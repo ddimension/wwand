@@ -7,7 +7,10 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=Support for QMI/5G cellular modems (wwand)
-LUCI_DEPENDS:=+wwand
+# luci-app-wwand provides the shared wwand.bands resource (band/frequency
+# helpers) used by this handler; depending on it keeps a single source of
+# truth. The status app has no file conflicts, so pulling it in is safe.
+LUCI_DEPENDS:=+wwand +luci-app-wwand
 
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=

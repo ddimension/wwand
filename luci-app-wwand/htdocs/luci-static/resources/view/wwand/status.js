@@ -4,38 +4,15 @@
 'require dom';
 'require rpc';
 'require ui';
+'require wwand.bands as bands';
 
 var callStatus = rpc.declare({ object: 'wwand', method: 'status', expect: { modems: {} } });
 var callSignal = rpc.declare({ object: 'wwand', method: 'modem_signal', params: [ 'modem' ], expect: {} });
 var callCells  = rpc.declare({ object: 'wwand', method: 'modem_cells',  params: [ 'modem' ], expect: {} });
 
-/* LTE EARFCN -> band/frequency (common bands), NR ARFCN -> MHz/band. */
-var LTE_BANDS = [
-	[1,0,599,2110],[2,600,1199,1930],[3,1200,1949,1805],[4,1950,2399,2110],
-	[5,2400,2649,869],[7,2750,3449,2620],[8,3450,3799,925],[12,5010,5179,729],
-	[13,5180,5279,746],[17,5730,5849,734],[18,5850,5999,860],[19,6000,6149,875],
-	[20,6150,6449,791],[25,8040,8689,1930],[26,8690,9039,859],[28,9210,9659,758],
-	[32,9770,9919,1452],[38,37750,38249,2570],[40,38650,39649,2300],
-	[41,39650,41589,2496],[42,41590,43589,3400],[43,43590,45589,3600]
-];
-var NR_BANDS = [['n1',2110,2170],['n3',1805,1880],['n7',2620,2690],['n8',925,960],
-	['n20',791,821],['n28',758,803],['n38',2570,2620],['n40',2300,2400],
-	['n41',2496,2690],['n77',3300,4200],['n78',3300,3800]];
-
-function lteEarfcn(e) {
-	for (var i = 0; i < LTE_BANDS.length; i++) {
-		var b = LTE_BANDS[i];
-		if (e >= b[1] && e <= b[2]) return { band: 'B'+b[0], mhz: b[3]+0.1*(e-b[1]) };
-	}
-	return null;
-}
-function nrArfcn(a) {
-	if (a == null) return null;
-	var mhz = a/200, band = null;
-	for (var i = 0; i < NR_BANDS.length; i++)
-		if (mhz >= NR_BANDS[i][1] && mhz <= NR_BANDS[i][2]) { band = NR_BANDS[i][0]; break; }
-	return { band: band, mhz: mhz };
-}
+/* Band/frequency helpers come from the shared wwand.bands module. */
+function lteEarfcn(e) { return bands.lteEarfcn(e); }
+function nrArfcn(a) { return bands.nrArfcn(a); }
 
 /* peak-hold across polls, per modem, for antenna alignment */
 var peak = {};
