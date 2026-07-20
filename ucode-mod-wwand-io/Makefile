@@ -11,6 +11,15 @@ PKG_MAINTAINER:=
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/cmake.mk
 
+# The sources (CMakeLists.txt + src/) live in this package directory rather
+# than in a downloaded tarball, so there is no PKG_SOURCE for the default
+# unpack step to stage. Copy them into PKG_BUILD_DIR ourselves, otherwise
+# cmake runs in an empty build dir and fails with "no CMakeLists.txt".
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
+	$(CP) ./CMakeLists.txt ./src $(PKG_BUILD_DIR)/
+endef
+
 define Package/ucode-mod-wwand-io
   SECTION:=lang
   CATEGORY:=Languages
