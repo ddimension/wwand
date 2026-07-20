@@ -63,7 +63,10 @@ function handlers()
 		GET_PROFILE_SETTINGS: { pdp_type: 0, apn: 'web' },
 		SET_IP_FAMILY: {},
 		START_NETWORK: { pdh: 4242 },
-		GET_CURRENT_SETTINGS: V4_SETTINGS,
+		// activation returns the base settings; a later refresh (triggered by
+		// a serving-system change) returns a changed address -> renew
+		GET_CURRENT_SETTINGS: (args, meta) =>
+			(meta.count <= 1) ? V4_SETTINGS : { ...V4_SETTINGS, ipv4: '10.11.12.99' },
 		STOP_NETWORK: {},
 	};
 }
@@ -84,6 +87,7 @@ let daemon = daemon_mod.create({
 		log: (level, msg) => null,
 		emit_event: (type, data) => push(events, { type: type, data: data }),
 		kick_interface: (iface) => push(events, { type: 'kick', data: iface }),
+		renew_interface: (iface) => push(events, { type: 'renew', data: iface }),
 		datapath_fx: dpfx,
 		resolve_modem_device: (cfg) => cfg.device,
 		resolve_netdev: (cfg, device) => 'wwan0',
@@ -132,55 +136,72 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		eq(st.contexts.wan_ctx.interface, 'wan', 'status: interface mapping');
 
 		// context_settings (netifd renew source): live settings while CONNECTED,
-		// same shape as context_up's reply, without (re)activating the context
+		// same shape as context_up's reply, without (re)activating the context.
+		// Its callback then drives the stage-B check so the read observes the
+		// original settings before the injected change.
 		conn_cli.defer('wwand', 'context_settings', { interface: 'wan' }, (cs, rs) => {
 			eq(cs, 0, 'context_settings: ok');
 			eq(rs.up, true, 'context_settings: up while connected');
 			eq(rs.netdev, 'wwan0', 'context_settings: netdev');
 			eq(rs.ipv4.addr, '10.11.12.13', 'context_settings: v4 addr');
-		});
 
-		// context_wait parks a deferred reply while the context is CONNECTED
-		// and must fire only once it drops. Its callback drives the remaining
-		// checks so the test does not depend on reply-delivery ordering
-		// between the parked wait and the context_down reply below.
-		conn_cli.defer('wwand', 'context_wait', { interface: 'wan' }, (cw, rw) => {
-			eq(cw, 0, 'context_wait: status ok');
-			eq(rw.event, 'down', 'context_wait: woke on context down');
-
-			conn_cli.defer('wwand', 'context_settings', { interface: 'wan' }, (cs2, rs2) => {
-				eq(rs2.up, false, 'context_settings: not up after down');
+			// stage B: a serving-system change makes the modem re-read its IP
+			// settings; the changed address must drive a netifd renew (in
+			// place, not a teardown). Inject while CONNECTED, then verify the
+			// renew event before bringing the context down.
+			mock.indicate(3, 0xff, 'SERVING_SYSTEM_IND', {
+				serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+				                  selected_network: 1, radio_ifs: [ 8 ] },
+				current_plmn: { mcc: 262, mnc: 1, description: 'Testnet' },
 			});
 
-			conn_cli.defer('wwand', 'context_status', { interface: 'wan' }, (c4, r4) => {
-				eq(r4.state, 'IDLE', 'context_status: IDLE after down');
+			uloop.timer(80, () => {
+			ok(length(filter(events, (e) => e.type == 'renew' && e.data == 'wan')) >= 1,
+				'stage B: settings change triggered netifd renew');
 
-				// events: context up + down were broadcast
-				let ctx_events = filter(events, (e) => e.type == 'wwand.context');
-				eq(map(ctx_events, (e) => e.data.event), [ 'up', 'down' ], 'events: up + down emitted');
+			// context_wait parks a deferred reply while the context is CONNECTED
+			// and must fire only once it drops. Its callback drives the remaining
+			// checks so the test does not depend on reply-delivery ordering
+			// between the parked wait and the context_down reply below.
+			conn_cli.defer('wwand', 'context_wait', { interface: 'wan' }, (cw, rw) => {
+				eq(cw, 0, 'context_wait: status ok');
+				eq(rw.event, 'down', 'context_wait: woke on context down');
 
-				// boot-race nudge: idle interface kicked when modem registered
-				ok(length(filter(events, (e) => e.type == 'kick' && e.data == 'wan')) >= 1,
-					'events: interface kicked after modem ready');
+				conn_cli.defer('wwand', 'context_settings', { interface: 'wan' }, (cs2, rs2) => {
+					eq(rs2.up, false, 'context_settings: not up after down');
+				});
 
-				let modem_events = filter(events, (e) => e.type == 'wwand.modem');
-				ok(length(filter(modem_events, (e) => e.data.event == 'registered')) == 1,
-					'events: modem registered emitted');
+				conn_cli.defer('wwand', 'context_status', { interface: 'wan' }, (c4, r4) => {
+					eq(r4.state, 'IDLE', 'context_status: IDLE after down');
 
-				guard.cancel();
-				uloop.end();
+					// events: context up + down were broadcast
+					let ctx_events = filter(events, (e) => e.type == 'wwand.context');
+					eq(map(ctx_events, (e) => e.data.event), [ 'up', 'down' ], 'events: up + down emitted');
+
+					// boot-race nudge: idle interface kicked when modem registered
+					ok(length(filter(events, (e) => e.type == 'kick' && e.data == 'wan')) >= 1,
+						'events: interface kicked after modem ready');
+
+					let modem_events = filter(events, (e) => e.type == 'wwand.modem');
+					ok(length(filter(modem_events, (e) => e.data.event == 'registered')) == 1,
+						'events: modem registered emitted');
+
+					guard.cancel();
+					uloop.end();
+				});
+			});
+
+			// an unknown ref must return immediately (gone) so netifd re-runs setup
+			conn_cli.defer('wwand', 'context_wait', { interface: 'nope' }, (cg, rg) => {
+				eq(rg.event, 'gone', 'context_wait: unknown ref -> gone');
+			});
+
+			// bringing the context down wakes the parked context_wait above
+			conn_cli.defer('wwand', 'context_down', { context: 'wan_ctx' }, (c3, r3) => {
+				eq(c3, 0, 'context_down: ok');
 			});
 		});
-
-		// an unknown ref must return immediately (gone) so netifd re-runs setup
-		conn_cli.defer('wwand', 'context_wait', { interface: 'nope' }, (cg, rg) => {
-			eq(rg.event, 'gone', 'context_wait: unknown ref -> gone');
-		});
-
-		// bringing the context down wakes the parked context_wait above
-		conn_cli.defer('wwand', 'context_down', { context: 'wan_ctx' }, (c3, r3) => {
-			eq(c3, 0, 'context_down: ok');
-		});
+	});
 	});
 });
 

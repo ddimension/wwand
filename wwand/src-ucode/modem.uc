@@ -728,6 +728,12 @@ export function create(opts)
 
 		emit('serving_system', self.reg);
 
+		// serving-system update while already connected: the network may have
+		// re-issued IP config (prefix/DNS/MTU). Nudge contexts to re-check
+		// their settings in place (they diff + rate-limit; no-op if unchanged).
+		if (ss.registration == nasmod.REG_REGISTERED && self.state == 'READY')
+			notify_contexts('serving_change');
+
 		if (ss.registration == nasmod.REG_REGISTERED) {
 			if (self.state == 'REGISTERING') {
 				if (reg_timer) {

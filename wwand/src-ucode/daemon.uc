@@ -119,6 +119,14 @@ export function create(opts)
 				flush_context_waiters(name, 'down', data);
 			break;
 
+		case 'settings':
+			// the modem pushed new IP settings while connected — ask netifd to
+			// renew the interface in place (no teardown). netifd re-runs the
+			// proto renew handler, which re-reads context_settings.
+			if (deps.renew_interface && entry?.cfg?.interface)
+				deps.renew_interface(entry.cfg.interface);
+			break;
+
 		case 'modem_ready':
 			// flush queued activation requests
 			if (entry && length(entry.pending_up)) {

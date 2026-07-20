@@ -209,6 +209,8 @@ function run_daemon()
 				netdev ? netlink.ep_iface_number(netdev) : null,
 			kick_interface: (interface) =>
 				conn.call('network.interface', 'up', { interface: interface }),
+			renew_interface: (interface) =>
+				conn.call('network.interface', 'renew', { interface: interface }),
 		},
 	});
 

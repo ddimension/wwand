@@ -448,6 +448,54 @@ scenario('zero-rx-quiet', {
 	});
 });
 
+// --- stage B: in-place settings refresh -------------------------------------
+// A serving-system change re-queries GET_CURRENT_SETTINGS; when the config
+// actually changed, the context emits 'settings' and updates self.settings.
+scenario('settings-change', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	handlers: {
+		// first call (activation) -> original; refresh -> changed addr + dns
+		GET_CURRENT_SETTINGS: (args, meta) =>
+			(meta.count <= 1) ? V4_SETTINGS
+			                  : { ...V4_SETTINGS, ipv4: '10.99.99.99', dns1: '8.8.8.8' },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'settings-change: up ok');
+		eq(ctx.settings.ipv4.addr, '10.11.12.13', 'settings-change: initial addr');
+
+		ctx.modem_event('serving_change');
+
+		uloop.timer(60, () => {
+			let se = filter(events, (e) => e.event == 'settings');
+			eq(length(se), 1, 'settings-change: one settings event');
+			eq(ctx.settings.ipv4.addr, '10.99.99.99', 'settings-change: self.settings updated');
+			eq(se[0].data.ipv4.addr, '10.99.99.99', 'settings-change: event carries new addr');
+			next();
+		});
+	});
+});
+
+// Unchanged settings on refresh must NOT emit — netifd renew stays quiet.
+scenario('settings-nochange', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	handlers: { GET_CURRENT_SETTINGS: V4_SETTINGS },
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'settings-nochange: up ok');
+
+		ctx.modem_event('serving_change');
+
+		uloop.timer(60, () => {
+			eq(length(filter(events, (e) => e.event == 'settings')), 0,
+				'settings-nochange: no settings event when unchanged');
+			ok(length(mock.calls_for('GET_CURRENT_SETTINGS')) >= 2,
+				'settings-nochange: settings were re-queried');
+			next();
+		});
+	});
+});
+
 run_next();
 uloop.run();
 

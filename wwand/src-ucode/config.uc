@@ -65,6 +65,7 @@ export function context_defaults(over)
 		username: null, password: null, profile: null,
 		mtu: null, use_pushed_mtu: true,
 		use_pushed_prefix: false,
+		settings_poll: 300,
 		...(over ?? {}),
 	};
 }
@@ -121,6 +122,7 @@ function parse_wwand_sections(raw, result)
 				mtu: (s.mtu != null) ? +s.mtu : null,
 				use_pushed_mtu: bool_opt(s.use_pushed_mtu, true),
 				use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
+				settings_poll: +(s.settings_poll ?? 300),
 			});
 			break;
 		}
@@ -253,6 +255,7 @@ function compat_translate(raw, result)
 			mtu: (s.mtu != null) ? +s.mtu : null,
 			use_pushed_mtu: bool_opt(s.use_pushed_mtu, false),   // old default: off
 			use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
+			settings_poll: +(s.settings_poll ?? 300),
 		});
 	}
 }

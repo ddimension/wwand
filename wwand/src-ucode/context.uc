@@ -87,6 +87,18 @@ export function create(opts)
 	let rx_last_total = -1;
 	let rx_stalled_ms = 0;
 
+	// live settings refresh (stage B): while CONNECTED, re-query the modem's IP
+	// config on serving-system changes (event-driven) plus a slow safety poll,
+	// and emit 'settings' when it actually changed so the daemon asks netifd to
+	// renew in place. Non-overlapping and rate-limited to bound modem load.
+	let settings_timer = null;
+	let refreshing = false;
+	let refresh_cooldown = null;
+	let refresh_settings, schedule_settings_poll;
+	const REFRESH_MIN_MS = 10000;
+	let settings_poll_ms = opts.timing?.settings_poll_ms ??
+		((+(self.config?.settings_poll ?? 300)) * 1000);
+
 	let emit = (event, data) => {
 		if (deps.on_event)
 			deps.on_event(self, event, data);
@@ -155,6 +167,10 @@ export function create(opts)
 		if (stats_timer) {
 			stats_timer.cancel();
 			stats_timer = null;
+		}
+		if (settings_timer) {
+			settings_timer.cancel();
+			settings_timer = null;
 		}
 	};
 
@@ -410,6 +426,80 @@ export function create(opts)
 		});
 	};
 
+	// re-query GET_CURRENT_SETTINGS for the active families and, if anything
+	// changed (addr/prefix/gateway/dns/mtu), rebuild self.settings and emit
+	// 'settings'. fetch_settings overwrites fam.settings in place, so we
+	// snapshot each family's serialized settings before and compare after.
+	let settings_sig = (s) => (s != null) ? sprintf('%J', s) : '';
+
+	refresh_settings = () => {
+		if (self.state != 'CONNECTED' || refreshing || refresh_cooldown)
+			return;
+
+		let list = filter(keys(self.families), (k) => self.families[k]?.pdh != null);
+
+		if (!length(list))
+			return;
+
+		refreshing = true;
+		refresh_cooldown = uloop.timer(REFRESH_MIN_MS, () => { refresh_cooldown = null; });
+
+		let idx = 0, changed = false, step;
+
+		step = () => {
+			if (idx >= length(list)) {
+				refreshing = false;
+
+				if (changed && self.state == 'CONNECTED') {
+					self.settings = {
+						ipv4: self.families['4']?.settings,
+						ipv6: self.families['6']?.settings,
+						mtu: self.families['4']?.settings?.mtu ?? self.families['6']?.settings?.mtu,
+					};
+
+					log('notice', 'ip settings changed, requesting netifd renew');
+					emit('settings', self.settings);
+				}
+
+				return;
+			}
+
+			let key = list[idx++];
+			let before = settings_sig(self.families[key]?.settings);
+
+			fetch_settings(+key, (err) => {
+				if (!err && settings_sig(self.families[key]?.settings) != before)
+					changed = true;
+
+				step();
+			});
+		};
+
+		step();
+	};
+
+	// slow safety poll while CONNECTED (self-rescheduling; stops when the
+	// context leaves CONNECTED). settings_poll <= 0 disables it.
+	schedule_settings_poll = () => {
+		if (settings_timer) {
+			settings_timer.cancel();
+			settings_timer = null;
+		}
+
+		if (settings_poll_ms <= 0 || self.state != 'CONNECTED')
+			return;
+
+		settings_timer = uloop.timer(settings_poll_ms, () => {
+			settings_timer = null;
+
+			if (self.state != 'CONNECTED')
+				return;
+
+			refresh_settings();
+			schedule_settings_poll();
+		});
+	};
+
 	release_family = (family, cb) => {
 		let key = sprintf('%d', family);
 		let fam = self.families[key];
@@ -513,6 +603,7 @@ export function create(opts)
 
 				set_state('CONNECTED');
 				start_stats();
+				schedule_settings_poll();
 				emit('up', self.settings);
 
 				let cb2 = up_cb;
@@ -584,6 +675,12 @@ export function create(opts)
 		switch (event) {
 		case 'ready':
 			emit('modem_ready', {});
+			break;
+
+		case 'serving_change':
+			// the modem's serving system changed while we are connected — the
+			// network may have pushed a new prefix/DNS/MTU; refresh in place
+			refresh_settings();
 			break;
 
 		case 'lost':
