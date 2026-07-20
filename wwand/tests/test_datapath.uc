@@ -141,4 +141,20 @@ ok(fx.action_index('write /sys/class/net/wwan0/qmi/raw_ip Y') > 0, 'plain: raw_i
 ok(fx.action_index('link_set wwan0 mtu 1430') > 0, 'plain: configured mtu');
 ok(fx.action_index('link_set wwan0 up') > 0, 'plain: up');
 
+// --- VRF compatibility invariant --------------------------------------------
+// The datapath layer must only ever touch the link layer (mux creation, MTU,
+// carrier, rename, up/down) and sysctl/qmi sysfs — never IP addresses or
+// routes. Addressing and routing are netifd's job so they land in the
+// interface's VRF / routing table (ip4table/ip6table). A direct 'ip route',
+// 'ip addr' or 'ip rule' here would bypass that and silently break VRF
+// setups. Assert a full mux bring-up records no such action.
+fx = fakefx.create({ present: caps_rmnet });
+netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'rmnet',
+	mux: [ { id: 1, name: 'wwan0m1' }, { id: 2, name: 'wwan0m2' } ], dgram_size: 4096,
+});
+let forbidden = filter(fx.actions, (a) =>
+	match(a, /(^|[ \/])(ip6?[ ]+(route|addr|address|rule|neigh)|(route|addr|rule)_(add|del))/) != null);
+eq(length(forbidden), 0, 'vrf: datapath performs no direct addressing/routing');
+
 done('test_datapath');

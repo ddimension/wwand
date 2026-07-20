@@ -62,6 +62,26 @@ it on USB). Aggregation size comes from a model table (e.g. RG650E 31 KB),
 then a board table, config override wins; the modem clamps the request and
 the echoed value drives the driver side.
 
+### Routing / VRF compatibility (invariant)
+
+The daemon touches only the **link layer** of the datapath — mux creation,
+MTU, carrier, rename, up/down (`RTM_NEWLINK`) and qmi/sysctl sysfs. It never
+adds IP addresses, routes or policy rules, and never sets `IFLA_MASTER`. All
+addressing and routing is handed to **netifd** via the proto shim
+(`proto_add_ipv4_address` / `proto_add_*_route` / `proto_send_update`).
+
+This is what makes wwand VRF-safe: netifd applies the interface's
+`ip4table` / `ip6table` (and thus any VRF / l3mdev binding) to every address
+and route it installs, entirely at the interface level and independent of the
+protocol. Because the daemon never enslaves the l3 device or writes a routing
+table itself, netifd is free to enslave the mux child (e.g. `wwan0m1`) to a
+VRF master and place its routes in the VRF table. A regression test
+(`test_datapath`, "vrf: datapath performs no direct addressing/routing")
+fences this invariant: any future `ip route` / `ip addr` / `ip rule` in the
+datapath fails the suite. Deeper netifd integrations (runtime `notify_proto`
+updates, carrier-driven teardown, renew) must keep addressing in netifd to
+preserve this.
+
 ### Recovery ladder
 
 Failed connection cycles climb: attempt 8 → operating-mode low-power/online
