@@ -62,6 +62,25 @@ it on USB). Aggregation size comes from a model table (e.g. RG650E 31 KB),
 then a board table, config override wins; the modem clamps the request and
 the echoed value drives the driver side.
 
+### netifd coupling (monitor, renew, live updates)
+
+Teardown is event-driven: the proto shim parks a single blocking
+`context_wait` ubus call per interface (the daemon holds the reply open until
+the context drops), so netifd tears down and retries without a polling
+watchdog or an `ubus listen` helper.
+
+Setting changes are applied **in place**. The shim declares a renew handler
+(`proto_qmi_renew`) that re-reads `context_settings` (read-only) and re-sends
+the netifd update with `keep=1`; netifd diffs it against the live config and
+applies only the delta — no teardown. The daemon triggers this itself: while
+connected it re-queries `GET_CURRENT_SETTINGS` on serving-system changes (plus
+a slow safety poll), and on a real diff emits `settings`, which the daemon maps
+to `network.interface renew`. So a changed v6 prefix / DNS / MTU updates the
+interface without a reconnect. (A contingent further step — driving the mux
+child carrier so netifd's own link tracking handles teardown/re-setup with zero
+helper processes — depends on whether rmnet/qmimux children expose a settable
+carrier; needs a hardware check.)
+
 ### Routing / VRF compatibility (invariant)
 
 The daemon touches only the **link layer** of the datapath — mux creation,
