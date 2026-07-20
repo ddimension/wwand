@@ -199,6 +199,8 @@ export function create(opts)
 	let at_opts = opts.at ?? {};
 	let at_drain_timer = null;
 	let telemetry_timer = null;
+	let watch_decay_timer = null, fast_timer = null;
+	let watch_active = false, fast_running = false;
 
 	let step_sync, step_services, step_at, step_datapath, step_opmode, step_sim, step_identity, step_confnet, step_register;
 
@@ -815,6 +817,65 @@ export function create(opts)
 	// periodic telemetry: cell environment, signal, operator — the compact
 	// per-interval log line replaces what the old proto handler logged during
 	// setup, and the collected data feeds future lock automation
+	// Fast "watch" mode: while a consumer (the LuCI status page) actively
+	// polls modem_signal/modem_cells, refresh signal + cell info at most once
+	// per second, non-overlapping so the cadence stretches automatically when
+	// the modem is busy (load-adaptive). Reverts to the slow telemetry timer a
+	// few seconds after polling stops. Signal also keeps arriving via the NAS
+	// SIGNAL_INFO indication subscription between refreshes.
+	const WATCH_MIN_INTERVAL = 1000;   // never faster than 1/s
+	const WATCH_DECAY = 6000;          // stop after this long without a poll
+
+	let fast_tick;   // forward-declared: it reschedules itself
+	fast_tick = () => {
+		fast_timer = null;
+
+		if (!watch_active || self.state != 'READY' || !self.nas) {
+			fast_running = false;
+			return;
+		}
+
+		fast_running = true;
+
+		// signal first, then cells; scheduling the next cycle only after both
+		// complete keeps it non-overlapping (adaptive to modem load)
+		self.nas.request('GET_SIGNAL_INFO', {}, (serr, sdata) => {
+			if (!serr && sdata)
+				self.signal = sdata;
+
+			if (!self.nas) { fast_running = false; return; }
+
+			self.nas.request('GET_CELL_LOCATION_INFO', {}, (cerr, cdata) => {
+				if (!cerr && cdata) {
+					self.cells = cdata;
+					emit('telemetry', { cells: self.cells, signal: self.signal, reg: self.reg });
+				}
+
+				if (watch_active && self.nas)
+					fast_timer = uloop.timer(WATCH_MIN_INTERVAL, fast_tick);
+				else
+					fast_running = false;
+			});
+		});
+	};
+
+	// called by the daemon whenever modem_signal / modem_cells is queried
+	self.watch = function() {
+		watch_active = true;
+
+		if (watch_decay_timer)
+			watch_decay_timer.cancel();
+
+		watch_decay_timer = uloop.timer(WATCH_DECAY, () => {
+			watch_active = false;
+			watch_decay_timer = null;
+		});
+
+		// kick an immediate refresh so the first poll already returns fresh data
+		if (!fast_running && self.state == 'READY' && self.nas)
+			fast_tick();
+	};
+
 	self._start_telemetry = function() {
 		if (telemetry_timer)
 			return;
@@ -962,11 +1023,14 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
-		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, telemetry_timer ])
+		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, telemetry_timer,
+		                watch_decay_timer, fast_timer ])
 			if (t)
 				t.cancel();
 
 		retry_timer = reg_timer = settle_timer = at_drain_timer = telemetry_timer = null;
+		watch_decay_timer = fast_timer = null;
+		watch_active = fast_running = false;
 
 		if (self.at) {
 			self.at.close();

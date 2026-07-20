@@ -210,13 +210,13 @@ return view.extend({
 			if (current) peak[current] = {}; refresh();
 		} }, _('Reset peak'));
 
-		poll.add(refresh, 2);
+		poll.add(refresh, 1);
 		refresh();
 
 		return E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('Modem Status')),
 			E('div', { 'class': 'cbi-map-descr' },
-				_('Live cellular signal and cell environment — updates every 2 seconds. Aim the antenna for the highest RSRP / SINR; the peak values below help while turning it.')),
+				_('Live cellular signal and cell environment — updates about once per second. Aim the antenna for the highest RSRP / SINR; the peak values below help while turning it.')),
 			E('div', { 'class': 'cbi-section', 'style': 'display:flex;gap:12px;align-items:center' },
 				[ selWrap, resetBtn ]),
 			live

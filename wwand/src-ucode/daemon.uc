@@ -431,6 +431,10 @@ export function create(opts)
 		if (!entry?.modem)
 			return { error: 'no_such_modem', ref: ref };
 
+		// keep the fast refresh loop warm while a consumer is polling
+		if (entry.modem.watch)
+			entry.modem.watch();
+
 		return entry.modem.signal ?? {};
 	};
 
@@ -439,6 +443,9 @@ export function create(opts)
 
 		if (!entry?.modem)
 			return { error: 'no_such_modem', ref: ref };
+
+		if (entry.modem.watch)
+			entry.modem.watch();
 
 		return {
 			registration: entry.modem.reg,
