@@ -76,10 +76,15 @@ applies only the delta — no teardown. The daemon triggers this itself: while
 connected it re-queries `GET_CURRENT_SETTINGS` on serving-system changes (plus
 a slow safety poll), and on a real diff emits `settings`, which the daemon maps
 to `network.interface renew`. So a changed v6 prefix / DNS / MTU updates the
-interface without a reconnect. (A contingent further step — driving the mux
-child carrier so netifd's own link tracking handles teardown/re-setup with zero
-helper processes — depends on whether rmnet/qmimux children expose a settable
-carrier; needs a hardware check.)
+interface without a reconnect.
+
+A further step was considered and ruled out: driving the mux child's carrier so
+netifd's own link tracking would handle teardown/re-setup with zero helper
+processes. rmnet/qmimux children do not implement `ndo_change_carrier`
+(`ip link set wwan0mN carrier off` → "RTNETLINK answers: Not supported" on the
+RG650E), and netifd derives link state from `IFF_LOWER_UP`, not operstate, so
+the carrier cannot be toggled per context. The `context_wait` monitor above
+stays the teardown mechanism.
 
 ### Routing / VRF compatibility (invariant)
 
