@@ -1,0 +1,10 @@
+{
+	"luci-app-wwand": {
+		"description": "Grant access to the wwand modem status page",
+		"read": {
+			"ubus": {
+				"wwand": [ "status", "modem_signal", "modem_cells", "context_status" ]
+			}
+		}
+	}
+}
