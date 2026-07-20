@@ -1,0 +1,11 @@
+# wwand — notify the daemon about cdc-wdm device add/remove.
+# Installed as /etc/hotplug.d/usbmisc/20-wwand.
+
+case "$DEVICENAME" in
+	cdc-wdm*) ;;
+	*) return 0 2>/dev/null || exit 0 ;;
+esac
+
+ubus -t 3 call wwand hotplug "{\"action\":\"$ACTION\",\"device\":\"$DEVICENAME\"}" 2>/dev/null
+
+return 0 2>/dev/null || exit 0

@@ -1,0 +1,37 @@
+#!/bin/sh
+# wwand — context supervision helper, spawned by the proto shim via
+# proto_run_command. Exits (non-zero) when the daemon reports the context
+# for this interface as down/errored, or when wwand itself disappears —
+# netifd then restarts the protocol setup. Replaces the old polling
+# uqmi-watchdog with a purely event-driven monitor.
+
+interface="$1"
+
+[ -n "$interface" ] || exit 1
+
+ubus listen wwand.context | (
+	while :; do
+		if read -t 30 -r line; then
+			[ -n "$line" ] || continue
+
+			case "$line" in
+				*'"interface": "'"$interface"'"'*|*'"interface":"'"$interface"'"'*)
+					case "$line" in
+						*'"event": "down"'*|*'"event":"down"'*|\
+						*'"event": "error"'*|*'"event":"error"'*)
+							exit 1
+							;;
+					esac
+					;;
+			esac
+		else
+			# read timeout: verify the daemon is still alive ('ubus lookup'
+			# does not exist on current ubus builds, use a status call)
+			ubus -t 5 call wwand status >/dev/null 2>&1 || exit 1
+		fi
+	done
+)
+rc=$?
+
+# also exit non-zero when `ubus listen` itself terminated (ubusd restart)
+exit "${rc:-1}"

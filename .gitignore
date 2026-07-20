@@ -1,0 +1,4 @@
+build-host/
+*.o
+*.so
+!tests/**

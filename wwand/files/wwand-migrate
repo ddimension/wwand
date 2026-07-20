@@ -1,0 +1,146 @@
+#!/usr/bin/env ucode
+// wwand — migrate old-style 'proto qmi' interfaces to the explicit
+// modem/context schema in /etc/config/wwand.
+//
+// Without arguments this prints the proposed changes (dry run); pass
+// --apply to write them. The old options are removed from the network
+// sections and replaced by 'option context'.
+//
+// The compat layer keeps old configs working either way — migrating is
+// optional and mainly makes the configuration self-documenting.
+
+'use strict';
+
+import * as libuci from 'uci';
+import * as config from 'wwand.config';
+
+const apply = (ARGV[0] == '--apply');
+
+let cursor = libuci.cursor();
+
+let raw = {
+	wwand: cursor.get_all('wwand'),
+	network: cursor.get_all('network'),
+};
+
+let parsed = config.parse(raw);
+let mdefaults = config.modem_defaults();
+let cdefaults = config.context_defaults();
+
+// options handled by netifd / the shim which stay on the interface
+const KEEP_ON_INTERFACE = {
+	proto: true, device: true, context: true,
+	defaultroute: true, peerdns: true, metric: true,
+	ip4table: true, ip6table: true, delegate: true, disabled: true, auto: true,
+};
+
+let changes = [];
+
+function set_opt(cfg, section, opt, val)
+{
+	if (type(val) == 'array') {
+		for (let v in val)
+			push(changes, [ 'add_list', cfg, section, opt, sprintf('%s', v) ]);
+	}
+	else {
+		push(changes, [ 'set', cfg, section, opt,
+			(type(val) == 'bool') ? (val ? '1' : '0') : sprintf('%s', val) ]);
+	}
+}
+
+let migrated = 0;
+
+for (let name, ctx in parsed.contexts) {
+	// only compat-synthesized entries need migration
+	if (index(ctx.modem, 'compat_') != 0)
+		continue;
+
+	let modem_name = replace(ctx.modem, 'compat_', '');
+	let ctx_name = sprintf('%s_ctx', ctx.interface ?? name);
+	let mcfg = parsed.modems[ctx.modem];
+
+	// modem section (once per modem)
+	if (!length(filter(changes, (c) => c[2] == modem_name && c[1] == 'wwand'))) {
+		push(changes, [ 'set', 'wwand', modem_name, null, 'modem' ]);
+
+		for (let key in [ 'device', 'netdev', 'usb_path', 'pincode', 'modes',
+		                  'mcc', 'mnc', 'mux', 'dl_datagram_max_size', 'tty',
+		                  'at_init', 'location', 'delay', 'failreboot',
+		                  'zero_rx_timeout', 'lock_4g', 'lock_5g',
+		                  'lock_persist', 'stats_interval' ]) {
+			if (mcfg[key] != null && sprintf('%J', mcfg[key]) != sprintf('%J', mdefaults[key]))
+				set_opt('wwand', modem_name, key, mcfg[key]);
+		}
+	}
+
+	// context section
+	push(changes, [ 'set', 'wwand', ctx_name, null, 'context' ]);
+	set_opt('wwand', ctx_name, 'modem', modem_name);
+
+	for (let key in [ 'mux_id', 'apn', 'pdp_type', 'auth', 'username',
+	                  'password', 'profile', 'mtu', 'use_pushed_mtu',
+	                  'use_pushed_prefix' ]) {
+		if (ctx[key] != null && sprintf('%J', ctx[key]) != sprintf('%J', cdefaults[key]))
+			set_opt('wwand', ctx_name, key, ctx[key]);
+	}
+
+	// interface: strip old options, reference the context
+	if (ctx.interface) {
+		let section = raw.network[ctx.interface] ?? {};
+
+		for (let opt in keys(section)) {
+			if (substr(opt, 0, 1) == '.' || KEEP_ON_INTERFACE[opt])
+				continue;
+
+			push(changes, [ 'delete', 'network', ctx.interface, opt, null ]);
+		}
+
+		push(changes, [ 'set', 'network', ctx.interface, 'context', ctx_name ]);
+	}
+
+	migrated++;
+}
+
+if (!migrated) {
+	print("nothing to migrate: no old-style proto qmi interfaces found\n");
+	exit(0);
+}
+
+for (let c in changes) {
+	if (c[0] == 'set' && c[3] == null)
+		printf("uci set %s.%s=%s\n", c[1], c[2], c[4]);
+	else if (c[0] == 'set')
+		printf("uci set %s.%s.%s='%s'\n", c[1], c[2], c[3], c[4]);
+	else if (c[0] == 'add_list')
+		printf("uci add_list %s.%s.%s='%s'\n", c[1], c[2], c[3], c[4]);
+	else if (c[0] == 'delete')
+		printf("uci delete %s.%s.%s\n", c[1], c[2], c[3]);
+}
+
+if (!apply) {
+	printf("\n(dry run — re-run with --apply to write, then: /etc/init.d/wwand reload; ubus call network reload)\n");
+	exit(0);
+}
+
+for (let c in changes) {
+	if (c[0] == 'set' && c[3] == null)
+		cursor.set(c[1], c[2], c[4]);
+	else if (c[0] == 'set')
+		cursor.set(c[1], c[2], c[3], c[4]);
+	else if (c[0] == 'add_list') {
+		let cur = cursor.get(c[1], c[2], c[3]) ?? [];
+
+		if (type(cur) != 'array')
+			cur = [ cur ];
+
+		push(cur, c[4]);
+		cursor.set(c[1], c[2], c[3], cur);
+	}
+	else if (c[0] == 'delete')
+		cursor.delete(c[1], c[2], c[3]);
+}
+
+cursor.commit('wwand');
+cursor.commit('network');
+
+printf("\napplied. run: /etc/init.d/wwand reload; ubus call network reload\n");
