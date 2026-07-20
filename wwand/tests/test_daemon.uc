@@ -131,6 +131,15 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		eq(st.contexts.wan_ctx.state, 'CONNECTED', 'status: context CONNECTED');
 		eq(st.contexts.wan_ctx.interface, 'wan', 'status: interface mapping');
 
+		// context_settings (netifd renew source): live settings while CONNECTED,
+		// same shape as context_up's reply, without (re)activating the context
+		conn_cli.defer('wwand', 'context_settings', { interface: 'wan' }, (cs, rs) => {
+			eq(cs, 0, 'context_settings: ok');
+			eq(rs.up, true, 'context_settings: up while connected');
+			eq(rs.netdev, 'wwan0', 'context_settings: netdev');
+			eq(rs.ipv4.addr, '10.11.12.13', 'context_settings: v4 addr');
+		});
+
 		// context_wait parks a deferred reply while the context is CONNECTED
 		// and must fire only once it drops. Its callback drives the remaining
 		// checks so the test does not depend on reply-delivery ordering
@@ -138,6 +147,10 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		conn_cli.defer('wwand', 'context_wait', { interface: 'wan' }, (cw, rw) => {
 			eq(cw, 0, 'context_wait: status ok');
 			eq(rw.event, 'down', 'context_wait: woke on context down');
+
+			conn_cli.defer('wwand', 'context_settings', { interface: 'wan' }, (cs2, rs2) => {
+				eq(rs2.up, false, 'context_settings: not up after down');
+			});
 
 			conn_cli.defer('wwand', 'context_status', { interface: 'wan' }, (c4, r4) => {
 				eq(r4.state, 'IDLE', 'context_status: IDLE after down');

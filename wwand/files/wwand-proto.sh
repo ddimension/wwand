@@ -12,6 +12,7 @@
 
 proto_qmi_init_config() {
 	available=1
+	renew_handler=1
 	proto_config_add_string context
 
 	# legacy qmi-advanced options: accepted so old configs keep parsing;
@@ -43,59 +44,12 @@ proto_qmi_init_config() {
 	proto_config_add_defaults
 }
 
-proto_qmi_setup() {
-	local interface="$1"
-	local defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
-	json_get_vars defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
-
-	# wait for the daemon
-	ubus -t 30 wait_for wwand 2>/dev/null || {
-		echo "wwand is not running"
-		proto_notify_error "$interface" NO_DAEMON
-		sleep 5
-		return 1
-	}
-
-	local resp
-	resp="$(ubus -t 180 call wwand context_up "{\"interface\":\"$interface\"}" 2>/dev/null)" || {
-		echo "context_up failed for $interface"
-		proto_notify_error "$interface" CONNECT_FAILED
-		return 1
-	}
-
-	local up error netdev pushed_mtu use_pushed_mtu mtu
-	json_load "$resp"
-	json_get_vars up error netdev pushed_mtu use_pushed_mtu mtu
-
-	[ "$up" = "1" ] || {
-		echo "connection failed: ${error:-unknown}"
-
-		case "$error" in
-			sim_blocked)
-				proto_notify_error "$interface" PIN_FAILED
-				proto_block_restart "$interface"
-				;;
-			no_such_context)
-				# transient during startup races: retry, do not block
-				proto_notify_error "$interface" NO_CONTEXT
-				sleep 5
-				;;
-			*)
-				proto_notify_error "$interface" CONNECT_FAILED
-				;;
-		esac
-
-		return 1
-	}
-
-	[ -n "$netdev" ] || {
-		echo "daemon did not report a network device"
-		proto_notify_error "$interface" NO_IFACE
-		return 1
-	}
-
-	# MTU (incl. use_pushed_mtu semantics) is applied by the daemon itself
-	# via rtnl before it reports the context up — nothing to do here
+# Build and send a netifd proto update from a wwand context reply. Shared by
+# setup and renew so the address/route/DNS handling is identical — and, per the
+# VRF invariant, addressing/routing stays entirely in netifd (proto_add_*),
+# never direct netlink. Args: interface netdev resp defaultroute peerdns
+_wwand_apply_settings() {
+	local interface="$1" netdev="$2" resp="$3" defaultroute="$4" peerdns="$5"
 
 	# extract everything from the reply FIRST — proto_init_update and the
 	# reply parsing share the same jshn state, mixing them corrupts the
@@ -157,6 +111,63 @@ proto_qmi_setup() {
 	}
 
 	proto_send_update "$interface"
+}
+
+proto_qmi_setup() {
+	local interface="$1"
+	local defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
+	json_get_vars defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
+
+	# wait for the daemon
+	ubus -t 30 wait_for wwand 2>/dev/null || {
+		echo "wwand is not running"
+		proto_notify_error "$interface" NO_DAEMON
+		sleep 5
+		return 1
+	}
+
+	local resp
+	resp="$(ubus -t 180 call wwand context_up "{\"interface\":\"$interface\"}" 2>/dev/null)" || {
+		echo "context_up failed for $interface"
+		proto_notify_error "$interface" CONNECT_FAILED
+		return 1
+	}
+
+	local up error netdev pushed_mtu use_pushed_mtu mtu
+	json_load "$resp"
+	json_get_vars up error netdev pushed_mtu use_pushed_mtu mtu
+
+	[ "$up" = "1" ] || {
+		echo "connection failed: ${error:-unknown}"
+
+		case "$error" in
+			sim_blocked)
+				proto_notify_error "$interface" PIN_FAILED
+				proto_block_restart "$interface"
+				;;
+			no_such_context)
+				# transient during startup races: retry, do not block
+				proto_notify_error "$interface" NO_CONTEXT
+				sleep 5
+				;;
+			*)
+				proto_notify_error "$interface" CONNECT_FAILED
+				;;
+		esac
+
+		return 1
+	}
+
+	[ -n "$netdev" ] || {
+		echo "daemon did not report a network device"
+		proto_notify_error "$interface" NO_IFACE
+		return 1
+	}
+
+	# MTU (incl. use_pushed_mtu semantics) is applied by the daemon itself
+	# via rtnl before it reports the context up — nothing to do here
+
+	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns"
 
 	# supervise: exits when wwand reports the context down or disappears,
 	# netifd then tears down and retries the setup
@@ -172,6 +183,30 @@ proto_qmi_teardown() {
 
 	proto_init_update "*" 0
 	proto_send_update "$interface"
+}
+
+# netifd renew: refresh the interface's IP settings in place, without a
+# teardown. Triggered by 'ubus call network.interface.<x> renew' — either
+# manually or by the wwand daemon when it detects the modem pushed new settings
+# (v6 prefix, DNS, MTU). The context_wait monitor keeps running throughout;
+# netifd diffs the update against the live config and applies only the delta.
+proto_qmi_renew() {
+	local interface="$1"
+	local defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
+	json_get_vars defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
+
+	local resp
+	resp="$(ubus -t 30 call wwand context_settings "{\"interface\":\"$interface\"}" 2>/dev/null)" || return 0
+
+	local up netdev
+	json_load "$resp"
+	json_get_vars up netdev
+
+	# not connected (or daemon busy): leave the running config untouched — a
+	# real drop is handled by the context_wait monitor, not by renew
+	[ "$up" = "1" ] && [ -n "$netdev" ] || return 0
+
+	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns"
 }
 
 [ -n "$INCLUDE_ONLY" ] || {

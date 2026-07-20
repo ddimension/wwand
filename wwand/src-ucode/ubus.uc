@@ -65,6 +65,13 @@ export function publish(conn, daemon, log)
 			call: (req) => daemon.context_status(req.args.context ?? req.args.interface),
 		},
 
+		// read-only current IP settings (proto shim renew path); same shape as
+		// context_up's reply but never (re)activates the context
+		context_settings: {
+			args: { context: '', interface: '', ubus_rpc_session: '' },
+			call: (req) => daemon.context_settings(req.args.context ?? req.args.interface),
+		},
+
 		context_up: {
 			args: { context: '', interface: '', ubus_rpc_session: '' },
 			call: (req) => {

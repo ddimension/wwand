@@ -365,7 +365,9 @@ export function create(opts)
 			log('warn', sprintf('context %s: enabling IPv6 on %s failed', name, netdev));
 	};
 
-	self._up_result = function(name, entry) {
+	// l3 device netdev for a context: parent netdev, MBIM VLAN sub-device or
+	// QMAP mux child depending on protocol/mux config.
+	let derive_netdev = (entry) => {
 		let mentry = self.modems[entry.cfg.modem];
 		let netdev = mentry?.netdev;
 
@@ -380,20 +382,42 @@ export function create(opts)
 			netdev = entry.cfg.mux_link ?? sprintf('%sm%d', netdev, entry.cfg.mux_id);
 		}
 
+		return netdev;
+	};
+
+	// the settings payload the proto shim consumes (context_up / renew).
+	let settings_result = (name, entry, netdev) => ({
+		up: true,
+		context: name,
+		interface: entry.cfg.interface,
+		netdev: netdev,
+		mtu: entry.cfg.mtu ?? entry.ctx.settings?.mtu,
+		pushed_mtu: entry.ctx.settings?.mtu,
+		use_pushed_mtu: entry.cfg.use_pushed_mtu,
+		ipv4: entry.ctx.settings?.ipv4,
+		ipv6: entry.ctx.settings?.ipv6,
+	});
+
+	self._up_result = function(name, entry) {
+		let netdev = derive_netdev(entry);
+
 		apply_mtu(name, entry, netdev);
 		enable_ipv6(name, entry, netdev);
 
-		return {
-			up: true,
-			context: name,
-			interface: entry.cfg.interface,
-			netdev: netdev,
-			mtu: entry.cfg.mtu ?? entry.ctx.settings?.mtu,
-			pushed_mtu: entry.ctx.settings?.mtu,
-			use_pushed_mtu: entry.cfg.use_pushed_mtu,
-			ipv4: entry.ctx.settings?.ipv4,
-			ipv6: entry.ctx.settings?.ipv6,
-		};
+		return settings_result(name, entry, netdev);
+	};
+
+	// read-only current settings for the netifd renew path: same shape as
+	// _up_result but without the MTU/IPv6 side effects and without touching
+	// the modem. Returns { up: false } unless the context is connected.
+	self.context_settings = function(ref) {
+		let name = self.resolve_context(ref);
+		let entry = name ? self.contexts[name] : null;
+
+		if (!entry?.ctx || entry.ctx.state != 'CONNECTED')
+			return { up: false };
+
+		return settings_result(name, entry, derive_netdev(entry));
 	};
 
 	self.context_down = function(ref, cb) {
