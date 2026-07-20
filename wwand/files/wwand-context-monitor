@@ -1,37 +1,24 @@
 #!/bin/sh
-# wwand — context supervision helper, spawned by the proto shim via
-# proto_run_command. Exits (non-zero) when the daemon reports the context
-# for this interface as down/errored, or when wwand itself disappears —
-# netifd then restarts the protocol setup. Replaces the old polling
-# uqmi-watchdog with a purely event-driven monitor.
+# wwand — lean context supervisor, spawned by the proto shim via
+# proto_run_command. A single blocking ubus call that returns the moment the
+# daemon reports this interface's context down/errored (or when wwand itself
+# disappears). When we exit, netifd tears the interface down and re-runs the
+# protocol setup.
+#
+# This replaces the earlier 'ubus listen wwand.context | while read' monitor,
+# which cost three processes per context (the shell, its pipe subshell and a
+# persistent 'ubus listen' child) and leaked the listener as an orphan
+# whenever netifd restarted the monitor. The daemon now holds the reply open
+# (deferred context_wait) and answers it on the down/error event, so a single
+# sleeping process per context is enough.
 
 interface="$1"
 
 [ -n "$interface" ] || exit 1
 
-ubus listen wwand.context | (
-	while :; do
-		if read -t 30 -r line; then
-			[ -n "$line" ] || continue
-
-			case "$line" in
-				*'"interface": "'"$interface"'"'*|*'"interface":"'"$interface"'"'*)
-					case "$line" in
-						*'"event": "down"'*|*'"event":"down"'*|\
-						*'"event": "error"'*|*'"event":"error"'*)
-							exit 1
-							;;
-					esac
-					;;
-			esac
-		else
-			# read timeout: verify the daemon is still alive ('ubus lookup'
-			# does not exist on current ubus builds, use a status call)
-			ubus -t 5 call wwand status >/dev/null 2>&1 || exit 1
-		fi
-	done
-)
-rc=$?
-
-# also exit non-zero when `ubus listen` itself terminated (ubusd restart)
-exit "${rc:-1}"
+# -t 0 disables the client-side timeout: the call blocks indefinitely until
+# the daemon replies. If wwand is not running (or goes away) the call returns
+# non-zero at once; netifd then re-runs setup, which waits for the daemon
+# again via 'ubus wait_for wwand'. exec replaces this shell with the ubus
+# process so no wrapper lingers.
+exec ubus -t 0 call wwand context_wait "{\"interface\":\"$interface\"}"

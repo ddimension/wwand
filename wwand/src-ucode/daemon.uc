@@ -65,6 +65,24 @@ export function create(opts)
 		}
 	};
 
+	// context_wait waiters: netifd's per-interface monitor parks a single
+	// deferred ubus request here; it is answered (waking the monitor, which
+	// makes netifd tear down + retry) the moment the context drops or errors.
+	// Replaces the old 'ubus listen' + shell-loop monitor per context.
+	let context_waiters = {};
+
+	let flush_context_waiters = (name, event, data) => {
+		let ws = context_waiters[name];
+
+		if (!ws)
+			return;
+
+		delete context_waiters[name];
+
+		for (let w in ws)
+			w({ event: event, ...(data?.reason != null ? { reason: data.reason } : {}) });
+	};
+
 	let on_context_event = (name, ctx, event, data) => {
 		let entry = self.contexts[name];
 
@@ -79,6 +97,7 @@ export function create(opts)
 			// failed activation climbs the recovery ladder (old connecttries)
 			ctx.modem.note_connect_failure();
 			emit('wwand.context', { context: name, interface: entry?.cfg?.interface, event: event });
+			flush_context_waiters(name, 'error');
 			break;
 
 		case 'zero_rx':
@@ -94,6 +113,10 @@ export function create(opts)
 				event: event,
 				...(event == 'down' ? { reason: data?.reason } : {}),
 			});
+			// only 'down' tears the interface down; 'suspend' is transient
+			// (registration lost) and keeps the netifd config in place
+			if (event == 'down')
+				flush_context_waiters(name, 'down', data);
 			break;
 
 		case 'modem_ready':
@@ -391,6 +414,24 @@ export function create(opts)
 			return { error: 'no_such_context', ref: ref };
 
 		return entry.ctx.status();
+	};
+
+	// Block until the context for `ref` goes down or errors, then invoke cb
+	// once. The netifd context-monitor parks a single deferred request here
+	// instead of running its own event listener. If the context is gone or is
+	// not currently connected, cb fires immediately so netifd re-runs setup.
+	self.context_wait = function(ref, cb) {
+		let name = self.resolve_context(ref);
+		let entry = name ? self.contexts[name] : null;
+
+		if (!entry?.ctx)
+			return cb({ event: 'gone' });
+
+		if (entry.ctx.state != 'CONNECTED')
+			return cb({ event: 'down', state: entry.ctx.state });
+
+		context_waiters[name] ??= [];
+		push(context_waiters[name], cb);
 	};
 
 	self.status = function() {

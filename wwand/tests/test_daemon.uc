@@ -131,8 +131,13 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		eq(st.contexts.wan_ctx.state, 'CONNECTED', 'status: context CONNECTED');
 		eq(st.contexts.wan_ctx.interface, 'wan', 'status: interface mapping');
 
-		conn_cli.defer('wwand', 'context_down', { context: 'wan_ctx' }, (c3, r3) => {
-			eq(c3, 0, 'context_down: ok');
+		// context_wait parks a deferred reply while the context is CONNECTED
+		// and must fire only once it drops. Its callback drives the remaining
+		// checks so the test does not depend on reply-delivery ordering
+		// between the parked wait and the context_down reply below.
+		conn_cli.defer('wwand', 'context_wait', { interface: 'wan' }, (cw, rw) => {
+			eq(cw, 0, 'context_wait: status ok');
+			eq(rw.event, 'down', 'context_wait: woke on context down');
 
 			conn_cli.defer('wwand', 'context_status', { interface: 'wan' }, (c4, r4) => {
 				eq(r4.state, 'IDLE', 'context_status: IDLE after down');
@@ -152,6 +157,16 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 				guard.cancel();
 				uloop.end();
 			});
+		});
+
+		// an unknown ref must return immediately (gone) so netifd re-runs setup
+		conn_cli.defer('wwand', 'context_wait', { interface: 'nope' }, (cg, rg) => {
+			eq(rg.event, 'gone', 'context_wait: unknown ref -> gone');
+		});
+
+		// bringing the context down wakes the parked context_wait above
+		conn_cli.defer('wwand', 'context_down', { context: 'wan_ctx' }, (c3, r3) => {
+			eq(c3, 0, 'context_down: ok');
 		});
 	});
 });
