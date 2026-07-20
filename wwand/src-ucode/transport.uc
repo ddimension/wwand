@@ -49,6 +49,10 @@ export function open(path, cbs)
 		return (w === length(frame));
 	};
 
+	// raw frame writer — identical to send(), named for the MBIM client which
+	// deals in whole messages already
+	hub.send_raw = hub.send;
+
 	hub.close = function() {
 		if (hub.closed)
 			return;
@@ -95,6 +99,13 @@ export function open(path, cbs)
 					cbs.on_gone(hub);
 
 				return;
+			}
+
+			// MBIM devices hand whole messages to a single raw handler
+			// (no per-service QMUX demux); QMI devices decode QMUX
+			if (cbs?.on_raw) {
+				cbs.on_raw(hub, msg);
+				continue;
 			}
 
 			let dec = qmux.decode(msg);

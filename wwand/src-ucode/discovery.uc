@@ -1,32 +1,47 @@
 // wwand — sysfs device discovery helpers (target-side).
 //
 // Modems are matched by one of: explicit cdc device path, parent netdev
-// name, or stable USB path. cdc_mbim-driven devices are excluded (preserved
-// behavior from the old hotplug filter).
+// name, or stable USB path. The bound driver selects the control protocol:
+// qmi_wwan -> QMI, cdc_mbim -> MBIM.
 
 'use strict';
 
 import { glob, readlink, lsdir, access } from 'fs';
 
-function driver_of(cdc_name)
+export function driver_of(cdc_name)
 {
-	let drv = readlink(sprintf('/sys/class/usbmisc/%s/device/driver', cdc_name));
+	// accept either a bare name or a /dev/... path
+	let name = substr(cdc_name, rindex(cdc_name, '/') + 1);
+	let drv = readlink(sprintf('/sys/class/usbmisc/%s/device/driver', name));
 
 	return drv ? substr(drv, rindex(drv, '/') + 1) : null;
 }
 
-// all qmi_wwan cdc-wdm control devices present
+// control protocol implied by the bound driver, or null if unknown
+export function protocol_of(device)
+{
+	let drv = driver_of(device);
+
+	if (drv == 'qmi_wwan')
+		return 'qmi';
+
+	if (drv == 'cdc_mbim')
+		return 'mbim';
+
+	return null;
+}
+
+// all cdc-wdm control devices with their protocol
 export function list_devices()
 {
 	let found = [];
 
 	for (let path in (glob('/sys/class/usbmisc/cdc-wdm*') ?? [])) {
 		let name = substr(path, rindex(path, '/') + 1);
+		let proto = protocol_of(name);
 
-		if (driver_of(name) == 'cdc_mbim')
-			continue;
-
-		push(found, sprintf('/dev/%s', name));
+		if (proto)
+			push(found, { device: sprintf('/dev/%s', name), protocol: proto });
 	}
 
 	return found;

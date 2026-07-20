@@ -29,6 +29,7 @@ import * as sim from './sim.uc';
 import * as netlink from './netlink.uc';
 import * as recovery_mod from './recovery.uc';
 import * as atcmd from './atcmd.uc';
+import * as protoswitch from './protocol_switch.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
 import * as dmsmod from './codec/schema/dms.uc';
 import * as nasmod from './codec/schema/nas.uc';
@@ -278,6 +279,27 @@ export function create(opts)
 	// zero-rx watchdog tripped on a context of this modem
 	self.trip_zero_rx = function() {
 		rec.usb_repower();
+	};
+
+	// switch the control protocol (QMI <-> MBIM). On a successful change the
+	// modem resets and re-enumerates; the caller lets this modem object die
+	// and discovery rebuilds it under the new driver.
+	self.switch_protocol = function(target, cb) {
+		protoswitch.switch_protocol(self, target, (err, res) => {
+			if (!err && res.resetting) {
+				emit('protocol_switch', { target: target });
+				// drop clients/timers now; the device is about to vanish
+				notify_contexts('lost');
+				self.teardown();
+				self.set_state('ABSENT');
+			}
+
+			cb(err, res);
+		});
+	};
+
+	self.protocol_switch_supported = function() {
+		return protoswitch.supported(self.info?.model);
 	};
 
 	step_sync = (tries) => {

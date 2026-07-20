@@ -44,6 +44,20 @@ export function publish(conn, daemon, log)
 			},
 		},
 
+		modem_set_protocol: {
+			args: { modem: '', protocol: '' },
+			call: (req) => {
+				daemon.modem_set_protocol(req.args.modem, req.args.protocol, (err, res) => {
+					if (err)
+						req.reply({ ok: false, ...err });
+					else
+						req.reply({ ok: true, ...res });
+				});
+
+				req.defer();
+			},
+		},
+
 		context_status: {
 			args: { context: '', interface: '' },
 			call: (req) => daemon.context_status(req.args.context ?? req.args.interface),

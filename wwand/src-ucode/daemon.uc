@@ -448,6 +448,15 @@ export function create(opts)
 		entry.modem.at.send(command, cb, { timeout: timeout });
 	};
 
+	self.modem_set_protocol = function(ref, target, cb) {
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return cb({ error: 'no_such_modem', ref: ref });
+
+		entry.modem.switch_protocol(target, cb);
+	};
+
 	self.hotplug = function(action, devname) {
 		log('info', sprintf('hotplug %s %s', action, devname));
 
