@@ -158,10 +158,28 @@ function renderStatus(netdev) {
 	}).catch(function() { return E('em', {}, _('status unavailable')); });
 }
 
+/* A small "add to lock" button. onAdd(kind, value, section_id, btn) writes the
+   value into the lock_4g list / lock_5g field. Returns '' when no handler is
+   wired (e.g. the read-only status tab), so the same renderer serves both. */
+function lockBtn(onAdd, section_id, kind, value, label) {
+	if (!onAdd || value == null)
+		return '';
+	return E('button', {
+		'class': 'btn cbi-button cbi-button-add',
+		'style': 'margin-left:8px;padding:1px 8px',
+		'title': _('Add %s to the cell lock').format(value),
+		'click': function(ev) {
+			ev.preventDefault();
+			onAdd(kind, value, section_id, ev.currentTarget);
+		}
+	}, label || _('+ Lock'));
+}
+
 /* Detailed cell environment for the cell-lock tab: current serving + 5G cell
    and the neighbour list with signal, so the user can see which
-   EARFCN:PCI / 5G cell to lock to. */
-function renderCellScan(netdev) {
+   EARFCN:PCI / 5G cell to lock to. When onAdd is given, each candidate gets a
+   button that appends its lock value to the corresponding form field. */
+function renderCellScan(netdev, onAdd, section_id) {
 	return L.resolveDefault(callStatus(), {}).then(function(modems) {
 		var name = pickModem(modems, netdev);
 		if (!name)
@@ -181,6 +199,7 @@ function renderCellScan(netdev) {
 				var ef = lteEarfcn(lc.earfcn);
 				var srv = null;
 				(lc.cells || []).forEach(function(c) { if (c.pci == lc.serving_cell_id) srv = c; });
+				var srvLock = '%d:%d'.format(lc.earfcn, lc.serving_cell_id);
 
 				out.push(E('p', {}, E('strong', {}, _('LTE serving cell'))));
 				out.push(tbl([
@@ -189,7 +208,9 @@ function renderCellScan(netdev) {
 					[ _('Frequency'), mhz(ef) ],
 					[ _('Bandwidth'), fmt(lc.bandwidth != null ? (lc.bandwidth/1000 + ' MHz') : null) ],
 					[ _('EARFCN'), '' + lc.earfcn ],
-					[ _('PCI'), '%d  →  %s'.format(lc.serving_cell_id, _('lock value %s').format('%d:%d'.format(lc.earfcn, lc.serving_cell_id))) ],
+					[ _('PCI'), E('span', {}, [
+						'%d  →  '.format(lc.serving_cell_id), E('code', {}, srvLock),
+						lockBtn(onAdd, section_id, '4g', srvLock, _('Lock this cell')) ]) ],
 					[ _('Signal'), 'RSRP %s · RSRQ %s · SNR %s · RSSI %s'.format(
 						srv ? (srv.rsrp/10).toFixed(1) + ' dBm' : (sig.lte ? sig.lte.rsrp + ' dBm' : '—'),
 						srv ? (srv.rsrq/10).toFixed(1) + ' dB' : (sig.lte ? sig.lte.rsrq + ' dB' : '—'),
@@ -205,14 +226,17 @@ function renderCellScan(netdev) {
 							E('th', { 'class': 'th' }, 'PCI'),
 							E('th', { 'class': 'th' }, 'RSRP'),
 							E('th', { 'class': 'th' }, 'RSRQ'),
-							E('th', { 'class': 'th' }, _('lock value'))
+							E('th', { 'class': 'th' }, _('lock value')),
+							E('th', { 'class': 'th', 'style': 'width:1%' }, '')
 						])
 					].concat(neigh.map(function(c) {
+						var v = '%d:%d'.format(lc.earfcn, c.pci);
 						return E('tr', { 'class': 'tr' }, [
 							E('td', { 'class': 'td' }, '' + c.pci),
 							E('td', { 'class': 'td' }, '%s dBm'.format((c.rsrp/10).toFixed(1))),
 							E('td', { 'class': 'td' }, '%s dB'.format((c.rsrq/10).toFixed(1))),
-							E('td', { 'class': 'td' }, '%d:%d'.format(lc.earfcn, c.pci))
+							E('td', { 'class': 'td' }, E('code', {}, v)),
+							E('td', { 'class': 'td' }, lockBtn(onAdd, section_id, '4g', v))
 						]);
 					}))));
 				}
@@ -221,6 +245,13 @@ function renderCellScan(netdev) {
 			var nc = cells.nr5g_cell;
 			if (nc) {
 				var nf = nrArfcn(cells.nr5g_arfcn);
+				/* lock_5g format: pci:arfcn:scs:band. QMI gives pci + arfcn;
+				   band is inferred from the ARFCN, scs defaults to 1 (30 kHz,
+				   the usual FR1 spacing) — the user should verify both. */
+				var nrBand = (nf && nf.band) ? nf.band.replace(/^n/, '') : null;
+				var nrLock = (cells.nr5g_arfcn != null && nrBand != null)
+					? '%d:%d:1:%s'.format(nc.pci, cells.nr5g_arfcn, nrBand) : null;
+
 				out.push(E('p', {}, E('strong', {}, _('5G NR cell'))));
 				out.push(tbl([
 					[ _('Technology'), '5G NR' ],
@@ -228,10 +259,16 @@ function renderCellScan(netdev) {
 					[ _('Frequency'), mhz(nf) ],
 					[ _('Bandwidth'), fmt(nc.bandwidth != null ? (nc.bandwidth/1000 + ' MHz') : null) ],
 					[ _('ARFCN'), '' + (cells.nr5g_arfcn || '?') ],
-					[ _('PCI'), '' + nc.pci ],
+					[ _('PCI'), E('span', {}, [
+						'' + nc.pci,
+						nrLock ? E('span', {}, [ '   →  ', E('code', {}, nrLock),
+							lockBtn(onAdd, section_id, '5g', nrLock, _('Lock this 5G cell')) ]) : '' ]) ],
 					[ _('Signal'), 'RSRP %s dBm · RSRQ %s dB · SNR %s dB'.format(
 						(nc.rsrp/10).toFixed(1), (nc.rsrq/10).toFixed(1), (nc.snr/10).toFixed(1)) ]
 				]));
+				if (onAdd && nrLock)
+					out.push(E('p', { 'style': 'color:#666;font-size:90%' },
+						_('5G SA lock is only supported in standalone mode; the scs value defaults to 1 (30 kHz) and the band is inferred — verify both before applying.')));
 			}
 
 			if (!out.length)
@@ -246,14 +283,14 @@ function renderCellScan(netdev) {
    The 5s poll is registered once per element id to avoid stacking pollers
    across form re-renders. */
 var _polled = {};
-function liveField(s, tab, name, title, renderFn) {
+function liveField(s, tab, name, title, renderFn, onAdd) {
 	var o = s.taboption(tab, form.DummyValue, name, title);
 	o.load = function(section_id) {
 		var elId = 'wwand-%s-%s'.format(name, section_id);
 		var node = E('div', { 'id': elId }, E('em', {}, _('loading…')));
 		var nd = o._netdev;
 		var refresh = function() {
-			return renderFn(nd).then(function(content) {
+			return renderFn(nd, onAdd, section_id).then(function(content) {
 				var cur = document.getElementById(elId);
 				if (cur) dom.content(cur, content);
 			});
@@ -432,16 +469,49 @@ return network.registerProtocol('qmi', {
 		o.default = o.enabled;
 
 		/* ---- cell lock (with live cell environment) ---- */
-		o = liveField(s, 'celllock', '_cellscan', _('Current cells'), renderCellScan);
+		/* Forward-declared so the cell-scan buttons (rendered first, clicked
+		   later) can reach the lock widgets by the time the user clicks. */
+		var lock4gOpt, lock5gOpt;
+		var addToLock = function(kind, value, section_id, btn) {
+			var opt = (kind == '5g') ? lock5gOpt : lock4gOpt;
+			var el = opt && opt.getUIElement(section_id);
+			if (!el) return;
+
+			if (kind == '5g') {
+				el.setValue(value);
+			} else {
+				var vals = el.getValue() || [];
+				if (!Array.isArray(vals))
+					vals = (vals != null && vals !== '') ? [ vals ] : [];
+				if (vals.indexOf(value) < 0) {
+					vals.push(value);
+					el.setValue(vals);
+				}
+			}
+
+			/* brief visual confirmation on the clicked button */
+			if (btn) {
+				var prev = btn.textContent;
+				btn.textContent = '✓';
+				btn.disabled = true;
+				window.setTimeout(function() {
+					btn.textContent = prev;
+					btn.disabled = false;
+				}, 1200);
+			}
+		};
+
+		o = liveField(s, 'celllock', '_cellscan', _('Current cells'), renderCellScan, addToLock);
 		o._netdev = netdev;
 
-		o = s.taboption('celllock', form.DynamicList, 'lock_4g', _('LTE cell lock'),
-			_('Lock to LTE cells, one entry "earfcn:pci" each (several entries = cell list). See the table above for candidate values.'));
-		o.placeholder = '1300:246';
+		lock4gOpt = s.taboption('celllock', form.DynamicList, 'lock_4g', _('LTE cell lock'),
+			_('Lock to LTE cells, one entry "earfcn:pci" each (several entries = cell list). Use the "Lock" buttons above to add the current or a neighbour cell.'));
+		lock4gOpt.placeholder = '1300:246';
 
-		o = s.taboption('celllock', form.Value, 'lock_5g', _('5G NR SA cell lock'),
-			_('Lock to a 5G SA cell: "pci:arfcn:scs:band".'));
-		o.placeholder = '242:431070:15:1';
+		lock5gOpt = s.taboption('celllock', form.Value, 'lock_5g', _('5G NR SA cell lock'),
+			_('Lock to a 5G SA cell: "pci:arfcn:scs:band". Use the "Lock this 5G cell" button above to prefill it from the current cell.'));
+		lock5gOpt.placeholder = '242:431070:15:1';
+		o = lock5gOpt;
 
 		o = s.taboption('celllock', form.Flag, 'lock_persist', _('Persist lock in modem'),
 			_('Store the cell lock in modem non-volatile memory.'));
