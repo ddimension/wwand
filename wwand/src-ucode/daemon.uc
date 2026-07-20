@@ -15,6 +15,8 @@
 import * as uloop from 'uloop';
 import * as modem_mod from './modem.uc';
 import * as context_mod from './context.uc';
+import * as modem_mbim_mod from './modem_mbim.uc';
+import * as context_mbim_mod from './context_mbim.uc';
 
 const UP_GUARD_MS = 150000;
 
@@ -132,24 +134,24 @@ export function create(opts)
 		if (!entry.netdev && deps.resolve_netdev)
 			entry.netdev = deps.resolve_netdev(cfg, device);
 
+		// the bound driver selects QMI vs MBIM (config 'protocol' can pin it)
+		let proto = cfg.protocol;
+
+		if (proto == null || proto == 'auto')
+			proto = (deps.resolve_protocol ? deps.resolve_protocol(device) : null) ?? 'qmi';
+
+		entry.protocol = proto;
+
 		let ep_id = cfg.ep_id;
 
 		if (ep_id == null && deps.resolve_ep_id)
 			ep_id = deps.resolve_ep_id(cfg, device, entry.netdev);
 
-		entry.modem = modem_mod.create({
+		let common = {
 			id: name,
 			device: device,
 			config: cfg,
 			timing: self.timing,
-			datapath: {
-				netdev: entry.netdev,
-				ep_id: ep_id,
-				mux: cfg.mux,
-				dgram_size: cfg.dl_datagram_max_size,
-				mux_links: muxinfo?.list ?? [],
-				fx: deps.datapath_fx,
-			},
 			recovery: {
 				fx: deps.recovery_fx,
 				state_dir: opts?.state_dir,
@@ -164,7 +166,24 @@ export function create(opts)
 				log: (level, msg) => log(level, sprintf('modem %s: %s', name, msg)),
 				on_event: on_modem_event,
 			},
-		});
+		};
+
+		if (proto == 'mbim') {
+			entry.modem = modem_mbim_mod.create(common);
+		}
+		else {
+			entry.modem = modem_mod.create({
+				...common,
+				datapath: {
+					netdev: entry.netdev,
+					ep_id: ep_id,
+					mux: cfg.mux,
+					dgram_size: cfg.dl_datagram_max_size,
+					mux_links: muxinfo?.list ?? [],
+					fx: deps.datapath_fx,
+				},
+			});
+		}
 
 		entry.modem.start();
 	};
@@ -179,8 +198,9 @@ export function create(opts)
 		}
 
 		let entry = { cfg: cfg, ctx: null, pending_up: [] };
+		let factory = (mentry.protocol == 'mbim') ? context_mbim_mod : context_mod;
 
-		entry.ctx = context_mod.create({
+		entry.ctx = factory.create({
 			name: name,
 			modem: mentry.modem,
 			config: cfg,
@@ -326,10 +346,16 @@ export function create(opts)
 		let mentry = self.modems[entry.cfg.modem];
 		let netdev = mentry?.netdev;
 
-		// muxed contexts use their mux child link (configured name or the
-		// default parent+mN scheme)
-		if (entry.cfg.mux_id > 0 && netdev)
+		if (mentry?.protocol == 'mbim') {
+			// MBIM sessions: session 0 is the parent netdev, sessions > 0 are
+			// VLAN sub-devices tagged with the session id
+			if (entry.cfg.mux_id > 0 && netdev)
+				netdev = sprintf('%s.%d', netdev, entry.cfg.mux_id);
+		}
+		else if (entry.cfg.mux_id > 0 && netdev) {
+			// QMAP muxed contexts use their mux child link
 			netdev = entry.cfg.mux_link ?? sprintf('%sm%d', netdev, entry.cfg.mux_id);
+		}
 
 		apply_mtu(name, entry, netdev);
 		enable_ipv6(name, entry, netdev);

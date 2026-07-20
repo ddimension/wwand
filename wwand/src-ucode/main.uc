@@ -204,6 +204,7 @@ function run_daemon()
 			datapath_fx: netlink.default_fx((level, msg) => logmod.log(level, '%s', msg)),
 			resolve_modem_device: discovery.resolve_modem_device,
 			resolve_netdev: discovery.resolve_netdev,
+			resolve_protocol: discovery.protocol_of,
 			resolve_ep_id: (cfg, device, netdev) =>
 				netdev ? netlink.ep_iface_number(netdev) : null,
 			kick_interface: (interface) =>
