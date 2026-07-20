@@ -873,14 +873,32 @@ export function create(opts)
 				nr.plmn, nr.tac, nr.pci, self.cells?.nr5g_arfcn ?? 0,
 				nr.rsrp / 10.0, nr.rsrq / 10.0, nr.snr / 10.0));
 
-		// -32768 is the QMI "not available" sentinel for i16 metrics
-		if (self.signal?.lte && self.signal.lte.rsrp > -32768)
-			push(parts, sprintf('sig_lte=[rssi %d rsrp %d snr %.1f]',
-				self.signal.lte.rssi, self.signal.lte.rsrp, self.signal.lte.snr / 10.0));
+		// -32768 is the QMI "not available" sentinel for i16 metrics;
+		// filter per field (mixed valid/sentinel values do occur)
+		let sig_part = (label, fields) => {
+			let out = [];
 
-		if (self.signal?.nr5g && self.signal.nr5g.rsrp > -32768)
-			push(parts, sprintf('sig_nr5g=[rsrp %d snr %.1f]',
-				self.signal.nr5g.rsrp, self.signal.nr5g.snr / 10.0));
+			for (let name, spec in fields)
+				if (spec[0] != null && spec[0] > -32768)
+					push(out, sprintf('%s %s', name,
+						spec[1] ? sprintf('%.1f', spec[0] / 10.0) : sprintf('%d', spec[0])));
+
+			if (length(out))
+				push(parts, sprintf('%s=[%s]', label, join(' ', out)));
+		};
+
+		if (self.signal?.lte)
+			sig_part('sig_lte', {
+				rssi: [ self.signal.lte.rssi, false ],
+				rsrp: [ self.signal.lte.rsrp, false ],
+				snr:  [ self.signal.lte.snr, true ],
+			});
+
+		if (self.signal?.nr5g)
+			sig_part('sig_nr5g', {
+				rsrp: [ self.signal.nr5g.rsrp, false ],
+				snr:  [ self.signal.nr5g.snr, true ],
+			});
 
 		if (length(self.config.lock_4g ?? []))
 			push(parts, sprintf('lock_4g=%s', join(',', self.config.lock_4g)));
