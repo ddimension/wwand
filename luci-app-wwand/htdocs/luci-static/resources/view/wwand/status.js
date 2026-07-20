@@ -165,42 +165,50 @@ return view.extend({
 	},
 
 	render: function(modems) {
-		var self = this;
-		var names = Object.keys(modems || {});
-
-		if (!names.length)
-			return E('div', { 'class': 'cbi-map' }, [
-				E('h2', {}, _('Modem Status')),
-				E('p', { 'class': 'cbi-map-descr' }, _('wwand is not running or no modem was found.')) ]);
-
-		var current = names[0];
+		var current = null;
+		var selWrap = E('span', {});   // filled with a modem selector when >1
 		var live = E('div', { 'id': 'wwand-live' }, E('em', {}, _('loading…')));
 
-		var sel = null;
-		if (names.length > 1) {
-			sel = E('select', { 'class': 'cbi-input-select',
+		function buildSelector(ms) {
+			var names = Object.keys(ms || {});
+			if (names.length < 2) { dom.content(selWrap, ''); return; }
+			var sel = E('select', { 'class': 'cbi-input-select',
 				'change': function(ev){ current = ev.target.value; peak[current] = {}; refresh(); } },
 				names.map(function(n){
-					var m = modems[n];
-					return E('option', { 'value': n }, '%s (%s)'.format(m.netdev || n, m.model || '?'));
+					var m = ms[n];
+					return E('option', { 'value': n,
+						'selected': (n == current) ? 'selected' : null },
+						'%s (%s)'.format(m.netdev || n, m.model || '?'));
 				}));
+			dom.content(selWrap, [ _('Modem') + ': ', sel ]);
 		}
-
-		var resetBtn = E('button', { 'class': 'btn cbi-button', 'click': function(){
-			peak[current] = {}; refresh();
-		} }, _('Reset peak'));
 
 		function refresh() {
 			return callStatus().then(function(ms) {
-				modems = ms || modems;
-				var m = modems[current];
-				if (!m) return;
-				return renderLive(current, m).then(function(node){
-					var el = document.getElementById('wwand-live');
-					if (el) dom.content(el, node);
+				ms = ms || {};
+				var names = Object.keys(ms);
+				var el = document.getElementById('wwand-live');
+				if (!el) return;
+
+				if (!names.length) {
+					current = null;
+					dom.content(selWrap, '');
+					dom.content(el, E('em', {}, _('wwand is not running or no modem present yet.')));
+					return;
+				}
+
+				if (!current || !ms[current]) current = names[0];
+				buildSelector(ms);
+				return renderLive(current, ms[current]).then(function(node){
+					var e2 = document.getElementById('wwand-live');
+					if (e2) dom.content(e2, node);
 				});
 			});
 		}
+
+		var resetBtn = E('button', { 'class': 'btn cbi-button', 'click': function(){
+			if (current) peak[current] = {}; refresh();
+		} }, _('Reset peak'));
 
 		poll.add(refresh, 2);
 		refresh();
@@ -210,7 +218,7 @@ return view.extend({
 			E('div', { 'class': 'cbi-map-descr' },
 				_('Live cellular signal and cell environment — updates every 2 seconds. Aim the antenna for the highest RSRP / SINR; the peak values below help while turning it.')),
 			E('div', { 'class': 'cbi-section', 'style': 'display:flex;gap:12px;align-items:center' },
-				[ sel ? E('span', {}, [ _('Modem') + ': ', sel ]) : E('span', {}), resetBtn ]),
+				[ selWrap, resetBtn ]),
 			live
 		]);
 	},

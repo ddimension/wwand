@@ -8,30 +8,32 @@ export function publish(conn, daemon, log)
 {
 	let obj = conn.publish('wwand', {
 		status: {
+			args: { ubus_rpc_session: '' },
 			call: (req) => daemon.status(),
 		},
 
 		modem_list: {
+			args: { ubus_rpc_session: '' },
 			call: (req) => daemon.status(),
 		},
 
 		modem_signal: {
-			args: { modem: '' },
+			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => daemon.modem_signal(req.args.modem),
 		},
 
 		modem_cells: {
-			args: { modem: '' },
+			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => daemon.modem_cells(req.args.modem),
 		},
 
 		modem_location: {
-			args: { modem: '' },
+			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => daemon.modem_location(req.args.modem),
 		},
 
 		modem_at: {
-			args: { modem: '', command: '', timeout: 0 },
+			args: { modem: '', command: '', timeout: 0, ubus_rpc_session: '' },
 			call: (req) => {
 				daemon.modem_at(req.args.modem, req.args.command, (err, res) => {
 					if (err)
@@ -45,7 +47,7 @@ export function publish(conn, daemon, log)
 		},
 
 		modem_set_protocol: {
-			args: { modem: '', protocol: '' },
+			args: { modem: '', protocol: '', ubus_rpc_session: '' },
 			call: (req) => {
 				daemon.modem_set_protocol(req.args.modem, req.args.protocol, (err, res) => {
 					if (err)
@@ -59,12 +61,12 @@ export function publish(conn, daemon, log)
 		},
 
 		context_status: {
-			args: { context: '', interface: '' },
+			args: { context: '', interface: '', ubus_rpc_session: '' },
 			call: (req) => daemon.context_status(req.args.context ?? req.args.interface),
 		},
 
 		context_up: {
-			args: { context: '', interface: '' },
+			args: { context: '', interface: '', ubus_rpc_session: '' },
 			call: (req) => {
 				let ref = req.args.context ?? req.args.interface;
 
@@ -83,7 +85,7 @@ export function publish(conn, daemon, log)
 		},
 
 		context_down: {
-			args: { context: '', interface: '' },
+			args: { context: '', interface: '', ubus_rpc_session: '' },
 			call: (req) => {
 				let ref = req.args.context ?? req.args.interface;
 
@@ -99,7 +101,7 @@ export function publish(conn, daemon, log)
 		},
 
 		hotplug: {
-			args: { action: '', device: '' },
+			args: { action: '', device: '', ubus_rpc_session: '' },
 			call: (req) => {
 				daemon.hotplug(req.args.action, req.args.device);
 				return {};
@@ -107,6 +109,7 @@ export function publish(conn, daemon, log)
 		},
 
 		reload: {
+			args: { ubus_rpc_session: '' },
 			call: (req) => {
 				if (daemon.reload)
 					daemon.reload();
