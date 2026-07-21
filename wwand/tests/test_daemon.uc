@@ -27,6 +27,7 @@ uloop.init();
 const TIMING = {
 	sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
 	reg_timeout: 500, backoff_min: 1, backoff_max: 5,
+	wait_keepalive_ms: 60,   // short long-poll window for the keepalive check
 };
 
 const V4_SETTINGS = {
@@ -159,12 +160,25 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 			ok(length(filter(events, (e) => e.type == 'renew' && e.data == 'wan')) >= 1,
 				'stage B: settings change triggered netifd renew');
 
-			// context_wait parks a deferred reply while the context is CONNECTED
-			// and must fire only once it drops. Its callback drives the remaining
-			// checks so the test does not depend on reply-delivery ordering
-			// between the parked wait and the context_down reply below.
-			conn_cli.defer('wwand', 'context_wait', { interface: 'wan' }, (cw, rw) => {
+			// long-poll: while CONNECTED the first reply is a 'keepalive' (after
+			// the short window above); the monitor re-issues, and bringing the
+			// context down then wakes it with 'down'. The final callback drives
+			// the remaining checks so we do not depend on reply ordering.
+			let waited = 0, doWait;
+			doWait = () => conn_cli.defer('wwand', 'context_wait', { interface: 'wan' }, (cw, rw) => {
 				eq(cw, 0, 'context_wait: status ok');
+
+				if (++waited == 1) {
+					eq(rw.event, 'keepalive', 'context_wait: keepalive while connected');
+					doWait();   // re-issue like the real monitor loop does
+
+					// now drop the context — the re-issued wait must wake on down
+					conn_cli.defer('wwand', 'context_down', { context: 'wan_ctx' }, (c3, r3) => {
+						eq(c3, 0, 'context_down: ok');
+					});
+					return;
+				}
+
 				eq(rw.event, 'down', 'context_wait: woke on context down');
 
 				conn_cli.defer('wwand', 'context_settings', { interface: 'wan' }, (cs2, rs2) => {
@@ -191,14 +205,11 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 				});
 			});
 
+			doWait();
+
 			// an unknown ref must return immediately (gone) so netifd re-runs setup
 			conn_cli.defer('wwand', 'context_wait', { interface: 'nope' }, (cg, rg) => {
 				eq(rg.event, 'gone', 'context_wait: unknown ref -> gone');
-			});
-
-			// bringing the context down wakes the parked context_wait above
-			conn_cli.defer('wwand', 'context_down', { context: 'wan_ctx' }, (c3, r3) => {
-				eq(c3, 0, 'context_down: ok');
 			});
 		});
 	});

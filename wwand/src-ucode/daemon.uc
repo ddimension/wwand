@@ -83,7 +83,15 @@ export function create(opts)
 	// deferred ubus request here; it is answered (waking the monitor, which
 	// makes netifd tear down + retry) the moment the context drops or errors.
 	// Replaces the old 'ubus listen' + shell-loop monitor per context.
+	//
+	// Long-poll, not an indefinite park: each waiter also carries a keepalive
+	// timer that answers 'keepalive' after wait_keepalive_ms if the context is
+	// still up. The monitor re-issues on keepalive, so a wwand crash can leave a
+	// request pending for at most that window (the monitor's own ubus timeout
+	// then fires) instead of blocking forever — no monitor ever hangs
+	// permanently, contexts always recover. Each entry is { cb, timer }.
 	let context_waiters = {};
+	let wait_keepalive_ms = opts?.timing?.wait_keepalive_ms ?? 30000;
 
 	let flush_context_waiters = (name, event, data) => {
 		let ws = context_waiters[name];
@@ -93,8 +101,12 @@ export function create(opts)
 
 		delete context_waiters[name];
 
-		for (let w in ws)
-			w({ event: event, ...(data?.reason != null ? { reason: data.reason } : {}) });
+		for (let w in ws) {
+			if (w.timer)
+				w.timer.cancel();
+
+			w.cb({ event: event, ...(data?.reason != null ? { reason: data.reason } : {}) });
+		}
 	};
 
 	let on_context_event = (name, ctx, event, data) => {
@@ -476,8 +488,18 @@ export function create(opts)
 		if (entry.ctx.state != 'CONNECTED')
 			return cb({ event: 'down', state: entry.ctx.state });
 
+		// park as a long-poll: answer 'keepalive' after the window if still up,
+		// so the caller's request never blocks indefinitely. A real down/error
+		// (or shutdown) replies earlier via flush_context_waiters.
 		context_waiters[name] ??= [];
-		push(context_waiters[name], cb);
+		let waiter = { cb: cb, timer: null };
+
+		waiter.timer = uloop.timer(wait_keepalive_ms, () => {
+			context_waiters[name] = filter(context_waiters[name] ?? [], (w) => w != waiter);
+			cb({ event: 'keepalive' });
+		});
+
+		push(context_waiters[name], waiter);
 	};
 
 	self.status = function() {

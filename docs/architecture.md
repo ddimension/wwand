@@ -64,10 +64,16 @@ the echoed value drives the driver side.
 
 ### netifd coupling (monitor, renew, live updates)
 
-Teardown is event-driven: the proto shim parks a single blocking
-`context_wait` ubus call per interface (the daemon holds the reply open until
-the context drops), so netifd tears down and retries without a polling
-watchdog or an `ubus listen` helper.
+Teardown is event-driven: the proto shim runs a `context_wait` long-poll per
+interface. The daemon holds the reply until the context drops or errors — then
+netifd tears down and retries — but also answers `keepalive` after a bounded
+window if the context is still up, so the monitor re-issues and no request ever
+blocks indefinitely. This matters because ubusd does not track forwarded
+invokes: a caller blocked on a provider that dies would otherwise wait forever
+(the monitor would hang and the context would never recover). With the bounded
+timeout a wwand crash is recovered within one window; on a graceful shutdown
+the daemon answers all parked waiters immediately. Either way there is no
+polling watchdog and no `ubus listen` helper.
 
 Setting changes are applied **in place**. The shim declares a renew handler
 (`proto_qmi_renew`) that re-reads `context_settings` (read-only) and re-sends
