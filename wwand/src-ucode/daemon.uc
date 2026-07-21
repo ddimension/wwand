@@ -15,10 +15,24 @@
 import * as uloop from 'uloop';
 import * as modem_mod from './modem.uc';
 import * as context_mod from './context.uc';
-import * as modem_mbim_mod from './modem_mbim.uc';
-import * as context_mbim_mod from './context_mbim.uc';
 
 const UP_GUARD_MS = 150000;
+
+// MBIM support is loaded lazily. On QMI hardware (the common case) its ~1.4k
+// lines of ucode never run, so keeping them out of the compiled/resident set
+// trims the daemon's memory, and a QMI-only install no longer needs the MBIM
+// modules or schema present just to start. Resolved (via the same module
+// search path as the static imports) only when an MBIM modem is created.
+let mbim_mods = null;
+function load_mbim() {
+	if (mbim_mods == null)
+		mbim_mods = {
+			modem: require('wwand.modem_mbim'),
+			context: require('wwand.context_mbim'),
+		};
+
+	return mbim_mods;
+}
 
 export function create(opts)
 {
@@ -200,7 +214,7 @@ export function create(opts)
 		};
 
 		if (proto == 'mbim') {
-			entry.modem = modem_mbim_mod.create(common);
+			entry.modem = load_mbim().modem.create(common);
 		}
 		else {
 			entry.modem = modem_mod.create({
@@ -229,7 +243,7 @@ export function create(opts)
 		}
 
 		let entry = { cfg: cfg, ctx: null, pending_up: [] };
-		let factory = (mentry.protocol == 'mbim') ? context_mbim_mod : context_mod;
+		let factory = (mentry.protocol == 'mbim') ? load_mbim().context : context_mod;
 
 		entry.ctx = factory.create({
 			name: name,
