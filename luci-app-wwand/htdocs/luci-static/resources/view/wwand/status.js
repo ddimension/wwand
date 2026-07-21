@@ -84,6 +84,12 @@ function renderConnections(details) {
 			rows.push([ _('IP'), E('em', {}, _('not connected')) ]);
 		rows.push([ _('MTU'), '' + (s.mtu || '—') ]);
 
+		/* last activation failure (bad password / forbidden APN / …) */
+		var le = d.st.last_error;
+		if (le && le.text && st != 'CONNECTED')
+			rows.push([ _('Last error'), E('span', { 'style': 'color:#e33' },
+				'%s%s'.format(le.text, (le.code != null) ? ' (%s %s)'.format(le.type || _('code'), le.code) : '')) ]);
+
 		return E('div', { 'class': 'cbi-section', 'style': 'flex:1;min-width:280px' }, [
 			E('h4', { 'style': 'margin:0 0 4px' }, d.cfg.interface), tbl(rows)
 		]);

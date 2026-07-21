@@ -506,6 +506,7 @@ export function create(opts)
 				modem: entry.cfg.modem,
 				mux_id: entry.cfg.mux_id,
 				state: entry.ctx?.state ?? 'UNBOUND',
+				last_error: entry.ctx?.last_error,
 			};
 		}
 

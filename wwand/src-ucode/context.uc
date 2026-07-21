@@ -23,6 +23,7 @@
 import * as uloop from 'uloop';
 import * as wdsmod from './codec/schema/wds.uc';
 import { ENDPOINT_TYPE_HSUSB } from './codec/schema/wda.uc';
+import * as callend from './callend.uc';
 
 const wds_schema = wdsmod.default;
 
@@ -73,6 +74,7 @@ export function create(opts)
 		state: 'IDLE',
 		families: {},      // '4' | '6' -> { client, pdh, settings }
 		settings: null,
+		last_error: null,  // { stage, text, code, type, ... } from the last failure
 	};
 
 	let deps = opts.deps ?? {};
@@ -360,6 +362,7 @@ export function create(opts)
 							err: e3,
 							call_end_reason: d3?.call_end_reason,
 							verbose: d3?.verbose_call_end,
+							ext_error: d3?.ext_error,
 						});
 					}
 
@@ -602,6 +605,7 @@ export function create(opts)
 				};
 
 				set_state('CONNECTED');
+				self.last_error = null;   // a good connection clears the last failure
 				start_stats();
 				schedule_settings_poll();
 				emit('up', self.settings);
@@ -636,7 +640,25 @@ export function create(opts)
 	};
 
 	self._fail = function(err) {
-		log('err', sprintf('context failed: %J', err));
+		// derive a human-readable cause from the QMI call-end / verbose reason
+		// (3GPP SM cause etc.) and retain it so the log and the status page can
+		// explain *why* activation failed — bad password, forbidden APN, ...
+		let desc = callend.describe(err?.call_end_reason, err?.verbose, err?.ext_error);
+
+		self.last_error = {
+			stage: err?.stage,
+			text:  desc?.text,
+			code:  desc?.code,
+			type:  desc?.type_name,
+			call_end_reason: err?.call_end_reason,
+			ext_error: err?.ext_error,
+		};
+
+		if (desc?.text)
+			log('err', sprintf('activation failed: %s (%s%s)', desc.text,
+				desc.type_name ? desc.type_name + ' ' : '', desc.code));
+		else
+			log('err', sprintf('context failed: %J', err));
 
 		stop_stats();
 
@@ -728,6 +750,7 @@ export function create(opts)
 			name: self.name,
 			state: self.state,
 			settings: self.settings,
+			last_error: self.last_error,
 			families: map(keys(self.families), (k) => ({
 				family: +k,
 				cid: self.families[k].client?.cid,
