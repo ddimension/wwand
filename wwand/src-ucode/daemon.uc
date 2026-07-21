@@ -608,6 +608,15 @@ export function create(opts)
 	};
 
 	self.shutdown = function() {
+		// Reply to every parked context_wait FIRST and synchronously. Otherwise
+		// those deferred requests are left dangling when our ubus connection
+		// closes on exit, and ubusd's cleanup of dangling deferred requests
+		// wedges the whole bus (observed: `wwand restart` hangs ubusd). Waking
+		// the monitors also makes netifd re-establish the contexts against the
+		// restarted daemon.
+		for (let name in keys(context_waiters))
+			flush_context_waiters(name, 'gone');
+
 		for (let name, entry in self.contexts)
 			if (entry.ctx && entry.ctx.state != 'IDLE')
 				entry.ctx.down(() => null);
