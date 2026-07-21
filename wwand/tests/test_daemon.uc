@@ -69,6 +69,9 @@ function handlers()
 		GET_CURRENT_SETTINGS: (args, meta) =>
 			(meta.count <= 1) ? V4_SETTINGS : { ...V4_SETTINGS, ipv4: '10.11.12.99' },
 		STOP_NETWORK: {},
+		// the stats sample now fires immediately on connect
+		GET_PACKET_STATISTICS: { tx_packets_ok: 0, rx_packets_ok: 0 },
+		GET_CHANNEL_RATES: { rates: { tx_rate: 0, rx_rate: 0, max_tx_rate: 0, max_rx_rate: 0 } },
 	};
 }
 

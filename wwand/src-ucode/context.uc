@@ -166,11 +166,14 @@ export function create(opts)
 
 	start_stats = () => {
 		// run while connected regardless of the zero-rx setting: the sample
-		// also feeds the data-usage counters shown on the status page.
+		// also feeds the data-usage counters + max channel rate shown on the
+		// status page. Fire the first sample immediately (it re-arms itself at
+		// stats_interval) so those values appear right after connect instead of
+		// only after the first interval.
 		rx_last_total = -1;
 		rx_stalled_ms = 0;
 		self.connected_since = time();
-		stats_timer = uloop.timer(stats_interval, sample_stats);
+		stats_timer = uloop.timer(0, sample_stats);
 	};
 
 	stop_stats = () => {
