@@ -30,6 +30,10 @@ function fmtDur(s) {
 	if (m) return '%dm %ds'.format(m, sec);
 	return '%ds'.format(sec);
 }
+function fmtRate(bps) {
+	if (bps == null || bps <= 0) return '—';
+	return (bps >= 1e9) ? (bps/1e9).toFixed(2) + ' Gbps' : (bps/1e6).toFixed(1) + ' Mbps';
+}
 
 /* Band/frequency helpers come from the shared wwand.bands module. */
 function lteEarfcn(e) { return bands.lteEarfcn(e); }
@@ -110,6 +114,11 @@ function renderConnections(details) {
 				rows.push([ _('Errors / dropped'),
 					'rx %d/%d \u00b7 tx %d/%d'.format(dc.rx_errors||0, dc.rx_dropped||0, dc.tx_errors||0, dc.tx_dropped||0) ]);
 		}
+
+		var cr = d.st.channel_rate;
+		if (cr && (cr.max_rx_rate || cr.max_tx_rate))
+			rows.push([ _('Max rate'),
+				'\u2193 %s \u00b7 \u2191 %s'.format(fmtRate(cr.max_rx_rate), fmtRate(cr.max_tx_rate)) ]);
 
 		/* last activation failure (bad password / forbidden APN / …) */
 		var le = d.st.last_error;

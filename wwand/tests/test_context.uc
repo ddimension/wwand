@@ -89,6 +89,9 @@ function make_handlers(over, started)
 		GET_CURRENT_SETTINGS: (args, meta) =>
 			(started[sprintf('%d', meta.cid)] == 4) ? V4_SETTINGS : V6_SETTINGS,
 		STOP_NETWORK: {},
+		// benign defaults so any connected scenario can run the stats sample
+		GET_PACKET_STATISTICS: { tx_packets_ok: 0, rx_packets_ok: 0 },
+		GET_CHANNEL_RATES: { rates: { tx_rate: 0, rx_rate: 0, max_tx_rate: 0, max_rx_rate: 0 } },
 
 		...(over ?? {}),
 	};
@@ -510,6 +513,10 @@ scenario('data-stats', {
 			tx_packets_error: 1, rx_packets_error: 2,
 			tx_packets_dropped: 3, rx_packets_dropped: 4,
 		}),
+		GET_CHANNEL_RATES: (args, meta) => ({
+			rates: { tx_rate: 20000000, rx_rate: 80000000,
+			         max_tx_rate: 50000000, max_rx_rate: 150000000 },
+		}),
 	},
 }, (ctx, mock, events, next) => {
 	ctx.up((err) => {
@@ -523,6 +530,8 @@ scenario('data-stats', {
 			eq(st.stats.rx_errors, 2, 'data-stats: rx error counter');
 			eq(st.stats.tx_dropped, 3, 'data-stats: tx dropped counter');
 			ok(st.uptime != null && st.uptime >= 0, 'data-stats: uptime reported');
+			eq(st.channel_rate.max_rx_rate, 150000000, 'data-stats: max downstream rate');
+			eq(st.channel_rate.max_tx_rate, 50000000, 'data-stats: max upstream rate');
 			next();
 		});
 	});

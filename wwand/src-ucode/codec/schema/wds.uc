@@ -105,6 +105,22 @@ export default {
 			},
 		},
 
+		// current + modem-computed maximum channel rate (bits/sec) for the
+		// active radio link — the max up/down bandwidth the current cell
+		// configuration (bandwidth, MIMO, modulation, CA) can deliver.
+		GET_CHANNEL_RATES: {
+			id: 0x0023,
+			req: {},
+			resp: {
+				rates: { t: 0x01, f: {
+					tx_rate:     'u32',
+					rx_rate:     'u32',
+					max_tx_rate: 'u32',
+					max_rx_rate: 'u32',
+				} },
+			},
+		},
+
 		GET_PACKET_STATISTICS: {
 			id: 0x0024,
 			req:  { mask: { t: 0x01, f: 'u32' } },

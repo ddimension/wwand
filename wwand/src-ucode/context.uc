@@ -77,6 +77,7 @@ export function create(opts)
 		last_error: null,  // { stage, text, code, type, ... } from the last failure
 		stats: null,       // cumulative data counters (bytes/packets/errors) since connect
 		connected_since: null,
+		channel_rate: null, // { tx_rate, rx_rate, max_tx_rate, max_rx_rate } bits/sec
 	};
 
 	// packet-statistics request mask: all 10 flags (tx/rx packets ok, errors,
@@ -192,6 +193,13 @@ export function create(opts)
 
 		if (!pend || self.state != 'CONNECTED')
 			return;
+
+		// max up/down bandwidth for the current radio link (same for every PDP
+		// on this modem) — query once via the first WDS client.
+		fams[0].client.request('GET_CHANNEL_RATES', {}, (err, data) => {
+			if (!err && data?.rates)
+				self.channel_rate = data.rates;
+		});
 
 		for (let fam in fams) {
 			fam.client.request('GET_PACKET_STATISTICS', { mask: STATS_MASK }, (err, data) => {
@@ -776,6 +784,7 @@ export function create(opts)
 			last_error: self.last_error,
 			uptime: (self.state == 'CONNECTED' && self.connected_since) ? (time() - self.connected_since) : null,
 			stats: (self.state == 'CONNECTED') ? self.stats : null,
+			channel_rate: (self.state == 'CONNECTED') ? self.channel_rate : null,
 			families: map(keys(self.families), (k) => ({
 				family: +k,
 				cid: self.families[k].client?.cid,
