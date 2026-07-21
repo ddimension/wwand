@@ -238,9 +238,21 @@ return view.extend({
 		var selWrap = E('span', {});   // filled with a modem selector when >1
 		var live = E('div', { 'id': 'wwand-live' }, E('em', {}, _('loading…')));
 
+		/* Rebuild the modem dropdown only when the set of modems actually
+		   changes; otherwise the 1s poll would recreate the <select> under the
+		   user every second, making it flicker and impossible to open. The last
+		   signature is stashed on selWrap so no extra closure state is needed. */
 		function buildSelector(ms) {
 			var names = Object.keys(ms || {});
-			if (names.length < 2) { dom.content(selWrap, ''); return; }
+			if (names.length < 2) {
+				if (selWrap._sig !== '') { dom.content(selWrap, ''); selWrap._sig = ''; }
+				return;
+			}
+			var sig = names.map(function(n){
+				return n + ':' + (ms[n].netdev || '') + ':' + (ms[n].model || '');
+			}).join('|');
+			if (sig === selWrap._sig) return;
+			selWrap._sig = sig;
 			var sel = E('select', { 'class': 'cbi-input-select',
 				'change': function(ev){ current = ev.target.value; peak[current] = {}; refresh(); } },
 				names.map(function(n){
