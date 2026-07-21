@@ -27,7 +27,6 @@ export default {
 			req:  {},
 			resp: {
 				msisdn: { t: 0x01, f: 'string' },
-				imsi:   { t: 0x11, f: 'string' },
 			},
 		},
 
