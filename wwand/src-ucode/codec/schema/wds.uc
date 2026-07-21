@@ -133,8 +133,8 @@ export default {
 				rx_overflows:       { t: 0x15, f: 'u32' },
 				tx_bytes_ok:        { t: 0x19, f: 'u64' },
 				rx_bytes_ok:        { t: 0x1A, f: 'u64' },
-				tx_packets_dropped: { t: 0x25, f: 'u32' },
-				rx_packets_dropped: { t: 0x26, f: 'u32' },
+				tx_packets_dropped: { t: 0x1D, f: 'u32' },
+				rx_packets_dropped: { t: 0x1E, f: 'u32' },
 			},
 		},
 
