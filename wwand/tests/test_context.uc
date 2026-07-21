@@ -496,6 +496,38 @@ scenario('settings-nochange', {
 	});
 });
 
+// --- data-usage counters + uptime -------------------------------------------
+// A stats sample while connected populates ctx.status().stats (bytes/packets/
+// errors, summed across families) and reports an uptime.
+scenario('data-stats', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	ctx_timing: { stats_interval: 5 },
+	handlers: {
+		GET_CURRENT_SETTINGS: V4_SETTINGS,
+		GET_PACKET_STATISTICS: (args, meta) => ({
+			tx_packets_ok: 100, rx_packets_ok: 200,
+			tx_bytes_ok: 5000, rx_bytes_ok: 90000,
+			tx_packets_error: 1, rx_packets_error: 2,
+			tx_packets_dropped: 3, rx_packets_dropped: 4,
+		}),
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'data-stats: up ok');
+
+		uloop.timer(40, () => {
+			let st = ctx.status();
+			ok(st.stats != null, 'data-stats: stats populated');
+			eq(st.stats.rx_bytes, 90000, 'data-stats: rx bytes');
+			eq(st.stats.tx_bytes, 5000, 'data-stats: tx bytes');
+			eq(st.stats.rx_errors, 2, 'data-stats: rx error counter');
+			eq(st.stats.tx_dropped, 3, 'data-stats: tx dropped counter');
+			ok(st.uptime != null && st.uptime >= 0, 'data-stats: uptime reported');
+			next();
+		});
+	});
+});
+
 run_next();
 uloop.run();
 

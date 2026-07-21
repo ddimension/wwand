@@ -14,6 +14,23 @@ var callCtxStatus = rpc.declare({ object: 'wwand', method: 'context_status', par
 
 function fmtList(a) { return (a && a.length) ? a.join(', ') : '—'; }
 
+function fmtBytes(n) {
+	if (n == null) return '—';
+	var u = ['B','KB','MB','GB','TB'], i = 0;
+	while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+	return (i ? n.toFixed(2) : n) + ' ' + u[i];
+}
+function fmtDur(s) {
+	if (s == null) return '—';
+	var d = Math.floor(s/86400); s -= d*86400;
+	var h = Math.floor(s/3600);  s -= h*3600;
+	var m = Math.floor(s/60),  sec = s - m*60;
+	if (d) return '%dd %dh %dm'.format(d, h, m);
+	if (h) return '%dh %dm'.format(h, m);
+	if (m) return '%dm %ds'.format(m, sec);
+	return '%ds'.format(sec);
+}
+
 /* Band/frequency helpers come from the shared wwand.bands module. */
 function lteEarfcn(e) { return bands.lteEarfcn(e); }
 function nrArfcn(a) { return bands.nrArfcn(a); }
@@ -83,6 +100,16 @@ function renderConnections(details) {
 		if (!v4 && !v6)
 			rows.push([ _('IP'), E('em', {}, _('not connected')) ]);
 		rows.push([ _('MTU'), '' + (s.mtu || '—') ]);
+
+		if (d.st.uptime != null)
+			rows.push([ _('Uptime'), fmtDur(d.st.uptime) ]);
+		var dc = d.st.stats;
+		if (dc) {
+			rows.push([ _('Data'), '\u2193 %s \u00b7 \u2191 %s'.format(fmtBytes(dc.rx_bytes), fmtBytes(dc.tx_bytes)) ]);
+			if ((dc.rx_errors||0)+(dc.tx_errors||0)+(dc.rx_dropped||0)+(dc.tx_dropped||0) > 0)
+				rows.push([ _('Errors / dropped'),
+					'rx %d/%d \u00b7 tx %d/%d'.format(dc.rx_errors||0, dc.rx_dropped||0, dc.tx_errors||0, dc.tx_dropped||0) ]);
+		}
 
 		/* last activation failure (bad password / forbidden APN / …) */
 		var le = d.st.last_error;

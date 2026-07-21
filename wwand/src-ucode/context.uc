@@ -75,7 +75,14 @@ export function create(opts)
 		families: {},      // '4' | '6' -> { client, pdh, settings }
 		settings: null,
 		last_error: null,  // { stage, text, code, type, ... } from the last failure
+		stats: null,       // cumulative data counters (bytes/packets/errors) since connect
+		connected_since: null,
 	};
+
+	// packet-statistics request mask: all 10 flags (tx/rx packets ok, errors,
+	// overflows, bytes, dropped) so one query feeds both the data-usage display
+	// and the zero-rx watchdog.
+	const STATS_MASK = 0x3FF;
 
 	let deps = opts.deps ?? {};
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: context %s: %s\n', level, self.name, msg)));
@@ -157,11 +164,11 @@ export function create(opts)
 	};
 
 	start_stats = () => {
-		if (zero_rx_limit_ms() <= 0)
-			return;
-
+		// run while connected regardless of the zero-rx setting: the sample
+		// also feeds the data-usage counters shown on the status page.
 		rx_last_total = -1;
 		rx_stalled_ms = 0;
+		self.connected_since = time();
 		stats_timer = uloop.timer(stats_interval, sample_stats);
 	};
 
@@ -179,24 +186,40 @@ export function create(opts)
 	sample_stats = () => {
 		let fams = values(self.families);
 		let pend = length(fams);
-		let total = 0;
 		let valid = true;
+		let agg = { tx_bytes: 0, rx_bytes: 0, tx_packets: 0, rx_packets: 0,
+		            tx_errors: 0, rx_errors: 0, tx_dropped: 0, rx_dropped: 0 };
 
 		if (!pend || self.state != 'CONNECTED')
 			return;
 
 		for (let fam in fams) {
-			// mask: tx-packets-ok | rx-packets-ok
-			fam.client.request('GET_PACKET_STATISTICS', { mask: 3 }, (err, data) => {
-				if (err || data.rx_packets_ok == null)
+			fam.client.request('GET_PACKET_STATISTICS', { mask: STATS_MASK }, (err, data) => {
+				if (err || data.rx_packets_ok == null) {
 					valid = false;   // preserved: skip the check this round
-				else
-					total += data.rx_packets_ok;
+				}
+				else {
+					// modem counters are per-call cumulative; sum across families
+					agg.tx_bytes   += data.tx_bytes_ok ?? 0;
+					agg.rx_bytes   += data.rx_bytes_ok ?? 0;
+					agg.tx_packets += data.tx_packets_ok ?? 0;
+					agg.rx_packets += data.rx_packets_ok ?? 0;
+					agg.tx_errors  += data.tx_packets_error ?? 0;
+					agg.rx_errors  += data.rx_packets_error ?? 0;
+					agg.tx_dropped += data.tx_packets_dropped ?? 0;
+					agg.rx_dropped += data.rx_packets_dropped ?? 0;
+				}
 
 				if (--pend > 0)
 					return;
 
-				if (valid) {
+				if (valid)
+					self.stats = agg;
+
+				// zero-rx watchdog: only when configured (rx-packet stall)
+				if (valid && zero_rx_limit_ms() > 0) {
+					let total = agg.rx_packets;
+
 					if (total > rx_last_total || rx_last_total < 0) {
 						rx_last_total = total;
 						rx_stalled_ms = 0;
@@ -751,6 +774,8 @@ export function create(opts)
 			state: self.state,
 			settings: self.settings,
 			last_error: self.last_error,
+			uptime: (self.state == 'CONNECTED' && self.connected_since) ? (time() - self.connected_since) : null,
+			stats: (self.state == 'CONNECTED') ? self.stats : null,
 			families: map(keys(self.families), (k) => ({
 				family: +k,
 				cid: self.families[k].client?.cid,
