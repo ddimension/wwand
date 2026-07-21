@@ -50,7 +50,6 @@ define Package/wwand/install
 	$(INSTALL_DIR) $(1)/lib/netifd/proto
 	$(INSTALL_BIN) ./files/wwand-proto.sh $(1)/lib/netifd/proto/qmi.sh
 	$(INSTALL_DIR) $(1)/usr/libexec/wwand
-	$(INSTALL_BIN) ./files/wwand-context-monitor $(1)/usr/libexec/wwand/context-monitor
 	$(INSTALL_BIN) ./files/wwand-migrate $(1)/usr/libexec/wwand/migrate
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/wwand.init $(1)/etc/init.d/wwand

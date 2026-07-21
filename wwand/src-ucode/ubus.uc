@@ -107,25 +107,6 @@ export function publish(conn, daemon, log)
 			},
 		},
 
-		// Long-lived: the reply is held open (deferred) until the context
-		// drops or errors. The netifd context-monitor parks one call here per
-		// interface instead of running an 'ubus listen' + shell loop.
-		context_wait: {
-			args: { context: '', interface: '', ubus_rpc_session: '' },
-			call: (req) => {
-				let ref = req.args.context ?? req.args.interface;
-
-				if (ref == null)
-					return { event: 'gone', error: 'missing_argument' };
-
-				daemon.context_wait(ref, (result) => {
-					req.reply(result);
-				});
-
-				req.defer();
-			},
-		},
-
 		hotplug: {
 			args: { action: '', device: '', ubus_rpc_session: '' },
 			call: (req) => {

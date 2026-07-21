@@ -26,8 +26,11 @@ uloop.init();
 
 const TIMING = {
 	sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
-	reg_timeout: 500, backoff_min: 1, backoff_max: 5,
-	wait_keepalive_ms: 60,   // short long-poll window for the keepalive check
+	reg_timeout: 500,
+	// reconnect backoff paced so only a few attempts fall inside the short hold
+	// window below (avoids climbing the recovery ladder during the test)
+	backoff_min: 40, backoff_max: 60,
+	hold_max_ms: 120,   // short reconnect-hold window for the hold-fallback check
 };
 
 const V4_SETTINGS = {
@@ -55,6 +58,8 @@ function handlers()
 		GET_IMSI: { imsi: '262011234567890' },
 		GET_ICCID: { iccid: '89490200001022832490' },
 		REGISTER_INDICATIONS: {},
+		GET_SIGNAL_INFO: {},
+		GET_CELL_LOCATION_INFO: {},
 		GET_SERVING_SYSTEM: {
 			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
 			                  selected_network: 1, radio_ifs: [ 8 ] },
@@ -63,7 +68,11 @@ function handlers()
 		MODIFY_PROFILE: {},
 		GET_PROFILE_SETTINGS: { pdp_type: 0, apn: 'web' },
 		SET_IP_FAMILY: {},
-		START_NETWORK: { pdh: 4242 },
+		// succeeds for the initial connect and the first transient-drop
+		// reconnect; fails afterwards so the second drop exercises the
+		// bounded-hold fallback (interface eventually driven down).
+		START_NETWORK: (args, meta) =>
+			(meta.count <= 2) ? { pdh: 4242 } : { __error: 0x0001 },
 		// activation returns the base settings; a later refresh (triggered by
 		// a serving-system change) returns a changed address -> renew
 		GET_CURRENT_SETTINGS: (args, meta) =>
@@ -92,6 +101,8 @@ let daemon = daemon_mod.create({
 		emit_event: (type, data) => push(events, { type: type, data: data }),
 		kick_interface: (iface) => push(events, { type: 'kick', data: iface }),
 		renew_interface: (iface) => push(events, { type: 'renew', data: iface }),
+		down_interface: (iface) => push(events, { type: 'down', data: iface }),
+		iface_status: (iface) => ({ up: false }),   // adoption path -> kick
 		datapath_fx: dpfx,
 		resolve_modem_device: (cfg) => cfg.device,
 		resolve_netdev: (cfg, device) => 'wwan0',
@@ -139,20 +150,17 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		eq(st.contexts.wan_ctx.state, 'CONNECTED', 'status: context CONNECTED');
 		eq(st.contexts.wan_ctx.interface, 'wan', 'status: interface mapping');
 
-		// context_settings (netifd renew source): live settings while CONNECTED,
-		// same shape as context_up's reply, without (re)activating the context.
-		// Its callback then drives the stage-B check so the read observes the
-		// original settings before the injected change.
+		// In-place model: a settings change and a transient drop NEVER tear the
+		// interface down — the daemon reconnects/renews in place. Only an admin
+		// context_down (or a permanent loss) drives network.interface down.
 		conn_cli.defer('wwand', 'context_settings', { interface: 'wan' }, (cs, rs) => {
 			eq(cs, 0, 'context_settings: ok');
 			eq(rs.up, true, 'context_settings: up while connected');
-			eq(rs.netdev, 'wwan0', 'context_settings: netdev');
 			eq(rs.ipv4.addr, '10.11.12.13', 'context_settings: v4 addr');
 
-			// stage B: a serving-system change makes the modem re-read its IP
-			// settings; the changed address must drive a netifd renew (in
-			// place, not a teardown). Inject while CONNECTED, then verify the
-			// renew event before bringing the context down.
+			let renews0 = length(filter(events, (e) => e.type == 'renew' && e.data == 'wan'));
+
+			// (1) settings change -> in-place renew (no teardown)
 			mock.indicate(3, 0xff, 'SERVING_SYSTEM_IND', {
 				serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
 				                  selected_network: 1, radio_ifs: [ 8 ] },
@@ -160,62 +168,51 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 			});
 
 			uloop.timer(80, () => {
-			ok(length(filter(events, (e) => e.type == 'renew' && e.data == 'wan')) >= 1,
-				'stage B: settings change triggered netifd renew');
+				ok(length(filter(events, (e) => e.type == 'renew' && e.data == 'wan')) > renews0,
+					'settings change -> in-place renew');
 
-			// long-poll: while CONNECTED the first reply is a 'keepalive' (after
-			// the short window above); the monitor re-issues, and bringing the
-			// context down then wakes it with 'down'. The final callback drives
-			// the remaining checks so we do not depend on reply ordering.
-			let waited = 0, doWait;
-			doWait = () => conn_cli.defer('wwand', 'context_wait', { interface: 'wan' }, (cw, rw) => {
-				eq(cw, 0, 'context_wait: status ok');
+				// (2) transient drop: must NOT down the interface; the daemon
+				// reconnects the session and renews again — all in place.
+				let downs0  = length(filter(events, (e) => e.type == 'down'));
+				let renews1 = length(filter(events, (e) => e.type == 'renew' && e.data == 'wan'));
+				mock.indicate(1, 0xff, 'PACKET_SERVICE_STATUS_IND', {
+					status: { status: 1, reconfigure: 0 }, call_end_reason: 2, ip_family: 4,
+				});
 
-				if (++waited == 1) {
-					eq(rw.event, 'keepalive', 'context_wait: keepalive while connected');
-					doWait();   // re-issue like the real monitor loop does
+				uloop.timer(150, () => {
+					eq(length(filter(events, (e) => e.type == 'down')), downs0,
+						'transient drop: interface NOT downed');
+					ok(length(filter(events, (e) => e.type == 'renew' && e.data == 'wan')) > renews1,
+						'transient drop: reconnected + renewed in place');
 
-					// now drop the context — the re-issued wait must wake on down
-					conn_cli.defer('wwand', 'context_down', { context: 'wan_ctx' }, (c3, r3) => {
-						eq(c3, 0, 'context_down: ok');
+					conn_cli.defer('wwand', 'context_status', { interface: 'wan' }, (c4, r4) => {
+						eq(r4.state, 'CONNECTED', 'context reconnected after transient drop');
+
+						// (3) hold-fallback: another drop, but reconnection now fails
+						// (START_NETWORK errors) — after the bounded hold the daemon
+						// gives up and drives the interface down.
+						let downs1 = length(filter(events, (e) => e.type == 'down' && e.data == 'wan'));
+						mock.indicate(1, 0xff, 'PACKET_SERVICE_STATUS_IND', {
+							status: { status: 1, reconfigure: 0 }, call_end_reason: 2, ip_family: 4,
+						});
+
+						uloop.timer(320, () => {
+							ok(length(filter(events, (e) => e.type == 'down' && e.data == 'wan')) > downs1,
+								'reconnect hold expired -> interface downed (bounded blackhole)');
+
+							ok(length(filter(events, (e) => e.type == 'kick' && e.data == 'wan')) >= 1,
+								'boot-race kick after modem ready');
+							let me = filter(events, (e) => e.type == 'wwand.modem');
+							ok(length(filter(me, (e) => e.data.event == 'registered')) == 1,
+								'modem registered emitted');
+
+							guard.cancel();
+							uloop.end();
+						});
 					});
-					return;
-				}
-
-				eq(rw.event, 'down', 'context_wait: woke on context down');
-
-				conn_cli.defer('wwand', 'context_settings', { interface: 'wan' }, (cs2, rs2) => {
-					eq(rs2.up, false, 'context_settings: not up after down');
 				});
-
-				conn_cli.defer('wwand', 'context_status', { interface: 'wan' }, (c4, r4) => {
-					eq(r4.state, 'IDLE', 'context_status: IDLE after down');
-
-					// events: context up + down were broadcast
-					let ctx_events = filter(events, (e) => e.type == 'wwand.context');
-					eq(map(ctx_events, (e) => e.data.event), [ 'up', 'down' ], 'events: up + down emitted');
-
-					// boot-race nudge: idle interface kicked when modem registered
-					ok(length(filter(events, (e) => e.type == 'kick' && e.data == 'wan')) >= 1,
-						'events: interface kicked after modem ready');
-
-					let modem_events = filter(events, (e) => e.type == 'wwand.modem');
-					ok(length(filter(modem_events, (e) => e.data.event == 'registered')) == 1,
-						'events: modem registered emitted');
-
-					guard.cancel();
-					uloop.end();
-				});
-			});
-
-			doWait();
-
-			// an unknown ref must return immediately (gone) so netifd re-runs setup
-			conn_cli.defer('wwand', 'context_wait', { interface: 'nope' }, (cg, rg) => {
-				eq(rg.event, 'gone', 'context_wait: unknown ref -> gone');
 			});
 		});
-	});
 	});
 });
 

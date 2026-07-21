@@ -211,6 +211,11 @@ function run_daemon()
 				conn.call('network.interface', 'up', { interface: interface }),
 			renew_interface: (interface) =>
 				conn.call('network.interface', 'renew', { interface: interface }),
+			down_interface: (interface) =>
+				conn.call('network.interface', 'down', { interface: interface }),
+			// synchronous status probe used to decide adopt-in-place vs kick
+			iface_status: (interface) =>
+				conn.call('network.interface', 'status', { interface: interface }),
 		},
 	});
 
@@ -236,7 +241,11 @@ function run_daemon()
 		length(keys(daemon.modems)), length(keys(daemon.contexts)));
 
 	uloop.run();
-	daemon.shutdown();
+	// non-destructive: keep contexts + netifd interfaces up across a restart
+	// (no-proto-task means the WAN stays up and traffic keeps flowing; the fresh
+	// daemon adopts the live session). A config reload uses the destructive
+	// shutdown() via apply_config instead.
+	daemon.stop_local();
 	uloop.done();
 }
 

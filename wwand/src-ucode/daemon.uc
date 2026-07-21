@@ -57,56 +57,167 @@ export function create(opts)
 		case 'registered':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
 
-			// nudge netifd: interfaces whose earlier setup attempts failed
-			// (boot race) stay down until something triggers them again
-			if (deps.kick_interface) {
-				for (let name, entry in self.contexts) {
-					if (entry.cfg.modem == modem.id && entry.cfg.interface &&
-					    entry.ctx && entry.ctx.state == 'IDLE') {
-						log('info', sprintf('kicking interface %s after modem ready', entry.cfg.interface));
-						deps.kick_interface(entry.cfg.interface);
-					}
+			// (re)establish interface-bound contexts sitting IDLE. Decide per
+			// interface by its netifd state so the two paths never race on
+			// ctx.up(): an interface still UP (survived a wwand restart, or a
+			// permanent-down that the modem now recovered from is handled by the
+			// down/up path) is ADOPTED in place (activate → 'up' → renew); an
+			// interface that is DOWN is kicked so netifd re-runs setup.
+			for (let name, entry in self.contexts) {
+				if (entry.cfg.modem != modem.id || !entry.cfg.interface ||
+				    !entry.ctx || entry.ctx.state != 'IDLE' || !entry.wanted)
+					continue;
+
+				let st = deps.iface_status ? deps.iface_status(entry.cfg.interface) : null;
+
+				if (st?.up) {
+					log('info', sprintf('adopting live interface %s after modem ready', entry.cfg.interface));
+					retry_activate(name);
+				}
+				else if (deps.kick_interface) {
+					log('info', sprintf('kicking interface %s after modem ready', entry.cfg.interface));
+					deps.kick_interface(entry.cfg.interface);
 				}
 			}
 
 			break;
 
+		case 'sim_blocked':
+			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
+			// terminal until operator action — down the interfaces (no hold)
+			for (let name, entry in self.contexts) {
+				if (entry.cfg.modem == modem.id && entry.cfg.interface) {
+					clear_reconnect(name);
+					if (deps.down_interface)
+						deps.down_interface(entry.cfg.interface);
+				}
+			}
+			break;
+
 		case 'deregistered':
 		case 'removed':
-		case 'sim_blocked':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
 			break;
 		}
 	};
 
-	// context_wait waiters: netifd's per-interface monitor parks a single
-	// deferred ubus request here; it is answered (waking the monitor, which
-	// makes netifd tear down + retry) the moment the context drops or errors.
-	// Replaces the old 'ubus listen' + shell-loop monitor per context.
-	//
-	// Long-poll, not an indefinite park: each waiter also carries a keepalive
-	// timer that answers 'keepalive' after wait_keepalive_ms if the context is
-	// still up. The monitor re-issues on keepalive, so a wwand crash can leave a
-	// request pending for at most that window (the monitor's own ubus timeout
-	// then fires) instead of blocking forever — no monitor ever hangs
-	// permanently, contexts always recover. Each entry is { cb, timer }.
-	let context_waiters = {};
-	let wait_keepalive_ms = opts?.timing?.wait_keepalive_ms ?? 30000;
+	// --- context lifecycle ------------------------------------------------
+	// The daemon (not a per-interface monitor process) keeps each interface-
+	// bound context up. A TRANSIENT loss keeps the netifd interface up and
+	// reconnects the modem session in place (renew, no teardown → PD/VRF
+	// dependencies preserved); only a PERMANENT loss or the bounded hold timeout
+	// drives the interface down (accepting the flush). netifd runs the proto with
+	// no-proto-task, so there is no monitor and no teardown-on-blip.
+	let hold_max_ms = opts?.timing?.hold_max_ms ?? 90000;
 
-	let flush_context_waiters = (name, event, data) => {
-		let ws = context_waiters[name];
+	// forward-declared: retry_activate self-references (reschedule) and
+	// enter_reconnecting references it — avoids the ucode TDZ trap.
+	let clear_reconnect, retry_activate, enter_reconnecting;
 
-		if (!ws)
+	// bring context `name` up, cb(err, up_result). Shared by context_up (ubus,
+	// replies to netifd) — queues on pending_up until the modem is READY.
+	let activate = (name, cb) => {
+		let entry = self.contexts[name];
+
+		if (!entry?.ctx)
+			return cb({ error: 'no_such_context', ref: name });
+
+		let modem = entry.ctx.modem;
+
+		if (modem.state == 'SIM_BLOCKED')
+			return cb({ error: 'sim_blocked' });
+
+		if (entry.ctx.state == 'CONNECTED')
+			return cb(null, self._up_result(name, entry));
+
+		if (modem.state != 'READY') {
+			log('info', sprintf('context %s: modem not ready (%s), queueing activation',
+				name, modem.state));
+
+			let fired = false;
+			let guarded = (err, res) => { if (fired) return; fired = true; cb(err, res); };
+
+			push(entry.pending_up, guarded);
+
+			uloop.timer(UP_GUARD_MS, () => {
+				entry.pending_up = filter(entry.pending_up, (p) => p != guarded);
+				guarded({ error: 'timeout', modem_state: modem.state });
+			});
+
+			return;
+		}
+
+		entry.ctx.up((err) => cb(err, err ? null : self._up_result(name, entry)));
+	};
+
+	clear_reconnect = (name) => {
+		let entry = self.contexts[name];
+
+		if (!entry)
 			return;
 
-		delete context_waiters[name];
+		if (entry.retry_timer) { entry.retry_timer.cancel(); entry.retry_timer = null; }
+		if (entry.hold_timer)  { entry.hold_timer.cancel();  entry.hold_timer = null; }
+		entry.retry_n = 0;
+	};
 
-		for (let w in ws) {
-			if (w.timer)
-				w.timer.cancel();
+	// internal reconnect attempt with capped backoff; self-schedules until the
+	// context reaches CONNECTED (the 'up' event then clears reconnect state and
+	// renews netifd in place) or enter_reconnecting's hold timer gives up. Does
+	// NOT use pending_up — it is the daemon's own supervisor loop.
+	retry_activate = (name) => {
+		let entry = self.contexts[name];
 
-			w.cb({ event: event, ...(data?.reason != null ? { reason: data.reason } : {}) });
-		}
+		if (!entry?.ctx || !entry.wanted || entry.ctx.state == 'CONNECTED')
+			return;
+
+		let modem = entry.ctx.modem;
+
+		if (modem.state == 'SIM_BLOCKED')
+			return;   // permanent; handled by the sim_blocked path (down)
+
+		let schedule = () => {
+			entry.retry_n = (entry.retry_n ?? 0) + 1;
+			let delay = min(entry.retry_n * (opts?.timing?.backoff_min ?? 2000),
+			                opts?.timing?.backoff_max ?? 30000);
+			entry.retry_timer = uloop.timer(delay, () => {
+				entry.retry_timer = null;
+				retry_activate(name);
+			});
+		};
+
+		if (modem.state != 'READY' || entry.ctx.state != 'IDLE')
+			return schedule();   // wait for recovery / an in-flight attempt
+
+		entry.ctx.up((err) => {
+			if (err && entry.wanted && entry.ctx?.state != 'CONNECTED')
+				schedule();
+			// success is handled by the 'up' event (clear_reconnect + renew)
+		});
+	};
+
+	// a transient loss: keep the interface up and reconnect in place; bound the
+	// blackhole with a hold timer that downs the interface if we never recover.
+	enter_reconnecting = (name) => {
+		let entry = self.contexts[name];
+
+		if (!entry?.ctx || !entry.wanted || entry.hold_timer)
+			return;   // not wanted, or already reconnecting
+
+		entry.hold_timer = uloop.timer(hold_max_ms, () => {
+			entry.hold_timer = null;
+
+			if (entry.ctx?.state != 'CONNECTED') {
+				log('warn', sprintf('context %s: reconnect hold expired, downing %s',
+					name, entry.cfg.interface));
+				clear_reconnect(name);
+
+				if (deps.down_interface && entry.cfg.interface)
+					deps.down_interface(entry.cfg.interface);
+			}
+		});
+
+		retry_activate(name);
 	};
 
 	let on_context_event = (name, ctx, event, data) => {
@@ -116,19 +227,29 @@ export function create(opts)
 		case 'up':
 			// a working data connection resets the recovery ladder
 			ctx.modem.note_connect_success();
+			clear_reconnect(name);
 			emit('wwand.context', { context: name, interface: entry?.cfg?.interface, event: event });
+			// push settings to netifd in place. During the initial netifd setup
+			// the interface is not yet IFS_UP so this renew is a no-op (setup's
+			// own proto_send_update applies); after a reconnect/adoption it is
+			// what re-applies the config — never a teardown.
+			if (deps.renew_interface && entry?.cfg?.interface)
+				deps.renew_interface(entry.cfg.interface);
 			break;
 
 		case 'error':
 			// failed activation climbs the recovery ladder (old connecttries)
 			ctx.modem.note_connect_failure();
 			emit('wwand.context', { context: name, interface: entry?.cfg?.interface, event: event });
-			flush_context_waiters(name, 'error');
+			if (entry?.wanted)
+				enter_reconnecting(name);
 			break;
 
 		case 'zero_rx':
 			log('err', sprintf('context %s: zero-rx watchdog tripped', name));
 			ctx.modem.trip_zero_rx();
+			if (entry?.wanted)
+				enter_reconnecting(name);
 			break;
 
 		case 'down':
@@ -139,10 +260,12 @@ export function create(opts)
 				event: event,
 				...(event == 'down' ? { reason: data?.reason } : {}),
 			});
-			// only 'down' tears the interface down; 'suspend' is transient
-			// (registration lost) and keeps the netifd config in place
-			if (event == 'down')
-				flush_context_waiters(name, 'down', data);
+			// Hold the interface up and reconnect in place. 'down/admin' comes
+			// from our own context_down, which already cleared `wanted`, so this
+			// no-ops there. All other drops (disconnected, modem_lost, suspend)
+			// are transient → reconnect; the hold timer bounds the blackhole.
+			if (entry?.wanted)
+				enter_reconnecting(name);
 			break;
 
 		case 'settings':
@@ -248,13 +371,19 @@ export function create(opts)
 	let start_context = (name, cfg) => {
 		let mentry = self.modems[cfg.modem];
 
+		// interface-bound contexts default to wanted=true so the daemon
+		// (re)establishes them on modem-ready without waiting for netifd — this
+		// is what adopts a session that survived a wwand restart.
+		let base = { cfg: cfg, ctx: null, pending_up: [], wanted: (cfg.interface != null),
+		             retry_timer: null, hold_timer: null, retry_n: 0 };
+
 		if (!mentry?.modem) {
 			log('warn', sprintf('context %s: modem %s not started', name, cfg.modem));
-			self.contexts[name] = { cfg: cfg, ctx: null, pending_up: [] };
+			self.contexts[name] = base;
 			return;
 		}
 
-		let entry = { cfg: cfg, ctx: null, pending_up: [] };
+		let entry = base;
 		let factory = (mentry.protocol == 'mbim') ? load_mbim().context : context_mod;
 
 		entry.ctx = factory.create({
@@ -313,45 +442,10 @@ export function create(opts)
 		if (!entry?.ctx)
 			return cb({ error: 'no_such_context', ref: ref });
 
-		let modem = entry.ctx.modem;
-
-		if (modem.state == 'SIM_BLOCKED')
-			return cb({ error: 'sim_blocked' });
-
-		if (entry.ctx.state == 'CONNECTED')
-			return cb(null, self._up_result(name, entry));
-
-		if (modem.state != 'READY') {
-			// queue until the modem reports ready; guard against waiting forever
-			log('info', sprintf('context %s: modem not ready (%s), queueing activation',
-				name, modem.state));
-
-			let fired = false;
-			let guarded = (err, res) => {
-				if (fired)
-					return;
-
-				fired = true;
-				cb(err, res);
-			};
-
-			push(entry.pending_up, guarded);
-
-			uloop.timer(UP_GUARD_MS, () => {
-				// drop from queue if still pending
-				entry.pending_up = filter(entry.pending_up, (p) => p != guarded);
-				guarded({ error: 'timeout', modem_state: modem.state });
-			});
-
-			return;
-		}
-
-		entry.ctx.up((err, settings) => {
-			if (err)
-				return cb(err);
-
-			cb(null, self._up_result(name, entry));
-		});
+		// netifd asked us to be up → mark the desired state so the daemon keeps
+		// it up (reconnects in place) until an explicit context_down.
+		entry.wanted = true;
+		activate(name, cb);
 	};
 
 	// apply the effective MTU on the l3 link (old use_pushed_mtu semantics,
@@ -461,6 +555,10 @@ export function create(opts)
 		if (!entry?.ctx)
 			return cb({ error: 'no_such_context', ref: ref });
 
+		// netifd tore the interface down (admin/config or our own down drive) →
+		// we no longer want it up; stop the reconnect loop.
+		entry.wanted = false;
+		clear_reconnect(name);
 		entry.ctx.down(() => cb(null, {}));
 	};
 
@@ -472,34 +570,6 @@ export function create(opts)
 			return { error: 'no_such_context', ref: ref };
 
 		return entry.ctx.status();
-	};
-
-	// Block until the context for `ref` goes down or errors, then invoke cb
-	// once. The netifd context-monitor parks a single deferred request here
-	// instead of running its own event listener. If the context is gone or is
-	// not currently connected, cb fires immediately so netifd re-runs setup.
-	self.context_wait = function(ref, cb) {
-		let name = self.resolve_context(ref);
-		let entry = name ? self.contexts[name] : null;
-
-		if (!entry?.ctx)
-			return cb({ event: 'gone' });
-
-		if (entry.ctx.state != 'CONNECTED')
-			return cb({ event: 'down', state: entry.ctx.state });
-
-		// park as a long-poll: answer 'keepalive' after the window if still up,
-		// so the caller's request never blocks indefinitely. A real down/error
-		// (or shutdown) replies earlier via flush_context_waiters.
-		context_waiters[name] ??= [];
-		let waiter = { cb: cb, timer: null };
-
-		waiter.timer = uloop.timer(wait_keepalive_ms, () => {
-			context_waiters[name] = filter(context_waiters[name] ?? [], (w) => w != waiter);
-			cb({ event: 'keepalive' });
-		});
-
-		push(context_waiters[name], waiter);
 	};
 
 	self.status = function() {
@@ -629,19 +699,15 @@ export function create(opts)
 		}
 	};
 
+	// Destructive teardown for config reload/removal: bring every context down
+	// (STOP_NETWORK) and stop the modems, then drop all state.
 	self.shutdown = function() {
-		// Reply to every parked context_wait FIRST and synchronously. Otherwise
-		// those deferred requests are left dangling when our ubus connection
-		// closes on exit, and ubusd's cleanup of dangling deferred requests
-		// wedges the whole bus (observed: `wwand restart` hangs ubusd). Waking
-		// the monitors also makes netifd re-establish the contexts against the
-		// restarted daemon.
-		for (let name in keys(context_waiters))
-			flush_context_waiters(name, 'gone');
+		for (let name, entry in self.contexts) {
+			clear_reconnect(name);
 
-		for (let name, entry in self.contexts)
 			if (entry.ctx && entry.ctx.state != 'IDLE')
 				entry.ctx.down(() => null);
+		}
 
 		for (let name, entry in self.modems)
 			if (entry.modem)
@@ -649,6 +715,16 @@ export function create(opts)
 
 		self.modems = {};
 		self.contexts = {};
+	};
+
+	// Non-destructive stop for a plain daemon exit/restart: do NOT bring
+	// connected contexts down (the modem's PDP session and the netifd interface
+	// survive) and do NOT drive interfaces down. With no-proto-task the WAN
+	// stays up and traffic keeps flowing across the restart; the fresh daemon
+	// adopts the live session on modem-ready. Just cancel our own timers.
+	self.stop_local = function() {
+		for (let name in keys(self.contexts))
+			clear_reconnect(name);
 	};
 
 	return self;

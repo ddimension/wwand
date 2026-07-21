@@ -13,6 +13,10 @@
 proto_qmi_init_config() {
 	available=1
 	renew_handler=1
+	# The daemon owns the context lifecycle and drives netifd (up/down/renew)
+	# over ubus, so there is no per-interface supervisor task. Setup applies the
+	# config once; the interface then stays up until the daemon drives it down.
+	no_proto_task=1
 	proto_config_add_string context
 
 	# legacy qmi-advanced options: accepted so old configs keep parsing;
@@ -169,16 +173,14 @@ proto_qmi_setup() {
 
 	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns"
 
-	# supervise: exits when wwand reports the context down or disappears,
-	# netifd then tears down and retries the setup
-	echo "starting context monitor for $interface"
-	proto_run_command "$interface" /usr/libexec/wwand/context-monitor "$interface"
+	# no-proto-task: no supervisor process. The interface now stays up; the
+	# daemon reconnects transient drops in place (renew) and only drives
+	# 'network.interface <x> down' on a permanent loss, which runs the teardown.
 }
 
 proto_qmi_teardown() {
 	local interface="$1"
 
-	proto_kill_command "$interface"
 	ubus -t 30 call wwand context_down "{\"interface\":\"$interface\"}" 2>/dev/null
 
 	proto_init_update "*" 0
@@ -186,10 +188,10 @@ proto_qmi_teardown() {
 }
 
 # netifd renew: refresh the interface's IP settings in place, without a
-# teardown. Triggered by 'ubus call network.interface.<x> renew' — either
-# manually or by the wwand daemon when it detects the modem pushed new settings
-# (v6 prefix, DNS, MTU). The context_wait monitor keeps running throughout;
-# netifd diffs the update against the live config and applies only the delta.
+# teardown. Driven by the wwand daemon (network.interface renew) whenever it
+# (re)establishes a context or the modem pushes new settings (v6 prefix, DNS,
+# MTU). netifd diffs the update against the live config and applies only the
+# delta — so PD/VRF dependencies are preserved.
 proto_qmi_renew() {
 	local interface="$1"
 	local defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
@@ -202,8 +204,9 @@ proto_qmi_renew() {
 	json_load "$resp"
 	json_get_vars up netdev
 
-	# not connected (or daemon busy): leave the running config untouched — a
-	# real drop is handled by the context_wait monitor, not by renew
+	# not connected (or daemon busy): leave the running config untouched — the
+	# daemon reconnects transient drops in place and only downs the interface
+	# on a permanent loss
 	[ "$up" = "1" ] && [ -n "$netdev" ] || return 0
 
 	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns"

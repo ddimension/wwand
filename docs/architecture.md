@@ -11,7 +11,7 @@ R17 ax (Quectel RG650E-EU, 5G NSA, two parallel PDP contexts).
 | Open fds | 36 | cdc-wdm, tty, ubus, uloop; watched for leaks in soak tests |
 | ucode sources | 196 KB uncompressed | ≈ 40–50 KB on squashfs |
 | Native module | ~68 KB stripped | I/O + rmnet netlink helper |
-| Processes | 1 daemon + 3 per context (shell monitor) | reducible to 2 |
+| Processes | **1 daemon, 0 per context** | no per-interface supervisor (no-proto-task) |
 | External spawns at runtime | 0 | only usb-repower/reboot in recovery |
 
 ## 2. Layering
@@ -24,7 +24,7 @@ R17 ax (Quectel RG650E-EU, 5G NSA, two parallel PDP contexts).
  statemachine: modem.uc, context.uc, sim.uc      — QMI flow logic
  system:       netlink.uc (datapath), recovery.uc, atcmd.uc (+atport)
  integration:  daemon.uc (registry/policy), config.uc (+compat), ubus.uc, main.uc
- shell:        wwand-proto.sh (netifd shim), context monitor, init, hotplug
+ shell:        wwand-proto.sh (thin netifd shim), init, hotplug
 ```
 
 Design principles, all validated in the field:
@@ -62,35 +62,39 @@ it on USB). Aggregation size comes from a model table (e.g. RG650E 31 KB),
 then a board table, config override wins; the modem clamps the request and
 the echoed value drives the driver side.
 
-### netifd coupling (monitor, renew, live updates)
+### netifd coupling (no-proto-task; daemon drives netifd in place)
 
-Teardown is event-driven: the proto shim runs a `context_wait` long-poll per
-interface. The daemon holds the reply until the context drops or errors — then
-netifd tears down and retries — but also answers `keepalive` after a bounded
-window if the context is still up, so the monitor re-issues and no request ever
-blocks indefinitely. This matters because ubusd does not track forwarded
-invokes: a caller blocked on a provider that dies would otherwise wait forever
-(the monitor would hang and the context would never recover). With the bounded
-timeout a wwand crash is recovered within one window; on a graceful shutdown
-the daemon answers all parked waiters immediately. Either way there is no
-polling watchdog and no `ubus listen` helper.
+There is **no per-interface monitor process**. The proto handler declares
+`no-proto-task`, so after setup netifd leaves the interface `IFS_UP` with no
+supervisor task, and the **daemon** owns the context lifecycle — it drives
+netifd over ubus (`network.interface <x> up/renew/down`).
 
-Setting changes are applied **in place**. The shim declares a renew handler
-(`proto_qmi_renew`) that re-reads `context_settings` (read-only) and re-sends
-the netifd update with `keep=1`; netifd diffs it against the live config and
-applies only the delta — no teardown. The daemon triggers this itself: while
-connected it re-queries `GET_CURRENT_SETTINGS` on serving-system changes (plus
-a slow safety poll), and on a real diff emits `settings`, which the daemon maps
-to `network.interface renew`. So a changed v6 prefix / DNS / MTU updates the
-interface without a reconnect.
+A **transient** loss (network drop, registration loss, recovery reset, brief
+modem-lost) keeps the netifd interface up and reconnects the modem session **in
+place**: on success the daemon fires `network.interface renew`, whose
+`proto_qmi_renew` re-reads `context_settings` and re-sends the update with
+`keep=1`, so netifd diffs against the live config and applies only the delta.
+No teardown fires, so `interface_ip_flush` never runs and the downstream
+IPv6-PD assignments and VRF-table routes are preserved. The blackhole is bounded
+by a hold timer (`hold_max`, default 90 s); if the context never recovers the
+daemon drives `network.interface down` (accepting the flush) and revives it when
+the modem is usable again. A **permanent** loss (`sim_blocked`, admin/config
+down) drives `down` immediately.
 
-A further step was considered and ruled out: driving the mux child's carrier so
-netifd's own link tracking would handle teardown/re-setup with zero helper
-processes. rmnet/qmimux children do not implement `ndo_change_carrier`
-(`ip link set wwan0mN carrier off` → "RTNETLINK answers: Not supported" on the
-RG650E), and netifd derives link state from `IFF_LOWER_UP`, not operstate, so
-the carrier cannot be toggled per context. The `context_wait` monitor above
-stays the teardown mechanism.
+Because a plain daemon exit is non-destructive (`stop_local` does not bring
+contexts down), the WAN stays up and traffic keeps flowing across a wwand
+restart; the fresh daemon **adopts** the live session on modem-ready — it probes
+`network.interface status` and, if the interface is still up, re-activates the
+context and renews in place (never a down/up), otherwise kicks netifd to re-run
+setup. Settings changes while connected work the same way: the context
+re-queries `GET_CURRENT_SETTINGS` on serving-system changes (plus a slow safety
+poll) and emits `settings`, which the daemon maps to `renew`.
+
+(Earlier designs — a `context_wait` long-poll monitor, and driving the mux
+child's carrier so netifd's own link tracking would teardown/re-setup — were
+dropped: the deferred long-poll still cost a process per interface, and
+rmnet/qmimux children do not implement `ndo_change_carrier` so the carrier
+cannot be toggled per context.)
 
 ### Routing / VRF compatibility (invariant)
 
