@@ -37,9 +37,13 @@ endef
 
 define Package/wwand/install
 	$(INSTALL_DIR) $(1)/usr/share/ucode/wwand/codec/schema
+	$(INSTALL_DIR) $(1)/usr/share/ucode/wwand/codec/mbim-schema
 	$(INSTALL_DATA) ./src-ucode/*.uc $(1)/usr/share/ucode/wwand/
 	$(INSTALL_DATA) ./src-ucode/codec/*.uc $(1)/usr/share/ucode/wwand/codec/
 	$(INSTALL_DATA) ./src-ucode/codec/schema/*.uc $(1)/usr/share/ucode/wwand/codec/schema/
+	# daemon.uc imports the MBIM modules at top level, so the MBIM schema must
+	# ship too, otherwise the daemon fails to compile modem_mbim.uc/context_mbim.uc
+	$(INSTALL_DATA) ./src-ucode/codec/mbim-schema/*.uc $(1)/usr/share/ucode/wwand/codec/mbim-schema/
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) ./src-ucode/main.uc $(1)/usr/sbin/wwand
 	rm -f $(1)/usr/share/ucode/wwand/main.uc
