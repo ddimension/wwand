@@ -7,8 +7,12 @@
 'require wwand.bands as bands';
 
 var callStatus = rpc.declare({ object: 'wwand', method: 'status', expect: { modems: {} } });
+var callContexts = rpc.declare({ object: 'wwand', method: 'status', expect: { contexts: {} } });
 var callSignal = rpc.declare({ object: 'wwand', method: 'modem_signal', params: [ 'modem' ], expect: {} });
 var callCells  = rpc.declare({ object: 'wwand', method: 'modem_cells',  params: [ 'modem' ], expect: {} });
+var callCtxStatus = rpc.declare({ object: 'wwand', method: 'context_status', params: [ 'interface' ], expect: {} });
+
+function fmtList(a) { return (a && a.length) ? a.join(', ') : '—'; }
 
 /* Band/frequency helpers come from the shared wwand.bands module. */
 function lteEarfcn(e) { return bands.lteEarfcn(e); }
@@ -52,12 +56,62 @@ function tbl(rows) {
 	}));
 }
 
+/* Per-context connection detail: IPs, gateways, DNS, MTU — the stuff you
+   otherwise only see by digging through ubus / the modem. */
+function renderConnections(details) {
+	var conns = details.filter(function(d) { return d.st && !d.st.error; });
+	if (!conns.length)
+		return null;
+
+	var cards = conns.map(function(d) {
+		var s = d.st.settings || {}, v4 = s.ipv4, v6 = s.ipv6;
+		var st = d.st.state || d.cfg.state || '?';
+		var rows = [
+			[ _('Interface'), d.cfg.interface + (d.cfg.mux_id ? ' · mux %d'.format(d.cfg.mux_id) : '') ],
+			[ _('State'), E('strong', { 'style': 'color:%s'.format(st == 'CONNECTED' ? '#3c3' : '#da3') }, st) ]
+		];
+		if (v4) {
+			rows.push([ _('IPv4'), '%s/%d'.format(v4.addr, v4.prefix) ]);
+			rows.push([ _('IPv4 gateway'), v4.gateway || '—' ]);
+			rows.push([ _('IPv4 DNS'), fmtList(v4.dns) ]);
+		}
+		if (v6) {
+			rows.push([ _('IPv6'), '%s/%d'.format(v6.addr, v6.plen) ]);
+			rows.push([ _('IPv6 gateway'), v6.gateway || '—' ]);
+			rows.push([ _('IPv6 DNS'), fmtList(v6.dns) ]);
+		}
+		if (!v4 && !v6)
+			rows.push([ _('IP'), E('em', {}, _('not connected')) ]);
+		rows.push([ _('MTU'), '' + (s.mtu || '—') ]);
+
+		return E('div', { 'class': 'cbi-section', 'style': 'flex:1;min-width:280px' }, [
+			E('h4', { 'style': 'margin:0 0 4px' }, d.cfg.interface), tbl(rows)
+		]);
+	});
+
+	return E('div', { 'class': 'cbi-section' }, [
+		E('h3', {}, _('Active connections')),
+		E('div', { 'style': 'display:flex;gap:16px;flex-wrap:wrap' }, cards)
+	]);
+}
+
 function renderLive(name, modem) {
 	return Promise.all([
 		L.resolveDefault(callSignal(name), {}),
-		L.resolveDefault(callCells(name), {})
+		L.resolveDefault(callCells(name), {}),
+		L.resolveDefault(callContexts(), {})
 	]).then(function(res) {
 		var sig = res[0] || {}, cells = (res[1] || {}).cells || {};
+		var allCtx = res[2] || {};
+		var myCtx = Object.keys(allCtx)
+			.filter(function(k){ return allCtx[k].modem == name; })
+			.map(function(k){ return { name: k, cfg: allCtx[k] }; });
+
+		/* fetch per-context IP settings in parallel, then render everything */
+		return Promise.all(myCtx.map(function(c){
+			return L.resolveDefault(callCtxStatus(c.cfg.interface), {})
+				.then(function(st){ return { name: c.name, cfg: c.cfg, st: st }; });
+		})).then(function(ctxDetails){
 		var reg = modem.registration || {};
 		var lte = sig.lte || {}, nr = sig.nr5g || {};
 		var cols = [];
@@ -113,11 +167,15 @@ function renderLive(name, modem) {
 
 		var out = [ E('div', { 'style': 'display:flex;gap:16px;flex-wrap:wrap' }, cols) ];
 
-		/* --- neighbour cells --- */
+		/* --- active connections (per context) --- */
+		var conns = renderConnections(ctxDetails);
+		if (conns) out.push(conns);
+
+		/* --- intra-frequency neighbour cells --- */
 		if (lc && lc.cells && lc.cells.length > 1) {
 			var neigh = lc.cells.filter(function(c){ return c.pci != lc.serving_cell_id; });
 			out.push(E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, _('LTE neighbour cells')),
+				E('h3', {}, _('LTE neighbour cells (intra-frequency)')),
 				E('table', { 'class': 'table' }, [
 					E('tr', { 'class': 'tr table-titles' }, [
 						E('th', { 'class':'th' }, 'PCI'), E('th', { 'class':'th' }, 'RSRP'),
@@ -132,7 +190,35 @@ function renderLive(name, modem) {
 				}))) ]));
 		}
 
+		/* --- inter-frequency neighbour cells (the extra ones qmicli shows) --- */
+		var li = cells.lte_inter;
+		var interRows = [];
+		if (li && li.freqs)
+			li.freqs.forEach(function(fr){
+				var fef = lteEarfcn(fr.earfcn);
+				(fr.cells || []).forEach(function(c){
+					interRows.push(E('tr', { 'class': 'tr' }, [
+						E('td', { 'class':'td' }, fef ? '%s · %d'.format(fef.band, fr.earfcn) : ''+fr.earfcn),
+						E('td', { 'class':'td' }, ''+c.pci),
+						E('td', { 'class':'td' }, (c.rsrp/10).toFixed(1)+' dBm'),
+						E('td', { 'class':'td' }, (c.rsrq/10).toFixed(1)+' dB'),
+						E('td', { 'class':'td' }, '%d:%d'.format(fr.earfcn, c.pci)) ]));
+				});
+			});
+		if (interRows.length) {
+			out.push(E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('LTE neighbour cells (inter-frequency)')),
+				E('table', { 'class': 'table' }, [
+					E('tr', { 'class': 'tr table-titles' }, [
+						E('th', { 'class':'th' }, _('Band / EARFCN')), E('th', { 'class':'th' }, 'PCI'),
+						E('th', { 'class':'th' }, 'RSRP'), E('th', { 'class':'th' }, 'RSRQ'),
+						E('th', { 'class':'th' }, _('lock value'))
+					])
+				].concat(interRows)) ]));
+		}
+
 		return E('div', {}, out);
+		});
 	});
 }
 

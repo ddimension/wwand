@@ -71,6 +71,24 @@ f = { services: { t: 0x01, f: { n: 'u8', of: { service: 'u8', major: 'u16', mino
 let arr = { services: [ { service: 1, major: 1, minor: 15 }, { service: 3, major: 1, minor: 25 } ] };
 eq(tlv.unpack(f, tlv.pack(f, arr)).services, arr.services, 'struct array roundtrip (CTL version info)');
 
+// nested arrays: array whose elements each contain another array — the shape
+// of the LTE inter-frequency cell set (freqs[] each with cells[]).
+f = { inter: { t: 0x14, f: {
+	ue_idle: 'u8',
+	freqs: { n: 'u8', of: {
+		earfcn: 'u16', thresh_low: 'u8', thresh_high: 'u8', resel_priority: 'u8',
+		cells: { n: 'u8', of: { pci: 'u16', rsrq: 'i16', rsrp: 'i16', rssi: 'i16', srxlev: 'i16' } },
+	} },
+} } };
+let inter = { inter: { ue_idle: 1, freqs: [
+	{ earfcn: 100, thresh_low: 2, thresh_high: 20, resel_priority: 4,
+	  cells: [ { pci: 111, rsrq: -120, rsrp: -1000, rssi: -800, srxlev: 30 },
+	           { pci: 222, rsrq: -130, rsrp: -1050, rssi: -820, srxlev: 20 } ] },
+	{ earfcn: 1300, thresh_low: 3, thresh_high: 21, resel_priority: 5,
+	  cells: [ { pci: 246, rsrq: -110, rsrp: -980, rssi: -780, srxlev: 40 } ] },
+] } };
+eq(tlv.unpack(f, tlv.pack(f, inter)).inter, inter.inter, 'nested array roundtrip (LTE inter-frequency cells)');
+
 // --- multiple TLVs, optional skipping ---------------------------------------
 
 f = {

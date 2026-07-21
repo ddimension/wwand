@@ -133,6 +133,26 @@ export default {
 						srxlev: 'i16',
 					} },
 				} },
+				// inter-frequency LTE neighbours: a list of frequencies, each
+				// carrying its own neighbour-cell list. These are the extra
+				// cells qmicli --nas-get-cell-location-info shows on top of the
+				// intra-frequency set above.
+				lte_inter: { t: 0x14, f: {
+					ue_idle: 'u8',
+					freqs: { n: 'u8', of: {
+						earfcn:         'u16',
+						thresh_low:     'u8',
+						thresh_high:    'u8',
+						resel_priority: 'u8',
+						cells: { n: 'u8', of: {
+							pci:    'u16',
+							rsrq:   'i16',
+							rsrp:   'i16',
+							rssi:   'i16',
+							srxlev: 'i16',
+						} },
+					} },
+				} },
 				lte_timing_advance: { t: 0x1E, f: 'u32' },
 				nr5g_arfcn:         { t: 0x2E, f: 'u32' },
 				nr5g_cell: { t: 0x2F, f: {
