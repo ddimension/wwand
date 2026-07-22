@@ -6,6 +6,12 @@ written in [ucode](https://github.com/jow-/ucode). It talks QMI natively over
 (the daemon owns the context lifecycle; there is no per-interface monitor
 process). MBIM support shares the same foundation (see `docs/architecture.md`).
 
+Beyond connectivity it manages the **SIM** — PIN, multi-slot switching, and
+**eSIM/eUICC**: native ES10c profile management plus **SM-DP+ provisioning**
+(profile download) driven by a bundled lpac, with the HTTPS running on the
+router over the existing WAN (no dedicated provisioning APN). See
+[eSIM management & provisioning](wwand/README.md#esim-management--provisioning).
+
 It replaces a grown bash-based connection manager (`qmi-advanced`) whose
 field-proven behaviors, quirks and recovery strategies were ported
 deliberately, while its known bugs were left behind.
