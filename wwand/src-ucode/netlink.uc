@@ -345,8 +345,12 @@ export function setup(fx, opts)
 
 				if (created)
 					link_op(fx, 'qmimux rename', created, { rename: child });
-				else
+				else {
+					// couldn't create/identify the link — skip it (don't add a
+					// phantom to mux_devs, matching the rmnet path's behaviour)
 					fx.log('err', sprintf('could not identify qmimux link for mux id %d', id));
+					continue;
+				}
 			}
 
 			push(mux_devs, child);
