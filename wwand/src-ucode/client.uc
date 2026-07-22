@@ -61,7 +61,7 @@ export function create(hub, schema, cid, hooks)
 
 		if (!hub.send(frame)) {
 			if (hooks?.on_error)
-				hooks.on_error(self, 'send');
+				hooks.on_error(self, 'send', name);
 
 			if (cb)
 				cb({ error: 'send' }, null);
@@ -75,7 +75,7 @@ export function create(hub, schema, cid, hooks)
 			delete self.pending[sprintf('%d', txn)];
 
 			if (hooks?.on_error)
-				hooks.on_error(self, 'timeout');
+				hooks.on_error(self, 'timeout', name);
 
 			if (cb)
 				cb({ error: 'timeout' }, null);
@@ -111,7 +111,7 @@ export function create(hub, schema, cid, hooks)
 				err = { error: 'qmi', result: data._result.result, code: data._result.error };
 
 			if (err && hooks?.on_error)
-				hooks.on_error(self, err.error);
+				hooks.on_error(self, err.error, p.name);
 			else if (!err && hooks?.on_success)
 				hooks.on_success(self);
 

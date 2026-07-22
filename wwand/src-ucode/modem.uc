@@ -150,11 +150,12 @@ export function create(opts)
 	// hooks shared by all clients: feed the recovery error counter; the
 	// ceiling (25, preserved) escalates straight to reboot
 	let client_hooks = {
-		on_error: (client, kind) => {
+		on_error: (client, kind, msg) => {
 			if (rec.on_qmi_error() == 'reboot')
 				rec.reboot('qmi error limit reached');
 
-			log('debug', sprintf('qmi error (%s), counter %d', kind, self.counters.qmi_errors));
+			log('debug', sprintf('qmi error (%s) svc %d %s, counter %d',
+				kind, client.service, msg ?? '?', self.counters.qmi_errors));
 		},
 		on_success: (client) => {
 			rec.on_qmi_success();

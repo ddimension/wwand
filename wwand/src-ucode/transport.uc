@@ -9,9 +9,11 @@
 // hub.send(frame);
 // hub.close();
 //
-// Note: QMI control messages are tiny; writes go straight to the (non-
-// blocking) fd without a queue. A failed/short write is reported to the
-// caller and counts as a request error upstream.
+// Note: QMI control messages are tiny, but cdc-wdm accepts only one
+// outstanding write — bursts (the once-a-minute stats/telemetry tick) hit
+// EAGAIN on the non-blocking fd. Failed writes are therefore queued and
+// retried shortly instead of failing the request; only a persistently
+// congested queue reports an error upstream.
 
 'use strict';
 
@@ -40,13 +42,50 @@ export function open(path, cbs)
 		delete hub.clients[sprintf('%d:%d', client.service, client.cid)];
 	};
 
+	let txq = [];
+	let tx_timer = null;
+	let flush_txq;
+
+	flush_txq = () => {
+		tx_timer = null;
+
+		while (length(txq)) {
+			let w = handle.write(txq[0]);
+
+			if (w !== length(txq[0])) {
+				// still congested — retry shortly (frames are message-
+				// oriented, a short write does not happen on cdc-wdm)
+				tx_timer = uloop.timer(5, flush_txq);
+				return;
+			}
+
+			shift(txq);
+		}
+	};
+
 	hub.send = function(frame) {
 		if (hub.closed)
 			return false;
 
+		if (length(txq) > 64)
+			return false;   // persistently congested: report upstream
+
+		if (length(txq)) {
+			push(txq, frame);
+			return true;
+		}
+
 		let w = handle.write(frame);
 
-		return (w === length(frame));
+		if (w === length(frame))
+			return true;
+
+		push(txq, frame);
+
+		if (!tx_timer)
+			tx_timer = uloop.timer(5, flush_txq);
+
+		return true;
 	};
 
 	// raw frame writer — identical to send(), named for the MBIM client which
@@ -58,6 +97,13 @@ export function open(path, cbs)
 			return;
 
 		hub.closed = true;
+
+		if (tx_timer) {
+			tx_timer.cancel();
+			tx_timer = null;
+		}
+
+		txq = [];
 
 		if (hub._uhandle) {
 			hub._uhandle.delete();
