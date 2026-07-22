@@ -69,9 +69,11 @@ define Package/wwand-esim
   SECTION:=net
   CATEGORY:=Network
   TITLE:=eSIM (eUICC) profile management for wwand
-  # lpac drives the SM-DP+ download/notification (ES9+ HTTPS on the router)
-  # via the wwand APDU channel; jsonfilter is used by the glue script
-  DEPENDS:=+wwand +lpac +jsonfilter
+  # wwand-lpac is our self-contained static lpac (bundled wolfSSL+libcurl, no
+  # OpenSSL/mbedtls .so). It drives the SM-DP+ download/notification (ES9+
+  # HTTPS on the router) via the wwand APDU channel; jsonfilter parses lpac's
+  # stdio protocol in the glue script.
+  DEPENDS:=+wwand +wwand-lpac +jsonfilter
 endef
 
 define Package/wwand-esim/description
@@ -83,19 +85,11 @@ define Package/wwand-esim/description
  port. lpac runs the ES9+ HTTPS on the router; no dedicated modem APN is
  required.
 
- Two build requirements for the download (verified on the RG650E):
-  * lpac v2.3.0's stdio APDU driver is broken (inverted json_request check
-    bails every request with -1 on success) — apply
-    wwand/patches-lpac/110-stdio-apdu-request-check.patch into the lpac feed's
-    patches/ dir. Without it euicc_init fails at connect. This is a backport of
-    upstream PR #399 (already merged to main, unreleased); drop the patch once
-    lpac ships a release later than v2.3.0. Do NOT bump the feed to main: the
-    #377 refactor turns the drivers into mandatory dynamic .so plugins, which
-    is incompatible with a single self-contained static binary.
-  * libcurl MUST be built with OpenSSL, not mbedtls. OpenWrt's mbedtls is
-    feature-stripped and fails the GSMA SM-DP+ TLS with X509 feature
-    unavailable; OpenSSL has the full curve/algorithm set. (A self-contained
-    static build against wolfSSL is smaller — see the wwand-lpac experiment.)
+ The download is handled by the wwand-lpac package (a dependency): a single
+ self-contained ~0.9 MB lpac binary with a minimal static wolfSSL + libcurl
+ linked in, so it needs no libcurl/libssl/libcrypto .so (vs the ~6.4 MB that
+ stock libcurl+OpenSSL pulls in) and carries the GSMA-capable TLS + the v2.3.0
+ stdio-driver fix (upstream PR #399) itself. See wwand-lpac/Makefile.
 endef
 
 define Package/wwand-esim/install
