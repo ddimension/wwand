@@ -16,7 +16,6 @@ import * as uloop from 'uloop';
 import * as modem_mod from './modem.uc';
 import * as context_mod from './context.uc';
 import * as sim from './sim.uc';
-import * as atcmd from './atcmd.uc';
 
 const UP_GUARD_MS = 150000;
 
@@ -808,42 +807,30 @@ export function create(opts)
 	let esim_logf = '/tmp/wwand/esim-download.log';
 
 	let esim_lpac_run = (ref, slot, op, code, conf, on_done) => {
-		let entry = self.modems[ref];
 		let fx = deps.datapath_fx;
 
-		// the OpenWrt /usr/bin/lpac wrapper forces LPAC_APDU=uqmi — use the
-		// real binary
-		let lpac = '/usr/lib/lpac';
+		// lpac's ES10 APDUs are relayed through wwand's own modem_apdu ubus
+		// channel by the stdio bridge script, so wwand stays the sole owner of
+		// the modem — no separate AT port. lpac does the SM-DP+ HTTPS itself.
+		let bridge = '/usr/libexec/wwand/esim-download';
 
-		if (fx?.exists && !fx.exists(lpac))
-			return on_done({ error: 'esim_not_installed' });
+		if (fx?.exists && !fx.exists(bridge))
+			return false;   // package not installed — caller reports it
 
-		// a free AT port for lpac (config override, else auto-discovered)
-		let atdev = entry?.modem?.config?.esim_at_tty;
-
-		if (!length(atdev ?? '') && fx)
-			atdev = atcmd.find_secondary_at(fx, entry?.modem?.device, entry?.modem?.at_tty);
-
-		if (!length(atdev ?? ''))
-			return on_done({ error: 'no_esim_at_port' });
-
-		let args;
-		switch (op) {
-		case 'download':     args = sprintf("profile download -a '%s'%s", code,
-		                                    length(conf ?? '') ? sprintf(" -c '%s'", conf) : ''); break;
-		case 'notif-list':   args = 'notification list'; break;
-		case 'notif-process':args = 'notification process -a'; break;
-		default:             args = 'chip info';
-		}
+		// op names map 1:1 to the bridge's OP env; anything else = chip self-test
+		let bridge_op = (op == 'download' || op == 'notif-list' || op == 'notif-process')
+			? op : 'chip';
 
 		if (fx?.write)
 			fx.write(esim_logf, '');   // truncate for a fresh run
 
-		log('notice', sprintf('modem %s: esim[%s]: lpac at-driver on %s', ref, op, atdev));
+		log('notice', sprintf('modem %s: esim[%s]: lpac stdio bridge', ref, op));
 
+		// code/conf are validated in the download op (LPA:1$host$token charset),
+		// so single-quoting is shell-safe; notif ops pass them empty
 		return uloop.process('/bin/sh', [ '-c',
-			sprintf("LPAC_APDU=at LPAC_APDU_AT_DEVICE=%s LPAC_HTTP=curl %s %s >%s 2>&1",
-				atdev, lpac, args, esim_logf) ], {},
+			sprintf("OP=%s %s %s %d '%s' '%s' >%s 2>&1",
+				bridge_op, bridge, ref, slot, code ?? '', conf ?? '', esim_logf) ], {},
 			(exitcode) => {
 				let out = fx?.read ? trim(fx.read(esim_logf) ?? '') : '';
 
@@ -856,7 +843,7 @@ export function create(opts)
 			});
 	};
 
-	// host-side download via lpac's AT driver
+	// host-side download via lpac (stdio bridge over wwand's APDU channel)
 	let esim_download_lpac = (ref, slot, code, conf, cb) => {
 		self._esim_dl = { state: 'running', via: 'lpac', logf: esim_logf };
 
@@ -871,7 +858,7 @@ export function create(opts)
 
 		if (!p) {
 			self._esim_dl = { state: 'failed', via: 'lpac', code: -1 };
-			return cb({ error: p == null ? 'no_esim_at_port' : 'spawn_failed' });
+			return cb({ error: 'esim_not_installed' });
 		}
 
 		cb(null, { started: true, via: 'lpac' });

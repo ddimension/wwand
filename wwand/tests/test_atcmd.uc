@@ -176,12 +176,6 @@ eq(atcmd.find_tty(quectel_fx(), '/dev/cdc-wdm0', null), '/dev/ttyUSB2', 'find: a
 // config override wins
 eq(atcmd.find_tty(quectel_fx(), '/dev/cdc-wdm0', '/dev/ttyACM7'), '/dev/ttyACM7', 'find: override wins');
 
-// secondary AT port for lpac: the at2 port, excluding wwand's primary
-eq(atcmd.find_secondary_at(quectel_fx(), '/dev/cdc-wdm0', '/dev/ttyUSB2'),
-	'/dev/ttyUSB3', 'find2: secondary at port excludes primary');
-eq(atcmd.find_secondary_at(fakefx.create(), '/dev/cdc-wdm0', '/dev/ttyUSB2'),
-	null, 'find2: none when no ports known');
-
 // board quirk wins over lookup
 let bfx = quectel_fx({ files: { '/tmp/sysinfo/board_name': "zyxel,nr7101\n" } });
 eq(atcmd.find_tty(bfx, '/dev/cdc-wdm0', null), '/dev/ttyUSB2', 'find: board quirk');

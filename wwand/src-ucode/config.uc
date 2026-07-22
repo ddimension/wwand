@@ -51,7 +51,7 @@ export function modem_defaults(over)
 		at_init: [], location: false, delay: 0,
 		failreboot: 100, zero_rx_timeout: 21600,
 		lock_4g: [], lock_5g: null, lock_persist: false,
-		sim_slot: 0, esim_at_tty: null,
+		sim_slot: 0,
 		stats_interval: 60,
 		...(over ?? {}),
 	};
@@ -102,7 +102,6 @@ function parse_wwand_sections(raw, result)
 				lock_5g: s.lock_5g,
 				lock_persist: bool_opt(s.lock_persist, false),
 				sim_slot: +(s.sim_slot ?? 0),
-				esim_at_tty: s.esim_at_tty,
 				stats_interval: +(s.stats_interval ?? 60),
 			});
 			break;

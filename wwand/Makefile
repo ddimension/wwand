@@ -77,17 +77,23 @@ endef
 define Package/wwand-esim/description
  Optional ES10c (SGP.22) profile management for wwand: EID, profile list,
  enable/disable/delete over the modem UIM APDU channel. SM-DP+ profile
- downloads and notification acknowledgements run lpac's AT driver on a free
- AT port (wwand keeps its own); the ES9+ HTTPS runs on the router, no
- dedicated modem APN is required.
+ downloads and notification acknowledgements are driven by lpac: its ES10
+ APDUs are relayed through wwand's own APDU channel (ubus modem_apdu) by the
+ stdio bridge, so wwand stays the sole owner of the modem — no separate AT
+ port. lpac runs the ES9+ HTTPS on the router; no dedicated modem APN is
+ required.
 
  Two build requirements for the download (verified on the RG650E):
-  * lpac's at driver must set the tty to raw mode — see
-    wwand/patches-lpac/100-at-driver-termios.patch (drop into the lpac feed's
-    patches/ dir). Without it the at driver hangs.
+  * lpac's stdio APDU driver is broken upstream (inverted json_request check
+    bails every request with -1 on success) — apply
+    wwand/patches-lpac/110-stdio-apdu-request-check.patch into the lpac feed's
+    patches/ dir. Without it euicc_init fails at connect.
   * libcurl MUST be built with OpenSSL, not mbedtls. OpenWrt's mbedtls is
     feature-stripped and fails the GSMA SM-DP+ TLS with X509 feature
     unavailable; OpenSSL has the full curve/algorithm set.
+
+ (100-at-driver-termios.patch fixes lpac's *at* driver and is not needed by
+ the stdio bridge — kept in patches-lpac/ only for standalone lpac-at use.)
 endef
 
 define Package/wwand-esim/install
