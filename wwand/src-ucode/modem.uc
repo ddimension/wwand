@@ -603,9 +603,22 @@ export function create(opts)
 		self.set_state('SIM_UNLOCK');
 		sim.unlock(self, (err, status) => {
 			if (err?.blocked) {
-				self.set_state('SIM_BLOCKED', err);
-				emit('sim_blocked', err);
-				notify_contexts('sim_blocked', err);
+				// identify the card before going terminal so the log says
+				// *which* SIM tripped the PIN guard. EF-IMSI is PIN-protected
+				// and may read as null on a locked card; the MF-level ICCID
+				// is readable regardless.
+				sim.read_identity(self, (id) => {
+					self.info.imsi = id.imsi;
+					self.info.iccid = id.iccid;
+					self.info.msisdn = id.msisdn;
+
+					log('err', sprintf('sim blocked: imsi %s, iccid %s',
+						id.imsi ?? '?', id.iccid ?? '?'));
+
+					self.set_state('SIM_BLOCKED', err);
+					emit('sim_blocked', err);
+					notify_contexts('sim_blocked', err);
+				});
 				return; // terminal until reload
 			}
 
@@ -931,7 +944,19 @@ export function create(opts)
 			else push(techs, sprintf('rat%d', r));
 		}
 
-		push(parts, sprintf('tech=%s', length(techs) ? join('+', techs) : 'none'));
+		// NSA: the modem stays LTE-registered (radio_ifs often lists LTE only)
+		// while the NR anchor shows up in the 5G cell/signal info — report it
+		let nr_anchor = self.cells?.nr5g_cell != null ||
+			(self.signal?.nr5g?.rsrp != null && self.signal.nr5g.rsrp > -32768);
+		let has_lte = index(techs, 'LTE') >= 0;
+		let has_nr = index(techs, 'NR5G') >= 0;
+
+		if (has_lte && !has_nr && nr_anchor)
+			push(techs, 'NR5G');
+
+		push(parts, sprintf('tech=%s%s',
+			length(techs) ? join('+', techs) : 'none',
+			(has_lte && (has_nr || nr_anchor)) ? '(NSA)' : ''));
 
 		if (self.reg.plmn)
 			push(parts, sprintf('plmn=%d/%02d%s', self.reg.plmn.mcc, self.reg.plmn.mnc,

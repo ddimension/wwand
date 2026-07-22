@@ -219,6 +219,16 @@ function run_daemon()
 		},
 	});
 
+	// runtime log-level override (ubus set_log_level); a reload re-applies
+	// the configured level from uci
+	daemon.set_log_level = (level) => {
+		if (!logmod.valid_level(level))
+			return false;
+
+		logmod.set_level(level);
+		return true;
+	};
+
 	daemon.reload = () => {
 		let p = load_config();
 

@@ -124,6 +124,21 @@ export function publish(conn, daemon, log)
 				return {};
 			},
 		},
+
+		// runtime debug switch: ubus call wwand set_log_level '{"level":"debug"}'
+		// (reverted to the uci value on reload)
+		set_log_level: {
+			args: { level: '', ubus_rpc_session: '' },
+			call: (req) => {
+				if (!req.args.level)
+					return { error: 'missing_argument' };
+
+				if (!daemon.set_log_level || !daemon.set_log_level(req.args.level))
+					return { error: 'invalid_level' };
+
+				return { level: req.args.level };
+			},
+		},
 	});
 
 	if (!obj && log)

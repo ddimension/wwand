@@ -11,6 +11,11 @@ export function set_level(name)
 	threshold = LEVELS[name] ?? LEVELS.info;
 }
 
+export function valid_level(name)
+{
+	return exists(LEVELS, name);
+}
+
 export function log(level, fmt, ...args)
 {
 	if ((LEVELS[level] ?? 7) > threshold)
