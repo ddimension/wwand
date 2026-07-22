@@ -254,6 +254,9 @@ function compat_translate(raw, result)
 		if (s.zero_rx_timeout != null)
 			modem.zero_rx_timeout = +s.zero_rx_timeout;
 
+		if (s.stats_interval != null)
+			modem.stats_interval = +s.stats_interval;
+
 		// context-level options
 		let v4 = bool_opt(s.ipv4, true);
 		let v6 = bool_opt(s.ipv6, true);

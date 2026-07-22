@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <net/if.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -256,6 +257,11 @@ qmit_spawn(uc_vm_t *vm, size_t nargs)
 	fl = fcntl(out[0], F_GETFL, 0);
 	fcntl(out[0], F_SETFL, (fl < 0 ? 0 : fl) | O_NONBLOCK);
 	fcntl(out[0], F_SETFD, FD_CLOEXEC);
+
+	/* the write end is non-blocking too: a stalled child must never block the
+	 * single-threaded uloop in write() */
+	fl = fcntl(in[1], F_GETFL, 0);
+	fcntl(in[1], F_SETFL, (fl < 0 ? 0 : fl) | O_NONBLOCK);
 	fcntl(in[1], F_SETFD, FD_CLOEXEC);
 
 	t = calloc(1, sizeof(*t));
@@ -458,10 +464,14 @@ qmit_free(void *ptr)
 		if (t->wfd >= 0)
 			close(t->wfd);
 
+		/* a spawn handle GC'd without close(): signal the child and reap it so
+		 * it neither lingers nor turns into a zombie */
 		if (t->pid > 0) {
 			int status;
 
-			waitpid(t->pid, &status, WNOHANG);
+			kill(t->pid, SIGTERM);
+			while (waitpid(t->pid, &status, 0) < 0 && errno == EINTR)
+				;
 		}
 
 		free(t);

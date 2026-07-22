@@ -78,11 +78,11 @@ export function device_for_usb_path(usb_path)
 		if (dev == null)
 			continue;
 
-		// devpath looks like ../../../1-1.2:1.4 — match the usb device part
-		if (index(dev, sprintf('/%s:', usb_path)) >= 0 || index(dev, sprintf('/%s/', usb_path)) >= 0) {
-			if (driver_of(name) != 'cdc_mbim')
-				return sprintf('/dev/%s', name);
-		}
+		// devpath looks like ../../../1-1.2:1.4 — match the usb device part.
+		// return the cdc-wdm regardless of driver (qmi_wwan or cdc_mbim) — the
+		// mode is determined later when the device is opened/probed
+		if (index(dev, sprintf('/%s:', usb_path)) >= 0 || index(dev, sprintf('/%s/', usb_path)) >= 0)
+			return sprintf('/dev/%s', name);
 	}
 
 	return null;

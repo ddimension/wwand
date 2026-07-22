@@ -32,7 +32,10 @@ const RECIPES = [
 	{
 		// Sierra/Netgear: AT!USBCOMP or AT+QCFG differs; MBIM via AT!UDUSBCOMP.
 		// Placeholder recipe kept minimal — extend when hardware is available.
-		match: '^(EM|MC)[0-9]',
+		// MC-only: the EM prefix is ambiguous (Quectel EM06/EM12 vs Sierra
+		// EM7455) and is claimed by the Quectel recipe above; disambiguating a
+		// Sierra EM needs a revision check, out of scope until we have one.
+		match: '^MC[0-9]',
 		query: 'AT!USBCOMP?',
 		query_re: /([0-9]+)/,
 		values: { qmi: '8', mbim: '6' },
