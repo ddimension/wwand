@@ -1007,6 +1007,25 @@ export function create(opts)
 	// SIGNAL_INFO indication subscription between refreshes.
 	const WATCH_MIN_INTERVAL = 1000;   // never faster than 1/s
 	const WATCH_DECAY = 6000;          // stop after this long without a poll
+	const NEIGH_HOLD = 30;             // s: hold last-seen neighbours over drops
+
+	// store a fresh GET_CELL_LOCATION_INFO result. The modem reports the intra-
+	// frequency neighbour list only intermittently (a measurement cycle), so a
+	// bare serving-cell-only result would make the UI neighbour list flicker in
+	// and out — hold the last-seen neighbours for NEIGH_HOLD seconds instead.
+	let store_cells = (data) => {
+		let li = data?.lte_intra;
+
+		if (li) {
+			if (length(li.cells ?? []) > 1)
+				self._neigh = { cells: li.cells, scid: li.serving_cell_id, ts: time() };
+			else if (self._neigh && self._neigh.scid == li.serving_cell_id &&
+			         (time() - self._neigh.ts) < NEIGH_HOLD)
+				li.cells = self._neigh.cells;   // carry the recent set over
+		}
+
+		self.cells = data;
+	};
 
 	let fast_tick;   // forward-declared: it reschedules itself
 	fast_tick = () => {
@@ -1029,7 +1048,7 @@ export function create(opts)
 
 			self.nas.request('GET_CELL_LOCATION_INFO', {}, (cerr, cdata) => {
 				if (!cerr && cdata)
-					self.cells = cdata;
+					store_cells(cdata);
 
 				let done = () => {
 					if (self.cells)
@@ -1152,7 +1171,7 @@ export function create(opts)
 
 			self.nas.request('GET_CELL_LOCATION_INFO', {}, (err, data) => {
 				if (!err) {
-					self.cells = data;
+					store_cells(data);
 					self._log_telemetry();
 				}
 				else if (err.error != 'cancelled') {
