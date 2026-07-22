@@ -24,12 +24,17 @@ DIR="$(mktemp -d)" || exit 92
 trap 'rm -rf "$DIR"' EXIT
 mkfifo "$DIR/req" "$DIR/resp" || exit 92
 
-if [ "$OP" = "chip" ]; then
-	set -- chip info
-else
+case "$OP" in
+chip)          set -- chip info ;;
+notif-list)    set -- notification list ;;
+notif-process) set -- notification process -a ;;   # ack all pending to SM-DP+
+*)
 	[ -n "$CODE" ] || { echo "no activation code" >&2; exit 91; }
 	set -- profile download -a "$CODE" ${CONF:+-c "$CONF"}
-fi
+	;;
+esac
+
+echo ">> lpac $*" >&2
 
 LPAC_APDU=stdio LPAC_HTTP=curl "$LPAC_BIN" "$@" \
 	<"$DIR/resp" >"$DIR/req" &
@@ -45,9 +50,11 @@ CHAN=0
 
 reply() {
 	printf '{"type":"apdu","payload":{"ecode":%s,"data":"%s"}}\n' "$1" "$2" >&4
+	[ -n "$WWAND_ESIM_DEBUG" ] && echo "dbg< reply ecode=$1 data=$2" >&2
 }
 
 while read -r line <&3; do
+	[ -n "$WWAND_ESIM_DEBUG" ] && echo "dbg> $line" >&2
 	type="$(echo "$line" | jsonfilter -e '@.type' 2>/dev/null)"
 
 	case "$type" in
@@ -81,8 +88,23 @@ while read -r line <&3; do
 			;;
 		esac
 		;;
+	progress)
+		# lpac step progress: {"type":"progress","payload":{"message":..,"progress":N}}
+		msg="$(echo "$line" | jsonfilter -e '@.payload.message' 2>/dev/null)"
+		pct="$(echo "$line" | jsonfilter -e '@.payload.progress' 2>/dev/null)"
+		echo "progress: ${msg:-step}${pct:+ ($pct%)}" >&2
+		;;
+	lpa)
+		# final result: {"type":"lpa","payload":{"code":N,"message":..}}
+		code="$(echo "$line" | jsonfilter -e '@.payload.code' 2>/dev/null)"
+		msg="$(echo "$line" | jsonfilter -e '@.payload.message' 2>/dev/null)"
+		echo "result: code=${code:-?} ${msg}" >&2
+		# echo the data payload too (notification list etc.)
+		echo "$line" | jsonfilter -e '@.payload.data' 2>/dev/null | grep -q . && \
+			echo "data: $(echo "$line" | jsonfilter -e '@.payload.data' 2>/dev/null)" >&2
+		;;
 	*)
-		# progress / lpa result lines: pass through for the status log
+		# any other lpac output: pass through verbatim
 		echo "$line" >&2
 		;;
 	esac

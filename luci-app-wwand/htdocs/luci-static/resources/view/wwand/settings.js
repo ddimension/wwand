@@ -192,15 +192,18 @@ return view.extend({
 		var codeIn = E('input', { 'type': 'text', 'style': 'width:60%',
 			'placeholder': 'LPA:1$rsp.example.com$ACTIVATION-CODE' });
 		var confIn = E('input', { 'type': 'text', 'style': 'width:20%', 'placeholder': _('confirmation code (optional)') });
-		var dlStatus = E('span', { 'style': 'margin-left:8px' });
+		var dlStatus = E('span', { 'style': 'margin-left:8px; font-weight:bold' });
+		var dlLog = E('pre', { 'style': 'max-height:14em; overflow:auto; background:#f5f5f5; ' +
+			'padding:6px; margin-top:6px; font-size:90%; display:none' });
 
 		var pollStatus = function() {
 			callEsim(data.modem, 'download_status', 0, '', '', '').then(function(st) {
-				dlStatus.textContent = st.state + (st.log ? (': ' + st.log.split('\n').pop()) : '');
+				dlStatus.textContent = _('State: ') + st.state + (st.via ? (' (' + st.via + ')') : '');
+				if (st.log) { dlLog.style.display = ''; dlLog.textContent = st.log; dlLog.scrollTop = dlLog.scrollHeight; }
 				if (st.state == 'running')
-					window.setTimeout(pollStatus, 2000);
+					window.setTimeout(pollStatus, 1500);
 				else if (st.state == 'done')
-					window.setTimeout(function() { window.location.reload() }, 1500);
+					window.setTimeout(function() { window.location.reload() }, 2500);
 			});
 		};
 
@@ -214,6 +217,7 @@ return view.extend({
 			codeIn, ' ', confIn, ' ',
 			E('button', { 'class': 'btn cbi-button cbi-button-apply',
 				'click': ui.createHandlerFn(self, function() {
+					dlLog.style.display = 'none'; dlLog.textContent = '';
 					return callEsim(data.modem, 'download', 0, '', codeIn.value, confIn.value).then(function(res) {
 						if (res && res.ok === false)
 							ui.addNotification(null, E('p', _('Download failed to start: ') + (res.error || '?')), 'error');
@@ -222,6 +226,34 @@ return view.extend({
 					});
 				}) }, _('Download')),
 			dlStatus,
+			dlLog,
+		]));
+
+		// pending eUICC notifications: confirm the download/enable/disable to
+		// the operator's SM-DP+ (ES9+). Can be done any time the router has
+		// internet — lpac delivers the queued notifications.
+		out.push(E('h4', {}, _('Provider confirmations (notifications)')));
+		out.push(E('p', {}, E('em', {}, _('After a download or profile change the eUICC queues notifications that confirm the operation to the operator. Send them once the router has internet.'))));
+		out.push(E('div', { 'class': 'cbi-section' }, [
+			E('button', { 'class': 'btn cbi-button',
+				'click': ui.createHandlerFn(self, function() {
+					return callEsim(data.modem, 'notifications', 0, '', '', '').then(function(r) {
+						dlLog.style.display = ''; dlLog.textContent = (r && r.log) || _('(no pending notifications)');
+					});
+				}) }, _('List pending')),
+			' ',
+			E('button', { 'class': 'btn cbi-button cbi-button-apply',
+				'click': ui.createHandlerFn(self, function() {
+					if (!confirm(_('Send all pending notifications to the operator now?')))
+						return;
+					dlLog.style.display = 'none'; dlLog.textContent = '';
+					return callEsim(data.modem, 'notify', 0, '', '', '').then(function(res) {
+						if (res && res.ok === false)
+							ui.addNotification(null, E('p', _('Failed: ') + (res.error || '?')), 'error');
+						else
+							pollStatus();
+					});
+				}) }, _('Send confirmations')),
 		]));
 
 		return out;

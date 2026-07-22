@@ -796,30 +796,49 @@ export function create(opts)
 	// 'profiles' | 'eid' | 'enable' | 'disable' | 'delete' (iccid required
 	// for the latter three). slot defaults to the active physical slot? No —
 	// explicit slot, default 1.
-	// host-side download via the lpac stdio glue (QMI-channel modems)
-	let esim_download_lpac = (ref, slot, code, conf, cb) => {
-		let script = '/usr/libexec/wwand/esim-download';
+	// run the lpac glue (op: download / chip / notif-list / notif-process).
+	// lpac's stderr (step progress + result) is captured to a log file that
+	// download_status streams live; every line is also mirrored to the wwand
+	// log so the provisioning process is visible in logread.
+	let esim_glue = '/usr/libexec/wwand/esim-download';
+	let esim_logf = '/tmp/wwand/esim-download.log';
+
+	let esim_lpac_run = (ref, slot, op, code, conf, on_done) => {
 		let fx = deps.datapath_fx;
 
-		if (fx?.exists && !fx.exists(script))
-			return cb({ error: 'esim_not_installed' });
+		if (fx?.exists && !fx.exists(esim_glue))
+			return on_done({ error: 'esim_not_installed' });
 
-		let logf = '/tmp/wwand/esim-download.log';
+		if (fx?.write)
+			fx.write(esim_logf, '');   // truncate for a fresh run
 
-		self._esim_dl = { state: 'running', via: 'lpac' };
-
-		let p = uloop.process('/bin/sh', [ '-c',
-			sprintf("exec %s '%s' %d '%s' '%s' 2>%s", script, ref, slot,
-				code, conf ?? '', logf) ], {},
+		return uloop.process('/bin/sh', [ '-c',
+			sprintf("OP='%s' exec %s '%s' %d '%s' '%s' 2>%s", op, esim_glue,
+				ref, slot, code ?? '', conf ?? '', esim_logf) ], {},
 			(exitcode) => {
-				self._esim_dl = {
-					state: (exitcode == 0) ? 'done' : 'failed', via: 'lpac',
-					code: exitcode,
-					log: fx?.read ? trim(fx.read(logf) ?? '') : null,
-				};
-				log('notice', sprintf('modem %s: eSIM lpac download %s (exit %d)',
-					ref, self._esim_dl.state, exitcode));
+				let out = fx?.read ? trim(fx.read(esim_logf) ?? '') : '';
+
+				// mirror lpac's progress/result to the wwand log
+				for (let l in split(out ?? '', '\n'))
+					if (length(trim(l)))
+						log('notice', sprintf('modem %s: esim[%s]: %s', ref, op, trim(l)));
+
+				on_done(exitcode == 0 ? null : { error: 'lpac', code: exitcode }, out);
 			});
+	};
+
+	// host-side download via the lpac stdio glue (QMI-channel modems)
+	let esim_download_lpac = (ref, slot, code, conf, cb) => {
+		self._esim_dl = { state: 'running', via: 'lpac', logf: esim_logf };
+
+		let p = esim_lpac_run(ref, slot, 'download', code, conf, (err, out) => {
+			self._esim_dl = {
+				state: err ? 'failed' : 'done', via: 'lpac',
+				code: err?.code ?? 0, log: out,
+			};
+			log('notice', sprintf('modem %s: eSIM lpac download %s (exit %d)',
+				ref, self._esim_dl.state, err?.code ?? 0));
+		});
 
 		if (!p) {
 			self._esim_dl = { state: 'failed', via: 'lpac', code: -1 };
@@ -882,8 +901,38 @@ export function create(opts)
 			});
 		}
 
-		case 'download_status':
-			return cb(null, self._esim_dl ?? { state: 'idle' });
+		case 'download_status': {
+			let st = self._esim_dl ?? { state: 'idle' };
+
+			// stream the live lpac output while a run is in progress
+			if (st.state == 'running' && st.logf && deps.datapath_fx?.read)
+				st = { ...st, log: trim(deps.datapath_fx.read(st.logf) ?? '') };
+
+			return cb(null, st);
+		}
+
+		// pending eUICC notifications: after any profile op the eUICC queues
+		// notifications that must be delivered to the SM-DP+ (ES9+) to confirm
+		// the operation — 'notifications' lists them, 'notify' sends them.
+		case 'notifications':
+			if (!esim_lpac_run(ref, slot, 'notif-list', '', '', (err, out) =>
+				cb(err ? { error: 'lpac', ...err } : null, { ok: !err, log: out })))
+				return cb({ error: 'esim_not_installed' });
+			return;
+
+		case 'notify':
+			if (self._esim_dl?.state == 'running')
+				return cb({ error: 'busy' });
+
+			self._esim_dl = { state: 'running', via: 'notify', logf: esim_logf };
+
+			if (!esim_lpac_run(ref, slot, 'notif-process', '', '', (err, out) => {
+				self._esim_dl = { state: err ? 'failed' : 'done', via: 'notify',
+				                  code: err?.code ?? 0, log: out };
+				log('notice', sprintf('modem %s: eSIM notifications %s', ref, self._esim_dl.state));
+			}))
+				return cb({ error: 'esim_not_installed' });
+			return cb(null, { started: true, via: 'notify' });
 
 		case 'profiles': return esim.profiles(entry.modem, slot, done);
 		case 'eid':      return esim.get_eid(entry.modem, slot, done);

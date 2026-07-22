@@ -69,14 +69,17 @@ define Package/wwand-esim
   SECTION:=net
   CATEGORY:=Network
   TITLE:=eSIM (eUICC) profile management for wwand
-  DEPENDS:=+wwand
+  # lpac drives the SM-DP+ download/notification (ES9+ HTTPS on the router)
+  # via the wwand APDU channel; jsonfilter is used by the glue script
+  DEPENDS:=+wwand +lpac +jsonfilter
 endef
 
 define Package/wwand-esim/description
  Optional ES10c (SGP.22) profile management for wwand: EID, profile list,
  enable/disable/delete over the modem UIM APDU channel. SM-DP+ profile
- downloads additionally use lpac (install separately); the HTTPS leg runs
- on the router, no dedicated modem APN is required.
+ downloads and notification acknowledgements use lpac (pulled in as a
+ dependency); the HTTPS leg runs on the router, no dedicated modem APN is
+ required.
 endef
 
 define Package/wwand-esim/install
