@@ -47,9 +47,10 @@ function parseBandList(text) {
 	return out.sort(function(a, b) { return a - b });
 }
 
-function plmnTable(title, list) {
+function plmnTable(title, list, absentHint) {
 	if (list == null)
-		return E('p', {}, [ E('em', {}, title + ': ' + _('not present on this SIM')) ]);
+		return E('p', {}, [ E('em', {}, title + ': ' + _('not present on this SIM') +
+			(absentHint ? ' — ' + absentHint : '')) ]);
 
 	var rows = list.map(function(e) {
 		var rats = [ 'gsm', 'utran', 'eutran', 'ngran' ]
@@ -488,9 +489,10 @@ return view.extend({
 			]),
 		].concat(this.renderSim(data)).concat([
 			E('h3', {}, _('SIM PLMN preference lists')),
-			plmnTable(_('User-controlled (editable by CPOL)'), (data.plmn || {}).user),
-			plmnTable(_('Operator-controlled'), (data.plmn || {}).operator),
-			plmnTable(_('Home PLMN'), (data.plmn || {}).home),
+			plmnTable(_('User-controlled (EF PLMNwAcT, 6F60)'), (data.plmn || {}).user,
+				_('optional SIM file — not provisioned on this SIM, and the device cannot create it')),
+			plmnTable(_('Operator-controlled (6F61)'), (data.plmn || {}).operator),
+			plmnTable(_('Home PLMN (6F62)'), (data.plmn || {}).home),
 		]));
 	},
 });
