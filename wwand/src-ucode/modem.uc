@@ -215,6 +215,7 @@ export function create(opts)
 		services: {},      // service id (string) -> { major, minor }
 		info: {},          // model, revision, imei, ...
 		reg: {},           // registration snapshot
+		reg_detail: null,  // why (not) registered: reject cause, limited service
 		signal: {},        // last signal info
 
 		counters: null,    // shared with the recovery instance below
@@ -316,7 +317,7 @@ export function create(opts)
 	let watch_decay_timer = null, fast_timer = null;
 	let watch_active = false, fast_running = false;
 
-	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_register;
+	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_attach_profile, step_register;
 
 	let fail = (stage, err) => {
 		log('err', sprintf('failed in %s: %J', stage, err));
@@ -874,7 +875,7 @@ export function create(opts)
 
 		// preserved: never reset modes/PLMN to defaults when unset
 		if (mask == null && !sel)
-			return step_register();
+			return step_attach_profile();
 
 		let args = {};
 
@@ -901,15 +902,42 @@ export function create(opts)
 					emit('modes_failed', { err: err });
 				}
 
-				step_register();
+				step_attach_profile();
 			});
 		};
 
 		attempt(1);
 	};
 
+	// program the LTE attach profile (CID1) from the primary context's config
+	// BEFORE registration so the modem's autonomous attach uses the right APN +
+	// IP family. If it changed, cycle the radio (low-power -> online) so an
+	// attach already in flight with the stale profile re-runs. See context.uc
+	// ensure_attach_profile / the EMM #33 IPv4-only-attach finding.
+	step_attach_profile = () => {
+		let ctx = self.contexts[0];
+
+		if (!ctx || !ctx.ensure_attach_profile || !self.dms)
+			return step_register();
+
+		ctx.ensure_attach_profile(1, (changed) => {
+			if (!changed)
+				return step_register();
+
+			log('notice', 'attach profile changed, cycling radio to re-attach');
+			self.dms.request('SET_OPERATING_MODE', { mode: dmsmod.OPMODE_LOW_POWER }, () => {
+				settle_timer = uloop.timer(self.timing.settle, () => {
+					self.dms.request('SET_OPERATING_MODE', { mode: dmsmod.OPMODE_ONLINE }, () => {
+						settle_timer = uloop.timer(self.timing.settle, step_register);
+					});
+				});
+			});
+		});
+	};
+
 	step_register = () => {
 		self.set_state('REGISTERING');
+		self.reg_detail = null;
 
 		self.nas.request('REGISTER_INDICATIONS', {
 			serving_system_events: 1,
@@ -919,9 +947,37 @@ export function create(opts)
 			if (err)
 				log('warn', sprintf('register indications failed: %J', err));
 
+			// early probe: surface a reject cause / limited service within
+			// seconds (into the log + status reg_detail) instead of only at the
+			// full 240s registration timeout — an attach reject (e.g. #33) shows
+			// up almost immediately once the modem camps
+			uloop.timer(self.timing.regdetail_probe ?? 12000, () => {
+				if (self.state != 'REGISTERING')
+					return;
+
+				self.collect_regdetail((d) => {
+					if (self.state == 'REGISTERING' && d &&
+					    (d.reject_text != null || d.reject_cause != null))
+						log('warn', sprintf('registration rejected: %s%s',
+							d.reject_text ?? sprintf('reject cause %d', d.reject_cause),
+							d.limited ? ' [limited service]' : ''));
+				});
+			});
+
 			reg_timer = uloop.timer(self.timing.reg_timeout, () => {
-				if (self.state == 'REGISTERING')
-					fail('registration_timeout', { reg: self.reg });
+				if (self.state != 'REGISTERING')
+					return;
+
+				// surface WHY we're still not registered before failing —
+				// EMM reject cause / limited service (see reg #33 attach finding)
+				self.collect_regdetail((d) => {
+					if (d && (d.reject_text != null || d.reject_cause != null))
+						log('warn', sprintf('not registered: %s%s',
+							d.reject_text ?? sprintf('reject cause %d', d.reject_cause),
+							d.limited ? ' [limited service]' : ''));
+
+					fail('registration_timeout', { reg: self.reg, detail: d });
+				});
 			});
 
 			self.nas.request('GET_SERVING_SYSTEM', {}, (e2, d2) => {
@@ -936,6 +992,79 @@ export function create(opts)
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
 			self.signal = data;
 		});
+	};
+
+	// gather WHY the modem is (not) registered: the EMM reject cause and whether
+	// it is stuck in limited service (camped but attach rejected). QMI and AT are
+	// COMPLEMENTARY here, not either/or: QMI GET_SYSTEM_INFO reliably reports the
+	// LTE limited-service flag but many modems leave the numeric reject cause TLV
+	// empty (reject_valid=0), while AT+CEER carries the clear-text cause. So we
+	// read QMI first and, when it lacks a numeric cause, top it up with AT+CEER.
+	// Result -> self.reg_detail and cb. no_recovery on the QMI read: an
+	// unsupported message must not climb the reboot ladder.
+	self.collect_regdetail = function(cb) {
+		cb = cb ?? (() => null);
+
+		let finish = (d) => {
+			if (d && d.reject_cause != null && d.reject_text == null)
+				d.reject_text = nasmod.REJECT_CAUSE[sprintf('%d', d.reject_cause)] ??
+					sprintf('reject cause %d', d.reject_cause);
+
+			if (d)
+				self.reg_detail = d;
+
+			cb(d);
+		};
+
+		// AT+CEER clear-text cause; merges into an existing (QMI) detail
+		let add_ceer = (d) => {
+			if (!self.at)
+				return finish(d);
+
+			self.at.send('AT+CEER', (err, res) => {
+				if (!err) {
+					for (let l in (res?.lines ?? [])) {
+						let m = match(l, /\+CEER:\s*(.+)/);
+
+						if (m && length(trim(m[1]))) {
+							d = d ?? {};
+							d.reject_text = trim(m[1]);
+							d.source = d.source ? (d.source + '+at') : 'at';
+						}
+					}
+				}
+
+				finish(d);
+			});
+		};
+
+		if (!self.nas)
+			return add_ceer(null);
+
+		self.nas.request('GET_SYSTEM_INFO', {}, (err, data) => {
+			if (err)
+				return add_ceer(null);
+
+			let d = { source: 'qmi' };
+			let ss = data.lte_service_status?.status;
+
+			if (ss != null)
+				d.limited = (ss == nasmod.SVC_STATUS_LIMITED ||
+				             ss == nasmod.SVC_STATUS_LIMITED_REGIONAL);
+
+			let ri = data.lte_sys_info;
+
+			if (ri?.reject_valid && ri.reject_cause) {
+				d.reject_cause = ri.reject_cause;
+				d.reject_domain = ri.reject_domain;
+			}
+
+			// numeric cause already present -> done; else top up from AT+CEER
+			if (d.reject_cause != null)
+				return finish(d);
+
+			add_ceer(d);
+		}, { no_recovery: true });
 	};
 
 	self._update_serving = function(data) {
@@ -970,6 +1099,7 @@ export function create(opts)
 				}
 
 				self.counters.attempts = 0;
+				self.reg_detail = null;   // registered: clear any stale reject info
 				log('notice', sprintf('registered: plmn %J, roaming %J, radio [%s]',
 					self.reg.plmn ? sprintf('%d/%02d (%s)', self.reg.plmn.mcc, self.reg.plmn.mnc,
 						trim(self.reg.plmn.description ?? '')) : null,
@@ -1325,6 +1455,14 @@ export function create(opts)
 
 		if (self.config.lock_5g)
 			push(parts, sprintf('lock_5g=%s', self.config.lock_5g));
+
+		// registration trouble (reject cause / limited service), when present
+		if (self.reg_detail?.reject_text != null || self.reg_detail?.reject_cause != null)
+			push(parts, sprintf('reject=%s', self.reg_detail.reject_text ??
+				sprintf('%d', self.reg_detail.reject_cause)));
+
+		if (self.reg_detail?.limited)
+			push(parts, 'limited_service');
 
 		log('notice', sprintf('telemetry: %s', join(' ', parts)));
 		emit('telemetry', { cells: self.cells, signal: self.signal, reg: self.reg });

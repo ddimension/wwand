@@ -3,6 +3,36 @@
 
 'use strict';
 
+// QmiNasServiceStatus (LTE service status): the "limited service" states mean
+// the modem camps on a cell but cannot use it (attach rejected / emergency-only)
+export const SVC_STATUS_NONE = 0;
+export const SVC_STATUS_LIMITED = 1;
+export const SVC_STATUS_AVAILABLE = 2;
+export const SVC_STATUS_LIMITED_REGIONAL = 3;
+
+// EMM / MM reject cause text (3GPP TS 24.301 §9.9.3.9 / TS 24.008) — the common
+// ones seen in the field; unknown codes are shown numerically by the caller
+export const REJECT_CAUSE = {
+	'2':  'IMSI unknown in HLR',
+	'3':  'illegal MS',
+	'6':  'illegal ME',
+	'7':  'EPS services not allowed',
+	'8':  'EPS and non-EPS services not allowed',
+	'9':  'UE identity cannot be derived',
+	'10': 'implicitly detached',
+	'11': 'PLMN not allowed',
+	'12': 'tracking area not allowed',
+	'13': 'roaming not allowed in this tracking area',
+	'14': 'EPS services not allowed in this PLMN',
+	'15': 'no suitable cells in tracking area',
+	'22': 'congestion',
+	'25': 'not authorized for this CSG',
+	'33': 'requested service option not subscribed',
+	'34': 'service option temporarily out of order',
+	'35': 'requested service option not subscribed (35)',
+	'42': 'severe network failure',
+};
+
 // QmiNasRegistrationState
 export const REG_NOT_REGISTERED = 0;
 export const REG_REGISTERED = 1;
@@ -231,6 +261,31 @@ export default {
 					state:        'u32',
 					cell_index:   'u8',
 				} } },
+			},
+		},
+
+		// System info — used for the EMM registration reject cause and the
+		// limited-service flag when a modem camps but the attach is rejected
+		// (e.g. cause 33 on an IPv4-only attach). The reject cause lives inside
+		// the big "LTE System Info v2" sequence TLV; we model only the fixed
+		// leading fields up to reject_cause and ignore the trailing ones.
+		GET_SYSTEM_INFO: {
+			id: 0x004D,
+			req: {},
+			resp: {
+				// QmiNasServiceStatus: 0 none, 1 limited, 2 available,
+				// 3 limited-regional
+				lte_service_status: { t: 0x14, f: {
+					status: 'u8', true_status: 'u8' } },
+				lte_sys_info: { t: 0x19, f: {
+					domain_valid: 'u8', domain: 'u8',
+					srv_cap_valid: 'u8', srv_cap: 'u8',
+					roaming_valid: 'u8', roaming: 'u8',
+					forbidden_valid: 'u8', forbidden: 'u8',
+					lac_valid: 'u8', lac: 'u16',
+					cid_valid: 'u8', cid: 'u32',
+					reject_valid: 'u8', reject_domain: 'u8', reject_cause: 'u8',
+				} },
 			},
 		},
 

@@ -222,8 +222,18 @@ return view.extend({
 					[ _('Recovery'), _('%d attempts, %d QMI errors').format(mo.attempts || 0, mo.qmi_errors || 0) ],
 				]);
 
+				var rd = cells.registration_detail || mo.registration_detail;
+				var rdMsg = null;
+				if (rd && (rd.reject_text || rd.reject_cause != null || rd.limited)) {
+					rdMsg = rd.reject_text ||
+						(rd.reject_cause != null ? _('reject cause %d').format(rd.reject_cause) : _('limited service'));
+					if (rd.limited && (rd.reject_text || rd.reject_cause != null))
+						rdMsg += ' · ' + _('limited service');
+				}
+
 				var registration = kv([
 					[ _('Status'), (reg.registration == 1) ? _('registered') : _('searching') ],
+					rdMsg ? [ _('Problem'), E('span', { 'style': 'color:#c00;font-weight:bold' }, rdMsg) ] : null,
 					plmn ? [ _('Operator'), '%s (%s/%s)'.format((plmn.description||'').replace(/[^\x20-\x7e]/g,'').trim(), plmn.mcc, plmn.mnc) ] : null,
 					[ _('Roaming'), reg.roaming ? _('yes') : _('no') ],
 					[ _('Radio'), radioList(reg.radio_ifs) ],

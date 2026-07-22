@@ -193,6 +193,15 @@ function renderLive(name, modem) {
 			[ _('State'), modem.state || '?' ],
 			[ _('Registration'), (reg.registration == 1) ? _('registered') : _('searching') ]
 		];
+		/* why registration is stuck: EMM reject cause / limited service */
+		var rd = modem.registration_detail;
+		if (rd && (rd.reject_text || rd.reject_cause != null || rd.limited)) {
+			var msg = rd.reject_text ||
+				(rd.reject_cause != null ? _('reject cause %d').format(rd.reject_cause) : _('limited service'));
+			if (rd.limited && (rd.reject_text || rd.reject_cause != null))
+				msg += ' · ' + _('limited service');
+			srvRows.push([ _('Problem'), E('span', { 'style': 'color:#c00;font-weight:bold' }, msg) ]);
+		}
 		if (plmn) srvRows.push([ _('Operator'), '%s (%s/%s)%s'.format((plmn.description||'').trim(),
 			plmn.mcc, plmn.mnc, reg.roaming ? ' · '+_('roaming') : '') ]);
 		if (lc) {

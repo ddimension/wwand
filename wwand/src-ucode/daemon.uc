@@ -665,6 +665,7 @@ export function create(opts)
 				imei: entry.modem?.info?.imei,
 				at_tty: entry.modem?.at_tty,
 				registration: entry.modem?.reg,
+				registration_detail: entry.modem?.reg_detail,
 				qmi_errors: entry.modem?.counters?.qmi_errors,
 				attempts: entry.modem?.counters?.attempts,
 			};
@@ -998,6 +999,7 @@ export function create(opts)
 
 		return {
 			registration: entry.modem.reg,
+			registration_detail: entry.modem.reg_detail,
 			signal: entry.modem.signal,
 			cells: entry.modem.cells,
 			dsd: entry.modem.dsd_status,

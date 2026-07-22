@@ -4,6 +4,7 @@
 
 import { eq, ok, done } from './lib/check.uc';
 import * as tlv from 'wwand/codec/tlv.uc';
+import * as nas from 'wwand/codec/schema/nas.uc';
 
 // --- primitives -------------------------------------------------------------
 
@@ -155,5 +156,30 @@ let sinfo = tlv.unpack(f, tlv.pack(f, {
 eq(sinfo.info[0].is_euicc, 1, 'slots: euicc flag');
 eq(sinfo.info[0].atr, "\x3b\x9f", 'slots: atr bytes');
 eq(sinfo.eids[0].eid, "\x89\x04\x40", 'slots: eid bytes');
+
+// partial struct decode: a field spec shorter than the TLV value must decode
+// the declared leading fields and ignore trailing bytes (GET_SYSTEM_INFO's LTE
+// System Info v2 carries the reject cause ahead of fields we don't model)
+let pf = { s: { t: 0x30, f: { a: 'u8', b: 'u8' } } };
+let pdec = tlv.unpack(pf, hexdec('30' + '0400' + 'aabbccdd'));   // len 4, 2 trailing
+eq(pdec.s.a, 0xaa, 'partial: first declared field');
+eq(pdec.s.b, 0xbb, 'partial: trailing bytes ignored');
+
+// GET_SYSTEM_INFO: the EMM reject cause + LTE limited-service flag decode from
+// the fixed leading fields of the LTE System Info v2 TLV (reg #33 diagnostics)
+let sysinfo = nas.default.messages.GET_SYSTEM_INFO.resp;
+let sysdec = tlv.unpack(sysinfo, tlv.pack(sysinfo, {
+	lte_service_status: { status: nas.SVC_STATUS_LIMITED, true_status: 1 },
+	lte_sys_info: {
+		domain_valid: 1, domain: 2, srv_cap_valid: 1, srv_cap: 3,
+		roaming_valid: 1, roaming: 0, forbidden_valid: 1, forbidden: 0,
+		lac_valid: 0, lac: 0, cid_valid: 0, cid: 0,
+		reject_valid: 1, reject_domain: 2, reject_cause: 33,
+	},
+}));
+eq(sysdec.lte_sys_info.reject_cause, 33, 'sysinfo: EMM reject cause 33');
+eq(sysdec.lte_sys_info.reject_valid, 1, 'sysinfo: reject valid');
+eq(sysdec.lte_service_status.status, nas.SVC_STATUS_LIMITED, 'sysinfo: LTE limited service');
+eq(nas.REJECT_CAUSE['33'], 'requested service option not subscribed', 'reject cause 33 text');
 
 done('test_tlv');

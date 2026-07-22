@@ -654,48 +654,75 @@ export function read_plmn_lists(modem, cb)
 	});
 }
 
+// try providers in order until one yields a non-null value; each provider is
+// (done) => done(value | null). The sustainable fallback shape for identity.
+function first_of(providers, cb)
+{
+	let i = 0, step;
+
+	step = () => {
+		if (i >= length(providers))
+			return cb(null);
+
+		providers[i++]((v) => (v != null) ? cb(v) : step());
+	};
+
+	step();
+}
+
+// first line of an AT reply that is a run of >= min digits (IMSI/ICCID)
+function at_digits(lines, min)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(trim(l), /([0-9]{8,})/);
+
+		if (m && length(m[1]) >= min)
+			return m[1];
+	}
+
+	return null;
+}
+
+// IMSI / ICCID with a sustainable per-field fallback: UIM EF read -> QMI DMS
+// getter -> AT. Modems whose UIM rejects raw EF reads (EG06: InvalidArgument)
+// fall through to DMS UIM Get IMSI/ICCID, then to AT (AT+CIMI / AT+QCCID). The
+// QMI getters use no_recovery so a rejection never climbs the reboot ladder.
 export function read_identity(modem, cb)
 {
 	let out = { imsi: null, iccid: null, msisdn: null };
 
-	let finish_msisdn = () => {
-		modem.dms.request('GET_MSISDN', {}, (err, data) => {
-			if (!err)
-				out.msisdn = data.msisdn;
+	let imsi_chain = [];
+	if (modem.uim)
+		push(imsi_chain, (done) => read_ef(modem, EF_IMSI, (b) =>
+			done(b != null ? substr(swap_nibbles(b), 3) : null)));   // strip len+parity
+	push(imsi_chain, (done) => modem.dms.request('GET_IMSI', {}, (e, d) =>
+		done((!e && length(d?.imsi ?? '')) ? d.imsi : null), { no_recovery: true }));
+	if (modem.at)
+		push(imsi_chain, (done) => modem.at.send('AT+CIMI', (e, r) =>
+			done(e ? null : at_digits(r?.lines, 14))));
 
-			cb(out);
-		});
-	};
+	let iccid_chain = [];
+	if (modem.uim)
+		push(iccid_chain, (done) => read_ef(modem, EF_ICCID, (b) =>
+			done(b != null ? replace(swap_nibbles(b), /f+$/, '') : null)));
+	push(iccid_chain, (done) => modem.dms.request('GET_ICCID', {}, (e, d) =>
+		done((!e && length(d?.iccid ?? '')) ? d.iccid : null), { no_recovery: true }));
+	if (modem.at)
+		push(iccid_chain, (done) => modem.at.send('AT+QCCID', (e, r) =>
+			done(e ? null : at_digits(r?.lines, 18))));
 
-	if (modem.uim) {
-		read_ef(modem, EF_IMSI, (imsi_bytes) => {
-			if (imsi_bytes != null) {
-				// first byte is the length, first digit the parity nibble
-				let s = swap_nibbles(imsi_bytes);
-				out.imsi = substr(s, 3);
-			}
+	first_of(imsi_chain, (imsi) => {
+		out.imsi = imsi;
 
-			read_ef(modem, EF_ICCID, (iccid_bytes) => {
-				if (iccid_bytes != null)
-					out.iccid = replace(swap_nibbles(iccid_bytes), /f+$/, '');
+		first_of(iccid_chain, (iccid) => {
+			out.iccid = iccid;
 
-				finish_msisdn();
+			modem.dms.request('GET_MSISDN', {}, (err, data) => {
+				if (!err)
+					out.msisdn = data.msisdn;
+
+				cb(out);
 			});
-		});
-
-		return;
-	}
-
-	// legacy DMS path
-	modem.dms.request('GET_IMSI', {}, (e1, d1) => {
-		if (!e1)
-			out.imsi = d1.imsi;
-
-		modem.dms.request('GET_ICCID', {}, (e2, d2) => {
-			if (!e2)
-				out.iccid = d2.iccid;
-
-			finish_msisdn();
 		});
 	});
 }

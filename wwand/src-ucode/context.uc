@@ -358,6 +358,64 @@ export function create(opts)
 		});
 	};
 
+	// Program the LTE attach profile (profile <index>, normally 1) from this
+	// context's config so the modem's *autonomous* attach uses the right APN and
+	// IP family. The modem attaches before wwand activates its data session, so a
+	// stale attach profile (e.g. IPv4-only where the subscription needs IPv4v6)
+	// gets the whole attach rejected (EMM #33 "service option not subscribed")
+	// and we never reach activation. Called at modem init, before REGISTERING;
+	// invokes done(changed) so the caller re-attaches when it changed. The data
+	// path still re-applies the same settings via prepare/check_pdp_type at
+	// activation time — this only fixes the *attach* that happens earlier.
+	self.ensure_attach_profile = function(index, done) {
+		let wds = self.modem.wds_cfg;
+		let apn = self.config.apn;
+
+		// '#N' means "use modem profile N as-is" — never rewrite it
+		if (!wds || !index || (apn != null && substr(apn, 0, 1) == '#'))
+			return done(false);
+
+		let want_pdp = PDP_MAP[self.config.pdp_type ?? 'ipv4v6'];
+		let prof = { type: wdsmod.PROFILE_TYPE_3GPP, index: index };
+
+		wds.request('GET_PROFILE_SETTINGS', { profile: prof }, (err, data) => {
+			if (err) {
+				log('warn', sprintf('attach profile %d read failed: %J', index, err));
+				return done(false);
+			}
+
+			let set_apn = (apn != null && apn != '');
+			let need_apn = set_apn && (data.apn ?? '') != apn;
+			let need_pdp = (want_pdp != null && data.pdp_type != want_pdp);
+
+			if (!need_apn && !need_pdp) {
+				log('debug', sprintf('attach profile %d up to date (apn %J pdp %J)',
+					index, data.apn, data.pdp_type));
+				return done(false);
+			}
+
+			let mod = { profile: prof };
+
+			if (set_apn) {
+				mod.apn = apn;
+				mod.apn_disabled = 0;
+			}
+
+			if (want_pdp != null)
+				mod.pdp_type = want_pdp;
+
+			log('notice', sprintf('attach profile %d: apn %J->%J, pdp %J->%J',
+				index, data.apn, set_apn ? apn : data.apn, data.pdp_type, want_pdp));
+
+			wds.request('MODIFY_PROFILE', mod, (e2) => {
+				if (e2)
+					log('warn', sprintf('attach profile %d modify failed: %J', index, e2));
+
+				done(!e2);
+			});
+		});
+	};
+
 	// --- ACTIVATING --------------------------------------------------------
 
 	activate_family = (family, profile, done) => {
