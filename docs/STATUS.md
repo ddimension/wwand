@@ -1,76 +1,60 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-21. HEAD: `2fb50a1`. All work committed + pushed to
-origin; working tree clean; 14 test suites green._
+_Last updated: 2026-07-22. All work committed + pushed to origin; working tree
+clean; 15 test suites green (~480 checks)._
 
 ## Where we are
-QMI path is production-shaped and unit-tested. The big recent change is the
-**no-proto-task rewrite** (`2fb50a1`): the per-interface monitor process is
-gone, the daemon drives netifd in place, transient losses no longer tear the
-WAN down (so IPv6-PD/VRF dependencies survive), and a wwand restart no longer
-bounces the interface. See `CLAUDE.md` → "netifd integration" and
-`docs/architecture.md`.
 
-## ⛔ Immediate blocker
-The **test router (192.168.203.245) was reflashed** and does not have the
-current build. Nothing since the reflash has been verified on hardware. Next
-session must: build the OpenWrt packages (see `CLAUDE.md` → Build), install via
-apk (`--force-reinstall` or bump PKG_RELEASE), reboot, switch the modem to QMI
-if needed (`AT+QCFG="usbnet",0` + `AT+CFUN=1,1`).
+The QMI path is production-shaped, unit-tested, and verified on three Quectel
+modems: **242** RG502Q (Zyxel VA) and **245** RG650E (MikroTik Chateau) both
+CONNECTED; **246** EG06 (Zyxel LTE3301) REGISTERING because its SIM is not
+activated (correctly diagnosed as EMM #33 / limited service). The no-proto-task
+model is HW-verified: transient losses hold + renew in place (IPv6-PD/VRF
+survive), a wwand restart adopts the live session, permanent losses down the WAN.
 
-## Must verify on-device (the no-proto-task change is untested on HW)
-Set up: WAN `qmi` proto in a VRF table, IPv6-PD delegating a /64 to a downstream
-`dmz`. Then confirm:
-1. **Transient blip** (radio/coverage cycle) → `ip -6 route show table <vrf>`
-   and `ip -6 addr show dev dmz` **unchanged**; `logread` shows hold + `renew`,
-   no "is now down". Only a brief WAN blackhole.
-2. **`/etc/init.d/wwand restart`** → `ubus call network.interface.wan status`
-   stays `up:true`; dmz PD + VRF routes persist; logread shows resync-via-renew,
-   not down/up. Also: `ps | grep context-monitor` empty; `ubus -v list wwand`
-   has no `context_wait`.
-3. **Permanent**: pull USB modem → after `hold_max` (~90 s) WAN downs (PD
-   withdrawn, expected); re-insert → `registered` → revives. SIM-blocked → WAN
-   down until PIN/PUK.
-4. Measure whether **CTL SYNC** on restart tears the live bearer (adoption
-   tolerates it, but measure the blackhole).
-Then re-run the LuCI status checks: max-rate / data-usage / uptime / error
-counters (wwan0m2), inter-frequency cells, multi-modem selector.
+Deploy to the fleet is a whole-`src-ucode` tar-over-ssh + non-destructive
+restart (see `CLAUDE.md` → Test router). The proper path is the apk package.
 
-## Pending work (not blocked by anything but the router)
-- **Dedicated restart-adoption unit test** — the code path (iface_status →
-  adopt-in-place vs kick) is exercised indirectly in `test_daemon` but there is
-  no full "fresh daemon adopts a live session" scenario yet.
-- **`hold_max` UCI config** — currently a 90 s default; the daemon `timing`
-  struct isn't even plumbed through `main.uc` in production (tests set it via
-  TIMING). Wire a global option if configurable holds are wanted.
-- **AT-based stats** (need the modem, verify exact response format):
-  per-antenna RSRP/SINR `AT+QRSRP`/`QSINR` (gold for antenna alignment),
-  channel **bandwidth in MHz** `AT+QENG="servingcell"` (the "second bandwidth",
-  fills the cell-lock `—`), Carrier Aggregation `AT+QCAINFO`, temperature
-  `AT+QTEMP`. Plan + priorities in `docs/telemetry-survey.md`.
-- **MBIM** end-to-end blocked on RG650E firmware (MBIM_OPEN fails); code is
-  written + host-tested, lazy-loaded. Needs MBIM-capable HW to validate.
+## Done recently (all committed + pushed)
 
-## Done this session (all committed)
-- no-proto-task rewrite (`2fb50a1`); before it: bounded long-poll monitor
-  (`73692e0`) and the ubusd-wedge graceful-shutdown fix (`e3d0567`) — both
-  superseded by removing the monitor, but the history explains the wedge.
-- QMI schema audited against libqmi 1.38 → fixed packet-dropped TLV ids
-  (`e3825ad`), dropped dead GET_MSISDN.imsi (`40392c4`). Reusable audit approach
-  in `CLAUDE.md`.
-- Status page: PDP failure reason → text (`728d5e1`), data counters + uptime
-  (`334c9ab`), modem-computed max up/down bandwidth (`d2e21c1`), inter-frequency
-  cells + connections panel (`359c3b9`), multi-modem selector flicker fix
-  (`6e1190e`), first stats sample fires immediately (`16a3c33`).
-- LuCI cell-lock "Lock this cell" buttons; band tables deduped into
-  `wwand.bands`.
-- Lazy MBIM load (−228 KB RSS, `3f00087`); Makefile fixes: `Build/Prepare`
-  (`2bfcf11`) + install `codec/mbim-schema` (`7f99e1f`).
-- Telemetry/stats survey (`c38a8f3`); carrier-teardown (stage A) ruled out
-  (`f507629`).
+- **Attach profile before registration** — the modem attaches autonomously off
+  CID1 before wwand activates its context, so wwand now programs the attach
+  profile (apn + pdp_type) at init. Fixes the EMM-#33 wedge (Telekom rejects an
+  IPv4-only / wrong-APN attach). `d152bce`.
+- **Registration diagnostics** — `registration_detail` (reject cause + limited
+  service) via QMI `GET_SYSTEM_INFO` + `AT+CEER`, on ubus + in the log. `d152bce`.
+- **Invalid-response detection** — truncation → protocol error, `has_payload`
+  gate, central sentinel table; neighbour-cell `-32768` normalised at the
+  source. `aeff5bf`.
+- **Config/LuCI audit** — added the missing form options + descriptions;
+  **`disabled` / `auto` interface handling** (auto=0 is no longer force-upped).
+- **Richer modem details** — UMTS/GSM signal, serving RSRQ/SINR, TAC/cell-id/
+  timing-advance, CA SCell state/count, neighbour RSSI/Srxlev.
+- **Refactors** — `merge_iface_modem_opts` (config), `setup_rmnet_links`/
+  `setup_qmimux_links` (netlink), `_fetch_ca_info`/`_determine_data_mode`
+  (fast_tick). `f1e50d5`.
+- **IMSI/ICCID fallback** — UIM read_ef → DMS getters → AT (EG06 rejects EF reads).
+- **Docs** — package reference (`wwand/README.md`) rewritten: config, no-proto-
+  task, full ubus API, eSIM management & provisioning, telemetry/diagnostics,
+  quirk handling, FAQ, troubleshooting. `94028f3` / `7acec96`.
+
+## Pending (not blocking anything)
+
+- **`context.up` refactor** — the nested activation state machine (241-reclaim,
+  v4-fatal/v6-degrades) is the connection hot path and thinly tested. Wants a
+  dedicated restart-adoption + activation unit test first, then extraction.
+- **Firmware update** — explored, not built. Tiered: ① carrier-config/MBN
+  selection (`AT+QMBNCFG`, native, safe), ② FOTA delta (`AT+QFOTADL`, native
+  orchestration), ③ full Firehose reflash via qfirehose (optional package,
+  wwand orchestrates release→flash→re-adopt, like lpac). Start with ①.
+- **`hold_max` UCI option** — currently a 90 s default; the `timing` struct is
+  not plumbed through `main.uc` in production (tests set it via TIMING).
+- **MBIM** end-to-end blocked on RG650E firmware (`MBIM_OPEN` fails); the code
+  is written + host-tested, lazy-loaded. Needs MBIM-capable HW to validate.
 
 ## Notes
-- A tar-over-ssh deploy script exists in the session scratchpad (temporary, not
-  in the repo). Prefer the proper apk package now.
-- Memory index for this project: the user's auto-memory has `qmid-rewrite-project`
-  and `wwand-vrf-constraint`.
+
+- QMI schemas must be audited against libqmi's `data/qmi-service-*.json` — a
+  wrong tag silently decodes garbage. See `CLAUDE.md`.
+- Project auto-memory covers the field findings (attach profile/#33, EG06 UIM
+  read fallback, 5G-not-subscribed on the Hybrid SIM, backend.choose pattern).

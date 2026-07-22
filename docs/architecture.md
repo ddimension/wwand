@@ -30,7 +30,7 @@ R17 ax (Quectel RG650E-EU, 5G NSA, two parallel PDP contexts).
 Design principles, all validated in the field:
 
 - **Effect injection everywhere** (`fx`, `transport_open`, `deps`): the whole
-  logic runs host-side against mocks — ~390 checks; every field bug becomes
+  logic runs host-side against mocks — ~480 checks; every field bug becomes
   a scenario in the suite.
 - **Declarative message schemas** (field tables verified against libqmi's
   JSON definitions) instead of generated code.

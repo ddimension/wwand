@@ -113,6 +113,15 @@ and drives netifd over ubus:
 The daemon touches only the link layer (mux/MTU/carrier, sysctl); **all**
 addressing and routing go through netifd, so `ip4table`/`ip6table`/VRF apply.
 
+**`disabled` and `auto`** on the netifd interface are honoured:
+
+- `option disabled '1'` — the interface is not linked to its context at all;
+  the daemon never manages, kicks or reconnects it.
+- `option auto '0'` — the daemon does **not** proactively bring the interface up
+  on modem-ready (it only *adopts* it if it is already up, e.g. after a manual
+  `ifup` or a wwand restart). With `auto '1'` (the default) the daemon kicks the
+  interface up as soon as the modem registers.
+
 ## ubus API
 
 Object `wwand`. Every method also accepts `ubus_rpc_session` (injected by rpcd
@@ -272,6 +281,74 @@ on a valid NSA anchor but never gets an NR carrier, `modem_cells` → `dsd` show
 selects the physical slot; `modem_sim_pin_lock` enables/disables the PIN lock.
 `SIM_BLOCKED` is terminal until a config reload (PIN guard tripped, no card, or
 PUK required).
+
+## Quirk handling
+
+wwand adapts to per-model firmware quirks through small **pattern-gated tables**
+and **runtime capability probing** (`backend.choose`: try the QMI path, fall
+back to AT, cache the decision per modem). Adding a modem usually means
+extending a table, not branching the code.
+
+| Quirk | Mechanism | Example |
+|---|---|---|
+| AT port discovery | 4-level fallback: `option tty` → board table → the `atport.uc` udev table (generated from ModemManager) → first-ttyUSB heuristic | — |
+| Init AT commands | `MODEL_QUIRKS` (atcmd.uc): model pattern → commands run once before registration | EG06/EM06/RG50xQ → `AT+QMBNCFG="AutoSel",1` (carrier-config auto-select) |
+| QMAP aggregation size | `board_dgram_size`: DL datagram size per model, then per board, overridable via `dl_datagram_max_size` | RG650E-EU → 31 KB (else 4 KB default) |
+| QMAP DAP fallback | rmnet requests MAPv5 checksum offload, renegotiates plain QMAP when the modem declines aggregation | RG650E declines DAP 8 edge cases |
+| eSIM host access | `esim_quirks`: some firmwares must have the internal LPA's `lpa_enable` disabled (one-time NV reset) so host-side ES10 APDUs work | RG65xx |
+| Identity read | UIM raw EF read → DMS getter fallback | EG06 rejects EF reads → IMSI/ICCID via DMS |
+| PIN unlock | UIM `VERIFY_PIN` → DMS fallback, with retry guards | — |
+| Attach profile | CID1 programmed from config before the autonomous attach | avoids the EMM-33 IPv4-only / wrong-APN reject |
+| Operator name | decoded whether plain ASCII or GSM-7 bit-packed (some modems pack the PLMN name) | EG06 |
+| Protocol switch | QMI ⇄ MBIM via `AT+QCFG="usbnet"` (`modem_set_protocol`); the modem resets and re-enumerates | Quectel RG5xx/RG6xx/EG |
+| MBIM firmware bug | some firmwares reject `MBIM_OPEN` — MBIM stays QMI-only there | RG650E |
+| Serial drain | discard stray serial noise before AT on modems that need it | M9200B |
+| Cell locking | Quectel `AT+QNWLOCK` for a fixed 4G anchor / 5G SA cell | `lock_4g` / `lock_5g` |
+
+The known-model tables live in `atcmd.uc` (init + eSIM quirks), `netlink.uc`
+(datagram size) and `protocol_switch.uc` (protocol recipes); capability probes
+go through `backend.uc`.
+
+## FAQ
+
+**Does restarting wwand drop the connection?** No. A restart is non-destructive
+(`stop_local`): the WAN and live traffic survive, and the daemon adopts the
+running session once the modem reports `registered`. Only a full `shutdown`
+(package removal) tears the session down.
+
+**The modem sits in REGISTERING with good signal — why?** Read
+`registration_detail`. An EMM reject cause (e.g. 33, "requested service option
+not subscribed") means the *attach* was rejected, not that there is no coverage
+— usually the attach APN or PDP type is wrong for the subscription. Check `apn`
+and use `pdp_type ipv4v6` (some subscriptions reject IPv4-only).
+
+**5G modem on a 5G cell but only LTE.** `modem_cells` → `dsd` with `nr: false`
+means the network is not granting EN-DC for this SIM (the tariff is LTE-only /
+DCNR-restricted). Nothing wwand or the modem can change.
+
+**Two connections over one modem?** Give the modem two `context` sections with
+different `mux_id` (and `apn`); QMAP multiplexing gives each its own `wwan0mN`
+L3 device. All contexts of a muxed modem get a channel.
+
+**Switch to an eSIM profile?** Install `wwand-esim`, download a profile
+(`modem_esim op:download`), enable it (`op:enable`), and set `option sim_slot`
+to the eUICC slot for a permanent switch — see
+[eSIM management](#esim-management--provisioning).
+
+**MBIM doesn't work on my modem.** Some firmwares (e.g. RG650E) reject
+`MBIM_OPEN` — a firmware bug, not wwand; stay on QMI. Switch back with
+`AT+QCFG="usbnet",0` + `AT+CFUN=1,1`, or `modem_set_protocol`.
+
+**Old `proto qmi` config — do I need to migrate?** No, it keeps working via the
+compat layer. To move to the native schema, run `/usr/libexec/wwand/migrate`
+(dry run) then `--apply`.
+
+**Lock to a specific cell?** `option lock_4g 'earfcn:pci'` (LTE) or
+`option lock_5g 'pci:arfcn:scs:band'` (NR SA); `lock_persist 1` stores it in the
+modem NV. The LuCI Modem page has a one-click "Lock this cell".
+
+**Where are the recovery counters?** `/tmp/wwand/state/` — they survive a daemon
+restart and clear on reboot (the recovery ladder's last rung).
 
 ## Development
 
