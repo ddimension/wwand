@@ -118,6 +118,43 @@ export default {
 			},
 		},
 
+		// raw APDU access (eSIM/ES10 traffic runs over a logical channel to
+		// the ISD-R). Verified against libqmi 1.38: APDU arrays are u16-
+		// prefixed, AID/select-response u8-prefixed.
+		SEND_APDU: {
+			id: 0x003B,
+			req: {
+				slot:       { t: 0x01, f: 'u8' },
+				apdu:       { t: 0x02, f: { n: 'u16', of: 'u8' } },
+				channel_id: { t: 0x10, f: 'u8' },
+			},
+			resp: {
+				response: { t: 0x10, f: { n: 'u16', of: 'u8' } },
+			},
+		},
+
+		OPEN_LOGICAL_CHANNEL: {
+			id: 0x0042,
+			req: {
+				slot: { t: 0x01, f: 'u8' },
+				aid:  { t: 0x10, f: { n: 'u8', of: 'u8' } },
+			},
+			resp: {
+				channel_id:      { t: 0x10, f: 'u8' },
+				select_response: { t: 0x12, f: { n: 'u8', of: 'u8' } },
+			},
+		},
+
+		LOGICAL_CHANNEL: {
+			id: 0x003F,
+			req: {
+				slot:       { t: 0x01, f: 'u8' },
+				channel_id: { t: 0x11, f: 'u8' },
+				terminate:  { t: 0x13, f: 'u8' },
+			},
+			resp: {},
+		},
+
 		VERIFY_PIN: {
 			id: 0x0026,
 			req: {

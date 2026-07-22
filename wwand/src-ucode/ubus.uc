@@ -55,6 +55,18 @@ export function publish(conn, daemon, log)
 			},
 		},
 
+		// raw APDU access (write ACL — security relevant)
+		modem_apdu: {
+			args: { modem: '', op: '', slot: 0, channel: 0, aid: '', apdu: '', ubus_rpc_session: '' },
+			call: (req) => {
+				daemon.modem_apdu(req.args.modem, req.args.op, req.args, (err, res) => {
+					req.reply(err ? { ok: false, ...err } : { ok: true, ...res });
+				});
+
+				req.defer();
+			},
+		},
+
 		modem_plmn_lists: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => {

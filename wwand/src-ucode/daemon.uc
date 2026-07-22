@@ -740,6 +740,37 @@ export function create(opts)
 		});
 	};
 
+	// raw APDU channel (eSIM foundation; also used by the lpac glue).
+	// op: 'open' {slot, aid} -> {channel, select_response}
+	//     'send' {slot, channel, apdu} -> {response}
+	//     'close' {slot, channel} -> {}
+	self.modem_apdu = function(ref, op, params, cb) {
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return cb({ error: 'no_such_modem', ref: ref });
+
+		let slot = +(params?.slot ?? 1);
+
+		switch (op) {
+		case 'open':
+			return sim.apdu_open(entry.modem, slot, params?.aid ?? '', (err, res) =>
+				cb(err ? { error: 'qmi', detail: err } : null, res));
+
+		case 'send':
+			return sim.apdu_send(entry.modem, slot, +(params?.channel ?? 0), params?.apdu ?? '',
+				(err, res) => cb(err ? { error: 'qmi', detail: err } : null,
+				                 err ? null : { response: res }));
+
+		case 'close':
+			return sim.apdu_close(entry.modem, slot, +(params?.channel ?? 0), (err) =>
+				cb(err ? { error: 'qmi', detail: err } : null, err ? null : {}));
+
+		default:
+			return cb({ error: 'invalid_op', op: op });
+		}
+	};
+
 	// SIM PLMN selector lists (settings editor; user list is editable on SIMs
 	// that carry EF 6F60 — absent lists read as null)
 	self.modem_plmn_lists = function(ref, cb) {

@@ -352,6 +352,72 @@ export function switch_slot(modem, physical, cb)
 	}, (err) => cb(err ?? null));
 }
 
+// --- raw APDU channel (eSIM/ES10 foundation) ---------------------------------
+
+export function hex_to_arr(s)
+{
+	let raw = hexdec(s ?? '');
+	let out = [];
+
+	for (let i = 0; i < length(raw ?? ''); i++)
+		push(out, ord(raw, i));
+
+	return out;
+}
+
+export function arr_to_hex(a)
+{
+	let s = '';
+
+	for (let b in (a ?? []))
+		s += sprintf('%02x', b);
+
+	return s;
+}
+
+// open a logical channel to `aid_hex` on physical slot `slot` (1-based);
+// cb(err, { channel, select_response })
+export function apdu_open(modem, slot, aid_hex, cb)
+{
+	if (!modem.uim)
+		return cb({ error: 'no_uim_client' }, null);
+
+	modem.uim.request('OPEN_LOGICAL_CHANNEL', {
+		slot: slot, aid: hex_to_arr(aid_hex),
+	}, (err, data) => {
+		if (err || data.channel_id == null)
+			return cb(err ?? { error: 'no_channel' }, null);
+
+		cb(null, { channel: data.channel_id,
+		           select_response: arr_to_hex(data.select_response) });
+	});
+}
+
+export function apdu_send(modem, slot, channel, apdu_hex, cb)
+{
+	if (!modem.uim)
+		return cb({ error: 'no_uim_client' }, null);
+
+	modem.uim.request('SEND_APDU', {
+		slot: slot, channel_id: channel, apdu: hex_to_arr(apdu_hex),
+	}, (err, data) => {
+		if (err)
+			return cb(err, null);
+
+		cb(null, arr_to_hex(data.response));
+	}, { timeout: 30000 });
+}
+
+export function apdu_close(modem, slot, channel, cb)
+{
+	if (!modem.uim)
+		return cb({ error: 'no_uim_client' });
+
+	modem.uim.request('LOGICAL_CHANNEL', {
+		slot: slot, channel_id: channel, terminate: 1,
+	}, (err) => cb(err ?? null));
+}
+
 // --- PLMN selector lists (settings editor) -----------------------------------
 
 const EF_PLMN_USER = { file_id: 0x6F60, path: "\x00\x3F\xFF\x7F" };   // PLMNwAcT
