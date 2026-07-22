@@ -22,11 +22,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <net/if.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -42,7 +44,9 @@ static uc_resource_type_t *transport_type;
 static int last_errno;
 
 typedef struct {
-	int fd;
+	int fd;       /* primary/read fd (nonblock): device, or a child's stdout */
+	int wfd;      /* spawn: write fd to the child's stdin; -1 for devices */
+	int pid;      /* spawn: child pid (reaped on close); -1 for devices */
 	bool is_tty;
 } wwand_io_t;
 
@@ -136,7 +140,138 @@ qmit_open_common(uc_vm_t *vm, const char *path, bool is_tty, int baud)
 	}
 
 	t->fd = fd;
+	t->wfd = -1;
+	t->pid = -1;
 	t->is_tty = is_tty;
+
+	return uc_resource_new(transport_type, t);
+}
+
+static void
+free_argv(char **args)
+{
+	size_t k;
+
+	if (!args)
+		return;
+
+	for (k = 0; args[k]; k++)
+		free(args[k]);
+
+	free(args);
+}
+
+/*
+ * spawn(argv) — fork/exec argv[] with the child's stdin and stdout wired to
+ * pipes; the child's stderr is inherited (redirect it in the argv via a shell
+ * if needed). The returned handle reads (non-blocking) the child's stdout and
+ * writes to its stdin, so a uloop.handle() drain loop can bridge a line
+ * protocol without ever blocking the daemon. close() reaps the child and
+ * returns its exit status.
+ */
+static uc_value_t *
+qmit_spawn(uc_vm_t *vm, size_t nargs)
+{
+	uc_value_t *argv = uc_fn_arg(0);
+	wwand_io_t *t;
+	char **args;
+	size_t n, i;
+	int in[2], out[2], fl;
+	pid_t pid;
+
+	last_errno = 0;
+
+	if (ucv_type(argv) != UC_ARRAY || (n = ucv_array_length(argv)) == 0) {
+		last_errno = EINVAL;
+
+		return NULL;
+	}
+
+	args = calloc(n + 1, sizeof(*args));
+
+	if (!args) {
+		last_errno = ENOMEM;
+
+		return NULL;
+	}
+
+	for (i = 0; i < n; i++) {
+		uc_value_t *a = ucv_array_get(argv, i);
+
+		/* strdup: ucv_string_get pointers are not stable across the fork */
+		if (ucv_type(a) != UC_STRING || !(args[i] = strdup(ucv_string_get(a)))) {
+			last_errno = (ucv_type(a) != UC_STRING) ? EINVAL : ENOMEM;
+			free_argv(args);
+
+			return NULL;
+		}
+	}
+
+	if (pipe(in) < 0) {
+		last_errno = errno;
+		free_argv(args);
+
+		return NULL;
+	}
+
+	if (pipe(out) < 0) {
+		last_errno = errno;
+		close(in[0]);
+		close(in[1]);
+		free_argv(args);
+
+		return NULL;
+	}
+
+	pid = fork();
+
+	if (pid < 0) {
+		last_errno = errno;
+		close(in[0]);
+		close(in[1]);
+		close(out[0]);
+		close(out[1]);
+		free_argv(args);
+
+		return NULL;
+	}
+
+	if (pid == 0) {
+		/* child: stdin <- in[0], stdout -> out[1], stderr inherited */
+		dup2(in[0], STDIN_FILENO);
+		dup2(out[1], STDOUT_FILENO);
+		close(in[0]);
+		close(in[1]);
+		close(out[0]);
+		close(out[1]);
+		execvp(args[0], args);
+		_exit(127);
+	}
+
+	/* parent */
+	close(in[0]);
+	close(out[1]);
+	free_argv(args);
+
+	fl = fcntl(out[0], F_GETFL, 0);
+	fcntl(out[0], F_SETFL, (fl < 0 ? 0 : fl) | O_NONBLOCK);
+	fcntl(out[0], F_SETFD, FD_CLOEXEC);
+	fcntl(in[1], F_SETFD, FD_CLOEXEC);
+
+	t = calloc(1, sizeof(*t));
+
+	if (!t) {
+		last_errno = ENOMEM;
+		close(out[0]);
+		close(in[1]);
+
+		return NULL;
+	}
+
+	t->fd = out[0];
+	t->wfd = in[1];
+	t->pid = pid;
+	t->is_tty = false;
 
 	return uc_resource_new(transport_type, t);
 }
@@ -212,11 +347,21 @@ qmit_write(uc_vm_t *vm, size_t nargs)
 	const char *p;
 	size_t len, off = 0;
 	ssize_t w;
+	int wfd;
 
 	last_errno = 0;
 
-	if (!t || t->fd < 0 || ucv_type(data) != UC_STRING) {
+	if (!t || ucv_type(data) != UC_STRING) {
 		last_errno = (ucv_type(data) != UC_STRING) ? EINVAL : EBADF;
+
+		return ucv_boolean_new(false);
+	}
+
+	/* spawn handles write to the child's stdin; devices write to their fd */
+	wfd = (t->wfd >= 0) ? t->wfd : t->fd;
+
+	if (wfd < 0) {
+		last_errno = EBADF;
 
 		return ucv_boolean_new(false);
 	}
@@ -225,7 +370,7 @@ qmit_write(uc_vm_t *vm, size_t nargs)
 	len = ucv_string_length(data);
 
 	while (off < len) {
-		w = write(t->fd, p + off, len - off);
+		w = write(wfd, p + off, len - off);
 
 		if (w < 0) {
 			if (errno == EINTR)
@@ -275,10 +420,27 @@ static uc_value_t *
 qmit_close(uc_vm_t *vm, size_t nargs)
 {
 	wwand_io_t *t = qmit_this(vm);
+	int status = 0;
 
-	if (t && t->fd >= 0) {
-		close(t->fd);
-		t->fd = -1;
+	if (t) {
+		if (t->fd >= 0) {
+			close(t->fd);
+			t->fd = -1;
+		}
+
+		if (t->wfd >= 0) {
+			close(t->wfd);
+			t->wfd = -1;
+		}
+
+		/* spawn: reap the child and hand back its exit status */
+		if (t->pid > 0) {
+			while (waitpid(t->pid, &status, 0) < 0 && errno == EINTR)
+				;
+			t->pid = -1;
+
+			return ucv_int64_new(WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+		}
 	}
 
 	return ucv_boolean_new(true);
@@ -292,6 +454,15 @@ qmit_free(void *ptr)
 	if (t) {
 		if (t->fd >= 0)
 			close(t->fd);
+
+		if (t->wfd >= 0)
+			close(t->wfd);
+
+		if (t->pid > 0) {
+			int status;
+
+			waitpid(t->pid, &status, WNOHANG);
+		}
 
 		free(t);
 	}
@@ -475,6 +646,7 @@ qmit_rmnet_add(uc_vm_t *vm, size_t nargs)
 static const uc_function_list_t global_fns[] = {
 	{ "open",       qmit_open },
 	{ "open_tty",   qmit_open_tty },
+	{ "spawn",      qmit_spawn },
 	{ "rmnet_add",  qmit_rmnet_add },
 	{ "last_error", qmit_last_error },
 };

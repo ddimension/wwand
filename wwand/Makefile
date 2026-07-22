@@ -71,9 +71,9 @@ define Package/wwand-esim
   TITLE:=eSIM (eUICC) profile management for wwand
   # wwand-lpac is our self-contained static lpac (bundled wolfSSL+libcurl, no
   # OpenSSL/mbedtls .so). It drives the SM-DP+ download/notification (ES9+
-  # HTTPS on the router) via the wwand APDU channel; jsonfilter parses lpac's
-  # stdio protocol in the glue script.
-  DEPENDS:=+wwand +wwand-lpac +jsonfilter
+  # HTTPS on the router); the daemon bridges lpac's stdio APDU protocol inline
+  # (native, no wrapper script / jsonfilter).
+  DEPENDS:=+wwand +wwand-lpac
 endef
 
 define Package/wwand-esim/description
@@ -95,8 +95,6 @@ endef
 define Package/wwand-esim/install
 	$(INSTALL_DIR) $(1)/usr/share/ucode/wwand
 	$(INSTALL_DATA) ./src-ucode/esim.uc $(1)/usr/share/ucode/wwand/
-	$(INSTALL_DIR) $(1)/usr/libexec/wwand
-	$(INSTALL_BIN) ./files/wwand-esim-download $(1)/usr/libexec/wwand/esim-download
 endef
 
 $(eval $(call BuildPackage,wwand))

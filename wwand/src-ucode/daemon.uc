@@ -13,6 +13,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
+import * as fs from 'fs';
 import * as modem_mod from './modem.uc';
 import * as context_mod from './context.uc';
 import * as sim from './sim.uc';
@@ -796,51 +797,124 @@ export function create(opts)
 	// 'profiles' | 'eid' | 'enable' | 'disable' | 'delete' (iccid required
 	// for the latter three). slot defaults to the active physical slot? No —
 	// explicit slot, default 1.
-	// run lpac's AT driver for a host-side eSIM op (download / chip /
-	// notif-list / notif-process). lpac does the ES10 APDUs over AT+CCHO/CGLA
-	// on a SECONDARY AT port (wwand keeps its own) and the ES9+ HTTPS itself
-	// over the router's uplink. Requires: the eUICC ISD-R free (the lpa_disable
-	// quirk handles that), lpac built with a termios-setting at driver, and
-	// libcurl built with OpenSSL (mbedtls fails the GSMA SM-DP+ TLS). lpac
-	// writes progress/result JSON to stdout, captured to a log file that
-	// download_status streams live and that is mirrored to the wwand log.
+	// Drive a host-side lpac eSIM op (download / chip / notif-list /
+	// notif-process) with the APDU bridge INLINE — no wrapper script, no
+	// jsonfilter. lpac is spawned (wwand_io.spawn) with LPAC_APDU=stdio; its
+	// stdout (the JSON requests) is drained non-blocking via uloop and each APDU
+	// goes straight to the modem through sim.apdu_* (no ubus round-trip); the
+	// JSON reply is written to lpac's stdin. lpac does the SM-DP+ HTTPS itself
+	// (curl). Progress/result lines and lpac's stderr go to esim_logf, which
+	// download_status streams live and which is mirrored to the wwand log. lpac
+	// is provided by the wwand-lpac package.
 	let esim_logf = '/tmp/wwand/esim-download.log';
+	let esim_lpac = '/usr/lib/lpac';
 
 	let esim_lpac_run = (ref, slot, op, code, conf, on_done) => {
-		let fx = deps.datapath_fx;
+		let entry = self.modems[ref];
 
-		// lpac's ES10 APDUs are relayed through wwand's own modem_apdu ubus
-		// channel by the stdio bridge script, so wwand stays the sole owner of
-		// the modem — no separate AT port. lpac does the SM-DP+ HTTPS itself.
-		let bridge = '/usr/libexec/wwand/esim-download';
+		if (fs.access(esim_lpac) != true)
+			return false;   // wwand-lpac not installed — caller reports it
 
-		if (fx?.exists && !fx.exists(bridge))
-			return false;   // package not installed — caller reports it
+		let cmd;
+		switch (op) {
+		case 'download':      cmd = sprintf("profile download -a '%s'%s", code ?? '',
+		                                    length(conf ?? '') ? sprintf(" -c '%s'", conf) : ''); break;
+		case 'notif-list':    cmd = 'notification list'; break;
+		case 'notif-process': cmd = 'notification process -a'; break;
+		default:              cmd = 'chip info';
+		}
 
-		// op names map 1:1 to the bridge's OP env; anything else = chip self-test
-		let bridge_op = (op == 'download' || op == 'notif-list' || op == 'notif-process')
-			? op : 'chip';
+		let tr = fs.open(esim_logf, 'w'); if (tr) tr.close();   // truncate the log
+		let logf = fs.open(esim_logf, 'a');
 
-		if (fx?.write)
-			fx.write(esim_logf, '');   // truncate for a fresh run
+		// native spawn gives a non-blocking stdout + writable stdin; the shell
+		// only sets the env and appends lpac's stderr to the log
+		let qmit = require('wwand_io');
+		let h = qmit.spawn([ '/bin/sh', '-c',
+			sprintf("mkdir -p /tmp/wwand; exec env LPAC_APDU=stdio LPAC_HTTP=curl %s %s 2>>%s",
+				esim_lpac, cmd, esim_logf) ]);
 
-		log('notice', sprintf('modem %s: esim[%s]: lpac stdio bridge', ref, op));
+		if (!h) { if (logf) logf.close(); return null; }
 
-		// code/conf are validated in the download op (LPA:1$host$token charset),
-		// so single-quoting is shell-safe; notif ops pass them empty
-		return uloop.process('/bin/sh', [ '-c',
-			sprintf("OP=%s %s %s %d '%s' '%s' >%s 2>&1",
-				bridge_op, bridge, ref, slot, code ?? '', conf ?? '', esim_logf) ], {},
-			(exitcode) => {
-				let out = fx?.read ? trim(fx.read(esim_logf) ?? '') : '';
+		log('notice', sprintf('modem %s: esim[%s]: lpac stdio (inline bridge)', ref, op));
 
-				// mirror lpac's progress/result to the wwand log
-				for (let l in split(out ?? '', '\n'))
-					if (length(trim(l)))
-						log('notice', sprintf('modem %s: esim[%s]: %s', ref, op, trim(l)));
+		let chan = 0, uh = null, buf = '';
 
-				on_done(exitcode == 0 ? null : { error: 'lpac', code: exitcode }, out);
-			});
+		let logline = (s) => {
+			if (logf) { logf.write(s + '\n'); logf.flush(); }
+			log('notice', sprintf('modem %s: esim[%s]: %s', ref, op, s));
+		};
+		let send = (ecode, data) =>
+			h.write(sprintf('{"type":"apdu","payload":{"ecode":%d,"data":"%s"}}\n', ecode, data ?? ''));
+		let field = (s, re) => { let m = match(s, re); return m ? m[1] : null; };
+
+		let finish;   // forward-declare (ucode TDZ on self-referencing arrows)
+		finish = () => {
+			if (uh) { uh.delete(); uh = null; }
+			let ec = h.close();   // reaps the child, returns its exit status
+			if (logf) { logf.close(); logf = null; }
+			on_done(ec == 0 ? null : { error: 'lpac', code: ec }, trim(fs.readfile(esim_logf) ?? ''));
+		};
+
+		// stdout carries only the protocol's JSON objects; fields are pulled with
+		// match() as ucode's json() throws uncatchably. APDU ops dispatch async
+		// (their reply is written when the modem answers); progress/lpa just log.
+		let handle_line = (s) => {
+			if (substr(s, 0, 1) != '{') { if (length(s)) logline(s); return; }
+
+			let mtype = field(s, /"type": *"([a-z]+)"/);
+			if (mtype == 'apdu') {
+				let func = field(s, /"func": *"([a-z_]+)"/);
+				let param = field(s, /"param": *"([0-9A-Fa-f]*)"/) ?? '';
+				switch (func) {
+				case 'connect':
+				case 'disconnect':
+					send(0, ''); break;
+				case 'logic_channel_open':
+					sim.apdu_open(entry.modem, slot, param, (err, res) => {
+						chan = res?.channel ?? 0;
+						send(err ? -1 : chan, '');
+					}); break;
+				case 'transmit':
+					// apdu_send yields the response hex directly (modem_apdu is
+					// what wraps it as {response}); use it as-is
+					sim.apdu_send(entry.modem, slot, chan, param, (err, res) =>
+						send(err ? -1 : 0, err ? '' : (res ?? ''))); break;
+				case 'logic_channel_close':
+					sim.apdu_close(entry.modem, slot, chan, () => send(0, '')); break;
+				default:
+					send(-1, '');
+				}
+			} else if (mtype == 'progress')
+				logline('progress: ' + (field(s, /"message": *"([^"]*)"/) ?? 'step'));
+			else if (mtype == 'lpa') {
+				logline(sprintf('result: code=%s %s',
+					field(s, /"code": *(-?[0-9]+)/) ?? '?',
+					field(s, /"message": *"([^"]*)"/) ?? ''));
+				let d = field(s, /"data": *"([^"]*)"/);
+				if (d) logline('data: ' + d);
+			}
+		};
+
+		// h.read() is non-blocking (edge-triggered fd): drain all available
+		// bytes, then process every complete line
+		uh = uloop.handle(h.fileno(), () => {
+			while (true) {
+				let chunk = h.read();
+				if (chunk === false) return finish();   // EOF: lpac exited
+				if (chunk === null) break;               // no more data right now
+				buf += chunk;
+			}
+
+			let nl;
+			while ((nl = index(buf, '\n')) >= 0) {
+				let s = trim(substr(buf, 0, nl));
+				buf = substr(buf, nl + 1);
+				if (length(s)) handle_line(s);
+			}
+		}, uloop.ULOOP_READ);
+
+		return h;
 	};
 
 	// host-side download via lpac (stdio bridge over wwand's APDU channel).

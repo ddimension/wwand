@@ -21,7 +21,11 @@ export function log(level, fmt, ...args)
 	if ((LEVELS[level] ?? 7) > threshold)
 		return;
 
-	warn(sprintf('%s: ' + fmt + "\n", level, ...args));
+	// strip control characters (e.g. the \x0b some modems prefix to the PLMN
+	// name) so each entry stays on one clean line in syslog
+	let msg = replace(sprintf('%s: ' + fmt, level, ...args), /[[:cntrl:]]/g, '');
+
+	warn(msg + "\n");
 }
 
 export function err(fmt, ...args)    { log('err', fmt, ...args); }
