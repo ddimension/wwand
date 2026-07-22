@@ -31,6 +31,7 @@ import * as recovery_mod from './recovery.uc';
 import * as atcmd from './atcmd.uc';
 import * as backend from './backend.uc';
 import * as protoswitch from './protocol_switch.uc';
+import * as tlv from './codec/tlv.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
 import * as dmsmod from './codec/schema/dms.uc';
 import * as nasmod from './codec/schema/nas.uc';
@@ -141,9 +142,11 @@ function ca_from_qmi(d)
 		push(out, { role: 'PCC', earfcn: d.pcell.earfcn, pci: d.pcell.pci,
 		            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', d.pcell.dl_bandwidth)] ?? null });
 
+	// QmiNasScellState: 0 deconfigured, 1 deactivated, 2 activated
 	for (let s in (d?.scells ?? []))
 		push(out, { role: 'SCC', earfcn: s.earfcn, pci: s.pci,
-		            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', s.dl_bandwidth)] ?? null });
+		            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', s.dl_bandwidth)] ?? null,
+		            state: s.state });
 
 	return out;
 }
@@ -187,6 +190,31 @@ function dsd_from_radio(radio_ifs)
 	let mode = nr ? (lte ? 'NSA' : 'SA') : (lte ? 'LTE' : null);
 
 	return mode ? { mode: mode, lte: lte, nr: nr } : null;
+}
+
+// Null out the i16 signal metrics QMI reports as -32768 ("not available") on
+// serving + neighbour cells, applied once at ingestion (store_cells) so the
+// telemetry line and both LuCI pages render "—" instead of e.g. -3276.8 dBm.
+// The metric set is a superset — a field absent on a given cell is skipped.
+function clean_cell_metrics(cells)
+{
+	let scrub = (c) => {
+		for (let f in [ 'rsrp', 'rsrq', 'rssi', 'srxlev', 'snr' ])
+			if (c[f] == tlv.SENTINEL.i16)   // only the actual sentinel, not absent keys
+				c[f] = null;
+	};
+
+	for (let c in (cells?.lte_intra?.cells ?? []))
+		scrub(c);
+
+	for (let fr in (cells?.lte_inter?.freqs ?? []))
+		for (let c in (fr.cells ?? []))
+			scrub(c);
+
+	if (cells?.nr5g_cell)
+		scrub(cells.nr5g_cell);
+
+	return cells;
 }
 
 export function create(opts)
@@ -1196,6 +1224,8 @@ export function create(opts)
 	// bare serving-cell-only result would make the UI neighbour list flicker in
 	// and out — hold the last-seen neighbours for NEIGH_HOLD seconds instead.
 	let store_cells = (data) => {
+		clean_cell_metrics(data);   // -32768 sentinels -> null before anyone reads them
+
 		let li = data?.lte_intra;
 
 		if (li) {
@@ -1223,13 +1253,14 @@ export function create(opts)
 		// signal first, then cells; scheduling the next cycle only after both
 		// complete keeps it non-overlapping (adaptive to modem load)
 		self.nas.request('GET_SIGNAL_INFO', {}, (serr, sdata) => {
-			if (!serr && sdata)
+			// keep last-known on an empty/invalid answer instead of blanking it
+			if (!serr && tlv.has_payload(sdata))
 				self.signal = sdata;
 
 			if (!self.nas) { fast_running = false; return; }
 
 			self.nas.request('GET_CELL_LOCATION_INFO', {}, (cerr, cdata) => {
-				if (!cerr && cdata)
+				if (!cerr && tlv.has_payload(cdata))
 					store_cells(cdata);
 
 				let done = () => {
@@ -1383,7 +1414,7 @@ export function create(opts)
 		// NSA: the modem stays LTE-registered (radio_ifs often lists LTE only)
 		// while the NR anchor shows up in the 5G cell/signal info — report it
 		let nr_anchor = self.cells?.nr5g_cell != null ||
-			(self.signal?.nr5g?.rsrp != null && self.signal.nr5g.rsrp > -32768);
+			!tlv.is_unavailable(self.signal?.nr5g?.rsrp, 'i16');
 		let has_lte = index(techs, 'LTE') >= 0;
 		let has_nr = index(techs, 'NR5G') >= 0;
 
@@ -1423,13 +1454,13 @@ export function create(opts)
 				nr.plmn, nr.tac, nr.pci, self.cells?.nr5g_arfcn ?? 0,
 				nr.rsrp / 10.0, nr.rsrq / 10.0, nr.snr / 10.0));
 
-		// -32768 is the QMI "not available" sentinel for i16 metrics;
+		// i16 signal metrics report -32768 when not available (tlv.SENTINEL.i16);
 		// filter per field (mixed valid/sentinel values do occur)
 		let sig_part = (label, fields) => {
 			let out = [];
 
 			for (let name, spec in fields)
-				if (spec[0] != null && spec[0] > -32768)
+				if (!tlv.is_unavailable(spec[0], 'i16'))
 					push(out, sprintf('%s %s', name,
 						spec[1] ? sprintf('%.1f', spec[0] / 10.0) : sprintf('%d', spec[0])));
 

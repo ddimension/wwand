@@ -77,6 +77,11 @@ function renderSignal(sig) {
 	var n = sig.nr5g;
 	if (n && (n.rsrp > -32768 || n.snr > -32768))
 		rows.push([ '5G NR', '—', sig10(n.rsrp,'dBm'), sig10(sig.nr5g_rsrq,'dB'), sig10(n.snr,'dB') ]);
+	var w = sig.wcdma;
+	if (w && w.rssi != null && w.rssi > -128)
+		rows.push([ 'UMTS', sig1(w.rssi,'dBm'), '—', sig10(w.ecio,'dB'), '—' ]);
+	if (sig.gsm_rssi != null && sig.gsm_rssi > -128)
+		rows.push([ 'GSM', sig1(sig.gsm_rssi,'dBm'), '—', '—', '—' ]);
 	if (!rows.length) return E('em', {}, _('no signal data'));
 	return grid([ _('RAT'), 'RSSI', 'RSRP', 'RSRQ', 'SNR/SINR' ], rows);
 }
@@ -85,6 +90,10 @@ function renderSignal(sig) {
 function renderServing(cells) {
 	var rows = [], sv = cells.serving || {};
 	var lc = cells.lte_intra, sl = sv.lte;
+	// QMI serving-cell metrics live in the intra-freq list entry whose PCI is the
+	// serving one — fall back to it when the QENG (AT) detail is absent
+	var lqmi = null;
+	if (lc && lc.cells) lqmi = lc.cells.filter(function(c){ return c.pci == lc.serving_cell_id })[0];
 	if (lc || sl) {
 		var earfcn = (sl && sl.earfcn) || (lc && lc.earfcn);
 		var ef = bands.lteEarfcn(earfcn);
@@ -93,7 +102,9 @@ function renderServing(cells) {
 			dash(earfcn), ef ? ef.mhz.toFixed(1)+' MHz' : '—',
 			(sl && sl.bandwidth_mhz) ? (sl.bandwidth_mhz + ' MHz') : '—',
 			dash((lc && lc.serving_cell_id) != null ? lc.serving_cell_id : (sl && sl.pci)),
-			sl ? sig1(sl.rsrp,'dBm') : '—' ]);
+			sl ? sig1(sl.rsrp,'dBm') : (lqmi ? sig10(lqmi.rsrp,'dBm') : '—'),
+			(sl && sl.rsrq != null) ? sig1(sl.rsrq,'dB') : (lqmi ? sig10(lqmi.rsrq,'dB') : '—'),
+			(sl && sl.sinr != null) ? sig1(sl.sinr,'dB') : '—' ]);
 	}
 	var nc = cells.nr5g_cell, sn = sv.nr;
 	if (nc || sn) {
@@ -104,22 +115,36 @@ function renderServing(cells) {
 			dash(arfcn), nf ? nf.mhz.toFixed(1)+' MHz' : '—',
 			(sn && sn.bandwidth_mhz) ? (sn.bandwidth_mhz + ' MHz') : '—',
 			dash((nc && nc.pci) != null ? nc.pci : (sn && sn.pci)),
-			sn ? sig1(sn.rsrp,'dBm') : (nc ? sig10(nc.rsrp,'dBm') : '—') ]);
+			sn ? sig1(sn.rsrp,'dBm') : (nc ? sig10(nc.rsrp,'dBm') : '—'),
+			(sn && sn.rsrq != null) ? sig1(sn.rsrq,'dB') : (nc ? sig10(nc.rsrq,'dB') : '—'),
+			(sn && sn.sinr != null) ? sig1(sn.sinr,'dB') : (nc ? sig10(nc.snr,'dB') : '—') ]);
 	}
 	if (!rows.length) return E('em', {}, _('no serving-cell data'));
-	return grid([ _('RAT'), _('Band'), 'ARFCN', _('Frequency'), _('Bandwidth'), 'PCI', 'RSRP' ], rows);
+
+	var g = grid([ _('RAT'), _('Band'), 'ARFCN', _('Frequency'), _('Bandwidth'), 'PCI', 'RSRP', 'RSRQ', 'SNR/SINR' ], rows);
+
+	// serving-cell identifiers + timing advance (compact line under the table)
+	var idbits = [];
+	if (lc && lc.tac != null) idbits.push('TAC ' + lc.tac);
+	if (lc && lc.global_cell_id != null) idbits.push(_('Cell') + ' ' + lc.global_cell_id);
+	if (cells.lte_timing_advance != null && cells.lte_timing_advance != 0xFFFFFFFF)
+		idbits.push(_('Timing advance') + ' ' + cells.lte_timing_advance);
+	if (!idbits.length) return g;
+	return E('div', {}, [ g, E('div', { 'style': 'margin-top:4px;color:#888;font-size:90%' }, idbits.join(' · ')) ]);
 }
 
+var SCELL_STATE = { 0: _('deconfigured'), 1: _('deactivated'), 2: _('activated') };
 function renderCA(ca) {
 	if (!ca || !ca.length) return null;
-	return section(_('Carrier aggregation'), grid(
-		[ _('Carrier'), _('Band'), 'ARFCN', _('Frequency'), _('Bandwidth'), 'PCI' ],
+	return section(_('Carrier aggregation') + ' (' + ca.length + ')', grid(
+		[ _('Carrier'), _('Band'), 'ARFCN', _('Frequency'), _('Bandwidth'), 'PCI', _('State') ],
 		ca.map(function(c){
 			var isNR = (''+c.role).indexOf('NR') >= 0;
 			var f = isNR ? bands.nrArfcn(c.earfcn) : bands.lteEarfcn(c.earfcn);
 			return [ c.role, f ? f.band : '—', ''+c.earfcn,
 				f ? f.mhz.toFixed(1)+' MHz' : '—',
-				c.bandwidth_mhz ? c.bandwidth_mhz+' MHz' : '—', ''+c.pci ];
+				c.bandwidth_mhz ? c.bandwidth_mhz+' MHz' : '—', ''+c.pci,
+				(c.role == 'PCC') ? _('primary') : (c.state != null ? (SCELL_STATE[c.state] || (''+c.state)) : '—') ];
 		})));
 }
 
@@ -130,20 +155,20 @@ function renderNeighbours(cells) {
 		var ef = bands.lteEarfcn(lc.earfcn);
 		var rows = lc.cells.filter(function(c){ return c.pci != lc.serving_cell_id })
 			.map(function(c){ return [ ''+c.pci, ef ? ef.mhz.toFixed(1)+' MHz' : '—',
-				sig10(c.rsrp,'dBm'), sig10(c.rsrq,'dB') ]; });
+				sig10(c.rsrp,'dBm'), sig10(c.rsrq,'dB'), sig10(c.rssi,'dBm'), sig10(c.srxlev,'dB') ]; });
 		if (rows.length) out.push(section(_('LTE neighbours (intra-frequency)'),
-			grid([ 'PCI', _('Freq'), 'RSRP', 'RSRQ' ], rows)));
+			grid([ 'PCI', _('Freq'), 'RSRP', 'RSRQ', 'RSSI', 'Srxlev' ], rows)));
 	}
 	var li = cells.lte_inter, irows = [];
 	if (li && li.freqs) li.freqs.forEach(function(fr){
 		var fef = bands.lteEarfcn(fr.earfcn);
 		(fr.cells || []).forEach(function(c){
 			irows.push([ fef ? '%s · %d'.format(fef.band, fr.earfcn) : ''+fr.earfcn,
-				fef ? fef.mhz.toFixed(1)+' MHz' : '—', ''+c.pci, sig10(c.rsrp,'dBm'), sig10(c.rsrq,'dB') ]);
+				fef ? fef.mhz.toFixed(1)+' MHz' : '—', ''+c.pci, sig10(c.rsrp,'dBm'), sig10(c.rsrq,'dB'), sig10(c.srxlev,'dB') ]);
 		});
 	});
 	if (irows.length) out.push(section(_('LTE neighbours (inter-frequency)'),
-		grid([ _('Band / EARFCN'), _('Freq'), 'PCI', 'RSRP', 'RSRQ' ], irows)));
+		grid([ _('Band / EARFCN'), _('Freq'), 'PCI', 'RSRP', 'RSRQ', 'Srxlev' ], irows)));
 	return out;
 }
 

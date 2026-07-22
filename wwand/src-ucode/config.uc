@@ -148,6 +148,68 @@ export function parse_netdev(device)
 	return { netdev: device, mux_id: 0, muxed: false };
 }
 
+// merge the modem-level options an old-style qmi-advanced interface section
+// carries into the synthesized modem (first interface wins; conflicts warn).
+// Extracted from compat_translate so its per-interface loop reads as its
+// distinct steps: skip-checks -> device resolution -> THIS -> context build.
+function merge_iface_modem_opts(modem, s, name, mkey, warnings)
+{
+	let scalars = { pincode: s.pincode, modes: s.modes, mcc: s.mcc, mnc: s.mnc, tty: null };
+
+	for (let key, val in scalars) {
+		if (val == null)
+			continue;
+
+		if (modem[key] == null)
+			modem[key] = val;
+		else if (modem[key] != val)
+			push(warnings, sprintf("interface %s: conflicting %s ignored (modem %s)", name, key, mkey));
+	}
+
+	if (type(s.at_init) == 'array' && !length(modem.at_init))
+		modem.at_init = s.at_init;
+
+	// cell lock is a modem-level property; old-style configs carry it on the
+	// interface sections (LuCI's "Lock this cell" writes it there)
+	let l4 = (type(s.lock_4g) == 'array') ? s.lock_4g :
+	         (s.lock_4g != null ? [ s.lock_4g ] : []);
+
+	if (length(l4)) {
+		if (!length(modem.lock_4g))
+			modem.lock_4g = l4;
+		else if (join(',', modem.lock_4g) != join(',', l4))
+			push(warnings, sprintf("interface %s: conflicting lock_4g ignored (modem %s)", name, mkey));
+	}
+
+	if (s.lock_5g != null) {
+		if (modem.lock_5g == null)
+			modem.lock_5g = s.lock_5g;
+		else if (modem.lock_5g != s.lock_5g)
+			push(warnings, sprintf("interface %s: conflicting lock_5g ignored (modem %s)", name, mkey));
+	}
+
+	if (s.lock_persist != null)
+		modem.lock_persist = bool_opt(s.lock_persist, false);
+
+	if (s.sim_slot != null && !modem.sim_slot)
+		modem.sim_slot = +s.sim_slot;
+
+	if (s.location != null)
+		modem.location = +s.location > 1;   // old gate: location > 1
+
+	if (s.delay != null)
+		modem.delay = +s.delay;
+
+	if (s.failreboot != null)
+		modem.failreboot = +s.failreboot;
+
+	if (s.zero_rx_timeout != null)
+		modem.zero_rx_timeout = +s.zero_rx_timeout;
+
+	if (s.stats_interval != null)
+		modem.stats_interval = +s.stats_interval;
+}
+
 function compat_translate(raw, result)
 {
 	for (let name, s in (raw.network ?? {})) {
@@ -200,67 +262,7 @@ function compat_translate(raw, result)
 			});
 		}
 
-		// modem-level options: first interface wins, conflicts are warned
-		let modem_opts = {
-			pincode: s.pincode,
-			modes: s.modes,
-			mcc: s.mcc,
-			mnc: s.mnc,
-			tty: null,
-		};
-
-		for (let key, val in modem_opts) {
-			if (val == null)
-				continue;
-
-			if (modem[key] == null)
-				modem[key] = val;
-			else if (modem[key] != val)
-				push(result.warnings, sprintf("interface %s: conflicting %s ignored (modem %s)", name, key, mkey));
-		}
-
-		if (type(s.at_init) == 'array' && !length(modem.at_init))
-			modem.at_init = s.at_init;
-
-		// cell lock is a modem-level property; old-style configs carry it on
-		// the interface sections (LuCI's "Lock this cell" writes it there)
-		let l4 = (type(s.lock_4g) == 'array') ? s.lock_4g :
-		         (s.lock_4g != null ? [ s.lock_4g ] : []);
-
-		if (length(l4)) {
-			if (!length(modem.lock_4g))
-				modem.lock_4g = l4;
-			else if (join(',', modem.lock_4g) != join(',', l4))
-				push(result.warnings, sprintf("interface %s: conflicting lock_4g ignored (modem %s)", name, mkey));
-		}
-
-		if (s.lock_5g != null) {
-			if (modem.lock_5g == null)
-				modem.lock_5g = s.lock_5g;
-			else if (modem.lock_5g != s.lock_5g)
-				push(result.warnings, sprintf("interface %s: conflicting lock_5g ignored (modem %s)", name, mkey));
-		}
-
-		if (s.lock_persist != null)
-			modem.lock_persist = bool_opt(s.lock_persist, false);
-
-		if (s.sim_slot != null && !modem.sim_slot)
-			modem.sim_slot = +s.sim_slot;
-
-		if (s.location != null)
-			modem.location = +s.location > 1;   // old gate: location > 1
-
-		if (s.delay != null)
-			modem.delay = +s.delay;
-
-		if (s.failreboot != null)
-			modem.failreboot = +s.failreboot;
-
-		if (s.zero_rx_timeout != null)
-			modem.zero_rx_timeout = +s.zero_rx_timeout;
-
-		if (s.stats_interval != null)
-			modem.stats_interval = +s.stats_interval;
+		merge_iface_modem_opts(modem, s, name, mkey, result.warnings);
 
 		// context-level options
 		let v4 = bool_opt(s.ipv4, true);

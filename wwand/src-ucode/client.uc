@@ -110,7 +110,12 @@ export function create(hub, schema, cid, hooks)
 			let data = tlv.unpack(p.msg.resp, dec.tlvs);
 			let err = null;
 
-			if (data._result == null)
+			// a TLV claimed more bytes than the frame carried: the decode is
+			// corrupt, so the payload can't be trusted even if a result TLV
+			// happened to parse. Treat as a protocol error, never as data.
+			if (data._truncated)
+				err = { error: 'proto', detail: 'truncated response' };
+			else if (data._result == null)
 				err = { error: 'proto', detail: 'missing result tlv' };
 			else if (data._result.result != 0)
 				err = { error: 'qmi', result: data._result.result, code: data._result.error };

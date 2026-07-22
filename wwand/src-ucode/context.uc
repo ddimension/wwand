@@ -21,6 +21,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
+import * as tlv from './codec/tlv.uc';
 import * as wdsmod from './codec/schema/wds.uc';
 import { ENDPOINT_TYPE_HSUSB } from './codec/schema/wda.uc';
 import * as callend from './callend.uc';
@@ -243,10 +244,10 @@ export function create(opts)
 				}
 				else {
 					// modem counters are per-call cumulative; sum across families.
-					// 0xFFFFFFFF is the modem's "not supported" sentinel (several
-					// modems return it for the error/dropped counts) — treat it as
+					// several modems return the u32 "not available" sentinel
+					// (tlv.SENTINEL.u32) for the error/dropped counts — treat it as
 					// 0 so the UI doesn't show ~4.29 billion errors
-					let c = (v) => (v == null || v == 0xFFFFFFFF) ? 0 : v;
+					let c = (v) => tlv.is_unavailable(v, 'u32') ? 0 : v;
 
 					agg.tx_bytes   += c(data.tx_bytes_ok);
 					agg.rx_bytes   += c(data.rx_bytes_ok);

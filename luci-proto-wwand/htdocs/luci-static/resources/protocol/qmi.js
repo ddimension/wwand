@@ -344,23 +344,27 @@ return network.registerProtocol('qmi', {
 		o = s.taboption('general', form.Value, 'apn', _('APN'),
 			_('Leave empty for the default APN, or "#N" to use modem profile N as-is.'));
 
-		o = s.taboption('general', form.ListValue, 'pdptype', _('PDP type'));
+		o = s.taboption('general', form.ListValue, 'pdptype', _('PDP type'),
+			_('IP version(s) to request for the bearer and the LTE attach. IPv4+IPv6 is recommended — some subscriptions reject an IPv4-only attach (EMM cause 33).'));
 		o.default = 'ipv4v6';
 		o.value('ipv4v6', _('IPv4 + IPv6'));
 		o.value('ipv4', _('IPv4'));
 		o.value('ipv6', _('IPv6'));
 
-		o = s.taboption('general', form.Value, 'pincode', _('PIN'));
+		o = s.taboption('general', form.Value, 'pincode', _('PIN'),
+			_('SIM PIN. Entered automatically on each start; leave empty for an unlocked SIM.'));
 		o.datatype = 'and(uinteger,minlength(4),maxlength(8))';
 
-		o = s.taboption('general', form.ListValue, 'auth', _('Authentication type'));
+		o = s.taboption('general', form.ListValue, 'auth', _('Authentication type'),
+			_('PAP/CHAP authentication for the APN. Most operators need none.'));
 		o.default = 'none';
 		o.value('none', _('None'));
 		o.value('pap', 'PAP');
 		o.value('chap', 'CHAP');
 		o.value('both', 'PAP/CHAP');
 
-		o = s.taboption('general', form.Value, 'username', _('PAP/CHAP username'));
+		o = s.taboption('general', form.Value, 'username', _('PAP/CHAP username'),
+			_('Only if the APN requires authentication.'));
 		o.depends('auth', 'pap');
 		o.depends('auth', 'chap');
 		o.depends('auth', 'both');
@@ -392,11 +396,13 @@ return network.registerProtocol('qmi', {
 			_('Mobile Network Code (requires MCC).'));
 		o.datatype = 'uinteger';
 
-		o = s.taboption('advanced', form.Value, 'mtu', _('Override MTU'));
+		o = s.taboption('advanced', form.Value, 'mtu', _('Override MTU'),
+			_('Force a fixed MTU on the WAN link instead of the modem/network value.'));
 		o.placeholder = dev ? (dev.getMTU() || 1500) : 1500;
 		o.datatype = 'max(9200)';
 
-		o = s.taboption('advanced', form.Flag, 'use_pushed_mtu', _('Use modem-pushed MTU'));
+		o = s.taboption('advanced', form.Flag, 'use_pushed_mtu', _('Use modem-pushed MTU'),
+			_('Apply the MTU the network advertises for the bearer (default on).'));
 		o.default = '1';
 
 		o = s.taboption('advanced', form.Flag, 'use_pushed_prefix', _('Use network-pushed IPv4 prefix'),
@@ -418,11 +424,52 @@ return network.registerProtocol('qmi', {
 		o.placeholder = '21600';
 		o.datatype = 'uinteger';
 
-		o = s.taboption('advanced', form.Flag, 'location', _('Enable GPS/location'));
+		o = s.taboption('advanced', form.Flag, 'location', _('Enable GPS/location'),
+			_('Start the modem GNSS engine and expose position over ubus.'));
 		o.default = '0';
 
-		o = s.taboption('advanced', form.DynamicList, 'at_init', _('Extra AT init commands'));
+		o = s.taboption('advanced', form.DynamicList, 'at_init', _('Extra AT init commands'),
+			_('Vendor AT commands sent once after the modem is detected, before registration.'));
 		o.placeholder = 'ATE0';
+
+		/* ---- wwand-specific advanced options (previously config-only) ---- */
+		o = s.taboption('advanced', form.Value, 'sim_slot', _('SIM slot'),
+			_('Physical SIM slot to activate on multi-slot / eSIM modems (0 = leave as-is).'));
+		o.placeholder = '0';
+		o.datatype = 'uinteger';
+
+		o = s.taboption('advanced', form.ListValue, 'mux', _('Data multiplexing'),
+			_('Kernel datapath backend for QMAP multiplexing. Leave on auto unless a modem misbehaves.'));
+		o.default = 'auto';
+		o.value('auto', _('Automatic'));
+		o.value('rmnet', 'rmnet');
+		o.value('qmimux', 'qmimux');
+
+		o = s.taboption('advanced', form.Value, 'dl_datagram_max_size', _('Aggregation DL datagram size'),
+			_('Max downlink QMAP aggregation datagram in bytes (0 = board/model default).'));
+		o.placeholder = '0';
+		o.datatype = 'uinteger';
+
+		o = s.taboption('advanced', form.Value, 'profile', _('Attach profile index'),
+			_('3GPP profile (CID) used for the LTE attach and default bearer (default derived from mux id / 1).'));
+		o.placeholder = '1';
+		o.datatype = 'uinteger';
+
+		o = s.taboption('advanced', form.Value, 'usb_path', _('USB path binding'),
+			_('Bind this interface to the modem at a fixed USB topology path (stable across renumbering on multi-modem setups).'));
+
+		o = s.taboption('advanced', form.Value, 'tty', _('AT control TTY'),
+			_('Override the auto-detected AT serial port (e.g. /dev/ttyUSB2).'));
+
+		o = s.taboption('advanced', form.Value, 'stats_interval', _('Telemetry interval'),
+			_('Seconds between throughput/signal telemetry samples while connected.'));
+		o.placeholder = '60';
+		o.datatype = 'uinteger';
+
+		o = s.taboption('advanced', form.Value, 'settings_poll', _('Settings poll interval'),
+			_('Seconds between re-checks of network-pushed IP/DNS/MTU settings (0 = off).'));
+		o.placeholder = '300';
+		o.datatype = 'uinteger';
 
 		o = s.taboption('advanced', form.Flag, 'defaultroute', _('Use default gateway'),
 			_('If unchecked, no default route is configured.'));

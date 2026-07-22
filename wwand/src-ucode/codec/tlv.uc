@@ -332,3 +332,44 @@ export function unpack(fields, buf)
 
 	return res;
 }
+
+// --- response validity -------------------------------------------------------
+// A decoded response carries meta keys (_result, _raw, _truncated) alongside the
+// schema fields. These helpers let pollers/consumers recognise the recurring
+// class of "structurally valid but not actually usable" answers instead of
+// caching or displaying them as real data.
+
+// meta keys unpack() may add that are not schema payload
+const META_KEYS = { _result: true, _raw: true, _truncated: true };
+
+// true when the modem actually returned at least one of the data TLVs the
+// schema asked for. A response with only _result (or _truncated) decoded no
+// payload — e.g. GET_SIGNAL_INFO right after registration, or a modem that
+// answers a poll with an empty body — and must not overwrite last-known data.
+export function has_payload(data)
+{
+	for (let k in (data ?? {}))
+		if (!META_KEYS[k])
+			return true;
+
+	return false;
+}
+
+// Per-type "value not available" markers QMI fills in for absent fields: signal
+// metrics report i16 -32768, counters u32 0xFFFFFFFF, TAC u16 0xFFFF, cell id
+// u32 0xFFFFFFFF, etc. Centralised so detectors reference one table instead of
+// sprinkling magic numbers.
+export const SENTINEL = {
+	i8:  -128,
+	i16: -32768,
+	i32: -2147483648,
+	u16: 0xFFFF,
+	u32: 0xFFFFFFFF,
+};
+
+// true when v is null or the type's not-available sentinel (opt-in per field —
+// 0xFFFF/0xFFFFFFFF are valid for some fields, so this is never applied blindly)
+export function is_unavailable(v, type)
+{
+	return v == null || (SENTINEL[type] != null && v == SENTINEL[type]);
+}

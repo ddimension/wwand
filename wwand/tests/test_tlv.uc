@@ -182,4 +182,21 @@ eq(sysdec.lte_sys_info.reject_valid, 1, 'sysinfo: reject valid');
 eq(sysdec.lte_service_status.status, nas.SVC_STATUS_LIMITED, 'sysinfo: LTE limited service');
 eq(nas.REJECT_CAUSE['33'], 'requested service option not subscribed', 'reject cause 33 text');
 
+// --- response validity detection --------------------------------------------
+eq(tlv.has_payload({ _result: { result: 0 } }), false, 'has_payload: result-only is empty');
+eq(tlv.has_payload({ _result: {}, _truncated: true }), false, 'has_payload: meta-only is empty');
+eq(tlv.has_payload({ _result: {}, lte: { rsrp: -95 } }), true, 'has_payload: schema field is payload');
+eq(tlv.has_payload(null), false, 'has_payload: null is empty');
+
+eq(tlv.is_unavailable(-32768, 'i16'), true, 'is_unavailable: i16 sentinel');
+eq(tlv.is_unavailable(-95, 'i16'), false, 'is_unavailable: real i16 value');
+eq(tlv.is_unavailable(0xFFFFFFFF, 'u32'), true, 'is_unavailable: u32 sentinel');
+eq(tlv.is_unavailable(0, 'u32'), false, 'is_unavailable: zero is valid');
+eq(tlv.is_unavailable(null, 'u16'), true, 'is_unavailable: null');
+
+// a TLV claiming more bytes than the frame carries -> _truncated, no payload
+let trunc = tlv.unpack({ v: { t: 0x01, f: 'u32' } }, hexdec('01' + '0800' + 'aabbccdd'));
+eq(trunc._truncated, true, 'unpack: truncation flagged');
+eq(tlv.has_payload(trunc), false, 'has_payload: truncated response has no payload');
+
 done('test_tlv');
