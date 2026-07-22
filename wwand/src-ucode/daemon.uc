@@ -52,6 +52,12 @@ export function create(opts)
 
 	// --- modem/context wiring ----------------------------------------------
 
+	// forward-declared BEFORE any closure that references them: ucode closures
+	// only capture variables already declared at definition time — a `let`
+	// further down is "undeclared" inside on_modem_event (crashed the adopt
+	// path in the field). Also covers the self-references (TDZ trap).
+	let clear_reconnect, retry_activate, enter_reconnecting, activate;
+
 	let on_modem_event = (modem, event, data) => {
 		switch (event) {
 		case 'registered':
@@ -112,11 +118,9 @@ export function create(opts)
 
 	// forward-declared: retry_activate self-references (reschedule) and
 	// enter_reconnecting references it — avoids the ucode TDZ trap.
-	let clear_reconnect, retry_activate, enter_reconnecting;
-
 	// bring context `name` up, cb(err, up_result). Shared by context_up (ubus,
 	// replies to netifd) — queues on pending_up until the modem is READY.
-	let activate = (name, cb) => {
+	activate = (name, cb) => {
 		let entry = self.contexts[name];
 
 		if (!entry?.ctx)
@@ -147,7 +151,15 @@ export function create(opts)
 			return;
 		}
 
-		entry.ctx.up((err) => cb(err, err ? null : self._up_result(name, entry)));
+		entry.ctx.up((err) => {
+			// registration was lost mid-attempt: the context aborted without
+			// climbing the recovery ladder — requeue until the modem is READY
+			// again (keeps netifd's setup long-poll open instead of failing)
+			if (err?.error == 'suspended')
+				return activate(name, cb);
+
+			cb(err, err ? null : self._up_result(name, entry));
+		});
 	};
 
 	clear_reconnect = (name) => {
@@ -238,8 +250,11 @@ export function create(opts)
 			break;
 
 		case 'error':
-			// failed activation climbs the recovery ladder (old connecttries)
-			ctx.modem.note_connect_failure();
+			// failed activation climbs the recovery ladder (old connecttries) —
+			// but not when the modem lost registration mid-attempt: no service
+			// is not a modem fault the ladder could fix
+			if (ctx.modem.state == 'READY')
+				ctx.modem.note_connect_failure();
 			emit('wwand.context', { context: name, interface: entry?.cfg?.interface, event: event });
 			if (entry?.wanted)
 				enter_reconnecting(name);
@@ -694,6 +709,23 @@ export function create(opts)
 					entry.modem.stop();
 					entry.modem = null;
 					entry.device = entry.cfg.device;   // reset to configured value
+
+					// detach this modem's contexts: their ctx objects are bound
+					// to the dead modem and queued activations would wait on it
+					// forever (protocol switch / USB replug / usb_repower). The
+					// next 'add' rebuilds them against the fresh modem object.
+					for (let cname, centry in self.contexts) {
+						if (centry.cfg.modem != name || !centry.ctx)
+							continue;
+
+						clear_reconnect(cname);
+
+						for (let p in centry.pending_up)
+							p({ error: 'modem_removed' });
+
+						centry.pending_up = [];
+						centry.ctx = null;
+					}
 				}
 			}
 		}

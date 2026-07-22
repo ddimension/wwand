@@ -339,6 +339,58 @@ scenario('modem-lost', { config: { apn: 'web', pdp_type: 'ipv4' } }, (ctx, mock,
 	});
 });
 
+// --- C2: registration loss mid-activation aborts without a ladder error ------
+
+scenario('suspend-abort', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	handlers: {
+		START_NETWORK: () => null,   // swallow the request: attempt stays in flight
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err?.error, 'suspended', 'sabort: aborted with suspended');
+		eq(ctx.state, 'IDLE', 'sabort: back to IDLE');
+		eq(length(filter(events, (e) => e.event == 'error')), 0,
+			'sabort: no error event (recovery ladder untouched)');
+		next();
+	});
+
+	// let the attempt reach START_NETWORK, then drop registration
+	uloop.timer(50, () => ctx.modem_event('suspend', {}));
+});
+
+// --- G1b: internal 241 (profile in use) is reclaimed over AT and retried -----
+
+scenario('reclaim-241', {
+	config: { apn: 'web', pdp_type: 'ipv6' },
+	handlers: {
+		START_NETWORK: (args, meta) => {
+			if (meta.count == 1)
+				return { __error: 14, call_end_reason: 1,
+					verbose_call_end: { type: 2, reason: 241 } };
+
+			return { pdh: 4242 };
+		},
+		GET_CURRENT_SETTINGS: V6_SETTINGS,
+	},
+}, (ctx, mock, events, next) => {
+	let at_cmds = [];
+
+	// the modem's AT channel is what the reclaim path uses; fake it
+	ctx.modem.at = {
+		send: (cmd, cb, o) => { push(at_cmds, cmd); cb(null, []); },
+		close: () => null,
+	};
+
+	ctx.up((err, settings) => {
+		eq(err, null, 'reclaim: up after reclaim');
+		eq(ctx.state, 'CONNECTED', 'reclaim: connected');
+		eq(at_cmds, [ 'AT+CGACT=0,1' ], 'reclaim: stale pdp context deactivated');
+		eq(length(mock.calls_for('START_NETWORK')), 2, 'reclaim: start-network retried');
+		next();
+	});
+});
+
 // --- G2: ipv6-only context fails hard when v6 activation fails ---------------
 
 scenario('v6-only-fatal', {
@@ -351,6 +403,35 @@ scenario('v6-only-fatal', {
 		ok(err != null, 'v6only: error reported');
 		eq(ctx.state, 'IDLE', 'v6only: back to IDLE');
 		next();
+	});
+});
+
+// --- H1b: modem re-randomizes the v6 interface id — no renumber, no renew ----
+
+scenario('v6-iid-stable', {
+	config: { apn: 'web', pdp_type: 'ipv6' },
+	handlers: {
+		GET_CURRENT_SETTINGS: (args, meta) =>
+			(meta.count <= 1) ? V6_SETTINGS
+			                  : { ...V6_SETTINGS,
+			                      ipv6: { addr: '2001:db8:0:0:dead:beef:0:99', plen: 64 } },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'iid: up ok');
+		eq(settings.ipv6.addr, '2001:db8:0:0:0:0:0:2', 'iid: initial addr');
+
+		// serving change triggers a settings refresh; the modem now reports a
+		// different interface id within the same /64
+		ctx.modem_event('serving_change', {});
+
+		uloop.timer(100, () => {
+			eq(length(filter(events, (e) => e.event == 'settings')), 0,
+				'iid: same-prefix iid change suppressed (no renew)');
+			eq(ctx.status().settings.ipv6.addr, '2001:db8:0:0:0:0:0:2',
+				'iid: configured address kept');
+			next();
+		});
 	});
 });
 

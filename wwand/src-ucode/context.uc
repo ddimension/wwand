@@ -89,6 +89,9 @@ export function create(opts)
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: context %s: %s\n', level, self.name, msg)));
 
 	let up_cb = null;
+	// bumped by every up(); guards the async activation flow against late
+	// replies after an attempt was aborted (registration lost mid-attempt)
+	let up_gen = 0;
 
 	// zero-rx watchdog (preserved: packet statistics sampled every 60s; no
 	// received packets for zero_rx_timeout -> usb-repower via the modem)
@@ -469,6 +472,28 @@ export function create(opts)
 	// snapshot each family's serialized settings before and compare after.
 	let settings_sig = (s) => (s != null) ? sprintf('%J', s) : '';
 
+	// the modem may re-randomize the IPv6 interface identifier on every
+	// settings query while prefix/gateway/dns stay put (seen on the RG502Q):
+	// adopting each variant would renumber the interface on every poll. Treat
+	// a same-prefix address as unchanged and keep the one netifd configured.
+	let keep_stable_v6 = (before, after) => {
+		if (!before?.addr || !after?.addr || after.addr == before.addr ||
+		    after.plen != before.plen)
+			return after;
+
+		let ab = iptoarr(after.addr), bb = iptoarr(before.addr);
+		let n = int((after.plen ?? 64) / 8);
+
+		if (!ab || !bb)
+			return after;
+
+		for (let i = 0; i < n; i++)
+			if (ab[i] != bb[i])
+				return after;
+
+		return { ...after, addr: before.addr };
+	};
+
 	refresh_settings = () => {
 		if (self.state != 'CONNECTED' || refreshing || refresh_cooldown)
 			return;
@@ -503,9 +528,15 @@ export function create(opts)
 
 			let key = list[idx++];
 			let before = settings_sig(self.families[key]?.settings);
+			let before_obj = self.families[key]?.settings;
 
 			fetch_settings(+key, (err) => {
-				if (!err && settings_sig(self.families[key]?.settings) != before)
+				let fam = self.families[key];
+
+				if (!err && fam && +key == 6)
+					fam.settings = keep_stable_v6(before_obj, fam.settings);
+
+				if (!err && settings_sig(fam?.settings) != before)
 					changed = true;
 
 				step();
@@ -581,16 +612,21 @@ export function create(opts)
 
 		up_cb = cb;
 
+		let gen = ++up_gen;
 		let profile = resolve_profile();
 		let fams = wanted_families();
 
 		set_state('PREPARING');
 
 		prepare(profile, () => {
+			if (gen != up_gen || self.state != 'PREPARING')
+				return;   // attempt aborted while preparing — drop the late reply
+
 			set_state('ACTIVATING');
 
 			let idx = 0;
 			let got_any = false;
+			let reclaimed = {};
 			let next, finish;
 
 			next = () => {
@@ -600,8 +636,38 @@ export function create(opts)
 				let family = fams[idx++];
 
 				activate_family(family, profile, (err) => {
+					if (gen != up_gen || self.state != 'ACTIVATING')
+						return;   // attempt aborted — drop the late reply
+
 					if (err) {
 						release_family(family);
+
+						// internal 241 "interface in use, config match": a call
+						// nobody owns holds our profile — some carrier firmwares
+						// (e.g. the Zyxel RG502Q) auto-activate their PDP
+						// profiles at boot, which blocks START_NETWORK forever.
+						// Deactivate the PDP context on our profile index over
+						// AT and retry this family once.
+						if (err.stage == 'start_network' &&
+						    err.verbose?.type == 2 && err.verbose?.reason == 241 &&
+						    self.modem.at && !reclaimed[family]) {
+							reclaimed[family] = true;
+							log('warn', sprintf(
+								'profile %d is in use on the modem, deactivating stale PDP context',
+								profile.index));
+
+							self.modem.at.send(sprintf('AT+CGACT=0,%d', profile.index), (aerr) => {
+								if (aerr)
+									log('warn', sprintf('AT+CGACT=0,%d failed: %J', profile.index, aerr));
+
+								if (gen != up_gen || self.state != 'ACTIVATING')
+									return;   // attempt aborted while deactivating
+
+								idx--;
+								next();
+							}, { timeout: 15000 });
+							return;
+						}
 
 						// preserved: v4 fatal, v6 degrades
 						if (family == 4 || !got_any && idx >= length(fams))
@@ -614,6 +680,9 @@ export function create(opts)
 					got_any = true;
 
 					fetch_settings(family, (serr) => {
+						if (gen != up_gen || self.state != 'ACTIVATING')
+							return;   // attempt aborted — drop the late reply
+
 						if (serr) {
 							release_family(family);
 
@@ -678,6 +747,11 @@ export function create(opts)
 		// (3GPP SM cause etc.) and retain it so the log and the status page can
 		// explain *why* activation failed — bad password, forbidden APN, ...
 		let desc = callend.describe(err?.call_end_reason, err?.verbose, err?.ext_error);
+
+		// the shim only relays a top-level `error` string to netifd's log —
+		// without it every failure shows up as "connection failed: unknown"
+		if (err != null && err.error == null)
+			err.error = desc?.text ?? sprintf('%s failed', err.stage ?? 'activation');
 
 		self.last_error = {
 			stage: err?.stage,
@@ -765,6 +839,27 @@ export function create(opts)
 
 		case 'suspend':
 			log('warn', 'modem lost registration');
+
+			// an in-flight activation cannot succeed without registration and
+			// its failure would climb the recovery ladder — abort it. The
+			// daemon requeues the request until the modem re-registers.
+			if (self.state == 'PREPARING' || self.state == 'ACTIVATING') {
+				log('info', 'aborting activation until registration returns');
+
+				let cb = up_cb;
+				up_cb = null;
+
+				set_state('IDLE');
+				self.settings = null;
+
+				release_family(4, () => {
+					release_family(6, () => {
+						if (cb)
+							cb({ error: 'suspended' });
+					});
+				});
+			}
+
 			emit('suspend', data);
 			break;
 

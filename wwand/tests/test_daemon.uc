@@ -90,6 +90,7 @@ let conn_cli = libubus.connect(sock);
 ok(conn_srv != null && conn_cli != null, 'ubus connections established');
 
 let events = [];
+let iface_up = false;
 let mock = mockhub.create({ handlers: handlers() });
 let dpfx = fakefx.create();
 
@@ -102,7 +103,7 @@ let daemon = daemon_mod.create({
 		kick_interface: (iface) => push(events, { type: 'kick', data: iface }),
 		renew_interface: (iface) => push(events, { type: 'renew', data: iface }),
 		down_interface: (iface) => push(events, { type: 'down', data: iface }),
-		iface_status: (iface) => ({ up: false }),   // adoption path -> kick
+		iface_status: (iface) => ({ up: iface_up }),   // false -> kick, true -> adopt
 		datapath_fx: dpfx,
 		resolve_modem_device: (cfg) => cfg.device,
 		resolve_netdev: (cfg, device) => 'wwan0',
@@ -206,8 +207,38 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 							ok(length(filter(me, (e) => e.data.event == 'registered')) == 1,
 								'modem registered emitted');
 
-							guard.cancel();
-							uloop.end();
+							// (4) adoption path: registration cycles while the
+							// interface reports UP -> the daemon adopts in place
+							// (retry_activate) instead of kicking netifd.
+							// Regression: this closure crashed on an undeclared
+							// retry_activate (use-before-declare in ucode).
+							iface_up = true;
+							let kicks1 = length(filter(events, (e) => e.type == 'kick' && e.data == 'wan'));
+
+							mock.indicate(3, 0xff, 'SERVING_SYSTEM_IND', {
+								serving_system: { registration: 0, cs_attach: 2, ps_attach: 2,
+								                  selected_network: 1, radio_ifs: [] },
+							});
+
+							uloop.timer(50, () => {
+								mock.indicate(3, 0xff, 'SERVING_SYSTEM_IND', {
+									serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+									                  selected_network: 1, radio_ifs: [ 8 ] },
+									current_plmn: { mcc: 262, mnc: 1, description: 'Testnet' },
+								});
+
+								uloop.timer(120, () => {
+									eq(length(filter(events, (e) => e.type == 'kick' && e.data == 'wan')),
+										kicks1, 'adopt: no kick while the interface is up');
+
+									conn_cli.defer('wwand', 'status', {}, (c5, st5) => {
+										eq(c5, 0, 'adopt: daemon alive after adopt path');
+
+										guard.cancel();
+										uloop.end();
+									});
+								});
+							});
 						});
 					});
 				});
