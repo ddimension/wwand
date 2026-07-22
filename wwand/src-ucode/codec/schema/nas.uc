@@ -88,13 +88,29 @@ export default {
 			},
 		},
 
+		// NOTE: request and response TLV ids DIFFER for several fields
+		// (usage 0x21/0x1F, ext lte 0x24/0x23, nr5g sa 0x2F/0x2C, nsa
+		// 0x30/0x2D) — verified against libqmi 1.38 qmi-service-nas.json
 		SET_SYSTEM_SELECTION_PREFERENCE: {
 			id: 0x0033,
 			req: {
 				mode_preference:   { t: 0x11, f: 'u16' },
+				band_preference:   { t: 0x12, f: 'u64' },
+				roaming_preference:{ t: 0x14, f: 'u16' },
+				lte_band_preference:{ t: 0x15, f: 'u64' },
 				network_selection: { t: 0x16, f: { mode: 'u8', mcc: 'u16', mnc: 'u16' } },
 				// 0 = permanent, 1 = power-cycle
 				change_duration:   { t: 0x17, f: 'u8' },
+				usage_preference:  { t: 0x21, f: 'u32' },
+				ext_lte_band: { t: 0x24, f: {
+					mask_low: 'u64', mask_mid_low: 'u64',
+					mask_mid_high: 'u64', mask_high: 'u64' } },
+				nr5g_sa_band: { t: 0x2F, f: {
+					m0: 'u64', m1: 'u64', m2: 'u64', m3: 'u64',
+					m4: 'u64', m5: 'u64', m6: 'u64', m7: 'u64' } },
+				nr5g_nsa_band: { t: 0x30, f: {
+					m0: 'u64', m1: 'u64', m2: 'u64', m3: 'u64',
+					m4: 'u64', m5: 'u64', m6: 'u64', m7: 'u64' } },
 			},
 			resp: {},
 		},
@@ -104,7 +120,21 @@ export default {
 			req: {},
 			resp: {
 				mode_preference:   { t: 0x11, f: 'u16' },
+				band_preference:   { t: 0x12, f: 'u64' },
+				roaming_preference:{ t: 0x14, f: 'u16' },
+				lte_band_preference:{ t: 0x15, f: 'u64' },
 				network_selection: { t: 0x16, f: 'u8' },
+				usage_preference:  { t: 0x1F, f: 'u32' },
+				disabled_modes:    { t: 0x22, f: 'u16' },
+				ext_lte_band: { t: 0x23, f: {
+					mask_low: 'u64', mask_mid_low: 'u64',
+					mask_mid_high: 'u64', mask_high: 'u64' } },
+				nr5g_sa_band: { t: 0x2C, f: {
+					m0: 'u64', m1: 'u64', m2: 'u64', m3: 'u64',
+					m4: 'u64', m5: 'u64', m6: 'u64', m7: 'u64' } },
+				nr5g_nsa_band: { t: 0x2D, f: {
+					m0: 'u64', m1: 'u64', m2: 'u64', m3: 'u64',
+					m4: 'u64', m5: 'u64', m6: 'u64', m7: 'u64' } },
 			},
 		},
 

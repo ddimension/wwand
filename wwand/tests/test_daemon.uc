@@ -80,6 +80,10 @@ function handlers()
 		STOP_NETWORK: {},
 		// the stats sample now fires immediately on connect
 		GET_PACKET_STATISTICS: { tx_packets_ok: 0, rx_packets_ok: 0 },
+		GET_SYSTEM_SELECTION_PREFERENCE: {
+			mode_preference: 0x18, roaming_preference: 0xFF,
+			lte_band_preference: 524420, usage_preference: 1,
+		},
 		GET_CHANNEL_RATES: { rates: { tx_rate: 0, rx_rate: 0, max_tx_rate: 0, max_rx_rate: 0 } },
 	};
 }
@@ -234,8 +238,17 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 									conn_cli.defer('wwand', 'status', {}, (c5, st5) => {
 										eq(c5, 0, 'adopt: daemon alive after adopt path');
 
-										guard.cancel();
-										uloop.end();
+										// settings editor read path: NAS sys-sel-pref via ubus
+										conn_cli.defer('wwand', 'modem_get_settings', { modem: 'm0' }, (c6, s6) => {
+											eq(c6, 0, 'settings: call ok');
+											eq(s6.ok, true, 'settings: ok flag');
+											eq(s6.mode_preference, 0x18, 'settings: mode pref');
+											eq(s6.lte_band_preference, 524420, 'settings: lte band mask');
+											eq(s6.usage_preference, 1, 'settings: usage pref');
+
+											guard.cancel();
+											uloop.end();
+										});
 									});
 								});
 							});

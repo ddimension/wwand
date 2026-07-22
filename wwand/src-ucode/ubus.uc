@@ -22,6 +22,17 @@ export function publish(conn, daemon, log)
 			call: (req) => daemon.modem_signal(req.args.modem),
 		},
 
+		modem_get_settings: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => {
+				daemon.modem_get_settings(req.args.modem, (err, res) => {
+					req.reply(err ? { ok: false, ...err } : { ok: true, ...res });
+				});
+
+				req.defer();
+			},
+		},
+
 		modem_cells: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => daemon.modem_cells(req.args.modem),

@@ -639,6 +639,27 @@ export function create(opts)
 		return { modems: modems, contexts: contexts };
 	};
 
+	// current NAS system-selection preferences (settings editor, read path)
+	self.modem_get_settings = function(ref, cb) {
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return cb({ error: 'no_such_modem', ref: ref });
+
+		let nas = entry.modem.nas;
+
+		if (!nas)
+			return cb({ error: 'no_nas_client' });
+
+		nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (err, data) => {
+			if (err)
+				return cb({ error: 'qmi', detail: err });
+
+			delete data._result;
+			cb(null, data);
+		});
+	};
+
 	self.modem_signal = function(ref) {
 		let entry = self.modems[ref];
 
