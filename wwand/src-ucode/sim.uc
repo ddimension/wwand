@@ -282,6 +282,56 @@ function read_ef(modem, ef, cb, session_type)
 }
 
 // best-effort: reads IMSI, ICCID and MSISDN; absent values stay null
+// --- physical SIM slots ------------------------------------------------------
+
+const CARD_STATES = { '0': 'unknown', '1': 'absent', '2': 'present' };
+
+// decode a raw nibble-swapped BCD ICCID string (lstring bytes) to digits
+function decode_iccid(raw)
+{
+	let s = '';
+
+	for (let i = 0; i < length(raw ?? ''); i++) {
+		let b = ord(raw, i);
+		s += sprintf('%x%x', b & 0xf, b >> 4);
+	}
+
+	return replace(s, /f+$/, '');
+}
+
+// slot list with card/activity state and identifying ICCID; err when the
+// modem has no slot-status support (single-slot firmwares often lack it)
+export function slot_status(modem, cb)
+{
+	if (!modem.uim)
+		return cb({ error: 'no_uim_client' }, null);
+
+	modem.uim.request('GET_SLOT_STATUS', {}, (err, data) => {
+		if (err)
+			return cb(err, null);
+
+		let out = map(data.slots ?? [], (s, i) => ({
+			physical: i + 1,
+			card: CARD_STATES[sprintf('%d', s.card_status)] ?? sprintf('%d', s.card_status),
+			active: s.slot_status == 1,
+			logical_slot: s.logical_slot,
+			iccid: length(s.iccid ?? '') ? decode_iccid(s.iccid) : null,
+		}));
+
+		cb(null, out);
+	});
+}
+
+export function switch_slot(modem, physical, cb)
+{
+	if (!modem.uim)
+		return cb({ error: 'no_uim_client' });
+
+	modem.uim.request('SWITCH_SLOT', {
+		logical: 1, physical: physical,
+	}, (err) => cb(err ?? null));
+}
+
 // --- PLMN selector lists (settings editor) -----------------------------------
 
 const EF_PLMN_USER = { file_id: 0x6F60, path: "\x00\x3F\xFF\x7F" };   // PLMNwAcT

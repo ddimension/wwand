@@ -33,6 +33,28 @@ export function publish(conn, daemon, log)
 			},
 		},
 
+		modem_sim_slots: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => {
+				daemon.modem_sim_slots(req.args.modem, (err, res) => {
+					req.reply(err ? { ok: false, ...err } : { ok: true, ...res });
+				});
+
+				req.defer();
+			},
+		},
+
+		modem_sim_switch_slot: {
+			args: { modem: '', slot: 0, ubus_rpc_session: '' },
+			call: (req) => {
+				daemon.modem_sim_switch_slot(req.args.modem, req.args.slot, (err, res) => {
+					req.reply(err ? { ok: false, ...err } : { ok: true, ...res });
+				});
+
+				req.defer();
+			},
+		},
+
 		modem_plmn_lists: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => {

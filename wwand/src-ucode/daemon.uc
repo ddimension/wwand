@@ -710,6 +710,36 @@ export function create(opts)
 		});
 	};
 
+	// physical SIM slots: list (status page) and switch (guarded; the modem
+	// re-initializes the SIM stack after a switch, recovery handles the rest)
+	self.modem_sim_slots = function(ref, cb) {
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return cb({ error: 'no_such_modem', ref: ref });
+
+		sim.slot_status(entry.modem, (err, slots) =>
+			cb(err ? { error: 'qmi', detail: err } : null, err ? null : { slots: slots }));
+	};
+
+	self.modem_sim_switch_slot = function(ref, physical, cb) {
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return cb({ error: 'no_such_modem', ref: ref });
+
+		if (!(physical > 0))
+			return cb({ error: 'invalid_slot' });
+
+		sim.switch_slot(entry.modem, physical, (err) => {
+			if (err)
+				return cb({ error: 'qmi', detail: err });
+
+			log('notice', sprintf('modem %s: switched to SIM slot %d', ref, physical));
+			cb(null, { slot: physical });
+		});
+	};
+
 	// SIM PLMN selector lists (settings editor; user list is editable on SIMs
 	// that carry EF 6F60 — absent lists read as null)
 	self.modem_plmn_lists = function(ref, cb) {

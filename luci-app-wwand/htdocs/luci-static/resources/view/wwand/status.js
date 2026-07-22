@@ -11,6 +11,8 @@ var callContexts = rpc.declare({ object: 'wwand', method: 'status', expect: { co
 var callSignal = rpc.declare({ object: 'wwand', method: 'modem_signal', params: [ 'modem' ], expect: {} });
 var callCells  = rpc.declare({ object: 'wwand', method: 'modem_cells',  params: [ 'modem' ], expect: {} });
 var callCtxStatus = rpc.declare({ object: 'wwand', method: 'context_status', params: [ 'interface' ], expect: {} });
+var callSlots = rpc.declare({ object: 'wwand', method: 'modem_sim_slots', params: [ 'modem' ], expect: {} });
+var callSwitchSlot = rpc.declare({ object: 'wwand', method: 'modem_sim_switch_slot', params: [ 'modem', 'slot' ], expect: {} });
 
 function fmtList(a) { return (a && a.length) ? a.join(', ') : '—'; }
 
@@ -141,7 +143,8 @@ function renderLive(name, modem) {
 	return Promise.all([
 		L.resolveDefault(callSignal(name), {}),
 		L.resolveDefault(callCells(name), {}),
-		L.resolveDefault(callContexts(), {})
+		L.resolveDefault(callContexts(), {}),
+		L.resolveDefault(callSlots(name), {})
 	]).then(function(res) {
 		var sig = res[0] || {}, cells = (res[1] || {}).cells || {};
 		var allCtx = res[2] || {};
@@ -206,6 +209,31 @@ function renderLive(name, modem) {
 		cols.push(E('div', { 'class': 'cbi-section', 'style': 'flex:1;min-width:280px' }, [
 			E('h3', {}, _('Serving cell')), tbl(srvRows)
 		]));
+
+		/* --- SIM slots (multi-slot devices; hidden when unsupported) --- */
+		var slots = (res[3] || {}).slots || [];
+		if (slots.length) {
+			var slotRows = slots.map(function(sl) {
+				var line = [
+					E('strong', {}, _('Slot %d').format(sl.physical) + (sl.active ? ' ✓' : '')),
+					' — ' + sl.card + (sl.iccid ? (', ICCID ' + sl.iccid) : '')
+				];
+				if (!sl.active && sl.card == 'present')
+					line.push(E('button', {
+						'class': 'btn cbi-button cbi-button-apply',
+						'style': 'margin-left:8px',
+						'click': function() {
+							if (!confirm(_('Switch to SIM slot %d? The connection will drop and re-establish.').format(sl.physical)))
+								return;
+							callSwitchSlot(name, sl.physical);
+						}
+					}, _('Activate')));
+				return E('div', { 'style': 'margin-bottom:4px' }, line);
+			});
+			cols.push(E('div', { 'class': 'cbi-section', 'style': 'flex:1;min-width:280px' }, [
+				E('h3', {}, _('SIM slots')), E('div', {}, slotRows)
+			]));
+		}
 
 		var out = [ E('div', { 'style': 'display:flex;gap:16px;flex-wrap:wrap' }, cols) ];
 

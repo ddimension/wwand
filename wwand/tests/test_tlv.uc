@@ -125,4 +125,19 @@ tlv.unpack(f, '');
 tlv.unpack(f, null);
 ok(true, 'short/garbage input survived');
 
+// uim slot-status shape: u8-counted struct array with an lstring iccid
+f = { slots: { t: 0x10, f: { n: 'u8', of: {
+	card_status: 'u32', slot_status: 'u32', logical_slot: 'u8', iccid: 'lstring' } } } };
+
+let slots = tlv.unpack(f, tlv.pack(f, { slots: [
+	{ card_status: 2, slot_status: 1, logical_slot: 1, iccid: "\x98\x94\x20" },
+	{ card_status: 1, slot_status: 0, logical_slot: 0, iccid: "" },
+] })).slots;
+
+eq(length(slots), 2, 'slots: two entries');
+eq(slots[0].card_status, 2, 'slots: card status');
+eq(slots[0].iccid, "\x98\x94\x20", 'slots: iccid bytes survive');
+eq(slots[1].slot_status, 0, 'slots: inactive slot');
+eq(length(slots[1].iccid), 0, 'slots: empty iccid');
+
 done('test_tlv');

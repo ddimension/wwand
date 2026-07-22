@@ -84,6 +84,31 @@ export default {
 			},
 		},
 
+		// physical SIM slot status/selection (multi-slot devices). Verified
+		// against libqmi 1.38: TLV 0x10 = u8-counted array of slot structs
+		// with a length-prefixed raw ICCID (nibble-swapped BCD).
+		SWITCH_SLOT: {
+			id: 0x0046,
+			req: {
+				logical:  { t: 0x01, f: 'u8' },
+				physical: { t: 0x02, f: 'u32' },
+			},
+			resp: {},
+		},
+
+		GET_SLOT_STATUS: {
+			id: 0x0047,
+			req: {},
+			resp: {
+				slots: { t: 0x10, f: { n: 'u8', of: {
+					card_status:  'u32',   // 0 unknown, 1 absent, 2 present
+					slot_status:  'u32',   // 0 inactive, 1 active
+					logical_slot: 'u8',
+					iccid:        'lstring',
+				} } },
+			},
+		},
+
 		VERIFY_PIN: {
 			id: 0x0026,
 			req: {
