@@ -84,16 +84,18 @@ define Package/wwand-esim/description
  required.
 
  Two build requirements for the download (verified on the RG650E):
-  * lpac's stdio APDU driver is broken upstream (inverted json_request check
+  * lpac v2.3.0's stdio APDU driver is broken (inverted json_request check
     bails every request with -1 on success) — apply
     wwand/patches-lpac/110-stdio-apdu-request-check.patch into the lpac feed's
-    patches/ dir. Without it euicc_init fails at connect.
+    patches/ dir. Without it euicc_init fails at connect. This is a backport of
+    upstream PR #399 (already merged to main, unreleased); drop the patch once
+    lpac ships a release later than v2.3.0. Do NOT bump the feed to main: the
+    #377 refactor turns the drivers into mandatory dynamic .so plugins, which
+    is incompatible with a single self-contained static binary.
   * libcurl MUST be built with OpenSSL, not mbedtls. OpenWrt's mbedtls is
     feature-stripped and fails the GSMA SM-DP+ TLS with X509 feature
-    unavailable; OpenSSL has the full curve/algorithm set.
-
- (100-at-driver-termios.patch fixes lpac's *at* driver and is not needed by
- the stdio bridge — kept in patches-lpac/ only for standalone lpac-at use.)
+    unavailable; OpenSSL has the full curve/algorithm set. (A self-contained
+    static build against wolfSSL is smaller — see the wwand-lpac experiment.)
 endef
 
 define Package/wwand-esim/install

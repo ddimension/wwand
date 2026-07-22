@@ -1,3 +1,11 @@
+Backport of upstream lpac PR #399 ("fix(driver): 'json_request' interface was
+changed in b23f0e4", commit 977c324, merged 2025-11-02) to the v2.3.0 release.
+json_print()/json_request() were changed to return true on success, but
+apdu/stdio.c's connect/logic_channel_open/transmit still checked
+`if (json_request(...)) return -1;` — bailing with -1 the moment a request is
+sent successfully, so euicc_init dies at connect before reading any reply.
+Drop this patch once lpac ships a release later than v2.3.0 that includes #399.
+
 --- a/driver/apdu/stdio.c
 +++ b/driver/apdu/stdio.c
 @@ -160,7 +160,7 @@
