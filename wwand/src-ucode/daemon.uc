@@ -640,6 +640,41 @@ export function create(opts)
 		return { modems: modems, contexts: contexts };
 	};
 
+	// band mask <-> band-number-list conversion. Done daemon-side on purpose:
+	// u64 masks lose precision in LuCI's JS numbers (> 2^53), band lists
+	// survive JSON. Bit n-1 across the mask words = band n; bit 63 of a word
+	// is skipped (no such band exists, and 1<<63 goes negative in int64).
+	let mask_to_bands = (masks) => {
+		let out = [];
+
+		for (let w = 0; w < length(masks); w++) {
+			let m = masks[w] ?? 0;
+
+			for (let b = 0; b < 63; b++)
+				if (m & (1 << b))
+					push(out, w * 64 + b + 1);
+		}
+
+		return out;
+	};
+
+	let bands_to_masks = (bands, words) => {
+		let masks = [];
+
+		for (let i = 0; i < words; i++)
+			push(masks, 0);
+
+		for (let n in bands) {
+			let bit = +n - 1;
+			let w = int(bit / 64);
+
+			if (bit >= 0 && w < words && (bit % 64) < 63)
+				masks[w] |= (1 << (bit % 64));
+		}
+
+		return masks;
+	};
+
 	// current NAS system-selection preferences (settings editor, read path)
 	self.modem_get_settings = function(ref, cb) {
 		let entry = self.modems[ref];
@@ -657,6 +692,20 @@ export function create(opts)
 				return cb({ error: 'qmi', detail: err });
 
 			delete data._result;
+
+			let e = data.ext_lte_band;
+
+			data.lte_bands = mask_to_bands(e
+				? [ e.mask_low, e.mask_mid_low, e.mask_mid_high, e.mask_high ]
+				: [ data.lte_band_preference ?? 0 ]);
+
+			for (let key in [ 'nr5g_sa_band', 'nr5g_nsa_band' ]) {
+				let s = data[key];
+
+				data[key + 's'] = s ? mask_to_bands([ s.m0, s.m1, s.m2, s.m3,
+				                                      s.m4, s.m5, s.m6, s.m7 ]) : [];
+			}
+
 			cb(null, data);
 		});
 	};
@@ -696,9 +745,34 @@ export function create(opts)
 		if (!nas)
 			return cb({ error: 'no_nas_client' });
 
+		// band-number lists (LuCI-safe) are converted to masks here
+		settings = { ...(settings ?? {}) };
+
+		if (type(settings.lte_bands) == 'array') {
+			let m = bands_to_masks(settings.lte_bands, 4);
+
+			settings.lte_band_preference = m[0];
+			settings.ext_lte_band = { mask_low: m[0], mask_mid_low: m[1],
+			                          mask_mid_high: m[2], mask_high: m[3] };
+			delete settings.lte_bands;
+		}
+
+		for (let key in [ 'nr5g_sa_bands', 'nr5g_nsa_bands' ]) {
+			if (type(settings[key]) != 'array')
+				continue;
+
+			let m = bands_to_masks(settings[key], 8);
+
+			settings[substr(key, 0, length(key) - 1)] = {
+				m0: m[0], m1: m[1], m2: m[2], m3: m[3],
+				m4: m[4], m5: m[5], m6: m[6], m7: m[7],
+			};
+			delete settings[key];
+		}
+
 		let args = {};
 
-		for (let key, val in (settings ?? {})) {
+		for (let key, val in settings) {
 			if (SETTABLE_PREFS[key] != type(val))
 				return cb({ error: 'invalid_setting', key: key });
 

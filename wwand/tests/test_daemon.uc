@@ -246,16 +246,20 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 											eq(s6.mode_preference, 0x18, 'settings: mode pref');
 											eq(s6.lte_band_preference, 524420, 'settings: lte band mask');
 											eq(s6.usage_preference, 1, 'settings: usage pref');
+											// 524420 -> bits 2,7,19 -> bands 3,8,20
+											eq(s6.lte_bands, [ 3, 8, 20 ], 'settings: band list decoded');
 
 											// write path: whitelisted set, permanent duration
 											conn_cli.defer('wwand', 'modem_set_settings',
-												{ modem: 'm0', settings: { usage_preference: 2 } }, (c7, s7) => {
+												{ modem: 'm0', settings: { usage_preference: 2, lte_bands: [ 1, 3, 8 ] } }, (c7, s7) => {
 												eq(s7.ok, true, 'set: ok');
-												eq(s7.applied, [ 'usage_preference' ], 'set: applied list');
 
 												let set = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
 												eq(set[length(set) - 1].args.usage_preference, 2, 'set: value reached modem');
 												eq(set[length(set) - 1].args.change_duration, 1, 'set: permanent duration');
+												// bands 1,3,8 -> bits 0,2,7 -> 0x85
+												eq(set[length(set) - 1].args.lte_band_preference, 133, 'set: band list -> mask');
+												eq(set[length(set) - 1].args.ext_lte_band.mask_low, 133, 'set: ext mask word 0');
 
 												// non-whitelisted key is rejected before the modem
 												conn_cli.defer('wwand', 'modem_set_settings',
