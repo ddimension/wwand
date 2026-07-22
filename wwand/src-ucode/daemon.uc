@@ -751,6 +751,10 @@ export function create(opts)
 			if (err)
 				return cb({ error: 'qmi', detail: err });
 
+			// a different slot may hold a different eUICC (removable eUICCs) —
+			// drop the cached eSIM backend so it is re-probed
+			delete entry.modem._esim_be;
+
 			log('notice', sprintf('modem %s: switched to SIM slot %d', ref, physical));
 			cb(null, { slot: physical });
 		});
@@ -791,6 +795,39 @@ export function create(opts)
 	// 'profiles' | 'eid' | 'enable' | 'disable' | 'delete' (iccid required
 	// for the latter three). slot defaults to the active physical slot? No —
 	// explicit slot, default 1.
+	// host-side download via the lpac stdio glue (QMI-channel modems)
+	let esim_download_lpac = (ref, slot, code, conf, cb) => {
+		let script = '/usr/libexec/wwand/esim-download';
+		let fx = deps.datapath_fx;
+
+		if (fx?.exists && !fx.exists(script))
+			return cb({ error: 'esim_not_installed' });
+
+		let logf = '/tmp/wwand/esim-download.log';
+
+		self._esim_dl = { state: 'running', via: 'lpac' };
+
+		let p = uloop.process('/bin/sh', [ '-c',
+			sprintf("exec %s '%s' %d '%s' '%s' 2>%s", script, ref, slot,
+				code, conf ?? '', logf) ], {},
+			(exitcode) => {
+				self._esim_dl = {
+					state: (exitcode == 0) ? 'done' : 'failed', via: 'lpac',
+					code: exitcode,
+					log: fx?.read ? trim(fx.read(logf) ?? '') : null,
+				};
+				log('notice', sprintf('modem %s: eSIM lpac download %s (exit %d)',
+					ref, self._esim_dl.state, exitcode));
+			});
+
+		if (!p) {
+			self._esim_dl = { state: 'failed', via: 'lpac', code: -1 };
+			return cb({ error: 'spawn_failed' });
+		}
+
+		cb(null, { started: true, via: 'lpac' });
+	};
+
 	self.modem_esim = function(ref, op, params, cb) {
 		let esim = load_esim();
 
@@ -807,6 +844,9 @@ export function create(opts)
 		let done = (err, res) => cb(err ? { error: 'esim', detail: err } : null, res);
 
 		switch (op) {
+		case 'backend':
+			return esim.backend(entry.modem, slot, (be) => cb(null, { backend: be }));
+
 		case 'download': {
 			if (self._esim_dl?.state == 'running')
 				return cb({ error: 'busy' });
@@ -822,35 +862,23 @@ export function create(opts)
 			     !match(params.confirmation_code, /^[A-Za-z0-9._-]*$/)))
 				return cb({ error: 'invalid_argument' });
 
-			let script = '/usr/libexec/wwand/esim-download';
-			let fx = deps.datapath_fx;
+			// pick the path by backend: AT modems download internally
+			// (AT+QESIM, no host data), QMI modems use the host-side lpac glue
+			return esim.backend(entry.modem, slot, (be) => {
+				if (be == 'at') {
+					self._esim_dl = { state: 'running', via: 'modem' };
+					esim.download_at(entry.modem, code, params?.confirmation_code, (err, res) => {
+						self._esim_dl = err
+							? { state: 'failed', via: 'modem', error: err.error, ret: err.ret }
+							: { state: 'done', via: 'modem', ret: res?.ret };
+						log('notice', sprintf('modem %s: eSIM AT download %s', ref, self._esim_dl.state));
+					});
 
-			if (fx?.exists && !fx.exists(script))
-				return cb({ error: 'esim_not_installed' });
+					return cb(null, { started: true, via: 'modem' });
+				}
 
-			let logf = '/tmp/wwand/esim-download.log';
-
-			self._esim_dl = { state: 'running' };
-
-			let p = uloop.process('/bin/sh', [ '-c',
-				sprintf("exec %s '%s' %d '%s' '%s' 2>%s", script, ref, slot,
-					code, params?.confirmation_code ?? '', logf) ], {},
-				(exitcode) => {
-					self._esim_dl = {
-						state: (exitcode == 0) ? 'done' : 'failed',
-						code: exitcode,
-						log: fx?.read ? trim(fx.read(logf) ?? '') : null,
-					};
-					log('notice', sprintf('modem %s: eSIM download %s (exit %d)',
-						ref, self._esim_dl.state, exitcode));
-				});
-
-			if (!p) {
-				self._esim_dl = { state: 'failed', code: -1 };
-				return cb({ error: 'spawn_failed' });
-			}
-
-			return cb(null, { started: true });
+				esim_download_lpac(ref, slot, code, params?.confirmation_code, cb);
+			});
 		}
 
 		case 'download_status':

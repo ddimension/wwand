@@ -88,10 +88,12 @@ return view.extend({
 				callPlmn(names[0]),
 				L.resolveDefault(callSlots(names[0]), {}),
 				L.resolveDefault(callEsim(names[0], 'profiles', 0, '', '', ''), {}),
+				L.resolveDefault(callEsim(names[0], 'backend', 0, '', '', ''), {}),
 			]).then(function(res) {
+				var esim = res[3] || {};
+				esim.backend = (res[4] || {}).backend;
 				return { modem: names[0], settings: res[0], plmn: res[1],
-				         slots: (res[2] || {}).slots || [],
-				         esim: res[3] || {} };
+				         slots: (res[2] || {}).slots || [], esim: esim };
 			});
 		});
 	},
@@ -202,7 +204,12 @@ return view.extend({
 			});
 		};
 
+		var dlHint = (data.esim.backend == 'at')
+			? _('Download runs inside the modem over its own network attach (no router data path needed).')
+			: _('Download runs on the router (lpac); requires the wwand-esim lpac helper.');
+
 		out.push(E('h4', {}, _('Download profile')));
+		out.push(E('p', {}, E('em', {}, dlHint)));
 		out.push(E('div', { 'class': 'cbi-section' }, [
 			codeIn, ' ', confIn, ' ',
 			E('button', { 'class': 'btn cbi-button cbi-button-apply',

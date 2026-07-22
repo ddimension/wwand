@@ -83,4 +83,8 @@ eq(f3[3], 'ACME', 'qesim: field after quoted comma');
 
 eq(esim._qesim_fields('OK'), null, 'qesim: non-qesim line ignored');
 
+// download result line
+let dl = esim._qesim_fields('+QESIM: "download",0');
+eq(dl[0], '0', 'qesim: download ret ok');
+
 done('test_esim');

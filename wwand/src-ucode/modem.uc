@@ -626,6 +626,8 @@ export function create(opts)
 				if (serr)
 					log('warn', sprintf('sim slot switch failed: %J', serr));
 
+				// slot changed -> a different eUICC may be present
+				delete self._esim_be;
 				settle_timer = uloop.timer(self.timing.sim_settle, step_sim);
 			});
 		});

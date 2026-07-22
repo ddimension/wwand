@@ -385,6 +385,60 @@ function at_profiles(modem, cb)
 	});
 }
 
+// modem-internal download (AT+QESIM="download"). The modem itself does the
+// HTTPS to the SM-DP+ over its own network attach — no host data path, no
+// configured WAN APN (matches MikroTik's esim-channel=at behaviour). Accepts
+// a full activation code "LPA:1$smdp$matchingid[$oid[$cc]]" or bare smdp +
+// matching id; result arrives as +QESIM:"download",<ret> (0 = ok).
+// NOTE: exact QESIM download arg order is firmware-specific — verify against
+// one real activation code on the RG650E before relying on it.
+function at_download(modem, activation_code, confirmation, cb)
+{
+	let smdp = null, mid = null;
+
+	let m = match(activation_code ?? '', /^LPA:1\$([^$]+)\$([^$]*)/);
+
+	if (m) {
+		smdp = m[1];
+		mid = m[2];
+	}
+	else {
+		// allow "smdp,matchingid" too
+		let parts = split(activation_code ?? '', ',');
+		smdp = trim(parts[0] ?? '');
+		mid = trim(parts[1] ?? '');
+	}
+
+	if (!length(smdp))
+		return cb({ error: 'bad_activation_code' });
+
+	let cmd = sprintf('AT+QESIM="download","%s","%s"', smdp, mid ?? '');
+
+	if (length(confirmation ?? ''))
+		cmd += sprintf(',"%s"', confirmation);
+
+	// the download is a full network transaction; give it a long window and
+	// read the +QESIM:"download",<ret> result line
+	modem.at.send(cmd, (err, res) => {
+		if (err)
+			return cb({ error: 'at', detail: err });
+
+		let ret = null;
+
+		for (let l in (res?.lines ?? [])) {
+			let f = qesim_fields(l);
+
+			if (f && match(l, /"download"/))
+				ret = +f[0];
+		}
+
+		if (ret == null || ret == 0)
+			cb(null, { ret: ret ?? 0 });
+		else
+			cb({ error: 'download_failed', ret: ret });
+	}, { timeout: 180000 });
+}
+
 // resolve ICCID -> index, then run `verb` (enable_profile/…)
 function at_profile_op(modem, iccid, verb, cb)
 {
@@ -493,6 +547,14 @@ function dispatch(op, args)
 return {
 	// backend detection is exposed so callers can report which path is used
 	backend: (modem, slot, cb) => backend_of(modem, slot, cb),
+
+	// clear the cached backend (call on SIM slot switch — removable eUICCs)
+	reset_backend: (modem) => { delete modem._esim_be; },
+
+	// modem-internal download (AT backend only; the QMI/lpac host path is
+	// driven from the daemon glue). cb(err, {ret})
+	download_at: (modem, activation_code, confirmation, cb) =>
+		at_download(modem, activation_code, confirmation, cb),
 
 	// exposed for the unit tests (QMI ES10c internals + AT parser)
 	_ber_parse: ber_parse,
