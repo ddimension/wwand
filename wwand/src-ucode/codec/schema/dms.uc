@@ -73,6 +73,14 @@ export default {
 			resp: { retries: { t: 0x10, f: { verify: 'u8', unblock: 'u8' } } },
 		},
 
+		// enable/disable the PIN1 query (SIM PIN lock); DMS fallback for modems
+		// without UIM. enabled=1 requires the PIN at power-on. libqmi 1.38 0x0027.
+		SET_PIN_PROTECTION: {
+			id: 0x0027,
+			req:  { info: { t: 0x01, f: { pin_id: 'u8', enabled: 'u8', pin: 'lstring' } } },
+			resp: { retries: { t: 0x10, f: { verify: 'u8', unblock: 'u8' } } },
+		},
+
 		GET_PIN_STATUS: {
 			id: 0x002B,
 			req:  {},

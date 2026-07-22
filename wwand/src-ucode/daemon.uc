@@ -803,6 +803,22 @@ export function create(opts)
 		});
 	};
 
+	self.modem_sim_pin_lock = function(ref, pin, enable, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		if (!length(pin ?? ''))
+			return cb({ error: 'missing_pin' });
+
+		sim.set_pin_lock(entry.modem, enable, pin, (err, res) => {
+			if (!err)
+				log('notice', sprintf('modem %s: SIM PIN query %s', ref, enable ? 'enabled' : 'disabled'));
+			cb(err, res);
+		});
+	};
+
 	// raw APDU channel (eSIM foundation; also used by the lpac glue).
 	// op: 'open' {slot, aid} -> {channel, select_response}
 	//     'send' {slot, channel, apdu} -> {response}

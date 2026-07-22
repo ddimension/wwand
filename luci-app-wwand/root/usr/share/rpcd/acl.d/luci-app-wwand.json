@@ -19,6 +19,7 @@
 				"wwand": [
 					"modem_set_settings",
 					"modem_sim_switch_slot",
+					"modem_sim_pin_lock",
 					"modem_esim"
 				]
 			}

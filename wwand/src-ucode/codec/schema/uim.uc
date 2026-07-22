@@ -166,6 +166,19 @@ export default {
 			},
 		},
 
+		// enable/disable the PIN1 query (SIM PIN lock). enabled=1 requires the
+		// PIN at power-on, 0 removes it. Verified against libqmi 1.38 (0x0025).
+		SET_PIN_PROTECTION: {
+			id: 0x0025,
+			req: {
+				session: SESSION,
+				info:    { t: 0x02, f: { pin_id: 'u8', enabled: 'u8', pin: 'lstring' } },
+			},
+			resp: {
+				retries: { t: 0x10, f: { verify: 'u8', unblock: 'u8' } },
+			},
+		},
+
 		REGISTER_EVENTS: {
 			id: 0x002E,
 			req:  { mask: { t: 0x01, f: 'u32' } },

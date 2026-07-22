@@ -55,6 +55,18 @@ export function publish(conn, daemon, log)
 			},
 		},
 
+		// enable/disable the SIM PIN query (PIN lock); needs the current PIN
+		modem_sim_pin_lock: {
+			args: { modem: '', pin: '', enable: false, ubus_rpc_session: '' },
+			call: (req) => {
+				daemon.modem_sim_pin_lock(req.args.modem, req.args.pin, req.args.enable, (err, res) => {
+					req.reply(err ? { ok: false, ...err } : { ok: true, ...res });
+				});
+
+				req.defer();
+			},
+		},
+
 		// eSIM management (optional wwand-esim package; reports
 		// esim_not_installed when absent)
 		modem_esim: {

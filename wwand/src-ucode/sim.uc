@@ -241,6 +241,43 @@ export function unlock(modem, cb)
 	return unlock_dms(modem, cb, 0);
 }
 
+// enable (lock) or disable (unlock) the SIM PIN1 query — whether the card asks
+// for the PIN at power-on. Needs the current PIN. Prefers QMI (UIM, then DMS),
+// falls back to AT+CLCK; the transport is cached per modem. cb(err, { enabled }).
+export function set_pin_lock(modem, enable, pin, cb)
+{
+	let enabled = enable ? 1 : 0;
+	let pin_id = uimmod.PIN_ID_PIN1;
+
+	backend.choose(modem, '_pinlock_be', [
+		{ name: 'uim', probe: (ok) => ok(!!modem.uim) },
+		{ name: 'dms', probe: (ok) => ok(!!modem.dms) },
+		{ name: 'at',  probe: (ok) => ok(!!modem.at) },
+	], (be) => {
+		let done = (err, data) => cb(
+			err ? { error: err.error ?? 'qmi', detail: err, retries: data?.retries?.verify } : null,
+			err ? null : { enabled: !!enable });
+
+		if (be == 'uim')
+			return modem.uim.request('SET_PIN_PROTECTION', {
+				session: { session_type: uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING, aid: '' },
+				info: { pin_id: pin_id, enabled: enabled, pin: pin },
+			}, done);
+
+		if (be == 'dms')
+			return modem.dms.request('SET_PIN_PROTECTION', {
+				info: { pin_id: pin_id, enabled: enabled, pin: pin },
+			}, done);
+
+		if (be == 'at')
+			// AT+CLCK="SC",<1 lock|0 unlock>,"<pin>"
+			return modem.at.send(sprintf('AT+CLCK="SC",%d,"%s"', enabled, pin),
+				(err) => cb(err ? { error: 'at', detail: err } : null, err ? null : { enabled: !!enable }));
+
+		cb({ error: 'no_pin_backend' });
+	});
+}
+
 // --- card identity (IMSI / ICCID) -------------------------------------------
 
 // SIM files are nibble-swapped BCD (old proto_qmi_convert_from_uimbyte)
