@@ -205,6 +205,32 @@ export default {
 			},
 		},
 
+		// LTE carrier-aggregation info: serving PCell + active SCells with
+		// EARFCN, DL bandwidth (QmiNasDLBandwidth: 0=1.4 1=3 2=5 3=10 4=15
+		// 5=20 MHz) and band. Preferred bandwidth source; some modems answer
+		// INFO_UNAVAILABLE and the caller falls back to AT+QCAINFO. Verified
+		// against libqmi 1.38 qmi-service-nas.json (msg 0x00AC).
+		GET_LTE_CPHY_CA_INFO: {
+			id: 0x00AC,
+			req: {},
+			resp: {
+				pcell: { t: 0x13, f: {
+					pci:          'u16',
+					earfcn:       'u16',
+					dl_bandwidth: 'u32',
+					band:         'u16',
+				} },
+				scells: { t: 0x15, f: { n: 'u8', of: {
+					pci:          'u16',
+					earfcn:       'u16',
+					dl_bandwidth: 'u32',
+					band:         'u16',
+					state:        'u32',
+					cell_index:   'u8',
+				} } },
+			},
+		},
+
 		GET_SIGNAL_INFO: {
 			id: 0x004F,
 			req: {},

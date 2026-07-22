@@ -76,6 +76,69 @@ export function parse_modes(str)
 	return mask || null;
 }
 
+// Generic cached-source selector: probe an ordered list of async providers
+// once, remember (on `obj[key]`) which one produced data for this device, then
+// use only that on every later call. Each provider is { name, run: (cb) => cb(
+// data | null) } where null means "unavailable here, try the next". Lets a
+// feature prefer a QMI message, fall back to an alternate QMI message, then to
+// AT, and stick with whatever worked — the same idea as the eSIM/APDU backend
+// probes. `none` is cached when nothing works, so we stop retrying.
+function pick_source(obj, key, providers, cb)
+{
+	let cached = obj[key];
+
+	if (cached != null) {
+		if (cached == 'none')
+			return cb(null);
+
+		for (let p in providers)
+			if (p.name == cached)
+				return p.run(cb);
+
+		return cb(null);   // cached provider no longer offered
+	}
+
+	let i = 0, step;
+	step = () => {
+		if (i >= length(providers)) {
+			obj[key] = 'none';
+			return cb(null);
+		}
+
+		let p = providers[i++];
+		p.run((data) => {
+			if (data != null) {
+				obj[key] = p.name;
+				return cb(data);
+			}
+			step();
+		});
+	};
+
+	step();
+}
+
+// QmiNasDLBandwidth enum -> MHz (LTE carrier bandwidth)
+const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
+
+// normalize a GET_LTE_CPHY_CA_INFO decode to the shared carrier shape
+// [ { role, earfcn, bandwidth_mhz, pci }, ... ] (band/freq are derived from
+// earfcn in the UI, so they are not carried here)
+function ca_from_qmi(d)
+{
+	let out = [];
+
+	if (d?.pcell)
+		push(out, { role: 'PCC', earfcn: d.pcell.earfcn, pci: d.pcell.pci,
+		            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', d.pcell.dl_bandwidth)] ?? null });
+
+	for (let s in (d?.scells ?? []))
+		push(out, { role: 'SCC', earfcn: s.earfcn, pci: s.pci,
+		            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', s.dl_bandwidth)] ?? null });
+
+	return out;
+}
+
 export function create(opts)
 {
 	let self = {
@@ -951,15 +1014,40 @@ export function create(opts)
 			if (!self.nas) { fast_running = false; return; }
 
 			self.nas.request('GET_CELL_LOCATION_INFO', {}, (cerr, cdata) => {
-				if (!cerr && cdata) {
+				if (!cerr && cdata)
 					self.cells = cdata;
-					emit('telemetry', { cells: self.cells, signal: self.signal, reg: self.reg });
-				}
 
-				if (watch_active && self.nas)
-					fast_timer = uloop.timer(WATCH_MIN_INTERVAL, fast_tick);
-				else
-					fast_running = false;
+				let done = () => {
+					if (self.cells)
+						emit('telemetry', { cells: self.cells, signal: self.signal, reg: self.reg });
+
+					if (watch_active && self.nas)
+						fast_timer = uloop.timer(WATCH_MIN_INTERVAL, fast_tick);
+					else
+						fast_running = false;
+				};
+
+				// per-carrier bandwidth (the cell-location neighbours lack it):
+				// prefer QMI GET_LTE_CPHY_CA_INFO, fall back to AT+QCAINFO, and
+				// cache whichever works for this modem (RG650E answers the QMI
+				// one with INFO_UNAVAILABLE, so it settles on AT). Only while
+				// watched (LuCI open).
+				if (!self.cells)
+					return done();
+
+				pick_source(self, '_ca_be', [
+					{ name: 'qmi', run: (cb) => self.nas
+						? self.nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) =>
+							cb((!e && (d?.pcell || d?.scells)) ? ca_from_qmi(d) : null))
+						: cb(null) },
+					{ name: 'at', run: (cb) => self.at
+						? self.at.send('AT+QCAINFO', (e, r) => cb(e ? null : atcmd.parse_qcainfo(r?.lines)))
+						: cb(null) },
+				], (ca) => {
+					if (self.cells)
+						self.cells.ca = ca ?? [];
+					done();
+				});
 			});
 		});
 	};

@@ -135,6 +135,36 @@ export function cell_lock_commands(cfg)
 	return cmds;
 }
 
+// LTE downlink bandwidth in resource blocks -> MHz (E-UTRA transmission BW)
+const RB_MHZ = { '6': 1.4, '15': 3, '25': 5, '50': 10, '75': 15, '100': 20 };
+
+// parse AT+QCAINFO response lines into the active LTE carriers. Quectel format:
+//   +QCAINFO: "PCC",<earfcn>,<rb>,"LTE BAND <n>",<ul>,<pci>[,<rsrp>,<rsrq>,...]
+//   +QCAINFO: "SCC",<earfcn>,<rb>,"LTE BAND <n>",<state>,<pci>[,...]
+// returns [ { role, earfcn, rb, bandwidth_mhz, band, pci }, ... ]
+export function parse_qcainfo(lines)
+{
+	let out = [];
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+QCAINFO:\s*"(PCC|SCC)",([0-9]+),([0-9]+),"[A-Za-z ]*BAND\s*([0-9]+)",[^,]*,([0-9]+)/);
+
+		if (!m)
+			continue;
+
+		push(out, {
+			role:          m[1],
+			earfcn:        +m[2],
+			rb:            +m[3],
+			bandwidth_mhz: RB_MHZ[m[3]] ?? null,
+			band:          +m[4],
+			pci:           +m[5],
+		});
+	}
+
+	return out;
+}
+
 // --- AT port discovery -------------------------------------------------------
 
 const ROLE_PREFERENCE = { at: 3, at2: 2, ppp: 1 };

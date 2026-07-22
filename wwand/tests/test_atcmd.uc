@@ -146,6 +146,24 @@ eq(atcmd.cell_lock_commands({}), [], 'lock: nothing configured');
 eq(atcmd.cell_lock_commands({ lock_4g: 'garbage' }), [], 'lock: malformed ignored');
 eq(atcmd.cell_lock_commands({ lock_persist: true }), [], 'lock: persist alone is no-op');
 
+// --- AT+QCAINFO parsing ------------------------------------------------------
+
+eq(atcmd.parse_qcainfo([ '+QCAINFO: "PCC",6300,50,"LTE BAND 20",1,409,-94,-10,-65,4' ]),
+	[ { role: 'PCC', earfcn: 6300, rb: 50, bandwidth_mhz: 10, band: 20, pci: 409 } ],
+	'qcainfo: PCC single carrier, 50 RB -> 10 MHz');
+
+eq(atcmd.parse_qcainfo([
+	'+QCAINFO: "PCC",1300,100,"LTE BAND 3",1,246,-90,-9,-60,10',
+	'+QCAINFO: "SCC",6300,50,"LTE BAND 20","DECONFIGURED",0',
+	'+QCAINFO: "SCC",1450,75,"LTE BAND 3","ACTIVE",111,-95,-11,-70,6',
+]), [
+	{ role: 'PCC', earfcn: 1300, rb: 100, bandwidth_mhz: 20, band: 3, pci: 246 },
+	{ role: 'SCC', earfcn: 6300, rb: 50, bandwidth_mhz: 10, band: 20, pci: 0 },
+	{ role: 'SCC', earfcn: 1450, rb: 75, bandwidth_mhz: 15, band: 3, pci: 111 },
+], 'qcainfo: PCC + two SCC, RB->MHz across widths');
+
+eq(atcmd.parse_qcainfo([ 'OK', '' ]), [], 'qcainfo: no carrier lines');
+
 // --- find_tty ----------------------------------------------------------------
 
 const BASE = '/sys/class/usbmisc/cdc-wdm0/device/..';

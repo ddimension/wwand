@@ -243,6 +243,29 @@ function renderLive(name, modem) {
 		var conns = renderConnections(ctxDetails);
 		if (conns) out.push(conns);
 
+		/* --- carrier aggregation (active carriers, incl. bandwidth) --- */
+		if (cells.ca && cells.ca.length) {
+			out.push(E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Carrier aggregation')),
+				E('table', { 'class': 'table' }, [
+					E('tr', { 'class': 'tr table-titles' }, [
+						E('th', { 'class':'th' }, _('Carrier')), E('th', { 'class':'th' }, _('Band')),
+						E('th', { 'class':'th' }, 'EARFCN'), E('th', { 'class':'th' }, _('Frequency')),
+						E('th', { 'class':'th' }, _('Bandwidth')), E('th', { 'class':'th' }, 'PCI')
+					])
+				].concat(cells.ca.map(function(c){
+					var isNR = (''+c.role).indexOf('NR') >= 0;
+					var cf = isNR ? nrArfcn(c.earfcn) : lteEarfcn(c.earfcn);
+					return E('tr', { 'class': 'tr' }, [
+						E('td', { 'class':'td' }, c.role),
+						E('td', { 'class':'td' }, cf ? cf.band : '—'),
+						E('td', { 'class':'td' }, ''+c.earfcn),
+						E('td', { 'class':'td' }, cf ? cf.mhz.toFixed(1)+' MHz' : '—'),
+						E('td', { 'class':'td' }, c.bandwidth_mhz ? c.bandwidth_mhz+' MHz' : '—'),
+						E('td', { 'class':'td' }, ''+c.pci) ]);
+				}))) ]));
+		}
+
 		/* --- intra-frequency neighbour cells --- */
 		if (lc && lc.cells && lc.cells.length > 1) {
 			var neigh = lc.cells.filter(function(c){ return c.pci != lc.serving_cell_id; });
@@ -250,12 +273,14 @@ function renderLive(name, modem) {
 				E('h3', {}, _('LTE neighbour cells (intra-frequency)')),
 				E('table', { 'class': 'table' }, [
 					E('tr', { 'class': 'tr table-titles' }, [
-						E('th', { 'class':'th' }, 'PCI'), E('th', { 'class':'th' }, 'RSRP'),
+						E('th', { 'class':'th' }, 'PCI'), E('th', { 'class':'th' }, _('Freq')),
+						E('th', { 'class':'th' }, 'RSRP'),
 						E('th', { 'class':'th' }, 'RSRQ'), E('th', { 'class':'th' }, _('lock value'))
 					])
 				].concat(neigh.map(function(c){
 					return E('tr', { 'class': 'tr' }, [
 						E('td', { 'class':'td' }, ''+c.pci),
+						E('td', { 'class':'td' }, ef ? ef.mhz.toFixed(1)+' MHz' : '—'),
 						E('td', { 'class':'td' }, (c.rsrp/10).toFixed(1)+' dBm'),
 						E('td', { 'class':'td' }, (c.rsrq/10).toFixed(1)+' dB'),
 						E('td', { 'class':'td' }, '%d:%d'.format(lc.earfcn, c.pci)) ]);
@@ -270,7 +295,7 @@ function renderLive(name, modem) {
 				var fef = lteEarfcn(fr.earfcn);
 				(fr.cells || []).forEach(function(c){
 					interRows.push(E('tr', { 'class': 'tr' }, [
-						E('td', { 'class':'td' }, fef ? '%s · %d'.format(fef.band, fr.earfcn) : ''+fr.earfcn),
+						E('td', { 'class':'td' }, fef ? '%s · %d · %s MHz'.format(fef.band, fr.earfcn, fef.mhz.toFixed(1)) : ''+fr.earfcn),
 						E('td', { 'class':'td' }, ''+c.pci),
 						E('td', { 'class':'td' }, (c.rsrp/10).toFixed(1)+' dBm'),
 						E('td', { 'class':'td' }, (c.rsrq/10).toFixed(1)+' dB'),
