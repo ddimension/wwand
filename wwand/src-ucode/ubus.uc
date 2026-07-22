@@ -55,6 +55,19 @@ export function publish(conn, daemon, log)
 			},
 		},
 
+		// eSIM management (optional wwand-esim package; reports
+		// esim_not_installed when absent)
+		modem_esim: {
+			args: { modem: '', op: '', slot: 0, iccid: '', ubus_rpc_session: '' },
+			call: (req) => {
+				daemon.modem_esim(req.args.modem, req.args.op, req.args, (err, res) => {
+					req.reply(err ? { ok: false, ...err } : { ok: true, ...(res ?? {}) });
+				});
+
+				req.defer();
+			},
+		},
+
 		// raw APDU access (write ACL — security relevant)
 		modem_apdu: {
 			args: { modem: '', op: '', slot: 0, channel: 0, aid: '', apdu: '', ubus_rpc_session: '' },

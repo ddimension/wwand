@@ -47,6 +47,8 @@ define Package/wwand/install
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) ./src-ucode/main.uc $(1)/usr/sbin/wwand
 	rm -f $(1)/usr/share/ucode/wwand/main.uc
+	# esim.uc ships in the optional wwand-esim package
+	rm -f $(1)/usr/share/ucode/wwand/esim.uc
 	$(INSTALL_DIR) $(1)/lib/netifd/proto
 	$(INSTALL_BIN) ./files/wwand-proto.sh $(1)/lib/netifd/proto/qmi.sh
 	$(INSTALL_DIR) $(1)/usr/libexec/wwand
@@ -63,4 +65,24 @@ define Package/wwand/conffiles
 /etc/config/wwand
 endef
 
+define Package/wwand-esim
+  SECTION:=net
+  CATEGORY:=Network
+  TITLE:=eSIM (eUICC) profile management for wwand
+  DEPENDS:=+wwand
+endef
+
+define Package/wwand-esim/description
+ Optional ES10c (SGP.22) profile management for wwand: EID, profile list,
+ enable/disable/delete over the modem UIM APDU channel. SM-DP+ profile
+ downloads additionally use lpac (install separately); the HTTPS leg runs
+ on the router, no dedicated modem APN is required.
+endef
+
+define Package/wwand-esim/install
+	$(INSTALL_DIR) $(1)/usr/share/ucode/wwand
+	$(INSTALL_DATA) ./src-ucode/esim.uc $(1)/usr/share/ucode/wwand/
+endef
+
 $(eval $(call BuildPackage,wwand))
+$(eval $(call BuildPackage,wwand-esim))

@@ -34,6 +34,22 @@ function load_mbim() {
 	return mbim_mods;
 }
 
+// optional eSIM module (wwand-esim package): an exportless plain script so
+// require() can load it; absent file => feature reports esim_not_installed
+let esim_mod = null;
+function load_esim() {
+	if (esim_mod == null) {
+		try {
+			esim_mod = require('wwand.esim');
+		}
+		catch (e) {
+			esim_mod = false;
+		}
+	}
+
+	return esim_mod;
+}
+
 export function create(opts)
 {
 	let deps = opts?.deps ?? {};
@@ -766,6 +782,46 @@ export function create(opts)
 			return sim.apdu_close(entry.modem, slot, +(params?.channel ?? 0), (err) =>
 				cb(err ? { error: 'qmi', detail: err } : null, err ? null : {}));
 
+		default:
+			return cb({ error: 'invalid_op', op: op });
+		}
+	};
+
+	// eSIM profile management (optional wwand-esim package). op:
+	// 'profiles' | 'eid' | 'enable' | 'disable' | 'delete' (iccid required
+	// for the latter three). slot defaults to the active physical slot? No —
+	// explicit slot, default 1.
+	self.modem_esim = function(ref, op, params, cb) {
+		let esim = load_esim();
+
+		if (!esim)
+			return cb({ error: 'esim_not_installed' });
+
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return cb({ error: 'no_such_modem', ref: ref });
+
+		let slot = +(params?.slot ?? 1);
+		let iccid = params?.iccid ?? '';
+		let done = (err, res) => cb(err ? { error: 'esim', detail: err } : null, res);
+
+		switch (op) {
+		case 'profiles': return esim.profiles(entry.modem, slot, done);
+		case 'eid':      return esim.get_eid(entry.modem, slot, done);
+		case 'enable':
+			if (!length(iccid)) return cb({ error: 'missing_argument' });
+			return esim.enable(entry.modem, slot, iccid, (err, res) => {
+				if (!err)
+					log('notice', sprintf('modem %s: eSIM profile %s enabled', ref, iccid));
+				done(err, res);
+			});
+		case 'disable':
+			if (!length(iccid)) return cb({ error: 'missing_argument' });
+			return esim.disable(entry.modem, slot, iccid, done);
+		case 'delete':
+			if (!length(iccid)) return cb({ error: 'missing_argument' });
+			return esim.del(entry.modem, slot, iccid, done);
 		default:
 			return cb({ error: 'invalid_op', op: op });
 		}
