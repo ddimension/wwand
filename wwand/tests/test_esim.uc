@@ -63,4 +63,24 @@ eq(profs[0].state, 'enabled', 'profiles: state');
 eq(profs[0].provider, 'TestNet', 'profiles: provider name');
 eq(profs[0].name, 'prof', 'profiles: profile name');
 
+// --- vendor AT+QESIM line parser --------------------------------------------
+
+let f1 = esim._qesim_fields('+QESIM: "profile_detail",89358152000000075749,0,"","Telit","Telit",2');
+eq(f1[0], '89358152000000075749', 'qesim: iccid field');
+eq(f1[1], '0', 'qesim: state field');
+eq(f1[2], '', 'qesim: empty quoted nickname');
+eq(f1[3], 'Telit', 'qesim: provider field');
+eq(f1[4], 'Telit', 'qesim: name field');
+eq(f1[5], '2', 'qesim: class field');
+
+let f2 = esim._qesim_fields('+QESIM: "eid",89033023426300000000041811587764');
+eq(f2[0], '89033023426300000000041811587764', 'qesim: eid field');
+
+// commas inside a quoted field must not split
+let f3 = esim._qesim_fields('+QESIM: "profile_detail",111,1,"Home, Work","ACME","ACME Data",1');
+eq(f3[2], 'Home, Work', 'qesim: comma inside quotes preserved');
+eq(f3[3], 'ACME', 'qesim: field after quoted comma');
+
+eq(esim._qesim_fields('OK'), null, 'qesim: non-qesim line ignored');
+
 done('test_esim');

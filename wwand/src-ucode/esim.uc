@@ -269,9 +269,160 @@ function iccid_request(tag, iccid, refresh)
 	return ber_build(tag, inner);
 }
 
+// --- vendor AT backend (Quectel AT+QESIM) ------------------------------------
+// Used when the modem exposes no QMI logical channel (e.g. RG650E: OPEN/
+// LOGICAL_CHANNEL return NOT_SUPPORTED) but has the AT+QESIM LPA. Operates
+// on the eUICC in the modem's active slot; profile ops address a 1-based
+// index which we map from the ICCID via the profile list.
+
+// split a +QESIM CSV line into fields, honoring double-quoted strings
+function qesim_fields(line)
+{
+	let body = match(line, /^\+QESIM: *"[a-z_]+",(.*)$/);
+
+	if (!body)
+		return null;
+
+	let out = [];
+	let s = body[1];
+	let i = 0, cur = '', q = false;
+
+	while (i < length(s)) {
+		let c = substr(s, i, 1);
+
+		if (c == '"')
+			q = !q;
+		else if (c == ',' && !q) {
+			push(out, cur);
+			cur = '';
+		}
+		else
+			cur += c;
+
+		i++;
+	}
+
+	push(out, cur);
+
+	return out;
+}
+
+function at_send(modem, cmd, cb)
+{
+	if (!modem.at)
+		return cb({ error: 'no_at_port' }, null);
+
+	modem.at.send(cmd, (err, res) => cb(err, res?.lines ?? []));
+}
+
+function at_eid(modem, cb)
+{
+	at_send(modem, 'AT+QESIM="eid"', (err, lines) => {
+		if (err)
+			return cb(err, null);
+
+		for (let l in lines) {
+			let f = qesim_fields(l);
+
+			if (f)
+				return cb(null, { eid: f[0] });
+		}
+
+		cb({ error: 'no_eid' }, null);
+	});
+}
+
+// list profiles with their 1-based index (needed for enable/disable/delete)
+function at_profiles(modem, cb)
+{
+	at_send(modem, 'AT+QESIM="profile_brief"', (err, lines) => {
+		if (err)
+			return cb(err, null);
+
+		let count = 0;
+
+		for (let l in lines) {
+			let f = qesim_fields(l);
+
+			if (f)
+				count = +f[0];
+		}
+
+		let out = [];
+		let idx = 0;
+		let step;
+
+		step = () => {
+			if (idx >= count) {
+				return cb(null, { profiles: out });
+			}
+
+			let i = ++idx;
+
+			at_send(modem, sprintf('AT+QESIM="profile_detail",%d', i), (e2, dl) => {
+				if (!e2) {
+					for (let l in dl) {
+						let f = qesim_fields(l);
+
+						// iccid,state,nickname,provider,name,class
+						if (f && length(f) >= 6)
+							push(out, {
+								index: i,
+								iccid: f[0],
+								state: (f[1] == '1') ? 'enabled' : 'disabled',
+								nickname: f[2],
+								provider: f[3],
+								name: f[4],
+							});
+					}
+				}
+
+				step();
+			});
+		};
+
+		step();
+	});
+}
+
+// resolve ICCID -> index, then run `verb` (enable_profile/…)
+function at_profile_op(modem, iccid, verb, cb)
+{
+	at_profiles(modem, (err, res) => {
+		if (err)
+			return cb(err);
+
+		let hit = filter(res.profiles, (p) => p.iccid == iccid)[0];
+
+		if (!hit)
+			return cb({ error: 'no_such_profile', iccid: iccid });
+
+		at_send(modem, sprintf('AT+QESIM="%s",%d', verb, hit.index), (e2) => cb(e2 ?? null));
+	});
+}
+
+// pick the eSIM backend once per modem: prefer the QMI logical channel,
+// fall back to the vendor AT LPA. cb('qmi' | 'at' | null)
+function backend_of(modem, slot, cb)
+{
+	if (modem._esim_be != null)
+		return cb(modem._esim_be || null);
+
+	sim.apdu_open(modem, slot, ISDR_AID, (err, ch) => {
+		if (!err) {
+			sim.apdu_close(modem, slot, ch.channel, () => {});
+			modem._esim_be = 'qmi';
+			return cb('qmi');
+		}
+
+		modem._esim_be = modem.at ? 'at' : '';
+		cb(modem._esim_be || null);
+	});
+}
+
 // --- public API --------------------------------------------------------------
 
-return {
+let qmi = {
 	// exposed for the unit tests
 	_ber_parse: ber_parse,
 	_ber_build: ber_build,
@@ -315,4 +466,45 @@ return {
 		es10_request(modem, slot, iccid_request(TAG_DELETE, iccid, null), (err, tlvs) =>
 			cb(err ?? parse_result(tlvs, TAG_DELETE), { iccid: iccid }));
 	},
+};
+
+let at = {
+	get_eid: (modem, slot, cb) => at_eid(modem, cb),
+	profiles: (modem, slot, cb) => at_profiles(modem, cb),
+	enable:  (modem, slot, iccid, cb) => at_profile_op(modem, iccid, 'enable_profile',  (e) => cb(e, { iccid: iccid })),
+	disable: (modem, slot, iccid, cb) => at_profile_op(modem, iccid, 'disable_profile', (e) => cb(e, { iccid: iccid })),
+	del:     (modem, slot, iccid, cb) => at_profile_op(modem, iccid, 'delete_profile',  (e) => cb(e, { iccid: iccid })),
+};
+
+// dispatch each op to the selected backend (QMI ES10c or vendor AT+QESIM)
+function dispatch(op, args)
+{
+	let modem = args[0], slot = args[1];
+	let cb = args[length(args) - 1];
+
+	backend_of(modem, slot, (be) => {
+		if (!be)
+			return cb({ error: 'no_esim_backend' }, null);
+
+		(be == 'qmi' ? qmi : at)[op](...args);
+	});
+}
+
+return {
+	// backend detection is exposed so callers can report which path is used
+	backend: (modem, slot, cb) => backend_of(modem, slot, cb),
+
+	// exposed for the unit tests (QMI ES10c internals + AT parser)
+	_ber_parse: ber_parse,
+	_ber_build: ber_build,
+	_parse_profiles: parse_profiles,
+	_iccid_request: iccid_request,
+	_bytes_to_iccid: bytes_to_iccid,
+	_qesim_fields: qesim_fields,
+
+	get_eid: (modem, slot, cb)        => dispatch('get_eid', [ modem, slot, cb ]),
+	profiles: (modem, slot, cb)       => dispatch('profiles', [ modem, slot, cb ]),
+	enable: (modem, slot, iccid, cb)  => dispatch('enable', [ modem, slot, iccid, cb ]),
+	disable: (modem, slot, iccid, cb) => dispatch('disable', [ modem, slot, iccid, cb ]),
+	del: (modem, slot, iccid, cb)     => dispatch('del', [ modem, slot, iccid, cb ]),
 };
