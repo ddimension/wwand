@@ -114,6 +114,32 @@ function dsd_summary(systems)
 	return { mode: mode, lte: !!rats.lte, nr: !!rats.nr };
 }
 
+// derive the data-system mode from the QENG serving detail (Quectel AT): the
+// NR line states NSA/SA directly. Fallback for modems without the DSD service.
+function dsd_from_serving(serving)
+{
+	let lte = serving?.lte != null;
+	let nr  = serving?.nr != null;
+	let mode = nr ? (serving.nr.mode ?? (lte ? 'NSA' : 'SA')) : (lte ? 'LTE' : null);
+
+	return mode ? { mode: mode, lte: lte, nr: nr } : null;
+}
+
+// derive a coarse mode from NAS radio interfaces (last-resort fallback; can't
+// see NSA — an NSA anchor reports LTE only here). radio_ifs: 8=LTE, 12=5GNR.
+function dsd_from_radio(radio_ifs)
+{
+	let lte = false, nr = false;
+
+	for (let r in (radio_ifs ?? []))
+		if (r == 8) lte = true;
+		else if (r == 12) nr = true;
+
+	let mode = nr ? (lte ? 'NSA' : 'SA') : (lte ? 'LTE' : null);
+
+	return mode ? { mode: mode, lte: lte, nr: nr } : null;
+}
+
 export function create(opts)
 {
 	let self = {
@@ -1023,28 +1049,47 @@ export function create(opts)
 				if (!self.cells)
 					return done();
 
-				// after CA: DSD data-system status (NSA/SA), then QENG serving
-				// detail (NR band/bandwidth/signal), then finish
+				// after CA: fetch the QENG serving detail (NR band/bandwidth/
+				// signal + the NSA/SA label) first, then settle the data-system
+				// mode using whatever this modem offers, then finish.
 				let finish_extras = () => {
-					let after_dsd = () => {
-						if (!self.at || !self.cells)
-							return done();
+					let set_mode = () => {
+						// mode (NSA/SA/LTE): prefer DSD (native, precise), else the
+						// QENG serving NR line (Quectel AT states NSA/SA directly),
+						// else the coarse NAS radio_ifs. Cached per modem so older
+						// modems settle on what they have.
+						backend.choose(self, '_dsd_be', [
+							{ name: 'dsd', probe: (ok) => self.dsd
+								? self.dsd.request('GET_SYSTEM_STATUS', {}, (e, d) =>
+									ok(!e && d?.available_systems != null))
+								: ok(false) },
+							{ name: 'at',  probe: (ok) => ok(self.cells?.serving?.lte != null ||
+							                                  self.cells?.serving?.nr != null) },
+							{ name: 'nas', probe: (ok) => ok(!!self.reg?.radio_ifs) },
+						], (be) => {
+							let tag = (s) => { if (s) s.source = be; return s; };
 
-						self.at.send('AT+QENG="servingcell"', (e, r) => {
-							if (!e && self.cells)
-								self.cells.serving = atcmd.parse_qeng_servingcell(r?.lines);
+							if (be == 'dsd')
+								return self.dsd.request('GET_SYSTEM_STATUS', {}, (e, d) => {
+									self.dsd_status = (!e && d?.available_systems) ? tag(dsd_summary(d.available_systems)) : null;
+									done();
+								});
+							if (be == 'at')
+								self.dsd_status = tag(dsd_from_serving(self.cells?.serving));
+							else if (be == 'nas')
+								self.dsd_status = tag(dsd_from_radio(self.reg?.radio_ifs));
 							done();
 						});
 					};
 
-					if (self.dsd)
-						self.dsd.request('GET_SYSTEM_STATUS', {}, (e, d) => {
-							if (!e && d?.available_systems)
-								self.dsd_status = dsd_summary(d.available_systems);
-							after_dsd();
-						});
-					else
-						after_dsd();
+					if (!self.at || !self.cells)
+						return set_mode();
+
+					self.at.send('AT+QENG="servingcell"', (e, r) => {
+						if (!e && self.cells)
+							self.cells.serving = atcmd.parse_qeng_servingcell(r?.lines);
+						set_mode();
+					});
 				};
 
 				let store = (ca) => { if (self.cells) self.cells.ca = ca ?? []; finish_extras(); };
