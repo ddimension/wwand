@@ -2,6 +2,7 @@
 'require view';
 'require rpc';
 'require ui';
+'require uci';
 
 // wwand modem settings editor. All values go through the daemon's QMI-native
 // ubus methods; band preferences travel as band-number lists (u64 masks would
@@ -11,6 +12,10 @@ var callStatus = rpc.declare({ object: 'wwand', method: 'status', expect: { mode
 var callGet  = rpc.declare({ object: 'wwand', method: 'modem_get_settings', params: [ 'modem' ], expect: {} });
 var callSet  = rpc.declare({ object: 'wwand', method: 'modem_set_settings', params: [ 'modem', 'settings' ], expect: {} });
 var callPlmn = rpc.declare({ object: 'wwand', method: 'modem_plmn_lists', params: [ 'modem' ], expect: {} });
+var callSlots = rpc.declare({ object: 'wwand', method: 'modem_sim_slots', params: [ 'modem' ], expect: {} });
+var callSwitchSlot = rpc.declare({ object: 'wwand', method: 'modem_sim_switch_slot', params: [ 'modem', 'slot' ], expect: {} });
+var callEsim = rpc.declare({ object: 'wwand', method: 'modem_esim',
+	params: [ 'modem', 'op', 'slot', 'iccid', 'activation_code', 'confirmation_code' ], expect: {} });
 
 var MODE_BITS = [
 	[ 0x04, 'GSM' ],
@@ -72,16 +77,147 @@ return view.extend({
 	handleReset: null,
 
 	load: function() {
-		return callStatus().then(function(modems) {
-			var names = Object.keys(modems || {});
+		return Promise.all([ callStatus(), uci.load('network') ]).then(function(r) {
+			var names = Object.keys(r[0] || {});
 
 			if (!names.length)
 				return { modem: null };
 
-			return Promise.all([ callGet(names[0]), callPlmn(names[0]) ]).then(function(res) {
-				return { modem: names[0], settings: res[0], plmn: res[1] };
+			return Promise.all([
+				callGet(names[0]),
+				callPlmn(names[0]),
+				L.resolveDefault(callSlots(names[0]), {}),
+				L.resolveDefault(callEsim(names[0], 'profiles', 0, '', '', ''), {}),
+			]).then(function(res) {
+				return { modem: names[0], settings: res[0], plmn: res[1],
+				         slots: (res[2] || {}).slots || [],
+				         esim: res[3] || {} };
 			});
 		});
+	},
+
+	simSlotUci: function(slot) {
+		// old-style configs carry sim_slot on the first proto-qmi interface
+		var target = null;
+		uci.sections('network', 'interface', function(s) {
+			if (!target && s.proto == 'qmi')
+				target = s['.name'];
+		});
+		if (!target)
+			return Promise.reject(new Error('no qmi interface'));
+		uci.set('network', target, 'sim_slot', String(slot));
+		return uci.save().then(function() { return uci.apply() });
+	},
+
+	renderSim: function(data) {
+		var self = this;
+		var esimOk = data.esim && data.esim.ok !== false && data.esim.profiles;
+		var out = [ E('h3', {}, _('SIM')) ];
+
+		var slotRows = (data.slots || []).map(function(sl) {
+			var line = [
+				E('strong', {}, _('Slot %d').format(sl.physical) +
+					(sl.is_euicc ? ' (eSIM)' : '') + (sl.active ? ' ✓' : '')),
+				' — ' + sl.card + (sl.iccid ? (', ICCID ' + sl.iccid) : '') +
+					(sl.eid ? (', EID ' + sl.eid) : ''), ' '
+			];
+			line.push(E('button', { 'class': 'btn cbi-button', 'style': 'margin-left:8px',
+				'click': ui.createHandlerFn(self, function() {
+					return self.simSlotUci(sl.physical).then(function() {
+						ui.addNotification(null, E('p', _('Primary SIM set to slot %d (persisted).').format(sl.physical)), 'info');
+					});
+				}) }, _('Set as primary')));
+			if (!sl.active && sl.card == 'present')
+				line.push(E('button', { 'class': 'btn cbi-button cbi-button-apply', 'style': 'margin-left:4px',
+					'click': ui.createHandlerFn(self, function() {
+						if (!confirm(_('Switch to SIM slot %d now? The connection will drop.').format(sl.physical)))
+							return;
+						return callSwitchSlot(data.modem, sl.physical);
+					}) }, _('Switch now')));
+			return E('div', { 'style': 'margin-bottom:4px' }, line);
+		});
+
+		out.push(E('div', { 'class': 'cbi-section' },
+			slotRows.length ? slotRows : [ E('em', {}, _('No slot information available.')) ]));
+
+		if (!esimOk) {
+			if (data.esim && data.esim.error == 'esim_not_installed')
+				out.push(E('p', {}, E('em', {}, _('eSIM management: package wwand-esim is not installed.'))));
+			return out;
+		}
+
+		var profRows = (data.esim.profiles || []).map(function(p) {
+			var acts = [];
+			if (p.state != 'enabled')
+				acts.push(E('button', { 'class': 'btn cbi-button cbi-button-apply',
+					'click': ui.createHandlerFn(self, function() {
+						if (!confirm(_('Enable profile %s? The connection will re-establish.').format(p.iccid)))
+							return;
+						return callEsim(data.modem, 'enable', 0, p.iccid, '', '').then(function() { window.location.reload() });
+					}) }, _('Enable')));
+			else
+				acts.push(E('button', { 'class': 'btn cbi-button',
+					'click': ui.createHandlerFn(self, function() {
+						if (!confirm(_('Disable the active profile %s?').format(p.iccid)))
+							return;
+						return callEsim(data.modem, 'disable', 0, p.iccid, '', '').then(function() { window.location.reload() });
+					}) }, _('Disable')));
+			acts.push(E('button', { 'class': 'btn cbi-button cbi-button-remove', 'style': 'margin-left:4px',
+				'click': ui.createHandlerFn(self, function() {
+					if (!confirm(_('Permanently DELETE profile %s from the eUICC?').format(p.iccid)))
+						return;
+					return callEsim(data.modem, 'delete', 0, p.iccid, '', '').then(function() { window.location.reload() });
+				}) }, _('Delete')));
+			return E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td' }, p.iccid),
+				E('td', { 'class': 'td' }, p.provider || p.name || p.nickname || ''),
+				E('td', { 'class': 'td' }, p.state),
+				E('td', { 'class': 'td' }, acts),
+			]);
+		});
+
+		out.push(E('h4', {}, _('eSIM profiles')));
+		out.push(E('table', { 'class': 'table' }, [
+			E('tr', { 'class': 'tr table-titles' }, [
+				E('th', { 'class': 'th' }, 'ICCID'),
+				E('th', { 'class': 'th' }, _('Provider')),
+				E('th', { 'class': 'th' }, _('State')),
+				E('th', { 'class': 'th' }, ''),
+			]),
+		].concat(profRows.length ? profRows : [
+			E('tr', { 'class': 'tr' }, [ E('td', { 'class': 'td', 'colspan': 4 }, E('em', {}, _('no profiles'))) ]) ])));
+
+		var codeIn = E('input', { 'type': 'text', 'style': 'width:60%',
+			'placeholder': 'LPA:1$rsp.example.com$ACTIVATION-CODE' });
+		var confIn = E('input', { 'type': 'text', 'style': 'width:20%', 'placeholder': _('confirmation code (optional)') });
+		var dlStatus = E('span', { 'style': 'margin-left:8px' });
+
+		var pollStatus = function() {
+			callEsim(data.modem, 'download_status', 0, '', '', '').then(function(st) {
+				dlStatus.textContent = st.state + (st.log ? (': ' + st.log.split('\n').pop()) : '');
+				if (st.state == 'running')
+					window.setTimeout(pollStatus, 2000);
+				else if (st.state == 'done')
+					window.setTimeout(function() { window.location.reload() }, 1500);
+			});
+		};
+
+		out.push(E('h4', {}, _('Download profile')));
+		out.push(E('div', { 'class': 'cbi-section' }, [
+			codeIn, ' ', confIn, ' ',
+			E('button', { 'class': 'btn cbi-button cbi-button-apply',
+				'click': ui.createHandlerFn(self, function() {
+					return callEsim(data.modem, 'download', 0, '', codeIn.value, confIn.value).then(function(res) {
+						if (res && res.ok === false)
+							ui.addNotification(null, E('p', _('Download failed to start: ') + (res.error || '?')), 'error');
+						else
+							pollStatus();
+					});
+				}) }, _('Download')),
+			dlStatus,
+		]));
+
+		return out;
 	},
 
 	apply: function(modem, settings) {
@@ -173,10 +309,11 @@ return view.extend({
 						});
 					}) }, _('Reset to defaults')),
 			]),
+		].concat(this.renderSim(data)).concat([
 			E('h3', {}, _('SIM PLMN preference lists')),
 			plmnTable(_('User-controlled (editable by CPOL)'), (data.plmn || {}).user),
 			plmnTable(_('Operator-controlled'), (data.plmn || {}).operator),
 			plmnTable(_('Home PLMN'), (data.plmn || {}).home),
-		]);
+		]));
 	},
 });
