@@ -481,12 +481,45 @@ export function create(opts)
 		return null;
 	};
 
+	// connection params re-read from disk on every up (structural changes —
+	// device/mux/protocol/modem binding — still go through the reload trigger).
+	// entry.cfg is the same object the context reads live, so updating it in
+	// place makes the next activation use the fresh values.
+	const CTX_LIVE_FIELDS = [ 'apn', 'pdp_type', 'auth', 'username', 'password',
+	                          'profile', 'mtu', 'use_pushed_mtu' ];
+
+	let refresh_context_cfg = (name, entry) => {
+		if (!deps.read_config)
+			return;
+
+		let parsed = deps.read_config();
+		let fresh = parsed?.contexts?.[name];
+
+		if (!fresh)
+			return;
+
+		let changed = [];
+
+		for (let f in CTX_LIVE_FIELDS)
+			if (sprintf('%J', entry.cfg[f]) != sprintf('%J', fresh[f])) {
+				entry.cfg[f] = fresh[f];
+				push(changed, f);
+			}
+
+		if (length(changed))
+			log('info', sprintf('context %s: refreshed config from disk (%s)',
+				name, join(', ', changed)));
+	};
+
 	self.context_up = function(ref, cb) {
 		let name = self.resolve_context(ref);
 		let entry = name ? self.contexts[name] : null;
 
 		if (!entry?.ctx)
 			return cb({ error: 'no_such_context', ref: ref });
+
+		// re-read connection params from disk on every up (like netifd)
+		refresh_context_cfg(name, entry);
 
 		// netifd asked us to be up → mark the desired state so the daemon keeps
 		// it up (reconnects in place) until an explicit context_down.

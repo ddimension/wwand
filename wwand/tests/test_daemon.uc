@@ -110,6 +110,15 @@ let daemon = daemon_mod.create({
 		down_interface: (iface) => push(events, { type: 'down', data: iface }),
 		iface_status: (iface) => ({ up: iface_up }),   // false -> kick, true -> adopt
 		datapath_fx: dpfx,
+		// context_up re-reads config from disk on every up: return a version
+		// with a changed apn so the refresh path is exercised
+		read_config: () => config.parse({
+			wwand: {
+				m0: { '.type': 'modem', device: '/dev/mock0' },
+				wan_ctx: { '.type': 'context', modem: 'm0', apn: 'web2', pdp_type: 'ipv4' },
+			},
+			network: { wan: { '.type': 'interface', proto: 'qmi', context: 'wan_ctx' } },
+		}),
 		resolve_modem_device: (cfg) => cfg.device,
 		resolve_netdev: (cfg, device) => 'wwan0',
 	},
@@ -147,6 +156,7 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 	eq(reply.ipv4.dns, [ '9.9.9.9', '1.1.1.1' ], 'context_up: v4 dns');
 	eq(reply.ipv6, null, 'context_up: no v6 for ipv4 context');
 	eq(reply.pushed_mtu, 1430, 'context_up: pushed mtu');
+	eq(daemon.contexts.wan_ctx.cfg.apn, 'web2', 'context_up: apn refreshed from disk on up');
 	ok(dpfx.action_index('link_set wwan0 mtu 1430') >= 0, 'context_up: mtu applied via rtnl layer');
 
 	conn_cli.defer('wwand', 'status', {}, (c2, st) => {

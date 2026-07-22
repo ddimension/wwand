@@ -200,6 +200,9 @@ function run_daemon()
 		deps: {
 			transport_open: transport.open,
 			log: (level, msg) => logmod.log(level, '%s', msg),
+			// re-parse uci on demand (context_up refreshes connection params
+			// from disk on every up, like netifd re-reads its config)
+			read_config: load_config,
 			emit_event: (type, data) => conn.event(type, data),
 			datapath_fx: netlink.default_fx((level, msg) => logmod.log(level, '%s', msg)),
 			resolve_modem_device: discovery.resolve_modem_device,
