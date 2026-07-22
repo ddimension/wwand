@@ -241,41 +241,68 @@ export function unlock(modem, cb)
 	return unlock_dms(modem, cb, 0);
 }
 
+// QMI codes where the transport rejected the op WITHOUT touching the PIN, so it
+// is safe to try the next transport: MissingArgument 17, InvalidArgument 48,
+// DeviceNotReady 52, AccessDenied 82, NotSupported 94. Real PIN results
+// (IncorrectPin 12, PinBlocked 35) stop the chain so we never burn a retry on
+// another transport. NoEffect 26 means already in the requested state = done.
+const PINLOCK_FALLBACK = { '17': 1, '48': 1, '52': 1, '82': 1, '94': 1 };
+
 // enable (lock) or disable (unlock) the SIM PIN1 query — whether the card asks
-// for the PIN at power-on. Needs the current PIN. Prefers QMI (UIM, then DMS),
-// falls back to AT+CLCK; the transport is cached per modem. cb(err, { enabled }).
+// for the PIN at power-on. Needs the current PIN. Tries QMI first (UIM, then
+// DMS), falls back to AT+CLCK on a transport rejection. cb(err, { enabled }).
 export function set_pin_lock(modem, enable, pin, cb)
 {
 	let enabled = enable ? 1 : 0;
 	let pin_id = uimmod.PIN_ID_PIN1;
 
-	backend.choose(modem, '_pinlock_be', [
-		{ name: 'uim', probe: (ok) => ok(!!modem.uim) },
-		{ name: 'dms', probe: (ok) => ok(!!modem.dms) },
-		{ name: 'at',  probe: (ok) => ok(!!modem.at) },
-	], (be) => {
-		let done = (err, data) => cb(
-			err ? { error: err.error ?? 'qmi', detail: err, retries: data?.retries?.verify } : null,
-			err ? null : { enabled: !!enable });
+	let chain = [];
+	if (modem.uim) push(chain, 'uim');
+	if (modem.dms) push(chain, 'dms');
+	if (modem.at)  push(chain, 'at');
+
+	let i = 0, attempt;
+
+	attempt = () => {
+		if (i >= length(chain))
+			return cb({ error: 'no_pin_backend' });
+
+		let be = chain[i++];
+
+		let handle = (err, data) => {
+			if (err && err.code == 26)                    // NoEffect: already set
+				return cb(null, { enabled: !!enable, note: 'no_effect' });
+
+			if (!err)
+				return cb(null, { enabled: !!enable });
+
+			// transport rejected the op (PIN untouched) -> try the next; a real
+			// PIN error stops here so another transport can't burn a retry
+			let transport_reject = (err.error != 'qmi') || PINLOCK_FALLBACK[sprintf('%d', err.code)];
+
+			if (transport_reject && i < length(chain))
+				return attempt();
+
+			cb({ error: err.error ?? 'qmi', detail: err, retries: data?.retries?.verify });
+		};
 
 		if (be == 'uim')
 			return modem.uim.request('SET_PIN_PROTECTION', {
 				session: { session_type: uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING, aid: '' },
 				info: { pin_id: pin_id, enabled: enabled, pin: pin },
-			}, done);
+			}, handle, { no_recovery: true });
 
 		if (be == 'dms')
 			return modem.dms.request('SET_PIN_PROTECTION', {
 				info: { pin_id: pin_id, enabled: enabled, pin: pin },
-			}, done);
+			}, handle, { no_recovery: true });
 
-		if (be == 'at')
-			// AT+CLCK="SC",<1 lock|0 unlock>,"<pin>"
-			return modem.at.send(sprintf('AT+CLCK="SC",%d,"%s"', enabled, pin),
-				(err) => cb(err ? { error: 'at', detail: err } : null, err ? null : { enabled: !!enable }));
+		// AT+CLCK="SC",<1 lock|0 unlock>,"<pin>"
+		modem.at.send(sprintf('AT+CLCK="SC",%d,"%s"', enabled, pin),
+			(err) => handle(err ? { error: 'at', detail: err } : null));
+	};
 
-		cb({ error: 'no_pin_backend' });
-	});
+	attempt();
 }
 
 // --- card identity (IMSI / ICCID) -------------------------------------------
@@ -298,6 +325,8 @@ function read_ef(modem, ef, cb, session_type)
 {
 	session_type = session_type ?? uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING;
 
+	// optional EF reads (PLMN lists, identity) that a modem rejects with
+	// INVALID_ARGUMENT etc. must not climb the recovery/reboot ladder
 	modem.uim.request('READ_TRANSPARENT', {
 		session:   { session_type: session_type, aid: '' },
 		file:      { file_id: ef.file_id, path: ef.path },
@@ -316,7 +345,7 @@ function read_ef(modem, ef, cb, session_type)
 		}
 
 		cb(data.data);
-	});
+	}, { no_recovery: true });
 }
 
 // best-effort: reads IMSI, ICCID and MSISDN; absent values stay null

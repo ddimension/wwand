@@ -59,8 +59,13 @@ export function create(hub, schema, cid, hooks)
 		let frame = qmux.encode(schema.service, cid, txn, msg.id,
 		                        tlv.pack(msg.req, args));
 
+		// opts.no_recovery: don't feed the recovery error counter for this
+		// request (optional reads / user ops that legitimately fail on some
+		// modems must not climb the reboot ladder)
+		let no_rec = opts?.no_recovery;
+
 		if (!hub.send(frame)) {
-			if (hooks?.on_error)
+			if (hooks?.on_error && !no_rec)
 				hooks.on_error(self, 'send', name);
 
 			if (cb)
@@ -69,12 +74,12 @@ export function create(hub, schema, cid, hooks)
 			return false;
 		}
 
-		let p = { name: name, msg: msg, cb: cb };
+		let p = { name: name, msg: msg, cb: cb, no_recovery: no_rec };
 
 		p.timer = uloop.timer(opts?.timeout ?? DEFAULT_TIMEOUT, () => {
 			delete self.pending[sprintf('%d', txn)];
 
-			if (hooks?.on_error)
+			if (hooks?.on_error && !no_rec)
 				hooks.on_error(self, 'timeout', name);
 
 			if (cb)
@@ -110,7 +115,7 @@ export function create(hub, schema, cid, hooks)
 			else if (data._result.result != 0)
 				err = { error: 'qmi', result: data._result.result, code: data._result.error };
 
-			if (err && hooks?.on_error)
+			if (err && hooks?.on_error && !p.no_recovery)
 				hooks.on_error(self, err.error, p.name);
 			else if (!err && hooks?.on_success)
 				hooks.on_success(self);
