@@ -100,7 +100,7 @@ let fake = {
 			if (match(cmd, /^AT\+CCHO=/))
 				cb(null, { lines: [ '+CCHO: 2' ] });
 			else if (match(cmd, /^AT\+CGLA=/))
-				cb(null, { lines: [ '+CGLA: 12,00A40004009000' ] });
+				cb(null, { lines: [ '+CGLA: 14,"00A40004009000"' ] });
 			else
 				cb(null, { lines: [] });
 		},
@@ -114,8 +114,8 @@ eq(at_cmds[0], 'AT+CCHO="A0000005591010FFFFFFFF8900000100"', 'apdu-at: CCHO comm
 eq(fake._apdu_be, 'at', 'apdu-at: backend cached as at (no uim)');
 
 sim.apdu_send(fake, 2, ap_ch, '00a4000400', (e, r) => { ap_resp = r; });
-eq(at_cmds[1], 'AT+CGLA=2,10,00A4000400', 'apdu-at: CGLA channel,len(hexchars),apdu');
-eq(ap_resp, '00a40004009000', 'apdu-at: CGLA response parsed lowercase');
+eq(at_cmds[1], 'AT+CGLA=2,10,"00A4000400"', 'apdu-at: CGLA quoted apdu (Quectel requirement)');
+eq(ap_resp, '00a40004009000', 'apdu-at: CGLA quoted response parsed lowercase');
 
 sim.apdu_close(fake, 2, ap_ch, (e) => { ap_closed = (e == null); });
 eq(at_cmds[2], 'AT+CCHC=2', 'apdu-at: CCHC command');

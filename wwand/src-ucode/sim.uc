@@ -402,13 +402,15 @@ function at_apdu_send(modem, channel, apdu_hex, cb)
 {
 	let h = uc(apdu_hex);
 
-	// CGLA length is the command length in hex characters (2 * bytes)
-	modem.at.send(sprintf('AT+CGLA=%d,%d,%s', channel, length(h), h), (err, res) => {
+	// CGLA length is the command length in hex characters (2 * bytes); the
+	// APDU MUST be quoted — Quectel rejects the unquoted form with ERROR.
+	// The response comes back quoted too: +CGLA: <len>,"<hex>"
+	modem.at.send(sprintf('AT+CGLA=%d,%d,"%s"', channel, length(h), h), (err, res) => {
 		if (err)
 			return cb(err, null);
 
 		for (let l in (res?.lines ?? [])) {
-			let m = match(l, /\+CGLA: *[0-9]+,([0-9A-Fa-f]+)/);
+			let m = match(l, /\+CGLA: *[0-9]+,"?([0-9A-Fa-f]+)"?/);
 
 			if (m)
 				return cb(null, lc(m[1]));
