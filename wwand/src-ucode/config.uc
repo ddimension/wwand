@@ -215,6 +215,28 @@ function compat_translate(raw, result)
 		if (type(s.at_init) == 'array' && !length(modem.at_init))
 			modem.at_init = s.at_init;
 
+		// cell lock is a modem-level property; old-style configs carry it on
+		// the interface sections (LuCI's "Lock this cell" writes it there)
+		let l4 = (type(s.lock_4g) == 'array') ? s.lock_4g :
+		         (s.lock_4g != null ? [ s.lock_4g ] : []);
+
+		if (length(l4)) {
+			if (!length(modem.lock_4g))
+				modem.lock_4g = l4;
+			else if (join(',', modem.lock_4g) != join(',', l4))
+				push(result.warnings, sprintf("interface %s: conflicting lock_4g ignored (modem %s)", name, mkey));
+		}
+
+		if (s.lock_5g != null) {
+			if (modem.lock_5g == null)
+				modem.lock_5g = s.lock_5g;
+			else if (modem.lock_5g != s.lock_5g)
+				push(result.warnings, sprintf("interface %s: conflicting lock_5g ignored (modem %s)", name, mkey));
+		}
+
+		if (s.lock_persist != null)
+			modem.lock_persist = bool_opt(s.lock_persist, false);
+
 		if (s.location != null)
 			modem.location = +s.location > 1;   // old gate: location > 1
 

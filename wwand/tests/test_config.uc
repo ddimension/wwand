@@ -48,7 +48,8 @@ r = config.parse({
 		       dhcp: '1', strongestnetwork: '1', location: '2',
 		       metric: '10', use_pushed_mtu: '1', mtu: '1430' },
 		wanb: { '.type': 'interface', proto: 'qmi', device: 'wwan0m2',
-		        apn: 'work', ipv4: '1', ipv6: '1' },
+		        apn: 'work', ipv4: '1', ipv6: '1',
+		        lock_4g: [ '1300:246' ], lock_persist: '1' },
 		lan: { '.type': 'interface', proto: 'static' },
 	},
 });
@@ -64,6 +65,10 @@ eq(m.zero_rx_timeout, 3600, 'compat: zero rx timeout');
 eq(m.failreboot, 50, 'compat: failreboot');
 eq(m.delay, 5, 'compat: delay');
 eq(m.location, true, 'compat: location>1 becomes true');
+// cell lock lives on the interface sections in old configs (LuCI writes it
+// there) — it must end up on the synthesized modem
+eq(m.lock_4g, [ '1300:246' ], 'compat: lock_4g moved to modem');
+eq(m.lock_persist, true, 'compat: lock_persist moved to modem');
 
 let c = r.contexts.wan;
 eq(c.modem, 'compat_wwan0', 'compat: context modem ref');
