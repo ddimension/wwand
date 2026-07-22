@@ -36,6 +36,26 @@ export const MODE_ALL = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) |
 export const NETWORK_SELECTION_AUTOMATIC = 0;
 export const NETWORK_SELECTION_MANUAL = 1;
 
+// field specs shared verbatim across the get/indication message pairs below
+// (the messages differ only in id and, for serving system, the lac/cell/tac
+// TLV ids, which stay inline)
+const SERVING_SYSTEM_F = { t: 0x01, f: {
+	registration:     'u8',
+	cs_attach:        'u8',
+	ps_attach:        'u8',
+	selected_network: 'u8',
+	radio_ifs:        { n: 'u8', of: 'u8' },
+} };
+const ROAMING_F = { t: 0x10, f: 'u8' };
+const CURRENT_PLMN_F = { t: 0x12, f: { mcc: 'u16', mnc: 'u16', description: 'string' } };
+const SIGNAL_INFO_F = {
+	gsm_rssi:  { t: 0x12, f: 'i8' },
+	wcdma:     { t: 0x13, f: { rssi: 'i8', ecio: 'i16' } },
+	lte:       { t: 0x14, f: { rssi: 'i8', rsrq: 'i8', rsrp: 'i16', snr: 'i16' } },
+	nr5g:      { t: 0x17, f: { rsrp: 'i16', snr: 'i16' } },
+	nr5g_rsrq: { t: 0x18, f: 'i16' },
+};
+
 export default {
 	service: 0x03,
 	messages: {
@@ -55,15 +75,9 @@ export default {
 			id: 0x0024,
 			req: {},
 			resp: {
-				serving_system: { t: 0x01, f: {
-					registration:     'u8',
-					cs_attach:        'u8',
-					ps_attach:        'u8',
-					selected_network: 'u8',
-					radio_ifs:        { n: 'u8', of: 'u8' },
-				} },
-				roaming:      { t: 0x10, f: 'u8' },
-				current_plmn: { t: 0x12, f: { mcc: 'u16', mnc: 'u16', description: 'string' } },
+				serving_system: SERVING_SYSTEM_F,
+				roaming:      ROAMING_F,
+				current_plmn: CURRENT_PLMN_F,
 				lac:          { t: 0x1C, f: 'u16' },
 				cell_id:      { t: 0x1D, f: 'u32' },
 				lte_tac:      { t: 0x24, f: 'u16' },
@@ -73,15 +87,9 @@ export default {
 		SERVING_SYSTEM_IND: {
 			id: 0x0024,
 			ind: {
-				serving_system: { t: 0x01, f: {
-					registration:     'u8',
-					cs_attach:        'u8',
-					ps_attach:        'u8',
-					selected_network: 'u8',
-					radio_ifs:        { n: 'u8', of: 'u8' },
-				} },
-				roaming:      { t: 0x10, f: 'u8' },
-				current_plmn: { t: 0x12, f: { mcc: 'u16', mnc: 'u16', description: 'string' } },
+				serving_system: SERVING_SYSTEM_F,
+				roaming:      ROAMING_F,
+				current_plmn: CURRENT_PLMN_F,
 				lac:          { t: 0x1D, f: 'u16' },
 				cell_id:      { t: 0x1E, f: 'u32' },
 				lte_tac:      { t: 0x25, f: 'u16' },
@@ -200,24 +208,12 @@ export default {
 		GET_SIGNAL_INFO: {
 			id: 0x004F,
 			req: {},
-			resp: {
-				gsm_rssi:  { t: 0x12, f: 'i8' },
-				wcdma:     { t: 0x13, f: { rssi: 'i8', ecio: 'i16' } },
-				lte:       { t: 0x14, f: { rssi: 'i8', rsrq: 'i8', rsrp: 'i16', snr: 'i16' } },
-				nr5g:      { t: 0x17, f: { rsrp: 'i16', snr: 'i16' } },
-				nr5g_rsrq: { t: 0x18, f: 'i16' },
-			},
+			resp: SIGNAL_INFO_F,
 		},
 
 		SIGNAL_INFO_IND: {
 			id: 0x0051,
-			ind: {
-				gsm_rssi:  { t: 0x12, f: 'i8' },
-				wcdma:     { t: 0x13, f: { rssi: 'i8', ecio: 'i16' } },
-				lte:       { t: 0x14, f: { rssi: 'i8', rsrq: 'i8', rsrp: 'i16', snr: 'i16' } },
-				nr5g:      { t: 0x17, f: { rsrp: 'i16', snr: 'i16' } },
-				nr5g_rsrq: { t: 0x18, f: 'i16' },
-			},
+			ind: SIGNAL_INFO_F,
 		},
 	},
 };
