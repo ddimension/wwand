@@ -34,12 +34,14 @@ export function open(path, cbs)
 		closed: false,
 	};
 
+	// service/cid are u8; combine into one integer key to avoid an sprintf on
+	// the per-message dispatch path (below)
 	hub.register = function(client) {
-		hub.clients[sprintf('%d:%d', client.service, client.cid)] = client;
+		hub.clients[client.service * 256 + client.cid] = client;
 	};
 
 	hub.unregister = function(client) {
-		delete hub.clients[sprintf('%d:%d', client.service, client.cid)];
+		delete hub.clients[client.service * 256 + client.cid];
 	};
 
 	let txq = [];
@@ -114,7 +116,7 @@ export function open(path, cbs)
 	};
 
 	hub._dispatch = function(dec) {
-		let client = hub.clients[sprintf('%d:%d', dec.service, dec.cid)];
+		let client = hub.clients[dec.service * 256 + dec.cid];
 
 		// broadcast indications (e.g. NAS) arrive on cid 0xff
 		if (!client && dec.kind == 'indication' && dec.cid == 0xff) {

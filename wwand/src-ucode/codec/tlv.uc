@@ -283,10 +283,14 @@ export function pack(fields, args)
 export function unpack(fields, buf)
 {
 	let res = {};
-	let by_type = {};
+
+	// TLV types are u8 (0-255), so index the reverse map by the integer
+	// directly — avoids an sprintf('%d', t) per field here and per TLV below,
+	// which ran on every decoded message
+	let by_type = [];
 
 	for (let name in fields ?? {})
-		by_type[sprintf('%d', fields[name].t)] = name;
+		by_type[fields[name].t] = name;
 
 	let pos = 0;
 	let len = length(buf ?? '');
@@ -306,7 +310,7 @@ export function unpack(fields, buf)
 
 		pos += l;
 
-		let name = by_type[sprintf('%d', t)];
+		let name = by_type[t];
 
 		// type 0x02 is the result TLV — unless the schema claims it as a
 		// regular field (UIM requests use 0x02 for File/Info TLVs)

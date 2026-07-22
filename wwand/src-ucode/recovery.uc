@@ -101,17 +101,22 @@ export function create(opts)
 		}
 	};
 
-	// per-request error bookkeeping; returns 'reboot' when the ceiling hits
+	// per-request error bookkeeping; returns 'reboot' when the ceiling hits.
+	// persist only at milestones, not on every error — during a sustained
+	// outage this fires per QMI request; a restart loses at most a few counts
 	self.on_qmi_error = function() {
 		self.counters.qmi_errors++;
-		self.persist();
+		let n = self.counters.qmi_errors;
 
-		if (self.counters.qmi_errors > 0 &&
-		    self.counters.qmi_errors % 5 == 0)
-			log('warn', sprintf('qmi error counter at %d', self.counters.qmi_errors));
+		if (n % 5 == 0) {
+			log('warn', sprintf('qmi error counter at %d', n));
+			self.persist();
+		}
 
-		if (self.counters.qmi_errors > QMI_ERROR_LIMIT)
+		if (n > QMI_ERROR_LIMIT) {
+			self.persist();
 			return 'reboot';
+		}
 
 		return 'retry';
 	};
