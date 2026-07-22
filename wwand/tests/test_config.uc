@@ -19,7 +19,7 @@ let r = config.parse({
 	},
 	network: {
 		wan: { '.type': 'interface', proto: 'qmi', context: 'wan_ctx' },
-		wan2: { '.type': 'interface', proto: 'qmi', context: 'wan2_ctx' },
+		wan2: { '.type': 'interface', proto: 'qmi', context: 'wan2_ctx', auto: '0' },
 	},
 });
 
@@ -32,6 +32,8 @@ eq(r.contexts.wan_ctx.modem, 'm0', 'new: context modem ref');
 eq(r.contexts.wan_ctx.interface, 'wan', 'new: interface attached');
 eq(r.contexts.wan2_ctx.mux_id, 2, 'new: mux id');
 eq(r.contexts.wan2_ctx.apn, '#2', 'new: profile passthrough apn');
+eq(r.contexts.wan_ctx.auto, true, 'new: interface auto defaults true');
+eq(r.contexts.wan2_ctx.auto, false, 'new: auto 0 -> not proactively brought up');
 // wan_ctx shares the modem with the muxed wan2_ctx -> auto-assigned channel
 eq(r.contexts.wan_ctx.mux_id, 1, 'new: sibling context auto-muxed');
 eq(length(r.warnings), 1, 'new: only the auto-mux warning');
@@ -79,6 +81,7 @@ eq(m.sim_slot, 2, 'compat: sim_slot moved to modem');
 let c = r.contexts.wan;
 eq(c.modem, 'compat_wwan0', 'compat: context modem ref');
 eq(c.interface, 'wan', 'compat: interface name');
+eq(c.auto, true, 'compat: auto defaults true');
 // wwan0m2 sibling forces muxing; the parent context gets a free channel
 eq(c.mux_id, 1, 'compat: wwan0 auto-muxed alongside wwan0m2');
 eq(c.pdp_type, 'ipv4', 'compat: ipv6=0 -> ipv4');

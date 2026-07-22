@@ -92,9 +92,13 @@ export function create(opts)
 					log('info', sprintf('adopting live interface %s after modem ready', entry.cfg.interface));
 					retry_activate(name);
 				}
-				else if (deps.kick_interface) {
+				else if ((entry.cfg.auto ?? true) && deps.kick_interface) {
 					log('info', sprintf('kicking interface %s after modem ready', entry.cfg.interface));
 					deps.kick_interface(entry.cfg.interface);
+				}
+				else {
+					// 'auto 0' and not up: leave it dormant until an explicit ifup
+					log('debug', sprintf('interface %s is down and auto=0, not kicking', entry.cfg.interface));
 				}
 			}
 

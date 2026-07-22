@@ -67,6 +67,7 @@ export function context_defaults(over)
 		mtu: null, use_pushed_mtu: true,
 		use_pushed_prefix: false,
 		settings_poll: 300,
+		auto: true,   // netifd 'auto 0' => daemon won't proactively bring it up
 		...(over ?? {}),
 	};
 }
@@ -223,8 +224,12 @@ function compat_translate(raw, result)
 
 		// new-style interface: references a context section
 		if (s.context != null) {
-			if (result.contexts[s.context])
+			if (result.contexts[s.context]) {
 				result.contexts[s.context].interface = name;
+				// 'auto 0' interfaces are not started at boot — the daemon must
+				// not proactively kick them up (only adopt them if already up)
+				result.contexts[s.context].auto = bool_opt(s.auto, true);
+			}
 			else
 				push(result.warnings, sprintf("interface %s references unknown context '%s'", name, s.context));
 
@@ -293,6 +298,7 @@ function compat_translate(raw, result)
 			use_pushed_mtu: bool_opt(s.use_pushed_mtu, false),   // old default: off
 			use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
 			settings_poll: +(s.settings_poll ?? 300),
+			auto: bool_opt(s.auto, true),
 		});
 	}
 }
