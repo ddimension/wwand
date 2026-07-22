@@ -47,8 +47,9 @@ define Package/wwand/install
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) ./src-ucode/main.uc $(1)/usr/sbin/wwand
 	rm -f $(1)/usr/share/ucode/wwand/main.uc
-	# esim.uc ships in the optional wwand-esim package
+	# esim.uc + esim_bridge.uc ship in the optional wwand-esim package
 	rm -f $(1)/usr/share/ucode/wwand/esim.uc
+	rm -f $(1)/usr/share/ucode/wwand/esim_bridge.uc
 	$(INSTALL_DIR) $(1)/lib/netifd/proto
 	$(INSTALL_BIN) ./files/wwand-proto.sh $(1)/lib/netifd/proto/qmi.sh
 	$(INSTALL_DIR) $(1)/usr/libexec/wwand
@@ -95,6 +96,7 @@ endef
 define Package/wwand-esim/install
 	$(INSTALL_DIR) $(1)/usr/share/ucode/wwand
 	$(INSTALL_DATA) ./src-ucode/esim.uc $(1)/usr/share/ucode/wwand/
+	$(INSTALL_DATA) ./src-ucode/esim_bridge.uc $(1)/usr/share/ucode/wwand/
 endef
 
 $(eval $(call BuildPackage,wwand))
