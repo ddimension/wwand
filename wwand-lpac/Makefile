@@ -12,7 +12,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=wwand-lpac
 PKG_VERSION:=2.3.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_LICENSE:=AGPL-3.0-only GPL-3.0-or-later curl
 PKG_MAINTAINER:=
@@ -30,6 +30,10 @@ WOLFSSL_VERSION:=5.9.1-stable
 CURL_VERSION:=8.21.0
 
 PKG_BUILD_PARALLEL:=1
+
+# wolfSSL's SP math (sp_int.c, WOLFSSL_SP_MIPS) carries inline assembly that
+# MIPS16 cannot encode ("operand 3 must be an immediate expression `addu ...'")
+PKG_BUILD_FLAGS:=no-mips16
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -110,6 +114,10 @@ define Build/Compile
 	$(MAKE) -C $(WOLFSSL_DIR) install
 
 	# 2) minimal static libcurl (HTTPS only) against the bundled wolfSSL
+	# -DSIZEOF_LONG_LONG=8: on 32-bit targets curl_config.h defines
+	# SIZEOF_LONG=4 and nothing else; wolfSSL's CTC_SETTINGS enum (types.h)
+	# then hits "#error bad math long / long long settings". 64-bit targets
+	# take the SIZEOF_LONG==8 branch and never look at it.
 	( cd $(CURL_DIR) && \
 		PKG_CONFIG_PATH="$(PREFIX)/lib/pkgconfig" PKG_CONFIG_LIBDIR="$(PREFIX)/lib/pkgconfig" \
 		./configure --host=$(GNU_TARGET_NAME) --prefix=$(PREFIX) --with-wolfssl=$(PREFIX) \
@@ -122,7 +130,7 @@ define Build/Compile
 		--without-zstd --without-libidn2 --without-librtmp --without-ca-path \
 		--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
 		CC="$(TARGET_CC)" $(BUNDLE_AR) \
-		CFLAGS="$(TARGET_CFLAGS) $(LTO_CFLAGS) -ffunction-sections -fdata-sections" \
+		CFLAGS="$(TARGET_CFLAGS) $(LTO_CFLAGS) -ffunction-sections -fdata-sections -DSIZEOF_LONG_LONG=8" \
 		CPPFLAGS="-I$(PREFIX)/include" LDFLAGS="-L$(PREFIX)/lib" LIBS="-lm" )
 	+$(MAKE) -C $(CURL_DIR)
 	$(MAKE) -C $(CURL_DIR) install
