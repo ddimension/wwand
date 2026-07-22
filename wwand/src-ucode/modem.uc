@@ -203,7 +203,7 @@ export function create(opts)
 	let watch_decay_timer = null, fast_timer = null;
 	let watch_active = false, fast_running = false;
 
-	let step_sync, step_services, step_at, step_esim_quirk, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_register;
+	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_register;
 
 	let fail = (stage, err) => {
 		log('err', sprintf('failed in %s: %J', stage, err));
@@ -307,6 +307,12 @@ export function create(opts)
 
 	step_sync = (tries) => {
 		self.set_state('INIT_TRANSPORT');
+
+		// deferred init resets: steps that change NV settings needing a modem
+		// reset push a reason here; one reset is applied at the end of the AT
+		// config phase instead of resetting mid-init several times
+		self._init_resets = [];
+
 		self.ctl.request('SYNC', {}, (err) => {
 			if (err) {
 				if (tries < SYNC_TRIES) {
@@ -477,14 +483,16 @@ export function create(opts)
 
 	// eSIM host-access quirk: free the eUICC's ISD-R from the modem's internal
 	// LPA so host-side ES10 APDUs (CCHO/CGLA) work. Disabling lpa_enable only
-	// takes effect after a reset — reset ONLY when we actually changed the
-	// value (it is NV, so this happens at most once per modem). Network is
-	// unaffected (the active profile keeps working with the LPA disabled).
+	// takes effect after a reset — but instead of resetting here, we just flag
+	// the reset and let step_apply_init_reset do a single reset at the end of
+	// the AT config phase. Reset happens ONLY when we changed the value (it is
+	// NV, so at most once per modem). Network is unaffected (the active profile
+	// keeps working with the LPA disabled).
 	step_esim_quirk = () => {
 		let q = atcmd.esim_quirks(self.info.model);
 
 		if (!q.lpa_disable_for_host || !self.at)
-			return step_datapath();
+			return step_apply_init_reset();
 
 		self.at.send('AT+QESIM="lpa_enable"', (err, res) => {
 			let enabled = false;
@@ -494,17 +502,28 @@ export function create(opts)
 					enabled = true;
 
 			if (err || !enabled)
-				return step_datapath();   // already disabled / unsupported
-
-			log('notice', 'esim: internal LPA holds the ISD-R; disabling it and resetting once to free it for host access');
+				return step_apply_init_reset();   // already disabled / unsupported
 
 			self.at.send('AT+QESIM="lpa_enable",0', () => {
-				// the reset re-enumerates the modem; discovery re-inits it and
-				// this step then reads lpa_enable=0 and continues. Do NOT call
-				// step_datapath here — this init instance is being torn down.
-				self.at.send('AT+CFUN=1,1', () => null, { timeout: 5000 });
+				push(self._init_resets, 'esim: free the ISD-R from the internal LPA');
+				step_apply_init_reset();
 			});
 		}, { timeout: 8000 });
+	};
+
+	// apply a single reset if any AT-config step requested one (NV changes that
+	// need a power cycle). The reset re-enumerates the modem; discovery re-inits
+	// it and this time nothing needs changing, so no reset is requested and init
+	// proceeds normally. Do NOT continue init here when resetting — this
+	// instance is being torn down.
+	step_apply_init_reset = () => {
+		if (!length(self._init_resets ?? []) || !self.at)
+			return step_datapath();
+
+		log('notice', sprintf('applying deferred init reset (%s)',
+			join('; ', self._init_resets)));
+
+		self.at.send('AT+CFUN=1,1', () => null, { timeout: 5000 });
 	};
 
 	step_datapath = () => {
