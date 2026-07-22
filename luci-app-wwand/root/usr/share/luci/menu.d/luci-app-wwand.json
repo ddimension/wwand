@@ -17,6 +17,24 @@
 			}
 		}
 	},
+	"admin/status/wwand-detail": {
+		"title": "Modem detail",
+		"order": 16,
+		"action": {
+			"type": "view",
+			"path": "wwand/detail"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-wwand"
+			],
+			"ubus": {
+				"wwand": [
+					"status"
+				]
+			}
+		}
+	},
 	"admin/network/wwand": {
 		"title": "Modem Settings",
 		"order": 60,
