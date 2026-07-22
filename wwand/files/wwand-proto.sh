@@ -84,12 +84,18 @@ _wwand_apply_settings() {
 		json_select ..
 	fi
 
+	# no proto_set_keep: every update carries the complete address/route/DNS
+	# set, and netifd only applies the diff anyway. With keep=1 entries missing
+	# from an update survive forever — stale addresses and host routes piled
+	# up across reconnect generations.
 	proto_init_update "$netdev" 1
-	proto_set_keep 1
 
 	[ -n "$v4_addr" ] && {
 		proto_add_ipv4_address "$v4_addr" "${v4_prefix:-32}"
-		[ "$defaultroute" = 0 ] || proto_add_ipv4_route "0.0.0.0" 0 "$v4_gateway"
+		# no gateway on the default route (old dialer behavior): the address
+		# is a /32 on a p2p link, so the modem-reported gateway is off-link
+		# and a via-route would be rejected — a device route always works
+		[ "$defaultroute" = 0 ] || proto_add_ipv4_route "0.0.0.0" 0
 
 		[ "$peerdns" = 0 ] || {
 			for d in $v4_dns; do
@@ -156,6 +162,10 @@ proto_qmi_setup() {
 				;;
 			*)
 				proto_notify_error "$interface" CONNECT_FAILED
+				# netifd re-runs setup immediately after a failed task; without
+				# a pause here a no-service condition becomes a hot loop that
+				# also climbs the daemon's recovery ladder
+				sleep 10
 				;;
 		esac
 
@@ -181,10 +191,9 @@ proto_qmi_setup() {
 proto_qmi_teardown() {
 	local interface="$1"
 
-	ubus -t 30 call wwand context_down "{\"interface\":\"$interface\"}" 2>/dev/null
-
-	proto_init_update "*" 0
-	proto_send_update "$interface"
+	ubus -t 30 call wwand context_down "{\"interface\":\"$interface\"}" >/dev/null 2>&1
+	# no link-down update here: netifd rejects notify_proto while in S_TEARDOWN
+	# and drops the link itself once this script exits
 }
 
 # netifd renew: refresh the interface's IP settings in place, without a
