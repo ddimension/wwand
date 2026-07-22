@@ -6,13 +6,13 @@
  #include <unistd.h>
 +#include <termios.h>
  
- static int at_expect(char **response, const char *expected);
- 
-@@ -70,6 +71,17 @@ static int apdu_interface_connect(struct
+ static FILE *fuart;
+ static int logic_channel = 0;
+@@ -74,6 +75,18 @@
      }
      setbuf(fuart, NULL);
  
-+    { /* put the tty in raw mode — lpac otherwise leaves the canonical/echo
++    { /* put the tty in raw mode -- lpac otherwise leaves the canonical/echo
 +         defaults and AT I/O garbles on real cdc/option serial ports */
 +        int _fd = fileno(fuart);
 +        struct termios _t;
