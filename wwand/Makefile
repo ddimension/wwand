@@ -17,7 +17,7 @@ define Package/wwand
   TITLE:=Event-driven QMI connection manager
   DEPENDS:=+ucode +ucode-mod-fs +ucode-mod-struct +ucode-mod-uloop \
 	+ucode-mod-ubus +ucode-mod-uci +ucode-mod-rtnl +ucode-mod-wwand-io \
-	+kmod-usb-net-qmi-wwan
+	+kmod-usb-net-qmi-wwan +kmod-rmnet
   CONFLICTS:=qmi-advanced uqmi
 endef
 
