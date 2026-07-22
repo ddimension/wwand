@@ -134,4 +134,13 @@ eq(cfg.ipv4_dns, [ '8.8.8.8', '8.8.4.4' ], 'ipcfg: v4 dns array');
 eq(cfg.ipv4_mtu, 1500, 'ipcfg: mtu');
 
 
+// --- lazy-load path ----------------------------------------------------------
+// daemon.uc pulls MBIM in via require(), which compiles plain scripts where
+// `export` is a syntax error — it must go through the exportless mbim_lazy
+// wrapper. Regression: require()ing the ES modules directly crashed the
+// daemon the moment a real MBIM modem enumerated (RG502Q on cdc_mbim).
+let lazy = require('wwand.mbim_lazy');
+ok(type(lazy?.modem?.create) == 'function', 'lazy: modem_mbim loadable via require');
+ok(type(lazy?.context?.create) == 'function', 'lazy: context_mbim loadable via require');
+
 done('test_mbim');

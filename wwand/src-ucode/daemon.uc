@@ -25,11 +25,10 @@ const UP_GUARD_MS = 150000;
 // search path as the static imports) only when an MBIM modem is created.
 let mbim_mods = null;
 function load_mbim() {
+	// require() cannot load ES modules directly (`export` is a syntax error
+	// in plain scripts) — go through the exportless mbim_lazy wrapper
 	if (mbim_mods == null)
-		mbim_mods = {
-			modem: require('wwand.modem_mbim'),
-			context: require('wwand.context_mbim'),
-		};
+		mbim_mods = require('wwand.mbim_lazy');
 
 	return mbim_mods;
 }
@@ -364,7 +363,14 @@ export function create(opts)
 		};
 
 		if (proto == 'mbim') {
-			entry.modem = load_mbim().modem.create(common);
+			entry.modem = load_mbim().modem.create({
+				...common,
+				datapath: {
+					netdev: entry.netdev,
+					mux_links: muxinfo?.list ?? [],
+					fx: deps.datapath_fx,
+				},
+			});
 		}
 		else {
 			entry.modem = modem_mod.create({
@@ -516,9 +522,10 @@ export function create(opts)
 
 		if (mentry?.protocol == 'mbim') {
 			// MBIM sessions: session 0 is the parent netdev, sessions > 0 are
-			// VLAN sub-devices tagged with the session id
+			// VLAN sub-devices tagged with the session id — named after the
+			// context's mux_link so netifd's device binding matches
 			if (entry.cfg.mux_id > 0 && netdev)
-				netdev = sprintf('%s.%d', netdev, entry.cfg.mux_id);
+				netdev = entry.cfg.mux_link ?? sprintf('%s.%d', netdev, entry.cfg.mux_id);
 		}
 		else if (entry.cfg.mux_id > 0 && netdev) {
 			// QMAP muxed contexts use their mux child link

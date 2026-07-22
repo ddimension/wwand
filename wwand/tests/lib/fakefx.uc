@@ -91,6 +91,19 @@ export function create(opts)
 		return true;
 	};
 
+	self.link_add_vlan = function(name, parent, vid) {
+		let action = sprintf('link_add_vlan %s link %s id %d', name, parent, vid);
+
+		push(self.actions, action);
+
+		if (self.rc[action])
+			return false;
+
+		self.present[sprintf('/sys/class/net/%s', name)] = true;
+
+		return true;
+	};
+
 	self.link_add_rmnet = function(name, parent, mux_id, flags) {
 		let action = sprintf('link_add_rmnet %s link %s mux_id %d flags 0x%x',
 			name, parent, mux_id, flags ?? 0);

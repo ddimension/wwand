@@ -141,6 +141,27 @@ ok(fx.action_index('write /sys/class/net/wwan0/qmi/raw_ip Y') > 0, 'plain: raw_i
 ok(fx.action_index('link_set wwan0 mtu 1430') > 0, 'plain: configured mtu');
 ok(fx.action_index('link_set wwan0 up') > 0, 'plain: up');
 
+// --- cdc_mbim session datapath ----------------------------------------------
+
+fx = fakefx.create();
+
+res = netlink.setup_mbim(fx, {
+	netdev: 'wwan0',
+	mux: [ { id: 1, name: 'wwan0m1', mtu: 1500 }, { id: 2, name: 'wwan0m2' } ],
+});
+
+eq(res.ok, true, 'mbim: ok');
+eq(res.mux_devs, [ 'wwan0m1', 'wwan0m2' ], 'mbim: vlan children named after mux_link');
+ok(fx.action_index('link_add_vlan wwan0m1 link wwan0 id 1') >= 0, 'mbim: session 1 vlan');
+ok(fx.action_index('link_add_vlan wwan0m2 link wwan0 id 2') >= 0, 'mbim: session 2 vlan');
+ok(fx.action_index('link_set wwan0 up') >= 0, 'mbim: parent up');
+ok(fx.action_index('link_set wwan0m1 up') >= 0, 'mbim: child up');
+
+// session 0 rides the parent netdev — no sub-device
+fx = fakefx.create();
+res = netlink.setup_mbim(fx, { netdev: 'wwan0', mux: [ { id: 0, name: null } ] });
+eq(res.mux_devs, [], 'mbim: session 0 has no vlan child');
+
 // --- VRF compatibility invariant --------------------------------------------
 // The datapath layer must only ever touch the link layer (mux creation, MTU,
 // carrier, rename, up/down) and sysctl/qmi sysfs — never IP addresses or

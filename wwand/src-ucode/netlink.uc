@@ -121,6 +121,19 @@ export function default_fx(log)
 		return rtnl_request(0, payload);
 	};
 
+	// 802.1q VLAN sub-device (cdc_mbim session mux: VLAN id == session id)
+	self.link_add_vlan = (name, parent, vid) => {
+		rtnl = rtnl ?? require('rtnl');
+
+		let C = rtnl['const'];
+
+		return rtnl_request(C.NLM_F_CREATE | C.NLM_F_EXCL, {
+			ifname: name,
+			link: parent,
+			linkinfo: { type: 'vlan', id: vid },
+		});
+	};
+
 	// rmnet links need IFLA_RMNET_FLAGS (deaggregation, MAPv5 checksum
 	// offload) which the generic rtnl module cannot encode — the raw-netlink
 	// helper lives in our own wwand_io module
@@ -355,6 +368,46 @@ export function setup(fx, opts)
 	}
 
 	return { ok: true, urb_size: urb_size, mux_devs: mux_devs };
+}
+
+// cdc_mbim session datapath: session 0 is the untagged parent netdev,
+// sessions > 0 are 802.1q VLAN sub-devices whose VLAN id equals the MBIM
+// session id. Children are named after the context's expected link name
+// (mux_link) so netifd's device binding matches without config changes.
+export function setup_mbim(fx, opts)
+{
+	let netdev = opts.netdev;
+	let mux_devs = [];
+	let mux_mtus = {};
+
+	for (let entry in (opts.mux ?? [])) {
+		if (!(entry.id > 0))
+			continue;   // session 0 rides the parent, no sub-device
+
+		let child = entry.name ?? sprintf('%s.%d', netdev, entry.id);
+
+		mux_mtus[child] = entry.mtu;
+
+		if (!fx.link_add_vlan(child, netdev, entry.id)) {
+			// tolerate pre-existing links (daemon restart)
+			if (!fx.exists(sprintf('/sys/class/net/%s', child))) {
+				fx.log('err', sprintf('failed to create vlan link %s%s', child,
+					fx.last_error ? sprintf(': %s', fx.last_error) : ''));
+				continue;
+			}
+		}
+
+		push(mux_devs, child);
+	}
+
+	link_op(fx, 'link up', netdev, { up: true });
+
+	for (let child in mux_devs) {
+		link_op(fx, 'child mtu', child, { mtu: child_mtu(mux_mtus[child]) });
+		link_op(fx, 'child up', child, { up: true });
+	}
+
+	return { ok: true, mux_devs: mux_devs };
 }
 
 // endpoint interface number for WDA/bind-mux (e.g. .../1-1.2:1.4 -> 4)

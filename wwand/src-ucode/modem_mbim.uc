@@ -117,7 +117,7 @@ export function create(opts)
 
 	// --- step chain --------------------------------------------------------
 
-	let step_open, step_caps, step_at, step_sim, step_register, step_attach;
+	let step_open, step_caps, step_at, step_datapath, step_sim, step_register, step_attach;
 
 	let fail = (stage, err) => {
 		log('err', sprintf('failed in %s: %J', stage, err));
@@ -204,19 +204,19 @@ export function create(opts)
 	// AT side channel: best-effort, only for quirks and protocol switching
 	step_at = () => {
 		if (self.at)
-			return step_sim();
+			return step_datapath();
 
 		let fxi = at_opts.fx ?? netlink.default_fx((l, m) => log(l, m));
 		let tty = atcmd.find_tty(fxi, self.device, self.config.tty);
 
 		if (!tty)
-			return step_sim();
+			return step_datapath();
 
 		let open_transport = at_opts.open_transport ?? atcmd.open_transport;
 		let tr = open_transport(tty, 115200, (l, m) => log(l, m));
 
 		if (!tr)
-			return step_sim();
+			return step_datapath();
 
 		self.at = atcmd.create(tr, { log: (l, m) => log(l, sprintf('at: %s', m)) });
 		self.at_tty = tty;
@@ -225,9 +225,36 @@ export function create(opts)
 		let cmds = [ ...(self.config.at_init ?? []), ...atcmd.cell_lock_commands(self.config) ];
 
 		if (!length(cmds))
-			return step_sim();
+			return step_datapath();
 
-		self.at.run_sequence(cmds, step_sim);
+		self.at.run_sequence(cmds, step_datapath);
+	};
+
+	// session datapath: parent netdev up, one VLAN sub-device per session id
+	// > 0 (named after the context's mux_link so netifd's device binding
+	// matches). Skipped gracefully when no datapath info is wired (host tests).
+	step_datapath = () => {
+		let dp = opts.datapath;
+
+		if (!dp?.netdev || !dp.fx) {
+			self.datapath = { backend: 'none', netdev: dp?.netdev ?? null, mux: [] };
+			return step_sim();
+		}
+
+		let r = netlink.setup_mbim(dp.fx, {
+			netdev: dp.netdev,
+			mux: dp.mux_links ?? [],
+		});
+
+		self.datapath = {
+			backend: 'cdc_mbim',
+			netdev: dp.netdev,
+			ep_id: null,
+			mux: r.mux_devs,
+		};
+
+		log('notice', sprintf('datapath: cdc_mbim, mux [%s]', join(' ', r.mux_devs)));
+		step_sim();
 	};
 
 	step_sim = () => {
@@ -302,9 +329,13 @@ export function create(opts)
 
 		if (registered && self.state == 'REGISTERING') {
 			if (reg_timer) { reg_timer.cancel(); reg_timer = null; }
+			// ATTACHING guards against REGISTER_STATE indications piling up
+			// while the attach is in flight — each one used to re-run
+			// step_attach and re-emit 'registered' (kick spam in the daemon)
+			self.set_state('ATTACHING');
 			step_attach();
 		}
-		else if (!registered && self.state == 'READY') {
+		else if (!registered && (self.state == 'READY' || self.state == 'ATTACHING')) {
 			log('warn', 'registration lost');
 			emit('deregistered', self.reg);
 			notify_contexts('suspend', self.reg);
@@ -331,6 +362,9 @@ export function create(opts)
 		// attach to the packet service before contexts can connect
 		self.mbim.command(bc, 'PACKET_SERVICE', 'set',
 			{ packet_service_action: bc.PACKET_SERVICE_ATTACH }, (err, data) => {
+			if (self.state != 'ATTACHING')
+				return;   // registration flapped while attaching
+
 			// already-attached returns an error on some modems; tolerate it
 			self.counters.attempts = 0;
 			log('notice', sprintf('registered: plmn %J, roaming %J',
