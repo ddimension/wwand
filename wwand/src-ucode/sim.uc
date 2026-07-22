@@ -302,6 +302,31 @@ export function set_pin_lock(modem, enable, pin, cb)
 			(err) => handle(err ? { error: 'at', detail: err } : null));
 	};
 
+	// idempotent: read the current PIN1 state and short-circuit if already in
+	// the requested state — avoids a spurious AccessDenied and never touches a
+	// retry. PIN1 state 1/2 = enabled, 3 = disabled, 4/5 = blocked. Use UIM
+	// (authoritative where present, and what the EG06 uses), else DMS.
+	let after_state = (st) => {
+		if (st != null) {
+			if (st == 4 || st == 5)
+				return cb({ error: 'pin_blocked', status: st });
+
+			if (!!enable == (st == 1 || st == 2))
+				return cb(null, { enabled: !!enable, already: true });
+		}
+
+		attempt();
+	};
+
+	if (modem.uim)
+		return modem.uim.request('GET_CARD_STATUS', {}, (err, data) =>
+			after_state(err ? null : find_app(data.card_status)?.app?.pin1_state),
+			{ no_recovery: true });
+
+	if (modem.dms)
+		return modem.dms.request('GET_PIN_STATUS', {}, (err, data) =>
+			after_state(err ? null : data?.pin1?.status), { no_recovery: true });
+
 	attempt();
 }
 
