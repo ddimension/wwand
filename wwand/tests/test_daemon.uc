@@ -263,8 +263,16 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 													eq(s8.ok, false, 'set: unknown key rejected');
 													eq(s8.error, 'invalid_setting', 'set: reject reason');
 
-													guard.cancel();
-													uloop.end();
+													// this test modem runs the DMS legacy path (no
+													// UIM) — plmn lists must fail cleanly
+													conn_cli.defer('wwand', 'modem_plmn_lists',
+														{ modem: 'm0' }, (c9, s9) => {
+														eq(s9.ok, false, 'plmn: no-uim guarded');
+														eq(s9.error, 'no_uim_client', 'plmn: guard reason');
+
+														guard.cancel();
+														uloop.end();
+													});
 												});
 											});
 										});

@@ -540,4 +540,23 @@ eq(modem_mod.parse_modes('lte'), 1 << 4, 'parse_modes lte');
 eq(modem_mod.parse_modes('bogus'), null, 'parse_modes unknown -> null');
 eq(modem_mod.parse_modes(''), null, 'parse_modes empty -> null');
 
+// --- PLMNwAcT decoder (pure; bytes captured from a live Telekom SIM) ---------
+
+import { decode_plmn_act } from 'wwand/sim.uc';
+
+let plmn = decode_plmn_act([
+	0x62, 0xF2, 0x10, 0x48, 0x00,   // 262/01, E-UTRAN + NG-RAN
+	0x12, 0xF4, 0x70, 0xC8, 0x80,   // 214/07, all RATs
+	0xFF, 0xFF, 0xFF, 0x00, 0x00,   // empty slot
+]);
+
+eq(length(plmn), 2, 'plmn: empty slot skipped');
+eq(plmn[0].mcc, '262', 'plmn: mcc');
+eq(plmn[0].mnc, '01', 'plmn: 2-digit mnc');
+eq(plmn[0].eutran, true, 'plmn: eutran flag');
+eq(plmn[0].ngran, true, 'plmn: ngran flag');
+eq(plmn[0].utran, false, 'plmn: no utran');
+eq(plmn[1].mcc, '214', 'plmn: second entry mcc');
+eq(plmn[1].gsm, true, 'plmn: gsm flag');
+
 done('test_modem');

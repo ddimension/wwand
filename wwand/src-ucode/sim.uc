@@ -282,6 +282,64 @@ function read_ef(modem, ef, cb, session_type)
 }
 
 // best-effort: reads IMSI, ICCID and MSISDN; absent values stay null
+// --- PLMN selector lists (settings editor) -----------------------------------
+
+const EF_PLMN_USER = { file_id: 0x6F60, path: "\x00\x3F\xFF\x7F" };   // PLMNwAcT
+const EF_PLMN_OPER = { file_id: 0x6F61, path: "\x00\x3F\xFF\x7F" };   // OPLMNwAcT
+const EF_PLMN_HOME = { file_id: 0x6F62, path: "\x00\x3F\xFF\x7F" };   // HPLMNwAcT
+
+// decode PLMNwAcT records (TS 31.102): 5 bytes each — 3 bytes BCD PLMN
+// (nibble-swapped, 0xF filler = 2-digit MNC) + 2 bytes access-technology mask
+export function decode_plmn_act(bytes)
+{
+	let out = [];
+
+	for (let i = 0; i + 4 < length(bytes ?? []); i += 5) {
+		let b = slice(bytes, i, i + 5);
+
+		if (b[0] == 0xFF)
+			continue;   // empty slot
+
+		let d = [ b[0] & 0xF, b[0] >> 4, b[1] & 0xF, b[1] >> 4, b[2] & 0xF, b[2] >> 4 ];
+		let act = (b[3] << 8) | b[4];
+
+		push(out, {
+			mcc: sprintf('%d%d%d', d[0], d[1], d[2]),
+			mnc: sprintf('%d%d', d[4], d[5]) + ((d[3] == 0xF) ? '' : sprintf('%d', d[3])),
+			act: act,
+			utran:  !!(act & 0x8000),
+			eutran: !!(act & 0x4000),
+			ngran:  !!(act & 0x0800),
+			gsm:    !!(act & 0x0080),
+		});
+	}
+
+	return out;
+}
+
+// best-effort read of the three PLMN selector lists; a list reads as null
+// when the file is absent (e.g. Telekom SIMs carry no user list)
+export function read_plmn_lists(modem, cb)
+{
+	let out = { user: null, operator: null, home: null };
+
+	if (!modem.uim)
+		return cb(out);   // DMS legacy path has no generic file read
+
+	read_ef(modem, EF_PLMN_USER, (u) => {
+		out.user = (u != null) ? decode_plmn_act(u) : null;
+
+		read_ef(modem, EF_PLMN_OPER, (o) => {
+			out.operator = (o != null) ? decode_plmn_act(o) : null;
+
+			read_ef(modem, EF_PLMN_HOME, (h) => {
+				out.home = (h != null) ? decode_plmn_act(h) : null;
+				cb(out);
+			});
+		});
+	});
+}
+
 export function read_identity(modem, cb)
 {
 	let out = { imsi: null, iccid: null, msisdn: null };

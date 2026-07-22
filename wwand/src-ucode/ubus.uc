@@ -33,6 +33,17 @@ export function publish(conn, daemon, log)
 			},
 		},
 
+		modem_plmn_lists: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => {
+				daemon.modem_plmn_lists(req.args.modem, (err, res) => {
+					req.reply(err ? { ok: false, ...err } : { ok: true, ...res });
+				});
+
+				req.defer();
+			},
+		},
+
 		modem_set_settings: {
 			args: { modem: '', settings: {}, ubus_rpc_session: '' },
 			call: (req) => {

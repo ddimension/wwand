@@ -15,6 +15,7 @@
 import * as uloop from 'uloop';
 import * as modem_mod from './modem.uc';
 import * as context_mod from './context.uc';
+import * as sim from './sim.uc';
 
 const UP_GUARD_MS = 150000;
 
@@ -658,6 +659,20 @@ export function create(opts)
 			delete data._result;
 			cb(null, data);
 		});
+	};
+
+	// SIM PLMN selector lists (settings editor; user list is editable on SIMs
+	// that carry EF 6F60 — absent lists read as null)
+	self.modem_plmn_lists = function(ref, cb) {
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return cb({ error: 'no_such_modem', ref: ref });
+
+		if (!entry.modem.uim)
+			return cb({ error: 'no_uim_client' });
+
+		sim.read_plmn_lists(entry.modem, (lists) => cb(null, lists));
 	};
 
 	// settable NAS preferences (settings editor, write path). Whitelist with
