@@ -12,15 +12,26 @@ MODEM="$1"
 SLOT="$2"
 CODE="$3"
 CONF="$4"
+OP="${OP:-download}"   # override with OP=chip for a no-download APDU+HTTP test
 
-command -v lpac >/dev/null 2>&1 || { echo "lpac not installed" >&2; exit 90; }
-[ -n "$MODEM" ] && [ -n "$SLOT" ] && [ -n "$CODE" ] || { echo "usage: $0 <modem> <slot> <code> [conf]" >&2; exit 91; }
+# use the real binary: the OpenWrt /usr/bin/lpac wrapper forces LPAC_APDU=uqmi
+LPAC_BIN=/usr/lib/lpac
+[ -x "$LPAC_BIN" ] || LPAC_BIN="$(command -v lpac)"
+[ -n "$LPAC_BIN" ] || { echo "lpac not installed" >&2; exit 90; }
+[ -n "$MODEM" ] && [ -n "$SLOT" ] || { echo "usage: $0 <modem> <slot> <code> [conf]" >&2; exit 91; }
 
 DIR="$(mktemp -d)" || exit 92
 trap 'rm -rf "$DIR"' EXIT
 mkfifo "$DIR/req" "$DIR/resp" || exit 92
 
-LPAC_APDU=stdio lpac profile download -a "$CODE" ${CONF:+-c "$CONF"} \
+if [ "$OP" = "chip" ]; then
+	set -- chip info
+else
+	[ -n "$CODE" ] || { echo "no activation code" >&2; exit 91; }
+	set -- profile download -a "$CODE" ${CONF:+-c "$CONF"}
+fi
+
+LPAC_APDU=stdio LPAC_HTTP=curl "$LPAC_BIN" "$@" \
 	<"$DIR/resp" >"$DIR/req" &
 LPAC_PID=$!
 
