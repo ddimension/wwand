@@ -12,6 +12,7 @@ var callSignal = rpc.declare({ object: 'wwand', method: 'modem_signal', params: 
 var callCells  = rpc.declare({ object: 'wwand', method: 'modem_cells',  params: [ 'modem' ], expect: {} });
 var callCtxStatus = rpc.declare({ object: 'wwand', method: 'context_status', params: [ 'interface' ], expect: {} });
 var callSlots = rpc.declare({ object: 'wwand', method: 'modem_sim_slots', params: [ 'modem' ], expect: {} });
+var callLocation = rpc.declare({ object: 'wwand', method: 'modem_location', params: [ 'modem' ], expect: {} });
 var callSwitchSlot = rpc.declare({ object: 'wwand', method: 'modem_sim_switch_slot', params: [ 'modem', 'slot' ], expect: {} });
 
 function fmtList(a) { return (a && a.length) ? a.join(', ') : '—'; }
@@ -144,7 +145,8 @@ function renderLive(name, modem) {
 		L.resolveDefault(callSignal(name), {}),
 		L.resolveDefault(callCells(name), {}),
 		L.resolveDefault(callContexts(), {}),
-		L.resolveDefault(callSlots(name), {})
+		L.resolveDefault(callSlots(name), {}),
+		L.resolveDefault(callLocation(name), {})
 	]).then(function(res) {
 		var sig = res[0] || {}, cells = (res[1] || {}).cells || {};
 		var allCtx = res[2] || {};
@@ -254,6 +256,27 @@ function renderLive(name, modem) {
 			});
 			cols.push(E('div', { 'class': 'cbi-section', 'style': 'flex:1;min-width:280px' }, [
 				E('h3', {}, _('SIM slots')), E('div', {}, slotRows)
+			]));
+		}
+
+		/* --- GNSS location (only when option location is on and a fix exists) --- */
+		var loc = res[4] || {};
+		if (loc.latitude != null && loc.longitude != null) {
+			var la = loc.latitude, lo = loc.longitude;
+			var osm = 'https://www.openstreetmap.org/?mlat=' + la + '&mlon=' + lo +
+				'#map=16/' + la + '/' + lo;
+			var locRows = [
+				[ _('Coordinates'), E('a', { 'href': osm, 'target': '_blank', 'rel': 'noreferrer' },
+					la.toFixed(6) + ', ' + lo.toFixed(6)) ]
+			];
+			if (loc.altitude != null)    locRows.push([ _('Altitude'), loc.altitude.toFixed(0) + ' m' ]);
+			if (loc.speed != null && loc.speed >= 0)
+				locRows.push([ _('Speed'), (loc.speed * 3.6).toFixed(1) + ' km/h' ]);
+			if (loc.heading != null && loc.speed > 0.3)
+				locRows.push([ _('Heading'), loc.heading.toFixed(0) + '°' ]);
+			if (loc.uncertainty != null) locRows.push([ _('Accuracy'), '± ' + loc.uncertainty.toFixed(0) + ' m' ]);
+			cols.push(E('div', { 'class': 'cbi-section', 'style': 'flex:1;min-width:280px' }, [
+				E('h3', {}, _('Location (GNSS)')), tbl(locRows)
 			]));
 		}
 
