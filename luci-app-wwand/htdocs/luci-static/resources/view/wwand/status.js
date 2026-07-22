@@ -196,15 +196,26 @@ function renderLive(name, modem) {
 		if (plmn) srvRows.push([ _('Operator'), '%s (%s/%s)%s'.format((plmn.description||'').trim(),
 			plmn.mcc, plmn.mnc, reg.roaming ? ' · '+_('roaming') : '') ]);
 		if (lc) {
-			srvRows.push([ _('Technology'), 'LTE' + (nr.rsrp > -32768 ? ' + 5G NR' : '') ]);
-			srvRows.push([ _('Band'), ef ? ef.band : '—' ]);
-			srvRows.push([ _('Frequency'), ef ? ef.mhz.toFixed(1)+' MHz' : '—' ]);
+			var dsd = cells.dsd, svl = (cells.serving||{}).lte;
+			var tech = 'LTE' + ((nr.rsrp > -32768 || (cells.serving||{}).nr) ? ' + 5G NR' : '');
+			if (dsd && dsd.mode && dsd.mode != 'LTE') tech += ' · ' + dsd.mode;
+			srvRows.push([ _('Technology'), tech ]);
+			srvRows.push([ _('Band'), (svl && svl.band != null) ? ('B'+svl.band) : (ef ? ef.band : '—') ]);
+			srvRows.push([ _('Frequency'), (ef ? ef.mhz.toFixed(1)+' MHz' : '—') +
+				((svl && svl.bandwidth_mhz) ? ' · ' + svl.bandwidth_mhz + ' MHz' : '') ]);
 			srvRows.push([ _('EARFCN / PCI'), '%d / %d'.format(lc.earfcn, lc.serving_cell_id) ]);
 			srvRows.push([ _('TAC / Cell ID'), '%d / %d'.format(lc.tac, lc.global_cell_id) ]);
 		}
-		var nc = cells.nr5g_cell, nf = nc ? nrArfcn(cells.nr5g_arfcn) : null;
-		if (nc) srvRows.push([ _('5G cell'), '%s · ARFCN %s · PCI %d'.format(
-			nf && nf.band ? nf.band : '?', cells.nr5g_arfcn || '?', nc.pci) ]);
+		var nc = cells.nr5g_cell, sn = (cells.serving||{}).nr;
+		var narfcn = (sn && sn.arfcn) || cells.nr5g_arfcn;
+		var nf = narfcn ? nrArfcn(narfcn) : null;
+		if (nc || sn) {
+			var nband = (sn && sn.band != null) ? ('n'+sn.band) : (nf && nf.band ? nf.band : '?');
+			var npci = (sn && sn.pci != null) ? sn.pci : (nc ? nc.pci : '?');
+			var nbw = (sn && sn.bandwidth_mhz) ? ' · ' + sn.bandwidth_mhz + ' MHz' : '';
+			srvRows.push([ _('5G cell'), '%s · %s MHz%s · PCI %s'.format(
+				nband, nf ? nf.mhz.toFixed(1) : '?', nbw, npci) ]);
+		}
 
 		cols.push(E('div', { 'class': 'cbi-section', 'style': 'flex:1;min-width:280px' }, [
 			E('h3', {}, _('Serving cell')), tbl(srvRows)
