@@ -1,0 +1,76 @@
+#!/bin/sh
+# wwand-esim — SM-DP+ profile download via lpac. lpac's stdio APDU driver is
+# bridged to the wwand ubus APDU channel (protocol verified against lpac
+# 2.3.0: requests {"type":"apdu","payload":{"func":...,"param":hex}} on
+# stdout, replies {"type":"apdu","payload":{"ecode":n,"data":hex}} on stdin;
+# for logic_channel_open the ecode carries the channel number). The HTTPS leg
+# to the SM-DP+ runs on the router's own uplink — no modem APN involved.
+#
+# Usage: wwand-esim-download <modem> <slot> <activation_code> [confirmation]
+
+MODEM="$1"
+SLOT="$2"
+CODE="$3"
+CONF="$4"
+
+command -v lpac >/dev/null 2>&1 || { echo "lpac not installed" >&2; exit 90; }
+[ -n "$MODEM" ] && [ -n "$SLOT" ] && [ -n "$CODE" ] || { echo "usage: $0 <modem> <slot> <code> [conf]" >&2; exit 91; }
+
+DIR="$(mktemp -d)" || exit 92
+trap 'rm -rf "$DIR"' EXIT
+mkfifo "$DIR/req" "$DIR/resp" || exit 92
+
+LPAC_APDU=stdio lpac profile download -a "$CODE" ${CONF:+-c "$CONF"} \
+	<"$DIR/resp" >"$DIR/req" &
+LPAC_PID=$!
+
+exec 3<"$DIR/req" 4>"$DIR/resp"
+
+CHAN=0
+
+reply() {
+	printf '{"type":"apdu","payload":{"ecode":%s,"data":"%s"}}\n' "$1" "$2" >&4
+}
+
+while read -r line <&3; do
+	type="$(echo "$line" | jsonfilter -e '@.type' 2>/dev/null)"
+
+	case "$type" in
+	apdu)
+		func="$(echo "$line" | jsonfilter -e '@.payload.func' 2>/dev/null)"
+		param="$(echo "$line" | jsonfilter -e '@.payload.param' 2>/dev/null)"
+
+		case "$func" in
+		connect|disconnect)
+			reply 0 ""
+			;;
+		logic_channel_open)
+			out="$(ubus -t 30 call wwand modem_apdu \
+				"{\"modem\":\"$MODEM\",\"op\":\"open\",\"slot\":$SLOT,\"aid\":\"$param\"}" 2>/dev/null)"
+			CHAN="$(echo "$out" | jsonfilter -e '@.channel' 2>/dev/null)"
+			if [ -n "$CHAN" ]; then reply "$CHAN" ""; else reply -1 ""; fi
+			;;
+		logic_channel_close)
+			ubus -t 30 call wwand modem_apdu \
+				"{\"modem\":\"$MODEM\",\"op\":\"close\",\"slot\":$SLOT,\"channel\":${CHAN:-0}}" >/dev/null 2>&1
+			reply 0 ""
+			;;
+		transmit)
+			out="$(ubus -t 60 call wwand modem_apdu \
+				"{\"modem\":\"$MODEM\",\"op\":\"send\",\"slot\":$SLOT,\"channel\":${CHAN:-0},\"apdu\":\"$param\"}" 2>/dev/null)"
+			data="$(echo "$out" | jsonfilter -e '@.response' 2>/dev/null)"
+			if [ -n "$data" ]; then reply 0 "$data"; else reply -1 ""; fi
+			;;
+		*)
+			reply -1 ""
+			;;
+		esac
+		;;
+	*)
+		# progress / lpa result lines: pass through for the status log
+		echo "$line" >&2
+		;;
+	esac
+done
+
+wait $LPAC_PID

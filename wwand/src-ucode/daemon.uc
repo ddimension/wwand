@@ -807,6 +807,55 @@ export function create(opts)
 		let done = (err, res) => cb(err ? { error: 'esim', detail: err } : null, res);
 
 		switch (op) {
+		case 'download': {
+			if (self._esim_dl?.state == 'running')
+				return cb({ error: 'busy' });
+
+			let code = params?.activation_code ?? '';
+
+			if (!length(code))
+				return cb({ error: 'missing_argument' });
+
+			// shell-safe: activation codes are LPA:1$host$token style
+			if (!match(code, /^[A-Za-z0-9$:._+-]+$/) ||
+			    (params?.confirmation_code != null &&
+			     !match(params.confirmation_code, /^[A-Za-z0-9._-]*$/)))
+				return cb({ error: 'invalid_argument' });
+
+			let script = '/usr/libexec/wwand/esim-download';
+			let fx = deps.datapath_fx;
+
+			if (fx?.exists && !fx.exists(script))
+				return cb({ error: 'esim_not_installed' });
+
+			let logf = '/tmp/wwand/esim-download.log';
+
+			self._esim_dl = { state: 'running' };
+
+			let p = uloop.process('/bin/sh', [ '-c',
+				sprintf("exec %s '%s' %d '%s' '%s' 2>%s", script, ref, slot,
+					code, params?.confirmation_code ?? '', logf) ], {},
+				(exitcode) => {
+					self._esim_dl = {
+						state: (exitcode == 0) ? 'done' : 'failed',
+						code: exitcode,
+						log: fx?.read ? trim(fx.read(logf) ?? '') : null,
+					};
+					log('notice', sprintf('modem %s: eSIM download %s (exit %d)',
+						ref, self._esim_dl.state, exitcode));
+				});
+
+			if (!p) {
+				self._esim_dl = { state: 'failed', code: -1 };
+				return cb({ error: 'spawn_failed' });
+			}
+
+			return cb(null, { started: true });
+		}
+
+		case 'download_status':
+			return cb(null, self._esim_dl ?? { state: 'idle' });
+
 		case 'profiles': return esim.profiles(entry.modem, slot, done);
 		case 'eid':      return esim.get_eid(entry.modem, slot, done);
 		case 'enable':

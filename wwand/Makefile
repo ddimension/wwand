@@ -82,6 +82,8 @@ endef
 define Package/wwand-esim/install
 	$(INSTALL_DIR) $(1)/usr/share/ucode/wwand
 	$(INSTALL_DATA) ./src-ucode/esim.uc $(1)/usr/share/ucode/wwand/
+	$(INSTALL_DIR) $(1)/usr/libexec/wwand
+	$(INSTALL_BIN) ./files/wwand-esim-download $(1)/usr/libexec/wwand/esim-download
 endef
 
 $(eval $(call BuildPackage,wwand))
