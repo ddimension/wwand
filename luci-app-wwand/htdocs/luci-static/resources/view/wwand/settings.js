@@ -3,6 +3,7 @@
 'require rpc';
 'require ui';
 'require uci';
+'require dom';
 
 // wwand modem settings editor. All values go through the daemon's QMI-native
 // ubus methods; band preferences travel as band-number lists (u64 masks would
@@ -15,7 +16,7 @@ var callPlmn = rpc.declare({ object: 'wwand', method: 'modem_plmn_lists', params
 var callSlots = rpc.declare({ object: 'wwand', method: 'modem_sim_slots', params: [ 'modem' ], expect: {} });
 var callSwitchSlot = rpc.declare({ object: 'wwand', method: 'modem_sim_switch_slot', params: [ 'modem', 'slot' ], expect: {} });
 var callEsim = rpc.declare({ object: 'wwand', method: 'modem_esim',
-	params: [ 'modem', 'op', 'slot', 'iccid', 'activation_code', 'confirmation_code' ], expect: {} });
+	params: [ 'modem', 'op', 'slot', 'iccid', 'activation_code', 'confirmation_code', 'auto_notify' ], expect: {} });
 
 var MODE_BITS = [
 	[ 0x04, 'GSM' ],
@@ -70,6 +71,57 @@ function plmnTable(title, list) {
 		].concat(rows)),
 	]);
 }
+
+// lpac emits terse ES10/ES9+ step tokens on its progress lines; map them to the
+// download stages a human recognises (order = the SGP.22 download sequence).
+var DL_STEPS = [
+	[ 'es10b_get_euicc_challenge_and_info', _('eUICC challenge') ],
+	[ 'es9p_initiate_authentication',       _('Contacting SM-DP+') ],
+	[ 'es10b_authenticate_server',          _('Verifying server') ],
+	[ 'es9p_authenticate_client',           _('Authenticating') ],
+	[ 'es10b_prepare_download',             _('Preparing download') ],
+	[ 'es9p_get_bound_profile_package',     _('Fetching profile') ],
+	[ 'es10b_load_bound_profile_package',   _('Installing profile') ],
+];
+
+// parse the live bridge log (progress:/result:/data: lines) into a status
+function parseActivity(log) {
+	var seen = {}, order = [], cancelled = false, msg = null, code = null, m;
+	(log || '').split('\n').forEach(function(l) {
+		l = l.trim();
+		if ((m = l.match(/^progress:\s*(\S+)/))) {
+			if (/cancel_session/.test(m[1])) cancelled = true;
+			else if (!seen[m[1]]) { seen[m[1]] = true; order.push(m[1]); }
+		} else if ((m = l.match(/^result:\s*code=(-?\d+)\s*(.*)$/))) {
+			code = parseInt(m[1], 10);
+			if (m[2] && m[2].trim() && m[2].trim() != 'success') msg = m[2].trim();
+		} else if ((m = l.match(/^data:\s*(.+)$/))) {
+			var d = m[1].trim();
+			if (d.length && d[0] != '{') msg = d;   // human message, not the chip JSON blob
+		}
+	});
+	return { seen: seen, order: order, cancelled: cancelled, msg: msg, code: code };
+}
+
+var ESIM_CSS = '' +
+'.wwe-panel{margin-top:.6em;border:1px solid rgba(128,128,128,.28);border-radius:7px;padding:14px 16px;background:rgba(128,128,128,.06)}' +
+'.wwe-steps{list-style:none;margin:.2em 0 0;padding:0}' +
+'.wwe-step{display:flex;align-items:center;gap:9px;padding:3px 0;color:#8a8a8a;font-size:.95em}' +
+'.wwe-step .ic{width:1.35em;text-align:center;font-weight:700}' +
+'.wwe-step.done{color:#2c8a2c}.wwe-step.cur{color:#0b6fc2;font-weight:600}' +
+'.wwe-bar{height:8px;border-radius:5px;background:rgba(128,128,128,.25);overflow:hidden;margin:11px 0 4px}' +
+'.wwe-bar>span{display:block;height:100%;background:#0b6fc2;transition:width .45s ease}' +
+'.wwe-bar.ok>span{background:#2c8a2c}.wwe-bar.err>span{background:#c0392b}' +
+'.wwe-banner{display:flex;align-items:center;gap:9px;padding:9px 13px;border-radius:6px;margin-top:11px;font-weight:600}' +
+'.wwe-banner.run{background:rgba(11,111,194,.12);color:#0b6fc2}' +
+'.wwe-banner.ok{background:rgba(44,138,44,.14);color:#1e6b1e}' +
+'.wwe-banner.err{background:rgba(192,57,43,.13);color:#b3271a}' +
+'.wwe-log{max-height:15em;overflow:auto;background:#1e1e1e;color:#dcdcdc;padding:9px 11px;margin-top:9px;' +
+'font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;border-radius:5px;white-space:pre-wrap;word-break:break-all}' +
+'.wwe-det{margin-top:9px;font-size:.9em}.wwe-det>summary{cursor:pointer;color:#0b6fc2}' +
+'.wwe-spin{display:inline-block;width:1.05em;height:1.05em;border:2px solid rgba(11,111,194,.3);' +
+'border-top-color:#0b6fc2;border-radius:50%;animation:wwe-rot .9s linear infinite;flex:none}' +
+'@keyframes wwe-rot{to{transform:rotate(360deg)}}';
 
 return view.extend({
 	handleSaveApply: null,
@@ -189,44 +241,123 @@ return view.extend({
 		].concat(profRows.length ? profRows : [
 			E('tr', { 'class': 'tr' }, [ E('td', { 'class': 'td', 'colspan': 4 }, E('em', {}, _('no profiles'))) ]) ])));
 
-		var codeIn = E('input', { 'type': 'text', 'style': 'width:60%',
-			'placeholder': 'LPA:1$rsp.example.com$ACTIVATION-CODE' });
-		var confIn = E('input', { 'type': 'text', 'style': 'width:20%', 'placeholder': _('confirmation code (optional)') });
-		var dlStatus = E('span', { 'style': 'margin-left:8px; font-weight:bold' });
-		var dlLog = E('pre', { 'style': 'max-height:14em; overflow:auto; background:#f5f5f5; ' +
-			'padding:6px; margin-top:6px; font-size:90%; display:none' });
+		out.push(E('style', {}, ESIM_CSS));
 
-		var pollStatus = function() {
+		// shared activity panel: live progress for downloads / notifications
+		var panel = E('div', { 'class': 'wwe-panel', 'style': 'display:none' });
+
+		var mkBanner = function(kind, icon, text) {
+			return E('div', { 'class': 'wwe-banner ' + kind }, [
+				(kind == 'run') ? E('span', { 'class': 'wwe-spin' }) : E('span', {}, icon),
+				E('span', {}, text),
+			]);
+		};
+
+		var renderPanel = function(st, mode) {
+			panel.style.display = '';
+			var a = parseActivity(st.log);
+			var running = (st.state == 'running');
+			var kids = [];
+
+			if (mode == 'download') {
+				var doneN = 0;
+				var lastSeen = a.order.length ? a.order[a.order.length - 1] : null;
+				var items = DL_STEPS.map(function(s) {
+					var isDone = !!a.seen[s[0]];
+					if (isDone) doneN++;
+					var isCur = running && !a.cancelled && a.code === null && s[0] == lastSeen;
+					var cls = isDone ? (isCur ? 'wwe-step cur' : 'wwe-step done') : 'wwe-step';
+					return E('li', { 'class': cls }, [
+						E('span', { 'class': 'ic' }, isDone ? (isCur ? '⟳' : '✓') : '○'),
+						E('span', {}, s[1]),
+					]);
+				});
+				// install acknowledgement to the operator (auto_notify) — its
+				// state comes from the daemon phase, not an lpac progress token
+				var ackDone = (st.notified === true);
+				var ackCur = running && st.phase == 'notify';
+				items.push(E('li', { 'class': ackDone ? 'wwe-step done' : (ackCur ? 'wwe-step cur' : 'wwe-step') }, [
+					E('span', { 'class': 'ic' }, ackDone ? '✓' : (ackCur ? '⟳' : '○')),
+					E('span', {}, _('Confirm install to operator')),
+				]));
+
+				var pct = Math.round(doneN / DL_STEPS.length * 100);
+				var barcls = 'wwe-bar' + (a.code === 0 ? ' ok'
+					: (!running && (a.code !== null || a.cancelled)) ? ' err' : '');
+				kids.push(E('ul', { 'class': 'wwe-steps' }, items));
+				kids.push(E('div', { 'class': barcls }, E('span', { 'style': 'width:' + pct + '%' })));
+			}
+
+			if (running)
+				kids.push(mkBanner('run', '', mode == 'download' ? _('Downloading profile…') : _('Contacting operator…')));
+			else if (a.code === 0 && !a.cancelled)
+				kids.push(mkBanner('ok', '✓', mode != 'download' ? _('Done.')
+					: (st.notified === false
+						? _('Profile downloaded (install not yet confirmed to the operator).')
+						: _('Profile downloaded and confirmed — the eUICC will re-initialise.'))));
+			else
+				kids.push(mkBanner('err', '✕', a.msg || _('The operation failed.')));
+
+			if (st.log)
+				kids.push(E('details', { 'class': 'wwe-det' }, [
+					E('summary', {}, _('Show raw lpac log')),
+					E('pre', { 'class': 'wwe-log' }, st.log),
+				]));
+
+			dom.content(panel, kids);
+		};
+
+		var pollStatus = function(mode) {
 			callEsim(data.modem, 'download_status', 0, '', '', '').then(function(st) {
-				dlStatus.textContent = _('State: ') + st.state + (st.via ? (' (' + st.via + ')') : '');
-				if (st.log) { dlLog.style.display = ''; dlLog.textContent = st.log; dlLog.scrollTop = dlLog.scrollHeight; }
+				renderPanel(st, mode);
 				if (st.state == 'running')
-					window.setTimeout(pollStatus, 1500);
-				else if (st.state == 'done')
-					window.setTimeout(function() { window.location.reload() }, 2500);
+					window.setTimeout(function() { pollStatus(mode) }, 1200);
+				else if (mode == 'download' && parseActivity(st.log).code === 0)
+					window.setTimeout(function() { window.location.reload() }, 3000);
 			});
 		};
 
+		var startBusy = function(text) {
+			panel.style.display = '';
+			dom.content(panel, mkBanner('run', '', text));
+		};
+
 		var dlHint = (data.esim.backend == 'at')
-			? _('Download runs inside the modem over its own network attach (no router data path needed).')
-			: _('Download runs on the router (lpac); requires the wwand-esim lpac helper.');
+			? _('The modem downloads over its own network attach — no router data path or APN needed.')
+			: _('lpac downloads on the router over your uplink and relays the eUICC APDUs through wwand — no dedicated modem APN needed.');
 
 		out.push(E('h4', {}, _('Download profile')));
 		out.push(E('p', {}, E('em', {}, dlHint)));
+
+		var codeIn = E('input', { 'type': 'text', 'class': 'cbi-input-text',
+			'style': 'width:min(440px,72%);margin-right:6px',
+			'placeholder': 'LPA:1$rsp.example.com$MATCHING-ID' });
+		var confIn = E('input', { 'type': 'text', 'class': 'cbi-input-text',
+			'style': 'width:min(240px,42%);margin-right:6px',
+			'placeholder': _('confirmation code (optional)') });
+		var ackChk = E('input', { 'type': 'checkbox', 'checked': 'checked', 'style': 'margin:0 5px 0 0' });
+
 		out.push(E('div', { 'class': 'cbi-section' }, [
-			codeIn, ' ', confIn, ' ',
-			E('button', { 'class': 'btn cbi-button cbi-button-apply',
-				'click': ui.createHandlerFn(self, function() {
-					dlLog.style.display = 'none'; dlLog.textContent = '';
-					return callEsim(data.modem, 'download', 0, '', codeIn.value, confIn.value).then(function(res) {
-						if (res && res.ok === false)
-							ui.addNotification(null, E('p', _('Download failed to start: ') + (res.error || '?')), 'error');
-						else
-							pollStatus();
-					});
-				}) }, _('Download')),
-			dlStatus,
-			dlLog,
+			E('div', { 'style': 'margin-bottom:8px' }, [ codeIn, confIn,
+				E('button', { 'class': 'btn cbi-button cbi-button-apply',
+					'click': ui.createHandlerFn(self, function() {
+						if (!(codeIn.value || '').trim()) {
+							ui.addNotification(null, E('p', _('Enter an activation code first.')), 'warning');
+							return;
+						}
+						startBusy(_('Starting download…'));
+						return callEsim(data.modem, 'download', 0, '', codeIn.value, confIn.value, ackChk.checked).then(function(res) {
+							if (res && res.ok === false)
+								dom.content(panel, mkBanner('err', '✕', _('Could not start: ') + (res.error || '?')));
+							else
+								pollStatus('download');
+						});
+					}) }, _('Download')),
+			]),
+			E('label', { 'style': 'display:inline-flex;align-items:center;font-weight:normal;color:var(--fg-color-2,#666)' }, [
+				ackChk, _('Confirm the install to the operator automatically (recommended; uncheck only for testing)'),
+			]),
+			panel,
 		]));
 
 		// pending eUICC notifications: confirm the download/enable/disable to
@@ -237,8 +368,15 @@ return view.extend({
 		out.push(E('div', { 'class': 'cbi-section' }, [
 			E('button', { 'class': 'btn cbi-button',
 				'click': ui.createHandlerFn(self, function() {
+					startBusy(_('Listing pending notifications…'));
 					return callEsim(data.modem, 'notifications', 0, '', '', '').then(function(r) {
-						dlLog.style.display = ''; dlLog.textContent = (r && r.log) || _('(no pending notifications)');
+						panel.style.display = '';
+						dom.content(panel, [
+							mkBanner((r && r.ok) ? 'ok' : 'err', (r && r.ok) ? '✓' : '✕',
+								(r && r.log && r.log.trim()) ? _('Pending notifications:') : _('No pending notifications.')),
+							(r && r.log && r.log.trim())
+								? E('pre', { 'class': 'wwe-log' }, r.log) : '',
+						]);
 					});
 				}) }, _('List pending')),
 			' ',
@@ -246,12 +384,12 @@ return view.extend({
 				'click': ui.createHandlerFn(self, function() {
 					if (!confirm(_('Send all pending notifications to the operator now?')))
 						return;
-					dlLog.style.display = 'none'; dlLog.textContent = '';
+					startBusy(_('Sending confirmations…'));
 					return callEsim(data.modem, 'notify', 0, '', '', '').then(function(res) {
 						if (res && res.ok === false)
-							ui.addNotification(null, E('p', _('Failed: ') + (res.error || '?')), 'error');
+							dom.content(panel, mkBanner('err', '✕', _('Failed: ') + (res.error || '?')));
 						else
-							pollStatus();
+							pollStatus('notify');
 					});
 				}) }, _('Send confirmations')),
 		]));

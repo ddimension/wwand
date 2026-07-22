@@ -843,17 +843,38 @@ export function create(opts)
 			});
 	};
 
-	// host-side download via lpac (stdio bridge over wwand's APDU channel)
-	let esim_download_lpac = (ref, slot, code, conf, cb) => {
-		self._esim_dl = { state: 'running', via: 'lpac', logf: esim_logf };
+	// host-side download via lpac (stdio bridge over wwand's APDU channel).
+	// On success the eUICC queues an install notification that MUST be delivered
+	// to the SM-DP+ (ES9+) to confirm the install — with auto_notify (default)
+	// we chain notif-process right away; disable it only for testing.
+	let esim_download_lpac = (ref, slot, code, conf, cb, auto_notify) => {
+		self._esim_dl = { state: 'running', via: 'lpac', logf: esim_logf, phase: 'download' };
+
+		let finish = (state, extra) => {
+			self._esim_dl = { state, via: 'lpac', ...extra };
+			log('notice', sprintf('modem %s: eSIM download %s%s', ref, state,
+				extra?.notified != null ? sprintf(' (ack %s)', extra.notified ? 'sent' : 'skipped') : ''));
+		};
 
 		let p = esim_lpac_run(ref, slot, 'download', code, conf, (err, out) => {
-			self._esim_dl = {
-				state: err ? 'failed' : 'done', via: 'lpac',
-				code: err?.code ?? 0, log: out,
-			};
-			log('notice', sprintf('modem %s: eSIM lpac download %s (exit %d)',
-				ref, self._esim_dl.state, err?.code ?? 0));
+			// the bridge exits 0 even when the SM-DP+ refuses; the real verdict
+			// is lpac's own result line
+			let ok = !err && match(out ?? '', /result:[^\n]*code=0/);
+
+			if (!ok)
+				return finish('failed', { code: err?.code ?? -1, log: out, phase: 'download' });
+
+			if (!auto_notify)
+				return finish('done', { code: 0, log: out, phase: 'download', notified: false });
+
+			// standard install acknowledgement to the operator
+			self._esim_dl = { state: 'running', via: 'lpac', logf: esim_logf, phase: 'notify', log: out };
+			let np = esim_lpac_run(ref, slot, 'notif-process', '', '', (nerr, nout) => {
+				finish('done', { code: 0, phase: 'notify', notified: !nerr,
+				                 log: trim((out ?? '') + '\n' + (nout ?? '')) });
+			});
+			if (!np)
+				finish('done', { code: 0, log: out, phase: 'download', notified: false });
 		});
 
 		if (!p) {
@@ -898,6 +919,10 @@ export function create(opts)
 			     !match(params.confirmation_code, /^[A-Za-z0-9._-]*$/)))
 				return cb({ error: 'invalid_argument' });
 
+			// standard: acknowledge the install to the operator afterwards;
+			// callers pass auto_notify=false only for testing
+			let auto_notify = params?.auto_notify ?? true;
+
 			// pick the path by backend: AT modems download internally
 			// (AT+QESIM, no host data), QMI modems use the host-side lpac glue
 			return esim.backend(entry.modem, slot, (be) => {
@@ -913,7 +938,7 @@ export function create(opts)
 					return cb(null, { started: true, via: 'modem' });
 				}
 
-				esim_download_lpac(ref, slot, code, params?.confirmation_code, cb);
+				esim_download_lpac(ref, slot, code, params?.confirmation_code, cb, auto_notify);
 			});
 		}
 

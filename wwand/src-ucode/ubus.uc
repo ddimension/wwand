@@ -59,7 +59,8 @@ export function publish(conn, daemon, log)
 		// esim_not_installed when absent)
 		modem_esim: {
 			args: { modem: '', op: '', slot: 0, iccid: '',
-			        activation_code: '', confirmation_code: '', ubus_rpc_session: '' },
+			        activation_code: '', confirmation_code: '',
+			        auto_notify: true, ubus_rpc_session: '' },
 			call: (req) => {
 				daemon.modem_esim(req.args.modem, req.args.op, req.args, (err, res) => {
 					req.reply(err ? { ok: false, ...err } : { ok: true, ...(res ?? {}) });
