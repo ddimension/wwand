@@ -121,6 +121,20 @@ export default {
 			},
 		},
 
+		// current data bearer RAT for THIS data session (query on the session's
+		// own WDS client). rat_mask 3GPP bits: LTE = 1<<5, 5GNR = 1<<10.
+		GET_CURRENT_DATA_BEARER_TECHNOLOGY: {
+			id: 0x0044,
+			req: {},
+			resp: {
+				current: { t: 0x01, f: {
+					network_type: 'u8',
+					rat_mask:     'u32',
+					so_mask:      'u32',
+				} },
+			},
+		},
+
 		GET_PACKET_STATISTICS: {
 			id: 0x0024,
 			req:  { mask: { t: 0x01, f: 'u32' } },

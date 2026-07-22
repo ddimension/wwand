@@ -162,6 +162,7 @@ function renderConnection(iface, cs) {
 	var rows = [
 		[ _('Interface'), iface ],
 		[ _('State'), cs.state + (cs.last_error ? ' · ' + cs.last_error : '') ],
+		cs.bearer ? [ _('Bearer'), cs.bearer ] : null,
 		[ _('Uptime'), fmtDur(cs.uptime) ],
 		v4 ? [ _('IPv4'), '%s/%s'.format(v4.addr, v4.prefix != null ? v4.prefix : 32) +
 			(v4.gateway ? ' → ' + v4.gateway : '') ] : null,

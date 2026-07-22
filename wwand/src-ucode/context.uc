@@ -64,6 +64,28 @@ export function netmask_to_prefix(netmask)
 	return bits;
 }
 
+// decode a WDS data-bearer rat_mask (3GPP bits) into the RAT(s) carrying THIS
+// session's data (LTE = 1<<5, 5GNR = 1<<10). This is the per-session bearer,
+// NOT the system NSA/SA mode (that is the modem-level dsd_status): a session
+// may ride only the NR leg under an NSA system, so we report the carrying RAT
+// rather than asserting SA/NSA.
+const RAT_LTE = (1 << 5), RAT_5GNR = (1 << 10);
+
+function bearer_rat(rat_mask)
+{
+	if (rat_mask == null)
+		return null;
+
+	let lte = (rat_mask & RAT_LTE) != 0;
+	let nr  = (rat_mask & RAT_5GNR) != 0;
+
+	if (nr && lte) return 'LTE + 5G';
+	if (nr) return '5G NR';
+	if (lte) return 'LTE';
+
+	return rat_mask ? 'other' : null;
+}
+
 export function create(opts)
 {
 	let self = {
@@ -205,6 +227,13 @@ export function create(opts)
 		fams[0].client.request('GET_CHANNEL_RATES', {}, (err, data) => {
 			if (!err && data?.rates)
 				self.channel_rate = data.rates;
+		});
+
+		// the RAT actually carrying THIS session's data (LTE / 5G NSA / SA) —
+		// only the session's own WDS client answers this (not the config client)
+		fams[0].client.request('GET_CURRENT_DATA_BEARER_TECHNOLOGY', {}, (err, data) => {
+			if (!err && data?.current)
+				self.bearer = bearer_rat(data.current.rat_mask);
 		});
 
 		for (let fam in fams) {
@@ -883,6 +912,7 @@ export function create(opts)
 			uptime: (self.state == 'CONNECTED' && self.connected_since) ? (time() - self.connected_since) : null,
 			stats: (self.state == 'CONNECTED') ? self.stats : null,
 			channel_rate: (self.state == 'CONNECTED') ? self.channel_rate : null,
+			bearer: (self.state == 'CONNECTED') ? self.bearer : null,
 			families: map(keys(self.families), (k) => ({
 				family: +k,
 				cid: self.families[k].client?.cid,
