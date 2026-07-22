@@ -25,7 +25,11 @@ deliberately, while its known bugs were left behind.
   autonomous attach uses the right APN/IP family (avoids the EMM-cause-33
   IPv4-only/wrong-APN attach reject)
 - SIM: PIN via the UIM service (legacy DMS fallback, retry guards), multi-slot
-  switching, PIN-lock enable/disable, and optional eSIM/LPA management
+  switching, PIN-lock enable/disable
+- **eSIM (optional `wwand-esim`):** native ES10c profile management
+  (list/enable/disable/delete/EID) plus SM-DP+ **provisioning/download** via
+  bundled lpac — ES9+ HTTPS runs on the router over the existing WAN, no
+  dedicated provisioning APN
 - **Registration diagnostics**: EMM reject cause + limited-service flag
   (QMI + AT+CEER) surfaced on ubus and in the log; robust handling of empty /
   truncated / sentinel QMI answers

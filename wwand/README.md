@@ -145,6 +145,69 @@ when called from LuCI).
 `renew`). These are for observers (e.g. LuCI); netifd itself is driven directly
 by the daemon (see above), not via an event subscription.
 
+## eSIM management & provisioning
+
+eSIM support lives in the optional **`wwand-esim`** package
+(`DEPENDS +wwand +wwand-lpac`). Without it the `modem_esim` methods answer
+`{ "error": "esim_not_installed" }` and core wwand is unaffected.
+
+wwand owns the eUICC's APDU channel and drives **ES10c** natively for profile
+management (list / enable / disable / delete / EID). Profile **download** from
+an SM-DP+ is delegated to **lpac** (shipped as the self-contained `wwand-lpac`,
+bundled wolfSSL + libcurl): lpac runs the **ES9+ HTTPS** session to the SM-DP+
+over the router's normal uplink — any existing WAN, **no dedicated provisioning
+APN** — while the ES10 APDUs travel over wwand's channel (the daemon bridges
+lpac's stdio APDU protocol inline). AT-only modems download internally instead
+(Quectel `AT+QESIM`); `backend.choose` picks the transport per modem, since some
+firmwares report the QMI logical channel as `NOT_SUPPORTED` and settle on AT.
+
+All operations go through `modem_esim { modem, op, slot?, … }` (`slot` defaults
+to 1):
+
+| op | args | Description |
+|---|---|---|
+| `eid` | — | read the eUICC EID |
+| `backend` | — | which transport the eUICC uses (`qmi` / `at`) |
+| `profiles` | — | list installed profiles (ICCID, state, provider / nickname) |
+| `enable` | `iccid` | enable a profile (eUICC REFRESH → SIM re-init → re-register) |
+| `disable` | `iccid` | disable a profile |
+| `delete` | `iccid` | delete a profile (guarded) |
+| `download` | `activation_code`, `confirmation_code?`, `auto_notify?` | install a profile from an SM-DP+ (async) |
+| `download_status` | — | poll a running download: `idle`/`running`/`done`/`failed` + live lpac log |
+| `notifications` | — | list pending eUICC notifications (ES9+) |
+| `notify` | — | send the pending notifications to the SM-DP+ |
+
+**Provisioning a profile (download flow):**
+
+1. Get an activation code from the operator —
+   `LPA:1$<sm-dp+ host>$<matching-id>` (plus a confirmation code if required).
+2. Start the download (async, returns immediately):
+   ```
+   ubus call wwand modem_esim '{"modem":"m0","op":"download",
+     "activation_code":"LPA:1$smdp.example.com$ABC-123"}'
+   ```
+3. Poll until it settles:
+   ```
+   ubus call wwand modem_esim '{"modem":"m0","op":"download_status"}'
+   ```
+   With `auto_notify` (default on) wwand sends the ES9+ install notification to
+   the operator after a successful download; otherwise run `op:"notify"` later.
+4. Enable the new profile:
+   ```
+   ubus call wwand modem_esim '{"modem":"m0","op":"enable","iccid":"8988..."}'
+   ```
+   The eUICC issues a REFRESH; the SIM stack re-initialises and the existing
+   recovery/registration path re-establishes the connection.
+
+**Switching to the eSIM permanently:** set `option sim_slot` to the eUICC's
+physical slot (so it is selected on every start) and enable the desired profile.
+Activation codes and confirmation codes are validated for shell-safe characters
+before reaching lpac.
+
+The LuCI **Network → Modem** settings page surfaces the profile list,
+enable/disable, the download form with live progress, and notification handling;
+the eSIM sections hide themselves when `wwand-esim` is not installed.
+
 ## Telemetry & diagnostics
 
 With `stats_interval > 0` the daemon logs one compact line per interval and
