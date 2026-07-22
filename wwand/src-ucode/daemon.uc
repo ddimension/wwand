@@ -423,7 +423,19 @@ export function create(opts)
 
 	// --- public API --------------------------------------------------------
 
+	let config_sig = null;
+
 	self.apply_config = function(parsed) {
+		// unchanged modem/context config is a no-op: the reload trigger also
+		// fires for unrelated /etc/config/network edits (LAN etc.), and the
+		// v1 reload semantics below are destructive (WAN bounce)
+		let sig = sprintf('%J', { m: parsed.modems, c: parsed.contexts });
+
+		if (sig == config_sig)
+			return;
+
+		config_sig = sig;
+
 		// v1 reload semantics: tear down everything, then rebuild
 		self.shutdown();
 
