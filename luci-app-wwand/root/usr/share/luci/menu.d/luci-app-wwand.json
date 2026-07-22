@@ -7,8 +7,32 @@
 			"path": "wwand/status"
 		},
 		"depends": {
-			"acl": [ "luci-app-wwand" ],
-			"ubus": { "wwand": [ "status" ] }
+			"acl": [
+				"luci-app-wwand"
+			],
+			"ubus": {
+				"wwand": [
+					"status"
+				]
+			}
+		}
+	},
+	"admin/network/wwand": {
+		"title": "Modem Settings",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "wwand/settings"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-wwand"
+			],
+			"ubus": {
+				"wwand": [
+					"modem_get_settings"
+				]
+			}
 		}
 	}
 }
