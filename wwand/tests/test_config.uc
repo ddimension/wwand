@@ -50,9 +50,14 @@ r = config.parse({
 		wanb: { '.type': 'interface', proto: 'qmi', device: 'wwan0m2',
 		        apn: 'work', ipv4: '1', ipv6: '1',
 		        lock_4g: [ '1300:246' ], lock_persist: '1', sim_slot: '2' },
+		wanc: { '.type': 'interface', proto: 'qmi', device: 'wwan0m3',
+		        apn: 'off', disabled: '1' },
 		lan: { '.type': 'interface', proto: 'static' },
 	},
 });
+
+// a disabled qmi interface is ignored entirely (no context synthesized)
+eq(r.contexts.wanc, null, 'compat: disabled interface produces no context');
 
 // one modem synthesized for the shared parent netdev
 eq(length(keys(r.modems)), 1, 'compat: one modem for wwan0 + wwan0m2');

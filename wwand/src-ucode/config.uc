@@ -154,6 +154,11 @@ function compat_translate(raw, result)
 		if (s['.type'] != 'interface' || s.proto != 'qmi')
 			continue;
 
+		// a disabled interface is not brought up by netifd; don't synthesize a
+		// context (nor link one) for it, so the daemon doesn't manage/kick it
+		if (bool_opt(s.disabled, false))
+			continue;
+
 		// new-style interface: references a context section
 		if (s.context != null) {
 			if (result.contexts[s.context])
