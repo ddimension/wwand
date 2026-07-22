@@ -246,6 +246,92 @@ function child_mtu(mtu)
 //   dgram_size,
 // }
 // Returns { ok, urb_size, mux_devs: [ 'wwan0m1', ... ], error? }
+// rmnet backend: one rmnet child per mux entry, tolerating pre-existing links
+// on a daemon restart. Fills mux_mtus, returns the created child dev names.
+// (preserved MTU dance: 1504 while adding links, then the urb size on the parent)
+function setup_rmnet_links(fx, netdev, mux, v5, urb_size, mux_mtus)
+{
+	let mux_devs = [];
+
+	link_op(fx, 'rmnet mtu', netdev, { mtu: 1504 });
+
+	// deaggregation is mandatory (multi-packet QMAP frames); v5 adds checksum
+	// offload negotiated via WDA
+	let rmnet_flags = RMNET_INGRESS_DEAGGREGATION |
+		(v5 ? (RMNET_INGRESS_CKSUMV5 | RMNET_EGRESS_CKSUMV5) : 0);
+
+	for (let entry in mux) {
+		let id = entry.id;
+		let child = entry.name ?? sprintf('%sm%d', netdev, id);
+
+		mux_mtus[child] = entry.mtu;
+
+		if (!fx.link_add_rmnet(child, netdev, id, rmnet_flags)) {
+			// tolerate pre-existing links (daemon restart)
+			if (!fx.exists(sprintf('/sys/class/net/%s', child))) {
+				fx.log('err', sprintf('failed to create rmnet link %s%s', child,
+					fx.last_error ? sprintf(': %s', fx.last_error) : ''));
+				continue;
+			}
+		}
+
+		push(mux_devs, child);
+	}
+
+	link_op(fx, 'parent mtu', netdev, { mtu: urb_size });
+
+	return mux_devs;
+}
+
+// qmimux backend: qmi_wwan creates qmimuxN on the add_mux write with no mux_id
+// sysfs attribute, so identify the new link by diffing the qmimux* set and
+// rename it to our scheme. Fills mux_mtus, returns the child dev names.
+function setup_qmimux_links(fx, netdev, sys, mux, urb_size, mux_mtus)
+{
+	let mux_devs = [];
+
+	for (let entry in mux) {
+		let id = entry.id;
+		let child = entry.name ?? sprintf('%sm%d', netdev, id);
+
+		mux_mtus[child] = entry.mtu;
+
+		if (!fx.exists(sprintf('/sys/class/net/%s', child))) {
+			let before = {};
+
+			for (let p in (fx.glob('/sys/class/net/qmimux*') ?? []))
+				before[p] = true;
+
+			if (!write_attr(fx, sprintf('%s/add_mux', sys), sprintf('%d\n', id), 'qmimux create'))
+				continue;
+
+			let created = null;
+
+			for (let p in (fx.glob('/sys/class/net/qmimux*') ?? [])) {
+				if (!before[p]) {
+					created = substr(p, rindex(p, '/') + 1);
+					break;
+				}
+			}
+
+			if (created)
+				link_op(fx, 'qmimux rename', created, { rename: child });
+			else {
+				// couldn't create/identify the link — skip it (don't add a
+				// phantom to mux_devs, matching the rmnet path's behaviour)
+				fx.log('err', sprintf('could not identify qmimux link for mux id %d', id));
+				continue;
+			}
+		}
+
+		push(mux_devs, child);
+	}
+
+	link_op(fx, 'parent mtu', netdev, { mtu: urb_size });
+
+	return mux_devs;
+}
+
 export function setup(fx, opts)
 {
 	let netdev = opts.netdev;
@@ -285,83 +371,13 @@ export function setup(fx, opts)
 			fx.log('info', sprintf('no rx_urb_size attribute, parent MTU %d covers the urb size (mainline usbnet)', urb_size));
 	}
 
-	if (backend == 'rmnet') {
-		// preserved MTU dance: 1504 while adding links, then urb size
-		link_op(fx, 'rmnet mtu', netdev, { mtu: 1504 });
-
-		// deaggregation is mandatory (multi-packet QMAP frames), v5 adds
-		// checksum offload negotiated via WDA
-		let rmnet_flags = RMNET_INGRESS_DEAGGREGATION |
-			(opts.v5 ? (RMNET_INGRESS_CKSUMV5 | RMNET_EGRESS_CKSUMV5) : 0);
-
-		for (let entry in mux) {
-			let id = entry.id;
-			let child = entry.name ?? sprintf('%sm%d', netdev, id);
-
-			mux_mtus[child] = entry.mtu;
-
-			if (!fx.link_add_rmnet(child, netdev, id, rmnet_flags)) {
-				// tolerate pre-existing links (daemon restart)
-				if (!fx.exists(sprintf('/sys/class/net/%s', child))) {
-					fx.log('err', sprintf('failed to create rmnet link %s%s', child,
-						fx.last_error ? sprintf(': %s', fx.last_error) : ''));
-					continue;
-				}
-			}
-
-			push(mux_devs, child);
-		}
-
-		link_op(fx, 'parent mtu', netdev, { mtu: urb_size });
-	}
-	else if (backend == 'qmimux') {
-		for (let entry in mux) {
-			let id = entry.id;
-			let child = entry.name ?? sprintf('%sm%d', netdev, id);
-
-			mux_mtus[child] = entry.mtu;
-
-			if (!fx.exists(sprintf('/sys/class/net/%s', child))) {
-				// qmi_wwan creates qmimuxN on add_mux write (no mux_id sysfs
-				// attribute on current kernels) — identify the new link by
-				// diffing the qmimux* set, then rename to our scheme
-				let before = {};
-
-				for (let p in (fx.glob('/sys/class/net/qmimux*') ?? []))
-					before[p] = true;
-
-				if (!write_attr(fx, sprintf('%s/add_mux', sys), sprintf('%d\n', id), 'qmimux create')) {
-					continue;
-				}
-
-				let created = null;
-
-				for (let p in (fx.glob('/sys/class/net/qmimux*') ?? [])) {
-					if (!before[p]) {
-						created = substr(p, rindex(p, '/') + 1);
-						break;
-					}
-				}
-
-				if (created)
-					link_op(fx, 'qmimux rename', created, { rename: child });
-				else {
-					// couldn't create/identify the link — skip it (don't add a
-					// phantom to mux_devs, matching the rmnet path's behaviour)
-					fx.log('err', sprintf('could not identify qmimux link for mux id %d', id));
-					continue;
-				}
-			}
-
-			push(mux_devs, child);
-		}
-
-		link_op(fx, 'parent mtu', netdev, { mtu: urb_size });
-	}
-	else {
+	if (backend == 'rmnet')
+		mux_devs = setup_rmnet_links(fx, netdev, mux, opts.v5, urb_size, mux_mtus);
+	else if (backend == 'qmimux')
+		mux_devs = setup_qmimux_links(fx, netdev, sys, mux, urb_size, mux_mtus);
+	else
 		// plain raw-ip: plain MTU on the parent (config or 1500)
 		link_op(fx, 'mtu', netdev, { mtu: child_mtu(opts.mtu) });
-	}
 
 	// child MTUs and link up
 	link_op(fx, 'link up', netdev, { up: true });

@@ -1273,75 +1273,78 @@ export function create(opts)
 						fast_running = false;
 				};
 
-				// per-carrier bandwidth (the cell-location neighbours lack it):
-				// prefer QMI GET_LTE_CPHY_CA_INFO, fall back to AT+QCAINFO, and
-				// cache the choice for this modem (RG650E answers the QMI one
-				// with INFO_UNAVAILABLE, so it settles on AT). Only while
-				// watched (LuCI open).
+				// per-carrier CA info, then the data-system mode (NSA/SA/LTE) —
+				// both only while watched (LuCI open). Extracted into named
+				// methods to keep this poll pyramid shallow.
 				if (!self.cells)
 					return done();
 
-				// after CA: fetch the QENG serving detail (NR band/bandwidth/
-				// signal + the NSA/SA label) first, then settle the data-system
-				// mode using whatever this modem offers, then finish.
-				let finish_extras = () => {
-					let set_mode = () => {
-						// mode (NSA/SA/LTE): prefer DSD (native, precise), else the
-						// QENG serving NR line (Quectel AT states NSA/SA directly),
-						// else the coarse NAS radio_ifs. Cached per modem so older
-						// modems settle on what they have.
-						backend.choose(self, '_dsd_be', [
-							{ name: 'dsd', probe: (ok) => self.dsd
-								? self.dsd.request('GET_SYSTEM_STATUS', {}, (e, d) =>
-									ok(!e && d?.available_systems != null))
-								: ok(false) },
-							{ name: 'at',  probe: (ok) => ok(self.cells?.serving?.lte != null ||
-							                                  self.cells?.serving?.nr != null) },
-							{ name: 'nas', probe: (ok) => ok(!!self.reg?.radio_ifs) },
-						], (be) => {
-							let tag = (s) => { if (s) s.source = be; return s; };
-
-							if (be == 'dsd')
-								return self.dsd.request('GET_SYSTEM_STATUS', {}, (e, d) => {
-									self.dsd_status = (!e && d?.available_systems) ? tag(dsd_summary(d.available_systems)) : null;
-									done();
-								});
-							if (be == 'at')
-								self.dsd_status = tag(dsd_from_serving(self.cells?.serving));
-							else if (be == 'nas')
-								self.dsd_status = tag(dsd_from_radio(self.reg?.radio_ifs));
-							done();
-						});
-					};
-
-					if (!self.at || !self.cells)
-						return set_mode();
-
-					self.at.send('AT+QENG="servingcell"', (e, r) => {
-						if (!e && self.cells)
-							self.cells.serving = atcmd.parse_qeng_servingcell(r?.lines);
-						set_mode();
-					});
-				};
-
-				let store = (ca) => { if (self.cells) self.cells.ca = ca ?? []; finish_extras(); };
-
-				backend.choose(self, '_ca_be', [
-					{ name: 'qmi', probe: (ok) => self.nas
-						? self.nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) =>
-							ok(!e && (d?.pcell || d?.scells)))
-						: ok(false) },
-					{ name: 'at', probe: (ok) => ok(!!self.at) },
-				], (be) => {
-					if (be == 'qmi')
-						return self.nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) =>
-							store((!e && d) ? ca_from_qmi(d) : []));
-					if (be == 'at')
-						return self.at.send('AT+QCAINFO', (e, r) =>
-							store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
-					store([]);
-				});
+				self._fetch_ca_info(() => self._determine_data_mode(done));
 			});
+		});
+	};
+
+	// carrier-aggregation carriers for the status page: prefer QMI
+	// GET_LTE_CPHY_CA_INFO, fall back to AT+QCAINFO, cache the choice per modem
+	// (RG650E answers the QMI one with INFO_UNAVAILABLE, so it settles on AT).
+	// Stores self.cells.ca and calls cb().
+	self._fetch_ca_info = function(cb) {
+		let store = (ca) => { if (self.cells) self.cells.ca = ca ?? []; cb(); };
+
+		backend.choose(self, '_ca_be', [
+			{ name: 'qmi', probe: (ok) => self.nas
+				? self.nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) =>
+					ok(!e && (d?.pcell || d?.scells)))
+				: ok(false) },
+			{ name: 'at', probe: (ok) => ok(!!self.at) },
+		], (be) => {
+			if (be == 'qmi')
+				return self.nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) =>
+					store((!e && d) ? ca_from_qmi(d) : []));
+			if (be == 'at')
+				return self.at.send('AT+QCAINFO', (e, r) =>
+					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
+			store([]);
+		});
+	};
+
+	// settle the data-system mode (NSA/SA/LTE): refresh the QENG serving detail
+	// (Quectel AT states NSA/SA directly + NR band/bandwidth/signal), then pick
+	// the mode source — prefer DSD (native, precise), else that QENG NR line,
+	// else the coarse NAS radio_ifs. Cached per modem; stores self.dsd_status.
+	self._determine_data_mode = function(cb) {
+		let set_mode = () => {
+			backend.choose(self, '_dsd_be', [
+				{ name: 'dsd', probe: (ok) => self.dsd
+					? self.dsd.request('GET_SYSTEM_STATUS', {}, (e, d) =>
+						ok(!e && d?.available_systems != null))
+					: ok(false) },
+				{ name: 'at',  probe: (ok) => ok(self.cells?.serving?.lte != null ||
+				                                  self.cells?.serving?.nr != null) },
+				{ name: 'nas', probe: (ok) => ok(!!self.reg?.radio_ifs) },
+			], (be) => {
+				let tag = (s) => { if (s) s.source = be; return s; };
+
+				if (be == 'dsd')
+					return self.dsd.request('GET_SYSTEM_STATUS', {}, (e, d) => {
+						self.dsd_status = (!e && d?.available_systems) ? tag(dsd_summary(d.available_systems)) : null;
+						cb();
+					});
+				if (be == 'at')
+					self.dsd_status = tag(dsd_from_serving(self.cells?.serving));
+				else if (be == 'nas')
+					self.dsd_status = tag(dsd_from_radio(self.reg?.radio_ifs));
+				cb();
+			});
+		};
+
+		if (!self.at || !self.cells)
+			return set_mode();
+
+		self.at.send('AT+QENG="servingcell"', (e, r) => {
+			if (!e && self.cells)
+				self.cells.serving = atcmd.parse_qeng_servingcell(r?.lines);
+			set_mode();
 		});
 	};
 
