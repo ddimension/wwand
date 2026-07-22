@@ -165,6 +165,66 @@ export function parse_qcainfo(lines)
 	return out;
 }
 
+// LTE downlink bandwidth index (Quectel QENG/servingcell) -> MHz
+const BW_IDX_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
+
+// parse AT+QENG="servingcell" into the serving LTE cell and any NR5G carrier.
+// Quectel formats (field counts vary by firmware; parse defensively):
+//   +QENG: "servingcell","<state>"
+//   +QENG: "LTE","<dup>",<mcc>,<mnc>,<cid>,<pci>,<earfcn>,<band>,<ulbw>,<dlbw>,
+//          <tac>,<rsrp>,<rsrq>,<rssi>,<sinr>,...
+//   +QENG: "NR5G-NSA",<mcc>,<mnc>,<pci>,<rsrp>,<sinr>,<rsrq>,<arfcn>,<band>,<dlbw>,<scs>
+//   +QENG: "NR5G-SA","<dup>",<mcc>,<mnc>,<cid>,<pci>,<tac>,<arfcn>,<band>,<dlbw>,...
+// returns { state, lte: {...}|null, nr: {...}|null }. rsrp/rsrq/sinr are dBm/dB.
+export function parse_qeng_servingcell(lines)
+{
+	let out = { state: null, lte: null, nr: null };
+	let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+QENG:\s*"([^"]+)"(.*)/);
+
+		if (!m)
+			continue;
+
+		let kind = m[1];
+		// split the remaining CSV, stripping quotes and leading comma
+		let rest = replace(trim(m[2]), /^,/, '');
+		let f = map(split(rest, ','), (x) => { x = trim(x); return replace(x, /^"|"$/g, ''); });
+
+		if (kind == 'servingcell') {
+			out.state = f[0];
+		}
+		else if (kind == 'LTE') {
+			// f: dup,mcc,mnc,cid,pci,earfcn,band,ulbw,dlbw,tac,rsrp,rsrq,rssi,sinr
+			out.lte = {
+				band: num(f[6]), earfcn: num(f[5]), pci: num(f[4]),
+				bandwidth_mhz: BW_IDX_MHZ[f[8]] ?? null,
+				rsrp: num(f[10]), rsrq: num(f[11]), sinr: num(f[13]),
+			};
+		}
+		else if (kind == 'NR5G-NSA') {
+			// mcc,mnc,pci,rsrp,sinr,rsrq,arfcn,band,dlbw,scs (verified on RG502Q)
+			out.nr = {
+				mode: 'NSA', band: num(f[7]), arfcn: num(f[6]), pci: num(f[2]),
+				bandwidth_mhz: BW_IDX_MHZ[f[8]] ?? null,
+				rsrp: num(f[3]), sinr: num(f[4]), rsrq: num(f[5]),
+			};
+		}
+		else if (kind == 'NR5G-SA') {
+			// dup,mcc,mnc,cid,pci,tac,arfcn,band,dlbw,rsrp,rsrq,sinr (best-effort:
+			// SA layout not verified on hardware yet)
+			out.nr = {
+				mode: 'SA', band: num(f[7]), arfcn: num(f[6]), pci: num(f[4]),
+				bandwidth_mhz: BW_IDX_MHZ[f[8]] ?? null,
+				rsrp: num(f[9]), rsrq: num(f[10]), sinr: num(f[11]),
+			};
+		}
+	}
+
+	return out;
+}
+
 // --- AT port discovery -------------------------------------------------------
 
 const ROLE_PREFERENCE = { at: 3, at2: 2, ppp: 1 };

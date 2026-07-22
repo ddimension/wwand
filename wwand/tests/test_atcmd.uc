@@ -164,6 +164,22 @@ eq(atcmd.parse_qcainfo([
 
 eq(atcmd.parse_qcainfo([ 'OK', '' ]), [], 'qcainfo: no carrier lines');
 
+// --- AT+QENG servingcell parsing (LTE + NR5G-NSA) ----------------------------
+// real lines from an RG502Q on LTE B3 + NR5G-NSA n1
+let sc = atcmd.parse_qeng_servingcell([
+	'+QENG: "servingcell","NOCONN"',
+	'+QENG: "LTE","FDD",262,01,1C36403,246,1300,3,5,5,BFF,-93,-11,-61,21,15,100,-',
+	'+QENG: "NR5G-NSA",262,01,242,-102,19,-11,431070,1,3,0',
+]);
+eq(sc.state, 'NOCONN', 'qeng: serving state');
+eq(sc.lte, { band: 3, earfcn: 1300, pci: 246, bandwidth_mhz: 20, rsrp: -93, rsrq: -11, sinr: 21 },
+	'qeng: LTE serving cell (dlbw idx 5 -> 20 MHz)');
+eq(sc.nr, { mode: 'NSA', band: 1, arfcn: 431070, pci: 242, bandwidth_mhz: 10, rsrp: -102, sinr: 19, rsrq: -11 },
+	'qeng: NR5G-NSA carrier (dlbw idx 3 -> 10 MHz)');
+
+eq(atcmd.parse_qeng_servingcell([ '+QENG: "servingcell","NOCONN"' ]),
+	{ state: 'NOCONN', lte: null, nr: null }, 'qeng: state only, no cells');
+
 // --- find_tty ----------------------------------------------------------------
 
 const BASE = '/sys/class/usbmisc/cdc-wdm0/device/..';

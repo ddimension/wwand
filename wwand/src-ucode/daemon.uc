@@ -984,6 +984,7 @@ export function create(opts)
 			registration: entry.modem.reg,
 			signal: entry.modem.signal,
 			cells: entry.modem.cells,
+			dsd: entry.modem.dsd_status,
 		};
 	};
 

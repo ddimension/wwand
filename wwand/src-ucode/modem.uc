@@ -34,6 +34,7 @@ import * as protoswitch from './protocol_switch.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
 import * as dmsmod from './codec/schema/dms.uc';
 import * as nasmod from './codec/schema/nas.uc';
+import * as dsdmod from './codec/schema/dsd.uc';
 import * as uimmod from './codec/schema/uim.uc';
 import * as wdsmod from './codec/schema/wds.uc';
 import * as wdamod from './codec/schema/wda.uc';
@@ -96,6 +97,21 @@ function ca_from_qmi(d)
 		            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', s.dl_bandwidth)] ?? null });
 
 	return out;
+}
+
+// summarize DSD available-systems into the data-system mode. 5G present with
+// LTE = NSA (NR anchored on LTE); 5G alone = SA; LTE alone = LTE.
+function dsd_summary(systems)
+{
+	let rats = {};
+
+	for (let s in (systems ?? []))
+		if (s.rat == dsdmod.RAT_LTE) rats.lte = true;
+		else if (s.rat == dsdmod.RAT_5G) rats.nr = true;
+
+	let mode = rats.nr ? (rats.lte ? 'NSA' : 'SA') : (rats.lte ? 'LTE' : null);
+
+	return { mode: mode, lte: !!rats.lte, nr: !!rats.nr };
 }
 
 export function create(opts)
@@ -386,7 +402,20 @@ export function create(opts)
 								return fail('alloc_wds', e4);
 
 							self.wds_cfg = wds;
-							self._read_info(step_at);
+
+							// DSD (Data System Determination): optional, gives the
+							// clean LTE / 5G-NSA / 5G-SA data-system status. Absent
+							// on older modems — non-fatal.
+							if (self.services[sprintf('%d', dsdmod.default.service)]) {
+								self.alloc(dsdmod.default, (e5, dsd) => {
+									self.dsd = e5 ? null : dsd;
+									self._read_info(step_at);
+								});
+							}
+							else {
+								self.dsd = null;
+								self._read_info(step_at);
+							}
 						});
 					};
 
@@ -994,7 +1023,31 @@ export function create(opts)
 				if (!self.cells)
 					return done();
 
-				let store = (ca) => { if (self.cells) self.cells.ca = ca ?? []; done(); };
+				// after CA: DSD data-system status (NSA/SA), then QENG serving
+				// detail (NR band/bandwidth/signal), then finish
+				let finish_extras = () => {
+					let after_dsd = () => {
+						if (!self.at || !self.cells)
+							return done();
+
+						self.at.send('AT+QENG="servingcell"', (e, r) => {
+							if (!e && self.cells)
+								self.cells.serving = atcmd.parse_qeng_servingcell(r?.lines);
+							done();
+						});
+					};
+
+					if (self.dsd)
+						self.dsd.request('GET_SYSTEM_STATUS', {}, (e, d) => {
+							if (!e && d?.available_systems)
+								self.dsd_status = dsd_summary(d.available_systems);
+							after_dsd();
+						});
+					else
+						after_dsd();
+				};
+
+				let store = (ca) => { if (self.cells) self.cells.ca = ca ?? []; finish_extras(); };
 
 				backend.choose(self, '_ca_be', [
 					{ name: 'qmi', probe: (ok) => self.nas
@@ -1210,7 +1263,7 @@ export function create(opts)
 			if (c)
 				c.destroy();
 
-		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = null;
+		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = self.dsd = null;
 
 		if (self.hub) {
 			self.hub.close();
