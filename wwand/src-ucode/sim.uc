@@ -15,6 +15,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
+import * as backend from './backend.uc';
 import * as uimmod from './codec/schema/uim.uc';
 import * as dmsmod from './codec/schema/dms.uc';
 
@@ -429,28 +430,25 @@ function at_apdu_close(modem, channel, cb)
 // when the QMI logical channel is unsupported. cb('qmi' | 'at' | null)
 function apdu_backend(modem, slot, cb)
 {
-	if (modem._apdu_be != null)
-		return cb(modem._apdu_be || null);
+	backend.choose(modem, '_apdu_be', [
+		// QMI logical channel: probe with the ISD-R AID; NOT_SUPPORTED -> next
+		{ name: 'qmi', probe: (ok) => {
+			if (!modem.uim)
+				return ok(false);
 
-	if (!modem.uim) {
-		modem._apdu_be = modem.at ? 'at' : '';
-		return cb(modem._apdu_be || null);
-	}
-
-	// probe the QMI channel with the ISD-R AID; NOT_SUPPORTED -> AT
-	modem.uim.request('OPEN_LOGICAL_CHANNEL', {
-		slot: slot, aid: hex_to_arr('a0000005591010ffffffff8900000100'),
-	}, (err, data) => {
-		if (!err && data.channel_id != null) {
-			modem.uim.request('LOGICAL_CHANNEL',
-				{ slot: slot, channel_id: data.channel_id, terminate: 1 }, () => {});
-			modem._apdu_be = 'qmi';
-			return cb('qmi');
-		}
-
-		modem._apdu_be = modem.at ? 'at' : '';
-		cb(modem._apdu_be || null);
-	});
+			modem.uim.request('OPEN_LOGICAL_CHANNEL', {
+				slot: slot, aid: hex_to_arr('a0000005591010ffffffff8900000100'),
+			}, (err, data) => {
+				if (!err && data.channel_id != null) {
+					modem.uim.request('LOGICAL_CHANNEL',
+						{ slot: slot, channel_id: data.channel_id, terminate: 1 }, () => {});
+					return ok(true);
+				}
+				ok(false);
+			});
+		} },
+		{ name: 'at', probe: (ok) => ok(!!modem.at) },
+	], cb);
 }
 
 // open a logical channel to `aid_hex` on physical slot `slot` (1-based);

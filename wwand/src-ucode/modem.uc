@@ -29,6 +29,7 @@ import * as sim from './sim.uc';
 import * as netlink from './netlink.uc';
 import * as recovery_mod from './recovery.uc';
 import * as atcmd from './atcmd.uc';
+import * as backend from './backend.uc';
 import * as protoswitch from './protocol_switch.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
 import * as dmsmod from './codec/schema/dms.uc';
@@ -74,48 +75,6 @@ export function parse_modes(str)
 	}
 
 	return mask || null;
-}
-
-// Generic cached-source selector: probe an ordered list of async providers
-// once, remember (on `obj[key]`) which one produced data for this device, then
-// use only that on every later call. Each provider is { name, run: (cb) => cb(
-// data | null) } where null means "unavailable here, try the next". Lets a
-// feature prefer a QMI message, fall back to an alternate QMI message, then to
-// AT, and stick with whatever worked — the same idea as the eSIM/APDU backend
-// probes. `none` is cached when nothing works, so we stop retrying.
-function pick_source(obj, key, providers, cb)
-{
-	let cached = obj[key];
-
-	if (cached != null) {
-		if (cached == 'none')
-			return cb(null);
-
-		for (let p in providers)
-			if (p.name == cached)
-				return p.run(cb);
-
-		return cb(null);   // cached provider no longer offered
-	}
-
-	let i = 0, step;
-	step = () => {
-		if (i >= length(providers)) {
-			obj[key] = 'none';
-			return cb(null);
-		}
-
-		let p = providers[i++];
-		p.run((data) => {
-			if (data != null) {
-				obj[key] = p.name;
-				return cb(data);
-			}
-			step();
-		});
-	};
-
-	step();
 }
 
 // QmiNasDLBandwidth enum -> MHz (LTE carrier bandwidth)
@@ -740,9 +699,9 @@ export function create(opts)
 				if (serr)
 					log('warn', sprintf('sim slot switch failed: %J', serr));
 
-				// slot changed -> a different eUICC may be present
-				delete self._esim_be;
-				delete self._apdu_be;
+				// slot changed -> a different eUICC may be present (the CA backend
+				// is a modem capability, not card-bound, so it is not reset here)
+				backend.reset(self, '_esim_be', '_apdu_be');
 				settle_timer = uloop.timer(self.timing.sim_settle, step_sim);
 			});
 		});
@@ -1029,24 +988,28 @@ export function create(opts)
 
 				// per-carrier bandwidth (the cell-location neighbours lack it):
 				// prefer QMI GET_LTE_CPHY_CA_INFO, fall back to AT+QCAINFO, and
-				// cache whichever works for this modem (RG650E answers the QMI
-				// one with INFO_UNAVAILABLE, so it settles on AT). Only while
+				// cache the choice for this modem (RG650E answers the QMI one
+				// with INFO_UNAVAILABLE, so it settles on AT). Only while
 				// watched (LuCI open).
 				if (!self.cells)
 					return done();
 
-				pick_source(self, '_ca_be', [
-					{ name: 'qmi', run: (cb) => self.nas
+				let store = (ca) => { if (self.cells) self.cells.ca = ca ?? []; done(); };
+
+				backend.choose(self, '_ca_be', [
+					{ name: 'qmi', probe: (ok) => self.nas
 						? self.nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) =>
-							cb((!e && (d?.pcell || d?.scells)) ? ca_from_qmi(d) : null))
-						: cb(null) },
-					{ name: 'at', run: (cb) => self.at
-						? self.at.send('AT+QCAINFO', (e, r) => cb(e ? null : atcmd.parse_qcainfo(r?.lines)))
-						: cb(null) },
-				], (ca) => {
-					if (self.cells)
-						self.cells.ca = ca ?? [];
-					done();
+							ok(!e && (d?.pcell || d?.scells)))
+						: ok(false) },
+					{ name: 'at', probe: (ok) => ok(!!self.at) },
+				], (be) => {
+					if (be == 'qmi')
+						return self.nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) =>
+							store((!e && d) ? ca_from_qmi(d) : []));
+					if (be == 'at')
+						return self.at.send('AT+QCAINFO', (e, r) =>
+							store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
+					store([]);
 				});
 			});
 		});

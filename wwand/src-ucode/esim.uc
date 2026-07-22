@@ -11,6 +11,7 @@
 'use strict';
 
 import * as sim from './sim.uc';
+import * as backend from './backend.uc';
 
 const ISDR_AID = 'a0000005591010ffffffff8900000100';
 
@@ -459,19 +460,16 @@ function at_profile_op(modem, iccid, verb, cb)
 // fall back to the vendor AT LPA. cb('qmi' | 'at' | null)
 function backend_of(modem, slot, cb)
 {
-	if (modem._esim_be != null)
-		return cb(modem._esim_be || null);
-
-	sim.apdu_open(modem, slot, ISDR_AID, (err, ch) => {
-		if (!err) {
+	backend.choose(modem, '_esim_be', [
+		// QMI ES10c over the logical channel: probe by opening the ISD-R
+		{ name: 'qmi', probe: (ok) => sim.apdu_open(modem, slot, ISDR_AID, (err, ch) => {
+			if (err)
+				return ok(false);
 			sim.apdu_close(modem, slot, ch.channel, () => {});
-			modem._esim_be = 'qmi';
-			return cb('qmi');
-		}
-
-		modem._esim_be = modem.at ? 'at' : '';
-		cb(modem._esim_be || null);
-	});
+			ok(true);
+		}) },
+		{ name: 'at', probe: (ok) => ok(!!modem.at) },
+	], cb);
 }
 
 // --- public API --------------------------------------------------------------
@@ -549,7 +547,7 @@ return {
 	backend: (modem, slot, cb) => backend_of(modem, slot, cb),
 
 	// clear the cached backend (call on SIM slot switch — removable eUICCs)
-	reset_backend: (modem) => { delete modem._esim_be; },
+	reset_backend: (modem) => backend.reset(modem, '_esim_be'),
 
 	// modem-internal download (AT backend only; the QMI/lpac host path is
 	// driven from the daemon glue). cb(err, {ret})
