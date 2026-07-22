@@ -752,8 +752,9 @@ export function create(opts)
 				return cb({ error: 'qmi', detail: err });
 
 			// a different slot may hold a different eUICC (removable eUICCs) —
-			// drop the cached eSIM backend so it is re-probed
+			// drop the cached eSIM/APDU backends so they are re-probed
 			delete entry.modem._esim_be;
+			delete entry.modem._apdu_be;
 
 			log('notice', sprintf('modem %s: switched to SIM slot %d', ref, physical));
 			cb(null, { slot: physical });

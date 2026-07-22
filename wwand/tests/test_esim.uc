@@ -3,6 +3,7 @@
 'use strict';
 
 import { eq, ok, done } from './lib/check.uc';
+import * as sim from 'wwand/sim.uc';
 
 let esim = require('wwand.esim');
 
@@ -86,5 +87,38 @@ eq(esim._qesim_fields('OK'), null, 'qesim: non-qesim line ignored');
 // download result line
 let dl = esim._qesim_fields('+QESIM: "download",0');
 eq(dl[0], '0', 'qesim: download ret ok');
+
+// --- AT (CCHO/CGLA/CCHC) APDU transport -------------------------------------
+// a modem with no UIM client falls back to the AT transport; verify the exact
+// AT commands and response parsing of open/send/close.
+let at_cmds = [];
+let fake = {
+	_apdu_be: null,
+	at: {
+		send: (cmd, cb, o) => {
+			push(at_cmds, cmd);
+			if (match(cmd, /^AT\+CCHO=/))
+				cb(null, { lines: [ '+CCHO: 2' ] });
+			else if (match(cmd, /^AT\+CGLA=/))
+				cb(null, { lines: [ '+CGLA: 12,00A40004009000' ] });
+			else
+				cb(null, { lines: [] });
+		},
+	},
+};
+
+let ap_ch, ap_resp, ap_closed;
+sim.apdu_open(fake, 2, 'a0000005591010ffffffff8900000100', (e, r) => { ap_ch = r?.channel; });
+eq(ap_ch, 2, 'apdu-at: CCHO channel parsed');
+eq(at_cmds[0], 'AT+CCHO="A0000005591010FFFFFFFF8900000100"', 'apdu-at: CCHO command + uppercase AID');
+eq(fake._apdu_be, 'at', 'apdu-at: backend cached as at (no uim)');
+
+sim.apdu_send(fake, 2, ap_ch, '00a4000400', (e, r) => { ap_resp = r; });
+eq(at_cmds[1], 'AT+CGLA=2,10,00A4000400', 'apdu-at: CGLA channel,len(hexchars),apdu');
+eq(ap_resp, '00a40004009000', 'apdu-at: CGLA response parsed lowercase');
+
+sim.apdu_close(fake, 2, ap_ch, (e) => { ap_closed = (e == null); });
+eq(at_cmds[2], 'AT+CCHC=2', 'apdu-at: CCHC command');
+eq(ap_closed, true, 'apdu-at: close ok');
 
 done('test_esim');

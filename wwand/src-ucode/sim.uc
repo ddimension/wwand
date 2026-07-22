@@ -375,26 +375,110 @@ export function arr_to_hex(a)
 	return s;
 }
 
+// APDU transport is either QMI UIM (SEND_APDU + logical channel) or, on
+// firmwares that return NOT_SUPPORTED for the QMI channel (e.g. RG650E), the
+// standard 3GPP AT commands CCHO/CGLA/CCHC. The eUICC's ISD-R must be free of
+// the modem's internal LPA for the AT path (AT+QESIM="lpa_enable",0 + reset).
+
+// --- AT (CCHO/CGLA/CCHC) transport ---
+function at_apdu_open(modem, aid_hex, cb)
+{
+	modem.at.send(sprintf('AT+CCHO="%s"', uc(aid_hex)), (err, res) => {
+		if (err)
+			return cb(err, null);
+
+		for (let l in (res?.lines ?? [])) {
+			let m = match(l, /\+CCHO: *([0-9]+)/);
+
+			if (m)
+				return cb(null, { channel: +m[1], select_response: '' });
+		}
+
+		cb({ error: 'no_channel' }, null);
+	}, { timeout: 15000 });
+}
+
+function at_apdu_send(modem, channel, apdu_hex, cb)
+{
+	let h = uc(apdu_hex);
+
+	// CGLA length is the command length in hex characters (2 * bytes)
+	modem.at.send(sprintf('AT+CGLA=%d,%d,%s', channel, length(h), h), (err, res) => {
+		if (err)
+			return cb(err, null);
+
+		for (let l in (res?.lines ?? [])) {
+			let m = match(l, /\+CGLA: *[0-9]+,([0-9A-Fa-f]+)/);
+
+			if (m)
+				return cb(null, lc(m[1]));
+		}
+
+		cb({ error: 'no_response' }, null);
+	}, { timeout: 30000 });
+}
+
+function at_apdu_close(modem, channel, cb)
+{
+	modem.at.send(sprintf('AT+CCHC=%d', channel), (err) => cb(err ?? null));
+}
+
+// pick the APDU transport once per modem: prefer QMI, fall back to AT CCHO
+// when the QMI logical channel is unsupported. cb('qmi' | 'at' | null)
+function apdu_backend(modem, slot, cb)
+{
+	if (modem._apdu_be != null)
+		return cb(modem._apdu_be || null);
+
+	if (!modem.uim) {
+		modem._apdu_be = modem.at ? 'at' : '';
+		return cb(modem._apdu_be || null);
+	}
+
+	// probe the QMI channel with the ISD-R AID; NOT_SUPPORTED -> AT
+	modem.uim.request('OPEN_LOGICAL_CHANNEL', {
+		slot: slot, aid: hex_to_arr('a0000005591010ffffffff8900000100'),
+	}, (err, data) => {
+		if (!err && data.channel_id != null) {
+			modem.uim.request('LOGICAL_CHANNEL',
+				{ slot: slot, channel_id: data.channel_id, terminate: 1 }, () => {});
+			modem._apdu_be = 'qmi';
+			return cb('qmi');
+		}
+
+		modem._apdu_be = modem.at ? 'at' : '';
+		cb(modem._apdu_be || null);
+	});
+}
+
 // open a logical channel to `aid_hex` on physical slot `slot` (1-based);
 // cb(err, { channel, select_response })
 export function apdu_open(modem, slot, aid_hex, cb)
 {
-	if (!modem.uim)
-		return cb({ error: 'no_uim_client' }, null);
+	apdu_backend(modem, slot, (be) => {
+		if (be == 'at')
+			return at_apdu_open(modem, aid_hex, cb);
 
-	modem.uim.request('OPEN_LOGICAL_CHANNEL', {
-		slot: slot, aid: hex_to_arr(aid_hex),
-	}, (err, data) => {
-		if (err || data.channel_id == null)
-			return cb(err ?? { error: 'no_channel' }, null);
+		if (be != 'qmi')
+			return cb({ error: 'no_apdu_channel' }, null);
 
-		cb(null, { channel: data.channel_id,
-		           select_response: arr_to_hex(data.select_response) });
+		modem.uim.request('OPEN_LOGICAL_CHANNEL', {
+			slot: slot, aid: hex_to_arr(aid_hex),
+		}, (err, data) => {
+			if (err || data.channel_id == null)
+				return cb(err ?? { error: 'no_channel' }, null);
+
+			cb(null, { channel: data.channel_id,
+			           select_response: arr_to_hex(data.select_response) });
+		});
 	});
 }
 
 export function apdu_send(modem, slot, channel, apdu_hex, cb)
 {
+	if (modem._apdu_be == 'at')
+		return at_apdu_send(modem, channel, apdu_hex, cb);
+
 	if (!modem.uim)
 		return cb({ error: 'no_uim_client' }, null);
 
@@ -410,6 +494,9 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 
 export function apdu_close(modem, slot, channel, cb)
 {
+	if (modem._apdu_be == 'at')
+		return at_apdu_close(modem, channel, cb);
+
 	if (!modem.uim)
 		return cb({ error: 'no_uim_client' });
 

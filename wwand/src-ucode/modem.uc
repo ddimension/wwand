@@ -628,6 +628,7 @@ export function create(opts)
 
 				// slot changed -> a different eUICC may be present
 				delete self._esim_be;
+				delete self._apdu_be;
 				settle_timer = uloop.timer(self.timing.sim_settle, step_sim);
 			});
 		});
