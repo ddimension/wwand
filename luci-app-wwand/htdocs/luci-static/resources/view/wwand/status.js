@@ -215,8 +215,10 @@ function renderLive(name, modem) {
 		if (slots.length) {
 			var slotRows = slots.map(function(sl) {
 				var line = [
-					E('strong', {}, _('Slot %d').format(sl.physical) + (sl.active ? ' ✓' : '')),
-					' — ' + sl.card + (sl.iccid ? (', ICCID ' + sl.iccid) : '')
+					E('strong', {}, _('Slot %d').format(sl.physical) +
+						(sl.is_euicc ? ' (eSIM)' : '') + (sl.active ? ' ✓' : '')),
+					' — ' + sl.card + (sl.iccid ? (', ICCID ' + sl.iccid) : '') +
+						(sl.eid ? (', EID ' + sl.eid) : '')
 				];
 				if (!sl.active && sl.card == 'present')
 					line.push(E('button', {

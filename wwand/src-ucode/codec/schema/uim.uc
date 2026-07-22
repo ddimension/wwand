@@ -106,6 +106,15 @@ export default {
 					logical_slot: 'u8',
 					iccid:        'lstring',
 				} } },
+				// per-slot card details incl. the eUICC flag (same order)
+				info: { t: 0x11, f: { n: 'u8', of: {
+					card_protocol:      'u32',
+					valid_applications: 'u8',
+					atr:                'lstring',
+					is_euicc:           'u8',
+				} } },
+				// per-slot EID (empty on non-eUICC slots; same order)
+				eids: { t: 0x12, f: { n: 'u8', of: { eid: 'lstring' } } },
 			},
 		},
 

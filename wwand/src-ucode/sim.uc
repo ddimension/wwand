@@ -299,6 +299,19 @@ function decode_iccid(raw)
 	return replace(s, /f+$/, '');
 }
 
+// EID is plain BCD, high nibble first (SGP.02) — no nibble swap
+function decode_eid(raw)
+{
+	let s = '';
+
+	for (let i = 0; i < length(raw ?? ''); i++) {
+		let b = ord(raw, i);
+		s += sprintf('%x%x', b >> 4, b & 0xf);
+	}
+
+	return s;
+}
+
 // slot list with card/activity state and identifying ICCID; err when the
 // modem has no slot-status support (single-slot firmwares often lack it)
 export function slot_status(modem, cb)
@@ -310,13 +323,20 @@ export function slot_status(modem, cb)
 		if (err)
 			return cb(err, null);
 
-		let out = map(data.slots ?? [], (s, i) => ({
-			physical: i + 1,
-			card: CARD_STATES[sprintf('%d', s.card_status)] ?? sprintf('%d', s.card_status),
-			active: s.slot_status == 1,
-			logical_slot: s.logical_slot,
-			iccid: length(s.iccid ?? '') ? decode_iccid(s.iccid) : null,
-		}));
+		let out = map(data.slots ?? [], (s, i) => {
+			let info = data.info?.[i];
+			let eid = data.eids?.[i]?.eid;
+
+			return {
+				physical: i + 1,
+				card: CARD_STATES[sprintf('%d', s.card_status)] ?? sprintf('%d', s.card_status),
+				active: s.slot_status == 1,
+				logical_slot: s.logical_slot,
+				iccid: length(s.iccid ?? '') ? decode_iccid(s.iccid) : null,
+				is_euicc: !!info?.is_euicc,
+				eid: length(eid ?? '') ? decode_eid(eid) : null,
+			};
+		});
 
 		cb(null, out);
 	});

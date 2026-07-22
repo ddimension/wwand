@@ -140,4 +140,20 @@ eq(slots[0].iccid, "\x98\x94\x20", 'slots: iccid bytes survive');
 eq(slots[1].slot_status, 0, 'slots: inactive slot');
 eq(length(slots[1].iccid), 0, 'slots: empty iccid');
 
+// slot info (eUICC flag) + EID TLVs of GET_SLOT_STATUS
+f = {
+	info: { t: 0x11, f: { n: 'u8', of: {
+		card_protocol: 'u32', valid_applications: 'u8', atr: 'lstring', is_euicc: 'u8' } } },
+	eids: { t: 0x12, f: { n: 'u8', of: { eid: 'lstring' } } },
+};
+
+let sinfo = tlv.unpack(f, tlv.pack(f, {
+	info: [ { card_protocol: 1, valid_applications: 1, atr: "\x3b\x9f", is_euicc: 1 } ],
+	eids: [ { eid: "\x89\x04\x40" } ],
+}));
+
+eq(sinfo.info[0].is_euicc, 1, 'slots: euicc flag');
+eq(sinfo.info[0].atr, "\x3b\x9f", 'slots: atr bytes');
+eq(sinfo.eids[0].eid, "\x89\x04\x40", 'slots: eid bytes');
+
 done('test_tlv');
