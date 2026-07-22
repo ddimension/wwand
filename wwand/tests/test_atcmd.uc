@@ -123,6 +123,12 @@ eq(atcmd.model_init_commands('RG502Q-EA'), [ 'AT+QMBNCFG="AutoSel",1' ], 'quirks
 eq(atcmd.model_init_commands('RG500Q-GL'), [ 'AT+QMBNCFG="AutoSel",1' ], 'quirks: RG500Q');
 eq(atcmd.model_init_commands('E392'), [], 'quirks: no init for huawei');
 eq(atcmd.model_init_commands(null), [], 'quirks: null model');
+
+// eSIM host-access quirk: verified on the RG650E only
+eq(atcmd.esim_quirks('RG650E-EU').lpa_disable_for_host, true, 'esim-quirk: RG650E');
+eq(atcmd.esim_quirks('RG502Q-EA').lpa_disable_for_host, null, 'esim-quirk: RG502Q not (untested)');
+eq(atcmd.esim_quirks('E392').lpa_disable_for_host, null, 'esim-quirk: none for huawei');
+eq(atcmd.esim_quirks(null).lpa_disable_for_host, null, 'esim-quirk: null model');
 ok(index(atcmd.modes_fallback_command('E392'), 'AT^SYSCFGEX') == 0, 'quirks: syscfgex fallback');
 
 // --- cell lock commands ------------------------------------------------------

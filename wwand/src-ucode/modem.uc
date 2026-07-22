@@ -203,7 +203,7 @@ export function create(opts)
 	let watch_decay_timer = null, fast_timer = null;
 	let watch_active = false, fast_running = false;
 
-	let step_sync, step_services, step_at, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_register;
+	let step_sync, step_services, step_at, step_esim_quirk, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_register;
 
 	let fail = (stage, err) => {
 		log('err', sprintf('failed in %s: %J', stage, err));
@@ -470,9 +470,41 @@ export function create(opts)
 		}
 
 		if (!length(cmds))
+			return step_esim_quirk();
+
+		self.at.run_sequence(cmds, step_esim_quirk);
+	};
+
+	// eSIM host-access quirk: free the eUICC's ISD-R from the modem's internal
+	// LPA so host-side ES10 APDUs (CCHO/CGLA) work. Disabling lpa_enable only
+	// takes effect after a reset — reset ONLY when we actually changed the
+	// value (it is NV, so this happens at most once per modem). Network is
+	// unaffected (the active profile keeps working with the LPA disabled).
+	step_esim_quirk = () => {
+		let q = atcmd.esim_quirks(self.info.model);
+
+		if (!q.lpa_disable_for_host || !self.at)
 			return step_datapath();
 
-		self.at.run_sequence(cmds, step_datapath);
+		self.at.send('AT+QESIM="lpa_enable"', (err, res) => {
+			let enabled = false;
+
+			for (let l in (res?.lines ?? []))
+				if (match(l, /"lpa_enable", *1/))
+					enabled = true;
+
+			if (err || !enabled)
+				return step_datapath();   // already disabled / unsupported
+
+			log('notice', 'esim: internal LPA holds the ISD-R; disabling it and resetting once to free it for host access');
+
+			self.at.send('AT+QESIM="lpa_enable",0', () => {
+				// the reset re-enumerates the modem; discovery re-inits it and
+				// this step then reads lpa_enable=0 and continues. Do NOT call
+				// step_datapath here — this init instance is being torn down.
+				self.at.send('AT+CFUN=1,1', () => null, { timeout: 5000 });
+			});
+		}, { timeout: 8000 });
 	};
 
 	step_datapath = () => {

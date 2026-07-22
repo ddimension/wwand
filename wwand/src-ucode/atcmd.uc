@@ -61,6 +61,23 @@ export function model_init_commands(model)
 	return [];
 }
 
+// eSIM host-access quirks. On some Quectel firmwares (RG650E and relatives)
+// the QMI logical channel is NOT_SUPPORTED and the modem's own LPA daemon
+// holds the ISD-R exclusively, so host-side ES10 APDU access over AT
+// (CCHO/CGLA) only works once the internal LPA is disabled
+// (AT+QESIM="lpa_enable",0) and the modem is reset once. Verified on the
+// RG650E; the CGLA payload must additionally be quoted (see sim.uc).
+export function esim_quirks(model)
+{
+	// verified on the RG650E only. Other Quectel modems may or may not need
+	// this (the RG502Q's QMI logical channel was not tested) — extend the
+	// pattern once confirmed on hardware rather than resetting them blindly.
+	if (match(model ?? '', /^RG65[0-9]/))
+		return { lpa_disable_for_host: true };
+
+	return {};
+}
+
 // fallback when NAS system-selection-preference keeps failing (old
 // proto_qmi_reset_modes_fallback; harmless ERROR on non-Huawei modems)
 export function modes_fallback_command(model)

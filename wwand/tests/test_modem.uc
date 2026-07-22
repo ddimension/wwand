@@ -446,6 +446,27 @@ scenario('at-init', {
 		eq(at_tr.written, [ 'AT+QMBNCFG="AutoSel",1', 'ATE0' ], 'at: quirk + at_init sequence');
 	});
 
+// --- 10b: eSIM host-access quirk (RG650E) queries lpa_enable at init --------
+
+let at_tr_esim = fake_at_transport();
+
+scenario('esim-quirk', {
+	handlers: base_handlers({ GET_MODEL: { model: 'RG650E-EU' } }),
+	config: { tty: '/dev/ttyUSB2' },
+	at: {
+		fx: fakefx.create(),
+		open_transport: (path, baud, log) => at_tr_esim,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.state, 'READY', 'esim-quirk: READY');
+		ok(index(at_tr_esim.written, 'AT+QESIM="lpa_enable"') >= 0,
+			'esim-quirk: internal LPA state queried at init');
+		// the fake acks "OK" (not lpa_enable,1) -> nothing to change -> no reset
+		eq(index(at_tr_esim.written, 'AT+CFUN=1,1'), -1,
+			'esim-quirk: no reset when the value is unchanged');
+	});
+
 // --- 11: LOC positioning session ----------------------------------------------
 
 scenario('loc', {

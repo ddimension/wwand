@@ -35,7 +35,11 @@ LPAC_APDU=stdio LPAC_HTTP=curl "$LPAC_BIN" "$@" \
 	<"$DIR/resp" >"$DIR/req" &
 LPAC_PID=$!
 
-exec 3<"$DIR/req" 4>"$DIR/resp"
+# FIFO open ordering: lpac (started above with <resp >req) opens resp for
+# reading FIRST, so we must open resp for writing BEFORE req for reading —
+# opening req first here deadlocks (both sides block on their first open).
+exec 4>"$DIR/resp"
+exec 3<"$DIR/req"
 
 CHAN=0
 
