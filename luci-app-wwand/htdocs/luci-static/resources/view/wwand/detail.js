@@ -226,7 +226,7 @@ return view.extend({
 					plmn ? [ _('Operator'), '%s (%s/%s)'.format((plmn.description||'').replace(/[^\x20-\x7e]/g,'').trim(), plmn.mcc, plmn.mnc) ] : null,
 					[ _('Roaming'), reg.roaming ? _('yes') : _('no') ],
 					[ _('Radio'), radioList(reg.radio_ifs) ],
-					dsd ? [ _('Data system'), dsd.mode ? (dsd.mode + (dsd.mode=='NSA' ? ' (5G + LTE)' : dsd.mode=='SA' ? ' (5G)' : '')) : '—' ] : null,
+					dsd ? [ _('Data system'), (dsd.mode ? (dsd.mode + (dsd.mode=='NSA' ? ' (5G + LTE)' : dsd.mode=='SA' ? ' (5G)' : '')) : '—') + (dsd.source && dsd.source != 'dsd' ? ' · ' + dsd.source : '') ] : null,
 				]);
 
 				var body = [
