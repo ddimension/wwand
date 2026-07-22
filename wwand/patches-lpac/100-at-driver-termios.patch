@@ -1,0 +1,29 @@
+--- a/driver/apdu/at.c
++++ b/driver/apdu/at.c
+@@ -11,6 +11,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <termios.h>
+ 
+ static int at_expect(char **response, const char *expected);
+ 
+@@ -70,6 +71,17 @@ static int apdu_interface_connect(struct
+     }
+     setbuf(fuart, NULL);
+ 
++    { /* put the tty in raw mode — lpac otherwise leaves the canonical/echo
++         defaults and AT I/O garbles on real cdc/option serial ports */
++        int _fd = fileno(fuart);
++        struct termios _t;
++        if (tcgetattr(_fd, &_t) == 0) {
++            cfmakeraw(&_t);
++            cfsetispeed(&_t, B115200);
++            cfsetospeed(&_t, B115200);
++            tcsetattr(_fd, TCSANOW, &_t);
++        }
++    }
++
+     fprintf(fuart, "AT+CCHO=?\r\n");
+     if (at_expect(NULL, NULL)) {
+         fprintf(stderr, "Device missing AT+CCHO support\n");

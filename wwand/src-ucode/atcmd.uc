@@ -205,6 +205,40 @@ export function find_tty(fx, device, tty_override)
 	return sprintf('/dev/%s', names[0]);
 }
 
+// find a secondary AT-capable tty (role at/at2) other than `primary` — used to
+// hand lpac a free AT port for eSIM host access while wwand keeps its own.
+export function find_secondary_at(fx, device, primary)
+{
+	let name = substr(device, rindex(device, '/') + 1);
+	let base = sprintf('/sys/class/usbmisc/%s/device/..', name);
+
+	let vid = lc(trim(fx.read(sprintf('%s/idVendor', base)) ?? ''));
+	let pid = lc(trim(fx.read(sprintf('%s/idProduct', base)) ?? ''));
+	let ports = LOCAL_PORTS[sprintf('%s:%s', vid, pid)] ?? atport_table()[sprintf('%s:%s', vid, pid)];
+
+	if (!ports)
+		return null;
+
+	let cands = [];
+
+	for (let path in (fx.glob(sprintf('%s/*/tty*', base)) ?? [])) {
+		let tty = substr(path, rindex(path, '/') + 1);
+
+		if (substr(tty, 0, 3) != 'tty')
+			continue;
+
+		let ifdir = substr(path, 0, rindex(path, '/'));
+		let ifnum_raw = trim(fx.read(sprintf('%s/bInterfaceNumber', ifdir)) ?? '');
+		let ifnum = length(ifnum_raw) ? hex('0x' + ifnum_raw) : null;
+		let role = (ifnum != null) ? ports[sprintf('%d', ifnum)] : null;
+
+		if ((role == 'at' || role == 'at2') && sprintf('/dev/%s', tty) != primary)
+			push(cands, sprintf('/dev/%s', tty));
+	}
+
+	return length(cands) ? sort(cands)[0] : null;
+}
+
 // --- transport ---------------------------------------------------------------
 
 // real tty transport; kept separate so the engine stays host-testable
