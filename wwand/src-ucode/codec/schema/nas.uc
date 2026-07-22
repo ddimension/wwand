@@ -47,7 +47,10 @@ const SERVING_SYSTEM_F = { t: 0x01, f: {
 	radio_ifs:        { n: 'u8', of: 'u8' },
 } };
 const ROAMING_F = { t: 0x10, f: 'u8' };
-const CURRENT_PLMN_F = { t: 0x12, f: { mcc: 'u16', mnc: 'u16', description: 'string' } };
+// the network description is a u8-length-prefixed string (some modems GSM-7-bit
+// pack the name — decoded in modem._update_serving); 'lstring' strips the
+// length byte that a plain 'string' would leak in as a leading control char
+const CURRENT_PLMN_F = { t: 0x12, f: { mcc: 'u16', mnc: 'u16', description: 'lstring' } };
 const SIGNAL_INFO_F = {
 	gsm_rssi:  { t: 0x12, f: 'i8' },
 	wcdma:     { t: 0x13, f: { rssi: 'i8', ecio: 'i16' } },

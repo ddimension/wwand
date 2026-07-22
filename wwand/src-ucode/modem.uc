@@ -78,6 +78,55 @@ export function parse_modes(str)
 	return mask || null;
 }
 
+// unpack GSM 7-bit packed septets (LSB-first) into bytes. For Latin operator
+// names the default-alphabet septets map 1:1 to ASCII, so we emit them directly.
+function gsm7_unpack(bytes)
+{
+	let out = '', acc = 0, bits = 0;
+
+	for (let i = 0; i < length(bytes); i++) {
+		acc |= (ord(bytes, i) << bits);
+		bits += 8;
+
+		while (bits >= 7) {
+			out += chr(acc & 0x7f);
+			acc >>= 7;
+			bits -= 7;
+		}
+	}
+
+	return out;
+}
+
+// the NAS current-PLMN description is a raw name string with no coding-scheme
+// byte: RG50x/RG65x send plain ASCII, older Quectel (EG06) GSM-7-bit pack it.
+// Heuristic: all-ASCII -> use as-is; any high byte -> try GSM7 and keep the
+// result only if it decodes to clean printable ASCII, else keep the original.
+function decode_operator_name(s)
+{
+	if (s == null || s == '')
+		return s;
+
+	let hi = false;
+
+	for (let i = 0; i < length(s); i++)
+		if (ord(s, i) >= 0x80) { hi = true; break; }
+
+	if (!hi)
+		return trim(s);
+
+	let u = gsm7_unpack(s);
+
+	while (length(u) && (ord(u, length(u) - 1) == 0 || ord(u, length(u) - 1) == 0x0d))
+		u = substr(u, 0, length(u) - 1);
+
+	for (let i = 0; i < length(u); i++)
+		if (ord(u, i) < 0x20 || ord(u, i) > 0x7e)
+			return s;   // not clean -> keep the original raw string
+
+	return u;
+}
+
 // QmiNasDLBandwidth enum -> MHz (LTE carrier bandwidth)
 const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
 
@@ -894,6 +943,9 @@ export function create(opts)
 
 		if (!ss)
 			return;
+
+		if (data.current_plmn?.description != null)
+			data.current_plmn.description = decode_operator_name(data.current_plmn.description);
 
 		self.reg = {
 			registration: ss.registration,
