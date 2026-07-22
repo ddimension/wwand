@@ -660,6 +660,51 @@ export function create(opts)
 		});
 	};
 
+	// settable NAS preferences (settings editor, write path). Whitelist with
+	// expected blobmsg types — anything else is rejected before it reaches
+	// the modem.
+	const SETTABLE_PREFS = {
+		mode_preference: 'int', band_preference: 'int',
+		roaming_preference: 'int', lte_band_preference: 'int',
+		usage_preference: 'int',
+		ext_lte_band: 'object', nr5g_sa_band: 'object', nr5g_nsa_band: 'object',
+	};
+
+	self.modem_set_settings = function(ref, settings, cb) {
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return cb({ error: 'no_such_modem', ref: ref });
+
+		let nas = entry.modem.nas;
+
+		if (!nas)
+			return cb({ error: 'no_nas_client' });
+
+		let args = {};
+
+		for (let key, val in (settings ?? {})) {
+			if (SETTABLE_PREFS[key] != type(val))
+				return cb({ error: 'invalid_setting', key: key });
+
+			args[key] = val;
+		}
+
+		if (!length(keys(args)))
+			return cb({ error: 'missing_argument' });
+
+		args.change_duration = 1;   // permanent (0 would revert on power cycle)
+
+		nas.request('SET_SYSTEM_SELECTION_PREFERENCE', args, (err) => {
+			if (err)
+				return cb({ error: 'qmi', detail: err });
+
+			log('notice', sprintf('modem %s: system selection preference set: %s',
+				ref, join(' ', filter(keys(args), (k) => k != 'change_duration'))));
+			cb(null, { applied: filter(keys(args), (k) => k != 'change_duration') });
+		});
+	};
+
 	self.modem_signal = function(ref) {
 		let entry = self.modems[ref];
 

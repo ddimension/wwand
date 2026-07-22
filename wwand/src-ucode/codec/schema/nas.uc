@@ -99,7 +99,7 @@ export default {
 				roaming_preference:{ t: 0x14, f: 'u16' },
 				lte_band_preference:{ t: 0x15, f: 'u64' },
 				network_selection: { t: 0x16, f: { mode: 'u8', mcc: 'u16', mnc: 'u16' } },
-				// 0 = permanent, 1 = power-cycle
+				// QmiNasChangeDuration: 0 = until power cycle, 1 = permanent
 				change_duration:   { t: 0x17, f: 'u8' },
 				usage_preference:  { t: 0x21, f: 'u32' },
 				ext_lte_band: { t: 0x24, f: {
