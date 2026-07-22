@@ -20,11 +20,8 @@ import * as sim from './sim.uc';
 
 const UP_GUARD_MS = 150000;
 
-// MBIM support is loaded lazily. On QMI hardware (the common case) its ~1.4k
-// lines of ucode never run, so keeping them out of the compiled/resident set
-// trims the daemon's memory, and a QMI-only install no longer needs the MBIM
-// modules or schema present just to start. Resolved (via the same module
-// search path as the static imports) only when an MBIM modem is created.
+// MBIM support is loaded lazily — a QMI-only install (the common case) never
+// touches its ~1.4k lines or schema, trimming resident memory.
 let mbim_mods = null;
 function load_mbim() {
 	// require() cannot load ES modules directly (`export` is a syntax error
@@ -69,10 +66,8 @@ export function create(opts)
 
 	// --- modem/context wiring ----------------------------------------------
 
-	// forward-declared BEFORE any closure that references them: ucode closures
-	// only capture variables already declared at definition time — a `let`
-	// further down is "undeclared" inside on_modem_event (crashed the adopt
-	// path in the field). Also covers the self-references (TDZ trap).
+	// forward-declared: ucode closures capture only already-declared vars, and
+	// these self-reference (the TDZ trap — see CLAUDE.md ucode gotchas)
 	let clear_reconnect, retry_activate, enter_reconnecting, activate;
 
 	let on_modem_event = (modem, event, data) => {
@@ -693,11 +688,24 @@ export function create(opts)
 	};
 
 	// current NAS system-selection preferences (settings editor, read path)
-	self.modem_get_settings = function(ref, cb) {
+	// resolve a modem ref for a cb-style ubus method: returns the entry, or
+	// reports no_such_modem via cb and returns null (caller returns on null)
+	let check_modem = (ref, cb) => {
 		let entry = self.modems[ref];
 
-		if (!entry?.modem)
-			return cb({ error: 'no_such_modem', ref: ref });
+		if (entry?.modem)
+			return entry;
+
+		cb({ error: 'no_such_modem', ref: ref });
+
+		return null;
+	};
+
+	self.modem_get_settings = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
 
 		let nas = entry.modem.nas;
 
@@ -730,20 +738,20 @@ export function create(opts)
 	// physical SIM slots: list (status page) and switch (guarded; the modem
 	// re-initializes the SIM stack after a switch, recovery handles the rest)
 	self.modem_sim_slots = function(ref, cb) {
-		let entry = self.modems[ref];
+		let entry = check_modem(ref, cb);
 
-		if (!entry?.modem)
-			return cb({ error: 'no_such_modem', ref: ref });
+		if (!entry)
+			return;
 
 		sim.slot_status(entry.modem, (err, slots) =>
 			cb(err ? { error: 'qmi', detail: err } : null, err ? null : { slots: slots }));
 	};
 
 	self.modem_sim_switch_slot = function(ref, physical, cb) {
-		let entry = self.modems[ref];
+		let entry = check_modem(ref, cb);
 
-		if (!entry?.modem)
-			return cb({ error: 'no_such_modem', ref: ref });
+		if (!entry)
+			return;
 
 		if (!(physical > 0))
 			return cb({ error: 'invalid_slot' });
@@ -767,10 +775,10 @@ export function create(opts)
 	//     'send' {slot, channel, apdu} -> {response}
 	//     'close' {slot, channel} -> {}
 	self.modem_apdu = function(ref, op, params, cb) {
-		let entry = self.modems[ref];
+		let entry = check_modem(ref, cb);
 
-		if (!entry?.modem)
-			return cb({ error: 'no_such_modem', ref: ref });
+		if (!entry)
+			return;
 
 		let slot = +(params?.slot ?? 1);
 
@@ -798,14 +806,10 @@ export function create(opts)
 	// for the latter three). slot defaults to the active physical slot? No —
 	// explicit slot, default 1.
 	// Drive a host-side lpac eSIM op (download / chip / notif-list /
-	// notif-process) with the APDU bridge INLINE — no wrapper script, no
-	// jsonfilter. lpac is spawned (wwand_io.spawn) with LPAC_APDU=stdio; its
-	// stdout (the JSON requests) is drained non-blocking via uloop and each APDU
-	// goes straight to the modem through sim.apdu_* (no ubus round-trip); the
-	// JSON reply is written to lpac's stdin. lpac does the SM-DP+ HTTPS itself
-	// (curl). Progress/result lines and lpac's stderr go to esim_logf, which
-	// download_status streams live and which is mirrored to the wwand log. lpac
-	// is provided by the wwand-lpac package.
+	// notif-process) INLINE: spawn lpac (LPAC_APDU=stdio), drain its JSON APDU
+	// requests non-blocking via uloop, answer each straight from sim.apdu_* (no
+	// ubus, no jsonfilter); lpac does the SM-DP+ HTTPS. Progress + lpac stderr
+	// go to esim_logf (streamed by download_status, mirrored to the wwand log).
 	let esim_logf = '/tmp/wwand/esim-download.log';
 	let esim_lpac = '/usr/lib/lpac';
 
@@ -965,10 +969,10 @@ export function create(opts)
 		if (!esim)
 			return cb({ error: 'esim_not_installed' });
 
-		let entry = self.modems[ref];
+		let entry = check_modem(ref, cb);
 
-		if (!entry?.modem)
-			return cb({ error: 'no_such_modem', ref: ref });
+		if (!entry)
+			return;
 
 		let slot = +(params?.slot ?? 1);
 		let iccid = params?.iccid ?? '';
@@ -1072,10 +1076,10 @@ export function create(opts)
 	// SIM PLMN selector lists (settings editor; user list is editable on SIMs
 	// that carry EF 6F60 — absent lists read as null)
 	self.modem_plmn_lists = function(ref, cb) {
-		let entry = self.modems[ref];
+		let entry = check_modem(ref, cb);
 
-		if (!entry?.modem)
-			return cb({ error: 'no_such_modem', ref: ref });
+		if (!entry)
+			return;
 
 		if (!entry.modem.uim)
 			return cb({ error: 'no_uim_client' });
@@ -1094,10 +1098,10 @@ export function create(opts)
 	};
 
 	self.modem_set_settings = function(ref, settings, cb) {
-		let entry = self.modems[ref];
+		let entry = check_modem(ref, cb);
 
-		if (!entry?.modem)
-			return cb({ error: 'no_such_modem', ref: ref });
+		if (!entry)
+			return;
 
 		let nas = entry.modem.nas;
 
@@ -1195,10 +1199,10 @@ export function create(opts)
 	};
 
 	self.modem_at = function(ref, command, cb, timeout) {
-		let entry = self.modems[ref];
+		let entry = check_modem(ref, cb);
 
-		if (!entry?.modem)
-			return cb({ error: 'no_such_modem', ref: ref });
+		if (!entry)
+			return;
 
 		if (!entry.modem.at)
 			return cb({ error: 'no_at_port' });
@@ -1210,10 +1214,10 @@ export function create(opts)
 	};
 
 	self.modem_set_protocol = function(ref, target, cb) {
-		let entry = self.modems[ref];
+		let entry = check_modem(ref, cb);
 
-		if (!entry?.modem)
-			return cb({ error: 'no_such_modem', ref: ref });
+		if (!entry)
+			return;
 
 		entry.modem.switch_protocol(target, cb);
 	};
