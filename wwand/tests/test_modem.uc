@@ -236,6 +236,25 @@ scenario('pin-guard', {
 		eq(length(mock.calls_for('VERIFY_PIN')), 0, 'guard: pin never sent');
 	});
 
+// --- 4b: configured sim_slot asserts the physical slot at init ---------------
+
+scenario('sim-slot', {
+	handlers: base_handlers({
+		GET_SLOT_STATUS: { slots: [
+			{ card_status: 2, slot_status: 1, logical_slot: 1, iccid: "\x98\x94\x20" },
+			{ card_status: 2, slot_status: 0, logical_slot: 1, iccid: "\x98\x94\x21" },
+		] },
+		SWITCH_SLOT: {},
+	}),
+	config: { sim_slot: 2 },
+}, 'registered',
+	(modem, mock, events) => {
+		eq(length(mock.calls_for('SWITCH_SLOT')), 1, 'slot: switch issued');
+		eq(mock.calls_for('SWITCH_SLOT')[0].args.physical, 2, 'slot: target slot');
+		eq(mock.calls_for('SWITCH_SLOT')[0].args.logical, 1, 'slot: logical slot 1');
+		eq(modem.state, 'READY', 'slot: init continues to READY');
+	});
+
 // --- 5: no UIM service, DMS legacy fallback ----------------------------------
 
 scenario('dms-fallback', {

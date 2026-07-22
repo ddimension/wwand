@@ -203,7 +203,7 @@ export function create(opts)
 	let watch_decay_timer = null, fast_timer = null;
 	let watch_active = false, fast_running = false;
 
-	let step_sync, step_services, step_at, step_datapath, step_opmode, step_sim, step_identity, step_confnet, step_register;
+	let step_sync, step_services, step_at, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_register;
 
 	let fail = (stage, err) => {
 		log('err', sprintf('failed in %s: %J', stage, err));
@@ -596,7 +596,38 @@ export function create(opts)
 				return fail('opmode', err);
 
 			// settle after mode change (old: sleep 2)
-			settle_timer = uloop.timer(self.timing.settle, step_sim);
+			settle_timer = uloop.timer(self.timing.settle, step_simslot);
+		});
+	};
+
+	// assert the configured physical SIM slot (option sim_slot, 0 = leave
+	// as-is) before touching the SIM — a switch re-initializes the SIM stack
+	step_simslot = () => {
+		let want = +(self.config.sim_slot ?? 0);
+
+		if (!want || !self.uim)
+			return step_sim();
+
+		sim.slot_status(self, (err, slots) => {
+			if (err) {
+				log('info', sprintf('sim_slot %d configured but slot status unsupported, continuing', want));
+				return step_sim();
+			}
+
+			let cur = filter(slots, (s) => s.active)[0];
+
+			if (cur?.physical == want)
+				return step_sim();
+
+			log('notice', sprintf('switching to SIM slot %d (active: slot %d)',
+				want, cur?.physical ?? 0));
+
+			sim.switch_slot(self, want, (serr) => {
+				if (serr)
+					log('warn', sprintf('sim slot switch failed: %J', serr));
+
+				settle_timer = uloop.timer(self.timing.sim_settle, step_sim);
+			});
 		});
 	};
 

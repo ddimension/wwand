@@ -51,6 +51,7 @@ export function modem_defaults(over)
 		at_init: [], location: false, delay: 0,
 		failreboot: 100, zero_rx_timeout: 21600,
 		lock_4g: [], lock_5g: null, lock_persist: false,
+		sim_slot: 0,
 		stats_interval: 60,
 		...(over ?? {}),
 	};
@@ -100,6 +101,7 @@ function parse_wwand_sections(raw, result)
 				         (s.lock_4g != null ? [ s.lock_4g ] : []),
 				lock_5g: s.lock_5g,
 				lock_persist: bool_opt(s.lock_persist, false),
+				sim_slot: +(s.sim_slot ?? 0),
 				stats_interval: +(s.stats_interval ?? 60),
 			});
 			break;
@@ -236,6 +238,9 @@ function compat_translate(raw, result)
 
 		if (s.lock_persist != null)
 			modem.lock_persist = bool_opt(s.lock_persist, false);
+
+		if (s.sim_slot != null && !modem.sim_slot)
+			modem.sim_slot = +s.sim_slot;
 
 		if (s.location != null)
 			modem.location = +s.location > 1;   // old gate: location > 1
