@@ -6,6 +6,7 @@ import { eq, ok, done } from './lib/check.uc';
 import * as qmux from 'wwand/codec/qmux.uc';
 import * as tlv from 'wwand/codec/tlv.uc';
 import ctl from 'wwand/codec/schema/ctl.uc';
+import nas from 'wwand/codec/schema/nas.uc';
 
 // --- CTL request (1-byte txn), hand-computed reference frame ----------------
 
@@ -49,6 +50,44 @@ let hexind = '011100800105' + '040000' + '22000500' + '0102000100';
 d = qmux.decode(hexdec(hexind));
 eq(d.kind, 'indication', 'WDS indication kind');
 eq(d.msg_id, 0x0022, 'WDS indication msg id');
+
+// --- NAS Network Scan schema (0x0021) ---------------------------------------
+
+// decode the REAL libqmi 1.38 test-generated.c "NAS Network Scan" Network
+// Information TLV (type 0x10) — proves the schema (guint16-count array of
+// { mcc:u16, mnc:u16, network_status:u8, description:lstring }) matches the wire
+let scan_tlvs = hexdec(
+	'02040000000000' +                             // result TLV (ok)
+	'1060000800' +                                 // netinfo TLV, 8 elements
+	'd6000100aa07' + '766f6461204553' +            // 214/1  0xAA "voda ES"
+	'd6000300aa06' + '4f72616e6765' +              // 214/3  0xAA "Orange"
+	'd6000400aa05' + '594f49474f' +                // 214/4  0xAA "YOIGO"
+	'd6000100aa07' + '766f6461204553' +
+	'd6000400aa05' + '594f49474f' +
+	'd6000700aa08' + '4d6f766973746172' +          // 214/7  0xAA "Movistar"
+	'd6000700aa08' + '4d6f766973746172' +
+	'd6000300a900');                               // 214/3  0xA9 "" (current serving)
+
+let scan = tlv.unpack(nas.messages.NETWORK_SCAN.resp, scan_tlvs);
+eq(length(scan.network_information), 8, 'network scan: 8 operators decoded');
+eq(scan.network_information[0],
+	{ mcc: 214, mnc: 1, network_status: 0xAA, description: 'voda ES' },
+	'network scan: first operator (libqmi wire bytes)');
+eq(scan.network_information[7].network_status, 0xA9, 'network scan: current-serving status bits');
+eq(scan.network_information[7].description, '', 'network scan: empty operator name');
+
+// round-trip through pack (the shape the mock hub encodes for the daemon test)
+let rt = tlv.unpack(nas.messages.NETWORK_SCAN.resp,
+	tlv.pack(nas.messages.NETWORK_SCAN.resp, {
+		network_information: [
+			{ mcc: 262, mnc: 1, network_status: 0x01, description: 'Op1' },
+			{ mcc: 262, mnc: 3, network_status: 0x12, description: 'Op3' },
+		],
+	}));
+eq(length(rt.network_information), 2, 'network scan: round-trip element count');
+eq(rt.network_information[1],
+	{ mcc: 262, mnc: 3, network_status: 0x12, description: 'Op3' },
+	'network scan: round-trip second element');
 
 // --- robustness -------------------------------------------------------------
 

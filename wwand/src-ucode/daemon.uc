@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import * as modem_mod from './modem.uc';
 import * as context_mod from './context.uc';
 import * as sim from './sim.uc';
+import * as atcmd from './atcmd.uc';
 
 const UP_GUARD_MS = 150000;
 
@@ -878,37 +879,164 @@ export function create(opts)
 		return null;
 	};
 
+	// registered PLMN in a protocol-neutral shape { mcc?, mnc?, name? } — QMI
+	// carries mcc/mnc + description, MBIM a provider name/id — or null.
+	let reg_plmn = (m) => {
+		let p = m?.reg?.plmn;
+
+		if (!p)
+			return null;
+
+		return { mcc: p.mcc ?? null, mnc: p.mnc ?? null, name: p.description ?? null };
+	};
+
+	// QmiNasNetworkStatus bits -> a coarse operator status label
+	let scan_status = (bits) =>
+		(bits & 0x01) ? 'current' :        // NET_STATUS_CURRENT_SERVING (bit 0)
+		(bits & 0x10) ? 'forbidden' :      // NET_STATUS_FORBIDDEN (bit 4)
+		'available';
+
+	// normalize a NAS Network Scan response to [ { mcc, mnc, name, status } ]
+	let scan_operators = (data) => {
+		let out = [];
+
+		for (let e in (data?.network_information ?? []))
+			push(out, { mcc: e.mcc, mnc: e.mnc, name: e.description ?? '',
+			            status: scan_status(e.network_status ?? 0) });
+
+		return out;
+	};
+
 	self.modem_get_settings = function(ref, cb) {
 		let entry = check_modem(ref, cb);
 
 		if (!entry)
 			return;
 
-		let nas = entry.modem.nas;
+		// protocol-neutral: QMI hands out its NAS client, MBIM the QMI-over-MBIM
+		// passthrough NAS; NCM has none (null) → gracefully unsupported.
+		entry.modem.with_nas((nas) => {
+			if (!nas)
+				return cb({ error: 'unsupported_on_backend' });
 
-		if (!nas)
-			return cb({ error: 'no_nas_client' });
+			nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (err, data) => {
+				if (err)
+					return cb({ error: 'qmi', detail: err });
 
-		nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (err, data) => {
-			if (err)
-				return cb({ error: 'qmi', detail: err });
+				delete data._result;
 
-			delete data._result;
+				let e = data.ext_lte_band;
 
-			let e = data.ext_lte_band;
+				data.lte_bands = mask_to_bands(e
+					? [ e.mask_low, e.mask_mid_low, e.mask_mid_high, e.mask_high ]
+					: [ data.lte_band_preference ?? 0 ]);
 
-			data.lte_bands = mask_to_bands(e
-				? [ e.mask_low, e.mask_mid_low, e.mask_mid_high, e.mask_high ]
-				: [ data.lte_band_preference ?? 0 ]);
+				for (let key in [ 'nr5g_sa_band', 'nr5g_nsa_band' ]) {
+					let s = data[key];
 
-			for (let key in [ 'nr5g_sa_band', 'nr5g_nsa_band' ]) {
-				let s = data[key];
+					data[key + 's'] = s ? mask_to_bands([ s.m0, s.m1, s.m2, s.m3,
+					                                      s.m4, s.m5, s.m6, s.m7 ]) : [];
+				}
 
-				data[key + 's'] = s ? mask_to_bands([ s.m0, s.m1, s.m2, s.m3,
-				                                      s.m4, s.m5, s.m6, s.m7 ]) : [];
+				// current network selection mode + registered operator (both
+				// protocol-neutral, so the settings editor shows them for any HW)
+				if (data.network_selection != null)
+					data.selection_mode = (data.network_selection == 1) ? 'manual' : 'auto';
+
+				data.registered_plmn = reg_plmn(entry.modem);
+
+				cb(null, data);
+			});
+		});
+	};
+
+	// network scan (COPS=? equivalent): the visible operators. May be slow
+	// (seconds) — a long timeout is used. QMI/passthrough via NAS Network Scan;
+	// AT fallback via AT+COPS=? on NCM.
+	const SCAN_TIMEOUT_MS = 90000;
+
+	self.modem_scan = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		entry.modem.with_nas((nas) => {
+			if (nas)
+				return nas.request('NETWORK_SCAN', {}, (err, data) => {
+					if (err)
+						return cb({ error: 'qmi', detail: err });
+
+					cb(null, { operators: scan_operators(data) });
+				}, { timeout: SCAN_TIMEOUT_MS });
+
+			// no QMI NAS (NCM) → AT+COPS=?
+			let at = entry.modem.at;
+
+			if (!at)
+				return cb({ error: 'unsupported_on_backend' });
+
+			at.send('AT+COPS=?', (err, res) => {
+				if (err)
+					return cb({ error: 'at', detail: err });
+
+				cb(null, { operators: atcmd.parse_cops_scan(res?.lines) });
+			}, { timeout: SCAN_TIMEOUT_MS });
+		});
+	};
+
+	// network selection: 'auto' (NAS automatic / AT+COPS=0) or 'manual' with an
+	// mcc/mnc (NAS manual / AT+COPS=1,2,"mccmnc").
+	self.modem_set_network_selection = function(ref, mode, mcc, mnc, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		if (mode != 'auto' && mode != 'manual')
+			return cb({ error: 'invalid_mode' });
+
+		let manual = (mode == 'manual');
+
+		if (manual && !(+mcc > 0 && +mnc >= 0))
+			return cb({ error: 'missing_plmn' });
+
+		let result = manual ? { mode: mode, mcc: +mcc, mnc: +mnc } : { mode: mode };
+
+		entry.modem.with_nas((nas) => {
+			if (nas) {
+				// reuse SET_SYSTEM_SELECTION_PREFERENCE's network_selection TLV
+				// (mode 0 auto / 1 manual), permanent duration (survives power cycle)
+				let sel = manual
+					? { mode: 1, mcc: +mcc, mnc: +mnc }
+					: { mode: 0 };
+
+				return nas.request('SET_SYSTEM_SELECTION_PREFERENCE',
+					{ network_selection: sel, change_duration: 1 }, (err) => {
+					if (err)
+						return cb({ error: 'qmi', detail: err });
+
+					log('notice', sprintf('modem %s: network selection %s%s', ref, mode,
+						manual ? sprintf(' %d/%02d', +mcc, +mnc) : ''));
+					cb(null, result);
+				});
 			}
 
-			cb(null, data);
+			// AT fallback (NCM): COPS. Manual uses numeric format (COPS mode 2).
+			let at = entry.modem.at;
+
+			if (!at)
+				return cb({ error: 'unsupported_on_backend' });
+
+			let cmd = manual ? sprintf('AT+COPS=1,2,"%d%02d"', +mcc, +mnc) : 'AT+COPS=0';
+
+			at.send(cmd, (err) => {
+				if (err)
+					return cb({ error: 'at', detail: err });
+
+				log('notice', sprintf('modem %s: network selection %s (AT)', ref, mode));
+				cb(null, result);
+			}, { timeout: 30000 });
 		});
 	};
 
@@ -1064,11 +1192,6 @@ export function create(opts)
 		if (!entry)
 			return;
 
-		let nas = entry.modem.nas;
-
-		if (!nas)
-			return cb({ error: 'no_nas_client' });
-
 		// band-number lists (LuCI-safe) are converted to masks here
 		settings = { ...(settings ?? {}) };
 
@@ -1108,13 +1231,19 @@ export function create(opts)
 
 		args.change_duration = 1;   // permanent (0 would revert on power cycle)
 
-		nas.request('SET_SYSTEM_SELECTION_PREFERENCE', args, (err) => {
-			if (err)
-				return cb({ error: 'qmi', detail: err });
+		// protocol-neutral: QMI's NAS, MBIM's passthrough NAS; NCM → unsupported
+		entry.modem.with_nas((nas) => {
+			if (!nas)
+				return cb({ error: 'unsupported_on_backend' });
 
-			log('notice', sprintf('modem %s: system selection preference set: %s',
-				ref, join(' ', filter(keys(args), (k) => k != 'change_duration'))));
-			cb(null, { applied: filter(keys(args), (k) => k != 'change_duration') });
+			nas.request('SET_SYSTEM_SELECTION_PREFERENCE', args, (err) => {
+				if (err)
+					return cb({ error: 'qmi', detail: err });
+
+				log('notice', sprintf('modem %s: system selection preference set: %s',
+					ref, join(' ', filter(keys(args), (k) => k != 'change_duration'))));
+				cb(null, { applied: filter(keys(args), (k) => k != 'change_duration') });
+			});
 		});
 	};
 

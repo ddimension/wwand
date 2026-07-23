@@ -180,6 +180,27 @@ eq(sc.nr, { mode: 'NSA', band: 1, arfcn: 431070, pci: 242, bandwidth_mhz: 10, rs
 eq(atcmd.parse_qeng_servingcell([ '+QENG: "servingcell","NOCONN"' ]),
 	{ state: 'NOCONN', lte: null, nr: null }, 'qeng: state only, no cells');
 
+// --- AT+COPS=? scan parsing --------------------------------------------------
+
+// a real-shaped +COPS=? test response: current + available + forbidden operators
+// then the supported <mode>/<AcT> value-range groups (which must be skipped)
+eq(atcmd.parse_cops_scan([
+	'+COPS: (2,"Telekom.de","TDG","26201",7),(1,"Vodafone.de","Voda","26202",7),' +
+	'(3,"o2 - de","o2","26203",2),,(0,1,2,3,4),(0,1,2)',
+]), [
+	{ mcc: 262, mnc: 1,  name: 'Telekom.de',  status: 'current' },
+	{ mcc: 262, mnc: 2,  name: 'Vodafone.de', status: 'available' },
+	{ mcc: 262, mnc: 3,  name: 'o2 - de',     status: 'forbidden' },
+], 'cops: current/available/forbidden parsed, value-range groups skipped');
+
+// 3-digit MNC and an operator with empty names
+eq(atcmd.parse_cops_scan([ '+COPS: (1,,,"310260",7),(2,"AT&T","ATT","310410",7)' ]), [
+	{ mcc: 310, mnc: 260, name: '', status: 'available' },
+	{ mcc: 310, mnc: 410, name: 'AT&T', status: 'current' },
+], 'cops: 3-digit mnc + nameless operator');
+
+eq(atcmd.parse_cops_scan([ 'OK' ]), [], 'cops: no operator line');
+
 // --- find_tty ----------------------------------------------------------------
 
 const BASE = '/sys/class/usbmisc/cdc-wdm0/device/..';

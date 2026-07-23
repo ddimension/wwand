@@ -66,6 +66,12 @@ export const MODE_ALL = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) |
 export const NETWORK_SELECTION_AUTOMATIC = 0;
 export const NETWORK_SELECTION_MANUAL = 1;
 
+// QmiNasNetworkStatus bitmask (Network Scan → Network Information element).
+// Verified against libqmi 1.38 qmi-enums-nas.h.
+export const NET_STATUS_CURRENT_SERVING = (1 << 0);
+export const NET_STATUS_AVAILABLE       = (1 << 1);
+export const NET_STATUS_FORBIDDEN       = (1 << 4);
+
 // field specs shared verbatim across the get/indication message pairs below
 // (the messages differ only in id and, for serving system, the lac/cell/tac
 // TLV ids, which stay inline)
@@ -126,6 +132,31 @@ export default {
 				lac:          { t: 0x1D, f: 'u16' },
 				cell_id:      { t: 0x1E, f: 'u32' },
 				lte_tac:      { t: 0x25, f: 'u16' },
+			},
+		},
+
+		// Perform Network Scan — the COPS=? equivalent: the modem sweeps the
+		// visible PLMNs and returns the operator list. Slow (seconds); the
+		// caller passes a long timeout. Verified against libqmi 1.38
+		// qmi-service-nas.json (msg 0x0021):
+		//   request  Network Type 0x10 (guint8 QmiNasNetworkScanType) — optional;
+		//            an empty request scans every RAT.
+		//   response Network Information 0x10 = guint16-count array of
+		//            { mcc:u16, mnc:u16, network_status:u8, description }. The
+		//            description is u8-length-prefixed on the wire (as the
+		//            serving-system Current PLMN name is) → 'lstring'; confirmed
+		//            against the libqmi test-generated.c NAS Network Scan buffer.
+		//   response Radio Access Technology 0x11 = the RAT per PLMN (gint8).
+		NETWORK_SCAN: {
+			id: 0x0021,
+			req: {
+				network_type: { t: 0x10, f: 'u8' },
+			},
+			resp: {
+				network_information: { t: 0x10, f: { n: 'u16', of: {
+					mcc: 'u16', mnc: 'u16', network_status: 'u8', description: 'lstring' } } },
+				radio_access_technology: { t: 0x11, f: { n: 'u16', of: {
+					mcc: 'u16', mnc: 'u16', radio_interface: 'i8' } } },
 			},
 		},
 

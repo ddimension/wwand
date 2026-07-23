@@ -170,6 +170,14 @@ export function create(opts)
 			ctx.modem_event('ready');
 	};
 
+	// backend-neutral NAS accessor (daemon settings / network-selection paths):
+	// MBIM has no native NAS, so bring up the QMI-over-MBIM passthrough and hand
+	// out its NAS client — a normal QMI client over the open channel, so
+	// qmi_backend / nas.uc messages work unchanged. cb(nas|null).
+	self.with_nas = function(cb) {
+		self._ensure_pt((ok) => cb(ok ? self.pt.nas : null));
+	};
+
 	// convenience wrapper used by contexts
 	self.command = function(name, kind, args, cb, o) {
 		self.mbim.command(bc, name, kind, args, cb, o);

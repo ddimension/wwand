@@ -10,7 +10,8 @@
 					"context_status",
 					"modem_get_settings",
 					"modem_plmn_lists",
-					"modem_sim_slots"
+					"modem_sim_slots",
+					"modem_scan"
 				]
 			}
 		},
@@ -18,6 +19,7 @@
 			"ubus": {
 				"wwand": [
 					"modem_set_settings",
+					"modem_set_network_selection",
 					"modem_sim_switch_slot",
 					"modem_sim_pin_lock",
 					"modem_esim"

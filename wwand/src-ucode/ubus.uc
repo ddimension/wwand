@@ -116,6 +116,32 @@ export function publish(conn, daemon, log)
 			},
 		},
 
+		// scan visible operators (COPS=? equivalent); may be slow, so the reply
+		// is deferred until the modem answers
+		modem_scan: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => {
+				daemon.modem_scan(req.args.modem, (err, res) => {
+					req.reply(err ? { ok: false, ...err } : { ok: true, ...res });
+				});
+
+				req.defer();
+			},
+		},
+
+		// network selection: mode 'auto' or 'manual' + mcc/mnc (write ACL)
+		modem_set_network_selection: {
+			args: { modem: '', mode: '', mcc: 0, mnc: 0, ubus_rpc_session: '' },
+			call: (req) => {
+				daemon.modem_set_network_selection(req.args.modem, req.args.mode,
+					req.args.mcc, req.args.mnc, (err, res) => {
+					req.reply(err ? { ok: false, ...err } : { ok: true, ...res });
+				});
+
+				req.defer();
+			},
+		},
+
 		modem_cells: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => daemon.modem_cells(req.args.modem),

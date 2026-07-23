@@ -813,6 +813,12 @@ export function create(opts)
 			ctx.modem_event('ready');
 	};
 
+	// backend-neutral NAS accessor (daemon settings / network-selection paths):
+	// NCM has no QMI at all → null, so the daemon falls back to AT (AT+COPS).
+	self.with_nas = function(cb) {
+		cb(null);
+	};
+
 	// the attach PDP context config: the first attached context (interface-bound
 	// preferred) drives the modem's autonomous LTE attach, so its APN/auth is
 	// what CGDCONT/QICSGP programs at bring-up. Contexts re-apply the same

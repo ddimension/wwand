@@ -300,6 +300,12 @@ export function create(opts)
 			ctx.modem_event('ready');
 	};
 
+	// backend-neutral NAS accessor (daemon settings / network-selection paths):
+	// QMI exposes its live NAS client directly. cb(nas|null).
+	self.with_nas = function(cb) {
+		cb(self.nas ?? null);
+	};
+
 	// --- step chain --------------------------------------------------------
 
 	let dp = opts.datapath ?? {};

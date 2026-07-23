@@ -225,6 +225,49 @@ export function parse_qeng_servingcell(lines)
 	return out;
 }
 
+// parse an AT+COPS=? test response into the visible operators (the AT-backend
+// network scan, COPS being the AT equivalent of QMI Network Scan). The +COPS:
+// line carries a list of parenthesised operator descriptors followed by the
+// supported <mode>/<AcT> value ranges:
+//   +COPS: (<stat>,"<long>","<short>","<mccmnc>"[,<AcT>]),(...),,(0-4),(0,1,2)
+// <stat>: 0 unknown, 1 available, 2 current, 3 forbidden. Returns
+// [ { mcc, mnc, name, status:'available'|'current'|'forbidden' }, ... ]; the
+// trailing numeric value-range groups (no quoted mccmnc) are skipped.
+export function parse_cops_scan(lines)
+{
+	let out = [];
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+COPS:\s*(.*)/);
+
+		if (!m)
+			continue;
+
+		for (let g in (match(m[1], /\(([^()]*)\)/g) ?? [])) {
+			let f = split(g[1], ',');
+
+			if (length(f) < 4)
+				continue;   // a mode/AcT value-range group, not an operator
+
+			let numeric = replace(trim(f[3]), /"/g, '');
+
+			if (!match(numeric, /^[0-9]{5,6}$/))
+				continue;   // no quoted PLMN id -> not an operator descriptor
+
+			let stat = +trim(f[0]);
+
+			push(out, {
+				mcc:    +substr(numeric, 0, 3),
+				mnc:    +substr(numeric, 3),
+				name:   replace(trim(f[1]), /"/g, ''),
+				status: (stat == 2) ? 'current' : (stat == 3) ? 'forbidden' : 'available',
+			});
+		}
+	}
+
+	return out;
+}
+
 // --- AT port discovery -------------------------------------------------------
 
 const ROLE_PREFERENCE = { at: 3, at2: 2, ppp: 1 };
