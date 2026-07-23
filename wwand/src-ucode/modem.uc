@@ -946,10 +946,39 @@ export function create(opts)
 			cb(d);
 		};
 
+		// attach profile (profile 1) — the APN + auth the modem uses for the
+		// autonomous LTE attach. Reported on every registration probe so a reject
+		// can be diagnosed against the actual attach APN (incl. the network-default
+		// blank APN case). Merges into the detail; forward-declared for add_ceer.
+		let add_attach;
+
+		add_attach = (d) => {
+			let wds = self.wds_cfg;
+
+			if (!wds)
+				return finish(d);
+
+			wds.request('GET_PROFILE_SETTINGS',
+				{ profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: 1 } }, (err, p) => {
+				if (!err) {
+					d = d ?? {};
+					d.attach = {
+						apn: p.apn ?? '',
+						apn_kind: (p.apn == null || p.apn == '') ? 'network default' : 'configured',
+						pdp_type: p.pdp_type,
+						auth: p.auth,
+						username: p.username ?? null,
+					};
+				}
+
+				finish(d);
+			}, { no_recovery: true });
+		};
+
 		// AT+CEER clear-text cause; merges into an existing (QMI) detail
 		let add_ceer = (d) => {
 			if (!self.at)
-				return finish(d);
+				return add_attach(d);
 
 			self.at.send('AT+CEER', (err, res) => {
 				if (!err) {
@@ -964,7 +993,7 @@ export function create(opts)
 					}
 				}
 
-				finish(d);
+				add_attach(d);
 			});
 		};
 
@@ -975,9 +1004,10 @@ export function create(opts)
 			if (!d)
 				return add_ceer(null);
 
-			// numeric cause already present -> done; else top up from AT+CEER
+			// numeric cause already present -> skip CEER; else top up from AT+CEER.
+			// Either way the attach-profile detail is appended.
 			if (d.reject_cause != null)
-				return finish(d);
+				return add_attach(d);
 
 			add_ceer(d);
 		});

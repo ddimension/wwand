@@ -194,6 +194,8 @@ export function create(opts)
 		activated = false;
 		set_state('ACTIVATING');
 
+		// empty APN = network default: MBIM CONNECT with a blank access string
+		// lets the network assign the default PDN (no blank APN written anywhere)
 		let profile = self.config.apn ?? '';
 		let ip_type = IP_TYPE_MAP[self.config.pdp_type ?? 'ipv4v6'];
 
@@ -209,8 +211,8 @@ export function create(opts)
 			context_type: bc.CONTEXT_TYPE_INTERNET,
 		};
 
-		log('notice', sprintf('connecting session %d: apn \'%s\', ip-type %d',
-			self.session_id, profile, ip_type));
+		log('notice', sprintf('connecting session %d: apn %s, ip-type %d',
+			self.session_id, profile == '' ? '(network default)' : sprintf('\'%s\'', profile), ip_type));
 
 		self.modem.command('CONNECT', 'set', args, (err, data) => {
 			if (err)

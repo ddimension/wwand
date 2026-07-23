@@ -362,8 +362,28 @@ export function create(opts)
 				return done(false);
 			}
 
-			let set_apn = (apn != null && apn != '');
-			let need_apn = set_apn && (data.apn ?? '') != apn;
+			// An unset/empty config APN means "use whatever the SIM/modem is
+			// provisioned with" — carriers pre-provision the attach profile (via
+			// the SIM's carrier config / MBN) with the correct default APN. So
+			// rather than writing anything, we READ the provisioned APN + details,
+			// LOG them, and let the modem attach with them. Writing a blank APN
+			// (an earlier attempt) was too blunt; leaving the provisioned config
+			// is cleaner and keeps a legitimately empty config APN working.
+			// ('#N' is handled above; the IP family is still enforced below.)
+			let card_apn = data.apn ?? '';
+			let configured = (apn != null && apn != '');
+
+			self.effective_apn = configured ? apn : card_apn;
+
+			if (!configured)
+				log('notice', sprintf('attach profile %d: no config APN — using SIM/modem-provisioned APN %s (pdp %J, auth %J%s)',
+					index, card_apn == '' ? '(network default)' : sprintf('%J', card_apn),
+					data.pdp_type, data.auth,
+					data.username ? sprintf(', user %J', data.username) : ''));
+
+			// only rewrite the APN when the config sets one that differs; an empty
+			// config never touches the provisioned APN
+			let need_apn = configured && (card_apn != apn);
 			let need_pdp = (want_pdp != null && data.pdp_type != want_pdp);
 
 			if (!need_apn && !need_pdp) {
@@ -374,7 +394,7 @@ export function create(opts)
 
 			let mod = { profile: prof };
 
-			if (set_apn) {
+			if (need_apn) {
 				mod.apn = apn;
 				mod.apn_disabled = 0;
 			}
@@ -382,8 +402,8 @@ export function create(opts)
 			if (want_pdp != null)
 				mod.pdp_type = want_pdp;
 
-			log('notice', sprintf('attach profile %d: apn %J->%J, pdp %J->%J',
-				index, data.apn, set_apn ? apn : data.apn, data.pdp_type, want_pdp));
+			log('notice', sprintf('attach profile %d: apn %J, pdp %J->%J',
+				index, need_apn ? apn : card_apn, data.pdp_type, want_pdp));
 
 			wds.request('MODIFY_PROFILE', mod, (e2) => {
 				if (e2)
