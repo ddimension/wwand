@@ -1,9 +1,8 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-23. 16 test suites green (~505 checks). Uncommitted
-working tree: MBIM datapath docs, MBIM transient-loss detection, deactivate-
-before-retry, a qmi_backend `stop_network` extraction, and a new MBIM mockhub +
-`test_context_mbim` integration suite (commit on request)._
+_Last updated: 2026-07-23. 16 test suites green (~510 checks). Committed through
+the MBIM datapath/loss-detection/mockhub work. Uncommitted: a robustness pass —
+MBIM zero-rx watchdog + `hold_max` UCI option (commit on request)._
 
 ## Where we are
 
@@ -97,8 +96,14 @@ plan in `docs/backend-interface.md`.
   selection (`AT+QMBNCFG`, native, safe), ② FOTA delta (`AT+QFOTADL`, native
   orchestration), ③ full Firehose reflash via qfirehose (optional package,
   wwand orchestrates release→flash→re-adopt, like lpac). Start with ①.
-- **`hold_max` UCI option** — currently a 90 s default; the `timing` struct is
-  not plumbed through `main.uc` in production (tests set it via TIMING).
+- ~~`hold_max` UCI option~~ **done** — global `config wwand` option (seconds,
+  default 90), parsed in `config.uc`, plumbed via `main.uc` into the daemon
+  timing. Applied at start (a change takes effect on wwand restart).
+- **MBIM zero-rx watchdog** **done** — `context_mbim` now samples MBIM
+  `PACKET_STATISTICS` (cid 20) while CONNECTED and trips `zero_rx` on an rx
+  stall, at parity with the QMI context (cdc_mbim carrier doesn't reflect a
+  silent bearer stall, so this is the only backstop). HW-verified on the EG06
+  (rx_bytes/rx_packets surface on `context_status`); tested in `test_context_mbim`.
 - **MBIM — data plane now WORKS end-to-end on real HW (EG06/246).** Config
   `device wwan0` → compat parses mux_id 0 → MBIM **session 0** → raw `wwan0`
   netdev. netifd claims plain `wwan0` cleanly, the `qmi` shim applies the IP +
