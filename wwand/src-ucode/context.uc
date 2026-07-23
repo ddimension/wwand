@@ -655,20 +655,12 @@ export function create(opts)
 		if (fam.pdh == null)
 			return release();
 
-		// preserved: double stop-network attempt
-		fam.client.request('STOP_NETWORK', { pdh: fam.pdh }, (err) => {
-			if (!err) {
-				log('notice', sprintf('stopped ipv%d connection, pdh %d', family, fam.pdh));
-				return release();
-			}
-
-			fam.client.request('STOP_NETWORK', { pdh: fam.pdh }, (e2) => {
-				log(e2 ? 'warn' : 'notice',
-					sprintf('stopped ipv%d connection, pdh %d%s', family, fam.pdh,
-						e2 ? sprintf(' (failed: %J)', e2) : ' (2nd attempt)'));
-				release();
-			});
-		}, { timeout: 10000 });
+		qmi_backend.stop_network(fam.client, fam.pdh, (err, second) => {
+			log(err ? 'warn' : 'notice',
+				sprintf('stopped ipv%d connection, pdh %d%s', family, fam.pdh,
+					err ? sprintf(' (failed: %J)', err) : (second ? ' (2nd attempt)' : '')));
+			release();
+		});
 	};
 
 	// --- public API --------------------------------------------------------

@@ -148,6 +148,21 @@ export function get_packet_stats(wds, cb)
 		cb((err || data?.rx_packets_ok == null) ? null : data));
 }
 
+// stop_network(client, pdh, cb): tear down a started WDS data call. Preserves
+// the double STOP_NETWORK attempt (some modems drop the first). cb(err, second)
+// — err is the final attempt's error (null on success), second is true when the
+// retry ran, so the caller can log "(2nd attempt)". The family-flavored logging
+// stays in the context (it holds the family/pdh context).
+export function stop_network(client, pdh, cb)
+{
+	client.request('STOP_NETWORK', { pdh: pdh }, (err) => {
+		if (!err)
+			return cb(null, false);
+
+		client.request('STOP_NETWORK', { pdh: pdh }, (e2) => cb(e2, true));
+	}, { timeout: 10000 });
+}
+
 // read_info(dms, cb): identity + capabilities.
 // cb(info) with { manufacturer?, model?, revision?, imei?, meid?, capabilities? }
 // (fields the modem didn't answer are simply absent).
