@@ -32,6 +32,16 @@ function load_mbim() {
 	return mbim_mods;
 }
 
+// NCM support (cdc_ncm / cdc_ether, AT-controlled) is loaded lazily the same
+// way — a QMI/MBIM-only install never touches it.
+let ncm_mods = null;
+function load_ncm() {
+	if (ncm_mods == null)
+		ncm_mods = require('wwand.ncm_lazy');
+
+	return ncm_mods;
+}
+
 // optional eSIM module (wwand-esim package): an exportless plain script so
 // require() can load it; absent file => feature reports esim_not_installed
 let esim_mod = null;
@@ -93,14 +103,17 @@ export function create(opts)
 					retry_activate(name);
 				}
 				else if ((entry.cfg.auto ?? true) && deps.kick_interface) {
-					// cdc_mbim: the data link's carrier follows the MBIM session,
-					// and netifd won't run its proto setup until the link is up —
-					// so connecting first (bringing link/carrier up) then kicking
-					// avoids the boot-time flap. The 'up' event does the kick once
-					// the session is connected (entry._kick_after_connect). QMI's
-					// mux device carries a stable link, so it is kicked directly.
-					if (self.modems[modem.id]?.protocol == 'mbim') {
-						log('info', sprintf('connecting %s first (mbim), then netifd', entry.cfg.interface));
+					// cdc_mbim/cdc_ncm: the data link's carrier follows the
+					// session/bearer, and netifd won't run its proto setup until
+					// the link is up — so connecting first (bringing link/carrier
+					// up) then kicking avoids the boot-time flap. The 'up' event
+					// does the kick once the session is connected
+					// (entry._kick_after_connect). QMI's mux device carries a
+					// stable link, so it is kicked directly.
+					let cf_proto = self.modems[modem.id]?.protocol;
+
+					if (cf_proto == 'mbim' || cf_proto == 'ncm') {
+						log('info', sprintf('connecting %s first (%s), then netifd', entry.cfg.interface, cf_proto));
 						entry._kick_after_connect = true;
 						retry_activate(name);
 					}
@@ -415,6 +428,17 @@ export function create(opts)
 				},
 			});
 		}
+		else if (proto == 'ncm') {
+			// cdc_ncm / cdc_ether: a plain netdev, no mux. The modem drives
+			// everything over AT; the datapath is just the parent link.
+			entry.modem = load_ncm().modem.create({
+				...common,
+				datapath: {
+					netdev: entry.netdev,
+					fx: deps.datapath_fx,
+				},
+			});
+		}
 		else {
 			entry.modem = modem_mod.create({
 				...common,
@@ -448,7 +472,8 @@ export function create(opts)
 		}
 
 		let entry = base;
-		let factory = (mentry.protocol == 'mbim') ? load_mbim().context : context_mod;
+		let factory = (mentry.protocol == 'mbim') ? load_mbim().context :
+		              (mentry.protocol == 'ncm')  ? load_ncm().context : context_mod;
 
 		entry.ctx = factory.create({
 			name: name,

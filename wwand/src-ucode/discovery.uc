@@ -28,6 +28,11 @@ export function protocol_of(device)
 	if (drv == 'cdc_mbim')
 		return 'mbim';
 
+	// cdc_ncm / cdc_ether: no rich control protocol — driven over AT (NCM).
+	// rndis_host is the RNDIS variant of the same AT-controlled datapath.
+	if (drv == 'cdc_ncm' || drv == 'cdc_ether' || drv == 'rndis_host')
+		return 'ncm';
+
 	return null;
 }
 
