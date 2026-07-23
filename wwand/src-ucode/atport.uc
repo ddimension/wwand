@@ -1,6 +1,6 @@
 // wwand — AT/GPS port roles by USB id and interface number.
 // GENERATED FILE, DO NOT EDIT.
-// Source: ModemManager port-type udev rules (commit 3568fb9),
+// Source: ModemManager port-type udev rules (commit 9a2d586),
 // https://gitlab.freedesktop.org/mobile-broadband/ModemManager
 // Regenerate: tools/gen-atport-table.py <mm-checkout> > src-ucode/atport.uc
 // License of the source data: GPL-2.0-or-later.
