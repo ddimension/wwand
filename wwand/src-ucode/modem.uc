@@ -1012,30 +1012,16 @@ export function create(opts)
 		if (!self.nas)
 			return add_ceer(null);
 
-		self.nas.request('GET_SYSTEM_INFO', {}, (err, data) => {
-			if (err)
+		qmi_backend.get_reg_detail(self.nas, (d) => {
+			if (!d)
 				return add_ceer(null);
-
-			let d = { source: 'qmi' };
-			let ss = data.lte_service_status?.status;
-
-			if (ss != null)
-				d.limited = (ss == nasmod.SVC_STATUS_LIMITED ||
-				             ss == nasmod.SVC_STATUS_LIMITED_REGIONAL);
-
-			let ri = data.lte_sys_info;
-
-			if (ri?.reject_valid && ri.reject_cause) {
-				d.reject_cause = ri.reject_cause;
-				d.reject_domain = ri.reject_domain;
-			}
 
 			// numeric cause already present -> done; else top up from AT+CEER
 			if (d.reject_cause != null)
 				return finish(d);
 
 			add_ceer(d);
-		}, { no_recovery: true });
+		});
 	};
 
 	self._update_serving = function(data) {

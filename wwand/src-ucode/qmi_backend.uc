@@ -15,6 +15,7 @@
 
 import * as dmsmod from './codec/schema/dms.uc';
 import * as dsdmod from './codec/schema/dsd.uc';
+import * as nasmod from './codec/schema/nas.uc';
 
 const OPMODE = {
 	online:    dmsmod.OPMODE_ONLINE,
@@ -83,6 +84,34 @@ export function get_data_mode(dsd, cb)
 
 		cb({ mode: mode, lte: !!rats.lte, nr: !!rats.nr });
 	});
+}
+
+// get_reg_detail(nas, cb): why (not) registered, from QMI GET_SYSTEM_INFO —
+// { source:'qmi', limited?, reject_cause?, reject_domain? } or null on error.
+// The clear-text mapping + the AT+CEER top-up are the core's job (protocol-
+// neutral). no_recovery: an unsupported message must not climb the reboot ladder.
+export function get_reg_detail(nas, cb)
+{
+	nas.request('GET_SYSTEM_INFO', {}, (err, data) => {
+		if (err)
+			return cb(null);
+
+		let d = { source: 'qmi' };
+		let ss = data.lte_service_status?.status;
+
+		if (ss != null)
+			d.limited = (ss == nasmod.SVC_STATUS_LIMITED ||
+			             ss == nasmod.SVC_STATUS_LIMITED_REGIONAL);
+
+		let ri = data.lte_sys_info;
+
+		if (ri?.reject_valid && ri.reject_cause) {
+			d.reject_cause = ri.reject_cause;
+			d.reject_domain = ri.reject_domain;
+		}
+
+		cb(d);
+	}, { no_recovery: true });
 }
 
 // read_info(dms, cb): identity + capabilities.
