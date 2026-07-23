@@ -93,8 +93,21 @@ export function create(opts)
 					retry_activate(name);
 				}
 				else if ((entry.cfg.auto ?? true) && deps.kick_interface) {
-					log('info', sprintf('kicking interface %s after modem ready', entry.cfg.interface));
-					deps.kick_interface(entry.cfg.interface);
+					// cdc_mbim: the data link's carrier follows the MBIM session,
+					// and netifd won't run its proto setup until the link is up —
+					// so connecting first (bringing link/carrier up) then kicking
+					// avoids the boot-time flap. The 'up' event does the kick once
+					// the session is connected (entry._kick_after_connect). QMI's
+					// mux device carries a stable link, so it is kicked directly.
+					if (self.modems[modem.id]?.protocol == 'mbim') {
+						log('info', sprintf('connecting %s first (mbim), then netifd', entry.cfg.interface));
+						entry._kick_after_connect = true;
+						retry_activate(name);
+					}
+					else {
+						log('info', sprintf('kicking interface %s after modem ready', entry.cfg.interface));
+						deps.kick_interface(entry.cfg.interface);
+					}
 				}
 				else {
 					// 'auto 0' and not up: leave it dormant until an explicit ifup
@@ -263,6 +276,19 @@ export function create(opts)
 			// what re-applies the config — never a teardown.
 			if (deps.renew_interface && entry?.cfg?.interface)
 				deps.renew_interface(entry.cfg.interface);
+
+			// MBIM connect-first: the daemon brought the session (and the data
+			// link) up before netifd ran its proto setup — kick netifd now so it
+			// runs the initial setup and adopts the live session (the renew above
+			// is a no-op while the interface is not yet IFS_UP).
+			if (entry?._kick_after_connect) {
+				entry._kick_after_connect = false;
+
+				if (deps.kick_interface && entry.cfg.interface) {
+					log('info', sprintf('kicking interface %s to adopt the connected mbim session', entry.cfg.interface));
+					deps.kick_interface(entry.cfg.interface);
+				}
+			}
 			break;
 
 		case 'error':
