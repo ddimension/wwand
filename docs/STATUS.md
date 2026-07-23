@@ -1,7 +1,63 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-23. 23 test suites green (~730 checks); all committed.
-Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+_Last updated: 2026-07-23. 23 test suites green (~733 checks); all committed.
+Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
+Deep-review follow-ups tracked below (commit `222798d` fixed the quick wins)._
+
+## Next TODO — deep-review follow-ups (2026-07-23)
+
+A full architecture/correctness/test review ran (codec verified clean vs libqmi
+1.38 / libmbim 1.32 — no schema drift). The trivial-but-real bugs are **fixed**
+(commit `222798d`): unbounded MBIM decode loops bounded, `ref-ipv4/ipv6` unpack
+guarded, structural **never-SYNC rail** in `qmi_over_mbim.send` (+ test),
+hotplug `cdc-wdm1`↔`cdc-wdm10` substring match → basename-exact, `self.dsd` CID
+released on teardown. Remaining, ranked by value (not yet done):
+
+1. **`test_daemon` runs only 3/47 checks** — the other 44 sit in ubus `defer()`
+   callbacks that never fire against the private ubusd (and the 5 s guard never
+   fires), so the suite is green while testing nothing. The no-proto-task
+   reconnect/hold/adopt lifecycle (`daemon.uc` `enter_reconnecting`/
+   `retry_activate`/`hold_max`/adopt-on-`registered`) — newest, riskiest code —
+   is effectively untested. Fix: restructure to poll like `test_netsel.uc`
+   (drives the same daemon to READY) or call `daemon.*` + inject indications.
+   *~½ day. Highest value.*
+2. **Recovery double-count + skippable rungs.** `rec.on_attempt()` fires from two
+   callers per failed cycle — the modem step-chain `fail()` (`modem.uc:325`) and
+   the daemon on context error (`daemon.uc:317`) — so `attempts` climbs ~2× and
+   hits the reboot gate too fast; the two callers also run rungs differently
+   (daemon runs opmode/reset on live `dms` without teardown, modem tears down).
+   Rungs are exact `==8/16/24` (`recovery.uc:87`) over a **persisted** counter,
+   so a restart mid-outage that restores e.g. 9 silently skips `opmode_cycle`.
+   Fix: single counter owner + `>=`-crossing with fired-flags. *medium. Real bug.*
+3. **Three forked state machines → real shared core.** `modem.uc`/`modem_mbim.uc`/
+   `modem_ncm.uc` (+ three contexts) are parallel impls; the shared-core contract
+   in `docs/backend-interface.md` is a target, not realized (`modem_common` only
+   extracts `open_at`/`close_at`). Genuinely duplicated: the fast "watch"
+   telemetry loop, the `backend.choose` resolvers (`_sig_be/_cells_be/_ca_be/
+   _dsd_be/_regd_be`, dup'd QMI↔MBIM), and the zero-rx watchdog (3 copies). This
+   fork is where divergence bugs are born. Execute Phase 1/2 of the migration
+   doc. *large, staged. Biggest structural risk reducer.*
+4. **`qmi_backend.uc` telemetry test.** MBIM has a rigorous hand-built-wire-buffer
+   suite (`test_mbim_backend`, 38 checks); QMI's `get_data_mode/get_ca/
+   get_reg_detail/get_packet_stats` have no dedicated per-function test. Given the
+   "wrong TLV silently decodes garbage" invariant, this asymmetry is a real gap.
+   *medium.*
+5. **at2 telemetry channel unused on QMI.** `modem_common.open_at` opens a second
+   `at2` engine, but only `modem_ncm` polls `self.at_telemetry` widely; QMI/MBIM
+   run most telemetry over QMI/passthrough and only route the AT *fallback* (CA)
+   there — so on modems where QMI CA works, at2 is opened for nothing. Either
+   wire `at_telemetry` in fully or open it lazily. *small.*
+
+Minor/latent hardening also noted: `encode_info` array-branch asymmetry
+(`mbim.uc` — dead code today, add assert/comment), txn-collision overwrite
+(`client.uc:52`), modeswitch/protoswitch assume-reset-succeeded (once-guarded →
+a non-re-enumerating reset leaves the modem permanently unmanaged),
+`wanted` cleared late on daemon-driven down (`daemon.uc:267`), deferred ubus
+replies rely on the backend always calling back (no watchdog), `hold_max`
+captured once at `daemon.create` (not re-read on reload).
+
+**Deferred (needs HW):** NCM ECM end-to-end (usbnet switch blocked on RG650E
+firmware); Huawei/MeiG NCM telemetry recipes need bench verification.
 
 ## Multi-backend + parity work (recent, all committed)
 
