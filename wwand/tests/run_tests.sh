@@ -18,7 +18,7 @@ else
 fi
 
 # 'wwand...' imports resolve via the tests/wwand -> ../src-ucode symlink
-NATIVE="$TESTDIR/../../ucode-mod-wwand-io/build-host/*.so"
+NATIVE="$TESTDIR/../io/build-host/*.so"
 
 # spawn a private ubusd for the daemon integration test if available
 UBUSD=""

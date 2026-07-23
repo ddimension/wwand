@@ -54,14 +54,18 @@ deliberately, while its known bugs were left behind.
 
 | Path | Description |
 |---|---|
-| `wwand/` | OpenWrt package: the daemon (ucode), netifd shim, init, migration helper, tests. See `wwand/README.md` for the full configuration and ubus reference. |
-| `ucode-mod-wwand-io/` | OpenWrt package: small native ucode module — message-oriented cdc-wdm/tty I/O, an rmnet netlink helper, and a non-blocking `spawn()` |
-| `luci-proto-wwand/` | LuCI proto handler (registers `proto 'qmi'`, replaces stock luci-proto-qmi) |
-| `luci-app-wwand/` | LuCI Status → Modem page (signal, cells, connections) and the settings editor |
+| `wwand/` | OpenWrt package: the daemon (ucode), the native I/O module (`io/`, C — message-oriented cdc-wdm/tty I/O, rmnet netlink helper, non-blocking `spawn()`), netifd shim, init, migration helper, tests. One source package building the `wwand`, `ucode-mod-wwand-io` and `wwand-esim` binary packages. See `wwand/README.md` for the full configuration and ubus reference. |
 | `docs/architecture.md` | Architecture, design decisions, measurements, MBIM integration plan |
 
-Use this repository as an OpenWrt feed, or copy the two package directories
-into an existing feed.
+The LuCI packages and wwand-lpac live in their own repositories:
+[luci-proto-wwand](https://github.com/ddimension/luci-proto-wwand),
+[luci-app-wwand](https://github.com/ddimension/luci-app-wwand), and the
+[wwand-openwrt-repo](https://github.com/ddimension/wwand-openwrt-repo)
+package feed carrying their OpenWrt package definitions (including
+`wwand-lpac`).
+
+Use this repository as an OpenWrt feed, or copy the `wwand/` package
+directory into an existing feed.
 
 ## Quick start
 

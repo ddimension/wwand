@@ -5,16 +5,16 @@ replacing the old bash `qmi-advanced` dialer. Repo: github.com/ddimension/wwand.
 Everything is English. Commit/push only when asked.
 
 ## Layout
-- `wwand/` — the daemon package: `src-ucode/` (core), `files/` (netifd shim,
-  init, hotplug, migrate), `tests/`, `Makefile`, `README.md`.
-- `ucode-mod-wwand-io/` — native C module (`src/wwand-io.c`): message-oriented
-  cdc-wdm/tty I/O + rmnet netlink helper. `build-target/wwand_io.so` is the
-  cross-built aarch64 module.
-- `luci-proto-wwand/` — LuCI proto handler (registers `proto 'qmi'`, replaces
-  stock luci-proto-qmi; depends on `+luci-app-wwand` for the shared
-  `wwand.bands` resource).
-- `luci-app-wwand/` — LuCI Status→Modem page (signal/cells/connections) +
-  shared `resources/wwand/bands.js`.
+- `wwand/` — the daemon package: `src-ucode/` (core), `io/` (native C module
+  `io/src/wwand-io.c`: message-oriented cdc-wdm/tty I/O + rmnet netlink
+  helper; `io/build-target/wwand_io.so` is the cross-built aarch64 module,
+  `io/build-host/wwand_io.so` the host build used by the tests), `files/`
+  (netifd shim, init, hotplug, migrate), `tests/`, `Makefile`, `README.md`.
+  One source package → binary packages `wwand`, `ucode-mod-wwand-io`,
+  `wwand-esim`.
+- LuCI packages + wwand-lpac moved to their own repos: ddimension/
+  luci-proto-wwand, luci-app-wwand (sources only) and wwand-openwrt-repo
+  (the OpenWrt package-definition feed, incl. wwand-lpac entirely).
 - `docs/architecture.md`, `docs/telemetry-survey.md`, `docs/STATUS.md`.
 
 ## Core layering (src-ucode)
@@ -67,9 +67,10 @@ Shim: `files/wwand-proto.sh` (`proto_qmi_setup/teardown/renew`,
   `/vol/release/chateau/openwrt/staging_dir/toolchain-aarch64_cortex-a53_gcc-14.4.0_musl`;
   build against `staging_dir/target-aarch64_cortex-a53_musl` (`-shared -fPIC
   -I…/usr/include -lucode`, then strip). Output already at
-  `ucode-mod-wwand-io/build-target/wwand_io.so`.
+  `wwand/io/build-target/wwand_io.so`.
 - **Proper build = OpenWrt package** (preferred). Makefile fixes that MUST stay:
-  `ucode-mod-wwand-io` has a `Build/Prepare` (sources live in the pkg dir, no
+  `wwand/Makefile` has a `Build/Prepare` staging `io/` into PKG_BUILD_DIR for
+  cmake (sources live in the pkg dir, no
   PKG_SOURCE); `wwand/Makefile` installs `codec/mbim-schema` (daemon imports
   MBIM at top level — MBIM is lazy-`require`d in `daemon.uc` but the schema must
   still ship). `wwand` DEPENDS pulls `+ucode-mod-struct` etc. — apk install
