@@ -1,8 +1,8 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-23. 25 test suites green (~869 checks); all committed.
+_Last updated: 2026-07-23. 26 test suites green (~936 checks); all committed.
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
-Deep-review follow-ups tracked below (quick wins + #1 + #2 done; #3 partial)._
+Deep-review follow-ups below: quick wins + #1/#2/#4/#5 done; #3 partial._
 
 ## Next TODO — deep-review follow-ups (2026-07-23)
 
@@ -53,16 +53,19 @@ released on teardown. Remaining, ranked by value:
    shared-core contract as the target. This is Phase 1/2 of the migration doc:
    large, staged, HW-critical — best done incrementally with a HW pass. Not yet
    started.
-4. **`qmi_backend.uc` telemetry test.** MBIM has a rigorous hand-built-wire-buffer
-   suite (`test_mbim_backend`, 38 checks); QMI's `get_data_mode/get_ca/
-   get_reg_detail/get_packet_stats` have no dedicated per-function test. Given the
-   "wrong TLV silently decodes garbage" invariant, this asymmetry is a real gap.
-   *medium.*
-5. **at2 telemetry channel unused on QMI.** `modem_common.open_at` opens a second
-   `at2` engine, but only `modem_ncm` polls `self.at_telemetry` widely; QMI/MBIM
-   run most telemetry over QMI/passthrough and only route the AT *fallback* (CA)
-   there — so on modems where QMI CA works, at2 is opened for nothing. Either
-   wire `at_telemetry` in fully or open it lazily. *small.*
+4. ✅ **DONE (`d406ce4`) — `qmi_backend` telemetry suite.** New `test_qmi_backend`
+   (24 checks), the QMI analogue of `test_mbim_backend`: each op (`get_ca`/
+   `get_data_mode`/`get_reg_detail`/`get_packet_stats`/`get_bearer`/
+   `get_channel_rates`) runs against a real QMI client on the mock hub, answered
+   with a hand-built TLV block via a new mockhub `__raw` path (bypasses
+   `tlv.pack`), so the schema's own decode runs — verified it bites (corrupting
+   the pcell tag 0x13→0x33 fails the suite). mockhub also gained the DSD service.
+5. ✅ **DONE (`11ceac7`) — at2 telemetry channel opened lazily.** `open_at` now
+   stashes a one-shot opener; `modem_common.telemetry_at(self)` runs it on the
+   first telemetry poll and returns the dedicated engine thereafter, else the
+   control channel. QMI/MBIM only open at2 if/when they hit the AT fallback
+   (often never); NCM opens it on its first tick (same end state). All telemetry
+   sends route through `telemetry_at`. +16 tests.
 
 Minor/latent hardening also noted: `encode_info` array-branch asymmetry
 (`mbim.uc` — dead code today, add assert/comment), txn-collision overwrite
