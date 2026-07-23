@@ -106,6 +106,24 @@ export function scaffolding(self, o)
 		rec.usb_repower();
 	};
 
+	// stop: administrative teardown (daemon shutdown / reload / modem removed).
+	self.stop = function() {
+		self.teardown();
+		self.set_state('ABSENT');
+	};
+
+	// _device_gone: the control channel's transport reported the device vanished
+	// (on_gone). Tell contexts, tear down, go ABSENT and announce removal so the
+	// daemon detaches. (NCM never calls this — its removal arrives as a net
+	// hotplug — but installing it keeps the modem contract uniform.)
+	self._device_gone = function() {
+		log('warn', 'device disappeared');
+		notify_contexts('lost');
+		self.teardown();
+		self.set_state('ABSENT');
+		emit('removed', {});
+	};
+
 	return { emit: emit, notify_contexts: notify_contexts };
 }
 

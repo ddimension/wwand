@@ -142,6 +142,23 @@ eq(success, 1, 'scaffolding: note_connect_success -> rec.on_connect_success');
 self_m.trip_zero_rx();
 eq(repowered, 1, 'scaffolding: trip_zero_rx -> rec.usb_repower');
 
+// stop(): teardown + ABSENT
+let torn_m = 0;
+self_m.teardown = () => { torn_m++; };
+self_m.state = 'READY';
+self_m.stop();
+eq(torn_m, 1, 'scaffolding: stop() tears down');
+eq(self_m.state, 'ABSENT', 'scaffolding: stop() -> ABSENT');
+
+// _device_gone(): notify contexts lost, teardown, ABSENT, emit removed
+ctx_events = []; events = []; torn_m = 0;
+self_m.state = 'READY';
+self_m._device_gone();
+eq(ctx_events, [ 'lost' ], 'scaffolding: _device_gone notifies contexts lost');
+eq(torn_m, 1, 'scaffolding: _device_gone tears down');
+eq(self_m.state, 'ABSENT', 'scaffolding: _device_gone -> ABSENT');
+eq(events[length(events) - 1].ev, 'removed', 'scaffolding: _device_gone emits removed');
+
 // --- note_connect_failure_light: MBIM/NCM recovery passthrough ---------------
 
 let ncf_rc = { action: 'retry', reboots: 0, repowers: 0 };

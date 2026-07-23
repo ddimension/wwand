@@ -755,18 +755,7 @@ export function create(opts)
 		}
 	};
 
-	self._device_gone = function() {
-		log('warn', 'device disappeared');
-		notify_contexts('lost');
-		self.teardown();
-		self.set_state('ABSENT');
-		emit('removed', {});
-	};
-
-	self.stop = function() {
-		self.teardown();
-		self.set_state('ABSENT');
-	};
+	// stop() + _device_gone() installed by modem_common.scaffolding
 
 	return self;
 }

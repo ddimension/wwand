@@ -1707,10 +1707,7 @@ export function create(opts)
 		modem_common.close_at(self);
 	};
 
-	self.stop = function() {
-		self.teardown();
-		self.set_state('ABSENT');
-	};
+	// stop() installed by modem_common.scaffolding
 
 	return self;
 }
