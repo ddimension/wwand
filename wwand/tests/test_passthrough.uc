@@ -59,4 +59,24 @@ eq(got?.err, null, 'passthrough: request succeeds through the shim');
 eq(got?.data?.model, 'RG650E-EU', 'passthrough: response decoded end-to-end');
 eq(seen.ind_registered, 'QMI_MSG', 'passthrough: registered for unsolicited QMI indications');
 
+// --- never-SYNC structural rail ---------------------------------------------
+// A CTL SYNC (service 0, msg 0x0027) must NEVER reach the wire over the
+// passthrough: it resets the modem's embedded QMI state and kills the live MBIM
+// data session. The shim drops it and fails the request fast instead.
+let wire_calls = 0;
+let rail_mc = {
+	command_raw: function(su, cid, info, cb) { wire_calls++; },
+	on: function() {},
+};
+let rail = qom.create(rail_mc);
+let sync_frame = qmux.encode(0, 0, 7, 0x0027, '', 'request');
+let sent = rail.send(sync_frame);
+
+eq(wire_calls, 0, 'never-SYNC: CTL SYNC is not forwarded to the MBIM wire');
+ok(sent, 'never-SYNC: send() still returns true (request handled, not queued)');
+
+// a non-SYNC CTL frame (ALLOCATE_CID, 0x0022) does go through
+rail.send(qmux.encode(0, 0, 8, 0x0022, '', 'request'));
+eq(wire_calls, 1, 'never-SYNC: other CTL frames still reach the wire');
+
 done('test_passthrough');

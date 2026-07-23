@@ -129,10 +129,17 @@ function _read_ms_struct_array(buf, pos, fields)
 		return [];
 
 	let count = _u32(buf, off);
+	let len = length(buf);
 	let o = off + 4;
 	let out = [];
 
-	for (let i = 0; i < count; i++) {
+	// hard bound: `count` is read straight off the modem buffer; a malformed
+	// BASE_STATIONS_INFO/cell payload can carry a garbage count that would loop
+	// building null-structs until OOM. Each struct advances `o` by its fixed
+	// span, so stopping once `o` leaves the buffer caps iterations to the real
+	// element capacity. (This decodes serving/neighbour cells on the native-MBIM
+	// path — first-choice telemetry on HW we cannot host-validate.)
+	for (let i = 0; i < count && o < len; i++) {
 		let r = _read_struct(buf, o, fields);
 		push(out, r[0]);
 		o += r[1];

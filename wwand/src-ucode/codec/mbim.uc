@@ -207,10 +207,12 @@ function decode_scalar(fmt, buf, pos)
 	case 'ipv6': return [ (pos + 16 <= length(buf)) ? ipv6_str(buf, pos) : null, pos + 16 ];
 	// ref-ipv4/ipv6: u32 offset into the buffer, then the address
 	case 'ref-ipv4': {
+		if (pos + 4 > length(buf)) return [ null, pos + 4 ];
 		let o = struct.unpack('<I', substr(buf, pos, 4))[0];
 		return [ (o > 0 && o + 4 <= length(buf)) ? ipv4_str(buf, o) : null, pos + 4 ];
 	}
 	case 'ref-ipv6': {
+		if (pos + 4 > length(buf)) return [ null, pos + 4 ];
 		let o = struct.unpack('<I', substr(buf, pos, 4))[0];
 		return [ (o > 0 && o + 16 <= length(buf)) ? ipv6_str(buf, o) : null, pos + 4 ];
 	}
@@ -273,7 +275,12 @@ export function decode_info(fields, buf)
 			let count = +(res[fmt.array] ?? 0);
 			let out = [];
 
-			for (let i = 0; i < count; i++) {
+			// hard bound: `count` comes straight off the modem wire; a
+			// malformed/misaligned buffer can carry a garbage count (up to
+			// ~4e9) which would loop building null-structs until OOM. Stop
+			// as soon as the read offset leaves the buffer — each element
+			// advances `o` by >=4, so this caps iterations at len/4.
+			for (let i = 0; i < count && o < len; i++) {
 				let d = (type(fmt.of) == 'object')
 					? decode_struct(fmt.of, buf, o)
 					: decode_scalar(fmt.of, buf, o);

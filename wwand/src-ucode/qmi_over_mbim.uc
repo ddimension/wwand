@@ -57,6 +57,19 @@ export function create(mc, opts)
 		// unwrap the QMUX reply.
 		let req = qmux.decode(frame);
 
+		// Structural never-SYNC rail. CTL SYNC (service 0, msg 0x0027) resets the
+		// modem's embedded QMI state and tears down the live MBIM data session
+		// (HW-proven on EG06 — it kills the MBIM CONNECT). The passthrough must
+		// NEVER carry it. Elsewhere this is convention (a comment in modem_mbim);
+		// here it is enforced: drop the frame and fail the request fast rather
+		// than let a stray SYNC reach the wire.
+		if (req && req.service == 0 && req.msg_id == 0x0027) {
+			log('warn', 'qmi-over-mbim: refusing CTL SYNC over passthrough (would reset the modem)');
+			deliver(qmux.encode(req.service, req.cid, req.txn, req.msg_id,
+				struct.pack('<BHHH', 0x02, 4, 1, 0), 'response'));
+			return true;
+		}
+
 		mc.command_raw(qmi_pt.service, qmi_pt.CID_QMI_MSG, frame, (err, info) => {
 			if (err) {
 				log('debug', sprintf('qmi-over-mbim: passthrough error %J', err));

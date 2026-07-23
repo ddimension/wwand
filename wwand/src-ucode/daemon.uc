@@ -1339,7 +1339,12 @@ export function create(opts)
 				// match by cdc-wdm control device (qmi/mbim) OR by datapath netdev
 				// name (NCM modems have no control device — a modem reboot arrives
 				// as a net remove of the cdc_ncm/cdc_ether interface).
-				let hit = (entry.device && index(entry.device, devname) >= 0) ||
+				// Basename-exact, NOT substring: a substring test makes removing
+				// `cdc-wdm1` also match a modem on `/dev/cdc-wdm10` and stop the
+				// wrong one. devname is the hotplug basename; entry.device a path.
+				let parts = entry.device ? split(entry.device, '/') : null;
+				let base = parts ? parts[length(parts) - 1] : null;
+				let hit = (base && base == devname) ||
 				          (entry.netdev && entry.netdev == devname);
 
 				if (hit && entry.modem) {

@@ -1669,7 +1669,7 @@ export function create(opts)
 
 		modem_common.close_at(self);
 
-		for (let c in [ self.ctl, self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg ])
+		for (let c in [ self.ctl, self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg, self.dsd ])
 			if (c)
 				c.destroy();
 
