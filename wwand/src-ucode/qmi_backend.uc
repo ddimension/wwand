@@ -13,7 +13,28 @@
 
 'use strict';
 
+import * as dmsmod from './codec/schema/dms.uc';
 import * as dsdmod from './codec/schema/dsd.uc';
+
+const OPMODE = {
+	online:    dmsmod.OPMODE_ONLINE,
+	low_power: dmsmod.OPMODE_LOW_POWER,
+	offline:   dmsmod.OPMODE_OFFLINE,
+	reset:     dmsmod.OPMODE_RESET,
+};
+
+// set_opmode(dms, mode, cb): mode is 'online'|'low_power'|'offline'|'reset'.
+// QMI error 26 ("no effect" — already in that mode) is normalized to success.
+export function set_opmode(dms, mode, cb)
+{
+	dms.request('SET_OPERATING_MODE', { mode: OPMODE[mode] }, (err) => {
+		if (err && err.error == 'qmi' && err.code == 26)
+			err = null;
+
+		if (cb)
+			cb(err);
+	});
+}
 
 // QmiNasDLBandwidth enum -> MHz (LTE carrier bandwidth)
 const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };

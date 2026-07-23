@@ -356,9 +356,9 @@ export function create(opts)
 				return done(action);
 
 			log('warn', 'recovery: cycling operating mode');
-			self.dms.request('SET_OPERATING_MODE', { mode: dmsmod.OPMODE_LOW_POWER }, () => {
+			qmi_backend.set_opmode(self.dms, 'low_power', () => {
 				settle_timer = uloop.timer(self.timing.settle, () => {
-					self.dms.request('SET_OPERATING_MODE', { mode: dmsmod.OPMODE_ONLINE }, () => {
+					qmi_backend.set_opmode(self.dms, 'online', () => {
 						settle_timer = uloop.timer(self.timing.settle, () => done(action));
 					});
 				});
@@ -370,8 +370,8 @@ export function create(opts)
 				return done(action);
 
 			log('warn', 'recovery: resetting modem');
-			self.dms.request('SET_OPERATING_MODE', { mode: dmsmod.OPMODE_OFFLINE }, () => {
-				self.dms.request('SET_OPERATING_MODE', { mode: dmsmod.OPMODE_RESET }, () => done(action));
+			qmi_backend.set_opmode(self.dms, 'offline', () => {
+				qmi_backend.set_opmode(self.dms, 'reset', () => done(action));
 			});
 			return;
 
@@ -739,9 +739,9 @@ export function create(opts)
 
 	step_opmode = () => {
 		self.set_state('SET_OPMODE');
-		self.dms.request('SET_OPERATING_MODE', { mode: dmsmod.OPMODE_ONLINE }, (err) => {
-			// error 26 = "no effect": already online
-			if (err && !(err.error == 'qmi' && err.code == 26))
+		qmi_backend.set_opmode(self.dms, 'online', (err) => {
+			// (set_opmode already treats "no effect / already online" as success)
+			if (err)
 				return fail('opmode', err);
 
 			// settle after mode change (old: sleep 2)
@@ -896,9 +896,9 @@ export function create(opts)
 				return step_register();
 
 			log('notice', 'attach profile changed, cycling radio to re-attach');
-			self.dms.request('SET_OPERATING_MODE', { mode: dmsmod.OPMODE_LOW_POWER }, () => {
+			qmi_backend.set_opmode(self.dms, 'low_power', () => {
 				settle_timer = uloop.timer(self.timing.settle, () => {
-					self.dms.request('SET_OPERATING_MODE', { mode: dmsmod.OPMODE_ONLINE }, () => {
+					qmi_backend.set_opmode(self.dms, 'online', () => {
 						settle_timer = uloop.timer(self.timing.settle, step_register);
 					});
 				});
