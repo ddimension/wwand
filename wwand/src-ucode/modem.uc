@@ -30,6 +30,7 @@ import * as netlink from './netlink.uc';
 import * as recovery_mod from './recovery.uc';
 import * as atcmd from './atcmd.uc';
 import * as backend from './backend.uc';
+import * as qmi_backend from './qmi_backend.uc';
 import * as protoswitch from './protocol_switch.uc';
 import * as tlv from './codec/tlv.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
@@ -126,44 +127,6 @@ function decode_operator_name(s)
 			return s;   // not clean -> keep the original raw string
 
 	return u;
-}
-
-// QmiNasDLBandwidth enum -> MHz (LTE carrier bandwidth)
-const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
-
-// normalize a GET_LTE_CPHY_CA_INFO decode to the shared carrier shape
-// [ { role, earfcn, bandwidth_mhz, pci }, ... ] (band/freq are derived from
-// earfcn in the UI, so they are not carried here)
-function ca_from_qmi(d)
-{
-	let out = [];
-
-	if (d?.pcell)
-		push(out, { role: 'PCC', earfcn: d.pcell.earfcn, pci: d.pcell.pci,
-		            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', d.pcell.dl_bandwidth)] ?? null });
-
-	// QmiNasScellState: 0 deconfigured, 1 deactivated, 2 activated
-	for (let s in (d?.scells ?? []))
-		push(out, { role: 'SCC', earfcn: s.earfcn, pci: s.pci,
-		            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', s.dl_bandwidth)] ?? null,
-		            state: s.state });
-
-	return out;
-}
-
-// summarize DSD available-systems into the data-system mode. 5G present with
-// LTE = NSA (NR anchored on LTE); 5G alone = SA; LTE alone = LTE.
-function dsd_summary(systems)
-{
-	let rats = {};
-
-	for (let s in (systems ?? []))
-		if (s.rat == dsdmod.RAT_LTE) rats.lte = true;
-		else if (s.rat == dsdmod.RAT_5G) rats.nr = true;
-
-	let mode = rats.nr ? (rats.lte ? 'NSA' : 'SA') : (rats.lte ? 'LTE' : null);
-
-	return { mode: mode, lte: !!rats.lte, nr: !!rats.nr };
 }
 
 // derive the data-system mode from the QENG serving detail (Quectel AT): the
@@ -545,40 +508,20 @@ export function create(opts)
 	};
 
 	self._read_info = function(next) {
-		self.dms.request('GET_MANUFACTURER', {}, (e0, d0) => {
-			if (!e0)
-				self.info.manufacturer = d0.manufacturer;
+		qmi_backend.read_info(self.dms, (info) => {
+			for (let k, v in info)
+				self.info[k] = v;
 
-			self.dms.request('GET_MODEL', {}, (e1, d1) => {
-				if (!e1)
-					self.info.model = d1.model;
+			let c = info.capabilities;
 
-				self.dms.request('GET_REVISION', {}, (e2, d2) => {
-					if (!e2)
-						self.info.revision = d2.revision;
+			if (c)
+				log('info', sprintf('capabilities: max tx %d rx %d kbps, radio ifs [%s]',
+					c.max_tx_rate, c.max_rx_rate, join(' ', c.radio_ifs ?? [])));
 
-					self.dms.request('GET_IDS', {}, (e3, d3) => {
-						if (!e3) {
-							self.info.imei = d3.imei;
-							self.info.meid = d3.meid;
-						}
-
-						self.dms.request('GET_CAPABILITIES', {}, (e4, d4) => {
-							if (!e4 && d4.capabilities) {
-								self.info.capabilities = d4.capabilities;
-								log('info', sprintf('capabilities: max tx %d rx %d kbps, radio ifs [%s]',
-									d4.capabilities.max_tx_rate, d4.capabilities.max_rx_rate,
-									join(' ', d4.capabilities.radio_ifs ?? [])));
-							}
-
-							log('notice', sprintf('%s %s, revision %s, imei %s',
-								self.info.manufacturer ?? '?', self.info.model,
-								self.info.revision, self.info.imei));
-							next();
-						});
-					});
-				});
-			});
+			log('notice', sprintf('%s %s, revision %s, imei %s',
+				self.info.manufacturer ?? '?', self.info.model,
+				self.info.revision, self.info.imei));
+			next();
 		});
 	};
 
@@ -1293,14 +1236,12 @@ export function create(opts)
 
 		backend.choose(self, '_ca_be', [
 			{ name: 'qmi', probe: (ok) => self.nas
-				? self.nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) =>
-					ok(!e && (d?.pcell || d?.scells)))
+				? qmi_backend.get_ca(self.nas, (ca) => ok(ca != null))
 				: ok(false) },
 			{ name: 'at', probe: (ok) => ok(!!self.at) },
 		], (be) => {
 			if (be == 'qmi')
-				return self.nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) =>
-					store((!e && d) ? ca_from_qmi(d) : []));
+				return qmi_backend.get_ca(self.nas, (ca) => store(ca ?? []));
 			if (be == 'at')
 				return self.at.send('AT+QCAINFO', (e, r) =>
 					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
@@ -1316,8 +1257,7 @@ export function create(opts)
 		let set_mode = () => {
 			backend.choose(self, '_dsd_be', [
 				{ name: 'dsd', probe: (ok) => self.dsd
-					? self.dsd.request('GET_SYSTEM_STATUS', {}, (e, d) =>
-						ok(!e && d?.available_systems != null))
+					? qmi_backend.get_data_mode(self.dsd, (m) => ok(m != null))
 					: ok(false) },
 				{ name: 'at',  probe: (ok) => ok(self.cells?.serving?.lte != null ||
 				                                  self.cells?.serving?.nr != null) },
@@ -1326,8 +1266,8 @@ export function create(opts)
 				let tag = (s) => { if (s) s.source = be; return s; };
 
 				if (be == 'dsd')
-					return self.dsd.request('GET_SYSTEM_STATUS', {}, (e, d) => {
-						self.dsd_status = (!e && d?.available_systems) ? tag(dsd_summary(d.available_systems)) : null;
+					return qmi_backend.get_data_mode(self.dsd, (m) => {
+						self.dsd_status = tag(m);
 						cb();
 					});
 				if (be == 'at')
