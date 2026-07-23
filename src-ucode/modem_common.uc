@@ -109,6 +109,47 @@ export function scaffolding(self, o)
 	return { emit: emit, notify_contexts: notify_contexts };
 }
 
+// make_fail(self, o): the shared "a bring-up step failed" handler. Runs the
+// modem's own note_connect_failure (QMI cycles opmode/reset on its live dms;
+// MBIM/NCM just bump the counter + reboot/usb_repower), then on the resulting
+// ladder action emits 'error', tears down, and either stops (reboot pending) or
+// schedules a capped-backoff retry of self.start(). This was three near-copies:
+// modem_mbim/modem_ncm were byte-identical and modem.uc differed only in that it
+// already routed through note_connect_failure + emitted 'error' — now all three
+// do (the daemon ignores the modem 'error' event; it is test/observability only,
+// so MBIM/NCM gaining it is a consistency win, not a behaviour change).
+//   o.log             — (level, msg) => …
+//   o.timing          — { backoff_min, backoff_max }
+//   o.emit            — the scaffolding emit helper
+//   o.set_retry_timer — (timer) => …  store where teardown cancels it
+// Returns fail(stage, err).
+export function make_fail(self, o)
+{
+	return (stage, err) => {
+		o.log('err', sprintf('failed in %s: %J', stage, err));
+
+		self.note_connect_failure((action) => {
+			o.emit('error', {
+				stage: stage, err: err,
+				attempts: self.counters.attempts, action: action,
+			});
+
+			self.teardown();
+
+			if (action == 'reboot') {
+				self.set_state('ABSENT');
+				return;   // no retry, reboot is pending
+			}
+
+			let backoff = min(o.timing.backoff_min * self.counters.attempts,
+			                  o.timing.backoff_max);
+
+			self.set_state('ABSENT', { retry_in: backoff });
+			o.set_retry_timer(uloop.timer(backoff, () => self.start()));
+		});
+	};
+}
+
 // watch_driver(o): the adaptive "fast telemetry" cadence shared by the QMI and
 // MBIM modem state machines. While a consumer polls (modem_signal/modem_cells
 // over ubus), it runs o.refresh at most once per min_interval, NON-OVERLAPPING

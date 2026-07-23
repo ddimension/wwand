@@ -142,6 +142,56 @@ eq(success, 1, 'scaffolding: note_connect_success -> rec.on_connect_success');
 self_m.trip_zero_rx();
 eq(repowered, 1, 'scaffolding: trip_zero_rx -> rec.usb_repower');
 
+// --- make_fail: shared bring-up failure handler ------------------------------
+
+let mf_events = [];
+let mf_action = 'retry';
+let torn = 0, started = 0, mf_retry = null;
+let fm = {
+	state: 'READY',
+	counters: { attempts: 3 },
+	timing: { backoff_min: 10, backoff_max: 100 },
+	note_connect_failure: (done) => done(mf_action),   // yield the ladder action
+	teardown: () => { torn++; },
+	start: () => { started++; },
+};
+fm.set_state = (s, d) => { fm.state = s; fm.last_state_data = d; };
+
+let fail = mc.make_fail(fm, {
+	log: (l, m) => null,
+	timing: fm.timing,
+	emit: (ev, d) => push(mf_events, { ev: ev, d: d }),
+	set_retry_timer: (t) => { mf_retry = t; },
+});
+
+// a 'retry' action: emits error, tears down, schedules a capped-backoff retry
+mf_action = 'retry';
+fail('register', { error: 'x' });
+eq(mf_events[0].ev, 'error', 'make_fail: emits an error event');
+eq(mf_events[0].d.action, 'retry', 'make_fail: error carries the ladder action');
+eq(mf_events[0].d.attempts, 3, 'make_fail: error carries the attempt count');
+eq(mf_events[0].d.stage, 'register', 'make_fail: error carries the failing stage');
+eq(torn, 1, 'make_fail: teardown called');
+eq(fm.state, 'ABSENT', 'make_fail: state driven to ABSENT');
+eq(fm.last_state_data.retry_in, 30, 'make_fail: backoff = backoff_min * attempts (10*3)');
+ok(mf_retry != null, 'make_fail: retry timer scheduled for a retry action');
+mf_retry.cancel();
+
+// a 'reboot' action: tears down but schedules NO retry (reboot pending)
+mf_events = []; torn = 0; mf_retry = null;
+mf_action = 'reboot';
+fail('sync', {});
+eq(torn, 1, 'make_fail: teardown on reboot too');
+eq(mf_retry, null, 'make_fail: no retry scheduled when a reboot is pending');
+eq(fm.state, 'ABSENT', 'make_fail: ABSENT after a reboot action');
+
+// backoff is capped at backoff_max
+mf_events = []; mf_retry = null; mf_action = 'retry';
+fm.counters.attempts = 50;                 // 10*50 = 500 -> capped to 100
+fail('register', {});
+eq(fm.last_state_data.retry_in, 100, 'make_fail: backoff capped at backoff_max');
+if (mf_retry) mf_retry.cancel();
+
 // --- guards: watch() does nothing unless ready AND alive ----------------------
 
 let calls = 0;

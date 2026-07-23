@@ -158,28 +158,10 @@ export function create(opts)
 
 	let step_open, step_caps, step_at, step_datapath, step_sim, step_register, step_attach;
 
-	let fail = (stage, err) => {
-		log('err', sprintf('failed in %s: %J', stage, err));
-
-		let action = rec.on_attempt();
-
-		if (action == 'reboot') {
-			rec.reboot('connection attempt limit reached');
-			self.teardown();
-			self.set_state('ABSENT');
-			return;
-		}
-
-		if (action == 'usb_repower')
-			rec.usb_repower();
-
-		self.teardown();
-
-		let backoff = min(self.timing.backoff_min * self.counters.attempts, self.timing.backoff_max);
-
-		self.set_state('ABSENT', { retry_in: backoff });
-		retry_timer = uloop.timer(backoff, () => self.start());
-	};
+	let fail = modem_common.make_fail(self, {
+		log: log, timing: self.timing, emit: emit,
+		set_retry_timer: (t) => retry_timer = t,
+	});
 
 	self.note_connect_failure = function(done) {
 		done = done ?? ((a) => null);

@@ -277,29 +277,10 @@ export function create(opts)
 
 	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_validate, step_attach_profile, step_register;
 
-	let fail = (stage, err) => {
-		log('err', sprintf('failed in %s: %J', stage, err));
-
-		self.note_connect_failure((action) => {
-			emit('error', {
-				stage: stage, err: err,
-				attempts: self.counters.attempts, action: action,
-			});
-
-			self.teardown();
-
-			if (action == 'reboot') {
-				self.set_state('ABSENT');
-				return;   // no retry, reboot is pending
-			}
-
-			let backoff = min(self.timing.backoff_min * self.counters.attempts,
-			                  self.timing.backoff_max);
-
-			self.set_state('ABSENT', { retry_in: backoff });
-			retry_timer = uloop.timer(backoff, () => self.start());
-		});
-	};
+	let fail = modem_common.make_fail(self, {
+		log: log, timing: self.timing, emit: emit,
+		set_retry_timer: (t) => retry_timer = t,
+	});
 
 	// record a failed connection cycle and run the resulting ladder action;
 	// also called by the daemon when a context activation fails. QMI-side
