@@ -68,12 +68,23 @@ plan in `docs/backend-interface.md`.
   correct IP** after fixing the IP_CONFIGURATION decode (count+offset arrays —
   it had only ever been host-tested against the wrong layout; the RG650E rejects
   MBIM_OPEN so it never ran). Remaining: after a *live* QMI→MBIM protocol switch,
-  netifd holds a stale device binding for wwan0m1 (was QMAP, now a VLAN) and
-  reports NO_DEVICE, so the interface doesn't bind the IP. Not a wwand connect
-  bug; a fresh boot into MBIM (no stale QMI device) should avoid it — verify on a
-  reboot, or add a wwand-side netifd device rebind after a protocol switch. Also
-  latent: on a connect that fails after CONNECT activated, the retry hits MBIM
-  status 13 (max activated contexts) — deactivate before retry.
+  netifd doesn't bind the IP (interface stays down). Two datapath-integration
+  issues, both confirmed on a fresh boot into MBIM (246):
+  1. **VLAN not declared to netifd.** The config `device 'wwan0m1'` is the QMAP
+     name; under MBIM it's an 802.1q VLAN of wwan0. netifd reports NO_DEVICE
+     until the VLAN is declared as a `config device` (type 8021q, ifname wwan0,
+     vid 1) — then `available:true`. Fix belongs in the MBIM datapath / migrate
+     (emit the device section, or use netifd's `wwan0.1` naming, or mark the
+     wwand-created VLAN external).
+  2. **cdc_mbim carrier flapping (chicken-and-egg).** The raw wwan0 carrier
+     follows the MBIM session state; netifd waits for link-up before running the
+     proto handler (which is what connects the session), so wwan0/wwan0m1 flap
+     up/down and the interface never settles. The MBIM datapath/proto flow needs
+     to establish the session (carrier) independently of netifd's link wait.
+  Also latent: a connect that fails after CONNECT activated leaves the context
+  activated, so the retry hits MBIM status 13 (max activated contexts) —
+  deactivate before retry. (246 currently carries an ad-hoc `config device
+  mbimvlan` from this investigation.)
 
 ## Notes
 
