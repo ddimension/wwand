@@ -5,16 +5,20 @@ replacing the old bash `qmi-advanced` dialer. Repo: github.com/ddimension/wwand.
 Everything is English. Commit/push only when asked.
 
 ## Layout
-- `wwand/` — the daemon package: `src-ucode/` (core), `io/` (native C module
-  `io/src/wwand-io.c`: message-oriented cdc-wdm/tty I/O + rmnet netlink
-  helper; `io/build-target/wwand_io.so` is the cross-built aarch64 module,
-  `io/build-host/wwand_io.so` the host build used by the tests), `files/`
-  (netifd shim, init, hotplug, migrate), `tests/`, `Makefile`, `README.md`.
-  One source package → binary packages `wwand`, `ucode-mod-wwand-io`,
-  `wwand-esim`.
-- LuCI packages + wwand-lpac moved to their own repos: ddimension/
-  luci-proto-wwand, luci-app-wwand (sources only) and wwand-openwrt-repo
-  (the OpenWrt package-definition feed, incl. wwand-lpac entirely).
+This repo is the wwand **source tree** (package root = repo root):
+`src-ucode/` (core), `io/` (native C module `io/src/wwand-io.c`:
+message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
+`io/build-target/wwand_io.so` is the cross-built aarch64 module,
+`io/build-host/wwand_io.so` the host build used by the tests), `files/`
+(netifd shim, init, hotplug, migrate), `tests/`, `tools/`,
+`docs/reference.md` (config + ubus API reference).
+- **Package definitions live in ddimension/wwand-openwrt-repo** (the feed):
+  `wwand/Makefile` there builds binary packages `wwand`,
+  `ucode-mod-wwand-io`, `wwand-esim` from this repo (git source, pinned via
+  PKG_SOURCE_VERSION — bump it there after pushing here).
+- LuCI packages moved to their own repos: ddimension/luci-proto-wwand,
+  luci-app-wwand (sources only; package defs + wwand-lpac entirely in the
+  feed repo).
 - `docs/architecture.md`, `docs/telemetry-survey.md`, `docs/STATUS.md`.
 
 ## Core layering (src-ucode)
@@ -60,20 +64,20 @@ Shim: `files/wwand-proto.sh` (`proto_qmi_setup/teardown/renew`,
 - `replace(s, /-/g, '')` for global replace (string arg replaces first only).
 
 ## Build / test / deploy
-- **Tests (host):** `cd wwand/tests && sh run_tests.sh` — 14 suites, mockhub
+- **Tests (host):** `cd tests && sh run_tests.sh` — 14 suites, mockhub
   over the real codec + a private ubusd. Run before every commit.
 - **JS syntax:** `node --check <file>.js` for LuCI resources.
 - **C module (cross):** aarch64 toolchain at
   `/vol/release/chateau/openwrt/staging_dir/toolchain-aarch64_cortex-a53_gcc-14.4.0_musl`;
   build against `staging_dir/target-aarch64_cortex-a53_musl` (`-shared -fPIC
   -I…/usr/include -lucode`, then strip). Output already at
-  `wwand/io/build-target/wwand_io.so`.
-- **Proper build = OpenWrt package** (preferred). Makefile fixes that MUST stay:
-  `wwand/Makefile` has a `Build/Prepare` staging `io/` into PKG_BUILD_DIR for
-  cmake (sources live in the pkg dir, no
-  PKG_SOURCE); `wwand/Makefile` installs `codec/mbim-schema` (daemon imports
-  MBIM at top level — MBIM is lazy-`require`d in `daemon.uc` but the schema must
-  still ship). `wwand` DEPENDS pulls `+ucode-mod-struct` etc. — apk install
+  `io/build-target/wwand_io.so`.
+- **Proper build = OpenWrt package** (preferred) — the Makefile lives in
+  **wwand-openwrt-repo** (`wwand/Makefile`, git source pinned on this repo).
+  Fixes that MUST stay there: `CMAKE_SOURCE_SUBDIR:=io` (cmake tree is a
+  subdir); it installs `codec/mbim-schema` (daemon imports MBIM at top
+  level — MBIM is lazy-`require`d in `daemon.uc` but the schema must still
+  ship). `wwand` DEPENDS pulls `+ucode-mod-struct` etc. — apk install
   resolves the ucode deps. Bump PKG_RELEASE or `apk add --force-reinstall`.
 
 ## Test router

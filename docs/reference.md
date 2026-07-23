@@ -4,7 +4,7 @@ wwand is an event-driven QMI/MBIM connection manager for OpenWrt, written in
 ucode. It owns the modem's control port (`/dev/cdc-wdmX`), drives netifd, and
 exposes a ubus API. This document is the reference for configuration, the ubus
 API, diagnostics and troubleshooting. For the design rationale see
-`../docs/architecture.md`.
+`architecture.md`.
 
 ## Configuration
 

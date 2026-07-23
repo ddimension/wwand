@@ -10,7 +10,7 @@ Beyond connectivity it manages the **SIM** — PIN, multi-slot switching, and
 **eSIM/eUICC**: native ES10c profile management plus **SM-DP+ provisioning**
 (profile download) driven by a bundled lpac, with the HTTPS running on the
 router over the existing WAN (no dedicated provisioning APN). See
-[eSIM management & provisioning](wwand/README.md#esim-management--provisioning).
+[eSIM management & provisioning](docs/reference.md#esim-management--provisioning).
 
 It replaces a grown bash-based connection manager (`qmi-advanced`) whose
 field-proven behaviors, quirks and recovery strategies were ported
@@ -52,20 +52,25 @@ deliberately, while its known bugs were left behind.
 
 ## Repository layout
 
+This repository holds the wwand sources; the OpenWrt package definitions
+live in the [wwand-openwrt-repo](https://github.com/ddimension/wwand-openwrt-repo)
+feed, which builds the `wwand`, `ucode-mod-wwand-io` and `wwand-esim`
+binary packages from this tree.
+
 | Path | Description |
 |---|---|
-| `wwand/` | OpenWrt package: the daemon (ucode), the native I/O module (`io/`, C — message-oriented cdc-wdm/tty I/O, rmnet netlink helper, non-blocking `spawn()`), netifd shim, init, migration helper, tests. One source package building the `wwand`, `ucode-mod-wwand-io` and `wwand-esim` binary packages. See `wwand/README.md` for the full configuration and ubus reference. |
+| `src-ucode/` | The daemon (ucode): codec, session, state machines, netifd/ubus integration |
+| `io/` | Native ucode C module — message-oriented cdc-wdm/tty I/O, rmnet netlink helper, non-blocking `spawn()` |
+| `files/` | netifd proto shim, init script, default config, hotplug, migration helper |
+| `tests/` | Host-side test suites (`sh run_tests.sh`, no hardware needed) |
+| `docs/reference.md` | Full configuration and ubus API reference |
 | `docs/architecture.md` | Architecture, design decisions, measurements, MBIM integration plan |
 
-The LuCI packages and wwand-lpac live in their own repositories:
-[luci-proto-wwand](https://github.com/ddimension/luci-proto-wwand),
-[luci-app-wwand](https://github.com/ddimension/luci-app-wwand), and the
-[wwand-openwrt-repo](https://github.com/ddimension/wwand-openwrt-repo)
-package feed carrying their OpenWrt package definitions (including
-`wwand-lpac`).
-
-Use this repository as an OpenWrt feed, or copy the `wwand/` package
-directory into an existing feed.
+The LuCI packages live in their own repositories:
+[luci-proto-wwand](https://github.com/ddimension/luci-proto-wwand) and
+[luci-app-wwand](https://github.com/ddimension/luci-app-wwand); their
+package definitions (and the `wwand-lpac` package entirely) are also part
+of the wwand-openwrt-repo feed.
 
 ## Quick start
 
@@ -87,7 +92,7 @@ config interface 'wan'
 	option context 'wan_ctx'
 ```
 
-`ifup wan` — that's it. See `wwand/README.md` for the complete configuration
+`ifup wan` — that's it. See `docs/reference.md` for the complete configuration
 reference, the ubus API and the compat/migration path for old configurations.
 
 ## Status
