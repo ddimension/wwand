@@ -4,10 +4,12 @@
 'require ui';
 'require uci';
 'require dom';
+'require wwand.bands as bands';
 
-// wwand modem settings editor. All values go through the daemon's QMI-native
-// ubus methods; band preferences travel as band-number lists (u64 masks would
-// lose precision in JS numbers).
+// wwand modem settings editor. All values go through the daemon's now
+// protocol-neutral ubus methods (QMI NAS, MBIM QMI-over-MBIM passthrough, or an
+// AT fallback on NCM); band preferences travel as band-number lists (u64 masks
+// would lose precision in JS numbers).
 
 var callStatus = rpc.declare({ object: 'wwand', method: 'status', expect: { modems: {} } });
 var callGet  = rpc.declare({ object: 'wwand', method: 'modem_get_settings', params: [ 'modem' ], expect: {} });
@@ -15,6 +17,9 @@ var callSet  = rpc.declare({ object: 'wwand', method: 'modem_set_settings', para
 var callPlmn = rpc.declare({ object: 'wwand', method: 'modem_plmn_lists', params: [ 'modem' ], expect: {} });
 var callSlots = rpc.declare({ object: 'wwand', method: 'modem_sim_slots', params: [ 'modem' ], expect: {} });
 var callSwitchSlot = rpc.declare({ object: 'wwand', method: 'modem_sim_switch_slot', params: [ 'modem', 'slot' ], expect: {} });
+var callScan = rpc.declare({ object: 'wwand', method: 'modem_scan', params: [ 'modem' ], expect: {} });
+var callSetSelection = rpc.declare({ object: 'wwand', method: 'modem_set_network_selection',
+	params: [ 'modem', 'mode', 'mcc', 'mnc' ], expect: {} });
 var callEsim = rpc.declare({ object: 'wwand', method: 'modem_esim',
 	params: [ 'modem', 'op', 'slot', 'iccid', 'activation_code', 'confirmation_code', 'auto_notify' ], expect: {} });
 
@@ -45,6 +50,78 @@ function parseBandList(text) {
 			out.push(n);
 	});
 	return out.sort(function(a, b) { return a - b });
+}
+
+// Band multi-select built from the shared wwand.bands tables. `known` is a list
+// of { num, label }; `selected` is the band-number list currently set. Known
+// bands become checkboxes; any selected band the table does not cover survives
+// in a raw comma-separated fallback input (so exotic bands are never dropped).
+// The returned node carries a _collect() that yields the merged band list.
+function bandPicker(known, selected) {
+	selected = selected || [];
+	var boxes = [], knownNums = {};
+	known.forEach(function(b) { knownNums[b.num] = true; });
+
+	var labels = known.map(function(b) {
+		var cb = E('input', { 'type': 'checkbox', 'data-band': b.num,
+			'checked': (selected.indexOf(b.num) >= 0) ? '' : null });
+		boxes.push(cb);
+		return E('label', { 'style': 'display:inline-block;min-width:4.5em;margin:1px 10px 1px 0;font-weight:normal' },
+			[ cb, ' ' + b.label ]);
+	});
+
+	var extra = selected.filter(function(n) { return !knownNums[n]; });
+	var rawIn = E('input', { 'type': 'text', 'class': 'cbi-input-text',
+		'style': 'width:100%;margin-top:5px',
+		'placeholder': _('additional band numbers (comma/space separated)'),
+		'value': extra.join(',') });
+
+	var node = E('div', {}, [ E('div', {}, labels), rawIn ]);
+	node._collect = function() {
+		var out = [];
+		boxes.forEach(function(cb) { if (cb.checked) out.push(+cb.getAttribute('data-band')); });
+		parseBandList(rawIn.value).forEach(function(n) { if (out.indexOf(n) < 0) out.push(n); });
+		return out.sort(function(a, b) { return a - b });
+	};
+	return node;
+}
+
+function lteKnownBands() {
+	return bands.LTE_BANDS.map(function(b) { return { num: b[0], label: 'B' + b[0] }; });
+}
+function nrKnownBands() {
+	return bands.NR_BANDS.map(function(b) {
+		return { num: parseInt(('' + b[0]).replace(/^n/, ''), 10), label: b[0] };
+	});
+}
+
+var WARN_CSS = '' +
+'.wwcw{display:flex;gap:9px;align-items:flex-start;padding:9px 13px;border-radius:6px;margin:6px 0;font-size:.95em}' +
+'.wwcw .ic{font-size:1.15em;line-height:1.2;flex:none}' +
+'.wwcw.warn{background:rgba(192,57,43,.12);color:#b3271a}' +
+'.wwcw.info{background:rgba(11,111,194,.11);color:#0b6fc2}' +
+'.wwcw-d{opacity:.85;font-size:.9em;margin-top:2px}';
+
+// Render status().config_warnings for a modem (a sibling daemon change adds
+// these). Absent/empty → returns null so the caller renders nothing.
+function renderWarnings(warns) {
+	if (!warns || !warns.length)
+		return null;
+	var items = warns.map(function(w) {
+		var sev = (w.severity == 'warn') ? 'warn' : 'info';
+		var det = [];
+		if (w.expected != null) det.push(_('expected') + ': ' + w.expected);
+		if (w.actual != null)   det.push(_('actual') + ': ' + w.actual);
+		return E('div', { 'class': 'wwcw ' + sev }, [
+			E('span', { 'class': 'ic' }, sev == 'warn' ? '⚠' : 'ℹ'),
+			E('div', {}, [
+				E('div', {}, [ w.check ? E('strong', {}, w.check + ': ') : '', w.message || '' ]),
+				det.length ? E('div', { 'class': 'wwcw-d' }, det.join(' · ')) : '',
+			]),
+		]);
+	});
+	return E('div', {}, [ E('style', {}, WARN_CSS),
+		E('h3', {}, _('Configuration warnings')) ].concat(items));
 }
 
 function plmnTable(title, list, absentHint) {
@@ -145,19 +222,26 @@ return view.extend({
 			]).then(function(res) {
 				var esim = res[3] || {};
 				esim.backend = (res[4] || {}).backend;
-				return { modem: names[0], settings: res[0], plmn: res[1],
+				return { modem: names[0], info: (r[0] || {})[names[0]] || {},
+				         settings: res[0], plmn: res[1],
 				         slots: (res[2] || {}).slots || [], esim: esim };
 			});
 		});
 	},
 
-	simSlotUci: function(slot) {
-		// old-style configs carry sim_slot on the first proto-qmi interface
+	// the interface section carrying wwand's per-interface config (SIM slot,
+	// cell lock, …). Old-style configs put it on the first proto=qmi interface.
+	targetIface: function() {
 		var target = null;
 		uci.sections('network', 'interface', function(s) {
 			if (!target && s.proto == 'qmi')
 				target = s['.name'];
 		});
+		return target;
+	},
+
+	simSlotUci: function(slot) {
+		var target = this.targetIface();
 		if (!target)
 			return Promise.reject(new Error('no qmi interface'));
 		uci.set('network', target, 'sim_slot', String(slot));
@@ -407,6 +491,205 @@ return view.extend({
 		});
 	},
 
+	// --- Network selection (operator scan + manual/automatic) ----------------
+	// Protocol-neutral: modem_scan/modem_set_network_selection run over QMI NAS,
+	// the MBIM passthrough, or AT+COPS on NCM. The scan is slow (up to ~90 s), so
+	// the rpc timeout is bumped for the duration and the button spins meanwhile.
+	renderNetSel: function(data) {
+		var self = this;
+		var s = data.settings || {};
+		var mode = (s.selection_mode == 'manual') ? 'manual' : 'auto';
+		var reg = s.registered_plmn || {};
+
+		var infoRows = [
+			E('div', { 'style': 'margin-bottom:3px' }, [
+				E('strong', {}, _('Current mode') + ': '),
+				(mode == 'manual') ? _('manual') : _('automatic') ]),
+		];
+		if (reg && (reg.mcc != null || reg.name))
+			infoRows.push(E('div', {}, [ E('strong', {}, _('Registered operator') + ': '),
+				(reg.name || _('unknown')) + ' (' + (reg.mcc != null ? reg.mcc : '?') +
+				'/' + (reg.mnc != null ? reg.mnc : '?') + ')' ]));
+
+		var results = E('div', { 'style': 'margin-top:10px' });
+
+		var setSelection = function(smode, mcc, mnc, label) {
+			return callSetSelection(data.modem, smode, (mcc != null ? +mcc : 0), (mnc != null ? +mnc : 0))
+				.then(function(res) {
+					if (res && res.ok === false)
+						ui.addNotification(null, E('p', _('Failed: ') + (res.error || '?')), 'error');
+					else {
+						ui.addNotification(null, E('p', label), 'info');
+						window.setTimeout(function() { window.location.reload(); }, 800);
+					}
+				});
+		};
+
+		var STATUS_LABEL = {
+			current:   _('current'),
+			forbidden: _('forbidden'),
+			available: _('available'),
+		};
+
+		var renderOps = function(ops) {
+			if (!ops || !ops.length) {
+				dom.content(results, E('em', {}, _('No operators found.')));
+				return;
+			}
+			var rows = ops.map(function(op) {
+				var forbidden = (op.status == 'forbidden');
+				var current = (op.status == 'current');
+				var act;
+				if (forbidden)
+					act = E('span', { 'style': 'color:#999' }, '—');
+				else
+					act = E('button', { 'class': 'btn cbi-button cbi-button-apply',
+						'click': ui.createHandlerFn(self, function() {
+							if (!confirm(_('Register manually to %s (%s/%s)? The connection may briefly drop.')
+									.format(op.name || '?', op.mcc, op.mnc)))
+								return;
+							return setSelection('manual', op.mcc, op.mnc,
+								_('Manual network selection applied.'));
+						}) }, current ? _('Reselect') : _('Select'));
+				return E('tr', { 'class': 'tr',
+					'style': forbidden ? 'opacity:.5' : (current ? 'font-weight:600' : '') }, [
+					E('td', { 'class': 'td' }, op.name || _('(unnamed)')),
+					E('td', { 'class': 'td' }, op.mcc + '/' + op.mnc),
+					E('td', { 'class': 'td' }, STATUS_LABEL[op.status] || op.status || ''),
+					E('td', { 'class': 'td', 'style': 'width:1%' }, act),
+				]);
+			});
+			dom.content(results, E('table', { 'class': 'table' }, [
+				E('tr', { 'class': 'tr table-titles' }, [
+					E('th', { 'class': 'th' }, _('Operator')),
+					E('th', { 'class': 'th' }, _('PLMN')),
+					E('th', { 'class': 'th' }, _('Status')),
+					E('th', { 'class': 'th' }, ''),
+				]),
+			].concat(rows)));
+		};
+
+		var scanBtn;
+		scanBtn = E('button', { 'class': 'btn cbi-button',
+			'click': ui.createHandlerFn(self, function() {
+				scanBtn.disabled = true;
+				dom.content(results, E('div', { 'class': 'wwe-banner run',
+					'style': 'display:flex;align-items:center;gap:9px' }, [
+					E('span', { 'class': 'wwe-spin' }),
+					E('span', {}, _('Scanning for operators — this can take up to ~90 s…')),
+				]));
+				// the scan blocks the ubus reply; give the XHR room beyond the
+				// daemon's 90 s scan timeout, then restore the global default.
+				var saved = L.env.rpctimeout;
+				L.env.rpctimeout = 120;
+				var restore = function() { L.env.rpctimeout = saved; scanBtn.disabled = false; };
+				return callScan(data.modem).then(function(r) {
+					restore();
+					if (r && r.ok === false) {
+						dom.content(results, E('div', { 'class': 'wwe-banner err' },
+							[ E('span', {}, '✕'), E('span', {}, _('Scan failed: ') + (r.error || '?')) ]));
+						return;
+					}
+					renderOps((r || {}).operators || []);
+				}).catch(function(e) {
+					restore();
+					dom.content(results, E('div', { 'class': 'wwe-banner err' },
+						[ E('span', {}, '✕'), E('span', {}, _('Scan failed: ') + (e && e.message || e)) ]));
+				});
+			}) }, _('Scan for operators'));
+
+		var autoBtn = E('button', { 'class': 'btn cbi-button', 'style': 'margin-left:6px',
+			'click': ui.createHandlerFn(self, function() {
+				return setSelection('auto', 0, 0, _('Automatic network selection enabled.'));
+			}) }, _('Set automatic'));
+
+		return E('div', {}, [
+			E('style', {}, ESIM_CSS),
+			E('h3', {}, _('Network selection')),
+			E('div', { 'class': 'cbi-section' }, [
+				E('div', {}, infoRows),
+				E('p', { 'style': 'margin:8px 0' }, E('em', {},
+					_('Automatic lets the modem choose the best operator. A manual scan lists the visible operators so you can force one (e.g. to prefer a partner network while roaming).'))),
+				E('div', {}, [ scanBtn, autoBtn ]),
+				results,
+			]),
+		]);
+	},
+
+	// --- Cell lock (protocol-neutral: written to uci on the WAN interface) ---
+	// The wwand compat layer / proto handler interpret lock_4g (earfcn:pci list),
+	// lock_5g (pci:arfcn:scs:band) and lock_persist regardless of qmi/mbim/ncm.
+	renderCellLock: function(data) {
+		var self = this;
+		var out = [ E('h3', {}, _('Cell lock')) ];
+
+		var sid = this.targetIface();
+		if (!sid) {
+			out.push(E('p', {}, E('em', {},
+				_('No qmi interface found — the cell lock is stored on the cellular WAN interface.'))));
+			return out;
+		}
+
+		var lock4g = uci.get('network', sid, 'lock_4g') || [];
+		if (!Array.isArray(lock4g))
+			lock4g = (lock4g != null && lock4g !== '') ? [ lock4g ] : [];
+		var lock5g = uci.get('network', sid, 'lock_5g') || '';
+		var persist = uci.get('network', sid, 'lock_persist') == '1';
+
+		var l4In = E('input', { 'type': 'text', 'class': 'cbi-input-text', 'style': 'width:100%',
+			'placeholder': '1300:246 5230:118', 'value': lock4g.join(' ') });
+		var l5In = E('input', { 'type': 'text', 'class': 'cbi-input-text', 'style': 'width:100%',
+			'placeholder': '242:431070:1:78', 'value': lock5g });
+		var persistChk = E('input', { 'type': 'checkbox', 'checked': persist ? '' : null });
+
+		var save = function() {
+			var l4 = (l4In.value || '').split(/[\s,]+/).filter(function(x) { return x; });
+			if (l4.length) uci.set('network', sid, 'lock_4g', l4);
+			else uci.unset('network', sid, 'lock_4g');
+
+			var v5 = (l5In.value || '').trim();
+			if (v5) uci.set('network', sid, 'lock_5g', v5);
+			else uci.unset('network', sid, 'lock_5g');
+
+			if (persistChk.checked) uci.set('network', sid, 'lock_persist', '1');
+			else uci.unset('network', sid, 'lock_persist');
+
+			return uci.save().then(function() { return uci.apply(); }).then(function() {
+				ui.addNotification(null, E('p',
+					_('Cell lock saved. Reconnect the interface to apply.')), 'info');
+			});
+		};
+
+		var row = function(label, node, hint) {
+			return E('div', { 'class': 'cbi-value' }, [
+				E('label', { 'class': 'cbi-value-title' }, label),
+				E('div', { 'class': 'cbi-value-field' },
+					hint ? [ node, E('div', { 'class': 'cbi-value-description' }, hint) ] : [ node ]),
+			]);
+		};
+
+		out.push(E('div', { 'class': 'cbi-section' }, [
+			row(_('LTE cell lock'), l4In,
+				_('Space/comma separated "earfcn:pci" entries (several = a cell list). See Status → Modem for the live cells and their lock values.')),
+			row(_('5G NR SA cell lock'), l5In,
+				_('A single 5G SA cell as "pci:arfcn:scs:band".')),
+			row(_('Persist in modem'),
+				E('label', { 'style': 'font-weight:normal' }, [ persistChk, ' ' + _('Store the lock in modem non-volatile memory') ]),
+				null),
+			E('div', { 'class': 'cbi-page-actions', 'style': 'margin-top:6px' }, [
+				E('button', { 'class': 'btn cbi-button cbi-button-apply',
+					'click': ui.createHandlerFn(self, save) }, _('Save cell lock')),
+				' ',
+				E('button', { 'class': 'btn cbi-button cbi-button-reset',
+					'click': ui.createHandlerFn(self, function() {
+						l4In.value = ''; l5In.value = ''; persistChk.checked = false;
+						return save();
+					}) }, _('Clear lock')),
+			]),
+		]));
+		return out;
+	},
+
 	render: function(data) {
 		if (!data || !data.modem)
 			return E('p', {}, _('No modem present.'));
@@ -431,12 +714,9 @@ return view.extend({
 			E('option', { value: 255, selected: s.roaming_preference == 255 ? '' : null }, _('any')),
 		]);
 
-		var lteIn = E('input', { type: 'text', style: 'width:100%',
-			value: (s.lte_bands || []).join(',') });
-		var saIn = E('input', { type: 'text', style: 'width:100%',
-			value: (s.nr5g_sa_bands || []).join(',') });
-		var nsaIn = E('input', { type: 'text', style: 'width:100%',
-			value: (s.nr5g_nsa_bands || []).join(',') });
+		var ltePicker = bandPicker(lteKnownBands(), s.lte_bands || []);
+		var saPicker  = bandPicker(nrKnownBands(), s.nr5g_sa_bands || []);
+		var nsaPicker = bandPicker(nrKnownBands(), s.nr5g_nsa_bands || []);
 
 		var collect = function() {
 			var mode = 0;
@@ -449,9 +729,9 @@ return view.extend({
 				mode_preference: mode,
 				usage_preference: +usageSel.value,
 				roaming_preference: +roamSel.value,
-				lte_bands: parseBandList(lteIn.value),
-				nr5g_sa_bands: parseBandList(saIn.value),
-				nr5g_nsa_bands: parseBandList(nsaIn.value),
+				lte_bands: ltePicker._collect(),
+				nr5g_sa_bands: saPicker._collect(),
+				nr5g_nsa_bands: nsaPicker._collect(),
 			};
 		};
 
@@ -462,15 +742,25 @@ return view.extend({
 			]);
 		};
 
+		// protocol label (shown if the daemon reports it; graceful if absent)
+		var proto = data.info && (data.info.protocol || data.info.proto);
+		var head = _('Modem Settings') + ' — ' + data.modem +
+			(proto ? ' (' + String(proto).toUpperCase() + ')' : '');
+
+		var warns = renderWarnings(data.info && data.info.config_warnings);
+
 		return E('div', {}, [
-			E('h2', {}, _('Modem Settings') + ' — ' + data.modem),
+			E('h2', {}, head),
+			warns || '',
 			E('div', { 'class': 'cbi-section' }, [
 				row(_('Radio technologies'), E('div', {}, modeBoxes)),
 				row(_('UE usage'), usageSel),
 				row(_('Roaming'), roamSel),
-				row(_('LTE bands'), lteIn),
-				row(_('NR5G SA bands'), saIn),
-				row(_('NR5G NSA bands'), nsaIn),
+				row(_('LTE bands'), ltePicker),
+				row(_('NR5G SA bands'), saPicker),
+				row(_('NR5G NSA bands'), nsaPicker),
+				E('p', { 'style': 'margin:6px 0 0;color:var(--fg-color-2,#666)' }, E('em', {},
+					_('Leave every band unchecked (and the fallback empty) to let the modem use all supported bands.'))),
 			]),
 			E('div', { 'class': 'cbi-page-actions' }, [
 				E('button', { 'class': 'btn cbi-button cbi-button-apply',
@@ -487,7 +777,8 @@ return view.extend({
 						});
 					}) }, _('Reset to defaults')),
 			]),
-		].concat(this.renderSim(data)).concat([
+			this.renderNetSel(data),
+		].concat(this.renderCellLock(data)).concat(this.renderSim(data)).concat([
 			E('h3', {}, _('SIM PLMN preference lists')),
 			plmnTable(_('User-controlled (EF PLMNwAcT, 6F60)'), (data.plmn || {}).user,
 				_('optional SIM file — not provisioned on this SIM, and the device cannot create it')),

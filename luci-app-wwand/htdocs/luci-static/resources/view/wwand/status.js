@@ -79,6 +79,28 @@ function tbl(rows) {
 	}));
 }
 
+/* status().config_warnings for a modem (added by a sibling daemon change).
+   Absent/empty -> null so nothing is rendered. */
+function renderWarnings(warns) {
+	if (!warns || !warns.length)
+		return null;
+	var items = warns.map(function(w) {
+		var warn = (w.severity == 'warn');
+		var det = [];
+		if (w.expected != null) det.push(_('expected') + ': ' + w.expected);
+		if (w.actual != null)   det.push(_('actual') + ': ' + w.actual);
+		return E('div', { 'style': 'display:flex;gap:9px;align-items:flex-start;padding:8px 12px;' +
+			'border-radius:6px;margin:5px 0;' +
+			(warn ? 'background:rgba(192,57,43,.12);color:#b3271a' : 'background:rgba(11,111,194,.11);color:#0b6fc2') }, [
+			E('span', { 'style': 'font-size:1.15em;flex:none' }, warn ? '⚠' : 'ℹ'),
+			E('div', {}, [
+				E('div', {}, [ w.check ? E('strong', {}, w.check + ': ') : '', w.message || '' ]),
+				det.length ? E('div', { 'style': 'opacity:.85;font-size:.9em;margin-top:2px' }, det.join(' · ')) : '' ]) ]);
+	});
+	return E('div', { 'class': 'cbi-section' },
+		[ E('h3', {}, _('Configuration warnings')) ].concat(items));
+}
+
 /* Per-context connection detail: IPs, gateways, DNS, MTU — the stuff you
    otherwise only see by digging through ubus / the modem. */
 function renderConnections(details) {
@@ -257,7 +279,13 @@ function renderLive(name, modem) {
 			]));
 		}
 
-		var out = [ E('div', { 'style': 'display:flex;gap:16px;flex-wrap:wrap' }, cols) ];
+		var out = [];
+
+		/* --- configuration warnings (if the daemon reports any) --- */
+		var warns = renderWarnings(modem.config_warnings);
+		if (warns) out.push(warns);
+
+		out.push(E('div', { 'style': 'display:flex;gap:16px;flex-wrap:wrap' }, cols));
 
 		/* --- active connections (per context) --- */
 		var conns = renderConnections(ctxDetails);
