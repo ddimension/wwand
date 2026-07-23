@@ -31,6 +31,7 @@ import * as recovery_mod from './recovery.uc';
 import * as atcmd from './atcmd.uc';
 import * as backend from './backend.uc';
 import * as qmi_backend from './qmi_backend.uc';
+import * as modem_common from './modem_common.uc';
 import * as protoswitch from './protocol_switch.uc';
 import * as tlv from './codec/tlv.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
@@ -526,58 +527,16 @@ export function create(opts)
 	};
 
 	// AT side channel: best-effort, failures never block bring-up
-	step_at = () => {
-		if (self.at)
-			return step_datapath();
-
-		let fxi = at_opts.fx ?? netlink.default_fx((level, msg) => log(level, msg));
-		let tty = atcmd.find_tty(fxi, self.device, self.config.tty);
-
-		if (!tty) {
-			log('info', 'no AT port found');
-			return step_datapath();
-		}
-
-		let open_transport = at_opts.open_transport ?? atcmd.open_transport;
-		let tr = open_transport(tty, 115200, (level, msg) => log(level, msg));
-
-		if (!tr) {
-			log('warn', sprintf('cannot open AT port %s', tty));
-			return step_datapath();
-		}
-
-		self.at = atcmd.create(tr, { log: (level, msg) => log(level, sprintf('at: %s', msg)) });
-		self.at_tty = tty;
-		log('notice', sprintf('AT port: %s', tty));
-
-		// model quirks + configured at_init list (old serial_init + at_init),
-		// then cell locks
-		let cmds = [
-			...atcmd.model_init_commands(self.info.model),
-			...(self.config.at_init ?? []),
-			...atcmd.cell_lock_commands(self.config),
-		];
-
-		// M9200B: periodically drain stale serial output (old
-		// empty_serial_buffers quirk, ran from the watchdog loop)
-		if (index(self.info.revision ?? '', 'M9200B') >= 0) {
-			let interval = self.timing.at_drain ?? 60000;
-			let tick;
-
-			tick = () => {
-				self.at.drain();
-				at_drain_timer = uloop.timer(interval, tick);
-			};
-
-			at_drain_timer = uloop.timer(interval, tick);
-			log('notice', 'M9200B detected, enabling serial drain');
-		}
-
-		if (!length(cmds))
-			return step_esim_quirk();
-
-		self.at.run_sequence(cmds, step_esim_quirk);
-	};
+	step_at = () => modem_common.open_at(self, {
+		at_opts: at_opts,
+		log: log,
+		drain_interval: self.timing.at_drain,
+		set_drain_timer: (t) => { at_drain_timer = t; },
+		next: step_esim_quirk,
+		// preserved: when AT is already open (defensive re-entry), skip straight
+		// to the datapath rather than re-running the eSIM quirk
+		reopen_next: step_datapath,
+	});
 
 	// eSIM host-access quirk: free the eUICC's ISD-R from the modem's internal
 	// LPA so host-side ES10 APDUs (CCHO/CGLA) work. Disabling lpa_enable only

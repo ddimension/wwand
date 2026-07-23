@@ -16,6 +16,7 @@
 import * as uloop from 'uloop';
 import * as transport_mod from './transport.uc';
 import * as mbim_client from './mbim_client.uc';
+import * as modem_common from './modem_common.uc';
 import * as mbimmod from './codec/mbim.uc';
 import * as recovery_mod from './recovery.uc';
 import * as atcmd from './atcmd.uc';
@@ -201,34 +202,16 @@ export function create(opts)
 		});
 	};
 
-	// AT side channel: best-effort, only for quirks and protocol switching
-	step_at = () => {
-		if (self.at)
-			return step_datapath();
-
-		let fxi = at_opts.fx ?? netlink.default_fx((l, m) => log(l, m));
-		let tty = atcmd.find_tty(fxi, self.device, self.config.tty);
-
-		if (!tty)
-			return step_datapath();
-
-		let open_transport = at_opts.open_transport ?? atcmd.open_transport;
-		let tr = open_transport(tty, 115200, (l, m) => log(l, m));
-
-		if (!tr)
-			return step_datapath();
-
-		self.at = atcmd.create(tr, { log: (l, m) => log(l, sprintf('at: %s', m)) });
-		self.at_tty = tty;
-		log('notice', sprintf('AT port: %s', tty));
-
-		let cmds = [ ...(self.config.at_init ?? []), ...atcmd.cell_lock_commands(self.config) ];
-
-		if (!length(cmds))
-			return step_datapath();
-
-		self.at.run_sequence(cmds, step_datapath);
-	};
+	// AT side channel: best-effort, for quirks, telemetry fallback and protocol
+	// switching. Shared with the QMI backend (also gains model-init + M9200B
+	// drain via the common helper).
+	step_at = () => modem_common.open_at(self, {
+		at_opts: at_opts,
+		log: log,
+		drain_interval: self.timing.at_drain,
+		set_drain_timer: (t) => { at_drain_timer = t; },
+		next: step_datapath,
+	});
 
 	// session datapath: parent netdev up, one VLAN sub-device per session id
 	// > 0 (named after the context's mux_link so netifd's device binding
