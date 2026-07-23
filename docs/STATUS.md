@@ -1,9 +1,9 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-23. 27 test suites green (~968 checks); all committed.
+_Last updated: 2026-07-23. 27 test suites green (~1005 checks); all committed.
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
 Deep-review follow-ups below: #1/#2/#4/#5 + the full minor-hardening list done;
-#3 partial (only the large state-machine-scaffolding unification remains)._
+#3 scaffolding now consolidated (only the genuinely per-protocol logic remains)._
 
 ## Next TODO — deep-review follow-ups (2026-07-23)
 
@@ -47,13 +47,25 @@ released on teardown. Remaining, ranked by value:
      passthrough `self.pt.nas`, plus MBIM's native candidate — folding them
      would add parameterisation without real dedup).
 
-   **Remaining (the large part):** the modem *scaffolding* still forks —
-   `emit`/`set_state`/`notify_contexts`/`attach_context`/`note_connect_*`/
-   `fail`+backoff and the step-chain shape are parallel across `modem.uc`/
-   `modem_mbim.uc`/`modem_ncm.uc`. `docs/backend-interface.md` describes the
-   shared-core contract as the target. This is Phase 1/2 of the migration doc:
-   large, staged, HW-critical — best done incrementally with a HW pass. Not yet
-   started.
+   **Scaffolding — now consolidated** (`805b97e`, `5c016ee`, `589120a`,
+   `d8f1763`, `f7a5d2e`). `modem_common` grew a shared core the three modems now
+   install instead of each carrying a copy:
+   - `scaffolding(self, {deps,log,rec})` — `emit`/`notify_contexts`/`set_state`/
+     `attach_context`/`note_connect_success`/`trip_zero_rx`/`stop`/`_device_gone`
+     (all byte-identical before).
+   - `make_fail(self, …)` — the `fail()`+backoff handler (was 3 near-copies; also
+     fixed a real divergence — MBIM/NCM now emit the `'error'` event QMI always
+     did).
+   - `note_connect_failure_light(self, rec)` — the MBIM/NCM "light" recovery
+     passthrough (QMI keeps its dms-cycling version).
+   - `watch_driver` now drives the fast-telemetry cadence for **all three**
+     (NCM was migrated too — it had the same loop).
+
+   Net −68 LOC despite ~250 new test lines; the real win is one source of truth
+   (test_modem_common 65 checks) + the divergence fix. **Remaining fork is
+   genuine, not duplication:** the per-protocol step chains, `with_nas`, the
+   teardown bodies (client destruction differs), and QMI's CID alloc/release —
+   these are legitimately backend-specific and not worth forcing together.
 4. ✅ **DONE (`d406ce4`) — `qmi_backend` telemetry suite.** New `test_qmi_backend`
    (24 checks), the QMI analogue of `test_mbim_backend`: each op (`get_ca`/
    `get_data_mode`/`get_reg_detail`/`get_packet_stats`/`get_bearer`/
