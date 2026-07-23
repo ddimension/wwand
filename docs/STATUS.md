@@ -1,8 +1,8 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-23. 23 test suites green (~790 checks); all committed.
+_Last updated: 2026-07-23. 25 test suites green (~869 checks); all committed.
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
-Deep-review follow-ups tracked below (quick wins + #1 + #2 done)._
+Deep-review follow-ups tracked below (quick wins + #1 + #2 done; #3 partial)._
 
 ## Next TODO — deep-review follow-ups (2026-07-23)
 
@@ -34,14 +34,25 @@ released on teardown. Remaining, ranked by value:
    neutralizes its only real harm (skipped rungs). A true single-owner refactor
    of the counter is **not pursued** — low value, and the caller path is
    HW-critical WAN code better left untouched without HW validation.
-3. **Three forked state machines → real shared core.** `modem.uc`/`modem_mbim.uc`/
-   `modem_ncm.uc` (+ three contexts) are parallel impls; the shared-core contract
-   in `docs/backend-interface.md` is a target, not realized (`modem_common` only
-   extracts `open_at`/`close_at`). Genuinely duplicated: the fast "watch"
-   telemetry loop, the `backend.choose` resolvers (`_sig_be/_cells_be/_ca_be/
-   _dsd_be/_regd_be`, dup'd QMI↔MBIM), and the zero-rx watchdog (3 copies). This
-   fork is where divergence bugs are born. Execute Phase 1/2 of the migration
-   doc. *large, staged. Biggest structural risk reducer.*
+3. **Three forked state machines → real shared core.** *Partially done — the
+   three concrete duplications the review named are consolidated:*
+   - ✅ zero-rx watchdog (3 copies) → `context_common.uc` (`zero_rx_limit_ms` +
+     `rx_stall_watch`), commit `f09be7d`, +22 tests.
+   - ✅ fast "watch" telemetry loop (2 copies, "Mirrors modem.uc") →
+     `modem_common.watch_driver`, commit `e0d3b2e`, +12 tests.
+   - ✅ `dsd_from_serving`/`dsd_from_radio` helpers → `modem_common`, commit
+     `220130e`. The rest of the `_ca_be`/`_dsd_be` resolvers stays per-backend
+     on purpose (candidate lists genuinely differ: `self.nas` vs the lazy
+     passthrough `self.pt.nas`, plus MBIM's native candidate — folding them
+     would add parameterisation without real dedup).
+
+   **Remaining (the large part):** the modem *scaffolding* still forks —
+   `emit`/`set_state`/`notify_contexts`/`attach_context`/`note_connect_*`/
+   `fail`+backoff and the step-chain shape are parallel across `modem.uc`/
+   `modem_mbim.uc`/`modem_ncm.uc`. `docs/backend-interface.md` describes the
+   shared-core contract as the target. This is Phase 1/2 of the migration doc:
+   large, staged, HW-critical — best done incrementally with a HW pass. Not yet
+   started.
 4. **`qmi_backend.uc` telemetry test.** MBIM has a rigorous hand-built-wire-buffer
    suite (`test_mbim_backend`, 38 checks); QMI's `get_data_mode/get_ca/
    get_reg_detail/get_packet_stats` have no dedicated per-function test. Given the
