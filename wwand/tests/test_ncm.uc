@@ -388,6 +388,95 @@ push(scenarios, {
 	},
 });
 
+// --- s7: Quectel telemetry -> QMI self.cells / self.signal / reg_detail ------
+//
+// Drives the vendor telemetry block (QENG servingcell+neighbourcell, per-antenna
+// QRSRP/QRSRQ/QSINR, QCAINFO, CEER, QNWLOCK) and asserts it decodes into the same
+// shapes the QMI backend produces, so the LuCI status page renders identically.
+
+push(scenarios, {
+	name: 's7_quectel_telemetry',
+	script: script([
+		{ re: /^AT\+QENG="servingcell"$/, lines: [
+			'+QENG: "servingcell","CONNECT"',
+			'+QENG: "LTE","FDD",262,01,1C36403,246,1300,3,5,5,BFF,-93,-11,-61,21,15,100,-',
+			'+QENG: "NR5G-NSA",262,01,242,-102,19,-11,431070,1,3,0',
+		] },
+		{ re: /^AT\+QENG="neighbourcell"$/, lines: [
+			'+QENG: "neighbourcell intra","LTE",1300,155,-13,-99,-70,8,-4,7,0,0,0',
+			'+QENG: "neighbourcell inter","LTE",100,88,-15,-105,-75,4,-8,5,0,0',
+		] },
+		{ re: /^AT\+QRSRP\?$/, lines: [ '+QRSRP: -95,-98,-140,-140,LTE' ] },
+		{ re: /^AT\+QRSRQ\?$/, lines: [ '+QRSRQ: -11,-12,-20,-20,LTE' ] },
+		{ re: /^AT\+QSINR\?$/, lines: [ '+QSINR: 21,19,0,0,LTE' ] },
+		{ re: /^AT\+QCAINFO$/, lines: [
+			'+QCAINFO: "PCC",1300,100,"LTE BAND 3",1,246',
+			'+QCAINFO: "SCC",1450,75,"LTE BAND 7",2,300',
+		] },
+		{ re: /^AT\+CEER$/, lines: [ '+CEER: EMM cause 33, requested service option not subscribed' ] },
+		{ re: /^AT\+QNWLOCK="common\/4g"$/, lines: [ '+QNWLOCK: "common/4g",1,1300,246' ] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6', mux_id: 0 },
+	run: (env) => {
+		let m = env.modem;
+
+		// wait for the first slow telemetry tick (interval=stats_interval=1s) to
+		// populate signal + cells + reg_detail, then assert the QMI shapes
+		uloop.timer(1500, () => {
+			// per-antenna QRSRP/QRSRQ/QSINR merged into self.signal.lte (best branch;
+			// snr in 0.1 dB), NR5G filled from the serving cell
+			eq(m.signal?.lte?.rsrp, -95, 'signal.lte.rsrp = best QRSRP branch');
+			eq(m.signal?.lte?.rsrq, -11, 'signal.lte.rsrq = best QRSRQ branch');
+			eq(m.signal?.lte?.snr, 210, 'signal.lte.snr = best QSINR ×10 (0.1 dB)');
+			eq(m.signal?.nr5g?.rsrp, -102, 'signal.nr5g.rsrp from QENG serving NR line');
+
+			// self.cells.lte_intra: serving identifiers + serving-as-cell + neighbour
+			let li = m.cells?.lte_intra;
+			eq(li?.serving_cell_id, 246, 'lte_intra.serving_cell_id = serving PCI');
+			eq(li?.earfcn, 1300, 'lte_intra.earfcn');
+			eq(li?.tac, 3071, 'lte_intra.tac (hex BFF decoded)');
+			eq(li?.global_cell_id, 29582339, 'lte_intra.global_cell_id (hex cid decoded)');
+			eq(li?.plmn, '262/01', 'lte_intra.plmn = mcc/mnc');
+			eq(length(li?.cells), 2, 'lte_intra.cells = serving + 1 neighbour');
+			// serving entry (pci == serving_cell_id) carries metrics in 0.1 dB units
+			let srv = filter(li.cells, (c) => c.pci == li.serving_cell_id)[0];
+			eq(srv?.rsrp, -930, 'serving cell rsrp ×10 (0.1 dB units, QMI scale)');
+			let nb = filter(li.cells, (c) => c.pci == 155)[0];
+			eq(nb?.rsrp, -990, 'neighbour cell rsrp ×10 from QENG neighbourcell');
+			eq(nb?.rsrq, -130, 'neighbour cell rsrq ×10');
+
+			// inter-frequency neighbours grouped by earfcn
+			eq(m.cells?.lte_inter?.freqs[0]?.earfcn, 100, 'lte_inter freq earfcn');
+			eq(m.cells?.lte_inter?.freqs[0]?.cells[0]?.pci, 88, 'lte_inter neighbour pci');
+
+			// NR5G serving cell (nr5g_cell) + arfcn, metrics ×10
+			eq(m.cells?.nr5g_arfcn, 431070, 'nr5g_arfcn');
+			eq(m.cells?.nr5g_cell?.pci, 242, 'nr5g_cell.pci');
+			eq(m.cells?.nr5g_cell?.rsrp, -1020, 'nr5g_cell.rsrp ×10');
+			eq(m.cells?.nr5g_cell?.snr, 190, 'nr5g_cell.snr ×10');
+
+			// QCAINFO -> ca
+			eq(length(m.cells?.ca), 2, 'QCAINFO -> two carriers');
+			eq(m.cells?.ca[0]?.role, 'PCC', 'ca[0] role PCC');
+			eq(m.cells?.ca[0]?.band, 3, 'ca[0] band 3');
+
+			// data-system mode from the QENG NR line
+			eq(m.dsd_status?.mode, 'NSA', 'dsd_status mode = NSA');
+
+			// CEER -> reg_detail (mapped through the QMI REJECT_CAUSE table)
+			eq(m.reg_detail?.reject_cause, 33, 'CEER -> reg_detail.reject_cause 33');
+			eq(m.reg_detail?.reject_text, 'requested service option not subscribed',
+				'reject_cause 33 mapped to text via REJECT_CAUSE');
+
+			// cell-lock read-back surfaced on self.locks
+			eq(m.locks?.lte?.enabled, true, 'QNWLOCK read -> self.locks.lte.enabled');
+			eq(m.locks?.lte?.values, [ 1300, 246 ], 'self.locks.lte.values (earfcn/pci)');
+
+			env.finish();
+		});
+	},
+});
+
 // --- direct unit test: parse_cgcontrdp on the exact RG650E-EU line ----------
 
 let rdp = modem_ncm.parse_cgcontrdp([

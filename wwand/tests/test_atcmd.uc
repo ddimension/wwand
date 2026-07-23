@@ -181,13 +181,88 @@ let sc = atcmd.parse_qeng_servingcell([
 	'+QENG: "NR5G-NSA",262,01,242,-102,19,-11,431070,1,3,0',
 ]);
 eq(sc.state, 'NOCONN', 'qeng: serving state');
-eq(sc.lte, { band: 3, earfcn: 1300, pci: 246, bandwidth_mhz: 20, rsrp: -93, rsrq: -11, sinr: 21 },
-	'qeng: LTE serving cell (dlbw idx 5 -> 20 MHz)');
-eq(sc.nr, { mode: 'NSA', band: 1, arfcn: 431070, pci: 242, bandwidth_mhz: 10, rsrp: -102, sinr: 19, rsrq: -11 },
+eq(sc.lte, { mcc: 262, mnc: '01', cid: 29582339, tac: 3071, band: 3, earfcn: 1300,
+	pci: 246, bandwidth_mhz: 20, rsrp: -93, rsrq: -11, rssi: -61, sinr: 21 },
+	'qeng: LTE serving cell (dlbw idx 5 -> 20 MHz, mcc/mnc/cid/tac decoded)');
+eq(sc.nr, { mode: 'NSA', mcc: 262, mnc: '01', band: 1, arfcn: 431070, pci: 242,
+	bandwidth_mhz: 10, rsrp: -102, sinr: 19, rsrq: -11 },
 	'qeng: NR5G-NSA carrier (dlbw idx 3 -> 10 MHz)');
 
 eq(atcmd.parse_qeng_servingcell([ '+QENG: "servingcell","NOCONN"' ]),
 	{ state: 'NOCONN', lte: null, nr: null }, 'qeng: state only, no cells');
+
+// --- AT+QENG="neighbourcell" parsing (intra + inter) -------------------------
+// metrics come out in QMI 0.1 dB units (×10). Quectel order after earfcn,pcid is
+// rsrq,rsrp,rssi,sinr,srxlev.
+let nb = atcmd.parse_qeng_neighbourcell([
+	'+QENG: "neighbourcell intra","LTE",1300,155,-13,-99,-70,8,-4,7,0,0,0',
+	'+QENG: "neighbourcell inter","LTE",100,88,-15,-105,-75,4,-8,5,0,0',
+	'+QENG: "neighbourcell inter","LTE",100,91,-16,-108,-78,2,-10,5,0,0',
+]);
+eq(length(nb.intra), 1, 'qeng nc: one intra neighbour');
+eq(nb.intra[0], { earfcn: 1300, pci: 155, rsrq: -130, rsrp: -990, rssi: -700, srxlev: -40 },
+	'qeng nc: intra neighbour (metrics ×10 into 0.1 dB units)');
+eq(length(nb.inter), 2, 'qeng nc: two inter neighbours');
+eq(nb.inter[1], { earfcn: 100, pci: 91, rsrq: -160, rsrp: -1080, rssi: -780, srxlev: -100 },
+	'qeng nc: inter neighbour parsed');
+eq(atcmd.parse_qeng_neighbourcell([ 'OK' ]), { intra: [], inter: [] }, 'qeng nc: none -> empty');
+
+// --- per-branch AT+QRSRP?/QRSRQ?/QSINR? --------------------------------------
+let qp = atcmd.parse_qrsrp([ '+QRSRP: -95,-98,-140,-140,LTE' ]);
+eq(qp.mode, 'LTE', 'qrsrp: sysmode LTE');
+eq(qp.branches, [ -95, -98, -140, -140 ], 'qrsrp: four Rx branches');
+eq(atcmd.branch_best(qp, -200), -95, 'qrsrp: best (strongest) branch');
+eq(atcmd.parse_qsinr([ '+QSINR: 24,22,16,18,NR5G' ]).mode, 'NR5G', 'qsinr: NR5G sysmode');
+eq(atcmd.branch_best(atcmd.parse_qsinr([ '+QSINR: 24,22,16,18,NR5G' ]), -200), 24,
+	'qsinr: best branch = 24');
+
+// --- AT+CEER reject-cause extraction -----------------------------------------
+eq(atcmd.parse_ceer([ '+CEER: EMM cause 33, requested service option not subscribed' ]),
+	{ text: 'EMM cause 33, requested service option not subscribed', cause: 33 },
+	'ceer: numeric cause after "cause"');
+eq(atcmd.parse_ceer([ '+CEER: No cause information available' ]).cause, null,
+	'ceer: free text -> no cause');
+
+// --- AT+CESQ (3GPP-generic signal) -------------------------------------------
+// +CESQ: rxlev,ber,rscp,ecno,rsrq,rsrp -> LTE rsrp=-140+n, rsrq=-19.5+n*0.5
+let cq = atcmd.parse_cesq([ '+CESQ: 99,99,255,255,20,60' ]);
+eq(cq.lte, { rsrq: -9.5, rsrp: -80 }, 'cesq: LTE rsrp/rsrq decoded');
+eq(cq.gsm_rssi, null, 'cesq: GSM n/a (rxlev 99)');
+eq(atcmd.parse_cesq([ '+CESQ: 99,99,60,30,255,255' ]).wcdma, { rscp: -60, ecno: -9.0 },
+	'cesq: WCDMA rscp/ecno decoded');
+
+// --- Huawei ^HCSQ signal (best-effort conversion) ----------------------------
+let hc = atcmd.parse_hcsq([ '^HCSQ: "LTE",30,29,91,22' ]);
+eq(hc.mode, 'LTE', 'hcsq: LTE mode');
+eq(hc.lte, { rssi: -91, rsrp: -112, sinr: -1.8, rsrq: -8.5 },
+	'hcsq: LTE rssi/rsrp/sinr/rsrq converted (v-121, v-141, v/5-20, v/2-19.5)');
+// tolerates the report-config prefix seen on some firmwares
+eq(atcmd.parse_hcsq([ '^HCSQ: 2,0,"LTE",63,20,68,151' ]).mode, 'LTE',
+	'hcsq: numeric report-config prefix tolerated');
+
+// --- Huawei ^MONSC serving cell (best-effort) --------------------------------
+let ms = atcmd.parse_monsc([ '^MONSC: LTE,250,02,6350,1A2B3C,131,ABCD,-104,-12,-81' ]);
+eq(ms.mcc, 250, 'monsc: mcc');
+eq(ms.earfcn, 6350, 'monsc: earfcn');
+eq(ms.pci, 131, 'monsc: pci');
+eq(ms.cid, 1715004, 'monsc: cell id from hex');
+eq(ms.tac, 43981, 'monsc: tac from hex');
+eq(ms.rsrp, -1040, 'monsc: rsrp ×10 into 0.1 dB');
+eq(ms.rsrp_dbm, -104, 'monsc: rsrp_dbm kept for self.signal');
+
+// --- MeiG AT+MENG serving + neighbour (best-effort) --------------------------
+let mg = atcmd.parse_meng_servingcell([
+	'+MENG: "servingcell",1,"LTE",1,262,03,1A2B3C4,88,1300,3,5,5,BFF,-95,-10,-65,12',
+]);
+eq(mg.pci, 88, 'meng: serving pci');
+eq(mg.earfcn, 1300, 'meng: serving earfcn');
+eq(mg.rsrp_dbm, -95, 'meng: serving rsrp dBm');
+eq(mg.rsrp, -950, 'meng: serving rsrp ×10');
+let mgn = atcmd.parse_meng_neighbourcell([
+	'+MENG: "neighbourcell intra","LTE",1300,155,-99,-13,-,-,-5',
+]);
+eq(mgn.intra[0], { earfcn: 1300, pci: 155, rsrp: -990, rsrq: -130, srxlev: -50 },
+	'meng nc: intra neighbour (RSRP,RSRQ order, metrics ×10)');
 
 // --- AT+COPS=? scan parsing --------------------------------------------------
 

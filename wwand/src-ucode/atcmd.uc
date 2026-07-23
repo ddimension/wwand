@@ -203,6 +203,8 @@ export function parse_qeng_servingcell(lines)
 {
 	let out = { state: null, lte: null, nr: null };
 	let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+	// QENG reports cell id / TAC as hex strings; decode to a decimal integer
+	let hnum = (s) => (s != null && match(s, /^[0-9A-Fa-f]+$/)) ? hex(s) : null;
 
 	for (let l in (lines ?? [])) {
 		let m = match(l, /\+QENG:\s*"([^"]+)"(.*)/);
@@ -221,15 +223,17 @@ export function parse_qeng_servingcell(lines)
 		else if (kind == 'LTE') {
 			// f: dup,mcc,mnc,cid,pci,earfcn,band,ulbw,dlbw,tac,rsrp,rsrq,rssi,sinr
 			out.lte = {
+				mcc: num(f[1]), mnc: f[2], cid: hnum(f[3]), tac: hnum(f[9]),
 				band: num(f[6]), earfcn: num(f[5]), pci: num(f[4]),
 				bandwidth_mhz: BW_IDX_MHZ[f[8]] ?? null,
-				rsrp: num(f[10]), rsrq: num(f[11]), sinr: num(f[13]),
+				rsrp: num(f[10]), rsrq: num(f[11]), rssi: num(f[12]), sinr: num(f[13]),
 			};
 		}
 		else if (kind == 'NR5G-NSA') {
 			// mcc,mnc,pci,rsrp,sinr,rsrq,arfcn,band,dlbw,scs (verified on RG502Q)
 			out.nr = {
-				mode: 'NSA', band: num(f[7]), arfcn: num(f[6]), pci: num(f[2]),
+				mode: 'NSA', mcc: num(f[0]), mnc: f[1], band: num(f[7]),
+				arfcn: num(f[6]), pci: num(f[2]),
 				bandwidth_mhz: BW_IDX_MHZ[f[8]] ?? null,
 				rsrp: num(f[3]), sinr: num(f[4]), rsrq: num(f[5]),
 			};
@@ -238,11 +242,336 @@ export function parse_qeng_servingcell(lines)
 			// dup,mcc,mnc,cid,pci,tac,arfcn,band,dlbw,rsrp,rsrq,sinr (best-effort:
 			// SA layout not verified on hardware yet)
 			out.nr = {
-				mode: 'SA', band: num(f[7]), arfcn: num(f[6]), pci: num(f[4]),
+				mode: 'SA', mcc: num(f[1]), mnc: f[2], cid: hnum(f[3]),
+				tac: hnum(f[5]), band: num(f[7]), arfcn: num(f[6]), pci: num(f[4]),
 				bandwidth_mhz: BW_IDX_MHZ[f[8]] ?? null,
 				rsrp: num(f[9]), rsrq: num(f[10]), sinr: num(f[11]),
 			};
 		}
+	}
+
+	return out;
+}
+
+// parse AT+QENG="neighbourcell" (Quectel) into intra- and inter-frequency LTE
+// neighbours. rsrp/rsrq/rssi/srxlev come out in QMI 0.1 dB units (×10) so they
+// slot straight into the GET_CELL_LOCATION_INFO lte_intra/lte_inter shape and
+// render through the same LuCI sig10 (÷10) path as the QMI set. Quectel format
+// (QuecCell AT manual), fields after the RAT tag:
+//   +QENG: "neighbourcell intra","LTE",<earfcn>,<pcid>,<rsrq>,<rsrp>,<rssi>,<sinr>,<srxlev>,...
+//   +QENG: "neighbourcell inter","LTE",<earfcn>,<pcid>,<rsrq>,<rsrp>,<rssi>,<sinr>,<srxlev>,...
+//   +QENG: "neighbourcell","LTE",...            (older firmwares; treated as intra)
+// returns { intra: [ {earfcn,pci,rsrq,rsrp,rssi,srxlev} ], inter: [ ... ] }.
+export function parse_qeng_neighbourcell(lines)
+{
+	let out = { intra: [], inter: [] };
+	let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+	let x10 = (s) => { let n = num(s); return (n != null) ? n * 10 : null; };
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+QENG:\s*"neighbourcell([^"]*)","LTE",(.*)/);
+
+		if (!m)
+			continue;
+
+		let scope = trim(m[1]);   // '' | 'intra' | 'inter'
+		let f = map(split(m[2], ','), (x) => trim(x));
+		// f: earfcn,pcid,rsrq,rsrp,rssi,sinr,srxlev,...
+		let cell = {
+			earfcn: num(f[0]), pci: num(f[1]),
+			rsrq: x10(f[2]), rsrp: x10(f[3]), rssi: x10(f[4]), srxlev: x10(f[6]),
+		};
+
+		if (cell.pci == null)
+			continue;
+
+		push((scope == 'inter') ? out.inter : out.intra, cell);
+	}
+
+	return out;
+}
+
+// per-Rx-branch signal (Quectel), the antenna-alignment source:
+//   +QRSRP: <b0>,<b1>,<b2>,<b3>,<sysmode>   (dBm; sysmode = LTE | NR5G | ...)
+//   +QRSRQ: <b0>,<b1>,<b2>,<b3>,<sysmode>   (dB)
+//   +QSINR: <b0>,<b1>,<b2>,<b3>,<sysmode>   (dB)
+// returns { mode, branches:[ints] } for the first matching line (or null).
+function qbranch(lines, re)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, re);
+
+		if (!m)
+			continue;
+
+		let mode = null, branches = [];
+
+		for (let x in split(m[1], ',')) {
+			x = trim(x);
+
+			if (match(x, /^-?[0-9]+$/))
+				push(branches, +x);
+			else if (x != '')
+				mode = x;   // trailing sysmode token
+		}
+
+		return { mode: mode, branches: branches };
+	}
+
+	return null;
+}
+
+export function parse_qrsrp(lines) { return qbranch(lines, /\+QRSRP:\s*(.*)/); }
+export function parse_qrsrq(lines) { return qbranch(lines, /\+QRSRQ:\s*(.*)/); }
+export function parse_qsinr(lines) { return qbranch(lines, /\+QSINR:\s*(.*)/); }
+
+// pick the strongest valid Rx branch from a qbranch() result, ignoring the
+// modem's not-available sentinels (RSRP -140, RSRQ/SINR very negative, 0 fill).
+export function branch_best(b, floor)
+{
+	if (!b || !length(b.branches))
+		return null;
+
+	let best = null;
+
+	for (let v in b.branches)
+		if (v > (floor ?? -900) && (best == null || v > best))
+			best = v;
+
+	return best;
+}
+
+// AT+CEER extended error report -> { text, cause }. Firmwares return either a
+// free-text reason or a numeric cause; extract a cause number when one follows
+// the word "cause" (or the payload is purely numeric) so the caller can map it
+// through the QMI REJECT_CAUSE table. Best-effort (format varies by vendor).
+export function parse_ceer(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+CEER:\s*(.*)/);
+
+		if (!m)
+			continue;
+
+		let text = trim(m[1]);
+
+		if (text == '')
+			continue;
+
+		let cause = null;
+		let mc = match(text, /cause[^0-9-]*(-?[0-9]+)/i);
+
+		if (mc)
+			cause = +mc[1];
+		else if (match(text, /^-?[0-9]+$/))
+			cause = +text;
+
+		return { text: text, cause: cause };
+	}
+
+	return null;
+}
+
+// AT+CESQ extended signal quality (3GPP TS 27.007 §8.69), the always-available
+// 3GPP-generic signal source:
+//   +CESQ: <rxlev>,<ber>,<rscp>,<ecno>,<rsrq>,<rsrp>
+// coded indices -> dBm/dB (99 GSM / 255 non-GSM = not available). Returns
+// { gsm_rssi, wcdma:{rscp,ecno}, lte:{rsrp,rsrq} } (dBm / dB) for self.signal.
+export function parse_cesq(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+CESQ:\s*([0-9]+),([0-9]+),([0-9]+),([0-9]+),([0-9]+),([0-9]+)/);
+
+		if (!m)
+			continue;
+
+		let rxlev = +m[1], rscp = +m[3], ecno = +m[4], rsrq = +m[5], rsrp = +m[6];
+		let out = { gsm_rssi: null, wcdma: null, lte: null };
+
+		if (rxlev != 99)
+			out.gsm_rssi = -110 + rxlev;
+
+		if (rscp != 255 || ecno != 255)
+			out.wcdma = { rscp: (rscp != 255) ? (-120 + rscp) : null,
+			              ecno: (ecno != 255) ? (-24 + ecno * 0.5) : null };
+
+		if (rsrq != 255 || rsrp != 255)
+			out.lte = { rsrq: (rsrq != 255) ? (-19.5 + rsrq * 0.5) : null,
+			            rsrp: (rsrp != 255) ? (-140 + rsrp) : null };
+
+		return out;
+	}
+
+	return null;
+}
+
+// Huawei ^HCSQ signal (BEST-EFFORT — conversion formulas per the Huawei ME909 /
+// NetEngine AR AT spec, not verified on wwand hardware):
+//   ^HCSQ: "GSM",<rssi>
+//   ^HCSQ: "WCDMA",<rssi>,<rscp>,<ecio>
+//   ^HCSQ: "LTE",<rssi>,<rsrp>,<sinr>,<rsrq>
+// raw index -> dBm/dB: rssi=v-121, rsrp=v-141, sinr=v/5-20, rsrq=v/2-19.5.
+// Some firmwares prefix the report-config pair `<n>,<m>,` — tolerated.
+export function parse_hcsq(lines)
+{
+	for (let l in (lines ?? [])) {
+		// optional leading report-config pair `<n>,<m>,` (m[1]) then "<mode>",rest
+		let m = match(l, /\^HCSQ:\s*([0-9]+,[0-9]+,)?"([^"]+)",(.*)/);
+
+		if (!m)
+			continue;
+
+		let mode = m[2];
+		let f = map(split(m[3], ','), (x) => trim(x));
+		let v = (i) => (f[i] != null && match(f[i], /^[0-9]+$/)) ? +f[i] : null;
+		let out = { mode: mode, gsm_rssi: null, wcdma: null, lte: null };
+
+		if (mode == 'LTE') {
+			let rssi = v(0), rsrp = v(1), sinr = v(2), rsrq = v(3);
+
+			out.lte = {
+				rssi: (rssi != null) ? rssi - 121 : null,
+				rsrp: (rsrp != null) ? rsrp - 141 : null,
+				sinr: (sinr != null) ? (sinr * 0.2 - 20) : null,
+				rsrq: (rsrq != null) ? (rsrq * 0.5 - 19.5) : null,
+			};
+		}
+		else if (mode == 'WCDMA') {
+			let rssi = v(0), rscp = v(1), ecio = v(2);
+
+			out.wcdma = { rssi: (rssi != null) ? rssi - 121 : null,
+			              rscp: (rscp != null) ? rscp - 121 : null,
+			              ecio: (ecio != null) ? (ecio * 0.5 - 32) : null };
+		}
+		else if (mode == 'GSM') {
+			let rssi = v(0);
+
+			out.gsm_rssi = (rssi != null) ? rssi - 121 : null;
+		}
+
+		return out;
+	}
+
+	return null;
+}
+
+// Huawei ^MONSC serving cell (BEST-EFFORT). LTE form:
+//   ^MONSC: LTE,<mcc>,<mnc>,<arfcn>,<cellid-hex>,<pci>,<tac-hex>,<rsrp>,<rsrq>,<rxlev>
+// rsrp/rsrq are already dBm/dB; returned in QMI 0.1 dB units (×10) plus the
+// mcc/mnc/earfcn/pci/tac/cid identifiers for the lte_intra shape.
+export function parse_monsc(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\^MONSC:\s*LTE,(.*)/);
+
+		if (!m)
+			continue;
+
+		let f = map(split(m[1], ','), (x) => trim(x));
+		let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+		let hn = (s) => (s != null && match(s, /^[0-9A-Fa-f]+$/)) ? hex(s) : null;
+
+		return {
+			rat: 'LTE', mcc: num(f[0]), mnc: f[1], earfcn: num(f[2]),
+			cid: hn(f[3]), pci: num(f[4]), tac: hn(f[5]),
+			rsrp: (num(f[6]) != null) ? num(f[6]) * 10 : null,
+			rsrq: (num(f[7]) != null) ? num(f[7]) * 10 : null,
+			rssi: (num(f[8]) != null) ? num(f[8]) * 10 : null,
+			rsrp_dbm: num(f[6]), rsrq_db: num(f[7]),
+		};
+	}
+
+	return null;
+}
+
+// Huawei ^MONNC neighbour cells (BEST-EFFORT; field layout not verified —
+// parsed defensively as earfcn,pci,rsrp,rsrq,...). Metrics in 0.1 dB units.
+export function parse_monnc(lines)
+{
+	let out = [];
+	let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\^MONNC:\s*LTE,(.*)/);
+
+		if (!m)
+			continue;
+
+		let f = map(split(m[1], ','), (x) => trim(x));
+
+		if (num(f[1]) == null)
+			continue;
+
+		push(out, { earfcn: num(f[0]), pci: num(f[1]),
+			rsrp: (num(f[2]) != null) ? num(f[2]) * 10 : null,
+			rsrq: (num(f[3]) != null) ? num(f[3]) * 10 : null });
+	}
+
+	return out;
+}
+
+// MeiG (ASR) AT+MENG="servingcell" — MeiG's QENG analogue (BEST-EFFORT; verified
+// against the SLM770A/SLM750 AT manual but not on wwand hardware). LTE form:
+//   +MENG: "servingcell",<state>,"LTE",<is_tdd>,<MCC>,<MNC>,<cellID>,<PCI>,
+//          <EARFCN>,<freq_band_ind>,<UL_bw>,<DL_bw>,<TAC>,<RSRP>,<RSRQ>,<RSSI>,<srxlev>
+// rsrp/rsrq/rssi/srxlev returned in QMI 0.1 dB units (×10); rsrp_dbm/rsrq_db kept
+// as plain dBm/dB for self.signal.
+export function parse_meng_servingcell(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+MENG:\s*"?\s*servingcell\s*"?,(.*)/);
+
+		if (!m)
+			continue;
+
+		let f = map(split(m[1], ','), (x) => replace(trim(x), /^"|"$/g, ''));
+
+		if (f[1] != 'LTE')
+			continue;   // only LTE mapped (MeiG SLM7xx are Cat4 LTE)
+
+		let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+		let hn = (s) => (s != null && match(s, /^[0-9A-Fa-f]+$/)) ? hex(s) : null;
+
+		return {
+			rat: 'LTE', mcc: num(f[3]), mnc: f[4], cid: hn(f[5]), pci: num(f[6]),
+			earfcn: num(f[7]), band: num(f[8]), tac: hn(f[11]),
+			rsrp: (num(f[12]) != null) ? num(f[12]) * 10 : null,
+			rsrq: (num(f[13]) != null) ? num(f[13]) * 10 : null,
+			rssi: (num(f[14]) != null) ? num(f[14]) * 10 : null,
+			srxlev: (num(f[15]) != null) ? num(f[15]) * 10 : null,
+			rsrp_dbm: num(f[12]), rsrq_db: num(f[13]),
+		};
+	}
+
+	return null;
+}
+
+// MeiG (ASR) AT+MENG="neighbourcell" (BEST-EFFORT). LTE form — NOTE the metric
+// order is RSRP,RSRQ (opposite of Quectel's neighbourcell rsrq,rsrp):
+//   +MENG: "neighbourcell intra","LTE",<EARFCN>,<PCI>,<RSRP>,<RSRQ>,-,-,<srxlev>,...
+export function parse_meng_neighbourcell(lines)
+{
+	let out = { intra: [], inter: [] };
+	let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+MENG:\s*"?\s*neighbourcell([^",]*)"?,"LTE",(.*)/);
+
+		if (!m)
+			continue;
+
+		let scope = trim(m[1]);
+		let f = map(split(m[2], ','), (x) => trim(x));
+
+		if (num(f[1]) == null)
+			continue;
+
+		let cell = { earfcn: num(f[0]), pci: num(f[1]),
+			rsrp: (num(f[2]) != null) ? num(f[2]) * 10 : null,
+			rsrq: (num(f[3]) != null) ? num(f[3]) * 10 : null,
+			srxlev: (num(f[6]) != null) ? num(f[6]) * 10 : null };
+
+		push((scope == 'inter') ? out.inter : out.intra, cell);
 	}
 
 	return out;
