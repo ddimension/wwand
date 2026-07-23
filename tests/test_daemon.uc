@@ -80,6 +80,14 @@ function handlers()
 		STOP_NETWORK: {},
 		// the stats sample now fires immediately on connect
 		GET_PACKET_STATISTICS: { tx_packets_ok: 0, rx_packets_ok: 0 },
+		// bearer tech carrying the session (rat_mask bit 5 = LTE, matching
+		// radio_ifs:[8]). Without this handler the context bring-up (get_bearer)
+		// died inside the uloop callback and unwound uloop.run() before any
+		// deferred ubus reply fired — which is why only the 3 pre-run checks
+		// ever executed.
+		GET_CURRENT_DATA_BEARER_TECHNOLOGY: {
+			current: { network_type: 8, rat_mask: (1 << 5), so_mask: 0 },
+		},
 		GET_SYSTEM_SELECTION_PREFERENCE: {
 			mode_preference: 0x18, roaming_preference: 0xFF,
 			lte_band_preference: 524420, usage_preference: 1,
@@ -143,6 +151,14 @@ let guard = uloop.timer(5000, () => {
 	ok(false, 'daemon test timed out');
 	uloop.end();
 });
+
+// completion sentinel: set true only by the innermost callback. If a future
+// missing mock handler makes context bring-up die() inside a uloop callback,
+// the exception unwinds uloop.run() before the guard fires and before the
+// deferred chain finishes — which would silently drop the check count while
+// still reporting "0 failures". Asserting this after the loop turns any such
+// silent unwind into a visible failure.
+let completed = false;
 
 // context_up is called while the modem is still initializing — this
 // exercises the queued-until-ready path.
@@ -284,6 +300,7 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 														eq(s9.ok, false, 'plmn: no-uim guarded');
 														eq(s9.error, 'no_uim_client', 'plmn: guard reason');
 
+														completed = true;
 														guard.cancel();
 														uloop.end();
 													});
@@ -303,5 +320,7 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 
 uloop.run();
 daemon.shutdown();
+
+ok(completed, 'full deferred-callback chain completed (no silent uloop unwind)');
 
 done('test_daemon');
