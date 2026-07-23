@@ -232,6 +232,12 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 							ok(length(filter(events, (e) => e.type == 'down' && e.data == 'wan')) > downs1,
 								'reconnect hold expired -> interface downed (bounded blackhole)');
 
+							// wanted is cleared at the daemon-driven down, not only when
+							// netifd later calls context_down — so a `registered` in the
+							// gap cannot re-kick the interface being torn down.
+							eq(daemon.contexts.wan_ctx.wanted, false,
+								'hold expiry cleared wanted immediately (no re-kick race)');
+
 							ok(length(filter(events, (e) => e.type == 'kick' && e.data == 'wan')) >= 1,
 								'boot-race kick after modem ready');
 							let me = filter(events, (e) => e.type == 'wwand.modem');

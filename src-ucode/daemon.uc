@@ -138,10 +138,14 @@ export function create(opts)
 
 		case 'sim_blocked':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
-			// terminal until operator action — down the interfaces (no hold)
+			// terminal until operator action — down the interfaces (no hold).
+			// Clear `wanted` now so a later `registered` (e.g. after the SIM is
+			// unblocked) doesn't auto-re-kick before an explicit ifup; recovery
+			// from a blocked SIM is an operator action by design.
 			for (let name, entry in self.contexts) {
 				if (entry.cfg.modem == modem.id && entry.cfg.interface) {
 					clear_reconnect(name);
+					entry.wanted = false;
 					if (deps.down_interface)
 						deps.down_interface(entry.cfg.interface);
 				}
@@ -282,6 +286,12 @@ export function create(opts)
 				log('warn', sprintf('context %s: reconnect hold expired, downing %s',
 					name, entry.cfg.interface));
 				clear_reconnect(name);
+
+				// clear `wanted` now, not only when netifd later calls context_down:
+				// otherwise a `registered` event in the gap would re-kick/adopt the
+				// interface we just decided to tear down. The end state is the same
+				// (context_down also sets it false), this just closes the race.
+				entry.wanted = false;
 
 				if (deps.down_interface && entry.cfg.interface)
 					deps.down_interface(entry.cfg.interface);
