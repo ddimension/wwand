@@ -261,16 +261,23 @@ export function decode_info(fields, buf)
 			res[name] = out;
 		}
 		else if (type(fmt) == 'object') {
-			// struct array: offset + count
-			if (pos + 8 > len) { res[name] = []; pos += 8; continue; }
+			// MBIM count+offset array: the element count lives in a separate,
+			// already-decoded field named by fmt.array; only a 4-byte OFFSET
+			// into the info buffer sits here. Elements (a struct via `of: {...}`
+			// or a scalar via `of: 'ipv4'`/'ipv6') are read from that offset.
+			if (pos + 4 > len) { res[name] = []; pos += 4; continue; }
 
-			let oc = struct.unpack('<II', substr(buf, pos, 8));
-			pos += 8;
+			let o = struct.unpack('<I', substr(buf, pos, 4))[0];
+			pos += 4;
+
+			let count = +(res[fmt.array] ?? 0);
 			let out = [];
-			let o = oc[0];
 
-			for (let i = 0; i < oc[1]; i++) {
-				let d = decode_struct(fmt.of, buf, o);
+			for (let i = 0; i < count; i++) {
+				let d = (type(fmt.of) == 'object')
+					? decode_struct(fmt.of, buf, o)
+					: decode_scalar(fmt.of, buf, o);
+
 				push(out, d[0]);
 				o = d[1];
 			}

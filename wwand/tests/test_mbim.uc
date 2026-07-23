@@ -20,36 +20,30 @@ function build_done(txn, uuid, cid, status, ibuf) {
 }
 
 function build_ipcfg() {
-	// fixed part layout of IP_CONFIGURATION.response, offsets relative to info
-	// scalars: session_id, v4avail, v6avail, v4count, [v4addr off/count],
-	//   v6count, [v6addr off/count], [v4gw ref], [v6gw ref],
-	//   v4dnscount, [v4dns off/size], v6dnscount, [v6dns off/size], v4mtu, v6mtu
-	// We place the data buffer after the fixed part and fill matching offsets.
-	let fixedlen = 4*3 + 4 + 8 + 4 + 8 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 4; // = 76
-	let db = fixedlen;
-	// v4 address element: prefix(4) + ipv4(4)
-	let v4addr_off = db;
-	let v4addr = p32(30) + chr(10,11,12,13);
-	// gateway
+	// real MBIM_IP_CONFIGURATION_INFO: 15 u32 in the fixed part — each array is a
+	// separate Count field plus a 4-byte Offset (NOT an inline offset+count
+	// pair) — then the data buffer with the elements at those offsets.
+	let fixedlen = 4 * 15;   // 60
+	let v4addr_off = fixedlen;
+	let v4addr = p32(30) + chr(10,11,12,13);   // OnLinkPrefixLength + IPv4
 	let gw_off = v4addr_off + length(v4addr);
 	let gw = chr(10,11,12,14);
-	// dns array: 2 x ipv4
 	let dns_off = gw_off + length(gw);
-	let dns = chr(8,8,8,8) + chr(8,8,4,4);
+	let dns = chr(8,8,8,8) + chr(8,8,4,4);     // 2 x IPv4 DNS
 
 	let fixed =
 		p32(0) +            // session_id
 		p32(1) + p32(0) +   // v4 avail, v6 avail
 		p32(1) +            // v4 count
-		p32(v4addr_off) + p32(1) +   // v4 addr off + count
+		p32(v4addr_off) +   // v4 addr OFFSET (count is the field above)
 		p32(0) +            // v6 count
-		p32(0) + p32(0) +   // v6 addr off/count
+		p32(0) +            // v6 addr offset
 		p32(gw_off) +       // v4 gw ref
 		p32(0) +            // v6 gw ref
 		p32(2) +            // v4 dns count
-		p32(dns_off) + p32(8) +   // v4 dns off + size(bytes)
+		p32(dns_off) +      // v4 dns OFFSET (count is the field above)
 		p32(0) +            // v6 dns count
-		p32(0) + p32(0) +   // v6 dns off/size
+		p32(0) +            // v6 dns offset
 		p32(1500) + p32(0); // v4 mtu, v6 mtu
 
 	return fixed + v4addr + gw + dns;
