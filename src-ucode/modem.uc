@@ -1402,7 +1402,7 @@ export function create(opts)
 			if (be == 'qmi')
 				return qmi_backend.get_ca(self.nas, (ca) => store(ca ?? []));
 			if (be == 'at')
-				return self.at_telemetry.send('AT+QCAINFO', (e, r) =>
+				return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) =>
 					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
 			store([]);
 		});

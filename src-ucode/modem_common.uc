@@ -133,6 +133,24 @@ export function watch_driver(o)
 	};
 }
 
+// telemetry_at(self): the AT engine a telemetry poll should run over. On first
+// use it opens the modem's dedicated 'at2' channel (if it has one); every later
+// call returns the already-open engine. When there is no second port — or it
+// fails to open — it returns the control channel (self.at), so callers can treat
+// the result exactly like self.at (null only when the modem has no AT at all).
+// This makes the second tty lazy: QMI/MBIM that never hit the AT fallback never
+// open it, while NCM opens it on its first telemetry tick.
+export function telemetry_at(self)
+{
+	if (self._at2_open) {
+		let open = self._at2_open;
+		self._at2_open = null;      // one-shot: never retry a failed open per poll
+		open();                     // sets self.at_telemetry on success
+	}
+
+	return self.at_telemetry;
+}
+
 // close_at(self): tear down both AT engines opened by open_at (the control
 // channel and, when distinct, the dedicated telemetry channel). Idempotent.
 export function close_at(self)
@@ -147,6 +165,7 @@ export function close_at(self)
 	self.at_telemetry = null;
 	self.at_tty = null;
 	self.at_telemetry_tty = null;
+	self._at2_open = null;
 }
 
 export function open_at(self, o)
@@ -178,21 +197,33 @@ export function open_at(self, o)
 	log('notice', sprintf('AT port: %s', tty));
 
 	// dedicated telemetry channel: when the modem exposes a second AT port
-	// ('at2'), open a separate engine there so telemetry polls (QENG/QCAINFO/…)
-	// don't serialize behind control/dial/user commands on the primary. Falls
-	// back to the control channel when there is no second port (or it won't open).
+	// ('at2'), telemetry polls (QENG/QCAINFO/…) run over a separate engine so
+	// they don't serialize behind control/dial/user commands on the primary.
+	// Opened LAZILY on the first telemetry poll (see telemetry_at) rather than
+	// eagerly here: QMI/MBIM only ever touch AT as a rare fallback (e.g. QCAINFO
+	// when QMI CA is unavailable), so eagerly opening a second tty on every such
+	// modem wasted an fd; NCM polls telemetry over AT from the first tick, so
+	// there it opens on that first poll. Until (or unless) it opens, telemetry
+	// falls back to the control channel.
 	self.at_telemetry = self.at;
 	self.at_telemetry_tty = tty;
 
-	if (ch.telemetry && ch.telemetry != tty) {
-		let tr2 = open_transport(ch.telemetry, 115200, (level, msg) => log(level, msg));
+	// stash a one-shot opener; telemetry_at() runs it on first use. Null when the
+	// modem has no distinct second AT port (telemetry then stays on control).
+	self._at2_open = (ch.telemetry && ch.telemetry != tty)
+		? () => {
+			let tr2 = open_transport(ch.telemetry, 115200, (level, msg) => log(level, msg));
 
-		if (tr2) {
+			if (!tr2) {
+				log('warn', sprintf('cannot open AT telemetry channel %s (using control channel)', ch.telemetry));
+				return;
+			}
+
 			self.at_telemetry = atcmd.create(tr2, { log: (level, msg) => log(level, sprintf('at2: %s', msg)) });
 			self.at_telemetry_tty = ch.telemetry;
 			log('notice', sprintf('AT telemetry channel: %s', ch.telemetry));
 		}
-	}
+		: null;
 
 	// model quirks + configured at_init list, then cell locks
 	let cmds = [

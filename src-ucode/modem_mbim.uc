@@ -570,7 +570,7 @@ export function create(opts)
 					{ no_recovery: true });
 
 			if (be == 'at')
-				return self.at_telemetry.send('AT+QENG="servingcell"', (e, r) => {
+				return modem_common.telemetry_at(self).send('AT+QENG="servingcell"', (e, r) => {
 					let serving = e ? null : atcmd.parse_qeng_servingcell(r?.lines);
 					store(serving ? { serving: serving } : null);
 				});
@@ -599,7 +599,7 @@ export function create(opts)
 				return qmi_backend.get_ca(self.pt.nas, (ca) => store(ca ?? []));
 
 			if (be == 'at')
-				return self.at_telemetry.send('AT+QCAINFO', (e, r) =>
+				return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) =>
 					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
 
 			store([]);

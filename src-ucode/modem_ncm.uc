@@ -907,17 +907,17 @@ function assemble_cells(self, serving, neigh, dsd)
 
 function tel_quectel_signal(self, cb)
 {
-	self.at_telemetry.send('AT+CSQ', (err, res) => {
+	modem_common.telemetry_at(self).send('AT+CSQ', (err, res) => {
 		sig_csq_floor(self, err ? null : parse_csq(res?.lines));
 
 		// per-branch QRSRP/QRSRQ/QSINR: authoritative rsrp/rsrq/snr (antenna aim)
-		self.at_telemetry.send('AT+QRSRP?', (e1, r1) => {
+		modem_common.telemetry_at(self).send('AT+QRSRP?', (e1, r1) => {
 			let rp = e1 ? null : atcmd.parse_qrsrp(r1?.lines);
 
-			self.at_telemetry.send('AT+QRSRQ?', (e2, r2) => {
+			modem_common.telemetry_at(self).send('AT+QRSRQ?', (e2, r2) => {
 				let rq = e2 ? null : atcmd.parse_qrsrq(r2?.lines);
 
-				self.at_telemetry.send('AT+QSINR?', (e3, r3) => {
+				modem_common.telemetry_at(self).send('AT+QSINR?', (e3, r3) => {
 					let sn = e3 ? null : atcmd.parse_qsinr(r3?.lines);
 
 					let mode = rp?.mode ?? rq?.mode ?? sn?.mode;
@@ -948,10 +948,10 @@ function tel_quectel_signal(self, cb)
 
 function tel_quectel_cells(self, cb)
 {
-	self.at_telemetry.send('AT+QENG="servingcell"', (err, res) => {
+	modem_common.telemetry_at(self).send('AT+QENG="servingcell"', (err, res) => {
 		let serving = err ? null : atcmd.parse_qeng_servingcell(res?.lines);
 
-		self.at_telemetry.send('AT+QENG="neighbourcell"', (e2, r2) => {
+		modem_common.telemetry_at(self).send('AT+QENG="neighbourcell"', (e2, r2) => {
 			let neigh = e2 ? null : atcmd.parse_qeng_neighbourcell(r2?.lines);
 
 			assemble_cells(self, serving, neigh);
@@ -962,7 +962,7 @@ function tel_quectel_cells(self, cb)
 
 function tel_quectel_ca(self, cb)
 {
-	self.at_telemetry.send('AT+QCAINFO', (err, res) => {
+	modem_common.telemetry_at(self).send('AT+QCAINFO', (err, res) => {
 		if (!err && self.cells)
 			self.cells.ca = atcmd.parse_qcainfo(res?.lines);
 
@@ -974,10 +974,10 @@ function tel_quectel_ca(self, cb)
 // status / settings pages can show it (mirrors nothing in QMI, but useful)
 function tel_quectel_locks(self, cb)
 {
-	self.at_telemetry.send('AT+QNWLOCK="common/4g"', (e1, r1) => {
+	modem_common.telemetry_at(self).send('AT+QNWLOCK="common/4g"', (e1, r1) => {
 		let l4 = e1 ? null : atcmd.parse_qnwlock(r1?.lines);
 
-		self.at_telemetry.send('AT+QNWLOCK="common/5g"', (e2, r2) => {
+		modem_common.telemetry_at(self).send('AT+QNWLOCK="common/5g"', (e2, r2) => {
 			let l5 = e2 ? null : atcmd.parse_qnwlock(r2?.lines);
 			let locks = {};
 
@@ -1016,10 +1016,10 @@ function merge_cesq_signal(self, c)
 
 function tel_generic_signal(self, cb)
 {
-	self.at_telemetry.send('AT+CSQ', (err, res) => {
+	modem_common.telemetry_at(self).send('AT+CSQ', (err, res) => {
 		sig_csq_floor(self, err ? null : parse_csq(res?.lines));
 
-		self.at_telemetry.send('AT+CESQ', (e2, r2) => {
+		modem_common.telemetry_at(self).send('AT+CESQ', (e2, r2) => {
 			let c = e2 ? null : atcmd.parse_cesq(r2?.lines);
 
 			if (c)
@@ -1038,7 +1038,7 @@ function tel_noop(self, cb) { cb(); }
 // not masquerade as a rejection; on_registered clears reg_detail outright).
 function tel_ceer_reg_detail(self, cb)
 {
-	self.at_telemetry.send('AT+CEER', (err, res) => {
+	modem_common.telemetry_at(self).send('AT+CEER', (err, res) => {
 		let c = err ? null : atcmd.parse_ceer(res?.lines);
 
 		if (c && c.cause != null)
@@ -1056,10 +1056,10 @@ function tel_ceer_reg_detail(self, cb)
 
 function tel_huawei_signal(self, cb)
 {
-	self.at_telemetry.send('AT+CSQ', (err, res) => {
+	modem_common.telemetry_at(self).send('AT+CSQ', (err, res) => {
 		sig_csq_floor(self, err ? null : parse_csq(res?.lines));
 
-		self.at_telemetry.send('AT^HCSQ?', (e2, r2) => {
+		modem_common.telemetry_at(self).send('AT^HCSQ?', (e2, r2) => {
 			let h = e2 ? null : atcmd.parse_hcsq(r2?.lines);
 
 			if (h?.lte) {
@@ -1091,10 +1091,10 @@ function sc_to_serving(sc)
 
 function tel_huawei_cells(self, cb)
 {
-	self.at_telemetry.send('AT^MONSC', (err, res) => {
+	modem_common.telemetry_at(self).send('AT^MONSC', (err, res) => {
 		let sc = err ? null : atcmd.parse_monsc(res?.lines);
 
-		self.at_telemetry.send('AT^MONNC', (e2, r2) => {
+		modem_common.telemetry_at(self).send('AT^MONNC', (e2, r2) => {
 			let nc = e2 ? null : atcmd.parse_monnc(r2?.lines);
 
 			if (sc) {
@@ -1113,10 +1113,10 @@ function tel_huawei_cells(self, cb)
 
 function tel_meig_cells(self, cb)
 {
-	self.at_telemetry.send('AT+MENG="servingcell"', (err, res) => {
+	modem_common.telemetry_at(self).send('AT+MENG="servingcell"', (err, res) => {
 		let sc = err ? null : atcmd.parse_meng_servingcell(res?.lines);
 
-		self.at_telemetry.send('AT+MENG="neighbourcell"', (e2, r2) => {
+		modem_common.telemetry_at(self).send('AT+MENG="neighbourcell"', (e2, r2) => {
 			let nc = e2 ? null : atcmd.parse_meng_neighbourcell(r2?.lines);
 
 			if (sc) {
