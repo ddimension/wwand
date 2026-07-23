@@ -18,7 +18,11 @@ import * as uloop from 'uloop';
 import * as sim from './sim.uc';
 
 const ESIM_LOGF = '/tmp/wwand/esim-download.log';
-const ESIM_LPAC = '/usr/lib/lpac';
+// /usr/bin/lpac is the standard entry point provided by BOTH lpac packages the
+// wwand-esim dependency (+lpac) can be satisfied by: the generic openwrt-packages
+// lpac (binary here) and our self-contained wwand-lpac (a thin wrapper here that
+// execs its static /usr/lib/lpac). Calling this path works for either.
+const ESIM_LPAC = '/usr/bin/lpac';
 
 return {
 	// deps: { esim (the wwand.esim module), log(level,msg), modem_of(ref) }
@@ -32,7 +36,7 @@ return {
 			let entry = modem_of(ref);
 
 			if (fs.access(ESIM_LPAC) != true)
-				return false;   // wwand-lpac not installed — caller reports it
+				return false;   // no lpac package installed — caller reports it
 
 			let cmd;
 			switch (op) {
