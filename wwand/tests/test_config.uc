@@ -9,7 +9,7 @@ import * as config from 'wwand/config.uc';
 
 let r = config.parse({
 	wwand: {
-		globals: { '.type': 'wwand', log_level: 'debug' },
+		globals: { '.type': 'wwand', log_level: 'debug', hold_max: '120' },
 		m0: { '.type': 'modem', device: '/dev/cdc-wdm0', pincode: '1234',
 		      modes: 'lte,nr5g', mux: 'auto', at_init: [ 'ATI' ], location: '1' },
 		wan_ctx: { '.type': 'context', modem: 'm0', apn: 'internet',
@@ -24,6 +24,7 @@ let r = config.parse({
 });
 
 eq(r.globals.log_level, 'debug', 'new: log level');
+eq(r.globals.hold_max, 120, 'new: hold_max parsed (seconds)');
 eq(r.modems.m0.device, '/dev/cdc-wdm0', 'new: modem device');
 eq(r.modems.m0.at_init, [ 'ATI' ], 'new: at_init list');
 eq(r.modems.m0.location, true, 'new: location bool');

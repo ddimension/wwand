@@ -10,7 +10,7 @@
 // }
 //
 // result = {
-//   globals:  { log_level },
+//   globals:  { log_level, hold_max },
 //   modems:   { name: { device?, netdev?, usb_path?, pincode?, modes?, mcc?,
 //                       mnc?, mux, dl_datagram_max_size, tty?, at_init[],
 //                       location, delay, failreboot, zero_rx_timeout } },
@@ -78,6 +78,16 @@ function parse_wwand_sections(raw, result)
 		switch (s['.type']) {
 		case 'wwand':
 			result.globals.log_level = s.log_level ?? result.globals.log_level;
+
+			if (s.hold_max != null) {
+				let hm = +s.hold_max;
+
+				if (hm > 0)
+					result.globals.hold_max = hm;
+				else
+					push(result.warnings, sprintf('invalid hold_max %J, keeping %d',
+						s.hold_max, result.globals.hold_max));
+			}
 			break;
 
 		case 'modem':
@@ -379,7 +389,9 @@ function validate(result)
 export function parse(raw)
 {
 	let result = {
-		globals: { log_level: 'info' },
+		// hold_max: seconds the daemon holds a lost interface up while
+		// reconnecting in place before giving up and downing it (netifd teardown)
+		globals: { log_level: 'info', hold_max: 90 },
 		modems: {},
 		contexts: {},
 		warnings: [],
