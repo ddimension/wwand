@@ -1,8 +1,9 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-23. 26 test suites green (~936 checks); all committed.
+_Last updated: 2026-07-23. 27 test suites green (~968 checks); all committed.
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
-Deep-review follow-ups below: quick wins + #1/#2/#4/#5 done; #3 partial._
+Deep-review follow-ups below: #1/#2/#4/#5 + the full minor-hardening list done;
+#3 partial (only the large state-machine-scaffolding unification remains)._
 
 ## Next TODO — deep-review follow-ups (2026-07-23)
 
@@ -67,13 +68,22 @@ released on teardown. Remaining, ranked by value:
    (often never); NCM opens it on its first tick (same end state). All telemetry
    sends route through `telemetry_at`. +16 tests.
 
-Minor/latent hardening also noted: `encode_info` array-branch asymmetry
-(`mbim.uc` — dead code today, add assert/comment), txn-collision overwrite
-(`client.uc:52`), modeswitch/protoswitch assume-reset-succeeded (once-guarded →
-a non-re-enumerating reset leaves the modem permanently unmanaged),
-`wanted` cleared late on daemon-driven down (`daemon.uc:267`), deferred ubus
-replies rely on the backend always calling back (no watchdog), `hold_max`
-captured once at `daemon.create` (not re-read on reload).
+Minor/latent hardening — **all done**:
+- ✅ `client.uc` txn-collision: `alloc_txn` skips in-flight ids, never overwrites
+  a pending slot (`e286623`).
+- ✅ `hold_max` live on reload via `daemon.set_hold_max_ms` + status exposure
+  (`4d759c5`).
+- ✅ `wanted` cleared at the daemon-driven down (hold expiry + sim_blocked),
+  closing the re-kick race (`c7116b1`).
+- ✅ `encode_info` arrays now `die()` loudly instead of emitting a corrupt buffer;
+  orphaned `encode_struct` removed (`5bee835`).
+- ✅ modeswitch liveness watchdog: a non-re-enumerating usbnet switch is flagged
+  in status (`control_note`) instead of silently unmanaged (`c36c706`).
+  protoswitch left as-is — its failure is already visible (modem → `ABSENT` in
+  status), user-initiated, and not once-guarded, so no silent-stuck class exists.
+- ✅ deferred ubus replies routed through a `defer()` helper with a once-guard +
+  backstop watchdog (300s; > any real op), so a dropped backend callback can't
+  leak the request open (`e37fd1e`).
 
 **Deferred (needs HW):** NCM ECM end-to-end (usbnet switch blocked on RG650E
 firmware); Huawei/MeiG NCM telemetry recipes need bench verification.
