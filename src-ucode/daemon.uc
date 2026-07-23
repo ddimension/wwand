@@ -27,23 +27,46 @@ import * as atcmd from './atcmd.uc';
 const UP_GUARD_MS = 150000;
 
 // MBIM support is loaded lazily — a QMI-only install (the common case) never
-// touches its ~1.4k lines or schema, trimming resident memory.
-let mbim_mods = null;
+// touches its ~1.4k lines or schema, trimming resident memory. It also ships as
+// a SEPARATE package (wwand-mbim): require() throws when it is not installed, so
+// catch that and return null (start_modem then reports a clear error). The
+// failure is cached so we do not re-require on every modem.
+let mbim_mods = null, mbim_unavailable = false;
 function load_mbim() {
 	// require() cannot load ES modules directly (`export` is a syntax error
 	// in plain scripts) — go through the exportless mbim_lazy wrapper
-	if (mbim_mods == null)
-		mbim_mods = require('wwand.mbim_lazy');
+	if (mbim_unavailable)
+		return null;
+
+	if (mbim_mods == null) {
+		try {
+			mbim_mods = require('wwand.mbim_lazy');
+		}
+		catch (e) {
+			mbim_unavailable = true;
+			return null;
+		}
+	}
 
 	return mbim_mods;
 }
 
-// NCM support (cdc_ncm / cdc_ether, AT-controlled) is loaded lazily the same
-// way — a QMI/MBIM-only install never touches it.
-let ncm_mods = null;
+// NCM support (cdc_ncm / cdc_ether, AT-controlled) is a separate package
+// (wwand-ncm), loaded lazily the same way.
+let ncm_mods = null, ncm_unavailable = false;
 function load_ncm() {
-	if (ncm_mods == null)
-		ncm_mods = require('wwand.ncm_lazy');
+	if (ncm_unavailable)
+		return null;
+
+	if (ncm_mods == null) {
+		try {
+			ncm_mods = require('wwand.ncm_lazy');
+		}
+		catch (e) {
+			ncm_unavailable = true;
+			return null;
+		}
+	}
 
 	return ncm_mods;
 }
@@ -68,6 +91,11 @@ export function create(opts)
 {
 	let deps = opts?.deps ?? {};
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: %s\n', level, msg)));
+
+	// backend module loaders — the real ones require() the separate wwand-mbim /
+	// wwand-ncm packages (null when not installed). Overridable for tests.
+	let load_mbim_fn = deps.load_mbim ?? load_mbim;
+	let load_ncm_fn = deps.load_ncm ?? load_ncm;
 
 	let self = {
 		modems: {},    // name -> { cfg, modem, device, netdev }
@@ -561,25 +589,26 @@ export function create(opts)
 			},
 		};
 
-		if (proto == 'mbim') {
-			entry.modem = load_mbim().modem.create({
+		if (proto == 'mbim' || proto == 'ncm') {
+			// MBIM and NCM ship as separate packages (wwand-mbim / wwand-ncm).
+			// When the modem needs one that is not installed, report it clearly
+			// (surfaced in status) and leave the modem unmanaged instead of
+			// crashing the daemon on the require() failure.
+			let be = (proto == 'mbim') ? load_mbim_fn() : load_ncm_fn();
+
+			if (!be) {
+				let pkg = (proto == 'mbim') ? 'wwand-mbim' : 'wwand-ncm';
+				log('err', sprintf('modem %s: %s control requires the %s package, which is not installed',
+					name, proto, pkg));
+				entry.control_note = sprintf('%s package not installed', pkg);
+				return;
+			}
+
+			entry.modem = be.modem.create({
 				...common,
-				datapath: {
-					netdev: entry.netdev,
-					mux_links: muxinfo?.list ?? [],
-					fx: deps.datapath_fx,
-				},
-			});
-		}
-		else if (proto == 'ncm') {
-			// cdc_ncm / cdc_ether: a plain netdev, no mux. The modem drives
-			// everything over AT; the datapath is just the parent link.
-			entry.modem = load_ncm().modem.create({
-				...common,
-				datapath: {
-					netdev: entry.netdev,
-					fx: deps.datapath_fx,
-				},
+				datapath: (proto == 'mbim')
+					? { netdev: entry.netdev, mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx }
+					: { netdev: entry.netdev, fx: deps.datapath_fx },
 			});
 		}
 		else {
@@ -615,8 +644,8 @@ export function create(opts)
 		}
 
 		let entry = base;
-		let factory = (mentry.protocol == 'mbim') ? load_mbim().context :
-		              (mentry.protocol == 'ncm')  ? load_ncm().context : context_mod;
+		let factory = (mentry.protocol == 'mbim') ? load_mbim_fn().context :
+		              (mentry.protocol == 'ncm')  ? load_ncm_fn().context : context_mod;
 
 		entry.ctx = factory.create({
 			name: name,

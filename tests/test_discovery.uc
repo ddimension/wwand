@@ -222,6 +222,49 @@ uloop.timer(70, () => {
 
 	dr.shutdown();
 	ds.shutdown();
+
+	// --- 8. a backend whose package is not installed is reported, not crashed --
+	// MBIM/NCM ship as separate packages (wwand-mbim / wwand-ncm); load_mbim/
+	// load_ncm return null when the package is absent. start_modem must flag it
+	// (control_note, surfaced in status) and leave the modem unmanaged instead of
+	// throwing on the require() failure.
+	let dm = daemon_mod.create({
+		deps: {
+			log: (level, msg) => null,
+			transport_open: mockhub.create({ handlers: {} }).transport_open,
+			resolve_control: (cfg) => ({ protocol: 'mbim', device: '/dev/cdc-wdm0', netdev: 'wwan0', tty: null }),
+			resolve_netdev: (cfg, dev) => 'wwan0',
+			load_mbim: () => null,   // wwand-mbim not installed
+		},
+	});
+
+	dm.apply_config(config.parse({
+		wwand: { m0: { '.type': 'modem', device: '/dev/cdc-wdm0' } },
+	}));
+
+	ok(!dm.modems.m0.modem, 'missing-pkg: no modem built when wwand-mbim is absent');
+	eq(dm.modems.m0.control_note, 'wwand-mbim package not installed',
+		'missing-pkg: control_note flags the missing backend package');
+	eq(dm.status().modems.m0.control_note, 'wwand-mbim package not installed',
+		'missing-pkg: status() surfaces it');
+
+	// an NCM modem with wwand-ncm absent is flagged the same way
+	let dn = daemon_mod.create({
+		deps: {
+			log: (level, msg) => null,
+			transport_open: mockhub.create({ handlers: {} }).transport_open,
+			resolve_control: (cfg) => ({ protocol: 'ncm', device: null, netdev: 'wwan0', tty: '/dev/ttyUSB2' }),
+			resolve_netdev: (cfg, dev) => 'wwan0',
+			load_ncm: () => null,   // wwand-ncm not installed
+		},
+	});
+
+	dn.apply_config(config.parse({ wwand: { m0: { '.type': 'modem', usb_path: '3-1' } } }));
+	eq(dn.modems.m0.control_note, 'wwand-ncm package not installed',
+		'missing-pkg: NCM backend absence flagged too');
+
+	dm.shutdown();
+	dn.shutdown();
 	uloop.end();
 });
 
