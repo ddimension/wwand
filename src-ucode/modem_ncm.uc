@@ -39,8 +39,7 @@ const TIMING_DEFAULTS = {
 // fast "watch" mode timing (mirrors modem.uc / modem_mbim.uc): while a consumer
 // (the LuCI status page) polls modem_signal/modem_cells, refresh at most once a
 // second and revert to the slow telemetry timer a few seconds after polling.
-const WATCH_MIN_INTERVAL = 1000;
-const WATCH_DECAY = 6000;
+// The adaptive cadence itself lives in modem_common.watch_driver (shared).
 
 // --- AT command model (shared with context_ncm.uc) ---------------------------
 //
@@ -1209,8 +1208,7 @@ export function create(opts)
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, reg_poll_timer = null, settle_timer = null;
 	let at_drain_timer = null, telemetry_timer = null;
-	let watch_decay_timer = null, fast_timer = null;
-	let watch_active = false, fast_running = false;
+	let telem_watch;   // modem_common.watch_driver (adaptive fast telemetry loop)
 
 	// protocol-neutral scaffolding (set_state / attach_context /
 	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)
@@ -1589,46 +1587,28 @@ export function create(opts)
 			self.dsd_status?.mode ?? '?', self.cells ? 'yes' : 'no'));
 	};
 
-	// fast "watch" loop while a consumer polls modem_signal/modem_cells
-	let fast_tick;
-	fast_tick = () => {
-		fast_timer = null;
-
-		if (!watch_active || self.state != 'READY' || !self.at) {
-			fast_running = false;
-			return;
-		}
-
-		fast_running = true;
-
+	// fast "watch" loop while a consumer polls modem_signal/modem_cells — the
+	// adaptive cadence lives in modem_common.watch_driver (shared with QMI/MBIM);
+	// this is just the NCM refresh body. done() is called once per cycle.
+	let refresh_fast = (done) => {
 		refresh_signal(() => {
-			if (!self.at) { fast_running = false; return; }
+			if (!self.at)
+				return done();
 
 			refresh_cells(() => {
 				emit_telemetry();
-
-				if (watch_active && self.at)
-					fast_timer = uloop.timer(WATCH_MIN_INTERVAL, fast_tick);
-				else
-					fast_running = false;
+				done();
 			});
 		});
 	};
 
-	self.watch = function() {
-		watch_active = true;
+	telem_watch = modem_common.watch_driver({
+		alive:   () => self.at != null,
+		ready:   () => self.state == 'READY',
+		refresh: refresh_fast,
+	});
 
-		if (watch_decay_timer)
-			watch_decay_timer.cancel();
-
-		watch_decay_timer = uloop.timer(WATCH_DECAY, () => {
-			watch_active = false;
-			watch_decay_timer = null;
-		});
-
-		if (!fast_running && self.state == 'READY' && self.at)
-			fast_tick();
-	};
+	self.watch = () => telem_watch.watch();
 
 	// slow telemetry loop + registration-loss detection (no unsolicited AT
 	// notifications are relied upon; a CEREG poll doubles as the liveness check)
@@ -1696,13 +1676,13 @@ export function create(opts)
 
 	self.teardown = function() {
 		for (let t in [ retry_timer, reg_timer, reg_poll_timer, settle_timer, at_drain_timer,
-		                telemetry_timer, watch_decay_timer, fast_timer ])
+		                telemetry_timer ])
 			if (t)
 				t.cancel();
 
 		retry_timer = reg_timer = reg_poll_timer = settle_timer = at_drain_timer = null;
-		telemetry_timer = watch_decay_timer = fast_timer = null;
-		watch_active = fast_running = false;
+		telemetry_timer = null;
+		telem_watch.stop();
 
 		modem_common.close_at(self);
 	};
