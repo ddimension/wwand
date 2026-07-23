@@ -142,6 +142,35 @@ eq(success, 1, 'scaffolding: note_connect_success -> rec.on_connect_success');
 self_m.trip_zero_rx();
 eq(repowered, 1, 'scaffolding: trip_zero_rx -> rec.usb_repower');
 
+// --- note_connect_failure_light: MBIM/NCM recovery passthrough ---------------
+
+let ncf_rc = { action: 'retry', reboots: 0, repowers: 0 };
+let ncf_self = {};
+mc.note_connect_failure_light(ncf_self, {
+	on_attempt: () => ncf_rc.action,
+	reboot: () => { ncf_rc.reboots++; },
+	usb_repower: () => { ncf_rc.repowers++; },
+});
+
+let got_action = null;
+ncf_self.note_connect_failure((a) => { got_action = a; });
+eq(got_action, 'retry', 'ncf-light: passes the ladder action to done');
+eq(ncf_rc.reboots, 0, 'ncf-light: retry does not reboot');
+eq(ncf_rc.repowers, 0, 'ncf-light: retry does not repower');
+
+ncf_rc.action = 'usb_repower';
+ncf_self.note_connect_failure((a) => { got_action = a; });
+eq(ncf_rc.repowers, 1, 'ncf-light: usb_repower action triggers rec.usb_repower');
+
+ncf_rc.action = 'reboot';
+ncf_self.note_connect_failure((a) => { got_action = a; });
+eq(ncf_rc.reboots, 1, 'ncf-light: reboot action triggers rec.reboot');
+
+// done is optional
+ncf_rc.action = 'retry';
+ncf_self.note_connect_failure();
+ok(true, 'ncf-light: tolerates a missing done callback');
+
 // --- make_fail: shared bring-up failure handler ------------------------------
 
 let mf_events = [];

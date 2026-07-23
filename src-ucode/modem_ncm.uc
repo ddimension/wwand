@@ -1248,17 +1248,7 @@ export function create(opts)
 		set_retry_timer: (t) => retry_timer = t,
 	});
 
-	self.note_connect_failure = function(done) {
-		done = done ?? ((a) => null);
-		let action = rec.on_attempt();
-
-		if (action == 'reboot')
-			rec.reboot('connection attempt limit reached');
-		else if (action == 'usb_repower')
-			rec.usb_repower();
-
-		done(action);
-	};
+	modem_common.note_connect_failure_light(self, rec);
 
 
 	// --- step chain --------------------------------------------------------

@@ -109,6 +109,28 @@ export function scaffolding(self, o)
 	return { emit: emit, notify_contexts: notify_contexts };
 }
 
+// note_connect_failure_light(self, rec): install the backend-neutral "record a
+// failed connection cycle" method for modems with no live DMS to cycle (MBIM,
+// NCM) — bump the recovery counter and run only the reboot/usb_repower rungs,
+// then hand the action to done. QMI installs its own richer version that also
+// cycles operating mode / resets the modem on the intermediate rungs (it has a
+// live dms client for that).
+export function note_connect_failure_light(self, rec)
+{
+	self.note_connect_failure = function(done) {
+		done = done ?? ((a) => null);
+
+		let action = rec.on_attempt();
+
+		if (action == 'reboot')
+			rec.reboot('connection attempt limit reached');
+		else if (action == 'usb_repower')
+			rec.usb_repower();
+
+		done(action);
+	};
+}
+
 // make_fail(self, o): the shared "a bring-up step failed" handler. Runs the
 // modem's own note_connect_failure (QMI cycles opmode/reset on its live dms;
 // MBIM/NCM just bump the counter + reboot/usb_repower), then on the resulting
