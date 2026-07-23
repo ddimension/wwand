@@ -311,6 +311,17 @@ export function create(opts)
 		self.mbim.on(bc, 'REGISTER_STATE', (data) => self._update_register(data));
 		self.mbim.on(bc, 'SIGNAL_STATE', (data) => { self.signal = { rssi: data.rssi }; });
 		self.mbim.on(bc, 'PACKET_SERVICE', (data) => null);
+		// unsolicited per-session (de)activation — the network dropping a data
+		// context. Routed to the owning context by session id so it can tear the
+		// session down (cdc_mbim carrier doesn't follow the session, so nothing
+		// else notices). See context_mbim connect_indication.
+		self.mbim.on(bc, 'CONNECT', (data) => self._on_connect_ind(data));
+	};
+
+	self._on_connect_ind = function(data) {
+		for (let ctx in self.contexts)
+			if (ctx.session_id == data.session_id && ctx.connect_indication)
+				ctx.connect_indication(data);
 	};
 
 	self._update_register = function(data) {

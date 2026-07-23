@@ -39,6 +39,10 @@ export function create(opts)
 	let log = deps.log ?? ((l, m) => warn(sprintf('%s: context %s: %s\n', l, self.name, m)));
 	let up_cb = null;
 	let stats_timer = null;
+	// true once our CONNECT activated the session — the modem then holds it, so a
+	// failure/retry path must DEACTIVATE first or the next CONNECT hits MBIM
+	// status 13 (max activated contexts).
+	let activated = false;
 
 	let emit = (event, data) => {
 		if (deps.on_event)
@@ -89,6 +93,19 @@ export function create(opts)
 		return out;
 	};
 
+	// best-effort DEACTIVATE of this session (shared by admin down + failure
+	// cleanup). ip_type DEFAULT / empty strings per the MBIM deactivate form.
+	let deactivate = (cb) => {
+		self.modem.command('CONNECT', 'set', {
+			session_id: self.session_id,
+			activation_command: bc.ACTIVATION_CMD_DEACTIVATE,
+			access_string: '', user_name: '', password: '',
+			compression: 0, auth_protocol: bc.AUTH_NONE,
+			ip_type: bc.IP_TYPE_DEFAULT,
+			context_type: bc.CONTEXT_TYPE_INTERNET,
+		}, (err) => { if (cb) cb(err); }, { timeout: 30000 });
+	};
+
 	self.up = function(cb) {
 		if (self.state != 'IDLE')
 			return cb({ error: 'busy', state: self.state });
@@ -97,6 +114,7 @@ export function create(opts)
 			return cb({ error: 'modem_not_ready', modem_state: self.modem.state });
 
 		up_cb = cb;
+		activated = false;
 		set_state('ACTIVATING');
 
 		let profile = self.config.apn ?? '';
@@ -125,6 +143,9 @@ export function create(opts)
 			    data.activation_state != bc.ACTIVATION_ACTIVATING)
 				return self._fail({ stage: 'connect', activation_state: data.activation_state,
 				                    nw_error: data.nw_error });
+
+			// the modem now holds the session — any later failure must deactivate
+			activated = true;
 
 			// query the assigned IP configuration
 			self.modem.command('IP_CONFIGURATION', 'query',
@@ -165,24 +186,18 @@ export function create(opts)
 
 		set_state('IDLE');
 		self.settings = null;
+		activated = false;
 
 		if (was == 'IDLE' || !self.modem.mbim)
 			return cb ? cb(null) : null;
 
-		self.modem.command('CONNECT', 'set', {
-			session_id: self.session_id,
-			activation_command: bc.ACTIVATION_CMD_DEACTIVATE,
-			access_string: '', user_name: '', password: '',
-			compression: 0, auth_protocol: bc.AUTH_NONE,
-			ip_type: bc.IP_TYPE_DEFAULT,
-			context_type: bc.CONTEXT_TYPE_INTERNET,
-		}, (err) => {
+		deactivate((err) => {
 			log('notice', sprintf('session %d deactivated', self.session_id));
 			emit('down', { reason: 'admin' });
 
 			if (cb)
 				cb(null);
-		}, { timeout: 30000 });
+		});
 	};
 
 	self._fail = function(err) {
@@ -191,12 +206,50 @@ export function create(opts)
 		let cb = up_cb;
 		up_cb = null;
 
+		let finish = () => {
+			set_state('IDLE');
+			self.settings = null;
+			emit('error', err);
+
+			if (cb)
+				cb(err);
+		};
+
+		// if our CONNECT already activated the session the modem still holds it;
+		// deactivate first so the daemon's retry doesn't hit MBIM status 13.
+		if (activated && self.modem.mbim) {
+			activated = false;
+			log('notice', sprintf('deactivating session %d after failed activation',
+				self.session_id));
+			deactivate((e) => finish());
+		}
+		else {
+			finish();
+		}
+	};
+
+	// Unsolicited MBIM_CID_CONNECT indication for this session: the network
+	// (de)activated the data context. This is the MBIM analogue of QMI's
+	// PACKET_SERVICE_STATUS_IND (context.uc _connection_lost) — the primary
+	// signal that a *live* data session dropped. It matters because on cdc_mbim
+	// the netdev carrier does NOT follow the session (a radio/bearer loss leaves
+	// wwan0 carrier up), so netifd never notices; without this we stay
+	// stale-CONNECTED. Emitting 'down'/'disconnected' routes into the same
+	// daemon reconnect-in-place path QMI uses.
+	self.connect_indication = function(data) {
+		let active = (data.activation_state == bc.ACTIVATION_ACTIVATED ||
+		              data.activation_state == bc.ACTIVATION_ACTIVATING);
+
+		if (self.state != 'CONNECTED' || active)
+			return;
+
+		log('warn', sprintf('session %d deactivated by network (state %J, nw_error %J)',
+			self.session_id, data.activation_state, data.nw_error));
+
+		activated = false;   // the network already tore it down
 		set_state('IDLE');
 		self.settings = null;
-		emit('error', err);
-
-		if (cb)
-			cb(err);
+		emit('down', { reason: 'disconnected', data: data });
 	};
 
 	self.modem_event = function(event, data) {
@@ -206,6 +259,8 @@ export function create(opts)
 			break;
 
 		case 'lost':
+			activated = false;   // device/registration gone — nothing to deactivate
+
 			if (self.state != 'IDLE') {
 				set_state('IDLE');
 				self.settings = null;

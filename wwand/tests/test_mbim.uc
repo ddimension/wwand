@@ -5,6 +5,7 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as mbim from 'wwand/codec/mbim.uc';
 import * as bc from 'wwand/codec/mbim-schema/basic_connect.uc';
+import * as context_mbim from 'wwand/context_mbim.uc';
 
 function p32(v) {
 	return chr(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff);
@@ -136,5 +137,137 @@ eq(cfg.ipv4_mtu, 1500, 'ipcfg: mtu');
 let lazy = require('wwand.mbim_lazy');
 ok(type(lazy?.modem?.create) == 'function', 'lazy: modem_mbim loadable via require');
 ok(type(lazy?.context?.create) == 'function', 'lazy: context_mbim loadable via require');
+
+
+// --- unsolicited CONNECT indication: network-side session loss --------------
+// The MBIM analogue of QMI's PACKET_SERVICE_STATUS_IND. On cdc_mbim the netdev
+// carrier does not follow the session, so this indication is the only signal
+// that a live data session dropped — it must tear the context down.
+
+function stub_mbim_modem() {
+	let m;
+	m = {
+		state: 'READY',
+		mbim: {},
+		contexts: [],
+		attach_context: function(c) { push(m.contexts, c); },
+		command: function(name, kind, args, cb) {
+			if (name == 'CONNECT' && args.activation_command == bc.ACTIVATION_CMD_ACTIVATE)
+				return cb(null, { session_id: args.session_id,
+				                  activation_state: bc.ACTIVATION_ACTIVATED });
+			if (name == 'CONNECT')
+				return cb(null, {});   // deactivate
+			if (name == 'IP_CONFIGURATION')
+				return cb(null, {
+					ipv4_available: 1, ipv4_count: 1,
+					ipv4_addresses: [ { address: '10.0.0.5', prefix: 30 } ],
+					ipv4_gateway: '10.0.0.6', ipv4_dns: [ '1.1.1.1' ], ipv4_mtu: 1500,
+					ipv6_available: 0, ipv6_addresses: [],
+				});
+			return cb(null, {});
+		},
+	};
+	return m;
+}
+
+let mev = [];
+let mctx = context_mbim.create({
+	name: 'wan', modem: stub_mbim_modem(),
+	config: { apn: 'internet', mux_id: 0 },
+	deps: { on_event: (c, e, d) => push(mev, { e: e, d: d }), log: () => null },
+});
+
+let up_err;
+mctx.up((e) => { up_err = e; });
+eq(up_err, null, 'connect-ind: up succeeds');
+eq(mctx.state, 'CONNECTED', 'connect-ind: reaches CONNECTED');
+eq(mctx.session_id, 0, 'connect-ind: session 0');
+
+// an ACTIVATED indication while connected is a no-op (still up)
+mctx.connect_indication({ session_id: 0, activation_state: bc.ACTIVATION_ACTIVATED });
+eq(mctx.state, 'CONNECTED', 'connect-ind: activated ind keeps CONNECTED');
+
+// a DEACTIVATED indication tears the session down and reports it as a transient
+// disconnect (same reason QMI uses -> same daemon reconnect-in-place path)
+mctx.connect_indication({ session_id: 0, activation_state: bc.ACTIVATION_DEACTIVATED, nw_error: 0 });
+eq(mctx.state, 'IDLE', 'connect-ind: deactivate ind -> IDLE');
+let last = mev[length(mev) - 1];
+eq(last.e, 'down', 'connect-ind: emits down');
+eq(last.d.reason, 'disconnected', 'connect-ind: reason disconnected');
+
+// a stray indication while already IDLE must not re-emit
+let n = length(mev);
+mctx.connect_indication({ session_id: 0, activation_state: bc.ACTIVATION_DEACTIVATED });
+eq(length(mev), n, 'connect-ind: ignored when not CONNECTED');
+
+
+// --- deactivate-before-retry ------------------------------------------------
+// A failure *after* CONNECT activated the session must DEACTIVATE before the
+// context reports failure — otherwise the daemon's retry issues a fresh CONNECT
+// and the modem answers MBIM status 13 (max activated contexts).
+
+function stub_fail_modem(rec) {
+	let m;
+	m = {
+		state: 'READY',
+		mbim: {},
+		contexts: [],
+		attach_context: function(c) { push(m.contexts, c); },
+		command: function(name, kind, args, cb) {
+			if (name == 'CONNECT')
+				push(rec, args.activation_command);
+			if (name == 'CONNECT' && args.activation_command == bc.ACTIVATION_CMD_ACTIVATE)
+				return cb(null, { session_id: args.session_id,
+				                  activation_state: bc.ACTIVATION_ACTIVATED });
+			if (name == 'CONNECT')
+				return cb(null, {});   // deactivate ack
+			if (name == 'IP_CONFIGURATION')
+				return cb({ error: 'mbim', status: 99 });   // fail after activation
+			return cb(null, {});
+		},
+	};
+	return m;
+}
+
+let recmds = [];
+let fctx = context_mbim.create({
+	name: 'wan', modem: stub_fail_modem(recmds),
+	config: { apn: 'internet', mux_id: 0 },
+	deps: { on_event: () => null, log: () => null },
+});
+
+let ferr;
+fctx.up((e) => { ferr = e; });
+ok(ferr != null, 'deactivate-retry: up fails at ip_config');
+eq(fctx.state, 'IDLE', 'deactivate-retry: back to IDLE');
+eq(recmds[0], bc.ACTIVATION_CMD_ACTIVATE, 'deactivate-retry: activated first');
+eq(recmds[length(recmds) - 1], bc.ACTIVATION_CMD_DEACTIVATE,
+	'deactivate-retry: deactivated after failure');
+
+// a failure *before* activation (CONNECT itself errors) must NOT deactivate
+function stub_connect_err(rec) {
+	let m;
+	m = {
+		state: 'READY', mbim: {}, contexts: [],
+		attach_context: function(c) { push(m.contexts, c); },
+		command: function(name, kind, args, cb) {
+			if (name == 'CONNECT')
+				push(rec, args.activation_command);
+			if (name == 'CONNECT')
+				return cb({ error: 'mbim', status: 12 });   // CONNECT fails outright
+			return cb(null, {});
+		},
+	};
+	return m;
+}
+
+let recmds2 = [];
+let fctx2 = context_mbim.create({
+	name: 'wan', modem: stub_connect_err(recmds2),
+	config: { apn: 'internet', mux_id: 0 },
+	deps: { on_event: () => null, log: () => null },
+});
+fctx2.up(() => null);
+eq(length(recmds2), 1, 'deactivate-retry: no deactivate when CONNECT never activated');
 
 done('test_mbim');
