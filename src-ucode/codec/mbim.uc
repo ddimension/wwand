@@ -134,16 +134,6 @@ function encode_scalar(fmt, v)
 	}
 }
 
-function encode_struct(fields, obj)
-{
-	let out = '';
-
-	for (let name, fmt in fields)
-		out += encode_scalar(fmt, obj?.[name]);
-
-	return out;
-}
-
 export function encode_info(fields, args)
 {
 	let fixed = '';
@@ -170,25 +160,20 @@ export function encode_info(fields, args)
 				fixed += struct.pack('<II', 0, 0);
 			}
 		}
-		else if (type(fmt) == 'string') {
-			fixed += encode_scalar(fmt, v);
+		else if (fmt == 'ipv4-array' || fmt == 'ipv6-array' || type(fmt) == 'object') {
+			// count+offset arrays are DECODE-only in wwand: they appear solely in
+			// MBIM responses/notifications, never in the SET/QUERY requests this
+			// function builds. The old array-encode paths were never exercised and
+			// are asymmetric with decode_info anyway (obj-array wrote an inline
+			// offset+count where decode expects a 4-byte offset + a separate count
+			// field; ipv4/ipv6-array had no branch at all and fell to a 4-byte
+			// scalar despite fixed_len reserving 8, corrupting every later offset).
+			// Fail loudly if a future request schema adds one, rather than silently
+			// emitting a corrupt InformationBuffer.
+			die(sprintf('encode_info: array field %s unsupported (arrays are decode-only)', name));
 		}
 		else {
-			// struct array: { array: countfield, of: {...} } — encoded as
-			// count in the referenced field + offset/length here
-			let items = v ?? [];
-			let blob = '';
-
-			for (let item in items)
-				blob += encode_struct(fmt.of, item);
-
-			if (length(blob)) {
-				fixed += struct.pack('<II', fixed_len + length(data), length(items));
-				data += blob;
-			}
-			else {
-				fixed += struct.pack('<II', 0, 0);
-			}
+			fixed += encode_scalar(fmt, v);
 		}
 	}
 

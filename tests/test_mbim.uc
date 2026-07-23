@@ -90,6 +90,15 @@ let ed = mbim.decode_info({ a: 'u32', s: 'string' }, e);
 eq(ed.a, 5, 'info: scalar before empty string');
 eq(ed.s, null, 'info: empty string decodes null');
 
+// encoding a count+offset array (decode-only in wwand) must fail loudly rather
+// than silently emit a corrupt InformationBuffer — for the object-array and the
+// ipv4/ipv6-array forms alike.
+for (let af in [ { arr: { array: 'n', of: { x: 'u32' } } }, { arr: 'ipv4-array' } ]) {
+	let threw = false;
+	try { mbim.encode_info(af, { arr: [] }); } catch (ex) { threw = true; }
+	ok(threw, sprintf('info: encoding an array field (%s) dies loudly', type(af.arr) == 'object' ? 'obj-array' : af.arr));
+}
+
 // --- COMMAND_DONE decode with synthesized response ---------------------------
 
 // build a Subscriber Ready Status response info buffer and wrap it in a DONE
