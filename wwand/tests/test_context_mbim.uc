@@ -2,12 +2,12 @@
 //
 // The MBIM counterpart to test_context.uc (QMI): drives modem_mbim through the
 // real OPEN -> CAPS -> SUBSCRIBER -> REGISTER -> PACKET_SERVICE bring-up to
-// READY, connects a context (CONNECT -> IP_CONFIGURATION), and validates the
-// loss-detection paths added for cdc_mbim — where the netdev carrier does not
-// follow the session, so the control-plane indications are the only signal:
-//   * unsolicited MBIM_CID_CONNECT deactivation -> context down/disconnected
-//   * REGISTER_STATE deregister -> modem 'deregistered' + context 'suspend'
-//   * reconnect in place after a drop.
+// READY and exercises the context lifecycle + the loss/liveness backstops added
+// for cdc_mbim, where the netdev carrier does not follow the session:
+//   s1  connect + IP decode; PACKET_STATISTICS sampling; unsolicited
+//       CONNECT-deactivate -> down/disconnected; reconnect in place;
+//       REGISTER deregister -> modem 'deregistered' + context 'suspend'.
+//   s2  zero-rx watchdog: stalled received packets -> 'zero_rx'.
 
 'use strict';
 
@@ -51,8 +51,8 @@ function build_ipcfg() {
 	return fixed + v4addr + gw + dns;
 }
 
-function base_handlers() {
-	return {
+function base_handlers(extra) {
+	let h = {
 		DEVICE_CAPS: {
 			device_type: 1, cellular_class: 1, voice_class: 1, sim_class: 2,
 			data_class: 0x3f, sms_caps: 0, control_caps: 0, max_sessions: 8,
@@ -83,6 +83,11 @@ function base_handlers() {
 			    context_type: bc.CONTEXT_TYPE_INTERNET, nw_error: 0 },
 		IP_CONFIGURATION: { __raw: build_ipcfg() },
 	};
+
+	for (let k, v in (extra ?? {}))
+		h[k] = v;
+
+	return h;
 }
 
 function last_event(arr, name) {
@@ -98,105 +103,168 @@ function any_event(arr, name, from) {
 	return false;
 }
 
-let mock = mbim_mockhub.create({ schema: bc, handlers: base_handlers() });
-let mevents = [], cevents = [];
-let ctx = null, modem = null, guard = null;
+// --- scenario 1: lifecycle + loss paths -------------------------------------
 
-let start_scenario, step_loss, step_reconnect, step_suspend, finish;
-
-modem = modem_mbim.create({
-	id: 'm0', device: '/dev/mock0',
-	config: { apn: 'internet.t-d1.de', mux_id: 0 },
-	timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
-	// starve the AT side channel: no tty found -> best-effort skip
-	at: { fx: { read: () => null, glob: () => [] } },
-	deps: {
-		transport_open: mock.transport_open,
-		log: () => null,
-		on_event: (m, event, data) => {
-			push(mevents, { event: event, data: data });
-
-			if (event == 'registered' && !ctx) {
-				ctx = context_mbim.create({
-					name: 'wan', modem: m,
-					config: { apn: 'internet.t-d1.de', mux_id: 0 },
-					deps: {
-						log: () => null,
-						on_event: (c, ev, d) => push(cevents, { event: ev, data: d }),
-					},
-				});
-
-				start_scenario();
-			}
-		},
+let scenario_flow = {
+	name: 's1_flow',
+	ctx_timing: { stats_interval: 5 },   // sample fast; default zero-rx won't trip
+	handlers: () => {
+		let n = 0;   // increasing rx packets -> no zero-rx trip
+		return base_handlers({
+			PACKET_STATISTICS: () => ({
+				in_octets: 1000, out_octets: 500,
+				in_packets: (++n) * 100, out_packets: n * 50,
+				in_errors: 0, out_errors: 0, in_discards: 0, out_discards: 0,
+			}),
+		});
 	},
-});
+	run: (env) => {
+		let ctx = env.ctx, mock = env.mock;
+		let step_loss, step_reconnect, step_suspend;
 
-start_scenario = () => {
-	ok(true, 'modem reached READY (OPEN->CAPS->SUBSCRIBER->REGISTER->PACKET_SERVICE)');
-	eq(modem.info.imsi, '262011234567890', 'subscriber id read from SUBSCRIBER_READY');
+		// unsolicited CONNECT deactivation -> the context must tear down
+		step_loss = () => {
+			mock.indicate('CONNECT', { session_id: 0, activation_state: bc.ACTIVATION_DEACTIVATED,
+			                           voice_call_state: 0, ip_type: 0,
+			                           context_type: bc.CONTEXT_TYPE_INTERNET, nw_error: 0 });
 
-	ctx.up((err, settings) => {
-		eq(err, null, 'context up succeeds');
-		eq(ctx.state, 'CONNECTED', 'context CONNECTED');
-		eq(settings?.ipv4?.addr, '37.83.58.112', 'ipv4 address decoded from IP_CONFIGURATION');
-		eq(settings?.ipv4?.gateway, '37.83.58.113', 'ipv4 gateway decoded');
-		eq(settings?.ipv4?.dns, [ '10.74.210.210', '10.74.210.211' ], 'ipv4 dns decoded');
-		step_loss();
+			uloop.timer(20, () => {
+				eq(ctx.state, 'IDLE', 'CONNECT-deactivate indication -> context IDLE');
+				let d = last_event(env.cevents, 'down');
+				ok(d && d.data?.reason == 'disconnected', 'context emitted down/disconnected');
+				step_reconnect();
+			});
+		};
+
+		// the daemon would retry after a disconnect — the context reconnects
+		step_reconnect = () => {
+			ctx.up((err) => {
+				eq(err, null, 'context reconnects after drop');
+				eq(ctx.state, 'CONNECTED', 'reconnected CONNECTED');
+				step_suspend();
+			});
+		};
+
+		// registration loss -> modem 'deregistered' + context 'suspend'
+		step_suspend = () => {
+			let from = length(env.cevents);
+
+			mock.indicate('REGISTER_STATE', { nw_error: 0, register_state: 0, register_mode: 0,
+			                                  available_data_classes: 0, current_cellular_class: 0,
+			                                  provider_id: '', provider_name: '', roaming_text: '',
+			                                  registration_flag: 0 });
+
+			uloop.timer(20, () => {
+				ok(any_event(env.mevents, 'deregistered'), 'REGISTER_STATE deregister -> modem deregistered');
+				ok(any_event(env.cevents, 'suspend', from), 'registration loss -> context suspend');
+				env.finish();
+			});
+		};
+
+		ok(true, 'modem reached READY (OPEN->CAPS->SUBSCRIBER->REGISTER->PACKET_SERVICE)');
+		eq(env.modem.info.imsi, '262011234567890', 'subscriber id read from SUBSCRIBER_READY');
+
+		ctx.up((err, settings) => {
+			eq(err, null, 'context up succeeds');
+			eq(ctx.state, 'CONNECTED', 'context CONNECTED');
+			eq(settings?.ipv4?.addr, '37.83.58.112', 'ipv4 address decoded from IP_CONFIGURATION');
+			eq(settings?.ipv4?.gateway, '37.83.58.113', 'ipv4 gateway decoded');
+			eq(settings?.ipv4?.dns, [ '10.74.210.210', '10.74.210.211' ], 'ipv4 dns decoded');
+
+			// the stats watchdog samples PACKET_STATISTICS while connected
+			uloop.timer(15, () => {
+				ok(length(mock.calls_for('PACKET_STATISTICS')) > 0, 'PACKET_STATISTICS sampled while connected');
+				ok(ctx.status()?.stats?.rx_packets != null, 'stats surfaced on status');
+				step_loss();
+			});
+		});
+	},
+};
+
+// --- scenario 2: zero-rx watchdog -------------------------------------------
+
+let scenario_zero_rx = {
+	name: 's2_zero_rx',
+	ctx_timing: { stats_interval: 5, zero_rx_ms: 8 },
+	handlers: () => base_handlers({
+		// constant rx packets -> a stall the watchdog must catch
+		PACKET_STATISTICS: {
+			in_octets: 1000, out_octets: 500, in_packets: 100, out_packets: 50,
+			in_errors: 0, out_errors: 0, in_discards: 0, out_discards: 0,
+		},
+	}),
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'zero-rx: context connected');
+
+			uloop.timer(80, () => {
+				ok(any_event(env.cevents, 'zero_rx'), 'stalled rx packets -> zero_rx tripped');
+				env.finish();
+			});
+		});
+	},
+};
+
+// --- runner -----------------------------------------------------------------
+
+let scenarios = [ scenario_flow, scenario_zero_rx ];
+let current = 0;
+
+function run_next() {
+	if (current >= length(scenarios)) {
+		uloop.end();
+		return;
+	}
+
+	let s = scenarios[current++];
+	let mock = mbim_mockhub.create({ schema: bc, handlers: s.handlers() });
+	let cevents = [], mevents = [];
+	let ctx = null, modem = null, guard = null, finished = false;
+
+	let finish = () => {
+		if (finished)
+			return;
+
+		finished = true;
+		if (guard) guard.cancel();
+		modem.stop();
+		uloop.timer(1, run_next);
+	};
+
+	modem = modem_mbim.create({
+		id: s.name, device: '/dev/mock0',
+		config: { apn: 'internet.t-d1.de', mux_id: 0 },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },   // no AT tty in tests
+		deps: {
+			transport_open: mock.transport_open,
+			log: () => null,
+			on_event: (m, event, data) => {
+				push(mevents, { event: event, data: data });
+
+				if (event == 'registered' && !ctx) {
+					ctx = context_mbim.create({
+						name: 'wan', modem: m,
+						config: { apn: 'internet.t-d1.de', mux_id: 0 },
+						timing: s.ctx_timing,
+						deps: {
+							log: () => null,
+							on_event: (c, ev, d) => push(cevents, { event: ev, data: d }),
+						},
+					});
+
+					s.run({ ctx: ctx, mock: mock, modem: m,
+					        cevents: cevents, mevents: mevents, finish: finish });
+				}
+			},
+		},
 	});
-};
 
-// unsolicited CONNECT deactivation -> the context must tear down
-step_loss = () => {
-	mock.indicate('CONNECT', { session_id: 0, activation_state: bc.ACTIVATION_DEACTIVATED,
-	                           voice_call_state: 0, ip_type: 0,
-	                           context_type: bc.CONTEXT_TYPE_INTERNET, nw_error: 0 });
+	guard = uloop.timer(3000, () => { ok(false, s.name + ': timed out'); finish(); });
+	modem.start();
+}
 
-	uloop.timer(20, () => {
-		eq(ctx.state, 'IDLE', 'CONNECT-deactivate indication -> context IDLE');
-		let d = last_event(cevents, 'down');
-		ok(d && d.data?.reason == 'disconnected', 'context emitted down/disconnected');
-		step_reconnect();
-	});
-};
-
-// the daemon would retry after a disconnect — the context reconnects in place
-step_reconnect = () => {
-	ctx.up((err) => {
-		eq(err, null, 'context reconnects after drop');
-		eq(ctx.state, 'CONNECTED', 'reconnected CONNECTED');
-		step_suspend();
-	});
-};
-
-// registration loss -> modem 'deregistered' + context 'suspend'
-step_suspend = () => {
-	let from = length(cevents);
-
-	mock.indicate('REGISTER_STATE', { nw_error: 0, register_state: 0, register_mode: 0,
-	                                  available_data_classes: 0, current_cellular_class: 0,
-	                                  provider_id: '', provider_name: '', roaming_text: '',
-	                                  registration_flag: 0 });
-
-	uloop.timer(20, () => {
-		ok(any_event(mevents, 'deregistered'), 'REGISTER_STATE deregister -> modem deregistered');
-		ok(any_event(cevents, 'suspend', from), 'registration loss -> context suspend');
-		finish();
-	});
-};
-
-finish = () => {
-	if (guard) guard.cancel();
-	modem.stop();
-	uloop.end();
-};
-
-guard = uloop.timer(3000, () => {
-	ok(false, 'scenario timed out');
-	uloop.end();
-});
-
-modem.start();
+run_next();
 uloop.run();
 
 done('test_context_mbim');

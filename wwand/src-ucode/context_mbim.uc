@@ -38,11 +38,20 @@ export function create(opts)
 	let deps = opts.deps ?? {};
 	let log = deps.log ?? ((l, m) => warn(sprintf('%s: context %s: %s\n', l, self.name, m)));
 	let up_cb = null;
-	let stats_timer = null;
 	// true once our CONNECT activated the session — the modem then holds it, so a
 	// failure/retry path must DEACTIVATE first or the next CONNECT hits MBIM
 	// status 13 (max activated contexts).
 	let activated = false;
+
+	// zero-rx watchdog (parity with the QMI context): sample MBIM
+	// PACKET_STATISTICS while CONNECTED; if received packets stall for
+	// zero_rx_timeout, emit 'zero_rx' so the daemon usb-repowers the modem.
+	// cdc_mbim's carrier does not reflect a silent bearer stall, so this is the
+	// only backstop for a wedged-but-"connected" data path.
+	let stats_timer = null;
+	let stats_interval = opts.timing?.stats_interval ?? 60000;
+	let rx_last_total = -1;
+	let rx_stalled_ms = 0;
 
 	let emit = (event, data) => {
 		if (deps.on_event)
@@ -91,6 +100,74 @@ export function create(opts)
 		out.mtu = out.ipv4?.mtu ?? out.ipv6?.mtu;
 
 		return out;
+	};
+
+	let zero_rx_limit_ms = () => {
+		if (opts.timing?.zero_rx_ms != null)
+			return opts.timing.zero_rx_ms;
+
+		let secs = +(self.modem.config?.zero_rx_timeout ?? 21600);
+
+		return (secs > 0) ? secs * 1000 : 0;
+	};
+
+	let start_stats, stop_stats, sample_stats;
+
+	start_stats = () => {
+		rx_last_total = -1;
+		rx_stalled_ms = 0;
+		self.connected_since = time();
+		stats_timer = uloop.timer(0, sample_stats);   // first sample immediately
+	};
+
+	stop_stats = () => {
+		if (stats_timer) {
+			stats_timer.cancel();
+			stats_timer = null;
+		}
+	};
+
+	sample_stats = () => {
+		if (self.state != 'CONNECTED' || !self.modem.mbim)
+			return;   // torn down (control channel gone) — let the timer lapse
+
+		// device-wide counters (MBIM PACKET_STATISTICS has no session id); for
+		// the common single-session setup that is exactly this context's traffic
+		self.modem.command('PACKET_STATISTICS', 'query', {}, (err, d) => {
+			if (self.state != 'CONNECTED')
+				return;
+
+			if (!err && d != null) {
+				self.stats = {
+					tx_bytes: d.out_octets, rx_bytes: d.in_octets,
+					tx_packets: d.out_packets, rx_packets: d.in_packets,
+					tx_errors: d.out_errors, rx_errors: d.in_errors,
+					tx_dropped: d.out_discards, rx_dropped: d.in_discards,
+				};
+
+				if (zero_rx_limit_ms() > 0) {
+					let total = +(d.in_packets ?? 0);
+
+					if (total > rx_last_total || rx_last_total < 0) {
+						rx_last_total = total;
+						rx_stalled_ms = 0;
+					}
+					else {
+						rx_stalled_ms += stats_interval;
+
+						if (rx_stalled_ms >= zero_rx_limit_ms()) {
+							log('err', sprintf('no rx packets for %dms, tripping zero-rx recovery', rx_stalled_ms));
+							stop_stats();
+							emit('zero_rx', { stalled_ms: rx_stalled_ms, rx_total: total });
+							return;
+						}
+					}
+				}
+			}
+
+			if (stats_timer)
+				stats_timer.set(stats_interval);
+		});
 	};
 
 	// best-effort DEACTIVATE of this session (shared by admin down + failure
@@ -170,6 +247,7 @@ export function create(opts)
 						self.settings.ipv6.gateway, join(' ', self.settings.ipv6.dns)));
 
 				set_state('CONNECTED');
+				start_stats();
 				emit('up', self.settings);
 
 				let cb2 = up_cb;
@@ -184,6 +262,7 @@ export function create(opts)
 	self.down = function(cb) {
 		let was = self.state;
 
+		stop_stats();
 		set_state('IDLE');
 		self.settings = null;
 		activated = false;
@@ -207,6 +286,7 @@ export function create(opts)
 		up_cb = null;
 
 		let finish = () => {
+			stop_stats();
 			set_state('IDLE');
 			self.settings = null;
 			emit('error', err);
@@ -247,6 +327,7 @@ export function create(opts)
 			self.session_id, data.activation_state, data.nw_error));
 
 		activated = false;   // the network already tore it down
+		stop_stats();
 		set_state('IDLE');
 		self.settings = null;
 		emit('down', { reason: 'disconnected', data: data });
@@ -260,6 +341,7 @@ export function create(opts)
 
 		case 'lost':
 			activated = false;   // device/registration gone — nothing to deactivate
+			stop_stats();
 
 			if (self.state != 'IDLE') {
 				set_state('IDLE');
@@ -297,6 +379,9 @@ export function create(opts)
 			protocol: 'mbim',
 			session_id: self.session_id,
 			settings: self.settings,
+			stats: (self.state == 'CONNECTED') ? self.stats : null,
+			uptime: (self.state == 'CONNECTED' && self.connected_since)
+				? (time() - self.connected_since) : null,
 		};
 	};
 
