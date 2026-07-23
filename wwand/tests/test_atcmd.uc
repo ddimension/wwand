@@ -164,6 +164,15 @@ eq(atcmd.parse_qcainfo([
 
 eq(atcmd.parse_qcainfo([ 'OK', '' ]), [], 'qcainfo: no carrier lines');
 
+// --- AT+QNWLOCK read-back parsing --------------------------------------------
+
+let lk4 = atcmd.parse_qnwlock([ '+QNWLOCK: "common/4g",1,1300,246' ]);
+eq(lk4.scope, 'common/4g', 'qnwlock: scope parsed');
+eq(lk4.enabled, true, 'qnwlock: enabled flag');
+eq(lk4.values, [ 1300, 246 ], 'qnwlock: earfcn/pci values');
+eq(atcmd.parse_qnwlock([ '+QNWLOCK: "common/5g",0' ]).enabled, false, 'qnwlock: disabled');
+eq(atcmd.parse_qnwlock([ 'OK' ]), null, 'qnwlock: no lock line -> null');
+
 // --- AT+QENG servingcell parsing (LTE + NR5G-NSA) ----------------------------
 // real lines from an RG502Q on LTE B3 + NR5G-NSA n1
 let sc = atcmd.parse_qeng_servingcell([

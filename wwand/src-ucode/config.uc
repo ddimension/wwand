@@ -53,6 +53,7 @@ export function modem_defaults(over)
 		lock_4g: [], lock_5g: null, lock_persist: false,
 		sim_slot: 0,
 		stats_interval: 60,
+		auto_correct_config: false,   // gated runtime auto-correction (default off)
 		...(over ?? {}),
 	};
 }
@@ -114,6 +115,7 @@ function parse_wwand_sections(raw, result)
 				lock_persist: bool_opt(s.lock_persist, false),
 				sim_slot: +(s.sim_slot ?? 0),
 				stats_interval: +(s.stats_interval ?? 60),
+				auto_correct_config: bool_opt(s.auto_correct_config, false),
 			});
 			break;
 

@@ -801,6 +801,7 @@ export function create(opts)
 			modems[name] = {
 				device: entry.device,
 				netdev: entry.netdev,
+				protocol: entry.protocol,
 				state: entry.modem?.state ?? 'UNRESOLVED',
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,
@@ -808,6 +809,7 @@ export function create(opts)
 				at_tty: entry.modem?.at_tty,
 				registration: entry.modem?.reg,
 				registration_detail: entry.modem?.reg_detail,
+				config_warnings: entry.modem?.config_warnings,
 				proto_errors: entry.modem?.counters?.proto_errors,
 				qmi_errors: entry.modem?.counters?.proto_errors,   // deprecated alias
 

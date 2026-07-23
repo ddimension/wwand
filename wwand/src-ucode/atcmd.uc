@@ -135,6 +135,29 @@ export function cell_lock_commands(cfg)
 	return cmds;
 }
 
+// parse an AT+QNWLOCK read response into the lock state. Quectel formats:
+//   +QNWLOCK: "common/4g",<enable>[,<earfcn>,<pci>[,...]]
+//   +QNWLOCK: "common/4g_ext",<enable>,<count>,<earfcn>,<pci>,...
+//   +QNWLOCK: "common/5g",<enable>[,<pci>,<arfcn>,<scs>,<band>]
+// returns { scope, enabled, values:[...] } for the first matching line, or null
+// when the modem answered with no lock line (unsupported / empty).
+export function parse_qnwlock(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+QNWLOCK:\s*"([^"]+)",([0-9]+)(.*)/);
+
+		if (!m)
+			continue;
+
+		let rest = replace(trim(m[3]), /^,/, '');
+		let vals = length(rest) ? map(split(rest, ','), (x) => +trim(x)) : [];
+
+		return { scope: m[1], enabled: +m[2] > 0, values: vals };
+	}
+
+	return null;
+}
+
 // LTE downlink bandwidth in resource blocks -> MHz (E-UTRA transmission BW)
 const RB_MHZ = { '6': 1.4, '15': 3, '25': 5, '50': 10, '75': 15, '100': 20 };
 

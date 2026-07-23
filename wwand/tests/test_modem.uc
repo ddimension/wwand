@@ -67,6 +67,13 @@ function base_handlers(over)
 				: [ 0x98, 0x94, 0x20, 0x00, 0x00, 0x01, 0x22, 0x38, 0x42, 0x09 ] }),
 		REGISTER_EVENTS: { mask: 1 },
 		REGISTER_INDICATIONS: {},
+		// config validation reads this back; default reflects a matching state
+		// (lte|nr5g allowed, manual selection) so unrelated scenarios see no
+		// warnings. Scenarios exercising validation override it.
+		GET_SYSTEM_SELECTION_PREFERENCE: {
+			mode_preference: (1 << 4) | (1 << 6),
+			network_selection: 1,
+		},
 		GET_SERVING_SYSTEM: {
 			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
 			                  selected_network: 1, radio_ifs: [ 8, 12 ] },
@@ -289,6 +296,57 @@ scenario('modes', {
 		eq(calls[0].args.network_selection, { mode: 1, mcc: 262, mnc: 1 }, 'modes: manual plmn');
 	});
 
+// --- 6b: runtime config validation — live modem MISMATCHES config ------------
+
+scenario('validate-mismatch', {
+	handlers: base_handlers({
+		SET_SYSTEM_SELECTION_PREFERENCE: {},
+		// modem allows lte|nr5g and sits in automatic selection, while config
+		// asks for lte-only and pins a manual PLMN -> two warnings
+		GET_SYSTEM_SELECTION_PREFERENCE: {
+			mode_preference: (1 << 4) | (1 << 6),
+			network_selection: 0,
+		},
+	}),
+	config: { modes: 'lte', mcc: '262', mnc: '1' },
+}, 'registered',
+	(modem, mock, events) => {
+		let w = modem.config_warnings;
+		ok(w != null, 'validate: config_warnings populated');
+
+		let mp = filter(w, (e) => e.check == 'mode_preference');
+		eq(length(mp), 1, 'validate: mode_preference mismatch flagged');
+		eq(mp[0].severity, 'warn', 'validate: mode_preference is a warn');
+		eq(mp[0].expected, 1 << 4, 'validate: expected lte mask');
+		eq(mp[0].actual, (1 << 4) | (1 << 6), 'validate: actual lte|nr5g mask');
+
+		let ns = filter(w, (e) => e.check == 'network_selection');
+		eq(length(ns), 1, 'validate: network_selection mismatch flagged');
+		eq(ns[0].actual, 'automatic', 'validate: modem reported automatic');
+
+		// RG502Q-EA also carries the profile-2 self-activation quirk note
+		let q = filter(w, (e) => e.check == 'quirk');
+		eq(length(q), 1, 'validate: RG502Q quirk note present');
+		eq(q[0].severity, 'info', 'validate: quirk is info severity');
+	});
+
+// --- 6c: runtime config validation — live modem MATCHES config ---------------
+
+scenario('validate-match', {
+	handlers: base_handlers({
+		GET_MODEL: { model: 'RG650E-EU' },   // no static quirk notes
+		SET_SYSTEM_SELECTION_PREFERENCE: {},
+		GET_SYSTEM_SELECTION_PREFERENCE: {
+			mode_preference: 1 << 4,
+			network_selection: 1,
+		},
+	}),
+	config: { modes: 'lte', mcc: '262', mnc: '1' },
+}, 'registered',
+	(modem, mock, events) => {
+		eq(length(modem.config_warnings), 0, 'validate: no warnings when modem matches');
+	});
+
 // --- 7: QMAP datapath setup (rmnet backend) ----------------------------------
 
 let dpfx = fakefx.create({ present: {
@@ -442,8 +500,10 @@ scenario('at-init', {
 	(modem, mock, events) => {
 		eq(modem.state, 'READY', 'at: READY');
 		eq(modem.at_tty, '/dev/ttyUSB2', 'at: tty from config override');
-		// model RG502Q-EA -> QMBNCFG quirk, then configured ATE0
-		eq(at_tr.written, [ 'AT+QMBNCFG="AutoSel",1', 'ATE0' ], 'at: quirk + at_init sequence');
+		// model RG502Q-EA -> QMBNCFG quirk, then configured ATE0 (validate_config
+		// later appends its AT+QCFG="autoconnect" probe, so check just the prefix)
+		eq(slice(at_tr.written, 0, 2), [ 'AT+QMBNCFG="AutoSel",1', 'ATE0' ], 'at: quirk + at_init sequence');
+		ok(index(at_tr.written, 'AT+QCFG="autoconnect"') >= 0, 'at: autoconnect probed at validate');
 	});
 
 // --- 10b: eSIM host-access quirk (RG650E) queries lpa_enable at init --------
@@ -465,6 +525,31 @@ scenario('esim-quirk', {
 		// the fake acks "OK" (not lpa_enable,1) -> nothing to change -> no reset
 		eq(index(at_tr_esim.written, 'AT+CFUN=1,1'), -1,
 			'esim-quirk: no reset when the value is unchanged');
+	});
+
+// --- 10c: cell-lock read-back over AT when the modem reports it unset ---------
+
+let at_tr_lock = fake_at_transport();
+
+scenario('validate-lock', {
+	handlers: base_handlers({
+		GET_MODEL: { model: 'RG650E-EU' },
+		SET_SYSTEM_SELECTION_PREFERENCE: {},
+		GET_SYSTEM_SELECTION_PREFERENCE: { mode_preference: 1 << 4, network_selection: 0 },
+	}),
+	// fake AT auto-acks bare "OK" (no +QNWLOCK line) -> lock reads as not applied
+	config: { modes: 'lte', tty: '/dev/ttyUSB2', lock_4g: [ '1300:246' ] },
+	at: {
+		fx: fakefx.create(),
+		open_transport: (path, baud, log) => at_tr_lock,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		let lk = filter(modem.config_warnings, (e) => e.check == 'lock_4g');
+		eq(length(lk), 1, 'validate: unapplied 4G lock flagged');
+		eq(lk[0].actual, 'off', 'validate: lock reported off');
+		ok(index(at_tr_lock.written, 'AT+QNWLOCK="common/4g"') >= 0,
+			'validate: 4G lock read back over AT');
 	});
 
 // --- 11: LOC positioning session ----------------------------------------------
@@ -579,6 +664,23 @@ eq(modem_mod.parse_modes('all') != null, true, 'parse_modes all');
 eq(modem_mod.parse_modes('lte'), 1 << 4, 'parse_modes lte');
 eq(modem_mod.parse_modes('bogus'), null, 'parse_modes unknown -> null');
 eq(modem_mod.parse_modes(''), null, 'parse_modes empty -> null');
+
+// --- modem_quirks.for_model (pure resolver) ----------------------------------
+
+import * as modem_quirks from 'wwand/modem_quirks.uc';
+
+let q502 = modem_quirks.for_model('RG502Q-EA');
+ok(length(q502.warn) >= 1, 'quirks: RG502Q carries a warn note');
+eq(q502.expect.attach_pdp_type, 'ipv4v6', 'quirks: RG502Q inherits the Quectel ipv4v6 attach expectation');
+
+let q650 = modem_quirks.for_model('RG650E-EU');
+eq(q650.expect.attach_pdp_type, 'ipv4v6', 'quirks: RG650E expects ipv4v6 attach');
+eq(length(q650.warn), 0, 'quirks: RG650E has no static warn note');
+
+let qnone = modem_quirks.for_model('SIMCOM7600');
+eq(length(qnone.warn), 0, 'quirks: unknown model -> no warns');
+eq(length(qnone.init_commands), 0, 'quirks: unknown model -> no init commands');
+eq(modem_quirks.for_model(null).expect.attach_pdp_type, null, 'quirks: null model safe');
 
 // --- PLMNwAcT decoder (pure; bytes captured from a live Telekom SIM) ---------
 

@@ -29,6 +29,7 @@ import * as sim from './sim.uc';
 import * as netlink from './netlink.uc';
 import * as recovery_mod from './recovery.uc';
 import * as atcmd from './atcmd.uc';
+import * as modem_quirks from './modem_quirks.uc';
 import * as backend from './backend.uc';
 import * as qmi_backend from './qmi_backend.uc';
 import * as modem_common from './modem_common.uc';
@@ -208,6 +209,7 @@ export function create(opts)
 		info: {},          // model, revision, imei, ...
 		reg: {},           // registration snapshot
 		reg_detail: null,  // why (not) registered: reject cause, limited service
+		config_warnings: null,  // runtime "modem doesn't match config/spec" checks
 		signal: {},        // last signal info
 
 		counters: null,    // shared with the recovery instance below
@@ -315,7 +317,7 @@ export function create(opts)
 	let watch_decay_timer = null, fast_timer = null;
 	let watch_active = false, fast_running = false;
 
-	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_attach_profile, step_register;
+	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_validate, step_attach_profile, step_register;
 
 	let fail = (stage, err) => {
 		log('err', sprintf('failed in %s: %J', stage, err));
@@ -811,7 +813,7 @@ export function create(opts)
 
 		// preserved: never reset modes/PLMN to defaults when unset
 		if (mask == null && !sel)
-			return step_attach_profile();
+			return step_validate();
 
 		let args = {};
 
@@ -838,11 +840,214 @@ export function create(opts)
 					emit('modes_failed', { err: err });
 				}
 
-				step_attach_profile();
+				step_validate();
 			});
 		};
 
 		attempt(1);
+	};
+
+	// runtime config validation: after step_confnet has APPLIED the config-derived
+	// NAS prefs, confirm the LIVE modem actually reflects config + per-model quirks
+	// and record any mismatch in self.config_warnings (surfaced on ubus + logged).
+	// Complements config.uc's static parse-time warnings. Non-fatal: a check that
+	// cannot read simply skips, and init proceeds to the attach profile regardless.
+	step_validate = () => self.validate_config(() => step_attach_profile());
+
+	// compare the live modem against self.config + modem_quirks and populate
+	// self.config_warnings = [ { check, severity:'warn'|'info', message, expected,
+	// actual } ]. Uses with_nas so it also works if extended to MBIM later. A
+	// gated auto_correct hook (config.auto_correct_config, default OFF) can then
+	// re-apply a known fix; otherwise the mismatch is only warned. cb() always.
+	self.validate_config = function(cb) {
+		cb = cb ?? (() => null);
+		self.config_warnings = [];   // refreshed on every init
+
+		let quirks = modem_quirks.for_model(self.info?.model);
+
+		// static per-firmware heads-up notes
+		for (let w in (quirks.warn ?? []))
+			push(self.config_warnings, {
+				check: 'quirk', severity: 'info',
+				message: w, expected: null, actual: null,
+			});
+
+		let add = (check, severity, message, expected, actual) =>
+			push(self.config_warnings, {
+				check: check, severity: severity, message: message,
+				expected: expected, actual: actual,
+			});
+
+		// forward-declared: these best-effort checks chain through async AT reads
+		let check_locks, check_autoconnect, finish, maybe_autocorrect;
+
+		// gated corrective action (example): re-apply the NAS system-selection
+		// preference when it drifted from config. Only ACTS when the operator
+		// opted in via config.auto_correct_config; otherwise it is a pure warn.
+		maybe_autocorrect = (done) => {
+			if (!self.config.auto_correct_config || !self.nas)
+				return done();
+
+			let fixable = filter(self.config_warnings, (w) =>
+				w.check == 'mode_preference' || w.check == 'network_selection');
+
+			if (!length(fixable))
+				return done();
+
+			let mask = parse_modes(self.config.modes);
+			let args = {};
+
+			if (mask != null)
+				args.mode_preference = mask;
+
+			if (self.config.mcc && self.config.mnc)
+				args.network_selection = {
+					mode: nasmod.NETWORK_SELECTION_MANUAL,
+					mcc: +self.config.mcc, mnc: +self.config.mnc,
+				};
+
+			if (mask == null && args.network_selection == null)
+				return done();
+
+			log('notice', 'auto_correct_config: re-applying NAS system selection preference');
+			self.nas.request('SET_SYSTEM_SELECTION_PREFERENCE', args, (err) => {
+				if (err)
+					log('warn', sprintf('auto_correct_config: re-apply failed: %J', err));
+
+				done();
+			}, { no_recovery: true });
+		};
+
+		finish = () => {
+			if (length(self.config_warnings))
+				log('warn', sprintf('config validation: %d issue(s) [%s]',
+					length(self.config_warnings),
+					join(' ', map(self.config_warnings, (w) => w.check))));
+			else
+				log('info', 'config validation: modem matches config');
+
+			maybe_autocorrect(() => cb());
+		};
+
+		// autoconnect: a rogue modem-side autoconnect competes with wwand for the
+		// data call. Quectel AT+QCFG="autoconnect" best-effort (also reuse the
+		// attach-profile detail from reg_detail if a probe already populated it).
+		check_autoconnect = () => {
+			if (self.reg_detail?.attach?.autoconnect)
+				add('autoconnect', 'warn',
+					'modem attach profile has autoconnect enabled; it competes with wwand',
+					'disabled', 'enabled');
+
+			if (!self.at)
+				return finish();
+
+			self.at.send('AT+QCFG="autoconnect"', (e, r) => {
+				if (!e)
+					for (let l in (r?.lines ?? [])) {
+						let m = match(l, /\+QCFG:\s*"autoconnect",([0-9]+)/);
+
+						if (m && +m[1] > 0)
+							add('autoconnect', 'warn',
+								sprintf('modem autoconnect is enabled (mode %d); it competes with wwand for the data call', +m[1]),
+								'disabled', sprintf('mode %d', +m[1]));
+					}
+
+				finish();
+			});
+		};
+
+		// cell locks: if config sets lock_4g/lock_5g, read them back (best-effort
+		// AT+QNWLOCK) and warn if the modem reports them off / unreadable.
+		check_locks = () => {
+			let l4 = self.config.lock_4g ?? [];
+
+			if (type(l4) == 'string')
+				l4 = [ l4 ];
+
+			let l5 = self.config.lock_5g;
+
+			if ((!length(l4) && !l5) || !self.at)
+				return check_autoconnect();
+
+			let check5 = () => {
+				if (!l5)
+					return check_autoconnect();
+
+				self.at.send('AT+QNWLOCK="common/5g"', (e, r) => {
+					let lk = atcmd.parse_qnwlock(r?.lines);
+
+					if (e || !lk || !lk.enabled)
+						add('lock_5g', 'warn',
+							sprintf('configured 5G cell lock %s is not applied on the modem', l5),
+							l5, (lk && lk.enabled) ? 'set' : 'off');
+
+					check_autoconnect();
+				});
+			};
+
+			if (!length(l4))
+				return check5();
+
+			self.at.send('AT+QNWLOCK="common/4g"', (e, r) => {
+				let lk = atcmd.parse_qnwlock(r?.lines);
+
+				if (e || !lk || !lk.enabled)
+					add('lock_4g', 'warn',
+						sprintf('configured 4G cell lock [%s] is not applied on the modem', join(',', l4)),
+						l4, (lk && lk.enabled) ? 'set' : 'off');
+
+				check5();
+			});
+		};
+
+		let want = parse_modes(self.config.modes);
+		let pinned = self.config.mcc && self.config.mnc;
+
+		// NAS system-selection prefs: RAT mode mask + auto/manual network
+		// selection. Only read when config actually constrains one of them —
+		// nothing to validate otherwise, and it avoids a needless GET.
+		self.with_nas((nas) => {
+			if (!nas || (want == null && !pinned))
+				return check_locks();
+
+			nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (err, d) => {
+				if (err || !d)
+					return check_locks();   // unreadable -> skip
+
+				let live = (d.mode_preference != null) ? (d.mode_preference & nasmod.MODE_ALL) : null;
+
+				// RAT/mode: modem must allow exactly the configured RAT set
+				if (want != null && live != null && live != (want & nasmod.MODE_ALL)) {
+					let extra = live & ~want & nasmod.MODE_ALL;
+					let missing = want & ~live & nasmod.MODE_ALL;
+
+					add('mode_preference', 'warn',
+						sprintf('modem RAT mask 0x%02x does not match configured modes "%s" (0x%02x)%s%s',
+							live, self.config.modes, want & nasmod.MODE_ALL,
+							extra ? sprintf('; modem also allows 0x%02x', extra) : '',
+							missing ? sprintf('; config also wants 0x%02x', missing) : ''),
+						want & nasmod.MODE_ALL, live);
+				}
+
+				// network selection: config pins a PLMN -> expect manual; the GET
+				// reply carries only the mode (u8), so a wrong manual PLMN is caught
+				// later by registration, not here.
+				if (self.config.mcc && self.config.mnc) {
+					if (d.network_selection == nasmod.NETWORK_SELECTION_AUTOMATIC)
+						add('network_selection', 'warn',
+							sprintf('config pins PLMN %d/%02d but modem is in automatic network selection',
+								+self.config.mcc, +self.config.mnc),
+							'manual', 'automatic');
+				}
+				else if (d.network_selection == nasmod.NETWORK_SELECTION_MANUAL) {
+					add('network_selection', 'info',
+						'modem is in manual network selection but no PLMN is configured',
+						'automatic', 'manual');
+				}
+
+				check_locks();
+			}, { no_recovery: true });
+		});
 	};
 
 	// program the LTE attach profile (CID1) from the primary context's config
