@@ -293,14 +293,14 @@ export function create(opts)
 	// ceiling (25, preserved) escalates straight to reboot
 	let client_hooks = {
 		on_error: (client, kind, msg) => {
-			if (rec.on_qmi_error() == 'reboot')
+			if (rec.on_proto_error() == 'reboot')
 				rec.reboot('qmi error limit reached');
 
 			log('debug', sprintf('qmi error (%s) svc %d %s, counter %d',
-				kind, client.service, msg ?? '?', self.counters.qmi_errors));
+				kind, client.service, msg ?? '?', self.counters.proto_errors));
 		},
 		on_success: (client) => {
-			rec.on_qmi_success();
+			rec.on_proto_success();
 		},
 	};
 

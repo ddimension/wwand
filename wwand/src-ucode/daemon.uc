@@ -670,7 +670,9 @@ export function create(opts)
 				at_tty: entry.modem?.at_tty,
 				registration: entry.modem?.reg,
 				registration_detail: entry.modem?.reg_detail,
-				qmi_errors: entry.modem?.counters?.qmi_errors,
+				proto_errors: entry.modem?.counters?.proto_errors,
+				qmi_errors: entry.modem?.counters?.proto_errors,   // deprecated alias
+
 				attempts: entry.modem?.counters?.attempts,
 			};
 		}

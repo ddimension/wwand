@@ -97,10 +97,10 @@ export function create(opts)
 
 	let hooks = {
 		on_error: (c, kind) => {
-			if (rec.on_qmi_error() == 'reboot')
+			if (rec.on_proto_error() == 'reboot')
 				rec.reboot('mbim error limit reached');
 		},
-		on_success: (c) => rec.on_qmi_success(),
+		on_success: (c) => rec.on_proto_success(),
 	};
 
 	self.attach_context = function(ctx) {

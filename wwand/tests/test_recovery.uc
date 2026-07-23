@@ -50,13 +50,13 @@ r = recovery.create({ id: 'm2', failreboot: 100, fx: fx, state_dir: '/state', lo
 let hit = null;
 
 for (let i = 1; i <= 26; i++)
-	if (r.on_qmi_error() == 'reboot' && hit == null)
+	if (r.on_proto_error() == 'reboot' && hit == null)
 		hit = i;
 
 eq(hit, 26, 'errors: 26th error crosses ceiling of 25');
 
-r.on_qmi_success();
-eq(r.counters.qmi_errors, 0, 'errors: success resets counter');
+r.on_proto_success();
+eq(r.counters.proto_errors, 0, 'errors: success resets counter');
 
 // --- persistence -------------------------------------------------------------
 
@@ -68,13 +68,13 @@ r.on_attempt();
 // qmi errors persist at 5-count milestones (debounced to avoid a write storm
 // during a sustained outage), so drive it to a milestone
 for (let i = 0; i < 5; i++)
-	r.on_qmi_error();
+	r.on_proto_error();
 
 let r2 = recovery.create({ id: 'wan', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
 r2.load();
 
 eq(r2.counters.attempts, 2, 'persist: attempts restored');
-eq(r2.counters.qmi_errors, 5, 'persist: qmi errors restored at milestone');
+eq(r2.counters.proto_errors, 5, 'persist: proto errors restored at milestone');
 
 // corrupted state file is ignored
 fx.files['/state/bad.json'] = 'not json{';

@@ -244,7 +244,7 @@ return view.extend({
 					[ _('Device'), '%s → %s'.format(dash(mo.device), dash(mo.netdev)) ],
 					[ _('AT port'), dash(mo.at_tty) ],
 					[ _('State'), dash(mo.state) ],
-					[ _('Recovery'), _('%d attempts, %d QMI errors').format(mo.attempts || 0, mo.qmi_errors || 0) ],
+					[ _('Recovery'), _('%d attempts, %d protocol errors').format(mo.attempts || 0, (mo.proto_errors != null ? mo.proto_errors : mo.qmi_errors) || 0) ],
 				]);
 
 				var rd = cells.registration_detail || mo.registration_detail;

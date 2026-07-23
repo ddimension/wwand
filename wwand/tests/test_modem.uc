@@ -404,7 +404,7 @@ scenario('ladder', {
 		let modes = map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args.mode);
 		// rung: low_power (1) then online (0), plus one normal online per cycle
 		ok(index(modes, 1) >= 0, 'ladder: low_power sent');
-		eq(ladder_fx.files['/state/ladder.json'], '{ "attempts": 8, "qmi_errors": 0 }',
+		eq(ladder_fx.files['/state/ladder.json'], '{ "attempts": 8, "proto_errors": 0 }',
 			'ladder: state persisted');
 	});
 

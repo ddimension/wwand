@@ -8,8 +8,8 @@
 //     == 24            usb-repower (external tool, skipped if absent)
 //     > failreboot     system reboot (default 100)
 //   failreboot == 0 disables the whole ladder (old gate: failreboot > 0).
-// - qmi request errors (old 'qmi_errors'): reset on any success,
-//   ceiling 25 -> system reboot.
+// - protocol request errors (old 'qmi_errors'): reset on any success,
+//   ceiling 25 -> system reboot. Protocol-neutral: QMI and MBIM both feed it.
 //
 // Counters persist to <state_dir>/<id>.json (tmpfs): they survive daemon
 // restarts and are intentionally cleared by a reboot — the ladder's last
@@ -20,7 +20,7 @@
 
 import * as uloop from 'uloop';
 
-const QMI_ERROR_LIMIT = 25;
+const PROTO_ERROR_LIMIT = 25;
 const DEFAULT_STATE_DIR = '/tmp/wwand/state';
 const REBOOT_DELAY_MS = 10000;
 
@@ -32,7 +32,7 @@ export function create(opts)
 	let self = {
 		id: opts.id,
 		failreboot: +(opts.failreboot ?? 100),
-		counters: { attempts: 0, qmi_errors: 0 },
+		counters: { attempts: 0, proto_errors: 0 },
 		rebooting: false,
 	};
 
@@ -47,13 +47,15 @@ export function create(opts)
 		// we write this file ourselves; extract via match() because ucode's
 		// json() throws uncatchably on corrupt input
 		let att = match(data, /"attempts": *([0-9]+)/);
-		let qerr = match(data, /"qmi_errors": *([0-9]+)/);
+		// accept the legacy 'qmi_errors' key from state files written before the
+		// counter was renamed to the protocol-neutral 'proto_errors'
+		let perr = match(data, /"proto_errors": *([0-9]+)/) ?? match(data, /"qmi_errors": *([0-9]+)/);
 
-		if (att || qerr) {
+		if (att || perr) {
 			self.counters.attempts = att ? +att[1] : 0;
-			self.counters.qmi_errors = qerr ? +qerr[1] : 0;
-			log('notice', sprintf('restored recovery state: attempts %d, qmi_errors %d',
-				self.counters.attempts, self.counters.qmi_errors));
+			self.counters.proto_errors = perr ? +perr[1] : 0;
+			log('notice', sprintf('restored recovery state: attempts %d, proto_errors %d',
+				self.counters.attempts, self.counters.proto_errors));
 		}
 	};
 
@@ -104,16 +106,16 @@ export function create(opts)
 	// per-request error bookkeeping; returns 'reboot' when the ceiling hits.
 	// persist only at milestones, not on every error — during a sustained
 	// outage this fires per QMI request; a restart loses at most a few counts
-	self.on_qmi_error = function() {
-		self.counters.qmi_errors++;
-		let n = self.counters.qmi_errors;
+	self.on_proto_error = function() {
+		self.counters.proto_errors++;
+		let n = self.counters.proto_errors;
 
 		if (n % 5 == 0) {
-			log('warn', sprintf('qmi error counter at %d', n));
+			log('warn', sprintf('protocol error counter at %d', n));
 			self.persist();
 		}
 
-		if (n > QMI_ERROR_LIMIT) {
+		if (n > PROTO_ERROR_LIMIT) {
 			self.persist();
 			return 'reboot';
 		}
@@ -121,9 +123,9 @@ export function create(opts)
 		return 'retry';
 	};
 
-	self.on_qmi_success = function() {
-		if (self.counters.qmi_errors != 0) {
-			self.counters.qmi_errors = 0;
+	self.on_proto_success = function() {
+		if (self.counters.proto_errors != 0) {
+			self.counters.proto_errors = 0;
 			self.persist();
 		}
 	};
