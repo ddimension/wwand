@@ -38,11 +38,25 @@ restart (see `CLAUDE.md` → Test router). The proper path is the apk package.
   task, full ubus API, eSIM management & provisioning, telemetry/diagnostics,
   quirk handling, FAQ, troubleshooting. `94028f3` / `7acec96`.
 
+## Multi-protocol backend abstraction (in progress)
+
+Goal: one shared modem/context core driving pluggable protocol backends (QMI,
+MBIM, AT-only) instead of the current two parallel implementations. Contract +
+plan in `docs/backend-interface.md`.
+- **Phase 0 (done):** the backend-interface contract doc; de-QMI'd the shared
+  vocabulary (recovery `on_proto_error/success`, `counters.proto_errors`; status
+  keeps a `qmi_errors` alias). Adoption path already covered by test_daemon (#4);
+  the mock-backend core tests belong to Phase 1 (no core to plug into yet).
+- **Phase 1 (next):** split `modem.uc`/`context.uc` into the shared core + a QMI
+  backend (mockhub suites then validate both). Big lift, test-protected.
+- Phases 2–5: MBIM as a backend, daemon reach-ins behind ops, generalize
+  `backend.choose`, AT-only backend. See the doc.
+
 ## Pending (not blocking anything)
 
-- **`context.up` refactor** — the nested activation state machine (241-reclaim,
-  v4-fatal/v6-degrades) is the connection hot path and thinly tested. Wants a
-  dedicated restart-adoption + activation unit test first, then extraction.
+- **`context.up` refactor** — subsumed by Phase 1 above (the context core split
+  is where its nested 241-reclaim / v4-fatal-v6-degrades logic gets extracted,
+  behind the mock-backend core tests).
 - **Firmware update** — explored, not built. Tiered: ① carrier-config/MBN
   selection (`AT+QMBNCFG`, native, safe), ② FOTA delta (`AT+QFOTADL`, native
   orchestration), ③ full Firehose reflash via qfirehose (optional package,
