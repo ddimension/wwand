@@ -1,8 +1,8 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-23. 23 test suites green (~733 checks); all committed.
+_Last updated: 2026-07-23. 23 test suites green (~790 checks); all committed.
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
-Deep-review follow-ups tracked below (commit `222798d` fixed the quick wins)._
+Deep-review follow-ups tracked below (quick wins + #1 + #2 done)._
 
 ## Next TODO — deep-review follow-ups (2026-07-23)
 
@@ -11,24 +11,29 @@ A full architecture/correctness/test review ran (codec verified clean vs libqmi
 (commit `222798d`): unbounded MBIM decode loops bounded, `ref-ipv4/ipv6` unpack
 guarded, structural **never-SYNC rail** in `qmi_over_mbim.send` (+ test),
 hotplug `cdc-wdm1`↔`cdc-wdm10` substring match → basename-exact, `self.dsd` CID
-released on teardown. Remaining, ranked by value (not yet done):
+released on teardown. Remaining, ranked by value:
 
-1. **`test_daemon` runs only 3/47 checks** — the other 44 sit in ubus `defer()`
-   callbacks that never fire against the private ubusd (and the 5 s guard never
-   fires), so the suite is green while testing nothing. The no-proto-task
-   reconnect/hold/adopt lifecycle (`daemon.uc` `enter_reconnecting`/
-   `retry_activate`/`hold_max`/adopt-on-`registered`) — newest, riskiest code —
-   is effectively untested. Fix: restructure to poll like `test_netsel.uc`
-   (drives the same daemon to READY) or call `daemon.*` + inject indications.
-   *~½ day. Highest value.*
-2. **Recovery double-count + skippable rungs.** `rec.on_attempt()` fires from two
-   callers per failed cycle — the modem step-chain `fail()` (`modem.uc:325`) and
-   the daemon on context error (`daemon.uc:317`) — so `attempts` climbs ~2× and
-   hits the reboot gate too fast; the two callers also run rungs differently
-   (daemon runs opmode/reset on live `dms` without teardown, modem tears down).
-   Rungs are exact `==8/16/24` (`recovery.uc:87`) over a **persisted** counter,
-   so a restart mid-outage that restores e.g. 9 silently skips `opmode_cycle`.
-   Fix: single counter owner + `>=`-crossing with fired-flags. *medium. Real bug.*
+1. ✅ **DONE (`bc7a675`) — `test_daemon` 3 → 47 checks.** Root cause was a single
+   missing mock handler (`GET_CURRENT_DATA_BEARER_TECHNOLOGY`): context bring-up's
+   `get_bearer` hit mockhub's `die()`, which unwound `uloop.run()` from inside a
+   uloop callback before any deferred ubus reply (or the 5 s guard) fired — so the
+   whole no-proto-task lifecycle went untested while the suite showed "3 checks,
+   0 failures". Added the handler + a **completion sentinel** (innermost callback
+   sets a flag asserted after `uloop.run()`), so any future die-unwind now FAILS
+   visibly instead of silently shrinking the check count.
+2. ✅ **DONE (`ecf6953`) — recovery skippable rungs fixed.** Replaced exact
+   `==8/16/24` rung matching with a **fired-once threshold crossing** over a
+   persisted `rung` index: each rung fires once, in order, robust to a counter
+   jump (never skips) and to a daemon restart mid-outage (rung index persisted;
+   legacy state files default it from the restored attempt count). +12 tests.
+   **Double-count finding:** empirically the common context-activation-failure
+   path is **1:1** (each retry = one increment via the daemon `error` path); the
+   modem `fail()` path only fires during bring-up (modem not READY), so the two
+   callers are mutually exclusive there — the "~2×" does not reproduce. The
+   narrow deregister-mid-session overlap stays theoretical, and the rung-crossing
+   neutralizes its only real harm (skipped rungs). A true single-owner refactor
+   of the counter is **not pursued** — low value, and the caller path is
+   HW-critical WAN code better left untouched without HW validation.
 3. **Three forked state machines → real shared core.** `modem.uc`/`modem_mbim.uc`/
    `modem_ncm.uc` (+ three contexts) are parallel impls; the shared-core contract
    in `docs/backend-interface.md` is a target, not realized (`modem_common` only
