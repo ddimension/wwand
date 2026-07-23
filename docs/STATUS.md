@@ -63,8 +63,17 @@ plan in `docs/backend-interface.md`.
   wwand orchestrates release→flash→re-adopt, like lpac). Start with ①.
 - **`hold_max` UCI option** — currently a 90 s default; the `timing` struct is
   not plumbed through `main.uc` in production (tests set it via TIMING).
-- **MBIM** end-to-end blocked on RG650E firmware (`MBIM_OPEN` fails); the code
-  is written + host-tested, lazy-loaded. Needs MBIM-capable HW to validate.
+- **MBIM** — first validated on real HW (EG06/246): control plane works
+  (open/caps/SIM/**registration**) and the data session now **connects with the
+  correct IP** after fixing the IP_CONFIGURATION decode (count+offset arrays —
+  it had only ever been host-tested against the wrong layout; the RG650E rejects
+  MBIM_OPEN so it never ran). Remaining: after a *live* QMI→MBIM protocol switch,
+  netifd holds a stale device binding for wwan0m1 (was QMAP, now a VLAN) and
+  reports NO_DEVICE, so the interface doesn't bind the IP. Not a wwand connect
+  bug; a fresh boot into MBIM (no stale QMI device) should avoid it — verify on a
+  reboot, or add a wwand-side netifd device rebind after a protocol switch. Also
+  latent: on a connect that fails after CONNECT activated, the retry hits MBIM
+  status 13 (max activated contexts) — deactivate before retry.
 
 ## Notes
 
