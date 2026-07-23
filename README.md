@@ -53,7 +53,7 @@ deliberately, while its known bugs were left behind.
 ## Repository layout
 
 This repository holds the wwand sources; the OpenWrt package definitions
-live in the [wwand-openwrt-repo](https://github.com/ddimension/wwand-openwrt-repo)
+live in the [openwrt-repo](https://github.com/ddimension/openwrt-repo)
 feed, which builds the `wwand`, `ucode-mod-wwand-io` and `wwand-esim`
 binary packages from this tree.
 
@@ -70,7 +70,7 @@ The LuCI packages live in their own repositories:
 [luci-proto-wwand](https://github.com/ddimension/luci-proto-wwand) and
 [luci-app-wwand](https://github.com/ddimension/luci-app-wwand); their
 package definitions (and the `wwand-lpac` package entirely) are also part
-of the wwand-openwrt-repo feed.
+of the openwrt-repo feed.
 
 ## Quick start
 

@@ -12,7 +12,7 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
 `io/build-host/wwand_io.so` the host build used by the tests), `files/`
 (netifd shim, init, hotplug, migrate), `tests/`, `tools/`,
 `docs/reference.md` (config + ubus API reference).
-- **Package definitions live in ddimension/wwand-openwrt-repo** (the feed):
+- **Package definitions live in ddimension/openwrt-repo** (the feed):
   `wwand/Makefile` there builds binary packages `wwand`,
   `ucode-mod-wwand-io`, `wwand-esim` from this repo (git source, pinned via
   PKG_SOURCE_VERSION — bump it there after pushing here).
@@ -73,7 +73,7 @@ Shim: `files/wwand-proto.sh` (`proto_qmi_setup/teardown/renew`,
   -I…/usr/include -lucode`, then strip). Output already at
   `io/build-target/wwand_io.so`.
 - **Proper build = OpenWrt package** (preferred) — the Makefile lives in
-  **wwand-openwrt-repo** (`wwand/Makefile`, git source pinned on this repo).
+  **openwrt-repo** (`wwand/Makefile`, git source pinned on this repo).
   Fixes that MUST stay there: `CMAKE_SOURCE_SUBDIR:=io` (cmake tree is a
   subdir); it installs `codec/mbim-schema` (daemon imports MBIM at top
   level — MBIM is lazy-`require`d in `daemon.uc` but the schema must still
