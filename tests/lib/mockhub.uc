@@ -24,10 +24,11 @@ import * as uimmod from '../wwand/codec/schema/uim.uc';
 import * as wdsmod from '../wwand/codec/schema/wds.uc';
 import * as wdamod from '../wwand/codec/schema/wda.uc';
 import * as locmod from '../wwand/codec/schema/loc.uc';
+import * as dsdmod from '../wwand/codec/schema/dsd.uc';
 
 const SCHEMAS = [ ctlmod.default, dmsmod.default, nasmod.default,
                   uimmod.default, wdsmod.default, wdamod.default,
-                  locmod.default ];
+                  locmod.default, dsdmod.default ];
 
 // per-service indexes: request messages by id, indications by name
 let req_index = {}, ind_index = {};
@@ -84,14 +85,27 @@ export function create(opts)
 	};
 
 	let respond = (dec, msg, obj) => {
-		let result = struct.pack('<BHHH', 0x02, 4, obj?.__error ? 1 : 0, obj?.__error ?? 0);
-		let rest = {};
+		let tlvs;
 
-		for (let k, v in (obj ?? {}))
-			if (k != '__error')
-				rest[k] = v;
+		// __raw: the handler supplies the COMPLETE TLV block (result TLV + data
+		// TLVs) as a byte string, bypassing tlv.pack. This lets a test hand-build
+		// a response in the true on-the-wire layout with libqmi-correct tags, so
+		// the schema's own decode is exercised (a wrong tag then decodes to null
+		// and the assertion fails) — the QMI analogue of mbim_mockhub's __raw.
+		if (obj?.__raw != null) {
+			tlvs = obj.__raw;
+		}
+		else {
+			let result = struct.pack('<BHHH', 0x02, 4, obj?.__error ? 1 : 0, obj?.__error ?? 0);
+			let rest = {};
 
-		let tlvs = result + tlv.pack(msg.resp ?? {}, rest);
+			for (let k, v in (obj ?? {}))
+				if (k != '__error')
+					rest[k] = v;
+
+			tlvs = result + tlv.pack(msg.resp ?? {}, rest);
+		}
+
 		let frame = qmux.encode(dec.service, dec.cid, dec.txn, msg.id, tlvs, 'response');
 
 		uloop.timer(0, () => self.route(qmux.decode(frame)));
