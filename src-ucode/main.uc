@@ -198,8 +198,8 @@ function run_daemon()
 		logmod.warning('config: %s', w);
 
 	let daemon = daemon_mod.create({
-		// operational timing from the global config (applied at start; a
-		// hold_max change takes effect on wwand restart)
+		// operational timing from the global config (also re-read live on reload
+		// in daemon.apply_config, so a hold_max edit takes effect without restart)
 		timing: { hold_max_ms: (parsed.globals.hold_max ?? 90) * 1000 },
 		deps: {
 			transport_open: transport.open,
@@ -249,6 +249,9 @@ function run_daemon()
 		for (let w in p.warnings)
 			logmod.warning('config: %s', w);
 
+		// operational globals that change without a destructive rebuild take
+		// effect here (log_level above; hold_max via the daemon setter).
+		daemon.set_hold_max_ms((p.globals.hold_max ?? 90) * 1000);
 		daemon.apply_config(p);
 	};
 

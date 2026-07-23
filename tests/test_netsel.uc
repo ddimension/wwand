@@ -86,6 +86,27 @@ daemon.apply_config(config.parse({
 	network: {},
 }));
 
+// hold_max is re-read live on reload (not only at daemon start). main.reload
+// derives it from globals.hold_max and calls set_hold_max_ms — kept separate
+// from apply_config so it applies even when the modem/context signature is
+// unchanged, and so a create-time timing override is never clobbered by the
+// config default. status() exposes the effective value.
+eq(daemon.status().globals.hold_max_ms, 90000, 'hold_max: default 90s at start');
+
+daemon.set_hold_max_ms((config.parse({
+	wwand: { g: { '.type': 'wwand', hold_max: 30 } }, network: {},
+}).globals.hold_max ?? 90) * 1000);
+eq(daemon.status().globals.hold_max_ms, 30000, 'hold_max: live-updated from a reloaded globals.hold_max');
+
+daemon.set_hold_max_ms((config.parse({
+	wwand: { g: { '.type': 'wwand', hold_max: 45 } }, network: {},
+}).globals.hold_max ?? 90) * 1000);
+eq(daemon.status().globals.hold_max_ms, 45000, 'hold_max: updates again on a later reload');
+
+// a non-positive / invalid value is ignored (config.parse warns + keeps prior)
+daemon.set_hold_max_ms(0);
+eq(daemon.status().globals.hold_max_ms, 45000, 'hold_max: non-positive value ignored');
+
 let guard = uloop.timer(5000, () => { ok(false, 'test_netsel timed out'); uloop.end(); });
 
 // forward-declared: wait_ready (a let arrow) references run (also a let arrow) —

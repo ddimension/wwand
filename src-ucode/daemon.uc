@@ -164,6 +164,17 @@ export function create(opts)
 	// no-proto-task, so there is no monitor and no teardown-on-blip.
 	let hold_max_ms = opts?.timing?.hold_max_ms ?? 90000;
 
+	// re-read the reconnect-hold ceiling live on reload (main.reload derives it
+	// from globals.hold_max, mirroring how it seeds timing.hold_max_ms at start).
+	// Applied on the next reconnect (enter_reconnecting reads hold_max_ms when it
+	// arms the hold timer). Ignores non-positive values. Kept separate from
+	// apply_config so a create-time timing override is never clobbered by the
+	// config default.
+	self.set_hold_max_ms = function(ms) {
+		if (ms > 0)
+			hold_max_ms = ms;
+	};
+
 	// forward-declared: retry_activate self-references (reschedule) and
 	// enter_reconnecting references it — avoids the ucode TDZ trap.
 	// bring context `name` up, cb(err, up_result). Shared by context_up (ubus,
@@ -829,7 +840,8 @@ export function create(opts)
 			};
 		}
 
-		return { modems: modems, contexts: contexts };
+		return { modems: modems, contexts: contexts,
+		         globals: { hold_max_ms: hold_max_ms } };
 	};
 
 	// band mask <-> band-number-list conversion. Done daemon-side on purpose:
