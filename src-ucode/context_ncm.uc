@@ -24,6 +24,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
+import * as context_common from './context_common.uc';
 import * as ncm from './modem_ncm.uc';
 
 export function create(opts)
@@ -50,8 +51,10 @@ export function create(opts)
 	// tears the session down as 'disconnected'.
 	let stats_timer = null;
 	let stats_interval = opts.timing?.stats_interval ?? 60000;
-	let rx_last_total = -1;
-	let rx_stalled_ms = 0;
+	let rx_watch = context_common.rx_stall_watch({
+		limit_ms: () => context_common.zero_rx_limit_ms(self.modem.config, opts.timing),
+		interval_ms: stats_interval,
+	});
 
 	let emit = (event, data) => {
 		if (deps.on_event)
@@ -119,20 +122,10 @@ export function create(opts)
 
 	// --- zero-rx watchdog / liveness ---------------------------------------
 
-	let zero_rx_limit_ms = () => {
-		if (opts.timing?.zero_rx_ms != null)
-			return opts.timing.zero_rx_ms;
-
-		let secs = +(self.modem.config?.zero_rx_timeout ?? 21600);
-
-		return (secs > 0) ? secs * 1000 : 0;
-	};
-
 	let start_stats, stop_stats, sample_stats;
 
 	start_stats = () => {
-		rx_last_total = -1;
-		rx_stalled_ms = 0;
+		rx_watch.reset();
 		self.connected_since = time();
 		stats_timer = uloop.timer(0, sample_stats);   // first sample immediately
 	};
@@ -171,23 +164,14 @@ export function create(opts)
 				if (s) {
 					self.stats = { tx_bytes: s.tx_bytes, rx_bytes: s.rx_bytes };
 
-					if (zero_rx_limit_ms() > 0) {
-						let total = +(s.rx_bytes ?? 0);
+					let total = +(s.rx_bytes ?? 0);
+					let stalled = rx_watch.feed(total);
 
-						if (total > rx_last_total || rx_last_total < 0) {
-							rx_last_total = total;
-							rx_stalled_ms = 0;
-						}
-						else {
-							rx_stalled_ms += stats_interval;
-
-							if (rx_stalled_ms >= zero_rx_limit_ms()) {
-								log('err', sprintf('no rx bytes for %dms, tripping zero-rx recovery', rx_stalled_ms));
-								stop_stats();
-								emit('zero_rx', { stalled_ms: rx_stalled_ms, rx_total: total });
-								return;
-							}
-						}
+					if (stalled != null) {
+						log('err', sprintf('no rx bytes for %dms, tripping zero-rx recovery', stalled));
+						stop_stats();
+						emit('zero_rx', { stalled_ms: stalled, rx_total: total });
+						return;
 					}
 				}
 

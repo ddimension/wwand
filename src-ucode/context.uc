@@ -23,6 +23,7 @@
 import * as uloop from 'uloop';
 import * as tlv from './codec/tlv.uc';
 import * as qmi_backend from './qmi_backend.uc';
+import * as context_common from './context_common.uc';
 import * as wdsmod from './codec/schema/wds.uc';
 import { ENDPOINT_TYPE_HSUSB } from './codec/schema/wda.uc';
 import * as callend from './callend.uc';
@@ -94,11 +95,15 @@ export function create(opts)
 	let up_gen = 0;
 
 	// zero-rx watchdog (preserved: packet statistics sampled every 60s; no
-	// received packets for zero_rx_timeout -> usb-repower via the modem)
+	// received packets for zero_rx_timeout -> usb-repower via the modem). The
+	// stall accumulator + threshold live in context_common (shared with the
+	// MBIM/NCM contexts); this context only feeds it its rx-packet total.
 	let stats_timer = null;
 	let stats_interval = opts.timing?.stats_interval ?? 60000;
-	let rx_last_total = -1;
-	let rx_stalled_ms = 0;
+	let rx_watch = context_common.rx_stall_watch({
+		limit_ms: () => context_common.zero_rx_limit_ms(self.modem.config, opts.timing),
+		interval_ms: stats_interval,
+	});
 
 	// live settings refresh (stage B): while CONNECTED, re-query the modem's IP
 	// config on serving-system changes (event-driven) plus a slow safety poll,
@@ -158,23 +163,13 @@ export function create(opts)
 	let prepare, check_pdp_type, activate_family, fetch_settings, release_family;
 	let start_stats, stop_stats, sample_stats;
 
-	let zero_rx_limit_ms = () => {
-		if (opts.timing?.zero_rx_ms != null)
-			return opts.timing.zero_rx_ms;
-
-		let secs = +(self.modem.config?.zero_rx_timeout ?? 21600);
-
-		return (secs > 0) ? secs * 1000 : 0;
-	};
-
 	start_stats = () => {
 		// run while connected regardless of the zero-rx setting: the sample
 		// also feeds the data-usage counters + max channel rate shown on the
 		// status page. Fire the first sample immediately (it re-arms itself at
 		// stats_interval) so those values appear right after connect instead of
 		// only after the first interval.
-		rx_last_total = -1;
-		rx_stalled_ms = 0;
+		rx_watch.reset();
 		self.connected_since = time();
 		stats_timer = uloop.timer(0, sample_stats);
 	};
@@ -242,23 +237,16 @@ export function create(opts)
 				if (valid)
 					self.stats = agg;
 
-				// zero-rx watchdog: only when configured (rx-packet stall)
-				if (valid && zero_rx_limit_ms() > 0) {
+				// zero-rx watchdog: rx-packet stall (no-op when disabled)
+				if (valid) {
 					let total = agg.rx_packets;
+					let stalled = rx_watch.feed(total);
 
-					if (total > rx_last_total || rx_last_total < 0) {
-						rx_last_total = total;
-						rx_stalled_ms = 0;
-					}
-					else {
-						rx_stalled_ms += stats_interval;
-
-						if (rx_stalled_ms >= zero_rx_limit_ms()) {
-							log('err', sprintf('no rx packets for %dms, tripping zero-rx recovery', rx_stalled_ms));
-							stop_stats();
-							emit('zero_rx', { stalled_ms: rx_stalled_ms, rx_total: total });
-							return;
-						}
+					if (stalled != null) {
+						log('err', sprintf('no rx packets for %dms, tripping zero-rx recovery', stalled));
+						stop_stats();
+						emit('zero_rx', { stalled_ms: stalled, rx_total: total });
+						return;
 					}
 				}
 
