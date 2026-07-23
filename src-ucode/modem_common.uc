@@ -56,6 +56,59 @@ export function dsd_from_radio(radio_ifs)
 	return mode ? { mode: mode, lte: lte, nr: nr } : null;
 }
 
+// scaffolding(self, o): install the protocol-neutral modem plumbing that was
+// copy-pasted byte-for-byte into all three state machines (modem.uc /
+// modem_mbim.uc / modem_ncm.uc) — state transitions, context attach/notify, and
+// the recovery-counter passthroughs. Sets self.set_state / self.attach_context /
+// self.note_connect_success / self.trip_zero_rx, and returns the two internal
+// helpers (emit, notify_contexts) the state machine calls directly.
+//   o.deps  — the modem's deps object (deps.on_event fans events out)
+//   o.log   — (level, msg) => …
+//   o.rec   — the recovery instance (on_connect_success / usb_repower)
+export function scaffolding(self, o)
+{
+	let deps = o.deps;
+	let log = o.log;
+	let rec = o.rec;
+
+	let emit = (event, data) => {
+		if (deps.on_event)
+			deps.on_event(self, event, data);
+	};
+
+	let notify_contexts = (event, data) => {
+		for (let ctx in self.contexts)
+			ctx.modem_event(event, data);
+	};
+
+	self.set_state = function(state, data) {
+		if (self.state == state)
+			return;
+
+		log('info', sprintf('state %s -> %s', self.state, state));
+		self.state = state;
+		emit('state', { state: state, ...(data ?? {}) });
+	};
+
+	self.attach_context = function(ctx) {
+		push(self.contexts, ctx);
+
+		if (self.state == 'READY')
+			ctx.modem_event('ready');
+	};
+
+	self.note_connect_success = function() {
+		rec.on_connect_success();
+	};
+
+	// zero-rx watchdog tripped on a context of this modem
+	self.trip_zero_rx = function() {
+		rec.usb_repower();
+	};
+
+	return { emit: emit, notify_contexts: notify_contexts };
+}
+
 // watch_driver(o): the adaptive "fast telemetry" cadence shared by the QMI and
 // MBIM modem state machines. While a consumer polls (modem_signal/modem_cells
 // over ubus), it runs o.refresh at most once per min_interval, NON-OVERLAPPING

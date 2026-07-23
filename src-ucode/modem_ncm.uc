@@ -1212,31 +1212,11 @@ export function create(opts)
 	let watch_decay_timer = null, fast_timer = null;
 	let watch_active = false, fast_running = false;
 
-	let emit = (event, data) => {
-		if (deps.on_event)
-			deps.on_event(self, event, data);
-	};
-
-	let notify_contexts = (event, data) => {
-		for (let ctx in self.contexts)
-			ctx.modem_event(event, data);
-	};
-
-	self.set_state = function(state, data) {
-		if (self.state == state)
-			return;
-
-		log('info', sprintf('state %s -> %s', self.state, state));
-		self.state = state;
-		emit('state', { state: state, ...(data ?? {}) });
-	};
-
-	self.attach_context = function(ctx) {
-		push(self.contexts, ctx);
-
-		if (self.state == 'READY')
-			ctx.modem_event('ready');
-	};
+	// protocol-neutral scaffolding (set_state / attach_context /
+	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)
+	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
+	let emit = scaffold.emit;
+	let notify_contexts = scaffold.notify_contexts;
 
 	// backend-neutral NAS accessor (daemon settings / network-selection paths):
 	// NCM has no QMI at all → null, so the daemon falls back to AT (AT+COPS).
@@ -1298,13 +1278,6 @@ export function create(opts)
 		done(action);
 	};
 
-	self.note_connect_success = function() {
-		rec.on_connect_success();
-	};
-
-	self.trip_zero_rx = function() {
-		rec.usb_repower();
-	};
 
 	// --- step chain --------------------------------------------------------
 

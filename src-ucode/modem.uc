@@ -215,24 +215,11 @@ export function create(opts)
 
 	let retry_timer = null, reg_timer = null, settle_timer = null;
 
-	let emit = (event, data) => {
-		if (deps.on_event)
-			deps.on_event(self, event, data);
-	};
-
-	let notify_contexts = (event, data) => {
-		for (let ctx in self.contexts)
-			ctx.modem_event(event, data);
-	};
-
-	self.set_state = function(state, data) {
-		if (self.state == state)
-			return;
-
-		log('info', sprintf('state %s -> %s', self.state, state));
-		self.state = state;
-		emit('state', { state: state, ...(data ?? {}) });
-	};
+	// protocol-neutral scaffolding (set_state / attach_context /
+	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)
+	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
+	let emit = scaffold.emit;
+	let notify_contexts = scaffold.notify_contexts;
 
 	// hooks shared by all clients: feed the recovery error counter; the
 	// ceiling (25, preserved) escalates straight to reboot
@@ -272,13 +259,6 @@ export function create(opts)
 		self.ctl.request('RELEASE_CID',
 			{ release: { service: client.service, cid: client.cid } },
 			(err) => cb ? cb(err) : null, { timeout: 3000 });
-	};
-
-	self.attach_context = function(ctx) {
-		push(self.contexts, ctx);
-
-		if (self.state == 'READY')
-			ctx.modem_event('ready');
 	};
 
 	// backend-neutral NAS accessor (daemon settings / network-selection paths):
@@ -367,14 +347,6 @@ export function create(opts)
 		}
 	};
 
-	self.note_connect_success = function() {
-		rec.on_connect_success();
-	};
-
-	// zero-rx watchdog tripped on a context of this modem
-	self.trip_zero_rx = function() {
-		rec.usb_repower();
-	};
 
 	// switch the control protocol (QMI <-> MBIM). On a successful change the
 	// modem resets and re-enumerates; the caller lets this modem object die

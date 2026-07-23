@@ -93,6 +93,55 @@ mc.telemetry_at(modem);
 eq(opened_ttys, [ '/dev/ttyUSB2', '/dev/ttyUSB3' ], 'open_at: at2 tty opened on first telemetry_at');
 ok(modem.at_telemetry != modem.at, 'open_at: telemetry now on the dedicated at2 engine');
 
+// --- scaffolding: shared modem plumbing --------------------------------------
+// The state-transition / context / recovery-passthrough plumbing that was
+// byte-identical in all three modem state machines.
+
+let events = [];
+let repowered = 0, success = 0;
+let self_m = { state: 'ABSENT', contexts: [] };
+let sc = mc.scaffolding(self_m, {
+	deps: { on_event: (m, ev, d) => push(events, { m: m, ev: ev, d: d }) },
+	log: (l, msg) => null,
+	rec: { on_connect_success: () => success++, usb_repower: () => repowered++ },
+});
+
+// set_state emits 'state' with the merged data, and no-ops on an unchanged state
+self_m.set_state('READY', { foo: 1 });
+eq(self_m.state, 'READY', 'scaffolding: set_state updates self.state');
+eq(length(events), 1, 'scaffolding: set_state emitted one event');
+eq(events[0].ev, 'state', 'scaffolding: emits a state event');
+eq(events[0].d, { state: 'READY', foo: 1 }, 'scaffolding: state event merges data');
+eq(events[0].m, self_m, 'scaffolding: emit passes the modem as subject');
+
+self_m.set_state('READY');
+eq(length(events), 1, 'scaffolding: set_state to the same state is a no-op');
+
+// emit / notify_contexts helpers
+sc.emit('custom', { x: 1 });
+eq(events[1], { m: self_m, ev: 'custom', d: { x: 1 } }, 'scaffolding: emit fans out via deps.on_event');
+
+let ctx_events = [];
+let ctx = { modem_event: (ev, d) => push(ctx_events, ev) };
+self_m.attach_context(ctx);
+eq(self_m.contexts, [ ctx ], 'scaffolding: attach_context registers the context');
+eq(ctx_events, [ 'ready' ], 'scaffolding: attach_context replays ready when already READY');
+
+sc.notify_contexts('lost');
+eq(ctx_events, [ 'ready', 'lost' ], 'scaffolding: notify_contexts fans out to attached contexts');
+
+// a context attached while NOT ready gets no immediate ready replay
+self_m.state = 'REGISTERING';
+let ctx2_events = [];
+self_m.attach_context({ modem_event: (ev) => push(ctx2_events, ev) });
+eq(ctx2_events, [], 'scaffolding: attach_context does not replay ready when not READY');
+
+// recovery passthroughs
+self_m.note_connect_success();
+eq(success, 1, 'scaffolding: note_connect_success -> rec.on_connect_success');
+self_m.trip_zero_rx();
+eq(repowered, 1, 'scaffolding: trip_zero_rx -> rec.usb_repower');
+
 // --- guards: watch() does nothing unless ready AND alive ----------------------
 
 let calls = 0;

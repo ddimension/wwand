@@ -127,24 +127,11 @@ export function create(opts)
 	let retry_timer = null, reg_timer = null, settle_timer = null, at_drain_timer = null, telemetry_timer = null;
 	let telem_watch;   // modem_common.watch_driver (adaptive fast telemetry loop)
 
-	let emit = (event, data) => {
-		if (deps.on_event)
-			deps.on_event(self, event, data);
-	};
-
-	let notify_contexts = (event, data) => {
-		for (let ctx in self.contexts)
-			ctx.modem_event(event, data);
-	};
-
-	self.set_state = function(state, data) {
-		if (self.state == state)
-			return;
-
-		log('info', sprintf('state %s -> %s', self.state, state));
-		self.state = state;
-		emit('state', { state: state, ...(data ?? {}) });
-	};
+	// protocol-neutral scaffolding (set_state / attach_context /
+	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)
+	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
+	let emit = scaffold.emit;
+	let notify_contexts = scaffold.notify_contexts;
 
 	let hooks = {
 		on_error: (c, kind) => {
@@ -152,13 +139,6 @@ export function create(opts)
 				rec.reboot('mbim error limit reached');
 		},
 		on_success: (c) => rec.on_proto_success(),
-	};
-
-	self.attach_context = function(ctx) {
-		push(self.contexts, ctx);
-
-		if (self.state == 'READY')
-			ctx.modem_event('ready');
 	};
 
 	// backend-neutral NAS accessor (daemon settings / network-selection paths):
@@ -213,13 +193,6 @@ export function create(opts)
 		done(action);
 	};
 
-	self.note_connect_success = function() {
-		rec.on_connect_success();
-	};
-
-	self.trip_zero_rx = function() {
-		rec.usb_repower();
-	};
 
 	step_open = () => {
 		self.set_state('INIT_TRANSPORT');
