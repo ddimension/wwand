@@ -114,6 +114,40 @@ export function get_reg_detail(nas, cb)
 	}, { no_recovery: true });
 }
 
+// --- context (WDS) operations ------------------------------------------------
+
+const RAT_LTE = (1 << 5), RAT_5GNR = (1 << 10);
+const STATS_MASK = 0x3FF;
+
+// get_channel_rates(wds, cb): current + max tx/rx link rate (bits/sec) or null.
+export function get_channel_rates(wds, cb)
+{
+	wds.request('GET_CHANNEL_RATES', {}, (err, data) => cb((!err && data?.rates) ? data.rates : null));
+}
+
+// get_bearer(wds, cb): the RAT actually carrying this session's data, as a
+// label ('LTE' / '5G NR' / 'LTE + 5G' / 'other') or null.
+export function get_bearer(wds, cb)
+{
+	wds.request('GET_CURRENT_DATA_BEARER_TECHNOLOGY', {}, (err, data) => {
+		let m = (!err) ? data?.current?.rat_mask : null;
+
+		if (m == null)
+			return cb(null);
+
+		let lte = (m & RAT_LTE) != 0, nr = (m & RAT_5GNR) != 0;
+		cb(nr ? (lte ? 'LTE + 5G' : '5G NR') : (lte ? 'LTE' : (m ? 'other' : null)));
+	});
+}
+
+// get_packet_stats(wds, cb): raw per-call packet counters, or null when the
+// modem didn't answer (the caller aggregates across families + masks sentinels).
+export function get_packet_stats(wds, cb)
+{
+	wds.request('GET_PACKET_STATISTICS', { mask: STATS_MASK }, (err, data) =>
+		cb((err || data?.rx_packets_ok == null) ? null : data));
+}
+
 // read_info(dms, cb): identity + capabilities.
 // cb(info) with { manufacturer?, model?, revision?, imei?, meid?, capabilities? }
 // (fields the modem didn't answer are simply absent).

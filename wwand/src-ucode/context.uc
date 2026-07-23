@@ -22,6 +22,7 @@
 
 import * as uloop from 'uloop';
 import * as tlv from './codec/tlv.uc';
+import * as qmi_backend from './qmi_backend.uc';
 import * as wdsmod from './codec/schema/wds.uc';
 import { ENDPOINT_TYPE_HSUSB } from './codec/schema/wda.uc';
 import * as callend from './callend.uc';
@@ -65,27 +66,6 @@ export function netmask_to_prefix(netmask)
 	return bits;
 }
 
-// decode a WDS data-bearer rat_mask (3GPP bits) into the RAT(s) carrying THIS
-// session's data (LTE = 1<<5, 5GNR = 1<<10). This is the per-session bearer,
-// NOT the system NSA/SA mode (that is the modem-level dsd_status): a session
-// may ride only the NR leg under an NSA system, so we report the carrying RAT
-// rather than asserting SA/NSA.
-const RAT_LTE = (1 << 5), RAT_5GNR = (1 << 10);
-
-function bearer_rat(rat_mask)
-{
-	if (rat_mask == null)
-		return null;
-
-	let lte = (rat_mask & RAT_LTE) != 0;
-	let nr  = (rat_mask & RAT_5GNR) != 0;
-
-	if (nr && lte) return 'LTE + 5G';
-	if (nr) return '5G NR';
-	if (lte) return 'LTE';
-
-	return rat_mask ? 'other' : null;
-}
 
 export function create(opts)
 {
@@ -104,9 +84,6 @@ export function create(opts)
 	};
 
 	// packet-statistics request mask: all 10 flags (tx/rx packets ok, errors,
-	// overflows, bytes, dropped) so one query feeds both the data-usage display
-	// and the zero-rx watchdog.
-	const STATS_MASK = 0x3FF;
 
 	let deps = opts.deps ?? {};
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: context %s: %s\n', level, self.name, msg)));
@@ -225,21 +202,21 @@ export function create(opts)
 
 		// max up/down bandwidth for the current radio link (same for every PDP
 		// on this modem) — query once via the first WDS client.
-		fams[0].client.request('GET_CHANNEL_RATES', {}, (err, data) => {
-			if (!err && data?.rates)
-				self.channel_rate = data.rates;
+		qmi_backend.get_channel_rates(fams[0].client, (rates) => {
+			if (rates)
+				self.channel_rate = rates;
 		});
 
 		// the RAT actually carrying THIS session's data (LTE / 5G NSA / SA) —
 		// only the session's own WDS client answers this (not the config client)
-		fams[0].client.request('GET_CURRENT_DATA_BEARER_TECHNOLOGY', {}, (err, data) => {
-			if (!err && data?.current)
-				self.bearer = bearer_rat(data.current.rat_mask);
+		qmi_backend.get_bearer(fams[0].client, (b) => {
+			if (b)
+				self.bearer = b;
 		});
 
 		for (let fam in fams) {
-			fam.client.request('GET_PACKET_STATISTICS', { mask: STATS_MASK }, (err, data) => {
-				if (err || data.rx_packets_ok == null) {
+			qmi_backend.get_packet_stats(fam.client, (data) => {
+				if (data == null) {
 					valid = false;   // preserved: skip the check this round
 				}
 				else {
