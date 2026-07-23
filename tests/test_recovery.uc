@@ -31,6 +31,49 @@ eq(actions[30], 'reboot', 'ladder: attempt 31 > failreboot -> reboot');
 
 r.on_connect_success();
 eq(r.counters.attempts, 0, 'ladder: success resets attempts');
+eq(r.counters.rung, 0, 'ladder: success resets the fired-rung index');
+
+// --- rung crossing: a counter jump must NOT skip a rung ----------------------
+// Two callers can increment the shared counter in one failed cycle, so the
+// count can leap past a threshold. The rung is a crossing, fired once, in order.
+fx = fakefx.create();
+r = recovery.create({ id: 'jump', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+
+for (let i = 1; i <= 7; i++) r.on_attempt();       // attempts=7, no rung yet
+eq(r.counters.rung, 0, 'jump: no rung fired below threshold 8');
+
+// simulate a double-count cycle: jump 7 -> 9, straight past 8
+r.counters.attempts = 8;                            // (second caller's increment)
+let jumped = r.on_attempt();                        // attempts becomes 9
+eq(jumped, 'opmode_cycle', 'jump: opmode_cycle still fires when 8 is jumped (9 >= 8)');
+eq(r.counters.rung, 1, 'jump: exactly one rung advanced');
+
+// next attempt does not re-fire the same rung
+eq(r.on_attempt(), 'retry', 'jump: rung does not re-fire on the next attempt');
+
+// --- restart mid-outage: rung index persists, no skip and no re-run ----------
+fx = fakefx.create();
+r = recovery.create({ id: 'restart', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+for (let i = 1; i <= 8; i++) r.on_attempt();        // fires opmode at 8 -> rung=1
+eq(r.counters.rung, 1, 'restart: opmode fired before restart');
+
+// a fresh daemon restores the persisted state (attempts=8, rung=1)
+let rr = recovery.create({ id: 'restart', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+rr.load();
+eq(rr.counters.attempts, 8, 'restart: attempts restored');
+eq(rr.counters.rung, 1, 'restart: fired-rung index restored (opmode not re-run)');
+// climbing continues from the restored rung; modem_reset next at 16
+let acts2 = [];
+for (let i = 9; i <= 16; i++) push(acts2, rr.on_attempt());
+eq(acts2[0], 'retry', 'restart: attempt 9 retry (opmode already done)');
+eq(acts2[7], 'modem_reset', 'restart: attempt 16 modem_reset (next rung, not skipped)');
+
+// legacy state file (no `rung` key) defaults the index from the attempt count
+fx.files['/state/legacy.json'] = '{ "attempts": 23, "proto_errors": 0 }';
+let rl = recovery.create({ id: 'legacy', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+rl.load();
+eq(rl.counters.rung, 2, 'legacy: rung index defaulted from attempts (23 -> opmode+reset done)');
+eq(rl.on_attempt(), 'usb_repower', 'legacy: next rung (24) still reachable after default');
 
 // failreboot = 0 disables the ladder entirely (old gate)
 r = recovery.create({ id: 'm1', failreboot: 0, fx: fx, state_dir: '/state', log: silent });

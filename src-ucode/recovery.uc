@@ -24,6 +24,34 @@ const PROTO_ERROR_LIMIT = 25;
 const DEFAULT_STATE_DIR = '/tmp/wwand/state';
 const REBOOT_DELAY_MS = 10000;
 
+// escalation rungs, in ascending order of attempt count. Each fires exactly
+// once per outage (tracked by the persisted `rung` index) the first time the
+// attempt counter reaches its threshold — a THRESHOLD CROSSING, not an exact
+// `== n` match. Exact matches were fragile: two callers can increment the
+// shared counter in one failed cycle (the modem step-chain fail() and the
+// daemon on a context-activation error), so a jump from 7 to 9 would sail past
+// `== 8` and silently skip opmode_cycle; likewise a daemon restart mid-outage
+// that restored e.g. attempts=9 would never re-hit `== 8`. Crossing + a
+// persisted fired-index is robust to both.
+const RUNGS = [
+	{ at: 8,  action: 'opmode_cycle' },
+	{ at: 16, action: 'modem_reset' },
+	{ at: 24, action: 'usb_repower' },
+];
+
+// how many rungs a given attempt count has already passed (used only to default
+// the fired-rung index when restoring a legacy state file that predates `rung`).
+function rungs_reached(n)
+{
+	let k = 0;
+
+	for (let r in RUNGS)
+		if (n >= r.at)
+			k++;
+
+	return k;
+}
+
 export function create(opts)
 {
 	let fx = opts.fx;
@@ -32,7 +60,7 @@ export function create(opts)
 	let self = {
 		id: opts.id,
 		failreboot: +(opts.failreboot ?? 100),
-		counters: { attempts: 0, proto_errors: 0 },
+		counters: { attempts: 0, proto_errors: 0, rung: 0 },
 		rebooting: false,
 	};
 
@@ -50,12 +78,17 @@ export function create(opts)
 		// accept the legacy 'qmi_errors' key from state files written before the
 		// counter was renamed to the protocol-neutral 'proto_errors'
 		let perr = match(data, /"proto_errors": *([0-9]+)/) ?? match(data, /"qmi_errors": *([0-9]+)/);
+		// `rung` (fired-rung index) may be absent in legacy state files; default
+		// it from the restored attempt count so a restart mid-outage does not
+		// re-run rungs that already fired (attempts>=24 -> all three done).
+		let rung = match(data, /"rung": *([0-9]+)/);
 
 		if (att || perr) {
 			self.counters.attempts = att ? +att[1] : 0;
 			self.counters.proto_errors = perr ? +perr[1] : 0;
-			log('notice', sprintf('restored recovery state: attempts %d, proto_errors %d',
-				self.counters.attempts, self.counters.proto_errors));
+			self.counters.rung = rung ? +rung[1] : rungs_reached(self.counters.attempts);
+			log('notice', sprintf('restored recovery state: attempts %d, proto_errors %d, rung %d',
+				self.counters.attempts, self.counters.proto_errors, self.counters.rung));
 		}
 	};
 
@@ -72,33 +105,39 @@ export function create(opts)
 	// 'retry' | 'opmode_cycle' | 'modem_reset' | 'usb_repower' | 'reboot'
 	self.on_attempt = function() {
 		self.counters.attempts++;
-		self.persist();
 
 		let n = self.counters.attempts;
 
 		log('info', sprintf('connection attempt %d failed', n));
 
-		if (self.failreboot <= 0)
+		if (self.failreboot <= 0) {
+			self.persist();
 			return 'retry';
+		}
 
-		if (n > self.failreboot)
+		if (n > self.failreboot) {
+			self.persist();
 			return 'reboot';
+		}
 
-		if (n == 8)
-			return 'opmode_cycle';
+		// fire the next not-yet-fired rung once we've reached its threshold.
+		// One rung per call (escalate step by step), in order — a jump past a
+		// threshold does not fire several rungs at once, and never skips one.
+		if (self.counters.rung < length(RUNGS) && n >= RUNGS[self.counters.rung].at) {
+			let action = RUNGS[self.counters.rung].action;
+			self.counters.rung++;
+			self.persist();
+			return action;
+		}
 
-		if (n == 16)
-			return 'modem_reset';
-
-		if (n == 24)
-			return 'usb_repower';
-
+		self.persist();
 		return 'retry';
 	};
 
 	self.on_connect_success = function() {
-		if (self.counters.attempts != 0) {
+		if (self.counters.attempts != 0 || self.counters.rung != 0) {
 			self.counters.attempts = 0;
+			self.counters.rung = 0;
 			self.persist();
 		}
 	};
