@@ -1429,7 +1429,7 @@ export function create(opts)
 			if (be == 'qmi')
 				return qmi_backend.get_ca(self.nas, (ca) => store(ca ?? []));
 			if (be == 'at')
-				return self.at.send('AT+QCAINFO', (e, r) =>
+				return self.at_telemetry.send('AT+QCAINFO', (e, r) =>
 					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
 			store([]);
 		});
@@ -1667,11 +1667,7 @@ export function create(opts)
 		watch_decay_timer = fast_timer = null;
 		watch_active = fast_running = false;
 
-		if (self.at) {
-			self.at.close();
-			self.at = null;
-			self.at_tty = null;
-		}
+		modem_common.close_at(self);
 
 		for (let c in [ self.ctl, self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg ])
 			if (c)

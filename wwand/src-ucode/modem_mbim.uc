@@ -579,7 +579,7 @@ export function create(opts)
 					{ no_recovery: true });
 
 			if (be == 'at')
-				return self.at.send('AT+QENG="servingcell"', (e, r) => {
+				return self.at_telemetry.send('AT+QENG="servingcell"', (e, r) => {
 					let serving = e ? null : atcmd.parse_qeng_servingcell(r?.lines);
 					store(serving ? { serving: serving } : null);
 				});
@@ -608,7 +608,7 @@ export function create(opts)
 				return qmi_backend.get_ca(self.pt.nas, (ca) => store(ca ?? []));
 
 			if (be == 'at')
-				return self.at.send('AT+QCAINFO', (e, r) =>
+				return self.at_telemetry.send('AT+QCAINFO', (e, r) =>
 					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
 
 			store([]);
@@ -813,11 +813,7 @@ export function create(opts)
 		watch_decay_timer = fast_timer = null;
 		watch_active = fast_running = false;
 
-		if (self.at) {
-			self.at.close();
-			self.at = null;
-			self.at_tty = null;
-		}
+		modem_common.close_at(self);
 
 		// passthrough QMI stack (torn down before the mbim channel it rides on).
 		// A fresh session must re-probe, so forget the cached backend choices.

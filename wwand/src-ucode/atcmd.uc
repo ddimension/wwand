@@ -704,6 +704,64 @@ export function find_tty(fx, device, tty_override, base_override)
 	return sprintf('/dev/%s', names[0]);
 }
 
+// find_at_channels: the primary AT port (find_tty) plus a DEDICATED secondary
+// AT channel (port role 'at2') when the modem exposes one. Running telemetry
+// polls on the secondary keeps them from serializing behind dial / cell-lock /
+// user (modem_at) commands on the control channel — the AT queue is per-tty.
+// Returns { primary, telemetry }; telemetry is null when there is no distinct
+// second AT port (the caller then reuses the primary). Only an explicitly
+// role-tagged 'at2' port is used — never a guessed one, which could hang.
+export function find_at_channels(fx, device, tty_override, base_override)
+{
+	let primary = find_tty(fx, device, tty_override, base_override);
+
+	if (!primary)
+		return { primary: null, telemetry: null };
+
+	// resolve the USB-device dir to enumerate sibling ttys for the 'at2' role:
+	// from the explicit base, else the cdc-wdm device, else the primary tty's
+	// own USB parent (the NCM case — no cdc-wdm anchor, port pinned via config).
+	let base = base_override;
+
+	if (base == null && device != null) {
+		let name = substr(device, rindex(device, '/') + 1);
+		base = sprintf('/sys/class/usbmisc/%s/device/..', name);
+	}
+
+	if (base == null) {
+		let tn = substr(primary, rindex(primary, '/') + 1);
+		base = sprintf('/sys/class/tty/%s/device/..', tn);
+	}
+
+	let vid = lc(trim(fx.read(sprintf('%s/idVendor', base)) ?? ''));
+	let pid = lc(trim(fx.read(sprintf('%s/idProduct', base)) ?? ''));
+	let ports = LOCAL_PORTS[sprintf('%s:%s', vid, pid)] ?? atport_table()[sprintf('%s:%s', vid, pid)];
+
+	if (!ports)
+		return { primary: primary, telemetry: null };
+
+	for (let path in (fx.glob(sprintf('%s/*/tty*', base)) ?? [])) {
+		let tty = substr(path, rindex(path, '/') + 1);
+
+		if (substr(tty, 0, 3) != 'tty')
+			continue;
+
+		let ifdir = substr(path, 0, rindex(path, '/'));
+		let ifnum_raw = trim(fx.read(sprintf('%s/bInterfaceNumber', ifdir)) ?? '');
+		let ifnum = length(ifnum_raw) ? hex('0x' + ifnum_raw) : null;
+		let role = (ifnum != null) ? ports[sprintf('%d', ifnum)] : null;
+
+		if (role == 'at2') {
+			let dev = sprintf('/dev/%s', tty);
+
+			if (dev != primary)
+				return { primary: primary, telemetry: dev };
+		}
+	}
+
+	return { primary: primary, telemetry: null };
+}
+
 // --- transport ---------------------------------------------------------------
 
 // real tty transport; kept separate so the engine stays host-testable

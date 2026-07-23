@@ -28,6 +28,22 @@ import * as netlink from './netlink.uc';
 //   reopen_next?:    () => …  continuation when self.at is already open
 //                             (defaults to next)
 // }
+// close_at(self): tear down both AT engines opened by open_at (the control
+// channel and, when distinct, the dedicated telemetry channel). Idempotent.
+export function close_at(self)
+{
+	if (self.at_telemetry && self.at_telemetry != self.at)
+		self.at_telemetry.close();
+
+	if (self.at)
+		self.at.close();
+
+	self.at = null;
+	self.at_telemetry = null;
+	self.at_tty = null;
+	self.at_telemetry_tty = null;
+}
+
 export function open_at(self, o)
 {
 	let log = o.log;
@@ -36,7 +52,8 @@ export function open_at(self, o)
 		return (o.reopen_next ?? o.next)();
 
 	let fxi = o.at_opts?.fx ?? netlink.default_fx((level, msg) => log(level, msg));
-	let tty = atcmd.find_tty(fxi, self.device, self.config.tty);
+	let ch = atcmd.find_at_channels(fxi, self.device, self.config.tty, o.base_override);
+	let tty = ch.primary;
 
 	if (!tty) {
 		log('info', 'no AT port found');
@@ -54,6 +71,23 @@ export function open_at(self, o)
 	self.at = atcmd.create(tr, { log: (level, msg) => log(level, sprintf('at: %s', msg)) });
 	self.at_tty = tty;
 	log('notice', sprintf('AT port: %s', tty));
+
+	// dedicated telemetry channel: when the modem exposes a second AT port
+	// ('at2'), open a separate engine there so telemetry polls (QENG/QCAINFO/…)
+	// don't serialize behind control/dial/user commands on the primary. Falls
+	// back to the control channel when there is no second port (or it won't open).
+	self.at_telemetry = self.at;
+	self.at_telemetry_tty = tty;
+
+	if (ch.telemetry && ch.telemetry != tty) {
+		let tr2 = open_transport(ch.telemetry, 115200, (level, msg) => log(level, msg));
+
+		if (tr2) {
+			self.at_telemetry = atcmd.create(tr2, { log: (level, msg) => log(level, sprintf('at2: %s', msg)) });
+			self.at_telemetry_tty = ch.telemetry;
+			log('notice', sprintf('AT telemetry channel: %s', ch.telemetry));
+		}
+	}
 
 	// model quirks + configured at_init list, then cell locks
 	let cmds = [
