@@ -39,6 +39,27 @@ export function create(hub, schema, cid, hooks)
 		if (msg.ind)
 			self.ind_by_id[sprintf('%d', msg.id)] = name;
 
+	// allocate a transaction id that is not already in flight. The id space wraps
+	// (CTL 1..0xff — a single byte — else 1..0xffff). Skipping live txns prevents
+	// a wrapped id from overwriting a still-pending request, which would leak that
+	// request's timeout timer and let its later firing delete the NEW pending slot
+	// (corrupting response correlation). Returns null only when every id is in
+	// flight — unreachable in practice (the modem answers or times out long before
+	// tens of thousands of requests stack up).
+	let alloc_txn = () => {
+		let txn_max = (schema.service == 0) ? 0xff : 0xffff;
+
+		for (let tries = 0; tries < txn_max; tries++) {
+			let txn = self.next_txn;
+			self.next_txn = (txn >= txn_max) ? 1 : txn + 1;
+
+			if (self.pending[sprintf('%d', txn)] == null)
+				return txn;
+		}
+
+		return null;
+	};
+
 	self.request = function(name, args, cb, opts) {
 		let msg = schema.messages[name];
 
@@ -49,12 +70,14 @@ export function create(hub, schema, cid, hooks)
 			return false;
 		}
 
-		let txn = self.next_txn;
+		let txn = alloc_txn();
 
-		// CTL transaction ids are a single byte
-		let txn_max = (schema.service == 0) ? 0xff : 0xffff;
+		if (txn == null) {
+			if (cb)
+				cb({ error: 'busy', detail: 'no free transaction id' }, null);
 
-		self.next_txn = (txn >= txn_max) ? 1 : txn + 1;
+			return false;
+		}
 
 		let frame = qmux.encode(schema.service, cid, txn, msg.id,
 		                        tlv.pack(msg.req, args));

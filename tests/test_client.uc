@@ -98,6 +98,27 @@ cc.next_txn = 0xff;
 cc.request('SYNC', {}, null);
 eq(cc.next_txn, 1, 'ctl txn wraps to 1');
 
+// --- txn collision: a wrapped id must skip a still-pending request ----------
+
+let hub2_sent = [];
+let hub2 = { send: (f) => { push(hub2_sent, f); return true; }, register: () => null, unregister: () => null };
+let tc = client.create(hub2, dms, 5, null);
+
+// request A stays pending (never dispatched)
+tc.request('GET_MODEL', {}, () => null);
+let ta = qmux.decode(hub2_sent[0]).txn;
+
+// force next_txn back onto A's id to simulate a wrap-around collision
+tc.next_txn = ta;
+tc.request('GET_REVISION', {}, () => null);
+let tb = qmux.decode(hub2_sent[1]).txn;
+
+ok(tb != ta, 'txn-collision: wrapped id skips the in-flight txn');
+ok(tc.pending[sprintf('%d', ta)] != null, 'txn-collision: original pending preserved (not overwritten)');
+eq(tc.pending[sprintf('%d', ta)].name, 'GET_MODEL', 'txn-collision: slot A still holds request A');
+eq(tc.pending[sprintf('%d', tb)].name, 'GET_REVISION', 'txn-collision: request B got its own free slot');
+tc.destroy();
+
 // --- destroy cancels pending ------------------------------------------------
 
 let cancelled = false;
