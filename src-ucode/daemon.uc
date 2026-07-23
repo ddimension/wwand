@@ -168,6 +168,12 @@ export function create(opts)
 	// no-proto-task, so there is no monitor and no teardown-on-blip.
 	let hold_max_ms = opts?.timing?.hold_max_ms ?? 90000;
 
+	// how long to wait for a mode-switched PPP-only modem to re-enumerate under a
+	// rich driver before flagging it as stuck (the reset is fire-and-forget and
+	// the switch is once-guarded, so without this a reset that never re-enumerates
+	// would leave the modem silently unmanaged forever).
+	let modeswitch_liveness_ms = opts?.timing?.modeswitch_liveness_ms ?? 60000;
+
 	// re-read the reconnect-hold ceiling live on reload (main.reload derives it
 	// from globals.hold_max, mirroring how it seeds timing.hold_max_ms at start).
 	// Applied on the next reconnect (enter_reconnecting reads hold_max_ms when it
@@ -425,10 +431,31 @@ export function create(opts)
 				return;
 			}
 
-			if (res?.switched)
+			if (res?.switched) {
 				log('notice', sprintf('modem %s: usbnet mode switch applied (%s), modem re-enumerating', name, res.target ?? '?'));
-			else
+
+				// liveness: the reset is fire-and-forget (the AT link usually drops
+				// before answering), so a reset that never re-enumerates would leave
+				// this modem stuck — once-guarded, no modem object, no hotplug. Arm a
+				// timeout; if no modem was built by then, flag it (surfaced in
+				// status) instead of failing silently. Cancelled when start_modem
+				// builds a real modem for this entry (re-enumeration succeeded).
+				if (entry.modeswitch_liveness)
+					entry.modeswitch_liveness.cancel();
+
+				entry.modeswitch_liveness = uloop.timer(modeswitch_liveness_ms, () => {
+					entry.modeswitch_liveness = null;
+
+					if (!entry.modem) {
+						log('err', sprintf('modem %s: usbnet mode switch did not re-enumerate within %ds; modem unmanaged (check hardware / recipe)',
+							name, modeswitch_liveness_ms / 1000));
+						entry.control_note = 'mode-switch did not re-enumerate';
+					}
+				});
+			}
+			else {
 				log('notice', sprintf('modem %s: already in a rich usbnet mode, nothing to switch', name));
+			}
 			// the reset re-enumerates -> the usbmisc/net hotplug fires ->
 			// self.hotplug('add') rebuilds this modem under the new driver.
 		});
@@ -485,6 +512,14 @@ export function create(opts)
 		// PPP-only: mode-switch and wait for re-enumeration; do not build a modem.
 		if (control.protocol == 'ppp')
 			return try_modeswitch(name, entry, control.tty);
+
+		// reaching here with a rich control interface means a prior mode switch
+		// (if any) re-enumerated — cancel its liveness watchdog and clear the note.
+		if (entry.modeswitch_liveness) {
+			entry.modeswitch_liveness.cancel();
+			entry.modeswitch_liveness = null;
+		}
+		entry.control_note = null;
 
 		let device = entry.device;
 		let proto = control.protocol ?? 'qmi';
@@ -824,6 +859,7 @@ export function create(opts)
 				netdev: entry.netdev,
 				protocol: entry.protocol,
 				state: entry.modem?.state ?? 'UNRESOLVED',
+				control_note: entry.control_note,   // e.g. a stuck mode switch
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,
 				imei: entry.modem?.info?.imei,
@@ -1406,9 +1442,13 @@ export function create(opts)
 				entry.ctx.down(() => null);
 		}
 
-		for (let name, entry in self.modems)
+		for (let name, entry in self.modems) {
+			if (entry.modeswitch_liveness)
+				entry.modeswitch_liveness.cancel();
+
 			if (entry.modem)
 				entry.modem.stop();
+		}
 
 		self.modems = {};
 		self.contexts = {};

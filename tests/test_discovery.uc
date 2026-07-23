@@ -16,6 +16,7 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as uloop from 'uloop';
 import * as fakefx from './lib/fakefx.uc';
+import * as mockhub from './lib/mockhub.uc';
 import * as discovery from 'wwand/discovery.uc';
 import * as config from 'wwand/config.uc';
 import * as daemon_mod from 'wwand/daemon.uc';
@@ -163,6 +164,67 @@ ok(!d.modems.m0.modem, 'ppp-only: no modem object is built');
 d.hotplug('add', 'ttyUSB2');
 eq(length(ms_calls), 1, 'usbnet mode switch attempted only once per modem');
 
-uloop.done();
+// --- 7. daemon: a mode switch that never re-enumerates is flagged (liveness) --
+// The reset is fire-and-forget and the switch is once-guarded, so without a
+// liveness timeout a modem that never comes back would be silently unmanaged.
+
+// stuck case: resolve_control stays ppp -> no modem is ever built
+let stuck_proto = 'ppp';
+let ds = daemon_mod.create({
+	timing: { modeswitch_liveness_ms: 30 },
+	deps: {
+		log: (level, msg) => null,
+		transport_open: mockhub.create({ handlers: {} }).transport_open,
+		resolve_control: (cfg) => (stuck_proto == 'ppp')
+			? { protocol: 'ppp', device: null, netdev: null, tty: '/dev/ttyUSB2' }
+			: { protocol: 'qmi', device: '/dev/cdc-wdm0', netdev: 'wwan0', tty: null },
+		resolve_netdev: (cfg, dev) => 'wwan0',
+		modeswitch: (o, cb) => cb(null, { switched: true, target: 'qmi' }),
+	},
+});
+
+ds.apply_config(config.parse({ wwand: { m0: { '.type': 'modem', usb_path: '3-1' } } }));
+ok(ds.modems.m0.modeswitch_liveness != null, 'liveness: watchdog armed after the switch');
+eq(ds.modems.m0.control_note, null, 'liveness: not flagged before the timeout');
+
+uloop.timer(70, () => {
+	eq(ds.modems.m0.control_note, 'mode-switch did not re-enumerate',
+		'liveness: stuck switch flagged after the timeout');
+	eq(ds.status().modems.m0.control_note, 'mode-switch did not re-enumerate',
+		'liveness: status() surfaces the stuck note');
+
+	// recovered case: a fresh modem re-enumerates as qmi before the timeout ->
+	// start_modem cancels the watchdog and clears the note
+	let recov_proto = 'ppp';
+	let dr = daemon_mod.create({
+		timing: { modeswitch_liveness_ms: 10000 },
+		deps: {
+			log: (level, msg) => null,
+			transport_open: mockhub.create({ handlers: {} }).transport_open,
+			resolve_control: (cfg) => (recov_proto == 'ppp')
+				? { protocol: 'ppp', device: null, netdev: null, tty: '/dev/ttyUSB2' }
+				: { protocol: 'qmi', device: '/dev/cdc-wdm0', netdev: 'wwan0', tty: null },
+			resolve_netdev: (cfg, dev) => 'wwan0',
+			modeswitch: (o, cb) => cb(null, { switched: true, target: 'qmi' }),
+		},
+	});
+
+	dr.apply_config(config.parse({ wwand: { m0: { '.type': 'modem', usb_path: '3-1' } } }));
+	ok(dr.modems.m0.modeswitch_liveness != null, 'liveness: armed on the recovered daemon too');
+
+	// re-enumeration: resolve_control now reports qmi; hotplug rebuilds the modem
+	recov_proto = 'qmi';
+	dr.hotplug('add', 'cdc-wdm0');
+
+	eq(dr.modems.m0.modeswitch_liveness, null, 'liveness: watchdog cancelled once a modem is built');
+	eq(dr.modems.m0.control_note, null, 'liveness: note cleared on successful re-enumeration');
+	ok(dr.modems.m0.modem != null, 'liveness: a real modem object was built after re-enumeration');
+
+	dr.shutdown();
+	ds.shutdown();
+	uloop.end();
+});
+
+uloop.run();
 
 done('test_discovery');
