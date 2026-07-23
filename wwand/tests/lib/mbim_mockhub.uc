@@ -9,6 +9,14 @@
 //   modem = modem_mbim.create({ ..., deps: { transport_open: mock.transport_open } });
 //   mock.indicate('CONNECT', { session_id: 0, activation_state: 0 });  // unsolicited
 //
+// A modem exercising more than one MBIM service (e.g. native cells over the
+// MS Basic Connect Extensions service alongside signal over Basic Connect —
+// both happen to use CID 11) passes { schemas: [ bc, ext ] } instead of a single
+// schema; routing is then keyed by (service uuid, cid). A COMMAND for a service/
+// cid no schema knows (e.g. the QMI-passthrough probe) is rejected with a
+// non-zero MBIM status rather than aborting the test, so an unsupported
+// passthrough candidate simply loses in backend.choose.
+//
 // Handlers are keyed by command name (e.g. 'CONNECT'). A handler is a static
 // response object or fn(args, meta) -> response. Special return values:
 //   { __error: <status> }  answer with a non-zero MBIM status (no info buffer)
@@ -50,7 +58,8 @@ function indicate_frame(service, cid, ibuf)
 
 export function create(opts)
 {
-	let schema = opts.schema;
+	let schemas = opts.schemas ?? [ opts.schema ];
+	let schema = schemas[0];   // primary: default for indication + response uuid
 	let self = {
 		handlers: opts?.handlers ?? {},
 		calls: [],
@@ -60,11 +69,16 @@ export function create(opts)
 		closed: true,
 	};
 
-	// cid -> { name, cmd }
-	let by_cid = {};
+	// (service uuid bytes, cid) -> { name, cmd, schema }. Keying on the service
+	// as well as the cid lets two services that reuse a cid (bc SIGNAL_STATE_V2
+	// and ext BASE_STATIONS_INFO both use 11) coexist in one mock.
+	let by_key = {};
+	let route_key = (uuid_bytes, cid) => uuid_bytes + sprintf(':%d', cid);
 
-	for (let name, cmd in schema.commands)
-		by_cid[sprintf('%d', cmd.cid)] = { name: name, cmd: cmd };
+	for (let sch in schemas)
+		for (let name, cmd in sch.commands)
+			by_key[route_key(mbim.uuid_bytes(sch.service), cmd.cid)] =
+				{ name: name, cmd: cmd, schema: sch };
 
 	let deliver = (frame) => {
 		uloop.timer(0, () => {
@@ -95,17 +109,25 @@ export function create(opts)
 		if (msg_type != mbim.MSG_COMMAND)
 			die(sprintf('mbim_mockhub: unexpected frame type 0x%08x', msg_type));
 
-		// COMMAND: skip header(12) + fragment(8) + uuid(16); then cid, cmd_type, infolen
+		// COMMAND: header(12) + fragment(8) + uuid(16) + cid + cmd_type + infolen
+		let uuid = substr(frame, 12 + 8, 16);
 		let p = 12 + 8 + 16;
 		let cid = struct.unpack('<I', substr(frame, p, 4))[0]; p += 4;
 		let cmd_type = struct.unpack('<I', substr(frame, p, 4))[0]; p += 4;
 		let ilen = struct.unpack('<I', substr(frame, p, 4))[0]; p += 4;
 		let info = substr(frame, p, ilen);
 
-		let entry = by_cid[sprintf('%d', cid)];
+		let entry = by_key[route_key(uuid, cid)];
 
-		if (!entry)
-			die(sprintf('mbim_mockhub: command for unknown cid %d', cid));
+		// a service/cid no configured schema knows (e.g. the QMI-passthrough
+		// probe): answer with a non-zero MBIM status so the caller sees a clean
+		// failure instead of the test aborting.
+		if (!entry) {
+			let body = struct.pack('<II', 1, 0) + uuid +
+				struct.pack('<III', cid, 1 /* MBIM_STATUS_FAILURE */, 0);
+			deliver(struct.pack('<III', mbim.MSG_COMMAND_DONE, 12 + length(body), txn) + body);
+			return true;
+		}
 
 		let kind = (cmd_type == mbim.CMD_SET) ? 'set' : 'query';
 		let args = mbim.decode_info(entry.cmd[kind] ?? {}, info);
@@ -134,7 +156,7 @@ export function create(opts)
 		else
 			ibuf = mbim.encode_info(entry.cmd.response ?? {}, obj);
 
-		deliver(done_frame(txn, schema.service, cid, status, ibuf));
+		deliver(done_frame(txn, entry.schema.service, cid, status, ibuf));
 		return true;
 	};
 
@@ -144,13 +166,16 @@ export function create(opts)
 
 	// synthesize an unsolicited INDICATE_STATUS towards the client
 	self.indicate = function(name, args) {
-		let cmd = schema.commands[name];
+		let sch = schema, cmd = null;
+
+		for (let s in schemas)
+			if (s.commands[name]) { sch = s; cmd = s.commands[name]; break; }
 
 		if (!cmd)
 			die(sprintf('mbim_mockhub: unknown indication %s', name));
 
 		let ibuf = mbim.encode_info(cmd.notification ?? cmd.response ?? {}, args ?? {});
-		deliver(indicate_frame(schema.service, cmd.cid, ibuf));
+		deliver(indicate_frame(sch.service, cmd.cid, ibuf));
 	};
 
 	// factory usable as deps.transport_open

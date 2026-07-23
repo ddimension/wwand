@@ -15,6 +15,7 @@
 
 'use strict';
 
+import * as struct from 'struct';
 import * as mbim from './codec/mbim.uc';
 import * as qmux from './codec/qmux.uc';
 import * as qmi_pt from './codec/mbim-schema/qmi_passthrough.uc';
@@ -53,11 +54,22 @@ export function create(mc, opts)
 
 		// `frame` is a raw QMUX frame from qmux.encode(); tunnel it as the opaque
 		// InformationBuffer of an MBIM COMMAND to the QMI passthrough CID and
-		// unwrap the QMUX reply. The QMI client correlates by the inner QMUX txn,
-		// so a dropped/erroring passthrough round-trip simply lets it time out.
+		// unwrap the QMUX reply.
+		let req = qmux.decode(frame);
+
 		mc.command_raw(qmi_pt.service, qmi_pt.CID_QMI_MSG, frame, (err, info) => {
 			if (err) {
 				log('debug', sprintf('qmi-over-mbim: passthrough error %J', err));
+
+				// The modem has no QMI passthrough service (or rejected it). There
+				// is no QMUX reply to dispatch, so synthesize a QMI error response
+				// (result TLV = failure) for the pending request — this makes the
+				// caller fail FAST instead of waiting out its timeout, which is
+				// what lets _ensure_pt fall back to native/AT promptly.
+				if (req)
+					deliver(qmux.encode(req.service, req.cid, req.txn, req.msg_id,
+						struct.pack('<BHHH', 0x02, 4, 1, 0), 'response'));
+
 				return;
 			}
 

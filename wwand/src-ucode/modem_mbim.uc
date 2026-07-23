@@ -23,6 +23,18 @@ import * as atcmd from './atcmd.uc';
 import * as protoswitch from './protocol_switch.uc';
 import * as netlink from './netlink.uc';
 import * as bc from './codec/mbim-schema/basic_connect.uc';
+// rich telemetry: native-MBIM backend + the QMI-over-MBIM passthrough (the whole
+// QMI client stack tunnelled over the open MBIM channel) + AT, chosen per
+// capability like modem.uc does over qmux.
+import * as backend from './backend.uc';
+import * as mbim_backend from './mbim_backend.uc';
+import * as qmi_backend from './qmi_backend.uc';
+import * as qom from './qmi_over_mbim.uc';
+import * as client_mod from './client.uc';
+import * as ctlmod from './codec/schema/ctl.uc';
+import * as nasmod from './codec/schema/nas.uc';
+import * as dsdmod from './codec/schema/dsd.uc';
+import * as tlv from './codec/tlv.uc';
 
 const TIMING_DEFAULTS = {
 	settle: 2000,
@@ -31,6 +43,48 @@ const TIMING_DEFAULTS = {
 	backoff_max: 30000,
 	at_drain: 60000,
 };
+
+// fast "watch" mode timing (mirrors modem.uc): while a consumer (the LuCI status
+// page) polls modem_signal/modem_cells, refresh at most once a second and revert
+// to the slow telemetry timer a few seconds after polling stops.
+const WATCH_MIN_INTERVAL = 1000;   // never faster than 1/s
+const WATCH_DECAY = 6000;          // stop the fast loop this long after a poll
+
+// Null out the i16 signal metrics QMI reports as -32768 ("not available") on
+// serving + neighbour cells (the passthrough cell path decodes the same NAS TLVs
+// modem.uc does). Applied once at ingestion so LuCI renders "—". Mirrors
+// modem.uc clean_cell_metrics.
+function clean_cell_metrics(cells)
+{
+	let scrub = (c) => {
+		for (let f in [ 'rsrp', 'rsrq', 'rssi', 'srxlev', 'snr' ])
+			if (c[f] == tlv.SENTINEL.i16)
+				c[f] = null;
+	};
+
+	for (let c in (cells?.lte_intra?.cells ?? []))
+		scrub(c);
+
+	for (let fr in (cells?.lte_inter?.freqs ?? []))
+		for (let c in (fr.cells ?? []))
+			scrub(c);
+
+	if (cells?.nr5g_cell)
+		scrub(cells.nr5g_cell);
+
+	return cells;
+}
+
+// derive the data-system mode from the QENG serving detail (Quectel AT): the NR
+// line states NSA/SA directly. Last-resort data_mode source. Mirrors modem.uc.
+function dsd_from_serving(serving)
+{
+	let lte = serving?.lte != null;
+	let nr  = serving?.nr != null;
+	let mode = nr ? (serving.nr.mode ?? (lte ? 'NSA' : 'SA')) : (lte ? 'LTE' : null);
+
+	return mode ? { mode: mode, lte: lte, nr: nr } : null;
+}
 
 export function create(opts)
 {
@@ -44,10 +98,13 @@ export function create(opts)
 		state: 'ABSENT',
 		hub: null,
 		mbim: null,
+		pt: null,          // lazy QMI-over-MBIM passthrough stack { shim, ctl, nas, dsd }
 		info: {},
 		reg: {},
+		reg_detail: null,  // why (not) registered (reject cause / limited service)
 		signal: {},
 		cells: null,
+		dsd_status: null,  // data-system mode { mode, lte, nr, source }
 		location: null,
 		at: null,
 		at_tty: null,
@@ -76,6 +133,8 @@ export function create(opts)
 
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, settle_timer = null, at_drain_timer = null, telemetry_timer = null;
+	let watch_decay_timer = null, fast_timer = null;
+	let watch_active = false, fast_running = false;
 
 	let emit = (event, data) => {
 		if (deps.on_event)
@@ -292,7 +351,15 @@ export function create(opts)
 
 	self._install_indications = function() {
 		self.mbim.on(bc, 'REGISTER_STATE', (data) => self._update_register(data));
-		self.mbim.on(bc, 'SIGNAL_STATE', (data) => { self.signal = { rssi: data.rssi }; });
+		// v1 RSSI floor: only fill in when no richer per-RAT signal is in place
+		// (the SIGNAL_STATE_V2 / passthrough refresh below owns self.signal once
+		// it resolves). data.rssi is the 0..31 coded index (99 = unknown).
+		self.mbim.on(bc, 'SIGNAL_STATE', (data) => {
+			if (!self.signal?.lte && !self.signal?.nr5g) {
+				let dbm = (data.rssi != null && data.rssi != 99) ? (-113 + 2 * data.rssi) : null;
+				self.signal = { rssi_raw: data.rssi, rssi: dbm };
+			}
+		});
 		self.mbim.on(bc, 'PACKET_SERVICE', (data) => null);
 		// unsolicited per-session (de)activation — the network dropping a data
 		// context. Routed to the owning context by session id so it can tear the
@@ -370,8 +437,288 @@ export function create(opts)
 		});
 	};
 
-	// --- telemetry (signal query; MBIM has no rich cell info in basic svc) --
+	// --- rich telemetry ----------------------------------------------------
+	//
+	// self.signal / self.cells / self.dsd_status / self.reg_detail are populated
+	// in the SAME shapes the QMI modem.uc produces, so daemon.modem_signal /
+	// modem_cells surface either backend unchanged. Each capability is sourced
+	// via backend.choose in the order native-MBIM -> QMI-passthrough -> AT, the
+	// choice cached per modem (_sig_be/_cells_be/_ca_be/_dsd_be/_regd_be).
 
+	// Lazy, idempotent bring-up of the QMI-over-MBIM passthrough service stack.
+	// The whole QMI client stack runs over the open MBIM channel (qom shim), so
+	// qmi_backend.* works unchanged. Non-fatal: cb(false) simply drops the
+	// capability to its AT/none fallback.
+	//
+	// CRITICAL: never CTL SYNC — on real HW that resets the embedded QMI state
+	// and tears down the live MBIM data session. GET_VERSION_INFO is issued
+	// directly, then a CID is allocated per needed service.
+	self._ensure_pt = function(cb) {
+		if (self.pt)
+			return cb(true);
+
+		// remembered "no passthrough on this modem" so we don't rebuild a shim +
+		// re-probe on every capability (reset on teardown/protocol change)
+		if (self._pt_failed || !self.mbim)
+			return cb(false);
+
+		let shim = qom.create(self.mbim, { log: log });
+		let ctl = client_mod.create(shim, ctlmod.default, 0, hooks);
+
+		let bail = () => { self._pt_failed = true; shim.close(); return cb(false); };
+
+		ctl.request('GET_VERSION_INFO', {}, (verr, vdata) => {
+			if (verr)
+				return bail();
+
+			let have = {};
+
+			for (let svc in (vdata.services ?? []))
+				have[sprintf('%d', svc.service)] = true;
+
+			// allocate a CID and wrap a client for `schema` over the shim
+			let alloc = (schema, done) => {
+				ctl.request('ALLOCATE_CID', { service: schema.service }, (aerr, adata) => {
+					if (aerr || !adata?.allocation)
+						return done(null);
+
+					done(client_mod.create(shim, schema, adata.allocation.cid, hooks));
+				}, { no_recovery: true });
+			};
+
+			// NAS is mandatory for the passthrough to be useful; DSD is optional.
+			alloc(nasmod.default, (nas) => {
+				if (!nas)
+					return bail();
+
+				let finish = (dsd) => {
+					self.pt = { shim: shim, ctl: ctl, nas: nas, dsd: dsd };
+					cb(true);
+				};
+
+				if (have[sprintf('%d', dsdmod.default.service)])
+					alloc(dsdmod.default, (dsd) => finish(dsd));
+				else
+					finish(null);
+			});
+		}, { no_recovery: true });
+	};
+
+	// signal: prefer the QMI passthrough (GET_SIGNAL_INFO — reuses the battle-
+	// tested QMI decode), then native MBIMEx v2 Signal State as a fallback for
+	// modems without the passthrough. (The native MS-ext buffer decode is not yet
+	// validated against real-HW buffers — on the EG06 it returned only rssi with
+	// null rsrp/rsrq/snr and misaligned cells, while the passthrough is correct.)
+	// Stores self.signal (QMI GET_SIGNAL_INFO shape).
+	self._refresh_signal = function(cb) {
+		cb = cb ?? (() => null);
+
+		backend.choose(self, '_sig_be', [
+			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => up
+				? self.pt.nas.request('GET_SIGNAL_INFO', {},
+					(e, d) => ok(!e && tlv.has_payload(d)), { no_recovery: true })
+				: ok(false)) },
+			{ name: 'mbim', probe: (ok) => self.mbim
+				? mbim_backend.get_signal(self.mbim, (s) => ok(s != null))
+				: ok(false) },
+		], (be) => {
+			if (be == 'mbim')
+				return mbim_backend.get_signal(self.mbim, (s) => { if (s) self.signal = s; cb(); });
+
+			if (be == 'qmi')
+				return self.pt.nas.request('GET_SIGNAL_INFO', {}, (e, d) => {
+					if (!e && tlv.has_payload(d))
+						self.signal = d;
+					cb();
+				}, { no_recovery: true });
+
+			cb();
+		});
+	};
+
+	// cells: native Base Stations Info, else passthrough NAS cell-location info
+	// (decoded + scrubbed exactly as modem.uc), else a best-effort AT QENG
+	// serving cell. Stores self.cells, preserving any carrier-aggregation set.
+	self._refresh_cells = function(cb) {
+		cb = cb ?? (() => null);
+
+		let ca = self.cells?.ca;
+		let store = (c) => {
+			if (c) {
+				if (ca != null)
+					c.ca = ca;
+				self.cells = c;
+			}
+			cb();
+		};
+
+		backend.choose(self, '_cells_be', [
+			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => up
+				? self.pt.nas.request('GET_CELL_LOCATION_INFO', {},
+					(e, d) => ok(!e && tlv.has_payload(d)), { no_recovery: true })
+				: ok(false)) },
+			{ name: 'mbim', probe: (ok) => self.mbim
+				? mbim_backend.get_cells(self.mbim, (c) => ok(c != null))
+				: ok(false) },
+			{ name: 'at', probe: (ok) => ok(!!self.at) },
+		], (be) => {
+			if (be == 'mbim')
+				return mbim_backend.get_cells(self.mbim, (c) => store(c));
+
+			if (be == 'qmi')
+				return self.pt.nas.request('GET_CELL_LOCATION_INFO', {}, (e, d) =>
+					store((!e && tlv.has_payload(d)) ? clean_cell_metrics(d) : null),
+					{ no_recovery: true });
+
+			if (be == 'at')
+				return self.at.send('AT+QENG="servingcell"', (e, r) => {
+					let serving = e ? null : atcmd.parse_qeng_servingcell(r?.lines);
+					store(serving ? { serving: serving } : null);
+				});
+
+			cb();
+		});
+	};
+
+	// carrier aggregation: passthrough NAS GET_LTE_CPHY_CA_INFO, else AT+QCAINFO
+	// (no native MBIM CA CID). Stores self.cells.ca. Mirrors modem.uc _fetch_ca_info.
+	self._refresh_ca = function(cb) {
+		cb = cb ?? (() => null);
+
+		if (!self.cells)   // nowhere to hang CA yet
+			return cb();
+
+		let store = (ca) => { if (self.cells) self.cells.ca = ca ?? []; cb(); };
+
+		backend.choose(self, '_ca_be', [
+			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => up
+				? qmi_backend.get_ca(self.pt.nas, (ca) => ok(ca != null))
+				: ok(false)) },
+			{ name: 'at', probe: (ok) => ok(!!self.at) },
+		], (be) => {
+			if (be == 'qmi')
+				return qmi_backend.get_ca(self.pt.nas, (ca) => store(ca ?? []));
+
+			if (be == 'at')
+				return self.at.send('AT+QCAINFO', (e, r) =>
+					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
+
+			store([]);
+		});
+	};
+
+	// data-system mode (LTE/NSA/SA): native register-state class mask, else
+	// passthrough DSD, else the AT QENG serving detail. Stores self.dsd_status.
+	self._refresh_data_mode = function(cb) {
+		cb = cb ?? (() => null);
+
+		backend.choose(self, '_dsd_be', [
+			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => (up && self.pt.dsd)
+				? qmi_backend.get_data_mode(self.pt.dsd, (m) => ok(m != null))
+				: ok(false)) },
+			{ name: 'mbim', probe: (ok) => self.mbim
+				? mbim_backend.get_data_mode(self.mbim, (m) => ok(m != null))
+				: ok(false) },
+			{ name: 'at', probe: (ok) => ok(self.cells?.serving?.lte != null ||
+			                                self.cells?.serving?.nr != null) },
+		], (be) => {
+			let tag = (s) => { if (s) s.source = be; return s; };
+
+			if (be == 'mbim')
+				return mbim_backend.get_data_mode(self.mbim, (m) => { self.dsd_status = tag(m); cb(); });
+
+			if (be == 'qmi')
+				return qmi_backend.get_data_mode(self.pt.dsd, (m) => { self.dsd_status = tag(m); cb(); });
+
+			if (be == 'at')
+				self.dsd_status = tag(dsd_from_serving(self.cells?.serving));
+
+			cb();
+		});
+	};
+
+	// registration detail (reject cause / limited service): native register
+	// state, else passthrough NAS system-info. Stores self.reg_detail.
+	self._refresh_reg_detail = function(cb) {
+		cb = cb ?? (() => null);
+
+		backend.choose(self, '_regd_be', [
+			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => up
+				? qmi_backend.get_reg_detail(self.pt.nas, (d) => ok(d != null))
+				: ok(false)) },
+			{ name: 'mbim', probe: (ok) => self.mbim
+				? mbim_backend.get_reg_detail(self.mbim, (d) => ok(d != null))
+				: ok(false) },
+		], (be) => {
+			if (be == 'mbim')
+				return mbim_backend.get_reg_detail(self.mbim, (d) => { if (d) self.reg_detail = d; cb(); });
+
+			if (be == 'qmi')
+				return qmi_backend.get_reg_detail(self.pt.nas, (d) => { if (d) self.reg_detail = d; cb(); });
+
+			cb();
+		});
+	};
+
+	let emit_telemetry = () => emit('telemetry', { signal: self.signal, cells: self.cells, reg: self.reg });
+
+	let log_telemetry = () => {
+		log('notice', sprintf('telemetry: plmn=%s roaming=%s rssi=%s dBm mode=%s cells=%s',
+			self.reg.plmn?.description ?? '?', self.reg.roaming ? 'yes' : 'no',
+			(self.signal?.lte?.rssi ?? self.signal?.rssi) ?? '?',
+			self.dsd_status?.mode ?? '?', self.cells ? 'yes' : 'no'));
+	};
+
+	// Fast "watch" loop: while a consumer polls modem_signal/modem_cells, refresh
+	// the LuCI-visible data (signal + cells + CA) at most once a second,
+	// non-overlapping so the cadence stretches when the modem is busy. Reverts to
+	// the slow telemetry timer WATCH_DECAY after polling stops. Mirrors modem.uc.
+	let fast_tick;   // forward-declared: it reschedules itself
+	fast_tick = () => {
+		fast_timer = null;
+
+		if (!watch_active || self.state != 'READY' || !self.mbim) {
+			fast_running = false;
+			return;
+		}
+
+		fast_running = true;
+
+		self._refresh_signal(() => {
+			if (!self.mbim) { fast_running = false; return; }
+
+			self._refresh_cells(() => self._refresh_ca(() => {
+				emit_telemetry();
+
+				if (watch_active && self.mbim)
+					fast_timer = uloop.timer(WATCH_MIN_INTERVAL, fast_tick);
+				else
+					fast_running = false;
+			}));
+		});
+	};
+
+	// called by the daemon whenever modem_signal / modem_cells is queried
+	self.watch = function() {
+		watch_active = true;
+
+		if (watch_decay_timer)
+			watch_decay_timer.cancel();
+
+		watch_decay_timer = uloop.timer(WATCH_DECAY, () => {
+			watch_active = false;
+			watch_decay_timer = null;
+		});
+
+		// kick an immediate refresh so the first poll already returns fresh data
+		if (!fast_running && self.state == 'READY' && self.mbim)
+			fast_tick();
+	};
+
+	// Slow telemetry loop (the stats interval): the baseline v1 SIGNAL_STATE
+	// query (kept working for modems without V2 / passthrough) plus the richer
+	// signal, data-system mode and registration detail. Cells stay on the fast
+	// loop / the fast-loop-primed cell set.
 	self._start_telemetry = function() {
 		if (telemetry_timer)
 			return;
@@ -387,21 +734,22 @@ export function create(opts)
 			if (!self.mbim)
 				return;
 
+			// v1 RSSI floor first, then let the rich per-RAT refresh overwrite it
 			self.mbim.command(bc, 'SIGNAL_STATE', 'query', {}, (err, data) => {
-				if (!err) {
-					// MBIM RSSI: 0..31 -> -113..-51 dBm, 99 = unknown
+				if (!err && !self.signal?.lte && !self.signal?.nr5g) {
 					let dbm = (data.rssi != null && data.rssi != 99)
 						? (-113 + 2 * data.rssi) : null;
-
 					self.signal = { rssi_raw: data.rssi, rssi: dbm };
-					log('notice', sprintf('telemetry: plmn=%s roaming=%s rssi=%s dBm class=0x%x',
-						self.reg.plmn?.description ?? '?', self.reg.roaming ? 'yes' : 'no',
-						dbm ?? '?', self.reg.data_class ?? 0));
-					emit('telemetry', { signal: self.signal, reg: self.reg });
 				}
 
-				if (self.mbim)
+				self._refresh_signal(() => self._refresh_data_mode(() => self._refresh_reg_detail(() => {
+					if (!self.mbim)
+						return;
+
+					log_telemetry();
+					emit_telemetry();
 					telemetry_timer = uloop.timer(interval, tick);
+				})));
 			});
 		};
 
@@ -448,17 +796,34 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
-		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, telemetry_timer ])
+		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, telemetry_timer,
+		                watch_decay_timer, fast_timer ])
 			if (t)
 				t.cancel();
 
 		retry_timer = reg_timer = settle_timer = at_drain_timer = telemetry_timer = null;
+		watch_decay_timer = fast_timer = null;
+		watch_active = fast_running = false;
 
 		if (self.at) {
 			self.at.close();
 			self.at = null;
 			self.at_tty = null;
 		}
+
+		// passthrough QMI stack (torn down before the mbim channel it rides on).
+		// A fresh session must re-probe, so forget the cached backend choices.
+		if (self.pt) {
+			for (let c in [ self.pt.ctl, self.pt.nas, self.pt.dsd ])
+				if (c)
+					c.destroy();
+
+			self.pt.shim.close();
+			self.pt = null;
+		}
+
+		self._pt_failed = false;
+		backend.reset(self, '_sig_be', '_cells_be', '_ca_be', '_dsd_be', '_regd_be');
 
 		if (self.mbim) {
 			self.mbim.destroy();
