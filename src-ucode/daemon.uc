@@ -19,12 +19,31 @@
 
 import * as uloop from 'uloop';
 import * as fs from 'fs';
-import * as modem_mod from './modem.uc';
-import * as context_mod from './context.uc';
 import * as sim from './sim.uc';
 import * as atcmd from './atcmd.uc';
 
 const UP_GUARD_MS = 150000;
+
+// QMI is a SEPARATE package too (wwand-qmi) — the daemon is backend-neutral and
+// loads each backend lazily. QMI, MBIM and NCM are all require()d on first use;
+// a missing package returns null (cached) so start_modem reports it clearly.
+let qmi_mods = null, qmi_unavailable = false;
+function load_qmi() {
+	if (qmi_unavailable)
+		return null;
+
+	if (qmi_mods == null) {
+		try {
+			qmi_mods = require('wwand.qmi_lazy');
+		}
+		catch (e) {
+			qmi_unavailable = true;
+			return null;
+		}
+	}
+
+	return qmi_mods;
+}
 
 // MBIM support is loaded lazily — a QMI-only install (the common case) never
 // touches its ~1.4k lines or schema, trimming resident memory. It also ships as
@@ -92,10 +111,18 @@ export function create(opts)
 	let deps = opts?.deps ?? {};
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: %s\n', level, msg)));
 
-	// backend module loaders — the real ones require() the separate wwand-mbim /
-	// wwand-ncm packages (null when not installed). Overridable for tests.
+	// backend module loaders — the real ones require() the separate wwand-qmi /
+	// wwand-mbim / wwand-ncm packages (null when not installed). Overridable for
+	// tests.
+	let load_qmi_fn = deps.load_qmi ?? load_qmi;
 	let load_mbim_fn = deps.load_mbim ?? load_mbim;
 	let load_ncm_fn = deps.load_ncm ?? load_ncm;
+
+	// resolve a control protocol to its backend module + a human package name
+	let backend_for = (proto) =>
+		(proto == 'mbim') ? { be: load_mbim_fn(), pkg: 'wwand-mbim' } :
+		(proto == 'ncm')  ? { be: load_ncm_fn(),  pkg: 'wwand-ncm' } :
+		                    { be: load_qmi_fn(),  pkg: 'wwand-qmi' };
 
 	let self = {
 		modems: {},    // name -> { cfg, modem, device, netdev }
@@ -589,42 +616,29 @@ export function create(opts)
 			},
 		};
 
-		if (proto == 'mbim' || proto == 'ncm') {
-			// MBIM and NCM ship as separate packages (wwand-mbim / wwand-ncm).
-			// When the modem needs one that is not installed, report it clearly
-			// (surfaced in status) and leave the modem unmanaged instead of
-			// crashing the daemon on the require() failure.
-			let be = (proto == 'mbim') ? load_mbim_fn() : load_ncm_fn();
+		// each backend (QMI, MBIM, NCM) ships as its own package (wwand-qmi /
+		// wwand-mbim / wwand-ncm). When the one this modem needs is not installed,
+		// report it clearly (surfaced in status) and leave the modem unmanaged
+		// instead of crashing the daemon on the require() failure.
+		let chosen = backend_for(proto);
 
-			if (!be) {
-				let pkg = (proto == 'mbim') ? 'wwand-mbim' : 'wwand-ncm';
-				log('err', sprintf('modem %s: %s control requires the %s package, which is not installed',
-					name, proto, pkg));
-				entry.control_note = sprintf('%s package not installed', pkg);
-				return;
-			}
-
-			entry.modem = be.modem.create({
-				...common,
-				datapath: (proto == 'mbim')
-					? { netdev: entry.netdev, mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx }
-					: { netdev: entry.netdev, fx: deps.datapath_fx },
-			});
-		}
-		else {
-			entry.modem = modem_mod.create({
-				...common,
-				datapath: {
-					netdev: entry.netdev,
-					ep_id: ep_id,
-					mux: cfg.mux,
-					dgram_size: cfg.dl_datagram_max_size,
-					mux_links: muxinfo?.list ?? [],
-					fx: deps.datapath_fx,
-				},
-			});
+		if (!chosen.be) {
+			log('err', sprintf('modem %s: %s control requires the %s package, which is not installed',
+				name, proto, chosen.pkg));
+			entry.control_note = sprintf('%s package not installed', chosen.pkg);
+			return;
 		}
 
+		let be = chosen.be;
+
+		let datapath =
+			(proto == 'mbim') ? { netdev: entry.netdev, mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx } :
+			(proto == 'ncm')  ? { netdev: entry.netdev, fx: deps.datapath_fx } :
+			                    { netdev: entry.netdev, ep_id: ep_id, mux: cfg.mux,
+			                      dgram_size: cfg.dl_datagram_max_size,
+			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx };
+
+		entry.modem = be.modem.create({ ...common, datapath: datapath });
 		entry.modem.start();
 	};
 
@@ -644,8 +658,9 @@ export function create(opts)
 		}
 
 		let entry = base;
-		let factory = (mentry.protocol == 'mbim') ? load_mbim_fn().context :
-		              (mentry.protocol == 'ncm')  ? load_ncm_fn().context : context_mod;
+		// the modem exists (guarded above), so its backend package is installed;
+		// use the same lazy loader to reach the matching context factory.
+		let factory = backend_for(mentry.protocol).be.context;
 
 		entry.ctx = factory.create({
 			name: name,

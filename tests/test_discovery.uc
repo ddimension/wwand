@@ -263,8 +263,25 @@ uloop.timer(70, () => {
 	eq(dn.modems.m0.control_note, 'wwand-ncm package not installed',
 		'missing-pkg: NCM backend absence flagged too');
 
+	// QMI itself is a separate package now (wwand-qmi); its absence is flagged too
+	let dq = daemon_mod.create({
+		deps: {
+			log: (level, msg) => null,
+			transport_open: mockhub.create({ handlers: {} }).transport_open,
+			resolve_control: (cfg) => ({ protocol: 'qmi', device: '/dev/cdc-wdm0', netdev: 'wwan0', tty: null }),
+			resolve_netdev: (cfg, dev) => 'wwan0',
+			load_qmi: () => null,   // wwand-qmi not installed
+		},
+	});
+
+	dq.apply_config(config.parse({ wwand: { m0: { '.type': 'modem', device: '/dev/cdc-wdm0' } } }));
+	ok(!dq.modems.m0.modem, 'missing-pkg: no modem built when wwand-qmi is absent');
+	eq(dq.modems.m0.control_note, 'wwand-qmi package not installed',
+		'missing-pkg: QMI backend absence flagged too');
+
 	dm.shutdown();
 	dn.shutdown();
+	dq.shutdown();
 	uloop.end();
 });
 
