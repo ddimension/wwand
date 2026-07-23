@@ -4,6 +4,8 @@
 
 'use strict';
 
+import * as struct from 'struct';
+
 export const SERVICE_UUID = 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df';
 
 // context type UUIDs
@@ -39,14 +41,68 @@ export const PIN_STATE_UNLOCKED = 0;
 export const PIN_STATE_LOCKED = 1;
 export const PIN_OP_ENTER = 0;
 
-// MbimRegisterState
-export const REGISTER_STATE_HOME = 1;
-export const REGISTER_STATE_ROAMING = 2;
-export const REGISTER_STATE_PARTNER = 3;
+// MbimRegisterState — values verified against libmbim mbim-enums.h. (Earlier
+// wwand used 1/2/3 for home/roaming/partner, which only worked for the home
+// case by accident — a real modem reports home=3, so the old 3==PARTNER check
+// matched — and would have misclassified roaming (4). Now correct.)
+export const REGISTER_STATE_DEREGISTERED = 1;
+export const REGISTER_STATE_SEARCHING = 2;
+export const REGISTER_STATE_HOME = 3;
+export const REGISTER_STATE_ROAMING = 4;
+export const REGISTER_STATE_PARTNER = 5;
+export const REGISTER_STATE_DENIED = 6;
 
 // MbimPacketServiceAction / State
 export const PACKET_SERVICE_ATTACH = 0;
 export const PACKET_SERVICE_STATE_ATTACHED = 2;
+
+// MbimRadioSwitchState
+export const RADIO_STATE_OFF = 0;
+export const RADIO_STATE_ON = 1;
+
+// MBIM RSSI coding: index 0..31 -> -113..-51 dBm (step 2); 99 = unknown.
+export const RSSI_UNKNOWN = 99;
+
+// --- v2 Signal State custom decode ------------------------------------------
+// The MBIMEx v2 Signal State (basic-connect service, same CID 11 as v1) appends
+// an ms-struct-array of MbimRsrpSnrInfo {Rsrp,Snr,RsrpThreshold,SnrThreshold,
+// SystemType} — five guint32 each — after the v1 fixed fields. ms-struct-array
+// (an [offset,size] pointer to a [count][elems] region) is not expressible in
+// the InformationBuffer codec vocabulary, so decode the raw buffer here.
+// Verified vs libmbim data/mbim-service-ms-basic-connect-v2.json.
+function _u32(buf, p)
+{
+	return (p + 4 <= length(buf)) ? struct.unpack('<I', substr(buf, p, 4))[0] : 0;
+}
+
+export function decode_signal_state_v2(info)
+{
+	let res = {
+		rssi:                     _u32(info, 0),
+		error_rate:               _u32(info, 4),
+		signal_strength_interval: _u32(info, 8),
+		rssi_threshold:           _u32(info, 12),
+		error_rate_threshold:     _u32(info, 16),
+		rsrp_snr:                 [],
+	};
+
+	// RsrpSnr ms-struct-array pointer at offset 20 (offset + size)
+	let ptr = _u32(info, 20);
+
+	if (ptr > 0 && ptr + 4 <= length(info)) {
+		let count = _u32(info, ptr);
+		let o = ptr + 4;
+
+		for (let i = 0; i < count && o + 20 <= length(info); i++, o += 20)
+			push(res.rsrp_snr, {
+				rsrp:        _u32(info, o),
+				snr:         _u32(info, o + 4),
+				system_type: _u32(info, o + 16),   // MbimDataClass bitmask
+			});
+	}
+
+	return res;
+}
 
 export const service = SERVICE_UUID;
 
@@ -111,6 +167,25 @@ export const commands = {
 			},
 		},
 
+		// MbimRadioSwitchState hardware/software radio state (CID 3).
+		RADIO_STATE: {
+			cid: 3,
+			set: { radio_state: 'u32' },
+			response: { hw_radio_state: 'u32', sw_radio_state: 'u32' },
+			notification: { hw_radio_state: 'u32', sw_radio_state: 'u32' },
+		},
+
+		// Visible (scanned) providers (CID 8). The response is ProvidersCount +
+		// a ref-struct-array of MbimProvider (variable structs carrying
+		// ProviderId/ProviderName strings) which the InformationBuffer codec
+		// cannot express; only the leading count is decoded (no op consumes the
+		// provider list — defined for parity / manual callers).
+		VISIBLE_PROVIDERS: {
+			cid: 8,
+			query: { action: 'u32' },   // MbimVisibleProvidersAction
+			response: { providers_count: 'u32' },
+		},
+
 		SIGNAL_STATE: {
 			cid: 11,
 			response: {
@@ -121,6 +196,16 @@ export const commands = {
 				rssi: 'u32', error_rate: 'u32', signal_strength_interval: 'u32',
 				rssi_threshold: 'u32', error_rate_threshold: 'u32',
 			},
+		},
+
+		// MBIMEx v2 Signal State (same CID 11) with per-RAT RSRP/SNR. Uses a
+		// custom decode (see decode_signal_state_v2) since the ms-struct-array
+		// tail is not codec-expressible. Look up by name — the shared CID is
+		// resolved per-name in mbim_client.command.
+		SIGNAL_STATE_V2: {
+			cid: 11,
+			query: {},
+			decode: decode_signal_state_v2,
 		},
 
 		CONNECT: {

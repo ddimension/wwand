@@ -115,11 +115,17 @@ export function create(hub, hooks)
 			if (hooks?.on_success)
 				hooks.on_success(self);
 
-			// responses use the 'response' field layout
-			let data = mbim.decode_info(cmd.response ?? {}, msg.info);
+			// responses use the 'response' field layout, unless the command
+			// supplies a custom `decode(info)` — needed for MBIMEx buffers whose
+			// ms-struct/ms-struct-array layout the InformationBuffer codec can't
+			// express (Base Stations Info, v2 Signal State). The raw info buffer
+			// is passed as a third argument for callers that want it.
+			let data = (type(cmd.decode) == 'function')
+				? cmd.decode(msg.info)
+				: mbim.decode_info(cmd.response ?? {}, msg.info);
 
 			if (cb)
-				cb(null, data);
+				cb(null, data, msg.info);
 		}, opts?.timeout);
 	};
 
