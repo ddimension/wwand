@@ -28,6 +28,83 @@ import * as netlink from './netlink.uc';
 //   reopen_next?:    () => …  continuation when self.at is already open
 //                             (defaults to next)
 // }
+// watch_driver(o): the adaptive "fast telemetry" cadence shared by the QMI and
+// MBIM modem state machines. While a consumer polls (modem_signal/modem_cells
+// over ubus), it runs o.refresh at most once per min_interval, NON-OVERLAPPING
+// (the next cycle is scheduled only after the previous refresh finishes, so the
+// cadence stretches under modem load), and decays back to idle `decay` ms after
+// the last poll. This was copied verbatim into both modems ("Mirrors modem.uc")
+// differing only in the liveness predicate and the refresh body.
+//
+//   o.alive   () => bool   — control channel up (self.nas != null / self.mbim)
+//   o.ready   () => bool   — self.state == 'READY'
+//   o.refresh (done) => …  — run one refresh cycle; call done() EXACTLY ONCE
+//                            when it finishes or bails (e.g. the channel
+//                            vanished mid-cycle). done() reschedules the next
+//                            cycle iff still watched and alive, else goes idle —
+//                            so a bail with !alive() stops the loop, exactly as
+//                            the old inline `fast_running = false` did.
+//   o.min_interval?  ms (default 1000) — never poll faster than this
+//   o.decay?         ms (default 6000) — idle-out delay after the last watch()
+//
+// Returns { watch(), stop() }: watch() is what the daemon calls on each
+// modem_signal/modem_cells poll; stop() is called from teardown.
+export function watch_driver(o)
+{
+	let min_interval = o.min_interval ?? 1000;
+	let decay = o.decay ?? 6000;
+
+	let decay_timer = null, fast_timer = null;
+	let active = false, running = false;
+
+	// mutually-referencing arrows -> forward-declare (ucode TDZ trap)
+	let tick, finish;
+
+	// the reschedule/finish handler handed to o.refresh.
+	finish = () => {
+		if (active && o.alive())
+			fast_timer = uloop.timer(min_interval, tick);
+		else
+			running = false;
+	};
+
+	tick = () => {
+		fast_timer = null;
+
+		if (!active || !o.ready() || !o.alive()) {
+			running = false;
+			return;
+		}
+
+		running = true;
+		o.refresh(finish);
+	};
+
+	return {
+		watch: function() {
+			active = true;
+
+			if (decay_timer)
+				decay_timer.cancel();
+
+			decay_timer = uloop.timer(decay, () => {
+				active = false;
+				decay_timer = null;
+			});
+
+			// kick an immediate refresh so the first poll already returns fresh data
+			if (!running && o.ready() && o.alive())
+				tick();
+		},
+
+		stop: function() {
+			if (decay_timer) { decay_timer.cancel(); decay_timer = null; }
+			if (fast_timer)  { fast_timer.cancel();  fast_timer = null; }
+			active = running = false;
+		},
+	};
+}
+
 // close_at(self): tear down both AT engines opened by open_at (the control
 // channel and, when distinct, the dedicated telemetry channel). Idempotent.
 export function close_at(self)

@@ -46,9 +46,8 @@ const TIMING_DEFAULTS = {
 
 // fast "watch" mode timing (mirrors modem.uc): while a consumer (the LuCI status
 // page) polls modem_signal/modem_cells, refresh at most once a second and revert
-// to the slow telemetry timer a few seconds after polling stops.
-const WATCH_MIN_INTERVAL = 1000;   // never faster than 1/s
-const WATCH_DECAY = 6000;          // stop the fast loop this long after a poll
+// to the slow telemetry timer a few seconds after polling stops. The adaptive
+// cadence itself lives in modem_common.watch_driver (shared with modem.uc).
 
 // Null out the i16 signal metrics QMI reports as -32768 ("not available") on
 // serving + neighbour cells (the passthrough cell path decodes the same NAS TLVs
@@ -133,8 +132,7 @@ export function create(opts)
 
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, settle_timer = null, at_drain_timer = null, telemetry_timer = null;
-	let watch_decay_timer = null, fast_timer = null;
-	let watch_active = false, fast_running = false;
+	let telem_watch;   // modem_common.watch_driver (adaptive fast telemetry loop)
 
 	let emit = (event, data) => {
 		if (deps.on_event)
@@ -680,48 +678,29 @@ export function create(opts)
 	// Fast "watch" loop: while a consumer polls modem_signal/modem_cells, refresh
 	// the LuCI-visible data (signal + cells + CA) at most once a second,
 	// non-overlapping so the cadence stretches when the modem is busy. Reverts to
-	// the slow telemetry timer WATCH_DECAY after polling stops. Mirrors modem.uc.
-	let fast_tick;   // forward-declared: it reschedules itself
-	fast_tick = () => {
-		fast_timer = null;
-
-		if (!watch_active || self.state != 'READY' || !self.mbim) {
-			fast_running = false;
-			return;
-		}
-
-		fast_running = true;
-
+	// the slow telemetry timer after polling stops. The adaptive cadence lives in
+	// modem_common.watch_driver (shared with modem.uc); this is just the MBIM
+	// refresh body. done() is called exactly once per cycle (finish or bail).
+	let refresh_fast = (done) => {
 		self._refresh_signal(() => {
-			if (!self.mbim) { fast_running = false; return; }
+			if (!self.mbim)
+				return done();
 
 			self._refresh_cells(() => self._refresh_ca(() => {
 				emit_telemetry();
-
-				if (watch_active && self.mbim)
-					fast_timer = uloop.timer(WATCH_MIN_INTERVAL, fast_tick);
-				else
-					fast_running = false;
+				done();
 			}));
 		});
 	};
 
+	telem_watch = modem_common.watch_driver({
+		alive:   () => self.mbim != null,
+		ready:   () => self.state == 'READY',
+		refresh: refresh_fast,
+	});
+
 	// called by the daemon whenever modem_signal / modem_cells is queried
-	self.watch = function() {
-		watch_active = true;
-
-		if (watch_decay_timer)
-			watch_decay_timer.cancel();
-
-		watch_decay_timer = uloop.timer(WATCH_DECAY, () => {
-			watch_active = false;
-			watch_decay_timer = null;
-		});
-
-		// kick an immediate refresh so the first poll already returns fresh data
-		if (!fast_running && self.state == 'READY' && self.mbim)
-			fast_tick();
-	};
+	self.watch = () => telem_watch.watch();
 
 	// Slow telemetry loop (the stats interval): the baseline v1 SIGNAL_STATE
 	// query (kept working for modems without V2 / passthrough) plus the richer
@@ -804,14 +783,12 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
-		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, telemetry_timer,
-		                watch_decay_timer, fast_timer ])
+		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, telemetry_timer ])
 			if (t)
 				t.cancel();
 
 		retry_timer = reg_timer = settle_timer = at_drain_timer = telemetry_timer = null;
-		watch_decay_timer = fast_timer = null;
-		watch_active = fast_running = false;
+		telem_watch.stop();
 
 		modem_common.close_at(self);
 

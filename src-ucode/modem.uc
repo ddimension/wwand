@@ -314,8 +314,7 @@ export function create(opts)
 	let at_opts = opts.at ?? {};
 	let at_drain_timer = null;
 	let telemetry_timer = null;
-	let watch_decay_timer = null, fast_timer = null;
-	let watch_active = false, fast_running = false;
+	let telem_watch;   // modem_common.watch_driver (adaptive fast telemetry loop)
 
 	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_validate, step_attach_profile, step_register;
 
@@ -1344,8 +1343,6 @@ export function create(opts)
 	// the modem is busy (load-adaptive). Reverts to the slow telemetry timer a
 	// few seconds after polling stops. Signal also keeps arriving via the NAS
 	// SIGNAL_INFO indication subscription between refreshes.
-	const WATCH_MIN_INTERVAL = 1000;   // never faster than 1/s
-	const WATCH_DECAY = 6000;          // stop after this long without a poll
 	const NEIGH_HOLD = 30;             // s: hold last-seen neighbours over drops
 
 	// store a fresh GET_CELL_LOCATION_INFO result. The modem reports the intra-
@@ -1368,50 +1365,47 @@ export function create(opts)
 		self.cells = data;
 	};
 
-	let fast_tick;   // forward-declared: it reschedules itself
-	fast_tick = () => {
-		fast_timer = null;
-
-		if (!watch_active || self.state != 'READY' || !self.nas) {
-			fast_running = false;
-			return;
-		}
-
-		fast_running = true;
-
-		// signal first, then cells; scheduling the next cycle only after both
-		// complete keeps it non-overlapping (adaptive to modem load)
+	// one fast-telemetry refresh cycle: signal first, then cells, then (while
+	// watched) CA + data-system mode, then emit. Calls done() exactly once when
+	// the cycle finishes or bails (channel gone) — the shared watch_driver uses
+	// done() to schedule the next cycle non-overlapping. The adaptive cadence /
+	// decay / teardown all live in modem_common.watch_driver now.
+	let refresh_fast = (done) => {
 		self.nas.request('GET_SIGNAL_INFO', {}, (serr, sdata) => {
 			// keep last-known on an empty/invalid answer instead of blanking it
 			if (!serr && tlv.has_payload(sdata))
 				self.signal = sdata;
 
-			if (!self.nas) { fast_running = false; return; }
+			if (!self.nas)
+				return done();
 
 			self.nas.request('GET_CELL_LOCATION_INFO', {}, (cerr, cdata) => {
 				if (!cerr && tlv.has_payload(cdata))
 					store_cells(cdata);
 
-				let done = () => {
+				let after = () => {
 					if (self.cells)
 						emit('telemetry', { cells: self.cells, signal: self.signal, reg: self.reg });
 
-					if (watch_active && self.nas)
-						fast_timer = uloop.timer(WATCH_MIN_INTERVAL, fast_tick);
-					else
-						fast_running = false;
+					done();
 				};
 
 				// per-carrier CA info, then the data-system mode (NSA/SA/LTE) —
 				// both only while watched (LuCI open). Extracted into named
 				// methods to keep this poll pyramid shallow.
 				if (!self.cells)
-					return done();
+					return after();
 
-				self._fetch_ca_info(() => self._determine_data_mode(done));
+				self._fetch_ca_info(() => self._determine_data_mode(after));
 			});
 		});
 	};
+
+	telem_watch = modem_common.watch_driver({
+		alive:   () => self.nas != null,
+		ready:   () => self.state == 'READY',
+		refresh: refresh_fast,
+	});
 
 	// carrier-aggregation carriers for the status page: prefer QMI
 	// GET_LTE_CPHY_CA_INFO, fall back to AT+QCAINFO, cache the choice per modem
@@ -1475,21 +1469,7 @@ export function create(opts)
 	};
 
 	// called by the daemon whenever modem_signal / modem_cells is queried
-	self.watch = function() {
-		watch_active = true;
-
-		if (watch_decay_timer)
-			watch_decay_timer.cancel();
-
-		watch_decay_timer = uloop.timer(WATCH_DECAY, () => {
-			watch_active = false;
-			watch_decay_timer = null;
-		});
-
-		// kick an immediate refresh so the first poll already returns fresh data
-		if (!fast_running && self.state == 'READY' && self.nas)
-			fast_tick();
-	};
+	self.watch = () => telem_watch.watch();
 
 	self._start_telemetry = function() {
 		if (telemetry_timer)
@@ -1658,14 +1638,12 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
-		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, telemetry_timer,
-		                watch_decay_timer, fast_timer ])
+		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, telemetry_timer ])
 			if (t)
 				t.cancel();
 
 		retry_timer = reg_timer = settle_timer = at_drain_timer = telemetry_timer = null;
-		watch_decay_timer = fast_timer = null;
-		watch_active = fast_running = false;
+		telem_watch.stop();
 
 		modem_common.close_at(self);
 
