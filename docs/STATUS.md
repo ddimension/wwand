@@ -1,8 +1,42 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-23. 16 test suites green (~510 checks). Committed through
-the MBIM datapath/loss-detection/mockhub work. Uncommitted: a robustness pass —
-MBIM zero-rx watchdog + `hold_max` UCI option (commit on request)._
+_Last updated: 2026-07-23. 23 test suites green (~730 checks); all committed.
+Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## Multi-backend + parity work (recent, all committed)
+
+wwand now has **three control backends** selected per modem by
+`discovery.resolve_control` (cdc-wdm→qmi/mbim, cdc_ncm/cdc_ether→ncm, serial-only
+→ppp with a one-time usbnet mode-switch), plus hotplug rediscovery
+(`files/wwand.hotplug.net`).
+
+- **MBIM → full CDC telemetry parity (HW-verified, EG06/246).** Shared AT
+  bring-up (`modem_common.open_at`); a **QMI-over-MBIM passthrough** shim
+  (`qmi_over_mbim.uc`) tunnels the whole QMI stack over the MBIM channel; native
+  MBIM decode (`mbim_backend.uc` / MS Basic Connect Extensions); per-capability
+  `backend.choose` (passthrough-first — reuses the trusted QMI decode; native
+  MBIM as fallback). Live signal/cells/CA/data-mode over MBIM without disrupting
+  the session. **Rule: never CTL SYNC over the passthrough** (memory
+  `qmi-over-mbim-passthrough`).
+- **NCM backend** (`modem_ncm.uc`/`context_ncm.uc`) — AT-controlled,
+  cdc_ncm/cdc_ether datapath, IP via CGCONTRDP, multi-vendor dial (per-modem
+  resolved: Quectel QNETDEVCTL→CGACT fallback, MeiG, Huawei, …), QICSGP auth.
+  Core AT HW-validated on the RG650E; full ECM end-to-end HW test blocked
+  (memory `ncm-backend-status`). Telemetry parity (multi-vendor) in progress.
+- **Config parity + network selection** — `modem_get/set_settings` now protocol-
+  neutral (MBIM via the passthrough NAS, HW-verified); `modem_scan` +
+  `modem_set_network_selection` (NAS NETWORK_SCAN / AT COPS).
+- **Init config validation** — `modem.validate_config` compares the live modem to
+  config + `modem_quirks.uc`, surfaces `config_warnings` on status (gated
+  `auto_correct`, default off).
+- **LuCI settings editor** — band pickers, network-selection scan panel,
+  cell-lock editing, config-warnings banner.
+- **Empty/unset APN** — read the SIM/modem-provisioned APN, log it, use it (no
+  blank write); attach APN reported on registration errors.
+
+---
+
+_Earlier robustness pass (committed): MBIM zero-rx watchdog + `hold_max` UCI._
 
 ## Where we are
 
