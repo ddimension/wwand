@@ -229,7 +229,14 @@ export function parse_qeng_servingcell(lines)
 
 const ROLE_PREFERENCE = { at: 3, at2: 2, ppp: 1 };
 
-export function find_tty(fx, device, tty_override)
+// find_tty(fx, device, tty_override, base_override):
+//   device        a cdc-wdm control device ('/dev/cdc-wdmN'); the USB parent is
+//                 derived from it. May be null when base_override is supplied.
+//   base_override an explicit sysfs USB-device base to enumerate tty siblings
+//                 under (used by discovery.uc for NCM/PPP modems, which have no
+//                 cdc-wdm to anchor on — the base is the netdev's or usb_path's
+//                 USB device dir).
+export function find_tty(fx, device, tty_override, base_override)
 {
 	if (tty_override != null && tty_override != '')
 		return tty_override;
@@ -241,8 +248,15 @@ export function find_tty(fx, device, tty_override)
 		if (substr(board, 0, length(b.prefix)) == b.prefix)
 			return b.tty;
 
-	let name = substr(device, rindex(device, '/') + 1);
-	let base = sprintf('/sys/class/usbmisc/%s/device/..', name);
+	let base = base_override;
+
+	if (base == null) {
+		if (device == null)
+			return null;   // no cdc-wdm anchor and no explicit base
+
+		let name = substr(device, rindex(device, '/') + 1);
+		base = sprintf('/sys/class/usbmisc/%s/device/..', name);
+	}
 
 	// enumerate tty siblings below the same USB device
 	let tty_paths = fx.glob(sprintf('%s/*/tty*', base)) ?? [];

@@ -9,6 +9,8 @@ export function create(opts)
 	let self = {
 		files: { ...(opts?.files ?? {}) },
 		present: { ...(opts?.present ?? {}) },
+		links: { ...(opts?.links ?? {}) },   // sysfs symlink targets (readlink)
+		dirs: { ...(opts?.dirs ?? {}) },     // directory listings (lsdir)
 		actions: [],
 		rc: opts?.rc ?? {},        // 'ip link add ...' -> nonzero rc override
 		qmimux_count: 0,
@@ -16,6 +18,19 @@ export function create(opts)
 
 	self.read = function(path) {
 		return self.files[path] ?? null;
+	};
+
+	// sysfs helpers used by discovery.uc (readlink/lsdir/access)
+	self.readlink = function(path) {
+		return self.links[path] ?? null;
+	};
+
+	self.lsdir = function(path) {
+		return self.dirs[path] ?? null;
+	};
+
+	self.access = function(path) {
+		return self.present[path] == true || self.files[path] != null;
 	};
 
 	self.write = function(path, data) {

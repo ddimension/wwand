@@ -60,6 +60,9 @@ define Package/wwand/install
 	$(INSTALL_CONF) ./files/wwand.config $(1)/etc/config/wwand
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/usbmisc
 	$(INSTALL_DATA) ./files/wwand.hotplug $(1)/etc/hotplug.d/usbmisc/20-wwand
+	# net hotplug: NCM modems (no cdc-wdm) + re-enumeration after a mode switch
+	$(INSTALL_DIR) $(1)/etc/hotplug.d/net
+	$(INSTALL_DATA) ./files/wwand.hotplug.net $(1)/etc/hotplug.d/net/20-wwand
 endef
 
 define Package/wwand/conffiles

@@ -8,6 +8,11 @@
 //   emit_event,                   // (type, data) -> ubus event broadcast
 //   resolve_modem_device,         // (modem_cfg) -> '/dev/cdc-wdmX' | null
 //   resolve_netdev,               // (modem_cfg, device) -> 'wwan0' | null
+//   resolve_control,              // (modem_cfg) -> { protocol, device, netdev,
+//                                 //   tty } | null — the control-type decision
+//                                 //   (qmi/mbim/ncm/ppp), incl. NCM (no cdc-wdm)
+//   modeswitch,                   // (opts, cb) one-time usbnet mode switch for
+//                                 //   a PPP-only modem (serial port only)
 // }
 
 'use strict';
@@ -360,37 +365,118 @@ export function create(opts)
 		}
 	};
 
-	let start_modem = (name, cfg, muxinfo) => {
-		let device = cfg.device;
+	// a PPP-only modem (only a serial port — no cdc-wdm, no cdc_ncm/cdc_ether
+	// netdev) is mode-switched ONCE to a richer usbnet mode, then left for
+	// hotplug to rebuild once it re-enumerates. We never build a modem object for
+	// it (there is no PPP dialer). Guarded per-modem so a switch that does not
+	// take (or an unsupported modem) never loops.
+	let modeswitch_tried = {};
 
-		if (!device && deps.resolve_modem_device)
-			device = deps.resolve_modem_device(cfg);
+	let try_modeswitch = (name, entry, tty) => {
+		log('warn', sprintf('modem %s: only a serial port present (ppp), no rich control interface', name));
+
+		if (modeswitch_tried[name]) {
+			log('info', sprintf('modem %s: usbnet mode switch already attempted, waiting for re-enumeration', name));
+			return;
+		}
+
+		modeswitch_tried[name] = true;
+
+		if (!deps.modeswitch) {
+			log('warn', sprintf('modem %s: no mode-switch backend, leaving unmanaged', name));
+			return;
+		}
+
+		if (!tty) {
+			log('warn', sprintf('modem %s: no AT port to mode-switch on, leaving unmanaged', name));
+			return;
+		}
+
+		log('notice', sprintf('modem %s: attempting one-time usbnet mode switch on %s', name, tty));
+
+		deps.modeswitch({
+			tty: tty,
+			log: (l, m) => log(l, sprintf('modem %s: modeswitch: %s', name, m)),
+		}, (err, res) => {
+			if (err) {
+				log('warn', sprintf('modem %s: usbnet mode switch failed: %J', name, err));
+				return;
+			}
+
+			if (res?.switched)
+				log('notice', sprintf('modem %s: usbnet mode switch applied (%s), modem re-enumerating', name, res.target ?? '?'));
+			else
+				log('notice', sprintf('modem %s: already in a rich usbnet mode, nothing to switch', name));
+			// the reset re-enumerates -> the usbmisc/net hotplug fires ->
+			// self.hotplug('add') rebuilds this modem under the new driver.
+		});
+	};
+
+	let start_modem = (name, cfg, muxinfo) => {
+		// decide how this modem is controlled (qmi/mbim/ncm/ppp): device, netdev,
+		// tty. resolve_control classifies EVERY modem, including NCM modems that
+		// have no cdc-wdm at all.
+		let control = deps.resolve_control ? deps.resolve_control(cfg) : null;
+
+		// legacy dep path (callers that inject resolve_modem_device/
+		// resolve_protocol instead of resolve_control): synthesize an equivalent
+		// control record for a cdc-wdm modem.
+		if (!control) {
+			let device = cfg.device;
+
+			if (!device && deps.resolve_modem_device)
+				device = deps.resolve_modem_device(cfg);
+
+			if (device) {
+				let proto = cfg.protocol;
+
+				if (proto == null || proto == 'auto')
+					proto = (deps.resolve_protocol ? deps.resolve_protocol(device) : null) ?? 'qmi';
+
+				control = { protocol: proto, device: device, netdev: cfg.netdev, tty: cfg.tty };
+			}
+		}
 
 		let entry = {
 			cfg: cfg,
-			device: device,
-			netdev: cfg.netdev,
+			device: control?.device ?? cfg.device,
+			netdev: control?.netdev ?? cfg.netdev,
 			muxinfo: muxinfo,
 			modem: null,
+			protocol: control?.protocol,
 		};
 
 		self.modems[name] = entry;
 
-		if (!device) {
-			log('warn', sprintf('modem %s: device not present yet, waiting for hotplug', name));
+		// presence gate: NCM needs a datapath netdev, PPP needs a serial port,
+		// QMI/MBIM need a cdc-wdm control device.
+		let present = control && (
+			control.protocol == 'ncm' ? control.netdev != null :
+			control.protocol == 'ppp' ? control.tty != null :
+			control.device != null);
+
+		if (!present) {
+			log('warn', sprintf('modem %s: control interface not present yet, waiting for hotplug', name));
 			return;
 		}
 
-		if (!entry.netdev && deps.resolve_netdev)
-			entry.netdev = deps.resolve_netdev(cfg, device);
+		// PPP-only: mode-switch and wait for re-enumeration; do not build a modem.
+		if (control.protocol == 'ppp')
+			return try_modeswitch(name, entry, control.tty);
 
-		// the bound driver selects QMI vs MBIM (config 'protocol' can pin it)
-		let proto = cfg.protocol;
-
-		if (proto == null || proto == 'auto')
-			proto = (deps.resolve_protocol ? deps.resolve_protocol(device) : null) ?? 'qmi';
+		let device = entry.device;
+		let proto = control.protocol ?? 'qmi';
 
 		entry.protocol = proto;
+
+		// AT-driven backends (NCM) and the AT side channel resolve their tty from
+		// the (possibly absent) control device — pin the resolved tty so they use
+		// the one discovery found (from the netdev's USB parent for NCM).
+		if (control.tty && !cfg.tty)
+			cfg.tty = control.tty;
+
+		if (!entry.netdev && deps.resolve_netdev)
+			entry.netdev = deps.resolve_netdev(cfg, device);
 
 		let ep_id = cfg.ep_id;
 
@@ -1119,10 +1205,17 @@ export function create(opts)
 		}
 		else if (action == 'remove') {
 			for (let name, entry in self.modems) {
-				if (entry.device && index(entry.device, devname) >= 0 && entry.modem) {
+				// match by cdc-wdm control device (qmi/mbim) OR by datapath netdev
+				// name (NCM modems have no control device — a modem reboot arrives
+				// as a net remove of the cdc_ncm/cdc_ether interface).
+				let hit = (entry.device && index(entry.device, devname) >= 0) ||
+				          (entry.netdev && entry.netdev == devname);
+
+				if (hit && entry.modem) {
 					entry.modem.stop();
 					entry.modem = null;
 					entry.device = entry.cfg.device;   // reset to configured value
+					entry.netdev = entry.cfg.netdev;
 
 					// detach this modem's contexts: their ctx objects are bound
 					// to the dead modem and queued activations would wait on it

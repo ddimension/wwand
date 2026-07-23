@@ -1,0 +1,31 @@
+# wwand — notify the daemon about modem datapath netdev add/remove.
+# Installed as /etc/hotplug.d/net/20-wwand.
+#
+# This is what makes NCM modems (cdc_ncm/cdc_ether/rndis_host — no cdc-wdm)
+# discoverable, and lets a modem that re-enumerates in a different mode (after a
+# usbnet mode switch or a reboot) be re-detected. cdc-wdm-backed netdevs
+# (qmi_wwan/cdc_mbim) are included too so a mode flip either way is caught.
+
+[ -n "$INTERFACE" ] || return 0 2>/dev/null || exit 0
+
+drv=""
+if [ -e "/sys/class/net/$INTERFACE/device/driver" ]; then
+	drv="$(basename "$(readlink -f "/sys/class/net/$INTERFACE/device/driver")")"
+fi
+
+case "$drv" in
+	cdc_ncm|cdc_ether|rndis_host|qmi_wwan|cdc_mbim) ;;
+	*)
+		# driver unreadable (e.g. on remove the sysfs node is already gone) —
+		# fall back to the interface names modems commonly enumerate as, so a
+		# modem-reboot 'remove' still reaches the daemon
+		case "$INTERFACE" in
+			wwan*|usb*|ncm*) ;;
+			*) return 0 2>/dev/null || exit 0 ;;
+		esac
+		;;
+esac
+
+ubus -t 3 call wwand hotplug "{\"action\":\"$ACTION\",\"device\":\"$INTERFACE\"}" 2>/dev/null
+
+return 0 2>/dev/null || exit 0

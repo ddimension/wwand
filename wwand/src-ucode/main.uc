@@ -19,6 +19,7 @@ import * as config from 'wwand.config';
 import * as daemon_mod from 'wwand.daemon';
 import * as ubus_api from 'wwand.ubus';
 import * as discovery from 'wwand.discovery';
+import * as modeswitch from 'wwand.modeswitch';
 import * as netlink from 'wwand.netlink';
 import ctl_schema from 'wwand.codec.schema.ctl';
 import dms_schema from 'wwand.codec.schema.dms';
@@ -211,6 +212,11 @@ function run_daemon()
 			resolve_modem_device: discovery.resolve_modem_device,
 			resolve_netdev: discovery.resolve_netdev,
 			resolve_protocol: discovery.protocol_of,
+			// the "how is this modem controlled" decision (qmi/mbim/ncm/ppp),
+			// including NCM modems that have no cdc-wdm control device
+			resolve_control: discovery.resolve_control,
+			// one-time usbnet mode switch for a PPP-only modem (serial port only)
+			modeswitch: (o, cb) => modeswitch.attempt(o, cb),
 			resolve_ep_id: (cfg, device, netdev) =>
 				netdev ? netlink.ep_iface_number(netdev) : null,
 			kick_interface: (interface) =>
