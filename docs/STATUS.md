@@ -1,7 +1,9 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-22. All work committed + pushed to origin; working tree
-clean; 15 test suites green (~480 checks)._
+_Last updated: 2026-07-23. 16 test suites green (~505 checks). Uncommitted
+working tree: MBIM datapath docs, MBIM transient-loss detection, deactivate-
+before-retry, a qmi_backend `stop_network` extraction, and a new MBIM mockhub +
+`test_context_mbim` integration suite (commit on request)._
 
 ## Where we are
 
@@ -47,8 +49,42 @@ plan in `docs/backend-interface.md`.
   vocabulary (recovery `on_proto_error/success`, `counters.proto_errors`; status
   keeps a `qmi_errors` alias). Adoption path already covered by test_daemon (#4);
   the mock-backend core tests belong to Phase 1 (no core to plug into yet).
-- **Phase 1 (next):** split `modem.uc`/`context.uc` into the shared core + a QMI
-  backend (mockhub suites then validate both). Big lift, test-protected.
+- **Phase 1 (in progress):** `qmi_backend.uc` now holds the QMI *leaf* ops —
+  modem `read_info`/`get_ca`/`get_data_mode`/`set_opmode`/`get_reg_detail`, and
+  context `get_channel_rates`/`get_bearer`/`get_packet_stats`/`stop_network`.
+  These were the clean query→normalize→return and single-shot teardown ops.
+  **Remaining piece — the activation core** (`context.up`: family loop, CID-per-
+  family alloc, `BIND_MUX_DATA_PORT`/`SET_IP_FAMILY`/`START_NETWORK`, PDH,
+  `PACKET_SERVICE_STATUS_IND`, settings shaping). **Re-evaluated 2026-07-23 —
+  de-prioritized, and here's why:**
+  - *Design is clear* (was not the blocker): both contexts already emit the
+    neutral `{ipv4,ipv6,mtu}` settings shape + neutral events, and the daemon
+    drives them polymorphically. The clean contract is a *thick*
+    `backend.connect(config, profile, hooks) → settings + loss-signal` — QMI
+    owns family-loop/CID/mux-bind/START_NETWORK/241-reclaim, MBIM owns
+    CONNECT+IP_CONFIGURATION, the core owns state machine / gen-guard / prepare /
+    stats / settings-poll / emit / reconnect.
+  - *But low value, high risk:* the two state machines already share the neutral
+    contract at their edges; the remaining activation *mechanism* is
+    legitimately divergent (QMI = N WDS calls/family + PDH/mux; MBIM = one
+    CONNECT). Forcing one core over that adds an abstraction fitting neither.
+    And `test_context` protects only the QMI core — MBIM has stub unit tests but
+    **no mockhub integration**, so a merge would run MBIM through the unified
+    path with no net.
+  - *Do it when it pays for itself:* the AT-only 3rd backend (a core over 3
+    backends earns the abstraction) or a concrete divergence bug.
+  - **Higher-value prerequisite — DONE:** `tests/lib/mbim_mockhub.uc` (an MBIM
+    control-channel mock speaking the real framing) + `test_context_mbim.uc`
+    drive `modem_mbim`+`context_mbim` end-to-end (bring-up → connect → IP decode
+    → CONNECT-deactivate loss → reconnect → REGISTER deregister/suspend). MBIM
+    now has the same integration net QMI has via `test_context`. This gates any
+    future core merge; the merge itself stays deferred per the above.
+  - Codec note surfaced while building the mock: **`mbim.encode_info` can't
+    produce count+offset array responses** (or `ref-ipv4` gateways) — it's
+    asymmetric with the fixed `decode_info`. Harmless in prod (arrays appear
+    only in *responses*, which wwand decodes, never encodes); the mock hands
+    such buffers in raw via a `{ __raw }` handler escape. Worth making symmetric
+    if wwand ever needs to *emit* an array field.
 - Phases 2–5: MBIM as a backend, daemon reach-ins behind ops, generalize
   `backend.choose`, AT-only backend. See the doc.
 
@@ -63,28 +99,44 @@ plan in `docs/backend-interface.md`.
   wwand orchestrates release→flash→re-adopt, like lpac). Start with ①.
 - **`hold_max` UCI option** — currently a 90 s default; the `timing` struct is
   not plumbed through `main.uc` in production (tests set it via TIMING).
-- **MBIM** — first validated on real HW (EG06/246): control plane works
-  (open/caps/SIM/**registration**) and the data session now **connects with the
-  correct IP** after fixing the IP_CONFIGURATION decode (count+offset arrays —
-  it had only ever been host-tested against the wrong layout; the RG650E rejects
-  MBIM_OPEN so it never ran). Remaining: after a *live* QMI→MBIM protocol switch,
-  netifd doesn't bind the IP (interface stays down). Two datapath-integration
-  issues, both confirmed on a fresh boot into MBIM (246):
-  1. **VLAN not declared to netifd.** The config `device 'wwan0m1'` is the QMAP
-     name; under MBIM it's an 802.1q VLAN of wwan0. netifd reports NO_DEVICE
-     until the VLAN is declared as a `config device` (type 8021q, ifname wwan0,
-     vid 1) — then `available:true`. Fix belongs in the MBIM datapath / migrate
-     (emit the device section, or use netifd's `wwan0.1` naming, or mark the
-     wwand-created VLAN external).
-  2. **cdc_mbim carrier flapping (chicken-and-egg).** The raw wwan0 carrier
-     follows the MBIM session state; netifd waits for link-up before running the
-     proto handler (which is what connects the session), so wwan0/wwan0m1 flap
-     up/down and the interface never settles. The MBIM datapath/proto flow needs
-     to establish the session (carrier) independently of netifd's link wait.
-  Also latent: a connect that fails after CONNECT activated leaves the context
-  activated, so the retry hits MBIM status 13 (max activated contexts) —
-  deactivate before retry. (246 currently carries an ad-hoc `config device
-  mbimvlan` from this investigation.)
+- **MBIM — data plane now WORKS end-to-end on real HW (EG06/246).** Config
+  `device wwan0` → compat parses mux_id 0 → MBIM **session 0** → raw `wwan0`
+  netdev. netifd claims plain `wwan0` cleanly, the `qmi` shim applies the IP +
+  default route, real public IP, ping works. Achieved with **zero wwand code
+  changes** — raw wwan0/session 0, **no VLAN, no `config device`, no
+  force_link**. The IP_CONFIGURATION decode fix (count+offset arrays) still
+  applies; the RG650E rejects MBIM_OPEN so MBIM stays EG06-only.
+  - The long "MBIM won't bind / VLAN / carrier flapping" saga was **two
+    246-specific deploy artifacts, not code** — see auto-memory
+    `mbim-datapath-findings`:
+    1. Stale `/lib/netifd/proto/qmi-advanced.sh` (old bash dialer) still present;
+       it also `add_protocol qmi` and **won** over wwand's `qmi.sh`, waiting on
+       its own `/tmp/qmi/wwan0/device_initialized` marker. Remove it.
+    2. `qmi.sh` deployed **without +x** (tar dropped the mode) → netifd couldn't
+       exec it → **no `qmi` handler registered** → `proto: none` (up, no L3).
+       `chmod +x` fixes it. The apk pkg is correct (`Makefile:54` INSTALL_BIN);
+       only ad-hoc tar deploys lose it. **Always `chmod +x
+       /lib/netifd/proto/qmi.sh` + `network restart` after a tar deploy.**
+  - The earlier "netifd follows carrier destructively on no_proto_task"
+    conclusion was **wrong** — that flapping was proto-none handler churn.
+  - **Carrier finding:** on cdc_mbim a radio loss does *not* drop the netdev
+    carrier, so netifd never reacts (address/route stay) but data is dead →
+    wwand must detect loss via the **MBIM session/registration state**, not
+    carrier. **Fixed:** `context_mbim.connect_indication` (routed from
+    `modem_mbim` by session id) handles the unsolicited MBIM_CID_CONNECT
+    deactivation — the MBIM analogue of QMI's `PACKET_SERVICE_STATUS_IND` — and
+    emits `down`/`disconnected` into the same daemon reconnect-in-place path.
+    Unit-tested (test_mbim); HW-deploy showed no regression (a real network-side
+    deactivation is hard to trigger on demand — the EG06 ignores AT+CFUN in MBIM
+    mode).
+  - **EG06 MBIM quirk:** AT commands time out in MBIM mode (`AT+CFUN=0/1/?` all
+    `at: timeout`); a `wwand restart` re-inits and recovers radio+session.
+  - **Fixed:** a connect that failed after CONNECT activated used to leave the
+    context activated → retry hit MBIM status 13 (max activated contexts).
+    `context_mbim` now tracks an `activated` flag and DEACTIVATEs in `_fail`
+    before reporting failure (shared `deactivate` helper with `down`). Tested.
+  - (246 is currently in MBIM mode with `network.wan.device='wwan0'`; switch
+    back to QMI needs `device 'wwan0m1'` + `AT+QCFG="usbnet",0`.)
 
 ## Notes
 

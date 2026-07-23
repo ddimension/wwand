@@ -82,7 +82,14 @@ RG650E-EU. **Reflashed often → SSH host key changes** (hence UserKnownHostsFil
 =/dev/null). Root has an **empty password**. OpenWrt build tree at
 `/vol/release/chateau/openwrt/` — do not modify except with explicit permission.
 No sftp/scp on the device → deploy via `tar | ssh` or install the .apk.
-**Always `sync` after a file deploy.** Modem is normally in **QMI mode**
+**Always `sync` after a file deploy.** A tar deploy can **drop the +x bit** on
+`qmi.sh` — netifd then can't exec it, the `qmi` proto handler never registers
+(`ubus call network get_proto_handlers` has no `qmi`), and interfaces fall back
+to `proto: none` (up, no L3 config). After a tar deploy always
+`chmod +x /lib/netifd/proto/qmi.sh` + `/etc/init.d/network restart` (the apk pkg
+is fine — Makefile uses INSTALL_BIN). Also ensure no **stale
+`qmi-advanced.sh`** (old dialer) lingers — it also `add_protocol qmi` and wins.
+Modem is normally in **QMI mode**
 (`qmi_wwan`); MBIM mode → switch back with `AT+QCFG="usbnet",0` + `AT+CFUN=1,1`.
 
 ## Gotchas from field bring-up
