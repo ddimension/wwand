@@ -76,14 +76,7 @@ function clean_cell_metrics(cells)
 
 // derive the data-system mode from the QENG serving detail (Quectel AT): the NR
 // line states NSA/SA directly. Last-resort data_mode source. Mirrors modem.uc.
-function dsd_from_serving(serving)
-{
-	let lte = serving?.lte != null;
-	let nr  = serving?.nr != null;
-	let mode = nr ? (serving.nr.mode ?? (lte ? 'NSA' : 'SA')) : (lte ? 'LTE' : null);
-
-	return mode ? { mode: mode, lte: lte, nr: nr } : null;
-}
+// dsd_from_serving moved to modem_common (shared with the QMI data-mode resolver).
 
 export function create(opts)
 {
@@ -637,7 +630,7 @@ export function create(opts)
 				return qmi_backend.get_data_mode(self.pt.dsd, (m) => { self.dsd_status = tag(m); cb(); });
 
 			if (be == 'at')
-				self.dsd_status = tag(dsd_from_serving(self.cells?.serving));
+				self.dsd_status = tag(modem_common.dsd_from_serving(self.cells?.serving));
 
 			cb();
 		});

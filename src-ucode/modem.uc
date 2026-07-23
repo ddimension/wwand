@@ -133,29 +133,8 @@ function decode_operator_name(s)
 
 // derive the data-system mode from the QENG serving detail (Quectel AT): the
 // NR line states NSA/SA directly. Fallback for modems without the DSD service.
-function dsd_from_serving(serving)
-{
-	let lte = serving?.lte != null;
-	let nr  = serving?.nr != null;
-	let mode = nr ? (serving.nr.mode ?? (lte ? 'NSA' : 'SA')) : (lte ? 'LTE' : null);
-
-	return mode ? { mode: mode, lte: lte, nr: nr } : null;
-}
-
-// derive a coarse mode from NAS radio interfaces (last-resort fallback; can't
-// see NSA — an NSA anchor reports LTE only here). radio_ifs: 8=LTE, 12=5GNR.
-function dsd_from_radio(radio_ifs)
-{
-	let lte = false, nr = false;
-
-	for (let r in (radio_ifs ?? []))
-		if (r == 8) lte = true;
-		else if (r == 12) nr = true;
-
-	let mode = nr ? (lte ? 'NSA' : 'SA') : (lte ? 'LTE' : null);
-
-	return mode ? { mode: mode, lte: lte, nr: nr } : null;
-}
+// dsd_from_serving / dsd_from_radio moved to modem_common (shared with the MBIM
+// data-mode resolver).
 
 // Null out the i16 signal metrics QMI reports as -32768 ("not available") on
 // serving + neighbour cells, applied once at ingestion (store_cells) so the
@@ -1451,9 +1430,9 @@ export function create(opts)
 						cb();
 					});
 				if (be == 'at')
-					self.dsd_status = tag(dsd_from_serving(self.cells?.serving));
+					self.dsd_status = tag(modem_common.dsd_from_serving(self.cells?.serving));
 				else if (be == 'nas')
-					self.dsd_status = tag(dsd_from_radio(self.reg?.radio_ifs));
+					self.dsd_status = tag(modem_common.dsd_from_radio(self.reg?.radio_ifs));
 				cb();
 			});
 		};

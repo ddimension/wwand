@@ -28,6 +28,34 @@ import * as netlink from './netlink.uc';
 //   reopen_next?:    () => …  continuation when self.at is already open
 //                             (defaults to next)
 // }
+// dsd_from_serving(serving): derive the data-system mode from an AT QENG
+// serving-cell detail (Quectel states NSA/SA directly). Returns { mode, lte, nr }
+// or null. Shared by the QMI and MBIM data-mode resolvers.
+export function dsd_from_serving(serving)
+{
+	let lte = serving?.lte != null;
+	let nr  = serving?.nr != null;
+	let mode = nr ? (serving.nr.mode ?? (lte ? 'NSA' : 'SA')) : (lte ? 'LTE' : null);
+
+	return mode ? { mode: mode, lte: lte, nr: nr } : null;
+}
+
+// dsd_from_radio(radio_ifs): derive a coarse mode from NAS radio interfaces
+// (last-resort fallback; can't see NSA — an NSA anchor reports LTE only here).
+// radio_ifs: 8=LTE, 12=5GNR. Returns { mode, lte, nr } or null.
+export function dsd_from_radio(radio_ifs)
+{
+	let lte = false, nr = false;
+
+	for (let r in (radio_ifs ?? []))
+		if (r == 8) lte = true;
+		else if (r == 12) nr = true;
+
+	let mode = nr ? (lte ? 'NSA' : 'SA') : (lte ? 'LTE' : null);
+
+	return mode ? { mode: mode, lte: lte, nr: nr } : null;
+}
+
 // watch_driver(o): the adaptive "fast telemetry" cadence shared by the QMI and
 // MBIM modem state machines. While a consumer polls (modem_signal/modem_cells
 // over ubus), it runs o.refresh at most once per min_interval, NON-OVERLAPPING
