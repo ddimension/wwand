@@ -179,6 +179,16 @@ export function create(opts)
 					retry_activate(name);
 				}
 				else if ((entry.cfg.auto ?? true) && deps.kick_interface) {
+					// An IDLE context while netifd holds the interface 'pending' is
+					// an ORPHANED setup — e.g. a wwand restart interrupted netifd
+					// mid-setup. A plain 'up' is a no-op on a pending interface, so
+					// reset it with a 'down' first (what a manual ifdown/ifup does),
+					// then the kick/connect below re-runs a clean setup.
+					if (st?.pending && deps.down_interface) {
+						log('info', sprintf('interface %s stuck pending, resetting before setup', entry.cfg.interface));
+						deps.down_interface(entry.cfg.interface);
+					}
+
 					// cdc_mbim/cdc_ncm: the data link's carrier follows the
 					// session/bearer, and netifd won't run its proto setup until
 					// the link is up — so connecting first (bringing link/carrier
