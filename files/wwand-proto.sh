@@ -169,6 +169,15 @@ proto_wwand_setup() {
 				proto_notify_error "$interface" NO_CONTEXT
 				sleep 5
 				;;
+			modem_absent)
+				# the modem's control device is not present yet (after boot, a
+				# modem reboot or a power-cycle). Surface it distinctly so the
+				# network overview shows "waiting for modem" instead of a generic
+				# failure; keep retrying (the daemon binds it once hotplug fires).
+				echo "waiting for modem (control device not present)"
+				proto_notify_error "$interface" WAITING_MODEM
+				sleep 8
+				;;
 			*)
 				proto_notify_error "$interface" CONNECT_FAILED
 				# netifd re-runs setup immediately after a failed task; without

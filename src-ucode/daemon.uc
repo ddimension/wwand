@@ -821,8 +821,15 @@ export function create(opts)
 		let name = self.resolve_context(ref);
 		let entry = name ? self.contexts[name] : null;
 
-		if (!entry?.ctx)
+		if (!entry)
 			return cb({ error: 'no_such_context', ref: ref });
+
+		// the context is configured but its modem is not present yet (control
+		// device not enumerated — after boot / a modem reboot / a power-cycle).
+		// Report it distinctly so netifd/LuCI can show "waiting for modem" rather
+		// than a misleading "context not found".
+		if (!entry.ctx)
+			return cb({ error: 'modem_absent', ref: ref, modem: entry.cfg?.modem });
 
 		// re-read connection params from disk on every up (like netifd)
 		refresh_context_cfg(name, entry);
