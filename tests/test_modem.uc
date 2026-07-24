@@ -198,6 +198,10 @@ scenario('late-reg', {
 	(modem, mock, events) => {
 		eq(modem.state, 'READY', 'late-reg: state READY');
 		eq(modem.reg.plmn.mnc, 2, 'late-reg: plmn from indication');
+		// a later serving-system indication that OMITS the optional Current-PLMN
+		// TLV (as on a cell reselection) must keep the last-known plmn
+		modem._update_serving({ serving_system: { registration: 1, radio_ifs: [ 8 ] } });
+		eq(modem.reg.plmn?.mnc, 2, 'reselection without Current-PLMN keeps last plmn');
 	});
 
 // --- 3: PIN required, verified via UIM ---------------------------------------

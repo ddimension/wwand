@@ -1244,11 +1244,17 @@ export function create(opts)
 		if (data.current_plmn?.description != null)
 			data.current_plmn.description = decode_operator_name(data.current_plmn.description);
 
+		// An incremental SERVING_SYSTEM_IND (e.g. on a cell reselection) may omit
+		// the OPTIONAL Current-PLMN / roaming TLVs. Carry the last-known values
+		// forward instead of wiping them, so the operator name + roaming flag stay
+		// in status/telemetry across a reselection rather than blinking out.
+		let prev = self.reg ?? {};
+
 		self.reg = {
 			registration: ss.registration,
 			radio_ifs: ss.radio_ifs,
-			roaming: (data.roaming != null) ? (data.roaming == 0) : null,
-			plmn: data.current_plmn,
+			roaming: (data.roaming != null) ? (data.roaming == 0) : prev.roaming,
+			plmn: data.current_plmn ?? prev.plmn,
 		};
 
 		emit('serving_system', self.reg);
