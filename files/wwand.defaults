@@ -1,0 +1,10 @@
+#!/bin/sh
+# wwand — one-time migration to the network-native config model, run on install
+# / upgrade (uci-defaults). Converts stock `proto mbim` (umbim) / `proto ncm`
+# (comgt-ncm) and wwand legacy-inline `proto qmi` interfaces into
+# wwand_modem + `option modem` + connection, all in /etc/config/network.
+#
+# migrate is idempotent (already-new config -> no changes), so re-running on
+# every upgrade is safe. The daemon reads any wwand format regardless (compat).
+[ -x /usr/libexec/wwand/migrate ] && /usr/libexec/wwand/migrate --apply >/dev/null 2>&1
+exit 0

@@ -530,6 +530,132 @@ export function parse(raw)
 	return result;
 }
 
+// --- migration to the network-native model -----------------------------------
+// migrate_plan(raw) returns an ordered list of uci changes that convert OLD
+// configs to the WireGuard-style network-native model (wwand_modem + interface
+// `option modem` + connection inline), all in /etc/config/network. It handles:
+//   - stock OpenWrt `proto mbim` (umbim) / `proto ncm` (comgt-ncm) interfaces —
+//     these BREAK once wwand-mbim/-ncm replace the stock handler, so converting
+//     them to `proto qmi` (wwand's proto) is what lets netifd invoke wwand;
+//   - wwand legacy inline `proto qmi` interfaces.
+// Already-new interfaces (`proto qmi` + `option modem`) are skipped. Each change
+// is [ op, 'network', section, option|null, value ]; op is 'add' (create a typed
+// section), 'set', 'add_list' or 'delete'. Pure + host-testable.
+
+// radio/SIM/hardware options -> the wwand_modem section
+const MIGRATE_MODEM_OPTS = [ 'device', 'netdev', 'usb_path', 'tty', 'mux',
+	'dl_datagram_max_size', 'sim_slot', 'pincode', 'modes', 'mcc', 'mnc',
+	'lock_4g', 'lock_5g', 'lock_persist', 'at_init', 'location', 'delay',
+	'failreboot', 'zero_rx_timeout', 'stats_interval' ];
+// connection options (apn/auth/username/password/profile/mtu/use_pushed_*/
+// settings_poll) simply stay on the interface, so they need no explicit list.
+
+export function migrate_plan(raw)
+{
+	let net = raw?.network ?? {};
+	let changes = [];
+	let modem_by_ident = {};   // modem identity -> wwand_modem section name
+	let seq = 0;
+
+	let put = (section, opt, val) => {
+		if (type(val) == 'array') {
+			for (let v in val)
+				push(changes, [ 'add_list', 'network', section, opt, sprintf('%s', v) ]);
+		}
+		else {
+			push(changes, [ 'set', 'network', section, opt,
+				(type(val) == 'bool') ? (val ? '1' : '0') : sprintf('%s', val) ]);
+		}
+	};
+
+	// create (once per identity) a wwand_modem section from an interface's radio/
+	// SIM options; return its name.
+	let ensure_modem = (ident, s) => {
+		if (modem_by_ident[ident])
+			return modem_by_ident[ident];
+
+		let name = sprintf('wwmodem%d', seq++);
+		modem_by_ident[ident] = name;
+		push(changes, [ 'add', 'network', name, null, 'wwand_modem' ]);
+
+		for (let k in MIGRATE_MODEM_OPTS) {
+			// the modem identity itself: for a wwan0mN device the parent netdev
+			// is the modem, the mN is the connection's mux channel
+			let v = s[k];
+
+			if (k == 'device' && v != null) {
+				let nd = parse_netdev(v);
+				v = nd?.muxed ? nd.netdev : v;
+			}
+
+			// stock ncm uses `mode` for the RAT restriction
+			if (k == 'modes' && (v == null || v == ''))
+				v = s.mode;
+
+			if (v != null && v != '')
+				put(name, k, v);
+		}
+
+		return name;
+	};
+
+	for (let name, s in net) {
+		if (s['.type'] != 'interface')
+			continue;
+
+		let proto = s.proto;
+
+		if (proto != 'qmi' && proto != 'mbim' && proto != 'ncm')
+			continue;
+
+		// already network-native
+		if (proto == 'qmi' && s.modem != null)
+			continue;
+
+		// the modem identity: for a wwan0mN device the PARENT netdev is the modem
+		// (the mN is the connection's mux channel), so several muxed interfaces
+		// share one wwand_modem. option-context configs (radio/SIM in
+		// /etc/config/wwand) are left to the compat layer.
+		let nd0 = parse_netdev(s.device);
+		let ident = (nd0 ? nd0.netdev : null) ?? s.netdev ?? s.usb_path ?? s.ctldevice;
+
+		if (s.context != null || ident == null)
+			continue;
+
+		let modem = ensure_modem(ident, s);
+		let nd = parse_netdev(s.device);
+
+		// interface: proto -> qmi, reference the modem, keep the connection
+		// options (apn/auth/…) that are ALREADY on the interface in place.
+		if (proto != 'qmi')
+			put(name, 'proto', 'qmi');
+
+		put(name, 'modem', modem);
+
+		if (nd?.muxed)
+			put(name, 'mux_id', nd.mux_id);
+
+		// pdp_type: rename the stock/legacy `pdptype`
+		if (s.pdptype != null && s.pdptype != '') {
+			put(name, 'pdp_type', s.pdp_type ?? s.pdptype);
+			push(changes, [ 'delete', 'network', name, 'pdptype', null ]);
+		}
+
+		// the radio/SIM options moved to the wwand_modem -> drop them here
+		for (let k in MIGRATE_MODEM_OPTS)
+			if (s[k] != null)
+				push(changes, [ 'delete', 'network', name, k, null ]);
+
+		// stock proto junk that has no place in the wwand model
+		for (let j in [ 'ctldevice', 'dhcp', 'ipv4', 'ipv6', 'mode',
+		                'strongestnetwork', 'autocreateif', 'customroutes' ])
+			if (s[j] != null)
+				push(changes, [ 'delete', 'network', name, j, null ]);
+	}
+
+	return changes;
+}
+
 // find the context serving a given netifd interface
 export function context_for_interface(result, interface)
 {
