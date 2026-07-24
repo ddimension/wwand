@@ -20,12 +20,18 @@ file for new setups:
   runtime to the inserted card by `option modem` + `option iccid`: overrides the
   modem's `pincode` and, optionally, `apn`/`auth`/`username`/`password` for that
   card (e.g. different eUICC profiles / dual-SIM with different PINs).
-- **`config interface '<name>'`** with `option proto 'qmi'` — the connection:
+- **`config interface '<name>'`** with `option proto 'wwand'` — the connection:
   `option modem <name>` + `apn`, `pdp_type`, `auth`, `username`, `password`,
   `profile`, `mux_id` (0 = no mux, N = channel N), `mtu`, `use_pushed_mtu`,
   `use_pushed_prefix`, `settings_poll` + the usual netifd knobs. Several
   interfaces referencing one `wwand_modem` = multiple mux contexts on one modem.
 - **`config wwand_globals 'globals'`** — `log_level`, `hold_max`.
+
+> **Proto name.** The netifd/LuCI protocol is **`wwand`** — one handler for all
+> backends (QMI/MBIM/NCM; the driver decides which). For backward compatibility
+> the handler *also* registers the historical name **`qmi`**, so interfaces still
+> saved as `proto qmi` keep working; migration and LuCI rewrite them to
+> `proto wwand` on the next save. Prefer `proto wwand` for new interfaces.
 
 ```
 config wwand_modem 'm0'
@@ -41,7 +47,7 @@ config wwand_sim 'vodafone'          # optional per-card override
 	option apn 'web.vodafone.de'
 
 config interface 'wan'
-	option proto 'qmi'
+	option proto 'wwand'
 	option modem 'm0'
 	option apn 'internet'
 	option pdp_type 'ipv4v6'
@@ -54,7 +60,7 @@ How the sections relate (all in `/etc/config/network`):
 
 ```
   config interface 'wan'          config interface 'ims'
-    proto qmi                        proto qmi
+    proto wwand                      proto wwand
     option modem 'm0' ───┐           option modem 'm0' ───┐      the connection:
     option apn 'internet'│           option apn 'ims'     │      apn / pdp_type /
     option mux_id '1'    │           option mux_id '2'    │      auth / mux channel
@@ -91,7 +97,7 @@ For example, a stock `proto ncm` interface is rewritten in place:
     option apn 'internet'             option mode 'lte'  → modes
     option pincode '1234'
     option mode 'lte'               config interface 'wan'
-    option pdptype 'ipv4v6'           option proto 'qmi'      ← wwand's proto
+    option pdptype 'ipv4v6'           option proto 'wwand'    ← wwand's proto
                                        option modem 'wwmodem0'
                                        option apn 'internet'   ← connection stays
                                        option pdp_type 'ipv4v6'
@@ -157,7 +163,7 @@ config context 'wan_ctx'
 
 ```
 config interface 'wan'
-	option proto 'qmi'
+	option proto 'wwand'             # legacy 'qmi' also accepted
 	option context 'wan_ctx'
 	option metric '10'               # metric / peerdns / defaultroute / ip4table /
 	                                 #   ip6table / VRF are handled by netifd as usual
@@ -179,7 +185,8 @@ see [Troubleshooting](#troubleshooting).
 
 ### Old-style configurations (compat layer)
 
-Interfaces with `proto qmi` and **no** `option context` are read the old way
+Interfaces with `proto wwand`|`qmi` and **no** `option modem`/`option context`
+are read the old way
 (options on the interface section: `device wwan0`/`wwan0mN`, `apn` incl. `#N`,
 `auth`, `username`, `password`, `pincode`, `modes`, `mcc`/`mnc`, `ipv4`/`ipv6`/
 `pdptype`, `mtu`, `use_pushed_mtu`, `sim_slot`, `at_init`, `lock_4g`/`lock_5g`/

@@ -151,7 +151,7 @@ To add a backend `xyz`:
 5. **Package** — a `wwand-xyz` package in the feed Makefile (`DEPENDS +wwand`,
    plus `CONFLICTS` the stock handler it replaces), and the file list.
 6. **Migration** — if it replaces a stock netifd proto, add that proto to
-   `migrate_plan` so `proto xyz` interfaces convert to `proto qmi` + `wwand_modem`.
+   `migrate_plan` so `proto xyz` interfaces convert to `proto wwand` + `wwand_modem`.
 
 MBIM is the reference example of reuse: it has no native NAS, so it brings up a
 **QMI-over-MBIM passthrough** (`qmi_over_mbim.uc`) and runs the whole QMI stack

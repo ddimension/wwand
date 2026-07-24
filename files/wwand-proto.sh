@@ -10,7 +10,7 @@
 	init_proto "$@"
 }
 
-proto_qmi_init_config() {
+proto_wwand_init_config() {
 	available=1
 	renew_handler=1
 	# The daemon owns the context lifecycle and drives netifd (up/down/renew)
@@ -132,7 +132,7 @@ _wwand_apply_settings() {
 	proto_send_update "$interface"
 }
 
-proto_qmi_setup() {
+proto_wwand_setup() {
 	local interface="$1"
 	local defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
 	json_get_vars defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
@@ -197,7 +197,7 @@ proto_qmi_setup() {
 	# 'network.interface <x> down' on a permanent loss, which runs the teardown.
 }
 
-proto_qmi_teardown() {
+proto_wwand_teardown() {
 	local interface="$1"
 
 	ubus -t 30 call wwand context_down "{\"interface\":\"$interface\"}" >/dev/null 2>&1
@@ -210,7 +210,7 @@ proto_qmi_teardown() {
 # (re)establishes a context or the modem pushes new settings (v6 prefix, DNS,
 # MTU). netifd diffs the update against the live config and applies only the
 # delta — so PD/VRF dependencies are preserved.
-proto_qmi_renew() {
+proto_wwand_renew() {
 	local interface="$1"
 	local defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
 	json_get_vars defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
@@ -230,6 +230,17 @@ proto_qmi_renew() {
 	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns"
 }
 
+# Back-compat: `proto qmi` is the name this handler shipped under historically
+# (and stock qmi-advanced/uqmi used). Interfaces still saved that way — plus
+# stock configs migrated in place — must keep working, so the legacy name maps
+# onto the same functions. New configs use `proto wwand`; the daemon and LuCI
+# accept both, and migration/LuCI rewrite to `wwand` on save.
+proto_qmi_init_config() { proto_wwand_init_config "$@"; }
+proto_qmi_setup()       { proto_wwand_setup "$@"; }
+proto_qmi_teardown()    { proto_wwand_teardown "$@"; }
+proto_qmi_renew()       { proto_wwand_renew "$@"; }
+
 [ -n "$INCLUDE_ONLY" ] || {
+	add_protocol wwand
 	add_protocol qmi
 }

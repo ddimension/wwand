@@ -34,7 +34,7 @@ per modem and load only when their package is installed.
                discovery.uc (control-type detection), modeswitch/protocol_switch
  integration:  daemon.uc (registry/policy), config.uc (+migrate/compat),
                ubus.uc, main.uc
- shell:        wwand-proto.sh (thin netifd shim, proto `qmi`), init, hotplug,
+ shell:        wwand-proto.sh (thin netifd shim → wwand.sh, proto `wwand`/`qmi`), init, hotplug,
                wwand-migrate + uci-defaults (config auto-migration)
 ```
 
@@ -126,7 +126,7 @@ netifd over ubus (`network.interface <x> up/renew/down`).
   ifup wan
      │
      ▼
-  netifd ──proto_qmi_setup──► wwand-proto.sh ──ubus wwand context_up──► daemon
+  netifd ──proto_wwand_setup──► wwand-proto.sh ──ubus wwand context_up──► daemon
                                                                           │ activate
                                                                           │ PDP context
      ◄──────────── reply { ipv4{…}, ipv6{…}, mtu } ◄───────────────────── ┘
@@ -139,7 +139,7 @@ netifd over ubus (`network.interface <x> up/renew/down`).
      ⋮
   transient loss ─► daemon reconnects the session in place
                     ─► ubus network.interface renew
-                    ─► proto_qmi_renew re-reads context_settings → delta update
+                    ─► proto_wwand_renew re-reads context_settings → delta update
                        (no teardown → IPv6-PD + VRF routes preserved)
      ⋮
   permanent loss / hold_max expiry ─► network.interface down (accept the flush)
@@ -150,7 +150,7 @@ netifd over ubus (`network.interface <x> up/renew/down`).
 A **transient** loss (network drop, registration loss, recovery reset, brief
 modem-lost) keeps the netifd interface up and reconnects the modem session **in
 place**: on success the daemon fires `network.interface renew`, whose
-`proto_qmi_renew` re-reads `context_settings` and re-sends the update with
+`proto_wwand_renew` re-reads `context_settings` and re-sends the update with
 `keep=1`, so netifd diffs against the live config and applies only the delta.
 No teardown fires, so `interface_ip_flush` never runs and the downstream
 IPv6-PD assignments and VRF-table routes are preserved. The blackhole is bounded
@@ -322,7 +322,8 @@ lpac is either the stock openwrt-packages `lpac` or the bundled `wwand-lpac`
 
 All config lives in `/etc/config/network` (WireGuard-style typed sections):
 `wwand_modem` (hardware + SIM slot + radio), `wwand_sim` (per-ICCID override),
-`interface` with `proto qmi` + `option modem` (the connection), `wwand_globals`.
+`interface` with `proto wwand` + `option modem` (the connection), `wwand_globals`.
+The netifd shim registers `wwand` and, for back-compat, the legacy `qmi` alias.
 The daemon reads every older format too (legacy inline `proto qmi`, the previous
 `/etc/config/wwand`), and `config.migrate_plan` converts old configs — including
 **stock `proto mbim`/`proto ncm`** interfaces, which `wwand-mbim`/`wwand-ncm`

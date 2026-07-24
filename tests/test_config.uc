@@ -241,6 +241,16 @@ r = config.parse({
 });
 eq(r.contexts.wan.pdp_type, 'ipv4', 'net: legacy pdptype alias honoured');
 
+// the current proto name `wwand` parses identically to the legacy `qmi` alias
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet' },
+	},
+});
+eq(r.contexts.wan.modem, 'm0', 'net: proto wwand interface bound to modem');
+eq(r.contexts.wan.apn, 'internet', 'net: proto wwand apn inline');
+
 // mux: two interfaces on one wwand_modem
 r = config.parse({
 	network: {
@@ -307,7 +317,7 @@ function mp_has(ch, op, section, opt) {
 	return false;
 }
 
-// stock OpenWrt `proto mbim` interface -> proto qmi + wwand_modem
+// stock OpenWrt `proto mbim` interface -> proto wwand + wwand_modem
 let ch = config.migrate_plan({ network: {
 	wan: { '.type': 'interface', proto: 'mbim', device: '/dev/cdc-wdm0',
 	       apn: 'internet', pincode: '1234', pdptype: 'ipv4', auth: 'chap' },
@@ -315,7 +325,7 @@ let ch = config.migrate_plan({ network: {
 ok(mp_has(ch, 'add', 'wwmodem0', null), 'migrate-mbim: wwand_modem section created');
 eq(mp_set(ch, 'wwmodem0', 'device'), '/dev/cdc-wdm0', 'migrate-mbim: device -> modem');
 eq(mp_set(ch, 'wwmodem0', 'pincode'), '1234', 'migrate-mbim: pincode -> modem');
-eq(mp_set(ch, 'wan', 'proto'), 'qmi', 'migrate-mbim: proto -> qmi');
+eq(mp_set(ch, 'wan', 'proto'), 'wwand', 'migrate-mbim: proto -> wwand');
 eq(mp_set(ch, 'wan', 'modem'), 'wwmodem0', 'migrate-mbim: option modem set');
 eq(mp_set(ch, 'wan', 'pdp_type'), 'ipv4', 'migrate-mbim: pdptype -> pdp_type');
 ok(mp_has(ch, 'delete', 'wan', 'pincode'), 'migrate-mbim: pincode stripped off interface');
@@ -329,7 +339,7 @@ ch = config.migrate_plan({ network: {
 	wan: { '.type': 'interface', proto: 'ncm', device: 'wwan0', apn: 'web', mode: 'lte' },
 } });
 eq(mp_set(ch, 'wwmodem0', 'modes'), 'lte', 'migrate-ncm: mode -> modes on modem');
-eq(mp_set(ch, 'wan', 'proto'), 'qmi', 'migrate-ncm: proto -> qmi');
+eq(mp_set(ch, 'wan', 'proto'), 'wwand', 'migrate-ncm: proto -> wwand');
 ok(mp_has(ch, 'delete', 'wan', 'mode'), 'migrate-ncm: stock mode stripped');
 
 // wwand legacy inline proto qmi with a mux device -> modem netdev + mux_id
@@ -340,12 +350,21 @@ eq(mp_set(ch, 'wwmodem0', 'device'), 'wwan0', 'migrate-mux: modem device = paren
 eq(mp_set(ch, 'wan', 'mux_id'), '1', 'migrate-mux: mux channel derived from wwan0m1');
 eq(mp_set(ch, 'wan', 'modem'), 'wwmodem0', 'migrate-mux: option modem');
 
-// already network-native -> no changes
+// already network-native (proto wwand + option modem) -> no changes
+ch = config.migrate_plan({ network: {
+	m0: { '.type': 'wwand_modem', usb_path: '1-1' },
+	wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet' },
+} });
+eq(length(ch), 0, 'migrate: already new-style produces no changes');
+
+// network-native but still on the legacy `qmi` proto name (written by an older
+// wwand) -> upgraded in place to `wwand`, nothing else touched
 ch = config.migrate_plan({ network: {
 	m0: { '.type': 'wwand_modem', usb_path: '1-1' },
 	wan: { '.type': 'interface', proto: 'qmi', modem: 'm0', apn: 'internet' },
 } });
-eq(length(ch), 0, 'migrate: already new-style produces no changes');
+eq(length(ch), 1, 'migrate: legacy qmi+modem yields exactly one change');
+eq(mp_set(ch, 'wan', 'proto'), 'wwand', 'migrate: qmi+modem proto upgraded to wwand');
 
 // two interfaces sharing one modem device -> one wwand_modem
 ch = config.migrate_plan({ network: {

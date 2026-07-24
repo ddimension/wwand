@@ -19,7 +19,7 @@
 //   warnings: [ ... ],
 // }
 //
-// Compat: network sections with proto 'qmi' and no 'context' option are
+// Compat: network sections with proto 'wwand'|'qmi' and no 'context' option are
 // old-style qmi-advanced interfaces and get translated in-memory: the parent
 // netdev becomes a synthesized modem, the interface becomes a context.
 // Options that only made sense in the old bash implementation are reported
@@ -291,7 +291,9 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 function compat_translate(raw, result)
 {
 	for (let name, s in (raw.network ?? {})) {
-		if (s['.type'] != 'interface' || s.proto != 'qmi')
+		// `wwand` is the current proto name; `qmi` is the historical alias the
+		// netifd shim still registers (legacy + stock-migrated configs).
+		if (s['.type'] != 'interface' || (s.proto != 'wwand' && s.proto != 'qmi'))
 			continue;
 
 		// a disabled interface is not brought up by netifd; don't synthesize a
@@ -541,9 +543,11 @@ export function parse(raw)
 // `option modem` + connection inline), all in /etc/config/network. It handles:
 //   - stock OpenWrt `proto mbim` (umbim) / `proto ncm` (comgt-ncm) interfaces —
 //     these BREAK once wwand-mbim/-ncm replace the stock handler, so converting
-//     them to `proto qmi` (wwand's proto) is what lets netifd invoke wwand;
+//     them to `proto wwand` (wwand's proto) is what lets netifd invoke wwand;
 //   - wwand legacy inline `proto qmi` interfaces.
-// Already-new interfaces (`proto qmi` + `option modem`) are skipped. Each change
+// The target proto is `wwand`; a `proto qmi` interface that is otherwise already
+// network-native (`+ option modem`, written by an older wwand) is upgraded in
+// place to `proto wwand`. Already-new `proto wwand` interfaces are skipped. Each change
 // is [ op, 'network', section, option|null, value ]; op is 'add' (create a typed
 // section), 'set', 'add_list' or 'delete'. Pure + host-testable.
 
@@ -610,12 +614,17 @@ export function migrate_plan(raw)
 
 		let proto = s.proto;
 
-		if (proto != 'qmi' && proto != 'mbim' && proto != 'ncm')
+		if (proto != 'wwand' && proto != 'qmi' && proto != 'mbim' && proto != 'ncm')
 			continue;
 
-		// already network-native
-		if (proto == 'qmi' && s.modem != null)
+		// already network-native: skip a `proto wwand` interface outright; a
+		// `proto qmi` one (older wwand) just needs its proto name upgraded.
+		if (s.modem != null) {
+			if (proto == 'qmi')
+				push(changes, [ 'set', 'network', name, 'proto', 'wwand' ]);
+
 			continue;
+		}
 
 		// the modem identity: for a wwan0mN device the PARENT netdev is the modem
 		// (the mN is the connection's mux channel), so several muxed interfaces
@@ -630,10 +639,10 @@ export function migrate_plan(raw)
 		let modem = ensure_modem(ident, s);
 		let nd = parse_netdev(s.device);
 
-		// interface: proto -> qmi, reference the modem, keep the connection
+		// interface: proto -> wwand, reference the modem, keep the connection
 		// options (apn/auth/…) that are ALREADY on the interface in place.
-		if (proto != 'qmi')
-			put(name, 'proto', 'qmi');
+		// (a bare legacy `proto qmi` reaches here too and is upgraded to wwand.)
+		put(name, 'proto', 'wwand');
 
 		put(name, 'modem', modem);
 

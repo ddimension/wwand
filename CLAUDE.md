@@ -23,8 +23,9 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   luci-app-wwand (sources only; package defs + wwand-lpac entirely in the
   feed repo).
 - **Config: all in `/etc/config/network`** (WireGuard-style: `wwand_modem` /
-  `wwand_sim` (per-ICCID override) / `interface proto qmi + option modem` /
-  `wwand_globals`). No `/etc/config/wwand` for new installs; old formats +
+  `wwand_sim` (per-ICCID override) / `interface proto wwand + option modem` /
+  `wwand_globals`). Proto is **`wwand`**; the shim also registers the legacy
+  **`qmi`** alias for back-compat. No `/etc/config/wwand` for new installs; old formats +
   stock `proto mbim`/`ncm` auto-migrate (`config.migrate_plan` + uci-defaults).
   Full model in `docs/reference.md`; how to extend in `docs/extending.md`.
 - `docs/architecture.md`, `docs/backend-interface.md`, `docs/extending.md`,
@@ -47,8 +48,10 @@ and drives netifd over ubus (deps in `main.uc`: `kick_interface`=up,
 - Permanent loss (`sim_blocked`, admin/config down) → `down` immediately.
 - wwand restart is non-destructive (`stop_local`, not `shutdown`): WAN + traffic
   survive; the daemon **adopts** the live session on `registered`.
-Shim: `files/wwand-proto.sh` (`proto_qmi_setup/teardown/renew`,
-`_wwand_apply_settings` builds the netifd update with `proto_set_keep 1`).
+Shim: `files/wwand-proto.sh` → `/lib/netifd/proto/wwand.sh`
+(`proto_wwand_setup/teardown/renew`, with thin `proto_qmi_*` aliases;
+registers both `add_protocol wwand` + `add_protocol qmi`;
+`_wwand_apply_settings` builds the netifd update).
 
 ## Invariants / conventions
 - **VRF**: the daemon touches only the link layer (mux/MTU/carrier via
@@ -99,14 +102,14 @@ RG650E-EU. **Reflashed often → SSH host key changes** (hence UserKnownHostsFil
 No sftp/scp on the device → deploy via `tar | ssh` or install the .apk.
 **Always `sync` after a file deploy.** A `tar x`/`cp` deploy **drops the +x
 bit** on the files that get *executed* — this bit twice:
-- `/lib/netifd/proto/qmi.sh` — netifd can't exec it, the `qmi` proto handler
-  never registers (`ubus call network get_proto_handlers` has no `qmi`), and
-  interfaces fall back to `proto: none` (up, no L3 config).
+- `/lib/netifd/proto/wwand.sh` — netifd can't exec it, the `wwand`/`qmi` proto
+  handlers never register (`ubus call network get_proto_handlers` has no `wwand`),
+  and interfaces fall back to `proto: none` (up, no L3 config).
 - `/usr/sbin/wwand` (the daemon, a ucode script with `#!/usr/bin/env ucode`) —
   procd exec fails with **exit 127**, respawn retries exhaust, and wwand is dead
   (the WAN persists by no-proto-task design, so ping still works — misleading).
   `ubus call service list '{"name":"wwand"}'` shows `exit_code: 127`.
-So after a tar/cp deploy: **`chmod +x /usr/sbin/wwand /lib/netifd/proto/qmi.sh`**,
+So after a tar/cp deploy: **`chmod +x /usr/sbin/wwand /lib/netifd/proto/wwand.sh`**,
 then `/etc/init.d/wwand restart` + `/etc/init.d/network restart`. The `.uc`
 modules under `/usr/share/ucode/wwand/` are imported, not exec'd — they don't
 need +x. The apk pkg is fine (Makefile uses INSTALL_BIN). Also ensure no **stale

@@ -87,7 +87,7 @@ config wwand_modem 'm0'
 	option pincode '1234'            # if the SIM needs one
 
 config interface 'wan'
-	option proto 'qmi'
+	option proto 'wwand'                 # one proto for QMI/MBIM/NCM
 	option modem 'm0'
 	option apn 'internet'
 	option pdp_type 'ipv4v6'
