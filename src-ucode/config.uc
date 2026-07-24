@@ -73,50 +73,83 @@ export function context_defaults(over)
 	};
 }
 
+// apply a globals section (log_level, hold_max) — shared by the old
+// `config wwand 'globals'` (wwand file) and the new `config wwand_globals`
+// (network file).
+function apply_globals(s, result)
+{
+	result.globals.log_level = s.log_level ?? result.globals.log_level;
+
+	if (s.hold_max != null) {
+		let hm = +s.hold_max;
+
+		if (hm > 0)
+			result.globals.hold_max = hm;
+		else
+			push(result.warnings, sprintf('invalid hold_max %J, keeping %d',
+				s.hold_max, result.globals.hold_max));
+	}
+}
+
+// build a modem config from a raw section — shared by the old `config modem`
+// (wwand file) and the new `config wwand_modem` (network file); both carry the
+// identical option set.
+function modem_from_section(s)
+{
+	return modem_defaults({
+		device: s.device,
+		netdev: s.netdev,
+		usb_path: s.usb_path,
+		pincode: s.pincode,
+		modes: s.modes,
+		mcc: s.mcc,
+		mnc: s.mnc,
+		mux: s.mux ?? 'auto',
+		dl_datagram_max_size: +(s.dl_datagram_max_size ?? 0),
+		tty: s.tty,
+		at_init: (type(s.at_init) == 'array') ? s.at_init :
+		         (s.at_init != null ? [ s.at_init ] : []),
+		location: bool_opt(s.location, false),
+		delay: +(s.delay ?? 0),
+		failreboot: +(s.failreboot ?? 100),
+		zero_rx_timeout: +(s.zero_rx_timeout ?? 21600),
+		lock_4g: (type(s.lock_4g) == 'array') ? s.lock_4g :
+		         (s.lock_4g != null ? [ s.lock_4g ] : []),
+		lock_5g: s.lock_5g,
+		lock_persist: bool_opt(s.lock_persist, false),
+		sim_slot: +(s.sim_slot ?? 0),
+		stats_interval: +(s.stats_interval ?? 60),
+		auto_correct_config: bool_opt(s.auto_correct_config, false),
+	});
+}
+
+// build a per-SIM override from a `config wwand_sim` section. Matched at runtime
+// to the active card by (modem, iccid); overrides the modem's pincode and,
+// optionally, the carrier apn/auth/pdp for that card.
+function sim_from_section(s)
+{
+	return {
+		modem: s.modem,
+		iccid: s.iccid,
+		pincode: s.pincode,
+		apn: s.apn,
+		auth: s.auth,
+		username: s.username,
+		password: s.password,
+		pdp_type: PDP_TYPES[s.pdp_type] ? s.pdp_type : null,
+	};
+}
+
 function parse_wwand_sections(raw, result)
 {
 	for (let name, s in (raw.wwand ?? {})) {
 		switch (s['.type']) {
 		case 'wwand':
-			result.globals.log_level = s.log_level ?? result.globals.log_level;
-
-			if (s.hold_max != null) {
-				let hm = +s.hold_max;
-
-				if (hm > 0)
-					result.globals.hold_max = hm;
-				else
-					push(result.warnings, sprintf('invalid hold_max %J, keeping %d',
-						s.hold_max, result.globals.hold_max));
-			}
+			apply_globals(s, result);
 			break;
 
 		case 'modem':
-			result.modems[name] = modem_defaults({
-				device: s.device,
-				netdev: s.netdev,
-				usb_path: s.usb_path,
-				pincode: s.pincode,
-				modes: s.modes,
-				mcc: s.mcc,
-				mnc: s.mnc,
-				mux: s.mux ?? 'auto',
-				dl_datagram_max_size: +(s.dl_datagram_max_size ?? 0),
-				tty: s.tty,
-				at_init: (type(s.at_init) == 'array') ? s.at_init :
-				         (s.at_init != null ? [ s.at_init ] : []),
-				location: bool_opt(s.location, false),
-				delay: +(s.delay ?? 0),
-				failreboot: +(s.failreboot ?? 100),
-				zero_rx_timeout: +(s.zero_rx_timeout ?? 21600),
-				lock_4g: (type(s.lock_4g) == 'array') ? s.lock_4g :
-				         (s.lock_4g != null ? [ s.lock_4g ] : []),
-				lock_5g: s.lock_5g,
-				lock_persist: bool_opt(s.lock_persist, false),
-				sim_slot: +(s.sim_slot ?? 0),
-				stats_interval: +(s.stats_interval ?? 60),
-				auto_correct_config: bool_opt(s.auto_correct_config, false),
-			});
+			result.modems[name] = modem_from_section(s);
 			break;
 
 		case 'context':
@@ -139,6 +172,37 @@ function parse_wwand_sections(raw, result)
 				use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
 				settings_poll: +(s.settings_poll ?? 300),
 			});
+			break;
+		}
+	}
+}
+
+// parse the network-native wwand sections (the goal model: no /etc/config/wwand).
+// These are WireGuard-style typed sections living in /etc/config/network:
+//   config wwand_globals 'globals'   -> log_level / hold_max
+//   config wwand_modem   '<name>'    -> a modem (same options as `config modem`)
+//   config wwand_sim     '<name>'    -> a per-SIM override (modem + iccid keyed)
+// The interface (proto qmi) that references a wwand_modem via `option modem` is
+// handled in compat_translate alongside the other interface generations.
+function parse_network_sections(raw, result)
+{
+	for (let name, s in (raw.network ?? {})) {
+		switch (s['.type']) {
+		case 'wwand_globals':
+			apply_globals(s, result);
+			break;
+
+		case 'wwand_modem':
+			result.modems[name] = modem_from_section(s);
+			break;
+
+		case 'wwand_sim':
+			if (s.iccid == null || s.iccid == '') {
+				push(result.warnings, sprintf("wwand_sim %s: no iccid, ignoring", name));
+				break;
+			}
+
+			result.sims[name] = sim_from_section(s);
 			break;
 		}
 	}
@@ -234,7 +298,7 @@ function compat_translate(raw, result)
 		if (bool_opt(s.disabled, false))
 			continue;
 
-		// new-style interface: references a context section
+		// current model: references a context section (in /etc/config/wwand)
 		if (s.context != null) {
 			if (result.contexts[s.context]) {
 				result.contexts[s.context].interface = name;
@@ -244,6 +308,44 @@ function compat_translate(raw, result)
 			}
 			else
 				push(result.warnings, sprintf("interface %s references unknown context '%s'", name, s.context));
+
+			continue;
+		}
+
+		// network-native model: references a wwand_modem via `option modem`; the
+		// connection (apn/pdp/auth/mux/…) is carried inline on the interface (the
+		// old `context` folded in). Radio/SIM options live on the wwand_modem.
+		if (s.modem != null) {
+			if (!result.modems[s.modem]) {
+				push(result.warnings, sprintf("interface %s references unknown modem '%s'", name, s.modem));
+				continue;
+			}
+
+			let nd = parse_netdev(s.device);
+			// accept both pdp_type (preferred) and the legacy proto-js pdptype
+			let pdp_in = s.pdp_type ?? s.pdptype;
+
+			if (pdp_in != null && !PDP_TYPES[pdp_in])
+				push(result.warnings, sprintf("interface %s: invalid pdp_type '%s', using ipv4v6", name, pdp_in));
+
+			result.contexts[name] = context_defaults({
+				modem: s.modem,
+				interface: name,
+				mux_id: nd?.mux_id ?? 0,
+				muxed: nd?.muxed ?? false,
+				mux_link: nd?.muxed ? s.device : null,
+				apn: s.apn,
+				pdp_type: PDP_TYPES[pdp_in] ? pdp_in : 'ipv4v6',
+				auth: s.auth,
+				username: s.username,
+				password: s.password,
+				profile: (s.profile != null) ? +s.profile : null,
+				mtu: (s.mtu != null) ? +s.mtu : null,
+				use_pushed_mtu: bool_opt(s.use_pushed_mtu, true),
+				use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
+				settings_poll: +(s.settings_poll ?? 300),
+				auto: bool_opt(s.auto, true),
+			});
 
 			continue;
 		}
@@ -317,6 +419,21 @@ function compat_translate(raw, result)
 
 function validate(result)
 {
+	// attach each per-SIM override to its modem; the daemon picks the matching
+	// one at bring-up by the active card's ICCID. Drop overrides whose modem
+	// reference is unknown.
+	for (let name, sim in result.sims) {
+		if (sim.modem == null || !result.modems[sim.modem]) {
+			push(result.warnings, sprintf("wwand_sim %s: unknown modem '%s', ignoring", name, sim.modem));
+			delete result.sims[name];
+			continue;
+		}
+
+		let m = result.modems[sim.modem];
+		m.sims = m.sims ?? [];
+		push(m.sims, sim);
+	}
+
 	for (let name, ctx in result.contexts) {
 		if (ctx.modem == null) {
 			push(result.warnings, sprintf("context %s: no modem reference, ignoring", name));
@@ -396,10 +513,12 @@ export function parse(raw)
 		globals: { log_level: 'info', hold_max: 90 },
 		modems: {},
 		contexts: {},
+		sims: {},
 		warnings: [],
 	};
 
 	parse_wwand_sections(raw ?? {}, result);
+	parse_network_sections(raw ?? {}, result);
 	compat_translate(raw ?? {}, result);
 	validate(result);
 

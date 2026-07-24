@@ -198,4 +198,74 @@ eq(config.parse_netdev('wwan0m3'), { netdev: 'wwan0', mux_id: 3, muxed: true }, 
 eq(config.parse_netdev('wwan1'), { netdev: 'wwan1', mux_id: 0, muxed: false }, 'parse_netdev plain');
 eq(config.parse_netdev('eth0'), { netdev: 'eth0', mux_id: 0, muxed: false }, 'parse_netdev other');
 
+// --- network-native model (WireGuard-style, everything in /etc/config/network) -
+
+r = config.parse({
+	network: {
+		globals: { '.type': 'wwand_globals', log_level: 'notice', hold_max: '45' },
+		m0: { '.type': 'wwand_modem', usb_path: '1-1.2', pincode: '1234',
+		      sim_slot: '1', modes: 'lte,nr5g', mcc: '262', mnc: '01' },
+		// per-SIM override, matched at runtime by (modem, iccid)
+		telekom: { '.type': 'wwand_sim', modem: 'm0', iccid: '8949...01',
+		           pincode: '5678', apn: 'internet.t-d1.de', auth: 'chap' },
+		// connection: references the modem, connection options inline
+		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0',
+		       apn: 'internet', pdp_type: 'ipv4v6', auth: 'chap' },
+	},
+});
+
+eq(r.globals.log_level, 'notice', 'net: wwand_globals log_level');
+eq(r.globals.hold_max, 45, 'net: wwand_globals hold_max');
+eq(r.modems.m0.usb_path, '1-1.2', 'net: wwand_modem usb_path');
+eq(r.modems.m0.pincode, '1234', 'net: wwand_modem pincode (default)');
+eq(r.modems.m0.sim_slot, 1, 'net: wwand_modem sim_slot');
+eq(r.modems.m0.mcc, '262', 'net: mcc on the modem');
+eq(r.contexts.wan.modem, 'm0', 'net: interface option modem -> context bound to modem');
+eq(r.contexts.wan.interface, 'wan', 'net: interface name recorded');
+eq(r.contexts.wan.apn, 'internet', 'net: apn inline on the interface');
+eq(r.contexts.wan.pdp_type, 'ipv4v6', 'net: pdp_type inline');
+eq(r.contexts.wan.auth, 'chap', 'net: auth inline');
+
+// the SIM override is attached to its modem for runtime iccid matching
+eq(length(r.modems.m0.sims ?? []), 1, 'net: wwand_sim attached to its modem');
+eq(r.modems.m0.sims[0].iccid, '8949...01', 'net: sim override iccid');
+eq(r.modems.m0.sims[0].pincode, '5678', 'net: sim override pincode');
+eq(r.modems.m0.sims[0].apn, 'internet.t-d1.de', 'net: sim override apn');
+
+// legacy pdptype alias on a network-native interface
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1' },
+		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0', pdptype: 'ipv4' },
+	},
+});
+eq(r.contexts.wan.pdp_type, 'ipv4', 'net: legacy pdptype alias honoured');
+
+// mux: two interfaces on one wwand_modem
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'rmnet' },
+		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0', device: 'wwan0m1', apn: 'internet' },
+		ims: { '.type': 'interface', proto: 'qmi', modem: 'm0', device: 'wwan0m2', apn: 'ims' },
+	},
+});
+eq(r.contexts.wan.mux_id, 1, 'net-mux: wan channel 1');
+eq(r.contexts.ims.mux_id, 2, 'net-mux: ims channel 2');
+eq(r.contexts.wan.modem, 'm0', 'net-mux: both share the modem');
+eq(r.contexts.ims.modem, 'm0', 'net-mux: both share the modem (2)');
+
+// guards
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1' },
+		bad_sim: { '.type': 'wwand_sim', modem: 'm0' },              // no iccid
+		orphan: { '.type': 'wwand_sim', modem: 'nope', iccid: 'x' }, // unknown modem
+		wan: { '.type': 'interface', proto: 'qmi', modem: 'ghost' }, // unknown modem
+	},
+});
+ok(length(filter(r.warnings, w => index(w, 'no iccid') >= 0)) == 1, 'guard: wwand_sim without iccid warns');
+ok(length(filter(r.warnings, w => index(w, "unknown modem 'nope'") >= 0)) == 1, 'guard: sim unknown modem warns');
+ok(length(filter(r.warnings, w => index(w, "unknown modem 'ghost'") >= 0)) == 1, 'guard: interface unknown modem warns');
+eq(r.contexts.wan, null, 'guard: interface with unknown modem builds no context');
+
 done('test_config');
