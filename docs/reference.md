@@ -1,10 +1,10 @@
 # wwand package — configuration and API reference
 
-wwand is an event-driven QMI/MBIM connection manager for OpenWrt, written in
-ucode. It owns the modem's control port (`/dev/cdc-wdmX`), drives netifd, and
-exposes a ubus API. This document is the reference for configuration, the ubus
-API, diagnostics and troubleshooting. For the design rationale see
-`architecture.md`.
+wwand is an event-driven QMI / MBIM / NCM connection manager for OpenWrt, written
+in ucode. It owns the modem's control port, drives netifd, and exposes a ubus
+API. This document is the reference for configuration, the ubus API, diagnostics
+and troubleshooting. For the design rationale see [architecture.md](architecture.md);
+to add a modem, quirk or backend see [extending.md](extending.md).
 
 ## Configuration
 
@@ -341,7 +341,8 @@ PUK required).
 wwand adapts to per-model firmware quirks through small **pattern-gated tables**
 and **runtime capability probing** (`backend.choose`: try the QMI path, fall
 back to AT, cache the decision per modem). Adding a modem usually means
-extending a table, not branching the code.
+extending a table, not branching the code — see
+[docs/extending.md](extending.md) for the step-by-step.
 
 | Quirk | Mechanism | Example |
 |---|---|---|
@@ -380,9 +381,10 @@ and use `pdp_type ipv4v6` (some subscriptions reject IPv4-only).
 means the network is not granting EN-DC for this SIM (the tariff is LTE-only /
 DCNR-restricted). Nothing wwand or the modem can change.
 
-**Two connections over one modem?** Give the modem two `context` sections with
-different `mux_id` (and `apn`); QMAP multiplexing gives each its own `wwan0mN`
-L3 device. All contexts of a muxed modem get a channel.
+**Two connections over one modem?** Point two `interface` sections at the same
+`option modem`, each with a different `mux_id` (and `apn`); QMAP multiplexing
+gives each its own `wwan0mN` L3 device. All contexts of a muxed modem get a
+channel.
 
 **Switch to an eSIM profile?** Install `wwand-esim`, download a profile
 (`modem_esim op:download`), enable it (`op:enable`), and set `option sim_slot`
@@ -393,9 +395,12 @@ to the eUICC slot for a permanent switch — see
 `MBIM_OPEN` — a firmware bug, not wwand; stay on QMI. Switch back with
 `AT+QCFG="usbnet",0` + `AT+CFUN=1,1`, or `modem_set_protocol`.
 
-**Old `proto qmi` config — do I need to migrate?** No, it keeps working via the
-compat layer. To move to the native schema, run `/usr/libexec/wwand/migrate`
-(dry run) then `--apply`.
+**Old config — do I need to migrate?** No. The daemon reads every older format
+(legacy inline `proto qmi`, the previous `/etc/config/wwand`). Conversion to the
+network-native model happens automatically on install/upgrade (a uci-defaults
+script) and on LuCI save. It also converts **stock `proto mbim`/`proto ncm`**
+interfaces — required, since `wwand-mbim`/`wwand-ncm` replace those handlers. Run
+it by hand any time: `/usr/libexec/wwand/migrate` (dry run) then `--apply`.
 
 **Lock to a specific cell?** `option lock_4g 'earfcn:pci'` (LTE) or
 `option lock_5g 'pci:arfcn:scs:band'` (NR SA); `lock_persist 1` stores it in the

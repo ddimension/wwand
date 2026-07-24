@@ -1,7 +1,10 @@
 # wwand — architecture
 
-Status: after milestones M1–M6 + production use on a MikroTik Chateau 5G
-R17 ax (Quectel RG650E-EU, 5G NSA, two parallel PDP contexts).
+Status: three control backends (QMI, MBIM, NCM) behind one daemon-neutral
+contract, all config in `/etc/config/network`, native SIM/eSIM. In production on
+a MikroTik Chateau 5G R17 ax (Quectel RG650E-EU, 5G NSA, two parallel PDP
+contexts). RSS figures below are for the QMI-only base; MBIM/NCM add ~200–400 KB
+per modem and load only when their package is installed.
 
 ## 1. Measured baseline (Chateau)
 
@@ -19,19 +22,36 @@ R17 ax (Quectel RG650E-EU, 5G NSA, two parallel PDP contexts).
 ```
  native (C):   wwand_io.so       — message-oriented cdc-wdm/tty I/O
                                    (protocol-agnostic), rmnet netlink helper
- codec:        qmux.uc, tlv.uc, schema/*.uc      — QMI-specific, declarative
- session:      transport.uc (hub/routing), client.uc — correlation, indications
- statemachine: modem.uc, context.uc, sim.uc      — QMI flow logic
- system:       netlink.uc (datapath), recovery.uc, atcmd.uc (+atport)
- integration:  daemon.uc (registry/policy), config.uc (+compat), ubus.uc, main.uc
- shell:        wwand-proto.sh (thin netifd shim), init, hotplug
+ codec:        qmux.uc, tlv.uc, schema/*.uc      — QMI, declarative
+               mbim.uc, mbim-schema/*.uc         — MBIM, declarative
+ session:      transport.uc (hub/routing), client.uc (QMI correlation),
+               mbim_client.uc, qmi_over_mbim.uc (QMI-over-MBIM passthrough hub)
+ backends:     modem.uc/context.uc (QMI), modem_mbim/context_mbim (MBIM),
+               modem_ncm/context_ncm (NCM/AT) — one daemon-neutral contract
+               shared core: modem_common.uc, context_common.uc, backend.uc,
+                            qmi_backend.uc, mbim_backend.uc, sim.uc
+ system:       netlink.uc (datapath), recovery.uc, atcmd.uc (+atport),
+               discovery.uc (control-type detection), modeswitch/protocol_switch
+ integration:  daemon.uc (registry/policy), config.uc (+migrate/compat),
+               ubus.uc, main.uc
+ shell:        wwand-proto.sh (thin netifd shim, proto `qmi`), init, hotplug,
+               wwand-migrate + uci-defaults (config auto-migration)
 ```
+
+The three control backends (QMI, MBIM, NCM) sit behind one **daemon-neutral
+contract** (`docs/backend-interface.md`): identical modem methods and an
+identical context `settings` shape, so everything above the backend layer is
+protocol-agnostic. `discovery.resolve_control` picks the backend per modem from
+the driver/device. Backends load lazily and ship as **separate packages**
+(`wwand-qmi` / `wwand-mbim` / `wwand-ncm`) on a backend-neutral `wwand` base; a
+missing backend package is reported (`control_note` in `status()`), not fatal.
+All configuration lives in `/etc/config/network` (see `docs/reference.md`).
 
 Design principles, all validated in the field:
 
 - **Effect injection everywhere** (`fx`, `transport_open`, `deps`): the whole
-  logic runs host-side against mocks — ~480 checks; every field bug becomes
-  a scenario in the suite.
+  logic runs host-side against mocks — ~1,060 checks across 27 suites; every
+  field bug becomes a scenario in the suite.
 - **Declarative message schemas** (field tables verified against libqmi's
   JSON definitions) instead of generated code.
 - **All state per modem/context instance** — multi-modem is a requirement,
@@ -143,58 +163,116 @@ Connection bring-up never depends on AT.
 
 ## 4. Maintainability review — open items
 
-1. `modem.uc` (~900 lines) should split: telemetry + LOC into
-   `telemetry.uc`, WDA negotiation into its own module.
+The cross-backend duplication (scaffolding, fail/backoff, the telemetry watch
+loop, the zero-rx watchdog) has been consolidated into `modem_common.uc` /
+`context_common.uc`; the remaining fork between the three backends is genuine
+per-protocol logic (step chains, teardown, `with_nas`). Open items:
+
+1. `modem.uc` telemetry + LOC could move into a `telemetry.uc`, and WDA
+   negotiation into its own module.
 2. A ~25-line `series()` helper would flatten the deeper callback chains
    (`_read_info`, sim flows).
 3. Error objects are ad hoc; an `errors.uc` with constants and a QMI
    error-code name table would improve logs and grep-ability.
-4. The shell context monitor costs 3 processes per context (sh + pipeline
-   subshell + `ubus listen`); the subshell can be eliminated.
-5. Recovery persistence writes on every counter change; a dirty-flag with a
+4. Recovery persistence writes on every counter change; a dirty-flag with a
    1 s timer would throttle failure storms (tmpfs, so hygiene only).
 
-## 5. MBIM integration plan (next milestone)
+(The old per-interface shell monitor is gone — the no-proto-task model in §3
+removed it entirely, so its process cost no longer applies.)
 
-MBIM is, like QMI, a binary message protocol over `/dev/cdc-wdmX` (driver
-`cdc_mbim`) — **the native I/O layer and the hub stay unchanged**.
-Differences: UUID-addressed services instead of QMUX service ids, UTF-16LE
-strings with offset/length pairs, message fragmentation, sessions instead of
-mux ids, datapath via cdc_ncm (session ↔ VLAN mapping).
+### Control backends (QMI, MBIM, NCM)
 
-New/changed modules:
+`discovery.resolve_control` classifies each modem by its driver/device and
+builds the matching backend; all three satisfy the same contract, so nothing
+above cares which one is in use.
 
 ```
- codec/mbim.uc              framing (OPEN/CLOSE/COMMAND/INDICATE), txn ids,
-                            fragments, field codec (u32le, uuid, utf16, offsets)
- codec/mbim-schema/basic_connect.uc
-                            DEVICE_CAPS, SUBSCRIBER_READY, PIN, REGISTER_STATE,
-                            PACKET_SERVICE, SIGNAL_STATE, CONNECT, IP_CONFIGURATION
- mbim_client.uc             pending map + timeouts + indication dispatch
- modem_mbim.uc              OPEN → caps/ready → PIN → register → attach → READY
- context_mbim.uc            CONNECT(session) → IP_CONFIGURATION → settings
- netlink.uc                 + 'mbim' backend: session links as VLANs (native
-                            rtnl), NCM buffer tuning via cdc_ncm rx_max/tx_max
- discovery.uc               driver detection qmi_wwan|cdc_mbim → protocol
- daemon.uc                  modem/context factory by protocol
- config.uc                  modem option protocol 'auto|qmi|mbim'
+              ┌──────────── daemon-neutral contract ─────────────┐
+              │ modem: start/stop/state/with_nas/attach_context/ │
+              │        note_connect_*/switch_protocol + events    │
+              │ context settings: {ipv4{…}, ipv6{…}, mtu}         │
+              └──────────────────────────────────────────────────┘
+                   │                  │                    │
+               ┌───┴───┐         ┌────┴────┐          ┌────┴───┐
+               │  QMI  │         │  MBIM   │          │  NCM   │
+               │ modem │         │ modem   │          │ modem  │
+               └───┬───┘         └────┬────┘          └───┬────┘
+      native qmux  │      native MBIM │  + QMI-over-MBIM  │  AT commands
+                   │    (MS BasicConn)│    passthrough    │
+                   ▼                  ▼   (reuses QMI)     ▼
+            /dev/cdc-wdmX       /dev/cdc-wdmX        /dev/ttyUSBx  +
+             (qmi_wwan)          (cdc_mbim)          cdc_ncm/cdc_ether
 ```
 
-The key contract: **contexts produce an identical `settings` object**
-(`{ipv4{addr,prefix,gateway,dns[]}, ipv6{addr,plen,gateway,dns[]}, mtu}`)
-for both protocols — the netifd shim, the ubus API and any UI stay
-protocol-neutral. Recovery, the AT engine (port discovery works on USB ids,
-independent of the driver), telemetry framing, config and compat are reused.
+- **QMI** — native QMUX over `/dev/cdc-wdmX`, the reference backend.
+- **MBIM** — native **MS Basic Connect Extensions** (v2/v3) for telemetry, plus a
+  **QMI-over-MBIM passthrough** (`qmi_over_mbim.uc`): a hub-shim that tunnels raw
+  QMUX frames through the MBIM `QMI` service, so the entire QMI stack
+  (`client.uc`, schemas, `qmi_backend.uc`) runs unchanged over the open MBIM
+  channel. This is why `wwand-mbim` depends on `wwand-qmi`. **Invariant: never
+  send CTL SYNC over the passthrough** — it resets the modem's embedded QMI state
+  and kills the live MBIM data session (HW-proven on EG06); the shim blocks it
+  structurally.
+- **NCM** — AT-controlled (`modem_ncm.uc` `VENDORS` recipes) over a plain
+  `cdc_ncm`/`cdc_ether` netdev, for modems with no cdc-wdm control device.
 
-Estimated effort: ~1,500 lines of ucode plus tests. Expected memory cost:
-+200–400 KB per MBIM modem instance; the daemon base stays as is.
-Hardware test path: the RG650E can be switched to MBIM via
-`AT+QCFG="usbnet"`.
+Shared logic is extracted once and installed by every backend:
+`modem_common.uc` (state/context scaffolding, `make_fail`, the adaptive
+telemetry `watch_driver`, AT bring-up, lazy `at2`) and `context_common.uc`
+(zero-rx watchdog). A PPP-only modem is mode-switched once (`modeswitch.uc`) to a
+richer usbnet mode and rebuilt by hotplug.
 
-## 6. Roadmap
+## 6. SIM, eSIM & eUICC
 
-1. Packaging into the target build system (feed), soak testing (24 h,
-   fd/CID leaks), iperf3 throughput comparison of aggregation sizes.
-2. MBIM milestone as above.
-3. Byte-trace captures from real modems as codec regression fixtures.
-4. Cell-lock automation on top of `modem_cells` telemetry; LuCI status page.
+wwand owns the modem's UIM channel end to end, so SIM handling is native — no
+separate AT port or helper daemon.
+
+- **SIM** — PIN unlock (UIM `VERIFY_PIN` → DMS fallback, retry-guarded), multi-
+  slot switching (`modem_sim_slots` / `modem_sim_switch_slot`), PIN
+  enable/disable (`modem_sim_pin_lock`), and per-SIM config overrides
+  (`config wwand_sim`, matched by ICCID) that pick the PIN/APN for the inserted
+  card before unlock (the MF-level ICCID is readable while locked).
+- **eSIM (eUICC)** — native **ES10c** profile management (list / enable / disable
+  / delete) over the UIM APDU channel, plus **SM-DP+ provisioning** driven by a
+  bundled **lpac** (optional `wwand-esim` package). The download runs the ES9+
+  HTTPS on the router over the existing WAN — no dedicated provisioning APN:
+
+```
+  LuCI / ubus  ──►  daemon: modem_esim(op:"download", activation_code)
+                       │
+                       ▼
+              esim_bridge spawns lpac  (env LPAC_APDU=stdio LPAC_HTTP=curl)
+                       │
+        ES9+ HTTPS ────┤  lpac ⇄ SM-DP+   (profile download, over the WAN)
+                       │
+        ES10 APDUs ────┤  lpac stdio ⇄ daemon ⇄ modem UIM
+                       │                 (ubus modem_apdu — wwand stays the
+                       │                  sole owner of the modem)
+                       ▼
+              profile installed on the eUICC
+                       │
+              op:"enable" ──► ES10c ENABLE + eUICC REFRESH ──► SIM re-init
+                       │                                       ──► re-register
+                       ▼
+              set `option sim_slot` to the eUICC slot = permanent boot default
+```
+
+lpac is either the stock openwrt-packages `lpac` or the bundled `wwand-lpac`
+(both provide `/usr/bin/lpac`); the stdio APDU bridge needs lpac ≥ 2.3.0.
+
+## 7. Configuration & migration
+
+All config lives in `/etc/config/network` (WireGuard-style typed sections):
+`wwand_modem` (hardware + SIM slot + radio), `wwand_sim` (per-ICCID override),
+`interface` with `proto qmi` + `option modem` (the connection), `wwand_globals`.
+The daemon reads every older format too (legacy inline `proto qmi`, the previous
+`/etc/config/wwand`), and `config.migrate_plan` converts old configs — including
+**stock `proto mbim`/`proto ncm`** interfaces, which `wwand-mbim`/`wwand-ncm`
+replace — to the new model. Conversion is automatic (a uci-defaults script runs
+the migrator on install/upgrade) and on LuCI save. See `docs/reference.md`.
+
+## 8. Roadmap
+
+1. Byte-trace captures from real modems as codec regression fixtures.
+2. QMI-native cell-lock / PDC (replacing the AT `QNWLOCK` / `QMBNCFG` quirks).
+3. Wider modem coverage in the quirk tables (see `docs/extending.md`).
