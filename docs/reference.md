@@ -128,6 +128,10 @@ config modem 'm0'
 	option device '/dev/cdc-wdm0'    # control port, or a netdev name (`wwan0`)
 	                                 # or `option path '1-1.2'` (optional stable USB
 	                                 #   anchor; `usb_path` still accepted)
+	option serial '99efe861'         # bind by USB iSerial — stable identity, matched
+	                                 #   pre-open; follows the modem across re-enum
+	option imei '868965060008609'    # bind by IMEI — verified post-open; a mismatch
+	                                 #   blocks bring-up (wrong-modem safety)
 	option tty ''                    # AT port override (auto-detected otherwise)
 	option pincode '1234'            # SIM PIN; entered on each start
 	option sim_slot '0'              # physical slot to activate (0 = leave as-is)
@@ -147,6 +151,18 @@ config modem 'm0'
 	option proto_error_limit '25'    # protocol-error ceiling before a reboot (gated by failreboot)
 	option zero_rx_timeout '21600'   # no-rx watchdog in seconds (0 = off)
 ```
+
+**Binding a modem to hardware.** The anchors are tried most-stable first:
+`serial` (USB iSerial, matched in sysfs before the modem is opened) → `imei`
+(read after open and *verified* — a mismatch halts bring-up so the wrong physical
+modem never gets this SIM/APN) → the topological anchors `device` / `path` /
+netdev. `serial` and `imei` follow the modem across re-enumeration, a port change,
+or two identical modems; the topological anchors do not. An empty or duplicated
+iSerial is treated as ambiguous and falls back to the next anchor. With
+`auto_correct_config` set, a modem that pinned no `imei` learns the one it
+discovers (written back onto its `wwand_modem` section) so a loose config
+self-stabilises. The LuCI Modems page and the inline interface editor populate the
+serial/IMEI fields from `ubus call wwand modem_probe`.
 
 ### Context section
 
@@ -249,6 +265,7 @@ when called from LuCI).
 | `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor |
 | `modem_plmn_lists` | `modem` | preferred/forbidden PLMN lists |
 | `modem_sim_slots` | `modem` | physical slots: card presence, active, ICCID, eUICC flag, EID |
+| `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
 | `modem_sim_switch_slot` | `modem`, `slot` | switch the active physical SIM slot (drops the connection) |
 | `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
 | `modem_esim` | `modem`, `op`, … | eSIM (list/enable/disable/eid/download/…); needs the optional `wwand-esim` package |
