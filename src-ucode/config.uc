@@ -47,6 +47,7 @@ export function modem_defaults(over)
 	return {
 		device: null, netdev: null, usb_path: null, reset_gpio: null,
 		serial: null, imei: null,   // stable identity anchors (USB iSerial / IMEI)
+		repower_time: null,         // recovery power-cycle off / reset hold seconds
 		pincode: null, modes: null, mcc: null, mnc: null,
 		mux: 'auto', dl_datagram_max_size: 0, tty: null,
 		at_init: [], location: false, delay: 0,
@@ -108,6 +109,7 @@ function modem_from_section(s)
 		// port changes — see discovery.resolve_modem_device / daemon identity check.
 		serial: s.serial,
 		imei: s.imei,
+		repower_time: (s.repower_time != null) ? +s.repower_time : null,
 		// optional named GPIO wired to the modem RESET line; when set, recovery
 		// pulses it instead of power-cycling (see board.uc / daemon repower).
 		reset_gpio: s.reset_gpio,
@@ -301,6 +303,9 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 
 	if (s.imei != null)
 		modem.imei = s.imei;
+
+	if (s.repower_time != null)
+		modem.repower_time = +s.repower_time;
 
 	if (s.zero_rx_timeout != null)
 		modem.zero_rx_timeout = +s.zero_rx_timeout;
@@ -579,7 +584,8 @@ export function parse(raw)
 const MIGRATE_MODEM_OPTS = [ 'device', 'netdev', 'serial', 'imei', 'tty', 'mux',
 	'dl_datagram_max_size', 'sim_slot', 'pincode', 'modes', 'mcc', 'mnc',
 	'lock_4g', 'lock_5g', 'lock_persist', 'at_init', 'location', 'delay',
-	'failreboot', 'proto_error_limit', 'zero_rx_timeout', 'stats_interval' ];
+	'failreboot', 'proto_error_limit', 'zero_rx_timeout', 'stats_interval',
+	'repower_time' ];
 // options only stripped OFF the interface (moved to nowhere): the optional USB
 // anchor and legacy per-family flags/junk have no place on the interface.
 const MIGRATE_STRIP_IFACE = [ 'usb_path', 'path', 'ctldevice', 'dhcp',

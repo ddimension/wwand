@@ -20,7 +20,9 @@ file for new setups:
   pincode, modes, mcc, mnc, lock_4g/5g/persist, at_init, location, delay,
   failreboot, zero_rx_timeout, stats_interval, dl_datagram_max_size, and
   **`reset_gpio`** — a named GPIO wired to the modem RESET line, pulsed by the
-  recovery ladder instead of a USB power-cycle (see [Board integration](#board-integration)).
+  recovery ladder instead of a USB power-cycle (see [Board integration](#board-integration)) —
+  and **`repower_time`** (seconds, default 30) — how long the modem is held
+  de-powered during a recovery power-cycle, or held in reset when `reset_gpio` is used.
 - **`config wwand_sim '<name>'`** *(optional)* — a per-SIM override, matched at
   runtime to the inserted card by `option modem` + `option iccid`: overrides the
   modem's `pincode` and, optionally, `apn`/`auth`/`username`/`password` for that
@@ -150,6 +152,7 @@ config modem 'm0'
 	option failreboot '100'          # attempts before the final reboot rung (0 = never reboot)
 	option proto_error_limit '25'    # protocol-error ceiling before a reboot (gated by failreboot)
 	option zero_rx_timeout '21600'   # no-rx watchdog in seconds (0 = off)
+	option repower_time '30'         # recovery power-cycle off / reset-hold seconds
 ```
 
 **Binding a modem to hardware.** The anchors are tried most-stable first:
@@ -363,8 +366,8 @@ built-in profile.
 
 - **Power / reset** — a profile may expose a modem power GPIO and/or a reset
   GPIO. The recovery ladder's hardware rung uses them (a modem `reset_gpio` in
-  config, or the board default, is **pulsed** — read, inverted, held 30 s,
-  restored; otherwise the USB power is **power-cycled**), fully replacing the old
+  config, or the board default, is **pulsed** — read, inverted, held for
+  `repower_time` (default 30 s), restored; otherwise the USB power is **power-cycled**), fully replacing the old
   external `usb-repower` tool. Trigger it by hand with `modem_repower` (a "Reset
   modem" button in LuCI) to recover a modem that hung or dropped off the USB bus.
   A modem `reset_gpio` works **without** a board profile, so any router can wire a

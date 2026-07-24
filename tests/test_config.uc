@@ -11,7 +11,8 @@ let r = config.parse({
 	wwand: {
 		globals: { '.type': 'wwand', log_level: 'debug', hold_max: '120' },
 		m0: { '.type': 'modem', device: '/dev/cdc-wdm0', pincode: '1234',
-		      modes: 'lte,nr5g', mux: 'auto', at_init: [ 'ATI' ], location: '1' },
+		      modes: 'lte,nr5g', mux: 'auto', at_init: [ 'ATI' ], location: '1',
+		      serial: '99efe861', imei: '868965060008609', repower_time: '10' },
 		wan_ctx: { '.type': 'context', modem: 'm0', apn: 'internet',
 		           pdp_type: 'ipv4v6', mux_id: '0' },
 		wan2_ctx: { '.type': 'context', modem: 'm0', apn: '#2',
@@ -29,6 +30,9 @@ eq(r.modems.m0.device, '/dev/cdc-wdm0', 'new: modem device');
 eq(r.modems.m0.at_init, [ 'ATI' ], 'new: at_init list');
 eq(r.modems.m0.location, true, 'new: location bool');
 eq(r.modems.m0.failreboot, 100, 'new: failreboot default');
+eq(r.modems.m0.serial, '99efe861', 'new: modem serial anchor');
+eq(r.modems.m0.imei, '868965060008609', 'new: modem imei anchor');
+eq(r.modems.m0.repower_time, 10, 'new: repower_time parsed (seconds)');
 eq(r.contexts.wan_ctx.modem, 'm0', 'new: context modem ref');
 eq(r.contexts.wan_ctx.interface, 'wan', 'new: interface attached');
 eq(r.contexts.wan2_ctx.mux_id, 2, 'new: mux id');

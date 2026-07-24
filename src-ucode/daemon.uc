@@ -656,7 +656,8 @@ export function create(opts)
 				// modem's USB power GPIO. No-op (null) when the board has neither.
 				repower: deps.board ? (() => {
 					let rg = cfg.reset_gpio ?? deps.board.profile?.reset_gpio;
-					return rg ? deps.board.reset_pulse(rg) : deps.board.power_cycle();
+					let off = cfg.repower_time ? +cfg.repower_time * 1000 : null;
+					return rg ? deps.board.reset_pulse(rg, off) : deps.board.power_cycle(off);
 				}) : null,
 			},
 			at: {
@@ -1522,12 +1523,13 @@ export function create(opts)
 			for (let n, e in self.modems) { cfg = e.cfg; break; }
 
 		let rg = cfg?.reset_gpio ?? deps.board.profile?.reset_gpio;
+		let off = cfg?.repower_time ? +cfg.repower_time * 1000 : null;
 
 		if (rg)
-			return deps.board.reset_pulse(rg) ?
+			return deps.board.reset_pulse(rg, off) ?
 				{ ok: true, action: 'reset', gpio: rg } : { error: 'reset_gpio_unavailable' };
 
-		return deps.board.power_cycle() ?
+		return deps.board.power_cycle(off) ?
 			{ ok: true, action: 'power_cycle' } : { error: 'no_power_control' };
 	};
 

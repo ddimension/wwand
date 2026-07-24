@@ -104,6 +104,16 @@ ok(fx.has(`${L}/green:lte/brightness=255`), 'lte5398: green:lte on when register
 ok(fx.has(`${L}/red:lte/brightness=0`), 'lte5398: red:lte off when registered');
 ok(fx.has(`${L}/orange:lte/brightness=0`), 'lte5398: orange:lte off when not roaming');
 
+// power_cycle / reset_pulse accept a per-modem duration override (repower_time)
+fx = mkfx({ [`${G}/lte_power/value`]: '1' });
+b = board.create({ id: 'zyxel,lte5398-m904', fx: fx, log: () => {} });
+ok(b.power_cycle(2000), 'repower_time: power_cycle accepts an off-duration override');
+ok(fx.has(`${G}/lte_power/value=0`), 'repower_time: power-cycle still de-powers');
+fx = mkfx({ [`${G}/mygpio/value`]: '1' });
+b = board.create({ id: 'zyxel,lte3301-plus', fx: fx, log: () => {} });
+ok(b.reset_pulse('mygpio', 2000), 'repower_time: reset_pulse accepts a hold override');
+ok(fx.has(`${G}/mygpio/value=0`), 'repower_time: reset still asserted');
+
 // --- 5. unknown board: every op a safe no-op ---------------------------------
 fx = mkfx({});
 b = board.create({ id: 'acme,unknown-router', fx: fx, log: () => {} });

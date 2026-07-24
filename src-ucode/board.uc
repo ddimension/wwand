@@ -18,7 +18,7 @@ import * as uloop from 'uloop';
 const GPIO_DIR = '/sys/class/gpio';
 const LED_DIR = '/sys/class/leds';
 // how long a power-cycle keeps the modem powered off / a reset GPIO stays asserted
-const POWER_OFF_MS = 3000;
+const POWER_OFF_MS = 30000;      // default de-power duration (config repower_time)
 const RESET_ASSERT_MS = 30000;   // per spec: invert, wait 30 s, restore
 
 export function default_fx()
@@ -265,13 +265,17 @@ export function create(opts)
 	// power-cycle the board's modem USB power: off, then on after a delay. Used
 	// by the recovery ladder to recover a hung / vanished modem. Returns true if
 	// a power GPIO exists (i.e. the cycle was initiated).
-	self.power_cycle = function() {
+	// `off_ms` optionally overrides the off duration (config `repower_time`).
+	self.power_cycle = function(off_ms) {
 		if (!profile?.power_gpio)
 			return false;
 
-		log('err', sprintf('board %s: power-cycling modem (gpio %s)', id, profile.power_gpio));
+		let off = (off_ms > 0) ? off_ms : power_off_ms;
+
+		log('err', sprintf('board %s: power-cycling modem (gpio %s, off %ds)',
+			id, profile.power_gpio, off / 1000));
 		gpio_set(profile.power_gpio, 0);
-		uloop.timer(power_off_ms, () => gpio_set(profile.power_gpio, 1));
+		uloop.timer(off, () => gpio_set(profile.power_gpio, 1));
 
 		return true;
 	};
@@ -280,20 +284,22 @@ export function create(opts)
 	// per-modem `reset_gpio` (config) or the board default. Per spec: read the
 	// current level, drive the inverse, wait 30 s, drive the original back.
 	// Returns true if a usable reset GPIO was found.
-	self.reset_pulse = function(name) {
+	// `hold_ms` optionally overrides the assert duration (config `repower_time`).
+	self.reset_pulse = function(name, hold_ms) {
 		let g = name ?? profile?.reset_gpio;
 
 		if (!g)
 			return false;
 
+		let hold = (hold_ms > 0) ? hold_ms : reset_ms;
 		let cur = gpio_read(g);
 		// default the "rest" level to high (1) when we cannot read it
 		let rest = (cur == '0') ? 0 : 1;
 
 		log('err', sprintf('board %s: asserting modem reset (gpio %s) for %ds',
-			id ?? '?', g, RESET_ASSERT_MS / 1000));
+			id ?? '?', g, hold / 1000));
 		gpio_set(g, rest ? 0 : 1);
-		uloop.timer(reset_ms, () => {
+		uloop.timer(hold, () => {
 			gpio_set(g, rest);
 			log('notice', sprintf('board %s: modem reset released (gpio %s)', id ?? '?', g));
 		});
