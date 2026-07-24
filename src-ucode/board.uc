@@ -199,6 +199,17 @@ const PROFILES = {
 			tech: 'lte3301:green:lte',
 		}, s),
 	},
+	// Zyxel LTE5398-M904: `lte_power` gates the modem's USB power (wired active-low
+	// at HW, but the sysfs gpio applies the inversion, so value 1 = on, default 1).
+	// The dedicated modem RESET (gpio-531) is not exported by name in board.json,
+	// so recovery power-cycles `lte_power`; a user can still point a per-modem
+	// `reset_gpio` at an exported reset line. Three gpio-LED status lights.
+	'zyxel,lte5398-m904': {
+		power_gpio: 'lte_power',
+		leds: (fx, s) => render_mobile(fx, {
+			red: 'red:lte', green: 'green:lte', orange: 'orange:lte',
+		}, s),
+	},
 	// nr7101: no modem-power GPIO and only shared system LEDs (owned by the OS) —
 	// a deliberately empty profile (detected, but every op a no-op).
 	'zyxel,nr7101': {},

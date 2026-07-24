@@ -90,6 +90,20 @@ b = board.create({ id: 'zyxel,lte3301-plus', fx: fx, reset_ms: 5, log: () => {} 
 ok(b.reset_pulse('mygpio'), 'reset_pulse: per-modem gpio accepted');
 ok(fx.has(`${G}/mygpio/value=1`), 'reset_pulse: inverted from 0 to 1');
 
+// --- 4b. Zyxel LTE5398-M904: lte_power power-cycle + :lte status LEDs ---------
+fx = mkfx({ [`${G}/lte_power/value`]: '1' });
+b = board.create({ id: 'zyxel,lte5398-m904', fx: fx, power_off_ms: 5, log: () => {} });
+ok(b.has_power, 'lte5398: has power gpio (lte_power)');
+ok(b.power_cycle(), 'lte5398: power_cycle returns true');
+ok(fx.has(`${G}/lte_power/value=0`), 'lte5398: powered off via lte_power');
+
+fx = mkfx({});
+b = board.create({ id: 'zyxel,lte5398-m904', fx: fx, log: () => {} });
+b.leds({ present: true, registered: true, radio: 'lte', roaming: false });
+ok(fx.has(`${L}/green:lte/brightness=255`), 'lte5398: green:lte on when registered');
+ok(fx.has(`${L}/red:lte/brightness=0`), 'lte5398: red:lte off when registered');
+ok(fx.has(`${L}/orange:lte/brightness=0`), 'lte5398: orange:lte off when not roaming');
+
 // --- 5. unknown board: every op a safe no-op ---------------------------------
 fx = mkfx({});
 b = board.create({ id: 'acme,unknown-router', fx: fx, log: () => {} });
