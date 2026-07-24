@@ -216,6 +216,10 @@ export function create(opts)
 					self.info.model ?? '?', self.info.imei ?? '?',
 					self.info.imsi ?? '?', self.info.iccid ?? '?'));
 
+				// stable-identity gate (see modem_common.check_identity)
+				if (!modem_common.check_identity(self, { emit: emit, log: log }))
+					return;
+
 				step_at();
 			});
 		});

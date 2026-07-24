@@ -58,6 +58,45 @@ export function dsd_from_radio(radio_ifs)
 	return mode ? { mode: mode, lte: lte, nr: nr } : null;
 }
 
+// IMEI digits that uniquely identify a device: TAC (8) + serial (6) = 14. Drops
+// the trailing IMEI check digit and the IMEISV software-version, so a modem that
+// reports IMEI (15) and a config that pinned IMEISV (16) — or vice versa — still
+// compare equal. Non-digits (spaces, dashes) are stripped.
+function imei_key(s)
+{
+	return substr(replace(sprintf('%s', s ?? ''), /[^0-9]/g, ''), 0, 14);
+}
+
+// check_identity(self, o): the post-open identity gate, backend-neutral. Call it
+// right after self.info.imei is populated. Always emits 'identity' (so the daemon
+// can learn/record the IMEI); when the config pinned `imei` and the modem reports
+// a DIFFERENT device, this is the wrong physical modem for this config — bringing
+// it up would apply the wrong SIM/PIN/APN — so it emits 'identity_mismatch' and
+// returns false (the caller must halt its bring-up chain). Returns true to proceed.
+//   o.emit — the scaffolding emit helper
+//   o.log  — (level, msg) => …
+export function check_identity(self, o)
+{
+	let got = self.info?.imei;
+	let want = self.config?.imei;
+
+	if (got != null && got != '')
+		o.emit('identity', { imei: got, serial: self.config?.serial, model: self.info?.model });
+
+	if (!want || got == null || got == '')
+		return true;
+
+	if (imei_key(want) == imei_key(got))
+		return true;
+
+	o.log('err', sprintf('identity mismatch: configured IMEI %s, modem reports %s — not binding this modem',
+		want, got));
+	self.identity_mismatch = { expected: want, found: got };
+	o.emit('identity_mismatch', self.identity_mismatch);
+
+	return false;
+}
+
 // scaffolding(self, o): install the protocol-neutral modem plumbing that was
 // copy-pasted byte-for-byte into all three state machines (modem.uc /
 // modem_mbim.uc / modem_ncm.uc) — state transitions, context attach/notify, and

@@ -225,6 +225,29 @@ export function create(opts)
 		case 'removed':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
 			break;
+
+		// stable-identity gate (modem_common.check_identity). 'identity' fires on
+		// every open once the IMEI is known; 'identity_mismatch' means the pinned
+		// IMEI does not match this physical modem and its bring-up chain halted.
+		case 'identity':
+			// learn-back: a config that did NOT pin an IMEI records the one just
+			// discovered, so a fresh install self-stabilises. Gated by
+			// auto_correct_config and only for a real wwand_modem section (not a
+			// synthesized compat modem, which has no uci section to write).
+			if (deps.learn_identity && self.modems[modem.id] &&
+			    !self.modems[modem.id].cfg?.imei &&
+			    self.modems[modem.id].cfg?.auto_correct_config)
+				deps.learn_identity(modem.id, data ?? {});
+			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
+			break;
+
+		case 'identity_mismatch':
+			if (self.modems[modem.id])
+				self.modems[modem.id].control_note = sprintf(
+					'identity mismatch: configured IMEI %s, modem reports %s',
+					data?.expected ?? '?', data?.found ?? '?');
+			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
+			break;
 		}
 	};
 
@@ -995,6 +1018,7 @@ export function create(opts)
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,
 				imei: entry.modem?.info?.imei,
+				identity_mismatch: entry.modem?.identity_mismatch,   // {expected,found} if the pinned IMEI didn't match
 				at_tty: entry.modem?.at_tty,
 				registration: entry.modem?.reg,
 				registration_detail: entry.modem?.reg_detail,

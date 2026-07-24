@@ -467,6 +467,12 @@ export function create(opts)
 			log('notice', sprintf('%s %s, revision %s, imei %s',
 				self.info.manufacturer ?? '?', self.info.model,
 				self.info.revision, self.info.imei));
+
+			// stable-identity gate: halt before touching SIM/context if the
+			// pinned IMEI does not match this physical modem.
+			if (!modem_common.check_identity(self, { emit: emit, log: log }))
+				return;
+
 			next();
 		});
 	};

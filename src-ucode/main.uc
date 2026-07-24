@@ -214,6 +214,23 @@ function run_daemon()
 			// unknown board). Recovery power-cycles/resets the modem through it.
 			board: board.create({ log: (level, msg) => logmod.log(level, '%s', msg) }),
 			resolve_modem_device: discovery.resolve_modem_device,
+			// learn-back: record a discovered IMEI onto its wwand_modem section so
+			// a loose config self-stabilises (daemon gates this on auto_correct_config
+			// and a real section). Best-effort; never blocks bring-up.
+			learn_identity: (section, info) => {
+				if (!info?.imei)
+					return;
+				let cursor = libuci.cursor();
+				if (cursor.get('network', section) == null)
+					return;   // not a real section (e.g. a compat_* synthesized modem)
+				if (cursor.get('network', section, 'imei') == info.imei)
+					return;   // already recorded
+				cursor.set('network', section, 'imei', info.imei);
+				if (info.serial && !cursor.get('network', section, 'serial'))
+					cursor.set('network', section, 'serial', info.serial);
+				cursor.commit('network');
+				logmod.log('notice', 'learn_identity: recorded IMEI %s on modem %s', info.imei, section);
+			},
 			resolve_netdev: discovery.resolve_netdev,
 			resolve_protocol: discovery.protocol_of,
 			// the "how is this modem controlled" decision (qmi/mbim/ncm/ppp),

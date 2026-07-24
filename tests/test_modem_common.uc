@@ -409,4 +409,44 @@ ok(index(l, 'lock_4g=1300:246') >= 0, 'ft-ncm: cell lock shown');
 l = mc.format_telemetry({ reg: {}, signal: { lte: { rssi: -50, rsrp: -32768, snr: -32768 } }, config: {} });
 ok(index(l, 'sig_lte=[rssi -50]') >= 0, 'ft: sentinel fields dropped');
 
+// --- check_identity: post-open stable-identity gate --------------------------
+let ci_events;
+let ci_emit = (ev, d) => push(ci_events, [ ev, d ]);
+let ci_log = (lvl, msg) => null;
+function mk_modem(imei, cfg_imei) {
+	return { info: { imei: imei, model: 'RGx' }, config: { imei: cfg_imei, serial: 'S1' } };
+}
+
+// no pinned IMEI -> proceed, but still emits 'identity' (for learn-back)
+ci_events = [];
+let ci1 = mk_modem('351234567890123', null);
+eq(mc.check_identity(ci1, { emit: ci_emit, log: ci_log }), true, 'identity: no pin -> proceed');
+eq(ci_events[0][0], 'identity', 'identity: emits identity event');
+eq(ci_events[0][1].imei, '351234567890123', 'identity: event carries the imei');
+eq(ci_events[0][1].serial, 'S1', 'identity: event carries the serial for learn-back');
+
+// exact match -> proceed
+eq(mc.check_identity(mk_modem('351234567890123', '351234567890123'), { emit: ci_emit, log: ci_log }),
+	true, 'identity: exact match -> proceed');
+
+// IMEISV (16 digits) matches the pinned IMEI (first 14 TAC+serial compared)
+eq(mc.check_identity(mk_modem('3512345678901288', '351234567890123'), { emit: ci_emit, log: ci_log }),
+	true, 'identity: IMEISV matches IMEI (first 14)');
+
+// punctuation/spaces ignored
+eq(mc.check_identity(mk_modem('35-123456-789012-3', '351234567890123'), { emit: ci_emit, log: ci_log }),
+	true, 'identity: punctuation ignored');
+
+// mismatch -> halt (false), records self.identity_mismatch, emits identity_mismatch
+ci_events = [];
+let ci4 = mk_modem('359999999999999', '351234567890123');
+eq(mc.check_identity(ci4, { emit: ci_emit, log: ci_log }), false, 'identity: mismatch -> halt');
+ok(ci4.identity_mismatch != null, 'identity: mismatch recorded on self');
+eq(ci4.identity_mismatch.found, '359999999999999', 'identity: records the found imei');
+eq(length(filter(ci_events, (e) => e[0] == 'identity_mismatch')), 1, 'identity: emits identity_mismatch');
+
+// pinned IMEI but the modem never reported one -> cannot validate, proceed
+eq(mc.check_identity(mk_modem(null, '351234567890123'), { emit: ci_emit, log: ci_log }),
+	true, 'identity: unknown modem imei -> proceed');
+
 done('test_modem_common');
