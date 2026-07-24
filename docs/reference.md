@@ -276,6 +276,9 @@ when called from LuCI).
 | `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
 | `modem_esim` | `modem`, `op`, … | eSIM (list/enable/disable/eid/download/…); needs the optional `wwand-esim` package |
 | `modem_apdu` | `modem`, `op`, … | raw ISO-7816 APDU channel (advanced) |
+| `modem_sms_list` | `modem`, `storage?` | list stored SMS (decoded: sender, timestamp, text, multipart merged); `storage` `SM` (SIM, default) or `ME` (modem) |
+| `modem_sms_read` | `modem`, `storage?`, `index` | read one stored SMS by index |
+| `modem_sms_delete` | `modem`, `storage?`, `index` | delete one stored SMS by index (write ACL) |
 | `modem_repower` | `modem?` | hardware repower: pulse the modem `reset_gpio` (or the board default), else power-cycle the modem USB power. Same path as the recovery ladder; recovers a hung / vanished modem |
 | `modem_set_protocol` | `modem`, `protocol` | switch the control protocol (`qmi` ⇄ `mbim`); the modem resets |
 | `context_up` / `context_down` | `context` or `interface` | connect / disconnect (deferred reply with the IP config) |
@@ -356,6 +359,27 @@ before reaching lpac.
 The LuCI **Network → Modem** settings page surfaces the profile list,
 enable/disable, the download form with live progress, and notification handling;
 the eSIM sections hide themselves when `wwand-esim` is not installed.
+
+## SMS
+
+Receive-only (list / read / delete stored messages — no send). `modem_sms_list`
+returns each message decoded — sender (incl. alphanumeric), timestamp, text
+(GSM 7-bit incl. umlauts, 8-bit, UCS2), with concatenated multipart messages
+merged. `storage` selects the **SIM** (`SM`, default) or the **modem** store
+(`ME`). Backend-neutral, chosen once per modem (`sms.uc`, like the APDU path):
+
+1. **QMI WMS** — native, or over the QMI-over-MBIM passthrough. The probe issues
+   a real *List Messages*, so a modem whose firmware rejects it (the Quectel
+   RG650E returns QMI `MISSING_ARGUMENT`) falls through instead of being picked.
+2. **native MBIM SMS** (`uuid_sms`) — for a pure-MBIM modem without the
+   passthrough; it has no storage selector (reads the modem's store), so it is
+   tried after QMI.
+3. **AT** — `AT+CPMS` + `AT+CMGF=0` + `CMGL`/`CMGR`/`CMGD` in PDU mode.
+
+The one GSM 03.40 PDU decoder (`sms_pdu.uc`) serves every backend. LuCI exposes
+an **SMS** section on the **Modem Tools** page: a storage selector, load, and a
+per-row delete. HW-validated on the RG650E (AT) and the EG06 (passthrough +
+native MBIM).
 
 ## Board integration
 

@@ -1,9 +1,29 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-23. 27 test suites green (~1005 checks); all committed.
-Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
-Deep-review follow-ups below: #1/#2/#4/#5 + the full minor-hardening list done;
-#3 scaffolding now consolidated (only the genuinely per-protocol logic remains)._
+_Last updated: 2026-07-25. All test suites green; all committed/pushed.
+Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## SMS + fixes (2026-07-25)
+
+- **SMS receive/list · read · delete** (no send) across all backends, HW-validated
+  on 245 (RG650E) + 246 (EG06). New `sms_pdu.uc` (GSM 03.40 decoder — 7-bit incl.
+  umlauts/UCS2/alphanumeric-sender/multipart, tested on real Vodafone PDUs),
+  `codec/schema/wms.uc` (QMI WMS, vs libqmi 1.38), `sms.uc` (backend ladder: QMI
+  WMS native/passthrough → native MBIM SMS → AT, probed by a real List so the
+  RG650E's `MISSING_ARGUMENT` falls to AT), `modem_mbim._ensure_wms` (passthrough)
+  + `mbim_backend.sms_read_all/sms_delete` (native `uuid_sms`, validated identical
+  to passthrough on the EG06). ubus `modem_sms_list/read/delete`; LuCI SMS tab on
+  Modem Tools. Tests: `test_sms_pdu`, `test_wms`, `test_sms`, `test_mbim_backend`.
+- **Fix — telemetry/serving:** `_update_serving` replaced `self.reg` wholesale, so
+  a cell-reselection SERVING_SYSTEM_IND that omits the optional Current-PLMN/roaming
+  TLV wiped the operator line; now carried forward.
+- **Fix — stuck-pending interface:** the `registered` handler treated a netifd
+  `pending` interface (orphaned after a wwand restart mid-setup) as "down" and
+  kicked it with a no-op `up`; now it `down`s a pending+IDLE interface first, then
+  re-runs setup (HW-validated self-heal on 245).
+
+_Earlier baseline: 27 suites (~1005 checks). Deep-review follow-ups #1/#2/#4/#5 +
+minor-hardening done; #3 scaffolding consolidated._
 
 ## Next TODO — deep-review follow-ups (2026-07-23)
 
