@@ -16,7 +16,8 @@ before every commit; reproduce a field problem as a mock scenario first.
 4. [Adding telemetry](#4-adding-telemetry)
 5. [Adding a ubus method](#5-adding-a-ubus-method)
 6. [Extending the LuCI UI](#6-extending-the-luci-ui)
-7. [Testing](#7-testing)
+7. [Adding a board profile](#7-adding-a-board-profile)
+8. [Testing](#8-testing)
 
 ---
 
@@ -225,7 +226,36 @@ on the router.
 
 ---
 
-## 7. Testing
+## 7. Adding a board profile
+
+Board-specific modem power/reset GPIOs and status LEDs live in one table in
+`src-ucode/board.uc`, keyed by the `/etc/board.json` model id. To support a new
+router, add an entry:
+
+```
+'vendor,my-router': {
+    power_gpio: 'modem-power',      // named GPIO gating modem USB power (optional)
+    reset_gpio: 'modem-reset',      // named GPIO on the modem RESET line (optional)
+    option_ids: [ '2c7c 0800' ],    // usb-serial `option` new_id binds (optional)
+    // render the panel from { present, registered, radio, roaming, bars }:
+    leds: (fx, s) => render_bars(fx, [ 'green:sig-1', 'green:sig-2', 'green:sig-3' ],
+                                 s.registered ? s.bars : 0),
+},
+```
+
+The GPIO / LED names are the kernel's line/LED names (`ls /sys/class/gpio`,
+`ls /sys/class/leds`). `leds(fx, s)` may use the helpers `render_bars` (an
+N-LED signal graph) or `render_mobile` (red/green(+orange) mobile + a tech LED);
+`bars` is derived by `bars_from_signal`. Everything goes through the injectable
+`fx` (read/write/list), so add a case to `test_board.uc` with a recording fx and
+assert the GPIO/LED writes — **no hardware needed**. An unknown board keeps the
+null profile (all ops no-op), so nothing else changes. The recovery ladder and
+the `modem_repower` ubus method pick this up automatically; the config
+`reset_gpio` option overrides the board default per modem.
+
+---
+
+## 8. Testing
 
 ```
 cd wwand/tests && sh run_tests.sh      # host-side, no hardware

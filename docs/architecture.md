@@ -15,7 +15,7 @@ per modem and load only when their package is installed.
 | ucode sources | 196 KB uncompressed | ≈ 40–50 KB on squashfs |
 | Native module | ~68 KB stripped | I/O + rmnet netlink helper |
 | Processes | **1 daemon, 0 per context** | no per-interface supervisor (no-proto-task) |
-| External spawns at runtime | 0 | only usb-repower/reboot in recovery |
+| External spawns at runtime | 0 | only reboot in recovery (repower is a board GPIO) |
 
 ## 2. Layering
 
@@ -197,10 +197,12 @@ preserve this.
 ### Recovery ladder
 
 Failed connection cycles climb: attempt 8 → operating-mode low-power/online
-cycle, 16 → modem offline/reset, 24 → usb-repower, > `failreboot` → system
+cycle, 16 → modem offline/reset, 24 → **hardware repower** — a modem/board
+`reset_gpio` pulse or a USB-power-cycle via the [board profile](reference.md#board-integration)
+(replacing the old external `usb-repower` tool) — > `failreboot` → system
 reboot. QMI request errors have a separate ceiling (25 → reboot). Counters
 persist in tmpfs across daemon restarts and are intentionally cleared by
-reboot. A zero-rx watchdog (packet stats delta) triggers usb-repower.
+reboot. A zero-rx watchdog (packet stats delta) triggers the same repower.
 
 ### Boot robustness
 

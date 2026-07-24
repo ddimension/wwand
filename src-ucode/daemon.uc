@@ -975,6 +975,7 @@ export function create(opts)
 				protocol: entry.protocol,
 				state: entry.modem?.state ?? 'UNRESOLVED',
 				control_note: entry.control_note,   // e.g. a stuck mode switch
+				apdu_backend: entry.modem?._apdu_be,   // mbim | qmi | at (once probed)
 				pin1: entry.modem?.pin1,            // SIM PIN-lock state (LuCI)
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,

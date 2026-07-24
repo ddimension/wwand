@@ -50,12 +50,13 @@ quirks and recovery strategies were ported deliberately, its bugs left behind.
 
 | Area | What |
 |---|---|
-| **Connectivity** | QMI / MBIM / NCM · IPv4/IPv6/dual-stack · IPv4 /32 p-t-p or pushed prefix · IPv6 RFC-7278 PD · QMAP mux (multiple contexts/modem) |
+| **Connectivity** | QMI / MBIM / NCM behind one `proto wwand` (legacy `qmi` still accepted) · IPv4/IPv6/dual-stack · IPv4 /32 p-t-p or pushed prefix · IPv6 RFC-7278 PD · QMAP mux (multiple contexts/modem) |
 | **Attach** | Attach profile programmed from config **before** registration → correct APN/IP family, avoids the EMM-33 IPv4-only reject |
 | **SIM** | PIN unlock (UIM → DMS fallback, retry-guarded) · multi-slot switching · PIN enable/disable · per-SIM overrides by ICCID (`wwand_sim`) |
-| **eSIM/eUICC** | Native ES10c list/enable/disable/delete · **SM-DP+ download** via bundled lpac, HTTPS on the router over the WAN (no provisioning APN) |
+| **eSIM/eUICC** | Native ES10c list/enable/disable/delete · **SM-DP+ download** via bundled lpac · APDU transport auto-chosen: QMI UIM → **native MBIM MS UICC Low Level Access** → AT — so eSIM works on MBIM modems without an AT port |
 | **Radio** | Mode/band restriction · manual PLMN · network scan & selection · Quectel cell-lock (4G anchor / 5G SA) · QMI LOC positioning |
-| **Ops** | Recovery ladder + zero-rx watchdog · non-destructive restart + session adoption · per-model quirk tables · AT side channel (best-effort) |
+| **Board** | Auto-detected board profiles (MikroTik Chateau 5G, Zyxel LTE33xx / NR7101) drive modem **power/reset GPIOs** and **status LEDs** (5-bar signal graph or mobile/LTE) — absorbing the vendor helper scripts. Manual `modem_repower` (LuCI button); GPIO picker in the UI |
+| **Ops** | Recovery ladder (opmode → modem reset → **board power-cycle / reset-GPIO** → reboot) + zero-rx watchdog · non-destructive restart + session adoption · **"waiting for modem"** surfaced to netifd/LuCI + logged · uniform rich telemetry line across all backends · per-model quirk tables · AT side channel |
 
 ## Packages
 
@@ -84,6 +85,7 @@ All configuration lives in `/etc/config/network` (WireGuard-style):
 config wwand_modem 'm0'
 	option device 'wwan0'            # netdev name or /dev/cdc-wdm0
 	# option path '1-1.2'            # optional: pin to a fixed USB topology path
+	# option reset_gpio 'modem-reset' # optional: GPIO to reset the modem on recovery
 	option modes 'lte,nr5g'
 	option pincode '1234'            # if the SIM needs one
 

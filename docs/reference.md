@@ -18,7 +18,9 @@ file for new setups:
   *optional* stable USB topology anchor (like a wifi-device `path`, e.g. `1-1.2`,
   stable across renumbering on multi-modem setups). Plus tty, mux, sim_slot,
   pincode, modes, mcc, mnc, lock_4g/5g/persist, at_init, location, delay,
-  failreboot, zero_rx_timeout, stats_interval, dl_datagram_max_size.
+  failreboot, zero_rx_timeout, stats_interval, dl_datagram_max_size, and
+  **`reset_gpio`** — a named GPIO wired to the modem RESET line, pulsed by the
+  recovery ladder instead of a USB power-cycle (see [Board integration](#board-integration)).
 - **`config wwand_sim '<name>'`** *(optional)* — a per-SIM override, matched at
   runtime to the inserted card by `option modem` + `option iccid`: overrides the
   modem's `pincode` and, optionally, `apn`/`auth`/`username`/`password` for that
@@ -235,7 +237,7 @@ when called from LuCI).
 
 | Method | Arguments | Description |
 |---|---|---|
-| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters) + contexts |
+| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`) + contexts + `board` (detected profile, power/reset capability) |
 | `reload` | — | re-read UCI and rebuild |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
@@ -250,6 +252,7 @@ when called from LuCI).
 | `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
 | `modem_esim` | `modem`, `op`, … | eSIM (list/enable/disable/eid/download/…); needs the optional `wwand-esim` package |
 | `modem_apdu` | `modem`, `op`, … | raw ISO-7816 APDU channel (advanced) |
+| `modem_repower` | `modem?` | hardware repower: pulse the modem `reset_gpio` (or the board default), else power-cycle the modem USB power. Same path as the recovery ladder; recovers a hung / vanished modem |
 | `modem_set_protocol` | `modem`, `protocol` | switch the control protocol (`qmi` ⇄ `mbim`); the modem resets |
 | `context_up` / `context_down` | `context` or `interface` | connect / disconnect (deferred reply with the IP config) |
 | `context_status` / `context_settings` | `context` or `interface` | state, per-family cid/pdh, IP settings |
@@ -273,8 +276,15 @@ bundled wolfSSL + libcurl): lpac runs the **ES9+ HTTPS** session to the SM-DP+
 over the router's normal uplink — any existing WAN, **no dedicated provisioning
 APN** — while the ES10 APDUs travel over wwand's channel (the daemon bridges
 lpac's stdio APDU protocol inline). AT-only modems download internally instead
-(Quectel `AT+QESIM`); `backend.choose` picks the transport per modem, since some
-firmwares report the QMI logical channel as `NOT_SUPPORTED` and settle on AT.
+(Quectel `AT+QESIM`).
+
+The **APDU channel** is chosen per modem by `backend.choose`, in order:
+**QMI UIM logical channel** (native, or tunnelled over the QMI-over-MBIM
+passthrough) → **native MBIM MS UICC Low Level Access** (`OPEN_CHANNEL` /
+`APDU` / `CLOSE_CHANNEL`, so eSIM works on an MBIM modem even without an AT port)
+→ **AT** (`CCHO`/`CGLA`/`CCHC`, for firmwares that report the QMI channel as
+`NOT_SUPPORTED`). The same `_apdu_be` choice serves both the raw `modem_apdu`
+channel and the ES10c eSIM path.
 
 All operations go through `modem_esim { modem, op, slot?, … }` (`slot` defaults
 to 1):
@@ -282,7 +292,7 @@ to 1):
 | op | args | Description |
 |---|---|---|
 | `eid` | — | read the eUICC EID |
-| `backend` | — | which transport the eUICC uses (`qmi` / `at`) |
+| `backend` | — | which APDU transport the eUICC uses (`qmi` / `mbim` / `at`) |
 | `profiles` | — | list installed profiles (ICCID, state, provider / nickname) |
 | `enable` | `iccid` | enable a profile (eUICC REFRESH → SIM re-init → re-register) |
 | `disable` | `iccid` | disable a profile |
@@ -322,6 +332,35 @@ before reaching lpac.
 The LuCI **Network → Modem** settings page surfaces the profile list,
 enable/disable, the download form with live progress, and notification handling;
 the eSIM sections hide themselves when `wwand-esim` is not installed.
+
+## Board integration
+
+Cellular routers wire the modem's **USB power** and **RESET** lines, and its
+**status LEDs**, to board GPIOs — historically driven by a vendor helper script.
+wwand absorbs that: it detects the board from `/etc/board.json` and applies a
+built-in profile.
+
+- **Power / reset** — a profile may expose a modem power GPIO and/or a reset
+  GPIO. The recovery ladder's hardware rung uses them (a modem `reset_gpio` in
+  config, or the board default, is **pulsed** — read, inverted, held 30 s,
+  restored; otherwise the USB power is **power-cycled**), fully replacing the old
+  external `usb-repower` tool. Trigger it by hand with `modem_repower` (a "Reset
+  modem" button in LuCI) to recover a modem that hung or dropped off the USB bus.
+- **Status LEDs** — driven from the modem's registration + signal: a **5-bar
+  signal graph** (e.g. MikroTik Chateau `green:mobile-1..5`) or a **mobile / LTE**
+  set (e.g. Zyxel `…:red/green:mobile`, `…:lte`).
+- **Waiting for modem** — after boot, a modem reboot or a power-cycle the control
+  device may take a while to (re)appear. wwand then **waits for hotplug** (it does
+  not fail), sets the modem `control_note` (shown in `status` and LuCI), reports a
+  `WAITING_MODEM` interface error to netifd, and re-logs it every 30 s so the wait
+  is visible.
+
+Built-in profiles: MikroTik Chateau 5G (`modem-power` + `modem-reset` + 5 signal
+LEDs), Zyxel LTE3301-plus / -m209 / -q222 (`power_modem`/`usbpower` + mobile/LTE
+LEDs), NR7101 (no dedicated GPIO/LED). An **unknown board** yields a no-op
+profile — wwand runs unchanged, and any GPIO/LED can still be named per modem
+(`reset_gpio`). LuCI's reset-GPIO picker lists every named GPIO line the kernel
+exposes. Adding a profile: see [extending.md](extending.md#adding-a-board-profile).
 
 ## Telemetry & diagnostics
 

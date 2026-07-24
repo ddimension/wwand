@@ -176,7 +176,10 @@ export function create(opts)
 		// native MS UICC Low Level Access transport for eSIM/APDU. sim.uc picks
 		// this duck-typed handle first (before the QMI passthrough and AT).
 		self.mbim_uicc = {
-			open:  (aid_hex, cb)           => mbim_backend.uicc_open_channel(self.mbim, aid_hex, cb),
+			open:  (aid_hex, cb)           => mbim_backend.uicc_open_channel(self.mbim, aid_hex, (err, r) => {
+				log('info', sprintf('native MBIM UICC open: %s', err ? sprintf('%J', err) : sprintf('channel %d', r?.channel)));
+				cb(err, r);
+			}),
 			apdu:  (channel, apdu_hex, cb) => mbim_backend.uicc_apdu(self.mbim, channel, apdu_hex, cb),
 			close: (channel, cb)           => mbim_backend.uicc_close_channel(self.mbim, channel, cb),
 		};

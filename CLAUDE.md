@@ -35,7 +35,28 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
 native `wwand_io.so` → codec (`qmux.uc`, `tlv.uc`, `schema/*.uc`, `mbim*.uc`) →
 session (`transport.uc`, `client.uc`) → state machines (`modem.uc`,
 `context.uc`, `sim.uc`) → system (`netlink.uc` datapath, `recovery.uc`,
-`atcmd.uc`) → integration (`daemon.uc`, `config.uc`, `ubus.uc`, `main.uc`).
+`atcmd.uc`, `board.uc`) → integration (`daemon.uc`, `config.uc`, `ubus.uc`, `main.uc`).
+
+## Board / power / LEDs (`board.uc`)
+Generic, keyed off `/etc/board.json` model id → a profile table (MikroTik
+Chateau, Zyxel LTE33xx/NR7101; unknown = null profile → all ops no-op). Absorbs
+the vendor helper scripts: modem power/reset GPIOs + status LEDs. Wired in:
+recovery `usb_repower` rung → board **power-cycle or reset-GPIO pulse** (replaces
+the external `usb-repower`); a modem config `reset_gpio` (or the board default)
+is pulsed instead of power-cycling. `daemon` runs a status tick (LEDs from
+reg+signal; re-logs a waited-on modem every 30 s). `modem_repower` ubus method +
+LuCI button. Everything through an injectable `fx` → `test_board.uc`.
+
+## eSIM / APDU transport (`sim.uc` + `esim.uc`)
+`_apdu_be` backend order: **QMI UIM logical channel** (native, or over the
+QMI-over-MBIM passthrough via `modem_mbim._ensure_uim`) → **native MBIM MS UICC
+Low Level Access** (`mbim_backend.uicc_*`, UUID `c2f6588e…`, via `command_raw`) →
+**AT** (`CCHO`/`CGLA`). MBIM modem exposes `self.mbim_uicc` (duck-typed; keeps the
+base `sim.uc` free of an mbim import). Wire format verified vs libmbim 1.32 +
+lpac; wire-buffer tests in `test_mbim_backend`. Not HW-validated end-to-end (no
+eUICC-equipped MBIM modem on hand; RG650E rejects MBIM_OPEN, EG06 card has no
+eUICC). Telemetry log is now one shared `modem_common.format_telemetry(o)` for
+all backends.
 
 ## netifd integration (current model — no-proto-task)
 The proto handler sets **`no_proto_task=1`**: after setup the interface stays
