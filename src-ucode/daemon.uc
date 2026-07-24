@@ -566,6 +566,10 @@ export function create(opts)
 
 		if (!present) {
 			log('warn', sprintf('modem %s: control interface not present yet, waiting for hotplug', name));
+			// surface the wait to status()/LuCI and netifd; the periodic tick
+			// re-logs it every 30s so an admin sees the modem is being waited on.
+			entry.control_note = 'waiting for modem (control device not present)';
+			entry.waiting_since = entry.waiting_since ?? time();
 			return;
 		}
 
@@ -609,6 +613,14 @@ export function create(opts)
 				fx: deps.recovery_fx,
 				state_dir: opts?.state_dir,
 				reboot_delay: opts?.reboot_delay,
+				// hardware repower rung (replaces the external usb-repower tool):
+				// a modem `reset_gpio` (or the board's default reset line) wins and
+				// pulses RESET without cutting power; otherwise power-cycle the
+				// modem's USB power GPIO. No-op (null) when the board has neither.
+				repower: deps.board ? (() => {
+					let rg = cfg.reset_gpio ?? deps.board.profile?.reset_gpio;
+					return rg ? deps.board.reset_pulse(rg) : deps.board.power_cycle();
+				}) : null,
 			},
 			at: {
 				fx: deps.datapath_fx,
@@ -715,6 +727,49 @@ export function create(opts)
 
 		for (let name, cfg in parsed.contexts)
 			start_context(name, cfg);
+
+		// board bring-up + a periodic status tick, started once. Drives the panel
+		// LEDs from the primary modem's registration + signal, and re-logs a modem
+		// we are still waiting on every 30 s so an admin sees it (after boot / a
+		// modem reboot the control device may take a while to (re)appear).
+		if (!self._tick_started) {
+			self._tick_started = true;
+			deps.board?.init();
+
+			let led_state = (entry) => {
+				let m = entry?.modem, reg = m?.reg;
+				let radio_ifs = reg?.radio_ifs;
+				return {
+					present: !!m && m.state != 'ABSENT',
+					registered: reg?.registration == 'registered',
+					radio: (type(radio_ifs) == 'array' && length(radio_ifs)) ? radio_ifs[0] : null,
+					roaming: reg?.roaming ?? false,
+					bars: deps.board ? deps.board.bars(m?.signal) : 0,
+				};
+			};
+
+			let tick;
+			tick = () => {
+				let now = time();
+
+				for (let name, entry in self.modems)
+					if (!entry.modem && entry.control_note &&
+					    (now - (entry._waiting_logged ?? 0)) >= 30) {
+						entry._waiting_logged = now;
+						log('warn', sprintf('modem %s: %s', name, entry.control_note));
+					}
+
+				if (deps.board) {
+					let first = null;
+					for (let n, e in self.modems) { first = e; break; }
+					deps.board.leds(led_state(first));
+				}
+
+				self._tick_timer = uloop.timer(10000, tick);
+			};
+
+			tick();
+		}
 	};
 
 	self.resolve_context = function(ref) {
@@ -936,7 +991,17 @@ export function create(opts)
 			};
 		}
 
+		// board profile info for LuCI: the detected id, whether wwand can
+		// power-cycle the modem, and the board's default modem reset GPIO (so the
+		// UI can hint "reset already provided by the board" on the matching modem).
+		let board = deps.board ? {
+			id: deps.board.id,
+			has_power: deps.board.has_power,
+			reset_gpio: deps.board.profile?.reset_gpio,
+		} : null;
+
 		return { modems: modems, contexts: contexts,
+		         board: board,
 		         globals: { hold_max_ms: hold_max_ms } };
 	};
 
@@ -1355,6 +1420,29 @@ export function create(opts)
 				cb(null, { applied: filter(keys(args), (k) => k != 'change_duration') });
 			});
 		});
+	};
+
+	// manual hardware repower/reset of a modem (admin/LuCI button, and the same
+	// path recovery uses at rung usb_repower): a modem `reset_gpio` (or the
+	// board's default reset line) pulses RESET; otherwise the modem USB power is
+	// power-cycled. `ref` optional — defaults to the first configured modem.
+	self.repower_modem = function(ref) {
+		if (!deps.board)
+			return { error: 'no_board_profile' };
+
+		let cfg = (ref && self.modems[ref]) ? self.modems[ref].cfg : null;
+
+		if (!cfg)
+			for (let n, e in self.modems) { cfg = e.cfg; break; }
+
+		let rg = cfg?.reset_gpio ?? deps.board.profile?.reset_gpio;
+
+		if (rg)
+			return deps.board.reset_pulse(rg) ?
+				{ ok: true, action: 'reset', gpio: rg } : { error: 'reset_gpio_unavailable' };
+
+		return deps.board.power_cycle() ?
+			{ ok: true, action: 'power_cycle' } : { error: 'no_power_control' };
 	};
 
 	self.modem_signal = function(ref) {

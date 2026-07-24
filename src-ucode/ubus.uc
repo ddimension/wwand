@@ -62,6 +62,13 @@ export function publish(conn, daemon, log)
 			call: (req) => daemon.modem_signal(req.args.modem),
 		},
 
+		// manual hardware repower/reset via the board profile (also the recovery
+		// path). modem optional; defaults to the first configured modem.
+		modem_repower: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => daemon.repower_modem(req.args.modem),
+		},
+
 		modem_get_settings: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

@@ -169,7 +169,17 @@ export function create(opts)
 		}
 	};
 
+	// hardware repower rung. Preferred: a board-provided callback (opts.repower)
+	// that power-cycles the modem's USB power GPIO — or, if the modem has a
+	// `reset_gpio`, pulses that instead (decided by the caller). It fully
+	// replaces the old external `usb-repower` tool; the fx.run fallback stays
+	// only for hosts that still ship such a tool and have no board profile.
 	self.usb_repower = function() {
+		if (opts.repower) {
+			log('err', 'recovery: triggering modem repower (board)');
+			return opts.repower() ? true : false;
+		}
+
 		log('err', 'recovery: triggering usb-repower');
 
 		let rc = fx?.run ? fx.run([ 'usb-repower' ]) : -1;

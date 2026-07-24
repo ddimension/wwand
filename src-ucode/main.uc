@@ -21,6 +21,7 @@ import * as ubus_api from 'wwand.ubus';
 import * as discovery from 'wwand.discovery';
 import * as modeswitch from 'wwand.modeswitch';
 import * as netlink from 'wwand.netlink';
+import * as board from 'wwand.board';
 import ctl_schema from 'wwand.codec.schema.ctl';
 import dms_schema from 'wwand.codec.schema.dms';
 
@@ -209,6 +210,9 @@ function run_daemon()
 			read_config: load_config,
 			emit_event: (type, data) => conn.event(type, data),
 			datapath_fx: netlink.default_fx((level, msg) => logmod.log(level, '%s', msg)),
+			// board profile: modem power/reset GPIOs + status LEDs (no-op on an
+			// unknown board). Recovery power-cycles/resets the modem through it.
+			board: board.create({ log: (level, msg) => logmod.log(level, '%s', msg) }),
 			resolve_modem_device: discovery.resolve_modem_device,
 			resolve_netdev: discovery.resolve_netdev,
 			resolve_protocol: discovery.protocol_of,

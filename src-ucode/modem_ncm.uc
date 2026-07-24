@@ -1198,6 +1198,8 @@ export function create(opts)
 		fx: opts.recovery?.fx ?? netlink.default_fx((l, m) => log(l, m)),
 		state_dir: opts.recovery?.state_dir,
 		reboot_delay: opts.recovery?.reboot_delay,
+		// board-provided modem repower (power-cycle or reset-gpio pulse); replaces usb-repower
+		repower: opts.recovery?.repower,
 		log: (l, m) => log(l, m),
 	});
 

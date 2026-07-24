@@ -45,7 +45,7 @@ function bool_opt(v, dflt)
 export function modem_defaults(over)
 {
 	return {
-		device: null, netdev: null, usb_path: null,
+		device: null, netdev: null, usb_path: null, reset_gpio: null,
 		pincode: null, modes: null, mcc: null, mnc: null,
 		mux: 'auto', dl_datagram_max_size: 0, tty: null,
 		at_init: [], location: false, delay: 0,
@@ -102,6 +102,9 @@ function modem_from_section(s)
 		// `path` is the stable USB topology anchor (named like wireless
 		// `wifi-device option path`); `usb_path` is the deprecated old name.
 		usb_path: s.path ?? s.usb_path,
+		// optional named GPIO wired to the modem RESET line; when set, recovery
+		// pulses it instead of power-cycling (see board.uc / daemon repower).
+		reset_gpio: s.reset_gpio,
 		pincode: s.pincode,
 		modes: s.modes,
 		mcc: s.mcc,
