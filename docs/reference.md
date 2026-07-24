@@ -8,8 +8,62 @@ API, diagnostics and troubleshooting. For the design rationale see
 
 ## Configuration
 
-`/etc/config/wwand` holds `modem` and `context` sections; netifd interfaces in
-`/etc/config/network` reference a context by name.
+**All configuration lives in `/etc/config/network`** (WireGuard-style). Three
+wwand section types plus the netifd interface — no separate `/etc/config/wwand`
+file for new setups:
+
+- **`config wwand_modem '<name>'`** — the modem: hardware + primary SIM slot +
+  default PIN + radio/cell/PLMN (device/netdev/usb_path, tty, mux, sim_slot,
+  pincode, modes, mcc, mnc, lock_4g/5g/persist, at_init, location, delay,
+  failreboot, zero_rx_timeout, stats_interval, dl_datagram_max_size).
+- **`config wwand_sim '<name>'`** *(optional)* — a per-SIM override, matched at
+  runtime to the inserted card by `option modem` + `option iccid`: overrides the
+  modem's `pincode` and, optionally, `apn`/`auth`/`username`/`password` for that
+  card (e.g. different eUICC profiles / dual-SIM with different PINs).
+- **`config interface '<name>'`** with `option proto 'qmi'` — the connection:
+  `option modem <name>` + `apn`, `pdp_type`, `auth`, `username`, `password`,
+  `profile`, `mux_id` (0 = no mux, N = channel N), `mtu`, `use_pushed_mtu`,
+  `use_pushed_prefix`, `settings_poll` + the usual netifd knobs. Several
+  interfaces referencing one `wwand_modem` = multiple mux contexts on one modem.
+- **`config wwand_globals 'globals'`** — `log_level`, `hold_max`.
+
+```
+config wwand_modem 'm0'
+	option usb_path '1-1.2'
+	option pincode '1234'
+	option sim_slot '1'
+	option modes 'lte,nr5g'
+
+config wwand_sim 'vodafone'          # optional per-card override
+	option modem 'm0'
+	option iccid '89490...'
+	option pincode '5678'
+	option apn 'web.vodafone.de'
+
+config interface 'wan'
+	option proto 'qmi'
+	option modem 'm0'
+	option apn 'internet'
+	option pdp_type 'ipv4v6'
+```
+
+**Precedence:** PIN = matching `wwand_sim.pincode` → `wwand_modem.pincode`;
+APN/auth = `interface` → active `wwand_sim` → card-provisioned.
+
+**Backward compatibility & migration.** The daemon still reads every older
+wwand format: a legacy inline `proto qmi` interface, and the previous
+`/etc/config/wwand` `modem`/`context` sections shown below. Nothing breaks.
+Conversion to the model above happens automatically — a uci-defaults script runs
+`/usr/libexec/wwand/migrate --apply` once on install/upgrade (it also converts
+stock OpenWrt `proto mbim`/`proto ncm` interfaces, since `wwand-mbim`/`wwand-ncm`
+replace those handlers), and saving in LuCI writes the new model too. Run the
+migrate tool by hand any time (dry-run without `--apply`).
+
+### Legacy: the `/etc/config/wwand` model
+
+The previous model (still read for compatibility): `/etc/config/wwand` holds
+`modem` and `context` sections; a netifd interface references a context by name
+(`option context 'wan_ctx'`).
 
 ### Modem section
 
