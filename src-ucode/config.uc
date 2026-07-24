@@ -323,6 +323,10 @@ function compat_translate(raw, result)
 			}
 
 			let nd = parse_netdev(s.device);
+			// mux channel: an explicit `option mux_id` wins (the 2-field UX), else
+			// it is derived from a wwan0mN device name.
+			let mux_id = (s.mux_id != null) ? +s.mux_id : (nd?.mux_id ?? 0);
+			let muxed = (mux_id > 0) || (nd?.muxed ?? false);
 			// accept both pdp_type (preferred) and the legacy proto-js pdptype
 			let pdp_in = s.pdp_type ?? s.pdptype;
 
@@ -332,9 +336,9 @@ function compat_translate(raw, result)
 			result.contexts[name] = context_defaults({
 				modem: s.modem,
 				interface: name,
-				mux_id: nd?.mux_id ?? 0,
-				muxed: nd?.muxed ?? false,
-				mux_link: nd?.muxed ? s.device : null,
+				mux_id: mux_id,
+				muxed: muxed,
+				mux_link: muxed ? (s.device ?? sprintf('%sm%d', nd?.netdev ?? 'wwan0', mux_id)) : null,
 				apn: s.apn,
 				pdp_type: PDP_TYPES[pdp_in] ? pdp_in : 'ipv4v6',
 				auth: s.auth,

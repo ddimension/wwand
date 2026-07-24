@@ -254,6 +254,17 @@ eq(r.contexts.ims.mux_id, 2, 'net-mux: ims channel 2');
 eq(r.contexts.wan.modem, 'm0', 'net-mux: both share the modem');
 eq(r.contexts.ims.modem, 'm0', 'net-mux: both share the modem (2)');
 
+// explicit option mux_id (the 2-field UX: Modem + Mux channel)
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'rmnet' },
+		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0', mux_id: '3', apn: 'internet' },
+	},
+});
+eq(r.contexts.wan.mux_id, 3, 'net: explicit mux_id honoured');
+eq(r.contexts.wan.muxed, true, 'net: explicit mux_id -> muxed');
+eq(r.contexts.wan.mux_link, 'wwan0m3', 'net: mux_link derived from mux_id');
+
 // guards
 r = config.parse({
 	network: {
