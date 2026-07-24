@@ -339,8 +339,7 @@ ch = config.migrate_plan({ network: {
 	wan: { '.type': 'interface', proto: 'ncm', device: 'wwan0', apn: 'web', mode: 'lte' },
 } });
 eq(mp_set(ch, 'wwmodem0', 'modes'), 'lte', 'migrate-ncm: mode -> modes on modem');
-eq(mp_set(ch, 'wwmodem0', 'netdev'), 'wwan0', 'migrate-ncm: non-mux device -> modem netdev');
-eq(mp_set(ch, 'wwmodem0', 'device'), null, 'migrate-ncm: no bogus control device');
+eq(mp_set(ch, 'wwmodem0', 'device'), 'wwan0', 'migrate-ncm: non-mux device = old netdev name');
 eq(mp_set(ch, 'wan', 'proto'), 'wwand', 'migrate-ncm: proto -> wwand');
 ok(mp_has(ch, 'delete', 'wan', 'mode'), 'migrate-ncm: stock mode stripped');
 
@@ -364,13 +363,36 @@ eq(mp_set(ch, 'wan', 'pdp_type'), 'ipv6', 'migrate: explicit pdptype wins over i
 ch = config.migrate_plan({ network: {
 	wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0m1', apn: 'internet' },
 } });
-// a netdev-style interface `device` (wwan0mN) becomes the modem's NETDEV
-// (parent), not `device` (which is a control /dev node) — else discovery
-// looks for a /dev path named "wwan0" and the modem never binds.
-eq(mp_set(ch, 'wwmodem0', 'netdev'), 'wwan0', 'migrate-mux: modem netdev = parent netdev');
-eq(mp_set(ch, 'wwmodem0', 'device'), null, 'migrate-mux: no bogus control device');
+// a muxed interface `device` (wwan0mN) anchors the modem on the PARENT netdev
+// name in `device` (discovery resolves a non-/dev `device` as a netdev); the
+// mN becomes the connection's mux channel.
+eq(mp_set(ch, 'wwmodem0', 'device'), 'wwan0', 'migrate-mux: modem device = parent netdev name');
 eq(mp_set(ch, 'wan', 'mux_id'), '1', 'migrate-mux: mux channel derived from wwan0m1');
 eq(mp_set(ch, 'wan', 'modem'), 'wwmodem0', 'migrate-mux: option modem');
+
+// the optional USB anchor is NOT migrated onto the modem (path stays user-only,
+// like wireless `path`), but it IS stripped off the interface. The modem is
+// anchored on the netdev name instead.
+ch = config.migrate_plan({ network: {
+	wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0m1',
+	       usb_path: '3-1', apn: 'internet' },
+} });
+eq(mp_set(ch, 'wwmodem0', 'device'), 'wwan0', 'migrate-path: modem anchored on netdev, not usb_path');
+eq(mp_set(ch, 'wwmodem0', 'usb_path'), null, 'migrate-path: usb_path NOT set on modem');
+eq(mp_set(ch, 'wwmodem0', 'path'), null, 'migrate-path: path NOT actively set on modem');
+ok(mp_has(ch, 'delete', 'wan', 'usb_path'), 'migrate-path: usb_path stripped off interface');
+
+// the modem `path` option is read (preferred), with `usb_path` still accepted
+r = config.parse({ network: {
+	m0: { '.type': 'wwand_modem', path: '1-1.4' },
+	wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'x' },
+} });
+eq(r.modems.m0.usb_path, '1-1.4', 'net: wwand_modem `path` read as the USB anchor');
+r = config.parse({ network: {
+	m0: { '.type': 'wwand_modem', usb_path: '1-1.5' },
+	wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'x' },
+} });
+eq(r.modems.m0.usb_path, '1-1.5', 'net: legacy `usb_path` still accepted');
 
 // already network-native (proto wwand + option modem) -> no changes
 ch = config.migrate_plan({ network: {

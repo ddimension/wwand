@@ -524,8 +524,13 @@ export function create(opts)
 
 		// legacy dep path (callers that inject resolve_modem_device/
 		// resolve_protocol instead of resolve_control): synthesize an equivalent
-		// control record for a cdc-wdm modem.
-		if (!control) {
+		// control record for a cdc-wdm modem. ONLY when resolve_control is not the
+		// injected dep — otherwise a null result from resolve_control is
+		// authoritative ("device not present yet"), and we must NOT fall back to
+		// the raw cfg.device: a netdev-name device (`wwan0`) is not an openable
+		// control node, and a not-yet-enumerated /dev node isn't there either.
+		// Either way the modem must WAIT for hotplug, exactly like qmi-advanced.
+		if (!control && !deps.resolve_control) {
 			let device = cfg.device;
 
 			if (!device && deps.resolve_modem_device)

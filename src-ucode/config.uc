@@ -99,7 +99,9 @@ function modem_from_section(s)
 	return modem_defaults({
 		device: s.device,
 		netdev: s.netdev,
-		usb_path: s.usb_path,
+		// `path` is the stable USB topology anchor (named like wireless
+		// `wifi-device option path`); `usb_path` is the deprecated old name.
+		usb_path: s.path ?? s.usb_path,
 		pincode: s.pincode,
 		modes: s.modes,
 		mcc: s.mcc,
@@ -551,11 +553,18 @@ export function parse(raw)
 // is [ op, 'network', section, option|null, value ]; op is 'add' (create a typed
 // section), 'set', 'add_list' or 'delete'. Pure + host-testable.
 
-// radio/SIM/hardware options -> the wwand_modem section
-const MIGRATE_MODEM_OPTS = [ 'device', 'netdev', 'usb_path', 'tty', 'mux',
+// radio/SIM/hardware options -> the wwand_modem section. NOTE: `usb_path`/`path`
+// is deliberately NOT here — the stable USB anchor is optional and the migration
+// does not set it; the modem is anchored on the old netdev name instead (put in
+// `device`, which discovery resolves as a netdev when it is not a /dev node).
+const MIGRATE_MODEM_OPTS = [ 'device', 'netdev', 'tty', 'mux',
 	'dl_datagram_max_size', 'sim_slot', 'pincode', 'modes', 'mcc', 'mnc',
 	'lock_4g', 'lock_5g', 'lock_persist', 'at_init', 'location', 'delay',
 	'failreboot', 'zero_rx_timeout', 'stats_interval' ];
+// options only stripped OFF the interface (moved to nowhere): the optional USB
+// anchor and legacy per-family flags/junk have no place on the interface.
+const MIGRATE_STRIP_IFACE = [ 'usb_path', 'path', 'ctldevice', 'dhcp',
+	'ipv4', 'ipv6', 'mode', 'strongestnetwork', 'autocreateif', 'customroutes' ];
 // connection options (apn/auth/username/password/profile/mtu/use_pushed_*/
 // settings_poll) simply stay on the interface, so they need no explicit list.
 
@@ -591,21 +600,14 @@ export function migrate_plan(raw)
 			let v = s[k];
 
 			// The interface `device` in a legacy wwand/qmi-advanced config is a
-			// NETDEV name (wwan0 / wwan0mN), NOT a control /dev node — that is how
-			// compat_translate reads it. So move it to the modem's `netdev`
-			// (the parent netdev for a muxed child; the mN is the connection's mux
-			// channel). Only a real /dev/... control node stays `device` — else
-			// discovery looks for a /dev path named "wwan0", finds none, and the
-			// modem never binds (ABSENT). Seen migrating a non-mux wan on HW.
+			// NETDEV name (wwan0 / wwan0mN), NOT a control /dev node. Anchor the
+			// modem on it in `device` — for a muxed child use the PARENT netdev
+			// (the mN is the connection's mux channel). discovery resolves a
+			// `device` that is not a /dev node as a netdev name, so a bare
+			// `option device 'wwan0'` binds; a real /dev/... path is kept as-is.
 			if (k == 'device' && v != null && v != '') {
-				if (substr(v, 0, 1) == '/') {
-					put(name, 'device', v);
-				}
-				else {
-					let nd = parse_netdev(v);
-					put(name, 'netdev', nd?.muxed ? nd.netdev : v);
-				}
-
+				let nd = (substr(v, 0, 1) == '/') ? null : parse_netdev(v);
+				put(name, 'device', (nd && nd.muxed) ? nd.netdev : v);
 				continue;
 			}
 
@@ -678,16 +680,12 @@ export function migrate_plan(raw)
 			put(name, 'pdp_type', (v4 && v6) ? 'ipv4v6' : (v6 ? 'ipv6' : 'ipv4'));
 		}
 
-		// the radio/SIM options moved to the wwand_modem -> drop them here
-		for (let k in MIGRATE_MODEM_OPTS)
+		// the radio/SIM options moved to the wwand_modem -> drop them here;
+		// plus the optional USB anchor and stock junk that have no place on the
+		// interface (the anchor is not migrated onto the modem either).
+		for (let k in [ ...MIGRATE_MODEM_OPTS, ...MIGRATE_STRIP_IFACE ])
 			if (s[k] != null)
 				push(changes, [ 'delete', 'network', name, k, null ]);
-
-		// stock proto junk that has no place in the wwand model
-		for (let j in [ 'ctldevice', 'dhcp', 'ipv4', 'ipv6', 'mode',
-		                'strongestnetwork', 'autocreateif', 'customroutes' ])
-			if (s[j] != null)
-				push(changes, [ 'delete', 'network', name, j, null ]);
 	}
 
 	return changes;

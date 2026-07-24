@@ -34,6 +34,37 @@ eq(c1.protocol, 'qmi', 'cdc-wdm qmi_wwan -> qmi');
 eq(c1.device, '/dev/cdc-wdm0', 'qmi: control device');
 eq(c1.netdev, 'wwan0', 'qmi: netdev from device/net');
 
+// --- 1b. `option device` holding a NETDEV name (network-native migration form) -
+// a `device` that is not a /dev control node is resolved as a netdev, so a bare
+// `option device 'wwan0'` (what the migration writes) binds the modem.
+let dev_netdev_fx = fakefx.create({
+	present: { '/sys/class/net/wwan0/device/usbmisc/cdc-wdm0': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/qmi_wwan' },
+	dirs: { '/sys/class/usbmisc/cdc-wdm0/device/net': [ 'wwan0' ] },
+});
+let cdn = discovery.resolve_control({ device: 'wwan0', tty: null }, dev_netdev_fx);
+eq(cdn?.device, '/dev/cdc-wdm0', 'device=wwan0 (netdev name) resolves to the cdc-wdm');
+eq(cdn?.protocol, 'qmi', 'device=netdev-name classified by driver');
+eq(cdn?.netdev, 'wwan0', 'device=netdev-name: netdev derived');
+// a muxed name strips its mN suffix to the parent netdev
+let cdm = discovery.resolve_control({ device: 'wwan0m1', tty: null }, dev_netdev_fx);
+eq(cdm?.device, '/dev/cdc-wdm0', 'device=wwan0m1 strips mux suffix -> parent netdev resolves');
+
+// a control node is only an ABSOLUTE /dev path: a bare netdev name that happens
+// to pass fx.access (cwd-dependent on real HW) must NOT be opened as a device —
+// it still resolves via the netdev. (Regression: on an MBIM box access('wwan0')
+// was true, so the daemon tried to open "wwan0" and the modem went ABSENT.)
+let dev_access_fx = fakefx.create({
+	present: {
+		'wwan0': true,   // access('wwan0') is true here
+		'/sys/class/net/wwan0/device/usbmisc/cdc-wdm0': true,
+	},
+	links: { '/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/cdc_mbim' },
+	dirs: { '/sys/class/usbmisc/cdc-wdm0/device/net': [ 'wwan0' ] },
+});
+eq(discovery.resolve_modem_device({ device: 'wwan0' }, dev_access_fx), '/dev/cdc-wdm0',
+	'device=wwan0 resolves via netdev even when access(wwan0) is true');
+
 // --- 2. cdc-wdm MBIM --------------------------------------------------------
 
 let mbim_fx = fakefx.create({

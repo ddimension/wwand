@@ -82,7 +82,8 @@ All configuration lives in `/etc/config/network` (WireGuard-style):
 
 ```
 config wwand_modem 'm0'
-	option usb_path '1-1.2'          # or: option device '/dev/cdc-wdm0'
+	option device 'wwan0'            # netdev name or /dev/cdc-wdm0
+	# option path '1-1.2'            # optional: pin to a fixed USB topology path
 	option modes 'lte,nr5g'
 	option pincode '1234'            # if the SIM needs one
 

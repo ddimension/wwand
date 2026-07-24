@@ -13,9 +13,12 @@ wwand section types plus the netifd interface — no separate `/etc/config/wwand
 file for new setups:
 
 - **`config wwand_modem '<name>'`** — the modem: hardware + primary SIM slot +
-  default PIN + radio/cell/PLMN (device/netdev/usb_path, tty, mux, sim_slot,
+  default PIN + radio/cell/PLMN. Identity: **`device`** — a control node
+  (`/dev/cdc-wdm0`) **or** a network device name (`wwan0`); or **`path`**, an
+  *optional* stable USB topology anchor (like a wifi-device `path`, e.g. `1-1.2`,
+  stable across renumbering on multi-modem setups). Plus tty, mux, sim_slot,
   pincode, modes, mcc, mnc, lock_4g/5g/persist, at_init, location, delay,
-  failreboot, zero_rx_timeout, stats_interval, dl_datagram_max_size).
+  failreboot, zero_rx_timeout, stats_interval, dl_datagram_max_size.
 - **`config wwand_sim '<name>'`** *(optional)* — a per-SIM override, matched at
   runtime to the inserted card by `option modem` + `option iccid`: overrides the
   modem's `pincode` and, optionally, `apn`/`auth`/`username`/`password` for that
@@ -35,7 +38,8 @@ file for new setups:
 
 ```
 config wwand_modem 'm0'
-	option usb_path '1-1.2'
+	option device 'wwan0'            # netdev name or /dev/cdc-wdmX
+	# option path '1-1.2'           # optional: pin to a fixed USB topology path
 	option pincode '1234'
 	option sim_slot '1'
 	option modes 'lte,nr5g'
@@ -66,7 +70,8 @@ How the sections relate (all in `/etc/config/network`):
     option mux_id '1'    │           option mux_id '2'    │      auth / mux channel
                          ▼                                 ▼
                     config wwand_modem 'm0'                       the modem: device/
-                      usb_path / pincode / sim_slot / modes …     SIM slot / radio
+                      device / pincode / sim_slot / modes …       SIM slot / radio
+                      (path optional)
                          ▲
        matched by ICCID  │  (at bring-up, before PIN unlock)
                     config wwand_sim 'vodafone'                   per-SIM override,
@@ -118,9 +123,9 @@ config wwand 'globals'
 	option log_level 'info'          # err|warn|notice|info|debug
 
 config modem 'm0'
-	option device '/dev/cdc-wdm0'    # control port; or `option netdev 'wwan0'`
-	                                 # or `option usb_path '1-1.2'` (stable across
-	                                 #   renumbering on multi-modem setups)
+	option device '/dev/cdc-wdm0'    # control port, or a netdev name (`wwan0`)
+	                                 # or `option path '1-1.2'` (optional stable USB
+	                                 #   anchor; `usb_path` still accepted)
 	option tty ''                    # AT port override (auto-detected otherwise)
 	option pincode '1234'            # SIM PIN; entered on each start
 	option sim_slot '0'              # physical slot to activate (0 = leave as-is)

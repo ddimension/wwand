@@ -251,8 +251,24 @@ export function resolve_modem_device(cfg, fx)
 {
 	fx = fx ?? default_fx();
 
-	if (cfg.device && fx.access(cfg.device))
+	// a control node is ALWAYS an absolute /dev path — only then does an existing
+	// `device` resolve to itself. (Guarding on the leading '/' matters: a bare
+	// netdev name like 'wwan0' can spuriously pass fx.access depending on the
+	// daemon's cwd, which would make the daemon try to open "wwan0" as a device.)
+	if (cfg.device && substr(cfg.device, 0, 1) == '/' && fx.access(cfg.device))
 		return cfg.device;
+
+	// a `device` that is NOT an absolute /dev node is a netdev name
+	// (wwan0 / wwan0mN) — resolve it like `netdev`, so `option device 'wwan0'`
+	// works (mirrors how the compat layer reads an interface `device`). The
+	// parent netdev carries the cdc-wdm, so strip any mux suffix first.
+	if (cfg.device && substr(cfg.device, 0, 1) != '/') {
+		let base = match(cfg.device, /^(wwan[0-9]+)(m[0-9]+)?$/);
+		let dev = device_for_netdev(base ? base[1] : cfg.device, fx);
+
+		if (dev)
+			return dev;
+	}
 
 	if (cfg.netdev)
 		return device_for_netdev(cfg.netdev, fx);
