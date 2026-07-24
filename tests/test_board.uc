@@ -103,6 +103,9 @@ eq(length(fx.writes), 0, 'unknown board: leds write nothing');
 eq(board.bars_from_signal({ lte: { rsrp: -75 } }), 5, 'bars: strong lte rsrp -> 5');
 eq(board.bars_from_signal({ lte: { rsrp: -105 } }), 2, 'bars: weak lte rsrp -> 2');
 eq(board.bars_from_signal({ nr5g: { rsrp: -85 } }), 4, 'bars: nr5g preferred');
+// the -32768 "no measurement" sentinel must not win over a valid lte value
+eq(board.bars_from_signal({ nr5g: { rsrp: -32768 }, lte: { rsrp: -66 } }), 5,
+	'bars: invalid nr5g sentinel ignored, strong lte -> 5');
 eq(board.bars_from_signal(null), 0, 'bars: no signal -> 0');
 
 done('test_board');

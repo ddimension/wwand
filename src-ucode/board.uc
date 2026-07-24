@@ -115,13 +115,23 @@ export function bars_from_signal(sig)
 	if (!sig)
 		return 0;
 
-	let rsrp = sig.nr5g?.rsrp ?? sig.lte?.rsrp;
+	// modems report -32768 (and similar large negatives) as "no measurement";
+	// treat anything below a sane floor as absent so it never wins the ?? chain.
+	let ok = (v) => v != null && v > -140;
+	let pick = (...vals) => {
+		for (let v in vals)
+			if (ok(v))
+				return v;
+		return null;
+	};
+
+	let rsrp = pick(sig.nr5g?.rsrp, sig.lte?.rsrp);
 
 	if (rsrp != null)
 		return (rsrp >= -80) ? 5 : (rsrp >= -90) ? 4 : (rsrp >= -100) ? 3 :
 		       (rsrp >= -110) ? 2 : 1;
 
-	let rssi = sig.lte?.rssi ?? sig.gsm_rssi ?? sig.wcdma?.rssi;
+	let rssi = pick(sig.lte?.rssi, sig.gsm_rssi, sig.wcdma?.rssi);
 
 	if (rssi != null)
 		return (rssi >= -65) ? 5 : (rssi >= -75) ? 4 : (rssi >= -85) ? 3 :
