@@ -371,4 +371,42 @@ phase5 = () => {
 phase2();
 uloop.run();
 
+// --- format_telemetry: one rich line across the three backend shapes ---------
+let qmi = {
+	reg: { radio_ifs: [ 8 ], roaming: false, plmn: { mcc: 262, mnc: 2, description: 'vodafone' } },
+	cells: { lte_intra: { plmn: '26202', tac: 45195, global_cell_id: 13102082,
+	         earfcn: 6300, serving_cell_id: 334, cells: [ { pci: 334, rsrp: -710, rsrq: -110 } ] } },
+	signal: { lte: { rssi: -42, rsrp: -71, snr: 72 } }, config: {},
+};
+let l = mc.format_telemetry(qmi);
+ok(index(l, 'tech=LTE') >= 0, 'ft-qmi: tech LTE from numeric radio_ifs');
+ok(index(l, 'plmn=262/02 (vodafone)') >= 0, 'ft-qmi: plmn mcc/mnc');
+ok(index(l, 'lte=[plmn 26202 tac 45195') >= 0, 'ft-qmi: cell block');
+ok(index(l, 'sig_lte=[rssi -42 rsrp -71 snr 7.2]') >= 0, 'ft-qmi: per-tech signal');
+
+// MBIM: no radio_ifs, plmn id, tech from dsd_status, flat signal
+let mbim = {
+	reg: { roaming: true, plmn: { id: '26201', description: 'Telekom' } },
+	dsd_status: { mode: 'NSA' }, signal: { rssi: -65, rsrp: -95 }, config: {},
+};
+l = mc.format_telemetry(mbim);
+ok(index(l, 'tech=NSA') >= 0, 'ft-mbim: tech from dsd_status');
+ok(index(l, 'plmn=26201 (Telekom)') >= 0, 'ft-mbim: plmn from provider id');
+ok(index(l, 'roaming=yes') >= 0, 'ft-mbim: roaming');
+ok(index(l, 'sig=[rssi -65 rsrp -95]') >= 0, 'ft-mbim: flat signal');
+
+// NCM: tech from dsd_status, sig.lte, config lock shown
+let ncm = {
+	reg: { roaming: false }, dsd_status: { mode: 'LTE' },
+	signal: { lte: { rssi: -60, rsrp: -80 } }, config: { lock_4g: [ '1300:246' ] },
+};
+l = mc.format_telemetry(ncm);
+ok(index(l, 'tech=LTE') >= 0, 'ft-ncm: tech from dsd_status');
+ok(index(l, 'sig_lte=[rssi -60 rsrp -80]') >= 0, 'ft-ncm: signal');
+ok(index(l, 'lock_4g=1300:246') >= 0, 'ft-ncm: cell lock shown');
+
+// the -32768 "no measurement" sentinel drops just that field
+l = mc.format_telemetry({ reg: {}, signal: { lte: { rssi: -50, rsrp: -32768, snr: -32768 } }, config: {} });
+ok(index(l, 'sig_lte=[rssi -50]') >= 0, 'ft: sentinel fields dropped');
+
 done('test_modem_common');

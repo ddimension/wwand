@@ -9,6 +9,8 @@
 import * as uloop from 'uloop';
 import * as atcmd from './atcmd.uc';
 import * as netlink from './netlink.uc';
+import * as tlv from './codec/tlv.uc';
+import * as nasmod from './codec/schema/nas.uc';
 
 // open_at(self, o): best-effort AT side-channel bring-up. Discovers the AT tty,
 // opens it, runs model-init + configured at_init + cell-lock commands, wires the
@@ -385,4 +387,124 @@ export function open_at(self, o)
 		return o.next();
 
 	self.at.run_sequence(cmds, o.next);
+}
+
+// format_telemetry(o): the single, rich telemetry log line for EVERY backend.
+// Reads the normalized modem fields (o.reg, o.cells, o.signal, o.reg_detail,
+// o.config) and is defensive about the per-backend shape differences so QMI,
+// MBIM and NCM all produce the same style of line, showing whatever each one
+// actually has:
+//   - tech:  numeric NAS radio_ifs (QMI) -> else a string reg.mode/reg.tech
+//            (NCM) -> else nothing;
+//   - plmn:  {mcc,mnc,description} (QMI) -> else {id,description} (MBIM);
+//   - cells: QMI/NCM lte_intra + nr5g_cell (0.1-unit rsrp/rsrq), when present;
+//   - signal: per-tech sig.lte/sig.nr5g (QMI/NCM) -> else a flat sig.rsrp/rssi
+//            (native MBIM). rsrp/rssi are dBm; snr is 0.1 dB.
+export function format_telemetry(o)
+{
+	let reg = o.reg ?? {}, cells = o.cells, sig = o.signal;
+	let rd = o.reg_detail, cfg = o.config ?? {};
+	let parts = [], techs = [];
+
+	for (let r in (reg.radio_ifs ?? [])) {
+		if (r == nasmod.RADIO_IF_LTE) push(techs, 'LTE');
+		else if (r == nasmod.RADIO_IF_5GNR) push(techs, 'NR5G');
+		else if (r == nasmod.RADIO_IF_UMTS) push(techs, 'UMTS');
+		else if (r == nasmod.RADIO_IF_GSM) push(techs, 'GSM');
+		else push(techs, sprintf('rat%d', r));
+	}
+
+	// backends without numeric radio_ifs (MBIM/NCM) carry the tech as a string
+	// on reg.mode/reg.tech or, most commonly, on the DSD status (LTE/NSA/SA).
+	if (!length(techs) && (reg.mode != null || reg.tech != null))
+		push(techs, uc(sprintf('%s', reg.mode ?? reg.tech)));
+
+	if (!length(techs) && o.dsd_status?.mode != null)
+		push(techs, uc(sprintf('%s', o.dsd_status.mode)));
+
+	// NSA: LTE-registered while the NR anchor shows in the 5G cell/signal info
+	let nr_anchor = cells?.nr5g_cell != null ||
+		(sig?.nr5g?.rsrp != null && !tlv.is_unavailable(sig.nr5g.rsrp, 'i16'));
+	let has_lte = index(techs, 'LTE') >= 0;
+	let has_nr = index(techs, 'NR5G') >= 0;
+
+	if (has_lte && !has_nr && nr_anchor)
+		push(techs, 'NR5G');
+
+	push(parts, sprintf('tech=%s%s', length(techs) ? join('+', techs) : 'none',
+		(has_lte && (has_nr || nr_anchor)) ? '(NSA)' : ''));
+
+	if (reg.plmn) {
+		let desc = reg.plmn.description ? sprintf(' (%s)', trim(reg.plmn.description)) : '';
+
+		if (reg.plmn.mcc != null)
+			push(parts, sprintf('plmn=%d/%02d%s', reg.plmn.mcc, reg.plmn.mnc, desc));
+		else if (reg.plmn.id != null)
+			push(parts, sprintf('plmn=%s%s', reg.plmn.id, desc));
+		else if (reg.plmn.description)
+			push(parts, sprintf('plmn=%s', trim(reg.plmn.description)));
+	}
+
+	if (reg.roaming != null)
+		push(parts, sprintf('roaming=%s', reg.roaming ? 'yes' : 'no'));
+
+	let lte = cells?.lte_intra;
+
+	if (lte) {
+		let serving = null;
+
+		for (let c in (lte.cells ?? []))
+			if (c.pci == lte.serving_cell_id)
+				serving = c;
+
+		push(parts, sprintf('lte=[plmn %s tac %d gci %d earfcn %d pci %d%s neigh %d]',
+			lte.plmn, lte.tac, lte.global_cell_id, lte.earfcn, lte.serving_cell_id,
+			serving ? sprintf(' rsrp %.1f rsrq %.1f', serving.rsrp / 10.0, serving.rsrq / 10.0) : '',
+			length(lte.cells ?? [])));
+	}
+
+	let nr = cells?.nr5g_cell;
+
+	if (nr)
+		push(parts, sprintf('nr5g=[plmn %s tac %d pci %d arfcn %d rsrp %.1f rsrq %.1f snr %.1f]',
+			nr.plmn, nr.tac, nr.pci, cells?.nr5g_arfcn ?? 0,
+			nr.rsrp / 10.0, nr.rsrq / 10.0, nr.snr / 10.0));
+
+	// signal: i16 metrics report -32768 when absent (filter per field). rsrp/rssi
+	// are dBm (%d); snr is 0.1 dB (%.1f).
+	let sig_part = (label, fields) => {
+		let out = [];
+
+		for (let name, spec in fields)
+			if (spec[0] != null && !tlv.is_unavailable(spec[0], 'i16'))
+				push(out, sprintf('%s %s', name,
+					spec[1] ? sprintf('%.1f', spec[0] / 10.0) : sprintf('%d', spec[0])));
+
+		if (length(out))
+			push(parts, sprintf('%s=[%s]', label, join(' ', out)));
+	};
+
+	if (sig?.lte)
+		sig_part('sig_lte', { rssi: [ sig.lte.rssi, false ],
+			rsrp: [ sig.lte.rsrp, false ], snr: [ sig.lte.snr, true ] });
+	else if (sig != null && (sig.rsrp != null || sig.rssi != null))
+		// native-MBIM flat signal (a single coded/dBm reading, no per-tech split)
+		sig_part('sig', { rssi: [ sig.rssi, false ], rsrp: [ sig.rsrp, false ] });
+
+	if (sig?.nr5g)
+		sig_part('sig_nr5g', { rsrp: [ sig.nr5g.rsrp, false ], snr: [ sig.nr5g.snr, true ] });
+
+	if (length(cfg.lock_4g ?? []))
+		push(parts, sprintf('lock_4g=%s', join(',', cfg.lock_4g)));
+
+	if (cfg.lock_5g)
+		push(parts, sprintf('lock_5g=%s', cfg.lock_5g));
+
+	if (rd?.reject_text != null || rd?.reject_cause != null)
+		push(parts, sprintf('reject=%s', rd.reject_text ?? sprintf('%d', rd.reject_cause)));
+
+	if (rd?.limited)
+		push(parts, 'limited_service');
+
+	return join(' ', parts);
 }

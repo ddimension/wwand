@@ -1583,10 +1583,7 @@ export function create(opts)
 	let emit_telemetry = () => emit('telemetry', { signal: self.signal, cells: self.cells, reg: self.reg });
 
 	let log_telemetry = () => {
-		log('notice', sprintf('telemetry: roaming=%s rssi=%s dBm mode=%s cells=%s',
-			self.reg.roaming ? 'yes' : 'no',
-			(self.signal?.lte?.rssi ?? self.signal?.rssi) ?? '?',
-			self.dsd_status?.mode ?? '?', self.cells ? 'yes' : 'no'));
+		log('notice', sprintf('telemetry: %s', modem_common.format_telemetry(self)));
 	};
 
 	// fast "watch" loop while a consumer polls modem_signal/modem_cells — the
