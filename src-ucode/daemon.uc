@@ -20,6 +20,7 @@
 import * as uloop from 'uloop';
 import * as fs from 'fs';
 import * as sim from './sim.uc';
+import * as sms from './sms.uc';
 import * as atcmd from './atcmd.uc';
 
 const UP_GUARD_MS = 150000;
@@ -1382,6 +1383,27 @@ export function create(opts)
 		default:
 			return cb({ error: 'invalid_op', op: op });
 		}
+	};
+
+	// SMS: list / read / delete stored messages. `storage` is 'SM' (SIM) or 'ME'
+	// (modem store). Backend-neutral (sms.uc dispatches QMI-WMS / MBIM / AT);
+	// returns unsupported_on_backend when the modem exposes no SMS transport.
+	self.modem_sms_list = function(ref, storage, cb) {
+		let entry = check_modem(ref, cb);
+		if (entry)
+			sms.sms_list(entry.modem, storage ?? 'SM', cb);
+	};
+
+	self.modem_sms_read = function(ref, storage, index, cb) {
+		let entry = check_modem(ref, cb);
+		if (entry)
+			sms.sms_read(entry.modem, storage ?? 'SM', +index, cb);
+	};
+
+	self.modem_sms_delete = function(ref, storage, index, cb) {
+		let entry = check_modem(ref, cb);
+		if (entry)
+			sms.sms_delete(entry.modem, storage ?? 'SM', +index, cb);
 	};
 
 	// The eSIM download/notification bridge and management delegation live in

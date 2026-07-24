@@ -134,6 +134,28 @@ export function publish(conn, daemon, log)
 					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
 		},
 
+		// SMS: list/read (read ACL), delete (write ACL). storage 'SM'|'ME'.
+		modem_sms_list: {
+			args: { modem: '', storage: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_sms_list(req.args.modem, req.args.storage, (err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
+		modem_sms_read: {
+			args: { modem: '', storage: '', index: 0, ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_sms_read(req.args.modem, req.args.storage, req.args.index, (err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
+		modem_sms_delete: {
+			args: { modem: '', storage: '', index: 0, ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_sms_delete(req.args.modem, req.args.storage, req.args.index, (err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
 		modem_plmn_lists: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

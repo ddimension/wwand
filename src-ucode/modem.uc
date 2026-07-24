@@ -40,6 +40,7 @@ import * as dmsmod from './codec/schema/dms.uc';
 import * as nasmod from './codec/schema/nas.uc';
 import * as dsdmod from './codec/schema/dsd.uc';
 import * as uimmod from './codec/schema/uim.uc';
+import * as wmsmod from './codec/schema/wms.uc';
 import * as wdsmod from './codec/schema/wds.uc';
 import * as wdamod from './codec/schema/wda.uc';
 import * as locmod from './codec/schema/loc.uc';
@@ -273,6 +274,12 @@ export function create(opts)
 		cb(self.nas ?? null);
 	};
 
+	// backend-neutral WMS (SMS) accessor: QMI exposes its live WMS client (native
+	// or allocated over the passthrough). cb(wms|null).
+	self.with_wms = function(cb) {
+		cb(self.wms ?? null);
+	};
+
 	// --- step chain --------------------------------------------------------
 
 	let dp = opts.datapath ?? {};
@@ -432,6 +439,27 @@ export function create(opts)
 						});
 					};
 
+					// allocate the WMS (SMS) client if the modem advertises the
+					// service; non-fatal — a missing/failed WMS just means no SMS.
+					let alloc_wms = (next) => {
+						if (!self.services[sprintf('%d', wmsmod.default.service)]) {
+							self.wms = null;
+							return next();
+						}
+
+						self.alloc(wmsmod.default, (ew, wms) => {
+							if (ew) {
+								log('warn', 'wms allocation failed, SMS unavailable');
+								self.wms = null;
+							}
+							else {
+								self.wms = wms;
+							}
+
+							next();
+						});
+					};
+
 					if (self.services[sprintf('%d', uimmod.default.service)]) {
 						self.alloc(uimmod.default, (e3, uim) => {
 							if (e3) {
@@ -442,11 +470,11 @@ export function create(opts)
 								self.uim = uim;
 							}
 
-							after_uim();
+							alloc_wms(after_uim);
 						});
 					}
 					else {
-						after_uim();
+						alloc_wms(after_uim);
 					}
 				});
 			});
