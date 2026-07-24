@@ -214,6 +214,8 @@ function run_daemon()
 			// unknown board). Recovery power-cycles/resets the modem through it.
 			board: board.create({ log: (level, msg) => logmod.log(level, '%s', msg) }),
 			resolve_modem_device: discovery.resolve_modem_device,
+			// enumerate physically-present control devices for the LuCI picker
+			list_present: () => discovery.list_present(),
 			// learn-back: record a discovered IMEI onto its wwand_modem section so
 			// a loose config self-stabilises (daemon gates this on auto_correct_config
 			// and a real section). Best-effort; never blocks bring-up.

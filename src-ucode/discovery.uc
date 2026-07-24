@@ -196,6 +196,52 @@ export function device_for_serial(serial, fx)
 	return (length(ids) == 1) ? byusb[ids[0]] : null;
 }
 
+// enumerate the modem control devices physically present right now — cdc-wdm
+// control nodes (qmi/mbim) and NCM datapath netdevs — each with its USB device
+// id and iSerial, read pre-open from sysfs. Powers the LuCI "detected modems"
+// picker so a user can pin `serial`/`imei` without typing. IMEI is NOT read here
+// (that needs opening the modem); the daemon fills it in for managed modems.
+export function list_present(fx)
+{
+	fx = fx ?? default_fx();
+
+	let out = [];
+
+	for (let path in (fx.glob('/sys/class/usbmisc/cdc-wdm*') ?? [])) {
+		let name = basename(path);
+		let usbid = usb_device_of(name, fx);
+
+		push(out, {
+			kind: 'cdc-wdm',
+			device: sprintf('/dev/%s', name),
+			protocol: protocol_of(sprintf('/dev/%s', name), fx),
+			usb_path: usbid,
+			serial: usb_serial_of(usbid, fx),
+		});
+	}
+
+	for (let path in (fx.glob('/sys/class/net/*') ?? [])) {
+		let netdev = basename(path);
+
+		if (!NCM_DRIVERS[netdev_driver(netdev, fx)])
+			continue;
+
+		let dev = fx.readlink(sprintf('/sys/class/net/%s/device', netdev));
+		let m = dev ? match(basename(dev), /^([0-9]+-[0-9.]+):/) : null;
+		let usbid = m ? m[1] : null;
+
+		push(out, {
+			kind: 'ncm',
+			netdev: netdev,
+			protocol: 'ncm',
+			usb_path: usbid,
+			serial: usb_serial_of(usbid, fx),
+		});
+	}
+
+	return out;
+}
+
 // '1-1.2' (usb path) -> '/dev/cdc-wdmX' | null
 export function device_for_usb_path(usb_path, fx)
 {

@@ -92,6 +92,14 @@ export function publish(conn, daemon, log)
 					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
 		},
 
+		// detected modems for the LuCI stable-binding picker (managed + present)
+		modem_probe: {
+			args: { ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_probe((err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
 		modem_sim_switch_slot: {
 			args: { modem: '', slot: 0, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

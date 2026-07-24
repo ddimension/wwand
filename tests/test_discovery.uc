@@ -108,6 +108,20 @@ let multi_fx = fakefx.create({
 ok(discovery.device_for_serial('UNIQUE', multi_fx) != null,
 	'serial: two cdc-wdm on one modem still bind (grouped by USB device)');
 
+// --- 1g. list_present: enumerate detected control devices for the picker ----
+let present_fx = fakefx.create({
+	present: { '/sys/class/usbmisc/cdc-wdm0': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device': '../../../3-1:1.4',
+	         '/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/qmi_wwan' },
+	files: { '/sys/bus/usb/devices/3-1/serial': '99efe861\n' },
+});
+let present = discovery.list_present(present_fx);
+eq(length(present), 1, 'list_present: one control device found');
+eq(present[0].device, '/dev/cdc-wdm0', 'list_present: device path');
+eq(present[0].protocol, 'qmi', 'list_present: protocol auto-detected');
+eq(present[0].serial, '99efe861', 'list_present: iSerial read pre-open');
+eq(present[0].usb_path, '3-1', 'list_present: usb device id');
+
 // --- 2. cdc-wdm MBIM --------------------------------------------------------
 
 let mbim_fx = fakefx.create({

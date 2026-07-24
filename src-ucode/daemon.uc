@@ -1278,6 +1278,41 @@ export function create(opts)
 			cb(err ? { error: 'qmi', detail: err } : null, err ? null : { slots: slots }));
 	};
 
+	// enumerate detected modems for the LuCI stable-binding picker: managed
+	// modems (with live IMEI/model from the daemon) + every control device
+	// physically present in sysfs (with its iSerial, read pre-open). Cheap, no
+	// modem is opened here.
+	self.modem_probe = function(cb) {
+		let present = deps.list_present ? deps.list_present() : [];
+		let managed = [];
+
+		for (let name, entry in self.modems)
+			push(managed, {
+				id: name,
+				configured_serial: entry.cfg?.serial,
+				configured_imei: entry.cfg?.imei,
+				imei: entry.modem?.info?.imei,
+				model: entry.modem?.info?.model,
+				device: entry.device,
+				netdev: entry.netdev,
+				registered: entry.modem?.reg?.registration == 'registered',
+				identity_mismatch: entry.modem?.identity_mismatch,
+			});
+
+		// enrich each present device with the IMEI/model of the managed modem
+		// sitting on the same control node, so the picker can offer both anchors
+		for (let p in present)
+			for (let m in managed)
+				if ((p.device && p.device == m.device) || (p.netdev && p.netdev == m.netdev)) {
+					p.imei = m.imei;
+					p.model = m.model;
+					p.managed_by = m.id;
+					break;
+				}
+
+		cb(null, { managed: managed, present: present });
+	};
+
 	self.modem_sim_switch_slot = function(ref, physical, cb) {
 		let entry = check_modem(ref, cb);
 
