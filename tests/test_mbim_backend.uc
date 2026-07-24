@@ -283,4 +283,38 @@ backend.uicc_close_channel(closec, 3, (err) => {
 	eq(closec.last.info, p32(3) + p32(1), 'uicc-close: [channel,group=1]');
 });
 
+// --- native MBIM SMS Read parsing (layout confirmed on the EG06) ------------
+// Response: Format(u32) MessagesCount(u32), then N [offset,size] ref pairs, each
+// to a record { index, status, pduOffset, pduSize }; PDU bytes at pduOffset.
+(function () {
+	let PDU = '000402912100002010100000000002e834';   // gsm7 "hi"
+	let pdu_bytes = '';
+	for (let i = 0; i < length(PDU); i += 2)
+		pdu_bytes += chr(hex(substr(PDU, i, 2)));
+
+	// [0..8] format=0,count=1 ; [8..16] pair(recOff=16,recSize=16) ;
+	// [16..32] record(index=5,status=1,pduOff=32,pduSize=17) ; [32..] pdu
+	let resp = p32(0) + p32(1) + p32(16) + p32(16) +
+		p32(5) + p32(1) + p32(32) + p32(length(pdu_bytes)) + pdu_bytes;
+
+	let seen = null;
+	let fake_mc = { command_raw: (uuid, cid, info, cb) => { seen = { uuid, cid, info }; cb(null, resp); } };
+
+	backend.sms_read_all(fake_mc, (err, recs) => {
+		eq(err, null, 'sms-read: no error');
+		eq(seen.cid, 2, 'sms-read: CID 2 (SMS Read)');
+		eq(seen.info, p32(0) + p32(0) + p32(0), 'sms-read: query [PDU,ALL,index0]');
+		eq(length(recs), 1, 'sms-read: one record');
+		eq(recs[0].index, 5, 'sms-read: message index');
+		eq(recs[0].status, 1, 'sms-read: message status');
+		eq(recs[0].pdu, PDU, 'sms-read: extracted PDU hex');
+	});
+
+	// delete by index -> CID 4, [flag=INDEX(1), index]
+	let delseen = null;
+	backend.sms_delete({ command_raw: (u, c, i, cb) => { delseen = { c, i }; cb(null); } }, 7, () => {});
+	eq(delseen.c, 4, 'sms-delete: CID 4');
+	eq(delseen.i, p32(1) + p32(7), 'sms-delete: [flag=INDEX, index=7]');
+})();
+
 done('test_mbim_backend');

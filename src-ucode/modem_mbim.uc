@@ -35,6 +35,7 @@ import * as ctlmod from './codec/schema/ctl.uc';
 import * as nasmod from './codec/schema/nas.uc';
 import * as dsdmod from './codec/schema/dsd.uc';
 import * as uimmod from './codec/schema/uim.uc';
+import * as wmsmod from './codec/schema/wms.uc';
 import * as sim from './sim.uc';
 import * as tlv from './codec/tlv.uc';
 
@@ -184,6 +185,13 @@ export function create(opts)
 			}),
 			apdu:  (channel, apdu_hex, cb) => mbim_backend.uicc_apdu(self.mbim, channel, apdu_hex, cb),
 			close: (channel, cb)           => mbim_backend.uicc_close_channel(self.mbim, channel, cb),
+		};
+
+		// native MBIM SMS (no storage selector) — the sms.uc fallback for a
+		// pure-MBIM modem without the QMI passthrough. Duck-typed like mbim_uicc.
+		self.mbim_sms = {
+			read_all: (cb)        => mbim_backend.sms_read_all(self.mbim, cb),
+			del:      (index, cb) => mbim_backend.sms_delete(self.mbim, index, cb),
 		};
 
 		self.mbim.open((err) => {
@@ -490,6 +498,27 @@ export function create(opts)
 		});
 	};
 
+	// _ensure_wms: allocate a QMI WMS client over the passthrough and expose it as
+	// self.wms, so the backend-neutral sms.uc list/read/delete works on an MBIM
+	// modem (the EG06 exposes the QMI stack — incl. WMS — over the passthrough).
+	// cb() either way; sms.uc's qmi probe then verifies WMS List actually works.
+	self._ensure_wms = function(cb) {
+		if (self.wms)
+			return cb();
+
+		self._ensure_pt((up) => {
+			if (!up)
+				return cb();
+
+			self.pt.ctl.request('ALLOCATE_CID', { service: wmsmod.default.service }, (aerr, adata) => {
+				if (!aerr && adata?.allocation)
+					self.wms = client_mod.create(self.pt.shim, wmsmod.default, adata.allocation.cid, hooks);
+
+				cb();
+			}, { no_recovery: true });
+		});
+	};
+
 	// signal: prefer the QMI passthrough (GET_SIGNAL_INFO — reuses the battle-
 	// tested QMI decode), then native MBIMEx v2 Signal State as a fallback for
 	// modems without the passthrough. (The native MS-ext buffer decode is not yet
@@ -790,6 +819,7 @@ export function create(opts)
 			self.mbim.destroy();
 			self.mbim = null;
 			self.mbim_uicc = null;
+			self.mbim_sms = null;
 		}
 
 		if (self.hub) {

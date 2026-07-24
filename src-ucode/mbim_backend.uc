@@ -130,6 +130,54 @@ export function uicc_close_channel(mc, channel, cb)
 	mc.command_raw(UICC_SERVICE, UICC_CID_CLOSE_CHANNEL, info, (err) => cb(err ?? null));
 }
 
+// --- native MBIM SMS service (uuid_sms, verified vs libmbim 1.32) ------------
+// The SMS service has NO storage selector (READ/DELETE act on the modem's
+// configured SMS store), unlike the QMI WMS path — so this is the fallback for
+// pure-MBIM firmware without the passthrough. PDU format only (no CDMA).
+const SMS_SERVICE = '533fbeeb-14fe-4467-9f90-33a223e56c3f';
+const SMS_CID_READ = 2;
+const SMS_CID_DELETE = 4;
+const SMS_FORMAT_PDU = 0;
+const SMS_FLAG_ALL = 0;
+const SMS_FLAG_INDEX = 1;
+
+function _u(buf, p) { return (p + 4 <= length(buf)) ? struct.unpack('<I', substr(buf, p, 4))[0] : 0; }
+
+// sms_read_all(mc, cb): read every stored PDU. cb(err, [{ index, status, pdu }]).
+// Response (MbimSmsRead, PDU): Format(u32), MessagesCount(u32), then a
+// ref-struct-array — MessagesCount [offset,size] pairs, each pointing to a
+// MbimSmsPduReadRecord { MessageIndex(u32), MessageStatus(u32),
+// PduData ref-byte-array [offset,size] }. All offsets are from the buffer start.
+export function sms_read_all(mc, cb)
+{
+	let info = struct.pack('<III', SMS_FORMAT_PDU, SMS_FLAG_ALL, 0);
+
+	mc.command_raw(SMS_SERVICE, SMS_CID_READ, info, (err, resp) => {
+		if (err)
+			return cb(err, null);
+
+		let count = _u(resp, 4), out = [];
+
+		for (let i = 0; i < count; i++) {
+			let off = _u(resp, 8 + i * 8);             // ref pair: [offset, size]
+			let idx = _u(resp, off), status = _u(resp, off + 4);
+			let poff = _u(resp, off + 8), psize = _u(resp, off + 12);
+
+			push(out, { index: idx, status: status, pdu: bin2hex(substr(resp, poff, psize)) });
+		}
+
+		cb(null, out);
+	});
+}
+
+// sms_delete(mc, index, cb): delete one stored message by index.
+export function sms_delete(mc, index, cb)
+{
+	let info = struct.pack('<II', SMS_FLAG_INDEX, +index);
+
+	mc.command_raw(SMS_SERVICE, SMS_CID_DELETE, info, (err) => cb(err ?? null));
+}
+
 // how many neighbour cells to ask the modem for (BASE_STATIONS_INFO caps)
 const MAX_CELLS = 16;
 

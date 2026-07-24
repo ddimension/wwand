@@ -100,6 +100,50 @@ function qmi_list(modem, storage, cb)
 	});
 }
 
+// --- native MBIM SMS path (no storage selector — reads the modem store) ------
+
+function mbim_decode(recs, storage)
+{
+	let parts = [];
+
+	for (let r in (recs ?? [])) {
+		let m = sms_pdu.decode_deliver(r.pdu);
+		if (m) {
+			m.index = r.index;
+			m.storage = storage;
+			push(parts, m);
+		}
+	}
+
+	return parts;
+}
+
+function mbim_list(modem, storage, cb)
+{
+	modem.mbim_sms.read_all((err, recs) =>
+		cb(err ? { error: 'mbim', detail: err } : null,
+		   err ? null : { messages: sms_pdu.reassemble(mbim_decode(recs, storage)) }));
+}
+
+function mbim_read(modem, storage, index, cb)
+{
+	modem.mbim_sms.read_all((err, recs) => {
+		if (err)
+			return cb({ error: 'mbim', detail: err }, null);
+
+		let m = null;
+
+		for (let r in (recs ?? []))
+			if (r.index == +index) {
+				m = sms_pdu.decode_deliver(r.pdu);
+				if (m) { m.index = r.index; m.storage = storage; }
+				break;
+			}
+
+		cb(null, { message: m });
+	});
+}
+
 // --- AT path (CMGL/CMGR/CMGD in PDU mode) ------------------------------------
 
 // +CMGL response: "+CMGL: <index>,<stat>,<alpha>,<len>" then a PDU hex line.
@@ -219,6 +263,14 @@ function sms_backend(modem, cb)
 
 			go();
 		} },
+		// native MBIM SMS — fallback for a pure-MBIM modem without the passthrough.
+		// After qmi because it has no storage selector (reads the modem's store).
+		{ name: 'mbim', probe: (ok) => {
+			if (!modem.mbim_sms)
+				return ok(false);
+
+			modem.mbim_sms.read_all((err) => ok(!err));
+		} },
 		// AT CMGL/CMGR/CMGD in PDU mode — the universal fallback.
 		{ name: 'at', probe: (ok) => ok(!!modem.at) },
 	], cb);
@@ -232,6 +284,8 @@ export function sms_list(modem, storage, cb)
 		if (be == 'qmi')
 			return qmi_list(modem, storage, (err, parts) =>
 				cb(err, err ? null : { messages: sms_pdu.reassemble(parts) }));
+		if (be == 'mbim')
+			return mbim_list(modem, storage, cb);
 		if (be == 'at')
 			return at_list(modem, storage, cb);
 
@@ -248,6 +302,8 @@ export function sms_read(modem, storage, index, cb)
 					m.storage = storage;
 				cb(err, err ? null : { message: m });
 			});
+		if (be == 'mbim')
+			return mbim_read(modem, storage, index, cb);
 		if (be == 'at')
 			return at_read(modem, storage, index, cb);
 
@@ -265,6 +321,9 @@ export function sms_delete(modem, storage, index, cb)
 				message_mode: wmsmod.MODE_GSM_WCDMA,
 			}, (err) => cb(err ? { error: 'qmi', detail: err } : null,
 			               err ? null : { ok: true }));
+		if (be == 'mbim')
+			return modem.mbim_sms.del(+index, (err) =>
+				cb(err ? { error: 'mbim', detail: err } : null, err ? null : { ok: true }));
 		if (be == 'at')
 			return at_delete(modem, storage, index, cb);
 
