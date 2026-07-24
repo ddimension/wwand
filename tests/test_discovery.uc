@@ -122,6 +122,39 @@ eq(present[0].protocol, 'qmi', 'list_present: protocol auto-detected');
 eq(present[0].serial, '99efe861', 'list_present: iSerial read pre-open');
 eq(present[0].usb_path, '3-1', 'list_present: usb device id');
 
+// --- 1h. pre-open IMEI match (modems that publish IMEI as the iSerial) -------
+let imei_fx = fakefx.create({
+	present: { '/sys/class/usbmisc/cdc-wdm0': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device': '../../../2-1:1.3',
+	         '/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/qmi_wwan' },
+	files: { '/sys/bus/usb/devices/2-1/serial': '351234567890123\n' },   // iSerial == IMEI
+	dirs: { '/sys/class/usbmisc/cdc-wdm0/device/net': [ 'wwan0' ] },
+});
+eq(discovery.device_for_imei('351234567890123', imei_fx), '/dev/cdc-wdm0',
+	'imei: matches pre-open when the iSerial IS the IMEI');
+eq(discovery.device_for_imei('3512345678901288', imei_fx), '/dev/cdc-wdm0',
+	'imei: IMEISV config matches the IMEI iSerial (first 14)');
+eq(discovery.resolve_modem_device({ imei: '351234567890123' }, imei_fx), '/dev/cdc-wdm0',
+	'imei: resolve_modem_device binds pre-open via IMEI-as-iSerial');
+
+// a short vendor serial (RG650E) never false-hits a configured IMEI
+let short_fx = fakefx.create({
+	present: { '/sys/class/usbmisc/cdc-wdm0': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device': '../../../3-1:1.4' },
+	files: { '/sys/bus/usb/devices/3-1/serial': '99efe861\n' },
+});
+eq(discovery.device_for_imei('868965060008609', short_fx), null,
+	'imei: a short vendor serial does not false-match an IMEI');
+
+// the EG06 dummy iSerial (0123456789ABCDEF) never false-hits either
+let dummy_fx = fakefx.create({
+	present: { '/sys/class/usbmisc/cdc-wdm0': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device': '../../../4-1:1.4' },
+	files: { '/sys/bus/usb/devices/4-1/serial': '0123456789ABCDEF\n' },
+});
+eq(discovery.device_for_imei('868759030540985', dummy_fx), null,
+	'imei: the EG06 dummy iSerial does not false-match an IMEI');
+
 // --- 2. cdc-wdm MBIM --------------------------------------------------------
 
 let mbim_fx = fakefx.create({

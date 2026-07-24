@@ -153,10 +153,13 @@ config modem 'm0'
 ```
 
 **Binding a modem to hardware.** The anchors are tried most-stable first:
-`serial` (USB iSerial, matched in sysfs before the modem is opened) → `imei`
-(read after open and *verified* — a mismatch halts bring-up so the wrong physical
-modem never gets this SIM/APN) → the topological anchors `device` / `path` /
-netdev. `serial` and `imei` follow the modem across re-enumeration, a port change,
+`serial` (USB iSerial, matched in sysfs before the modem is opened) → `imei` →
+the topological anchors `device` / `path` / netdev. `imei` is normally *verified*
+after open (a mismatch halts bring-up so the wrong physical modem never gets this
+SIM/APN); additionally, modems that publish their IMEI **as** the USB iSerial are
+matched pre-open too, exactly like `serial`. A short vendor serial or a dummy
+constant (e.g. the EG06 `0123456789ABCDEF`) never false-matches an IMEI and just
+falls through to the post-open check. `serial` and `imei` follow the modem across re-enumeration, a port change,
 or two identical modems; the topological anchors do not. An empty or duplicated
 iSerial is treated as ambiguous and falls back to the next anchor. With
 `auto_correct_config` set, a modem that pinned no `imei` learns the one it

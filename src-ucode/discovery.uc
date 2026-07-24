@@ -242,6 +242,82 @@ export function list_present(fx)
 	return out;
 }
 
+// IMEI digits that identify a device (TAC+serial, 14) — drops the check digit /
+// IMEISV software-version. Local to discovery so this layer keeps no upward
+// dependency on modem_common (which has the same helper for the post-open gate).
+function imei14(s)
+{
+	return substr(replace(sprintf('%s', s ?? ''), /[^0-9]/g, ''), 0, 14);
+}
+
+// Some modems publish their IMEI AS the USB iSerial. When they do, `option imei`
+// can be matched PRE-OPEN, exactly like `serial`. Returns the control device only
+// when a present modem's iSerial normalises to the same 14 IMEI digits — and both
+// must be full 14 digits, so a short vendor serial ('99efe861') or the dummy
+// '0123456789ABCDEF' never false-hits. Modems that use a separate serial simply
+// miss here and fall through; the post-open identity gate verifies them instead.
+export function device_for_imei(imei, fx)
+{
+	fx = fx ?? default_fx();
+
+	let want = imei14(imei);
+
+	if (length(want) < 14)
+		return null;
+
+	let byusb = {};
+
+	for (let path in (fx.glob('/sys/class/usbmisc/cdc-wdm*') ?? [])) {
+		let name = basename(path);
+		let usbid = usb_device_of(name, fx);
+
+		if (usbid == null || imei14(usb_serial_of(usbid, fx)) != want)
+			continue;
+
+		if (byusb[usbid] == null)
+			byusb[usbid] = sprintf('/dev/%s', name);
+	}
+
+	let ids = keys(byusb);
+
+	return (length(ids) == 1) ? byusb[ids[0]] : null;
+}
+
+// NCM counterpart of device_for_imei (IMEI published as the iSerial), matched on
+// the datapath netdev's USB parent.
+export function ncm_netdev_for_imei(imei, fx)
+{
+	fx = fx ?? default_fx();
+
+	let want = imei14(imei);
+
+	if (length(want) < 14)
+		return null;
+
+	let byusb = {};
+
+	for (let path in (fx.glob('/sys/class/net/*') ?? [])) {
+		let netdev = basename(path);
+
+		if (!NCM_DRIVERS[netdev_driver(netdev, fx)])
+			continue;
+
+		let dev = fx.readlink(sprintf('/sys/class/net/%s/device', netdev));
+		let m = dev ? match(basename(dev), /^([0-9]+-[0-9.]+):/) : null;
+		let usbid = m ? m[1] : null;
+
+		if (usbid == null || imei14(usb_serial_of(usbid, fx)) != want)
+			continue;
+
+		if (byusb[usbid] == null)
+			byusb[usbid] = netdev;
+	}
+
+	let ids = keys(byusb);
+
+	return (length(ids) == 1) ? byusb[ids[0]] : null;
+}
+
 // '1-1.2' (usb path) -> '/dev/cdc-wdmX' | null
 export function device_for_usb_path(usb_path, fx)
 {
@@ -403,6 +479,15 @@ export function resolve_modem_device(cfg, fx)
 			return dev;
 	}
 
+	// a pinned IMEI is normally verified post-open, but modems that publish their
+	// IMEI as the iSerial can be matched pre-open here too — same effect as serial.
+	if (cfg.imei) {
+		let dev = device_for_imei(cfg.imei, fx);
+
+		if (dev)
+			return dev;
+	}
+
 	// a control node is ALWAYS an absolute /dev path — only then does an existing
 	// `device` resolve to itself. (Guarding on the leading '/' matters: a bare
 	// netdev name like 'wwan0' can spuriously pass fx.access depending on the
@@ -473,6 +558,9 @@ export function resolve_control(cfg, fx)
 
 	if (cfg.serial)
 		netdev = ncm_netdev_for_serial(cfg.serial, fx);
+
+	if (!netdev && cfg.imei)
+		netdev = ncm_netdev_for_imei(cfg.imei, fx);
 
 	if (!netdev && cfg.netdev && NCM_DRIVERS[netdev_driver(cfg.netdev, fx)])
 		netdev = cfg.netdev;
