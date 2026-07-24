@@ -19,6 +19,15 @@ proto_qmi_init_config() {
 	no_proto_task=1
 	proto_config_add_string context
 
+	# network-native model: the interface references a wwand_modem via `option
+	# modem` and carries the connection (apn/auth/… reused from the block below)
+	# inline. Declared so netifd tracks them; the daemon reads them from uci.
+	proto_config_add_string modem
+	proto_config_add_string pdp_type
+	proto_config_add_string profile
+	proto_config_add_string use_pushed_prefix
+	proto_config_add_string settings_poll
+
 	# legacy qmi-advanced options: accepted so old configs keep parsing;
 	# interpreted by the wwand compat layer, not by this shim
 	proto_config_add_string "device:device"
