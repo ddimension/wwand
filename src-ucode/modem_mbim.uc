@@ -35,6 +35,7 @@ import * as ctlmod from './codec/schema/ctl.uc';
 import * as nasmod from './codec/schema/nas.uc';
 import * as dsdmod from './codec/schema/dsd.uc';
 import * as uimmod from './codec/schema/uim.uc';
+import * as sim from './sim.uc';
 import * as tlv from './codec/tlv.uc';
 
 const TIMING_DEFAULTS = {
@@ -265,7 +266,7 @@ export function create(opts)
 		if (self._ready_state == bc.READY_STATE_INITIALIZED)
 			return step_register();
 
-		let pincode = self.config.pincode;
+		let pincode = sim.effective_pincode(self);
 
 		self.mbim.command(bc, 'PIN', 'query', {}, (err, data) => {
 			if (err)
@@ -274,19 +275,20 @@ export function create(opts)
 			if (data.pin_state == bc.PIN_STATE_UNLOCKED)
 				return step_register();
 
-			if (!pincode) {
-				self.set_state('SIM_BLOCKED', { reason: 'pin_required_no_pin' });
-				emit('sim_blocked', { reason: 'pin_required_no_pin' });
+			let block = (reason) => {
+				self.set_state('SIM_BLOCKED', { reason: reason, retries: data.remaining_attempts });
+				emit('sim_blocked', { reason: reason, retries: data.remaining_attempts });
 				notify_contexts('sim_blocked', {});
-				return;
-			}
+			};
 
-			if (data.remaining_attempts != null && data.remaining_attempts < 2) {
-				self.set_state('SIM_BLOCKED', { reason: 'retries_exhausted' });
-				emit('sim_blocked', { reason: 'retries_exhausted' });
-				notify_contexts('sim_blocked', {});
-				return;
-			}
+			if (!pincode)
+				return block('pin_required_no_pin');
+
+			// PIN-safety: never auto-burn the last try (<=1 left blocks; 0 = PUK)
+			let br = sim.pin_block_reason(data.remaining_attempts, self.pin_force);
+
+			if (br)
+				return block(br);
 
 			self.mbim.command(bc, 'PIN', 'set', {
 				pin_type: bc.PIN_TYPE_PIN1,

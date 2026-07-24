@@ -53,12 +53,39 @@ function find_app(card_status)
 // default pincode; an empty override falls through to the modem default.
 export function effective_pincode(modem)
 {
+	// a manual PIN release (the pin-verify ubus method) sets a one-shot override
+	// that wins over the configured PIN — used to unlock past the low-retry block.
+	if (modem._pin_override != null && modem._pin_override != '')
+		return modem._pin_override;
+
 	let sp = modem.active_sim?.pincode;
 
 	if (sp != null && sp != '')
 		return sp;
 
 	return modem.config?.pincode;
+}
+
+// PIN-safety threshold: with this many verify attempts left (or fewer), do NOT
+// auto-enter the PIN — burning the last try locks the SIM to PUK. The daemon
+// blocks and waits for a manual release (modem.pin_force, set by the pin-verify
+// ubus call). Shared by all backends so the behaviour is uniform.
+export const PIN_MIN_RETRIES = 2;
+
+// decide whether to block auto PIN entry given the remaining attempts; returns
+// a blocked reason string, or null to proceed. `force` = a manual release.
+export function pin_block_reason(retries, force)
+{
+	if (retries == null || force)
+		return null;
+
+	if (retries < 1)
+		return 'retries_exhausted';   // 0 left — PUK needed
+
+	if (retries < PIN_MIN_RETRIES)
+		return 'pin_retries_low';     // precautionary block, releasable manually
+
+	return null;
 }
 
 function unlock_uim(modem, cb, tries)
@@ -107,9 +134,12 @@ function unlock_uim(modem, cb, tries)
 		case uimmod.APP_STATE_PIN1_OR_UPIN_PIN_REQUIRED: {
 			let retries = app.upin_replaces_pin1 ? found.card.upin_retries : app.pin1_retries;
 
-			// guard: refuse to burn the last try
-			if (retries != null && retries < 1)
-				return cb({ blocked: true, reason: 'retries_exhausted', retries: retries });
+			// guard: never auto-burn the last try (<= 1 left blocks and waits for
+			// a manual release; 0 left needs the PUK)
+			let br = pin_block_reason(retries, modem.pin_force);
+
+			if (br)
+				return cb({ blocked: true, reason: br, retries: retries });
 
 			if (!pincode)
 				return cb({ blocked: true, reason: 'pin_required_no_pin' });
@@ -210,9 +240,11 @@ function unlock_dms(modem, cb, tries)
 			return cb(null, { status: 'ready' });
 
 		case 1: { // enabled, not verified
-			// old guard: refuse when fewer than 2 tries left
-			if (pin1.verify_retries != null && pin1.verify_retries < 2)
-				return cb({ blocked: true, reason: 'retries_exhausted', retries: pin1.verify_retries });
+			// guard: never auto-burn the last try (shared PIN-safety threshold)
+			let br = pin_block_reason(pin1.verify_retries, modem.pin_force);
+
+			if (br)
+				return cb({ blocked: true, reason: br, retries: pin1.verify_retries });
 
 			if (!pincode)
 				return cb({ blocked: true, reason: 'pin_required_no_pin' });

@@ -26,6 +26,7 @@ import * as recovery_mod from './recovery.uc';
 import * as protoswitch from './protocol_switch.uc';
 import * as netlink from './netlink.uc';
 import * as nasmod from './codec/schema/nas.uc';
+import * as sim from './sim.uc';
 
 const TIMING_DEFAULTS = {
 	settle: 2000,
@@ -1408,25 +1409,40 @@ export function create(opts)
 				return step_attach();
 
 			if (st == 'SIM PIN') {
-				let pincode = self.config.pincode;
-
-				if (!pincode) {
-					self.set_state('SIM_BLOCKED', { reason: 'pin_required_no_pin' });
-					emit('sim_blocked', { reason: 'pin_required_no_pin' });
+				let pincode = sim.effective_pincode(self);
+				let block = (reason, retries) => {
+					self.set_state('SIM_BLOCKED', { reason: reason, retries: retries });
+					emit('sim_blocked', { reason: reason, retries: retries });
 					notify_contexts('sim_blocked', {});
-					return;
-				}
+				};
 
-				return self.at.send(sprintf('AT+CPIN="%s"', pincode), (verr) => {
-					if (verr) {
-						self.set_state('SIM_BLOCKED', { reason: 'verify_failed' });
-						emit('sim_blocked', { reason: 'verify_failed' });
-						notify_contexts('sim_blocked', {});
-						return;
+				if (!pincode)
+					return block('pin_required_no_pin');
+
+				// PIN-safety: query the remaining attempts (Quectel AT+QPINC="SC":
+				// +QPINC: "SC",<pin_remaining>,<puk_remaining>) and refuse to
+				// auto-burn the last try. Best-effort — if the modem lacks QPINC,
+				// retries stays null and pin_block_reason lets it proceed.
+				return self.at.send('AT+QPINC="SC"', (qerr, qres) => {
+					let retries = null;
+
+					for (let l in (qres?.lines ?? [])) {
+						let m = match(l, /\+QPINC:\s*(?:"[^"]*",\s*)?([0-9]+)/);
+						if (m) { retries = +m[1]; break; }
 					}
 
-					log('notice', 'sim: pin accepted');
-					settle_timer = uloop.timer(self.timing.settle, step_attach);
+					let br = sim.pin_block_reason(retries, self.pin_force);
+
+					if (br)
+						return block(br, retries);
+
+					self.at.send(sprintf('AT+CPIN="%s"', pincode), (verr) => {
+						if (verr)
+							return block('verify_failed');
+
+						log('notice', 'sim: pin accepted');
+						settle_timer = uloop.timer(self.timing.settle, step_attach);
+					});
 				});
 			}
 

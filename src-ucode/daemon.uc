@@ -142,6 +142,20 @@ export function create(opts)
 	let clear_reconnect, retry_activate, enter_reconnecting, activate;
 
 	let on_modem_event = (modem, event, data) => {
+		// clear the one-shot manual-PIN-release flags once the unlock resolved
+		// (either way) so the daemon never re-uses them on a later cycle
+		if (event == 'registered' || event == 'sim_blocked') {
+			modem.pin_force = false;
+			modem._pin_override = null;
+		}
+
+		// remember the SIM-block detail (reason + remaining PIN attempts) so
+		// status()/LuCI can offer a manual release for the low-retry case
+		if (event == 'sim_blocked')
+			modem.sim_block = data ?? {};
+		else if (event == 'registered')
+			modem.sim_block = null;
+
 		switch (event) {
 		case 'registered':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
@@ -977,6 +991,7 @@ export function create(opts)
 				control_note: entry.control_note,   // e.g. a stuck mode switch
 				apdu_backend: entry.modem?._apdu_be,   // mbim | qmi | at (once probed)
 				pin1: entry.modem?.pin1,            // SIM PIN-lock state (LuCI)
+				sim_block: entry.modem?.sim_block,  // { reason, retries } when SIM_BLOCKED
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,
 				imei: entry.modem?.info?.imei,
@@ -1455,6 +1470,31 @@ export function create(opts)
 
 		return deps.board.power_cycle() ?
 			{ ok: true, action: 'power_cycle' } : { error: 'no_power_control' };
+	};
+
+	// manual PIN release: enter the PIN once past the low-retry safety block
+	// (with <=1 verify attempt left the daemon refuses to auto-enter, to avoid
+	// burning the last try into a PUK lock). The admin explicitly accepts the
+	// risk; an optional `pin` overrides the configured one for this attempt. The
+	// one-shot `pin_force`/`_pin_override` flags are cleared on the next
+	// registered / sim_blocked event.
+	self.sim_pin_verify = function(ref, pin, cb) {
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return cb({ error: 'no_such_modem', ref: ref });
+
+		entry.modem.pin_force = true;
+
+		if (pin != null && pin != '')
+			entry.modem._pin_override = pin;
+
+		log('warn', sprintf('modem %s: manual PIN release requested (entering PIN past the low-retry guard)', ref));
+
+		entry.modem.stop();
+		entry.modem.start();
+
+		cb(null, { ok: true });
 	};
 
 	self.modem_signal = function(ref) {

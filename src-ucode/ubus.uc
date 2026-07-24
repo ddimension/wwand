@@ -69,6 +69,15 @@ export function publish(conn, daemon, log)
 			call: (req) => daemon.repower_modem(req.args.modem),
 		},
 
+		// manual PIN release: enter the PIN once past the low-retry safety block
+		// (security relevant — write ACL). `pin` optional (overrides the config).
+		modem_sim_pin_verify: {
+			args: { modem: '', pin: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.sim_pin_verify(req.args.modem, req.args.pin, (err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
 		modem_get_settings: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

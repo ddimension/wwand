@@ -121,4 +121,20 @@ sim.apdu_close(fake, 2, ap_ch, (e) => { ap_closed = (e == null); });
 eq(at_cmds[2], 'AT+CCHC=2', 'apdu-at: CCHC command');
 eq(ap_closed, true, 'apdu-at: close ok');
 
+// --- PIN safety: shared low-retry guard (all backends) ----------------------
+// never auto-enter the PIN with <= 1 attempt left; distinct reason for 0 (PUK)
+// vs 1 (releasable); a manual force overrides; unknown retries -> proceed.
+eq(sim.pin_block_reason(null, false), null, 'pin: unknown retries -> proceed');
+eq(sim.pin_block_reason(3, false), null, 'pin: 3 left -> proceed');
+eq(sim.pin_block_reason(2, false), null, 'pin: 2 left -> proceed');
+eq(sim.pin_block_reason(1, false), 'pin_retries_low', 'pin: 1 left -> block (releasable)');
+eq(sim.pin_block_reason(0, false), 'retries_exhausted', 'pin: 0 left -> block (PUK)');
+eq(sim.pin_block_reason(1, true), null, 'pin: manual force overrides the 1-left block');
+eq(sim.pin_block_reason(0, true), null, 'pin: manual force overrides even at 0 (user accepts risk)');
+
+// effective_pincode: manual override wins over active_sim / config
+eq(sim.effective_pincode({ _pin_override: '4321', active_sim: { pincode: '1111' }, config: { pincode: '2222' } }), '4321', 'pin: manual override wins');
+eq(sim.effective_pincode({ active_sim: { pincode: '1111' }, config: { pincode: '2222' } }), '1111', 'pin: active_sim override wins over config');
+eq(sim.effective_pincode({ config: { pincode: '2222' } }), '2222', 'pin: falls back to config pincode');
+
 done('test_esim');
