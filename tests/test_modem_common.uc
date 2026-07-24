@@ -391,7 +391,7 @@ let mbim = {
 };
 l = mc.format_telemetry(mbim);
 ok(index(l, 'tech=NSA') >= 0, 'ft-mbim: tech from dsd_status');
-ok(index(l, 'plmn=26201 (Telekom)') >= 0, 'ft-mbim: plmn from provider id');
+ok(index(l, 'plmn=262/01 (Telekom)') >= 0, 'ft-mbim: numeric provider id split to mcc/mnc');
 ok(index(l, 'roaming=yes') >= 0, 'ft-mbim: roaming');
 ok(index(l, 'sig=[rssi -65 rsrp -95]') >= 0, 'ft-mbim: flat signal');
 

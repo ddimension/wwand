@@ -641,8 +641,9 @@ export function create(opts)
 
 	// Slow telemetry loop (the stats interval): the baseline v1 SIGNAL_STATE
 	// query (kept working for modems without V2 / passthrough) plus the richer
-	// signal, data-system mode and registration detail. Cells stay on the fast
-	// loop / the fast-loop-primed cell set.
+	// signal, data-system mode, registration detail and cells — so the periodic
+	// telemetry log line is as complete as QMI's (the passthrough serves cells
+	// via NAS GET_CELL_LOCATION_INFO just like the QMI backend).
 	self._start_telemetry = function() {
 		if (telemetry_timer)
 			return;
@@ -666,14 +667,14 @@ export function create(opts)
 					self.signal = { rssi_raw: data.rssi, rssi: dbm };
 				}
 
-				self._refresh_signal(() => self._refresh_data_mode(() => self._refresh_reg_detail(() => {
+				self._refresh_signal(() => self._refresh_data_mode(() => self._refresh_reg_detail(() => self._refresh_cells(() => {
 					if (!self.mbim)
 						return;
 
 					log_telemetry();
 					emit_telemetry();
 					telemetry_timer = uloop.timer(interval, tick);
-				})));
+				}))));
 			});
 		};
 

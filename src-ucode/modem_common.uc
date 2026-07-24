@@ -439,8 +439,13 @@ export function format_telemetry(o)
 
 		if (reg.plmn.mcc != null)
 			push(parts, sprintf('plmn=%d/%02d%s', reg.plmn.mcc, reg.plmn.mnc, desc));
-		else if (reg.plmn.id != null)
-			push(parts, sprintf('plmn=%s%s', reg.plmn.id, desc));
+		else if (reg.plmn.id != null) {
+			// a numeric provider id (MBIM) is the concatenated MCCMNC — split it
+			// to the same mcc/mnc form the QMI backend prints
+			let m = match(sprintf('%s', reg.plmn.id), /^([0-9]{3})([0-9]{2,3})$/);
+			push(parts, m ? sprintf('plmn=%s/%s%s', m[1], m[2], desc)
+			              : sprintf('plmn=%s%s', reg.plmn.id, desc));
+		}
 		else if (reg.plmn.description)
 			push(parts, sprintf('plmn=%s', trim(reg.plmn.description)));
 	}
