@@ -68,6 +68,39 @@ Design principles, all validated in the field:
 
 ## 3. Selected mechanisms
 
+### Modem lifecycle
+
+Bring-up is a linear step chain per modem; any step failure tears down and
+schedules a capped-backoff retry that climbs the recovery ladder (§ Recovery).
+
+```
+  ABSENT
+    │ start()
+    ▼
+  INIT_TRANSPORT ─► INIT_SERVICES ─► INIT_DATAPATH ─► SET_OPMODE
+                                                          │
+                                                          ▼
+                                    (read active ICCID)  SIM_UNLOCK ──blocked──► SIM_BLOCKED
+                                    pick wwand_sim PIN        │                   (terminal until
+                                                              ▼                    config reload)
+                                                        CONFIGURE_NET
+                                                        (attach profile
+                                                         set from config)
+                                                              │
+    ┌── fail: teardown + backoff ◄──── REGISTERING ◄──────────┘
+    │   retry (recovery ladder)            │
+    │                                      ▼ registered
+    └────────────────────────────────►  READY
+                                           │  emits 'registered'
+                                           ▼
+                                the daemon binds/kicks each interface;
+                                contexts activate (per PDP / mux channel)
+```
+
+`device removed` → `ABSENT` + `removed` at any point; hotplug rebuilds it.
+MBIM and NCM run the same shape with protocol-specific steps (e.g. MBIM
+`OPEN → DEVICE_CAPS → SUBSCRIBER_READY → PIN → REGISTER → PACKET_SERVICE`).
+
 ### Datapath (QMAP muxing)
 
 Backend selection per modem: rmnet pass-through preferred (needs
@@ -88,6 +121,31 @@ There is **no per-interface monitor process**. The proto handler declares
 `no-proto-task`, so after setup netifd leaves the interface `IFS_UP` with no
 supervisor task, and the **daemon** owns the context lifecycle — it drives
 netifd over ubus (`network.interface <x> up/renew/down`).
+
+```
+  ifup wan
+     │
+     ▼
+  netifd ──proto_qmi_setup──► wwand-proto.sh ──ubus wwand context_up──► daemon
+                                                                          │ activate
+                                                                          │ PDP context
+     ◄──────────── reply { ipv4{…}, ipv6{…}, mtu } ◄───────────────────── ┘
+     │
+  proto_add_ipv4_address / proto_add_*_route / proto_add_dns_server
+  proto_send_update (keep=1)          ← addressing/routing = netifd's job (VRF-safe)
+     │
+     ▼
+  interface IFS_UP        (no task — daemon owns the lifecycle from here)
+     ⋮
+  transient loss ─► daemon reconnects the session in place
+                    ─► ubus network.interface renew
+                    ─► proto_qmi_renew re-reads context_settings → delta update
+                       (no teardown → IPv6-PD + VRF routes preserved)
+     ⋮
+  permanent loss / hold_max expiry ─► network.interface down (accept the flush)
+```
+
+
 
 A **transient** loss (network drop, registration loss, recovery reset, brief
 modem-lost) keeps the netifd interface up and reconnects the modem session **in

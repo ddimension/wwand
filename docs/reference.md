@@ -50,6 +50,27 @@ config interface 'wan'
 **Precedence:** PIN = matching `wwand_sim.pincode` → `wwand_modem.pincode`;
 APN/auth = `interface` → active `wwand_sim` → card-provisioned.
 
+How the sections relate (all in `/etc/config/network`):
+
+```
+  config interface 'wan'          config interface 'ims'
+    proto qmi                        proto qmi
+    option modem 'm0' ───┐           option modem 'm0' ───┐      the connection:
+    option apn 'internet'│           option apn 'ims'     │      apn / pdp_type /
+    option mux_id '1'    │           option mux_id '2'    │      auth / mux channel
+                         ▼                                 ▼
+                    config wwand_modem 'm0'                       the modem: device/
+                      usb_path / pincode / sim_slot / modes …     SIM slot / radio
+                         ▲
+       matched by ICCID  │  (at bring-up, before PIN unlock)
+                    config wwand_sim 'vodafone'                   per-SIM override,
+                      iccid / pincode / apn   (option modem       keyed by ICCID —
+                                               optional)          PIN + carrier APN
+```
+
+Two interfaces share one `wwand_modem` = two mux contexts on one modem. A
+`wwand_sim` is picked by the inserted card's ICCID (modem binding optional).
+
 **Backward compatibility & migration.** The daemon still reads every older
 wwand format: a legacy inline `proto qmi` interface, and the previous
 `/etc/config/wwand` `modem`/`context` sections shown below. Nothing breaks.
@@ -58,6 +79,25 @@ Conversion to the model above happens automatically — a uci-defaults script ru
 stock OpenWrt `proto mbim`/`proto ncm` interfaces, since `wwand-mbim`/`wwand-ncm`
 replace those handlers), and saving in LuCI writes the new model too. Run the
 migrate tool by hand any time (dry-run without `--apply`).
+
+For example, a stock `proto ncm` interface is rewritten in place:
+
+```
+  before (stock comgt-ncm)          after (wwand, network-native)
+  ─────────────────────────         ─────────────────────────────
+  config interface 'wan'            config wwand_modem 'wwmodem0'
+    option proto 'ncm'                option device 'wwan0'
+    option device 'wwan0'             option pincode '1234'
+    option apn 'internet'             option mode 'lte'  → modes
+    option pincode '1234'
+    option mode 'lte'               config interface 'wan'
+    option pdptype 'ipv4v6'           option proto 'qmi'      ← wwand's proto
+                                       option modem 'wwmodem0'
+                                       option apn 'internet'   ← connection stays
+                                       option pdp_type 'ipv4v6'
+```
+
+wwand then detects at runtime (by the `cdc_ncm` driver) that it is an NCM modem.
 
 ### Legacy: the `/etc/config/wwand` model
 
@@ -363,6 +403,21 @@ extending a table, not branching the code — see
 The known-model tables live in `atcmd.uc` (init + eSIM quirks), `netlink.uc`
 (datagram size) and `protocol_switch.uc` (protocol recipes); capability probes
 go through `backend.uc`.
+
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| **PDP context / bearer** | A cellular data session with its own IP config. wwand maps one context to one netifd interface. |
+| **Attach profile** | The 3GPP profile (CID 1) the modem uses for the *autonomous* LTE/5G attach. wwand programs its APN/PDP type from config **before** registration to avoid a wrong-APN reject. |
+| **QMAP / mux** | Qualcomm multiplexing that carries several PDP contexts over one USB link, each as an L3 device `wwan0mN`. Backends: **rmnet** (kernel, preferred) or **qmimux** (sysfs). |
+| **`mux_id`** | The QMAP channel of a context (0 = no mux, N = `wwan0mN`). |
+| **NSA / SA / DSD** | 5G Non-Standalone (NR anchored on LTE) / Standalone / Data-System-Determination (the QMI service reporting which the session actually uses). |
+| **EMM cause** | LTE NAS reject reason. Cause 33 ("service option not subscribed") usually means the *attach* APN/PDP type is wrong for the SIM, not "no coverage". |
+| **eUICC / eSIM** | An embedded UICC that holds multiple downloadable SIM **profiles**; one is enabled at a time. |
+| **SM-DP+ / ES9+ / ES10** | The GSMA remote-provisioning server (SM-DP+), the download protocol to it (ES9+, HTTPS), and the local eUICC APDU interface (ES10). lpac speaks ES9+; wwand relays ES10 APDUs to the modem. |
+| **no-proto-task** | The netifd mode where the proto handler runs no supervisor process; the daemon owns the interface lifecycle and drives netifd over ubus. |
+| **passthrough** | QMI-over-MBIM: the QMI stack tunnelled through the MBIM `QMI` service, so an MBIM modem gets full QMI telemetry/config. |
 
 ## FAQ
 
