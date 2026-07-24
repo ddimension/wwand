@@ -339,14 +339,36 @@ ch = config.migrate_plan({ network: {
 	wan: { '.type': 'interface', proto: 'ncm', device: 'wwan0', apn: 'web', mode: 'lte' },
 } });
 eq(mp_set(ch, 'wwmodem0', 'modes'), 'lte', 'migrate-ncm: mode -> modes on modem');
+eq(mp_set(ch, 'wwmodem0', 'netdev'), 'wwan0', 'migrate-ncm: non-mux device -> modem netdev');
+eq(mp_set(ch, 'wwmodem0', 'device'), null, 'migrate-ncm: no bogus control device');
 eq(mp_set(ch, 'wan', 'proto'), 'wwand', 'migrate-ncm: proto -> wwand');
 ok(mp_has(ch, 'delete', 'wan', 'mode'), 'migrate-ncm: stock mode stripped');
+
+// legacy ipv4/ipv6 boolean flags (no pdptype) -> derived pdp_type, so the
+// family constraint survives migration instead of widening to ipv4v6
+ch = config.migrate_plan({ network: {
+	wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'x',
+	       ipv4: '1', ipv6: '0' },
+} });
+eq(mp_set(ch, 'wan', 'pdp_type'), 'ipv4', 'migrate-v4only: ipv4=1/ipv6=0 -> pdp_type ipv4');
+ok(mp_has(ch, 'delete', 'wan', 'ipv6'), 'migrate-v4only: legacy ipv6 flag stripped');
+
+// an explicit pdptype still wins over the flags
+ch = config.migrate_plan({ network: {
+	wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'x',
+	       pdptype: 'ipv6', ipv4: '1', ipv6: '0' },
+} });
+eq(mp_set(ch, 'wan', 'pdp_type'), 'ipv6', 'migrate: explicit pdptype wins over ipv4/ipv6 flags');
 
 // wwand legacy inline proto qmi with a mux device -> modem netdev + mux_id
 ch = config.migrate_plan({ network: {
 	wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0m1', apn: 'internet' },
 } });
-eq(mp_set(ch, 'wwmodem0', 'device'), 'wwan0', 'migrate-mux: modem device = parent netdev');
+// a netdev-style interface `device` (wwan0mN) becomes the modem's NETDEV
+// (parent), not `device` (which is a control /dev node) — else discovery
+// looks for a /dev path named "wwan0" and the modem never binds.
+eq(mp_set(ch, 'wwmodem0', 'netdev'), 'wwan0', 'migrate-mux: modem netdev = parent netdev');
+eq(mp_set(ch, 'wwmodem0', 'device'), null, 'migrate-mux: no bogus control device');
 eq(mp_set(ch, 'wan', 'mux_id'), '1', 'migrate-mux: mux channel derived from wwan0m1');
 eq(mp_set(ch, 'wan', 'modem'), 'wwmodem0', 'migrate-mux: option modem');
 

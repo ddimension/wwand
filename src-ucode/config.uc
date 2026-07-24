@@ -588,13 +588,25 @@ export function migrate_plan(raw)
 		push(changes, [ 'add', 'network', name, null, 'wwand_modem' ]);
 
 		for (let k in MIGRATE_MODEM_OPTS) {
-			// the modem identity itself: for a wwan0mN device the parent netdev
-			// is the modem, the mN is the connection's mux channel
 			let v = s[k];
 
-			if (k == 'device' && v != null) {
-				let nd = parse_netdev(v);
-				v = nd?.muxed ? nd.netdev : v;
+			// The interface `device` in a legacy wwand/qmi-advanced config is a
+			// NETDEV name (wwan0 / wwan0mN), NOT a control /dev node — that is how
+			// compat_translate reads it. So move it to the modem's `netdev`
+			// (the parent netdev for a muxed child; the mN is the connection's mux
+			// channel). Only a real /dev/... control node stays `device` — else
+			// discovery looks for a /dev path named "wwan0", finds none, and the
+			// modem never binds (ABSENT). Seen migrating a non-mux wan on HW.
+			if (k == 'device' && v != null && v != '') {
+				if (substr(v, 0, 1) == '/') {
+					put(name, 'device', v);
+				}
+				else {
+					let nd = parse_netdev(v);
+					put(name, 'netdev', nd?.muxed ? nd.netdev : v);
+				}
+
+				continue;
 			}
 
 			// stock ncm uses `mode` for the RAT restriction
@@ -649,10 +661,21 @@ export function migrate_plan(raw)
 		if (nd?.muxed)
 			put(name, 'mux_id', nd.mux_id);
 
-		// pdp_type: rename the stock/legacy `pdptype`
-		if (s.pdptype != null && s.pdptype != '') {
-			put(name, 'pdp_type', s.pdp_type ?? s.pdptype);
+		// pdp_type: prefer an explicit pdp_type/pdptype; otherwise DERIVE it from
+		// the legacy ipv4/ipv6 boolean flags. Without this last step, dropping
+		// those flags below would silently widen an ipv4-only (or ipv6-only)
+		// interface to the ipv4v6 default — a real behaviour change on carriers
+		// pinned to one family (seen migrating a Telekom ipv4-only wan).
+		if (s.pdp_type != null && s.pdp_type != '') {
+			put(name, 'pdp_type', s.pdp_type);
+		}
+		else if (s.pdptype != null && s.pdptype != '') {
+			put(name, 'pdp_type', s.pdptype);
 			push(changes, [ 'delete', 'network', name, 'pdptype', null ]);
+		}
+		else if (s.ipv4 != null || s.ipv6 != null) {
+			let v4 = bool_opt(s.ipv4, true), v6 = bool_opt(s.ipv6, true);
+			put(name, 'pdp_type', (v4 && v6) ? 'ipv4v6' : (v6 ? 'ipv6' : 'ipv4'));
 		}
 
 		// the radio/SIM options moved to the wwand_modem -> drop them here
