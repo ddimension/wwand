@@ -185,6 +185,7 @@ export function create(opts)
 		cells: null,       // last cell location info (telemetry collector)
 		active_sim: null,  // matched per-SIM override (config wwand_sim) for the
 		                   // inserted card: overrides pincode + apn/auth/pdp
+		pin1: null,        // SIM PIN-lock state { state, retries, enabled }
 
 		services: {},      // service id (string) -> { major, minor }
 		info: {},          // model, revision, imei, ...
@@ -743,6 +744,16 @@ export function create(opts)
 				(status.pin1_state != null)
 					? sprintf(' (pin1 state %d, %d retries left)', status.pin1_state, status.pin1_retries)
 					: ''));
+
+			// remember the PIN-lock state for status() / LuCI. QMI UIM pin1_state:
+			// 1/2 = enabled (not-/verified), 3 = disabled, 4/5 = (perm-)blocked.
+			if (status.pin1_state != null)
+				self.pin1 = {
+					state: status.pin1_state,
+					retries: status.pin1_retries,
+					enabled: (status.pin1_state == 1 || status.pin1_state == 2),
+				};
+
 			step_identity();
 		}));
 	};

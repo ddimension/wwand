@@ -904,6 +904,7 @@ export function create(opts)
 				protocol: entry.protocol,
 				state: entry.modem?.state ?? 'UNRESOLVED',
 				control_note: entry.control_note,   // e.g. a stuck mode switch
+				pin1: entry.modem?.pin1,            // SIM PIN-lock state (LuCI)
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,
 				imei: entry.modem?.info?.imei,
