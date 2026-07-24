@@ -117,17 +117,22 @@ installs never pull in the MBIM code/schema. Per-capability fallback within a
 backend uses `backend.uc` `choose()` (probe candidates once, cache the winner,
 dispatch by name — already used for APDU/eSIM/CA/DSD transport).
 
-## Migration (target)
+## Status (realized)
 
-1. **Phase 0 (done):** this contract; de-QMI the shared vocabulary
-   (`on_proto_error/success`, `counters.proto_errors`); test scaffolding.
-2. **Phase 1:** split `modem.uc`/`context.uc` into the shared **core** + a **QMI
-   backend**; the 15 mockhub suites then validate the QMI backend + the core.
-3. **Phase 2:** reframe `modem_mbim.uc`/`context_mbim.uc` as an **MBIM backend**
-   on the shared core (kills ~750 duplicated lines; MBIM gains cells/stats/etc.
-   where the backend can implement them).
-4. **Phase 3:** move the daemon's remaining QMI reach-ins (`modem_get/set_settings`
-   system-selection, SIM ops) behind backend operations; `sim.uc`/`callend.uc`
-   take normalized inputs.
-5. **Phase 4:** generalize `backend.choose` into the per-capability selector.
-6. **Phase 5:** an **AT-only backend** implementing the required subset.
+The contract above is implemented across all three backends:
+
+- **Shared core** — `modem_common.uc` (state/context scaffolding, `make_fail` +
+  backoff, the adaptive telemetry `watch_driver`, AT bring-up, lazy `at2`) and
+  `context_common.uc` (zero-rx watchdog) are installed by every backend instead
+  of being duplicated.
+- **QMI** (`modem.uc` / `context.uc`) — the reference backend, native QMUX.
+- **MBIM** (`modem_mbim.uc` / `context_mbim.uc`) — runs on the shared core with a
+  native MS-BasicConnect decoder plus a **QMI-over-MBIM passthrough** that reuses
+  the QMI backend + schemas (hence `wwand-mbim` DEPENDS `wwand-qmi`).
+- **NCM** (`modem_ncm.uc` / `context_ncm.uc`) — the AT-only backend.
+- Daemon reach-ins are behind backend ops (`with_nas`), and per-capability
+  telemetry/config is chosen at runtime by `backend.choose`
+  (native → passthrough → AT), cached per modem.
+
+Adding a fourth backend is a matter of the same contract + a lazy shim + a
+package — see [extending.md](extending.md#3-adding-a-control-backend).

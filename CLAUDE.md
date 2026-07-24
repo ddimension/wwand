@@ -13,13 +13,22 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
 (netifd shim, init, hotplug, migrate), `tests/`, `tools/`,
 `docs/reference.md` (config + ubus API reference).
 - **Package definitions live in ddimension/openwrt-repo** (the feed):
-  `wwand/Makefile` there builds binary packages `wwand`,
-  `ucode-mod-wwand-io`, `wwand-esim` from this repo (git source, pinned via
-  PKG_SOURCE_VERSION — bump it there after pushing here).
+  `wwand/Makefile` there builds, from this repo (git source, pinned via
+  PKG_SOURCE_VERSION — bump it there after pushing here), a **backend-neutral
+  base + per-backend split**: `wwand` (daemon/framework/codec/shared core),
+  `wwand-qmi`, `wwand-mbim` (DEPENDS wwand-qmi), `wwand-ncm`, `wwand-esim`,
+  `ucode-mod-wwand-io`. Each backend `CONFLICTS` the stock OpenWrt handler it
+  replaces (uqmi/qmi-advanced, umbim, comgt-ncm).
 - LuCI packages moved to their own repos: ddimension/luci-proto-wwand,
   luci-app-wwand (sources only; package defs + wwand-lpac entirely in the
   feed repo).
-- `docs/architecture.md`, `docs/telemetry-survey.md`, `docs/STATUS.md`.
+- **Config: all in `/etc/config/network`** (WireGuard-style: `wwand_modem` /
+  `wwand_sim` (per-ICCID override) / `interface proto qmi + option modem` /
+  `wwand_globals`). No `/etc/config/wwand` for new installs; old formats +
+  stock `proto mbim`/`ncm` auto-migrate (`config.migrate_plan` + uci-defaults).
+  Full model in `docs/reference.md`; how to extend in `docs/extending.md`.
+- `docs/architecture.md`, `docs/backend-interface.md`, `docs/extending.md`,
+  `docs/telemetry-survey.md`, `docs/STATUS.md`.
 
 ## Core layering (src-ucode)
 native `wwand_io.so` → codec (`qmux.uc`, `tlv.uc`, `schema/*.uc`, `mbim*.uc`) →
@@ -75,10 +84,11 @@ Shim: `files/wwand-proto.sh` (`proto_qmi_setup/teardown/renew`,
 - **Proper build = OpenWrt package** (preferred) — the Makefile lives in
   **openwrt-repo** (`wwand/Makefile`, git source pinned on this repo).
   Fixes that MUST stay there: `CMAKE_SOURCE_SUBDIR:=io` (cmake tree is a
-  subdir); it installs `codec/mbim-schema` (daemon imports MBIM at top
-  level — MBIM is lazy-`require`d in `daemon.uc` but the schema must still
-  ship). `wwand` DEPENDS pulls `+ucode-mod-struct` etc. — apk install
-  resolves the ucode deps. Bump PKG_RELEASE or `apk add --force-reinstall`.
+  subdir). All backends (QMI/MBIM/NCM) are **lazy-`require`d** in `daemon.uc`
+  (`*_lazy.uc` shims) and ship in their own package — the base `wwand` carries
+  no backend; `wwand-mbim` ships `codec/mbim-schema`. `wwand` DEPENDS pulls
+  `+ucode-mod-struct` etc. — apk install resolves the ucode deps. Bump
+  PKG_RELEASE or `apk add --force-reinstall`.
 
 ## Test router
 `ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.203.245`
