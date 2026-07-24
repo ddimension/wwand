@@ -739,10 +739,14 @@ export function create(opts)
 			let led_state = (entry) => {
 				let m = entry?.modem, reg = m?.reg;
 				let radio_ifs = reg?.radio_ifs;
+				let on_rat = (type(radio_ifs) == 'array' && length(radio_ifs) > 0);
 				return {
 					present: !!m && m.state != 'ABSENT',
-					registered: reg?.registration == 'registered',
-					radio: (type(radio_ifs) == 'array' && length(radio_ifs)) ? radio_ifs[0] : null,
+					// "registered" across backends: attached to a RAT (radio_ifs),
+					// or a registration value in any of its numeric/string forms
+					registered: on_rat || reg?.registration == 'registered' ||
+					            reg?.registration == 1,
+					radio: on_rat ? radio_ifs[0] : null,
 					roaming: reg?.roaming ?? false,
 					bars: deps.board ? deps.board.bars(m?.signal) : 0,
 				};
