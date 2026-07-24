@@ -34,6 +34,7 @@ import * as client_mod from './client.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
 import * as nasmod from './codec/schema/nas.uc';
 import * as dsdmod from './codec/schema/dsd.uc';
+import * as uimmod from './codec/schema/uim.uc';
 import * as tlv from './codec/tlv.uc';
 
 const TIMING_DEFAULTS = {
@@ -171,6 +172,14 @@ export function create(opts)
 	step_open = () => {
 		self.set_state('INIT_TRANSPORT');
 		self.mbim = mbim_client.create(self.hub, hooks);
+
+		// native MS UICC Low Level Access transport for eSIM/APDU. sim.uc picks
+		// this duck-typed handle first (before the QMI passthrough and AT).
+		self.mbim_uicc = {
+			open:  (aid_hex, cb)           => mbim_backend.uicc_open_channel(self.mbim, aid_hex, cb),
+			apdu:  (channel, apdu_hex, cb) => mbim_backend.uicc_apdu(self.mbim, channel, apdu_hex, cb),
+			close: (channel, cb)           => mbim_backend.uicc_close_channel(self.mbim, channel, cb),
+		};
 
 		self.mbim.open((err) => {
 			if (err)
@@ -448,6 +457,27 @@ export function create(opts)
 					finish(null);
 			});
 		}, { no_recovery: true });
+	};
+
+	// _ensure_uim: allocate a QMI UIM client over the passthrough and expose it
+	// as self.uim, so sim.uc's QMI UIM APDU/eSIM path works on an MBIM modem whose
+	// firmware lacks native MS UICC Low Level Access but does expose the QMI
+	// passthrough (the fallback for the native MBIM UICC path). cb() either way.
+	self._ensure_uim = function(cb) {
+		if (self.uim)
+			return cb();
+
+		self._ensure_pt((up) => {
+			if (!up)
+				return cb();
+
+			self.pt.ctl.request('ALLOCATE_CID', { service: uimmod.default.service }, (aerr, adata) => {
+				if (!aerr && adata?.allocation)
+					self.uim = client_mod.create(self.pt.shim, uimmod.default, adata.allocation.cid, hooks);
+
+				cb();
+			}, { no_recovery: true });
+		});
 	};
 
 	// signal: prefer the QMI passthrough (GET_SIGNAL_INFO — reuses the battle-
@@ -741,12 +771,15 @@ export function create(opts)
 			self.pt = null;
 		}
 
+		// the passthrough-allocated UIM client (if any) rode on the shim just closed
+		self.uim = null;
 		self._pt_failed = false;
-		backend.reset(self, '_sig_be', '_cells_be', '_ca_be', '_dsd_be', '_regd_be');
+		backend.reset(self, '_sig_be', '_cells_be', '_ca_be', '_dsd_be', '_regd_be', '_apdu_be', '_esim_be');
 
 		if (self.mbim) {
 			self.mbim.destroy();
 			self.mbim = null;
+			self.mbim_uicc = null;
 		}
 
 		if (self.hub) {

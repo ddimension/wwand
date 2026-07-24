@@ -20,8 +20,115 @@
 
 'use strict';
 
+import * as struct from 'struct';
 import * as bc from './codec/mbim-schema/basic_connect.uc';
 import * as ext from './codec/mbim-schema/ms_basic_connect_ext.uc';
+
+// --- native MBIM MS UICC Low Level Access (eSIM/APDU) ------------------------
+// Service UUID + CIDs and buffer layouts verified against libmbim 1.32
+// (mbim-service-ms-uicc-low-level-access + the generated builder) and the lpac
+// mbim apdu driver. A `uicc-ref-byte-array` field is a [length, offset] pair
+// (swapped) in the fixed region with the bytes appended (4-byte padded) in the
+// variable region, the offset absolute from the start of the InformationBuffer.
+const UICC_SERVICE = 'c2f6588e-f037-4bc9-8665-f4d44bd09367';
+const UICC_CID_OPEN_CHANNEL = 2;
+const UICC_CID_CLOSE_CHANNEL = 3;
+const UICC_CID_APDU = 4;
+// lpac's proven parameters
+const UICC_CHANNEL_GROUP = 1;
+const UICC_SECURE_MESSAGING_NONE = 0;
+const UICC_CLASS_BYTE_INTER_INDUSTRY = 1;
+
+function hex2bin(h)
+{
+	let o = '';
+
+	for (let i = 0; i + 1 < length(h); i += 2)
+		o += chr(hex(substr(h, i, 2)));
+
+	return o;
+}
+
+function bin2hex(b)
+{
+	let o = '';
+
+	for (let i = 0; i < length(b); i++)
+		o += sprintf('%02x', ord(b, i));
+
+	return o;
+}
+
+// zero-pad a byte string up to the next 4-byte boundary
+function pad4(s)
+{
+	for (let need = (4 - length(s) % 4) % 4; need > 0; need--)
+		s += chr(0);
+
+	return s;
+}
+
+// open a logical channel to `aid_hex` (ISD-R for eSIM). cb(err, { channel,
+// select_response }). `mc` is the MBIM session client (mbim_client.uc).
+export function uicc_open_channel(mc, aid_hex, cb)
+{
+	let aid = hex2bin(aid_hex);
+	// [ AppIdLength, AppIdOffset(=16), SelectP2Arg(0), ChannelGroup(1) ] + AppId
+	let info = struct.pack('<IIII', length(aid), 16, 0, UICC_CHANNEL_GROUP) + pad4(aid);
+
+	mc.command_raw(UICC_SERVICE, UICC_CID_OPEN_CHANNEL, info, (err, resp) => {
+		if (err)
+			return cb(err, null);
+
+		if (length(resp) < 16)
+			return cb({ error: 'uicc_short' }, null);
+
+		let status  = struct.unpack('<I', substr(resp, 0, 4))[0];
+		let channel = struct.unpack('<I', substr(resp, 4, 4))[0];
+		let rlen    = struct.unpack('<I', substr(resp, 8, 4))[0];
+		let roff    = struct.unpack('<I', substr(resp, 12, 4))[0];
+		let sel = (roff && rlen && roff + rlen <= length(resp)) ? substr(resp, roff, rlen) : '';
+
+		cb(null, { channel: channel, select_response: bin2hex(sel), status: status });
+	});
+}
+
+// transmit `apdu_hex` on `channel`. cb(err, response_hex) where the response
+// carries the card data followed by SW1 SW2 (reconstructed from the MBIM Status
+// field, exactly as lpac does — the QMI SEND_APDU path returns SW inline too).
+export function uicc_apdu(mc, channel, apdu_hex, cb)
+{
+	let cmd = hex2bin(apdu_hex);
+	// [ Channel, SecureMessaging, ClassByteType, CommandLength, CommandOffset(=20) ] + Command
+	let info = struct.pack('<IIIII', channel, UICC_SECURE_MESSAGING_NONE,
+		UICC_CLASS_BYTE_INTER_INDUSTRY, length(cmd), 20) + pad4(cmd);
+
+	mc.command_raw(UICC_SERVICE, UICC_CID_APDU, info, (err, resp) => {
+		if (err)
+			return cb(err, null);
+
+		if (length(resp) < 12)
+			return cb({ error: 'uicc_short' }, null);
+
+		let status = struct.unpack('<I', substr(resp, 0, 4))[0];
+		let rlen   = struct.unpack('<I', substr(resp, 4, 4))[0];
+		let roff   = struct.unpack('<I', substr(resp, 8, 4))[0];
+		let data = (roff && rlen && roff + rlen <= length(resp)) ? substr(resp, roff, rlen) : '';
+
+		// append SW1 SW2 from the status word (low byte, then high byte)
+		let full = data + chr(status & 0xff) + chr((status >> 8) & 0xff);
+
+		cb(null, bin2hex(full));
+	});
+}
+
+// close a logical channel. cb(err)
+export function uicc_close_channel(mc, channel, cb)
+{
+	let info = struct.pack('<II', channel, UICC_CHANNEL_GROUP);
+
+	mc.command_raw(UICC_SERVICE, UICC_CID_CLOSE_CHANNEL, info, (err) => cb(err ?? null));
+}
 
 // how many neighbour cells to ask the modem for (BASE_STATIONS_INFO caps)
 const MAX_CELLS = 16;

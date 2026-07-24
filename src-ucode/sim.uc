@@ -530,26 +530,53 @@ function at_apdu_close(modem, channel, cb)
 	modem.at.send(sprintf('AT+CCHC=%d', channel), (err) => cb(err ?? null));
 }
 
-// pick the APDU transport once per modem: prefer QMI, fall back to AT CCHO
-// when the QMI logical channel is unsupported. cb('qmi' | 'at' | null)
+// pick the APDU transport once per modem, in order: native MBIM MS UICC Low
+// Level Access -> QMI UIM logical channel (native, or over the QMI-over-MBIM
+// passthrough) -> AT CCHO/CGLA/CCHC. cb('mbim' | 'qmi' | 'at' | null)
+const ISDR_AID = 'a0000005591010ffffffff8900000100';
+
 function apdu_backend(modem, slot, cb)
 {
 	backend.choose(modem, '_apdu_be', [
-		// QMI logical channel: probe with the ISD-R AID; NOT_SUPPORTED -> next
-		{ name: 'qmi', probe: (ok) => {
-			if (!modem.uim)
+		// native MBIM UICC (modem exposes modem.mbim_uicc): probe by opening the
+		// ISD-R channel and closing it again
+		{ name: 'mbim', probe: (ok) => {
+			if (!modem.mbim_uicc)
 				return ok(false);
 
-			modem.uim.request('OPEN_LOGICAL_CHANNEL', {
-				slot: slot, aid: hex_to_arr('a0000005591010ffffffff8900000100'),
-			}, (err, data) => {
-				if (!err && data.channel_id != null) {
-					modem.uim.request('LOGICAL_CHANNEL',
-						{ slot: slot, channel_id: data.channel_id, terminate: 1 }, () => {});
+			modem.mbim_uicc.open(ISDR_AID, (err, data) => {
+				if (!err && data?.channel != null) {
+					modem.mbim_uicc.close(data.channel, () => {});
 					return ok(true);
 				}
 				ok(false);
 			});
+		} },
+		// QMI logical channel: probe with the ISD-R AID; NOT_SUPPORTED -> next.
+		// On an MBIM modem modem.uim is null until a UIM client is allocated over
+		// the passthrough (modem._ensure_uim) — the fallback for modems whose
+		// firmware lacks native MBIM UICC but exposes the QMI passthrough.
+		{ name: 'qmi', probe: (ok) => {
+			let go = () => {
+				if (!modem.uim)
+					return ok(false);
+
+				modem.uim.request('OPEN_LOGICAL_CHANNEL', {
+					slot: slot, aid: hex_to_arr(ISDR_AID),
+				}, (err, data) => {
+					if (!err && data.channel_id != null) {
+						modem.uim.request('LOGICAL_CHANNEL',
+							{ slot: slot, channel_id: data.channel_id, terminate: 1 }, () => {});
+						return ok(true);
+					}
+					ok(false);
+				});
+			};
+
+			if (!modem.uim && modem._ensure_uim)
+				return modem._ensure_uim(() => go());
+
+			go();
 		} },
 		{ name: 'at', probe: (ok) => ok(!!modem.at) },
 	], cb);
@@ -560,6 +587,10 @@ function apdu_backend(modem, slot, cb)
 export function apdu_open(modem, slot, aid_hex, cb)
 {
 	apdu_backend(modem, slot, (be) => {
+		if (be == 'mbim')
+			return modem.mbim_uicc.open(aid_hex, (err, d) =>
+				cb(err, d ? { channel: d.channel, select_response: d.select_response } : null));
+
 		if (be == 'at')
 			return at_apdu_open(modem, aid_hex, cb);
 
@@ -580,6 +611,9 @@ export function apdu_open(modem, slot, aid_hex, cb)
 
 export function apdu_send(modem, slot, channel, apdu_hex, cb)
 {
+	if (modem._apdu_be == 'mbim')
+		return modem.mbim_uicc.apdu(channel, apdu_hex, cb);
+
 	if (modem._apdu_be == 'at')
 		return at_apdu_send(modem, channel, apdu_hex, cb);
 
@@ -598,6 +632,9 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 
 export function apdu_close(modem, slot, channel, cb)
 {
+	if (modem._apdu_be == 'mbim')
+		return modem.mbim_uicc.close(channel, cb);
+
 	if (modem._apdu_be == 'at')
 		return at_apdu_close(modem, channel, cb);
 

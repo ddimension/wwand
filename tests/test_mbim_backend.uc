@@ -240,4 +240,47 @@ run_next();
 uloop.run();
 guard.cancel();
 
+// --- native MBIM MS UICC Low Level Access (eSIM/APDU) ------------------------
+// direct command_raw mock: capture the request InformationBuffer, return a canned
+// response buffer, and assert both the encoded request and the decoded result.
+function h2b(h) { let o = ''; for (let i = 0; i + 1 < length(h); i += 2) o += chr(hex(substr(h, i, 2))); return o; }
+function mkuicc(resp_for) {
+	return { last: null,
+		command_raw: function(svc, cid, info, cb) { this.last = { svc: svc, cid: cid, info: info }; cb(null, resp_for(cid, info)); } };
+}
+
+// OPEN_CHANNEL: request layout [len, offset=16, p2=0, group=1] + AppId
+let aid = 'a0000005591010ffffffff8900000100';   // ISD-R (16 bytes)
+// response [status=0, channel=3, respLen=3, respOff=16] + 3 select bytes
+let openc = mkuicc((cid, info) => p32(0) + p32(3) + p32(3) + p32(16) + h2b('6f5aa5'));
+backend.uicc_open_channel(openc, aid, (err, r) => {
+	ok(!err, 'uicc-open: no error');
+	eq(openc.last.cid, 2, 'uicc-open: CID 2');
+	eq(openc.last.info, p32(16) + p32(16) + p32(0) + p32(1) + h2b(aid), 'uicc-open: request buffer [len,off=16,p2=0,grp=1]+aid');
+	eq(r.channel, 3, 'uicc-open: channel from response');
+	eq(r.select_response, '6f5aa5', 'uicc-open: select response bytes');
+});
+
+// APDU: request [channel, secure=0, class=1, len, offset=20] + command; the
+// response status is the SW word (0x0090 == SW 90 00), appended as SW1 SW2.
+let apducmd = '80e2910006bf3e035c015a';   // an ES10 STORE DATA-ish command
+// MBIM status word 0x0090 == card SW1SW2 "90 00" (SW1 low byte, SW2 high byte)
+let apduc = mkuicc((cid, info) => p32(0x0090) + p32(2) + p32(12) + h2b('abcd'));
+backend.uicc_apdu(apduc, 3, apducmd, (err, resp) => {
+	ok(!err, 'uicc-apdu: no error');
+	eq(apduc.last.cid, 4, 'uicc-apdu: CID 4');
+	let cmd = h2b(apducmd);
+	eq(substr(apduc.last.info, 0, 20), p32(3) + p32(0) + p32(1) + p32(length(cmd)) + p32(20), 'uicc-apdu: fixed header');
+	eq(substr(apduc.last.info, 20, length(cmd)), cmd, 'uicc-apdu: command bytes appended');
+	eq(resp, 'abcd9000', 'uicc-apdu: data + SW1SW2 (status word 9000)');
+});
+
+// CLOSE_CHANNEL: [channel, group=1]
+let closec = mkuicc(() => p32(0));
+backend.uicc_close_channel(closec, 3, (err) => {
+	ok(!err, 'uicc-close: no error');
+	eq(closec.last.cid, 3, 'uicc-close: CID 3');
+	eq(closec.last.info, p32(3) + p32(1), 'uicc-close: [channel,group=1]');
+});
+
 done('test_mbim_backend');
