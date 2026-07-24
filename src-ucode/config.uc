@@ -424,20 +424,25 @@ function compat_translate(raw, result)
 
 function validate(result)
 {
-	// attach each per-SIM override to its modem; the daemon picks the matching
-	// one at bring-up by the active card's ICCID. Drop overrides whose modem
-	// reference is unknown.
+	// a wwand_sim is matched at runtime by the active card's ICCID; the modem
+	// binding is OPTIONAL — an unbound sim applies to every modem, a bound one
+	// only to that modem. A binding to a modem that does not exist is a typo →
+	// warn + drop.
 	for (let name, sim in result.sims) {
-		if (sim.modem == null || !result.modems[sim.modem]) {
+		if (sim.modem != null && !result.modems[sim.modem]) {
 			push(result.warnings, sprintf("wwand_sim %s: unknown modem '%s', ignoring", name, sim.modem));
 			delete result.sims[name];
-			continue;
 		}
-
-		let m = result.modems[sim.modem];
-		m.sims = m.sims ?? [];
-		push(m.sims, sim);
 	}
+
+	// give each modem the sims it could match (unbound, or bound to it); the
+	// daemon then picks the one whose ICCID equals the inserted card's.
+	for (let mname, m in result.modems)
+		for (let sname, sim in result.sims)
+			if (sim.modem == null || sim.modem == mname) {
+				m.sims = m.sims ?? [];
+				push(m.sims, sim);
+			}
 
 	for (let name, ctx in result.contexts) {
 		if (ctx.modem == null) {

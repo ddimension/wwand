@@ -265,6 +265,19 @@ eq(r.contexts.wan.mux_id, 3, 'net: explicit mux_id honoured');
 eq(r.contexts.wan.muxed, true, 'net: explicit mux_id -> muxed');
 eq(r.contexts.wan.mux_link, 'wwan0m3', 'net: mux_link derived from mux_id');
 
+// wwand_sim.modem is OPTIONAL: an unbound sim applies to every modem (matched
+// by ICCID), a bound one only to its modem
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1' },
+		m1: { '.type': 'wwand_modem', usb_path: '1-2' },
+		anysim:  { '.type': 'wwand_sim', iccid: '8949X', pincode: '4321' },   // no modem
+		m0only:  { '.type': 'wwand_sim', modem: 'm0', iccid: '8949Y', pincode: '1111' },
+	},
+});
+eq(length(r.modems.m0.sims ?? []), 2, 'sim-unbound: m0 gets the unbound sim + its own');
+eq(length(r.modems.m1.sims ?? []), 1, 'sim-unbound: m1 gets only the unbound sim');
+
 // guards
 r = config.parse({
 	network: {
