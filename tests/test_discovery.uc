@@ -65,6 +65,49 @@ let dev_access_fx = fakefx.create({
 eq(discovery.resolve_modem_device({ device: 'wwan0' }, dev_access_fx), '/dev/cdc-wdm0',
 	'device=wwan0 resolves via netdev even when access(wwan0) is true');
 
+// --- 1e. stable USB-iSerial anchor (option serial) --------------------------
+// A pinned iSerial resolves the modem's cdc-wdm via its USB device parent,
+// independent of the /dev index or netdev name (the RG650E reports '99efe861').
+let serial_fx = fakefx.create({
+	present: { '/sys/class/usbmisc/cdc-wdm0': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device': '../../../3-1:1.4',
+	         '/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/qmi_wwan' },
+	files: { '/sys/bus/usb/devices/3-1/serial': '99efe861\n' },
+	dirs: { '/sys/class/usbmisc/cdc-wdm0/device/net': [ 'wwan0' ] },
+});
+eq(discovery.device_for_serial('99efe861', serial_fx), '/dev/cdc-wdm0',
+	'serial: iSerial resolves the cdc-wdm device');
+eq(discovery.resolve_modem_device({ serial: '99efe861' }, serial_fx), '/dev/cdc-wdm0',
+	'serial: resolve_modem_device binds by iSerial alone');
+let cser = discovery.resolve_control({ serial: '99efe861', tty: null }, serial_fx);
+eq(cser?.protocol, 'qmi', 'serial: control type still auto-detected (qmi)');
+eq(cser?.device, '/dev/cdc-wdm0', 'serial: resolve_control device via serial');
+eq(discovery.device_for_serial('deadbeef', serial_fx), null,
+	'serial: unknown iSerial does not match');
+// serial precedence: a stale /dev index in `device` is overridden by the serial
+eq(discovery.resolve_modem_device({ serial: '99efe861', device: '/dev/cdc-wdm9' }, serial_fx),
+	'/dev/cdc-wdm0', 'serial: pinned iSerial overrides a stale device index');
+
+// --- 1f. ambiguous serial -> null (falls back to a topological anchor) ------
+let dup_fx = fakefx.create({
+	present: { '/sys/class/usbmisc/cdc-wdm0': true, '/sys/class/usbmisc/cdc-wdm1': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device': '../../../3-1:1.4',
+	         '/sys/class/usbmisc/cdc-wdm1/device': '../../../4-1:1.4' },
+	files: { '/sys/bus/usb/devices/3-1/serial': 'SAME\n',
+	         '/sys/bus/usb/devices/4-1/serial': 'SAME\n' },
+});
+eq(discovery.device_for_serial('SAME', dup_fx), null,
+	'serial: same iSerial on two USB devices is ambiguous -> null');
+// several cdc-wdm on ONE modem (e.g. qmi+mbim) is NOT ambiguous -> still binds
+let multi_fx = fakefx.create({
+	present: { '/sys/class/usbmisc/cdc-wdm0': true, '/sys/class/usbmisc/cdc-wdm1': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device': '../../../3-1:1.4',
+	         '/sys/class/usbmisc/cdc-wdm1/device': '../../../3-1:1.6' },
+	files: { '/sys/bus/usb/devices/3-1/serial': 'UNIQUE\n' },
+});
+ok(discovery.device_for_serial('UNIQUE', multi_fx) != null,
+	'serial: two cdc-wdm on one modem still bind (grouped by USB device)');
+
 // --- 2. cdc-wdm MBIM --------------------------------------------------------
 
 let mbim_fx = fakefx.create({

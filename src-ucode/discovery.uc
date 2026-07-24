@@ -137,6 +137,65 @@ export function device_for_netdev(netdev, fx)
 	return sprintf('/dev/%s', basename(paths[0]));
 }
 
+// cdc-wdm interface basename -> its USB device id ('3-1', '1-1.2', …) or null.
+// The `device` symlink of a cdc-wdm points at the USB *interface* (…/3-1:1.4);
+// the parent USB device (…/3-1) carries the iSerial. Strip the ':<cfg>.<if>'.
+export function usb_device_of(name, fx)
+{
+	fx = fx ?? default_fx();
+
+	let dev = fx.readlink(sprintf('/sys/class/usbmisc/%s/device', name));
+
+	if (dev == null)
+		return null;
+
+	let m = match(basename(dev), /^([0-9]+-[0-9.]+):/);
+
+	return m ? m[1] : null;
+}
+
+// USB device id ('3-1') -> its iSerial string (trimmed) or null.
+export function usb_serial_of(usbid, fx)
+{
+	fx = fx ?? default_fx();
+
+	if (!usbid)
+		return null;
+
+	let s = fx.read(sprintf('/sys/bus/usb/devices/%s/serial', usbid));
+
+	return (s != null) ? trim(s) : null;
+}
+
+// USB iSerial -> '/dev/cdc-wdmX' | null. Matches ONLY when exactly one physical
+// USB device carries that serial (several cdc-wdm nodes on the *same* modem are
+// fine — grouped by USB device); an empty/duplicated serial across two modems is
+// ambiguous and returns null so the caller falls back to a topological anchor.
+export function device_for_serial(serial, fx)
+{
+	fx = fx ?? default_fx();
+
+	if (serial == null || serial == '')
+		return null;
+
+	let byusb = {};   // usbid -> first matching /dev/cdc-wdmX
+
+	for (let path in (fx.glob('/sys/class/usbmisc/cdc-wdm*') ?? [])) {
+		let name = basename(path);
+		let usbid = usb_device_of(name, fx);
+
+		if (usbid == null || usb_serial_of(usbid, fx) != serial)
+			continue;
+
+		if (byusb[usbid] == null)
+			byusb[usbid] = sprintf('/dev/%s', name);
+	}
+
+	let ids = keys(byusb);
+
+	return (length(ids) == 1) ? byusb[ids[0]] : null;
+}
+
 // '1-1.2' (usb path) -> '/dev/cdc-wdmX' | null
 export function device_for_usb_path(usb_path, fx)
 {
@@ -182,6 +241,43 @@ export function ncm_netdev_for_usb_path(usb_path, fx)
 	}
 
 	return null;
+}
+
+// USB iSerial -> an NCM datapath netdev (no cdc-wdm), matched on the netdev's
+// USB parent. Unique physical match only, like device_for_serial.
+export function ncm_netdev_for_serial(serial, fx)
+{
+	fx = fx ?? default_fx();
+
+	if (serial == null || serial == '')
+		return null;
+
+	let byusb = {};
+
+	for (let path in (fx.glob('/sys/class/net/*') ?? [])) {
+		let netdev = basename(path);
+
+		if (!NCM_DRIVERS[netdev_driver(netdev, fx)])
+			continue;
+
+		let dev = fx.readlink(sprintf('/sys/class/net/%s/device', netdev));
+
+		if (dev == null)
+			continue;
+
+		let m = match(basename(dev), /^([0-9]+-[0-9.]+):/);
+		let usbid = m ? m[1] : null;
+
+		if (usbid == null || usb_serial_of(usbid, fx) != serial)
+			continue;
+
+		if (byusb[usbid] == null)
+			byusb[usbid] = netdev;
+	}
+
+	let ids = keys(byusb);
+
+	return (length(ids) == 1) ? byusb[ids[0]] : null;
 }
 
 // the AT port on the same USB device as an NCM datapath netdev. Reuses the
@@ -251,6 +347,16 @@ export function resolve_modem_device(cfg, fx)
 {
 	fx = fx ?? default_fx();
 
+	// stable identity first: a pinned USB iSerial follows the modem across
+	// re-enumeration and port changes. Unique physical match only; an absent or
+	// ambiguous serial falls through to the topological anchors below.
+	if (cfg.serial) {
+		let dev = device_for_serial(cfg.serial, fx);
+
+		if (dev)
+			return dev;
+	}
+
 	// a control node is ALWAYS an absolute /dev path — only then does an existing
 	// `device` resolve to itself. (Guarding on the leading '/' matters: a bare
 	// netdev name like 'wwan0' can spuriously pass fx.access depending on the
@@ -319,9 +425,12 @@ export function resolve_control(cfg, fx)
 	// 2. an NCM datapath netdev (no cdc-wdm)?
 	let netdev = null;
 
-	if (cfg.netdev && NCM_DRIVERS[netdev_driver(cfg.netdev, fx)])
+	if (cfg.serial)
+		netdev = ncm_netdev_for_serial(cfg.serial, fx);
+
+	if (!netdev && cfg.netdev && NCM_DRIVERS[netdev_driver(cfg.netdev, fx)])
 		netdev = cfg.netdev;
-	else if (cfg.usb_path)
+	else if (!netdev && cfg.usb_path)
 		netdev = ncm_netdev_for_usb_path(cfg.usb_path, fx);
 
 	if (netdev) {

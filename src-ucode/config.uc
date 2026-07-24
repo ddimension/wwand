@@ -46,6 +46,7 @@ export function modem_defaults(over)
 {
 	return {
 		device: null, netdev: null, usb_path: null, reset_gpio: null,
+		serial: null, imei: null,   // stable identity anchors (USB iSerial / IMEI)
 		pincode: null, modes: null, mcc: null, mnc: null,
 		mux: 'auto', dl_datagram_max_size: 0, tty: null,
 		at_init: [], location: false, delay: 0,
@@ -102,6 +103,11 @@ function modem_from_section(s)
 		// `path` is the stable USB topology anchor (named like wireless
 		// `wifi-device option path`); `usb_path` is the deprecated old name.
 		usb_path: s.path ?? s.usb_path,
+		// stable identity anchors: `serial` (USB iSerial, matched pre-open) and
+		// `imei` (matched post-open) follow the modem across re-enumeration and
+		// port changes — see discovery.resolve_modem_device / daemon identity check.
+		serial: s.serial,
+		imei: s.imei,
 		// optional named GPIO wired to the modem RESET line; when set, recovery
 		// pulses it instead of power-cycling (see board.uc / daemon repower).
 		reset_gpio: s.reset_gpio,
@@ -289,6 +295,12 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 
 	if (s.proto_error_limit != null)
 		modem.proto_error_limit = +s.proto_error_limit;
+
+	if (s.serial != null)
+		modem.serial = s.serial;
+
+	if (s.imei != null)
+		modem.imei = s.imei;
 
 	if (s.zero_rx_timeout != null)
 		modem.zero_rx_timeout = +s.zero_rx_timeout;
@@ -564,7 +576,7 @@ export function parse(raw)
 // is deliberately NOT here — the stable USB anchor is optional and the migration
 // does not set it; the modem is anchored on the old netdev name instead (put in
 // `device`, which discovery resolves as a netdev when it is not a /dev node).
-const MIGRATE_MODEM_OPTS = [ 'device', 'netdev', 'tty', 'mux',
+const MIGRATE_MODEM_OPTS = [ 'device', 'netdev', 'serial', 'imei', 'tty', 'mux',
 	'dl_datagram_max_size', 'sim_slot', 'pincode', 'modes', 'mcc', 'mnc',
 	'lock_4g', 'lock_5g', 'lock_persist', 'at_init', 'location', 'delay',
 	'failreboot', 'proto_error_limit', 'zero_rx_timeout', 'stats_interval' ];
