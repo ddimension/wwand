@@ -205,6 +205,7 @@ export function create(opts)
 	let rec = recovery_mod.create({
 		id: opts.id,
 		failreboot: (opts.config ?? {}).failreboot,
+		proto_error_limit: (opts.config ?? {}).proto_error_limit,
 		fx: opts.recovery?.fx ?? netlink.default_fx((level, msg) => log(level, msg)),
 		state_dir: opts.recovery?.state_dir,
 		reboot_delay: opts.recovery?.reboot_delay,

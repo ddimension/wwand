@@ -75,16 +75,25 @@ rl.load();
 eq(rl.counters.rung, 2, 'legacy: rung index defaulted from attempts (23 -> opmode+reset done)');
 eq(rl.on_attempt(), 'usb_repower', 'legacy: next rung (24) still reachable after default');
 
-// failreboot = 0 disables the ladder entirely (old gate)
+// failreboot = 0 disables ONLY the final reboot rung: the cheaper hardware
+// recovery rungs still fire (headless GPIO-reset / keep-router-up use case),
+// and the ladder then retries forever instead of ever rebooting.
 r = recovery.create({ id: 'm1', failreboot: 0, fx: fx, state_dir: '/state', log: silent });
 
-let all_retry = true;
-
+let acts0 = [];
 for (let i = 1; i <= 200; i++)
-	if (r.on_attempt() != 'retry')
-		all_retry = false;
+	push(acts0, r.on_attempt());
 
-ok(all_retry, 'ladder: failreboot=0 never escalates');
+eq(acts0[7], 'opmode_cycle', 'failreboot=0: opmode rung still fires at 8');
+eq(acts0[15], 'modem_reset', 'failreboot=0: modem_reset rung still fires at 16');
+eq(acts0[23], 'usb_repower', 'failreboot=0: repower rung still fires at 24');
+
+let no_reboot0 = true;
+for (let a in acts0)
+	if (a == 'reboot')
+		no_reboot0 = false;
+
+ok(no_reboot0, 'failreboot=0: never reboots, keeps retrying');
 
 // --- qmi error ceiling -------------------------------------------------------
 
@@ -100,6 +109,22 @@ eq(hit, 26, 'errors: 26th error crosses ceiling of 25');
 
 r.on_proto_success();
 eq(r.counters.proto_errors, 0, 'errors: success resets counter');
+
+// the proto-error ceiling is configurable (proto_error_limit)
+r = recovery.create({ id: 'plim', failreboot: 100, proto_error_limit: 3, fx: fx, state_dir: '/state', log: silent });
+let phit = null;
+for (let i = 1; i <= 6; i++)
+	if (r.on_proto_error() == 'reboot' && phit == null)
+		phit = i;
+eq(phit, 4, 'errors: configurable limit 3 crosses at the 4th error');
+
+// the proto-error reboot is gated by failreboot too: <=0 never reboots
+r = recovery.create({ id: 'pgate', failreboot: 0, proto_error_limit: 3, fx: fx, state_dir: '/state', log: silent });
+let pg_reboot = false;
+for (let i = 1; i <= 30; i++)
+	if (r.on_proto_error() == 'reboot')
+		pg_reboot = true;
+ok(!pg_reboot, 'errors: failreboot=0 never reboots on a proto-error storm');
 
 // --- persistence -------------------------------------------------------------
 

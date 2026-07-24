@@ -49,7 +49,7 @@ export function modem_defaults(over)
 		pincode: null, modes: null, mcc: null, mnc: null,
 		mux: 'auto', dl_datagram_max_size: 0, tty: null,
 		at_init: [], location: false, delay: 0,
-		failreboot: 100, zero_rx_timeout: 21600,
+		failreboot: 100, proto_error_limit: 25, zero_rx_timeout: 21600,
 		lock_4g: [], lock_5g: null, lock_persist: false,
 		sim_slot: 0,
 		stats_interval: 60,
@@ -117,6 +117,7 @@ function modem_from_section(s)
 		location: bool_opt(s.location, false),
 		delay: +(s.delay ?? 0),
 		failreboot: +(s.failreboot ?? 100),
+		proto_error_limit: +(s.proto_error_limit ?? 25),
 		zero_rx_timeout: +(s.zero_rx_timeout ?? 21600),
 		lock_4g: (type(s.lock_4g) == 'array') ? s.lock_4g :
 		         (s.lock_4g != null ? [ s.lock_4g ] : []),
@@ -285,6 +286,9 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 
 	if (s.failreboot != null)
 		modem.failreboot = +s.failreboot;
+
+	if (s.proto_error_limit != null)
+		modem.proto_error_limit = +s.proto_error_limit;
 
 	if (s.zero_rx_timeout != null)
 		modem.zero_rx_timeout = +s.zero_rx_timeout;
@@ -563,7 +567,7 @@ export function parse(raw)
 const MIGRATE_MODEM_OPTS = [ 'device', 'netdev', 'tty', 'mux',
 	'dl_datagram_max_size', 'sim_slot', 'pincode', 'modes', 'mcc', 'mnc',
 	'lock_4g', 'lock_5g', 'lock_persist', 'at_init', 'location', 'delay',
-	'failreboot', 'zero_rx_timeout', 'stats_interval' ];
+	'failreboot', 'proto_error_limit', 'zero_rx_timeout', 'stats_interval' ];
 // options only stripped OFF the interface (moved to nowhere): the optional USB
 // anchor and legacy per-family flags/junk have no place on the interface.
 const MIGRATE_STRIP_IFACE = [ 'usb_path', 'path', 'ctldevice', 'dhcp',

@@ -5,11 +5,16 @@
 //     < 8              plain retry (backoff handled by the caller)
 //     == 8             DMS operating-mode low_power -> online cycle
 //     == 16            DMS offline -> reset (modem reboot)
-//     == 24            usb-repower (external tool, skipped if absent)
+//     == 24            board repower / reset-GPIO pulse (skipped if absent)
 //     > failreboot     system reboot (default 100)
-//   failreboot == 0 disables the whole ladder (old gate: failreboot > 0).
-// - protocol request errors (old 'qmi_errors'): reset on any success,
-//   ceiling 25 -> system reboot. Protocol-neutral: QMI and MBIM both feed it.
+//   The hardware rungs (opmode cycle / modem reset / repower) fire on their
+//   thresholds INDEPENDENT of failreboot. `failreboot == 0` disables ONLY the
+//   final reboot rung: the cheaper hardware recovery still runs and the ladder
+//   then keeps retrying forever, so the router stays up for logging/debugging
+//   (forum request: keep a headless GPIO-reset recovery without ever rebooting).
+// - protocol request errors (old 'qmi_errors'): reset on any success, ceiling
+//   `proto_error_limit` (default 25) -> system reboot, but ALSO gated by
+//   failreboot (<=0 never reboots). Protocol-neutral: QMI and MBIM both feed it.
 //
 // Counters persist to <state_dir>/<id>.json (tmpfs): they survive daemon
 // restarts and are intentionally cleared by a reboot — the ladder's last
@@ -36,7 +41,7 @@ const REBOOT_DELAY_MS = 10000;
 const RUNGS = [
 	{ at: 8,  action: 'opmode_cycle' },
 	{ at: 16, action: 'modem_reset' },
-	{ at: 24, action: 'usb_repower' },
+	{ at: 24, action: 'usb_repower' },  // board repower / reset-GPIO pulse
 ];
 
 // how many rungs a given attempt count has already passed (used only to default
@@ -60,6 +65,7 @@ export function create(opts)
 	let self = {
 		id: opts.id,
 		failreboot: +(opts.failreboot ?? 100),
+		proto_error_limit: +(opts.proto_error_limit ?? PROTO_ERROR_LIMIT),
 		counters: { attempts: 0, proto_errors: 0, rung: 0 },
 		rebooting: false,
 	};
@@ -110,24 +116,24 @@ export function create(opts)
 
 		log('info', sprintf('connection attempt %d failed', n));
 
-		if (self.failreboot <= 0) {
-			self.persist();
-			return 'retry';
-		}
-
-		if (n > self.failreboot) {
-			self.persist();
-			return 'reboot';
-		}
-
-		// fire the next not-yet-fired rung once we've reached its threshold.
-		// One rung per call (escalate step by step), in order — a jump past a
-		// threshold does not fire several rungs at once, and never skips one.
+		// Fire the next not-yet-fired hardware rung once we've reached its
+		// threshold. One rung per call (escalate step by step), in order — a
+		// jump past a threshold does not fire several rungs at once, and never
+		// skips one. These run INDEPENDENT of failreboot: disabling the reboot
+		// must not disable the cheaper hardware recovery below it.
 		if (self.counters.rung < length(RUNGS) && n >= RUNGS[self.counters.rung].at) {
 			let action = RUNGS[self.counters.rung].action;
 			self.counters.rung++;
 			self.persist();
 			return action;
+		}
+
+		// Reboot is the final rung, gated by failreboot: <=0 disables ONLY the
+		// reboot and the ladder retries forever (router stays up for
+		// logging/debugging); >0 reboots once the count passes it.
+		if (self.failreboot > 0 && n > self.failreboot) {
+			self.persist();
+			return 'reboot';
 		}
 
 		self.persist();
@@ -154,9 +160,11 @@ export function create(opts)
 			self.persist();
 		}
 
-		if (n > PROTO_ERROR_LIMIT) {
+		if (n > self.proto_error_limit) {
 			self.persist();
-			return 'reboot';
+			// Same gate as the attempt ladder: never reboot when failreboot<=0
+			// — a headless install keeps retrying instead of cycling the box.
+			return (self.failreboot > 0) ? 'reboot' : 'retry';
 		}
 
 		return 'retry';

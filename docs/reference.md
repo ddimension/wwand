@@ -143,7 +143,8 @@ config modem 'm0'
 	option location '0'              # start the QMI LOC positioning session
 	option stats_interval '60'       # telemetry period in seconds (0 = off)
 	option delay '0'                 # seconds to wait before the first init
-	option failreboot '100'          # recovery-ladder ceiling (0 = ladder off)
+	option failreboot '100'          # attempts before the final reboot rung (0 = never reboot)
+	option proto_error_limit '25'    # protocol-error ceiling before a reboot (gated by failreboot)
 	option zero_rx_timeout '21600'   # no-rx watchdog in seconds (0 = off)
 ```
 
@@ -346,6 +347,17 @@ built-in profile.
   restored; otherwise the USB power is **power-cycled**), fully replacing the old
   external `usb-repower` tool. Trigger it by hand with `modem_repower` (a "Reset
   modem" button in LuCI) to recover a modem that hung or dropped off the USB bus.
+  A modem `reset_gpio` works **without** a board profile, so any router can wire a
+  GPIO reset into the ladder.
+
+The recovery ladder escalates on consecutive failed connection attempts:
+op-mode cycle (8) → modem reset (16) → board repower / reset-GPIO pulse (24) →
+system reboot (> `failreboot`, default 100). The three **hardware** rungs fire
+on their thresholds **independent of `failreboot`**; `failreboot 0` disables
+**only** the final reboot — the hardware recovery still runs and the ladder then
+keeps retrying forever, so a headless box stays up for logging/debugging.
+`proto_error_limit` (default 25) is a separate ceiling on protocol-level errors
+that also ends in a reboot, and is gated by `failreboot` the same way.
 - **Status LEDs** — driven from the modem's registration + signal: a **5-bar
   signal graph** (e.g. MikroTik Chateau `green:mobile-1..5`) or a **mobile / LTE**
   set (e.g. Zyxel `…:red/green:mobile`, `…:lte`).
