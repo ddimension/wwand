@@ -143,8 +143,22 @@ export function create(opts)
 		return fams;
 	};
 
+	// a connection field for THIS context: the interface's own value wins; an
+	// empty one falls back to the active card's per-SIM override (config
+	// wwand_sim, matched by ICCID on the modem). Lets a SIM carry its carrier's
+	// apn/auth/username/password while the interface stays SIM-agnostic. The
+	// attach profile then still falls back to the modem-provisioned APN below.
+	let cfg = (field) => {
+		let v = self.config[field];
+
+		if (v != null && v != '')
+			return v;
+
+		return self.modem?.active_sim?.[field];
+	};
+
 	let resolve_profile = () => {
-		let apn = self.config.apn;
+		let apn = cfg('apn');
 
 		// '#N': use modem profile N as-is
 		if (apn != null && substr(apn, 0, 1) == '#')
@@ -267,20 +281,20 @@ export function create(opts)
 		let base = {
 			profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: profile.index },
 			profile_name: 'default',
-			apn: self.config.apn,
+			apn: cfg('apn'),
 			apn_disabled: 0,
 		};
 
-		if (self.config.auth != null)
-			base.auth = AUTH_MAP[self.config.auth] ?? wdsmod.AUTH_BOTH;
-		else if (self.config.username && self.config.password)
+		if (cfg('auth') != null)
+			base.auth = AUTH_MAP[cfg('auth')] ?? wdsmod.AUTH_BOTH;
+		else if (cfg('username') && cfg('password'))
 			base.auth = wdsmod.AUTH_BOTH;   // preserved default
 
-		if (self.config.username)
-			base.username = self.config.username;
+		if (cfg('username'))
+			base.username = cfg('username');
 
-		if (self.config.password)
-			base.password = self.config.password;
+		if (cfg('password'))
+			base.password = cfg('password');
 
 		wds.request('MODIFY_PROFILE', base, (err) => {
 			if (err)
@@ -335,7 +349,7 @@ export function create(opts)
 	// activation time — this only fixes the *attach* that happens earlier.
 	self.ensure_attach_profile = function(index, done) {
 		let wds = self.modem.wds_cfg;
-		let apn = self.config.apn;
+		let apn = cfg('apn');
 
 		// '#N' means "use modem profile N as-is" — never rewrite it
 		if (!wds || !index || (apn != null && substr(apn, 0, 1) == '#'))
@@ -456,19 +470,19 @@ export function create(opts)
 				let start_args = { profile_3gpp: profile.index };
 
 				if (profile.modify) {
-					start_args.apn = self.config.apn;
+					start_args.apn = cfg('apn');
 
-					if (self.config.auth != null)
-						start_args.auth = AUTH_MAP[self.config.auth] ?? wdsmod.AUTH_BOTH;
+					if (cfg('auth') != null)
+						start_args.auth = AUTH_MAP[cfg('auth')] ?? wdsmod.AUTH_BOTH;
 
-					if (self.config.username) {
-						start_args.username = self.config.username;
-						start_args.password = self.config.password;
+					if (cfg('username')) {
+						start_args.username = cfg('username');
+						start_args.password = cfg('password');
 					}
 				}
 
 				log('notice', sprintf('starting ipv%d: apn \'%s\', profile %d',
-					family, self.config.apn ?? '(profile default)', profile.index));
+					family, cfg('apn') ?? '(profile default)', profile.index));
 
 				client.request('START_NETWORK', start_args, (e3, d3) => {
 					if (e3 || d3?.pdh == null) {

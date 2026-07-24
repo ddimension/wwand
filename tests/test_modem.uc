@@ -230,6 +230,40 @@ scenario('pin-unlock', {
 		eq(vp[0].args.info.pin_id, 1, 'pin: pin1 id');
 	});
 
+// --- 3b: per-SIM PIN override (config wwand_sim matched by ICCID) -------------
+
+scenario('pin-override', {
+	handlers: base_handlers({
+		GET_CARD_STATUS: (args, meta) =>
+			({ card_status: card_status(meta.count == 1 ? { state: 2, pin1_state: 1 } : {}) }),
+		VERIFY_PIN: { retries: { verify: 2, unblock: 10 } },
+	}),
+	// the active card's ICCID (89490200001022832490) matches a wwand_sim whose
+	// pincode overrides the modem default; its ICCID is read BEFORE unlock.
+	config: {
+		pincode: '1234',
+		sims: [ { iccid: '89490200001022832490', pincode: '9999', apn: 'sim.apn' } ],
+	},
+	setup: (mock, modem) => {
+		let poll = null;
+		poll = uloop.timer(10, () => {
+			if (length(mock.calls_for('VERIFY_PIN')) > 0 && modem.uim) {
+				mock.indicate(11, modem.uim.cid, 'CARD_STATUS_IND',
+					{ card_status: card_status() });
+				return;
+			}
+			poll.set(10);
+		});
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.state, 'READY', 'pin-override: state READY');
+		let vp = mock.calls_for('VERIFY_PIN');
+		eq(vp[0].args.info.pin, '9999', 'pin-override: the wwand_sim pincode is used, not the modem default');
+		eq(modem.active_sim?.iccid, '89490200001022832490', 'pin-override: active_sim resolved by ICCID');
+		eq(modem.active_sim?.apn, 'sim.apn', 'pin-override: active_sim carries the carrier apn');
+	});
+
 // --- 4: PIN retry guard ------------------------------------------------------
 
 scenario('pin-guard', {

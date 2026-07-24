@@ -48,10 +48,23 @@ function find_app(card_status)
 	return null;
 }
 
+// the PIN to try: a per-SIM override (config wwand_sim matched to the active
+// card's ICCID, set on modem.active_sim before unlock) wins over the modem's
+// default pincode; an empty override falls through to the modem default.
+export function effective_pincode(modem)
+{
+	let sp = modem.active_sim?.pincode;
+
+	if (sp != null && sp != '')
+		return sp;
+
+	return modem.config?.pincode;
+}
+
 function unlock_uim(modem, cb, tries)
 {
 	let uim = modem.uim;
-	let pincode = modem.config?.pincode;
+	let pincode = effective_pincode(modem);
 	let settle = modem.timing?.sim_settle ?? 5000;
 
 	uim.request('GET_CARD_STATUS', {}, (err, data) => {
@@ -167,7 +180,7 @@ function unlock_uim(modem, cb, tries)
 function unlock_dms(modem, cb, tries)
 {
 	let dms = modem.dms;
-	let pincode = modem.config?.pincode;
+	let pincode = effective_pincode(modem);
 	let settle = modem.timing?.sim_settle ?? 5000;
 
 	dms.request('GET_PIN_STATUS', {}, (err, data) => {
@@ -687,6 +700,25 @@ function at_digits(lines, min)
 // getter -> AT. Modems whose UIM rejects raw EF reads (EG06: InvalidArgument)
 // fall through to DMS UIM Get IMSI/ICCID, then to AT (AT+CIMI / AT+QCCID). The
 // QMI getters use no_recovery so a rejection never climbs the reboot ladder.
+// read just the ICCID (UIM EF read -> DMS getter -> AT). The MF-level EF-ICCID
+// is readable BEFORE PIN unlock, so this is used to identify the active card and
+// pick a matching per-SIM override (wwand_sim) before choosing the PIN. Already
+// trailing-'f'-stripped, matching the ICCID shown in status/LuCI.
+export function read_iccid(modem, cb)
+{
+	let chain = [];
+	if (modem.uim)
+		push(chain, (done) => read_ef(modem, EF_ICCID, (b) =>
+			done(b != null ? replace(swap_nibbles(b), /f+$/, '') : null)));
+	push(chain, (done) => modem.dms.request('GET_ICCID', {}, (e, d) =>
+		done((!e && length(d?.iccid ?? '')) ? d.iccid : null), { no_recovery: true }));
+	if (modem.at)
+		push(chain, (done) => modem.at.send('AT+QCCID', (e, r) =>
+			done(e ? null : at_digits(r?.lines, 18))));
+
+	first_of(chain, cb);
+}
+
 export function read_identity(modem, cb)
 {
 	let out = { imsi: null, iccid: null, msisdn: null };
@@ -701,20 +733,10 @@ export function read_identity(modem, cb)
 		push(imsi_chain, (done) => modem.at.send('AT+CIMI', (e, r) =>
 			done(e ? null : at_digits(r?.lines, 14))));
 
-	let iccid_chain = [];
-	if (modem.uim)
-		push(iccid_chain, (done) => read_ef(modem, EF_ICCID, (b) =>
-			done(b != null ? replace(swap_nibbles(b), /f+$/, '') : null)));
-	push(iccid_chain, (done) => modem.dms.request('GET_ICCID', {}, (e, d) =>
-		done((!e && length(d?.iccid ?? '')) ? d.iccid : null), { no_recovery: true }));
-	if (modem.at)
-		push(iccid_chain, (done) => modem.at.send('AT+QCCID', (e, r) =>
-			done(e ? null : at_digits(r?.lines, 18))));
-
 	first_of(imsi_chain, (imsi) => {
 		out.imsi = imsi;
 
-		first_of(iccid_chain, (iccid) => {
+		read_iccid(modem, (iccid) => {
 			out.iccid = iccid;
 
 			modem.dms.request('GET_MSISDN', {}, (err, data) => {

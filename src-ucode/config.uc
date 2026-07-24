@@ -128,6 +128,8 @@ function modem_from_section(s)
 // optionally, the carrier apn/auth/pdp for that card.
 function sim_from_section(s)
 {
+	// the per-SIM carrier bundle: PIN + credentials. pdp_type / IP family is a
+	// connection concern and stays on the interface, not the SIM.
 	return {
 		modem: s.modem,
 		iccid: s.iccid,
@@ -136,7 +138,6 @@ function sim_from_section(s)
 		auth: s.auth,
 		username: s.username,
 		password: s.password,
-		pdp_type: PDP_TYPES[s.pdp_type] ? s.pdp_type : null,
 	};
 }
 

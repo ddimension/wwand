@@ -183,6 +183,8 @@ export function create(opts)
 		loc: null,         // LOC client when config.location is set
 		location: null,    // last position report
 		cells: null,       // last cell location info (telemetry collector)
+		active_sim: null,  // matched per-SIM override (config wwand_sim) for the
+		                   // inserted card: overrides pincode + apn/auth/pdp
 
 		services: {},      // service id (string) -> { major, minor }
 		info: {},          // model, revision, imei, ...
@@ -681,9 +683,39 @@ export function create(opts)
 		});
 	};
 
+	// pick the per-SIM override (config wwand_sim) matching the active card BEFORE
+	// unlock, so its pincode is used. The MF-level ICCID is readable on a locked
+	// card, and the extra read only runs when overrides are actually configured.
+	let resolve_active_sim = (next) => {
+		self.active_sim = null;
+
+		let sims = self.config?.sims;
+
+		if (!sims || !length(sims))
+			return next();
+
+		sim.read_iccid(self, (iccid) => {
+			if (iccid) {
+				let norm = (x) => replace(lc(x ?? ''), /f+$/, '');
+				let want = norm(iccid);
+
+				for (let s in sims)
+					if (norm(s.iccid) == want) {
+						self.active_sim = s;
+						break;
+					}
+
+				if (self.active_sim)
+					log('notice', sprintf('SIM %s matched a configured wwand_sim (per-SIM pin/apn)', iccid));
+			}
+
+			next();
+		});
+	};
+
 	step_sim = () => {
 		self.set_state('SIM_UNLOCK');
-		sim.unlock(self, (err, status) => {
+		resolve_active_sim(() => sim.unlock(self, (err, status) => {
 			if (err?.blocked) {
 				// identify the card before going terminal so the log says
 				// *which* SIM tripped the PIN guard. EF-IMSI is PIN-protected
@@ -712,7 +744,7 @@ export function create(opts)
 					? sprintf(' (pin1 state %d, %d retries left)', status.pin1_state, status.pin1_retries)
 					: ''));
 			step_identity();
-		});
+		}));
 	};
 
 	// card identity, logged like the old proto handler did after unlock
