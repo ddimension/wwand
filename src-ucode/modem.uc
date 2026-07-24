@@ -40,10 +40,10 @@ import * as dmsmod from './codec/schema/dms.uc';
 import * as nasmod from './codec/schema/nas.uc';
 import * as dsdmod from './codec/schema/dsd.uc';
 import * as uimmod from './codec/schema/uim.uc';
-import * as wmsmod from './codec/schema/wms.uc';
 import * as wdsmod from './codec/schema/wds.uc';
 import * as wdamod from './codec/schema/wda.uc';
-import * as locmod from './codec/schema/loc.uc';
+// loc.uc + wms.uc are lazy-loaded (require of a *_lazy shim) only when GPS /
+// SMS is actually used, keeping those schemas off the heap on the common path.
 
 const TIMING_DEFAULTS = {
 	sync_retry: 1000,      // delay between CTL sync attempts
@@ -280,6 +280,32 @@ export function create(opts)
 		cb(self.wms ?? null);
 	};
 
+	// lazily allocate the WMS (SMS) client on first use — the wms schema is
+	// require()d here (via the *_lazy shim) rather than imported at the top, so it
+	// stays off the heap until SMS is actually used. sms.uc's probe calls this.
+	// `_wms_tried` gates the one-shot (ucode has no `undefined`; self.wms is null
+	// until resolved, then null = unavailable or the client).
+	self._ensure_wms = function(cb) {
+		if (self._wms_tried)
+			return cb();
+
+		self._wms_tried = true;
+
+		let wmsmod = require('wwand.codec.schema.wms_lazy').s;
+
+		if (!self.services[sprintf('%d', wmsmod.default.service)]) {
+			self.wms = null;
+			return cb();
+		}
+
+		self.alloc(wmsmod.default, (ew, wms) => {
+			if (ew)
+				log('warn', 'wms allocation failed, SMS unavailable');
+			self.wms = ew ? null : wms;
+			cb();
+		});
+	};
+
 	// --- step chain --------------------------------------------------------
 
 	let dp = opts.datapath ?? {};
@@ -439,27 +465,9 @@ export function create(opts)
 						});
 					};
 
-					// allocate the WMS (SMS) client if the modem advertises the
-					// service; non-fatal — a missing/failed WMS just means no SMS.
-					let alloc_wms = (next) => {
-						if (!self.services[sprintf('%d', wmsmod.default.service)]) {
-							self.wms = null;
-							return next();
-						}
-
-						self.alloc(wmsmod.default, (ew, wms) => {
-							if (ew) {
-								log('warn', 'wms allocation failed, SMS unavailable');
-								self.wms = null;
-							}
-							else {
-								self.wms = wms;
-							}
-
-							next();
-						});
-					};
-
+					// The WMS (SMS) client is NOT allocated here — it is lazily
+					// brought up on the first SMS operation via _ensure_wms, so the
+					// wms schema stays off the heap until SMS is actually used.
 					if (self.services[sprintf('%d', uimmod.default.service)]) {
 						self.alloc(uimmod.default, (e3, uim) => {
 							if (e3) {
@@ -470,11 +478,11 @@ export function create(opts)
 								self.uim = uim;
 							}
 
-							alloc_wms(after_uim);
+							after_uim();
 						});
 					}
 					else {
-						alloc_wms(after_uim);
+						after_uim();
 					}
 				});
 			});
@@ -1297,6 +1305,9 @@ export function create(opts)
 	self._start_loc = function() {
 		if (self.loc || !self.config.location)
 			return;
+
+		// lazy-load the LOC schema only now (GPS enabled) — see the top-of-file note
+		let locmod = require('wwand.codec.schema.loc_lazy').s;
 
 		if (!self.services[sprintf('%d', locmod.default.service)]) {
 			log('info', 'location requested but loc service unavailable');
