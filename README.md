@@ -63,7 +63,12 @@ quirks and recovery strategies were ported deliberately, its bugs left behind.
 
 The daemon is a backend-neutral base plus per-backend packages — install only
 what your modems need. Package definitions live in the
-[openwrt-repo](https://github.com/ddimension/openwrt-repo) feed.
+[openwrt-repo](https://github.com/ddimension/openwrt-repo) feed, which also
+publishes **prebuilt, signed binary repositories** (snapshot, 25.12 and 24.10
+across seven architectures) at
+`https://ddimension.github.io/openwrt-repo/<release>/<arch>/` — see the
+[feed README](https://github.com/ddimension/openwrt-repo#binary-package-repositories)
+for device setup (apk/opkg lines and signing keys).
 
 | Package | Role |
 |---|---|
