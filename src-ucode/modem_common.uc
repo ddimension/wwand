@@ -326,6 +326,33 @@ export function telemetry_at(self)
 	return self.at_telemetry;
 }
 
+// fetch_nr_neighbours(self, cb): the ONLY source of NR5G neighbour cells — QMI
+// Get Cell Location Info carries none (only the NR serving cell), so ALL backends
+// read them here over the shared AT side channel (AT+QENG="neighbourcell",
+// Quectel/ASR). Best-effort: gated on an active NR serving cell (so it never runs
+// on LTE-only), and silently skipped when the modem has no usable AT (e.g. an
+// MBIM firmware that rejects AT). Stores self.cells.nr5g_neigh (or null).
+export function fetch_nr_neighbours(self, cb)
+{
+	cb = cb ?? (() => null);
+
+	let at = telemetry_at(self);
+
+	if (!at || !self.cells?.nr5g_cell) {
+		if (self.cells)
+			self.cells.nr5g_neigh = null;
+		return cb();
+	}
+
+	at.send('AT+QENG="neighbourcell"', (err, res) => {
+		if (!err && self.cells) {
+			let n = atcmd.parse_qeng_neighbourcell(res?.lines).nr;
+			self.cells.nr5g_neigh = length(n) ? n : null;
+		}
+		cb();
+	});
+}
+
 // close_at(self): tear down both AT engines opened by open_at (the control
 // channel and, when distinct, the dedicated telemetry channel). Idempotent.
 export function close_at(self)

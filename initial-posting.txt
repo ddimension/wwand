@@ -1,0 +1,78 @@
+Wwand - new mobile network connection manager with eSIM support
+Wwand - new mobile network connection manager with eSIM support
+Hi all,
+
+I've been running the MikroTik Chateau 5G R17 ax (qualcommax/ipq60xx, Quectel RG650E-EU) on OpenWrt and want to share wwand — a small connection manager I wrote to replace the old bash qmi-advanced dialer.
+
+👉 https://github.com/ddimension/wwand
+
+It's an event-driven daemon written entirely in ucode that talks QMI, MBIM and NCM/AT natively over /dev/cdc-wdmX (or the tty) — no uqmi, qmicli, libqmi, umbim or glib. It drives netifd directly (no per-interface monitor process), so a daemon restart or a transient signal loss doesn't bounce your WAN (IPv6-PD/VRF survive). On the Chateau it does 5G NSA with two parallel PDP contexts (IPv4 + IPv6) over QMAP multiplexing, \~3 MB RSS, no polling.
+
+# Features
+
+* One daemon, three modem backends: QMI, native MBIM and NCM/ECM (AT-driven) — one `proto 'wwand'` for all of them
+* Multiple modems + multiple parallel PDP contexts (QMAP: rmnet / qmimux, auto-selected)
+* IPv4 / IPv6 / dual-stack per context; IPv6 prefix delegation
+* Recovery ladder: retry → op-mode cycle → modem reset → board power-cycle / reset-GPIO → reboot, plus a zero-rx watchdog
+* Board profiles (MikroTik Chateau, Zyxel LTE33xx / NR7101): modem power/reset GPIOs and status LEDs (5-bar signal graph) — replaces the vendor helper scripts
+* SIM: PIN, multi-slot switching, PIN-lock, per-SIM overrides by ICCID — and eSIM/eUICC: native ES10c profile management (list/enable/disable/EID) plus SM-DP+ provisioning (profile download) via a bundled lpac; the HTTPS runs on the router over your existing WAN, no dedicated provisioning APN. The eSIM APDU transport is auto-chosen (QMI UIM → native MBIM UICC → AT), so it also works on MBIM modems without an AT port
+* SMS: receive/list/read/delete with a full GSM 03.40 PDU decoder (7-bit incl. umlauts, UCS2, multipart merge) + LuCI inbox
+* Registration diagnostics: EMM reject cause + limited-service flag over ubus/log (handy when an attach is rejected, e.g. IPv4-only → cause 33); attach profile is programmed from config *before* registration to avoid exactly that
+* Telemetry: serving + neighbour cells, signal, operator, data-system mode (LTE/NSA/SA) — uniform across all backends
+* Quectel cell locking (4G anchor / 5G SA), network scan/selection, QMI LOC/GPS
+* LuCI integration (proto handler + Status → Modem page + settings/eSIM/SMS UI)
+* Configuration lives entirely in /etc/config/network (WireGuard-style `wwand_modem` sections); existing proto qmi/mbim/ncm configs auto-migrate on install
+
+# Installation
+
+## Option 1: prebuilt packages (no buildroot needed)
+
+CI publishes signed binary repositories for snapshot, 25.12 and 24.10 across seven architectures (aarch64_cortex-a53/-a72, arm_cortex-a7/-a15, mips_24kc, mipsel_24kc, x86_64):
+
+```
+https://ddimension.github.io/openwrt-repo/<release>/<arch>/
+```
+
+apk (snapshot / 25.12), example for a Chateau on snapshot:
+
+```
+wget -O /etc/apk/keys/wwand.pem https://ddimension.github.io/openwrt-repo/keys/public-key.pem
+echo "https://ddimension.github.io/openwrt-repo/snapshot/aarch64_cortex-a53/packages.adb" > /etc/apk/repositories.d/wwand.list
+apk update
+apk del luci-proto-qmi          # wwand's LuCI proto replaces it (same protocol/qmi.js)
+apk add wwand-qmi luci-proto-wwand luci-app-wwand
+apk add wwand-esim wwand-lpac   # optional: eSIM management + provisioning
+```
+
+opkg (24.10): same scheme — key to /etc/opkg/keys/, `src/gz wwand https://ddimension.github.io/openwrt-repo/openwrt-24.10/<arch>` into /etc/opkg/customfeeds.conf, then `opkg install`.
+
+## Option 2: build it yourself
+
+The package definitions live in a separate feed repo (the wwand repo itself is the pure source tree):
+
+```
+echo "src-git wwand https://github.com/ddimension/openwrt-repo.git" >> feeds.conf.default
+./scripts/feeds update wwand
+./scripts/feeds install -a -p wwand
+
+make menuconfig
+  Network → WWAN → wwand-qmi          # the common case; pulls in the wwand base
+  #                wwand-mbim         # for MBIM modems (includes the QMI passthrough)
+  #                wwand-ncm          # for NCM/ECM (AT-driven) modems
+  LuCI → Protocols    → luci-proto-wwand   (replaces luci-proto-qmi)
+  LuCI → Applications → luci-app-wwand
+  # optional eSIM: wwand-esim + wwand-lpac
+
+make
+```
+
+Pick the backend package(s) matching your modems — the `wwand` base carries no backend on its own and is pulled in automatically. Each backend package replaces the corresponding stock handler (uqmi / umbim / comgt-ncm).
+
+Then configure a `proto 'wwand'` interface (the legacy `proto 'qmi'` keeps working as an alias, and existing configs are migrated automatically). Full config/ubus reference, quirk handling and an FAQ: https://github.com/ddimension/wwand/blob/main/docs/reference.md
+
+Tested on the Chateau (RG650E, 5G NSA), Zyxel NR7101 (RG502Q) and LTE-3301Plus (EG06).
+~480 host-side unit checks run without hardware.
+
+Feedback / testers on other modems very welcome!
+
+Cheers!

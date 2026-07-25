@@ -1425,7 +1425,8 @@ export function create(opts)
 				if (!self.cells)
 					return after();
 
-				self._fetch_ca_info(() => self._determine_data_mode(after));
+				self._fetch_ca_info(() => self._determine_data_mode(
+					() => modem_common.fetch_nr_neighbours(self, after)));
 			});
 		});
 	};

@@ -955,6 +955,8 @@ function tel_quectel_cells(self, cb)
 			let neigh = e2 ? null : atcmd.parse_qeng_neighbourcell(r2?.lines);
 
 			assemble_cells(self, serving, neigh);
+			if (self.cells)
+				self.cells.nr5g_neigh = (neigh && length(neigh.nr)) ? neigh.nr : null;
 			cb();
 		});
 	});

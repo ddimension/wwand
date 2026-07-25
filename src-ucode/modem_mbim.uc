@@ -692,10 +692,11 @@ export function create(opts)
 			if (!self.mbim)
 				return done();
 
-			self._refresh_cells(() => self._refresh_ca(() => {
-				emit_telemetry();
-				done();
-			}));
+			self._refresh_cells(() => self._refresh_ca(() =>
+				modem_common.fetch_nr_neighbours(self, () => {
+					emit_telemetry();
+					done();
+				})));
 		});
 	};
 

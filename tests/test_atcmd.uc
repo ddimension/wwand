@@ -205,7 +205,19 @@ eq(nb.intra[0], { earfcn: 1300, pci: 155, rsrq: -130, rsrp: -990, rssi: -700, sr
 eq(length(nb.inter), 2, 'qeng nc: two inter neighbours');
 eq(nb.inter[1], { earfcn: 100, pci: 91, rsrq: -160, rsrp: -1080, rssi: -780, srxlev: -100 },
 	'qeng nc: inter neighbour parsed');
-eq(atcmd.parse_qeng_neighbourcell([ 'OK' ]), { intra: [], inter: [] }, 'qeng nc: none -> empty');
+eq(atcmd.parse_qeng_neighbourcell([ 'OK' ]), { intra: [], inter: [], nr: [] }, 'qeng nc: none -> empty');
+
+// NR5G neighbour rows (QMI carries none, so QENG is the only source). Two layouts:
+// with an ARFCN (large) and without (PCI first) — told apart by magnitude.
+let nrn = atcmd.parse_qeng_neighbourcell([
+	'+QENG: "neighbourcell","NR5G",633984,123,-95,-11,15',   // arfcn,pci,rsrp,rsrq,sinr
+	'+QENG: "neighbourcell","NR5G",300,-88,-9,20',            // pci,rsrp,rsrq,sinr (no arfcn)
+]);
+eq(length(nrn.nr), 2, 'qeng nc: two NR neighbours');
+eq(nrn.nr[0], { arfcn: 633984, pci: 123, rsrp: -950, rsrq: -110, sinr: 15 },
+	'qeng nc: NR neighbour with ARFCN (metrics ×10)');
+eq(nrn.nr[1], { arfcn: null, pci: 300, rsrp: -880, rsrq: -90, sinr: 20 },
+	'qeng nc: NR neighbour without ARFCN (PCI-first layout)');
 
 // --- per-branch AT+QRSRP?/QRSRQ?/QSINR? --------------------------------------
 let qp = atcmd.parse_qrsrp([ '+QRSRP: -95,-98,-140,-140,LTE' ]);

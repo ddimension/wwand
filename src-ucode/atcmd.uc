@@ -261,14 +261,37 @@ export function parse_qeng_servingcell(lines)
 //   +QENG: "neighbourcell intra","LTE",<earfcn>,<pcid>,<rsrq>,<rsrp>,<rssi>,<sinr>,<srxlev>,...
 //   +QENG: "neighbourcell inter","LTE",<earfcn>,<pcid>,<rsrq>,<rsrp>,<rssi>,<sinr>,<srxlev>,...
 //   +QENG: "neighbourcell","LTE",...            (older firmwares; treated as intra)
-// returns { intra: [ {earfcn,pci,rsrq,rsrp,rssi,srxlev} ], inter: [ ... ] }.
+// QMI Get Cell Location Info carries NO NR neighbour cells (only the NR serving
+// cell), so the NR5G neighbour set comes ONLY from here — the single backend-
+// neutral source, run over the shared AT side channel. NR field order varies by
+// firmware; the ARFCN (large) is told apart from the PCI (<= 1007) by magnitude.
+//   +QENG: "neighbourcell","NR5G",<arfcn>,<pci>,<rsrp>,<rsrq>,<sinr>[,...]
+//   +QENG: "neighbourcell","NR5G",<pci>,<rsrp>,<rsrq>,<sinr>[,...]  (no arfcn)
+// returns { intra:[{earfcn,pci,rsrq,rsrp,rssi,srxlev}], inter:[…],
+//           nr:[{arfcn,pci,rsrp,rsrq,sinr}] }.
 export function parse_qeng_neighbourcell(lines)
 {
-	let out = { intra: [], inter: [] };
+	let out = { intra: [], inter: [], nr: [] };
 	let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
 	let x10 = (s) => { let n = num(s); return (n != null) ? n * 10 : null; };
 
 	for (let l in (lines ?? [])) {
+		let mn = match(l, /\+QENG:\s*"neighbourcell[^"]*","NR5G",(.*)/);
+
+		if (mn) {
+			let f = map(split(mn[1], ','), (x) => trim(x));
+			let f0 = num(f[0]);
+			let has_arfcn = (f0 != null && f0 > 3300);   // ARFCN >> max PCI (1007)
+			let i = has_arfcn ? 1 : 0;
+			let cell = {
+				arfcn: has_arfcn ? f0 : null, pci: num(f[i]),
+				rsrp: x10(f[i + 1]), rsrq: x10(f[i + 2]), sinr: num(f[i + 3]),
+			};
+			if (cell.pci != null)
+				push(out.nr, cell);
+			continue;
+		}
+
 		let m = match(l, /\+QENG:\s*"neighbourcell([^"]*)","LTE",(.*)/);
 
 		if (!m)
