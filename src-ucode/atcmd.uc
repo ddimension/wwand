@@ -59,7 +59,7 @@ export function model_init_commands(model)
 			return [ ...q.commands ];
 
 	return [];
-}
+};
 
 // eSIM host-access quirks. On some Quectel firmwares (RG650E and relatives)
 // the QMI logical channel is NOT_SUPPORTED and the modem's own LPA daemon
@@ -76,14 +76,14 @@ export function esim_quirks(model)
 		return { lpa_disable_for_host: true };
 
 	return {};
-}
+};
 
 // fallback when NAS system-selection-preference keeps failing (old
 // proto_qmi_reset_modes_fallback; harmless ERROR on non-Huawei modems)
 export function modes_fallback_command(model)
 {
 	return 'AT^SYSCFGEX="00",3fffffff,1,4,7fffffffffffffff,,';
-}
+};
 
 // Quectel cell locking (verified on RG650E). Config:
 //   lock_4g:  list of 'earfcn:pci' (one entry -> common/4g, several -> 4g_ext)
@@ -133,7 +133,7 @@ export function cell_lock_commands(cfg)
 		push(cmds, 'AT+QNWLOCK="save_ctrl",1,1');
 
 	return cmds;
-}
+};
 
 // parse an AT+QNWLOCK read response into the lock state. Quectel formats:
 //   +QNWLOCK: "common/4g",<enable>[,<earfcn>,<pci>[,...]]
@@ -156,7 +156,7 @@ export function parse_qnwlock(lines)
 	}
 
 	return null;
-}
+};
 
 // LTE downlink bandwidth in resource blocks -> MHz (E-UTRA transmission BW)
 const RB_MHZ = { '6': 1.4, '15': 3, '25': 5, '50': 10, '75': 15, '100': 20 };
@@ -186,7 +186,7 @@ export function parse_qcainfo(lines)
 	}
 
 	return out;
-}
+};
 
 // LTE downlink bandwidth index (Quectel QENG/servingcell) -> MHz
 const BW_IDX_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
@@ -251,7 +251,7 @@ export function parse_qeng_servingcell(lines)
 	}
 
 	return out;
-}
+};
 
 // parse AT+QENG="neighbourcell" (Quectel) into intra- and inter-frequency LTE
 // neighbours. rsrp/rsrq/rssi/srxlev come out in QMI 0.1 dB units (×10) so they
@@ -312,7 +312,7 @@ export function parse_qeng_neighbourcell(lines)
 	}
 
 	return out;
-}
+};
 
 // per-Rx-branch signal (Quectel), the antenna-alignment source:
 //   +QRSRP: <b0>,<b1>,<b2>,<b3>,<sysmode>   (dBm; sysmode = LTE | NR5G | ...)
@@ -344,9 +344,9 @@ function qbranch(lines, re)
 	return null;
 }
 
-export function parse_qrsrp(lines) { return qbranch(lines, /\+QRSRP:\s*(.*)/); }
-export function parse_qrsrq(lines) { return qbranch(lines, /\+QRSRQ:\s*(.*)/); }
-export function parse_qsinr(lines) { return qbranch(lines, /\+QSINR:\s*(.*)/); }
+export function parse_qrsrp(lines) { return qbranch(lines, /\+QRSRP:\s*(.*)/); };
+export function parse_qrsrq(lines) { return qbranch(lines, /\+QRSRQ:\s*(.*)/); };
+export function parse_qsinr(lines) { return qbranch(lines, /\+QSINR:\s*(.*)/); };
 
 // pick the strongest valid Rx branch from a qbranch() result, ignoring the
 // modem's not-available sentinels (RSRP -140, RSRQ/SINR very negative, 0 fill).
@@ -362,7 +362,7 @@ export function branch_best(b, floor)
 			best = v;
 
 	return best;
-}
+};
 
 // AT+CEER extended error report -> { text, cause }. Firmwares return either a
 // free-text reason or a numeric cause; extract a cause number when one follows
@@ -393,7 +393,7 @@ export function parse_ceer(lines)
 	}
 
 	return null;
-}
+};
 
 // AT+CESQ extended signal quality (3GPP TS 27.007 §8.69), the always-available
 // 3GPP-generic signal source:
@@ -426,7 +426,7 @@ export function parse_cesq(lines)
 	}
 
 	return null;
-}
+};
 
 // Huawei ^HCSQ signal (BEST-EFFORT — conversion formulas per the Huawei ME909 /
 // NetEngine AR AT spec, not verified on wwand hardware):
@@ -476,7 +476,7 @@ export function parse_hcsq(lines)
 	}
 
 	return null;
-}
+};
 
 // Huawei ^MONSC serving cell (BEST-EFFORT). LTE form:
 //   ^MONSC: LTE,<mcc>,<mnc>,<arfcn>,<cellid-hex>,<pci>,<tac-hex>,<rsrp>,<rsrq>,<rxlev>
@@ -505,7 +505,7 @@ export function parse_monsc(lines)
 	}
 
 	return null;
-}
+};
 
 // Huawei ^MONNC neighbour cells (BEST-EFFORT; field layout not verified —
 // parsed defensively as earfcn,pci,rsrp,rsrq,...). Metrics in 0.1 dB units.
@@ -531,7 +531,7 @@ export function parse_monnc(lines)
 	}
 
 	return out;
-}
+};
 
 // MeiG (ASR) AT+MENG="servingcell" — MeiG's QENG analogue (BEST-EFFORT; verified
 // against the SLM770A/SLM750 AT manual but not on wwand hardware). LTE form:
@@ -567,7 +567,7 @@ export function parse_meng_servingcell(lines)
 	}
 
 	return null;
-}
+};
 
 // MeiG (ASR) AT+MENG="neighbourcell" (BEST-EFFORT). LTE form — NOTE the metric
 // order is RSRP,RSRQ (opposite of Quectel's neighbourcell rsrq,rsrp):
@@ -598,7 +598,7 @@ export function parse_meng_neighbourcell(lines)
 	}
 
 	return out;
-}
+};
 
 // parse an AT+COPS=? test response into the visible operators (the AT-backend
 // network scan, COPS being the AT equivalent of QMI Network Scan). The +COPS:
@@ -641,7 +641,7 @@ export function parse_cops_scan(lines)
 	}
 
 	return out;
-}
+};
 
 // --- AT port discovery -------------------------------------------------------
 
@@ -725,7 +725,7 @@ export function find_tty(fx, device, tty_override, base_override)
 	let names = sort(map(found, (f) => f.tty));
 
 	return sprintf('/dev/%s', names[0]);
-}
+};
 
 // find_at_channels: the primary AT port (find_tty) plus a DEDICATED secondary
 // AT channel (port role 'at2') when the modem exposes one. Running telemetry
@@ -783,7 +783,7 @@ export function find_at_channels(fx, device, tty_override, base_override)
 	}
 
 	return { primary: primary, telemetry: null };
-}
+};
 
 // --- transport ---------------------------------------------------------------
 
@@ -840,7 +840,7 @@ export function open_transport(path, baud, log)
 	};
 
 	return self;
-}
+};
 
 // --- engine ------------------------------------------------------------------
 
@@ -975,4 +975,4 @@ export function create(transport, opts)
 	};
 
 	return self;
-}
+};

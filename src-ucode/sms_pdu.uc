@@ -277,7 +277,7 @@ export function decode_deliver(pdu_hex)
 		udh: udh,
 		text: text,
 	};
-}
+};
 
 // Merge multipart parts (same UDH ref) into single messages. `msgs` is a list of
 // decoded objects (each may carry `.udh` and an `.index`/`.storage` for delete).
@@ -331,4 +331,4 @@ export function reassemble(msgs)
 	}
 
 	return out;
-}
+};

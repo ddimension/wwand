@@ -65,7 +65,7 @@ export function netmask_to_prefix(netmask)
 	}
 
 	return bits;
-}
+};
 
 
 export function create(opts)
@@ -979,4 +979,4 @@ export function create(opts)
 	self.modem.attach_context(self);
 
 	return self;
-}
+};

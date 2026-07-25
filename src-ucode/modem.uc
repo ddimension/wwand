@@ -81,7 +81,7 @@ export function parse_modes(str)
 	}
 
 	return mask || null;
-}
+};
 
 // unpack GSM 7-bit packed septets (LSB-first) into bytes. For Latin operator
 // names the default-alphabet septets map 1:1 to ASCII, so we emit them directly.
@@ -1597,4 +1597,4 @@ export function create(opts)
 	// stop() + _device_gone() installed by modem_common.scaffolding
 
 	return self;
-}
+};

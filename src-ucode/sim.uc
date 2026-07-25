@@ -64,7 +64,7 @@ export function effective_pincode(modem)
 		return sp;
 
 	return modem.config?.pincode;
-}
+};
 
 // PIN-safety threshold: with this many verify attempts left (or fewer), do NOT
 // auto-enter the PIN — burning the last try locks the SIM to PUK. The daemon
@@ -86,7 +86,7 @@ export function pin_block_reason(retries, force)
 		return 'pin_retries_low';     // precautionary block, releasable manually
 
 	return null;
-}
+};
 
 function unlock_uim(modem, cb, tries)
 {
@@ -284,7 +284,7 @@ export function unlock(modem, cb)
 		return unlock_uim(modem, cb, 0);
 
 	return unlock_dms(modem, cb, 0);
-}
+};
 
 // QMI codes where the transport rejected the op WITHOUT touching the PIN, so it
 // is safe to try the next transport: MissingArgument 17, InvalidArgument 48,
@@ -373,7 +373,7 @@ export function set_pin_lock(modem, enable, pin, cb)
 			after_state(err ? null : data?.pin1?.status), { no_recovery: true });
 
 	attempt();
-}
+};
 
 // --- card identity (IMSI / ICCID) -------------------------------------------
 
@@ -477,7 +477,7 @@ export function slot_status(modem, cb)
 
 		cb(null, out);
 	});
-}
+};
 
 export function switch_slot(modem, physical, cb)
 {
@@ -487,7 +487,7 @@ export function switch_slot(modem, physical, cb)
 	modem.uim.request('SWITCH_SLOT', {
 		logical: 1, physical: physical,
 	}, (err) => cb(err ?? null));
-}
+};
 
 // --- raw APDU channel (eSIM/ES10 foundation) ---------------------------------
 
@@ -500,7 +500,7 @@ export function hex_to_arr(s)
 		push(out, ord(raw, i));
 
 	return out;
-}
+};
 
 export function arr_to_hex(a)
 {
@@ -510,7 +510,7 @@ export function arr_to_hex(a)
 		s += sprintf('%02x', b);
 
 	return s;
-}
+};
 
 // APDU transport is either QMI UIM (SEND_APDU + logical channel) or, on
 // firmwares that return NOT_SUPPORTED for the QMI channel (e.g. RG650E), the
@@ -639,7 +639,7 @@ export function apdu_open(modem, slot, aid_hex, cb)
 			           select_response: arr_to_hex(data.select_response) });
 		});
 	});
-}
+};
 
 export function apdu_send(modem, slot, channel, apdu_hex, cb)
 {
@@ -660,7 +660,7 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 
 		cb(null, arr_to_hex(data.response));
 	}, { timeout: 30000 });
-}
+};
 
 export function apdu_close(modem, slot, channel, cb)
 {
@@ -676,7 +676,7 @@ export function apdu_close(modem, slot, channel, cb)
 	modem.uim.request('LOGICAL_CHANNEL', {
 		slot: slot, channel_id: channel, terminate: 1,
 	}, (err) => cb(err ?? null));
-}
+};
 
 // --- PLMN selector lists (settings editor) -----------------------------------
 
@@ -711,7 +711,7 @@ export function decode_plmn_act(bytes)
 	}
 
 	return out;
-}
+};
 
 // best-effort read of the three PLMN selector lists; a list reads as null
 // when the file is absent (e.g. Telekom SIMs carry no user list)
@@ -734,7 +734,7 @@ export function read_plmn_lists(modem, cb)
 			});
 		});
 	});
-}
+};
 
 // try providers in order until one yields a non-null value; each provider is
 // (done) => done(value | null). The sustainable fallback shape for identity.
@@ -786,7 +786,7 @@ export function read_iccid(modem, cb)
 			done(e ? null : at_digits(r?.lines, 18))));
 
 	first_of(chain, cb);
-}
+};
 
 export function read_identity(modem, cb)
 {
@@ -816,4 +816,4 @@ export function read_identity(modem, cb)
 			});
 		});
 	});
-}
+};

@@ -188,7 +188,7 @@ export function decode_base_stations_info(info)
 		nr_serving:      _read_ms_struct_array(info, 80, F_SERVING_NR),
 		nr_neighbors:    _read_ms_struct_array(info, 88, F_NEIGH_NR),
 	};
-}
+};
 
 // VERSION query/report is two guint16 (MbimVersion, MbimExtendedVersion); the
 // codec has no u16 scalar, so decode the 4-byte buffer directly.
@@ -198,7 +198,7 @@ export function decode_version(info)
 		mbim_version:          (length(info) >= 2) ? struct.unpack('<H', substr(info, 0, 2))[0] : null,
 		mbim_extended_version: (length(info) >= 4) ? struct.unpack('<H', substr(info, 2, 2))[0] : null,
 	};
-}
+};
 
 export const commands = {
 	// Protocol version handshake (MBIMEx v2.0+). CID 15.

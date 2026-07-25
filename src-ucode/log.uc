@@ -9,12 +9,12 @@ let threshold = LEVELS.info;
 export function set_level(name)
 {
 	threshold = LEVELS[name] ?? LEVELS.info;
-}
+};
 
 export function valid_level(name)
 {
 	return exists(LEVELS, name);
-}
+};
 
 export function log(level, fmt, ...args)
 {
@@ -26,10 +26,10 @@ export function log(level, fmt, ...args)
 	let msg = replace(sprintf('%s: ' + fmt, level, ...args), /[[:cntrl:]]/g, '');
 
 	warn(msg + "\n");
-}
+};
 
-export function err(fmt, ...args)    { log('err', fmt, ...args); }
-export function warning(fmt, ...args){ log('warn', fmt, ...args); }
-export function notice(fmt, ...args) { log('notice', fmt, ...args); }
-export function info(fmt, ...args)   { log('info', fmt, ...args); }
-export function debug(fmt, ...args)  { log('debug', fmt, ...args); }
+export function err(fmt, ...args)    { log('err', fmt, ...args); };
+export function warning(fmt, ...args){ log('warn', fmt, ...args); };
+export function notice(fmt, ...args) { log('notice', fmt, ...args); };
+export function info(fmt, ...args)   { log('info', fmt, ...args); };
+export function debug(fmt, ...args)  { log('debug', fmt, ...args); };

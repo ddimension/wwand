@@ -40,7 +40,7 @@ export function dsd_from_serving(serving)
 	let mode = nr ? (serving.nr.mode ?? (lte ? 'NSA' : 'SA')) : (lte ? 'LTE' : null);
 
 	return mode ? { mode: mode, lte: lte, nr: nr } : null;
-}
+};
 
 // dsd_from_radio(radio_ifs): derive a coarse mode from NAS radio interfaces
 // (last-resort fallback; can't see NSA — an NSA anchor reports LTE only here).
@@ -56,7 +56,7 @@ export function dsd_from_radio(radio_ifs)
 	let mode = nr ? (lte ? 'NSA' : 'SA') : (lte ? 'LTE' : null);
 
 	return mode ? { mode: mode, lte: lte, nr: nr } : null;
-}
+};
 
 // IMEI digits that uniquely identify a device: TAC (8) + serial (6) = 14. Drops
 // the trailing IMEI check digit and the IMEISV software-version, so a modem that
@@ -95,7 +95,7 @@ export function check_identity(self, o)
 	o.emit('identity_mismatch', self.identity_mismatch);
 
 	return false;
-}
+};
 
 // scaffolding(self, o): install the protocol-neutral modem plumbing that was
 // copy-pasted byte-for-byte into all three state machines (modem.uc /
@@ -166,7 +166,7 @@ export function scaffolding(self, o)
 	};
 
 	return { emit: emit, notify_contexts: notify_contexts };
-}
+};
 
 // note_connect_failure_light(self, rec): install the backend-neutral "record a
 // failed connection cycle" method for modems with no live DMS to cycle (MBIM,
@@ -188,7 +188,7 @@ export function note_connect_failure_light(self, rec)
 
 		done(action);
 	};
-}
+};
 
 // make_fail(self, o): the shared "a bring-up step failed" handler. Runs the
 // modem's own note_connect_failure (QMI cycles opmode/reset on its live dms;
@@ -229,7 +229,7 @@ export function make_fail(self, o)
 			o.set_retry_timer(uloop.timer(backoff, () => self.start()));
 		});
 	};
-}
+};
 
 // watch_driver(o): the adaptive "fast telemetry" cadence shared by the QMI and
 // MBIM modem state machines. While a consumer polls (modem_signal/modem_cells
@@ -306,7 +306,7 @@ export function watch_driver(o)
 			active = running = false;
 		},
 	};
-}
+};
 
 // telemetry_at(self): the AT engine a telemetry poll should run over. On first
 // use it opens the modem's dedicated 'at2' channel (if it has one); every later
@@ -324,7 +324,7 @@ export function telemetry_at(self)
 	}
 
 	return self.at_telemetry;
-}
+};
 
 // fetch_nr_neighbours(self, cb): the ONLY source of NR5G neighbour cells — QMI
 // Get Cell Location Info carries none (only the NR serving cell), so ALL backends
@@ -351,7 +351,7 @@ export function fetch_nr_neighbours(self, cb)
 		}
 		cb();
 	});
-}
+};
 
 // close_at(self): tear down both AT engines opened by open_at (the control
 // channel and, when distinct, the dedicated telemetry channel). Idempotent.
@@ -368,7 +368,7 @@ export function close_at(self)
 	self.at_tty = null;
 	self.at_telemetry_tty = null;
 	self._at2_open = null;
-}
+};
 
 export function open_at(self, o)
 {
@@ -453,7 +453,7 @@ export function open_at(self, o)
 		return o.next();
 
 	self.at.run_sequence(cmds, o.next);
-}
+};
 
 // format_telemetry(o): the single, rich telemetry log line for EVERY backend.
 // Reads the normalized modem fields (o.reg, o.cells, o.signal, o.reg_detail,
@@ -578,4 +578,4 @@ export function format_telemetry(o)
 		push(parts, 'limited_service');
 
 	return join(' ', parts);
-}
+};

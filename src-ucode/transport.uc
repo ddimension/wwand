@@ -172,4 +172,4 @@ export function open(path, cbs)
 	}
 
 	return hub;
-}
+};

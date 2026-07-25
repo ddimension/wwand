@@ -104,4 +104,4 @@ export function create(mc, opts)
 	mc.on(qmi_pt, 'QMI_MSG', (data, msg) => deliver(msg.info));
 
 	return self;
-}
+};

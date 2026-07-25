@@ -832,4 +832,4 @@ export function create(opts)
 	// stop() + _device_gone() installed by modem_common.scaffolding
 
 	return self;
-}
+};

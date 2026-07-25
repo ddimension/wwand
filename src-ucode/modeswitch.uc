@@ -156,4 +156,4 @@ export function attempt(opts, cb)
 			}
 		});
 	});
-}
+};

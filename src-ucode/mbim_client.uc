@@ -235,4 +235,4 @@ export function create(hub, hooks)
 	};
 
 	return self;
-}
+};

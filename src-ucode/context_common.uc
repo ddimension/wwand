@@ -17,7 +17,7 @@ export function zero_rx_limit_ms(modem_config, timing)
 	let secs = +(modem_config?.zero_rx_timeout ?? 21600);
 
 	return (secs > 0) ? secs * 1000 : 0;
-}
+};
 
 // rx_stall_watch(o): the shared zero-rx accumulator behind all three data
 // contexts. Each context samples a *cumulative* rx counter once per stats
@@ -59,4 +59,4 @@ export function rx_stall_watch(o)
 			return (stalled >= o.limit_ms()) ? stalled : null;
 		},
 	};
-}
+};

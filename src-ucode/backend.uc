@@ -46,7 +46,7 @@ export function choose(obj, key, candidates, cb)
 	};
 
 	step();
-}
+};
 
 // forget the cached decision (e.g. on SIM slot switch / removable eUICC), so
 // the next call re-probes. Pass the same keys the features cache under.
@@ -54,4 +54,4 @@ export function reset(obj, ...keys)
 {
 	for (let k in keys)
 		delete obj[k];
-}
+};

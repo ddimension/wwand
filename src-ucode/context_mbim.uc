@@ -374,4 +374,4 @@ export function create(opts)
 	self.modem.attach_context(self);
 
 	return self;
-}
+};

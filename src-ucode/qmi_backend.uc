@@ -35,7 +35,7 @@ export function set_opmode(dms, mode, cb)
 		if (cb)
 			cb(err);
 	});
-}
+};
 
 // QmiNasDLBandwidth enum -> MHz (LTE carrier bandwidth)
 const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
@@ -63,7 +63,7 @@ export function get_ca(nas, cb)
 
 		cb(out);
 	});
-}
+};
 
 // get_data_mode(dsd, cb): data-system mode from the DSD service — { mode, lte,
 // nr } with mode LTE / NSA / SA — or null when unavailable. 5G present with LTE
@@ -84,7 +84,7 @@ export function get_data_mode(dsd, cb)
 
 		cb({ mode: mode, lte: !!rats.lte, nr: !!rats.nr });
 	});
-}
+};
 
 // get_reg_detail(nas, cb): why (not) registered, from QMI GET_SYSTEM_INFO —
 // { source:'qmi', limited?, reject_cause?, reject_domain? } or null on error.
@@ -112,7 +112,7 @@ export function get_reg_detail(nas, cb)
 
 		cb(d);
 	}, { no_recovery: true });
-}
+};
 
 // --- context (WDS) operations ------------------------------------------------
 
@@ -123,7 +123,7 @@ const STATS_MASK = 0x3FF;
 export function get_channel_rates(wds, cb)
 {
 	wds.request('GET_CHANNEL_RATES', {}, (err, data) => cb((!err && data?.rates) ? data.rates : null));
-}
+};
 
 // get_bearer(wds, cb): the RAT actually carrying this session's data, as a
 // label ('LTE' / '5G NR' / 'LTE + 5G' / 'other') or null.
@@ -138,7 +138,7 @@ export function get_bearer(wds, cb)
 		let lte = (m & RAT_LTE) != 0, nr = (m & RAT_5GNR) != 0;
 		cb(nr ? (lte ? 'LTE + 5G' : '5G NR') : (lte ? 'LTE' : (m ? 'other' : null)));
 	});
-}
+};
 
 // get_packet_stats(wds, cb): raw per-call packet counters, or null when the
 // modem didn't answer (the caller aggregates across families + masks sentinels).
@@ -146,7 +146,7 @@ export function get_packet_stats(wds, cb)
 {
 	wds.request('GET_PACKET_STATISTICS', { mask: STATS_MASK }, (err, data) =>
 		cb((err || data?.rx_packets_ok == null) ? null : data));
-}
+};
 
 // stop_network(client, pdh, cb): tear down a started WDS data call. Preserves
 // the double STOP_NETWORK attempt (some modems drop the first). cb(err, second)
@@ -161,7 +161,7 @@ export function stop_network(client, pdh, cb)
 
 		client.request('STOP_NETWORK', { pdh: pdh }, (e2) => cb(e2, true));
 	}, { timeout: 10000 });
-}
+};
 
 // read_info(dms, cb): identity + capabilities.
 // cb(info) with { manufacturer?, model?, revision?, imei?, meid?, capabilities? }
@@ -198,4 +198,4 @@ export function read_info(dms, cb)
 			});
 		});
 	});
-}
+};

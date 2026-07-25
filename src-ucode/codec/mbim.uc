@@ -48,7 +48,7 @@ export function uuid_bytes(str)
 {
 	// MBIM UUIDs are stored as the string written out verbatim (16 bytes)
 	return hexdec(replace(str, /-/g, ''));
-}
+};
 
 function uuid_str(bytes)
 {
@@ -178,7 +178,7 @@ export function encode_info(fields, args)
 	}
 
 	return fixed + data;
-}
+};
 
 // --- InformationBuffer decode -----------------------------------------------
 
@@ -284,7 +284,7 @@ export function decode_info(fields, buf)
 	}
 
 	return res;
-}
+};
 
 
 // --- message framing --------------------------------------------------------
@@ -300,17 +300,17 @@ export function encode_command(txn, service_uuid, cid, cmd_type, info)
 	let total = 12 + length(body);
 
 	return struct.pack('<III', MSG_COMMAND, total, txn) + body;
-}
+};
 
 export function encode_open(txn, max_control_transfer)
 {
 	return struct.pack('<IIII', MSG_OPEN, 16, txn, max_control_transfer ?? 4096);
-}
+};
 
 export function encode_close(txn)
 {
 	return struct.pack('<III', MSG_CLOSE, 12, txn);
-}
+};
 
 export function decode(buf)
 {
@@ -348,4 +348,4 @@ export function decode(buf)
 	}
 
 	return msg;
-}
+};

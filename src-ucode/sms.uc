@@ -291,7 +291,7 @@ export function sms_list(modem, storage, cb)
 
 		cb({ error: 'unsupported_on_backend' }, null);
 	});
-}
+};
 
 export function sms_read(modem, storage, index, cb)
 {
@@ -309,7 +309,7 @@ export function sms_read(modem, storage, index, cb)
 
 		cb({ error: 'unsupported_on_backend' }, null);
 	});
-}
+};
 
 export function sms_delete(modem, storage, index, cb)
 {
@@ -329,4 +329,4 @@ export function sms_delete(modem, storage, index, cb)
 
 		cb({ error: 'unsupported_on_backend' }, null);
 	});
-}
+};

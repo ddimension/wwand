@@ -149,7 +149,7 @@ export function default_fx(log)
 	};
 
 	return self;
-}
+};
 
 // perform a link operation with diagnostics
 function link_op(fx, what, dev, opts)
@@ -206,7 +206,7 @@ export function board_dgram_size(fx, override, model)
 			return entry.size;
 
 	return DEFAULT_DGRAM_SIZE;
-}
+};
 
 // decide the mux backend for a modem
 //   cfg_mux: 'auto' | 'rmnet' | 'qmimux' | 'none'
@@ -233,7 +233,7 @@ export function select_backend(fx, netdev, cfg_mux, want_mux)
 		return 'qmimux';
 
 	return null;
-}
+};
 
 function child_mtu(mtu)
 {
@@ -388,7 +388,7 @@ export function setup(fx, opts)
 	}
 
 	return { ok: true, urb_size: urb_size, mux_devs: mux_devs };
-}
+};
 
 // cdc_mbim session datapath: session 0 is the untagged parent netdev,
 // sessions > 0 are 802.1q VLAN sub-devices whose VLAN id equals the MBIM
@@ -428,7 +428,7 @@ export function setup_mbim(fx, opts)
 	}
 
 	return { ok: true, mux_devs: mux_devs };
-}
+};
 
 // endpoint interface number for WDA/bind-mux (e.g. .../1-1.2:1.4 -> 4)
 export function ep_iface_number(netdev)
@@ -447,4 +447,4 @@ export function ep_iface_number(netdev)
 	}
 
 	return null;
-}
+};

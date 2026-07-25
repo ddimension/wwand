@@ -58,7 +58,7 @@ export function modem_defaults(over)
 		auto_correct_config: false,   // gated runtime auto-correction (default off)
 		...(over ?? {}),
 	};
-}
+};
 
 export function context_defaults(over)
 {
@@ -73,7 +73,7 @@ export function context_defaults(over)
 		auto: true,   // netifd 'auto 0' => daemon won't proactively bring it up
 		...(over ?? {}),
 	};
-}
+};
 
 // apply a globals section (log_level, hold_max) — shared by the old
 // `config wwand 'globals'` (wwand file) and the new `config wwand_globals`
@@ -238,7 +238,7 @@ export function parse_netdev(device)
 		return { netdev: m[1], mux_id: +m[2], muxed: true };
 
 	return { netdev: device, mux_id: 0, muxed: false };
-}
+};
 
 // merge the modem-level options an old-style qmi-advanced interface section
 // carries into the synthesized modem (first interface wins; conflicts warn).
@@ -561,7 +561,7 @@ export function parse(raw)
 	validate(result);
 
 	return result;
-}
+};
 
 // --- migration to the network-native model -----------------------------------
 // migrate_plan(raw) returns an ordered list of uci changes that convert OLD
@@ -714,7 +714,7 @@ export function migrate_plan(raw)
 	}
 
 	return changes;
-}
+};
 
 // find the context serving a given netifd interface
 export function context_for_interface(result, interface)
@@ -724,4 +724,4 @@ export function context_for_interface(result, interface)
 			return name;
 
 	return null;
-}
+};

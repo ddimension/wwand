@@ -42,7 +42,7 @@ export function defer(req, run, watchdog_ms)
 
 	run(reply);
 	req.defer();
-}
+};
 
 export function publish(conn, daemon, log)
 {
@@ -298,4 +298,4 @@ export function publish(conn, daemon, log)
 		log('err', 'failed to publish wwand ubus object');
 
 	return obj;
-}
+};

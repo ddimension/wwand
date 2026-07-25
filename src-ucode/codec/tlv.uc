@@ -277,7 +277,7 @@ export function pack(fields, args)
 	}
 
 	return out;
-}
+};
 
 // Unpack concatenated TLV bytes into an object according to field spec.
 export function unpack(fields, buf)
@@ -331,7 +331,7 @@ export function unpack(fields, buf)
 	}
 
 	return res;
-}
+};
 
 // --- response validity -------------------------------------------------------
 // A decoded response carries meta keys (_result, _raw, _truncated) alongside the
@@ -353,7 +353,7 @@ export function has_payload(data)
 			return true;
 
 	return false;
-}
+};
 
 // Per-type "value not available" markers QMI fills in for absent fields: signal
 // metrics report i16 -32768, counters u32 0xFFFFFFFF, TAC u16 0xFFFF, cell id
@@ -372,4 +372,4 @@ export const SENTINEL = {
 export function is_unavailable(v, type)
 {
 	return v == null || (SENTINEL[type] != null && v == SENTINEL[type]);
-}
+};

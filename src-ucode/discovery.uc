@@ -43,7 +43,7 @@ export function default_fx()
 			return data;
 		},
 	};
-}
+};
 
 function basename(p)
 {
@@ -59,7 +59,7 @@ export function driver_of(cdc_name, fx)
 	let drv = fx.readlink(sprintf('/sys/class/usbmisc/%s/device/driver', name));
 
 	return drv ? basename(drv) : null;
-}
+};
 
 // control protocol implied by a cdc-wdm's bound driver, or null if unknown
 export function protocol_of(device, fx)
@@ -78,7 +78,7 @@ export function protocol_of(device, fx)
 		return 'ncm';
 
 	return null;
-}
+};
 
 // bound driver of a datapath netdev (basename of /sys/class/net/<n>/device/driver)
 export function netdev_driver(netdev, fx)
@@ -91,7 +91,7 @@ export function netdev_driver(netdev, fx)
 	let drv = fx.readlink(sprintf('/sys/class/net/%s/device/driver', netdev));
 
 	return drv ? basename(drv) : null;
-}
+};
 
 // control classification by NETDEV driver — this is how an NCM modem (which has
 // no cdc-wdm) is recognised. qmi_wwan/cdc_mbim netdevs still resolve their
@@ -110,7 +110,7 @@ export function control_of_netdev(netdev, fx)
 		return 'ncm';
 
 	return null;
-}
+};
 
 // '/dev/cdc-wdm0' -> 'wwan0'
 export function netdev_for_device(device, fx)
@@ -121,7 +121,7 @@ export function netdev_for_device(device, fx)
 	let nets = fx.lsdir(sprintf('/sys/class/usbmisc/%s/device/net', name));
 
 	return length(nets ?? []) ? nets[0] : null;
-}
+};
 
 // 'wwan0' -> '/dev/cdc-wdm0'
 export function device_for_netdev(netdev, fx)
@@ -135,7 +135,7 @@ export function device_for_netdev(netdev, fx)
 		return null;
 
 	return sprintf('/dev/%s', basename(paths[0]));
-}
+};
 
 // cdc-wdm interface basename -> its USB device id ('3-1', '1-1.2', …) or null.
 // The `device` symlink of a cdc-wdm points at the USB *interface* (…/3-1:1.4);
@@ -152,7 +152,7 @@ export function usb_device_of(name, fx)
 	let m = match(basename(dev), /^([0-9]+-[0-9.]+):/);
 
 	return m ? m[1] : null;
-}
+};
 
 // USB device id ('3-1') -> its iSerial string (trimmed) or null.
 export function usb_serial_of(usbid, fx)
@@ -165,7 +165,7 @@ export function usb_serial_of(usbid, fx)
 	let s = fx.read(sprintf('/sys/bus/usb/devices/%s/serial', usbid));
 
 	return (s != null) ? trim(s) : null;
-}
+};
 
 // USB iSerial -> '/dev/cdc-wdmX' | null. Matches ONLY when exactly one physical
 // USB device carries that serial (several cdc-wdm nodes on the *same* modem are
@@ -194,7 +194,7 @@ export function device_for_serial(serial, fx)
 	let ids = keys(byusb);
 
 	return (length(ids) == 1) ? byusb[ids[0]] : null;
-}
+};
 
 // enumerate the modem control devices physically present right now — cdc-wdm
 // control nodes (qmi/mbim) and NCM datapath netdevs — each with its USB device
@@ -240,7 +240,7 @@ export function list_present(fx)
 	}
 
 	return out;
-}
+};
 
 // IMEI digits that identify a device (TAC+serial, 14) — drops the check digit /
 // IMEISV software-version. Local to discovery so this layer keeps no upward
@@ -281,7 +281,7 @@ export function device_for_imei(imei, fx)
 	let ids = keys(byusb);
 
 	return (length(ids) == 1) ? byusb[ids[0]] : null;
-}
+};
 
 // NCM counterpart of device_for_imei (IMEI published as the iSerial), matched on
 // the datapath netdev's USB parent.
@@ -316,7 +316,7 @@ export function ncm_netdev_for_imei(imei, fx)
 	let ids = keys(byusb);
 
 	return (length(ids) == 1) ? byusb[ids[0]] : null;
-}
+};
 
 // '1-1.2' (usb path) -> '/dev/cdc-wdmX' | null
 export function device_for_usb_path(usb_path, fx)
@@ -338,7 +338,7 @@ export function device_for_usb_path(usb_path, fx)
 	}
 
 	return null;
-}
+};
 
 // scan the interfaces of a USB device for a cdc_ncm/cdc_ether/rndis datapath
 // netdev (an NCM modem exposes no cdc-wdm, so this is the only way to find it
@@ -363,7 +363,7 @@ export function ncm_netdev_for_usb_path(usb_path, fx)
 	}
 
 	return null;
-}
+};
 
 // USB iSerial -> an NCM datapath netdev (no cdc-wdm), matched on the netdev's
 // USB parent. Unique physical match only, like device_for_serial.
@@ -400,7 +400,7 @@ export function ncm_netdev_for_serial(serial, fx)
 	let ids = keys(byusb);
 
 	return (length(ids) == 1) ? byusb[ids[0]] : null;
-}
+};
 
 // the AT port on the same USB device as an NCM datapath netdev. Reuses the
 // atcmd port table/heuristic against the netdev's USB parent (device/..).
@@ -413,7 +413,7 @@ export function tty_for_netdev(fx, netdev, override)
 		return null;
 
 	return atcmd.find_tty(fx, null, null, sprintf('/sys/class/net/%s/device/..', netdev));
-}
+};
 
 // the AT/serial port on a bare USB device (PPP-only: no netdev to anchor to)
 export function tty_for_usb_path(fx, usb_path, override)
@@ -425,7 +425,7 @@ export function tty_for_usb_path(fx, usb_path, override)
 		return null;
 
 	return atcmd.find_tty(fx, null, null, sprintf('/sys/bus/usb/devices/%s', usb_path));
-}
+};
 
 // enumerate EVERY manageable modem on the host: cdc-wdm control devices AND
 // NCM datapath netdevs (which have no cdc-wdm). Shapes:
@@ -461,7 +461,7 @@ export function list_devices(fx)
 	}
 
 	return found;
-}
+};
 
 // resolve a modem config to its cdc-wdm control device (null for NCM/PPP modems,
 // which have none — the caller falls back to the netdev/tty).
@@ -514,7 +514,7 @@ export function resolve_modem_device(cfg, fx)
 		return device_for_usb_path(cfg.usb_path, fx);
 
 	return null;
-}
+};
 
 export function resolve_netdev(cfg, device, fx)
 {
@@ -522,7 +522,7 @@ export function resolve_netdev(cfg, device, fx)
 		return cfg.netdev;
 
 	return device ? netdev_for_device(device, fx) : null;
-}
+};
 
 // The central "how is this modem controlled" decision. Returns
 //   { protocol, device, netdev, tty }
@@ -590,4 +590,4 @@ export function resolve_control(cfg, fx)
 
 	// 4. nothing present yet
 	return null;
-}
+};

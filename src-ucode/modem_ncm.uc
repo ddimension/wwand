@@ -526,7 +526,7 @@ export function vendor_for(manufacturer)
 			return v;
 
 	return VENDORS.generic;
-}
+};
 
 // AT command sequence to program a PDP context + auth from a context config
 // (the per-connect setup, NOT the one-time modem_init). An empty/unset APN is
@@ -554,7 +554,7 @@ export function build_pdp_setup(vendor, cid, cfg)
 		push(cmds, ac);
 
 	return cmds;
-}
+};
 
 // --- CGCONTRDP parsing (shared with context_ncm.uc) --------------------------
 //
@@ -677,7 +677,7 @@ export function parse_cgcontrdp(lines)
 	}
 
 	return { ipv4: assign_family(v4, false), ipv6: assign_family(v6, true) };
-}
+};
 
 // --- AT status parsers -------------------------------------------------------
 
@@ -1712,4 +1712,4 @@ export function create(opts)
 	// stop() installed by modem_common.scaffolding
 
 	return self;
-}
+};

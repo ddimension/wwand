@@ -102,7 +102,7 @@ export function decode_signal_state_v2(info)
 	}
 
 	return res;
-}
+};
 
 export const service = SERVICE_UUID;
 

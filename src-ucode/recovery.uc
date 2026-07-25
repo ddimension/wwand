@@ -214,4 +214,4 @@ export function create(opts)
 	};
 
 	return self;
-}
+};

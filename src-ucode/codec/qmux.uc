@@ -42,7 +42,7 @@ export function encode(service, cid, txn, msg_id, tlv_bytes, kind)
 	sdu += struct.pack('<HH', msg_id, length(tlv_bytes)) + tlv_bytes;
 
 	return struct.pack('<BHBBB', 0x01, 5 + length(sdu), sender, service, cid) + sdu;
-}
+};
 
 export function decode(buf)
 {
@@ -97,4 +97,4 @@ export function decode(buf)
 		msg_id: mh[0],
 		tlvs: substr(buf, pos, mlen),
 	};
-}
+};

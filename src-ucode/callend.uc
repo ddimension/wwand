@@ -84,4 +84,4 @@ export function describe(reason, verbose, ext_error) {
 		return { code: ext_error, text: sprintf('activation failed (ext error %d)', ext_error) };
 
 	return null;
-}
+};

@@ -43,7 +43,7 @@ export function default_fx()
 		// list entries of a directory (for the named-GPIO enumeration)
 		list: (p) => fs.lsdir(p),
 	};
-}
+};
 
 // the board model id, read straight from /etc/board.json (no ubus dependency).
 // Parsed as JSON; a malformed file (json() does throw, but catchably) or a
@@ -65,7 +65,7 @@ export function detect_id(fx)
 	}
 
 	return (type(data) == 'object') ? data.model?.id : null;
-}
+};
 
 // all *named* GPIO lines the kernel exposes (i.e. gpio-line-names from the DT),
 // for the LuCI reset/power picker. Skips the control pseudo-files and the raw
@@ -84,7 +84,7 @@ export function list_named_gpios(fx)
 	}
 
 	return sort(out);
-}
+};
 
 // --- LED rendering helpers (shared by the profiles) --------------------------
 
@@ -138,7 +138,7 @@ export function bars_from_signal(sig)
 		       (rssi >= -95) ? 2 : 1;
 
 	return 0;
-}
+};
 
 // light `n` of the given LED list, rest off (bar-graph signal indicator)
 function render_bars(fx, leds, n)
@@ -315,4 +315,4 @@ export function create(opts)
 	};
 
 	return self;
-}
+};

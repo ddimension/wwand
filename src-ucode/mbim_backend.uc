@@ -91,7 +91,7 @@ export function uicc_open_channel(mc, aid_hex, cb)
 
 		cb(null, { channel: channel, select_response: bin2hex(sel), status: status });
 	});
-}
+};
 
 // transmit `apdu_hex` on `channel`. cb(err, response_hex) where the response
 // carries the card data followed by SW1 SW2 (reconstructed from the MBIM Status
@@ -120,7 +120,7 @@ export function uicc_apdu(mc, channel, apdu_hex, cb)
 
 		cb(null, bin2hex(full));
 	});
-}
+};
 
 // close a logical channel. cb(err)
 export function uicc_close_channel(mc, channel, cb)
@@ -128,7 +128,7 @@ export function uicc_close_channel(mc, channel, cb)
 	let info = struct.pack('<II', channel, UICC_CHANNEL_GROUP);
 
 	mc.command_raw(UICC_SERVICE, UICC_CID_CLOSE_CHANNEL, info, (err) => cb(err ?? null));
-}
+};
 
 // --- native MBIM SMS service (uuid_sms, verified vs libmbim 1.32) ------------
 // The SMS service has NO storage selector (READ/DELETE act on the modem's
@@ -168,7 +168,7 @@ export function sms_read_all(mc, cb)
 
 		cb(null, out);
 	});
-}
+};
 
 // sms_delete(mc, index, cb): delete one stored message by index.
 export function sms_delete(mc, index, cb)
@@ -176,7 +176,7 @@ export function sms_delete(mc, index, cb)
 	let info = struct.pack('<II', SMS_FLAG_INDEX, +index);
 
 	mc.command_raw(SMS_SERVICE, SMS_CID_DELETE, info, (err) => cb(err ?? null));
-}
+};
 
 // how many neighbour cells to ask the modem for (BASE_STATIONS_INFO caps)
 const MAX_CELLS = 16;
@@ -242,7 +242,7 @@ export function get_signal(mc, cb)
 
 		return cb(length(out) ? out : null);
 	});
-}
+};
 
 // map one MBIM LTE cell (serving or neighbour, metrics in actual dBm/dB) into a
 // QMI lte_intra.cells[] entry (metrics in 0.1 dB units; rssi/srxlev unavailable)
@@ -305,7 +305,7 @@ export function get_cells(mc, cb)
 
 		return cb(length(cells) ? cells : null);
 	});
-}
+};
 
 // get_data_mode(mc, cb): data-system mode { mode, lte, nr } (mode LTE/NSA/SA) —
 // the MBIM analogue of qmi_backend.get_data_mode. Derived from the register
@@ -325,7 +325,7 @@ export function get_data_mode(mc, cb)
 
 		cb({ mode: mode, lte: lte, nr: nr });
 	});
-}
+};
 
 // get_reg_detail(mc, cb): why (not) registered, from the register state —
 // { source:'mbim', limited?, reject_cause? } or cb(null) on error. nw_error is
@@ -346,4 +346,4 @@ export function get_reg_detail(mc, cb)
 
 		cb(d);
 	}, { no_recovery: true });
-}
+};

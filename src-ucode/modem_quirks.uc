@@ -63,4 +63,4 @@ export function for_model(model)
 	}
 
 	return out;
-}
+};

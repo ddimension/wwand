@@ -66,7 +66,7 @@ function token_protocol(recipe, token)
 export function supported(model)
 {
 	return recipe_for(model) != null;
-}
+};
 
 export function switch_protocol(modem, target, cb)
 {
@@ -125,4 +125,4 @@ export function switch_protocol(modem, target, cb)
 			}, { timeout: 5000 });
 		});
 	}, { timeout: 8000 });
-}
+};

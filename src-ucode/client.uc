@@ -184,4 +184,4 @@ export function create(hub, schema, cid, hooks)
 	hub.register(self);
 
 	return self;
-}
+};
