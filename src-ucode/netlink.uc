@@ -150,8 +150,31 @@ export function default_fx(log)
 
 	// read an existing rmnet child's kernel MAP id (IFLA_RMNET_MUX_ID) — the
 	// authoritative value when adopting a link on a daemon restart. null when the
-	// link is absent or not an rmnet link (qmimux has no such attribute).
-	self.rmnet_mux_id = (name) => require('wwand_io').rmnet_mux_id(name);
+	// link is absent or not an rmnet link (qmimux has no such attribute), or when
+	// an older wwand_io.so predates this getter (graceful degradation on deploy).
+	self.rmnet_mux_id = (name) => {
+		let qmit = require('wwand_io');
+
+		return (type(qmit.rmnet_mux_id) == 'function') ? qmit.rmnet_mux_id(name) : null;
+	};
+
+	// enable rmnet uplink (egress) QMAP aggregation via the ethtool coalesce
+	// TX-aggregation params. Best-effort: false when the kernel/driver has no
+	// such knob (e.g. plain mainline without the coalesce op) — callers ignore.
+	self.rmnet_tx_aggr = (name, bytes, frames, usecs) => {
+		let qmit = require('wwand_io');
+
+		// robust against an older wwand_io.so without this getter
+		if (type(qmit.rmnet_tx_aggr) != 'function')
+			return false;
+
+		let ok = qmit.rmnet_tx_aggr(name, bytes, frames, usecs);
+
+		if (!ok)
+			self.last_error = qmit.last_error();
+
+		return ok;
+	};
 
 	return self;
 };
@@ -401,6 +424,35 @@ export function setup(fx, opts)
 		link_op(fx, 'child up', child, { up: true });
 	}
 
+	// vendor qmi_wwan (Quectel) gates each mux's data flow through a per-PDP
+	// link_state write: `mux_id` enables it, `0x80|mux_id` disables it.
+	// Mainline qmi_wwan has no such node (data flows once the WDS session and
+	// carrier are up), so this is best-effort and existence-gated — a no-op on
+	// mainline, but on a vendor kernel it is what actually opens the mux.
+	let link_state = sprintf('/sys/class/net/%s/link_state', netdev);
+	if (fx.exists(link_state)) {
+		let ids = length(mux) ? map(mux, (e) => e.id) : [ 0 ];
+		for (let id in ids)
+			write_attr(fx, link_state, sprintf('%d\n', id & 0x7f), 'link_state enable');
+	}
+
+	// item 3: switch host-side uplink QMAP aggregation on to match what WDA
+	// negotiated with the modem. Mainline rmnet exposes this only through the
+	// ethtool TX-aggregation coalesce (default max_frames=1 = off); best-effort,
+	// rmnet-only (qmimux/none/mbim have no such knob). Aggregation is shared per
+	// real_dev port, so configuring any one child updates it.
+	if (backend == 'rmnet' && fx.rmnet_tx_aggr &&
+	    opts.ul_agg && (opts.ul_agg.count ?? 0) > 1 && (opts.ul_agg.size ?? 0) > 0) {
+		for (let child in mux_devs) {
+			if (fx.rmnet_tx_aggr(child, opts.ul_agg.size, opts.ul_agg.count, 800))
+				fx.log('notice', sprintf('%s: uplink aggregation on (%d frames / %d bytes)',
+					child, opts.ul_agg.count, opts.ul_agg.size));
+			else
+				fx.log('info', sprintf('%s: uplink aggregation unavailable, kernel default kept%s',
+					child, fx.last_error ? sprintf(': %s', fx.last_error) : ''));
+		}
+	}
+
 	return { ok: true, urb_size: urb_size, mux_devs: mux_devs };
 };
 
@@ -458,6 +510,33 @@ export function ep_iface_number(netdev)
 
 		if (m)
 			return +m[1];
+	}
+
+	return null;
+};
+
+// derive the QMI data endpoint type from the netdev's bus. The WDA
+// SET_DATA_FORMAT and WDS BIND_MUX endpoint TLVs must carry the real bus so a
+// PCIe-attached modem (e.g. RG500Q on M.2 / MHI) gets ENDPOINT_TYPE_PCIE (3),
+// not HSUSB (2). A USB device's sysfs path always contains a `/usbN` component
+// (its xHCI parent is on PCI, hence the usb check must win first); an MHI/PCIe
+// modem has only the PCI BDF. Returns 2 (HSUSB), 3 (PCIE), or null.
+export function ep_type_number(netdev)
+{
+	const EP_HSUSB = 2, EP_PCIE = 3;
+
+	for (let link in [ sprintf('/sys/class/net/%s/device', netdev),
+	                   sprintf('/sys/class/net/%s/lower_0/device', netdev) ]) {
+		let target = fs.readlink(link);
+
+		if (target == null)
+			continue;
+
+		if (match(target, /\/usb[0-9]/))
+			return EP_HSUSB;
+
+		if (match(target, /[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]/))
+			return EP_PCIE;
 	}
 
 	return null;

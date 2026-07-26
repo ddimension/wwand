@@ -3,6 +3,60 @@
 _Last updated: 2026-07-26. All test suites green; all committed/pushed.
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## QModem study — datapath parity items (2026-07-26)
+
+Studied QModem (FUjr/QModem) + quectel-CM vs wwand. wwand's QMI/AT/mux vocabulary
+is a near-superset; only narrow datapath gaps. Adopted (schema libqmi-1.38-verified,
+host+target `wwand_io.so` rebuilt, 31 suites/1281 checks green):
+- **WDA UL aggregation** — SET_DATA_FORMAT now requests `ul_max_datagrams`(0x1B)/
+  `ul_max_size`(0x1C)/`dl_min_padding`(0x19); negotiated maxima logged + stored.
+- **rmnet UL egress aggregation** — mainline has NO `IFLA_RMNET_UL_AGG_PARAMS`;
+  it's the ethtool **TX_AGGR coalesce** (default off). New genl helper
+  `qmit_rmnet_tx_aggr` (wwand-io.c) + best-effort `netlink.setup` wire-up.
+- **Dynamic endpoint type** — `netlink.ep_type_number` (HSUSB/PCIE from the bus);
+  fixes PCIe modems (RG500Q/MHI) that were hardcoded HSUSB in SET_DATA_FORMAT +
+  BIND_MUX. AW1000-relevant.
+- **BIND_MUX `client_type`=1 (tethered)** TLV 0x13.
+- **link_state per-mux gate** — vendor qmi_wwan_q sysfs, existence-gated best-effort
+  (no-op mainline; opens the mux on a vendor kernel).
+
+NCM backend parity (modem_ncm/context_ncm, host-tested — 242 is QMI so no HW yet):
+- **5G-SA registration** — `parse_creg` widened to `+C5GREG` (POSIX ERE capturing
+  group), register poll now CEREG → **C5GREG** → CREG (SA modems read CEREG
+  not-registered while attached via 5GS only).
+- **Fibocom auth = `+MGAUTH`** (FM150/FM350 reject `+CGAUTH`).
+- **New vendor dial verbs** — gosuncn `+ZECMCALL`, neoway `$MYUSBNETACT`, telit
+  fallback `#ICMAUTOCONN`, meig fallback 5-arg `$QCRMCALL=1,0,3,2,<cid>`.
+- **Universal `AT+CGPADDR` liveness** — for vendors with neither a byte counter nor
+  a dial status query (previously zero liveness); conservative, only trips on a
+  clearly-empty reply for our cid.
+- **`0.0.0.0`/`::` guard** in `build_settings`. (Autodial modems — Huawei-unisoc
+  `^SETAUTODIAL`, neoway — deferred; needs HW.)
+
+## test_context was silently running only 4/20 scenarios — fixed (2026-07-26)
+
+Found while adding a mux-bind assertion: **`test_context.uc` silently executed only
+the first 4 scenarios** (dual, v6-degrade, v4-fatal, disconnect) and reported "27
+checks, 0 failures". Every scenario that defers its assertions / `next()` to a
+`uloop.timer` *after* connect — disconnect teardown, admin-down, pdp-update,
+**mux-bind**, reconnect, zero-rx watchdog, data-stats, … (~16) — **never ran**, so
+their assertions had never validated. Root cause: on the host ucode build a
+`uloop.timer` scheduled from inside the mock-driven callback chain (mockhub delivers
+via `uloop.timer(0)`, no fd) does not fire under a single `uloop.run()` — the loop
+returns once the current delivery wave drains (0.04 s, no guard timeout). Isolation
+proves plain `uloop.run()` DOES block on top-level timers, so it's the mock async
+chain, not uloop. Neither a parked pipe fd via `uloop.handle`, a self-rescheduling
+keepalive, `uloop.interval`, nor globally-held timers kept it alive.
+
+**Fix:** pump `uloop.run(2)` in short slices until all scenarios are consumed
+(wall-clock advances so the deferred one-shot timers become due and fire). Now
+**17/20 scenarios validate** (85 checks, was 27) — including the mux-bind
+`client_type` TLV assertion, which passes. The 3 telemetry scenarios (zero-rx,
+zero-rx-quiet, data-stats) rely on a *self-rescheduling* QMI-round-trip sampler that
+the re-entrant pump still can't drive; they **self-skip with a printed note** rather
+than silently pass. Proper full fix = an **fd-backed mock hub** so `uloop.run()`
+blocks like production (transport.uc registers the cdc-wdm fd) — deferred.
+
 ## VRF vs policy-routing — HW deep-dive (2026-07-26)
 
 Tried converting 242 (NR7101, Telekom, **public** WAN `2.164.26.219` + v6 GUA,

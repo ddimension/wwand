@@ -619,18 +619,25 @@ export function create(opts)
 					args.dl_protocol = dap;
 					args.dl_max_datagrams = 32;
 					args.dl_max_size = dgram;
+					// tell the modem the host may batch uplink QMAP frames; it
+					// echoes the maxima it will actually honor. Safe even when
+					// host-side UL aggregation stays off — the modem then simply
+					// receives single-datagram frames.
+					args.ul_max_datagrams = 11;
+					args.ul_max_size = dgram;
 				}
 
 				if (dp.ep_id != null)
-					args.endpoint = { type: wdamod.ENDPOINT_TYPE_HSUSB, iface: dp.ep_id };
+					args.endpoint = { type: dp.ep_type ?? wdamod.ENDPOINT_TYPE_HSUSB, iface: dp.ep_id };
 
 				wda.request('SET_DATA_FORMAT', args, (werr, wdata) => {
 					if (werr)
 						return fail('wda_format', werr);
 
-					log('info', sprintf('wda format negotiated: llp %d, ul/dl aggregation %d/%d, dl max %d x %d bytes (requested proto %d, %d bytes)',
+					log('info', sprintf('wda format negotiated: llp %d, ul/dl aggregation %d/%d, dl max %d x %d bytes, ul max %d x %d bytes (requested proto %d, %d bytes)',
 						wdata.llp, wdata.ul_protocol ?? 0, wdata.dl_protocol ?? 0,
-						wdata.dl_max_datagrams ?? 0, wdata.dl_max_size ?? 0, dap, dgram));
+						wdata.dl_max_datagrams ?? 0, wdata.dl_max_size ?? 0,
+						wdata.ul_max_datagrams ?? 0, wdata.ul_max_size ?? 0, dap, dgram));
 
 					let aggr_ok = (backend == 'none') ||
 						((wdata.dl_protocol == wdamod.DAP_QMAP ||
@@ -659,6 +666,9 @@ export function create(opts)
 						})),
 						dgram_size: (wdata.dl_max_size > 0) ? wdata.dl_max_size : dgram,
 						mtu: dp.mtu,
+						// negotiated uplink aggregation maxima (item 3: host-side
+						// rmnet egress coalesce, best-effort where supported)
+						ul_agg: { count: wdata.ul_max_datagrams ?? 0, size: wdata.ul_max_size ?? 0 },
 					});
 
 					if (!r.ok)
@@ -670,6 +680,7 @@ export function create(opts)
 						urb_size: r.urb_size,
 						mux_devs: r.mux_devs,
 						ep_id: dp.ep_id,
+						ep_type: dp.ep_type,
 					};
 
 					log('notice', sprintf('datapath: %s%s, urb %d, mux [%s]',

@@ -286,6 +286,46 @@ const DIAL_QCRMCALL = {
 	status_state: () => null,
 };
 
+// Meig (Qualcomm platform): 5-arg $QCRMCALL rmnet/ncm data call.
+const DIAL_QCRMCALL_MEIG = {
+	name: 'qcrmcall_meig',
+	probe: null,
+	connect: (cid) => sprintf('AT$QCRMCALL=1,0,3,2,%d', cid),
+	disconnect: (cid) => sprintf('AT$QCRMCALL=0,0,3,2,%d', cid),
+	status: null,
+	status_state: () => null,
+};
+
+// Gosuncn / ZTE ME-series: +ZECMCALL brings the ECM data call up (no cid arg).
+const DIAL_ZECMCALL = {
+	name: 'zecmcall',
+	probe: null,
+	connect: (cid) => 'AT+ZECMCALL=1',
+	disconnect: (cid) => 'AT+ZECMCALL=0',
+	status: null,
+	status_state: () => null,
+};
+
+// Neoway (Unisoc): $MYUSBNETACT toggles the usbnet data call.
+const DIAL_MYUSBNETACT = {
+	name: 'myusbnetact',
+	probe: null,
+	connect: (cid) => 'AT$MYUSBNETACT=0,1',
+	disconnect: (cid) => 'AT$MYUSBNETACT=0,0',
+	status: null,
+	status_state: () => null,
+};
+
+// Telit (Qualcomm): #ICMAUTOCONN drives the IPCM auto-connect data call.
+const DIAL_ICMAUTOCONN = {
+	name: 'icmautoconn',
+	probe: null,
+	connect: (cid) => sprintf('AT#ICMAUTOCONN=1,%d', cid),
+	disconnect: (cid) => sprintf('AT#ICMAUTOCONN=0,%d', cid),
+	status: null,
+	status_state: () => null,
+};
+
 // Per-manufacturer AT recipe. Everything vendor-specific (init, the context
 // definition, the auth command, the ordered `dials` to probe, the traffic
 // counters) lives here so adding a manufacturer is a table entry rather than a
@@ -344,7 +384,7 @@ const VENDORS = {
 			return sprintf('AT^AUTHDATA=%d,%d,,%s,%s', cid, a,
 				cfg.password ?? '', cfg.username ?? '');
 		},
-		dials: [ DIAL_ECMDUP, DIAL_CGACT ],
+		dials: [ DIAL_ECMDUP, DIAL_QCRMCALL_MEIG, DIAL_CGACT ],
 		stats: 'AT^DSFLOWQRY',
 		parse_stats: (lines) => {
 			for (let l in (lines ?? [])) {
@@ -462,12 +502,13 @@ const VENDORS = {
 		parse_stats: () => null,
 	},
 
-	// Fibocom (best-effort): GTRNDIS binds the RNDIS/NCM netdev. Auth via CGAUTH.
+	// Fibocom (best-effort): GTRNDIS binds the RNDIS/NCM netdev. Auth is the
+	// Fibocom-specific +MGAUTH (FM150/FM350 reject/ignore +CGAUTH).
 	fibocom: {
 		match: /fibocom/,
 		modem_init: [ 'AT+CFUN=1' ],
 		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
+			? sprintf('AT+MGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
 				cfg.username ?? '', cfg.password ?? '')
 			: null,
 		dials: [ DIAL_GTRNDIS, DIAL_CGACT ],
@@ -483,7 +524,7 @@ const VENDORS = {
 			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
 				cfg.username ?? '', cfg.password ?? '')
 			: null,
-		dials: [ DIAL_TECM, DIAL_CGACT ],
+		dials: [ DIAL_TECM, DIAL_ICMAUTOCONN, DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
 	},
@@ -497,6 +538,32 @@ const VENDORS = {
 				cfg.username ?? '', cfg.password ?? '')
 			: null,
 		dials: [ DIAL_QCRMCALL, DIAL_CGACT ],
+		stats: null,
+		parse_stats: () => null,
+	},
+
+	// Gosuncn / ZTE ME-series: +ZECMCALL data call, CGAUTH auth.
+	gosuncn: {
+		match: /gosuncn/,
+		modem_init: [ 'AT+CFUN=1' ],
+		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
+			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
+				cfg.username ?? '', cfg.password ?? '')
+			: null,
+		dials: [ DIAL_ZECMCALL, DIAL_CGACT ],
+		stats: null,
+		parse_stats: () => null,
+	},
+
+	// Neoway (Unisoc): $MYUSBNETACT data call, CGAUTH auth.
+	neoway: {
+		match: /neoway/,
+		modem_init: [ 'AT+CFUN=1' ],
+		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
+			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
+				cfg.username ?? '', cfg.password ?? '')
+			: null,
+		dials: [ DIAL_MYUSBNETACT, DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
 	},
@@ -694,24 +761,26 @@ function parse_cpin(lines)
 	return null;
 }
 
-// +CEREG/+CREG: <n>,<stat>[,...] — registered when stat is 1 (home) or 5
-// (roaming). Handles both the query echo (<n>,<stat>) and the URC (<stat>).
-function parse_creg(lines)
+// +CEREG/+C5GREG/+CREG: <n>,<stat>[,...] — registered when stat is 1 (home) or
+// 5 (roaming). Handles both the query echo (<n>,<stat>) and the URC (<stat>).
+export function parse_creg(lines)
 {
 	for (let l in (lines ?? [])) {
-		// query form "<n>,<stat>" first, then the URC form "<stat>"
-		let m = match(l, /\+CE?REG:\s*[0-9]+,([0-9]+)/) ?? match(l, /\+CE?REG:\s*([0-9]+)/);
+		// query form "<n>,<stat>" first, then the URC form "<stat>". Group 1 is
+		// the optional CE/C5G marker (ucode uses POSIX ERE — no non-capturing
+		// groups), so the stat is always group 2.
+		let m = match(l, /\+C(E|5G)?REG:\s*[0-9]+,([0-9]+)/) ?? match(l, /\+C(E|5G)?REG:\s*([0-9]+)/);
 
 		if (!m)
 			continue;
 
-		let stat = +m[1];
+		let stat = +m[2];
 
 		return { stat: stat, registered: (stat == 1 || stat == 5), roaming: (stat == 5) };
 	}
 
 	return null;
-}
+};
 
 // +CSQ: <rssi>,<ber> — rssi 0..31 coded (99 = unknown) -> dBm
 function parse_csq(lines)
@@ -1513,12 +1582,20 @@ export function create(opts)
 						reg_poll_timer = uloop.timer(self.timing.reg_poll, poll);
 				};
 
-				// fall back to CREG when CEREG is unavailable/not registered
-				if (!r?.registered)
+				if (r?.registered)
+					return after(r);
+
+				// 5G-SA: EPS registration (CEREG) can read not-registered while the
+				// device is attached via 5GS only — try C5GREG, then legacy CREG.
+				self.at.send('AT+C5GREG?', (e5, r5) => {
+					let rr5 = (!e5 && parse_creg(r5?.lines)?.registered) ? parse_creg(r5.lines) : null;
+
+					if (rr5?.registered)
+						return after(rr5);
+
 					self.at.send('AT+CREG?', (e2, r2) =>
 						after((!e2 && parse_creg(r2?.lines)?.registered) ? parse_creg(r2.lines) : r));
-				else
-					after(r);
+				});
 			});
 		};
 

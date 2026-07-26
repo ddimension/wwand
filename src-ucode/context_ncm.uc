@@ -87,7 +87,7 @@ export function create(opts)
 	let build_settings = (rdp) => {
 		let out = { ipv4: null, ipv6: null, mtu: null };
 
-		if (rdp.ipv4?.addr) {
+		if (rdp.ipv4?.addr && rdp.ipv4.addr != '0.0.0.0') {
 			// /32 point-to-point unless the pushed prefix is explicitly wanted
 			// (parity with context.uc / context_mbim.uc)
 			let pushed = rdp.ipv4.prefix;
@@ -106,7 +106,7 @@ export function create(opts)
 			};
 		}
 
-		if (rdp.ipv6?.addr) {
+		if (rdp.ipv6?.addr && rdp.ipv6.addr != '::') {
 			out.ipv6 = {
 				addr: rdp.ipv6.addr, plen: rdp.ipv6.plen,
 				gateway: rdp.ipv6.gateway,
@@ -151,6 +151,44 @@ export function create(opts)
 				return;
 
 			if (!vendor.stats) {
+				// vendors without a byte counter: if the dial method also lacks a
+				// status query there is otherwise zero liveness. Poll the assigned
+				// address (AT+CGPADDR — every 3GPP modem answers) and treat a
+				// clearly-empty reply for our cid as a dropped bearer. Conservative:
+				// an AT error, an unparsable line, or any non-zero address all keep
+				// the context up.
+				if (!dial.status) {
+					self.modem.at.send(sprintf('AT+CGPADDR=%d', self.cid), (err, res) => {
+						if (self.state != 'CONNECTED')
+							return;
+
+						if (!err) {
+							let seen = false, alive = false;
+
+							for (let l in (res?.lines ?? [])) {
+								let m = match(l, /\+CGPADDR:\s*([0-9]+),(.*)/);
+
+								if (!m || +m[1] != self.cid)
+									continue;
+
+								seen = true;
+
+								for (let a in split(m[2], ',')) {
+									a = trim(replace(a, /"/g, ''));
+									if (length(a) && a != '0.0.0.0' && a != '::')
+										alive = true;
+								}
+							}
+
+							if (seen && !alive)
+								return self._connection_lost({ reason: 'no_address' });
+						}
+
+						if (stats_timer) stats_timer.set(stats_interval);
+					});
+					return;
+				}
+
 				if (stats_timer) stats_timer.set(stats_interval);
 				return;
 			}

@@ -497,6 +497,26 @@ eq(rdp2.ipv4?.addr, '10.20.30.40', 'parse_cgcontrdp: standard v4 addr');
 eq(rdp2.ipv4?.gateway, '10.20.30.1', 'parse_cgcontrdp: standard v4 gateway (masked local)');
 eq(rdp2.ipv4?.dns, [ '8.8.8.8', '8.8.4.4' ], 'parse_cgcontrdp: standard v4 DNS');
 
+// --- QModem-study additions: 5G-SA registration + vendor dial/auth verbs ----
+
+// C5GREG registration (5G-SA modems read not-registered on CEREG)
+eq(modem_ncm.parse_creg([ '+C5GREG: 2,1' ])?.registered, true, 'parse_creg: +C5GREG registered (home)');
+eq(modem_ncm.parse_creg([ '+C5GREG: 2,5' ])?.roaming, true, 'parse_creg: +C5GREG roaming');
+eq(modem_ncm.parse_creg([ '+C5GREG: 2,0' ])?.registered, false, 'parse_creg: +C5GREG not registered');
+eq(modem_ncm.parse_creg([ '+CEREG: 2,1' ])?.registered, true, 'parse_creg: +CEREG still parses');
+eq(modem_ncm.parse_creg([ '+CREG: 2,5' ])?.roaming, true, 'parse_creg: +CREG still parses');
+
+// Fibocom auth is +MGAUTH (not +CGAUTH)
+ok(match(modem_ncm.vendor_for('Fibocom Wireless').auth_cmd(1, 3, 'web',
+	{ username: 'u', password: 'p' }), /^AT\+MGAUTH=1,[0-9]+,"u","p"$/) != null,
+	'fibocom auth uses +MGAUTH');
+
+// new vendor dial verbs
+eq(modem_ncm.vendor_for('gosuncn').dials[0].connect(2), 'AT+ZECMCALL=1', 'gosuncn dial = +ZECMCALL');
+eq(modem_ncm.vendor_for('neoway').dials[0].connect(2), 'AT$MYUSBNETACT=0,1', 'neoway dial = $MYUSBNETACT');
+eq(modem_ncm.vendor_for('telit').dials[1].connect(3), 'AT#ICMAUTOCONN=1,3', 'telit fallback dial = #ICMAUTOCONN');
+eq(modem_ncm.vendor_for('meig').dials[1].connect(4), 'AT$QCRMCALL=1,0,3,2,4', 'meig fallback dial = 5-arg $QCRMCALL');
+
 run_next();
 uloop.run();
 

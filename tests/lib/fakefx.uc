@@ -133,6 +133,17 @@ export function create(opts)
 		return true;
 	};
 
+	// ethtool TX-aggregation coalesce (uplink QMAP aggregation); records the
+	// call, honors an rc override for the "unsupported" path
+	self.rmnet_tx_aggr = function(name, bytes, frames, usecs) {
+		let action = sprintf('rmnet_tx_aggr %s bytes %d frames %d usecs %d',
+			name, bytes, frames, usecs);
+
+		push(self.actions, action);
+
+		return !self.rc[action];
+	};
+
 	// glob support: explicit pattern -> results map, with a generic fallback
 	// matching wildcard patterns against the fake sysfs (present/files keys)
 	self.globs = opts?.globs ?? {};

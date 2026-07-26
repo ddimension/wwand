@@ -93,6 +93,29 @@ eq(res.ok, true, 'v5: ok');
 ok(fx.action_index('link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x31') >= 0,
 	'v5: deagg + cksum v5 flags');
 
+// item 7 (vendor link_state per-mux gate) + item 3 (uplink QMAP aggregation)
+fx = fakefx.create({ present: { ...caps_rmnet, '/sys/class/net/wwan0/link_state': true } });
+res = netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'rmnet', v5: true,
+	mux: [ { id: 1, name: 'wwan0m1' }, { id: 2, name: 'wwan0m2' } ], dgram_size: 4096,
+	ul_agg: { count: 11, size: 8192 },
+});
+eq(res.ok, true, 'agg: ok');
+ok(fx.action_index('write /sys/class/net/wwan0/link_state 1') >= 0, 'agg: link_state enables mux 1');
+ok(fx.action_index('write /sys/class/net/wwan0/link_state 2') >= 0, 'agg: link_state enables mux 2');
+ok(fx.action_index('rmnet_tx_aggr wwan0m1 bytes 8192 frames 11 usecs 800') >= 0,
+	'agg: uplink aggregation configured from negotiated maxima');
+
+// no link_state node + aggregation count<=1 -> neither poke happens
+fx = fakefx.create({ present: caps_rmnet });
+netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'rmnet', v5: true,
+	mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096,
+	ul_agg: { count: 1, size: 8192 },
+});
+eq(length(filter(fx.actions, (a) => match(a, /link_state|rmnet_tx_aggr/) != null)), 0,
+	'agg: no link_state / no aggregation when unsupported or count<=1');
+
 // --- qmimux setup sequence ---------------------------------------------------
 
 fx = fakefx.create({ present: {

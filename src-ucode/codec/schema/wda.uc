@@ -42,6 +42,11 @@ export default {
 				dl_max_datagrams: { t: 0x15, f: 'u32' },
 				dl_max_size:      { t: 0x16, f: 'u32' },
 				endpoint:         { t: 0x17, f: { type: 'u32', iface: 'u32' } },
+				// uplink QMAP aggregation: tell the modem to expect host-batched
+				// UL frames. Optional — only emitted when the caller sets them.
+				dl_min_padding:   { t: 0x19, f: 'u32' },
+				ul_max_datagrams: { t: 0x1B, f: 'u32' },
+				ul_max_size:      { t: 0x1C, f: 'u32' },
 			},
 			resp: FORMAT_FIELDS_RESP,
 		},

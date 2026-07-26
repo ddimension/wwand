@@ -264,6 +264,8 @@ function run_daemon()
 			modeswitch: (o, cb) => modeswitch.attempt(o, cb),
 			resolve_ep_id: (cfg, device, netdev) =>
 				netdev ? netlink.ep_iface_number(netdev) : null,
+			resolve_ep_type: (cfg, device, netdev) =>
+				netdev ? netlink.ep_type_number(netdev) : null,
 			kick_interface: (interface) =>
 				conn.call('network.interface', 'up', { interface: interface }),
 			renew_interface: (interface) =>

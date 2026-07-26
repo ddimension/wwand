@@ -422,6 +422,8 @@ scenario('datapath', {
 		eq(modem.datapath.v5, true, 'dp: v5 negotiated');
 		eq(sdf[0].args.dl_max_size, 4096, 'dp: aggregation size');
 		eq(sdf[0].args.endpoint, { type: 2, iface: 4 }, 'dp: endpoint tlv');
+		eq(sdf[0].args.ul_max_datagrams, 11, 'dp: uplink aggregation requested');
+		ok((sdf[0].args.ul_max_size ?? 0) > 0, 'dp: uplink aggregation size set');
 
 		ok(dpfx.action_index('link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x31') >= 0,
 			'dp: rmnet link created with v5 flags');

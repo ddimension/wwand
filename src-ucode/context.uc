@@ -449,8 +449,9 @@ export function create(opts)
 				let orig_start = () => start_activation();
 
 				client.request('BIND_MUX_DATA_PORT', {
-					endpoint: { type: ENDPOINT_TYPE_HSUSB, iface: dp.ep_id },
+					endpoint: { type: dp.ep_type ?? ENDPOINT_TYPE_HSUSB, iface: dp.ep_id },
 					mux_id: mux_id,
+					client_type: 1,   // QMI_WDS_CLIENT_TYPE_TETHERED
 				}, (berr) => {
 					if (berr)
 						return done({ stage: 'bind_mux', err: berr });

@@ -35,6 +35,7 @@
 
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <linux/genetlink.h>
 
 #include <ucode/module.h>
 
@@ -780,13 +781,203 @@ qmit_rmnet_mux_id(uc_vm_t *vm, size_t nargs)
 	return ucv_int64_new(*(uint16_t *)RTA_DATA(muxa));
 }
 
+/*
+ * ethtool-netlink (genl) constants for the TX aggregation coalesce params.
+ * Defined locally (stable UAPI values) so the build never depends on the host
+ * carrying a recent linux/ethtool_netlink.h.
+ */
+#define WW_ETHTOOL_GENL_NAME                     "ethtool"
+#define WW_ETHTOOL_GENL_VERSION                  1
+#define WW_ETHTOOL_MSG_COALESCE_SET              21
+#define WW_ETHTOOL_A_COALESCE_HEADER             1
+#define WW_ETHTOOL_A_HEADER_DEV_NAME             2
+#define WW_ETHTOOL_A_COALESCE_TX_AGGR_MAX_BYTES  26
+#define WW_ETHTOOL_A_COALESCE_TX_AGGR_MAX_FRAMES 27
+#define WW_ETHTOOL_A_COALESCE_TX_AGGR_TIME_USECS 28
+
+/* resolve the "ethtool" genl family id on `fd`; 0 on failure */
+static uint16_t
+genl_resolve_family(int fd, const char *name)
+{
+	struct {
+		struct nlmsghdr nlh;
+		struct genlmsghdr genl;
+		char buf[128];
+	} req;
+	struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
+	struct nlmsghdr *rh;
+	struct rtattr *fa;
+	char resp[1024];
+	ssize_t rlen;
+	void *attrs;
+	size_t alen;
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+	req.nlh.nlmsg_type = GENL_ID_CTRL;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST;
+	req.nlh.nlmsg_seq = 1;
+	req.genl.cmd = CTRL_CMD_GETFAMILY;
+	req.genl.version = 1;
+
+	if (!nla_put(&req.nlh, sizeof(req), CTRL_ATTR_FAMILY_NAME,
+	             name, strlen(name) + 1))
+		return 0;
+
+	if (sendto(fd, &req, req.nlh.nlmsg_len, 0,
+	           (struct sockaddr *)&sa, sizeof(sa)) < 0)
+		return 0;
+
+	rlen = recv(fd, resp, sizeof(resp), 0);
+
+	if (rlen < (ssize_t)NLMSG_LENGTH(GENL_HDRLEN))
+		return 0;
+
+	rh = (struct nlmsghdr *)resp;
+
+	if (rh->nlmsg_type == NLMSG_ERROR || rh->nlmsg_type != GENL_ID_CTRL)
+		return 0;
+
+	attrs = (char *)NLMSG_DATA(rh) + GENL_HDRLEN;
+	alen = rh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+	fa = rta_find(attrs, alen, CTRL_ATTR_FAMILY_ID);
+
+	if (!fa || RTA_PAYLOAD(fa) < sizeof(uint16_t))
+		return 0;
+
+	return *(uint16_t *)RTA_DATA(fa);
+}
+
+/*
+ * rmnet_tx_aggr(name, max_bytes, max_frames, time_usecs): turn on mainline
+ * rmnet uplink (egress) QMAP aggregation via the ethtool-netlink coalesce API
+ * (ETHTOOL_A_COALESCE_TX_AGGR_*). The kernel default is max_frames=1 —
+ * aggregation off — so the WDA-negotiated modem maxima only take effect once
+ * the host side is switched on here. Best-effort: a false return simply leaves
+ * the kernel default in place (no datapath impact).
+ *   qmit.rmnet_tx_aggr("wwan0m1", 8192, 11, 800) -> true | false
+ */
+static uc_value_t *
+qmit_rmnet_tx_aggr(uc_vm_t *vm, size_t nargs)
+{
+	uc_value_t *name = uc_fn_arg(0);
+	uc_value_t *bytes = uc_fn_arg(1);
+	uc_value_t *frames = uc_fn_arg(2);
+	uc_value_t *usecs = uc_fn_arg(3);
+
+	struct {
+		struct nlmsghdr nlh;
+		struct genlmsghdr genl;
+		char buf[256];
+	} req;
+	struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
+	struct rtattr *hdr;
+	uint32_t v_bytes, v_frames, v_usecs;
+	uint16_t family;
+	char resp[1024];
+	ssize_t rlen;
+	int fd, err;
+
+	last_errno = 0;
+
+	if (ucv_type(name) != UC_STRING || ucv_type(bytes) != UC_INTEGER ||
+	    ucv_type(frames) != UC_INTEGER || ucv_type(usecs) != UC_INTEGER) {
+		last_errno = EINVAL;
+
+		return ucv_boolean_new(false);
+	}
+
+	v_bytes = (uint32_t)ucv_int64_get(bytes);
+	v_frames = (uint32_t)ucv_int64_get(frames);
+	v_usecs = (uint32_t)ucv_int64_get(usecs);
+
+	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC);
+
+	if (fd < 0) {
+		last_errno = errno;
+
+		return ucv_boolean_new(false);
+	}
+
+	family = genl_resolve_family(fd, WW_ETHTOOL_GENL_NAME);
+
+	if (!family) {
+		last_errno = EPROTONOSUPPORT;
+		close(fd);
+
+		return ucv_boolean_new(false);
+	}
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+	req.nlh.nlmsg_type = family;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	req.nlh.nlmsg_seq = 2;
+	req.genl.cmd = WW_ETHTOOL_MSG_COALESCE_SET;
+	req.genl.version = WW_ETHTOOL_GENL_VERSION;
+
+	hdr = nla_begin(&req.nlh, sizeof(req),
+	                WW_ETHTOOL_A_COALESCE_HEADER | NLA_F_NESTED);
+
+	if (!hdr ||
+	    !nla_put(&req.nlh, sizeof(req), WW_ETHTOOL_A_HEADER_DEV_NAME,
+	             ucv_string_get(name), ucv_string_length(name) + 1)) {
+		last_errno = EMSGSIZE;
+		close(fd);
+
+		return ucv_boolean_new(false);
+	}
+
+	nla_end(&req.nlh, hdr);
+
+	if (!nla_put(&req.nlh, sizeof(req), WW_ETHTOOL_A_COALESCE_TX_AGGR_MAX_BYTES,
+	             &v_bytes, sizeof(v_bytes)) ||
+	    !nla_put(&req.nlh, sizeof(req), WW_ETHTOOL_A_COALESCE_TX_AGGR_MAX_FRAMES,
+	             &v_frames, sizeof(v_frames)) ||
+	    !nla_put(&req.nlh, sizeof(req), WW_ETHTOOL_A_COALESCE_TX_AGGR_TIME_USECS,
+	             &v_usecs, sizeof(v_usecs))) {
+		last_errno = EMSGSIZE;
+		close(fd);
+
+		return ucv_boolean_new(false);
+	}
+
+	if (sendto(fd, &req, req.nlh.nlmsg_len, 0,
+	           (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		last_errno = errno;
+		close(fd);
+
+		return ucv_boolean_new(false);
+	}
+
+	rlen = recv(fd, resp, sizeof(resp), 0);
+	close(fd);
+
+	if (rlen >= (ssize_t)NLMSG_LENGTH(sizeof(struct nlmsgerr))) {
+		struct nlmsghdr *rh = (struct nlmsghdr *)resp;
+
+		if (rh->nlmsg_type == NLMSG_ERROR) {
+			err = ((struct nlmsgerr *)NLMSG_DATA(rh))->error;
+
+			if (err != 0) {
+				last_errno = -err;
+
+				return ucv_boolean_new(false);
+			}
+		}
+	}
+
+	return ucv_boolean_new(true);
+}
+
 static const uc_function_list_t global_fns[] = {
-	{ "open",         qmit_open },
-	{ "open_tty",     qmit_open_tty },
-	{ "spawn",        qmit_spawn },
-	{ "rmnet_add",    qmit_rmnet_add },
-	{ "rmnet_mux_id", qmit_rmnet_mux_id },
-	{ "last_error",   qmit_last_error },
+	{ "open",          qmit_open },
+	{ "open_tty",      qmit_open_tty },
+	{ "spawn",         qmit_spawn },
+	{ "rmnet_add",     qmit_rmnet_add },
+	{ "rmnet_mux_id",  qmit_rmnet_mux_id },
+	{ "rmnet_tx_aggr", qmit_rmnet_tx_aggr },
+	{ "last_error",    qmit_last_error },
 };
 
 void

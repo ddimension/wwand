@@ -230,8 +230,11 @@ export default {
 		BIND_MUX_DATA_PORT: {
 			id: 0x00A2,
 			req: {
-				endpoint: { t: 0x10, f: { type: 'u32', iface: 'u32' } },
-				mux_id:   { t: 0x11, f: 'u8' },
+				endpoint:    { t: 0x10, f: { type: 'u32', iface: 'u32' } },
+				mux_id:      { t: 0x11, f: 'u8' },
+				// QmiWdsClientType: 1 = tethered (some modems distinguish
+				// tethered vs embedded clients on the mux bind). Optional.
+				client_type: { t: 0x13, f: 'u32' },
 			},
 			resp: {},
 		},

@@ -667,6 +667,11 @@ export function create(opts)
 		if (ep_id == null && deps.resolve_ep_id)
 			ep_id = deps.resolve_ep_id(cfg, device, entry.netdev);
 
+		let ep_type = cfg.ep_type;
+
+		if (ep_type == null && deps.resolve_ep_type)
+			ep_type = deps.resolve_ep_type(cfg, device, entry.netdev);
+
 		let common = {
 			id: name,
 			device: device,
@@ -715,7 +720,7 @@ export function create(opts)
 		let datapath =
 			(proto == 'mbim') ? { netdev: entry.netdev, mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx } :
 			(proto == 'ncm')  ? { netdev: entry.netdev, fx: deps.datapath_fx } :
-			                    { netdev: entry.netdev, ep_id: ep_id, mux: cfg.mux,
+			                    { netdev: entry.netdev, ep_id: ep_id, ep_type: ep_type, mux: cfg.mux,
 			                      dgram_size: cfg.dl_datagram_max_size,
 			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx };
 
