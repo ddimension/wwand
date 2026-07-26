@@ -3,6 +3,34 @@
 _Last updated: 2026-07-26. All test suites green; all committed/pushed.
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## Device name as a first-class handle (2026-07-26)
+
+- **Daemon write-back.** On `registered` the daemon materialises the resolved l3
+  device name onto the interface as `option device` (`main.uc` `learn_device`,
+  triggered in `daemon.uc` via `derive_netdev`; forward-declared to dodge the ucode
+  TDZ trap). Idempotent, never clobbers a user value (device-name sovereignty),
+  `commit`-only (no interface bounce). Off-switch `wwand_globals.write_device`
+  (default on). Status now also reports `contexts[].l3_device`.
+- **Config-path hardening (`config.uc`).** Both the native and compat paths now
+  treat `device`+`mux_id` identically: a bare-netdev `device` + `mux_id` derives
+  `<netdev>m<mux_id>` (regression: it named the child the same as the parent), and
+  the compat path honours a separate `mux_id` (previously ignored). New
+  `test_config` cases cover both; `test_daemon` covers the write-back.
+- **rmnet kernel readback (C).** `io/src/wwand-io.c` gains `rmnet_mux_id(name)`
+  (RTM_GETLINK + parse `IFLA_RMNET_MUX_ID`); `netlink.uc` reads it when adopting a
+  pre-existing rmnet child on restart and warns on a config-vs-kernel mismatch.
+  qmimux has no such attribute → stays daemon-remembered.
+- **LuCI.** `wwand.js` stops stripping `interface.device` (it's the l3 handle now,
+  not a legacy inline modem netdev) and adds an editable **L3 device** field
+  (empty = daemon auto-fill, set = user override). `node --check` clean.
+- All 31 host suites green (`test_config` 135, `test_daemon` 49).
+- **HW-validated on 245 (RG650E/QMI, live Vodafone session):** wwand restart wrote
+  `network.wwan0m1.device='wwan0m1'` (`learn_device` logged once) with **no
+  connection bounce** (IP unchanged across two restarts); the C
+  `rmnet_mux_id('wwan0m1')` read back `1` from the kernel; idempotent on the 2nd
+  restart (no re-write). LuCI JS deployed (RW field pending a browser look).
+  No-clobber is unit-tested (same early-return as the HW-proven idempotency).
+
 ## Deployment docs + IPv6-PD analysis (2026-07-26)
 
 - **New `## Deployment examples` section** in `docs/reference.md`: a DMZ-host

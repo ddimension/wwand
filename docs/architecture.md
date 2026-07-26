@@ -115,6 +115,18 @@ it on USB). Aggregation size comes from a model table (e.g. RG650E 31 KB),
 then a board table, config override wins; the modem clamps the request and
 the echoed value drives the driver side.
 
+**Device-name resolution & write-back.** The l3 device name is `<netdev>m<mux_id>`
+for a muxed backend (QMI/MBIM), else the plain modem netdev (NCM, or unmuxed). An
+explicit `option device` on the interface wins — its `…mN` suffix also supplies
+the mux id (`config.uc` derives both consistently across the native and compat
+paths). On `registered` the daemon writes the resolved name back onto the
+interface section as `option device` (`main.uc` `learn_device`, idempotent,
+never clobbers a user value, `commit`-only so no interface bounce; off-switch
+`wwand_globals.write_device`) — giving VRF `list ports`, firewall and LuCI one
+explicit, editable handle. For an rmnet child adopted on restart the kernel is the
+source of truth: `wwand_io.rmnet_mux_id()` reads `IFLA_RMNET_MUX_ID` back and warns
+on a config drift; qmimux exposes no such attribute, so its id stays daemon-remembered.
+
 ### netifd coupling (no-proto-task; daemon drives netifd in place)
 
 There is **no per-interface monitor process**. The proto handler declares

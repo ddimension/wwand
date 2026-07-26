@@ -129,6 +129,7 @@ let daemon = daemon_mod.create({
 		}),
 		resolve_modem_device: (cfg) => cfg.device,
 		resolve_netdev: (cfg, device) => 'wwan0',
+		learn_device: (iface, l3) => push(events, { type: 'learn_device', data: { iface: iface, l3: l3 } }),
 	},
 });
 
@@ -243,6 +244,14 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 							let me = filter(events, (e) => e.type == 'wwand.modem');
 							ok(length(filter(me, (e) => e.data.event == 'registered')) == 1,
 								'modem registered emitted');
+
+							// learn_device: on 'registered' the daemon writes the
+							// resolved l3 device name back onto the interface section
+							// (here no mux -> the plain netdev). Also exercises the
+							// derive_netdev TDZ forward-declaration.
+							ok(length(filter(events, (e) => e.type == 'learn_device' &&
+								e.data.iface == 'wan' && e.data.l3 == 'wwan0')) >= 1,
+								'learn_device: resolved l3 device written back');
 
 							// (4) adoption path: registration cycles while the
 							// interface reports UP -> the daemon adopts in place

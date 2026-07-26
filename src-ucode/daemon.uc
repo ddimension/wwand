@@ -140,7 +140,7 @@ export function create(opts)
 
 	// forward-declared: ucode closures capture only already-declared vars, and
 	// these self-reference (the TDZ trap — see CLAUDE.md ucode gotchas)
-	let clear_reconnect, retry_activate, enter_reconnecting, activate;
+	let clear_reconnect, retry_activate, enter_reconnecting, activate, derive_netdev;
 
 	let on_modem_event = (modem, event, data) => {
 		// clear the one-shot manual-PIN-release flags once the unlock resolved
@@ -160,6 +160,21 @@ export function create(opts)
 		switch (event) {
 		case 'registered':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
+
+			// materialise the resolved l3 device name onto each interface section as
+			// `option device` (so VRF/firewall/LuCI have one explicit handle). The
+			// modem's netdev is resolved by now; learn_device is idempotent and never
+			// clobbers a user value. Gated by wwand_globals.write_device (default on).
+			if ((self.write_device ?? true) && deps.learn_device) {
+				for (let cname, centry in self.contexts) {
+					if (centry.cfg.modem != modem.id || !centry.cfg.interface)
+						continue;
+
+					let l3 = derive_netdev(centry);
+					if (l3)
+						deps.learn_device(centry.cfg.interface, l3);
+				}
+			}
 
 			// (re)establish interface-bound contexts sitting IDLE. Decide per
 			// interface by its netifd state so the two paths never race on
@@ -747,6 +762,10 @@ export function create(opts)
 	let config_sig = null;
 
 	self.apply_config = function(parsed) {
+		// off-switch for the l3-device learn-back (default on); read before the
+		// no-op short-circuit so a globals-only edit still updates it
+		self.write_device = parsed.globals?.write_device ?? true;
+
 		// unchanged modem/context config is a no-op: the reload trigger also
 		// fires for unrelated /etc/config/network edits (LAN etc.), and the
 		// v1 reload semantics below are destructive (WAN bounce)
@@ -936,7 +955,9 @@ export function create(opts)
 
 	// l3 device netdev for a context: parent netdev, MBIM VLAN sub-device or
 	// QMAP mux child depending on protocol/mux config.
-	let derive_netdev = (entry) => {
+	// forward-declared (line ~143) so on_modem_event's 'registered' learn_device
+	// path can reference it without the ucode TDZ trap.
+	derive_netdev = (entry) => {
 		let mentry = self.modems[entry.cfg.modem];
 		let netdev = mentry?.netdev;
 
@@ -1049,6 +1070,7 @@ export function create(opts)
 				interface: entry.cfg.interface,
 				modem: entry.cfg.modem,
 				mux_id: entry.cfg.mux_id,
+				l3_device: derive_netdev(entry),
 				state: entry.ctx?.state ?? 'UNBOUND',
 				last_error: entry.ctx?.last_error,
 			};

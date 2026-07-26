@@ -148,6 +148,11 @@ export function default_fx(log)
 		return false;
 	};
 
+	// read an existing rmnet child's kernel MAP id (IFLA_RMNET_MUX_ID) — the
+	// authoritative value when adopting a link on a daemon restart. null when the
+	// link is absent or not an rmnet link (qmimux has no such attribute).
+	self.rmnet_mux_id = (name) => require('wwand_io').rmnet_mux_id(name);
+
 	return self;
 };
 
@@ -273,6 +278,15 @@ function setup_rmnet_links(fx, netdev, mux, v5, urb_size, mux_mtus)
 					fx.last_error ? sprintf(': %s', fx.last_error) : ''));
 				continue;
 			}
+
+			// adopt: the kernel is the source of truth for the MAP id. Read it back
+			// and warn on a mismatch with our config id (config drifted while the
+			// link survived a restart) — the existing link is kept, not recreated.
+			let kid = fx.rmnet_mux_id ? fx.rmnet_mux_id(child) : null;
+
+			if (kid != null && kid != id)
+				fx.log('warn', sprintf('rmnet %s: kernel MAP id %d != config %d (kept existing link)',
+					child, kid, id));
 		}
 
 		push(mux_devs, child);

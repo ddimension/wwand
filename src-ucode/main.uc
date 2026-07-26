@@ -233,6 +233,28 @@ function run_daemon()
 				cursor.commit('network');
 				logmod.log('notice', 'learn_identity: recorded IMEI %s on modem %s', info.imei, section);
 			},
+			// learn-back: record the resolved l3 device name on the interface section
+			// as `option device`, so VRF `list ports` / firewall / LuCI have one
+			// explicit, stable handle. Idempotent; NEVER overwrites a user-set value
+			// (device-name sovereignty). Best-effort; only commit() (no netifd reload
+			// -> no connection bounce), mirroring learn_identity. Gated in the daemon
+			// by wwand_globals.write_device (default on).
+			learn_device: (iface_section, l3name) => {
+				if (!iface_section || !l3name)
+					return;
+				let cursor = libuci.cursor();
+				if (cursor.get('network', iface_section) == null)
+					return;   // not a real section
+				let cur = cursor.get('network', iface_section, 'device');
+				if (cur == l3name)
+					return;   // already recorded
+				if (cur != null && cur != '')
+					return;   // user sovereignty: never clobber an explicit device
+				cursor.set('network', iface_section, 'device', l3name);
+				cursor.commit('network');
+				logmod.log('notice', 'learn_device: recorded l3 device %s on interface %s',
+					l3name, iface_section);
+			},
 			resolve_netdev: discovery.resolve_netdev,
 			resolve_protocol: discovery.protocol_of,
 			// the "how is this modem controlled" decision (qmi/mbim/ncm/ppp),

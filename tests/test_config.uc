@@ -279,6 +279,38 @@ eq(r.contexts.wan.mux_id, 3, 'net: explicit mux_id honoured');
 eq(r.contexts.wan.muxed, true, 'net: explicit mux_id -> muxed');
 eq(r.contexts.wan.mux_link, 'wwan0m3', 'net: mux_link derived from mux_id');
 
+// native path: a BARE netdev device + mux_id must derive <netdev>m<mux_id>, not
+// name the child the same as the parent (regression: mux_link was 'wwan0')
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', device: 'wwan0', mux: 'rmnet' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'wwan0', mux_id: '1', apn: 'internet' },
+	},
+});
+eq(r.contexts.wan.mux_id, 1, 'net: bare-netdev device + mux_id -> mux_id 1');
+eq(r.contexts.wan.mux_link, 'wwan0m1', 'net: bare-netdev device + mux_id derives wwan0m1 (not wwan0)');
+
+// native path: an explicit muxed device name is used as-is + its suffix -> mux_id
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', device: 'wwan0', mux: 'rmnet' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'wwan0m2', apn: 'internet' },
+	},
+});
+eq(r.contexts.wan.mux_id, 2, 'net: mux id derived from explicit device name');
+eq(r.contexts.wan.mux_link, 'wwan0m2', 'net: explicit muxed device name used as-is');
+
+// compat path (no `option modem`): a separate option mux_id must be honoured
+// (regression: the compat path ignored mux_id and only read the device suffix)
+r = config.parse({
+	network: {
+		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', mux_id: '4', apn: 'internet' },
+	},
+});
+eq(r.contexts.wan.mux_id, 4, 'compat: explicit mux_id honoured');
+eq(r.contexts.wan.muxed, true, 'compat: explicit mux_id -> muxed');
+eq(r.contexts.wan.mux_link, 'wwan0m4', 'compat: bare netdev + mux_id derives wwan0m4');
+
 // wwand_sim.modem is OPTIONAL: an unbound sim applies to every modem (matched
 // by ICCID), a bound one only to its modem
 r = config.parse({

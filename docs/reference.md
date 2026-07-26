@@ -311,6 +311,17 @@ netdev). Enabling muxing on QMI is also a throughput win — see
 resulting device name — `wwan0m1` (or `wwan0` unmuxed) — is what you reference in
 a VRF's `list ports` and in firewall `option device` matches.
 
+**The daemon materialises the name.** When a modem registers, the daemon writes
+the resolved l3 device back onto the interface as `option device` (if you left it
+empty) — so the config always carries the explicit name for VRF/firewall/LuCI to
+reference, and LuCI shows it in an editable **L3 device** field. It is idempotent
+and **never overwrites a value you set** (you have the final say — clear the field
+to hand it back to auto-fill). Turn the write-back off globally with
+`config wwand_globals` → `option write_device '0'`. For an rmnet mux child the
+daemon reads the MAP id back from the kernel (`IFLA_RMNET_MUX_ID`) when adopting a
+live link on restart; qmimux has no such kernel attribute, so the daemon keeps its
+remembered mapping there.
+
 `/etc/config/firewall` — a `wan` zone that reaches nothing else, a **new `dmz`
 zone**, DMZ→WAN allowed, and all inbound forwarded to one host:
 

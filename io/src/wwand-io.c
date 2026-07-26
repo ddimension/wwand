@@ -653,12 +653,140 @@ qmit_rmnet_add(uc_vm_t *vm, size_t nargs)
 	return ucv_boolean_new(true);
 }
 
+/* find the first rtattr of `type` within [buf, buf+len); NULL if absent */
+static struct rtattr *
+rta_find(void *buf, size_t len, unsigned short type)
+{
+	struct rtattr *rta = buf;
+
+	for (; RTA_OK(rta, len); rta = RTA_NEXT(rta, len))
+		if (rta->rta_type == type)
+			return rta;
+
+	return NULL;
+}
+
+/*
+ * rmnet_mux_id(name): read the QMAP MAP id (IFLA_RMNET_MUX_ID) of an existing
+ * rmnet link straight from the kernel — the authoritative value on a daemon
+ * restart (adopt), where the config id may be stale. Returns the id (number) or
+ * null (link absent, not an rmnet link, or no mux id). qmi_wwan's qmimux has no
+ * such attribute, so that backend keeps its daemon-remembered mapping instead.
+ *   qmit.rmnet_mux_id("wwan0m1")  ->  1 | null
+ */
+static uc_value_t *
+qmit_rmnet_mux_id(uc_vm_t *vm, size_t nargs)
+{
+	uc_value_t *name = uc_fn_arg(0);
+	struct {
+		struct nlmsghdr nlh;
+		struct ifinfomsg ifi;
+	} req;
+	struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
+	struct rtattr *linkinfo, *kind, *infodata, *muxa;
+	struct nlmsghdr *rh;
+	unsigned int idx;
+	char resp[2048];
+	void *attrs;
+	size_t alen;
+	ssize_t rlen;
+	int fd;
+
+	last_errno = 0;
+
+	if (ucv_type(name) != UC_STRING) {
+		last_errno = EINVAL;
+
+		return NULL;
+	}
+
+	idx = if_nametoindex(ucv_string_get(name));
+
+	if (!idx) {
+		last_errno = ENODEV;
+
+		return NULL;
+	}
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+	req.nlh.nlmsg_type = RTM_GETLINK;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST;
+	req.nlh.nlmsg_seq = 1;
+	req.ifi.ifi_family = AF_UNSPEC;
+	req.ifi.ifi_index = idx;
+
+	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+
+	if (fd < 0) {
+		last_errno = errno;
+
+		return NULL;
+	}
+
+	if (sendto(fd, &req, req.nlh.nlmsg_len, 0,
+	           (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		last_errno = errno;
+		close(fd);
+
+		return NULL;
+	}
+
+	rlen = recv(fd, resp, sizeof(resp), 0);
+	close(fd);
+
+	if (rlen < (ssize_t)NLMSG_LENGTH(sizeof(struct ifinfomsg))) {
+		last_errno = EIO;
+
+		return NULL;
+	}
+
+	rh = (struct nlmsghdr *)resp;
+
+	if (rh->nlmsg_type == NLMSG_ERROR) {
+		int e = ((struct nlmsgerr *)NLMSG_DATA(rh))->error;
+
+		last_errno = e ? -e : EIO;
+
+		return NULL;
+	}
+
+	if (rh->nlmsg_type != RTM_NEWLINK)
+		return NULL;
+
+	attrs = (char *)NLMSG_DATA(rh) + NLMSG_ALIGN(sizeof(struct ifinfomsg));
+	alen = rh->nlmsg_len - NLMSG_LENGTH(sizeof(struct ifinfomsg));
+
+	linkinfo = rta_find(attrs, alen, IFLA_LINKINFO);
+
+	if (!linkinfo)
+		return NULL;
+
+	kind = rta_find(RTA_DATA(linkinfo), RTA_PAYLOAD(linkinfo), IFLA_INFO_KIND);
+
+	if (!kind || strcmp((char *)RTA_DATA(kind), "rmnet") != 0)
+		return NULL;   /* not an rmnet link */
+
+	infodata = rta_find(RTA_DATA(linkinfo), RTA_PAYLOAD(linkinfo), IFLA_INFO_DATA);
+
+	if (!infodata)
+		return NULL;
+
+	muxa = rta_find(RTA_DATA(infodata), RTA_PAYLOAD(infodata), IFLA_RMNET_MUX_ID);
+
+	if (!muxa || RTA_PAYLOAD(muxa) < sizeof(uint16_t))
+		return NULL;
+
+	return ucv_int64_new(*(uint16_t *)RTA_DATA(muxa));
+}
+
 static const uc_function_list_t global_fns[] = {
-	{ "open",       qmit_open },
-	{ "open_tty",   qmit_open_tty },
-	{ "spawn",      qmit_spawn },
-	{ "rmnet_add",  qmit_rmnet_add },
-	{ "last_error", qmit_last_error },
+	{ "open",         qmit_open },
+	{ "open_tty",     qmit_open_tty },
+	{ "spawn",        qmit_spawn },
+	{ "rmnet_add",    qmit_rmnet_add },
+	{ "rmnet_mux_id", qmit_rmnet_mux_id },
+	{ "last_error",   qmit_last_error },
 };
 
 void

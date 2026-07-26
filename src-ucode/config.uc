@@ -82,6 +82,11 @@ function apply_globals(s, result)
 {
 	result.globals.log_level = s.log_level ?? result.globals.log_level;
 
+	// off-switch for the daemon writing the resolved l3 device name back onto the
+	// interface section as `option device` (default on).
+	if (s.write_device != null)
+		result.globals.write_device = bool_opt(s.write_device, true);
+
 	if (s.hold_max != null) {
 		let hm = +s.hold_max;
 
@@ -366,7 +371,15 @@ function compat_translate(raw, result)
 				interface: name,
 				mux_id: mux_id,
 				muxed: muxed,
-				mux_link: muxed ? (s.device ?? sprintf('%sm%d', nd?.netdev ?? 'wwan0', mux_id)) : null,
+				// The mux child's chosen NAME. An explicit muxed device name
+				// (wwan0mN) is used as-is; a bare netdev + `mux_id` derives
+				// <netdev>m<mux_id> (never the bare netdev itself, which would collide
+				// with the parent); no device falls back to the modem's netdev, else
+				// 'wwan0'. The runtime re-derives from the real netdev when this is null.
+				mux_link: muxed
+					? ((nd?.muxed ?? false) ? s.device
+						: sprintf('%sm%d', nd?.netdev ?? result.modems[s.modem]?.netdev ?? 'wwan0', mux_id))
+					: null,
 				apn: s.apn,
 				pdp_type: PDP_TYPES[pdp_in] ? pdp_in : 'ipv4v6',
 				auth: s.auth,
@@ -430,12 +443,21 @@ function compat_translate(raw, result)
 		if (PDP_TYPES[s.pdptype])
 			pdp = s.pdptype;
 
+		// mux channel: same rule as the native path — an explicit `option mux_id`
+		// wins, else it is derived from a wwan0mN device name. (Previously this path
+		// ignored `mux_id`.)
+		let cmux_id = (s.mux_id != null) ? +s.mux_id : (nd?.mux_id ?? 0);
+		let cmuxed = (cmux_id > 0) || (nd?.muxed ?? false);
+
 		result.contexts[name] = context_defaults({
 			modem: mkey,
 			interface: name,
-			mux_id: nd?.mux_id ?? 0,
-			muxed: nd?.muxed ?? false,
-			mux_link: nd?.muxed ? dev : null,
+			mux_id: cmux_id,
+			muxed: cmuxed,
+			// same naming rule as the native path (see above)
+			mux_link: cmuxed
+				? ((nd?.muxed ?? false) ? dev : sprintf('%sm%d', nd?.netdev ?? 'wwan0', cmux_id))
+				: null,
 			apn: s.apn,
 			pdp_type: pdp,
 			auth: s.auth,
@@ -548,7 +570,7 @@ export function parse(raw)
 	let result = {
 		// hold_max: seconds the daemon holds a lost interface up while
 		// reconnecting in place before giving up and downing it (netifd teardown)
-		globals: { log_level: 'info', hold_max: 90 },
+		globals: { log_level: 'info', hold_max: 90, write_device: true },
 		modems: {},
 		contexts: {},
 		sims: {},
