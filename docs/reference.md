@@ -272,9 +272,12 @@ network, the DMZ may go out, and inbound is allowed only to the DMZ host.
 `/etc/config/network`:
 
 ```
+config wwand_modem 'm0'
+	option device 'wwan0'             # the modem's control/net device
+
 config interface 'wan'
 	option proto 'wwand'
-	option modem 'm0'
+	option modem 'm0'                 # no `option device` here — see note below
 	option apn 'internet'
 	option pdp_type 'ipv4v6'          # dual-stack bearer
 
@@ -291,6 +294,12 @@ config interface 'dmz'
 	option netmask '255.255.255.0'
 	option ip6assign '64'             # carve a /64 for the DMZ (see Dual-stack)
 ```
+
+A `proto wwand` interface takes **no `option device`**: the daemon builds the L3
+device from the modem's netdev (`wwand_modem.device`) plus the interface's
+`mux_id` — `wwan0` with no mux, `wwan0mN` with `option mux_id 'N'`. That resulting
+name (`wwan0` here) is what you reference in a VRF's `list ports` and in firewall
+`option device` matches — there is no device option on the interface itself.
 
 `/etc/config/firewall` — a `wan` zone that reaches nothing else, a **new `dmz`
 zone**, DMZ→WAN allowed, and all inbound forwarded to one host:
@@ -343,6 +352,29 @@ config dhcp 'dmz'
 	list ra_flags 'other-config'
 ```
 
+**Pinning the DMZ host's address.** The rules target the host by address, so it
+needs a *stable* one. Give it a fixed interface identifier (say `::10`) so every
+prefix yields the same host part — on the DMZ host itself, e.g. (OpenWrt):
+
+```
+config interface 'dmzhost'
+	option proto 'static'
+	option device 'eth0'
+	option ipaddr '192.0.2.10'        # matches dmz-host-v4 dest_ip
+	option netmask '255.255.255.0'
+	option ip6ifaceid '::10'          # stable GUA/ULA host part -> <prefix>::10
+	list ip6addr 'fe80::10/64'        # fixed link-local (or use the HW-derived LL)
+```
+
+- **ULA** (`fd88:ff8d:4303:4535::10`, from the router's `ula_prefix`) never
+  rotates — the rotation-proof handle for stable internal reachability and rules.
+- **GUA** (`<prefix>::10`) keeps a stable host part, but on mobile the `/64`
+  *prefix* itself rotates per reconnect, so the `dmz-host-v6` rule's `dest_ip`
+  still tracks the current prefix — set it to `<current-prefix>::10` (or drive it
+  from the ULA/host part). Fixed link-local and ULA do not have this problem.
+- **Link-local** (`fe80::10`, or the host's HW-derived LL) is a stable next-hop
+  for the router↔host link, independent of any prefix.
+
 This base keeps all routes in the single `main` table. Pick one variant below to
 separate the WAN/DMZ routing from the rest of the router.
 
@@ -388,7 +420,8 @@ config device
 	option type 'vrf'
 	option name 'vrf_wan'
 	option table '100'
-	list ports 'wwan0'               # the WAN l3 device (mux child, e.g. wwan0m1)
+	list ports 'wwan0'               # the WAN l3 device: modem netdev, no mux
+	                                 #   (with `mux_id N` it is `wwan0mN` — see Base)
 	list ports 'dmz0'                # the DMZ l3 device
 
 config interface 'wan'
