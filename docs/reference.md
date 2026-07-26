@@ -277,8 +277,8 @@ config wwand_modem 'm0'
 
 config interface 'wan'
 	option proto 'wwand'
-	option modem 'm0'                 # no `option device` here — see note below
-	option mux_id '1'                 # QMI/MBIM mux channel -> l3 device wwan0m1
+	option modem 'm0'
+	option device 'wwan0m1'          # l3 device = QMI/MBIM mux child (see note)
 	option apn 'internet'
 	option pdp_type 'ipv4v6'          # dual-stack bearer
 
@@ -296,13 +296,20 @@ config interface 'dmz'
 	option ip6assign '64'             # carve a /64 for the DMZ (see Dual-stack)
 ```
 
-A `proto wwand` interface takes **no `option device`**: the daemon builds and
-manages the L3 device itself. For a **muxed backend (QMI, MBIM)** the name is
-`<modem-netdev>m<mux_id>` — here `wwan0m1` (modem netdev `wwan0` + `mux_id '1'`).
-For **NCM** there is no mux, so the L3 device is the plain modem netdev (`wwan0`).
-That resulting name — `wwan0m1` here — is what you reference in a VRF's
-`list ports` and in firewall `option device` matches. (`option device` on the
-interface only serves as an optional explicit override of the derived name.)
+The interface's L3 device is the mux child the daemon creates and manages. Name it
+either way:
+
+- `option device 'wwan0m1'` — the mux id is **derived from the `…mN` suffix** (`1`
+  here); or
+- the 2-field form `option modem 'm0'` + `option mux_id '1'` — the daemon then
+  derives the device name `wwan0m1`.
+
+**Muxing is opt-in.** With neither of the above, QMI/MBIM run raw on the plain
+modem netdev (`wwan0`, a single PDN); **NCM never muxes** (always the plain
+netdev). Enabling muxing on QMI is also a throughput win — see
+[Performance & tuning](#performance--tuning). Whichever form you use, that
+resulting device name — `wwan0m1` (or `wwan0` unmuxed) — is what you reference in
+a VRF's `list ports` and in firewall `option device` matches.
 
 `/etc/config/firewall` — a `wan` zone that reaches nothing else, a **new `dmz`
 zone**, DMZ→WAN allowed, and all inbound forwarded to one host:
@@ -391,7 +398,7 @@ keep the WAN's default route:
 config interface 'wan'
 	option proto 'wwand'
 	option modem 'm0'
-	option mux_id '1'                # -> l3 device wwan0m1 (QMI/MBIM)
+	option device 'wwan0m1'         # l3 device (mux child); mux id derived from name
 	option apn 'internet'
 	option pdp_type 'ipv4v6'
 	option ip4table '100'
@@ -431,7 +438,7 @@ config device
 config interface 'wan'
 	option proto 'wwand'
 	option modem 'm0'
-	option mux_id '1'                # -> l3 device wwan0m1 (matches the VRF port)
+	option device 'wwan0m1'         # l3 device (mux child); matches the VRF port
 	option apn 'internet'
 	option pdp_type 'ipv4v6'
 	option defaultroute '1'          # default via WAN, into VRF table 100
