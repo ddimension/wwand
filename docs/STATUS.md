@@ -3,6 +3,59 @@
 _Last updated: 2026-07-26. All test suites green; all committed/pushed.
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## VRF vs policy-routing — HW deep-dive (2026-07-26)
+
+Tried converting 242 (NR7101, Telekom, **public** WAN `2.164.26.219` + v6 GUA,
+reachable from the internet) from policy routing to a VRF per the docs. Deep HW
+investigation; 242 restored to the working policy-routing baseline afterwards (LAN
+untouched throughout).
+
+- **VRF instantiation gaps (docs fixed):** a `config device type 'vrf'` only comes
+  up when an interface references it → needs `config interface 'vrf_wan' proto
+  'none' device 'vrf_wan'`; and a **full `network restart`** (not `reload`) to
+  enslave the members. The member interfaces must keep `ip4table=<vrf-table>` or
+  the default route leaks to `main`. The `l3mdev` FIB rule (v4+v6) **and** the VRF
+  master itself **are** auto-created by the kernel/netifd on every (cold) boot —
+  an earlier hotplug helper adding them by hand was pure redundancy
+  (cold-boot-verified).
+- **More VRF sharp edges found on HW (all reproduced, all documented):**
+  - *dmz→wan outbound is dropped.* With **both** members in one VRF the l3mdev
+    rewrites the ingress iif to the master `vrf_wan` for **all** inter-member
+    forwarding, so fw4 can no longer tell dmz-sourced from wan-sourced traffic.
+    The `vrf_wan`-in-wan-zone fix (needed so the **inbound** DNAT return matches a
+    zone) then misclassifies the DMZ host's **outbound** (`iif=vrf_wan` → wan) as
+    wan→wan → dropped (`drop wan out: IN=vrf_wan OUT=wwan0m1`, HW-seen with the DMZ
+    host's IKE/UDP-4500). Policy routing keeps the real iif (`br-lan.20`=dmz) so
+    dmz→wan just works.
+  - *v6 return needs a non-source-specific default.* The cellular v6 default is
+    source-scoped (`from <WAN /64>`); on the DNAT reply the source is un-NAT'd only
+    at postrouting, so at routing time it is still the DMZ host's addr → no match →
+    `unreachable`, dropped before `forward`. Fixed with a catch-all `config route6`
+    (device default) in the VRF table. (Applies to policy routing too.)
+  - *static DMZ IPv6 is flushed on enslavement.* The kernel keeps IPv4 but drops
+    IPv6 on a master change; netifd never notices (only listens to `RTNLGRP_LINK`,
+    never `RTM_DELADDR`) → the static ULA is gone after boot until an `ifup`. Clean
+    fix is a sysctl, `net.ipv6.conf.{default,all}.keep_addr_on_down=1`
+    (`/etc/sysctl.d/`), cold-boot-verified. No netifd patch needed.
+- **Hard limit (docs' new caveat):** router-**terminated** traffic on the WAN IP
+  is broken under VRF — HW-confirmed for **ICMP and TCP** (request in, no reply
+  out). Root cause is *below* the firewall: the router's locally-generated reply
+  is not VRF-associated, routes to the raw slave **without** the l3mdev
+  `<redirect>`, and cannot egress. Proven that no fw4/nftables change fixes it
+  (accept rules, `notrack` both legs, master-in-zone all just shifted the
+  symptom); secondary fw4 effects (untracked→`ct state invalid` drop, forward
+  reclassification via l3mdev double-traversal) are real but downstream. Forwarded
+  traffic (inbound→DMZ host, `iif=VRF`) does get the redirect and works.
+- **Verdict:** **242 left on policy routing (Variant 1)** — it does everything
+  natively and cleanly: bidirectional DMZ forwarding (in **and** out, incl. the
+  DMZ host's own IKE), inbound DNAT (v4 404 + v6 handshake), and router-terminated
+  traffic on the cellular WAN IP (ping from the WAN IP, 0% loss). VRF *can* be made
+  to forward inbound with a stack of fixes (master-in-zone, catch-all route6,
+  keep_addr_on_down sysctl, on-link SNAT, ICMPv6-allow) but still cannot do
+  router-terminated WAN traffic or clean bidirectional dmz↔wan — it is only worth
+  it for a strictly forward-only uplink. reference.md Variant 2 carries all the
+  VRF fixes + caveats; Variant 1 remains the tested/recommended model.
+
 ## Device name as a first-class handle (2026-07-26)
 
 - **Daemon write-back.** On `registered` the daemon materialises the resolved l3
