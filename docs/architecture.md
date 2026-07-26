@@ -115,6 +115,22 @@ it on USB). Aggregation size comes from a model table (e.g. RG650E 31 KB),
 then a board table, config override wins; the modem clamps the request and
 the echoed value drives the driver side.
 
+**Bidirectional aggregation, endpoint typing & client type.** `SET_DATA_FORMAT`
+negotiates **uplink** QMAP aggregation as well as downlink — `ul_max_datagrams`
+/`ul_max_size` (libqmi TLVs 0x1B/0x1C) alongside the DL parameters — and the host
+side is switched on to match via the rmnet **egress coalesce** (ethtool `TX_AGGR`,
+since mainline rmnet has no `IFLA_RMNET_UL_AGG_PARAMS`; a native genl helper in
+`wwand_io`). So a QMAP link aggregates in **both** directions, not just downlink.
+The endpoint-info TLV carries the real bus — `ENDPOINT_TYPE_HSUSB` vs `PCIE`,
+derived from the netdev's sysfs path (`netlink.ep_type_number`) — so PCIe/MHI
+modems (e.g. RG500Q on M.2) are typed correctly instead of a hardcoded HSUSB, in
+both `SET_DATA_FORMAT` and `BIND_MUX_DATA_PORT`; the bind also tags the client as
+tethered (`client_type`). A vendor `qmi_wwan` that gates each mux behind a
+`link_state` sysfs node is opened per channel (existence-gated, no-op on mainline).
+All of it stays **capability-gated**: aggregation is applied only when the modem
+confirms QMAP in its echo (non-zero DL size) — a non-QMAP modem, or a config
+without a mux, drops to plain raw-ip framing and the extra TLVs are harmless.
+
 **Device-name resolution & write-back.** The l3 device name is `<netdev>m<mux_id>`
 for a muxed backend (QMI/MBIM), else the plain modem netdev (NCM, or unmuxed). An
 explicit `option device` on the interface wins — its `…mN` suffix also supplies

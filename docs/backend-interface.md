@@ -129,7 +129,13 @@ The contract above is implemented across all three backends:
 - **MBIM** (`modem_mbim.uc` / `context_mbim.uc`) — runs on the shared core with a
   native MS-BasicConnect decoder plus a **QMI-over-MBIM passthrough** that reuses
   the QMI backend + schemas (hence `wwand-mbim` DEPENDS `wwand-qmi`).
-- **NCM** (`modem_ncm.uc` / `context_ncm.uc`) — the AT-only backend.
+- **NCM** (`modem_ncm.uc` / `context_ncm.uc`) — the AT-only backend. Per-vendor
+  `VENDORS` dial/auth/telemetry recipes (Quectel, Fibocom, Huawei, Meig, SIMCom,
+  Sierra, Sony, Samsung, ZTE, MikroTik, MediaTek, Spreadtrum/Unisoc, Telit,
+  Gosuncn, Neoway + a 3GPP-standard fallback); registration polls
+  `AT+CEREG?` → `AT+C5GREG?` → `AT+CREG?` (5G-SA aware); bearer liveness comes from
+  the vendor byte counter, the dial's status query, or a universal `AT+CGPADDR`
+  poll for modems that have neither.
 - Daemon reach-ins are behind backend ops (`with_nas`), and per-capability
   telemetry/config is chosen at runtime by `backend.choose`
   (native → passthrough → AT), cached per modem.

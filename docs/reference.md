@@ -718,6 +718,12 @@ with a single PDN. Muxing switches the datapath from raw-IP `qmi_wwan` to the
 the raw-IP path is CPU-bound well below line rate; QMAP aggregation is what reaches
 full throughput — this is why the examples above set `option mux_id '1'`.
 
+- Aggregation is **bidirectional**: downlink (the modem batches packets into the
+  host's rx URB) *and* uplink (the host batches IP packets into QMAP frames —
+  WDA-negotiated `ul_max_datagrams`/`ul_max_size` plus the rmnet egress coalesce).
+  The **endpoint type** (USB vs PCIe) is auto-detected from the netdev's bus, so
+  PCIe/MHI modems negotiate the data format correctly. It is capability-gated —
+  a modem that does not confirm QMAP simply runs plain framing.
 - Tune the aggregation buffer per modem with `option dl_datagram_max_size` on the
   `wwand_modem` section (default from a per-model table, ~31 KB): larger buffers
   aggregate more but cost latency/RAM. The daemon renegotiates plain QMAP if the
