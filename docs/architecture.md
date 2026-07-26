@@ -194,6 +194,31 @@ datapath fails the suite. Deeper netifd integrations (runtime `notify_proto`
 updates, carrier-driven teardown, renew) must keep addressing in netifd to
 preserve this.
 
+One caveat follows from the same split: when the daemon *recreates* the mux child
+(QMAP renegotiation, a backend/mode switch that re-enumerates the netdev) the new
+device comes up **unenslaved**, and netifd re-applies `IFLA_MASTER` only when it
+observes the device reappear — so a brief window exists where the netdev is up but
+not yet in the VRF. Holding the netdev stable (renew **in place** rather than
+teardown/recreate) keeps that window from opening; it is another reason the
+transient-loss path never tears the device down.
+
+### IPv6 addressing & prefix delegation
+
+wwand configures the WAN's IPv6 from the modem's `GET_CURRENT_SETTINGS`: a global
+address (published as a `/128`) plus the on-link `/64`, which the proto shim
+shares toward the LAN per RFC 7278 (`proto_add_ipv6_prefix`). There is **no
+IA_PD request to the modem** — QMI/MBIM only ever expose that single `/64`.
+
+True prefix delegation (a separate, shorter prefix from the carrier) is therefore
+layered **on top**, not folded into the daemon: a stacked `proto dhcpv6` interface
+riding on wwand's l3 device (`option device '@wan'`) runs a DHCPv6-PD client for
+the delegation, while wwand keeps owning the GUA + default route unchanged. Two
+constraints shape this: the exchange is a DHCPv6 IA_PD toward the P-GW (only works
+where the carrier delegates), and it needs a **global** source address — hence the
+stack must inherit wwand's GUA (a link-local source generally does not carry over
+the bearer, and odhcp6c cannot be told to pick the source). See the
+[deployment examples](reference.md#deployment-examples) for the concrete config.
+
 ### Recovery ladder
 
 Failed connection cycles climb: attempt 8 → operating-mode low-power/online

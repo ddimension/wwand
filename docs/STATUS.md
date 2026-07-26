@@ -1,7 +1,41 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-25. All test suites green; all committed/pushed.
+_Last updated: 2026-07-26. All test suites green; all committed/pushed.
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## Deployment docs + IPv6-PD analysis (2026-07-26)
+
+- **New `## Deployment examples` section** in `docs/reference.md`: a DMZ-host
+  scenario (all inbound → one local v4/v6 host) in full dual-stack, with two
+  routing variants — **policy routing** (`ip4table`/`ip6table`, netifd
+  auto-generates the source `ip rule`s) and **VRF** (`config device type 'vrf'`).
+  Documents the firewall/VRF specialities: fw4 is VRF-agnostic (zones bind to the
+  member L3 devices, not the VRF master), `tcp_l3mdev`/`udp_l3mdev` is a **global**
+  `config globals` switch, and the double-traversal caveat (`/etc/nftables.d/`).
+  `docs/architecture.md` gained the netdev-recreate VRF-enslavement window note +
+  an IPv6 addressing/PD subsection.
+- **IPv6 prefix delegation — analysis + design + HW verdict.** Established that
+  wwand does **no IA_PD** today (single WAN `/64`, RFC-7278 shared). True PD is a
+  DHCPv6 IA_PD exchange with the P-GW, so the design is **PD on top**: a stacked
+  `proto dhcpv6` interface (`device @wan`, `reqaddress none`, `reqprefix auto`)
+  while wwand keeps owning the GUA. Feasibility knot found by reading odhcp6c
+  (`10a52220`): it has **no source-address control** (binds `::`, sends to
+  `ff02::1:2` with no `IPV6_PKTINFO` source), so the kernel picks the source
+  (RFC 6724 → link-local if present).
+- **HW test (245 Vodafone `web.vodafone.de`, 242 Telekom `nonbonding.hybrid`):**
+  ran a PD-only `odhcp6c -N none -P 0` on `wwan0m1` with tcpdump. Default SOLICIT
+  sources from **link-local** → **no response** on either carrier. Forced the
+  **GUA** source (temporarily removed the interface LL — v6 gateway is global, so
+  routing was unaffected) → SOLICIT now from the GUA, **still no response**.
+  **Verdict: neither Vodafone DE nor Telekom DE answers DHCPv6-PD over the mobile
+  bearer here — the source address is NOT the blocker, the network offers no PD.**
+  Consequence: the **odhcp6c `-G` patch is not justified** (would not help) and the
+  optional `ipv6_share_prefix` knob is unneeded — the **RFC-7278 `/64` sharing
+  wwand already does is the correct and only mechanism** for these carriers. PD
+  stays carrier-dependent as documented; other networks/business APNs may differ.
+  Deployment docs (reference.md `## Deployment examples`) are the shipped
+  deliverable; no odhcp6c/wwand code change needed. Plan (for reference):
+  `~/.claude/plans/parallel-cooking-cloud.md`.
 
 ## SMS + fixes (2026-07-25)
 

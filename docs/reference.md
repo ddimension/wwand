@@ -253,6 +253,233 @@ addressing and routing go through netifd, so `ip4table`/`ip6table`/VRF apply.
   `ifup` or a wwand restart). With `auto '1'` (the default) the daemon kicks the
   interface up as soon as the modem registers.
 
+## Deployment examples
+
+Two ways to isolate a cellular WAN together with a DMZ so that **all inbound
+traffic reaches a single local host**, in full IPv4/IPv6 dual-stack. Both share
+the base below and differ only in how the routing is separated — per-interface
+policy routing (variant 1) or a VRF (variant 2). All addressing and routing is
+netifd's, per the
+[routing/VRF invariant](architecture.md#routing--vrf-compatibility-invariant):
+wwand only builds the link.
+
+### Base scenario
+
+A cellular uplink (`wan`, proto wwand, dual-stack) plus a DMZ on a tagged VLAN
+whose single host receives every inbound connection. The WAN reaches no other
+network, the DMZ may go out, and inbound is allowed only to the DMZ host.
+
+`/etc/config/network`:
+
+```
+config interface 'wan'
+	option proto 'wwand'
+	option modem 'm0'
+	option apn 'internet'
+	option pdp_type 'ipv4v6'          # dual-stack bearer
+
+config device
+	option type '8021q'               # DMZ on a tagged VLAN ...
+	option ifname 'lan1'              #   ... off this switch port
+	option vid '40'
+	option name 'dmz0'
+
+config interface 'dmz'
+	option proto 'static'
+	option device 'dmz0'
+	option ipaddr '192.0.2.1'
+	option netmask '255.255.255.0'
+	option ip6assign '64'             # carve a /64 for the DMZ (see Dual-stack)
+```
+
+`/etc/config/firewall` — a `wan` zone that reaches nothing else, a **new `dmz`
+zone**, DMZ→WAN allowed, and all inbound forwarded to one host:
+
+```
+config zone
+	option name 'wan'
+	list network 'wan'
+	option input 'REJECT'
+	option output 'ACCEPT'
+	option forward 'REJECT'
+	option masq '1'                  # IPv4 NAT outbound (IPv6 is routed, no NAT)
+
+config zone
+	option name 'dmz'
+	list network 'dmz'
+	option input 'REJECT'            # the router itself stays unreachable from DMZ
+	option output 'ACCEPT'
+	option forward 'REJECT'
+
+config forwarding                    # DMZ may reach the internet
+	option src 'dmz'
+	option dest 'wan'
+
+config redirect                      # all inbound IPv4 -> the DMZ host (DMZ host / 1:1 DNAT)
+	option name 'dmz-host-v4'
+	option src 'wan'
+	option dest 'dmz'
+	option proto 'all'
+	option dest_ip '192.0.2.10'
+
+config rule                          # all inbound IPv6 -> the DMZ host (no NAT, just allow)
+	option name 'dmz-host-v6'
+	option src 'wan'
+	option dest 'dmz'
+	option family 'ipv6'
+	option proto 'all'
+	option dest_ip '<dmz-host-GUA>'  # host address out of the DMZ /64
+	option target 'ACCEPT'
+```
+
+`/etc/config/dhcp` — advertise the DMZ `/64` (RA + DHCPv6 server):
+
+```
+config dhcp 'dmz'
+	option interface 'dmz'
+	option ra 'server'
+	option dhcpv6 'server'
+	list ra_flags 'managed-config'
+	list ra_flags 'other-config'
+```
+
+This base keeps all routes in the single `main` table. Pick one variant below to
+separate the WAN/DMZ routing from the rest of the router.
+
+### Variant 1 — policy routing
+
+Give the WAN and the DMZ their own routing table so only these two interfaces use
+the cellular default route. Add `ip4table` / `ip6table` (same id) to both, and
+keep the WAN's default route:
+
+```
+config interface 'wan'
+	option proto 'wwand'
+	option modem 'm0'
+	option apn 'internet'
+	option pdp_type 'ipv4v6'
+	option ip4table '100'
+	option ip6table '100'
+	option defaultroute '1'          # default via WAN, into table 100
+
+config interface 'dmz'
+	option proto 'static'
+	option device 'dmz0'
+	option ipaddr '192.0.2.1'
+	option netmask '255.255.255.0'
+	option ip6assign '64'
+	option ip4table '100'
+	option ip6table '100'
+```
+
+netifd **auto-generates the `ip rule` source rules** — you do not write them: per
+address a `from <host>` rule (prio 10000) and a `from <subnet>` rule (prio 20000)
+into table 100, an `iif lo` rule (prio 90000+ifindex) so router-originated
+traffic resolves there, and (IPv6) a reject rule at prio 4200000000 against
+leakage. Inspect with `ip rule` / `ip -6 rule` and `ip route show table 100`.
+
+### Variant 2 — VRF
+
+Bind the WAN and DMZ into an L3 VRF instead. The VRF is a `config device` of
+`type 'vrf'` with its own table; both interfaces' L3 devices are its `ports`:
+
+```
+config device
+	option type 'vrf'
+	option name 'vrf_wan'
+	option table '100'
+	list ports 'wwan0'               # the WAN l3 device (mux child, e.g. wwan0m1)
+	list ports 'dmz0'                # the DMZ l3 device
+
+config interface 'wan'
+	option proto 'wwand'
+	option modem 'm0'
+	option apn 'internet'
+	option pdp_type 'ipv4v6'
+	option defaultroute '1'          # default via WAN, into VRF table 100
+
+config interface 'dmz'
+	option proto 'static'
+	option device 'dmz0'
+	option ipaddr '192.0.2.1'
+	option netmask '255.255.255.0'
+	option ip6assign '64'
+```
+
+**VRF specialities — read these:**
+
+- **wwand stays out of it.** The daemon never sets `IFLA_MASTER`; netifd enslaves
+  the mux child to the VRF master and places its routes in the VRF table — see the
+  [routing/VRF invariant](architecture.md#routing--vrf-compatibility-invariant).
+- **l3mdev is a global switch, not per-VRF.** For the router's own *listening*
+  sockets (a DHCPv6 client, DNS, …) to work across the VRF, enable it globally:
+  ```
+  config globals 'globals'
+  	option tcp_l3mdev '1'
+  	option udp_l3mdev '1'
+  ```
+  (writes `net.ipv4.{tcp,udp}_l3mdev_accept`; host-wide, all-or-nothing.)
+- **fw4 is VRF-agnostic.** Firewall zones must reference the **member interfaces**
+  (their L3 devices `wwan0m1`, `dmz0`), **not** the VRF master `vrf_wan`: fw4
+  derives `iifname`/`oifname` from each interface's `l3_device`, so a zone on the
+  master would not match forwarded traffic. The base-scenario `wan`/`dmz` zones
+  already list the *networks*, which resolve to the member devices — keep them.
+- **Double traversal.** With l3mdev on, packets can pass the netfilter hooks of
+  both the master and the member device; fw4 does not deduplicate this. If it ever
+  matters, add explicit rules under `/etc/nftables.d/`.
+
+### Dual-stack and IPv6 prefix delegation
+
+The examples are already dual-stack: `pdp_type 'ipv4v6'` brings up both families,
+wwand configures the WAN IPv6 GUA + default route and (RFC 7278) shares its `/64`,
+so the DMZ's `ip6assign '64'` takes addresses from that same `/64`. One shared
+`/64` is enough for a single downstream network.
+
+For a **separately delegated** prefix (a real IA_PD — e.g. a `/56` the carrier
+delegates so the DMZ gets its own `/64`), run a DHCPv6-PD client **on top of** the
+wwand interface. wwand keeps managing the WAN GUA; a stacked `dhcpv6` logical
+interface requests only the prefix:
+
+```
+config interface 'wan6'
+	option proto 'dhcpv6'
+	option device '@wan'             # ride on wan's l3 device (inherits its GUA)
+	option reqaddress 'none'         # wwand owns the address; request a prefix only
+	option reqprefix 'auto'
+```
+
+The DMZ then draws its `/64` from the delegated prefix exactly as above
+(`option ip6assign '64'`), advertised by odhcpd.
+
+**Two hard constraints:**
+
+- **The carrier must actually delegate.** 3GPP prefix delegation is a DHCPv6
+  IA_PD exchange with the network (P-GW); there is no QMI/MBIM path to a shorter
+  prefix. Where the network delegates nothing, you fall back to the shared `/64`
+  above — nothing breaks.
+- **The DHCPv6 client needs a global source address.** The stacked interface
+  **must** ride on `@wan` so it inherits the wwand-configured GUA: over the
+  cellular bearer a link-local source usually does not carry, and odhcp6c has no
+  option to force the source — the kernel selects it (RFC 6724) and prefers a
+  link-local when one exists. If your bearer drops link-local DHCPv6, IA_PD needs
+  an odhcp6c that pins the global source; verify with
+  `tcpdump -i <wan-l3dev> udp port 547` which source the SOLICIT uses.
+
+**How prefix delegation works on mobile (background).** In 3GPP every IPv6 /
+IPv4v6 PDN connection is assigned its own `/64` by the network via SLAAC — the
+connection is a point-to-point link between the modem and the P-GW, and that
+single `/64` is exactly what wwand configures and (RFC 7278) shares. Delegating a
+*separate*, shorter prefix is an **optional DHCPv6-PD feature** (RFC 8415; 3GPP
+TS 29.061, overview in RFC 6459) that the operator must provision **per APN**: the
+router is the requesting router, the P-GW the delegating server (often backed by
+RADIUS, RFC 4818). Most consumer APNs do not enable it — a PD `SOLICIT` then goes
+unanswered and you are left with the shared `/64`; the standard-compliant
+link-local source is fine there, the network simply offers no PD. Verified on this
+project's SIMs: Vodafone DE (`web.vodafone.de`) and Telekom DE
+(`nonbonding.hybrid`) return no delegation on either a link-local or a global
+source. Business / M2M APNs with explicit PD provisioning are where a delegated
+prefix actually appears.
+
 ## ubus API
 
 Object `wwand`. Every method also accepts `ubus_rpc_session` (injected by rpcd
