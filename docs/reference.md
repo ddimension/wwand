@@ -518,6 +518,50 @@ project's SIMs: Vodafone DE (`web.vodafone.de`) and Telekom DE
 source. Business / M2M APNs with explicit PD provisioning are where a delegated
 prefix actually appears.
 
+## Performance & tuning
+
+Two knobs dominate routed throughput on a cellular WAN.
+
+### QMI muxing + QMAP aggregation
+
+For the **QMI backend, enable muxing** (`option mux_id 'N'` on the context) even
+with a single PDN. Muxing switches the datapath from raw-IP `qmi_wwan` to the
+**rmnet driver with QMAP**, which aggregates many IP packets into one USB transfer
+(plus MAPv5 checksum offload) instead of one URB per packet. On fast 5G/LTE links
+the raw-IP path is CPU-bound well below line rate; QMAP aggregation is what reaches
+full throughput — this is why the examples above set `option mux_id '1'`.
+
+- Tune the aggregation buffer per modem with `option dl_datagram_max_size` on the
+  `wwand_modem` section (default from a per-model table, ~31 KB): larger buffers
+  aggregate more but cost latency/RAM. The daemon renegotiates plain QMAP if the
+  modem rejects a datagram-aggregation size (e.g. the RG650E's DAP-8 edge case).
+- **MBIM** aggregates natively (NTB) — no extra config. **NCM** (`cdc_ncm`) cannot
+  mux and runs the plain netdev, so expect a lower ceiling there.
+
+### Firewall flow offloading
+
+For a router that forwards/NATs cellular traffic, enable **software flow
+offloading** so established connections take the nftables fast path instead of
+traversing the full netfilter chains per packet:
+
+```
+config defaults
+	option flow_offloading '1'          # software fast path (recommended)
+	option flow_offloading_hw '1'       # + hardware offload where the SoC supports it
+```
+
+- Software offloading is a large CPU win on any target. Hardware offloading
+  (`flow_offloading_hw`) depends on the SoC — e.g. the Chateau's ipq60xx supports
+  it, smaller ramips targets may not — and falls back to software when absent.
+- Trade-off: offloaded flows **bypass per-packet netfilter**, so SQM/QoS shaping
+  and some counters do not see them. If you shape the WAN with SQM, leave
+  offloading off (or accept that offloaded flows are not shaped).
+- Offloading works at the routing/conntrack layer, **independent of the mux
+  datapath and of policy-routing / VRF** — it composes with both variants above.
+
+`option packet_steering '1'` in `config globals` (as on the reference boards)
+spreads softirq/RPS load across CPU cores and helps on multi-core targets.
+
 ## ubus API
 
 Object `wwand`. Every method also accepts `ubus_rpc_session` (injected by rpcd
