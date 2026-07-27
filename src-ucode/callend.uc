@@ -61,6 +61,23 @@ const SM_CAUSE = {
 	'112': 'APN restriction value incompatible with active context',
 };
 
+// QMI_WDS_CALL_END_REASON generic values (coarse TLV 0x10). The verbose reason
+// (0x11) carries the actionable detail; this names the coarse enum so a drop that
+// only reports the coarse code still reads as text instead of a bare number.
+const GENERIC_CAUSE = {
+	'1':  'unspecified',
+	'2':  'client-ended',
+	'3':  'no service',
+	'4':  'fade (radio signal lost)',
+	'5':  'released (normal)',
+	'6':  'access attempt in progress',
+	'7':  'access failure',
+	'8':  'redirection or handoff',
+	'9':  'close in progress',
+	'10': 'authentication failed',
+	'11': 'internal error',
+};
+
 // Return { code, type, type_name, text } or null when there is nothing to say.
 // `verbose` is { type, reason }; `reason` is the coarse call_end_reason.
 export function describe(reason, verbose, ext_error) {
@@ -78,7 +95,10 @@ export function describe(reason, verbose, ext_error) {
 	}
 
 	if (reason != null)
-		return { code: reason, text: sprintf('call ended (reason %d)', reason) };
+		return {
+			code: reason,
+			text: GENERIC_CAUSE[sprintf('%d', reason)] ?? sprintf('call ended (reason %d)', reason),
+		};
 
 	if (ext_error != null)
 		return { code: ext_error, text: sprintf('activation failed (ext error %d)', ext_error) };

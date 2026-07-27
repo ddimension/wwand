@@ -67,6 +67,8 @@ function base_handlers(over)
 				: [ 0x98, 0x94, 0x20, 0x00, 0x00, 0x01, 0x22, 0x38, 0x42, 0x09 ] }),
 		REGISTER_EVENTS: { mask: 1 },
 		REGISTER_INDICATIONS: {},
+		SET_EVENT_REPORT: {},
+		REFRESH_REGISTER_ALL: {},
 		// config validation reads this back; default reflects a matching state
 		// (lte|nr5g allowed, manual selection) so unrelated scenarios see no
 		// warnings. Scenarios exercising validation override it.
@@ -502,7 +504,7 @@ scenario('ladder', {
 		let modes = map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args.mode);
 		// rung: low_power (1) then online (0), plus one normal online per cycle
 		ok(index(modes, 1) >= 0, 'ladder: low_power sent');
-		eq(ladder_fx.files['/state/ladder.json'], '{ "attempts": 8, "proto_errors": 0, "rung": 1 }',
+		eq(ladder_fx.files['/state/ladder.json'], '{ "attempts": 8, "proto_errors": 0, "rung": 1, "proto_hw": 0 }',
 			'ladder: state persisted (rung 1 = opmode_cycle fired)');
 	});
 
@@ -694,6 +696,136 @@ scenario('gone', {
 }, 'removed',
 	(modem, mock, events) => {
 		eq(modem.state, 'ABSENT', 'gone: state ABSENT');
+	});
+
+// --- 14: unsolicited indications — NITZ network time + DSD data-system --------
+// The modem advertises DSD (service 0x2A) so self.dsd is allocated and the
+// SYSTEM_STATUS_CHANGE register + SYSTEM_STATUS_IND handler are wired. During
+// REGISTERING we deliver a NITZ Network-Time indication and a DSD system-status
+// indication (LTE+5G = NSA), then the registered serving-system indication to
+// complete. Both indications round-trip through the real schema pack/unpack.
+scenario('indications', {
+	handlers: base_handlers({
+		GET_VERSION_INFO: { services: [
+			{ service: 1, major: 1, minor: 60 },
+			{ service: 2, major: 1, minor: 14 },
+			{ service: 3, major: 1, minor: 25 },
+			{ service: 11, major: 1, minor: 22 },
+			{ service: 26, major: 1, minor: 16 },
+			{ service: 42, major: 1, minor: 0 },   // DSD (0x2A)
+		] },
+		GET_SERVING_SYSTEM: (args, meta) => ({
+			serving_system: { registration: 2, cs_attach: 0, ps_attach: 0,
+			                  selected_network: 0, radio_ifs: [] },
+		}),
+		SYSTEM_STATUS_CHANGE: {},
+		SET_EVENT_REPORT: {},
+		GET_SYSTEM_STATUS: { available_systems: [ { technology: 1, rat: 3, so_mask: 0 } ] },
+	}),
+	setup: (mock, modem) => {
+		let poll = null;
+		poll = uloop.timer(20, () => {
+			if (modem.state == 'REGISTERING' && modem.nas && modem.dsd) {
+				// operator-pushed clock: 2026-07-27 13:45:09 UTC, +120 min, DST 1h
+				mock.indicate(3, modem.nas.cid, 'NETWORK_TIME_IND', {
+					universal_time: { year: 2026, month: 7, day: 27,
+					                  hour: 13, minute: 45, second: 9, day_of_week: 1 },
+					timezone_offset: 8,
+					dst_adjustment: 1,
+					radio_interface: 8,
+				});
+				// data-system: LTE + 5G present -> NSA
+				mock.indicate(42, modem.dsd.cid, 'SYSTEM_STATUS_IND', {
+					available_systems: [
+						{ technology: 1, rat: 3, so_mask: 0 },
+						{ technology: 1, rat: 6, so_mask: 0 },
+					],
+				});
+				// NAS event report: RF band change. libqmi types Active Channel as
+				// guint16, so the values here stay in u16 range (LTE band 3 earfcn
+				// 1300, NR band 78 with a u16-fitting channel).
+				mock.indicate(3, modem.nas.cid, 'EVENT_REPORT_IND', {
+					rf_band_info: [
+						{ radio_interface: 8, band: 3, channel: 1300 },
+						{ radio_interface: 12, band: 78, channel: 62000 },
+					],
+				});
+				// DMS event report: baseline (online) then an external switch to
+				// offline -> handler logs the change and tracks _dms_opmode.
+				mock.indicate(2, modem.dms.cid, 'EVENT_REPORT_IND', { operating_mode: 0 });
+				mock.indicate(2, modem.dms.cid, 'EVENT_REPORT_IND', { operating_mode: 3 });
+				// UIM refresh completed -> handler re-reads identity, emits sim_refresh
+				mock.indicate(11, modem.uim.cid, 'REFRESH_IND', {
+					event: { stage: 2, mode: 1, session_type: 0 },
+				});
+				// then complete registration
+				mock.indicate(3, modem.nas.cid, 'SERVING_SYSTEM_IND', {
+					serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+					                  selected_network: 1, radio_ifs: [ 8, 12 ] },
+					current_plmn: { mcc: 262, mnc: 1, description: 'Telekom.de' },
+				});
+				return;
+			}
+
+			poll.set(20);
+		});
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		// NITZ: schema decode + nitz_epoch + handler stored the time
+		ok(modem.network_time != null, 'ind: network_time captured');
+		eq(modem.network_time.epoch,
+			timegm({ year: 2026, mon: 7, mday: 27, hour: 13, min: 45, sec: 9 }),
+			'ind: NITZ epoch decoded (UTC, 1-based month)');
+		eq(modem.network_time.tz_offset_min, 120, 'ind: tz offset 8*15 = 120 min');
+		eq(modem.network_time.dst, 1, 'ind: dst adjustment carried');
+		// DSD: SYSTEM_STATUS_CHANGE registered + SYSTEM_STATUS_IND -> NSA live
+		ok(length(mock.calls_for('SYSTEM_STATUS_CHANGE')) >= 1, 'ind: dsd indication registered');
+		eq(modem.dsd_status.mode, 'NSA', 'ind: dsd system-status IND -> NSA');
+		eq(modem.dsd_status.source, 'dsd', 'ind: dsd_status source tagged dsd');
+		ok(modem.dsd_status.nr && modem.dsd_status.lte, 'ind: NSA = lte+nr');
+		// NAS event report: SET_EVENT_REPORT armed + RF band decoded live
+		ok(length(mock.calls_for('SET_EVENT_REPORT')) >= 1, 'ind: nas event report armed');
+		ok(modem.rf_bands != null && length(modem.rf_bands) == 2, 'ind: rf band list decoded');
+		eq(modem.rf_bands[0].band, 3, 'ind: lte band 3');
+		eq(modem.rf_bands[0].channel, 1300, 'ind: lte earfcn 1300');
+		eq(modem.rf_bands[1].band, 78, 'ind: nr band 78');
+		eq(modem.rf_bands[1].channel, 62000, 'ind: nr channel (u16)');
+		// DMS event report: external opmode change tracked (baseline 0 -> 3)
+		ok(length(mock.calls_for('SET_EVENT_REPORT')) >= 1, 'ind: dms event report armed');
+		eq(modem._dms_opmode, 3, 'ind: dms external opmode change tracked (offline)');
+		// UIM refresh: register sent + REFRESH_IND decoded without error (the
+		// END_SUCCESS re-read + sim_refresh emit are async and complete after
+		// registration, so they are not asserted here — the register + clean
+		// decode prove the schema and wiring).
+		ok(length(mock.calls_for('REFRESH_REGISTER_ALL')) >= 1, 'ind: uim refresh registered');
+		ok(modem._uim_refresh_armed === true, 'ind: uim refresh handler armed');
+	});
+
+// --- 15: UIM refresh END_SUCCESS drives an async identity re-read -------------
+// Modem reaches READY normally, then a Refresh indication (stage END_SUCCESS)
+// arrives; the handler re-reads identity and emits sim_refresh. Waiting on that
+// event exercises the full async re-read path the scenario-14 verify runs too
+// early to see.
+scenario('sim-refresh', {
+	handlers: base_handlers(),
+	setup: (mock, modem) => {
+		let poll = null;
+		poll = uloop.timer(15, () => {
+			if (modem.state == 'READY' && modem.uim) {
+				mock.indicate(11, modem.uim.cid, 'REFRESH_IND',
+					{ event: { stage: 2, mode: 1, session_type: 0 } });
+				return;
+			}
+			poll.set(15);
+		});
+	},
+}, 'sim_refresh',
+	(modem, mock, events) => {
+		let ev = filter(events, function(e) { return e.event == 'sim_refresh' });
+		ok(length(ev) >= 1, 'sim-refresh: sim_refresh event emitted after re-read');
+		eq(modem.info.iccid, '89490200001022832490', 'sim-refresh: iccid re-read');
+		eq(modem.info.imsi, '262011234567890', 'sim-refresh: imsi re-read');
 	});
 
 run_next();

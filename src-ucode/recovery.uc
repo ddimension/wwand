@@ -66,7 +66,7 @@ export function create(opts)
 		id: opts.id,
 		failreboot: +(opts.failreboot ?? 100),
 		proto_error_limit: +(opts.proto_error_limit ?? PROTO_ERROR_LIMIT),
-		counters: { attempts: 0, proto_errors: 0, rung: 0 },
+		counters: { attempts: 0, proto_errors: 0, rung: 0, proto_hw: 0 },
 		rebooting: false,
 	};
 
@@ -88,10 +88,12 @@ export function create(opts)
 		// it from the restored attempt count so a restart mid-outage does not
 		// re-run rungs that already fired (attempts>=24 -> all three done).
 		let rung = match(data, /"rung": *([0-9]+)/);
+		let phw = match(data, /"proto_hw": *([0-9]+)/);
 
 		if (att || perr) {
 			self.counters.attempts = att ? +att[1] : 0;
 			self.counters.proto_errors = perr ? +perr[1] : 0;
+			self.counters.proto_hw = phw ? +phw[1] : 0;
 			self.counters.rung = rung ? +rung[1] : rungs_reached(self.counters.attempts);
 			log('notice', sprintf('restored recovery state: attempts %d, proto_errors %d, rung %d',
 				self.counters.attempts, self.counters.proto_errors, self.counters.rung));
@@ -160,10 +162,26 @@ export function create(opts)
 			self.persist();
 		}
 
-		if (n > self.proto_error_limit) {
+		// A wedged control channel (repeated SYNC / request timeouts) never
+		// completes a connection *attempt*, so the attempt-ladder's reset /
+		// repower rungs (on_attempt) never fire — the proto-error counter is the
+		// ONLY thing that climbs. Give the modem a hardware reset (reset-GPIO
+		// pulse / power-cycle, via usb_repower) ONCE when the count first crosses
+		// the limit, BEFORE a router reboot: a reboot does not power-cycle a
+		// self-powered modem, so a wedge only a modem reset clears would otherwise
+		// reboot-loop (observed on the NR7101). Independent of failreboot — the
+		// cheaper hardware recovery must run even when reboots are disabled.
+		if (n > self.proto_error_limit && !self.counters.proto_hw) {
+			self.counters.proto_hw = 1;
 			self.persist();
-			// Same gate as the attempt ladder: never reboot when failreboot<=0
-			// — a headless install keeps retrying instead of cycling the box.
+			return 'usb_repower';
+		}
+
+		// Reboot only after the hardware reset has been tried and errors persist a
+		// further full window. Same gate as the attempt ladder: never reboot when
+		// failreboot<=0 — a headless install keeps retrying instead of cycling.
+		if (n > self.proto_error_limit * 2) {
+			self.persist();
 			return (self.failreboot > 0) ? 'reboot' : 'retry';
 		}
 
@@ -171,8 +189,9 @@ export function create(opts)
 	};
 
 	self.on_proto_success = function() {
-		if (self.counters.proto_errors != 0) {
+		if (self.counters.proto_errors != 0 || self.counters.proto_hw != 0) {
 			self.counters.proto_errors = 0;
+			self.counters.proto_hw = 0;
 			self.persist();
 		}
 	};

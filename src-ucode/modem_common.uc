@@ -42,6 +42,24 @@ export function dsd_from_serving(serving)
 	return mode ? { mode: mode, lte: lte, nr: nr } : null;
 };
 
+// nitz_epoch(ut): convert a QMI NAS Network-Time "Universal Time" struct
+// { year, month, day, hour, minute, second } (already UTC) to a Unix epoch, or
+// null if the fields are absent or implausible. QMI months are 1-based — the
+// same convention timegm() expects. Pure: the caller decides whether to apply it
+// (e.g. only when the system clock is clearly unset). Guards against a modem that
+// pushes a zeroed NITZ frame before it has a real network time.
+export function nitz_epoch(ut)
+{
+	if (ut?.year == null || ut.year < 2000 || ut.year > 2200 ||
+	    ut.month == null || ut.month < 1 || ut.month > 12)
+		return null;
+
+	return timegm({
+		year: ut.year, mon: ut.month, mday: ut.day ?? 1,
+		hour: ut.hour ?? 0, min: ut.minute ?? 0, sec: ut.second ?? 0,
+	});
+};
+
 // dsd_from_radio(radio_ifs): derive a coarse mode from NAS radio interfaces
 // (last-resort fallback; can't see NSA — an NSA anchor reports LTE only here).
 // radio_ifs: 8=LTE, 12=5GNR. Returns { mode, lte, nr } or null.

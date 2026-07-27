@@ -699,6 +699,7 @@ export function create(opts)
 				transport_open: deps.transport_open,
 				log: (level, msg) => log(level, sprintf('modem %s: %s', name, msg)),
 				on_event: on_modem_event,
+				set_clock: deps.set_clock,
 			},
 		};
 

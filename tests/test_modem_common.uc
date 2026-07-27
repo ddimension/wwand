@@ -449,4 +449,17 @@ eq(length(filter(ci_events, (e) => e[0] == 'identity_mismatch')), 1, 'identity: 
 eq(mc.check_identity(mk_modem(null, '351234567890123'), { emit: ci_emit, log: ci_log }),
 	true, 'identity: unknown modem imei -> proceed');
 
+// --- nitz_epoch: NAS Network-Time "Universal Time" -> unix epoch --------------
+// QMI month is 1-based (matches timegm). 2026-07-27 13:45:09 UTC.
+eq(mc.nitz_epoch({ year: 2026, month: 7, day: 27, hour: 13, minute: 45, second: 9 }),
+	timegm({ year: 2026, mon: 7, mday: 27, hour: 13, min: 45, sec: 9 }), 'nitz: full UTC -> epoch');
+eq(mc.nitz_epoch({ year: 2000, month: 1, day: 1, hour: 0, minute: 0, second: 0 }),
+	timegm({ year: 2000, mon: 1, mday: 1, hour: 0, min: 0, sec: 0 }), 'nitz: lower-bound year accepted');
+// implausible / zeroed frames -> null (modem pushed NITZ before it had a time)
+eq(mc.nitz_epoch({ year: 0, month: 0, day: 0 }), null, 'nitz: zeroed frame -> null');
+eq(mc.nitz_epoch({ year: 1980, month: 6, day: 1 }), null, 'nitz: pre-2000 year -> null');
+eq(mc.nitz_epoch({ year: 2026, month: 13, day: 1 }), null, 'nitz: month out of range -> null');
+eq(mc.nitz_epoch(null), null, 'nitz: no struct -> null');
+eq(mc.nitz_epoch({ year: 2026 }), null, 'nitz: missing month -> null');
+
 done('test_modem_common');

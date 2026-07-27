@@ -65,24 +65,35 @@ export function get_ca(nas, cb)
 	});
 };
 
-// get_data_mode(dsd, cb): data-system mode from the DSD service — { mode, lte,
-// nr } with mode LTE / NSA / SA — or null when unavailable. 5G present with LTE
-// = NSA (NR anchored on LTE); 5G alone = SA; LTE alone = LTE.
+// data_mode_from_systems(available_systems): map a DSD available-systems list
+// (from either GET_SYSTEM_STATUS or the SYSTEM_STATUS_IND) to { mode, lte, nr }
+// with mode LTE / NSA / SA — or null when the list is absent. 5G present with LTE
+// = NSA (NR anchored on LTE); 5G alone = SA; LTE alone = LTE. Shared by the poll
+// and the indication so both derive the mode identically.
+export function data_mode_from_systems(available_systems)
+{
+	if (available_systems == null)
+		return null;
+
+	let rats = {};
+
+	for (let s in available_systems)
+		if (s.rat == dsdmod.RAT_LTE) rats.lte = true;
+		else if (s.rat == dsdmod.RAT_5G) rats.nr = true;
+
+	let mode = rats.nr ? (rats.lte ? 'NSA' : 'SA') : (rats.lte ? 'LTE' : null);
+
+	return { mode: mode, lte: !!rats.lte, nr: !!rats.nr };
+};
+
+// get_data_mode(dsd, cb): data-system mode from the DSD service, polled — see
+// data_mode_from_systems for the return shape. null on error/unavailable.
 export function get_data_mode(dsd, cb)
 {
 	dsd.request('GET_SYSTEM_STATUS', {}, (e, d) => {
-		if (e || d?.available_systems == null)
+		if (e)
 			return cb(null);
-
-		let rats = {};
-
-		for (let s in d.available_systems)
-			if (s.rat == dsdmod.RAT_LTE) rats.lte = true;
-			else if (s.rat == dsdmod.RAT_5G) rats.nr = true;
-
-		let mode = rats.nr ? (rats.lte ? 'NSA' : 'SA') : (rats.lte ? 'LTE' : null);
-
-		cb({ mode: mode, lte: !!rats.lte, nr: !!rats.nr });
+		cb(data_mode_from_systems(d?.available_systems));
 	});
 };
 
@@ -125,19 +136,24 @@ export function get_channel_rates(wds, cb)
 	wds.request('GET_CHANNEL_RATES', {}, (err, data) => cb((!err && data?.rates) ? data.rates : null));
 };
 
+// bearer_label(rat_mask): map a WDS data-bearer RAT mask to a label ('LTE' /
+// '5G NR' / 'LTE + 5G' / 'other') or null. Shared by the polled get_bearer and
+// the WDS EVENT_REPORT current-bearer indication so both derive it identically.
+export function bearer_label(rat_mask)
+{
+	if (rat_mask == null)
+		return null;
+
+	let lte = (rat_mask & RAT_LTE) != 0, nr = (rat_mask & RAT_5GNR) != 0;
+	return nr ? (lte ? 'LTE + 5G' : '5G NR') : (lte ? 'LTE' : (rat_mask ? 'other' : null));
+};
+
 // get_bearer(wds, cb): the RAT actually carrying this session's data, as a
 // label ('LTE' / '5G NR' / 'LTE + 5G' / 'other') or null.
 export function get_bearer(wds, cb)
 {
-	wds.request('GET_CURRENT_DATA_BEARER_TECHNOLOGY', {}, (err, data) => {
-		let m = (!err) ? data?.current?.rat_mask : null;
-
-		if (m == null)
-			return cb(null);
-
-		let lte = (m & RAT_LTE) != 0, nr = (m & RAT_5GNR) != 0;
-		cb(nr ? (lte ? 'LTE + 5G' : '5G NR') : (lte ? 'LTE' : (m ? 'other' : null)));
-	});
+	wds.request('GET_CURRENT_DATA_BEARER_TECHNOLOGY', {}, (err, data) =>
+		cb(bearer_label((!err) ? data?.current?.rat_mask : null)));
 };
 
 // get_packet_stats(wds, cb): raw per-call packet counters, or null when the

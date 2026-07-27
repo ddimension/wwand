@@ -150,6 +150,9 @@ function finish() {
 	uloop.timer(1, () => { uloop.end(); });
 }
 
+// captures sim_refresh emitted by the SUBSCRIBER_READY_STATUS handler
+let ready_events = [];
+
 function assert_telemetry() {
 	// signal (fast watch loop; native SIGNAL_STATE_V2) — QMI GET_SIGNAL_INFO shape
 	ok(modem.signal?.lte != null, 'signal: lte block populated via native backend');
@@ -183,6 +186,15 @@ function assert_telemetry() {
 	ok(modem._dsd_be == 'mbim', 'backend: data_mode chose native mbim');
 	ok(modem._regd_be == 'mbim', 'backend: reg_detail chose native mbim');
 
+	// SUBSCRIBER_READY_STATUS notification (SIM hot-swap): a new iccid/imsi is
+	// delivered unsolicited -> the native handler refreshes identity and emits
+	// sim_refresh (parity with the QMI UIM CARD_STATUS/REFRESH path).
+	eq(modem.info.iccid, '89490200099999999999', 'ready-status: iccid refreshed from notification');
+	eq(modem.info.imsi, '262019999999999', 'ready-status: imsi refreshed from notification');
+	eq(modem._ready_state, bc.READY_STATE_INITIALIZED, 'ready-status: state tracked');
+	ok(length(filter(ready_events, function(e) { return e.event == 'sim_refresh' })) >= 1,
+		'ready-status: sim_refresh emitted on identity change');
+
 	finish();
 }
 
@@ -195,11 +207,20 @@ modem = modem_mbim.create({
 		transport_open: mock.transport_open,
 		log: () => null,
 		on_event: (m, event, data) => {
+			if (event == 'sim_refresh')
+				push(ready_events, { event: event, data: data });
 			if (event == 'registered') {
 				ok(true, 'modem reached READY (OPEN->CAPS->SUBSCRIBER->REGISTER->PACKET_SERVICE)');
 				// warm the fast loop (as daemon.modem_signal does), then read back
 				// after the fast loop + the first slow telemetry tick have run
 				m.watch();
+				// simulate a SIM hot-swap: unsolicited ready-status with a new
+				// iccid/imsi -> exercises the native SUBSCRIBER_READY_STATUS handler
+				mock.indicate('SUBSCRIBER_READY_STATUS', {
+					ready_state: bc.READY_STATE_INITIALIZED,
+					subscriber_id: '262019999999999', sim_iccid: '89490200099999999999',
+					ready_info: 0, telephone_numbers_count: 0,
+				});
 				uloop.timer(1400, assert_telemetry);
 			}
 		},

@@ -44,21 +44,37 @@ const PROFILE_ID = { t: 0x01, f: { type: 'u8', index: 'u8' } };
 export default {
 	service: 0x01,
 	messages: {
+		// Enable-flags verified vs libqmi qmi-service-wds.json msg 0x0001 input:
+		// Channel Rate 0x10, Transfer Statistics 0x11, Data Bearer Technology 0x12,
+		// Dormancy Status 0x13, Current Data Bearer Technology 0x15 (all guint8
+		// booleans except Transfer Statistics {interval u8, indicators i32}). We
+		// enable Current Data Bearer + Dormancy so bearer-tech and idle/active
+		// transitions are pushed live (augmenting the get_bearer poll, which stays
+		// as the baseline since not every modem emits this — the RG650E is silent).
 		SET_EVENT_REPORT: {
 			id: 0x0001,
 			req: {
-				stats: { t: 0x11, f: { interval: 'u8', indicators: 'i32' } },
+				stats:               { t: 0x11, f: { interval: 'u8', indicators: 'i32' } },
+				current_data_bearer: { t: 0x15, f: 'u8' },
+				dormancy:            { t: 0x13, f: 'u8' },
 			},
 			resp: {},
 		},
 
+		// Output TLVs verified vs libqmi (NOTE: the output ids differ from the
+		// enable-flag input ids): Channel Rates 0x16 {tx_rate_bps i32, rx_rate_bps
+		// i32}, Dormancy Status 0x18 u8, Tx/Rx Bytes 0x19/0x1A u64, Current Data
+		// Bearer 0x1D {network_type u8, rat_mask u32, so_mask u32}.
 		EVENT_REPORT_IND: {
 			id: 0x0001,
 			ind: {
-				tx_packets_ok: { t: 0x10, f: 'u32' },
-				rx_packets_ok: { t: 0x11, f: 'u32' },
-				tx_bytes_ok:   { t: 0x19, f: 'u64' },
-				rx_bytes_ok:   { t: 0x1A, f: 'u64' },
+				tx_packets_ok:  { t: 0x10, f: 'u32' },
+				rx_packets_ok:  { t: 0x11, f: 'u32' },
+				channel_rates:  { t: 0x16, f: { tx_rate: 'i32', rx_rate: 'i32' } },
+				dormancy:       { t: 0x18, f: 'u8' },
+				tx_bytes_ok:    { t: 0x19, f: 'u64' },
+				rx_bytes_ok:    { t: 0x1A, f: 'u64' },
+				current_bearer: { t: 0x1D, f: { network_type: 'u8', rat_mask: 'u32', so_mask: 'u32' } },
 			},
 		},
 

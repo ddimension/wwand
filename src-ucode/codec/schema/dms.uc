@@ -13,6 +13,14 @@ export const OPMODE_LOW_POWER = 1;
 export const OPMODE_OFFLINE = 3;
 export const OPMODE_RESET = 4;
 
+// human-readable operating-mode names (for the DMS event-report log). Keys are
+// strings; look up via sprintf('%d', mode).
+export const OPMODE_NAMES = {
+	'0': 'online', '1': 'low power', '2': 'factory test', '3': 'offline',
+	'4': 'resetting', '5': 'shutting down', '6': 'persistent low power',
+	'7': 'mode-only low power', '8': 'network test',
+};
+
 export default {
 	service: 0x02,
 	messages: {
@@ -118,6 +126,38 @@ export default {
 			id: 0x0043,
 			req:  {},
 			resp: { imsi: { t: 0x01, f: 'string' } },
+		},
+
+		// DMS event report — notices an EXTERNAL change to the modem's operating
+		// mode (someone toggled airplane mode / RF off via AT, another tool, or a
+		// front-panel switch) or PIN state, without wwand having initiated it.
+		// Verified vs libqmi qmi-service-dms.json msg 0x0001:
+		//   Set Event Report input  PIN State Reporting 0x12, Operating Mode
+		//                           Reporting 0x14, UIM State Reporting 0x15 (u8).
+		//   Event Report indication PIN1 Status 0x11 / PIN2 Status 0x12 sequence
+		//                           { current_status u8, verify_retries u8,
+		//                             unblock_retries u8 }; Operating Mode 0x14 u8;
+		//                           UIM State 0x15 u8.
+		SET_EVENT_REPORT: {
+			id: 0x0001,
+			req: {
+				pin_state:      { t: 0x12, f: 'u8' },
+				operating_mode: { t: 0x14, f: 'u8' },
+				uim_state:      { t: 0x15, f: 'u8' },
+			},
+			resp: {},
+		},
+
+		EVENT_REPORT_IND: {
+			id: 0x0001,
+			ind: {
+				pin1_status: { t: 0x11, f: {
+					current_status: 'u8', verify_retries: 'u8', unblock_retries: 'u8' } },
+				pin2_status: { t: 0x12, f: {
+					current_status: 'u8', verify_retries: 'u8', unblock_retries: 'u8' } },
+				operating_mode: { t: 0x14, f: 'u8' },
+				uim_state:      { t: 0x15, f: 'u8' },
+			},
 		},
 	},
 };

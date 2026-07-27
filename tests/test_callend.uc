@@ -25,7 +25,9 @@ eq(callend.describe(null, { type: 3, reason: 5 }).text, 'call manager cause 5', 
 eq(callend.describe(null, { type: 99, reason: 1 }).text, 'type 99 cause 1', 'unknown type generic');
 
 // coarse reason only / ext only / nothing
-eq(callend.describe(6, null).text, 'call ended (reason 6)', 'coarse reason fallback');
+eq(callend.describe(1, null).text, 'unspecified', 'coarse reason 1 named');
+eq(callend.describe(6, null).text, 'access attempt in progress', 'coarse reason 6 named');
+eq(callend.describe(503, null).text, 'call ended (reason 503)', 'coarse reason fallback (unmapped)');
 eq(callend.describe(null, null, 42).text, 'activation failed (ext error 42)', 'ext-error fallback');
 eq(callend.describe(null, null), null, 'nothing -> null');
 

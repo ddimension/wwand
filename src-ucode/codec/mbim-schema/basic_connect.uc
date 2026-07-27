@@ -33,7 +33,18 @@ export const AUTH_CHAP = 2;
 export const AUTH_MSCHAPV2 = 3;
 
 // MbimSubscriberReadyState
-export const READY_STATE_INITIALIZED = 1;
+export const READY_STATE_NOT_INITIALIZED = 0;
+export const READY_STATE_INITIALIZED     = 1;
+export const READY_STATE_SIM_NOT_INSERTED = 2;
+export const READY_STATE_BAD_SIM         = 3;
+export const READY_STATE_FAILURE         = 4;
+export const READY_STATE_NOT_ACTIVATED   = 5;
+export const READY_STATE_DEVICE_LOCKED   = 6;
+
+export const READY_STATE_NAMES = {
+	'0': 'not initialized', '1': 'initialized', '2': 'SIM not inserted',
+	'3': 'bad SIM', '4': 'failure', '5': 'not activated', '6': 'device locked',
+};
 
 // MbimPinType / MbimPinState
 export const PIN_TYPE_PIN1 = 2;

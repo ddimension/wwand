@@ -135,6 +135,55 @@ export default {
 			},
 		},
 
+		// Network Time / NITZ — the operator-pushed clock, armed via
+		// REGISTER_INDICATIONS network_time. Lets a router with no RTC set its
+		// clock from the cellular network. Verified vs libqmi qmi-service-nas.json
+		// (msg 0x004C): Universal Time 0x01 sequence {year u16, month/day/hour/
+		// minute/second/day_of_week u8}, Timezone Offset 0x10 gint8 (offset from
+		// UTC in 15-minute increments), Daylight Savings Adjustment 0x11 u8 (hours
+		// of DST already folded into the reported time), Radio Interface 0x12 gint8.
+		NETWORK_TIME_IND: {
+			id: 0x004C,
+			ind: {
+				universal_time: { t: 0x01, f: {
+					year: 'u16', month: 'u8', day: 'u8',
+					hour: 'u8', minute: 'u8', second: 'u8', day_of_week: 'u8' } },
+				timezone_offset: { t: 0x10, f: 'i8' },
+				dst_adjustment:  { t: 0x11, f: 'u8' },
+				radio_interface: { t: 0x12, f: 'i8' },
+			},
+		},
+
+		// NAS event report — the per-event telemetry channel (distinct from the
+		// coarse REGISTER_INDICATIONS toggles). We enable RF Band Information so a
+		// band change (carrier aggregation reshuffle, band-steer) is pushed live
+		// instead of only surfacing at the next cell poll. Verified vs libqmi
+		// qmi-service-nas.json msg 0x0002:
+		//   Set Event Report input  RF Band Information 0x11 (guint8 enable),
+		//                           Registration Reject Reason 0x12 (guint8 enable).
+		//   Event Report indication RF Band Information 0x11 = guint8-count array of
+		//                           { radio_interface gint8, active_band guint16,
+		//                             active_channel guint16 };
+		//                           Registration Reject Reason 0x12 sequence
+		//                           { service_domain u8, reject_cause u16 }.
+		SET_EVENT_REPORT: {
+			id: 0x0002,
+			req: {
+				rf_band_info:  { t: 0x11, f: 'u8' },
+				reject_reason: { t: 0x12, f: 'u8' },
+			},
+			resp: {},
+		},
+
+		EVENT_REPORT_IND: {
+			id: 0x0002,
+			ind: {
+				rf_band_info: { t: 0x11, f: { n: 'u8', of: {
+					radio_interface: 'i8', band: 'u16', channel: 'u16' } } },
+				reject_reason: { t: 0x12, f: { service_domain: 'u8', reject_cause: 'u16' } },
+			},
+		},
+
 		// Perform Network Scan — the COPS=? equivalent: the modem sweeps the
 		// visible PLMNs and returns the operator list. Slow (seconds); the
 		// caller passes a long timeout. Verified against libqmi 1.38

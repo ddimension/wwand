@@ -195,5 +195,38 @@ export default {
 			id: 0x0032,
 			ind: { card_status: { t: 0x10, f: CARD_STATUS_FMT } },
 		},
+
+		// SIM/eUICC refresh registration + indication. A network- or LPA-initiated
+		// refresh (e.g. an eSIM profile switch, or a SIM OTA file update) is pushed
+		// as a Refresh indication so wwand can re-read identity (ICCID/IMSI may
+		// change) instead of running stale. Verified vs libqmi qmi-service-uim.json:
+		//   Refresh Register All (0x0044): UIM Session 0x01 + Info 0x02
+		//                                  { register_flag u8 }.
+		//   Refresh (0x0033): Event 0x10 sequence, leading fixed fields
+		//                     { stage u8, mode u8, session_type u8 } followed by the
+		//                     variable aid/files arrays (not needed here — the
+		//                     leading fields tell us a refresh happened and its
+		//                     stage; the decoder ignores the trailing arrays).
+		REFRESH_REGISTER_ALL: {
+			id: 0x0044,
+			req: {
+				session:  SESSION,
+				register: { t: 0x02, f: { register_flag: 'u8' } },
+			},
+			resp: {},
+		},
+
+		REFRESH_IND: {
+			id: 0x0033,
+			ind: { event: { t: 0x10, f: {
+				stage: 'u8', mode: 'u8', session_type: 'u8' } } },
+		},
 	},
 };
+
+// QmiUimRefreshStage — the refresh lifecycle. START precedes the file changes,
+// END_SUCCESS / END_FAILURE bracket completion; we re-read identity on END_SUCCESS.
+export const REFRESH_STAGE_WAIT_FOR_OK   = 0;
+export const REFRESH_STAGE_START         = 1;
+export const REFRESH_STAGE_END_SUCCESS   = 2;
+export const REFRESH_STAGE_END_FAILURE   = 3;

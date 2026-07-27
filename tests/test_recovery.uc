@@ -97,34 +97,46 @@ ok(no_reboot0, 'failreboot=0: never reboots, keeps retrying');
 
 // --- qmi error ceiling -------------------------------------------------------
 
+// A SYNC-wedged modem only climbs the proto-error counter (never a full
+// attempt), so this path escalates itself: ONE hardware reset (usb_repower) when
+// the count first crosses the limit, and reboot only if errors persist a further
+// full window (> 2x limit). A reboot doesn't power-cycle a self-powered modem, so
+// the cheaper reset must be tried first (fixes the NR7101 reboot-loop).
 r = recovery.create({ id: 'm2', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
 
-let hit = null;
+let acts = [];
+for (let i = 1; i <= 51; i++)
+	push(acts, r.on_proto_error());
 
-for (let i = 1; i <= 26; i++)
-	if (r.on_proto_error() == 'reboot' && hit == null)
-		hit = i;
-
-eq(hit, 26, 'errors: 26th error crosses ceiling of 25');
+eq(acts[25], 'usb_repower', 'errors: 26th error (crosses limit 25) -> hardware reset first');
+let repowers = 0;
+for (let a in acts) if (a == 'usb_repower') repowers++;
+eq(repowers, 1, 'errors: hardware reset fires exactly once, not per error');
+eq(acts[50], 'reboot', 'errors: 51st error (> 2x limit) -> reboot after the reset did not clear it');
 
 r.on_proto_success();
 eq(r.counters.proto_errors, 0, 'errors: success resets counter');
+eq(r.counters.proto_hw, 0, 'errors: success clears the hardware-reset flag');
 
-// the proto-error ceiling is configurable (proto_error_limit)
+// the proto-error thresholds scale with the configurable proto_error_limit
 r = recovery.create({ id: 'plim', failreboot: 100, proto_error_limit: 3, fx: fx, state_dir: '/state', log: silent });
-let phit = null;
-for (let i = 1; i <= 6; i++)
-	if (r.on_proto_error() == 'reboot' && phit == null)
-		phit = i;
-eq(phit, 4, 'errors: configurable limit 3 crosses at the 4th error');
+let pacts = [];
+for (let i = 1; i <= 7; i++)
+	push(pacts, r.on_proto_error());
+eq(pacts[3], 'usb_repower', 'errors: limit 3 -> hardware reset at the 4th error');
+eq(pacts[6], 'reboot', 'errors: limit 3 -> reboot at the 7th error (> 2x3)');
 
-// the proto-error reboot is gated by failreboot too: <=0 never reboots
+// the proto-error reboot is gated by failreboot too: <=0 never reboots, but the
+// hardware reset still fires (cheaper recovery runs even with reboots disabled)
 r = recovery.create({ id: 'pgate', failreboot: 0, proto_error_limit: 3, fx: fx, state_dir: '/state', log: silent });
-let pg_reboot = false;
-for (let i = 1; i <= 30; i++)
-	if (r.on_proto_error() == 'reboot')
-		pg_reboot = true;
+let pg_reboot = false, pg_repower = false;
+for (let i = 1; i <= 30; i++) {
+	let a = r.on_proto_error();
+	if (a == 'reboot') pg_reboot = true;
+	if (a == 'usb_repower') pg_repower = true;
+}
 ok(!pg_reboot, 'errors: failreboot=0 never reboots on a proto-error storm');
+ok(pg_repower, 'errors: failreboot=0 still fires the hardware reset');
 
 // --- persistence -------------------------------------------------------------
 

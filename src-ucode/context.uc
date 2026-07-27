@@ -82,6 +82,8 @@ export function create(opts)
 		stats: null,       // cumulative data counters (bytes/packets/errors) since connect
 		connected_since: null,
 		channel_rate: null, // { tx_rate, rx_rate, max_tx_rate, max_rx_rate } bits/sec
+		bearer: null,       // RAT carrying data ('LTE' / '5G NR' / 'LTE + 5G'), pushed by the WDS event report
+		dormancy: null,     // 1 = dormant (idle), 2 = active — from the WDS event report
 	};
 
 	// packet-statistics request mask: all 10 flags (tx/rx packets ok, errors,
@@ -216,8 +218,11 @@ export function create(opts)
 				self.channel_rate = rates;
 		});
 
-		// the RAT actually carrying THIS session's data (LTE / 5G NSA / SA) —
-		// only the session's own WDS client answers this (not the config client)
+		// the RAT actually carrying THIS session's data (LTE / 5G NSA / SA). The
+		// WDS EVENT_REPORT current-bearer indication (armed in activate_family)
+		// pushes this live when the modem supports it, but not every modem does
+		// (the RG650E stays silent), so the poll remains the baseline. When the
+		// indication has already set a value this round it is simply refreshed.
 		qmi_backend.get_bearer(fams[0].client, (b) => {
 			if (b)
 				self.bearer = b;
@@ -431,6 +436,30 @@ export function create(opts)
 				if (data.status?.status == wdsmod.CONN_DISCONNECTED)
 					self._connection_lost(family, data);
 			});
+
+			// WDS event report: push bearer-technology + dormancy changes live
+			// instead of polling get_bearer every stats tick. Both families report
+			// the same modem-wide bearer, so last-writer-wins with identical values.
+			// The channel-rate max is not carried here (only current tx/rx), so the
+			// channel_rate poll stays; bearer/dormancy are now event-driven.
+			client.on('EVENT_REPORT_IND', (data) => {
+				if (data.current_bearer?.rat_mask != null) {
+					let b = qmi_backend.bearer_label(data.current_bearer.rat_mask);
+					if (b)
+						self.bearer = b;
+				}
+				if (data.dormancy != null)
+					self.dormancy = data.dormancy;
+				// keep the live tx/rx fresh between channel-rate polls (max preserved)
+				if (data.channel_rates) {
+					self.channel_rate ??= {};
+					self.channel_rate.tx_rate = data.channel_rates.tx_rate;
+					self.channel_rate.rx_rate = data.channel_rates.rx_rate;
+				}
+			});
+
+			client.request('SET_EVENT_REPORT',
+				{ current_data_bearer: 1, dormancy: 1 }, (e) => null, { no_recovery: true });
 
 			let start_activation;
 
@@ -874,7 +903,11 @@ export function create(opts)
 		if (self.state != 'CONNECTED')
 			return;
 
-		log('warn', sprintf('ipv%d connection lost (reason %J)', family, data.call_end_reason));
+		// decode the WDS call-end cause: prefer the verbose reason (TLV 0x11,
+		// the actionable 3GPP/IPv6/PPP detail) over the coarse code (0x10).
+		let cause = callend.describe(data.call_end_reason, data.verbose_call_end);
+		log('warn', sprintf('ipv%d connection lost: %s', family,
+			cause ? cause.text : sprintf('call-end reason %d', data.call_end_reason ?? 0)));
 		stop_stats();
 		set_state('IDLE');
 		self.settings = null;
@@ -969,6 +1002,7 @@ export function create(opts)
 			stats: (self.state == 'CONNECTED') ? self.stats : null,
 			channel_rate: (self.state == 'CONNECTED') ? self.channel_rate : null,
 			bearer: (self.state == 'CONNECTED') ? self.bearer : null,
+			dormancy: (self.state == 'CONNECTED') ? self.dormancy : null,
 			families: map(keys(self.families), (k) => ({
 				family: +k,
 				cid: self.families[k].client?.cid,

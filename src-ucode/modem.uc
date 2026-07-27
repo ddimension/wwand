@@ -232,7 +232,13 @@ export function create(opts)
 	// ceiling (25, preserved) escalates straight to reboot
 	let client_hooks = {
 		on_error: (client, kind, msg) => {
-			if (rec.on_proto_error() == 'reboot')
+			let act = rec.on_proto_error();
+			// a SYNC-wedged modem never reaches the attempt ladder, so escalate
+			// the proto-error path itself: a hardware reset first, reboot only if
+			// that fails to clear the wedge (see recovery.on_proto_error).
+			if (act == 'usb_repower')
+				rec.usb_repower();
+			else if (act == 'reboot')
 				rec.reboot('qmi error limit reached');
 
 			log('debug', sprintf('qmi error (%s) svc %d %s, counter %d',
@@ -434,6 +440,7 @@ export function create(opts)
 					return fail('alloc_dms', e1);
 
 				self.dms = dms;
+				self._install_dms_handlers();
 
 				self.alloc(nasmod.default, (e2, nas) => {
 					if (e2)
@@ -455,6 +462,8 @@ export function create(opts)
 							if (self.services[sprintf('%d', dsdmod.default.service)]) {
 								self.alloc(dsdmod.default, (e5, dsd) => {
 									self.dsd = e5 ? null : dsd;
+									if (self.dsd)
+										self._arm_data_mode_ind();
 									self._read_info(step_at);
 								});
 							}
@@ -476,6 +485,7 @@ export function create(opts)
 							}
 							else {
 								self.uim = uim;
+								self._install_uim_refresh();
 							}
 
 							after_uim();
@@ -1110,9 +1120,12 @@ export function create(opts)
 		self.set_state('REGISTERING');
 		self.reg_detail = null;
 
+		self._arm_nas_event_report();
+
 		self.nas.request('REGISTER_INDICATIONS', {
 			serving_system_events: 1,
 			signal_info: 1,
+			network_time: 1,
 		}, (err) => {
 			// some modems lack this; fall back to the initial query result
 			if (err)
@@ -1158,11 +1171,116 @@ export function create(opts)
 		});
 	};
 
+	// UIM refresh: register for SIM/eUICC refresh notifications so a network- or
+	// LPA-initiated refresh (eSIM profile switch, SIM OTA file update) makes wwand
+	// re-read identity (ICCID/IMSI can change) rather than running stale. On some
+	// modems (e.g. RG650E) UIM logical-channel ops are unsupported and the
+	// register is refused — best-effort, no_recovery.
+	self._install_uim_refresh = function() {
+		if (!self.uim || self._uim_refresh_armed)
+			return;
+		self._uim_refresh_armed = true;
+
+		self.uim.on('REFRESH_IND', (data) => {
+			let stage = data?.event?.stage;
+			log('info', sprintf('sim refresh (stage %d)', stage ?? -1));
+			// re-read identity once the refresh has completed successfully
+			if (stage == uimmod.REFRESH_STAGE_END_SUCCESS) {
+				sim.read_identity(self, (id) => {
+					let changed = (id.iccid != self.info.iccid || id.imsi != self.info.imsi);
+					self.info.imsi = id.imsi ?? self.info.imsi;
+					self.info.iccid = id.iccid ?? self.info.iccid;
+					self.info.msisdn = id.msisdn ?? self.info.msisdn;
+					if (changed)
+						log('notice', sprintf('sim identity changed after refresh: iccid %s imsi %s',
+							self.info.iccid, self.info.imsi));
+					emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
+				});
+			}
+		});
+
+		self.uim.request('REFRESH_REGISTER_ALL', {
+			session:  { session_type: uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING, aid: '' },
+			register: { register_flag: 1 },
+		}, (e) => {
+			if (e)
+				log('debug', 'uim refresh register failed (sim-refresh notifications unavailable)');
+		}, { no_recovery: true });
+	};
+
+	// DMS event report: catch an EXTERNAL operating-mode or PIN change (airplane
+	// mode toggled via AT / another tool / a hardware switch) that wwand did not
+	// initiate. We only observe + log it here; the state machine still reacts to
+	// the resulting serving-system / registration change through its own path.
+	self._install_dms_handlers = function() {
+		self.dms.on('EVENT_REPORT_IND', (data) => {
+			if (data?.operating_mode != null && data.operating_mode != self._dms_opmode) {
+				let prev = self._dms_opmode;
+				self._dms_opmode = data.operating_mode;
+				// skip the very first report (baseline, not a change)
+				if (prev != null)
+					log('notice', sprintf('operating mode changed externally: %s',
+						dmsmod.OPMODE_NAMES[sprintf('%d', data.operating_mode)] ??
+						sprintf('mode %d', data.operating_mode)));
+			}
+			if (data?.pin1_status?.current_status != null)
+				self._dms_pin1 = data.pin1_status;
+		});
+
+		self.dms.request('SET_EVENT_REPORT',
+			{ operating_mode: 1, pin_state: 1, uim_state: 1 }, (e) => {
+				if (e)
+					log('debug', 'dms set-event-report failed (external opmode watch unavailable)');
+			}, { no_recovery: true });
+	};
+
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
 			self.signal = data;
 		});
+		// Network Time / NITZ: the operator-pushed UTC clock. Store it for status
+		// and hand the epoch + timezone to the daemon, which decides whether to
+		// apply it (only when the system clock is clearly unset — an RTC-less
+		// router booted before NTP). tz offset is signed 15-minute units.
+		self.nas.on('NETWORK_TIME_IND', (data) => {
+			let epoch = modem_common.nitz_epoch(data?.universal_time);
+			if (epoch == null)
+				return;
+			let tz_min = (data.timezone_offset != null) ? data.timezone_offset * 15 : null;
+			self.network_time = { epoch: epoch, tz_offset_min: tz_min, dst: data.dst_adjustment };
+			log('info', sprintf('network time (NITZ): %d utc, tz %s',
+				epoch, tz_min != null ? sprintf('%+d min', tz_min) : '?'));
+			if (deps.set_clock)
+				deps.set_clock(epoch, tz_min);
+		});
+		// NAS event report — live RF band changes (band-steer / CA reshuffle)
+		// pushed instead of waiting for the next cell poll. Stored on self.rf_bands
+		// for status; a change in the active-band set is logged.
+		self.nas.on('EVENT_REPORT_IND', (data) => {
+			if (data?.rf_band_info == null)
+				return;
+			let bands = map(data.rf_band_info, (b) => b.band);
+			let key = join(',', bands);
+			if (key != self._rf_band_key) {
+				self._rf_band_key = key;
+				log('info', sprintf('rf band change: %s', key != '' ? key : 'none'));
+			}
+			self.rf_bands = data.rf_band_info;
+		});
+	};
+
+	// enable the NAS event report (RF band + reject reason). Separate from the
+	// REGISTER_INDICATIONS toggles; best-effort — some modems reject it. Called
+	// once the NAS handlers are installed and registration is armed.
+	self._arm_nas_event_report = function() {
+		if (!self.nas || self._nas_evt_armed)
+			return;
+		self._nas_evt_armed = true;
+		self.nas.request('SET_EVENT_REPORT', { rf_band_info: 1, reject_reason: 1 }, (e) => {
+			if (e)
+				log('debug', 'nas set-event-report failed (rf-band push unavailable)');
+		}, { no_recovery: true });
 	};
 
 	// gather WHY the modem is (not) registered: the EMM reject cause and whether
@@ -1474,6 +1592,33 @@ export function create(opts)
 	// (Quectel AT states NSA/SA directly + NR band/bandwidth/signal), then pick
 	// the mode source — prefer DSD (native, precise), else that QENG NR line,
 	// else the coarse NAS radio_ifs. Cached per modem; stores self.dsd_status.
+	// Register for the DSD data-system change indication so LTE ↔ 5G-NSA ↔ 5G-SA
+	// transitions update self.dsd_status live instead of only at the next
+	// telemetry poll. Only meaningful when DSD is the active mode source (it is
+	// whenever self.dsd exists — see the _dsd_be probe order below). Failure to
+	// register is non-fatal: the poll in _determine_data_mode still runs.
+	self._arm_data_mode_ind = function() {
+		if (!self.dsd || self._dsd_ind_armed)
+			return;
+		self._dsd_ind_armed = true;
+
+		self.dsd.on('SYSTEM_STATUS_IND', (data) => {
+			let m = qmi_backend.data_mode_from_systems(data?.available_systems);
+			if (m == null)
+				return;
+			m.source = 'dsd';
+			let was = self.dsd_status?.mode;
+			self.dsd_status = m;
+			if (m.mode != was)
+				log('info', sprintf('data-system changed: %s', m.mode ?? 'none'));
+		});
+
+		self.dsd.request('SYSTEM_STATUS_CHANGE', { register: 1 }, (e) => {
+			if (e)
+				log('debug', 'dsd system-status indication register failed (poll still active)');
+		}, { no_recovery: true });
+	};
+
 	self._determine_data_mode = function(cb) {
 		let set_mode = () => {
 			backend.choose(self, '_dsd_be', [

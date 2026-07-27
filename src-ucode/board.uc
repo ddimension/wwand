@@ -210,9 +210,14 @@ const PROFILES = {
 			red: 'red:lte', green: 'green:lte', orange: 'orange:lte',
 		}, s),
 	},
-	// nr7101: no modem-power GPIO and only shared system LEDs (owned by the OS) —
-	// a deliberately empty profile (detected, but every op a no-op).
-	'zyxel,nr7101': {},
+	// nr7101: no switchable modem-power rail, but the board exposes the RG502Q's
+	// RESET line as the named gpio_switch `lte_reset` (board.d: gpio 515, exported
+	// at /sys/class/gpio/gpio515). Wire it as reset_gpio so the recovery ladder
+	// can pulse the modem's reset to recover a hung control channel instead of
+	// falling through to a full router reboot. Status LEDs are OS-owned -> none.
+	'zyxel,nr7101': {
+		reset_gpio: 'gpio515',
+	},
 };
 
 // --- instance ----------------------------------------------------------------

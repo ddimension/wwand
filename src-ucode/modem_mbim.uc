@@ -334,6 +334,34 @@ export function create(opts)
 			}
 		});
 		self.mbim.on(bc, 'PACKET_SERVICE', (data) => null);
+		// SIM ready-state changes (hot-swap, removal, post-PIN initialisation) —
+		// the MBIM counterpart of the QMI UIM CARD_STATUS_IND. Keep identity fresh
+		// and surface SIM removal instead of running stale. (Closes the one native
+		// MBIM indication gap vs the QMI backend.)
+		self.mbim.on(bc, 'SUBSCRIBER_READY_STATUS', (data) => {
+			let prev = self._ready_state;
+			self._ready_state = data.ready_state;
+
+			if (data.ready_state != prev)
+				log('notice', sprintf('sim ready-state: %s',
+					bc.READY_STATE_NAMES[sprintf('%d', data.ready_state)] ??
+					sprintf('state %d', data.ready_state)));
+
+			if (data.ready_state == bc.READY_STATE_INITIALIZED) {
+				let changed = (data.sim_iccid != self.info.iccid ||
+				               data.subscriber_id != self.info.imsi);
+				if (data.subscriber_id != null && data.subscriber_id != '')
+					self.info.imsi = data.subscriber_id;
+				if (data.sim_iccid != null && data.sim_iccid != '')
+					self.info.iccid = data.sim_iccid;
+				if (changed)
+					emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
+			}
+			else if (data.ready_state == bc.READY_STATE_SIM_NOT_INSERTED && prev != null) {
+				log('warn', 'sim removed');
+				emit('sim_removed', {});
+			}
+		});
 		// unsolicited per-session (de)activation — the network dropping a data
 		// context. Routed to the owning context by session id so it can tear the
 		// session down (cdc_mbim carrier doesn't follow the session, so nothing

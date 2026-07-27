@@ -255,6 +255,17 @@ function run_daemon()
 				logmod.log('notice', 'learn_device: recorded l3 device %s on interface %s',
 					l3name, iface_section);
 			},
+			// apply an operator-pushed NITZ time — but ONLY when the system clock
+			// is clearly unset (an RTC-less router booted before NTP synced), so we
+			// never fight sysntpd once it has taken over. Conservative threshold:
+			// any clock before 2021 is treated as unset. Best-effort; busybox
+			// `date -u -s @<epoch>` sets UTC; hwclock/RTC is left to the OS.
+			set_clock: (epoch, tz_min) => {
+				if (!epoch || time() >= 1609459200)   // 2021-01-01: clock already sane
+					return;
+				system(sprintf('date -u -s @%d >/dev/null 2>&1', epoch));
+				logmod.log('notice', 'set system clock from NITZ: %d utc', epoch);
+			},
 			resolve_netdev: discovery.resolve_netdev,
 			resolve_protocol: discovery.protocol_of,
 			// the "how is this modem controlled" decision (qmi/mbim/ncm/ppp),

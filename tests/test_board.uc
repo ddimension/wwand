@@ -104,6 +104,19 @@ ok(fx.has(`${L}/green:lte/brightness=255`), 'lte5398: green:lte on when register
 ok(fx.has(`${L}/red:lte/brightness=0`), 'lte5398: red:lte off when registered');
 ok(fx.has(`${L}/orange:lte/brightness=0`), 'lte5398: orange:lte off when not roaming');
 
+// --- 4c. Zyxel NR7101: no power rail, RESET via the named gpio515 (lte_reset) --
+// The board has no switchable modem-power GPIO, but exposes the RG502Q reset as
+// gpio515 -> the recovery ladder must be able to pulse it (instead of rebooting).
+fx = mkfx({ [`${G}/gpio515/value`]: '0' });
+b = board.create({ id: 'zyxel,nr7101', fx: fx, reset_ms: 5, log: () => {} });
+ok(!b.has_power, 'nr7101: no modem-power rail');
+eq(b.power_cycle(), false, 'nr7101: power_cycle no-op (no power gpio)');
+ok(b.reset_pulse(), 'nr7101: reset_pulse uses the board default reset gpio (gpio515)');
+ok(fx.has(`${G}/gpio515/value=1`), 'nr7101: reset asserted (0 -> 1) on gpio515');
+uloop.timer(20, () => uloop.end());
+uloop.run();
+ok(fx.has(`${G}/gpio515/value=0`), 'nr7101: reset released back to rest level (0)');
+
 // power_cycle / reset_pulse accept a per-modem duration override (repower_time)
 fx = mkfx({ [`${G}/lte_power/value`]: '1' });
 b = board.create({ id: 'zyxel,lte5398-m904', fx: fx, log: () => {} });

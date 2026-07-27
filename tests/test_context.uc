@@ -74,6 +74,8 @@ function make_handlers(over, started)
 				: [ 0x98, 0x94, 0x20, 0x00, 0x00, 0x01, 0x22, 0x38, 0x42, 0x09 ] }),
 		REGISTER_EVENTS: { mask: 1 },
 		REGISTER_INDICATIONS: {},
+		SET_EVENT_REPORT: {},
+		REFRESH_REGISTER_ALL: {},
 		GET_SERVING_SYSTEM: {
 			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
 			                  selected_network: 1, radio_ifs: [ 8 ] },
@@ -90,8 +92,12 @@ function make_handlers(over, started)
 			(started[sprintf('%d', meta.cid)] == 4) ? V4_SETTINGS : V6_SETTINGS,
 		STOP_NETWORK: {},
 		// benign defaults so any connected scenario can run the stats sample
+		// (the sampler polls stats + channel rates + current bearer; all three
+		// must be stubbed or a late sampler tick dies with "no handler" — this was
+		// a timing-flaky failure before the bearer stub was added)
 		GET_PACKET_STATISTICS: { tx_packets_ok: 0, rx_packets_ok: 0 },
 		GET_CHANNEL_RATES: { rates: { tx_rate: 0, rx_rate: 0, max_tx_rate: 0, max_rx_rate: 0 } },
+		GET_CURRENT_DATA_BEARER_TECHNOLOGY: { current: { rat_mask: 0 } },
 
 		...(over ?? {}),
 	};
@@ -618,8 +624,22 @@ scenario('data-stats', {
 	ctx.up((err) => {
 		eq(err, null, 'data-stats: up ok');
 
+		// WDS event report: bearer-tech + dormancy are pushed live (replacing the
+		// old get_bearer poll). rat_mask 1056 = LTE(1<<5) | 5GNR(1<<10) -> LTE + 5G.
+		let cid = ctx.families['4'].client.cid;
+		mock.indicate(1, cid, 'EVENT_REPORT_IND', {
+			current_bearer: { network_type: 1, rat_mask: (1 << 5) | (1 << 10), so_mask: 0 },
+			dormancy: 2,
+			channel_rates: { tx_rate: 21000000, rx_rate: 81000000 },
+		});
+
 		uloop.timer(40, () => {
 			let st = ctx.status();
+			// bearer/dormancy from the event report (independent of the sampler)
+			eq(ctx.bearer, 'LTE + 5G', 'data-stats: bearer pushed by WDS event report');
+			eq(ctx.dormancy, 2, 'data-stats: dormancy pushed by WDS event report');
+			eq(st.bearer, 'LTE + 5G', 'data-stats: status carries bearer');
+
 			if (st.stats == null) {
 				printf("  SKIP data-stats: telemetry sampler not driven under mock pump harness\n");
 				return next();
