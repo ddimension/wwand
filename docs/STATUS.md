@@ -1,7 +1,7 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-04. All test suites green (31 suites); NCM fixes below
-UNCOMMITTED. Three control backends (QMI, MBIM, NCM) behind one daemon-neutral
+_Last updated: 2026-08-04. All test suites green (31 suites); everything
+committed/pushed (wwand 65bbf0c, luci-app af635b3, feed 277c048). Three control backends (QMI, MBIM, NCM) behind one daemon-neutral
 contract._
 
 ## Cudy LT300 v3 / MeiG SLM770A-R bring-up — NCM HW fixes (2026-08-04)
@@ -9,7 +9,7 @@ contract._
 First real NCM/ECM field bring-up (Cudy LT300 v3, MT7628, 58 MB RAM; MeiG
 SLM770A-R, ASR platform, USB 2dee). Modem switched RNDIS→ECM (`AT+SER=2,1`;
 2 = ECM, 3 = RNDIS — QModem's meig.sh mapping, HW-confirmed). All fixes
-HW-validated on the device incl. three cold-boot cycles; **uncommitted**:
+HW-validated on the device incl. three cold-boot cycles; committed in 65bbf0c:
 
 - `atcmd.uc` LOCAL_PORTS: MeiG SLM770A `2dee:4d57` (RNDIS) / `2dee:4d58` (ECM)
   → if4 `at`, if3 `at2` (if2 is a mute DIAG port the first-ttyUSB heuristic
@@ -32,7 +32,7 @@ HW-validated on the device incl. three cold-boot cycles; **uncommitted**:
   (Open: the LuCI modemopts `serial` field saved empty; consider read-back.)
 
 Batch 2 (same day, all HW-validated on the Cudy incl. a clean cold boot;
-**uncommitted**):
+also in 65bbf0c / luci-app af635b3):
 
 - `modem_ncm.uc` **SERIAL_NEW_ID** table + `ensure_serial_bind()` — vid:pid
   whose serial interfaces the kernel `option` driver doesn't know (MeiG ECM
