@@ -1161,7 +1161,8 @@ function sc_to_serving(sc)
 {
 	return { lte: {
 		band: sc.band, earfcn: sc.earfcn, pci: sc.pci, mcc: sc.mcc, mnc: sc.mnc,
-		cid: sc.cid, tac: sc.tac, rsrp: sc.rsrp_dbm, rsrq: sc.rsrq_db, sinr: null,
+		cid: sc.cid, tac: sc.tac, rsrp: sc.rsrp_dbm, rsrq: sc.rsrq_db,
+		sinr: sc.sinr_db ?? null,
 	} };
 }
 
@@ -1185,7 +1186,8 @@ function tel_huawei_cells(self, cb)
 	});
 }
 
-// --- MeiG (ASR) telemetry (BEST-EFFORT — AT+MENG, MeiG's QENG analogue) -------
+// --- MeiG (ASR) telemetry (AT+MENG, MeiG's QENG analogue; HW-verified on the
+// SLM770A-R / Cudy LT300 v3) --------------------------------------------------
 
 function tel_meig_cells(self, cb)
 {
@@ -1216,9 +1218,32 @@ const TELEMETRY_HUAWEI = {
 	ca: tel_noop, reg_detail: tel_ceer_reg_detail, unverified: true,
 };
 
+// MeiG AT^CELLLOCK? read-back (Huawei-style; set-side needs CFUN cycling per
+// the manual, so wwand only *reports* the lock state for now).
+function tel_meig_locks(self, cb)
+{
+	modem_common.telemetry_at(self).send('AT^CELLLOCK?', (err, res) => {
+		let ls = err ? null : atcmd.parse_celllock(res?.lines);
+		let locks = {};
+
+		for (let e in (ls ?? [])) {
+			if (e.rat != null && e.rat != 'LTE')
+				continue;
+
+			let vals = [];
+			if (e.arfcn != null) push(vals, e.arfcn);
+			if (e.pci != null) push(vals, e.pci);
+			locks.lte = { enabled: e.enabled, values: vals };
+		}
+
+		self.locks = length(locks) ? locks : null;
+		cb();
+	});
+}
+
 const TELEMETRY_MEIG = {
 	signal: tel_generic_signal, cells: tel_meig_cells,
-	ca: tel_noop, reg_detail: tel_ceer_reg_detail, unverified: true,
+	ca: tel_noop, reg_detail: tel_ceer_reg_detail, locks: tel_meig_locks,
 };
 
 const TELEMETRY_GENERIC = {

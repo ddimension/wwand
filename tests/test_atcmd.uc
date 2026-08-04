@@ -262,7 +262,8 @@ eq(ms.tac, 43981, 'monsc: tac from hex');
 eq(ms.rsrp, -1040, 'monsc: rsrp ×10 into 0.1 dB');
 eq(ms.rsrp_dbm, -104, 'monsc: rsrp_dbm kept for self.signal');
 
-// --- MeiG AT+MENG serving + neighbour (best-effort) --------------------------
+// --- MeiG AT+MENG serving + neighbour ----------------------------------------
+// 16-field manual form (no SINR): last metric is srxlev
 let mg = atcmd.parse_meng_servingcell([
 	'+MENG: "servingcell",1,"LTE",1,262,03,1A2B3C4,88,1300,3,5,5,BFF,-95,-10,-65,12',
 ]);
@@ -270,11 +271,41 @@ eq(mg.pci, 88, 'meng: serving pci');
 eq(mg.earfcn, 1300, 'meng: serving earfcn');
 eq(mg.rsrp_dbm, -95, 'meng: serving rsrp dBm');
 eq(mg.rsrp, -950, 'meng: serving rsrp ×10');
+eq(mg.sinr, null, 'meng: 16-field form has no SINR');
+eq(mg.srxlev, 120, 'meng: 16-field form srxlev');
+// real SLM770A-R B.0.3 line (17 fields: SINR present, RSRQ with decimal
+// fraction — the integer-only match used to null it out -> "rsrq 0.0" bug)
+let mg2 = atcmd.parse_meng_servingcell([
+	'+MENG: "servingcell","CONNECT","LTE","FDD",262,01,2fc9902,316,1300,3,5,5,fbe,-108,-10.5,-77,-20,19',
+]);
+eq(mg2.cid, 0x2fc9902, 'meng hw: cid');
+eq(mg2.tac, 0xfbe, 'meng hw: tac');
+eq(mg2.rsrp, -1080, 'meng hw: rsrp ×10');
+eq(mg2.rsrq, -105, 'meng hw: decimal rsrq ×10');
+eq(mg2.rsrq_db, -10.5, 'meng hw: rsrq_db plain');
+eq(mg2.sinr, -200, 'meng hw: sinr ×10 (manual format line omits it)');
+eq(mg2.sinr_db, -20, 'meng hw: sinr_db plain');
+eq(mg2.srxlev, 190, 'meng hw: srxlev ×10');
 let mgn = atcmd.parse_meng_neighbourcell([
 	'+MENG: "neighbourcell intra","LTE",1300,155,-99,-13,-,-,-5',
+	'+MENG: "neighbourcell intra","LTE",1300,341,-119,-17.5,-,-,0,0,0,4,0',
+	'+MENG: "neighbourcell inter","LTE",6400,36,-93,-9.0,-,-,0,0,0,0',
 ]);
 eq(mgn.intra[0], { earfcn: 1300, pci: 155, rsrp: -990, rsrq: -130, srxlev: -50 },
 	'meng nc: intra neighbour (RSRP,RSRQ order, metrics ×10)');
+eq(mgn.intra[1], { earfcn: 1300, pci: 341, rsrp: -1190, rsrq: -175, srxlev: 0 },
+	'meng nc: decimal rsrq survives (real HW line)');
+eq(mgn.inter[0].rsrq, -90, 'meng nc: inter decimal rsrq');
+
+// --- MeiG AT^CELLLOCK? read-back ---------------------------------------------
+let cl = atcmd.parse_celllock([
+	'^CELLLOCK: 1,"LTE",1,1300,316',
+	'^CELLLOCK: 0',
+]);
+eq(cl[0], { enabled: true, rat: 'LTE', lock_type: 1, arfcn: 1300, pci: 316 },
+	'celllock: enabled LTE freq+cell lock');
+eq(cl[1].enabled, false, 'celllock: disabled entry');
+eq(atcmd.parse_celllock([ 'OK' ]), null, 'celllock: no lines -> null');
 
 // --- AT+COPS=? scan parsing --------------------------------------------------
 

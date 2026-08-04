@@ -538,12 +538,18 @@ export function parse_monnc(lines)
 	return out;
 };
 
-// MeiG (ASR) AT+MENG="servingcell" — MeiG's QENG analogue (BEST-EFFORT; verified
-// against the SLM770A/SLM750 AT manual but not on wwand hardware). LTE form:
+// MeiG (ASR) AT+MENG="servingcell" — MeiG's QENG analogue (HW-verified on the
+// SLM770A-R B.0.3 / Cudy LT300 v3). LTE form:
 //   +MENG: "servingcell",<state>,"LTE",<is_tdd>,<MCC>,<MNC>,<cellID>,<PCI>,
-//          <EARFCN>,<freq_band_ind>,<UL_bw>,<DL_bw>,<TAC>,<RSRP>,<RSRQ>,<RSSI>,<srxlev>
-// rsrp/rsrq/rssi/srxlev returned in QMI 0.1 dB units (×10); rsrp_dbm/rsrq_db kept
-// as plain dBm/dB for self.signal.
+//          <EARFCN>,<freq_band_ind>,<UL_bw>,<DL_bw>,<TAC>,<RSRP>,<RSRQ>,
+//          <RSSI>[,<SINR>],<srxlev>
+// Two firmware traps: the manual's format line omits <SINR>, but its parameter
+// table (SINR range -20..30 dB), the manual's own example AND real hardware all
+// carry it — so accept both the 16- and 17-field form. And RSRQ (also
+// neighbour RSRP/RSRQ) can come with a decimal fraction ("-10.5"), which an
+// integer-only match silently turned into null.
+// rsrp/rsrq/rssi/sinr/srxlev returned in QMI 0.1 dB units (×10);
+// rsrp_dbm/rsrq_db/sinr_db kept as plain dBm/dB for self.signal.
 export function parse_meng_servingcell(lines)
 {
 	for (let l in (lines ?? [])) {
@@ -558,16 +564,23 @@ export function parse_meng_servingcell(lines)
 			continue;   // only LTE mapped (MeiG SLM7xx are Cat4 LTE)
 
 		let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+		let numf = (s) => (s != null && match(s, /^-?[0-9]+(\.[0-9]+)?$/)) ? +s : null;
+		let x10 = (v) => (v != null) ? int(v * 10) : null;
 		let hn = (s) => (s != null && match(s, /^[0-9A-Fa-f]+$/)) ? hex(s) : null;
+
+		// 17 metric-bearing fields when SINR is present, 16 without
+		let sinr = (length(f) >= 17) ? numf(f[15]) : null;
+		let srxlev = numf(f[(length(f) >= 17) ? 16 : 15]);
 
 		return {
 			rat: 'LTE', mcc: num(f[3]), mnc: f[4], cid: hn(f[5]), pci: num(f[6]),
 			earfcn: num(f[7]), band: num(f[8]), tac: hn(f[11]),
-			rsrp: (num(f[12]) != null) ? num(f[12]) * 10 : null,
-			rsrq: (num(f[13]) != null) ? num(f[13]) * 10 : null,
-			rssi: (num(f[14]) != null) ? num(f[14]) * 10 : null,
-			srxlev: (num(f[15]) != null) ? num(f[15]) * 10 : null,
-			rsrp_dbm: num(f[12]), rsrq_db: num(f[13]),
+			rsrp: x10(numf(f[12])),
+			rsrq: x10(numf(f[13])),
+			rssi: x10(numf(f[14])),
+			sinr: x10(sinr),
+			srxlev: x10(srxlev),
+			rsrp_dbm: numf(f[12]), rsrq_db: numf(f[13]), sinr_db: sinr,
 		};
 	}
 
@@ -581,6 +594,9 @@ export function parse_meng_neighbourcell(lines)
 {
 	let out = { intra: [], inter: [] };
 	let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+	// metrics may carry a decimal fraction on real firmware (e.g. rsrq -17.5)
+	let numf = (s) => (s != null && match(s, /^-?[0-9]+(\.[0-9]+)?$/)) ? +s : null;
+	let x10 = (v) => (v != null) ? int(v * 10) : null;
 
 	for (let l in (lines ?? [])) {
 		let m = match(l, /\+MENG:\s*"?\s*neighbourcell([^",]*)"?,"LTE",(.*)/);
@@ -595,14 +611,41 @@ export function parse_meng_neighbourcell(lines)
 			continue;
 
 		let cell = { earfcn: num(f[0]), pci: num(f[1]),
-			rsrp: (num(f[2]) != null) ? num(f[2]) * 10 : null,
-			rsrq: (num(f[3]) != null) ? num(f[3]) * 10 : null,
-			srxlev: (num(f[6]) != null) ? num(f[6]) * 10 : null };
+			rsrp: x10(numf(f[2])),
+			rsrq: x10(numf(f[3])),
+			srxlev: x10(numf(f[6])) };
 
 		push((scope == 'inter') ? out.inter : out.intra, cell);
 	}
 
 	return out;
+};
+
+// MeiG AT^CELLLOCK? read-back — one line per RAT:
+//   ^CELLLOCK: <enable>[,<rat>,<lock_type>,<arfcn>[,<pci/psc>]]
+// (lock_type 0 = frequency, 1 = frequency+cell, per the SLM770A manual 8.12).
+// Returns a list of { enabled, rat, lock_type, arfcn, pci } or null.
+export function parse_celllock(lines)
+{
+	let out = [];
+	let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\^CELLLOCK:\s*(.*)/);
+
+		if (!m)
+			continue;
+
+		let f = map(split(m[1], ','), (x) => replace(trim(x), /^"|"$/g, ''));
+
+		if (num(f[0]) == null)
+			continue;
+
+		push(out, { enabled: num(f[0]) == 1, rat: f[1] ?? null,
+			lock_type: num(f[2]), arfcn: num(f[3]), pci: num(f[4]) });
+	}
+
+	return length(out) ? out : null;
 };
 
 // parse an AT+COPS=? test response into the visible operators (the AT-backend
