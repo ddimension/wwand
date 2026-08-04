@@ -201,6 +201,11 @@ export function create(opts)
 					// then the kick/connect below re-runs a clean setup.
 					if (st?.pending && deps.down_interface) {
 						log('info', sprintf('interface %s stuck pending, resetting before setup', entry.cfg.interface));
+						// mark the down as our own: the teardown netifd now runs
+						// calls context_down, which must not read it as operator
+						// intent (clear `wanted`) nor let it kill the activation
+						// below without a restart
+						entry._reset_pending = true;
 						deps.down_interface(entry.cfg.interface);
 					}
 
@@ -1024,6 +1029,19 @@ export function create(opts)
 		if (!entry?.ctx)
 			return cb({ error: 'no_such_context', ref: ref });
 
+		// our own stuck-pending reset (registered handler): the teardown is
+		// self-inflicted, not operator intent — keep `wanted`, and restart the
+		// activation it just aborted once the teardown has settled (the aborted
+		// attempt's up() callback never fires, so nothing else reschedules it)
+		if (entry._reset_pending) {
+			entry._reset_pending = false;
+
+			return entry.ctx.down(() => {
+				cb(null, {});
+				retry_activate(name);
+			});
+		}
+
 		// netifd tore the interface down (admin/config or our own down drive) →
 		// we no longer want it up; stop the reconnect loop.
 		entry.wanted = false;
@@ -1216,10 +1234,10 @@ export function create(opts)
 		});
 	};
 
-	// network scan (COPS=? equivalent): the visible operators. May be slow
-	// (seconds) — a long timeout is used. QMI/passthrough via NAS Network Scan;
-	// AT fallback via AT+COPS=? on NCM.
-	const SCAN_TIMEOUT_MS = 90000;
+	// network scan (COPS=? equivalent): the visible operators. Genuinely SLOW —
+	// AT+COPS=? regularly takes minutes (QMI NAS scans too, on busy bands).
+	// QMI/passthrough via NAS Network Scan; AT fallback via AT+COPS=? on NCM.
+	const SCAN_TIMEOUT_MS = 240000;
 
 	self.modem_scan = function(ref, cb) {
 		let entry = check_modem(ref, cb);
@@ -1248,6 +1266,60 @@ export function create(opts)
 
 				cb(null, { operators: atcmd.parse_cops_scan(res?.lines) });
 			}, { timeout: SCAN_TIMEOUT_MS });
+		});
+	};
+
+	// async scan job: a scan outlives the LuCI→uhttpd→rpcd XHR chain (uhttpd's
+	// script_timeout is 60 s by default while the scan runs minutes), so the UI
+	// starts a job and polls. One job per modem; a finished job's result is kept
+	// until the next start.
+	self.modem_scan_start = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		if (entry.netscan?.running)
+			return cb(null, { running: true, started: entry.netscan.started_at });
+
+		let job = { running: true, started_at: time(), operators: null, error: null };
+		entry.netscan = job;
+
+		self.modem_scan(ref, (err, res) => {
+			job.running = false;
+			job.finished_at = time();
+			job.error = err ?? null;
+			job.operators = res?.operators;
+		});
+
+		// modem_scan can fail synchronously (no modem / no AT) — report that
+		// instead of a pointless poll loop
+		if (!job.running)
+			return cb(job.error ?? { error: 'scan_failed' });
+
+		cb(null, { running: true, started: job.started_at });
+	};
+
+	self.modem_scan_status = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		let job = entry.netscan;
+
+		if (!job)
+			return cb(null, { running: false, idle: true });
+
+		if (job.running)
+			return cb(null, { running: true, started: job.started_at });
+
+		cb(null, {
+			running: false,
+			started: job.started_at,
+			finished: job.finished_at,
+			...(job.error ? { error: job.error.error ?? 'scan_failed', detail: job.error } :
+			                { operators: job.operators ?? [] }),
 		});
 	};
 
@@ -1702,6 +1774,16 @@ export function create(opts)
 			for (let name, entry in self.contexts)
 				if (!entry.ctx)
 					start_context(name, entry.cfg);
+
+			// a modem whose datapath resolved but whose AT port was missing
+			// (NCM: the serial ports can appear long after the netdev — vendor
+			// serial new_id bind, late kmodloader) sits in make_fail's ABSENT
+			// backoff — a tty arrival is the cue to retry now, not after the
+			// timer. start() is state-guarded, so this is a no-op elsewhere.
+			for (let name, entry in self.modems) {
+				if (entry.modem && !entry.modem.at && entry.modem.state == 'ABSENT')
+					entry.modem.start();
+			}
 		}
 		else if (action == 'remove') {
 			for (let name, entry in self.modems) {

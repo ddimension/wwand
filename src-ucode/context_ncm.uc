@@ -266,17 +266,11 @@ export function create(opts)
 			if (self.state != 'ACTIVATING')
 				return;   // aborted (modem lost) while configuring
 
-			// 2. dial: bind the cdc_ncm netdev to the bearer
-			self.modem.at.send(dial.connect(self.cid, self.config), (err) => {
-				if (self.state != 'ACTIVATING')
-					return;
-
-				if (err)
-					return self._fail({ stage: 'connect', err: err });
-
+			// 3. read the assigned IP configuration (shared by the fresh-dial
+			//    and the adopt-existing paths below)
+			let read_ip_config = () => {
 				activated = true;
 
-				// 3. read the assigned IP configuration
 				self.modem.at.send(sprintf('AT+CGCONTRDP=%d', self.cid), (e2, res) => {
 					if (self.state != 'ACTIVATING')
 						return;
@@ -311,6 +305,36 @@ export function create(opts)
 					if (cb2)
 						cb2(null, self.settings);
 				}, { timeout: 15000 });
+			};
+
+			// 2. dial: bind the cdc_ncm netdev to the bearer
+			self.modem.at.send(dial.connect(self.cid, self.config), (err) => {
+				if (self.state != 'ACTIVATING')
+					return;
+
+				if (!err)
+					return read_ip_config();
+
+				// some modems auto-dial (or keep the bearer from a previous
+				// run) and reject a dial while it is up (MeiG ECMDUP returns
+				// bare ERROR) — probe the dial status and adopt the live
+				// session instead of failing
+				if (dial.status && dial.status_state) {
+					return self.modem.at.send(dial.status, (serr, sres) => {
+						if (self.state != 'ACTIVATING')
+							return;
+
+						let st = serr ? null : dial.status_state(sres?.lines, self.cid);
+
+						if (st != 1)
+							return self._fail({ stage: 'connect', err: err });
+
+						log('notice', sprintf('cid %d already connected, adopting live session', self.cid));
+						read_ip_config();
+					});
+				}
+
+				self._fail({ stage: 'connect', err: err });
 			}, { timeout: 60000 });
 		});
 	};

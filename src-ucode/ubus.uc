@@ -171,11 +171,29 @@ export function publish(conn, daemon, log)
 		},
 
 		// scan visible operators (COPS=? equivalent); may be slow, so the reply
-		// is deferred until the modem answers
+		// is deferred until the modem answers. NOTE: a real scan often runs
+		// MINUTES — interactive callers should use the async start/status pair
+		// below instead of this blocking form (kept for CLI use).
 		modem_scan: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
 				daemon.modem_scan(req.args.modem, (err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
+		// async scan: start returns immediately, status is polled. Survives the
+		// LuCI→uhttpd→rpcd timeout chain that kills a minutes-long blocking call.
+		modem_scan_start: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_scan_start(req.args.modem, (err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
+		modem_scan_status: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_scan_status(req.args.modem, (err, res) =>
 					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
 		},
 

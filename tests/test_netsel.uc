@@ -182,8 +182,34 @@ run = () => {
 							daemon.modem_scan('nope', (gerr) => {
 								eq(gerr.error, 'no_such_modem', 'scan: unknown modem guarded');
 
-								guard.cancel();
-								uloop.end();
+								// (8) async job: start returns immediately,
+								// status polling delivers the result
+								daemon.modem_scan_start('m0', (xerr, xres) => {
+									eq(xerr, null, 'scan_start: no error');
+									eq(xres.running, true, 'scan_start: job running');
+
+									let tries = 0;
+									let poll;
+									poll = () => uloop.timer(20, () => {
+										daemon.modem_scan_status('m0', (perr, st) => {
+											eq(perr, null, 'scan_status: no error');
+
+											if (st.running && tries++ < 100)
+												return poll();
+
+											eq(st.running, false, 'scan_status: job finished');
+											eq(st.operators, [
+												{ mcc: 262, mnc: 1, name: 'Testnet', status: 'current' },
+												{ mcc: 262, mnc: 2, name: 'Other', status: 'available' },
+												{ mcc: 262, mnc: 3, name: 'Nope', status: 'forbidden' },
+											], 'scan_status: operators delivered async');
+
+											guard.cancel();
+											uloop.end();
+										});
+									});
+									poll();
+								});
 							});
 						});
 					});

@@ -43,6 +43,11 @@ const BOARD_TTYS = [
 const LOCAL_PORTS = {
 	// Quectel RG650E: 0 DIAG, 1 NMEA, 2 AT, 3 AT secondary
 	'2c7c:0122': { '2': 'at', '3': 'at2' },
+	// MeiG SLM770A (ASR): if2 DIAG, if3 AT secondary, if4 AT, if5 NMEA
+	// (HW-verified on a Cudy LT300; first-ttyUSB heuristic picks the mute
+	// DIAG port). 4d57 = RNDIS composition, 4d58 = ECM.
+	'2dee:4d57': { '4': 'at', '3': 'at2' },
+	'2dee:4d58': { '4': 'at', '3': 'at2' },
 };
 
 // model-specific init sequences (old proto_qmi_serial_init)
@@ -678,6 +683,22 @@ export function find_tty(fx, device, tty_override, base_override)
 
 	// enumerate tty siblings below the same USB device
 	let tty_paths = fx.glob(sprintf('%s/*/tty*', base)) ?? [];
+
+	// an NCM modem's `device` is a netdev name (no cdc-wdm) — when the usbmisc
+	// anchor yields nothing, anchor on the net class instead. This matters for
+	// the RETRY path: at first resolve the ttys may not exist yet (runtime
+	// new_id bind), and the re-kick must be able to find them from scratch.
+	if (!length(tty_paths) && base_override == null && device != null) {
+		let name = substr(device, rindex(device, '/') + 1);
+		let nbase = sprintf('/sys/class/net/%s/device/..', name);
+		let npaths = fx.glob(sprintf('%s/*/tty*', nbase)) ?? [];
+
+		if (length(npaths)) {
+			base = nbase;
+			tty_paths = npaths;
+		}
+	}
+
 	let found = [];
 
 	for (let path in tty_paths) {

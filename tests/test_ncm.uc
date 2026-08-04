@@ -15,6 +15,7 @@
 
 import { eq, ok, done } from './lib/check.uc';
 import * as uloop from 'uloop';
+import * as fakefx from './lib/fakefx.uc';
 import * as modem_ncm from 'wwand/modem_ncm.uc';
 import * as context_ncm from 'wwand/context_ncm.uc';
 
@@ -295,7 +296,7 @@ function meig_script()
 		{ re: /^AT\+CGCONTRDP/, lines: [
 			'+CGCONTRDP: 1,5,internet,100.64.0.5.255.255.255.252,100.64.0.6,1.1.1.1,1.0.0.1',
 		] },
-		{ re: /^AT\+ECMDUP=1,1$/, lines: [ '^DCONN: 1,1,"IPV4"' ] },
+		{ re: /^AT\+ECMDUP=1,1,[0-2]$/, lines: [ '^DCONN: 1,1,"IPV4"' ] },
 		{ re: /^AT\+ECMDUP=1,0$/, lines: [ '^DEND: 1,0,"IPV4"' ] },
 		{ re: /^AT\+ECMDUP\?$/, lines: [ '+ECMDUP: 1,1,"IPV4",0,"IPV6"' ] },
 		{ re: /^AT\^DSFLOWQRY$/, lines: [ '^DSFLOWQRY: 100,0,0,592,645c,3c0f' ] },
@@ -314,7 +315,8 @@ push(scenarios, {
 		let m = env.modem;
 
 		eq(m.info.model, 'SLM770A', 'meig model from CGMM');
-		ok(m.dial.connect(1) == 'AT+ECMDUP=1,1', 'meig ECMDUP dial selected from CGMI');
+		ok(m.dial.connect(1) == 'AT+ECMDUP=1,1,2', 'meig ECMDUP dial selected from CGMI (default ipv4v6)');
+		ok(m.dial.connect(1, { pdp_type: 'ipv4' }) == 'AT+ECMDUP=1,1,0', 'ECMDUP carries pdp_type (ipv4)');
 
 		env.ctx.up((err, settings) => {
 			eq(err, null, 'meig context up succeeds');
@@ -328,7 +330,7 @@ push(scenarios, {
 			ok(a && index(a, 'secret') >= 0 && index(a, 'joe') >= 0, 'AUTHDATA carries password + username');
 			ok(a && match(a, /^AT\^AUTHDATA=1,2,/), 'AUTHDATA auth = CHAP (2)');
 
-			ok(env.tr.saw(/^AT\+ECMDUP=1,1$/) != null, 'ECMDUP connect issued');
+			ok(env.tr.saw(/^AT\+ECMDUP=1,1,0$/) != null, 'ECMDUP connect issued with pdp_type ipv4');
 
 			env.ctx.down(() => {
 				ok(env.tr.saw(/^AT\+ECMDUP=1,0$/) != null, 'ECMDUP disconnect issued');
@@ -337,6 +339,76 @@ push(scenarios, {
 		});
 	},
 });
+
+// --- s5b: MeiG auto-dialed bearer — ECMDUP connect rejected while up, the
+//          status probe sees the live session and the context adopts it
+//          (HW-found on SLM770A-R: the modem auto-dials after attach and
+//          answers a second ECMDUP with bare ERROR) ------------------------
+
+function meig_adopt_script()
+{
+	let s = meig_script();
+
+	for (let e in s) {
+		if (match('AT+ECMDUP=1,1,0', e.re)) {
+			e.lines = [];
+			e.term = 'ERROR';
+		}
+	}
+
+	return s;
+}
+
+push(scenarios, {
+	name: 's5b_meig_adopt',
+	script: meig_adopt_script(),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4', auth: 'none', mux_id: 0 },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 'meig adopt: context up succeeds despite ECMDUP ERROR');
+			eq(env.ctx.state, 'CONNECTED', 'meig adopt: context CONNECTED');
+			eq(settings?.ipv4?.addr, '100.64.0.5', 'meig adopt: ipv4 addr from CGCONTRDP');
+			ok(env.tr.saw(/^AT\+ECMDUP\?$/) != null, 'meig adopt: dial status probed after ERROR');
+			env.finish();
+		});
+	},
+});
+
+// --- ensure_serial_bind: runtime usb-serial new_id registration -------------
+// (MeiG SLM770A ECM 2dee:4d58 — the kernel option driver only knows the RNDIS
+// PID, so wwand registers the ECM id itself before AT port discovery)
+
+function bind_fx(over)
+{
+	return fakefx.create({
+		files: {
+			'/sys/class/net/usb0/device/../idVendor': '2dee\n',
+			'/sys/class/net/usb0/device/../idProduct': '4d58\n',
+			...(over?.files ?? {}),
+		},
+		present: { '/sys/bus/usb-serial/drivers/option1/new_id': true, ...(over?.present ?? {}) },
+		globs: over?.globs ?? {},
+	});
+}
+
+let bfx = bind_fx();
+ok(modem_ncm.ensure_serial_bind(bfx, 'usb0') === true, 'new_id: known ECM pid is registered');
+ok(bfx.actions[0] == 'write /sys/bus/usb-serial/drivers/option1/new_id 2dee 4d58',
+	'new_id: correct vid/pid written to the option driver');
+
+// ttys already bound -> no write
+let bfx2 = bind_fx({ globs: { '/sys/class/net/usb0/device/../*/tty*':
+	[ '/sys/class/net/usb0/device/../1-1:1.4/ttyUSB2' ] } });
+ok(modem_ncm.ensure_serial_bind(bfx2, 'usb0') === false, 'new_id: skipped when ttys exist');
+eq(length(bfx2.actions), 0, 'new_id: no write when ttys exist');
+
+// unknown pid -> no write
+let bfx3 = bind_fx({ files: { '/sys/class/net/usb0/device/../idProduct': '4d57\n' } });
+ok(modem_ncm.ensure_serial_bind(bfx3, 'usb0') === false, 'new_id: unknown pid untouched');
+
+// option module not loaded -> no write, caller retries via hotplug
+let bfx4 = bind_fx({ present: { '/sys/bus/usb-serial/drivers/option1/new_id': false } });
+ok(modem_ncm.ensure_serial_bind(bfx4, 'usb0') === false, 'new_id: driver absent -> no-op');
 
 // --- s6: RG650E-EU HW reality — QNETDEVCTL unsupported -> CGACT dial + the
 //         real dual-stack CGCONTRDP line -----------------------------------

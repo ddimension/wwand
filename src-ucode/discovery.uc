@@ -564,7 +564,14 @@ export function resolve_control(cfg, fx)
 
 	if (!netdev && cfg.netdev && NCM_DRIVERS[netdev_driver(cfg.netdev, fx)])
 		netdev = cfg.netdev;
-	else if (!netdev && cfg.usb_path)
+
+	// the migrated network model stores a netdev-name in the modem `device`
+	// (there is no /dev control node for NCM) — accept it here too, so a modem
+	// whose `serial` anchor got lost (e.g. a config rewrite) still resolves
+	if (!netdev && cfg.device && NCM_DRIVERS[netdev_driver(cfg.device, fx)])
+		netdev = cfg.device;
+
+	if (!netdev && cfg.usb_path)
 		netdev = ncm_netdev_for_usb_path(cfg.usb_path, fx);
 
 	if (netdev) {

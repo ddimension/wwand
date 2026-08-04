@@ -127,12 +127,17 @@ const DIAL_QNETDEVCTL = {
 };
 
 // MeiG ECMDUP dial.
-//   AT+ECMDUP=<pdpid>,<action>  (action 1=connect, 0=disconnect)
+//   AT+ECMDUP=<pdpid>,<action>[,<pdp_type>]  (action 1=connect, 0=disconnect;
+//   pdp_type 0=IPv4, 1=IPv6, 2=IPv4v6 — omitting it dials IPv4 only, so pass
+//   it explicitly; HW-verified on SLM770A-R)
 //   AT+ECMDUP? -> +ECMDUP: <pdpid>,<v4status>,"IPV4",<v6status>,"IPV6"
+const ECMDUP_TYPE = { ipv4: 0, ipv6: 1, ipv4v6: 2 };
+
 const DIAL_ECMDUP = {
 	name: 'ecmdup',
 	probe: null,
-	connect: (cid) => sprintf('AT+ECMDUP=%d,1', cid),
+	connect: (cid, cfg) => sprintf('AT+ECMDUP=%d,1,%d', cid,
+		ECMDUP_TYPE[cfg?.pdp_type ?? 'ipv4v6'] ?? 2),
 	disconnect: (cid) => sprintf('AT+ECMDUP=%d,0', cid),
 	status: 'AT+ECMDUP?',
 	status_state: (lines, cid) => {
@@ -1234,6 +1239,53 @@ function vendor_telemetry(self)
 	return self.vendor?.telemetry ?? TELEMETRY_GENERIC;
 }
 
+// --- vendor-serial driver bind (usb-serial new_id) ---------------------------
+//
+// Some modem compositions carry their AT/DIAG serial interfaces under a USB
+// PID the in-kernel `option` driver does not know — typically the non-default
+// composition (the kernel id table only covers the mode the vendor ships).
+// Then no ttyUSB nodes exist, open_at finds no AT port and the modem never
+// dials. For known devices, register the id at runtime: writing "vid pid" to
+// the driver's new_id probes the already-present device synchronously (and
+// covers any later re-enumeration), so the ttys appear right away.
+//
+//   'vid:pid' (lowercase hex) -> usb-serial driver name under
+//   /sys/bus/usb-serial/drivers/<name>/new_id
+const SERIAL_NEW_ID = {
+	// MeiG SLM770A ECM composition — the kernel knows only RNDIS (2dee:4d57).
+	// HW-verified on a Cudy LT300 v3.
+	'2dee:4d58': 'option1',
+};
+
+// bind the vendor serial driver for a known composition; netdev anchors the
+// USB parent. Returns true when a new_id write was performed. No-op when the
+// device is unknown, ttys already exist, or the driver module is not loaded
+// (a later tty/net hotplug re-kick retries via the normal start path).
+export function ensure_serial_bind(fx, netdev)
+{
+	if (!netdev)
+		return false;
+
+	let base = sprintf('/sys/class/net/%s/device/..', netdev);
+	let vid = lc(trim(fx.read(sprintf('%s/idVendor', base)) ?? ''));
+	let pid = lc(trim(fx.read(sprintf('%s/idProduct', base)) ?? ''));
+	let drv = SERIAL_NEW_ID[sprintf('%s:%s', vid, pid)];
+
+	if (!drv)
+		return false;
+
+	// serial interfaces already bound? (same sibling glob open_at uses)
+	if (length(fx.glob(sprintf('%s/*/tty*', base)) ?? []) > 0)
+		return false;
+
+	let node = sprintf('/sys/bus/usb-serial/drivers/%s/new_id', drv);
+
+	if (!fx.exists(node))
+		return false;
+
+	return fx.write(node, sprintf('%s %s\n', vid, pid)) == true;
+};
+
 export function create(opts)
 {
 	let self = {
@@ -1337,6 +1389,13 @@ export function create(opts)
 			return;
 
 		self.set_state('INIT_TRANSPORT');
+
+		// known composition whose serial ports need a runtime driver bind
+		// (SERIAL_NEW_ID) — do it before the AT port discovery below
+		let bind_fx = at_opts.fx ?? netlink.default_fx((l, m) => log(l, m));
+
+		if (ensure_serial_bind(bind_fx, self.device))
+			log('notice', sprintf('registered vendor serial driver id for %s (usb-serial new_id)', self.device));
 
 		modem_common.open_at(self, {
 			at_opts: at_opts,

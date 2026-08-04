@@ -95,6 +95,10 @@ registers both `add_protocol wwand` + `add_protocol qmi`;
 - `Date.now()`/`new Date()`/`Math.random()` unavailable; `time()` is a builtin
   (works in the daemon; not in Workflow scripts).
 - `replace(s, /-/g, '')` for global replace (string arg replaces first only).
+- **Module-level `export function f() {…}` MUST end with `};`** — the OpenWrt
+  ucode parser errors ("Expecting ';'" at the next export) without it; the
+  newer host-built ucode is lenient, so `run_tests.sh` does NOT catch this.
+  Always sanity-import changed modules on the target after deploy.
 
 ## Build / test / deploy
 - **Tests (host):** `cd tests && sh run_tests.sh` — 14 suites, mockhub

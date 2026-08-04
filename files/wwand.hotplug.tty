@@ -1,0 +1,21 @@
+# wwand — notify the daemon when a modem serial (AT) port appears.
+# Installed as /etc/hotplug.d/tty/20-wwand (procd fires 'tty' for
+# SUBSYSTEM=usb-serial, DEVNAME ttyUSB*/ttyACM*).
+#
+# An AT-driven modem's data netdev (cdc_ether/cdc_ncm/rndis) can enumerate long
+# before its serial ports are usable — e.g. when the vendor-serial driver only
+# binds after a runtime new_id write or a late kmodloader. The daemon then fails
+# open_at with no_at_port and sits in its retry backoff; forwarding the tty
+# arrival lets it retry immediately (cold-boot race seen on a Cudy LT300 /
+# MeiG SLM770A in ECM mode).
+
+[ "$ACTION" = "add" ] || return 0 2>/dev/null || exit 0
+
+case "$DEVNAME" in
+	ttyUSB*|ttyACM*) ;;
+	*) return 0 2>/dev/null || exit 0 ;;
+esac
+
+ubus -t 3 call wwand hotplug "{\"action\":\"add\",\"device\":\"$DEVNAME\"}" 2>/dev/null
+
+return 0 2>/dev/null || exit 0

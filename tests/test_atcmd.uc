@@ -324,6 +324,27 @@ function quectel_fx(over)
 // exact lookup: RG502Q AT port is interface 2 -> ttyUSB2
 eq(atcmd.find_tty(quectel_fx(), '/dev/cdc-wdm0', null), '/dev/ttyUSB2', 'find: atport lookup');
 
+// NCM: `device` is a netdev name (no usbmisc anchor) — the net-class fallback
+// must find the ttys, incl. the LOCAL_PORTS role pick (MeiG SLM770A ECM: if4).
+// This is the retry path after a runtime new_id bind created the ttys late.
+const NBASE = '/sys/class/net/usb0/device/..';
+
+let ncm_tty_fx = fakefx.create({
+	files: {
+		[sprintf('%s/idVendor', NBASE)]: "2dee\n",
+		[sprintf('%s/idProduct', NBASE)]: "4d58\n",
+		[sprintf('%s/1-1:1.2/bInterfaceNumber', NBASE)]: "02\n",
+		[sprintf('%s/1-1:1.4/bInterfaceNumber', NBASE)]: "04\n",
+	},
+	globs: {
+		[sprintf('%s/*/tty*', NBASE)]: [
+			sprintf('%s/1-1:1.2/ttyUSB0', NBASE),
+			sprintf('%s/1-1:1.4/ttyUSB2', NBASE),
+		],
+	},
+});
+eq(atcmd.find_tty(ncm_tty_fx, 'usb0', null), '/dev/ttyUSB2', 'find: netdev-anchored lookup (NCM)');
+
 // config override wins
 eq(atcmd.find_tty(quectel_fx(), '/dev/cdc-wdm0', '/dev/ttyACM7'), '/dev/ttyACM7', 'find: override wins');
 

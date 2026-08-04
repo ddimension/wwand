@@ -218,6 +218,13 @@ const PROFILES = {
 	'zyxel,nr7101': {
 		reset_gpio: 'gpio515',
 	},
+	// Cudy LT300 (MT7628, MeiG SLM770A-R): the modem RESET/power-enable line is
+	// exported as the named gpio `4g` (value 1 = modem on). No separate
+	// switchable USB power rail; status LEDs are OS-owned -> none here.
+	// HW-verified on the v3.
+	'cudy,lt300-v3': {
+		reset_gpio: '4g',
+	},
 };
 
 // --- instance ----------------------------------------------------------------

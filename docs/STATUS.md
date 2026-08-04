@@ -1,7 +1,70 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-07-26. All test suites green; all committed/pushed.
-Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+_Last updated: 2026-08-04. All test suites green (31 suites); NCM fixes below
+UNCOMMITTED. Three control backends (QMI, MBIM, NCM) behind one daemon-neutral
+contract._
+
+## Cudy LT300 v3 / MeiG SLM770A-R bring-up — NCM HW fixes (2026-08-04)
+
+First real NCM/ECM field bring-up (Cudy LT300 v3, MT7628, 58 MB RAM; MeiG
+SLM770A-R, ASR platform, USB 2dee). Modem switched RNDIS→ECM (`AT+SER=2,1`;
+2 = ECM, 3 = RNDIS — QModem's meig.sh mapping, HW-confirmed). All fixes
+HW-validated on the device incl. three cold-boot cycles; **uncommitted**:
+
+- `atcmd.uc` LOCAL_PORTS: MeiG SLM770A `2dee:4d57` (RNDIS) / `2dee:4d58` (ECM)
+  → if4 `at`, if3 `at2` (if2 is a mute DIAG port the first-ttyUSB heuristic
+  used to pick → every AT timed out, dial never started).
+- `modem_ncm.uc` DIAL_ECMDUP: carries `<pdp_type>` (`AT+ECMDUP=<cid>,1,<0|1|2>`)
+  — without it the modem dials IPv4-only.
+- `context_ncm.uc`: on dial-connect ERROR probe `dial.status`; if the bearer is
+  already up (SLM770A auto-dials after attach and rejects a second ECMDUP with
+  bare ERROR) **adopt the live session** instead of failing forever.
+- `daemon.uc`: the stuck-pending interface reset marks `entry._reset_pending`;
+  `context_down` no longer reads the self-inflicted teardown as operator intent
+  (kept killing the queued activation and clearing `wanted` → interface stayed
+  down until a manual wwand restart).
+- `daemon.uc` + new `files/wwand.hotplug.tty` (feed Makefile updated): tty
+  hotplug add re-kicks a modem parked in `no_at_port` ABSENT backoff — NCM
+  serial ports can appear long after the netdev (vendor-serial `new_id` bind).
+- `discovery.uc` resolve_control: accept a netdev-name `option device` for the
+  NCM classification (was serial/netdev/usb_path only) — a LuCI save dropped
+  `serial` from the wwand_modem section and the modem became UNRESOLVED.
+  (Open: the LuCI modemopts `serial` field saved empty; consider read-back.)
+
+Batch 2 (same day, all HW-validated on the Cudy incl. a clean cold boot;
+**uncommitted**):
+
+- `modem_ncm.uc` **SERIAL_NEW_ID** table + `ensure_serial_bind()` — vid:pid
+  whose serial interfaces the kernel `option` driver doesn't know (MeiG ECM
+  `2dee:4d58`); wwand writes the id to
+  `/sys/bus/usb-serial/drivers/<drv>/new_id` itself before AT discovery. The
+  device-local init/hotplug hack scripts are REMOVED from the Cudy — wwand owns
+  this now. (Complements `board.uc` `option_ids`, which is board-keyed +
+  init-time only.)
+- `atcmd.uc` find_tty: **netdev anchor fallback** — an NCM `device` is a netdev
+  name; when `/sys/class/usbmisc/<dev>` yields no ttys, anchor on
+  `/sys/class/net/<dev>/device/..`. Without this the retry path (ttys created
+  late by the new_id bind) could never find the port even with ttys present.
+- `board.uc`: **Cudy LT300 v3 profile** — modem reset line = named gpio `4g`
+  (`/sys/class/gpio/4g/value`). HW-validated: `modem_repower` recovered a modem
+  that had vanished from the USB bus entirely.
+- **Async network scan** — `modem_scan_start`/`modem_scan_status` (daemon +
+  ubus): a real scan runs MINUTES (AT+COPS=? and QMI NAS alike), which the
+  LuCI→uhttpd(script_timeout 60 s)→rpcd chain cannot survive as one blocking
+  call. LuCI settings.js now starts the job and polls every 3 s (legacy
+  blocking fallback kept for old daemons). SCAN_TIMEOUT_MS 90 s → 240 s.
+  HW-validated: 41 s scan on the SLM770A found Telekom.de + o2.
+- luci-app-wwand `modemopts.js`: custom `o.load` overrides now end in
+  `self.super('load', [section_id])` instead of `self.cfgvalue(...)` (canonical
+  idiom; suspect in the LuCI save that dropped `serial`).
+- **ucode gotcha (now in CLAUDE.md):** module-level `export function f() {…}`
+  needs a trailing `};` — OpenWrt's ucode parser rejects the file otherwise
+  ("Expecting ';'"), while the newer host-built ucode accepts it, so the test
+  suite does NOT catch it. The daemon then reports the module's backend as
+  "package not installed" (lazy-load treats any require error that way).
+
+The kernel-proper fix (add 2dee:4d58 to the option driver id table upstream)
+remains open; wwand's runtime bind covers it meanwhile.
 
 ## QModem study — datapath parity items (2026-07-26)
 

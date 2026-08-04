@@ -196,6 +196,14 @@ eq(c3.tty, '/dev/ttyUSB2', 'ncm: AT tty resolved from the netdev USB parent');
 eq(discovery.netdev_driver('wwan0', ncm_fx), 'cdc_ncm', 'netdev_driver reads net/<n>/device/driver');
 eq(discovery.control_of_netdev('wwan0', ncm_fx), 'ncm', 'control_of_netdev classifies cdc_ncm as ncm');
 
+// NCM `option device` holding the netdev name (migrated network model) with NO
+// serial/imei/netdev anchor — a config rewrite that dropped `serial` (HW-found:
+// LuCI save on a Cudy LT300/SLM770A) must still resolve via device-as-netdev
+let c3d = discovery.resolve_control({ device: 'wwan0', tty: null }, ncm_fx);
+eq(c3d?.protocol, 'ncm', 'device=netdev-name (ncm driver) -> ncm');
+eq(c3d?.netdev, 'wwan0', 'device=netdev-name: datapath netdev');
+eq(c3d?.device, null, 'device=netdev-name: no control device');
+
 // NCM discovered from a usb_path (scan the USB device's interfaces)
 let ncm_fx2 = fakefx.create({
 	present: { '/sys/class/net/wwan0': true },
