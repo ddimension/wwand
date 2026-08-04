@@ -23,6 +23,7 @@ import * as sim from './sim.uc';
 import * as sms from './sms.uc';
 import * as atcmd from './atcmd.uc';
 import * as quirks from './modem_quirks.uc';
+import * as apndb from './apndb.uc';
 
 const UP_GUARD_MS = 150000;
 
@@ -142,6 +143,7 @@ export function create(opts)
 	// forward-declared: ucode closures capture only already-declared vars, and
 	// these self-reference (the TDZ trap — see CLAUDE.md ucode gotchas)
 	let clear_reconnect, retry_activate, enter_reconnecting, activate, derive_netdev;
+	let maybe_autosetup_fill;
 
 	let on_modem_event = (modem, event, data) => {
 		// clear the one-shot manual-PIN-release flags once the unlock resolved
@@ -176,6 +178,14 @@ export function create(opts)
 						deps.learn_device(centry.cfg.interface, l3);
 				}
 			}
+
+			// autosetup phase 2 (one-shot): an interface the zero-config
+			// autosetup created still carries `option autosetup 1`. Now that
+			// the SIM is read, match its ICCID/IMSI against the internal APN
+			// table and COPY the values into the config (uci) — the config is
+			// the single source of truth afterwards, the marker is cleared.
+			// No table match -> keep the empty APN (SIM-provisioned attach).
+			maybe_autosetup_fill(modem);
 
 			// (re)establish interface-bound contexts sitting IDLE. Decide per
 			// interface by its netifd state so the two paths never race on
@@ -307,6 +317,49 @@ export function create(opts)
 	self.set_hold_max_ms = function(ms) {
 		if (ms > 0)
 			hold_max_ms = ms;
+	};
+
+	// autosetup phase 2: copy the ICCID/IMSI-matched APN defaults into the
+	// interface config (uci, via deps.autosetup_fill) — once per interface per
+	// boot, only for interfaces the autosetup itself created (cfg.autosetup).
+	let autosetup_done = {};
+
+	maybe_autosetup_fill = (modem) => {
+		if (!(self.autosetup ?? true))
+			return;
+
+		for (let name, entry in self.contexts) {
+			if (entry.cfg.modem != modem.id || !entry.cfg.autosetup ||
+			    !entry.cfg.interface || autosetup_done[name])
+				continue;
+
+			autosetup_done[name] = true;
+
+			let info = self.modems[modem.id]?.modem?.info ?? {};
+			let vals = apndb.lookup(info.iccid, info.imsi);
+
+			if (!vals) {
+				log('info', sprintf('autosetup: no APN-table match for %s (iccid %s, imsi %s) — keeping the SIM-provisioned attach',
+					name, info.iccid ?? '?', info.imsi ?? '?'));
+				continue;
+			}
+
+			if (!deps.autosetup_fill)
+				continue;
+
+			if (deps.autosetup_fill(entry.cfg.interface, vals)) {
+				log('notice', sprintf('autosetup: %s defaults written to %s (apn %s) — reloading',
+					vals.note ?? 'APN-table', entry.cfg.interface, vals.apn));
+
+				// re-read our own config, then let netifd re-run the proto
+				// setup with the new values
+				if (self.reload)
+					self.reload();
+
+				if (deps.network_reload)
+					deps.network_reload();
+			}
+		}
 	};
 
 	// forward-declared: retry_activate self-references (reschedule) and
@@ -777,6 +830,9 @@ export function create(opts)
 		// off-switch for the l3-device learn-back (default on); read before the
 		// no-op short-circuit so a globals-only edit still updates it
 		self.write_device = parsed.globals?.write_device ?? true;
+
+		// zero-config autosetup gate (default on; wwand_globals option autosetup)
+		self.autosetup = parsed.globals?.autosetup ?? true;
 
 		// unchanged modem/context config is a no-op: the reload trigger also
 		// fires for unrelated /etc/config/network edits (LAN etc.), and the
@@ -1877,6 +1933,19 @@ export function create(opts)
 		log('info', sprintf('hotplug %s %s', action, devname));
 
 		if (action == 'add') {
+			// zero-config autosetup phase 1: a modem device appears while
+			// NOTHING wwand-related is configured -> create wwmodem_auto +
+			// interface wwan0 (joined to the default wan firewall zone) and
+			// reload our config. Gated by wwand_globals.autosetup (default
+			// on); deps.autosetup_create re-checks the live uci for emptiness.
+			if ((self.autosetup ?? true) && !length(keys(self.modems)) &&
+			    deps.autosetup_create && deps.autosetup_create(devname)) {
+				log('notice', sprintf('autosetup: modem %s appeared without any configuration — created wwmodem_auto + interface wwan0 (wan zone)', devname));
+
+				if (self.reload)
+					self.reload();
+			}
+
 			// try to start modems that could not be resolved before (e.g.
 			// wwand started before USB enumeration finished at boot)
 			for (let name, entry in self.modems) {

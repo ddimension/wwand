@@ -255,6 +255,100 @@ function run_daemon()
 				logmod.log('notice', 'learn_device: recorded l3 device %s on interface %s',
 					l3name, iface_section);
 			},
+			// zero-config autosetup phase 1: create the initial config for the
+			// first modem that appears while nothing wwand-related exists —
+			// named sections wwmodem_auto + interface wwan0, joined to the
+			// default wan firewall zone. Returns true when config was written.
+			autosetup_create: (devname) => {
+				let cursor = libuci.cursor();
+
+				// re-check emptiness against the LIVE config (a manual edit
+				// could be newer than the daemon's parsed view)
+				let occupied = false;
+				cursor.foreach('network', 'wwand_modem', () => { occupied = true; return false; });
+				cursor.foreach('network', 'interface', (s) => {
+					if (s.proto == 'wwand' || s.proto == 'qmi') {
+						occupied = true;
+						return false;
+					}
+				});
+
+				if (occupied || cursor.get('network', 'wwan0') != null)
+					return false;
+
+				let dev = (substr(devname ?? '', 0, 7) == 'cdc-wdm')
+					? '/dev/' + devname : devname;
+
+				cursor.set('network', 'wwmodem_auto', 'wwand_modem');
+				cursor.set('network', 'wwmodem_auto', 'device', dev);
+				cursor.set('network', 'wwan0', 'interface');
+				cursor.set('network', 'wwan0', 'proto', 'wwand');
+				cursor.set('network', 'wwan0', 'modem', 'wwmodem_auto');
+				cursor.set('network', 'wwan0', 'autosetup', '1');
+				cursor.commit('network');
+
+				// join the default wan firewall zone
+				let fw = libuci.cursor();
+				let zone = null;
+
+				fw.foreach('firewall', 'zone', (s) => {
+					if (s.name == 'wan') {
+						zone = s['.name'];
+						return false;
+					}
+				});
+
+				if (zone) {
+					let nets = fw.get('firewall', zone, 'network');
+
+					nets = (type(nets) == 'array') ? [ ...nets ]
+						: ((nets != null && nets != '') ? [ nets ] : []);
+
+					if (!('wwan0' in nets)) {
+						push(nets, 'wwan0');
+						fw.set('firewall', zone, 'network', nets);
+						fw.commit('firewall');
+					}
+				}
+
+				return true;
+			},
+			// autosetup phase 2: copy the ICCID/IMSI-matched APN defaults onto
+			// the autosetup-created interface section and clear the marker —
+			// one-shot, never clobbers values the operator set meanwhile.
+			autosetup_fill: (iface_section, vals) => {
+				let cursor = libuci.cursor();
+
+				if (cursor.get('network', iface_section) == null)
+					return false;
+
+				if (cursor.get('network', iface_section, 'autosetup') != '1')
+					return false;   // marker gone: the operator took over
+
+				let cur_apn = cursor.get('network', iface_section, 'apn');
+
+				if (cur_apn != null && cur_apn != '')
+					return false;   // operator set an APN — leave everything alone
+
+				cursor.set('network', iface_section, 'apn', vals.apn);
+
+				if (vals.pdp_type)
+					cursor.set('network', iface_section, 'pdp_type', vals.pdp_type);
+
+				if (vals.auth)
+					cursor.set('network', iface_section, 'auth', vals.auth);
+
+				if (vals.username)
+					cursor.set('network', iface_section, 'username', vals.username);
+
+				if (vals.password)
+					cursor.set('network', iface_section, 'password', vals.password);
+
+				cursor.delete('network', iface_section, 'autosetup');
+				cursor.commit('network');
+				return true;
+			},
+			network_reload: () => conn.call('network', 'reload', {}),
 			// apply an operator-pushed NITZ time — but ONLY when the system clock
 			// is clearly unset (an RTC-less router booted before NTP synced), so we
 			// never fight sysntpd once it has taken over. Conservative threshold:

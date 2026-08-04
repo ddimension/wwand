@@ -6,6 +6,24 @@ API. This document is the reference for configuration, the ubus API, diagnostics
 and troubleshooting. For the design rationale see [architecture.md](architecture.md);
 to add a modem, quirk or backend see [extending.md](extending.md).
 
+## Zero-config autosetup
+
+On a device with **no wwand configuration at all** (no `wwand_modem`
+section, no `proto 'wwand'`/`'qmi'` interface), wwand sets itself up when a
+modem appears: it creates `config wwand_modem 'wwmodem_auto'` (anchored to
+the detected device) and `config interface 'wwan0'` (`proto 'wwand'`),
+joins `wwan0` to the default `wan` firewall zone and brings it up. Once the
+SIM is read, the ICCID/IMSI is matched against a small internal APN table
+(`apndb.uc`: prefix → apn/pdp type/auth/credentials); on a match the values
+are **copied into `/etc/config/network` once** and the `autosetup` marker
+is removed — afterwards the config is an ordinary hand-editable config. No
+table match keeps the APN empty, which attaches with the SIM/modem-
+provisioned APN.
+
+Disable with `option autosetup '0'` in `config wwand_globals`. Autosetup
+never runs when any wwand config exists, and the one-shot fill never
+overwrites operator-set values.
+
 ## Configuration
 
 **All configuration lives in `/etc/config/network`** (WireGuard-style). Three

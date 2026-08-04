@@ -88,6 +88,13 @@ function apply_globals(s, result)
 	if (s.write_device != null)
 		result.globals.write_device = bool_opt(s.write_device, true);
 
+	// zero-config autosetup (default on): when NO wwand_modem / proto-wwand
+	// interface exists and a modem shows up, wwand creates wwmodem_auto +
+	// interface wwan0 (default wan firewall zone) and later copies the
+	// ICCID-matched APN defaults (apndb) into the config — one-shot.
+	if (s.autosetup != null)
+		result.globals.autosetup = bool_opt(s.autosetup, true);
+
 	if (s.hold_max != null) {
 		let hm = +s.hold_max;
 
@@ -395,6 +402,10 @@ function compat_translate(raw, result)
 				use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
 				settings_poll: +(s.settings_poll ?? 300),
 				auto: bool_opt(s.auto, true),
+				// autosetup marker: this interface was created by the
+				// zero-config autosetup and still awaits its one-shot
+				// ICCID->APN fill-in (cleared by the daemon afterwards)
+				autosetup: bool_opt(s.autosetup, false),
 			});
 
 			continue;
@@ -574,7 +585,7 @@ export function parse(raw)
 	let result = {
 		// hold_max: seconds the daemon holds a lost interface up while
 		// reconnecting in place before giving up and downing it (netifd teardown)
-		globals: { log_level: 'info', hold_max: 90, write_device: true },
+		globals: { log_level: 'info', hold_max: 90, write_device: true, autosetup: true },
 		modems: {},
 		contexts: {},
 		sims: {},

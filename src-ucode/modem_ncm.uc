@@ -1509,8 +1509,25 @@ export function create(opts)
 						ask('AT+CIMI', (imsi) => {
 							self.info.imsi = imsi;
 
-							ask('AT+QCCID', (iccid) => {
-								self.info.iccid = iccid;
+							// ICCID command varies by vendor: Quectel AT+QCCID,
+							// 3GPP-ish AT+CCID, MeiG (ASR) only AT+ICCID
+							// (HW-verified on the SLM770A-R — QCCID/CCID both
+							// ERROR there and the identity ended up iccid '?')
+							let iccid_cmds = [ 'AT+QCCID', 'AT+CCID', 'AT+ICCID' ];
+							let try_iccid;
+
+							try_iccid = (idx, done2) => {
+								if (idx >= length(iccid_cmds))
+									return done2(null);
+
+								ask(iccid_cmds[idx], (iccid) =>
+									iccid ? done2(iccid) : try_iccid(idx + 1, done2));
+							};
+
+							try_iccid(0, (iccid) => {
+								// strip the '+[Q]ICCID: ' echo some firmwares keep
+								let m = iccid ? match(iccid, /([0-9]{18,20})/) : null;
+								self.info.iccid = m ? m[1] : iccid;
 
 								log('notice', sprintf('ncm modem %s (%s), imei %s, imsi %s, iccid %s',
 									self.info.model ?? '?', self.info.manufacturer ?? '?',
