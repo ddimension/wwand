@@ -784,7 +784,7 @@ when called from LuCI).
 
 | Method | Arguments | Description |
 |---|---|---|
-| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`) + contexts + `board` (detected profile, power/reset capability) |
+| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `locks` — cell/frequency-lock read-back) + contexts + `board` (detected profile, power/reset capability) |
 | `reload` | — | re-read UCI and rebuild |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
@@ -792,7 +792,10 @@ when called from LuCI).
 | `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` |
 | `modem_location` | `modem` | last QMI LOC fix (when `location` is enabled) |
 | `modem_at` | `modem`, `command`, `timeout?` | run an AT command on the modem's AT port |
-| `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor |
+| `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor. Sets are **idempotent**: values the modem already carries are dropped; nothing left → `unchanged: true`, no NV write, no radio disturbance |
+| `modem_scan` / `modem_scan_start` / `modem_scan_status` | `modem` | visible-operator scan (sync, or async start+poll — a scan takes up to ~90 s) |
+| `modem_set_network_selection` | `modem`, `mode`, `mcc?`, `mnc?` | `auto` or `manual` PLMN selection (QMI NAS / MBIM passthrough / AT+COPS). Idempotent (`unchanged: true` when the modem already runs the requested selection); on deferred-apply models the result carries `deferred: true` + `apply: 'modem_reset'` |
+| `modem_reset` | `modem` | admin soft modem reset (QMI: DMS offline→reset, NCM: `AT+CFUN=1,1`) — the apply step for `deferred` results (write ACL). The modem re-enumerates and every `auto` interface comes back up on its own |
 | `modem_plmn_lists` | `modem` | preferred/forbidden PLMN lists |
 | `modem_sim_slots` | `modem` | physical slots: card presence, active, ICCID, eUICC flag, EID |
 | `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
@@ -807,6 +810,23 @@ when called from LuCI).
 | `modem_set_protocol` | `modem`, `protocol` | switch the control protocol (`qmi` ⇄ `mbim`); the modem resets |
 | `context_up` / `context_down` | `context` or `interface` | connect / disconnect (deferred reply with the IP config) |
 | `context_status` / `context_settings` | `context` or `interface` | state, per-family cid/pdh, IP settings |
+
+### Idempotent sets & deferred apply
+
+Radio-sensitive writes are guarded end to end: network selection, the
+settings editor, the WDS profile writes at activation, the NCM `CGDCONT`
+programming at dial time and the SIM slot switch all **read the live state
+first and skip the write when nothing would change** (`unchanged: true` in
+the result). Configured credentials always write — they cannot be read back
+for comparison.
+
+Some modems (quirk-flagged, e.g. MeiG SLM7xx) apply selection/band NV
+changes only after a modem reboot. Their set results carry
+`deferred: true` + `apply: 'modem_reset'` — the **caller decides**: the
+LuCI settings page shows a notice and offers a "Restart modem now" button
+(`modem_reset`). During **boot/init** a needed reset is applied
+automatically but **batched** — changes collect in the init-reset list and
+one single modem reset at the end of init applies them all.
 
 **Events.** The daemon broadcasts `wwand.modem` (`{ modem, event, … }`, events
 `registered` / `deregistered` / `sim_blocked` / `removed` / …) and

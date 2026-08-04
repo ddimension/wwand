@@ -28,6 +28,21 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   **`qmi`** alias for back-compat. No `/etc/config/wwand` for new installs; old formats +
   stock `proto mbim`/`ncm` auto-migrate (`config.migrate_plan` + uci-defaults).
   Full model in `docs/reference.md`; how to extend in `docs/extending.md`.
+- **Zero-config autosetup** (default ON, opt-out `wwand_globals option
+  autosetup '0'`): modem appears on an unconfigured box → daemon hotplug
+  creates `wwmodem_auto` + `interface wwan0` (default wan firewall zone),
+  then ONE-SHOT ICCID/IMSI→APN fill from `apndb.uc` is COPIED into uci
+  (marker `option autosetup 1` cleared; uci writers live in main.uc deps
+  `autosetup_create`/`autosetup_fill`). HW-verified on the Cudy LT300.
+- **Idempotent sets + deferred apply**: netsel/settings/WDS-profile/NCM
+  CGDCONT/slot-switch all read-before-write (`unchanged: true`, no radio
+  bounce). Quirk `netsel_deferred`/`settings_deferred` (MeiG SLM7xx) →
+  result `deferred: true` + `apply: 'modem_reset'` (ubus `modem_reset`:
+  QMI DMS offline→reset, NCM CFUN=1,1; auto ifaces come back on their
+  own). During INIT needed resets collect in `_init_resets` → ONE batched
+  reset at the end. `option at2_external '1'` releases the secondary AT
+  port for external tools (status `at2_released`; telemetry falls back to
+  the control channel).
 - `docs/architecture.md`, `docs/backend-interface.md`, `docs/extending.md`,
   `docs/telemetry-survey.md`, `docs/STATUS.md`.
 
