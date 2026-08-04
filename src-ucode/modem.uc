@@ -374,6 +374,24 @@ export function create(opts)
 	};
 
 
+	// admin-triggered soft modem reset (ubus modem_reset — the apply step for
+	// `deferred` selection/band settings): DMS offline -> reset, the same
+	// sequence the recovery ladder's modem_reset rung uses. The modem drops off
+	// the bus and re-enumerates; discovery rebuilds this modem and the daemon
+	// kicks every auto interface back up once it re-registers.
+	self.reset = function(cb) {
+		if (!self.dms)
+			return cb({ error: 'unsupported_on_backend' });
+
+		log('warn', 'admin modem reset (DMS offline -> reset)');
+		qmi_backend.set_opmode(self.dms, 'offline', () => {
+			qmi_backend.set_opmode(self.dms, 'reset', () => {
+				notify_contexts('lost');
+				cb(null, { resetting: true });
+			});
+		});
+	};
+
 	// switch the control protocol (QMI <-> MBIM). On a successful change the
 	// modem resets and re-enumerates; the caller lets this modem object die
 	// and discovery rebuilds it under the new driver.

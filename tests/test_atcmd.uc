@@ -307,6 +307,18 @@ eq(cl[0], { enabled: true, rat: 'LTE', lock_type: 1, arfcn: 1300, pci: 316 },
 eq(cl[1].enabled, false, 'celllock: disabled entry');
 eq(atcmd.parse_celllock([ 'OK' ]), null, 'celllock: no lines -> null');
 
+// --- AT+COPS? read form (network-selection idempotency guard) ----------------
+eq(atcmd.parse_cops_read([ '+COPS: 0,2,"26201"' ]),
+	{ mode: 0, format: 2, oper: '26201', plmn: '26201' },
+	'cops read: numeric auto');
+eq(atcmd.parse_cops_read([ '+COPS: 1,0,"Testnet"' ]),
+	{ mode: 1, format: 0, oper: 'Testnet', plmn: null },
+	'cops read: long-format oper has no plmn digits');
+eq(atcmd.parse_cops_read([ '+COPS: 0' ]),
+	{ mode: 0, format: null, oper: null, plmn: null },
+	'cops read: bare mode');
+eq(atcmd.parse_cops_read([ 'OK' ]), null, 'cops read: no line -> null');
+
 // --- AT+COPS=? scan parsing --------------------------------------------------
 
 // a real-shaped +COPS=? test response: current + available + forbidden operators

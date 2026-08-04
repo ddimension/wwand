@@ -40,10 +40,24 @@ const QUIRKS = [
 		match: /^RG502Q/,
 		warn: [ 'firmware self-activates PDP profile 2 on boot; wwand reclaims it via AT+CGACT' ],
 	},
+
+	// MeiG SLM7xx (ASR): network-selection and band/mode NV writes only take
+	// effect after a modem reboot (the SLM770A manual mandates CFUN cycling for
+	// CELLLOCK/SYSCFGEX-class changes, and COPS behaves the same in the field).
+	// The daemon surfaces `deferred: true` on such sets so the caller (LuCI)
+	// can inform the user and offer a modem reset.
+	{
+		match: /^SLM7[0-9]/,
+		netsel_deferred: true,
+		settings_deferred: true,
+		warn: [ 'selection/band changes apply at the next modem reset (deferred)' ],
+	},
 ];
 
 // resolve every matching entry for a model into one merged descriptor.
 // Always returns the full shape so callers can index without guards.
+// Scalar flags (netsel_deferred, settings_deferred, ...) copy through
+// generically; later matches win.
 export function for_model(model)
 {
 	let out = { expect: {}, warn: [], init_commands: [] };
@@ -60,6 +74,13 @@ export function for_model(model)
 
 		for (let c in (q.init_commands ?? []))
 			push(out.init_commands, c);
+
+		for (let k, v in q) {
+			if (k in [ 'match', 'expect', 'warn', 'init_commands' ])
+				continue;
+
+			out[k] = v;
+		}
 	}
 
 	return out;

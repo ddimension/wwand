@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import * as sim from './sim.uc';
 import * as sms from './sms.uc';
 import * as atcmd from './atcmd.uc';
+import * as quirks from './modem_quirks.uc';
 
 const UP_GUARD_MS = 150000;
 
@@ -1325,6 +1326,16 @@ export function create(opts)
 
 	// network selection: 'auto' (NAS automatic / AT+COPS=0) or 'manual' with an
 	// mcc/mnc (NAS manual / AT+COPS=1,2,"mccmnc").
+	//
+	// Two field-driven behaviours (COPS — and sometimes its QMI equivalent —
+	// can bounce the radio on several modems):
+	// - idempotency guard: the SET is skipped entirely when the modem already
+	//   runs the requested selection (result carries `unchanged: true`), so a
+	//   LuCI "save" never disturbs a healthy registration for nothing.
+	// - deferred apply: on models whose quirk table flags `netsel_deferred`,
+	//   the setting is written but only takes effect at the next modem reboot;
+	//   the result carries `deferred: true` + `apply: 'modem_reset'` and the
+	//   CALLER decides (the LuCI page informs the user and offers the reset).
 	self.modem_set_network_selection = function(ref, mode, mcc, mnc, cb) {
 		let entry = check_modem(ref, cb);
 
@@ -1340,23 +1351,55 @@ export function create(opts)
 			return cb({ error: 'missing_plmn' });
 
 		let result = manual ? { mode: mode, mcc: +mcc, mnc: +mnc } : { mode: mode };
+		let q = quirks.for_model(entry.modem.info?.model);
+
+		let done_set = (via) => {
+			log('notice', sprintf('modem %s: network selection %s%s%s%s', ref, mode,
+				manual ? sprintf(' %d/%02d', +mcc, +mnc) : '', via,
+				q.netsel_deferred ? ' (deferred until modem reset)' : ''));
+
+			if (q.netsel_deferred) {
+				result.deferred = true;
+				result.apply = 'modem_reset';
+			}
+
+			cb(null, result);
+		};
+
+		let skip_set = (via) => {
+			log('info', sprintf('modem %s: network selection already %s%s%s — not touching the radio',
+				ref, mode, manual ? sprintf(' %d/%02d', +mcc, +mnc) : '', via));
+			cb(null, { ...result, unchanged: true });
+		};
 
 		entry.modem.with_nas((nas) => {
 			if (nas) {
-				// reuse SET_SYSTEM_SELECTION_PREFERENCE's network_selection TLV
-				// (mode 0 auto / 1 manual), permanent duration (survives power cycle)
-				let sel = manual
-					? { mode: 1, mcc: +mcc, mnc: +mnc }
-					: { mode: 0 };
+				// idempotency: read the current preference first; for manual the
+				// serving PLMN must match too (fall through to the SET whenever
+				// the current state cannot be read positively)
+				return nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
+					let cur_manual = (!gerr && cur?.network_selection != null)
+						? (cur.network_selection == 1) : null;
+					let sv = entry.modem.cells?.serving?.lte;
+					let same = (cur_manual != null) && (cur_manual == manual) &&
+						(!manual || (sv?.mcc != null && +sv.mcc == +mcc && +sv.mnc == +mnc));
 
-				return nas.request('SET_SYSTEM_SELECTION_PREFERENCE',
-					{ network_selection: sel, change_duration: 1 }, (err) => {
-					if (err)
-						return cb({ error: 'qmi', detail: err });
+					if (same)
+						return skip_set('');
 
-					log('notice', sprintf('modem %s: network selection %s%s', ref, mode,
-						manual ? sprintf(' %d/%02d', +mcc, +mnc) : ''));
-					cb(null, result);
+					// reuse SET_SYSTEM_SELECTION_PREFERENCE's network_selection TLV
+					// (mode 0 auto / 1 manual), permanent duration (survives power cycle)
+					let sel = manual
+						? { mode: 1, mcc: +mcc, mnc: +mnc }
+						: { mode: 0 };
+
+					nas.request('SET_SYSTEM_SELECTION_PREFERENCE',
+						{ network_selection: sel, change_duration: 1 }, (err) => {
+						if (err)
+							return cb({ error: 'qmi', detail: err });
+
+						done_set('');
+					});
 				});
 			}
 
@@ -1366,16 +1409,46 @@ export function create(opts)
 			if (!at)
 				return cb({ error: 'unsupported_on_backend' });
 
-			let cmd = manual ? sprintf('AT+COPS=1,2,"%d%02d"', +mcc, +mnc) : 'AT+COPS=0';
+			// idempotency: numeric read-back (COPS=3,2 sets the read format only)
+			at.send('AT+COPS=3,2', () => {
+				at.send('AT+COPS?', (rerr, rres) => {
+					let cur = rerr ? null : atcmd.parse_cops_read(rres?.lines);
+					let same = cur &&
+						((!manual && cur.mode == 0) ||
+						 (manual && cur.mode == 1 && cur.plmn == sprintf('%d%02d', +mcc, +mnc)));
 
-			at.send(cmd, (err) => {
-				if (err)
-					return cb({ error: 'at', detail: err });
+					if (same)
+						return skip_set(' (AT)');
 
-				log('notice', sprintf('modem %s: network selection %s (AT)', ref, mode));
-				cb(null, result);
-			}, { timeout: 30000 });
+					let cmd = manual ? sprintf('AT+COPS=1,2,"%d%02d"', +mcc, +mnc) : 'AT+COPS=0';
+
+					at.send(cmd, (err) => {
+						if (err)
+							return cb({ error: 'at', detail: err });
+
+						done_set(' (AT)');
+					}, { timeout: 30000 });
+				}, { timeout: 10000 });
+			}, { timeout: 5000 });
 		});
+	};
+
+	// admin-triggered soft modem reset (ubus modem_reset): the apply step for
+	// `deferred` settings. Backend-specific (QMI: DMS offline->reset, NCM:
+	// AT+CFUN=1,1); the modem re-enumerates, discovery rebuilds it and the
+	// daemon kicks every auto (auto != 0) interface back up on `registered` —
+	// the same proven path the recovery ladder's modem_reset rung takes.
+	self.modem_reset = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		if (type(entry.modem.reset) != 'function')
+			return cb({ error: 'unsupported_on_backend' });
+
+		log('warn', sprintf('modem %s: admin-requested modem reset', ref));
+		entry.modem.reset(cb);
 	};
 
 	// physical SIM slots: list (status page) and switch (guarded; the modem
@@ -1625,18 +1698,49 @@ export function create(opts)
 
 		args.change_duration = 1;   // permanent (0 would revert on power cycle)
 
+		let q = quirks.for_model(entry.modem.info?.model);
+
 		// protocol-neutral: QMI's NAS, MBIM's passthrough NAS; NCM → unsupported
 		entry.modem.with_nas((nas) => {
 			if (!nas)
 				return cb({ error: 'unsupported_on_backend' });
 
-			nas.request('SET_SYSTEM_SELECTION_PREFERENCE', args, (err) => {
-				if (err)
-					return cb({ error: 'qmi', detail: err });
+			// idempotency guard: read the current preference and drop every key
+			// whose value already matches — NV writes (and the radio disturbance
+			// some firmwares answer them with) only happen for real changes. On a
+			// read error fall through and set everything as requested.
+			nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
+				if (!gerr && cur) {
+					for (let k in filter(keys(args), (k) => k != 'change_duration')) {
+						if (cur[k] != null && sprintf('%J', cur[k]) == sprintf('%J', args[k]))
+							delete args[k];
+					}
+				}
 
-				log('notice', sprintf('modem %s: system selection preference set: %s',
-					ref, join(' ', filter(keys(args), (k) => k != 'change_duration'))));
-				cb(null, { applied: filter(keys(args), (k) => k != 'change_duration') });
+				let changed = filter(keys(args), (k) => k != 'change_duration');
+
+				if (!length(changed)) {
+					log('info', sprintf('modem %s: system selection preference unchanged — not touching the radio', ref));
+					return cb(null, { applied: [], unchanged: true });
+				}
+
+				nas.request('SET_SYSTEM_SELECTION_PREFERENCE', args, (err) => {
+					if (err)
+						return cb({ error: 'qmi', detail: err });
+
+					log('notice', sprintf('modem %s: system selection preference set: %s%s',
+						ref, join(' ', changed),
+						q.settings_deferred ? ' (deferred until modem reset)' : ''));
+
+					let res = { applied: changed };
+
+					if (q.settings_deferred) {
+						res.deferred = true;
+						res.apply = 'modem_reset';
+					}
+
+					cb(null, res);
+				});
 			});
 		});
 	};

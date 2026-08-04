@@ -648,6 +648,30 @@ export function parse_celllock(lines)
 	return length(out) ? out : null;
 };
 
+// AT+COPS? read form — the idempotency guard for network selection:
+//   +COPS: <mode>[,<format>,"<oper>"[,<AcT>]]
+// Returns { mode, format, oper, plmn } (plmn = digits-only oper when the
+// read format is numeric, i.e. format 2) or null.
+export function parse_cops_read(lines)
+{
+	for (let l in (lines ?? [])) {
+		// plain capturing group for the optional tail — ucode regexes are
+		// POSIX ERE underneath, (?:...) is not portable across builds
+		let m = match(l, /\+COPS:\s*([0-9]+)(\s*,\s*([0-9]+)\s*,\s*"([^"]*)")?/);
+
+		if (!m)
+			continue;
+
+		let format = (m[3] != null) ? +m[3] : null;
+		let oper = m[4] ?? null;
+
+		return { mode: +m[1], format: format, oper: oper,
+			plmn: (format == 2 && oper != null && match(oper, /^[0-9]+$/)) ? oper : null };
+	}
+
+	return null;
+};
+
 // parse an AT+COPS=? test response into the visible operators (the AT-backend
 // network scan, COPS being the AT equivalent of QMI Network Scan). The +COPS:
 // line carries a list of parenthesised operator descriptors followed by the

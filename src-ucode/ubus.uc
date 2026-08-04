@@ -69,6 +69,16 @@ export function publish(conn, daemon, log)
 			call: (req) => daemon.repower_modem(req.args.modem),
 		},
 
+		// admin soft modem reset (QMI: DMS offline->reset, NCM: AT+CFUN=1,1) —
+		// the apply step for `deferred` selection/band settings (write ACL).
+		// auto interfaces come back up on their own once the modem re-registers.
+		modem_reset: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_reset(req.args.modem, (err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
 		// manual PIN release: enter the PIN once past the low-retry safety block
 		// (security relevant — write ACL). `pin` optional (overrides the config).
 		modem_sim_pin_verify: {

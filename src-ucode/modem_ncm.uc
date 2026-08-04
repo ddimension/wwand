@@ -1857,6 +1857,22 @@ export function create(opts)
 		return protoswitch.supported(self.info?.model);
 	};
 
+	// admin-triggered soft modem reset (ubus modem_reset — the apply step for
+	// `deferred` selection/band settings): AT+CFUN=1,1 full reboot. The modem
+	// drops off the bus and re-enumerates; hotplug/discovery rebuild it and
+	// the daemon kicks every auto interface back up once it re-registers —
+	// same flow as the recovery ladder, HW-proven on this backend.
+	self.reset = function(cb) {
+		if (!self.at)
+			return cb({ error: 'unsupported_on_backend' });
+
+		log('warn', 'admin modem reset (AT+CFUN=1,1)');
+		self.at.send('AT+CFUN=1,1', () => {
+			notify_contexts('lost');
+			cb(null, { resetting: true });
+		}, { timeout: 8000 });
+	};
+
 	self.teardown = function() {
 		for (let t in [ retry_timer, reg_timer, reg_poll_timer, settle_timer, at_drain_timer,
 		                telemetry_timer ])

@@ -153,14 +153,18 @@ run = () => {
 					'set_network_selection manual: NAS network_selection TLV');
 				eq(last.change_duration, 1, 'set_network_selection manual: permanent');
 
-				// (4) auto selection -> NAS network_selection mode 0
+				// (4) auto selection while the modem already runs auto (the mock's
+				// GET_SYSTEM_SELECTION_PREFERENCE says network_selection 0): the
+				// idempotency guard must SKIP the set — no radio disturbance —
+				// and flag the result `unchanged`
 				daemon.modem_set_network_selection('m0', 'auto', 0, 0, (aerr, ares) => {
 					eq(aerr, null, 'set_network_selection auto: no error');
-					eq(ares, { mode: 'auto' }, 'set_network_selection auto: result');
+					eq(ares, { mode: 'auto', unchanged: true },
+						'set_network_selection auto: unchanged (idempotency guard)');
 
 					let sel2 = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
-					eq(sel2[length(sel2) - 1].args.network_selection.mode, 0,
-						'set_network_selection auto: NAS mode 0');
+					eq(sel2[length(sel2) - 1].args.network_selection.mode, 1,
+						'set_network_selection auto: SET skipped, last request still the manual one');
 
 					// (5) invalid mode is rejected before touching the modem
 					daemon.modem_set_network_selection('m0', 'bogus', 0, 0, (ierr) => {
@@ -177,6 +181,19 @@ run = () => {
 							eq(wl.usage_preference, 2, 'set_settings: value reached modem via with_nas');
 							eq(wl.lte_band_preference, 133, 'set_settings: band list -> mask');
 							eq(wl.change_duration, 1, 'set_settings: permanent duration');
+
+							// (6b) a value the modem already has (mock GET says
+							// mode_preference 0x18) is dropped by the idempotency
+							// guard -> nothing left to set, result `unchanged`
+							daemon.modem_set_settings('m0',
+								{ mode_preference: 0x18 }, (uerr, ures) => {
+								eq(uerr, null, 'set_settings unchanged: no error');
+								eq(ures, { applied: [], unchanged: true },
+									'set_settings unchanged: guard skipped the set');
+
+								let sset2 = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
+								eq(length(sset2), length(sset),
+									'set_settings unchanged: no new SET reached the modem');
 
 							// (7) no_such_modem guard preserved
 							daemon.modem_scan('nope', (gerr) => {
@@ -211,6 +228,7 @@ run = () => {
 									poll();
 								});
 							});
+								});
 						});
 					});
 				});
