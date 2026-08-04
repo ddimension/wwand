@@ -428,6 +428,15 @@ export function open_at(self, o)
 	self.at_telemetry = self.at;
 	self.at_telemetry_tty = tty;
 
+	// config `at2_external`: the secondary AT port is reserved for EXTERNAL
+	// tools (gpsd, user scripts, ...) — wwand must never open it. Telemetry
+	// stays on the control channel; log which tty is being left alone.
+	if (self.config?.at2_external && ch.telemetry && ch.telemetry != tty) {
+		log('notice', sprintf('secondary AT port %s released for external use (at2_external)', ch.telemetry));
+		self.at2_released = ch.telemetry;
+		ch = { ...ch, telemetry: null };
+	}
+
 	// stash a one-shot opener; telemetry_at() runs it on first use. Null when the
 	// modem has no distinct second AT port (telemetry then stays on control).
 	self._at2_open = (ch.telemetry && ch.telemetry != tty)

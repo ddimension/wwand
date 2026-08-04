@@ -628,6 +628,41 @@ export function build_pdp_setup(vendor, cid, cfg)
 	return cmds;
 };
 
+// AT+CGDCONT? read-back: '+CGDCONT: <cid>,"<type>","<apn>",...' per line.
+// Feeds the dial-time idempotency guard below.
+export function parse_cgdcont(lines)
+{
+	let out = [];
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+CGDCONT:\s*([0-9]+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"/);
+
+		if (m)
+			push(out, { cid: +m[1], pdp_type: m[2], apn: m[3] });
+	}
+
+	return out;
+};
+
+// dial-time idempotency guard: true when the modem's PDP context <cid> already
+// carries exactly the configured pdp-type + APN, so the CGDCONT/auth NV writes
+// can be skipped for this dial (used only when no username/password is
+// configured — auth values cannot be read back for comparison).
+export function pdp_setup_matches(cid, cfg, lines)
+{
+	let want_pdp = PDP_STR[cfg.pdp_type ?? 'ipv4v6'] ?? PDP_STR.ipv4v6;
+	let want_apn = lc(cfg.apn ?? '');
+
+	for (let e in parse_cgdcont(lines)) {
+		if (e.cid != cid)
+			continue;
+
+		return uc(e.pdp_type) == want_pdp && lc(e.apn) == want_apn;
+	}
+
+	return false;
+};
+
 // --- CGCONTRDP parsing (shared with context_ncm.uc) --------------------------
 //
 // AT+CGCONTRDP=<cid> reports the dynamic parameters of an active context. The

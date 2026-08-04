@@ -301,7 +301,7 @@ export function create(opts)
 		if (cfg('password'))
 			base.password = cfg('password');
 
-		wds.request('MODIFY_PROFILE', base, (err) => {
+		let do_write = () => wds.request('MODIFY_PROFILE', base, (err) => {
 			if (err)
 				log('warn', sprintf('profile modify failed: %J', err));
 
@@ -309,15 +309,37 @@ export function create(opts)
 			wds.request('MODIFY_PROFILE', { ...base, roaming_disallowed: 0 },
 				(e2) => check_pdp_type(profile, done));
 		});
-	};
 
-	check_pdp_type = (profile, done) => {
-		let wds = self.modem.wds_cfg;
-		let want = PDP_MAP[self.config.pdp_type ?? 'ipv4v6'];
+		// idempotency guard: skip both NV writes when the profile already
+		// matches. Credentials cannot be read back — configured username/
+		// password always write.
+		if (base.username != null || base.password != null)
+			return do_write();
 
 		wds.request('GET_PROFILE_SETTINGS', {
 			profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: profile.index },
-		}, (err, data) => {
+		}, (gerr, curp) => {
+			let same = !gerr && curp &&
+				lc(curp.apn ?? '') == lc(base.apn ?? '') &&
+				(curp.apn_disabled ?? 0) == 0 &&
+				(curp.roaming_disallowed ?? 0) == 0 &&
+				(base.auth == null || curp.auth == base.auth);
+
+			if (same) {
+				log('debug', sprintf('profile %d unchanged (apn/auth/roaming) — skipping modify',
+					profile.index));
+				return check_pdp_type(profile, done, curp);
+			}
+
+			do_write();
+		});
+	};
+
+	check_pdp_type = (profile, done, pre) => {
+		let wds = self.modem.wds_cfg;
+		let want = PDP_MAP[self.config.pdp_type ?? 'ipv4v6'];
+
+		let evaluate = (err, data) => {
 			if (err) {
 				log('warn', sprintf('get profile settings failed: %J', err));
 				return done();
@@ -340,7 +362,15 @@ export function create(opts)
 
 				done();
 			});
-		});
+		};
+
+		// reuse the profile data the guard in prepare() already fetched
+		if (pre)
+			return evaluate(null, pre);
+
+		wds.request('GET_PROFILE_SETTINGS', {
+			profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: profile.index },
+		}, evaluate);
 	};
 
 	// Program the LTE attach profile (profile <index>, normally 1) from this

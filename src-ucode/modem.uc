@@ -589,13 +589,23 @@ export function create(opts)
 	// proceeds normally. Do NOT continue init here when resetting — this
 	// instance is being torn down.
 	step_apply_init_reset = () => {
-		if (!length(self._init_resets ?? []) || !self.at)
+		if (!length(self._init_resets ?? []))
 			return step_datapath();
 
 		log('notice', sprintf('applying deferred init reset (%s)',
 			join('; ', self._init_resets)));
 
-		self.at.send('AT+CFUN=1,1', () => null, { timeout: 5000 });
+		// one batched reset for everything collected during init: AT when a
+		// command port exists, otherwise the DMS offline->reset sequence
+		if (self.at)
+			return self.at.send('AT+CFUN=1,1', () => null, { timeout: 5000 });
+
+		if (self.dms)
+			return qmi_backend.set_opmode(self.dms, 'offline', () =>
+				qmi_backend.set_opmode(self.dms, 'reset', () => null));
+
+		log('warn', 'init reset requested but no AT port/DMS available — settings apply at the next reboot');
+		step_datapath();
 	};
 
 	step_datapath = () => {
@@ -875,15 +885,11 @@ export function create(opts)
 
 		let args = {};
 
-		if (mask != null) {
+		if (mask != null)
 			args.mode_preference = mask;
-			log('notice', sprintf('setting network modes "%s" (mask 0x%02x)', self.config.modes, mask));
-		}
 
-		if (sel) {
+		if (sel)
 			args.network_selection = sel;
-			log('notice', sprintf('setting manual PLMN %d/%02d', sel.mcc, sel.mnc));
-		}
 
 		let attempt;
 
@@ -896,13 +902,42 @@ export function create(opts)
 					// AT fallback hook lands here with M6
 					log('warn', sprintf('failed to set system selection: %J', err));
 					emit('modes_failed', { err: err });
+				} else if (self._init_resets && modem_quirks.for_model(self.info?.model).settings_deferred) {
+					// boot rule: during init a modem reset is always allowed so
+					// the values actually apply — but BATCHED: push a reason and
+					// let step_apply_init_reset issue ONE reset at the end.
+					push(self._init_resets, 'system selection preference');
 				}
 
 				step_validate();
 			});
 		};
 
-		attempt(1);
+		// idempotency guard: read the live preference first and drop whatever
+		// already matches — the boot path must not bounce the radio for values
+		// the modem NV already carries. The manual-PLMN target itself is not
+		// readable here (the GET carries only the selection TYPE and the
+		// registration is not up yet at CONFIGURE_NET), so a configured manual
+		// selection is conservatively (re-)applied.
+		self.nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
+			if (!gerr && cur) {
+				if (args.mode_preference != null && cur.mode_preference == args.mode_preference) {
+					log('info', sprintf('network modes "%s" already set — skipping', self.config.modes));
+					delete args.mode_preference;
+				}
+			}
+
+			if (!length(keys(args)))
+				return step_validate();
+
+			if (args.mode_preference != null)
+				log('notice', sprintf('setting network modes "%s" (mask 0x%02x)', self.config.modes, args.mode_preference));
+
+			if (args.network_selection)
+				log('notice', sprintf('setting manual PLMN %d/%02d', sel.mcc, sel.mnc));
+
+			attempt(1);
+		});
 	};
 
 	// runtime config validation: after step_confnet has APPLIED the config-derived

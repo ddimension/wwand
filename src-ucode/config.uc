@@ -51,6 +51,7 @@ export function modem_defaults(over)
 		pincode: null, modes: null, mcc: null, mnc: null,
 		mux: 'auto', dl_datagram_max_size: 0, tty: null,
 		at_init: [], location: false, delay: 0,
+		at2_external: false,   // release the secondary AT port for external tools
 		failreboot: 100, proto_error_limit: 25, zero_rx_timeout: 21600,
 		lock_4g: [], lock_5g: null, lock_persist: false,
 		sim_slot: 0,
@@ -125,6 +126,9 @@ function modem_from_section(s)
 		mux: s.mux ?? 'auto',
 		dl_datagram_max_size: +(s.dl_datagram_max_size ?? 0),
 		tty: s.tty,
+		// release the secondary AT port ('at2') for external tools: wwand then
+		// never opens it and runs telemetry over the control channel instead
+		at2_external: bool_opt(s.at2_external, false),
 		at_init: (type(s.at_init) == 'array') ? s.at_init :
 		         (s.at_init != null ? [ s.at_init ] : []),
 		location: bool_opt(s.location, false),

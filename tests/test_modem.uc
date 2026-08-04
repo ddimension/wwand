@@ -332,7 +332,10 @@ scenario('modes', {
 	(modem, mock, events) => {
 		let calls = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
 		eq(length(calls), 1, 'modes: preference set once');
-		eq(calls[0].args.mode_preference, (1 << 4) | (1 << 6), 'modes: lte|nr5g bitmask');
+		// idempotency guard: the mock's GET already reports lte|nr5g, so the
+		// mode_preference is DROPPED from the write; the manual PLMN (whose
+		// target is not readable pre-registration) is still applied
+		eq(calls[0].args.mode_preference, null, 'modes: live mode matches -> dropped by guard');
 		eq(calls[0].args.network_selection, { mode: 1, mcc: 262, mnc: 1 }, 'modes: manual plmn');
 	});
 

@@ -1078,6 +1078,11 @@ export function create(opts)
 				imei: entry.modem?.info?.imei,
 				identity_mismatch: entry.modem?.identity_mismatch,   // {expected,found} if the pinned IMEI didn't match
 				at_tty: entry.modem?.at_tty,
+				// secondary AT port released for external tools (at2_external)
+				at2_released: entry.modem?.at2_released,
+				// cell/frequency lock read-back (telemetry `locks` hook:
+				// Quectel QNWLOCK / MeiG ^CELLLOCK), null when none/unknown
+				locks: entry.modem?.locks,
 				registration: entry.modem?.reg,
 				registration_detail: entry.modem?.reg_detail,
 				config_warnings: entry.modem?.config_warnings,
@@ -1507,9 +1512,16 @@ export function create(opts)
 		if (!(physical > 0))
 			return cb({ error: 'invalid_slot' });
 
-		sim.switch_slot(entry.modem, physical, (err) => {
+		sim.switch_slot(entry.modem, physical, (err, res) => {
 			if (err)
 				return cb({ error: 'qmi', detail: err });
+
+			// idempotency guard hit: the slot is already active — nothing was
+			// switched, keep the cached eSIM/APDU backends
+			if (res?.unchanged) {
+				log('info', sprintf('modem %s: SIM slot %d already active — not switching', ref, physical));
+				return cb(null, { slot: physical, unchanged: true });
+			}
 
 			// a different slot may hold a different eUICC (removable eUICCs) —
 			// drop the cached eSIM/APDU backends so they are re-probed

@@ -832,20 +832,42 @@ export function find_at_channels(fx, device, tty_override, base_override)
 	// resolve the USB-device dir to enumerate sibling ttys for the 'at2' role:
 	// from the explicit base, else the cdc-wdm device, else the primary tty's
 	// own USB parent (the NCM case — no cdc-wdm anchor, port pinned via config).
-	let base = base_override;
+	// candidate USB-device dirs, first whose idVendor reads wins. The old
+	// single-shot logic died on NCM modems: `device` is the NETDEV name there
+	// (usb0), so the usbmisc-derived path never resolves and the tty fallback
+	// was unreachable (HW-verified on the SLM770A/LT300 — at2 silently absent).
+	let tn = substr(primary, rindex(primary, '/') + 1);
+	let candidates = [];
 
-	if (base == null && device != null) {
+	if (base_override != null)
+		push(candidates, base_override);
+
+	if (device != null) {
 		let name = substr(device, rindex(device, '/') + 1);
-		base = sprintf('/sys/class/usbmisc/%s/device/..', name);
+		push(candidates, sprintf('/sys/class/usbmisc/%s/device/..', name));
 	}
 
-	if (base == null) {
-		let tn = substr(primary, rindex(primary, '/') + 1);
-		base = sprintf('/sys/class/tty/%s/device/..', tn);
+	// tty -> usb-serial port -> INTERFACE (1-1:1.x) -> DEVICE (1-1):
+	// idVendor/idProduct live on the device, two levels up
+	push(candidates, sprintf('/sys/class/tty/%s/device/../..', tn));
+
+	let base = null, vid = '', pid = '';
+
+	for (let c in candidates) {
+		let v = lc(trim(fx.read(sprintf('%s/idVendor', c)) ?? ''));
+
+		if (!length(v))
+			continue;
+
+		base = c;
+		vid = v;
+		pid = lc(trim(fx.read(sprintf('%s/idProduct', c)) ?? ''));
+		break;
 	}
 
-	let vid = lc(trim(fx.read(sprintf('%s/idVendor', base)) ?? ''));
-	let pid = lc(trim(fx.read(sprintf('%s/idProduct', base)) ?? ''));
+	if (base == null)
+		return { primary: primary, telemetry: null };
+
 	let ports = LOCAL_PORTS[sprintf('%s:%s', vid, pid)] ?? atport_table()[sprintf('%s:%s', vid, pid)];
 
 	if (!ports)

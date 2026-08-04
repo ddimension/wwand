@@ -190,8 +190,10 @@ scenario('dual', { config: { apn: 'web', pdp_type: 'ipv4v6' } }, (ctx, mock, eve
 		eq(settings.ipv6.plen, 64, 'dual: v6 prefix length');
 		eq(settings.mtu, 1430, 'dual: mtu');
 
-		// profile write: base + roaming retry, pdp type matches -> no 3rd
-		eq(length(mock.calls_for('MODIFY_PROFILE')), 2, 'dual: profile modified twice');
+		// idempotency guard: the mock profile already matches (apn 'web',
+		// pdp ipv4v6, no auth) -> prepare skips BOTH base writes and the pdp
+		// type is unchanged too -> zero NV writes on activation
+		eq(length(mock.calls_for('MODIFY_PROFILE')), 0, 'dual: profile unchanged, no NV writes');
 		eq(length(mock.calls_for('START_NETWORK')), 2, 'dual: two start-network calls');
 		eq(mock.calls_for('START_NETWORK')[0].args.profile_3gpp, 1, 'dual: profile 1');
 		eq(mock.calls_for('START_NETWORK')[0].args.apn, 'web', 'dual: apn in start-network');
@@ -320,9 +322,11 @@ scenario('pdp-update', {
 	ctx.up((err, settings) => {
 		eq(err, null, 'pdp: up ok');
 
+		// guard skips the (matching) base writes; only the differing pdp type
+		// is modified — one targeted NV write instead of three
 		let mods = mock.calls_for('MODIFY_PROFILE');
-		eq(length(mods), 3, 'pdp: third modify for pdp type');
-		eq(mods[2].args.pdp_type, 0, 'pdp: changed to ipv4');
+		eq(length(mods), 1, 'pdp: single modify (only the pdp type differed)');
+		eq(mods[0].args.pdp_type, 0, 'pdp: changed to ipv4');
 		next();
 	});
 });

@@ -143,6 +143,10 @@ config modem 'm0'
 	option mux 'auto'                # auto|rmnet|qmimux|none — QMAP datapath backend
 	option dl_datagram_max_size '0'  # QMAP DL aggregation bytes; 0 = model/board table
 	list at_init 'ATE0'              # extra AT commands, sent once before registration
+	option at2_external '0'          # 1: reserve the secondary AT port for external tools
+	                                 #    (gpsd, scripts) — wwand never opens it; telemetry
+	                                 #    runs over the control channel. The released tty
+	                                 #    shows up as `at2_released` in `ubus call wwand status`
 	option lock_4g '1300:246'        # earfcn:pci — LTE cell lock (repeatable / list)
 	option lock_5g '242:431070:15:1' # pci:arfcn:scs:band — NR SA cell lock
 	option lock_persist '0'          # store the cell lock in modem NV

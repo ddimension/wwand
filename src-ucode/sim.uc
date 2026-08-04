@@ -484,9 +484,24 @@ export function switch_slot(modem, physical, cb)
 	if (!modem.uim)
 		return cb({ error: 'no_uim_client' });
 
-	modem.uim.request('SWITCH_SLOT', {
-		logical: 1, physical: physical,
-	}, (err) => cb(err ?? null));
+	// idempotency guard: switching to the already-active slot would still
+	// bounce the SIM (and with it the registration) on most firmwares —
+	// read the slot status first and no-op when nothing would change.
+	modem.uim.request('GET_SLOT_STATUS', {}, (gerr, data) => {
+		let cur = null;
+
+		if (!gerr)
+			for (let i, s in (data?.slots ?? []))
+				if (s.slot_status == 1 && s.logical_slot == 1)
+					cur = i + 1;
+
+		if (cur != null && cur == +physical)
+			return cb(null, { unchanged: true });
+
+		modem.uim.request('SWITCH_SLOT', {
+			logical: 1, physical: physical,
+		}, (err) => cb(err ?? null));
+	});
 };
 
 // --- raw APDU channel (eSIM/ES10 foundation) ---------------------------------

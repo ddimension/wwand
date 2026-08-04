@@ -262,7 +262,12 @@ export function create(opts)
 			self.cid, self.config.apn ?? '', self.config.pdp_type ?? 'ipv4v6',
 			(self.config.apn == null || self.config.apn == '') ? ' (network default)' : ''));
 
-		self.modem.at.run_sequence(setup, () => {
+		// dial-time idempotency guard: when the modem's PDP context already
+		// matches the config (and no auth values are configured — those cannot
+		// be read back), skip the CGDCONT/auth NV writes for this dial. Saves
+		// NV wear on every redial and avoids upsetting firmwares that dislike
+		// context rewrites while a bearer is being set up (MeiG ECMDUP).
+		let run_setup = (cmds) => self.modem.at.run_sequence(cmds, () => {
 			if (self.state != 'ACTIVATING')
 				return;   // aborted (modem lost) while configuring
 
@@ -337,6 +342,22 @@ export function create(opts)
 				self._fail({ stage: 'connect', err: err });
 			}, { timeout: 60000 });
 		});
+
+		if (!length(setup) || self.config.username || self.config.password)
+			return run_setup(setup);
+
+		self.modem.at.send('AT+CGDCONT?', (gerr, gres) => {
+			if (self.state != 'ACTIVATING')
+				return;
+
+			if (!gerr && ncm.pdp_setup_matches(self.cid, self.config, gres?.lines)) {
+				log('info', sprintf('cid %d already configured (pdp-type + apn match) — skipping context write',
+					self.cid));
+				return run_setup([]);
+			}
+
+			run_setup(setup);
+		}, { timeout: 8000 });
 	};
 
 	// best-effort unbind of the netdev + deactivate the bearer
