@@ -44,6 +44,21 @@ eq(mc.telemetry_at(s3), s3.at, 'lazy: failed open falls back to control');
 eq(mc.telemetry_at(s3), s3.at, 'lazy: failed open not retried every poll');
 eq(tried, 1, 'lazy: open attempted once, then given up');
 
+// a torn-down modem (close_at ran: at/at_telemetry nulled) must NOT yield null —
+// stale in-flight callbacks call telemetry_at(self).send(...) unguarded; they
+// get a stub engine that errors immediately instead of crashing the daemon
+// (the Cudy LT300 autosetup-reload crash: reload inside the 'registered' emit)
+let s4 = { at: null, at_telemetry: null, _at2_open: null };
+let stub = mc.telemetry_at(s4);
+ok(stub != null, 'teardown: telemetry_at never returns null');
+let stub_err = 'unset';
+stub.send('AT+CSQ', (err, res) => { stub_err = err; eq(res, null, 'teardown: stub send has no result'); });
+eq(stub_err, 'closed', 'teardown: stub send errors with closed');
+let seq_done = false;
+stub.run_sequence([ 'AT' ], () => { seq_done = true; });
+ok(seq_done, 'teardown: stub run_sequence completes via callback');
+stub.close();   // must not throw
+
 // (2) open_at must NOT open the at2 tty eagerly (the #5 fix). Drive the real
 // open_at with a mock fx (RG650E-style 2c7c:0122 -> ttyUSB2 at + ttyUSB3 at2)
 // and a transport opener that records which ttys it opens.

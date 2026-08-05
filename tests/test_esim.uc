@@ -121,6 +121,31 @@ sim.apdu_close(fake, 2, ap_ch, (e) => { ap_closed = (e == null); });
 eq(at_cmds[2], 'AT+CCHC=2', 'apdu-at: CCHC command');
 eq(ap_closed, true, 'apdu-at: close ok');
 
+// --- M2M / locked eUICC classification (ES10 refused with SW 6985) ----------
+// The ISD-R opens fine (CCHO ok) but every ES10 STORE DATA is refused with a
+// bare 6985: es10_request must classify this as es10_refused with the
+// m2m_or_locked_euicc hint so the UI can explain (HW-hit: EMnify M2M eUICC —
+// SGP.02 cards have no local ES10, they are managed OTA by the SM-SR).
+let m2m = {
+	_apdu_be: null,
+	at: {
+		send: (cmd, cb, o) => {
+			if (match(cmd, /^AT\+CCHO=/))
+				cb(null, { lines: [ '+CCHO: 1' ] });
+			else if (match(cmd, /^AT\+CGLA=/))
+				cb(null, { lines: [ '+CGLA: 4,"6985"' ] });
+			else
+				cb(null, { lines: [] });
+		},
+	},
+};
+
+let m2m_err = 'unset';
+esim.profiles(m2m, 1, (e, r) => { m2m_err = e; });
+eq(m2m_err?.error, 'es10_refused', 'm2m: bare 6985 on ES10 classified as es10_refused');
+eq(m2m_err?.hint, 'm2m_or_locked_euicc', 'm2m: hint set for UI messaging');
+eq(m2m_err?.sw, '6985', 'm2m: original status word preserved');
+
 // --- PIN safety: shared low-retry guard (all backends) ----------------------
 // never auto-enter the PIN with <= 1 attempt left; distinct reason for 0 (PUK)
 // vs 1 (releasable); a manual force overrides; unknown retries -> proceed.

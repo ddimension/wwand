@@ -330,9 +330,17 @@ export function watch_driver(o)
 // use it opens the modem's dedicated 'at2' channel (if it has one); every later
 // call returns the already-open engine. When there is no second port — or it
 // fails to open — it returns the control channel (self.at), so callers can treat
-// the result exactly like self.at (null only when the modem has no AT at all).
-// This makes the second tty lazy: QMI/MBIM that never hit the AT fallback never
-// open it, while NCM opens it on its first telemetry tick.
+// the result exactly like self.at. This makes the second tty lazy: QMI/MBIM
+// that never hit the AT fallback never open it, while NCM opens it on its first
+// telemetry tick.
+//
+// NEVER returns null: a torn-down modem (close_at ran — teardown/reload can
+// happen synchronously under an emit while a poll callback is still in flight)
+// gets a stub engine whose send() fails immediately, so the many unguarded
+// `telemetry_at(self).send(...)` call sites degrade to an AT error instead of
+// crashing the daemon on `null.send` (HW-hit: autosetup phase-2 reload on the
+// Cudy LT300 tore the modem down inside the 'registered' emit; the READY hook
+// then ran tel_meig_locks on the corpse).
 export function telemetry_at(self)
 {
 	if (self._at2_open) {
@@ -341,7 +349,11 @@ export function telemetry_at(self)
 		open();                     // sets self.at_telemetry on success
 	}
 
-	return self.at_telemetry;
+	return self.at_telemetry ?? {
+		send: (cmd, cb) => { if (cb) cb('closed', null); },
+		run_sequence: (cmds, cb) => { if (cb) cb(); },
+		close: () => null,
+	};
 };
 
 // fetch_nr_neighbours(self, cb): the ONLY source of NR5G neighbour cells — QMI
@@ -356,16 +368,19 @@ export function fetch_nr_neighbours(self, cb)
 
 	let at = telemetry_at(self);
 
-	if (!at || !self.cells?.nr5g_cell) {
+	if (!self.cells?.nr5g_cell) {
 		if (self.cells)
 			self.cells.nr5g_neigh = null;
 		return cb();
 	}
 
+	// telemetry_at never returns null; a modem without AT surfaces as an
+	// immediate send error here, which clears the neighbour list like the
+	// old explicit no-AT skip did
 	at.send('AT+QENG="neighbourcell"', (err, res) => {
-		if (!err && self.cells) {
-			let n = atcmd.parse_qeng_neighbourcell(res?.lines).nr;
-			self.cells.nr5g_neigh = length(n) ? n : null;
+		if (self.cells) {
+			let n = err ? null : atcmd.parse_qeng_neighbourcell(res?.lines).nr;
+			self.cells.nr5g_neigh = length(n ?? []) ? n : null;
 		}
 		cb();
 	});

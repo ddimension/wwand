@@ -1708,6 +1708,12 @@ export function create(opts)
 				return;
 
 			self.at.send('AT+CEREG?', (err, res) => {
+				// a response can arrive after a teardown/reload stopped this
+				// instance (stop() nulls self.at) — a stale callback must not
+				// drive a dead modem to READY or send on a null engine
+				if (self.state != 'REGISTERING' || !self.at)
+					return;
+
 				let r = err ? null : parse_creg(res?.lines);
 
 				let after = (rr) => {
@@ -1724,6 +1730,9 @@ export function create(opts)
 				// 5G-SA: EPS registration (CEREG) can read not-registered while the
 				// device is attached via 5GS only — try C5GREG, then legacy CREG.
 				self.at.send('AT+C5GREG?', (e5, r5) => {
+					if (self.state != 'REGISTERING' || !self.at)
+						return;
+
 					let rr5 = (!e5 && parse_creg(r5?.lines)?.registered) ? parse_creg(r5.lines) : null;
 
 					if (rr5?.registered)
@@ -1751,6 +1760,12 @@ export function create(opts)
 		self.set_state('READY');
 		emit('registered', self.reg);
 		notify_contexts('ready');
+
+		// the 'registered' emit can run a SYNCHRONOUS config reload that tears
+		// this very instance down (autosetup phase 2 writes uci and reloads;
+		// close_at nulls the AT engines) — don't start telemetry on the corpse
+		if (self.state != 'READY')
+			return;
 
 		let t = vendor_telemetry(self);
 

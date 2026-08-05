@@ -175,6 +175,17 @@ function es10_request(modem, slot, req, cb)
 
 		es10_transceive(modem, slot, ch.channel, req, (terr, resp) => {
 			sim.apdu_close(modem, slot, ch.channel, () => {
+				// ISD-R selected fine, but the card refuses the ES10 STORE DATA
+				// outright (SW 6985, conditions of use not satisfied): the
+				// profile-management interface is not locally usable. Typical
+				// for M2M eUICCs (SGP.02 — profiles are managed over-the-air
+				// by the operator's SM-SR, there IS no local ES10) and for
+				// vendor-locked cards. Classify so UIs can explain instead of
+				// showing a bare status word (HW-hit: EMnify M2M eUICC).
+				if (terr?.error == 'sw' && terr.sw == '6985')
+					return cb({ error: 'es10_refused', sw: terr.sw,
+					            hint: 'm2m_or_locked_euicc' }, null);
+
 				if (terr)
 					return cb(terr, null);
 

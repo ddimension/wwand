@@ -1,8 +1,47 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-04. All test suites green (31 suites); everything
-committed/pushed (wwand 65bbf0c, luci-app af635b3, feed 277c048). Three control backends (QMI, MBIM, NCM) behind one daemon-neutral
-contract._
+_Last updated: 2026-08-05. All test suites green (33 suites, ~1478 checks).
+Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## Cold-boot autosetup + reload-race crash + M2M-eUICC detection (2026-08-05)
+
+All HW-validated on the Cudy LT300 (MeiG SLM770A-R, NCM/ECM):
+
+- **Cold-boot autosetup sweep** (`daemon.autosetup_scan`, called once from
+  `main.uc` after the initial apply): zero-config autosetup phase 1 was
+  hotplug-only — on the slow-booting Cudy the `usb0` net hotplug fires ~30 s
+  BEFORE wwand is on the bus, the `ubus call wwand hotplug` forwarder call goes
+  nowhere and nothing ever re-triggers it → freshly flashed box stayed
+  unconfigured every cold boot. The startup sweep replays the first present
+  candidate (`deps.list_present`: cdc-wdm or NCM netdev) through the same
+  hotplug path; `autosetup_create` re-checks live uci emptiness, so configured
+  boxes are untouched. New suite `tests/test_autosetup.uc`.
+- **Reload-race daemon crash fixed** (HW-hit): autosetup phase 2 writes uci and
+  reloads SYNCHRONOUSLY inside the `registered` emit → tears the emitting NCM
+  modem instance down (`close_at` nulls the engines) → the READY hook then ran
+  `tel_meig_locks` → `telemetry_at(self)` was null → `null.send` Reference
+  error, daemon died (procd respawn). Three-layer fix: `on_registered`
+  re-checks `state == 'READY'` after the emit; the CEREG/C5GREG poll callbacks
+  re-check `REGISTERING`/`self.at` (stale in-flight responses); and
+  `modem_common.telemetry_at` NEVER returns null any more — a torn-down modem
+  gets a stub engine whose `send()` fails with `'closed'`, covering the ~25
+  unguarded `telemetry_at(self).send(...)` call sites in all backends. New NCM
+  scenario `s8_teardown_in_registered_emit` + stub checks in
+  `test_modem_common`.
+- **M2M / locked eUICC classification** (`esim.uc` + LuCI settings.js): an
+  EMnify M2M eUICC (ICCID 8988239…, bootstrap IMSI 90128…) selects the ISD-R
+  fine but refuses every ES10 STORE DATA with bare `6985` — SGP.02 cards have
+  NO local ES10 (profiles are OTA-managed by the operator's SM-SR); proven via
+  raw-AT probe (INS E2 to the USIM returns 6D00 → modem doesn't filter; ISD-R
+  FCI carries no SGP.22 BF64 tag). `es10_request` now classifies this as
+  `{ error: 'es10_refused', sw, hint: 'm2m_or_locked_euicc' }`; the LuCI eSIM
+  panel renders an explanatory banner instead of a bare failure. Local profile
+  download on such cards is impossible by design — NOT a wwand/lpac bug.
+- ucode require-vs-import note: `esim.uc` is an exportless `require()` module
+  with a top-level `return` — sanity-check it on-target with
+  `ucode -e 'require("wwand.esim")'`, NOT via `import` (which fails by design).
+- Open (deliberately not done): apndb entry for the EMnify bootstrap
+  (IMSI 90128 → APN `em`) — user opted for detection/UX only.
 
 ## Cudy LT300 v3 / MeiG SLM770A-R bring-up — NCM HW fixes (2026-08-04)
 

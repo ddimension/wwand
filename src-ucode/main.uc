@@ -414,6 +414,10 @@ function run_daemon()
 		exit(1);
 	}
 
+	// zero-config autosetup: catch a modem that enumerated BEFORE the daemon
+	// was on the bus (its hotplug 'add' went nowhere — the cold-boot race)
+	daemon.autosetup_scan();
+
 	logmod.notice('wwand started, %d modem(s), %d context(s)',
 		length(keys(daemon.modems)), length(keys(daemon.contexts)));
 

@@ -549,6 +549,37 @@ push(scenarios, {
 	},
 });
 
+// --- s8: synchronous teardown INSIDE the 'registered' emit ------------------
+// The autosetup phase-2 reload (uci write + apply_config) runs synchronously
+// under emit('registered') and tears the emitting modem instance down
+// (close_at nulls the AT engines). on_registered must notice and NOT start the
+// READY telemetry hooks on the corpse — this crashed the daemon on the Cudy
+// LT300 (tel_meig_locks over telemetry_at(null).send). The runner calls run()
+// synchronously from the 'registered' event, i.e. exactly inside that emit.
+
+push(scenarios, {
+	name: 's8_teardown_in_registered_emit',
+	script: script(),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6', mux_id: 0 },
+	run: (env) => {
+		let m = env.modem;
+
+		// simulate the reload: stop this instance while emit('registered') is
+		// still on the stack (surviving this line at all is the core check —
+		// pre-fix the daemon crashed right here)
+		m.stop();
+		eq(m.state, 'ABSENT', 'teardown-in-emit: modem stopped to ABSENT');
+
+		// give any (wrongly) started telemetry a tick, then verify the READY
+		// hooks never ran: no lock read-back, no telemetry poll on the tty
+		uloop.timer(50, () => {
+			eq(env.tr.saw(/QNWLOCK/), null, 'teardown-in-emit: no lock read-back after stop');
+			eq(env.tr.saw(/^AT\+CSQ/), null, 'teardown-in-emit: no telemetry poll after stop');
+			env.finish();
+		});
+	},
+});
+
 // --- direct unit test: parse_cgcontrdp on the exact RG650E-EU line ----------
 
 let rdp = modem_ncm.parse_cgcontrdp([

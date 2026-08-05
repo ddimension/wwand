@@ -2010,6 +2010,30 @@ export function create(opts)
 		}
 	};
 
+	// zero-config autosetup, boot-time sweep: on a slow cold boot the modem
+	// enumerates (and its net/usbmisc hotplug events fire) BEFORE the daemon is
+	// on the bus, so the 'add' that would trigger autosetup phase 1 is lost —
+	// and nothing ever re-fires it (the startup path only resolves *configured*
+	// modems). Scan what is already present once at startup and replay the
+	// first candidate through the same hotplug path. autosetup_create re-checks
+	// the live uci for emptiness, so this never touches a configured box.
+	self.autosetup_scan = function() {
+		if (!(self.autosetup ?? true) || length(keys(self.modems)) ||
+		    !deps.autosetup_create || !deps.list_present)
+			return;
+
+		for (let p in deps.list_present()) {
+			// hotplug devnames are basenames: 'cdc-wdm0' (usbmisc) / 'usb0' (net)
+			let dev = (p.kind == 'cdc-wdm')
+				? replace(p.device ?? '', /^.*\//, '') : p.netdev;
+
+			if (dev != null && dev != '') {
+				self.hotplug('add', dev);
+				return;
+			}
+		}
+	};
+
 	// Destructive teardown for config reload/removal: bring every context down
 	// (STOP_NETWORK) and stop the modems, then drop all state.
 	self.shutdown = function() {
