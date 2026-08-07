@@ -145,6 +145,7 @@ export function create(opts)
 	// forward-declared: ucode closures capture only already-declared vars, and
 	// these self-reference (the TDZ trap — see CLAUDE.md ucode gotchas)
 	let clear_reconnect, retry_activate, enter_reconnecting, activate, derive_netdev;
+	let detach_modem;   // forward-declared: used by modem_removed above its definition
 	let maybe_autosetup_fill;
 
 	// --- modem event handlers (one named function per event; the router
@@ -240,6 +241,21 @@ export function create(opts)
 	// `wanted` now so a later `registered` (e.g. after the SIM is unblocked)
 	// doesn't auto-re-kick before an explicit ifup; recovery from a blocked
 	// SIM is an operator action by design.
+	// modem 'removed' (transport-level device gone): detach the dead modem and
+	// enter the boot-style waiting state. Presence is then re-checked by the
+	// periodic tick — NOT only by hotplug — because the 'add' may never fire.
+	let modem_removed = (modem) => {
+		let entry = self.modems[modem.id];
+
+		if (!entry || entry.modem != modem)
+			return;
+
+		detach_modem(modem.id, entry);
+		entry.control_note = 'waiting for modem (device vanished)';
+		entry.waiting_since = time();
+		entry._waiting_logged = time();
+	};
+
 	let modem_sim_blocked = (modem) => {
 		for (let name, entry in self.contexts) {
 			if (entry.cfg.modem == modem.id && entry.cfg.interface) {
@@ -297,9 +313,20 @@ export function create(opts)
 			return modem_sim_blocked(modem);
 
 		case 'deregistered':
-		case 'removed':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
 			return;
+
+		// the control transport reported the device gone (modem_common
+		// _device_gone). Detach like a hotplug 'remove' and enter the same
+		// waiting state used at boot: the periodic tick re-checks presence, so
+		// the modem also recovers when NO hotplug 'add' ever fires — HW-seen
+		// with a provider-side (GDSP) SIM reset on the Huawei E392: the read
+		// fails while the device stays on the bus (or re-enumerates before the
+		// daemon processes the loss), and the modem used to stay ABSENT until
+		// a router reboot.
+		case 'removed':
+			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
+			return modem_removed(modem);
 
 		// stable-identity gate (modem_common.check_identity). 'identity' fires on
 		// every open once the IMEI is known; 'identity_mismatch' means the pinned
@@ -669,6 +696,32 @@ export function create(opts)
 	// recovery repower rung, modem_reset and repower_modem.
 	let board_gpio_ok = () => length(keys(self.modems)) <= 1;
 
+	// detach a dead modem: drop the modem object, reset the resolved device/
+	// netdev to their configured values and unbind this modem's contexts (their
+	// ctx objects are bound to the dead modem and queued activations would wait
+	// on it forever). Used by hotplug 'remove' and the modem 'removed' event;
+	// the next rebuild (hotplug 'add' or the periodic presence re-check) builds
+	// fresh modem + context objects.
+	detach_modem = (name, entry) => {
+		entry.modem.stop();
+		entry.modem = null;
+		entry.device = entry.cfg.device;   // reset to configured value
+		entry.netdev = entry.cfg.netdev;
+
+		for (let cname, centry in self.contexts) {
+			if (centry.cfg.modem != name || !centry.ctx)
+				continue;
+
+			clear_reconnect(cname);
+
+			for (let p in centry.pending_up)
+				p({ error: 'modem_removed' });
+
+			centry.pending_up = [];
+			centry.ctx = null;
+		}
+	};
+
 	let start_modem = (name, cfg, muxinfo) => {
 		// decide how this modem is controlled (qmi/mbim/ncm/ppp): device, netdev,
 		// tty. resolve_control classifies EVERY modem, including NCM modems that
@@ -927,11 +980,24 @@ export function create(opts)
 			tick = () => {
 				let now = time();
 
+				// waiting modems: periodically re-check presence and rebuild
+				// via start_modem — this recovers modems whose hotplug 'add'
+				// never fired (false device-gone with the device still on the
+				// bus, or a re-enumeration processed before the loss). While
+				// the device is still absent, start_modem re-logs the wait.
 				for (let name, entry in self.modems)
 					if (!entry.modem && entry.control_note &&
-					    (now - (entry._waiting_logged ?? 0)) >= 30) {
-						entry._waiting_logged = now;
-						log('warn', sprintf('modem %s: %s', name, entry.control_note));
+					    (now - (entry._waiting_logged ?? 0)) >= (self.timing?.waiting_retry ?? 30)) {
+						start_modem(name, entry.cfg, entry.muxinfo);
+
+						if (self.modems[name])
+							self.modems[name]._waiting_logged = now;
+
+						// rebind contexts that lost their modem (mirrors hotplug add)
+						if (self.modems[name]?.modem)
+							for (let cname, centry in self.contexts)
+								if (!centry.ctx)
+									start_context(cname, centry.cfg);
 					}
 
 				if (deps.board) {
@@ -1650,29 +1716,8 @@ export function create(opts)
 				let hit = (base && base == devname) ||
 				          (entry.netdev && entry.netdev == devname);
 
-				if (hit && entry.modem) {
-					entry.modem.stop();
-					entry.modem = null;
-					entry.device = entry.cfg.device;   // reset to configured value
-					entry.netdev = entry.cfg.netdev;
-
-					// detach this modem's contexts: their ctx objects are bound
-					// to the dead modem and queued activations would wait on it
-					// forever (protocol switch / USB replug / usb_repower). The
-					// next 'add' rebuilds them against the fresh modem object.
-					for (let cname, centry in self.contexts) {
-						if (centry.cfg.modem != name || !centry.ctx)
-							continue;
-
-						clear_reconnect(cname);
-
-						for (let p in centry.pending_up)
-							p({ error: 'modem_removed' });
-
-						centry.pending_up = [];
-						centry.ctx = null;
-					}
-				}
+				if (hit && entry.modem)
+					detach_modem(name, entry);
 			}
 		}
 	};

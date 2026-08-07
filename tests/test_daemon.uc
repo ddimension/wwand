@@ -336,6 +336,20 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 });
 
 uloop.run();
+
+// --- false device-gone recovery ---------------------------------------------
+// The transport reports the device gone while it is still on the bus (HW-seen:
+// GDSP provider SIM reset on the E392). The 'removed' event must detach the
+// modem and enter the waiting state; the presence re-check path (shared with
+// hotplug 'add') must then rebuild it.
+let entry_m0 = daemon.modems.m0;
+ok(entry_m0 != null && entry_m0.modem != null, 'gone: modem bound before the test');
+entry_m0.modem._device_gone();
+eq(entry_m0.modem, null, 'gone: modem detached on the removed event');
+ok(length(entry_m0.control_note ?? '') > 0, 'gone: waiting control_note set');
+daemon.hotplug('add', 'mock0');
+ok(daemon.modems.m0.modem != null, 'gone: modem rebuilt via the add/presence path');
+
 daemon.shutdown();
 
 ok(completed, 'full deferred-callback chain completed (no silent uloop unwind)');
