@@ -37,9 +37,21 @@ findings were all worked off:
   test_transport (txq congestion/flush/dispatch over an injected fake
   `io_open` handle — NOTE: ucode does not parse `(a ?? b)(args)` as a call),
   test_hex (roundtrips incl. ICCID/EID), test_log (child-process capture).
-- **Open**: provider-driven eSIM profile switch (GDSP) still wedges the modem
-  until reboot — better handling (card-event → SIM hot-reset + reapply) to be
-  designed/tested with remote provider action.
+- **Provider-driven (GDSP) SIM reset — played through live on HW** (Huawei
+  E392, IMSI 9012800014...): the provider purges the registration; the modem
+  loses registration ("unknown cause code", the newly-decoded internal 204),
+  attach attempts get rejected without a cause, and the E392 eventually
+  reboots itself off the bus. The old "only a router reboot helps" was the
+  device-gone dead end above — with the removed-detach + presence re-check the
+  whole cycle now self-heals: drop → detach → waiting → rebuild → fresh attach
+  → READY, ~25-30 s per cycle, repeatedly HW-verified (incl. a mid-cycle wwand
+  restart adopting seamlessly). Network-side re-acceptance took up to ~15 min
+  of passive cycles; an admin `modem_reset` (LuCI button, backend DMS reset)
+  produced a fresh attach the network accepted immediately — the documented
+  fast path after a provider purge. Fallout fixed on the spot: sim.uc lost its
+  internal hex_to_arr alias in the dedupe (daemon crash when the eSIM/slot
+  path ran) — restored as non-exported aliases; check_modem now reports
+  `modem_waiting` for a detached-but-configured modem.
 
 ## Maintainability audit rounds 1-3 (2026-08-07)
 
