@@ -105,6 +105,7 @@ export default {
 			resp: {},
 		},
 
+	// unused in production — kept as a stable codec fixture for test_qmux
 		GET_PACKET_SERVICE_STATUS: {
 			id: 0x0022,
 			req:  {},
@@ -200,15 +201,6 @@ export default {
 			},
 		},
 
-		GET_DEFAULT_SETTINGS: {
-			id: 0x002C,
-			req: { profile_type: { t: 0x01, f: 'u8' } },
-			resp: {
-				pdp_type: { t: 0x11, f: 'u8' },
-				apn:      { t: 0x14, f: 'string' },
-			},
-		},
-
 		GET_CURRENT_SETTINGS: {
 			id: 0x002D,
 			req: { requested: { t: 0x10, f: 'u32' } },
@@ -227,14 +219,6 @@ export default {
 				mtu:          { t: 0x29, f: 'u32' },
 				ip_family:    { t: 0x2B, f: 'u8' },
 			},
-		},
-
-		SET_DEFAULT_PROFILE_NUMBER: {
-			id: 0x004A,
-			req: {
-				profile: { t: 0x01, f: { type: 'u8', family: 'u8', index: 'u8' } },
-			},
-			resp: {},
 		},
 
 		SET_IP_FAMILY: {

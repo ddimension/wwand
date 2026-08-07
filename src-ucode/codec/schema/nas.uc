@@ -4,10 +4,9 @@
 'use strict';
 
 // QmiNasServiceStatus (LTE service status): the "limited service" states mean
-// the modem camps on a cell but cannot use it (attach rejected / emergency-only)
-export const SVC_STATUS_NONE = 0;
+// the modem camps on a cell but cannot use it (attach rejected / emergency-only).
+// Only the LIMITED states are consumed (0 = none / 2 = available unused).
 export const SVC_STATUS_LIMITED = 1;
-export const SVC_STATUS_AVAILABLE = 2;
 export const SVC_STATUS_LIMITED_REGIONAL = 3;
 
 // EMM / MM reject cause text (3GPP TS 24.301 §9.9.3.9 / TS 24.008) — the common

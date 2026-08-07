@@ -29,9 +29,6 @@
 
 const OLD_DEPRECATED = [ 'dhcp', 'autocreateif', 'customroutes', 'strongestnetwork' ];
 
-// options handled by netifd itself; silently left alone
-const NETIFD_OPTS = [ 'defaultroute', 'peerdns', 'metric', 'ip4table', 'ip6table' ];
-
 const PDP_TYPES = { ipv4: true, ipv6: true, ipv4v6: true };
 
 function bool_opt(v, dflt)

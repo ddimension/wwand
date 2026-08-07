@@ -918,7 +918,7 @@ physical slot (so it is selected on every start) and enable the desired profile.
 Activation codes and confirmation codes are validated for shell-safe characters
 before reaching lpac.
 
-The LuCI **Network → Modem** settings page surfaces the profile list,
+The LuCI **Network → Modems** page (Tools view of the selected modem) surfaces the profile list,
 enable/disable, the download form with live progress, and notification handling;
 the eSIM sections hide themselves when `wwand-esim` is not installed.
 

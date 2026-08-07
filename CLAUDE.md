@@ -116,7 +116,8 @@ registers both `add_protocol wwand` + `add_protocol qmi`;
   Always sanity-import changed modules on the target after deploy.
 
 ## Build / test / deploy
-- **Tests (host):** `cd tests && sh run_tests.sh` — 14 suites, mockhub
+- **Tests (host):** `cd tests && sh run_tests.sh` — all suites must be green
+  before every commit (current count lives in docs/STATUS.md); mockhub
   over the real codec + a private ubusd. Run before every commit.
 - **JS syntax:** `node --check <file>.js` for LuCI resources.
 - **C module (cross):** aarch64 toolchain at

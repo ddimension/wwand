@@ -13,7 +13,7 @@
 import * as sim from './sim.uc';
 import * as backend from './backend.uc';
 
-const ISDR_AID = 'a0000005591010ffffffff8900000100';
+import { ISDR_AID } from './sim.uc';
 
 // --- minimal BER-TLV ---------------------------------------------------------
 

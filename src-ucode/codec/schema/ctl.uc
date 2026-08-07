@@ -1,16 +1,12 @@
 // wwand — QMI CTL service message schema (service 0x00).
+// Message/TLV ids verified against libqmi 1.38 qmi-service-ctl.json (CTL is
+// spec-stable; ids unchanged since libqmi 1.0).
 
 'use strict';
 
 export default {
 	service: 0x00,
 	messages: {
-		SET_INSTANCE_ID: {
-			id: 0x0020,
-			req:  { instance: { t: 0x01, f: 'u8' } },
-			resp: { link:     { t: 0x01, f: 'u16' } },
-		},
-
 		GET_VERSION_INFO: {
 			id: 0x0021,
 			req:  {},

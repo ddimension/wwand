@@ -89,7 +89,20 @@ export function create(hub, hooks)
 		}
 
 		let cmd_type = (kind == 'set') ? mbim.CMD_SET : mbim.CMD_QUERY;
-		let info = mbim.encode_info(cmd[kind] ?? {}, args);
+
+		// encode_info die()s on schema fields it cannot encode (arrays are
+		// decode-only) — surface that as a failed REQUEST, not a dead daemon
+		let info;
+		try {
+			info = mbim.encode_info(cmd[kind] ?? {}, args);
+		}
+		catch (e) {
+			if (cb)
+				cb({ error: 'proto', detail: sprintf('%s', e) }, null);
+
+			return false;
+		}
+
 		let txn = self.next_txn++;
 
 		let frame = mbim.encode_command(txn, schema.service, cmd.cid, cmd_type, info);

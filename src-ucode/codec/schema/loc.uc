@@ -30,12 +30,6 @@ export default {
 			resp: {},
 		},
 
-		STOP: {
-			id: 0x0023,
-			req:  { session_id: { t: 0x01, f: 'u8' } },
-			resp: {},
-		},
-
 		POSITION_REPORT_IND: {
 			id: 0x0024,
 			ind: {

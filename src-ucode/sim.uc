@@ -645,7 +645,7 @@ function at_apdu_close(modem, channel, cb)
 // pick the APDU transport once per modem, in order: native MBIM MS UICC Low
 // Level Access -> QMI UIM logical channel (native, or over the QMI-over-MBIM
 // passthrough) -> AT CCHO/CGLA/CCHC. cb('mbim' | 'qmi' | 'at' | null)
-const ISDR_AID = 'a0000005591010ffffffff8900000100';
+export const ISDR_AID = 'a0000005591010ffffffff8900000100';
 
 function apdu_backend(modem, slot, cb)
 {

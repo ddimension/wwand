@@ -1,6 +1,6 @@
 // wwand — QMI DMS service message schema (service 0x02).
 //
-// Operating modes (SET/GET_OPERATING_MODE): 0 online, 1 low_power, 2 factory
+// Operating modes (SET_OPERATING_MODE): 0 online, 1 low_power, 2 factory
 // test, 3 offline, 4 reset, 5 shutting_down, 6 persistent_low_power.
 //
 // PIN status (legacy DMS UIM): 0 not initialized, 1 enabled/not verified,
@@ -95,16 +95,6 @@ export default {
 			resp: {
 				pin1: { t: 0x11, f: { status: 'u8', verify_retries: 'u8', unblock_retries: 'u8' } },
 				pin2: { t: 0x12, f: { status: 'u8', verify_retries: 'u8', unblock_retries: 'u8' } },
-			},
-		},
-
-		GET_OPERATING_MODE: {
-			id: 0x002D,
-			req:  {},
-			resp: {
-				mode:            { t: 0x01, f: 'u8' },
-				offline_reason:  { t: 0x10, f: 'u16' },
-				hw_restricted:   { t: 0x11, f: 'u8' },
 			},
 		},
 

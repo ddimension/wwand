@@ -50,13 +50,5 @@ export default {
 			},
 			resp: FORMAT_FIELDS_RESP,
 		},
-
-		GET_DATA_FORMAT: {
-			id: 0x0021,
-			req: {
-				endpoint: { t: 0x10, f: { type: 'u32', iface: 'u32' } },
-			},
-			resp: FORMAT_FIELDS_RESP,
-		},
 	},
 };

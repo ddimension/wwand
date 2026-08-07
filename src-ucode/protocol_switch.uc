@@ -35,6 +35,9 @@ const RECIPES = [
 		// MC-only: the EM prefix is ambiguous (Quectel EM06/EM12 vs Sierra
 		// EM7455) and is claimed by the Quectel recipe above; disambiguating a
 		// Sierra EM needs a revision check, out of scope until we have one.
+		// UNVERIFIED on real hardware: excluded from supported() until then —
+		// a wrong USBCOMP write can strand a modem in a dead composition.
+		unverified: true,
 		match: '^MC[0-9]',
 		query: 'AT!USBCOMP?',
 		query_re: /([0-9]+)/,
@@ -65,7 +68,11 @@ function token_protocol(recipe, token)
 
 export function supported(model)
 {
-	return recipe_for(model) != null;
+	let r = recipe_for(model);
+
+	// hardware-unverified recipes stay in the table as documentation but are
+	// not offered for switching (a bad composition write can brick access)
+	return r != null && !r.unverified;
 };
 
 export function switch_protocol(modem, target, cb)

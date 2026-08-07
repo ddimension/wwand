@@ -49,7 +49,7 @@ const NETMASK_BITS = {
 	'240': 4, '224': 3, '192': 2, '128': 1, '0': 0,
 };
 
-export function netmask_to_prefix(netmask)
+function netmask_to_prefix(netmask)
 {
 	if (netmask == null)
 		return null;
