@@ -1,7 +1,36 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-05. All test suites green (33 suites, ~1478 checks).
+_Last updated: 2026-08-07. All test suites green (34 suites, ~1541 checks).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## Maintainability audit rounds 1-3 (2026-08-07)
+
+Three-agent audit (core / codec+services / LuCI+docs), findings worked off in
+commit rounds; both modems on the Chateau (RG650E + Huawei E392, multi-modem)
+re-verified CONNECTED on the refactored core. Highlights:
+
+- **Consolidation**: `context_common.ctx_scaffolding` (emit/set_state/_fail
+  tail — the context-side mirror of `modem_common.scaffolding`),
+  `codec/hex.uc` (all byte/hex/BCD codecs, 5 copies dropped),
+  `backend.first_of`/`run_seq` (sequential ladders/pyramids),
+  `modem_common.TIMING_BASE`, config.uc `conn_fields`+`derive_mux_link` (the
+  mux-child naming rule existed twice).
+- **Structure**: `atcmd_parse.uc` split out of atcmd.uc (volatile vendor
+  parsers vs stable engine; `atcmd.parse_*` re-exported), daemon
+  `on_modem_event` split into named per-event handlers.
+- **Safety**: NEW `tests/test_sim.uc` (35 checks) covers the PIN/PUK unlock
+  machine (was the most safety-critical untested code); warn-only state
+  validation (MODEM_STATES registry + complete CONTEXT_TRANSITIONS matrix);
+  mbim encode_info die() now fails the request, not the daemon; the
+  HW-unverified Sierra protocol-switch recipe is gated out of supported();
+  batched-init-reset failures are logged.
+- **Dead code**: six unused schema messages, NETIFD_OPTS, unused exports/ACL
+  grants removed; `_apdu_be` docs aligned with the code (probe MBIM→QMI→AT,
+  power_cycle deliberately QMI-first).
+- **LuCI**: shared `wwand.rpc` / `wwand.format` / `wwand.modemsid` modules
+  (rpc.declare and formatter duplication across 5 files), settings.js split
+  (`wwand.esim` + `wwand.netsel`); identity-field save invariant documented
+  (Combobox create-preservation), IMEI picker sources widened.
 
 ## Cold-boot autosetup + reload-race crash + M2M-eUICC detection (2026-08-05)
 
