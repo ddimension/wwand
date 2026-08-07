@@ -19,8 +19,8 @@ import * as mbim_client from './mbim_client.uc';
 import * as modem_common from './modem_common.uc';
 import * as mbimmod from './codec/mbim.uc';
 import * as recovery_mod from './recovery.uc';
-import * as atcmd from './atcmd.uc';
 import * as protoswitch from './protocol_switch.uc';
+import * as telemetry_mbim from './telemetry_mbim.uc';
 import * as netlink from './netlink.uc';
 import * as bc from './codec/mbim-schema/basic_connect.uc';
 // rich telemetry: native-MBIM backend + the QMI-over-MBIM passthrough (the whole
@@ -36,47 +36,13 @@ import * as nasmod from './codec/schema/nas.uc';
 import * as dsdmod from './codec/schema/dsd.uc';
 import * as uimmod from './codec/schema/uim.uc';
 import * as wmsmod from './codec/schema/wms.uc';
+import * as dmsmod from './codec/schema/dms.uc';
 import * as sim from './sim.uc';
-import * as tlv from './codec/tlv.uc';
 
 const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
 	at_drain: 60000,
 };
-
-// fast "watch" mode timing (mirrors modem.uc): while a consumer (the LuCI status
-// page) polls modem_signal/modem_cells, refresh at most once a second and revert
-// to the slow telemetry timer a few seconds after polling stops. The adaptive
-// cadence itself lives in modem_common.watch_driver (shared with modem.uc).
-
-// Null out the i16 signal metrics QMI reports as -32768 ("not available") on
-// serving + neighbour cells (the passthrough cell path decodes the same NAS TLVs
-// modem.uc does). Applied once at ingestion so LuCI renders "—". Mirrors
-// modem.uc clean_cell_metrics.
-function clean_cell_metrics(cells)
-{
-	let scrub = (c) => {
-		for (let f in [ 'rsrp', 'rsrq', 'rssi', 'srxlev', 'snr' ])
-			if (c[f] == tlv.SENTINEL.i16)
-				c[f] = null;
-	};
-
-	for (let c in (cells?.lte_intra?.cells ?? []))
-		scrub(c);
-
-	for (let fr in (cells?.lte_inter?.freqs ?? []))
-		for (let c in (fr.cells ?? []))
-			scrub(c);
-
-	if (cells?.nr5g_cell)
-		scrub(cells.nr5g_cell);
-
-	return cells;
-}
-
-// derive the data-system mode from the QENG serving detail (Quectel AT): the NR
-// line states NSA/SA directly. Last-resort data_mode source. Mirrors modem.uc.
-// dsd_from_serving moved to modem_common (shared with the QMI data-mode resolver).
 
 export function create(opts)
 {
@@ -127,8 +93,7 @@ export function create(opts)
 	self.recovery = rec;
 
 	let at_opts = opts.at ?? {};
-	let retry_timer = null, reg_timer = null, settle_timer = null, at_drain_timer = null, telemetry_timer = null;
-	let telem_watch;   // modem_common.watch_driver (adaptive fast telemetry loop)
+	let retry_timer = null, reg_timer = null, settle_timer = null, at_drain_timer = null;
 
 	// protocol-neutral scaffolding (set_state / attach_context /
 	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)
@@ -611,237 +576,48 @@ export function create(opts)
 		});
 	};
 
-	// signal: prefer the QMI passthrough (GET_SIGNAL_INFO — reuses the battle-
-	// tested QMI decode), then native MBIMEx v2 Signal State as a fallback for
-	// modems without the passthrough. (The native MS-ext buffer decode is not yet
-	// validated against real-HW buffers — on the EG06 it returned only rssi with
-	// null rsrp/rsrq/snr and misaligned cells, while the passthrough is correct.)
-	// Stores self.signal (QMI GET_SIGNAL_INFO shape).
-	self._refresh_signal = function(cb) {
-		cb = cb ?? (() => null);
+	// admin-triggered soft modem reset (ubus modem_reset — backend fallback of
+	// the generic reset chain; backend parity with QMI/NCM): QMI DMS
+	// offline -> reset over the passthrough (same sequence as the native QMI
+	// backend), falling back to AT+CFUN=1,1 for modems without the passthrough.
+	// The modem drops off the bus and re-enumerates; hotplug/discovery rebuild
+	// it and the daemon kicks the auto interfaces back up.
+	self.reset = function(cb) {
+		let at_reset = () => {
+			if (!self.at)
+				return cb({ error: 'unsupported_on_backend' });
 
-		backend.choose(self, '_sig_be', [
-			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => up
-				? self.pt.nas.request('GET_SIGNAL_INFO', {},
-					(e, d) => ok(!e && tlv.has_payload(d)), { no_recovery: true })
-				: ok(false)) },
-			{ name: 'mbim', probe: (ok) => self.mbim
-				? mbim_backend.get_signal(self.mbim, (s) => ok(s != null))
-				: ok(false) },
-		], (be) => {
-			if (be == 'mbim')
-				return mbim_backend.get_signal(self.mbim, (s) => { if (s) self.signal = s; cb(); });
-
-			if (be == 'qmi')
-				return self.pt.nas.request('GET_SIGNAL_INFO', {}, (e, d) => {
-					if (!e && tlv.has_payload(d))
-						self.signal = d;
-					cb();
-				}, { no_recovery: true });
-
-			cb();
-		});
-	};
-
-	// cells: native Base Stations Info, else passthrough NAS cell-location info
-	// (decoded + scrubbed exactly as modem.uc), else a best-effort AT QENG
-	// serving cell. Stores self.cells, preserving any carrier-aggregation set.
-	self._refresh_cells = function(cb) {
-		cb = cb ?? (() => null);
-
-		let ca = self.cells?.ca;
-		let store = (c) => {
-			if (c) {
-				if (ca != null)
-					c.ca = ca;
-				self.cells = c;
-			}
-			cb();
+			log('warn', 'admin modem reset (AT+CFUN=1,1)');
+			self.at.send('AT+CFUN=1,1', () => {
+				notify_contexts('lost');
+				cb(null, { resetting: true });
+			}, { timeout: 8000 });
 		};
 
-		backend.choose(self, '_cells_be', [
-			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => up
-				? self.pt.nas.request('GET_CELL_LOCATION_INFO', {},
-					(e, d) => ok(!e && tlv.has_payload(d)), { no_recovery: true })
-				: ok(false)) },
-			{ name: 'mbim', probe: (ok) => self.mbim
-				? mbim_backend.get_cells(self.mbim, (c) => ok(c != null))
-				: ok(false) },
-			{ name: 'at', probe: (ok) => ok(!!self.at) },
-		], (be) => {
-			if (be == 'mbim')
-				return mbim_backend.get_cells(self.mbim, (c) => store(c));
+		self._ensure_pt((up) => {
+			if (!up)
+				return at_reset();
 
-			if (be == 'qmi')
-				return self.pt.nas.request('GET_CELL_LOCATION_INFO', {}, (e, d) =>
-					store((!e && tlv.has_payload(d)) ? clean_cell_metrics(d) : null),
-					{ no_recovery: true });
+			self.pt.ctl.request('ALLOCATE_CID', { service: dmsmod.default.service }, (aerr, adata) => {
+				if (aerr || !adata?.allocation)
+					return at_reset();
 
-			if (be == 'at')
-				return modem_common.telemetry_at(self).send('AT+QENG="servingcell"', (e, r) => {
-					let serving = e ? null : atcmd.parse_qeng_servingcell(r?.lines);
-					store(serving ? { serving: serving } : null);
-				});
+				let dms = client_mod.create(self.pt.shim, dmsmod.default, adata.allocation.cid, hooks);
 
-			cb();
+				log('warn', 'admin modem reset (DMS offline -> reset over the MBIM passthrough)');
+				qmi_backend.set_opmode(dms, 'offline', () =>
+					qmi_backend.set_opmode(dms, 'reset', () => {
+						notify_contexts('lost');
+						cb(null, { resetting: true });
+					}));
+			}, { no_recovery: true });
 		});
 	};
 
-	// carrier aggregation: passthrough NAS GET_LTE_CPHY_CA_INFO, else AT+QCAINFO
-	// (no native MBIM CA CID). Stores self.cells.ca. Mirrors modem.uc _fetch_ca_info.
-	self._refresh_ca = function(cb) {
-		cb = cb ?? (() => null);
-
-		if (!self.cells)   // nowhere to hang CA yet
-			return cb();
-
-		let store = (ca) => { if (self.cells) self.cells.ca = ca ?? []; cb(); };
-
-		backend.choose(self, '_ca_be', [
-			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => up
-				? qmi_backend.get_ca(self.pt.nas, (ca) => ok(ca != null))
-				: ok(false)) },
-			{ name: 'at', probe: (ok) => ok(!!self.at) },
-		], (be) => {
-			if (be == 'qmi')
-				return qmi_backend.get_ca(self.pt.nas, (ca) => store(ca ?? []));
-
-			if (be == 'at')
-				return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) =>
-					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
-
-			store([]);
-		});
-	};
-
-	// data-system mode (LTE/NSA/SA): native register-state class mask, else
-	// passthrough DSD, else the AT QENG serving detail. Stores self.dsd_status.
-	self._refresh_data_mode = function(cb) {
-		cb = cb ?? (() => null);
-
-		backend.choose(self, '_dsd_be', [
-			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => (up && self.pt.dsd)
-				? qmi_backend.get_data_mode(self.pt.dsd, (m) => ok(m != null))
-				: ok(false)) },
-			{ name: 'mbim', probe: (ok) => self.mbim
-				? mbim_backend.get_data_mode(self.mbim, (m) => ok(m != null))
-				: ok(false) },
-			{ name: 'at', probe: (ok) => ok(self.cells?.serving?.lte != null ||
-			                                self.cells?.serving?.nr != null) },
-		], (be) => {
-			let tag = (s) => { if (s) s.source = be; return s; };
-
-			if (be == 'mbim')
-				return mbim_backend.get_data_mode(self.mbim, (m) => { self.dsd_status = tag(m); cb(); });
-
-			if (be == 'qmi')
-				return qmi_backend.get_data_mode(self.pt.dsd, (m) => { self.dsd_status = tag(m); cb(); });
-
-			if (be == 'at')
-				self.dsd_status = tag(modem_common.dsd_from_serving(self.cells?.serving));
-
-			cb();
-		});
-	};
-
-	// registration detail (reject cause / limited service): native register
-	// state, else passthrough NAS system-info. Stores self.reg_detail.
-	self._refresh_reg_detail = function(cb) {
-		cb = cb ?? (() => null);
-
-		backend.choose(self, '_regd_be', [
-			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => up
-				? qmi_backend.get_reg_detail(self.pt.nas, (d) => ok(d != null))
-				: ok(false)) },
-			{ name: 'mbim', probe: (ok) => self.mbim
-				? mbim_backend.get_reg_detail(self.mbim, (d) => ok(d != null))
-				: ok(false) },
-		], (be) => {
-			if (be == 'mbim')
-				return mbim_backend.get_reg_detail(self.mbim, (d) => { if (d) self.reg_detail = d; cb(); });
-
-			if (be == 'qmi')
-				return qmi_backend.get_reg_detail(self.pt.nas, (d) => { if (d) self.reg_detail = d; cb(); });
-
-			cb();
-		});
-	};
-
-	let emit_telemetry = () => emit('telemetry', { signal: self.signal, cells: self.cells, reg: self.reg });
-
-	let log_telemetry = () => {
-		log('notice', sprintf('telemetry: %s', modem_common.format_telemetry(self)));
-	};
-
-	// Fast "watch" loop: while a consumer polls modem_signal/modem_cells, refresh
-	// the LuCI-visible data (signal + cells + CA) at most once a second,
-	// non-overlapping so the cadence stretches when the modem is busy. Reverts to
-	// the slow telemetry timer after polling stops. The adaptive cadence lives in
-	// modem_common.watch_driver (shared with modem.uc); this is just the MBIM
-	// refresh body. done() is called exactly once per cycle (finish or bail).
-	let refresh_fast = (done) => {
-		self._refresh_signal(() => {
-			if (!self.mbim)
-				return done();
-
-			self._refresh_cells(() => self._refresh_ca(() =>
-				modem_common.fetch_nr_neighbours(self, () => {
-					emit_telemetry();
-					done();
-				})));
-		});
-	};
-
-	telem_watch = modem_common.watch_driver({
-		alive:   () => self.mbim != null,
-		ready:   () => self.state == 'READY',
-		refresh: refresh_fast,
-	});
-
-	// called by the daemon whenever modem_signal / modem_cells is queried
-	self.watch = () => telem_watch.watch();
-
-	// Slow telemetry loop (the stats interval): the baseline v1 SIGNAL_STATE
-	// query (kept working for modems without V2 / passthrough) plus the richer
-	// signal, data-system mode, registration detail and cells — so the periodic
-	// telemetry log line is as complete as QMI's (the passthrough serves cells
-	// via NAS GET_CELL_LOCATION_INFO just like the QMI backend).
-	self._start_telemetry = function() {
-		if (telemetry_timer)
-			return;
-
-		let interval = +(self.config.stats_interval ?? 60) * 1000;
-
-		if (interval <= 0)
-			return;
-
-		let tick;
-
-		tick = () => {
-			if (!self.mbim)
-				return;
-
-			// v1 RSSI floor first, then let the rich per-RAT refresh overwrite it
-			self.mbim.command(bc, 'SIGNAL_STATE', 'query', {}, (err, data) => {
-				if (!err && !self.signal?.lte && !self.signal?.nr5g) {
-					let dbm = (data.rssi != null && data.rssi != 99)
-						? (-113 + 2 * data.rssi) : null;
-					self.signal = { rssi_raw: data.rssi, rssi: dbm };
-				}
-
-				self._refresh_signal(() => self._refresh_data_mode(() => self._refresh_reg_detail(() => self._refresh_cells(() => {
-					if (!self.mbim)
-						return;
-
-					log_telemetry();
-					emit_telemetry();
-					telemetry_timer = uloop.timer(interval, tick);
-				}))));
-			});
-		};
-
-		telemetry_timer = uloop.timer(min(interval, 5000), tick);
-	};
+	// telemetry (signal/cells/CA/data-mode/reg-detail + slow log loop + fast
+	// watch loop) — extracted to telemetry_mbim.uc; attaches the _refresh_*
+	// methods, watch and _start_telemetry, returns { stop } for teardown.
+	let telem = telemetry_mbim.install(self, { log: log, emit: emit });
 
 	// --- lifecycle ---------------------------------------------------------
 
@@ -883,12 +659,12 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
-		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, telemetry_timer ])
+		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer ])
 			if (t)
 				t.cancel();
 
-		retry_timer = reg_timer = settle_timer = at_drain_timer = telemetry_timer = null;
-		telem_watch.stop();
+		retry_timer = reg_timer = settle_timer = at_drain_timer = null;
+		telem.stop();
 
 		modem_common.close_at(self);
 

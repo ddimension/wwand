@@ -340,4 +340,72 @@ daemon.shutdown();
 
 ok(completed, 'full deferred-callback chain completed (no silent uloop unwind)');
 
+// --- generic modem_reset chain: GPIO priority, multi-modem gating, backend
+// fallback. Uses a bare daemon instance with a fake board + hand-built modem
+// entries (no transport needed — the chain never opens the device).
+let pulses = [];
+let cycles = 0;
+let rdeps = {
+	log: (level, msg) => null,
+	board: {
+		profile: { reset_gpio: 'gpio900' },
+		reset_pulse: (rg, off) => { push(pulses, rg); return true; },
+		power_cycle: (off) => { cycles++; return true; },
+	},
+};
+let rd = daemon_mod.create({ timing: TIMING, deps: rdeps });
+let backend_resets = [];
+let mk_entry = (cfg, with_reset) => ({
+	cfg: cfg,
+	modem: with_reset ?
+		{ stop: () => null,
+		  reset: (cb) => { push(backend_resets, 1); cb(null, { resetting: true }); } } :
+		{ stop: () => null },
+});
+
+// single modem, no per-modem gpio -> board default GPIO wins over backend
+rd.modems = { m0: mk_entry({}, true) };
+rd.modem_reset('m0', (err, res) => {
+	eq(err, null, 'reset single: no error');
+	eq(res.action, 'gpio', 'reset single: board default GPIO used');
+});
+eq(pulses, [ 'gpio900' ], 'reset single: board reset line pulsed');
+eq(length(backend_resets), 0, 'reset single: backend reset not touched');
+
+// two modems, no per-modem gpio -> board default is ambiguous, backend reset
+rd.modems = { m0: mk_entry({}, true), m1: mk_entry({}, true) };
+rd.modem_reset('m1', (err, res) => {
+	eq(err, null, 'reset multi: no error');
+	eq(res.action, 'backend', 'reset multi: falls back to backend reset');
+});
+eq(length(pulses), 1, 'reset multi: board GPIO not pulsed');
+eq(length(backend_resets), 1, 'reset multi: backend reset ran');
+
+// two modems, per-modem reset_gpio -> that line is pulsed
+rd.modems.m1.cfg = { reset_gpio: 'gpio7' };
+rd.modem_reset('m1', (err, res) => {
+	eq(res.gpio, 'gpio7', 'reset multi+gpio: per-modem line used');
+});
+eq(pulses[1], 'gpio7', 'reset multi+gpio: per-modem line pulsed');
+
+// two modems, no gpio, backend without reset -> clean unsupported error
+rd.modems = { m0: mk_entry({}, false), m1: mk_entry({}, false) };
+rd.modem_reset('m0', (err, res) =>
+	eq(err.error, 'unsupported_on_backend', 'reset multi no-backend: clean error'));
+
+// repower: multi-modem without per-modem gpio must NOT power-cycle the shared rail
+let rp = rd.repower_modem('m0');
+eq(rp.error, 'multi_modem_needs_reset_gpio', 'repower multi: shared rail guarded');
+eq(cycles, 0, 'repower multi: power_cycle not fired');
+
+// repower: single modem -> power-cycle allowed... but board default GPIO wins first
+rd.modems = { m0: mk_entry({}, false) };
+rp = rd.repower_modem('m0');
+eq(rp.action, 'reset', 'repower single: board reset line preferred');
+delete rdeps.board.profile.reset_gpio;
+rp = rd.repower_modem('m0');
+eq(rp.action, 'power_cycle', 'repower single: falls back to power cycle');
+eq(cycles, 1, 'repower single: power_cycle fired');
+rd.shutdown();
+
 done('test_daemon');

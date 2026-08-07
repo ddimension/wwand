@@ -813,7 +813,7 @@ when called from LuCI).
 | `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor. Sets are **idempotent**: values the modem already carries are dropped; nothing left → `unchanged: true`, no NV write, no radio disturbance |
 | `modem_scan` / `modem_scan_start` / `modem_scan_status` | `modem` | visible-operator scan (sync, or async start+poll — a scan takes up to ~90 s) |
 | `modem_set_network_selection` | `modem`, `mode`, `mcc?`, `mnc?` | `auto` or `manual` PLMN selection (QMI NAS / MBIM passthrough / AT+COPS). Idempotent (`unchanged: true` when the modem already runs the requested selection); on deferred-apply models the result carries `deferred: true` + `apply: 'modem_reset'` |
-| `modem_reset` | `modem` | admin soft modem reset (QMI: DMS offline→reset, NCM: `AT+CFUN=1,1`) — the apply step for `deferred` results (write ACL). The modem re-enumerates and every `auto` interface comes back up on its own |
+| `modem_reset` | `modem` | generic admin modem reset — the apply step for `deferred` results (write ACL). Priority: dedicated reset GPIO (per-modem `reset_gpio`, or the board default when only one modem is managed), then the backend soft reset (QMI: DMS offline→reset, MBIM: passthrough-DMS or `AT+CFUN=1,1`, NCM: `AT+CFUN=1,1`). Result reports `action: 'gpio'\|'backend'`. The modem re-enumerates and every `auto` interface comes back up on its own |
 | `modem_plmn_lists` | `modem` | preferred/forbidden PLMN lists |
 | `modem_sim_slots` | `modem` | physical slots: card presence, active, ICCID, eUICC flag, EID |
 | `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
@@ -824,7 +824,7 @@ when called from LuCI).
 | `modem_sms_list` | `modem`, `storage?` | list stored SMS (decoded: sender, timestamp, text, multipart merged); `storage` `SM` (SIM, default) or `ME` (modem) |
 | `modem_sms_read` | `modem`, `storage?`, `index` | read one stored SMS by index |
 | `modem_sms_delete` | `modem`, `storage?`, `index` | delete one stored SMS by index (write ACL) |
-| `modem_repower` | `modem?` | hardware repower: pulse the modem `reset_gpio` (or the board default), else power-cycle the modem USB power. Same path as the recovery ladder; recovers a hung / vanished modem |
+| `modem_repower` | `modem?` | hardware repower: pulse the modem `reset_gpio` (or, single-modem only, the board default), else power-cycle the modem USB power (also single-modem only — on a multi-modem box the board lines would hit the wrong hardware: error `multi_modem_needs_reset_gpio`). Same path as the recovery ladder; recovers a hung / vanished modem |
 | `modem_set_protocol` | `modem`, `protocol` | switch the control protocol (`qmi` ⇄ `mbim`); the modem resets |
 | `context_up` / `context_down` | `context` or `interface` | connect / disconnect (deferred reply with the IP config) |
 | `context_status` / `context_settings` | `context` or `interface` | state, per-family cid/pdh, IP settings |

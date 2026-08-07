@@ -661,6 +661,14 @@ export function create(opts)
 		});
 	};
 
+	// board-level power/reset lines are only safe to fall back on when they
+	// unambiguously belong to the one managed modem: on a multi-modem box the
+	// board profile's GPIOs drive the BUILT-IN modem (and power_cycle may cut a
+	// shared rail), so pulsing them for e.g. a USB-stick modem resets the wrong
+	// hardware. Per-modem `reset_gpio` is the multi-modem answer. Used by the
+	// recovery repower rung, modem_reset and repower_modem.
+	let board_gpio_ok = () => length(keys(self.modems)) <= 1;
+
 	let start_modem = (name, cfg, muxinfo) => {
 		// decide how this modem is controlled (qmi/mbim/ncm/ppp): device, netdev,
 		// tty. resolve_control classifies EVERY modem, including NCM modems that
@@ -764,13 +772,17 @@ export function create(opts)
 				state_dir: opts?.state_dir,
 				reboot_delay: opts?.reboot_delay,
 				// hardware repower rung (replaces the external usb-repower tool):
-				// a modem `reset_gpio` (or the board's default reset line) wins and
-				// pulses RESET without cutting power; otherwise power-cycle the
-				// modem's USB power GPIO. No-op (null) when the board has neither.
+				// a modem `reset_gpio` (or, single-modem only, the board's default
+				// reset line) wins and pulses RESET without cutting power; otherwise
+				// power-cycle the modem's USB power GPIO. Board fallbacks are gated
+				// by board_gpio_ok — on a multi-modem box they'd hit the wrong
+				// hardware. No-op (false) when nothing safe is available.
 				repower: deps.board ? (() => {
-					let rg = cfg.reset_gpio ?? deps.board.profile?.reset_gpio;
+					let rg = cfg.reset_gpio ?? (board_gpio_ok() ? deps.board.profile?.reset_gpio : null);
 					let off = cfg.repower_time ? +cfg.repower_time * 1000 : null;
-					return rg ? deps.board.reset_pulse(rg, off) : deps.board.power_cycle(off);
+					if (rg)
+						return deps.board.reset_pulse(rg, off);
+					return board_gpio_ok() ? deps.board.power_cycle(off) : false;
 				}) : null,
 			},
 			at: {
@@ -1232,17 +1244,37 @@ export function create(opts)
 	// modem_set_network_selection and the async scan job trio)
 	netsel_ops.install(self, { log: log, check_modem: check_modem, reg_plmn: reg_plmn });
 
+	// generic modem reset: dedicated reset GPIO first (per-modem `reset_gpio`,
+	// or the board default when it clearly maps to this modem), then the
+	// backend-specific soft reset (QMI DMS offline->reset, MBIM passthrough-DMS/
+	// AT, NCM AT+CFUN=1,1).
 	self.modem_reset = function(ref, cb) {
 		let entry = check_modem(ref, cb);
 
 		if (!entry)
 			return;
 
+		let rg = entry.cfg?.reset_gpio ??
+			(board_gpio_ok() ? deps.board?.profile?.reset_gpio : null);
+
+		if (rg && deps.board) {
+			let off = entry.cfg?.repower_time ? +entry.cfg.repower_time * 1000 : null;
+
+			log('warn', sprintf('modem %s: admin-requested modem reset (GPIO %s pulse)', ref, rg));
+
+			if (deps.board.reset_pulse(rg, off))
+				return cb(null, { ok: true, resetting: true, action: 'gpio', gpio: rg });
+
+			// GPIO configured but unusable -> fall through to the backend reset
+			log('warn', sprintf('modem %s: reset GPIO %s unavailable, trying backend reset', ref, rg));
+		}
+
 		if (type(entry.modem.reset) != 'function')
 			return cb({ error: 'unsupported_on_backend' });
 
-		log('warn', sprintf('modem %s: admin-requested modem reset', ref));
-		entry.modem.reset(cb);
+		log('warn', sprintf('modem %s: admin-requested modem reset (backend)', ref));
+		entry.modem.reset((err, res) =>
+			cb(err, err ? null : { ...res, action: 'backend' }));
 	};
 
 	// physical SIM slots: list (status page) and switch (guarded; the modem
@@ -1444,9 +1476,9 @@ export function create(opts)
 		sim.read_plmn_lists(entry.modem, (lists) => cb(null, lists));
 	};
 
-	// settable NAS preferences (settings editor, write path). Whitelist with
-	// expected blobmsg types — anything else is rejected before it reaches
-	// the modem.
+	// manual hardware repower of a modem (ubus modem_repower): reset-GPIO pulse
+	// when one applies, else board power-cycle — both gated for multi-modem
+	// boxes (see board_gpio_ok). `ref` optional — defaults to the first modem.
 	self.repower_modem = function(ref) {
 		if (!deps.board)
 			return { error: 'no_board_profile' };
@@ -1456,12 +1488,17 @@ export function create(opts)
 		if (!cfg)
 			for (let n, e in self.modems) { cfg = e.cfg; break; }
 
-		let rg = cfg?.reset_gpio ?? deps.board.profile?.reset_gpio;
+		// board defaults only when they unambiguously target this modem (see
+		// board_gpio_ok): per-modem reset_gpio is the multi-modem path.
+		let rg = cfg?.reset_gpio ?? (board_gpio_ok() ? deps.board.profile?.reset_gpio : null);
 		let off = cfg?.repower_time ? +cfg.repower_time * 1000 : null;
 
 		if (rg)
 			return deps.board.reset_pulse(rg, off) ?
 				{ ok: true, action: 'reset', gpio: rg } : { error: 'reset_gpio_unavailable' };
+
+		if (!board_gpio_ok())
+			return { error: 'multi_modem_needs_reset_gpio' };
 
 		return deps.board.power_cycle(off) ?
 			{ ok: true, action: 'power_cycle' } : { error: 'no_power_control' };
