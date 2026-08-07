@@ -416,4 +416,36 @@ uloop.timer(70, () => {
 
 uloop.run();
 
+// --- wireless-style sysfs path binding ---------------------------------------
+// sysfs_path_of: realpath -> strip /sys/devices/ -> drop the USB interface
+// component; matching accepts the full path (exact device dir or a parent
+// prefix) beside the legacy bare USB id.
+(function() {
+	const RG_IF = '/sys/devices/platform/soc/8af8800.usb/xhci-hcd.2.auto/usb3/3-1/3-1:1.4';
+	const RG_DEV = 'platform/soc/8af8800.usb/xhci-hcd.2.auto/usb3/3-1';
+
+	let fx = {
+		realpath: (p) => (p == '/sys/class/usbmisc/cdc-wdm1/device') ? RG_IF : null,
+		glob: (p) => (p == '/sys/class/usbmisc/cdc-wdm*') ? [ '/sys/class/usbmisc/cdc-wdm1' ] : [],
+		readlink: (p) => null,
+		read: (p) => null,
+		lsdir: (p) => null,
+		access: (p) => false,
+	};
+
+	eq(discovery.sysfs_path_of('/sys/class/usbmisc/cdc-wdm1/device', fx), RG_DEV,
+		'path: interface component stripped to the usb device dir');
+	eq(discovery.sysfs_path_of('/nope', fx), null, 'path: unresolvable -> null');
+
+	eq(discovery.device_for_usb_path(RG_DEV, fx), '/dev/cdc-wdm1',
+		'path: full sysfs path matches the control device');
+	eq(discovery.device_for_usb_path('platform/soc/8af8800.usb/xhci-hcd.2.auto/usb3', fx),
+		'/dev/cdc-wdm1', 'path: parent prefix matches too');
+	eq(discovery.device_for_usb_path('platform/soc/8af8800.usb/xhci-hcd.1.auto/usb1/1-1', fx),
+		null, 'path: different port does not match');
+	// legacy bare id still goes through the readlink matcher (null here)
+	eq(discovery.device_for_usb_path('3-1', fx), null,
+		'path: bare id uses the legacy matcher (no readlink in this fx)');
+})();
+
 done('test_discovery');

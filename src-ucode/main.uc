@@ -279,8 +279,19 @@ function run_daemon()
 				let dev = (substr(devname ?? '', 0, 7) == 'cdc-wdm')
 					? '/dev/' + devname : devname;
 
+				// bind by the wireless-style sysfs path (stable across USB
+				// enumeration order, ready for PCIe/MHI); the device name is
+				// only the fallback when the path cannot be resolved
+				let clink = (substr(devname ?? '', 0, 7) == 'cdc-wdm')
+					? '/sys/class/usbmisc/' + devname + '/device'
+					: '/sys/class/net/' + devname + '/device';
+				let spath = discovery.sysfs_path_of(clink);
+
 				cursor.set('network', 'wwmodem_auto', 'wwand_modem');
-				cursor.set('network', 'wwmodem_auto', 'device', dev);
+				if (spath)
+					cursor.set('network', 'wwmodem_auto', 'path', spath);
+				else
+					cursor.set('network', 'wwmodem_auto', 'device', dev);
 				cursor.set('network', 'wwan0', 'interface');
 				cursor.set('network', 'wwan0', 'proto', 'wwand');
 				cursor.set('network', 'wwan0', 'modem', 'wwmodem_auto');

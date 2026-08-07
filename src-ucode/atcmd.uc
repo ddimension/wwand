@@ -652,6 +652,50 @@ export function parse_celllock(lines)
 //   +COPS: <mode>[,<format>,"<oper>"[,<AcT>]]
 // Returns { mode, format, oper, plmn } (plmn = digits-only oper when the
 // read format is numeric, i.e. format 2) or null.
+// parse ATI output into { manufacturer, model, revision } (null when nothing
+// useful). Two shapes in the wild:
+//   labeled: "Manufacturer: huawei" / "Model: E398" / "Revision: 11.x"
+//   bare:    "Quectel\nRG650E-EU\n..." (line 1 manufacturer, line 2 model)
+// URC noise (^RSSI etc.) and +-prefixed lines are ignored — old sticks spew
+// unsolicited status on the same port.
+export function parse_ati(lines)
+{
+	let out = {};
+	let bare = [];
+
+	for (let l in (lines ?? [])) {
+		l = trim(l);
+
+		if (!length(l) || l == 'OK' || uc(substr(l, 0, 3)) == 'ATI')
+			continue;
+
+		let m = match(l, /^([A-Za-z ]+): *(.+)$/);
+
+		if (m) {
+			let k = lc(trim(m[1]));
+
+			if (k == 'manufacturer')
+				out.manufacturer = trim(m[2]);
+			else if (k == 'model')
+				out.model = trim(m[2]);
+			else if (k == 'revision')
+				out.revision = trim(m[2]);
+		}
+		else if (substr(l, 0, 1) != '+' && substr(l, 0, 1) != '^')
+			push(bare, l);
+	}
+
+	if (!out.model && length(bare) >= 2) {
+		out.manufacturer = out.manufacturer ?? bare[0];
+		out.model = bare[1];
+
+		if (length(bare) >= 3)
+			out.revision = out.revision ?? bare[2];
+	}
+
+	return (out.model || out.manufacturer) ? out : null;
+};
+
 export function parse_cops_read(lines)
 {
 	for (let l in (lines ?? [])) {

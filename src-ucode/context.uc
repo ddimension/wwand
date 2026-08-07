@@ -21,6 +21,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
+import * as fs from 'fs';
 import * as tlv from './codec/tlv.uc';
 import * as qmi_backend from './qmi_backend.uc';
 import * as context_common from './context_common.uc';
@@ -206,10 +207,16 @@ export function create(opts)
 			return;
 
 		// max up/down bandwidth for the current radio link (same for every PDP
-		// on this modem) — query once via the first WDS client.
+		// on this modem) — query once via the first WDS client. Several modems
+		// report "not available" rates as the u32 sentinel (0xFFFFFFFF) —
+		// treat those as 0 so the UI doesn't show 4.3 Gbit/s.
 		qmi_backend.get_channel_rates(fams[0].client, (rates) => {
-			if (rates)
-				self.channel_rate = rates;
+			if (rates) {
+				let r = {};
+				for (let k, v in rates)
+					r[k] = tlv.is_unavailable(v, 'u32') ? 0 : v;
+				self.channel_rate = r;
+			}
 		});
 
 		// the RAT actually carrying THIS session's data (LTE / 5G NSA / SA). The
@@ -246,6 +253,33 @@ export function create(opts)
 
 				if (--pend > 0)
 					return;
+
+				// QMAP/rmnet-offloaded modems (e.g. the RG650E) account the
+				// accelerated datapath ONLY in the kernel netdev — the WDS
+				// per-call counters stay 0 forever. Fall back to the context
+				// netdev's kernel statistics so usage display and the zero-rx
+				// watchdog see real numbers.
+				if (valid && !agg.rx_packets && !agg.tx_packets) {
+					let mux = +(self.config.mux_id ?? 0);
+					let parent = self.modem.datapath?.netdev;
+					let dev = (mux > 0)
+						? (self.config.mux_link ?? (parent ? sprintf('%sm%d', parent, mux) : null))
+						: parent;
+
+					if (dev && fs.access('/sys/class/net/' + dev)) {
+						let g = (f) => +(trim(fs.readfile(sprintf('/sys/class/net/%s/statistics/%s', dev, f)) ?? '') || 0);
+
+						agg.tx_bytes   = g('tx_bytes');
+						agg.rx_bytes   = g('rx_bytes');
+						agg.tx_packets = g('tx_packets');
+						agg.rx_packets = g('rx_packets');
+						agg.tx_errors  = g('tx_errors');
+						agg.rx_errors  = g('rx_errors');
+						agg.tx_dropped = g('tx_dropped');
+						agg.rx_dropped = g('rx_dropped');
+						agg.source = 'netdev';
+					}
+				}
 
 				if (valid)
 					self.stats = agg;

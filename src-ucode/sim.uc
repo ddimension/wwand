@@ -456,9 +456,20 @@ export function slot_status(modem, cb)
 	if (!modem.uim)
 		return cb({ error: 'no_uim_client' }, null);
 
+	// single-slot firmwares (e.g. old Huawei sticks) don't implement the
+	// message at all — and LuCI polls this method every few seconds. Cache
+	// the deterministic refusal instead of hammering the modem and flooding
+	// the log on every poll.
+	if (modem._slot_status_unsupported)
+		return cb({ error: 'unsupported' }, null);
+
 	modem.uim.request('GET_SLOT_STATUS', {}, (err, data) => {
-		if (err)
+		if (err) {
+			// 71 InvalidQmiCommand / 94 NotSupported: permanent for this fw
+			if (err.code == 71 || err.code == 94)
+				modem._slot_status_unsupported = true;
 			return cb(err, null);
+		}
 
 		let out = map(data.slots ?? [], (s, i) => {
 			let info = data.info?.[i];

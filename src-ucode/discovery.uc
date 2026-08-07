@@ -17,7 +17,7 @@
 
 'use strict';
 
-import { glob, readlink, lsdir, access, open } from 'fs';
+import { glob, readlink, lsdir, access, open, realpath } from 'fs';
 import * as atcmd from './atcmd.uc';
 
 // datapath drivers that mean "no rich control protocol — driven over AT"
@@ -29,6 +29,7 @@ export function default_fx()
 	return {
 		glob:     (...p) => glob(...p),
 		readlink: (p) => readlink(p),
+		realpath: (p) => realpath(p),
 		lsdir:    (p) => lsdir(p),
 		access:   (p) => access(p) == true,
 		read:     (p) => {
@@ -154,6 +155,48 @@ export function usb_device_of(name, fx)
 	return m ? m[1] : null;
 };
 
+// wireless-style stable device path: the sysfs path of the modem's physical
+// device relative to /sys/devices — same convention as `wifi-device option
+// path` — anchored at the controller, so it stays valid across enumeration
+// order AND covers non-USB attachments (PCIe/MHI) with the same mechanism.
+// `class_link` is a /sys/class/... "device" link (e.g.
+// /sys/class/usbmisc/cdc-wdm0/device); for a USB function the resolved
+// INTERFACE dir (…/3-1:1.4) has its trailing interface component dropped so
+// the path names the USB *device* (…/usb3/3-1). null when unresolvable.
+export function sysfs_path_of(class_link, fx)
+{
+	fx = fx ?? default_fx();
+
+	let real = fx.realpath ? fx.realpath(class_link) : null;
+
+	if (real == null)
+		return null;
+
+	let p = replace(real, /^\/sys\/devices\//, '');
+
+	if (p == real)
+		return null;
+
+	let parts = split(p, '/');
+
+	if (match(parts[-1], /^[0-9]+-[0-9.]+:[0-9.]+$/))
+		p = join('/', slice(parts, 0, length(parts) - 1));
+
+	return p;
+};
+
+// does the candidate's full sysfs path (relative to /sys/devices) fall under
+// the configured wireless-style path? Exact device dir or any parent (a user
+// may pin just the controller/port prefix).
+function full_path_matches(cfg_path, cand_path)
+{
+	if (cand_path == null)
+		return false;
+
+	return cand_path == cfg_path ||
+	       substr(cand_path, 0, length(cfg_path) + 1) == cfg_path + '/';
+};
+
 // USB device id ('3-1') -> its iSerial string (trimmed) or null.
 export function usb_serial_of(usbid, fx)
 {
@@ -216,6 +259,7 @@ export function list_present(fx)
 			device: sprintf('/dev/%s', name),
 			protocol: protocol_of(sprintf('/dev/%s', name), fx),
 			usb_path: usbid,
+			path: sysfs_path_of(sprintf('/sys/class/usbmisc/%s/device', name), fx),
 			serial: usb_serial_of(usbid, fx),
 		});
 	}
@@ -235,6 +279,7 @@ export function list_present(fx)
 			netdev: netdev,
 			protocol: 'ncm',
 			usb_path: usbid,
+			path: sysfs_path_of(sprintf('/sys/class/net/%s/device', netdev), fx),
 			serial: usb_serial_of(usbid, fx),
 		});
 	}
@@ -318,14 +363,27 @@ export function ncm_netdev_for_imei(imei, fx)
 	return (length(ids) == 1) ? byusb[ids[0]] : null;
 };
 
-// '1-1.2' (usb path) -> '/dev/cdc-wdmX' | null
+// path -> '/dev/cdc-wdmX' | null. Accepts BOTH forms: the bare USB id
+// ('1-1.2', legacy) and the wireless-style full sysfs path
+// ('platform/…/usb3/3-1', works for PCIe/MHI too — recognized by a '/').
 export function device_for_usb_path(usb_path, fx)
 {
 	fx = fx ?? default_fx();
 
+	let full = index(usb_path, '/') >= 0;
+
 	for (let path in (fx.glob('/sys/class/usbmisc/cdc-wdm*') ?? [])) {
 		let name = basename(path);
-		let dev = fx.readlink(sprintf('/sys/class/usbmisc/%s/device', name));
+		let link = sprintf('/sys/class/usbmisc/%s/device', name);
+
+		if (full) {
+			if (full_path_matches(usb_path, sysfs_path_of(link, fx)))
+				return sprintf('/dev/%s', name);
+
+			continue;
+		}
+
+		let dev = fx.readlink(link);
 
 		if (dev == null)
 			continue;
@@ -347,13 +405,24 @@ export function ncm_netdev_for_usb_path(usb_path, fx)
 {
 	fx = fx ?? default_fx();
 
+	let full = index(usb_path, '/') >= 0;
+
 	for (let path in (fx.glob('/sys/class/net/*') ?? [])) {
 		let netdev = basename(path);
 
 		if (!NCM_DRIVERS[netdev_driver(netdev, fx)])
 			continue;
 
-		let dev = fx.readlink(sprintf('/sys/class/net/%s/device', netdev));
+		let link = sprintf('/sys/class/net/%s/device', netdev);
+
+		if (full) {
+			if (full_path_matches(usb_path, sysfs_path_of(link, fx)))
+				return netdev;
+
+			continue;
+		}
+
+		let dev = fx.readlink(link);
 
 		if (dev == null)
 			continue;
@@ -424,7 +493,12 @@ export function tty_for_usb_path(fx, usb_path, override)
 	if (!usb_path)
 		return null;
 
-	return atcmd.find_tty(fx, null, null, sprintf('/sys/bus/usb/devices/%s', usb_path));
+	// full wireless-style path vs bare USB id (see device_for_usb_path)
+	let base = (index(usb_path, '/') >= 0)
+		? sprintf('/sys/devices/%s', usb_path)
+		: sprintf('/sys/bus/usb/devices/%s', usb_path);
+
+	return atcmd.find_tty(fx, null, null, base);
 };
 
 // enumerate EVERY manageable modem on the host: cdc-wdm control devices AND

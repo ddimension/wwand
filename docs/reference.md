@@ -65,7 +65,9 @@ file for new setups:
 ```
 config wwand_modem 'm0'
 	option device 'wwan0'            # netdev name or /dev/cdc-wdmX
-	# option path '1-1.2'           # optional: pin to a fixed USB topology path
+	# option path 'platform/soc/8af8800.usb/xhci-hcd.2.auto/usb3/3-1'
+	#                                # preferred: stable sysfs path (like
+	#                                # wifi-device `path`); bare '3-1' works too
 	option pincode '1234'
 	option sim_slot '1'
 	option modes 'lte,nr5g'
@@ -154,8 +156,16 @@ config wwand 'globals'
 
 config modem 'm0'
 	option device '/dev/cdc-wdm0'    # control port, or a netdev name (`wwan0`)
-	                                 # or `option path '1-1.2'` (optional stable USB
-	                                 #   anchor; `usb_path` still accepted)
+	                                 # or `option path` — PREFERRED for multi-modem
+	                                 #   setups: netdev/cdc-wdm names follow USB
+	                                 #   enumeration order and can swap on reboot.
+	                                 #   Two accepted forms:
+	                                 #     'platform/…/usb3/3-1'  full sysfs path
+	                                 #        relative to /sys/devices (same
+	                                 #        convention as wifi-device `path`;
+	                                 #        also covers future PCIe/MHI modems)
+	                                 #     '3-1' / '1-1.2'        bare USB port id
+	                                 #   (`usb_path` still accepted as option name)
 	option serial '99efe861'         # bind by USB iSerial — stable identity, matched
 	                                 #   pre-open; follows the modem across re-enum
 	option imei '868965060008609'    # bind by IMEI — verified post-open; a mismatch

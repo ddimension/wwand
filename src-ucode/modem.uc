@@ -23,6 +23,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
+import * as fs from 'fs';
 import * as transport_mod from './transport.uc';
 import * as client_mod from './client.uc';
 import * as sim from './sim.uc';
@@ -522,6 +523,40 @@ export function create(opts)
 			for (let k, v in info)
 				self.info[k] = v;
 
+			// …/device is the USB *interface* dir (1-1:1.3); one level up is
+			// the USB device (1-1) carrying the descriptor strings (two would
+			// be the hub — "xHCI Host Controller")
+			let base = '/sys/class/usbmisc/' + substr(self.device, 5) + '/device/..';
+			let sf = (f) => trim(fs.readfile(base + '/' + f) ?? '');
+
+			// USB identity for status/detail (vid:pid + product string)
+			let vid = sf('idVendor'), pid = sf('idProduct'), prod = sf('product');
+
+			if (length(vid))
+				self.info.usb = sprintf('%s:%s%s', vid, pid,
+					length(prod) ? ' ' + prod : '');
+
+			// some firmwares return junk from DMS GET_MODEL (old Huawei
+			// sticks literally answer "0") — fall back to the USB device
+			// descriptor strings so status/LuCI show a usable name; once the
+			// AT channel opens, ATI (which such sticks answer properly)
+			// upgrades this further (step_at -> _ati_info).
+			let bogus = (s) => (s == null || trim(s) == '' || trim(s) == '0');
+
+			if (bogus(self.info.model)) {
+				self._model_generic = true;
+
+				if (length(prod))
+					self.info.model = prod;
+
+				if (bogus(self.info.manufacturer)) {
+					let manu = sf('manufacturer');
+
+					if (length(manu))
+						self.info.manufacturer = manu;
+				}
+			}
+
 			let c = info.capabilities;
 
 			if (c)
@@ -541,13 +576,35 @@ export function create(opts)
 		});
 	};
 
+	// the DMS model was junk and the USB descriptor filled in (generic
+	// "HUAWEI Mobile" style): ATI usually knows the real model — upgrade the
+	// identity off the critical path once the AT channel is open.
+	let _ati_info = () => {
+		if (!self._model_generic || !self.at)
+			return;
+
+		self.at.send('ATI', (err, res) => {
+			let inf = err ? null : atcmd.parse_ati(res?.lines);
+
+			if (!inf?.model)
+				return;
+
+			self._model_generic = false;
+			self.info.model = inf.model;
+			self.info.manufacturer = inf.manufacturer ?? self.info.manufacturer;
+			self.info.revision = inf.revision ?? self.info.revision;
+			log('notice', sprintf('identity from ATI: %s %s (rev %s)',
+				self.info.manufacturer ?? '?', self.info.model, self.info.revision ?? '?'));
+		}, { timeout: 8000 });
+	};
+
 	// AT side channel: best-effort, failures never block bring-up
 	step_at = () => modem_common.open_at(self, {
 		at_opts: at_opts,
 		log: log,
 		drain_interval: self.timing.at_drain,
 		set_drain_timer: (t) => { at_drain_timer = t; },
-		next: step_esim_quirk,
+		next: () => { _ati_info(); step_esim_quirk(); },
 		// preserved: when AT is already open (defensive re-entry), skip straight
 		// to the datapath rather than re-running the eSIM quirk
 		reopen_next: step_datapath,

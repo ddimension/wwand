@@ -407,4 +407,20 @@ eq(atcmd.find_tty(nfx, '/dev/cdc-wdm0', null), null, 'find: none present');
 let rg650 = quectel_fx({ files: { [sprintf('%s/idProduct', BASE)]: "0122\n" } });
 eq(atcmd.find_tty(rg650, '/dev/cdc-wdm0', null), '/dev/ttyUSB2', 'find: RG650E local override');
 
+// --- ATI parse (model-identity fallback) -------------------------------------
+let ati1 = atcmd.parse_ati([ 'Manufacturer: huawei', 'Model: E398', 'Revision: 11.810.09.04.00', 'IMEI: 861234567890123', 'OK' ]);
+eq(ati1.model, 'E398', 'ati: labeled model');
+eq(ati1.manufacturer, 'huawei', 'ati: labeled manufacturer');
+eq(ati1.revision, '11.810.09.04.00', 'ati: labeled revision');
+
+let ati2 = atcmd.parse_ati([ 'Quectel', 'RG650E-EU', 'Revision: RG650EEUAAR11A05M8G', 'OK' ]);
+eq(ati2.model, 'RG650E-EU', 'ati: bare model (line 2)');
+eq(ati2.manufacturer, 'Quectel', 'ati: bare manufacturer (line 1)');
+eq(ati2.revision, 'RG650EEUAAR11A05M8G', 'ati: labeled revision wins over bare');
+
+let ati3 = atcmd.parse_ati([ '^RSSI:26', 'Manufacturer: huawei', '^LTERSRP:-87,-12', 'Model: E398', '+CSQ: 26,99', 'OK' ]);
+eq(ati3.model, 'E398', 'ati: URC/+ noise ignored');
+
+eq(atcmd.parse_ati([ '^RSSI:26', 'OK' ]), null, 'ati: nothing useful -> null');
+
 done('test_atcmd');
