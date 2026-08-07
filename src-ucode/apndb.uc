@@ -34,11 +34,14 @@ const APNDB = {
 	'8988280': { match: 'iccid', apn: 'iot.1nce.net', pdp_type: 'ipv4', auth: 'none',
 	             note: '1NCE IoT' },
 
-	// Vodafone GDSP / global M2M (IMSI 901 28 00...) — HW-verified on the
-	// Cudy LT300 deployment SIM
+	// Vodafone GDSP / global M2M (IMSI 901 28 00..., ICCID 8988239...) —
+	// HW-verified on the Cudy LT300 + Huawei E392 deployment SIMs
 	'9012800': { match: 'imsi', apn: 'apn.global-m2m.net', pdp_type: 'ipv4v6', auth: 'both',
 	             username: 'gdsp', password: 'gdsp',
 	             note: 'Vodafone GDSP global M2M' },
+	'8988239': { match: 'iccid', apn: 'apn.global-m2m.net', pdp_type: 'ipv4v6', auth: 'both',
+	             username: 'gdsp', password: 'gdsp',
+	             note: 'Vodafone GDSP global M2M (ICCID)' },
 };
 
 // longest-prefix lookup across ICCID and IMSI; returns the entry (a copy,
