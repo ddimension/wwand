@@ -23,6 +23,7 @@ import * as protoswitch from './protocol_switch.uc';
 import * as telemetry_mbim from './telemetry_mbim.uc';
 import * as netlink from './netlink.uc';
 import * as bc from './codec/mbim-schema/basic_connect.uc';
+import * as quectel_svc from './codec/mbim-schema/quectel.uc';
 // rich telemetry: native-MBIM backend + the QMI-over-MBIM passthrough (the whole
 // QMI client stack tunnelled over the open MBIM channel) + AT, chosen per
 // capability like modem.uc does over qmux.
@@ -124,7 +125,7 @@ export function create(opts)
 
 	// --- step chain --------------------------------------------------------
 
-	let step_open, step_caps, step_at, step_datapath, step_sim, step_register, step_attach;
+	let step_open, step_fcc, step_caps, step_at, step_datapath, step_sim, step_register, step_attach;
 
 	let fail = modem_common.make_fail(self, {
 		log: log, timing: self.timing, emit: emit,
@@ -160,6 +161,27 @@ export function create(opts)
 		self.mbim.open((err) => {
 			if (err)
 				return fail('open', err);
+
+			step_fcc();
+		});
+	};
+
+	// FCC RF unlock (laptop-SKU Quectel modems in MBIM mode, e.g. EM120R-GL /
+	// EM160R-GL in Lenovo machines): `option fcc_auth 'quectel'` sends the
+	// vendor Radio State = on right after MBIM OPEN — the MBIM mirror of
+	// ModemManager's `mbimcli --quectel-set-radio-state=on` unlock helper.
+	// Best-effort: an error is logged and bring-up continues (an unlocked
+	// modem simply ignores/rejects the vendor CID).
+	step_fcc = () => {
+		if (self.config.fcc_auth != 'quectel')
+			return step_caps();
+
+		self.mbim.command(quectel_svc, 'RADIO_STATE', 'set',
+			{ radio_state: quectel_svc.RADIO_ON }, (err, data) => {
+			if (err)
+				log('warn', sprintf('FCC unlock (quectel radio state) failed: %J', err));
+			else
+				log('notice', sprintf('FCC unlock: quectel radio state now %d', data?.radio_state));
 
 			step_caps();
 		});

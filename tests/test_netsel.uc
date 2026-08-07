@@ -34,6 +34,7 @@ function handlers()
 		GET_REVISION: { revision: 'R11' },
 		GET_IDS: { imei: '860000000000001' },
 		SET_OPERATING_MODE: {},
+		GET_OPERATING_MODE: { mode: 0 },   // online (FCC verify pass-through)
 		GET_PIN_STATUS: { pin1: { status: 3, verify_retries: 3, unblock_retries: 10 } },
 		GET_MANUFACTURER: { manufacturer: 'Quectel' },
 		GET_CAPABILITIES: { capabilities: { max_tx_rate: 262144, max_rx_rate: 4194304,

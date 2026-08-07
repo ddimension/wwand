@@ -66,6 +66,28 @@ export function set_opmode(dms, mode, cb)
 	});
 };
 
+// FCC authentication (RF unlock): laptop-SKU modems (Lenovo/Dell/HP variants
+// of Quectel EM05/EM120/EM160, Foxconn SDX55/SDX62, Dell DW5821e-class) ship
+// RF-locked and stay in (persistent) low power until the host sends an FCC
+// authentication message. Variants (all verified vs libqmi qmi-service-dms):
+//   'dms'      DMS Set FCC Authentication 0x555F, no arguments
+//   'foxconn'  DMS Foxconn Set FCC Authentication 0x5571, u8 magic (default 0)
+//   'foxconn2' same id, v2 layout: magic string + u8 magic number
+// no_recovery: an unsupported message on a regular modem must stay harmless.
+export function fcc_auth(dms, variant, magic, cb)
+{
+	if (variant == 'foxconn')
+		return dms.request('FOXCONN_SET_FCC_AUTHENTICATION',
+			{ value: magic ?? 0 }, (err) => cb(err), { no_recovery: true });
+
+	if (variant == 'foxconn2')
+		return dms.request('FOXCONN_SET_FCC_AUTHENTICATION_V2',
+			{ magic_string: magic?.string ?? '', magic_number: magic?.number ?? 0 },
+			(err) => cb(err), { no_recovery: true });
+
+	dms.request('SET_FCC_AUTHENTICATION', {}, (err) => cb(err), { no_recovery: true });
+};
+
 // QmiNasDLBandwidth enum -> MHz (LTE carrier bandwidth)
 const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
 

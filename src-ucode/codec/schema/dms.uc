@@ -12,6 +12,8 @@ export const OPMODE_ONLINE = 0;
 export const OPMODE_LOW_POWER = 1;
 export const OPMODE_OFFLINE = 3;
 export const OPMODE_RESET = 4;
+export const OPMODE_PERSISTENT_LOW_POWER = 6;
+export const OPMODE_MODE_ONLY_LOW_POWER = 7;
 
 // human-readable operating-mode names (for the DMS event-report log). Keys are
 // strings; look up via sprintf('%d', mode).
@@ -101,6 +103,46 @@ export default {
 		SET_OPERATING_MODE: {
 			id: 0x002E,
 			req:  { mode: { t: 0x01, f: 'u8' } },
+			resp: {},
+		},
+
+		// verified vs libqmi qmi-service-dms.json msg 0x002D: Mode 0x01 u8,
+		// Offline Reason 0x10 u16 (only when offline), Hardware Restricted
+		// Mode 0x11 u8. Used to detect an FCC-RF-locked modem that stays in
+		// (persistent) low power after a set-online.
+		GET_OPERATING_MODE: {
+			id: 0x002D,
+			req:  {},
+			resp: { mode: { t: 0x01, f: 'u8' }, offline_reason: { t: 0x10, f: 'u16' },
+			        hw_restricted: { t: 0x11, f: 'u8' } },
+		},
+
+		// FCC authentication (RF unlock for laptop-SKU modems). Verified vs
+		// libqmi qmi-service-dms.json:
+		//   Set FCC Authentication 0x555F — no input (Quectel EM05/EM120/EM160
+		//   in Lenovo SKUs).
+		//   Foxconn Set FCC Authentication 0x5571 — Value 0x01 u8 (Foxconn
+		//   SDX55 T99W175 / Dell DW5821e-class, magic usually 0).
+		//   Foxconn Set FCC Authentication v2 (same id 0x5571) — Magic String
+		//   0x01 + Magic Number 0x02 u8 (T99W373-class SDX62).
+		// Same-id entries are fine: requests encode by NAME and responses are
+		// matched to the pending transaction, not decoded by id lookup.
+		SET_FCC_AUTHENTICATION: {
+			id: 0x555F,
+			req:  {},
+			resp: {},
+		},
+
+		FOXCONN_SET_FCC_AUTHENTICATION: {
+			id: 0x5571,
+			req:  { value: { t: 0x01, f: 'u8' } },
+			resp: {},
+		},
+
+		FOXCONN_SET_FCC_AUTHENTICATION_V2: {
+			id: 0x5571,
+			req:  { magic_string: { t: 0x01, f: 'string' },
+			        magic_number: { t: 0x02, f: 'u8' } },
 			resp: {},
 		},
 

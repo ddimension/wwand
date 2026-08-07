@@ -40,7 +40,7 @@ export function install(self, o)
 	let match_sim_override = (iccid, imsi) =>
 		modem_common.match_sim_override(self.config?.sims, iccid, imsi);
 
-	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, step_simslot, step_sim, step_identity, step_confnet, step_validate, step_attach_profile, step_register;
+	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, verify_online, step_simslot, step_sim, step_identity, step_confnet, step_validate, step_attach_profile, step_register;
 
 	// the DMS model was junk and the USB descriptor filled in (generic
 	// "HUAWEI Mobile" style): ATI usually knows the real model — upgrade the
@@ -252,9 +252,79 @@ export function install(self, o)
 			if (err)
 				return fail('opmode', err);
 
-			// settle after mode change (old: sleep 2)
-			tm.settle = uloop.timer(self.timing.settle, step_simslot);
+			verify_online(0);
 		});
+	};
+
+	// FCC RF unlock: laptop-SKU modems (Lenovo/Dell/HP Quectel EM1xx, Foxconn
+	// SDX55/SDX62, DW5821e-class) accept set-online but STAY in (persistent)
+	// low power until an FCC authentication message. Config `option fcc_auth`:
+	//   unset/'auto'  try 'dms' then 'foxconn' when the modem stays low-power
+	//   'off'         never try
+	//   'dms' | 'foxconn[:<magic>]' | 'foxconn2:<string>:<number>'  explicit
+	// Modems without the lock answer GET_OPERATING_MODE with online on the
+	// first pass and never see an FCC message.
+	let fcc_variants = () => {
+		let o = self.config.fcc_auth;
+
+		if (o == null || o == '' || o == 'auto')
+			return [ [ 'dms', null ], [ 'foxconn', 0 ] ];
+
+		if (o == 'off' || o == '0' || o == 'none')
+			return [];
+
+		let p = split(sprintf('%s', o), ':');
+
+		if (p[0] == 'foxconn')
+			return [ [ 'foxconn', (p[1] != null && p[1] != '') ? +p[1] : 0 ] ];
+
+		if (p[0] == 'foxconn2')
+			return [ [ 'foxconn2', { string: p[1] ?? '', number: +(p[2] ?? 0) } ] ];
+
+		if (p[0] == 'dms')
+			return [ [ 'dms', null ] ];
+
+		log('warn', sprintf('unknown fcc_auth value %J — treating as auto', o));
+		return [ [ 'dms', null ], [ 'foxconn', 0 ] ];
+	};
+
+	verify_online = (fcc_idx) => {
+		self.dms.request('GET_OPERATING_MODE', {}, (err, d) => {
+			let mode = err ? null : d?.mode;
+
+			// unsupported query or already online -> settle and continue
+			// (settle after mode change; old dialer: sleep 2)
+			if (mode == null || mode == dmsmod.OPMODE_ONLINE)
+				return tm.settle = uloop.timer(self.timing.settle, step_simslot);
+
+			let locked = (mode == dmsmod.OPMODE_LOW_POWER ||
+			              mode == dmsmod.OPMODE_PERSISTENT_LOW_POWER ||
+			              mode == dmsmod.OPMODE_MODE_ONLY_LOW_POWER);
+
+			let variants = fcc_variants();
+
+			if (!locked || fcc_idx >= length(variants)) {
+				log('warn', sprintf('modem stays in %s after set-online%s — continuing',
+					dmsmod.OPMODE_NAMES[sprintf('%d', mode)] ?? sprintf('opmode %d', mode),
+					(locked && length(variants)) ? ' (FCC authentication did not release it)' : ''));
+				return tm.settle = uloop.timer(self.timing.settle, step_simslot);
+			}
+
+			let variant = variants[fcc_idx][0], magic = variants[fcc_idx][1];
+
+			log('notice', sprintf('RF locked (%s) — trying FCC authentication (%s)',
+				dmsmod.OPMODE_NAMES[sprintf('%d', mode)] ?? sprintf('opmode %d', mode), variant));
+
+			qmi_backend.fcc_auth(self.dms, variant, magic, (ferr) => {
+				if (ferr) {
+					log('info', sprintf('FCC authentication (%s) not accepted: %J', variant, ferr));
+					return verify_online(fcc_idx + 1);
+				}
+
+				log('notice', sprintf('FCC authentication accepted (%s) — going online', variant));
+				qmi_backend.set_opmode(self.dms, 'online', () => verify_online(fcc_idx + 1));
+			});
+		}, { no_recovery: true });
 	};
 
 	// assert the configured physical SIM slot (option sim_slot, 0 = leave

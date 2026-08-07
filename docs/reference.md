@@ -183,6 +183,16 @@ config modem 'm0'
 	                                 #    (gpsd, scripts) — wwand never opens it; telemetry
 	                                 #    runs over the control channel. The released tty
 	                                 #    shows up as `at2_released` in `ubus call wwand status`
+	option fcc_auth 'auto'           # RF unlock for laptop-SKU modems that boot radio-locked
+	                                 #    (Lenovo/Dell/HP variants of Quectel EM1xx, Foxconn
+	                                 #    SDX55/SDX62, DW5821e-class). QMI values:
+	                                 #    auto (default: try dms, then foxconn, when the modem
+	                                 #    stays low-power after set-online) | off | dms
+	                                 #    (DMS 0x555F, Quectel EM1xx) | foxconn[:<magic>]
+	                                 #    (DMS 0x5571 v1, default magic 0) |
+	                                 #    foxconn2:<string>:<number> (0x5571 v2, SDX62).
+	                                 #    MBIM modems: 'quectel' (vendor Radio State = on,
+	                                 #    EM120R-GL/EM160R-GL in MBIM mode) — explicit only.
 	option lock_4g '1300:246'        # earfcn:pci — LTE cell lock (repeatable / list)
 	option lock_5g '242:431070:15:1' # pci:arfcn:scs:band — NR SA cell lock
 	option lock_persist '0'          # store the cell lock in modem NV

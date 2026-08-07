@@ -55,6 +55,7 @@ function base_handlers(over)
 		GET_REVISION: { revision: 'RG502QEAAAR11A06M4G' },
 		GET_IDS: { imei: '860000000000001' },
 		SET_OPERATING_MODE: {},
+		GET_OPERATING_MODE: { mode: 0 },   // online (FCC verify pass-through)
 		GET_CARD_STATUS: { card_status: card_status() },
 		GET_MANUFACTURER: { manufacturer: 'Quectel' },
 		GET_CAPABILITIES: { capabilities: { max_tx_rate: 262144, max_rx_rate: 4194304,
@@ -832,6 +833,50 @@ scenario('sim-refresh', {
 	});
 
 run_next();
+// --- 16: FCC-RF-locked modem — auto unlock chain ------------------------------
+// The modem accepts set-online but reports persistent low power until an FCC
+// authentication message arrives. Auto mode first tries the argument-less DMS
+// 0x555F; the mock rejects it (like a Foxconn device would) and accepts the
+// Foxconn 0x5571 variant, after which the mode goes online.
+
+let fcc_unlocked = false;
+
+scenario('fcc-unlock', {
+	handlers: base_handlers({
+		GET_OPERATING_MODE: () => ({ mode: fcc_unlocked ? 0 : 6 }),
+		SET_FCC_AUTHENTICATION: { __error: 0x0019 },   // NotSupported
+		// the v1/v2 foxconn messages share id 0x5571 — mockhub's id->name map
+		// resolves to the LAST entry (V2), so register the handler under both
+		FOXCONN_SET_FCC_AUTHENTICATION: (args) => { fcc_unlocked = true; return {}; },
+		FOXCONN_SET_FCC_AUTHENTICATION_V2: (args) => { fcc_unlocked = true; return {}; },
+	}),
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.state, 'READY', 'fcc: state READY after unlock');
+		eq(fcc_unlocked, true, 'fcc: foxconn authentication message sent');
+		eq(length(mock.calls_for('SET_FCC_AUTHENTICATION')), 1, 'fcc: dms variant tried first');
+		eq(length(mock.calls_for('FOXCONN_SET_FCC_AUTHENTICATION')) +
+		   length(mock.calls_for('FOXCONN_SET_FCC_AUTHENTICATION_V2')), 1, 'fcc: foxconn variant tried once');
+		// set-online: the initial attempt + one after the successful unlock
+		ok(length(mock.calls_for('SET_OPERATING_MODE')) >= 2, 'fcc: re-set online after unlock');
+	});
+
+// --- 17: fcc_auth off — locked modem is NOT poked -----------------------------
+
+scenario('fcc-off', {
+	handlers: base_handlers({
+		// stays low-power; with fcc_auth off the chain logs and continues,
+		// bring-up then proceeds (registration works in the mock regardless)
+		GET_OPERATING_MODE: { mode: 6 },
+	}),
+	config: { fcc_auth: 'off' },
+}, 'registered',
+	(modem, mock, events) => {
+		eq(length(mock.calls_for('SET_FCC_AUTHENTICATION')), 0, 'fcc-off: no dms fcc message');
+		eq(length(mock.calls_for('FOXCONN_SET_FCC_AUTHENTICATION')) +
+		   length(mock.calls_for('FOXCONN_SET_FCC_AUTHENTICATION_V2')), 0, 'fcc-off: no foxconn fcc message');
+	});
+
 uloop.run();
 
 // parse_modes edge cases (pure function)
