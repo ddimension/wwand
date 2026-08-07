@@ -25,6 +25,34 @@ const OPMODE = {
 	reset:     dmsmod.OPMODE_RESET,
 };
 
+// parse a config `modes` string ('lte,nr5g' / 'all') into the NAS
+// mode-preference mask; null for empty/unknown input. Moved from modem.uc —
+// shared with config_check.uc.
+export function parse_modes(str)
+{
+	if (str == null || str == '')
+		return null;
+
+	if (str == 'all')
+		return nasmod.MODE_ALL;
+
+	let mask = 0;
+
+	for (let m in split(str, /[, ]+/)) {
+		if (m == '')
+			continue;
+
+		let bits = nasmod.MODE_BITS[m];
+
+		if (bits == null)
+			return null;   // unknown mode name: refuse to guess
+
+		mask |= bits;
+	}
+
+	return mask || null;
+};
+
 // set_opmode(dms, mode, cb): mode is 'online'|'low_power'|'offline'|'reset'.
 // QMI error 26 ("no effect" — already in that mode) is normalized to success.
 export function set_opmode(dms, mode, cb)
