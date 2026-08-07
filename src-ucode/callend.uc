@@ -78,6 +78,32 @@ const GENERIC_CAUSE = {
 	'11': 'internal error',
 };
 
+// QMI_WDS_VERBOSE_CALL_END_REASON_INTERNAL (verbose type 2) — libqmi
+// qmi-enums-wds.h. These come from the modem's own stack, not the network.
+const INTERNAL_CAUSE = {
+	'201': 'internal error',
+	'202': 'call ended',
+	'203': 'unknown internal cause',
+	'204': 'unknown cause code',
+	'205': 'close in progress',
+	'206': 'network-initiated termination',
+	'207': 'app preempted',
+	'208': 'PDN IPv4 call disallowed',
+	'209': 'PDN IPv4 call throttled',
+	'210': 'PDN IPv6 call disallowed',
+	'211': 'PDN IPv6 call throttled',
+	'212': 'modem restart',
+	'213': 'PDP PPP not supported',
+	'214': 'unpreferred RAT',
+	'215': 'physical link close in progress',
+	'216': 'APN pending handover',
+	'217': 'profile bearer incompatible',
+	'218': 'card event (SIM refresh/removal)',
+	'219': 'low power mode or power down',
+	'220': 'APN disabled',
+	'241': 'PDP context already in use',
+};
+
 // Return { code, type, type_name, text } or null when there is nothing to say.
 // `verbose` is { type, reason }; `reason` is the coarse call_end_reason.
 // verbose type 2 (internal) reason 241: "PDP context already in use" — an
@@ -89,7 +115,11 @@ export const INTERNAL_PDP_IN_USE = 241;
 export function describe(reason, verbose, ext_error) {
 	if (verbose != null && verbose.type != null) {
 		let tname = TYPE_NAMES[sprintf('%d', verbose.type)] ?? sprintf('type %d', verbose.type);
-		let text = (verbose.type == 6) ? SM_CAUSE[sprintf('%d', verbose.reason)] : null;
+		let text = null;
+		if (verbose.type == 6)
+			text = SM_CAUSE[sprintf('%d', verbose.reason)];
+		else if (verbose.type == VERBOSE_TYPE_INTERNAL)
+			text = INTERNAL_CAUSE[sprintf('%d', verbose.reason)];
 
 		return {
 			code:      verbose.reason,

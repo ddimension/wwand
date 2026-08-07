@@ -24,6 +24,12 @@ eq(callend.describe(null, { type: 6, reason: 200 }).text, '3GPP cause 200', 'unk
 eq(callend.describe(null, { type: 3, reason: 5 }).text, 'call manager cause 5', 'CM type generic');
 eq(callend.describe(null, { type: 99, reason: 1 }).text, 'type 99 cause 1', 'unknown type generic');
 
+// verbose type 2 (modem-internal, libqmi VERBOSE_CALL_END_REASON_INTERNAL)
+eq(callend.describe(null, { type: 2, reason: 204 }).text, 'unknown cause code', 'internal 204 named');
+eq(callend.describe(null, { type: 2, reason: 206 }).text, 'network-initiated termination', 'internal 206 named');
+eq(callend.describe(null, { type: 2, reason: 241 }).text, 'PDP context already in use', 'internal 241 named');
+eq(callend.describe(null, { type: 2, reason: 999 }).text, 'internal cause 999', 'internal fallback keeps type name');
+
 // coarse reason only / ext only / nothing
 eq(callend.describe(1, null).text, 'unspecified', 'coarse reason 1 named');
 eq(callend.describe(6, null).text, 'access attempt in progress', 'coarse reason 6 named');
