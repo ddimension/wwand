@@ -28,6 +28,17 @@ export function conn_cfg(ctx, field)
 	return (v != null && v != '') ? v : null;
 };
 
+// the complete context state machine: IDLE -> PREPARING (QMI) | ACTIVATING
+// (MBIM/NCM dial directly) -> CONNECTED -> IDLE; every activation stage may
+// fall back to IDLE on failure/teardown. Used by ctx_scaffolding's warn-only
+// transition guard.
+export const CONTEXT_TRANSITIONS = {
+	IDLE:       { PREPARING: true, ACTIVATING: true },
+	PREPARING:  { ACTIVATING: true, IDLE: true },
+	ACTIVATING: { CONNECTED: true, IDLE: true },
+	CONNECTED:  { IDLE: true },
+};
+
 // shared context plumbing (the context-side mirror of
 // modem_common.scaffolding): the emit/set_state pair every context carries,
 // plus the common tail of _fail — stop stats, back to IDLE, clear settings,
@@ -45,6 +56,13 @@ export function ctx_scaffolding(self, o)
 	let set_state = (state) => {
 		if (self.state == state)
 			return;
+
+		// warn-only transition guard: the context machine is small enough for
+		// a complete matrix — an illegal edge here is a logic bug upstream
+		if (!(state in CONTEXT_TRANSITIONS))
+			o.log('warn', sprintf('set_state: unknown context state %J (typo?)', state));
+		else if (!(CONTEXT_TRANSITIONS[self.state] ?? {})[state])
+			o.log('warn', sprintf('set_state: unexpected transition %s -> %s', self.state, state));
 
 		o.log('info', sprintf('state %s -> %s', self.state, state));
 		self.state = state;

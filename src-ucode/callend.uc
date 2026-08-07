@@ -80,6 +80,12 @@ const GENERIC_CAUSE = {
 
 // Return { code, type, type_name, text } or null when there is nothing to say.
 // `verbose` is { type, reason }; `reason` is the coarse call_end_reason.
+// verbose type 2 (internal) reason 241: "PDP context already in use" — an
+// autonomously-activated context holds the CID (e.g. Zyxel RG502Q firmware
+// self-activating profile 2). The QMI context reclaims it via AT+CGACT.
+export const VERBOSE_TYPE_INTERNAL = 2;
+export const INTERNAL_PDP_IN_USE = 241;
+
 export function describe(reason, verbose, ext_error) {
 	if (verbose != null && verbose.type != null) {
 		let tname = TYPE_NAMES[sprintf('%d', verbose.type)] ?? sprintf('type %d', verbose.type);

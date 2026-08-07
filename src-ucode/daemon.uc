@@ -145,6 +145,128 @@ export function create(opts)
 	let clear_reconnect, retry_activate, enter_reconnecting, activate, derive_netdev;
 	let maybe_autosetup_fill;
 
+	// --- modem event handlers (one named function per event; the router
+	// below stays a thin dispatch) --------------------------------------------
+
+	// modem reached service: write back resolved l3 device names, run the
+	// one-shot autosetup APN fill, and (re)establish every interface-bound
+	// context of this modem that sits IDLE.
+	let modem_registered = (modem, data) => {
+		// materialise the resolved l3 device name onto each interface section as
+		// `option device` (so VRF/firewall/LuCI have one explicit handle). The
+		// modem's netdev is resolved by now; learn_device is idempotent and never
+		// clobbers a user value. Gated by wwand_globals.write_device (default on).
+		if ((self.write_device ?? true) && deps.learn_device) {
+			for (let cname, centry in self.contexts) {
+				if (centry.cfg.modem != modem.id || !centry.cfg.interface)
+					continue;
+
+				let l3 = derive_netdev(centry);
+				if (l3)
+					deps.learn_device(centry.cfg.interface, l3);
+			}
+		}
+
+		// autosetup phase 2 (one-shot): an interface the zero-config
+		// autosetup created still carries `option autosetup 1`. Now that
+		// the SIM is read, match its ICCID/IMSI against the internal APN
+		// table and COPY the values into the config (uci) — the config is
+		// the single source of truth afterwards, the marker is cleared.
+		// No table match -> keep the empty APN (SIM-provisioned attach).
+		maybe_autosetup_fill(modem);
+
+		// (re)establish interface-bound contexts sitting IDLE. Decide per
+		// interface by its netifd state so the two paths never race on
+		// ctx.up(): an interface still UP (survived a wwand restart, or a
+		// permanent-down that the modem now recovered from is handled by the
+		// down/up path) is ADOPTED in place (activate → 'up' → renew); an
+		// interface that is DOWN is kicked so netifd re-runs setup.
+		for (let name, entry in self.contexts) {
+			if (entry.cfg.modem != modem.id || !entry.cfg.interface ||
+			    !entry.ctx || entry.ctx.state != 'IDLE' || !entry.wanted)
+				continue;
+
+			let st = deps.iface_status ? deps.iface_status(entry.cfg.interface) : null;
+
+			if (st?.up) {
+				log('info', sprintf('adopting live interface %s after modem ready', entry.cfg.interface));
+				retry_activate(name);
+			}
+			else if ((entry.cfg.auto ?? true) && deps.kick_interface) {
+				// An IDLE context while netifd holds the interface 'pending' is
+				// an ORPHANED setup — e.g. a wwand restart interrupted netifd
+				// mid-setup. A plain 'up' is a no-op on a pending interface, so
+				// reset it with a 'down' first (what a manual ifdown/ifup does),
+				// then the kick/connect below re-runs a clean setup.
+				if (st?.pending && deps.down_interface) {
+					log('info', sprintf('interface %s stuck pending, resetting before setup', entry.cfg.interface));
+					// mark the down as our own: the teardown netifd now runs
+					// calls context_down, which must not read it as operator
+					// intent (clear `wanted`) nor let it kill the activation
+					// below without a restart
+					entry._reset_pending = true;
+					deps.down_interface(entry.cfg.interface);
+				}
+
+				// cdc_mbim/cdc_ncm: the data link's carrier follows the
+				// session/bearer, and netifd won't run its proto setup until
+				// the link is up — so connecting first (bringing link/carrier
+				// up) then kicking avoids the boot-time flap. The 'up' event
+				// does the kick once the session is connected
+				// (entry._kick_after_connect). QMI's mux device carries a
+				// stable link, so it is kicked directly.
+				let cf_proto = self.modems[modem.id]?.protocol;
+
+				if (cf_proto == 'mbim' || cf_proto == 'ncm') {
+					log('info', sprintf('connecting %s first (%s), then netifd', entry.cfg.interface, cf_proto));
+					entry._kick_after_connect = true;
+					retry_activate(name);
+				}
+				else {
+					log('info', sprintf('kicking interface %s after modem ready', entry.cfg.interface));
+					deps.kick_interface(entry.cfg.interface);
+				}
+			}
+			else {
+				// 'auto 0' and not up: leave it dormant until an explicit ifup
+				log('debug', sprintf('interface %s is down and auto=0, not kicking', entry.cfg.interface));
+			}
+		}
+	};
+
+	// terminal until operator action — down the interfaces (no hold). Clear
+	// `wanted` now so a later `registered` (e.g. after the SIM is unblocked)
+	// doesn't auto-re-kick before an explicit ifup; recovery from a blocked
+	// SIM is an operator action by design.
+	let modem_sim_blocked = (modem) => {
+		for (let name, entry in self.contexts) {
+			if (entry.cfg.modem == modem.id && entry.cfg.interface) {
+				clear_reconnect(name);
+				entry.wanted = false;
+				if (deps.down_interface)
+					deps.down_interface(entry.cfg.interface);
+			}
+		}
+	};
+
+	// learn-back: a config that did NOT pin an IMEI records the one just
+	// discovered, so a fresh install self-stabilises. Gated by
+	// auto_correct_config and only for a real wwand_modem section (not a
+	// synthesized compat modem, which has no uci section to write).
+	let modem_identity = (modem, data) => {
+		if (deps.learn_identity && self.modems[modem.id] &&
+		    !self.modems[modem.id].cfg?.imei &&
+		    self.modems[modem.id].cfg?.auto_correct_config)
+			deps.learn_identity(modem.id, data ?? {});
+	};
+
+	let modem_identity_mismatch = (modem, data) => {
+		if (self.modems[modem.id])
+			self.modems[modem.id].control_note = sprintf(
+				'identity mismatch: configured IMEI %s, modem reports %s',
+				data?.expected ?? '?', data?.found ?? '?');
+	};
+
 	let on_modem_event = (modem, event, data) => {
 		// clear the one-shot manual-PIN-release flags once the unlock resolved
 		// (either way) so the daemon never re-uses them on a later cycle
@@ -160,136 +282,35 @@ export function create(opts)
 		else if (event == 'registered')
 			modem.sim_block = null;
 
+		// the lifecycle events are mirrored onto the bus for listeners; the
+		// handlers' side effects run in the same order as before (identity
+		// handlers first, their emit after — the payload is unaffected)
 		switch (event) {
 		case 'registered':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
-
-			// materialise the resolved l3 device name onto each interface section as
-			// `option device` (so VRF/firewall/LuCI have one explicit handle). The
-			// modem's netdev is resolved by now; learn_device is idempotent and never
-			// clobbers a user value. Gated by wwand_globals.write_device (default on).
-			if ((self.write_device ?? true) && deps.learn_device) {
-				for (let cname, centry in self.contexts) {
-					if (centry.cfg.modem != modem.id || !centry.cfg.interface)
-						continue;
-
-					let l3 = derive_netdev(centry);
-					if (l3)
-						deps.learn_device(centry.cfg.interface, l3);
-				}
-			}
-
-			// autosetup phase 2 (one-shot): an interface the zero-config
-			// autosetup created still carries `option autosetup 1`. Now that
-			// the SIM is read, match its ICCID/IMSI against the internal APN
-			// table and COPY the values into the config (uci) — the config is
-			// the single source of truth afterwards, the marker is cleared.
-			// No table match -> keep the empty APN (SIM-provisioned attach).
-			maybe_autosetup_fill(modem);
-
-			// (re)establish interface-bound contexts sitting IDLE. Decide per
-			// interface by its netifd state so the two paths never race on
-			// ctx.up(): an interface still UP (survived a wwand restart, or a
-			// permanent-down that the modem now recovered from is handled by the
-			// down/up path) is ADOPTED in place (activate → 'up' → renew); an
-			// interface that is DOWN is kicked so netifd re-runs setup.
-			for (let name, entry in self.contexts) {
-				if (entry.cfg.modem != modem.id || !entry.cfg.interface ||
-				    !entry.ctx || entry.ctx.state != 'IDLE' || !entry.wanted)
-					continue;
-
-				let st = deps.iface_status ? deps.iface_status(entry.cfg.interface) : null;
-
-				if (st?.up) {
-					log('info', sprintf('adopting live interface %s after modem ready', entry.cfg.interface));
-					retry_activate(name);
-				}
-				else if ((entry.cfg.auto ?? true) && deps.kick_interface) {
-					// An IDLE context while netifd holds the interface 'pending' is
-					// an ORPHANED setup — e.g. a wwand restart interrupted netifd
-					// mid-setup. A plain 'up' is a no-op on a pending interface, so
-					// reset it with a 'down' first (what a manual ifdown/ifup does),
-					// then the kick/connect below re-runs a clean setup.
-					if (st?.pending && deps.down_interface) {
-						log('info', sprintf('interface %s stuck pending, resetting before setup', entry.cfg.interface));
-						// mark the down as our own: the teardown netifd now runs
-						// calls context_down, which must not read it as operator
-						// intent (clear `wanted`) nor let it kill the activation
-						// below without a restart
-						entry._reset_pending = true;
-						deps.down_interface(entry.cfg.interface);
-					}
-
-					// cdc_mbim/cdc_ncm: the data link's carrier follows the
-					// session/bearer, and netifd won't run its proto setup until
-					// the link is up — so connecting first (bringing link/carrier
-					// up) then kicking avoids the boot-time flap. The 'up' event
-					// does the kick once the session is connected
-					// (entry._kick_after_connect). QMI's mux device carries a
-					// stable link, so it is kicked directly.
-					let cf_proto = self.modems[modem.id]?.protocol;
-
-					if (cf_proto == 'mbim' || cf_proto == 'ncm') {
-						log('info', sprintf('connecting %s first (%s), then netifd', entry.cfg.interface, cf_proto));
-						entry._kick_after_connect = true;
-						retry_activate(name);
-					}
-					else {
-						log('info', sprintf('kicking interface %s after modem ready', entry.cfg.interface));
-						deps.kick_interface(entry.cfg.interface);
-					}
-				}
-				else {
-					// 'auto 0' and not up: leave it dormant until an explicit ifup
-					log('debug', sprintf('interface %s is down and auto=0, not kicking', entry.cfg.interface));
-				}
-			}
-
-			break;
+			return modem_registered(modem, data);
 
 		case 'sim_blocked':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
-			// terminal until operator action — down the interfaces (no hold).
-			// Clear `wanted` now so a later `registered` (e.g. after the SIM is
-			// unblocked) doesn't auto-re-kick before an explicit ifup; recovery
-			// from a blocked SIM is an operator action by design.
-			for (let name, entry in self.contexts) {
-				if (entry.cfg.modem == modem.id && entry.cfg.interface) {
-					clear_reconnect(name);
-					entry.wanted = false;
-					if (deps.down_interface)
-						deps.down_interface(entry.cfg.interface);
-				}
-			}
-			break;
+			return modem_sim_blocked(modem);
 
 		case 'deregistered':
 		case 'removed':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
-			break;
+			return;
 
 		// stable-identity gate (modem_common.check_identity). 'identity' fires on
 		// every open once the IMEI is known; 'identity_mismatch' means the pinned
 		// IMEI does not match this physical modem and its bring-up chain halted.
 		case 'identity':
-			// learn-back: a config that did NOT pin an IMEI records the one just
-			// discovered, so a fresh install self-stabilises. Gated by
-			// auto_correct_config and only for a real wwand_modem section (not a
-			// synthesized compat modem, which has no uci section to write).
-			if (deps.learn_identity && self.modems[modem.id] &&
-			    !self.modems[modem.id].cfg?.imei &&
-			    self.modems[modem.id].cfg?.auto_correct_config)
-				deps.learn_identity(modem.id, data ?? {});
+			modem_identity(modem, data);
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
-			break;
+			return;
 
 		case 'identity_mismatch':
-			if (self.modems[modem.id])
-				self.modems[modem.id].control_note = sprintf(
-					'identity mismatch: configured IMEI %s, modem reports %s',
-					data?.expected ?? '?', data?.found ?? '?');
+			modem_identity_mismatch(modem, data);
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
-			break;
+			return;
 		}
 	};
 

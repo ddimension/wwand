@@ -650,13 +650,20 @@ export function create(opts)
 			join('; ', self._init_resets)));
 
 		// one batched reset for everything collected during init: AT when a
-		// command port exists, otherwise the DMS offline->reset sequence
+		// command port exists, otherwise the DMS offline->reset sequence. A
+		// refused reset is only logged — the modem stays up on its old
+		// settings and the next boot retries (nothing to recover here).
+		let logerr = (what) => (err) => {
+			if (err)
+				log('warn', sprintf('init reset via %s refused: %J — settings apply at the next reboot', what, err));
+		};
+
 		if (self.at)
-			return self.at.send('AT+CFUN=1,1', () => null, { timeout: 5000 });
+			return self.at.send('AT+CFUN=1,1', logerr('AT+CFUN=1,1'), { timeout: 5000 });
 
 		if (self.dms)
 			return qmi_backend.set_opmode(self.dms, 'offline', () =>
-				qmi_backend.set_opmode(self.dms, 'reset', () => null));
+				qmi_backend.set_opmode(self.dms, 'reset', logerr('DMS reset')));
 
 		log('warn', 'init reset requested but no AT port/DMS available — settings apply at the next reboot');
 		step_datapath();

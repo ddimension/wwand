@@ -91,6 +91,25 @@ function imei_key(s)
 // a DIFFERENT device, this is the wrong physical modem for this config — bringing
 // it up would apply the wrong SIM/PIN/APN — so it emits 'identity_mismatch' and
 // returns false (the caller must halt its bring-up chain). Returns true to proceed.
+// every modem state any backend may enter — the single source of truth for
+// the names (the per-backend step chains use different subsets). set_state
+// warns (does not refuse) on a name missing here: a typo'd state string
+// would otherwise silently "work" while every consumer matching on it misses.
+export const MODEM_STATES = {
+	ABSENT: true,          // control device not present (waiting for hotplug)
+	INIT_TRANSPORT: true,
+	INIT_SERVICES: true,
+	SET_OPMODE: true,      // QMI only
+	SIM_UNLOCK: true,
+	SIM_BLOCKED: true,     // terminal until reload (PIN/PUK)
+	CONFIGURE_NET: true,   // QMI only
+	CONFIGURING: true,     // QMI only (deferred-settings apply)
+	INIT_DATAPATH: true,
+	ATTACHING: true,       // MBIM packet-service attach
+	REGISTERING: true,
+	READY: true,
+};
+
 // timing defaults shared by all three backends; each backend spreads its
 // extras on top ({ ...TIMING_BASE, ...backend_extras, ...opts.timing })
 export const TIMING_BASE = {
@@ -179,6 +198,11 @@ export function scaffolding(self, o)
 	self.set_state = function(state, data) {
 		if (self.state == state)
 			return;
+
+		// registry check (warn-only): a typo'd state string would otherwise
+		// silently "work" — every consumer matching on the name just misses
+		if (!MODEM_STATES[state])
+			log('warn', sprintf('set_state: unknown modem state %J (typo?)', state));
 
 		log('info', sprintf('state %s -> %s', self.state, state));
 		self.state = state;

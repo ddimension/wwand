@@ -818,7 +818,8 @@ export function create(opts)
 						// Deactivate the PDP context on our profile index over
 						// AT and retry this family once.
 						if (err.stage == 'start_network' &&
-						    err.verbose?.type == 2 && err.verbose?.reason == 241 &&
+						    err.verbose?.type == callend.VERBOSE_TYPE_INTERNAL &&
+			    err.verbose?.reason == callend.INTERNAL_PDP_IN_USE &&
 						    self.modem.at && !reclaimed[family]) {
 							reclaimed[family] = true;
 							log('warn', sprintf(
