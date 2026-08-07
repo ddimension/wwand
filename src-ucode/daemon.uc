@@ -1282,14 +1282,20 @@ export function create(opts)
 	};
 
 	// resolve a modem ref for a cb-style ubus method: returns the entry, or
-	// reports no_such_modem via cb and returns null (caller returns on null)
+	// reports the failure via cb and returns null (caller returns on null).
+	// A configured modem whose device is currently being waited on (detached
+	// after a device-gone, not yet re-enumerated) reports modem_waiting with
+	// the control_note instead of a misleading no_such_modem.
 	let check_modem = (ref, cb) => {
 		let entry = self.modems[ref];
 
 		if (entry?.modem)
 			return entry;
 
-		cb({ error: 'no_such_modem', ref: ref });
+		if (entry)
+			cb({ error: 'modem_waiting', ref: ref, note: entry.control_note });
+		else
+			cb({ error: 'no_such_modem', ref: ref });
 
 		return null;
 	};
