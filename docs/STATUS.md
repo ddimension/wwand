@@ -1,7 +1,45 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-07. All test suites green (34 suites, ~1541 checks).
+_Last updated: 2026-08-08. All test suites green (39 suites, ~1648 checks).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## Re-audit follow-up + generic modem reset (2026-08-08)
+
+Re-audit of the decomposed tree confirmed the earlier fixes hold; the residual
+findings were all worked off:
+
+- **Bug fixes**: proto `renderCellScan` resolves the modem from the
+  interface's `option modem` first (netdev heuristic only as fallback — a
+  cell lock must never target the wrong modem after a netdev swap);
+  `settings.js` writes cell lock / SIM slot to the wwand_modem section of the
+  **selected** modem tab (was: always the first wwand interface);
+  `modem_init_qmi` parks its regdetail probe timer in the shared `tm` holder.
+- **Generic `modem_reset`** (user request): priority reset-GPIO (per-modem
+  `reset_gpio`; board default only when a single modem is managed) → backend
+  soft reset. NEW MBIM backend reset (passthrough-DMS offline→reset, else
+  AT+CFUN=1,1) closes the parity gap. `modem_repower` + the recovery repower
+  rung gate board GPIO/power-cycle to single-modem boxes
+  (`multi_modem_needs_reset_gpio`) — on multi-modem hardware the board lines
+  would reset the wrong modem. LuCI button now calls `modem_reset` with the
+  section's modem (was `modem_repower` with an empty ref).
+- **Call-end decode**: verbose type 2 (modem-internal) reasons now named via
+  the libqmi `VERBOSE_CALL_END_REASON_INTERNAL` table (201-220 + 241) — e.g.
+  the field-seen `internal cause 204` now logs `unknown cause code`.
+- **Dedupe/cleanup**: `clean_cell_metrics` hoisted to modem_common;
+  `telemetry_mbim.uc` extracted from modem_mbim (mirrors telemetry_qmi);
+  sim.uc uses `hexmod.bytes_to_iccid` + named `QMI_ERR_NO_EFFECT`; esim
+  imports the hex codecs directly (sim re-exports dropped); shared LuCI
+  `fmt.hasSignal/mhz/regShort/dB`; dead imports/requires, stranded comments,
+  the app-ACL `modem_sim_pin_verify` over-grant and the unused `repower` rpc
+  removed; config_check/regdetail reflowed; named consts for the transport
+  txq (64/5ms), QMAP datagram maxima (32/11) and the START_NETWORK timeout.
+- **NEW suites**: test_backend (choose/first_of/run_seq/reset),
+  test_transport (txq congestion/flush/dispatch over an injected fake
+  `io_open` handle — NOTE: ucode does not parse `(a ?? b)(args)` as a call),
+  test_hex (roundtrips incl. ICCID/EID), test_log (child-process capture).
+- **Open**: provider-driven eSIM profile switch (GDSP) still wedges the modem
+  until reboot — better handling (card-event → SIM hot-reset + reapply) to be
+  designed/tested with remote provider action.
 
 ## Maintainability audit rounds 1-3 (2026-08-07)
 

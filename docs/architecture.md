@@ -50,7 +50,8 @@ All configuration lives in `/etc/config/network` (see `docs/reference.md`).
 Design principles, all validated in the field:
 
 - **Effect injection everywhere** (`fx`, `transport_open`, `deps`): the whole
-  logic runs host-side against mocks — ~1,060 checks across 27 suites; every
+  logic runs host-side against mocks (current suite/check counts live in
+  `docs/STATUS.md`); every
   field bug becomes a scenario in the suite.
 - **Declarative message schemas** (field tables verified against libqmi's
   JSON definitions) instead of generated code.
