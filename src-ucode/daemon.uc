@@ -1132,6 +1132,10 @@ export function create(opts)
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,
 				imei: entry.modem?.info?.imei,
+				imsi: entry.modem?.info?.imsi,      // active card identity (LuCI)
+				iccid: entry.modem?.info?.iccid,
+				msisdn: entry.modem?.info?.msisdn,
+				usb: entry.modem?.info?.usb,        // vid:pid + product string
 				identity_mismatch: entry.modem?.identity_mismatch,   // {expected,found} if the pinned IMEI didn't match
 				at_tty: entry.modem?.at_tty,
 				// secondary AT port released for external tools (at2_external)
