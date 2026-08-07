@@ -37,6 +37,7 @@ import * as modem_common from './modem_common.uc';
 import * as regdetail from './regdetail.uc';
 import * as telemetry_qmi from './telemetry_qmi.uc';
 import * as config_check from './config_check.uc';
+import * as datapath_qmi from './datapath_qmi.uc';
 import * as protoswitch from './protocol_switch.uc';
 import * as tlv from './codec/tlv.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
@@ -624,129 +625,8 @@ export function create(opts)
 		step_datapath();
 	};
 
-	step_datapath = () => {
-		self.set_state('INIT_DATAPATH');
-
-		let want_mux = length(dp.mux_links ?? []) > 0;
-
-		if (!dp.netdev) {
-			if (want_mux)
-				return fail('datapath', { error: 'netdev_unknown' });
-
-			log('info', 'netdev unknown, skipping datapath setup');
-			return step_opmode();
-		}
-
-		// modems without WDA keep their default framing (old behavior:
-		// "no wda support, skipping data format switch")
-		if (!self.services[sprintf('%d', wdamod.default.service)]) {
-			if (want_mux)
-				return fail('datapath', { error: 'wda_unavailable_for_mux' });
-
-			log('info', 'no wda service, skipping data format setup');
-			return step_opmode();
-		}
-
-		self.alloc(wdamod.default, (err, wda) => {
-			if (err)
-				return fail('alloc_wda', err);
-
-			self.wda = wda;
-
-			let fxi = dp.fx ?? netlink.default_fx((level, msg) => log(level, msg));
-			let backend = netlink.select_backend(fxi, dp.netdev, dp.mux ?? 'auto', want_mux);
-
-			if (backend == null)
-				return fail('datapath', { error: 'mux_backend_unavailable', mux: dp.mux });
-
-			let dgram = netlink.board_dgram_size(fxi, dp.dgram_size, self.info.model);
-			let negotiate;
-
-			// rmnet supports MAPv5 checksum offload; try it first there and
-			// renegotiate plain QMAP when the modem rejects it (some answer
-			// a v5 request with aggregation fully disabled)
-			negotiate = (dap, allow_fallback) => {
-				let args = { qos: 0, llp: wdamod.LLP_RAW_IP };
-
-				if (backend != 'none') {
-					args.ul_protocol = dap;
-					args.dl_protocol = dap;
-					args.dl_max_datagrams = 32;
-					args.dl_max_size = dgram;
-					// tell the modem the host may batch uplink QMAP frames; it
-					// echoes the maxima it will actually honor. Safe even when
-					// host-side UL aggregation stays off — the modem then simply
-					// receives single-datagram frames.
-					args.ul_max_datagrams = 11;
-					args.ul_max_size = dgram;
-				}
-
-				if (dp.ep_id != null)
-					args.endpoint = { type: dp.ep_type ?? wdamod.ENDPOINT_TYPE_HSUSB, iface: dp.ep_id };
-
-				wda.request('SET_DATA_FORMAT', args, (werr, wdata) => {
-					if (werr)
-						return fail('wda_format', werr);
-
-					log('info', sprintf('wda format negotiated: llp %d, ul/dl aggregation %d/%d, dl max %d x %d bytes, ul max %d x %d bytes (requested proto %d, %d bytes)',
-						wdata.llp, wdata.ul_protocol ?? 0, wdata.dl_protocol ?? 0,
-						wdata.dl_max_datagrams ?? 0, wdata.dl_max_size ?? 0,
-						wdata.ul_max_datagrams ?? 0, wdata.ul_max_size ?? 0, dap, dgram));
-
-					let aggr_ok = (backend == 'none') ||
-						((wdata.dl_protocol == wdamod.DAP_QMAP ||
-						  wdata.dl_protocol == wdamod.DAP_QMAPV5) &&
-						 (wdata.dl_max_size ?? 0) > 0);
-
-					if (!aggr_ok && allow_fallback && dap != wdamod.DAP_QMAP) {
-						log('notice', sprintf('modem rejected aggregation protocol %d, renegotiating plain qmap', dap));
-						return negotiate(wdamod.DAP_QMAP, false);
-					}
-
-					if (!aggr_ok)
-						return fail('wda_format', { error: 'aggregation_rejected', echo: wdata });
-
-					let v5 = (wdata.dl_protocol == wdamod.DAP_QMAPV5);
-
-					// the modem may clamp the aggregation size; follow it
-					let r = netlink.setup(fxi, {
-						netdev: dp.netdev,
-						backend: backend,
-						v5: v5,
-						mux: map(dp.mux_links ?? [], (e) => ({
-							id: e.id,
-							name: e.name ?? sprintf('%sm%d', dp.netdev, e.id),
-							mtu: e.mtu,
-						})),
-						dgram_size: (wdata.dl_max_size > 0) ? wdata.dl_max_size : dgram,
-						mtu: dp.mtu,
-						// negotiated uplink aggregation maxima (item 3: host-side
-						// rmnet egress coalesce, best-effort where supported)
-						ul_agg: { count: wdata.ul_max_datagrams ?? 0, size: wdata.ul_max_size ?? 0 },
-					});
-
-					if (!r.ok)
-						return fail('datapath', r);
-
-					self.datapath = {
-						backend: backend,
-						v5: v5,
-						urb_size: r.urb_size,
-						mux_devs: r.mux_devs,
-						ep_id: dp.ep_id,
-						ep_type: dp.ep_type,
-					};
-
-					log('notice', sprintf('datapath: %s%s, urb %d, mux [%s]',
-						backend, v5 ? '/qmapv5' : '', r.urb_size, join(' ', r.mux_devs)));
-					step_opmode();
-				});
-			};
-
-			negotiate((backend == 'rmnet') ? wdamod.DAP_QMAPV5 : wdamod.DAP_QMAP,
-				backend == 'rmnet');
-		});
-	};
+	// datapath bring-up — extracted to datapath_qmi.uc (audit round)
+	step_datapath = () => datapath_qmi.setup(self, dp, { log: log, fail: fail }, step_opmode);
 
 	step_opmode = () => {
 		self.set_state('SET_OPMODE');
