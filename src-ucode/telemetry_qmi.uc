@@ -23,30 +23,6 @@ import * as qmi_backend from './qmi_backend.uc';
 import * as modem_common from './modem_common.uc';
 import * as atcmd from './atcmd.uc';
 
-// Null out the i16 signal metrics QMI reports as -32768 ("not available") on
-// serving + neighbour cells, applied once at ingestion (store_cells) so the
-// telemetry line and both LuCI pages render "—" instead of e.g. -3276.8 dBm.
-// The metric set is a superset — a field absent on a given cell is skipped.
-function clean_cell_metrics(cells)
-{
-	let scrub = (c) => {
-		for (let f in [ 'rsrp', 'rsrq', 'rssi', 'srxlev', 'snr' ])
-			if (c[f] == tlv.SENTINEL.i16)   // only the actual sentinel, not absent keys
-				c[f] = null;
-	};
-
-	for (let c in (cells?.lte_intra?.cells ?? []))
-		scrub(c);
-
-	for (let fr in (cells?.lte_inter?.freqs ?? []))
-		for (let c in (fr.cells ?? []))
-			scrub(c);
-
-	if (cells?.nr5g_cell)
-		scrub(cells.nr5g_cell);
-
-	return cells;
-}
 
 export function install(self, o)
 {
@@ -70,7 +46,7 @@ export function install(self, o)
 	// bare serving-cell-only result would make the UI neighbour list flicker in
 	// and out — hold the last-seen neighbours for NEIGH_HOLD seconds instead.
 	let store_cells = (data) => {
-		clean_cell_metrics(data);   // -32768 sentinels -> null before anyone reads them
+		modem_common.clean_cell_metrics(data);   // -32768 sentinels -> null before anyone reads them
 
 		let li = data?.lte_intra;
 

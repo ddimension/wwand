@@ -14,7 +14,7 @@ import * as sim from './sim.uc';
 import * as backend from './backend.uc';
 
 import { ISDR_AID } from './sim.uc';
-import { iccid_to_bytes, bytes_to_iccid } from './codec/hex.uc';
+import { iccid_to_bytes, bytes_to_iccid, hex_to_arr, arr_to_hex } from './codec/hex.uc';
 
 // --- minimal BER-TLV ---------------------------------------------------------
 
@@ -94,7 +94,7 @@ function es10_transceive(modem, slot, channel, req, cb)
 	let collect;
 
 	collect = (hexresp) => {
-		let r = sim.hex_to_arr(hexresp);
+		let r = hex_to_arr(hexresp);
 
 		if (length(r) < 2)
 			return cb({ error: 'short_response' }, null);
@@ -121,7 +121,7 @@ function es10_transceive(modem, slot, channel, req, cb)
 		let last = (idx == length(blocks) - 1);
 		let blk = blocks[idx++];
 		let apdu = sprintf('%02xe2%02x%02x%02x%s', cla,
-			last ? 0x91 : 0x11, idx - 1, length(blk), sim.arr_to_hex(blk));
+			last ? 0x91 : 0x11, idx - 1, length(blk), arr_to_hex(blk));
 
 		sim.apdu_send(modem, slot, channel, apdu, (err, hr) => {
 			if (err)
@@ -207,16 +207,16 @@ function parse_profiles(tlvs)
 			switch (f.tag) {
 			case 0x5a:   p.iccid = bytes_to_iccid(f.val); break;
 			case 0x9f70: p.state = PROFILE_STATES[sprintf('%d', f.val[0] ?? 255)] ?? 'unknown'; break;
-			case 0x90:   p.nickname = sim.arr_to_hex(f.val); break;
+			case 0x90:   p.nickname = arr_to_hex(f.val); break;
 			case 0x91:   p.provider = join('', map(f.val, (c) => sprintf('%c', c))); break;
 			case 0x92:   p.name = join('', map(f.val, (c) => sprintf('%c', c))); break;
-			case 0x4f:   p.isdp_aid = sim.arr_to_hex(f.val); break;
+			case 0x4f:   p.isdp_aid = arr_to_hex(f.val); break;
 			}
 		}
 
 		// nickname is UTF-8 text as well
 		if (p.nickname != null)
-			p.nickname = join('', map(sim.hex_to_arr(p.nickname), (c) => sprintf('%c', c)));
+			p.nickname = join('', map(hex_to_arr(p.nickname), (c) => sprintf('%c', c)));
 
 		push(out, p);
 	}
@@ -460,12 +460,6 @@ function backend_of(modem, slot, cb)
 // --- public API --------------------------------------------------------------
 
 let qmi = {
-	// exposed for the unit tests
-	_ber_parse: ber_parse,
-	_ber_build: ber_build,
-	_parse_profiles: parse_profiles,
-	_iccid_request: iccid_request,
-	_bytes_to_iccid: bytes_to_iccid,
 
 	get_eid: (modem, slot, cb) => {
 		// GetEuiccDataRequest: tag list 5C requesting 5A (EID)
@@ -476,7 +470,7 @@ let qmi = {
 			let body = find_tag(tlvs, TAG_GET_EID);
 			let eid = body ? find_tag(ber_parse(body), 0x5a) : null;
 
-			cb(null, { eid: eid ? sim.arr_to_hex(eid) : null });
+			cb(null, { eid: eid ? arr_to_hex(eid) : null });
 		});
 	},
 

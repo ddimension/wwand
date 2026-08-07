@@ -33,6 +33,30 @@ import * as nasmod from './codec/schema/nas.uc';
 // dsd_from_serving(serving): derive the data-system mode from an AT QENG
 // serving-cell detail (Quectel states NSA/SA directly). Returns { mode, lte, nr }
 // or null. Shared by the QMI and MBIM data-mode resolvers.
+// scrub NAS cell-info sentinel metrics (-32768 = "not measured") to null so
+// consumers never render the sentinel as a real dBm value. Shared by the QMI
+// and MBIM(passthrough) cell telemetry.
+export function clean_cell_metrics(cells)
+{
+	let scrub = (c) => {
+		for (let f in [ 'rsrp', 'rsrq', 'rssi', 'srxlev', 'snr' ])
+			if (c[f] == tlv.SENTINEL.i16)   // only the actual sentinel, not absent keys
+				c[f] = null;
+	};
+
+	for (let c in (cells?.lte_intra?.cells ?? []))
+		scrub(c);
+
+	for (let fr in (cells?.lte_inter?.freqs ?? []))
+		for (let c in (fr.cells ?? []))
+			scrub(c);
+
+	if (cells?.nr5g_cell)
+		scrub(cells.nr5g_cell);
+
+	return cells;
+}
+
 export function dsd_from_serving(serving)
 {
 	let lte = serving?.lte != null;

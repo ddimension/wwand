@@ -14,6 +14,12 @@
 import * as netlink from './netlink.uc';
 import * as wdamod from './codec/schema/wda.uc';
 
+// QMAP aggregation maxima offered to the modem in SET_DATA_FORMAT: downlink
+// datagrams per aggregate (matches the qmi_wwan/rmnet driver default) and the
+// uplink batch the host may send (the modem echoes what it actually honors).
+const DL_MAX_DATAGRAMS = 32;
+const UL_MAX_DATAGRAMS = 11;
+
 export function setup(self, dp, o, next)
 {
 	let log = o.log, fail = o.fail;
@@ -64,13 +70,11 @@ export function setup(self, dp, o, next)
 				if (backend != 'none') {
 					args.ul_protocol = dap;
 					args.dl_protocol = dap;
-					args.dl_max_datagrams = 32;
+					args.dl_max_datagrams = DL_MAX_DATAGRAMS;
 					args.dl_max_size = dgram;
-					// tell the modem the host may batch uplink QMAP frames; it
-					// echoes the maxima it will actually honor. Safe even when
-					// host-side UL aggregation stays off — the modem then simply
-					// receives single-datagram frames.
-					args.ul_max_datagrams = 11;
+					// safe even when host-side UL aggregation stays off — the
+					// modem then simply receives single-datagram frames
+					args.ul_max_datagrams = UL_MAX_DATAGRAMS;
 					args.ul_max_size = dgram;
 				}
 

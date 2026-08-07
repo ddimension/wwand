@@ -515,7 +515,10 @@ export function install(self, o)
 			// seconds (into the log + status reg_detail) instead of only at the
 			// full 240s registration timeout — an attach reject (e.g. #33) shows
 			// up almost immediately once the modem camps
-			uloop.timer(self.timing.regdetail_probe ?? 12000, () => {
+			// parked in tm so teardown cancels it (holder contract)
+			tm.probe = uloop.timer(self.timing.regdetail_probe ?? 12000, () => {
+				tm.probe = null;
+
 				if (self.state != 'REGISTERING')
 					return;
 

@@ -326,12 +326,6 @@ export function install(self, o)
 		});
 	};
 
-	// admin-triggered soft modem reset (ubus modem_reset): the apply step for
-	// `deferred` settings. Backend-specific (QMI: DMS offline->reset, NCM:
-	// AT+CFUN=1,1); the modem re-enumerates, discovery rebuilds it and the
-	// daemon kicks every auto (auto != 0) interface back up on `registered` —
-	// the same proven path the recovery ladder's modem_reset rung takes.
-
 	const SETTABLE_PREFS = {
 		mode_preference: 'int', band_preference: 'int',
 		roaming_preference: 'int', lte_band_preference: 'int',
@@ -431,8 +425,4 @@ export function install(self, o)
 		});
 	};
 
-	// manual hardware repower/reset of a modem (admin/LuCI button, and the same
-	// path recovery uses at rung usb_repower): a modem `reset_gpio` (or the
-	// board's default reset line) pulses RESET; otherwise the modem USB power is
-	// power-cycled. `ref` optional — defaults to the first configured modem.
 };

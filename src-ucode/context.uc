@@ -21,14 +21,16 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as fs from 'fs';
-import * as tlv from './codec/tlv.uc';
 import * as qmi_backend from './qmi_backend.uc';
 import * as context_common from './context_common.uc';
 import * as context_monitor_qmi from './context_monitor_qmi.uc';
 import * as wdsmod from './codec/schema/wds.uc';
 import { ENDPOINT_TYPE_HSUSB } from './codec/schema/wda.uc';
 import * as callend from './callend.uc';
+
+// START_NETWORK can legitimately take a long time (network attach + bearer
+// setup on a congested cell); only then declare the activation dead.
+const START_NETWORK_TIMEOUT_MS = 120000;
 
 const wds_schema = wdsmod.default;
 
@@ -88,7 +90,6 @@ export function create(opts)
 		dormancy: null,     // 1 = dormant (idle), 2 = active — from the WDS event report
 	};
 
-	// packet-statistics request mask: all 10 flags (tx/rx packets ok, errors,
 
 	let deps = opts.deps ?? {};
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: context %s: %s\n', level, self.name, msg)));
@@ -437,7 +438,7 @@ export function create(opts)
 					fam.pdh = d3.pdh;
 					log('notice', sprintf('ipv%d up, pdh %d (cid %d)', family, fam.pdh, client.cid));
 					done(null);
-				}, { timeout: 120000 });
+				}, { timeout: START_NETWORK_TIMEOUT_MS });
 			});
 
 			if (mux_id == 0)

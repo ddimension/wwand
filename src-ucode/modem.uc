@@ -29,25 +29,17 @@ import * as client_mod from './client.uc';
 import * as sim from './sim.uc';
 import * as netlink from './netlink.uc';
 import * as recovery_mod from './recovery.uc';
-import * as atcmd from './atcmd.uc';
-import * as modem_quirks from './modem_quirks.uc';
-import * as backend from './backend.uc';
 import * as qmi_backend from './qmi_backend.uc';
 import * as modem_common from './modem_common.uc';
 import * as regdetail from './regdetail.uc';
 import * as telemetry_qmi from './telemetry_qmi.uc';
 import * as config_check from './config_check.uc';
-import * as datapath_qmi from './datapath_qmi.uc';
 import * as modem_init_qmi from './modem_init_qmi.uc';
 import * as protoswitch from './protocol_switch.uc';
-import * as tlv from './codec/tlv.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
 import * as dmsmod from './codec/schema/dms.uc';
 import * as nasmod from './codec/schema/nas.uc';
-import * as dsdmod from './codec/schema/dsd.uc';
 import * as uimmod from './codec/schema/uim.uc';
-import * as wdsmod from './codec/schema/wds.uc';
-import * as wdamod from './codec/schema/wda.uc';
 // loc.uc + wms.uc are lazy-loaded (require of a *_lazy shim) only when GPS /
 // SMS is actually used, keeping those schemas off the heap on the common path.
 
@@ -178,7 +170,7 @@ export function create(opts)
 	// shared timer holder: the init chain (modem_init_qmi), make_fail, the
 	// recovery actions and the NAS registered-handler all park their one-shot
 	// timers here; teardown cancels whatever is pending.
-	let tm = { retry: null, reg: null, settle: null, at_drain: null };
+	let tm = { retry: null, reg: null, settle: null, at_drain: null, probe: null };
 
 	// protocol-neutral scaffolding (set_state / attach_context /
 	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)

@@ -107,6 +107,8 @@ export function run_seq(steps, cb)
 	step();
 };
 
+// drop cached backend choices so the next call re-probes — e.g. on a SIM slot
+// switch: reset(modem, '_apdu_be', '_esim_be')
 export function reset(obj, ...keys)
 {
 	for (let k in keys)

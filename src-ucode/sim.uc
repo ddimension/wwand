@@ -316,7 +316,7 @@ export function set_pin_lock(modem, enable, pin, cb)
 		let be = chain[i++];
 
 		let handle = (err, data) => {
-			if (err && err.code == 26)                    // NoEffect: already set
+			if (err && err.code == QMI_ERR_NO_EFFECT)     // already in the requested state
 				return cb(null, { enabled: !!enable, note: 'no_effect' });
 
 			if (!err)
@@ -411,7 +411,6 @@ function read_ef(modem, ef, cb, session_type)
 	}, { no_recovery: true });
 }
 
-// best-effort: reads IMSI, ICCID and MSISDN; absent values stay null
 // --- physical SIM slots ------------------------------------------------------
 
 const CARD_STATES = { '0': 'unknown', '1': 'absent', '2': 'present' };
@@ -543,10 +542,6 @@ export function power_cycle(modem, slot, cb)
 };
 
 // --- raw APDU channel (eSIM/ES10 foundation) ---------------------------------
-
-// re-exported from codec/hex.uc (single home for byte/hex/BCD conversion)
-export const hex_to_arr = hexmod.hex_to_arr;
-export const arr_to_hex = hexmod.arr_to_hex;
 
 // APDU transport is either QMI UIM (SEND_APDU + logical channel) or, on
 // firmwares that return NOT_SUPPORTED for the QMI channel (e.g. RG650E), the
@@ -772,9 +767,8 @@ export function read_plmn_lists(modem, cb)
 	});
 };
 
-// try providers in order until one yields a non-null value; each provider is
-// (done) => done(value | null). The sustainable fallback shape for identity.
-// shared sequential-provider ladder (backend.first_of)
+// shared sequential-provider ladder (backend.first_of): try providers in order
+// until one yields a non-null value. The sustainable fallback shape for identity.
 const first_of = backend.first_of;
 
 // first line of an AT reply that is a run of >= min digits (IMSI/ICCID)
@@ -790,20 +784,18 @@ function at_digits(lines, min)
 	return null;
 }
 
-// IMSI / ICCID with a sustainable per-field fallback: UIM EF read -> QMI DMS
-// getter -> AT. Modems whose UIM rejects raw EF reads (EG06: InvalidArgument)
-// fall through to DMS UIM Get IMSI/ICCID, then to AT (AT+CIMI / AT+QCCID). The
-// QMI getters use no_recovery so a rejection never climbs the reboot ladder.
-// read just the ICCID (UIM EF read -> DMS getter -> AT). The MF-level EF-ICCID
-// is readable BEFORE PIN unlock, so this is used to identify the active card and
-// pick a matching per-SIM override (wwand_sim) before choosing the PIN. Already
-// trailing-'f'-stripped, matching the ICCID shown in status/LuCI.
+// read just the ICCID (UIM EF read -> DMS getter -> AT; modems whose UIM
+// rejects raw EF reads, e.g. the EG06, fall through — no_recovery keeps a
+// rejection off the reboot ladder). The MF-level EF-ICCID is readable BEFORE
+// PIN unlock, so this identifies the active card and picks a matching per-SIM
+// override (wwand_sim) before choosing the PIN. Already trailing-'f'-stripped,
+// matching the ICCID shown in status/LuCI.
 export function read_iccid(modem, cb)
 {
 	let chain = [];
 	if (modem.uim)
 		push(chain, (done) => read_ef(modem, EF_ICCID, (b) =>
-			done(b != null ? replace(swap_nibbles(b), /f+$/, '') : null)));
+			done(b != null ? hexmod.bytes_to_iccid(b) : null)));
 	push(chain, (done) => modem.dms.request('GET_ICCID', {}, (e, d) =>
 		done((!e && length(d?.iccid ?? '')) ? d.iccid : null), { no_recovery: true }));
 	if (modem.at)
