@@ -13,6 +13,28 @@
 //   then AT). A probe reports true only when that transport actually works on
 //   this modem (e.g. the QMI message returned data rather than NOT_SUPPORTED /
 //   INFO_UNAVAILABLE); an AT candidate typically probes just `!!modem.at`.
+//
+// ----------------------------------------------------------------------------
+// DUCK-TYPED MODEM CONTRACT (the fields cross-module consumers may rely on).
+// The three modem backends (modem.uc / modem_mbim.uc / modem_ncm.uc) expose a
+// shared surface *by convention* — this is its single written-down spec:
+//
+//   always:      id, state, config, info{model,imei,imsi,iccid,…}, reg,
+//                active_sim, at (may be null), timing, contexts[],
+//                set_state/attach_context/… (modem_common.scaffolding),
+//                reset(cb), reapply_sim(cb)   [re-read identity + re-match
+//                wwand_sim + (QMI) attach profile after in-place card change]
+//   QMI:         uim/dms/nas/wds_cfg clients, datapath{netdev,…}
+//   MBIM:        mbim client, mbim_uicc{open,apdu,close,reset},
+//                mbim_sms{read_all,del}, _ensure_uim(cb) [QMI-over-MBIM
+//                passthrough: populates .uim on success]
+//   NCM:         vendor/dial tables (AT command model)
+//
+// Consumers feature-test with `if (modem.x)` — never assume a backend.
+// Underscore fields (_apdu_be/_esim_be/_pin_override/…) are private caches;
+// the daemon's direct pokes at _pin_override/_apdu_be are the documented
+// exceptions (one-shot PIN release, status reporting) — do not add new ones.
+// ----------------------------------------------------------------------------
 
 'use strict';
 
