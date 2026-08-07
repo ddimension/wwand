@@ -381,6 +381,11 @@ export function set_pin_lock(modem, enable, pin, cb)
 // SIM files are nibble-swapped BCD — helpers live in codec/hex.uc
 const swap_nibbles = hexmod.bcd_swapped_arr;
 
+// local aliases for the APDU paths below (module-internal; the public hex API
+// lives in codec/hex.uc — import it directly, these are NOT re-exported)
+const hex_to_arr = hexmod.hex_to_arr;
+const arr_to_hex = hexmod.arr_to_hex;
+
 const EF_IMSI  = { file_id: 0x6F07, path: "\x00\x3F\xFF\x7F" };   // 3F00/7FFF
 const EF_ICCID = { file_id: 0x2FE2, path: "\x00\x3F" };           // 3F00
 
