@@ -55,7 +55,7 @@ export function clean_cell_metrics(cells)
 		scrub(cells.nr5g_cell);
 
 	return cells;
-}
+};
 
 export function dsd_from_serving(serving)
 {
