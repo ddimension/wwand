@@ -56,18 +56,16 @@ export function create(opts)
 		interval_ms: stats_interval,
 	});
 
-	let emit = (event, data) => {
-		if (deps.on_event)
-			deps.on_event(self, event, data);
-	};
+	// stats controls forward-declared BEFORE the scaffolding arrow that
+	// captures stop_stats (ucode resolves lexical refs only for bindings
+	// already declared at definition time)
+	let start_stats, stop_stats, sample_stats;
 
-	let set_state = (state) => {
-		if (self.state == state)
-			return;
-
-		log('info', sprintf('state %s -> %s', self.state, state));
-		self.state = state;
-	};
+	// shared emit/set_state/fail_finish (context_common.ctx_scaffolding)
+	let sc = context_common.ctx_scaffolding(self, {
+		deps: deps, log: log, stop_stats: () => stop_stats(),
+	});
+	let emit = sc.emit, set_state = sc.set_state;
 
 	let netmask_to_prefix = (p) => p;   // MBIM already gives the prefix length
 
@@ -105,7 +103,6 @@ export function create(opts)
 		return out;
 	};
 
-	let start_stats, stop_stats, sample_stats;
 
 	start_stats = () => {
 		rx_watch.reset();
@@ -273,15 +270,7 @@ export function create(opts)
 		let cb = up_cb;
 		up_cb = null;
 
-		let finish = () => {
-			stop_stats();
-			set_state('IDLE');
-			self.settings = null;
-			emit('error', err);
-
-			if (cb)
-				cb(err);
-		};
+		let finish = () => sc.fail_finish(err, cb);
 
 		// if our CONNECT already activated the session the modem still holds it;
 		// deactivate first so the daemon's retry doesn't hit MBIM status 13.

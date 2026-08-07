@@ -39,6 +39,38 @@ function bool_opt(v, dflt)
 	return !(v == '0' || v == 'false' || v == 'off' || v == 'no');
 }
 
+// the connection option bundle every context flavor shares (apn / auth /
+// credentials / mtu / refresh cadence). Flavor-specific fields (profile,
+// use_pushed_mtu default, auto/autosetup, mux naming) stay at the call sites.
+function conn_fields(s)
+{
+	return {
+		apn: s.apn,
+		auth: s.auth,
+		username: s.username,
+		password: s.password,
+		mtu: (s.mtu != null) ? +s.mtu : null,
+		use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
+		settings_poll: +(s.settings_poll ?? 300),
+	};
+}
+
+// The mux child's chosen NAME. An explicit muxed device name (wwan0mN) is
+// used as-is; a bare netdev + `mux_id` derives <netdev>m<mux_id> (never the
+// bare netdev itself, which would collide with the parent); no device falls
+// back to the given netdev, else 'wwan0'. The runtime re-derives from the
+// real netdev when this is null. Shared by the native and old-style
+// interface parsers (they must never drift — the child name is what netifd
+// claims).
+function derive_mux_link(nd, device, mux_id, muxed, fallback_netdev)
+{
+	if (!muxed)
+		return null;
+
+	return (nd?.muxed ?? false) ? device
+		: sprintf('%sm%d', nd?.netdev ?? fallback_netdev ?? 'wwan0', mux_id);
+}
+
 export function modem_defaults(over)
 {
 	return {
@@ -186,20 +218,14 @@ function parse_wwand_sections(raw, result)
 				push(result.warnings, sprintf("context %s: invalid pdp_type '%s', using ipv4v6", name, s.pdp_type));
 
 			result.contexts[name] = context_defaults({
+				...conn_fields(s),
 				modem: s.modem,
 				mux_id: +(s.mux_id ?? 0),
 				muxed: +(s.mux_id ?? 0) > 0,
 				mux_link: s.mux_link,
-				apn: s.apn,
 				pdp_type: PDP_TYPES[s.pdp_type] ? s.pdp_type : 'ipv4v6',
-				auth: s.auth,
-				username: s.username,
-				password: s.password,
 				profile: (s.profile != null) ? +s.profile : null,
-				mtu: (s.mtu != null) ? +s.mtu : null,
 				use_pushed_mtu: bool_opt(s.use_pushed_mtu, true),
-				use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
-				settings_poll: +(s.settings_poll ?? 300),
 			});
 			break;
 		}
@@ -376,29 +402,16 @@ function compat_translate(raw, result)
 				push(result.warnings, sprintf("interface %s: invalid pdp_type '%s', using ipv4v6", name, pdp_in));
 
 			result.contexts[name] = context_defaults({
+				...conn_fields(s),
 				modem: s.modem,
 				interface: name,
 				mux_id: mux_id,
 				muxed: muxed,
-				// The mux child's chosen NAME. An explicit muxed device name
-				// (wwan0mN) is used as-is; a bare netdev + `mux_id` derives
-				// <netdev>m<mux_id> (never the bare netdev itself, which would collide
-				// with the parent); no device falls back to the modem's netdev, else
-				// 'wwan0'. The runtime re-derives from the real netdev when this is null.
-				mux_link: muxed
-					? ((nd?.muxed ?? false) ? s.device
-						: sprintf('%sm%d', nd?.netdev ?? result.modems[s.modem]?.netdev ?? 'wwan0', mux_id))
-					: null,
-				apn: s.apn,
+				mux_link: derive_mux_link(nd, s.device, mux_id, muxed,
+					result.modems[s.modem]?.netdev),
 				pdp_type: PDP_TYPES[pdp_in] ? pdp_in : 'ipv4v6',
-				auth: s.auth,
-				username: s.username,
-				password: s.password,
 				profile: (s.profile != null) ? +s.profile : null,
-				mtu: (s.mtu != null) ? +s.mtu : null,
 				use_pushed_mtu: bool_opt(s.use_pushed_mtu, true),
-				use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
-				settings_poll: +(s.settings_poll ?? 300),
 				auto: bool_opt(s.auto, true),
 				// autosetup marker: this interface was created by the
 				// zero-config autosetup and still awaits its one-shot
@@ -463,23 +476,14 @@ function compat_translate(raw, result)
 		let cmuxed = (cmux_id > 0) || (nd?.muxed ?? false);
 
 		result.contexts[name] = context_defaults({
+			...conn_fields(s),
 			modem: mkey,
 			interface: name,
 			mux_id: cmux_id,
 			muxed: cmuxed,
-			// same naming rule as the native path (see above)
-			mux_link: cmuxed
-				? ((nd?.muxed ?? false) ? dev : sprintf('%sm%d', nd?.netdev ?? 'wwan0', cmux_id))
-				: null,
-			apn: s.apn,
+			mux_link: derive_mux_link(nd, dev, cmux_id, cmuxed, null),
 			pdp_type: pdp,
-			auth: s.auth,
-			username: s.username,
-			password: s.password,
-			mtu: (s.mtu != null) ? +s.mtu : null,
 			use_pushed_mtu: bool_opt(s.use_pushed_mtu, false),   // old default: off
-			use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
-			settings_poll: +(s.settings_poll ?? 300),
 			auto: bool_opt(s.auto, true),
 		});
 	}

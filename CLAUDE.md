@@ -63,10 +63,13 @@ reg+signal; re-logs a waited-on modem every 30 s). `modem_repower` ubus method +
 LuCI button. Everything through an injectable `fx` → `test_board.uc`.
 
 ## eSIM / APDU transport (`sim.uc` + `esim.uc`)
-`_apdu_be` backend order: **QMI UIM logical channel** (native, or over the
-QMI-over-MBIM passthrough via `modem_mbim._ensure_uim`) → **native MBIM MS UICC
-Low Level Access** (`mbim_backend.uicc_*`, UUID `c2f6588e…`, via `command_raw`) →
-**AT** (`CCHO`/`CGLA`). MBIM modem exposes `self.mbim_uicc` (duck-typed; keeps the
+`_apdu_be` probe order (sim.uc `apdu_backend`): **native MBIM MS UICC Low Level
+Access** (`mbim_backend.uicc_*`, UUID `c2f6588e…`, via `command_raw`) → **QMI
+UIM logical channel** (native, or over the QMI-over-MBIM passthrough via
+`modem_mbim._ensure_uim`) → **AT** (`CCHO`/`CGLA`). `sim.power_cycle`
+deliberately uses the OPPOSITE precedence (QMI-UIM first — the HW-proven SIM
+hot-reset — then MBIM UICC Reset, then AT CFUN=0/1); see the comments at both
+sites. MBIM modem exposes `self.mbim_uicc` (duck-typed; keeps the
 base `sim.uc` free of an mbim import). Wire format verified vs libmbim 1.32 +
 lpac; wire-buffer tests in `test_mbim_backend`. Not HW-validated end-to-end (no
 eUICC-equipped MBIM modem on hand; RG650E rejects MBIM_OPEN, EG06 card has no

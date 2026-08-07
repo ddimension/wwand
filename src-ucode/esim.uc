@@ -14,6 +14,7 @@ import * as sim from './sim.uc';
 import * as backend from './backend.uc';
 
 import { ISDR_AID } from './sim.uc';
+import { iccid_to_bytes, bytes_to_iccid } from './codec/hex.uc';
 
 // --- minimal BER-TLV ---------------------------------------------------------
 
@@ -70,36 +71,6 @@ function ber_build(tag, val)
 	return [ ...out, ...val ];
 }
 
-// ICCID digits <-> nibble-swapped BCD bytes (same coding as on the SIM)
-const NIBBLES = '0123456789abcdef';
-
-function iccid_to_bytes(iccid)
-{
-	let out = [];
-	let s = lc(iccid ?? '');
-
-	if (length(s) % 2)
-		s += 'f';
-
-	for (let i = 0; i < length(s); i += 2) {
-		let lo = index(NIBBLES, substr(s, i, 1));
-		let hi = index(NIBBLES, substr(s, i + 1, 1));
-
-		push(out, ((hi < 0 ? 0xf : hi) << 4) | (lo < 0 ? 0xf : lo));
-	}
-
-	return out;
-}
-
-function bytes_to_iccid(b)
-{
-	let s = '';
-
-	for (let x in (b ?? []))
-		s += sprintf('%x%x', x & 0xf, x >> 4);
-
-	return replace(s, /f+$/, '');
-}
 
 // --- ES10 transport (STORE DATA over the ISD-R logical channel) --------------
 

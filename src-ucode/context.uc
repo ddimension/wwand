@@ -120,18 +120,16 @@ export function create(opts)
 	let settings_poll_ms = opts.timing?.settings_poll_ms ??
 		((+(self.config?.settings_poll ?? 300)) * 1000);
 
-	let emit = (event, data) => {
-		if (deps.on_event)
-			deps.on_event(self, event, data);
-	};
+	// stats controls forward-declared BEFORE the scaffolding arrow that
+	// captures stop_stats (ucode resolves lexical refs only for bindings
+	// already declared at definition time)
+	let start_stats, stop_stats, sample_stats;
 
-	let set_state = (state) => {
-		if (self.state == state)
-			return;
-
-		log('info', sprintf('state %s -> %s', self.state, state));
-		self.state = state;
-	};
+	// shared emit/set_state/fail_finish (context_common.ctx_scaffolding)
+	let sc = context_common.ctx_scaffolding(self, {
+		deps: deps, log: log, stop_stats: () => stop_stats(),
+	});
+	let emit = sc.emit, set_state = sc.set_state;
 
 	let wanted_families = () => {
 		let pdp = self.config.pdp_type ?? 'ipv4v6';
@@ -172,7 +170,6 @@ export function create(opts)
 	// forward declarations: ucode resolves closure captures only for names
 	// already declared at definition time
 	let prepare, check_pdp_type, activate_family, fetch_settings, release_family;
-	let start_stats, stop_stats, sample_stats;
 
 	start_stats = () => {
 		// run while connected regardless of the zero-rx setting: the sample
@@ -946,14 +943,7 @@ export function create(opts)
 		up_cb = null;
 
 		release_family(4, () => {
-			release_family(6, () => {
-				set_state('IDLE');
-				self.settings = null;
-				emit('error', err);
-
-				if (cb)
-					cb(err);
-			});
+			release_family(6, () => sc.fail_finish(err, cb));
 		});
 	};
 

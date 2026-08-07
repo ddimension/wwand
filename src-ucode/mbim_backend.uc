@@ -21,6 +21,7 @@
 'use strict';
 
 import * as struct from 'struct';
+import * as hexmod from './codec/hex.uc';
 import * as bc from './codec/mbim-schema/basic_connect.uc';
 import * as ext from './codec/mbim-schema/ms_basic_connect_ext.uc';
 
@@ -41,26 +42,6 @@ const UICC_CHANNEL_GROUP = 1;
 const UICC_SECURE_MESSAGING_NONE = 0;
 const UICC_CLASS_BYTE_INTER_INDUSTRY = 1;
 
-function hex2bin(h)
-{
-	let o = '';
-
-	for (let i = 0; i + 1 < length(h); i += 2)
-		o += chr(hex(substr(h, i, 2)));
-
-	return o;
-}
-
-function bin2hex(b)
-{
-	let o = '';
-
-	for (let i = 0; i < length(b); i++)
-		o += sprintf('%02x', ord(b, i));
-
-	return o;
-}
-
 // zero-pad a byte string up to the next 4-byte boundary
 function pad4(s)
 {
@@ -74,7 +55,7 @@ function pad4(s)
 // select_response }). `mc` is the MBIM session client (mbim_client.uc).
 export function uicc_open_channel(mc, aid_hex, cb)
 {
-	let aid = hex2bin(aid_hex);
+	let aid = hexmod.hex_to_bin(aid_hex);
 	// [ AppIdLength, AppIdOffset(=16), SelectP2Arg(0), ChannelGroup(1) ] + AppId
 	let info = struct.pack('<IIII', length(aid), 16, 0, UICC_CHANNEL_GROUP) + pad4(aid);
 
@@ -91,7 +72,7 @@ export function uicc_open_channel(mc, aid_hex, cb)
 		let roff    = struct.unpack('<I', substr(resp, 12, 4))[0];
 		let sel = (roff && rlen && roff + rlen <= length(resp)) ? substr(resp, roff, rlen) : '';
 
-		cb(null, { channel: channel, select_response: bin2hex(sel), status: status });
+		cb(null, { channel: channel, select_response: hexmod.bin_to_hex(sel), status: status });
 	});
 };
 
@@ -100,7 +81,7 @@ export function uicc_open_channel(mc, aid_hex, cb)
 // field, exactly as lpac does — the QMI SEND_APDU path returns SW inline too).
 export function uicc_apdu(mc, channel, apdu_hex, cb)
 {
-	let cmd = hex2bin(apdu_hex);
+	let cmd = hexmod.hex_to_bin(apdu_hex);
 	// [ Channel, SecureMessaging, ClassByteType, CommandLength, CommandOffset(=20) ] + Command
 	let info = struct.pack('<IIIII', channel, UICC_SECURE_MESSAGING_NONE,
 		UICC_CLASS_BYTE_INTER_INDUSTRY, length(cmd), 20) + pad4(cmd);
@@ -120,7 +101,7 @@ export function uicc_apdu(mc, channel, apdu_hex, cb)
 		// append SW1 SW2 from the status word (low byte, then high byte)
 		let full = data + chr(status & 0xff) + chr((status >> 8) & 0xff);
 
-		cb(null, bin2hex(full));
+		cb(null, hexmod.bin_to_hex(full));
 	});
 };
 
@@ -177,7 +158,7 @@ export function sms_read_all(mc, cb)
 			let idx = _u(resp, off), status = _u(resp, off + 4);
 			let poff = _u(resp, off + 8), psize = _u(resp, off + 12);
 
-			push(out, { index: idx, status: status, pdu: bin2hex(substr(resp, poff, psize)) });
+			push(out, { index: idx, status: status, pdu: hexmod.bin_to_hex(substr(resp, poff, psize)) });
 		}
 
 		cb(null, out);

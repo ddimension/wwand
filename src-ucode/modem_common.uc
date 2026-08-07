@@ -91,6 +91,15 @@ function imei_key(s)
 // a DIFFERENT device, this is the wrong physical modem for this config — bringing
 // it up would apply the wrong SIM/PIN/APN — so it emits 'identity_mismatch' and
 // returns false (the caller must halt its bring-up chain). Returns true to proceed.
+// timing defaults shared by all three backends; each backend spreads its
+// extras on top ({ ...TIMING_BASE, ...backend_extras, ...opts.timing })
+export const TIMING_BASE = {
+	settle: 2000,          // settle after operating-mode changes
+	reg_timeout: 240000,   // registration guard
+	backoff_min: 5000,     // retry backoff after failures
+	backoff_max: 30000,
+};
+
 // match a configured wwand_sim list against a card identity: ICCID first
 // (authoritative — needed for PIN overrides; trailing-F padding tolerated),
 // then IMSI (option imsi, or an IMSI put into the iccid field — a frequent

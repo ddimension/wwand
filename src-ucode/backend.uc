@@ -50,6 +50,41 @@ export function choose(obj, key, candidates, cb)
 
 // forget the cached decision (e.g. on SIM slot switch / removable eUICC), so
 // the next call re-probes. Pass the same keys the features cache under.
+// run value providers in order until one yields a non-null result; cb(value)
+// with null when every provider came up empty. The shared "try QMI, then AT"
+// fallback ladder used by identity reads and similar per-field chains (the
+// cached-probe cousin is choose() above — use that when the winning transport
+// should stick per modem).
+export function first_of(providers, cb)
+{
+	let i = 0, step;
+
+	step = () => {
+		if (i >= length(providers))
+			return cb(null);
+
+		providers[i++]((v) => (v != null) ? cb(v) : step());
+	};
+
+	step();
+};
+
+// run async steps strictly in sequence: each step is (done) => …; done() moves
+// on. Flattens hand-rolled callback pyramids (e.g. multi-getter init reads).
+export function run_seq(steps, cb)
+{
+	let i = 0, step;
+
+	step = () => {
+		if (i >= length(steps))
+			return cb();
+
+		steps[i++](step);
+	};
+
+	step();
+};
+
 export function reset(obj, ...keys)
 {
 	for (let k in keys)

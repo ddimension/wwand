@@ -56,18 +56,16 @@ export function create(opts)
 		interval_ms: stats_interval,
 	});
 
-	let emit = (event, data) => {
-		if (deps.on_event)
-			deps.on_event(self, event, data);
-	};
+	// stats controls forward-declared BEFORE the scaffolding arrow that
+	// captures stop_stats (ucode resolves lexical refs only for bindings
+	// already declared at definition time)
+	let start_stats, stop_stats, sample_stats;
 
-	let set_state = (state) => {
-		if (self.state == state)
-			return;
-
-		log('info', sprintf('state %s -> %s', self.state, state));
-		self.state = state;
-	};
+	// shared emit/set_state/fail_finish (context_common.ctx_scaffolding)
+	let sc = context_common.ctx_scaffolding(self, {
+		deps: deps, log: log, stop_stats: () => stop_stats(),
+	});
+	let emit = sc.emit, set_state = sc.set_state;
 
 	// effective connection config for a dial: the carrier bundle (apn/auth/
 	// username/password) resolved through the per-SIM override (wwand_sim
@@ -139,7 +137,6 @@ export function create(opts)
 
 	// --- zero-rx watchdog / liveness ---------------------------------------
 
-	let start_stats, stop_stats, sample_stats;
 
 	start_stats = () => {
 		rx_watch.reset();
@@ -417,15 +414,7 @@ export function create(opts)
 		let cb = up_cb;
 		up_cb = null;
 
-		let finish = () => {
-			stop_stats();
-			set_state('IDLE');
-			self.settings = null;
-			emit('error', err);
-
-			if (cb)
-				cb(err);
-		};
+		let finish = () => sc.fail_finish(err, cb);
 
 		// if our dial already bound the netdev, unbind before the daemon retries
 		if (activated && self.modem.at) {

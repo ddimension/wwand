@@ -28,6 +28,41 @@ export function conn_cfg(ctx, field)
 	return (v != null && v != '') ? v : null;
 };
 
+// shared context plumbing (the context-side mirror of
+// modem_common.scaffolding): the emit/set_state pair every context carries,
+// plus the common tail of _fail — stop stats, back to IDLE, clear settings,
+// emit 'error', complete the pending up() callback. Backends run their
+// transport-specific cleanup (deactivate / unbind / release CIDs) first and
+// then call fail_finish. o: { deps, log, stop_stats: () => … } (stop_stats as
+// a thunk — it is forward-declared in the callers).
+export function ctx_scaffolding(self, o)
+{
+	let emit = (event, data) => {
+		if (o.deps?.on_event)
+			o.deps.on_event(self, event, data);
+	};
+
+	let set_state = (state) => {
+		if (self.state == state)
+			return;
+
+		o.log('info', sprintf('state %s -> %s', self.state, state));
+		self.state = state;
+	};
+
+	let fail_finish = (err, cb) => {
+		o.stop_stats();
+		set_state('IDLE');
+		self.settings = null;
+		emit('error', err);
+
+		if (cb)
+			cb(err);
+	};
+
+	return { emit: emit, set_state: set_state, fail_finish: fail_finish };
+};
+
 export function zero_rx_limit_ms(modem_config, timing)
 {
 	if (timing?.zero_rx_ms != null)

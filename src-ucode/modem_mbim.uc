@@ -40,10 +40,7 @@ import * as sim from './sim.uc';
 import * as tlv from './codec/tlv.uc';
 
 const TIMING_DEFAULTS = {
-	settle: 2000,
-	reg_timeout: 240000,
-	backoff_min: 5000,
-	backoff_max: 30000,
+	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
 	at_drain: 60000,
 };
 

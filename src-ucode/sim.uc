@@ -15,6 +15,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
+import * as hexmod from './codec/hex.uc';
 import * as backend from './backend.uc';
 import * as uimmod from './codec/schema/uim.uc';
 import * as dmsmod from './codec/schema/dms.uc';
@@ -377,16 +378,8 @@ export function set_pin_lock(modem, enable, pin, cb)
 
 // --- card identity (IMSI / ICCID) -------------------------------------------
 
-// SIM files are nibble-swapped BCD (old proto_qmi_convert_from_uimbyte)
-function swap_nibbles(bytes)
-{
-	let s = '';
-
-	for (let b in (bytes ?? []))
-		s += sprintf('%x%x', b & 0xf, b >> 4);
-
-	return s;
-}
+// SIM files are nibble-swapped BCD — helpers live in codec/hex.uc
+const swap_nibbles = hexmod.bcd_swapped_arr;
 
 const EF_IMSI  = { file_id: 0x6F07, path: "\x00\x3F\xFF\x7F" };   // 3F00/7FFF
 const EF_ICCID = { file_id: 0x2FE2, path: "\x00\x3F" };           // 3F00
@@ -423,31 +416,8 @@ function read_ef(modem, ef, cb, session_type)
 
 const CARD_STATES = { '0': 'unknown', '1': 'absent', '2': 'present' };
 
-// decode a raw nibble-swapped BCD ICCID string (lstring bytes) to digits
-function decode_iccid(raw)
-{
-	let s = '';
-
-	for (let i = 0; i < length(raw ?? ''); i++) {
-		let b = ord(raw, i);
-		s += sprintf('%x%x', b & 0xf, b >> 4);
-	}
-
-	return replace(s, /f+$/, '');
-}
-
-// EID is plain BCD, high nibble first (SGP.02) — no nibble swap
-function decode_eid(raw)
-{
-	let s = '';
-
-	for (let i = 0; i < length(raw ?? ''); i++) {
-		let b = ord(raw, i);
-		s += sprintf('%x%x', b >> 4, b & 0xf);
-	}
-
-	return s;
-}
+const decode_iccid = hexmod.decode_iccid;
+const decode_eid = hexmod.decode_eid;
 
 // slot list with card/activity state and identifying ICCID; err when the
 // modem has no slot-status support (single-slot firmwares often lack it)
@@ -520,7 +490,10 @@ export function switch_slot(modem, physical, cb)
 // an eSIM profile switch (the RG650E ignores the eUICC REFRESH, keeps serving
 // the old profile's identity and ends up in limited service). Far lighter than
 // a full modem reset: no USB re-enumeration, the data session recovers via the
-// normal transient-loss path. Backend parity mirrors the _apdu_be order:
+// normal transient-loss path. NOTE the precedence here deliberately DIFFERS
+// from apdu_backend (which probes native MBIM first): for the reset we prefer
+// the HW-proven QMI-UIM path and keep the unvalidated MBIM UICC Reset as
+// fallback:
 //   QMI UIM POWER_OFF/ON_SIM (native, or over the QMI-over-MBIM passthrough)
 //   -> native MBIM MS UICC Reset (pure-MBIM firmware)
 //   -> AT CFUN=0/1 cycle (NCM/AT modems: powers the (U)SIM down with the
@@ -571,26 +544,9 @@ export function power_cycle(modem, slot, cb)
 
 // --- raw APDU channel (eSIM/ES10 foundation) ---------------------------------
 
-export function hex_to_arr(s)
-{
-	let raw = hexdec(s ?? '');
-	let out = [];
-
-	for (let i = 0; i < length(raw ?? ''); i++)
-		push(out, ord(raw, i));
-
-	return out;
-};
-
-export function arr_to_hex(a)
-{
-	let s = '';
-
-	for (let b in (a ?? []))
-		s += sprintf('%02x', b);
-
-	return s;
-};
+// re-exported from codec/hex.uc (single home for byte/hex/BCD conversion)
+export const hex_to_arr = hexmod.hex_to_arr;
+export const arr_to_hex = hexmod.arr_to_hex;
 
 // APDU transport is either QMI UIM (SEND_APDU + logical channel) or, on
 // firmwares that return NOT_SUPPORTED for the QMI channel (e.g. RG650E), the
@@ -818,19 +774,8 @@ export function read_plmn_lists(modem, cb)
 
 // try providers in order until one yields a non-null value; each provider is
 // (done) => done(value | null). The sustainable fallback shape for identity.
-function first_of(providers, cb)
-{
-	let i = 0, step;
-
-	step = () => {
-		if (i >= length(providers))
-			return cb(null);
-
-		providers[i++]((v) => (v != null) ? cb(v) : step());
-	};
-
-	step();
-}
+// shared sequential-provider ladder (backend.first_of)
+const first_of = backend.first_of;
 
 // first line of an AT reply that is a run of >= min digits (IMSI/ICCID)
 function at_digits(lines, min)

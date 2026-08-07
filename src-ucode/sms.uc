@@ -17,19 +17,9 @@
 'use strict';
 
 import * as backend from './backend.uc';
+import * as hexmod from './codec/hex.uc';
 import * as sms_pdu from './sms_pdu.uc';
 import * as wmsmod from './codec/schema/wms.uc';
-
-// byte array -> lowercase hex string (PDU bytes from the WMS raw-data TLV)
-function arr_hex(a)
-{
-	let s = '';
-
-	for (let b in (a ?? []))
-		s += sprintf('%02x', b & 0xff);
-
-	return s;
-}
 
 function is_me(storage)
 {
@@ -55,7 +45,7 @@ function qmi_read(modem, st, index, cb)
 		if (err)
 			return cb({ error: 'qmi', detail: err }, null);
 
-		let m = data?.raw?.data ? sms_pdu.decode_deliver(arr_hex(data.raw.data)) : null;
+		let m = data?.raw?.data ? sms_pdu.decode_deliver(hexmod.arr_to_hex(data.raw.data)) : null;
 
 		if (m) {
 			m.index = +index;

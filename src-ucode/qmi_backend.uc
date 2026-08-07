@@ -13,6 +13,7 @@
 
 'use strict';
 
+import * as backend from './backend.uc';
 import * as dmsmod from './codec/schema/dms.uc';
 import * as dsdmod from './codec/schema/dsd.uc';
 import * as nasmod from './codec/schema/nas.uc';
@@ -186,32 +187,32 @@ export function read_info(dms, cb)
 {
 	let info = {};
 
-	dms.request('GET_MANUFACTURER', {}, (e0, d0) => {
-		if (!e0)
-			info.manufacturer = d0.manufacturer;
-
-		dms.request('GET_MODEL', {}, (e1, d1) => {
-			if (!e1)
-				info.model = d1.model;
-
-			dms.request('GET_REVISION', {}, (e2, d2) => {
-				if (!e2)
-					info.revision = d2.revision;
-
-				dms.request('GET_IDS', {}, (e3, d3) => {
-					if (!e3) {
-						info.imei = d3.imei;
-						info.meid = d3.meid;
-					}
-
-					dms.request('GET_CAPABILITIES', {}, (e4, d4) => {
-						if (!e4 && d4.capabilities)
-							info.capabilities = d4.capabilities;
-
-						cb(info);
-					});
-				});
-			});
-		});
-	});
+	// the five DMS getters, strictly sequential on the shared control channel
+	// (backend.run_seq — was a five-level callback pyramid); individual
+	// failures leave their field unset, the rest still populate
+	backend.run_seq([
+		(next) => dms.request('GET_MANUFACTURER', {}, (e, d) => {
+			if (!e) info.manufacturer = d.manufacturer;
+			next();
+		}),
+		(next) => dms.request('GET_MODEL', {}, (e, d) => {
+			if (!e) info.model = d.model;
+			next();
+		}),
+		(next) => dms.request('GET_REVISION', {}, (e, d) => {
+			if (!e) info.revision = d.revision;
+			next();
+		}),
+		(next) => dms.request('GET_IDS', {}, (e, d) => {
+			if (!e) {
+				info.imei = d.imei;
+				info.meid = d.meid;
+			}
+			next();
+		}),
+		(next) => dms.request('GET_CAPABILITIES', {}, (e, d) => {
+			if (!e && d.capabilities) info.capabilities = d.capabilities;
+			next();
+		}),
+	], () => cb(info));
 };

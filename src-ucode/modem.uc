@@ -47,13 +47,10 @@ import * as wdamod from './codec/schema/wda.uc';
 // SMS is actually used, keeping those schemas off the heap on the common path.
 
 const TIMING_DEFAULTS = {
+	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
 	sync_retry: 1000,      // delay between CTL sync attempts
-	settle: 2000,          // settle after operating-mode changes (old: sleep 2)
 	sim_settle: 5000,      // settle after PIN verify without indication (old: sleep 5)
 	card_poll: 1000,       // card-status re-poll while initializing
-	reg_timeout: 240000,   // registration guard (old: 240s loop)
-	backoff_min: 5000,     // retry backoff after failures
-	backoff_max: 30000,
 };
 
 const SYNC_TRIES = 10;
