@@ -21,9 +21,19 @@ import * as qmit from 'wwand_io';
 import * as uloop from 'uloop';
 import * as qmux from './codec/qmux.uc';
 
+// tx congestion: frames queued past this depth report an error upstream
+const TXQ_MAX = 64;
+// retry cadence for a congested cdc-wdm write (message-oriented, so a failed
+// write is retried whole)
+const TX_RETRY_MS = 5;
+
 export function open(path, cbs)
 {
-	let handle = qmit.open(path);
+	// cbs.io_open: injectable device opener (unit tests fake the native
+	// handle). NOTE: kept as two statements — ucode does not parse
+	// `(a ?? b)(args)` as a call on the parenthesized expression.
+	let io_open = cbs?.io_open ?? qmit.open;
+	let handle = io_open(path);
 
 	if (!handle)
 		return null;
@@ -57,7 +67,7 @@ export function open(path, cbs)
 			if (w !== length(txq[0])) {
 				// still congested — retry shortly (frames are message-
 				// oriented, a short write does not happen on cdc-wdm)
-				tx_timer = uloop.timer(5, flush_txq);
+				tx_timer = uloop.timer(TX_RETRY_MS, flush_txq);
 				return;
 			}
 
@@ -69,7 +79,7 @@ export function open(path, cbs)
 		if (hub.closed)
 			return false;
 
-		if (length(txq) > 64)
+		if (length(txq) > TXQ_MAX)
 			return false;   // persistently congested: report upstream
 
 		if (length(txq)) {
@@ -85,7 +95,7 @@ export function open(path, cbs)
 		push(txq, frame);
 
 		if (!tx_timer)
-			tx_timer = uloop.timer(5, flush_txq);
+			tx_timer = uloop.timer(TX_RETRY_MS, flush_txq);
 
 		return true;
 	};
