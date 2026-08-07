@@ -39,6 +39,23 @@ success or `{ error, ... }`; `data` uses the normalized shapes below. An
 operation a backend cannot perform reports `{ error: 'unsupported' }` — the core
 tolerates that (every optional capability is guarded and best-effort).
 
+Two deliberate convention splits exist in the backends — both are on purpose,
+do not "fix" one side to match the other:
+
+- **Callback shape.** Mutating / must-succeed operations use `cb(err[, data])`
+  (`set_opmode`, `stop_network`, sim/esim/sms ops). *Normalized-telemetry
+  getters* use the result-only form `cb(result | null)` (`get_ca`,
+  `get_data_mode`, `get_bearer`, `get_channel_rates`, `get_reg_detail`,
+  `read_info` and the mbim_backend equivalents): a telemetry failure is not an
+  error the caller can act on — null simply means "nothing to display" and the
+  poll loop moves on.
+- **First argument.** `qmi_backend`/`mbim_backend` operations take the bare
+  protocol *client* (`set_opmode(dms, …)`, `get_ca(nas, …)`) and never touch
+  modem state — they are pure wire adapters. The stateful service layers
+  (`sim.uc`, `esim.uc`, `sms.uc`) take the whole `modem` because they choose
+  transports (`backend.choose`/`first_of`), read `modem.config`/`active_sim`
+  and update `modem.info`.
+
 ### Modem-level
 
 | Operation | Purpose | QMI today | MBIM today |

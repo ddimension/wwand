@@ -27,6 +27,14 @@ import * as apndb from './apndb.uc';
 
 const UP_GUARD_MS = 150000;
 
+// AT+COPS timeouts (netsel AT fallback): the format-set is instant, the read
+// can stall on a busy modem, and a manual COPS SET legitimately runs a full
+// network search (3GPP allows minutes — 30 s covers the observed worst case
+// before the deferred-apply path takes over).
+const COPS_FORMAT_TIMEOUT_MS = 5000;
+const COPS_READ_TIMEOUT_MS = 10000;
+const COPS_SET_TIMEOUT_MS = 30000;
+
 // QMI is a SEPARATE package too (wwand-qmi) — the daemon is backend-neutral and
 // loads each backend lazily. QMI, MBIM and NCM are all require()d on first use;
 // a missing package returns null (cached) so start_modem reports it clearly.
@@ -1513,9 +1521,9 @@ export function create(opts)
 							return cb({ error: 'at', detail: err });
 
 						done_set(' (AT)');
-					}, { timeout: 30000 });
-				}, { timeout: 10000 });
-			}, { timeout: 5000 });
+					}, { timeout: COPS_SET_TIMEOUT_MS });
+				}, { timeout: COPS_READ_TIMEOUT_MS });
+			}, { timeout: COPS_FORMAT_TIMEOUT_MS });
 		});
 	};
 

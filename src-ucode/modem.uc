@@ -34,6 +34,7 @@ import * as modem_quirks from './modem_quirks.uc';
 import * as backend from './backend.uc';
 import * as qmi_backend from './qmi_backend.uc';
 import * as modem_common from './modem_common.uc';
+import * as regdetail from './regdetail.uc';
 import * as protoswitch from './protocol_switch.uc';
 import * as tlv from './codec/tlv.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
@@ -1448,93 +1449,10 @@ export function create(opts)
 		}, { no_recovery: true });
 	};
 
-	// gather WHY the modem is (not) registered: the EMM reject cause and whether
-	// it is stuck in limited service (camped but attach rejected). QMI and AT are
-	// COMPLEMENTARY here, not either/or: QMI GET_SYSTEM_INFO reliably reports the
-	// LTE limited-service flag but many modems leave the numeric reject cause TLV
-	// empty (reject_valid=0), while AT+CEER carries the clear-text cause. So we
-	// read QMI first and, when it lacks a numeric cause, top it up with AT+CEER.
-	// Result -> self.reg_detail and cb. no_recovery on the QMI read: an
-	// unsupported message must not climb the reboot ladder.
+	// registration-detail collector — extracted to regdetail.uc (audit round);
+	// kept as a method so daemon/status callers are unchanged
 	self.collect_regdetail = function(cb) {
-		cb = cb ?? (() => null);
-
-		let finish = (d) => {
-			if (d && d.reject_cause != null && d.reject_text == null)
-				d.reject_text = nasmod.REJECT_CAUSE[sprintf('%d', d.reject_cause)] ??
-					sprintf('reject cause %d', d.reject_cause);
-
-			if (d)
-				self.reg_detail = d;
-
-			cb(d);
-		};
-
-		// attach profile (profile 1) — the APN + auth the modem uses for the
-		// autonomous LTE attach. Reported on every registration probe so a reject
-		// can be diagnosed against the actual attach APN (incl. the network-default
-		// blank APN case). Merges into the detail; forward-declared for add_ceer.
-		let add_attach;
-
-		add_attach = (d) => {
-			let wds = self.wds_cfg;
-
-			if (!wds)
-				return finish(d);
-
-			wds.request('GET_PROFILE_SETTINGS',
-				{ profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: 1 } }, (err, p) => {
-				if (!err) {
-					d = d ?? {};
-					d.attach = {
-						apn: p.apn ?? '',
-						apn_kind: (p.apn == null || p.apn == '') ? 'network default' : 'configured',
-						pdp_type: p.pdp_type,
-						auth: p.auth,
-						username: p.username ?? null,
-					};
-				}
-
-				finish(d);
-			}, { no_recovery: true });
-		};
-
-		// AT+CEER clear-text cause; merges into an existing (QMI) detail
-		let add_ceer = (d) => {
-			if (!self.at)
-				return add_attach(d);
-
-			self.at.send('AT+CEER', (err, res) => {
-				if (!err) {
-					for (let l in (res?.lines ?? [])) {
-						let m = match(l, /\+CEER:\s*(.+)/);
-
-						if (m && length(trim(m[1]))) {
-							d = d ?? {};
-							d.reject_text = trim(m[1]);
-							d.source = d.source ? (d.source + '+at') : 'at';
-						}
-					}
-				}
-
-				add_attach(d);
-			});
-		};
-
-		if (!self.nas)
-			return add_ceer(null);
-
-		qmi_backend.get_reg_detail(self.nas, (d) => {
-			if (!d)
-				return add_ceer(null);
-
-			// numeric cause already present -> skip CEER; else top up from AT+CEER.
-			// Either way the attach-profile detail is appended.
-			if (d.reject_cause != null)
-				return add_attach(d);
-
-			add_ceer(d);
-		});
+		regdetail.collect(self, log, cb);
 	};
 
 	self._update_serving = function(data) {

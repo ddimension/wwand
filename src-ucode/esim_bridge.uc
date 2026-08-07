@@ -29,7 +29,52 @@ const ESIM_LOGF = '/tmp/wwand/esim-download.log';
 // execs its static /usr/lib/lpac). Calling this path works for either.
 const ESIM_LPAC = '/usr/bin/lpac';
 
+// classify one lpac stdout line — the testable core of the stdio bridge.
+// Protocol fields are pulled with match() because ucode's json() throws
+// uncatchably on malformed input (and lpac interleaves non-JSON noise).
+//   { kind: 'apdu', func, param }        an APDU request to answer
+//   { kind: 'progress', message }        ES9+/ES10 progress step
+//   { kind: 'lpa', code, message, data } final result (code '0' = success)
+//   { kind: 'log', text }                anything that is not protocol JSON
+//   null                                 empty line
+function parse_lpac_line(s)
+{
+	let field = (str, re) => { let m = match(str, re); return m ? m[1] : null; };
+
+	if (!length(s ?? ''))
+		return null;
+
+	if (substr(s, 0, 1) != '{')
+		return { kind: 'log', text: s };
+
+	let mtype = field(s, /"type": *"([a-z]+)"/);
+
+	if (mtype == 'apdu')
+		return {
+			kind: 'apdu',
+			func: field(s, /"func": *"([a-z_]+)"/),
+			param: field(s, /"param": *"([0-9A-Fa-f]*)"/) ?? '',
+		};
+
+	if (mtype == 'progress')
+		return { kind: 'progress', message: field(s, /"message": *"([^"]*)"/) ?? 'step' };
+
+	if (mtype == 'lpa')
+		return {
+			kind: 'lpa',
+			code: field(s, /"code": *(-?[0-9]+)/),
+			message: field(s, /"message": *"([^"]*)"/) ?? '',
+			data: field(s, /"data": *"([^"]*)"/),
+		};
+
+	// unknown JSON object: keep it visible in the log rather than dropping it
+	return { kind: 'log', text: s };
+}
+
 return {
+	// exposed for tests (test_esim_bridge): the pure lpac line classifier
+	parse_lpac_line: parse_lpac_line,
+
 	// deps: { esim (the wwand.esim module), log(level,msg), modem_of(ref) }
 	create: function(deps) {
 		let esim = deps.esim, log = deps.log, modem_of = deps.modem_of;
@@ -90,43 +135,45 @@ return {
 				on_done(ec == 0 ? null : { error: 'lpac', code: ec }, trim(fs.readfile(ESIM_LOGF) ?? ''));
 			};
 
-			// stdout carries only the protocol's JSON objects; fields are pulled
-			// with match() as ucode's json() throws uncatchably. APDU ops
+			// dispatch a classified lpac line (parse_lpac_line above). APDU ops
 			// dispatch async (reply written when the modem answers); the rest log.
 			let handle_line = (s) => {
-				if (substr(s, 0, 1) != '{') { if (length(s)) logline(s); return; }
+				let rec = parse_lpac_line(s);
 
-				let mtype = field(s, /"type": *"([a-z]+)"/);
-				if (mtype == 'apdu') {
-					let func = field(s, /"func": *"([a-z_]+)"/);
-					let param = field(s, /"param": *"([0-9A-Fa-f]*)"/) ?? '';
-					switch (func) {
-					case 'connect':
-					case 'disconnect':
-						send(0, ''); break;
-					case 'logic_channel_open':
-						sim.apdu_open(entry.modem, slot, param, (err, res) => {
-							chan = res?.channel ?? 0;
-							send(err ? -1 : chan, '');
-						}); break;
-					case 'transmit':
-						// apdu_send yields the response hex directly (modem_apdu is
-						// what wraps it as {response}); use it as-is
-						sim.apdu_send(entry.modem, slot, chan, param, (err, res) =>
-							send(err ? -1 : 0, err ? '' : (res ?? ''))); break;
-					case 'logic_channel_close':
-						sim.apdu_close(entry.modem, slot, chan, () => send(0, '')); break;
-					default:
-						send(-1, '');
-					}
-				} else if (mtype == 'progress')
-					logline('progress: ' + (field(s, /"message": *"([^"]*)"/) ?? 'step'));
-				else if (mtype == 'lpa') {
-					logline(sprintf('result: code=%s %s',
-						field(s, /"code": *(-?[0-9]+)/) ?? '?',
-						field(s, /"message": *"([^"]*)"/) ?? ''));
-					let d = field(s, /"data": *"([^"]*)"/);
-					if (d) logline('data: ' + d);
+				if (rec == null)
+					return;
+
+				if (rec.kind == 'log')
+					return logline(rec.text);
+
+				if (rec.kind == 'progress')
+					return logline('progress: ' + rec.message);
+
+				if (rec.kind == 'lpa') {
+					logline(sprintf('result: code=%s %s', rec.code ?? '?', rec.message));
+					if (rec.data)
+						logline('data: ' + rec.data);
+					return;
+				}
+
+				switch (rec.func) {
+				case 'connect':
+				case 'disconnect':
+					send(0, ''); break;
+				case 'logic_channel_open':
+					sim.apdu_open(entry.modem, slot, rec.param, (err, res) => {
+						chan = res?.channel ?? 0;
+						send(err ? -1 : chan, '');
+					}); break;
+				case 'transmit':
+					// apdu_send yields the response hex directly (modem_apdu is
+					// what wraps it as {response}); use it as-is
+					sim.apdu_send(entry.modem, slot, chan, rec.param, (err, res) =>
+						send(err ? -1 : 0, err ? '' : (res ?? ''))); break;
+				case 'logic_channel_close':
+					sim.apdu_close(entry.modem, slot, chan, () => send(0, '')); break;
+				default:
+					send(-1, '');
 				}
 			};
 

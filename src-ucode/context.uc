@@ -772,6 +772,30 @@ export function create(opts)
 
 	// --- public API --------------------------------------------------------
 
+	// stale-PDP reclaim (QMI internal cause 241, "interface in use, config
+	// match"): a call nobody owns holds our profile — some carrier firmwares
+	// (e.g. the Zyxel RG502Q) auto-activate their PDP profiles at boot, which
+	// blocks START_NETWORK forever. Deactivating the PDP context on our
+	// profile index over AT frees it; the caller then retries the family ONCE.
+	let is_stale_pdp = (err) =>
+		err?.stage == 'start_network' &&
+		err.verbose?.type == callend.VERBOSE_TYPE_INTERNAL &&
+		err.verbose?.reason == callend.INTERNAL_PDP_IN_USE &&
+		self.modem.at != null;
+
+	let reclaim_stale_pdp = (profile, on_done) => {
+		log('warn', sprintf(
+			'profile %d is in use on the modem, deactivating stale PDP context',
+			profile.index));
+
+		self.modem.at.send(sprintf('AT+CGACT=0,%d', profile.index), (aerr) => {
+			if (aerr)
+				log('warn', sprintf('AT+CGACT=0,%d failed: %J', profile.index, aerr));
+
+			on_done();
+		}, { timeout: 15000 });
+	};
+
 	self.up = function(cb) {
 		if (self.state != 'IDLE')
 			return cb({ error: 'busy', state: self.state });
@@ -811,32 +835,16 @@ export function create(opts)
 					if (err) {
 						release_family(family);
 
-						// internal 241 "interface in use, config match": a call
-						// nobody owns holds our profile — some carrier firmwares
-						// (e.g. the Zyxel RG502Q) auto-activate their PDP
-						// profiles at boot, which blocks START_NETWORK forever.
-						// Deactivate the PDP context on our profile index over
-						// AT and retry this family once.
-						if (err.stage == 'start_network' &&
-						    err.verbose?.type == callend.VERBOSE_TYPE_INTERNAL &&
-			    err.verbose?.reason == callend.INTERNAL_PDP_IN_USE &&
-						    self.modem.at && !reclaimed[family]) {
+						// stale-PDP reclaim (see is_stale_pdp above), once per family
+						if (is_stale_pdp(err) && !reclaimed[family]) {
 							reclaimed[family] = true;
-							log('warn', sprintf(
-								'profile %d is in use on the modem, deactivating stale PDP context',
-								profile.index));
-
-							self.modem.at.send(sprintf('AT+CGACT=0,%d', profile.index), (aerr) => {
-								if (aerr)
-									log('warn', sprintf('AT+CGACT=0,%d failed: %J', profile.index, aerr));
-
+							return reclaim_stale_pdp(profile, () => {
 								if (gen != up_gen || self.state != 'ACTIVATING')
 									return;   // attempt aborted while deactivating
 
 								idx--;
 								next();
-							}, { timeout: 15000 });
-							return;
+							});
 						}
 
 						// preserved: v4 fatal, v6 degrades

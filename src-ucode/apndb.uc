@@ -14,26 +14,29 @@
 // conservative: only add prefixes whose mapping is certain, and prefer the
 // carrier's dual-stack default APN.
 //
-// Entry: '<prefix>': { apn, pdp_type, auth, username?, password?, note }
+// Entry: '<prefix>': { match?, apn, pdp_type, auth, username?, password?, note }
+//   match: 'iccid' | 'imsi' — which identity the prefix may bind to. As the
+//   table grows, an IMSI digit run could collide with an ICCID issuer prefix;
+//   tagging prevents that. Absent = both (legacy).
 
 'use strict';
 
 const APNDB = {
 	// Deutsche Telekom (DE, 262/01): dual-stack default APN
-	'894902': { apn: 'internet.v6.telekom', pdp_type: 'ipv4v6', auth: 'none',
+	'894902': { match: 'iccid', apn: 'internet.v6.telekom', pdp_type: 'ipv4v6', auth: 'none',
 	            note: 'Deutsche Telekom DE' },
 
 	// Vodafone (DE, 262/02)
-	'894920': { apn: 'web.vodafone.de', pdp_type: 'ipv4v6', auth: 'none',
+	'894920': { match: 'iccid', apn: 'web.vodafone.de', pdp_type: 'ipv4v6', auth: 'none',
 	            note: 'Vodafone DE' },
 
 	// 1NCE IoT (global, rides Telekom)
-	'8988280': { apn: 'iot.1nce.net', pdp_type: 'ipv4', auth: 'none',
+	'8988280': { match: 'iccid', apn: 'iot.1nce.net', pdp_type: 'ipv4', auth: 'none',
 	             note: '1NCE IoT' },
 
 	// Vodafone GDSP / global M2M (IMSI 901 28 00...) — HW-verified on the
 	// Cudy LT300 deployment SIM
-	'9012800': { apn: 'apn.global-m2m.net', pdp_type: 'ipv4v6', auth: 'both',
+	'9012800': { match: 'imsi', apn: 'apn.global-m2m.net', pdp_type: 'ipv4v6', auth: 'both',
 	             username: 'gdsp', password: 'gdsp',
 	             note: 'Vodafone GDSP global M2M' },
 };
@@ -48,7 +51,17 @@ export function lookup(iccid, imsi)
 		if (length(prefix) <= best_len)
 			continue;
 
-		for (let ident in [ iccid, imsi ]) {
+		// entries may pin the identity class they match (see header).
+		// NOTE deliberately written as a kind-loop: a nested-ternary building
+		// per-iteration array literals here crashed the host ucode build with
+		// heap corruption (malloc_consolidate abort in test_daemon) — do not
+		// "simplify" this back.
+		for (let kind in [ 'iccid', 'imsi' ]) {
+			if (entry.match != null && entry.match != kind)
+				continue;
+
+			let ident = (kind == 'iccid') ? iccid : imsi;
+
 			if (length(ident ?? '') && substr(ident, 0, length(prefix)) == prefix) {
 				best = entry;
 				best_len = length(prefix);
