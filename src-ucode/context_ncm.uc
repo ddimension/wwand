@@ -69,14 +69,31 @@ export function create(opts)
 		self.state = state;
 	};
 
+	// effective connection config for a dial: the carrier bundle (apn/auth/
+	// username/password) resolved through the per-SIM override (wwand_sim
+	// wins over the interface — context_common.conn_cfg), everything else
+	// straight from the interface
+	let eff_config = () => {
+		let e = { ...self.config };
+
+		for (let f in ['apn', 'auth', 'username', 'password']) {
+			let v = context_common.conn_cfg(self, f);
+
+			if (v != null)
+				e[f] = v;
+		}
+
+		return e;
+	};
+
 	// resolve the PDP context id (mirrors context.uc resolve_profile)
-	let resolve_cid = () => {
-		let apn = self.config.apn;
+	let resolve_cid = (ccfg) => {
+		let apn = ccfg.apn;
 
 		if (apn != null && substr(apn, 0, 1) == '#')
 			return { index: +substr(apn, 1), pass_through: true };
 
-		let index = +(self.config.profile ?? 0);
+		let index = +(ccfg.profile ?? 0);
 
 		if (!index)
 			index = +(self.config.mux_id ?? 0) || 1;
@@ -246,7 +263,8 @@ export function create(opts)
 		up_cb = cb;
 		activated = false;
 
-		let prof = resolve_cid();
+		let ccfg = eff_config();
+		let prof = resolve_cid(ccfg);
 		self.cid = prof.index;
 
 		let vendor = self.modem.vendor;
@@ -256,11 +274,11 @@ export function create(opts)
 
 		// 1. program the PDP context + auth (CGDCONT + vendor auth carrying
 		//    username/password). Skipped for a '#N' pass-through apn.
-		let setup = prof.pass_through ? [] : ncm.build_pdp_setup(vendor, self.cid, self.config);
+		let setup = prof.pass_through ? [] : ncm.build_pdp_setup(vendor, self.cid, ccfg);
 
 		log('notice', sprintf('connecting cid %d: apn %J, pdp-type %s%s',
-			self.cid, self.config.apn ?? '', self.config.pdp_type ?? 'ipv4v6',
-			(self.config.apn == null || self.config.apn == '') ? ' (network default)' : ''));
+			self.cid, ccfg.apn ?? '', ccfg.pdp_type ?? 'ipv4v6',
+			(ccfg.apn == null || ccfg.apn == '') ? ' (network default)' : ''));
 
 		// dial-time idempotency guard: when the modem's PDP context already
 		// matches the config (and no auth values are configured — those cannot
@@ -313,7 +331,7 @@ export function create(opts)
 			};
 
 			// 2. dial: bind the cdc_ncm netdev to the bearer
-			self.modem.at.send(dial.connect(self.cid, self.config), (err) => {
+			self.modem.at.send(dial.connect(self.cid, ccfg), (err) => {
 				if (self.state != 'ACTIVATING')
 					return;
 
@@ -343,14 +361,14 @@ export function create(opts)
 			}, { timeout: 60000 });
 		});
 
-		if (!length(setup) || self.config.username || self.config.password)
+		if (!length(setup) || ccfg.username || ccfg.password)
 			return run_setup(setup);
 
 		self.modem.at.send('AT+CGDCONT?', (gerr, gres) => {
 			if (self.state != 'ACTIVATING')
 				return;
 
-			if (!gerr && ncm.pdp_setup_matches(self.cid, self.config, gres?.lines)) {
+			if (!gerr && ncm.pdp_setup_matches(self.cid, ccfg, gres?.lines)) {
 				log('info', sprintf('cid %d already configured (pdp-type + apn match) — skipping context write',
 					self.cid));
 				return run_setup([]);

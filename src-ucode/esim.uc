@@ -282,8 +282,11 @@ function iccid_request(tag, iccid, refresh)
 }
 
 // --- vendor AT backend (Quectel AT+QESIM) ------------------------------------
-// Used when the modem exposes no QMI logical channel (e.g. RG650E: OPEN/
-// LOGICAL_CHANNEL return NOT_SUPPORTED) but has the AT+QESIM LPA. Operates
+// Used when the modem exposes no usable QMI logical channel but has the
+// AT+QESIM LPA. (Firmware-dependent: some RG650E builds return NOT_SUPPORTED
+// on OPEN/LOGICAL_CHANNEL, others open the ISD-R fine but then refuse ES10c
+// writes — which is why the bridge routes management writes through lpac and
+// only falls back here.) Operates
 // on the eUICC in the modem's active slot; profile ops address a 1-based
 // index which we map from the ICCID via the profile list.
 

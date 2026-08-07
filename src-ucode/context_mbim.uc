@@ -179,18 +179,20 @@ export function create(opts)
 		set_state('ACTIVATING');
 
 		// empty APN = network default: MBIM CONNECT with a blank access string
-		// lets the network assign the default PDN (no blank APN written anywhere)
-		let profile = self.config.apn ?? '';
+		// lets the network assign the default PDN (no blank APN written anywhere).
+		// The carrier bundle resolves through the per-SIM override (wwand_sim
+		// wins over the interface — context_common.conn_cfg).
+		let profile = context_common.conn_cfg(self, 'apn') ?? '';
 		let ip_type = IP_TYPE_MAP[self.config.pdp_type ?? 'ipv4v6'];
 
 		let args = {
 			session_id: self.session_id,
 			activation_command: bc.ACTIVATION_CMD_ACTIVATE,
 			access_string: profile,
-			user_name: self.config.username ?? '',
-			password: self.config.password ?? '',
+			user_name: context_common.conn_cfg(self, 'username') ?? '',
+			password: context_common.conn_cfg(self, 'password') ?? '',
 			compression: 0,
-			auth_protocol: AUTH_MAP[self.config.auth] ?? bc.AUTH_NONE,
+			auth_protocol: AUTH_MAP[context_common.conn_cfg(self, 'auth')] ?? bc.AUTH_NONE,
 			ip_type: ip_type,
 			context_type: bc.CONTEXT_TYPE_INTERNET,
 		};

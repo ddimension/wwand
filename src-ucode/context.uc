@@ -145,19 +145,13 @@ export function create(opts)
 		return fams;
 	};
 
-	// a connection field for THIS context: the interface's own value wins; an
-	// empty one falls back to the active card's per-SIM override (config
-	// wwand_sim, matched by ICCID on the modem). Lets a SIM carry its carrier's
-	// apn/auth/username/password while the interface stays SIM-agnostic. The
-	// attach profile then still falls back to the modem-provisioned APN below.
-	let cfg = (field) => {
-		let v = self.config[field];
-
-		if (v != null && v != '')
-			return v;
-
-		return self.modem?.active_sim?.[field];
-	};
+	// a connection field for THIS context: the active card's per-SIM override
+	// (config wwand_sim, matched by ICCID) wins over the interface's own value
+	// (shared resolver, see context_common.conn_cfg). Lets a SIM carry its
+	// carrier's apn/auth/username/password while the interface stays
+	// SIM-agnostic. The attach profile then still falls back to the
+	// modem-provisioned APN below.
+	let cfg = (field) => context_common.conn_cfg(self, field);
 
 	let resolve_profile = () => {
 		let apn = cfg('apn');

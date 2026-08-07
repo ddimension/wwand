@@ -201,4 +201,12 @@ run_next();
 uloop.run();
 guard.cancel();
 
+// QmiNasActiveBand decode (table generated from libqmi 1.38 qmi-enums-nas.h;
+// the enum is non-contiguous — EUTRAN_20 is 145, not 139)
+eq(nasmod.active_band_name(127), 'LTE B8', 'active band: 127 = LTE B8');
+eq(nasmod.active_band_name(145), 'LTE B20', 'active band: 145 = LTE B20 (non-contiguous)');
+eq(nasmod.active_band_name(269), 'NR n78', 'active band: 269 = NR n78');
+eq(nasmod.active_band_name(45), 'GSM 900', 'active band: 45 = GSM 900');
+eq(nasmod.active_band_name(9999), 'band 9999', 'active band: unknown value passthrough');
+
 done('test_qmi_backend');

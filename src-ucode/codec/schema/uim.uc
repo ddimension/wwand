@@ -179,6 +179,21 @@ export default {
 			},
 		},
 
+		// SIM hot-reset (card power off/on, slot 1-based). The modem discards
+		// its cached SIM state and re-reads the card — the "apply" after an
+		// eSIM profile switch. Verified vs libqmi 1.38 (0x0030/0x0031).
+		POWER_OFF_SIM: {
+			id: 0x0030,
+			req:  { slot: { t: 0x01, f: 'u8' } },
+			resp: {},
+		},
+
+		POWER_ON_SIM: {
+			id: 0x0031,
+			req:  { slot: { t: 0x01, f: 'u8' } },
+			resp: {},
+		},
+
 		REGISTER_EVENTS: {
 			id: 0x002E,
 			req:  { mask: { t: 0x01, f: 'u32' } },

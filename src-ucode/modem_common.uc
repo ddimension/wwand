@@ -91,6 +91,33 @@ function imei_key(s)
 // a DIFFERENT device, this is the wrong physical modem for this config — bringing
 // it up would apply the wrong SIM/PIN/APN — so it emits 'identity_mismatch' and
 // returns false (the caller must halt its bring-up chain). Returns true to proceed.
+// match a configured wwand_sim list against a card identity: ICCID first
+// (authoritative — needed for PIN overrides; trailing-F padding tolerated),
+// then IMSI (option imsi, or an IMSI put into the iccid field — a frequent
+// config mistake). Shared by all three modem backends. Returns the matching
+// entry or null.
+export function match_sim_override(sims, iccid, imsi)
+{
+	sims = sims ?? [];
+
+	let norm = (x) => replace(lc(x ?? ''), /f+$/, '');
+
+	if (iccid) {
+		let want = norm(iccid);
+
+		for (let s in sims)
+			if (s.iccid && norm(s.iccid) == want)
+				return s;
+	}
+
+	if (imsi)
+		for (let s in sims)
+			if ((s.imsi ?? '') == imsi || (s.iccid ?? '') == imsi)
+				return s;
+
+	return null;
+};
+
 //   o.emit — the scaffolding emit helper
 //   o.log  — (level, msg) => …
 export function check_identity(self, o)

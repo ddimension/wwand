@@ -283,6 +283,15 @@ backend.uicc_close_channel(closec, 3, (err) => {
 	eq(closec.last.info, p32(3) + p32(1), 'uicc-close: [channel,group=1]');
 });
 
+// RESET (CID 6): [PassThroughAction=0 (disable)] — the SIM hot-reset "apply"
+// after an eSIM profile switch on pure-MBIM firmware
+let resetc = mkuicc(() => p32(1));
+backend.uicc_reset(resetc, (err) => {
+	ok(!err, 'uicc-reset: no error');
+	eq(resetc.last.cid, 6, 'uicc-reset: CID 6');
+	eq(resetc.last.info, p32(0), 'uicc-reset: [passthrough=disable]');
+});
+
 // --- native MBIM SMS Read parsing (layout confirmed on the EG06) ------------
 // Response: Format(u32) MessagesCount(u32), then N [offset,size] ref pairs, each
 // to a record { index, status, pduOffset, pduSize }; PDU bytes at pduOffset.

@@ -185,6 +185,7 @@ export function create(opts)
 			}),
 			apdu:  (channel, apdu_hex, cb) => mbim_backend.uicc_apdu(self.mbim, channel, apdu_hex, cb),
 			close: (channel, cb)           => mbim_backend.uicc_close_channel(self.mbim, channel, cb),
+			reset: (cb)                    => mbim_backend.uicc_reset(self.mbim, cb),
 		};
 
 		// native MBIM SMS (no storage selector) — the sms.uc fallback for a
@@ -223,6 +224,15 @@ export function create(opts)
 				log('notice', sprintf('mbim device %s, imei %s, imsi %s, iccid %s',
 					self.info.model ?? '?', self.info.imei ?? '?',
 					self.info.imsi ?? '?', self.info.iccid ?? '?'));
+
+				// per-SIM override (config wwand_sim) — parity with the QMI
+				// backend: matched here (before the PIN step, so a pincode
+				// override applies too), consumed by contexts via conn_cfg
+				self.active_sim = modem_common.match_sim_override(
+					self.config?.sims, self.info.iccid, self.info.imsi);
+				if (self.active_sim)
+					log('notice', sprintf('SIM %s matched a configured wwand_sim (per-SIM pin/apn)',
+						self.info.iccid ?? self.info.imsi));
 
 				// stable-identity gate (see modem_common.check_identity)
 				if (!modem_common.check_identity(self, { emit: emit, log: log }))
@@ -354,8 +364,16 @@ export function create(opts)
 					self.info.imsi = data.subscriber_id;
 				if (data.sim_iccid != null && data.sim_iccid != '')
 					self.info.iccid = data.sim_iccid;
-				if (changed)
+				if (changed) {
+					// the card changed in place (eSIM switch / swap): the old
+					// card's wwand_sim override must not stick — re-match
+					self.active_sim = modem_common.match_sim_override(
+						self.config?.sims, self.info.iccid, self.info.imsi);
+					log('notice', sprintf('sim identity changed: iccid %s imsi %s%s',
+						self.info.iccid ?? '?', self.info.imsi ?? '?',
+						self.active_sim ? ' (matched a configured wwand_sim)' : ''));
 					emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
+				}
 			}
 			else if (data.ready_state == bc.READY_STATE_SIM_NOT_INSERTED && prev != null) {
 				log('warn', 'sim removed');
@@ -509,6 +527,32 @@ export function create(opts)
 	// as self.uim, so sim.uc's QMI UIM APDU/eSIM path works on an MBIM modem whose
 	// firmware lacks native MS UICC Low Level Access but does expose the QMI
 	// passthrough (the fallback for the native MBIM UICC path). cb() either way.
+	// the card behind the modem changed in place (eSIM switch applied via the
+	// SIM hot-reset): re-query the subscriber state and re-resolve the per-SIM
+	// override — the old card's wwand_sim must not stick. Contexts pick the
+	// corrected override up on their next (re)dial via conn_cfg. (No QMI-style
+	// attach-profile step on MBIM — the attach APN rides in CONNECT.)
+	self.reapply_sim = function(cb) {
+		self.mbim.command(bc, 'SUBSCRIBER_READY_STATUS', 'query', {}, (err, d) => {
+			if (!err) {
+				if (d.subscriber_id != null && d.subscriber_id != '')
+					self.info.imsi = d.subscriber_id;
+				if (d.sim_iccid != null && d.sim_iccid != '')
+					self.info.iccid = d.sim_iccid;
+			}
+
+			self.active_sim = modem_common.match_sim_override(
+				self.config?.sims, self.info.iccid, self.info.imsi);
+			log('notice', sprintf('sim reapply: iccid %s imsi %s%s',
+				self.info.iccid ?? '?', self.info.imsi ?? '?',
+				self.active_sim ? ' (matched a configured wwand_sim)' : ''));
+			emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
+
+			if (cb)
+				cb(null);
+		});
+	};
+
 	self._ensure_uim = function(cb) {
 		if (self.uim)
 			return cb();

@@ -9,6 +9,25 @@
 //   timing.zero_rx_ms — explicit override (tests) when not null.
 //   else the modem's `zero_rx_timeout` in seconds (default 21600 = 6 h).
 // Returns 0 to mean "watchdog disabled".
+// effective connection field (apn/auth/username/password) for a context: a
+// per-SIM override (config wwand_sim, matched to the active card by ICCID)
+// WINS over the interface's own value — the SIM-specific entry is more
+// specific than the SIM-agnostic dial profile, same specificity rule as the
+// PIN (wwand_sim -> wwand_modem). The interface value is the generic default;
+// card-provisioned values remain the last fallback where supported. Empty
+// strings count as unset on both levels.
+export function conn_cfg(ctx, field)
+{
+	let s = ctx.modem?.active_sim?.[field];
+
+	if (s != null && s != '')
+		return s;
+
+	let v = ctx.config?.[field];
+
+	return (v != null && v != '') ? v : null;
+};
+
 export function zero_rx_limit_ms(modem_config, timing)
 {
 	if (timing?.zero_rx_ms != null)

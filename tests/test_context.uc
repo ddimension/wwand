@@ -7,6 +7,7 @@ import * as uloop from 'uloop';
 import * as mockhub from './lib/mockhub.uc';
 import * as modem_mod from 'wwand/modem.uc';
 import * as context_mod from 'wwand/context.uc';
+import * as context_common from 'wwand/context_common.uc';
 
 uloop.init();
 
@@ -675,5 +676,24 @@ run_next();
 // fix is an fd-backed mock hub; tracked in docs/STATUS.md.)
 for (let i = 0; i < 200000 && !_all_done; i++)
 	uloop.run(2);
+
+// --- per-SIM override precedence (context_common.conn_cfg) -------------------
+// the wwand_sim carrier bundle wins over the interface's value; empty strings
+// count as unset on both levels; the interface is the generic default.
+(function() {
+	let ctx = { config: { apn: 'iface-apn', username: '', auth: 'pap' },
+	            modem: { active_sim: { apn: 'sim-apn', username: 'simuser', password: '' } } };
+
+	eq(context_common.conn_cfg(ctx, 'apn'), 'sim-apn', 'conn_cfg: sim apn wins over interface');
+	eq(context_common.conn_cfg(ctx, 'username'), 'simuser', 'conn_cfg: sim fills empty interface field');
+	eq(context_common.conn_cfg(ctx, 'auth'), 'pap', 'conn_cfg: interface fallback when sim unset');
+	eq(context_common.conn_cfg(ctx, 'password'), null, 'conn_cfg: empty on both levels -> null');
+
+	ctx.modem.active_sim = null;
+	eq(context_common.conn_cfg(ctx, 'apn'), 'iface-apn', 'conn_cfg: no active sim -> interface');
+
+	ctx.config = null;
+	eq(context_common.conn_cfg(ctx, 'apn'), null, 'conn_cfg: nothing configured -> null');
+})();
 
 done('test_context');

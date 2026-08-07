@@ -163,6 +163,7 @@ function sim_from_section(s)
 	return {
 		modem: s.modem,
 		iccid: s.iccid,
+		imsi: s.imsi,
 		pincode: s.pincode,
 		apn: s.apn,
 		auth: s.auth,
@@ -228,8 +229,8 @@ function parse_network_sections(raw, result)
 			break;
 
 		case 'wwand_sim':
-			if (s.iccid == null || s.iccid == '') {
-				push(result.warnings, sprintf("wwand_sim %s: no iccid, ignoring", name));
+			if ((s.iccid == null || s.iccid == '') && (s.imsi == null || s.imsi == '')) {
+				push(result.warnings, sprintf("wwand_sim %s: no iccid/imsi, ignoring", name));
 				break;
 			}
 

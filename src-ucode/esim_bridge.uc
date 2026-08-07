@@ -8,8 +8,13 @@
 // It spawns lpac (LPAC_APDU=stdio), drains its JSON APDU requests non-blocking
 // via uloop and answers each straight from sim.apdu_* (no ubus, no jsonfilter);
 // lpac does the SM-DP+ HTTPS itself. Progress + lpac stderr go to the log file,
-// which download_status streams. Management ops (backend/profiles/enable/…)
-// and the modem-internal AT download are delegated to the injected esim module.
+// which download_status streams. Profile management writes (enable/disable/
+// delete) also run through lpac over the same APDU bridge — the proven-good
+// write path (some eUICC/modem combos, e.g. the RG650E, refuse ES10c writes
+// over the QMI channel with undefinedError 127 and speak a different AT+QESIM
+// dialect); the injected esim module's own ES10c/AT paths remain the fallback
+// when no lpac is installed. Reads (backend/profiles/eid) and the
+// modem-internal AT download stay delegated to the esim module.
 
 'use strict';
 
@@ -29,6 +34,7 @@ return {
 	create: function(deps) {
 		let esim = deps.esim, log = deps.log, modem_of = deps.modem_of;
 		let dl = { state: 'idle' };   // one host download at a time
+		let mgmt_busy = false;        // one lpac profile-management op at a time
 
 		// spawn lpac for a host-side op (download / chip / notif-list /
 		// notif-process) and bridge its stdio APDU protocol; on_done(err, log)
@@ -44,6 +50,11 @@ return {
 			                                    length(conf ?? '') ? sprintf(" -c '%s'", conf) : ''); break;
 			case 'notif-list':    cmd = 'notification list'; break;
 			case 'notif-process': cmd = 'notification process -a'; break;
+			// management writes: the ICCID rides in the code arg (validated
+			// digits-only by the caller, so the quoting is shell-safe)
+			case 'enable':        cmd = sprintf("profile enable '%s'",  code); break;
+			case 'disable':       cmd = sprintf("profile disable '%s'", code); break;
+			case 'delete':        cmd = sprintf("profile delete '%s'",  code); break;
 			default:              cmd = 'chip info';
 			}
 
@@ -179,6 +190,67 @@ return {
 			cb(null, { started: true, via: 'lpac' });
 		};
 
+		// apply after a profile switch: hot-reset the SIM so the modem drops
+		// its cached (old-profile) SIM state and re-reads the card — without
+		// this the RG650E keeps running the stale identity into limited
+		// service. Then re-unlock (PIN may re-arm with the card) and re-read
+		// identity so status/LuCI show the new profile. cb fires immediately;
+		// the re-read finishes in the background and the data session comes
+		// back via the normal transient-loss path.
+		let apply_sim_reset = (ref, entry, slot, res, cb) => {
+			sim.power_cycle(entry.modem, slot, (perr) => {
+				if (perr) {
+					log('warn', sprintf('modem %s: eSIM apply: sim power-cycle failed (%J) — modem reset needed',
+						ref, perr));
+					return cb(null, { ...res, apply: 'modem_reset' });
+				}
+
+				// after the card is back: unlock (PIN may re-arm), then the full
+				// per-SIM reapply — identity, wwand_sim override re-match and
+				// attach profile (modem.reapply_sim; QMI/MBIM). Fallback for
+				// modems without it: at least refresh the cached identity.
+				uloop.timer(2000, () => sim.unlock(entry.modem, () => {
+					if (entry.modem.reapply_sim)
+						return entry.modem.reapply_sim();
+
+					sim.read_identity(entry.modem, (id) => {
+						entry.modem.info.imsi   = id.imsi   ?? entry.modem.info.imsi;
+						entry.modem.info.iccid  = id.iccid  ?? entry.modem.info.iccid;
+						entry.modem.info.msisdn = id.msisdn ?? entry.modem.info.msisdn;
+						log('notice', sprintf('modem %s: eSIM apply: sim re-read: iccid %s imsi %s',
+							ref, id.iccid ?? '?', id.imsi ?? '?'));
+					});
+				}));
+
+				cb(null, { ...res, applied: 'sim_reset' });
+			});
+		};
+
+		// profile management (enable/disable/delete) via lpac — always
+		// preferred over the esim module's own ES10c/AT writes (see header);
+		// falls back to those only when no lpac binary is installed.
+		let profile_op_lpac = (ref, slot, op, iccid, cb, fallback) => {
+			if (dl?.state == 'running' || mgmt_busy)
+				return cb({ error: 'busy' });
+
+			mgmt_busy = true;
+			let p = lpac_run(ref, slot, op, iccid, '', (err, out) => {
+				mgmt_busy = false;
+				// lpac exits 0 even when the eUICC refuses; the real verdict
+				// is its own result line (same convention as download)
+				let ok = !err && match(out ?? '', /result:[^\n]*code=0/);
+				log('notice', sprintf('modem %s: eSIM profile %s %s%s (lpac)',
+					ref, iccid, op, ok ? 'd' : ' FAILED'));
+				if (ok)
+					return cb(null, { ok: true, via: 'lpac' });
+				cb({ error: 'esim',
+				     detail: { error: 'lpac', code: err?.code ?? -1, log: out } });
+			});
+
+			if (p === false) { mgmt_busy = false; return fallback(); }
+			if (!p) { mgmt_busy = false; return cb({ error: 'esim', detail: { error: 'spawn' } }); }
+		};
+
 		return {
 			modem_esim: function(ref, op, params, cb) {
 				let entry = modem_of(ref);
@@ -195,7 +267,7 @@ return {
 					return esim.backend(entry.modem, slot, (be) => cb(null, { backend: be }));
 
 				case 'download': {
-					if (dl?.state == 'running')
+					if (dl?.state == 'running' || mgmt_busy)
 						return cb({ error: 'busy' });
 
 					let code = params?.activation_code ?? '';
@@ -252,7 +324,7 @@ return {
 					return;
 
 				case 'notify':
-					if (dl?.state == 'running')
+					if (dl?.state == 'running' || mgmt_busy)
 						return cb({ error: 'busy' });
 
 					dl = { state: 'running', via: 'notify', logf: ESIM_LOGF };
@@ -268,18 +340,29 @@ return {
 				case 'profiles': return esim.profiles(entry.modem, slot, done);
 				case 'eid':      return esim.get_eid(entry.modem, slot, done);
 				case 'enable':
-					if (!length(iccid)) return cb({ error: 'missing_argument' });
-					return esim.enable(entry.modem, slot, iccid, (err, res) => {
-						if (!err)
-							log('notice', sprintf('modem %s: eSIM profile %s enabled', ref, iccid));
-						done(err, res);
-					});
 				case 'disable':
+				case 'delete': {
 					if (!length(iccid)) return cb({ error: 'missing_argument' });
-					return esim.disable(entry.modem, slot, iccid, done);
-				case 'delete':
-					if (!length(iccid)) return cb({ error: 'missing_argument' });
-					return esim.del(entry.modem, slot, iccid, done);
+					if (!match(iccid, /^[0-9]+$/)) return cb({ error: 'invalid_argument' });
+					return profile_op_lpac(ref, slot, op, iccid, (err, res) => {
+						// enable/disable change the active profile — the modem
+						// must re-read the card; delete only removes a disabled
+						// profile, nothing to apply
+						if (err || op == 'delete')
+							return cb(err, res);
+						apply_sim_reset(ref, entry, slot, res, cb);
+					}, () => {
+						if (op == 'enable')
+							return esim.enable(entry.modem, slot, iccid, (err, res) => {
+								if (!err)
+									log('notice', sprintf('modem %s: eSIM profile %s enabled', ref, iccid));
+								done(err, res);
+							});
+						if (op == 'disable')
+							return esim.disable(entry.modem, slot, iccid, done);
+						return esim.del(entry.modem, slot, iccid, done);
+					});
+				}
 				default:
 					return cb({ error: 'invalid_op', op: op });
 				}

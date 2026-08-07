@@ -778,6 +778,10 @@ export function create(opts)
 		});
 	};
 
+	// shared wwand_sim matcher (modem_common — parity across all backends)
+	let match_sim_override = (iccid, imsi) =>
+		modem_common.match_sim_override(self.config?.sims, iccid, imsi);
+
 	// pick the per-SIM override (config wwand_sim) matching the active card BEFORE
 	// unlock, so its pincode is used. The MF-level ICCID is readable on a locked
 	// card, and the extra read only runs when overrides are actually configured.
@@ -791,14 +795,7 @@ export function create(opts)
 
 		sim.read_iccid(self, (iccid) => {
 			if (iccid) {
-				let norm = (x) => replace(lc(x ?? ''), /f+$/, '');
-				let want = norm(iccid);
-
-				for (let s in sims)
-					if (norm(s.iccid) == want) {
-						self.active_sim = s;
-						break;
-					}
+				self.active_sim = match_sim_override(iccid, null);
 
 				if (self.active_sim)
 					log('notice', sprintf('SIM %s matched a configured wwand_sim (per-SIM pin/apn)', iccid));
@@ -861,6 +858,23 @@ export function create(opts)
 
 			log('notice', sprintf('imsi %s, iccid %s, msisdn %s',
 				id.imsi ?? '?', id.iccid ?? '?', id.msisdn ?? '?'));
+
+			// late per-SIM match: the pre-unlock matcher only sees the ICCID
+			// (readable on a locked card). Now that the IMSI is readable,
+			// accept an explicit `option imsi` — or an IMSI mistakenly put in
+			// the iccid field — so the carrier bundle (apn/auth/credentials)
+			// still applies. Runs BEFORE step_attach_profile, so the LTE
+			// attach APN honors the override too. PIN overrides still need
+			// `option iccid` (the PIN was consumed before this point).
+			if (!self.active_sim && id.imsi) {
+				self.active_sim = match_sim_override(null, id.imsi);
+
+				if (self.active_sim)
+					log('notice', sprintf(
+						'SIM imsi %s matched a configured wwand_sim (per-SIM apn/credentials; PIN overrides need option iccid)',
+						id.imsi));
+			}
+
 			step_confnet();
 		});
 	};
@@ -1224,6 +1238,50 @@ export function create(opts)
 		});
 	};
 
+	// the card behind the modem changed in place (eSIM profile switch applied
+	// via SIM hot-reset, or a UIM REFRESH): re-read identity, RE-RESOLVE the
+	// per-SIM override (the old card's wwand_sim must not stick) and re-program
+	// the LTE attach profile — the same work the INIT chain does, without
+	// tearing the modem down. Contexts pick the corrected override up on their
+	// next (re)dial via conn_cfg. cb(changed) optional.
+	self.reapply_sim = function(cb) {
+		sim.read_identity(self, (id) => {
+			let changed = (id.iccid != self.info.iccid || id.imsi != self.info.imsi);
+
+			self.info.imsi = id.imsi ?? self.info.imsi;
+			self.info.iccid = id.iccid ?? self.info.iccid;
+			self.info.msisdn = id.msisdn ?? self.info.msisdn;
+
+			self.active_sim = match_sim_override(id.iccid, id.imsi);
+
+			log('notice', sprintf('sim reapply: iccid %s imsi %s%s',
+				id.iccid ?? '?', id.imsi ?? '?',
+				self.active_sim ? ' (matched a configured wwand_sim)' : ''));
+
+			emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
+
+			let ctx = self.contexts[0];
+
+			if (!ctx?.ensure_attach_profile || !self.dms)
+				return cb ? cb(changed) : null;
+
+			ctx.ensure_attach_profile(1, (ch) => {
+				if (!ch)
+					return cb ? cb(changed) : null;
+
+				log('notice', 'attach profile changed after sim reapply, cycling radio to re-attach');
+				qmi_backend.set_opmode(self.dms, 'low_power', () => {
+					settle_timer = uloop.timer(self.timing.settle, () => {
+						qmi_backend.set_opmode(self.dms, 'online', () => {
+							if (cb)
+								cb(changed);
+						});
+					});
+				});
+			});
+		});
+	};
+
 	// UIM refresh: register for SIM/eUICC refresh notifications so a network- or
 	// LPA-initiated refresh (eSIM profile switch, SIM OTA file update) makes wwand
 	// re-read identity (ICCID/IMSI can change) rather than running stale. On some
@@ -1237,19 +1295,9 @@ export function create(opts)
 		self.uim.on('REFRESH_IND', (data) => {
 			let stage = data?.event?.stage;
 			log('info', sprintf('sim refresh (stage %d)', stage ?? -1));
-			// re-read identity once the refresh has completed successfully
-			if (stage == uimmod.REFRESH_STAGE_END_SUCCESS) {
-				sim.read_identity(self, (id) => {
-					let changed = (id.iccid != self.info.iccid || id.imsi != self.info.imsi);
-					self.info.imsi = id.imsi ?? self.info.imsi;
-					self.info.iccid = id.iccid ?? self.info.iccid;
-					self.info.msisdn = id.msisdn ?? self.info.msisdn;
-					if (changed)
-						log('notice', sprintf('sim identity changed after refresh: iccid %s imsi %s',
-							self.info.iccid, self.info.imsi));
-					emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
-				});
-			}
+			// the full reapply once the refresh has completed successfully
+			if (stage == uimmod.REFRESH_STAGE_END_SUCCESS)
+				self.reapply_sim();
 		});
 
 		self.uim.request('REFRESH_REGISTER_ALL', {
@@ -1317,9 +1365,12 @@ export function create(opts)
 			let key = join(',', bands);
 			if (key != self._rf_band_key) {
 				self._rf_band_key = key;
-				log('info', sprintf('rf band change: %s', key != '' ? key : 'none'));
+				// decode the QmiNasActiveBand values ("LTE B20" instead of 145)
+				let names = join(', ', map(bands, nasmod.active_band_name));
+				log('info', sprintf('rf band change: %s', length(names) ? names : 'none'));
 			}
-			self.rf_bands = data.rf_band_info;
+			self.rf_bands = map(data.rf_band_info, (b) =>
+				({ ...b, name: nasmod.active_band_name(b.band) }));
 		});
 	};
 

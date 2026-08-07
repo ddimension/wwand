@@ -1534,6 +1534,14 @@ export function create(opts)
 									self.info.imei ?? '?', self.info.imsi ?? '?',
 									self.info.iccid ?? '?'));
 
+								// per-SIM override (config wwand_sim) — parity
+								// with the QMI backend; consumed via conn_cfg
+								self.active_sim = modem_common.match_sim_override(
+									self.config?.sims, self.info.iccid, self.info.imsi);
+								if (self.active_sim)
+									log('notice', sprintf('SIM %s matched a configured wwand_sim (per-SIM pin/apn)',
+										self.info.iccid ?? self.info.imsi));
+
 								// stable-identity gate (see modem_common.check_identity)
 								if (!modem_common.check_identity(self, { emit: emit, log: log }))
 									return;
@@ -1922,6 +1930,67 @@ export function create(opts)
 
 	self.protocol_switch_supported = function() {
 		return protoswitch.supported(self.info?.model);
+	};
+
+	// the card behind the modem changed in place (eSIM switch applied via the
+	// CFUN=0/1 cycle): re-read IMSI/ICCID over AT and re-resolve the per-SIM
+	// override — the old card's wwand_sim must not stick. The next (re)dial
+	// picks the override up via conn_cfg; CGDCONT is (re)written at dial time
+	// anyway, so there is no attach-profile step here. cb optional.
+	self.reapply_sim = function(cb) {
+		if (!self.at)
+			return cb ? cb(null) : null;
+
+		let q = (cmd, done) => self.at.send(cmd, (err, res) => {
+			if (err)
+				return done(null);
+
+			for (let l in (res?.lines ?? [])) {
+				l = trim(l);
+				if (length(l) && l != 'OK')
+					return done(l);
+			}
+
+			done(null);
+		}, { timeout: 8000 });
+
+		q('AT+CIMI', (imsi) => {
+			let mi = imsi ? match(imsi, /([0-9]{6,15})/) : null;
+
+			if (mi)
+				self.info.imsi = mi[1];
+
+			let finish = (iccid) => {
+				if (iccid)
+					self.info.iccid = iccid;
+
+				self.active_sim = modem_common.match_sim_override(
+					self.config?.sims, self.info.iccid, self.info.imsi);
+				log('notice', sprintf('sim reapply: iccid %s imsi %s%s',
+					self.info.iccid ?? '?', self.info.imsi ?? '?',
+					self.active_sim ? ' (matched a configured wwand_sim)' : ''));
+				emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
+
+				if (cb)
+					cb(null);
+			};
+
+			// same vendor-varying ICCID chain as the init step
+			let cmds = [ 'AT+QCCID', 'AT+CCID', 'AT+ICCID' ];
+			let tryi;
+
+			tryi = (i) => {
+				if (i >= length(cmds))
+					return finish(null);
+
+				q(cmds[i], (r) => {
+					let m = r ? match(r, /([0-9]{18,20})/) : null;
+					m ? finish(m[1]) : tryi(i + 1);
+				});
+			};
+
+			tryi(0);
+		});
 	};
 
 	// admin-triggered soft modem reset (ubus modem_reset — the apply step for

@@ -45,6 +45,10 @@ file for new setups:
   runtime to the inserted card by `option modem` + `option iccid`: overrides the
   modem's `pincode` and, optionally, `apn`/`auth`/`username`/`password` for that
   card (e.g. different eUICC profiles / dual-SIM with different PINs).
+  Alternatively `option imsi` matches by the card's IMSI (an IMSI accidentally
+  put into `option iccid` is accepted too) — but the IMSI is only readable
+  *after* PIN unlock, so a `pincode` override needs the real ICCID; the
+  apn/auth/credential overrides (incl. the LTE attach APN) work with either.
 - **`config interface '<name>'`** with `option proto 'wwand'` — the connection:
   `option modem <name>` + `apn`, `pdp_type`, `auth`, `username`, `password`,
   `profile`, `mux_id` (0 = no mux, N = channel N), `mtu`, `use_pushed_mtu`,
@@ -80,7 +84,11 @@ config interface 'wan'
 ```
 
 **Precedence:** PIN = matching `wwand_sim.pincode` → `wwand_modem.pincode`;
-APN/auth = `interface` → active `wwand_sim` → card-provisioned.
+APN/auth/username/password = active `wwand_sim` → `interface` →
+card-provisioned. The SIM-specific entry is more specific than the
+SIM-agnostic dial profile, so it wins (same rule as the PIN) — swap SIMs and
+the matching `wwand_sim` carries its carrier's credentials without touching
+the interface; the interface value is the generic default.
 
 How the sections relate (all in `/etc/config/network`):
 

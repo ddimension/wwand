@@ -34,6 +34,8 @@ const UICC_SERVICE = 'c2f6588e-f037-4bc9-8665-f4d44bd09367';
 const UICC_CID_OPEN_CHANNEL = 2;
 const UICC_CID_CLOSE_CHANNEL = 3;
 const UICC_CID_APDU = 4;
+const UICC_CID_RESET = 6;
+const UICC_PASS_THROUGH_DISABLE = 0;   // modem resumes normal UICC use after reset
 // lpac's proven parameters
 const UICC_CHANNEL_GROUP = 1;
 const UICC_SECURE_MESSAGING_NONE = 0;
@@ -128,6 +130,18 @@ export function uicc_close_channel(mc, channel, cb)
 	let info = struct.pack('<II', channel, UICC_CHANNEL_GROUP);
 
 	mc.command_raw(UICC_SERVICE, UICC_CID_CLOSE_CHANNEL, info, (err) => cb(err ?? null));
+};
+
+// UICC reset — power-cycle the card at MBIM level (the "apply" after an eSIM
+// profile switch on a pure-MBIM modem). PassThroughAction=disable: reset the
+// card and let the modem resume normal UICC operation. Verified vs libmbim
+// 1.32 (Reset since 1.26; set = PassThroughAction u32, response =
+// PassThroughStatus u32). cb(err)
+export function uicc_reset(mc, cb)
+{
+	let info = struct.pack('<I', UICC_PASS_THROUGH_DISABLE);
+
+	mc.command_raw(UICC_SERVICE, UICC_CID_RESET, info, (err) => cb(err ?? null));
 };
 
 // --- native MBIM SMS service (uuid_sms, verified vs libmbim 1.32) ------------

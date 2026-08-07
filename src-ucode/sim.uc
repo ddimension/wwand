@@ -504,6 +504,60 @@ export function switch_slot(modem, physical, cb)
 	});
 };
 
+// hot-reset the SIM: power the card off and on again (slot 1-based). The modem
+// drops its cached SIM state and re-reads the card — the working "apply" after
+// an eSIM profile switch (the RG650E ignores the eUICC REFRESH, keeps serving
+// the old profile's identity and ends up in limited service). Far lighter than
+// a full modem reset: no USB re-enumeration, the data session recovers via the
+// normal transient-loss path. Backend parity mirrors the _apdu_be order:
+//   QMI UIM POWER_OFF/ON_SIM (native, or over the QMI-over-MBIM passthrough)
+//   -> native MBIM MS UICC Reset (pure-MBIM firmware)
+//   -> AT CFUN=0/1 cycle (NCM/AT modems: powers the (U)SIM down with the
+//      stack, the card is re-read on the way back up)
+// cb(err).
+export function power_cycle(modem, slot, cb)
+{
+	slot = (+slot >= 1) ? +slot : 1;
+
+	let via_uim = () => {
+		modem.uim.request('POWER_OFF_SIM', { slot: slot }, (offerr) => {
+			// power on regardless: if off failed because the card was already
+			// down, on still brings it back
+			modem.uim.request('POWER_ON_SIM', { slot: slot }, (onerr) =>
+				cb(onerr ?? offerr ?? null));
+		});
+	};
+
+	let via_at = () => {
+		if (!modem.at)
+			return cb({ error: 'no_sim_reset_path' });
+
+		modem.at.send('AT+CFUN=0', (e1) => {
+			if (e1)
+				return cb(e1);
+
+			modem.at.send('AT+CFUN=1', (e2) => cb(e2 ?? null), { timeout: 15000 });
+		}, { timeout: 15000 });
+	};
+
+	let via_mbim_or_at = () => {
+		if (modem.mbim_uicc?.reset)
+			return modem.mbim_uicc.reset((err) => err ? via_at() : cb(null));
+
+		via_at();
+	};
+
+	if (modem.uim)
+		return via_uim();
+
+	// MBIM modem: prefer the QMI passthrough UIM (same proven path as native
+	// QMI); fall through to the native UICC Reset / AT when unavailable
+	if (modem._ensure_uim)
+		return modem._ensure_uim(() => modem.uim ? via_uim() : via_mbim_or_at());
+
+	via_mbim_or_at();
+};
+
 // --- raw APDU channel (eSIM/ES10 foundation) ---------------------------------
 
 export function hex_to_arr(s)
