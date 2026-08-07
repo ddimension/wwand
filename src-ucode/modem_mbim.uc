@@ -286,11 +286,34 @@ export function create(opts)
 		if (self._ready_state == bc.READY_STATE_INITIALIZED)
 			return step_register();
 
+		// no card: terminal like the QMI/NCM backends (sim_absent), NOT a
+		// retriable failure — climbing the recovery ladder cannot conjure a
+		// SIM and would pointlessly reset the modem forever. A later
+		// SUBSCRIBER_READY_STATUS indication / hotplug re-runs the chain.
+		// (HW-hit on a SIM-less RM520N-GL: the PIN query answers MBIM status
+		// 3 and the old path counted connection attempts.)
+		if (self._ready_state == bc.READY_STATE_SIM_NOT_INSERTED) {
+			self.set_state('SIM_BLOCKED', { reason: 'sim_absent' });
+			emit('sim_blocked', { reason: 'sim_absent' });
+			notify_contexts('sim_blocked', {});
+			return;
+		}
+
 		let pincode = sim.effective_pincode(self);
 
 		self.mbim.command(bc, 'PIN', 'query', {}, (err, data) => {
-			if (err)
+			if (err) {
+				// same terminal mapping when only the PIN query reveals it
+				if (self._ready_state == bc.READY_STATE_SIM_NOT_INSERTED ||
+				    err.status == bc.STATUS_SIM_NOT_INSERTED) {
+					self.set_state('SIM_BLOCKED', { reason: 'sim_absent' });
+					emit('sim_blocked', { reason: 'sim_absent' });
+					notify_contexts('sim_blocked', {});
+					return;
+				}
+
 				return fail('pin_query', err);
+			}
 
 			if (data.pin_state == bc.PIN_STATE_UNLOCKED)
 				return step_register();

@@ -36,6 +36,11 @@ export const AUTH_MSCHAPV2 = 3;
 export const READY_STATE_NOT_INITIALIZED = 0;
 export const READY_STATE_INITIALIZED     = 1;
 export const READY_STATE_SIM_NOT_INSERTED = 2;
+
+// MbimStatusError (message-level status in the MBIM_COMMAND_DONE header;
+// verified vs libmbim mbim-errors.h): 3 = the operation needs a SIM and none
+// is inserted — HW-hit answering a PIN query on a SIM-less RM520N-GL.
+export const STATUS_SIM_NOT_INSERTED = 3;
 export const READY_STATE_BAD_SIM         = 3;
 export const READY_STATE_FAILURE         = 4;
 export const READY_STATE_NOT_ACTIVATED   = 5;
