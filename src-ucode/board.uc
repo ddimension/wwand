@@ -221,9 +221,13 @@ const PROFILES = {
 	// Cudy LT300 (MT7628, MeiG SLM770A-R): the modem RESET/power-enable line is
 	// exported as the named gpio `4g` (value 1 = modem on). No separate
 	// switchable USB power rail; status LEDs are OS-owned -> none here.
+	// The SLM770A's serial (AT) interfaces are vendor-class (0xff) and the stock
+	// `option` driver has no id for 2dee:4d57/4d58, so no ttyUSB appear and the
+	// NCM backend has no AT channel (modem stays ABSENT). Bind them via new_id.
 	// HW-verified on the v3.
 	'cudy,lt300-v3': {
 		reset_gpio: '4g',
+		option_ids: [ '2dee 4d57', '2dee 4d58' ],
 	},
 };
 

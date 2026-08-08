@@ -117,6 +117,16 @@ uloop.timer(20, () => uloop.end());
 uloop.run();
 ok(fx.has(`${G}/gpio515/value=0`), 'nr7101: reset released back to rest level (0)');
 
+// --- 4d. Cudy LT300 (MeiG SLM770A): serial ports are vendor-class (0xff) and the
+// stock `option` driver has no id for them, so init() must bind them via new_id —
+// otherwise no ttyUSB appear and the NCM backend has no AT channel (modem ABSENT).
+fx = mkfx({});
+b = board.create({ id: 'cudy,lt300-v3', fx: fx, log: () => {} });
+b.init();
+let NEWID = '/sys/module/option/drivers/usb-serial:option1/new_id';
+ok(fx.has(`${NEWID}=2dee 4d58`), 'cudy: binds SLM770A 2dee:4d58 to the option driver via new_id');
+ok(fx.has(`${NEWID}=2dee 4d57`), 'cudy: binds the 2dee:4d57 variant too');
+
 // power_cycle / reset_pulse accept a per-modem duration override (repower_time)
 fx = mkfx({ [`${G}/lte_power/value`]: '1' });
 b = board.create({ id: 'zyxel,lte5398-m904', fx: fx, log: () => {} });
