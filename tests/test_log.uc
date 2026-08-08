@@ -45,4 +45,47 @@ eq(lines, [
 
 ok(index(out, '\x0b') < 0, 'log: control character stripped from output');
 
+// --- syslog seam: priority mapping via an injected fake io (in-process) -------
+// emit succeeds, so nothing hits stderr; assert the exact (severity, body) the
+// seam receives — real numeric severities, and NO "level:" text prefix.
+let emitted = [];
+let fake_io = {
+	syslog_open: (ident, fac) => true,
+	syslog_emit: (sev, msg) => { push(emitted, sprintf('%d|%s', sev, msg)); return true; },
+};
+
+ok(logmod.open(fake_io, { level: 'debug', target: 'auto' }) == true,
+	'open: reports /dev/log available from the seam');
+
+logmod.log('err', 'e');
+logmod.log('warn', 'w');
+logmod.log('notice', 'n');
+logmod.log('info', 'i %d', 6);
+logmod.log('debug', 'd');
+
+eq(emitted, [ '3|e', '4|w', '5|n', '6|i 6', '7|d' ],
+	'syslog: severities 3..7 mapped, body without level prefix, args formatted');
+
+// an io lacking the seam (older .so) is ignored -> not "available"
+ok(logmod.open({}, { target: 'auto' }) == false, 'open: no seam -> not available');
+
+// --- syslog seam: routing / fallback / target (child, merged std streams) -----
+let script2 =
+	'import * as log from "wwand/log.uc";' +
+	'let io={syslog_open:function(){return true;},' +
+	'syslog_emit:function(s,m){if(m=="viastderr")return false;print("SYS "+s+" "+m+"\\n");return true;}};' +
+	'log.open(io,{level:"debug",target:"auto"});' +
+	'log.notice("hello");' +           /* seam, severity 5 */
+	'log.err("viastderr");' +          /* emit false -> stderr fallback */
+	'log.set_target("stderr");' +
+	'log.info("forced");';             /* target stderr -> bypass seam */
+
+let cmd2 = sprintf(`%s -L '%s/*.uc' -e '%s' 2>&1`, ucode, testdir, script2);
+let out2 = fs.popen(cmd2)?.read('all') ?? '';
+
+ok(index(out2, 'SYS 5 hello') >= 0, 'syslog child: notice emitted via seam at severity 5');
+ok(index(out2, 'err: viastderr') >= 0, 'syslog child: emit-false falls back to stderr');
+ok(index(out2, 'info: forced') >= 0, 'syslog child: target stderr bypasses the seam');
+ok(index(out2, 'SYS 6 forced') < 0, 'syslog child: forced-stderr not sent to the seam');
+
 done('test_log');

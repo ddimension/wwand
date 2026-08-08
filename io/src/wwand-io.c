@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -970,6 +971,127 @@ qmit_rmnet_tx_aggr(uc_vm_t *vm, size_t nargs)
 	return ucv_boolean_new(true);
 }
 
+/* --- syslog seam ----------------------------------------------------------
+ * Log to /dev/log with real RFC3164 priorities so the daemon passes per-message
+ * severity to the system logger, instead of everything arriving as daemon.err
+ * through procd's stderr capture. connect()ing the datagram socket lets the
+ * caller learn whether /dev/log is available and fall back to stderr when not.
+ * Stock ucode has no AF_UNIX socket support, hence this small native seam. */
+static int syslog_fd = -1;
+static int syslog_facility = 3;            /* LOG_DAEMON */
+static char syslog_ident[32] = "wwand";
+
+static bool
+syslog_connect(void)
+{
+	struct sockaddr_un sa = { .sun_family = AF_UNIX };
+	int fd;
+
+	fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+
+	if (fd < 0)
+		return false;
+
+	strncpy(sa.sun_path, "/dev/log", sizeof(sa.sun_path) - 1);
+
+	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		last_errno = errno;
+		close(fd);
+
+		return false;
+	}
+
+	syslog_fd = fd;
+
+	return true;
+}
+
+/* syslog_open(ident?, facility?) -> bool available. Re-opens if already open. */
+static uc_value_t *
+qmit_syslog_open(uc_vm_t *vm, size_t nargs)
+{
+	uc_value_t *ident = uc_fn_arg(0);
+	uc_value_t *facility = uc_fn_arg(1);
+
+	last_errno = 0;
+
+	if (ucv_type(ident) == UC_STRING) {
+		strncpy(syslog_ident, ucv_string_get(ident), sizeof(syslog_ident) - 1);
+		syslog_ident[sizeof(syslog_ident) - 1] = 0;
+	}
+
+	if (ucv_type(facility) == UC_INTEGER)
+		syslog_facility = (int)ucv_int64_get(facility);
+
+	if (syslog_fd >= 0) {
+		close(syslog_fd);
+		syslog_fd = -1;
+	}
+
+	return ucv_boolean_new(syslog_connect());
+}
+
+/* syslog_emit(severity, msg) -> bool sent. severity 0..7 (syslog numeric).
+ * Reconnects once if logd was restarted; false lets the caller use stderr. */
+static uc_value_t *
+qmit_syslog_emit(uc_vm_t *vm, size_t nargs)
+{
+	uc_value_t *sev = uc_fn_arg(0);
+	uc_value_t *msg = uc_fn_arg(1);
+	char buf[2048];
+	int pri, n;
+
+	last_errno = 0;
+
+	if (ucv_type(sev) != UC_INTEGER || ucv_type(msg) != UC_STRING) {
+		last_errno = EINVAL;
+
+		return ucv_boolean_new(false);
+	}
+
+	if (syslog_fd < 0 && !syslog_connect())
+		return ucv_boolean_new(false);
+
+	pri = (syslog_facility << 3) | ((int)ucv_int64_get(sev) & 7);
+	n = snprintf(buf, sizeof(buf), "<%d>%s[%d]: %s",
+	             pri, syslog_ident, (int)getpid(), ucv_string_get(msg));
+
+	if (n < 0)
+		return ucv_boolean_new(false);
+
+	if (n >= (int)sizeof(buf))
+		n = sizeof(buf) - 1;
+
+	if (send(syslog_fd, buf, n, MSG_NOSIGNAL) < 0) {
+		/* logd may have restarted — drop the stale socket, reconnect, retry */
+		last_errno = errno;
+		close(syslog_fd);
+		syslog_fd = -1;
+
+		if (!syslog_connect())
+			return ucv_boolean_new(false);
+
+		if (send(syslog_fd, buf, n, MSG_NOSIGNAL) < 0) {
+			last_errno = errno;
+
+			return ucv_boolean_new(false);
+		}
+	}
+
+	return ucv_boolean_new(true);
+}
+
+static uc_value_t *
+qmit_syslog_close(uc_vm_t *vm, size_t nargs)
+{
+	if (syslog_fd >= 0) {
+		close(syslog_fd);
+		syslog_fd = -1;
+	}
+
+	return ucv_boolean_new(true);
+}
+
 static const uc_function_list_t global_fns[] = {
 	{ "open",          qmit_open },
 	{ "open_tty",      qmit_open_tty },
@@ -978,6 +1100,9 @@ static const uc_function_list_t global_fns[] = {
 	{ "rmnet_mux_id",  qmit_rmnet_mux_id },
 	{ "rmnet_tx_aggr", qmit_rmnet_tx_aggr },
 	{ "last_error",    qmit_last_error },
+	{ "syslog_open",   qmit_syslog_open },
+	{ "syslog_emit",   qmit_syslog_emit },
+	{ "syslog_close",  qmit_syslog_close },
 };
 
 void

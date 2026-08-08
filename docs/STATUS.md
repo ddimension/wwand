@@ -3,6 +3,26 @@
 _Last updated: 2026-08-08. All test suites green (39 suites, ~1697 checks).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## Syslog-priority logging via /dev/log (2026-08-08 late)
+
+- **wwand now logs to `/dev/log`** (the syslog datagram socket) with real
+  RFC3164 priorities, so `logread` shows each message at its true severity
+  (`daemon.info`/`notice`/`warn`/`err`/`debug`) instead of everything arriving as
+  `daemon.err` through procd's stderr capture. When /dev/log is unreachable it
+  falls back to stderr (self-healing: it retries the socket per message, so logd
+  coming up late is picked up automatically). Older `wwand_io.so` without the
+  seam → clean stderr fallback (feature-detected).
+- **Native seam** in `io/src/wwand-io.c`: `syslog_open(ident, facility)` /
+  `syslog_emit(severity, msg)` / `syslog_close` — an AF_UNIX SOCK_DGRAM to
+  /dev/log (stock ucode has no unix-socket support). `log.uc` reworked around it
+  (target `auto`/`syslog`/`stderr`, severity map err=3…debug=7).
+- **CLI overrides** (main.uc), precedence over uci `log_level`, sticky across
+  reloads: `--log-level`, `--log-target`, `--stderr`, `--syslog`.
+- HW-verified on 245 (aarch64) and 246 (mipsel_24kc — rebuilt the `.so` for that
+  arch): `logread` shows a real mix of severities post-restart.
+- test_log +7 checks (priority mapping via a fake seam, target selection, emit-
+  false → stderr fallback).
+
 ## Idempotent reload + modem reboot button (2026-08-08 late)
 
 - **Idempotent config reload**: `apply_config` no longer tears everything down and

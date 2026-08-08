@@ -182,7 +182,8 @@ The full modem option set, with defaults:
 
 ```
 config wwand_globals 'globals'
-	option log_level 'info'          # err|warn|notice|info|debug
+	option log_level 'info'          # err|warn|notice|info|debug (to /dev/log with
+	                                 #   real priorities, else stderr; see below)
 	option hold_max '90'             # seconds to hold a lost interface up while
 	                                 #   reconnecting in place before downing it
 	option write_device '1'          # write the resolved wwandN L3 name back onto
@@ -984,8 +985,16 @@ rather than e.g. `-3276.8 dBm`.
 
 ## Troubleshooting
 
-- `option log_level 'debug'` (globals) shows every state transition, CID
-  allocation and QMI error. `set_log_level` changes it at runtime.
+- **Logging.** wwand logs to **`/dev/log`** with real syslog priorities when it
+  is reachable (so `logread` shows `daemon.info` / `daemon.notice` / `daemon.warn`
+  / `daemon.err` per message, not everything as `daemon.err`), and falls back to
+  **stderr** otherwise. `option log_level 'debug'` (globals) shows every state
+  transition, CID allocation and QMI error; `set_log_level` changes it at
+  runtime. Command-line overrides (win over the uci level and stick across
+  reloads): `--log-level err|warn|notice|info|debug`,
+  `--log-target auto|syslog|stderr`, and the `--stderr` / `--syslog` shorthands
+  (e.g. run `wwand --log-target stderr --log-level debug` by hand to watch a
+  boot without syslog).
 - `ubus call wwand status` / `context_status` for a live snapshot.
 - `ubus call wwand modem_at '{"modem":"m0","command":"AT+QENG=\"servingcell\""}'`
   for ad-hoc modem diagnostics.

@@ -5,6 +5,12 @@
 //   wwand                      run as daemon
 //   wwand --probe <cdc-wdm>    smoke test: CTL sync, service versions,
 //                             DMS model/revision/IMEI, then exit.
+//
+// Logging goes to /dev/log with real syslog priorities when available, else to
+// stderr. Override with:
+//   --log-level err|warn|notice|info|debug   (over the uci log_level)
+//   --log-target auto|syslog|stderr          (auto = syslog, else stderr)
+//   --stderr / --syslog                      (shorthands for --log-target)
 
 'use strict';
 
@@ -13,6 +19,7 @@ import * as fs from 'fs';
 import * as libubus from 'ubus';
 import * as libuci from 'uci';
 import * as transport from 'wwand.transport';
+import * as wio from 'wwand_io';
 import * as client from 'wwand.client';
 import * as logmod from 'wwand.log';
 import * as config from 'wwand.config';
@@ -24,6 +31,12 @@ import * as netlink from 'wwand.netlink';
 import * as board from 'wwand.board';
 import ctl_schema from 'wwand.codec.schema.ctl';
 import dms_schema from 'wwand.codec.schema.dms';
+
+// CLI logging overrides (precedence over uci, sticky across reloads). Declared
+// at module scope so run_daemon()/daemon.reload — defined above the arg parser —
+// can read them (ucode does not hoist a later `let` into an earlier function).
+let cli_log_level = null;
+let cli_log_target = null;
 
 const SERVICE_NAMES = {
 	'0': 'ctl', '1': 'wds', '2': 'dms', '3': 'nas', '4': 'qos', '5': 'wms',
@@ -192,7 +205,13 @@ function run_daemon()
 
 	let parsed = load_config();
 
-	logmod.set_level(parsed.globals.log_level);
+	// logging: primary sink is /dev/log with real syslog priorities (native seam
+	// in wwand_io), falling back to stderr. CLI --log-level/--log-target override
+	// the uci log_level and stick across reloads.
+	logmod.open(wio, {
+		level: cli_log_level ?? parsed.globals.log_level,
+		target: cli_log_target ?? 'auto',
+	});
 
 	for (let w in parsed.warnings)
 		logmod.warning('config: %s', w);
@@ -396,7 +415,8 @@ function run_daemon()
 	daemon.reload = () => {
 		let p = load_config();
 
-		logmod.set_level(p.globals.log_level);
+		// a CLI --log-level override wins over the uci value across reloads
+		logmod.set_level(cli_log_level ?? p.globals.log_level);
 
 		for (let w in p.warnings)
 			logmod.warning('config: %s', w);
@@ -430,13 +450,58 @@ function run_daemon()
 
 // --- entry point ------------------------------------------------------------
 
-if (ARGV[0] == '--probe' && ARGV[1]) {
-	probe(ARGV[1], index(ARGV, '--no-sync') >= 0);
+// Parsed before dispatch so both --probe and the daemon honour the overrides
+// (cli_log_level / cli_log_target are declared at module scope near the top).
+function parse_log_args()
+{
+	let rest = [];
+
+	for (let i = 0; i < length(ARGV); i++) {
+		let a = ARGV[i];
+
+		if (a == '--log-level' && ARGV[i + 1] != null)
+			cli_log_level = ARGV[++i];
+		else if (substr(a, 0, 12) == '--log-level=')
+			cli_log_level = substr(a, 12);
+		else if (a == '--log-target' && ARGV[i + 1] != null)
+			cli_log_target = ARGV[++i];
+		else if (substr(a, 0, 13) == '--log-target=')
+			cli_log_target = substr(a, 13);
+		else if (a == '--stderr')
+			cli_log_target = 'stderr';
+		else if (a == '--syslog')
+			cli_log_target = 'syslog';
+		else
+			push(rest, a);
+	}
+
+	if (cli_log_level != null && !logmod.valid_level(cli_log_level)) {
+		warn(sprintf("wwand: invalid --log-level '%s' (err|warn|notice|info|debug)\n",
+			cli_log_level));
+		exit(1);
+	}
+
+	if (cli_log_target != null &&
+	    cli_log_target != 'auto' && cli_log_target != 'syslog' && cli_log_target != 'stderr') {
+		warn(sprintf("wwand: invalid --log-target '%s' (auto|syslog|stderr)\n",
+			cli_log_target));
+		exit(1);
+	}
+
+	return rest;
 }
-else if (ARGV[0] == null) {
+
+let args = parse_log_args();
+
+if (args[0] == '--probe' && args[1]) {
+	probe(args[1], index(args, '--no-sync') >= 0);
+}
+else if (args[0] == null) {
 	run_daemon();
 }
 else {
-	warn("Usage: wwand [--probe /dev/cdc-wdmX [--no-sync]]\n");
+	warn("Usage: wwand [--probe /dev/cdc-wdmX [--no-sync]]\n" +
+	     "             [--log-level err|warn|notice|info|debug]\n" +
+	     "             [--log-target auto|syslog|stderr] [--stderr] [--syslog]\n");
 	exit(1);
 }
