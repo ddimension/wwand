@@ -646,6 +646,47 @@ export function create(opts)
 		}
 	};
 
+	// Idempotent-reload teardown of a SINGLE context: cancel its reconnect, fail
+	// pending waiters, down it if up, and drop it from the map. (detach_modem
+	// above keeps the entry as a "modem gone" placeholder; this removes it fully.)
+	let stop_context = (name) => {
+		let entry = self.contexts[name];
+
+		if (!entry)
+			return;
+
+		clear_reconnect(name);
+
+		for (let p in entry.pending_up)
+			p({ error: 'reload' });
+
+		if (entry.ctx && entry.ctx.state != 'IDLE')
+			entry.ctx.down(() => null);
+
+		delete self.contexts[name];
+	};
+
+	// Idempotent-reload teardown of a SINGLE modem: stop its contexts, cancel a
+	// pending mode-switch watchdog, stop the backend, and drop it from the map.
+	let stop_modem = (name) => {
+		let entry = self.modems[name];
+
+		if (!entry)
+			return;
+
+		for (let cname in keys(self.contexts))
+			if (self.contexts[cname].cfg.modem == name)
+				stop_context(cname);
+
+		if (entry.modeswitch_liveness)
+			entry.modeswitch_liveness.cancel();
+
+		if (entry.modem)
+			entry.modem.stop();
+
+		delete self.modems[name];
+	};
+
 	// stable L3 names (non-mux datapath): rename the kernel netdev to the
 	// context's l3_name so multi-modem boxes keep deterministic names regardless
 	// of USB enumeration order. Mux children are created under their own name
@@ -710,6 +751,9 @@ export function create(opts)
 			l3_name: l3name ?? null,   // stable L3 target (false: mux owns naming)
 			modem: null,
 			protocol: control?.protocol,
+			// carry the last-applied reload signature across internal rebuilds
+			// (hotplug re-add, waiting-modem retry) — they don't change the config
+			_sig: self.modems[name]?._sig,
 		};
 
 		self.modems[name] = entry;
@@ -830,7 +874,10 @@ export function create(opts)
 		// them on modem-ready without waiting for netifd — adopts a session that
 		// survived a wwand restart.
 		let base = { cfg: cfg, ctx: null, pending_up: [], wanted: (cfg.interface != null),
-		             retry_timer: null, hold_timer: null, retry_n: 0 };
+		             retry_timer: null, hold_timer: null, retry_n: 0,
+		             // preserve the last-applied reload signature across internal
+		             // re-binds (hotplug) — the config itself is unchanged there
+		             _sig: self.contexts[name]?._sig };
 
 		if (!mentry?.modem) {
 			log('warn', sprintf('context %s: modem %s not started', name, cfg.modem));
@@ -869,8 +916,8 @@ export function create(opts)
 		// zero-config autosetup gate (default on; wwand_globals option autosetup)
 		self.autosetup = parsed.globals?.autosetup ?? true;
 
-		// unchanged modem/context config is a no-op: the reload trigger also fires
-		// for unrelated network edits, and the rebuild below is destructive (WAN bounce)
+		// unchanged whole config is a no-op: the reload trigger also fires for
+		// unrelated network edits, so skip the diff entirely when nothing changed.
 		let sig = sprintf('%J', { m: parsed.modems, c: parsed.contexts });
 
 		if (sig == config_sig)
@@ -878,10 +925,8 @@ export function create(opts)
 
 		config_sig = sig;
 
-		// v1 reload semantics: tear down everything, then rebuild
-		self.shutdown();
-
-		// aggregate mux requirements + stable L3 name per modem before start_modem
+		// aggregate mux requirements + stable L3 name per modem (drives start_modem
+		// AND the per-modem signature: a modem's mux set depends on its contexts)
 		let mux_by_modem = {};
 		let l3_by_modem = {};
 
@@ -900,11 +945,46 @@ export function create(opts)
 			}
 		}
 
+		// Idempotent reload: bounce only what actually changed. A modem's signature
+		// folds in its mux set + stable L3 name (both derived from its contexts), so
+		// adding/removing a mux channel counts as a modem change; a context's own
+		// signature is just its cfg. Unchanged modems and unchanged contexts keep
+		// running untouched — the whole point (no WAN bounce on an unrelated edit,
+		// and a single modem's edit never disturbs the others or their siblings).
+		let modem_sig = (mn) => sprintf('%J',
+			{ cfg: parsed.modems[mn], mux: mux_by_modem[mn], l3: l3_by_modem[mn] });
+		let ctx_sig = (cn) => sprintf('%J', parsed.contexts[cn]);
+
+		// 1) stop modems that are gone or changed (cascades to their contexts). A
+		//    changed modem must rebuild its datapath, so its contexts bounce with it.
+		for (let mn in keys(self.modems))
+			if (!parsed.modems[mn] || self.modems[mn]._sig != modem_sig(mn))
+				stop_modem(mn);
+
+		// 2) stop contexts that are gone or changed on a still-running modem (their
+		//    modem stays up; only this one context re-applies — APN/auth/mtu/etc.).
+		//    Contexts of the modems stopped above are already gone.
+		for (let cn in keys(self.contexts))
+			if (!parsed.contexts[cn] || self.contexts[cn]._sig != ctx_sig(cn))
+				stop_context(cn);
+
+		// 3) (re)start whatever is now missing — new sections and the ones just
+		//    stopped. Untouched modems/contexts are already present and skipped.
 		for (let name, cfg in parsed.modems)
-			start_modem(name, cfg, mux_by_modem[name], l3_by_modem[name]);
+			if (!self.modems[name])
+				start_modem(name, cfg, mux_by_modem[name], l3_by_modem[name]);
 
 		for (let name, cfg in parsed.contexts)
-			start_context(name, cfg);
+			if (!self.contexts[name])
+				start_context(name, cfg);
+
+		// 4) stamp the applied signatures for the next reload's diff (idempotent for
+		//    the ones that kept running: same config -> same signature).
+		for (let mn in keys(self.modems))
+			self.modems[mn]._sig = modem_sig(mn);
+
+		for (let cn in keys(self.contexts))
+			self.contexts[cn]._sig = ctx_sig(cn);
 
 		// board bring-up + periodic status tick (once): drives panel LEDs from the
 		// primary modem's reg+signal and re-logs a waited-on modem every 30 s.

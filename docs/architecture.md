@@ -247,6 +247,17 @@ setup. Settings changes while connected work the same way: the context
 re-queries `GET_CURRENT_SETTINGS` on serving-system changes (plus a slow safety
 poll) and emits `settings`, which the daemon maps to `renew`.
 
+A config **reload** (`apply_config`) is likewise scoped: it diffs the new config
+against the running state and bounces **only** the modems/contexts that actually
+changed, keyed on a per-modem signature (its cfg plus its derived mux set + L3
+name) and a per-context signature (its cfg). An unchanged section keeps its live
+`modem`/`ctx` object untouched, so editing one interface's APN reconnects only
+that context while every other session — including sibling contexts on the same
+modem — runs uninterrupted. Adding/removing a mux channel changes that modem's
+datapath signature, so its own contexts bounce (scoped to that modem). A forced
+single-interface restart stays available through `ifup`/`ifdown`, which act on
+exactly one interface regardless of the diff.
+
 (Earlier designs — a `context_wait` long-poll monitor, and driving the mux
 child's carrier so netifd's own link tracking would teardown/re-setup — were
 dropped: the deferred long-poll still cost a process per interface, and

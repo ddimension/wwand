@@ -419,4 +419,119 @@ eq(rp.action, 'power_cycle', 'repower single: falls back to power cycle');
 eq(cycles, 1, 'repower single: power_cycle fired');
 rd.shutdown();
 
+// --- idempotent reload diff -------------------------------------------------
+// apply_config must bounce ONLY what actually changed: an unrelated edit leaves
+// every session untouched; a single context's APN change re-applies just that
+// context (its modem + siblings keep running); a changed/removed/added modem or
+// mux channel is scoped to it. A fake QMI backend (deps.load_qmi) lets
+// start_modem/start_context build trackable stand-ins with no transport;
+// rl_events records every backend start/stop + context down. Interfaces pin an
+// explicit `device` so the auto wwandN numbering can't renumber survivors and
+// confound the diff (that stability is itself the point of the pinned names).
+let rl_events = [];
+let fake_qmi = {
+	modem: { create: (o) => ({
+		start: () => push(rl_events, 'mstart:' + o.id),
+		stop:  () => push(rl_events, 'mstop:' + o.id),
+	}) },
+	context: { create: (o) => ({
+		state: 'CONNECTED',
+		down: (cb) => { push(rl_events, 'cdown:' + o.name); if (cb) cb(); },
+	}) },
+};
+let rld = daemon_mod.create({ timing: TIMING, deps: {
+	log: (l, m) => null,
+	load_qmi: () => fake_qmi,
+} });
+
+let netcfg = (mut) => {
+	let net = {
+		g:    { '.type': 'wwand_globals' },
+		m0:   { '.type': 'wwand_modem', device: '/dev/mock0' },
+		m1:   { '.type': 'wwand_modem', device: '/dev/mock1' },
+		wanA: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', pdp_type: 'ipv4' },
+		wanB: { '.type': 'interface', proto: 'wwand', modem: 'm1', device: 'l3b', apn: 'b', pdp_type: 'ipv4' },
+	};
+	if (mut) mut(net);
+	return config.parse({ network: net });
+};
+
+// initial apply: both modems + both contexts come up
+rld.apply_config(netcfg());
+eq(sort(keys(rld.modems)), [ 'm0', 'm1' ], 'reload init: both modems present');
+eq(sort(keys(rld.contexts)), [ 'wanA', 'wanB' ], 'reload init: both contexts present');
+ok(rld.modems.m0.modem != null && rld.contexts.wanA.ctx != null, 'reload init: m0/wanA built');
+
+let m0_obj = rld.modems.m0.modem, m1_obj = rld.modems.m1.modem;
+let ctxA_obj = rld.contexts.wanA.ctx, ctxB_obj = rld.contexts.wanB.ctx;
+
+// (1) no-op reload: identical config -> zero churn (whole-config fast path)
+rl_events = [];
+rld.apply_config(netcfg());
+eq(rl_events, [], 'reload no-op: nothing stopped or started');
+ok(rld.modems.m0.modem == m0_obj, 'reload no-op: m0 modem object identical');
+ok(rld.contexts.wanA.ctx == ctxA_obj, 'reload no-op: wanA ctx object identical');
+
+// (2) change ONE context's APN -> only that context re-applies; siblings +
+//     both modems keep running untouched (the core win)
+rl_events = [];
+rld.apply_config(netcfg((n) => { n.wanA.apn = 'a2'; }));
+ok(index(rl_events, 'cdown:wanA') >= 0, 'reload apn: changed context taken down');
+eq(index(rl_events, 'mstop:m0'), -1, 'reload apn: its modem NOT restarted');
+eq(index(rl_events, 'mstop:m1'), -1, 'reload apn: other modem untouched');
+eq(index(rl_events, 'cdown:wanB'), -1, 'reload apn: sibling context untouched');
+ok(rld.modems.m0.modem == m0_obj, 'reload apn: m0 modem object preserved');
+ok(rld.contexts.wanB.ctx == ctxB_obj, 'reload apn: wanB ctx object preserved');
+ok(rld.contexts.wanA.ctx != ctxA_obj, 'reload apn: wanA ctx rebuilt with new config');
+eq(rld.contexts.wanA.cfg.apn, 'a2', 'reload apn: wanA carries the new APN');
+ctxA_obj = rld.contexts.wanA.ctx;
+
+// (3) add a new modem + interface -> only the new one starts; existing untouched
+rl_events = [];
+rld.apply_config(netcfg((n) => {
+	n.wanA.apn = 'a2';
+	n.m2 = { '.type': 'wwand_modem', device: '/dev/mock2' };
+	n.wanC = { '.type': 'interface', proto: 'wwand', modem: 'm2', device: 'l3c', apn: 'c', pdp_type: 'ipv4' };
+}));
+ok(index(rl_events, 'mstart:m2') >= 0, 'reload add: new modem started');
+eq(index(rl_events, 'mstop:m0'), -1, 'reload add: existing modem m0 untouched');
+eq(index(rl_events, 'mstop:m1'), -1, 'reload add: existing modem m1 untouched');
+eq(index(rl_events, 'cdown:wanA'), -1, 'reload add: existing context wanA untouched');
+ok(rld.contexts.wanA.ctx == ctxA_obj, 'reload add: wanA ctx object preserved');
+ok(rld.modems.m1.modem == m1_obj, 'reload add: m1 modem object preserved');
+
+// (4) remove modem m1 + its interface -> only that one is torn down
+rl_events = [];
+rld.apply_config(netcfg((n) => {
+	n.wanA.apn = 'a2';
+	n.m2 = { '.type': 'wwand_modem', device: '/dev/mock2' };
+	n.wanC = { '.type': 'interface', proto: 'wwand', modem: 'm2', device: 'l3c', apn: 'c', pdp_type: 'ipv4' };
+	delete n.m1; delete n.wanB;
+}));
+ok(index(rl_events, 'mstop:m1') >= 0, 'reload remove: m1 modem stopped');
+ok(index(rl_events, 'cdown:wanB') >= 0, 'reload remove: wanB context downed');
+ok(!rld.modems.m1, 'reload remove: m1 dropped from the map');
+ok(!rld.contexts.wanB, 'reload remove: wanB dropped from the map');
+eq(index(rl_events, 'mstop:m0'), -1, 'reload remove: m0 untouched');
+ok(rld.contexts.wanA.ctx == ctxA_obj, 'reload remove: wanA ctx preserved');
+
+// (5) add a mux channel on m0 -> m0 rebuilds (datapath changes) and its contexts
+//     bounce with it; the unrelated modem m2 + its context stay put
+let m2_obj = rld.modems.m2.modem, ctxC_obj = rld.contexts.wanC.ctx;
+rl_events = [];
+rld.apply_config(netcfg((n) => {
+	delete n.m1; delete n.wanB;
+	n.wanA.apn = 'a2';
+	n.wanA.mux_id = '1';
+	n.m2 = { '.type': 'wwand_modem', device: '/dev/mock2' };
+	n.wanC = { '.type': 'interface', proto: 'wwand', modem: 'm2', device: 'l3c', apn: 'c', pdp_type: 'ipv4' };
+}));
+ok(index(rl_events, 'mstop:m0') >= 0 && index(rl_events, 'mstart:m0') >= 0,
+	'reload mux: m0 rebuilt for the datapath change');
+eq(index(rl_events, 'mstop:m2'), -1, 'reload mux: m2 untouched');
+ok(rld.modems.m2.modem == m2_obj, 'reload mux: m2 modem object preserved');
+ok(rld.contexts.wanC.ctx == ctxC_obj, 'reload mux: wanC ctx preserved');
+
+rld.shutdown();
+
 done('test_daemon');

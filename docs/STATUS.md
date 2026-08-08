@@ -1,7 +1,34 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-08. All test suites green (39 suites, ~1667 checks).
+_Last updated: 2026-08-08. All test suites green (39 suites, ~1697 checks).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## Idempotent reload + modem reboot button (2026-08-08 late)
+
+- **Idempotent config reload**: `apply_config` no longer tears everything down and
+  rebuilds on every reload. It now **diffs** the new config against the running
+  state (per-modem signature = cfg + derived mux set + L3 name; per-context
+  signature = cfg) and bounces **only** what changed. Unchanged modems/contexts
+  keep their live objects untouched — editing one interface's APN reconnects only
+  that context; siblings and other modems run uninterrupted. Adding/removing a mux
+  channel is scoped to that modem. New helpers `stop_modem`/`stop_context` (scoped
+  teardown, distinct from the whole-box `shutdown`); `_sig` is carried across
+  internal rebuilds (hotplug re-add, waiting-modem retry) so those never trigger a
+  false bounce on the next unrelated reload. `ifup`/`ifdown` stay the force path
+  for a single interface. `test_daemon` +30 checks (no-op / APN change / add /
+  remove / mux-add scenarios with a fake backend asserting object identity).
+  **HW-verified on the dual-modem Chateau**: no-op reload → zero churn; changing
+  modem A's APN kept modem B CONNECTED across all 36 samples of the reload window,
+  logs showed only A's context reconnecting. 246 (MBIM single) no-op reload → no
+  bounce.
+- **LuCI modem-list Reboot button** — a per-row **Reboot** action next to Tools
+  triggers `ubus modem_reset` for that modem (GPIO reset if the board has one,
+  else backend soft reset), with a confirm. The list also now shows each modem's
+  **backend** and **up-connection count**.
+- **Cold-boot finding (Cudy/SLM770A)**: on a cold boot the MeiG SLM770A can
+  enumerate its USB composite **net-function only** (`cdc_ether`, no ttyUSB) — the
+  NCM backend then has no AT control channel and stays ABSENT (`no AT port`).
+  A GPIO reset did not restore the serial ports in this state; warm boots do.
 
 ## FCC unlock + stable L3 names + doc overhaul (2026-08-08 pm)
 

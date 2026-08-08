@@ -406,6 +406,9 @@ and drives netifd over ubus:
 - **Permanent loss** (`sim_blocked`, admin/config down) → `down` immediately.
 - **wwand restart is non-destructive** (`stop_local`, not `shutdown`): WAN and
   live traffic survive; the daemon **adopts** the running session on `registered`.
+- **A config reload is idempotent** — it re-applies only what actually changed.
+  Editing one interface's APN reconnects **only that context**; its modem and the
+  other modems' sessions keep running untouched. See *Idempotent reload* below.
 
 The daemon touches only the link layer (mux/MTU/carrier, sysctl); **all**
 addressing and routing go through netifd, so `ip4table`/`ip6table`/VRF apply.
@@ -418,6 +421,34 @@ addressing and routing go through netifd, so `ip4table`/`ip6table`/VRF apply.
   on modem-ready (it only *adopts* it if it is already up, e.g. after a manual
   `ifup` or a wwand restart). With `auto '1'` (the default) the daemon kicks the
   interface up as soon as the modem registers.
+
+### Idempotent reload
+
+A UCI change on `/etc/config/network` fires a procd reload trigger, which calls
+`ubus call wwand reload`. The reload is a **diff**, not a rebuild: wwand compares
+the new config against what is running and touches **only what changed**.
+
+- **Unchanged config** → no-op. The reload trigger also fires for edits to
+  *unrelated* interfaces (any `network` commit), so an idempotent reload is what
+  keeps an unrelated change from bouncing the cellular WAN.
+- **One context changed** (APN / auth / PDP type / MTU …) → **only that context**
+  reconnects. Its modem stays up; sibling contexts on the same modem and every
+  other modem keep running without a blip.
+- **A modem added / removed / changed** → scoped to that modem: its own contexts
+  bounce, the others are untouched.
+- **A mux channel added or removed** on a modem changes that modem's datapath, so
+  **that modem's** contexts bounce (only its own) — adding a second APN/mux to
+  modem A never disturbs modem B.
+
+This matters most on multi-modem boxes and on modems carrying several
+APNs/connections: a settings edit no longer takes down the whole box.
+
+**Forcing a full restart of one interface** stays available through the usual
+netifd path — `ifdown <iface>` / `ifup <iface>` act on exactly that interface
+regardless of the diff (`ifdown` also clears the daemon's `wanted` flag so it is
+not immediately re-established; `ifup` sets it again). *(HW-verified on the
+dual-modem Chateau: changing modem A's APN kept modem B CONNECTED across the
+whole reload; a no-op reload bounced nothing.)*
 
 ## Deployment examples
 
@@ -727,7 +758,7 @@ when called from LuCI).
 | Method | Arguments | Description |
 |---|---|---|
 | `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `locks` — cell/frequency-lock read-back) + contexts + `board` (detected profile, power/reset capability) |
-| `reload` | — | re-read UCI and rebuild |
+| `reload` | — | re-read UCI and apply the **diff** — only changed/added/removed modems and contexts are touched (idempotent; see *Idempotent reload*) |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
 | `modem_signal` | `modem` | last raw signal info (LTE/NR5G/WCDMA/GSM metrics) |

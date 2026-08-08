@@ -10,8 +10,11 @@ EID are masked in these screenshots.
 ## Network → Modems — the overview
 
 The entry point. Lists every managed **and** detected modem with live SIM and
-registration status, and the per-ICCID SIM override table. Each row has
-**Config** (edit the modem), **Status** and **Tools**.
+registration status, its **backend** (QMI/MBIM/NCM) and the number of **up
+connections** per modem, plus the per-ICCID SIM override table. Each row has
+**Config** (edit the modem), **Status**, **Tools** and **Reboot** — the last
+resets just that modem (GPIO reset if the board exposes one, otherwise a backend
+soft reset; its connections drop briefly and recover on their own).
 
 ![Modems overview](images/luci-modems-list.png)
 
