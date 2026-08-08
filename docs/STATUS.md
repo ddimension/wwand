@@ -1,6 +1,6 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-08. All test suites green (39 suites, ~1697 checks).
+_Last updated: 2026-08-08. All test suites green (39 suites, ~1704 checks).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
 ## Log wording: context → interface (netifd-style) (2026-08-08 late)
