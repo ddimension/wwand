@@ -64,19 +64,34 @@ function gsm7_unpack(bytes)
 
 // the NAS current-PLMN description is a raw name string with no coding-scheme
 // byte: RG50x/RG65x send plain ASCII, older Quectel (EG06) GSM-7-bit pack it.
-// Heuristic: all-ASCII -> use as-is; any high byte -> try GSM7 and keep the
-// result only if it decodes to clean printable ASCII, else keep the original.
+// Heuristic: a plain-ASCII name is all printable; anything with a high byte
+// (>=0x80) OR a control byte (<0x20) is treated as GSM-7-bit packed and
+// unpacked, keeping the result only if it decodes to clean printable ASCII.
+// (A packed short name can be all-low-byte — e.g. "PLAY" packs to 50 66 30 0b,
+// which as raw ASCII reads "Pf0\x0b" — so the trigger must include control
+// bytes, not just high bytes; issue #2.)
 function decode_operator_name(s)
 {
 	if (s == null || s == '')
 		return s;
 
-	let hi = false;
+	// drop trailing pad some modems append (NUL, CR/LF, spaces) before deciding,
+	// so a clean ASCII name with a trailing NUL is not mistaken for packed data
+	while (length(s) && (ord(s, length(s) - 1) == 0 || ord(s, length(s) - 1) == 0x0d ||
+	                     ord(s, length(s) - 1) == 0x0a || ord(s, length(s) - 1) == 0x20))
+		s = substr(s, 0, length(s) - 1);
 
-	for (let i = 0; i < length(s); i++)
-		if (ord(s, i) >= 0x80) { hi = true; break; }
+	if (s == '')
+		return s;
 
-	if (!hi)
+	let packed = false;
+
+	for (let i = 0; i < length(s); i++) {
+		let c = ord(s, i);
+		if (c >= 0x80 || c < 0x20) { packed = true; break; }
+	}
+
+	if (!packed)
 		return trim(s);
 
 	let u = gsm7_unpack(s);
@@ -86,7 +101,7 @@ function decode_operator_name(s)
 
 	for (let i = 0; i < length(u); i++)
 		if (ord(u, i) < 0x20 || ord(u, i) > 0x7e)
-			return s;   // not clean -> keep the original raw string
+			return s;   // not clean -> keep the original (trimmed) raw string
 
 	return u;
 }

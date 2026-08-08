@@ -172,6 +172,28 @@ scenario('happy', { handlers: base_handlers() }, 'registered',
 		eq(modem.counters.attempts, 0, 'happy: attempts reset');
 	});
 
+// --- 1b: GSM-7-bit packed operator name (issue #2) ---------------------------
+// EG06-class firmware GSM-7-bit packs the Current-PLMN name. "PLAY" packs to the
+// octets 50 66 30 0b, which as raw ASCII read "Pf0\x0b" (note the 0x0b control
+// byte, no high byte) — so the decode must trigger on control bytes, not just
+// high bytes, and unpack to "PLAY".
+scenario('operator name gsm7-packed',
+	{ handlers: base_handlers({
+		GET_SERVING_SYSTEM: {
+			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+			                  selected_network: 1, radio_ifs: [ 8 ] },
+			roaming: 0,
+			current_plmn: { mcc: 260, mnc: 6,
+			                description: chr(0x50) + chr(0x66) + chr(0x30) + chr(0x0b) },
+		},
+	}) },
+	'registered',
+	(modem, mock, events) => {
+		eq(modem.reg.plmn.description, 'PLAY', 'issue#2: gsm7-packed operator name unpacked');
+		eq(modem.reg.plmn.mcc, 260, 'issue#2: plmn mcc');
+		eq(modem.reg.plmn.mnc, 6, 'issue#2: plmn mnc (raw int; UI zero-pads to 06)');
+	});
+
 // --- 2: registration arrives later via indication ----------------------------
 
 scenario('late-reg', {
