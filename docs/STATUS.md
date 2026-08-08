@@ -1,7 +1,39 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-08. All test suites green (39 suites, ~1704 checks).
+_Last updated: 2026-08-09. All test suites green (39 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## QModem-quirk harvest (2026-08-09)
+
+Studied FUjr/QModem for valuable, non-obvious modem quirks wwand lacked; adopted
+the ones that fit (skipping what QModem does that wwand already had — CGACT dial
+fallback, CGDCONT context, per-RAT signal, cell-lock).
+
+- **Temperature telemetry (P1)** — new per-vendor AT readout in
+  `modem_common.collect_temperature` (Quectel `AT+QTEMP`, MeiG `AT+TEMP`
+  milli-°C /1000, Huawei `AT^CHIPTEMP`, SIMCom `AT+CPMUTEMP`); parsers in
+  `atcmd_parse.uc`. Wired into the NCM + QMI slow telemetry loops, the
+  `format_telemetry` log line (`temp=NNC`), the `modem_cells` ubus field
+  (`temperature{celsius,source}`), and the LuCI status "Serving cell" panel.
+  **HW-validated on 245 (RG650E): `temp=42C`.**
+- **Correctness fixes (P2)** — Huawei `AT^SETAUTODIAL=0` (disable the modem's
+  internal auto-dialer at init) and Sierra `AT!ENTERCND="A710"` (unlock the `AT!`
+  command set, else all Sierra config silently ERRORs) added to their NCM
+  `modem_init`.
+- **Generic-variant audit** — verified we always co-set the standard 3GPP
+  variant where one exists: `AT+CGACT` is already the universal dial fallback;
+  fixed the one gap where ZTE/MikroTik defined the context only via proprietary
+  `AT+ZGDCONT` — `build_pdp_setup` now **always** emits generic `AT+CGDCONT`
+  first, with the vendor define layered on top, so the CGACT fallback has a valid
+  context. (Auth stays vendor-specific: it is either-or, not co-settable.)
+- **MHI/PCIe AT-port discovery (P4)** — `atcmd.find_mhi_at` probes
+  `/dev/wwan*at*` / `/dev/mhi_*DUN*`; `find_tty` falls back to it when a modem
+  exposes no USB tty siblings (M.2/PCIe modems on the MHI bus).
+- **Fibocom mode-switch (P3, partial)** — documented `AT+GTUSBMODE` recipe in
+  `protocol_switch.uc`, **UNVERIFIED** (excluded from `supported()`; the
+  composition codes are many-to-one per chipset). The Fibocom `GTCCINFO`/
+  `GTCAINFO` cell telemetry and `GTACT`/`GTCELLLOCK` band/cell lock are
+  **deferred** pending Fibocom HW — a wrong cell parser silently shows garbage.
 
 ## Good-citizen coexistence + user-triggered migration (2026-08-08 late)
 

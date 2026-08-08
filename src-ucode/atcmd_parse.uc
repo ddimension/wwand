@@ -621,3 +621,65 @@ export function parse_cops_scan(lines)
 
 	return out;
 };
+
+// --- temperature (QModem-derived, per-vendor AT) -----------------------------
+// Modem die/board temperature in whole degrees Celsius, or null. Each vendor
+// reports it differently; the shapes below are ported from FUjr/QModem's
+// per-vendor scripts. A plausibility window (10..120 C) rejects sensor-name
+// digits and "no reading" sentinels — the same heuristic QModem uses, since the
+// exact field/sensor set varies across firmware revisions.
+
+// scan every integer token on the marker lines, return the first in-range value
+function first_temp(lines, marker)
+{
+	for (let l in (lines ?? [])) {
+		if (!match(l, marker))
+			continue;
+
+		for (let m in (match(l, /-?[0-9]+/g) ?? [])) {
+			let v = +m[0];
+
+			if (v > 10 && v < 120)
+				return v;
+		}
+	}
+
+	return null;
+}
+
+// Quectel AT+QTEMP: bare "+QTEMP: 35" or +QTEMP: "sensor","35" (multi-line).
+export function parse_qtemp(lines)    { return first_temp(lines, /\+QTEMP:/); }
+
+// Huawei AT^CHIPTEMP: "^CHIPTEMP: <a>,<b>,<c>,<d>" (several sensors).
+export function parse_chiptemp(lines) { return first_temp(lines, /\^CHIPTEMP:/i); }
+
+// SIMCom AT+CPMUTEMP: "+CPMUTEMP: 35" (single value, already Celsius).
+export function parse_cpmutemp(lines) { return first_temp(lines, /\+CPMUTEMP:/i); }
+
+// MeiG AT+TEMP: '+TEMP: "sensor","value"'. The value is milli-Celsius on some
+// platforms (Unisoc soc-thmzone) — divide by 1000 when it is clearly milli
+// (magnitude > 200). Prefers an soc/cpu sensor, else the first plausible reading.
+export function parse_meig_temp(lines)
+{
+	let best = null;
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+TEMP:\s*"([^"]*)"\s*,\s*"?(-?[0-9]+)"?/);
+
+		if (!m)
+			continue;
+
+		let name = m[1], v = +m[2];
+
+		if ((v < 0 ? -v : v) > 200)
+			v = int(v / 1000);
+
+		if (match(name, /thmzone|cpu|soc/i))
+			return int(v);
+
+		if (best == null && v > 10 && v < 120)
+			best = int(v);
+	}
+
+	return best;
+};

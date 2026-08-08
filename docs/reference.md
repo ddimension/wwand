@@ -784,7 +784,7 @@ when called from LuCI).
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
 | `modem_signal` | `modem` | last raw signal info (LTE/NR5G/WCDMA/GSM metrics) |
-| `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` |
+| `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` + `temperature` (`{ celsius, source }`, per-vendor AT: Quectel `QTEMP` / MeiG `TEMP` / Huawei `CHIPTEMP` / SIMCom `CPMUTEMP`) |
 | `modem_location` | `modem` | last QMI LOC fix (when `location` is enabled) |
 | `modem_at` | `modem`, `command`, `timeout?` | run an AT command on the modem's AT port |
 | `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor. Sets are **idempotent**: values the modem already carries are dropped; nothing left → `unchanged: true`, no NV write, no radio disturbance |
@@ -974,7 +974,7 @@ caches the structured data (query it via `modem_cells`):
 ```
 telemetry: tech=LTE plmn=262/01 (Telekom.de) roaming=no
   lte=[plmn 262/01 tac 3071 gci 29582339 earfcn 1300 pci 246 rsrp -97.4 rsrq -10.9 neigh 2]
-  sig_lte=[rssi -66 rsrp -98 snr 15.0]
+  sig_lte=[rssi -66 rsrp -98 snr 15.0] temp=42C
 ```
 
 The first sample runs right after registration (cell environment at connect

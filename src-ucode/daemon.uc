@@ -1632,6 +1632,7 @@ export function create(opts)
 			signal: entry.modem.signal,
 			cells: entry.modem.cells,
 			dsd: entry.modem.dsd_status,
+			temperature: entry.modem.temperature,
 		};
 	};
 

@@ -42,6 +42,9 @@ function fake_modem(model, responses)
 eq(ps.supported('RG650E-EU'), true, 'supported: Quectel RG650E');
 eq(ps.supported('EG06-E'), true, 'supported: Quectel EG06');
 eq(ps.supported('SomeRandomModem'), false, 'supported: unknown model');
+// Fibocom GTUSBMODE recipe exists but is HW-unverified -> not offered for switch
+eq(ps.supported('FM150-AE'), false, 'supported: Fibocom recipe present but unverified (not offered)');
+eq(ps.supported('FG360'), false, 'supported: Fibocom FG unverified');
 
 // --- switch QMI -> MBIM ------------------------------------------------------
 

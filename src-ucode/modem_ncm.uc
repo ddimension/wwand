@@ -388,7 +388,11 @@ const VENDORS = {
 	// Huawei: ^NDISDUP carries apn/auth inline.
 	huawei: {
 		match: /huawei/,
-		modem_init: [],
+		// disable the modem's internal auto-dialer so it does not connect behind
+		// wwand's back (best-effort; modems without it just warn). QModem disables
+		// it in the hangup path — we do it once at init so it never races the
+		// daemon-owned context (parity with the RG502Q autoconnect reclaim).
+		modem_init: [ 'AT^SETAUTODIAL=0' ],
 		auth_cmd: null,
 		dials: [ DIAL_NDISDUP, DIAL_CGACT ],
 		stats: null,
@@ -399,7 +403,11 @@ const VENDORS = {
 	// !SCACT activates. Ported from ncm.json.
 	sierra: {
 		match: /sierra|netgear/,
-		modem_init: [ 'AT+CFUN=1' ],
+		// Sierra gates ALL vendor `AT!` commands (USBCOMP / SCACT / BAND / SELRAT)
+		// behind a service unlock — without it every `AT!` returns ERROR and the
+		// dial/mode/band config silently fails. "A710" is the common factory
+		// password (QModem's default); best-effort at init.
+		modem_init: [ 'AT!ENTERCND="A710"', 'AT+CFUN=1' ],
 		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
 			? sprintf('AT$QCPDPP=%d,%d,"%s","%s"', cid, auth_value(cfg),
 				cfg.password ?? '', cfg.username ?? '')
@@ -599,8 +607,16 @@ export function build_pdp_setup(vendor, cid, cfg)
 	let ctxtype = CTX_TYPE[key] ?? CTX_TYPE.ipv4v6;
 	let target_apn = apn ?? '';   // blank => network default
 
-	let define = vendor.define ?? cgdcont;
-	let cmds = [ define(cid, pdp, target_apn) ];
+	// ALWAYS define the standard 3GPP context (AT+CGDCONT) first, so the generic
+	// AT+CGACT dial fallback (last entry of every vendor's `dials`) has a valid
+	// context to activate even on modems whose vendor define uses a proprietary
+	// table (ZTE/MikroTik AT+ZGDCONT). A vendor `define` is then layered ON TOP as
+	// an extension (extra columns / vendor NV), not as a replacement.
+	let cmds = [ cgdcont(cid, pdp, target_apn) ];
+
+	if (vendor.define)
+		push(cmds, vendor.define(cid, pdp, target_apn));
+
 	let ac = vendor.auth_cmd ? vendor.auth_cmd(cid, ctxtype, target_apn, cfg) : null;
 
 	if (ac)
@@ -1402,14 +1418,15 @@ export function create(opts)
 					return;
 				}
 
-				refresh_signal(() => refresh_cells(() => refresh_reg_detail(() => {
-					if (!self.at)
-						return;
+				refresh_signal(() => refresh_cells(() => refresh_reg_detail(() =>
+					modem_common.collect_temperature(self, () => {
+						if (!self.at)
+							return;
 
-					log_telemetry();
-					emit_telemetry();
-					telemetry_timer = uloop.timer(interval, tick);
-				})));
+						log_telemetry();
+						emit_telemetry();
+						telemetry_timer = uloop.timer(interval, tick);
+					}))));
 			});
 		};
 

@@ -402,6 +402,35 @@ export function fetch_nr_neighbours(self, cb)
 	});
 };
 
+// collect_temperature(self, cb): read the modem die/board temperature over the
+// shared AT side channel and store self.temperature = { celsius, source:'at' }.
+// The command + parser are picked per manufacturer (QModem-derived): Quectel
+// AT+QTEMP, MeiG AT+TEMP, Huawei AT^CHIPTEMP, SIMCom AT+CPMUTEMP. Slow-loop only
+// (temperature drifts slowly). Best-effort: an unknown vendor or a no-AT modem
+// (e.g. EG06 in MBIM mode) skips silently and keeps the last-known value.
+export function collect_temperature(self, cb)
+{
+	cb = cb ?? (() => null);
+
+	let mfr = lc(self.info?.manufacturer ?? '');
+	let cmd, parse;
+
+	if (index(mfr, 'quectel') >= 0)     { cmd = 'AT+QTEMP';    parse = atcmd.parse_qtemp; }
+	else if (index(mfr, 'meig') >= 0)   { cmd = 'AT+TEMP';     parse = atcmd.parse_meig_temp; }
+	else if (index(mfr, 'huawei') >= 0) { cmd = 'AT^CHIPTEMP'; parse = atcmd.parse_chiptemp; }
+	else if (index(mfr, 'simcom') >= 0) { cmd = 'AT+CPMUTEMP'; parse = atcmd.parse_cpmutemp; }
+	else
+		return cb();   // no known temperature command for this vendor
+
+	telemetry_at(self).send(cmd, (err, res) => {
+		if (!err) {
+			let c = parse(res?.lines);
+			self.temperature = (c != null) ? { celsius: c, source: 'at' } : null;
+		}
+		cb();
+	});
+};
+
 // tear down both AT engines opened by open_at (control + distinct telemetry
 // channel). Idempotent.
 export function close_at(self)
@@ -616,6 +645,9 @@ export function format_telemetry(o)
 
 	if (sig?.nr5g)
 		sig_part('sig_nr5g', { rsrp: [ sig.nr5g.rsrp, false ], snr: [ sig.nr5g.snr, true ] });
+
+	if (o.temperature?.celsius != null)
+		push(parts, sprintf('temp=%dC', o.temperature.celsius));
 
 	if (length(cfg.lock_4g ?? []))
 		push(parts, sprintf('lock_4g=%s', join(',', cfg.lock_4g)));

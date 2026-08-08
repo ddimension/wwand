@@ -59,6 +59,48 @@ stub.run_sequence([ 'AT' ], () => { seq_done = true; });
 ok(seq_done, 'teardown: stub run_sequence completes via callback');
 stub.close();   // must not throw
 
+// --- collect_temperature (per-manufacturer AT dispatch) ----------------------
+function temp_modem(mfr, resp) {
+	let m;
+	m = {
+		info: { manufacturer: mfr },
+		at_telemetry: { send: (cmd, cb) => { m._sent = cmd; cb(null, { lines: resp }); } },
+		_at2_open: null,
+	};
+	return m;
+}
+
+let tq = temp_modem('Quectel', [ '+QTEMP: "cpu0-0-usr","41"', 'OK' ]);
+mc.collect_temperature(tq, () => null);
+eq(tq._sent, 'AT+QTEMP', 'temp: quectel sends AT+QTEMP');
+eq(tq.temperature.celsius, 41, 'temp: quectel parsed 41 C');
+eq(tq.temperature.source, 'at', 'temp: source tagged at');
+
+let tm = temp_modem('MeiG SMART', [ '+TEMP: "soc-thmzone","38500"', 'OK' ]);
+mc.collect_temperature(tm, () => null);
+eq(tm._sent, 'AT+TEMP', 'temp: meig sends AT+TEMP');
+eq(tm.temperature.celsius, 38, 'temp: meig milli /1000');
+
+let ts = temp_modem('SIMCOM INCORPORATED', [ '+CPMUTEMP: 47' ]);
+mc.collect_temperature(ts, () => null);
+eq(ts._sent, 'AT+CPMUTEMP', 'temp: simcom sends AT+CPMUTEMP');
+eq(ts.temperature.celsius, 47, 'temp: simcom parsed 47 C');
+
+// unreadable value -> temperature cleared to null (not left stale-as-object)
+let tn = temp_modem('Quectel', [ '+QTEMP: "x","5"', 'OK' ]);
+mc.collect_temperature(tn, () => null);
+eq(tn.temperature, null, 'temp: below-floor reading -> null');
+
+// unknown vendor: no command sent, temperature untouched
+let tu = temp_modem('AcmeModem', [ '+FOO: 1' ]);
+mc.collect_temperature(tu, () => null);
+eq(tu._sent, null, 'temp: unknown vendor sends nothing');
+eq(tu.temperature, null, 'temp: unknown vendor leaves temperature unset');
+
+// format_telemetry surfaces the temperature
+ok(index(mc.format_telemetry({ reg: { radio_ifs: [] }, temperature: { celsius: 44 } }), 'temp=44C') >= 0,
+	'format_telemetry: temperature in the log line');
+
 // (2) open_at must NOT open the at2 tty eagerly (the #5 fix). Drive the real
 // open_at with a mock fx (RG650E-style 2c7c:0122 -> ttyUSB2 at + ttyUSB3 at2)
 // and a transport opener that records which ttys it opens.

@@ -30,6 +30,22 @@ const RECIPES = [
 		reset: 'AT+CFUN=1,1',
 	},
 	{
+		// Fibocom FM/FG/NL: AT+GTUSBMODE=<n>. The composition NUMBER is a raw USB
+		// layout id that is MANY-TO-ONE per chipset (QModem's table: Qualcomm QMI
+		// in {17,31,32,34}, ECM {18,23,33,35}, MBIM {29,30}, RNDIS 24; Unisoc/MTK
+		// use a different set entirely). We pick one representative Qualcomm code
+		// per protocol for the SET; the exact per-platform map + query-readback
+		// need a device, so this stays UNVERIFIED (excluded from supported()) —
+		// a wrong GTUSBMODE write can strand the modem in a dead composition.
+		unverified: true,
+		match: '^(FM|FG|NL)[0-9]',
+		query: 'AT+GTUSBMODE?',
+		query_re: /\+GTUSBMODE:\s*([0-9]+)/,
+		values: { qmi: '31', mbim: '29' },
+		set: (v) => sprintf('AT+GTUSBMODE=%s', v),
+		reset: 'AT+CFUN=1,1',
+	},
+	{
 		// Sierra/Netgear: AT!USBCOMP or AT+QCFG differs; MBIM via AT!UDUSBCOMP.
 		// Placeholder recipe kept minimal — extend when hardware is available.
 		// MC-only: the EM prefix is ambiguous (Quectel EM06/EM12 vs Sierra

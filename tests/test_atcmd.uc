@@ -340,6 +340,27 @@ eq(atcmd.parse_cops_scan([ '+COPS: (1,,,"310260",7),(2,"AT&T","ATT","310410",7)'
 
 eq(atcmd.parse_cops_scan([ 'OK' ]), [], 'cops: no operator line');
 
+// --- temperature parsers (QModem-derived) ------------------------------------
+
+// Quectel AT+QTEMP: sensor-name digits skipped, first in-range value wins
+eq(atcmd.parse_qtemp([ '+QTEMP: "cpu0-0-usr","35"', '+QTEMP: "pa1","120"' ]), 35, 'qtemp: quoted sensor,val');
+eq(atcmd.parse_qtemp([ '+QTEMP: 42' ]), 42, 'qtemp: bare value');
+eq(atcmd.parse_qtemp([ '+QTEMP: "modem-ambient","5"' ]), null, 'qtemp: below floor -> null');
+eq(atcmd.parse_qtemp([ 'OK' ]), null, 'qtemp: no line -> null');
+
+// Huawei ^CHIPTEMP: first plausible sensor across the CSV
+eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 0,38,41,45' ]), 38, 'chiptemp: first in-range (0 skipped)');
+eq(atcmd.parse_chiptemp([ 'OK' ]), null, 'chiptemp: none -> null');
+
+// SIMCom AT+CPMUTEMP: single Celsius value
+eq(atcmd.parse_cpmutemp([ '+CPMUTEMP: 47' ]), 47, 'cpmutemp: single value');
+
+// MeiG AT+TEMP: quoted sensor, milli-Celsius on Unisoc (soc-thmzone) -> /1000
+eq(atcmd.parse_meig_temp([ '+TEMP: "soc-thmzone","38500"' ]), 38, 'meig temp: milli soc-thmzone /1000');
+eq(atcmd.parse_meig_temp([ '+TEMP: "cpu0-0-usr","44"' ]), 44, 'meig temp: plain cpu sensor');
+eq(atcmd.parse_meig_temp([ '+TEMP: "board","39"' ]), 39, 'meig temp: fallback first plausible');
+eq(atcmd.parse_meig_temp([ 'OK' ]), null, 'meig temp: none -> null');
+
 // --- find_tty ----------------------------------------------------------------
 
 const BASE = '/sys/class/usbmisc/cdc-wdm0/device/..';
@@ -366,6 +387,20 @@ function quectel_fx(over)
 
 // exact lookup: RG502Q AT port is interface 2 -> ttyUSB2
 eq(atcmd.find_tty(quectel_fx(), '/dev/cdc-wdm0', null), '/dev/ttyUSB2', 'find: atport lookup');
+
+// PCIe/MHI modem: no USB tty siblings -> AT port is a wwan/MHI char device
+let mhi_fx = fakefx.create({
+	globs: {
+		[sprintf('%s/*/tty*', BASE)]: [],           // no USB ttys under the modem
+		'/dev/wwan*at*': [ '/dev/wwan0at0' ],
+	},
+});
+eq(atcmd.find_tty(mhi_fx, '/dev/cdc-wdm0', null), '/dev/wwan0at0', 'find: MHI/wwan AT char-dev fallback');
+
+// direct find_mhi_at: wwan subsystem preferred, then legacy mhi_DUN, else null
+eq(atcmd.find_mhi_at(fakefx.create({ globs: { '/dev/mhi_*DUN*': [ '/dev/mhi_0306_00.01.00_DUN' ] } })),
+	'/dev/mhi_0306_00.01.00_DUN', 'find_mhi_at: legacy mhi_DUN node');
+eq(atcmd.find_mhi_at(fakefx.create({})), null, 'find_mhi_at: no MHI node -> null');
 
 // NCM: `device` is a netdev name (no usbmisc anchor) — the net-class fallback
 // must find the ttys, incl. the LOCAL_PORTS role pick (MeiG SLM770A ECM: if4).

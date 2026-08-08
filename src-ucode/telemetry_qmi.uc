@@ -216,16 +216,20 @@ export function install(self, o)
 				return;
 
 			self.nas.request('GET_CELL_LOCATION_INFO', {}, (err, data) => {
-				if (!err) {
+				if (!err)
 					store_cells(data);
-					self._log_telemetry();
-				}
-				else if (err.error != 'cancelled') {
+				else if (err.error != 'cancelled')
 					log('warn', sprintf('telemetry: cell location query failed: %J', err));
-				}
 
-				if (self.nas)
-					telemetry_timer = uloop.timer(interval, tick);
+				// modem temperature over the AT side channel (best-effort, slow
+				// loop) — then log the full telemetry line and reschedule
+				modem_common.collect_temperature(self, () => {
+					if (!err)
+						self._log_telemetry();
+
+					if (self.nas)
+						telemetry_timer = uloop.timer(interval, tick);
+				});
 			});
 		};
 

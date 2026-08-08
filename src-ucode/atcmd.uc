@@ -162,10 +162,31 @@ export const parse_celllock = parse.parse_celllock;
 export const parse_ati = parse.parse_ati;
 export const parse_cops_read = parse.parse_cops_read;
 export const parse_cops_scan = parse.parse_cops_scan;
+export const parse_qtemp = parse.parse_qtemp;
+export const parse_chiptemp = parse.parse_chiptemp;
+export const parse_cpmutemp = parse.parse_cpmutemp;
+export const parse_meig_temp = parse.parse_meig_temp;
 
 // --- AT port discovery -------------------------------------------------------
 
 const ROLE_PREFERENCE = { at: 3, at2: 2, ppp: 1 };
+
+// PCIe / M.2 modems on the MHI bus (RG500Q-M.2, RM5xx, Foxconn T99W, SDX-class)
+// expose NO USB tty siblings — their AT port is an MHI or wwan-subsystem
+// character device. Probe those nodes directly (QModem probes /dev/mhi_DUN* and
+// /dev/wwan*). Modern kernels expose it via the wwan subsystem (/dev/wwanNatM);
+// older MHI stacks as /dev/mhi_<...>_DUN. Returns the first match or null.
+export function find_mhi_at(fx)
+{
+	for (let pat in [ '/dev/wwan*at*', '/dev/mhi_*DUN*', '/dev/mhi_DUN*' ]) {
+		let hits = sort(fx.glob(pat) ?? []);
+
+		if (length(hits))
+			return hits[0];
+	}
+
+	return null;
+};
 
 // find_tty(fx, device, tty_override, base_override):
 //   device        a cdc-wdm control device ('/dev/cdc-wdmN'); the USB parent is
@@ -231,8 +252,10 @@ export function find_tty(fx, device, tty_override, base_override)
 		});
 	}
 
+	// no USB tty siblings: on a PCIe/MHI modem the AT port is an MHI/wwan char
+	// device instead — probe those before giving up
 	if (!length(found))
-		return null;
+		return find_mhi_at(fx);
 
 	// exact role lookup via USB ids
 	let vid = lc(trim(fx.read(sprintf('%s/idVendor', base)) ?? ''));

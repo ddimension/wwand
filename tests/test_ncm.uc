@@ -620,6 +620,23 @@ eq(modem_ncm.vendor_for('neoway').dials[0].connect(2), 'AT$MYUSBNETACT=0,1', 'ne
 eq(modem_ncm.vendor_for('telit').dials[1].connect(3), 'AT#ICMAUTOCONN=1,3', 'telit fallback dial = #ICMAUTOCONN');
 eq(modem_ncm.vendor_for('meig').dials[1].connect(4), 'AT$QCRMCALL=1,0,3,2,4', 'meig fallback dial = 5-arg $QCRMCALL');
 
+// P2 correctness fixes: internal-dialer disable + Sierra AT! unlock at init
+ok(index(modem_ncm.vendor_for('Huawei Technologies').modem_init, 'AT^SETAUTODIAL=0') >= 0,
+	'huawei init disables the internal auto-dialer (SETAUTODIAL=0)');
+ok(index(modem_ncm.vendor_for('Sierra Wireless, Incorporated').modem_init, 'AT!ENTERCND="A710"') >= 0,
+	'sierra init unlocks AT! via ENTERCND before any AT! config');
+
+// generic-variant audit: the standard 3GPP context (CGDCONT) is ALWAYS defined,
+// even for vendors whose context define is proprietary (ZTE/MikroTik ZGDCONT),
+// so the generic AT+CGACT dial fallback has a valid context to activate
+let zte_setup = modem_ncm.build_pdp_setup(modem_ncm.vendor_for('ZTE Corporation'), 1,
+	{ apn: 'web', pdp_type: 'ipv4v6' });
+ok(index(zte_setup, 'AT+CGDCONT=1,"IPV4V6","web"') >= 0, 'zte: generic CGDCONT co-set (not only ZGDCONT)');
+ok(length(filter(zte_setup, (c) => match(c, /^AT\+ZGDCONT=/) != null)) == 1, 'zte: vendor ZGDCONT still layered on top');
+// a vendor without a custom define emits CGDCONT exactly once
+let q_setup = modem_ncm.build_pdp_setup(modem_ncm.vendor_for('Quectel'), 1, { apn: 'web' });
+eq(length(filter(q_setup, (c) => match(c, /^AT\+CGDCONT=/) != null)), 1, 'quectel: single generic CGDCONT');
+
 run_next();
 uloop.run();
 
