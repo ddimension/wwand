@@ -1,7 +1,40 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-08. All test suites green (39 suites, ~1648 checks).
+_Last updated: 2026-08-08. All test suites green (39 suites, ~1667 checks).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## FCC unlock + stable L3 names + doc overhaul (2026-08-08 pm)
+
+- **FCC RF unlock** for laptop-SKU modems that boot radio-locked (Lenovo/Dell/
+  HP Quectel EM1xx, Foxconn SDX55/SDX62, DW5821e). QMI: after set-online,
+  `GET_OPERATING_MODE` verifies the mode and, if stuck in low power, runs the
+  `fcc_auth` chain (`option fcc_auth`: auto=dms→foxconn, off, or explicit
+  incl. `foxconn:<magic>` / `foxconn2:<str>:<num>`) then retries online —
+  DMS 0x555F / Foxconn 0x5571 v1+v2 verified vs libqmi 1.38. MBIM:
+  `codec/mbim-schema/quectel.uc` (vendor UUID, RADIO_STATE cid 1, vs libmbim
+  1.32), `option fcc_auth 'quectel'` sends radio-state ON after OPEN. LuCI
+  Combobox + reference.md; test_modem auto-chain + off scenarios.
+- **Stable L3 device names `wwand0`…`wwand100`**: every context gets a
+  deterministic datapath name in one flat namespace (config order), an
+  explicit `option device` pins it. Non-mux datapaths (QMI/MBIM without mux,
+  NCM/ECM) rename the kernel netdev via netlink; mux children are created
+  under the wwandN name; the muxed **parent keeps its kernel name**. Name
+  conflict → error-log, kernel name kept. learn_device write-back pins the
+  number. Autosetup pre-pins `wwand0`. HW-verified on all four datapath
+  variants: Chateau QMI non-mux (wwan0→wwand1) + QMI mux child (wwand0,
+  parent untouched), Cudy NCM (usb0→wwand0), 246 MBIM non-mux (wwan0→wwand0,
+  public IP intact) — all reconnected. (246 converted to the modern
+  wwand_modem+option-modem model for the test; backup at
+  /etc/config/network.bak-wwandtest.)
+- **Docs**: new `docs/README.md` (documentation map, AI-friendly) and
+  `docs/connection-flow.md` (a dial-in walked through from the wwand, modem
+  and network side, with per-phase extension hooks); reference.md gains a TOC
+  + a "Configuration workflows" chapter (fresh box, manual, 2nd APN/modem,
+  per-SIM, eSIM, radio pin, FCC, migration); the `fcc_auth` option and the
+  L3-naming model documented; extending.md gains the explicit-parse trap
+  note. LuCI proto L3-device help + placeholder updated to wwandN.
+- **LuCI screenshots** can be produced headlessly (Chrome + CDP with the
+  session cookie) — captured Modems / Status / Modem Tools for review.
 
 ## Re-audit follow-up + generic modem reset (2026-08-08)
 

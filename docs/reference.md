@@ -5,6 +5,21 @@ in ucode. It owns the modem's control port, drives netifd, and exposes a ubus
 API. This document is the reference for configuration, the ubus API, diagnostics
 and troubleshooting. For the design rationale see [architecture.md](architecture.md);
 to add a modem, quirk or backend see [extending.md](extending.md).
+How a connection actually comes up — from the wwand, modem and network
+perspective — is [connection-flow.md](connection-flow.md); the documentation
+map is [README.md](README.md).
+
+**Contents:** [Zero-config autosetup](#zero-config-autosetup) ·
+[Configuration](#configuration) ·
+[Configuration workflows](#configuration-workflows) ·
+[netifd integration](#netifd-integration-no-proto-task) ·
+[Deployment examples](#deployment-examples) (multi-PDN/mux, VRF, DMZ,
+dual-stack) · [Performance & tuning](#performance--tuning) ·
+[ubus API](#ubus-api) · [eSIM](#esim-management--provisioning) ·
+[SMS](#sms) · [Board integration](#board-integration) ·
+[Telemetry & diagnostics](#telemetry--diagnostics) ·
+[Troubleshooting](#troubleshooting) · [Quirk handling](#quirk-handling) ·
+[Glossary](#glossary) · [FAQ](#faq) · [Development](#development)
 
 ## Zero-config autosetup
 
@@ -277,6 +292,88 @@ obsolete and ignored with a warning. A `disabled` interface is skipped entirely.
 
 `/usr/libexec/wwand/migrate` prints the equivalent native configuration (dry
 run); `--apply` writes it and strips the old options from the network sections.
+
+## Configuration workflows
+
+Task-oriented recipes. Each ends in an ordinary `/etc/config/network` you can
+keep editing by hand; LuCI (Network → Modems, the per-interface proto dialog
+and Network → Modem Tools) performs the same edits through the same model.
+
+### Fresh box (zero-config)
+
+Plug the modem in, boot, done — autosetup creates `wwmodem_auto` +
+`interface wwan0` (device `wwand0`, wan firewall zone) and fills the APN from
+the SIM's ICCID/IMSI once (see [Zero-config autosetup](#zero-config-autosetup)).
+Check with `ubus call wwand status`; then edit APN/PIN in place if needed.
+
+### Manual single modem
+
+```
+config wwand_modem 'm0'
+	option path '…/usb3/3-1'         # from: ubus call wwand modem_probe
+	option pincode '1234'
+
+config interface 'wan'
+	option proto 'wwand'
+	option modem 'm0'
+	option apn 'internet'
+```
+
+`modem_probe` lists detected control devices with their stable `path`; leave
+`apn` empty to attach with the SIM/modem-provisioned APN. The L3 device gets
+the next free `wwandN` name and is written back as `option device`.
+
+### A second APN / PDN on the same modem (mux)
+
+Add another interface with a `mux_id` — see the multi-PDN example under
+[Deployment examples](#deployment-examples). QMI/MBIM only; NCM is single-PDN.
+
+### A second modem
+
+Add another `wwand_modem` (anchor it with `path` — USB enumeration order is
+not stable) and its own interface. Each connection gets its own `wwandN`
+device; firewall/VRF rules can rely on those names. `option serial`/`imei`
+add identity pinning on top (the daemon refuses a foreign modem on a bound
+path).
+
+### Per-SIM settings / dual-SIM
+
+`config wwand_sim` sections match the *active card* by ICCID (or IMSI) and
+override pincode/apn/credentials — nothing to reconfigure when swapping SIMs;
+see [Configuration](#configuration). Physical slot switching:
+`ubus call wwand modem_sim_switch_slot` or the SIM panel in LuCI Modem Tools
+(`option sim_slot` selects the boot-time slot).
+
+### eSIM: download and switch profiles
+
+LuCI → Modem Tools → eSIM (or `ubus call wwand modem_esim`): list profiles,
+download via activation code (lpac/SM-DP+), enable/disable/delete — writes go
+through lpac, then wwand hot-resets the SIM and re-applies identity-matched
+config ([eSIM management & provisioning](#esim-management--provisioning)).
+M2M eUICCs (operator-managed, SGP.02) have no local management — wwand
+reports `m2m_or_locked_euicc` instead of failing cryptically.
+
+### Pin the radio: modes, bands, cell lock
+
+`option modes` (e.g. `lte`, `nr5g`), band preferences via LuCI Modem
+Tools → Settings (deferred-apply modems get an explicit "reset to apply"
+button), `lock_4g`/`lock_5g` for hard cell locks with live candidates from
+the cell scan ([Configuration](#configuration), Troubleshooting for the
+scan).
+
+### FCC-locked laptop modem
+
+If a Lenovo/Dell/HP-SKU modem stays in low power (no RF), set
+`option fcc_auth` — or leave the default `auto`, which tries the known QMI
+unlock messages by itself; MBIM-mode Quectel needs the explicit `quectel`
+value. See the option in [Configuration](#configuration).
+
+### Migrating from stock qmi/mbim/ncm or old wwand configs
+
+Nothing to do: the uci-defaults migrator converts stock `proto qmi`/`mbim`/
+`ncm` interfaces and old `/etc/config/wwand` files into the native model on
+upgrade, and the daemon reads the legacy formats directly in the meantime.
+Details: [Configuration](#configuration) (migration notes).
 
 ## netifd integration (no-proto-task)
 

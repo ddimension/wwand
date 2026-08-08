@@ -120,6 +120,11 @@ option (say a modem option `foo`):
 6. **LuCI + docs** — a form field (see §6) and a row in `docs/reference.md`.
 7. **Test** — a `test_config` case asserting it parses.
 
+> **Trap:** the parser copies fields **explicitly** — an option that exists in
+> `modem_defaults()` but is not read in step 2 parses to its default and
+> silently never reaches the runtime. The `test_config` pass-through assertion
+> in step 7 is what catches this.
+
 The config model itself (`wwand_modem` / `wwand_sim` / `interface option modem` /
 `wwand_globals`, all in `/etc/config/network`) is described in
 [reference.md → Configuration](reference.md#configuration).

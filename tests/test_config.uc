@@ -345,6 +345,14 @@ r = config.parse({
 });
 eq(r.contexts.wan.l3_name, 'wwand0', 'l3: /dev control path -> auto name');
 
+// modem hardware-quirk options reach the modem config
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', fcc_auth: 'foxconn:0' },
+	},
+});
+eq(r.modems.m0.fcc_auth, 'foxconn:0', 'modem: fcc_auth passed through');
+
 // wwand_sim.modem is OPTIONAL: an unbound sim applies to every modem (matched
 // by ICCID), a bound one only to its modem
 r = config.parse({
