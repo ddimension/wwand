@@ -1,11 +1,8 @@
 // wwand — per-vendor NCM/AT telemetry blocks (extracted from modem_ncm.uc).
-//
 // The telemetry AT differs per manufacturer; each exported table provides
-// best-effort steps, each taking the modem `self` + a completion cb and
-// mutating self.signal / self.cells / self.reg_detail using self.at (see the
-// section comment below for the exact step contract and metric scaling —
-// shapes match the QMI backend so LuCI renders identically). modem_ncm.uc
-// wires the tables onto its VENDORS entries.
+// best-effort steps (see the step contract + metric scaling below). Shapes match
+// the QMI backend so LuCI renders identically. modem_ncm.uc wires the tables
+// onto its VENDORS entries.
 
 'use strict';
 
@@ -44,10 +41,9 @@ function parse_csq(lines)
 
 // --- per-vendor telemetry ----------------------------------------------------
 //
-// The telemetry AT differs per manufacturer, so each VENDORS entry carries a
-// `telemetry` block instead of the loop hard-coding Quectel commands. A block
-// provides best-effort steps, each taking the modem `self` + a completion cb and
-// mutating self.signal / self.cells / self.reg_detail using self.at:
+// Each block provides best-effort steps, each taking the modem `self` + a
+// completion cb and mutating self.signal / self.cells / self.reg_detail via
+// self.at:
 //   signal(self, cb)      -> self.signal      (RSSI/RSRP/RSRQ/SNR per RAT)
 //   cells(self, cb)       -> self.cells        (QMI GET_CELL_LOCATION_INFO shape:
 //                                               lte_intra/lte_inter/nr5g_cell + serving)

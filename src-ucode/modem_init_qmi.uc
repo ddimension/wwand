@@ -1,16 +1,13 @@
-// wwand — QMI modem bring-up chain (extracted from the modem.uc mega-closure).
+// wwand — QMI modem bring-up chain (extracted from modem.uc).
 //
 // install(self, o) wires the linear init flow
 //   sync -> services/clients -> AT port -> esim quirk -> batched init reset
 //   -> datapath -> opmode -> sim slot -> sim unlock -> identity -> confnet
 //   -> validate -> attach profile -> register
-// and returns { begin } (the start() entry). o = { log, emit,
-// notify_contexts, fail, dp, at_opts, tm } — `tm` is modem.uc's shared
-// one-shot timer holder (teardown cancels), `fail` the recovery-aware
-// failure path (modem_common.make_fail). All state stays on `self`; the
-// self-attached methods the chain calls (_read_info, validate_config,
-// collect_regdetail, _install_*_handlers, alloc) are attached by modem.uc
-// before start() runs.
+// and returns { begin } (the start() entry). o = { log, emit, notify_contexts,
+// fail, dp, at_opts, tm } — `tm` is modem.uc's shared one-shot timer holder,
+// `fail` the recovery-aware failure path. All state stays on `self`; the
+// self-attached methods the chain calls are installed by modem.uc before start().
 
 'use strict';
 
@@ -42,9 +39,9 @@ export function install(self, o)
 
 	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, verify_online, step_simslot, step_sim, step_identity, step_confnet, step_validate, step_attach_profile, step_register;
 
-	// the DMS model was junk and the USB descriptor filled in (generic
-	// "HUAWEI Mobile" style): ATI usually knows the real model — upgrade the
-	// identity off the critical path once the AT channel is open.
+	// DMS model was junk and the USB descriptor filled in (generic "HUAWEI Mobile"
+	// style): ATI usually knows the real model — upgrade identity off the critical
+	// path once the AT channel is open.
 	let _ati_info = () => {
 		if (!self._model_generic || !self.at)
 			return;
@@ -67,9 +64,8 @@ export function install(self, o)
 	step_sync = (tries) => {
 		self.set_state('INIT_TRANSPORT');
 
-		// deferred init resets: steps that change NV settings needing a modem
-		// reset push a reason here; one reset is applied at the end of the AT
-		// config phase instead of resetting mid-init several times
+		// deferred init resets: NV-changing steps push a reason here; ONE reset is
+		// applied at the end of the AT config phase (not mid-init several times)
 		self._init_resets = [];
 
 		self.ctl.request('SYNC', {}, (err) => {
@@ -126,8 +122,7 @@ export function install(self, o)
 							self.wds_cfg = wds;
 
 							// DSD (Data System Determination): optional, gives the
-							// clean LTE / 5G-NSA / 5G-SA data-system status. Absent
-							// on older modems — non-fatal.
+							// clean LTE / 5G-NSA / 5G-SA status; absent on older modems.
 							if (self.services[sprintf('%d', dsdmod.default.service)]) {
 								self.alloc(dsdmod.default, (e5, dsd) => {
 									self.dsd = e5 ? null : dsd;
@@ -143,9 +138,8 @@ export function install(self, o)
 						});
 					};
 
-					// The WMS (SMS) client is NOT allocated here — it is lazily
-					// brought up on the first SMS operation via _ensure_wms, so the
-					// wms schema stays off the heap until SMS is actually used.
+					// WMS (SMS) is NOT allocated here — brought up lazily on the
+					// first SMS op via _ensure_wms (wms schema off the heap until used).
 					if (self.services[sprintf('%d', uimmod.default.service)]) {
 						self.alloc(uimmod.default, (e3, uim) => {
 							if (e3) {
@@ -180,13 +174,11 @@ export function install(self, o)
 		reopen_next: step_datapath,
 	});
 
-	// eSIM host-access quirk: free the eUICC's ISD-R from the modem's internal
-	// LPA so host-side ES10 APDUs (CCHO/CGLA) work. Disabling lpa_enable only
-	// takes effect after a reset — but instead of resetting here, we just flag
-	// the reset and let step_apply_init_reset do a single reset at the end of
-	// the AT config phase. Reset happens ONLY when we changed the value (it is
-	// NV, so at most once per modem). Network is unaffected (the active profile
-	// keeps working with the LPA disabled).
+	// eSIM host-access quirk: free the eUICC's ISD-R from the modem's internal LPA
+	// so host-side ES10 APDUs (CCHO/CGLA) work. Disabling lpa_enable takes effect
+	// only after a reset, so we flag the reset (batched by step_apply_init_reset)
+	// and only when we actually changed the value (NV, so at most once per modem).
+	// Network is unaffected (the active profile keeps working with the LPA off).
 	step_esim_quirk = () => {
 		let q = atcmd.esim_quirks(self.info.model);
 
@@ -210,11 +202,10 @@ export function install(self, o)
 		}, { timeout: 8000 });
 	};
 
-	// apply a single reset if any AT-config step requested one (NV changes that
-	// need a power cycle). The reset re-enumerates the modem; discovery re-inits
-	// it and this time nothing needs changing, so no reset is requested and init
-	// proceeds normally. Do NOT continue init here when resetting — this
-	// instance is being torn down.
+	// apply a single reset if any AT-config step requested one. The reset
+	// re-enumerates the modem; discovery re-inits it (nothing left to change, so
+	// no reset that pass) and init proceeds normally. Do NOT continue init here
+	// when resetting — this instance is being torn down.
 	step_apply_init_reset = () => {
 		if (!length(self._init_resets ?? []))
 			return step_datapath();
@@ -222,10 +213,9 @@ export function install(self, o)
 		log('notice', sprintf('applying deferred init reset (%s)',
 			join('; ', self._init_resets)));
 
-		// one batched reset for everything collected during init: AT when a
-		// command port exists, otherwise the DMS offline->reset sequence. A
-		// refused reset is only logged — the modem stays up on its old
-		// settings and the next boot retries (nothing to recover here).
+		// one batched reset: AT when a command port exists, else DMS offline->reset.
+		// A refused reset is only logged — the modem stays on its old settings and
+		// the next boot retries.
 		let logerr = (what) => (err) => {
 			if (err)
 				log('warn', sprintf('init reset via %s refused: %J — settings apply at the next reboot', what, err));
@@ -242,7 +232,7 @@ export function install(self, o)
 		step_datapath();
 	};
 
-	// datapath bring-up — extracted to datapath_qmi.uc (audit round)
+	// datapath bring-up (datapath_qmi.uc)
 	step_datapath = () => datapath_qmi.setup(self, dp, { log: log, fail: fail }, step_opmode);
 
 	step_opmode = () => {
@@ -361,9 +351,9 @@ export function install(self, o)
 		});
 	};
 
-	// pick the per-SIM override (config wwand_sim) matching the active card BEFORE
-	// unlock, so its pincode is used. The MF-level ICCID is readable on a locked
-	// card, and the extra read only runs when overrides are actually configured.
+	// match the per-SIM override (config wwand_sim) BEFORE unlock so its pincode is
+	// used. The MF-level ICCID is readable on a locked card; the extra read only
+	// runs when overrides are configured.
 	let resolve_active_sim = (next) => {
 		self.active_sim = null;
 
@@ -388,10 +378,9 @@ export function install(self, o)
 		self.set_state('SIM_UNLOCK');
 		resolve_active_sim(() => sim.unlock(self, (err, status) => {
 			if (err?.blocked) {
-				// identify the card before going terminal so the log says
-				// *which* SIM tripped the PIN guard. EF-IMSI is PIN-protected
-				// and may read as null on a locked card; the MF-level ICCID
-				// is readable regardless.
+				// identify the card before going terminal so the log says *which*
+				// SIM tripped the PIN guard. EF-IMSI is PIN-protected (may read null
+				// on a locked card); the MF-level ICCID is readable regardless.
 				sim.read_identity(self, (id) => {
 					self.info.imsi = id.imsi;
 					self.info.iccid = id.iccid;
@@ -438,13 +427,11 @@ export function install(self, o)
 			log('notice', sprintf('imsi %s, iccid %s, msisdn %s',
 				id.imsi ?? '?', id.iccid ?? '?', id.msisdn ?? '?'));
 
-			// late per-SIM match: the pre-unlock matcher only sees the ICCID
-			// (readable on a locked card). Now that the IMSI is readable,
-			// accept an explicit `option imsi` — or an IMSI mistakenly put in
-			// the iccid field — so the carrier bundle (apn/auth/credentials)
-			// still applies. Runs BEFORE step_attach_profile, so the LTE
-			// attach APN honors the override too. PIN overrides still need
-			// `option iccid` (the PIN was consumed before this point).
+			// late per-SIM match: the pre-unlock matcher only saw the ICCID. Now the
+			// IMSI is readable, accept an explicit `option imsi` (or an IMSI put in
+			// the iccid field) so the carrier bundle still applies. Runs BEFORE
+			// step_attach_profile so the LTE attach APN honors it too. PIN overrides
+			// still need `option iccid` (the PIN was consumed before this point).
 			if (!self.active_sim && id.imsi) {
 				self.active_sim = match_sim_override(null, id.imsi);
 
@@ -492,13 +479,11 @@ export function install(self, o)
 					if (tries < MODES_TRIES)
 						return attempt(tries + 1);
 
-					// AT fallback hook lands here with M6
 					log('warn', sprintf('failed to set system selection: %J', err));
 					emit('modes_failed', { err: err });
 				} else if (self._init_resets && modem_quirks.for_model(self.info?.model).settings_deferred) {
-					// boot rule: during init a modem reset is always allowed so
-					// the values actually apply — but BATCHED: push a reason and
-					// let step_apply_init_reset issue ONE reset at the end.
+					// batched: push a reason, step_apply_init_reset issues ONE
+					// reset at the end so the deferred values actually apply
 					push(self._init_resets, 'system selection preference');
 				}
 
@@ -506,12 +491,11 @@ export function install(self, o)
 			});
 		};
 
-		// idempotency guard: read the live preference first and drop whatever
-		// already matches — the boot path must not bounce the radio for values
-		// the modem NV already carries. The manual-PLMN target itself is not
-		// readable here (the GET carries only the selection TYPE and the
-		// registration is not up yet at CONFIGURE_NET), so a configured manual
-		// selection is conservatively (re-)applied.
+		// idempotency guard: read the live preference and drop whatever matches —
+		// the boot path must not bounce the radio for values NV already carries.
+		// The manual-PLMN target is not readable here (the GET carries only the
+		// selection TYPE, and registration is not up yet at CONFIGURE_NET), so a
+		// configured manual selection is conservatively (re-)applied.
 		self.nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
 			if (!gerr && cur) {
 				if (args.mode_preference != null && cur.mode_preference == args.mode_preference) {
@@ -533,17 +517,14 @@ export function install(self, o)
 		});
 	};
 
-	// runtime config validation: after step_confnet has APPLIED the config-derived
-	// NAS prefs, confirm the LIVE modem actually reflects config + per-model quirks
-	// and record any mismatch in self.config_warnings (surfaced on ubus + logged).
-	// Complements config.uc's static parse-time warnings. Non-fatal: a check that
-	// cannot read simply skips, and init proceeds to the attach profile regardless.
+	// runtime config validation: confirm the LIVE modem reflects config + per-model
+	// quirks, recording mismatches in self.config_warnings (ubus + log). Non-fatal;
+	// complements config.uc's static parse-time warnings.
 	step_validate = () => self.validate_config(() => step_attach_profile());
 
-	// program the LTE attach profile (CID1) from the primary context's config
-	// BEFORE registration so the modem's autonomous attach uses the right APN +
-	// IP family. If it changed, cycle the radio (low-power -> online) so an
-	// attach already in flight with the stale profile re-runs. See context.uc
+	// program the LTE attach profile (CID1) BEFORE registration so the autonomous
+	// attach uses the right APN + IP family. On a change, cycle the radio so an
+	// in-flight attach with the stale profile re-runs. See context.uc
 	// ensure_attach_profile / the EMM #33 IPv4-only-attach finding.
 	step_attach_profile = () => {
 		let ctx = self.contexts[0];
@@ -581,11 +562,10 @@ export function install(self, o)
 			if (err)
 				log('warn', sprintf('register indications failed: %J', err));
 
-			// early probe: surface a reject cause / limited service within
-			// seconds (into the log + status reg_detail) instead of only at the
-			// full 240s registration timeout — an attach reject (e.g. #33) shows
-			// up almost immediately once the modem camps
-			// parked in tm so teardown cancels it (holder contract)
+			// early probe: surface a reject cause / limited service within seconds
+			// (an attach reject e.g. #33 shows up almost immediately once the modem
+			// camps) instead of only at the full 240s timeout. Parked in tm so
+			// teardown cancels it.
 			tm.probe = uloop.timer(self.timing.regdetail_probe ?? 12000, () => {
 				tm.probe = null;
 
@@ -605,8 +585,8 @@ export function install(self, o)
 				if (self.state != 'REGISTERING')
 					return;
 
-				// surface WHY we're still not registered before failing —
-				// EMM reject cause / limited service (see reg #33 attach finding)
+				// surface WHY we're still not registered before failing — EMM
+				// reject cause / limited service (see reg #33 attach finding)
 				self.collect_regdetail((d) => {
 					if (d && (d.reject_text != null || d.reject_cause != null))
 						log('warn', sprintf('not registered: %s%s',

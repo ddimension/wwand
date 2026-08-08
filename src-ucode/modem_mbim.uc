@@ -118,7 +118,6 @@ export function create(opts)
 		self._ensure_pt((ok) => cb(ok ? self.pt.nas : null));
 	};
 
-	// convenience wrapper used by contexts
 	self.command = function(name, kind, args, cb, o) {
 		self.mbim.command(bc, name, kind, args, cb, o);
 	};
@@ -502,7 +501,6 @@ export function create(opts)
 			for (let svc in (vdata.services ?? []))
 				have[sprintf('%d', svc.service)] = true;
 
-			// allocate a CID and wrap a client for `schema` over the shim
 			let alloc = (schema, done) => {
 				ctl.request('ALLOCATE_CID', { service: schema.service }, (aerr, adata) => {
 					if (aerr || !adata?.allocation)

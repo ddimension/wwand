@@ -1,8 +1,5 @@
-// wwand — helpers shared by the QMI (modem.uc) and MBIM (modem_mbim.uc) modem
-// state machines, so both backends (and future ones) reuse the same plumbing
-// instead of duplicating it. Everything here is protocol-neutral: it operates
-// on the modem `self` object through the small contract both backends share
-// (self.device, self.config, self.info, self.at, self.at_tty).
+// wwand — protocol-neutral helpers shared by the QMI/MBIM/NCM modem state
+// machines (operate on the modem `self` object).
 
 'use strict';
 
@@ -12,30 +9,8 @@ import * as netlink from './netlink.uc';
 import * as tlv from './codec/tlv.uc';
 import * as nasmod from './codec/schema/nas.uc';
 
-// open_at(self, o): best-effort AT side-channel bring-up. Discovers the AT tty,
-// opens it, runs model-init + configured at_init + cell-lock commands, wires the
-// M9200B serial-drain quirk, then calls o.next(). Leaves self.at/self.at_tty set
-// (or unset when there is no usable AT port — always non-fatal). This is the
-// single copy of what both modems' step_at used to implement independently; the
-// MBIM copy previously skipped model-init + the drain quirk, so folding them here
-// also brings MBIM to parity.
-//
-// o = {
-//   at_opts?:        { fx?, open_transport? }  (test injection; else real deps)
-//   log:             (level, msg) => …
-//   drain_interval?: ms for the M9200B drain tick (default 60000)
-//   set_drain_timer: (timer) => …  stores the drain timer where the modem's
-//                                  teardown already cancels it
-//   next:            () => …  continue the init chain
-//   reopen_next?:    () => …  continuation when self.at is already open
-//                             (defaults to next)
-// }
-// dsd_from_serving(serving): derive the data-system mode from an AT QENG
-// serving-cell detail (Quectel states NSA/SA directly). Returns { mode, lte, nr }
-// or null. Shared by the QMI and MBIM data-mode resolvers.
 // scrub NAS cell-info sentinel metrics (-32768 = "not measured") to null so
-// consumers never render the sentinel as a real dBm value. Shared by the QMI
-// and MBIM(passthrough) cell telemetry.
+// consumers never render the sentinel as a real dBm value.
 export function clean_cell_metrics(cells)
 {
 	let scrub = (c) => {
@@ -66,12 +41,10 @@ export function dsd_from_serving(serving)
 	return mode ? { mode: mode, lte: lte, nr: nr } : null;
 };
 
-// nitz_epoch(ut): convert a QMI NAS Network-Time "Universal Time" struct
-// { year, month, day, hour, minute, second } (already UTC) to a Unix epoch, or
-// null if the fields are absent or implausible. QMI months are 1-based — the
-// same convention timegm() expects. Pure: the caller decides whether to apply it
-// (e.g. only when the system clock is clearly unset). Guards against a modem that
-// pushes a zeroed NITZ frame before it has a real network time.
+// convert a QMI NAS Network-Time "Universal Time" struct (already UTC) to a Unix
+// epoch, or null if absent/implausible. QMI months are 1-based (as timegm()
+// expects). Guards against a modem pushing a zeroed NITZ frame before it has a
+// real network time.
 export function nitz_epoch(ut)
 {
 	if (ut?.year == null || ut.year < 2000 || ut.year > 2200 ||
@@ -84,9 +57,8 @@ export function nitz_epoch(ut)
 	});
 };
 
-// dsd_from_radio(radio_ifs): derive a coarse mode from NAS radio interfaces
-// (last-resort fallback; can't see NSA — an NSA anchor reports LTE only here).
-// radio_ifs: 8=LTE, 12=5GNR. Returns { mode, lte, nr } or null.
+// derive a coarse mode from NAS radio interfaces (last-resort fallback; can't
+// see NSA — an NSA anchor reports LTE only here). radio_ifs: 8=LTE, 12=5GNR.
 export function dsd_from_radio(radio_ifs)
 {
 	let lte = false, nr = false;
@@ -100,21 +72,13 @@ export function dsd_from_radio(radio_ifs)
 	return mode ? { mode: mode, lte: lte, nr: nr } : null;
 };
 
-// IMEI digits that uniquely identify a device: TAC (8) + serial (6) = 14. Drops
-// the trailing IMEI check digit and the IMEISV software-version, so a modem that
-// reports IMEI (15) and a config that pinned IMEISV (16) — or vice versa — still
-// compare equal. Non-digits (spaces, dashes) are stripped.
+// the 14 identifying IMEI digits (TAC+serial), dropping the check digit and any
+// IMEISV software-version so IMEI (15) and IMEISV (16) forms compare equal.
 function imei_key(s)
 {
 	return substr(replace(sprintf('%s', s ?? ''), /[^0-9]/g, ''), 0, 14);
 }
 
-// check_identity(self, o): the post-open identity gate, backend-neutral. Call it
-// right after self.info.imei is populated. Always emits 'identity' (so the daemon
-// can learn/record the IMEI); when the config pinned `imei` and the modem reports
-// a DIFFERENT device, this is the wrong physical modem for this config — bringing
-// it up would apply the wrong SIM/PIN/APN — so it emits 'identity_mismatch' and
-// returns false (the caller must halt its bring-up chain). Returns true to proceed.
 // every modem state any backend may enter — the single source of truth for
 // the names (the per-backend step chains use different subsets). set_state
 // warns (does not refuse) on a name missing here: a typo'd state string
@@ -134,8 +98,7 @@ export const MODEM_STATES = {
 	READY: true,
 };
 
-// timing defaults shared by all three backends; each backend spreads its
-// extras on top ({ ...TIMING_BASE, ...backend_extras, ...opts.timing })
+// timing defaults shared by all backends; each spreads its extras on top.
 export const TIMING_BASE = {
 	settle: 2000,          // settle after operating-mode changes
 	reg_timeout: 240000,   // registration guard
@@ -145,9 +108,7 @@ export const TIMING_BASE = {
 
 // match a configured wwand_sim list against a card identity: ICCID first
 // (authoritative — needed for PIN overrides; trailing-F padding tolerated),
-// then IMSI (option imsi, or an IMSI put into the iccid field — a frequent
-// config mistake). Shared by all three modem backends. Returns the matching
-// entry or null.
+// then IMSI (option imsi, or an IMSI mistakenly put into the iccid field).
 export function match_sim_override(sims, iccid, imsi)
 {
 	sims = sims ?? [];
@@ -170,8 +131,9 @@ export function match_sim_override(sims, iccid, imsi)
 	return null;
 };
 
-//   o.emit — the scaffolding emit helper
-//   o.log  — (level, msg) => …
+// post-open identity gate: always emits 'identity'; when config pinned `imei`
+// and the modem is a DIFFERENT device, emits 'identity_mismatch' and returns
+// false (caller must halt bring-up — wrong modem = wrong SIM/PIN/APN).
 export function check_identity(self, o)
 {
 	let got = self.info?.imei;
@@ -194,15 +156,12 @@ export function check_identity(self, o)
 	return false;
 };
 
-// scaffolding(self, o): install the protocol-neutral modem plumbing that was
-// copy-pasted byte-for-byte into all three state machines (modem.uc /
-// modem_mbim.uc / modem_ncm.uc) — state transitions, context attach/notify, and
-// the recovery-counter passthroughs. Sets self.set_state / self.attach_context /
-// self.note_connect_success / self.trip_zero_rx, and returns the two internal
-// helpers (emit, notify_contexts) the state machine calls directly.
-//   o.deps  — the modem's deps object (deps.on_event fans events out)
-//   o.log   — (level, msg) => …
-//   o.rec   — the recovery instance (on_connect_success / usb_repower)
+// scaffolding(self, o): install the protocol-neutral modem plumbing shared by
+// all three state machines — state transitions, context attach/notify, recovery
+// passthroughs. Sets self.set_state / attach_context / note_connect_success /
+// trip_zero_rx, and returns { emit, notify_contexts } the state machine uses.
+//   o.deps  — deps.on_event fans events out
+//   o.rec   — recovery instance
 export function scaffolding(self, o)
 {
 	let deps = o.deps;
@@ -223,8 +182,7 @@ export function scaffolding(self, o)
 		if (self.state == state)
 			return;
 
-		// registry check (warn-only): a typo'd state string would otherwise
-		// silently "work" — every consumer matching on the name just misses
+		// warn-only registry check (see MODEM_STATES)
 		if (!MODEM_STATES[state])
 			log('warn', sprintf('set_state: unknown modem state %J (typo?)', state));
 
@@ -249,16 +207,15 @@ export function scaffolding(self, o)
 		rec.usb_repower();
 	};
 
-	// stop: administrative teardown (daemon shutdown / reload / modem removed).
+	// administrative teardown (daemon shutdown / reload / modem removed)
 	self.stop = function() {
 		self.teardown();
 		self.set_state('ABSENT');
 	};
 
-	// _device_gone: the control channel's transport reported the device vanished
-	// (on_gone). Tell contexts, tear down, go ABSENT and announce removal so the
-	// daemon detaches. (NCM never calls this — its removal arrives as a net
-	// hotplug — but installing it keeps the modem contract uniform.)
+	// control transport reported the device vanished (on_gone): notify contexts,
+	// tear down, go ABSENT and announce removal so the daemon detaches. (NCM never
+	// calls this — removal arrives as a net hotplug — but keeps the contract uniform.)
 	self._device_gone = function() {
 		log('warn', 'device disappeared');
 		notify_contexts('lost');
@@ -270,12 +227,9 @@ export function scaffolding(self, o)
 	return { emit: emit, notify_contexts: notify_contexts };
 };
 
-// note_connect_failure_light(self, rec): install the backend-neutral "record a
-// failed connection cycle" method for modems with no live DMS to cycle (MBIM,
-// NCM) — bump the recovery counter and run only the reboot/usb_repower rungs,
-// then hand the action to done. QMI installs its own richer version that also
-// cycles operating mode / resets the modem on the intermediate rungs (it has a
-// live dms client for that).
+// install "record a failed connection cycle" for modems with no live DMS to
+// cycle (MBIM, NCM): bump the recovery counter and run only the reboot/usb_repower
+// rungs. QMI installs its own richer version that also cycles opmode / resets.
 export function note_connect_failure_light(self, rec)
 {
 	self.note_connect_failure = function(done) {
@@ -292,20 +246,13 @@ export function note_connect_failure_light(self, rec)
 	};
 };
 
-// make_fail(self, o): the shared "a bring-up step failed" handler. Runs the
-// modem's own note_connect_failure (QMI cycles opmode/reset on its live dms;
-// MBIM/NCM just bump the counter + reboot/usb_repower), then on the resulting
-// ladder action emits 'error', tears down, and either stops (reboot pending) or
-// schedules a capped-backoff retry of self.start(). This was three near-copies:
-// modem_mbim/modem_ncm were byte-identical and modem.uc differed only in that it
-// already routed through note_connect_failure + emitted 'error' — now all three
-// do (the daemon ignores the modem 'error' event; it is test/observability only,
-// so MBIM/NCM gaining it is a consistency win, not a behaviour change).
-//   o.log             — (level, msg) => …
+// make_fail(self, o): shared "a bring-up step failed" handler. Runs the modem's
+// note_connect_failure, then on the resulting ladder action emits 'error', tears
+// down, and either stops (reboot pending) or schedules a capped-backoff retry of
+// self.start(). Returns fail(stage, err). (The daemon ignores the 'error' event;
+// it is test/observability only.)
 //   o.timing          — { backoff_min, backoff_max }
-//   o.emit            — the scaffolding emit helper
 //   o.set_retry_timer — (timer) => …  store where teardown cancels it
-// Returns fail(stage, err).
 export function make_fail(self, o)
 {
 	return (stage, err) => {
@@ -334,26 +281,19 @@ export function make_fail(self, o)
 };
 
 // watch_driver(o): the adaptive "fast telemetry" cadence shared by the QMI and
-// MBIM modem state machines. While a consumer polls (modem_signal/modem_cells
-// over ubus), it runs o.refresh at most once per min_interval, NON-OVERLAPPING
-// (the next cycle is scheduled only after the previous refresh finishes, so the
-// cadence stretches under modem load), and decays back to idle `decay` ms after
-// the last poll. This was copied verbatim into both modems ("Mirrors modem.uc")
-// differing only in the liveness predicate and the refresh body.
-//
-//   o.alive   () => bool   — control channel up (self.nas != null / self.mbim)
+// MBIM state machines. While a consumer polls (modem_signal/modem_cells over
+// ubus), runs o.refresh at most once per min_interval, NON-OVERLAPPING (next
+// cycle scheduled only after the previous finishes, so it stretches under load),
+// and decays back to idle `decay` ms after the last poll.
+//   o.alive   () => bool   — control channel up
 //   o.ready   () => bool   — self.state == 'READY'
-//   o.refresh (done) => …  — run one refresh cycle; call done() EXACTLY ONCE
-//                            when it finishes or bails (e.g. the channel
-//                            vanished mid-cycle). done() reschedules the next
-//                            cycle iff still watched and alive, else goes idle —
-//                            so a bail with !alive() stops the loop, exactly as
-//                            the old inline `fast_running = false` did.
+//   o.refresh (done) => …  — run one refresh cycle; call done() EXACTLY ONCE when
+//                            it finishes or bails. done() reschedules iff still
+//                            watched and alive, else goes idle (a bail with
+//                            !alive() stops the loop).
 //   o.min_interval?  ms (default 1000) — never poll faster than this
 //   o.decay?         ms (default 6000) — idle-out delay after the last watch()
-//
-// Returns { watch(), stop() }: watch() is what the daemon calls on each
-// modem_signal/modem_cells poll; stop() is called from teardown.
+// Returns { watch(), stop() }.
 export function watch_driver(o)
 {
 	let min_interval = o.min_interval ?? 1000;
@@ -365,7 +305,6 @@ export function watch_driver(o)
 	// mutually-referencing arrows -> forward-declare (ucode TDZ trap)
 	let tick, finish;
 
-	// the reschedule/finish handler handed to o.refresh.
 	finish = () => {
 		if (active && o.alive())
 			fast_timer = uloop.timer(min_interval, tick);
@@ -410,21 +349,17 @@ export function watch_driver(o)
 	};
 };
 
-// telemetry_at(self): the AT engine a telemetry poll should run over. On first
-// use it opens the modem's dedicated 'at2' channel (if it has one); every later
-// call returns the already-open engine. When there is no second port — or it
-// fails to open — it returns the control channel (self.at), so callers can treat
-// the result exactly like self.at. This makes the second tty lazy: QMI/MBIM
-// that never hit the AT fallback never open it, while NCM opens it on its first
-// telemetry tick.
+// telemetry_at(self): the AT engine a telemetry poll runs over. Opens the modem's
+// dedicated 'at2' channel lazily on first use (if it has one); otherwise returns
+// the control channel (self.at). This keeps the second tty lazy: QMI/MBIM that
+// never hit the AT fallback never open it; NCM opens it on its first tick.
 //
-// NEVER returns null: a torn-down modem (close_at ran — teardown/reload can
-// happen synchronously under an emit while a poll callback is still in flight)
-// gets a stub engine whose send() fails immediately, so the many unguarded
+// NEVER returns null: a torn-down modem (close_at ran — teardown/reload can happen
+// synchronously under an emit while a poll callback is still in flight) gets a stub
+// engine whose send() fails immediately, so the many unguarded
 // `telemetry_at(self).send(...)` call sites degrade to an AT error instead of
-// crashing the daemon on `null.send` (HW-hit: autosetup phase-2 reload on the
-// Cudy LT300 tore the modem down inside the 'registered' emit; the READY hook
-// then ran tel_meig_locks on the corpse).
+// crashing on `null.send` (HW-hit: autosetup phase-2 reload on the Cudy LT300 tore
+// the modem down inside the 'registered' emit; the READY hook then ran on the corpse).
 export function telemetry_at(self)
 {
 	if (self._at2_open) {
@@ -440,12 +375,11 @@ export function telemetry_at(self)
 	};
 };
 
-// fetch_nr_neighbours(self, cb): the ONLY source of NR5G neighbour cells — QMI
-// Get Cell Location Info carries none (only the NR serving cell), so ALL backends
-// read them here over the shared AT side channel (AT+QENG="neighbourcell",
-// Quectel/ASR). Best-effort: gated on an active NR serving cell (so it never runs
-// on LTE-only), and silently skipped when the modem has no usable AT (e.g. an
-// MBIM firmware that rejects AT). Stores self.cells.nr5g_neigh (or null).
+// the ONLY source of NR5G neighbour cells — QMI Get Cell Location Info carries
+// none (only the NR serving cell), so ALL backends read them over the shared AT
+// side channel (AT+QENG="neighbourcell", Quectel/ASR). Best-effort: gated on an
+// active NR serving cell; silently skipped when the modem has no usable AT.
+// Stores self.cells.nr5g_neigh (or null).
 export function fetch_nr_neighbours(self, cb)
 {
 	cb = cb ?? (() => null);
@@ -458,9 +392,7 @@ export function fetch_nr_neighbours(self, cb)
 		return cb();
 	}
 
-	// telemetry_at never returns null; a modem without AT surfaces as an
-	// immediate send error here, which clears the neighbour list like the
-	// old explicit no-AT skip did
+	// no-AT modem surfaces as a send error here, clearing the neighbour list
 	at.send('AT+QENG="neighbourcell"', (err, res) => {
 		if (self.cells) {
 			let n = err ? null : atcmd.parse_qeng_neighbourcell(res?.lines).nr;
@@ -470,8 +402,8 @@ export function fetch_nr_neighbours(self, cb)
 	});
 };
 
-// close_at(self): tear down both AT engines opened by open_at (the control
-// channel and, when distinct, the dedicated telemetry channel). Idempotent.
+// tear down both AT engines opened by open_at (control + distinct telemetry
+// channel). Idempotent.
 export function close_at(self)
 {
 	if (self.at_telemetry && self.at_telemetry != self.at)
@@ -487,6 +419,10 @@ export function close_at(self)
 	self._at2_open = null;
 };
 
+// best-effort AT side-channel bring-up: discover + open the AT tty, run
+// model-init + configured at_init + cell-lock commands, then o.next(). Always
+// non-fatal (no usable AT port -> next() with self.at unset).
+//   o = { at_opts?, log, drain_interval?, set_drain_timer, next, reopen_next? }
 export function open_at(self, o)
 {
 	let log = o.log;
@@ -515,15 +451,10 @@ export function open_at(self, o)
 	self.at_tty = tty;
 	log('notice', sprintf('AT port: %s', tty));
 
-	// dedicated telemetry channel: when the modem exposes a second AT port
-	// ('at2'), telemetry polls (QENG/QCAINFO/…) run over a separate engine so
-	// they don't serialize behind control/dial/user commands on the primary.
-	// Opened LAZILY on the first telemetry poll (see telemetry_at) rather than
-	// eagerly here: QMI/MBIM only ever touch AT as a rare fallback (e.g. QCAINFO
-	// when QMI CA is unavailable), so eagerly opening a second tty on every such
-	// modem wasted an fd; NCM polls telemetry over AT from the first tick, so
-	// there it opens on that first poll. Until (or unless) it opens, telemetry
-	// falls back to the control channel.
+	// dedicated telemetry channel ('at2'): telemetry polls run over a separate
+	// engine so they don't serialize behind control/dial commands. Opened LAZILY
+	// on the first poll (see telemetry_at) to avoid wasting an fd on QMI/MBIM that
+	// rarely touch AT. Until it opens, telemetry falls back to the control channel.
 	self.at_telemetry = self.at;
 	self.at_telemetry_tty = tty;
 
@@ -536,8 +467,8 @@ export function open_at(self, o)
 		ch = { ...ch, telemetry: null };
 	}
 
-	// stash a one-shot opener; telemetry_at() runs it on first use. Null when the
-	// modem has no distinct second AT port (telemetry then stays on control).
+	// one-shot opener telemetry_at() runs on first use; null when there is no
+	// distinct second AT port (telemetry then stays on control).
 	self._at2_open = (ch.telemetry && ch.telemetry != tty)
 		? () => {
 			let tr2 = open_transport(ch.telemetry, 115200, (level, msg) => log(level, msg));
@@ -560,8 +491,7 @@ export function open_at(self, o)
 		...atcmd.cell_lock_commands(self.config),
 	];
 
-	// M9200B: periodically drain stale serial output (old empty_serial_buffers
-	// quirk that used to run from the QMI watchdog loop)
+	// M9200B: periodically drain stale serial output (empty_serial_buffers quirk)
 	if (index(self.info?.revision ?? '', 'M9200B') >= 0) {
 		let interval = o.drain_interval ?? 60000;
 		let tick;
@@ -581,16 +511,12 @@ export function open_at(self, o)
 	self.at.run_sequence(cmds, o.next);
 };
 
-// format_telemetry(o): the single, rich telemetry log line for EVERY backend.
-// Reads the normalized modem fields (o.reg, o.cells, o.signal, o.reg_detail,
-// o.config) and is defensive about the per-backend shape differences so QMI,
-// MBIM and NCM all produce the same style of line, showing whatever each one
-// actually has:
-//   - tech:  numeric NAS radio_ifs (QMI) -> else a string reg.mode/reg.tech
-//            (NCM) -> else nothing;
+// format_telemetry(o): the single telemetry log line for EVERY backend, defensive
+// about per-backend shape differences so all produce the same style of line:
+//   - tech:  numeric NAS radio_ifs (QMI) -> else string reg.mode/reg.tech (NCM);
 //   - plmn:  {mcc,mnc,description} (QMI) -> else {id,description} (MBIM);
-//   - cells: QMI/NCM lte_intra + nr5g_cell (0.1-unit rsrp/rsrq), when present;
-//   - signal: per-tech sig.lte/sig.nr5g (QMI/NCM) -> else a flat sig.rsrp/rssi
+//   - cells: QMI/NCM lte_intra + nr5g_cell (0.1-unit rsrp/rsrq);
+//   - signal: per-tech sig.lte/sig.nr5g (QMI/NCM) -> else flat sig.rsrp/rssi
 //            (native MBIM). rsrp/rssi are dBm; snr is 0.1 dB.
 export function format_telemetry(o)
 {
@@ -606,8 +532,8 @@ export function format_telemetry(o)
 		else push(techs, sprintf('rat%d', r));
 	}
 
-	// backends without numeric radio_ifs (MBIM/NCM) carry the tech as a string
-	// on reg.mode/reg.tech or, most commonly, on the DSD status (LTE/NSA/SA).
+	// no numeric radio_ifs (MBIM/NCM): tech is a string on reg.mode/reg.tech
+	// or on the DSD status (LTE/NSA/SA)
 	if (!length(techs) && (reg.mode != null || reg.tech != null))
 		push(techs, uc(sprintf('%s', reg.mode ?? reg.tech)));
 

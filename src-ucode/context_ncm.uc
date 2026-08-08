@@ -1,25 +1,23 @@
 // wwand — per-PDP-context state machine for NCM (cdc_ncm / cdc_ether, AT-driven).
 //
 // A context maps to a PDP context id on the AT channel and the single cdc_ncm
-// netdev (wwan0). up() programs the context + auth (CGDCONT + vendor auth,
-// carrying username/password), then issues the vendor "dial" that binds the
-// netdev to the bearer (Quectel: AT+QNETDEVCTL=1,<cid>,1), then reads the
-// assigned IP with AT+CGCONTRDP=<cid> and produces the SAME neutral settings
-// object as the QMI/MBIM contexts ({ ipv4:{addr,prefix,gateway,dns[],mtu},
-// ipv6:{...}, mtu }) so the netifd shim and ubus stay protocol-neutral.
+// netdev. up() programs the context + auth (CGDCONT + vendor auth), issues the
+// vendor "dial" that binds the netdev to the bearer (Quectel: AT+QNETDEVCTL=1,
+// <cid>,1), reads the assigned IP with AT+CGCONTRDP=<cid> and produces the SAME
+// neutral settings object as the QMI/MBIM contexts so the netifd shim and ubus
+// stay protocol-neutral.
 //
-// The netdev carrier does NOT follow the bearer on cdc_ncm any more than it
-// does on cdc_mbim, so — like context_mbim — liveness is an AT poll: the vendor
-// netdev-status query (QNETDEVCTL?) detects a dropped bearer, and a byte-counter
-// query (QGDCNT) feeds the zero-rx watchdog.
+// The netdev carrier does NOT follow the bearer on cdc_ncm (as on cdc_mbim), so
+// — like context_mbim — liveness is an AT poll: the vendor netdev-status query
+// (QNETDEVCTL?) detects a dropped bearer, byte counters (QGDCNT) feed the
+// zero-rx watchdog.
 //
-// IP-source note: OpenWrt's stock ncm.sh brings the address up via a DHCP
-// sub-interface. wwand instead reports a STATIC config from AT+CGCONTRDP so the
-// datapath stays uniform with QMI/MBIM (the daemon pushes settings to netifd,
-// VRF/PD dependencies preserved). The proto shim adds the v4 default route with
-// NO gateway on the /32 p2p link, so a modem-internal CGCONTRDP gateway is
-// harmless. If a given modem does not populate CGCONTRDP, switch that modem to
-// the DHCP path (proto shim 'dhcp' sub-interface) — see the package README.
+// IP-source note: stock ncm.sh brings the address up via a DHCP sub-interface;
+// wwand instead reports a STATIC config from AT+CGCONTRDP so the datapath stays
+// uniform with QMI/MBIM (VRF/PD dependencies preserved). The proto shim adds the
+// v4 default route with NO gateway on the /32 p2p link, so a modem-internal
+// CGCONTRDP gateway is harmless. A modem that does not populate CGCONTRDP must
+// switch to the DHCP path (proto shim 'dhcp' sub-interface) — see the README.
 
 'use strict';
 
@@ -67,10 +65,9 @@ export function create(opts)
 	});
 	let emit = sc.emit, set_state = sc.set_state;
 
-	// effective connection config for a dial: the carrier bundle (apn/auth/
-	// username/password) resolved through the per-SIM override (wwand_sim
-	// wins over the interface — context_common.conn_cfg), everything else
-	// straight from the interface
+	// effective connection config for a dial: carrier bundle (apn/auth/username/
+	// password) resolved through the per-SIM override (context_common.conn_cfg,
+	// wwand_sim wins over the interface); everything else straight from the config
 	let eff_config = () => {
 		let e = { ...self.config };
 
@@ -165,12 +162,10 @@ export function create(opts)
 				return;
 
 			if (!vendor.stats) {
-				// vendors without a byte counter: if the dial method also lacks a
-				// status query there is otherwise zero liveness. Poll the assigned
-				// address (AT+CGPADDR — every 3GPP modem answers) and treat a
-				// clearly-empty reply for our cid as a dropped bearer. Conservative:
-				// an AT error, an unparsable line, or any non-zero address all keep
-				// the context up.
+				// no byte counter AND no dial status query = zero liveness. Poll the
+				// assigned address (AT+CGPADDR — every 3GPP modem answers); a clearly
+				// empty reply for our cid is a dropped bearer. Conservative: an AT
+				// error, an unparsable line, or any non-zero address keep the context up.
 				if (!dial.status) {
 					self.modem.at.send(sprintf('AT+CGPADDR=%d', self.cid), (err, res) => {
 						if (self.state != 'CONNECTED')
@@ -277,11 +272,10 @@ export function create(opts)
 			self.cid, ccfg.apn ?? '', ccfg.pdp_type ?? 'ipv4v6',
 			(ccfg.apn == null || ccfg.apn == '') ? ' (network default)' : ''));
 
-		// dial-time idempotency guard: when the modem's PDP context already
-		// matches the config (and no auth values are configured — those cannot
-		// be read back), skip the CGDCONT/auth NV writes for this dial. Saves
-		// NV wear on every redial and avoids upsetting firmwares that dislike
-		// context rewrites while a bearer is being set up (MeiG ECMDUP).
+		// dial-time idempotency guard: when the PDP context already matches the
+		// config (and no auth is configured — those cannot be read back), skip the
+		// CGDCONT/auth NV writes. Saves NV wear and avoids upsetting firmwares that
+		// dislike context rewrites while a bearer is being set up (MeiG ECMDUP).
 		let run_setup = (cmds) => self.modem.at.run_sequence(cmds, () => {
 			if (self.state != 'ACTIVATING')
 				return;   // aborted (modem lost) while configuring
@@ -335,10 +329,9 @@ export function create(opts)
 				if (!err)
 					return read_ip_config();
 
-				// some modems auto-dial (or keep the bearer from a previous
-				// run) and reject a dial while it is up (MeiG ECMDUP returns
-				// bare ERROR) — probe the dial status and adopt the live
-				// session instead of failing
+				// some modems auto-dial (or keep a previous bearer) and reject a
+				// dial while it is up (MeiG ECMDUP returns bare ERROR) — probe the
+				// dial status and adopt the live session instead of failing
 				if (dial.status && dial.status_state) {
 					return self.modem.at.send(dial.status, (serr, sres) => {
 						if (self.state != 'ACTIVATING')

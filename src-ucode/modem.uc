@@ -1,24 +1,12 @@
-// wwand — per-modem state machine.
+// wwand — per-modem QMI state machine.
 //
-// States:
-//   ABSENT -> INIT_TRANSPORT -> INIT_SERVICES -> SET_OPMODE -> SIM_UNLOCK
-//     -> CONFIGURE_NET -> REGISTERING -> READY
-//   SIM_BLOCKED  terminal until config reload (PIN guard tripped)
-//   Any failure schedules a backoff retry; device removal -> ABSENT.
+// States: ABSENT -> INIT_TRANSPORT -> INIT_SERVICES -> INIT_DATAPATH ->
+//   SET_OPMODE -> SIM_UNLOCK -> CONFIGURE_NET -> REGISTERING -> READY.
+//   SIM_BLOCKED terminal until config reload; any failure -> backoff retry;
+//   device removal -> ABSENT.
 //
-// INIT_DATAPATH (WDA data format / mux link setup) is inserted before
-// SET_OPMODE with milestone M4; the hook is already in the step chain.
-//
-// opts = {
-//   id, device,                    // name + /dev/cdc-wdmX
-//   config: { pincode, modes, mcc, mnc, delay },
-//   deps: {
-//     transport_open,              // (device, cbs) => hub   [test injection]
-//     log,                         // (level, msg)
-//     on_event,                    // (modem, event, data)
-//   },
-//   timing: { ... }                // ms overrides, see TIMING_DEFAULTS
-// }
+// opts = { id, device, config, deps: { transport_open, log, on_event },
+//          timing } — transport_open is test injection; see TIMING_DEFAULTS.
 
 'use strict';
 
@@ -51,12 +39,11 @@ const TIMING_DEFAULTS = {
 };
 
 
-// parse_modes moved to qmi_backend.uc (needed by config_check too);
-// re-exported for existing consumers (daemon, tests)
+// parse_modes lives in qmi_backend.uc; re-exported for daemon/tests.
 export const parse_modes = qmi_backend.parse_modes;
 
-// unpack GSM 7-bit packed septets (LSB-first) into bytes. For Latin operator
-// names the default-alphabet septets map 1:1 to ASCII, so we emit them directly.
+// unpack GSM 7-bit packed septets (LSB-first) into bytes. Latin operator names
+// map 1:1 to ASCII in the default alphabet, so we emit them directly.
 function gsm7_unpack(bytes)
 {
 	let out = '', acc = 0, bits = 0;
@@ -104,10 +91,7 @@ function decode_operator_name(s)
 	return u;
 }
 
-// derive the data-system mode from the QENG serving detail (Quectel AT): the
-// NR line states NSA/SA directly. Fallback for modems without the DSD service.
-// dsd_from_serving / dsd_from_radio moved to modem_common (shared with the MBIM
-// data-mode resolver).
+// dsd_from_serving / dsd_from_radio moved to modem_common (shared with MBIM).
 
 export function create(opts)
 {
@@ -167,19 +151,15 @@ export function create(opts)
 	self.recovery = rec;
 	self.log_fn = log;
 
-	// shared timer holder: the init chain (modem_init_qmi), make_fail, the
-	// recovery actions and the NAS registered-handler all park their one-shot
-	// timers here; teardown cancels whatever is pending.
+	// shared one-shot timer holder; teardown cancels whatever is pending.
 	let tm = { retry: null, reg: null, settle: null, at_drain: null, probe: null };
 
-	// protocol-neutral scaffolding (set_state / attach_context /
-	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)
+	// protocol-neutral scaffolding (sets set_state/attach_context/… on self)
 	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
 	let emit = scaffold.emit;
 	let notify_contexts = scaffold.notify_contexts;
 
-	// hooks shared by all clients: feed the recovery error counter; the
-	// ceiling (25, preserved) escalates straight to reboot
+	// hooks shared by all clients: feed the recovery error counter.
 	let client_hooks = {
 		on_error: (client, kind, msg) => {
 			let act = rec.on_proto_error();
@@ -224,23 +204,19 @@ export function create(opts)
 			(err) => cb ? cb(err) : null, { timeout: 3000 });
 	};
 
-	// backend-neutral NAS accessor (daemon settings / network-selection paths):
-	// QMI exposes its live NAS client directly. cb(nas|null).
+	// backend-neutral NAS accessor. cb(nas|null).
 	self.with_nas = function(cb) {
 		cb(self.nas ?? null);
 	};
 
-	// backend-neutral WMS (SMS) accessor: QMI exposes its live WMS client (native
-	// or allocated over the passthrough). cb(wms|null).
+	// backend-neutral WMS (SMS) accessor. cb(wms|null).
 	self.with_wms = function(cb) {
 		cb(self.wms ?? null);
 	};
 
 	// lazily allocate the WMS (SMS) client on first use — the wms schema is
-	// require()d here (via the *_lazy shim) rather than imported at the top, so it
-	// stays off the heap until SMS is actually used. sms.uc's probe calls this.
-	// `_wms_tried` gates the one-shot (ucode has no `undefined`; self.wms is null
-	// until resolved, then null = unavailable or the client).
+	// require()d (via the *_lazy shim) so it stays off the heap until SMS is
+	// used. `_wms_tried` gates the one-shot (self.wms null = unavailable or client).
 	self._ensure_wms = function(cb) {
 		if (self._wms_tried)
 			return cb();
@@ -273,16 +249,15 @@ export function create(opts)
 		set_retry_timer: (t) => tm.retry = t,
 	});
 
-	// QMI bring-up chain — extracted to modem_init_qmi.uc; chain.begin() is
-	// the start() entry point (timers shared via tm, failures via fail).
+	// QMI bring-up chain (modem_init_qmi.uc); chain.begin() is the start() entry.
 	let chain = modem_init_qmi.install(self, {
 		log: log, emit: emit, notify_contexts: notify_contexts,
 		fail: fail, dp: dp, at_opts: at_opts, tm: tm,
 	});
 
-	// record a failed connection cycle and run the resulting ladder action;
-	// also called by the daemon when a context activation fails. QMI-side
-	// rungs run against the live clients, so this happens before teardown.
+	// record a failed connection cycle and run the resulting ladder action; also
+	// called by the daemon on context-activation failure. QMI-side rungs run
+	// against the live clients, so this happens before teardown.
 	self.note_connect_failure = function(done) {
 		done = done ?? ((action) => null);
 
@@ -328,10 +303,8 @@ export function create(opts)
 
 
 	// admin-triggered soft modem reset (ubus modem_reset — the apply step for
-	// `deferred` selection/band settings): DMS offline -> reset, the same
-	// sequence the recovery ladder's modem_reset rung uses. The modem drops off
-	// the bus and re-enumerates; discovery rebuilds this modem and the daemon
-	// kicks every auto interface back up once it re-registers.
+	// `deferred` selection/band settings): DMS offline -> reset. The modem
+	// re-enumerates; discovery rebuilds it and re-kicks the auto interfaces.
 	self.reset = function(cb) {
 		if (!self.dms)
 			return cb({ error: 'unsupported_on_backend' });
@@ -345,9 +318,8 @@ export function create(opts)
 		});
 	};
 
-	// switch the control protocol (QMI <-> MBIM). On a successful change the
-	// modem resets and re-enumerates; the caller lets this modem object die
-	// and discovery rebuilds it under the new driver.
+	// switch the control protocol (QMI <-> MBIM). On success the modem resets and
+	// re-enumerates; discovery rebuilds it under the new driver.
 	self.switch_protocol = function(target, cb) {
 		protoswitch.switch_protocol(self, target, (err, res) => {
 			if (!err && res.resetting) {
@@ -379,7 +351,6 @@ export function create(opts)
 			let base = '/sys/class/usbmisc/' + substr(self.device, 5) + '/device/..';
 			let sf = (f) => trim(fs.readfile(base + '/' + f) ?? '');
 
-			// USB identity for status/detail (vid:pid + product string)
 			let vid = sf('idVendor'), pid = sf('idProduct'), prod = sf('product');
 
 			if (length(vid))
@@ -417,8 +388,8 @@ export function create(opts)
 				self.info.manufacturer ?? '?', self.info.model,
 				self.info.revision, self.info.imei));
 
-			// stable-identity gate: halt before touching SIM/context if the
-			// pinned IMEI does not match this physical modem.
+			// stable-identity gate: halt before SIM/context if the pinned IMEI
+			// does not match this physical modem.
 			if (!modem_common.check_identity(self, { emit: emit, log: log }))
 				return;
 
@@ -442,20 +413,18 @@ export function create(opts)
 
 
 
-	// live-config validation — extracted to config_check.uc (audit round);
-	// kept as a method so the init chain and ubus revalidation are unchanged
+	// live-config validation (config_check.uc); kept as a method for the init
+	// chain + ubus revalidation.
 	self.validate_config = function(cb) {
 		config_check.validate(self, log, cb);
 	};
 
 
 
-	// the card behind the modem changed in place (eSIM profile switch applied
-	// via SIM hot-reset, or a UIM REFRESH): re-read identity, RE-RESOLVE the
-	// per-SIM override (the old card's wwand_sim must not stick) and re-program
-	// the LTE attach profile — the same work the INIT chain does, without
-	// tearing the modem down. Contexts pick the corrected override up on their
-	// next (re)dial via conn_cfg. cb(changed) optional.
+	// the card changed in place (eSIM profile switch via SIM hot-reset, or a UIM
+	// REFRESH): re-read identity, RE-RESOLVE the per-SIM override (the old card's
+	// wwand_sim must not stick) and re-program the LTE attach profile — without
+	// tearing the modem down. cb(changed) optional.
 	self.reapply_sim = function(cb) {
 		sim.read_identity(self, (id) => {
 			let changed = (id.iccid != self.info.iccid || id.imsi != self.info.imsi);
@@ -494,10 +463,9 @@ export function create(opts)
 		});
 	};
 
-	// UIM refresh: register for SIM/eUICC refresh notifications so a network- or
-	// LPA-initiated refresh (eSIM profile switch, SIM OTA file update) makes wwand
-	// re-read identity (ICCID/IMSI can change) rather than running stale. On some
-	// modems (e.g. RG650E) UIM logical-channel ops are unsupported and the
+	// register for SIM/eUICC refresh notifications so a network-/LPA-initiated
+	// refresh (eSIM profile switch, SIM OTA update) makes wwand re-read identity.
+	// On some modems (e.g. RG650E) UIM logical-channel ops are unsupported and the
 	// register is refused — best-effort, no_recovery.
 	self._install_uim_refresh = function() {
 		if (!self.uim || self._uim_refresh_armed)
@@ -507,7 +475,7 @@ export function create(opts)
 		self.uim.on('REFRESH_IND', (data) => {
 			let stage = data?.event?.stage;
 			log('info', sprintf('sim refresh (stage %d)', stage ?? -1));
-			// the full reapply once the refresh has completed successfully
+			// full reapply only once the refresh completed successfully
 			if (stage == uimmod.REFRESH_STAGE_END_SUCCESS)
 				self.reapply_sim();
 		});
@@ -521,10 +489,9 @@ export function create(opts)
 		}, { no_recovery: true });
 	};
 
-	// DMS event report: catch an EXTERNAL operating-mode or PIN change (airplane
-	// mode toggled via AT / another tool / a hardware switch) that wwand did not
-	// initiate. We only observe + log it here; the state machine still reacts to
-	// the resulting serving-system / registration change through its own path.
+	// DMS event report: observe + log an EXTERNAL operating-mode / PIN change
+	// (airplane toggled via AT / another tool / a hardware switch) wwand did not
+	// initiate. The state machine still reacts via its own serving-system path.
 	self._install_dms_handlers = function() {
 		self.dms.on('EVENT_REPORT_IND', (data) => {
 			if (data?.operating_mode != null && data.operating_mode != self._dms_opmode) {
@@ -552,10 +519,9 @@ export function create(opts)
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
 			self.signal = data;
 		});
-		// Network Time / NITZ: the operator-pushed UTC clock. Store it for status
-		// and hand the epoch + timezone to the daemon, which decides whether to
-		// apply it (only when the system clock is clearly unset — an RTC-less
-		// router booted before NTP). tz offset is signed 15-minute units.
+		// Network Time / NITZ (operator-pushed UTC clock): store for status and
+		// hand epoch+tz to the daemon, which decides whether to apply it (only
+		// when the system clock is clearly unset). tz offset is signed 15-min units.
 		self.nas.on('NETWORK_TIME_IND', (data) => {
 			let epoch = modem_common.nitz_epoch(data?.universal_time);
 			if (epoch == null)
@@ -568,8 +534,7 @@ export function create(opts)
 				deps.set_clock(epoch, tz_min);
 		});
 		// NAS event report — live RF band changes (band-steer / CA reshuffle)
-		// pushed instead of waiting for the next cell poll. Stored on self.rf_bands
-		// for status; a change in the active-band set is logged.
+		// pushed instead of waiting for the next cell poll. Stored on self.rf_bands.
 		self.nas.on('EVENT_REPORT_IND', (data) => {
 			if (data?.rf_band_info == null)
 				return;
@@ -586,9 +551,8 @@ export function create(opts)
 		});
 	};
 
-	// enable the NAS event report (RF band + reject reason). Separate from the
-	// REGISTER_INDICATIONS toggles; best-effort — some modems reject it. Called
-	// once the NAS handlers are installed and registration is armed.
+	// enable the NAS event report (RF band + reject reason). Separate from
+	// REGISTER_INDICATIONS; best-effort — some modems reject it.
 	self._arm_nas_event_report = function() {
 		if (!self.nas || self._nas_evt_armed)
 			return;
@@ -599,8 +563,8 @@ export function create(opts)
 		}, { no_recovery: true });
 	};
 
-	// registration-detail collector — extracted to regdetail.uc (audit round);
-	// kept as a method so daemon/status callers are unchanged
+	// registration-detail collector (regdetail.uc); kept as a method for
+	// daemon/status callers.
 	self.collect_regdetail = function(cb) {
 		regdetail.collect(self, log, cb);
 	};
@@ -614,10 +578,9 @@ export function create(opts)
 		if (data.current_plmn?.description != null)
 			data.current_plmn.description = decode_operator_name(data.current_plmn.description);
 
-		// An incremental SERVING_SYSTEM_IND (e.g. on a cell reselection) may omit
-		// the OPTIONAL Current-PLMN / roaming TLVs. Carry the last-known values
-		// forward instead of wiping them, so the operator name + roaming flag stay
-		// in status/telemetry across a reselection rather than blinking out.
+		// an incremental SERVING_SYSTEM_IND (e.g. on cell reselection) may omit the
+		// OPTIONAL Current-PLMN / roaming TLVs — carry the last-known values forward
+		// instead of wiping them, so operator name + roaming don't blink out.
 		let prev = self.reg ?? {};
 
 		self.reg = {
@@ -629,9 +592,9 @@ export function create(opts)
 
 		emit('serving_system', self.reg);
 
-		// serving-system update while already connected: the network may have
-		// re-issued IP config (prefix/DNS/MTU). Nudge contexts to re-check
-		// their settings in place (they diff + rate-limit; no-op if unchanged).
+		// serving-system update while connected: the network may have re-issued IP
+		// config (prefix/DNS/MTU). Nudge contexts to re-check in place (they diff +
+		// rate-limit; no-op if unchanged).
 		if (ss.registration == nasmod.REG_REGISTERED && self.state == 'READY')
 			notify_contexts('serving_change');
 
@@ -725,8 +688,8 @@ export function create(opts)
 		});
 	};
 
-	// telemetry subsystem (fast watch loop, CA, data-mode, slow log tick)
-	// extracted to telemetry_qmi.uc — attaches watch/_start_telemetry/… methods
+	// telemetry subsystem (fast watch loop, CA, data-mode, slow log tick) —
+	// telemetry_qmi.uc attaches watch/_start_telemetry/… methods
 	let telem = telemetry_qmi.install(self, { log: log, emit: emit });
 
 	// --- lifecycle ---------------------------------------------------------

@@ -1,21 +1,16 @@
 // wwand — per-modem state machine for NCM control (cdc_ncm / cdc_ether driver,
 // AT-controlled).
 //
-// NCM modems have NO rich control protocol (no QMI, no MBIM): the whole modem
-// is driven over an AT command channel (a ttyUSB/ttyACM serial port), and the
-// datapath is a plain cdc_ncm/cdc_ether netdev (wwan0). There is therefore no
-// message transport to open here — every step is an AT command over the shared
-// AT engine (atcmd.uc), the same one the QMI/MBIM backends use as a side
-// channel. Bring-up:
+// NCM modems have NO rich control protocol (no QMI/MBIM): the whole modem is
+// driven over an AT channel (atcmd.uc, the same engine the QMI/MBIM backends use
+// as a side channel); the datapath is a plain cdc_ncm/cdc_ether netdev. There is
+// no message transport to open. Bring-up:
 //   open AT -> identify (CGMI/CGMM/CGMR/CGSN/CIMI/CCID) -> SIM/PIN (CPIN?) ->
-//   program the attach PDP context + auth from the attached context's config
-//   (CGDCONT + vendor auth) -> wait for registration (CEREG?/CREG?) -> READY.
-// Registration and telemetry are kept fresh by polling AT while READY.
+//   program attach PDP context + auth (CGDCONT + vendor auth) -> wait for
+//   registration (CEREG?/CREG?) -> READY. Polled while READY.
 //
-// The object exposes the SAME contract as modem.uc / modem_mbim.uc (start/stop/
-// state/config/info/reg/signal/at/attach_context/note_connect_*/switch_protocol
-// + events) so daemon.uc, the netifd shim and ubus stay protocol-neutral.
-// Contexts use context_ncm.uc, which reuses the AT builders exported here.
+// Exposes the SAME contract as modem.uc / modem_mbim.uc so daemon.uc, the netifd
+// shim and ubus stay protocol-neutral. Contexts use context_ncm.uc.
 
 'use strict';
 
@@ -35,13 +30,7 @@ const TIMING_DEFAULTS = {
 	at_drain: 60000,
 };
 
-// fast "watch" mode timing (mirrors modem.uc / modem_mbim.uc): while a consumer
-// (the LuCI status page) polls modem_signal/modem_cells, refresh at most once a
-// second and revert to the slow telemetry timer a few seconds after polling.
-// The adaptive cadence itself lives in modem_common.watch_driver (shared).
-
 // --- AT command model (shared with context_ncm.uc) ---------------------------
-//
 // pdp_type -> the 3GPP PDP type string used in AT+CGDCONT and the Quectel
 // AT+QICSGP <context_type> enum (1=IPv4, 2=IPv6, 3=IPv4v6).
 
@@ -51,9 +40,8 @@ const CTX_TYPE = { ipv4: 1, ipv6: 2, ipv4v6: 3 };
 // QICSGP / CGAUTH auth enum: 0=none, 1=PAP, 2=CHAP, 3=PAP-or-CHAP
 const AUTH_ENUM = { none: 0, pap: 1, chap: 2, both: 3 };
 
-// resolve the auth method: explicit config wins; otherwise default to
-// PAP-or-CHAP when a username/password pair is present (QMI/MBIM parity), else
-// none.
+// explicit config wins; else PAP-or-CHAP when username/password present
+// (QMI/MBIM parity), else none.
 function auth_value(cfg)
 {
 	if (cfg.auth != null)
@@ -71,11 +59,10 @@ function cgdcont(cid, pdp, apn)
 // --- dial methods (per-modem resolved at bring-up) ---------------------------
 //
 // A "dial method" binds/unbinds the cdc_ncm netdev to the active bearer and
-// (optionally) reports the binding state. It is resolved PER MODEM at bring-up
-// rather than hard-coded per vendor, because it varies within a vendor by
-// platform: a method carrying a `probe` command is adopted only if the modem
-// answers OK; the vendor's `dials` are tried in order and always fall back to
-// the 3GPP CGACT dial, which every 3GPP modem supports.
+// (optionally) reports the binding state. Resolved PER MODEM at bring-up (it
+// varies within a vendor by platform): a method carrying a `probe` command is
+// adopted only if the modem answers OK; the vendor's `dials` are tried in order
+// and always fall back to the 3GPP CGACT dial, which every 3GPP modem supports.
 //
 // >>> HW (RG650E-EU): AT+QNETDEVCTL=? -> ERROR. The Quectel RG5xx/SDX 5G modems
 //     do NOT implement QNETDEVCTL, so they resolve to CGACT. QNETDEVCTL stays
@@ -329,13 +316,10 @@ const DIAL_ICMAUTOCONN = {
 	status_state: () => null,
 };
 
-// Per-manufacturer AT recipe. Everything vendor-specific (init, the context
-// definition, the auth command, the ordered `dials` to probe, the traffic
-// counters) lives here so adding a manufacturer is a table entry rather than a
-// code change. Recipes with concrete commands are ported from OpenWrt's
-// /etc/gcom/ncm.json (the reference NCM implementation) and are authoritative;
-// the ones marked "best-effort" are added from vendor docs and want a hardware
-// check.
+// Per-manufacturer AT recipe. Recipes with concrete commands are ported from
+// OpenWrt's /etc/gcom/ncm.json (the reference NCM implementation) and are
+// authoritative; the ones marked "best-effort" come from vendor docs and want a
+// hardware check.
 //
 //   modem_init:               commands run ONCE at modem bring-up (e.g. CFUN=1)
 //   define(cid, pdp, apn)     -> the context-definition command (default CGDCONT)
@@ -585,8 +569,8 @@ const VENDORS = {
 	},
 };
 
-// pick the vendor recipe from the AT+CGMI manufacturer string. The generic
-// fallback is skipped in the scan (its match is null) and returned last.
+// pick the vendor recipe from the AT+CGMI manufacturer string; generic (match
+// null) is skipped in the scan and returned last.
 export function vendor_for(manufacturer)
 {
 	let s = lc(manufacturer ?? '');
@@ -600,10 +584,9 @@ export function vendor_for(manufacturer)
 
 // AT command sequence to program a PDP context + auth from a context config
 // (the per-connect setup, NOT the one-time modem_init). An empty/unset APN is
-// intentional: it means "use the network default APN", a *blank* APN in the
-// context definition (the network then assigns the default PDN), mirroring
-// context.uc's attach-profile behavior. Returns [] for a '#N' pass-through APN
-// (use the modem profile as-is, never rewrite it).
+// intentional: a *blank* APN => network default PDN (mirrors context.uc's
+// attach-profile behavior). Returns [] for a '#N' pass-through APN (use the
+// modem profile as-is, never rewrite it).
 export function build_pdp_setup(vendor, cid, cfg)
 {
 	let apn = cfg.apn;
@@ -627,7 +610,6 @@ export function build_pdp_setup(vendor, cid, cfg)
 };
 
 // AT+CGDCONT? read-back: '+CGDCONT: <cid>,"<type>","<apn>",...' per line.
-// Feeds the dial-time idempotency guard below.
 export function parse_cgdcont(lines)
 {
 	let out = [];
@@ -642,10 +624,9 @@ export function parse_cgdcont(lines)
 	return out;
 };
 
-// dial-time idempotency guard: true when the modem's PDP context <cid> already
-// carries exactly the configured pdp-type + APN, so the CGDCONT/auth NV writes
-// can be skipped for this dial (used only when no username/password is
-// configured — auth values cannot be read back for comparison).
+// dial-time idempotency guard: true when PDP context <cid> already carries
+// exactly the configured pdp-type + APN, so the CGDCONT/auth NV writes can be
+// skipped. Only usable with no username/password (auth cannot be read back).
 export function pdp_setup_matches(cid, cfg, lines)
 {
 	let want_pdp = PDP_STR[cfg.pdp_type ?? 'ipv4v6'] ?? PDP_STR.ipv4v6;
@@ -667,24 +648,20 @@ export function pdp_setup_matches(cid, cfg, lines)
 // 3GPP layout is:
 //   +CGCONTRDP: <cid>,<bearer>,<apn>,<local_addr_and_subnet_mask>,<gw>,
 //               <dns1>,<dns2>[,<p-cscf1>,<p-cscf2>,<im_cn>,<lipa>,<ipv4_mtu>...]
-// but firmwares diverge wildly for a dual-stack (ipv4v6) context. The RG650E-EU
-// crams BOTH families into ONE line with irregular comma/space separators and
-// mixed field widths (verified on HW), e.g.:
+// but firmwares diverge wildly for a dual-stack (ipv4v6) context. HW-seen on
+// RG650E-EU: BOTH families crammed into ONE line with irregular comma/space
+// separators and mixed field widths, e.g.:
 //   +CGCONTRDP: 1,5,"apn","100.71.169.229","42.0.0.32.66.143.62.233...",
 //     "254.128.0.0...1","139.7.30.125" "42.1.8.96...83","139.7.30.126" "42.1.8.96...1.83"
 // where the local addr is a bare 4-octet IPv4 (no mask), the next 16-octet field
 // is the IPv6 address, and v4 DNS + v6 DNS are interleaved.
 //
-// So rather than trust positions, we tokenize every dotted-decimal group in the
-// line(s) (tolerating both comma and space separators), classify each by octet
-// count (4/8 = IPv4[+mask], 16/32 = IPv6[+mask]), bucket per family IN ORDER,
-// then map each family's tokens as [addr(+mask), gateway?, dns...]. Heuristic:
-// the gateway slot is taken only when the address carried a mask (8/32 octets)
-// or for IPv6 (which always advertises a link-local gateway) — an unmasked IPv4
-// address (RG650E) has no gateway field, so every remaining v4 token is DNS.
-// This yields the neutral { ipv4:{addr,prefix,gateway,dns[],mtu}, ipv6:{addr,
-// plen,gateway,dns[]}, mtu } shape for both the merged and the one-line-per-
-// family styles.
+// So rather than trust positions, tokenize every dotted-decimal group (comma OR
+// space separated), classify by octet count (4/8 = IPv4[+mask], 16/32 =
+// IPv6[+mask]), bucket per family IN ORDER, then map each as [addr(+mask),
+// gateway?, dns...]. The gateway slot is taken only for a masked IPv4 (8/32
+// octets) or for IPv6 (always advertises a link-local gw) — an unmasked IPv4
+// (RG650E) has no gateway field, so every remaining v4 token is DNS.
 
 const NETMASK_BITS = {
 	'255': 8, '254': 7, '252': 6, '248': 5,
@@ -822,12 +799,8 @@ export function parse_creg(lines)
 
 
 
-// per-vendor telemetry blocks — extracted to telemetry_ncm.uc; wired onto
-// the VENDORS entries below (vendor_telemetry() resolves per modem).
-
-// attach the telemetry blocks to their vendor recipes (kept out of the VENDORS
-// literal so the const ordering stays simple). Vendors without an entry inherit
-// TELEMETRY_GENERIC via vendor_telemetry().
+// per-vendor telemetry blocks (telemetry_ncm.uc) wired onto the VENDORS recipes;
+// vendors without an entry inherit TELEMETRY_GENERIC via vendor_telemetry().
 VENDORS.quectel.telemetry = telemetry_ncm.QUECTEL;
 VENDORS.meig.telemetry    = telemetry_ncm.MEIG;
 VENDORS.huawei.telemetry  = telemetry_ncm.HUAWEI;
@@ -840,13 +813,11 @@ function vendor_telemetry(self)
 
 // --- vendor-serial driver bind (usb-serial new_id) ---------------------------
 //
-// Some modem compositions carry their AT/DIAG serial interfaces under a USB
-// PID the in-kernel `option` driver does not know — typically the non-default
-// composition (the kernel id table only covers the mode the vendor ships).
-// Then no ttyUSB nodes exist, open_at finds no AT port and the modem never
-// dials. For known devices, register the id at runtime: writing "vid pid" to
-// the driver's new_id probes the already-present device synchronously (and
-// covers any later re-enumeration), so the ttys appear right away.
+// Some modem compositions carry their AT/DIAG serial interfaces under a USB PID
+// the in-kernel `option` driver does not know (its id table only covers the mode
+// the vendor ships), so no ttyUSB nodes exist and open_at finds no AT port. For
+// known devices, register the id at runtime: writing "vid pid" to the driver's
+// new_id probes the already-present device synchronously, so the ttys appear.
 //
 //   'vid:pid' (lowercase hex) -> usb-serial driver name under
 //   /sys/bus/usb-serial/drivers/<name>/new_id
@@ -856,10 +827,9 @@ const SERIAL_NEW_ID = {
 	'2dee:4d58': 'option1',
 };
 
-// bind the vendor serial driver for a known composition; netdev anchors the
-// USB parent. Returns true when a new_id write was performed. No-op when the
-// device is unknown, ttys already exist, or the driver module is not loaded
-// (a later tty/net hotplug re-kick retries via the normal start path).
+// bind the vendor serial driver for a known composition (netdev anchors the USB
+// parent). Returns true when a new_id write was performed. No-op when the device
+// is unknown, ttys already exist, or the driver module is not loaded.
 export function ensure_serial_bind(fx, netdev)
 {
 	if (!netdev)
@@ -948,10 +918,10 @@ export function create(opts)
 		cb(null);
 	};
 
-	// the attach PDP context config: the first attached context (interface-bound
+	// attach PDP context config: the first attached context (interface-bound
 	// preferred) drives the modem's autonomous LTE attach, so its APN/auth is
-	// what CGDCONT/QICSGP programs at bring-up. Contexts re-apply the same
-	// settings idempotently at dial time (context_ncm.up).
+	// what CGDCONT/QICSGP programs at bring-up. Contexts re-apply idempotently at
+	// dial time (context_ncm.up).
 	let attach_cfg = () => {
 		let bound = null;
 
@@ -979,18 +949,17 @@ export function create(opts)
 
 	let step_identify, step_resolve_dial, step_datapath, step_sim, step_attach, step_register, on_registered;
 
-	// AT side channel: for NCM this IS the control channel. open_at discovers
-	// the tty, opens it and runs model-init + configured at_init + cell locks.
-	// Non-fatal only in the sense that a missing port fails the whole modem —
-	// there is no other transport.
+	// AT side channel: for NCM this IS the control channel (a missing port fails
+	// the whole modem — there is no other transport). open_at discovers the tty,
+	// opens it and runs model-init + configured at_init + cell locks.
 	self.start = function() {
 		if (self.at || self.state != 'ABSENT')
 			return;
 
 		self.set_state('INIT_TRANSPORT');
 
-		// known composition whose serial ports need a runtime driver bind
-		// (SERIAL_NEW_ID) — do it before the AT port discovery below
+		// runtime driver bind for known compositions (SERIAL_NEW_ID) before AT
+		// port discovery
 		let bind_fx = at_opts.fx ?? netlink.default_fx((l, m) => log(l, m));
 
 		if (ensure_serial_bind(bind_fx, self.device))
@@ -1095,10 +1064,9 @@ export function create(opts)
 	};
 
 	// resolve the dial method ONCE per modem: try the vendor's ordered dials,
-	// adopting the first whose support-probe (if any) answers OK. A dial without
-	// a probe is adopted directly; the list always ends in CGACT (universal), so
-	// self.dial is always set. Verified need: the RG650E answers ERROR to the
-	// QNETDEVCTL probe and resolves to CGACT.
+	// adopting the first whose support-probe (if any) answers OK (a probe-less
+	// dial is adopted directly). The list always ends in CGACT, so self.dial is
+	// always set. HW: RG650E answers ERROR to the QNETDEVCTL probe -> CGACT.
 	step_resolve_dial = () => {
 		let dials = self.vendor.dials ?? [ DIAL_CGACT ];
 		let i = 0, tryNext;
@@ -1135,8 +1103,7 @@ export function create(opts)
 
 	// datapath: a plain cdc_ncm/cdc_ether netdev carries no mux and needs no
 	// driver format change (unlike qmi_wwan raw-ip). Just bring the parent link
-	// up so it is ready to carry traffic once the modem dials; the IP comes from
-	// the connection (context_ncm). Skipped gracefully in host tests (no fx).
+	// up; the IP comes from the connection (context_ncm). Skipped in host tests.
 	step_datapath = () => {
 		let dp = opts.datapath;
 
@@ -1255,8 +1222,7 @@ export function create(opts)
 				return;
 
 			self.at.send('AT+CEREG?', (err, res) => {
-				// a response can arrive after a teardown/reload stopped this
-				// instance (stop() nulls self.at) — a stale callback must not
+				// stale callback after a teardown/reload nulled self.at: must not
 				// drive a dead modem to READY or send on a null engine
 				if (self.state != 'REGISTERING' || !self.at)
 					return;
@@ -1316,8 +1282,7 @@ export function create(opts)
 
 		let t = vendor_telemetry(self);
 
-		// one-time warning for best-effort (unverified) vendor telemetry recipes,
-		// mirroring how the dial table flags its best-effort methods
+		// one-time warning for best-effort (unverified) telemetry recipes
 		if (t.unverified && !self._tel_warned) {
 			self._tel_warned = true;
 			log('warn', sprintf('telemetry recipe for %s is best-effort/unverified (needs HW check)',
@@ -1338,10 +1303,9 @@ export function create(opts)
 	// gives an RSSI floor, AT+QENG="servingcell" the serving cell (rsrp/rsrq/
 	// sinr + NR carrier), AT+QCAINFO the LTE aggregation set.
 
-	// telemetry reads route through the modem's vendor telemetry block (its own
-	// AT command set), falling back to the 3GPP-generic block. Each step is
-	// best-effort — a command that errors is swallowed and the last-known value
-	// is kept — so a modem answering only a subset still degrades gracefully.
+	// telemetry reads route through the vendor telemetry block, falling back to
+	// the 3GPP-generic block. Each step is best-effort — an erroring command is
+	// swallowed and the last-known value kept.
 	let refresh_signal, refresh_cells, refresh_reg_detail;
 
 	refresh_signal = (cb) => {
@@ -1534,9 +1498,8 @@ export function create(opts)
 
 	// admin-triggered soft modem reset (ubus modem_reset — the apply step for
 	// `deferred` selection/band settings): AT+CFUN=1,1 full reboot. The modem
-	// drops off the bus and re-enumerates; hotplug/discovery rebuild it and
-	// the daemon kicks every auto interface back up once it re-registers —
-	// same flow as the recovery ladder, HW-proven on this backend.
+	// re-enumerates; hotplug/discovery rebuild it and the daemon kicks every auto
+	// interface back up once it re-registers. HW-proven on this backend.
 	self.reset = function(cb) {
 		if (!self.at)
 			return cb({ error: 'unsupported_on_backend' });

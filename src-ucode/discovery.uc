@@ -155,14 +155,12 @@ export function usb_device_of(name, fx)
 	return m ? m[1] : null;
 };
 
-// wireless-style stable device path: the sysfs path of the modem's physical
-// device relative to /sys/devices — same convention as `wifi-device option
-// path` — anchored at the controller, so it stays valid across enumeration
-// order AND covers non-USB attachments (PCIe/MHI) with the same mechanism.
-// `class_link` is a /sys/class/... "device" link (e.g.
-// /sys/class/usbmisc/cdc-wdm0/device); for a USB function the resolved
-// INTERFACE dir (…/3-1:1.4) has its trailing interface component dropped so
-// the path names the USB *device* (…/usb3/3-1). null when unresolvable.
+// wireless-style stable device path (same convention as `wifi-device option
+// path`): the modem's physical device path relative to /sys/devices — anchored
+// at the controller, valid across enumeration order and across USB/PCIe/MHI.
+// `class_link` is a /sys/class/.../device link; for a USB function the resolved
+// INTERFACE dir (…/3-1:1.4) has its trailing interface component dropped so the
+// path names the USB *device* (…/usb3/3-1). null when unresolvable.
 export function sysfs_path_of(class_link, fx)
 {
 	fx = fx ?? default_fx();
@@ -239,11 +237,10 @@ export function device_for_serial(serial, fx)
 	return (length(ids) == 1) ? byusb[ids[0]] : null;
 };
 
-// enumerate the modem control devices physically present right now — cdc-wdm
-// control nodes (qmi/mbim) and NCM datapath netdevs — each with its USB device
-// id and iSerial, read pre-open from sysfs. Powers the LuCI "detected modems"
-// picker so a user can pin `serial`/`imei` without typing. IMEI is NOT read here
-// (that needs opening the modem); the daemon fills it in for managed modems.
+// enumerate the modem control devices physically present now — cdc-wdm nodes
+// (qmi/mbim) and NCM datapath netdevs — each with USB id and iSerial read
+// pre-open from sysfs. Powers the LuCI "detected modems" picker. IMEI is NOT
+// read here (needs opening the modem); the daemon fills it in for managed modems.
 export function list_present(fx)
 {
 	fx = fx ?? default_fx();
@@ -295,12 +292,10 @@ function imei14(s)
 	return substr(replace(sprintf('%s', s ?? ''), /[^0-9]/g, ''), 0, 14);
 }
 
-// Some modems publish their IMEI AS the USB iSerial. When they do, `option imei`
-// can be matched PRE-OPEN, exactly like `serial`. Returns the control device only
-// when a present modem's iSerial normalises to the same 14 IMEI digits — and both
-// must be full 14 digits, so a short vendor serial ('99efe861') or the dummy
-// '0123456789ABCDEF' never false-hits. Modems that use a separate serial simply
-// miss here and fall through; the post-open identity gate verifies them instead.
+// Some modems publish their IMEI AS the USB iSerial → `option imei` can match
+// PRE-OPEN like `serial`. Matches only when a present modem's iSerial normalises
+// to the same 14 IMEI digits, both full 14 (so a short vendor serial or the dummy
+// '0123456789ABCDEF' never false-hits). Others fall through to the post-open gate.
 export function device_for_imei(imei, fx)
 {
 	fx = fx ?? default_fx();

@@ -5,7 +5,7 @@
 //   cb({ blocked: true, reason: ... })               terminal, do not retry
 //   cb({ error: ... })                               transient failure
 //
-// Preserved behavior from the old proto handler:
+// Load-bearing behaviors preserved from the old proto handler:
 // - retry-count guard: never send a PIN when too few tries remain
 //   (< 1 left on UIM, < 2 on legacy DMS)
 // - QMI error 26 ("no effect") on DMS verify means "PIN not needed"
@@ -381,8 +381,7 @@ export function set_pin_lock(modem, enable, pin, cb)
 // SIM files are nibble-swapped BCD — helpers live in codec/hex.uc
 const swap_nibbles = hexmod.bcd_swapped_arr;
 
-// local aliases for the APDU paths below (module-internal; the public hex API
-// lives in codec/hex.uc — import it directly, these are NOT re-exported)
+// module-internal aliases (NOT re-exported; import codec/hex.uc directly)
 const hex_to_arr = hexmod.hex_to_arr;
 const arr_to_hex = hexmod.arr_to_hex;
 
@@ -772,8 +771,7 @@ export function read_plmn_lists(modem, cb)
 	});
 };
 
-// shared sequential-provider ladder (backend.first_of): try providers in order
-// until one yields a non-null value. The sustainable fallback shape for identity.
+// sequential-provider ladder: try providers in order until one yields non-null.
 const first_of = backend.first_of;
 
 // first line of an AT reply that is a run of >= min digits (IMSI/ICCID)

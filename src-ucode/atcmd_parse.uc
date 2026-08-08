@@ -1,11 +1,6 @@
-// wwand — vendor AT response parsers.
-//
-// Split out of atcmd.uc: these are the volatile, per-firmware pieces (Quectel
-// QENG/QCAINFO/QNWLOCK, Huawei MONSC/HCSQ, MeiG MENG, 3GPP CESQ/CEER/COPS,
-// ATI identity). The stable AT engine / port discovery / command builders stay
-// in atcmd.uc, which re-exports everything here so consumers keep importing
-// atcmd. Every parser takes the reply's `lines` array and returns plain data
-// (null/[] when the reply carries nothing usable) — covered by test_atcmd.
+// wwand — vendor AT response parsers (volatile per-firmware pieces split from
+// atcmd.uc, which re-exports them). Each parser takes the reply's `lines` array
+// and returns plain data (null/[] when nothing usable). Covered by test_atcmd.
 
 'use strict';
 
@@ -87,7 +82,6 @@ export function parse_qeng_servingcell(lines)
 			continue;
 
 		let kind = m[1];
-		// split the remaining CSV, stripping quotes and leading comma
 		let rest = replace(trim(m[2]), /^,/, '');
 		let f = map(split(rest, ','), (x) => { x = trim(x); return replace(x, /^"|"$/g, ''); });
 

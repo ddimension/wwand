@@ -131,9 +131,8 @@ function probe(dev, nosync)
 		});
 	};
 
-	// CTL sync with retry, replaces the old `uqmi --get-versions` x10 probe.
-	// SYNC releases stale client ids on the modem — skip it (--no-sync) when
-	// probing a device another connection manager is actively using.
+	// CTL sync with retry. SYNC releases stale client ids on the modem — skip it
+	// (--no-sync) when probing a device another connection manager is using.
 	step_sync = (tries) => {
 		ctl.request('SYNC', {}, (err) => {
 			if (err) {
@@ -199,14 +198,12 @@ function run_daemon()
 		logmod.warning('config: %s', w);
 
 	let daemon = daemon_mod.create({
-		// operational timing from the global config (also re-read live on reload
-		// in daemon.apply_config, so a hold_max edit takes effect without restart)
+		// operational timing from global config (re-read live on reload)
 		timing: { hold_max_ms: (parsed.globals.hold_max ?? 90) * 1000 },
 		deps: {
 			transport_open: transport.open,
 			log: (level, msg) => logmod.log(level, '%s', msg),
-			// re-parse uci on demand (context_up refreshes connection params
-			// from disk on every up, like netifd re-reads its config)
+			// re-parse uci on demand (context_up refreshes params on every up)
 			read_config: load_config,
 			emit_event: (type, data) => conn.event(type, data),
 			datapath_fx: netlink.default_fx((level, msg) => logmod.log(level, '%s', msg)),
@@ -216,9 +213,8 @@ function run_daemon()
 			resolve_modem_device: discovery.resolve_modem_device,
 			// enumerate physically-present control devices for the LuCI picker
 			list_present: () => discovery.list_present(),
-			// learn-back: record a discovered IMEI onto its wwand_modem section so
-			// a loose config self-stabilises (daemon gates this on auto_correct_config
-			// and a real section). Best-effort; never blocks bring-up.
+			// learn-back: record a discovered IMEI onto its wwand_modem section so a
+			// loose config self-stabilises. Best-effort; never blocks bring-up.
 			learn_identity: (section, info) => {
 				if (!info?.imei)
 					return;
@@ -233,12 +229,9 @@ function run_daemon()
 				cursor.commit('network');
 				logmod.log('notice', 'learn_identity: recorded IMEI %s on modem %s', info.imei, section);
 			},
-			// learn-back: record the resolved l3 device name on the interface section
-			// as `option device`, so VRF `list ports` / firewall / LuCI have one
-			// explicit, stable handle. Idempotent; NEVER overwrites a user-set value
-			// (device-name sovereignty). Best-effort; only commit() (no netifd reload
-			// -> no connection bounce), mirroring learn_identity. Gated in the daemon
-			// by wwand_globals.write_device (default on).
+			// learn-back: record the resolved l3 device name on the interface as
+			// `option device` (one stable handle for VRF/firewall/LuCI). Idempotent;
+			// NEVER overwrites a user value. commit() only (no netifd reload → no bounce).
 			learn_device: (iface_section, l3name) => {
 				if (!iface_section || !l3name)
 					return;
@@ -255,15 +248,13 @@ function run_daemon()
 				logmod.log('notice', 'learn_device: recorded l3 device %s on interface %s',
 					l3name, iface_section);
 			},
-			// zero-config autosetup phase 1: create the initial config for the
-			// first modem that appears while nothing wwand-related exists —
-			// named sections wwmodem_auto + interface wwan0, joined to the
-			// default wan firewall zone. Returns true when config was written.
+			// autosetup phase 1: create initial config for the first modem on an
+			// unconfigured box (wwmodem_auto + interface wwan0, wan zone). Returns
+			// true when written.
 			autosetup_create: (devname) => {
 				let cursor = libuci.cursor();
 
-				// re-check emptiness against the LIVE config (a manual edit
-				// could be newer than the daemon's parsed view)
+				// re-check emptiness against LIVE config (a manual edit may be newer)
 				let occupied = false;
 				cursor.foreach('network', 'wwand_modem', () => { occupied = true; return false; });
 				cursor.foreach('network', 'interface', (s) => {
@@ -279,9 +270,8 @@ function run_daemon()
 				let dev = (substr(devname ?? '', 0, 7) == 'cdc-wdm')
 					? '/dev/' + devname : devname;
 
-				// bind by the wireless-style sysfs path (stable across USB
-				// enumeration order, ready for PCIe/MHI); the device name is
-				// only the fallback when the path cannot be resolved
+				// bind by the sysfs path (stable across USB enumeration order); device
+				// name is only the fallback when the path can't be resolved
 				let clink = (substr(devname ?? '', 0, 7) == 'cdc-wdm')
 					? '/sys/class/usbmisc/' + devname + '/device'
 					: '/sys/class/net/' + devname + '/device';
@@ -294,8 +284,7 @@ function run_daemon()
 					cursor.set('network', 'wwmodem_auto', 'device', dev);
 				cursor.set('network', 'wwan0', 'interface');
 				cursor.set('network', 'wwan0', 'proto', 'wwand');
-				// stable L3 name: the datapath netdev is renamed to wwand0
-				// (matches the auto-assignment the parser would make)
+				// stable L3 name: datapath netdev renamed to wwand0 (matches the parser)
 				cursor.set('network', 'wwan0', 'device', 'wwand0');
 				cursor.set('network', 'wwan0', 'modem', 'wwmodem_auto');
 				cursor.set('network', 'wwan0', 'autosetup', '1');
@@ -327,9 +316,9 @@ function run_daemon()
 
 				return true;
 			},
-			// autosetup phase 2: copy the ICCID/IMSI-matched APN defaults onto
-			// the autosetup-created interface section and clear the marker —
-			// one-shot, never clobbers values the operator set meanwhile.
+			// autosetup phase 2: copy ICCID/IMSI-matched APN defaults onto the
+			// autosetup interface and clear the marker — one-shot, never clobbers
+			// operator values.
 			autosetup_fill: (iface_section, vals) => {
 				let cursor = libuci.cursor();
 
@@ -363,11 +352,9 @@ function run_daemon()
 				return true;
 			},
 			network_reload: () => conn.call('network', 'reload', {}),
-			// apply an operator-pushed NITZ time — but ONLY when the system clock
-			// is clearly unset (an RTC-less router booted before NTP synced), so we
-			// never fight sysntpd once it has taken over. Conservative threshold:
-			// any clock before 2021 is treated as unset. Best-effort; busybox
-			// `date -u -s @<epoch>` sets UTC; hwclock/RTC is left to the OS.
+			// apply operator-pushed NITZ time ONLY when the clock is clearly unset
+			// (RTC-less router before NTP), so we never fight sysntpd. Threshold: any
+			// clock before 2021 is unset. busybox date sets UTC; RTC left to the OS.
 			set_clock: (epoch, tz_min) => {
 				if (!epoch || time() >= 1609459200)   // 2021-01-01: clock already sane
 					return;
@@ -376,8 +363,7 @@ function run_daemon()
 			},
 			resolve_netdev: discovery.resolve_netdev,
 			resolve_protocol: discovery.protocol_of,
-			// the "how is this modem controlled" decision (qmi/mbim/ncm/ppp),
-			// including NCM modems that have no cdc-wdm control device
+			// how this modem is controlled (qmi/mbim/ncm/ppp), incl. NCM (no cdc-wdm)
 			resolve_control: discovery.resolve_control,
 			// one-time usbnet mode switch for a PPP-only modem (serial port only)
 			modeswitch: (o, cb) => modeswitch.attempt(o, cb),
@@ -428,8 +414,7 @@ function run_daemon()
 		exit(1);
 	}
 
-	// zero-config autosetup: catch a modem that enumerated BEFORE the daemon
-	// was on the bus (its hotplug 'add' went nowhere — the cold-boot race)
+	// autosetup: catch a modem that enumerated BEFORE the daemon (cold-boot race)
 	daemon.autosetup_scan();
 
 	logmod.notice('wwand started, %d modem(s), %d context(s)',
@@ -437,9 +422,8 @@ function run_daemon()
 
 	uloop.run();
 	// non-destructive: keep contexts + netifd interfaces up across a restart
-	// (no-proto-task means the WAN stays up and traffic keeps flowing; the fresh
-	// daemon adopts the live session). A config reload uses the destructive
-	// shutdown() via apply_config instead.
+	// (no-proto-task → WAN stays up; the fresh daemon adopts the live session).
+	// A config reload uses the destructive shutdown() via apply_config instead.
 	daemon.stop_local();
 	uloop.done();
 }

@@ -278,12 +278,11 @@ export function find_at_channels(fx, device, tty_override, base_override)
 		return { primary: null, telemetry: null };
 
 	// resolve the USB-device dir to enumerate sibling ttys for the 'at2' role:
-	// from the explicit base, else the cdc-wdm device, else the primary tty's
-	// own USB parent (the NCM case — no cdc-wdm anchor, port pinned via config).
-	// candidate USB-device dirs, first whose idVendor reads wins. The old
-	// single-shot logic died on NCM modems: `device` is the NETDEV name there
-	// (usb0), so the usbmisc-derived path never resolves and the tty fallback
-	// was unreachable (HW-verified on the SLM770A/LT300 — at2 silently absent).
+	// explicit base, else the cdc-wdm device, else the primary tty's own USB
+	// parent. The old single-shot logic died on NCM modems: `device` is the
+	// NETDEV name there (usb0), so the usbmisc-derived path never resolves and
+	// the tty fallback was unreachable (HW-verified on the SLM770A/LT300 — at2
+	// silently absent).
 	let tn = substr(primary, rindex(primary, '/') + 1);
 	let candidates = [];
 

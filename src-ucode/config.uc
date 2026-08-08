@@ -1,29 +1,9 @@
-// wwand — configuration model.
-//
-// parse(raw) is pure: it receives plain section objects (as returned by
-// uci cursor.get_all()) and produces the internal model. UCI access itself
-// happens in main.uc so this stays host-testable.
-//
-// raw = {
-//   wwand:    sections of /etc/config/wwand    (may be null),
-//   network: sections of /etc/config/network (may be null),
-// }
-//
-// result = {
-//   globals:  { log_level, hold_max },
-//   modems:   { name: { device?, netdev?, usb_path?, pincode?, modes?, mcc?,
-//                       mnc?, mux, dl_datagram_max_size, tty?, at_init[],
-//                       location, delay, failreboot, zero_rx_timeout } },
-//   contexts: { name: { modem, interface?, mux_id, apn?, pdp_type, auth?,
-//                       username?, password?, profile?, mtu?, use_pushed_mtu } },
-//   warnings: [ ... ],
-// }
+// wwand — configuration model. parse(raw) is pure (raw = uci get_all() section
+// objects) so it stays host-testable; UCI access itself lives in main.uc.
 //
 // Compat: network sections with proto 'wwand'|'qmi' and no 'context' option are
-// old-style qmi-advanced interfaces and get translated in-memory: the parent
-// netdev becomes a synthesized modem, the interface becomes a context.
-// Options that only made sense in the old bash implementation are reported
-// as deprecation warnings and ignored.
+// old-style qmi-advanced interfaces, translated in-memory (parent netdev ->
+// synthesized modem, interface -> context); bash-only options warn + are ignored.
 
 'use strict';
 
@@ -39,9 +19,8 @@ function bool_opt(v, dflt)
 	return !(v == '0' || v == 'false' || v == 'off' || v == 'no');
 }
 
-// the connection option bundle every context flavor shares (apn / auth /
-// credentials / mtu / refresh cadence). Flavor-specific fields (profile,
-// use_pushed_mtu default, auto/autosetup, mux naming) stay at the call sites.
+// the connection option bundle every context flavor shares (apn/auth/creds/mtu/
+// cadence); flavor-specific fields stay at the call sites.
 function conn_fields(s)
 {
 	return {
@@ -55,13 +34,11 @@ function conn_fields(s)
 	};
 }
 
-// The mux child's chosen NAME. An explicit muxed device name (wwan0mN) is
-// used as-is; a bare netdev + `mux_id` derives <netdev>m<mux_id> (never the
-// bare netdev itself, which would collide with the parent); no device falls
-// back to the given netdev, else 'wwan0'. The runtime re-derives from the
-// real netdev when this is null. Shared by the native and old-style
-// interface parsers (they must never drift — the child name is what netifd
-// claims).
+// The mux child's chosen NAME (what netifd claims). Explicit wwan0mN used as-is;
+// a bare netdev + `mux_id` derives <netdev>m<mux_id> (NEVER the bare netdev — it
+// would collide with the parent); no device -> given netdev, else 'wwan0'. null
+// => runtime re-derives from the real netdev. Shared by both interface parsers,
+// which must never drift.
 function derive_mux_link(nd, device, mux_id, muxed, fallback_netdev)
 {
 	if (!muxed)
@@ -107,9 +84,8 @@ export function context_defaults(over)
 	};
 };
 
-// apply a globals section (log_level, hold_max) — shared by the old
-// `config wwand 'globals'` (wwand file) and the new `config wwand_globals`
-// (network file).
+// apply a globals section — shared by old `config wwand 'globals'` and new
+// `config wwand_globals`.
 function apply_globals(s, result)
 {
 	result.globals.log_level = s.log_level ?? result.globals.log_level;
@@ -137,9 +113,8 @@ function apply_globals(s, result)
 	}
 }
 
-// build a modem config from a raw section — shared by the old `config modem`
-// (wwand file) and the new `config wwand_modem` (network file); both carry the
-// identical option set.
+// build a modem config from a raw section — shared by old `config modem` and new
+// `config wwand_modem` (identical option set).
 function modem_from_section(s)
 {
 	return modem_defaults({
@@ -235,13 +210,9 @@ function parse_wwand_sections(raw, result)
 	}
 }
 
-// parse the network-native wwand sections (the goal model: no /etc/config/wwand).
-// These are WireGuard-style typed sections living in /etc/config/network:
-//   config wwand_globals 'globals'   -> log_level / hold_max
-//   config wwand_modem   '<name>'    -> a modem (same options as `config modem`)
-//   config wwand_sim     '<name>'    -> a per-SIM override (modem + iccid keyed)
-// The interface (proto qmi) that references a wwand_modem via `option modem` is
-// handled in compat_translate alongside the other interface generations.
+// parse the network-native wwand sections (WireGuard-style typed sections in
+// /etc/config/network: wwand_globals / wwand_modem / wwand_sim). The interface
+// referencing a wwand_modem via `option modem` is handled in compat_translate.
 function parse_network_sections(raw, result)
 {
 	for (let name, s in (raw.network ?? {})) {
@@ -285,8 +256,6 @@ export function parse_netdev(device)
 
 // merge the modem-level options an old-style qmi-advanced interface section
 // carries into the synthesized modem (first interface wins; conflicts warn).
-// Extracted from compat_translate so its per-interface loop reads as its
-// distinct steps: skip-checks -> device resolution -> THIS -> context build.
 function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 {
 	let scalars = { pincode: s.pincode, modes: s.modes, mcc: s.mcc, mnc: s.mnc, tty: null };
@@ -480,9 +449,8 @@ function compat_translate(raw, result)
 		if (PDP_TYPES[s.pdptype])
 			pdp = s.pdptype;
 
-		// mux channel: same rule as the native path — an explicit `option mux_id`
-		// wins, else it is derived from a wwan0mN device name. (Previously this path
-		// ignored `mux_id`.)
+		// mux channel: same rule as the native path — explicit `option mux_id`
+		// wins, else derived from a wwan0mN device name.
 		let cmux_id = (s.mux_id != null) ? +s.mux_id : (nd?.mux_id ?? 0);
 		let cmuxed = (cmux_id > 0) || (nd?.muxed ?? false);
 
@@ -503,13 +471,11 @@ function compat_translate(raw, result)
 	}
 }
 
-// stable L3 device names: every context's datapath netdev gets a
-// deterministic name. An explicit interface `option device` wins (any
-// non-path name, e.g. a legacy wwan0m1); everything else is auto-assigned
-// wwand0..wwand100 in config order — one flat namespace independent of the
-// modem. Raw netdevs (QMI/MBIM without mux, NCM/ECM) are RENAMED to this by
-// the daemon; QMAP mux children are created/renamed under it directly
-// (mux_link is unified onto the same name).
+// stable L3 device names: every context's datapath netdev gets a deterministic
+// name. Explicit interface `option device` wins (any non-path name); everything
+// else is auto-assigned wwand0..wwand100 in config order — one flat namespace
+// independent of the modem. Raw netdevs are RENAMED to this by the daemon; QMAP
+// mux children are created/renamed under it (mux_link unified onto the same name).
 function assign_l3_names(result)
 {
 	let used = {};
@@ -654,23 +620,18 @@ export function parse(raw)
 };
 
 // --- migration to the network-native model -----------------------------------
-// migrate_plan(raw) returns an ordered list of uci changes that convert OLD
-// configs to the WireGuard-style network-native model (wwand_modem + interface
-// `option modem` + connection inline), all in /etc/config/network. It handles:
-//   - stock OpenWrt `proto mbim` (umbim) / `proto ncm` (comgt-ncm) interfaces —
-//     these BREAK once wwand-mbim/-ncm replace the stock handler, so converting
-//     them to `proto wwand` (wwand's proto) is what lets netifd invoke wwand;
-//   - wwand legacy inline `proto qmi` interfaces.
-// The target proto is `wwand`; a `proto qmi` interface that is otherwise already
-// network-native (`+ option modem`, written by an older wwand) is upgraded in
-// place to `proto wwand`. Already-new `proto wwand` interfaces are skipped. Each change
-// is [ op, 'network', section, option|null, value ]; op is 'add' (create a typed
-// section), 'set', 'add_list' or 'delete'. Pure + host-testable.
+// migrate_plan(raw): ordered uci changes converting OLD configs to the
+// network-native model, all in /etc/config/network. Stock `proto mbim`/`ncm`
+// BREAK once wwand-mbim/-ncm replace the stock handler, so they are converted to
+// `proto wwand`; legacy inline `proto qmi` too (a `proto qmi` already carrying
+// `option modem` just gets its proto upgraded in place; `proto wwand` skipped).
+// Each change is [ op, 'network', section, option|null, value ] with op
+// add|set|add_list|delete. Pure + host-testable.
 
 // radio/SIM/hardware options -> the wwand_modem section. NOTE: `usb_path`/`path`
-// is deliberately NOT here — the stable USB anchor is optional and the migration
-// does not set it; the modem is anchored on the old netdev name instead (put in
-// `device`, which discovery resolves as a netdev when it is not a /dev node).
+// is deliberately NOT here — the stable USB anchor is optional and not migrated;
+// the modem is anchored on the old netdev name instead (put in `device`, which
+// discovery resolves as a netdev when it is not a /dev node).
 const MIGRATE_MODEM_OPTS = [ 'device', 'netdev', 'serial', 'imei', 'tty', 'mux',
 	'dl_datagram_max_size', 'sim_slot', 'pincode', 'modes', 'mcc', 'mnc',
 	'lock_4g', 'lock_5g', 'lock_persist', 'at_init', 'location', 'delay',
@@ -714,12 +675,11 @@ export function migrate_plan(raw)
 		for (let k in MIGRATE_MODEM_OPTS) {
 			let v = s[k];
 
-			// The interface `device` in a legacy wwand/qmi-advanced config is a
-			// NETDEV name (wwan0 / wwan0mN), NOT a control /dev node. Anchor the
-			// modem on it in `device` — for a muxed child use the PARENT netdev
-			// (the mN is the connection's mux channel). discovery resolves a
-			// `device` that is not a /dev node as a netdev name, so a bare
-			// `option device 'wwan0'` binds; a real /dev/... path is kept as-is.
+			// legacy interface `device` is a NETDEV name (wwan0 / wwan0mN), not a
+			// control /dev node. Anchor the modem on it in `device` — for a muxed
+			// child use the PARENT netdev (mN is the connection's mux channel).
+			// discovery resolves a non-/dev `device` as a netdev name; a real
+			// /dev/... path is kept as-is.
 			if (k == 'device' && v != null && v != '') {
 				let nd = (substr(v, 0, 1) == '/') ? null : parse_netdev(v);
 				put(name, 'device', (nd && nd.muxed) ? nd.netdev : v);

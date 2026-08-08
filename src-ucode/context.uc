@@ -132,12 +132,9 @@ export function create(opts)
 		return fams;
 	};
 
-	// a connection field for THIS context: the active card's per-SIM override
-	// (config wwand_sim, matched by ICCID) wins over the interface's own value
-	// (shared resolver, see context_common.conn_cfg). Lets a SIM carry its
-	// carrier's apn/auth/username/password while the interface stays
-	// SIM-agnostic. The attach profile then still falls back to the
-	// modem-provisioned APN below.
+	// per-SIM override (wwand_sim by ICCID) wins over the interface value;
+	// shared resolver, see context_common.conn_cfg. Attach profile still
+	// falls back to the modem-provisioned APN below.
 	let cfg = (field) => context_common.conn_cfg(self, field);
 
 	let resolve_profile = () => {
@@ -279,14 +276,10 @@ export function create(opts)
 				return done(false);
 			}
 
-			// An unset/empty config APN means "use whatever the SIM/modem is
-			// provisioned with" — carriers pre-provision the attach profile (via
-			// the SIM's carrier config / MBN) with the correct default APN. So
-			// rather than writing anything, we READ the provisioned APN + details,
-			// LOG them, and let the modem attach with them. Writing a blank APN
-			// (an earlier attempt) was too blunt; leaving the provisioned config
-			// is cleaner and keeps a legitimately empty config APN working.
-			// ('#N' is handled above; the IP family is still enforced below.)
+			// Unset/empty config APN = use the SIM/modem-provisioned one (carrier
+			// pre-provisions the attach profile via MBN). So READ + LOG it and let
+			// the modem attach with it, rather than writing a blank APN (too blunt).
+			// ('#N' handled above; IP family still enforced below.)
 			let card_apn = data.apn ?? '';
 			let configured = (apn != null && apn != '');
 
@@ -347,11 +340,9 @@ export function create(opts)
 					self._connection_lost(family, data);
 			});
 
-			// WDS event report: push bearer-technology + dormancy changes live
-			// instead of polling get_bearer every stats tick. Both families report
-			// the same modem-wide bearer, so last-writer-wins with identical values.
-			// The channel-rate max is not carried here (only current tx/rx), so the
-			// channel_rate poll stays; bearer/dormancy are now event-driven.
+			// WDS event report: bearer + dormancy pushed live (not polled).
+			// Both families report the same modem-wide bearer (last-writer-wins).
+			// Only current tx/rx is carried (no max), so the channel_rate poll stays.
 			client.on('EVENT_REPORT_IND', (data) => {
 				if (data.current_bearer?.rat_mask != null) {
 					let b = qmi_backend.bearer_label(data.current_bearer.rat_mask);
