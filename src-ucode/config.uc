@@ -1,9 +1,11 @@
 // wwand — configuration model. parse(raw) is pure (raw = uci get_all() section
 // objects) so it stays host-testable; UCI access itself lives in main.uc.
 //
-// Compat: network sections with proto 'wwand'|'qmi' and no 'context' option are
-// old-style qmi-advanced interfaces, translated in-memory (parent netdev ->
-// synthesized modem, interface -> context); bash-only options warn + are ignored.
+// Compat: stock/old-style qmi-advanced interfaces (proto 'wwand'|'qmi' with the
+// connection carried inline, no `option modem`) are translated in-memory (parent
+// netdev -> synthesized modem, interface -> context); bash-only options warn +
+// are ignored. The one-shot migrator (migrate_plan) upgrades them to the
+// network-native model on install.
 
 'use strict';
 
@@ -84,8 +86,7 @@ export function context_defaults(over)
 	};
 };
 
-// apply a globals section — shared by old `config wwand 'globals'` and new
-// `config wwand_globals`.
+// apply a `config wwand_globals` section.
 function apply_globals(s, result)
 {
 	result.globals.log_level = s.log_level ?? result.globals.log_level;
@@ -113,8 +114,7 @@ function apply_globals(s, result)
 	}
 }
 
-// build a modem config from a raw section — shared by old `config modem` and new
-// `config wwand_modem` (identical option set).
+// build a modem config from a raw `config wwand_modem` section.
 function modem_from_section(s)
 {
 	return modem_defaults({
@@ -177,37 +177,6 @@ function sim_from_section(s)
 		username: s.username,
 		password: s.password,
 	};
-}
-
-function parse_wwand_sections(raw, result)
-{
-	for (let name, s in (raw.wwand ?? {})) {
-		switch (s['.type']) {
-		case 'wwand':
-			apply_globals(s, result);
-			break;
-
-		case 'modem':
-			result.modems[name] = modem_from_section(s);
-			break;
-
-		case 'context':
-			if (s.pdp_type != null && !PDP_TYPES[s.pdp_type])
-				push(result.warnings, sprintf("context %s: invalid pdp_type '%s', using ipv4v6", name, s.pdp_type));
-
-			result.contexts[name] = context_defaults({
-				...conn_fields(s),
-				modem: s.modem,
-				mux_id: +(s.mux_id ?? 0),
-				muxed: +(s.mux_id ?? 0) > 0,
-				mux_link: s.mux_link,
-				pdp_type: PDP_TYPES[s.pdp_type] ? s.pdp_type : 'ipv4v6',
-				profile: (s.profile != null) ? +s.profile : null,
-				use_pushed_mtu: bool_opt(s.use_pushed_mtu, true),
-			});
-			break;
-		}
-	}
 }
 
 // parse the network-native wwand sections (WireGuard-style typed sections in
@@ -338,20 +307,6 @@ function compat_translate(raw, result)
 		// context (nor link one) for it, so the daemon doesn't manage/kick it
 		if (bool_opt(s.disabled, false))
 			continue;
-
-		// current model: references a context section (in /etc/config/wwand)
-		if (s.context != null) {
-			if (result.contexts[s.context]) {
-				result.contexts[s.context].interface = name;
-				// 'auto 0' interfaces are not started at boot — the daemon must
-				// not proactively kick them up (only adopt them if already up)
-				result.contexts[s.context].auto = bool_opt(s.auto, true);
-			}
-			else
-				push(result.warnings, sprintf("interface %s references unknown context '%s'", name, s.context));
-
-			continue;
-		}
 
 		// network-native model: references a wwand_modem via `option modem`; the
 		// connection (apn/pdp/auth/mux/…) is carried inline on the interface (the
@@ -610,7 +565,6 @@ export function parse(raw)
 		warnings: [],
 	};
 
-	parse_wwand_sections(raw ?? {}, result);
 	parse_network_sections(raw ?? {}, result);
 	compat_translate(raw ?? {}, result);
 	assign_l3_names(result);

@@ -85,8 +85,7 @@ let daemon = daemon_mod.create({
 });
 
 daemon.apply_config(config.parse({
-	wwand: { m0: { '.type': 'modem', device: '/dev/mock0' } },
-	network: {},
+	network: { m0: { '.type': 'wwand_modem', device: '/dev/mock0' } },
 }));
 
 // hold_max is re-read live on reload (not only at daemon start). main.reload
@@ -97,12 +96,12 @@ daemon.apply_config(config.parse({
 eq(daemon.status().globals.hold_max_ms, 90000, 'hold_max: default 90s at start');
 
 daemon.set_hold_max_ms((config.parse({
-	wwand: { g: { '.type': 'wwand', hold_max: 30 } }, network: {},
+	network: { g: { '.type': 'wwand_globals', hold_max: 30 } },
 }).globals.hold_max ?? 90) * 1000);
 eq(daemon.status().globals.hold_max_ms, 30000, 'hold_max: live-updated from a reloaded globals.hold_max');
 
 daemon.set_hold_max_ms((config.parse({
-	wwand: { g: { '.type': 'wwand', hold_max: 45 } }, network: {},
+	network: { g: { '.type': 'wwand_globals', hold_max: 45 } },
 }).globals.hold_max ?? 90) * 1000);
 eq(daemon.status().globals.hold_max_ms, 45000, 'hold_max: updates again on a later reload');
 

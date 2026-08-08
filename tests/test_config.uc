@@ -1,48 +1,44 @@
-// wwand tests — config model: new schema parsing + old-config compat layer.
+// wwand tests — config model: network-native schema + stock-config compat layer.
 
 'use strict';
 
 import { eq, ok, done } from './lib/check.uc';
 import * as config from 'wwand/config.uc';
 
-// --- new schema --------------------------------------------------------------
+// --- network-native schema ---------------------------------------------------
 
 let r = config.parse({
-	wwand: {
-		globals: { '.type': 'wwand', log_level: 'debug', hold_max: '120' },
-		m0: { '.type': 'modem', device: '/dev/cdc-wdm0', pincode: '1234',
+	network: {
+		globals: { '.type': 'wwand_globals', log_level: 'debug', hold_max: '120' },
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', pincode: '1234',
 		      modes: 'lte,nr5g', mux: 'auto', at_init: [ 'ATI' ], location: '1',
 		      serial: '99efe861', imei: '868965060008609', repower_time: '10' },
-		wan_ctx: { '.type': 'context', modem: 'm0', apn: 'internet',
-		           pdp_type: 'ipv4v6', mux_id: '0' },
-		wan2_ctx: { '.type': 'context', modem: 'm0', apn: '#2',
-		            pdp_type: 'ipv4', mux_id: '2' },
-	},
-	network: {
-		wan: { '.type': 'interface', proto: 'qmi', context: 'wan_ctx' },
-		wan2: { '.type': 'interface', proto: 'qmi', context: 'wan2_ctx', auto: '0' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet',
+		       pdp_type: 'ipv4v6', mux_id: '0' },
+		wan2: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: '#2',
+		        pdp_type: 'ipv4', mux_id: '2', auto: '0' },
 	},
 });
 
-eq(r.globals.log_level, 'debug', 'new: log level');
-eq(r.globals.hold_max, 120, 'new: hold_max parsed (seconds)');
-eq(r.modems.m0.device, '/dev/cdc-wdm0', 'new: modem device');
-eq(r.modems.m0.at_init, [ 'ATI' ], 'new: at_init list');
-eq(r.modems.m0.location, true, 'new: location bool');
-eq(r.modems.m0.failreboot, 100, 'new: failreboot default');
-eq(r.modems.m0.serial, '99efe861', 'new: modem serial anchor');
-eq(r.modems.m0.imei, '868965060008609', 'new: modem imei anchor');
-eq(r.modems.m0.repower_time, 10, 'new: repower_time parsed (seconds)');
-eq(r.contexts.wan_ctx.modem, 'm0', 'new: context modem ref');
-eq(r.contexts.wan_ctx.interface, 'wan', 'new: interface attached');
-eq(r.contexts.wan2_ctx.mux_id, 2, 'new: mux id');
-eq(r.contexts.wan2_ctx.apn, '#2', 'new: profile passthrough apn');
-eq(r.contexts.wan_ctx.auto, true, 'new: interface auto defaults true');
-eq(r.contexts.wan2_ctx.auto, false, 'new: auto 0 -> not proactively brought up');
-// wan_ctx shares the modem with the muxed wan2_ctx -> auto-assigned channel
-eq(r.contexts.wan_ctx.mux_id, 1, 'new: sibling context auto-muxed');
-eq(length(r.warnings), 1, 'new: only the auto-mux warning');
-eq(config.context_for_interface(r, 'wan2'), 'wan2_ctx', 'new: interface lookup');
+eq(r.globals.log_level, 'debug', 'native: log level');
+eq(r.globals.hold_max, 120, 'native: hold_max parsed (seconds)');
+eq(r.modems.m0.device, '/dev/cdc-wdm0', 'native: modem device');
+eq(r.modems.m0.at_init, [ 'ATI' ], 'native: at_init list');
+eq(r.modems.m0.location, true, 'native: location bool');
+eq(r.modems.m0.failreboot, 100, 'native: failreboot default');
+eq(r.modems.m0.serial, '99efe861', 'native: modem serial anchor');
+eq(r.modems.m0.imei, '868965060008609', 'native: modem imei anchor');
+eq(r.modems.m0.repower_time, 10, 'native: repower_time parsed (seconds)');
+eq(r.contexts.wan.modem, 'm0', 'native: context modem ref');
+eq(r.contexts.wan.interface, 'wan', 'native: interface attached');
+eq(r.contexts.wan2.mux_id, 2, 'native: mux id');
+eq(r.contexts.wan2.apn, '#2', 'native: profile passthrough apn');
+eq(r.contexts.wan.auto, true, 'native: interface auto defaults true');
+eq(r.contexts.wan2.auto, false, 'native: auto 0 -> not proactively brought up');
+// wan shares the modem with the muxed wan2 -> auto-assigned channel
+eq(r.contexts.wan.mux_id, 1, 'native: sibling context auto-muxed');
+eq(length(r.warnings), 1, 'native: only the auto-mux warning');
+eq(config.context_for_interface(r, 'wan2'), 'wan2', 'native: interface lookup');
 
 // --- old-style compat --------------------------------------------------------
 
@@ -107,14 +103,16 @@ eq(length(dep), 2, 'compat: dhcp + strongestnetwork warned');
 
 // unknown modem reference drops the context
 r = config.parse({
-	wwand: { c1: { '.type': 'context', modem: 'nope', apn: 'x' } },
+	network: {
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'nope', apn: 'x' },
+	},
 });
 eq(length(keys(r.contexts)), 0, 'edge: unknown modem ref dropped');
 ok(length(r.warnings) > 0, 'edge: warning for unknown modem');
 
 // modem without any address info is dropped
 r = config.parse({
-	wwand: { m1: { '.type': 'modem', pincode: '1111' } },
+	network: { m1: { '.type': 'wwand_modem', pincode: '1111' } },
 });
 eq(length(keys(r.modems)), 0, 'edge: modem without device dropped');
 
@@ -146,15 +144,15 @@ r = config.parse({
 });
 eq(r.contexts.wan.pdp_type, 'ipv4', 'compat: pdptype option wins');
 
-// cell lock options on new-style modems
+// cell lock options on a wwand_modem
 r = config.parse({
-	wwand: {
-		m0: { '.type': 'modem', device: '/dev/cdc-wdm0',
+	network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0',
 		      lock_4g: '1300:246', lock_persist: '1' },
 	},
 });
-eq(r.modems.m0.lock_4g, [ '1300:246' ], 'new: lock_4g normalized to list');
-eq(r.modems.m0.lock_persist, true, 'new: lock_persist');
+eq(r.modems.m0.lock_4g, [ '1300:246' ], 'native: lock_4g normalized to list');
+eq(r.modems.m0.lock_persist, true, 'native: lock_persist');
 
 // mixed muxed/unmuxed contexts on one modem: the unmuxed one gets a channel
 r = config.parse({

@@ -283,7 +283,7 @@ let d = daemon_mod.create({
 });
 
 d.apply_config(config.parse({
-	wwand: { m0: { '.type': 'modem', usb_path: '3-1' } },
+	network: { m0: { '.type': 'wwand_modem', usb_path: '3-1' } },
 }));
 
 eq(ms_calls, [ '/dev/ttyUSB2' ], 'ppp-only modem triggers a usbnet mode switch');
@@ -312,7 +312,7 @@ let ds = daemon_mod.create({
 	},
 });
 
-ds.apply_config(config.parse({ wwand: { m0: { '.type': 'modem', usb_path: '3-1' } } }));
+ds.apply_config(config.parse({ network: { m0: { '.type': 'wwand_modem', usb_path: '3-1' } } }));
 ok(ds.modems.m0.modeswitch_liveness != null, 'liveness: watchdog armed after the switch');
 eq(ds.modems.m0.control_note, null, 'liveness: not flagged before the timeout');
 
@@ -338,7 +338,7 @@ uloop.timer(70, () => {
 		},
 	});
 
-	dr.apply_config(config.parse({ wwand: { m0: { '.type': 'modem', usb_path: '3-1' } } }));
+	dr.apply_config(config.parse({ network: { m0: { '.type': 'wwand_modem', usb_path: '3-1' } } }));
 	ok(dr.modems.m0.modeswitch_liveness != null, 'liveness: armed on the recovered daemon too');
 
 	// re-enumeration: resolve_control now reports qmi; hotplug rebuilds the modem
@@ -368,7 +368,7 @@ uloop.timer(70, () => {
 	});
 
 	dm.apply_config(config.parse({
-		wwand: { m0: { '.type': 'modem', device: '/dev/cdc-wdm0' } },
+		network: { m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' } },
 	}));
 
 	ok(!dm.modems.m0.modem, 'missing-pkg: no modem built when wwand-mbim is absent');
@@ -388,7 +388,7 @@ uloop.timer(70, () => {
 		},
 	});
 
-	dn.apply_config(config.parse({ wwand: { m0: { '.type': 'modem', usb_path: '3-1' } } }));
+	dn.apply_config(config.parse({ network: { m0: { '.type': 'wwand_modem', usb_path: '3-1' } } }));
 	eq(dn.modems.m0.control_note, 'wwand-ncm package not installed',
 		'missing-pkg: NCM backend absence flagged too');
 
@@ -403,7 +403,7 @@ uloop.timer(70, () => {
 		},
 	});
 
-	dq.apply_config(config.parse({ wwand: { m0: { '.type': 'modem', device: '/dev/cdc-wdm0' } } }));
+	dq.apply_config(config.parse({ network: { m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' } } }));
 	ok(!dq.modems.m0.modem, 'missing-pkg: no modem built when wwand-qmi is absent');
 	eq(dq.modems.m0.control_note, 'wwand-qmi package not installed',
 		'missing-pkg: QMI backend absence flagged too');
