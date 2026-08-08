@@ -9,6 +9,7 @@ whether you are a user, a developer, or an AI assistant working on the tree.
 | I want to… | Read |
 |---|---|
 | Configure a router (APN, PIN, multi-modem, mux, VRF, IPv6) | [reference.md](reference.md) — config model, examples, workflows |
+| See the UI | [luci.md](luci.md) — a visual tour of the LuCI web app (screenshots + slideshow) |
 | Understand what happens when it dials | [connection-flow.md](connection-flow.md) — the same connection from the wwand, modem and network side |
 | Understand the design / internals | [architecture.md](architecture.md) — layering, mechanisms, invariants |
 | Add a quirk, option, backend, telemetry, ubus method, board | [extending.md](extending.md) — one checklist per extension type |

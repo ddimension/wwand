@@ -25,6 +25,14 @@ quirks and recovery strategies were ported deliberately, its bugs left behind.
 
 ---
 
+## Screenshots
+
+A quick tour of the LuCI UI (modems overview · modem config · interface · SIM/APN/PIN · Modem Tools with eSIM · live status) — full-size, captioned gallery in **[docs/luci.md](docs/luci.md)**:
+
+[![wwand in LuCI — slideshow](docs/images/luci-slideshow.gif)](docs/luci.md)
+
+---
+
 ## Why wwand
 
 - **Tiny & quiet** — ~3 MB RSS, **zero** processes spawned in normal operation,
@@ -111,7 +119,9 @@ configs keep working and are auto-migrated on upgrade. See
 
 | Doc | For |
 |---|---|
+| [docs/luci.md](docs/luci.md) | Visual tour of the LuCI web UI (screenshots) |
 | [docs/reference.md](docs/reference.md) | Config options, ubus API, eSIM, quirks, troubleshooting, FAQ |
+| [docs/connection-flow.md](docs/connection-flow.md) | How a connection comes up — wwand, modem and network side, phase by phase |
 | [docs/architecture.md](docs/architecture.md) | How it works: layering, backends, netifd coupling, VRF, recovery |
 | [docs/extending.md](docs/extending.md) | Add a modem/quirk, a config option, a backend, telemetry, a ubus method |
 | [docs/backend-interface.md](docs/backend-interface.md) | The daemon-neutral backend contract |
