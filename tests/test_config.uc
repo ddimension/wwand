@@ -277,7 +277,7 @@ r = config.parse({
 });
 eq(r.contexts.wan.mux_id, 3, 'net: explicit mux_id honoured');
 eq(r.contexts.wan.muxed, true, 'net: explicit mux_id -> muxed');
-eq(r.contexts.wan.mux_link, 'wwan0m3', 'net: mux_link derived from mux_id');
+eq(r.contexts.wan.mux_link, 'wwand0', 'net: derived mux child now auto-named wwand0');
 
 // native path: a BARE netdev device + mux_id must derive <netdev>m<mux_id>, not
 // name the child the same as the parent (regression: mux_link was 'wwan0')
@@ -288,7 +288,7 @@ r = config.parse({
 	},
 });
 eq(r.contexts.wan.mux_id, 1, 'net: bare-netdev device + mux_id -> mux_id 1');
-eq(r.contexts.wan.mux_link, 'wwan0m1', 'net: bare-netdev device + mux_id derives wwan0m1 (not wwan0)');
+eq(r.contexts.wan.mux_link, 'wwand0', 'net: bare parent + mux_id -> auto wwand0 (never the parent name)');
 
 // native path: an explicit muxed device name is used as-is + its suffix -> mux_id
 r = config.parse({
@@ -309,7 +309,41 @@ r = config.parse({
 });
 eq(r.contexts.wan.mux_id, 4, 'compat: explicit mux_id honoured');
 eq(r.contexts.wan.muxed, true, 'compat: explicit mux_id -> muxed');
-eq(r.contexts.wan.mux_link, 'wwan0m4', 'compat: bare netdev + mux_id derives wwan0m4');
+eq(r.contexts.wan.mux_link, 'wwand0', 'compat: bare parent + mux_id -> auto wwand0');
+
+// --- stable L3 names (wwandN auto-assignment) --------------------------------
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		m1: { '.type': 'wwand_modem', device: '/dev/cdc-wdm1' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'x' },
+		b: { '.type': 'interface', proto: 'wwand', modem: 'm1', apn: 'y' },
+		c: { '.type': 'interface', proto: 'wwand', modem: 'm0', mux_id: '2', apn: 'z' },
+	},
+});
+eq(r.contexts.a.l3_name, 'wwand0', 'l3: first context auto wwand0');
+eq(r.contexts.b.l3_name, 'wwand1', 'l3: second context auto wwand1 (across modems)');
+eq(r.contexts.c.l3_name, 'wwand2', 'l3: muxed context in the same namespace');
+eq(r.contexts.c.mux_link, 'wwand2', 'l3: mux child claimed under the wwandN name');
+
+// explicit device pins the name; auto assignment skips it
+r = config.parse({
+	network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'wwand0', apn: 'x' },
+		b: { '.type': 'interface', proto: 'wwand', modem: 'm0', mux_id: '1', apn: 'y' },
+	},
+});
+eq(r.contexts.a.l3_name, 'wwand0', 'l3: explicit wwand0 honoured');
+eq(r.contexts.b.l3_name, 'wwand1', 'l3: auto assignment skips the pinned name');
+
+// a control-device path never becomes an L3 name
+r = config.parse({
+	network: {
+		wan: { '.type': 'interface', proto: 'qmi', device: '/dev/cdc-wdm0', apn: 'x' },
+	},
+});
+eq(r.contexts.wan.l3_name, 'wwand0', 'l3: /dev control path -> auto name');
 
 // wwand_sim.modem is OPTIONAL: an unbound sim applies to every modem (matched
 // by ICCID), a bound one only to its modem

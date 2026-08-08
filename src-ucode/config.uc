@@ -95,6 +95,7 @@ export function context_defaults(over)
 	return {
 		modem: null, interface: null, mux_id: 0,
 		muxed: false, mux_link: null,
+		l3_name: null,   // assigned datapath netdev name (wwandN / explicit device)
 		apn: null, pdp_type: 'ipv4v6', auth: null,
 		username: null, password: null, profile: null,
 		mtu: null, use_pushed_mtu: true,
@@ -409,6 +410,14 @@ function compat_translate(raw, result)
 				muxed: muxed,
 				mux_link: derive_mux_link(nd, s.device, mux_id, muxed,
 					result.modems[s.modem]?.netdev),
+				// explicit `option device` pins the L3 name; a path
+				// (/dev/...) is a control device, never an L3 name — and a
+				// BARE parent netdev on a muxed context is not one either
+				// (the child must never shadow the parent): those fall back
+				// to the auto wwandN assignment.
+				l3_name: (s.device != null && s.device != '' &&
+				          substr(s.device, 0, 1) != '/' &&
+				          (!muxed || (nd?.muxed ?? false))) ? s.device : null,
 				pdp_type: PDP_TYPES[pdp_in] ? pdp_in : 'ipv4v6',
 				profile: (s.profile != null) ? +s.profile : null,
 				use_pushed_mtu: bool_opt(s.use_pushed_mtu, true),
@@ -482,10 +491,49 @@ function compat_translate(raw, result)
 			mux_id: cmux_id,
 			muxed: cmuxed,
 			mux_link: derive_mux_link(nd, dev, cmux_id, cmuxed, null),
+			// same explicit-device rule as the native parser (see there)
+			l3_name: (dev != null && dev != '' && substr(dev, 0, 1) != '/' &&
+			          (!cmuxed || (nd?.muxed ?? false))) ? dev : null,
 			pdp_type: pdp,
 			use_pushed_mtu: bool_opt(s.use_pushed_mtu, false),   // old default: off
 			auto: bool_opt(s.auto, true),
 		});
+	}
+}
+
+// stable L3 device names: every context's datapath netdev gets a
+// deterministic name. An explicit interface `option device` wins (any
+// non-path name, e.g. a legacy wwan0m1); everything else is auto-assigned
+// wwand0..wwand100 in config order — one flat namespace independent of the
+// modem. Raw netdevs (QMI/MBIM without mux, NCM/ECM) are RENAMED to this by
+// the daemon; QMAP mux children are created/renamed under it directly
+// (mux_link is unified onto the same name).
+function assign_l3_names(result)
+{
+	let used = {};
+
+	for (let name, c in result.contexts)
+		if (c.l3_name)
+			used[c.l3_name] = true;
+
+	let next = 0;
+
+	for (let name, c in result.contexts) {
+		if (c.l3_name == null) {
+			while (used[sprintf('wwand%d', next)])
+				next++;
+
+			if (next > 100)
+				push(result.warnings, sprintf(
+					'interface %s: more than 100 auto-named L3 devices (wwand%d)', name, next));
+
+			c.l3_name = sprintf('wwand%d', next);
+			used[c.l3_name] = true;
+		}
+
+		// the mux child is claimed by netifd under exactly this name
+		if (c.muxed)
+			c.mux_link = c.l3_name;
 	}
 }
 
@@ -597,6 +645,7 @@ export function parse(raw)
 	parse_wwand_sections(raw ?? {}, result);
 	parse_network_sections(raw ?? {}, result);
 	compat_translate(raw ?? {}, result);
+	assign_l3_names(result);
 	validate(result);
 
 	return result;

@@ -225,7 +225,7 @@ serial/IMEI fields from `ubus call wwand modem_probe`.
 ```
 config context 'wan_ctx'
 	option modem 'm0'
-	option mux_id '1'                # QMAP channel; the L3 device becomes wwan0m1
+	option mux_id '1'                # QMAP channel; the L3 device gets a wwandN name
 	option profile '1'               # 3GPP profile (CID) for the attach + bearer
 	                                 #   (default: mux_id, else 1)
 	option apn 'internet'            # or '#2' = use modem profile 2 untouched
@@ -328,7 +328,7 @@ config wwand_modem 'm0'
 config interface 'wan'
 	option proto 'wwand'
 	option modem 'm0'
-	option device 'wwan0m1'          # l3 device = QMI/MBIM mux child (see note)
+	option device 'wwand0'           # stable L3 device name (see note)
 	option apn 'internet'
 	option pdp_type 'ipv4v6'          # dual-stack bearer
 
@@ -346,27 +346,35 @@ config interface 'dmz'
 	option ip6assign '64'             # carve a /64 for the DMZ (see Dual-stack)
 ```
 
-The interface's L3 device is the mux child the daemon creates and manages. Name it
-either way:
+**Stable L3 names (`wwand0` … `wwand100`).** Every wwand interface gets a
+deterministic L3 device name, independent of the modem and of USB enumeration
+order:
 
-- `option device 'wwan0m1'` — the mux id is **derived from the `…mN` suffix** (`1`
-  here); or
-- the 2-field form `option modem 'm0'` + `option mux_id '1'` — the daemon then
-  derives the device name `wwan0m1`.
+- With no `option device`, the daemon auto-assigns `wwand0`, `wwand1`, … in
+  config order — one flat namespace across all modems and both mux and non-mux
+  interfaces.
+- An explicit `option device` **pins** the name (any netdev name; a legacy
+  `wwan0m1`-style muxed name additionally derives the mux id from its `…mN`
+  suffix, and a bare parent name is never used for a mux child).
+- **Non-mux datapaths** (QMI/MBIM without mux, NCM/ECM): the daemon **renames
+  the kernel netdev** (netlink) to the assigned name. A name conflict is logged
+  as an error and the kernel name is kept.
+- **Mux children** are created directly under the assigned name.
 
-**Muxing is opt-in.** With neither of the above, QMI/MBIM run raw on the plain
-modem netdev (`wwan0`, a single PDN); **NCM never muxes** (always the plain
-netdev). Enabling muxing on QMI is also a throughput win — see
-[Performance & tuning](#performance--tuning). Whichever form you use, that
-resulting device name — `wwan0m1` (or `wwan0` unmuxed) — is what you reference in
-a VRF's `list ports` and in firewall `option device` matches.
+**Muxing is opt-in** (`option mux_id 'N'`, or a muxed explicit device name);
+without it QMI/MBIM run raw on the modem netdev (single PDN); **NCM never
+muxes**. Enabling muxing on QMI is also a throughput win — see
+[Performance & tuning](#performance--tuning). Whichever form applies, the
+assigned device name — `wwand0` etc. — is what you reference in a VRF's
+`list ports` and in firewall `option device` matches.
 
 **The daemon materialises the name.** When a modem registers, the daemon writes
 the resolved l3 device back onto the interface as `option device` (if you left it
 empty) — so the config always carries the explicit name for VRF/firewall/LuCI to
-reference, and LuCI shows it in an editable **L3 device** field. It is idempotent
-and **never overwrites a value you set** (you have the final say — clear the field
-to hand it back to auto-fill). Turn the write-back off globally with
+reference, the auto-assigned number is pinned from then on, and LuCI shows it in
+an editable **L3 device** field. It is idempotent and **never overwrites a value
+you set** (you have the final say — clear the field to hand it back to
+auto-fill). Turn the write-back off globally with
 `config wwand_globals` → `option write_device '0'`. For an rmnet mux child the
 daemon reads the MAP id back from the kernel (`IFLA_RMNET_MUX_ID`) when adopting a
 live link on restart; qmimux has no such kernel attribute, so the daemon keeps its
@@ -459,7 +467,7 @@ keep the WAN's default route:
 config interface 'wan'
 	option proto 'wwand'
 	option modem 'm0'
-	option device 'wwan0m1'         # l3 device (mux child); mux id derived from name
+	option device 'wwand0'          # l3 device (stable wwandN name)
 	option apn 'internet'
 	option pdp_type 'ipv4v6'
 	option ip4table '100'
@@ -492,8 +500,8 @@ config device
 	option type 'vrf'
 	option name 'vrf_wan'
 	option table '100'
-	list ports 'wwan0m1'             # the WAN l3 device (QMI/MBIM mux child;
-	                                 #   for NCM use the plain netdev `wwan0`)
+	list ports 'wwand0'              # the WAN l3 device (stable wwandN name,
+	                                 #   mux child or renamed raw netdev alike)
 	list ports 'dmz0'                # the DMZ l3 device
 
 config interface 'vrf_wan'           # REQUIRED: a `config device` is only brought
@@ -503,7 +511,7 @@ config interface 'vrf_wan'           # REQUIRED: a `config device` is only broug
 config interface 'wan'
 	option proto 'wwand'
 	option modem 'm0'
-	option device 'wwan0m1'         # l3 device (mux child); matches the VRF port
+	option device 'wwand0'          # l3 device; matches the VRF port
 	option apn 'internet'
 	option pdp_type 'ipv4v6'
 	option ip4table '100'            # REQUIRED: place the default INTO the VRF table
@@ -522,7 +530,7 @@ config interface 'dmz'
 
 Apply with a **full `/etc/init.d/network restart`** (not `reload`): a `reload`
 registers the VRF config but does not instantiate the master or enslave the
-members. Verify: `ip link show master vrf_wan` lists `wwan0m1` and `dmz0`.
+members. Verify: `ip link show master vrf_wan` lists `wwand0` and `dmz0`.
 
 **VRF specialities — read these:**
 
@@ -538,7 +546,7 @@ members. Verify: `ip link show master vrf_wan` lists `wwan0m1` and `dmz0`.
   ```
   (writes `net.ipv4.{tcp,udp}_l3mdev_accept`; host-wide, all-or-nothing.)
 - **fw4 is VRF-agnostic — and you MUST add the VRF master to the WAN zone.** fw4
-  derives a zone's `iifname`/`oifname` from each member's `l3_device` (`wwan0m1`,
+  derives a zone's `iifname`/`oifname` from each member's `l3_device` (`wwand0`,
   `dmz0`). But a **forwarded, DNAT'd** packet is re-injected by the l3mdev with
   `iif = vrf_wan` (the master, not the member) — so unless `vrf_wan` is in the WAN
   zone it matches no zone and hits the default reject (HW-confirmed via `nft
@@ -632,7 +640,7 @@ chain dmz_v6_snat {
 
 **The forwarded v6 reply needs a non-source-specific default route in the VRF
 table (else it is dropped before `forward`).** Over cellular the WAN's IPv6
-default is **source-specific** — `default from <WAN /64> via … dev wwan0m1`, an
+default is **source-specific** — `default from <WAN /64> via … dev wwand0`, an
 artefact of the delegated/temporary prefix. On the DNAT'd reply the kernel un-NATs
 the *destination* at prerouting but the *source* only at postrouting, so at the
 **routing decision the source is still the DMZ host's address** — not in the WAN
@@ -677,7 +685,7 @@ forwarding, so fw4 can no longer tell dmz-sourced from wan-sourced transit traff
 — both arrive as `iif = vrf_wan`. The `vrf_wan`-in-WAN-zone entry above (required so
 the **inbound** DNAT return matches a zone) therefore also makes the DMZ host's
 **outbound** traffic look wan-sourced → it is classified wan→wan and dropped
-(`drop wan out: IN=vrf_wan OUT=wwan0m1`, HW-seen with a DMZ host's outbound IKE).
+(`drop wan out: IN=vrf_wan OUT=wwand0`, HW-seen with a DMZ host's outbound IKE).
 There is no clean fw4 fix — the zone key (the ingress device) is gone. Either scope
 the VRF to the WAN only (leave the DMZ a normal interface that routes into the VRF
 table via `ip4table`/`ip6table` + a policy rule, so it keeps its real `br-lan.20`

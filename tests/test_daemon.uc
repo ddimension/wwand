@@ -171,13 +171,13 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 	eq(reply.up, true, 'context_up: reports up');
 	eq(reply.context, 'wan_ctx', 'context_up: context name');
 	eq(reply.interface, 'wan', 'context_up: interface');
-	eq(reply.netdev, 'wwan0', 'context_up: netdev');
+	eq(reply.netdev, 'wwand0', 'context_up: netdev (renamed stable L3 name)');
 	eq(reply.ipv4.addr, '10.11.12.13', 'context_up: v4 addr');
 	eq(reply.ipv4.dns, [ '9.9.9.9', '1.1.1.1' ], 'context_up: v4 dns');
 	eq(reply.ipv6, null, 'context_up: no v6 for ipv4 context');
 	eq(reply.pushed_mtu, 1430, 'context_up: pushed mtu');
 	eq(daemon.contexts.wan_ctx.cfg.apn, 'web2', 'context_up: apn refreshed from disk on up');
-	ok(dpfx.action_index('link_set wwan0 mtu 1430') >= 0, 'context_up: mtu applied via rtnl layer');
+	ok(dpfx.action_index('link_set wwand0 mtu 1430') >= 0, 'context_up: mtu applied via rtnl layer');
 
 	conn_cli.defer('wwand', 'status', {}, (c2, st) => {
 		eq(c2, 0, 'status: ok');
@@ -253,7 +253,7 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 							// (here no mux -> the plain netdev). Also exercises the
 							// derive_netdev TDZ forward-declaration.
 							ok(length(filter(events, (e) => e.type == 'learn_device' &&
-								e.data.iface == 'wan' && e.data.l3 == 'wwan0')) >= 1,
+								e.data.iface == 'wan' && e.data.l3 == 'wwand0')) >= 1,
 								'learn_device: resolved l3 device written back');
 
 							// (4) adoption path: registration cycles while the

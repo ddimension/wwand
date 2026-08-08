@@ -294,6 +294,9 @@ function run_daemon()
 					cursor.set('network', 'wwmodem_auto', 'device', dev);
 				cursor.set('network', 'wwan0', 'interface');
 				cursor.set('network', 'wwan0', 'proto', 'wwand');
+				// stable L3 name: the datapath netdev is renamed to wwand0
+				// (matches the auto-assignment the parser would make)
+				cursor.set('network', 'wwan0', 'device', 'wwand0');
 				cursor.set('network', 'wwan0', 'modem', 'wwmodem_auto');
 				cursor.set('network', 'wwan0', 'autosetup', '1');
 				cursor.commit('network');

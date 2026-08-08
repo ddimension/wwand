@@ -722,7 +722,40 @@ export function create(opts)
 		}
 	};
 
-	let start_modem = (name, cfg, muxinfo) => {
+	// stable L3 names (non-mux datapath): the kernel netdev is renamed to the
+	// context's assigned l3_name (auto wwandN, or an explicit interface
+	// `option device`) so multi-modem boxes keep deterministic interface
+	// names independent of USB enumeration order. Mux children are created
+	// under their own name directly (mux_link, unified to the same wwandN
+	// namespace) — the raw parent then keeps its kernel name. A name conflict
+	// is an ERROR (no rename; netifd claims the kernel name as before).
+	let rename_l3 = (name, entry) => {
+		let fx = deps.datapath_fx;
+
+		if (!fx?.link_set || !entry.netdev)
+			return;
+
+		// entry.l3_name: assigned in apply_config from the modem's non-mux
+		// context (false when a muxed context owns the naming)
+		let want = entry.l3_name;
+
+		if (!want || want == entry.netdev)
+			return;
+
+		if (fx.exists(sprintf('/sys/class/net/%s', want)))
+			return log('err', sprintf('modem %s: cannot rename netdev %s to %s: name already in use — keeping %s',
+				name, entry.netdev, want, entry.netdev));
+
+		if (!fx.link_set(entry.netdev, { rename: want }))
+			return log('err', sprintf('modem %s: renaming netdev %s to %s failed (device busy?) — keeping %s',
+				name, entry.netdev, want, entry.netdev));
+
+		log('notice', sprintf('modem %s: netdev %s renamed to %s (stable L3 device name)',
+			name, entry.netdev, want));
+		entry.netdev = want;
+	};
+
+	let start_modem = (name, cfg, muxinfo, l3name) => {
 		// decide how this modem is controlled (qmi/mbim/ncm/ppp): device, netdev,
 		// tty. resolve_control classifies EVERY modem, including NCM modems that
 		// have no cdc-wdm at all.
@@ -757,6 +790,7 @@ export function create(opts)
 			device: control?.device ?? cfg.device,
 			netdev: control?.netdev ?? cfg.netdev,
 			muxinfo: muxinfo,
+			l3_name: l3name ?? null,   // stable L3 target (false: mux owns naming)
 			modem: null,
 			protocol: control?.protocol,
 		};
@@ -804,6 +838,8 @@ export function create(opts)
 
 		if (!entry.netdev && deps.resolve_netdev)
 			entry.netdev = deps.resolve_netdev(cfg, device);
+
+		rename_l3(name, entry);
 
 		let ep_id = cfg.ep_id;
 
@@ -935,19 +971,28 @@ export function create(opts)
 		// v1 reload semantics: tear down everything, then rebuild
 		self.shutdown();
 
-		// aggregate mux requirements per modem before starting them
+		// aggregate mux requirements + the stable L3 name per modem before
+		// starting them (contexts start later; start_modem needs both early)
 		let mux_by_modem = {};
+		let l3_by_modem = {};
 
 		for (let name, cfg in parsed.contexts) {
 			if (cfg.mux_id > 0) {
 				let mi = mux_by_modem[cfg.modem] = mux_by_modem[cfg.modem] ?? { list: [] };
 
 				push(mi.list, { id: cfg.mux_id, name: cfg.mux_link, mtu: cfg.mtu });
+
+				// mux children are claimed under their own names — the raw
+				// parent keeps its kernel name (false = never rename)
+				l3_by_modem[cfg.modem] = false;
+			}
+			else if (cfg.modem && l3_by_modem[cfg.modem] == null) {
+				l3_by_modem[cfg.modem] = cfg.l3_name;
 			}
 		}
 
 		for (let name, cfg in parsed.modems)
-			start_modem(name, cfg, mux_by_modem[name]);
+			start_modem(name, cfg, mux_by_modem[name], l3_by_modem[name]);
 
 		for (let name, cfg in parsed.contexts)
 			start_context(name, cfg);
@@ -988,7 +1033,7 @@ export function create(opts)
 				for (let name, entry in self.modems)
 					if (!entry.modem && entry.control_note &&
 					    (now - (entry._waiting_logged ?? 0)) >= (self.timing?.waiting_retry ?? 30)) {
-						start_modem(name, entry.cfg, entry.muxinfo);
+						start_modem(name, entry.cfg, entry.muxinfo, entry.l3_name);
 
 						if (self.modems[name])
 							self.modems[name]._waiting_logged = now;
@@ -1691,7 +1736,7 @@ export function create(opts)
 				if (entry.modem)
 					continue;
 
-				start_modem(name, entry.cfg, entry.muxinfo);
+				start_modem(name, entry.cfg, entry.muxinfo, entry.l3_name);
 			}
 
 			// bind contexts that had no running modem at config time
