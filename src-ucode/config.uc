@@ -484,19 +484,19 @@ function validate(result)
 
 	for (let name, ctx in result.contexts) {
 		if (ctx.modem == null) {
-			push(result.warnings, sprintf("context %s: no modem reference, ignoring", name));
+			push(result.warnings, sprintf("interface %s: no modem reference, ignoring", name));
 			delete result.contexts[name];
 			continue;
 		}
 
 		if (!result.modems[ctx.modem]) {
-			push(result.warnings, sprintf("context %s: unknown modem '%s', ignoring", name, ctx.modem));
+			push(result.warnings, sprintf("interface %s: unknown modem '%s', ignoring", name, ctx.modem));
 			delete result.contexts[name];
 			continue;
 		}
 
 		if (ctx.mux_id > 0 && result.modems[ctx.modem].mux == 'none') {
-			push(result.warnings, sprintf("context %s: mux_id set but modem '%s' has mux disabled", name, ctx.modem));
+			push(result.warnings, sprintf("interface %s: mux_id set but modem '%s' has mux disabled", name, ctx.modem));
 			ctx.mux_id = 0;
 		}
 	}
@@ -547,7 +547,7 @@ function validate(result)
 			if (!ctx.muxed) {
 				ctx.muxed = true;
 				push(result.warnings, sprintf(
-					"context %s: modem '%s' uses muxing, auto-assigned mux id %d", name, modem, id));
+					"interface %s: modem '%s' uses muxing, auto-assigned mux id %d", name, modem, id));
 			}
 		}
 	}

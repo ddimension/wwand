@@ -3,6 +3,26 @@
 _Last updated: 2026-08-08. All test suites green (39 suites, ~1697 checks).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## Log wording: context → interface (netifd-style) (2026-08-08 late)
+
+- Per-entity **log prefixes** now read like netifd: a connection logs as
+  **`interface <name>: …`** (was `context <name>: …`) and a modem as
+  **`modem <name>: …`** (already the case). 3GPP/PDP terminology is left intact —
+  "attach context", "skipping context write" (CGDCONT) still say *context*, since
+  there it means the PDP context, not the netifd interface. Internal code
+  (`context.uc`, `self.contexts`) keeps its names; this is a log-text change only.
+  HW-verified on 245/246: `logread` shows `interface wwan0m1: …` / `interface
+  wan: …`.
+- **Test harness robustness** (`run_tests.sh`): a suite's verdict now comes from
+  the `"<name>: N checks, 0 failures"` summary it prints (line-buffered so it
+  survives a teardown abort), not the exit code. This tolerates a **pre-existing
+  host ucode `ubus.so` use-after-free at VM teardown** (valgrind-proven:
+  `uc_ubus_object_call_cb` → `ucv_gc_common`, present on a clean tree too — a
+  host-interpreter bug, not wwand's; the product on musl is unaffected). glibc
+  only turns that latent double-free into a SIGABRT depending on heap layout, so
+  a longer log string could make `test_daemon` abort *after* all checks passed; a
+  crash *before* the summary still fails the suite.
+
 ## Syslog-priority logging via /dev/log (2026-08-08 late)
 
 - **wwand now logs to `/dev/log`** (the syslog datagram socket) with real

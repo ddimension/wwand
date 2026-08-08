@@ -37,7 +37,7 @@ export function create(opts)
 	};
 
 	let deps = opts.deps ?? {};
-	let log = deps.log ?? ((l, m) => warn(sprintf('%s: context %s: %s\n', l, self.name, m)));
+	let log = deps.log ?? ((l, m) => warn(sprintf('%s: interface %s: %s\n', l, self.name, m)));
 	let up_cb = null;
 	// true once our CONNECT activated the session — the modem then holds it, so a
 	// failure/retry path must DEACTIVATE first or the next CONNECT hits MBIM
@@ -265,7 +265,7 @@ export function create(opts)
 	};
 
 	self._fail = function(err) {
-		log('err', sprintf('context failed: %J', err));
+		log('err', sprintf('bring-up failed: %J', err));
 
 		let cb = up_cb;
 		up_cb = null;

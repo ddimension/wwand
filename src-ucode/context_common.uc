@@ -60,7 +60,7 @@ export function ctx_scaffolding(self, o)
 		// warn-only transition guard: the context machine is small enough for
 		// a complete matrix — an illegal edge here is a logic bug upstream
 		if (!(state in CONTEXT_TRANSITIONS))
-			o.log('warn', sprintf('set_state: unknown context state %J (typo?)', state));
+			o.log('warn', sprintf('set_state: unknown interface state %J (typo?)', state));
 		else if (!(CONTEXT_TRANSITIONS[self.state] ?? {})[state])
 			o.log('warn', sprintf('set_state: unexpected transition %s -> %s', self.state, state));
 

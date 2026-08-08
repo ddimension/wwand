@@ -92,7 +92,7 @@ export function create(opts)
 
 
 	let deps = opts.deps ?? {};
-	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: context %s: %s\n', level, self.name, msg)));
+	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: interface %s: %s\n', level, self.name, msg)));
 
 	let up_cb = null;
 	// bumped by every up(); guards the async activation flow against late
@@ -688,7 +688,7 @@ export function create(opts)
 			log('err', sprintf('activation failed: %s (%s%s)', desc.text,
 				desc.type_name ? desc.type_name + ' ' : '', desc.code));
 		else
-			log('err', sprintf('context failed: %J', err));
+			log('err', sprintf('bring-up failed: %J', err));
 
 		mon.stop();
 

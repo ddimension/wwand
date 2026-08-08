@@ -994,7 +994,10 @@ rather than e.g. `-3276.8 dBm`.
   reloads): `--log-level err|warn|notice|info|debug`,
   `--log-target auto|syslog|stderr`, and the `--stderr` / `--syslog` shorthands
   (e.g. run `wwand --log-target stderr --log-level debug` by hand to watch a
-  boot without syslog).
+  boot without syslog). Per-entity log lines are prefixed netifd-style —
+  **`interface <name>: …`** for a connection (the `config interface` section) and
+  **`modem <name>: …`** for a modem — so `logread` reads the same way the config
+  does.
 - `ubus call wwand status` / `context_status` for a live snapshot.
 - `ubus call wwand modem_at '{"modem":"m0","command":"AT+QENG=\"servingcell\""}'`
   for ad-hoc modem diagnostics.

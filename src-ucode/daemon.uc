@@ -375,7 +375,7 @@ export function create(opts)
 			return cb(null, self._up_result(name, entry));
 
 		if (modem.state != 'READY') {
-			log('info', sprintf('context %s: modem not ready (%s), queueing activation',
+			log('info', sprintf('interface %s: modem not ready (%s), queueing activation',
 				name, modem.state));
 
 			let fired = false;
@@ -458,7 +458,7 @@ export function create(opts)
 			entry.hold_timer = null;
 
 			if (entry.ctx?.state != 'CONNECTED') {
-				log('warn', sprintf('context %s: reconnect hold expired, downing %s',
+				log('warn', sprintf('interface %s: reconnect hold expired, downing %s',
 					name, entry.cfg.interface));
 				clear_reconnect(name);
 
@@ -511,7 +511,7 @@ export function create(opts)
 			break;
 
 		case 'zero_rx':
-			log('err', sprintf('context %s: zero-rx watchdog tripped', name));
+			log('err', sprintf('interface %s: zero-rx watchdog tripped', name));
 			ctx.modem.trip_zero_rx();
 			if (entry?.wanted)
 				enter_reconnecting(name);
@@ -880,7 +880,7 @@ export function create(opts)
 		             _sig: self.contexts[name]?._sig };
 
 		if (!mentry?.modem) {
-			log('warn', sprintf('context %s: modem %s not started', name, cfg.modem));
+			log('warn', sprintf('interface %s: modem %s not started', name, cfg.modem));
 			self.contexts[name] = base;
 			return;
 		}
@@ -896,7 +896,7 @@ export function create(opts)
 			config: cfg,
 			timing: opts?.ctx_timing,
 			deps: {
-				log: (level, msg) => log(level, sprintf('context %s: %s', name, msg)),
+				log: (level, msg) => log(level, sprintf('interface %s: %s', name, msg)),
 				on_event: (ctx, event, data) => on_context_event(name, ctx, event, data),
 			},
 		});
@@ -1078,7 +1078,7 @@ export function create(opts)
 			}
 
 		if (length(changed))
-			log('info', sprintf('context %s: refreshed config from disk (%s)',
+			log('info', sprintf('interface %s: refreshed config from disk (%s)',
 				name, join(', ', changed)));
 	};
 
@@ -1120,16 +1120,16 @@ export function create(opts)
 		if (mtu == null)
 			return;
 
-		log('info', sprintf('context %s: applying MTU %d on %s', name, mtu, netdev));
+		log('info', sprintf('interface %s: applying MTU %d on %s', name, mtu, netdev));
 
 		if (!fx.link_set(netdev, { mtu: mtu }))
-			log('warn', sprintf('context %s: setting MTU %d on %s failed%s', name, mtu, netdev,
+			log('warn', sprintf('interface %s: setting MTU %d on %s failed%s', name, mtu, netdev,
 				fx.last_error ? sprintf(': %s', fx.last_error) : ''));
 
 		let v6mtu = sprintf('/proc/sys/net/ipv6/conf/%s/mtu', netdev);
 
 		if (fx.exists(v6mtu) && !fx.write(v6mtu, sprintf('%d', mtu)))
-			log('warn', sprintf('context %s: setting IPv6 MTU on %s failed', name, netdev));
+			log('warn', sprintf('interface %s: setting IPv6 MTU on %s failed', name, netdev));
 	};
 
 	// enable IPv6 on the l3 link before netifd configures it (disable_ipv6=0)
@@ -1142,7 +1142,7 @@ export function create(opts)
 		let path = sprintf('/proc/sys/net/ipv6/conf/%s/disable_ipv6', netdev);
 
 		if (fx.exists(path) && trim(fx.read(path) ?? '') != '0' && !fx.write(path, '0'))
-			log('warn', sprintf('context %s: enabling IPv6 on %s failed', name, netdev));
+			log('warn', sprintf('interface %s: enabling IPv6 on %s failed', name, netdev));
 	};
 
 	// l3 netdev for a context: parent netdev, MBIM VLAN sub-device or QMAP mux
