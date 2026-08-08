@@ -17,16 +17,19 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   PKG_SOURCE_VERSION — bump it there after pushing here), a **backend-neutral
   base + per-backend split**: `wwand` (daemon/framework/codec/shared core),
   `wwand-qmi`, `wwand-mbim` (DEPENDS wwand-qmi), `wwand-ncm`, `wwand-esim`,
-  `ucode-mod-wwand-io`. Each backend `CONFLICTS` the stock OpenWrt handler it
-  replaces (uqmi/qmi-advanced, umbim, comgt-ncm).
+  `ucode-mod-wwand-io`. Backends do **not** CONFLICTS the stock handlers — wwand
+  coexists with uqmi/qmi-advanced/umbim/comgt-ncm and manages only `proto wwand`.
 - LuCI packages moved to their own repos: ddimension/luci-proto-wwand,
   luci-app-wwand (sources only; package defs + wwand-lpac entirely in the
   feed repo).
 - **Config: all in `/etc/config/network`** (WireGuard-style: `wwand_modem` /
   `wwand_sim` (per-ICCID override) / `interface proto wwand + option modem` /
-  `wwand_globals`). Proto is **`wwand`**; the shim also registers the legacy
-  **`qmi`** alias for back-compat. No `/etc/config/wwand` for new installs; old formats +
-  stock `proto mbim`/`ncm` auto-migrate (`config.migrate_plan` + uci-defaults).
+  `wwand_globals`). Proto is **`wwand`**. Good-citizen default: wwand manages only
+  `proto wwand` interfaces; the shim registers the legacy **`qmi`** alias and the
+  daemon adopts bare `proto qmi` interfaces ONLY when `option takeover '1'`
+  (default off). No `/etc/config/wwand` for new installs; migration to the native
+  model is user-triggered (LuCI modem list / `config.migrate_plan`) or auto on
+  upgrade only under `takeover`.
   Full model in `docs/reference.md`; how to extend in `docs/extending.md`.
 - **Zero-config autosetup** (default ON, opt-out `wwand_globals option
   autosetup '0'`): modem appears on an unconfigured box → daemon hotplug
@@ -94,7 +97,8 @@ and drives netifd over ubus (deps in `main.uc`: `kick_interface`=up,
   survive; the daemon **adopts** the live session on `registered`.
 Shim: `files/wwand-proto.sh` → `/lib/netifd/proto/wwand.sh`
 (`proto_wwand_setup/teardown/renew`, with thin `proto_qmi_*` aliases;
-registers both `add_protocol wwand` + `add_protocol qmi`;
+always `add_protocol wwand`, and `add_protocol qmi` ONLY when
+`uci get network.@wwand_globals[0].takeover` is set (default off);
 `_wwand_apply_settings` builds the netifd update).
 
 ## Invariants / conventions
@@ -161,8 +165,10 @@ bit** on the files that get *executed* — this bit twice:
 So after a tar/cp deploy: **`chmod +x /usr/sbin/wwand /lib/netifd/proto/wwand.sh`**,
 then `/etc/init.d/wwand restart` + `/etc/init.d/network restart`. The `.uc`
 modules under `/usr/share/ucode/wwand/` are imported, not exec'd — they don't
-need +x. The apk pkg is fine (Makefile uses INSTALL_BIN). Also ensure no **stale
-`qmi-advanced.sh`** (old dialer) lingers — it also `add_protocol qmi` and wins.
+need +x. The apk pkg is fine (Makefile uses INSTALL_BIN). Note: with `takeover`
+off wwand does NOT register `proto qmi`, so a stock `qmi-advanced.sh`/uqmi keeps
+`proto qmi` — expected coexistence, not a bug. (Only under `takeover` do both
+register `qmi`; then a **stale `qmi-advanced.sh`** could still shadow wwand.)
 Modem is normally in **QMI mode**
 (`qmi_wwan`); MBIM mode → switch back with `AT+QCFG="usbnet",0` + `AT+CFUN=1,1`.
 

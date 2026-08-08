@@ -5,9 +5,18 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as config from 'wwand/config.uc';
 
+// Adoption of bare legacy `proto qmi` interfaces is opt-in (global `takeover`,
+// default off). Most tests below exercise the parsing/adoption engine, so they
+// parse with takeover ON via padopt(); the dedicated "takeover gate" block near
+// the end verifies the default-off behavior with a plain config.parse().
+function padopt(raw) {
+	raw.network.g = { '.type': 'wwand_globals', takeover: '1' };
+	return config.parse(raw);
+}
+
 // --- network-native schema ---------------------------------------------------
 
-let r = config.parse({
+let r = padopt({
 	network: {
 		globals: { '.type': 'wwand_globals', log_level: 'debug', hold_max: '120' },
 		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', pincode: '1234',
@@ -42,7 +51,7 @@ eq(config.context_for_interface(r, 'wan2'), 'wan2', 'native: interface lookup');
 
 // --- old-style compat --------------------------------------------------------
 
-r = config.parse({
+r = padopt({
 	network: {
 		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0',
 		       apn: 'internet.telekom', pincode: '4321', modes: 'lte',
@@ -102,7 +111,7 @@ eq(length(dep), 2, 'compat: dhcp + strongestnetwork warned');
 // --- edge cases --------------------------------------------------------------
 
 // unknown modem reference drops the context
-r = config.parse({
+r = padopt({
 	network: {
 		wan: { '.type': 'interface', proto: 'wwand', modem: 'nope', apn: 'x' },
 	},
@@ -111,13 +120,13 @@ eq(length(keys(r.contexts)), 0, 'edge: unknown modem ref dropped');
 ok(length(r.warnings) > 0, 'edge: warning for unknown modem');
 
 // modem without any address info is dropped
-r = config.parse({
+r = padopt({
 	network: { m1: { '.type': 'wwand_modem', pincode: '1111' } },
 });
 eq(length(keys(r.modems)), 0, 'edge: modem without device dropped');
 
 // indirect @device reference is skipped with warning
-r = config.parse({
+r = padopt({
 	network: {
 		wan: { '.type': 'interface', proto: 'qmi', device: '@wan6', apn: 'x' },
 	},
@@ -125,7 +134,7 @@ r = config.parse({
 eq(length(keys(r.contexts)), 0, 'edge: @device skipped');
 
 // pincode conflict: first wins, warning emitted
-r = config.parse({
+r = padopt({
 	network: {
 		a: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'x', pincode: '1111' },
 		b: { '.type': 'interface', proto: 'qmi', device: 'wwan0m1', apn: 'y', pincode: '2222' },
@@ -136,7 +145,7 @@ ok(length(filter(r.warnings, (w) => index(w, 'conflicting pincode') >= 0)) == 1,
 	'edge: pincode conflict warned');
 
 // 'pdptype' option variant (seen in deployed configs) wins over flags
-r = config.parse({
+r = padopt({
 	network: {
 		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0',
 		       apn: 'x', pdptype: 'ipv4', ipv4: '1', ipv6: '1' },
@@ -145,7 +154,7 @@ r = config.parse({
 eq(r.contexts.wan.pdp_type, 'ipv4', 'compat: pdptype option wins');
 
 // cell lock options on a wwand_modem
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0',
 		      lock_4g: '1300:246', lock_persist: '1' },
@@ -155,7 +164,7 @@ eq(r.modems.m0.lock_4g, [ '1300:246' ], 'native: lock_4g normalized to list');
 eq(r.modems.m0.lock_persist, true, 'native: lock_persist');
 
 // mixed muxed/unmuxed contexts on one modem: the unmuxed one gets a channel
-r = config.parse({
+r = padopt({
 	network: {
 		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'a' },
 		wanb: { '.type': 'interface', proto: 'qmi', device: 'wwan0m1', apn: 'b' },
@@ -167,7 +176,7 @@ ok(length(filter(r.warnings, (w) => index(w, 'auto-assigned mux id') >= 0)) == 1
 	'automux: warning emitted');
 
 // no mux anywhere: nothing auto-assigned
-r = config.parse({
+r = padopt({
 	network: {
 		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'a' },
 	},
@@ -175,7 +184,7 @@ r = config.parse({
 eq(r.contexts.wan.mux_id, 0, 'automux: plain modem untouched');
 
 // explicit m0 device: muxed with auto channel, link keeps the configured name
-r = config.parse({
+r = padopt({
 	network: {
 		wwan0m0: { '.type': 'interface', proto: 'qmi', device: 'wwan0m0', apn: 'a' },
 		wwan0m1: { '.type': 'interface', proto: 'qmi', device: 'wwan0m1', apn: 'b' },
@@ -187,7 +196,7 @@ eq(r.contexts.wwan0m0.mux_id, 2, 'm0: free channel assigned');
 eq(r.contexts.wwan0m0.mux_link, 'wwan0m0', 'm0: link name preserved');
 
 // m0 alone also enables muxing
-r = config.parse({
+r = padopt({
 	network: {
 		wwan0m0: { '.type': 'interface', proto: 'qmi', device: 'wwan0m0', apn: 'a' },
 	},
@@ -202,7 +211,7 @@ eq(config.parse_netdev('eth0'), { netdev: 'eth0', mux_id: 0, muxed: false }, 'pa
 
 // --- network-native model (WireGuard-style, everything in /etc/config/network) -
 
-r = config.parse({
+r = padopt({
 	network: {
 		globals: { '.type': 'wwand_globals', log_level: 'notice', hold_max: '45' },
 		m0: { '.type': 'wwand_modem', usb_path: '1-1.2', pincode: '1234',
@@ -235,7 +244,7 @@ eq(r.modems.m0.sims[0].pincode, '5678', 'net: sim override pincode');
 eq(r.modems.m0.sims[0].apn, 'internet.t-d1.de', 'net: sim override apn');
 
 // legacy pdptype alias on a network-native interface
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', usb_path: '1-1' },
 		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0', pdptype: 'ipv4' },
@@ -244,7 +253,7 @@ r = config.parse({
 eq(r.contexts.wan.pdp_type, 'ipv4', 'net: legacy pdptype alias honoured');
 
 // the current proto name `wwand` parses identically to the legacy `qmi` alias
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', usb_path: '1-1' },
 		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet' },
@@ -254,7 +263,7 @@ eq(r.contexts.wan.modem, 'm0', 'net: proto wwand interface bound to modem');
 eq(r.contexts.wan.apn, 'internet', 'net: proto wwand apn inline');
 
 // mux: two interfaces on one wwand_modem
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'rmnet' },
 		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0', device: 'wwan0m1', apn: 'internet' },
@@ -267,7 +276,7 @@ eq(r.contexts.wan.modem, 'm0', 'net-mux: both share the modem');
 eq(r.contexts.ims.modem, 'm0', 'net-mux: both share the modem (2)');
 
 // explicit option mux_id (the 2-field UX: Modem + Mux channel)
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'rmnet' },
 		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0', mux_id: '3', apn: 'internet' },
@@ -279,7 +288,7 @@ eq(r.contexts.wan.mux_link, 'wwand0', 'net: derived mux child now auto-named wwa
 
 // native path: a BARE netdev device + mux_id must derive <netdev>m<mux_id>, not
 // name the child the same as the parent (regression: mux_link was 'wwan0')
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', device: 'wwan0', mux: 'rmnet' },
 		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'wwan0', mux_id: '1', apn: 'internet' },
@@ -289,7 +298,7 @@ eq(r.contexts.wan.mux_id, 1, 'net: bare-netdev device + mux_id -> mux_id 1');
 eq(r.contexts.wan.mux_link, 'wwand0', 'net: bare parent + mux_id -> auto wwand0 (never the parent name)');
 
 // native path: an explicit muxed device name is used as-is + its suffix -> mux_id
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', device: 'wwan0', mux: 'rmnet' },
 		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'wwan0m2', apn: 'internet' },
@@ -300,7 +309,7 @@ eq(r.contexts.wan.mux_link, 'wwan0m2', 'net: explicit muxed device name used as-
 
 // compat path (no `option modem`): a separate option mux_id must be honoured
 // (regression: the compat path ignored mux_id and only read the device suffix)
-r = config.parse({
+r = padopt({
 	network: {
 		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', mux_id: '4', apn: 'internet' },
 	},
@@ -310,7 +319,7 @@ eq(r.contexts.wan.muxed, true, 'compat: explicit mux_id -> muxed');
 eq(r.contexts.wan.mux_link, 'wwand0', 'compat: bare parent + mux_id -> auto wwand0');
 
 // --- stable L3 names (wwandN auto-assignment) --------------------------------
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
 		m1: { '.type': 'wwand_modem', device: '/dev/cdc-wdm1' },
@@ -325,7 +334,7 @@ eq(r.contexts.c.l3_name, 'wwand2', 'l3: muxed context in the same namespace');
 eq(r.contexts.c.mux_link, 'wwand2', 'l3: mux child claimed under the wwandN name');
 
 // explicit device pins the name; auto assignment skips it
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
 		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'wwand0', apn: 'x' },
@@ -336,7 +345,7 @@ eq(r.contexts.a.l3_name, 'wwand0', 'l3: explicit wwand0 honoured');
 eq(r.contexts.b.l3_name, 'wwand1', 'l3: auto assignment skips the pinned name');
 
 // a control-device path never becomes an L3 name
-r = config.parse({
+r = padopt({
 	network: {
 		wan: { '.type': 'interface', proto: 'qmi', device: '/dev/cdc-wdm0', apn: 'x' },
 	},
@@ -344,7 +353,7 @@ r = config.parse({
 eq(r.contexts.wan.l3_name, 'wwand0', 'l3: /dev control path -> auto name');
 
 // modem hardware-quirk options reach the modem config
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', fcc_auth: 'foxconn:0' },
 	},
@@ -353,7 +362,7 @@ eq(r.modems.m0.fcc_auth, 'foxconn:0', 'modem: fcc_auth passed through');
 
 // wwand_sim.modem is OPTIONAL: an unbound sim applies to every modem (matched
 // by ICCID), a bound one only to its modem
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', usb_path: '1-1' },
 		m1: { '.type': 'wwand_modem', usb_path: '1-2' },
@@ -365,7 +374,7 @@ eq(length(r.modems.m0.sims ?? []), 2, 'sim-unbound: m0 gets the unbound sim + it
 eq(length(r.modems.m1.sims ?? []), 1, 'sim-unbound: m1 gets only the unbound sim');
 
 // guards
-r = config.parse({
+r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', usb_path: '1-1' },
 		bad_sim: { '.type': 'wwand_sim', modem: 'm0' },              // no iccid
@@ -377,6 +386,32 @@ ok(length(filter(r.warnings, w => index(w, 'no iccid') >= 0)) == 1, 'guard: wwan
 ok(length(filter(r.warnings, w => index(w, "unknown modem 'nope'") >= 0)) == 1, 'guard: sim unknown modem warns');
 ok(length(filter(r.warnings, w => index(w, "unknown modem 'ghost'") >= 0)) == 1, 'guard: interface unknown modem warns');
 eq(r.contexts.wan, null, 'guard: interface with unknown modem builds no context');
+
+// --- takeover gate (default off) ---------------------------------------------
+// Adoption of a bare legacy `proto qmi` interface is opt-in. By default (no
+// takeover) wwand ignores it — uqmi keeps it — while a `proto wwand` interface,
+// and any interface carrying `option modem`, is always managed. Enabling the
+// global `takeover` restores adoption of the bare qmi interface.
+r = config.parse({
+	network: {
+		q: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'a' },
+		w: { '.type': 'interface', proto: 'wwand', device: 'wwan1', apn: 'b' },
+	},
+});
+eq(r.contexts.q, null, 'gate: bare proto qmi NOT adopted when takeover off');
+ok(r.contexts.w != null, 'gate: proto wwand always managed regardless of takeover');
+
+r = config.parse({
+	network: {
+		g: { '.type': 'wwand_globals', takeover: '1' },
+		q: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'a' },
+	},
+});
+ok(r.contexts.q != null, 'gate: bare proto qmi adopted when takeover on');
+
+// migrate_plan is the explicit (user-triggered) conversion path — independent of
+// the takeover gate; it converts regardless.
+eq(r.globals.takeover, true, 'gate: takeover parsed true');
 
 // --- migrate_plan: convert old configs to the network-native model -----------
 
@@ -459,12 +494,12 @@ eq(mp_set(ch, 'wwmodem0', 'path'), null, 'migrate-path: path NOT actively set on
 ok(mp_has(ch, 'delete', 'wan', 'usb_path'), 'migrate-path: usb_path stripped off interface');
 
 // the modem `path` option is read (preferred), with `usb_path` still accepted
-r = config.parse({ network: {
+r = padopt({ network: {
 	m0: { '.type': 'wwand_modem', path: '1-1.4' },
 	wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'x' },
 } });
 eq(r.modems.m0.usb_path, '1-1.4', 'net: wwand_modem `path` read as the USB anchor');
-r = config.parse({ network: {
+r = padopt({ network: {
 	m0: { '.type': 'wwand_modem', usb_path: '1-1.5' },
 	wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'x' },
 } });

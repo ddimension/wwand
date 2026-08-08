@@ -3,6 +3,26 @@
 _Last updated: 2026-08-08. All test suites green (39 suites, ~1704 checks).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## Good-citizen coexistence + user-triggered migration (2026-08-08 late)
+
+- wwand no longer replaces the stock cellular stack by default. **Package
+  CONFLICTS removed** (wwand-qmi/-mbim/-ncm install alongside uqmi/umbim/
+  comgt-ncm). New global **`option takeover`** (`wwand_globals`, default **off**)
+  gates all automatic adoption: the shim's `add_protocol qmi` alias, the daemon's
+  runtime adoption of bare `proto qmi` interfaces (config.uc `parse()` gate — a
+  bare legacy interface is a context only under takeover; `proto wwand` + `option
+  modem` always managed), and the uci-defaults auto-migration on install/upgrade.
+- **User-triggered migration** replaces the automatic path: a new `migrate` ubus
+  method (`daemon.migrate(interfaces, apply)` in main.uc, reusing the tested
+  `config.migrate_plan`; scopes by dropping unselected legacy interfaces from the
+  raw dump to preserve modem dedup) + a **Migratable interfaces** section in the
+  LuCI modem list (checkboxes + *Migrate selected*). Converts `proto qmi/mbim/ncm`
+  **in place** to `proto wwand` (name/firewall/IP kept). rpc.js `migrate` + ACL.
+- test_config: compat/adoption tests now parse with takeover on via `padopt()`;
+  a dedicated *takeover gate* block asserts the default-off behavior (+ new
+  checks). Docs (reference/architecture/extending/luci/README + both CLAUDE.md)
+  rewritten from "replaces/auto-migrates" to "coexists/opt-in".
+
 ## Log wording: context → interface (netifd-style) (2026-08-08 late)
 
 - Per-entity **log prefixes** now read like netifd: a connection logs as

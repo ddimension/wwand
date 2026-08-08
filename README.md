@@ -113,8 +113,10 @@ config interface 'wan'
 	option pdp_type 'ipv4v6'
 ```
 
-`ifup wan` — done. Existing stock `proto qmi`/`mbim`/`ncm` interfaces keep
-working and are auto-migrated to `proto wwand` on upgrade. See
+`ifup wan` — done. wwand installs alongside the stock uqmi/umbim/comgt-ncm
+packages and leaves their `proto qmi`/`mbim`/`ncm` interfaces alone; migrate one
+to `proto wwand` on demand from the LuCI modem list (or set `option takeover '1'`
+for the old automatic behavior). See
 [docs/reference.md](docs/reference.md) for every option.
 
 ## Documentation

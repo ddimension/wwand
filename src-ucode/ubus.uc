@@ -306,6 +306,20 @@ export function publish(conn, daemon, log)
 			},
 		},
 
+		// user-triggered config migration (LuCI modem list). apply=false returns
+		// the planned uci changes for preview; apply=true converts the selected
+		// legacy proto qmi/mbim/ncm interfaces to proto wwand in place. An empty
+		// interfaces list migrates everything migratable.
+		migrate: {
+			args: { apply: false, interfaces: [], ubus_rpc_session: '' },
+			call: (req) => {
+				if (!daemon.migrate)
+					return { error: 'unsupported' };
+
+				return daemon.migrate(req.args.interfaces, req.args.apply);
+			},
+		},
+
 		// runtime debug switch: ubus call wwand set_log_level '{"level":"debug"}'
 		// (reverted to the uci value on reload)
 		set_log_level: {

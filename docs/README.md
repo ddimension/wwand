@@ -23,7 +23,9 @@ whether you are a user, a developer, or an AI assistant working on the tree.
 - **Config lives in `/etc/config/network`** (WireGuard-style): `wwand_modem`
   (hardware + PIN + radio policy), optional `wwand_sim` (per-ICCID/IMSI
   override), `interface … proto wwand` + `option modem` (the connection),
-  `wwand_globals`. Old formats and stock `proto qmi/mbim/ncm` auto-migrate.
+  `wwand_globals`. wwand coexists with the stock uqmi/umbim/comgt-ncm packages;
+  migrate a stock `proto qmi/mbim/ncm` interface to wwand on demand from the LuCI
+  modem list (or set `option takeover '1'` for the old automatic behavior).
 - **One daemon** (`/usr/sbin/wwand`) owns modems and contexts, drives netifd
   over ubus (`no_proto_task`), touches only the link layer — netifd owns all
   addressing/routing (VRF-safe).

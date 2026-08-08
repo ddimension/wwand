@@ -48,8 +48,8 @@ One process. Zero per-context spawns. ~3 MB resident. The measured baseline:
                discovery.uc (control-type detection), modeswitch/protocol_switch
  integration:  daemon.uc + netsel_ops.uc (registry/policy), config.uc
                (+migrate/compat), ubus.uc, main.uc
- shell:        wwand-proto.sh (thin netifd shim → wwand.sh, proto `wwand`/`qmi`), init, hotplug,
-               wwand-migrate + uci-defaults (config auto-migration)
+ shell:        wwand-proto.sh (thin netifd shim → wwand.sh, proto `wwand` + opt-in `qmi`), init, hotplug,
+               wwand-migrate + uci-defaults (opt-in config migration, `option takeover`)
 ```
 
 The three control backends (QMI, MBIM, NCM) sit behind one **daemon-neutral
@@ -445,12 +445,15 @@ lpac is either the stock openwrt-packages `lpac` or the bundled `wwand-lpac`
 All config lives in `/etc/config/network` (WireGuard-style typed sections):
 `wwand_modem` (hardware + SIM slot + radio), `wwand_sim` (per-ICCID override),
 `interface` with `proto wwand` + `option modem` (the connection), `wwand_globals`.
-The netifd shim registers `wwand` and, for back-compat, the legacy `qmi` alias.
-The daemon reads every older format too (legacy inline `proto qmi`, the previous
-`/etc/config/wwand`), and `config.migrate_plan` converts old configs — including
-**stock `proto mbim`/`proto ncm`** interfaces, which `wwand-mbim`/`wwand-ncm`
-replace — to the new model. Conversion is automatic (a uci-defaults script runs
-the migrator on install/upgrade) and on LuCI save. See `docs/reference.md`.
+The netifd shim registers `wwand`; the legacy `qmi` alias only when the global
+`option takeover` is set. **wwand is a good citizen by default:** it installs
+alongside the stock uqmi/umbim/comgt-ncm packages (no CONFLICTS) and manages only
+`proto wwand` interfaces — bare `proto qmi`/`mbim`/`ncm` interfaces are left to the
+stock stack. Moving one to wwand is explicit: `config.migrate_plan` converts it
+**in place** to `proto wwand` (+ a linked `wwand_modem`), driven from the LuCI
+modem list (the `migrate` ubus method) or the `wwand-migrate` CLI. Setting
+`option takeover '1'` restores the old automatic behavior (adopt legacy
+interfaces at runtime + auto-migrate on install/upgrade). See `docs/reference.md`.
 
 ## 8. Roadmap
 

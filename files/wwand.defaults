@@ -1,10 +1,17 @@
 #!/bin/sh
-# wwand — one-time migration to the network-native config model, run on install
-# / upgrade (uci-defaults). Converts stock `proto mbim` (umbim) / `proto ncm`
-# (comgt-ncm) and wwand legacy-inline `proto qmi` interfaces into
-# wwand_modem + `option modem` + connection, all in /etc/config/network.
+# wwand — OPTIONAL one-time migration to the network-native config model, run on
+# install/upgrade (uci-defaults) but ONLY when takeover is enabled (global
+# wwand_globals option takeover, default off). By default wwand does not touch
+# existing configs at all: migrate specific interfaces on demand from the LuCI
+# modem list, or run `/usr/libexec/wwand/migrate --apply` by hand.
 #
-# migrate is idempotent (already-new config -> no changes), so re-running on
-# every upgrade is safe. The daemon reads any wwand format regardless (compat).
-[ -x /usr/libexec/wwand/migrate ] && /usr/libexec/wwand/migrate --apply >/dev/null 2>&1
+# When enabled: converts stock `proto mbim` (umbim) / `proto ncm` (comgt-ncm) and
+# legacy-inline `proto qmi` interfaces into wwand_modem + `option modem` +
+# connection, all in /etc/config/network. migrate is idempotent (already-new
+# config -> no changes), so re-running on every upgrade is safe.
+case "$(uci -q get network.@wwand_globals[0].takeover)" in
+	1|true|yes|on)
+		[ -x /usr/libexec/wwand/migrate ] && /usr/libexec/wwand/migrate --apply >/dev/null 2>&1
+		;;
+esac
 exit 0

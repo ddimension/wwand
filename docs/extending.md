@@ -153,10 +153,12 @@ To add a backend `xyz`:
    null when the package is absent) and a branch in `backend_for(proto)`.
 4. **Discovery** — teach `src-ucode/discovery.uc` `resolve_control(cfg)` to map
    the modem's driver/device to `xyz`.
-5. **Package** — a `wwand-xyz` package in the feed Makefile (`DEPENDS +wwand`,
-   plus `CONFLICTS` the stock handler it replaces), and the file list.
-6. **Migration** — if it replaces a stock netifd proto, add that proto to
-   `migrate_plan` so `proto xyz` interfaces convert to `proto wwand` + `wwand_modem`.
+5. **Package** — a `wwand-xyz` package in the feed Makefile (`DEPENDS +wwand`)
+   and the file list. Do **not** `CONFLICTS` the stock handler — wwand coexists
+   with it and only manages `proto wwand` interfaces.
+6. **Migration** — if the modem is normally driven by a stock netifd proto, add
+   that proto to `migrate_plan` so a `proto xyz` interface converts to `proto
+   wwand` + `wwand_modem` (user-triggered from the LuCI modem list / migrate CLI).
 
 MBIM is the reference example of reuse: it has no native NAS, so it brings up a
 **QMI-over-MBIM passthrough** (`qmi_over_mbim.uc`) and runs the whole QMI stack

@@ -251,5 +251,11 @@ proto_qmi_renew()       { proto_wwand_renew "$@"; }
 
 [ -n "$INCLUDE_ONLY" ] || {
 	add_protocol wwand
-	add_protocol qmi
+	# The historical `qmi` alias (stock qmi-advanced/uqmi's proto name) is only
+	# claimed when takeover is enabled (global wwand_globals option takeover,
+	# default off) — otherwise wwand stays a good citizen and leaves `proto qmi`
+	# to uqmi. Explicitly-migrated interfaces use `proto wwand` regardless.
+	case "$(uci -q get network.@wwand_globals[0].takeover)" in
+		1|true|yes|on) add_protocol qmi ;;
+	esac
 }

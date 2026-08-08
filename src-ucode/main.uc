@@ -427,6 +427,74 @@ function run_daemon()
 		daemon.apply_config(p);
 	};
 
+	// user-triggered migration (the LuCI modem list; parity with the migrate CLI):
+	// convert the selected legacy proto qmi/mbim/ncm interfaces to the network-
+	// native model in place (proto -> wwand + a linked wwand_modem), reusing the
+	// tested config.migrate_plan engine. apply=false returns only the planned uci
+	// changes (preview); an empty interface list migrates everything migratable.
+	daemon.migrate = (interfaces, apply) => {
+		let cursor = libuci.cursor();
+		let net = cursor.get_all('network') ?? {};
+
+		// scope to the selected interfaces by dropping the OTHER not-yet-migrated
+		// legacy interfaces from the dump, so migrate_plan ignores them — this
+		// keeps the engine's per-modem dedup intact for the selected set instead of
+		// post-filtering its (interface + shared-modem) change list.
+		if (type(interfaces) == 'array' && length(interfaces)) {
+			let want = {};
+
+			for (let i in interfaces)
+				want[i] = true;
+
+			let scoped = {};
+
+			for (let name, s in net) {
+				let legacy = (s['.type'] == 'interface' && s.modem == null &&
+				              (s.proto == 'qmi' || s.proto == 'mbim' || s.proto == 'ncm'));
+
+				if (legacy && !want[name])
+					continue;
+
+				scoped[name] = s;
+			}
+
+			net = scoped;
+		}
+
+		let changes = config.migrate_plan({ network: net });
+
+		if (!apply)
+			return { changes: changes };
+
+		// apply — same uci ops as files/wwand-migrate --apply
+		for (let c in changes) {
+			if (c[0] == 'add')
+				cursor.set('network', c[2], c[4]);        // create typed section
+			else if (c[0] == 'set')
+				cursor.set('network', c[2], c[3], c[4]);
+			else if (c[0] == 'add_list') {
+				let cur = cursor.get('network', c[2], c[3]) ?? [];
+
+				if (type(cur) != 'array')
+					cur = (cur != null) ? [ cur ] : [];
+
+				push(cur, c[4]);
+				cursor.set('network', c[2], c[3], cur);
+			}
+			else if (c[0] == 'delete')
+				cursor.delete('network', c[2], c[3]);
+		}
+
+		cursor.commit('network');
+
+		// netifd re-reads the interfaces (now proto wwand) and the daemon re-reads
+		// its config so it starts managing them
+		conn.call('network', 'reload', {});
+		daemon.reload();
+
+		return { ok: true, applied: length(changes) };
+	};
+
 	daemon.apply_config(parsed);
 
 	if (!ubus_api.publish(conn, daemon, (level, msg) => logmod.log(level, '%s', msg))) {

@@ -103,6 +103,16 @@ function apply_globals(s, result)
 	if (s.autosetup != null)
 		result.globals.autosetup = bool_opt(s.autosetup, true);
 
+	// opt-in adoption of the stock/legacy netifd stack (default OFF). When off,
+	// wwand is a good citizen: it ignores bare `proto qmi` interfaces (uqmi keeps
+	// them), the netifd shim registers only `proto wwand`, and install/upgrade
+	// never auto-migrates. When on, wwand adopts legacy `proto qmi` interfaces and
+	// the shim also registers the historical `qmi` alias (the old behavior).
+	// Explicit migration to `proto wwand` is always available on demand (the LuCI
+	// modem list / the migrate CLI), independent of this switch.
+	if (s.takeover != null)
+		result.globals.takeover = bool_opt(s.takeover, false);
+
 	if (s.hold_max != null) {
 		let hm = +s.hold_max;
 
@@ -357,6 +367,12 @@ function compat_translate(raw, result)
 			continue;
 		}
 
+		// A bare legacy interface (no `option modem`). Stock `proto qmi` is only
+		// adopted when takeover is enabled — otherwise leave it to uqmi (the
+		// good-citizen default). `proto wwand` is wwand's own proto, always managed.
+		if (s.proto == 'qmi' && !result.globals.takeover)
+			continue;
+
 		// --- old-style qmi-advanced interface ---------------------------
 
 		for (let opt in OLD_DEPRECATED)
@@ -558,7 +574,8 @@ export function parse(raw)
 	let result = {
 		// hold_max: seconds the daemon holds a lost interface up while
 		// reconnecting in place before giving up and downing it (netifd teardown)
-		globals: { log_level: 'info', hold_max: 90, write_device: true, autosetup: true },
+		globals: { log_level: 'info', hold_max: 90, write_device: true, autosetup: true,
+		           takeover: false },
 		modems: {},
 		contexts: {},
 		sims: {},
