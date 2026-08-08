@@ -42,8 +42,7 @@ overwrites operator-set values.
 ## Configuration
 
 **All configuration lives in `/etc/config/network`** (WireGuard-style). Three
-wwand section types plus the netifd interface — no separate `/etc/config/wwand`
-file for new setups:
+wwand section types plus the netifd interface — no separate config file:
 
 - **`config wwand_modem '<name>'`** — the modem: hardware + primary SIM slot +
   default PIN + radio/cell/PLMN. Identity: **`device`** — a control node
@@ -69,7 +68,9 @@ file for new setups:
   `profile`, `mux_id` (0 = no mux, N = channel N), `mtu`, `use_pushed_mtu`,
   `use_pushed_prefix`, `settings_poll` + the usual netifd knobs. Several
   interfaces referencing one `wwand_modem` = multiple mux contexts on one modem.
-- **`config wwand_globals 'globals'`** — `log_level`, `hold_max`.
+- **`config wwand_globals 'globals'`** — `log_level`, `hold_max`, `write_device`
+  (write the resolved L3 name back onto interfaces, default on), `autosetup`
+  (zero-config autosetup, default on).
 
 > **Proto name.** The netifd/LuCI protocol is **`wwand`** — one handler for all
 > backends (QMI/MBIM/NCM; the driver decides which). For backward compatibility
@@ -129,14 +130,32 @@ How the sections relate (all in `/etc/config/network`):
 Two interfaces share one `wwand_modem` = two mux contexts on one modem. A
 `wwand_sim` is picked by the inserted card's ICCID (modem binding optional).
 
-**Backward compatibility & migration.** The daemon still reads every older
-wwand format: a legacy inline `proto qmi` interface, and the previous
-`/etc/config/wwand` `modem`/`context` sections shown below. Nothing breaks.
-Conversion to the model above happens automatically — a uci-defaults script runs
+### Device naming
+
+`option device` means **two different things** depending on the section — this is
+the top point of confusion, so keep them straight:
+
+- On **`config wwand_modem`** it is the **control anchor**: a `/dev/cdc-wdm0`
+  control node or a netdev name (`wwan0`) that identifies *which modem*. Prefer
+  `path`/`serial`/`imei` over it on multi-modem boxes.
+- On **`config interface`** it is the **L3 device name** — the datapath device
+  the connection runs on. Leave it empty and the daemon assigns a stable
+  **`wwand0…wwand100`** name (auto, one flat namespace across all modems),
+  **renames the kernel netdev** (or creates the mux child) to match, and writes
+  the name back here. Set a value to pin it. This `wwandN` name is what you
+  reference in a VRF `list ports` or a firewall `option device`. Full rules in
+  [Stable L3 names](#deployment-examples) below.
+
+**Backward compatibility & migration.** Stock and old-style interfaces keep
+working: a legacy inline `proto qmi` interface (stock qmi-advanced style, options
+carried on the interface) is read directly by the compat layer. Conversion to the
+model above happens automatically — a uci-defaults script runs
 `/usr/libexec/wwand/migrate --apply` once on install/upgrade (it also converts
 stock OpenWrt `proto mbim`/`proto ncm` interfaces, since `wwand-mbim`/`wwand-ncm`
 replace those handlers), and saving in LuCI writes the new model too. Run the
-migrate tool by hand any time (dry-run without `--apply`).
+migrate tool by hand any time (dry-run without `--apply`). *(The pre-network-native
+`/etc/config/wwand` file — `config modem`/`config context` — is no longer read at
+runtime; migrate it via the network-native model above.)*
 
 For example, a stock `proto ncm` interface is rewritten in place:
 
@@ -157,19 +176,20 @@ For example, a stock `proto ncm` interface is rewritten in place:
 
 wwand then detects at runtime (by the `cdc_ncm` driver) that it is an NCM modem.
 
-### Legacy: the `/etc/config/wwand` model
+### Modem section — `config wwand_modem`
 
-The previous model (still read for compatibility): `/etc/config/wwand` holds
-`modem` and `context` sections; a netifd interface references a context by name
-(`option context 'wan_ctx'`).
-
-### Modem section
+The full modem option set, with defaults:
 
 ```
-config wwand 'globals'
+config wwand_globals 'globals'
 	option log_level 'info'          # err|warn|notice|info|debug
+	option hold_max '90'             # seconds to hold a lost interface up while
+	                                 #   reconnecting in place before downing it
+	option write_device '1'          # write the resolved wwandN L3 name back onto
+	                                 #   the interface as `option device` (0 = off)
+	option autosetup '1'             # zero-config autosetup (0 = off)
 
-config modem 'm0'
+config wwand_modem 'm0'
 	option device '/dev/cdc-wdm0'    # control port, or a netdev name (`wwan0`)
 	                                 # or `option path` — PREFERRED for multi-modem
 	                                 #   setups: netdev/cdc-wdm names follow USB
@@ -218,6 +238,8 @@ config modem 'm0'
 	option proto_error_limit '25'    # protocol-error ceiling before a reboot (gated by failreboot)
 	option zero_rx_timeout '21600'   # no-rx watchdog in seconds (0 = off)
 	option repower_time '30'         # recovery power-cycle off / reset-hold seconds
+	option auto_correct_config '0'   # learn + write back a missing imei anchor so a
+	                                 #   loose config self-stabilises (default off)
 ```
 
 **Binding a modem to hardware.** The anchors are tried most-stable first:
@@ -235,11 +257,16 @@ discovers (written back onto its `wwand_modem` section) so a loose config
 self-stabilises. The LuCI Modems page and the inline interface editor populate the
 serial/IMEI fields from `ubus call wwand modem_probe`.
 
-### Context section
+### Connection section — `config interface`
+
+The connection (apn/pdp/auth/mux/MTU) lives directly on the netifd interface,
+alongside `option modem`:
 
 ```
-config context 'wan_ctx'
-	option modem 'm0'
+config interface 'wan'
+	option proto 'wwand'             # legacy 'qmi' also accepted
+	option modem 'm0'                # the wwand_modem this connection runs on
+	option device 'wwand0'           # optional: pin the stable L3 name (else auto)
 	option mux_id '1'                # QMAP channel; the L3 device gets a wwandN name
 	option profile '1'               # 3GPP profile (CID) for the attach + bearer
 	                                 #   (default: mux_id, else 1)
@@ -252,14 +279,6 @@ config context 'wan_ctx'
 	option use_pushed_mtu '1'        # apply the network-advertised MTU
 	option use_pushed_prefix '0'     # keep the pushed IPv4 prefix (default: /32 p-t-p)
 	option settings_poll '300'       # re-check pushed IP/DNS/MTU every N s (0 = off)
-```
-
-`/etc/config/network`:
-
-```
-config interface 'wan'
-	option proto 'wwand'             # legacy 'qmi' also accepted
-	option context 'wan_ctx'
 	option metric '10'               # metric / peerdns / defaultroute / ip4table /
 	                                 #   ip6table / VRF are handled by netifd as usual
 ```
@@ -368,11 +387,11 @@ If a Lenovo/Dell/HP-SKU modem stays in low power (no RF), set
 unlock messages by itself; MBIM-mode Quectel needs the explicit `quectel`
 value. See the option in [Configuration](#configuration).
 
-### Migrating from stock qmi/mbim/ncm or old wwand configs
+### Migrating from stock qmi/mbim/ncm
 
 Nothing to do: the uci-defaults migrator converts stock `proto qmi`/`mbim`/
-`ncm` interfaces and old `/etc/config/wwand` files into the native model on
-upgrade, and the daemon reads the legacy formats directly in the meantime.
+`ncm` interfaces into the native model on upgrade, and the compat layer reads
+a legacy inline `proto qmi` interface directly in the meantime.
 Details: [Configuration](#configuration) (migration notes).
 
 ## netifd integration (no-proto-task)
@@ -589,224 +608,14 @@ leakage. Inspect with `ip rule` / `ip -6 rule` and `ip route show table 100`.
 
 ### Variant 2 — VRF
 
-Bind the WAN and DMZ into an L3 VRF instead. The VRF is a `config device` of
-`type 'vrf'` with its own table; both interfaces' L3 devices are its `ports`:
-
-```
-config device
-	option type 'vrf'
-	option name 'vrf_wan'
-	option table '100'
-	list ports 'wwand0'              # the WAN l3 device (stable wwandN name,
-	                                 #   mux child or renamed raw netdev alike)
-	list ports 'dmz0'                # the DMZ l3 device
-
-config interface 'vrf_wan'           # REQUIRED: a `config device` is only brought
-	option proto 'none'              #   up when an interface references it — this
-	option device 'vrf_wan'          #   instantiates the master + enslaves the ports
-
-config interface 'wan'
-	option proto 'wwand'
-	option modem 'm0'
-	option device 'wwand0'          # l3 device; matches the VRF port
-	option apn 'internet'
-	option pdp_type 'ipv4v6'
-	option ip4table '100'            # REQUIRED: place the default INTO the VRF table
-	option ip6table '100'            #   — netifd does NOT auto-place proto routes
-	option defaultroute '1'          #   there; without it the default leaks to main
-
-config interface 'dmz'
-	option proto 'static'
-	option device 'dmz0'
-	option ipaddr '192.0.2.1'
-	option netmask '255.255.255.0'
-	option ip6assign '64'
-	option ip4table '100'
-	option ip6table '100'
-```
-
-Apply with a **full `/etc/init.d/network restart`** (not `reload`): a `reload`
-registers the VRF config but does not instantiate the master or enslave the
-members. Verify: `ip link show master vrf_wan` lists `wwand0` and `dmz0`.
-
-**VRF specialities — read these:**
-
-- **wwand stays out of it.** The daemon never sets `IFLA_MASTER`; netifd enslaves
-  the mux child to the VRF master and places its routes in the VRF table — see the
-  [routing/VRF invariant](architecture.md#routing--vrf-compatibility-invariant).
-- **l3mdev is a global switch, not per-VRF.** For the router's own *listening*
-  sockets (a DHCPv6 client, DNS, …) to work across the VRF, enable it globally:
-  ```
-  config globals 'globals'
-  	option tcp_l3mdev '1'
-  	option udp_l3mdev '1'
-  ```
-  (writes `net.ipv4.{tcp,udp}_l3mdev_accept`; host-wide, all-or-nothing.)
-- **fw4 is VRF-agnostic — and you MUST add the VRF master to the WAN zone.** fw4
-  derives a zone's `iifname`/`oifname` from each member's `l3_device` (`wwand0`,
-  `dmz0`). But a **forwarded, DNAT'd** packet is re-injected by the l3mdev with
-  `iif = vrf_wan` (the master, not the member) — so unless `vrf_wan` is in the WAN
-  zone it matches no zone and hits the default reject (HW-confirmed via `nft
-  monitor trace`: `iif "vrf_wan" oif "br-lan.20" … jump handle_reject`). Add the
-  master as a device to the WAN zone:
-  ```
-  config zone
-  	option name 'wan'
-  	list network 'wan'
-  	list device 'vrf_wan'          # REQUIRED: l3mdev re-injects forwarded
-  	...                            #   traffic with iif = the VRF master
-  ```
-- **l3mdev FIB rule is automatic — do not script it.** When the first VRF device
-  is created the kernel installs the `1000: from all lookup [l3mdev]` rule for
-  **both** v4 and v6 itself, and the `config device` + `config interface vrf_wan`
-  pair re-instantiates the master on every (cold) boot. Cold-boot-verified: no
-  `ip rule add l3mdev` and no hotplug helper are needed (an earlier workaround
-  adding them by hand was pure redundancy).
-
-**Forwarding to a DMZ host through the VRF (HW-tested).** With the master in the
-WAN zone, inbound traffic is correctly DNAT'd and forwarded to the DMZ host — v4
-end-to-end confirmed, v6 end-to-end once the two routing fixes below (catch-all
-default route + `keep_addr_on_down`) are in place. Announce the DMZ prefix so
-the host can address itself, and NAT the forwarded traffic so its reply returns
-symmetrically via the router:
-
-```
-# /etc/config/dhcp — announce the DMZ /64 (RA) so the host auto-configures
-config dhcp 'dmz'
-	option interface 'dmz'
-	option ra 'server'
-	option dhcpv6 'server'
-	list ra_flags 'none'
-
-# /etc/config/firewall — DMZ-host DNAT + NAT66 so the host replies via the router
-config redirect                     # all inbound v4 -> the DMZ host
-	option name 'DMZ-host'
-	option src 'wan'
-	option dest 'dmz'
-	option proto 'all'
-	option dest_ip '192.0.2.10'
-
-config zone
-	option name 'dmz'
-	list network 'dmz'
-	option masq6 '1'                # NAT66: forwarded v6 gets an on-link source,
-	...                             #   so the host's reply routes back to us
-```
-
-**Allow ICMPv6 ND on a REJECT-input DMZ zone (else v6 breaks entirely).** A DMZ
-zone with `input 'REJECT'` and no ICMPv6 allow **rejects the host's incoming
-neighbour advertisements** — so the router can never resolve the host's L2 address
-and every v6 forward silently fails with the neighbour stuck `FAILED`
-(HW-confirmed via `nft monitor trace`: the NA hits `input_dmz → reject_from_dmz →
-handle_reject`). The stock `wan` zone ships an `Allow-ICMPv6-Input` rule; a custom
-DMZ zone needs the same:
-```
-config rule
-	option name 'Allow-DMZ-ICMPv6'
-	option src 'dmz'
-	option family 'ipv6'
-	option proto 'icmp'
-	list icmp_type 'neighbour-solicitation'
-	list icmp_type 'neighbour-advertisement'
-	list icmp_type 'router-solicitation'
-	list icmp_type 'router-advertisement'
-	list icmp_type 'echo-request'
-	list icmp_type 'echo-reply'
-	list icmp_type 'destination-unreachable'
-	list icmp_type 'packet-too-big'
-	list icmp_type 'time-exceeded'
-	option limit '1000/sec'
-	option target 'ACCEPT'
-```
-With this, the neighbour resolves (`… lladdr … REACHABLE`) and the host replies
-(HW-confirmed SYN → SYN-ACK). The DMZ host must also have an address *in an on-link
-prefix the router shares* (SLAAC from the announced RA, or a static address in a
-common `fd…::/64` you also put on the DMZ interface as `::1`) so `masq6` can give
-the forwarded traffic an on-link source and the reply returns via the router. To
-force that on-link source deterministically (RFC-6724 selection otherwise prefers
-the GUA over the ULA for a ULA destination), SNAT the forwarded traffic to the
-shared `::1` explicitly rather than relying on `masq6` alone — e.g. an
-`/etc/nftables.d/` include:
-```
-# /etc/nftables.d/20-dmz-v6-snat.nft — on-link source for the DMZ host
-chain dmz_v6_snat {
-	type nat hook postrouting priority 99; policy accept;   # before fw4 srcnat (100)
-	oifname "dmz0" ip6 daddr fd00:…::/64 snat ip6 to fd00:…::1
-}
-```
-
-**The forwarded v6 reply needs a non-source-specific default route in the VRF
-table (else it is dropped before `forward`).** Over cellular the WAN's IPv6
-default is **source-specific** — `default from <WAN /64> via … dev wwand0`, an
-artefact of the delegated/temporary prefix. On the DNAT'd reply the kernel un-NATs
-the *destination* at prerouting but the *source* only at postrouting, so at the
-**routing decision the source is still the DMZ host's address** — not in the WAN
-`/64`, so the source-specific default does not match → `RTNETLINK: Network
-unreachable` and the reply is dropped **before** the `forward` hook (HW-confirmed:
-`nft monitor trace` stops at `prerouting`, no `forward`/`postrouting`). IPv4 is
-immune (its default is not source-scoped). Add a **catch-all** default into the
-VRF table — a device route (no gateway) so it survives prefix/gateway rotation:
-```
-config route6
-	option interface 'wan'           # the wwand WAN interface
-	option target '::/0'
-	option table '100'               # the VRF table
-	option metric '2048'             # below the source-specific default (1024)
-```
-The router's own traffic still prefers the source-specific default (metric 1024);
-only the forwarded reply — whose source does not match it — falls through to the
-catch-all. With this the v6 3-way handshake completes end-to-end.
-
-**Keep the DMZ's static IPv6 address across VRF enslavement (`keep_addr_on_down`).**
-When the DMZ carries a *static* `ip6addr` (the shared `fd…::1/64` the host replies
-to on-link), **enslaving the port into the VRF flushes its IPv6 addresses** — the
-kernel keeps IPv4 on a master change but drops IPv6, and netifd never notices (it
-still lists the address in `ubus … status`; `reload` is a no-op, only a full
-`ifup dmz` re-adds it). At boot the enslavement runs *after* the DMZ comes up, so
-the static ULA is gone until the next `ifup`. Fix it with one sysctl — retain
-IPv6 addresses on a down/master-change:
-```
-# /etc/sysctl.d/10-keep-addr-on-down.conf
-net.ipv6.conf.default.keep_addr_on_down = 1
-net.ipv6.conf.all.keep_addr_on_down = 1
-```
-Cold-boot-verified: the static ULA then survives enslavement with no hotplug/`ifup`
-workaround. (A SLAAC address from the announced RA is re-added by netifd anyway;
-this only matters for a *static* `ip6addr`.) The root cause is a netifd gap — it
-subscribes only to `RTNLGRP_LINK`, never to `RTM_DELADDR`, so an externally-caused
-address flush is invisible to it; the sysctl sidesteps it entirely.
-
-**Both members in one VRF collapse fw4's zone distinction (breaks dmz→wan).** The
-l3mdev rewrites the ingress `iif` to the master `vrf_wan` for **all** inter-member
-forwarding, so fw4 can no longer tell dmz-sourced from wan-sourced transit traffic
-— both arrive as `iif = vrf_wan`. The `vrf_wan`-in-WAN-zone entry above (required so
-the **inbound** DNAT return matches a zone) therefore also makes the DMZ host's
-**outbound** traffic look wan-sourced → it is classified wan→wan and dropped
-(`drop wan out: IN=vrf_wan OUT=wwand0`, HW-seen with a DMZ host's outbound IKE).
-There is no clean fw4 fix — the zone key (the ingress device) is gone. Either scope
-the VRF to the WAN only (leave the DMZ a normal interface that routes into the VRF
-table via `ip4table`/`ip6table` + a policy rule, so it keeps its real `br-lan.20`
-iif), or — simpler — use **Variant 1 (policy routing)**, where the iif is never
-rewritten and dmz↔wan works both ways natively.
-
-> **Hard limit — the WAN uplink itself must NOT be VRF-enslaved if the router
-> terminates traffic on its WAN IP.** VRF works for traffic **forwarded through**
-> the router (inbound → a DMZ host): those packets carry `iif = the VRF`, so the
-> kernel applies the l3mdev redirect and they route out correctly. But traffic
-> **terminated on the router's own WAN address** (ping to the WAN IP, or any
-> service the router itself runs there) is **broken by design**: the router's
-> reply is generated locally, is *not* VRF-associated (no socket bound to the
-> VRF), routes to the raw slave **without** the l3mdev redirect, and cannot egress
-> the enslaved member. This was HW-confirmed for **both ICMP and TCP** (SYN in, no
-> SYN-ACK out — `tcp_l3mdev_accept=1` does not help; it is a routing/l3mdev-egress
-> issue *below* the firewall, so no fw4/nftables rule fixes it). Secondary fw4
-> symptoms you will also see: the reply is untracked → `ct state invalid` → the
-> anti-NAT-leak drop; and the l3mdev double-traversal reclassifies it as
-> *forwarded*, hitting the `wan` zone's `forward` policy (IPv6 often survives only
-> because of the stock `Allow-ICMPv6-Forward` rule). **If the router must be
-> reachable / run services on the cellular WAN IP, use Variant 1 (policy routing)
-> — it does exactly that and is the tested model.** Reserve VRF for the
-> forward-only case where the router never terminates WAN traffic.
+Bind the WAN + DMZ into an L3 **VRF** (a `config device` of `type 'vrf'` with
+its own routing table; each interface's stable `wwandN` L3 device is a `port`).
+This isolates the cellular routing table completely — but the router itself no
+longer terminates WAN traffic, so services on the cellular WAN IP need Variant 1
+(policy routing) instead. The full config, the HW-confirmed l3mdev / DMZ field
+notes, the NAT66 / nftables SNAT recipe and the
+"router-can't-reach-its-own-WAN" caveat live in a dedicated doc:
+**[VRF & DMZ deep-dive → docs/vrf.md](vrf.md)**.
 
 ### Dual-stack and IPv6 prefix delegation
 
@@ -934,6 +743,7 @@ when called from LuCI).
 | `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
 | `modem_sim_switch_slot` | `modem`, `slot` | switch the active physical SIM slot (drops the connection) |
 | `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
+| `modem_sim_pin_verify` | `modem`, `pin?` | manual PIN release past the low-retry safety block (the daemon refuses to auto-enter with ≤1 attempt left, to avoid a PUK lock); `pin` overrides the configured one for this attempt (write ACL) |
 | `modem_esim` | `modem`, `op`, … | eSIM (list/enable/disable/eid/download/…); needs the optional `wwand-esim` package |
 | `modem_apdu` | `modem`, `op`, … | raw ISO-7816 APDU channel (advanced) |
 | `modem_sms_list` | `modem`, `storage?` | list stored SMS (decoded: sender, timestamp, text, multipart merged); `storage` `SM` (SIM, default) or `ME` (modem) |
@@ -1080,8 +890,11 @@ system reboot (> `failreboot`, default 100). The three **hardware** rungs fire
 on their thresholds **independent of `failreboot`**; `failreboot 0` disables
 **only** the final reboot — the hardware recovery still runs and the ladder then
 keeps retrying forever, so a headless box stays up for logging/debugging.
-`proto_error_limit` (default 25) is a separate ceiling on protocol-level errors
-that also ends in a reboot, and is gated by `failreboot` the same way.
+`proto_error_limit` (default 25) is a separate ceiling on protocol-level errors,
+applied in two stages: when errors first cross the limit the modem gets one
+hardware repower/reset; only when they reach **2× the limit** does it reboot (and
+that reboot is gated by `failreboot` — with `failreboot 0` it keeps retrying
+instead). A success resets the counter.
 - **Status LEDs** — driven from the modem's registration + signal: a **5-bar
   signal graph** (e.g. MikroTik Chateau `green:mobile-1..5`) or a **mobile / LTE**
   set (e.g. Zyxel `…:red/green:mobile`, `…:lte`).
@@ -1093,10 +906,12 @@ that also ends in a reboot, and is gated by `failreboot` the same way.
 
 Built-in profiles: MikroTik Chateau 5G (`modem-power` + `modem-reset` + 5 signal
 LEDs), Zyxel LTE3301-plus / -m209 / -q222 (`power_modem`/`usbpower` + mobile/LTE
-LEDs), NR7101 (no dedicated GPIO/LED). An **unknown board** yields a no-op
+LEDs), Zyxel LTE5398-M904 (`lte_power` + red/green/orange mobile LEDs), Cudy
+LT300 (MeiG SLM770A, reset GPIO `4g`; the autosetup HW-verify platform), NR7101
+(no dedicated GPIO/LED). An **unknown board** yields a no-op
 profile — wwand runs unchanged, and any GPIO/LED can still be named per modem
 (`reset_gpio`). LuCI's reset-GPIO picker lists every named GPIO line the kernel
-exposes. Adding a profile: see [extending.md](extending.md#adding-a-board-profile).
+exposes. Adding a profile: see [extending.md](extending.md#7-adding-a-board-profile).
 
 ## Telemetry & diagnostics
 
@@ -1197,8 +1012,9 @@ go through `backend.uc`.
 |---|---|
 | **PDP context / bearer** | A cellular data session with its own IP config. wwand maps one context to one netifd interface. |
 | **Attach profile** | The 3GPP profile (CID 1) the modem uses for the *autonomous* LTE/5G attach. wwand programs its APN/PDP type from config **before** registration to avoid a wrong-APN reject. |
-| **QMAP / mux** | Qualcomm multiplexing that carries several PDP contexts over one USB link, each as an L3 device `wwan0mN`. Backends: **rmnet** (kernel, preferred) or **qmimux** (sysfs). |
-| **`mux_id`** | The QMAP channel of a context (0 = no mux, N = `wwan0mN`). |
+| **QMAP / mux** | Qualcomm multiplexing that carries several PDP contexts over one link, each as its own L3 device (`wwandN`, see [Device naming](#device-naming)). Backends: **rmnet** (kernel, preferred) or **qmimux** (sysfs). |
+| **`mux_id`** | The QMAP channel of a context (0 = no mux, N = channel N; the L3 device is still named `wwandN`). |
+| **L3 device / `wwandN`** | The stable per-connection datapath device the daemon assigns (`wwand0…wwand100`) and references in VRF ports / firewall matches. See [Device naming](#device-naming). |
 | **NSA / SA / DSD** | 5G Non-Standalone (NR anchored on LTE) / Standalone / Data-System-Determination (the QMI service reporting which the session actually uses). |
 | **EMM cause** | LTE NAS reject reason. Cause 33 ("service option not subscribed") usually means the *attach* APN/PDP type is wrong for the SIM, not "no coverage". |
 | **eUICC / eSIM** | An embedded UICC that holds multiple downloadable SIM **profiles**; one is enabled at a time. |
@@ -1225,7 +1041,7 @@ DCNR-restricted). Nothing wwand or the modem can change.
 
 **Two connections over one modem?** Point two `interface` sections at the same
 `option modem`, each with a different `mux_id` (and `apn`); QMAP multiplexing
-gives each its own `wwan0mN` L3 device. All contexts of a muxed modem get a
+gives each its own `wwandN` L3 device. All contexts of a muxed modem get a
 channel.
 
 **Switch to an eSIM profile?** Install `wwand-esim`, download a profile
@@ -1237,12 +1053,13 @@ to the eUICC slot for a permanent switch — see
 `MBIM_OPEN` — a firmware bug, not wwand; stay on QMI. Switch back with
 `AT+QCFG="usbnet",0` + `AT+CFUN=1,1`, or `modem_set_protocol`.
 
-**Old config — do I need to migrate?** No. The daemon reads every older format
-(legacy inline `proto qmi`, the previous `/etc/config/wwand`). Conversion to the
-network-native model happens automatically on install/upgrade (a uci-defaults
+**Old config — do I need to migrate?** No. A legacy inline `proto qmi` interface
+(stock qmi-advanced style) is read directly by the compat layer. Conversion to
+the network-native model happens automatically on install/upgrade (a uci-defaults
 script) and on LuCI save. It also converts **stock `proto mbim`/`proto ncm`**
 interfaces — required, since `wwand-mbim`/`wwand-ncm` replace those handlers. Run
 it by hand any time: `/usr/libexec/wwand/migrate` (dry run) then `--apply`.
+(The pre-network-native `/etc/config/wwand` file is no longer read at runtime.)
 
 **Lock to a specific cell?** `option lock_4g 'earfcn:pci'` (LTE) or
 `option lock_5g 'pci:arfcn:scs:band'` (NR SA); `lock_persist 1` stores it in the

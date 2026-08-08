@@ -112,6 +112,9 @@ modem when the config leaves it empty) — `context_common.conn_cfg`.
 - wwand restarts are non-destructive: the WAN stays up and the new daemon
   **adopts** the live session on `registered`.
 
+To watch these states happen in the UI — live signal/cells, the registration
+line, per-modem status — see the LuCI tour in [luci.md](luci.md).
+
 ## 2. The modem's view
 
 What the firmware goes through, and which wwand step drives it:
@@ -181,6 +184,7 @@ Every phase has one intended extension point (patterns + checklists in
 | Support a firmware quirk (delay, deferred apply, band decode) | `modem_quirks.uc` (§1 in extending.md) |
 | Add a config option end-to-end | `config.uc` defaults + parser → consumer → reference.md (§2) |
 | Add a whole control backend | `docs/backend-interface.md` contract + `*_lazy.uc` shim (§3) |
+| Rename the datapath netdev / assign a stable L3 name | `daemon.uc rename_l3` + `config.uc assign_l3_names` (phase 4) |
 | Add a telemetry source | `telemetry_*.uc` + `backend.choose()` transport probe (§4) |
 | Expose a new ubus method | `daemon.uc`/`netsel_ops.uc` + `ubus.uc` + ACL (§5) |
 | Board power/reset/LED wiring | `board.uc` profile table (§7) |

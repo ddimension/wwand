@@ -12,8 +12,8 @@ Native QMI / MBIM / NCM. ~3 MB. No uqmi, qmicli, libqmi, glib or ModemManager.
         └──────┼─────────┼──────────┼────────────────────┬─────────┘
                │ native  │ native+  │ AT                 │ ubus
                │ qmux    │ passthru │                    ▼
-          /dev/cdc-wdm  cdc_mbim  ttyUSB           netifd (proto qmi)
-          ────────────────────────────────►  wwan0 / wwan0mN  ──►  WAN
+          /dev/cdc-wdm  cdc_mbim  ttyUSB           netifd (proto wwand)
+          ────────────────────────────────►  wwand0 / wwandN  ──►  WAN
               modem  ◄── SIM · eSIM/eUICC · PIN · cell-lock · telemetry
 ```
 
@@ -41,15 +41,15 @@ A quick tour of the LuCI UI (modems overview · modem config · interface · SIM
 - **Three backends, one contract** — QMI, MBIM and NCM sit behind a single
   daemon-neutral interface, so netifd, the ubus API and the UI never care which
   a modem speaks. MBIM even tunnels the whole QMI stack over an
-  [MBIM passthrough](docs/architecture.md#control-backends-qmi-mbim-ncm).
+  [MBIM passthrough](docs/architecture.md#5-control-backends-qmi-mbim-ncm).
 - **Multi-modem, multi-context** — several modems, and several parallel PDP
   contexts per modem via QMAP multiplexing (rmnet / qmimux, auto-selected, auto
   channel assignment).
 - **VRF-safe by construction** — the daemon touches only the link layer; all
   addressing/routing goes through netifd, so `ip4table`/`ip6table`/VRF just work.
 - **Robust** — a persisted recovery ladder (retry → op-mode cycle → modem reset
-  → usb-repower → reboot), a zero-rx watchdog, non-destructive restart (the WAN
-  survives a daemon restart; the daemon adopts the live session).
+  → board power-cycle / reset-GPIO → reboot), a zero-rx watchdog, non-destructive
+  restart (the WAN survives a daemon restart; the daemon adopts the live session).
 - **Diagnostic** — EMM reject cause + limited-service flag (QMI + `AT+CEER`),
   live cell environment (serving + neighbours, LTE & NR5G), signal, operator,
   data-system mode (LTE/NSA/SA), all on ubus.
@@ -62,10 +62,12 @@ A quick tour of the LuCI UI (modems overview · modem config · interface · SIM
 | **Attach** | Attach profile programmed from config **before** registration → correct APN/IP family, avoids the EMM-33 IPv4-only reject |
 | **SIM** | PIN unlock (UIM → DMS fallback, retry-guarded) · multi-slot switching · PIN enable/disable · per-SIM overrides by ICCID (`wwand_sim`) |
 | **eSIM/eUICC** | Native ES10c list/enable/disable/delete · **SM-DP+ download** via bundled lpac · APDU transport auto-chosen: QMI UIM → **native MBIM MS UICC Low Level Access** → AT — so eSIM works on MBIM modems without an AT port |
-| **Setup** | **Zero-config autosetup** (default on): a modem on an unconfigured box creates `wwmodem_auto` + interface `wwan0` in the default wan firewall zone, then a one-shot internal **ICCID/IMSI → APN table** copies the carrier defaults (APN, PDP type, auth, credentials) into the config |
+| **Binding** | Pin a modem by USB **serial**, **IMEI**, or a stable **device path** (sysfs topology, PCIe/MHI-ready) so the right SIM/APN follows the right modem across re-enumeration; **stable L3 names** `wwand0…wwand100` (auto-assigned, kernel netdev renamed, written back) survive USB renumbering on multi-modem boxes |
+| **RF unlock** | `option fcc_auth` unlocks laptop-SKU modems that boot radio-locked (Lenovo/Dell/HP Quectel EM1xx, Foxconn SDX55/SDX62, DW5821e) — QMI DMS/Foxconn auto-chain, MBIM Quectel radio-state |
+| **Setup** | **Zero-config autosetup** (default on): a modem on an unconfigured box creates `wwmodem_auto` + interface `wwan0` (L3 device `wwand0`) in the default wan firewall zone, then a one-shot internal **ICCID/IMSI → APN table** copies the carrier defaults (APN, PDP type, auth, credentials) into the config |
 | **Radio** | Mode/band restriction · manual PLMN · network scan & selection · Quectel cell-lock (4G anchor / 5G SA) · QMI LOC positioning · **idempotent, radio-safe sets** (skipped when the modem already runs the value; `unchanged`/`deferred` results) with a LuCI-offered modem reset for deferred-apply firmwares |
 | **SMS** | Receive/list · read · delete stored messages (SIM or modem store) with a full GSM 03.40 PDU decoder (7-bit incl. umlauts, UCS2, alphanumeric sender, multipart merge) · transport auto-chosen QMI WMS (native / passthrough) → native MBIM SMS → AT · LuCI inbox on the Modem Tools page |
-| **Board** | Auto-detected board profiles (MikroTik Chateau 5G, Zyxel LTE33xx / NR7101) drive modem **power/reset GPIOs** and **status LEDs** (5-bar signal graph or mobile/LTE) — absorbing the vendor helper scripts. Manual `modem_repower` (LuCI button); GPIO picker in the UI |
+| **Board** | Auto-detected board profiles (MikroTik Chateau 5G, Zyxel LTE33xx / LTE5398-M904 / NR7101, Cudy LT300) drive modem **power/reset GPIOs** and **status LEDs** (5-bar signal graph or mobile/LTE) — absorbing the vendor helper scripts. Manual `modem_reset` / `modem_repower` (LuCI button); GPIO picker in the UI |
 | **Ops** | Recovery ladder (opmode → modem reset → **board power-cycle / reset-GPIO** → reboot) + zero-rx watchdog · non-destructive restart + session adoption · **"waiting for modem"** surfaced to netifd/LuCI + logged · uniform rich telemetry line across all backends · per-model quirk tables · AT side channel · **`at2_external`** reserves the secondary AT port for external tools (gpsd, scripts) |
 
 ## Packages
@@ -111,8 +113,8 @@ config interface 'wan'
 	option pdp_type 'ipv4v6'
 ```
 
-`ifup wan` — done. Existing `proto qmi`/`mbim`/`ncm` and old `/etc/config/wwand`
-configs keep working and are auto-migrated on upgrade. See
+`ifup wan` — done. Existing stock `proto qmi`/`mbim`/`ncm` interfaces keep
+working and are auto-migrated to `proto wwand` on upgrade. See
 [docs/reference.md](docs/reference.md) for every option.
 
 ## Documentation
@@ -121,6 +123,7 @@ configs keep working and are auto-migrated on upgrade. See
 |---|---|
 | [docs/luci.md](docs/luci.md) | Visual tour of the LuCI web UI (screenshots) |
 | [docs/reference.md](docs/reference.md) | Config options, ubus API, eSIM, quirks, troubleshooting, FAQ |
+| [docs/vrf.md](docs/vrf.md) | VRF & DMZ deep-dive (L3 isolation, NAT66, field notes) |
 | [docs/connection-flow.md](docs/connection-flow.md) | How a connection comes up — wwand, modem and network side, phase by phase |
 | [docs/architecture.md](docs/architecture.md) | How it works: layering, backends, netifd coupling, VRF, recovery |
 | [docs/extending.md](docs/extending.md) | Add a modem/quirk, a config option, a backend, telemetry, a ubus method |
@@ -138,9 +141,10 @@ configs keep working and are auto-migrated on upgrade. See
 
 ## Status
 
-Production-tested on a MikroTik Chateau 5G R17 ax (Quectel RG650E-EU) and further
-Quectel modems (RG502Q, EG06). **~1,060 host-side checks across 27 suites** run
-without hardware.
+Production-tested across MikroTik Chateau 5G (Quectel RG650E-EU + Huawei E392),
+Zyxel NR7101, Cudy LT300 (MeiG SLM770A) and GL.iNet X3000 (RM520N), plus further
+Quectel modems (RG502Q, EG06). A hardware-free host suite runs on every change —
+current suite/check counts live in [docs/STATUS.md](docs/STATUS.md).
 
 ## License
 

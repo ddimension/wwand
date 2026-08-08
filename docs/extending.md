@@ -5,7 +5,7 @@ usually means adding a row to a table; adding a feature means adding one
 declarative schema entry or one small module behind an existing contract. This
 guide is the map: what to touch, where, and how to test it.
 
-Every change is host-testable — see [§7 Testing](#7-testing). Run the suites
+Every change is host-testable — see [§8 Testing](#8-testing). Run the suites
 before every commit; reproduce a field problem as a mock scenario first.
 
 **Contents**
@@ -106,11 +106,10 @@ Config is parsed by `src-ucode/config.uc` into a normalized model. To add an
 option (say a modem option `foo`):
 
 1. **Default** — add `foo` to `modem_defaults()` (or `context_defaults()`).
-2. **Parse** — read it in `modem_from_section(s)` (used by both the
-   `config modem` and `config wwand_modem` paths) with the right coercion
-   (`+(s.foo ?? 0)`, `bool_opt(s.foo, false)`, list handling). Context options go
-   in the `context` case + the `option modem` interface branch in
-   `compat_translate`.
+2. **Parse** — read it in `modem_from_section(s)` (the `config wwand_modem`
+   parser) with the right coercion (`+(s.foo ?? 0)`, `bool_opt(s.foo, false)`,
+   list handling). Context options go in the `context` case + the `option modem`
+   interface branch in `compat_translate`.
 3. **netifd** — if it's an *interface* (connection) option, declare it in
    `files/wwand-proto.sh` with `proto_config_add_string foo` so netifd tracks it
    (the daemon reads uci directly, but this keeps change-detection clean).
@@ -227,7 +226,8 @@ object:
   sections), PIN enable/disable, and eSIM.
 
 `node --check` every JS file. LuCI cannot be host-tested — validate in a browser
-on the router.
+on the router. For a visual tour of the existing panels (what each view looks
+like and where a new field lands), see [luci.md](luci.md).
 
 ---
 

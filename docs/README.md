@@ -9,12 +9,13 @@ whether you are a user, a developer, or an AI assistant working on the tree.
 | I want to… | Read |
 |---|---|
 | Configure a router (APN, PIN, multi-modem, mux, VRF, IPv6) | [reference.md](reference.md) — config model, examples, workflows |
+| Isolate the WAN in a VRF / run a DMZ | [vrf.md](vrf.md) — VRF & DMZ deep-dive |
 | See the UI | [luci.md](luci.md) — a visual tour of the LuCI web app (screenshots + slideshow) |
 | Understand what happens when it dials | [connection-flow.md](connection-flow.md) — the same connection from the wwand, modem and network side |
 | Understand the design / internals | [architecture.md](architecture.md) — layering, mechanisms, invariants |
 | Add a quirk, option, backend, telemetry, ubus method, board | [extending.md](extending.md) — one checklist per extension type |
 | Write or port a control backend | [backend-interface.md](backend-interface.md) — the duck-typed modem/context contract |
-| Know which modem exposes which telemetry | [telemetry-survey.md](telemetry-survey.md) |
+| Know which modem exposes which telemetry | [telemetry-survey.md](telemetry-survey.md) — a dated, point-in-time survey |
 | See what changed / current test counts / open items | [STATUS.md](STATUS.md) — running continuation log |
 
 ## The 60-second model

@@ -1,5 +1,12 @@
 # wwand — architecture
 
+A from-scratch native QMI/MBIM/NCM stack in ~3 MB — a tenth of ModemManager —
+that has survived a dwc3/swiotlb 4-byte-URB storm, provider-side SIM purges, and
+four datapath variants (rmnet / qmimux / raw-ip / NCM-ECM) in production. This
+document is how it's built and why each decision was forced by the field; read
+[`connection-flow.md`](connection-flow.md) next to it for the runtime bring-up
+sequence, and [`luci.md`](luci.md) for the web UI.
+
 Status: three control backends (QMI, MBIM, NCM) behind one daemon-neutral
 contract, all config in `/etc/config/network`, native SIM/eSIM. In production on
 a MikroTik Chateau 5G R17 ax (Quectel RG650E-EU, 5G NSA, two parallel PDP
@@ -7,6 +14,8 @@ contexts). RSS figures below are for the QMI-only base; MBIM/NCM add ~200–400 
 per modem and load only when their package is installed.
 
 ## 1. Measured baseline (Chateau)
+
+One process. Zero per-context spawns. ~3 MB resident. The measured baseline:
 
 | Metric | Value | Context |
 |---|---|---|
@@ -22,18 +31,23 @@ per modem and load only when their package is installed.
 ```
  native (C):   wwand_io.so       — message-oriented cdc-wdm/tty I/O
                                    (protocol-agnostic), rmnet netlink helper
- codec:        qmux.uc, tlv.uc, schema/*.uc      — QMI, declarative
-               mbim.uc, mbim-schema/*.uc         — MBIM, declarative
+ codec:        qmux.uc, tlv.uc, hex.uc, schema/*.uc  — QMI, declarative
+               mbim.uc, mbim-schema/*.uc             — MBIM, declarative
  session:      transport.uc (hub/routing), client.uc (QMI correlation),
                mbim_client.uc, qmi_over_mbim.uc (QMI-over-MBIM passthrough hub)
- backends:     modem.uc/context.uc (QMI), modem_mbim/context_mbim (MBIM),
-               modem_ncm/context_ncm (NCM/AT) — one daemon-neutral contract
-               shared core: modem_common.uc, context_common.uc, backend.uc,
-                            qmi_backend.uc, mbim_backend.uc, sim.uc
- system:       netlink.uc (datapath), recovery.uc, atcmd.uc (+atport),
+ backends:     QMI  — modem.uc/context.uc + extracted helpers modem_init_qmi.uc,
+                      telemetry_qmi.uc, datapath_qmi.uc, context_monitor_qmi.uc,
+                      regdetail.uc, config_check.uc
+               MBIM — modem_mbim/context_mbim + telemetry_mbim.uc
+               NCM  — modem_ncm/context_ncm + telemetry_ncm.uc (NCM/AT)
+               one daemon-neutral contract; shared core:
+                      modem_common.uc, context_common.uc, backend.uc,
+                      qmi_backend.uc, mbim_backend.uc, sim.uc
+ system:       netlink.uc (datapath), recovery.uc, board.uc (power/reset/LEDs),
+               atcmd.uc + atcmd_parse.uc (+atport),
                discovery.uc (control-type detection), modeswitch/protocol_switch
- integration:  daemon.uc (registry/policy), config.uc (+migrate/compat),
-               ubus.uc, main.uc
+ integration:  daemon.uc + netsel_ops.uc (registry/policy), config.uc
+               (+migrate/compat), ubus.uc, main.uc
  shell:        wwand-proto.sh (thin netifd shim → wwand.sh, proto `wwand`/`qmi`), init, hotplug,
                wwand-migrate + uci-defaults (config auto-migration)
 ```
@@ -59,13 +73,19 @@ Design principles, all validated in the field:
   not an afterthought. Logs are prefixed accordingly.
 - One process, one uloop, indication-driven; timers only where indications
   don't exist (packet stats, registration guard, settle delays).
-- **Never trust modem echoes blindly.** A v5 aggregation request answered
-  with "aggregation disabled, size 0" once produced a 4-byte URB
-  configuration and a dwc3/swiotlb storm. The WDA negotiation now
-  renegotiates on rejection and never adopts zeroed values.
+- **Never trust modem echoes blindly.** The WDA negotiation renegotiates on
+  rejection and never adopts zeroed values (see the field lesson below).
 - sysfs attributes differ per kernel (e.g. `rx_urb_size` is a vendor patch;
   mainline usbnet derives the URB size from the parent MTU) — every
   attribute write distinguishes "absent on this kernel" from "write failed".
+
+> **Field lesson — the 4-byte-URB storm.** A v5 QMAP aggregation request once
+> came back answered with "aggregation disabled, size 0". Taken at face value,
+> that zero drove a 4-byte URB configuration into the driver and set off a
+> dwc3/swiotlb storm that took the datapath down. The fix — and the reason the
+> WDA path treats a zeroed echo as a rejection to renegotiate, never a value to
+> adopt — is the single most load-bearing "don't trust the modem" rule in the
+> codebase.
 
 ## 3. Selected mechanisms
 
@@ -79,7 +99,13 @@ schedules a capped-backoff retry that climbs the recovery ladder (§ Recovery).
     │ start()
     ▼
   INIT_TRANSPORT ─► INIT_SERVICES ─► INIT_DATAPATH ─► SET_OPMODE
-                                                          │
+                                                          │ set-online
+                                                          ▼
+                             ┌── low power ──  VERIFY_ONLINE ◄──┐
+                             ▼                 (GET_OPMODE)      │ retry
+                          FCC_AUTH ────────────────────────────┘
+                       (dms 0x555F / foxconn 0x5571)
+                                                          │ online
                                                           ▼
                                     (read active ICCID)  SIM_UNLOCK ──blocked──► SIM_BLOCKED
                                     pick wwand_sim PIN        │                   (terminal until
@@ -101,6 +127,19 @@ schedules a capped-backoff retry that climbs the recovery ladder (§ Recovery).
 `device removed` → `ABSENT` + `removed` at any point; hotplug rebuilds it.
 MBIM and NCM run the same shape with protocol-specific steps (e.g. MBIM
 `OPEN → DEVICE_CAPS → SUBSCRIBER_READY → PIN → REGISTER → PACKET_SERVICE`).
+
+**FCC RF unlock.** Laptop-SKU modems (Lenovo/Dell/HP Quectel EM05/EM120/EM160,
+Foxconn SDX55/SDX62, Dell DW5821e-class) accept set-online but stay in
+(persistent) low power until the host sends an FCC authentication message. So
+after `SET_OPMODE` the QMI init re-reads `GET_OPERATING_MODE`
+(`modem_init_qmi.uc` `verify_online`): a modem still reporting a low-power mode
+runs the `fcc_auth` chain (`qmi_backend.fcc_auth` — DMS Set FCC Authentication
+`0x555F`, no args; or Foxconn `0x5571` with a u8 magic — `option fcc_auth`
+selects `dms`/`foxconn[:magic]`, `auto` tries both, `off` disables), sets
+online again and retries. An ordinary modem answers online on the first pass and
+never sees an FCC message. MBIM does the equivalent through the vendor Quectel
+Radio State service (`codec/mbim-schema/quectel.uc`, mirroring `mbimcli
+--quectel-set-radio-state=on`).
 
 ### Datapath (QMAP muxing)
 
@@ -132,17 +171,28 @@ All of it stays **capability-gated**: aggregation is applied only when the modem
 confirms QMAP in its echo (non-zero DL size) — a non-QMAP modem, or a config
 without a mux, drops to plain raw-ip framing and the extra TLVs are harmless.
 
-**Device-name resolution & write-back.** The l3 device name is `<netdev>m<mux_id>`
-for a muxed backend (QMI/MBIM), else the plain modem netdev (NCM, or unmuxed). An
-explicit `option device` on the interface wins — its `…mN` suffix also supplies
-the mux id (`config.uc` derives both consistently across the native and compat
-paths). On `registered` the daemon writes the resolved name back onto the
-interface section as `option device` (`main.uc` `learn_device`, idempotent,
-never clobbers a user value, `commit`-only so no interface bounce; off-switch
-`wwand_globals.write_device`) — giving VRF `list ports`, firewall and LuCI one
-explicit, editable handle. For an rmnet child adopted on restart the kernel is the
-source of truth: `wwand_io.rmnet_mux_id()` reads `IFLA_RMNET_MUX_ID` back and warns
-on a config drift; qmimux exposes no such attribute, so its id stays daemon-remembered.
+**Stable L3 device names.** USB enumeration order is not stable, so wwand gives
+every interface a deterministic L3 device name instead of inheriting whatever the
+kernel picked. `config.uc` `assign_l3_names` walks the contexts in config order
+and hands each one a name from a single flat namespace **`wwand0`..`wwand100`**,
+independent of which modem it lives on; an explicit interface `option device`
+(any non-path name) pins the name instead. How that name is realised depends on
+the datapath:
+
+- **Non-mux datapaths** (QMI/MBIM without a mux, and NCM/ECM): the daemon
+  **renames** the kernel netdev to the assigned name over netlink
+  (`daemon.uc` `rename_l3` → `link_set {rename}`). If the target name is already
+  in use, or the link is busy and the rename fails, it logs an error and **keeps
+  the kernel name** — it never forces the issue.
+- **Muxed datapaths** (QMAP): the mux **child** is created directly under the
+  assigned name (`mux_link` is unified onto `l3_name`); the muxed **parent**
+  keeps its kernel name and is never renamed.
+
+On `registered` the daemon writes the resolved name back onto the interface
+section as `option device` (`main.uc` `learn_device`): idempotent, `commit`-only
+so no interface bounce, and it **never clobbers a user-set value** — gated by
+`wwand_globals.write_device` (default on). That gives VRF `list ports`, firewall
+and LuCI one explicit, editable, stable handle onto the datapath.
 
 ### netifd coupling (no-proto-task; daemon drives netifd in place)
 
@@ -215,7 +265,7 @@ This is what makes wwand VRF-safe: netifd applies the interface's
 `ip4table` / `ip6table` (and thus any VRF / l3mdev binding) to every address
 and route it installs, entirely at the interface level and independent of the
 protocol. Because the daemon never enslaves the l3 device or writes a routing
-table itself, netifd is free to enslave the mux child (e.g. `wwan0m1`) to a
+table itself, netifd is free to enslave the mux child (e.g. `wwand0`) to a
 VRF master and place its routes in the VRF table. A regression test
 (`test_datapath`, "vrf: datapath performs no direct addressing/routing")
 fences this invariant: any future `ip route` / `ip addr` / `ip rule` in the
@@ -258,6 +308,13 @@ reboot. QMI request errors have a separate ceiling (25 → reboot). Counters
 persist in tmpfs across daemon restarts and are intentionally cleared by
 reboot. A zero-rx watchdog (packet stats delta) triggers the same repower.
 
+Alongside the automatic ladder, the `modem_reset` ubus method
+(`daemon.uc`) offers an admin-driven reset with the same GPIO-first priority: it
+pulses the modem/board `reset_gpio` when one is configured, else falls back to
+the backend soft reset (QMI DMS offline→reset, NCM `CFUN=1,1`). Board-default
+GPIOs are gated by `board_gpio_ok` (a shared board power/reset rail is only
+touched on a single-modem box); a per-modem `reset_gpio` is the multi-modem path.
+
 ### Boot robustness
 
 The daemon may start before USB enumeration: modems resolve lazily, the
@@ -282,19 +339,17 @@ loop, the zero-rx watchdog) has been consolidated into `modem_common.uc` /
 `context_common.uc`; the remaining fork between the three backends is genuine
 per-protocol logic (step chains, teardown, `with_nas`). Open items:
 
-1. `modem.uc` telemetry + LOC could move into a `telemetry.uc`, and WDA
-   negotiation into its own module.
-2. A ~25-line `series()` helper would flatten the deeper callback chains
+1. A ~25-line `series()` helper would flatten the deeper callback chains
    (`_read_info`, sim flows).
-3. Error objects are ad hoc; an `errors.uc` with constants and a QMI
+2. Error objects are ad hoc; an `errors.uc` with constants and a QMI
    error-code name table would improve logs and grep-ability.
-4. Recovery persistence writes on every counter change; a dirty-flag with a
+3. Recovery persistence writes on every counter change; a dirty-flag with a
    1 s timer would throttle failure storms (tmpfs, so hygiene only).
 
 (The old per-interface shell monitor is gone — the no-proto-task model in §3
 removed it entirely, so its process cost no longer applies.)
 
-### Control backends (QMI, MBIM, NCM)
+## 5. Control backends (QMI, MBIM, NCM)
 
 `discovery.resolve_control` classifies each modem by its driver/device and
 builds the matching backend; all three satisfy the same contract, so nothing
