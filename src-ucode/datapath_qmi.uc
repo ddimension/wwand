@@ -151,8 +151,10 @@ export function setup(self, dp, o, next)
 							{ size: wdata.ul_max_size, count: wdata.ul_max_datagrams } : null,
 					};
 
-					log('notice', sprintf('datapath: %s%s, urb %d, mux [%s]',
-						backend, v5 ? '/qmapv5' : '', r.urb_size, join(' ', r.mux_devs)));
+					log('notice', sprintf('datapath: %s%s%s, mux [%s]',
+						backend, v5 ? '/qmapv5' : '',
+						(r.urb_size != null) ? sprintf(', urb %d', r.urb_size) : '',
+						join(' ', r.mux_devs)));
 					next();
 				});
 			};

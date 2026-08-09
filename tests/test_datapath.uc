@@ -135,15 +135,17 @@ ok(fx.action_index('write /sys/class/net/wwan0/qmi/raw_ip Y') > 0, 'qmimux: raw_
 ok(fx.action_index('write /sys/class/net/wwan0/qmi/add_mux 3') > 0, 'qmimux: add_mux written');
 ok(fx.action_index('link_set qmimux0 name wwan0m3') > 0, 'qmimux: renamed');
 
-// urb size attribute missing (kernel 6.12): skipped with a clear log line
+// urb size attribute missing (mainline usbnet): silently skipped, parent MTU
+// carries the urb size — setup still succeeds and writes no urb attribute
 fx = fakefx.create({ present: {
 	'/sys/class/net/wwan0/qmi/add_mux': true,
 	'/sys/class/net/wwan0/qmi/raw_ip': true,
 } });
 res = netlink.setup(fx, { netdev: 'wwan0', backend: 'qmimux', mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096 });
 eq(res.ok, true, 'nourb: setup still succeeds');
-ok(fx.action_index('log info no rx_urb_size attribute, parent MTU 4100 covers') >= 0,
-	'nourb: mainline fallback explained in log');
+eq(length(fx.matching('rx_urb_size')), 0, 'nourb: no urb write when the attribute is absent');
+ok(fx.action_index('link_set wwan0 mtu 4100') >= 0,
+	'nourb: parent MTU carries the urb size (4100)');
 
 // essential attribute missing: setup fails with clear error
 fx = fakefx.create();
@@ -159,10 +161,23 @@ res = netlink.setup(fx, { netdev: 'wwan0', backend: 'none', dgram_size: 4096, mt
 
 eq(res.ok, true, 'plain: ok');
 eq(res.mux_devs, [], 'plain: no mux devices');
+eq(res.urb_size, null, 'plain: urb_size null for a non-muxed raw-ip datapath');
 eq(length(fx.matching('rx_urb_size')), 0, 'plain: no urb write');
 ok(fx.action_index('write /sys/class/net/wwan0/qmi/raw_ip Y') > 0, 'plain: raw_ip set');
 ok(fx.action_index('link_set wwan0 mtu 1430') > 0, 'plain: configured mtu');
 ok(fx.action_index('link_set wwan0 up') > 0, 'plain: up');
+
+// invalid configured MTU is logged (not silently swallowed) and falls to 1500
+fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/raw_ip': true } });
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'none', dgram_size: 4096, mtu: 400 });
+eq(res.ok, true, 'badmtu: setup ok');
+ok(fx.action_index('link_set wwan0 mtu 1500') > 0, 'badmtu: too-small mtu falls to 1500');
+ok(fx.action_index('log warn wwan0: ignoring invalid MTU 400') >= 0, 'badmtu: substitution is logged');
+
+// an unset MTU uses the default WITHOUT a warning (no noise on the common path)
+fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/raw_ip': true } });
+netlink.setup(fx, { netdev: 'wwan0', backend: 'none', dgram_size: 4096 });
+eq(length(fx.matching('ignoring invalid MTU')), 0, 'badmtu: no warning when mtu is unset');
 
 // --- cdc_mbim session datapath ----------------------------------------------
 

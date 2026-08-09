@@ -265,9 +265,20 @@ export function select_backend(fx, netdev, cfg_mux, want_mux)
 	return null;
 };
 
-function child_mtu(mtu)
+// resolve a mux child / raw-ip MTU: a configured value above the IPv4 minimum
+// (576) is used as-is, otherwise 1500. An explicitly configured but out-of-range
+// value is logged (not silently swallowed) so a typo is visible; an unset value
+// falls through to the default without noise.
+function child_mtu(mtu, fx, what)
 {
-	return (+mtu > 576) ? +mtu : 1500;
+	if (+mtu > 576)
+		return +mtu;
+
+	if (fx && mtu != null && mtu != '')
+		fx.log('warn', sprintf('%s: ignoring invalid MTU %J (must be > 576), using 1500',
+			what ?? 'mtu', mtu));
+
+	return 1500;
 }
 
 // Configure driver-side datapath. opts = {
@@ -406,8 +417,6 @@ export function setup(fx, opts)
 
 		if (fx.exists(urb_attr))
 			write_attr(fx, urb_attr, sprintf('%d', urb_size), 'urb size');
-		else
-			fx.log('info', sprintf('no rx_urb_size attribute, parent MTU %d covers the urb size (mainline usbnet)', urb_size));
 	}
 
 	if (backend == 'rmnet')
@@ -416,13 +425,13 @@ export function setup(fx, opts)
 		mux_devs = setup_qmimux_links(fx, netdev, sys, mux, urb_size, mux_mtus);
 	else
 		// plain raw-ip: plain MTU on the parent (config or 1500)
-		link_op(fx, 'mtu', netdev, { mtu: child_mtu(opts.mtu) });
+		link_op(fx, 'mtu', netdev, { mtu: child_mtu(opts.mtu, fx, netdev) });
 
 	// child MTUs and link up
 	link_op(fx, 'link up', netdev, { up: true });
 
 	for (let child in mux_devs) {
-		link_op(fx, 'child mtu', child, { mtu: child_mtu(mux_mtus[child]) });
+		link_op(fx, 'child mtu', child, { mtu: child_mtu(mux_mtus[child], fx, child) });
 		link_op(fx, 'child up', child, { up: true });
 	}
 
@@ -455,7 +464,9 @@ export function setup(fx, opts)
 		}
 	}
 
-	return { ok: true, urb_size: urb_size, mux_devs: mux_devs };
+	// urb_size only means something for a muxed backend (the aggregation buffer);
+	// on plain raw-ip the parent just carries the child MTU, so report null
+	return { ok: true, urb_size: (backend != 'none') ? urb_size : null, mux_devs: mux_devs };
 };
 
 // cdc_mbim session datapath: session 0 is the untagged parent netdev,
@@ -491,7 +502,7 @@ export function setup_mbim(fx, opts)
 	link_op(fx, 'link up', netdev, { up: true });
 
 	for (let child in mux_devs) {
-		link_op(fx, 'child mtu', child, { mtu: child_mtu(mux_mtus[child]) });
+		link_op(fx, 'child mtu', child, { mtu: child_mtu(mux_mtus[child], fx, child) });
 		link_op(fx, 'child up', child, { up: true });
 	}
 
