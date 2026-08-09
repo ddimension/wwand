@@ -47,10 +47,13 @@ lean MBIM as the generic host interface. Crucially, **QMAP is modelled as a
 datapath capability, not a synonym for QMI**, and the physical transport is not
 baked in — so `control=QMI datapath=QMAP transport=PCIe/MHI` is representable
 without a redesign, which matters as high-end 5G modules move to PCIe/MHI (and
-QRTR) instead of USB. This transport-independent, control/datapath-separated
-model is the part I think is genuinely worth having in-tree regardless of the
-QMI-vs-MBIM balance. (A fuller vendor/interface survey is in
-`docs/interface-landscape.md`.)
+QRTR) instead of USB. That transport-independence is not just aspirational: modem
+discovery already enumerates control devices from the kernel `wwan` framework
+(`/dev/wwanXqmi0|mbim0`, the MHI/PCIe path) alongside USB cdc-wdm, and binds them
+by sysfs path — the remaining PCIe/MHI work is HW validation on an M.2 module, not
+a redesign. This transport-independent, control/datapath-separated model is the
+part I think is genuinely worth having in-tree regardless of the QMI-vs-MBIM
+balance. (A fuller vendor/interface survey is in `docs/interface-landscape.md`.)
 
 ## The question
 
@@ -109,6 +112,16 @@ These are the field problems that made me build it rather than script uqmi:
    the stock stack does eSIM.
 6. **Board integration** — /etc/board.json-keyed power/reset GPIOs + status LEDs,
    absorbing the per-vendor helper scripts.
+7. **netifd-ecosystem integration depth** — dependent tunnels (WireGuard, xfrm/
+   IPsec, gre/vti/ipip) that bind the WAN as `tunlink`/parent follow it correctly
+   through netifd's host-dependency graph on up/down. wwand also handles the one
+   subtle edge the in-place-renew design creates: netifd drops an in-place
+   base-address update for resolved host dependencies, so a tunnel/xfrm would keep
+   a stale local address across a cellular IP change — an opt-in
+   `hard_reconnect_on_ip_change` makes wwand emit a netifd link down→up (without
+   re-dialling the session) so dependents re-follow. This is the kind of
+   whole-netifd-ecosystem behaviour a from-scratch, netifd-native manager can get
+   right by construction.
 
 ## The two ways forward
 
