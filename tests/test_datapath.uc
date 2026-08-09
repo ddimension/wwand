@@ -201,4 +201,39 @@ let forbidden = filter(fx.actions, (a) =>
 	match(a, /(^|[ \/])(ip6?[ ]+(route|addr|address|rule|neigh)|(route|addr|rule)_(add|del))/) != null);
 eq(length(forbidden), 0, 'vrf: datapath performs no direct addressing/routing');
 
+// --- ep_iface_number / ep_type_number (sysfs readlink derivation) -------------
+// The WDA/WDS endpoint TLVs must carry the modem's real USB interface number
+// and bus type; a wrong value silently breaks QMAP. Driven via the fx seam.
+let eplinks = {};
+let epfx = { readlink: (p) => eplinks[p] ?? null };
+
+// plain netdev: /device -> ...usb3/3-1/3-1:1.4 -> iface 4, HSUSB
+eplinks = { '/sys/class/net/wwan0/device':
+	'../../../devices/platform/soc/8af8800.usb/usb3/3-1/3-1:1.4' };
+eq(netlink.ep_iface_number('wwan0', epfx), 4, 'ep: usb interface number from :1.4');
+eq(netlink.ep_type_number('wwan0', epfx), 2, 'ep: /usbN/ path -> HSUSB (2)');
+
+// vlan/mux child: no /device, falls back to lower_0/device
+eplinks = { '/sys/class/net/wwan0m1/lower_0/device':
+	'../../../devices/platform/soc/8af8800.usb/usb3/3-1/3-1:1.2' };
+eq(netlink.ep_iface_number('wwan0m1', epfx), 2, 'ep: lower_0 fallback for a mux child');
+eq(netlink.ep_type_number('wwan0m1', epfx), 2, 'ep: lower_0 bus type');
+
+// PCIe/MHI modem: PCI BDF, no usb component -> PCIE (3), no iface number
+eplinks = { '/sys/class/net/mhi0/device':
+	'../../../devices/pci0001:00/0001:00:00.0/0001:01:00.0' };
+eq(netlink.ep_iface_number('mhi0', epfx), null, 'ep: PCIe device has no usb iface number');
+eq(netlink.ep_type_number('mhi0', epfx), 3, 'ep: PCI BDF -> PCIE (3)');
+
+// xHCI-on-PCI: the sysfs path contains BOTH a PCI BDF (the xHCI parent) and a
+// /usbN component — usb must win (the regression the code comment warns about)
+eplinks = { '/sys/class/net/wwan1/device':
+	'../../../devices/pci0000:00/0000:00:14.0/usb3/3-1/3-1:1.3' };
+eq(netlink.ep_type_number('wwan1', epfx), 2, 'ep: xHCI-on-PCI still classifies as HSUSB');
+
+// nothing resolvable
+eplinks = {};
+eq(netlink.ep_iface_number('nope', epfx), null, 'ep: missing links -> null');
+eq(netlink.ep_type_number('nope', epfx), null, 'ep: missing links -> null type');
+
 done('test_datapath');

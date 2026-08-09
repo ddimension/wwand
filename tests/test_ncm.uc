@@ -549,6 +549,122 @@ push(scenarios, {
 	},
 });
 
+// --- s7b: Huawei telemetry (HCSQ / MONSC / MONNC / CHIPTEMP) ------------------
+//
+// The Huawei vendor block shipped with zero coverage: a regex slip silently
+// nulls telemetry on Huawei sticks. Asserts the HCSQ index->dBm conversion, the
+// MONSC/MONNC cell assembly into the QMI shapes, CEER and the temperature read.
+
+push(scenarios, {
+	name: 's7b_huawei_telemetry',
+	script: script([
+		{ re: /^AT\+CGMI$/, lines: [ 'Huawei' ] },
+		{ re: /^AT\+CGMM$/, lines: [ 'E3372h-320' ] },
+		{ re: /^AT\+CSQ$/,  lines: [ '+CSQ: 18,99' ] },
+		// index->dBm: rssi 46-121=-75, rsrp 55-141=-86, sinr 146*0.2-20=9.2,
+		// rsrq 26*0.5-19.5=-6.5
+		{ re: /^AT\^HCSQ\?$/, lines: [ '^HCSQ: "LTE",46,55,146,26' ] },
+		{ re: /^AT\^MONSC$/, lines: [ '^MONSC: LTE,262,01,1300,1C36403,246,BFF,-93,-11,-61' ] },
+		{ re: /^AT\^MONNC$/, lines: [ '^MONNC: LTE,1300,155,-99,-13,0,8' ] },
+		{ re: /^AT\+CEER$/, lines: [ '+CEER: EMM cause 33, requested service option not subscribed' ] },
+		{ re: /^AT\^CHIPTEMP/, lines: [ '^CHIPTEMP: 42' ] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6', mux_id: 0 },
+	run: (env) => {
+		let m = env.modem;
+
+		uloop.timer(1500, () => {
+			// HCSQ wins over the CSQ floor for the per-RAT block
+			eq(m.signal?.lte?.rssi, -75, 'huawei: HCSQ rssi index 46 -> -75 dBm');
+			eq(m.signal?.lte?.rsrp, -86, 'huawei: HCSQ rsrp index 55 -> -86 dBm');
+			eq(m.signal?.lte?.rsrq, -6.5, 'huawei: HCSQ rsrq index 26 -> -6.5 dB');
+			ok(m.signal?.lte?.snr >= 91.9 && m.signal?.lte?.snr <= 92.1,
+				'huawei: HCSQ sinr index 146 -> ~9.2 dB (snr in 0.1 dB)');
+
+			// MONSC serving identifiers -> lte_intra (QMI shape)
+			let li = m.cells?.lte_intra;
+			eq(li?.plmn, '262/01', 'huawei: MONSC plmn');
+			eq(li?.earfcn, 1300, 'huawei: MONSC earfcn');
+			eq(li?.tac, 3071, 'huawei: MONSC tac (hex BFF)');
+			eq(li?.global_cell_id, 29582339, 'huawei: MONSC cid (hex 1C36403)');
+			eq(li?.serving_cell_id, 246, 'huawei: MONSC pci = serving_cell_id');
+			eq(length(li?.cells), 2, 'huawei: serving + MONNC neighbour');
+			let srv = filter(li.cells, (c) => c.pci == 246)[0];
+			eq(srv?.rsrp, -930, 'huawei: serving rsrp x10 (0.1 dB)');
+			let nb = filter(li.cells, (c) => c.pci == 155)[0];
+			eq(nb?.rsrp, -990, 'huawei: MONNC neighbour rsrp x10');
+			eq(nb?.rsrq, -130, 'huawei: MONNC neighbour rsrq x10');
+
+			eq(m.reg_detail?.reject_cause, 33, 'huawei: CEER cause via REJECT_CAUSE');
+			eq(m.temperature?.celsius, 42, 'huawei: CHIPTEMP -> temperature');
+			eq(m.dsd_status?.mode, 'LTE', 'huawei: dsd mode LTE from cell source');
+
+			env.finish();
+		});
+	},
+});
+
+// --- s7c: MeiG telemetry (MENG serving/neighbour, CELLLOCK, TEMP) -------------
+//
+// The MeiG (SLM770A / Cudy LT300) vendor block likewise had zero checks. Also
+// exercises the fractional-RSRQ firmware trap (-10.5) and the CESQ-error path
+// (signal must survive a failing AT+CESQ, keeping the CSQ floor + MENG fill).
+
+push(scenarios, {
+	name: 's7c_meig_telemetry',
+	script: script([
+		{ re: /^AT\+CGMI$/, lines: [ 'MEIG' ] },
+		{ re: /^AT\+CGMM$/, lines: [ 'SLM770A-R' ] },
+		{ re: /^AT\+CSQ$/,  lines: [ '+CSQ: 20,99' ] },          // floor rssi -73
+		{ re: /^AT\+CESQ$/, lines: [], term: 'ERROR' },          // must not break signal
+		{ re: /^AT\+MENG="servingcell"$/, lines: [
+			'+MENG: "servingcell","NOCONN","LTE",0,262,01,1C36403,246,1300,3,5,5,BFF,-93,-10.5,-61,21,15',
+		] },
+		{ re: /^AT\+MENG="neighbourcell"$/, lines: [
+			'+MENG: "neighbourcell intra","LTE",1300,155,-99,-13.5,-,-,8',
+			'+MENG: "neighbourcell inter","LTE",100,88,-105,-15,-,-,4',
+		] },
+		{ re: /^AT\^CELLLOCK\?$/, lines: [ '^CELLLOCK: 1,"LTE",1,1300,246' ] },
+		{ re: /^AT\+TEMP/, lines: [ '+TEMP: "soc-thmzone","42000"' ] },   // milli-C
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4', mux_id: 0 },
+	run: (env) => {
+		let m = env.modem;
+
+		uloop.timer(1500, () => {
+			// MENG serving fills the per-RAT signal; CSQ floor supplies rssi
+			eq(m.signal?.lte?.rsrp, -93, 'meig: MENG rsrp -> signal.lte (dBm)');
+			eq(m.signal?.lte?.rsrq, -10.5, 'meig: fractional MENG rsrq survives');
+			eq(m.signal?.lte?.snr, 210, 'meig: MENG sinr 21 dB -> snr 210 (0.1 dB)');
+			eq(m.signal?.lte?.rssi, -73, 'meig: CSQ floor rssi (CESQ ERROR tolerated)');
+
+			let li = m.cells?.lte_intra;
+			eq(li?.plmn, '262/01', 'meig: MENG plmn');
+			eq(li?.tac, 3071, 'meig: MENG tac (hex BFF)');
+			eq(li?.global_cell_id, 29582339, 'meig: MENG cid');
+			eq(li?.serving_cell_id, 246, 'meig: MENG pci');
+			let srv = filter(li.cells, (c) => c.pci == 246)[0];
+			eq(srv?.rsrp, -930, 'meig: serving rsrp x10');
+			let nb = filter(li.cells, (c) => c.pci == 155)[0];
+			eq(nb?.rsrp, -990, 'meig: neighbour rsrp x10');
+			eq(nb?.rsrq, -135, 'meig: fractional neighbour rsrq x10 (-13.5 -> -135)');
+
+			// inter-frequency neighbours grouped by earfcn
+			eq(m.cells?.lte_inter?.freqs[0]?.earfcn, 100, 'meig: inter freq earfcn');
+			eq(m.cells?.lte_inter?.freqs[0]?.cells[0]?.pci, 88, 'meig: inter neighbour pci');
+
+			// CELLLOCK read-back -> self.locks
+			eq(m.locks?.lte?.enabled, true, 'meig: CELLLOCK enabled');
+			eq(m.locks?.lte?.values, [ 1300, 246 ], 'meig: CELLLOCK arfcn/pci values');
+
+			// milli-Celsius TEMP normalized
+			eq(m.temperature?.celsius, 42, 'meig: TEMP 42000 milli-C -> 42 C');
+
+			env.finish();
+		});
+	},
+});
+
 // --- s8: synchronous teardown INSIDE the 'registered' emit ------------------
 // The autosetup phase-2 reload (uci write + apply_config) runs synchronously
 // under emit('registered') and tears the emitting modem instance down

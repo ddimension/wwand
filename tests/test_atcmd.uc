@@ -458,4 +458,50 @@ eq(ati3.model, 'E398', 'ati: URC/+ noise ignored');
 
 eq(atcmd.parse_ati([ '^RSSI:26', 'OK' ]), null, 'ati: nothing useful -> null');
 
+// --- parse_monnc / parse_qrsrq gap fill --------------------------------------
+
+let monnc = atcmd.parse_monnc([ '^MONNC: LTE,1300,155,-99,-13,0,8',
+                                '^MONNC: LTE,100,88,-105,-15', 'garbage', 'OK' ]);
+eq(length(monnc), 2, 'monnc: two neighbour lines parsed');
+eq(monnc[0], { earfcn: 1300, pci: 155, rsrp: -990, rsrq: -130 },
+	'monnc: metrics in 0.1 dB units');
+eq(monnc[1].pci, 88, 'monnc: second line pci');
+eq(atcmd.parse_monnc([ 'OK' ]), [], 'monnc: no lines -> empty list');
+
+let qrsrq = atcmd.parse_qrsrq([ '+QRSRQ: -11,-12,-20,-20,LTE' ]);
+eq(qrsrq.branches, [ -11, -12, -20, -20 ], 'qrsrq: all rx branches');
+eq(atcmd.branch_best(qrsrq, -19), -11, 'qrsrq: branch_best picks strongest above floor');
+eq(atcmd.branch_best({ branches: [ -140, -140 ] }, -139), null,
+	'branch_best: all-sentinel branches -> null');
+
+// --- robustness: no vendor parser may throw on garbage -----------------------
+// Feed every lines-taking parser hostile input (ERROR, binary junk, truncated
+// reports, huge line). A parser that throws would kill the telemetry tick.
+let hostile = [
+	[ 'ERROR' ],
+	[ '+CME ERROR: 100' ],
+	[ '\x00\x01\xffbinary\x7f' ],
+	[ '+QENG: "servingcell"' ],           // truncated: no payload
+	[ '^MONSC: LTE' ],                    // truncated
+	[ '+MENG: "servingcell"' ],           // truncated
+	[ '^HCSQ: "LTE"' ],                   // no values
+	[ '+CEER:' ],
+	[ sprintf('+QCAINFO: %s', substr('x' + 'y', 0, 1)) ],
+	[ '1,2,3,4,5,6,7,8,9' ],              // bare numbers, no prefix
+	[],
+	null,
+];
+let parsers = [ 'parse_qnwlock', 'parse_qcainfo', 'parse_qeng_servingcell',
+	'parse_qeng_neighbourcell', 'parse_qrsrp', 'parse_qrsrq', 'parse_qsinr',
+	'parse_ceer', 'parse_cesq', 'parse_hcsq', 'parse_monsc', 'parse_monnc',
+	'parse_meng_servingcell', 'parse_meng_neighbourcell', 'parse_celllock',
+	'parse_ati', 'parse_cops_read', 'parse_cops_scan', 'parse_qtemp',
+	'parse_chiptemp', 'parse_cpmutemp', 'parse_meig_temp' ];
+let threw = [];
+for (let name in parsers)
+	for (let input in hostile)
+		try { atcmd[name](input); }
+		catch (e) { push(threw, sprintf('%s(%J)', name, input)); }
+eq(threw, [], 'robustness: no parser throws on hostile input');
+
 done('test_atcmd');

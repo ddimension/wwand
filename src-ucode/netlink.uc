@@ -499,13 +499,21 @@ export function setup_mbim(fx, opts)
 };
 
 // endpoint interface number for WDA/bind-mux (e.g. .../1-1.2:1.4 -> 4)
-export function ep_iface_number(netdev)
+export function ep_iface_number(netdev, fx)
 {
+	let rl = fx?.readlink ?? fs.readlink;
+
 	for (let link in [ sprintf('/sys/class/net/%s/device', netdev),
 	                   sprintf('/sys/class/net/%s/lower_0/device', netdev) ]) {
-		let target = fs.readlink(link);
+		let target = rl(link);
 
 		if (target == null)
+			continue;
+
+		// USB interface numbers only exist on USB paths — a bare PCI BDF
+		// ("0001:01:00.0") would otherwise match the ":<cfg>.<iface>" suffix
+		// and report a bogus interface 0 for an MHI/PCIe modem
+		if (!match(target, /\/usb[0-9]/))
 			continue;
 
 		let m = match(target, /:[0-9]+\.([0-9]+)$/);
@@ -523,13 +531,14 @@ export function ep_iface_number(netdev)
 // not HSUSB (2). A USB device's sysfs path always contains a `/usbN` component
 // (its xHCI parent is on PCI, hence the usb check must win first); an MHI/PCIe
 // modem has only the PCI BDF. Returns 2 (HSUSB), 3 (PCIE), or null.
-export function ep_type_number(netdev)
+export function ep_type_number(netdev, fx)
 {
 	const EP_HSUSB = 2, EP_PCIE = 3;
+	let rl = fx?.readlink ?? fs.readlink;
 
 	for (let link in [ sprintf('/sys/class/net/%s/device', netdev),
 	                   sprintf('/sys/class/net/%s/lower_0/device', netdev) ]) {
-		let target = fs.readlink(link);
+		let target = rl(link);
 
 		if (target == null)
 			continue;
