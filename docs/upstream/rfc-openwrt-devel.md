@@ -59,17 +59,28 @@ These are the field problems that made me build it rather than script uqmi:
 2. **Non-destructive reload / in-place renew** — transient loss holds the
    interface up and renews over ubus without teardown, so IPv6-PD leases and VRF/
    policy-routing survive. netifd otherwise tears down and rebuilds.
-3. **Multi-PDP / QMAP** — several `proto wwand` interfaces share one modem over
-   rmnet mux channels, with per-context lifecycle.
+3. **Native netlink datapath — QMAP mux + UL/DL aggregation** — wwand sets up the
+   rmnet mux channels *and* the QMAP uplink/downlink datagram aggregation
+   (datagram max size + aggregation count, both directions) **directly over
+   netlink** (RTM_NEWLINK / rmnet), with no qmicli/ip subprocess in the path.
+   It's strictly link-layer (mux/MTU/carrier); all addressing and routing stay in
+   netifd, so ip4table/ip6table/VRF/policy-routing apply unchanged. Several
+   `proto wwand` interfaces share one modem over mux channels with per-context
+   lifecycle. This aggregation path is the main throughput win over a
+   uqmi+scripts setup and is not something the CLI tools expose cleanly.
 4. **Backend-neutral SIM/PLMN layer** — PIN safety (never burn the last retry),
    per-ICCID overrides, and named PLMN selector lists (preferred + forbidden/
-   FPLMN) the daemon re-applies before every radio-on. This last one is a real
-   operator need (steering-of-roaming control for M2M/GDSP SIMs) that nothing in
+   FPLMN) the daemon re-applies before every radio-on. The forbidden-list control
+   is a real operator need (steering-of-roaming for M2M/GDSP SIMs) that nothing in
    the current stack offers.
-5. **Board integration** — /etc/board.json-keyed power/reset GPIOs + status LEDs,
+5. **eSIM handling** — lpac-based profile management (list/enable/disable/
+   download/switch) with the APDU channel carried over whichever transport the
+   modem offers: QMI-UIM logical channel, native MBIM UICC low-level access, or
+   AT CCHO/CGLA. Profile switch applies via a SIM hot-reset (no full modem
+   reboot). Shipped as an optional `wwand-esim` package (pulls lpac). Nothing in
+   the stock stack does eSIM.
+6. **Board integration** — /etc/board.json-keyed power/reset GPIOs + status LEDs,
    absorbing the per-vendor helper scripts.
-6. **Fine radio-type identification** — NB-IoT / LTE-M / RedCap / NTN, which
-   libqmi/libmbim don't even model, surfaced in status/caps for IoT deployments.
 
 ## The two ways forward
 
