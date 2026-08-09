@@ -239,10 +239,32 @@ export function device_for_serial(serial, fx)
 	return (length(ids) == 1) ? byusb[ids[0]] : null;
 };
 
+// kernel `wwan` framework control ports (PCIe/MHI, and some USB modems): the
+// class dir holds one device per port — wwanXqmiN / wwanXmbimN / wwanXatN — with
+// the char device at /dev/<name> and the port type in the `type` file
+// ("QMI"/"MBIM"/"AT"/"QCDM"/…). Returns the QMI/MBIM CONTROL ports only (AT is
+// resolved separately by atcmd.find_mhi_at). [ { name, protocol } ].
+function wwan_control_ports(fx)
+{
+	let out = [];
+
+	for (let path in (fx.glob('/sys/class/wwan/*') ?? [])) {
+		let name = basename(path);
+		let type = uc(trim(sprintf('%s', fx.read(sprintf('/sys/class/wwan/%s/type', name)) ?? '')));
+		let proto = (type == 'QMI') ? 'qmi' : (type == 'MBIM') ? 'mbim' : null;
+
+		if (proto)
+			push(out, { name: name, protocol: proto });
+	}
+
+	return out;
+}
+
 // enumerate the modem control devices physically present now — cdc-wdm nodes
-// (qmi/mbim) and NCM datapath netdevs — each with USB id and iSerial read
-// pre-open from sysfs. Powers the LuCI "detected modems" picker. IMEI is NOT
-// read here (needs opening the modem); the daemon fills it in for managed modems.
+// (qmi/mbim), wwan-framework control ports (PCIe/MHI) and NCM datapath netdevs —
+// each with USB id and iSerial read pre-open from sysfs. Powers the LuCI
+// "detected modems" picker. IMEI is NOT read here (needs opening the modem); the
+// daemon fills it in for managed modems.
 export function list_present(fx)
 {
 	fx = fx ?? default_fx();
@@ -260,6 +282,19 @@ export function list_present(fx)
 			usb_path: usbid,
 			path: sysfs_path_of(sprintf('/sys/class/usbmisc/%s/device', name), fx),
 			serial: usb_serial_of(usbid, fx),
+		});
+	}
+
+	// PCIe/MHI (and some USB) modems expose QMI/MBIM over the kernel wwan
+	// framework instead of a cdc-wdm node. No pre-open iSerial for MHI/PCIe —
+	// identity is read after opening the modem (the post-open gate).
+	for (let p in wwan_control_ports(fx)) {
+		push(out, {
+			kind: 'wwan',
+			device: sprintf('/dev/%s', p.name),
+			protocol: p.protocol,
+			path: sysfs_path_of(sprintf('/sys/class/wwan/%s/device', p.name), fx),
+			serial: null,
 		});
 	}
 
@@ -390,6 +425,25 @@ export function device_for_usb_path(usb_path, fx)
 		// mode is determined later when the device is opened/probed
 		if (index(dev, sprintf('/%s:', usb_path)) >= 0 || index(dev, sprintf('/%s/', usb_path)) >= 0)
 			return sprintf('/dev/%s', name);
+	}
+
+	// PCIe/MHI (and some USB): the wwan-framework control node. MHI uses the full
+	// sysfs-path form; the bare-id form is matched too for USB wwan modems.
+	for (let p in wwan_control_ports(fx)) {
+		let link = sprintf('/sys/class/wwan/%s/device', p.name);
+
+		if (full) {
+			if (full_path_matches(usb_path, sysfs_path_of(link, fx)))
+				return sprintf('/dev/%s', p.name);
+
+			continue;
+		}
+
+		let dev = fx.readlink(link);
+
+		if (dev != null &&
+		    (index(dev, sprintf('/%s:', usb_path)) >= 0 || index(dev, sprintf('/%s/', usb_path)) >= 0))
+			return sprintf('/dev/%s', p.name);
 	}
 
 	return null;

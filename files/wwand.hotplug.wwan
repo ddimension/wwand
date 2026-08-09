@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 André Valentin <avalentin@marcant.net>
+# wwand — notify the daemon about kernel `wwan`-framework control-port add/remove
+# (PCIe/MHI modems, and some USB modems that expose /dev/wwanXqmiN|mbimN instead
+# of a cdc-wdm node). Installed as /etc/hotplug.d/wwan/20-wwand.
+
+case "$DEVICENAME" in
+	wwan*qmi*|wwan*mbim*) ;;
+	*) return 0 2>/dev/null || exit 0 ;;
+esac
+
+ubus -t 3 call wwand hotplug "{\"action\":\"$ACTION\",\"device\":\"$DEVICENAME\"}" 2>/dev/null
+
+return 0 2>/dev/null || exit 0

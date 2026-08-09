@@ -448,4 +448,43 @@ uloop.run();
 		'path: bare id uses the legacy matcher (no readlink in this fx)');
 })();
 
+// --- wwan framework (PCIe/MHI) control-device discovery ----------------------
+// MHI/PCIe modems expose QMI/MBIM over /dev/wwanXqmiN|mbimN (kernel wwan class),
+// not a cdc-wdm node; the AT port is found separately. list_present enumerates
+// the QMI/MBIM control ports (AT skipped) and path binding resolves them.
+(function() {
+	const MHI_DEV = '/sys/devices/platform/soc@0/1c08000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/mhi0';
+	const MHI_PATH = 'platform/soc@0/1c08000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/mhi0';
+
+	let fx = {
+		glob: (p) => (p == '/sys/class/wwan/*')
+			? [ '/sys/class/wwan/wwan0qmi0', '/sys/class/wwan/wwan0at0', '/sys/class/wwan/wwan0mbim0' ]
+			: [],
+		read: (p) => ({
+			'/sys/class/wwan/wwan0qmi0/type':  'QMI\n',
+			'/sys/class/wwan/wwan0at0/type':   'AT\n',
+			'/sys/class/wwan/wwan0mbim0/type': 'MBIM\n',
+		})[p],
+		realpath: (p) => (p == '/sys/class/wwan/wwan0qmi0/device' ||
+		                  p == '/sys/class/wwan/wwan0mbim0/device') ? MHI_DEV : null,
+		readlink: (p) => null,
+		lsdir: (p) => null,
+		access: (p) => false,
+	};
+
+	let pres = discovery.list_present(fx);
+	eq(length(pres), 2, 'wwan: QMI + MBIM control ports enumerated, AT skipped');
+	eq(pres[0], { kind: 'wwan', device: '/dev/wwan0qmi0', protocol: 'qmi', path: MHI_PATH, serial: null },
+		'wwan: QMI control device (PCIe/MHI, no pre-open serial)');
+	eq(pres[1].protocol, 'mbim', 'wwan: MBIM control port too');
+
+	eq(discovery.device_for_usb_path(MHI_PATH, fx), '/dev/wwan0qmi0',
+		'wwan: full MHI sysfs path binds to the control device');
+	eq(discovery.device_for_usb_path(
+		'platform/soc@0/1c08000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0', fx),
+		'/dev/wwan0qmi0', 'wwan: parent (PCI function) prefix matches too');
+	eq(discovery.device_for_usb_path('platform/nope/mhi9', fx), null,
+		'wwan: a different path does not match');
+})();
+
 done('test_discovery');

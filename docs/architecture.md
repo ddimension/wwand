@@ -13,6 +13,17 @@ a MikroTik Chateau 5G R17 ax (Quectel RG650E-EU, 5G NSA, two parallel PDP
 contexts). RSS figures below are for the QMI-only base; MBIM/NCM add ~200–400 KB
 per modem and load only when their package is installed.
 
+**Design principle — three separable concerns.** wwand deliberately keeps the
+**control protocol** (QMI / MBIM / AT), the **datapath** (QMAP/RmNet, MBIM,
+NCM/ECM, raw-ip) and the **physical transport** (USB today; PCIe/MHI on the
+roadmap) as distinct axes rather than one "modem protocol". QMI and MBIM are
+co-equal first-class control backends (the market splits QMI/QMAP —
+Quectel/SIMCom/MeiG — vs MBIM — Sierra-Semtech/Telit/Fibocom/u-blox); QMAP is a
+*datapath capability*, not a synonym for QMI; and the control plane does not bake
+in USB, so `control=QMI datapath=QMAP transport=PCIe/MHI` (and QRTR) plug in
+without a redesign. See [`interface-landscape.md`](interface-landscape.md) for
+the vendor/interface survey behind this.
+
 ## 1. Measured baseline (Chateau)
 
 One process. Zero per-context spawns. ~3 MB resident. The measured baseline:
@@ -263,6 +274,34 @@ child's carrier so netifd's own link tracking would teardown/re-setup — were
 dropped: the deferred long-poll still cost a process per interface, and
 rmnet/qmimux children do not implement `ndo_change_carrier` so the carrier
 cannot be toggled per context.)
+
+### Dependent tunnels (WireGuard / xfrm / gre) over a wwand WAN
+
+A wwand interface is a first-class netifd L3 interface with a **stable netdev
+name** (`wwandN`), so a tunnel/xfrm can bind to it as a parent — `option tunlink
+'<wwand-iface>'` (gre/vti/ipip/6in4/xfrm) or an xfrm `dev <wwandN>`. Bring-up and
+teardown propagate correctly through netifd's host-dependency graph: when the
+wwand interface goes fully **down** (permanent loss), dependents are torn down
+(`IFEV_DOWN`); when it comes **up**, they re-resolve and re-run their setup,
+re-reading the current local address.
+
+**The subtlety — in-place renew with a changed IP.** wwand's non-destructive
+reconnect renews the address *in place* (no `down`→`up`, to preserve IPv6-PD/VRF).
+netifd delivers that as `IFEV_UPDATE`, which a *resolved* host dependency
+**ignores** (netifd `proto-ext.c`: the resolved-dep callback reacts only to
+DOWN/UP, not UPDATE). Classic tunnels and xfrm therefore keep the **stale local
+address / SA source** and silently break until a real down→up; WireGuard is
+immune (address-agnostic — it follows the route). This is a netifd property that
+affects *any* in-place-renewing manager (a DHCP renew that changes IP has the
+same effect), not a wwand-specific bug.
+
+**Mitigation — `option hard_reconnect_on_ip_change '1'`** (per interface, default
+off). When wwand detects that a reconnect changed the IP, it asks the proto shim
+for a one-shot **link down→up** (`relink`: `proto_send_update` with link-down then
+link-up) instead of the plain renew — so dependents see `IFEV_DOWN`→`IFEV_UP` and
+re-follow the new address. This toggles only netifd's L3 view; the **modem session
+is not re-dialled**. Cost: the WAN's own IPv6-PD/VRF is rebuilt and the WAN blips
+briefly. Leave it off for WireGuard-only setups.
 
 ### Routing / VRF compatibility (invariant)
 

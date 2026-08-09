@@ -29,6 +29,7 @@ proto_wwand_init_config() {
 	proto_config_add_string profile
 	proto_config_add_string use_pushed_prefix
 	proto_config_add_string settings_poll
+	proto_config_add_string hard_reconnect_on_ip_change
 
 	# legacy qmi-advanced options: accepted so old configs keep parsing;
 	# interpreted by the wwand compat layer, not by this shim
@@ -243,14 +244,24 @@ proto_wwand_renew() {
 	local resp
 	resp="$(ubus -t 30 call wwand context_settings "{\"interface\":\"$interface\"}" 2>/dev/null)" || return 0
 
-	local up netdev
+	local up netdev relink
 	json_load "$resp"
-	json_get_vars up netdev
+	json_get_vars up netdev relink
 
 	# not connected (or daemon busy): leave the running config untouched — the
 	# daemon reconnects transient drops in place and only downs the interface
 	# on a permanent loss
 	[ "$up" = "1" ] && [ -n "$netdev" ] || return 0
+
+	# hard_reconnect_on_ip_change: the daemon detected the reconnect changed the
+	# IP and asks (relink=1) for a netifd link down->up, so dependent tunnels/xfrm
+	# tear down (IFEV_DOWN) and re-resolve (IFEV_UP) against the NEW local address
+	# — netifd drops an in-place address update for resolved host dependencies.
+	# This toggles only netifd's L3 view; the wwand modem session is untouched.
+	[ "$relink" = "1" ] && {
+		proto_init_update "$netdev" 0
+		proto_send_update "$interface"
+	}
 
 	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns"
 }

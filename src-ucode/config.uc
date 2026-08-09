@@ -35,6 +35,12 @@ function conn_fields(s)
 		mtu: (s.mtu != null) ? +s.mtu : null,
 		use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
 		settings_poll: +(s.settings_poll ?? 300),
+		// on a reconnect that changes the IP, do a netifd link down->up instead of
+		// an in-place renew, so dependent tunnels/xfrm re-follow the new local
+		// address (netifd ignores an in-place address update for resolved host
+		// dependencies). Costs the WAN's own IPv6-PD/VRF a rebuild + a brief blip;
+		// default off (WireGuard doesn't need it — it follows the route).
+		hard_reconnect_on_ip_change: bool_opt(s.hard_reconnect_on_ip_change, false),
 	};
 }
 

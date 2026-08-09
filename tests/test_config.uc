@@ -25,7 +25,8 @@ let r = padopt({
 		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet',
 		       pdp_type: 'ipv4v6', mux_id: '0' },
 		wan2: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: '#2',
-		        pdp_type: 'ipv4', mux_id: '2', auto: '0' },
+		        pdp_type: 'ipv4', mux_id: '2', auto: '0',
+		        hard_reconnect_on_ip_change: '1' },
 	},
 });
 
@@ -41,6 +42,8 @@ eq(r.modems.m0.repower_time, 10, 'native: repower_time parsed (seconds)');
 eq(r.contexts.wan.modem, 'm0', 'native: context modem ref');
 eq(r.contexts.wan.interface, 'wan', 'native: interface attached');
 eq(r.contexts.wan2.mux_id, 2, 'native: mux id');
+eq(r.contexts.wan2.hard_reconnect_on_ip_change, true, 'native: hard_reconnect_on_ip_change parsed (bool)');
+eq(r.contexts.wan.hard_reconnect_on_ip_change, false, 'native: hard_reconnect defaults off');
 eq(r.contexts.wan2.apn, '#2', 'native: profile passthrough apn');
 eq(r.contexts.wan.auto, true, 'native: interface auto defaults true');
 eq(r.contexts.wan2.auto, false, 'native: auto 0 -> not proactively brought up');

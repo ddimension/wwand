@@ -66,8 +66,12 @@ wwand section types plus the netifd interface — no separate config file:
 - **`config interface '<name>'`** with `option proto 'wwand'` — the connection:
   `option modem <name>` + `apn`, `pdp_type`, `auth`, `username`, `password`,
   `profile`, `mux_id` (0 = no mux, N = channel N), `mtu`, `use_pushed_mtu`,
-  `use_pushed_prefix`, `settings_poll` + the usual netifd knobs. Several
-  interfaces referencing one `wwand_modem` = multiple mux contexts on one modem.
+  `use_pushed_prefix`, `settings_poll`, `hard_reconnect_on_ip_change` (default
+  off; on a reconnect that changes the IP, do a netifd link down→up instead of an
+  in-place renew so dependent tunnels/xfrm/IPsec re-follow the new local address —
+  costs the WAN's own IPv6-PD/VRF a rebuild + a brief blip; WireGuard doesn't need
+  it) + the usual netifd knobs. Several interfaces referencing one `wwand_modem` =
+  multiple mux contexts on one modem.
 - **`config wwand_globals 'globals'`** — `log_level`, `hold_max`, `write_device`
   (write the resolved L3 name back onto interfaces, default on), `autosetup`
   (zero-config autosetup, default on), `takeover` (adopt the stock/legacy stack,

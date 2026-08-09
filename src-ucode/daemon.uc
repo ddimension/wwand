@@ -485,6 +485,27 @@ export function create(opts)
 			ctx.modem.note_connect_success();
 			clear_reconnect(name);
 			emit('wwand.context', { context: name, interface: entry?.cfg?.interface, event: event });
+
+			// detect an address change vs the last applied settings. When the IP
+			// changed AND the interface opted into hard_reconnect_on_ip_change, ask
+			// the proto shim for a netifd link down->up (one-shot `relink`) instead
+			// of the plain in-place renew, so dependent tunnels/xfrm re-follow the
+			// new local address (netifd drops an in-place address update for
+			// resolved host dependencies — see docs/architecture.md). Default off.
+			if (entry) {
+				let cur_ip = sprintf('%s|%s', ctx.settings?.ipv4?.addr ?? '',
+					ctx.settings?.ipv6?.addr ?? '');
+				let changed = (entry._applied_ip != null && entry._applied_ip != cur_ip);
+
+				entry._applied_ip = cur_ip;
+
+				if (changed && entry.cfg?.hard_reconnect_on_ip_change) {
+					entry._relink_once = true;
+					log('notice', sprintf('interface %s: IP changed (%s) — hard reconnect (link down->up) so dependent tunnels/xfrm follow',
+						entry.cfg?.interface, cur_ip));
+				}
+			}
+
 			// push settings to netifd in place (never a teardown). A no-op during
 			// initial setup (not yet IFS_UP); re-applies config after reconnect/adoption.
 			if (deps.renew_interface && entry?.cfg?.interface)
@@ -1173,17 +1194,25 @@ export function create(opts)
 	};
 
 	// the settings payload the proto shim consumes (context_up / renew).
-	let settings_result = (name, entry, netdev) => ({
-		up: true,
-		context: name,
-		interface: entry.cfg.interface,
-		netdev: netdev,
-		mtu: entry.cfg.mtu ?? entry.ctx.settings?.mtu,
-		pushed_mtu: entry.ctx.settings?.mtu,
-		use_pushed_mtu: entry.cfg.use_pushed_mtu,
-		ipv4: entry.ctx.settings?.ipv4,
-		ipv6: entry.ctx.settings?.ipv6,
-	});
+	// `relink` is a one-shot flag: when set, the renew handler does a netifd link
+	// down->up instead of an in-place update (hard_reconnect_on_ip_change).
+	let settings_result = (name, entry, netdev) => {
+		let relink = entry._relink_once ? 1 : 0;
+		entry._relink_once = false;
+
+		return {
+			up: true,
+			context: name,
+			interface: entry.cfg.interface,
+			netdev: netdev,
+			mtu: entry.cfg.mtu ?? entry.ctx.settings?.mtu,
+			pushed_mtu: entry.ctx.settings?.mtu,
+			use_pushed_mtu: entry.cfg.use_pushed_mtu,
+			ipv4: entry.ctx.settings?.ipv4,
+			ipv6: entry.ctx.settings?.ipv6,
+			relink: relink,
+		};
+	};
 
 	self._up_result = function(name, entry) {
 		let netdev = derive_netdev(entry);
@@ -1597,9 +1626,11 @@ export function create(opts)
 			return;
 
 		for (let p in deps.list_present()) {
-			// hotplug devnames are basenames: 'cdc-wdm0' (usbmisc) / 'usb0' (net)
-			let dev = (p.kind == 'cdc-wdm')
-				? replace(p.device ?? '', /^.*\//, '') : p.netdev;
+			// hotplug devnames are basenames: 'cdc-wdm0' (usbmisc) / 'wwan0qmi0'
+			// (wwan framework, PCIe/MHI) — both have a control device; 'usb0' (net)
+			// for NCM which has only a datapath netdev.
+			let dev = (p.kind == 'ncm')
+				? p.netdev : replace(p.device ?? '', /^.*\//, '');
 
 			if (dev != null && dev != '') {
 				self.hotplug('add', dev);
