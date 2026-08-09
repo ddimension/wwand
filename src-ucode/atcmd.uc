@@ -164,6 +164,7 @@ export const parse_celllock = parse.parse_celllock;
 export const parse_ati = parse.parse_ati;
 export const parse_cops_read = parse.parse_cops_read;
 export const parse_cops_scan = parse.parse_cops_scan;
+export const parse_cpol = parse.parse_cpol;
 export const parse_qtemp = parse.parse_qtemp;
 export const parse_chiptemp = parse.parse_chiptemp;
 export const parse_cpmutemp = parse.parse_cpmutemp;

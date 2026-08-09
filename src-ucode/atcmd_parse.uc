@@ -639,6 +639,47 @@ export function parse_cops_scan(lines)
 	return out;
 };
 
+// AT+CPOL? preferred-PLMN list read (3GPP 27.007 §7.19). One line per record:
+//   +CPOL: <index>,<format>,"<oper>"[,<GSM>,<GSM_compact>,<UTRAN>[,<E-UTRAN>[,<NG-RAN>]]]
+// <format> 2 = numeric "mccmnc". Returns [ { index, format, oper, mcc, mnc,
+// gsm, utran, eutran, ngran } ]; the per-RAT flags default false when the
+// firmware omits the AcT fields (older LTE modems report only up to E-UTRAN).
+export function parse_cpol(lines)
+{
+	let out = [];
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+CPOL:\s*(.*)/);
+
+		if (!m)
+			continue;
+
+		let f = map(split(m[1], ','), (x) => trim(x));
+
+		if (length(f) < 3 || !match(f[0], /^[0-9]+$/))
+			continue;
+
+		let fmt = +f[1];
+		let oper = replace(f[2], /"/g, '');
+		let flag = (i) => (f[i] != null && trim(f[i]) == '1');
+		let rec = {
+			index: +f[0], format: fmt, oper: oper,
+			mcc: null, mnc: null,
+			gsm: flag(3), utran: flag(5), eutran: flag(6), ngran: flag(7),
+		};
+
+		// numeric format carries the mcc/mnc directly
+		if (fmt == 2 && match(oper, /^[0-9]{5,6}$/)) {
+			rec.mcc = substr(oper, 0, 3);
+			rec.mnc = substr(oper, 3);
+		}
+
+		push(out, rec);
+	}
+
+	return out;
+};
+
 // --- temperature (QModem-derived, per-vendor AT) -----------------------------
 // Modem die/board temperature in whole degrees Celsius, or null. Each vendor
 // reports it differently; the shapes below are ported from FUjr/QModem's

@@ -21,6 +21,7 @@ import * as hexmod from './codec/hex.uc';
 import * as backend from './backend.uc';
 import * as uimmod from './codec/schema/uim.uc';
 import * as dmsmod from './codec/schema/dms.uc';
+import * as atcmd from './atcmd.uc';
 
 const QMI_ERR_NO_EFFECT = 26;
 
@@ -771,6 +772,104 @@ export function read_plmn_lists(modem, cb)
 			});
 		});
 	});
+};
+
+// Write the USER-controlled preferred PLMN list (EF 6F60 / PLMNwAcT) via the
+// standard 3GPP AT interface — backend-neutral (every backend has an AT side
+// channel), avoiding a modem-specific QMI/UIM record-write. entries is the
+// desired list IN PRIORITY ORDER: [ { mcc, mnc, gsm, utran, eutran, ngran } ].
+//
+// Sequence (27.007 §7.19): AT+CPLS=0 selects the user list; read the current
+// records (AT+CPOL?), delete them (highest index first so lower indices don't
+// shift), then write the new list at explicit indices 1..N. Per record the AcT
+// flags are GSM,GSM-compact,UTRAN,E-UTRAN[,NG-RAN]; the 5th (NG-RAN) field is
+// only emitted when 5G is requested, since LTE-only firmwares reject it.
+// On success reads the list BACK through the QMI/UIM path (read_plmn_lists) so
+// the caller can cross-verify the AT write actually landed in the SIM EF.
+export function write_user_plmn(modem, entries, cb)
+{
+	let at = modem.at;
+
+	if (!at)
+		return cb({ error: 'no_at_channel' });
+
+	let list = entries ?? [];
+	let esc = (s) => replace(sprintf('%s', s ?? ''), /[^0-9]/g, '');
+
+	// forward-declared: write_at / del_existing / try_write recurse (self-
+	// referencing let arrows hit the ucode TDZ otherwise — see CLAUDE.md)
+	let finish, write_at, del_existing, try_write;
+
+	finish = () => {
+		// cross-verify via the independent QMI/UIM read path (best-effort:
+		// NCM modems without a UIM client just return null)
+		read_plmn_lists(modem, (lists) => cb(null, { ok: true, written: length(list), user: lists.user }));
+	};
+
+	// AcT-field arities to try, in order: 5 fields (GSM,GSM-compact,UTRAN,E-UTRAN,
+	// NG-RAN — Rel-15 / 5G modems), 4 (no NG-RAN — LTE modems), 0 (numeric-only,
+	// oldest firmwares). The first arity a modem accepts is remembered so the rest
+	// of the list writes without re-probing.
+	let ACT_ARITIES = [ 5, 4, 0 ];
+	let arity_i = 0;
+
+	let acts_for = (e, arity) => {
+		if (arity == 0)
+			return '';
+
+		let f = [ e.gsm ? 1 : 0, 0, e.utran ? 1 : 0, e.eutran ? 1 : 0 ];   // GSM,GSMc,UTRAN,E-UTRAN
+
+		if (arity == 5)
+			push(f, e.ngran ? 1 : 0);
+
+		return ',' + join(',', f);
+	};
+
+	try_write = (i, plmn, ai) => {
+		if (ai >= length(ACT_ARITIES))
+			return cb({ error: 'cpol_write', at_index: i, plmn: plmn,
+			            note: 'rejected at every AcT arity — SIM may be write-protected (ADM)' });
+
+		at.send(sprintf('AT+CPOL=%d,2,"%s"%s', i + 1, plmn, acts_for(list[i], ACT_ARITIES[ai])), (werr) => {
+			if (werr)
+				return try_write(i, plmn, ai + 1);   // step down the AcT arity
+
+			arity_i = ai;   // remember the arity this modem accepts
+			write_at(i + 1);
+		}, { timeout: 5000 });
+	};
+
+	write_at = (i) => {
+		if (i >= length(list))
+			return finish();
+
+		let plmn = esc(list[i].mcc) + esc(list[i].mnc);
+
+		if (!match(plmn, /^[0-9]{5,6}$/))
+			return cb({ error: 'invalid_plmn', at_index: i, plmn: plmn });
+
+		try_write(i, plmn, arity_i);
+	};
+
+	del_existing = (indices, k) => {
+		if (k < 0)
+			return write_at(0);
+
+		// tolerate a delete error (record may already be empty)
+		at.send(sprintf('AT+CPOL=%d', indices[k]), () => del_existing(indices, k - 1),
+			{ timeout: 5000 });
+	};
+
+	// select the user list (some modems lack AT+CPLS — tolerate), then read the
+	// current records so we can clear them before writing the new order
+	at.send('AT+CPLS=0', () => {
+		at.send('AT+CPOL?', (err, res) => {
+			let cur = err ? [] : (atcmd.parse_cpol(res?.lines) ?? []);
+			let indices = sort(map(cur, (e) => e.index), (a, b) => a - b);
+
+			del_existing(indices, length(indices) - 1);
+		}, { timeout: 8000 });
+	}, { timeout: 5000 });
 };
 
 // sequential-provider ladder: try providers in order until one yields non-null.

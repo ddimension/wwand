@@ -177,6 +177,22 @@ export function install(self, o)
 		sim.read_plmn_lists(entry.modem, (lists) => cb(null, lists));
 	};
 
+	// write the USER preferred-PLMN list (EF 6F60) via AT+CPOL/CPLS — the desired
+	// list in priority order, then read it back over the QMI/UIM path for cross-
+	// verification. entries: [ { mcc, mnc, gsm, utran, eutran, ngran } ].
+	self.modem_plmn_set = function(ref, entries, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		if (type(entries) != 'array')
+			return cb({ error: 'invalid_entries' });
+
+		log('notice', sprintf('modem %s: writing %d user-preferred PLMN record(s)', ref, length(entries)));
+		sim.write_user_plmn(entry.modem, entries, cb);
+	};
+
 	// manual PIN release: enter the PIN past the low-retry safety block (with <=1
 	// attempt left the daemon refuses to auto-enter, to avoid burning the last try
 	// into a PUK lock). Optional `pin` overrides the configured one. The one-shot

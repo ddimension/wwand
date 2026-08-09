@@ -175,6 +175,13 @@ export function publish(conn, daemon, log)
 					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
 		},
 
+		modem_plmn_set: {
+			args: { modem: '', entries: [], ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_plmn_set(req.args.modem, req.args.entries, (err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
 		modem_set_settings: {
 			args: { modem: '', settings: {}, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

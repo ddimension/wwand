@@ -325,6 +325,84 @@ scenario('pinlock: blocked pin refuses up front', (next) => {
 	});
 });
 
+// --- write_user_plmn via AT+CPOL/CPLS ----------------------------------------
+
+// a mock AT channel: records every command; answers AT+CPOL? with two existing
+// records (so the writer must clear them), everything else OK.
+function mock_at(sent)
+{
+	return {
+		send: (cmd, cb, o) => {
+			push(sent, cmd);
+			if (match(cmd, /^AT\+CPOL\?$/))
+				return uloop.timer(1, () => cb(null, { lines: [
+					'+CPOL: 1,2,"26202",1,0,1,1', '+CPOL: 2,2,"26203",0,0,0,1', 'OK' ] }));
+			uloop.timer(1, () => cb(null, { lines: [ 'OK' ] }));
+		},
+	};
+}
+
+scenario('plmn write: CPLS + clear existing + write new list (AT+CPOL)', (next) => {
+	let sent = [];
+	// uim: null -> read-back returns nulls, but the AT write sequence still runs
+	let m = { at: mock_at(sent), uim: null };
+
+	sim.write_user_plmn(m, [
+		{ mcc: '262', mnc: '01', gsm: true, utran: true, eutran: true, ngran: false },
+		{ mcc: '262', mnc: '03', gsm: false, utran: false, eutran: true, ngran: true },
+	], (err, res) => {
+		eq(err, null, 'plmn write: no error');
+		eq(res.written, 2, 'plmn write: two records written');
+		// selected the user list first
+		eq(sent[0], 'AT+CPLS=0', 'plmn write: selects the user-controlled list');
+		ok(index(sent, 'AT+CPOL?') >= 0, 'plmn write: reads current records');
+		// cleared the two existing records, highest index first (2 then 1)
+		ok(index(sent, 'AT+CPOL=2') < index(sent, 'AT+CPOL=1'), 'plmn write: deletes high index before low');
+		// wrote the new list at explicit indices with the full 5-field AcT set
+		// (GSM,GSM-compact,UTRAN,E-UTRAN,NG-RAN) — the arity the mock accepts first
+		ok(index(sent, 'AT+CPOL=1,2,"26201",1,0,1,1,0') >= 0, 'plmn write: record 1 (5 AcT fields, NG-RAN 0)');
+		ok(index(sent, 'AT+CPOL=2,2,"26203",0,0,0,1,1') >= 0, 'plmn write: record 2 (NG-RAN 1)');
+		next();
+	});
+});
+
+// arity fallback: a modem that rejects the 5-field form but accepts 4 fields
+scenario('plmn write: AcT arity falls back 5 -> 4 on ERROR', (next) => {
+	let sent = [];
+	let at = {
+		send: (cmd, cb, o) => {
+			push(sent, cmd);
+			// reject any 5-field CPOL write (two commas after the last needed one)
+			if (match(cmd, /^AT\+CPOL=[0-9]+,2,"[0-9]+",[0-9],[0-9],[0-9],[0-9],[0-9]$/))
+				return uloop.timer(1, () => cb({ error: 'ERROR' }));
+			if (match(cmd, /^AT\+CPOL\?$/))
+				return uloop.timer(1, () => cb(null, { lines: [ 'OK' ] }));
+			uloop.timer(1, () => cb(null, { lines: [ 'OK' ] }));
+		},
+	};
+	sim.write_user_plmn({ at: at, uim: null },
+		[ { mcc: '262', mnc: '01', eutran: true } ], (err, res) => {
+		eq(err, null, 'plmn write (fallback): succeeds after stepping down');
+		ok(index(sent, 'AT+CPOL=1,2,"26201",0,0,0,1,0') >= 0, 'plmn write (fallback): tried 5-field first');
+		ok(index(sent, 'AT+CPOL=1,2,"26201",0,0,0,1') >= 0, 'plmn write (fallback): accepted the 4-field form');
+		next();
+	});
+});
+
+scenario('plmn write: no AT channel -> clean error', (next) => {
+	sim.write_user_plmn({ at: null }, [ { mcc: '262', mnc: '01' } ], (err, res) => {
+		eq(err?.error, 'no_at_channel', 'plmn write: no AT channel reported');
+		next();
+	});
+});
+
+scenario('plmn write: invalid plmn rejected', (next) => {
+	sim.write_user_plmn({ at: mock_at([]), uim: null }, [ { mcc: '26', mnc: '1' } ], (err, res) => {
+		eq(err?.error, 'invalid_plmn', 'plmn write: too-short plmn rejected');
+		next();
+	});
+});
+
 // --- drive -------------------------------------------------------------------
 
 uloop.timer(1, run_next);

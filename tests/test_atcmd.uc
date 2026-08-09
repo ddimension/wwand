@@ -347,6 +347,21 @@ eq(atcmd.parse_cops_scan([ '+COPS: (2,"A","A","26201"),(1,"B","B","26202",0),(1,
 
 eq(atcmd.parse_cops_scan([ 'OK' ]), [], 'cops: no operator line');
 
+// --- parse_cpol (preferred PLMN list read) -----------------------------------
+let cpol = atcmd.parse_cpol([
+	'+CPOL: 1,2,"26201",1,0,1,1,0',   // GSM + UTRAN + E-UTRAN, no NG-RAN
+	'+CPOL: 2,2,"310260",0,0,0,1,1',  // E-UTRAN + NG-RAN, 3-digit mnc
+	'+CPOL: 3,0,"Telekom.de"',        // alpha format (no numeric plmn)
+	'OK',
+]);
+eq(length(cpol), 3, 'cpol: three records');
+eq(cpol[0], { index: 1, format: 2, oper: '26201', mcc: '262', mnc: '01',
+	gsm: true, utran: true, eutran: true, ngran: false }, 'cpol: numeric record + AcT flags');
+eq(cpol[1].mnc, '260', 'cpol: 3-digit mnc');
+eq(cpol[1].ngran, true, 'cpol: NG-RAN flag');
+eq(cpol[2].mcc, null, 'cpol: alpha format has no numeric mcc/mnc');
+eq(atcmd.parse_cpol([ 'OK' ]), [], 'cpol: empty');
+
 // --- temperature parsers (QModem-derived) ------------------------------------
 
 // Quectel AT+QTEMP: sensor-name digits skipped, first in-range value wins
