@@ -49,6 +49,31 @@ eq(r.contexts.wan.mux_id, 1, 'native: sibling context auto-muxed');
 eq(length(r.warnings), 1, 'native: only the auto-mux warning');
 eq(config.context_for_interface(r, 'wan2'), 'wan2', 'native: interface lookup');
 
+// --- named PLMN lists (wwand_plmnlist) + plmn_list attach --------------------
+r = config.parse({
+	network: {
+		flist:  { '.type': 'wwand_plmnlist', type: 'fplmn', plmn: [ '26202', '310410' ] },
+		nlist:  { '.type': 'wwand_plmnlist', type: 'nas', plmn: [ '26201 utran,eutran' ] },
+		notype: { '.type': 'wwand_plmnlist', plmn: [ '26203' ] },
+		mp:     { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', plmn_list: 'flist' },
+		msim:   { '.type': 'wwand_sim', iccid: '8988000000012345678', plmn_list: 'nlist' },
+		bad:    { '.type': 'wwand_modem', device: '/dev/cdc-wdm9', plmn_list: 'ghost' },
+		wan:    { '.type': 'interface', proto: 'wwand', modem: 'mp', apn: 'i' },
+	},
+});
+eq(r.plmnlists.flist.type, 'fplmn', 'plmnlist: fplmn type parsed');
+eq(r.plmnlists.flist.entries[0], { mcc: '262', mnc: '02', gsm: false, utran: false, eutran: false, ngran: false },
+	'plmnlist: fplmn entry parsed (no AcT flags set)');
+eq(r.plmnlists.flist.entries[1].mnc, '410', 'plmnlist: 3-digit MNC entry');
+eq(r.plmnlists.nlist.type, 'nas', 'plmnlist: nas type');
+eq(r.plmnlists.nlist.entries[0].eutran, true, 'plmnlist: nas entry AcT parsed');
+eq(r.plmnlists.notype.type, 'nas', 'plmnlist: missing type -> nas default');
+eq(r.modems.mp.plmn_restore, { type: 'fplmn', entries: r.plmnlists.flist.entries },
+	'plmnlist: modem plmn_list resolves to fplmn restore');
+eq(r.sims.msim.plmn_restore.type, 'nas', 'plmnlist: per-SIM plmn_list resolves (nas)');
+ok(length(filter(r.warnings, (w) => match(w, /unknown plmn_list 'ghost'/))) == 1,
+	'plmnlist: dangling plmn_list reference warns');
+
 // --- old-style compat --------------------------------------------------------
 
 r = padopt({

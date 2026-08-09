@@ -202,9 +202,10 @@ function parse_plmn_entry(str)
 }
 
 // a `config wwand_plmnlist <name>` section -> { type, entries } in priority
-// order. `option type` selects which modem list this targets: 'nas' (the QMI
-// NAS preferred-networks list) or 'user' (the SIM EF 6F60 user list, via
-// AT+CPOL); default 'nas' since that is the one wwand can reliably re-apply.
+// order. `option type` selects which modem list this targets: 'nas' (QMI NAS
+// preferred networks), 'user' (SIM EF 6F60 user list, via AT+CPOL) or 'fplmn'
+// (SIM EF 6F7B forbidden list, via UIM/AT+CRSM); default 'nas' since that is the
+// one wwand can reliably re-apply. fplmn entries carry no access technology.
 function plmnlist_from_section(s)
 {
 	let raw = (type(s.plmn) == 'array') ? s.plmn : (s.plmn != null ? [ s.plmn ] : []);

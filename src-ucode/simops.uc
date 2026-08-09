@@ -193,16 +193,12 @@ export function install(self, o)
 		if (type(entries) != 'array')
 			return cb({ error: 'invalid_entries' });
 
-		let kind = (list_type == 'user') ? 'user' : (list_type == 'fplmn') ? 'fplmn' : 'nas';
+		if (index([ 'user', 'nas', 'fplmn' ], list_type) < 0)
+			return cb({ error: 'invalid_list_type', list_type: list_type });
 
-		log('notice', sprintf('modem %s: writing %d %s PLMN record(s)', ref, length(entries), kind));
+		log('notice', sprintf('modem %s: writing %d %s PLMN record(s)', ref, length(entries), list_type));
 
-		if (kind == 'nas')
-			sim.write_nas_plmn(entry.modem, entries, cb);
-		else if (kind == 'fplmn')
-			sim.write_fplmn(entry.modem, entries, cb);
-		else
-			sim.write_user_plmn(entry.modem, entries, cb);
+		sim.write_plmn(entry.modem, list_type, entries, cb);
 	};
 
 	// apply this modem's configured plmn list (wwand_modem option plmn_list) on
@@ -214,7 +210,10 @@ export function install(self, o)
 		if (!entry)
 			return;
 
-		let r = entry.cfg?.plmn_restore;
+		// the effective list = per-SIM (active card) override, else the modem's —
+		// same resolution as the boot-time restore, so "restore now" applies the
+		// SAME list the daemon would at radio-on.
+		let r = sim.effective_plmn_restore(entry.modem);
 
 		if (type(r) != 'object' || type(r.entries) != 'array' || !length(r.entries))
 			return cb({ error: 'no_configured_list' });
@@ -224,12 +223,7 @@ export function install(self, o)
 		log('notice', sprintf('modem %s: restoring the configured %s list (%d records)',
 			ref, kind, length(r.entries)));
 
-		if (kind == 'nas')
-			sim.write_nas_plmn(entry.modem, r.entries, cb);
-		else if (kind == 'fplmn')
-			sim.write_fplmn(entry.modem, r.entries, cb);
-		else
-			sim.write_user_plmn(entry.modem, r.entries, cb);
+		sim.write_plmn(entry.modem, kind, r.entries, cb);
 	};
 
 	// manual PIN release: enter the PIN past the low-retry safety block (with <=1

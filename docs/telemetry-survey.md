@@ -36,7 +36,7 @@ Quectel RG650E-EU (Qualcomm SDX72), 5G NSA/SA.
 | 4 | Bandwidth + SINR + band via `AT+QENG` | ✅ **done** — `telemetry_qmi.uc` polls `AT+QENG="servingcell"` (feeds `cells.serving` rsrp/rsrq/sinr/bandwidth) |
 | 5 | Carrier Aggregation | ✅ **done** — `qmi_backend.get_ca` (`GET_LTE_CPHY_CA_INFO`) with `AT+QCAINFO` fallback, cached via `backend.choose` |
 | 6 | Connection uptime / duration | ✅ **done** — `context.uc` `uptime` (from `connected_since`) on `context_status` |
-| 7 | Temperature | ◻ **open** — `AT+QTEMP` not yet wired |
+| 7 | Temperature | ✅ **done** — `modem_common.collect_temperature` (per-vendor AT: Quectel `QTEMP` / MeiG `TEMP` / Huawei `CHIPTEMP` / SIMCom `CPMUTEMP`); on `modem_cells` (`temperature{celsius,source}`), the telemetry log line and LuCI |
 | — | Data-bearer / DSD NSA-vs-SA mode | ✅ **done** — `telemetry_qmi.uc` `_determine_data_mode` (DSD `SYSTEM_STATUS` → QENG → radio_ifs), live `SYSTEM_STATUS_IND` |
 
 The detail below is the original wishlist text, kept for the rationale.
@@ -83,9 +83,12 @@ WDS `GET_CALL_DURATION` gives per-call uptime directly (no need to borrow netifd
 Cheap per-context stat for the connections panel. *(Shipped a simpler way:
 `context.uc` derives `uptime` from a `connected_since` timestamp, no QMI round-trip.)*
 
-### 7. Temperature  *(thermal health)*  ◻ open
+### 7. Temperature  *(thermal health)*  ✅ done
 `AT+QTEMP` reports several sensors (PA, modem, etc.). 5G modems throttle on heat;
-a temperature readout explains sudden rate drops. No standard QMI equivalent.
+a temperature readout explains sudden rate drops. No standard QMI equivalent, so
+it rides the AT side channel per vendor — `modem_common.collect_temperature`
+(Quectel `QTEMP` / MeiG `TEMP` / Huawei `CHIPTEMP` / SIMCom `CPMUTEMP`), surfaced
+on `modem_cells` (`temperature{celsius,source}`), the telemetry log line and LuCI.
 
 ## Tier 2 — nice to have
 

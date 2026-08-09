@@ -3,6 +3,29 @@
 _Last updated: 2026-08-09. All test suites green (40 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## Audit / consolidation pass over the 2-day feature window (2026-08-09)
+
+Three-dimension review (consolidation, docs, core-fitness) over the PLMN/FPLMN/
+IoT-RAT changes; fixes:
+- **Behavioural bugs:** `modem_plmn_restore` now uses `effective_plmn_restore`
+  (per-SIM `plmn_list` wins) so the LuCI "restore now" applies the SAME list as
+  the boot-time restore; `write_fplmn` reads the current EF length and rewrites
+  the WHOLE file (no stale forbidden PLMNs in tail slots on a >12-byte EF_FPLMN);
+  `modem_plmn_set` rejects an unknown `list_type` instead of silently writing NAS.
+- **Consolidation (sim.uc):** one `sim.write_plmn(modem, type, entries, cb)`
+  dispatcher replaces the type→writer map that was triplicated across simops +
+  restore; shared `bcd_plmn` / `scrub_digits` / `valid_plmn` / `act_flags` /
+  `nas_of` helpers replace the duplicated BCD decode, digit-scrub, AcT masks and
+  `with_nas` shims; dropped the redundant `EF_FPLMN_ID`.
+- **Docs:** reference.md now documents `config wwand_plmnlist` (user/nas/fplmn),
+  `option plmn_list`, and `modem_plmn_set`/`modem_plmn_restore`; CLAUDE.md core
+  layering lists simops/hwops/ncm_vendors/rat.uc; telemetry-survey temperature
+  marked done; extending.md gains RAT/caps + SIM-EF pointers. rat.uc header now
+  states which mappers are wired vs. provided-for-extension.
+- **Tests:** +config `wwand_plmnlist` fplmn/nas/dangling-ref cases (test_config).
+- HW-re-validated FPLMN write/read/clear on RG650E (UIM) + Cudy (CRSM) after the
+  refactor; `invalid_list_type` rejection confirmed.
+
 ## Forbidden-PLMN (FPLMN) management (2026-08-09)
 
 A third managed PLMN list type (`fplmn`) alongside `user`/`nas` — the SIM

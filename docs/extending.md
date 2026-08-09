@@ -185,6 +185,17 @@ capability:
   (`modem_signal`/`modem_cells`).
 - **Surface** — the daemon exposes it via `status()` / `modem_signal` /
   `modem_cells`; keep the shape identical across backends so the UI stays neutral.
+- **Radio type / IoT variant** — the canonical vocabulary lives in one place,
+  `src-ucode/codec/schema/rat.uc` (GSM…5G plus NB-IoT / LTE-M / EC-GSM-IoT /
+  RedCap / NTN). Add a source mapper there (`from_*`), give it a `test_rat.uc`
+  case, and — since the IoT variants are only visible over AT — feed it through
+  `modem_common.probe_iot_rat` (AT+QNWINFO) / `collect_caps`. It surfaces as
+  `status.rat` (current fine access tech) + `status.caps` `{rats,iot_modes,ntn}`.
+- **A SIM EF wwand should re-apply** (like the forbidden-PLMN list `EF_FPLMN`):
+  read/write via QMI UIM READ/WRITE_TRANSPARENT with an `AT+CRSM` fallback for
+  modems whose UIM rejects EF access (see `sim.uc` `read_fplmn`/`write_fplmn`),
+  and register it as a `wwand_plmnlist` type so the daemon restores it before
+  every radio-on.
 
 ---
 

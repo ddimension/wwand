@@ -6,16 +6,20 @@
 // sub-bearers and the 5G NSA/SA split); NONE of NB-IoT, LTE-M (Cat-M1/eMTC),
 // EC-GSM-IoT, RedCap (NR-Light) or NTN/satellite exist as constants there.
 // This module defines wwand's OWN canonical RAT slugs and normalises every
-// available source into one { rat, mode, ntn, src } object:
-//   - QMI NAS radio interface        -> from_qmi_radio_if()
-//   - QMI DSD rat + service-option    -> from_dsd()
-//   - MBIM data class + v3 subclass   -> from_mbim()
-//   - 3GPP TS 27.007 <AcT> (COPS/…)   -> from_at_cops_act()
-//   - Quectel +QNWINFO / +QENG string -> from_qnwinfo() / from_qeng_act()
-// The IoT variants are only reachable over the AT sources, so those win in
-// merge(). label() renders the display string (e.g. "NB-IoT", "5G-SA",
-// "RedCap", "NB-IoT (NTN)"). Read-only identification — no RAT is ever set on
-// the modem from here.
+// available source into one { rat, mode, ntn, src } object. label() renders the
+// display string (e.g. "NB-IoT", "5G-SA", "RedCap", "NB-IoT (NTN)"). Read-only
+// identification — no RAT is ever set on the modem from here.
+//
+// WIRED sources (consumed in production today):
+//   - Quectel +QNWINFO string       -> from_qnwinfo()   (probe_iot_rat)
+//   - 3GPP TS 27.007 <AcT> (COPS)   -> from_at_cops_act() (network-scan RAT)
+//   - QMI DMS device-capability     -> from_dms_radio_if() (collect_caps)
+//   - caps summary                  -> caps_from()
+// PROVIDED for extension (the coarse structured sources — QMI radio interface,
+// DSD service-option mask, MBIM data class, +QENG — plus merge(), which lets a
+// finer AT source win over a coarse one): normalisers ready to wire when a
+// backend feeds them; covered by test_rat. Kept deliberately as the documented
+// extension point for new IoT/RedCap/NTN sources.
 
 'use strict';
 

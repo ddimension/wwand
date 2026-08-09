@@ -50,15 +50,18 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   `docs/telemetry-survey.md`, `docs/STATUS.md`.
 
 ## Core layering (src-ucode)
-native `wwand_io.so` → codec (`qmux.uc`, `tlv.uc`, `hex.uc`, `schema/*.uc`,
-`mbim*.uc`) → session (`transport.uc`, `client.uc`) → state machines
+native `wwand_io.so` → codec (`qmux.uc`, `tlv.uc`, `hex.uc`, `schema/*.uc`
+incl. `schema/rat.uc` = canonical RAT/IoT vocabulary, `mbim*.uc`) → session
+(`transport.uc`, `client.uc`) → state machines
 (`modem.uc` + its extracted QMI helpers `modem_init_qmi.uc` / `telemetry_qmi.uc`
 / `regdetail.uc` / `config_check.uc` / `datapath_qmi.uc`; `modem_mbim.uc` +
-`telemetry_mbim.uc`; `modem_ncm.uc` + `telemetry_ncm.uc`; `context.uc` +
-`context_monitor_qmi.uc`; `sim.uc`; shared `modem_common.uc` /
-`context_common.uc` / `backend.uc`) → system (`netlink.uc` datapath,
-`recovery.uc`, `atcmd.uc` + `atcmd_parse.uc`, `board.uc`) → integration
-(`daemon.uc` + `netsel_ops.uc`, `config.uc`, `ubus.uc`, `main.uc`).
+`telemetry_mbim.uc`; `modem_ncm.uc` + `ncm_vendors.uc` (vendor dial/auth tables)
++ `telemetry_ncm.uc`; `context.uc` + `context_monitor_qmi.uc`; `sim.uc`; shared
+`modem_common.uc` / `context_common.uc` / `backend.uc`) → system (`netlink.uc`
+datapath, `recovery.uc`, `atcmd.uc` + `atcmd_parse.uc`, `board.uc`) → integration
+(`daemon.uc` + its extracted op modules `netsel_ops.uc` / `simops.uc`
+(SIM/SMS/eSIM/APDU/PLMN ops) / `hwops.uc` (reset/repower), `config.uc`,
+`ubus.uc`, `main.uc`).
 
 ## Board / power / LEDs (`board.uc`)
 Generic, keyed off `/etc/board.json` model id → a profile table (MikroTik

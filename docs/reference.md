@@ -72,6 +72,17 @@ wwand section types plus the netifd interface — no separate config file:
   (write the resolved L3 name back onto interfaces, default on), `autosetup`
   (zero-config autosetup, default on), `takeover` (adopt the stock/legacy stack,
   **default off** — see below).
+- **`config wwand_plmnlist '<name>'`** *(optional)* — a named PLMN list wwand
+  restores to the SIM/modem **before every radio-on** (so operator edits and
+  modem reboots don't lose it): `option type 'nas'|'user'|'fplmn'` (default
+  `nas`) and a repeatable `list plmn '<mccmnc> [rat,rat…]'` (e.g. `list plmn
+  '26201 utran,eutran'`; a `fplmn` forbidden entry carries no access technology,
+  just `list plmn '26202'`). Attach it with **`option plmn_list '<name>'`** on a
+  `wwand_modem` (that modem) or a `wwand_sim` (per-card, wins over the modem's).
+  `nas` = QMI preferred networks, `user` = SIM EF 6F60 (AT+CPOL), `fplmn` = SIM
+  EF 6F7B forbidden (QMI UIM / AT+CRSM). Note the preferred lists (`nas`/`user`)
+  are *ordering hints* for automatic selection, not locks; only `fplmn` hard-
+  blocks a network. Managed from the LuCI modem settings page.
 
 > **Proto name.** The netifd/LuCI protocol is **`wwand`** — one handler for all
 > backends (QMI/MBIM/NCM; the driver decides which). Use `proto wwand` for
@@ -805,7 +816,9 @@ when called from LuCI).
 | `modem_scan` / `modem_scan_start` / `modem_scan_status` | `modem` | visible-operator scan (sync, or async start+poll — a scan takes up to ~90 s) |
 | `modem_set_network_selection` | `modem`, `mode`, `mcc?`, `mnc?` | `auto` or `manual` PLMN selection (QMI NAS / MBIM passthrough / AT+COPS). Idempotent (`unchanged: true` when the modem already runs the requested selection); on deferred-apply models the result carries `deferred: true` + `apply: 'modem_reset'` |
 | `modem_reset` | `modem` | generic admin modem reset — the apply step for `deferred` results (write ACL). Priority: dedicated reset GPIO (per-modem `reset_gpio`, or the board default when only one modem is managed), then the backend soft reset (QMI: DMS offline→reset, MBIM: passthrough-DMS or `AT+CFUN=1,1`, NCM: `AT+CFUN=1,1`). Result reports `action: 'gpio'\|'backend'`. The modem re-enumerates and every `auto` interface comes back up on its own |
-| `modem_plmn_lists` | `modem` | preferred/forbidden PLMN lists |
+| `modem_plmn_lists` | `modem` | read the PLMN selector lists: `user` (EF 6F60), `nas` (QMI preferred networks), `operator`/`home` (read-only) and `fplmn` (EF 6F7B forbidden) |
+| `modem_plmn_set` | `modem`, `list_type`, `entries` | write a PLMN list to the SIM/modem; `list_type` = `user`\|`nas`\|`fplmn`; `entries` = `[{mcc,mnc[,gsm,utran,eutran,ngran]}]` (fplmn carries no AcT). Reads back for cross-verification (write ACL) |
+| `modem_plmn_restore` | `modem` | re-apply the modem's effective configured list (per-SIM `plmn_list` wins over the modem's) — the same list restored before every radio-on (write ACL) |
 | `modem_sim_slots` | `modem` | physical slots: card presence, active, ICCID, eUICC flag, EID |
 | `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
 | `modem_sim_switch_slot` | `modem`, `slot` | switch the active physical SIM slot (drops the connection) |
