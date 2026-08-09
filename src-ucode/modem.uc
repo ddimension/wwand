@@ -335,6 +335,30 @@ export function create(opts)
 		});
 	};
 
+	// admin-triggered network re-attach (ubus modem_reattach): a QMI RF bounce
+	// (DMS low_power -> online) makes the modem deregister and re-register, so
+	// automatic selection re-scans a network it's camped on. Unlike self.reset it
+	// does NOT reboot the modem, and unlike a PDP teardown it does not touch the
+	// context config — the daemon re-activates the same context on re-registration
+	// (data blips during the brief RF-off window). QMI has no pure COPS-2 detach,
+	// so this opmode bounce is the native equivalent.
+	self.reattach = function(cb) {
+		cb = cb ?? (() => null);
+
+		if (!self.dms)
+			return cb({ error: 'unsupported_on_backend' });
+
+		log('notice', 'network reattach (DMS low_power -> online)');
+		qmi_backend.set_opmode(self.dms, 'low_power', () => {
+			uloop.timer(self.timing.settle, () => {
+				qmi_backend.set_opmode(self.dms, 'online', (err) => {
+					cb(err ? { error: 'qmi', detail: err } : null,
+						{ ok: true, action: 'reattach', via: 'qmi' });
+				});
+			});
+		});
+	};
+
 	// switch the control protocol (QMI <-> MBIM). On success the modem resets and
 	// re-enumerates; discovery rebuilds it under the new driver.
 	self.switch_protocol = function(target, cb) {

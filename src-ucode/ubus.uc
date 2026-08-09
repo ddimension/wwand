@@ -232,6 +232,13 @@ export function publish(conn, daemon, log)
 					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
 		},
 
+		modem_reattach: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_reattach(req.args.modem, (err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
 		modem_cells: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => daemon.modem_cells(req.args.modem),

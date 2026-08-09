@@ -368,6 +368,42 @@ export function install(self, o)
 		});
 	};
 
+	// force a network re-registration (deregister + re-attach) so automatic
+	// selection re-scans — the fix for a modem camped on a previously-selected
+	// PLMN (automatic only re-scans on a reselection trigger; this is it). NOT a
+	// modem reset and NOT a PDP-config teardown: the daemon re-activates the same
+	// context once the modem re-registers (data blips meanwhile).
+	//   - QMI: the backend's native reattach (DMS opmode low_power -> online, a
+	//     brief RF bounce — QMI has no pure COPS-2 detach).
+	//   - else (NCM / AT modems): AT+COPS=2 (deregister) -> AT+COPS=0 (automatic),
+	//     which keeps the RF on (pure registration level).
+	self.modem_reattach = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		if (entry.modem.reattach) {
+			log('notice', sprintf('modem %s: network reattach (QMI opmode bounce)', ref));
+			return entry.modem.reattach(cb);
+		}
+
+		let at = entry.modem.at;
+
+		if (!at)
+			return cb({ error: 'unsupported_on_backend' });
+
+		log('notice', sprintf('modem %s: network reattach (AT COPS deregister -> automatic)', ref));
+
+		// tolerate a deregister error (already deregistered) — always re-attach
+		at.send('AT+COPS=2', () => {
+			at.send('AT+COPS=0', (aerr) => {
+				cb(aerr ? { error: 'at', detail: aerr } : null,
+					{ ok: true, action: 'reattach', via: 'at' });
+			}, { timeout: COPS_SET_TIMEOUT_MS });
+		}, { timeout: COPS_SET_TIMEOUT_MS });
+	};
+
 	const SETTABLE_PREFS = {
 		mode_preference: 'int', band_preference: 'int',
 		roaming_preference: 'int', lte_band_preference: 'int',

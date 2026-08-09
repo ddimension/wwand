@@ -235,6 +235,14 @@ run = () => {
 											], 'scan_status: operators delivered async');
 
 											guard.cancel();
+											// (9) reattach: QMI-native path issues the DMS
+											// opmode bounce (low_power = 1), the network
+											// re-registration trigger
+											daemon.modem_reattach('m0', () => {});
+											let opc = mock.calls_for('SET_OPERATING_MODE');
+											ok(length(opc) && opc[length(opc) - 1].args.mode == 1,
+												'reattach: QMI opmode low_power (bounce) issued');
+
 											uloop.end();
 										});
 									});
