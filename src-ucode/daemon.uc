@@ -1045,6 +1045,10 @@ export function create(opts)
 	};
 
 	self.resolve_context = function(ref) {
+		// same bound as check_modem: refs are section/interface names
+		if (type(ref) != 'string' || length(ref) == 0 || length(ref) > 64)
+			return null;
+
 		if (self.contexts[ref])
 			return ref;
 
@@ -1303,6 +1307,13 @@ export function create(opts)
 	// via cb and returns null. A modem being waited on (detached, not yet
 	// re-enumerated) reports modem_waiting, not a misleading no_such_modem.
 	let check_modem = (ref, cb) => {
+		// refs are uci section names used as hash keys — bound them so an
+		// oversized or non-string bus value is rejected outright
+		if (type(ref) != 'string' || length(ref) == 0 || length(ref) > 64) {
+			cb({ error: 'no_such_modem', ref: null });
+			return null;
+		}
+
 		let entry = self.modems[ref];
 
 		if (entry?.modem)

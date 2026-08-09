@@ -127,6 +127,20 @@ let NEWID = '/sys/module/option/drivers/usb-serial:option1/new_id';
 ok(fx.has(`${NEWID}=2dee 4d58`), 'cudy: binds SLM770A 2dee:4d58 to the option driver via new_id');
 ok(fx.has(`${NEWID}=2dee 4d57`), 'cudy: binds the 2dee:4d57 variant too');
 
+// --- 4e. GPIO name sanitizer: a config-supplied reset_gpio is interpolated into
+// a sysfs path — hostile values (slash, '..', oversized) must be rejected, never
+// written. reset_pulse takes the per-modem uci value directly, so drive it there.
+fx = mkfx({});
+b = board.create({ id: 'cudy,lt300-v3', fx: fx, reset_ms: 5, log: () => {} });
+eq(b.reset_pulse('../../class/leds/evil'), false, 'sanitize: path traversal name rejected');
+eq(b.reset_pulse('..'), false, 'sanitize: bare .. rejected');
+eq(b.reset_pulse('a/b'), false, 'sanitize: slash rejected');
+eq(length(fx.writes), 0, 'sanitize: nothing written to sysfs for bad names');
+ok(b.reset_pulse('gpio7'), 'sanitize: clean name still accepted');
+ok(fx.has(`${G}/gpio7/direction=out`), 'sanitize: clean name written');
+uloop.timer(20, () => uloop.end());
+uloop.run();
+
 // power_cycle / reset_pulse accept a per-modem duration override (repower_time)
 fx = mkfx({ [`${G}/lte_power/value`]: '1' });
 b = board.create({ id: 'zyxel,lte5398-m904', fx: fx, log: () => {} });

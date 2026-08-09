@@ -245,9 +245,25 @@ export function create(opts)
 	let power_off_ms = opts?.power_off_ms ?? POWER_OFF_MS;
 	let reset_ms = opts?.reset_ms ?? RESET_ASSERT_MS;
 
-	let gpio_read = (name) => fx.read(sprintf('%s/%s/value', GPIO_DIR, name));
+	// GPIO names are interpolated into sysfs paths, and a per-modem
+	// `reset_gpio` comes from uci — restrict to a safe token (no slash, no
+	// '..') so a hostile config value can never escape /sys/class/gpio.
+	let safe_gpio = (name) => {
+		if (type(name) == 'string' && length(name) <= 64 &&
+		    match(name, /^[A-Za-z0-9._:-]+$/) && index(name, '..') < 0)
+			return true;
+
+		log('err', sprintf('board: rejecting invalid gpio name %J', name));
+		return false;
+	};
+
+	let gpio_read = (name) =>
+		safe_gpio(name) ? fx.read(sprintf('%s/%s/value', GPIO_DIR, name)) : null;
 
 	let gpio_set = (name, v) => {
+		if (!safe_gpio(name))
+			return;
+
 		fx.write(sprintf('%s/%s/direction', GPIO_DIR, name), 'out');
 		fx.write(sprintf('%s/%s/value', GPIO_DIR, name), v ? '1' : '0');
 	};
@@ -306,7 +322,9 @@ export function create(opts)
 	self.reset_pulse = function(name, hold_ms) {
 		let g = name ?? profile?.reset_gpio;
 
-		if (!g)
+		// reject an invalid (config-supplied) name up front so the caller sees
+		// false and the recovery ladder can fall through to the next rung
+		if (!g || !safe_gpio(g))
 			return false;
 
 		let hold = (hold_ms > 0) ? hold_ms : reset_ms;

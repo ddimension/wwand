@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 /*
  * ucode-mod-wwand-io — minimal message-oriented I/O for wwand.
  *
@@ -15,9 +17,10 @@
  *
  *   let t = qmit.open_tty("/dev/ttyUSB2", 115200);
  *   qmit.last_error();   // string | null
- *
- * SPDX-License-Identifier: GPL-2.0
  */
+
+/* pipe2() */
+#define _GNU_SOURCE
 
 #include <errno.h>
 #include <fcntl.h>
@@ -210,14 +213,18 @@ qmit_spawn(uc_vm_t *vm, size_t nargs)
 		}
 	}
 
-	if (pipe(in) < 0) {
+	/* O_CLOEXEC on both pipe ends at creation: the child's dup2() below clears
+	 * it on the duped stdio fds (dup2 never copies FD_CLOEXEC), and every other
+	 * end vanishes on execvp — so no pipe fd can leak into the child, nor into
+	 * any other process this module ever spawns. */
+	if (pipe2(in, O_CLOEXEC) < 0) {
 		last_errno = errno;
 		free_argv(args);
 
 		return NULL;
 	}
 
-	if (pipe(out) < 0) {
+	if (pipe2(out, O_CLOEXEC) < 0) {
 		last_errno = errno;
 		close(in[0]);
 		close(in[1]);
@@ -241,8 +248,9 @@ qmit_spawn(uc_vm_t *vm, size_t nargs)
 
 	if (pid == 0) {
 		/* child: stdin <- in[0], stdout -> out[1], stderr inherited */
-		dup2(in[0], STDIN_FILENO);
-		dup2(out[1], STDOUT_FILENO);
+		if (dup2(in[0], STDIN_FILENO) < 0 ||
+		    dup2(out[1], STDOUT_FILENO) < 0)
+			_exit(127);
 		close(in[0]);
 		close(in[1]);
 		close(out[0]);
@@ -251,20 +259,18 @@ qmit_spawn(uc_vm_t *vm, size_t nargs)
 		_exit(127);
 	}
 
-	/* parent */
+	/* parent (pipe fds are already FD_CLOEXEC from pipe2) */
 	close(in[0]);
 	close(out[1]);
 	free_argv(args);
 
 	fl = fcntl(out[0], F_GETFL, 0);
 	fcntl(out[0], F_SETFL, (fl < 0 ? 0 : fl) | O_NONBLOCK);
-	fcntl(out[0], F_SETFD, FD_CLOEXEC);
 
 	/* the write end is non-blocking too: a stalled child must never block the
 	 * single-threaded uloop in write() */
 	fl = fcntl(in[1], F_GETFL, 0);
 	fcntl(in[1], F_SETFL, (fl < 0 ? 0 : fl) | O_NONBLOCK);
-	fcntl(in[1], F_SETFD, FD_CLOEXEC);
 
 	t = calloc(1, sizeof(*t));
 
