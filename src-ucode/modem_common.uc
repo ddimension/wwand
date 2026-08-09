@@ -412,6 +412,12 @@ export function collect_temperature(self, cb)
 {
 	cb = cb ?? (() => null);
 
+	// latched off: this modem's AT temperature command failed once — an
+	// unsupported command (old Huawei E392: no AT^CHIPTEMP) or a dead AT port
+	// (EG06 in MBIM mode). Don't re-send a command we know fails every slow tick.
+	if (self._temp_unavail)
+		return cb();
+
 	let mfr = lc(self.info?.manufacturer ?? '');
 	let cmd, parse;
 
@@ -419,11 +425,15 @@ export function collect_temperature(self, cb)
 	else if (index(mfr, 'meig') >= 0)   { cmd = 'AT+TEMP';     parse = atcmd.parse_meig_temp; }
 	else if (index(mfr, 'huawei') >= 0) { cmd = 'AT^CHIPTEMP'; parse = atcmd.parse_chiptemp; }
 	else if (index(mfr, 'simcom') >= 0) { cmd = 'AT+CPMUTEMP'; parse = atcmd.parse_cpmutemp; }
-	else
-		return cb();   // no known temperature command for this vendor
+	else {
+		self._temp_unavail = true;   // no known temperature command for this vendor
+		return cb();
+	}
 
 	telemetry_at(self).send(cmd, (err, res) => {
-		if (!err) {
+		if (err)
+			self._temp_unavail = true;   // AT error / timeout / unsupported -> latch off
+		else {
 			let c = parse(res?.lines);
 			self.temperature = (c != null) ? { celsius: c, source: 'at' } : null;
 		}

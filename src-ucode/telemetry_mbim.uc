@@ -246,14 +246,19 @@ export function install(self, o)
 					self.signal = { rssi_raw: data.rssi, rssi: dbm };
 				}
 
-				self._refresh_signal(() => self._refresh_data_mode(() => self._refresh_reg_detail(() => self._refresh_cells(() => {
-					if (!self.mbim)
-						return;
+				self._refresh_signal(() => self._refresh_data_mode(() => self._refresh_reg_detail(() => self._refresh_cells(() =>
+					// modem temperature over the AT side channel (best-effort, slow
+					// loop). MBIM modems with a working AT port get parity with QMI;
+					// where AT is dead (EG06) collect_temperature latches off after
+					// the first timeout, so it is not re-tried every tick.
+					modem_common.collect_temperature(self, () => {
+						if (!self.mbim)
+							return;
 
-					log_telemetry();
-					emit_telemetry();
-					telemetry_timer = uloop.timer(interval, tick);
-				}))));
+						log_telemetry();
+						emit_telemetry();
+						telemetry_timer = uloop.timer(interval, tick);
+					})))));
 			});
 		};
 

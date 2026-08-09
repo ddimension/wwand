@@ -91,11 +91,24 @@ let tn = temp_modem('Quectel', [ '+QTEMP: "x","5"', 'OK' ]);
 mc.collect_temperature(tn, () => null);
 eq(tn.temperature, null, 'temp: below-floor reading -> null');
 
-// unknown vendor: no command sent, temperature untouched
+// unknown vendor: no command sent, temperature untouched, and latched off
 let tu = temp_modem('AcmeModem', [ '+FOO: 1' ]);
 mc.collect_temperature(tu, () => null);
 eq(tu._sent, null, 'temp: unknown vendor sends nothing');
 eq(tu.temperature, null, 'temp: unknown vendor leaves temperature unset');
+ok(tu._temp_unavail === true, 'temp: unknown vendor latches off');
+
+// failure latch: an AT error (unsupported command / dead AT port) stops retries
+let tf;
+tf = {
+	info: { manufacturer: 'Quectel' }, _at2_open: null,
+	at_telemetry: { send: (cmd, cb) => { tf._n = (tf._n ?? 0) + 1; cb('closed', null); } },
+};
+mc.collect_temperature(tf, () => null);
+eq(tf._n, 1, 'temp latch: first attempt sends');
+ok(tf._temp_unavail === true, 'temp latch: AT error sets the unavailable latch');
+mc.collect_temperature(tf, () => null);
+eq(tf._n, 1, 'temp latch: no re-send on later ticks after a failure');
 
 // format_telemetry surfaces the temperature
 ok(index(mc.format_telemetry({ reg: { radio_ifs: [] }, temperature: { celsius: 44 } }), 'temp=44C') >= 0,
