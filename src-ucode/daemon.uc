@@ -8,15 +8,14 @@
 
 import * as uloop from 'uloop';
 import * as fs from 'fs';
-import * as sim from './sim.uc';
-import * as sms from './sms.uc';
 import * as atcmd from './atcmd.uc';
 import * as quirks from './modem_quirks.uc';
 import * as apndb from './apndb.uc';
 import * as netsel_ops from './netsel_ops.uc';
+import * as simops from './simops.uc';
+import * as hwops from './hwops.uc';
 
 const UP_GUARD_MS = 150000;
-
 
 // backends load lazily; a missing package returns null (cached) so start_modem
 // reports it clearly instead of crashing.
@@ -1340,49 +1339,11 @@ export function create(opts)
 	// settings / network-selection / operator-scan ubus ops — extracted to netsel_ops.uc
 	netsel_ops.install(self, { log: log, check_modem: check_modem, reg_plmn: reg_plmn });
 
-	// generic modem reset: dedicated reset GPIO first (per-modem `reset_gpio` or the
-	// board default), then backend soft reset (QMI DMS offline->reset, MBIM
-	// passthrough-DMS/AT, NCM AT+CFUN=1,1).
-	self.modem_reset = function(ref, cb) {
-		let entry = check_modem(ref, cb);
-
-		if (!entry)
-			return;
-
-		let rg = entry.cfg?.reset_gpio ??
-			(board_gpio_ok() ? deps.board?.profile?.reset_gpio : null);
-
-		if (rg && deps.board) {
-			let off = entry.cfg?.repower_time ? +entry.cfg.repower_time * 1000 : null;
-
-			log('warn', sprintf('modem %s: admin-requested modem reset (GPIO %s pulse)', ref, rg));
-
-			if (deps.board.reset_pulse(rg, off))
-				return cb(null, { ok: true, resetting: true, action: 'gpio', gpio: rg });
-
-			// GPIO configured but unusable -> fall through to the backend reset
-			log('warn', sprintf('modem %s: reset GPIO %s unavailable, trying backend reset', ref, rg));
-		}
-
-		if (type(entry.modem.reset) != 'function')
-			return cb({ error: 'unsupported_on_backend' });
-
-		log('warn', sprintf('modem %s: admin-requested modem reset (backend)', ref));
-		entry.modem.reset((err, res) =>
-			cb(err, err ? null : { ...res, action: 'backend' }));
-	};
-
-	// physical SIM slots: list (status page) and switch (guarded; the modem
-	// re-initializes the SIM stack after a switch, recovery handles the rest)
-	self.modem_sim_slots = function(ref, cb) {
-		let entry = check_modem(ref, cb);
-
-		if (!entry)
-			return;
-
-		sim.slot_status(entry.modem, (err, slots) =>
-			cb(err ? { error: 'qmi', detail: err } : null, err ? null : { slots: slots }));
-	};
+	// SIM/SMS/eSIM/APDU + hardware reset/repower ops live in their own modules
+	// (same install pattern); the daemon keeps lifecycle, config and status.
+	simops.install(self, { log: log, check_modem: check_modem, load_esim: load_esim });
+	hwops.install(self, { log: log, check_modem: check_modem, board: deps.board,
+	                      board_gpio_ok: board_gpio_ok });
 
 	// enumerate modems for the LuCI stable-binding picker: managed modems (live
 	// IMEI/model) + every control device present in sysfs (iSerial read pre-open).
@@ -1416,205 +1377,6 @@ export function create(opts)
 				}
 
 		cb(null, { managed: managed, present: present });
-	};
-
-	self.modem_sim_switch_slot = function(ref, physical, cb) {
-		let entry = check_modem(ref, cb);
-
-		if (!entry)
-			return;
-
-		if (!(physical > 0))
-			return cb({ error: 'invalid_slot' });
-
-		sim.switch_slot(entry.modem, physical, (err, res) => {
-			if (err)
-				return cb({ error: 'qmi', detail: err });
-
-			// idempotency guard: slot already active — nothing switched, keep caches
-			if (res?.unchanged) {
-				log('info', sprintf('modem %s: SIM slot %d already active — not switching', ref, physical));
-				return cb(null, { slot: physical, unchanged: true });
-			}
-
-			// a different slot may hold a different eUICC — drop the cached
-			// eSIM/APDU backends so they are re-probed
-			delete entry.modem._esim_be;
-			delete entry.modem._apdu_be;
-
-			log('notice', sprintf('modem %s: switched to SIM slot %d', ref, physical));
-			cb(null, { slot: physical });
-		});
-	};
-
-	self.modem_sim_pin_lock = function(ref, pin, enable, cb) {
-		let entry = check_modem(ref, cb);
-
-		if (!entry)
-			return;
-
-		if (!length(pin ?? ''))
-			return cb({ error: 'missing_pin' });
-
-		sim.set_pin_lock(entry.modem, enable, pin, (err, res) => {
-			if (!err)
-				log('notice', sprintf('modem %s: SIM PIN query %s', ref, enable ? 'enabled' : 'disabled'));
-			cb(err, res);
-		});
-	};
-
-	// raw APDU channel (eSIM foundation; also used by the lpac glue).
-	// op: 'open' {slot, aid} -> {channel, select_response}
-	//     'send' {slot, channel, apdu} -> {response}
-	//     'close' {slot, channel} -> {}
-	self.modem_apdu = function(ref, op, params, cb) {
-		let entry = check_modem(ref, cb);
-
-		if (!entry)
-			return;
-
-		let slot = +(params?.slot ?? 1);
-
-		switch (op) {
-		case 'open':
-			return sim.apdu_open(entry.modem, slot, params?.aid ?? '', (err, res) =>
-				cb(err ? { error: 'qmi', detail: err } : null, res));
-
-		case 'send':
-			return sim.apdu_send(entry.modem, slot, +(params?.channel ?? 0), params?.apdu ?? '',
-				(err, res) => cb(err ? { error: 'qmi', detail: err } : null,
-				                 err ? null : { response: res }));
-
-		case 'close':
-			return sim.apdu_close(entry.modem, slot, +(params?.channel ?? 0), (err) =>
-				cb(err ? { error: 'qmi', detail: err } : null, err ? null : {}));
-
-		default:
-			return cb({ error: 'invalid_op', op: op });
-		}
-	};
-
-	// SMS list/read/delete. `storage` 'SM' (SIM) or 'ME' (modem). Backend-neutral
-	// (sms.uc dispatches QMI-WMS / MBIM / AT); unsupported_on_backend when none.
-	self.modem_sms_list = function(ref, storage, cb) {
-		let entry = check_modem(ref, cb);
-		if (entry)
-			sms.sms_list(entry.modem, storage ?? 'SM', cb);
-	};
-
-	self.modem_sms_read = function(ref, storage, index, cb) {
-		let entry = check_modem(ref, cb);
-		if (entry)
-			sms.sms_read(entry.modem, storage ?? 'SM', +index, cb);
-	};
-
-	self.modem_sms_delete = function(ref, storage, index, cb) {
-		let entry = check_modem(ref, cb);
-		if (entry)
-			sms.sms_delete(entry.modem, storage ?? 'SM', +index, cb);
-	};
-
-	// eSIM download/notification bridge (optional wwand-esim, esim_bridge.uc); lazy.
-	let esim_bridge = null;
-	let load_esim_bridge = () => {
-		if (esim_bridge === false)
-			return null;
-
-		if (!esim_bridge) {
-			let esim = load_esim();
-			let mod = null;
-
-			if (esim) {
-				try { mod = require('wwand.esim_bridge'); }
-				catch (e) { mod = null; }
-			}
-
-			if (!mod) {
-				esim_bridge = false;
-				return null;
-			}
-
-			esim_bridge = mod.create({
-				esim: esim,
-				log: log,
-				modem_of: (ref) => self.modems[ref],
-			});
-		}
-
-		return esim_bridge;
-	};
-
-	self.modem_esim = function(ref, op, params, cb) {
-		let br = load_esim_bridge();
-
-		if (!br)
-			return cb({ error: 'esim_not_installed' });
-
-		return br.modem_esim(ref, op, params, cb);
-	};
-
-	// SIM PLMN selector lists (settings editor; user list is editable on SIMs
-	// that carry EF 6F60 — absent lists read as null)
-	self.modem_plmn_lists = function(ref, cb) {
-		let entry = check_modem(ref, cb);
-
-		if (!entry)
-			return;
-
-		if (!entry.modem.uim)
-			return cb({ error: 'no_uim_client' });
-
-		sim.read_plmn_lists(entry.modem, (lists) => cb(null, lists));
-	};
-
-	// manual hardware repower (ubus modem_repower): reset-GPIO pulse when one
-	// applies, else board power-cycle — both gated for multi-modem boxes.
-	self.repower_modem = function(ref) {
-		if (!deps.board)
-			return { error: 'no_board_profile' };
-
-		let cfg = (ref && self.modems[ref]) ? self.modems[ref].cfg : null;
-
-		if (!cfg)
-			for (let n, e in self.modems) { cfg = e.cfg; break; }
-
-		// board defaults only when they unambiguously target this modem (see
-		// board_gpio_ok): per-modem reset_gpio is the multi-modem path.
-		let rg = cfg?.reset_gpio ?? (board_gpio_ok() ? deps.board.profile?.reset_gpio : null);
-		let off = cfg?.repower_time ? +cfg.repower_time * 1000 : null;
-
-		if (rg)
-			return deps.board.reset_pulse(rg, off) ?
-				{ ok: true, action: 'reset', gpio: rg } : { error: 'reset_gpio_unavailable' };
-
-		if (!board_gpio_ok())
-			return { error: 'multi_modem_needs_reset_gpio' };
-
-		return deps.board.power_cycle(off) ?
-			{ ok: true, action: 'power_cycle' } : { error: 'no_power_control' };
-	};
-
-	// manual PIN release: enter the PIN past the low-retry safety block (with <=1
-	// attempt left the daemon refuses to auto-enter, to avoid burning the last try
-	// into a PUK lock). Optional `pin` overrides the configured one. The one-shot
-	// pin_force/_pin_override flags clear on the next registered/sim_blocked event.
-	self.sim_pin_verify = function(ref, pin, cb) {
-		let entry = self.modems[ref];
-
-		if (!entry?.modem)
-			return cb({ error: 'no_such_modem', ref: ref });
-
-		entry.modem.pin_force = true;
-
-		if (pin != null && pin != '')
-			entry.modem._pin_override = pin;
-
-		log('warn', sprintf('modem %s: manual PIN release requested (entering PIN past the low-retry guard)', ref));
-
-		entry.modem.stop();
-		entry.modem.start();
-
-		cb(null, { ok: true });
 	};
 
 	self.modem_signal = function(ref) {
