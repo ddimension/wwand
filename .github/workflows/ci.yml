@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# wwand CI: host test suite (mockhub over the real codec + a private ubusd)
+# and shell lint. The suite needs a host ucode with the fs/struct/uloop/ubus
+# modules — all bundled in the ucode source tree — so we build libubox, ubus
+# and ucode from source (a couple of minutes) instead of depending on distro
+# packages that don't exist.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake pkg-config libjson-c-dev
+
+      - name: Build libubox / ubus / ucode (host)
+        run: |
+          set -e
+          PREFIX="$HOME/.local"
+          mkdir -p "$PREFIX"
+          build() { # repo cmakeflags...
+            repo="$1"; shift
+            git clone -q --depth 1 "https://github.com/openwrt/$repo.git" "/tmp/$repo"
+            cmake -S "/tmp/$repo" -B "/tmp/$repo/build" \
+              -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" \
+              -DCMAKE_BUILD_TYPE=Release "$@" > /dev/null
+            cmake --build "/tmp/$repo/build" -j"$(nproc)" > /dev/null
+            cmake --install "/tmp/$repo/build" > /dev/null
+          }
+          build libubox -DBUILD_LUA=OFF -DBUILD_EXAMPLES=OFF
+          build ubus -DBUILD_LUA=OFF -DBUILD_EXAMPLES=OFF
+          build ucode -DFS_SUPPORT=ON -DSTRUCT_SUPPORT=ON -DULOOP_SUPPORT=ON \
+                      -DUBUS_SUPPORT=ON -DUCI_SUPPORT=OFF -DNL80211_SUPPORT=OFF \
+                      -DRTNL_SUPPORT=OFF -DRESOLV_SUPPORT=OFF
+          # run_tests.sh looks for ubusd at ~/.local/sbin
+          mkdir -p "$PREFIX/sbin"
+          [ -x "$PREFIX/sbin/ubusd" ] || cp /tmp/ubus/build/ubusd "$PREFIX/sbin/"
+
+      - name: Build wwand_io.so (host)
+        run: |
+          set -e
+          PREFIX="$HOME/.local"
+          cmake -S io -B io/build-host \
+            -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-I$PREFIX/include -L$PREFIX/lib"
+          cmake --build io/build-host -j"$(nproc)"
+
+      - name: Run test suite
+        run: |
+          export LD_LIBRARY_PATH="$HOME/.local/lib"
+          cd tests && sh run_tests.sh
+
+  shell-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: shellcheck files/
+        # -S error only: OpenWrt init/hotplug scripts source procd/netifd
+        # helpers shellcheck cannot see; style warnings would be noise
+        run: |
+          shellcheck -S error -s sh \
+            files/wwand.init files/wwand.defaults files/wwand-proto.sh \
+            files/wwand.hotplug files/wwand.hotplug.net files/wwand.hotplug.tty \
+            tests/run_tests.sh

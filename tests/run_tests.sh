@@ -61,6 +61,8 @@ for t in "$TESTDIR"/test_*.uc; do
 
 	if printf '%s\n' "$out" | grep -q "^$name: [0-9]\{1,\} checks, 0 failures$"; then
 		[ "$code" -ne 0 ] && echo "  ($name: all checks passed; ignoring exit $code from a host-ucode teardown abort)"
+	elif printf '%s\n' "$out" | grep -q "^$name: SKIPPED"; then
+		: # environment-gated suite (e.g. no ubusd) — skip is not a failure
 	else
 		echo "FAIL: $name (no clean summary; exit $code)"
 		rc=1
