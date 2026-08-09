@@ -24,6 +24,34 @@ It is now a **good citizen**: no `CONFLICTS`, manages only `proto wwand`, and
 coexists with uqmi/umbim/comgt-ncm. Adopting the stock stack is opt-in
 (`option takeover`, default off) or per-interface user-triggered migration.
 
+One-line positioning: *a lightweight WWAN control daemon providing a unified
+control plane for **QMI and MBIM** modems, with Qualcomm-specific datapaths
+(QMAP/RmNet) and modern PCIe/MHI transports modelled as separate capabilities* —
+deliberately not "a QMI daemon".
+
+## Architecture: control protocol ≠ datapath ≠ transport
+
+The design choice I'd most like feedback on is the separation of three concerns
+that the stock tools tend to conflate:
+
+```
+  control protocol :  QMI | MBIM | AT | (QRTR)
+  datapath         :  QMAP/RmNet | MBIM | NCM/ECM | raw-ip
+  physical transport: USB | PCIe/MHI | UART
+```
+
+QMI and MBIM are **both first-class control backends** behind one daemon-neutral
+contract (not QMI-with-MBIM-bolted-on) — that matches where the market actually
+is: Quectel/SIMCom/MeiG lean QMI/QMAP, while Sierra-Semtech/Telit/Fibocom/u-blox
+lean MBIM as the generic host interface. Crucially, **QMAP is modelled as a
+datapath capability, not a synonym for QMI**, and the physical transport is not
+baked in — so `control=QMI datapath=QMAP transport=PCIe/MHI` is representable
+without a redesign, which matters as high-end 5G modules move to PCIe/MHI (and
+QRTR) instead of USB. This transport-independent, control/datapath-separated
+model is the part I think is genuinely worth having in-tree regardless of the
+QMI-vs-MBIM balance. (A fuller vendor/interface survey is in
+`docs/interface-landscape.md`.)
+
 ## The question
 
 BKPepe's review of #30185 raised the right high-level point: since wwand is
