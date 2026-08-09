@@ -236,4 +236,46 @@ eplinks = {};
 eq(netlink.ep_iface_number('nope', epfx), null, 'ep: missing links -> null');
 eq(netlink.ep_type_number('nope', epfx), null, 'ep: missing links -> null type');
 
+// --- datapath_stats: parent-vs-children aggregation ratio --------------------
+let stat = {};
+let statfx = { read: (p) => stat[p] ?? null };
+let cnt = (dev, rxp, txp, rxb, txb) => {
+	stat[sprintf('/sys/class/net/%s/statistics/rx_packets', dev)] = '' + rxp;
+	stat[sprintf('/sys/class/net/%s/statistics/tx_packets', dev)] = '' + txp;
+	stat[sprintf('/sys/class/net/%s/statistics/rx_bytes', dev)] = '' + rxb;
+	stat[sprintf('/sys/class/net/%s/statistics/tx_bytes', dev)] = '' + txb;
+};
+// parent RX 100 QMAP frames carrying 250 demuxed packets across 2 children;
+// TX 20 QMAP frames aggregating 40 host packets
+cnt('wwan0', 100, 20, 500000, 20000);
+cnt('wwan0m1', 150, 30, 300000, 15000);
+cnt('wwan0m2', 100, 10, 200000, 5000);
+let ds = netlink.datapath_stats(statfx, 'wwan0', [ 'wwan0m1', 'wwan0m2' ]);
+eq(ds.parent.rx_packets, 100, 'stats: parent rx_packets');
+eq(ds.rx_aggregation, 2.5, 'stats: rx aggregation = 250 demuxed / 100 frames');
+eq(ds.tx_aggregation, 2.0, 'stats: tx aggregation = 40 host pkts / 20 frames');
+eq(ds.children['wwan0m1'].rx_bytes, 300000, 'stats: child byte counter');
+
+// unreadable counters -> null ratio, no throw
+stat = {};
+let ds2 = netlink.datapath_stats(statfx, 'wwanX', [ 'wwanXm1' ]);
+eq(ds2.rx_aggregation, null, 'stats: missing counters -> null aggregation');
+eq(ds2.parent.rx_packets, null, 'stats: missing parent counter -> null');
+
+// --- cdc_ncm_params: NTB aggregation params for MBIM/NCM datapaths -----------
+let ntbfx = { read: (p) => {
+	let m = match(p, /\/cdc_ncm\/(.+)$/);
+	if (!m) return null;
+	return ({ rx_max: '16384', tx_max: '16384', wNtbOutMaxDatagrams: '16',
+	          tx_timer_usecs: '400', min_tx_pkt: '13312' })[m[1]];
+} };
+let ntb = netlink.cdc_ncm_params(ntbfx, 'wwand0');
+eq(ntb.rx_max, 16384, 'ntb: rx_max (downlink NTB buffer)');
+eq(ntb.tx_max, 16384, 'ntb: tx_max');
+eq(ntb.tx_max_datagrams, 16, 'ntb: wNtbOutMaxDatagrams -> tx_max_datagrams');
+eq(ntb.tx_timer_usecs, 400, 'ntb: coalescing timer');
+// a QMI qmi_wwan parent has no cdc_ncm dir -> null (not NTB-framed)
+eq(netlink.cdc_ncm_params({ read: () => null }, 'wwan0'), null,
+	'ntb: non-cdc_ncm device -> null');
+
 done('test_datapath');

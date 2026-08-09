@@ -132,8 +132,23 @@ export function setup(self, dp, o, next)
 						v5: v5,
 						urb_size: r.urb_size,
 						mux_devs: r.mux_devs,
+						parent: dp.netdev,
 						ep_id: dp.ep_id,
 						ep_type: dp.ep_type,
+						// the WDA data-aggregation the modem actually negotiated
+						// (what makes muxing/aggregation observable in status)
+						wda: {
+							dl_protocol: wdata.dl_protocol,
+							ul_protocol: wdata.ul_protocol,
+							dl_max_size: wdata.dl_max_size,
+							dl_max_datagrams: wdata.dl_max_datagrams,
+							ul_max_size: wdata.ul_max_size,
+							ul_max_datagrams: wdata.ul_max_datagrams,
+						},
+						// host-side uplink aggregation we asked rmnet to coalesce
+						ul_agg: (backend == 'rmnet' &&
+						         (wdata.ul_max_datagrams ?? 0) > 1) ?
+							{ size: wdata.ul_max_size, count: wdata.ul_max_datagrams } : null,
 					};
 
 					log('notice', sprintf('datapath: %s%s, urb %d, mux [%s]',

@@ -258,8 +258,10 @@ export function create(opts)
 		self.datapath = {
 			backend: 'cdc_mbim',
 			netdev: dp.netdev,
+			parent: dp.netdev,
 			ep_id: null,
 			mux: r.mux_devs,
+			mux_devs: r.mux_devs,
 		};
 
 		log('notice', sprintf('datapath: cdc_mbim, mux [%s]', join(' ', r.mux_devs)));

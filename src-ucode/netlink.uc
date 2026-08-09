@@ -552,3 +552,85 @@ export function ep_type_number(netdev, fx)
 
 	return null;
 };
+
+// Live datapath / aggregation statistics from the netdev byte+packet counters.
+// For QMAP muxing (rmnet/qmimux) the PARENT usbnet device receives one counter
+// tick per USB frame (a frame may carry several muxed+aggregated packets),
+// while each mux CHILD counts the deaggregated IP packets. So
+//   rx_aggregation = sum(child rx_packets) / parent rx_packets
+// is the mean number of packets the modem packed into each downlink frame — a
+// real, mainline-observable measure of how much aggregation actually happened
+// (1.0 = none, higher = better). Uplink is the same the other way. Returns
+// per-device counters plus the derived ratios; null fields where a counter is
+// unreadable. fx.read defaults to sysfs.
+export function datapath_stats(fx, parent, children)
+{
+	let rl = fx?.read ?? (default_fx()).read;
+	let ctr = (dev, name) => {
+		let v = rl(sprintf('/sys/class/net/%s/statistics/%s', dev, name));
+		return (v != null && match(trim(v), /^[0-9]+$/)) ? +trim(v) : null;
+	};
+	let dev_stats = (dev) => ({
+		rx_packets: ctr(dev, 'rx_packets'), tx_packets: ctr(dev, 'tx_packets'),
+		rx_bytes: ctr(dev, 'rx_bytes'), tx_bytes: ctr(dev, 'tx_bytes'),
+	});
+
+	let p = parent ? dev_stats(parent) : null;
+	let kids = {};
+	let sum_rx = 0, sum_tx = 0, have = false;
+
+	for (let c in (children ?? [])) {
+		let s = dev_stats(c);
+		kids[c] = s;
+
+		if (s.rx_packets != null) { sum_rx += s.rx_packets; have = true; }
+		if (s.tx_packets != null) { sum_tx += s.tx_packets; have = true; }
+	}
+
+	// aggregation ratio only makes sense when a parent frame count exists and is
+	// distinct from the children (QMAP); round to 2 decimals. NB ucode does
+	// integer division for int/int — force float with the 100.0 factor.
+	let ratio = (num, den) => (den && den > 0 && num != null) ?
+		(int(num * 100.0 / den) / 100.0) : null;
+
+	return {
+		parent: p ? { dev: parent, ...p } : null,
+		children: kids,
+		rx_aggregation: (p && have) ? ratio(sum_rx, p.rx_packets) : null,
+		tx_aggregation: (p && have) ? ratio(sum_tx, p.tx_packets) : null,
+	};
+};
+
+// cdc_ncm / cdc_mbim NTB aggregation parameters, exposed by the usbnet cdc_ncm
+// framing layer under /sys/class/net/<dev>/cdc_ncm/. This is the MBIM/NCM
+// analogue of the QMI WDA aggregation config: several IP datagrams are packed
+// into one USB NTB (NCM Transfer Block). Returns the load-bearing knobs (rx/tx
+// max NTB size, max uplink datagrams per block, the coalescing timer) or null
+// when the device is not cdc_ncm-framed (e.g. a QMI qmi_wwan parent). fx.read
+// defaults to sysfs.
+export function cdc_ncm_params(fx, dev)
+{
+	if (!dev)
+		return null;
+
+	let rl = fx?.read ?? (default_fx()).read;
+	let base = sprintf('/sys/class/net/%s/cdc_ncm', dev);
+	let num = (f) => {
+		let v = rl(sprintf('%s/%s', base, f));
+		return (v != null && match(trim(v), /^[0-9]+$/)) ? +trim(v) : null;
+	};
+
+	let rx_max = num('rx_max');
+
+	// no cdc_ncm dir -> not NTB-framed
+	if (rx_max == null && num('dwNtbInMaxSize') == null)
+		return null;
+
+	return {
+		rx_max: rx_max ?? num('dwNtbInMaxSize'),
+		tx_max: num('tx_max') ?? num('dwNtbOutMaxSize'),
+		tx_max_datagrams: num('wNtbOutMaxDatagrams'),
+		tx_timer_usecs: num('tx_timer_usecs'),
+		min_tx_pkt: num('min_tx_pkt'),
+	};
+};

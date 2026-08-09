@@ -14,6 +14,7 @@ import * as apndb from './apndb.uc';
 import * as netsel_ops from './netsel_ops.uc';
 import * as simops from './simops.uc';
 import * as hwops from './hwops.uc';
+import * as nlmod from './netlink.uc';
 
 const UP_GUARD_MS = 150000;
 
@@ -1409,6 +1410,73 @@ export function create(opts)
 			dsd: entry.modem.dsd_status,
 			temperature: entry.modem.temperature,
 		};
+	};
+
+	// datapath / muxing status: the config the daemon applied at datapath setup
+	// (backend, negotiated WDA aggregation, urb size, endpoint, mux channels)
+	// plus live aggregation statistics derived from the netdev counters.
+	self.modem_datapath = function(ref) {
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return { error: 'no_such_modem', ref: ref };
+
+		let dp = entry.modem.datapath;
+
+		if (!dp)
+			return { error: 'no_datapath' };
+
+		let parent = dp.parent ?? dp.netdev;
+
+		// live mux child L3 devices: the rmnet/qmimux children get renamed to
+		// their context's stable wwandN name after setup, so dp.mux_devs (the
+		// pre-rename wwan0mN) is stale — collect the current names from the
+		// muxed contexts bound to this modem instead.
+		let children = [];
+		let chan = [];
+
+		for (let cname, centry in self.contexts) {
+			if (centry.cfg.modem != ref || !(centry.cfg.mux_id > 0))
+				continue;
+
+			// the live L3 device (same resolution status uses for l3_device):
+			// the rmnet child renamed to its stable wwandN name
+			let l3 = derive_netdev(centry);
+
+			if (!l3)
+				continue;
+
+			push(children, l3);
+			push(chan, { mux_id: centry.cfg.mux_id, netdev: l3,
+			             interface: centry.cfg.interface });
+		}
+
+		let out = {
+			backend: dp.backend,
+			protocol: entry.modem.protocol,
+			parent: parent,
+			v5: dp.v5,
+			urb_size: dp.urb_size,
+			ep_id: dp.ep_id,
+			ep_type: dp.ep_type,
+			wda: dp.wda,            // negotiated QMAP aggregation maxima (QMI)
+			ul_agg: dp.ul_agg,      // host-side uplink coalesce config (QMI)
+			channels: chan,         // live mux channels (id -> l3 device)
+		};
+
+		// MBIM/NCM aggregate via NTB (cdc_ncm framing) instead of QMAP — surface
+		// the NTB parameters from sysfs so muxing/aggregation is observable there
+		// too. Absent (null) on a QMI qmi_wwan parent.
+		let ntb = nlmod.cdc_ncm_params(null, parent);
+		if (ntb)
+			out.ntb = ntb;
+
+		// live counters + aggregation ratio. Only muxed QMAP backends carry a
+		// meaningful parent-vs-children packet ratio (frames vs demuxed packets).
+		if (parent && length(children))
+			out.stats = nlmod.datapath_stats(null, parent, children);
+
+		return out;
 	};
 
 	self.modem_location = function(ref) {

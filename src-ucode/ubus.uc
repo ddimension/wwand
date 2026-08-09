@@ -228,6 +228,11 @@ export function publish(conn, daemon, log)
 			call: (req) => daemon.modem_location(req.args.modem),
 		},
 
+		modem_datapath: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => daemon.modem_datapath(req.args.modem),
+		},
+
 		modem_at: {
 			args: { modem: '', command: '', timeout: 0, ubus_rpc_session: '' },
 			call: (req) => {
