@@ -1,7 +1,70 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-09. All test suites green (39 suites).
+_Last updated: 2026-08-09. All test suites green (40 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## Forbidden-PLMN (FPLMN) management (2026-08-09)
+
+A third managed PLMN list type (`fplmn`) alongside `user`/`nas` — the SIM
+EF_FPLMN (6F7B), the *hard* network block (unlike the preferred lists, which are
+only ordering hints). Same workflow: read from modem, edit, save as a named
+`wwand_plmnlist type 'fplmn'`, restore before every radio-on, LuCI editor +
+per-modem/SIM attach.
+
+- **No QMI NAS forbidden message exists** (libqmi 1.38 has Get/Set *Preferred*
+  only), so FPLMN is SIM-EF-only: **QMI UIM WRITE/READ_TRANSPARENT(6F7B)** with
+  an **AT+CRSM (214/176)** fallback (the only path on modems whose UIM rejects EF
+  access, e.g. the Huawei E392 — code 48). `sim.uc` `read_fplmn`/`write_fplmn`
+  (+ `decode_fplmn`/`encode_fplmn`, 3-byte MCC/MNC, no AcT); `atcmd_parse.parse_crsm`.
+- **UIM WRITE_TRANSPARENT (0x0022)** added to `codec/schema/uim.uc` — spec-derived
+  (libqmi ships NO binding), mirrors READ_TRANSPARENT, locked by a wire-buffer
+  test (`test_qmux`) and HW-validated.
+- Wired through `config.uc` (type `fplmn`), `simops.uc`/`ubus` (`modem_plmn_set`
+  list_type `fplmn`, restore dispatch), and the LuCI editor (type dropdown; the
+  RAT columns are hidden for fplmn — forbidden entries carry no AcT).
+- **HW-validated 2026-08-09**: RG650E (QMI, UIM path) write/read/clear OK — the
+  spec-derived UIM write schema confirmed on real hardware; Cudy LT300 v3
+  (SLM770A/MeiG, NCM, pure AT+CRSM) write/read/clear OK. **E392 CANNOT write
+  FPLMN by any means** — UIM rejects (code 48) AND its old Huawei firmware
+  refuses AT+CRSM UPDATE (214) while allowing READ (176); a hard modem limitation
+  (use manual COPS selection there). The CRSM write tries quoted then bare
+  `<data>` for firmware compatibility.
+
+## IoT / extended radio-type identification (2026-08-09)
+
+Identify and display the cellular-IoT / reduced-capability radio types that
+libqmi 1.38 and libmbim 1.32 do **not** model at all — **NB-IoT, LTE-M
+(Cat-M1/eMTC), EC-GSM-IoT, RedCap, NTN/satellite** — plus the 5G NSA/SA split.
+Read-only (no mode selection).
+
+- **`codec/schema/rat.uc`** (new) — one canonical RAT vocabulary + mappers from
+  every source: `from_qmi_radio_if` / `from_dsd` (incl. `so_mask` bits verified
+  vs `qmi-flags64-dsd.h`) / `from_mbim` / `from_at_cops_act` (3GPP TS 27.007
+  `<AcT>`) / `from_qnwinfo` / `from_qeng_act`, plus `merge` (AT/QNWINFO wins for
+  the IoT variants QMI/MBIM can't name), `label`, `caps_from`. `test_rat.uc`.
+- **AT is the only standardised path to NB-IoT** — `atcmd_parse.uc`: fixed the
+  `+COPS` `<AcT>` map (**8→EC-GSM-IoT, 9→NB-IoT**, previously folded into
+  GSM/LTE), added `<AcT>` to the `+COPS?` read form, new `parse_qnwinfo`
+  (Quectel active access-tech: eMTC/NB-IoT/NR5G-NSA/NR5G-SA/…) and
+  `parse_qcfg_iotopmode` (which IoT modes the modem searches).
+- **`modem_common.probe_iot_rat`** — vendor-gated (Quectel) `AT+QNWINFO` over the
+  at2 side channel on the slow telemetry loop → `self.rat_fine` + `self.rat_label`;
+  **`collect_caps`** → `self.caps {rats, iot_modes, ntn}` from the authoritative
+  **QMI DMS device-capability `radio_ifs`** (`from_dms_radio_if`; DMS 5GNR=10, not
+  the NAS 12) + Quectel `AT+QCFG="iotopmode"` (once) + model hints (RedCap/NTN) +
+  observed RATs. Wired into the QMI + NCM telemetry ticks (MBIM left alone —
+  EG06 AT times out in MBIM mode).
+- **`format_telemetry`** now lets a fine IoT/RedCap/NTN reading override the
+  coarse radio-interface `tech=` (non-IoT readings leave the existing output
+  intact — no regression).
+- **ubus `status`** gains per-modem `rat` (current fine access tech) + `caps`;
+  **LuCI status** shows a "Technology" row (prefers `rat`) and a "Capabilities"
+  badge row (IoT/RedCap/NTN highlighted).
+- **HW-verified on 245**: RG650E (Quectel) → `rat=LTE` (live QNWINFO probe),
+  `caps.rats=[lte,nr5g,umts]` (DMS caps — honest 5G capability while camped on
+  LTE); E392 (Huawei, non-Quectel) → QNWINFO skipped (`rat=null`) but DMS caps
+  still give `[gsm,lte,umts]`; `tech=LTE` unchanged. RedCap/NTN paths are
+  host-tested only (no such modem on hand) but plug in via one mapper/hint entry.
 
 ## QModem-quirk harvest (2026-08-09)
 

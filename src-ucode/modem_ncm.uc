@@ -803,14 +803,15 @@ export function create(opts)
 				}
 
 				refresh_signal(() => refresh_cells(() => refresh_reg_detail(() =>
-					modem_common.collect_temperature(self, () => {
+					modem_common.collect_temperature(self, () =>
+					    modem_common.probe_iot_rat(self, () => {
 						if (!self.at)
 							return;
 
 						log_telemetry();
 						emit_telemetry();
 						telemetry_timer = uloop.timer(interval, tick);
-					}))));
+					})))));
 			});
 		};
 

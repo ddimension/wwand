@@ -7,6 +7,7 @@ import * as qmux from 'wwand/codec/qmux.uc';
 import * as tlv from 'wwand/codec/tlv.uc';
 import ctl from 'wwand/codec/schema/ctl.uc';
 import nas from 'wwand/codec/schema/nas.uc';
+import uim from 'wwand/codec/schema/uim.uc';
 
 // --- CTL request (1-byte txn), hand-computed reference frame ----------------
 
@@ -112,6 +113,25 @@ let getrt = tlv.unpack(nas.messages.GET_PREFERRED_NETWORKS.resp,
 		preferred_networks: [ { mcc: 310, mnc: 260, rat: 0x4000 } ],
 	}));
 eq(getrt.preferred_networks[0], { mcc: 310, mnc: 260, rat: 0x4000 }, 'nas get-pref: 3-digit mnc + E-UTRAN round-trip');
+
+// --- UIM Write Transparent (0x0022) — EF_FPLMN update ------------------------
+// libqmi 1.38 has no binding for this message; the schema is spec-derived and
+// mirrors READ_TRANSPARENT with the read_info replaced by write data. Pin the
+// request wire form: session(0x01), file(0x02 {file_id u16, path}), write_data
+// (0x03 {offset u16, data as u16-counted u8 array}).
+let wt_bytes = tlv.pack(uim.messages.WRITE_TRANSPARENT.req, {
+	session:    { session_type: 0, aid: '' },
+	file:       { file_id: 0x6F7B, path: '\x00\x3F\x20\x7F' },   // 3F00/7F20
+	write_data: { offset: 0, data: [ 0x62, 0xF2, 0x20, 0xFF, 0xFF, 0xFF ] },
+});
+let wt = tlv.unpack(uim.messages.WRITE_TRANSPARENT.req, wt_bytes);
+eq(wt.file.file_id, 0x6F7B, 'uim write: EF_FPLMN file id round-trips');
+eq(wt.write_data.offset, 0, 'uim write: offset');
+eq(wt.write_data.data, [ 0x62, 0xF2, 0x20, 0xFF, 0xFF, 0xFF ], 'uim write: 6-byte data array round-trips');
+// the write_data TLV (type 0x03) on the wire: offset u16-le (0000) + u16-le
+// count (0006) + the 6 data bytes = 10 payload bytes
+ok(index(wt_bytes, chr(0x03) + '\x0a\x00' + '\x00\x00' + '\x06\x00' + '\x62\xf2\x20\xff\xff\xff') >= 0,
+	'uim write: write_data TLV wire layout (offset + u16 count + bytes)');
 
 // --- robustness -------------------------------------------------------------
 

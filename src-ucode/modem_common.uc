@@ -8,6 +8,7 @@ import * as atcmd from './atcmd.uc';
 import * as netlink from './netlink.uc';
 import * as tlv from './codec/tlv.uc';
 import * as nasmod from './codec/schema/nas.uc';
+import * as ratmod from './codec/schema/rat.uc';
 
 // scrub NAS cell-info sentinel metrics (-32768 = "not measured") to null so
 // consumers never render the sentinel as a real dBm value.
@@ -402,6 +403,98 @@ export function fetch_nr_neighbours(self, cb)
 	});
 };
 
+// manufacturers whose AT firmware answers AT+QNWINFO (the active access-tech
+// query). Extensible: add a vendor here once its QNWINFO/analogue is verified.
+const QNWINFO_VENDORS = /quectel/;
+
+// collect_caps(self, cb): build self.caps — a best-effort summary of which RATs
+// the modem supports, for status display. The Quectel AT+QCFG="iotopmode" query
+// (which cellular-IoT modes it searches) runs ONCE and is cached; the summary
+// is then rebuilt each call so newly-observed RATs fold in. Combined with a
+// model-string hint (RedCap/NTN). Stores self.caps = { rats, iot_modes, ntn }.
+// Defined before probe_iot_rat, which calls it (ucode does not hoist exports).
+export function collect_caps(self, cb)
+{
+	cb = cb ?? (() => null);
+
+	// authoritative supported-RAT families from the QMI DMS device capabilities
+	// (radio_ifs list), when the backend has them — the honest base for caps.rats
+	// on a 5G modem currently camped on LTE. DMS 5GNR=10 (not the NAS 12).
+	let mode_caps = null;
+	let cap_ifs = self.info?.capabilities?.radio_ifs;
+
+	if (type(cap_ifs) == 'array') {
+		mode_caps = [];
+		for (let r in cap_ifs) {
+			let o = ratmod.from_dms_radio_if(r);
+			if (o && index(mode_caps, o.rat) < 0)
+				push(mode_caps, o.rat);
+		}
+	}
+
+	let build = () => {
+		self.caps = ratmod.caps_from({
+			model:     self.info?.model,
+			iot_modes: self._iot_modes,
+			observed:  keys(self._rats_seen ?? {}),
+			modes:     mode_caps,
+		});
+		cb();
+	};
+
+	if (self._caps_done)
+		return build();
+
+	self._caps_done = true;
+
+	let mfr = lc(sprintf('%s', self.info?.manufacturer ?? ''));
+
+	if (!match(mfr, QNWINFO_VENDORS))
+		return build();
+
+	telemetry_at(self).send('AT+QCFG="iotopmode"', (err, res) => {
+		self._iot_modes = err ? null : atcmd.parse_qcfg_iotopmode(res?.lines);
+		build();
+	});
+};
+
+// probe_iot_rat(self, cb): identify the active radio-access technology to the
+// fine IoT granularity that QMI/MBIM structured data cannot express — NB-IoT,
+// LTE-M (Cat-M1/eMTC), RedCap, the 5G NSA/SA split — over the shared AT side
+// channel (AT+QNWINFO, Quectel). Stores self.rat_fine (a canonical rat.uc
+// object { rat, mode, ntn, src }) or null. Best-effort and vendor-gated: a
+// non-Quectel or no-AT modem leaves self.rat_fine null and sends nothing.
+export function probe_iot_rat(self, cb)
+{
+	cb = cb ?? (() => null);
+
+	let mfr = lc(sprintf('%s', self.info?.manufacturer ?? ''));
+
+	// record the identified RAT (label for status, slug into the observed set)
+	// and refresh the capability summary, then finish
+	let finish = () => {
+		self.rat_label = self.rat_fine ? ratmod.label(self.rat_fine) : null;
+
+		if (self.rat_fine?.rat) {
+			self._rats_seen = self._rats_seen ?? {};
+			self._rats_seen[self.rat_fine.rat] = true;
+		}
+
+		collect_caps(self, cb);
+	};
+
+	if (!match(mfr, QNWINFO_VENDORS)) {
+		self.rat_fine = null;
+		return finish();
+	}
+
+	telemetry_at(self).send('AT+QNWINFO', (err, res) => {
+		let info = err ? null : atcmd.parse_qnwinfo(res?.lines);
+		self.rat_fine = info ? { rat: info.rat, mode: info.mode, ntn: false, src: 'qnwinfo' } : null;
+		finish();
+	});
+};
+
 // collect_temperature(self, cb): read the modem die/board temperature over the
 // shared AT side channel and store self.temperature = { celsius, source:'at' }.
 // The command + parser are picked per manufacturer (QModem-derived): Quectel
@@ -563,7 +656,15 @@ export function format_telemetry(o)
 	let rd = o.reg_detail, cfg = o.config ?? {};
 	let parts = [], techs = [];
 
-	for (let r in (reg.radio_ifs ?? [])) {
+	// a fine RAT identified over AT (QNWINFO/QENG/AcT) that names an IoT / RedCap
+	// / NTN variant wins: QMI/MBIM radio interfaces cannot represent these, so it
+	// replaces the coarse radio-interface derivation for the tech label.
+	let iot = (o.rat_fine != null && ratmod.is_iot(o.rat_fine.rat)) ? o.rat_fine : null;
+
+	if (iot)
+		push(techs, ratmod.label(iot));
+
+	for (let r in (iot ? [] : (reg.radio_ifs ?? []))) {
 		if (r == nasmod.RADIO_IF_LTE) push(techs, 'LTE');
 		else if (r == nasmod.RADIO_IF_5GNR) push(techs, 'NR5G');
 		else if (r == nasmod.RADIO_IF_UMTS) push(techs, 'UMTS');
@@ -573,15 +674,15 @@ export function format_telemetry(o)
 
 	// no numeric radio_ifs (MBIM/NCM): tech is a string on reg.mode/reg.tech
 	// or on the DSD status (LTE/NSA/SA)
-	if (!length(techs) && (reg.mode != null || reg.tech != null))
+	if (!iot && !length(techs) && (reg.mode != null || reg.tech != null))
 		push(techs, uc(sprintf('%s', reg.mode ?? reg.tech)));
 
-	if (!length(techs) && o.dsd_status?.mode != null)
+	if (!iot && !length(techs) && o.dsd_status?.mode != null)
 		push(techs, uc(sprintf('%s', o.dsd_status.mode)));
 
 	// NSA: LTE-registered while the NR anchor shows in the 5G cell/signal info
-	let nr_anchor = cells?.nr5g_cell != null ||
-		(sig?.nr5g?.rsrp != null && !tlv.is_unavailable(sig.nr5g.rsrp, 'i16'));
+	let nr_anchor = !iot && (cells?.nr5g_cell != null ||
+		(sig?.nr5g?.rsrp != null && !tlv.is_unavailable(sig.nr5g.rsrp, 'i16')));
 	let has_lte = index(techs, 'LTE') >= 0;
 	let has_nr = index(techs, 'NR5G') >= 0;
 

@@ -793,7 +793,7 @@ when called from LuCI).
 
 | Method | Arguments | Description |
 |---|---|---|
-| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `locks` — cell/frequency-lock read-back) + contexts + `board` (detected profile, power/reset capability) |
+| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary) + contexts + `board` (detected profile, power/reset capability) |
 | `reload` | — | re-read UCI and apply the **diff** — only changed/added/removed modems and contexts are touched (idempotent; see *Idempotent reload*) |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |

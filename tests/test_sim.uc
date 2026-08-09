@@ -504,4 +504,28 @@ uloop.run();
 ok(all_done, 'all scenarios completed (no silent uloop unwind)');
 eq(idx, length(scenarios), 'every scenario ran');
 
+// --- EF_FPLMN codec (forbidden-PLMN list, 3 bytes/entry, no AcT) -------------
+// 262/02 = 62 F2 20 ; 234/07 = 32 F4 70 (2-digit MNC -> MNC3 nibble = F); 0xFF pad
+eq(sim.decode_fplmn([ 0x62, 0xF2, 0x20, 0x32, 0xF4, 0x70, 0xFF, 0xFF, 0xFF ]),
+	[ { mcc: '262', mnc: '02' }, { mcc: '234', mnc: '07' } ],
+	'decode_fplmn: two 2-digit-MNC entries + pad');
+// 3-digit MNC: 310/410 = 13 00 14 (octet2 = MNC3<<4 | MCC3)
+eq(sim.decode_fplmn([ 0x13, 0x00, 0x14 ]), [ { mcc: '310', mnc: '410' } ],
+	'decode_fplmn: 3-digit MNC');
+eq(sim.decode_fplmn([ 0xFF, 0xFF, 0xFF ]), [], 'decode_fplmn: all-empty -> []');
+eq(sim.decode_fplmn(null), [], 'decode_fplmn: null -> []');
+
+// encode round-trips, padded to the 12-byte (4-slot) minimum
+eq(sim.encode_fplmn([ { mcc: '262', mnc: '02' } ]),
+	[ 0x62, 0xF2, 0x20, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF ],
+	'encode_fplmn: one entry padded to 12 bytes');
+eq(sim.encode_fplmn([ { mcc: '310', mnc: '410' } ], 3),
+	[ 0x13, 0x00, 0x14 ], 'encode_fplmn: 3-digit MNC, no extra pad');
+eq(sim.decode_fplmn(sim.encode_fplmn([ { mcc: '262', mnc: '02' }, { mcc: '234', mnc: '07' }, { mcc: '310', mnc: '410' } ])),
+	[ { mcc: '262', mnc: '02' }, { mcc: '234', mnc: '07' }, { mcc: '310', mnc: '410' } ],
+	'fplmn: encode->decode round-trip');
+// malformed entries are skipped
+eq(sim.encode_fplmn([ { mcc: '26', mnc: '02' }, { mcc: '262', mnc: '2' } ], 0), [],
+	'encode_fplmn: drops short mcc / short mnc');
+
 done('test_sim');

@@ -223,15 +223,17 @@ export function install(self, o)
 				else if (err.error != 'cancelled')
 					log('warn', sprintf('telemetry: cell location query failed: %J', err));
 
-				// modem temperature over the AT side channel (best-effort, slow
-				// loop) — then log the full telemetry line and reschedule
-				modem_common.collect_temperature(self, () => {
+				// modem temperature + active access-tech (IoT/RedCap) over the AT
+				// side channel (best-effort, slow loop) — then log the full
+				// telemetry line and reschedule
+				modem_common.collect_temperature(self, () =>
+				    modem_common.probe_iot_rat(self, () => {
 					if (!err)
 						self._log_telemetry();
 
 					if (self.nas)
 						telemetry_timer = uloop.timer(interval, tick);
-				});
+				}));
 			});
 		};
 

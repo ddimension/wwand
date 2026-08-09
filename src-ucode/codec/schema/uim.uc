@@ -86,6 +86,25 @@ export default {
 			},
 		},
 
+		// Write Transparent (update a transparent EF, e.g. EF_FPLMN 6F7B).
+		// NOTE: libqmi 1.38 ships NO binding for this message — its layout is
+		// derived from the QMI UIM spec and mirrors READ_TRANSPARENT (0x0020),
+		// with the read_info replaced by write data. Locked by a wire-buffer
+		// test (test_qmi_backend) and HW-validated on the RG650E (E392 rejects
+		// UIM and uses the AT+CRSM path instead).
+		WRITE_TRANSPARENT: {
+			id: 0x0022,
+			req: {
+				session:    SESSION,
+				file:       { t: 0x02, f: { file_id: 'u16', path: 'lstring' } },
+				write_data: { t: 0x03, f: { offset: 'u16', data: { n: 'u16', of: 'u8' } } },
+			},
+			resp: {
+				// card SW1/SW2 status word (optional; present on most modems)
+				card_result: { t: 0x10, f: { sw1: 'u8', sw2: 'u8' } },
+			},
+		},
+
 		// physical SIM slot status/selection (multi-slot devices). Verified
 		// against libqmi 1.38: TLV 0x10 = u8-counted array of slot structs
 		// with a length-prefixed raw ICCID (nibble-swapped BCD).

@@ -6,6 +6,8 @@
 
 'use strict';
 
+import * as ratmod from './codec/schema/rat.uc';
+
 // parse an AT+QNWLOCK read response into the lock state. Quectel formats:
 //   +QNWLOCK: "common/4g",<enable>[,<earfcn>,<pci>[,...]]
 //   +QNWLOCK: "common/4g_ext",<enable>,<count>,<earfcn>,<pci>,...
@@ -565,17 +567,20 @@ export function parse_cops_read(lines)
 {
 	for (let l in (lines ?? [])) {
 		// plain capturing group for the optional tail — ucode regexes are
-		// POSIX ERE underneath, (?:...) is not portable across builds
-		let m = match(l, /\+COPS:\s*([0-9]+)(\s*,\s*([0-9]+)\s*,\s*"([^"]*)")?/);
+		// POSIX ERE underneath, (?:...) is not portable across builds. The
+		// trailing (,<AcT>) is the active access technology (3GPP 27.007).
+		let m = match(l, /\+COPS:\s*([0-9]+)(\s*,\s*([0-9]+)\s*,\s*"([^"]*)"(\s*,\s*([0-9]+))?)?/);
 
 		if (!m)
 			continue;
 
 		let format = (m[3] != null) ? +m[3] : null;
 		let oper = m[4] ?? null;
+		let act = (m[6] != null) ? +m[6] : null;
 
 		return { mode: +m[1], format: format, oper: oper,
-			plmn: (format == 2 && oper != null && match(oper, /^[0-9]+$/)) ? oper : null };
+			plmn: (format == 2 && oper != null && match(oper, /^[0-9]+$/)) ? oper : null,
+			act: act, rat: (act != null) ? ratmod.label(ratmod.from_at_cops_act(act)) : null };
 	}
 
 	return null;
@@ -614,16 +619,12 @@ export function parse_cops_scan(lines)
 			let mcc = +substr(numeric, 0, 3), mnc = +substr(numeric, 3);
 
 			// optional 5th field = the access technology (3GPP 27.007 <AcT>);
-			// map it to the same coarse RAT labels the QMI scan uses
+			// normalise through the canonical RAT map so NB-IoT (AcT 9) and
+			// EC-GSM-IoT (AcT 8) are reported as such, not folded into LTE/GSM
 			let rat = null;
 
-			if (length(f) >= 5 && match(trim(f[4]), /^[0-9]+$/)) {
-				let act = +trim(f[4]);
-				rat = (act == 0 || act == 1 || act == 3 || act == 8) ? 'GSM' :
-				      (act >= 2 && act <= 6) ? 'UMTS' :
-				      (act == 7 || act == 9 || act == 10) ? 'LTE' :
-				      (act >= 11 && act <= 13) ? 'NR5G' : null;
-			}
+			if (length(f) >= 5 && match(trim(f[4]), /^[0-9]+$/))
+				rat = ratmod.label(ratmod.from_at_cops_act(+trim(f[4])));
 
 			push(out, {
 				mcc:    mcc,
@@ -637,6 +638,95 @@ export function parse_cops_scan(lines)
 	}
 
 	return out;
+};
+
+// AT+QNWINFO (Quectel) — the currently active access technology, the primary
+// AT path to the IoT variants QMI/MBIM cannot see. Formats seen in the wild:
+//   +QNWINFO: "<Act>","<oper>","<band>",<channel>
+//   +QNWINFO: <Act>,<oper>,<band>,<channel>          (some firmwares unquoted)
+//   +QNWINFO: No Service                             (unregistered)
+// <Act> strings include eMTC / NB-IoT / NR5G-NSA / NR5G-SA / FDD LTE / … .
+// Returns { act, rat, mode, label, oper, band, channel } (rat = canonical slug)
+// or null when out of service / unparsable.
+export function parse_qnwinfo(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+QNWINFO:\s*(.+)/);
+
+		if (!m)
+			continue;
+
+		let body = trim(m[1]);
+
+		if (!length(body) || match(uc(body), /NO SERVICE/))
+			return null;
+
+		let f = map(split(body, ','), (x) => replace(trim(x), /^"|"$/g, ''));
+		let ro = ratmod.from_qnwinfo(f[0]);
+
+		if (!ro)
+			return null;
+
+		return {
+			act:     f[0] ?? null,
+			rat:     ro.rat,
+			mode:    ro.mode,
+			label:   ratmod.label(ro),
+			oper:    f[1] ?? null,
+			band:    f[2] ?? null,
+			channel: (f[3] != null && match(trim(f[3]), /^[0-9]+$/)) ? +trim(f[3]) : null,
+		};
+	}
+
+	return null;
+};
+
+// AT+QCFG="iotopmode" (Quectel) — which cellular-IoT modes the modem is set to
+// search: +QCFG: "iotopmode",<mode>  where 0 = eMTC (LTE-M), 1 = NB-IoT,
+// 2 = eMTC + NB-IoT. Returns the canonical IoT slugs enabled ([ 'lte-m' ] /
+// [ 'nb-iot' ] / [ 'lte-m', 'nb-iot' ]), or null when unsupported/absent. A
+// read-only capability probe (never set from here).
+export function parse_qcfg_iotopmode(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+QCFG:\s*"iotopmode",\s*([0-9]+)/);
+
+		if (!m)
+			continue;
+
+		let mode = +m[1];
+
+		return (mode == 0) ? [ 'lte-m' ] :
+		       (mode == 1) ? [ 'nb-iot' ] :
+		       (mode == 2) ? [ 'lte-m', 'nb-iot' ] : [];
+	}
+
+	return null;
+};
+
+// AT+CRSM restricted SIM access (3GPP TS 27.007 §8.18) — the portable path to
+// EF files a modem's QMI UIM rejects (e.g. Huawei E392) and the only AT way to
+// write EF_FPLMN. Response: +CRSM: <sw1>,<sw2>[,"<hex>"]. Returns
+// { sw1, sw2, data } (data = uppercase hex string on a READ, else null), or
+// null when no +CRSM line. sw1=0x90,sw2=0x00 (144,0) = success; 0x91xx also ok.
+export function parse_crsm(lines)
+{
+	for (let l in (lines ?? [])) {
+		// plain groups (no (?:...) — POSIX ERE across ucode builds)
+		let m = match(l, /\+CRSM:\s*([0-9]+)\s*,\s*([0-9]+)(\s*,\s*"?([0-9A-Fa-f]*)"?)?/);
+
+		if (!m)
+			continue;
+
+		return {
+			sw1:  +m[1],
+			sw2:  +m[2],
+			data: (m[4] != null && length(m[4])) ? uc(m[4]) : null,
+			ok:   (+m[1] == 0x90 && +m[2] == 0x00) || +m[1] == 0x91,
+		};
+	}
+
+	return null;
 };
 
 // AT+CPOL? preferred-PLMN list read (3GPP 27.007 §7.19). One line per record:
@@ -706,13 +796,13 @@ function first_temp(lines, marker)
 }
 
 // Quectel AT+QTEMP: bare "+QTEMP: 35" or +QTEMP: "sensor","35" (multi-line).
-export function parse_qtemp(lines)    { return first_temp(lines, /\+QTEMP:/); }
+export function parse_qtemp(lines)    { return first_temp(lines, /\+QTEMP:/); };
 
 // Huawei AT^CHIPTEMP: "^CHIPTEMP: <a>,<b>,<c>,<d>" (several sensors).
-export function parse_chiptemp(lines) { return first_temp(lines, /\^CHIPTEMP:/i); }
+export function parse_chiptemp(lines) { return first_temp(lines, /\^CHIPTEMP:/i); };
 
 // SIMCom AT+CPMUTEMP: "+CPMUTEMP: 35" (single value, already Celsius).
-export function parse_cpmutemp(lines) { return first_temp(lines, /\+CPMUTEMP:/i); }
+export function parse_cpmutemp(lines) { return first_temp(lines, /\+CPMUTEMP:/i); };
 
 // MeiG AT+TEMP: '+TEMP: "sensor","value"'. The value is milli-Celsius on some
 // platforms (Unisoc soc-thmzone) — divide by 1000 when it is clearly milli

@@ -309,14 +309,21 @@ eq(atcmd.parse_celllock([ 'OK' ]), null, 'celllock: no lines -> null');
 
 // --- AT+COPS? read form (network-selection idempotency guard) ----------------
 eq(atcmd.parse_cops_read([ '+COPS: 0,2,"26201"' ]),
-	{ mode: 0, format: 2, oper: '26201', plmn: '26201' },
+	{ mode: 0, format: 2, oper: '26201', plmn: '26201', act: null, rat: null },
 	'cops read: numeric auto');
 eq(atcmd.parse_cops_read([ '+COPS: 1,0,"Testnet"' ]),
-	{ mode: 1, format: 0, oper: 'Testnet', plmn: null },
+	{ mode: 1, format: 0, oper: 'Testnet', plmn: null, act: null, rat: null },
 	'cops read: long-format oper has no plmn digits');
 eq(atcmd.parse_cops_read([ '+COPS: 0' ]),
-	{ mode: 0, format: null, oper: null, plmn: null },
+	{ mode: 0, format: null, oper: null, plmn: null, act: null, rat: null },
 	'cops read: bare mode');
+// with the active access technology tail (<AcT>) — NB-IoT surfaces here
+eq(atcmd.parse_cops_read([ '+COPS: 0,2,"26201",9' ]),
+	{ mode: 0, format: 2, oper: '26201', plmn: '26201', act: 9, rat: 'NB-IoT' },
+	'cops read: AcT 9 -> NB-IoT');
+eq(atcmd.parse_cops_read([ '+COPS: 0,2,"26201",7' ]),
+	{ mode: 0, format: 2, oper: '26201', plmn: '26201', act: 7, rat: 'LTE' },
+	'cops read: AcT 7 -> LTE');
 eq(atcmd.parse_cops_read([ 'OK' ]), null, 'cops read: no line -> null');
 
 // --- AT+COPS=? scan parsing --------------------------------------------------
@@ -338,14 +345,55 @@ eq(atcmd.parse_cops_scan([ '+COPS: (1,,,"310260",7),(2,"AT&T","ATT","310410",7)'
 	{ mcc: 310, mnc: 410, plmn: '310/410', name: 'AT&T', status: 'current', rats: [ 'LTE' ] },
 ], 'cops: 3-digit mnc + nameless operator');
 
-// AcT omitted (4-field group) -> no rat; and AcT for 2G/3G/5G
+// AcT omitted (4-field group) -> no rat; and AcT for 2G/5G-SA
 eq(atcmd.parse_cops_scan([ '+COPS: (2,"A","A","26201"),(1,"B","B","26202",0),(1,"C","C","26203",11)' ]), [
 	{ mcc: 262, mnc: 1, plmn: '262/01', name: 'A', status: 'current',   rats: [] },
 	{ mcc: 262, mnc: 2, plmn: '262/02', name: 'B', status: 'available', rats: [ 'GSM' ] },
-	{ mcc: 262, mnc: 3, plmn: '262/03', name: 'C', status: 'available', rats: [ 'NR5G' ] },
-], 'cops: AcT mapping (none/GSM/NR5G)');
+	{ mcc: 262, mnc: 3, plmn: '262/03', name: 'C', status: 'available', rats: [ '5G-SA' ] },
+], 'cops: AcT mapping (none/GSM/5G-SA)');
+
+// IoT AcT values now surface distinctly instead of being folded into GSM/LTE
+eq(atcmd.parse_cops_scan([ '+COPS: (1,"IoTnet","IoT","26201",8),(1,"NBnet","NB","26202",9)' ]), [
+	{ mcc: 262, mnc: 1, plmn: '262/01', name: 'IoTnet', status: 'available', rats: [ 'EC-GSM-IoT' ] },
+	{ mcc: 262, mnc: 2, plmn: '262/02', name: 'NBnet',  status: 'available', rats: [ 'NB-IoT' ] },
+], 'cops: AcT 8/9 -> EC-GSM-IoT / NB-IoT');
 
 eq(atcmd.parse_cops_scan([ 'OK' ]), [], 'cops: no operator line');
+
+// --- AT+QNWINFO (active access technology; primary IoT path) -----------------
+eq(atcmd.parse_qnwinfo([ '+QNWINFO: "FDD LTE","46000","LTE BAND 3",1650' ]),
+	{ act: 'FDD LTE', rat: 'lte', mode: null, label: 'LTE', oper: '46000', band: 'LTE BAND 3', channel: 1650 },
+	'qnwinfo: FDD LTE');
+eq(atcmd.parse_qnwinfo([ '+QNWINFO: "NB-IoT","26201","LTE BAND 8",3688' ]),
+	{ act: 'NB-IoT', rat: 'nb-iot', mode: null, label: 'NB-IoT', oper: '26201', band: 'LTE BAND 8', channel: 3688 },
+	'qnwinfo: NB-IoT');
+eq(atcmd.parse_qnwinfo([ '+QNWINFO: "eMTC","26201","LTE BAND 20",6300' ]),
+	{ act: 'eMTC', rat: 'lte-m', mode: null, label: 'LTE-M', oper: '26201', band: 'LTE BAND 20', channel: 6300 },
+	'qnwinfo: eMTC -> LTE-M');
+eq(atcmd.parse_qnwinfo([ '+QNWINFO: "NR5G-SA","26201","NR N78",636666' ]),
+	{ act: 'NR5G-SA', rat: 'nr5g', mode: 'sa', label: '5G-SA', oper: '26201', band: 'NR N78', channel: 636666 },
+	'qnwinfo: NR5G-SA');
+eq(atcmd.parse_qnwinfo([ '+QNWINFO: No Service' ]), null, 'qnwinfo: No Service -> null');
+eq(atcmd.parse_qnwinfo([ 'OK' ]), null, 'qnwinfo: no line -> null');
+eq(atcmd.parse_qnwinfo([ '+QNWINFO: "GARBAGE","x","y",0' ]), null, 'qnwinfo: unknown act -> null');
+
+// --- AT+QCFG="iotopmode" (IoT search-mode capability) ------------------------
+eq(atcmd.parse_qcfg_iotopmode([ '+QCFG: "iotopmode",0' ]), [ 'lte-m' ], 'iotopmode 0 -> lte-m');
+eq(atcmd.parse_qcfg_iotopmode([ '+QCFG: "iotopmode",1' ]), [ 'nb-iot' ], 'iotopmode 1 -> nb-iot');
+eq(atcmd.parse_qcfg_iotopmode([ '+QCFG: "iotopmode",2' ]), [ 'lte-m', 'nb-iot' ], 'iotopmode 2 -> both');
+eq(atcmd.parse_qcfg_iotopmode([ 'OK' ]), null, 'iotopmode: no line -> null');
+
+// --- AT+CRSM (restricted SIM access; FPLMN read/write) -----------------------
+eq(atcmd.parse_crsm([ '+CRSM: 144,0,"212F810FFFFFFFFFFFFFFFFF"' ]),
+	{ sw1: 144, sw2: 0, data: '212F810FFFFFFFFFFFFFFFFF', ok: true },
+	'crsm: read success with data');
+eq(atcmd.parse_crsm([ '+CRSM: 144,0' ]),
+	{ sw1: 144, sw2: 0, data: null, ok: true }, 'crsm: update success, no data');
+eq(atcmd.parse_crsm([ '+CRSM: 98,8' ]),
+	{ sw1: 98, sw2: 8, data: null, ok: false }, 'crsm: security-status failure (0x98)');
+eq(atcmd.parse_crsm([ '+CRSM: 145,20,"deadBEEF"' ]),
+	{ sw1: 145, sw2: 20, data: 'DEADBEEF', ok: true }, 'crsm: 0x91 proactive-cmd ok, hex upper-cased');
+eq(atcmd.parse_crsm([ 'OK' ]), null, 'crsm: no line -> null');
 
 // --- parse_cpol (preferred PLMN list read) -----------------------------------
 let cpol = atcmd.parse_cpol([
@@ -517,7 +565,7 @@ let parsers = [ 'parse_qnwlock', 'parse_qcainfo', 'parse_qeng_servingcell',
 	'parse_qeng_neighbourcell', 'parse_qrsrp', 'parse_qrsrq', 'parse_qsinr',
 	'parse_ceer', 'parse_cesq', 'parse_hcsq', 'parse_monsc', 'parse_monnc',
 	'parse_meng_servingcell', 'parse_meng_neighbourcell', 'parse_celllock',
-	'parse_ati', 'parse_cops_read', 'parse_cops_scan', 'parse_qtemp',
+	'parse_ati', 'parse_cops_read', 'parse_cops_scan', 'parse_qnwinfo', 'parse_crsm', 'parse_qtemp',
 	'parse_chiptemp', 'parse_cpmutemp', 'parse_meig_temp' ];
 let threw = [];
 for (let name in parsers)

@@ -193,12 +193,14 @@ export function install(self, o)
 		if (type(entries) != 'array')
 			return cb({ error: 'invalid_entries' });
 
-		let kind = (list_type == 'user') ? 'user' : 'nas';
+		let kind = (list_type == 'user') ? 'user' : (list_type == 'fplmn') ? 'fplmn' : 'nas';
 
-		log('notice', sprintf('modem %s: writing %d %s preferred-PLMN record(s)', ref, length(entries), kind));
+		log('notice', sprintf('modem %s: writing %d %s PLMN record(s)', ref, length(entries), kind));
 
 		if (kind == 'nas')
 			sim.write_nas_plmn(entry.modem, entries, cb);
+		else if (kind == 'fplmn')
+			sim.write_fplmn(entry.modem, entries, cb);
 		else
 			sim.write_user_plmn(entry.modem, entries, cb);
 	};
@@ -217,13 +219,15 @@ export function install(self, o)
 		if (type(r) != 'object' || type(r.entries) != 'array' || !length(r.entries))
 			return cb({ error: 'no_configured_list' });
 
-		let kind = (r.type == 'nas') ? 'nas' : 'user';
+		let kind = (r.type == 'nas') ? 'nas' : (r.type == 'fplmn') ? 'fplmn' : 'user';
 
-		log('notice', sprintf('modem %s: restoring the configured %s preferred list (%d records)',
+		log('notice', sprintf('modem %s: restoring the configured %s list (%d records)',
 			ref, kind, length(r.entries)));
 
 		if (kind == 'nas')
 			sim.write_nas_plmn(entry.modem, r.entries, cb);
+		else if (kind == 'fplmn')
+			sim.write_fplmn(entry.modem, r.entries, cb);
 		else
 			sim.write_user_plmn(entry.modem, r.entries, cb);
 	};

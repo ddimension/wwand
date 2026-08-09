@@ -721,6 +721,8 @@ export function apdu_close(modem, slot, channel, cb)
 const EF_PLMN_USER = { file_id: 0x6F60, path: "\x00\x3F\xFF\x7F" };   // PLMNwAcT
 const EF_PLMN_OPER = { file_id: 0x6F61, path: "\x00\x3F\xFF\x7F" };   // OPLMNwAcT
 const EF_PLMN_HOME = { file_id: 0x6F62, path: "\x00\x3F\xFF\x7F" };   // HPLMNwAcT
+const EF_FPLMN     = { file_id: 0x6F7B, path: "\x00\x3F\xFF\x7F" };   // Forbidden PLMNs
+const EF_FPLMN_ID  = 0x6F7B;   // decimal 28539 for AT+CRSM
 
 // decode PLMNwAcT records (TS 31.102): 5 bytes each — 3 bytes BCD PLMN
 // (nibble-swapped, 0xF filler = 2-digit MNC) + 2 bytes access-technology mask
@@ -751,6 +753,141 @@ export function decode_plmn_act(bytes)
 	return out;
 };
 
+// EF_FPLMN (6F7B): the forbidden-PLMN list — 3 bytes per PLMN (packed MCC/MNC
+// BCD, NO access technology), 0xFF-padded. Same nibble packing as the first 3
+// bytes of a PLMNwAcT record. decode -> [ { mcc, mnc } ].
+export function decode_fplmn(bytes)
+{
+	let out = [];
+
+	for (let i = 0; i + 2 < length(bytes ?? []); i += 3) {
+		let b = slice(bytes, i, i + 3);
+
+		if (b[0] == 0xFF)
+			continue;   // empty slot
+
+		let d = [ b[0] & 0xF, b[0] >> 4, b[1] & 0xF, b[1] >> 4, b[2] & 0xF, b[2] >> 4 ];
+
+		push(out, {
+			mcc: sprintf('%d%d%d', d[0], d[1], d[2]),
+			mnc: sprintf('%d%d', d[4], d[5]) + ((d[3] == 0xF) ? '' : sprintf('%d', d[3])),
+		});
+	}
+
+	return out;
+};
+
+// pack forbidden-PLMN entries back into EF_FPLMN bytes, 0xFF-padded to at least
+// min_bytes (default 12 = 4 slots, the 3GPP minimum). Skips malformed entries
+// (mcc not 3 digits, mnc not 2-3 digits). Returns a byte array.
+export function encode_fplmn(entries, min_bytes)
+{
+	let out = [];
+	let dig = (s, i) => +substr(sprintf('%s', s), i, 1);
+
+	for (let e in (entries ?? [])) {
+		let mcc = replace(sprintf('%s', e.mcc ?? ''), /[^0-9]/g, '');
+		let mnc = replace(sprintf('%s', e.mnc ?? ''), /[^0-9]/g, '');
+
+		if (length(mcc) != 3 || (length(mnc) != 2 && length(mnc) != 3))
+			continue;
+
+		let m3 = (length(mnc) == 3) ? dig(mnc, 2) : 0xF;
+
+		push(out, (dig(mcc, 1) << 4) | dig(mcc, 0));   // MCC2 | MCC1
+		push(out, (m3 << 4) | dig(mcc, 2));            // MNC3(or F) | MCC3
+		push(out, (dig(mnc, 1) << 4) | dig(mnc, 0));   // MNC2 | MNC1
+	}
+
+	while (length(out) < (min_bytes ?? 12))
+		push(out, 0xFF);
+
+	return out;
+};
+
+// read the forbidden-PLMN list (EF_FPLMN 6F7B): QMI UIM READ_TRANSPARENT first,
+// then AT+CRSM 176 (the only path on modems whose UIM rejects EF reads, e.g. the
+// Huawei E392 — code 48). cb([ { mcc, mnc } ]) or cb(null) when unreadable.
+export function read_fplmn(modem, cb)
+{
+	let via_crsm = () => {
+		if (!modem.at)
+			return cb(null);
+
+		// P3=12: the standard 4-slot EF_FPLMN; enough for the common case
+		modem.at.send(sprintf('AT+CRSM=176,%d,0,0,12', EF_FPLMN_ID), (err, res) => {
+			let r = err ? null : atcmd.parse_crsm(res?.lines);
+			cb((r && r.ok && r.data) ? decode_fplmn(hex_to_arr(r.data)) : null);
+		}, { timeout: 8000 });
+	};
+
+	if (modem.uim)
+		return read_ef(modem, EF_FPLMN, (bytes) => {
+			if (bytes != null)
+				return cb(decode_fplmn(bytes));
+
+			via_crsm();   // UIM refused the EF read -> AT fallback
+		});
+
+	via_crsm();
+};
+
+// write the forbidden-PLMN list (EF_FPLMN 6F7B): QMI UIM WRITE_TRANSPARENT
+// first, AT+CRSM 214 fallback (E392). entries: [ { mcc, mnc } ] (no AcT). FPLMN
+// update is a PIN1 operation (no ADM), unlike the operator/home selector lists.
+// Reads the list back for cross-verification. NOTE the modem also manages this
+// list itself (adds on EMM reject #11/#13/#15) — the daemon re-asserts the
+// configured list before every radio-on.
+export function write_fplmn(modem, entries, cb)
+{
+	let bytes = encode_fplmn(entries, 12);
+
+	let finish = () => read_fplmn(modem, (fplmn) =>
+		cb(null, { ok: true, written: length(entries ?? []), fplmn: fplmn }));
+
+	// AT+CRSM update. Firmwares disagree on the <data> argument: some want it
+	// quoted ("62F2..."), some bare (62F2...). Try quoted first; if the modem
+	// rejects the syntax outright (no +CRSM line at all), retry bare.
+	let hex = arr_to_hex(bytes);
+	let crsm_write;   // forward-declared (self-referencing arrow -> ucode TDZ)
+	crsm_write = (quoted, retry) => {
+		if (!modem.at)
+			return cb({ error: 'no_write_channel' });
+
+		let arg = quoted ? sprintf('"%s"', hex) : hex;
+
+		modem.at.send(sprintf('AT+CRSM=214,%d,0,0,%d,%s', EF_FPLMN_ID, length(bytes), arg), (werr, res) => {
+			let r = werr ? null : atcmd.parse_crsm(res?.lines);
+
+			// no +CRSM line -> the modem rejected the command form; try the other
+			if (r == null && retry)
+				return crsm_write(!quoted, false);
+
+			if (!r || !r.ok)
+				return cb({ error: 'crsm_write',
+				            note: r ? sprintf('SIM rejected FPLMN write (SW %02X%02X)', r.sw1, r.sw2)
+				                    : 'no CRSM response' });
+
+			finish();
+		}, { timeout: 8000 });
+	};
+	let via_crsm = () => crsm_write(true, true);
+
+	if (modem.uim)
+		return modem.uim.request('WRITE_TRANSPARENT', {
+			session:    { session_type: uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING, aid: '' },
+			file:       { file_id: EF_FPLMN.file_id, path: EF_FPLMN.path },
+			write_data: { offset: 0, data: bytes },
+		}, (err) => {
+			if (!err)
+				return finish();
+
+			via_crsm();   // UIM refused (E392) -> AT+CRSM
+		}, { no_recovery: true });
+
+	via_crsm();
+};
+
 // best-effort read of the three PLMN selector lists; a list reads as null
 // when the file is absent (e.g. Telekom SIMs carry no user list)
 // the AcT bitmask shared by EF 6F60 and QMI NAS preferred-networks: bit flags
@@ -775,7 +912,7 @@ export function plmn_act_bits(e)
 
 export function read_plmn_lists(modem, cb)
 {
-	let out = { user: null, nas: null, operator: null, home: null };
+	let out = { user: null, nas: null, operator: null, home: null, fplmn: null };
 
 	// map a QMI NAS preferred-networks array to the display shape
 	let map_nas = (arr) => map(arr ?? [], (e) => {
@@ -859,8 +996,11 @@ export function read_plmn_lists(modem, cb)
 		});
 	};
 
-	// user list (EF 6F60) via UIM/AT, NAS list via NAS Get, then operator/home
-	user_via_uim_at(() => read_nas(() => read_op_home(() => cb(out))));
+	// forbidden list (EF 6F7B) via UIM, else AT+CRSM
+	let read_fpl = (done) => read_fplmn(modem, (f) => { out.fplmn = f; done(); });
+
+	// user list (EF 6F60) via UIM/AT, NAS via NAS Get, operator/home, forbidden
+	user_via_uim_at(() => read_nas(() => read_op_home(() => read_fpl(() => cb(out)))));
 };
 
 // Write the USER-controlled preferred PLMN list (EF 6F60 / PLMNwAcT) via the
@@ -1048,8 +1188,8 @@ export function restore_preferred_plmn(modem, log, cb)
 	if (type(r) != 'object' || type(r.entries) != 'array' || !length(r.entries))
 		return cb();
 
-	let kind = (r.type == 'nas') ? 'nas' : 'user';
-	let writer = (kind == 'nas') ? write_nas_plmn : write_user_plmn;
+	let kind = (r.type == 'nas') ? 'nas' : (r.type == 'fplmn') ? 'fplmn' : 'user';
+	let writer = (kind == 'nas') ? write_nas_plmn : (kind == 'fplmn') ? write_fplmn : write_user_plmn;
 
 	writer(modem, r.entries, (err, res) => {
 		if (err)

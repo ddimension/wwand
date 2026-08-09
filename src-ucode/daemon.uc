@@ -1273,6 +1273,11 @@ export function create(opts)
 				locks: entry.modem?.locks,
 				registration: entry.modem?.reg,
 				registration_detail: entry.modem?.reg_detail,
+				// current fine access technology (NB-IoT/LTE-M/5G-SA/… identified
+				// over AT where QMI/MBIM can't) and a best-effort capability
+				// summary { rats, iot_modes, ntn }
+				rat: entry.modem?.rat_label,
+				caps: entry.modem?.caps,
 				config_warnings: entry.modem?.config_warnings,
 				proto_errors: entry.modem?.counters?.proto_errors,
 				qmi_errors: entry.modem?.counters?.proto_errors,   // deprecated alias

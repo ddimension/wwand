@@ -479,6 +479,22 @@ ok(index(l, 'lock_4g=1300:246') >= 0, 'ft-ncm: cell lock shown');
 l = mc.format_telemetry({ reg: {}, signal: { lte: { rssi: -50, rsrp: -32768, snr: -32768 } }, config: {} });
 ok(index(l, 'sig_lte=[rssi -50]') >= 0, 'ft: sentinel fields dropped');
 
+// a fine IoT RAT (from AT QNWINFO) overrides the coarse radio-interface tech:
+// the QMI radio_ifs say LTE, but the modem is actually on NB-IoT
+l = mc.format_telemetry({
+	reg: { radio_ifs: [ 8 ] },
+	rat_fine: { rat: 'nb-iot', mode: null, ntn: false, src: 'qnwinfo' }, config: {},
+});
+ok(index(l, 'tech=NB-IoT') >= 0, 'ft: IoT rat_fine overrides coarse LTE');
+ok(index(l, 'tech=LTE') < 0, 'ft: coarse LTE suppressed when IoT identified');
+
+// a non-IoT rat_fine (e.g. plain LTE) does NOT override — coarse path stands
+l = mc.format_telemetry({
+	reg: { radio_ifs: [ 8 ] },
+	rat_fine: { rat: 'lte', mode: null, ntn: false, src: 'qnwinfo' }, config: {},
+});
+ok(index(l, 'tech=LTE') >= 0, 'ft: non-IoT rat_fine leaves coarse tech intact');
+
 // --- check_identity: post-open stable-identity gate --------------------------
 let ci_events;
 let ci_emit = (ev, d) => push(ci_events, [ ev, d ]);

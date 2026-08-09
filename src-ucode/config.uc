@@ -217,7 +217,7 @@ function plmnlist_from_section(s)
 			push(entries, e);
 	}
 
-	return { type: (s.type == 'user') ? 'user' : 'nas', entries: entries };
+	return { type: (s.type == 'user') ? 'user' : (s.type == 'fplmn') ? 'fplmn' : 'nas', entries: entries };
 }
 
 // build a per-SIM override from a `config wwand_sim` section. Matched at runtime
