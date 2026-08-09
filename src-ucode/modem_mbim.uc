@@ -126,7 +126,7 @@ export function create(opts)
 
 	// --- step chain --------------------------------------------------------
 
-	let step_open, step_fcc, step_caps, step_at, step_datapath, step_sim, step_register, step_attach;
+	let step_open, step_fcc, step_caps, step_at, step_at_ident, step_datapath, step_sim, step_register, step_attach;
 
 	let fail = modem_common.make_fail(self, {
 		log: log, timing: self.timing, emit: emit,
@@ -236,8 +236,31 @@ export function create(opts)
 		log: log,
 		drain_interval: self.timing.at_drain,
 		set_drain_timer: (t) => { at_drain_timer = t; },
-		next: step_datapath,
+		next: step_at_ident,
 	});
+
+	// MBIM DEVICE_CAPS carries no manufacturer — fill it best-effort from the AT
+	// side channel (AT+CGMI), for parity with the QMI DMS / NCM CGMI identity.
+	// Fully non-blocking: no AT, an error or a timeout just leaves it null and
+	// proceeds (some MBIM firmwares answer AT slowly or not at all).
+	step_at_ident = () => {
+		if (self.info.manufacturer || !self.at)
+			return step_datapath();
+
+		self.at.send('AT+CGMI', (err, res) => {
+			if (!err)
+				for (let l in (res?.lines ?? [])) {
+					let t = trim(replace(l, /^\+CGMI:\s*/, ''));
+
+					if (t != '' && t != 'OK' && !match(t, /^[+^]/)) {
+						self.info.manufacturer = t;
+						break;
+					}
+				}
+
+			step_datapath();
+		}, { timeout: 3000 });
+	};
 
 	// session datapath: parent netdev up, one VLAN sub-device per session id
 	// > 0 (named after the context's mux_link so netifd's device binding

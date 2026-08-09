@@ -1254,8 +1254,12 @@ export function create(opts)
 				apdu_backend: entry.modem?._apdu_be,   // mbim | qmi | at (once probed)
 				pin1: entry.modem?.pin1,
 				sim_block: entry.modem?.sim_block,  // { reason, retries } when SIM_BLOCKED
+				manufacturer: entry.modem?.info?.manufacturer,
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,
+				// firmware version, backend-neutral: MBIM device caps firmware_info,
+				// else the QMI DMS / AT CGMR revision
+				firmware: entry.modem?.info?.firmware ?? entry.modem?.info?.revision,
 				imei: entry.modem?.info?.imei,
 				imsi: entry.modem?.info?.imsi,
 				iccid: entry.modem?.info?.iccid,
