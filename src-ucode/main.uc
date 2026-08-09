@@ -452,7 +452,8 @@ function run_daemon()
 
 			for (let name, s in net) {
 				let legacy = (s['.type'] == 'interface' && s.modem == null &&
-				              (s.proto == 'qmi' || s.proto == 'mbim' || s.proto == 'ncm'));
+				              (s.proto == 'qmi' || s.proto == 'mbim' ||
+				               s.proto == 'ncm' || s.proto == 'modemmanager'));
 
 				if (legacy && !want[name])
 					continue;

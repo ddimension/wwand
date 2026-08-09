@@ -157,11 +157,24 @@ comgt-ncm packages without conflict and, by default, leaves their `proto
 qmi`/`mbim`/`ncm` interfaces untouched. Two ways to move an interface to wwand:
 
 - **User-triggered (recommended).** In LuCI → Network → Modems, the *Migratable
-  interfaces* section lists every legacy `proto qmi`/`mbim`/`ncm` interface; pick
-  the ones to convert and press *Migrate selected*. Each is rewritten **in place**
-  to `proto wwand` (its name, firewall zone and IP settings are kept) and a
-  `wwand_modem` section is created and linked. The same conversion is available on
-  the command line: `/usr/libexec/wwand/migrate` (dry-run) / `--apply`.
+  interfaces* section lists every legacy `proto qmi`/`mbim`/`ncm`/`modemmanager`
+  interface; pick the ones to convert and press *Migrate selected*. Each is
+  rewritten **in place** to `proto wwand` (its name, firewall zone and IP settings
+  are kept) and a `wwand_modem` section is created and linked. The same conversion
+  is available on the command line: `/usr/libexec/wwand/migrate` (dry-run) /
+  `--apply`.
+
+  For a **ModemManager** interface the option translation is: `device` (a sysfs
+  path) → modem `path`; `iptype` → `pdp_type`; `allowedauth` → `auth`
+  (pap+chap → `both`; mschap/eap have no equivalent and are dropped);
+  `allowedmode` → modem `modes` (`4g|5g` → `lte,nr5g`); `plmn` → modem
+  `mcc`/`mnc`; `signalrate` → modem `stats_interval`; `pincode` moves to the
+  modem. `apn`/`username`/`password`/`metric` stay on the interface.
+  `preferredmode`, `sourcefilter`, `lowpower`, `allow_roaming`,
+  `force_connection` and the `init_*` attach-bearer group are dropped — wwand
+  programs the LTE attach profile from the connection's `apn`/`pdp_type`.
+  **After migrating, stop and remove the ModemManager service** — it would
+  otherwise keep claiming the modem's control port.
 - **Opt-in automatic.** Setting the global `option takeover '1'` makes wwand adopt
   legacy `proto qmi` interfaces at runtime, register the `qmi` proto alias, and
   auto-migrate everything on the next install/upgrade — the historical behavior.
@@ -406,11 +419,12 @@ If a Lenovo/Dell/HP-SKU modem stays in low power (no RF), set
 unlock messages by itself; MBIM-mode Quectel needs the explicit `quectel`
 value. See the option in [Configuration](#configuration).
 
-### Migrating from stock qmi/mbim/ncm
+### Migrating from stock qmi/mbim/ncm/modemmanager
 
 wwand coexists with the stock packages and does not touch their interfaces by
 default. Open **Network → Modems** in LuCI: the *Migratable interfaces* section
-lists your `proto qmi`/`mbim`/`ncm` interfaces — select them and press *Migrate
+lists your `proto qmi`/`mbim`/`ncm`/`modemmanager` interfaces — select them and
+press *Migrate
 selected* to convert them **in place** to `proto wwand` (name/firewall/IP kept).
 The CLI equivalent is `/usr/libexec/wwand/migrate` (dry-run) / `--apply`. To
 restore the old fully-automatic behavior (adopt + auto-migrate on upgrade), set
@@ -1119,7 +1133,8 @@ to the eUICC slot for a permanent switch — see
 
 **Old config — do I need to migrate?** Only when you want wwand to manage a
 given interface. wwand coexists with the stock uqmi/umbim/comgt-ncm packages and
-leaves their `proto qmi`/`mbim`/`ncm` interfaces alone by default. To hand one to
+leaves their `proto qmi`/`mbim`/`ncm`/`modemmanager` interfaces alone by default.
+To hand one to
 wwand, migrate it from **Network → Modems** (*Migratable interfaces* → *Migrate
 selected*) — it is rewritten in place to `proto wwand`. CLI equivalent:
 `/usr/libexec/wwand/migrate` (dry run) then `--apply`. Setting `option takeover

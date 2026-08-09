@@ -19,8 +19,8 @@ soft reset; its connections drop briefly and recover on their own).
 ![Modems overview](images/luci-modems-list.png)
 
 Below the SIM list, a **Migratable interfaces** section appears whenever the box
-still has stock `proto qmi`/`mbim`/`ncm` interfaces that wwand does not manage
-yet. Tick the ones to convert and press **Migrate selected**: each is rewritten
+still has stock `proto qmi`/`mbim`/`ncm`/`modemmanager` interfaces that wwand
+does not manage yet. Tick the ones to convert and press **Migrate selected**: each is rewritten
 **in place** to `proto wwand` (its name, firewall zone and IP settings are kept)
 and a `wwand_modem` section is created and linked — wwand then takes over managing
 it. This is the recommended way to hand a stock cellular interface to wwand; the

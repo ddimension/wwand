@@ -530,4 +530,61 @@ eq(mp_set(ch, 'wan', 'modem'), 'wwmodem0', 'migrate-share: wan -> wwmodem0');
 eq(mp_set(ch, 'ims', 'modem'), 'wwmodem0', 'migrate-share: ims -> same wwmodem0');
 eq(length(filter(ch, c => c[0] == 'add' && c[4] == 'wwand_modem')), 1, 'migrate-share: exactly one wwand_modem for a shared device');
 
+// --- migrate_plan: ModemManager (`proto modemmanager`) ------------------------
+// MM's `device` is a full sysfs path -> the modem's `path` anchor (interface
+// component stripped); allowedauth/allowedmode/plmn/iptype/signalrate are
+// translated; the MM-runtime and init_* options are stripped; apn/creds/metric
+// stay on the interface untouched.
+ch = config.migrate_plan({ network: {
+	wan: { '.type': 'interface', proto: 'modemmanager',
+	       device: '/sys/devices/platform/soc/8af8800.usb/usb1/1-1',
+	       apn: 'internet.telekom', allowedauth: [ 'pap', 'chap' ],
+	       username: 't', password: 'p', pincode: '1234', iptype: 'ipv4',
+	       plmn: '26201', allowedmode: '4g|5g', preferredmode: '5g',
+	       signalrate: '30', allow_roaming: '1', init_epsbearer: 'none',
+	       metric: '10' },
+} });
+ok(mp_has(ch, 'add', 'wwmodem0', null), 'migrate-mm: wwand_modem created');
+eq(mp_set(ch, 'wwmodem0', 'path'), 'platform/soc/8af8800.usb/usb1/1-1',
+	'migrate-mm: sysfs device -> modem path (prefix stripped)');
+eq(mp_set(ch, 'wwmodem0', 'pincode'), '1234', 'migrate-mm: pincode -> modem');
+eq(mp_set(ch, 'wwmodem0', 'modes'), 'lte,nr5g', 'migrate-mm: allowedmode 4g|5g -> lte,nr5g');
+eq(mp_set(ch, 'wwmodem0', 'mcc'), '262', 'migrate-mm: plmn mcc');
+eq(mp_set(ch, 'wwmodem0', 'mnc'), '01', 'migrate-mm: plmn mnc keeps the leading zero');
+eq(mp_set(ch, 'wwmodem0', 'stats_interval'), '30', 'migrate-mm: signalrate -> stats_interval');
+eq(mp_set(ch, 'wan', 'proto'), 'wwand', 'migrate-mm: proto -> wwand');
+eq(mp_set(ch, 'wan', 'modem'), 'wwmodem0', 'migrate-mm: option modem set');
+eq(mp_set(ch, 'wan', 'pdp_type'), 'ipv4', 'migrate-mm: iptype -> pdp_type');
+eq(mp_set(ch, 'wan', 'auth'), 'both', 'migrate-mm: pap+chap -> both');
+ok(mp_has(ch, 'delete', 'wan', 'device'), 'migrate-mm: device stripped');
+ok(mp_has(ch, 'delete', 'wan', 'iptype'), 'migrate-mm: iptype stripped');
+ok(mp_has(ch, 'delete', 'wan', 'plmn'), 'migrate-mm: plmn stripped');
+ok(mp_has(ch, 'delete', 'wan', 'preferredmode'), 'migrate-mm: preferredmode stripped (no wwand equivalent)');
+ok(mp_has(ch, 'delete', 'wan', 'init_epsbearer'), 'migrate-mm: init_* stripped (attach follows apn)');
+ok(mp_has(ch, 'delete', 'wan', 'allow_roaming'), 'migrate-mm: allow_roaming stripped');
+ok(!mp_has(ch, 'delete', 'wan', 'apn'), 'migrate-mm: apn kept on interface');
+ok(!mp_has(ch, 'delete', 'wan', 'metric'), 'migrate-mm: metric kept (generic netifd)');
+
+// edge cases: string-form auth, bare usb id, unmappable mode/auth -> omitted
+ch = config.migrate_plan({ network: {
+	wan: { '.type': 'interface', proto: 'modemmanager', device: '1-1.2',
+	       apn: 'x', allowedauth: 'chap', allowedmode: 'any' },
+} });
+eq(mp_set(ch, 'wwmodem0', 'path'), '1-1.2', 'migrate-mm: bare usb id kept verbatim');
+eq(mp_set(ch, 'wan', 'auth'), 'chap', 'migrate-mm: string allowedauth chap');
+ok(!mp_has(ch, 'set', 'wwmodem0', 'modes'), 'migrate-mm: allowedmode any -> no modes written');
+
+ch = config.migrate_plan({ network: {
+	wan: { '.type': 'interface', proto: 'modemmanager', device: '1-1',
+	       apn: 'x', allowedauth: [ 'eap' ], plmn: 'garbage' },
+} });
+ok(!mp_has(ch, 'set', 'wan', 'auth'), 'migrate-mm: eap-only auth -> no auth written');
+ok(!mp_has(ch, 'set', 'wwmodem0', 'mcc'), 'migrate-mm: malformed plmn dropped');
+
+// device-less MM section: nothing to anchor on -> skipped entirely
+ch = config.migrate_plan({ network: {
+	wan: { '.type': 'interface', proto: 'modemmanager', apn: 'x' },
+} });
+eq(length(ch), 0, 'migrate-mm: no device -> not migratable, no changes');
+
 done('test_config');

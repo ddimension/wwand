@@ -596,7 +596,8 @@ export function parse(raw)
 // migrate_plan(raw): ordered uci changes converting OLD configs to the
 // network-native model, all in /etc/config/network. Stock `proto mbim`/`ncm`
 // BREAK once wwand-mbim/-ncm replace the stock handler, so they are converted to
-// `proto wwand`; legacy inline `proto qmi` too (a `proto qmi` already carrying
+// `proto wwand`; legacy inline `proto qmi` and `proto modemmanager` too (a
+// `proto qmi` already carrying
 // `option modem` just gets its proto upgraded in place; `proto wwand` skipped).
 // Each change is [ op, 'network', section, option|null, value ] with op
 // add|set|add_list|delete. Pure + host-testable.
@@ -616,6 +617,74 @@ const MIGRATE_STRIP_IFACE = [ 'usb_path', 'path', 'ctldevice', 'dhcp',
 	'ipv4', 'ipv6', 'mode', 'strongestnetwork', 'autocreateif', 'customroutes' ];
 // connection options (apn/auth/username/password/profile/mtu/use_pushed_*/
 // settings_poll) simply stay on the interface, so they need no explicit list.
+
+// --- ModemManager (`proto modemmanager`) translation --------------------------
+// MM's option set maps mostly 1:1; what has no wwand home is stripped and
+// documented (reference.md): preferredmode (wwand has only the allowed set),
+// sourcefilter/lowpower/allow_roaming/force_connection (MM runtime behaviors),
+// and the init_* attach-bearer group (wwand programs the LTE attach profile
+// from the connection's apn/pdp_type). apn/username/password/metric stay.
+const MM_MODE_MAP = { '2g': 'gsm', '3g': 'umts', '4g': 'lte', '5g': 'nr5g' };
+const MIGRATE_STRIP_IFACE_MM = [ 'device', 'allowedauth', 'allowedmode',
+	'preferredmode', 'pincode', 'iptype', 'plmn', 'signalrate', 'sourcefilter',
+	'lowpower', 'allow_roaming', 'force_connection', 'init_epsbearer',
+	'init_iptype', 'init_allowedauth', 'init_user', 'init_password', 'init_apn' ];
+
+// MM `device` is a FULL sysfs path (/sys/devices/…), possibly down to an
+// interface component — wwand's modem `path` is the same anchor relative to
+// /sys/devices (wireless-style; discovery also accepts a bare '1-1.2' id).
+function mm_path(dev)
+{
+	let p = replace(dev, /^\/sys\/devices\//, '');
+
+	// drop a trailing USB interface component ("…/1-1:1.4" -> "…/1-1")
+	return replace(p, /:[0-9]+\.[0-9]+$/, '');
+}
+
+// MM allowedauth is a list (or space/comma string) of pap/chap/mschap*/eap;
+// wwand knows none|pap|chap|both. mschap*/eap have no equivalent -> null.
+function mm_auth(v)
+{
+	let items = (type(v) == 'array') ? v : split(sprintf('%s', v ?? ''), /[ ,|]+/);
+	let pap = false, chap = false;
+
+	for (let a in items) {
+		if (a == 'pap') pap = true;
+		else if (a == 'chap') chap = true;
+	}
+
+	return (pap && chap) ? 'both' : pap ? 'pap' : chap ? 'chap' : null;
+}
+
+// MM allowedmode '4g|5g' -> wwand modes 'lte,nr5g'; 'any'/empty -> null (=all)
+function mm_modes(v)
+{
+	if (v == null || v == '' || v == 'any')
+		return null;
+
+	let out = [];
+
+	for (let m in split(sprintf('%s', v), /[|,]/)) {
+		let w = MM_MODE_MAP[trim(m)];
+
+		if (w)
+			push(out, w);
+	}
+
+	return length(out) ? join(',', out) : null;
+}
+
+// MM plmn '26201' -> { mcc: '262', mnc: '01' } (mnc kept as string so the
+// leading zero survives); malformed -> null
+function mm_plmn(v)
+{
+	let s = sprintf('%s', v ?? '');
+
+	if (!match(s, /^[0-9]{5,6}$/))
+		return null;
+
+	return { mcc: substr(s, 0, 3), mnc: substr(s, 3) };
+}
 
 export function migrate_plan(raw)
 {
@@ -676,7 +745,8 @@ export function migrate_plan(raw)
 
 		let proto = s.proto;
 
-		if (proto != 'wwand' && proto != 'qmi' && proto != 'mbim' && proto != 'ncm')
+		if (proto != 'wwand' && proto != 'qmi' && proto != 'mbim' &&
+		    proto != 'ncm' && proto != 'modemmanager')
 			continue;
 
 		// already network-native: skip a `proto wwand` interface outright; a
@@ -684,6 +754,60 @@ export function migrate_plan(raw)
 		if (s.modem != null) {
 			if (proto == 'qmi')
 				push(changes, [ 'set', 'network', name, 'proto', 'wwand' ]);
+
+			continue;
+		}
+
+		// --- ModemManager interface --------------------------------------
+		// MM's `device` is a full sysfs path — the ONLY anchor the section
+		// carries (no netdev, no /dev node). It maps to the modem's `path`
+		// (the wireless-style sysfs anchor discovery resolves), a deliberate
+		// deviation from the netdev-anchor rule below; the control protocol
+		// needs no option at all (discovery reads the driver binding).
+		if (proto == 'modemmanager') {
+			if (s.device == null || s.device == '')
+				continue;
+
+			let ident = 'mm:' + s.device;
+			let modem = modem_by_ident[ident];
+
+			if (!modem) {
+				modem = sprintf('wwmodem%d', seq++);
+				modem_by_ident[ident] = modem;
+				push(changes, [ 'add', 'network', modem, null, 'wwand_modem' ]);
+				put(modem, 'path', mm_path(s.device));
+
+				if (s.pincode != null && s.pincode != '')
+					put(modem, 'pincode', s.pincode);
+
+				let modes = mm_modes(s.allowedmode);
+				if (modes)
+					put(modem, 'modes', modes);
+
+				let plmn = mm_plmn(s.plmn);
+				if (plmn) {
+					put(modem, 'mcc', plmn.mcc);
+					put(modem, 'mnc', plmn.mnc);
+				}
+
+				if (s.signalrate != null && s.signalrate != '')
+					put(modem, 'stats_interval', s.signalrate);
+			}
+
+			put(name, 'proto', 'wwand');
+			put(name, 'modem', modem);
+
+			// values are identical (ipv4/ipv6/ipv4v6) — a straight rename
+			if (s.iptype != null && s.iptype != '')
+				put(name, 'pdp_type', s.iptype);
+
+			let auth = mm_auth(s.allowedauth);
+			if (auth)
+				put(name, 'auth', auth);
+
+			for (let k in MIGRATE_STRIP_IFACE_MM)
+				if (s[k] != null)
+					push(changes, [ 'delete', 'network', name, k, null ]);
 
 			continue;
 		}
