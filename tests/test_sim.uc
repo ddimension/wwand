@@ -417,9 +417,71 @@ scenario('plmn read: AT+CPOL fallback when UIM rejects the EF read', (next) => {
 	});
 });
 
-scenario('plmn write: no AT channel -> clean error', (next) => {
+// QMI NAS path preferred over AT: write via SET_PREFERRED_NETWORKS, read via GET
+function mock_nas(store, calls) {
+	return {
+		request: (name, args, cb) => {
+			push(calls, name);
+			if (name == 'SET_PREFERRED_NETWORKS') {
+				store.pn = args.preferred_networks;
+				return uloop.timer(1, () => cb(null, {}));
+			}
+			if (name == 'GET_PREFERRED_NETWORKS')
+				return uloop.timer(1, () => cb(null, { preferred_networks: store.pn ?? [] }));
+			uloop.timer(1, () => cb({ error: 'unknown' }));
+		},
+	};
+}
+
+scenario('plmn write: uses QMI NAS Set (not AT) when NAS is present', (next) => {
+	let store = {}, calls = [], sent = [];
+	let m = { nas: mock_nas(store, calls), at: mock_at(sent), uim: null };
+
+	sim.write_user_plmn(m, [
+		{ mcc: '262', mnc: '01', utran: true, eutran: true },
+		{ mcc: '310', mnc: '260', eutran: true, ngran: true },
+	], (err, res) => {
+		eq(err, null, 'nas write: ok');
+		eq(index(calls, 'SET_PREFERRED_NETWORKS') >= 0, true, 'nas write: used NAS Set');
+		eq(length(sent), 0, 'nas write: did NOT touch AT+CPOL');
+		// the rat bitmask encodes the AcT flags (UTRAN|E-UTRAN = 0xC000)
+		eq(store.pn[0], { mcc: 262, mnc: 1, rat: 0xC000 }, 'nas write: record 0 mcc/mnc/rat');
+		eq(store.pn[1].rat, 0x4800, 'nas write: record 1 rat (E-UTRAN|NG-RAN)');
+		// read-back (finish) goes through NAS Get and decodes the same list
+		eq(length(res.user), 2, 'nas write: read-back via NAS Get returns the list');
+		eq(res.user[1], { mcc: '310', mnc: '260', gsm: false, utran: false, eutran: true, ngran: true },
+			'nas write: read-back decodes 3-digit mnc + AcT flags');
+		next();
+	});
+});
+
+scenario('plmn write: falls back to AT when NAS Set errors', (next) => {
+	let sent = [];
+	let m = {
+		nas: { request: (name, args, cb) => uloop.timer(1, () => cb({ error: 'not_supported' })) },
+		at: mock_at(sent), uim: null,
+	};
+	sim.write_user_plmn(m, [ { mcc: '262', mnc: '01', eutran: true } ], (err) => {
+		eq(err, null, 'nas->at fallback: ok');
+		ok(index(sent, 'AT+CPLS=0') >= 0, 'nas->at fallback: used AT+CPOL after NAS error');
+		next();
+	});
+});
+
+scenario('plmn read: QMI NAS Get preferred over UIM/AT', (next) => {
+	let store = { pn: [ { mcc: 262, mnc: 2, rat: 0x8000 | 0x4000 | 0x0080 } ] }, calls = [];
+	let m = { nas: mock_nas(store, calls), uim: null };
+	sim.read_plmn_lists(m, (lists) => {
+		eq(index(calls, 'GET_PREFERRED_NETWORKS') >= 0, true, 'nas read: used NAS Get');
+		eq(lists.user[0], { mcc: '262', mnc: '02', gsm: true, utran: true, eutran: true, ngran: false },
+			'nas read: decoded from NAS Get');
+		next();
+	});
+});
+
+scenario('plmn write: no write channel -> clean error', (next) => {
 	sim.write_user_plmn({ at: null }, [ { mcc: '262', mnc: '01' } ], (err, res) => {
-		eq(err?.error, 'no_at_channel', 'plmn write: no AT channel reported');
+		eq(err?.error, 'no_write_channel', 'plmn write: no NAS and no AT reported');
 		next();
 	});
 });

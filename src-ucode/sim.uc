@@ -753,15 +753,41 @@ export function decode_plmn_act(bytes)
 
 // best-effort read of the three PLMN selector lists; a list reads as null
 // when the file is absent (e.g. Telekom SIMs carry no user list)
+// the AcT bitmask shared by EF 6F60 and QMI NAS preferred-networks: bit flags
+// for the radio access technologies of one PLMN record.
+const PLMN_ACT_UTRAN = 0x8000, PLMN_ACT_EUTRAN = 0x4000, PLMN_ACT_NGRAN = 0x0800, PLMN_ACT_GSM = 0x0080;
+
+export function plmn_act_flags(bits)
+{
+	return {
+		gsm:    !!(bits & PLMN_ACT_GSM),
+		utran:  !!(bits & PLMN_ACT_UTRAN),
+		eutran: !!(bits & PLMN_ACT_EUTRAN),
+		ngran:  !!(bits & PLMN_ACT_NGRAN),
+	};
+};
+
+export function plmn_act_bits(e)
+{
+	return (e.gsm ? PLMN_ACT_GSM : 0) | (e.utran ? PLMN_ACT_UTRAN : 0) |
+	       (e.eutran ? PLMN_ACT_EUTRAN : 0) | (e.ngran ? PLMN_ACT_NGRAN : 0);
+};
+
 export function read_plmn_lists(modem, cb)
 {
 	let out = { user: null, operator: null, home: null };
 
+	// map a QMI NAS preferred-networks array to the display shape
+	let map_nas = (arr) => map(arr ?? [], (e) => {
+		let f = plmn_act_flags(e.rat);
+		return { mcc: sprintf('%d', e.mcc),
+		         mnc: (e.mnc >= 100) ? sprintf('%d', e.mnc) : sprintf('%02d', e.mnc),
+		         gsm: f.gsm, utran: f.utran, eutran: f.eutran, ngran: f.ngran };
+	});
+
 	// AT fallback for the USER list: some modems reject a UIM EF read of 6F60
-	// (HW-seen: Huawei E392 / EG06 return err 48) or have no UIM at all (NCM),
-	// yet expose the same list over AT+CPOL. Read it the way write_user_plmn
-	// writes it — AT+CPLS=0 selects the user list, AT+CPOL? dumps it — so LuCI
-	// shows exactly what was written even when the QMI/UIM read can't see it.
+	// (HW-seen: Huawei E392 / EG06 return err 48) or have no UIM (NCM), yet
+	// expose the list over AT+CPOL (AT+CPLS=0 selects it, AT+CPOL? dumps it).
 	let at_user = (done) => {
 		let at = modem.at;
 
@@ -782,26 +808,53 @@ export function read_plmn_lists(modem, cb)
 		}, { timeout: 5000 });
 	};
 
-	if (!modem.uim)
-		return at_user(() => cb(out));   // no UIM (NCM): AT-only user list
+	// user list via the UIM EF, then AT
+	let user_via_uim_at = (done) => {
+		if (!modem.uim)
+			return at_user(done);
 
-	read_ef(modem, EF_PLMN_USER, (u) => {
-		out.user = (u != null) ? decode_plmn_act(u) : null;
+		read_ef(modem, EF_PLMN_USER, (u) => {
+			out.user = (u != null) ? decode_plmn_act(u) : null;
+
+			if (out.user == null)
+				return at_user(done);
+
+			done();
+		});
+	};
+
+	// user list: QMI NAS Get Preferred Networks first (QMI-native, works even
+	// where the UIM EF read is rejected), then UIM EF, then AT+CPOL.
+	let read_user = (done) => {
+		if (modem.nas)
+			return modem.nas.request('GET_PREFERRED_NETWORKS', {}, (err, data) => {
+				if (!err && data?.preferred_networks != null) {
+					out.user = map_nas(data.preferred_networks);
+					return done();
+				}
+
+				user_via_uim_at(done);
+			});
+
+		user_via_uim_at(done);
+	};
+
+	// operator + home come only from the UIM EFs (no NAS/AT equivalent)
+	let read_op_home = (done) => {
+		if (!modem.uim)
+			return done();
 
 		read_ef(modem, EF_PLMN_OPER, (o) => {
 			out.operator = (o != null) ? decode_plmn_act(o) : null;
 
 			read_ef(modem, EF_PLMN_HOME, (h) => {
 				out.home = (h != null) ? decode_plmn_act(h) : null;
-
-				// user list unreadable over UIM -> fall back to AT+CPOL
-				if (out.user == null)
-					return at_user(() => cb(out));
-
-				cb(out);
+				done();
 			});
 		});
-	});
+	};
+
+	read_user(() => read_op_home(() => cb(out)));
 };
 
 // Write the USER-controlled preferred PLMN list (EF 6F60 / PLMNwAcT) via the
@@ -819,16 +872,12 @@ export function read_plmn_lists(modem, cb)
 export function write_user_plmn(modem, entries, cb)
 {
 	let at = modem.at;
-
-	if (!at)
-		return cb({ error: 'no_at_channel' });
-
 	let list = entries ?? [];
 	let esc = (s) => replace(sprintf('%s', s ?? ''), /[^0-9]/g, '');
 
 	// forward-declared: write_at / del_existing / try_write recurse (self-
 	// referencing let arrows hit the ucode TDZ otherwise — see CLAUDE.md)
-	let finish, write_at, del_existing, try_write;
+	let finish, write_at, del_existing, try_write, at_path;
 
 	finish = () => {
 		// cross-verify via the independent QMI/UIM read path (best-effort:
@@ -890,16 +939,50 @@ export function write_user_plmn(modem, entries, cb)
 			{ timeout: 5000 });
 	};
 
-	// select the user list (some modems lack AT+CPLS — tolerate), then read the
-	// current records so we can clear them before writing the new order
-	at.send('AT+CPLS=0', () => {
-		at.send('AT+CPOL?', (err, res) => {
-			let cur = err ? [] : (atcmd.parse_cpol(res?.lines) ?? []);
-			let indices = sort(map(cur, (e) => e.index), (a, b) => a - b);
+	// the AT+CPOL path (fallback / NCM): select the user list (some modems lack
+	// AT+CPLS — tolerate), read the current records, clear them, write the new
+	// order.
+	at_path = () => {
+		if (!at)
+			return cb({ error: 'no_write_channel' });
 
-			del_existing(indices, length(indices) - 1);
-		}, { timeout: 8000 });
-	}, { timeout: 5000 });
+		at.send('AT+CPLS=0', () => {
+			at.send('AT+CPOL?', (err, res) => {
+				let cur = err ? [] : (atcmd.parse_cpol(res?.lines) ?? []);
+				let indices = sort(map(cur, (e) => e.index), (a, b) => a - b);
+
+				del_existing(indices, length(indices) - 1);
+			}, { timeout: 8000 });
+		}, { timeout: 5000 });
+	};
+
+	// QMI NAS Set Preferred Networks first: the QMI-native write (may persist to
+	// the SIM EF where a modem's AT+CPOL list is only a volatile modem-side copy)
+	// and verifiable via NAS Get. Falls back to AT+CPOL on error / no NAS.
+	if (modem.nas) {
+		let pn = [];
+
+		for (let e in list) {
+			let mcc = +esc(e.mcc), mnc = +esc(e.mnc);
+
+			if (!(mcc >= 100 && mcc <= 999) || !(mnc >= 0 && mnc <= 999))
+				return cb({ error: 'invalid_plmn', plmn: esc(e.mcc) + esc(e.mnc) });
+
+			push(pn, { mcc: mcc, mnc: mnc, rat: plmn_act_bits(e) });
+		}
+
+		return modem.nas.request('SET_PREFERRED_NETWORKS',
+			{ preferred_networks: pn, clear_previous: 1 }, (err) => {
+				if (err) {
+					// NAS refused — try the AT path before giving up
+					return at_path();
+				}
+
+				finish();
+			});
+	}
+
+	at_path();
 };
 
 // sequential-provider ladder: try providers in order until one yields non-null.

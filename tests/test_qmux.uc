@@ -89,6 +89,30 @@ eq(rt.network_information[1],
 	{ mcc: 262, mnc: 3, network_status: 0x12, description: 'Op3' },
 	'network scan: round-trip second element');
 
+// --- NAS Set/Get Preferred Networks (0x0027 / 0x0026) -----------------------
+// TLV 0x10 = guint16-count array of { mcc:u16, mnc:u16, rat:u16 }; the rat is
+// the EF-6F60 AcT bitmask (0x8000 UTRAN, 0x4000 E-UTRAN, 0x0800 NG-RAN,
+// 0x0080 GSM). The array wire form is the same {n:'u16',of} convention proven
+// against real libqmi bytes by the NETWORK_SCAN test above; round-trip here.
+let setrt = tlv.unpack(nas.messages.SET_PREFERRED_NETWORKS.req,
+	tlv.pack(nas.messages.SET_PREFERRED_NETWORKS.req, {
+		preferred_networks: [
+			{ mcc: 262, mnc: 1, rat: 0x8000 | 0x4000 },   // UTRAN + E-UTRAN
+			{ mcc: 262, mnc: 3, rat: 0x4000 | 0x0800 },   // E-UTRAN + NG-RAN
+		],
+		clear_previous: 1,
+	}));
+eq(length(setrt.preferred_networks), 2, 'nas set-pref: two records round-trip');
+eq(setrt.preferred_networks[0], { mcc: 262, mnc: 1, rat: 0xC000 }, 'nas set-pref: element 0 (mcc/mnc/rat)');
+eq(setrt.preferred_networks[1].rat, 0x4800, 'nas set-pref: element 1 rat bitmask (E-UTRAN|NG-RAN)');
+eq(setrt.clear_previous, 1, 'nas set-pref: clear-previous flag');
+
+let getrt = tlv.unpack(nas.messages.GET_PREFERRED_NETWORKS.resp,
+	tlv.pack(nas.messages.GET_PREFERRED_NETWORKS.resp, {
+		preferred_networks: [ { mcc: 310, mnc: 260, rat: 0x4000 } ],
+	}));
+eq(getrt.preferred_networks[0], { mcc: 310, mnc: 260, rat: 0x4000 }, 'nas get-pref: 3-digit mnc + E-UTRAN round-trip');
+
 // --- robustness -------------------------------------------------------------
 
 eq(qmux.decode(null), null, 'null input');

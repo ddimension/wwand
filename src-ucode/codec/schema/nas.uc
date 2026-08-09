@@ -226,6 +226,30 @@ export default {
 			},
 		},
 
+		// Get/Set the 3GPP preferred-networks list (the QMI-native equivalent of
+		// AT+CPOL / EF 6F60 PLMNwAcT). Verified against libqmi 1.38 qmi-service-
+		// nas.json (0x0026/0x0027, since 1.30): TLV 0x10 = guint16-count array of
+		// { mcc:u16, mnc:u16, rat:u16 }, where `rat` is the same AcT bitmask as
+		// EF 6F60 (0x8000 UTRAN, 0x4000 E-UTRAN, 0x0800 NG-RAN, 0x0080 GSM). Set
+		// also takes TLV 0x12 "Clear Previous" (guint8 bool).
+		GET_PREFERRED_NETWORKS: {
+			id: 0x0026,
+			resp: {
+				preferred_networks: { t: 0x10, f: { n: 'u16', of: {
+					mcc: 'u16', mnc: 'u16', rat: 'u16' } } },
+			},
+		},
+
+		SET_PREFERRED_NETWORKS: {
+			id: 0x0027,
+			req: {
+				preferred_networks: { t: 0x10, f: { n: 'u16', of: {
+					mcc: 'u16', mnc: 'u16', rat: 'u16' } } },
+				clear_previous: { t: 0x12, f: 'u8' },
+			},
+			resp: {},
+		},
+
 		// NOTE: request and response TLV ids DIFFER for several fields
 		// (usage 0x21/0x1F, ext lte 0x24/0x23, nr5g sa 0x2F/0x2C, nsa
 		// 0x30/0x2D) — verified against libqmi 1.38 qmi-service-nas.json
