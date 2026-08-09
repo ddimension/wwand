@@ -1471,10 +1471,21 @@ export function create(opts)
 		if (ntb)
 			out.ntb = ntb;
 
-		// live counters + aggregation ratio. Only muxed QMAP backends carry a
-		// meaningful parent-vs-children packet ratio (frames vs demuxed packets).
-		if (parent && length(children))
+		// live counters + aggregation ratio. The parent-vs-children packet ratio
+		// only MEASURES aggregation for QMAP backends, where the parent counts
+		// aggregated USB frames and the children the demuxed IP packets. On
+		// MBIM/NCM the cdc_ncm layer deaggregates the NTB below the netdev, so
+		// parent and children both count IP packets and the ratio is always ~1 —
+		// drop it there (the NTB block is the aggregation indicator); keep the
+		// raw counters, which are useful on every backend.
+		if (parent && length(children)) {
 			out.stats = nlmod.datapath_stats(null, parent, children);
+
+			if (dp.backend != 'rmnet' && dp.backend != 'qmimux') {
+				delete out.stats.rx_aggregation;
+				delete out.stats.tx_aggregation;
+			}
+		}
 
 		return out;
 	};
