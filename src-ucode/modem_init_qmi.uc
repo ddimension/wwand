@@ -456,10 +456,11 @@ export function install(self, o)
 	step_confnet = () => {
 		self.set_state('CONFIGURE_NET');
 
-		// restore the configured preferred-PLMN list (per-SIM wins over per-modem)
-		// now that the SIM is unlocked and before registration, so the modem uses
-		// it for network selection. Best-effort; failures are logged, init proceeds.
-		sim.restore_preferred_plmn(self, log, () => step_confnet_apply());
+		// now that the SIM is unlocked (before registration): a second debug dump
+		// WITH the SIM/network identity (the pre-radio one at SET_OPMODE runs
+		// before SIM unlock), then restore the configured preferred-PLMN list
+		// (per-SIM wins over per-modem). Best-effort; failures logged, init proceeds.
+		sim.log_preradio(self, log, () => sim.restore_preferred_plmn(self, log, () => step_confnet_apply()));
 	};
 
 	step_confnet_apply = () => {
