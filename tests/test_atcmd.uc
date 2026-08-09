@@ -327,16 +327,23 @@ eq(atcmd.parse_cops_scan([
 	'+COPS: (2,"Telekom.de","TDG","26201",7),(1,"Vodafone.de","Voda","26202",7),' +
 	'(3,"o2 - de","o2","26203",2),,(0,1,2,3,4),(0,1,2)',
 ]), [
-	{ mcc: 262, mnc: 1,  name: 'Telekom.de',  status: 'current' },
-	{ mcc: 262, mnc: 2,  name: 'Vodafone.de', status: 'available' },
-	{ mcc: 262, mnc: 3,  name: 'o2 - de',     status: 'forbidden' },
-], 'cops: current/available/forbidden parsed, value-range groups skipped');
+	{ mcc: 262, mnc: 1,  plmn: '262/01', name: 'Telekom.de',  status: 'current',   rats: [ 'LTE' ] },
+	{ mcc: 262, mnc: 2,  plmn: '262/02', name: 'Vodafone.de', status: 'available',  rats: [ 'LTE' ] },
+	{ mcc: 262, mnc: 3,  plmn: '262/03', name: 'o2 - de',     status: 'forbidden',  rats: [ 'UMTS' ] },
+], 'cops: current/available/forbidden + AcT->RAT parsed, value-range groups skipped');
 
 // 3-digit MNC and an operator with empty names
 eq(atcmd.parse_cops_scan([ '+COPS: (1,,,"310260",7),(2,"AT&T","ATT","310410",7)' ]), [
-	{ mcc: 310, mnc: 260, name: '', status: 'available' },
-	{ mcc: 310, mnc: 410, name: 'AT&T', status: 'current' },
+	{ mcc: 310, mnc: 260, plmn: '310/260', name: '', status: 'available', rats: [ 'LTE' ] },
+	{ mcc: 310, mnc: 410, plmn: '310/410', name: 'AT&T', status: 'current', rats: [ 'LTE' ] },
 ], 'cops: 3-digit mnc + nameless operator');
+
+// AcT omitted (4-field group) -> no rat; and AcT for 2G/3G/5G
+eq(atcmd.parse_cops_scan([ '+COPS: (2,"A","A","26201"),(1,"B","B","26202",0),(1,"C","C","26203",11)' ]), [
+	{ mcc: 262, mnc: 1, plmn: '262/01', name: 'A', status: 'current',   rats: [] },
+	{ mcc: 262, mnc: 2, plmn: '262/02', name: 'B', status: 'available', rats: [ 'GSM' ] },
+	{ mcc: 262, mnc: 3, plmn: '262/03', name: 'C', status: 'available', rats: [ 'NR5G' ] },
+], 'cops: AcT mapping (none/GSM/NR5G)');
 
 eq(atcmd.parse_cops_scan([ 'OK' ]), [], 'cops: no operator line');
 

@@ -69,13 +69,23 @@ _wwand_apply_settings() {
 	# extract everything from the reply FIRST — proto_init_update and the
 	# reply parsing share the same jshn state, mixing them corrupts the
 	# update message sent to netifd
+	# guard every json_select with a type check: the daemon emits ipv4/ipv6 as
+	# null for a single-stack APN, and json_select on a null/absent key prints a
+	# "Variable does not exist or is not an array/object" WARNING that netifd
+	# captures into the system log. Only descend when the key is actually an
+	# object, so a v4-only (or v6-only) APN produces no log noise.
+	local _t
 	local v4_addr v4_prefix v4_gateway v4_dns
 	json_load "$resp"
-	if json_select ipv4 2>/dev/null; then
+	json_get_type _t ipv4
+	if [ "$_t" = object ]; then
+		json_select ipv4
 		json_get_var v4_addr addr
 		json_get_var v4_prefix prefix
 		json_get_var v4_gateway gateway
-		if json_select dns 2>/dev/null; then
+		json_get_type _t dns
+		if [ "$_t" = array ]; then
+			json_select dns
 			json_get_values v4_dns
 			json_select ..
 		fi
@@ -84,11 +94,15 @@ _wwand_apply_settings() {
 
 	local v6_addr v6_plen v6_gateway v6_dns
 	json_load "$resp"
-	if json_select ipv6 2>/dev/null; then
+	json_get_type _t ipv6
+	if [ "$_t" = object ]; then
+		json_select ipv6
 		json_get_var v6_addr addr
 		json_get_var v6_plen plen
 		json_get_var v6_gateway gateway
-		if json_select dns 2>/dev/null; then
+		json_get_type _t dns
+		if [ "$_t" = array ]; then
+			json_select dns
 			json_get_values v6_dns
 			json_select ..
 		fi

@@ -75,13 +75,43 @@ export function install(self, o)
 		(bits & 0x10) ? 'forbidden' :      // NET_STATUS_FORBIDDEN (bit 4)
 		'available';
 
-	// normalize a NAS Network Scan response to [ { mcc, mnc, name, status } ]
+	// normalize a NAS Network Scan response to
+	//   [ { mcc, mnc, plmn, name, status, roaming, preferred, rats: [ ... ] } ]
+	// The Radio Access Technology TLV (0x11) is a SEPARATE list keyed by mcc/mnc
+	// — the same PLMN can appear on several RATs — so collect every RAT per PLMN
+	// and attach it (what the scan actually saw, beyond just the operator name).
 	let scan_operators = (data) => {
+		let rats = {};   // "mcc/mnc" -> [ 'LTE', 'UMTS', ... ]
+
+		for (let r in (data?.radio_access_technology ?? [])) {
+			let name = nasmod.radio_if_name(r.radio_interface);
+
+			if (name == null)
+				continue;
+
+			let key = sprintf('%d/%d', r.mcc, r.mnc);
+			rats[key] = rats[key] ?? [];
+
+			if (index(rats[key], name) < 0)
+				push(rats[key], name);
+		}
+
 		let out = [];
 
-		for (let e in (data?.network_information ?? []))
-			push(out, { mcc: e.mcc, mnc: e.mnc, name: e.description ?? '',
-			            status: scan_status(e.network_status ?? 0) });
+		for (let e in (data?.network_information ?? [])) {
+			let bits = e.network_status ?? 0;
+
+			push(out, {
+				mcc: e.mcc, mnc: e.mnc,
+				plmn: sprintf('%d/%02d', e.mcc, e.mnc),
+				name: e.description ?? '',
+				status: scan_status(bits),
+				// extra scan flags carried in the status bitmask
+				roaming: (bits & 0x08) ? true : false,   // NET_STATUS_ROAMING (bit 3)
+				preferred: (bits & 0x04) ? true : false, // NET_STATUS_PREFERRED (bit 2)
+				rats: rats[sprintf('%d/%d', e.mcc, e.mnc)] ?? [],
+			});
+		}
 
 		return out;
 	};
@@ -141,16 +171,11 @@ export function install(self, o)
 		if (!entry)
 			return;
 
-		entry.modem.with_nas((nas) => {
-			if (nas)
-				return nas.request('NETWORK_SCAN', {}, (err, data) => {
-					if (err)
-						return cb({ error: 'qmi', detail: err });
-
-					cb(null, { operators: scan_operators(data) });
-				}, { timeout: SCAN_TIMEOUT_MS });
-
-			// no QMI NAS (NCM) → AT+COPS=?
+		// AT+COPS=? fallback: used when there is no QMI NAS (NCM) AND when the NAS
+		// scan itself fails — some modems refuse a NAS network scan (HW-seen: the
+		// EG06 rejects it over the QMI-over-MBIM passthrough with result 1), so AT
+		// keeps MBIM/NCM at parity with QMI where the passthrough scan works.
+		let at_scan = () => {
 			let at = entry.modem.at;
 
 			if (!at)
@@ -161,6 +186,21 @@ export function install(self, o)
 					return cb({ error: 'at', detail: err });
 
 				cb(null, { operators: atcmd.parse_cops_scan(res?.lines) });
+			}, { timeout: SCAN_TIMEOUT_MS });
+		};
+
+		entry.modem.with_nas((nas) => {
+			if (!nas)
+				return at_scan();
+
+			nas.request('NETWORK_SCAN', {}, (err, data) => {
+				if (err) {
+					log('info', sprintf('modem %s: NAS network scan failed (%J) — falling back to AT+COPS=?',
+						ref, err));
+					return at_scan();
+				}
+
+				cb(null, { operators: scan_operators(data) });
 			}, { timeout: SCAN_TIMEOUT_MS });
 		});
 	};

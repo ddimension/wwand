@@ -64,8 +64,15 @@ function handlers()
 		NETWORK_SCAN: {
 			network_information: [
 				{ mcc: 262, mnc: 1, network_status: 0x01, description: 'Testnet' },
-				{ mcc: 262, mnc: 2, network_status: 0x22, description: 'Other' },
+				{ mcc: 262, mnc: 2, network_status: 0x0C, description: 'Other' },   // preferred(0x04)+roaming(0x08)
 				{ mcc: 262, mnc: 3, network_status: 0x10, description: 'Nope' },
+			],
+			// the separate RAT list: Testnet is on both LTE and UMTS (two entries
+			// for one PLMN), Other on 5G, Nope has none reported
+			radio_access_technology: [
+				{ mcc: 262, mnc: 1, radio_interface: 8 },   // LTE
+				{ mcc: 262, mnc: 1, radio_interface: 5 },   // UMTS
+				{ mcc: 262, mnc: 2, radio_interface: 12 },  // NR5G
 			],
 		},
 	};
@@ -137,10 +144,13 @@ run = () => {
 		daemon.modem_scan('m0', (serr, sc) => {
 			eq(serr, null, 'scan: no error');
 			eq(sc.operators, [
-				{ mcc: 262, mnc: 1, name: 'Testnet', status: 'current' },
-				{ mcc: 262, mnc: 2, name: 'Other', status: 'available' },
-				{ mcc: 262, mnc: 3, name: 'Nope', status: 'forbidden' },
-			], 'scan: operators parsed from NAS network scan');
+				{ mcc: 262, mnc: 1, plmn: '262/01', name: 'Testnet', status: 'current',
+				  roaming: false, preferred: false, rats: [ 'LTE', 'UMTS' ] },
+				{ mcc: 262, mnc: 2, plmn: '262/02', name: 'Other', status: 'available',
+				  roaming: true, preferred: true, rats: [ 'NR5G' ] },
+				{ mcc: 262, mnc: 3, plmn: '262/03', name: 'Nope', status: 'forbidden',
+				  roaming: false, preferred: false, rats: [] },
+			], 'scan: operators + per-PLMN RAT list from NAS network scan (0x11 TLV)');
 
 			// (3) manual selection issues the right NAS request
 			daemon.modem_set_network_selection('m0', 'manual', 262, 3, (merr, mres) => {
@@ -216,9 +226,12 @@ run = () => {
 
 											eq(st.running, false, 'scan_status: job finished');
 											eq(st.operators, [
-												{ mcc: 262, mnc: 1, name: 'Testnet', status: 'current' },
-												{ mcc: 262, mnc: 2, name: 'Other', status: 'available' },
-												{ mcc: 262, mnc: 3, name: 'Nope', status: 'forbidden' },
+												{ mcc: 262, mnc: 1, plmn: '262/01', name: 'Testnet', status: 'current',
+												  roaming: false, preferred: false, rats: [ 'LTE', 'UMTS' ] },
+												{ mcc: 262, mnc: 2, plmn: '262/02', name: 'Other', status: 'available',
+												  roaming: true, preferred: true, rats: [ 'NR5G' ] },
+												{ mcc: 262, mnc: 3, plmn: '262/03', name: 'Nope', status: 'forbidden',
+												  roaming: false, preferred: false, rats: [] },
 											], 'scan_status: operators delivered async');
 
 											guard.cancel();

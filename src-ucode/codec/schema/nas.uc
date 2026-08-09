@@ -50,6 +50,22 @@ export const RADIO_IF_LTE = 8;
 export const RADIO_IF_TD_SCDMA = 9;
 export const RADIO_IF_5GNR = 12;
 
+// QmiNasRadioInterface value -> a coarse RAT label (null when unknown/no service)
+export function radio_if_name(r)
+{
+	switch (r) {
+	case RADIO_IF_GSM:      return 'GSM';
+	case RADIO_IF_UMTS:     return 'UMTS';
+	case RADIO_IF_LTE:      return 'LTE';
+	case RADIO_IF_TD_SCDMA: return 'TD-SCDMA';
+	case RADIO_IF_5GNR:     return 'NR5G';
+	case RADIO_IF_CDMA_1X:  return 'CDMA';
+	case RADIO_IF_CDMA_1XEVDO: return 'EVDO';
+	}
+
+	return null;
+};
+
 // QmiNasRatModePreference bits — config 'modes' string maps onto these
 export const MODE_BITS = {
 	cdma:       (1 << 0) | (1 << 1),

@@ -611,12 +611,27 @@ export function parse_cops_scan(lines)
 				continue;   // no quoted PLMN id -> not an operator descriptor
 
 			let stat = +trim(f[0]);
+			let mcc = +substr(numeric, 0, 3), mnc = +substr(numeric, 3);
+
+			// optional 5th field = the access technology (3GPP 27.007 <AcT>);
+			// map it to the same coarse RAT labels the QMI scan uses
+			let rat = null;
+
+			if (length(f) >= 5 && match(trim(f[4]), /^[0-9]+$/)) {
+				let act = +trim(f[4]);
+				rat = (act == 0 || act == 1 || act == 3 || act == 8) ? 'GSM' :
+				      (act >= 2 && act <= 6) ? 'UMTS' :
+				      (act == 7 || act == 9 || act == 10) ? 'LTE' :
+				      (act >= 11 && act <= 13) ? 'NR5G' : null;
+			}
 
 			push(out, {
-				mcc:    +substr(numeric, 0, 3),
-				mnc:    +substr(numeric, 3),
+				mcc:    mcc,
+				mnc:    mnc,
+				plmn:   sprintf('%d/%02d', mcc, mnc),
 				name:   replace(trim(f[1]), /"/g, ''),
 				status: (stat == 2) ? 'current' : (stat == 3) ? 'forbidden' : 'available',
+				rats:   rat ? [ rat ] : [],
 			});
 		}
 	}
