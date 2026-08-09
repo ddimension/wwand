@@ -510,13 +510,12 @@ export function ep_iface_number(netdev, fx)
 		if (target == null)
 			continue;
 
-		// USB interface numbers only exist on USB paths — a bare PCI BDF
-		// ("0001:01:00.0") would otherwise match the ":<cfg>.<iface>" suffix
-		// and report a bogus interface 0 for an MHI/PCIe modem
-		if (!match(target, /\/usb[0-9]/))
-			continue;
-
-		let m = match(target, /:[0-9]+\.([0-9]+)$/);
+		// USB interface component is the `<bus>-<port>[.<port>]:<cfg>.<iface>`
+		// form (e.g. "3-1:1.4", possibly as the bare relative symlink target
+		// "../../../3-1:1.4"). Require the `-`-bearing bus-port token so a bare
+		// PCI BDF ("0001:01:00.0") does NOT match the ":<cfg>.<iface>" suffix and
+		// report a bogus interface 0 for an MHI/PCIe modem.
+		let m = match(target, /[0-9]+-[0-9.]+:[0-9]+\.([0-9]+)$/);
 
 		if (m)
 			return +m[1];

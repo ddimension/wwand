@@ -213,6 +213,15 @@ eplinks = { '/sys/class/net/wwan0/device':
 eq(netlink.ep_iface_number('wwan0', epfx), 4, 'ep: usb interface number from :1.4');
 eq(netlink.ep_type_number('wwan0', epfx), 2, 'ep: /usbN/ path -> HSUSB (2)');
 
+// the SHORT relative symlink form the kernel actually emits for a usbnet device
+// (fs.readlink is not -f): "../../../3-1:1.4" — no /usbN component at all, so the
+// iface number must come from the bus-port token, not a path match (HW-seen on
+// the RG650E: a /usbN guard here broke the mux with endpoint_unknown)
+eplinks = { '/sys/class/net/wwan0/device': '../../../3-1:1.4' };
+eq(netlink.ep_iface_number('wwan0', epfx), 4, 'ep: iface from the bare relative symlink (../../../3-1:1.4)');
+eplinks = { '/sys/class/net/wwan0/device': '../../../3-1.2:1.0' };
+eq(netlink.ep_iface_number('wwan0', epfx), 0, 'ep: iface from a hub-port relative symlink (3-1.2:1.0)');
+
 // vlan/mux child: no /device, falls back to lower_0/device
 eplinks = { '/sys/class/net/wwan0m1/lower_0/device':
 	'../../../devices/platform/soc/8af8800.usb/usb3/3-1/3-1:1.2' };
