@@ -469,15 +469,63 @@ export function setup(fx, opts)
 	return { ok: true, urb_size: (backend != 'none') ? urb_size : null, mux_devs: mux_devs };
 };
 
+// lowest free `<prefix>N` netdev name (prefix defaults to 'wwan'), e.g. the raw
+// kernel-style name to move a stale-renamed parent back to.
+function free_raw_name(fx, prefix)
+{
+	let p = prefix ?? 'wwan';
+
+	for (let i = 0; i < 32; i++) {
+		let name = sprintf('%s%d', p, i);
+
+		if (!fx.exists(sprintf('/sys/class/net/%s', name)))
+			return name;
+	}
+
+	return null;
+}
+
 // cdc_mbim session datapath: session 0 is the untagged parent netdev,
 // sessions > 0 are 802.1q VLAN sub-devices whose VLAN id equals the MBIM
 // session id. Children are named after the context's expected link name
 // (mux_link) so netifd's device binding matches without config changes.
+// Mirrors QMI/rmnet: the parent stays a RAW kernel name (wwanN), each child is
+// the stable wwandN — so returns the (possibly moved) parent name.
 export function setup_mbim(fx, opts)
 {
 	let netdev = opts.netdev;
 	let mux_devs = [];
 	let mux_mtus = {};
+
+	// A muxed child cannot share the parent's name. This happens when the parent
+	// still carries a stable "wwandN" name from a previous untagged (session-0)
+	// config and is now being muxed — move the parent back to a raw kernel name
+	// first, so the child can take the name (QMI keeps the parent raw wwanN and
+	// the rmnet child wwandN for exactly this reason). Without this, link_add_vlan
+	// would collide with the parent, silently leaving the L3 on the untagged
+	// parent while the session is VLAN-tagged — no traffic.
+	for (let entry in (opts.mux ?? [])) {
+		if (!(entry.id > 0))
+			continue;
+
+		let child = entry.name ?? sprintf('%s.%d', netdev, entry.id);
+
+		if (child == netdev) {
+			let raw = free_raw_name(fx);
+
+			if (raw && fx.link_set(netdev, { rename: raw })) {
+				fx.log('notice', sprintf('mbim: parent %s renamed to raw %s so the mux child can take the name',
+					netdev, raw));
+				netdev = raw;
+			}
+			else {
+				fx.log('err', sprintf('mbim: parent %s occupies the mux child name and could not be moved',
+					netdev));
+			}
+
+			break;
+		}
+	}
 
 	for (let entry in (opts.mux ?? [])) {
 		if (!(entry.id > 0))
@@ -499,6 +547,21 @@ export function setup_mbim(fx, opts)
 		push(mux_devs, child);
 	}
 
+	// the parent trunk must carry VLAN-tagged child frames: its MTU has to be at
+	// least the largest child MTU + 4 (the 802.1q tag), else the kernel rejects a
+	// child MTU that exceeds the parent. Bump it (floor 1504 for a 1500 child).
+	let parent_mtu = 1504;
+
+	for (let child in mux_devs) {
+		let cm = child_mtu(mux_mtus[child]) + 4;
+
+		if (cm > parent_mtu)
+			parent_mtu = cm;
+	}
+
+	if (length(mux_devs))
+		link_op(fx, 'parent mtu', netdev, { mtu: parent_mtu });
+
 	link_op(fx, 'link up', netdev, { up: true });
 
 	for (let child in mux_devs) {
@@ -506,7 +569,7 @@ export function setup_mbim(fx, opts)
 		link_op(fx, 'child up', child, { up: true });
 	}
 
-	return { ok: true, mux_devs: mux_devs };
+	return { ok: true, mux_devs: mux_devs, parent: netdev };
 };
 
 // endpoint interface number for WDA/bind-mux (e.g. .../1-1.2:1.4 -> 4)

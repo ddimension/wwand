@@ -255,16 +255,20 @@ export function create(opts)
 			mux: dp.mux_links ?? [],
 		});
 
+		// setup_mbim may move the parent to a raw kernel name (freeing a stale
+		// stable-L3 name for a mux child) — follow it
+		let parent = r.parent ?? dp.netdev;
+
 		self.datapath = {
 			backend: 'cdc_mbim',
-			netdev: dp.netdev,
-			parent: dp.netdev,
+			netdev: parent,
+			parent: parent,
 			ep_id: null,
 			mux: r.mux_devs,
 			mux_devs: r.mux_devs,
 		};
 
-		log('notice', sprintf('datapath: cdc_mbim, mux [%s]', join(' ', r.mux_devs)));
+		log('notice', sprintf('datapath: cdc_mbim, parent %s, mux [%s]', parent, join(' ', r.mux_devs)));
 		step_sim();
 	};
 

@@ -190,8 +190,10 @@ res = netlink.setup_mbim(fx, {
 
 eq(res.ok, true, 'mbim: ok');
 eq(res.mux_devs, [ 'wwan0m1', 'wwan0m2' ], 'mbim: vlan children named after mux_link');
+eq(res.parent, 'wwan0', 'mbim: parent name reported');
 ok(fx.action_index('link_add_vlan wwan0m1 link wwan0 id 1') >= 0, 'mbim: session 1 vlan');
 ok(fx.action_index('link_add_vlan wwan0m2 link wwan0 id 2') >= 0, 'mbim: session 2 vlan');
+ok(fx.action_index('link_set wwan0 mtu 1504') >= 0, 'mbim: parent mtu bumped to child+4 (VLAN tag headroom)');
 ok(fx.action_index('link_set wwan0 up') >= 0, 'mbim: parent up');
 ok(fx.action_index('link_set wwan0m1 up') >= 0, 'mbim: child up');
 
@@ -199,6 +201,18 @@ ok(fx.action_index('link_set wwan0m1 up') >= 0, 'mbim: child up');
 fx = fakefx.create();
 res = netlink.setup_mbim(fx, { netdev: 'wwan0', mux: [ { id: 0, name: null } ] });
 eq(res.mux_devs, [], 'mbim: session 0 has no vlan child');
+
+// stale parent name: a mux child wants the parent's own name (parent still
+// carries a stable wwandN name from a prior untagged session-0 config). The
+// parent must be moved to a free raw name so the child can take it — like QMI
+// (raw parent + wwandN child). Regression: without this the VLAN silently
+// collapses onto the untagged parent and no traffic flows.
+fx = fakefx.create({ present: { '/sys/class/net/wwand0': true } });
+res = netlink.setup_mbim(fx, { netdev: 'wwand0', mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ] });
+eq(res.parent, 'wwan0', 'mbim-stale: parent moved to a free raw name (wwan0)');
+ok(fx.action_index('link_set wwand0 name wwan0') >= 0, 'mbim-stale: parent renamed off the child name');
+ok(fx.action_index('link_add_vlan wwand0 link wwan0 id 1') >= 0, 'mbim-stale: vlan child wwand0 created on the raw parent');
+eq(res.mux_devs, [ 'wwand0' ], 'mbim-stale: child keeps the stable name wwand0');
 
 // --- VRF compatibility invariant --------------------------------------------
 // The datapath layer must only ever touch the link layer (mux creation, MTU,
