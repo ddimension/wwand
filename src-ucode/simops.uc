@@ -180,10 +180,11 @@ export function install(self, o)
 		sim.read_plmn_lists(entry.modem, (lists) => cb(null, lists));
 	};
 
-	// write the USER preferred-PLMN list (EF 6F60) via AT+CPOL/CPLS — the desired
-	// list in priority order, then read it back over the QMI/UIM path for cross-
-	// verification. entries: [ { mcc, mnc, gsm, utran, eutran, ngran } ].
-	self.modem_plmn_set = function(ref, entries, cb) {
+	// write a preferred-PLMN list. `list_type` selects which one: 'nas' (the QMI
+	// NAS preferred-networks list) or 'user' (the SIM EF 6F60 user list via
+	// AT+CPOL). entries: [ { mcc, mnc, gsm, utran, eutran, ngran } ] in priority
+	// order; the daemon reads it back for cross-verification.
+	self.modem_plmn_set = function(ref, list_type, entries, cb) {
 		let entry = check_modem(ref, cb);
 
 		if (!entry)
@@ -192,8 +193,39 @@ export function install(self, o)
 		if (type(entries) != 'array')
 			return cb({ error: 'invalid_entries' });
 
-		log('notice', sprintf('modem %s: writing %d user-preferred PLMN record(s)', ref, length(entries)));
-		sim.write_user_plmn(entry.modem, entries, cb);
+		let kind = (list_type == 'user') ? 'user' : 'nas';
+
+		log('notice', sprintf('modem %s: writing %d %s preferred-PLMN record(s)', ref, length(entries), kind));
+
+		if (kind == 'nas')
+			sim.write_nas_plmn(entry.modem, entries, cb);
+		else
+			sim.write_user_plmn(entry.modem, entries, cb);
+	};
+
+	// apply this modem's configured plmn list (wwand_modem option plmn_list) on
+	// demand — the "restore now" button. Uses the same type-aware write + logging
+	// as the pre-radio-on hook.
+	self.modem_plmn_restore = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		let r = entry.cfg?.plmn_restore;
+
+		if (type(r) != 'object' || type(r.entries) != 'array' || !length(r.entries))
+			return cb({ error: 'no_configured_list' });
+
+		let kind = (r.type == 'nas') ? 'nas' : 'user';
+
+		log('notice', sprintf('modem %s: restoring the configured %s preferred list (%d records)',
+			ref, kind, length(r.entries)));
+
+		if (kind == 'nas')
+			sim.write_nas_plmn(entry.modem, r.entries, cb);
+		else
+			sim.write_user_plmn(entry.modem, r.entries, cb);
 	};
 
 	// manual PIN release: enter the PIN past the low-retry safety block (with <=1

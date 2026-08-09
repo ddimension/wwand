@@ -775,7 +775,7 @@ export function plmn_act_bits(e)
 
 export function read_plmn_lists(modem, cb)
 {
-	let out = { user: null, operator: null, home: null };
+	let out = { user: null, nas: null, operator: null, home: null };
 
 	// map a QMI NAS preferred-networks array to the display shape
 	let map_nas = (arr) => map(arr ?? [], (e) => {
@@ -823,20 +823,25 @@ export function read_plmn_lists(modem, cb)
 		});
 	};
 
-	// user list: QMI NAS Get Preferred Networks first (QMI-native, works even
-	// where the UIM EF read is rejected), then UIM EF, then AT+CPOL.
-	let read_user = (done) => {
-		if (modem.nas)
-			return modem.nas.request('GET_PREFERRED_NETWORKS', {}, (err, data) => {
-				if (!err && data?.preferred_networks != null) {
-					out.user = map_nas(data.preferred_networks);
-					return done();
-				}
+	// NAS is a direct client on QMI (self.nas), only the async with_nas() lazy
+	// passthrough on MBIM (and null on NCM) — go through with_nas for parity.
+	let with_nas = modem.with_nas ?? ((cb) => cb(modem.nas ?? null));
 
-				user_via_uim_at(done);
+	// the QMI NAS "preferred networks" list — a SEPARATE list from the SIM
+	// EF 6F60 user list (on some modems they even differ: E392 shows 33 via NAS
+	// vs 85 via AT+CPOL). Kept in out.nas so the two are managed independently.
+	let read_nas = (done) => {
+		with_nas((nas) => {
+			if (!nas)
+				return done();
+
+			nas.request('GET_PREFERRED_NETWORKS', {}, (err, data) => {
+				if (!err && data?.preferred_networks != null)
+					out.nas = map_nas(data.preferred_networks);
+
+				done();
 			});
-
-		user_via_uim_at(done);
+		});
 	};
 
 	// operator + home come only from the UIM EFs (no NAS/AT equivalent)
@@ -854,7 +859,8 @@ export function read_plmn_lists(modem, cb)
 		});
 	};
 
-	read_user(() => read_op_home(() => cb(out)));
+	// user list (EF 6F60) via UIM/AT, NAS list via NAS Get, then operator/home
+	user_via_uim_at(() => read_nas(() => read_op_home(() => cb(out))));
 };
 
 // Write the USER-controlled preferred PLMN list (EF 6F60 / PLMNwAcT) via the
@@ -956,10 +962,26 @@ export function write_user_plmn(modem, entries, cb)
 		}, { timeout: 5000 });
 	};
 
-	// QMI NAS Set Preferred Networks first: the QMI-native write (may persist to
-	// the SIM EF where a modem's AT+CPOL list is only a volatile modem-side copy)
-	// and verifiable via NAS Get. Falls back to AT+CPOL on error / no NAS.
-	if (modem.nas) {
+	// the EF 6F60 user list is written over AT+CPOL (UIM record write is refused
+	// by the modems on hand); the QMI NAS "preferred networks" list is a separate
+	// type written by write_nas_plmn().
+	at_path();
+};
+
+// Write the QMI NAS "preferred networks" list (NAS Set Preferred Networks) —
+// a separate list from the EF 6F60 user list (write_user_plmn). Via with_nas()
+// so MBIM's QMI-over-MBIM passthrough has parity with QMI; NCM (no NAS) errors.
+// entries: [ { mcc, mnc, gsm, utran, eutran, ngran } ]. Reads back via NAS Get.
+export function write_nas_plmn(modem, entries, cb)
+{
+	let list = entries ?? [];
+	let esc = (s) => replace(sprintf('%s', s ?? ''), /[^0-9]/g, '');
+	let with_nas = modem.with_nas ?? ((cb2) => cb2(modem.nas ?? null));
+
+	with_nas((nas) => {
+		if (!nas)
+			return cb({ error: 'no_nas_client' });
+
 		let pn = [];
 
 		for (let e in list) {
@@ -971,18 +993,72 @@ export function write_user_plmn(modem, entries, cb)
 			push(pn, { mcc: mcc, mnc: mnc, rat: plmn_act_bits(e) });
 		}
 
-		return modem.nas.request('SET_PREFERRED_NETWORKS',
+		nas.request('SET_PREFERRED_NETWORKS',
 			{ preferred_networks: pn, clear_previous: 1 }, (err) => {
-				if (err) {
-					// NAS refused — try the AT path before giving up
-					return at_path();
-				}
+				if (err)
+					return cb({ error: 'nas_set', detail: err });
 
-				finish();
+				// read back the NAS list for cross-verification
+				read_plmn_lists(modem, (lists) => cb(null, { ok: true, written: length(list), nas: lists.nas }));
 			});
-	}
+	});
+};
 
-	at_path();
+// pre-radio-on DEBUG dump (called by every backend right before it enables the
+// radio): the current NAS preferred-networks list + the SIM/network state to
+// the debug log. Never stalls bring-up (always cb()).
+export function log_preradio(modem, log, cb)
+{
+	let with_nas = modem.with_nas ?? ((c) => c(modem.nas ?? null));
+
+	log('debug', sprintf('pre-radio: sim/network imsi=%s iccid=%s reg=%J',
+		modem.info?.imsi ?? '?', modem.info?.iccid ?? '?',
+		modem.reg ?? modem.registration ?? null));
+
+	with_nas((nas) => {
+		if (!nas)
+			return cb();
+
+		nas.request('GET_PREFERRED_NETWORKS', {}, (err, data) => {
+			let pn = err ? null : (data?.preferred_networks ?? []);
+
+			log('debug', (pn == null) ? 'pre-radio: nas preferred networks unavailable'
+				: sprintf('pre-radio: nas preferred networks = %d record(s) %J', length(pn), pn));
+
+			cb();
+		});
+	});
+};
+
+// the effective configured PLMN list to restore: a per-SIM list (matched active
+// card, wwand_sim option plmn_list) wins over the modem's (wwand_modem option
+// plmn_list). { type, entries } or null.
+export function effective_plmn_restore(modem)
+{
+	return modem.active_sim?.plmn_restore ?? modem.config?.plmn_restore ?? null;
+};
+
+// restore the configured user/NAS preferred list (run after SIM unlock, before
+// registration — so a per-SIM list resolves). Logs any failure so a write-
+// protected SIM / rejecting modem is visible. Always cb().
+export function restore_preferred_plmn(modem, log, cb)
+{
+	let r = effective_plmn_restore(modem);
+
+	if (type(r) != 'object' || type(r.entries) != 'array' || !length(r.entries))
+		return cb();
+
+	let kind = (r.type == 'nas') ? 'nas' : 'user';
+	let writer = (kind == 'nas') ? write_nas_plmn : write_user_plmn;
+
+	writer(modem, r.entries, (err, res) => {
+		if (err)
+			log('err', sprintf('%s preferred-list restore FAILED: %J', kind, err));
+		else
+			log('notice', sprintf('restored %d %s preferred-list record(s) from config', res.written, kind));
+
+		cb();
+	});
 };
 
 // sequential-provider ladder: try providers in order until one yields non-null.

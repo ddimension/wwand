@@ -433,48 +433,51 @@ function mock_nas(store, calls) {
 	};
 }
 
-scenario('plmn write: uses QMI NAS Set (not AT) when NAS is present', (next) => {
-	let store = {}, calls = [], sent = [];
-	let m = { nas: mock_nas(store, calls), at: mock_at(sent), uim: null };
+// write_nas_plmn writes the SEPARATE QMI NAS preferred-networks list (not AT).
+scenario('plmn write (nas): QMI NAS Set + read-back via NAS Get', (next) => {
+	let store = {}, calls = [];
+	let m = { nas: mock_nas(store, calls), uim: null };
 
-	sim.write_user_plmn(m, [
+	sim.write_nas_plmn(m, [
 		{ mcc: '262', mnc: '01', utran: true, eutran: true },
 		{ mcc: '310', mnc: '260', eutran: true, ngran: true },
 	], (err, res) => {
 		eq(err, null, 'nas write: ok');
 		eq(index(calls, 'SET_PREFERRED_NETWORKS') >= 0, true, 'nas write: used NAS Set');
-		eq(length(sent), 0, 'nas write: did NOT touch AT+CPOL');
-		// the rat bitmask encodes the AcT flags (UTRAN|E-UTRAN = 0xC000)
 		eq(store.pn[0], { mcc: 262, mnc: 1, rat: 0xC000 }, 'nas write: record 0 mcc/mnc/rat');
 		eq(store.pn[1].rat, 0x4800, 'nas write: record 1 rat (E-UTRAN|NG-RAN)');
-		// read-back (finish) goes through NAS Get and decodes the same list
-		eq(length(res.user), 2, 'nas write: read-back via NAS Get returns the list');
-		eq(res.user[1], { mcc: '310', mnc: '260', gsm: false, utran: false, eutran: true, ngran: true },
+		eq(length(res.nas), 2, 'nas write: read-back returns the nas list');
+		eq(res.nas[1], { mcc: '310', mnc: '260', gsm: false, utran: false, eutran: true, ngran: true },
 			'nas write: read-back decodes 3-digit mnc + AcT flags');
 		next();
 	});
 });
 
-scenario('plmn write: falls back to AT when NAS Set errors', (next) => {
-	let sent = [];
-	let m = {
-		nas: { request: (name, args, cb) => uloop.timer(1, () => cb({ error: 'not_supported' })) },
-		at: mock_at(sent), uim: null,
-	};
-	sim.write_user_plmn(m, [ { mcc: '262', mnc: '01', eutran: true } ], (err) => {
-		eq(err, null, 'nas->at fallback: ok');
-		ok(index(sent, 'AT+CPLS=0') >= 0, 'nas->at fallback: used AT+CPOL after NAS error');
+scenario('plmn write (nas): clean error when NAS Set fails', (next) => {
+	let m = { nas: { request: (name, args, cb) => uloop.timer(1, () => cb({ error: 'not_supported' })) } };
+	sim.write_nas_plmn(m, [ { mcc: '262', mnc: '01', eutran: true } ], (err) => {
+		eq(err?.error, 'nas_set', 'nas write: surfaces the NAS error');
 		next();
 	});
 });
 
-scenario('plmn read: QMI NAS Get preferred over UIM/AT', (next) => {
-	let store = { pn: [ { mcc: 262, mnc: 2, rat: 0x8000 | 0x4000 | 0x0080 } ] }, calls = [];
-	let m = { nas: mock_nas(store, calls), uim: null };
+scenario('plmn write (nas): no NAS client -> clean error', (next) => {
+	sim.write_nas_plmn({ uim: null }, [ { mcc: '262', mnc: '01' } ], (err) => {
+		eq(err?.error, 'no_nas_client', 'nas write: no NAS reported');
+		next();
+	});
+});
+
+// read returns the user (EF/AT) and nas lists as SEPARATE fields
+scenario('plmn read: user (AT+CPOL) and nas (NAS Get) are separate', (next) => {
+	let store = { pn: [ { mcc: 262, mnc: 2, rat: 0x8000 | 0x4000 | 0x0080 } ] }, calls = [], sent = [];
+	let m = { nas: mock_nas(store, calls), at: mock_at(sent), uim: null };
 	sim.read_plmn_lists(m, (lists) => {
-		eq(index(calls, 'GET_PREFERRED_NETWORKS') >= 0, true, 'nas read: used NAS Get');
-		eq(lists.user[0], { mcc: '262', mnc: '02', gsm: true, utran: true, eutran: true, ngran: false },
-			'nas read: decoded from NAS Get');
+		eq(index(calls, 'GET_PREFERRED_NETWORKS') >= 0, true, 'read: used NAS Get for the nas list');
+		eq(lists.nas[0], { mcc: '262', mnc: '02', gsm: true, utran: true, eutran: true, ngran: false },
+			'read: nas list decoded from NAS Get');
+		// user list comes from AT+CPOL (the mock_at returns two records)
+		eq(length(lists.user), 2, 'read: user list from AT+CPOL, distinct from nas');
 		next();
 	});
 });

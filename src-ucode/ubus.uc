@@ -176,9 +176,16 @@ export function publish(conn, daemon, log)
 		},
 
 		modem_plmn_set: {
-			args: { modem: '', entries: [], ubus_rpc_session: '' },
+			args: { modem: '', list_type: '', entries: [], ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_plmn_set(req.args.modem, req.args.entries, (err, res) =>
+				daemon.modem_plmn_set(req.args.modem, req.args.list_type, req.args.entries, (err, res) =>
+					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+		},
+
+		modem_plmn_restore: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_plmn_restore(req.args.modem, (err, res) =>
 					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
 		},
 

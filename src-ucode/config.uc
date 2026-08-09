@@ -169,7 +169,55 @@ function modem_from_section(s)
 		sim_slot: +(s.sim_slot ?? 0),
 		stats_interval: +(s.stats_interval ?? 60),
 		auto_correct_config: bool_opt(s.auto_correct_config, false),
+		// optional named user-PLMN list to restore before radio-on (wwand_plmnlist)
+		plmn_list: (s.plmn_list != null && s.plmn_list != '') ? s.plmn_list : null,
+		plmn_restore: null,   // resolved from plmn_list at the end of parse()
 	});
+}
+
+// parse one `list plmn '<mccmnc> <rat>,<rat>...'` entry into the write shape.
+// RAT tokens: gsm/2g, utran/3g/umts, eutran/4g/lte, ngran/5g/nr. null if the
+// PLMN id is malformed.
+function parse_plmn_entry(str)
+{
+	let f = split(trim(sprintf('%s', str ?? '')), /[ \t,]+/);
+	let id = f[0] ?? '';
+
+	if (!match(id, /^[0-9]{5,6}$/))
+		return null;
+
+	let e = { mcc: substr(id, 0, 3), mnc: substr(id, 3),
+	          gsm: false, utran: false, eutran: false, ngran: false };
+
+	for (let i = 1; i < length(f); i++) {
+		let r = lc(f[i]);
+
+		if (r == 'gsm' || r == '2g')                       e.gsm = true;
+		else if (r == 'utran' || r == '3g' || r == 'umts') e.utran = true;
+		else if (r == 'eutran' || r == '4g' || r == 'lte') e.eutran = true;
+		else if (r == 'ngran' || r == '5g' || r == 'nr' || r == 'nr5g') e.ngran = true;
+	}
+
+	return e;
+}
+
+// a `config wwand_plmnlist <name>` section -> { type, entries } in priority
+// order. `option type` selects which modem list this targets: 'nas' (the QMI
+// NAS preferred-networks list) or 'user' (the SIM EF 6F60 user list, via
+// AT+CPOL); default 'nas' since that is the one wwand can reliably re-apply.
+function plmnlist_from_section(s)
+{
+	let raw = (type(s.plmn) == 'array') ? s.plmn : (s.plmn != null ? [ s.plmn ] : []);
+	let entries = [];
+
+	for (let str in raw) {
+		let e = parse_plmn_entry(str);
+
+		if (e)
+			push(entries, e);
+	}
+
+	return { type: (s.type == 'user') ? 'user' : 'nas', entries: entries };
 }
 
 // build a per-SIM override from a `config wwand_sim` section. Matched at runtime
@@ -188,6 +236,9 @@ function sim_from_section(s)
 		auth: s.auth,
 		username: s.username,
 		password: s.password,
+		// optional per-SIM user-PLMN list (wwand_plmnlist), wins over the modem's
+		plmn_list: (s.plmn_list != null && s.plmn_list != '') ? s.plmn_list : null,
+		plmn_restore: null,   // resolved at the end of parse()
 	};
 }
 
@@ -213,6 +264,10 @@ function parse_network_sections(raw, result)
 			}
 
 			result.sims[name] = sim_from_section(s);
+			break;
+
+		case 'wwand_plmnlist':
+			result.plmnlists[name] = plmnlist_from_section(s);
 			break;
 		}
 	}
@@ -581,12 +636,42 @@ export function parse(raw)
 		modems: {},
 		contexts: {},
 		sims: {},
+		plmnlists: {},
 		warnings: [],
 	};
 
 	parse_network_sections(raw ?? {}, result);
 	compat_translate(raw ?? {}, result);
 	assign_l3_names(result);
+
+	// resolve each modem's optional plmn_list -> the entries to restore before
+	// radio-on; warn on a dangling reference.
+	for (let mname, m in result.modems) {
+		if (m.plmn_list == null)
+			continue;
+
+		let pl = result.plmnlists[m.plmn_list];
+
+		if (pl)
+			m.plmn_restore = { type: pl.type, entries: pl.entries };
+		else
+			push(result.warnings, sprintf("wwand_modem %s: unknown plmn_list '%s', ignoring", mname, m.plmn_list));
+	}
+
+	// same for the per-SIM plmn_list (wins over the modem's at runtime, resolved
+	// when the active card matches — see the daemon's active_sim handling)
+	for (let sname, sm in result.sims) {
+		if (sm.plmn_list == null)
+			continue;
+
+		let pl = result.plmnlists[sm.plmn_list];
+
+		if (pl)
+			sm.plmn_restore = { type: pl.type, entries: pl.entries };
+		else
+			push(result.warnings, sprintf("wwand_sim %s: unknown plmn_list '%s', ignoring", sname, sm.plmn_list));
+	}
+
 	validate(result);
 
 	return result;

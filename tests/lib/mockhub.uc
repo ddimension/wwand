@@ -162,6 +162,14 @@ export function create(opts)
 			}
 		}
 
+		// built-in NAS defaults: the pre-radio-on hook probes the preferred-
+		// networks list on every init — answer benignly unless a scenario
+		// overrides it (empty list / write ok).
+		if (handler == null && entry.name == 'GET_PREFERRED_NETWORKS')
+			handler = { preferred_networks: [] };
+		if (handler == null && entry.name == 'SET_PREFERRED_NETWORKS')
+			handler = {};
+
 		if (handler == null)
 			die(sprintf('mockhub: no handler for %s', entry.name));
 

@@ -39,7 +39,7 @@ export function install(self, o)
 	let match_sim_override = (iccid, imsi) =>
 		modem_common.match_sim_override(self.config?.sims, iccid, imsi);
 
-	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, verify_online, step_simslot, step_sim, step_identity, step_confnet, step_validate, step_attach_profile, step_register;
+	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, verify_online, step_simslot, step_sim, step_identity, step_confnet, step_confnet_apply, step_validate, step_attach_profile, step_register;
 
 	// DMS model was junk and the USB descriptor filled in (generic "HUAWEI Mobile"
 	// style): ATI usually knows the real model — upgrade identity off the critical
@@ -239,12 +239,18 @@ export function install(self, o)
 
 	step_opmode = () => {
 		self.set_state('SET_OPMODE');
-		qmi_backend.set_opmode(self.dms, 'online', (err) => {
-			// (set_opmode already treats "no effect / already online" as success)
-			if (err)
-				return fail('opmode', err);
 
-			verify_online(0);
+		// before enabling the radio: debug-dump the current NAS preferred-network
+		// list + SIM/network state (the actual restore runs at CONFIGURE_NET,
+		// after SIM unlock, so a per-SIM configured list can resolve).
+		sim.log_preradio(self, log, () => {
+			qmi_backend.set_opmode(self.dms, 'online', (err) => {
+				// (set_opmode already treats "no effect / already online" as success)
+				if (err)
+					return fail('opmode', err);
+
+				verify_online(0);
+			});
 		});
 	};
 
@@ -450,6 +456,13 @@ export function install(self, o)
 	step_confnet = () => {
 		self.set_state('CONFIGURE_NET');
 
+		// restore the configured preferred-PLMN list (per-SIM wins over per-modem)
+		// now that the SIM is unlocked and before registration, so the modem uses
+		// it for network selection. Best-effort; failures are logged, init proceeds.
+		sim.restore_preferred_plmn(self, log, () => step_confnet_apply());
+	};
+
+	step_confnet_apply = () => {
 		let mask = qmi_backend.parse_modes(self.config.modes);
 		let sel = null;
 
