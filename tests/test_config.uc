@@ -587,4 +587,15 @@ ch = config.migrate_plan({ network: {
 } });
 eq(length(ch), 0, 'migrate-mm: no device -> not migratable, no changes');
 
+// collision guard: a box ALREADY carrying wwmodem0 (an existing wwand modem)
+// must not have a migration overwrite it — the new section skips to wwmodem1.
+ch = config.migrate_plan({ network: {
+	wwmodem0: { '.type': 'wwand_modem', serial: 'abc' },
+	other:    { '.type': 'interface', proto: 'wwand', modem: 'wwmodem0', apn: 'a' },
+	wan:      { '.type': 'interface', proto: 'mbim', device: '/dev/cdc-wdm0', apn: 'internet' },
+} });
+ok(mp_has(ch, 'add', 'wwmodem1', null), 'migrate-collision: new section is wwmodem1, not wwmodem0');
+ok(!mp_has(ch, 'add', 'wwmodem0', null), 'migrate-collision: existing wwmodem0 untouched');
+eq(mp_set(ch, 'wan', 'modem'), 'wwmodem1', 'migrate-collision: interface links the fresh wwmodem1');
+
 done('test_config');

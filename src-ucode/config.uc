@@ -691,7 +691,21 @@ export function migrate_plan(raw)
 	let net = raw?.network ?? {};
 	let changes = [];
 	let modem_by_ident = {};   // modem identity -> wwand_modem section name
+
+	// allocate `wwmodemN` section names that do NOT collide with sections
+	// already present in the config — a box may already carry wwand_modem
+	// sections (an existing wwand modem, or a prior partial migration), and
+	// reusing `wwmodem0` would silently overwrite one. Skip every existing
+	// section name, not just wwand_modem, to be safe.
 	let seq = 0;
+	let next_modem_name = () => {
+		let name = sprintf('wwmodem%d', seq++);
+
+		while (net[name] != null)
+			name = sprintf('wwmodem%d', seq++);
+
+		return name;
+	};
 
 	let put = (section, opt, val) => {
 		if (type(val) == 'array') {
@@ -710,7 +724,7 @@ export function migrate_plan(raw)
 		if (modem_by_ident[ident])
 			return modem_by_ident[ident];
 
-		let name = sprintf('wwmodem%d', seq++);
+		let name = next_modem_name();
 		modem_by_ident[ident] = name;
 		push(changes, [ 'add', 'network', name, null, 'wwand_modem' ]);
 
@@ -772,7 +786,7 @@ export function migrate_plan(raw)
 			let modem = modem_by_ident[ident];
 
 			if (!modem) {
-				modem = sprintf('wwmodem%d', seq++);
+				modem = next_modem_name();
 				modem_by_ident[ident] = modem;
 				push(changes, [ 'add', 'network', modem, null, 'wwand_modem' ]);
 				put(modem, 'path', mm_path(s.device));
