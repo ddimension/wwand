@@ -29,20 +29,25 @@ jobs:
           set -e
           PREFIX="$HOME/.local"
           mkdir -p "$PREFIX"
-          build() { # repo cmakeflags...
-            repo="$1"; shift
-            git clone -q --depth 1 "https://github.com/openwrt/$repo.git" "/tmp/$repo"
+          build() { # name url cmakeflags...
+            repo="$1"; url="$2"; shift 2
+            git clone -q --depth 1 "$url" "/tmp/$repo"
             cmake -S "/tmp/$repo" -B "/tmp/$repo/build" \
               -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" \
               -DCMAKE_BUILD_TYPE=Release "$@" > /dev/null
             cmake --build "/tmp/$repo/build" -j"$(nproc)" > /dev/null
             cmake --install "/tmp/$repo/build" > /dev/null
           }
-          build libubox -DBUILD_LUA=OFF -DBUILD_EXAMPLES=OFF
-          build ubus -DBUILD_LUA=OFF -DBUILD_EXAMPLES=OFF
-          build ucode -DFS_SUPPORT=ON -DSTRUCT_SUPPORT=ON -DULOOP_SUPPORT=ON \
-                      -DUBUS_SUPPORT=ON -DUCI_SUPPORT=OFF -DNL80211_SUPPORT=OFF \
-                      -DRTNL_SUPPORT=OFF -DRESOLV_SUPPORT=OFF
+          # libubox/ubus have no GitHub mirror — clone from git.openwrt.org;
+          # the ucode upstream lives at jow-/ucode
+          build libubox https://git.openwrt.org/project/libubox.git \
+                -DBUILD_LUA=OFF -DBUILD_EXAMPLES=OFF
+          build ubus https://git.openwrt.org/project/ubus.git \
+                -DBUILD_LUA=OFF -DBUILD_EXAMPLES=OFF
+          build ucode https://github.com/jow-/ucode.git \
+                -DFS_SUPPORT=ON -DSTRUCT_SUPPORT=ON -DULOOP_SUPPORT=ON \
+                -DUBUS_SUPPORT=ON -DUCI_SUPPORT=OFF -DNL80211_SUPPORT=OFF \
+                -DRTNL_SUPPORT=OFF -DRESOLV_SUPPORT=OFF
           # run_tests.sh looks for ubusd at ~/.local/sbin
           mkdir -p "$PREFIX/sbin"
           [ -x "$PREFIX/sbin/ubusd" ] || cp /tmp/ubus/build/ubusd "$PREFIX/sbin/"
