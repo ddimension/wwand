@@ -340,7 +340,7 @@ export function create(opts)
 
 	// --- step chain --------------------------------------------------------
 
-	let step_identify, step_resolve_dial, step_datapath, step_sim, step_attach, step_register, on_registered;
+	let step_identify, step_resolve_dial, step_datapath, step_sim, step_attach, step_register, step_register_go, on_registered;
 
 	// AT side channel: for NCM this IS the control channel (a missing port fails
 	// the whole modem — there is no other transport). open_at discovers the tty,
@@ -600,6 +600,13 @@ export function create(opts)
 	// registration: poll CEREG (LTE/5G) then CREG (fallback) until the modem is
 	// registered home/roaming or the timeout elapses.
 	step_register = () => {
+		// before registering: debug-dump + restore the configured preferred list
+		// (NCM has no NAS — a 'nas' list errors and is logged; a 'user' list goes
+		// out over AT+CPOL). Best-effort, never blocks bring-up.
+		sim.log_preradio(self, log, () => sim.restore_preferred_plmn(self, log, () => step_register_go()));
+	};
+
+	step_register_go = () => {
 		self.set_state('REGISTERING');
 
 		if (reg_timer) reg_timer.cancel();

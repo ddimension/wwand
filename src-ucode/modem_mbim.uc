@@ -461,18 +461,23 @@ export function create(opts)
 	};
 
 	step_register = () => {
-		self.set_state('REGISTERING');
-		self._install_indications();
+		// before registering: debug-dump the NAS preferred list + SIM/network,
+		// then restore the configured list (per-SIM wins over per-modem) — via the
+		// QMI-over-MBIM passthrough NAS / AT+CPOL. Best-effort, never blocks.
+		sim.log_preradio(self, log, () => sim.restore_preferred_plmn(self, log, () => {
+			self.set_state('REGISTERING');
+			self._install_indications();
 
-		reg_timer = uloop.timer(self.timing.reg_timeout, () => {
-			if (self.state == 'REGISTERING')
-				fail('registration_timeout', { reg: self.reg });
-		});
+			reg_timer = uloop.timer(self.timing.reg_timeout, () => {
+				if (self.state == 'REGISTERING')
+					fail('registration_timeout', { reg: self.reg });
+			});
 
-		self.mbim.command(bc, 'REGISTER_STATE', 'query', {}, (err, data) => {
-			if (!err)
-				self._update_register(data);
-		});
+			self.mbim.command(bc, 'REGISTER_STATE', 'query', {}, (err, data) => {
+				if (!err)
+					self._update_register(data);
+			});
+		}));
 	};
 
 	step_attach = () => {
