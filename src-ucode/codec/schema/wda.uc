@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI WDA service message schema (service 0x1A).
 // TLV layouts verified against libqmi data/qmi-service-wda.json.
 

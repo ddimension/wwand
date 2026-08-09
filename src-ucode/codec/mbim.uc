@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — MBIM message framing and InformationBuffer codec.
 //
 // MBIM messages share a 12-byte header (MessageType, MessageLength,

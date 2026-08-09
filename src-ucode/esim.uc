@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand-esim — ES10c profile management (SGP.22) over the wwand APDU channel.
 //
 // Shipped as the optional wwand-esim package; the daemon loads it lazily via

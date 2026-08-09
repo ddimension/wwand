@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — lazy-load shim for the MBIM modules.
 //
 // daemon.uc pulls MBIM in only when an MBIM modem actually shows up (saves

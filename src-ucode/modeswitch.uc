@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — one-time usbnet mode switch for PPP-only modems.
 //
 // A modem that enumerates exposing ONLY serial/ACM ports (no cdc-wdm, no

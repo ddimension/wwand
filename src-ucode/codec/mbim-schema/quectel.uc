@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — MBIM Quectel vendor service schema (FCC RF unlock).
 //
 // Laptop-SKU Quectel modems in MBIM mode (e.g. EM120R-GL / EM160R-GL in

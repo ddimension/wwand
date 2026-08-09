@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — MBIM "QMI over MBIM" passthrough service (MBIM 1.14+).
 //
 // A single CID that tunnels a raw QMI/QMUX frame in either direction: the

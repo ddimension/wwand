@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — SIM PIN handling: UIM service first, legacy DMS fallback.
 //
 // sim.unlock(modem, cb) drives the card to a usable state.

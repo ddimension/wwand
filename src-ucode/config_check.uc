@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — live-config validation (extracted from the modem.uc mega-closure).
 //
 // validate(self, log, cb): compare the live modem against self.config +

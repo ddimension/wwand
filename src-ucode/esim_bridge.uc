@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand-esim — host-side eSIM download/notification bridge.
 //
 // Shipped as the optional wwand-esim package; the daemon loads it lazily via

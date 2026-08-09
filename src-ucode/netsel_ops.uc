@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — settings / network-selection / operator-scan ubus operations
 // (extracted from the daemon.uc factory).
 //

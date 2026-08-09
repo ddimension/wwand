@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — configuration model. parse(raw) is pure (raw = uci get_all() section
 // objects) so it stays host-testable; UCI access itself lives in main.uc.
 //

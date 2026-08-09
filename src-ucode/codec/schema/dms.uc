@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI DMS service message schema (service 0x02).
 //
 // Operating modes (SET_OPERATING_MODE): 0 online, 1 low_power, 2 factory

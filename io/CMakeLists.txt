@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 cmake_minimum_required(VERSION 3.13)
 
 project(ucode-mod-wwand-io C)

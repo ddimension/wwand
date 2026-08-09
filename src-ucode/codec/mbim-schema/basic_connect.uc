@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — MBIM Basic Connect service schema (MBIM 1.0).
 // Field layouts verified against libmbim data/mbim-service-basic-connect.json;
 // CID numbers are the MBIM 1.0 standard values.

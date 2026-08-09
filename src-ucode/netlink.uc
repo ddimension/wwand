@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — datapath/link setup: qmi_wwan driver data format, rx_urb_size,
 // QMAP mux link creation (rmnet pass-through or qmimux backend), MTU
 // sequencing. Port of the old qmi-hotplug logic.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — daemon core: owns modems and contexts, applies configuration,
 // dispatches ubus ops. Transport/sysfs/ubus access is injected (opts.deps) so
 // the core runs host-side against mocks.

@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 # wwand — thin netifd proto handler. All modem logic lives in the wwand
 # daemon; this shim only relays context up/down over ubus and feeds the
 # resulting static IP configuration to netifd (modeled after the

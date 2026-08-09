@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI datapath bring-up (extracted from the modem.uc mega-closure).
 //
 // setup(self, dp, { log, fail }, next): negotiate the WDA data format

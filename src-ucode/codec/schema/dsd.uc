@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI DSD (Data System Determination) service schema (service 0x2A).
 // Reports which radio access technologies currently provide data service —
 // the clean way to tell LTE-only from 5G NSA (LTE+NR) from 5G SA.

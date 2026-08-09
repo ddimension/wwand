@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — lazy-load shim for the NCM modules.
 //
 // daemon.uc pulls NCM in only when an NCM modem actually shows up. ucode's

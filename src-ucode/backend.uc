@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — generic per-modem backend selection.
 //
 // Many features can be served by more than one transport: a cheap QMI message,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — per-model / per-vendor quirk + expectation table.
 //
 // A small, extensible data table of what a given modem SHOULD look like once

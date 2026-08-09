@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — registration-detail collector (QMI backend).
 //
 // Extracted from the modem.uc mega-closure (maintainability audit): gathers

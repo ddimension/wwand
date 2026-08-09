@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI telemetry subsystem (extracted from the modem.uc mega-closure).
 //
 // install(self, o) attaches the telemetry surface to a QMI modem object:

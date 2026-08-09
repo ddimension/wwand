@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — helpers shared by the QMI / MBIM / NCM data-context state machines
 // (context.uc, context_mbim.uc, context_ncm.uc). Protocol-neutral: the pieces
 // that were near-identical across all three contexts live here once, so a fix

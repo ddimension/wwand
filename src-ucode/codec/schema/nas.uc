@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI NAS service message schema (service 0x03).
 // TLV layouts verified against libqmi data/qmi-service-nas.json.
 

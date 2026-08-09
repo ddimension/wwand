@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — modem control protocol switching (QMI <-> MBIM), the software
 // equivalent of usb_modeswitch for the modem's USB configuration.
 //

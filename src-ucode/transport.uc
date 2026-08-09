@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — transport hub: wraps the native wwand_io handle, registers the
 // fd with uloop and routes decoded QMUX messages to attached service clients.
 //

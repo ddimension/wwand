@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — sysfs device discovery + control-type detection (target-side).
 //
 // A modem is matched by one of: explicit cdc control-device path, parent

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — lazy-load shim for the QMI LOC schema.
 //
 // loc.uc is a ~100 kB (parsed) schema only needed when a modem enables GPS

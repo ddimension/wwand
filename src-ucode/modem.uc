@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — per-modem QMI state machine.
 //
 // States: ABSENT -> INIT_TRANSPORT -> INIT_SERVICES -> INIT_DATAPATH ->

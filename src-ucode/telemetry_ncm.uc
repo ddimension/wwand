@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — per-vendor NCM/AT telemetry blocks (extracted from modem_ncm.uc).
 // The telemetry AT differs per manufacturer; each exported table provides
 // best-effort steps (see the step contract + metric scaling below). Shapes match

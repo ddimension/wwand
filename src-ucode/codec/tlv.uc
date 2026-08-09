@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — schema-driven QMI TLV codec.
 //
 // Field spec:      { argname: { t: <tlv type>, f: FORMAT }, ... }

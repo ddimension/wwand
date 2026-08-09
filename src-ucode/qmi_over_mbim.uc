@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI-over-MBIM passthrough transport shim.
 //
 // Presents the same tiny `hub` contract that transport.uc offers to the QMI

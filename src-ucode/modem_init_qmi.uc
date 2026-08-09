@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI modem bring-up chain (extracted from modem.uc).
 //
 // install(self, o) wires the linear init flow

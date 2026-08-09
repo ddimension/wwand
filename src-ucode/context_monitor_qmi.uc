@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — while-CONNECTED monitoring for the QMI context (extracted from
 // the context.uc closure).
 //

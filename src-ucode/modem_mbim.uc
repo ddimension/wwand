@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — per-modem state machine for MBIM control (cdc_mbim driver).
 //
 // MBIM exposes a single control channel (no per-service client ids like QMI),

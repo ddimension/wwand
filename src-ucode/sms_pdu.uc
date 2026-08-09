@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — SMS PDU decoder (GSM 03.40 SMS-DELIVER), backend-neutral.
 //
 // All three backends deliver stored messages as raw PDUs — QMI WMS RAW_READ,

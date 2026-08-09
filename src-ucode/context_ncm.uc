@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — per-PDP-context state machine for NCM (cdc_ncm / cdc_ether, AT-driven).
 //
 // A context maps to a PDP context id on the AT channel and the single cdc_ncm

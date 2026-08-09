@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — per-PDP-context state machine for MBIM.
 //
 // A context maps to an MBIM session on the shared control channel. Session 0

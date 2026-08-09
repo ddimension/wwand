@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — internal ICCID-prefix -> APN defaults table (AUTOSETUP ONLY).
 //
 // Used exclusively by the zero-config autosetup: when wwand creates the

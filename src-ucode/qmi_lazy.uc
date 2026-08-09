@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — lazy-load shim for the QMI modules.
 //
 // QMI ships as its own package (wwand-qmi) so a pure-MBIM or pure-NCM install

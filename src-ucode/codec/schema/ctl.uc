@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI CTL service message schema (service 0x00).
 // Message/TLV ids verified against libqmi 1.38 qmi-service-ctl.json (CTL is
 // spec-stable; ids unchanged since libqmi 1.0).

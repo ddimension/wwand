@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — ubus object registration. Maps the 'wwand' ubus object onto the
 // daemon core. context_up uses a deferred reply: the request stays open
 // until the context reports CONNECTED or fails.

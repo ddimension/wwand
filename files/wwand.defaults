@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 # wwand — OPTIONAL one-time migration to the network-native config model, run on
 # install/upgrade (uci-defaults) but ONLY when takeover is enabled (global
 # wwand_globals option takeover, default off). By default wwand does not touch

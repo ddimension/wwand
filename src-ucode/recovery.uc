@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — recovery ladder with persisted counters.
 //
 // Two inputs, thresholds preserved from the old proto handler:

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — AT command engine and AT port discovery.
 //
 // Replaces comgt/gcom: a serialized command queue over a raw tty with

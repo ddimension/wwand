@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — backend-neutral SMS access (list / read / delete stored messages).
 //
 // Mirrors sim.apdu_backend: pick the transport once per modem via backend.choose

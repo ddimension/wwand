@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — generic QMI service client with request/response correlation.
 //
 // let c = client.create(hub, schema, cid);

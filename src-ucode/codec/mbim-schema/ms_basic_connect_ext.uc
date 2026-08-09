@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — MBIM "MS Basic Connect Extensions" service schema (MBIMEx).
 //
 // Service UUID and CIDs verified against libmbim 1.32.0:

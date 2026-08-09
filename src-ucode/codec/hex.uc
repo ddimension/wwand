@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — shared byte/hex/BCD helpers.
 //
 // One home for the conversions that were re-implemented across sim/esim/sms/

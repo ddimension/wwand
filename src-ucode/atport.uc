@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — AT/GPS port roles by USB id and interface number.
 // GENERATED FILE, DO NOT EDIT.
 // Source: ModemManager port-type udev rules (commit 9a2d586),

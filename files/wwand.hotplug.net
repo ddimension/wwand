@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 # wwand — notify the daemon about modem datapath netdev add/remove.
 # Installed as /etc/hotplug.d/net/20-wwand.
 #

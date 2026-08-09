@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — per-modem state machine for NCM control (cdc_ncm / cdc_ether driver,
 // AT-controlled).
 //

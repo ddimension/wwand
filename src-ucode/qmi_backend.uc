@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI protocol backend.
 //
 // The QMI implementations of the protocol-neutral modem/context operations

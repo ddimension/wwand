@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — human-readable text for QMI call-end / activation-failure reasons.
 //
 // WDS START_NETWORK (and PACKET_SERVICE_STATUS) report two things on failure:

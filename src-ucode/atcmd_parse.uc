@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — vendor AT response parsers (volatile per-firmware pieces split from
 // atcmd.uc, which re-exports them). Each parser takes the reply's `lines` array
 // and returns plain data (null/[] when nothing usable). Covered by test_atcmd.

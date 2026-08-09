@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — lazy-load shim for the QMI WMS (SMS) schema.
 //
 // wms.uc is only needed when SMS is actually used (modem_sms_*), so the WMS

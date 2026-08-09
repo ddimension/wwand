@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — logging. The primary sink is /dev/log (the syslog datagram socket),
 // so each message carries its real severity (via the native wwand.io seam);
 // when /dev/log is unreachable it falls back to stderr (procd forwards that to

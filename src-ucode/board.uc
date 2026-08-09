@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — board abstraction: modem power / reset GPIOs, status LEDs.
 //
 // Absorbs the board-specific bits that used to live in vendor helper scripts

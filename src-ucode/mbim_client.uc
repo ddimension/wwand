@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — MBIM session client. Owns the transaction id space on a cdc-wdm
 // control channel, correlates COMMAND/COMMAND_DONE by transaction id and
 // dispatches INDICATE_STATUS by (service, cid).
