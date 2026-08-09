@@ -171,7 +171,10 @@ export function install(self, o)
 		if (!entry)
 			return;
 
-		if (!entry.modem.uim)
+		// read_plmn_lists falls back to AT+CPOL for the user list, so a modem
+		// with no UIM client (NCM) or one that rejects UIM EF reads (E392) still
+		// returns its user list; only a modem with neither UIM nor AT is stuck.
+		if (!entry.modem.uim && !entry.modem.at)
 			return cb({ error: 'no_uim_client' });
 
 		sim.read_plmn_lists(entry.modem, (lists) => cb(null, lists));

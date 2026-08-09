@@ -389,6 +389,34 @@ scenario('plmn write: AcT arity falls back 5 -> 4 on ERROR', (next) => {
 	});
 });
 
+scenario('plmn read: AT+CPOL fallback when UIM rejects the EF read', (next) => {
+	let sent = [];
+	// a modem WITH a UIM client that returns null for the user EF (E392-style
+	// rejection) but answers AT+CPOL? — read_plmn_lists must fall back to AT
+	let m = {
+		uim: { request: (name, args, cb) => uloop.timer(1, () => cb({ error: 'ef_read' }, null)) },
+		at: {
+			send: (cmd, cb, o) => {
+				push(sent, cmd);
+				if (match(cmd, /^AT\+CPOL\?$/))
+					return uloop.timer(1, () => cb(null, { lines: [
+						'+CPOL: 1,2,"26202",1,0,1,1', '+CPOL: 2,2,"310260",0,0,0,1,1', 'OK' ] }));
+				uloop.timer(1, () => cb(null, { lines: [ 'OK' ] }));
+			},
+		},
+	};
+
+	sim.read_plmn_lists(m, (lists) => {
+		eq(length(lists.user), 2, 'plmn read: user list came from AT+CPOL fallback');
+		eq(lists.user[0], { mcc: '262', mnc: '02', gsm: true, utran: true, eutran: true, ngran: false },
+			'plmn read: first record decoded from CPOL');
+		eq(lists.user[1].mnc, '260', 'plmn read: 3-digit mnc');
+		eq(lists.user[1].ngran, true, 'plmn read: NG-RAN flag from CPOL');
+		ok(index(sent, 'AT+CPLS=0') >= 0, 'plmn read: selected the user list first');
+		next();
+	});
+});
+
 scenario('plmn write: no AT channel -> clean error', (next) => {
 	sim.write_user_plmn({ at: null }, [ { mcc: '262', mnc: '01' } ], (err, res) => {
 		eq(err?.error, 'no_at_channel', 'plmn write: no AT channel reported');

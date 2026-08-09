@@ -757,8 +757,33 @@ export function read_plmn_lists(modem, cb)
 {
 	let out = { user: null, operator: null, home: null };
 
+	// AT fallback for the USER list: some modems reject a UIM EF read of 6F60
+	// (HW-seen: Huawei E392 / EG06 return err 48) or have no UIM at all (NCM),
+	// yet expose the same list over AT+CPOL. Read it the way write_user_plmn
+	// writes it — AT+CPLS=0 selects the user list, AT+CPOL? dumps it — so LuCI
+	// shows exactly what was written even when the QMI/UIM read can't see it.
+	let at_user = (done) => {
+		let at = modem.at;
+
+		if (!at)
+			return done();
+
+		at.send('AT+CPLS=0', () => {
+			at.send('AT+CPOL?', (err, res) => {
+				if (!err) {
+					let recs = atcmd.parse_cpol(res?.lines) ?? [];
+
+					out.user = map(recs, (r) => ({ mcc: r.mcc, mnc: r.mnc,
+						gsm: r.gsm, utran: r.utran, eutran: r.eutran, ngran: r.ngran }));
+				}
+
+				done();
+			}, { timeout: 8000 });
+		}, { timeout: 5000 });
+	};
+
 	if (!modem.uim)
-		return cb(out);   // DMS legacy path has no generic file read
+		return at_user(() => cb(out));   // no UIM (NCM): AT-only user list
 
 	read_ef(modem, EF_PLMN_USER, (u) => {
 		out.user = (u != null) ? decode_plmn_act(u) : null;
@@ -768,6 +793,11 @@ export function read_plmn_lists(modem, cb)
 
 			read_ef(modem, EF_PLMN_HOME, (h) => {
 				out.home = (h != null) ? decode_plmn_act(h) : null;
+
+				// user list unreadable over UIM -> fall back to AT+CPOL
+				if (out.user == null)
+					return at_user(() => cb(out));
+
 				cb(out);
 			});
 		});
