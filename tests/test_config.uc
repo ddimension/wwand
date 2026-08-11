@@ -77,6 +77,25 @@ eq(r.sims.msim.plmn_restore.type, 'nas', 'plmnlist: per-SIM plmn_list resolves (
 ok(length(filter(r.warnings, (w) => match(w, /unknown plmn_list 'ghost'/))) == 1,
 	'plmnlist: dangling plmn_list reference warns');
 
+// --- unknown/dead options are flagged with a typo hint -----------------------
+// ('pin' instead of 'pincode' silently produced "PIN required but none
+// configured" -> SIM_BLOCKED on real hardware)
+
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', pin: '0000', bogus: 'x' },
+		s0:  { '.type': 'wwand_sim', iccid: '8988000000012345678', pincode: '1234', pn: 'y' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+ok(length(filter(r.warnings, (w) => match(w, /wwand_modem m0: unknown option 'pin'/) && match(w, /did you mean 'pincode'/))) == 1,
+	'unknown-opt: pin suggests pincode');
+ok(length(filter(r.warnings, (w) => match(w, /unknown option 'bogus' \(ignored\)/))) == 1,
+	'unknown-opt: bogus flagged (no hint)');
+eq(length(r.modems.m0.config_notes), 2, 'unknown-opt: notes attached to the modem config');
+ok(length(filter(r.warnings, (w) => match(w, /wwand_sim s0: unknown option 'pn'/))) == 1,
+	'unknown-opt: sim section checked too');
+
 // --- old-style compat --------------------------------------------------------
 
 r = padopt({

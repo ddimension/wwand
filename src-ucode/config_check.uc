@@ -35,6 +35,14 @@ export function validate(self, log, cb)
 			message: w, expected: null, actual: null,
 		});
 
+	// parse-time dead-option notes ('pin' vs 'pincode' & co): the reset above
+	// wiped the scaffolding seed, re-add them so they survive every re-init
+	for (let n in (self.config?.config_notes ?? []))
+		push(self.config_warnings, {
+			check: 'config', severity: 'warn',
+			message: n, expected: null, actual: null,
+		});
+
 	let add = (check, severity, message, expected, actual) =>
 		push(self.config_warnings, {
 			check: check, severity: severity, message: message,

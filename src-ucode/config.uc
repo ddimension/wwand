@@ -132,6 +132,49 @@ function apply_globals(s, result)
 	}
 }
 
+// every option the wwand_modem / wwand_sim parsers consume — used to flag
+// unknown options: those are silently dead config, usually a typo ('pin'
+// instead of 'pincode' cost a HW debugging session — the daemon saw "PIN
+// required but none configured" and safety-blocked the SIM).
+const MODEM_KNOWN_OPTS = [ 'device', 'netdev', 'path', 'usb_path', 'serial',
+	'imei', 'repower_time', 'reset_gpio', 'pincode', 'modes', 'mcc', 'mnc',
+	'mux', 'dl_datagram_max_size', 'tty', 'at2_external', 'fcc_auth',
+	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
+	'zero_rx_timeout', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
+	'stats_interval', 'auto_correct_config', 'plmn_list' ];
+const SIM_KNOWN_OPTS = [ 'modem', 'iccid', 'imsi', 'pincode', 'apn', 'auth',
+	'username', 'password', 'plmn_list' ];
+
+// flag section options the parser does not consume; suggest the known option
+// the unknown one is a prefix of (or vice versa) — catches pin/pincode-style
+// typos. Returns the messages (also pushed onto `warnings` for the log).
+function unknown_opts(s, known, warnings, label)
+{
+	let kmap = {};
+	let out = [];
+
+	for (let k in known)
+		kmap[k] = true;
+
+	for (let k in keys(s)) {
+		if (substr(k, 0, 1) == '.' || kmap[k])
+			continue;
+
+		let hint = null;
+
+		for (let cand in known)
+			if (index(cand, k) == 0 || index(k, cand) == 0) { hint = cand; break; }
+
+		let msg = sprintf("%s: unknown option '%s'%s (ignored)", label, k,
+			hint ? sprintf(" — did you mean '%s'?", hint) : '');
+
+		push(warnings, msg);
+		push(out, msg);
+	}
+
+	return out;
+}
+
 // build a modem config from a raw `config wwand_modem` section.
 function modem_from_section(s)
 {
@@ -262,6 +305,10 @@ function parse_network_sections(raw, result)
 
 		case 'wwand_modem':
 			result.modems[name] = modem_from_section(s);
+			// dead-option detection travels with the modem config so the
+			// per-modem status warnings can surface it in LuCI too
+			result.modems[name].config_notes = unknown_opts(s, MODEM_KNOWN_OPTS,
+				result.warnings, sprintf('wwand_modem %s', name));
 			break;
 
 		case 'wwand_sim':
@@ -271,6 +318,7 @@ function parse_network_sections(raw, result)
 			}
 
 			result.sims[name] = sim_from_section(s);
+			unknown_opts(s, SIM_KNOWN_OPTS, result.warnings, sprintf('wwand_sim %s', name));
 			break;
 
 		case 'wwand_plmnlist':

@@ -169,6 +169,15 @@ export function scaffolding(self, o)
 	let log = o.log;
 	let rec = o.rec;
 
+	// surface parse-time dead-option notes ('pin' vs 'pincode' & co) on every
+	// backend — the QMI live validation (config_check) re-adds them after its
+	// reset; MBIM/NCM have no validate pass, this seed is their only source
+	if (length(self.config?.config_notes ?? []) && self.config_warnings == null)
+		self.config_warnings = map(self.config.config_notes, (n) => ({
+			check: 'config', severity: 'warn', message: n,
+			expected: null, actual: null,
+		}));
+
 	let emit = (event, data) => {
 		if (deps.on_event)
 			deps.on_event(self, event, data);
