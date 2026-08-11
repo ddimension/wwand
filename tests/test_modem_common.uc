@@ -548,4 +548,32 @@ eq(mc.nitz_epoch({ year: 2026, month: 13, day: 1 }), null, 'nitz: month out of r
 eq(mc.nitz_epoch(null), null, 'nitz: no struct -> null');
 eq(mc.nitz_epoch({ year: 2026 }), null, 'nitz: missing month -> null');
 
+// --- last_reg_detail: reject cause survives the failure re-init --------------
+// make_fail stashes a fresh registration problem on the persistent recovery
+// record; scaffolding re-seeds it (marked stale) onto the recreated modem.
+let rec_p = {};
+let frd = { reg_detail: { source: 'mbim', reject_cause: 15, limited: true },
+	counters: { attempts: 1 },
+	note_connect_failure: (cb) => cb('reboot'),   // 'reboot' path: no retry timer
+	teardown: () => null, set_state: () => null, state: 'REGISTERING' };
+let ffail = mc.make_fail(frd, { log: () => null, emit: () => null,
+	timing: { backoff_min: 1, backoff_max: 1 }, set_retry_timer: () => null,
+	rec: rec_p });
+ffail('registration_timeout', { reg: {} });
+eq(rec_p.last_reg_detail, { source: 'mbim', reject_cause: 15, limited: true },
+	'last_reg_detail: make_fail stashes the fresh cause on the recovery record');
+
+let seeded = { config: {}, reg_detail: null, state: 'ABSENT', contexts: [] };
+mc.scaffolding(seeded, { deps: {}, log: () => null, rec: rec_p });
+eq(seeded.reg_detail, { source: 'mbim', reject_cause: 15, limited: true, stale: true },
+	'last_reg_detail: scaffolding re-seeds it marked stale');
+
+// a stale detail is NOT re-stashed (would keep resurrecting forever)
+let rec_p2 = {};
+let frd2 = { ...frd, reg_detail: { source: 'mbim', reject_cause: 15, stale: true } };
+mc.make_fail(frd2, { log: () => null, emit: () => null,
+	timing: { backoff_min: 1, backoff_max: 1 }, set_retry_timer: () => null,
+	rec: rec_p2 })('registration_timeout', { reg: {} });
+eq(rec_p2.last_reg_detail, null, 'last_reg_detail: stale detail is not re-stashed');
+
 done('test_modem_common');

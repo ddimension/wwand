@@ -131,6 +131,7 @@ export function create(opts)
 	let fail = modem_common.make_fail(self, {
 		log: log, timing: self.timing, emit: emit,
 		set_retry_timer: (t) => retry_timer = t,
+		rec: rec,
 	});
 
 	modem_common.note_connect_failure_light(self, rec);
@@ -450,6 +451,34 @@ export function create(opts)
 			data_class: data.available_data_classes,
 		};
 
+		// why (not) registered — MBIM carries the 3GPP reject cause (NwError)
+		// inline in every REGISTER_STATE response/indication. Capture it HERE
+		// so a denied/limited registration is visible immediately (status +
+		// the registration_timeout failure), not only once the slow telemetry
+		// loop has run; a clean registration clears any stale cause.
+		if ((data.nw_error != null && data.nw_error != 0) ||
+		    st == bc.REGISTER_STATE_DENIED) {
+			let d = { source: 'mbim', limited: (st == bc.REGISTER_STATE_DENIED) };
+
+			if (data.nw_error != null && data.nw_error != 0) {
+				d.reject_cause = data.nw_error;
+				d.reject_text = nasmod.REJECT_CAUSE[sprintf('%d', data.nw_error)] ??
+					sprintf('reject cause %d', data.nw_error);
+			}
+
+			let prev = self.reg_detail;
+
+			self.reg_detail = d;
+
+			if (prev?.reject_cause != d.reject_cause || prev?.limited != d.limited)
+				log('warn', sprintf('registration problem: %s%s',
+					d.reject_text ?? 'limited service',
+					(d.limited && d.reject_text) ? ' (limited service)' : ''));
+		}
+		else if (registered) {
+			self.reg_detail = null;
+		}
+
 		emit('serving_system', self.reg);
 
 		if (registered && self.state == 'REGISTERING') {
@@ -478,7 +507,7 @@ export function create(opts)
 
 			reg_timer = uloop.timer(self.timing.reg_timeout, () => {
 				if (self.state == 'REGISTERING')
-					fail('registration_timeout', { reg: self.reg });
+					fail('registration_timeout', { reg: self.reg, detail: self.reg_detail });
 			});
 
 			self.mbim.command(bc, 'REGISTER_STATE', 'query', {}, (err, data) => {

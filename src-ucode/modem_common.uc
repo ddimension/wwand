@@ -178,6 +178,13 @@ export function scaffolding(self, o)
 			expected: null, actual: null,
 		}));
 
+	// carry the last registration problem across a re-init: the failure retry
+	// recreates the modem object, which would wipe the reject cause. Marked
+	// stale — any fresh detail (inline capture / telemetry) overwrites it, a
+	// clean registration clears it.
+	if (self.reg_detail == null && o.rec?.last_reg_detail != null)
+		self.reg_detail = { ...o.rec.last_reg_detail, stale: true };
+
 	let emit = (event, data) => {
 		if (deps.on_event)
 			deps.on_event(self, event, data);
@@ -267,6 +274,12 @@ export function make_fail(self, o)
 {
 	return (stage, err) => {
 		o.log('err', sprintf('failed in %s: %J', stage, err));
+
+		// keep the last fresh registration problem on the persistent recovery
+		// record: the retry recreates the modem object, which would otherwise
+		// wipe the reject cause the user needs to see (scaffolding re-seeds it)
+		if (o.rec && self.reg_detail && !self.reg_detail.stale)
+			o.rec.last_reg_detail = self.reg_detail;
 
 		self.note_connect_failure((action) => {
 			o.emit('error', {

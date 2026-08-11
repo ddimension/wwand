@@ -333,6 +333,7 @@ export function create(opts)
 	let fail = modem_common.make_fail(self, {
 		log: log, timing: self.timing, emit: emit,
 		set_retry_timer: (t) => retry_timer = t,
+		rec: rec,
 	});
 
 	modem_common.note_connect_failure_light(self, rec);
@@ -612,7 +613,7 @@ export function create(opts)
 		if (reg_timer) reg_timer.cancel();
 		reg_timer = uloop.timer(self.timing.reg_timeout, () => {
 			if (self.state == 'REGISTERING')
-				fail('registration_timeout', { reg: self.reg });
+				fail('registration_timeout', { reg: self.reg, detail: self.reg_detail });
 		});
 
 		let poll;

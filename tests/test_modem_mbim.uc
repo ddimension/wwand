@@ -153,6 +153,37 @@ function finish() {
 // captures sim_refresh emitted by the SUBSCRIBER_READY_STATUS handler
 let ready_events = [];
 
+// inline NwError capture: a denied REGISTER_STATE with a reject cause must
+// surface in reg_detail IMMEDIATELY (no telemetry tick involved); a clean
+// re-registration clears it. The mock's query handler is switched alongside
+// the indication so the re-register probe sees the same state.
+function assert_inline_reject() {
+	let denied = {
+		nw_error: 15, register_state: bc.REGISTER_STATE_DENIED, register_mode: 1,
+		available_data_classes: 0, current_cellular_class: 1,
+		provider_id: '', provider_name: '', roaming_text: '', registration_flag: 0,
+	};
+
+	mock.handlers.REGISTER_STATE = denied;
+	mock.indicate('REGISTER_STATE', denied);
+
+	uloop.timer(100, function() {
+		eq(modem.reg_detail?.reject_cause, 15, 'inline: NwError captured from the indication');
+		eq(modem.reg_detail?.limited, true, 'inline: denied register state -> limited');
+		ok(modem.reg_detail?.reject_text != null, 'inline: reject cause mapped to text');
+
+		let home = handlers().REGISTER_STATE;
+
+		mock.handlers.REGISTER_STATE = home;
+		mock.indicate('REGISTER_STATE', home);
+
+		uloop.timer(100, function() {
+			eq(modem.reg_detail, null, 'inline: clean registration clears the cause');
+			finish();
+		});
+	});
+}
+
 function assert_telemetry() {
 	// signal (fast watch loop; native SIGNAL_STATE_V2) — QMI GET_SIGNAL_INFO shape
 	ok(modem.signal?.lte != null, 'signal: lte block populated via native backend');
@@ -195,7 +226,7 @@ function assert_telemetry() {
 	ok(length(filter(ready_events, function(e) { return e.event == 'sim_refresh' })) >= 1,
 		'ready-status: sim_refresh emitted on identity change');
 
-	finish();
+	assert_inline_reject();
 }
 
 modem = modem_mbim.create({

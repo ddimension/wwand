@@ -264,6 +264,7 @@ export function create(opts)
 	let fail = modem_common.make_fail(self, {
 		log: log, timing: self.timing, emit: emit,
 		set_retry_timer: (t) => tm.retry = t,
+		rec: rec,
 	});
 
 	// QMI bring-up chain (modem_init_qmi.uc); chain.begin() is the start() entry.
