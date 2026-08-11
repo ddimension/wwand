@@ -7,9 +7,9 @@
 //         { 3d 01 dc c5 } { fe f5 } { 4d 05 } { 0d 3a } { be f7 05 8e 9a af }
 //         -> "3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf"
 //   CIDs  src/libmbim-glib/mbim-cid.h (enum MbimCidMsBasicConnectExtensions):
-//         LTE_ATTACH_INFO=4, SYS_CAPS=5, DEVICE_CAPS=6, DEVICE_SLOT_MAPPINGS=7,
-//         SLOT_INFO_STATUS=8, BASE_STATIONS_INFO=11, VERSION=15,
-//         REGISTRATION_PARAMETERS=17.
+//         LTE_ATTACH_CONFIGURATION=3, LTE_ATTACH_INFO=4, SYS_CAPS=5,
+//         DEVICE_CAPS=6, DEVICE_SLOT_MAPPINGS=7, SLOT_INFO_STATUS=8,
+//         BASE_STATIONS_INFO=11, VERSION=15, REGISTRATION_PARAMETERS=17.
 //
 // Field layouts verified against data/mbim-service-ms-basic-connect-extensions*
 // .json.  A handful of MBIMEx layouts (ms-struct / ms-struct-array, guint16
@@ -234,7 +234,123 @@ export function decode_version(info)
 	};
 };
 
+// MbimMsLteAttachContextRoamingControl — one attach context per roaming
+// condition; a Set must carry exactly these three.
+export const ROAMING_HOME        = 0;
+export const ROAMING_PARTNER     = 1;
+export const ROAMING_NON_PARTNER = 2;
+
+// MbimMsContextSource — creation source; the OS/admin-configured attach APN is
+// tagged Admin (modem-preconfigured defaults come back tagged ModemProvisioned).
+export const CONTEXT_SOURCE_ADMIN             = 0;
+export const CONTEXT_SOURCE_MODEM_PROVISIONED = 3;
+
+// MbimMsLteAttachContextOperation for the Set.
+export const ATTACH_OP_DEFAULT         = 0;   // overwrite all three roaming contexts
+export const ATTACH_OP_RESTORE_FACTORY = 1;
+
+// --- LTE attach context (CID 3) encode/decode --------------------------------
+// MBIM_MS_LTE_ATTACH_CONTEXT: 44-byte fixed head then 4-byte-padded UTF-16LE
+// strings, string offsets relative to the struct start (matches _read_struct's
+// base-relative 'str' handling). Field order verified vs MS-Learn
+// "MB LTE Attach Operations" and libmbim mbim-service-ms-basic-connect-ext JSON:
+//   IPType, Roaming, Source, Access[off,size], User[off,size], Pass[off,size],
+//   Compression, AuthProtocol.
+const F_LTE_ATTACH_CTX = [
+	[ 'ip_type', 'u32' ], [ 'roaming', 'u32' ], [ 'source', 'u32' ],
+	[ 'access_string', 'str' ], [ 'user_name', 'str' ], [ 'password', 'str' ],
+	[ 'compression', 'u32' ], [ 'auth_protocol', 'u32' ],
+];
+
+// UTF-16LE encoder (ASCII/latin subset — APN/user/pass); mbim.uc's is module-
+// private, so keep a local twin rather than couple the schema to the codec.
+function _utf16le(s)
+{
+	let out = '';
+
+	for (let i = 0; i < length(s ?? ''); i++)
+		out += struct.pack('<H', ord(s, i));
+
+	return out;
+}
+
+function _pad4enc(s)
+{
+	for (let need = (4 - length(s) % 4) % 4; need > 0; need--)
+		s += '\x00';
+
+	return s;
+}
+
+// one MBIM_MS_LTE_ATTACH_CONTEXT (self-sized): 11×u32 head + padded strings.
+function _encode_attach_context(c)
+{
+	let astr = _utf16le(c.access_string ?? '');
+	let ustr = _utf16le(c.user_name ?? '');
+	let pstr = _utf16le(c.password ?? '');
+
+	let HEAD = 44;
+	let ao = length(astr) ? HEAD : 0;
+	let uo = length(ustr) ? (HEAD + length(_pad4enc(astr))) : 0;
+	let po = length(pstr) ? (HEAD + length(_pad4enc(astr)) + length(_pad4enc(ustr))) : 0;
+
+	let head = struct.pack('<IIIIIIIIIII',
+		c.ip_type ?? 0, c.roaming ?? 0, c.source ?? 0,
+		ao, length(astr), uo, length(ustr), po, length(pstr),
+		c.compression ?? 0, c.auth_protocol ?? 0);
+
+	return head + _pad4enc(astr) + _pad4enc(ustr) + _pad4enc(pstr);
+}
+
+// MBIM_MS_SET_LTE_ATTACH_CONFIG: Operation(u32), ElementCount(u32), then EC
+// [offset,size] ref pairs (offsets from the struct start), then the context
+// structs. Built raw because the codec has no ms-struct-array encode path.
+export function encode_set_lte_attach_config(contexts, operation)
+{
+	let ec = length(contexts);
+	let cur = 8 + 8 * ec;          // header: op + ec + EC ref pairs
+	let pairs = '';
+	let data = '';
+
+	for (let c in contexts) {
+		let enc = _encode_attach_context(c);
+		pairs += struct.pack('<II', cur, length(enc));
+		data += enc;
+		cur += length(enc);
+	}
+
+	return struct.pack('<II', operation ?? ATTACH_OP_DEFAULT, ec) + pairs + data;
+};
+
+// MBIM_MS_LTE_ATTACH_CONFIG_INFO (Query + Set response): ElementCount(u32) then
+// EC [offset,size] ref pairs (offsets from buffer start) into the context array.
+export function decode_lte_attach_config(info)
+{
+	let ec = _u32(info, 0);
+	let out = [];
+
+	for (let i = 0; i < ec && 4 + 8 * i + 8 <= length(info); i++) {
+		let off = _u32(info, 4 + 8 * i);
+
+		if (off > 0 && off + 44 <= length(info))
+			push(out, _read_struct(info, off, F_LTE_ATTACH_CTX)[0]);
+	}
+
+	return { contexts: out };
+};
+
 export const commands = {
+	// Default LTE attach context of the inserted SIM's provider (CID 3, MBIMEx).
+	// Query returns the three roaming contexts (home/partner/non-partner); the
+	// Set (exactly three) is built raw in mbim_backend.set_lte_attach_config —
+	// the codec encode has no ms-struct-array vocabulary. Both answer with
+	// MBIM_MS_LTE_ATTACH_CONFIG_INFO -> decode_lte_attach_config.
+	LTE_ATTACH_CONFIG: {
+		cid: 3,
+		query: {},
+		decode: decode_lte_attach_config,
+	},
+
 	// Protocol version handshake (MBIMEx v2.0+). CID 15.
 	VERSION: {
 		cid: 15,

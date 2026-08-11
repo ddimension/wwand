@@ -581,6 +581,13 @@ export function create(opts)
 	// program the attach PDP context (CGDCONT + vendor auth) so the modem's
 	// autonomous attach uses the right APN and IP family. Best-effort: a modem
 	// that rejects a command still proceeds to registration.
+	//
+	// Parity with QMI ensure_attach_profile / MBIM step_attach_profile: when a
+	// concrete configured APN actually CHANGES context 1, the modem must re-run
+	// its EPS attach — it may have auto-attached at power-on (or CFUN=1 above) on
+	// the stale/provisioned context 1, and rewriting CGDCONT alone does NOT
+	// re-trigger the attach. So read CGDCONT? first, and on a real change cycle
+	// the radio (CFUN=0 -> CFUN=1) after the writes to force the re-attach.
 	step_attach = () => {
 		self.set_state('CONFIGURING');
 
@@ -595,7 +602,33 @@ export function create(opts)
 			cfg.apn ?? '', (cfg.apn == null || cfg.apn == '') ? 'network default' : 'configured',
 			cfg.pdp_type ?? 'ipv4v6'));
 
-		self.at.run_sequence(cmds, step_register);
+		// only a concrete configured APN (not empty/network-default, not a '#N'
+		// pass-through) forces a re-attach; an empty APN leaves the provisioned
+		// context untouched (QMI parity — never blindly detach the network default)
+		let apn = cfg.apn;
+		let configured = (apn != null && apn != '' && substr(apn, 0, 1) != '#');
+
+		self.at.send('AT+CGDCONT?', (rerr, rres) => {
+			// changed = a concrete APN that context 1 does not already carry
+			// (pdp_setup_matches compares pdp-type + APN; a read error => assume
+			// changed and re-attach, the safe side)
+			let changed = configured &&
+				!ncm_vendors.pdp_setup_matches(1, cfg, rres?.lines);
+
+			self.at.run_sequence(cmds, () => {
+				if (!changed)
+					return step_register();
+
+				log('notice', 'attach context changed, cycling radio to re-attach');
+				self.at.send('AT+CFUN=0', () => {
+					settle_timer = uloop.timer(self.timing.settle, () => {
+						self.at.send('AT+CFUN=1', () => {
+							settle_timer = uloop.timer(self.timing.settle, step_register);
+						}, { timeout: 15000 });
+					});
+				}, { timeout: 15000 });
+			});
+		}, { timeout: 8000 });
 	};
 
 	// registration: poll CEREG (LTE/5G) then CREG (fallback) until the modem is

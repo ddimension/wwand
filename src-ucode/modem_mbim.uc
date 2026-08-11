@@ -25,6 +25,8 @@ import * as protoswitch from './protocol_switch.uc';
 import * as telemetry_mbim from './telemetry_mbim.uc';
 import * as netlink from './netlink.uc';
 import * as bc from './codec/mbim-schema/basic_connect.uc';
+import * as ext from './codec/mbim-schema/ms_basic_connect_ext.uc';
+import * as context_common from './context_common.uc';
 import * as quectel_svc from './codec/mbim-schema/quectel.uc';
 // rich telemetry: native-MBIM backend + the QMI-over-MBIM passthrough (the whole
 // QMI client stack tunnelled over the open MBIM channel) + AT, chosen per
@@ -45,6 +47,16 @@ import * as sim from './sim.uc';
 const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
 	at_drain: 60000,
+};
+
+// config pdp_type / auth -> MBIM enums for the LTE attach context (parity with
+// context_mbim's CONNECT maps; 'both' collapses to CHAP like the CONNECT path)
+const IP_TYPE_MAP = {
+	ipv4: bc.IP_TYPE_IPV4, ipv6: bc.IP_TYPE_IPV6, ipv4v6: bc.IP_TYPE_IPV4V6,
+};
+
+const AUTH_MAP = {
+	none: bc.AUTH_NONE, pap: bc.AUTH_PAP, chap: bc.AUTH_CHAP, both: bc.AUTH_CHAP,
 };
 
 export function create(opts)
@@ -126,7 +138,7 @@ export function create(opts)
 
 	// --- step chain --------------------------------------------------------
 
-	let step_open, step_fcc, step_caps, step_at, step_at_ident, step_datapath, step_sim, step_register, step_attach;
+	let step_open, step_fcc, step_caps, step_at, step_at_ident, step_datapath, step_sim, step_attach_profile, step_register, step_attach;
 
 	let fail = modem_common.make_fail(self, {
 		log: log, timing: self.timing, emit: emit,
@@ -310,7 +322,7 @@ export function create(opts)
 		// ready_state 1 = initialized (unlocked). Other states need a PIN or
 		// signal a SIM problem.
 		if (self._ready_state == bc.READY_STATE_INITIALIZED)
-			return step_register();
+			return step_attach_profile();
 
 		// no card: terminal like the QMI/NCM backends (sim_absent), NOT a
 		// retriable failure — climbing the recovery ladder cannot conjure a
@@ -342,7 +354,7 @@ export function create(opts)
 			}
 
 			if (data.pin_state == bc.PIN_STATE_UNLOCKED)
-				return step_register();
+				return step_attach_profile();
 
 			let block = (reason) => {
 				self.set_state('SIM_BLOCKED', { reason: reason, retries: data.remaining_attempts });
@@ -373,7 +385,7 @@ export function create(opts)
 				}
 
 				log('notice', 'sim: pin accepted');
-				settle_timer = uloop.timer(self.timing.settle, step_register);
+				settle_timer = uloop.timer(self.timing.settle, step_attach_profile);
 			});
 		});
 	};
@@ -497,6 +509,88 @@ export function create(opts)
 		}
 	};
 
+	// Program the default LTE attach context (MS BCE LTE_ATTACH_CONFIG, CID 3)
+	// from the primary context's config BEFORE registering, so the modem's
+	// *autonomous* EPS attach uses the right APN + IP family. The modem attaches
+	// before wwand ever issues a CONNECT, so a stale/carrier-default attach APN
+	// gets the whole attach rejected (LIMSRV / EMM reject) and we never reach a
+	// data session. MBIM parity with modem_init_qmi step_attach_profile /
+	// context.uc ensure_attach_profile. On a change, cycle the radio so an
+	// already-completed attach with the stale profile re-runs. Best-effort:
+	// firmware without the CID (or any error) just proceeds to step_register.
+	step_attach_profile = () => {
+		let ctx = self.contexts[0];
+
+		if (!ctx || !self.mbim)
+			return step_register();
+
+		let apn = context_common.conn_cfg(ctx, 'apn');
+
+		// no configured APN, or '#N' (use the modem-provisioned context as-is) —
+		// never overwrite the SIM/modem-provisioned attach context (QMI parity)
+		if (apn == null || apn == '' || substr(apn, 0, 1) == '#')
+			return step_register();
+
+		let want_ip = IP_TYPE_MAP[ctx.config.pdp_type ?? 'ipv4v6'] ?? bc.IP_TYPE_IPV4V6;
+		let user = context_common.conn_cfg(ctx, 'username') ?? '';
+		let pass = context_common.conn_cfg(ctx, 'password') ?? '';
+		let auth = AUTH_MAP[context_common.conn_cfg(ctx, 'auth')] ?? bc.AUTH_NONE;
+
+		mbim_backend.get_lte_attach_config(self.mbim, (gerr, cur) => {
+			// compare against the home-roaming context (fallback: the first)
+			let home = null;
+
+			for (let c in (cur?.contexts ?? []))
+				if (c.roaming == ext.ROAMING_HOME) { home = c; break; }
+
+			home ??= (cur?.contexts ?? [])[0];
+
+			let cur_apn = home?.access_string ?? '';
+			let cur_ip = home?.ip_type;
+
+			// up to date: same APN and (unknown or matching) IP family — leave it
+			if (!gerr && cur_apn == apn && (cur_ip == null || cur_ip == want_ip)) {
+				log('debug', sprintf('attach profile up to date (apn %J, ip %J)', cur_apn, cur_ip));
+				return step_register();
+			}
+
+			// overwrite all three roaming contexts with the same config (a Set
+			// must carry exactly three, one per roaming condition)
+			let mk = (roaming) => ({
+				ip_type: want_ip, roaming: roaming, source: ext.CONTEXT_SOURCE_ADMIN,
+				access_string: apn, user_name: user, password: pass,
+				compression: 0, auth_protocol: auth,
+			});
+
+			log('notice', sprintf('attach profile: apn %J -> %J, ip %J (was %J)',
+				cur_apn == '' ? '(default)' : cur_apn, apn, want_ip, cur_ip));
+
+			mbim_backend.set_lte_attach_config(self.mbim,
+				[ mk(ext.ROAMING_HOME), mk(ext.ROAMING_PARTNER), mk(ext.ROAMING_NON_PARTNER) ],
+				(serr) => {
+				if (serr) {
+					log('warn', sprintf('attach profile set failed: %J — continuing', serr));
+					return step_register();
+				}
+
+				self.effective_apn = apn;
+
+				// force the (possibly already-completed) autonomous attach to
+				// re-run with the new profile: radio off -> settle -> on -> settle
+				log('notice', 'attach profile changed, cycling radio to re-attach');
+				self.mbim.command(bc, 'RADIO_STATE', 'set',
+					{ radio_state: bc.RADIO_STATE_OFF }, () => {
+					settle_timer = uloop.timer(self.timing.settle, () => {
+						self.mbim.command(bc, 'RADIO_STATE', 'set',
+							{ radio_state: bc.RADIO_STATE_ON }, () => {
+							settle_timer = uloop.timer(self.timing.settle, step_register);
+						});
+					});
+				});
+			});
+		});
+	};
+
 	step_register = () => {
 		// before registering: debug-dump the NAS preferred list + SIM/network,
 		// then restore the configured list (per-SIM wins over per-modem) — via the
@@ -608,8 +702,8 @@ export function create(opts)
 	// the card behind the modem changed in place (eSIM switch applied via the
 	// SIM hot-reset): re-query the subscriber state and re-resolve the per-SIM
 	// override — the old card's wwand_sim must not stick. Contexts pick the
-	// corrected override up on their next (re)dial via conn_cfg. (No QMI-style
-	// attach-profile step on MBIM — the attach APN rides in CONNECT.)
+	// corrected override up on their next (re)dial via conn_cfg. (The LTE attach
+	// APN is programmed separately in step_attach_profile before registration.)
 	self.reapply_sim = function(cb) {
 		self.mbim.command(bc, 'SUBSCRIBER_READY_STATUS', 'query', {}, (err, d) => {
 			if (!err) {

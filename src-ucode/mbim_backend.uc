@@ -207,6 +207,33 @@ export function slot_switch(mc, physical, cb)
 	});
 };
 
+// --- native MBIM default LTE attach context (MS BCE LTE_ATTACH_CONFIG, CID 3) -
+// The MBIM equivalent of the QMI attach-profile write (context.uc
+// ensure_attach_profile): programs the APN the modem uses for its *autonomous*
+// EPS attach, which happens before any CONNECT. Without it a pure-MBIM modem
+// attaches on its stored / carrier-default attach context, and a mismatched
+// attach APN gets the whole attach rejected (LIMSRV) before contexts connect.
+
+// get_lte_attach_config(mc, cb): cb(err, { contexts: [ { ip_type, roaming,
+// source, access_string, user_name, password, compression, auth_protocol } ] }).
+// The modem returns three contexts (one per roaming condition) for the SIM.
+export function get_lte_attach_config(mc, cb)
+{
+	mc.command(ext, 'LTE_ATTACH_CONFIG', 'query', {}, (err, data) => cb(err, data));
+};
+
+// set_lte_attach_config(mc, contexts, cb): overwrite the default attach contexts.
+// `contexts` must hold exactly three (home/partner/non-partner) or the modem
+// rejects the Set. Built raw (no ms-struct-array encode in the codec), mirroring
+// slot_switch; the Set response (CONFIG_INFO) is ignored beyond its status.
+export function set_lte_attach_config(mc, contexts, cb)
+{
+	let info = ext.encode_set_lte_attach_config(contexts);
+
+	mc.command_raw(ext.service, ext.commands.LTE_ATTACH_CONFIG.cid, info,
+		(err) => cb(err ?? null));
+};
+
 // --- native MBIM SMS service (uuid_sms, verified vs libmbim 1.32) ------------
 // The SMS service has NO storage selector (READ/DELETE act on the modem's
 // configured SMS store), unlike the QMI WMS path — so this is the fallback for
