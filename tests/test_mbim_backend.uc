@@ -384,4 +384,57 @@ backend.slot_status({ command: (schema, name, kind, args, cb) =>
 	cb(null, { number_of_executors: 1, number_of_slots: 0 }) }, (err) =>
 	eq(err?.error, 'unsupported', 'slots: zero slots -> unsupported'));
 
+// --- LTE ATTACH CONFIG (CID 3): hand-built wire buffers ----------------------
+// Verified vs libmbim 1.32 (MbimLteAttachConfiguration / MbimMsSetLteAttachConfig):
+// service UUID + CID 3, 44-byte struct head (IpType,Roaming,Source,3×str
+// off/size,Compression,AuthProtocol), in-struct string offsets relative to the
+// struct start, ref-struct-array offsets relative to the information-buffer start
+// (past Operation+Count), each struct DWORD-padded, LE, Operation=0="overwrite".
+// APN 'ims' -> UTF-16LE (6 bytes) padded to 8; struct = 44 + 8 = 52 bytes.
+const APN16 = "i" + chr(0) + "m" + chr(0) + "s" + chr(0) + chr(0) + chr(0);
+// one context struct head (ip_type varies), APN='ims', empty user/pass.
+function attach_ctx_bytes(ip_type) {
+	return p32(ip_type) + p32(0) + p32(0) +   // ip_type, roaming, source
+	       p32(44) + p32(6) +                 // access_string off(=HEAD), size
+	       p32(0) + p32(0) +                  // user_name off/size (empty)
+	       p32(0) + p32(0) +                  // password off/size (empty)
+	       p32(0) + p32(0) +                  // compression, auth_protocol
+	       APN16;
+}
+
+// encode: single context -> Operation(0)+Count(1)+[off=16,size=52]+struct.
+eq(ext.encode_set_lte_attach_config(
+	[ { ip_type: 3, roaming: 0, source: 0, access_string: 'ims',
+	    user_name: '', password: '', compression: 0, auth_protocol: 0 } ],
+	ext.ATTACH_OP_DEFAULT),
+	p32(0) + p32(1) + p32(16) + p32(52) + attach_ctx_bytes(3),
+	'lte-attach: encode single context');
+
+// encode: real 3-context Set (home/partner/non-partner), Operation defaults to 0.
+// ref-array offsets progress 32,84,136 (8+8*3, then +52 each) from buffer start.
+eq(ext.encode_set_lte_attach_config([
+		{ ip_type: 1, roaming: ext.ROAMING_HOME,        source: ext.CONTEXT_SOURCE_ADMIN, access_string: 'ims' },
+		{ ip_type: 1, roaming: ext.ROAMING_PARTNER,     source: ext.CONTEXT_SOURCE_ADMIN, access_string: 'ims' },
+		{ ip_type: 1, roaming: ext.ROAMING_NON_PARTNER, source: ext.CONTEXT_SOURCE_ADMIN, access_string: 'ims' },
+	]),
+	p32(0) + p32(3) +
+	p32(32) + p32(52) + p32(84) + p32(52) + p32(136) + p32(52) +
+	(p32(1) + p32(0) + p32(0) + p32(44) + p32(6) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0) + APN16) +
+	(p32(1) + p32(1) + p32(0) + p32(44) + p32(6) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0) + APN16) +
+	(p32(1) + p32(2) + p32(0) + p32(44) + p32(6) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0) + APN16),
+	'lte-attach: encode 3-context set (roaming enums, offset progression)');
+
+// decode: INFO buffer (no Operation) Count(1)+[off=12,size=52]+struct.
+eq(ext.decode_lte_attach_config(
+	p32(1) + p32(12) + p32(52) + attach_ctx_bytes(2)),
+	{ contexts: [ { ip_type: 2, roaming: 0, source: 0, access_string: 'ims',
+	                user_name: '', password: '', compression: 0, auth_protocol: 0 } ] },
+	'lte-attach: decode single context');
+
+eq(ext.decode_lte_attach_config(p32(0)), { contexts: [] }, 'lte-attach: decode empty');
+
+// decode robustness: a pair whose struct runs past the buffer is dropped, no OOB.
+eq(ext.decode_lte_attach_config(p32(1) + p32(12) + p32(52)),
+	{ contexts: [] }, 'lte-attach: decode truncated struct stays bounded');
+
 done('test_mbim_backend');

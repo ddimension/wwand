@@ -303,7 +303,7 @@ function _encode_attach_context(c)
 }
 
 // MBIM_MS_SET_LTE_ATTACH_CONFIG: Operation(u32), ElementCount(u32), then EC
-// [offset,size] ref pairs (offsets from the struct start), then the context
+// [offset,size] ref pairs (offsets from the information-buffer start), then the context
 // structs. Built raw because the codec has no ms-struct-array encode path.
 export function encode_set_lte_attach_config(contexts, operation)
 {

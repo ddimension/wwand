@@ -597,7 +597,11 @@ export function create(opts)
 						if (family == 4 || !got_any && idx >= length(fams))
 							return self._fail(err);
 
-						log('warn', sprintf('ipv%d activation failed, continuing: %J', family, err));
+						let cdesc = callend.describe(err?.call_end_reason, err?.verbose, err?.ext_error);
+						log('warn', sprintf('ipv%d activation failed, continuing: %s%J', family,
+							cdesc?.text ? sprintf('%s (%s%s) ', cdesc.text,
+								cdesc.type_name ? cdesc.type_name + ' ' : '', cdesc.code) : '',
+							err));
 						return next();
 					}
 
