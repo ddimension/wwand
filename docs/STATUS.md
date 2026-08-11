@@ -3,6 +3,31 @@
 _Last updated: 2026-08-11. All test suites green (40 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## Datapath: stale-renamed parent silently adopted as its own mux child (2026-08-11)
+
+HW-hit on the Chateau after a config update: link up, packets leave, nothing
+returns — persistent across restarts. Root cause chain: a config reload briefly
+produced a channel-less datapath snapshot (`datapath: none, mux []`), whose
+non-mux path legitimately renames the raw netdev to the stable L3 name
+(`wwan0` → `wwand0`, daemon `rename_l3`). When the next setup ran WITH mux
+channels, the child name collided with the (renamed) parent; `link_add_rmnet`
+failed and the pre-existing-link tolerance **adopted the parent as its own mux
+child** — QMAP-muxed traffic on a raw parent, dead data plane, logged as
+success. Fixes (netlink.uc, mirrors the existing setup_mbim recovery):
+- **setup()**: when a mux child name is held by the parent itself, rename the
+  parent back to a free raw kernel name first (`free_raw_name`, moved above
+  setup() — ucode resolves module names textually, no hoisting), then create
+  the child on the moved parent; `parent` is returned and followed by
+  datapath_qmi (`self.datapath.parent`).
+- **rmnet adopt hardening**: an existing device that is not a verifiable rmnet
+  mux child (`rmnet_mux_id` readable) is REFUSED, not adopted; the fx wrapper
+  leaves `rmnet_mux_id` unset on an older wwand_io.so so legacy tolerant
+  adoption remains there.
+- fakefx rename now moves the whole sysfs subtree (kernel-faithful);
+  test_datapath +5 collision checks. HW-validated on the Chateau: healing
+  rename fires once, wwan0(parent)+wwand0(rmnet child) restored, two full
+  uci-commit/reload_config cycles survive with 0% loss.
+
 ## SIM slots on MBIM modems: passthrough bring-up + native MS BCE CIDs (2026-08-11)
 
 `modem_sim_slots`/`modem_sim_switch_slot` never worked on MBIM modems: sim.uc

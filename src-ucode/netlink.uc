@@ -151,14 +151,13 @@ export function default_fx(log)
 	};
 
 	// read an existing rmnet child's kernel MAP id (IFLA_RMNET_MUX_ID) — the
-	// authoritative value when adopting a link on a daemon restart. null when the
-	// link is absent or not an rmnet link (qmimux has no such attribute), or when
-	// an older wwand_io.so predates this getter (graceful degradation on deploy).
-	self.rmnet_mux_id = (name) => {
-		let qmit = require('wwand_io');
-
-		return (type(qmit.rmnet_mux_id) == 'function') ? qmit.rmnet_mux_id(name) : null;
-	};
+	// authoritative value when adopting a link on a daemon restart; null when
+	// the link is absent or not an rmnet link (the adopt path then REFUSES the
+	// device). Left entirely unset when an older wwand_io.so predates the
+	// getter, so the adopt path keeps its tolerant legacy behaviour instead of
+	// refusing every adoption it cannot verify.
+	if (type(require('wwand_io').rmnet_mux_id) == 'function')
+		self.rmnet_mux_id = (name) => require('wwand_io').rmnet_mux_id(name);
 
 	// enable rmnet uplink (egress) QMAP aggregation via the ethtool coalesce
 	// TX-aggregation params. Best-effort: false when the kernel/driver has no
@@ -318,7 +317,15 @@ function setup_rmnet_links(fx, netdev, mux, v5, urb_size, mux_mtus)
 			// adopt: the kernel is the source of truth for the MAP id. Read it back
 			// and warn on a mismatch with our config id (config drifted while the
 			// link survived a restart) — the existing link is kept, not recreated.
+			// A device of that name that is NOT an rmnet link (e.g. the parent
+			// itself, or a foreign dev) must never be adopted: it would report a
+			// working mux while the traffic dies on the raw device.
 			let kid = fx.rmnet_mux_id ? fx.rmnet_mux_id(child) : null;
+
+			if (fx.rmnet_mux_id && kid == null) {
+				fx.log('err', sprintf('rmnet %s: existing device is not an rmnet mux child — not adopting', child));
+				continue;
+			}
 
 			if (kid != null && kid != id)
 				fx.log('warn', sprintf('rmnet %s: kernel MAP id %d != config %d (kept existing link)',
@@ -382,11 +389,62 @@ function setup_qmimux_links(fx, netdev, sys, mux, urb_size, mux_mtus)
 	return mux_devs;
 }
 
+// lowest free `<prefix>N` netdev name (prefix defaults to 'wwan'), e.g. the raw
+// kernel-style name to move a stale-renamed parent back to. (Declared before
+// setup() — ucode resolves module-level names textually, no hoisting.)
+function free_raw_name(fx, prefix)
+{
+	let p = prefix ?? 'wwan';
+
+	for (let i = 0; i < 32; i++) {
+		let name = sprintf('%s%d', p, i);
+
+		if (!fx.exists(sprintf('/sys/class/net/%s', name)))
+			return name;
+	}
+
+	return null;
+}
+
 export function setup(fx, opts)
 {
 	let netdev = opts.netdev;
 	let backend = opts.backend ?? 'none';
 	let mux = opts.mux ?? [];
+
+	// A mux child cannot share the parent's name. This happens when the parent
+	// still carries a stable "wwandN" name from a previous NON-mux config (the
+	// daemon renames the raw netdev to the L3 name when there are no mux
+	// channels) and the config now switched to muxing — move the parent back
+	// to a raw kernel name first so the child can take the name (mirrors
+	// setup_mbim). Without this, link_add_rmnet/add_mux collides and the
+	// pre-existing-link tolerance below silently adopts the PARENT as its own
+	// mux child: the L3 then sits on the raw parent while the session traffic
+	// is QMAP-muxed — link up, no data (HW-hit on the Chateau after a config
+	// update bounced the datapath through a channel-less snapshot).
+	if (backend != 'none') {
+		for (let entry in mux) {
+			let child = entry.name ?? sprintf('%sm%d', netdev, entry.id);
+
+			if (child != netdev)
+				continue;
+
+			let raw = free_raw_name(fx);
+
+			if (raw && fx.link_set(netdev, { rename: raw })) {
+				fx.log('notice', sprintf('datapath: parent %s renamed to raw %s so the mux child can take the name',
+					netdev, raw));
+				netdev = raw;
+			}
+			else {
+				return { ok: false,
+					error: sprintf('parent %s occupies a mux child name and could not be moved', netdev) };
+			}
+
+			break;
+		}
+	}
+
 	let sys = sprintf('/sys/class/net/%s/qmi', netdev);
 	let mux_devs = [];
 	let mux_mtus = {};
@@ -465,25 +523,11 @@ export function setup(fx, opts)
 	}
 
 	// urb_size only means something for a muxed backend (the aggregation buffer);
-	// on plain raw-ip the parent just carries the child MTU, so report null
-	return { ok: true, urb_size: (backend != 'none') ? urb_size : null, mux_devs: mux_devs };
+	// on plain raw-ip the parent just carries the child MTU, so report null.
+	// `parent` follows a possibly-moved parent name (see the rename above).
+	return { ok: true, urb_size: (backend != 'none') ? urb_size : null,
+	         mux_devs: mux_devs, parent: netdev };
 };
-
-// lowest free `<prefix>N` netdev name (prefix defaults to 'wwan'), e.g. the raw
-// kernel-style name to move a stale-renamed parent back to.
-function free_raw_name(fx, prefix)
-{
-	let p = prefix ?? 'wwan';
-
-	for (let i = 0; i < 32; i++) {
-		let name = sprintf('%s%d', p, i);
-
-		if (!fx.exists(sprintf('/sys/class/net/%s', name)))
-			return name;
-	}
-
-	return null;
-}
 
 // cdc_mbim session datapath: session 0 is the untagged parent netdev,
 // sessions > 0 are 802.1q VLAN sub-devices whose VLAN id equals the MBIM

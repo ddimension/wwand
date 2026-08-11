@@ -99,8 +99,24 @@ export function create(opts)
 			return false;
 
 		if (o.rename != null) {
-			delete self.present[sprintf('/sys/class/net/%s', dev)];
-			self.present[sprintf('/sys/class/net/%s', o.rename)] = true;
+			// the whole sysfs subtree follows a kernel netdev rename — move
+			// every /sys/class/net/<dev>/... entry (attrs incl.), like the kernel
+			let from = sprintf('/sys/class/net/%s', dev);
+			let to = sprintf('/sys/class/net/%s', o.rename);
+
+			for (let k in keys(self.present))
+				if (k == from || index(k, from + '/') == 0) {
+					self.present[to + substr(k, length(from))] = self.present[k];
+					delete self.present[k];
+				}
+
+			for (let k in keys(self.files))
+				if (index(k, from + '/') == 0) {
+					self.files[to + substr(k, length(from))] = self.files[k];
+					delete self.files[k];
+				}
+
+			self.present[to] = true;
 		}
 
 		return true;

@@ -83,6 +83,28 @@ fx = fakefx.create({
 res = netlink.setup(fx, { netdev: 'wwan0', backend: 'rmnet', mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096 });
 eq(res.mux_devs, [ 'wwan0m1' ], 'rmnet: existing link tolerated');
 
+// stale-renamed parent occupies the mux child name (a config update bounced the
+// datapath through a channel-less snapshot, which renamed the raw netdev to the
+// stable L3 name): the parent must move back to a raw kernel name and the child
+// is created on the moved parent — never silently adopted onto the parent
+// itself (HW-hit on the Chateau: link up, QMAP-muxed traffic on the raw parent,
+// no data).
+fx = fakefx.create({ present: {
+	'/sys/class/net/wwand0/qmi/pass_through': true,
+	'/sys/class/net/wwand0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+	'/sys/class/net/wwand0/qmi/add_mux': true,
+	'/sys/class/net/wwand0': true,
+} });
+res = netlink.setup(fx, { netdev: 'wwand0', backend: 'rmnet',
+	mux: [ { id: 1, name: 'wwand0' } ], dgram_size: 4096 });
+eq(res.ok, true, 'collision: ok');
+eq(res.parent, 'wwan0', 'collision: parent moved to the free raw name');
+ok(fx.action_index('link_set wwand0 name wwan0') >= 0, 'collision: parent rename emitted');
+ok(fx.action_index('link_add_rmnet wwand0 link wwan0 mux_id 1 flags 0x1') >= 0,
+	'collision: child created on the moved parent');
+eq(res.mux_devs, [ 'wwand0' ], 'collision: child owns the stable L3 name');
+
 // rmnet with negotiated MAPv5: checksum offload flags on the links
 fx = fakefx.create({ present: caps_rmnet });
 res = netlink.setup(fx, {
