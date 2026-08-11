@@ -159,6 +159,14 @@ export function create(opts)
 			del:      (index, cb) => mbim_backend.sms_delete(self.mbim, index, cb),
 		};
 
+		// native MBIM multi-slot (MS BCE SysCaps/DeviceSlotMappings/SlotInfo-
+		// Status) — sim.uc's slot fallback when the passthrough UIM is
+		// unavailable. Duck-typed like mbim_uicc.
+		self.mbim_slots = {
+			status:    (cb)           => mbim_backend.slot_status(self.mbim, cb),
+			switch_to: (physical, cb) => mbim_backend.slot_switch(self.mbim, physical, cb),
+		};
+
 		self.mbim.open((err) => {
 			if (err)
 				return fail('open', err);
@@ -745,6 +753,7 @@ export function create(opts)
 			self.mbim = null;
 			self.mbim_uicc = null;
 			self.mbim_sms = null;
+			self.mbim_slots = null;
 		}
 
 		if (self.hub) {

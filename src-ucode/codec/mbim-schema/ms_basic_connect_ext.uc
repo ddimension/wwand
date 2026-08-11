@@ -7,7 +7,8 @@
 //         { 3d 01 dc c5 } { fe f5 } { 4d 05 } { 0d 3a } { be f7 05 8e 9a af }
 //         -> "3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf"
 //   CIDs  src/libmbim-glib/mbim-cid.h (enum MbimCidMsBasicConnectExtensions):
-//         LTE_ATTACH_INFO=4, DEVICE_CAPS=6, BASE_STATIONS_INFO=11, VERSION=15,
+//         LTE_ATTACH_INFO=4, SYS_CAPS=5, DEVICE_CAPS=6, DEVICE_SLOT_MAPPINGS=7,
+//         SLOT_INFO_STATUS=8, BASE_STATIONS_INFO=11, VERSION=15,
 //         REGISTRATION_PARAMETERS=17.
 //
 // Field layouts verified against data/mbim-service-ms-basic-connect-extensions*
@@ -192,6 +193,37 @@ export function decode_base_stations_info(info)
 	};
 };
 
+// MbimUiccSlotState (mbim-enums.h, since 1.26) — carried by SLOT_INFO_STATUS.
+export const UICC_SLOT_STATE_UNKNOWN                 = 0;
+export const UICC_SLOT_STATE_OFF_EMPTY               = 1;
+export const UICC_SLOT_STATE_OFF                     = 2;
+export const UICC_SLOT_STATE_EMPTY                   = 3;
+export const UICC_SLOT_STATE_NOT_READY               = 4;
+export const UICC_SLOT_STATE_ACTIVE                  = 5;
+export const UICC_SLOT_STATE_ERROR                   = 6;
+export const UICC_SLOT_STATE_ACTIVE_ESIM             = 7;
+export const UICC_SLOT_STATE_ACTIVE_ESIM_NO_PROFILES = 8;
+
+// Device Slot Mappings response: MapCount, then a ref-struct-array of MbimSlot —
+// MapCount × [offset(u32), size(u32)] pairs (offsets relative to the
+// InformationBuffer start) with each 4-byte struct in the data region. Returns
+// { slots: [ slot_index_of_executor_0, ... ] }. Verified against the generated
+// _mbim_message_read_mbim_slot_ref_struct_array in libmbim 1.32.
+export function decode_device_slot_mappings(info)
+{
+	let count = _u32(info, 0);
+	let out = [];
+
+	for (let i = 0; i < count && 4 + 8 * i + 8 <= length(info); i++) {
+		let off = _u32(info, 4 + 8 * i);
+		let len = _u32(info, 4 + 8 * i + 4);
+
+		push(out, (len >= 4 && off + 4 <= length(info)) ? _u32(info, off) : null);
+	}
+
+	return { slots: out };
+};
+
 // VERSION query/report is two guint16 (MbimVersion, MbimExtendedVersion); the
 // codec has no u16 scalar, so decode the 4-byte buffer directly.
 export function decode_version(info)
@@ -225,6 +257,34 @@ export const commands = {
 			access_string: 'string', user_name: 'string', password: 'string',
 			compression: 'u32', auth_protocol: 'u32',
 		},
+	},
+
+	// System capabilities (CID 5): executor / SIM-slot counts. Verified vs the
+	// 1.26 JSON (NumberOfExecutors, NumberOfSlots, Concurrency, ModemId).
+	SYS_CAPS: {
+		cid: 5,
+		query: {},
+		response: {
+			number_of_executors: 'u32', number_of_slots: 'u32',
+			concurrency: 'u32', modem_id: 'u64',
+		},
+	},
+
+	// Executor→slot mapping (CID 7). Response needs the ref-struct-array decode
+	// above; the SET (slot switch) is built raw in mbim_backend.slot_switch
+	// (the codec's encode path has no array vocabulary).
+	DEVICE_SLOT_MAPPINGS: {
+		cid: 7,
+		query: {},
+		decode: decode_device_slot_mappings,
+	},
+
+	// Per-slot UICC state (CID 8). State is MbimUiccSlotState (consts above).
+	SLOT_INFO_STATUS: {
+		cid: 8,
+		query: { slot_index: 'u32' },
+		response: { slot_index: 'u32', state: 'u32' },
+		notification: { slot_index: 'u32', state: 'u32' },
 	},
 
 	// Device capabilities, extensions variant (CID 6). Modeled on the v1/v2

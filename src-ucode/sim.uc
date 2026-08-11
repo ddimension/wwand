@@ -429,9 +429,6 @@ const decode_eid = hexmod.decode_eid;
 // modem has no slot-status support (single-slot firmwares often lack it)
 export function slot_status(modem, cb)
 {
-	if (!modem.uim)
-		return cb({ error: 'no_uim_client' }, null);
-
 	// single-slot firmwares (e.g. old Huawei sticks) don't implement the
 	// message at all — and LuCI polls this method every few seconds. Cache
 	// the deterministic refusal instead of hammering the modem and flooding
@@ -439,11 +436,50 @@ export function slot_status(modem, cb)
 	if (modem._slot_status_unsupported)
 		return cb({ error: 'unsupported' }, null);
 
+	// native MBIM slot CIDs (MS BCE SysCaps/SlotInfoStatus/DeviceSlotMappings)
+	// — the pure-MBIM fallback. They carry no per-slot ICCID/EID, so fill the
+	// active slot's identity from what the modem itself reported.
+	let via_mbim = () => {
+		if (!modem.mbim_slots)
+			return cb({ error: 'no_uim_client' }, null);
+
+		modem.mbim_slots.status((err, slots) => {
+			if (err)
+				return cb(err, null);
+
+			for (let s in slots)
+				if (s.active && s.iccid == null)
+					s.iccid = modem.info?.iccid ?? null;
+
+			cb(null, slots);
+		});
+	};
+
+	// this modem's QMI UIM refused GET_SLOT_STATUS earlier — go native directly
+	if (modem._slot_via_mbim)
+		return via_mbim();
+
+	// MBIM modem: prefer the QMI passthrough UIM client (richer: per-slot
+	// ICCID/EID, same proven path as APDU/power_cycle) — bring it up on
+	// first use, then fall back to the native slot CIDs
+	if (!modem.uim && modem._ensure_uim)
+		return modem._ensure_uim(() =>
+			modem.uim ? slot_status(modem, cb) : via_mbim());
+
+	if (!modem.uim)
+		return via_mbim();
+
 	modem.uim.request('GET_SLOT_STATUS', {}, (err, data) => {
 		if (err) {
-			// 71 InvalidQmiCommand / 94 NotSupported: permanent for this fw
-			if (err.code == 71 || err.code == 94)
+			// 71 InvalidQmiCommand / 94 NotSupported: permanent for this fw —
+			// go native MBIM when available, otherwise cache the refusal
+			if (err.code == 71 || err.code == 94) {
+				if (modem.mbim_slots) {
+					modem._slot_via_mbim = true;
+					return via_mbim();
+				}
 				modem._slot_status_unsupported = true;
+			}
 			return cb(err, null);
 		}
 
@@ -468,8 +504,22 @@ export function slot_status(modem, cb)
 
 export function switch_slot(modem, physical, cb)
 {
+	// native MBIM DEVICE_SLOT_MAPPINGS set — pure-MBIM fallback (carries its
+	// own idempotency guard in mbim_backend.slot_switch)
+	let via_mbim = () => modem.mbim_slots
+		? modem.mbim_slots.switch_to(physical, cb)
+		: cb({ error: 'no_uim_client' });
+
+	if (modem._slot_via_mbim)
+		return via_mbim();
+
+	// MBIM modem: same passthrough-UIM bring-up as slot_status above
+	if (!modem.uim && modem._ensure_uim)
+		return modem._ensure_uim(() =>
+			modem.uim ? switch_slot(modem, physical, cb) : via_mbim());
+
 	if (!modem.uim)
-		return cb({ error: 'no_uim_client' });
+		return via_mbim();
 
 	// idempotency guard: switching to the already-active slot would still
 	// bounce the SIM (and with it the registration) on most firmwares —

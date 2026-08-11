@@ -1,7 +1,33 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-09. All test suites green (40 suites).
+_Last updated: 2026-08-11. All test suites green (40 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## SIM slots on MBIM modems: passthrough bring-up + native MS BCE CIDs (2026-08-11)
+
+`modem_sim_slots`/`modem_sim_switch_slot` never worked on MBIM modems: sim.uc
+required a ready `modem.uim` (QMI UIM client) and bailed with `no_uim_client`,
+but nothing on the MBIM side ever allocated one for the slot path (APDU/eSIM ride
+native MBIM UICC first) — LuCI showed no slot list (found on the x1800/RM520N-GL,
+2 slots). Fixes:
+- **sim.uc**: `slot_status`/`switch_slot` bring the passthrough UIM up on demand
+  via `modem._ensure_uim` (same pattern as `power_cycle`), falling back to the
+  native path below; a UIM `GET_SLOT_STATUS` refusal (err 71/94) flips the modem
+  to the native path permanently (`_slot_via_mbim`) instead of caching
+  `unsupported` when a fallback exists.
+- **Native MBIM multi-slot** for pure-MBIM modems (no passthrough): MS Basic
+  Connect Extensions `SYS_CAPS` (CID 5, slot count), `DEVICE_SLOT_MAPPINGS`
+  (CID 7, active slot + raw-built SET for switching — ref-struct-array layout),
+  `SLOT_INFO_STATUS` (CID 8, per-slot `MbimUiccSlotState`), all verified against
+  libmbim 1.32. `mbim_backend.slot_status/slot_switch` normalize to the exact
+  QMI-shaped rows sim.uc produces (card/active/is_euicc; the native CIDs carry no
+  per-slot ICCID/EID — the active slot's ICCID is filled from modem info).
+  Exposed duck-typed as `self.mbim_slots` (like `mbim_uicc`), cleared on close.
+- **Tests:** test_mbim_backend +15 (mockhub slot scenario incl. exact SET bytes,
+  ref-struct-array wire decodes, zero-slot guard; mockhub now records raw request
+  buffers), test_sim +13 (on-demand UIM bring-up, native fallback + ICCID fill,
+  err-71 flip caching). HW-validated on the x1800 (RM520N-GL MBIM: passthrough
+  path lists both slots — slot 1 active eUICC with EID, slot 2 physical SIM).
 
 ## Audit / consolidation pass over the 2-day feature window (2026-08-09)
 

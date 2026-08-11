@@ -132,7 +132,9 @@ export function create(opts)
 		let kind = (cmd_type == mbim.CMD_SET) ? 'set' : 'query';
 		let args = mbim.decode_info(entry.cmd[kind] ?? {}, info);
 
-		push(self.calls, { name: entry.name, cid: cid, kind: kind, args: args });
+		// `info` carries the raw InformationBuffer so tests can assert the exact
+		// bytes of requests the schema cannot decode (raw-built SETs)
+		push(self.calls, { name: entry.name, cid: cid, kind: kind, args: args, info: info });
 		self.counts[entry.name] = (self.counts[entry.name] ?? 0) + 1;
 
 		let meta = { name: entry.name, cid: cid, kind: kind, count: self.counts[entry.name] };

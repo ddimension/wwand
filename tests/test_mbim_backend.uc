@@ -221,9 +221,51 @@ function s_reg_detail(next) {
 	}));
 }
 
+// multi-slot: SYS_CAPS count -> DEVICE_SLOT_MAPPINGS active -> per-slot
+// SLOT_INFO_STATUS; then a slot switch whose raw SET must carry the exact
+// ref-struct-array layout (MapCount + [offset,size] pair + MbimSlot struct).
+function s_slots(next) {
+	let mock = mbim_mockhub.create({ schema: ext, handlers: {
+		SYS_CAPS: { number_of_executors: 1, number_of_slots: 2, concurrency: 1, modem_id: 0 },
+		// query: MapCount=1, ref pair [offset=12,size=4], MbimSlot{Slot=0}
+		DEVICE_SLOT_MAPPINGS: (args, meta) =>
+			(meta.kind == 'set') ? {} : { __raw: p32(1) + p32(12) + p32(4) + p32(0) },
+		// slot 0: eSIM with active profile (7); slot 1: plain active card (5)
+		SLOT_INFO_STATUS: (args) => ({ slot_index: args.slot_index, state: args.slot_index ? 5 : 7 }),
+	} });
+	let mc = mbim_client.create(mock, {});
+	mock.transport_open('/dev/mock', {
+		on_raw: (hub, msg) => { let dec = mbim.decode(msg); if (dec) mc.on_message(dec); },
+		on_gone: () => null,
+	});
+
+	mc.open(() => backend.slot_status(mc, (err, slots) => {
+		eq(err, null, 'slots: no error');
+		eq(length(slots), 2, 'slots: SYS_CAPS slot count');
+		eq(slots[0], { physical: 1, card: 'present', active: true, logical_slot: 1,
+			iccid: null, is_euicc: true, eid: null }, 'slots: slot 1 = active eSIM (state 7)');
+		eq(slots[1], { physical: 2, card: 'present', active: false, logical_slot: null,
+			iccid: null, is_euicc: false, eid: null }, 'slots: slot 2 = inactive plain card (state 5)');
+
+		backend.slot_switch(mc, 1, (serr, sres) => {
+			ok(sres?.unchanged, 'slot-switch: active slot -> unchanged, no SET sent');
+
+			backend.slot_switch(mc, 2, (serr2) => {
+				eq(serr2, null, 'slot-switch: SET ok');
+
+				let sets = filter(mock.calls_for('DEVICE_SLOT_MAPPINGS'), (c) => c.kind == 'set');
+				eq(length(sets), 1, 'slot-switch: exactly one SET');
+				eq(sets[0].info, p32(1) + p32(12) + p32(4) + p32(1),
+					'slot-switch: MapCount=1 + [off=12,size=4] + slot index 1');
+				next();
+			});
+		});
+	}));
+}
+
 // --- runner ------------------------------------------------------------------
 
-let scenarios = [ s_signal, s_cells, s_data_mode, s_reg_detail ];
+let scenarios = [ s_signal, s_cells, s_data_mode, s_reg_detail, s_slots ];
 let i = 0;
 
 function run_next() {
@@ -325,5 +367,21 @@ backend.uicc_reset(resetc, (err) => {
 	eq(delseen.c, 4, 'sms-delete: CID 4');
 	eq(delseen.i, p32(1) + p32(7), 'sms-delete: [flag=INDEX, index=7]');
 })();
+
+// --- MS BCE slot CIDs: wire decodes ------------------------------------------
+// ref-struct-array response: MapCount=2, pairs at 4/12, 4-byte structs at 20/24
+eq(ext.decode_device_slot_mappings(
+	p32(2) + p32(20) + p32(4) + p32(24) + p32(4) + p32(1) + p32(0)),
+	{ slots: [ 1, 0 ] }, 'slot-mappings: two-executor decode');
+eq(ext.decode_device_slot_mappings(p32(0)), { slots: [] }, 'slot-mappings: empty');
+// count larger than the buffer: the in-range pair yields null (struct out of
+// range), the rest is dropped — no reads past the buffer
+eq(ext.decode_device_slot_mappings(p32(3) + p32(28) + p32(4)),
+	{ slots: [ null ] }, 'slot-mappings: truncated buffer stays bounded');
+
+// SYS_CAPS with no slots -> clean unsupported, no per-slot queries
+backend.slot_status({ command: (schema, name, kind, args, cb) =>
+	cb(null, { number_of_executors: 1, number_of_slots: 0 }) }, (err) =>
+	eq(err?.error, 'unsupported', 'slots: zero slots -> unsupported'));
 
 done('test_mbim_backend');

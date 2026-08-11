@@ -496,6 +496,70 @@ scenario('plmn write: invalid plmn rejected', (next) => {
 	});
 });
 
+// --- physical slots: passthrough bring-up + native MBIM fallback -------------
+
+// QMI-shaped GET_SLOT_STATUS canned response (2 slots, slot 1 active)
+const SLOTS2 = { slots: [
+	{ card_status: 2, slot_status: 1, logical_slot: 1, iccid: '' },
+	{ card_status: 2, slot_status: 0, logical_slot: 0, iccid: '' },
+] };
+
+scenario('slots: MBIM modem brings up the passthrough UIM on demand', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {} };
+	m._ensure_uim = (cb) => { m.uim = mkclient({ GET_SLOT_STATUS: SLOTS2 }, calls); cb(); };
+
+	sim.slot_status(m, (err, slots) => {
+		eq(err, null, 'slots: no error after on-demand UIM bring-up');
+		eq(calls, [ 'GET_SLOT_STATUS' ], 'slots: served by the passthrough UIM');
+		eq(length(slots), 2, 'slots: both slots listed');
+		eq(slots[0].active, true, 'slots: slot 1 active');
+		eq(slots[1].card, 'present', 'slots: slot 2 present');
+		next();
+	});
+});
+
+scenario('slots: pure-MBIM fallback fills the active ICCID from modem info', (next) => {
+	let m = { timing: T, config: {}, info: { iccid: '891234' },
+		mbim_slots: { status: (cb) => cb(null, [
+			{ physical: 1, card: 'present', active: true, logical_slot: 1,
+			  iccid: null, is_euicc: true, eid: null },
+			{ physical: 2, card: 'absent', active: false, logical_slot: null,
+			  iccid: null, is_euicc: false, eid: null },
+		]) } };
+
+	sim.slot_status(m, (err, slots) => {
+		eq(err, null, 'slots-mbim: no error');
+		eq(slots[0].iccid, '891234', 'slots-mbim: active slot ICCID from modem info');
+		eq(slots[1].iccid, null, 'slots-mbim: inactive slot has no identity');
+		next();
+	});
+});
+
+scenario('slots: UIM refusal (err 71) flips to native MBIM permanently', (next) => {
+	let calls = [];
+	let native = 0;
+	let m = { timing: T, config: {}, info: {},
+		uim: mkclient({ GET_SLOT_STATUS: { __err: { code: 71 } } }, calls),
+		mbim_slots: { status: (cb) => { native++; cb(null, []); },
+		              switch_to: (p, cb) => cb(null, { unchanged: true }) } };
+
+	sim.slot_status(m, (err) => {
+		eq(err, null, 'slots-flip: native fallback answered');
+		eq(m._slot_via_mbim, true, 'slots-flip: flip cached on the modem');
+
+		sim.slot_status(m, () => {
+			eq(calls, [ 'GET_SLOT_STATUS' ], 'slots-flip: UIM not asked again');
+			eq(native, 2, 'slots-flip: second call went native directly');
+
+			sim.switch_slot(m, 1, (serr, sres) => {
+				ok(sres?.unchanged, 'slots-flip: switch rides native too (idempotent)');
+				next();
+			});
+		});
+	});
+});
+
 // --- drive -------------------------------------------------------------------
 
 uloop.timer(1, run_next);

@@ -127,6 +127,86 @@ export function uicc_reset(mc, cb)
 	mc.command_raw(UICC_SERVICE, UICC_CID_RESET, info, (err) => cb(err ?? null));
 };
 
+// --- native MBIM multi-slot (MS BCE SYS_CAPS / SLOT_INFO_STATUS / -----------
+// --- DEVICE_SLOT_MAPPINGS) — the sim.uc slot fallback for pure-MBIM modems ---
+
+// MbimUiccSlotState → the QMI-shaped card vocabulary sim.uc surfaces
+const SLOT_STATES = {
+	'0': { card: 'unknown' },
+	'1': { card: 'absent' },                    // powered off, no card
+	'2': { card: 'present' },                   // powered off
+	'3': { card: 'absent' },
+	'4': { card: 'present' },                   // occupied, card not ready yet
+	'5': { card: 'present' },
+	'6': { card: 'error' },
+	'7': { card: 'present', is_euicc: true },   // eSIM, active profile
+	'8': { card: 'present', is_euicc: true },   // eSIM, no active profile
+};
+
+// slot list in the exact shape sim.uc's QMI GET_SLOT_STATUS path produces.
+// SYS_CAPS gives the slot count, DEVICE_SLOT_MAPPINGS the active slot of
+// executor 0, SLOT_INFO_STATUS (sequential, 0-based) the per-slot card state.
+// The native CIDs carry no per-slot ICCID/EID — those stay null (the caller
+// may fill the active slot's identity from the modem info).
+export function slot_status(mc, cb)
+{
+	mc.command(ext, 'SYS_CAPS', 'query', {}, (err, caps) => {
+		if (err)
+			return cb(err, null);
+
+		let n = caps?.number_of_slots ?? 0;
+
+		if (n < 1)
+			return cb({ error: 'unsupported' }, null);
+
+		mc.command(ext, 'DEVICE_SLOT_MAPPINGS', 'query', {}, (merr, mapping) => {
+			let active = merr ? null : mapping?.slots?.[0];
+			let out = [];
+			let step;
+
+			step = (i) => {
+				if (i >= n)
+					return cb(null, out);
+
+				mc.command(ext, 'SLOT_INFO_STATUS', 'query', { slot_index: i }, (serr, si) => {
+					let st = serr ? null : SLOT_STATES[sprintf('%d', si?.state ?? 0)];
+
+					push(out, {
+						physical: i + 1,
+						card: st?.card ?? 'unknown',
+						active: (active != null) ? (i == active) : false,
+						logical_slot: (active != null && i == active) ? 1 : null,
+						iccid: null,
+						is_euicc: !!st?.is_euicc,
+						eid: null,
+					});
+
+					step(i + 1);
+				});
+			};
+
+			step(0);
+		});
+	});
+};
+
+// switch executor 0 to `physical` (1-based): DEVICE_SLOT_MAPPINGS set, built
+// raw (the codec encode has no array vocabulary): MapCount=1, one
+// [offset=12, size=4] ref pair, then the 4-byte MbimSlot struct. Mirrors the
+// sim.uc idempotency guard: already-active slot → { unchanged: true }.
+export function slot_switch(mc, physical, cb)
+{
+	mc.command(ext, 'DEVICE_SLOT_MAPPINGS', 'query', {}, (gerr, mapping) => {
+		if (!gerr && mapping?.slots?.[0] == physical - 1)
+			return cb(null, { unchanged: true });
+
+		let info = struct.pack('<IIII', 1, 12, 4, physical - 1);
+
+		mc.command_raw(ext.service, ext.commands.DEVICE_SLOT_MAPPINGS.cid, info,
+			(err) => cb(err ?? null, null));
+	});
+};
+
 // --- native MBIM SMS service (uuid_sms, verified vs libmbim 1.32) ------------
 // The SMS service has NO storage selector (READ/DELETE act on the modem's
 // configured SMS store), unlike the QMI WMS path — so this is the fallback for
