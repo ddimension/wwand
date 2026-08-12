@@ -278,6 +278,11 @@ qmit_spawn(uc_vm_t *vm, size_t nargs)
 		last_errno = ENOMEM;
 		close(out[0]);
 		close(in[1]);
+		/* nobody holds the pid anymore — terminate and reap the child so it
+		 * neither runs on detached nor lingers as a zombie */
+		kill(pid, SIGTERM);
+		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+			;
 
 		return NULL;
 	}
@@ -392,9 +397,16 @@ qmit_write(uc_vm_t *vm, size_t nargs)
 
 			last_errno = errno;
 
-			/* partial tty writes are resumable by the caller */
-			if (off && (errno == EAGAIN || errno == EWOULDBLOCK))
-				break;
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/* partial tty writes are resumable by the caller */
+				if (off)
+					break;
+
+				/* nothing written, would block: null — "try again",
+				 * distinct from false = hard error (mirrors read()). A
+				 * hard EIO must not be retried forever as congestion. */
+				return NULL;
+			}
 
 			return ucv_boolean_new(false);
 		}
@@ -449,9 +461,19 @@ qmit_close(uc_vm_t *vm, size_t nargs)
 
 		/* spawn: reap the child and hand back its exit status */
 		if (t->pid > 0) {
-			while (waitpid(t->pid, &status, 0) < 0 && errno == EINTR)
+			pid_t r;
+
+			while ((r = waitpid(t->pid, &status, 0)) < 0 && errno == EINTR)
 				;
 			t->pid = -1;
+
+			/* uloop's SIGCHLD handler reaps ALL children (waitpid(-1) in
+			 * libubox) — when it won the race the status is UNKNOWN, not 0.
+			 * Return null so the caller never mistakes a failed child for
+			 * exit 0; callers needing the real status must carry it in-band
+			 * (esim_bridge appends an __EXIT marker to stdout). */
+			if (r < 0)
+				return NULL;
 
 			return ucv_int64_new(WIFEXITED(status) ? WEXITSTATUS(status) : -1);
 		}
@@ -472,14 +494,26 @@ qmit_free(void *ptr)
 		if (t->wfd >= 0)
 			close(t->wfd);
 
-		/* a spawn handle GC'd without close(): signal the child and reap it so
-		 * it neither lingers nor turns into a zombie */
+		/* a spawn handle GC'd without close(): try to reap; only signal a
+		 * child that is provably still ours. Probing with WNOHANG first
+		 * matters twice: (a) if uloop's SIGCHLD handler already reaped it,
+		 * the pid may be RECYCLED — a blind kill() would signal an unrelated
+		 * process; (b) a blocking waitpid() on an ignoring child would hang
+		 * the single-threaded uloop. If it still runs after SIGTERM, uloop's
+		 * global reaper collects it on exit — no zombie either way. */
 		if (t->pid > 0) {
 			int status;
+			pid_t r;
 
-			kill(t->pid, SIGTERM);
-			while (waitpid(t->pid, &status, 0) < 0 && errno == EINTR)
+			while ((r = waitpid(t->pid, &status, WNOHANG)) < 0 && errno == EINTR)
 				;
+
+			if (r == 0) {
+				kill(t->pid, SIGTERM);
+
+				while (waitpid(t->pid, &status, WNOHANG) < 0 && errno == EINTR)
+					;
+			}
 		}
 
 		free(t);
@@ -554,6 +588,20 @@ nla_put(struct nlmsghdr *nlh, size_t maxlen, unsigned short type,
 	return true;
 }
 
+/* recv a netlink reply, retrying on EINTR (plain recv() here would miss the
+ * ACK on a signal and the caller would misreport the operation) */
+static ssize_t
+nl_recv(int fd, void *buf, size_t len)
+{
+	ssize_t r;
+
+	do {
+		r = recv(fd, buf, len, 0);
+	} while (r < 0 && errno == EINTR);
+
+	return r;
+}
+
 static uc_value_t *
 qmit_rmnet_add(uc_vm_t *vm, size_t nargs)
 {
@@ -573,7 +621,9 @@ qmit_rmnet_add(uc_vm_t *vm, size_t nargs)
 	struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
 	unsigned int parent_idx;
 	uint16_t mux;
-	char resp[1024];
+	/* union: guarantees nlmsghdr alignment of the recv buffer (a plain char
+	 * array is unaligned-cast UB and traps into the kernel fixup on mips) */
+	union { char b[1024]; struct nlmsghdr h; } resp;
 	ssize_t rlen;
 	int fd, err;
 
@@ -609,17 +659,37 @@ qmit_rmnet_add(uc_vm_t *vm, size_t nargs)
 		return ucv_boolean_new(false);
 	}
 
+	/* every nla_* checked: a long ifname can fill the tail so that a later
+	 * nla_begin returns NULL — nla_end would then deref it */
 	linkinfo = nla_begin(&req.nlh, sizeof(req), IFLA_LINKINFO);
-	nla_put(&req.nlh, sizeof(req), IFLA_INFO_KIND, "rmnet", 6);
+
+	if (!linkinfo ||
+	    !nla_put(&req.nlh, sizeof(req), IFLA_INFO_KIND, "rmnet", 6)) {
+		last_errno = EMSGSIZE;
+
+		return ucv_boolean_new(false);
+	}
+
 	infodata = nla_begin(&req.nlh, sizeof(req), IFLA_INFO_DATA);
 
 	mux = (uint16_t)ucv_int64_get(mux_id);
-	nla_put(&req.nlh, sizeof(req), IFLA_RMNET_MUX_ID, &mux, sizeof(mux));
+
+	if (!infodata ||
+	    !nla_put(&req.nlh, sizeof(req), IFLA_RMNET_MUX_ID, &mux, sizeof(mux))) {
+		last_errno = EMSGSIZE;
+
+		return ucv_boolean_new(false);
+	}
 
 	if (flags && ucv_type(flags) == UC_INTEGER && ucv_int64_get(flags) > 0) {
 		rf.flags = (uint32_t)ucv_int64_get(flags);
 		rf.mask = rf.flags;
-		nla_put(&req.nlh, sizeof(req), IFLA_RMNET_FLAGS, &rf, sizeof(rf));
+
+		if (!nla_put(&req.nlh, sizeof(req), IFLA_RMNET_FLAGS, &rf, sizeof(rf))) {
+			last_errno = EMSGSIZE;
+
+			return ucv_boolean_new(false);
+		}
 	}
 
 	nla_end(&req.nlh, infodata);
@@ -641,21 +711,25 @@ qmit_rmnet_add(uc_vm_t *vm, size_t nargs)
 		return ucv_boolean_new(false);
 	}
 
-	rlen = recv(fd, resp, sizeof(resp), 0);
+	rlen = nl_recv(fd, resp.b, sizeof(resp.b));
 	close(fd);
 
-	if (rlen >= (ssize_t)NLMSG_LENGTH(sizeof(struct nlmsgerr))) {
-		struct nlmsghdr *rh = (struct nlmsghdr *)resp;
+	/* NLM_F_ACK guarantees an nlmsgerr reply — a missed/short read must NOT
+	 * be reported as success (the caller would believe the link exists) */
+	if (rlen < (ssize_t)NLMSG_LENGTH(sizeof(struct nlmsgerr)) ||
+	    resp.h.nlmsg_len > (size_t)rlen ||
+	    resp.h.nlmsg_type != NLMSG_ERROR) {
+		last_errno = EIO;
 
-		if (rh->nlmsg_type == NLMSG_ERROR) {
-			err = ((struct nlmsgerr *)NLMSG_DATA(rh))->error;
+		return ucv_boolean_new(false);
+	}
 
-			if (err != 0) {
-				last_errno = -err;
+	err = ((struct nlmsgerr *)NLMSG_DATA(&resp.h))->error;
 
-				return ucv_boolean_new(false);
-			}
-		}
+	if (err != 0) {
+		last_errno = -err;
+
+		return ucv_boolean_new(false);
 	}
 
 	return ucv_boolean_new(true);
@@ -694,7 +768,9 @@ qmit_rmnet_mux_id(uc_vm_t *vm, size_t nargs)
 	struct rtattr *linkinfo, *kind, *infodata, *muxa;
 	struct nlmsghdr *rh;
 	unsigned int idx;
-	char resp[2048];
+	/* a single-link RTM_GETLINK reply (stats64, AF_SPEC, alt-names, ...) can
+	 * exceed 2 KB on current kernels — size generously; union for alignment */
+	union { char b[16384]; struct nlmsghdr h; } resp;
 	void *attrs;
 	size_t alen;
 	ssize_t rlen;
@@ -740,7 +816,7 @@ qmit_rmnet_mux_id(uc_vm_t *vm, size_t nargs)
 		return NULL;
 	}
 
-	rlen = recv(fd, resp, sizeof(resp), 0);
+	rlen = nl_recv(fd, resp.b, sizeof(resp.b));
 	close(fd);
 
 	if (rlen < (ssize_t)NLMSG_LENGTH(sizeof(struct ifinfomsg))) {
@@ -749,7 +825,15 @@ qmit_rmnet_mux_id(uc_vm_t *vm, size_t nargs)
 		return NULL;
 	}
 
-	rh = (struct nlmsghdr *)resp;
+	rh = &resp.h;
+
+	/* a truncated datagram keeps the FULL length in nlmsg_len — walking that
+	 * far would read past the buffer (OOB) */
+	if (rh->nlmsg_len > (size_t)rlen) {
+		last_errno = EMSGSIZE;
+
+		return NULL;
+	}
 
 	if (rh->nlmsg_type == NLMSG_ERROR) {
 		int e = ((struct nlmsgerr *)NLMSG_DATA(rh))->error;
@@ -814,7 +898,9 @@ genl_resolve_family(int fd, const char *name)
 	struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
 	struct nlmsghdr *rh;
 	struct rtattr *fa;
-	char resp[1024];
+	/* the GETFAMILY reply carries the full ops/mcast-group lists and routinely
+	 * exceeds 1 KB — a truncated reply must not be walked; union for alignment */
+	union { char b[8192]; struct nlmsghdr h; } resp;
 	ssize_t rlen;
 	void *attrs;
 	size_t alen;
@@ -835,12 +921,15 @@ genl_resolve_family(int fd, const char *name)
 	           (struct sockaddr *)&sa, sizeof(sa)) < 0)
 		return 0;
 
-	rlen = recv(fd, resp, sizeof(resp), 0);
+	rlen = nl_recv(fd, resp.b, sizeof(resp.b));
 
 	if (rlen < (ssize_t)NLMSG_LENGTH(GENL_HDRLEN))
 		return 0;
 
-	rh = (struct nlmsghdr *)resp;
+	rh = &resp.h;
+
+	if (rh->nlmsg_len > (size_t)rlen)
+		return 0;   /* truncated — never walk past the buffer */
 
 	if (rh->nlmsg_type == NLMSG_ERROR || rh->nlmsg_type != GENL_ID_CTRL)
 		return 0;
@@ -881,7 +970,7 @@ qmit_rmnet_tx_aggr(uc_vm_t *vm, size_t nargs)
 	struct rtattr *hdr;
 	uint32_t v_bytes, v_frames, v_usecs;
 	uint16_t family;
-	char resp[1024];
+	union { char b[1024]; struct nlmsghdr h; } resp;
 	ssize_t rlen;
 	int fd, err;
 
@@ -957,21 +1046,24 @@ qmit_rmnet_tx_aggr(uc_vm_t *vm, size_t nargs)
 		return ucv_boolean_new(false);
 	}
 
-	rlen = recv(fd, resp, sizeof(resp), 0);
+	rlen = nl_recv(fd, resp.b, sizeof(resp.b));
 	close(fd);
 
-	if (rlen >= (ssize_t)NLMSG_LENGTH(sizeof(struct nlmsgerr))) {
-		struct nlmsghdr *rh = (struct nlmsghdr *)resp;
+	/* NLM_F_ACK: a missed/short ACK is a failure, not success (see rmnet_add) */
+	if (rlen < (ssize_t)NLMSG_LENGTH(sizeof(struct nlmsgerr)) ||
+	    resp.h.nlmsg_len > (size_t)rlen ||
+	    resp.h.nlmsg_type != NLMSG_ERROR) {
+		last_errno = EIO;
 
-		if (rh->nlmsg_type == NLMSG_ERROR) {
-			err = ((struct nlmsgerr *)NLMSG_DATA(rh))->error;
+		return ucv_boolean_new(false);
+	}
 
-			if (err != 0) {
-				last_errno = -err;
+	err = ((struct nlmsgerr *)NLMSG_DATA(&resp.h))->error;
 
-				return ucv_boolean_new(false);
-			}
-		}
+	if (err != 0) {
+		last_errno = -err;
+
+		return ucv_boolean_new(false);
 	}
 
 	return ucv_boolean_new(true);

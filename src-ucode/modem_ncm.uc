@@ -23,7 +23,6 @@ import * as telemetry_ncm from './telemetry_ncm.uc';
 import * as recovery_mod from './recovery.uc';
 import * as protoswitch from './protocol_switch.uc';
 import * as netlink from './netlink.uc';
-import * as nasmod from './codec/schema/nas.uc';
 import * as sim from './sim.uc';
 import * as ncm_vendors from './ncm_vendors.uc';
 
@@ -356,17 +355,29 @@ export function create(opts)
 		// port discovery
 		let bind_fx = at_opts.fx ?? netlink.default_fx((l, m) => log(l, m));
 
-		if (ensure_serial_bind(bind_fx, self.device))
-			log('notice', sprintf('registered vendor serial driver id for %s (usb-serial new_id)', self.device));
+		// USB anchor for the serial bind + AT-port discovery: `device` (holds a
+		// netdev name on migrated configs), else the datapath netdev — discovery
+		// builds NCM modems with device = null (there is no control node), and
+		// without an anchor a cold boot where the ttys appear only AFTER the
+		// first resolve (runtime new_id bind, late kmodloader) can never find
+		// them on retry: cfg.tty was pinned as null and find_tty bails on
+		// device == null. HW-hit on the Cudy LT300/SLM770A — 7 no_at_port
+		// attempts in a row while ttyUSB0-3 existed the whole time.
+		let anchor = self.device ?? opts.datapath?.netdev;
+
+		if (ensure_serial_bind(bind_fx, anchor))
+			log('notice', sprintf('registered vendor serial driver id for %s (usb-serial new_id)', anchor));
 
 		modem_common.open_at(self, {
 			at_opts: at_opts,
 			log: log,
 			drain_interval: self.timing.at_drain,
 			set_drain_timer: (t) => { at_drain_timer = t; },
+			base_override: (self.device == null && anchor != null)
+				? sprintf('/sys/class/net/%s/device/..', anchor) : null,
 			next: () => {
 				if (!self.at)
-					return fail('open_at', { error: 'no_at_port', device: self.device });
+					return fail('open_at', { error: 'no_at_port', device: self.device ?? anchor });
 
 				step_identify();
 			},

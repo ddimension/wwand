@@ -49,6 +49,11 @@ const TIMING_DEFAULTS = {
 	at_drain: 60000,
 };
 
+// SIM-init wait (ready_state 0 after MBIM open on a cold boot) — mirrors the
+// QMI backend's CARD_POLL_TRIES/CARD_POLL_MS in sim.uc
+const SIM_POLL_TRIES = 10;
+const SIM_POLL_MS = 1000;
+
 // config pdp_type / auth -> MBIM enums for the LTE attach context (parity with
 // context_mbim's CONNECT maps; 'both' collapses to CHAP like the CONNECT path)
 const IP_TYPE_MAP = {
@@ -108,7 +113,8 @@ export function create(opts)
 	self.recovery = rec;
 
 	let at_opts = opts.at ?? {};
-	let retry_timer = null, reg_timer = null, settle_timer = null, at_drain_timer = null;
+	let retry_timer = null, reg_timer = null, settle_timer = null, at_drain_timer = null,
+	    sim_poll_timer = null;
 
 	// protocol-neutral scaffolding (set_state / attach_context /
 	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)
@@ -118,8 +124,17 @@ export function create(opts)
 
 	let hooks = {
 		on_error: (c, kind) => {
-			if (rec.on_proto_error() == 'reboot')
+			let act = rec.on_proto_error();
+			// same escalation as QMI: a wedged control channel gets a hardware
+			// reset first; reboot only if that fails to clear it (the NR7101
+			// reboot-loop fix — see recovery.on_proto_error)
+			if (act == 'usb_repower')
+				rec.usb_repower();
+			else if (act == 'reboot')
 				rec.reboot('mbim error limit reached');
+
+			log('debug', sprintf('mbim proto error (%s), counter %d',
+				kind ?? '?', self.counters.proto_errors));
 		},
 		on_success: (c) => rec.on_proto_success(),
 	};
@@ -316,7 +331,7 @@ export function create(opts)
 		step_sim();
 	};
 
-	step_sim = () => {
+	step_sim = (tries) => {
 		self.set_state('SIM_UNLOCK');
 
 		// ready_state 1 = initialized (unlocked). Other states need a PIN or
@@ -334,6 +349,45 @@ export function create(opts)
 			self.set_state('SIM_BLOCKED', { reason: 'sim_absent' });
 			emit('sim_blocked', { reason: 'sim_absent' });
 			notify_contexts('sim_blocked', {});
+			return;
+		}
+
+		// SIM still initializing (cold boot: MBIM opens before the card is
+		// up — ready_state 0, no imsi/iccid yet). Wait like the QMI backend's
+		// card poll instead of racing ahead: a PIN query answered mid-init
+		// reports "locked" for a PIN-disabled card, and the ENTER the old
+		// path then sent came back as an error (no retry consumed) that was
+		// mapped to a terminal SIM_BLOCKED/verify_failed. HW-hit on a
+		// GL-X3000 (RM520N, sim_slot 2) on every cold boot.
+		if (self._ready_state == bc.READY_STATE_NOT_INITIALIZED) {
+			if ((tries ?? 0) >= SIM_POLL_TRIES)
+				return fail('sim_ready', { error: 'sim_not_initialized' });
+
+			sim_poll_timer = uloop.timer(self.timing.card_poll ?? SIM_POLL_MS, () => {
+				self.mbim.command(bc, 'SUBSCRIBER_READY_STATUS', 'query', {}, (e2, d2) => {
+					if (!e2) {
+						self._ready_state = d2.ready_state;
+
+						// the boot-time identity query ran before the card:
+						// imsi/iccid and the per-SIM override are still
+						// unset — refresh them now (mirrors the indication
+						// handler; some firmwares never send the indication)
+						if (d2.ready_state == bc.READY_STATE_INITIALIZED) {
+							if (d2.subscriber_id != null && d2.subscriber_id != '')
+								self.info.imsi = d2.subscriber_id;
+							if (d2.sim_iccid != null && d2.sim_iccid != '')
+								self.info.iccid = d2.sim_iccid;
+							self.active_sim = modem_common.match_sim_override(
+								self.config?.sims, self.info.iccid, self.info.imsi);
+							log('notice', sprintf('sim initialized after wait (poll %d): imsi %s, iccid %s%s',
+								(tries ?? 0) + 1, self.info.imsi ?? '?', self.info.iccid ?? '?',
+								self.active_sim ? ' (matched a configured wwand_sim)' : ''));
+						}
+					}
+
+					step_sim((tries ?? 0) + 1);
+				});
+			});
 			return;
 		}
 
@@ -362,6 +416,27 @@ export function create(opts)
 				notify_contexts('sim_blocked', {});
 			};
 
+			// The card may be waiting for something our PIN1 ENTER cannot
+			// satisfy — a PUK, PIN2 or a personalization code. Entering PIN1
+			// there loops fail('pin_verify') -> recovery ladder -> resets on a
+			// SIM only a PUK can fix. Terminal-block instead (like QMI/NCM).
+			let pt = data.pin_type;
+
+			if (pt == bc.PIN_TYPE_PUK1 || pt == bc.PIN_TYPE_PUK2)
+				return block('puk_required');
+
+			if (pt >= bc.PIN_TYPE_NETWORK_PIN && pt <= bc.PIN_TYPE_CORPORATE_PIN)
+				return block('personalization');
+
+			if (pt == bc.PIN_TYPE_PIN2) {
+				// PIN2 gates FDN/settings only, not attach — carry on
+				log('notice', 'sim: pin2 requested by card, not required for attach');
+				return step_attach_profile();
+			}
+
+			if (pt != null && pt != bc.PIN_TYPE_PIN1)
+				return block('pin_type_unsupported');
+
 			if (!pincode)
 				return block('pin_required_no_pin');
 
@@ -378,9 +453,33 @@ export function create(opts)
 				new_pin: '',
 			}, (verr, vdata) => {
 				if (verr) {
-					self.set_state('SIM_BLOCKED', { reason: 'verify_failed' });
-					emit('sim_blocked', { reason: 'verify_failed' });
-					notify_contexts('sim_blocked', {});
+					// A rejected ENTER is either a genuinely wrong PIN (a
+					// retry was consumed) or the firmware refusing the
+					// operation (SIM mid-init / PIN1 not enabled — no retry
+					// consumed). Only the former may be terminal: re-query
+					// and let the retry counter decide.
+					self.mbim.command(bc, 'PIN', 'query', {}, (qerr, qdata) => {
+						if (!qerr && qdata.pin_state == bc.PIN_STATE_UNLOCKED) {
+							// the verify reply got lost/garbled but took effect
+							log('notice', 'sim: pin accepted (verify reply lost)');
+							settle_timer = uloop.timer(self.timing.settle, step_attach_profile);
+							return;
+						}
+
+						if (!qerr && qdata.remaining_attempts != null &&
+						    data.remaining_attempts != null &&
+						    qdata.remaining_attempts < data.remaining_attempts) {
+							self.set_state('SIM_BLOCKED', { reason: 'verify_failed', retries: qdata.remaining_attempts });
+							emit('sim_blocked', { reason: 'verify_failed', retries: qdata.remaining_attempts });
+							notify_contexts('sim_blocked', {});
+							return;
+						}
+
+						// no retry consumed -> transient refusal; retriable
+						// (the pin_block_reason guard above still keeps a
+						// later attempt from burning the last try)
+						fail('pin_verify', verr);
+					});
 					return;
 				}
 
@@ -846,11 +945,11 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
-		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer ])
+		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, sim_poll_timer ])
 			if (t)
 				t.cancel();
 
-		retry_timer = reg_timer = settle_timer = at_drain_timer = null;
+		retry_timer = reg_timer = settle_timer = at_drain_timer = sim_poll_timer = null;
 		telem.stop();
 
 		modem_common.close_at(self);

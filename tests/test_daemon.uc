@@ -409,6 +409,12 @@ let rp = rd.repower_modem('m0');
 eq(rp.error, 'multi_modem_needs_reset_gpio', 'repower multi: shared rail guarded');
 eq(cycles, 0, 'repower multi: power_cycle not fired');
 
+// repower: a named-but-unknown ref must error, never fall back to another
+// modem's cfg (a typo'd ref used to pulse the FIRST modem's reset GPIO)
+rp = rd.repower_modem('nope');
+eq(rp.error, 'no_such_modem', 'repower unknown ref: clean error');
+eq(cycles, 0, 'repower unknown ref: nothing pulsed');
+
 // repower: single modem -> power-cycle allowed... but board default GPIO wins first
 rd.modems = { m0: mk_entry({}, false) };
 rp = rd.repower_modem('m0');

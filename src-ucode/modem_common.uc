@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — protocol-neutral helpers shared by the QMI/MBIM/NCM modem state
 // machines (operate on the modem `self` object).
 
@@ -213,6 +215,12 @@ export function scaffolding(self, o)
 
 		if (self.state == 'READY')
 			ctx.modem_event('ready');
+	};
+
+	// counterpart for reload teardown: without it a replaced context stays in
+	// self.contexts forever — retained closures AND still receiving events
+	self.detach_context = function(ctx) {
+		self.contexts = filter(self.contexts, (c) => c != ctx);
 	};
 
 	self.note_connect_success = function() {
@@ -576,7 +584,9 @@ export function close_at(self)
 // best-effort AT side-channel bring-up: discover + open the AT tty, run
 // model-init + configured at_init + cell-lock commands, then o.next(). Always
 // non-fatal (no usable AT port -> next() with self.at unset).
-//   o = { at_opts?, log, drain_interval?, set_drain_timer, next, reopen_next? }
+//   o = { at_opts?, log, drain_interval?, set_drain_timer, next, reopen_next?,
+//         base_override? — explicit sysfs USB-device base for tty discovery
+//         (NCM: the datapath netdev's USB parent; there is no cdc-wdm anchor) }
 export function open_at(self, o)
 {
 	let log = o.log;

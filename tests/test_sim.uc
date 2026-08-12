@@ -591,6 +591,51 @@ scenario('slots: UIM refusal (err 71) flips to native MBIM permanently', (next) 
 	});
 });
 
+// unlock on a modem with neither uim nor dms (native-MBIM-UICC / NCM) must not
+// crash (used to null-deref modem.dms via unlock_dms — eSIM apply path)
+scenario('unlock: no uim/dms -> clean no_unlock_backend', (next) => {
+	let m = { timing: T, config: {} };
+
+	sim.unlock(m, (err, st) => {
+		eq(err, null, 'unlock-none: no error');
+		eq(st.status, 'no_unlock_backend', 'unlock-none: clean status');
+		next();
+	});
+});
+
+// unlock on an MBIM modem bridges via _ensure_uim to the passthrough UIM
+scenario('unlock: _ensure_uim bridges to passthrough UIM', (next) => {
+	let m = { timing: T, config: {} };
+	m._ensure_uim = (cb) => {
+		m.uim = mkclient({
+			GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_READY, 3) },
+		}, []);
+		cb(m.uim);
+	};
+
+	sim.unlock(m, (err, st) => {
+		eq(err, null, 'unlock-ensure: no error');
+		eq(st.status, 'ready', 'unlock-ensure: unlocked via passthrough UIM');
+		next();
+	});
+});
+
+// read_identity without a dms client (AT-only modem) must not crash and still
+// return via the AT chain
+scenario('read_identity: no dms -> AT chain, no crash', (next) => {
+	let m = { timing: T, config: {},
+		at: { send: (cmd, cb) => cb(null, { lines: [
+			(cmd == 'AT+CIMI') ? '262021234567890' : '89490240001234567890',
+		] }) } };
+
+	sim.read_identity(m, (id) => {
+		eq(id.imsi, '262021234567890', 'identity-nodms: imsi via AT');
+		eq(id.iccid, '89490240001234567890', 'identity-nodms: iccid via AT');
+		eq(id.msisdn, null, 'identity-nodms: msisdn stays null');
+		next();
+	});
+});
+
 // --- drive -------------------------------------------------------------------
 
 uloop.timer(1, run_next);

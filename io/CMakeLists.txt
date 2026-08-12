@@ -6,10 +6,20 @@ project(ucode-mod-wwand-io C)
 
 set(CMAKE_C_STANDARD 11)
 
+# standalone builds (build-host/build-target trees) default to -O0 without
+# this; the OpenWrt feed build injects its own flags either way
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 find_path(UCODE_INCLUDE_DIR ucode/module.h)
 find_library(UCODE_LIBRARY NAMES ucode)
+
+if(NOT UCODE_INCLUDE_DIR OR NOT UCODE_LIBRARY)
+  message(FATAL_ERROR "libucode headers/library not found (install ucode dev files)")
+endif()
 
 add_library(wwand_io MODULE src/wwand-io.c)
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 """Generate src-ucode/atport.uc from ModemManager port-type udev rules.
 
 Usage: gen-atport-table.py <modemmanager-checkout> > ../src-ucode/atport.uc

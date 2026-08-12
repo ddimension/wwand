@@ -20,7 +20,6 @@ import * as uloop from 'uloop';
 import * as hexmod from './codec/hex.uc';
 import * as backend from './backend.uc';
 import * as uimmod from './codec/schema/uim.uc';
-import * as dmsmod from './codec/schema/dms.uc';
 import * as atcmd from './atcmd.uc';
 
 const QMI_ERR_NO_EFFECT = 26;
@@ -325,7 +324,24 @@ export function unlock(modem, cb)
 	if (modem.uim)
 		return unlock_uim(modem, cb, 0);
 
-	return unlock_dms(modem, cb, 0);
+	if (modem.dms)
+		return unlock_dms(modem, cb, 0);
+
+	// no QMI clients (native-MBIM-UICC or NCM modem): try to bring up the
+	// passthrough UIM on demand (MBIM), else report cleanly — callers like the
+	// eSIM apply path just continue; the backend's own init owns AT+CPIN.
+	// Without this guard unlock_dms would null-deref modem.dms.
+	if (modem._ensure_uim) {
+		modem._ensure_uim((uim) => {
+			if (uim && modem.uim)
+				return unlock_uim(modem, cb, 0);
+
+			cb(null, { status: 'no_unlock_backend' });
+		});
+		return;
+	}
+
+	return cb(null, { status: 'no_unlock_backend' });
 };
 
 // QMI codes where the transport rejected the op WITHOUT touching the PIN, so it
@@ -1366,8 +1382,9 @@ export function read_iccid(modem, cb)
 	if (modem.uim)
 		push(chain, (done) => read_ef(modem, EF_ICCID, (b) =>
 			done(b != null ? hexmod.bytes_to_iccid(b) : null)));
-	push(chain, (done) => modem.dms.request('GET_ICCID', {}, (e, d) =>
-		done((!e && length(d?.iccid ?? '')) ? d.iccid : null), { no_recovery: true }));
+	if (modem.dms)
+		push(chain, (done) => modem.dms.request('GET_ICCID', {}, (e, d) =>
+			done((!e && length(d?.iccid ?? '')) ? d.iccid : null), { no_recovery: true }));
 	if (modem.at)
 		push(chain, (done) => modem.at.send('AT+QCCID', (e, r) =>
 			done(e ? null : at_digits(r?.lines, 18))));
@@ -1383,8 +1400,9 @@ export function read_identity(modem, cb)
 	if (modem.uim)
 		push(imsi_chain, (done) => read_ef(modem, EF_IMSI, (b) =>
 			done(b != null ? substr(swap_nibbles(b), 3) : null)));   // strip len+parity
-	push(imsi_chain, (done) => modem.dms.request('GET_IMSI', {}, (e, d) =>
-		done((!e && length(d?.imsi ?? '')) ? d.imsi : null), { no_recovery: true }));
+	if (modem.dms)
+		push(imsi_chain, (done) => modem.dms.request('GET_IMSI', {}, (e, d) =>
+			done((!e && length(d?.imsi ?? '')) ? d.imsi : null), { no_recovery: true }));
 	if (modem.at)
 		push(imsi_chain, (done) => modem.at.send('AT+CIMI', (e, r) =>
 			done(e ? null : at_digits(r?.lines, 14))));
@@ -1394,6 +1412,9 @@ export function read_identity(modem, cb)
 
 		read_iccid(modem, (iccid) => {
 			out.iccid = iccid;
+
+			if (!modem.dms)
+				return cb(out);
 
 			modem.dms.request('GET_MSISDN', {}, (err, data) => {
 				if (!err)

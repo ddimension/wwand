@@ -167,7 +167,7 @@ The contract above is implemented across all three backends:
   native MS-BasicConnect decoder plus a **QMI-over-MBIM passthrough** that reuses
   the QMI backend + schemas (hence `wwand-mbim` DEPENDS `wwand-qmi`).
 - **NCM** (`modem_ncm.uc` / `context_ncm.uc`) — the AT-only backend. Per-vendor
-  `VENDORS` dial/auth/telemetry recipes (Quectel, Fibocom, Huawei, Meig, SIMCom,
+  `VENDORS` dial/auth/telemetry recipes in `ncm_vendors.uc` (Quectel, Fibocom, Huawei, Meig, SIMCom,
   Sierra, Sony, Samsung, ZTE, MikroTik, MediaTek, Spreadtrum/Unisoc, Telit,
   Gosuncn, Neoway + a 3GPP-standard fallback); registration polls
   `AT+CEREG?` → `AT+C5GREG?` → `AT+CREG?` (5G-SA aware); bearer liveness comes from

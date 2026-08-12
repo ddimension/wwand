@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — MBIM telemetry (signal / cells / CA / data-mode / registration
 // detail + the slow log loop and the fast watch loop).
 //

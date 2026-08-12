@@ -53,8 +53,13 @@ export const READY_STATE_NAMES = {
 	'3': 'bad SIM', '4': 'failure', '5': 'not activated', '6': 'device locked',
 };
 
-// MbimPinType / MbimPinState
+// MbimPinType / MbimPinState (values verified against libmbim mbim-enums.h)
 export const PIN_TYPE_PIN1 = 2;
+export const PIN_TYPE_PIN2 = 3;
+export const PIN_TYPE_NETWORK_PIN = 6;        // 6..9 = personalization locks
+export const PIN_TYPE_CORPORATE_PIN = 9;
+export const PIN_TYPE_PUK1 = 11;
+export const PIN_TYPE_PUK2 = 12;
 export const PIN_STATE_UNLOCKED = 0;
 export const PIN_STATE_LOCKED = 1;
 export const PIN_OP_ENTER = 0;

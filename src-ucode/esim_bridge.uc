@@ -109,10 +109,15 @@ return {
 			let logf = fs.open(ESIM_LOGF, 'a');
 
 			// native spawn gives a non-blocking stdout + writable stdin; the
-			// shell only sets the env and appends lpac's stderr to the log
+			// shell sets the env and appends lpac's stderr to the log. The
+			// __EXIT marker carries the exit status IN-BAND: uloop's SIGCHLD
+			// handler reaps all children, so h.close()'s waitpid can lose the
+			// race and not know the status (returns null) — the marker line is
+			// then the only reliable source. (No exec: the shell must survive
+			// lpac to echo the marker.)
 			let qmit = require('wwand_io');
 			let h = qmit.spawn([ '/bin/sh', '-c',
-				sprintf("mkdir -p /tmp/wwand; exec env LPAC_APDU=stdio LPAC_HTTP=curl %s %s 2>>%s",
+				sprintf("mkdir -p /tmp/wwand; env LPAC_APDU=stdio LPAC_HTTP=curl %s %s 2>>%s; echo \"__EXIT:$?\"",
 					ESIM_LPAC, cmd, ESIM_LOGF) ]);
 
 			if (!h) { if (logf) logf.close(); return null; }
@@ -129,10 +134,18 @@ return {
 				h.write(sprintf('{"type":"apdu","payload":{"ecode":%d,"data":"%s"}}\n', ecode, data ?? ''));
 			let field = (s, re) => { let m = match(s, re); return m ? m[1] : null; };
 
+			let inband_ec = null;   // exit status from the __EXIT stdout marker
+
 			let finish;   // forward-declare (ucode TDZ on self-referencing arrows)
 			finish = () => {
 				if (uh) { uh.delete(); uh = null; }
-				let ec = h.close();   // reaps the child, returns its exit status
+				// close() returns null when uloop already reaped the child
+				// (status unknown) — the in-band marker fills the gap; with
+				// neither (shell killed) the missing result line is the
+				// caller-visible failure, so don't fabricate an error here
+				let ec = h.close();
+				if (ec === null)
+					ec = inband_ec ?? 0;
 				if (logf) { logf.close(); logf = null; }
 				on_done(ec == 0 ? null : { error: 'lpac', code: ec }, trim(fs.readfile(ESIM_LOGF) ?? ''));
 			};
@@ -193,6 +206,11 @@ return {
 				while ((nl = index(buf, '\n')) >= 0) {
 					let s = trim(substr(buf, 0, nl));
 					buf = substr(buf, nl + 1);
+
+					// in-band exit status (see spawn above), not an lpac line
+					let em = match(s, /^__EXIT:(\d+)$/);
+					if (em) { inband_ec = +em[1]; continue; }
+
 					if (length(s)) handle_line(s);
 				}
 			}, uloop.ULOOP_READ);

@@ -153,6 +153,46 @@ function finish() {
 // captures sim_refresh emitted by the SUBSCRIBER_READY_STATUS handler
 let ready_events = [];
 
+// PUK-locked SIM must terminal-block (SIM_BLOCKED reason puk_required), NOT
+// loop PIN1-ENTER -> fail('pin_verify') -> recovery ladder (resets a SIM only
+// a PUK can fix). Second modem instance: device-locked ready state + PIN query
+// answering pin_type PUK1. (Defined before its caller — this ucode treats
+// module-level function statements as non-hoisted under 'use strict'.)
+function assert_puk_block() {
+	let h2 = handlers();
+	h2.SUBSCRIBER_READY_STATUS = {
+		ready_state: bc.READY_STATE_DEVICE_LOCKED,
+		subscriber_id: '', sim_iccid: '', ready_info: 0, telephone_numbers_count: 0,
+	};
+	h2.PIN = { pin_type: bc.PIN_TYPE_PUK1, pin_state: bc.PIN_STATE_LOCKED,
+	           remaining_attempts: 0 };
+
+	let mock2 = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h2 });
+	let m2 = null, m2_done = false;
+
+	m2 = modem_mbim.create({
+		id: 'm_puk', device: '/dev/mock1',
+		config: { apn: 'internet', pincode: '1234' },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		deps: {
+			transport_open: mock2.transport_open,
+			log: () => null,
+			on_event: (m, event, data) => {
+				if (event == 'sim_blocked' && !m2_done) {
+					m2_done = true;
+					eq(data.reason, 'puk_required', 'puk: terminal reason puk_required');
+					eq(m2.state, 'SIM_BLOCKED', 'puk: state SIM_BLOCKED, no recovery ladder');
+					m2.stop();
+					finish();
+				}
+			},
+		},
+	});
+
+	m2.start();
+}
+
 // inline NwError capture: a denied REGISTER_STATE with a reject cause must
 // surface in reg_detail IMMEDIATELY (no telemetry tick involved); a clean
 // re-registration clears it. The mock's query handler is switched alongside
@@ -179,7 +219,7 @@ function assert_inline_reject() {
 
 		uloop.timer(100, function() {
 			eq(modem.reg_detail, null, 'inline: clean registration clears the cause');
-			finish();
+			assert_puk_block();
 		});
 	});
 }

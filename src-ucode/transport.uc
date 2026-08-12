@@ -66,9 +66,21 @@ export function open(path, cbs)
 		while (length(txq)) {
 			let w = handle.write(txq[0]);
 
+			// hard write error (false; e.g. EIO on a wedged-not-gone device):
+			// the device is unusable — take the same path as a read failure
+			// instead of busy-retrying it as congestion forever
+			if (w === false) {
+				hub.close();
+
+				if (cbs?.on_gone)
+					cbs.on_gone(hub);
+
+				return;
+			}
+
 			if (w !== length(txq[0])) {
-				// still congested — retry shortly (frames are message-
-				// oriented, a short write does not happen on cdc-wdm)
+				// congested (null / partial) — retry shortly (frames are
+				// message-oriented, a short write does not happen on cdc-wdm)
 				tx_timer = uloop.timer(TX_RETRY_MS, flush_txq);
 				return;
 			}

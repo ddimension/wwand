@@ -22,7 +22,6 @@
 
 'use strict';
 
-import * as uloop from 'uloop';
 import * as qmi_backend from './qmi_backend.uc';
 import * as context_common from './context_common.uc';
 import * as context_monitor_qmi from './context_monitor_qmi.uc';

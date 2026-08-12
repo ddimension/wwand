@@ -24,5 +24,6 @@ service_triggers() {
 }
 
 reload_service() {
-	ubus -t 10 call wwand reload
+	# daemon dead/hung -> the edit would silently never apply; restart instead
+	ubus -t 10 call wwand reload || restart
 }

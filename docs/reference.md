@@ -835,6 +835,9 @@ when called from LuCI).
 | `modem_sms_delete` | `modem`, `storage?`, `index` | delete one stored SMS by index (write ACL) |
 | `modem_repower` | `modem?` | hardware repower: pulse the modem `reset_gpio` (or, single-modem only, the board default), else power-cycle the modem USB power (also single-modem only — on a multi-modem box the board lines would hit the wrong hardware: error `multi_modem_needs_reset_gpio`). Same path as the recovery ladder; recovers a hung / vanished modem |
 | `modem_set_protocol` | `modem`, `protocol` | switch the control protocol (`qmi` ⇄ `mbim`); the modem resets |
+| `modem_reattach` | `modem` | detach/re-attach at the registration level (QMI DMS low-power→online bounce natively, `AT+COPS=2`→`0` fallback) without a full modem reset (write ACL) |
+| `modem_datapath` | `modem` | datapath diagnostics: driver/protocol, mux channels, aggregation state, netdev counters |
+| `migrate` | `interfaces?`, `apply?` | plan (default) or apply the config migration of the named (or all) stock `proto qmi`/`mbim`/`ncm` interfaces to the network-native `proto wwand` model (same engine as the `/usr/libexec/wwand/migrate` CLI and the LuCI *Migrate selected* button) |
 | `context_up` / `context_down` | `context` or `interface` | connect / disconnect (deferred reply with the IP config) |
 | `context_status` / `context_settings` | `context` or `interface` | state, per-family cid/pdh, IP settings |
 

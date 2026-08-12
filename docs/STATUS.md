@@ -1,7 +1,89 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-11. All test suites green (40 suites).
+_Last updated: 2026-08-12. All test suites green (42 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## Audit tranche 1 — bug fixes across ucode + C module (2026-08-12)
+
+Five-agent project audit (RAM / duplication / maintainability / C+shell /
+backend parity); tranche 1 = the confirmed defects. All host-tested, HW-smoked
+on 245 (QMI/RG650E, aarch64) and 246 (MBIM/EG06, mipsel):
+
+- **sim.uc crash**: `unlock()`/`read_iccid`/`read_identity` null-deref'd
+  `modem.dms` on modems with neither uim nor dms (native-MBIM-UICC / NCM,
+  reachable via the eSIM apply path) — guarded; `unlock()` now bridges over
+  `_ensure_uim` (MBIM) or reports `no_unlock_backend`.
+- **MBIM PUK**: a PUK/perso-locked SIM looped PIN1-ENTER → recovery ladder;
+  now terminal `SIM_BLOCKED` (`puk_required`/`personalization`), PIN2 passes
+  through (attach not gated). New `PIN_TYPE_*` consts vs libmbim.
+- **Context leak**: reload-replaced contexts stayed in `modem.contexts`
+  (retained + still receiving events) — `detach_context` in scaffolding,
+  called from the daemon's `stop_context`.
+- `modem_probe.registered` was always false (string vs numeric compare) —
+  shared `is_registered()`; `repower_modem` with an unknown ref no longer
+  falls back to ANOTHER modem's reset GPIO; MBIM proto-error hook now runs the
+  `usb_repower` rung (NR7101-class fix was QMI-only); MBIM context aborts an
+  in-flight activation on `suspend` (netifd requeue parity); activate()'s
+  150 s queue-guard timer is cancelled on flush.
+- **wwand-io.c**: OOB read on truncated netlink replies (nlmsg_len clamp +
+  16K/8K aligned union buffers — the 2K buffer was routinely too small for
+  RTM_GETLINK); rmnet_add/tx_aggr no longer report success on a missed ACK
+  (EINTR loop + strict nlmsgerr check); nla_begin/nla_put NULL checks;
+  spawn close() returns null when uloop's SIGCHLD reaper won the race
+  (esim_bridge now carries the exit status in-band via an `__EXIT` marker);
+  GC free() probes WNOHANG before signalling (pid-reuse hazard);
+  write() returns null for pure-EAGAIN vs false for hard errors (transport
+  treats false as device-gone instead of busy-retrying forever).
+- Hygiene: SPDX headers completed (3 files), 6 dead imports removed, stale
+  doc references fixed (ncm_vendors, hwops, 3 missing ubus methods in
+  reference.md), wwand-migrate header said `proto qmi` instead of `proto
+  wwand`, init reload falls back to restart when the daemon is dead.
+
+## MBIM cold-boot SIM race → bogus terminal SIM_BLOCKED/verify_failed (2026-08-12)
+
+HW-hit on the x1800 (GL-X3000/RM520N-GL, MBIM, `sim_slot 2`) on every cold
+boot: modem parked in `SIM_BLOCKED` reason `verify_failed`, yet the SIM was
+fine — `+CPIN: READY`, PIN retries untouched at 3/3 (no verify ever consumed
+one); only a wwand restart cleared it. Root cause chain in `modem_mbim.uc`
+`step_sim`: MBIM opens before the card is up (`SUBSCRIBER_READY_STATUS` →
+`ready_state 0`, no imsi/iccid), the old code raced straight into the PIN
+query, firmware answered "locked" mid-init, the ENTER was refused WITHOUT
+consuming a retry — and every verify error was mapped to a terminal
+`SIM_BLOCKED`. Fixes (deployed on the x1800):
+- **SIM-init wait**: `ready_state == NOT_INITIALIZED` → poll
+  SUBSCRIBER_READY_STATUS (QMI `unlock_uim` card-poll parity, 10× `card_poll`
+  1 s), refreshing imsi/iccid + the `wwand_sim` override when the identity
+  lands late (some firmwares never send the indication); exhaustion →
+  retriable `fail('sim_ready')`, not terminal.
+- **Verify-error disambiguation**: on a refused ENTER re-query PIN and let the
+  retry counter decide — counter decremented ⇒ genuinely wrong PIN ⇒ terminal
+  `verify_failed` (now with `retries`); re-query says unlocked ⇒ reply was
+  lost, proceed; unchanged ⇒ transient refusal ⇒ retriable `fail('pin_verify')`
+  (the `pin_block_reason` last-try guard still applies on the next attempt).
+- New suite `test_modem_mbim_sim` (18 checks): cold-boot wait / transient
+  refusal / wrong PIN / lost reply.
+- NOTE the x1800's underlying trigger is likely hardware: during diagnosis the
+  slot-2 card (M2M, 898823…) went electrically absent (`+CPIN` CME 10,
+  `+QSIMSTAT: 0,0`) and stayed gone through CFUN 0/1, QUIMSLOT toggles and a
+  full CFUN=1,1 — while the slot-1 card (1NCE, 898822…) reads fine. Reseat the
+  slot-2 card / check the tray.
+
+## NCM AT-port discovery dead on cold boot: no anchor when device=null (2026-08-12)
+
+From the Cudy LT300 (SLM770A ECM) boot log of 2026-08-08: 7 consecutive
+`no_at_port` attempts — including retries kicked by the `hotplug add ttyUSB*`
+events — while ttyUSB0-3 existed the whole time. Discovery builds NCM modems
+with `device = null` (no control node) and pins `control.tty` at resolve time;
+on a cold boot the serial interfaces bind only after the first resolve
+(board-profile/runtime `new_id`, late kmodloader), so `cfg.tty` stayed null and
+`open_at`'s tty discovery anchored on `self.device` — null — so no retry could
+ever find them (`find_tty` bails without device/base). Fix in
+`modem_ncm.start()`: anchor = `self.device ?? datapath.netdev`; the serial
+new_id bind runs off it and `open_at` gets a `base_override` of the netdev's
+USB parent (`/sys/class/net/<netdev>/device/..`). New suite
+`test_ncm_atdiscover` (6 checks) replays the boot race (attempt 1 no ttys →
+new_id → attempt 2 finds the role-tagged AT port from scratch). Not yet
+deployed to the LT300 (tunnel down at fix time).
 
 ## Datapath: stale-renamed parent silently adopted as its own mux child (2026-08-11)
 

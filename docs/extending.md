@@ -35,7 +35,7 @@ table that matches the kind of quirk:
 | **Protocol-switch recipe** (QMI⇄MBIM `AT+QCFG="usbnet"`) | `src-ucode/protocol_switch.uc` | per-vendor set/reset/query commands |
 | **usbnet mode-switch** (PPP-only → rich mode) | `src-ucode/modeswitch.uc` | per-vendor `{ set, reset, query }` |
 | **AT port mapping** (which ttyUSB is AT/at2/gps) | `src-ucode/atport.uc` (generated) + `atcmd.uc` `LOCAL_PORTS` | `usbid → { ifnum: role }` |
-| **NCM dial + telemetry recipe** | `src-ucode/modem_ncm.uc` → `VENDORS` | per-vendor `dials` + `telemetry` blocks |
+| **NCM dial + telemetry recipe** | `src-ucode/ncm_vendors.uc` → `VENDORS` | per-vendor `dials` + `telemetry` blocks |
 
 ### Worked example — "my modem needs an AT command at startup"
 

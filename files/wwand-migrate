@@ -5,9 +5,9 @@
 // /etc/config/network: wwand_modem + interface `option modem` + connection).
 //
 // Converts:
-//   - stock OpenWrt `proto mbim` (umbim) / `proto ncm` (comgt-ncm) interfaces —
-//     these stop working once wwand-mbim/-ncm replace the stock handler, so they
-//     MUST be rewritten to `proto qmi` (wwand's proto) for netifd to invoke us;
+//   - stock OpenWrt `proto qmi` (uqmi) / `proto mbim` (umbim) / `proto ncm`
+//     (comgt-ncm) interfaces — rewritten in place to `proto wwand` (wwand's
+//     native proto) so netifd invokes wwand's handler;
 //   - wwand legacy inline `proto qmi` interfaces.
 // Already network-native interfaces are left alone; the daemon keeps reading any
 // wwand format (compat), so migrating is safe to run repeatedly.

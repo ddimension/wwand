@@ -51,7 +51,12 @@ export function install(self, o)
 		if (!board)
 			return { error: 'no_board_profile' };
 
-		let cfg = (ref && self.modems[ref]) ? self.modems[ref].cfg : null;
+		// a named-but-unknown ref must error — silently falling back to the
+		// first modem would pulse ANOTHER modem's reset GPIO
+		if (ref && !self.modems[ref])
+			return { error: 'no_such_modem', ref: ref };
+
+		let cfg = ref ? self.modems[ref].cfg : null;
 
 		if (!cfg)
 			for (let n, e in self.modems) { cfg = e.cfg; break; }

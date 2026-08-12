@@ -337,6 +337,20 @@ export function create(opts)
 			break;
 
 		case 'suspend':
+			// registration lost mid-attempt: abort an in-flight activation so
+			// the daemon requeues it (parity with context.uc / context_ncm —
+			// without this netifd's setup gets a hard failure mid-flap)
+			if (self.state == 'ACTIVATING') {
+				let cb = up_cb;
+				up_cb = null;
+
+				set_state('IDLE');
+				self.settings = null;
+
+				if (cb)
+					cb({ error: 'suspended' });
+			}
+
 			emit('suspend', data);
 			break;
 

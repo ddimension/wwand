@@ -7,9 +7,6 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as fs from 'fs';
-import * as atcmd from './atcmd.uc';
-import * as quirks from './modem_quirks.uc';
 import * as apndb from './apndb.uc';
 import * as netsel_ops from './netsel_ops.uc';
 import * as simops from './simops.uc';
@@ -92,6 +89,19 @@ function load_esim() {
 	}
 
 	return esim_mod;
+}
+
+// "registered" across backends: QMI stores the numeric NAS value, MBIM/NCM
+// store 1/0 — never compare against a string. Radio list is the strongest
+// signal (a modem camped on a RAT is registered whatever the field says).
+function is_registered(reg)
+{
+	let radio_ifs = reg?.radio_ifs;
+
+	if (type(radio_ifs) == 'array' && length(radio_ifs) > 0)
+		return true;
+
+	return reg?.registration == 1 || reg?.registration == 'registered';
 }
 
 export function create(opts)
@@ -380,12 +390,24 @@ export function create(opts)
 			log('info', sprintf('interface %s: modem not ready (%s), queueing activation',
 				name, modem.state));
 
-			let fired = false;
-			let guarded = (err, res) => { if (fired) return; fired = true; cb(err, res); };
+			let fired = false, guard_timer = null;
+			let guarded = (err, res) => {
+				if (fired)
+					return;
+
+				fired = true;
+
+				// cancel the guard so the reply closure isn't retained for
+				// the full window after the queue already flushed
+				if (guard_timer) { guard_timer.cancel(); guard_timer = null; }
+
+				cb(err, res);
+			};
 
 			push(entry.pending_up, guarded);
 
-			uloop.timer(UP_GUARD_MS, () => {
+			guard_timer = uloop.timer(UP_GUARD_MS, () => {
+				guard_timer = null;
 				entry.pending_up = filter(entry.pending_up, (p) => p != guarded);
 				guarded({ error: 'timeout', modem_state: modem.state });
 			});
@@ -685,6 +707,11 @@ export function create(opts)
 
 		if (entry.ctx && entry.ctx.state != 'IDLE')
 			entry.ctx.down(() => null);
+
+		// unhook from the modem's context list — else the dead ctx is retained
+		// and keeps receiving notify_contexts events (leak + latent misbehavior)
+		if (entry.ctx?.modem?.detach_context)
+			entry.ctx.modem.detach_context(entry.ctx);
 
 		delete self.contexts[name];
 	};
@@ -1021,9 +1048,7 @@ export function create(opts)
 				let on_rat = (type(radio_ifs) == 'array' && length(radio_ifs) > 0);
 				return {
 					present: !!m && m.state != 'ABSENT',
-					// "registered" across backends: on a RAT, or reg value in any form
-					registered: on_rat || reg?.registration == 'registered' ||
-					            reg?.registration == 1,
+					registered: is_registered(reg),
 					radio: on_rat ? radio_ifs[0] : null,
 					roaming: reg?.roaming ?? false,
 					bars: deps.board ? deps.board.bars(m?.signal) : 0,
@@ -1400,7 +1425,7 @@ export function create(opts)
 				model: entry.modem?.info?.model,
 				device: entry.device,
 				netdev: entry.netdev,
-				registered: entry.modem?.reg?.registration == 'registered',
+				registered: is_registered(entry.modem?.reg),
 				identity_mismatch: entry.modem?.identity_mismatch,
 			});
 

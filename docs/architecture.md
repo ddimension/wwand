@@ -359,7 +359,8 @@ persist in tmpfs across daemon restarts and are intentionally cleared by
 reboot. A zero-rx watchdog (packet stats delta) triggers the same repower.
 
 Alongside the automatic ladder, the `modem_reset` ubus method
-(`daemon.uc`) offers an admin-driven reset with the same GPIO-first priority: it
+(`hwops.uc`, installed into the daemon) offers an admin-driven reset with the
+same GPIO-first priority: it
 pulses the modem/board `reset_gpio` when one is configured, else falls back to
 the backend soft reset (QMI DMS offline→reset, NCM `CFUN=1,1`). Board-default
 GPIOs are gated by `board_gpio_ok` (a shared board power/reset rail is only
@@ -432,8 +433,9 @@ above cares which one is in use.
   send CTL SYNC over the passthrough** — it resets the modem's embedded QMI state
   and kills the live MBIM data session (HW-proven on EG06); the shim blocks it
   structurally.
-- **NCM** — AT-controlled (`modem_ncm.uc` `VENDORS` recipes) over a plain
-  `cdc_ncm`/`cdc_ether` netdev, for modems with no cdc-wdm control device.
+- **NCM** — AT-controlled (`ncm_vendors.uc` `VENDORS` recipes, driven by
+  `modem_ncm.uc`) over a plain `cdc_ncm`/`cdc_ether` netdev, for modems with no
+  cdc-wdm control device.
 
 Shared logic is extracted once and installed by every backend:
 `modem_common.uc` (state/context scaffolding, `make_fail`, the adaptive
