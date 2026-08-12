@@ -92,6 +92,12 @@ export function publish(conn, daemon, log)
 
 		// manual PIN release: enter the PIN once past the low-retry safety block
 		// (security relevant — write ACL). `pin` optional (overrides the config).
+		modem_sim_puk: {
+			args: { modem: '', puk: '', new_pin: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.sim_puk_unblock(req.args.modem, req.args.puk, req.args.new_pin, ok_reply(reply))),
+		},
+
 		modem_sim_pin_verify: {
 			args: { modem: '', pin: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

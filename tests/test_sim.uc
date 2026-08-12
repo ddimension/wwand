@@ -636,6 +636,59 @@ scenario('read_identity: no dms -> AT chain, no crash', (next) => {
 	});
 });
 
+// --- PUK unblock chain (sim.unblock_puk) --------------------------------------
+
+// UIM UNBLOCK_PIN succeeds -> done, no fallback
+scenario('puk: uim unblock ok', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {}, uim: mkclient({
+		UNBLOCK_PIN: { retries: { verify: 3, unblock: 9 } },
+	}, calls), at: { send: () => ok(false, 'puk-uim: AT must not be touched') } };
+
+	sim.unblock_puk(m, '12345678', '4321', (err, res) => {
+		eq(err, null, 'puk-uim: no error');
+		eq(res.via, 'uim', 'puk-uim: via uim');
+		eq(calls, [ 'UNBLOCK_PIN' ], 'puk-uim: single request');
+		next();
+	});
+});
+
+// UIM transport rejection (NotSupported 94 — card untouched) -> falls to AT
+scenario('puk: uim transport-reject falls through to AT', (next) => {
+	let at_cmds = [];
+	let m = { timing: T, config: {},
+		uim: mkclient({ UNBLOCK_PIN: { __err: { error: 'qmi', code: 94 } } }, []),
+		at: { send: (cmd, cb) => { push(at_cmds, cmd); cb(null, { lines: [ 'OK' ] }); } } };
+
+	sim.unblock_puk(m, '12345678', '4321', (err, res) => {
+		eq(err, null, 'puk-fallback: no error');
+		eq(res.via, 'at', 'puk-fallback: via at');
+		eq(at_cmds, [ 'AT+CPIN="12345678","4321"' ], 'puk-fallback: CPIN puk+newpin form');
+		next();
+	});
+});
+
+// UIM says wrong PUK (IncorrectPin 12 — an unblock retry was CONSUMED):
+// terminal, the chain must NOT re-try the PUK over AT
+scenario('puk: wrong puk is terminal, never retried on AT', (next) => {
+	let m = { timing: T, config: {},
+		uim: mkclient({ UNBLOCK_PIN: { __err: { error: 'qmi', code: 12 } } }, []),
+		at: { send: () => ok(false, 'puk-wrong: AT retry would burn a PUK attempt') } };
+
+	sim.unblock_puk(m, '00000000', '4321', (err) => {
+		eq(err.error, 'qmi', 'puk-wrong: error surfaced');
+		next();
+	});
+});
+
+// no transport at all -> clean error
+scenario('puk: no transport -> clean error', (next) => {
+	sim.unblock_puk({ timing: T, config: {} }, '12345678', '4321', (err) => {
+		eq(err.error, 'no_sim_transport', 'puk-none: clean error');
+		next();
+	});
+});
+
 // --- drive -------------------------------------------------------------------
 
 uloop.timer(1, run_next);

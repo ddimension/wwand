@@ -801,6 +801,50 @@ config defaults
 `option packet_steering '1'` in `config globals` (as on the reference boards)
 spreads softirq/RPS load across CPU cores and helps on multi-core targets.
 
+## wwandctl — command-line control
+
+`wwandctl` (in the base `wwand` package, `/usr/bin/wwandctl`) is the
+human-friendly front-end over the ubus API below: no JSON to type, readable
+output, and the modem argument may be omitted whenever exactly one modem is
+managed. `wwandctl help` prints the full command list.
+
+```
+wwandctl status                      # modem + interface overview
+wwandctl modems                      # one-line modem list
+wwandctl signal / cells / datapath   # diagnostics (optional [modem] first arg)
+wwandctl up wan / down wan           # connect / disconnect an interface
+wwandctl reattach                    # network re-attach without a modem reset
+wwandctl scan                        # operator scan (up to ~90 s)
+wwandctl select auto                 # automatic network selection
+wwandctl select 262 01               # manual PLMN selection
+wwandctl slots / slot 2              # SIM slot status / switch
+wwandctl pin [pin]                   # manual PIN release (low-retry guard)
+wwandctl pin-lock 1234 / pin-unlock 1234
+wwandctl puk 12345678 4321           # PUK entry: unblock + set NEW PIN 4321
+wwandctl plmn                        # PLMN selector lists incl. FPLMN
+wwandctl sms / sms-delete 3          # stored SMS
+wwandctl reset / repower             # modem reset / hardware repower
+wwandctl at AT+CSQ                   # raw AT command
+wwandctl migrate [apply]             # config migration plan/apply
+wwandctl log-level debug
+```
+
+Errors from the daemon surface as one-line messages (`wwandctl: <method>
+failed: <reason>`), exit code 1.
+
+### PUK entry
+
+A PUK-locked SIM shows up as `SIM blocked: puk_required` in `wwandctl status`
+(and on the LuCI modem list, which offers the same unlock dialog). Unblock it
+with `wwandctl puk <8-digit PUK> <new PIN>` — the operation sets a NEW PIN in
+the same step (that is how the SIM spec works, there is no "unblock only").
+**A wrong PUK consumes one of ~10 attempts; after the last one the SIM is
+permanently dead** — wwand therefore never falls back to a second transport
+after an attempt reached the card, and never auto-retries. After a successful
+unblock the daemon restarts the modem bring-up with the new PIN; update
+`option pincode` (or the per-SIM `wwand_sim` override) to the new PIN so the
+next boot unlocks cleanly.
+
 ## ubus API
 
 Object `wwand`. Every method also accepts `ubus_rpc_session` (injected by rpcd
@@ -828,6 +872,7 @@ when called from LuCI).
 | `modem_sim_switch_slot` | `modem`, `slot` | switch the active physical SIM slot (drops the connection) |
 | `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
 | `modem_sim_pin_verify` | `modem`, `pin?` | manual PIN release past the low-retry safety block (the daemon refuses to auto-enter with ≤1 attempt left, to avoid a PUK lock); `pin` overrides the configured one for this attempt (write ACL) |
+| `modem_sim_puk` | `modem`, `puk`, `new_pin` | **PUK entry**: unblock a PUK-locked SIM and set a NEW PIN in one operation (UIM Unblock PIN → native MBIM PIN/PUK1 → `AT+CPIN="puk","pin"`; the chain never re-tries a PUK on a second transport — wrong PUKs brick the SIM). PUK = 8 digits, new PIN 4–8 digits. On success the modem restarts its bring-up with the new PIN as one-shot override; **update the configured `pincode` afterwards** (write ACL) |
 | `modem_esim` | `modem`, `op`, … | eSIM (list/enable/disable/eid/download/…); needs the optional `wwand-esim` package |
 | `modem_apdu` | `modem`, `op`, … | raw ISO-7816 APDU channel (advanced) |
 | `modem_sms_list` | `modem`, `storage?` | list stored SMS (decoded: sender, timestamp, text, multipart merged); `storage` `SM` (SIM, default) or `ME` (modem) |

@@ -3,6 +3,27 @@
 _Last updated: 2026-08-12. All test suites green (42 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## wwandctl CLI + end-to-end PUK entry (2026-08-12)
+
+- **`wwandctl`** (`src-ucode/wwandctl.uc` → `/usr/bin/wwandctl`, base package):
+  human-friendly CLI over the ubus API — status/modems/signal/cells/datapath,
+  up/down/reattach/scan/select, slots/slot/pin/pin-lock/puk/plmn, sms,
+  reset/repower/at/migrate/log-level, `help`. Modem argument optional with a
+  single managed modem (auto-resolve; a first arg naming a modem is consumed).
+  Live-validated on 245 (status/modems/slots/at/signal/reattach).
+- **PUK entry, LuCI → ubus → daemon → card**: new `sim.unblock_puk` transport
+  chain (QMI UIM `UNBLOCK_PIN` 0x0027 — spec-verified vs libqmi 1.38 — →
+  native MBIM `PIN` set PUK1+ENTER (duck-typed `modem.mbim_pin`, base stays
+  mbim-free) → `AT+CPIN="puk","newpin"`). SAFETY: falls through ONLY on QMI
+  transport-reject codes that provably never reached the card; an attempt that
+  reached the card is terminal (wrong PUKs brick the SIM). ubus
+  `modem_sim_puk {modem, puk, new_pin}` (8-digit/4–8-digit validation), on
+  success restarts bring-up with the new PIN as one-shot override. LuCI:
+  "Unlock SIM" button on the modem list while `sim_block` is set — PUK+new-PIN
+  dialog for puk_required/retries_exhausted, manual PIN release otherwise
+  (modem_sim_pin_verify finally wired into the UI + ACL). 4 host tests for the
+  chain (ok / transport-fallback / wrong-PUK-terminal / no-transport).
+
 ## Audit tranche 3 — dedup + extractions (2026-08-12)
 
 Duplication audit follow-through (suite green after every step):

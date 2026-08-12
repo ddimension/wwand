@@ -186,6 +186,21 @@ export default {
 			resp: {},
 		},
 
+		// PUK entry: unblocks a PUK-locked PIN and sets a NEW pin in one op.
+		// Verified vs libqmi 1.38 qmi-service-uim.json ("Unblock PIN" 0x0027:
+		// Session + Info 0x02 { PIN ID u8, PUK string, New PIN string };
+		// response 0x10 Retries Remaining { verify u8, unblock u8 }).
+		UNBLOCK_PIN: {
+			id: 0x0027,
+			req: {
+				session: SESSION,
+				info:    { t: 0x02, f: { pin_id: 'u8', puk: 'lstring', new_pin: 'lstring' } },
+			},
+			resp: {
+				retries: { t: 0x10, f: { verify: 'u8', unblock: 'u8' } },
+			},
+		},
+
 		VERIFY_PIN: {
 			id: 0x0026,
 			req: {

@@ -351,6 +351,63 @@ export function unlock(modem, cb)
 // another transport. NoEffect 26 means already in the requested state = done.
 const PINLOCK_FALLBACK = { '17': 1, '48': 1, '52': 1, '82': 1, '94': 1 };
 
+// PUK entry: unblock a PUK-locked PIN1 and set a NEW pin in one operation (a
+// PUK-locked card refuses plain verify). Transport chain UIM -> native MBIM
+// (duck-typed modem.mbim_pin, keeps this base module free of mbim imports) ->
+// AT+CPIN="<puk>","<newpin>". SAFETY: fall through ONLY after a QMI transport
+// rejection that provably never reached the card (PINLOCK_FALLBACK codes) —
+// an attempt that reached the card is terminal, whatever the transport said:
+// ~10 wrong PUKs brick the SIM permanently, so no second transport may ever
+// re-try the same PUK. cb(err, { unblocked, via, retries }).
+export function unblock_puk(modem, puk, new_pin, cb)
+{
+	let chain = [];
+	if (modem.uim)      push(chain, 'uim');
+	if (modem.mbim_pin) push(chain, 'mbim');
+	if (modem.at)       push(chain, 'at');
+
+	if (!length(chain))
+		return cb({ error: 'no_sim_transport' });
+
+	let i = 0, attempt;
+
+	attempt = () => {
+		let be = chain[i++];
+
+		let handle = (err, data) => {
+			if (!err)
+				return cb(null, { unblocked: true, via: be,
+				                  retries: data?.retries ?? null });
+
+			// only the QMI reject codes guarantee the card was not touched
+			let transport_reject = (be == 'uim') &&
+				(err.error == 'qmi') && PINLOCK_FALLBACK[sprintf('%d', err.code)];
+
+			if (transport_reject && i < length(chain))
+				return attempt();
+
+			cb({ error: err.error ?? 'unblock_failed', detail: err,
+			     retries: err.retries ?? data?.retries?.unblock });
+		};
+
+		if (be == 'uim')
+			return modem.uim.request('UNBLOCK_PIN', {
+				session: { session_type: uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING, aid: '' },
+				info: { pin_id: uimmod.PIN_ID_PIN1, puk: puk, new_pin: new_pin },
+			}, (err, data) => handle(err ? { ...err, retries: data?.retries?.unblock } : null, data),
+			{ no_recovery: true });
+
+		if (be == 'mbim')
+			return modem.mbim_pin.unblock(puk, new_pin, handle);
+
+		// AT+CPIN with two arguments = PUK + new PIN (3GPP TS 27.007)
+		modem.at.send(sprintf('AT+CPIN="%s","%s"', puk, new_pin),
+			(err) => handle(err ? { error: 'at', detail: err } : null));
+	};
+
+	attempt();
+};
+
 // enable (lock) or disable (unlock) the SIM PIN1 query — whether the card asks
 // for the PIN at power-on. Needs the current PIN. Tries QMI first (UIM, then
 // DMS), falls back to AT+CLCK on a transport rejection. cb(err, { enabled }).

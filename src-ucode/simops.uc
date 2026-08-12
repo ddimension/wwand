@@ -249,4 +249,38 @@ export function install(self, o)
 
 		cb(null, { ok: true });
 	};
+
+	// PUK entry (ubus modem_sim_puk): unblock a PUK-locked SIM and set a NEW
+	// PIN in one operation. Digits-only validation keeps it AT/shell-safe; the
+	// transport chain in sim.unblock_puk never retries a PUK on a second
+	// transport (wrong PUKs brick the SIM). On success the state machine
+	// restarts with the new PIN as a one-shot override — the CONFIGURED
+	// pincode must still be updated by the user (surfaced in the reply).
+	self.sim_puk_unblock = function(ref, puk, new_pin, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		if (!match(puk ?? '', /^[0-9]{8}$/))
+			return cb({ error: 'invalid_puk', detail: 'PUK must be 8 digits' });
+
+		if (!match(new_pin ?? '', /^[0-9]{4,8}$/))
+			return cb({ error: 'invalid_pin', detail: 'new PIN must be 4-8 digits' });
+
+		log('warn', sprintf('modem %s: PUK entry requested (unblock + set new PIN)', ref));
+
+		sim.unblock_puk(entry.modem, puk, new_pin, (err, res) => {
+			if (err)
+				return cb(err);
+
+			entry.modem._pin_override = new_pin;
+			entry.modem.pin_force = true;
+			entry.modem.stop();
+			entry.modem.start();
+
+			cb(null, { ...res,
+				note: 'SIM unblocked - update the configured pincode to the new PIN' });
+		});
+	};
 };

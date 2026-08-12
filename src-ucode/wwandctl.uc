@@ -1,0 +1,513 @@
+#!/usr/bin/env ucode
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2026 André Valentin <avalentin@marcant.net>
+// wwandctl — human-friendly CLI for the wwand daemon.
+//
+// Thin front-end over `ubus call wwand ...`: no JSON to type, readable output,
+// modem auto-selection when only one is managed. Run `wwandctl help`.
+
+'use strict';
+
+import * as libubus from 'ubus';
+
+let conn = null;
+
+function die(msg)
+{
+	warn(sprintf('wwandctl: %s\n', msg));
+	exit(1);
+}
+
+function call(method, args)
+{
+	let res = conn.call('wwand', method, args ?? {});
+
+	if (res == null)
+		die(sprintf('ubus call wwand %s failed: %s (is wwand running?)',
+			method, conn.error() ?? 'no reply'));
+
+	return res;
+}
+
+// LuCI-facing methods reply { ok: bool, ... }; surface failures uniformly
+function call_ok(method, args)
+{
+	let res = call(method, args);
+
+	if (res.ok === false)
+		die(sprintf('%s failed: %s%s', method, res.error ?? 'unknown error',
+			res.detail ? sprintf(' (%J)', res.detail) : ''));
+
+	return res;
+}
+
+function status()
+{
+	return call('status', {});
+}
+
+// resolve the modem argument: explicit name, else the single managed modem.
+// Commands taking values after an optional modem call this with the first
+// argument — if it names a modem it is consumed, else the default applies.
+function resolve_modem(st, name)
+{
+	if (name != null && st.modems[name])
+		return { modem: name, consumed: true };
+
+	let names = keys(st.modems);
+
+	if (length(names) == 1)
+		return { modem: names[0], consumed: false };
+
+	if (name != null && length(names) > 1)
+		die(sprintf('unknown modem %J — managed: %s', name, join(', ', names)));
+
+	die(length(names) ? sprintf('more than one modem — specify one of: %s', join(', ', names))
+	                  : 'no modem managed');
+}
+
+function fmt_plmn(reg)
+{
+	let p = reg?.plmn;
+
+	if (!p)
+		return '-';
+
+	return sprintf('%s (%d/%02d)', trim(p.description ?? '?'), p.mcc, p.mnc);
+}
+
+function fmt_sig(sig)
+{
+	let parts = [];
+	// -32768 & friends are "not measured" sentinels, never real dBm
+	let ok = (v) => v != null && v > -140;
+
+	if (ok(sig?.nr5g?.rsrp))
+		push(parts, sprintf('NR rsrp %d dBm snr %.1f dB', sig.nr5g.rsrp, (sig.nr5g.snr ?? 0) / 10.0));
+
+	if (ok(sig?.lte?.rsrp))
+		push(parts, sprintf('LTE rsrp %d dBm rsrq %d dB', sig.lte.rsrp, sig.lte.rsrq ?? 0));
+	else if (ok(sig?.lte?.rssi))
+		push(parts, sprintf('LTE rssi %d dBm', sig.lte.rssi));
+
+	if (ok(sig?.wcdma?.rssi))
+		push(parts, sprintf('WCDMA rssi %d dBm', sig.wcdma.rssi));
+
+	if (!length(parts) && ok(sig?.rsrp))
+		push(parts, sprintf('rsrp %d dBm', sig.rsrp));
+
+	if (!length(parts) && ok(sig?.rssi))
+		push(parts, sprintf('rssi %d dBm', sig.rssi));
+
+	return length(parts) ? join(', ', parts) : '-';
+}
+
+function reg_text(m)
+{
+	let r = m.registration;
+
+	if (m.state == 'SIM_BLOCKED')
+		return sprintf('SIM blocked: %s%s', m.sim_block?.reason ?? '?',
+			m.sim_block?.retries != null ? sprintf(' (%d retries left)', m.sim_block.retries) : '');
+
+	if (r?.registration == 1 || (type(r?.radio_ifs) == 'array' && length(r.radio_ifs)))
+		return sprintf('%s%s%s', fmt_plmn(r), r.roaming ? ', roaming' : '',
+			m.rat ? sprintf(', %s', m.rat) : '');
+
+	return m.registration_detail?.reject_text
+		? sprintf('not registered: %s', m.registration_detail.reject_text)
+		: 'not registered';
+}
+
+function cmd_status(args)
+{
+	let st = status();
+
+	for (let name, m in st.modems) {
+		printf('MODEM %s  (%s %s, %s, %s)\n', name,
+			m.manufacturer ?? '?', m.model ?? '?', m.protocol ?? '?', m.device ?? '?');
+		printf('  state       %s%s\n', m.state,
+			m.control_note ? sprintf('  [%s]', m.control_note) : '');
+		printf('  SIM         imsi %s  iccid %s\n', m.imsi ?? '-', m.iccid ?? '-');
+		printf('  network     %s\n', reg_text(m));
+
+		if (m.state == 'READY') {
+			let sig = call('modem_signal', { modem: name });
+
+			if (sig && sig.ok !== false)
+				printf('  signal      %s\n', fmt_sig(sig));
+		}
+
+		if (m.temperature?.celsius != null)
+			printf('  temp        %d °C\n', m.temperature.celsius);
+	}
+
+	for (let name, c in st.contexts) {
+		printf('INTERFACE %s  (netdev %s)\n', c.interface ?? name, c.l3_device ?? '-');
+		printf('  state       %s%s\n', c.state,
+			c.last_error ? sprintf('  [last error: %s %s]',
+				c.last_error.stage ?? '', c.last_error.text ?? c.last_error.code ?? '') : '');
+
+		let s = (c.state == 'CONNECTED')
+			? call('context_settings', { context: name })?.settings : null;
+
+		if (s?.ipv4)
+			printf('  ipv4        %s/%d  gw %s  dns %s\n', s.ipv4.addr, s.ipv4.prefix ?? 32,
+				s.ipv4.gateway ?? '-', join(' ', s.ipv4.dns ?? []));
+
+		if (s?.ipv6)
+			printf('  ipv6        %s/%d  gw %s\n', s.ipv6.addr, s.ipv6.plen ?? 64, s.ipv6.gateway ?? '-');
+	}
+
+	if (!length(keys(st.modems)))
+		printf('no modems managed\n');
+}
+
+function cmd_modems()
+{
+	let st = status();
+
+	for (let name, m in st.modems)
+		printf('%-16s %-10s %-6s %-24s %s\n', name, m.state, m.protocol ?? '?',
+			m.model ?? '?', reg_text(m));
+}
+
+function dump(obj, indent)
+{
+	// readable key: value dump for the diagnostic commands
+	for (let k, v in obj) {
+		if (v == null || k == 'ok' || substr(k, 0, 1) == '_')
+			continue;
+
+		if (type(v) == 'object' || type(v) == 'array')
+			printf('%s%-18s %J\n', indent, k, v);
+		else
+			printf('%s%-18s %s\n', indent, k, v);
+	}
+}
+
+function cmd_puk(st, args)
+{
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	if (length(rest) != 2)
+		die('usage: wwandctl puk [modem] <puk> <new-pin>');
+
+	printf('WARNING: a wrong PUK consumes one of ~10 attempts; 0 left destroys the SIM.\n');
+
+	let res = call_ok('modem_sim_puk', { modem: r.modem, puk: rest[0], new_pin: rest[1] });
+
+	printf('SIM unblocked via %s. New PIN set.\n', res.via ?? '?');
+	printf('NOTE: update the configured pincode (uci set network.%s.pincode=...) to the new PIN.\n',
+		r.modem);
+}
+
+function cmd_sms(st, args)
+{
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+	let storage = (rest[0] == 'ME' || rest[0] == 'SM') ? rest[0] : 'SM';
+
+	let res = call_ok('modem_sms_list', { modem: r.modem, storage: storage });
+
+	for (let m in (res.messages ?? []))
+		printf('[%3d] %s  %s\n      %s\n', m.index, m.timestamp ?? '-', m.sender ?? '?',
+			m.text ?? '');
+
+	if (!length(res.messages ?? []))
+		printf('no messages in %s\n', storage);
+}
+
+const HELP = `wwandctl — control the wwand cellular connection manager
+
+Usage: wwandctl <command> [modem] [args...]
+  [modem] may be omitted when exactly one modem is managed.
+
+Status
+  status                 modem + interface overview
+  modems                 one-line modem list
+  signal [modem]         raw signal metrics
+  cells [modem]          cells, registration detail, temperature
+  datapath [modem]       datapath / mux / aggregation diagnostics
+  slots [modem]          SIM slot status (ICCID, eUICC, active)
+  plmn [modem]           PLMN selector lists (user/nas/operator/home/fplmn)
+
+Connection
+  up <interface>         connect (like ifup, via the daemon)
+  down <interface>       disconnect
+  reattach [modem]       network detach/re-attach (no full reset)
+  scan [modem]           visible-operator scan (takes up to ~90 s)
+  select [modem] auto    automatic network selection
+  select [modem] <mcc> <mnc>   manual PLMN selection
+
+SIM
+  pin [modem] [pin]      manual PIN release past the low-retry safety block
+  pin-lock [modem] <pin>     enable the SIM PIN query
+  pin-unlock [modem] <pin>   disable the SIM PIN query
+  puk [modem] <puk> <new-pin>  unblock a PUK-locked SIM and set a NEW PIN
+  slot [modem] <n>       switch the active physical SIM slot
+
+SMS
+  sms [modem] [SM|ME]    list stored messages
+  sms-delete [modem] <index>
+
+Maintenance
+  reset [modem]          modem reset (GPIO if configured, else backend soft reset)
+  repower [modem]        hardware repower (reset-GPIO pulse / board power-cycle)
+  at [modem] <command>   raw AT command on the modem's AT port
+  migrate [apply]        plan (default) or apply config migration to proto wwand
+  log-level <level>      err|warn|notice|info|debug (until next reload)
+  help                   this text
+`;
+
+// --- main ---------------------------------------------------------------------
+
+// ucode: ARGV holds the arguments after the script name
+let cmd = ARGV[0];
+let args = slice(ARGV, 1);
+
+if (cmd == null || cmd == 'help' || cmd == '-h' || cmd == '--help') {
+	print(HELP);
+	exit(0);
+}
+
+conn = libubus.connect();
+
+if (!conn)
+	die('cannot connect to ubus');
+
+switch (cmd) {
+case 'status':   cmd_status(args); break;
+case 'modems':   cmd_modems(); break;
+
+case 'signal': {
+	let r = resolve_modem(status(), args[0]);
+	dump(call_ok('modem_signal', { modem: r.modem }), '  ');
+	break;
+}
+
+case 'cells': {
+	let r = resolve_modem(status(), args[0]);
+	dump(call_ok('modem_cells', { modem: r.modem }), '  ');
+	break;
+}
+
+case 'datapath': {
+	let r = resolve_modem(status(), args[0]);
+	dump(call_ok('modem_datapath', { modem: r.modem }), '  ');
+	break;
+}
+
+case 'slots': {
+	let r = resolve_modem(status(), args[0]);
+	let res = call_ok('modem_sim_slots', { modem: r.modem });
+
+	for (let s in (res.slots ?? []))
+		printf('slot %d: %-7s %s%s%s\n', s.physical, s.card,
+			s.active ? '[active] ' : '', s.iccid ? sprintf('iccid %s ', s.iccid) : '',
+			s.is_euicc ? sprintf('eUICC eid %s', s.eid ?? '?') : '');
+	break;
+}
+
+case 'slot': {
+	let st = status();
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	if (!(+rest[0] > 0))
+		die('usage: wwandctl slot [modem] <n>');
+
+	let res = call_ok('modem_sim_switch_slot', { modem: r.modem, slot: +rest[0] });
+	printf(res.unchanged ? 'slot %d already active\n' : 'switched to slot %d\n', +rest[0]);
+	break;
+}
+
+case 'plmn': {
+	let r = resolve_modem(status(), args[0]);
+	let res = call_ok('modem_plmn_lists', { modem: r.modem });
+
+	for (let list in [ 'user', 'nas', 'operator', 'home', 'fplmn' ]) {
+		if (res[list] == null)
+			continue;
+
+		printf('%s:\n', list);
+
+		for (let e in res[list])
+			printf('  %s/%s%s\n', e.mcc, e.mnc, (list == 'fplmn') ? '' :
+				sprintf('  [%s]', join(' ', filter([ e.gsm ? 'gsm' : null,
+					e.utran ? 'utran' : null, e.eutran ? 'eutran' : null,
+					e.ngran ? 'ngran' : null ], (x) => x != null))));
+	}
+	break;
+}
+
+case 'up':
+case 'down': {
+	if (!length(args[0] ?? ''))
+		die(sprintf('usage: wwandctl %s <interface>', cmd));
+
+	let res = call((cmd == 'up') ? 'context_up' : 'context_down', { interface: args[0] });
+
+	if (cmd == 'up' && !res.up)
+		die(sprintf('up failed: %s', res.error ?? 'unknown'));
+
+	printf('%s: %s\n', args[0], (cmd == 'up') ? 'connected' : 'disconnected');
+
+	if (cmd == 'up' && res.ipv4)
+		printf('  ipv4 %s\n', res.ipv4.addr);
+	break;
+}
+
+case 'reattach': {
+	let r = resolve_modem(status(), args[0]);
+	let res = call_ok('modem_reattach', { modem: r.modem });
+	printf('reattach done (via %s)\n', res.via ?? '?');
+	break;
+}
+
+case 'scan': {
+	let r = resolve_modem(status(), args[0]);
+	printf('scanning (up to ~90 s)...\n');
+	let res = call_ok('modem_scan', { modem: r.modem });
+
+	for (let n in (res.networks ?? []))
+		printf('  %s/%s  %-20s %-10s %s\n', n.mcc ?? '?', n.mnc ?? '?',
+			n.description ?? n.name ?? '?', n.status ?? '', n.rat ?? n.act ?? '');
+	break;
+}
+
+case 'select': {
+	let st = status();
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	if (rest[0] == 'auto') {
+		call_ok('modem_set_network_selection', { modem: r.modem, mode: 'auto' });
+		printf('automatic network selection set\n');
+	}
+	else if (length(rest) == 2) {
+		call_ok('modem_set_network_selection',
+			{ modem: r.modem, mode: 'manual', mcc: rest[0], mnc: rest[1] });
+		printf('manual selection %s/%s set\n', rest[0], rest[1]);
+	}
+	else {
+		die('usage: wwandctl select [modem] auto | <mcc> <mnc>');
+	}
+	break;
+}
+
+case 'pin': {
+	let st = status();
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	call_ok('modem_sim_pin_verify', { modem: r.modem, pin: rest[0] ?? '' });
+	printf('PIN release requested — the modem restarts its bring-up\n');
+	break;
+}
+
+case 'pin-lock':
+case 'pin-unlock': {
+	let st = status();
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	if (!length(rest[0] ?? ''))
+		die(sprintf('usage: wwandctl %s [modem] <pin>', cmd));
+
+	let res = call_ok('modem_sim_pin_lock',
+		{ modem: r.modem, pin: rest[0], enable: (cmd == 'pin-lock') });
+	printf('SIM PIN query %s%s\n', (cmd == 'pin-lock') ? 'enabled' : 'disabled',
+		res.already ? ' (was already)' : '');
+	break;
+}
+
+case 'puk':
+	cmd_puk(status(), args);
+	break;
+
+case 'sms':
+	cmd_sms(status(), args);
+	break;
+
+case 'sms-delete': {
+	let st = status();
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	if (rest[0] == null)
+		die('usage: wwandctl sms-delete [modem] <index>');
+
+	call_ok('modem_sms_delete', { modem: r.modem, index: +rest[0] });
+	printf('message %d deleted\n', +rest[0]);
+	break;
+}
+
+case 'reset': {
+	let r = resolve_modem(status(), args[0]);
+	let res = call_ok('modem_reset', { modem: r.modem });
+	printf('modem reset issued (%s)\n', res.action ?? '?');
+	break;
+}
+
+case 'repower': {
+	let r = resolve_modem(status(), args[0]);
+	let res = call('modem_repower', { modem: r.modem });
+
+	if (res.ok === false || res.error)
+		die(sprintf('repower failed: %s', res.error));
+
+	printf('repower issued (%s)\n', res.action ?? '?');
+	break;
+}
+
+case 'at': {
+	let st = status();
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	if (!length(rest))
+		die('usage: wwandctl at [modem] <command>');
+
+	let res = call('modem_at', { modem: r.modem, command: join(' ', rest) });
+
+	if (res.ok === false)
+		die(sprintf('AT failed: %s%s', res.error ?? '?',
+			res.code ? sprintf(' (code %s)', res.code) : ''));
+
+	for (let l in (res.response ?? []))
+		printf('%s\n', l);
+	break;
+}
+
+case 'migrate': {
+	let apply = (args[0] == 'apply');
+	let res = call('migrate', { apply: apply });
+
+	if (res.error)
+		die(sprintf('migrate: %s', res.error));
+
+	printf('%J\n', res);
+
+	if (!apply)
+		printf('(plan only — run `wwandctl migrate apply` to convert)\n');
+	break;
+}
+
+case 'log-level': {
+	if (!length(args[0] ?? ''))
+		die('usage: wwandctl log-level err|warn|notice|info|debug');
+
+	let res = call('set_log_level', { level: args[0] });
+
+	if (res.ok === false)
+		die(sprintf('set_log_level: %s', res.error ?? '?'));
+
+	printf('log level set to %s\n', args[0]);
+	break;
+}
+
+default:
+	die(sprintf('unknown command %J — see `wwandctl help`', cmd));
+}

@@ -187,6 +187,17 @@ export function create(opts)
 			del:      (index, cb) => mbim_backend.sms_delete(self.mbim, index, cb),
 		};
 
+		// PUK entry for sim.unblock_puk (duck-typed like mbim_uicc so the base
+		// sim.uc stays free of mbim imports): PIN set with PUK1 + ENTER carries
+		// the new PIN per the MBIM spec.
+		self.mbim_pin = {
+			unblock: (puk, new_pin, cb) => self.mbim.command(bc, 'PIN', 'set', {
+				pin_type: bc.PIN_TYPE_PUK1,
+				pin_operation: bc.PIN_OP_ENTER,
+				pin: puk, new_pin: new_pin,
+			}, (err, d) => cb(err, err ? null : { retries: d?.remaining_attempts })),
+		};
+
 		// native MBIM multi-slot (MS BCE SysCaps/DeviceSlotMappings/SlotInfo-
 		// Status) — sim.uc's slot fallback when the passthrough UIM is
 		// unavailable. Duck-typed like mbim_uicc.
