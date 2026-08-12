@@ -48,29 +48,7 @@ const PDP_MAP = {
 	ipv4v6: wdsmod.PDP_TYPE_IPV4V6,
 };
 
-const NETMASK_BITS = {
-	'255': 8, '254': 7, '252': 6, '248': 5,
-	'240': 4, '224': 3, '192': 2, '128': 1, '0': 0,
-};
-
-function netmask_to_prefix(netmask)
-{
-	if (netmask == null)
-		return null;
-
-	let bits = 0;
-
-	for (let octet in split(netmask, '.')) {
-		let b = NETMASK_BITS[octet];
-
-		if (b == null)
-			return null;
-
-		bits += b;
-	}
-
-	return bits;
-};
+const netmask_to_prefix = context_common.netmask_to_prefix;
 
 
 export function create(opts)

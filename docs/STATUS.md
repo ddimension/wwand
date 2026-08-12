@@ -3,6 +3,38 @@
 _Last updated: 2026-08-12. All test suites green (42 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## Audit tranche 3 — dedup + extractions (2026-08-12)
+
+Duplication audit follow-through (suite green after every step):
+
+- **Extractions** (established install()/re-export patterns): `sim_plmn.uc`
+  (PLMN/FPLMN codec + EF read/write out of sim.uc, 1448→889 LOC; API stable
+  via re-exports), `reconnect.uc` (daemon reconnect/hold engine),
+  `ctx_settings.uc` (context-settings assembly + CTX_LIVE_FIELDS);
+  daemon.uc 1705→1457, plus one lazy-loader factory replacing the four
+  memoized try-require quadruplets.
+- **ubus.uc**: one `ok_reply` wrapper for all 22 deferred methods; sync
+  LuCI-facing methods normalized to the `{ ok: bool, ... }` envelope
+  (purely additive — every existing key incl. `error` preserved).
+- **Shared modem core** (scaffolding): `switch_protocol`/
+  `protocol_switch_supported` (3 identical copies), `make_recovery`
+  (3× factory preamble), `sim_block` emitter (9 sites, payload preserved),
+  `enter_ready` (READY epilogue — propagates NCM's HW-proven
+  teardown-during-emit guard to QMI+MBIM), `resolve_active_sim`
+  (reapply tails; QMI keeps matching the RAW re-read identity).
+- **MBIM**: `ensure_pt_client` factory (_ensure_uim ≡ _ensure_wms),
+  pdp/auth enum maps single-sourced in basic_connect
+  (IP_TYPE_FROM_PDP/AUTH_FROM_CFG — the 'both'→CHAP collapse can't drift),
+  UTF-16LE encode/decode exported from codec/mbim.uc (ext-schema twins gone).
+- **ncm_vendors**: shared `AUTH_CGAUTH` builder (8 identical lambdas).
+- **context_common**: one NETMASK_BITS table + both converters (context.uc
+  and modem_ncm.uc carried identical copies).
+
+Consciously deferred (drift risk > value right now): the context-lifecycle
+skeleton merge (modem_event/up-guard/_fail/connected-tail), the slow-telemetry
+loop driver, the stats-driver core, ncm status_state regex factory, atcmd
+first_match helper.
+
 ## Audit tranche 2 — backend parity MBIM/NCM (2026-08-12)
 
 Closes the parity gaps the audit's capability matrix surfaced (HW-smoked on

@@ -19,9 +19,8 @@
 import * as uloop from 'uloop';
 import * as atcmd from './atcmd.uc';
 import * as modem_common from './modem_common.uc';
+import * as context_common from './context_common.uc';
 import * as telemetry_ncm from './telemetry_ncm.uc';
-import * as recovery_mod from './recovery.uc';
-import * as protoswitch from './protocol_switch.uc';
 import * as netlink from './netlink.uc';
 import * as sim from './sim.uc';
 import * as ncm_vendors from './ncm_vendors.uc';
@@ -62,26 +61,7 @@ export const pdp_setup_matches = ncm_vendors.pdp_setup_matches;
 // octets) or for IPv6 (always advertises a link-local gw) — an unmasked IPv4
 // (RG650E) has no gateway field, so every remaining v4 token is DNS.
 
-const NETMASK_BITS = {
-	'255': 8, '254': 7, '252': 6, '248': 5,
-	'240': 4, '224': 3, '192': 2, '128': 1, '0': 0,
-};
-
-function mask_to_prefix(octets)
-{
-	let bits = 0;
-
-	for (let o in octets) {
-		let b = NETMASK_BITS[o];
-
-		if (b == null)
-			return null;
-
-		bits += b;
-	}
-
-	return bits;
-}
+const mask_to_prefix = context_common.mask_octets_to_prefix;
 
 // join 16 decimal byte strings into an IPv6 literal (uncompressed but valid)
 function bytes_to_ipv6(bytes)
@@ -277,21 +257,7 @@ export function create(opts)
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: modem %s: %s\n', level, self.id, msg)));
 	self.log_fn = log;
 
-	let rec = recovery_mod.create({
-		id: opts.id,
-		failreboot: (opts.config ?? {}).failreboot,
-		proto_error_limit: (opts.config ?? {}).proto_error_limit,
-		fx: opts.recovery?.fx ?? netlink.default_fx((l, m) => log(l, m)),
-		state_dir: opts.recovery?.state_dir,
-		reboot_delay: opts.recovery?.reboot_delay,
-		// board-provided modem repower (power-cycle or reset-gpio pulse); replaces usb-repower
-		repower: opts.recovery?.repower,
-		log: (l, m) => log(l, m),
-	});
-
-	rec.load();
-	self.counters = rec.counters;
-	self.recovery = rec;
+	let rec = modem_common.make_recovery(self, opts, log);
 
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, reg_poll_timer = null, settle_timer = null;
@@ -314,6 +280,8 @@ export function create(opts)
 	}
 	let emit = scaffold.emit;
 	let notify_contexts = scaffold.notify_contexts;
+	let sim_block = scaffold.sim_block;
+	let enter_ready = scaffold.enter_ready;
 
 	// backend-neutral NAS accessor (daemon settings / network-selection paths):
 	// NCM has no QMI at all → null, so the daemon falls back to AT (AT+COPS).
@@ -564,9 +532,7 @@ export function create(opts)
 
 			// +CME ERROR: 10 (SIM not inserted) / other hard SIM faults
 			if (err && err.error == 'cme' && err.code == '10') {
-				self.set_state('SIM_BLOCKED', { reason: 'sim_absent' });
-				emit('sim_blocked', { reason: 'sim_absent' });
-				notify_contexts('sim_blocked', {});
+				sim_block({ reason: 'sim_absent' });
 				return;
 			}
 
@@ -576,9 +542,7 @@ export function create(opts)
 			if (st == 'SIM PIN') {
 				let pincode = sim.effective_pincode(self);
 				let block = (reason, retries) => {
-					self.set_state('SIM_BLOCKED', { reason: reason, retries: retries });
-					emit('sim_blocked', { reason: reason, retries: retries });
-					notify_contexts('sim_blocked', {});
+					sim_block({ reason: reason, retries: retries });
 				};
 
 				if (!pincode)
@@ -612,9 +576,7 @@ export function create(opts)
 			}
 
 			if (st == 'SIM PUK' || st == 'SIM PUK2') {
-				self.set_state('SIM_BLOCKED', { reason: 'puk_required' });
-				emit('sim_blocked', { reason: 'puk_required' });
-				notify_contexts('sim_blocked', {});
+				sim_block({ reason: 'puk_required' });
 				return;
 			}
 
@@ -749,9 +711,7 @@ export function create(opts)
 		self.counters.attempts = 0;
 
 		log('notice', sprintf('registered (%s)', r.roaming ? 'roaming' : 'home'));
-		self.set_state('READY');
-		emit('registered', self.reg);
-		notify_contexts('ready');
+		enter_ready();
 
 		// the 'registered' emit can run a SYNCHRONOUS config reload that tears
 		// this very instance down (autosetup phase 2 writes uci and reloads;
@@ -898,23 +858,7 @@ export function create(opts)
 	};
 
 	// --- lifecycle ---------------------------------------------------------
-
-	self.switch_protocol = function(target, cb) {
-		protoswitch.switch_protocol(self, target, (err, res) => {
-			if (!err && res.resetting) {
-				emit('protocol_switch', { target: target });
-				notify_contexts('lost');
-				self.teardown();
-				self.set_state('ABSENT');
-			}
-
-			cb(err, res);
-		});
-	};
-
-	self.protocol_switch_supported = function() {
-		return protoswitch.supported(self.info?.model);
-	};
+	// (switch_protocol / protocol_switch_supported come from scaffolding)
 
 	// the card behind the modem changed in place (eSIM switch applied via the
 	// CFUN=0/1 cycle): re-read IMSI/ICCID over AT and re-resolve the per-SIM
@@ -948,12 +892,7 @@ export function create(opts)
 				if (iccid)
 					self.info.iccid = iccid;
 
-				self.active_sim = modem_common.match_sim_override(
-					self.config?.sims, self.info.iccid, self.info.imsi);
-				log('notice', sprintf('sim reapply: iccid %s imsi %s%s',
-					self.info.iccid ?? '?', self.info.imsi ?? '?',
-					self.active_sim ? ' (matched a configured wwand_sim)' : ''));
-				emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
+				scaffold.resolve_active_sim(self.info.iccid, self.info.imsi);
 
 				if (cb)
 					cb(null);

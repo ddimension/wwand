@@ -21,6 +21,7 @@
 'use strict';
 
 import * as struct from 'struct';
+import { utf16le_encode, utf16le_decode } from '../mbim.uc';
 
 export const SERVICE_UUID = '3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf';
 export const service = SERVICE_UUID;
@@ -54,21 +55,8 @@ function _u32(buf, p) { return (p + 4 <= length(buf)) ? struct.unpack('<I', subs
 function _i32(buf, p) { return (p + 4 <= length(buf)) ? struct.unpack('<i', substr(buf, p, 4))[0] : 0; }
 function _u64(buf, p) { return (p + 8 <= length(buf)) ? struct.unpack('<Q', substr(buf, p, 8))[0] : 0; }
 
-function _utf16(bytes)
-{
-	let out = '';
-
-	for (let i = 0; i + 1 < length(bytes); i += 2) {
-		let c = struct.unpack('<H', substr(bytes, i, 2))[0];
-
-		if (c == 0)
-			break;
-
-		out += chr(c & 0xff);
-	}
-
-	return out;
-}
+// UTF-16LE decode shared with the codec (codec/mbim.uc)
+const _utf16 = utf16le_decode;
 
 // Read one MBIMEx variable struct at absolute offset `base`, driven by an
 // ordered field list of [name, fmt] where fmt is 'u32' | 'i32' | 'u64' | 'str'.
@@ -262,17 +250,8 @@ const F_LTE_ATTACH_CTX = [
 	[ 'compression', 'u32' ], [ 'auth_protocol', 'u32' ],
 ];
 
-// UTF-16LE encoder (ASCII/latin subset — APN/user/pass); mbim.uc's is module-
-// private, so keep a local twin rather than couple the schema to the codec.
-function _utf16le(s)
-{
-	let out = '';
-
-	for (let i = 0; i < length(s ?? ''); i++)
-		out += struct.pack('<H', ord(s, i));
-
-	return out;
-}
+// UTF-16LE encoder shared with the codec (codec/mbim.uc); null-tolerant wrap
+const _utf16le = (s) => utf16le_encode(s ?? '');
 
 function _pad4enc(s)
 {

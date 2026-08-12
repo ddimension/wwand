@@ -12,84 +12,41 @@ import * as netsel_ops from './netsel_ops.uc';
 import * as simops from './simops.uc';
 import * as hwops from './hwops.uc';
 import * as nlmod from './netlink.uc';
+import * as reconnect from './reconnect.uc';
+import * as ctx_settings from './ctx_settings.uc';
 
-const UP_GUARD_MS = 150000;
+// backends load lazily; a missing package returns null (cached failure) so
+// start_modem reports it clearly instead of crashing. Lazy also so a QMI-only
+// install never loads MBIM's ~1.4k lines/schema. require() cannot load ES
+// modules directly (`export` is a syntax error in plain scripts) — the *_lazy
+// names are exportless wrapper scripts.
+let lazy_backend = (mod) => {
+	let m = null, failed = false;
 
-// backends load lazily; a missing package returns null (cached) so start_modem
-// reports it clearly instead of crashing.
-let qmi_mods = null, qmi_unavailable = false;
-function load_qmi() {
-	if (qmi_unavailable)
-		return null;
-
-	if (qmi_mods == null) {
-		try {
-			qmi_mods = require('wwand.qmi_lazy');
-		}
-		catch (e) {
-			qmi_unavailable = true;
+	return () => {
+		if (failed)
 			return null;
+
+		if (m == null) {
+			try {
+				m = require(mod);
+			}
+			catch (e) {
+				failed = true;
+				m = null;
+			}
 		}
-	}
 
-	return qmi_mods;
-}
+		return m;
+	};
+};
 
-// lazy so a QMI-only install never loads MBIM's ~1.4k lines/schema.
-let mbim_mods = null, mbim_unavailable = false;
-function load_mbim() {
-	// require() cannot load ES modules directly (`export` is a syntax error
-	// in plain scripts) — go through the exportless mbim_lazy wrapper
-	if (mbim_unavailable)
-		return null;
-
-	if (mbim_mods == null) {
-		try {
-			mbim_mods = require('wwand.mbim_lazy');
-		}
-		catch (e) {
-			mbim_unavailable = true;
-			return null;
-		}
-	}
-
-	return mbim_mods;
-}
-
-// NCM support (cdc_ncm / cdc_ether, AT-controlled) is a separate package
-// (wwand-ncm), loaded lazily the same way.
-let ncm_mods = null, ncm_unavailable = false;
-function load_ncm() {
-	if (ncm_unavailable)
-		return null;
-
-	if (ncm_mods == null) {
-		try {
-			ncm_mods = require('wwand.ncm_lazy');
-		}
-		catch (e) {
-			ncm_unavailable = true;
-			return null;
-		}
-	}
-
-	return ncm_mods;
-}
-
+let load_qmi = lazy_backend('wwand.qmi_lazy');
+let load_mbim = lazy_backend('wwand.mbim_lazy');
+// NCM support (cdc_ncm / cdc_ether, AT-controlled) is a separate package (wwand-ncm)
+let load_ncm = lazy_backend('wwand.ncm_lazy');
 // optional eSIM module (wwand-esim); absent => feature reports esim_not_installed
-let esim_mod = null;
-function load_esim() {
-	if (esim_mod == null) {
-		try {
-			esim_mod = require('wwand.esim');
-		}
-		catch (e) {
-			esim_mod = false;
-		}
-	}
-
-	return esim_mod;
-}
+let load_esim = lazy_backend('wwand.esim');
 
 // "registered" across backends: QMI stores the numeric NAS value, MBIM/NCM
 // store 1/0 — never compare against a string. Radio list is the strongest
@@ -133,9 +90,23 @@ export function create(opts)
 
 	// --- modem/context wiring ----------------------------------------------
 
+	// reconnect engine (activate/pending-up queue, capped-backoff retry, the
+	// transient-loss hold timer) — extracted to reconnect.uc; bound as locals
+	// so the call sites below read unchanged. Also installs set_hold_max_ms.
+	reconnect.install(self, {
+		log: log,
+		timing: opts?.timing,
+		down_interface: deps.down_interface,
+	});
+
+	let activate = self._activate;
+	let clear_reconnect = self._clear_reconnect;
+	let retry_activate = self._retry_activate;
+	let enter_reconnecting = self._enter_reconnecting;
+
 	// forward-declared: ucode closures capture only already-declared vars, and
 	// these self-reference (the TDZ trap — see CLAUDE.md ucode gotchas)
-	let clear_reconnect, retry_activate, enter_reconnecting, activate, derive_netdev;
+	let derive_netdev;
 	let detach_modem;   // forward-declared: used by modem_removed above its definition
 	let maybe_autosetup_fill;
 
@@ -309,24 +280,13 @@ export function create(opts)
 	};
 
 	// --- context lifecycle ------------------------------------------------
-	// The daemon (no per-interface monitor) keeps each context up. A TRANSIENT
-	// loss keeps the netifd interface up and reconnects the session in place
-	// (renew, no teardown → PD/VRF preserved); a PERMANENT loss or the hold
-	// timeout drives the interface down. netifd runs the proto no-proto-task.
-	let hold_max_ms = opts?.timing?.hold_max_ms ?? 90000;
+	// The daemon (no per-interface monitor) keeps each context up; the
+	// reconnect/hold machinery lives in reconnect.uc (installed above).
 
 	// how long to wait for a mode-switched PPP-only modem to re-enumerate before
 	// flagging it stuck (the switch is once-guarded, so without this a reset that
 	// never re-enumerates would leave the modem unmanaged forever).
 	let modeswitch_liveness_ms = opts?.timing?.modeswitch_liveness_ms ?? 60000;
-
-	// re-read the reconnect-hold ceiling live on reload; applied on the next
-	// reconnect. Kept out of apply_config so a create-time timing override is
-	// never clobbered by the config default.
-	self.set_hold_max_ms = function(ms) {
-		if (ms > 0)
-			hold_max_ms = ms;
-	};
 
 	// autosetup phase 2: copy ICCID/IMSI-matched APN defaults into uci — once
 	// per interface per boot, only for autosetup-created interfaces.
@@ -367,135 +327,6 @@ export function create(opts)
 					deps.network_reload();
 			}
 		}
-	};
-
-	// forward-declared (retry_activate self-references, enter_reconnecting
-	// references it) — avoids the ucode TDZ trap.
-	// bring context `name` up; queues on pending_up until the modem is READY.
-	activate = (name, cb) => {
-		let entry = self.contexts[name];
-
-		if (!entry?.ctx)
-			return cb({ error: 'no_such_context', ref: name });
-
-		let modem = entry.ctx.modem;
-
-		if (modem.state == 'SIM_BLOCKED')
-			return cb({ error: 'sim_blocked' });
-
-		if (entry.ctx.state == 'CONNECTED')
-			return cb(null, self._up_result(name, entry));
-
-		if (modem.state != 'READY') {
-			log('info', sprintf('interface %s: modem not ready (%s), queueing activation',
-				name, modem.state));
-
-			let fired = false, guard_timer = null;
-			let guarded = (err, res) => {
-				if (fired)
-					return;
-
-				fired = true;
-
-				// cancel the guard so the reply closure isn't retained for
-				// the full window after the queue already flushed
-				if (guard_timer) { guard_timer.cancel(); guard_timer = null; }
-
-				cb(err, res);
-			};
-
-			push(entry.pending_up, guarded);
-
-			guard_timer = uloop.timer(UP_GUARD_MS, () => {
-				guard_timer = null;
-				entry.pending_up = filter(entry.pending_up, (p) => p != guarded);
-				guarded({ error: 'timeout', modem_state: modem.state });
-			});
-
-			return;
-		}
-
-		entry.ctx.up((err) => {
-			// registration lost mid-attempt: requeue until READY again (keeps
-			// netifd's setup long-poll open instead of failing)
-			if (err?.error == 'suspended')
-				return activate(name, cb);
-
-			cb(err, err ? null : self._up_result(name, entry));
-		});
-	};
-
-	clear_reconnect = (name) => {
-		let entry = self.contexts[name];
-
-		if (!entry)
-			return;
-
-		if (entry.retry_timer) { entry.retry_timer.cancel(); entry.retry_timer = null; }
-		if (entry.hold_timer)  { entry.hold_timer.cancel();  entry.hold_timer = null; }
-		entry.retry_n = 0;
-	};
-
-	// internal reconnect with capped backoff; self-schedules until CONNECTED or
-	// enter_reconnecting's hold timer gives up. Daemon's own supervisor loop
-	// (does NOT use pending_up).
-	retry_activate = (name) => {
-		let entry = self.contexts[name];
-
-		if (!entry?.ctx || !entry.wanted || entry.ctx.state == 'CONNECTED')
-			return;
-
-		let modem = entry.ctx.modem;
-
-		if (modem.state == 'SIM_BLOCKED')
-			return;   // permanent; handled by the sim_blocked path (down)
-
-		let schedule = () => {
-			entry.retry_n = (entry.retry_n ?? 0) + 1;
-			let delay = min(entry.retry_n * (opts?.timing?.backoff_min ?? 2000),
-			                opts?.timing?.backoff_max ?? 30000);
-			entry.retry_timer = uloop.timer(delay, () => {
-				entry.retry_timer = null;
-				retry_activate(name);
-			});
-		};
-
-		if (modem.state != 'READY' || entry.ctx.state != 'IDLE')
-			return schedule();   // wait for recovery / an in-flight attempt
-
-		entry.ctx.up((err) => {
-			if (err && entry.wanted && entry.ctx?.state != 'CONNECTED')
-				schedule();
-			// success is handled by the 'up' event (clear_reconnect + renew)
-		});
-	};
-
-	// transient loss: keep the interface up and reconnect in place; a hold timer
-	// bounds the blackhole and downs the interface if we never recover.
-	enter_reconnecting = (name) => {
-		let entry = self.contexts[name];
-
-		if (!entry?.ctx || !entry.wanted || entry.hold_timer)
-			return;   // not wanted, or already reconnecting
-
-		entry.hold_timer = uloop.timer(hold_max_ms, () => {
-			entry.hold_timer = null;
-
-			if (entry.ctx?.state != 'CONNECTED') {
-				log('warn', sprintf('interface %s: reconnect hold expired, downing %s',
-					name, entry.cfg.interface));
-				clear_reconnect(name);
-
-				// clear `wanted` now (not only when context_down later fires) so a
-				// `registered` in the gap can't re-kick the interface we're tearing down.
-				entry.wanted = false;
-
-				if (deps.down_interface && entry.cfg.interface)
-					deps.down_interface(entry.cfg.interface);
-			}
-		});
-
-		retry_activate(name);
 	};
 
 	let on_context_event = (name, ctx, event, data) => {
@@ -1105,34 +936,19 @@ export function create(opts)
 		return null;
 	};
 
-	// connection params re-read from disk on every up (structural changes still go
-	// through the reload trigger). entry.cfg is the object the context reads live,
-	// so updating it in place makes the next activation use the fresh values.
-	const CTX_LIVE_FIELDS = [ 'apn', 'pdp_type', 'auth', 'username', 'password',
-	                          'profile', 'mtu', 'use_pushed_mtu' ];
+	// context settings assembly (live config re-read, MTU/IPv6 link side effects,
+	// the proto-shim settings payload) — extracted to ctx_settings.uc; bound as
+	// locals so the call sites below read unchanged.
+	ctx_settings.install(self, {
+		log: log,
+		read_config: deps.read_config,
+		datapath_fx: deps.datapath_fx,
+	});
 
-	let refresh_context_cfg = (name, entry) => {
-		if (!deps.read_config)
-			return;
-
-		let parsed = deps.read_config();
-		let fresh = parsed?.contexts?.[name];
-
-		if (!fresh)
-			return;
-
-		let changed = [];
-
-		for (let f in CTX_LIVE_FIELDS)
-			if (sprintf('%J', entry.cfg[f]) != sprintf('%J', fresh[f])) {
-				entry.cfg[f] = fresh[f];
-				push(changed, f);
-			}
-
-		if (length(changed))
-			log('info', sprintf('interface %s: refreshed config from disk (%s)',
-				name, join(', ', changed)));
-	};
+	let refresh_context_cfg = self._refresh_context_cfg;
+	let apply_mtu = self._apply_mtu;
+	let enable_ipv6 = self._enable_ipv6;
+	let settings_result = self._settings_result;
 
 	self.context_up = function(ref, cb) {
 		let name = self.resolve_context(ref);
@@ -1154,49 +970,6 @@ export function create(opts)
 		activate(name, cb);
 	};
 
-	// apply the effective MTU on the l3 link (use_pushed_mtu semantics, native rtnl)
-	let apply_mtu = (name, entry, netdev) => {
-		let fx = deps.datapath_fx;
-
-		if (!fx || !netdev)
-			return;
-
-		let pushed = entry.ctx.settings?.mtu;
-		let mtu = null;
-
-		if (entry.cfg.use_pushed_mtu && pushed != null && pushed > 1280)
-			mtu = pushed;
-		else if (entry.cfg.mtu != null && entry.cfg.mtu > 575)
-			mtu = entry.cfg.mtu;
-
-		if (mtu == null)
-			return;
-
-		log('info', sprintf('interface %s: applying MTU %d on %s', name, mtu, netdev));
-
-		if (!fx.link_set(netdev, { mtu: mtu }))
-			log('warn', sprintf('interface %s: setting MTU %d on %s failed%s', name, mtu, netdev,
-				fx.last_error ? sprintf(': %s', fx.last_error) : ''));
-
-		let v6mtu = sprintf('/proc/sys/net/ipv6/conf/%s/mtu', netdev);
-
-		if (fx.exists(v6mtu) && !fx.write(v6mtu, sprintf('%d', mtu)))
-			log('warn', sprintf('interface %s: setting IPv6 MTU on %s failed', name, netdev));
-	};
-
-	// enable IPv6 on the l3 link before netifd configures it (disable_ipv6=0)
-	let enable_ipv6 = (name, entry, netdev) => {
-		let fx = deps.datapath_fx;
-
-		if (!fx || !netdev || !entry.ctx.settings?.ipv6)
-			return;
-
-		let path = sprintf('/proc/sys/net/ipv6/conf/%s/disable_ipv6', netdev);
-
-		if (fx.exists(path) && trim(fx.read(path) ?? '') != '0' && !fx.write(path, '0'))
-			log('warn', sprintf('interface %s: enabling IPv6 on %s failed', name, netdev));
-	};
-
 	// l3 netdev for a context: parent netdev, MBIM VLAN sub-device or QMAP mux
 	// child per protocol/mux. Forward-declared (line ~143) so on_modem_event's
 	// learn_device path can reference it without the ucode TDZ trap.
@@ -1216,27 +989,6 @@ export function create(opts)
 		}
 
 		return netdev;
-	};
-
-	// the settings payload the proto shim consumes (context_up / renew).
-	// `relink` is a one-shot flag: when set, the renew handler does a netifd link
-	// down->up instead of an in-place update (hard_reconnect_on_ip_change).
-	let settings_result = (name, entry, netdev) => {
-		let relink = entry._relink_once ? 1 : 0;
-		entry._relink_once = false;
-
-		return {
-			up: true,
-			context: name,
-			interface: entry.cfg.interface,
-			netdev: netdev,
-			mtu: entry.cfg.mtu ?? entry.ctx.settings?.mtu,
-			pushed_mtu: entry.ctx.settings?.mtu,
-			use_pushed_mtu: entry.cfg.use_pushed_mtu,
-			ipv4: entry.ctx.settings?.ipv4,
-			ipv6: entry.ctx.settings?.ipv6,
-			relink: relink,
-		};
 	};
 
 	self._up_result = function(name, entry) {
@@ -1363,7 +1115,7 @@ export function create(opts)
 
 		return { modems: modems, contexts: contexts,
 		         board: board,
-		         globals: { hold_max_ms: hold_max_ms } };
+		         globals: { hold_max_ms: self._hold_max_ms() } };
 	};
 
 	// resolve a modem ref for a cb-style ubus method: returns the entry, or reports

@@ -18,14 +18,12 @@ import * as transport_mod from './transport.uc';
 import * as client_mod from './client.uc';
 import * as sim from './sim.uc';
 import * as netlink from './netlink.uc';
-import * as recovery_mod from './recovery.uc';
 import * as qmi_backend from './qmi_backend.uc';
 import * as modem_common from './modem_common.uc';
 import * as regdetail from './regdetail.uc';
 import * as telemetry_qmi from './telemetry_qmi.uc';
 import * as config_check from './config_check.uc';
 import * as modem_init_qmi from './modem_init_qmi.uc';
-import * as protoswitch from './protocol_switch.uc';
 import * as ctlmod from './codec/schema/ctl.uc';
 import * as dmsmod from './codec/schema/dms.uc';
 import * as nasmod from './codec/schema/nas.uc';
@@ -152,22 +150,7 @@ export function create(opts)
 	let transport_open = deps.transport_open ?? transport_mod.open;
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: modem %s: %s\n', level, self.id, msg)));
 
-	let rec = recovery_mod.create({
-		id: opts.id,
-		failreboot: (opts.config ?? {}).failreboot,
-		proto_error_limit: (opts.config ?? {}).proto_error_limit,
-		fx: opts.recovery?.fx ?? netlink.default_fx((level, msg) => log(level, msg)),
-		state_dir: opts.recovery?.state_dir,
-		reboot_delay: opts.recovery?.reboot_delay,
-		// board-provided modem repower (power-cycle or reset-gpio pulse); replaces usb-repower
-		repower: opts.recovery?.repower,
-		log: (level, msg) => log(level, msg),
-	});
-
-	rec.load();
-	self.counters = rec.counters;
-	self.recovery = rec;
-	self.log_fn = log;
+	let rec = modem_common.make_recovery(self, opts, log);
 
 	// shared one-shot timer holder; teardown cancels whatever is pending.
 	let tm = { retry: null, reg: null, settle: null, at_drain: null, probe: null };
@@ -176,6 +159,7 @@ export function create(opts)
 	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
 	let emit = scaffold.emit;
 	let notify_contexts = scaffold.notify_contexts;
+	let enter_ready = scaffold.enter_ready;
 
 	// hooks shared by all clients: feed the recovery error counter.
 	let client_hooks = {
@@ -271,6 +255,7 @@ export function create(opts)
 	// QMI bring-up chain (modem_init_qmi.uc); chain.begin() is the start() entry.
 	let chain = modem_init_qmi.install(self, {
 		log: log, emit: emit, notify_contexts: notify_contexts,
+		sim_block: scaffold.sim_block,
 		fail: fail, dp: dp, at_opts: at_opts, tm: tm,
 	});
 
@@ -361,25 +346,8 @@ export function create(opts)
 		});
 	};
 
-	// switch the control protocol (QMI <-> MBIM). On success the modem resets and
-	// re-enumerates; discovery rebuilds it under the new driver.
-	self.switch_protocol = function(target, cb) {
-		protoswitch.switch_protocol(self, target, (err, res) => {
-			if (!err && res.resetting) {
-				emit('protocol_switch', { target: target });
-				// drop clients/timers now; the device is about to vanish
-				notify_contexts('lost');
-				self.teardown();
-				self.set_state('ABSENT');
-			}
-
-			cb(err, res);
-		});
-	};
-
-	self.protocol_switch_supported = function() {
-		return protoswitch.supported(self.info?.model);
-	};
+	// switch_protocol / protocol_switch_supported come from
+	// modem_common.scaffolding (shared across all three backends)
 
 
 
@@ -476,13 +444,7 @@ export function create(opts)
 			self.info.iccid = id.iccid ?? self.info.iccid;
 			self.info.msisdn = id.msisdn ?? self.info.msisdn;
 
-			self.active_sim = match_sim_override(id.iccid, id.imsi);
-
-			log('notice', sprintf('sim reapply: iccid %s imsi %s%s',
-				id.iccid ?? '?', id.imsi ?? '?',
-				self.active_sim ? ' (matched a configured wwand_sim)' : ''));
-
-			emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
+			scaffold.resolve_active_sim(id.iccid, id.imsi);
 
 			let ctx = self.contexts[0];
 
@@ -654,11 +616,10 @@ export function create(opts)
 					self.reg.plmn ? sprintf('%d/%02d (%s)', self.reg.plmn.mcc, self.reg.plmn.mnc,
 						trim(self.reg.plmn.description ?? '')) : null,
 					self.reg.roaming, join(' ', self.reg.radio_ifs ?? [])));
-				self.set_state('READY');
-				emit('registered', self.reg);
-				notify_contexts('ready');
-				self._start_loc();
-				self._start_telemetry();
+				enter_ready(() => {
+					self._start_loc();
+					self._start_telemetry();
+				});
 			}
 		}
 		else if (self.state == 'READY') {

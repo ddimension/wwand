@@ -134,3 +134,36 @@ export function rx_stall_watch(o)
 		},
 	};
 };
+
+// IPv4 netmask -> prefix length. One table for the two converters (dotted
+// string form in the QMI context, octet-array form in the NCM CGCONTRDP
+// parser) — they had drifted into two identical copies.
+export const NETMASK_BITS = {
+	'255': 8, '254': 7, '252': 6, '248': 5,
+	'240': 4, '224': 3, '192': 2, '128': 1, '0': 0,
+};
+
+export function mask_octets_to_prefix(octets)
+{
+	let bits = 0;
+
+	for (let octet in octets) {
+		let b = NETMASK_BITS[octet];
+
+		if (b == null)
+			return null;
+
+		bits += b;
+	}
+
+	return bits;
+};
+
+// export functions are NOT hoisted in ucode — mask_octets_to_prefix above
+export function netmask_to_prefix(netmask)
+{
+	if (netmask == null)
+		return null;
+
+	return mask_octets_to_prefix(split(netmask, '.'));
+};

@@ -7,6 +7,8 @@
 
 import * as uloop from 'uloop';
 import * as atcmd from './atcmd.uc';
+import * as protoswitch from './protocol_switch.uc';
+import * as recovery_mod from './recovery.uc';
 import * as netlink from './netlink.uc';
 import * as tlv from './codec/tlv.uc';
 import * as nasmod from './codec/schema/nas.uc';
@@ -223,6 +225,60 @@ export function scaffolding(self, o)
 		self.contexts = filter(self.contexts, (c) => c != ctx);
 	};
 
+	// admin control-protocol switch (QMI <-> MBIM) — identical across all
+	// three backends: on success the modem resets and re-enumerates, so drop
+	// clients/timers immediately; discovery rebuilds the modem afterwards.
+	self.switch_protocol = function(target, cb) {
+		protoswitch.switch_protocol(self, target, (err, res) => {
+			if (!err && res.resetting) {
+				emit('protocol_switch', { target: target });
+				notify_contexts('lost');
+				self.teardown();
+				self.set_state('ABSENT');
+			}
+
+			cb(err, res);
+		});
+	};
+
+	self.protocol_switch_supported = function() {
+		return protoswitch.supported(self.info?.model);
+	};
+
+	// terminal SIM block: one emitter for the set_state/emit/notify triple that
+	// every backend repeated (payload passes through untouched — QMI hands the
+	// full err object incl. `blocked`, MBIM/NCM hand { reason, retries })
+	let sim_block = (data) => {
+		self.set_state('SIM_BLOCKED', data);
+		emit('sim_blocked', data);
+		notify_contexts('sim_blocked', data);
+	};
+
+	// re-match the per-SIM override for the (possibly new) card and announce
+	// it — the shared tail of every backend's reapply_sim. Identity is passed
+	// explicitly: QMI deliberately matches the RAW re-read values (a failed
+	// read must not keep matching the old card), MBIM/NCM pass self.info.*.
+	let resolve_active_sim = (iccid, imsi) => {
+		self.active_sim = match_sim_override(self.config?.sims, iccid, imsi);
+		log('notice', sprintf('sim reapply: iccid %s imsi %s%s',
+			iccid ?? '?', imsi ?? '?',
+			self.active_sim ? ' (matched a configured wwand_sim)' : ''));
+		emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
+	};
+
+	// READY epilogue shared by the backends. The 'registered' emit can run a
+	// SYNCHRONOUS config reload that tears this very instance down (HW-hit on
+	// the Cudy LT300: autosetup phase 2 writes uci and reloads) — `after`
+	// (telemetry/LOC start) runs only when the modem survived the emit.
+	let enter_ready = (after) => {
+		self.set_state('READY');
+		emit('registered', self.reg);
+		notify_contexts('ready');
+
+		if (self.state == 'READY' && after)
+			after();
+	};
+
 	self.note_connect_success = function() {
 		rec.on_connect_success();
 	};
@@ -249,7 +305,8 @@ export function scaffolding(self, o)
 		emit('removed', {});
 	};
 
-	return { emit: emit, notify_contexts: notify_contexts };
+	return { emit: emit, notify_contexts: notify_contexts, sim_block: sim_block,
+	         enter_ready: enter_ready, resolve_active_sim: resolve_active_sim };
 };
 
 // install "record a failed connection cycle" for modems with no live DMS to
@@ -286,6 +343,31 @@ export function note_connect_failure_light(self, rec, handlers)
 // it is test/observability only.)
 //   o.timing          — { backoff_min, backoff_max }
 //   o.set_retry_timer — (timer) => …  store where teardown cancels it
+// shared modem-factory preamble (identical in all three backends): recovery
+// instance wired to the board repower hook, persisted counters loaded, and the
+// counters/recovery/log_fn fields attached to self. Returns the rec instance.
+export function make_recovery(self, opts, log)
+{
+	let rec = recovery_mod.create({
+		id: opts.id,
+		failreboot: (opts.config ?? {}).failreboot,
+		proto_error_limit: (opts.config ?? {}).proto_error_limit,
+		fx: opts.recovery?.fx ?? netlink.default_fx((l, m) => log(l, m)),
+		state_dir: opts.recovery?.state_dir,
+		reboot_delay: opts.recovery?.reboot_delay,
+		// board-provided modem repower (power-cycle or reset-gpio pulse)
+		repower: opts.recovery?.repower,
+		log: (l, m) => log(l, m),
+	});
+
+	rec.load();
+	self.counters = rec.counters;
+	self.recovery = rec;
+	self.log_fn = log;
+
+	return rec;
+};
+
 export function make_fail(self, o)
 {
 	return (stage, err) => {

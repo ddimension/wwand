@@ -46,6 +46,16 @@ export function defer(req, run, watchdog_ms)
 	req.defer();
 };
 
+// ok_reply(reply): the standard deferred-method completion — adapts a daemon
+// op's (err, res) callback to the uniform { ok: ... } reply envelope.
+let ok_reply = (reply) => (err, res) =>
+	reply(err ? { ok: false, ...err } : { ok: true, ...(res ?? {}) });
+
+// ok_sync(r): uniform envelope for LuCI-facing sync methods. Purely additive —
+// keeps every field of the daemon result and only adds the ok flag, so existing
+// consumers reading fields or .error keep working.
+let ok_sync = (r) => (r?.error ? { ok: false, ...r } : { ok: true, ...(r ?? {}) });
+
 export function publish(conn, daemon, log)
 {
 	let obj = conn.publish('wwand', {
@@ -61,14 +71,14 @@ export function publish(conn, daemon, log)
 
 		modem_signal: {
 			args: { modem: '', ubus_rpc_session: '' },
-			call: (req) => daemon.modem_signal(req.args.modem),
+			call: (req) => ok_sync(daemon.modem_signal(req.args.modem)),
 		},
 
 		// manual hardware repower/reset via the board profile (also the recovery
 		// path). modem optional; defaults to the first configured modem.
 		modem_repower: {
 			args: { modem: '', ubus_rpc_session: '' },
-			call: (req) => daemon.repower_modem(req.args.modem),
+			call: (req) => ok_sync(daemon.repower_modem(req.args.modem)),
 		},
 
 		// admin soft modem reset (QMI: DMS offline->reset, NCM: AT+CFUN=1,1) —
@@ -77,8 +87,7 @@ export function publish(conn, daemon, log)
 		modem_reset: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_reset(req.args.modem, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_reset(req.args.modem, ok_reply(reply))),
 		},
 
 		// manual PIN release: enter the PIN once past the low-retry safety block
@@ -86,45 +95,39 @@ export function publish(conn, daemon, log)
 		modem_sim_pin_verify: {
 			args: { modem: '', pin: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.sim_pin_verify(req.args.modem, req.args.pin, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.sim_pin_verify(req.args.modem, req.args.pin, ok_reply(reply))),
 		},
 
 		modem_get_settings: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_get_settings(req.args.modem, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_get_settings(req.args.modem, ok_reply(reply))),
 		},
 
 		modem_sim_slots: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_sim_slots(req.args.modem, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_sim_slots(req.args.modem, ok_reply(reply))),
 		},
 
 		// detected modems for the LuCI stable-binding picker (managed + present)
 		modem_probe: {
 			args: { ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_probe((err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_probe(ok_reply(reply))),
 		},
 
 		modem_sim_switch_slot: {
 			args: { modem: '', slot: 0, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_sim_switch_slot(req.args.modem, req.args.slot, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_sim_switch_slot(req.args.modem, req.args.slot, ok_reply(reply))),
 		},
 
 		// enable/disable the SIM PIN query (PIN lock); needs the current PIN
 		modem_sim_pin_lock: {
 			args: { modem: '', pin: '', enable: false, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_sim_pin_lock(req.args.modem, req.args.pin, req.args.enable, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_sim_pin_lock(req.args.modem, req.args.pin, req.args.enable, ok_reply(reply))),
 		},
 
 		// eSIM management (optional wwand-esim package; reports
@@ -134,66 +137,57 @@ export function publish(conn, daemon, log)
 			        activation_code: '', confirmation_code: '',
 			        auto_notify: true, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_esim(req.args.modem, req.args.op, req.args, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...(res ?? {}) }))),
+				daemon.modem_esim(req.args.modem, req.args.op, req.args, ok_reply(reply))),
 		},
 
 		// raw APDU access (write ACL — security relevant)
 		modem_apdu: {
 			args: { modem: '', op: '', slot: 0, channel: 0, aid: '', apdu: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_apdu(req.args.modem, req.args.op, req.args, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_apdu(req.args.modem, req.args.op, req.args, ok_reply(reply))),
 		},
 
 		// SMS: list/read (read ACL), delete (write ACL). storage 'SM'|'ME'.
 		modem_sms_list: {
 			args: { modem: '', storage: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_sms_list(req.args.modem, req.args.storage, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_sms_list(req.args.modem, req.args.storage, ok_reply(reply))),
 		},
 
 		modem_sms_read: {
 			args: { modem: '', storage: '', index: 0, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_sms_read(req.args.modem, req.args.storage, req.args.index, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_sms_read(req.args.modem, req.args.storage, req.args.index, ok_reply(reply))),
 		},
 
 		modem_sms_delete: {
 			args: { modem: '', storage: '', index: 0, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_sms_delete(req.args.modem, req.args.storage, req.args.index, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_sms_delete(req.args.modem, req.args.storage, req.args.index, ok_reply(reply))),
 		},
 
 		modem_plmn_lists: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_plmn_lists(req.args.modem, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_plmn_lists(req.args.modem, ok_reply(reply))),
 		},
 
 		modem_plmn_set: {
 			args: { modem: '', list_type: '', entries: [], ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_plmn_set(req.args.modem, req.args.list_type, req.args.entries, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_plmn_set(req.args.modem, req.args.list_type, req.args.entries, ok_reply(reply))),
 		},
 
 		modem_plmn_restore: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_plmn_restore(req.args.modem, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_plmn_restore(req.args.modem, ok_reply(reply))),
 		},
 
 		modem_set_settings: {
 			args: { modem: '', settings: {}, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_set_settings(req.args.modem, req.args.settings, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_set_settings(req.args.modem, req.args.settings, ok_reply(reply))),
 		},
 
 		// scan visible operators (COPS=? equivalent); may be slow, so the reply
@@ -203,8 +197,7 @@ export function publish(conn, daemon, log)
 		modem_scan: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_scan(req.args.modem, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_scan(req.args.modem, ok_reply(reply))),
 		},
 
 		// async scan: start returns immediately, status is polled. Survives the
@@ -212,15 +205,13 @@ export function publish(conn, daemon, log)
 		modem_scan_start: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_scan_start(req.args.modem, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_scan_start(req.args.modem, ok_reply(reply))),
 		},
 
 		modem_scan_status: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_scan_status(req.args.modem, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_scan_status(req.args.modem, ok_reply(reply))),
 		},
 
 		// network selection: mode 'auto' or 'manual' + mcc/mnc (write ACL)
@@ -228,30 +219,28 @@ export function publish(conn, daemon, log)
 			args: { modem: '', mode: '', mcc: 0, mnc: 0, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
 				daemon.modem_set_network_selection(req.args.modem, req.args.mode,
-					req.args.mcc, req.args.mnc, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+					req.args.mcc, req.args.mnc, ok_reply(reply))),
 		},
 
 		modem_reattach: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_reattach(req.args.modem, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_reattach(req.args.modem, ok_reply(reply))),
 		},
 
 		modem_cells: {
 			args: { modem: '', ubus_rpc_session: '' },
-			call: (req) => daemon.modem_cells(req.args.modem),
+			call: (req) => ok_sync(daemon.modem_cells(req.args.modem)),
 		},
 
 		modem_location: {
 			args: { modem: '', ubus_rpc_session: '' },
-			call: (req) => daemon.modem_location(req.args.modem),
+			call: (req) => ok_sync(daemon.modem_location(req.args.modem)),
 		},
 
 		modem_datapath: {
 			args: { modem: '', ubus_rpc_session: '' },
-			call: (req) => daemon.modem_datapath(req.args.modem),
+			call: (req) => ok_sync(daemon.modem_datapath(req.args.modem)),
 		},
 
 		modem_at: {
@@ -273,8 +262,7 @@ export function publish(conn, daemon, log)
 		modem_set_protocol: {
 			args: { modem: '', protocol: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_set_protocol(req.args.modem, req.args.protocol, (err, res) =>
-					reply(err ? { ok: false, ...err } : { ok: true, ...res }))),
+				daemon.modem_set_protocol(req.args.modem, req.args.protocol, ok_reply(reply))),
 		},
 
 		context_status: {
@@ -342,9 +330,9 @@ export function publish(conn, daemon, log)
 			args: { apply: false, interfaces: [], ubus_rpc_session: '' },
 			call: (req) => {
 				if (!daemon.migrate)
-					return { error: 'unsupported' };
+					return { ok: false, error: 'unsupported' };
 
-				return daemon.migrate(req.args.interfaces, req.args.apply);
+				return ok_sync(daemon.migrate(req.args.interfaces, req.args.apply));
 			},
 		},
 
@@ -354,12 +342,12 @@ export function publish(conn, daemon, log)
 			args: { level: '', ubus_rpc_session: '' },
 			call: (req) => {
 				if (!req.args.level)
-					return { error: 'missing_argument' };
+					return { ok: false, error: 'missing_argument' };
 
 				if (!daemon.set_log_level || !daemon.set_log_level(req.args.level))
-					return { error: 'invalid_level' };
+					return { ok: false, error: 'invalid_level' };
 
-				return { level: req.args.level };
+				return { ok: true, level: req.args.level };
 			},
 		},
 	});

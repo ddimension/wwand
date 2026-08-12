@@ -64,6 +64,17 @@ export const PIN_STATE_UNLOCKED = 0;
 export const PIN_STATE_LOCKED = 1;
 export const PIN_OP_ENTER = 0;
 
+// config pdp_type / auth -> MBIM enums — ONE table for both users (the
+// CONNECT path in context_mbim and the LTE attach path in modem_mbim), so
+// the deliberate 'both'->CHAP collapse can never drift between them.
+export const IP_TYPE_FROM_PDP = {
+	ipv4: IP_TYPE_IPV4, ipv6: IP_TYPE_IPV6, ipv4v6: IP_TYPE_IPV4V6,
+};
+export const AUTH_FROM_CFG = {
+	none: AUTH_NONE, pap: AUTH_PAP, chap: AUTH_CHAP, both: AUTH_CHAP,
+};
+
+
 // MbimRegisterState — values verified against libmbim mbim-enums.h. (Earlier
 // wwand used 1/2/3 for home/roaming/partner, which only worked for the home
 // case by accident — a real modem reports home=3, so the old 3==PARTNER check

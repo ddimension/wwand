@@ -18,14 +18,8 @@ import * as uloop from 'uloop';
 import * as context_common from './context_common.uc';
 import * as bc from './codec/mbim-schema/basic_connect.uc';
 
-const AUTH_MAP = {
-	none: bc.AUTH_NONE, pap: bc.AUTH_PAP,
-	chap: bc.AUTH_CHAP, both: bc.AUTH_CHAP,
-};
-
-const IP_TYPE_MAP = {
-	ipv4: bc.IP_TYPE_IPV4, ipv6: bc.IP_TYPE_IPV6, ipv4v6: bc.IP_TYPE_IPV4V6,
-};
+// pdp_type/auth -> MBIM enum maps live in basic_connect.uc (shared with
+// modem_mbim's LTE attach path — bc.IP_TYPE_FROM_PDP / bc.AUTH_FROM_CFG)
 
 export function create(opts)
 {
@@ -183,7 +177,7 @@ export function create(opts)
 		// The carrier bundle resolves through the per-SIM override (wwand_sim
 		// wins over the interface — context_common.conn_cfg).
 		let profile = context_common.conn_cfg(self, 'apn') ?? '';
-		let ip_type = IP_TYPE_MAP[self.config.pdp_type ?? 'ipv4v6'];
+		let ip_type = bc.IP_TYPE_FROM_PDP[self.config.pdp_type ?? 'ipv4v6'];
 
 		let args = {
 			session_id: self.session_id,
@@ -192,7 +186,7 @@ export function create(opts)
 			user_name: context_common.conn_cfg(self, 'username') ?? '',
 			password: context_common.conn_cfg(self, 'password') ?? '',
 			compression: 0,
-			auth_protocol: AUTH_MAP[context_common.conn_cfg(self, 'auth')] ?? bc.AUTH_NONE,
+			auth_protocol: bc.AUTH_FROM_CFG[context_common.conn_cfg(self, 'auth')] ?? bc.AUTH_NONE,
 			ip_type: ip_type,
 			context_type: bc.CONTEXT_TYPE_INTERNET,
 		};

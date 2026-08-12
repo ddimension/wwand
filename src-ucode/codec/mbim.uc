@@ -64,7 +64,7 @@ function uuid_str(bytes)
 		substr(h, 16, 4), substr(h, 20, 12));
 }
 
-function utf16le_encode(s)
+export function utf16le_encode(s)
 {
 	let out = '';
 
@@ -72,9 +72,9 @@ function utf16le_encode(s)
 		out += struct.pack('<H', ord(s, i));   // ASCII/latin subset is enough
 
 	return out;
-}
+};
 
-function utf16le_decode(bytes)
+export function utf16le_decode(bytes)
 {
 	let out = '';
 
@@ -88,7 +88,7 @@ function utf16le_decode(bytes)
 	}
 
 	return out;
-}
+};
 
 function ipv4_bytes(v)
 {

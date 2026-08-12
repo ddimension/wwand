@@ -33,6 +33,7 @@ const MODES_TRIES = 3;
 export function install(self, o)
 {
 	let log = o.log, emit = o.emit, notify_contexts = o.notify_contexts;
+	let sim_block = o.sim_block;
 	let fail = o.fail, dp = o.dp, at_opts = o.at_opts, tm = o.tm;
 
 	// shared wwand_sim matcher (modem_common — parity across all backends)
@@ -397,9 +398,7 @@ export function install(self, o)
 					log('err', sprintf('sim blocked: imsi %s, iccid %s',
 						id.imsi ?? '?', id.iccid ?? '?'));
 
-					self.set_state('SIM_BLOCKED', err);
-					emit('sim_blocked', err);
-					notify_contexts('sim_blocked', err);
+					sim_block(err);
 				});
 				return; // terminal until reload
 			}

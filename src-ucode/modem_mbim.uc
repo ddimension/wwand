@@ -20,8 +20,6 @@ import * as transport_mod from './transport.uc';
 import * as mbim_client from './mbim_client.uc';
 import * as modem_common from './modem_common.uc';
 import * as mbimmod from './codec/mbim.uc';
-import * as recovery_mod from './recovery.uc';
-import * as protoswitch from './protocol_switch.uc';
 import * as telemetry_mbim from './telemetry_mbim.uc';
 import * as netlink from './netlink.uc';
 import * as bc from './codec/mbim-schema/basic_connect.uc';
@@ -54,15 +52,6 @@ const TIMING_DEFAULTS = {
 const SIM_POLL_TRIES = 10;
 const SIM_POLL_MS = 1000;
 
-// config pdp_type / auth -> MBIM enums for the LTE attach context (parity with
-// context_mbim's CONNECT maps; 'both' collapses to CHAP like the CONNECT path)
-const IP_TYPE_MAP = {
-	ipv4: bc.IP_TYPE_IPV4, ipv6: bc.IP_TYPE_IPV6, ipv4v6: bc.IP_TYPE_IPV4V6,
-};
-
-const AUTH_MAP = {
-	none: bc.AUTH_NONE, pap: bc.AUTH_PAP, chap: bc.AUTH_CHAP, both: bc.AUTH_CHAP,
-};
 
 export function create(opts)
 {
@@ -96,21 +85,7 @@ export function create(opts)
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: modem %s: %s\n', level, self.id, msg)));
 	self.log_fn = log;
 
-	let rec = recovery_mod.create({
-		id: opts.id,
-		failreboot: (opts.config ?? {}).failreboot,
-		proto_error_limit: (opts.config ?? {}).proto_error_limit,
-		fx: opts.recovery?.fx ?? netlink.default_fx((l, m) => log(l, m)),
-		state_dir: opts.recovery?.state_dir,
-		reboot_delay: opts.recovery?.reboot_delay,
-		// board-provided modem repower (power-cycle or reset-gpio pulse); replaces usb-repower
-		repower: opts.recovery?.repower,
-		log: (l, m) => log(l, m),
-	});
-
-	rec.load();
-	self.counters = rec.counters;
-	self.recovery = rec;
+	let rec = modem_common.make_recovery(self, opts, log);
 
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, settle_timer = null, at_drain_timer = null,
@@ -121,6 +96,8 @@ export function create(opts)
 	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
 	let emit = scaffold.emit;
 	let notify_contexts = scaffold.notify_contexts;
+	let sim_block = scaffold.sim_block;
+	let enter_ready = scaffold.enter_ready;
 
 	let hooks = {
 		on_error: (c, kind) => {
@@ -407,9 +384,7 @@ export function create(opts)
 		// (HW-hit on a SIM-less RM520N-GL: the PIN query answers MBIM status
 		// 3 and the old path counted connection attempts.)
 		if (self._ready_state == bc.READY_STATE_SIM_NOT_INSERTED) {
-			self.set_state('SIM_BLOCKED', { reason: 'sim_absent' });
-			emit('sim_blocked', { reason: 'sim_absent' });
-			notify_contexts('sim_blocked', {});
+			sim_block({ reason: 'sim_absent' });
 			return;
 		}
 
@@ -459,9 +434,7 @@ export function create(opts)
 				// same terminal mapping when only the PIN query reveals it
 				if (self._ready_state == bc.READY_STATE_SIM_NOT_INSERTED ||
 				    err.status == bc.STATUS_SIM_NOT_INSERTED) {
-					self.set_state('SIM_BLOCKED', { reason: 'sim_absent' });
-					emit('sim_blocked', { reason: 'sim_absent' });
-					notify_contexts('sim_blocked', {});
+					sim_block({ reason: 'sim_absent' });
 					return;
 				}
 
@@ -481,11 +454,8 @@ export function create(opts)
 			if (data.pin_state == bc.PIN_STATE_UNLOCKED)
 				return step_attach_profile();
 
-			let block = (reason) => {
-				self.set_state('SIM_BLOCKED', { reason: reason, retries: data.remaining_attempts });
-				emit('sim_blocked', { reason: reason, retries: data.remaining_attempts });
-				notify_contexts('sim_blocked', {});
-			};
+			let block = (reason) =>
+				sim_block({ reason: reason, retries: data.remaining_attempts });
 
 			// The card may be waiting for something our PIN1 ENTER cannot
 			// satisfy — a PUK, PIN2 or a personalization code. Entering PIN1
@@ -540,9 +510,7 @@ export function create(opts)
 						if (!qerr && qdata.remaining_attempts != null &&
 						    data.remaining_attempts != null &&
 						    qdata.remaining_attempts < data.remaining_attempts) {
-							self.set_state('SIM_BLOCKED', { reason: 'verify_failed', retries: qdata.remaining_attempts });
-							emit('sim_blocked', { reason: 'verify_failed', retries: qdata.remaining_attempts });
-							notify_contexts('sim_blocked', {});
+							sim_block({ reason: 'verify_failed', retries: qdata.remaining_attempts });
 							return;
 						}
 
@@ -703,10 +671,10 @@ export function create(opts)
 		if (apn == null || apn == '' || substr(apn, 0, 1) == '#')
 			return step_register();
 
-		let want_ip = IP_TYPE_MAP[ctx.config.pdp_type ?? 'ipv4v6'] ?? bc.IP_TYPE_IPV4V6;
+		let want_ip = bc.IP_TYPE_FROM_PDP[ctx.config.pdp_type ?? 'ipv4v6'] ?? bc.IP_TYPE_IPV4V6;
 		let user = context_common.conn_cfg(ctx, 'username') ?? '';
 		let pass = context_common.conn_cfg(ctx, 'password') ?? '';
-		let auth = AUTH_MAP[context_common.conn_cfg(ctx, 'auth')] ?? bc.AUTH_NONE;
+		let auth = bc.AUTH_FROM_CFG[context_common.conn_cfg(ctx, 'auth')] ?? bc.AUTH_NONE;
 
 		mbim_backend.get_lte_attach_config(self.mbim, (gerr, cur) => {
 			// compare against the home-roaming context (fallback: the first)
@@ -794,10 +762,7 @@ export function create(opts)
 			self.counters.attempts = 0;
 			log('notice', sprintf('registered: plmn %J, roaming %J',
 				self.reg.plmn?.description, self.reg.roaming));
-			self.set_state('READY');
-			emit('registered', self.reg);
-			notify_contexts('ready');
-			self._start_telemetry();
+			enter_ready(() => self._start_telemetry());
 		});
 	};
 
@@ -885,55 +850,38 @@ export function create(opts)
 					self.info.iccid = d.sim_iccid;
 			}
 
-			self.active_sim = modem_common.match_sim_override(
-				self.config?.sims, self.info.iccid, self.info.imsi);
-			log('notice', sprintf('sim reapply: iccid %s imsi %s%s',
-				self.info.iccid ?? '?', self.info.imsi ?? '?',
-				self.active_sim ? ' (matched a configured wwand_sim)' : ''));
-			emit('sim_refresh', { iccid: self.info.iccid, imsi: self.info.imsi });
+			scaffold.resolve_active_sim(self.info.iccid, self.info.imsi);
 
 			if (cb)
 				cb(null);
 		});
 	};
 
-	self._ensure_uim = function(cb) {
-		if (self.uim)
-			return cb();
+	// ensure a QMI client over the passthrough and cache it as self[field]:
+	// one factory for the identical _ensure_uim/_ensure_wms bodies. cb() either
+	// way — the caller's probe verifies the service actually answers.
+	let ensure_pt_client = (field, schema) => (cb) => {
+		if (self[field])
+			return cb(self[field]);
 
 		self._ensure_pt((up) => {
 			if (!up)
-				return cb();
+				return cb(null);
 
-			self.pt.ctl.request('ALLOCATE_CID', { service: uimmod.default.service }, (aerr, adata) => {
+			self.pt.ctl.request('ALLOCATE_CID', { service: schema.default.service }, (aerr, adata) => {
 				if (!aerr && adata?.allocation)
-					self.uim = client_mod.create(self.pt.shim, uimmod.default, adata.allocation.cid, hooks);
+					self[field] = client_mod.create(self.pt.shim, schema.default, adata.allocation.cid, hooks);
 
-				cb();
+				cb(self[field]);
 			}, { no_recovery: true });
 		});
 	};
 
-	// _ensure_wms: allocate a QMI WMS client over the passthrough and expose it as
-	// self.wms, so the backend-neutral sms.uc list/read/delete works on an MBIM
-	// modem (the EG06 exposes the QMI stack — incl. WMS — over the passthrough).
-	// cb() either way; sms.uc's qmi probe then verifies WMS List actually works.
-	self._ensure_wms = function(cb) {
-		if (self.wms)
-			return cb();
+	self._ensure_uim = ensure_pt_client('uim', uimmod);
 
-		self._ensure_pt((up) => {
-			if (!up)
-				return cb();
-
-			self.pt.ctl.request('ALLOCATE_CID', { service: wmsmod.default.service }, (aerr, adata) => {
-				if (!aerr && adata?.allocation)
-					self.wms = client_mod.create(self.pt.shim, wmsmod.default, adata.allocation.cid, hooks);
-
-				cb();
-			}, { no_recovery: true });
-		});
-	};
+	// self.wms via the passthrough so the backend-neutral sms.uc list/read/
+	// delete works on an MBIM modem (the EG06 exposes QMI-WMS over it)
+	self._ensure_wms = ensure_pt_client('wms', wmsmod);
 
 	// admin-triggered soft modem reset (ubus modem_reset — backend fallback of
 	// the generic reset chain; backend parity with QMI/NCM): QMI DMS
@@ -1027,23 +975,7 @@ export function create(opts)
 	let telem = telemetry_mbim.install(self, { log: log, emit: emit });
 
 	// --- lifecycle ---------------------------------------------------------
-
-	self.switch_protocol = function(target, cb) {
-		protoswitch.switch_protocol(self, target, (err, res) => {
-			if (!err && res.resetting) {
-				emit('protocol_switch', { target: target });
-				notify_contexts('lost');
-				self.teardown();
-				self.set_state('ABSENT');
-			}
-
-			cb(err, res);
-		});
-	};
-
-	self.protocol_switch_supported = function() {
-		return protoswitch.supported(self.info?.model);
-	};
+	// (switch_protocol / protocol_switch_supported come from scaffolding)
 
 	self.start = function() {
 		if (self.hub)

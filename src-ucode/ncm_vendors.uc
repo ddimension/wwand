@@ -20,6 +20,14 @@ const CTX_TYPE = { ipv4: 1, ipv6: 2, ipv4v6: 3 };
 // QICSGP / CGAUTH auth enum: 0=none, 1=PAP, 2=CHAP, 3=PAP-or-CHAP
 const AUTH_ENUM = { none: 0, pap: 1, chap: 2, both: 3 };
 
+// the standard 3GPP AT+CGAUTH auth command — shared by every vendor whose
+// firmware takes the stock form (vendor-specific variants like QICSGP/
+// AUTHDATA/QCPDPP stay in their tables)
+const AUTH_CGAUTH = (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
+	? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
+		cfg.username ?? '', cfg.password ?? '')
+	: null;
+
 // explicit config wins; else PAP-or-CHAP when username/password present
 // (QMI/MBIM parity), else none.
 function auth_value(cfg)
@@ -413,10 +421,7 @@ export const VENDORS = {
 	samsung: {
 		match: /samsung/,
 		modem_init: [ 'AT+CFUN=1' ],
-		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
-				cfg.username ?? '', cfg.password ?? '')
-			: null,
+		auth_cmd: AUTH_CGAUTH,
 		dials: [ DIAL_CGATT, DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
@@ -455,10 +460,7 @@ export const VENDORS = {
 		match: /mediatek|mtk/,
 		modem_init: [ 'AT+CFUN=1' ],
 		define: (cid, pdp, apn) => sprintf('AT+CGDCONT=%d,"%s","%s",0,0', cid, pdp, apn),
-		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
-				cfg.username ?? '', cfg.password ?? '')
-			: null,
+		auth_cmd: AUTH_CGAUTH,
 		dials: [ DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
@@ -468,10 +470,7 @@ export const VENDORS = {
 	spreadtrum: {
 		match: /spreadtrum|unisoc|spreadtr/,
 		modem_init: [ 'AT+CFUN=1' ],
-		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
-				cfg.username ?? '', cfg.password ?? '')
-			: null,
+		auth_cmd: AUTH_CGAUTH,
 		dials: [ DIAL_SPTZCMD, DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
@@ -495,10 +494,7 @@ export const VENDORS = {
 	telit: {
 		match: /telit/,
 		modem_init: [ 'AT+CFUN=1' ],
-		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
-				cfg.username ?? '', cfg.password ?? '')
-			: null,
+		auth_cmd: AUTH_CGAUTH,
 		dials: [ DIAL_TECM, DIAL_ICMAUTOCONN, DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
@@ -508,10 +504,7 @@ export const VENDORS = {
 	simcom: {
 		match: /simcom/,
 		modem_init: [ 'AT+CFUN=1' ],
-		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
-				cfg.username ?? '', cfg.password ?? '')
-			: null,
+		auth_cmd: AUTH_CGAUTH,
 		dials: [ DIAL_QCRMCALL, DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
@@ -521,10 +514,7 @@ export const VENDORS = {
 	gosuncn: {
 		match: /gosuncn/,
 		modem_init: [ 'AT+CFUN=1' ],
-		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
-				cfg.username ?? '', cfg.password ?? '')
-			: null,
+		auth_cmd: AUTH_CGAUTH,
 		dials: [ DIAL_ZECMCALL, DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
@@ -534,10 +524,7 @@ export const VENDORS = {
 	neoway: {
 		match: /neoway/,
 		modem_init: [ 'AT+CFUN=1' ],
-		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
-				cfg.username ?? '', cfg.password ?? '')
-			: null,
+		auth_cmd: AUTH_CGAUTH,
 		dials: [ DIAL_MYUSBNETACT, DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
@@ -547,10 +534,7 @@ export const VENDORS = {
 	generic: {
 		match: null,
 		modem_init: [ 'AT+CFUN=1' ],
-		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-			? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
-				cfg.username ?? '', cfg.password ?? '')
-			: null,
+		auth_cmd: AUTH_CGAUTH,
 		dials: [ DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
