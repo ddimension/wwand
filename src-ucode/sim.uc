@@ -204,8 +204,46 @@ function unlock_uim(modem, cb, tries)
 			return;
 		}
 
+		case uimmod.APP_STATE_CHECK_PERSONALIZATION_STATE: {
+			// NOT a PIN/PUK lock — the modem asks the host to check network/SP
+			// personalization. Unless a perso code is actually required the card
+			// is usable. Some modems (Huawei E392) report this state PERSISTENTLY
+			// over QMI-UIM while AT already reports the SIM READY, so a blanket
+			// block here wedges a perfectly usable SIM.
+			let ps = app.personalization_state;
+
+			// a real, active personalization lock -> honest block
+			if (ps == uimmod.PERSO_STATE_CODE_REQUIRED ||
+			    ps == uimmod.PERSO_STATE_PUK_CODE_REQUIRED ||
+			    ps == uimmod.PERSO_STATE_PERMANENTLY_BLOCKED) {
+				return cb({
+					blocked: true,
+					reason: 'personalization',
+					state: app.state,
+					perso_state: ps,
+					perso_feature: app.personalization_feature,
+					perso_retries: app.personalization_retries,
+				});
+			}
+
+			// no active lock: give the card a few polls to settle to READY (like
+			// DETECTED/UNKNOWN); if it never leaves state 4 (the Huawei quirk),
+			// let it through as ready.
+			if ((tries ?? 0) < CARD_POLL_TRIES) {
+				uloop.timer(modem.timing?.card_poll ?? CARD_POLL_MS,
+					() => unlock_uim(modem, cb, (tries ?? 0) + 1));
+				return;
+			}
+
+			return cb(null, {
+				status: 'ready',
+				pin1_state: app.pin1_state,
+				pin1_retries: app.pin1_retries,
+			});
+		}
+
 		default:
-			// puk required, pin blocked, illegal, personalization
+			// puk required, pin blocked, illegal
 			return cb({ blocked: true, reason: 'app_state', state: app.state });
 		}
 	});

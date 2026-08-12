@@ -41,7 +41,7 @@ function mkclient(handlers, calls)
 	return self;
 }
 
-function card(app_state, pin1_retries, upin_replaces)
+function card(app_state, pin1_retries, upin_replaces, perso_state)
 {
 	return { cards: [ {
 		card_state: uimmod.CARD_STATE_PRESENT,
@@ -50,6 +50,7 @@ function card(app_state, pin1_retries, upin_replaces)
 			type: uimmod.APP_TYPE_USIM,
 			state: app_state,
 			upin_replaces_pin1: upin_replaces ? 1 : 0,
+			personalization_state: perso_state ?? 0,
 			pin1_state: 2, pin1_retries: pin1_retries ?? 3,
 		} ],
 	} ] };
@@ -218,6 +219,36 @@ scenario('uim: no sim after poll exhaustion', (next) => {
 	sim.unlock(m, (err) => {
 		eq(err.blocked, true, 'uim-nosim: blocked');
 		eq(err.reason, 'no_sim', 'uim-nosim: reason');
+		next();
+	});
+});
+
+// CHECK_PERSONALIZATION_STATE without an active perso lock (Huawei E392 quirk:
+// QMI reports state 4 persistently while AT says READY) -> treat as ready.
+scenario('uim: check-perso, no active lock -> ready', (next) => {
+	let m = { timing: T, config: {}, uim: mkclient({
+		GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_CHECK_PERSONALIZATION_STATE,
+			3, false, uimmod.PERSO_STATE_READY) },
+	}, []) };
+
+	sim.unlock(m, (err, st) => {
+		eq(err, null, 'uim-perso-ok: no error');
+		eq(st.status, 'ready', 'uim-perso-ok: ready after poll exhaustion');
+		next();
+	});
+});
+
+// CHECK_PERSONALIZATION_STATE with an active perso lock -> honest block.
+scenario('uim: check-perso, code required -> blocked', (next) => {
+	let m = { timing: T, config: {}, uim: mkclient({
+		GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_CHECK_PERSONALIZATION_STATE,
+			3, false, uimmod.PERSO_STATE_CODE_REQUIRED) },
+	}, []) };
+
+	sim.unlock(m, (err) => {
+		eq(err.blocked, true, 'uim-perso-lock: blocked');
+		eq(err.reason, 'personalization', 'uim-perso-lock: reason');
+		eq(err.perso_state, uimmod.PERSO_STATE_CODE_REQUIRED, 'uim-perso-lock: perso_state reported');
 		next();
 	});
 });

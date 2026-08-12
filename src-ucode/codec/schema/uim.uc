@@ -20,6 +20,16 @@ export const APP_STATE_PIN1_BLOCKED = 5;
 export const APP_STATE_ILLEGAL = 6;
 export const APP_STATE_READY = 7;
 
+// QmiUimCardApplicationPersonalizationState (the app.personalization_state
+// carried alongside APP_STATE_CHECK_PERSONALIZATION_STATE). 3/4/5 = an active
+// perso lock; 0/1/2 = nothing to unlock.
+export const PERSO_STATE_UNKNOWN = 0;
+export const PERSO_STATE_IN_PROGRESS = 1;
+export const PERSO_STATE_READY = 2;
+export const PERSO_STATE_CODE_REQUIRED = 3;
+export const PERSO_STATE_PUK_CODE_REQUIRED = 4;
+export const PERSO_STATE_PERMANENTLY_BLOCKED = 5;
+
 // QmiUimCardApplicationType
 export const APP_TYPE_SIM = 1;
 export const APP_TYPE_USIM = 2;
