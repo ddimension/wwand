@@ -117,6 +117,7 @@ export function create(opts)
 		device: opts.device,
 		config: opts.config ?? {},
 		timing: { ...TIMING_DEFAULTS, ...(opts.timing ?? {}) },
+		protocol: 'qmi',   // MBIM/NCM parity (status/datapath read it)
 
 		state: 'ABSENT',
 		hub: null,

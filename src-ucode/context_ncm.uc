@@ -35,6 +35,7 @@ export function create(opts)
 		config: opts.config ?? {},
 		state: 'IDLE',
 		settings: null,
+		last_error: null,  // { stage, text, code } from the last failure
 		// PDP context id: '#N' apn selects modem context N as-is; else the
 		// configured profile, else the mux id, else 1 (parity with context.uc)
 		cid: null,
@@ -311,6 +312,7 @@ export function create(opts)
 							self.settings.ipv6.addr, self.settings.ipv6.plen,
 							self.settings.ipv6.gateway ?? '-', join(' ', self.settings.ipv6.dns)));
 
+					self.last_error = null;   // a good connection clears the last failure
 					set_state('CONNECTED');
 					start_stats();
 					emit('up', self.settings);
@@ -405,6 +407,14 @@ export function create(opts)
 
 	self._fail = function(err) {
 		log('err', sprintf('bring-up failed: %J', err));
+
+		// LuCI-visible failure reason (daemon status `last_error` — QMI parity;
+		// stayed null on NCM before)
+		self.last_error = {
+			stage: err?.stage ?? 'activation',
+			text:  err?.error ?? null,
+			code:  err?.code ?? null,
+		};
 
 		let cb = up_cb;
 		up_cb = null;

@@ -153,7 +153,7 @@ export function create(opts)
 
 	// --- step chain --------------------------------------------------------
 
-	let step_open, step_fcc, step_caps, step_at, step_at_ident, step_datapath, step_sim, step_attach_profile, step_register, step_attach;
+	let step_open, step_fcc, step_caps, step_at, step_at_ident, step_datapath, step_simslot, step_sim, step_attach_profile, step_register, step_attach;
 
 	let fail = modem_common.make_fail(self, {
 		log: log, timing: self.timing, emit: emit,
@@ -161,7 +161,30 @@ export function create(opts)
 		rec: rec,
 	});
 
-	modem_common.note_connect_failure_light(self, rec);
+	// soft recovery rungs (parity with QMI's DMS-based implementations):
+	// opmode_cycle = radio off -> settle -> on; modem_reset = self.reset
+	// (passthrough DMS offline->reset, AT+CFUN=1,1 fallback)
+	modem_common.note_connect_failure_light(self, rec, {
+		opmode_cycle: (done) => {
+			if (!self.mbim)
+				return done();
+
+			log('warn', 'recovery: cycling radio state');
+			self.mbim.command(bc, 'RADIO_STATE', 'set',
+				{ radio_state: bc.RADIO_STATE_OFF }, () => {
+					settle_timer = uloop.timer(self.timing.settle, () => {
+						self.mbim.command(bc, 'RADIO_STATE', 'set',
+							{ radio_state: bc.RADIO_STATE_ON }, () => {
+								settle_timer = uloop.timer(self.timing.settle, done);
+							});
+					});
+				});
+		},
+		modem_reset: (done) => {
+			log('warn', 'recovery: resetting modem');
+			self.reset((err) => done());
+		},
+	});
 
 
 	step_open = () => {
@@ -230,6 +253,9 @@ export function create(opts)
 			if (!err) {
 				self.info.model = data.hardware_info ?? self.info.model;
 				self.info.firmware = data.firmware_info;
+				// status `revision` (QMI parity — stayed null on MBIM; AT ATI
+				// overwrites it later with the richer string when a port works)
+				self.info.revision = self.info.revision ?? data.firmware_info;
 				self.info.device_id = data.device_id;   // IMEI
 				self.info.imei = data.device_id;
 				self.info.max_sessions = data.max_sessions;
@@ -306,7 +332,7 @@ export function create(opts)
 
 		if (!dp?.netdev || !dp.fx) {
 			self.datapath = { backend: 'none', netdev: dp?.netdev ?? null, mux: [] };
-			return step_sim();
+			return step_simslot();
 		}
 
 		let r = netlink.setup_mbim(dp.fx, {
@@ -328,7 +354,42 @@ export function create(opts)
 		};
 
 		log('notice', sprintf('datapath: cdc_mbim, parent %s, mux [%s]', parent, join(' ', r.mux_devs)));
-		step_sim();
+		step_simslot();
+	};
+
+	// assert the configured physical SIM slot before touching the SIM (QMI
+	// parity — `option sim_slot` was silently ignored on MBIM). sim.slot_status/
+	// switch_slot handle the MBIM transports themselves (passthrough UIM on
+	// demand, native MS-BCE fallback); unsupported -> log + continue.
+	step_simslot = () => {
+		let want = +(self.config.sim_slot ?? 0);
+
+		if (!want)
+			return step_sim();
+
+		sim.slot_status(self, (err, slots) => {
+			if (err) {
+				log('info', sprintf('sim_slot %d configured but slot status unsupported, continuing', want));
+				return step_sim();
+			}
+
+			let cur = filter(slots, (s) => s.active)[0];
+
+			if (cur?.physical == want)
+				return step_sim();
+
+			log('notice', sprintf('switching to SIM slot %d (active: slot %d)',
+				want, cur?.physical ?? 0));
+
+			sim.switch_slot(self, want, (serr) => {
+				if (serr)
+					log('warn', sprintf('sim slot switch failed: %J', serr));
+
+				// a different eUICC may be present after the switch
+				backend.reset(self, '_esim_be', '_apdu_be');
+				settle_timer = uloop.timer(self.timing.sim_settle ?? 5000, step_sim);
+			});
+		});
 	};
 
 	step_sim = (tries) => {
@@ -407,6 +468,16 @@ export function create(opts)
 				return fail('pin_query', err);
 			}
 
+			// status `pin1` (QMI parity — stayed null on MBIM): MBIM only
+			// reports the CURRENTLY required pin, so `enabled` is unknowable
+			// once unlocked (null, not false)
+			self.pin1 = {
+				state: (data.pin_state == bc.PIN_STATE_LOCKED) ? 1 : 2,
+				retries: data.remaining_attempts,
+				enabled: (data.pin_state == bc.PIN_STATE_LOCKED &&
+				          data.pin_type == bc.PIN_TYPE_PIN1) ? true : null,
+			};
+
 			if (data.pin_state == bc.PIN_STATE_UNLOCKED)
 				return step_attach_profile();
 
@@ -484,6 +555,8 @@ export function create(opts)
 				}
 
 				log('notice', 'sim: pin accepted');
+				self.pin1 = { state: 2, retries: vdata?.remaining_attempts ?? data.remaining_attempts,
+				              enabled: true };
 				settle_timer = uloop.timer(self.timing.settle, step_attach_profile);
 			});
 		});
@@ -896,6 +969,54 @@ export function create(opts)
 						notify_contexts('lost');
 						cb(null, { resetting: true });
 					}));
+			}, { no_recovery: true });
+		});
+	};
+
+	// network reattach (ubus modem_reattach): detach/attach at registration
+	// level WITHOUT a full reset. Preference: passthrough DMS low_power ->
+	// online (identical to the HW-proven QMI path), else native RADIO_STATE
+	// off -> on. Implemented here because netsel_ops' AT+COPS fallback rides a
+	// port that is frequently dead in MBIM mode (EG06: AT times out).
+	self.reattach = function(cb) {
+		cb = cb ?? (() => null);
+
+		let via_radio = () => {
+			if (!self.mbim)
+				return cb({ error: 'unsupported_on_backend' });
+
+			log('notice', 'network reattach (MBIM radio off -> on)');
+			self.mbim.command(bc, 'RADIO_STATE', 'set',
+				{ radio_state: bc.RADIO_STATE_OFF }, () => {
+					settle_timer = uloop.timer(self.timing.settle, () => {
+						self.mbim.command(bc, 'RADIO_STATE', 'set',
+							{ radio_state: bc.RADIO_STATE_ON }, (err) => {
+								cb(err ? { error: 'mbim', detail: err } : null,
+									{ ok: true, action: 'reattach', via: 'mbim_radio' });
+							});
+					});
+				});
+		};
+
+		self._ensure_pt((up) => {
+			if (!up)
+				return via_radio();
+
+			self.pt.ctl.request('ALLOCATE_CID', { service: dmsmod.default.service }, (aerr, adata) => {
+				if (aerr || !adata?.allocation)
+					return via_radio();
+
+				let dms = client_mod.create(self.pt.shim, dmsmod.default, adata.allocation.cid, hooks);
+
+				log('notice', 'network reattach (passthrough DMS low_power -> online)');
+				qmi_backend.set_opmode(dms, 'low_power', () => {
+					settle_timer = uloop.timer(self.timing.settle, () => {
+						qmi_backend.set_opmode(dms, 'online', (err) => {
+							cb(err ? { error: 'qmi', detail: err } : null,
+								{ ok: true, action: 'reattach', via: 'qmi_passthrough' });
+						});
+					});
+				});
 			}, { no_recovery: true });
 		});
 	};

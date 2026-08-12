@@ -312,7 +312,7 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 													conn_cli.defer('wwand', 'modem_plmn_lists',
 														{ modem: 'm0' }, (c9, s9) => {
 														eq(s9.ok, false, 'plmn: no-uim guarded');
-														eq(s9.error, 'no_uim_client', 'plmn: guard reason');
+														eq(s9.error, 'no_sim_transport', 'plmn: guard reason');
 
 														completed = true;
 														guard.cancel();

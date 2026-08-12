@@ -3,6 +3,41 @@
 _Last updated: 2026-08-12. All test suites green (42 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## Audit tranche 2 — backend parity MBIM/NCM (2026-08-12)
+
+Closes the parity gaps the audit's capability matrix surfaced (HW-smoked on
+245 QMI + 246 MBIM/EG06; suite green):
+
+- **Recovery rungs 8/16 now act on MBIM + NCM**: `note_connect_failure_light`
+  takes optional `{ opmode_cycle, modem_reset }` handlers — MBIM cycles
+  RADIO_STATE (reset via passthrough-DMS/AT), NCM cycles CFUN 0/1 (reset
+  CFUN=1,1). Before, both rungs were silent no-ops and the ladder skipped
+  from plain retries straight to board repower.
+- **MBIM `self.reattach`** — passthrough DMS low_power→online (HW-proven:
+  2 s on the EG06, session survives), native RADIO_STATE off→on fallback;
+  no longer rides the frequently-dead AT port. netsel log now backend-neutral.
+- **MBIM status parity**: `rat`/`caps` (probe_iot_rat in the slow loop),
+  `pin1` (from the PIN query; `enabled: null` where MBIM can't know),
+  `info.revision` (from firmware_info until ATI enriches it),
+  `last_error` on context_mbim/_ncm `_fail` (+ cleared on connect — QMI parity).
+- **`option sim_slot`**: MBIM asserts it at init (step_simslot before the SIM
+  step, idempotent via sim.slot_status/switch_slot); NCM surfaces an honest
+  config_warning (no slot transport on AT-only).
+- **PLMN/FPLMN on MBIM**: sim.uc `ensure_uim` brings up the passthrough UIM
+  on demand for read_plmn_lists/read_fplmn/write_fplmn (operator/home lists
+  no longer null; FPLMN no longer capped to the 12-byte AT+CRSM path);
+  simops gate accepts `_ensure_uim` (`no_sim_transport` replaces the
+  misnamed `no_uim_client`).
+- **LED bars on native MBIM**: bars_from_signal also picks the flat
+  `{ rssi, rsrp }` v1 shape (was 0 bars / dark LEDs).
+- QMI modem carries `protocol: 'qmi'` (modem_datapath/location gates read
+  it); `modem_location` says `unsupported_on_backend` when `option location`
+  is configured on a non-QMI backend (was a misleading `location_disabled`);
+  simops transport errors are `sim_transport` (was `qmi` even on NCM).
+
+Deferred (documented, not blocking): MBIM/NCM in-place IP-settings refresh
+while CONNECTED, MSISDN on MBIM/NCM, NCM multi-context rejection.
+
 ## Audit tranche 1 — bug fixes across ucode + C module (2026-08-12)
 
 Five-agent project audit (RAM / duplication / maintainability / C+shell /

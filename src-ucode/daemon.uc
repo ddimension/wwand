@@ -1559,8 +1559,15 @@ export function create(opts)
 		if (!entry?.modem)
 			return { error: 'no_such_modem', ref: ref };
 
-		if (!entry.modem.loc)
+		if (!entry.modem.loc) {
+			// distinguish "not configured" from "configured but the backend
+			// cannot do it" — 'location_disabled' on an MBIM/NCM modem WITH
+			// `option location` set was misleading
+			if (entry.cfg?.location && entry.modem.protocol != 'qmi')
+				return { error: 'unsupported_on_backend' };
+
 			return { error: 'location_disabled' };
+		}
 
 		return entry.modem.location ?? { error: 'no_fix' };
 	};

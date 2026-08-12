@@ -168,5 +168,9 @@ eq(board.bars_from_signal({ nr5g: { rsrp: -85 } }), 4, 'bars: nr5g preferred');
 eq(board.bars_from_signal({ nr5g: { rsrp: -32768 }, lte: { rsrp: -66 } }), 5,
 	'bars: invalid nr5g sentinel ignored, strong lte -> 5');
 eq(board.bars_from_signal(null), 0, 'bars: no signal -> 0');
+// native-MBIM v1 fallback shape is FLAT ({ rssi, rsrp }) — used to render 0
+// bars (LEDs dark) on a pure-native MBIM modem
+eq(board.bars_from_signal({ rsrp: -85 }), 4, 'bars: flat rsrp (native MBIM) -> 4');
+eq(board.bars_from_signal({ rssi: -80 }), 3, 'bars: flat rssi (native MBIM) -> 3');
 
 done('test_board');

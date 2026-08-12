@@ -949,22 +949,36 @@ export function encode_fplmn(entries, min_bytes)
 // Huawei E392 — code 48). cb(bytes|null). The CRSM read is capped at the 12-byte
 // (4-slot) 3GPP minimum; a UIM modem returns the whole EF, so a larger file is
 // fully seen and fully rewritten (see write_fplmn).
+// bring up the QMI-over-MBIM passthrough UIM on demand for the SIM-file paths.
+// The slot/apdu/power paths already do this; the PLMN/FPLMN readers used to
+// test modem.uim only — on MBIM modems the operator/home lists read null and
+// FPLMN fell to the 12-byte AT+CRSM path although the passthrough UIM works.
+function ensure_uim(modem, cb)
+{
+	if (modem.uim || !modem._ensure_uim)
+		return cb();
+
+	modem._ensure_uim(() => cb());
+}
+
 function read_fplmn_raw(modem, cb)
 {
-	let via_crsm = () => {
-		if (!modem.at)
-			return cb(null);
+	ensure_uim(modem, () => {
+		let via_crsm = () => {
+			if (!modem.at)
+				return cb(null);
 
-		modem.at.send(sprintf('AT+CRSM=176,%d,0,0,12', EF_FPLMN.file_id), (err, res) => {
-			let r = err ? null : atcmd.parse_crsm(res?.lines);
-			cb((r && r.ok && r.data) ? hex_to_arr(r.data) : null);
-		}, { timeout: 8000 });
-	};
+			modem.at.send(sprintf('AT+CRSM=176,%d,0,0,12', EF_FPLMN.file_id), (err, res) => {
+				let r = err ? null : atcmd.parse_crsm(res?.lines);
+				cb((r && r.ok && r.data) ? hex_to_arr(r.data) : null);
+			}, { timeout: 8000 });
+		};
 
-	if (modem.uim)
-		return read_ef(modem, EF_FPLMN, (bytes) => bytes != null ? cb(bytes) : via_crsm());
+		if (modem.uim)
+			return read_ef(modem, EF_FPLMN, (bytes) => bytes != null ? cb(bytes) : via_crsm());
 
-	via_crsm();
+		via_crsm();
+	});
 }
 
 // read the forbidden-PLMN list -> cb([ { mcc, mnc } ]) or cb(null) when unreadable.
@@ -1051,7 +1065,7 @@ export function plmn_act_bits(e)
 	       (e.eutran ? PLMN_ACT_EUTRAN : 0) | (e.ngran ? PLMN_ACT_NGRAN : 0);
 };
 
-export function read_plmn_lists(modem, cb)
+function read_plmn_lists_inner(modem, cb)
 {
 	let out = { user: null, nas: null, operator: null, home: null, fplmn: null };
 
@@ -1142,6 +1156,13 @@ export function read_plmn_lists(modem, cb)
 
 	// user list (EF 6F60) via UIM/AT, NAS via NAS Get, operator/home, forbidden
 	user_via_uim_at(() => read_nas(() => read_op_home(() => read_fpl(() => cb(out)))));
+}
+
+export function read_plmn_lists(modem, cb)
+{
+	// MBIM: bring up the passthrough UIM first — operator/home/user EF reads
+	// need it, and the AT-only fallbacks are lossy (no operator/home at all)
+	ensure_uim(modem, () => read_plmn_lists_inner(modem, cb));
 };
 
 // Write the USER-controlled preferred PLMN list (EF 6F60 / PLMNwAcT) via the

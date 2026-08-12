@@ -249,18 +249,20 @@ export function install(self, o)
 				}
 
 				self._refresh_signal(() => self._refresh_data_mode(() => self._refresh_reg_detail(() => self._refresh_cells(() =>
-					// modem temperature over the AT side channel (best-effort, slow
-					// loop). MBIM modems with a working AT port get parity with QMI;
-					// where AT is dead (EG06) collect_temperature latches off after
-					// the first timeout, so it is not re-tried every tick.
-					modem_common.collect_temperature(self, () => {
+					// modem temperature + fine access-tech/caps (IoT/RedCap)
+					// over the AT side channel (best-effort, slow loop —
+					// QMI/NCM parity; status `rat`/`caps` stayed null on MBIM
+					// without this). Where AT is dead (EG06) both latch off
+					// after the first timeout, so no per-tick re-tries.
+					modem_common.collect_temperature(self, () =>
+					    modem_common.probe_iot_rat(self, () => {
 						if (!self.mbim)
 							return;
 
 						log_telemetry();
 						emit_telemetry();
 						telemetry_timer = uloop.timer(interval, tick);
-					})))));
+					}))))));
 			});
 		};
 

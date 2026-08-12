@@ -255,7 +255,11 @@ export function scaffolding(self, o)
 // install "record a failed connection cycle" for modems with no live DMS to
 // cycle (MBIM, NCM): bump the recovery counter and run only the reboot/usb_repower
 // rungs. QMI installs its own richer version that also cycles opmode / resets.
-export function note_connect_failure_light(self, rec)
+// handlers (optional): { opmode_cycle: (done) => …, modem_reset: (done) => … }
+// — backend implementations for the two soft recovery rungs. Without them the
+// rungs are no-ops and the ladder silently skips from plain retries to board
+// repower; every backend that has the primitives should pass them.
+export function note_connect_failure_light(self, rec, handlers)
 {
 	self.note_connect_failure = function(done) {
 		done = done ?? ((a) => null);
@@ -266,6 +270,10 @@ export function note_connect_failure_light(self, rec)
 			rec.reboot('connection attempt limit reached');
 		else if (action == 'usb_repower')
 			rec.usb_repower();
+		else if (action == 'opmode_cycle' && handlers?.opmode_cycle)
+			return handlers.opmode_cycle(() => done(action));
+		else if (action == 'modem_reset' && handlers?.modem_reset)
+			return handlers.modem_reset(() => done(action));
 
 		done(action);
 	};

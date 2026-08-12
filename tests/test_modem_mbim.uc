@@ -183,6 +183,7 @@ function assert_puk_block() {
 					m2_done = true;
 					eq(data.reason, 'puk_required', 'puk: terminal reason puk_required');
 					eq(m2.state, 'SIM_BLOCKED', 'puk: state SIM_BLOCKED, no recovery ladder');
+					eq(m2.pin1?.state, 1, 'puk: pin1 status populated (MBIM parity)');
 					m2.stop();
 					finish();
 				}

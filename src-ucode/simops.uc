@@ -25,7 +25,7 @@ export function install(self, o)
 			return;
 
 		sim.slot_status(entry.modem, (err, slots) =>
-			cb(err ? { error: 'qmi', detail: err } : null, err ? null : { slots: slots }));
+			cb(err ? { error: 'sim_transport', detail: err } : null, err ? null : { slots: slots }));
 	};
 
 	self.modem_sim_switch_slot = function(ref, physical, cb) {
@@ -39,7 +39,7 @@ export function install(self, o)
 
 		sim.switch_slot(entry.modem, physical, (err, res) => {
 			if (err)
-				return cb({ error: 'qmi', detail: err });
+				return cb({ error: 'sim_transport', detail: err });
 
 			// idempotency guard: slot already active — nothing switched, keep caches
 			if (res?.unchanged) {
@@ -88,16 +88,16 @@ export function install(self, o)
 		switch (op) {
 		case 'open':
 			return sim.apdu_open(entry.modem, slot, params?.aid ?? '', (err, res) =>
-				cb(err ? { error: 'qmi', detail: err } : null, res));
+				cb(err ? { error: 'sim_transport', detail: err } : null, res));
 
 		case 'send':
 			return sim.apdu_send(entry.modem, slot, +(params?.channel ?? 0), params?.apdu ?? '',
-				(err, res) => cb(err ? { error: 'qmi', detail: err } : null,
+				(err, res) => cb(err ? { error: 'sim_transport', detail: err } : null,
 				                 err ? null : { response: res }));
 
 		case 'close':
 			return sim.apdu_close(entry.modem, slot, +(params?.channel ?? 0), (err) =>
-				cb(err ? { error: 'qmi', detail: err } : null, err ? null : {}));
+				cb(err ? { error: 'sim_transport', detail: err } : null, err ? null : {}));
 
 		default:
 			return cb({ error: 'invalid_op', op: op });
@@ -173,9 +173,10 @@ export function install(self, o)
 
 		// read_plmn_lists falls back to AT+CPOL for the user list, so a modem
 		// with no UIM client (NCM) or one that rejects UIM EF reads (E392) still
-		// returns its user list; only a modem with neither UIM nor AT is stuck.
-		if (!entry.modem.uim && !entry.modem.at)
-			return cb({ error: 'no_uim_client' });
+		// returns its user list; MBIM modems get the passthrough UIM on demand
+		// (_ensure_uim). Only a modem with none of the three is stuck.
+		if (!entry.modem.uim && !entry.modem.at && !entry.modem._ensure_uim)
+			return cb({ error: 'no_sim_transport' });
 
 		sim.read_plmn_lists(entry.modem, (lists) => cb(null, lists));
 	};

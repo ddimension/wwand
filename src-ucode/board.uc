@@ -127,13 +127,16 @@ export function bars_from_signal(sig)
 		return null;
 	};
 
-	let rsrp = pick(sig.nr5g?.rsrp, sig.lte?.rsrp);
+	// top-level rsrp/rssi: the native-MBIM v1 fallback shape is flat
+	// ({ rssi, rsrp }) — without these picks a pure-native MBIM modem always
+	// rendered 0 bars (LEDs dark despite full signal)
+	let rsrp = pick(sig.nr5g?.rsrp, sig.lte?.rsrp, sig.rsrp);
 
 	if (rsrp != null)
 		return (rsrp >= -80) ? 5 : (rsrp >= -90) ? 4 : (rsrp >= -100) ? 3 :
 		       (rsrp >= -110) ? 2 : 1;
 
-	let rssi = pick(sig.lte?.rssi, sig.gsm_rssi, sig.wcdma?.rssi);
+	let rssi = pick(sig.lte?.rssi, sig.gsm_rssi, sig.wcdma?.rssi, sig.rssi);
 
 	if (rssi != null)
 		return (rssi >= -65) ? 5 : (rssi >= -75) ? 4 : (rssi >= -85) ? 3 :

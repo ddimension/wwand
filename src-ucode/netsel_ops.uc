@@ -384,7 +384,7 @@ export function install(self, o)
 			return;
 
 		if (entry.modem.reattach) {
-			log('notice', sprintf('modem %s: network reattach (QMI opmode bounce)', ref));
+			log('notice', sprintf('modem %s: network reattach (backend)', ref));
 			return entry.modem.reattach(cb);
 		}
 

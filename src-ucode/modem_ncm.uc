@@ -301,6 +301,17 @@ export function create(opts)
 	// protocol-neutral scaffolding (set_state / attach_context /
 	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)
 	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
+
+	// `option sim_slot` needs a UIM/MBIM slot transport — the AT-only backend
+	// has none: surface a warning instead of silently running the active slot
+	if (+(self.config?.sim_slot ?? 0)) {
+		self.config_warnings = self.config_warnings ?? [];
+		push(self.config_warnings, {
+			check: 'sim_slot', severity: 'warn',
+			message: 'option sim_slot is not supported on the NCM/AT backend (active slot left unchanged)',
+			expected: sprintf('slot %d', +self.config.sim_slot), actual: null,
+		});
+	}
 	let emit = scaffold.emit;
 	let notify_contexts = scaffold.notify_contexts;
 
@@ -335,7 +346,30 @@ export function create(opts)
 		rec: rec,
 	});
 
-	modem_common.note_connect_failure_light(self, rec);
+	// soft recovery rungs (parity with QMI's DMS-based implementations):
+	// opmode_cycle = CFUN 0 -> settle -> 1; modem_reset = self.reset (CFUN=1,1)
+	modem_common.note_connect_failure_light(self, rec, {
+		opmode_cycle: (done) => {
+			if (!self.at)
+				return done();
+
+			log('warn', 'recovery: cycling operating mode (CFUN 0/1)');
+			self.at.send('AT+CFUN=0', () => {
+				settle_timer = uloop.timer(self.timing.settle, () => {
+					self.at.send('AT+CFUN=1', () => {
+						settle_timer = uloop.timer(self.timing.settle, done);
+					}, { timeout: 15000 });
+				});
+			}, { timeout: 15000 });
+		},
+		modem_reset: (done) => {
+			if (!self.at)
+				return done();
+
+			log('warn', 'recovery: resetting modem');
+			self.reset((err) => done());
+		},
+	});
 
 
 	// --- step chain --------------------------------------------------------

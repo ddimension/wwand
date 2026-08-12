@@ -35,6 +35,7 @@ export function create(opts)
 		config: opts.config ?? {},
 		state: 'IDLE',
 		settings: null,
+		last_error: null,  // { stage, text, code, nw_error } from the last failure
 		session_id: +(opts.config?.mux_id ?? 0),
 	};
 
@@ -233,6 +234,7 @@ export function create(opts)
 						self.settings.ipv6.addr, self.settings.ipv6.plen,
 						self.settings.ipv6.gateway, join(' ', self.settings.ipv6.dns)));
 
+				self.last_error = null;   // a good connection clears the last failure
 				set_state('CONNECTED');
 				start_stats();
 				emit('up', self.settings);
@@ -268,6 +270,16 @@ export function create(opts)
 
 	self._fail = function(err) {
 		log('err', sprintf('bring-up failed: %J', err));
+
+		// LuCI-visible failure reason (daemon status `last_error` — QMI parity;
+		// stayed null on MBIM before). nw_error carries the 3GPP cause when the
+		// network refused the attach/activation.
+		self.last_error = {
+			stage: err?.stage ?? 'activation',
+			text:  err?.error ?? null,
+			code:  err?.status ?? err?.nw_error ?? null,
+			nw_error: err?.nw_error,
+		};
 
 		let cb = up_cb;
 		up_cb = null;
