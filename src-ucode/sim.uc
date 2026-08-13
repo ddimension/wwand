@@ -241,8 +241,16 @@ function unlock_uim(modem, cb, tries)
 			});
 		}
 
+		case uimmod.APP_STATE_PUK1_OR_UPUK_REQUIRED: {
+			// PUK-locked: surface it distinctly (LuCI/CLI show the PUK dialog)
+			// with the remaining unblock attempts so the user knows the risk.
+			let pukr = app.upin_replaces_pin1 ? found.card.upuk_retries : app.puk1_retries;
+			return cb({ blocked: true, reason: 'puk_required',
+			            puk_retries: pukr, retries: pukr });
+		}
+
 		default:
-			// puk required, pin blocked, illegal
+			// pin blocked, illegal, or an unmapped terminal state
 			return cb({ blocked: true, reason: 'app_state', state: app.state });
 		}
 	});
@@ -313,7 +321,11 @@ function unlock_dms(modem, cb, tries)
 			return;
 		}
 
-		default: // blocked / permanently blocked
+		case 4: // blocked -> PUK required (5 = permanently blocked)
+			return cb({ blocked: true, reason: 'puk_required',
+			            puk_retries: pin1.unblock_retries, retries: pin1.unblock_retries });
+
+		default: // permanently blocked, illegal
 			return cb({ blocked: true, reason: 'pin_blocked', state: pin1.status });
 		}
 	});

@@ -486,6 +486,15 @@ export function create(transport, opts)
 
 		self.buffer += chunk;
 
+		// PDU-prompt commands (AT+CMGS=<len>): the modem answers with a bare
+		// '> ' prompt (NO newline) and then waits for the payload + Ctrl-Z. Send
+		// it once the prompt appears, before the line loop (which needs '\n').
+		if (cur.payload != null && !cur.payload_sent && index(self.buffer, '>') >= 0) {
+			cur.payload_sent = true;
+			self.buffer = '';
+			transport.write(cur.payload + '\x1a');
+		}
+
 		let idx;
 
 		while ((idx = index(self.buffer, '\n')) >= 0) {
@@ -516,6 +525,20 @@ export function create(transport, opts)
 			cmd: cmd,
 			cb: cb,
 			timeout: o?.timeout ?? DEFAULT_TIMEOUT,
+		});
+
+		next();
+	};
+
+	// two-phase prompt command (AT+CMGS PDU mode): send `cmd`, wait for the '>'
+	// prompt, then write `payload` + Ctrl-Z. cb gets the final reply lines (e.g.
+	// "+CMGS: <ref>"). Longer default timeout — sending includes an OTA round trip.
+	self.send_pdu = function(cmd, payload, cb, o) {
+		push(self.queue, {
+			cmd: cmd,
+			payload: payload,
+			cb: cb,
+			timeout: o?.timeout ?? 60000,
 		});
 
 		next();

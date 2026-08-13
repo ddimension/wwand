@@ -166,6 +166,12 @@ export function publish(conn, daemon, log)
 				daemon.modem_sms_read(req.args.modem, req.args.storage, req.args.index, ok_reply(reply))),
 		},
 
+		modem_sms_send: {
+			args: { modem: '', number: '', text: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_sms_send(req.args.modem, req.args.number, req.args.text, ok_reply(reply))),
+		},
+
 		modem_sms_delete: {
 			args: { modem: '', storage: '', index: 0, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

@@ -3,6 +3,31 @@
 _Last updated: 2026-08-12. All test suites green (42 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## SMS send + parity finishers + CLI --json (2026-08-13)
+
+- **SMS send** (the receive-only gap): `sms_pdu.encode_submit` (SMS-SUBMIT
+  encoder — GSM7/UCS2 auto-select, 8-bit concatenation UDH for long text;
+  byte-verified vs GSM 03.40), QMI WMS `RAW_SEND` (0x0020, spec-verified) over
+  native or the MBIM passthrough, else `AT+CMGS` PDU mode via a new
+  `atcmd.send_pdu` two-phase `>`-prompt handler. ubus `modem_sms_send
+  {modem,number,text}`, `wwandctl sms-send`, LuCI ACL. NOT live-sent (costs /
+  outbound); encoder + AT-prompt unit-tested.
+- **PUK retries surfaced**: QMI now reports a PUK-locked card distinctly as
+  `puk_required` with the remaining unblock attempts (UIM app_state 3 →
+  puk1/upuk_retries; DMS pin status 4 → unblock_retries) instead of a generic
+  `app_state`/`pin_blocked` — the LuCI/CLI PUK dialog now shows the correct
+  branch + "N attempts left".
+- **Parity finishers**: MBIM + NCM refresh IP settings while CONNECTED (re-read
+  IP_CONFIGURATION / CGCONTRDP on the stats tick, emit 'settings' → daemon
+  renews in place — QMI parity; catches network-pushed DNS/MTU/prefix changes).
+  NCM rejects a second parallel context (`unsupported_multi_context`) instead
+  of two interfaces silently sharing the one cdc_ncm netdev.
+- **wwandctl `--json`**: machine mode — raw ubus reply of a read command
+  (status/modems/signal/cells/datapath/slots/plmn) for scripting/monitoring.
+
+Deferred (user): the optional stats/metrics module (JSON exporter / quota /
+`wwandctl watch`).
+
 ## wwandctl CLI + end-to-end PUK entry (2026-08-12)
 
 - **`wwandctl`** (`src-ucode/wwandctl.uc` → `/usr/bin/wwandctl`, base package):

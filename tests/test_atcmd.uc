@@ -574,4 +574,29 @@ for (let name in parsers)
 		catch (e) { push(threw, sprintf('%s(%J)', name, input)); }
 eq(threw, [], 'robustness: no parser throws on hostile input');
 
+// --- send_pdu: two-phase '>' prompt (AT+CMGS PDU mode) -----------------------
+
+tr = fake_transport();
+at = atcmd.create(tr, { log: silent });
+
+got = null;
+at.send_pdu('AT+CMGS=18', '0011000C9194...', (err, res) => { got = { err: err, res: res }; });
+
+eq(tr.written, [ "AT+CMGS=18\r" ], 'send_pdu: command written, payload withheld');
+
+// modem answers with a bare '> ' prompt (no newline) -> payload + Ctrl-Z sent
+tr.reply('\r\n> ');
+eq(tr.written[1], "0011000C9194...\x1a", 'send_pdu: payload + Ctrl-Z sent on prompt');
+
+// final reply carries the message reference
+tr.reply("\r\n+CMGS: 42\r\n\r\nOK\r\n");
+eq(got.err, null, 'send_pdu: success');
+eq(got.res.lines, [ '+CMGS: 42' ], 'send_pdu: +CMGS reference line');
+
+// error before the prompt (e.g. +CMS ERROR) still surfaces
+got = null;
+at.send_pdu('AT+CMGS=18', 'DEAD', (err) => { got = { err: err }; });
+tr.reply("\r\n+CMS ERROR: 500\r\n");
+eq(got.err?.error, 'cms', 'send_pdu: CMS error surfaces');
+
 done('test_atcmd');

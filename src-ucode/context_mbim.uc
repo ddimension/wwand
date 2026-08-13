@@ -56,7 +56,7 @@ export function create(opts)
 	// stats controls forward-declared BEFORE the scaffolding arrow that
 	// captures stop_stats (ucode resolves lexical refs only for bindings
 	// already declared at definition time)
-	let start_stats, stop_stats, sample_stats;
+	let start_stats, stop_stats, sample_stats, refresh_settings;
 
 	// shared emit/set_state/fail_finish (context_common.ctx_scaffolding)
 	let sc = context_common.ctx_scaffolding(self, {
@@ -145,6 +145,36 @@ export function create(opts)
 
 			if (stats_timer)
 				stats_timer.set(stats_interval);
+		});
+
+		refresh_settings();
+	};
+
+	// live IP-settings refresh (QMI parity via context_monitor_qmi): re-query
+	// the assigned IP config on the stats tick and, if the network pushed a
+	// changed address/prefix/DNS/MTU, emit 'settings' so the daemon renews the
+	// interface in place. Cheap (one query per stats interval, default 60 s).
+	refresh_settings = () => {
+		if (self.state != 'CONNECTED' || !self.modem.mbim)
+			return;
+
+		self.modem.command('IP_CONFIGURATION', 'query',
+			{ session_id: self.session_id }, (err, cfg) => {
+			if (err || self.state != 'CONNECTED')
+				return;
+
+			let next = build_settings(cfg);
+
+			if (!next.ipv4 && !next.ipv6)
+				return;   // transient empty read — keep the current settings
+
+			if (sprintf('%J', next) == sprintf('%J', self.settings))
+				return;
+
+			log('notice', sprintf('session %d: network pushed new IP settings, renewing',
+				self.session_id));
+			self.settings = next;
+			emit('settings', self.settings);
 		});
 	};
 

@@ -822,11 +822,14 @@ wwandctl pin [pin]                   # manual PIN release (low-retry guard)
 wwandctl pin-lock 1234 / pin-unlock 1234
 wwandctl puk 12345678 4321           # PUK entry: unblock + set NEW PIN 4321
 wwandctl plmn                        # PLMN selector lists incl. FPLMN
-wwandctl sms / sms-delete 3          # stored SMS
+wwandctl sms                         # list stored SMS
+wwandctl sms-send +49170... "hi"     # send an SMS
+wwandctl sms-delete 3
 wwandctl reset / repower             # modem reset / hardware repower
 wwandctl at AT+CSQ                   # raw AT command
 wwandctl migrate [apply]             # config migration plan/apply
 wwandctl log-level debug
+wwandctl --json status               # machine mode (raw ubus reply)
 ```
 
 Errors from the daemon surface as one-line messages (`wwandctl: <method>
@@ -878,6 +881,7 @@ when called from LuCI).
 | `modem_sms_list` | `modem`, `storage?` | list stored SMS (decoded: sender, timestamp, text, multipart merged); `storage` `SM` (SIM, default) or `ME` (modem) |
 | `modem_sms_read` | `modem`, `storage?`, `index` | read one stored SMS by index |
 | `modem_sms_delete` | `modem`, `storage?`, `index` | delete one stored SMS by index (write ACL) |
+| `modem_sms_send` | `modem`, `number`, `text` | send an SMS (SMS-SUBMIT, GSM7/UCS2, auto-segmented): QMI WMS RAW_SEND (native/passthrough) else AT+CMGS PDU mode (write ACL) |
 | `modem_repower` | `modem?` | hardware repower: pulse the modem `reset_gpio` (or, single-modem only, the board default), else power-cycle the modem USB power (also single-modem only — on a multi-modem box the board lines would hit the wrong hardware: error `multi_modem_needs_reset_gpio`). Same path as the recovery ladder; recovers a hung / vanished modem |
 | `modem_set_protocol` | `modem`, `protocol` | switch the control protocol (`qmi` ⇄ `mbim`); the modem resets |
 | `modem_reattach` | `modem` | detach/re-attach at the registration level (QMI DMS low-power→online bounce natively, `AT+COPS=2`→`0` fallback) without a full modem reset (write ACL) |

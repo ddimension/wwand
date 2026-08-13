@@ -124,6 +124,12 @@ export function install(self, o)
 			sms.sms_delete(entry.modem, storage ?? 'SM', +index, cb);
 	};
 
+	self.modem_sms_send = function(ref, number, text, cb) {
+		let entry = check_modem(ref, cb);
+		if (entry)
+			sms.sms_send(entry.modem, number, text, cb);
+	};
+
 	// eSIM download/notification bridge (optional wwand-esim, esim_bridge.uc); lazy.
 	let esim_bridge = null;
 	let load_esim_bridge = () => {

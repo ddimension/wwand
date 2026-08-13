@@ -221,8 +221,10 @@ function cmd_sms(st, args)
 
 const HELP = `wwandctl — control the wwand cellular connection manager
 
-Usage: wwandctl <command> [modem] [args...]
+Usage: wwandctl [--json] <command> [modem] [args...]
   [modem] may be omitted when exactly one modem is managed.
+  --json    machine mode: print the raw ubus reply of a read command as JSON
+            (status/modems/signal/cells/datapath/slots/plmn)
 
 Status
   status                 modem + interface overview
@@ -250,6 +252,7 @@ SIM
 
 SMS
   sms [modem] [SM|ME]    list stored messages
+  sms-send [modem] <number> <text...>   send an SMS
   sms-delete [modem] <index>
 
 Maintenance
@@ -263,9 +266,18 @@ Maintenance
 
 // --- main ---------------------------------------------------------------------
 
-// ucode: ARGV holds the arguments after the script name
-let cmd = ARGV[0];
-let args = slice(ARGV, 1);
+// ucode: ARGV holds the arguments after the script name. A leading --json puts
+// the tool in machine mode: read commands print the raw ubus reply as JSON.
+let argv = ARGV;
+let json_mode = false;
+
+if (argv[0] == '--json' || argv[0] == '-j') {
+	json_mode = true;
+	argv = slice(argv, 1);
+}
+
+let cmd = argv[0];
+let args = slice(argv, 1);
 
 if (cmd == null || cmd == 'help' || cmd == '-h' || cmd == '--help') {
 	print(HELP);
@@ -276,6 +288,31 @@ conn = libubus.connect();
 
 if (!conn)
 	die('cannot connect to ubus');
+
+// machine mode: emit the raw ubus reply of the matching read method as JSON
+// (scripting / monitoring). Action commands stay human-only.
+if (json_mode) {
+	const JSON_READ = {
+		status: 'status', modems: 'status',
+		signal: 'modem_signal', cells: 'modem_cells', datapath: 'modem_datapath',
+		slots: 'modem_sim_slots', plmn: 'modem_plmn_lists',
+	};
+
+	let method = JSON_READ[cmd];
+
+	if (!method)
+		die(sprintf('--json supports only: %s', join(' ', sort(keys(JSON_READ)))));
+
+	let cargs = {};
+
+	if (method != 'status') {
+		let r = resolve_modem(status(), args[0]);
+		cargs.modem = r.modem;
+	}
+
+	printf('%J\n', call(method, cargs));
+	exit(0);
+}
 
 switch (cmd) {
 case 'status':   cmd_status(args); break;
@@ -430,6 +467,21 @@ case 'puk':
 case 'sms':
 	cmd_sms(status(), args);
 	break;
+
+case 'sms-send': {
+	let st = status();
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	if (length(rest) < 2)
+		die('usage: wwandctl sms-send [modem] <number> <text...>');
+
+	let number = rest[0];
+	let text = join(' ', slice(rest, 1));
+	let res = call_ok('modem_sms_send', { modem: r.modem, number: number, text: text });
+	printf('sent (%d part%s)\n', res.parts ?? 1, (res.parts == 1) ? '' : 's');
+	break;
+}
 
 case 'sms-delete': {
 	let st = status();

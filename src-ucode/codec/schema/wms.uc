@@ -16,6 +16,9 @@ export const STORAGE_NV  = 0x01;   // ME (modem non-volatile)
 export const MODE_CDMA      = 0x00;
 export const MODE_GSM_WCDMA = 0x01;
 
+// QmiWmsMessageFormat (RAW_SEND Format field)
+export const FORMAT_GSM_WCDMA_PP = 0x06;
+
 // QmiWmsMessageTagType
 export const TAG_MT_READ     = 0x00;
 export const TAG_MT_NOT_READ = 0x01;
@@ -25,6 +28,19 @@ export const TAG_MO_NOT_SENT = 0x03;
 export default {
 	service: 0x05,
 	messages: {
+		// Send a raw PDU (SMS-SUBMIT). Verified vs libqmi wms "Raw Send" 0x0020:
+		// input Raw Message Data 0x01 { Format u8, Raw Data u16-array }, GSM WCDMA
+		// Link Timer 0x12 (u8) optional; output Message ID 0x01 (u16 reference).
+		RAW_SEND: {
+			id: 0x0020,
+			req: {
+				raw: { t: 0x01, f: { format: 'u8', data: { n: 'u16', of: 'u8' } } },
+			},
+			resp: {
+				message_id: { t: 0x01, f: 'u16' },
+			},
+		},
+
 		// Read one stored message as a raw PDU. Message Mode (0x10) is mandatory
 		// for GSM. Response TLV 0x01 = { tag, format, raw_data } with the PDU as a
 		// u16-prefixed byte array (like uim SEND_APDU).

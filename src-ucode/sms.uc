@@ -322,3 +322,74 @@ export function sms_delete(modem, storage, index, cb)
 		cb({ error: 'unsupported_on_backend' }, null);
 	});
 };
+
+// rolling 8-bit concatenation reference for multipart sends (no RNG in ucode)
+let concat_ref = 0;
+
+// send an SMS. Encodes SMS-SUBMIT PDU(s) (GSM7/UCS2, auto-segmented), then
+// dispatches: QMI WMS RAW_SEND (native or over the MBIM passthrough) else
+// AT+CMGS PDU mode. A native-MBIM-only modem with no AT falls through to
+// unsupported (no native MBIM SMS_SEND path yet). cb(err, { parts, refs }).
+export function sms_send(modem, number, text, cb)
+{
+	if (!length(number ?? '') || text == null)
+		return cb({ error: 'invalid_argument' });
+
+	concat_ref = (concat_ref + 1) & 0xff;
+	let pdus = sms_pdu.encode_submit(number, text, { ref: concat_ref });
+
+	// QMI WMS whenever a WMS client is up (native or passthrough); else AT
+	if (modem.wms) {
+		let refs = [], i = 0, step;
+
+		step = () => {
+			if (i >= length(pdus))
+				return cb(null, { parts: length(pdus), refs: refs });
+
+			modem.wms.request('RAW_SEND', {
+				raw: { format: wmsmod.FORMAT_GSM_WCDMA_PP,
+				       data: hexmod.hex_to_arr(pdus[i].pdu) },
+			}, (err, data) => {
+				if (err)
+					return cb({ error: 'qmi', detail: err, sent: i });
+
+				push(refs, data?.message_id);
+				i++;
+				step();
+			});
+		};
+
+		return step();
+	}
+
+	if (modem.at) {
+		modem.at.send('AT+CMGF=0', () => {
+			let refs = [], i = 0, step;
+
+			step = () => {
+				if (i >= length(pdus))
+					return cb(null, { parts: length(pdus), refs: refs });
+
+				// AT+CMGS=<tpdu length in octets, excluding the SMSC byte>
+				modem.at.send_pdu(sprintf('AT+CMGS=%d', pdus[i].tpdu_len), pdus[i].pdu,
+					(err, res) => {
+						if (err)
+							return cb({ error: 'at', detail: err, sent: i });
+
+						for (let l in (res?.lines ?? [])) {
+							let m = match(l, /\+CMGS:\s*([0-9]+)/);
+							if (m) push(refs, +m[1]);
+						}
+						i++;
+						step();
+					});
+			};
+
+			step();
+		});
+
+		return;
+	}
+
+	cb({ error: 'unsupported_on_backend' });
+};

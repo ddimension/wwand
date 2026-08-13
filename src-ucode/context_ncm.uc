@@ -60,7 +60,7 @@ export function create(opts)
 	// stats controls forward-declared BEFORE the scaffolding arrow that
 	// captures stop_stats (ucode resolves lexical refs only for bindings
 	// already declared at definition time)
-	let start_stats, stop_stats, sample_stats;
+	let start_stats, stop_stats, sample_stats, refresh_settings;
 
 	// shared emit/set_state/fail_finish (context_common.ctx_scaffolding)
 	let sc = context_common.ctx_scaffolding(self, {
@@ -151,9 +151,36 @@ export function create(opts)
 		}
 	};
 
+	// live IP-settings refresh (QMI/MBIM parity): re-read CGCONTRDP on the
+	// stats tick and, if the network pushed changed IP config, emit 'settings'
+	// so the daemon renews the interface in place.
+	refresh_settings = () => {
+		if (self.state != 'CONNECTED' || !self.modem.at)
+			return;
+
+		self.modem.at.send(sprintf('AT+CGCONTRDP=%d', self.cid), (err, res) => {
+			if (err || self.state != 'CONNECTED')
+				return;
+
+			let next = build_settings(ncm.parse_cgcontrdp(res?.lines));
+
+			if (!next.ipv4 && !next.ipv6)
+				return;   // transient/empty read — keep current settings
+
+			if (sprintf('%J', next) == sprintf('%J', self.settings))
+				return;
+
+			log('notice', sprintf('cid %d: network pushed new IP settings, renewing', self.cid));
+			self.settings = next;
+			emit('settings', self.settings);
+		});
+	};
+
 	sample_stats = () => {
 		if (self.state != 'CONNECTED' || !self.modem.at)
 			return;   // torn down — let the timer lapse
+
+		refresh_settings();
 
 		let vendor = self.modem.vendor;
 		let dial = self.modem.dial;
@@ -254,6 +281,17 @@ export function create(opts)
 
 		if (self.modem.state != 'READY' || !self.modem.at)
 			return cb({ error: 'modem_not_ready', modem_state: self.modem.state });
+
+		// NCM has ONE shared cdc_ncm/cdc_ether netdev — a second parallel
+		// context would silently share it (no per-PDP mux like QMAP/MBIM
+		// sessions). Reject the extra context with a clear error instead of
+		// two interfaces fighting over the same netdev.
+		let other = filter(self.modem.contexts,
+			(c) => c != self && c.state != 'IDLE');
+
+		if (length(other))
+			return cb({ error: 'unsupported_multi_context',
+			            detail: 'NCM modems support a single active context (one shared netdev)' });
 
 		up_cb = cb;
 		activated = false;

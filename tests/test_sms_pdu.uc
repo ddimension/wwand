@@ -168,4 +168,40 @@ eq(sms.decode_deliver('0001'), null, '6: MTI!=DELIVER -> null (SUBMIT first octe
 	ok(index(d.text, 'Grüße') > 0, '7: real: German ü/ß decoded from GSM7');
 })();
 
+// --- SMS-SUBMIT encoder (send) -----------------------------------------------
+(function() {
+	// single GSM7 segment to an international number (+ 12 digits). Framing:
+	// 00 (no SMSC) 11 (SUBMIT|VPF-rel) 00 (MR) DA[0C 91 947110325476] 00 (PID)
+	// 00 (DCS GSM7) AA (VP-rel) 05 (UDL septets) + packed "hello".
+	let s1 = sms.encode_submit('+491701234567', 'hello');
+	eq(length(s1), 1, 'submit: single segment');
+	eq(s1[0].encoding, 'gsm7', 'submit: gsm7 chosen for ASCII');
+	eq(s1[0].pdu, '0011000C919471103254760000AA05E8329BFD06', 'submit: full SMS-SUBMIT PDU byte-exact');
+	// AT+CMGS length = octets after the SMSC byte
+	eq(s1[0].tpdu_len, length(s1[0].pdu) / 2 - 1, 'submit: tpdu_len excludes SMSC byte');
+
+	// national number -> toa 0x81; even digit count, swapped BCD
+	let s1b = sms.encode_submit('0170', 'hi');
+	ok(index(s1b[0].pdu, '04811007') >= 0, 'submit: national DA (toa 81, swapped BCD)');
+
+	// odd digit count -> F pad in the last high nibble (3 digits: 03 81 10 F7)
+	let s1c = sms.encode_submit('017', 'hi');
+	ok(index(s1c[0].pdu, '038110F7') >= 0, 'submit: odd-digit DA gets F pad');
+
+	// non-GSM7 char forces UCS2 (DCS 08, UTF-16BE)
+	let s2 = sms.encode_submit('0170', 'A☃');
+	eq(s2[0].encoding, 'ucs2', 'submit: ucs2 for non-GSM7 char');
+	ok(index(s2[0].pdu, '0008') >= 0, 'submit: DCS 08 (UCS2)');
+	ok(index(s2[0].pdu, '00412603') >= 0, 'submit: "A☃" as UTF-16BE (0041 2603)');
+
+	// long GSM7 (>160 septets) -> concatenated, UDHI set, 8-bit concat UDH
+	let long = '';
+	for (let i = 0; i < 170; i++) long += 'a';
+	let s3 = sms.encode_submit('0170', long, { ref: 0x42 });
+	eq(length(s3), 2, 'submit: 170 chars -> 2 parts');
+	eq(substr(s3[0].pdu, 2, 2), '51', 'submit: first octet 0x51 (SUBMIT|VPF|UDHI)');
+	ok(index(s3[0].pdu, '0500034202') >= 0, 'submit: 8-bit concat UDH (ref 42, total 02) part 1');
+	ok(index(s3[1].pdu, '0500034202') >= 0, 'submit: same ref/total on part 2');
+})();
+
 done('test_sms_pdu');

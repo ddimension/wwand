@@ -4,9 +4,9 @@
 //
 // All three backends deliver stored messages as raw PDUs — QMI WMS RAW_READ,
 // MBIM SMS_READ, and AT+CMGF=0 CMGL/CMGR — so this ONE decoder serves them all.
-// Decode-only (receive); there is no SMS-SUBMIT encoder because sending is out
-// of scope. Everything here is pure (no I/O) and host-testable with known TPDU
-// hex vectors (tests/test_sms_pdu.uc).
+// encode_submit() is the send counterpart (SMS-SUBMIT, GSM7/UCS2, concatenated).
+// Everything here is pure (no I/O) and host-testable with known TPDU hex vectors
+// (tests/test_sms_pdu.uc).
 //
 // decode_deliver(pdu_hex) -> {
 //   smsc, sender, sender_type, timestamp, encoding ('gsm7'|'8bit'|'ucs2'),
@@ -330,6 +330,183 @@ export function reassemble(msgs)
 			indexes: indexes,
 			incomplete: have < g.total,
 		});
+	}
+
+	return out;
+};
+
+// --- SMS-SUBMIT encoder (sending) --------------------------------------------
+// Builds SMS-SUBMIT TPDUs for sms.uc's send path. GSM7 when the whole text maps
+// to the default alphabet (incl. the extension table), else UCS2 (UTF-16BE).
+// Long text is segmented with an 8-bit concatenation UDH. All pure; wire format
+// verified vs GSM 03.40 and round-trips through decode_deliver in the tests.
+
+// reverse GSM 03.38 map, built once (code point -> [septet] or [0x1b, ext]).
+let GSM7_REV = null;
+
+function gsm7_rev()
+{
+	if (GSM7_REV != null)
+		return GSM7_REV;
+
+	GSM7_REV = {};
+
+	for (let i = 0; i < length(GSM7); i++)
+		GSM7_REV[sprintf('%d', GSM7[i])] = [ i ];
+
+	for (let k, v in GSM7_EXT)
+		GSM7_REV[sprintf('%d', v)] = [ 0x1b, +k ];
+
+	return GSM7_REV;
+}
+
+// decode a UTF-8 string to an array of Unicode code points.
+function utf8_cps(s)
+{
+	let cps = [], i = 0, n = length(s ?? '');
+
+	while (i < n) {
+		let c = ord(s, i);
+
+		if (c < 0x80) { push(cps, c); i += 1; }
+		else if (c < 0xE0) { push(cps, ((c & 0x1f) << 6) | (ord(s, i+1) & 0x3f)); i += 2; }
+		else if (c < 0xF0) { push(cps, ((c & 0x0f) << 12) | ((ord(s, i+1) & 0x3f) << 6) | (ord(s, i+2) & 0x3f)); i += 3; }
+		else { push(cps, ((c & 0x07) << 18) | ((ord(s, i+1) & 0x3f) << 12) | ((ord(s, i+2) & 0x3f) << 6) | (ord(s, i+3) & 0x3f)); i += 4; }
+	}
+
+	return cps;
+}
+
+// map code points to GSM7 septets, or null if any char is outside the alphabet.
+function to_septets(cps)
+{
+	let rev = gsm7_rev();
+	let sep = [];
+
+	for (let cp in cps) {
+		let m = rev[sprintf('%d', cp)];
+
+		if (!m)
+			return null;
+
+		for (let s in m)
+			push(sep, s);
+	}
+
+	return sep;
+}
+
+let hx = (a) => { let s = ''; for (let o in a) s += sprintf('%02X', o & 0xff); return s; };
+
+// pack septets LSB-first into octets (optionally UDH-aligned by `skip` bits).
+function pack7(sep, fill_bits)
+{
+	let out = [], carry = 0, bits = 0;
+
+	// leading fill bits so the first septet starts on a 7-bit boundary after UDH
+	if (fill_bits) { bits = fill_bits; }
+
+	for (let s in sep) {
+		carry |= (s << bits);
+		bits += 7;
+
+		while (bits >= 8) {
+			push(out, carry & 0xff);
+			carry >>= 8;
+			bits -= 8;
+		}
+	}
+
+	if (bits > 0)
+		push(out, carry & 0xff);
+
+	return out;
+}
+
+// encode a destination address into DA octets: [ ndigits, toa, ...semi-octets ].
+function encode_address(number)
+{
+	let intl = (substr(number, 0, 1) == '+');
+	let digits = replace(number, /[^0-9]/g, '');
+	let toa = intl ? 0x91 : 0x81;   // 0x91 international/ISDN, 0x81 unknown/ISDN
+	let out = [ length(digits), toa ];
+
+	for (let i = 0; i < length(digits); i += 2) {
+		let lo = ord(digits, i) - 48;
+		let hi = (i + 1 < length(digits)) ? (ord(digits, i + 1) - 48) : 0x0f;
+		push(out, (hi << 4) | lo);
+	}
+
+	return out;
+}
+
+// encode_submit(number, text, opts?) -> [ { pdu, tpdu_len }, ... ]
+//   pdu: hex string with a 00 SMSC prefix (AT+CMGS wants tpdu_len = octet count
+//        AFTER the SMSC byte; QMI/MBIM take the same PDU). One entry per segment.
+//   opts.ref: 8-bit concatenation reference (default derived by the caller).
+export function encode_submit(number, text, opts)
+{
+	let da = encode_address(number);
+	let ref = (opts?.ref ?? 0) & 0xff;
+	let cps = utf8_cps(text ?? '');
+	let sep = to_septets(cps);
+	let gsm7 = (sep != null);
+	let dcs = gsm7 ? 0x00 : 0x08;
+
+	// segment limits: single 160 GSM7 septets / 70 UCS2 chars; concatenated
+	// 153 septets / 67 chars (6-byte UDH eats one septet-boundary block).
+	let segs = [];
+
+	if (gsm7) {
+		if (length(sep) <= 160)
+			segs = [ sep ];
+		else
+			for (let i = 0; i < length(sep); i += 153)
+				push(segs, slice(sep, i, i + 153));
+	}
+	else {
+		if (length(cps) <= 70)
+			segs = [ cps ];
+		else
+			for (let i = 0; i < length(cps); i += 67)
+				push(segs, slice(cps, i, i + 67));
+	}
+
+	let total = length(segs);
+	let out = [];
+
+	for (let n = 0; n < total; n++) {
+		let concat = (total > 1);
+		// first octet: SMS-SUBMIT (0x01) | VPF relative (0x10) | UDHI when concat
+		let fo = 0x11 | (concat ? 0x40 : 0);
+		let tp = [ fo, 0x00 ];   // + MR 00
+
+		for (let o in da) push(tp, o);
+		push(tp, 0x00);          // TP-PID
+		push(tp, dcs);           // TP-DCS
+		push(tp, 0xAA);          // TP-VP relative = 4 days
+
+		let udh = concat ? [ 0x05, 0x00, 0x03, ref, total, n + 1 ] : [];
+
+		if (gsm7) {
+			let seg = segs[n];
+			// UDL counts septets incl. the UDH's septet-equivalent padding
+			let udhl_septets = concat ? int((length(udh) * 8 + 6) / 7) : 0;
+			let fill = concat ? (7 - ((length(udh) * 8) % 7)) % 7 : 0;
+			push(tp, length(seg) + udhl_septets);   // TP-UDL (septets)
+			for (let o in udh) push(tp, o);
+			for (let o in pack7(seg, fill)) push(tp, o);
+		}
+		else {
+			let seg = segs[n];
+			let body = [];
+			for (let cp in seg) { push(body, (cp >> 8) & 0xff); push(body, cp & 0xff); }
+			push(tp, length(udh) + length(body));    // TP-UDL (octets)
+			for (let o in udh) push(tp, o);
+			for (let o in body) push(tp, o);
+		}
+
+		out[n] = { pdu: '00' + hx(tp), tpdu_len: length(tp), encoding: gsm7 ? 'gsm7' : 'ucs2' };
 	}
 
 	return out;
