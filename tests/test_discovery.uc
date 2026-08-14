@@ -487,4 +487,46 @@ uloop.run();
 		'wwan: a different path does not match');
 })();
 
+// MBIM-only MHI modem (HW-reported: RM520N on PCIe exposes wwan0at0 +
+// wwan0mbim0 + wwan0qcdm0, NO wwan0qmi0). protocol_of must read the port type,
+// not the mhi-pci-generic driver — otherwise it falls through to the qmi
+// default and the daemon runs QMI CTL SYNC against an MBIM port (sync timeout
+// -> device_claim_failed).
+(function() {
+	const MHI_DEV = '/sys/devices/platform/soc@0/1c08000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/mhi0';
+
+	let fx = {
+		glob: (p) => (p == '/sys/class/wwan/*')
+			? [ '/sys/class/wwan/wwan0at0', '/sys/class/wwan/wwan0mbim0', '/sys/class/wwan/wwan0qcdm0' ]
+			: [],
+		read: (p) => ({
+			'/sys/class/wwan/wwan0at0/type':   'AT\n',
+			'/sys/class/wwan/wwan0mbim0/type': 'MBIM\n',
+			'/sys/class/wwan/wwan0qcdm0/type': 'QCDM\n',
+		})[p],
+		realpath: (p) => (p == '/sys/class/wwan/wwan0mbim0/device') ? MHI_DEV : null,
+		readlink: (p) => null,
+		lsdir: (p) => null,
+		access: (p) => false,
+	};
+
+	// the exact call resolve_control makes on the resolved control node:
+	eq(discovery.protocol_of('/dev/wwan0mbim0', fx), 'mbim',
+		'wwan mbim-only: MHI node resolves to mbim (not the qmi default)');
+	eq(discovery.protocol_of('/dev/wwan0qcdm0', fx), null,
+		'wwan: a QCDM port is not a control protocol');
+
+	let pres = discovery.list_present(fx);
+	eq(length(pres), 1, 'wwan mbim-only: only the MBIM control port is a modem');
+	eq(pres[0], { kind: 'wwan', device: '/dev/wwan0mbim0', protocol: 'mbim',
+	              path: 'platform/soc@0/1c08000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/mhi0',
+	              serial: null }, 'wwan mbim-only: MBIM device + protocol');
+})();
+
+// a cdc-wdm node still classifies by its bound driver (the wwan branch must not
+// hijack non-wwan device names)
+eq(discovery.protocol_of('/dev/cdc-wdm0', {
+	readlink: (p) => (p == '/sys/class/usbmisc/cdc-wdm0/device/driver') ? '/x/cdc_mbim' : null,
+}), 'mbim', 'cdc-wdm still classified by driver (not affected by the wwan branch)');
+
 done('test_discovery');

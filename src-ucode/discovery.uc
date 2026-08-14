@@ -64,9 +64,34 @@ export function driver_of(cdc_name, fx)
 	return drv ? basename(drv) : null;
 };
 
-// control protocol implied by a cdc-wdm's bound driver, or null if unknown
+// map a kernel wwan-framework control port (wwan0qmi0 / wwan0mbim0) to its
+// control protocol via /sys/class/wwan/<name>/type. 'qmi' | 'mbim' | null.
+function wwan_port_protocol(name, fx)
+{
+	let type = uc(trim(sprintf('%s', fx.read(sprintf('/sys/class/wwan/%s/type', name)) ?? '')));
+
+	return (type == 'QMI') ? 'qmi' : (type == 'MBIM') ? 'mbim' : null;
+}
+
+// control protocol of a modem control DEVICE, or null if unknown.
 export function protocol_of(device, fx)
 {
+	fx = fx ?? default_fx();
+
+	// kernel wwan-framework control node (PCIe/MHI, some USB): the bound driver
+	// is mhi-pci-generic / wwan, NOT qmi_wwan/cdc_mbim, so the protocol lives in
+	// the port type file, not the driver. (Without this an MBIM-only MHI modem
+	// like the RM520N on PCIe wrongly falls through to the qmi default and the
+	// daemon runs QMI CTL SYNC against an MBIM port -> sync timeout.)
+	let base = basename(sprintf('%s', device ?? ''));
+
+	if (substr(base, 0, 4) == 'wwan') {
+		let p = wwan_port_protocol(base, fx);
+
+		if (p)
+			return p;
+	}
+
 	let drv = driver_of(device, fx);
 
 	if (drv == 'qmi_wwan')
@@ -250,8 +275,7 @@ function wwan_control_ports(fx)
 
 	for (let path in (fx.glob('/sys/class/wwan/*') ?? [])) {
 		let name = basename(path);
-		let type = uc(trim(sprintf('%s', fx.read(sprintf('/sys/class/wwan/%s/type', name)) ?? '')));
-		let proto = (type == 'QMI') ? 'qmi' : (type == 'MBIM') ? 'mbim' : null;
+		let proto = wwan_port_protocol(name, fx);
 
 		if (proto)
 			push(out, { name: name, protocol: proto });

@@ -3,6 +3,21 @@
 _Last updated: 2026-08-12. All test suites green (42 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## MHI/PCIe: MBIM-only modem misdetected as QMI (2026-08-14, HW-found)
+
+Forum tester (LS3434) ran wwand on a PCIe/MHI RM520N: `device_claim_failed`,
+`failed in sync: { "error": "timeout" }`, recovery ladder climbing. The modem
+exposes `wwan0at0` / `wwan0mbim0` / `wwan0qcdm0` over MHI — **no `wwan0qmi0`**.
+Root cause: `discovery.protocol_of()` classified the control device only by its
+bound driver (`qmi_wwan`/`cdc_mbim`), but an MHI control node's driver is
+`mhi-pci-generic`, so it returned null → `resolve_control` fell through to the
+`'qmi'` default → the daemon ran QMI CTL SYNC against an MBIM-only port → sync
+timeout. Fix: `protocol_of` now reads the kernel wwan port `type` file
+(`/sys/class/wwan/<port>/type` → QMI/MBIM) for any `/dev/wwan*` control node
+before falling back to the driver; the type→proto mapping is shared with
+`wwan_control_ports`. Regression test in test_discovery (MBIM-only MHI). NOTE:
+an MBIM MHI modem needs the **wwand-mbim** package installed.
+
 ## SMS send + parity finishers + CLI --json (2026-08-13)
 
 - **SMS send** (the receive-only gap): `sms_pdu.encode_submit` (SMS-SUBMIT
