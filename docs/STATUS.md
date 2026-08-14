@@ -18,6 +18,17 @@ before falling back to the driver; the type→proto mapping is shared with
 `wwan_control_ports`. Regression test in test_discovery (MBIM-only MHI). NOTE:
 an MBIM MHI modem needs the **wwand-mbim** package installed.
 
+Follow-up (same tester, T99W175/DELL X55 on a BPI-R4): with the protocol fixed
+the modem reached READY/registered but the interface still got
+`DEVICE_CLAIM_FAILED` — `netdev_for_device()` only searched the USB cdc-wdm
+sysfs (`/sys/class/usbmisc/<n>/device/net`), so the MHI data netdev was never
+found (`status.netdev = null`) and netifd had no L3 device to claim. HW sysfs:
+the data netdev `wwan0` (POINTOPOINT/NOARP raw-IP MBIM channel) and the control
+port `wwan0mbim0` both resolve to the same `.../mhiN/wwan/wwan0` device dir.
+Fix: `netdev_for_device` now, for a `/dev/wwan*` control node, matches the
+netdev whose `device` path equals the control port's. Regression test with the
+confirmed layout.
+
 ## SMS send + parity finishers + CLI --json (2026-08-13)
 
 - **SMS send** (the receive-only gap): `sms_pdu.encode_submit` (SMS-SUBMIT

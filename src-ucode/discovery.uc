@@ -146,9 +146,32 @@ export function netdev_for_device(device, fx)
 	fx = fx ?? default_fx();
 
 	let name = basename(device);
+
+	// USB cdc-wdm: the datapath netdev is a sibling under the same USB interface
 	let nets = fx.lsdir(sprintf('/sys/class/usbmisc/%s/device/net', name));
 
-	return length(nets ?? []) ? nets[0] : null;
+	if (length(nets ?? []))
+		return nets[0];
+
+	// kernel wwan-framework control node (PCIe/MHI): the data netdev sits under
+	// the SAME wwan device as the control port — e.g. wwan0mbim0 and the wwan0
+	// netdev both resolve to .../mhiN/wwan/wwan0. Match the netdev whose device
+	// path equals the control port's. (HW-confirmed on a T99W175/DELL X55 on
+	// mhi-pci-generic: without this the MBIM datapath had no netdev and netifd
+	// failed to claim the interface -> DEVICE_CLAIM_FAILED.)
+	if (substr(name, 0, 4) == 'wwan') {
+		let devdir = fx.realpath(sprintf('/sys/class/wwan/%s/device', name));
+
+		if (devdir)
+			for (let path in (fx.glob('/sys/class/net/*') ?? [])) {
+				let nd = basename(path);
+
+				if (fx.realpath(sprintf('/sys/class/net/%s/device', nd)) == devdir)
+					return nd;
+			}
+	}
+
+	return null;
 };
 
 // 'wwan0' -> '/dev/cdc-wdm0'

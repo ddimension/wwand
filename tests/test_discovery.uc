@@ -523,6 +523,29 @@ uloop.run();
 	              serial: null }, 'wwan mbim-only: MBIM device + protocol');
 })();
 
+// MHI data netdev resolution (HW-confirmed T99W175/DELL X55 layout: the wwan0
+// netdev and the wwan0mbim0 control port share the .../mhiN/wwan/wwan0 device
+// dir). Without this the MBIM context had no netdev -> DEVICE_CLAIM_FAILED.
+(function() {
+	const DEVDIR = '/sys/devices/platform/soc/11280000.pcie/pci0003:00/0003:00:00.0/0003:01:00.0/mhi0/wwan/wwan0';
+
+	let fx = {
+		lsdir: (p) => null,   // not a USB cdc-wdm
+		glob: (p) => (p == '/sys/class/net/*')
+			? [ '/sys/class/net/eth0', '/sys/class/net/wwan0', '/sys/class/net/br-lan' ] : [],
+		realpath: (p) => ({
+			'/sys/class/wwan/wwan0mbim0/device': DEVDIR,
+			'/sys/class/net/wwan0/device':       DEVDIR,
+			'/sys/class/net/eth0/device':        '/sys/devices/platform/soc/15100000.ethernet',
+		})[p],
+	};
+
+	eq(discovery.netdev_for_device('/dev/wwan0mbim0', fx), 'wwan0',
+		'wwan: MHI data netdev found via the shared wwan device dir');
+	eq(discovery.resolve_netdev({}, '/dev/wwan0mbim0', fx), 'wwan0',
+		'wwan: resolve_netdev returns the MHI data netdev');
+})();
+
 // a cdc-wdm node still classifies by its bound driver (the wwan branch must not
 // hijack non-wwan device names)
 eq(discovery.protocol_of('/dev/cdc-wdm0', {
