@@ -119,7 +119,7 @@ let daemon = daemon_mod.create({
 		kick_interface: (iface) => push(events, { type: 'kick', data: iface }),
 		renew_interface: (iface) => push(events, { type: 'renew', data: iface }),
 		down_interface: (iface) => push(events, { type: 'down', data: iface }),
-		iface_status: (iface) => ({ up: iface_up }),   // false -> kick, true -> adopt
+		iface_status: (iface, cb) => cb({ up: iface_up }),   // async: false -> kick, true -> adopt
 		datapath_fx: dpfx,
 		// context_up re-reads config from disk on every up: return a version
 		// with a changed apn so the refresh path is exercised

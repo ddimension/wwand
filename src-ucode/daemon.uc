@@ -143,44 +143,53 @@ export function create(opts)
 			    !entry.ctx || entry.ctx.state != 'IDLE' || !entry.wanted)
 				continue;
 
-			let st = deps.iface_status ? deps.iface_status(entry.cfg.interface) : null;
+			// capture per iteration: the netifd status probe is async, so the
+			// adopt-vs-kick decision runs later in the callback.
+			let cname = name, centry = entry;
 
-			if (st?.up) {
-				log('info', sprintf('adopting live interface %s after modem ready', entry.cfg.interface));
-				retry_activate(name);
-			}
-			else if ((entry.cfg.auto ?? true) && deps.kick_interface) {
-				// IDLE context while netifd holds the interface 'pending' = an
-				// ORPHANED setup (e.g. a wwand restart mid-setup). 'up' no-ops on a
-				// pending interface, so 'down' first, then the kick re-runs setup.
-				if (st?.pending && deps.down_interface) {
-					log('info', sprintf('interface %s stuck pending, resetting before setup', entry.cfg.interface));
-					// mark the down as our own so context_down doesn't read it as
-					// operator intent (clearing `wanted`) or kill the activation below
-					entry._reset_pending = true;
-					deps.down_interface(entry.cfg.interface);
+			let decide = (st) => {
+				if (st?.up) {
+					log('info', sprintf('adopting live interface %s after modem ready', centry.cfg.interface));
+					retry_activate(cname);
 				}
+				else if ((centry.cfg.auto ?? true) && deps.kick_interface) {
+					// IDLE context while netifd holds the interface 'pending' = an
+					// ORPHANED setup (e.g. a wwand restart mid-setup). 'up' no-ops on a
+					// pending interface, so 'down' first, then the kick re-runs setup.
+					if (st?.pending && deps.down_interface) {
+						log('info', sprintf('interface %s stuck pending, resetting before setup', centry.cfg.interface));
+						// mark the down as our own so context_down doesn't read it as
+						// operator intent (clearing `wanted`) or kill the activation below
+						centry._reset_pending = true;
+						deps.down_interface(centry.cfg.interface);
+					}
 
-				// cdc_mbim/cdc_ncm: the data link's carrier follows the session,
-				// and netifd won't run proto setup until the link is up — so connect
-				// first, then kick (the 'up' event kicks once connected via
-				// _kick_after_connect). QMI's mux link is stable, so kick it directly.
-				let cf_proto = self.modems[modem.id]?.protocol;
+					// cdc_mbim/cdc_ncm: the data link's carrier follows the session,
+					// and netifd won't run proto setup until the link is up — so connect
+					// first, then kick (the 'up' event kicks once connected via
+					// _kick_after_connect). QMI's mux link is stable, so kick it directly.
+					let cf_proto = self.modems[modem.id]?.protocol;
 
-				if (cf_proto == 'mbim' || cf_proto == 'ncm') {
-					log('info', sprintf('connecting %s first (%s), then netifd', entry.cfg.interface, cf_proto));
-					entry._kick_after_connect = true;
-					retry_activate(name);
+					if (cf_proto == 'mbim' || cf_proto == 'ncm') {
+						log('info', sprintf('connecting %s first (%s), then netifd', centry.cfg.interface, cf_proto));
+						centry._kick_after_connect = true;
+						retry_activate(cname);
+					}
+					else {
+						log('info', sprintf('kicking interface %s after modem ready', centry.cfg.interface));
+						deps.kick_interface(centry.cfg.interface);
+					}
 				}
 				else {
-					log('info', sprintf('kicking interface %s after modem ready', entry.cfg.interface));
-					deps.kick_interface(entry.cfg.interface);
+					// 'auto 0' and not up: leave it dormant until an explicit ifup
+					log('debug', sprintf('interface %s is down and auto=0, not kicking', centry.cfg.interface));
 				}
-			}
-			else {
-				// 'auto 0' and not up: leave it dormant until an explicit ifup
-				log('debug', sprintf('interface %s is down and auto=0, not kicking', entry.cfg.interface));
-			}
+			};
+
+			if (deps.iface_status)
+				deps.iface_status(centry.cfg.interface, decide);
+			else
+				decide(null);
 		}
 	};
 

@@ -3,6 +3,26 @@
 _Last updated: 2026-08-12. All test suites green (42 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## Never block the uloop: async netifd calls + native recv/waitpid timeouts (2026-08-14)
+
+Symptom (HW, Cudy during an operator scan): `ubus call wwand status` hangs
+while wwand is busy. Root cause: the single uloop was blocked in a synchronous
+syscall, so the daemon couldn't answer its own ubus. Fixes (no fork/thread —
+the design is single-loop non-blocking):
+- **netifd calls** used ucode's synchronous `conn.call()`, which blocks the
+  loop until netifd replies (up to its 30s timeout); during a scan the flapping
+  registration fires renew/down/kick and each froze the daemon. Switched to
+  `conn.defer(obj, method, data, cb)` (uloop-integrated async): up/renew/down/
+  reload are fire-and-forget (cb logs a non-zero status); `iface_status`
+  (adopt-vs-kick in modem_ready) is now `(iface, cb)` and the decision runs in
+  the callback. The runtime keeps the deferred alive until completion, so the
+  handle need not be retained.
+- **wwand-io.c**: `nl_recv` sets `SO_RCVTIMEO` (2s) so a wedged rmnet/driver
+  datapath op can't block forever; `qmit_close` reaps the spawn child with
+  `WNOHANG` only (a lingering lpac no longer blocks close() — uloop's SIGCHLD
+  reaper collects it, the __EXIT marker carries the real status).
+Optional follow-up: a procd/cron watchdog for pathological kernel-ioctl hangs.
+
 ## MHI/PCIe: MBIM-only modem misdetected as QMI (2026-08-14, HW-found)
 
 Forum tester (LS3434) ran wwand on a PCIe/MHI RM520N: `device_claim_failed`,

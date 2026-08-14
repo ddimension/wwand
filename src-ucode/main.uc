@@ -218,6 +218,17 @@ function run_daemon()
 	for (let w in parsed.warnings)
 		logmod.warning('config: %s', w);
 
+	// netifd ubus calls MUST be asynchronous: ucode's conn.call() blocks the
+	// single uloop until netifd replies (up to its 30s timeout), and while the
+	// daemon is parked in a call it cannot answer its own ubus (status) — the
+	// "no status during a network scan / reconnect" freeze. conn.defer() runs
+	// the call through uloop and fires cb(ret, reply) on completion; the runtime
+	// keeps the deferred alive until then, so the handle need not be retained.
+	let netifd_cb = (what) => (ret, reply) => {
+		if (ret != 0)
+			logmod.log('warn', 'netifd %s: ubus status %d', what, ret);
+	};
+
 	let daemon = daemon_mod.create({
 		// operational timing from global config (re-read live on reload)
 		timing: { hold_max_ms: (parsed.globals.hold_max ?? 90) * 1000 },
@@ -372,7 +383,7 @@ function run_daemon()
 				cursor.commit('network');
 				return true;
 			},
-			network_reload: () => conn.call('network', 'reload', {}),
+			network_reload: () => conn.defer('network', 'reload', {}, netifd_cb('reload')),
 			// apply operator-pushed NITZ time ONLY when the clock is clearly unset
 			// (RTC-less router before NTP), so we never fight sysntpd. Threshold: any
 			// clock before 2021 is unset. busybox date sets UTC; RTC left to the OS.
@@ -393,14 +404,16 @@ function run_daemon()
 			resolve_ep_type: (cfg, device, netdev) =>
 				netdev ? netlink.ep_type_number(netdev) : null,
 			kick_interface: (interface) =>
-				conn.call('network.interface', 'up', { interface: interface }),
+				conn.defer('network.interface', 'up', { interface: interface }, netifd_cb('up ' + interface)),
 			renew_interface: (interface) =>
-				conn.call('network.interface', 'renew', { interface: interface }),
+				conn.defer('network.interface', 'renew', { interface: interface }, netifd_cb('renew ' + interface)),
 			down_interface: (interface) =>
-				conn.call('network.interface', 'down', { interface: interface }),
-			// synchronous status probe used to decide adopt-in-place vs kick
-			iface_status: (interface) =>
-				conn.call('network.interface', 'status', { interface: interface }),
+				conn.defer('network.interface', 'down', { interface: interface }, netifd_cb('down ' + interface)),
+			// async status probe (adopt-in-place vs kick): cb(status|null). Must
+			// not block — see netifd_cb above.
+			iface_status: (interface, cb) =>
+				conn.defer('network.interface', 'status', { interface: interface },
+					(ret, reply) => cb(ret == 0 ? reply : null)),
 		},
 	});
 

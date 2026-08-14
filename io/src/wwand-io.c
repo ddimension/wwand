@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -459,20 +460,21 @@ qmit_close(uc_vm_t *vm, size_t nargs)
 			t->wfd = -1;
 		}
 
-		/* spawn: reap the child and hand back its exit status */
+		/* spawn: reap the child WITHOUT blocking. close() runs on the single
+		 * uloop; a blocking waitpid() would freeze the daemon (no status, no
+		 * events) if the child closed stdout but lingers. WNOHANG only: if the
+		 * child hasn't exited yet, uloop's SIGCHLD handler reaps it later
+		 * (waitpid(-1)), so no zombie. The status is then UNKNOWN (also when
+		 * that reaper already collected it, ECHILD) -> return null; callers
+		 * needing the real code carry it in-band (esim_bridge's __EXIT marker). */
 		if (t->pid > 0) {
 			pid_t r;
 
-			while ((r = waitpid(t->pid, &status, 0)) < 0 && errno == EINTR)
+			while ((r = waitpid(t->pid, &status, WNOHANG)) < 0 && errno == EINTR)
 				;
 			t->pid = -1;
 
-			/* uloop's SIGCHLD handler reaps ALL children (waitpid(-1) in
-			 * libubox) — when it won the race the status is UNKNOWN, not 0.
-			 * Return null so the caller never mistakes a failed child for
-			 * exit 0; callers needing the real status must carry it in-band
-			 * (esim_bridge appends an __EXIT marker to stdout). */
-			if (r < 0)
+			if (r <= 0)
 				return NULL;
 
 			return ucv_int64_new(WIFEXITED(status) ? WEXITSTATUS(status) : -1);
@@ -589,11 +591,18 @@ nla_put(struct nlmsghdr *nlh, size_t maxlen, unsigned short type,
 }
 
 /* recv a netlink reply, retrying on EINTR (plain recv() here would miss the
- * ACK on a signal and the caller would misreport the operation) */
+ * ACK on a signal and the caller would misreport the operation). A receive
+ * timeout guards the single-threaded uloop: the kernel answers these requests
+ * synchronously, but a driver/rmnet in a bad state could otherwise leave the
+ * daemon blocked in recv() forever (no status, no events). On timeout recv
+ * returns EAGAIN and the caller sees a short read -> clean failure. */
 static ssize_t
 nl_recv(int fd, void *buf, size_t len)
 {
+	struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
 	ssize_t r;
+
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 	do {
 		r = recv(fd, buf, len, 0);
