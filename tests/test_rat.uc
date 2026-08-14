@@ -69,6 +69,21 @@ eq(rat.from_mbim(0, 0), null, 'mbim none -> null');
 // highest class wins: LTE + 5G_SA -> 5G_SA
 eq(rat.from_mbim((1 << 5) | (1 << 7), 0), { rat: 'nr5g', mode: 'sa', ntn: false, src: 'mbim' }, 'mbim LTE+5G_SA -> nr5g sa');
 
+// --- families_from_mbim() (caps.rats base) -----------------------------------
+
+eq(rat.families_from_mbim((1 << 2) | (1 << 5), null), ['umts', 'lte'], 'mbim caps UMTS+LTE');
+eq(rat.families_from_mbim((1 << 5) | (1 << 7), null), ['lte', 'nr5g'], 'mbim caps LTE+5G_SA');
+eq(rat.families_from_mbim(0, null), [], 'mbim caps none -> empty');
+// RM520N: base bits = CUSTOM|UMTS|HSDPA|HSUPA|LTE (no 5G bit), custom = "5G/TDS"
+eq(rat.families_from_mbim(0x8000003C, '5G/TDS'), ['umts', 'lte', 'nr5g'], 'mbim caps CUSTOM 5G/TDS -> +nr5g');
+// CUSTOM bit but no/empty string -> base bits only (no phantom 5G)
+eq(rat.families_from_mbim(0x8000003C, ''), ['umts', 'lte'], 'mbim caps CUSTOM empty string -> base only');
+eq(rat.families_from_mbim(0x8000003C, null), ['umts', 'lte'], 'mbim caps CUSTOM null string -> base only');
+// custom string can add classes the base bits omit entirely
+eq(rat.families_from_mbim(0x80000020, '5G'), ['lte', 'nr5g'], 'mbim caps CUSTOM|LTE + "5G" -> lte,nr5g');
+// custom string ignored when CUSTOM bit not set
+eq(rat.families_from_mbim(1 << 5, '5G'), ['lte'], 'mbim caps no-CUSTOM ignores custom string');
+
 // --- from_at_cops_act() (3GPP TS 27.007 <AcT>) -------------------------------
 
 eq(rat.from_at_cops_act(0), { rat: 'gsm', mode: null, ntn: false, src: 'at' }, 'AcT 0 -> gsm');

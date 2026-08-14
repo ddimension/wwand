@@ -544,7 +544,8 @@ export function collect_caps(self, cb)
 	let mode_caps = null;
 
 	if (self.info?.mbim_data_class != null) {
-		mode_caps = ratmod.families_from_mbim(self.info.mbim_data_class);
+		mode_caps = ratmod.families_from_mbim(self.info.mbim_data_class,
+			self.info.mbim_custom_data_class);
 	}
 	else {
 		let cap_ifs = self.info?.capabilities?.radio_ifs;

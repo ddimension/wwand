@@ -161,6 +161,9 @@ const MB_HSUPA = 1 << 4;
 const MB_LTE   = 1 << 5;
 const MB_5G_NSA = 1 << 6;
 const MB_5G_SA  = 1 << 7;
+// CUSTOM: the base bitmask cannot express this modem's classes; the real list
+// is carried in the free-text custom_data_class string (see custom_families).
+const MB_CUSTOM = 1 << 31;
 
 export function from_mbim(dataclass, subclass)
 {
@@ -177,10 +180,36 @@ export function from_mbim(dataclass, subclass)
 	return null;
 };
 
+// parse the free-text custom_data_class string (present when the CUSTOM bit is
+// set) into RAT-family slugs. Modems that under-report in the base bitmask list
+// their real classes here, slash/comma/space separated, e.g. "5G/TDS" (Quectel
+// RM520N = 5G + TD-SCDMA) or "5G". Token match is substring, case-insensitive.
+function custom_families(custom, add)
+{
+	let s = uc(sprintf('%s', custom ?? ''));
+
+	if (s == '')
+		return;
+
+	// order coarse->fine so e.g. "TDS"/"TDSCDMA"/"WCDMA" all fold to umts
+	if (index(s, 'GSM') >= 0 || index(s, 'GPRS') >= 0 || index(s, 'EDGE') >= 0)
+		add('gsm');
+	if (index(s, 'WCDMA') >= 0 || index(s, 'UMTS') >= 0 || index(s, 'HSPA') >= 0 ||
+	    index(s, 'TDS') >= 0 || index(s, 'TD-SCDMA') >= 0)
+		add('umts');
+	if (index(s, 'LTE') >= 0)
+		add('lte');
+	// "5G" or "NR" (avoid matching inside other words — these are standalone tokens)
+	if (index(s, '5G') >= 0 || index(s, 'NR') >= 0)
+		add('nr5g');
+}
+
 // decompose an MBIM DEVICE_CAPS data_class bitmask into the supported RAT
 // families (caps.rats) — the native, passthrough-free base for a 5G MBIM modem
-// currently camped on LTE. Ascending gsm..nr5g.
-export function families_from_mbim(dataclass)
+// currently camped on LTE. When the CUSTOM bit is set the base bits may omit
+// classes (5G on the RM520N); the custom_data_class string fills them in.
+// Ascending gsm..nr5g.
+export function families_from_mbim(dataclass, custom)
 {
 	let c = (type(dataclass) == 'int') ? dataclass : 0;
 	let out = [];
@@ -191,7 +220,12 @@ export function families_from_mbim(dataclass)
 	if (c & MB_LTE)                          add('lte');
 	if (c & (MB_5G_NSA | MB_5G_SA))          add('nr5g');
 
-	return out;
+	if (c & MB_CUSTOM)
+		custom_families(custom, add);
+
+	// keep ascending family order regardless of which source added each
+	let rank = { gsm: 0, umts: 1, lte: 2, nr5g: 3 };
+	return sort(out, (a, b) => (rank[a] ?? 9) - (rank[b] ?? 9));
 };
 
 // the current RAT from the resolved data-system mode (dsd_status.mode), which

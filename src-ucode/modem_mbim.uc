@@ -247,8 +247,12 @@ export function create(opts)
 				self.info.device_id = data.device_id;   // IMEI
 				self.info.imei = data.device_id;
 				self.info.max_sessions = data.max_sessions;
-				// supported-RAT bitmask -> caps.rats natively (no passthrough/AT)
+				// supported-RAT bitmask -> caps.rats natively (no passthrough/AT).
+				// Some modems (Quectel RM520N) leave the 5G bits unset and instead
+				// set the CUSTOM bit, describing the extra classes in the free-text
+				// custom_data_class string ("5G/TDS") — kept so caps can read it.
 				self.info.mbim_data_class = data.data_class;
+				self.info.mbim_custom_data_class = data.custom_data_class;
 			}
 
 			self.mbim.command(bc, 'SUBSCRIBER_READY_STATUS', 'query', {}, (e2, d2) => {
