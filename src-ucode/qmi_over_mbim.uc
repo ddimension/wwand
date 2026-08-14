@@ -37,6 +37,17 @@ export function create(mc, opts)
 
 		let client = self.clients[dec.service * 256 + dec.cid];
 
+		// broadcast indications (e.g. NAS) arrive on cid 0xff — fan them out to
+		// every client of that service, exactly like the native hub (transport.uc).
+		// Without this, subscribed NAS indications delivered on 0xff are dropped.
+		if (!client && dec.kind == 'indication' && dec.cid == 0xff) {
+			for (let key, c in self.clients)
+				if (c.service == dec.service)
+					c.dispatch(dec);
+
+			return;
+		}
+
 		if (client)
 			client.dispatch(dec);
 	};
@@ -102,7 +113,12 @@ export function create(mc, opts)
 	};
 
 	// unsolicited QMI indications arrive as MBIM INDICATE_STATUS on the QMI CID;
-	// the passthrough info is the raw QMUX indication frame (2nd on() arg = msg)
+	// the passthrough info is the raw QMUX indication frame (2nd on() arg = msg).
+	// NOTE (HW finding 2026-08): the EG06 and RM520N accept NAS REGISTER_INDICATIONS
+	// over the passthrough but never actually push indications this way — the
+	// passthrough is request/response only, so MBIM telemetry stays poll-based.
+	// This path is kept correct (0xff broadcast fan-out in deliver) for any
+	// firmware that does forward them.
 	mc.on(qmi_pt, 'QMI_MSG', (data, msg) => deliver(msg.info));
 
 	return self;

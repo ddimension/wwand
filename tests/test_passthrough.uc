@@ -79,4 +79,49 @@ ok(sent, 'never-SYNC: send() still returns true (request handled, not queued)');
 rail.send(qmux.encode(0, 0, 8, 0x0022, '', 'request'));
 eq(wire_calls, 1, 'never-SYNC: other CTL frames still reach the wire');
 
+// --- broadcast (0xff) indication fan-out ------------------------------------
+// NAS broadcast indications arrive on cid 0xff and must be fanned out to every
+// client of that service, exactly like the native transport hub. Regression
+// guard: the passthrough deliver() diverged and dropped them before this fix.
+import * as nasmod from 'wwand/codec/schema/nas.uc';
+
+let nas = nasmod.default;
+let ind_cb = null;
+let bcast_mc = {
+	command_raw: function() {},
+	on: function(schema, name, cb) { ind_cb = cb; },
+};
+let bshim = qom.create(bcast_mc);
+
+// two NAS clients on distinct cids, each with a serving-system handler
+let hits = {};
+let n5 = client_mod.create(bshim, nas, 5, {});
+let n6 = client_mod.create(bshim, nas, 6, {});
+n5.on('SERVING_SYSTEM_IND', () => hits['5'] = (hits['5'] ?? 0) + 1);
+n6.on('SERVING_SYSTEM_IND', () => hits['6'] = (hits['6'] ?? 0) + 1);
+
+// a DMS client of a different service must NOT receive the NAS broadcast
+let dms_hit = 0;
+let d7 = client_mod.create(bshim, dms, 7, {});
+d7.on('EVENT_REPORT', () => dms_hit++);
+
+// simulate the modem pushing a broadcast SERVING_SYSTEM_IND on cid 0xff
+let ss_tlv = tlv.pack(nas.messages.SERVING_SYSTEM_IND.ind, {
+	serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+	                  selected_network: 1, radio_ifs: [8] },
+});
+let bcast = qmux.encode(nas.service, 0xff, 0, 0x0024, ss_tlv, 'indication');
+ind_cb(null, { info: bcast });
+
+eq(hits['5'], 1, 'broadcast 0xff: fanned out to NAS client cid 5');
+eq(hits['6'], 1, 'broadcast 0xff: fanned out to NAS client cid 6');
+eq(dms_hit, 0, 'broadcast 0xff: not delivered to a different service');
+
+// a targeted (non-0xff) indication still goes only to its own client
+delete hits['5']; delete hits['6'];
+let direct = qmux.encode(nas.service, 6, 0, 0x0024, ss_tlv, 'indication');
+ind_cb(null, { info: direct });
+eq(hits['6'], 1, 'targeted indication: delivered to the addressed client');
+eq(hits['5'], null, 'targeted indication: not fanned out to other clients');
+
 done('test_passthrough');
