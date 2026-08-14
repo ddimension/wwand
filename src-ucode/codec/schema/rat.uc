@@ -177,6 +177,37 @@ export function from_mbim(dataclass, subclass)
 	return null;
 };
 
+// decompose an MBIM DEVICE_CAPS data_class bitmask into the supported RAT
+// families (caps.rats) — the native, passthrough-free base for a 5G MBIM modem
+// currently camped on LTE. Ascending gsm..nr5g.
+export function families_from_mbim(dataclass)
+{
+	let c = (type(dataclass) == 'int') ? dataclass : 0;
+	let out = [];
+	let add = (s) => { if (index(out, s) < 0) push(out, s); };
+
+	if (c & (MB_GPRS | MB_EDGE))            add('gsm');
+	if (c & (MB_UMTS | MB_HSDPA | MB_HSUPA)) add('umts');
+	if (c & MB_LTE)                          add('lte');
+	if (c & (MB_5G_NSA | MB_5G_SA))          add('nr5g');
+
+	return out;
+};
+
+// the current RAT from the resolved data-system mode (dsd_status.mode), which
+// every backend fills via native MBIM / QMI(-passthrough) serving info — a
+// backend-neutral base when no finer AT (QNWINFO) source is available.
+export function from_dsd_mode(mode)
+{
+	switch (mode) {
+	case 'LTE': return mk('lte', null, false, 'dsd');
+	case 'NSA': return mk('nr5g', 'nsa', false, 'dsd');
+	case 'SA':  return mk('nr5g', 'sa', false, 'dsd');
+	}
+
+	return null;
+};
+
 // -- 3GPP TS 27.007 <AcT> (COPS / CxREG) -------------------------------------
 // 0 GSM · 1 GSM-Compact · 2 UTRAN · 3 GSM/EGPRS · 4 UTRAN-HSDPA · 5 UTRAN-HSUPA
 // · 6 UTRAN-HSPA · 7 E-UTRAN (LTE) · 8 EC-GSM-IoT · 9 E-UTRAN-NB-S1 (NB-IoT) ·

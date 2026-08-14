@@ -247,6 +247,11 @@ function assert_telemetry() {
 	eq(modem.dsd_status.mode, 'LTE', 'dsd_status: LTE-only class mask -> LTE');
 	eq(modem.dsd_status.source, 'mbim', 'dsd_status: sourced from native mbim');
 
+	// caps.rats derived natively from DEVICE_CAPS data_class (0x3f = GPRS..LTE),
+	// no passthrough/AT — and the current RAT from dsd_status even with no AT port
+	eq(modem.caps?.rats, [ 'gsm', 'lte', 'umts' ], 'caps: rats from native MBIM data_class (sorted)');
+	eq(modem.rat_label, 'LTE', 'rat: current RAT from dsd_status (no AT needed)');
+
 	// registration detail (slow tick; native register state)
 	ok(modem.reg_detail != null, 'reg_detail: populated via native backend');
 	eq(modem.reg_detail.source, 'mbim', 'reg_detail: source mbim');

@@ -247,6 +247,8 @@ export function create(opts)
 				self.info.device_id = data.device_id;   // IMEI
 				self.info.imei = data.device_id;
 				self.info.max_sessions = data.max_sessions;
+				// supported-RAT bitmask -> caps.rats natively (no passthrough/AT)
+				self.info.mbim_data_class = data.data_class;
 			}
 
 			self.mbim.command(bc, 'SUBSCRIBER_READY_STATUS', 'query', {}, (e2, d2) => {

@@ -537,18 +537,25 @@ export function collect_caps(self, cb)
 {
 	cb = cb ?? (() => null);
 
-	// authoritative supported-RAT families from the QMI DMS device capabilities
-	// (radio_ifs list), when the backend has them — the honest base for caps.rats
-	// on a 5G modem currently camped on LTE. DMS 5GNR=10 (not the NAS 12).
+	// authoritative supported-RAT families for caps.rats on a 5G modem currently
+	// camped on LTE. Source order native -> passthrough/QMI: the native MBIM
+	// DEVICE_CAPS data_class bitmask first (no passthrough/AT needed), else the
+	// QMI DMS device-capabilities radio_ifs list. DMS 5GNR=10 (not the NAS 12).
 	let mode_caps = null;
-	let cap_ifs = self.info?.capabilities?.radio_ifs;
 
-	if (type(cap_ifs) == 'array') {
-		mode_caps = [];
-		for (let r in cap_ifs) {
-			let o = ratmod.from_dms_radio_if(r);
-			if (o && index(mode_caps, o.rat) < 0)
-				push(mode_caps, o.rat);
+	if (self.info?.mbim_data_class != null) {
+		mode_caps = ratmod.families_from_mbim(self.info.mbim_data_class);
+	}
+	else {
+		let cap_ifs = self.info?.capabilities?.radio_ifs;
+
+		if (type(cap_ifs) == 'array') {
+			mode_caps = [];
+			for (let r in cap_ifs) {
+				let o = ratmod.from_dms_radio_if(r);
+				if (o && index(mode_caps, o.rat) < 0)
+					push(mode_caps, o.rat);
+			}
 		}
 	}
 
@@ -591,8 +598,12 @@ export function probe_iot_rat(self, cb)
 	let mfr = lc(sprintf('%s', self.info?.manufacturer ?? ''));
 
 	// record the identified RAT (label for status, slug into the observed set)
-	// and refresh the capability summary, then finish
-	let finish = () => {
+	// and refresh the capability summary, then finish. `fine` is the AT-QNWINFO
+	// result (NB-IoT/RedCap detail) when available; otherwise fall back to the
+	// backend-neutral current RAT from the resolved dsd_status (native MBIM /
+	// QMI-passthrough serving), so the RAT shows even with a dead AT port.
+	let finish = (fine) => {
+		self.rat_fine = fine ?? ratmod.from_dsd_mode(self.dsd_status?.mode);
 		self.rat_label = self.rat_fine ? ratmod.label(self.rat_fine) : null;
 
 		if (self.rat_fine?.rat) {
@@ -603,15 +614,15 @@ export function probe_iot_rat(self, cb)
 		collect_caps(self, cb);
 	};
 
-	if (!match(mfr, QNWINFO_VENDORS)) {
-		self.rat_fine = null;
-		return finish();
-	}
+	// AT+QNWINFO is the fine (IoT-aware) source, but only for the vendors that
+	// implement it AND with a live AT port — otherwise the native dsd fallback
+	// above carries the base RAT.
+	if (!match(mfr, QNWINFO_VENDORS))
+		return finish(null);
 
 	telemetry_at(self).send('AT+QNWINFO', (err, res) => {
 		let info = err ? null : atcmd.parse_qnwinfo(res?.lines);
-		self.rat_fine = info ? { rat: info.rat, mode: info.mode, ntn: false, src: 'qnwinfo' } : null;
-		finish();
+		finish(info ? { rat: info.rat, mode: info.mode, ntn: false, src: 'qnwinfo' } : null);
 	});
 };
 

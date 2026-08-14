@@ -8,9 +8,16 @@
 // _refresh_* methods, watch and _start_telemetry to the modem object and
 // returns { stop } for teardown.
 //
-// Every capability picks its transport per modem via backend.choose():
-// QMI-over-MBIM passthrough first (battle-tested QMI decodes), then native
-// MBIM (MS Basic Connect Extensions), then AT — see the per-method comments.
+// Every capability picks its transport per modem via backend.choose(). For the
+// live telemetry (signal / cells / data-mode / reg-detail) the QMI-over-MBIM
+// passthrough is preferred, then native MBIM (MS Basic Connect Extensions),
+// then AT: the passthrough reuses the battle-tested QMI decode and — HW-shown
+// on the EG06 — yields far richer data (RSRP/SNR, full serving + neighbour
+// cells) than this modem's native MBIM (rssi-only signal, sparse cells). Native
+// MBIM is the fallback for modems without a working passthrough. Capabilities
+// that don't depend on the live transport are native-first regardless:
+// caps.rats from MBIM DEVICE_CAPS, the current RAT from dsd_status — so they
+// work even with no passthrough and a dead AT port (see modem_common).
 
 'use strict';
 
@@ -61,9 +68,10 @@ export function install(self, o)
 		});
 	};
 
-	// cells: native Base Stations Info, else passthrough NAS cell-location info
-	// (decoded + scrubbed exactly as the QMI backend), else a best-effort AT QENG
-	// serving cell. Stores self.cells, preserving any carrier-aggregation set.
+	// cells: passthrough NAS cell-location info (decoded + scrubbed exactly as the
+	// QMI backend — richest serving + neighbour detail), else native MBIM Base
+	// Stations Info, else a best-effort AT QENG serving cell. Stores self.cells,
+	// preserving any carrier-aggregation set.
 	self._refresh_cells = function(cb) {
 		cb = cb ?? (() => null);
 
@@ -133,8 +141,9 @@ export function install(self, o)
 		});
 	};
 
-	// data-system mode (LTE/NSA/SA): native register-state class mask, else
-	// passthrough DSD, else the AT QENG serving detail. Stores self.dsd_status.
+	// data-system mode (LTE/NSA/SA): passthrough DSD, else the native MBIM
+	// register-state class mask, else the AT QENG serving detail. Stores
+	// self.dsd_status.
 	self._refresh_data_mode = function(cb) {
 		cb = cb ?? (() => null);
 
@@ -163,8 +172,8 @@ export function install(self, o)
 		});
 	};
 
-	// registration detail (reject cause / limited service): native register
-	// state, else passthrough NAS system-info. Stores self.reg_detail.
+	// registration detail (reject cause / limited service): passthrough NAS
+	// system-info, else the native MBIM register state. Stores self.reg_detail.
 	self._refresh_reg_detail = function(cb) {
 		cb = cb ?? (() => null);
 
