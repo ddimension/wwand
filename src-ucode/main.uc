@@ -290,7 +290,12 @@ function run_daemon()
 				let occupied = false;
 				cursor.foreach('network', 'wwand_modem', () => { occupied = true; return false; });
 				cursor.foreach('network', 'interface', (s) => {
-					if (s.proto == 'wwand' || s.proto == 'qmi') {
+					// any existing mobile-WAN interface — wwand's own or a stock
+					// qmi/mbim/ncm one (uqmi / umbim / comgt-ncm) — means the box is
+					// already configured, so never auto-grab a control device the
+					// stock stack owns (device-ownership coexistence).
+					if (s.proto == 'wwand' || s.proto == 'qmi' ||
+					    s.proto == 'mbim' || s.proto == 'ncm') {
 						occupied = true;
 						return false;
 					}
