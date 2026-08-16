@@ -697,4 +697,15 @@ for (let i = 0; i < 200000 && !_all_done; i++)
 	eq(context_common.conn_cfg(ctx, 'apn'), null, 'conn_cfg: nothing configured -> null');
 })();
 
+// --- mono(): monotonic uptime base (immune to the boot-time NTP step) ---------
+(function() {
+	let a = context_common.mono();
+	ok(type(a) == 'int' && a > 0, 'mono: positive integer seconds');
+	ok(context_common.mono() >= a, 'mono: non-decreasing (monotonic)');
+	// CLOCK_MONOTONIC counts from boot (seconds..weeks); wall time() is a ~1.78e9
+	// unix epoch. A gap this large proves uptime no longer rides the wall clock
+	// that steps forward on NTP sync — the ~18 h bogus-uptime bug (forum LS3434).
+	ok(time() - a > 1000000000, 'mono: distinct clock from wall-time() (not epoch)');
+})();
+
 done('test_context');

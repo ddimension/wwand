@@ -59,7 +59,7 @@ export function install(self, o)
 		// stats_interval) so those values appear right after connect instead of
 		// only after the first interval.
 		rx_watch.reset();
-		self.connected_since = time();
+		self.connected_since = context_common.mono();
 		stats_timer = uloop.timer(0, sample_stats);
 	};
 

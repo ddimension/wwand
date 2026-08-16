@@ -782,7 +782,7 @@ export function create(opts)
 			state: self.state,
 			settings: self.settings,
 			last_error: self.last_error,
-			uptime: (self.state == 'CONNECTED' && self.connected_since) ? (time() - self.connected_since) : null,
+			uptime: (self.state == 'CONNECTED' && self.connected_since) ? (context_common.mono() - self.connected_since) : null,
 			stats: (self.state == 'CONNECTED') ? self.stats : null,
 			channel_rate: (self.state == 'CONNECTED') ? self.channel_rate : null,
 			bearer: (self.state == 'CONNECTED') ? self.bearer : null,

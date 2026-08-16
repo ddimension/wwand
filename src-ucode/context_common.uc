@@ -83,6 +83,17 @@ export function ctx_scaffolding(self, o)
 	return { emit: emit, set_state: set_state, fail_finish: fail_finish };
 };
 
+// mono(): monotonic seconds (CLOCK_MONOTONIC), for measuring durations like a
+// context's connected uptime. Unlike time() it is immune to a wall-clock step,
+// which matters on RTC-less boards (PCIe/MHI): the modem connects at boot before
+// NTP sets the clock, so a `connected_since` captured with time() and read back
+// after the NTP jump yields a bogus multi-hour uptime (forum report: LS3434 saw
+// a constant ~18 h on a T99W175). Both the capture and the read must use mono().
+export function mono()
+{
+	return clock(true)[0];
+};
+
 export function zero_rx_limit_ms(modem_config, timing)
 {
 	if (timing?.zero_rx_ms != null)

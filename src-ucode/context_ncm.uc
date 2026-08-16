@@ -140,7 +140,7 @@ export function create(opts)
 
 	start_stats = () => {
 		rx_watch.reset();
-		self.connected_since = time();
+		self.connected_since = context_common.mono();
 		stats_timer = uloop.timer(0, sample_stats);   // first sample immediately
 	};
 
@@ -545,7 +545,7 @@ export function create(opts)
 			settings: self.settings,
 			stats: (self.state == 'CONNECTED') ? self.stats : null,
 			uptime: (self.state == 'CONNECTED' && self.connected_since)
-				? (time() - self.connected_since) : null,
+				? (context_common.mono() - self.connected_since) : null,
 		};
 	};
 
