@@ -91,6 +91,23 @@ export function parse_qeng_servingcell(lines)
 
 		if (kind == 'servingcell') {
 			out.state = f[0];
+
+			// newer Quectel 5G modems (RG650E, RM520N, …) put the WHOLE serving
+			// cell inline on the servingcell line instead of a separate "LTE"/
+			// "NR5G-*" line:
+			//   "servingcell",<state>,"LTE","FDD",<mcc>,<mnc>,<cid>,<pci>,
+			//     <earfcn>,<band>,<ulbw>,<dlbw>,<tac>,<rsrp>,<rsrq>,<rssi>,<sinr>,…
+			// (HW-verified on the RG650E). f[1] carries the RAT here — decode it so
+			// band/earfcn survive even when RRC-idle (state NOCONN). The older
+			// multi-line branches below still handle modems that split the lines.
+			if (f[1] == 'LTE') {
+				out.lte = {
+					mcc: num(f[3]), mnc: f[4], cid: hnum(f[5]), pci: num(f[6]),
+					earfcn: num(f[7]), band: num(f[8]),
+					bandwidth_mhz: BW_IDX_MHZ[f[10]] ?? null, tac: hnum(f[11]),
+					rsrp: num(f[12]), rsrq: num(f[13]), rssi: num(f[14]), sinr: num(f[15]),
+				};
+			}
 		}
 		else if (kind == 'LTE') {
 			// f: dup,mcc,mnc,cid,pci,earfcn,band,ulbw,dlbw,tac,rsrp,rsrq,rssi,sinr

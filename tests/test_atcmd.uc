@@ -191,6 +191,16 @@ eq(sc.nr, { mode: 'NSA', mcc: 262, mnc: '01', band: 1, arfcn: 431070, pci: 242,
 eq(atcmd.parse_qeng_servingcell([ '+QENG: "servingcell","NOCONN"' ]),
 	{ state: 'NOCONN', lte: null, nr: null }, 'qeng: state only, no cells');
 
+// newer Quectel single-line format (real RG650E line, RRC-idle): the whole LTE
+// serving cell rides the servingcell line — band/earfcn must survive NOCONN
+let sc1 = atcmd.parse_qeng_servingcell([
+	'+QENG: "servingcell","NOCONN","LTE","FDD",262,01,C7EC02,334,6300,20,3,3,B08B,-96,-12,-66,9,0,-,34',
+]);
+eq(sc1.state, 'NOCONN', 'qeng single-line: state');
+eq(sc1.lte, { mcc: 262, mnc: '01', cid: 13102082, pci: 334, earfcn: 6300, band: 20,
+	bandwidth_mhz: 10, tac: 45195, rsrp: -96, rsrq: -12, rssi: -66, sinr: 9 },
+	'qeng single-line: RG650E LTE serving cell decoded inline (band 20, EARFCN 6300)');
+
 // --- AT+QENG="neighbourcell" parsing (intra + inter) -------------------------
 // metrics come out in QMI 0.1 dB units (×10). Quectel order after earfcn,pcid is
 // rsrq,rsrp,rssi,sinr,srxlev.
