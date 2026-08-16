@@ -18,6 +18,8 @@ import * as mbim_mockhub from './lib/mbim_mockhub.uc';
 import * as backend from 'wwand/mbim_backend.uc';
 import * as bc from 'wwand/codec/mbim-schema/basic_connect.uc';
 import * as ext from 'wwand/codec/mbim-schema/ms_basic_connect_ext.uc';
+import * as fibocom from 'wwand/codec/mbim-schema/fibocom.uc';
+import * as compal from 'wwand/codec/mbim-schema/compal.uc';
 
 uloop.init();
 
@@ -263,9 +265,67 @@ function s_slots(next) {
 	}));
 }
 
+// AT over MBIM: Fibocom vendor CID tunnels a raw AT line as a SET; the reply
+// blob parses into the same `lines` the tty engine yields (echo + OK stripped),
+// and an ERROR reply surfaces as an error.
+function s_at_over_mbim(next) {
+	let mock = mbim_mockhub.create({ schema: fibocom, handlers: {
+		AT_COMMAND: (args, meta) =>
+			(meta.count == 1) ? { __raw: "\r\nFibocom Wireless\r\n\r\nOK\r\n" }
+			                  : { __raw: "\r\nERROR\r\n" },
+	} });
+	let mc = mbim_client.create(mock, {});
+	mock.transport_open('/dev/mock', {
+		on_raw: (hub, msg) => { let dec = mbim.decode(msg); if (dec) mc.on_message(dec); },
+		on_gone: () => null,
+	});
+
+	mc.open(() => {
+		let eng = backend.make_at_engine(mc, 'fibocom');
+
+		eng.send('AT+CGMI', (err, res) => {
+			eq(err, null, 'at-mbim: CGMI ok');
+			eq(res.lines, [ 'Fibocom Wireless' ], 'at-mbim: reply lines (echo + OK stripped)');
+
+			let c = mock.calls_for('AT_COMMAND')[0];
+			eq(c.kind, 'set', 'at-mbim: Fibocom issues a SET');
+			eq(c.info, "AT+CGMI\r", 'at-mbim: request is the CR-terminated AT line');
+
+			eng.send('AT+BOGUS', (err2) => {
+				eq(err2, { error: 'ERROR' }, 'at-mbim: ERROR reply surfaces as an error');
+				next();
+			});
+		});
+	});
+}
+
+// AT over MBIM (Compal): same engine, but the vendor CID is a QUERY.
+function s_at_over_mbim_compal(next) {
+	let mock = mbim_mockhub.create({ schema: compal, handlers: {
+		AT_COMMAND: { __raw: "\r\n+CGMI: Compal\r\n\r\nOK\r\n" },
+	} });
+	let mc = mbim_client.create(mock, {});
+	mock.transport_open('/dev/mock', {
+		on_raw: (hub, msg) => { let dec = mbim.decode(msg); if (dec) mc.on_message(dec); },
+		on_gone: () => null,
+	});
+
+	mc.open(() => {
+		let eng = backend.make_at_engine(mc, 'compal');
+
+		eng.send('AT+CGMI', (err, res) => {
+			eq(err, null, 'at-mbim compal: ok');
+			eq(res.lines, [ '+CGMI: Compal' ], 'at-mbim compal: reply line');
+			eq(mock.calls_for('AT_COMMAND')[0].kind, 'query', 'at-mbim compal: issues a QUERY');
+			next();
+		});
+	});
+}
+
 // --- runner ------------------------------------------------------------------
 
-let scenarios = [ s_signal, s_cells, s_data_mode, s_reg_detail, s_slots ];
+let scenarios = [ s_signal, s_cells, s_data_mode, s_reg_detail, s_slots,
+	s_at_over_mbim, s_at_over_mbim_compal ];
 let i = 0;
 
 function run_next() {

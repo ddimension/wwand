@@ -23,9 +23,12 @@
 'use strict';
 
 import * as struct from 'struct';
+import * as mbim from './codec/mbim.uc';
 import * as hexmod from './codec/hex.uc';
 import * as bc from './codec/mbim-schema/basic_connect.uc';
 import * as ext from './codec/mbim-schema/ms_basic_connect_ext.uc';
+import * as fibocom from './codec/mbim-schema/fibocom.uc';
+import * as compal from './codec/mbim-schema/compal.uc';
 
 // --- native MBIM MS UICC Low Level Access (eSIM/APDU) ------------------------
 // Service UUID + CIDs and buffer layouts verified against libmbim 1.32
@@ -52,6 +55,94 @@ function pad4(s)
 
 	return s;
 }
+
+// --- AT over MBIM (Fibocom / Compal vendor CID) ------------------------------
+// A drop-in AT engine (same { send, run_sequence, close } contract as the tty
+// engine in atcmd.uc) that tunnels each AT line over a vendor MBIM CID instead
+// of a serial port — for MBIM modems whose dedicated cdc-wdm AT port is absent
+// or dead. Unlike the streaming tty, the vendor CID is request/response: one
+// COMMAND carries the AT line, one COMMAND_DONE returns the whole modem reply,
+// so a single round trip yields the complete { lines } result.
+
+// parse a raw AT response blob into the same `lines` array the tty engine yields
+// (atcmd.uc finish): CR/LF split, trim, drop blanks + the command echo, stop at
+// OK/ERROR/+CME|CMS ERROR. Returns { err, lines } (err null on OK).
+function at_parse_response(cmd, blob)
+{
+	let lines = [];
+
+	// normalize CR-only and CRLF to LF, then split
+	let norm = replace(replace(sprintf('%s', blob ?? ''), /\r\n/g, '\n'), /\r/g, '\n');
+
+	for (let line in split(norm, '\n')) {
+		line = trim(line);
+
+		if (line == '' || line == cmd)     // skip blanks and echo
+			continue;
+
+		if (line == 'OK')
+			return { err: null, lines: lines };
+
+		if (line == 'ERROR' || line == 'COMMAND NOT SUPPORT')
+			return { err: { error: 'ERROR' }, lines: lines };
+
+		let m = match(line, /^\+(CME|CMS) ERROR: *(.*)$/);
+
+		if (m)
+			return { err: { error: lc(m[1]), code: m[2] }, lines: lines };
+
+		push(lines, line);
+	}
+
+	// no terminator seen: return what we have (best-effort, like a short read)
+	return { err: null, lines: lines };
+}
+
+// make_at_engine(mc, vendor): vendor is 'fibocom' (default) or 'compal'. Returns
+// a duck-typed AT engine. A modem that does not expose the vendor CID NAKs the
+// COMMAND -> command_raw yields an mbim error -> send() reports it, exactly like
+// a no-AT tty modem, so callers degrade gracefully.
+export function make_at_engine(mc, vendor)
+{
+	let schema = (vendor == 'compal') ? compal : fibocom;
+	let cmd_type = (schema.AT_CMD_KIND == 'query') ? mbim.CMD_QUERY : mbim.CMD_SET;
+
+	let self = {};
+
+	self.send = function(cmd, cb, o) {
+		// the request InformationBuffer is the bare AT line, CR-terminated
+		let req = cmd + '\r';
+
+		mc.command_raw(schema.service, schema.CID_AT_COMMAND, req, (err, info) => {
+			if (err)
+				return cb ? cb(err, null) : null;
+
+			let r = at_parse_response(cmd, info);
+
+			if (cb)
+				cb(r.err, { lines: r.lines });
+		}, { cmd_type: cmd_type, timeout: o?.timeout });
+	};
+
+	// best-effort sequential run (errors logged by the caller's cb), matching the
+	// tty engine's run_sequence contract.
+	self.run_sequence = function(cmds, done) {
+		let idx = 0, step;
+
+		step = () => {
+			if (idx >= length(cmds))
+				return done ? done() : null;
+
+			self.send(cmds[idx++], () => step());
+		};
+
+		step();
+	};
+
+	self.close = () => null;
+
+	return self;
+};
 
 // open a logical channel to `aid_hex` (ISD-R for eSIM). cb(err, { channel,
 // select_response }). `mc` is the MBIM session client (mbim_client.uc).

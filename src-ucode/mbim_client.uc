@@ -146,10 +146,12 @@ export function create(hub, hooks)
 
 	// command_raw: send a COMMAND whose InformationBuffer is opaque bytes (not a
 	// schema-encoded struct) and return the raw response InformationBuffer. Used
-	// by the QMI-over-MBIM passthrough, where `info` is a whole QMUX frame.
+	// by the QMI-over-MBIM passthrough (info = a whole QMUX frame) and the AT-over-
+	// MBIM vendor tunnel. Defaults to a SET; opts.cmd_type overrides it (the Compal
+	// AT CID is a QUERY).
 	self.command_raw = function(service_uuid, cid, info, cb, opts) {
 		let txn = self.next_txn++;
-		let frame = mbim.encode_command(txn, service_uuid, cid, mbim.CMD_SET, info ?? '');
+		let frame = mbim.encode_command(txn, service_uuid, cid, opts?.cmd_type ?? mbim.CMD_SET, info ?? '');
 
 		return self.raw_send(frame, txn, (err, msg) => {
 			if (err)

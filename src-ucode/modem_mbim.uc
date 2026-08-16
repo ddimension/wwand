@@ -287,13 +287,33 @@ export function create(opts)
 	// AT side channel: best-effort, for quirks, telemetry fallback and protocol
 	// switching. Shared with the QMI backend (also gains model-init + M9200B
 	// drain via the common helper).
-	step_at = () => modem_common.open_at(self, {
-		at_opts: at_opts,
-		log: log,
-		drain_interval: self.timing.at_drain,
-		set_drain_timer: (t) => { at_drain_timer = t; },
-		next: step_at_ident,
-	});
+	//
+	// `option at_over_mbim '<fibocom|compal|1>'` (default off): the modem has no
+	// usable cdc-wdm AT port, so route AT over the vendor AT-over-MBIM CID instead
+	// of opening a serial port. The tunnel engine is duck-typed exactly like the
+	// tty engine, so step_at_ident and the telemetry fallbacks use it unchanged
+	// (telemetry_at returns self.at_telemetry). NOT HW-validated — opt-in only.
+	step_at = () => {
+		let aom = self.config?.at_over_mbim;
+
+		if (aom) {
+			let vendor = (aom == 'compal') ? 'compal' : 'fibocom';
+			let eng = mbim_backend.make_at_engine(self.mbim, vendor);
+
+			log('notice', sprintf('AT side channel over MBIM (%s vendor CID)', vendor));
+			self.at = eng;
+			self.at_telemetry = eng;
+			return step_at_ident();
+		}
+
+		return modem_common.open_at(self, {
+			at_opts: at_opts,
+			log: log,
+			drain_interval: self.timing.at_drain,
+			set_drain_timer: (t) => { at_drain_timer = t; },
+			next: step_at_ident,
+		});
+	};
 
 	// MBIM DEVICE_CAPS carries no manufacturer — fill it best-effort from the AT
 	// side channel (AT+CGMI), for parity with the QMI DMS / NCM CGMI identity.
