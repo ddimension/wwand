@@ -13,6 +13,7 @@ import * as netlink from './netlink.uc';
 import * as tlv from './codec/tlv.uc';
 import * as nasmod from './codec/schema/nas.uc';
 import * as ratmod from './codec/schema/rat.uc';
+import * as merge from './codec/schema/merge.uc';
 
 // scrub NAS cell-info sentinel metrics (-32768 = "not measured") to null so
 // consumers never render the sentinel as a real dBm value.
@@ -35,6 +36,87 @@ export function clean_cell_metrics(cells)
 		scrub(cells.nr5g_cell);
 
 	return cells;
+};
+
+// serving_still_current(serving, cells): does a carried-over `serving` object
+// (from an AT +QENG read) still describe the serving cell that `cells` (from a
+// NAS/passthrough/native cell-location read) reports? Compares the LTE EARFCN,
+// then the NR ARFCN; if neither side carries a comparable identity, keep it
+// (conservative). A handover between the two reads makes them disagree.
+function serving_still_current(serving, cells)
+{
+	let le = serving.lte?.earfcn, nle = cells?.lte_intra?.earfcn;
+	if (le != null && nle != null)
+		return le == nle;
+
+	let ne = serving.nr?.arfcn, nne = cells?.nr5g_arfcn;
+	if (ne != null && nne != null)
+		return ne == nne;
+
+	return true;
+};
+
+// preserve_serving(newc, oldc): carry the AT-`+QENG`-derived `serving` (which
+// alone carries LTE/NR `band` + `bandwidth_mhz`) forward across a cells refresh
+// that came from a band-less transport (NAS / MBIM passthrough / native MBIM).
+// Only fills when the new object lacks `serving` (gap) AND the old serving still
+// describes the current serving cell (identity guard) — a handover drops the
+// stale band instead of mislabelling it. Without this, `serving.band` is only
+// re-read on the slow loop, so band flickers out during 1 s LuCI polling on
+// backends whose fast loop refreshes cells but not the serving detail (MBIM).
+// Returns newc. Mirrors the existing `cells.ca` carry-over.
+export function preserve_serving(newc, oldc)
+{
+	if (newc == null || oldc?.serving == null)
+		return newc;
+
+	return merge.fill(newc, oldc, {
+		gap:   [ 'serving' ],
+		guard: (dst, src) => serving_still_current(src.serving, dst),
+	});
+};
+
+// serving_from_ca(self): the QMI LTE-CPHY CA-info PCC (self.cells.ca[role=PCC])
+// IS the serving LTE cell and — unlike the cell-location decode — carries the
+// channel BANDWIDTH (dl_bandwidth). It reaches every QMI/MBIM modem over the
+// (passthrough) QMI stack, so this is the VENDOR-NEUTRAL bandwidth source: no AT
+// parser, works on Fibocom/Foxconn/Sierra/… all the same. Gap-fill serving.lte
+// from it (a Quectel AT-QENG value already there wins), EARFCN-guarded; seeds
+// serving.lte when the modem has no AT serving read. The BAND is left to EARFCN
+// derivation (LuCI, disjoint ranges) / AT-QENG — the QMI CA `band` TLV is the
+// non-3GPP ActiveBand enum. LTE only (there is no NR CPHY CA info).
+export function serving_from_ca(self)
+{
+	let ca = self.cells?.ca;
+
+	if (!self.cells || type(ca) != 'array')
+		return;
+
+	let pcc = null;
+	for (let c in ca)
+		if (c?.role == 'PCC') { pcc = c; break; }
+
+	if (!pcc || pcc.bandwidth_mhz == null)
+		return;
+
+	self.cells.serving = self.cells.serving ?? {};
+	self.cells.serving.lte = merge.fill(self.cells.serving.lte, pcc, {
+		src:   'qmi-ca',
+		gap:   [ 'bandwidth_mhz', 'earfcn', 'pci' ],
+		guard: (dst, src) => dst.earfcn == null || src.earfcn == null || dst.earfcn == src.earfcn,
+	});
+};
+
+// manufacturers whose AT firmware answers AT+QENG (serving/neighbour cell). Gate
+// the QENG reads on this so a non-Quectel modem (Fibocom, Foxconn, Sierra, Telit,
+// SIMCom, …) is not sent an unsupported command every cycle — its band/bandwidth
+// come from the vendor-neutral QMI CA-info (serving_from_ca) + EARFCN derivation.
+// Defined before fetch_nr_neighbours, which calls it (ucode does not hoist exports).
+const QENG_VENDORS = /quectel|asr/;
+
+export function qeng_ok(self)
+{
+	return !!match(lc(sprintf('%s', self.info?.manufacturer ?? '')), QENG_VENDORS);
 };
 
 export function dsd_from_serving(serving)
@@ -513,6 +595,10 @@ export function fetch_nr_neighbours(self, cb)
 		return cb();
 	}
 
+	// QENG is Quectel/ASR — don't send it to a modem that can't answer it
+	if (!qeng_ok(self))
+		return cb();
+
 	// no-AT modem surfaces as a send error here, clearing the neighbour list
 	at.send('AT+QENG="neighbourcell"', (err, res) => {
 		if (self.cells) {
@@ -604,7 +690,12 @@ export function probe_iot_rat(self, cb)
 	// backend-neutral current RAT from the resolved dsd_status (native MBIM /
 	// QMI-passthrough serving), so the RAT shows even with a dead AT port.
 	let finish = (fine) => {
-		self.rat_fine = fine ?? ratmod.from_dsd_mode(self.dsd_status?.mode);
+		// combine the coarse structured base (dsd_status: LTE/NSA/SA) with the
+		// fine AT source (QNWINFO: IoT/RedCap + NSA/SA). ratmod.merge scores them
+		// so a finer source wins — but ALSO so a fresh DSD "5G-NSA" is not masked
+		// by a QNWINFO that only reported the LTE anchor (the old `fine ?? base`
+		// let a coarser QNWINFO always win). fine==null -> base; base==null -> fine.
+		self.rat_fine = ratmod.merge(ratmod.from_dsd_mode(self.dsd_status?.mode), fine);
 		self.rat_label = self.rat_fine ? ratmod.label(self.rat_fine) : null;
 
 		if (self.rat_fine?.rat) {

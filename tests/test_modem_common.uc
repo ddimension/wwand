@@ -576,4 +576,77 @@ mc.make_fail(frd2, { log: () => null, emit: () => null,
 	rec: rec_p2 })('registration_timeout', { reg: {} });
 eq(rec_p2.last_reg_detail, null, 'last_reg_detail: stale detail is not re-stashed');
 
+// --- preserve_serving: carry AT band forward across a band-less cell refresh --
+
+// same serving cell (EARFCN match) -> serving carried onto the new cells object
+let oldc = { serving: { lte: { earfcn: 6300, band: 20, bandwidth_mhz: 10 } } };
+let newc = { lte_intra: { earfcn: 6300, serving_cell_id: 334 } };
+mc.preserve_serving(newc, oldc);
+eq(newc.serving, { lte: { earfcn: 6300, band: 20, bandwidth_mhz: 10 } }, 'preserve_serving: carried when EARFCN matches');
+
+// handover (EARFCN differs) -> stale serving dropped, not mislabelled
+newc = { lte_intra: { earfcn: 1500, serving_cell_id: 12 } };
+mc.preserve_serving(newc, oldc);
+ok(newc.serving == null, 'preserve_serving: dropped on EARFCN mismatch (handover)');
+
+// no comparable identity on the new cells -> conservatively keep
+newc = { nr5g_arfcn: null };
+mc.preserve_serving(newc, oldc);
+ok(newc.serving != null, 'preserve_serving: kept when identity not comparable');
+
+// NR path: ARFCN match carries serving.nr
+let oldnr = { serving: { nr: { arfcn: 646272, band: 78, bandwidth_mhz: 100 } } };
+newc = { nr5g_arfcn: 646272 };
+mc.preserve_serving(newc, oldnr);
+eq(newc.serving.nr.band, 78, 'preserve_serving: NR carried when ARFCN matches');
+
+// never clobber a serving the new object already has (gap-only)
+newc = { serving: { lte: { band: 3 } }, lte_intra: { earfcn: 6300 } };
+mc.preserve_serving(newc, oldc);
+eq(newc.serving.lte.band, 3, 'preserve_serving: existing serving not overwritten');
+
+// null guards
+ok(mc.preserve_serving(null, oldc) == null, 'preserve_serving: null new cells -> null');
+newc = { lte_intra: { earfcn: 6300 } };
+mc.preserve_serving(newc, { serving: null });
+ok(newc.serving == null, 'preserve_serving: no old serving -> no-op');
+
+// --- serving_from_ca: vendor-neutral BANDWIDTH from the CA-info PCC -----------
+// (band is left to EARFCN derivation; the QMI CA band TLV is the ActiveBand enum)
+
+// no serving yet -> seed serving.lte with bandwidth + earfcn/pci from the PCC
+let sca = { cells: { ca: [
+	{ role: 'PCC', earfcn: 6300, pci: 334, bandwidth_mhz: 10 },
+	{ role: 'SCC', earfcn: 1500, bandwidth_mhz: 20 },
+] } };
+mc.serving_from_ca(sca);
+eq(sca.cells.serving.lte, { bandwidth_mhz: 10, earfcn: 6300, pci: 334 },
+	'serving_from_ca: PCC seeds serving.lte (bw+earfcn+pci, no band); SCC ignored');
+
+// an AT-QENG serving already there wins (gap-fill only fills the missing bw)
+sca = { cells: { serving: { lte: { earfcn: 6300, band: 20 } },
+	ca: [ { role: 'PCC', earfcn: 6300, bandwidth_mhz: 15 } ] } };
+mc.serving_from_ca(sca);
+eq(sca.cells.serving.lte, { earfcn: 6300, band: 20, bandwidth_mhz: 15 },
+	'serving_from_ca: existing serving (AT) kept, missing bandwidth filled from PCC');
+
+// EARFCN mismatch -> guarded out (bandwidth not filled)
+sca = { cells: { serving: { lte: { earfcn: 6300 } },
+	ca: [ { role: 'PCC', earfcn: 1500, bandwidth_mhz: 20 } ] } };
+mc.serving_from_ca(sca);
+ok(sca.cells.serving.lte.bandwidth_mhz == null, 'serving_from_ca: EARFCN mismatch does not fill');
+
+// no PCC (or PCC without bandwidth) -> no-op
+sca = { cells: { ca: [ { role: 'SCC', earfcn: 1500, bandwidth_mhz: 20 } ] } };
+mc.serving_from_ca(sca);
+ok(sca.cells.serving == null, 'serving_from_ca: no PCC -> no serving created');
+
+// --- qeng_ok: vendor gate for AT+QENG ----------------------------------------
+
+ok(mc.qeng_ok({ info: { manufacturer: 'Quectel' } }), 'qeng_ok: Quectel');
+ok(mc.qeng_ok({ info: { manufacturer: 'ASR' } }), 'qeng_ok: ASR');
+ok(!mc.qeng_ok({ info: { manufacturer: 'Fibocom' } }), 'qeng_ok: Fibocom -> no');
+ok(!mc.qeng_ok({ info: { manufacturer: 'Foxconn' } }), 'qeng_ok: Foxconn -> no');
+ok(!mc.qeng_ok({ info: {} }), 'qeng_ok: unknown -> no');
+
 done('test_modem_common');

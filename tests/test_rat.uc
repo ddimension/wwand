@@ -129,6 +129,10 @@ eq(rat.merge(rat.from_qmi_radio_if(8), null),
 // NTN carries over from the losing base onto the (finer) winner
 eq(rat.merge({ rat: 'lte', mode: null, ntn: true, src: 'hint' }, rat.from_qnwinfo('NB-IoT')),
 	{ rat: 'nb-iot', mode: null, ntn: true, src: 'qnwinfo' }, 'merge: NTN flag carried onto finer winner');
+// probe_iot_rat fix: a QNWINFO that only saw the LTE anchor must NOT mask a DSD
+// that saw the 5G leg (the old `fine ?? base` let the coarser QNWINFO win).
+eq(rat.merge(rat.from_dsd_mode('NSA'), rat.from_qnwinfo('FDD LTE')),
+	{ rat: 'nr5g', mode: 'nsa', ntn: false, src: 'dsd' }, 'merge: coarse QNWINFO LTE does not mask DSD 5G-NSA');
 
 // --- caps_from() -------------------------------------------------------------
 

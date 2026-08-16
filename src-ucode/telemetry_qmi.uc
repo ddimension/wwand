@@ -60,6 +60,10 @@ export function install(self, o)
 				li.cells = self._neigh.cells;   // carry the recent set over
 		}
 
+		// carry the AT-derived serving detail (LTE/NR band + bandwidth) forward —
+		// NAS cell-location has no band; a fresh QENG read overwrites it later
+		modem_common.preserve_serving(data, self.cells);
+
 		self.cells = data;
 	};
 
@@ -94,8 +98,13 @@ export function install(self, o)
 				if (!self.cells)
 					return after();
 
-				self._fetch_ca_info(() => self._determine_data_mode(
-					() => modem_common.fetch_nr_neighbours(self, after)));
+				self._fetch_ca_info(() => self._determine_data_mode(() => {
+					// vendor-neutral serving band/bandwidth from the CA-info PCC —
+					// after data-mode so a Quectel AT+QENG serving (exact) wins;
+					// fills for every other modem that has no QENG.
+					modem_common.serving_from_ca(self);
+					modem_common.fetch_nr_neighbours(self, after);
+				}));
 			});
 		});
 	};
@@ -184,7 +193,7 @@ export function install(self, o)
 			});
 		};
 
-		if (!self.at || !self.cells)
+		if (!self.at || !self.cells || !modem_common.qeng_ok(self))
 			return set_mode();
 
 		self.at.send('AT+QENG="servingcell"', (e, r) => {

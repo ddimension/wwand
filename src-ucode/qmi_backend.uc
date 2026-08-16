@@ -105,6 +105,12 @@ export function get_ca(nas, cb)
 
 		let out = [];
 
+		// The PCC is the serving cell; its dl_bandwidth is a vendor-neutral
+		// serving-cell BANDWIDTH source (telemetry fills serving.lte.bandwidth_mhz
+		// from it on ANY QMI/MBIM modem). The raw `band` TLV is the QMI ActiveBand
+		// enum (EUTRAN_1=120…, non-linearly mapped) — NOT the 3GPP band number, and
+		// LuCI derives the band from the (disjoint) EARFCN anyway, so it is not
+		// surfaced here to avoid a misleading value.
 		if (d.pcell)
 			push(out, { role: 'PCC', earfcn: d.pcell.earfcn, pci: d.pcell.pci,
 			            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', d.pcell.dl_bandwidth)] ?? null });

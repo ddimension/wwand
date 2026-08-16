@@ -80,6 +80,10 @@ export function install(self, o)
 			if (c) {
 				if (ca != null)
 					c.ca = ca;
+				// carry the AT-QENG serving detail (LTE/NR band + bandwidth)
+				// forward: MBIM's fast loop refreshes cells but not the serving
+				// detail, so without this the band flickers out during 1 s polling
+				modem_common.preserve_serving(c, self.cells);
 				self.cells = c;
 			}
 			cb();
@@ -195,6 +199,30 @@ export function install(self, o)
 		});
 	};
 
+	// serving-cell band/bandwidth over AT +QENG. Neither the native MBIM cell
+	// info nor the QMI-passthrough GET_CELL_LOCATION_INFO carries the LTE/NR band,
+	// so read it separately over AT — UNCONDITIONALLY, not only when AT happens to
+	// win the cells/data-mode choose (on a modem with a working passthrough the
+	// AT branch there never runs, so serving.band was never populated). Slow-loop
+	// only; preserve_serving() then carries it across the band-less 1 s cell
+	// refreshes. Latches off on a dead AT port (EG06) via telemetry_at. Stores
+	// self.cells.serving.
+	self._refresh_serving = function(cb) {
+		cb = cb ?? (() => null);
+
+		if (!self.at || !self.cells || !modem_common.qeng_ok(self))
+			return cb();
+
+		modem_common.telemetry_at(self).send('AT+QENG="servingcell"', (e, r) => {
+			if (!e && self.cells) {
+				let s = atcmd.parse_qeng_servingcell(r?.lines);
+				if (s && (s.lte || s.nr))
+					self.cells.serving = s;
+			}
+			cb();
+		});
+	};
+
 	let emit_telemetry = () => emit('telemetry', { signal: self.signal, cells: self.cells, reg: self.reg });
 
 	let log_telemetry = () => {
@@ -212,11 +240,15 @@ export function install(self, o)
 			if (!self.mbim)
 				return done();
 
-			self._refresh_cells(() => self._refresh_ca(() =>
+			self._refresh_cells(() => self._refresh_ca(() => {
+				// vendor-neutral serving band/bandwidth from the CA-info PCC (over
+				// the passthrough) — works on any MBIM modem, not just Quectel-AT
+				modem_common.serving_from_ca(self);
 				modem_common.fetch_nr_neighbours(self, () => {
 					emit_telemetry();
 					done();
-				})));
+				});
+			}));
 		});
 	};
 
@@ -257,7 +289,7 @@ export function install(self, o)
 					self.signal = { rssi_raw: data.rssi, rssi: dbm };
 				}
 
-				self._refresh_signal(() => self._refresh_data_mode(() => self._refresh_reg_detail(() => self._refresh_cells(() =>
+				self._refresh_signal(() => self._refresh_data_mode(() => self._refresh_reg_detail(() => self._refresh_cells(() => self._refresh_serving(() =>
 					// modem temperature + fine access-tech/caps (IoT/RedCap)
 					// over the AT side channel (best-effort, slow loop —
 					// QMI/NCM parity; status `rat`/`caps` stayed null on MBIM
@@ -271,7 +303,7 @@ export function install(self, o)
 						log_telemetry();
 						emit_telemetry();
 						telemetry_timer = uloop.timer(interval, tick);
-					}))))));
+					})))))));
 			});
 		};
 
