@@ -14,6 +14,7 @@ import * as tlv from './codec/tlv.uc';
 import * as nasmod from './codec/schema/nas.uc';
 import * as ratmod from './codec/schema/rat.uc';
 import * as merge from './codec/schema/merge.uc';
+import * as arfcn_bands from './codec/arfcn_bands.uc';
 
 // scrub NAS cell-info sentinel metrics (-32768 = "not measured") to null so
 // consumers never render the sentinel as a real dBm value.
@@ -105,6 +106,48 @@ export function serving_from_ca(self)
 		gap:   [ 'bandwidth_mhz', 'earfcn', 'pci' ],
 		guard: (dst, src) => dst.earfcn == null || src.earfcn == null || dst.earfcn == src.earfcn,
 	});
+};
+
+// fill_serving_band(self): gap-fill serving.lte.band / serving.nr.band from the
+// serving-cell EARFCN / NR-ARFCN when no vendor source (AT +QENG, QMI CA-info)
+// already named the band. For the band-less transports (native MBIM on Intel /
+// MediaTek modems) this is the ONLY band source. Call AFTER serving_from_ca so a
+// real vendor band always wins — band is only ever set when currently absent.
+// The serving EARFCN comes from cells.serving.lte.earfcn (seeded by
+// serving_from_ca / AT) or, failing that, the serving cell-info earfcn
+// (cells.lte_intra.earfcn); NR from cells.nr5g_arfcn.
+export function fill_serving_band(self)
+{
+	let cells = self.cells;
+
+	if (!cells)
+		return;
+
+	let earfcn = cells.serving?.lte?.earfcn ?? cells.lte_intra?.earfcn;
+	let arfcn  = cells.serving?.nr?.arfcn ?? cells.nr5g_arfcn;
+
+	if (earfcn != null) {
+		let d = arfcn_bands.lte_band(earfcn);
+		if (d?.band != null) {
+			cells.serving = cells.serving ?? {};
+			cells.serving.lte = cells.serving.lte ?? {};
+			cells.serving.lte.earfcn ??= earfcn;
+			cells.serving.lte.band ??= d.band;
+			cells.serving.lte.dl_freq_mhz ??= d.mhz;
+		}
+	}
+
+	if (arfcn != null) {
+		let d = arfcn_bands.nr_band(arfcn);
+		if (d != null) {
+			cells.serving = cells.serving ?? {};
+			cells.serving.nr = cells.serving.nr ?? {};
+			cells.serving.nr.arfcn ??= arfcn;
+			if (d.band != null)
+				cells.serving.nr.band ??= d.band;
+			cells.serving.nr.dl_freq_mhz ??= d.mhz;
+		}
+	}
 };
 
 // manufacturers whose AT firmware answers AT+QENG (serving/neighbour cell). Gate
@@ -945,18 +988,28 @@ export function format_telemetry(o)
 			if (c.pci == lte.serving_cell_id)
 				serving = c;
 
-		push(parts, sprintf('lte=[plmn %s tac %d gci %d earfcn %d pci %d%s neigh %d]',
-			lte.plmn, lte.tac, lte.global_cell_id, lte.earfcn, lte.serving_cell_id,
+		// band (+ channel bandwidth) from the serving detail — vendor AT/CA-info
+		// where available, else EARFCN-derived (fill_serving_band)
+		let sl = cells?.serving?.lte;
+		let band = (sl?.band != null) ? sprintf(' band %s', sl.band) : '';
+		let bw = (sl?.bandwidth_mhz != null) ? sprintf(' bw %gMHz', sl.bandwidth_mhz) : '';
+
+		push(parts, sprintf('lte=[plmn %s tac %d gci %d earfcn %d pci %d%s%s%s neigh %d]',
+			lte.plmn, lte.tac, lte.global_cell_id, lte.earfcn, lte.serving_cell_id, band, bw,
 			serving ? sprintf(' rsrp %.1f rsrq %.1f', serving.rsrp / 10.0, serving.rsrq / 10.0) : '',
 			length(lte.cells ?? [])));
 	}
 
 	let nr = cells?.nr5g_cell;
 
-	if (nr)
-		push(parts, sprintf('nr5g=[plmn %s tac %d pci %d arfcn %d rsrp %.1f rsrq %.1f snr %.1f]',
-			nr.plmn, nr.tac, nr.pci, cells?.nr5g_arfcn ?? 0,
+	if (nr) {
+		let sn = cells?.serving?.nr;
+		let band = (sn?.band != null) ? sprintf(' band %s', sn.band) : '';
+
+		push(parts, sprintf('nr5g=[plmn %s tac %d pci %d arfcn %d%s rsrp %.1f rsrq %.1f snr %.1f]',
+			nr.plmn, nr.tac, nr.pci, cells?.nr5g_arfcn ?? 0, band,
 			nr.rsrp / 10.0, nr.rsrq / 10.0, nr.snr / 10.0));
+	}
 
 	// signal: i16 metrics report -32768 when absent (filter per field). rsrp/rssi
 	// are dBm (%d); snr is 0.1 dB (%.1f).

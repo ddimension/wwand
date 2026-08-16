@@ -103,6 +103,9 @@ export function install(self, o)
 					// after data-mode so a Quectel AT+QENG serving (exact) wins;
 					// fills for every other modem that has no QENG.
 					modem_common.serving_from_ca(self);
+					// EARFCN/NR-ARFCN -> band gap-fill (only fills when a vendor
+					// source left band unset; QENG/CA-info always win).
+					modem_common.fill_serving_band(self);
 					modem_common.fetch_nr_neighbours(self, after);
 				}));
 			});

@@ -244,6 +244,10 @@ export function install(self, o)
 				// vendor-neutral serving band/bandwidth from the CA-info PCC (over
 				// the passthrough) — works on any MBIM modem, not just Quectel-AT
 				modem_common.serving_from_ca(self);
+				// EARFCN/NR-ARFCN -> band for band-less transports (native MBIM on
+				// Intel/MediaTek: no QENG, no CA-info) — only fills when unset, so
+				// the CA-info band above always wins.
+				modem_common.fill_serving_band(self);
 				modem_common.fetch_nr_neighbours(self, () => {
 					emit_telemetry();
 					done();
