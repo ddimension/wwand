@@ -19,7 +19,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as parse from './atcmd_parse.uc';
+import * as parse from 'wwand.atcmd_parse';
 
 // the port table (225 devices) is the largest single module — loaded lazily
 // on first use so daemon startup does not pay for it when no AT port exists

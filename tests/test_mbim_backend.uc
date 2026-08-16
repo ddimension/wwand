@@ -16,10 +16,10 @@ import * as mbim from 'wwand/codec/mbim.uc';
 import * as mbim_client from 'wwand/mbim_client.uc';
 import * as mbim_mockhub from './lib/mbim_mockhub.uc';
 import * as backend from 'wwand/mbim_backend.uc';
-import * as bc from 'wwand/codec/mbim-schema/basic_connect.uc';
-import * as ext from 'wwand/codec/mbim-schema/ms_basic_connect_ext.uc';
-import * as fibocom from 'wwand/codec/mbim-schema/fibocom.uc';
-import * as compal from 'wwand/codec/mbim-schema/compal.uc';
+import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
+import * as ext from 'wwand/codec/mbim_schema/ms_basic_connect_ext.uc';
+import * as fibocom from 'wwand/codec/mbim_schema/fibocom.uc';
+import * as compal from 'wwand/codec/mbim_schema/compal.uc';
 
 uloop.init();
 

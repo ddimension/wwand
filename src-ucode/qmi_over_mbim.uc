@@ -18,9 +18,9 @@
 'use strict';
 
 import * as struct from 'struct';
-import * as mbim from './codec/mbim.uc';
-import * as qmux from './codec/qmux.uc';
-import * as qmi_pt from './codec/mbim-schema/qmi_passthrough.uc';
+import * as mbim from 'wwand.codec.mbim';
+import * as qmux from 'wwand.codec.qmux';
+import * as qmi_pt from 'wwand.codec.mbim_schema.qmi_passthrough';
 
 // create(mc, opts): mc is an opened mbim_client. Returns a hub-shaped object.
 export function create(mc, opts)

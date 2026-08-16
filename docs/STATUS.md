@@ -3,6 +3,62 @@
 _Last updated: 2026-08-16. All test suites green (42 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
+## Bytecode precompile, namespaced imports, io merge, radio_ifs rat fallback (2026-08-16)
+
+- **Production builds ship ucode as precompiled bytecode**, built by the new
+  **repo-root `CMakeLists.txt`** in the same cmake run as `wwand_io.so` — one
+  independent compiler invocation per file (like C translation units: parallel,
+  incremental), driven by **explicit source lists** (`WWAND_UCODE_MODULES` /
+  `_PROGRAMS` / `_PLAIN`; no glob as build input — a configure-time check fails
+  on any drift between the lists and the tree). The trick that removes all
+  ordering: every intra-tree module name is passed as `dynlink=`, so imports are
+  never resolved at compile time; the VM resolves them at runtime via the
+  search path. A typo'd import stays a hard compile error (only listed names are
+  dynlink). Modules compile `-cmodule`, `main.uc`/`wwandctl.uc` `-c` (interp
+  line survives → procd-exec'able), the require()-CommonJS shims are copied as
+  source. `-s` (strip debug) is mandatory: unstripped bytecode embeds the
+  absolute build path and is not relocatable. Configure-time guards reject
+  relative imports, hyphens in module paths and unlisted files. Feed Makefile:
+  `-DUCODE_COMPILER=$(STAGING_DIR_HOSTPKG)/bin/ucode` (`PKG_BUILD_DEPENDS:=
+  ucode/host` — same revision as the target VM, bytecode is VM-locked);
+  dev opt-out `CONFIG_WWAND_UCODE_SOURCE` / `-DUCODE_PRECOMPILE=OFF` ships
+  plain source (source-line tracebacks, on-device editing). Host-validated:
+  full parallel build in ~0.3 s, single-file incremental rebuild, whole daemon
+  graph loads relocated, `require()` shims over bytecode work. (An interim
+  standalone-script variant was replaced by this cmake integration.)
+  **HW-validated on the whole fleet** (on-device compile with each router's own
+  ucode = exact VM match; A/B fresh-restart + 35 s settle): daemon RSS drops
+  **~31–33 %** — 245 (aarch64, 2 modems) 6328→4332 kB, 93 (aarch64) 6140→4096,
+  242 (mipsel) 4944→3416, 246 (mipsel) 5072→3496. All modems READY/CONNECTED
+  on bytecode, telemetry incl. band/bandwidth pipeline intact, wwandctl works.
+  Rollback: `/usr/share/ucode/wwand.bak` (source) left on each router.
+- **Import style migrated tree-wide: namespaced only.** All 160 relative
+  imports (`'./codec/tlv.uc'`) became search-path names (`'wwand.codec.tlv'`) —
+  the ucode VM resolves bytecode modules ONLY via the search path. The
+  precompiler hard-fails on relative imports, on hyphens in module paths
+  (`codec/mbim-schema/` → renamed **`codec/mbim_schema/`**) and on intra-tree
+  specifiers that do not resolve to a file (caught two real migration slips:
+  `wwand.loc`/`wwand.wms` in the lazy schema shims needed the full
+  `wwand.codec.schema.*` path, and `../mbim.uc` in ms_basic_connect_ext).
+  Full suite green after migration.
+- **`ucode-mod-wwand-io` package merged into `wwand`.** The native `wwand_io.so`
+  is wwand-private and version-locked to the ucode side; shipping it in the base
+  package removes the stale-.so/arch-mismatch deploy hazard. `PROVIDES:=
+  ucode-mod-wwand-io` keeps old configs resolving; feed CI/imagebuilder/README
+  references updated.
+- **`rat` status fallback from NAS `radio_ifs`** (`modem_common.
+  rat_from_radio_ifs`, highest-tech-wins): a registered modem without a DSD
+  service and without QNWINFO (Huawei E392 on 245) showed `rat: null` while its
+  telemetry line said `tech=LTE` — `probe_iot_rat` now falls back to the coarse
+  radio_ifs RAT when `dsd_status` is absent. Found while raw-dumping the E392's
+  `GET_CELL_LOCATION_INFO` to rule out a decode dialect (bytes decode cleanly;
+  the "duplicate serving cell" across both 245 modems is physical reality —
+  both camp on the same B20 site). HW-validated on 245. +9 checks.
+
+**Deploy note:** the fleet still runs the pre-split source deploys; the first
+apk upgrade to a bytecode build replaces the whole `/usr/share/ucode/wwand`
+tree. `wwand.x` forum draft untouched.
+
 ## MBIM 5G caps, passthrough parity, coexistence + uptime fixes (2026-08-16)
 
 A cluster of correctness fixes, several from forum HW reports:

@@ -6,7 +6,7 @@
 
 'use strict';
 
-import * as ratmod from './codec/schema/rat.uc';
+import * as ratmod from 'wwand.codec.schema.rat';
 
 // parse an AT+QNWLOCK read response into the lock state. Quectel formats:
 //   +QNWLOCK: "common/4g",<enable>[,<earfcn>,<pci>[,...]]

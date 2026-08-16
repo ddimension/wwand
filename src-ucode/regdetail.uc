@@ -9,9 +9,9 @@
 
 'use strict';
 
-import * as qmi_backend from './qmi_backend.uc';
-import * as nasmod from './codec/schema/nas.uc';
-import * as wdsmod from './codec/schema/wds.uc';
+import * as qmi_backend from 'wwand.qmi_backend';
+import * as nasmod from 'wwand.codec.schema.nas';
+import * as wdsmod from 'wwand.codec.schema.wds';
 
 // gather WHY the modem is (not) registered: the EMM reject cause and whether
 // it is stuck in limited service (camped but attach rejected). QMI and AT are

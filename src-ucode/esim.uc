@@ -12,11 +12,11 @@
 // transport.
 'use strict';
 
-import * as sim from './sim.uc';
-import * as backend from './backend.uc';
+import * as sim from 'wwand.sim';
+import * as backend from 'wwand.backend';
 
-import { ISDR_AID } from './sim.uc';
-import { iccid_to_bytes, bytes_to_iccid, hex_to_arr, arr_to_hex } from './codec/hex.uc';
+import { ISDR_AID } from 'wwand.sim';
+import { iccid_to_bytes, bytes_to_iccid, hex_to_arr, arr_to_hex } from 'wwand.codec.hex';
 
 // --- minimal BER-TLV ---------------------------------------------------------
 

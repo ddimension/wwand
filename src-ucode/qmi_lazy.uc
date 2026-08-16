@@ -11,7 +11,7 @@
 // hands them back as a value (same trick as mbim_lazy / ncm_lazy).
 'use strict';
 
-import * as modem from './modem.uc';
-import * as context from './context.uc';
+import * as modem from 'wwand.modem';
+import * as context from 'wwand.context';
 
 return { modem: modem, context: context };

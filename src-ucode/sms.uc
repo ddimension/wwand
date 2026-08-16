@@ -18,10 +18,10 @@
 
 'use strict';
 
-import * as backend from './backend.uc';
-import * as hexmod from './codec/hex.uc';
-import * as sms_pdu from './sms_pdu.uc';
-import * as wmsmod from './codec/schema/wms.uc';
+import * as backend from 'wwand.backend';
+import * as hexmod from 'wwand.codec.hex';
+import * as sms_pdu from 'wwand.sms_pdu';
+import * as wmsmod from 'wwand.codec.schema.wms';
 
 function is_me(storage)
 {

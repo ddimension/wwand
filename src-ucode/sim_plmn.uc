@@ -11,9 +11,9 @@
 
 'use strict';
 
-import * as hexmod from './codec/hex.uc';
-import * as uimmod from './codec/schema/uim.uc';
-import * as atcmd from './atcmd.uc';
+import * as hexmod from 'wwand.codec.hex';
+import * as uimmod from 'wwand.codec.schema.uim';
+import * as atcmd from 'wwand.atcmd';
 
 // module-internal aliases (NOT re-exported; import codec/hex.uc directly)
 const hex_to_arr = hexmod.hex_to_arr;

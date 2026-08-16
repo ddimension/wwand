@@ -15,8 +15,8 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as context_common from './context_common.uc';
-import * as bc from './codec/mbim-schema/basic_connect.uc';
+import * as context_common from 'wwand.context_common';
+import * as bc from 'wwand.codec.mbim_schema.basic_connect';
 
 // pdp_type/auth -> MBIM enum maps live in basic_connect.uc (shared with
 // modem_mbim's LTE attach path — bc.IP_TYPE_FROM_PDP / bc.AUTH_FROM_CFG)

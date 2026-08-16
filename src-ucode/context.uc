@@ -22,12 +22,12 @@
 
 'use strict';
 
-import * as qmi_backend from './qmi_backend.uc';
-import * as context_common from './context_common.uc';
-import * as context_monitor_qmi from './context_monitor_qmi.uc';
-import * as wdsmod from './codec/schema/wds.uc';
-import { ENDPOINT_TYPE_HSUSB } from './codec/schema/wda.uc';
-import * as callend from './callend.uc';
+import * as qmi_backend from 'wwand.qmi_backend';
+import * as context_common from 'wwand.context_common';
+import * as context_monitor_qmi from 'wwand.context_monitor_qmi';
+import * as wdsmod from 'wwand.codec.schema.wds';
+import { ENDPOINT_TYPE_HSUSB } from 'wwand.codec.schema.wda';
+import * as callend from 'wwand.callend';
 
 // START_NETWORK can legitimately take a long time (network attach + bearer
 // setup on a congested cell); only then declare the activation dead.

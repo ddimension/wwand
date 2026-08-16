@@ -15,7 +15,7 @@ import * as tlv from 'wwand/codec/tlv.uc';
 import * as dmsmod from 'wwand/codec/schema/dms.uc';
 import * as client_mod from 'wwand/client.uc';
 import * as qom from 'wwand/qmi_over_mbim.uc';
-import * as qmi_pt from 'wwand/codec/mbim-schema/qmi_passthrough.uc';
+import * as qmi_pt from 'wwand/codec/mbim_schema/qmi_passthrough.uc';
 
 uloop.init();
 

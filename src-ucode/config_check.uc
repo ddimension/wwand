@@ -11,10 +11,10 @@
 
 'use strict';
 
-import * as qmi_backend from './qmi_backend.uc';
-import * as modem_quirks from './modem_quirks.uc';
-import * as atcmd from './atcmd.uc';
-import * as nasmod from './codec/schema/nas.uc';
+import * as qmi_backend from 'wwand.qmi_backend';
+import * as modem_quirks from 'wwand.modem_quirks';
+import * as atcmd from 'wwand.atcmd';
+import * as nasmod from 'wwand.codec.schema.nas';
 
 // compare the live modem against self.config + modem_quirks and populate
 // self.config_warnings = [ { check, severity:'warn'|'info', message, expected,

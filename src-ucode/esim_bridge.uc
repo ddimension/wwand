@@ -22,7 +22,7 @@
 
 import * as fs from 'fs';
 import * as uloop from 'uloop';
-import * as sim from './sim.uc';
+import * as sim from 'wwand.sim';
 
 const ESIM_LOGF = '/tmp/wwand/esim-download.log';
 // /usr/bin/lpac is the standard entry point provided by BOTH lpac packages the

@@ -8,6 +8,6 @@
 // Exportless plain script (require()-able); `import` is allowed, `export` isn't.
 'use strict';
 
-import * as loc from './loc.uc';
+import * as loc from 'wwand.codec.schema.loc';
 
 return { s: loc };

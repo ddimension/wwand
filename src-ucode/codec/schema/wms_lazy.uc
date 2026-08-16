@@ -8,6 +8,6 @@
 // Exportless plain script (require()-able); `import` is allowed, `export` isn't.
 'use strict';
 
-import * as wms from './wms.uc';
+import * as wms from 'wwand.codec.schema.wms';
 
 return { s: wms };

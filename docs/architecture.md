@@ -43,7 +43,7 @@ One process. Zero per-context spawns. ~3 MB resident. The measured baseline:
  native (C):   wwand_io.so       — message-oriented cdc-wdm/tty I/O
                                    (protocol-agnostic), rmnet netlink helper
  codec:        qmux.uc, tlv.uc, hex.uc, schema/*.uc  — QMI, declarative
-               mbim.uc, mbim-schema/*.uc             — MBIM, declarative
+               mbim.uc, mbim_schema/*.uc             — MBIM, declarative
  session:      transport.uc (hub/routing), client.uc (QMI correlation),
                mbim_client.uc, qmi_over_mbim.uc (QMI-over-MBIM passthrough hub)
  backends:     QMI  — modem.uc/context.uc + extracted helpers modem_init_qmi.uc,
@@ -149,7 +149,7 @@ runs the `fcc_auth` chain (`qmi_backend.fcc_auth` — DMS Set FCC Authentication
 selects `dms`/`foxconn[:magic]`, `auto` tries both, `off` disables), sets
 online again and retries. An ordinary modem answers online on the first pass and
 never sees an FCC message. MBIM does the equivalent through the vendor Quectel
-Radio State service (`codec/mbim-schema/quectel.uc`, mirroring `mbimcli
+Radio State service (`codec/mbim_schema/quectel.uc`, mirroring `mbimcli
 --quectel-set-radio-state=on`).
 
 ### Datapath (QMAP muxing)

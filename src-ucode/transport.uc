@@ -21,7 +21,7 @@
 
 import * as qmit from 'wwand_io';
 import * as uloop from 'uloop';
-import * as qmux from './codec/qmux.uc';
+import * as qmux from 'wwand.codec.qmux';
 
 // tx congestion: frames queued past this depth report an error upstream
 const TXQ_MAX = 64;

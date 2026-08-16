@@ -9,7 +9,7 @@
 // them back as a value. Mirrors mbim_lazy.uc.
 'use strict';
 
-import * as modem from './modem_ncm.uc';
-import * as context from './context_ncm.uc';
+import * as modem from 'wwand.modem_ncm';
+import * as context from 'wwand.context_ncm';
 
 return { modem: modem, context: context };

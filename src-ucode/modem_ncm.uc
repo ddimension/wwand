@@ -17,13 +17,13 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as atcmd from './atcmd.uc';
-import * as modem_common from './modem_common.uc';
-import * as context_common from './context_common.uc';
-import * as telemetry_ncm from './telemetry_ncm.uc';
-import * as netlink from './netlink.uc';
-import * as sim from './sim.uc';
-import * as ncm_vendors from './ncm_vendors.uc';
+import * as atcmd from 'wwand.atcmd';
+import * as modem_common from 'wwand.modem_common';
+import * as context_common from 'wwand.context_common';
+import * as telemetry_ncm from 'wwand.telemetry_ncm';
+import * as netlink from 'wwand.netlink';
+import * as sim from 'wwand.sim';
+import * as ncm_vendors from 'wwand.ncm_vendors';
 
 const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max

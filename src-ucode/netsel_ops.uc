@@ -18,9 +18,9 @@
 
 'use strict';
 
-import * as quirks from './modem_quirks.uc';
-import * as atcmd from './atcmd.uc';
-import * as nasmod from './codec/schema/nas.uc';
+import * as quirks from 'wwand.modem_quirks';
+import * as atcmd from 'wwand.atcmd';
+import * as nasmod from 'wwand.codec.schema.nas';
 
 // AT+COPS timeouts (netsel AT fallback): the format-set is instant, the read
 // can stall on a busy modem, and a manual COPS SET legitimately runs a full

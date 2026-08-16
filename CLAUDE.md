@@ -15,10 +15,25 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
 - **Package definitions live in ddimension/openwrt-repo** (the feed):
   `wwand/Makefile` there builds, from this repo (git source, pinned via
   PKG_SOURCE_VERSION — bump it there after pushing here), a **backend-neutral
-  base + per-backend split**: `wwand` (daemon/framework/codec/shared core),
-  `wwand-qmi`, `wwand-mbim` (DEPENDS wwand-qmi), `wwand-ncm`, `wwand-esim`,
-  `ucode-mod-wwand-io`. Backends do **not** CONFLICTS the stock handlers — wwand
+  base + per-backend split**: `wwand` (daemon/framework/codec/shared core +
+  the native `wwand_io.so`, which since 2026-08 ships inside the base package —
+  the separate `ucode-mod-wwand-io` package is gone, `PROVIDES` covers old
+  configs), `wwand-qmi`, `wwand-mbim` (DEPENDS wwand-qmi), `wwand-ncm`,
+  `wwand-esim`. Backends do **not** CONFLICTS the stock handlers — wwand
   coexists with uqmi/qmi-advanced/umbim/comgt-ncm and manages only `proto wwand`.
+- **ucode is shipped precompiled to bytecode by default** (production builds),
+  built by the **repo-root `CMakeLists.txt`** alongside `wwand_io.so` — one
+  compiler invocation per file over **explicit source lists** (no glob as build
+  input; a configure-time check fails on list drift, so ADD NEW `.uc` FILES to
+  `WWAND_UCODE_MODULES`/`_PROGRAMS`/`_PLAIN` there). Every intra-tree module
+  name is passed as `dynlink=` so files compile independently (no ordering;
+  imports resolve at runtime via the search path); `-s` keeps the bytecode
+  relocatable; a typo'd import is still a compile error. Dev opt-out:
+  `CONFIG_WWAND_UCODE_SOURCE` (feed menuconfig) / `-DUCODE_PRECOMPILE=OFF`.
+  **Invariants (configure fails otherwise): imports namespaced
+  (`wwand.codec.tlv`), NEVER relative; no hyphens in module paths (hence
+  `codec/mbim_schema/`).** require()-CommonJS shims (top-level `return`,
+  `WWAND_UCODE_PLAIN`) stay source; they may import bytecode modules freely.
 - LuCI packages moved to their own repos: ddimension/luci-proto-wwand,
   luci-app-wwand (sources only; package defs + wwand-lpac entirely in the
   feed repo).
@@ -117,6 +132,12 @@ always `add_protocol wwand`, and `add_protocol qmi` ONLY when
   `ubus_rpc_session: ''` in its args (rpcd injects it).
 
 ## ucode gotchas (hit repeatedly)
+- **Imports MUST be namespaced** (`import … from 'wwand.codec.tlv'`), never
+  relative (`'./codec/tlv.uc'`) — the bytecode precompile resolves modules only
+  via the search path, and the root CMakeLists.txt fails the configure on a
+  relative import. Sibling files in subdirs need the FULL namespace path
+  (`wwand.codec.schema.loc`, not `wwand.loc`). No `-` in module dirs/files.
+  New `.uc` files must be added to the CMakeLists source lists.
 - Self/mutually-referencing `let` arrows (recursion/reschedule) throw
   "Can't access lexical declaration before initialization" → **forward-declare**
   (`let f; f = () => {…}`).
@@ -145,7 +166,8 @@ always `add_protocol wwand`, and `add_protocol qmi` ONLY when
   Fixes that MUST stay there: `CMAKE_SOURCE_SUBDIR:=io` (cmake tree is a
   subdir). All backends (QMI/MBIM/NCM) are **lazy-`require`d** in `daemon.uc`
   (`*_lazy.uc` shims) and ship in their own package — the base `wwand` carries
-  no backend; `wwand-mbim` ships `codec/mbim-schema`. `wwand` DEPENDS pulls
+  no backend; `wwand-mbim` ships `codec/mbim_schema` (underscore — bytecode
+  module names cannot carry hyphens). `wwand` DEPENDS pulls
   `+ucode-mod-struct` etc. — apk install resolves the ucode deps. Bump
   PKG_RELEASE or `apk add --force-reinstall`.
 

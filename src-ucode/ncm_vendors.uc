@@ -8,7 +8,7 @@
 
 'use strict';
 
-import * as telemetry_ncm from './telemetry_ncm.uc';
+import * as telemetry_ncm from 'wwand.telemetry_ncm';
 
 // --- AT command model (shared with context_ncm.uc) ---------------------------
 // pdp_type -> the 3GPP PDP type string used in AT+CGDCONT and the Quectel

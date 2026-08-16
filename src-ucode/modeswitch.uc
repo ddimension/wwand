@@ -21,7 +21,7 @@
 
 'use strict';
 
-import * as atcmd from './atcmd.uc';
+import * as atcmd from 'wwand.atcmd';
 
 // per-vendor recipes, matched against the manufacturer (AT+CGMI) or model
 // (AT+CGMM) string (case-insensitive). `want`/`query`/`query_re` enable the

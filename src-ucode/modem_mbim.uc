@@ -16,31 +16,31 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as transport_mod from './transport.uc';
-import * as mbim_client from './mbim_client.uc';
-import * as modem_common from './modem_common.uc';
-import * as mbimmod from './codec/mbim.uc';
-import * as telemetry_mbim from './telemetry_mbim.uc';
-import * as netlink from './netlink.uc';
-import * as bc from './codec/mbim-schema/basic_connect.uc';
-import * as ext from './codec/mbim-schema/ms_basic_connect_ext.uc';
-import * as context_common from './context_common.uc';
-import * as quectel_svc from './codec/mbim-schema/quectel.uc';
+import * as transport_mod from 'wwand.transport';
+import * as mbim_client from 'wwand.mbim_client';
+import * as modem_common from 'wwand.modem_common';
+import * as mbimmod from 'wwand.codec.mbim';
+import * as telemetry_mbim from 'wwand.telemetry_mbim';
+import * as netlink from 'wwand.netlink';
+import * as bc from 'wwand.codec.mbim_schema.basic_connect';
+import * as ext from 'wwand.codec.mbim_schema.ms_basic_connect_ext';
+import * as context_common from 'wwand.context_common';
+import * as quectel_svc from 'wwand.codec.mbim_schema.quectel';
 // rich telemetry: native-MBIM backend + the QMI-over-MBIM passthrough (the whole
 // QMI client stack tunnelled over the open MBIM channel) + AT, chosen per
 // capability like modem.uc does over qmux.
-import * as backend from './backend.uc';
-import * as mbim_backend from './mbim_backend.uc';
-import * as qmi_backend from './qmi_backend.uc';
-import * as qom from './qmi_over_mbim.uc';
-import * as client_mod from './client.uc';
-import * as ctlmod from './codec/schema/ctl.uc';
-import * as nasmod from './codec/schema/nas.uc';
-import * as dsdmod from './codec/schema/dsd.uc';
-import * as uimmod from './codec/schema/uim.uc';
-import * as wmsmod from './codec/schema/wms.uc';
-import * as dmsmod from './codec/schema/dms.uc';
-import * as sim from './sim.uc';
+import * as backend from 'wwand.backend';
+import * as mbim_backend from 'wwand.mbim_backend';
+import * as qmi_backend from 'wwand.qmi_backend';
+import * as qom from 'wwand.qmi_over_mbim';
+import * as client_mod from 'wwand.client';
+import * as ctlmod from 'wwand.codec.schema.ctl';
+import * as nasmod from 'wwand.codec.schema.nas';
+import * as dsdmod from 'wwand.codec.schema.dsd';
+import * as uimmod from 'wwand.codec.schema.uim';
+import * as wmsmod from 'wwand.codec.schema.wms';
+import * as dmsmod from 'wwand.codec.schema.dms';
+import * as sim from 'wwand.sim';
 
 const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max

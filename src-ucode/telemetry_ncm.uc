@@ -8,9 +8,9 @@
 
 'use strict';
 
-import * as atcmd from './atcmd.uc';
-import * as modem_common from './modem_common.uc';
-import * as nasmod from './codec/schema/nas.uc';
+import * as atcmd from 'wwand.atcmd';
+import * as modem_common from 'wwand.modem_common';
+import * as nasmod from 'wwand.codec.schema.nas';
 
 // like modem_common.dsd_from_serving, but tagged source:'at' — on the NCM
 // backend the QENG/serving parse IS the AT source (the QMI path tags at the

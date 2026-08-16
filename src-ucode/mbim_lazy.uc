@@ -9,7 +9,7 @@
 // them through the proper module path) and hands them back as a value.
 'use strict';
 
-import * as modem from './modem_mbim.uc';
-import * as context from './context_mbim.uc';
+import * as modem from 'wwand.modem_mbim';
+import * as context from 'wwand.context_mbim';
 
 return { modem: modem, context: context };

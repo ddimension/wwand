@@ -4,7 +4,7 @@
 
 import { eq, ok, done } from './lib/check.uc';
 import * as mbim from 'wwand/codec/mbim.uc';
-import * as bc from 'wwand/codec/mbim-schema/basic_connect.uc';
+import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
 import * as context_mbim from 'wwand/context_mbim.uc';
 
 function p32(v) {

@@ -18,7 +18,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as mbim from './codec/mbim.uc';
+import * as mbim from 'wwand.codec.mbim';
 
 const DEFAULT_TIMEOUT = 15000;
 const OPEN_TIMEOUT = 10000;

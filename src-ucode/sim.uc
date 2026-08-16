@@ -17,10 +17,10 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as hexmod from './codec/hex.uc';
-import * as backend from './backend.uc';
-import * as uimmod from './codec/schema/uim.uc';
-import * as sim_plmn from './sim_plmn.uc';
+import * as hexmod from 'wwand.codec.hex';
+import * as backend from 'wwand.backend';
+import * as uimmod from 'wwand.codec.schema.uim';
+import * as sim_plmn from 'wwand.sim_plmn';
 
 const QMI_ERR_NO_EFFECT = 26;
 

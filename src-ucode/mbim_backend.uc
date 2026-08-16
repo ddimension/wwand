@@ -23,12 +23,12 @@
 'use strict';
 
 import * as struct from 'struct';
-import * as mbim from './codec/mbim.uc';
-import * as hexmod from './codec/hex.uc';
-import * as bc from './codec/mbim-schema/basic_connect.uc';
-import * as ext from './codec/mbim-schema/ms_basic_connect_ext.uc';
-import * as fibocom from './codec/mbim-schema/fibocom.uc';
-import * as compal from './codec/mbim-schema/compal.uc';
+import * as mbim from 'wwand.codec.mbim';
+import * as hexmod from 'wwand.codec.hex';
+import * as bc from 'wwand.codec.mbim_schema.basic_connect';
+import * as ext from 'wwand.codec.mbim_schema.ms_basic_connect_ext';
+import * as fibocom from 'wwand.codec.mbim_schema.fibocom';
+import * as compal from 'wwand.codec.mbim_schema.compal';
 
 // --- native MBIM MS UICC Low Level Access (eSIM/APDU) ------------------------
 // Service UUID + CIDs and buffer layouts verified against libmbim 1.32

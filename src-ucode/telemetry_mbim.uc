@@ -22,13 +22,13 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as tlv from './codec/tlv.uc';
-import * as backend from './backend.uc';
-import * as qmi_backend from './qmi_backend.uc';
-import * as mbim_backend from './mbim_backend.uc';
-import * as modem_common from './modem_common.uc';
-import * as atcmd from './atcmd.uc';
-import * as bc from './codec/mbim-schema/basic_connect.uc';
+import * as tlv from 'wwand.codec.tlv';
+import * as backend from 'wwand.backend';
+import * as qmi_backend from 'wwand.qmi_backend';
+import * as mbim_backend from 'wwand.mbim_backend';
+import * as modem_common from 'wwand.modem_common';
+import * as atcmd from 'wwand.atcmd';
+import * as bc from 'wwand.codec.mbim_schema.basic_connect';
 
 export function install(self, o)
 {

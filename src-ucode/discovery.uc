@@ -20,7 +20,7 @@
 'use strict';
 
 import { glob, readlink, lsdir, access, open, realpath } from 'fs';
-import * as atcmd from './atcmd.uc';
+import * as atcmd from 'wwand.atcmd';
 
 // datapath drivers that mean "no rich control protocol — driven over AT"
 const NCM_DRIVERS = { cdc_ncm: true, cdc_ether: true, rndis_host: true };

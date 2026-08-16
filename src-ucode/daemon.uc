@@ -7,13 +7,13 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as apndb from './apndb.uc';
-import * as netsel_ops from './netsel_ops.uc';
-import * as simops from './simops.uc';
-import * as hwops from './hwops.uc';
-import * as nlmod from './netlink.uc';
-import * as reconnect from './reconnect.uc';
-import * as ctx_settings from './ctx_settings.uc';
+import * as apndb from 'wwand.apndb';
+import * as netsel_ops from 'wwand.netsel_ops';
+import * as simops from 'wwand.simops';
+import * as hwops from 'wwand.hwops';
+import * as nlmod from 'wwand.netlink';
+import * as reconnect from 'wwand.reconnect';
+import * as ctx_settings from 'wwand.ctx_settings';
 
 // backends load lazily; a missing package returns null (cached failure) so
 // start_modem reports it clearly instead of crashing. Lazy also so a QMI-only

@@ -21,7 +21,7 @@
 'use strict';
 
 import * as struct from 'struct';
-import { utf16le_encode, utf16le_decode } from '../mbim.uc';
+import { utf16le_encode, utf16le_decode } from 'wwand.codec.mbim';
 
 export const SERVICE_UUID = '3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf';
 export const service = SERVICE_UUID;

@@ -14,20 +14,20 @@
 
 import * as uloop from 'uloop';
 import * as fs from 'fs';
-import * as transport_mod from './transport.uc';
-import * as client_mod from './client.uc';
-import * as sim from './sim.uc';
-import * as netlink from './netlink.uc';
-import * as qmi_backend from './qmi_backend.uc';
-import * as modem_common from './modem_common.uc';
-import * as regdetail from './regdetail.uc';
-import * as telemetry_qmi from './telemetry_qmi.uc';
-import * as config_check from './config_check.uc';
-import * as modem_init_qmi from './modem_init_qmi.uc';
-import * as ctlmod from './codec/schema/ctl.uc';
-import * as dmsmod from './codec/schema/dms.uc';
-import * as nasmod from './codec/schema/nas.uc';
-import * as uimmod from './codec/schema/uim.uc';
+import * as transport_mod from 'wwand.transport';
+import * as client_mod from 'wwand.client';
+import * as sim from 'wwand.sim';
+import * as netlink from 'wwand.netlink';
+import * as qmi_backend from 'wwand.qmi_backend';
+import * as modem_common from 'wwand.modem_common';
+import * as regdetail from 'wwand.regdetail';
+import * as telemetry_qmi from 'wwand.telemetry_qmi';
+import * as config_check from 'wwand.config_check';
+import * as modem_init_qmi from 'wwand.modem_init_qmi';
+import * as ctlmod from 'wwand.codec.schema.ctl';
+import * as dmsmod from 'wwand.codec.schema.dms';
+import * as nasmod from 'wwand.codec.schema.nas';
+import * as uimmod from 'wwand.codec.schema.uim';
 // loc.uc + wms.uc are lazy-loaded (require of a *_lazy shim) only when GPS /
 // SMS is actually used, keeping those schemas off the heap on the common path.
 

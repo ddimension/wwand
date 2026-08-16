@@ -17,9 +17,9 @@
 
 import * as uloop from 'uloop';
 import * as fs from 'fs';
-import * as tlv from './codec/tlv.uc';
-import * as qmi_backend from './qmi_backend.uc';
-import * as context_common from './context_common.uc';
+import * as tlv from 'wwand.codec.tlv';
+import * as qmi_backend from 'wwand.qmi_backend';
+import * as context_common from 'wwand.context_common';
 
 export function install(self, o)
 {

@@ -13,8 +13,8 @@
 
 'use strict';
 
-import * as netlink from './netlink.uc';
-import * as wdamod from './codec/schema/wda.uc';
+import * as netlink from 'wwand.netlink';
+import * as wdamod from 'wwand.codec.schema.wda';
 
 // QMAP aggregation maxima offered to the modem in SET_DATA_FORMAT: downlink
 // datagrams per aggregate (matches the qmi_wwan/rmnet driver default) and the

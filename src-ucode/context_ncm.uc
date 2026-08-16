@@ -24,8 +24,8 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as context_common from './context_common.uc';
-import * as ncm from './modem_ncm.uc';
+import * as context_common from 'wwand.context_common';
+import * as ncm from 'wwand.modem_ncm';
 
 export function create(opts)
 {

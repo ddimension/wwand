@@ -17,7 +17,7 @@ import * as struct from 'struct';
 import * as mbim_mockhub from './lib/mbim_mockhub.uc';
 import * as modem_mbim from 'wwand/modem_mbim.uc';
 import * as context_mbim from 'wwand/context_mbim.uc';
-import * as bc from 'wwand/codec/mbim-schema/basic_connect.uc';
+import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
 
 uloop.init();
 

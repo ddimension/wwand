@@ -19,8 +19,8 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as tlv from './codec/tlv.uc';
-import * as qmux from './codec/qmux.uc';
+import * as tlv from 'wwand.codec.tlv';
+import * as qmux from 'wwand.codec.qmux';
 
 const DEFAULT_TIMEOUT = 10000;
 

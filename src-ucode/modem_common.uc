@@ -6,15 +6,15 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as atcmd from './atcmd.uc';
-import * as protoswitch from './protocol_switch.uc';
-import * as recovery_mod from './recovery.uc';
-import * as netlink from './netlink.uc';
-import * as tlv from './codec/tlv.uc';
-import * as nasmod from './codec/schema/nas.uc';
-import * as ratmod from './codec/schema/rat.uc';
-import * as merge from './codec/schema/merge.uc';
-import * as arfcn_bands from './codec/arfcn_bands.uc';
+import * as atcmd from 'wwand.atcmd';
+import * as protoswitch from 'wwand.protocol_switch';
+import * as recovery_mod from 'wwand.recovery';
+import * as netlink from 'wwand.netlink';
+import * as tlv from 'wwand.codec.tlv';
+import * as nasmod from 'wwand.codec.schema.nas';
+import * as ratmod from 'wwand.codec.schema.rat';
+import * as merge from 'wwand.codec.schema.merge';
+import * as arfcn_bands from 'wwand.codec.arfcn_bands';
 
 // scrub NAS cell-info sentinel metrics (-32768 = "not measured") to null so
 // consumers never render the sentinel as a real dBm value.
@@ -715,6 +715,26 @@ export function collect_caps(self, cb)
 	});
 };
 
+// coarse current RAT from the always-present NAS radio_ifs (highest-tech wins):
+// the steady-state fallback for rat_label when neither DSD (no such service on
+// older/simple QMI modems, e.g. Huawei E392) nor QNWINFO (non-Quectel) named the
+// mode. Mirrors format_telemetry's radio_ifs-derived `tech`, so status `rat`
+// stays consistent with the telemetry log line instead of showing null on a
+// registered modem. NR5G(12) > LTE(8) > TD-SCDMA(9)/UMTS(5) > EVDO(2) > GSM(4)/
+// CDMA(1). Returns a canonical rat object or null.
+const RADIO_IF_RANK = { '12': 6, '8': 5, '9': 4, '5': 4, '2': 3, '4': 2, '1': 1 };
+export function rat_from_radio_ifs(radio_ifs)
+{
+	let best = null, best_rank = -1;
+
+	for (let r in (radio_ifs ?? [])) {
+		let rank = RADIO_IF_RANK[sprintf('%d', r)] ?? 0;
+		if (rank > best_rank) { best_rank = rank; best = r; }
+	}
+
+	return best != null ? ratmod.from_qmi_radio_if(best) : null;
+};
+
 // probe_iot_rat(self, cb): identify the active radio-access technology to the
 // fine IoT granularity that QMI/MBIM structured data cannot express — NB-IoT,
 // LTE-M (Cat-M1/eMTC), RedCap, the 5G NSA/SA split — over the shared AT side
@@ -738,7 +758,13 @@ export function probe_iot_rat(self, cb)
 		// so a finer source wins — but ALSO so a fresh DSD "5G-NSA" is not masked
 		// by a QNWINFO that only reported the LTE anchor (the old `fine ?? base`
 		// let a coarser QNWINFO always win). fine==null -> base; base==null -> fine.
-		self.rat_fine = ratmod.merge(ratmod.from_dsd_mode(self.dsd_status?.mode), fine);
+		// The DSD mode is populated only by the fast/watched loop; when it is
+		// absent (steady state, or a modem with no DSD service like the E392),
+		// fall back to the coarse RAT from the always-present NAS radio_ifs so a
+		// registered modem never reports rat=null while its telemetry logs LTE.
+		let base = ratmod.from_dsd_mode(self.dsd_status?.mode)
+		           ?? rat_from_radio_ifs(self.reg?.radio_ifs);
+		self.rat_fine = ratmod.merge(base, fine);
 		self.rat_label = self.rat_fine ? ratmod.label(self.rat_fine) : null;
 
 		if (self.rat_fine?.rat) {

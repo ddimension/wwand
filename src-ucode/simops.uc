@@ -7,8 +7,8 @@
 
 'use strict';
 
-import * as sim from './sim.uc';
-import * as sms from './sms.uc';
+import * as sim from 'wwand.sim';
+import * as sms from 'wwand.sms';
 
 export function install(self, o)
 {

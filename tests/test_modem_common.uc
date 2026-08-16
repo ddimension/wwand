@@ -495,6 +495,19 @@ l = mc.format_telemetry({
 });
 ok(index(l, 'tech=LTE') >= 0, 'ft: non-IoT rat_fine leaves coarse tech intact');
 
+// --- rat_from_radio_ifs: coarse rat_label fallback (E392-class, no DSD/QNWINFO)
+eq(mc.rat_from_radio_ifs([ 8 ])?.rat, 'lte', 'radio_ifs: [8] -> lte');
+eq(mc.rat_from_radio_ifs([ 5 ])?.rat, 'umts', 'radio_ifs: [5] -> umts');
+eq(mc.rat_from_radio_ifs([ 4 ])?.rat, 'gsm', 'radio_ifs: [4] -> gsm');
+eq(mc.rat_from_radio_ifs([ 12 ])?.rat, 'nr5g', 'radio_ifs: [12] -> nr5g');
+// highest-tech wins when several are present (order-independent)
+eq(mc.rat_from_radio_ifs([ 4, 8, 5 ])?.rat, 'lte', 'radio_ifs: mixed -> highest (lte)');
+eq(mc.rat_from_radio_ifs([ 8, 12 ])?.rat, 'nr5g', 'radio_ifs: lte+nr -> nr5g');
+// empty / absent / unknown -> null (no coarse rat)
+ok(mc.rat_from_radio_ifs([]) == null, 'radio_ifs: empty -> null');
+ok(mc.rat_from_radio_ifs(null) == null, 'radio_ifs: null -> null');
+ok(mc.rat_from_radio_ifs([ 99 ]) == null, 'radio_ifs: unknown value -> null');
+
 // --- check_identity: post-open stable-identity gate --------------------------
 let ci_events;
 let ci_emit = (ev, d) => push(ci_events, [ ev, d ]);

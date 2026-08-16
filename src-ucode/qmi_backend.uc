@@ -15,10 +15,10 @@
 
 'use strict';
 
-import * as backend from './backend.uc';
-import * as dmsmod from './codec/schema/dms.uc';
-import * as dsdmod from './codec/schema/dsd.uc';
-import * as nasmod from './codec/schema/nas.uc';
+import * as backend from 'wwand.backend';
+import * as dmsmod from 'wwand.codec.schema.dms';
+import * as dsdmod from 'wwand.codec.schema.dsd';
+import * as nasmod from 'wwand.codec.schema.nas';
 
 const OPMODE = {
 	online:    dmsmod.OPMODE_ONLINE,

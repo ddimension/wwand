@@ -14,18 +14,18 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as sim from './sim.uc';
-import * as backend from './backend.uc';
-import * as qmi_backend from './qmi_backend.uc';
-import * as modem_common from './modem_common.uc';
-import * as modem_quirks from './modem_quirks.uc';
-import * as atcmd from './atcmd.uc';
-import * as datapath_qmi from './datapath_qmi.uc';
-import * as nasmod from './codec/schema/nas.uc';
-import * as dmsmod from './codec/schema/dms.uc';
-import * as uimmod from './codec/schema/uim.uc';
-import * as wdsmod from './codec/schema/wds.uc';
-import * as dsdmod from './codec/schema/dsd.uc';
+import * as sim from 'wwand.sim';
+import * as backend from 'wwand.backend';
+import * as qmi_backend from 'wwand.qmi_backend';
+import * as modem_common from 'wwand.modem_common';
+import * as modem_quirks from 'wwand.modem_quirks';
+import * as atcmd from 'wwand.atcmd';
+import * as datapath_qmi from 'wwand.datapath_qmi';
+import * as nasmod from 'wwand.codec.schema.nas';
+import * as dmsmod from 'wwand.codec.schema.dms';
+import * as uimmod from 'wwand.codec.schema.uim';
+import * as wdsmod from 'wwand.codec.schema.wds';
+import * as dsdmod from 'wwand.codec.schema.dsd';
 
 const SYNC_TRIES = 10;
 const MODES_TRIES = 3;
