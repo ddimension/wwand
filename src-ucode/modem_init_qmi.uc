@@ -65,6 +65,14 @@ export function install(self, o)
 	};
 
 	step_sync = (tries) => {
+		// the transport can vanish between scheduling and firing: a hotplug remove
+		// tears the modem down (teardown() nulls self.ctl + cancels timers), but an
+		// already-expired sync-retry timer can still run this callback in the same
+		// uloop iteration. Bail if the control client is gone — the modem stays
+		// ABSENT and the re-add path restarts init with a fresh self.ctl.
+		if (!self.ctl)
+			return;
+
 		self.set_state('INIT_TRANSPORT');
 
 		// deferred init resets: NV-changing steps push a reason here; ONE reset is
