@@ -1,7 +1,45 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-12. All test suites green (42 suites).
+_Last updated: 2026-08-16. All test suites green (42 suites).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+
+## MBIM 5G caps, passthrough parity, coexistence + uptime fixes (2026-08-16)
+
+A cluster of correctness fixes, several from forum HW reports:
+
+- **MBIM caps read 5G from the CUSTOM `custom_data_class` string.** The Quectel
+  RM520N-GL (93) leaves the 5G bits unset in the base `DEVICE_CAPS.data_class`
+  (`0x8000003C` = CUSTOM|UMTS|HSxPA|LTE) and describes the extra classes in the
+  free-text `custom_data_class` ("5G/TDS"). `rat.families_from_mbim(dataclass,
+  custom)` now parses that string **only when the CUSTOM bit is set** (no phantom
+  5G on an empty/absent string), so `caps.rats` reports `nr5g`. HW-validated on 93;
+  test_rat golden + negatives. See [[qmi-over-mbim-passthrough]].
+- **QMI-over-MBIM passthrough is REQUEST/RESPONSE ONLY.** HW-probed on EG06 (246)
+  and RM520N (93): both accept NAS `REGISTER_INDICATIONS` over the passthrough
+  (`err=null`) but never push a single unsolicited QMI message back as MBIM
+  `INDICATE_STATUS` — so MBIM telemetry stays poll-based (`watch_driver`); you
+  cannot subscribe over the passthrough. `qmi_over_mbim.deliver` still fans a
+  `0xff` broadcast indication out to every same-service client (parity with the
+  native `transport.uc` hub — it was silently dropping them); test_passthrough
+  +5 checks. Kept correct for any firmware that would forward them; none on the
+  fleet does. **Do not re-run that probe.**
+- **Autosetup device-ownership coexistence.** The zero-config occupancy gate
+  (`main.uc autosetup_create`) treated the box as configured only for an existing
+  `wwand_modem`, a `proto wwand`/`qmi` interface, or a `wwan0` section — a stock
+  umbim (`proto mbim`) / comgt-ncm (`proto ncm`) interface under another name
+  slipped through, so autosetup could auto-grab a cdc-wdm the stock stack already
+  owns and open a second session. Now `proto mbim`/`ncm` count as occupied too —
+  the good-citizen device-ownership contract (raised in the openwrt/packages
+  review, #30185).
+- **Uptime uses a monotonic clock.** A context's connected uptime was
+  `time() - connected_since`, both wall-clock. On an RTC-less PCIe/MHI board the
+  modem connects at boot **before** NTP sets the clock, so the NTP step then made
+  uptime jump by the offset (forum tester LS3434 saw a constant ~18 h on a
+  Foxconn/Dell T99W175). New `context_common.mono()` (CLOCK_MONOTONIC via
+  `clock(true)`) is used for both capture and read across all three backends;
+  test_context covers it. (Same thread: 5G band info reaches LuCI natively — the
+  NR band is derived client-side from `nr5g_arfcn`, which both the passthrough
+  `GET_CELL_LOCATION_INFO` and native MBIM `BASE_STATIONS_INFO` populate.)
 
 ## Never block the uloop: async netifd calls + native recv/waitpid timeouts (2026-08-14)
 
