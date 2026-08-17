@@ -37,6 +37,14 @@ Not a lab-only stack. Running on production hardware here across all three contr
 | Zyxel NR7101 (ipq40xx) | Quectel RG502Q | QMI |
 | Cudy LT300 v3 | MeiG SLM770A | NCM (cdc_ncm/AT) |
 | (mipsel) | Fibocom-class | MBIM |
+| PCIe/MHI host (indep. tester @LS3434) | Foxconn T99W175 | MBIM over **MHI** |
+
+The **PCIe/MHI** row is independent third-party validation from a forum tester
+([@LS3434](https://forum.openwrt.org/t/looking-for-pcie-mhi-modem-testers-native-qmi-mbim-connection-manager-wwand/252692)):
+their testing on a Foxconn T99W175 drove the two kernel-`wwan`/MHI portability
+fixes now in the tree (resolve the control protocol from the wwan port type;
+locate the data netdev of a wwan control node), extending coverage beyond USB
+to the MHI transport across both arches.
 
 Field-proven behaviors that motivated the project: recovery ladder (opmode-cycle → modem-reset → GPIO/power-cycle → reboot), non-destructive reload (IPv6-PD/VRF preserved), QMAP multi-PDP, GDSP/M2M provider-SIM handling, board power/reset/LED profiles.
 
@@ -48,15 +56,19 @@ Addressed in the tree (and the packaging nits from the bot review):
 - Token sanitizer for every sysfs-bound value; hardened the C spawn plumbing.
 - Closed real test gaps (vendor telemetry, netlink endpoint derivation, AT parser robustness).
 - ModemManager config migration (`proto modemmanager` → `proto wwand`) as a user feature.
-- Fixed the bot's packaging points: `+ucode` (not `+libucode`), `SUBMENU:=WWAN` on wwand-esim, `$(CMAKE_BINARY_DIR)`, removed the dead `qmi-advanced` CONFLICTS entry.
+- Fixed the bot's packaging points: `+ucode` (not `+libucode`), `SUBMENU:=WWAN` on wwand-esim, `$(CMAKE_BINARY_DIR)`, removed the dead CONFLICTS entries (and every stray `qmi-advanced` mention — it was never an official package).
+- **`test-version.sh` added** for the generic CI version check across all three installed executables (`wwand`, `wwandctl`, `migrate`).
 
-Still open from the bot review, will address in the next Makefile revision:
-- the glob-then-`rm` split in `Package/wwand/install` (switch the base package to an explicit file list so a new backend file can never be double-owned);
-- add the generic `test-version.sh`.
+Landing together in the v1.3.0 Makefile revision:
+- **glob-then-`rm` split → explicit per-file list** in `Package/wwand/install`, so a new backend file can never be silently double-owned.
+- **New `wwand-mhi` package** answering Makefile:120 (MHI drivers): PCIe/MHI modems live on the kernel `wwan` subsystem and need the MHI driver stack, not the USB kmods. `wwand-mhi` pulls `kmod-mhi-pci-generic` + `kmod-mhi-wwan-ctrl` + `kmod-mhi-wwan-mbim` + `kmod-mhi-net` and ships the `wwan`-subsystem hotplug — moved out of the base package, since procd only arms a subsystem whose hotplug dir exists. Backend-neutral: pair with wwand-qmi or wwand-mbim.
+- `codec/mbim-schema/` → `codec/mbim_schema/` install-path rename (matches the source tree).
+
+On the bot's Makefile:215 (reuse stock `ucode-mod-io`): evaluated — the stock module is generic file I/O; wwand's native module does message-oriented cdc-wdm/tty framing plus an rmnet netlink helper, which the stock module does not provide. It stays wwand-private and version-locked to the ucode side.
 
 ## 6. On device ownership under coexistence (bot's question)
 
-`CONFLICTS` previously guaranteed only one stack could touch a given `/dev/cdc-wdmX`. Under coexistence that guarantee is now a **runtime** property: wwand opens a control device only for an interface it manages (`proto wwand`, or `proto qmi` only under `takeover`), so with `takeover` off it never contends with uqmi/qmi-advanced for the same node. The LuCI migration flow additionally warns the operator to stop/disable the stock dialer for a modem it's taking over. This is the same additive-ownership model ModemManager uses.
+`CONFLICTS` previously guaranteed only one stack could touch a given `/dev/cdc-wdmX`. Under coexistence that guarantee is now a **runtime** property: wwand opens a control device only for an interface it manages (`proto wwand`, or `proto qmi` only under `takeover`), so with `takeover` off it never contends with uqmi for the same node. The LuCI migration flow additionally warns the operator to stop/disable the stock dialer for a modem it's taking over. This is the same additive-ownership model ModemManager uses.
 
 ## 7. Request
 

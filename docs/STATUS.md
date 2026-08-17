@@ -1,6 +1,7 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-16. All test suites green (42 suites).
+_Last updated: 2026-08-16. 44 host suites (42 green; test_modem_mbim_sim +
+test_ncm_atdiscover are timing-flaky under host CPU load, green on a clean run).
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
 
 ## Bytecode precompile, namespaced imports, io merge, radio_ifs rat fallback (2026-08-16)

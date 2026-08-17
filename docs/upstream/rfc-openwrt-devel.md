@@ -13,7 +13,7 @@ question for the WWAN/netifd area, not a packaging one.
 ## What wwand is
 
 wwand is an event-driven cellular connection manager written in ucode, built
-around uloop/ubus/UCI/netifd. It replaces a bash `qmi-advanced` dialer I've run
+around uloop/ubus/UCI/netifd. It replaces a bash QMI dialer I've run
 since ~2014 and encodes a lot of field-earned modem-quirk handling. It speaks
 QMI, MBIM and NCM/AT itself (native qmux/tlv codec + MBIM, no uqmi/mbimcli
 spawning), owns the connection lifecycle, and drives netifd over ubus

@@ -145,7 +145,10 @@ To add a backend `xyz`:
    shared core in `src-ucode/modem_common.uc` (`scaffolding`, `make_fail`,
    `note_connect_failure_light`, `watch_driver`, `open_at`/`close_at`/
    `telemetry_at`) and `context_common.uc` (`rx_stall_watch`, `zero_rx_limit_ms`)
-   — do NOT re-implement them.
+   — do NOT re-implement them. **Import other modules by namespace**
+   (`import * as foo from 'wwand.foo'`), never relative (`'./foo.uc'`), and use
+   `_` not `-` in file/dir names — the bytecode precompile resolves modules only
+   via the search path and cannot map hyphens (see `docs/architecture.md`).
 2. **Lazy shim** — `src-ucode/xyz_lazy.uc` (an exportless plain script that
    `import`s the modules and returns `{ modem, context }`), because ucode's
    `require()` cannot load ES modules directly.
@@ -154,8 +157,12 @@ To add a backend `xyz`:
 4. **Discovery** — teach `src-ucode/discovery.uc` `resolve_control(cfg)` to map
    the modem's driver/device to `xyz`.
 5. **Package** — a `wwand-xyz` package in the feed Makefile (`DEPENDS +wwand`)
-   and the file list. Do **not** `CONFLICTS` the stock handler — wwand coexists
-   with it and only manages `proto wwand` interfaces.
+   with an **explicit per-file install list** (no glob-then-`rm` — every module
+   is owned by exactly one package). Add each new `.uc` to the source lists in
+   the repo-root **`CMakeLists.txt`** (`WWAND_UCODE_MODULES` for `export`
+   modules, `_PLAIN` for `require()`d CommonJS shims) or the bytecode build's
+   configure-time completeness check fails. Do **not** `CONFLICTS` the stock
+   handler — wwand coexists with it and only manages `proto wwand` interfaces.
 6. **Migration** — if the modem is normally driven by a stock netifd proto, add
    that proto to `migrate_plan` so a `proto xyz` interface converts to `proto
    wwand` + `wwand_modem` (user-triggered from the LuCI modem list / migrate CLI).

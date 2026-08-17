@@ -3,7 +3,7 @@
 // wwand — configuration model. parse(raw) is pure (raw = uci get_all() section
 // objects) so it stays host-testable; UCI access itself lives in main.uc.
 //
-// Compat: stock/old-style qmi-advanced interfaces (proto 'wwand'|'qmi' with the
+// Compat: stock/legacy-style qmi interfaces (proto 'wwand'|'qmi' with the
 // connection carried inline, no `option modem`) are translated in-memory (parent
 // netdev -> synthesized modem, interface -> context); bash-only options warn +
 // are ignored. The one-shot migrator (migrate_plan) upgrades them to the
@@ -345,7 +345,7 @@ export function parse_netdev(device)
 	return { netdev: device, mux_id: 0, muxed: false };
 };
 
-// merge the modem-level options an old-style qmi-advanced interface section
+// merge the modem-level options a legacy-style qmi interface section
 // carries into the synthesized modem (first interface wins; conflicts warn).
 function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 {
@@ -485,7 +485,7 @@ function compat_translate(raw, result)
 		if (s.proto == 'qmi' && !result.globals.takeover)
 			continue;
 
-		// --- old-style qmi-advanced interface ---------------------------
+		// --- legacy-style qmi interface ---------------------------
 
 		for (let opt in OLD_DEPRECATED)
 			if (s[opt] != null && s[opt] != '' && s[opt] != '0')

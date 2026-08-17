@@ -1,7 +1,7 @@
 # wwand — project guide for Claude
 
 wwand is an event-driven **ucode** QMI/MBIM connection manager for OpenWrt,
-replacing the old bash `qmi-advanced` dialer. Repo: github.com/ddimension/wwand.
+replacing the legacy bash QMI dialer. Repo: github.com/ddimension/wwand.
 Everything is English. Commit/push only when asked.
 
 ## Layout
@@ -19,8 +19,10 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   the native `wwand_io.so`, which since 2026-08 ships inside the base package —
   the separate `ucode-mod-wwand-io` package is gone, `PROVIDES` covers old
   configs), `wwand-qmi`, `wwand-mbim` (DEPENDS wwand-qmi), `wwand-ncm`,
-  `wwand-esim`. Backends do **not** CONFLICTS the stock handlers — wwand
-  coexists with uqmi/qmi-advanced/umbim/comgt-ncm and manages only `proto wwand`.
+  `wwand-mhi` (PCIe/MHI transport + MHI kmods + the wwan-subsystem hotplug;
+  backend-neutral, pair with wwand-qmi/-mbim), `wwand-esim`. Backends do **not**
+  CONFLICTS the stock handlers — wwand coexists with uqmi/umbim/comgt-ncm and
+  manages only `proto wwand`.
 - **ucode is shipped precompiled to bytecode by default** (production builds),
   built by the **repo-root `CMakeLists.txt`** alongside `wwand_io.so` — one
   compiler invocation per file over **explicit source lists** (no glob as build
@@ -28,7 +30,11 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   `WWAND_UCODE_MODULES`/`_PROGRAMS`/`_PLAIN` there). Every intra-tree module
   name is passed as `dynlink=` so files compile independently (no ordering;
   imports resolve at runtime via the search path); `-s` keeps the bytecode
-  relocatable; a typo'd import is still a compile error. Dev opt-out:
+  relocatable; a typo'd import is still a compile error. **Graceful fallback:** a
+  configure-time capability probe checks the host ucode can actually emit a
+  bytecode module with these flags — an older/absent ucode (e.g. openwrt-25.12
+  ships an older ucode than snapshot) DOES NOT fail the build, it ships the
+  ucode SOURCE instead (functional, no bytecode start-up win). Dev opt-out:
   `CONFIG_WWAND_UCODE_SOURCE` (feed menuconfig) / `-DUCODE_PRECOMPILE=OFF`.
   **Invariants (configure fails otherwise): imports namespaced
   (`wwand.codec.tlv`), NEVER relative; no hyphens in module paths (hence
@@ -191,9 +197,9 @@ So after a tar/cp deploy: **`chmod +x /usr/sbin/wwand /lib/netifd/proto/wwand.sh
 then `/etc/init.d/wwand restart` + `/etc/init.d/network restart`. The `.uc`
 modules under `/usr/share/ucode/wwand/` are imported, not exec'd — they don't
 need +x. The apk pkg is fine (Makefile uses INSTALL_BIN). Note: with `takeover`
-off wwand does NOT register `proto qmi`, so a stock `qmi-advanced.sh`/uqmi keeps
+off wwand does NOT register `proto qmi`, so uqmi’s `qmi.sh` keeps
 `proto qmi` — expected coexistence, not a bug. (Only under `takeover` do both
-register `qmi`; then a **stale `qmi-advanced.sh`** could still shadow wwand.)
+register `qmi`; then a **stale `qmi.sh`** could still shadow wwand.)
 Modem is normally in **QMI mode**
 (`qmi_wwan`); MBIM mode → switch back with `AT+QCFG="usbnet",0` + `AT+CFUN=1,1`.
 

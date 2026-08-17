@@ -20,7 +20,7 @@ Native QMI / MBIM / NCM. ~3 MB. No uqmi, qmicli, libqmi, glib or ModemManager.
 wwand talks to cellular modems natively — a compact ucode daemon that decodes
 QMI/MBIM on the wire, drives **netifd** directly (it owns the context lifecycle;
 no per-interface monitor process), and manages the **SIM and eSIM** end to end.
-It replaces the grown bash `qmi-advanced` dialer: its field-proven behaviours,
+It replaces the grown bash QMI dialer: its field-proven behaviours,
 quirks and recovery strategies were ported deliberately, its bugs left behind.
 
 ---
@@ -83,12 +83,15 @@ for device setup (apk/opkg lines and signing keys).
 
 | Package | Role |
 |---|---|
-| `wwand` | daemon + framework + codec + shared core (no backend on its own) |
+| `wwand` | daemon + framework + codec + shared core + the native `wwand_io.so` I/O module (no backend on its own) |
 | `wwand-qmi` | QMI backend — the common case (`DEPENDS wwand`) |
 | `wwand-mbim` | MBIM backend (`DEPENDS wwand-qmi` — the passthrough reuses QMI) |
 | `wwand-ncm` | NCM/ECM backend (`DEPENDS wwand`) |
+| `wwand-mhi` | PCIe/MHI transport + MHI drivers (`DEPENDS wwand`; backend-neutral, add wwand-qmi or wwand-mbim) |
 | `wwand-esim` | eSIM management + SM-DP+ download (`DEPENDS wwand-qmi + lpac`) |
-| `ucode-mod-wwand-io` | native C I/O module |
+
+The ucode tree ships **precompiled to bytecode** by default (faster start, no
+on-device parse); build with `CONFIG_WWAND_UCODE_SOURCE` for editable source.
 
 A typical QMI router installs **`wwand-qmi`** (which pulls in `wwand`). The LuCI
 UI is [luci-proto-wwand](https://github.com/ddimension/luci-proto-wwand) +

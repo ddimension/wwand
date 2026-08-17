@@ -31,7 +31,7 @@ proto_wwand_init_config() {
 	proto_config_add_string settings_poll
 	proto_config_add_string hard_reconnect_on_ip_change
 
-	# legacy qmi-advanced options: accepted so old configs keep parsing;
+	# legacy dialer options: accepted so old configs keep parsing;
 	# interpreted by the wwand compat layer, not by this shim
 	proto_config_add_string "device:device"
 	proto_config_add_string ctldevice
@@ -267,7 +267,7 @@ proto_wwand_renew() {
 }
 
 # Back-compat: `proto qmi` is the name this handler shipped under historically
-# (and stock qmi-advanced/uqmi used). Interfaces still saved that way — plus
+# (and stock uqmi used). Interfaces still saved that way — plus
 # stock configs migrated in place — must keep working, so the legacy name maps
 # onto the same functions. New configs use `proto wwand`; the daemon and LuCI
 # accept both, and migration/LuCI rewrite to `wwand` on save.
@@ -278,7 +278,7 @@ proto_qmi_renew()       { proto_wwand_renew "$@"; }
 
 [ -n "$INCLUDE_ONLY" ] || {
 	add_protocol wwand
-	# The historical `qmi` alias (stock qmi-advanced/uqmi's proto name) is only
+	# The historical `qmi` alias (uqmi’s proto name) is only
 	# claimed when takeover is enabled (global wwand_globals option takeover,
 	# default off) — otherwise wwand stays a good citizen and leaves `proto qmi`
 	# to uqmi. Explicitly-migrated interfaces use `proto wwand` regardless.
