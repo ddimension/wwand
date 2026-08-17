@@ -73,12 +73,15 @@ export function create(opts)
 	let deps = opts.deps ?? {};
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: interface %s: %s\n', level, self.name, msg)));
 
-	// log an assigned family IP config at 'notice' only when it actually changed
-	// since last time — a modem that re-pushes identical settings every few
-	// minutes (some do) would otherwise repeat the same line at notice forever.
-	// An unchanged re-push drops to 'debug'.
+	// log an assigned family IP config at 'notice' only the FIRST time (at
+	// connect — you want to see what the link came up with); every re-log drops
+	// to 'debug'. A modem re-pushes settings every few minutes, and an IPv6
+	// privacy address rotates its host bits each time (same /64, gw, dns) — a
+	// real "change" that is nonetheless routine noise, so it must not stay at
+	// notice. netifd still gets the update via the idempotent renew; this is
+	// purely the human log line.
 	let log_family_config = (fam, msg) => {
-		log(fam._logsig == msg ? 'debug' : 'notice', msg);
+		log(fam._logsig == null ? 'notice' : 'debug', msg);
 		fam._logsig = msg;
 	};
 
