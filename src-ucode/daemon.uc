@@ -140,8 +140,21 @@ export function create(opts)
 		// kicked so netifd re-runs setup.
 		for (let name, entry in self.contexts) {
 			if (entry.cfg.modem != modem.id || !entry.cfg.interface ||
-			    !entry.ctx || entry.ctx.state != 'IDLE' || !entry.wanted)
+			    !entry.ctx || entry.ctx.state != 'IDLE')
 				continue;
+
+			// re-establish wanted contexts; ALSO re-arm one we involuntarily gave
+			// up on after a reconnect-hold blackhole (reconnect_on_register, set by
+			// context_down) now that the modem is registered again. An operator
+			// ifdown leaves wanted=false WITHOUT that marker, so it stays down.
+			if (!entry.wanted) {
+				if (!entry.reconnect_on_register)
+					continue;
+				entry.reconnect_on_register = false;
+				entry.wanted = true;
+				log('notice', sprintf('interface %s: service returned, reconnecting after earlier give-up',
+					entry.cfg.interface));
+			}
 
 			// capture per iteration: the netifd status probe is async, so the
 			// adopt-vs-kick decision runs later in the callback.
@@ -341,6 +354,38 @@ export function create(opts)
 	let on_context_event = (name, ctx, event, data) => {
 		let entry = self.contexts[name];
 
+		// idempotent renew: re-pushing the same addresses to netifd only churns it
+		// and its address-dependent consumers (odhcpd RAs, firewall reloads, host
+		// routes). Async-probe netifd's live v4/v6 and skip the renew when the link
+		// is up and both addresses already match what the session holds. `force`
+		// (a real IP change / relink) and any doubt (no probe, probe fails) fall
+		// through to the renew, so this can only ever SKIP a genuine no-op.
+		let renew_iface = (force) => {
+			let do_renew = () => {
+				if (deps.renew_interface && entry?.cfg?.interface)
+					deps.renew_interface(entry.cfg.interface);
+			};
+
+			if (force || !deps.iface_status || !entry?.cfg?.interface)
+				return do_renew();
+
+			let first_addr = (arr) =>
+				(type(arr) == 'array' && length(arr)) ? arr[0]?.address : null;
+			let same = (a, b) => (a ?? '') == (b ?? '');
+
+			deps.iface_status(entry.cfg.interface, (st) => {
+				if (st?.up &&
+				    same(first_addr(st['ipv4-address']), ctx.settings?.ipv4?.addr) &&
+				    same(first_addr(st['ipv6-address']), ctx.settings?.ipv6?.addr)) {
+					log('info', sprintf('interface %s: v4/v6 unchanged (%s|%s), skipping renew',
+						entry.cfg.interface, ctx.settings?.ipv4?.addr ?? '',
+						ctx.settings?.ipv6?.addr ?? ''));
+					return;
+				}
+				do_renew();
+			});
+		};
+
 		switch (event) {
 		case 'up':
 			// a working data connection resets the recovery ladder
@@ -369,9 +414,11 @@ export function create(opts)
 			}
 
 			// push settings to netifd in place (never a teardown). A no-op during
-			// initial setup (not yet IFS_UP); re-applies config after reconnect/adoption.
-			if (deps.renew_interface && entry?.cfg?.interface)
-				deps.renew_interface(entry.cfg.interface);
+			// initial setup (not yet IFS_UP); re-applies config after reconnect/
+			// adoption — but skipped when the address is unchanged (renew_iface).
+			// A pending relink (IP changed + hard_reconnect_on_ip_change) always
+			// renews so the shim runs its link down->up.
+			renew_iface(entry?._relink_once);
 
 			// MBIM connect-first: the session/link came up before netifd ran proto
 			// setup — kick netifd now so it runs setup and adopts the live session.
@@ -419,9 +466,9 @@ export function create(opts)
 
 		case 'settings':
 			// modem pushed new IP settings — renew the interface in place (no
-			// teardown); netifd re-reads context_settings.
-			if (deps.renew_interface && entry?.cfg?.interface)
-				deps.renew_interface(entry.cfg.interface);
+			// teardown); netifd re-reads context_settings. Idempotent: skipped when
+			// the pushed addresses actually match what netifd already has.
+			renew_iface(false);
 			break;
 
 		case 'modem_ready':
@@ -1040,8 +1087,22 @@ export function create(opts)
 			});
 		}
 
-		// netifd tore the interface down (admin/config) → no longer wanted; stop reconnect.
+		// our own give-up after a reconnect-hold blackhole (reconnect.uc set
+		// _holdexpiry before downing): tear the interface down now, but stay
+		// re-armable — a later `registered` reconnects it (modem_registered),
+		// unlike an operator ifdown below which is meant to stay down.
+		if (entry._holdexpiry) {
+			entry._holdexpiry = false;
+			entry.wanted = false;
+			entry.reconnect_on_register = true;
+			clear_reconnect(name);
+			return entry.ctx.down(() => cb(null, {}));
+		}
+
+		// netifd tore the interface down (admin/config) → no longer wanted; stop
+		// reconnect and clear any stale re-arm marker (operator intent wins).
 		entry.wanted = false;
+		entry.reconnect_on_register = false;
 		clear_reconnect(name);
 		entry.ctx.down(() => cb(null, {}));
 	};

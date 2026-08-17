@@ -74,7 +74,7 @@ export function create(opts)
 			let prefix = self.config.use_pushed_prefix ? a.prefix : 32;
 
 			if (!self.config.use_pushed_prefix && a.prefix != 32)
-				log('warn', sprintf('network pushed ipv4 prefix /%d, forcing /32', a.prefix));
+				log('debug', sprintf('network pushed ipv4 prefix /%d, forcing /32', a.prefix));
 
 			out.ipv4 = {
 				addr: a.address, prefix: prefix, pushed_prefix: a.prefix,
@@ -171,7 +171,7 @@ export function create(opts)
 			if (sprintf('%J', next) == sprintf('%J', self.settings))
 				return;
 
-			log('notice', sprintf('session %d: network pushed new IP settings, renewing',
+			log('debug', sprintf('session %d: network pushed new IP settings, renewing',
 				self.session_id));
 			self.settings = next;
 			emit('settings', self.settings);

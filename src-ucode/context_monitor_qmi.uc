@@ -235,7 +235,7 @@ export function install(self, o)
 						mtu: self.families['4']?.settings?.mtu ?? self.families['6']?.settings?.mtu,
 					};
 
-					log('notice', 'ip settings changed, requesting netifd renew');
+					log('debug', 'ip settings changed, requesting netifd renew');
 					emit('settings', self.settings);
 				}
 

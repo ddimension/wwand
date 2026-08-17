@@ -238,6 +238,12 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 							eq(daemon.contexts.wan.wanted, false,
 								'hold expiry cleared wanted immediately (no re-kick race)');
 
+							// ...but the give-up is marked INVOLUNTARY: context_down
+							// re-arms it (reconnect_on_register) so a later `registered`
+							// reconnects, unlike an operator ifdown which stays down.
+							eq(daemon.contexts.wan._holdexpiry, true,
+								'hold expiry marks an involuntary give-up (re-armable)');
+
 							ok(length(filter(events, (e) => e.type == 'kick' && e.data == 'wan')) >= 1,
 								'boot-race kick after modem ready');
 							let me = filter(events, (e) => e.type == 'wwand.modem');

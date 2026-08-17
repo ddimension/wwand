@@ -111,7 +111,7 @@ export function create(opts)
 			if (self.config.use_pushed_prefix && pushed != null)
 				prefix = pushed;
 			else if (pushed != null && pushed != 32)
-				log('warn', sprintf('network pushed ipv4 prefix /%d, forcing /32', pushed));
+				log('debug', sprintf('network pushed ipv4 prefix /%d, forcing /32', pushed));
 
 			out.ipv4 = {
 				addr: rdp.ipv4.addr, prefix: prefix, pushed_prefix: pushed,
@@ -170,7 +170,7 @@ export function create(opts)
 			if (sprintf('%J', next) == sprintf('%J', self.settings))
 				return;
 
-			log('notice', sprintf('cid %d: network pushed new IP settings, renewing', self.cid));
+			log('debug', sprintf('cid %d: network pushed new IP settings, renewing', self.cid));
 			self.settings = next;
 			emit('settings', self.settings);
 		});

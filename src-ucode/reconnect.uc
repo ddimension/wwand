@@ -163,8 +163,12 @@ export function install(self, o)
 				clear_reconnect(name);
 
 				// clear `wanted` now (not only when context_down later fires) so a
-				// `registered` in the gap can't re-kick the interface we're tearing down.
+				// `registered` in the gap can't re-kick the interface we're tearing
+				// down. `_holdexpiry` marks this as an INVOLUNTARY give-up (blackhole
+				// too long), not operator intent: context_down re-arms it so a later
+				// `registered` (service returned) reconnects — see modem_registered.
 				entry.wanted = false;
+				entry._holdexpiry = true;
 
 				if (down_interface && entry.cfg.interface)
 					down_interface(entry.cfg.interface);

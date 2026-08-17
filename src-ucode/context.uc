@@ -73,6 +73,15 @@ export function create(opts)
 	let deps = opts.deps ?? {};
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: interface %s: %s\n', level, self.name, msg)));
 
+	// log an assigned family IP config at 'notice' only when it actually changed
+	// since last time — a modem that re-pushes identical settings every few
+	// minutes (some do) would otherwise repeat the same line at notice forever.
+	// An unchanged re-push drops to 'debug'.
+	let log_family_config = (fam, msg) => {
+		log(fam._logsig == msg ? 'debug' : 'notice', msg);
+		fam._logsig = msg;
+	};
+
 	let up_cb = null;
 	// bumped by every up(); guards the async activation flow against late
 	// replies after an attempt was aborted (registration lost mid-attempt)
@@ -434,7 +443,7 @@ export function create(opts)
 				if (self.config.use_pushed_prefix && pushed_prefix != null)
 					prefix = pushed_prefix;
 				else if (pushed_prefix != null && pushed_prefix != 32)
-					log('warn', sprintf('network pushed ipv4 prefix /%d, forcing /32 (option use_pushed_prefix keeps the pushed one)', pushed_prefix));
+					log('debug', sprintf('network pushed ipv4 prefix /%d, forcing /32 (option use_pushed_prefix keeps the pushed one)', pushed_prefix));
 
 				fam.settings = {
 					addr: data.ipv4,
@@ -446,7 +455,7 @@ export function create(opts)
 					mtu: data.mtu,
 				};
 
-				log('notice', sprintf('ipv4 config: %s/%d gw %s dns [%s] mtu %J',
+				log_family_config(fam, sprintf('ipv4 config: %s/%d gw %s dns [%s] mtu %J',
 					fam.settings.addr, fam.settings.prefix, fam.settings.gateway,
 					join(' ', fam.settings.dns), fam.settings.mtu));
 			}
@@ -459,7 +468,7 @@ export function create(opts)
 					mtu: data.mtu,
 				};
 
-				log('notice', sprintf('ipv6 config: %s/%d gw %s dns [%s] mtu %J',
+				log_family_config(fam, sprintf('ipv6 config: %s/%d gw %s dns [%s] mtu %J',
 					fam.settings.addr, fam.settings.plen, fam.settings.gateway,
 					join(' ', fam.settings.dns), fam.settings.mtu));
 			}
