@@ -40,12 +40,42 @@ if(NOT UCODE_PRECOMPILE)
 endif()
 
 find_program(UCODE_COMPILER ucode DOC "ucode interpreter used as bytecode compiler")
-if(NOT UCODE_COMPILER)
-  message(FATAL_ERROR "ucode compiler not found (pass -DUCODE_COMPILER=/path/to/ucode)")
-endif()
 
 set(UCODE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src-ucode)
 set(UCODE_OUT ${CMAKE_BINARY_DIR}/ucode/wwand)
+
+# Capability probe: can this ucode actually emit a bytecode MODULE with the flags
+# we use? Older stable bases (e.g. openwrt-25.12 ships an older ucode than
+# snapshot) may lack `-cmodule` / `dynlink=`, and the host tool may be absent. In
+# any of those cases DO NOT fail the package build — fall back to shipping the
+# ucode SOURCE (a fully functional install, just without the bytecode start-up
+# win). The tree is byte-for-byte runnable either way (namespaced imports resolve
+# via the on-device search path). Snapshot/newer ucode still gets bytecode.
+set(WWAND_BYTECODE_OK FALSE)
+if(UCODE_COMPILER)
+  # the probe exercises everything the real compile relies on: `-cmodule`, a
+  # `dynlink=` import, and the modern ucode syntax the tree uses (optional
+  # chaining `?.`, nullish `??` / `??=`). An older base ucode that lacks the
+  # flags OR whose parser predates that syntax fails here -> source fallback.
+  set(_probe_src ${CMAKE_BINARY_DIR}/uc_probe.uc)
+  set(_probe_out ${CMAKE_BINARY_DIR}/uc_probe.out)
+  file(WRITE ${_probe_src}
+    "'use strict';\n"
+    "import * as fs from 'fs';\n"
+    "export function p(x) { let a = x?.b ?? 0; a ??= 1; return a + length(fs); };\n")
+  execute_process(
+    COMMAND ${UCODE_COMPILER} -s -cmodule,dynlink=fs -o ${_probe_out} ${_probe_src}
+    RESULT_VARIABLE _probe_rc OUTPUT_QUIET ERROR_VARIABLE _probe_err)
+  if(_probe_rc EQUAL 0 AND EXISTS ${_probe_out})
+    set(WWAND_BYTECODE_OK TRUE)
+    message(STATUS "wwand: ucode bytecode precompile enabled (${UCODE_COMPILER})")
+  else()
+    message(WARNING "wwand: '${UCODE_COMPILER}' cannot precompile ucode bytecode "
+      "(rc=${_probe_rc}: ${_probe_err}) — shipping ucode SOURCE instead")
+  endif()
+else()
+  message(WARNING "wwand: no ucode compiler found — shipping ucode SOURCE instead")
+endif()
 
 # --- explicit source lists (deliberately no file globbing for build inputs;
 # --- a verification check below fails the configure if a file on disk is
@@ -133,18 +163,28 @@ list(JOIN _dyn "," _dynflags)
 
 set(_uc_outputs "")
 foreach(f IN LISTS WWAND_UCODE_MODULES WWAND_UCODE_PROGRAMS)
-  if(f IN_LIST WWAND_UCODE_MODULES)
-    set(_cflag "-cmodule,${_dynflags}")
-  else()
-    set(_cflag "-c${_dynflags}")
-  endif()
   get_filename_component(_dir ${UCODE_OUT}/${f} DIRECTORY)
-  add_custom_command(OUTPUT ${UCODE_OUT}/${f}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${_dir}
-    COMMAND ${UCODE_COMPILER} -s ${_cflag} -o ${UCODE_OUT}/${f} ${UCODE_SRC}/${f}
-    DEPENDS ${UCODE_SRC}/${f}
-    COMMENT "UC ${f}"
-    VERBATIM)
+  if(WWAND_BYTECODE_OK)
+    if(f IN_LIST WWAND_UCODE_MODULES)
+      set(_cflag "-cmodule,${_dynflags}")
+    else()
+      set(_cflag "-c${_dynflags}")
+    endif()
+    add_custom_command(OUTPUT ${UCODE_OUT}/${f}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${_dir}
+      COMMAND ${UCODE_COMPILER} -s ${_cflag} -o ${UCODE_OUT}/${f} ${UCODE_SRC}/${f}
+      DEPENDS ${UCODE_SRC}/${f}
+      COMMENT "UC ${f}"
+      VERBATIM)
+  else()
+    # source fallback: ship the .uc verbatim (see the capability probe above)
+    add_custom_command(OUTPUT ${UCODE_OUT}/${f}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${_dir}
+      COMMAND ${CMAKE_COMMAND} -E copy ${UCODE_SRC}/${f} ${UCODE_OUT}/${f}
+      DEPENDS ${UCODE_SRC}/${f}
+      COMMENT "CP ${f}"
+      VERBATIM)
+  endif()
   list(APPEND _uc_outputs ${UCODE_OUT}/${f})
 endforeach()
 
