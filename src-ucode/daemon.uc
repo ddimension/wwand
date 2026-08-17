@@ -129,6 +129,13 @@ export function create(opts)
 			}
 		}
 
+		// self-heal a fragile `device '/dev/cdc-wdmX'` node binding into a stable
+		// USB `path` now that this modem has registered on that node (so the path
+		// recorded is always the working modem's — see learn_modem_path). Prevents
+		// the two-modem reboot-shuffle where the section wakes up on the wrong node.
+		if ((self.write_device ?? true) && deps.learn_modem_path && modem.device)
+			deps.learn_modem_path(modem.id, modem.device);
+
 		// autosetup phase 2 (one-shot): now the SIM is read, match ICCID/IMSI
 		// against the APN table and copy values into uci (config is then the
 		// source of truth). No match -> keep empty APN (SIM-provisioned attach).

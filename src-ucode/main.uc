@@ -261,6 +261,33 @@ function run_daemon()
 				cursor.commit('network');
 				logmod.log('notice', 'learn_identity: recorded IMEI %s on modem %s', info.imei, section);
 			},
+			// learn-back: replace a fragile `device '/dev/cdc-wdmX'` node artifact on a
+			// wwand_modem with its STABLE USB path (`option path`). The cdc-wdm number
+			// shuffles across USB enumeration order / reboots, so a two-modem box can
+			// wake up with the section pointing at the wrong modem (HW-seen on the
+			// GL-X3000: RM520N + an E392 stick). Fires from modem_registered, i.e. only
+			// once THIS modem has actually registered on that node — so it always
+			// records the working modem's path and can never lock in a wrong/flapping
+			// one, and it converts the binding while the node is still correct (before
+			// a reboot can shuffle it). Only ever touches a cdc-wdm node artifact;
+			// netdev / imei / serial / existing path bindings are left untouched.
+			learn_modem_path: (section, control_device) => {
+				if (!control_device || substr(control_device, 0, 12) != '/dev/cdc-wdm')
+					return;   // only USB cdc-wdm control nodes have a resolvable sysfs path
+				let cursor = libuci.cursor();
+				let cur_dev = cursor.get('network', section, 'device');
+				if (!cur_dev || substr(cur_dev, 0, 12) != '/dev/cdc-wdm')
+					return;   // no cdc-wdm node artifact to fix (or a compat modem)
+				let spath = discovery.sysfs_path_of('/sys/class/usbmisc/' +
+					substr(control_device, 5) + '/device');
+				if (!spath)
+					return;
+				cursor.set('network', section, 'path', spath);
+				cursor.delete('network', section, 'device');
+				cursor.commit('network');
+				logmod.log('notice', 'learn_path: modem %s rebound to stable USB path %s (dropped cdc-wdm node artifact)',
+					section, spath);
+			},
 			// learn-back: record the resolved l3 device name on the interface as
 			// `option device` (one stable handle for VRF/firewall/LuCI). Idempotent;
 			// NEVER overwrites a user value. commit() only (no netifd reload → no bounce).

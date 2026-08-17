@@ -132,6 +132,7 @@ let daemon = daemon_mod.create({
 		resolve_modem_device: (cfg) => cfg.device,
 		resolve_netdev: (cfg, device) => 'wwan0',
 		learn_device: (iface, l3) => push(events, { type: 'learn_device', data: { iface: iface, l3: l3 } }),
+		learn_modem_path: (section, dev) => push(events, { type: 'learn_modem_path', data: { section: section, dev: dev } }),
 	},
 });
 
@@ -257,6 +258,13 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 							ok(length(filter(events, (e) => e.type == 'learn_device' &&
 								e.data.iface == 'wan' && e.data.l3 == 'wwand0')) >= 1,
 								'learn_device: resolved l3 device written back');
+
+							// learn_modem_path: on 'registered' the daemon also offers
+							// the modem's control device for cdc-wdm-node -> stable-path
+							// self-healing (the dep no-ops unless it's a cdc-wdm artifact).
+							ok(length(filter(events, (e) => e.type == 'learn_modem_path' &&
+								e.data.section == 'm0')) >= 1,
+								'learn_modem_path: called with the modem section on register');
 
 							// (4) adoption path: registration cycles while the
 							// interface reports UP -> the daemon adopts in place
