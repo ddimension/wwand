@@ -74,8 +74,8 @@ eq(f1[3], 'Telit', 'qesim: provider field');
 eq(f1[4], 'Telit', 'qesim: name field');
 eq(f1[5], '2', 'qesim: class field');
 
-let f2 = esim._qesim_fields('+QESIM: "eid",89033023426300000000041811587764');
-eq(f2[0], '89033023426300000000041811587764', 'qesim: eid field');
+let f2 = esim._qesim_fields('+QESIM: "eid",89000000000000000000000000000000');
+eq(f2[0], '89000000000000000000000000000000', 'qesim: eid field');
 
 // commas inside a quoted field must not split
 let f3 = esim._qesim_fields('+QESIM: "profile_detail",111,1,"Home, Work","ACME","ACME Data",1');

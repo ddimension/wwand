@@ -29,11 +29,11 @@ function p32(v) { return struct.pack('<I', v); }
 function build_ipcfg() {
 	let fixedlen = 4 * 15;
 	let v4addr_off = fixedlen;
-	let v4addr = p32(30) + chr(37, 83, 58, 112);
+	let v4addr = p32(30) + chr(192, 0, 2, 112);
 	let gw_off = v4addr_off + length(v4addr);
-	let gw = chr(37, 83, 58, 113);
+	let gw = chr(192, 0, 2, 113);
 	let dns_off = gw_off + length(gw);
-	let dns = chr(10, 74, 210, 210) + chr(10, 74, 210, 211);
+	let dns = chr(192, 0, 2, 210) + chr(192, 0, 2, 211);
 
 	let fixed =
 		p32(0) +               // session_id
@@ -167,9 +167,9 @@ let scenario_flow = {
 		ctx.up((err, settings) => {
 			eq(err, null, 'context up succeeds');
 			eq(ctx.state, 'CONNECTED', 'context CONNECTED');
-			eq(settings?.ipv4?.addr, '37.83.58.112', 'ipv4 address decoded from IP_CONFIGURATION');
-			eq(settings?.ipv4?.gateway, '37.83.58.113', 'ipv4 gateway decoded');
-			eq(settings?.ipv4?.dns, [ '10.74.210.210', '10.74.210.211' ], 'ipv4 dns decoded');
+			eq(settings?.ipv4?.addr, '192.0.2.112', 'ipv4 address decoded from IP_CONFIGURATION');
+			eq(settings?.ipv4?.gateway, '192.0.2.113', 'ipv4 gateway decoded');
+			eq(settings?.ipv4?.dns, [ '192.0.2.210', '192.0.2.211' ], 'ipv4 dns decoded');
 
 			// the stats watchdog samples PACKET_STATISTICS while connected
 			uloop.timer(15, () => {

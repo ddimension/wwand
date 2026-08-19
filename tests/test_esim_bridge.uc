@@ -7,6 +7,7 @@
 
 'use strict';
 
+import * as uloop from 'uloop';
 import { eq, ok, done } from './lib/check.uc';
 
 let bridge = require('wwand.esim_bridge');
@@ -69,4 +70,106 @@ eq(r.kind, 'log', 'unknown JSON object: kept visible as log');
 r = P('{broken json');
 eq(r.kind, 'log', 'malformed JSON: logged, never thrown');
 
-done('test_esim_bridge');
+// --- modem_esim op router (the done-routing surface LuCI calls) --------------
+//
+// No lpac on the host (lpac_path points at nothing) -> every lpac path takes
+// the esim_not_installed branch — side-effect-free and exercises the exact
+// error routing (missing_argument / invalid_argument / fallback) that guards
+// the shell call. Each op must clear _esim_op and surface errors as
+// { error: 'esim', detail: ... }.
+let dl_at_called = null;
+let backend_at = false;   // flipped for the in-modem download test
+let dl_auto = true, dl_completion = null;   // download completion control
+let esim_fake = {
+	backend: (m, s, cb) => cb(backend_at ? 'at' : 'qmi'),
+	// async completion (like the real in-modem download): fires AFTER the
+	// start-ack, so the quiet re-raise ordering is what the test pins
+	download_at: (m, code, conf, cb) => {
+		dl_at_called = code;
+		if (dl_auto) uloop.timer(0, () => cb(null, { ret: 0 }));
+		else dl_completion = cb;
+	},
+	profiles: (m, s, cb) => cb(null, { profiles: [] }),
+	get_eid: (m, s, cb) => cb(null, { eid: '89000000000000000000000000000000' }),
+	enable: (m, s, iccid, cb) => cb(null, { ok: true, via: 'esim' }),
+	disable: (m, s, iccid, cb) => cb(null, { ok: true, via: 'esim' }),
+	del: (m, s, iccid, cb) => cb(null, { ok: true, via: 'esim' }),
+};
+
+let entry = { modem: { id: 'm0', _esim_op: false } };
+let br = bridge.create({ esim: esim_fake, log: () => null,
+	modem_of: (r) => (r == 'm0') ? entry : null,
+	lpac_path: '/nonexistent-lpac' });
+
+let chain = [];
+
+let expect = (op, params, err_name, then) =>
+	push(chain, { op: op, params: params, err: err_name, then: then });
+
+let run_chain;   // forward-declared (self-referencing arrow — ucode TDZ)
+run_chain = (idx) => {
+	if (idx >= length(chain)) {
+		// the last download's run is still open (its completion was parked).
+		// One tick lets the ack's quiet re-raise unwind (it runs after the
+		// synchronous done() chain) — then: raised while running, cleared
+		// when the modem finishes.
+		uloop.timer(0, () => {
+			eq(entry.modem._esim_op, true, 'router: quiet raised while the download runs');
+			dl_completion(null, { ret: 0 });   // simulate the modem finishing
+			eq(entry.modem._esim_op, false, 'router: quiet cleared at download completion');
+			done('test_esim_bridge');
+		});
+		return;
+	}
+
+	let c = chain[idx];
+
+	br.modem_esim('m0', c.op, c.params, (err, res) => {
+		if (c.err != null) {
+			eq(err?.error, 'esim', sprintf('router %s: error wrapper shape', c.op));
+			eq(err?.detail?.error, c.err, sprintf('router %s: %s', c.op, c.err));
+		}
+		else
+			eq(err, null, sprintf('router %s: no error', c.op));
+		if (c.then) c.then(res);
+		run_chain(idx + 1);
+	});
+};
+
+expect('download', {}, 'missing_argument');
+expect('download', { activation_code: 'LPA:1$x;rm$y' }, 'invalid_argument');
+expect('download', { activation_code: 'LPA:1$a$b' }, 'esim_not_installed');
+expect('notifications', {}, 'esim_not_installed');
+expect('notify', {}, 'esim_not_installed');
+expect('download_status', {}, null, (res) => {
+	// the failed lpac starts must not wedge dl 'running' (the notify leak fix)
+	eq(res?.state, 'failed', 'router download_status: dl never wedged running');
+});
+expect('enable', { iccid: 'x' }, 'invalid_argument');
+expect('enable', {}, 'missing_argument');
+expect('enable', { iccid: '89358152000000075749' }, null, (res) => {
+	eq(res, { ok: true, via: 'esim' }, 'router enable: no lpac -> esim.enable fallback');
+});
+expect('profiles', {}, null, (res) => {
+	eq(res, { profiles: [] }, 'router profiles: passthrough');
+});
+expect('eid', {}, null, (res) => {
+	eq(res?.eid, '89000000000000000000000000000000', 'router eid: passthrough');
+	backend_at = true;   // the final download takes the in-modem AT path
+	dl_auto = false;     // and its completion is parked (chain end drives it)
+});
+expect('download', { activation_code: 'LPA:1$a$b' }, null, (res) => {
+	// the fake esim.backend reports 'at' -> the in-modem download path. The
+	// ack fires first; the quiet-flag states are pinned at the chain end.
+	eq(res, { started: true, via: 'modem' }, 'router download: AT backend starts in-modem');
+	eq(dl_at_called, 'LPA:1$a$b', 'router download: code handed to download_at');
+});
+
+// the no_such_modem early return precedes the done wrapper (no flag set yet) —
+// the raw error shape, not the esim wrapper
+br.modem_esim('nosuchref', 'eid', {}, (err) => {
+	eq(err?.error, 'no_such_modem', 'router: unknown modem errors raw');
+	run_chain(0);
+});
+
+uloop.run();

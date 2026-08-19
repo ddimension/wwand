@@ -347,7 +347,6 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 });
 
 uloop.run();
-
 // --- false device-gone recovery ---------------------------------------------
 // The transport reports the device gone while it is still on the bus (HW-seen:
 // GDSP provider SIM reset on the E392). The 'removed' event must detach the
@@ -554,4 +553,95 @@ ok(rld.contexts.wanC.ctx == ctxC_obj, 'reload mux: wanC ctx preserved');
 
 rld.shutdown();
 
+// --- esim_ready bring-up refresh ---------------------------------------------
+// A second, fully stubbed daemon: the modem stub's create() captures the
+// on_event binding (the esim_ready handler), and the ubus-facing modem_esim is
+// overridden with a fake — the chain under test is the handler itself: the
+// 3 s defer, the modem.at gate, the eUICC-active slot filter, the physical
+// slot hand-through, and the once-per-object refresh gate.
+let ed_on_event = null;
+let es_ops = [];
+
+let ed = daemon_mod.create({
+	timing: TIMING,
+	deps: {
+		transport_open: () => null,
+		load_qmi: () => ({
+			modem: {
+				create: (o) => {
+					ed_on_event = o.deps.on_event;
+					return { start: () => null, stop: () => null };
+				},
+			},
+			context: {
+				create: (o) => ({ state: 'IDLE', up: (cb) => cb?.(null, {}),
+				                  down: (cb) => cb?.(), attach: () => null, detach: () => null }),
+			},
+		}),
+		log: (level, msg) => null,
+		emit_event: (type, data) => null,
+		kick_interface: (iface) => null,
+		renew_interface: (iface) => null,
+		down_interface: (iface) => null,
+		iface_status: (iface, cb) => cb({ up: false }),
+		datapath_fx: dpfx,
+		read_config: () => config.parse({ network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/mock0' },
+			wan: { '.type': 'interface', proto: 'wwand', modem: 'm0' },
+		} }),
+		resolve_modem_device: (cfg) => cfg.device,
+		resolve_netdev: (cfg, device) => 'wwan0',
+		learn_device: (iface, l3) => null,
+		learn_modem_path: (section, dev) => null,
+	},
+});
+
+ed.apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0' },
+	wan: { '.type': 'interface', proto: 'wwand', modem: 'm0' },
+} }));
+
+let es_modem = {
+	id: 'm0',
+	at: { send: (cmd, cb) => cb(null, { lines: [ 'OK' ] }) },
+	slot_status: (cb) => cb(null, [ { physical: 2, active: true, is_euicc: true,
+		eid: '89000000000000000000000000000000', iccid: null } ]),
+	stop: () => null,   // daemon.shutdown() calls it
+};
+
+ed.modems.m0.modem = es_modem;   // swap in the stub after the wiring ran
+
+// override the ubus-facing modem_esim with a recorder — the handler's logic
+// (defer/gates/slot) is the unit under test, not the ES10c transport
+ed.modem_esim = (ref, op, params, cb) => {
+	push(es_ops, { op: op, slot: params?.slot });
+	if (op == 'eid')
+		return cb(null, { eid: '89000000000000000000000000000000' });
+	if (op == 'profiles')
+		return cb(null, { profiles: [ { iccid: 'x' } ] });
+	cb({ error: 'unexpected_op' });
+};
+
+ed_on_event(es_modem, 'esim_ready', { eslots: [] });
+
+uloop.timer(3200, () => {
+	eq(length(es_ops), 2, 'esim_ready: eid + profiles ops ran');
+	eq(es_ops[0], { op: 'eid', slot: 2 }, 'esim_ready: eid op on the ACTIVE eUICC slot (2, not hardcoded 1)');
+	eq(es_ops[1].op, 'profiles', 'esim_ready: profiles op second');
+	eq(es_modem.esim_info?.eid, '89000000000000000000000000000000', 'esim_ready: eid read into esim_info');
+	eq(length(es_modem.esim_info?.profiles), 1, 'esim_ready: profiles read');
+
+	// once-per-object gate: a second event must not re-run the refresh
+	let n = length(es_ops);
+	ed_on_event(es_modem, 'esim_ready', { eslots: [] });
+	uloop.timer(50, () => {
+		eq(length(es_ops), n, 'esim_ready: _esim_refreshed gate — refresh once per object');
+		ed.shutdown();
+		// the main daemon instance keeps arming its own timers — end the loop
+		// explicitly, else this second run never drains
+		uloop.end();
+	});
+});
+
+uloop.run();
 done('test_daemon');

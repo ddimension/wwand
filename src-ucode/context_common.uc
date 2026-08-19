@@ -178,3 +178,18 @@ export function netmask_to_prefix(netmask)
 
 	return mask_octets_to_prefix(split(netmask, '.'));
 };
+
+// the shared /32 point-to-point rule: a pushed prefix wins only under
+// option use_pushed_prefix; otherwise the connection stays a /32 (parity
+// across all three backends — QMI/MBIM/NCM). debug-logs the override once
+// per differing push.
+export function v4_prefix(config, pushed, log)
+{
+	if (config?.use_pushed_prefix && pushed != null)
+		return pushed;
+
+	if (pushed != null && pushed != 32)
+		log?.('debug', sprintf('network pushed ipv4 prefix /%d, forcing /32', pushed));
+
+	return 32;
+};

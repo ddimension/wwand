@@ -17,9 +17,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as atcmd from 'wwand.atcmd';
 import * as modem_common from 'wwand.modem_common';
-import * as context_common from 'wwand.context_common';
 import * as telemetry_ncm from 'wwand.telemetry_ncm';
 import * as netlink from 'wwand.netlink';
 import * as sim from 'wwand.sim';
@@ -49,96 +47,11 @@ export const pdp_setup_matches = ncm_vendors.pdp_setup_matches;
 // but firmwares diverge wildly for a dual-stack (ipv4v6) context. HW-seen on
 // RG650E-EU: BOTH families crammed into ONE line with irregular comma/space
 // separators and mixed field widths, e.g.:
-//   +CGCONTRDP: 1,5,"apn","100.71.169.229","42.0.0.32.66.143.62.233...",
-//     "254.128.0.0...1","139.7.30.125" "42.1.8.96...83","139.7.30.126" "42.1.8.96...1.83"
-// where the local addr is a bare 4-octet IPv4 (no mask), the next 16-octet field
-// is the IPv6 address, and v4 DNS + v6 DNS are interleaved.
-//
-// So rather than trust positions, tokenize every dotted-decimal group (comma OR
-// space separated), classify by octet count (4/8 = IPv4[+mask], 16/32 =
-// IPv6[+mask]), bucket per family IN ORDER, then map each as [addr(+mask),
-// gateway?, dns...]. The gateway slot is taken only for a masked IPv4 (8/32
-// octets) or for IPv6 (always advertises a link-local gw) — an unmasked IPv4
-// (RG650E) has no gateway field, so every remaining v4 token is DNS.
-
-const mask_to_prefix = context_common.mask_octets_to_prefix;
-
-// join 16 decimal byte strings into an IPv6 literal (uncompressed but valid)
-function bytes_to_ipv6(bytes)
-{
-	let hextets = [];
-
-	for (let i = 0; i < 16; i += 2)
-		push(hextets, sprintf('%x', (+bytes[i] & 0xff) * 256 + (+bytes[i + 1] & 0xff)));
-
-	return join(':', hextets);
-}
-
-// assign an ordered list of dotted-octet tokens (each an array of octet strings)
-// for one family to { addr, prefix/plen, gateway, dns[] }
-function assign_family(tokens, is_v6)
-{
-	if (!length(tokens))
-		return null;
-
-	let t0 = tokens[0];
-	let out = { addr: null, gateway: null, dns: [] };
-	let has_mask;
-
-	if (is_v6) {
-		has_mask = (length(t0) == 32);
-		out.addr = bytes_to_ipv6(slice(t0, 0, 16));
-		out.plen = has_mask ? mask_to_prefix(slice(t0, 16, 32)) : 64;
-	}
-	else {
-		has_mask = (length(t0) == 8);
-		out.addr = join('.', slice(t0, 0, 4));
-		out.prefix = has_mask ? mask_to_prefix(slice(t0, 4, 8)) : null;
-	}
-
-	let idx = 1;
-	let render = (t) => is_v6 ? bytes_to_ipv6(slice(t, 0, 16)) : join('.', slice(t, 0, 4));
-
-	// gateway slot: present for IPv6 (link-local gw) or a masked IPv4 address
-	if ((is_v6 || has_mask) && idx < length(tokens))
-		out.gateway = render(tokens[idx++]);
-
-	for (; idx < length(tokens); idx++)
-		push(out.dns, render(tokens[idx]));
-
-	return out;
-}
-
-export function parse_cgcontrdp(lines)
-{
-	let v4 = [], v6 = [];
-
-	for (let l in (lines ?? [])) {
-		let m = match(l, /\+CGCONTRDP:\s*(.*)/);
-
-		if (!m)
-			continue;
-
-		// tokenize on comma AND whitespace (RG650E mixes them), strip quotes,
-		// keep only dotted-decimal groups (skips cid/bearer ints and the apn)
-		let clean = replace(m[1], /"/g, '');
-
-		for (let tok in split(clean, /[, \t]+/)) {
-			if (!match(tok, /^[0-9]+(\.[0-9]+)+$/))
-				continue;
-
-			let parts = split(tok, '.');
-			let n = length(parts);
-
-			if (n == 4 || n == 8)
-				push(v4, parts);
-			else if (n == 16 || n == 32)
-				push(v6, parts);
-		}
-	}
-
-	return { ipv4: assign_family(v4, false), ipv6: assign_family(v6, true) };
-};
+//   +CGCONTRDP: 1,5,"apn","192.0.2.229","32.1.13.184...",
+//     "254.128.0.0...1","192.0.2.53" "32.1.72.96.72.96...136.136","192.0.2.54" "32.1.72.96.72.96...136.68"
+// parse_cgcontrdp + the tokenizer moved to ncm_vendors.uc (shared with the
+// per-vendor ip_config hooks); re-exported here for the existing consumers.
+export const parse_cgcontrdp = ncm_vendors.parse_cgcontrdp;
 
 // --- AT status parsers -------------------------------------------------------
 
@@ -197,6 +110,10 @@ const SERIAL_NEW_ID = {
 	// MeiG SLM770A ECM composition — the kernel knows only RNDIS (2dee:4d57).
 	// HW-verified on a Cudy LT300 v3.
 	'2dee:4d58': 'option1',
+	// NOTE: Fibocom FM350-GL (0e8d:7126/7127) is deliberately ABSENT — the
+	// kernel option driver binds its serial interfaces itself (since 4.19.318,
+	// ADB excepted). A blanket new_id write here would also claim the ADB
+	// interface and crash-loop the card (forum-observed).
 };
 
 // bind the vendor serial driver for a known composition (netdev anchors the USB
@@ -261,6 +178,21 @@ export function create(opts)
 
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, reg_poll_timer = null, settle_timer = null;
+	let poll_inflight = false;   // one register-poll chain at a time (URC fast-path coalescing)
+	let poll;   // the register poll (forward-declared; the URC fast path re-runs it)
+
+	// shared radio cycle: CFUN 0 -> settle -> CFUN 1 -> settle -> then()
+	// (the recovery ladder's opmode_cycle and step_attach's re-attach both
+	// use exactly this dance)
+	let cfun_cycle = (then) => {
+		self.at.send('AT+CFUN=0', () => {
+			settle_timer = uloop.timer(self.timing.settle, () => {
+				self.at.send('AT+CFUN=1', () => {
+					settle_timer = uloop.timer(self.timing.settle, then);
+				}, { timeout: 15000 });
+			});
+		}, { timeout: 15000 });
+	};
 	let at_drain_timer = null, telemetry_timer = null;
 	let telem_watch;   // modem_common.watch_driver (adaptive fast telemetry loop)
 
@@ -268,16 +200,52 @@ export function create(opts)
 	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)
 	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
 
-	// `option sim_slot` needs a UIM/MBIM slot transport — the AT-only backend
-	// has none: surface a warning instead of silently running the active slot
-	if (+(self.config?.sim_slot ?? 0)) {
-		self.config_warnings = self.config_warnings ?? [];
-		push(self.config_warnings, {
-			check: 'sim_slot', severity: 'warn',
-			message: 'option sim_slot is not supported on the NCM/AT backend (active slot left unchanged)',
-			expected: sprintf('slot %d', +self.config.sim_slot), actual: null,
-		});
-	}
+	// unsolicited result codes: the engine surfaces idle +CODE lines here
+	// (field-verified on the mode-40 AT port: +CREG/+CEREG URCs arrive).
+	// Registration URCs act as a fast path — an immediate re-poll instead of
+	// waiting out the poll timer (polling stays the fallback; the URCs are
+	// best-effort, the parse decision remains the poll's).
+	self.at_on_urc = (line) => {
+		log('debug', sprintf('urc: %s', line));
+
+		if (self.state == 'REGISTERING' && poll && !self._esim_op &&
+		    match(line, /^\+?(CEREG|C5GREG|CREG|CGREG|CTZV|EONSNWNAME)[:\s]/))
+			poll();
+
+		// NITZ (network identity/time — pushed at attach): parse the T700's
+		// +CTZV frame and feed the shared clock path (the daemon applies it
+		// only when the system clock is clearly unset — RTC-less router
+		// before NTP). Hint only: this provider doesn't push NITZ regularly.
+		let tz = modem_common.nitz_ctzv(line);
+
+		if (tz) {
+			self.network_time = { epoch: tz.epoch, tz_offset_min: tz.tz_offset_min };
+			log('info', sprintf('network time (NITZ): %d utc, tz %+d min', tz.epoch, tz.tz_offset_min));
+			if (deps.set_clock)
+				deps.set_clock(tz.epoch, tz.tz_offset_min);
+		}
+
+		// +CGEV PDN events are the modem's own session notifications:
+		// DEACT pokes the affected context's liveness probe immediately
+		// (the probe's result decides, not the URC), ACT pokes a settings
+		// re-read (the network may have reassigned IPs on re-activation)
+		let m = match(line, /^\+CGEV:.*\bPDN (ACT|DEACT)\s*(\d*)/);
+
+		if (m && !self._esim_op) {
+			let cid = +m[2];
+			let is_deact = (m[1] == 'DEACT');
+
+			for (let c in (self.contexts ?? []))
+				if (!cid || c.cid == cid)
+					is_deact ? c.liveness_poke?.() : c.settings_poke?.();
+		}
+	};
+
+	// `option sim_slot` needs a slot transport — on the AT-only backend that
+	// is the vendor AT slots recipe (Fibocom AT+GTDUALSIM), resolved once the
+	// manufacturer is known (the gate below at identify time). Without a
+	// recipe the configured slot cannot be selected — the warning is raised
+	// there, not here (the vendor is not known yet at create time).
 	let emit = scaffold.emit;
 	let notify_contexts = scaffold.notify_contexts;
 	let sim_block = scaffold.sim_block;
@@ -322,13 +290,7 @@ export function create(opts)
 				return done();
 
 			log('warn', 'recovery: cycling operating mode (CFUN 0/1)');
-			self.at.send('AT+CFUN=0', () => {
-				settle_timer = uloop.timer(self.timing.settle, () => {
-					self.at.send('AT+CFUN=1', () => {
-						settle_timer = uloop.timer(self.timing.settle, done);
-					}, { timeout: 15000 });
-				});
-			}, { timeout: 15000 });
+			cfun_cycle(done);
 		},
 		modem_reset: (done) => {
 			if (!self.at)
@@ -342,7 +304,7 @@ export function create(opts)
 
 	// --- step chain --------------------------------------------------------
 
-	let step_identify, step_resolve_dial, step_datapath, step_sim, step_attach, step_register, step_register_go, on_registered;
+	let step_identify, step_resolve_dial, step_datapath, step_simslot, step_sim, step_attach, step_register, step_register_go, on_registered;
 
 	// AT side channel: for NCM this IS the control channel (a missing port fails
 	// the whole modem — there is no other transport). open_at discovers the tty,
@@ -391,25 +353,49 @@ export function create(opts)
 	step_identify = () => {
 		self.set_state('INIT_SERVICES');
 
-		let ask = (cmd, done) => self.at.send(cmd, (err, res) => {
+		let ask = (cmd, done, o) => self.at.send(cmd, (err, res) => {
 			let val = null;
 
 			for (let line in (res?.lines ?? [])) {
-				// skip AT+... response prefixes ("+CGMI: ...") -> take the value
-				let m = match(line, /^\+[A-Z]+:\s*(.*)/);
+				let bare = trim(line);
 
-				val = m ? trim(m[1]) : trim(line);
+				// a URC interleaved into the response is never the answer:
+				// the modem emits +CGEV/+ESIMS/+CIREPI/+CNEMIU/+CTZV... bursts
+				// right while the identify chain runs after a reset, and taking
+				// one shifts every identify value by one command — the vendor
+				// then resolves to generic (HW-seen: generic CSQ+CESQ telemetry
+				// and the generic ip_config path after a daemon restart)
+				if (match(bare, /^\+(CGEV|ESIMS|CIREPI|CNEMIU|CTZV|EONSNWNAME|CEREG|C5GREG|CREG|CGREG)[:\s]/))
+					continue;
+
+				// skip AT+... response prefixes ("+CGMI: ...") -> take the value
+				let m = match(bare, /^\+[A-Z]+:\s*(.*)/);
+
+				val = m ? trim(m[1]) : bare;
 
 				if (val != '')
 					break;
 			}
 
 			done(err ? null : val);
-		});
+		}, o);
 
 		ask('AT+CGMI', (manuf) => {
 			self.info.manufacturer = manuf;
 			self.vendor = vendor_for(manuf);
+
+			// `option sim_slot` gate: with a vendor AT slots recipe the
+			// configured slot is asserted at init (step_simslot, QMI parity);
+			// without one it cannot be selected — surface a warning instead
+			// of silently running the active slot
+			if (+(self.config?.sim_slot ?? 0) && !self.vendor.slots) {
+				self.config_warnings = self.config_warnings ?? [];
+				push(self.config_warnings, {
+					check: 'sim_slot', severity: 'warn',
+					message: 'option sim_slot needs a vendor slot recipe on the NCM/AT backend — this modem has none (active slot left unchanged)',
+					expected: sprintf('slot %d', +self.config.sim_slot), actual: null,
+				});
+			}
 
 			ask('AT+CGMM', (model) => {
 				self.info.model = model;
@@ -448,6 +434,59 @@ export function create(opts)
 									self.info.model ?? '?', self.info.manufacturer ?? '?',
 									self.info.imei ?? '?', self.info.imsi ?? '?',
 									self.info.iccid ?? '?'));
+
+								// vendor FCC-lock probe (Fibocom T700 family):
+								// 0 = unlocked, 1 = one-time unlock, 2 = locked at
+								// every power-up. A locked modem stays silent (no
+								// registration/URCs) — surface it instead of a hang.
+								if (self.vendor?.fcc_probe) {
+									// a locked modem stays silent — don't stall the
+									// identity chain for the full default timeout
+									ask(self.vendor.fcc_probe, (val) => {
+										let m = val ? match(val, /([0-9]+)/) : null;
+
+										self.fcc_lock = m ? +m[1] : null;
+
+										if (self.fcc_lock != null && self.fcc_lock != 0)
+											log('warn', sprintf('modem FCC lock active (mode %d) — registration may stay silent until unlocked', self.fcc_lock));
+									}, { timeout: 2000 });
+								}
+
+								// eSIM status probes: each command runs best-effort
+								// (the raw answers land in the at-debug log); the
+								// last non-empty reply becomes self.esim_state
+								if (self.vendor?.esims_probes) {
+									let ep_idx = 0;
+									let ep_next;
+
+									ep_next = () => {
+										if (ep_idx >= length(self.vendor.esims_probes)) {
+											// the slot surface is known now — tell the
+											// daemon (the eUICC-active case drives the
+											// eSIM bring-up refresh; registration is not
+											// a usable trigger on an empty eUICC)
+											if (self.eslots)
+												deps.on_event?.(self, 'esim_ready', { eslots: self.eslots });
+
+											return;
+										}
+
+										let cmd = self.vendor.esims_probes[ep_idx++];
+
+										ask(cmd, (val) => {
+											if (val != null && val != '') {
+												self.esim_state = val;
+
+												if (cmd == 'AT+ESLOTSINFO?')
+													self.eslots = ncm_vendors.parse_eslotsinfo([ '+ESLOTSINFO: ' + val ]);
+											}
+
+											ep_next();
+										}, { timeout: 2000 });
+									};
+
+									ep_next();
+								}
 
 								// per-SIM override (config wwand_sim) — parity
 								// with the QMI backend; consumed via conn_cfg
@@ -508,20 +547,153 @@ export function create(opts)
 		tryNext();
 	};
 
-	// datapath: a plain cdc_ncm/cdc_ether netdev carries no mux and needs no
-	// driver format change (unlike qmi_wwan raw-ip). Just bring the parent link
-	// up; the IP comes from the connection (context_ncm). Skipped in host tests.
+	// --- dual-SIM slots (sim.uc dispatches here for the AT backend) ----------
+	// slot_status: the vendor recipe's dual-sim query (Fibocom GTDUALSIM).
+	// Only the ACTIVE card's identity is readable — the inactive slot reports
+	// 'present' with null identity until a switch re-reads it at bring-up.
+	self.slot_status = (cb) => {
+		let sl = self.vendor?.slots;
+
+		if (!sl)
+			return cb({ error: 'unsupported' }, null);
+
+		self.at.send(sl.query, (err, res) => {
+			let st = err ? null : sl.parse(res?.lines);
+
+			if (!st)
+				return cb(err ?? { error: 'no_slot_status' }, null);
+
+			// ESLOTSINFO enrichment (field-verified): per-slot EID/CPIN/ICCID —
+			// the eUICC slot reports CPIN EMPTY_EUICC when no profile is
+			// provisioned; the GTDUALSIM read-back stays the active/service
+			// source and the identity fallback
+			let es1 = self.eslots?.[0] ?? null;
+			let es2 = self.eslots?.[1] ?? null;
+
+			cb(null, [
+				{ physical: 1, card: 'present', active: st.sub == 1,
+				  logical_slot: null,
+				  iccid: es1?.iccid ?? ((st.sub == 1) ? (self.info?.iccid ?? null) : null),
+				  is_euicc: es1?.kind == 'euicc', eid: es1?.eid ?? null, cpin: es1?.cpin ?? null,
+				  service: (st.sub == 1) ? (st.service ?? null) : null },
+				{ physical: 2, card: 'present', active: st.sub == 2,
+				  logical_slot: null,
+				  iccid: es2?.iccid ?? ((st.sub == 2) ? (self.info?.iccid ?? null) : null),
+				  is_euicc: es2?.kind == 'euicc', eid: es2?.eid ?? null, cpin: es2?.cpin ?? null,
+				  service: (st.sub == 2) ? (st.service ?? null) : null },
+			]);
+		}, { timeout: 8000 });
+	};
+
+	// switch_slot: GTDUALSIM=<n-1> + a CFUN reset so the firmware re-reads the
+	// other card deterministically (the current registration drops — the
+	// daemon's reg poll follows it through deregistered/registered)
+	self.switch_slot = (physical, cb) => {
+		let sl = self.vendor?.slots;
+
+		if (!sl)
+			return cb({ error: 'unsupported' });
+
+		self.at.send(sl.query, (err, res) => {
+			let st = err ? null : sl.parse(res?.lines);
+
+			if (st && st.sub == +physical)
+				return cb(null, { unchanged: true });
+
+			// a failed status read must not trigger a blind switch + CFUN —
+			// the slot state is unknown, so a reset could drop a working
+			// registration for nothing
+			if (!st)
+				return cb(err ?? { error: 'no_slot_status' });
+
+			self.at.send(sl.switch(physical), (e2) => {
+				// a rejected switch command (unsupported form, modem error) must
+				// not still fire the CFUN reset — that would drop a working
+				// registration for a switch that never took. Same principle as
+				// the status-read guard above: no blind reset on unknown state.
+				if (e2)
+					return cb(e2);
+
+				// the CFUN error must not be swallowed: the new card is only
+				// re-read after the reset — without it the switch never took
+				self.at.send('AT+CFUN=1,1', (f2) => cb(f2));
+			}, { timeout: 8000 });
+		}, { timeout: 8000 });
+	};
+
+	// datapath: a plain cdc_ncm/cdc_ether/rndis_host netdev carries no mux and
+	// needs no driver format change (unlike qmi_wwan raw-ip). Just bring the
+	// parent link up; the IP comes from the connection (context_ncm). Skipped
+	// in host tests (no fx -> the 'cdc_ncm' label fallback).
 	step_datapath = () => {
 		let dp = opts.datapath;
-
-		self.datapath = { backend: 'cdc_ncm', netdev: dp?.netdev ?? null };
+		let drv = 'cdc_ncm';
 
 		if (dp?.netdev && dp.fx) {
-			dp.fx.link_set(dp.netdev, { up: true });
-			log('notice', sprintf('datapath: cdc_ncm netdev %s up', dp.netdev));
+			// the real netdev driver name (rndis_host / cdc_ether / cdc_ncm) —
+			// readlink the driver symlink under the netdev's sysfs dir
+			let lnk = dp.fx.readlink(sprintf('/sys/class/net/%s/device/driver', dp.netdev));
+
+			if (lnk != null && length(lnk))
+				drv = substr(lnk, rindex(lnk, '/') + 1);
 		}
 
-		step_sim();
+		self.datapath = { backend: drv, netdev: dp?.netdev ?? null, fx: dp?.fx };
+
+		if (dp?.netdev && dp.fx) {
+			// RNDIS is a point-to-point hop: disable ARP so the gateway-less
+			// device route (netifd default) needs no neighbour resolution —
+			// the modem receives everything sent to the netdev
+			dp.fx.link_set(dp.netdev, { up: true, noarp: (drv == 'rndis_host') });
+			log('notice', sprintf('datapath: %s netdev %s up%s', drv, dp.netdev,
+				(drv == 'rndis_host') ? ' (noarp)' : ''));
+
+			// accept IPv6 router advertisements on the host link: on
+			// IPv6-only/464XLAT setups the modem (or the network behind its
+			// internal CLAT) may serve the host v6 via RA/SLAAC. A router box
+			// leaves accept_ra off (forwarding=1), and the daemon's
+			// settings-gated _enable_ipv6 only clears disable_ipv6 when the
+			// modem reports a static v6 — so both must be set here,
+			// unconditionally. accept_ra=2 accepts even with forwarding on.
+			for (let k in [ 'disable_ipv6', 'accept_ra' ]) {
+				let path = sprintf('/proc/sys/net/ipv6/conf/%s/%s', dp.netdev, k);
+
+				if (dp.fx.exists(path) &&
+				    !dp.fx.write(path, k == 'accept_ra' ? '2' : '0'))
+					log('warn', sprintf('datapath: writing %s failed', path));
+			}
+		}
+
+		step_simslot();
+	};
+
+	// assert the configured physical SIM slot (option sim_slot, 0 = leave
+	// as-is) via the vendor AT slots recipe — QMI parity (a switch
+	// re-initializes the SIM stack, so it runs BEFORE the SIM step). Without
+	// a recipe the identify-time warning already flagged the config.
+	step_simslot = () => {
+		let want = +(self.config?.sim_slot ?? 0);
+
+		if (!want || !self.vendor?.slots)
+			return step_sim();
+
+		sim.switch_slot(self, want, (err, res) => {
+			if (res?.unchanged) {
+				log('info', sprintf('sim_slot %d already active', want));
+				return step_sim();
+			}
+
+			if (err) {
+				log('warn', sprintf('sim_slot %d: slot switch failed (%J), continuing on the active slot', want, err));
+				return step_sim();
+			}
+
+			// the switch fired the CFUN reset — the modem re-enumerates and
+			// the daemon re-runs the bring-up on the configured slot (the
+			// device-gone path). Nothing further to do on this instance.
+			log('notice', sprintf('sim_slot %d: switched, modem re-enumerating', want));
+			self.stop();
+		});
 	};
 
 	step_sim = () => {
@@ -627,13 +799,7 @@ export function create(opts)
 					return step_register();
 
 				log('notice', 'attach context changed, cycling radio to re-attach');
-				self.at.send('AT+CFUN=0', () => {
-					settle_timer = uloop.timer(self.timing.settle, () => {
-						self.at.send('AT+CFUN=1', () => {
-							settle_timer = uloop.timer(self.timing.settle, step_register);
-						}, { timeout: 15000 });
-					});
-				}, { timeout: 15000 });
+				cfun_cycle(step_register);
 			});
 		}, { timeout: 8000 });
 	};
@@ -656,26 +822,36 @@ export function create(opts)
 				fail('registration_timeout', { reg: self.reg, detail: self.reg_detail });
 		});
 
-		let poll;
-
 		poll = () => {
-			if (self.state != 'REGISTERING' || !self.at)
+			if (self.state != 'REGISTERING' || !self.at || poll_inflight)
 				return;
+
+			poll_inflight = true;
 
 			self.at.send('AT+CEREG?', (err, res) => {
 				// stale callback after a teardown/reload nulled self.at: must not
 				// drive a dead modem to READY or send on a null engine
-				if (self.state != 'REGISTERING' || !self.at)
+				if (self.state != 'REGISTERING' || !self.at) {
+					poll_inflight = false;
 					return;
+				}
 
 				let r = err ? null : parse_creg(res?.lines);
 
 				let after = (rr) => {
+					poll_inflight = false;
+
 					if (rr?.registered)
 						return on_registered(rr);
 
-					if (self.state == 'REGISTERING')
+					if (self.state == 'REGISTERING') {
+						// the URC fast path can re-enter poll() while a timer is
+						// still pending — cancel first, or both fire
+						if (reg_poll_timer)
+							reg_poll_timer.cancel();
+
 						reg_poll_timer = uloop.timer(self.timing.reg_poll, poll);
+					}
 				};
 
 				if (r?.registered)
@@ -684,10 +860,13 @@ export function create(opts)
 				// 5G-SA: EPS registration (CEREG) can read not-registered while the
 				// device is attached via 5GS only — try C5GREG, then legacy CREG.
 				self.at.send('AT+C5GREG?', (e5, r5) => {
-					if (self.state != 'REGISTERING' || !self.at)
+					if (self.state != 'REGISTERING' || !self.at) {
+						poll_inflight = false;
 						return;
+					}
 
-					let rr5 = (!e5 && parse_creg(r5?.lines)?.registered) ? parse_creg(r5.lines) : null;
+					let r5p = e5 ? null : parse_creg(r5?.lines);
+					let rr5 = (r5p?.registered) ? r5p : null;
 
 					if (rr5?.registered)
 						return after(rr5);
@@ -784,7 +963,7 @@ export function create(opts)
 	let emit_telemetry = () => emit('telemetry', { signal: self.signal, cells: self.cells, reg: self.reg });
 
 	let log_telemetry = () => {
-		log('notice', sprintf('telemetry: %s', modem_common.format_telemetry(self)));
+		log('debug', sprintf('telemetry: %s', modem_common.format_telemetry(self)));
 	};
 
 	// fast "watch" loop while a consumer polls modem_signal/modem_cells — the

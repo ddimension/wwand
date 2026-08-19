@@ -427,6 +427,11 @@ eq(atcmd.parse_qtemp([ '+QTEMP: "cpu0-0-usr","35"', '+QTEMP: "pa1","120"' ]), 35
 eq(atcmd.parse_qtemp([ '+QTEMP: 42' ]), 42, 'qtemp: bare value');
 eq(atcmd.parse_qtemp([ '+QTEMP: "modem-ambient","5"' ]), null, 'qtemp: below floor -> null');
 eq(atcmd.parse_qtemp([ 'OK' ]), null, 'qtemp: no line -> null');
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 47' ]), 47.0, 'ethermal: single sensor');
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 46,48' ]), 47.0, 'ethermal: two sensors averaged');
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 46,48', '+ETHERMAL: 50' ]), 48.0, 'ethermal: multi-line averaged');
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 999' ]), null, 'ethermal: out-of-range -> null');
+eq(atcmd.parse_ethermal([ 'OK' ]), null, 'ethermal: no line -> null');
 
 // Huawei ^CHIPTEMP: first plausible sensor across the CSV
 eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 0,38,41,45' ]), 38, 'chiptemp: first in-range (0 skipped)');
@@ -609,4 +614,80 @@ at.send_pdu('AT+CMGS=18', 'DEAD', (err) => { got = { err: err }; });
 tr.reply("\r\n+CMS ERROR: 500\r\n");
 eq(got.err?.error, 'cms', 'send_pdu: CMS error surfaces');
 
-done('test_atcmd');
+// --- engine: idle URC dispatch ----------------------------------------------
+
+let urcs = [];
+let tr2 = fake_transport();
+let at2 = atcmd.create(tr2, { log: silent, on_urc: (line) => push(urcs, line) });
+
+tr2.reply('+CTZV: "26/08/19,14:00:00"\r\n');
+tr2.reply('+EONSNWNAME: "TestNet"\r\n');
+tr2.reply('garbage line\r\n');
+
+eq(urcs, [ '+CTZV: "26/08/19,14:00:00"', '+EONSNWNAME: "TestNet"' ],
+	'engine: idle URC lines dispatched, garbage discarded');
+
+// URCs arriving in the SAME read as the previous command's OK must dispatch
+// too (the T700's first +CTZV lands right behind AT+CTZR=1's OK)
+let urcs2 = [];
+let tr3 = fake_transport();
+let at3 = atcmd.create(tr3, { log: silent, on_urc: (l) => push(urcs2, l) });
+
+at3.send('AT+CEREG?', () => null);
+tr3.reply('AT+CEREG?\r\n+CEREG: 2,1\r\nOK\r\n+CGEV: ME PDN DEACT 1\r\n+CTZV: "26/08/19,14:00:00+32"\r\n');
+
+eq(urcs2, [ '+CGEV: ME PDN DEACT 1', '+CTZV: "26/08/19,14:00:00+32"' ],
+	'engine: URCs buffered behind OK dispatch');
+
+// auth commands never log credentials
+let auth_logs = [];
+let tr4 = fake_transport();
+let at4 = atcmd.create(tr4, { log: (level, msg) => push(auth_logs, msg) });
+
+at4.send('AT+CGAUTH=1,3,"user","secret123"', () => null);
+tr4.reply('\r\nOK\r\n');
+
+ok(length(auth_logs) > 0, 'auth: exchange logged');
+ok(!match(join(' ', auth_logs), /secret123/), 'auth: password redacted');
+ok(match(join(' ', auth_logs), /"\*\*\*"/), 'auth: mask present');
+
+// the full auth class: every form must mask, incl. the AUTHDATA one-credential
+// shapes (a missing password/username must not un-mask the other) and PIN/PUK
+// entry — the redaction matrix the log-leak fix added
+let auth_matrix = [
+	'AT+MGAUTH=1,2,"joe","secret"',
+	'AT+QICSGP=1,3,"web","joe","secret",2',
+	'AT$QCPDPP=1,1,"secret","joe"',
+	'AT^NDISDUP=1,1,"web","joe","secret",2',
+	'AT^AUTHDATA=1,2,,secret,joe',
+	'AT^AUTHDATA=1,2,,,joe',           // password empty — must still mask
+	'AT^AUTHDATA=1,2,,secret,',        // username empty — must still mask
+	'AT+CPIN="1234"',
+	'AT+CPIN="12345678","1234"',       // PUK entry form
+	'AT+CPUK="12345678","1234"',       // the CPUK class must mask like CPIN
+];
+
+for (let c in auth_matrix) {
+	let logs = [];
+	let trx = fake_transport();
+	let atx = atcmd.create(trx, { log: (level, msg) => push(logs, msg) });
+
+	atx.send(c, () => null);
+	trx.reply('\r\nOK\r\n');
+
+	ok(!match(join(' ', logs), /secret|joe|1234|12345678/),
+		sprintf('auth: %s masked', substr(c, 0, 22)));
+}
+
+// the timeout log path redacts too
+let tlogs = [];
+let trt = fake_transport();
+let att = atcmd.create(trt, { log: (level, msg) => push(tlogs, msg) });
+
+att.send('AT+CGAUTH=1,3,"user","secret123"', () => null, { timeout: 200 });
+uloop.timer(600, () => {
+	ok(!match(join(' ', tlogs), /secret123/), 'auth: timeout log redacted');
+	done('test_atcmd');
+});
+
+uloop.run();

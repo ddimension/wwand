@@ -26,6 +26,7 @@
 import * as uloop from 'uloop';
 import * as context_common from 'wwand.context_common';
 import * as ncm from 'wwand.modem_ncm';
+import * as netlink from 'wwand.netlink';
 
 export function create(opts)
 {
@@ -104,14 +105,9 @@ export function create(opts)
 
 		if (rdp.ipv4?.addr && rdp.ipv4.addr != '0.0.0.0') {
 			// /32 point-to-point unless the pushed prefix is explicitly wanted
-			// (parity with context.uc / context_mbim.uc)
+			// (parity with context.uc / context_mbim.uc — shared rule)
 			let pushed = rdp.ipv4.prefix;
-			let prefix = 32;
-
-			if (self.config.use_pushed_prefix && pushed != null)
-				prefix = pushed;
-			else if (pushed != null && pushed != 32)
-				log('debug', sprintf('network pushed ipv4 prefix /%d, forcing /32', pushed));
+			let prefix = context_common.v4_prefix(self.config, pushed, log);
 
 			out.ipv4 = {
 				addr: rdp.ipv4.addr, prefix: prefix, pushed_prefix: pushed,
@@ -121,16 +117,57 @@ export function create(opts)
 			};
 		}
 
-		if (rdp.ipv6?.addr && rdp.ipv6.addr != '::') {
+		// a PDP-reported v6 must be a real HOST address to be pushed: global
+		// unicast (2000::/3) or ULA (fc00::/7). Everything else is dropped —
+		// the literal '::' (CGPADDR before the v6 assignment settles) AND the
+		// NAT64/DNS64-embedded junk some networks misreport in the address
+		// slot (field: ::9b3c:bbac:ae08:b741 pushed as /128 next to the real
+		// RA GUA on ByteSIM). A dropped address falls back to the DNS-only /
+		// unmanaged bucket below — the RA-provided host address is untouched.
+		let valid_host_v6 = (a) => {
+			let m = match(a ?? '', /^([0-9a-fA-F]{1,4}):/);
+
+			if (!m)
+				return false;
+
+			let h = hex('0x' + m[1]);
+
+			return (h & 0xE000) == 0x2000 || (h & 0xFE00) == 0xFC00;
+		};
+
+		let v6_addr = (rdp.ipv6?.addr && valid_host_v6(rdp.ipv6.addr)) ? rdp.ipv6.addr : null;
+
+		if (rdp.ipv6 && (v6_addr || length(rdp.ipv6.dns ?? []))) {
 			out.ipv6 = {
-				addr: rdp.ipv6.addr, plen: rdp.ipv6.plen,
+				addr: v6_addr, plen: rdp.ipv6.plen,
 				gateway: rdp.ipv6.gateway,
 				dns: rdp.ipv6.dns ?? [],
 				mtu: rdp.ipv6.mtu,
 			};
+
+			// addr-less = the host v6 is NOT managed here (RNDIS v6 model:
+			// RA/SLAAC on the netdev + the dhcpv6 subinterface) — mark it so
+			// status renders "unmanaged" instead of null/0
+			if (out.ipv6.addr == null)
+				out.ipv6.unmanaged = true;
 		}
 
 		out.mtu = out.ipv4?.mtu ?? out.ipv6?.mtu;
+
+		// no MTU from the modem (the FM350-GL's CGCONTRDP carries none): the
+		// netdev's own MTU is what the datapath actually uses — surface it
+		// instead of reporting an empty MTU
+		if (out.mtu == null) {
+			let nd = self.modem.datapath?.netdev;
+			let fx = self.modem.datapath?.fx;
+
+			if (nd && fx) {
+				let m = fx.read(sprintf('/sys/class/net/%s/mtu', nd));
+
+				if (m != null && +m > 0)
+					out.mtu = +m;
+			}
+		}
 
 		return out;
 	};
@@ -138,10 +175,44 @@ export function create(opts)
 	// --- zero-rx watchdog / liveness ---------------------------------------
 
 
+	// --- v6 SLAAC re-solicit ------------------------------------------------
+	//
+	// The T700's internal router announces the host v6 via RA; after a PDP
+	// re-establishment its v6 forwarding can go stale until the host sends a
+	// fresh router solicitation (field-observed: v6 stopped answering until a
+	// disable_ipv6 toggle re-triggered SLAAC). Toggle the sysctl once per
+	// connect — cheap, idempotent, and the RA state then refreshes itself.
+	// RNDIS-ONLY: the modem RA model only exists there. On cdc_ncm/cdc_ether
+	// the v6 address is a pushed STATIC one — the 1s disable window would
+	// flush it mid-update and nothing there re-solicits.
+	let nudge_rs = () => {
+		if (self.modem.datapath?.backend != 'rndis_host')
+			return;
+
+		let nd = self.modem.datapath?.netdev;
+		let fx = self.modem.datapath?.fx;
+
+		if (!nd || !fx)
+			return;
+
+		let path = sprintf('/proc/sys/net/ipv6/conf/%s/disable_ipv6', nd);
+
+		if (!fx.exists(path))
+			return;
+
+		fx.write(path, '1');
+		uloop.timer(1000, () => {
+			// restore unconditionally: a teardown within the 1s window must
+			// not leave v6 disabled on the netdev (the write is idempotent)
+			fx.write(path, '0');
+		});
+	};
+
 	start_stats = () => {
 		rx_watch.reset();
 		self.connected_since = context_common.mono();
 		stats_timer = uloop.timer(0, sample_stats);   // first sample immediately
+		nudge_rs();
 	};
 
 	stop_stats = () => {
@@ -151,18 +222,48 @@ export function create(opts)
 		}
 	};
 
-	// live IP-settings refresh (QMI/MBIM parity): re-read CGCONTRDP on the
-	// stats tick and, if the network pushed changed IP config, emit 'settings'
-	// so the daemon renews the interface in place.
+	// URC pokes (modem-side +CGEV notifications): the modem pushes the
+	// session events unsolicited; DEACT runs the liveness probe immediately
+	// (the probe's own result decides, not the URC), ACT re-reads the
+	// settings (the network may have reassigned IPs on re-activation)
+	self.liveness_poke = () => {
+		if (self.state == 'CONNECTED')
+			sample_stats();
+	};
+
+	self.settings_poke = () => {
+		if (self.state == 'CONNECTED')
+			refresh_settings();
+	};
+
+	// per-vendor ip_config hook (ncm_vendors): vendors whose CGCONTRDP does not
+	// carry the assigned address (Fibocom T700 — empty local fields, CGPADDR
+	// instead) supply their own reader. The default is the generic CGCONTRDP
+	// path, byte-identical to the previous behavior.
+	let read_rdp = (cb) => {
+		if (self.modem.vendor?.ip_config)
+			return self.modem.vendor.ip_config(self.modem, self.cid, self.config, cb);
+
+		self.modem.at.send(sprintf('AT+CGCONTRDP=%d', self.cid), (err, res) => {
+			if (err)
+				return cb(err);
+
+			cb(null, ncm.parse_cgcontrdp(res?.lines));
+		}, { timeout: 15000 });
+	};
+
+	// live IP-settings refresh (QMI/MBIM parity): re-read the assigned IP on
+	// the stats tick and, if the network pushed changed IP config, emit
+	// 'settings' so the daemon renews the interface in place.
 	refresh_settings = () => {
 		if (self.state != 'CONNECTED' || !self.modem.at)
 			return;
 
-		self.modem.at.send(sprintf('AT+CGCONTRDP=%d', self.cid), (err, res) => {
+		read_rdp((err, rdp) => {
 			if (err || self.state != 'CONNECTED')
 				return;
 
-			let next = build_settings(ncm.parse_cgcontrdp(res?.lines));
+			let next = build_settings(rdp);
 
 			if (!next.ipv4 && !next.ipv6)
 				return;   // transient/empty read — keep current settings
@@ -187,6 +288,42 @@ export function create(opts)
 
 		// bearer liveness: the resolved dial's netdev-status query. state 0 while
 		// we think we are connected means the network/modem dropped the binding.
+		//
+		// netdev byte counters (the QMI/MBIM datapath_stats source): the
+		// universal NCM counter — vendors without a stats AT command (fibocom:
+		// none) still surface rx/tx on the status page / wwandctl and feed the
+		// zero-rx watchdog from the netdev statistics.
+		let sample_netdev = (done) => {
+			let nd = self.modem.datapath?.netdev;
+
+			if (!nd)
+				return done();
+
+			let st = netlink.datapath_stats(self.modem.datapath?.fx, nd, []);
+			let p = st?.parent;
+
+			if (p && (p.rx_bytes != null || p.tx_bytes != null)) {
+				self.stats = {
+					tx_bytes: p.tx_bytes ?? self.stats?.tx_bytes ?? 0,
+					rx_bytes: p.rx_bytes ?? self.stats?.rx_bytes ?? 0,
+				};
+
+				if (p.rx_bytes != null) {
+					let total = +p.rx_bytes;
+					let stalled = rx_watch.feed(total);
+
+					if (stalled != null) {
+						log('err', sprintf('no rx bytes for %dms, tripping zero-rx recovery', stalled));
+						stop_stats();
+						emit('zero_rx', { stalled_ms: stalled, rx_total: total });
+						return;
+					}
+				}
+			}
+
+			done();
+		};
+
 		let after_status = () => {
 			if (self.state != 'CONNECTED')
 				return;
@@ -223,12 +360,16 @@ export function create(opts)
 								return self._connection_lost({ reason: 'no_address' });
 						}
 
-						if (stats_timer) stats_timer.set(stats_interval);
+						sample_netdev(() => {
+							if (stats_timer) stats_timer.set(stats_interval);
+						});
 					});
 					return;
 				}
 
-				if (stats_timer) stats_timer.set(stats_interval);
+				sample_netdev(() => {
+					if (stats_timer) stats_timer.set(stats_interval);
+				});
 				return;
 			}
 
@@ -250,10 +391,18 @@ export function create(opts)
 						emit('zero_rx', { stalled_ms: stalled, rx_total: total });
 						return;
 					}
+
+					if (stats_timer)
+						stats_timer.set(stats_interval);
+					return;
 				}
 
-				if (stats_timer)
-					stats_timer.set(stats_interval);
+				// the vendor AT counter read/parse failed — the netdev counter
+				// is the universal fallback (and the sole source where the
+				// vendor defines no stats command at all)
+				sample_netdev(() => {
+					if (stats_timer) stats_timer.set(stats_interval);
+				});
 			});
 		};
 
@@ -326,17 +475,21 @@ export function create(opts)
 			let read_ip_config = () => {
 				activated = true;
 
-				self.modem.at.send(sprintf('AT+CGCONTRDP=%d', self.cid), (e2, res) => {
+				read_rdp((e2, rdp) => {
 					if (self.state != 'ACTIVATING')
 						return;
 
 					if (e2)
 						return self._fail({ stage: 'ip_config', err: e2 });
 
-					let rdp = ncm.parse_cgcontrdp(res?.lines);
 					self.settings = build_settings(rdp);
 
-					if (!self.settings.ipv4 && !self.settings.ipv6)
+					// an ipv6-only PDP legitimately carries no static address
+					// (host v6 = the modem's RA/SLAAC, host v4 = the separate
+					// 464xlat package) — only a v4-capable PDP with empty
+					// settings is an error
+					if ((!self.settings.ipv4 && !self.settings.ipv6) &&
+					    ccfg.pdp_type != 'ipv6')
 						return self._fail({ stage: 'ip_config', err: 'no address assigned' });
 
 					if (self.settings.ipv4)
@@ -345,10 +498,16 @@ export function create(opts)
 							self.settings.ipv4.gateway ?? '-', join(' ', self.settings.ipv4.dns),
 							self.settings.ipv4.mtu));
 
-					if (self.settings.ipv6)
+					if (self.settings.ipv6?.addr)
 						log('notice', sprintf('ipv6 config: %s/%d gw %s dns [%s]',
 							self.settings.ipv6.addr, self.settings.ipv6.plen,
 							self.settings.ipv6.gateway ?? '-', join(' ', self.settings.ipv6.dns)));
+					else if (self.settings.ipv6)
+						log('notice', sprintf('ipv6 dns: [%s] (ipv6-only PDP — host addressing via RA/SLAAC)',
+							join(' ', self.settings.ipv6.dns)));
+
+					if (!self.settings.ipv4 && !self.settings.ipv6)
+						log('notice', 'ip config: none (ipv6-only PDP — host v6 via RA/SLAAC, host v4 via 464xlat)');
 
 					self.last_error = null;   // a good connection clears the last failure
 					set_state('CONNECTED');

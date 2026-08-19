@@ -140,6 +140,27 @@ function cmd_status(args)
 
 		if (m.temperature?.celsius != null)
 			printf('  temp        %d °C\n', m.temperature.celsius);
+
+		if (m.fcc_lock != null && m.fcc_lock != 0)
+			printf('  fcc_lock    mode %d (radio locked — fcc_auth may unlock)\n', m.fcc_lock);
+
+		if (m.apdu_backend)
+			printf('  apdu        %s\n', m.apdu_backend);
+
+		if (m.esim?.eid)
+			printf('  esim        eid %s (%d profile%s)\n', m.esim.eid,
+				length(m.esim.profiles ?? []), length(m.esim.profiles ?? []) == 1 ? '' : 's');
+
+		if (m.locks) {
+			let ls = [];
+
+			for (let k, v in m.locks)
+				if (v != null && v !== false)
+					push(ls, sprintf('%s=%J', k, v));
+
+			if (length(ls))
+				printf('  locks       %s\n', join(' ', ls));
+		}
 	}
 
 	for (let name, c in st.contexts) {
@@ -155,12 +176,29 @@ function cmd_status(args)
 			printf('  ipv4        %s/%d  gw %s  dns %s\n', s.ipv4.addr, s.ipv4.prefix ?? 32,
 				s.ipv4.gateway ?? '-', join(' ', s.ipv4.dns ?? []));
 
-		if (s?.ipv6)
-			printf('  ipv6        %s/%d  gw %s\n', s.ipv6.addr, s.ipv6.plen ?? 64, s.ipv6.gateway ?? '-');
+		if (s?.ipv6) {
+			if (s.ipv6.unmanaged)
+				printf('  ipv6        unmanaged (RA/SLAAC on the netdev, dhcpv6 subinterface)\n');
+			else
+				printf('  ipv6        %s/%d  gw %s\n', s.ipv6.addr, s.ipv6.plen ?? 64, s.ipv6.gateway ?? '-');
+		}
+
+		if (c.state == 'CONNECTED') {
+			let cs = call('context_status', { context: name });
+			let st = cs?.stats;
+
+			if (st && (st.rx_bytes != null || st.tx_bytes != null))
+				printf('  data        down %d bytes  up %d bytes\n',
+					st.rx_bytes ?? 0, st.tx_bytes ?? 0);
+		}
 	}
 
 	if (!length(keys(st.modems)))
 		printf('no modems managed\n');
+
+	if (st.board?.id)
+		printf('BOARD       %s%s\n', st.board.id,
+			st.board.has_power ? ' (power/reset capable)' : '');
 }
 
 function cmd_modems()
@@ -219,12 +257,101 @@ function cmd_sms(st, args)
 		printf('no messages in %s\n', storage);
 }
 
+// eSIM management (needs the wwand-esim package on the device): mirror the
+// LuCI panel for headless boxes. slot is optional (defaults to 1 in the
+// daemon; on dual-SIM modules address the eUICC's physical slot).
+function cmd_esim(st, args)
+{
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+	let op = rest[0];
+
+	if (op == null)
+		die('usage: wwandctl esim [modem] <eid|backend|profiles|enable|disable|delete|download|download-status|notifications|notify> [...]');
+
+	switch (op) {
+	case 'eid':
+	case 'backend': {
+		let res = call_ok('modem_esim', { modem: r.modem, op: op, slot: +(rest[1] ?? 1) });
+		printf('%s\n', (op == 'eid') ? (res.eid ?? '?') : (res.backend ?? '?'));
+		break;
+	}
+
+	case 'profiles': {
+		let res = call_ok('modem_esim', { modem: r.modem, op: op, slot: +(rest[1] ?? 1) });
+
+		for (let p in (res.profiles ?? []))
+			printf('%-22s %-9s %s%s\n', p.iccid ?? '?', p.state ?? '?',
+				p.provider ? sprintf('provider %s ', p.provider) : '',
+				p.name ? sprintf('"%s"', p.name) : '');
+
+		if (!length(res.profiles ?? []))
+			printf('no profiles installed\n');
+		break;
+	}
+
+	case 'enable':
+	case 'disable':
+	case 'delete': {
+		if (!length(rest[1] ?? ''))
+			die(sprintf('usage: wwandctl esim [modem] %s <iccid>', op));
+
+		let res = call_ok('modem_esim', { modem: r.modem, op: op, slot: +(rest[2] ?? 1), iccid: rest[1] });
+		printf('profile %s%s\n', op, res.applied ? sprintf(' (%s applied)', res.applied) : '');
+		break;
+	}
+
+	case 'download': {
+		let code = rest[1];
+		let conf = null, auto_notify = true;
+
+		for (let i = 2; rest[i] != null; i++) {
+			if (rest[i] == '--no-notify') { auto_notify = false; continue; }
+			if (conf != null)
+				die('usage: wwandctl esim [modem] download <activation_code> [confirmation_code] [--no-notify]');
+			conf = rest[i];
+		}
+
+		if (!length(code ?? ''))
+			die('usage: wwandctl esim [modem] download <activation_code> [confirmation_code] [--no-notify]');
+
+		let res = call_ok('modem_esim', { modem: r.modem, op: op, activation_code: code,
+			confirmation_code: conf ?? '', auto_notify: auto_notify });
+		printf('download started (%s)\n', res.via ?? '?');
+		break;
+	}
+
+	case 'download-status': {
+		let res = call_ok('modem_esim', { modem: r.modem, op: op });
+		printf('state: %s%s\n', res.state ?? '?', res.via ? sprintf(' via %s', res.via) : '');
+		if (length(res.log ?? ''))
+			printf('%s\n', res.log);
+		break;
+	}
+
+	case 'notifications': {
+		let res = call_ok('modem_esim', { modem: r.modem, op: op, slot: +(rest[1] ?? 1) });
+		printf('%s\n', length(res.log ?? '') ? res.log : '(none)');
+		break;
+	}
+
+	case 'notify': {
+		call_ok('modem_esim', { modem: r.modem, op: op });
+		printf('notification process started\n');
+		break;
+	}
+
+	default:
+		die(sprintf('unknown esim op %J — see `wwandctl help`', op));
+	}
+}
+
 const HELP = `wwandctl — control the wwand cellular connection manager
 
 Usage: wwandctl [--json] <command> [modem] [args...]
   [modem] may be omitted when exactly one modem is managed.
   --json    machine mode: print the raw ubus reply of a read command as JSON
-            (status/modems/signal/cells/datapath/slots/plmn)
+            (status/modems/signal/cells/datapath/slots/plmn/settings/probe/location)
 
 Status
   status                 modem + interface overview
@@ -232,8 +359,11 @@ Status
   signal [modem]         raw signal metrics
   cells [modem]          cells, registration detail, temperature
   datapath [modem]       datapath / mux / aggregation diagnostics
-  slots [modem]          SIM slot status (ICCID, eUICC, active)
+  slots [modem]          SIM slot status (ICCID, eUICC, CPIN, service, active)
   plmn [modem]           PLMN selector lists (user/nas/operator/home/fplmn)
+  settings [modem]       NAS settings / band prefs (settings editor data)
+  probe                  detected modems (managed + present, for stable binding)
+  location [modem]       last location fix
 
 Connection
   up <interface>         connect (like ifup, via the daemon)
@@ -255,11 +385,24 @@ SMS
   sms-send [modem] <number> <text...>   send an SMS
   sms-delete [modem] <index>
 
+eSIM (needs the wwand-esim package)
+  esim [modem] profiles                  list installed profiles
+  esim [modem] eid                      read the eUICC EID
+  esim [modem] backend                  which APDU transport serves the eUICC
+  esim [modem] enable|disable|delete <iccid>
+  esim [modem] download <activation_code> [confirmation_code] [--no-notify]
+  esim [modem] download-status          poll a running download
+  esim [modem] notifications | notify   pending eUICC notifications (ES9+)
+
 Maintenance
   reset [modem]          modem reset (GPIO if configured, else backend soft reset)
   repower [modem]        hardware repower (reset-GPIO pulse / board power-cycle)
+  protocol [modem] qmi|mbim   switch the control protocol (the modem resets)
+  plmn-set [modem] <user|nas|fplmn> <mccmnc>[+gsm,+utran,...] ...
+  plmn-restore [modem]   re-apply the configured PLMN list ("restore now")
   at [modem] <command>   raw AT command on the modem's AT port
   migrate [apply]        plan (default) or apply config migration to proto wwand
+  reload                 re-read UCI and apply the diff
   log-level <level>      err|warn|notice|info|debug (until next reload)
   help                   this text
 `;
@@ -296,6 +439,8 @@ if (json_mode) {
 		status: 'status', modems: 'status',
 		signal: 'modem_signal', cells: 'modem_cells', datapath: 'modem_datapath',
 		slots: 'modem_sim_slots', plmn: 'modem_plmn_lists',
+		settings: 'modem_get_settings', probe: 'modem_probe',
+		location: 'modem_location',
 	};
 
 	let method = JSON_READ[cmd];
@@ -341,9 +486,13 @@ case 'slots': {
 	let res = call_ok('modem_sim_slots', { modem: r.modem });
 
 	for (let s in (res.slots ?? []))
-		printf('slot %d: %-7s %s%s%s\n', s.physical, s.card,
-			s.active ? '[active] ' : '', s.iccid ? sprintf('iccid %s ', s.iccid) : '',
-			s.is_euicc ? sprintf('eUICC eid %s', s.eid ?? '?') : '');
+		printf('slot %d: %-7s %s%s%s%s%s%s\n', s.physical, s.card,
+			s.active ? '[active] ' : '',
+			s.iccid ? sprintf('iccid %s ', s.iccid) : '',
+			s.is_euicc ? sprintf('eUICC eid %s', s.eid ?? '?') : '',
+			s.cpin ? sprintf(' cpin %s', s.cpin) : '',
+			s.service ? sprintf(' service %s', s.service) : '',
+			s.atr ? sprintf(' atr %s', s.atr) : '');
 	break;
 }
 
@@ -378,6 +527,99 @@ case 'plmn': {
 	}
 	break;
 }
+
+case 'plmn-set': {
+	let st = status();
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	if (index([ 'user', 'nas', 'fplmn' ], rest[0]) < 0 || !length(rest[1] ?? ''))
+		die('usage: wwandctl plmn-set [modem] <user|nas|fplmn> <mccmnc>[+gsm,+utran,...] ...');
+
+	let entries = [];
+
+	for (let e in slice(rest, 1)) {
+		let parts = split(e, '+');
+		let mm = match(parts[0], /^([0-9]{3})([0-9]{2,3})$/);
+
+		if (!mm)
+			die(sprintf('bad mccmnc %J (want 5-6 digits)', parts[0]));
+
+		let ent = { mcc: mm[1], mnc: mm[2] };
+
+		for (let f in slice(parts, 1))
+			if (index([ 'gsm', 'utran', 'eutran', 'ngran' ], f) >= 0)
+				ent[f] = true;
+
+		push(entries, ent);
+	}
+
+	call_ok('modem_plmn_set', { modem: r.modem, list_type: rest[0], entries: entries });
+	printf('wrote %d record(s) to the %s list\n', length(entries), rest[0]);
+	break;
+}
+
+case 'plmn-restore': {
+	let r = resolve_modem(status(), args[0]);
+	call_ok('modem_plmn_restore', { modem: r.modem });
+	printf('configured list restored\n');
+	break;
+}
+
+case 'protocol': {
+	let st = status();
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	if (index([ 'qmi', 'mbim' ], rest[0]) < 0)
+		die('usage: wwandctl protocol [modem] qmi|mbim');
+
+	call_ok('modem_set_protocol', { modem: r.modem, protocol: rest[0] });
+	printf('protocol switch to %s issued — the modem resets\n', rest[0]);
+	break;
+}
+
+case 'settings': {
+	let r = resolve_modem(status(), args[0]);
+	dump(call_ok('modem_get_settings', { modem: r.modem }), '  ');
+	break;
+}
+
+case 'location': {
+	let r = resolve_modem(status(), args[0]);
+	let res = call('modem_location', { modem: r.modem });
+
+	if (res?.error)
+		printf('no location (%s)\n', res.error);
+	else
+		dump(res ?? {}, '  ');
+	break;
+}
+
+case 'probe': {
+	let res = call_ok('modem_probe', {});
+
+	printf('managed:\n');
+
+	for (let m in (res.managed ?? []))
+		printf('  %-10s %-18s %s\n', m.id ?? '?', m.model ?? '?', m.device ?? '?');
+
+	printf('present (unconfigured):\n');
+
+	for (let p in (res.present ?? []))
+		printf('  %s\n', p.device ?? p);
+
+	break;
+}
+
+case 'esim':
+	cmd_esim(status(), args);
+	break;
+
+case 'reload':
+	call_ok('reload', {});
+	printf('config reloaded\n');
+	break;
 
 case 'up':
 case 'down': {

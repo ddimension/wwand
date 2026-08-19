@@ -2,7 +2,7 @@
 
 A from-scratch native QMI/MBIM/NCM stack in ~3 MB — a tenth of ModemManager —
 that has survived a dwc3/swiotlb 4-byte-URB storm, provider-side SIM purges, and
-four datapath variants (rmnet / qmimux / raw-ip / NCM-ECM) in production. This
+four datapath variants (rmnet / qmimux / raw-ip / NCM-ECM-RNDIS) in production. This
 document is how it's built and why each decision was forced by the field; read
 [`connection-flow.md`](connection-flow.md) next to it for the runtime bring-up
 sequence, and [`luci.md`](luci.md) for the web UI.
@@ -15,7 +15,7 @@ per modem and load only when their package is installed.
 
 **Design principle — three separable concerns.** wwand deliberately keeps the
 **control protocol** (QMI / MBIM / AT), the **datapath** (QMAP/RmNet, MBIM,
-NCM/ECM, raw-ip) and the **physical transport** (USB today; PCIe/MHI on the
+NCM/ECM/RNDIS, raw-ip) and the **physical transport** (USB today; PCIe/MHI on the
 roadmap) as distinct axes rather than one "modem protocol". QMI and MBIM are
 co-equal first-class control backends (the market splits QMI/QMAP —
 Quectel/SIMCom/MeiG — vs MBIM — Sierra-Semtech/Telit/Fibocom/u-blox); QMAP is a
@@ -434,8 +434,14 @@ above cares which one is in use.
   and kills the live MBIM data session (HW-proven on EG06); the shim blocks it
   structurally.
 - **NCM** — AT-controlled (`ncm_vendors.uc` `VENDORS` recipes, driven by
-  `modem_ncm.uc`) over a plain `cdc_ncm`/`cdc_ether` netdev, for modems with no
-  cdc-wdm control device.
+  `modem_ncm.uc`) over a plain `cdc_ncm`/`cdc_ether`/`rndis_host` netdev, for
+  modems with no cdc-wdm control device. RNDIS modems (Fibocom FM350-GL) are
+  the same backend — the control is AT either way, so no separate backend
+  exists. Assigned IP config is always static from the modem (CGCONTRDP, or
+  the per-vendor `ip_config` hook, e.g. CGPADDR on the T700) — DHCP is never
+  used. rndis_host datapaths come up with ARP disabled (NOARP): the
+  gateway-less /32 device route then works without neighbour resolution
+  (Linux treats NOARP interfaces as NUD_NOARP for IPv6 NDP as well).
 
 Shared logic is extracted once and installed by every backend:
 `modem_common.uc` (state/context scaffolding, `make_fail`, the adaptive
@@ -480,6 +486,17 @@ separate AT port or helper daemon.
 
 lpac is either the stock openwrt-packages `lpac` or the bundled `wwand-lpac`
 (both provide `/usr/bin/lpac`); the stdio APDU bridge needs lpac ≥ 2.3.0.
+
+The **APDU transport** is chosen per modem (`sim.uc apdu_backend`): native
+**MBIM MS UICC Low Level Access** → **QMI UIM** (native or over the
+QMI-over-MBIM passthrough) → **AT** (`CCHO`/`CGLA`/`CCHC` — the path for
+AT-only modems like the Fibocom FM350-GL, whose T700 answers `CCHO` with a
+bare session id). On dual-SIM modules the eUICC is its own physical slot; the
+internal LPA re-claims the ISD-R, so host APDU access is a **window** that
+opens after a slot switch — wwand re-probes the backend per operation instead
+of caching a dead channel, and the modem's `esim_ready` event (fired after the
+bring-up esim-surface probes) triggers the daemon's `eid`/`profiles` refresh
+into status.
 
 ## 7. Configuration & migration
 

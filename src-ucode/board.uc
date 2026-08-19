@@ -167,11 +167,14 @@ function render_mobile(fx, m, s)
 }
 
 // --- board profiles ----------------------------------------------------------
-// power_gpio  — named GPIO that gates modem USB power (power-cycle target)
-// reset_gpio  — named GPIO wired to the modem RESET line (board default; a modem
-//               config `reset_gpio` overrides per modem)
-// option_ids  — vendor/product pairs to bind to the usb-serial `option` driver
-// leds(fx, s) — render the panel from the modem state s
+// power_gpio           — named GPIO that gates modem USB power (power-cycle
+//                        target). value 1 = powered by default.
+// power_gpio_active_low— the power line is INVERTED: value 0 = powered, 1 = off.
+// reset_gpio           — named GPIO wired to the modem RESET line (board
+//                        default; a modem config `reset_gpio` overrides)
+// option_ids           — vendor/product pairs to bind to the usb-serial `option`
+//                        driver
+// leds(fx, s)          — render the panel from the modem state s
 const SIGNAL5 = [ 'green:mobile-1', 'green:mobile-2', 'green:mobile-3',
                   'green:mobile-4', 'green:mobile-5' ];
 
@@ -234,6 +237,23 @@ const PROFILES = {
 		reset_gpio: '4g',
 		option_ids: [ '2dee 4d57', '2dee 4d58' ],
 	},
+	// Huasifei WH3000 Pro (MT7981B Filogic 820; 5G M.2 slot wired to USB). The
+	// DTS exports the modem power enable as `modem_power` (pio 4) — INVERTED
+	// on this board (field-verified on a WH3000 Pro: value 1 cuts the modem,
+	// 0 powers it; the T700 re-enumerates slowly after power-off, give it a
+	// minute). init() only drives the line when it reads "off". No modem RESET
+	// line and no dedicated modem LEDs (the two board LEDs are the OS status
+	// pair). The FM350-GL serials are deliberately NOT in option_ids: the
+	// kernel option driver binds them itself (since 4.19.318, ADB excepted)
+	// and a blanket new_id would grab ADB and crash-loop the card.
+	'huasifei,wh3000-pro-emmc': {
+		power_gpio: 'modem_power',
+		power_gpio_active_low: true,
+	},
+	'huasifei,wh3000-pro-nand': {
+		power_gpio: 'modem_power',
+		power_gpio_active_low: true,
+	},
 };
 
 // --- instance ----------------------------------------------------------------
@@ -247,6 +267,9 @@ export function create(opts)
 	// timings are injectable so tests can drive the deferred halves quickly
 	let power_off_ms = opts?.power_off_ms ?? POWER_OFF_MS;
 	let reset_ms = opts?.reset_ms ?? RESET_ASSERT_MS;
+	// polarity of the modem power line (inverted boards power with 0)
+	let power_on = profile?.power_gpio_active_low ? '0' : '1';
+	let power_off = profile?.power_gpio_active_low ? '1' : '0';
 
 	// GPIO names are interpolated into sysfs paths, and a per-modem
 	// `reset_gpio` comes from uci — restrict to a safe token (no slash, no
@@ -289,9 +312,9 @@ export function create(opts)
 		if (profile.power_gpio) {
 			// only assert power if currently off, so we never gratuitously
 			// power-cycle a working modem on a daemon restart
-			if (gpio_read(profile.power_gpio) == '0') {
+			if (gpio_read(profile.power_gpio) == power_off) {
 				log('notice', sprintf('board %s: powering modem on (gpio %s)', id, profile.power_gpio));
-				gpio_set(profile.power_gpio, 1);
+				gpio_set(profile.power_gpio, power_on == '1');
 			}
 		}
 
@@ -311,8 +334,8 @@ export function create(opts)
 
 		log('err', sprintf('board %s: power-cycling modem (gpio %s, off %ds)',
 			id, profile.power_gpio, off / 1000));
-		gpio_set(profile.power_gpio, 0);
-		uloop.timer(off, () => gpio_set(profile.power_gpio, 1));
+		gpio_set(profile.power_gpio, power_off == '1');
+		uloop.timer(off, () => gpio_set(profile.power_gpio, power_on == '1'));
 
 		return true;
 	};

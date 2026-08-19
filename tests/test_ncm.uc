@@ -18,6 +18,8 @@ import * as uloop from 'uloop';
 import * as fakefx from './lib/fakefx.uc';
 import * as modem_ncm from 'wwand/modem_ncm.uc';
 import * as context_ncm from 'wwand/context_ncm.uc';
+import * as ncm_vendors from 'wwand/ncm_vendors.uc';
+import * as modem_common from 'wwand/modem_common.uc';
 
 uloop.init();
 
@@ -39,6 +41,7 @@ function at_mock(handlers)
 			if (match(cmd, e.re)) { h = e; break; }
 
 		let lines = h?.lines ?? [];
+		let urcs = h?.urcs ?? [];
 		let term = h?.term ?? 'OK';
 
 		uloop.timer(0, () => {
@@ -46,6 +49,12 @@ function at_mock(handlers)
 				return;
 
 			let out = '';
+
+			// URCs interleaved INTO the response (before the finalizer): the
+			// engine folds them into the command's lines, exactly like a real
+			// modem reset does during the identify chain
+			for (let u in urcs)
+				out += u + "\r\n";
 
 			for (let l in lines)
 				out += l + "\r\n";
@@ -125,6 +134,7 @@ function run_next()
 		id: s.name, device: '/dev/cdc-wdm0',
 		config: { tty: '/dev/ttyUSB2', stats_interval: 1, zero_rx_timeout: 0, ...(s.mconfig ?? {}) },
 		timing: { settle: 1, reg_timeout: 500, reg_poll: 5, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		datapath: s.datapath,
 		at: { open_transport: () => tr },   // inject the scripted tty
 		deps: {
 			log: () => null,
@@ -425,9 +435,9 @@ push(scenarios, {
 		{ re: /^AT\+CPIN\?$/, lines: [ '+CPIN: READY' ] },
 		{ re: /^AT\+CEREG\?$/, lines: [ '+CEREG: 2,1' ] },
 		{ re: /^AT\+QNETDEVCTL=\?$/, lines: [], term: 'ERROR' },   // HW: unsupported
-		// the verbatim RG650E dual-stack line (mixed comma/space, mixed widths)
+		// the RG650E dual-stack line shape (mixed comma/space, mixed widths; values anonymized)
 		{ re: /^AT\+CGCONTRDP/, lines: [
-			'+CGCONTRDP: 1,5,"web.vodafone.de","100.71.169.229","42.0.0.32.66.143.62.233.146.68.145.209.245.33.214.219", "254.128.0.0.0.0.0.0.0.0.0.0.0.0.0.1","139.7.30.125" "42.1.8.96.0.0.3.0.0.0.0.0.0.0.0.83","139.7.30.126" "42.1.8.96.0.0.3.0.0.0.0.0.0.0.1.83"',
+			'+CGCONTRDP: 1,5,"internet","192.0.2.229","32.1.13.184.0.0.0.0.0.0.0.0.0.0.0.1", "254.128.0.0.0.0.0.0.0.0.0.0.0.0.0.1","192.0.2.53" "32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136","192.0.2.54" "32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.68"',
 		] },
 		{ re: /^AT\+CGACT=1,/, lines: [] },
 		{ re: /^AT\+CGACT=0,/, lines: [] },
@@ -435,7 +445,7 @@ push(scenarios, {
 		{ re: /^AT\+CSQ$/,    lines: [ '+CSQ: 20,99' ] },
 		{ re: /^AT\+QENG=/,   lines: [] },
 	],
-	cconfig: { apn: 'web.vodafone.de', pdp_type: 'ipv4v6', mux_id: 0 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6', mux_id: 0 },
 	run: (env) => {
 		let m = env.modem;
 
@@ -445,12 +455,12 @@ push(scenarios, {
 			eq(err, null, 'RG650E context up succeeds via CGACT');
 			ok(env.tr.saw(/^AT\+CGACT=1,1$/) != null, 'CGACT connect issued');
 
-			// dual-stack decode from the real RG650E CGCONTRDP line
-			eq(settings?.ipv4?.addr, '100.71.169.229', 'RG650E ipv4 addr (bare 4-octet local)');
+			// dual-stack decode from the RG650E CGCONTRDP line
+			eq(settings?.ipv4?.addr, '192.0.2.229', 'RG650E ipv4 addr (bare 4-octet local)');
 			eq(settings?.ipv4?.prefix, 32, 'RG650E ipv4 forced /32');
-			eq(settings?.ipv4?.dns, [ '139.7.30.125', '139.7.30.126' ], 'RG650E both v4 DNS');
-			eq(settings?.ipv6?.addr, '2a00:20:428f:3ee9:9244:91d1:f521:d6db', 'RG650E ipv6 addr (16-octet field)');
-			eq(settings?.ipv6?.dns, [ '2a01:860:0:300:0:0:0:53', '2a01:860:0:300:0:0:0:153' ], 'RG650E both v6 DNS');
+			eq(settings?.ipv4?.dns, [ '192.0.2.53', '192.0.2.54' ], 'RG650E both v4 DNS');
+			eq(settings?.ipv6?.addr, '2001:db8:0:0:0:0:0:1', 'RG650E ipv6 addr (16-octet field)');
+			eq(settings?.ipv6?.dns, [ '2001:4860:4860:0:0:0:0:8888', '2001:4860:4860:0:0:0:0:8844' ], 'RG650E both v6 DNS');
 
 			env.ctx.down(() => {
 				ok(env.tr.saw(/^AT\+CGACT=0,1$/) != null, 'CGACT disconnect issued');
@@ -696,17 +706,775 @@ push(scenarios, {
 	},
 });
 
+// --- s9: Fibocom FM350-GL static-IP path (empty-local CGCONTRDP + CGPADDR) ---
+
+// base Fibocom FM350-GL bring-up + connect script. CGCONTRDP answers in the
+// T700 empty-local form (gateway + dns only — the exact live capture), plus an
+// IPv6 line for the parity check. `over` prepends scenario overrides.
+function fscript(over)
+{
+	return [
+		...(over ?? []),
+		{ re: /^AT\+CGMI$/, lines: [ 'Fibocom Wireless Inc.' ] },
+		{ re: /^AT\+CGMM$/, lines: [ 'FM350-GL' ] },
+		{ re: /^AT\+CGMR$/, lines: [ 'FM350GL_04.02.10' ] },
+		{ re: /^AT\+CGSN$/, lines: [ '350000000000000' ] },
+		{ re: /^AT\+GTFCCEFFSTATUS\?$/, lines: [ '+GTFCCEFFSTATUS: 0' ] },
+		{ re: /^AT\+SIMTYPE\?$/, lines: [ '+SIMTYPE: 0' ] },
+		{ re: /^AT\+ESLOTSINFO/, lines: [ '+ESLOTSINFO: 2, "+CPIN: READY", "1", "0", "3B00000000000000", "", "89000000000000000000", "+CPIN: EMPTY_EUICC", "1", "1", "3B9F00000000000000000000", "89000000000000000000000000000000", ""' ] },
+		{ re: /^AT\+EID$/, lines: [ '+EID: 89000000000000000000000000000000' ] },
+		{ re: /^AT\+CIMI$/, lines: [ '001010123456789' ] },
+		{ re: /^AT\+QCCID$/, term: 'ERROR', lines: [] },      // quectel-only probe
+		{ re: /^AT\+ICCID$/, lines: [ '+ICCID: 89000000000000000000' ] },
+		{ re: /^AT\+CPIN\?$/, lines: [ '+CPIN: READY' ] },
+		{ re: /^AT\+CEREG\?$/, lines: [ '+CEREG: 2,1' ] },
+		{ re: /^AT\+C5GREG\?$/, lines: [ '+C5GREG: 2,1' ] },
+		{ re: /^AT\+GTDUALSIM\?$/, lines: [ '+GTDUALSIM : 0, "SUB1", "NR"' ] },
+		{ re: /^AT\+GTRNDIS=\?$/, term: 'ERROR', lines: [] }, // no GTRNDIS on T700
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,5,"internet","","","192.0.2.1","192.0.2.22"',
+			'+CGCONTRDP: 1,5,"internet",32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136,32.1.72.96.0.0.0.0.0.0.0.0.0.0.0.1,32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136',
+		] },
+		{ re: /^AT\+CGPADDR=1$/, lines: [ '+CGPADDR: 1,"192.0.2.190",""' ] },
+		{ re: /^AT\+CGDCONT\?$/, lines: [] },                  // no existing profile
+		{ re: /^AT\+CGACT=1,/, lines: [ 'OK' ] },
+		{ re: /^AT\+GTCAINFO/, lines: [ '+GTCAINFO:', 'LTE PCC: 103,120,1279,75,2,1,1,1,71' ] },
+		{ re: /^AT\+CSQ$/, lines: [ '+CSQ: 20,99' ] },
+	];
+}
+
+let s9a_fx = fakefx.create({
+	files: {
+		'/sys/class/net/wwand0/mtu': '1500',
+		'/proc/sys/net/ipv6/conf/wwand0/disable_ipv6': '1',
+		'/proc/sys/net/ipv6/conf/wwand0/accept_ra': '0',
+	},
+	present: {
+		'/proc/sys/net/ipv6/conf/wwand0/disable_ipv6': true,
+		'/proc/sys/net/ipv6/conf/wwand0/accept_ra': true,
+	},
+	links: { '/sys/class/net/wwand0/device/driver': 'drivers/rndis_host' },
+});
+
+push(scenarios, {
+	name: 's9a_fibocom_static_ip',
+	script: fscript(),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	mconfig: { apn: 'internet' },   // concrete attach APN -> the CFUN cycle runs
+	datapath: { netdev: 'wwand0', fx: s9a_fx },
+	run: (env) => {
+		let m = env.modem;
+
+		ok(true, 'fibocom modem reached READY');
+		eq(m.info.model, 'FM350-GL', 'fibocom model from CGMM');
+		eq(m.dial.name, 'cgact', 'fibocom dial resolves to CGACT (GTRNDIS probe errors)');
+		eq(s9a_fx.action_index('link_set wwand0 up noarp'), 0,
+			's9a: rndis_host datapath comes up with NOARP');
+		eq(m.datapath?.backend, 'rndis_host', 's9a: datapath label reads the real driver');
+		ok(type(env.ctx.liveness_poke) == 'function' && type(env.ctx.settings_poke) == 'function',
+			's9a: URC poke entry points exposed');
+		eq(m.fcc_lock, 0, 's9a: FCC-lock probe read (unlocked)');
+		eq(m.esim_state, '89000000000000000000000000000000', 's9a: eSIM surface probes run (EID last)');
+		ok(any_event(env.mevents, 'esim_ready'), 's9a: esim_ready emitted after the probes');
+		eq(s9a_fx.files['/proc/sys/net/ipv6/conf/wwand0/accept_ra'], '2',
+			's9a: RA acceptance enabled on the netdev (accept_ra 2)');
+
+		env.ctx.up((err, settings) => {
+			eq(err, null, 'fibocom context up succeeds');
+			eq(env.ctx.state, 'CONNECTED', 'fibocom context CONNECTED');
+
+			// static /32 p2p: address from CGPADDR, gateway stays null — the
+			// shim applies a gateway-less default device route (NOARP on rndis)
+			eq(settings?.ipv4?.addr, '192.0.2.190', 'fibocom ipv4 addr from CGPADDR');
+			eq(settings?.ipv4?.prefix, 32, 'fibocom ipv4 stays /32 (host-route model)');
+			eq(settings?.ipv4?.gateway, null, 'fibocom gateway stays null (device route + NOARP on rndis)');
+			eq(settings?.ipv4?.dns, [ '192.0.2.22' ], 'fibocom dns from the CGCONTRDP tail');
+			eq(settings?.mtu, 1500, 'fibocom mtu falls back to the netdev mtu (1500)');
+
+			// IPv6 parity: the CGCONTRDP v6 line survives the static v4 path
+			eq(settings?.ipv6?.addr, '2001:4860:4860:0:0:0:0:8888', 'fibocom ipv6 addr from CGCONTRDP (parity)');
+			ok(settings?.ipv6?.gateway == '2001:4860:0:0:0:0:0:1', 'fibocom ipv6 gateway decoded');
+
+			ok(env.tr.saw(/^AT\+CGPADDR=1$/) != null, 'fibocom static path queried CGPADDR');
+			ok(env.tr.saw(/^AT\+CREG=3;\+CGREG=3;\+CEREG=3;\+C5GREG=3;\+CGEREP=2,1$/) != null,
+				's9a: URC enables issued');
+			ok(env.tr.saw(/^AT\+CTZR=1$/) != null, 's9a: NITZ URC enabled');
+			// the empty CGDCONT? answer means the attach profile changes on every
+			// connect — the CFUN 0/1 radio cycle must run each time
+			ok(env.tr.saw(/^AT\+CFUN=0$/) != null, 's9a: attach-change radio cycle ran (CFUN 0 leg)');
+
+			// the RS nudge toggles disable_ipv6 (1 then 0, 1s apart) after connect
+			uloop.timer(1500, () => {
+				eq(s9a_fx.files['/proc/sys/net/ipv6/conf/wwand0/disable_ipv6'], '0',
+					's9a: RS nudge restores IPv6 on the netdev');
+				ok(length(s9a_fx.matching('/proc/sys/net/ipv6/conf/wwand0/disable_ipv6')) >= 3,
+					's9a: RS nudge toggled disable_ipv6 (datapath + 1/0 pair)');
+				env.finish();
+			});
+		});
+	},
+});
+
+push(scenarios, {
+	name: 's9c_fibocom_filled_cgcontrdp',
+	script: fscript([
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,5,internet,10.20.30.40.255.255.255.0,10.20.30.1,8.8.8.8,8.8.4.4',
+			'+CGCONTRDP: 1,5,internet,32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136,32.1.72.96.0.0.0.0.0.0.0.0.0.0.0.1,32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 'fibocom-filled context up succeeds');
+
+			// Qualcomm-style regression: a filled CGCONTRDP takes the generic
+			// path and CGPADDR is NEVER sent
+			eq(settings?.ipv4?.addr, '10.20.30.40', 'fibocom-filled addr from CGCONTRDP');
+			eq(settings?.ipv4?.gateway, '10.20.30.1', 'fibocom-filled gateway from CGCONTRDP');
+			ok(env.tr.saw(/^AT\+CGPADDR=/) == null, 'fibocom-filled: no CGPADDR sent');
+
+			env.finish();
+		});
+	},
+});
+
+push(scenarios, {
+	name: 's9e_fibocom_v6_dns_pair',
+	script: fscript([
+		// v6-only PDP (field-analyzed): CGCONTRDP carries the ISP DNS PAIR in
+		// the v6 slots — no host address, no link-local gateway. The hook must
+		// demote them to DNS and NEVER surface a v6 address. And per the atc/
+		// 3GPP model an ipv6-only PDP carries NO host v4: the embedded
+		// <0×8, 0,1, 0,0><v4> CGPADDR form (the modem-CLAT artifact) must not
+		// be assigned either — host v4 comes from the 464xlat package.
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,6,"internet","","","32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136","32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.68","","",0,,0',
+		] },
+		{ re: /^AT\+CGPADDR=1$/, lines: [ '+CGPADDR: 1,"0.0.0.0.0.0.0.0.0.1.0.0.192.0.2.48",""' ] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv6' },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9e context up succeeds');
+			eq(settings?.ipv6?.addr, null, 's9e: no v6 address surfaced (DNS pair demoted)');
+			eq(settings?.ipv6?.gateway, null, 's9e: no v6 gateway from the pair');
+			eq(settings?.ipv6?.dns, [ '2001:4860:4860:0:0:0:0:8888', '2001:4860:4860:0:0:0:0:8844' ],
+				's9e: the pair rides in dns (the DNS-only bucket)');
+			eq(settings?.ipv6?.unmanaged, true, 's9e: the DNS-only v6 bucket is marked unmanaged (status rendering)');
+			eq(settings?.ipv4, null, 's9e: no v4 on the ipv6-only PDP (embedded form not applied)');
+			env.finish();
+		});
+	},
+});
+
+push(scenarios, {
+	name: 's9v_fibocom_bogus_v6_addr',
+	script: fscript([
+		// ByteSIM field case: CGPADDR reports a NAT64-embedded junk address
+		// (::<v4-hex>) as the PDP address — the real host v6 arrives via RA.
+		// The validity filter must drop it (never push ::…/128 to netifd) and
+		// fall back to the DNS-only/unmanaged bucket.
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,6,"internet","","","32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136","32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.68","","",0,,0',
+		] },
+		{ re: /^AT\+CGPADDR=1$/, lines: [ '+CGPADDR: 1,"::beef:beef:beef:beef",""' ] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv6' },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9v context up succeeds');
+			eq(settings?.ipv6?.addr, null, 's9v: the NAT64-embedded junk address is dropped');
+			eq(settings?.ipv6?.unmanaged, true, 's9v: falls back to the unmanaged (DNS-only) bucket');
+			eq(settings?.ipv6?.dns, [ '2001:4860:4860:0:0:0:0:8888', '2001:4860:4860:0:0:0:0:8844' ],
+				's9v: the real DNS pair survives');
+			env.finish();
+		});
+	},
+});
+
+push(scenarios, {
+	name: 's9d_fibocom_gtccinfo_fallback',
+	script: fscript([
+		// T700 firmware: GTCAINFO? answers with an empty body, the serving
+		// cell row comes from GTCCINFO? (verbatim live capture)
+		{ re: /^AT\+GTCAINFO/, lines: [ '+GTCAINFO:' ] },
+		{ re: /^AT\+GTCCINFO\?$/, lines: [
+			'+GTCCINFO:',
+			'1,4,001,01,0001,001DBE47B,38927,272,140,100,13,54,54,12',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 's9d context up succeeds');
+			// first telemetry tick fires stats_interval (1000 ms) after READY
+			uloop.timer(1300, () => {
+				eq(env.modem.cells?.serving?.lte?.band, 40, 's9d: GTCCINFO fallback fills band 40');
+				eq(env.modem.cells?.serving?.lte?.rsrp, -87, 's9d: rsrp from GTCCINFO');
+				eq(env.modem.cells?.serving?.lte?.pci, 272, 's9d: pci from GTCCINFO');
+				eq(env.modem.signal?.lte?.rsrp, -87, 's9d: signal rsrp filled from serving');
+				ok(env.modem.dsd_status != null, 's9d: dsd/tech set from the serving cell');
+				ok(env.tr.saw(/^AT\+GTCCINFO\?$/) != null, 's9d: GTCCINFO was queried');
+				env.finish();
+			});
+		});
+	},
+});
+
+let s9s_fx = fakefx.create({
+	files: {
+		'/sys/class/net/wwand0/mtu': '1500',
+		'/sys/class/net/wwand0/statistics/rx_bytes': '1234567890',
+		'/sys/class/net/wwand0/statistics/tx_bytes': '987654321',
+		'/sys/class/net/wwand0/statistics/rx_packets': '1000',
+		'/sys/class/net/wwand0/statistics/tx_packets': '900',
+		'/proc/sys/net/ipv6/conf/wwand0/disable_ipv6': '1',
+		'/proc/sys/net/ipv6/conf/wwand0/accept_ra': '0',
+	},
+	present: {
+		'/proc/sys/net/ipv6/conf/wwand0/disable_ipv6': true,
+		'/proc/sys/net/ipv6/conf/wwand0/accept_ra': true,
+	},
+	links: { '/sys/class/net/wwand0/device/driver': 'drivers/rndis_host' },
+});
+
+push(scenarios, {
+	name: 's9s_fibocom_endc_merge',
+	script: fscript([
+		// EN-DC rows (verbatim live shape): GTCAINFO carries the two PCC rows
+		// (NR first), GTCCINFO the matching serving rows + the temp read
+		{ re: /^AT\+GTCAINFO/, lines: [
+			'+GTCAINFO:',
+			'PCC:5041,770,532002,300,300,3,1,3,1,-87',
+			'PCC:103,272,1775,75,75,1,1,1,3,-85',
+		] },
+		{ re: /^AT\+GTCCINFO\?$/, lines: [
+			'+GTCCINFO:',
+			'1,4,001,01,0001,001DBE47B,1775,272,103,75,17,55,55,21',
+			'1,9,,,FFFFFFF,00FFFFFFF,532002,770,5041,300,28,69,69,65',
+		] },
+		{ re: /^AT\+ETHERMAL\?$/, lines: [ '+ETHERMAL: 47' ] },
+	]),
+	datapath: { netdev: 'wwand0', fx: s9s_fx },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	ctx_timing: { stats_interval: 5, zero_rx_ms: 0 },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 's9s context up succeeds');
+			uloop.timer(1300, () => {
+				let sl = env.modem.cells?.serving?.lte;
+				let sn = env.modem.cells?.serving?.nr;
+				let ca = env.modem.cells?.ca;
+
+				// the matching GTCCINFO LTE row enriches identity + rsrq/sinr/bw
+				eq(sl?.pci, 272, 's9s: lte pci stays GTCAINFO-authoritative');
+				eq(sl?.rsrp, -85, 's9s: lte rsrp stays the signed GTCAINFO value');
+				eq(sl?.rsrq, -9.5, 's9s: lte rsrq enriched from GTCCINFO');
+				eq(sl?.sinr, 8.5, 's9s: lte sinr enriched from GTCCINFO');
+				eq(sl?.cid, 31188091, 's9s: lte identity (cid) enriched from GTCCINFO');
+				eq(sl?.tac, 1, 's9s: lte identity (tac) enriched from GTCCINFO');
+
+				// the matching GTCCINFO NR row fills the gaps the NR PCC row
+				// leaves: rsrq/sinr/bw (NR scales) — the 5G status SNR follows
+				eq(sn?.pci, 770, 's9s: nr pci');
+				eq(sn?.rsrp, -87, 's9s: nr rsrp stays the signed GTCAINFO value');
+				eq(sn?.rsrq, -11.0, 's9s: nr rsrq from the GTCCINFO NR row');
+				eq(sn?.sinr, 14.0, 's9s: nr sinr from the GTCCINFO NR row');
+
+				eq(length(ca ?? []), 2, 's9s: both PCC carriers in the CA table');
+				eq(ca?.[0]?.bandwidth_mhz, 15.0, 's9s: ca lte bandwidth_mhz');
+				eq(ca?.[1]?.bandwidth_mhz, 60.0, 's9s: ca nr bandwidth_mhz (60 MHz n41)');
+				eq(ca?.[1]?.rsrq, -110.0, 's9s: ca nr rsrq x10');
+				eq(env.modem.signal?.nr5g?.snr, 140.0, 's9s: 5G status snr filled (sinr x10)');
+				eq(env.modem.cells?.nr5g_cell?.snr, 140.0, 's9s: nr5g_cell snr filled');
+
+				// the fibocom signal block follows the serving cells (refresh):
+				// no independent NR/LTE source exists on this backend
+				eq(env.modem.signal?.nr5g?.rsrp, -87, 's9s: signal.nr5g.rsrp == serving.nr.rsrp');
+				eq(env.modem.signal?.lte?.rsrp, -85, 's9s: signal.lte.rsrp == serving.lte.rsrp');
+				eq(env.modem.signal?.lte?.rsrq, -9.5, 's9s: signal.lte.rsrq == serving.lte.rsrq');
+
+				// the fibocom/MediaTek temperature command (the 3ginfo-lite source)
+				eq(env.modem.temperature?.celsius, 47.0, 's9s: ETHERMAL temperature read');
+				ok(env.tr.saw(/^AT\+ETHERMAL\?$/) != null, 's9s: AT+ETHERMAL? was sent');
+
+				// the netdev byte counters (no vendor stats AT on fibocom):
+				// sampled from the datapath netdev statistics — the status
+				// page / wwandctl byte counters + the zero-rx feed
+				eq(env.ctx.stats?.rx_bytes, 1234567890, 's9s: netdev rx byte counter surfaced');
+				eq(env.ctx.stats?.tx_bytes, 987654321, 's9s: netdev tx byte counter surfaced');
+
+				env.finish();
+			});
+		});
+	},
+});
+
+push(scenarios, {
+	name: 's9t_fibocom_gtccinfo_mismatch',
+	script: fscript([
+		// a handover between the two sequential reads: GTCCINFO reports
+		// DIFFERENT cells (lte pci 99/band 30, nr pci 777/band 78) — the
+		// enrichment must drop them whole (no blending of two cells, and
+		// no stale identity glued onto the new serving cell)
+		{ re: /^AT\+GTCAINFO/, lines: [
+			'+GTCAINFO:',
+			'PCC:5041,770,532002,300,300,3,1,3,1,-87',
+			'PCC:103,272,1775,75,75,1,1,1,3,-85',
+		] },
+		{ re: /^AT\+GTCCINFO\?$/, lines: [
+			'+GTCCINFO:',
+			'1,4,001,01,0002,00000ABC,1800,99,130,100,13,50,50,15',
+			'1,9,,,FFFFFFF,00FFFFFFF,631334,777,5078,100,20,66,66,60',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 's9t context up succeeds');
+			uloop.timer(1300, () => {
+				let sl = env.modem.cells?.serving?.lte;
+				let sn = env.modem.cells?.serving?.nr;
+				let ca = env.modem.cells?.ca;
+
+				eq(sl?.pci, 272, 's9t: lte pci keeps the GTCAINFO cell (mismatched row dropped)');
+				eq(sl?.cid, null, 's9t: no stale cid glued onto the new cell');
+				eq(sl?.tac, null, 's9t: no stale tac glued onto the new cell');
+				eq(sl?.rsrq, null, 's9t: lte rsrq not enriched from the other cell');
+				eq(sl?.sinr, null, 's9t: lte sinr not enriched from the other cell');
+				eq(sn?.pci, 770, 's9t: nr pci keeps the GTCAINFO cell');
+				eq(sn?.rsrq, null, 's9t: nr rsrq not enriched from the other cell');
+				eq(sn?.sinr, null, 's9t: nr sinr not enriched from the other cell');
+				eq(ca?.[0]?.rsrq, null, 's9t: ca lte rsrq stays empty');
+				eq(ca?.[1]?.rsrq, null, 's9t: ca nr rsrq stays empty');
+
+				env.finish();
+			});
+		});
+	},
+});
+
+// --- s9 units: dual-slot surface ---------------------------------------------
+
+let fb_slots = ncm_vendors.VENDORS.fibocom.slots;
+
+eq(fb_slots.switch(2), 'AT+GTDUALSIM=1', 'fibocom slot switch maps slot 2 -> GTDUALSIM=1');
+eq(fb_slots.switch(1), 'AT+GTDUALSIM=0', 'fibocom slot switch maps slot 1 -> GTDUALSIM=0');
+eq(fb_slots.parse([ '+GTDUALSIM : 0, "SUB1", "NR"' ])?.sub, 1, 'fibocom gtdualsim parse: SUB1 active');
+eq(fb_slots.parse([ '+GTDUALSIM : 1, "SUB2", "NO SERVICE"' ])?.sub, 2, 'fibocom gtdualsim parse: SUB2 active');
+eq(fb_slots.parse([]), null, 'fibocom gtdualsim parse: empty -> null');
+
+// vendor resolution: the fibocom match must win over mediatek when a T700
+// unit's CGMI carries both tokens ("MediaTek Fibocom Wireless Inc.")
+eq(ncm_vendors.vendor_for('MediaTek Fibocom Wireless Inc.'), ncm_vendors.VENDORS.fibocom,
+	'vendor_for: fibocom wins over the mediatek match');
+
+push(scenarios, {
+	name: 's9f_fibocom_dual_slot',
+	script: fscript(),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		let m = env.modem;
+
+		m.slot_status((err, slots) => {
+			eq(err, null, 's9f slot_status succeeds');
+			eq(length(slots ?? []), 2, 's9f two slots reported');
+			eq(slots?.[0]?.active, true, 's9f SUB1 (physical) active');
+			eq(slots?.[0]?.service, 'NR', 's9f GTDUALSIM service surfaced on the active slot');
+			eq(slots?.[0]?.iccid, '89000000000000000000', 's9f active slot carries the modem iccid');
+			eq(slots?.[0]?.cpin, '+CPIN: READY', 's9f USIM slot CPIN from ESLOTSINFO');
+			eq(slots?.[1]?.is_euicc, true, 's9f SUB2 flagged eUICC');
+			eq(slots?.[1]?.eid, '89000000000000000000000000000000', 's9f eUICC EID from ESLOTSINFO');
+			eq(slots?.[1]?.cpin, '+CPIN: EMPTY_EUICC', 's9f eUICC CPIN state surfaced');
+			eq(slots?.[1]?.iccid, null, 's9f inactive slot identity unknown until switched');
+
+			m.switch_slot(2, (e2) => {
+				eq(e2, null, 's9f switch_slot succeeds');
+				ok(env.tr.saw(/^AT\+GTDUALSIM=1$/) != null, 's9f GTDUALSIM=1 issued');
+				ok(env.tr.saw(/^AT\+CFUN=1,1$/) != null, 's9f CFUN reset after the switch');
+
+				m.switch_slot(1, (e3, res) => {
+					eq(e3, null, 's9f back-switch succeeds');
+					eq(res?.unchanged, true, 's9f back-switch short-circuits (mock still on SUB1)');
+					env.finish();
+				});
+			});
+		});
+	},
+});
+
+// s9g: v6-DNS-pair pin — the v6-only PDP's empty-local CGCONTRDP line carries
+// the ISP DNS PAIR as bare 16-octet tokens. The v6_real heuristic must NOT
+// surface them as a v6 address (that would apply a DNS as a /128) — with no
+// real 32-octet assignment on its own line, the settings stay v6-free.
+push(scenarios, {
+	name: 's9g_fibocom_v6_dns_pair_only',
+	script: fscript([
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,5,"internet","","",32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136,32.1.72.96.0.0.0.0.0.0.0.0.0.0.0.1',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	datapath: { netdev: 'wwand0', fx: s9a_fx },
+	run: (env) => {
+		let m = env.modem;
+
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9g: context up succeeds');
+			eq(settings?.ipv4?.addr, '192.0.2.190', 's9g: v4 from CGPADDR unaffected');
+			eq(settings?.ipv6, null, 's9g: DNS-pair tokens never applied as a v6 address');
+			// the pair DOES surface as DNS (GTDNS unsupported here -> fallback)
+			eq(settings?.ipv4?.dns,
+				[ '2001:4860:4860:0:0:0:0:8888', '2001:4860:0:0:0:0:0:1' ],
+				's9g: the DNS64 pair surfaces as dns (fallback)');
+			env.finish();
+		});
+	},
+});
+
+// s9h: GTDNS is the T700's canonical resolver query — its answer wins over
+// the CGCONTRDP pair fallback
+push(scenarios, {
+	name: 's9h_fibocom_gt_dns',
+	script: fscript([
+		{ re: /^AT\+GTDNS/, lines: [ '+GTDNS: 1,"2001:4860:4860::8888","2001:4860:4860::8844"' ] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	datapath: { netdev: 'wwand0', fx: s9a_fx },
+	run: (env) => {
+		let m = env.modem;
+
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9h: context up succeeds');
+			ok(env.tr.saw(/^AT\+GTDNS=1$/) != null, 's9h: GTDNS queried');
+			eq(settings?.ipv4?.dns,
+				[ '2001:4860:4860::8888', '2001:4860:4860::8844' ],
+				's9h: GTDNS resolvers win');
+			env.finish();
+		});
+	},
+});
+
+// s9i: bare-empty CGCONTRDP (no quotes — field-seen right after a CFUN
+// cycle): the positional gate must still detect the empty local/subnet and
+// take the CGPADDR path (the gateway token must never become the address)
+push(scenarios, {
+	name: 's9i_fibocom_bare_empty_local',
+	script: fscript([
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,5,internet,,,192.0.2.1,192.0.2.22,0,,0',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	datapath: { netdev: 'wwand0', fx: s9a_fx },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9i: context up succeeds');
+			eq(settings?.ipv4?.addr, '192.0.2.190', 's9i: CGPADDR address wins (gateway token never the addr)');
+			eq(settings?.ipv4?.dns, [ '192.0.2.22' ], 's9i: v4 DNS tail intact');
+			env.finish();
+		});
+	},
+});
+
+// s9j: a wrapped continuation line (no +CGCONTRDP:<cid> prefix, empty fields
+// 3/4) after a FILLED response must not hijack the static CGPADDR path —
+// the positional prefix gate's whole reason to exist
+push(scenarios, {
+	name: 's9j_fibocom_wrapped_continuation',
+	script: fscript([
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,5,internet,10.20.30.40.255.255.255.0,10.20.30.1,8.8.8.8,8.8.4.4,',
+			'"","","",',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9j: context up succeeds');
+			eq(settings?.ipv4?.addr, '10.20.30.40', 's9j: addr from the filled CGCONTRDP line');
+			eq(settings?.ipv4?.gateway, '10.20.30.1', 's9j: gateway intact (never CGPADDR)');
+			ok(env.tr.saw(/^AT\+CGPADDR=/) == null,
+				's9j: continuation line must NOT trigger the static path');
+			env.finish();
+		});
+	},
+});
+
+// s9k: ipv4v6 PDP whose CGCONTRDP carries an empty v6 pair — the fallback_dns
+// null-when-empty must let the CGCONTRDP v4 DNS survive the ?? chain (an empty
+// ARRAY would be truthy and drop the DNS entirely)
+push(scenarios, {
+	name: 's9k_fibocom_empty_pair_dns',
+	script: fscript([
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,5,"internet","","","192.0.2.1","192.0.2.22"',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	datapath: { netdev: 'wwand0', fx: s9a_fx },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9k: context up succeeds');
+			eq(settings?.ipv4?.addr, '192.0.2.190', 's9k: v4 from CGPADDR');
+			eq(settings?.ipv4?.dns, [ '192.0.2.22' ],
+				's9k: empty v6 pair falls through to the CGCONTRDP v4 DNS (null, not [])');
+			eq(settings?.ipv6, null, 's9k: no v6 surfaced');
+			env.finish();
+		});
+	},
+});
+
+// s9l: GTDNS answering ERROR must not leave the settings without DNS — the
+// chain falls back to the CGCONTRDP tail (s9g/s9h pin the win + empty cases)
+push(scenarios, {
+	name: 's9l_fibocom_gt_dns_error',
+	script: fscript([
+		{ re: /^AT\+GTDNS/, lines: [], term: 'ERROR' },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	datapath: { netdev: 'wwand0', fx: s9a_fx },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9l: context up succeeds');
+			eq(settings?.ipv4?.dns, [ '192.0.2.22' ], 's9l: GTDNS ERROR -> v4 tail fallback');
+			env.finish();
+		});
+	},
+});
+
+// s9m: an embedded-v4 token inside the GTDNS reply is never a resolver —
+// it must be skipped, not decoded into a garbage v6
+push(scenarios, {
+	name: 's9m_fibocom_gt_dns_ev4_skip',
+	script: fscript([
+		{ re: /^AT\+GTDNS/, lines: [
+			'+GTDNS: 1,"0.0.0.0.0.0.0.0.0.1.0.0.192.0.2.1","2001:4860:4860::8888"',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	datapath: { netdev: 'wwand0', fx: s9a_fx },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9m: context up succeeds');
+			eq(settings?.ipv4?.dns, [ '2001:4860:4860::8888' ],
+				's9m: embedded-v4 GTDNS token skipped, real resolver kept');
+			env.finish();
+		});
+	},
+});
+
+// s9n: option sim_slot on a modem whose vendor HAS an AT slots recipe
+// (Fibocom AT+GTDUALSIM) is now SUPPORTED — no config warning, and the
+// already-active configured slot short-circuits without a switch
+push(scenarios, {
+	name: 's9n_fibocom_sim_slot',
+	script: fscript([
+		{ re: /^AT\+GTDUALSIM\?$/, lines: [ '+GTDUALSIM : 1, "SUB2", "NR"' ] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	mconfig: { apn: 'internet', sim_slot: 2 },
+	run: (env) => {
+		let m = env.modem;
+
+		ok(m.state == 'READY', 's9n: modem READY with the configured slot active');
+		ok(env.tr.saw(/^AT\+GTDUALSIM=/) == null, 's9n: no switch sent (slot already active)');
+		ok(!filter(m.config_warnings ?? [], (w) => w.check == 'sim_slot')[0],
+			's9n: no sim_slot warning (the vendor AT slots recipe supports it)');
+		env.finish();
+	},
+});
+
+// s9o: the same option on a modem with NO vendor slots recipe keeps the
+// warning (the identify-time gate) — the active slot stays untouched
+push(scenarios, {
+	name: 's9o_generic_sim_slot_warning',
+	script: script([
+		{ re: /^AT\+CGMI$/, lines: [ 'Unknown Vendor Inc.' ] },
+	]),
+	mconfig: { sim_slot: 2 },
+	run: (env) => {
+		let w = filter(env.modem.config_warnings ?? [], (x) => x.check == 'sim_slot')[0];
+
+		ok(w != null, 's9o: sim_slot warning raised without a vendor slot recipe');
+		eq(w?.expected, 'slot 2', 's9o: warning carries the configured slot');
+		ok(env.tr.saw(/^AT\+GTDUALSIM/) == null, 's9o: no slot command attempted');
+		env.finish();
+	},
+});
+
+// s9p: ipv6-only PDP whose CGCONTRDP carries the DNS64 pair in the ADDR+SUBNET
+// slots (field-seen right after a PDP-type change — the modem's other form
+// beside the empty-local one). The pair must NEVER become a v6 assignment:
+// host v6 arrives via the modem's RA/SLAAC — the pair rides in dns instead
+// (the DNS-only ipv6 bucket), which the shim pushes without an address.
+push(scenarios, {
+	name: 's9p_fibocom_ipv6_pair_in_addr_slots',
+	script: fscript([
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,6,"internet","36.4.216.0.0.240.0.0.0.0.0.0.0.83.0.16","36.4.216.0.0.240.0.0.0.0.0.0.0.83.0.34","","",0,,0',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv6' },
+	datapath: { netdev: 'wwand0', fx: s9a_fx },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9p: context up succeeds');
+			eq(settings?.ipv4, null, 's9p: no host v4 on the ipv6-only PDP');
+			eq(settings?.ipv6?.addr, null, 's9p: the pair never becomes a v6 address (host v6 = RA)');
+			eq(settings?.ipv6?.gateway, null, 's9p: no v6 gateway from the pair');
+			eq(settings?.ipv6?.dns, [ '2404:d800:f0:0:0:0:53:10', '2404:d800:f0:0:0:0:53:22' ],
+				's9p: the DNS64 pair rides in dns (the DNS-only bucket)');
+			env.finish();
+		});
+	},
+});
+
+// s9q: ipv4 PDP with the pair-in-addr-slots form (field-seen right after a
+// PDP-type change — the modem settles on the empty-local form a minute
+// later): the CGCONTRDP v4 tokens are gateway+DNS, the ADDRESS comes over
+// AT (CGPADDR). The gw token must never become the address.
+push(scenarios, {
+	name: 's9q_fibocom_ipv4_pair_in_addr_slots',
+	script: fscript([
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,6,"internet","192.0.2.1","192.0.2.22","","",0,,0',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	datapath: { netdev: 'wwand0', fx: s9a_fx },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9q: context up succeeds');
+			eq(settings?.ipv4?.addr, '192.0.2.190',
+				's9q: address from CGPADDR (the gw token never becomes the address)');
+			eq(settings?.ipv4?.gateway, null, 's9q: gateway-less /32');
+			eq(settings?.ipv4?.dns, [ '192.0.2.22' ], 's9q: the pair tail rides in dns');
+			env.finish();
+		});
+	},
+});
+
+// s9r: URCs interleaved into the identify answers (the modem emits
+// +CGEV/+ESIMS/+CIREPI/+CNEMIU/+CTZV bursts right after a reset — HW-seen):
+// every identify value must still land on its own command, or the vendor
+// resolves to generic (generic telemetry + generic ip_config, no cells)
+push(scenarios, {
+	name: 's9r_fibocom_noisy_identify',
+	script: fscript([
+		{ re: /^AT\+CGMI$/,  lines: [ 'Fibocom Wireless Inc.' ], urcs: [ '+CGEV: ME PDN DEACT 1' ] },
+		{ re: /^AT\+CGMM$/,  lines: [ 'FM350-GL' ],               urcs: [ '+ESIMS: 0,0' ] },
+		{ re: /^AT\+CGSN$/,  lines: [ '350000000000000' ],       urcs: [ '+CIREPI: 0' ] },
+		{ re: /^AT\+CIMI$/,  lines: [ '001010123456789' ],       urcs: [ '+CNEMIU: 0' ] },
+		{ re: /^AT\+ICCID$/, lines: [ '+ICCID: 89000000000000000000' ], urcs: [ '+CTZV: "+32,0"' ] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	run: (env) => {
+		let m = env.modem;
+
+		eq(m.info.manufacturer, 'Fibocom Wireless Inc.', 's9r: manuf correct despite interleaved URCs');
+		eq(m.info.model, 'FM350-GL', 's9r: model correct');
+		eq(m.info.imsi, '001010123456789', 's9r: imsi correct');
+		eq(m.info.iccid, '89000000000000000000', 's9r: iccid correct');
+		eq(m.fcc_lock, 0, 's9r: fibocom vendor resolved (fcc probe ran)');
+		ok(env.tr.saw(/^AT\+CESQ$/) == null,
+			's9r: fibocom telemetry block (no generic CESQ)');
+		env.finish();
+	},
+});
+
+// --- s9 units: peer-gateway rule + CGPADDR/empty-local parsers ----------------
+
+let cgp = ncm_vendors.parse_cgpaddr([ '+CGPADDR: 1,"192.0.2.190",""' ]);
+
+eq(cgp?.addr, '192.0.2.190', 'parse_cgpaddr: v4 addr (quoted)');
+eq(cgp?.v6, null, 'parse_cgpaddr: empty v6 -> null');
+
+let cgp2 = ncm_vendors.parse_cgpaddr([ '+CGPADDR: 1,"192.0.2.190","2001:db8::1"' ]);
+
+eq(cgp2?.addr, '192.0.2.190', 'parse_cgpaddr: v4 addr (with v6)');
+eq(cgp2?.v6, '2001:db8::1', 'parse_cgpaddr: v6 addr');
+
+let cgp3 = ncm_vendors.parse_cgpaddr([ '+CGPADDR: 1,192.0.2.190,' ]);
+
+eq(cgp3?.addr, '192.0.2.190', 'parse_cgpaddr: bare (unquoted) form');
+
+// single-slot CGPADDR (v4-only PDP, 3GPP 27.007): the second slot is optional
+let cgp5 = ncm_vendors.parse_cgpaddr([ '+CGPADDR: 1,"192.0.2.190"' ]);
+
+eq(cgp5?.addr, '192.0.2.190', 'parse_cgpaddr: single-slot v4');
+eq(cgp5?.v6, null, 'parse_cgpaddr: single-slot has no v6');
+
+// parse_eslotsinfo: every per-slot field, both slot kinds, absent forms
+let es = ncm_vendors.parse_eslotsinfo([ '+ESLOTSINFO: 2, "+CPIN: READY", "1", "0", "3B00000000000000", "", "89000000000000000000", "+CPIN: EMPTY_EUICC", "1", "1", "3B9F00000000000000000000", "89000000000000000000000000000000", ""' ]);
+
+eq(es[0].cpin, '+CPIN: READY', 'eslotsinfo: slot1 cpin');
+eq(es[0].present, true, 'eslotsinfo: slot1 present');
+eq(es[0].kind, 'usim', 'eslotsinfo: slot1 kind usim');
+eq(es[0].atr, '3B00000000000000', 'eslotsinfo: slot1 atr');
+eq(es[0].eid, null, 'eslotsinfo: usim slot has no eid');
+eq(es[0].iccid, '89000000000000000000', 'eslotsinfo: slot1 iccid');
+eq(es[1].kind, 'euicc', 'eslotsinfo: slot2 kind euicc');
+eq(es[1].atr, '3B9F00000000000000000000', 'eslotsinfo: slot2 atr');
+eq(es[1].iccid, null, 'eslotsinfo: empty iccid -> null');
+
+let es2 = ncm_vendors.parse_eslotsinfo([ '+ESLOTSINFO: 1, "", "0", "1", "", "", ""' ]);
+
+eq(es2[0].present, false, 'eslotsinfo: present 0');
+eq(es2[0].cpin, null, 'eslotsinfo: empty cpin -> null');
+eq(ncm_vendors.parse_eslotsinfo([ 'OK' ]), null, 'eslotsinfo: no line -> null');
+
+// T700 pdp-ipv6 form: the v4 slot carries <0×8, 0,1, 0,0><embedded v4> — the
+// network serves IPv4 even on the ipv6 PDP (field-verified: 13/14.x pool (anonymized), the
+// extracted address pinged 3/3)
+let cgp4 = ncm_vendors.parse_cgpaddr([ '+CGPADDR: 1,"0.0.0.0.0.0.0.0.0.1.0.0.192.0.2.48",""' ]);
+
+eq(cgp4?.addr, '192.0.2.48', 'parse_cgpaddr: embedded v4 extracted from the dotted token');
+eq(cgp4?.v6, null, 'parse_cgpaddr: no v6 in the embedded form');
+
+// the empty-local misread is REAL — the hook gates on the raw line before
+// this parser runs; here it must keep DNS extraction correct anyway
+let empty_rdp = modem_ncm.parse_cgcontrdp([
+	'+CGCONTRDP: 1,5,"internet","","","192.0.2.1","192.0.2.22"',
+]);
+
+eq(empty_rdp.ipv4?.addr, '192.0.2.1', 'empty-local CGCONTRDP: gateway lands in the addr slot (hook gates on this)');
+eq(empty_rdp.ipv4?.gateway, null, 'empty-local CGCONTRDP: no gateway slot');
+eq(empty_rdp.ipv4?.dns, [ '192.0.2.22' ], 'empty-local CGCONTRDP: DNS tail intact');
+
+// embedded-v4 on the CGCONTRDP path (the v6-only PDP): the 16-octet token
+// must extract the real v4 — and never corrupt the v6 bucket even when its
+// line precedes the real v6 tokens (first token wins there)
+let ev4 = ncm_vendors.parse_cgcontrdp([
+	'+CGCONTRDP: 1,5,"apn","0.0.0.0.0.0.0.0.0.1.0.0.192.0.2.190","32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136.255.255.255.255.255.255.255.255.0.0.0.0.0.0.0.0","32.1.72.96.0.0.0.0.0.0.0.0.0.0.0.1"',
+]);
+
+eq(ev4.ipv4?.addr, '192.0.2.190', 'CGCONTRDP: embedded-v4 extracted');
+eq(ev4.ipv4?.prefix, null, 'CGCONTRDP: embedded-v4 /32 (no mask token)');
+eq(ev4.ipv6?.addr, '2001:4860:4860:0:0:0:0:8888', 'CGCONTRDP: v6 untouched by the embedded token');
+eq(ev4.ipv6?.gateway, '2001:4860:0:0:0:0:0:1', 'CGCONTRDP: v6 gateway intact');
+
+// +CTZV NITZ frame (Fibocom T700 format): yy/MM/dd,hh:mm:ss±quarter-hours
+let tzv = modem_common.nitz_ctzv('+CTZV: "26/08/19,14:00:00+32"');
+
+eq(tzv?.tz_offset_min, 480, 'nitz_ctzv: +32 quarter-hours = +480 min');
+eq(tzv?.epoch, timegm({ year: 2026, mon: 8, mday: 19, hour: 14, min: 0, sec: 0 }),
+	'nitz_ctzv: epoch from the frame');
+eq(modem_common.nitz_ctzv('+CTZV: "00/00/00,00:00:00+0"'), null, 'nitz_ctzv: zeroed frame -> null');
+eq(modem_common.nitz_ctzv('garbage'), null, 'nitz_ctzv: junk -> null');
+
 // --- direct unit test: parse_cgcontrdp on the exact RG650E-EU line ----------
 
 let rdp = modem_ncm.parse_cgcontrdp([
-	'+CGCONTRDP: 1,5,"web.vodafone.de","100.71.169.229","42.0.0.32.66.143.62.233.146.68.145.209.245.33.214.219", "254.128.0.0.0.0.0.0.0.0.0.0.0.0.0.1","139.7.30.125" "42.1.8.96.0.0.3.0.0.0.0.0.0.0.0.83","139.7.30.126" "42.1.8.96.0.0.3.0.0.0.0.0.0.0.1.83"',
+	'+CGCONTRDP: 1,5,"internet","192.0.2.229","32.1.13.184.0.0.0.0.0.0.0.0.0.0.0.1", "254.128.0.0.0.0.0.0.0.0.0.0.0.0.0.1","192.0.2.53" "32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136","192.0.2.54" "32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.68"',
 ]);
-eq(rdp.ipv4?.addr, '100.71.169.229', 'parse_cgcontrdp: v4 addr');
+eq(rdp.ipv4?.addr, '192.0.2.229', 'parse_cgcontrdp: v4 addr');
 eq(rdp.ipv4?.gateway, null, 'parse_cgcontrdp: no v4 gateway (unmasked local)');
-eq(rdp.ipv4?.dns, [ '139.7.30.125', '139.7.30.126' ], 'parse_cgcontrdp: both v4 DNS');
-eq(rdp.ipv6?.addr, '2a00:20:428f:3ee9:9244:91d1:f521:d6db', 'parse_cgcontrdp: v6 addr from 16-octet field');
+eq(rdp.ipv4?.dns, [ '192.0.2.53', '192.0.2.54' ], 'parse_cgcontrdp: both v4 DNS');
+eq(rdp.ipv6?.addr, '2001:db8:0:0:0:0:0:1', 'parse_cgcontrdp: v6 addr from 16-octet field');
 eq(rdp.ipv6?.gateway, 'fe80:0:0:0:0:0:0:1', 'parse_cgcontrdp: v6 gateway (link-local)');
-eq(rdp.ipv6?.dns, [ '2a01:860:0:300:0:0:0:53', '2a01:860:0:300:0:0:0:153' ], 'parse_cgcontrdp: both v6 DNS');
+eq(rdp.ipv6?.dns, [ '2001:4860:4860:0:0:0:0:8888', '2001:4860:4860:0:0:0:0:8844' ], 'parse_cgcontrdp: both v6 DNS');
 
 // standard single-stack-per-line style still parses (masked v4 -> gateway present)
 let rdp2 = modem_ncm.parse_cgcontrdp([
@@ -725,10 +1493,26 @@ eq(modem_ncm.parse_creg([ '+C5GREG: 2,0' ])?.registered, false, 'parse_creg: +C5
 eq(modem_ncm.parse_creg([ '+CEREG: 2,1' ])?.registered, true, 'parse_creg: +CEREG still parses');
 eq(modem_ncm.parse_creg([ '+CREG: 2,5' ])?.roaming, true, 'parse_creg: +CREG still parses');
 
-// Fibocom auth is +MGAUTH (not +CGAUTH)
-ok(match(modem_ncm.vendor_for('Fibocom Wireless').auth_cmd(1, 3, 'web',
-	{ username: 'u', password: 'p' }), /^AT\+MGAUTH=1,[0-9]+,"u","p"$/) != null,
-	'fibocom auth uses +MGAUTH');
+// Fibocom auth is a best-effort chain: +MGAUTH (the Qualcomm FM150/FM350
+// form) first, +CGAUTH as the fallback for the MediaTek T700 (FM350-GL)
+let fb_auth = modem_ncm.vendor_for('Fibocom Wireless').auth_cmds(1, 3, 'web',
+	{ username: 'u', password: 'p' });
+
+eq(length(fb_auth), 2, 'fibocom auth chain has two candidates');
+ok(match(fb_auth[0], /^AT\+MGAUTH=1,[0-9]+,"u","p"$/) != null,
+	'fibocom auth chain: +MGAUTH first');
+ok(match(fb_auth[1], /^AT\+CGAUTH=1,[0-9]+,"u","p"$/) != null,
+	'fibocom auth chain: +CGAUTH fallback');
+eq(modem_ncm.vendor_for('Fibocom Wireless').auth_cmds(1, 3, 'web', {}), [],
+	'fibocom auth chain: no credentials -> no auth commands');
+
+let fb_setup = modem_ncm.build_pdp_setup(modem_ncm.vendor_for('Fibocom Wireless'), 1,
+	{ apn: 'web', username: 'u', password: 'p' });
+
+ok(index(fb_setup, 'AT+CGDCONT=1,"IPV4V6","web"') == 0, 'fibocom setup: CGDCONT first');
+ok(length(filter(fb_setup, (c) => match(c, /^AT\+MGAUTH=/) != null)) == 1
+	&& length(filter(fb_setup, (c) => match(c, /^AT\+CGAUTH=/) != null)) == 1,
+	'fibocom setup: both auth candidates in the sequence');
 
 // new vendor dial verbs
 eq(modem_ncm.vendor_for('gosuncn').dials[0].connect(2), 'AT+ZECMCALL=1', 'gosuncn dial = +ZECMCALL');

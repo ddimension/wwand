@@ -21,7 +21,7 @@ let r = padopt({
 		globals: { '.type': 'wwand_globals', log_level: 'debug', hold_max: '120' },
 		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', pincode: '1234',
 		      modes: 'lte,nr5g', mux: 'auto', at_init: [ 'ATI' ], location: '1',
-		      serial: '99efe861', imei: '868965060008609', repower_time: '10' },
+		      serial: '99efe861', imei: '350000000000000', repower_time: '10' },
 		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet',
 		       pdp_type: 'ipv4v6', mux_id: '0' },
 		wan2: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: '#2',
@@ -37,7 +37,7 @@ eq(r.modems.m0.at_init, [ 'ATI' ], 'native: at_init list');
 eq(r.modems.m0.location, true, 'native: location bool');
 eq(r.modems.m0.failreboot, 100, 'native: failreboot default');
 eq(r.modems.m0.serial, '99efe861', 'native: modem serial anchor');
-eq(r.modems.m0.imei, '868965060008609', 'native: modem imei anchor');
+eq(r.modems.m0.imei, '350000000000000', 'native: modem imei anchor');
 eq(r.modems.m0.repower_time, 10, 'native: repower_time parsed (seconds)');
 eq(r.contexts.wan.modem, 'm0', 'native: context modem ref');
 eq(r.contexts.wan.interface, 'wan', 'native: interface attached');

@@ -253,7 +253,7 @@ export function install(self, o)
 	};
 
 	self._log_telemetry = function() {
-		log('notice', sprintf('telemetry: %s', modem_common.format_telemetry(self)));
+		log('debug', sprintf('telemetry: %s', modem_common.format_telemetry(self)));
 		emit('telemetry', { cells: self.cells, signal: self.signal, reg: self.reg });
 	};
 

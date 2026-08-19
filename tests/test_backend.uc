@@ -86,4 +86,22 @@ eq(seq, [ 'a', 'b', 'c', 'end' ], 'run_seq: steps then cb, in order');
 backend.run_seq([], () => push(seq, 'empty-ok'));
 eq(seq[-1], 'empty-ok', 'run_seq: empty step list still calls cb');
 
+// forget: clears the cached decision, next choose re-probes
+{
+	let probes = 0;
+	let obj = {};
+
+	backend.choose(obj, 'k', [ { name: 'a', probe: (ok) => { probes++; ok(true); } } ], (be) => {
+		eq(be, 'a', 'forget: first choose probes');
+		backend.choose(obj, 'k', [ { name: 'b', probe: (ok) => { probes++; ok(true); } } ], (be2) => {
+			eq(be2, 'a', 'forget: cached value served without probing');
+			backend.forget(obj, 'k');
+			backend.choose(obj, 'k', [ { name: 'b', probe: (ok) => { probes++; ok(true); } } ], (be3) => {
+				eq(be3, 'b', 'forget: re-probe after forget');
+				eq(probes, 2, 'forget: exactly two probes ran');
+			});
+		});
+	});
+}
+
 done('test_backend');

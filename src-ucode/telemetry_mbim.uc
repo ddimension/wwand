@@ -226,7 +226,7 @@ export function install(self, o)
 	let emit_telemetry = () => emit('telemetry', { signal: self.signal, cells: self.cells, reg: self.reg });
 
 	let log_telemetry = () => {
-		log('notice', sprintf('telemetry: %s', modem_common.format_telemetry(self)));
+		log('debug', sprintf('telemetry: %s', modem_common.format_telemetry(self)));
 	};
 
 	// Fast "watch" loop: while a consumer polls modem_signal/modem_cells, refresh

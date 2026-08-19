@@ -1,8 +1,41 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-16. 44 host suites (42 green; test_modem_mbim_sim +
-test_ncm_atdiscover are timing-flaky under host CPU load, green on a clean run).
-Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract._
+_Last updated: 2026-08-20. 47 host suites, all green._
+Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
+
+## FM350-GL field round: RNDIS v6 subif, EN-DC merge, netdev counters (2026-08-20)
+
+- **RNDIS v6 subinterface** (Huasifei WH3000 Pro / FM350-GL): a persisted
+  static section `<parent>_6` (proto dhcpv6, `device @<parent>`, `auto 1`,
+  the parent's firewall zone as `option zone` — LuCI-visible; fw4 joins it
+  via netifd's zone attribute), never deleted, instantiated immediately via
+  `add_dynamic` (no config reload); a user section wins via the status
+  probe.
+- **NCM byte counters from the netdev** (parity with QMI/MBIM): the stats
+  sampler reads the datapath netdev statistics as primary/fallback (no
+  vendor stats AT on fibocom) — status page, wwandctl, zero-rx watchdog;
+  the datapath method surfaces parent counters on NCM too.
+- **GTCAINFO + GTCCINFO merge** (fibocom telemetry): GTCCINFO enriches the
+  NR serving cell (rsrq/sinr/bw → 5G status SNR, CA table). NR scales:
+  rsrp v/2−121 + sinr v/2 (cross-validated vs simultaneous GTCAINFO
+  reads), rsrq (v−87)/2 + bw v/5 (3ginfo-lite's field-derived 0e8d7127
+  FM350 script). Rows pair on pci+band — a mismatch (handover between the
+  two reads) drops the stale row whole, identity included.
+- Temperature via `AT+ETHERMAL?` (the FM350 rejects the NL952 `AT+MTSM=1`).
+- An addr-less (DNS-only) ipv6 bucket is flagged `ipv6.unmanaged` — status
+  renders "unmanaged (RA/SLAAC)" instead of null/0; the fibocom signal
+  block refreshes from the serving cells every tick (it used to freeze on
+  the first fill).
+- **Audit fixes** (code-review round): the shim pushes v6 DNS on EVERY
+  connection shape again (the DNS-only branch had replaced the dual-stack
+  push); the zone lookup splits the classic space-separated
+  `option network 'wan wan6'` spelling; the literal `::` address is never
+  pushed; the RS nudge is gated to rndis_host (cdc_ncm/cdc_ether keep
+  their static v6); the CPUK redact branch actually masks; fibocom wins
+  the vendor match over mediatek; `wwandctl status` reads `has_power`;
+  `_reattaching` arms before the COPS bounce; the esim_ready refresh
+  latch clears on failure; GTCCINFO `hxid` nulls only the long all-F
+  placeholders (TAC 0xFF / ECI 0xFFFFFF stay real).
 
 ## Bytecode precompile, namespaced imports, io merge, radio_ifs rat fallback (2026-08-16)
 
@@ -241,7 +274,9 @@ Closes the parity gaps the audit's capability matrix surfaced (HW-smoked on
   `last_error` on context_mbim/_ncm `_fail` (+ cleared on connect — QMI parity).
 - **`option sim_slot`**: MBIM asserts it at init (step_simslot before the SIM
   step, idempotent via sim.slot_status/switch_slot); NCM surfaces an honest
-  config_warning (no slot transport on AT-only).
+  config_warning (no slot transport on AT-only) — superseded 2026-08-19: NCM
+  now has the vendor `slots` recipe (Fibocom GTDUALSIM, see the FM350-GL
+  section).
 - **PLMN/FPLMN on MBIM**: sim.uc `ensure_uim` brings up the passthrough UIM
   on demand for read_plmn_lists/read_fplmn/write_fplmn (operator/home lists
   no longer null; FPLMN no longer capped to the 12-byte AT+CRSM path);
@@ -504,9 +539,10 @@ fallback, CGDCONT context, per-RAT signal, cell-lock).
   exposes no USB tty siblings (M.2/PCIe modems on the MHI bus).
 - **Fibocom mode-switch (P3, partial)** — documented `AT+GTUSBMODE` recipe in
   `protocol_switch.uc`, **UNVERIFIED** (excluded from `supported()`; the
-  composition codes are many-to-one per chipset). The Fibocom `GTCCINFO`/
-  `GTCAINFO` cell telemetry and `GTACT`/`GTCELLLOCK` band/cell lock are
-  **deferred** pending Fibocom HW — a wrong cell parser silently shows garbage.
+  composition codes are many-to-one per chipset). `GTACT`/`GTCELLLOCK`
+  band/cell lock remain **deferred** pending Fibocom HW; the `GTCCINFO`/
+  `GTCAINFO` cell telemetry landed HW-checked 2026-08-19 (see the FM350-GL
+  section).
 
 ## Good-citizen coexistence + user-triggered migration (2026-08-08 late)
 
@@ -830,7 +866,9 @@ NCM backend parity (modem_ncm/context_ncm, host-tested — 242 is QMI so no HW y
 - **5G-SA registration** — `parse_creg` widened to `+C5GREG` (POSIX ERE capturing
   group), register poll now CEREG → **C5GREG** → CREG (SA modems read CEREG
   not-registered while attached via 5GS only).
-- **Fibocom auth = `+MGAUTH`** (FM150/FM350 reject `+CGAUTH`).
+- **Fibocom auth = `+MGAUTH`** (FM150/FM350 reject `+CGAUTH`) — superseded
+  2026-08-19 by the error-tolerant MGAUTH→CGAUTH chain (see the FM350-GL
+  section).
 - **New vendor dial verbs** — gosuncn `+ZECMCALL`, neoway `$MYUSBNETACT`, telit
   fallback `#ICMAUTOCONN`, meig fallback 5-arg `$QCRMCALL=1,0,3,2,<cid>`.
 - **Universal `AT+CGPADDR` liveness** — for vendors with neither a byte counter nor
@@ -865,7 +903,7 @@ blocks like production (transport.uc registers the cdc-wdm fd) — deferred.
 
 ## VRF vs policy-routing — HW deep-dive (2026-07-26)
 
-Tried converting 242 (NR7101, Telekom, **public** WAN `2.164.26.219` + v6 GUA,
+Tried converting 242 (NR7101, public WAN IP + v6 GUA,
 reachable from the internet) from policy routing to a VRF per the docs. Deep HW
 investigation; 242 restored to the working policy-routing baseline afterwards (LAN
 untouched throughout).
@@ -1093,7 +1131,114 @@ Minor/latent hardening — **all done**:
   leak the request open (`e37fd1e`).
 
 **Deferred (needs HW):** NCM ECM end-to-end (usbnet switch blocked on RG650E
-firmware); Huawei/MeiG NCM telemetry recipes need bench verification.
+firmware); the Huawei NCM telemetry recipe needs bench verification (MeiG is
+HW-verified on the SLM770A).
+
+## Fibocom FM350-GL support (2026-08-19)
+
+Support pass for the Fibocom **FM350-GL** (MediaTek T700, M.2; USB offers RNDIS
+compositions only — `AT+GTUSBMODE` 40/41 → 0e8d:7126/7127; no MBIM/QMI).
+Built from public captures + kernel docs, then **field-validated on a
+WH3000 Pro (2026-08-19)** — the field facts are in the "First field run"
+bullet below:
+
+- **AT-port discovery** (`atcmd.uc` LOCAL_PORTS): 0e8d:7126 iface 4 / 0e8d:7127
+  iface 6 pinned as `at` (OpenWrt-forum dumps + the ModemManager udev rules for
+  this module). No aux port in either composition. Deliberately NOT in
+  `SERIAL_NEW_ID` — the kernel option driver knows the module since 4.19.318,
+  and a blanket `new_id` grabs ADB → crash-loop (forum-observed).
+- **Discovery data path**: no change needed — `rndis_host` is already in
+  `NCM_DRIVERS`; the forum's working recipe (CGDCONT+CGACT) is exactly the
+  NCM backend's GTRNDIS-probe → CGACT fallback (the T700 lacks GTRNDIS).
+- **Auth chain** (`ncm_vendors.uc`): new `auth_cmds` list support; the fibocom
+  recipe now offers **+MGAUTH → +CGAUTH** in the error-tolerant setup sequence
+  (MGAUTH = the Qualcomm FM150/FM350 form; the T700 form is undocumented, so
+  both candidates run and the firmware takes the one it knows).
+- **Telemetry** (`telemetry_ncm.uc`): new `FIBOCOM` block + `parse_gtcainfo`
+  (serving LTE/NR + SCC aggregation from `AT+GTCAINFO?`) + `parse_gtccinfo`
+  (the serving row). Field offsets cross-checked between real FM190 captures
+  (GTCAINFO vs the GTCCINFO hex row) and the 3ginfo-lite parser, then
+  **HW-checked live** on the field run — no `unverified` mark. rsrq/sinr stay
+  null only on the GTCAINFO-only path (the GTCCINFO enrichment parses LTE
+  rsrq/sinr). Anchored by `tests/test_ncm_fibocom.uc` (verbatim captures).
+- **Board profile** (`board.uc`): **Huasifei WH3000 Pro** (MT7981B Filogic 820,
+  official OpenWrt `huasifei,wh3000-pro-{emmc,nand}`; the FM350-GL's typical
+  host — M.2 slot wired to USB). The DTS exports the modem power enable as the
+  named gpio `modem_power` (pio 4) — field-verified INVERTED (1 = off, 0 =
+  on; `power_gpio_active_low`), so `init()` only drives the line when it
+  reads "off" and the recovery ladder + `modem_repower` power-cycle with the
+  inverted levels. No modem RESET line, no dedicated modem LEDs (the board's
+  two LEDs are the OS status pair) -> nothing else; the FM350-GL serials stay
+  OUT of `option_ids` (kernel-bound since 4.19.318; blanket new_id grabs ADB
+  -> crash-loop). Board PWM fan is OS-owned, not wwand's.
+- **Docs**: `interface-landscape.md` Fibocom section corrected — the FM350-GL
+  is MediaTek T700, not Qualcomm; RNDIS-only + kernel/AT-port facts recorded.
+
+- **First field run (WH3000 Pro, FM350-GL)** — static-IP path
+  HW-validated end-to-end: CGPADDR address + /30 peer (two sessions: .77/.78,
+  .69/.70 — peer rule holds), DNS from the CGCONTRDP tail, **no DHCP at all**
+  (the T700 serves none); netifd applies /32 + host route + via-route (shim
+  fix), defaults untouched (pre-existing default/VPN routes and metrics),
+  mwan3 sim = metric-3 last resort, ping through sim 0% loss. The cid-1
+  idempotency guard skipped a context write on reconnect — field-proven.
+  Device-side lessons: OpenWrt's ucode parser needs `};` on module-level
+  export functions (host parser lenient), `basename` is NOT a ucode global,
+  netifd registers proto handlers only at start (first deploy needs a
+  network restart/reboot), and `auto 0` keeps the interface dormant until an
+  explicit ifup by design. Open: GTCAINFO command form (tech=none until
+  probed), reg display while connected.
+- **IPv6-only/464XLAT — field-analyzed, 3GPP-correct model applied.** On the
+  v6-only PDP the raw CGCONTRDP line is empty-local (no host address) with
+  the gw + dns1 slots carrying two 16-octet tokens decoding to the
+  provider's **DNS64 pair** (a /32 ending `:53:10` / `:53:22`) — never an
+  address; CGPADDR carries the embedded `<0×8, 0,1, 0,0><v4>` CLAT artifact
+  (13/14.x pool (anonymized) — the modem-internal CLAT's address, field-
+  pinged 3/3, but **deliberately NOT assigned**: an ipv6-only PDP carries no
+  host v4, verified against atc.sh's logic + patrakov's review — host v4 on
+  such networks comes from the separate **464xlat package** (jool, wan_4)).
+  The real host v6 comes from the **modem's internal RA/SLAAC** (global /64
+  with the modem's MAC-derived IID, default route via fe80::5) — it appears
+  once the netdev accepts RAs, which the NCM datapath enables (disable_ipv6=0,
+  accept_ra=2) and the context re-solicits after every connect (disable_ipv6
+  toggle — a PDP re-establishment can leave the modem's v6 forwarding stale
+  until a fresh RS). DNS chain: `AT+GTDNS=<cid>` (the T700's canonical
+  resolver query) wins when it answers; when GTDNS is unsupported, an
+  ipv4-only PDP falls back to the CGCONTRDP v4 DNS, any other PDP to the
+  DNS64 pair read off the CGCONTRDP v6 fields (null when the line carries
+  none). Egress check (ifconfig.me): v6 egresses as the SLAAC address
+  unchanged (no rewrite); the v4 egress is CGNAT-rewritten by the provider.
+  Addresses anonymized.
+- **URC infrastructure (field-verified on the mode-40 AT port).** The AT
+  engine surfaces idle `+CODE` lines via `on_urc` (including lines buffered
+  behind the previous command's OK); the fibocom recipe enables the
+  registration/network URCs (`CREG=3`-style + `CTZR=1`). Wired: register
+  fast-path (URC-triggered re-poll, polling stays the fallback), `+CGEV` PDN
+  DEACT/ACT context pokes (liveness/settings — hints, the probe's result
+  decides), `+CTZV` NITZ into the shared clock path (`nitz_ctzv` →
+  `set_clock`, QMI parity), and the `GTFCCEFFSTATUS?` FCC-lock probe
+  (`fcc_lock` in status, mode 0 = unlocked). The field provider pushes no
+  NITZ regularly — the CTZV branch awaits a real event. Auth commands are
+  redacted in the AT logs.
+- **eSIM field finding (FM350-GL):** the module is dual-SIM — SUB1 = the
+  physical SIM, SUB2 = the built-in eUICC slot; `AT+GTDUALSIM=<0|1>` switches
+  (SIMTYPE? 1 = eSIM). New NCM slot surface (vendor `slots` recipe +
+  modem_ncm slot_status/switch_slot, sim.uc dispatch) makes both slots
+  visible and switchable from wwandctl/LuCI — field-validated: switch to
+  SUB2 reports "NO SERVICE" (no ENABLED profile in the eUICC), switch
+  back re-enumerates the modem (CFUN reset) and the connection restores.
+  **Host-side APDU WORKS when the eSIM slot is ACTIVE** (field-validated):
+  the T700 answers CCHO with a BARE session id (parse fixed), the ISD-R
+  opens in a window after the slot switch before the internal LPA
+  re-claims it, and the eSIM ops re-probe per call (`backend.forget`) —
+  `eid` and `profiles` run end-to-end over CCHO/CGLA/CCHC (ES10c, SW
+  9000). The eUICC carries one DISABLED test profile (factory
+  conformance-testing) — hence the EMPTY_EUICC CPIN state; enable/
+  disable/delete share the proven channel, download untested.
+
+**Deferred (needs HW):** `protocol_switch.uc`'s GTUSBMODE recipe still carries
+Qualcomm composition codes — the T700 set differs; NR rsrq/sinr offsets (LTE
+is HW-checked via GTCCINFO). `wwand-mhi` does not cover the FM350-GL's MT7xx
+PCIe path.
 
 ## Multi-backend + parity work (recent, all committed)
 

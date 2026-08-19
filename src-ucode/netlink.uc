@@ -60,6 +60,8 @@ export function default_fx(log)
 		return data;
 	};
 
+	self.readlink = (path) => fs.readlink(path);
+
 	self.write = (path, data) => {
 		let f = fs.open(path, 'w');
 
@@ -104,14 +106,26 @@ export function default_fx(log)
 	};
 
 	const IFF_UP = 1;
+	const IFF_NOARP = 0x80;
 
-	// opts: { up: bool, mtu: n, rename: 'newname' }
+	// opts: { up: bool, mtu: n, rename: 'newname', noarp: bool }
 	self.link_set = (dev, opts) => {
 		let payload = { dev: dev };
+		let flags = 0, change = 0;
 
 		if (opts.up != null) {
-			payload.flags = opts.up ? IFF_UP : 0;
-			payload.change = IFF_UP;
+			flags |= opts.up ? IFF_UP : 0;
+			change |= IFF_UP;
+		}
+
+		if (opts.noarp != null) {
+			flags |= opts.noarp ? IFF_NOARP : 0;
+			change |= IFF_NOARP;
+		}
+
+		if (change) {
+			payload.flags = flags;
+			payload.change = change;
 		}
 
 		if (opts.mtu != null)

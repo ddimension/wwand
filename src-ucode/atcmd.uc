@@ -51,6 +51,15 @@ const LOCAL_PORTS = {
 	// DIAG port). 4d57 = RNDIS composition, 4d58 = ECM.
 	'2dee:4d57': { '4': 'at', '3': 'at2' },
 	'2dee:4d58': { '4': 'at', '3': 'at2' },
+	// Fibocom FM350-GL (MediaTek T700; RNDIS compositions only — AT+GTUSBMODE
+	// 40/41). AT port per the OpenWrt forum dumps + ModemManager udev rules for
+	// this module: iface 4 in mode 40 (0e8d:7126), iface 6 in mode 41
+	// (0e8d:7127, default). No aux AT port in either composition. Field-verified
+	// on a WH3000 Pro (mode 40, iface 4: identity, dial and URCs all flow).
+	// Pinned by interface number, so a wrong mapping stays contained (the
+	// first-tty heuristic would land on a mute META port).
+	'0e8d:7126': { '4': 'at' },
+	'0e8d:7127': { '6': 'at' },
 };
 
 // model-specific init sequences (old proto_qmi_serial_init)
@@ -172,6 +181,8 @@ export const parse_qtemp = parse.parse_qtemp;
 export const parse_chiptemp = parse.parse_chiptemp;
 export const parse_cpmutemp = parse.parse_cpmutemp;
 export const parse_meig_temp = parse.parse_meig_temp;
+export const parse_mtsm = parse.parse_mtsm;
+export const parse_ethermal = parse.parse_ethermal;
 
 // --- AT port discovery -------------------------------------------------------
 
@@ -438,9 +449,60 @@ export function create(transport, opts)
 		queue: [],
 		current: null,
 		buffer: '',
+		urc_buffer: '',
+		on_urc: opts?.on_urc ?? null,
 	};
 
 	let finish, next;
+
+	// never log credentials: auth commands carry username+password in their
+	// argument list — mask every quoted argument (covers the user/pass
+	// positions in all quoted forms: CGAUTH/MGAUTH/QICSGP/QCPDPP/NDISDUP),
+	// and the trailing comma fields for the unquoted AT^AUTHDATA form.
+	// CPIN/CPUK (PIN/PUK entry) mask everything after the '='. The prefix
+	// class must cover AT+/AT^/AT$ — Huawei/MeiG/Sierra use ^/$.
+	let redact = (cmd) => {
+		let cls = match(cmd, /^AT[+^$](CGAUTH|MGAUTH|QICSGP|AUTHDATA|QCPDPP|NDISDUP|CPIN|CPUK)\s*=/);
+
+		if (!cls)
+			return cmd;
+
+		if (cls[1] == 'CPIN' || cls[1] == 'CPUK')
+			return replace(cmd, /^(AT\+(CPIN|CPUK)\s*=\s*).*$/, '$1***');
+
+		cmd = replace(cmd, /"([^"]*)"/g, '"***"');
+
+		// unquoted AUTHDATA carries the credentials as the last two comma
+		// fields — either may be empty (one-credential forms exist), so
+		// requiring two non-empty fields leaked them into the log
+		return replace(cmd, /(,[^,"]*)(,[^,"]*)$/, ',***,***');
+	};
+
+	// drain complete lines from a buffer field: URCs can arrive while idle
+	// AND buffered BEHIND a finished command (the T700's first +CTZV lands
+	// right after AT+CTZR=1's OK, a +CGEV right after a dial read) — surface
+	// URC-looking lines, discard the rest
+	let drain_urcs = (key) => {
+		let idx;
+
+		while ((idx = index(self[key], '\n')) >= 0) {
+			let line = trim(substr(self[key], 0, idx));
+
+			self[key] = substr(self[key], idx + 1);
+
+			if (line == '' || !match(line, /^\s*\+[A-Z]/))
+				continue;
+
+			if (self.on_urc)
+				self.on_urc(line);
+			else
+				log('debug', sprintf('urc: %s', line));
+		}
+	};
+
+	// drain leftover URCs BEFORE the callback — it may synchronously queue
+	// the next command, which resets the buffer
+	let dispatch_urcs = () => drain_urcs('buffer');
 
 	finish = (err, lines) => {
 		let cur = self.current;
@@ -452,6 +514,17 @@ export function create(transport, opts)
 
 		if (cur.timer)
 			cur.timer.cancel();
+
+		// drain leftover URCs BEFORE the callback — it may synchronously queue
+		// the next command, which resets the buffer
+		dispatch_urcs();
+
+		// every exchange at debug level, raw response lines included — the
+		// field-analysis gold (CGCONTRDP/CGPADDR dotted tokens, GTDNS, …).
+		// Errors log at warn so a silent line-drop never hides a failure.
+		// Auth commands are redacted — never log credentials.
+		log(err ? 'warn' : 'debug', sprintf('%s -> %s', redact(cur.cmd),
+			err ? sprintf('error: %s', err.error ?? '?') : join(' | ', lines ?? [])));
 
 		if (cur.cb)
 			cur.cb(err, { lines: lines });
@@ -469,7 +542,7 @@ export function create(transport, opts)
 		cur.lines = [];
 
 		cur.timer = uloop.timer(cur.timeout, () => {
-			log('warn', sprintf('timeout waiting for reply to %s', cur.cmd));
+			log('warn', sprintf('timeout waiting for reply to %s', redact(cur.cmd)));
 			finish({ error: 'timeout' }, cur.lines);
 		});
 
@@ -480,7 +553,10 @@ export function create(transport, opts)
 		let cur = self.current;
 
 		if (!cur) {
-			// unsolicited data outside a command: discard
+			// unsolicited data outside a command: buffer it and surface
+			// URC-looking lines (+CODE...), discard the rest
+			self.urc_buffer += chunk;
+			drain_urcs('urc_buffer');
 			return;
 		}
 
@@ -557,9 +633,9 @@ export function create(transport, opts)
 
 			self.send(cmd, (err, res) => {
 				if (err)
-					log('warn', sprintf('%s failed: %J', cmd, err));
+					log('warn', sprintf('%s failed: %J', redact(cmd), err));
 				else
-					log('info', sprintf('%s ok', cmd));
+					log('info', sprintf('%s ok', redact(cmd)));
 
 				step();
 			});

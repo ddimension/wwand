@@ -211,6 +211,7 @@ export function create(opts)
 			else
 				decide(null);
 		}
+
 	};
 
 	// modem 'removed' (transport-level device gone): detach and enter the
@@ -282,6 +283,61 @@ export function create(opts)
 
 		case 'deregistered':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
+			return;
+
+		// eSIM surface known (the modem finished its eSIM probes): with the
+		// eUICC active, the APDU window right after bring-up is the natural
+		// moment to read eid + profiles once — best-effort, no error surface;
+		// the manual ubus ops re-probe per call and stay the on-demand path
+		case 'esim_ready':
+			if (!self.modem_esim || !modem.slot_status || modem._esim_refreshed)
+				return;
+
+			modem._esim_refreshed = true;   // once per modem object lifetime
+
+			uloop.timer(3000, () => {
+				// no READY gate: on an empty eUICC the modem never reaches
+				// READY (registration cannot succeed) — the APDU window is
+				// independent of the registration state. Any failure clears
+				// the latch so the next esim_ready (re-enumeration, slot
+				// switch) retries instead of staying empty forever.
+				if (!modem.at) {
+					modem._esim_refreshed = false;
+					return;
+				}
+
+				modem.slot_status((err, slots) => {
+					// the active eUICC's own physical slot (SUB2 on the FM350
+					// dual-SIM module) — never a hardcoded slot 1
+					let eslot = filter(slots ?? [], (s) => s.is_euicc && s.active)[0];
+
+					if (err || !eslot) {
+						modem._esim_refreshed = false;
+						return;
+					}
+
+					self.modem_esim(modem.id, 'eid', { slot: eslot.physical }, (e2, r2) => {
+						if (e2) {
+							modem._esim_refreshed = false;
+							return;
+						}
+
+						self.modem_esim(modem.id, 'profiles', { slot: eslot.physical }, (e3, r3) => {
+							if (e3) {
+								modem._esim_refreshed = false;
+								return;
+							}
+
+							modem.esim_info = {
+								eid: r2?.eid ?? null,
+								profiles: r3?.profiles ?? [],
+							};
+							log('info', sprintf('modem %s: eSIM surface read (eid %s, %d profile(s))',
+								modem.id, modem.esim_info.eid ?? '?', length(modem.esim_info.profiles)));
+						});
+					});
+				});
+			});
 			return;
 
 		// control transport reported the device gone (modem_common _device_gone):
@@ -400,6 +456,18 @@ export function create(opts)
 			clear_reconnect(name);
 			emit('wwand.context', { context: name, interface: entry?.cfg?.interface, event: event });
 
+			// RNDIS v6 model: the modem's v6 arrives via RA on the parent netdev.
+			// A dhcpv6 subinterface on the parent's device (@<parent>, auto:1)
+			// lets netifd run the v6 client (address/route/DNS/PD) natively —
+			// runtime-only (netifd ubus add_dynamic, nothing in uci), and netifd
+			// manages its lifecycle on its own; a matching user section wins.
+			if (deps.ensure_wan6 && ctx.modem?.datapath?.backend == 'rndis_host' &&
+			    entry?.cfg?.interface && ctx.config?.pdp_type != 'ipv4') {
+				log('info', sprintf('interface %s: ensuring the dynamic dhcpv6 subinterface (RNDIS v6 model)',
+					entry.cfg.interface));
+				deps.ensure_wan6(entry.cfg.interface);
+			}
+
 			// detect an address change vs the last applied settings. When the IP
 			// changed AND the interface opted into hard_reconnect_on_ip_change, ask
 			// the proto shim for a netifd link down->up (one-shot `relink`) instead
@@ -427,13 +495,14 @@ export function create(opts)
 			// renews so the shim runs its link down->up.
 			renew_iface(entry?._relink_once);
 
-			// MBIM connect-first: the session/link came up before netifd ran proto
-			// setup — kick netifd now so it runs setup and adopts the live session.
+			// connect-first backends (MBIM/NCM): the session/link came up before
+			// netifd ran proto setup — kick netifd now so it runs setup and
+			// adopts the live session.
 			if (entry?._kick_after_connect) {
 				entry._kick_after_connect = false;
 
 				if (deps.kick_interface && entry.cfg.interface) {
-					log('info', sprintf('kicking interface %s to adopt the connected mbim session', entry.cfg.interface));
+					log('info', sprintf('kicking interface %s to adopt the connected session', entry.cfg.interface));
 					deps.kick_interface(entry.cfg.interface);
 				}
 			}
@@ -467,7 +536,9 @@ export function create(opts)
 			// Hold the interface up and reconnect in place. 'down/admin' from our
 			// own context_down already cleared `wanted` (no-op here); all other
 			// drops are transient → reconnect, bounded by the hold timer.
-			if (entry?.wanted)
+			// A modem-level AT reattach (netsel_ops) bounces the contexts itself
+			// — don't race its bounce with enter_reconnecting.
+			if (entry?.wanted && !ctx?.modem?._reattaching)
 				enter_reconnecting(name);
 			break;
 
@@ -1162,6 +1233,10 @@ export function create(opts)
 				rat: entry.modem?.rat_label,
 				caps: entry.modem?.caps,
 				config_warnings: entry.modem?.config_warnings,
+				// FCC-lock probe (Fibocom GTFCCEFFSTATUS?): 0/1/2, null = not probed
+				fcc_lock: entry.modem?.fcc_lock,
+				// eSIM surface from the bring-up refresh (eUICC active only)
+				esim: entry.modem?.esim_info ?? null,
 				proto_errors: entry.modem?.counters?.proto_errors,
 				qmi_errors: entry.modem?.counters?.proto_errors,   // deprecated alias
 
@@ -1369,9 +1444,10 @@ export function create(opts)
 		// MBIM/NCM the cdc_ncm layer deaggregates the NTB below the netdev, so
 		// parent and children both count IP packets and the ratio is always ~1 —
 		// drop it there (the NTB block is the aggregation indicator); keep the
-		// raw counters, which are useful on every backend.
-		if (parent && length(children)) {
-			out.stats = nlmod.datapath_stats(null, parent, children);
+		// raw counters, which are useful on every backend (on NCM there are no
+		// children at all — the parent counters alone are the byte counters).
+		if (parent) {
+			out.stats = nlmod.datapath_stats(null, parent, children ?? []);
 
 			if (dp.backend != 'rmnet' && dp.backend != 'qmimux') {
 				delete out.stats.rx_aggregation;

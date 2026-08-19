@@ -80,6 +80,7 @@ return {
 	// deps: { esim (the wwand.esim module), log(level,msg), modem_of(ref) }
 	create: function(deps) {
 		let esim = deps.esim, log = deps.log, modem_of = deps.modem_of;
+		let lpac = deps.lpac_path ?? ESIM_LPAC;   // test seam for the lpac binary
 		let dl = { state: 'idle' };   // one host download at a time
 		let mgmt_busy = false;        // one lpac profile-management op at a time
 
@@ -88,7 +89,7 @@ return {
 		let lpac_run = (ref, slot, op, code, conf, on_done) => {
 			let entry = modem_of(ref);
 
-			if (fs.access(ESIM_LPAC) != true)
+			if (fs.access(lpac) != true)
 				return false;   // no lpac package installed — caller reports it
 
 			let cmd;
@@ -118,7 +119,7 @@ return {
 			let qmit = require('wwand_io');
 			let h = qmit.spawn([ '/bin/sh', '-c',
 				sprintf("mkdir -p /tmp/wwand; env LPAC_APDU=stdio LPAC_HTTP=curl %s %s 2>>%s; echo \"__EXIT:$?\"",
-					ESIM_LPAC, cmd, ESIM_LOGF) ]);
+					lpac, cmd, ESIM_LOGF) ]);
 
 			if (!h) { if (logf) logf.close(); return null; }
 
@@ -225,6 +226,8 @@ return {
 
 			let finish = (state, extra) => {
 				dl = { state, via: 'lpac', ...extra };
+				let m = modem_of(ref)?.modem;
+				if (m) m._esim_op = false;   // run finished — URCs may resume
 				log('notice', sprintf('modem %s: eSIM download %s%s', ref, state,
 					extra?.notified != null ? sprintf(' (ack %s)', extra.notified ? 'sent' : 'skipped') : ''));
 			};
@@ -327,26 +330,34 @@ return {
 
 				let slot = +(params?.slot ?? 1);
 				let iccid = params?.iccid ?? '';
-				let done = (err, res) => cb(err ? { error: 'esim', detail: err } : null, res);
+				// quiet mode: while an eSIM op runs, URC-driven background
+				// actions (register fast-path polls, +CGEV pokes) stay out of
+				// the AT queue — long APDU ops must not have their commands
+				// starved behind poll bursts
+				entry.modem._esim_op = true;
+				let done = (err, res) => {
+					entry.modem._esim_op = false;
+					cb(err ? { error: 'esim', detail: err } : null, res);
+				};
 
 				switch (op) {
 				case 'backend':
-					return esim.backend(entry.modem, slot, (be) => cb(null, { backend: be }));
+					return esim.backend(entry.modem, slot, (be) => done(null, { backend: be }));
 
 				case 'download': {
 					if (dl?.state == 'running' || mgmt_busy)
-						return cb({ error: 'busy' });
+						return done({ error: 'busy' });
 
 					let code = params?.activation_code ?? '';
 
 					if (!length(code))
-						return cb({ error: 'missing_argument' });
+						return done({ error: 'missing_argument' });
 
 					// shell-safe: activation codes are LPA:1$host$token style
 					if (!match(code, /^[A-Za-z0-9$:._+-]+$/) ||
 					    (params?.confirmation_code != null &&
 					     !match(params.confirmation_code, /^[A-Za-z0-9._-]*$/)))
-						return cb({ error: 'invalid_argument' });
+						return done({ error: 'invalid_argument' });
 
 					// standard: acknowledge the install to the operator afterwards;
 					// callers pass auto_notify=false only for testing
@@ -361,13 +372,23 @@ return {
 								dl = err
 									? { state: 'failed', via: 'modem', error: err.error, ret: err.ret }
 									: { state: 'done', via: 'modem', ret: res?.ret };
+								entry.modem._esim_op = false;   // run finished — URCs may resume
 								log('notice', sprintf('modem %s: eSIM AT download %s', ref, dl.state));
 							});
 
-							return cb(null, { started: true, via: 'modem' });
+							// the in-modem download runs long after this ack —
+							// keep the quiet mode up for its whole duration
+							done(null, { started: true, via: 'modem' });
+							entry.modem._esim_op = true;
+							return;
 						}
 
-						download_lpac(ref, slot, code, params?.confirmation_code, cb, auto_notify);
+						download_lpac(ref, slot, code, params?.confirmation_code,
+							(err, res) => {
+								done(err, res);
+								if (!err)
+									entry.modem._esim_op = true;   // stays quiet for the whole lpac run
+							}, auto_notify);
 					});
 				}
 
@@ -378,7 +399,7 @@ return {
 					if (st.state == 'running' && st.logf)
 						st = { ...st, log: trim(fs.readfile(st.logf) ?? '') };
 
-					return cb(null, st);
+					return done(null, st);
 				}
 
 				// pending eUICC notifications: after any profile op the eUICC
@@ -386,38 +407,48 @@ return {
 				// (ES9+) — 'notifications' lists them, 'notify' sends them
 				case 'notifications':
 					if (!lpac_run(ref, slot, 'notif-list', '', '', (err, out) =>
-						cb(err ? { error: 'lpac', ...err } : null, { ok: !err, log: out })))
-						return cb({ error: 'esim_not_installed' });
+						done(err ? { error: 'lpac', ...err } : null, { ok: !err, log: out })))
+						return done({ error: 'esim_not_installed' });
 					return;
 
 				case 'notify':
 					if (dl?.state == 'running' || mgmt_busy)
-						return cb({ error: 'busy' });
+						return done({ error: 'busy' });
 
 					dl = { state: 'running', via: 'notify', logf: ESIM_LOGF };
 
 					if (!lpac_run(ref, slot, 'notif-process', '', '', (err, out) => {
 						dl = { state: err ? 'failed' : 'done', via: 'notify',
 						       code: err?.code ?? 0, log: out };
+						entry.modem._esim_op = false;   // run finished — URCs may resume
 						log('notice', sprintf('modem %s: eSIM notifications %s', ref, dl.state));
-					}))
-						return cb({ error: 'esim_not_installed' });
-					return cb(null, { started: true, via: 'notify' });
+					})) {
+						// lpac missing / spawn failed: never leave dl wedged
+						// 'running' — every later download/notify would read busy
+						dl = { state: 'failed', via: 'notify', code: -1 };
+						return done({ error: 'esim_not_installed' });
+					}
+
+					// notif-process runs long after this ack — keep the quiet
+					// mode up for its whole duration
+					done(null, { started: true, via: 'notify' });
+					entry.modem._esim_op = true;
+					return;
 
 				case 'profiles': return esim.profiles(entry.modem, slot, done);
 				case 'eid':      return esim.get_eid(entry.modem, slot, done);
 				case 'enable':
 				case 'disable':
 				case 'delete': {
-					if (!length(iccid)) return cb({ error: 'missing_argument' });
-					if (!match(iccid, /^[0-9]+$/)) return cb({ error: 'invalid_argument' });
+					if (!length(iccid)) return done({ error: 'missing_argument' });
+					if (!match(iccid, /^[0-9]+$/)) return done({ error: 'invalid_argument' });
 					return profile_op_lpac(ref, slot, op, iccid, (err, res) => {
 						// enable/disable change the active profile — the modem
 						// must re-read the card; delete only removes a disabled
 						// profile, nothing to apply
 						if (err || op == 'delete')
-							return cb(err, res);
-						apply_sim_reset(ref, entry, slot, res, cb);
+							return done(err, res);
+						apply_sim_reset(ref, entry, slot, res, done);
 					}, () => {
 						if (op == 'enable')
 							return esim.enable(entry.modem, slot, iccid, (err, res) => {
@@ -431,7 +462,7 @@ return {
 					});
 				}
 				default:
-					return cb({ error: 'invalid_op', op: op });
+					return done({ error: 'invalid_op', op: op });
 				}
 			},
 		};

@@ -91,6 +91,9 @@ export function create(opts)
 		if (o.rename != null)
 			push(parts, sprintf('name %s', o.rename));
 
+		if (o.noarp)
+			push(parts, 'noarp');
+
 		let action = sprintf('link_set %s %s', dev, join(' ', parts));
 
 		push(self.actions, action);

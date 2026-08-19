@@ -187,6 +187,26 @@ export function nitz_epoch(ut)
 	});
 };
 
+// parse a Fibocom T700 +CTZV NITZ URC line into { epoch, tz_offset_min } —
+// the NCM backend's equivalent of the QMI NETWORK_TIME_IND feed. The payload
+// is `+CTZV: "yy/MM/dd,hh:mm:ss±qq"` with the timezone in QUARTER HOURS
+// (+32 = +8h), like the QMI timezone_offset field. null on any implausible
+// frame (the modem can push a zeroed NITZ before it has real network time).
+export function nitz_ctzv(line)
+{
+	let m = match(line, /^\+CTZV:\s*"([0-9]{2})\/([0-9]{2})\/([0-9]{2}),([0-9]{2}):([0-9]{2}):([0-9]{2})([+-][0-9]+)"/);
+
+	if (!m)
+		return null;
+
+	let epoch = nitz_epoch({
+		year: 2000 + +m[1], month: +m[2], day: +m[3],
+		hour: +m[4], minute: +m[5], second: +m[6],
+	});
+
+	return (epoch != null) ? { epoch: epoch, tz_offset_min: +m[7] * 15 } : null;
+};
+
 // derive a coarse mode from NAS radio interfaces (last-resort fallback; can't
 // see NSA — an NSA anchor reports LTE only here). radio_ifs: 8=LTE, 12=5GNR.
 export function dsd_from_radio(radio_ifs)
@@ -810,6 +830,9 @@ export function collect_temperature(self, cb)
 	else if (index(mfr, 'meig') >= 0)   { cmd = 'AT+TEMP';     parse = atcmd.parse_meig_temp; }
 	else if (index(mfr, 'huawei') >= 0) { cmd = 'AT^CHIPTEMP'; parse = atcmd.parse_chiptemp; }
 	else if (index(mfr, 'simcom') >= 0) { cmd = 'AT+CPMUTEMP'; parse = atcmd.parse_cpmutemp; }
+	// FM350/T700 (MediaTek): AT+ETHERMAL? (field-verified — the FM350 REJECTS
+	// the 3ginfo-lite NL952 command AT+MTSM=1)
+	else if (index(mfr, 'fibocom') >= 0) { cmd = 'AT+ETHERMAL?'; parse = atcmd.parse_ethermal; }
 	else {
 		self._temp_unavail = true;   // no known temperature command for this vendor
 		return cb();
@@ -873,7 +896,10 @@ export function open_at(self, o)
 		return o.next();
 	}
 
-	self.at = atcmd.create(tr, { log: (level, msg) => log(level, sprintf('at: %s', msg)) });
+	self.at = atcmd.create(tr, {
+		log: (level, msg) => log(level, sprintf('at: %s', msg)),
+		on_urc: self.at_on_urc ?? null,
+	});
 	self.at_tty = tty;
 	log('notice', sprintf('AT port: %s', tty));
 

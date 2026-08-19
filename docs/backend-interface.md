@@ -79,14 +79,14 @@ do not "fix" one side to match the other:
 | `open` | bring the control channel up | transport + `CTL SYNC` + version + per-service CID alloc | open + `MBIM OPEN` | open the AT tty (this *is* the control channel; optional usb-serial `new_id` bind) |
 | `read_info` | model, revision, imei, manufacturer, capabilities | `DMS GET_*` | `DEVICE_CAPS` | `ATI`/`CGMI`/`CGMM`/`CGMR` + `CGSN` (imei); manufacturer selects the vendor recipe |
 | `set_opmode(mode)` | online / low_power / offline / reset | `DMS SET_OPERATING_MODE` | radio-state (partial) | `AT+CFUN` (reset = `AT+CFUN=1,1`) |
-| `slot_status` / `switch_slot(n)` | list / select physical SIM slots | `UIM GET_SLOT_STATUS` / `SWITCH_SLOT` | — | — |
+| `slot_status` / `switch_slot(n)` | list / select physical SIM slots | `UIM GET_SLOT_STATUS` / `SWITCH_SLOT` | — | vendor `slots` recipe (Fibocom `AT+GTDUALSIM`, switch + CFUN reset) |
 | `sim_unlock(pin)` | query PIN state, verify, guard retries | `UIM`/`DMS` | `SUBSCRIBER_READY` + `PIN` | `AT+CPIN?` + `AT+CPIN="…"`; retries via `AT+QPINC` |
 | `read_identity` | imsi, iccid, msisdn | `UIM` EF read → `DMS` → AT | `SUBSCRIBER_READY` | `AT+CIMI` (imsi) + `AT+QCCID`/`+CCID`/`+ICCID` chain |
 | `config_network(modes,plmn)` | mode/PLMN preference | `NAS SET_SYSTEM_SELECTION_PREFERENCE` | — | AT (`AT+COPS`; `with_nas` is null → daemon uses the AT path) |
 | `ensure_attach_profile(apn,pdp)` | program the autonomous-attach profile | `WDS MODIFY_PROFILE` (CID 1) | folded into connect | `AT+CGDCONT` (+ vendor auth: `QICSGP`/`CGAUTH`/…) on CID 1 |
-| `register` | wait for registration + subscribe indications | `NAS REGISTER_INDICATIONS` + `GET_SERVING_SYSTEM` + ind | `REGISTER_STATE` + `PACKET_SERVICE` | poll `AT+CEREG?` → `AT+C5GREG?` → `AT+CREG?` (5G-SA aware) |
+| `register` | wait for registration + subscribe indications | `NAS REGISTER_INDICATIONS` + `GET_SERVING_SYSTEM` + ind | `REGISTER_STATE` + `PACKET_SERVICE` | poll `AT+CEREG?` → `AT+C5GREG?` → `AT+CREG?` (5G-SA aware), with registration URCs (`+CREG`/`+CEREG`/…, Fibocom) as a poll fast path |
 | `reg_detail` | EMM reject cause + limited-service flag | `NAS GET_SYSTEM_INFO` + AT `+CEER` | — | vendor `reg_detail` block (AT; best-effort) |
-| `signal` / `cells` / `ca` / `data_mode` | telemetry | `NAS GET_SIGNAL_INFO`/`GET_CELL_LOCATION_INFO`/`GET_LTE_CPHY_CA_INFO`, `DSD GET_SYSTEM_STATUS` | `SIGNAL_STATE` + QMI-over-MBIM passthrough (full parity) | per-vendor AT block (`telemetry_ncm.uc`): `CSQ`, `QENG="servingcell"` (rsrp/rsrq/sinr/bandwidth), `QCAINFO` (CA), `QRSRP`/`QSINR` (per-branch); `data_mode` from the QENG serving line |
+| `signal` / `cells` / `ca` / `data_mode` | telemetry | `NAS GET_SIGNAL_INFO`/`GET_CELL_LOCATION_INFO`/`GET_LTE_CPHY_CA_INFO`, `DSD GET_SYSTEM_STATUS` | `SIGNAL_STATE` + QMI-over-MBIM passthrough (full parity) | per-vendor AT block (`telemetry_ncm.uc`): `CSQ`, `QENG="servingcell"` (rsrp/rsrq/sinr/bandwidth), `QCAINFO` (CA), `QRSRP`/`QSINR` (per-branch); Fibocom `GTCAINFO`/`GTCCINFO` (CA SCCs); `data_mode` from the QENG serving line |
 | `location` | GNSS position | `LOC` service (broken on Quectel; AT+QGPS is the real path) | — | — |
 | `teardown` | release clients/CIDs | `RELEASE_CID` + close | `MBIM CLOSE` | close the AT engine(s) |
 
@@ -95,12 +95,12 @@ do not "fix" one side to match the other:
 | Operation | Purpose | QMI | MBIM | NCM (AT) |
 |---|---|---|---|---|
 | `prepare(apn,auth,pdp)` | program the data profile | `WDS MODIFY_PROFILE` | folded into connect | `AT+CGDCONT` + vendor auth (idempotency-guarded against `AT+CGDCONT?`) |
-| `bind_mux(channel)` | bind the data port to a mux channel | `WDS BIND_MUX_DATA_PORT` | session id / VLAN | — (plain cdc_ncm/cdc_ether netdev, no mux) |
+| `bind_mux(channel)` | bind the data port to a mux channel | `WDS BIND_MUX_DATA_PORT` | session id / VLAN | — (plain cdc_ncm/cdc_ether/rndis_host netdev, no mux) |
 | `activate(family)` | start a data session, return a handle | `WDS SET_IP_FAMILY` + `START_NETWORK` → pdh | `CONNECT set` | resolved vendor "dial" binds the netdev to the bearer (`QNETDEVCTL`/`NDISDUP`/…, falling back to `CGACT`) |
-| `settings(family)` | fetch assigned IP config | `WDS GET_CURRENT_SETTINGS` | `IP_CONFIGURATION` | `AT+CGCONTRDP=<cid>` (parsed into the neutral static config) |
+| `settings(family)` | fetch assigned IP config | `WDS GET_CURRENT_SETTINGS` | `IP_CONFIGURATION` | `AT+CGCONTRDP=<cid>` via the per-vendor `ip_config` hook (e.g. the Fibocom T700 path: `CGPADDR` address, gateway-less, + CGCONTRDP DNS; the embedded-v4 form is extracted on BOTH the CGPADDR and the CGCONTRDP parser paths but deliberately NOT applied on an ipv6-only PDP — 3GPP: `pdp ipv6` means no host v4, the network's 464XLAT CLAT stays in the modem) — always STATIC from the modem, DHCP is never used; a modem that reports no MTU falls back to the netdev's own `/sys/class/net/…/mtu` |
 | `deactivate(family)` | stop a session | `WDS STOP_NETWORK` | `CONNECT` deactivate | vendor dial disconnect (`QNETDEVCTL=0`/`CGACT=0`/…) |
 | `stats` | packet/byte counters + channel rate + bearer tech | `WDS GET_PACKET_STATISTICS`/`GET_CHANNEL_RATES`/`GET_CURRENT_DATA_BEARER_TECHNOLOGY` | — | vendor byte counter (`QGDCNT`/`DSFLOWQRY`) feeds the zero-rx watchdog |
-| `on_lost` | connection-lost notification | `WDS PACKET_SERVICE_STATUS_IND` | `PACKET_SERVICE` ind | AT poll (no unsolicited notif): dial-status query, else `AT+CGPADDR` liveness |
+| `on_lost` | connection-lost notification | `WDS PACKET_SERVICE_STATUS_IND` | `PACKET_SERVICE` ind | AT poll (dial-status query, else `AT+CGPADDR` liveness), plus unsolicited `+CGEV` PDN DEACT pokes where the modem sends them (Fibocom T700) |
 
 ## Normalized data shapes
 
@@ -130,7 +130,8 @@ code}` fed into the shared `callend.uc` text table (instead of raw QMI TLVs).
 `config_network`, `ensure_attach_profile`, `reg_detail`, `ca`/`data_mode`,
 `location`, `stats`. The core degrades gracefully — the shipped NCM/AT backend is
 exactly this case: it implements the required subset over AT and simply has no
-slot-switching or GNSS, which the core tolerates.
+GNSS (slot switching comes via the vendor `slots` recipe where one exists),
+which the core tolerates.
 
 ## Event contract + status fields
 
@@ -166,13 +167,20 @@ The contract above is implemented across all three backends:
 - **MBIM** (`modem_mbim.uc` / `context_mbim.uc`) — runs on the shared core with a
   native MS-BasicConnect decoder plus a **QMI-over-MBIM passthrough** that reuses
   the QMI backend + schemas (hence `wwand-mbim` DEPENDS `wwand-qmi`).
-- **NCM** (`modem_ncm.uc` / `context_ncm.uc`) — the AT-only backend. Per-vendor
-  `VENDORS` dial/auth/telemetry recipes in `ncm_vendors.uc` (Quectel, Fibocom, Huawei, Meig, SIMCom,
-  Sierra, Sony, Samsung, ZTE, MikroTik, MediaTek, Spreadtrum/Unisoc, Telit,
-  Gosuncn, Neoway + a 3GPP-standard fallback); registration polls
-  `AT+CEREG?` → `AT+C5GREG?` → `AT+CREG?` (5G-SA aware); bearer liveness comes from
-  the vendor byte counter, the dial's status query, or a universal `AT+CGPADDR`
-  poll for modems that have neither.
+- **NCM** (`modem_ncm.uc` / `context_ncm.uc`) — the AT-only backend (the
+  "AT-driven" backend: its datapath is a plain `cdc_ncm`/`cdc_ether`/
+  **`rndis_host`** netdev, so RNDIS modems like the Fibocom FM350-GL need no
+  separate backend). Per-vendor `VENDORS` dial/auth/**ip_config**/telemetry
+  recipes in `ncm_vendors.uc` (Quectel, Fibocom, Huawei, Meig, SIMCom, Sierra,
+  Sony, Samsung, ZTE, MikroTik, MediaTek, Spreadtrum/Unisoc, Telit, Gosuncn,
+  Neoway + a 3GPP-standard fallback); registration polls `AT+CEREG?` →
+  `AT+C5GREG?` → `AT+CREG?` (5G-SA aware); bearer liveness comes from the
+  vendor byte counter, the dial's status query, or a universal `AT+CGPADDR`
+  poll for modems that have neither. Assigned IP config is always STATIC from
+  the modem (CGCONTRDP, or the vendor `ip_config` hook — e.g. CGPADDR on the
+  T700) — DHCP is never involved. RNDIS datapaths come up with ARP disabled
+  (NOARP), so the gateway-less /32 device route needs no neighbour
+  resolution.
 - Daemon reach-ins are behind backend ops (`with_nas`), and per-capability
   telemetry/config is chosen at runtime by `backend.choose`
   (native → passthrough → AT), cached per modem.

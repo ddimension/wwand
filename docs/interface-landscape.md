@@ -15,7 +15,7 @@ wwand is designed to support multiple modem control/data-plane interfaces. The c
 |---|---|---:|---:|---:|---:|---:|---|
 | **Quectel** | RG650E, RM520N | Yes | **Yes** | Yes | Some | **Yes** | **QMI / QMAP** |
 | **Sierra Wireless / Semtech** | EM9291/EM9293, EM9191 | Yes | Yes | **Yes** | – | **Yes / MHI** | **MBIM** |
-| **Fibocom** | FM160, FM350, FM190 | Yes | Yes* | **Yes** | Some | Yes | **MBIM** |
+| **Fibocom** | FM160, FM190 (Qualcomm); FM350-GL (T700 — RNDIS-only, no MBIM/QMI) | Yes | Yes* | Some | **Yes** | Yes | MBIM (FM160/190) / AT-NCM (FM350-GL) |
 | **Telit Cinterion** | FN990, FE990 | Yes | Yes* | **Yes** | – | Some | **MBIM** |
 | **SIMCom** | SIM8200, SIM8262, SIM8270 | Yes | **Yes** | Yes | Some | Some | **QMI** |
 | **Meig** | SRM825L, SRM815 | Yes | **Yes** | Some | Some | Some | **QMI** |
@@ -133,38 +133,54 @@ Sierra is therefore an important reason why wwand should have a first-class MBIM
 
 Relevant current families include:
 
-- FM160
-- FM190
-- FM350
-- other Qualcomm-based 5G modules
-
-Fibocom exposes multiple USB network/control configurations depending on the module and firmware.
-
-Typical possibilities include:
+- **FM160 / FM190** — Qualcomm-based 5G modules; multiple USB compositions
+  (MBIM/QMI/NCM) depending on module and firmware.
+- **FM350-GL** — **MediaTek T700**-based (NOT Qualcomm), M.2 3052; PCIe
+  Gen3 ×1 + USB 2.0/3.0. USB offers **RNDIS compositions only**:
+  `AT+GTUSBMODE` 40 (0e8d:7126, 8 ifaces) / 41 (0e8d:7127, default, 10
+  ifaces) — no MBIM/QMI composition. AT port on interface 4 (mode 40) / 6
+  (mode 41); the kernel `option` driver binds the serial interfaces itself
+  since 4.19.318 (ADB interface excepted — a blanket `new_id` write grabs ADB
+  and crash-loops the card, forum-observed). Data path via `rndis_host`; the
+  modem lacks `GTRNDIS`/`GTRAT`, so the working dial is `CGDCONT` + `CGACT`.
+  Assigned IP config is static from the modem (CGPADDR address, gateway-less
+  device route with ARP disabled on the rndis_host netdev, CGCONTRDP DNS —
+  DHCP is not involved; field-verified on a WH3000 Pro). FCC-locked on PCIe
+  (MT7xx driver + ModemManager unlock); built-in eUICC (host APDU available when the eSIM slot is ACTIVE —
+  the ISD-R opens via CCHO/CGLA in a window after the slot switch before
+  the internal LPA re-claims it; eid/profiles field-validated, incl. the
+  T700's bare CCHO session-id form).
 
 ```text
-USB
- ├── MBIM
- ├── QMI
- ├── NCM
- └── AT
+USB (FM350-GL, both compositions)
+ ├── RNDIS (ifaces 0-1)
+ ├── AT
+ └── META / DEBUG / NPT / ADB / AP(GNSS/LOG/META)
 ```
 
-The exact composition is highly module/firmware dependent.
-
-For generic Linux integration, MBIM is generally the safer standardized target, while QMI remains important for Qualcomm-specific functionality.
+The exact composition is highly module/firmware dependent. For generic Linux
+integration on the Qualcomm modules, MBIM is generally the safer standardized
+target, while QMI remains important for Qualcomm-specific functionality.
 
 ### wwand relevance
 
-**MBIM: high**
+**MBIM: high** (FM160/FM190-class)
 
 **QMI: medium**
 
-**NCM: medium**
+**NCM: high for the FM350-GL** — RNDIS-only, so the AT-driven NCM backend is
+the only wwand path on this module (no separate RNDIS backend: the control is
+AT either way). Vendor recipe, MGAUTH→CGAUTH auth chain, the static-IP hook
+(CGPADDR + NOARP device route) and a GTCAINFO/GTCCINFO telemetry block all
+exist; static-IP path and telemetry are field-verified on a WH3000 Pro. The
+T700's CGCONTRDP **empty-local form** (empty addr/subnet fields, gateway +
+DNS64 pair shifted into their place — the empty fields go bare after a CFUN
+cycle) is gated positionally: the hook requires the `+CGCONTRDP: <cid>` prefix
+plus empty fields 3+4 before it takes the CGPADDR path, so a wrapped
+continuation line or the gateway token is never misread as the address.
 
-**PCIe: high**
-
-Fibocom is therefore another strong argument for supporting both QMI and MBIM in wwand.
+**PCIe: high** (FM160/FM190 on MHI-class platforms; the FM350-GL's MT7xx PCIe
+path is a different subsystem and is not covered by wwand-mhi)
 
 ---
 

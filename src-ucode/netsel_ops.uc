@@ -393,13 +393,76 @@ export function install(self, o)
 		if (!at)
 			return cb({ error: 'unsupported_on_backend' });
 
+		// a bounce is already running — don't stack a second one (it would
+		// snapshot zero contexts, clear the flag mid-bounce and race the
+		// daemon's reconnect)
+		if (entry.modem._reattaching)
+			return cb(null, { ok: true, action: 'reattach', via: 'at',
+			                  contexts_bounced: 0, contexts_failed: [], busy: true });
+
+		// arm the guard NOW, before the two AT round trips: the daemon's
+		// 'down' handler must stay calm during the whole deregister window
+		// (the flag also blocks a second reattach invocation)
+		entry.modem._reattaching = true;
+
 		log('notice', sprintf('modem %s: network reattach (AT COPS deregister -> automatic)', ref));
 
 		// tolerate a deregister error (already deregistered) — always re-attach
 		at.send('AT+COPS=2', () => {
 			at.send('AT+COPS=0', (aerr) => {
-				cb(aerr ? { error: 'at', detail: aerr } : null,
-					{ ok: true, action: 'reattach', via: 'at' });
+				if (aerr) {
+					entry.modem._reattaching = false;
+					return cb({ error: 'at', detail: aerr });
+				}
+
+				// the T700's data path does NOT survive the deregister/attach
+				// cycle (CGACT stays 1 while the network bearer is gone —
+				// field-verified): bounce every connected context so the PDP
+				// re-establishes; the re-registration + settings refresh run
+				// on their own. QMI/MBIM keep their native reattach.
+				// The modem-level flag stops the daemon's own 'down' handler
+				// from racing the bounce with enter_reconnecting.
+				// snapshot once: a bounced context is CONNECTED again when its
+				// up() returns — rescanning would loop it forever
+				let todo = [];
+
+				for (let c in (entry.modem.contexts ?? []))
+					if (c.state == 'CONNECTED')
+						push(todo, c);
+
+				let bounced = 0;
+				let failed = [];
+				let next_ctx;   // forward-declared (self-referencing arrow)
+
+				next_ctx = () => {
+					if (!length(todo)) {
+						entry.modem._reattaching = false;
+
+						return cb(null, { ok: true, action: 'reattach', via: 'at',
+						                  contexts_bounced: bounced,
+						                  contexts_failed: failed });
+					}
+
+					let c = shift(todo);
+
+					c.down((de) => {
+						if (de) {
+							push(failed, { context: c.name ?? '?', step: 'down' });
+
+							return next_ctx();
+						}
+
+						bounced++;   // count only successful downs
+						c.up((ue) => {
+							if (ue)
+								push(failed, { context: c.name ?? '?', step: 'up' });
+
+							next_ctx();
+						});
+					});
+				};
+
+				next_ctx();
 			}, { timeout: COPS_SET_TIMEOUT_MS });
 		}, { timeout: COPS_SET_TIMEOUT_MS });
 	};

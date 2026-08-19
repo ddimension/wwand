@@ -821,6 +821,35 @@ export function parse_chiptemp(lines) { return first_temp(lines, /\^CHIPTEMP:/i)
 // SIMCom AT+CPMUTEMP: "+CPMUTEMP: 35" (single value, already Celsius).
 export function parse_cpmutemp(lines) { return first_temp(lines, /\+CPMUTEMP:/i); };
 
+// Fibocom AT+MTSM=1: "+MTSM: <temp>" (Celsius) — the MTK thermal-sensor read
+// the 3ginfo-lite parser uses on the NL952 family (the FM350/T700 rejects it).
+export function parse_mtsm(lines) { return first_temp(lines, /\+MTSM:/); };
+
+// Fibocom/MediaTek AT+ETHERMAL?: "+ETHERMAL: <a>[,<b>…]" — die/board sensor
+// readings in Celsius (the 3ginfo-lite 0e8d7127 script's source for the
+// FM350/T700). Average of all in-range readings, rounded to 0.1 °C;
+// 3ginfo takes one sensor only.
+export function parse_ethermal(lines)
+{
+	let sum = 0.0, n = 0;
+
+	for (let l in (lines ?? [])) {
+		if (!match(l, /\+ETHERMAL:/))
+			continue;
+
+		for (let m in (match(l, /-?[0-9]+/g) ?? [])) {
+			let v = +m[0];
+
+			if (v > 10 && v < 120) {
+				sum += v;
+				n++;
+			}
+		}
+	}
+
+	return n ? +sprintf('%.1f', sum / n) : null;
+};
+
 // MeiG AT+TEMP: '+TEMP: "sensor","value"'. The value is milli-Celsius on some
 // platforms (Unisoc soc-thmzone) — divide by 1000 when it is clearly milli
 // (magnitude > 200). Prefers an soc/cpu sensor, else the first plausible reading.

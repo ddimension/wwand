@@ -14,6 +14,7 @@ import * as mockhub from './lib/mockhub.uc';
 import * as fakefx from './lib/fakefx.uc';
 import * as config from 'wwand/config.uc';
 import * as daemon_mod from 'wwand/daemon.uc';
+import * as netsel_ops from 'wwand/netsel_ops.uc';
 
 uloop.init();
 
@@ -268,6 +269,69 @@ wait_ready = () => {
 
 	uloop.timer(5, wait_ready);
 };
+
+// --- AT-path reattach bounces connected contexts (T700 field finding) -------
+// A standalone netsel_ops install with a fake AT engine + fake contexts:
+// COPS deregister -> automatic, then every CONNECTED context is bounced
+// (down+up); IDLE contexts are left alone.
+{
+	let sent = [];
+	let at = { send: (cmd, cb) => { push(sent, cmd); cb(null); } };
+	let events = [];
+	let mkctx = (state) => {
+		let c = { state: state };
+
+		c.down = (cb) => { push(events, c.state + ':down'); c.state = 'IDLE'; cb(); };
+		c.up = (cb) => { push(events, c.state + ':up'); c.state = 'CONNECTED'; cb(); };
+		return c;
+	};
+	let entry = { modem: { at: at, contexts: [ mkctx('CONNECTED'), mkctx('IDLE') ], reattach: null } };
+	let fake = {};
+
+	netsel_ops.install(fake, {
+		log: () => null,
+		check_modem: (ref, cb) => (ref == 'm1') ? entry : (cb({ error: 'no_such_modem' }), null),
+		reg_plmn: () => null,
+	});
+
+	fake.modem_reattach('m1', (err, res) => {
+		eq(err, null, 'at-reattach: no error');
+		ok(sent[0] == 'AT+COPS=2' && sent[1] == 'AT+COPS=0',
+			'at-reattach: COPS deregister -> automatic');
+		eq(events, [ 'CONNECTED:down', 'IDLE:up' ],
+			'at-reattach: only the connected context bounced');
+		eq(res.contexts_bounced, 1, 'at-reattach: bounce count');
+		eq(length(res.contexts_failed ?? []), 0, 'at-reattach: no failed contexts');
+		eq(entry.modem._reattaching, false, 'at-reattach: reattaching flag cleared');
+
+		// error path: a failing up() is reported, not swallowed (the daemon's
+		// error machinery must not be the only place that notices)
+		let sent2 = [];
+		let at2 = { send: (cmd, cb) => { push(sent2, cmd); cb(null); } };
+		let mkctx2 = (state) => {
+			let c = { state: state, name: 'sim' };
+
+			c.down = (cb) => { c.state = 'IDLE'; cb(); };
+			c.up = (cb) => { c.state = 'CONNECTED'; cb({ error: 'at' }); };
+			return c;
+		};
+		let entry2 = { modem: { at: at2, contexts: [ mkctx2('CONNECTED') ], reattach: null } };
+		let fake2 = {};
+
+		netsel_ops.install(fake2, {
+			log: () => null,
+			check_modem: (ref, cb) => (ref == 'm1') ? entry2 : (cb({ error: 'no_such_modem' }), null),
+			reg_plmn: () => null,
+		});
+
+		fake2.modem_reattach('m1', (e2, r2) => {
+			eq(e2, null, 'at-reattach err path: op still ok');
+			eq(length(r2.contexts_failed ?? []), 1, 'at-reattach: failed context reported');
+			eq(r2.contexts_failed?.[0]?.step, 'up', 'at-reattach: failed step is up');
+			eq(entry2.modem._reattaching, false, 'at-reattach: flag cleared on failure too');
+		});
+	});
+}
 
 wait_ready();
 uloop.run();

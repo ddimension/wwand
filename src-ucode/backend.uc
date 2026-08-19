@@ -74,6 +74,12 @@ export function choose(obj, key, candidates, cb)
 
 // forget the cached decision (e.g. on SIM slot switch / removable eUICC), so
 // the next call re-probes. Pass the same keys the features cache under.
+export function forget(obj, ...keys)
+{
+	for (let k in keys)
+		delete obj[k];
+};
+
 // run value providers in order until one yields a non-null result; cb(value)
 // with null when every provider came up empty. The shared "try QMI, then AT"
 // fallback ladder used by identity reads and similar per-field chains (the

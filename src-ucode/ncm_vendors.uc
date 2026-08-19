@@ -9,6 +9,7 @@
 'use strict';
 
 import * as telemetry_ncm from 'wwand.telemetry_ncm';
+import * as context_common from 'wwand.context_common';
 
 // --- AT command model (shared with context_ncm.uc) ---------------------------
 // pdp_type -> the 3GPP PDP type string used in AT+CGDCONT and the Quectel
@@ -20,16 +21,9 @@ const CTX_TYPE = { ipv4: 1, ipv6: 2, ipv4v6: 3 };
 // QICSGP / CGAUTH auth enum: 0=none, 1=PAP, 2=CHAP, 3=PAP-or-CHAP
 const AUTH_ENUM = { none: 0, pap: 1, chap: 2, both: 3 };
 
-// the standard 3GPP AT+CGAUTH auth command — shared by every vendor whose
-// firmware takes the stock form (vendor-specific variants like QICSGP/
-// AUTHDATA/QCPDPP stay in their tables)
-const AUTH_CGAUTH = (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-	? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
-		cfg.username ?? '', cfg.password ?? '')
-	: null;
-
 // explicit config wins; else PAP-or-CHAP when username/password present
-// (QMI/MBIM parity), else none.
+// (QMI/MBIM parity), else none. (Must precede AUTH_CGAUTH — ucode does not
+// hoist function declarations, the arrow below resolves it at call time.)
 function auth_value(cfg)
 {
 	if (cfg.auth != null)
@@ -38,11 +32,232 @@ function auth_value(cfg)
 	return (cfg.username && cfg.password) ? AUTH_ENUM.both : AUTH_ENUM.none;
 }
 
+// the standard 3GPP AT+CGAUTH auth command — shared by every vendor whose
+// firmware takes the stock form (vendor-specific variants like QICSGP/
+// AUTHDATA/QCPDPP stay in their tables)
+const AUTH_CGAUTH = (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
+	? sprintf('AT+CGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
+		cfg.username ?? '', cfg.password ?? '')
+	: null;
+
 // standard 3GPP context definition — the default `define` for most vendors
 function cgdcont(cid, pdp, apn)
 {
 	return sprintf('AT+CGDCONT=%d,"%s","%s"', cid, pdp, apn);
 }
+
+// --- CGCONTRDP / CGPADDR parsers (shared with the per-vendor ip_config hooks) -
+
+// +CGCONTRDP=<cid> field positions are NOT uniform across firmwares: some put
+// the local addr as a bare 4-octet IPv4 (no mask) and interleave v4/v6 DNS.
+// So rather than trust positions, tokenize every dotted-decimal group (comma OR
+// space separated), classify by octet count (4/8 = IPv4[+mask], 16/32 =
+// IPv6[+mask]), bucket per family IN ORDER, then map each as [addr(+mask),
+// gateway?, dns...]. The gateway slot is taken only for a masked IPv4 (8/32
+// octets) or for IPv6 (always advertises a link-local gw) — an unmasked IPv4
+// (RG650E) has no gateway field, so every remaining v4 token is DNS.
+const mask_to_prefix = context_common.mask_octets_to_prefix;
+
+// join 16 decimal byte strings into an IPv6 literal (uncompressed but valid)
+function bytes_to_ipv6(bytes)
+{
+	let hextets = [];
+
+	for (let i = 0; i < 16; i += 2)
+		push(hextets, sprintf('%x', (+bytes[i] & 0xff) * 256 + (+bytes[i + 1] & 0xff)));
+
+	return join(':', hextets);
+}
+
+// the T700's embedded-IPv4 form (field-seen on the v6-only PDP): a 16-octet
+// token <0×8, 0,1, 0,0><v4> — the network serves IPv4 inside the IPv6-only
+// bearer. Return the trailing 4-octet slice, else null.
+function embedded_v4(parts)
+{
+	if (length(parts) != 16)
+		return null;
+
+	for (let i = 0; i < 8; i++)
+		if (+parts[i] != 0)
+			return null;
+
+	return ((+parts[8] == 0) && (+parts[9] == 1) &&
+	        (+parts[10] == 0) && (+parts[11] == 0))
+		? slice(parts, 12, 16)
+		: null;
+}
+
+// classify one token of a CGCONTRDP/GTDNS/CGPADDR payload: null when it is not
+// a dotted-decimal group, else { n, parts, ev4 } (ev4 = the embedded-v4 form —
+// 16 octets that encode an IPv4, resolved once so every consumer skips it the
+// same way). Shared by parse_cgcontrdp, dns_from_gt and the v6_real scan.
+function dotted_group(tok)
+{
+	if (!match(tok, /^[0-9]+(\.[0-9]+)+$/))
+		return null;
+
+	let parts = split(tok, '.');
+	let n = length(parts);
+
+	return { n: n, parts: parts, ev4: (n == 16) ? embedded_v4(parts) : null };
+}
+
+// assign an ordered list of dotted-octet tokens (each an array of octet strings)
+// for one family to { addr, prefix/plen, gateway, dns[] }
+function assign_family(tokens, is_v6)
+{
+	if (!length(tokens))
+		return null;
+
+	let t0 = tokens[0];
+	let out = { addr: null, gateway: null, dns: [] };
+	let has_mask;
+
+	if (is_v6) {
+		has_mask = (length(t0) == 32);
+		out.addr = bytes_to_ipv6(slice(t0, 0, 16));
+		out.plen = has_mask ? mask_to_prefix(slice(t0, 16, 32)) : 64;
+	}
+	else {
+		has_mask = (length(t0) == 8);
+		out.addr = join('.', slice(t0, 0, 4));
+		out.prefix = has_mask ? mask_to_prefix(slice(t0, 4, 8)) : null;
+	}
+
+	let idx = 1;
+	let render = (t) => is_v6 ? bytes_to_ipv6(slice(t, 0, 16)) : join('.', slice(t, 0, 4));
+
+	// gateway slot: present for IPv6 (link-local gw) or a masked IPv4 address
+	if ((is_v6 || has_mask) && idx < length(tokens))
+		out.gateway = render(tokens[idx++]);
+
+	for (; idx < length(tokens); idx++)
+		push(out.dns, render(tokens[idx]));
+
+	return out;
+}
+
+export function parse_cgcontrdp(lines)
+{
+	let v4 = [], v6 = [];
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+CGCONTRDP:\s*(.*)/);
+
+		if (!m)
+			continue;
+
+		// tokenize on comma AND whitespace (RG650E mixes them), strip quotes,
+		// keep only dotted-decimal groups (skips cid/bearer ints and the apn)
+		for (let tok in split(replace(m[1], /"/g, ''), /[, \t]+/)) {
+			let g = dotted_group(tok);
+
+			if (!g)
+				continue;
+
+			// the embedded-v4 form is 16 octets but a V4 address — extract it
+			// BEFORE the family bucket, or it would corrupt the v6 assignment
+			// (first token wins) when its line precedes the real v6 line
+			if (g.ev4)
+				push(v4, g.ev4);
+			else if (g.n == 4 || g.n == 8)
+				push(v4, g.parts);
+			else if (g.n == 16 || g.n == 32)
+				push(v6, g.parts);
+		}
+	}
+
+	return { ipv4: assign_family(v4, false), ipv6: assign_family(v6, true) };
+};
+
+// +CGPADDR: <cid>,"<v4>","<v6>" (quoted or bare) -> { addr, v6 } or null.
+// The T700 reuses the CGCONTRDP dotted-decimal encoding in the v4 slot:
+//   - <0×8, 0,1, 0,0><v4>  — an EMBEDDED IPv4: the network serves v4 even on
+//     the ipv6 PDP (field-verified: 13/14.x pool (anonymized), ping 3/3 through the address)
+//   - any other 16-octet token — a dotted-decimal IPv6 (decoded)
+//   - exactly 4 octets — a plain IPv4
+// The second (v6) slot is taken verbatim only as a plain colon-hex address;
+// dotted-decimal 32-octet addr+mask tokens are deliberately NOT decoded
+// (IPv6 stays untested on this device — no live v6 session was ever observed).
+// Passing an embedded/decoded token through as "ipv4" printed garbage on the
+// status page and routed nothing.
+export function parse_cgpaddr(lines)
+{
+	let v4 = null, v6 = null;
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+CGPADDR:\s*[0-9]+\s*,\s*"?([0-9a-fA-F:.]+)"?(\s*,\s*"?([0-9a-fA-F:.]*)"?)?/);
+
+		if (!m)
+			continue;
+
+		// a colon-hex v6 in the v4 slot (never field-seen on the T700 — the
+		// firmware always uses the dotted-decimal encoding — but the wide slot
+		// regex must not drop the whole line on one)
+		if (index(m[1], ':') >= 0) {
+			v6 = m[1];
+		}
+		else {
+			let t1 = split(m[1], '.');
+
+			if (length(t1) == 4 && match(m[1], /^[0-9]+\.[0-9.]+$/)) {
+				v4 = m[1];
+			}
+			else {
+				let ev4 = embedded_v4(t1);
+
+				if (ev4)
+					v4 = join('.', ev4);
+				else if (length(t1) == 16)
+					v6 = bytes_to_ipv6(slice(t1, 0, 16));
+			}
+		}
+
+		// the second (v6) slot is optional — 3GPP allows a single address on a
+		// single-family PDP (v4-only), where the two-slot regex used to fail
+		// the whole line
+		if (match(m[3] ?? '', /^[0-9a-fA-F:]+$/))
+			v6 = m[3];
+	}
+
+	return (v4 || v6) ? { addr: v4, v6: v6 } : null;
+};
+
+// parse AT+ESLOTSINFO? — per-slot [cpin, present, kind, atr, eid, iccid]
+// (field-verified on the FM350-GL: field 5 carries the EID on the eUICC slot
+// and is empty on the USIM slot; the eUICC reports CPIN EMPTY_EUICC when no
+// profile is provisioned)
+export function parse_eslotsinfo(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, /^\+ESLOTSINFO:\s*([0-9]+)\s*,\s*(.*)$/);
+
+		if (!m)
+			continue;
+
+		let n = +m[1];
+		let toks = split(replace(m[2], /"/g, ''), /,\s*/);
+		let slots = [];
+
+		for (let i = 0; i < n && (i + 1) * 6 <= length(toks); i++) {
+			let b = i * 6;
+
+			push(slots, {
+				cpin: trim(toks[b] ?? '') || null,
+				present: trim(toks[b + 1] ?? '') == '1',
+				kind: trim(toks[b + 2] ?? '') == '1' ? 'euicc' : 'usim',
+				atr: trim(toks[b + 3] ?? '') || null,
+				eid: trim(toks[b + 4] ?? '') || null,
+				iccid: trim(toks[b + 5] ?? '') || null,
+			});
+		}
+
+		return slots;
+	}
+
+	return null;
+};
+
 
 // --- dial methods (per-modem resolved at bring-up) ---------------------------
 //
@@ -313,6 +528,16 @@ const DIAL_ICMAUTOCONN = {
 //   define(cid, pdp, apn)     -> the context-definition command (default CGDCONT)
 //   auth_cmd(cid, ctxtype, apn, cfg) -> the command carrying username/password
 //                                       (or null when the dial/define carries it)
+//   auth_cmds(...)            -> same, but a LIST: a best-effort auth chain (the
+//                                setup sequence is error-tolerant, so a vendor
+//                                whose platforms disagree on the auth command
+//                                offers both and the firmware takes the one it
+//                                knows). Precedence over auth_cmd.
+//   ip_config(modem, cid, cfg, cb)  -> optional: cb(err, rdp) with the
+//                                parse_cgcontrdp shape for the assigned IP —
+//                                vendors whose CGCONTRDP does not carry the
+//                                address supply their own reader (default:
+//                                generic AT+CGCONTRDP read)
 //   dials:                    ordered dial methods to resolve (probed at bring-up)
 //   stats / parse_stats(lines)  -> { tx_bytes, rx_bytes } (or null)
 export const VENDORS = {
@@ -477,14 +702,261 @@ export const VENDORS = {
 	},
 
 	// Fibocom (best-effort): GTRNDIS binds the RNDIS/NCM netdev. Auth is the
-	// Fibocom-specific +MGAUTH (FM150/FM350 reject/ignore +CGAUTH).
+	// Fibocom-specific +MGAUTH on the Qualcomm platforms (FM150/FM350 reject/
+	// ignore +CGAUTH) — the MediaTek T700 module (FM350-GL, RNDIS compositions
+	// only) does not document it, so offer BOTH in sequence: the setup sequence
+	// is error-tolerant and whichever the firmware knows sticks, the other logs
+	// a warn. NOTE the FM350-GL lacks GTRNDIS entirely — its +GTRNDIS=? probe
+	// errors and the CGACT fallback dials (forum-verified recipe).
+	//
+	// ip_config: the FM350-GL (T700) leaves the CGCONTRDP local/subnet fields
+	// EMPTY (gateway+dns only) — the real address comes from CGPADDR. Gate on
+	// the RAW line (two adjacent empty quoted fields) BEFORE the position-
+	// tolerant parser misreads the gateway as the local address. The static
+	// path keeps the /32 p2p model: address from CGPADDR, NO gateway — the
+	// netifd default is a plain device route, and the daemon disables ARP on
+	// the rndis_host netdev so no neighbour resolution is needed (field-
+	// verified). IPv6 keeps whatever CGCONTRDP/CGPADDR reported (parity).
+	// Qualcomm FM150/FM350 fill CGCONTRDP and take the generic path — no
+	// CGPADDR is sent there.
 	fibocom: {
 		match: /fibocom/,
-		modem_init: [ 'AT+CFUN=1' ],
-		auth_cmd: (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
-			? sprintf('AT+MGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
-				cfg.username ?? '', cfg.password ?? '')
-			: null,
+		modem_init: [ 'AT+CFUN=1',
+			// unsolicited registration/network events (the T700's intended
+			// dial model — see mrhaav/atc + the FM350 forum thread). Field-
+			// verified on the mode-40 AT port; the modem_ncm on_urc handler
+			// wires them into the state machine (register fast-path, +CGEV
+			// pokes, +CTZV NITZ).
+			'AT+CREG=3;+CGREG=3;+CEREG=3;+C5GREG=3;+CGEREP=2,1',
+			'AT+CTZR=1' ],
+		// 0 = unlocked, 1 = one-time, 2 = locked at every power-up (fm350_fcc_unlock.sh)
+		fcc_probe: 'AT+GTFCCEFFSTATUS?',
+		// eSIM surface probes (FM350 AT manual V2.10 + MTK RIL field
+		// evidence): +SIMTYPE? 0=USIM 1=ESIM; +ESLOTSINFO? per-slot
+		// CPIN/present/EID (undocumented but field-verified on FM350s);
+		// +EID fallback. NOTE: +ESIMS is NOT an eSIM command — it is the
+		// legacy MTK SIM-presence query (0/1 = SIM inserted; its set form
+		// only toggles the URC, and =? rejects with CME ERROR by design).
+		esims_probes: [ 'AT+SIMTYPE?', 'AT+ESLOTSINFO?', 'AT+EID' ],
+		auth_cmds: (cid, ctxtype, apn, cfg) => {
+			if (!cfg.username && !cfg.password)
+				return [];
+
+			// MGAUTH then CGAUTH (the T700 takes both; the stock 3GPP form
+			// goes through the shared builder — never restate it inline)
+			return [
+				sprintf('AT+MGAUTH=%d,%d,"%s","%s"', cid, auth_value(cfg),
+					cfg.username ?? '', cfg.password ?? ''),
+				AUTH_CGAUTH(cid, ctxtype, apn, cfg),
+			];
+		},
+		ip_config: (modem, cid, cfg, cb) => {
+			// best-effort resolver read from the T700's canonical DNS query
+			// (AT+GTDNS=<cid> — mrhaav/forum field notes recommend it over
+			// CGCONTRDP on this module family). Any 4-octet v4, colon-hex v6
+			// or 16/32-octet dotted v6 token in the reply counts.
+			let dns_from_gt = (done) => {
+				modem.at.send(sprintf('AT+GTDNS=%d', cid), (e3, r3) => {
+					if (e3 || !r3?.lines)
+						return done(null);
+
+					let dns = [];
+
+					for (let l in r3.lines) {
+						for (let tok in split(replace(l, /"/g, ''), /[, \t]+/)) {
+							let g = dotted_group(tok);
+
+							if (g) {
+								// an embedded-v4 token is never a resolver —
+								// skip it rather than decoding a garbage v6
+								if (g.ev4)
+									continue;
+
+								if (g.n == 4)
+									push(dns, tok);
+								else if (g.n == 16 || g.n == 32)
+									push(dns, bytes_to_ipv6(slice(g.parts, 0, 16)));
+							}
+							else if (tok != '::' &&
+							         match(tok, /^[0-9a-fA-F:]+:[0-9a-fA-F:]+$/) && index(tok, '.') < 0)
+								push(dns, tok);
+						}
+					}
+
+					done(length(dns) ? dns : null);
+				}, { timeout: 8000 });
+			};
+
+			modem.at.send(sprintf('AT+CGCONTRDP=%d', cid), (err, res) => {
+				if (err)
+					return cb(err);
+
+				let rdp = parse_cgcontrdp(res?.lines);
+
+				// 3GPP-correct (verified against atc.sh + patrakov's review):
+				// an ipv6-only PDP carries NO host v4. The T700's embedded
+				// <0×8, 0,1, 0,0><v4> CGPADDR form is the modem-CLAT artifact
+				// and must not be assigned — host v4 on such networks comes
+				// from the separate 464xlat package (jool, wan_4).
+				if (cfg.pdp_type == 'ipv6')
+					rdp.ipv4 = null;
+
+				// the empty-local form: the two fields right after the APN
+				// (local, subnet) are empty. Match POSITIONALLY — the modem's
+				// quoting varies (""…"" normally, BARE empty fields right
+				// after a CFUN cycle — field-seen, where the old quote-regex
+				// gate slipped and the gateway token became the address) and
+				// a bare `,,` scan would false-hit the trailing empty slots
+				// every line carries. Only the CGCONTRDP data line counts:
+				// wrapped continuation lines (no cid prefix) have empty
+				// fields 3/4 and would hijack the static path on a FILLED
+				// response.
+				let is_empty_local = (l) => {
+					let parts = split(replace(l, /"/g, ''), /\s*,\s*/);
+
+					if (!match(trim(parts[0] ?? ''), /^\+CGCONTRDP:\s*[0-9]+$/))
+						return false;
+
+					return (trim(parts[3] ?? '') == '' && trim(parts[4] ?? '') == '');
+				};
+
+				// the pair-in-addr-slots form (field-seen right after a
+				// PDP-type change — the modem settles on the empty-local form
+				// a minute later): fields 3+4 hold the gateway+DNS tokens —
+				// two same-length dotted tokens (4 = the v4 gw+dns pair,
+				// 16 = the DNS64 pair) and NOTHING follows them (field 5
+				// empty — a real v6 assignment carries dns tokens behind its
+				// addr+gateway pair; a real v4 assignment is a masked
+				// 8-octet addr token in field 3).
+				let is_pair_form = (l) => {
+					let parts = split(replace(l, /"/g, ''), /\s*,\s*/);
+
+					if (!match(trim(parts[0] ?? ''), /^\+CGCONTRDP:\s*[0-9]+$/))
+						return false;
+
+					if (trim(parts[5] ?? '') != '')
+						return false;
+
+					let t3 = split(trim(parts[3] ?? ''), '.');
+					let t4 = split(trim(parts[4] ?? ''), '.');
+
+					if (length(t3) != length(t4) || !match(parts[3] ?? '', /^[0-9.]+$/) ||
+					    !match(parts[4] ?? '', /^[0-9.]+$/))
+						return false;
+
+					return (length(t3) == 4 || length(t3) == 16);
+				};
+
+				// one pass over the raw lines: the empty-local/pair forms
+				// (both take the static CGPADDR path), AND — for lines
+				// WITHOUT them — whether they carry a real 16/32-octet v6
+				// assignment (v6 tokens OUTSIDE those lines are an address;
+				// tokens ON them are the DNS pair — field-analyzed)
+				let static_path = false;
+				let v6_real = false;
+
+				for (let l in (res?.lines ?? [])) {
+					if (is_empty_local(l) || is_pair_form(l)) {
+						static_path = true;
+						continue;
+					}
+
+					for (let tok in split(replace(l, /"/g, ''), /[, \t]+/)) {
+						let g = dotted_group(tok);
+
+						if (g && (g.n == 16 || g.n == 32))
+							v6_real = true;
+					}
+				}
+
+				// on an ipv6-only PDP the CGCONTRDP v6 tokens are NEVER a
+				// host assignment — host v6 arrives via the modem's RA/SLAAC
+				// (field-verified twice: the only v6 data is the DNS64 pair,
+				// in EITHER the empty-local gw+dns slots OR, right after a
+				// PDP-type change, the addr+subnet slots)
+				if (cfg.pdp_type == 'ipv6')
+					v6_real = false;
+
+				if (!static_path && cfg.pdp_type != 'ipv6')
+					return cb(null, rdp);
+
+				// static path: address from CGPADDR (over AT — the modem's
+				// canonical address source on this platform); the CGCONTRDP v4
+				// tokens in the empty-local/pair forms are [gateway, dns...] —
+				// their tail is the DNS list, the leading gateway is discarded
+				// (not on our /30).
+				modem.at.send(sprintf('AT+CGPADDR=%d', cid), (e2, r2) => {
+					if (e2)
+						return cb(e2);
+
+					let a = parse_cgpaddr(r2?.lines);
+
+					// the pair: the v6 tokens the CGCONTRDP line carries in
+					// its addr/gateway slots (BOTH observed forms) — the
+					// provider's DNS64 pair, field-verified live. A real v6
+					// assignment (v6_real, never on an ipv6-only PDP) owns
+					// those slots — no pair fallback then; on a v4-only PDP
+					// the family-appropriate CGCONTRDP v4 DNS wins over the
+					// (unreachable) v6 pair. An empty pair is null, not an
+					// empty array — the ?? chain below would otherwise treat
+					// it as truthy and drop the CGCONTRDP v4 DNS.
+					let pair = filter([ rdp.ipv6?.addr, rdp.ipv6?.gateway ], (x) => x != null);
+					let fallback_dns = (v6_real || !length(pair)) ? null : pair;
+
+					// on the ipv6-only PDP the v6 bucket is DNS-ONLY: no
+					// address, no gateway (host v6 = the modem's RA/SLAAC) —
+					// the pair rides in dns so the shim can push the resolvers
+					// without assigning a bogus /128
+					let v6 = v6_real
+						? rdp.ipv6
+						: (a?.v6
+							? { addr: a.v6, plen: 64, gateway: null, dns: [] }
+							: ((cfg.pdp_type == 'ipv6')
+								? { addr: null, plen: null, gateway: null, dns: [] }
+								: null));
+
+					let v4 = null;
+
+					if (cfg.pdp_type != 'ipv6' && a?.addr)
+						v4 = {
+							addr: a.addr,
+							prefix: null,   // /32 p2p, gateway-less (NOARP device route)
+							gateway: null,
+							dns: [],   // filled below
+							mtu: null,
+						};
+
+					dns_from_gt((gdns) => {
+						let dns = gdns
+							?? ((cfg.pdp_type == 'ipv4') ? (rdp.ipv4?.dns ?? []) : fallback_dns)
+							?? (rdp.ipv4?.dns ?? []);
+
+						if (v4)
+							v4.dns = dns;
+						else if (v6)
+							v6.dns = dns;
+
+						cb(null, { ipv4: v4, ipv6: v6 });
+					});
+				}, { timeout: 8000 });
+			}, { timeout: 15000 });
+		},
+		// dual-SIM surface (field-verified): SUB1 = the physical SIM,
+		// SUB2 = the built-in eSIM; AT+GTDUALSIM=<0|1> switches the active
+		// card (the current registration drops, the modem re-reads the SIM)
+		slots: {
+			query: 'AT+GTDUALSIM?',
+			parse: (lines) => {
+				for (let l in (lines ?? [])) {
+					let m = match(l, /\+GTDUALSIM\s*:\s*([0-9]+)\s*,\s*"SUB([0-9]+)"\s*,\s*"([^"]*)"/);
+
+					if (m)
+						return { active: +m[1], sub: +m[2], service: m[3] };
+				}
+				return null;
+			},
+			switch: (n) => sprintf('AT+GTDUALSIM=%d', n - 1),
+		},
 		dials: [ DIAL_GTRNDIS, DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
@@ -547,6 +1019,13 @@ export function vendor_for(manufacturer)
 {
 	let s = lc(manufacturer ?? '');
 
+	// fibocom FIRST: the FM350 family is a MediaTek T700 module, and units
+	// whose CGMI reports the die vendor ("MediaTek") instead of the brand
+	// must still resolve to the fibocom recipe (its ip_config/slots/eSIM
+	// paths), never to the bare mediatek one.
+	if (VENDORS.fibocom.match && match(s, VENDORS.fibocom.match))
+		return VENDORS.fibocom;
+
 	for (let name, v in VENDORS)
 		if (v.match && match(s, v.match))
 			return v;
@@ -581,10 +1060,20 @@ export function build_pdp_setup(vendor, cid, cfg)
 	if (vendor.define)
 		push(cmds, vendor.define(cid, pdp, target_apn));
 
-	let ac = vendor.auth_cmd ? vendor.auth_cmd(cid, ctxtype, target_apn, cfg) : null;
+	let acs = vendor.auth_cmds
+		? vendor.auth_cmds(cid, ctxtype, target_apn, cfg)
+		: null;
 
-	if (ac)
-		push(cmds, ac);
+	if (acs) {
+		for (let c in acs)
+			push(cmds, c);
+	}
+	else {
+		let ac = vendor.auth_cmd ? vendor.auth_cmd(cid, ctxtype, target_apn, cfg) : null;
+
+		if (ac)
+			push(cmds, ac);
+	}
 
 	return cmds;
 };
@@ -628,4 +1117,5 @@ export function pdp_setup_matches(cid, cfg, lines)
 VENDORS.quectel.telemetry = telemetry_ncm.QUECTEL;
 VENDORS.meig.telemetry    = telemetry_ncm.MEIG;
 VENDORS.huawei.telemetry  = telemetry_ncm.HUAWEI;
+VENDORS.fibocom.telemetry = telemetry_ncm.FIBOCOM;
 VENDORS.generic.telemetry = telemetry_ncm.GENERIC;

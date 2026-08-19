@@ -415,6 +415,101 @@ function run_daemon()
 				cursor.commit('network');
 				return true;
 			},
+			// RNDIS v6 model (see docs/reference.md "RNDIS IPv6"): the modem's
+			// v6 arrives via RA on the parent netdev; a dhcpv6 subinterface
+			// <parent>_6 on @<parent> lets netifd run the v6 client natively.
+			// Persisted (LuCI-visible, never deleted, auto 1, parent's zone
+			// as `option zone`); a fresh section reaches netifd only at the
+			// next config evaluation — which wwand never triggers — so the
+			// instance is additionally started at runtime via add_dynamic +
+			// an explicit idempotent up (same name). A user-defined section
+			// (device/ifname @<parent> + proto dhcpv6) wins: nothing is
+			// written.
+			ensure_wan6: (parent) => {
+				let name = parent + '_6';
+				let want = '@' + parent;
+
+				// the parent's firewall zone (read-only lookup): carried as
+				// `option zone`, so fw4 joins the subif to that zone and
+				// tracks its IP updates. The zone IDENTIFIER is the zone's
+				// NAME (option name) — NOT the uci section name, which is
+				// an anonymous cfgXXXXXX on most boxes.
+				let zone = null;
+				let fw = libuci.cursor();
+				fw.foreach('firewall', 'zone', (s) => {
+					let nets = fw.get('firewall', s['.name'], 'network');
+
+					// both spellings: `list network 'wan'` and the classic
+					// space-separated `option network 'wan wan6'`
+					nets = (type(nets) == 'array') ? [ ...nets ]
+						: ((nets != null && nets != '') ? split(nets, /[ \t]+/) : []);
+
+					if (parent in nets) {
+						zone = s.name ?? s['.name'];
+						return false;
+					}
+				});
+
+				// a matching section already exists (user-defined OR our own) —
+				// netifd manages it, nothing to write. Both spellings of the
+				// device reference count (ifname is the legacy uci option,
+				// device the modern one).
+				let have = false;
+				let cursor = libuci.cursor();
+				cursor.foreach('network', 'interface', (s) => {
+					if ((s.device == want || s.ifname == want) &&
+					    (s.proto == 'dhcpv6' || s.proto == 'dhcpv6c')) {
+						have = true;
+						return false;
+					}
+				});
+
+				if (!have) {
+					cursor.set('network', name, 'interface');
+					cursor.set('network', name, 'proto', 'dhcpv6');
+					cursor.set('network', name, 'device', want);
+					cursor.set('network', name, 'auto', '1');
+
+					if (zone)
+						cursor.set('network', name, 'zone', zone);
+
+					cursor.commit('network');
+				}
+
+				conn.defer('network.interface', 'status', { interface: name },
+					(ret, reply) => {
+						// an instance exists (ours or a user's static section) —
+						// netifd manages it (auto), nothing to create
+						if (ret == 0)
+							return;
+
+						let blob = { name: name, proto: 'dhcpv6', device: want, auto: true };
+
+						if (zone)
+							blob.zone = zone;
+
+						conn.defer('network', 'add_dynamic', blob, (aret, areply) => {
+							if (aret != 0) {
+								logmod.log('warn', sprintf('dhcpv6 subinterface %s: add_dynamic failed (%J)',
+									name, areply));
+								return;
+							}
+
+							logmod.log('notice', sprintf('started the dhcpv6 subinterface %s (device %s, auto%s)',
+								name, want, zone ? sprintf(', zone %s', zone) : ''));
+
+							// first-time bring-up: a freshly added dynamic
+							// instance does not reliably self-start (auto: 1
+							// only applies at the next config evaluation) —
+							// an explicit up is idempotent and closes the gap
+							conn.defer('network.interface', 'up', { interface: name },
+								netifd_cb('up ' + name));
+						});
+					});
+
+				return true;
+			},
+
 			network_reload: () => conn.defer('network', 'reload', {}, netifd_cb('reload')),
 			// apply operator-pushed NITZ time ONLY when the clock is clearly unset
 			// (RTC-less router before NTP), so we never fight sysntpd. Threshold: any

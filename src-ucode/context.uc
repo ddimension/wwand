@@ -440,13 +440,9 @@ export function create(opts)
 			if (family == 4) {
 				// always /32 point-to-point (old behavior) unless the pushed
 				// prefix is explicitly requested via use_pushed_prefix
+				// (shared rule in context_common)
 				let pushed_prefix = netmask_to_prefix(data.netmask);
-				let prefix = 32;
-
-				if (self.config.use_pushed_prefix && pushed_prefix != null)
-					prefix = pushed_prefix;
-				else if (pushed_prefix != null && pushed_prefix != 32)
-					log('debug', sprintf('network pushed ipv4 prefix /%d, forcing /32 (option use_pushed_prefix keeps the pushed one)', pushed_prefix));
+				let prefix = context_common.v4_prefix(self.config, pushed_prefix, log);
 
 				fam.settings = {
 					addr: data.ipv4,

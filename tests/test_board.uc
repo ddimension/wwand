@@ -127,6 +127,34 @@ let NEWID = '/sys/module/option/drivers/usb-serial:option1/new_id';
 ok(fx.has(`${NEWID}=2dee 4d58`), 'cudy: binds SLM770A 2dee:4d58 to the option driver via new_id');
 ok(fx.has(`${NEWID}=2dee 4d57`), 'cudy: binds the 2dee:4d57 variant too');
 
+// --- 4f. Huasifei WH3000 Pro: modem_power gpio, INVERTED (field-verified:
+// 1 = modem off, 0 = on). init() must only drive the line when it reads
+// "off"; the recovery ladder power-cycles with the inverted levels. NO
+// option_ids: the kernel option driver binds the FM350-GL serials itself
+// (since 4.19.318, ADB excepted) and a blanket new_id would grab ADB and
+// crash-loop the card (forum-observed).
+fx = mkfx({ [`${G}/modem_power/value`]: '1' });
+b = board.create({ id: 'huasifei,wh3000-pro-emmc', fx: fx, log: () => {} });
+ok(b.has_power, 'wh3000-pro: has power gpio (modem_power)');
+b.init();
+ok(fx.has(`${G}/modem_power/value=0`), 'wh3000-pro: init powers on (reads 1 -> sets 0)');
+ok(!fx.has(`${NEWID}=0e8d 7127`) && !fx.has(`${NEWID}=0e8d 7126`),
+	'wh3000-pro: no blanket new_id for the FM350-GL (ADB crash-loop risk)');
+
+// already-on line (0): init must not touch it
+fx = mkfx({ [`${G}/modem_power/value`]: '0' });
+b = board.create({ id: 'huasifei,wh3000-pro-emmc', fx: fx, log: () => {} });
+b.init();
+ok(!fx.has(`${G}/modem_power/direction`), 'wh3000-pro: on-line init leaves the gpio alone');
+
+fx = mkfx({});
+b = board.create({ id: 'huasifei,wh3000-pro-nand', fx: fx, power_off_ms: 5, log: () => {} });
+ok(b.power_cycle(), 'wh3000-pro-nand: power_cycle returns true');
+ok(fx.has(`${G}/modem_power/value=1`), 'wh3000-pro-nand: powered off with value 1 (inverted)');
+uloop.timer(20, () => uloop.end());
+uloop.run();
+ok(fx.has(`${G}/modem_power/value=0`), 'wh3000-pro-nand: powered back on with value 0 (inverted)');
+
 // --- 4e. GPIO name sanitizer: a config-supplied reset_gpio is interpolated into
 // a sysfs path — hostile values (slash, '..', oversized) must be rejected, never
 // written. reset_pulse takes the per-modem uci value directly, so drive it there.

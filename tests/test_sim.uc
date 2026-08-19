@@ -721,4 +721,61 @@ eq(sim.decode_fplmn(sim.encode_fplmn([ { mcc: '262', mnc: '02' }, { mcc: '234', 
 eq(sim.encode_fplmn([ { mcc: '26', mnc: '02' }, { mcc: '262', mnc: '2' } ], 0), [],
 	'encode_fplmn: drops short mcc / short mnc');
 
-done('test_sim');
+// --- AT APDU open: the T700 answers CCHO with a BARE session id (field-
+// verified on the FM350-GL) — both response forms must parse
+let mk_modem = (lines) => ({
+	at: { send: (cmd, cb) => cb(null, { lines: lines }) },
+	_apdu_be: 'at',
+});
+
+sim.apdu_open(mk_modem([ '1' ]), 1, sim.ISDR_AID, (err, ch) => {
+	eq(err, null, 'apdu_open: bare session id accepted');
+	eq(ch?.channel, 1, 'apdu_open: channel parsed from the bare form');
+
+	sim.apdu_open(mk_modem([ '+CCHO: 7' ]), 1, sim.ISDR_AID, (e2, ch2) => {
+		eq(e2, null, 'apdu_open: prefixed form accepted');
+		eq(ch2?.channel, 7, 'apdu_open: channel parsed from +CCHO');
+
+		sim.apdu_open(mk_modem([ 'ERROR' ]), 1, sim.ISDR_AID, (e3, ch3) => {
+			eq(e3?.error, 'no_channel', 'apdu_open: garbage response -> no_channel');
+			eq(ch3, null, 'apdu_open: no channel on garbage');
+		});
+	});
+});
+
+// --- simops slot-switch cache clears (the ubus wrapper layer) -----------------
+//
+// A real switch must drop the cached eSIM/APDU backends + the once-per-object
+// refresh gate + the stale surface data (the new slot may hold a different
+// eUICC); an unchanged switch must keep them.
+import * as simops from 'wwand/simops.uc';
+
+let sw_modem = {
+	switch_slot: (p, cb) => cb(null, {}),   // pretend the switch succeeded
+	_esim_be: 'at', _apdu_be: 'at',
+	_esim_refreshed: true, esim_info: { eid: 'x' },
+};
+let sw_self = { modems: { m0: { modem: sw_modem } } };
+
+simops.install(sw_self, {
+	log: () => null,
+	check_modem: (ref, cb) => sw_self.modems[ref] ?? null,
+	load_esim: () => null,
+});
+
+sw_self.modem_sim_switch_slot('m0', 1, (err) => {
+	eq(err, null, 'slot-clear: switch ok');
+	ok(sw_modem._esim_be == null && sw_modem._apdu_be == null,
+		'slot-clear: eSIM/APDU backends dropped');
+	ok(sw_modem._esim_refreshed == null && sw_modem.esim_info == null,
+		'slot-clear: refresh gate + surface dropped');
+
+	// idempotent switch keeps the caches
+	sw_modem._esim_refreshed = true;
+	sw_modem.switch_slot = (p, cb) => cb(null, { unchanged: true });
+	sw_self.modem_sim_switch_slot('m0', 1, (e2, r2) => {
+		eq(r2?.unchanged, true, 'slot-clear: unchanged switch short-circuits');
+		eq(sw_modem._esim_refreshed, true, 'slot-clear: caches kept on an unchanged switch');
+		done('test_sim');
+	});
+});

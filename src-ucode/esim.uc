@@ -443,10 +443,15 @@ function at_profile_op(modem, iccid, verb, cb)
 	});
 }
 
-// pick the eSIM backend once per modem: prefer the QMI logical channel,
-// fall back to the vendor AT LPA. cb('qmi' | 'at' | null)
+// pick the eSIM backend: prefer the QMI logical channel, fall back to the
+// vendor AT LPA. cb('qmi' | 'at' | null). Re-probed per op — the ISD-R is
+// only free in a window right after a SIM slot switch (the modem's internal
+// LPA re-claims it; field-verified on the FM350-GL), so a stale 'at' cache
+// would mask a usable channel.
 function backend_of(modem, slot, cb)
 {
+	backend.forget(modem, '_esim_be');
+
 	backend.choose(modem, '_esim_be', [
 		// QMI ES10c over the logical channel: probe by opening the ISD-R
 		{ name: 'qmi', probe: (ok) => sim.apdu_open(modem, slot, ISDR_AID, (err, ch) => {

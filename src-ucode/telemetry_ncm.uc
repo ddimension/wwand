@@ -9,6 +9,7 @@
 'use strict';
 
 import * as atcmd from 'wwand.atcmd';
+import * as arfcn_bands from 'wwand.codec.arfcn_bands';
 import * as modem_common from 'wwand.modem_common';
 import * as nasmod from 'wwand.codec.schema.nas';
 
@@ -77,9 +78,24 @@ function sig_csq_floor(self, s)
 	self.signal = base;
 }
 
+// every vendor signal block opens with the CSQ floor read (the shared
+// rssi baseline) before its own per-RAT extras — one opener, not four copies
+function csq_first(self, then)
+{
+	modem_common.telemetry_at(self).send('AT+CSQ', (err, res) => {
+		sig_csq_floor(self, err ? null : parse_csq(res?.lines));
+		then();
+	});
+}
+
 // mirror serving-cell metrics into self.signal.{lte,nr5g} only where a more
-// authoritative source (per-branch QRSRP/QRSRQ/QSINR, ^HCSQ, CESQ) left a gap
-function fill_signal_from_serving(self, serving)
+// authoritative source (per-branch QRSRP/QRSRQ/QSINR, ^HCSQ, CESQ) left a gap.
+// `refresh` (the fibocom path passes it — the serving cells are the ONLY
+// signal source there, the CSQ floor adds rssi only): take every serving
+// value unconditionally, so the signal block follows the cells tick for tick
+// instead of freezing on the first fill (?? keeps first-fill values to
+// protect the Quectel per-branch reads).
+function fill_signal_from_serving(self, serving, refresh)
 {
 	let sig = { ...(self.signal ?? {}) };
 
@@ -87,10 +103,10 @@ function fill_signal_from_serving(self, serving)
 		let cur = { ...(sig.lte ?? {}) };
 
 		cur.rssi = cur.rssi ?? sig.rssi;
-		cur.rsrp = cur.rsrp ?? serving.lte.rsrp;
-		cur.rsrq = cur.rsrq ?? serving.lte.rsrq;
+		cur.rsrp = (refresh && serving.lte.rsrp != null) ? serving.lte.rsrp : (cur.rsrp ?? serving.lte.rsrp);
+		cur.rsrq = (refresh && serving.lte.rsrq != null) ? serving.lte.rsrq : (cur.rsrq ?? serving.lte.rsrq);
 
-		if (cur.snr == null && serving.lte.sinr != null)
+		if (serving.lte.sinr != null && (refresh || cur.snr == null))
 			cur.snr = serving.lte.sinr * 10;   // QMI snr is 0.1 dB
 
 		sig.lte = cur;
@@ -99,10 +115,10 @@ function fill_signal_from_serving(self, serving)
 	if (serving?.nr) {
 		let cur = { ...(sig.nr5g ?? {}) };
 
-		cur.rsrp = cur.rsrp ?? serving.nr.rsrp;
-		cur.rsrq = cur.rsrq ?? serving.nr.rsrq;
+		cur.rsrp = (refresh && serving.nr.rsrp != null) ? serving.nr.rsrp : (cur.rsrp ?? serving.nr.rsrp);
+		cur.rsrq = (refresh && serving.nr.rsrq != null) ? serving.nr.rsrq : (cur.rsrq ?? serving.nr.rsrq);
 
-		if (cur.snr == null && serving.nr.sinr != null)
+		if (serving.nr.sinr != null && (refresh || cur.snr == null))
 			cur.snr = serving.nr.sinr * 10;
 
 		sig.nr5g = cur;
@@ -144,7 +160,8 @@ function group_inter(list)
 // (parse_qeng_servingcell/parse_monsc/parse_meng_servingcell) + a neighbour set
 // ({ intra:[], inter:[] } already in 0.1 dB units). `sc` carries mcc/mnc/cid/tac/
 // earfcn/pci and dBm rsrp/rsrq (via rsrp_dbm/rsrq_db or serving.lte.*).
-function assemble_cells(self, serving, neigh, dsd)
+// `signal_refresh`: see fill_signal_from_serving.
+function assemble_cells(self, serving, neigh, dsd, signal_refresh)
 {
 	if (!serving || (!serving.lte && !serving.nr))
 		return;   // keep last-known cells
@@ -200,16 +217,14 @@ function assemble_cells(self, serving, neigh, dsd)
 
 	self.cells = cells;
 	self.dsd_status = dsd ?? dsd_from_serving(serving);
-	fill_signal_from_serving(self, serving);
+	fill_signal_from_serving(self, serving, signal_refresh);
 }
 
 // --- Quectel / Qualcomm telemetry (primary; verified command syntax) ---------
 
 function tel_quectel_signal(self, cb)
 {
-	modem_common.telemetry_at(self).send('AT+CSQ', (err, res) => {
-		sig_csq_floor(self, err ? null : parse_csq(res?.lines));
-
+	csq_first(self, () => {
 		// per-branch QRSRP/QRSRQ/QSINR: authoritative rsrp/rsrq/snr (antenna aim)
 		modem_common.telemetry_at(self).send('AT+QRSRP?', (e1, r1) => {
 			let rp = e1 ? null : atcmd.parse_qrsrp(r1?.lines);
@@ -318,9 +333,7 @@ function merge_cesq_signal(self, c)
 
 function tel_generic_signal(self, cb)
 {
-	modem_common.telemetry_at(self).send('AT+CSQ', (err, res) => {
-		sig_csq_floor(self, err ? null : parse_csq(res?.lines));
-
+	csq_first(self, () => {
 		modem_common.telemetry_at(self).send('AT+CESQ', (e2, r2) => {
 			let c = e2 ? null : atcmd.parse_cesq(r2?.lines);
 
@@ -358,9 +371,7 @@ function tel_ceer_reg_detail(self, cb)
 
 function tel_huawei_signal(self, cb)
 {
-	modem_common.telemetry_at(self).send('AT+CSQ', (err, res) => {
-		sig_csq_floor(self, err ? null : parse_csq(res?.lines));
-
+	csq_first(self, () => {
 		modem_common.telemetry_at(self).send('AT^HCSQ?', (e2, r2) => {
 			let h = e2 ? null : atcmd.parse_hcsq(r2?.lines);
 
@@ -381,15 +392,38 @@ function tel_huawei_signal(self, cb)
 	});
 }
 
+// shared serving-row builders: every vendor parser feeds the same shape —
+// fields a source row lacks (GTCAINFO has no identity/rsrq/sinr, GTCCINFO NR
+// has no band/rsrp) come out null
+function mk_lte(r)
+{
+	return {
+		band: r.band ?? null, earfcn: r.earfcn ?? null, pci: r.pci ?? null,
+		mcc: r.mcc ?? null, mnc: r.mnc ?? null, cid: r.cid ?? null, tac: r.tac ?? null,
+		rsrp: r.rsrp ?? null, rsrq: r.rsrq ?? null, sinr: r.sinr ?? null,
+		bw_mhz: r.bw_mhz ?? null,
+	};
+}
+
+function mk_nr(r)
+{
+	return {
+		band: r.band ?? null, arfcn: r.arfcn ?? null, pci: r.pci ?? null,
+		mcc: r.mcc ?? null, mnc: r.mnc ?? null, cid: r.cid ?? null, tac: r.tac ?? null,
+		rsrp: r.rsrp ?? null, rsrq: r.rsrq ?? null, sinr: r.sinr ?? null,
+		bw_mhz: r.bw_mhz ?? null,
+	};
+}
+
 // wrap a parse_monsc/parse_meng_servingcell descriptor as a serving object with
 // dBm rsrp/rsrq for fill_signal_from_serving + assemble_cells
 function sc_to_serving(sc)
 {
-	return { lte: {
+	return { lte: mk_lte({
 		band: sc.band, earfcn: sc.earfcn, pci: sc.pci, mcc: sc.mcc, mnc: sc.mnc,
 		cid: sc.cid, tac: sc.tac, rsrp: sc.rsrp_dbm, rsrq: sc.rsrq_db,
 		sinr: sc.sinr_db ?? null,
-	} };
+	}) };
 }
 
 function tel_huawei_cells(self, cb)
@@ -472,6 +506,510 @@ const TELEMETRY_MEIG = {
 	ca: tel_noop, reg_detail: tel_ceer_reg_detail, locks: tel_meig_locks,
 };
 
+// --- Fibocom (FM350-GL / MediaTek T700) --------------------------------------
+// Two serving-cell read-backs exist across Fibocom firmwares: GTCAINFO (FM190
+// capture) and GTCCINFO (the T700's row format). The cells step tries GTCAINFO
+// first and falls back to GTCCINFO — the FM350-GL answers AT+GTCAINFO? with an
+// EMPTY body (field-verified) and serves its data via AT+GTCCINFO?.
+
+// AT+GTCAINFO? is the Fibocom serving/CA cell read-back (FM190 captures; the
+// GTCCINFO row of the same generation corroborates the field offsets, as does
+// the 3ginfo-lite parser for older modules):
+//
+//   +GTCAINFO:
+//   LTE PCC:     <band+100>,<pci>,<earfcn>,<rsrp+141>,...
+//   NR PCC:      ...,<arfcn>,<rsrp+141>,...,<band>
+//   LTE SCC<n>:  2,0,<band+100>,<pci>,<earfcn>,<rsrp+141>,...
+//
+// Only the corroborated offsets are parsed. rsrq/sinr positions and the NR PCC
+// pci slot are UNVERIFIED and deliberately left null — a wrong offset silently
+// shows garbage on the status page. Bands tolerate the +100 offset conditionally
+// (>100 => subtract; NR band 77-style values are reported directly).
+// shared token/offset readers for the Fibocom parsers (the same conventions
+// appear in GTCAINFO and GTCCINFO): 255 = the "no measurement" sentinel,
+// the LTE band is reported with a +100 offset (tolerate direct reports,
+// 0 = unknown), RSRP is reported as value + 141
+function numtok(s)
+{
+	s = trim(s ?? '');
+
+	if (!length(s))
+		return null;
+
+	let m = match(s, /^-?[0-9]+$/);
+
+	return m ? +s : null;
+}
+
+function hxtok(s)
+{
+	s = trim(s ?? '');
+
+	return length(s) ? hex('0x' + s) : null;
+}
+
+function band_of(v)
+{
+	return (v != null && v > 0 && v != 255) ? ((v > 100) ? v - 100 : v) : null;
+}
+
+function rsrp_of(v)
+{
+	return (v != null && v != 255) ? v - 141 : null;
+}
+
+export function parse_gtcainfo(lines)
+{
+	let lte = null, nr = null, sccs = [];
+
+	// numeric field read: empty/non-numeric -> null (fields can be blank)
+	let f = (fields, i) => numtok(fields[i] ?? '');
+	// LTE band +100 offset / RSRP +141 offset (255-sentinel-guarded)
+	let band = band_of;
+	let rsrp = rsrp_of;
+
+	// T700 layout (field-verified on a real FM350-GL): "PCC:" and "SCC n:"
+	// labels, and the LAST field is the RSRP as a SIGNED dBm value (-88) —
+	// no offset. 255 marks "no measurement".
+	let last_signed = (fields) => {
+		let v = f(fields, length(fields) - 1);
+
+		return (v != null && v != 255) ? v : null;
+	};
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /^\s*LTE PCC:\s*(.*)$/);
+
+		if (m) {
+			let fl = split(m[1], ',');
+
+			lte = {
+				band:  band(f(fl, 0)),
+				pci:   f(fl, 1),
+				earfcn: f(fl, 2),
+				rsrp:  rsrp(f(fl, 3)),
+				rsrq:  null,   // offset unverified
+				sinr:  null,
+			};
+			continue;
+		}
+
+		m = match(l, /^\s*NR PCC:\s*(.*)$/);
+
+		if (m) {
+			let fl = split(m[1], ',');
+
+			nr = {
+				band:  band(f(fl, 8)),
+				arfcn: f(fl, 2),
+				pci:   null,   // slot differs from GTCCINFO's pci — unverified
+				rsrp:  rsrp(f(fl, 3)),
+				rsrq:  null,
+				sinr:  null,
+			};
+			continue;
+		}
+
+		m = match(l, /^\s*LTE SCC[0-9]+:\s*(.*)$/);
+
+		if (m) {
+			let fl = split(m[1], ',');
+
+			push(sccs, {
+				band:  band(f(fl, 2)),
+				pci:   f(fl, 3),
+				earfcn: f(fl, 4),
+				rsrp:  rsrp(f(fl, 5)),
+			});
+			continue;
+		}
+
+		// T700 "PCC: <band+100>,<pci>,<earfcn>,...,<rsrp dBm>" — the serving
+		// LTE cell; rsrp is the signed LAST field, no +141 offset
+		m = match(l, /^\s*PCC:\s*(.*)$/);
+
+		if (m) {
+			let fl = split(m[1], ',');
+			let b0 = f(fl, 0);
+
+			// the NR carrier row carries the NR band with a +5000 offset
+			// (5041 = n41) and lands BEFORE the LTE row under EN-DC
+			// (field-verified live: B3 anchor + n41) — slot 1 = PCI,
+			// slot 2 = ARFCN, rsrp is the signed last field
+			if (b0 != null && b0 >= 5000) {
+				nr = {
+					band:  b0 - 5000,
+					pci:   f(fl, 1),
+					arfcn: f(fl, 2),
+					rsrp:  last_signed(fl),
+					rsrq:  null,
+					sinr:  null,
+				};
+				continue;
+			}
+
+			lte = {
+				band:  band(f(fl, 0)),
+				pci:   f(fl, 1),
+				earfcn: f(fl, 2),
+				rsrp:  last_signed(fl),
+				rsrq:  null,
+				sinr:  null,
+			};
+			continue;
+		}
+
+		// T700 "SCC <n>: 2,0,<band+100>,<pci>,<earfcn>,...,<rsrp dBm>"
+		m = match(l, /^\s*SCC [0-9]+:\s*(.*)$/);
+
+		if (m) {
+			let fl = split(m[1], ',');
+
+			push(sccs, {
+				band:  band(f(fl, 2)),
+				pci:   f(fl, 3),
+				earfcn: f(fl, 4),
+				rsrp:  last_signed(fl),
+			});
+		}
+	}
+
+	if (!lte && !nr)
+		return null;
+
+	return { lte: lte, nr: nr, sccs: sccs };
+};
+
+// AT+GTCCINFO? — the Fibocom serving-cell row (one row per RAT). Field offsets
+// FIELD-VERIFIED on a real FM350-GL (2026-08-19/20, WH3000 Pro) and
+// cross-checked against the FM190 captures + the 3ginfo-lite parser:
+//   +GTCCINFO:
+//   <id>,<rat>,<mcc>,<mnc>,<tac>,<cid>,<earfcn>,<pci>,<band+100>,<bw>,
+//   <sinr*2>,<rsrp?>,<rsrp>,<rsrq>
+//   rat 4=LTE, 9=NR. tac/cid are ALWAYS hex (both captures). earfcn/pci are
+//   decimal on the T700 (38927 = B40, cross-checked against the band field)
+//   but HEX on some FM190 firmwares (4FF) — a pure-digit token is decided by
+//   the 3GPP band cross-check (decimal first, hex when that alone fits the
+//   band). band carries the +100 offset (conditional, like GTCAINFO).
+//   LTE scales (field-verified against the live CSQ/CESQ + GTCAINFO reads):
+//     rsrp = v-141 (54 -> -87 dBm), rsrq = (v-34)/2-3, sinr = v/2 (dB).
+//   NR scales (3ginfo-lite's field-derived 0e8d7127 table for exactly this
+//   modem, cross-checked against SIMULTANEOUS GTCAINFO PCC reads on the live
+//   T700, 2026-08-20 — the PCC row carries the signed rsrp dBm last):
+//     rsrp = v/2-121 (68->-87, 70->-86, 71->-85.5 vs PCC -87/-86/-85; the
+//     3ginfo v-157 alternative lands 1-2 dB off on the live samples),
+//     sinr = v/2 (27-28 -> 13.5-14 dB; 3ginfo's (v-45)/2-1 goes negative
+//     on this firmware),
+//     rsrq = (v-87)/2 (64-65 -> -11.5/-11.0 — the 3ginfo FM350 formula).
+//   bw: v/5 MHz for BOTH rats (the 3ginfo convert_bw table: 75 -> 15 MHz B3,
+//   100 -> 20 MHz B40, 300 -> 60 MHz n41).
+export function parse_gtccinfo(lines)
+{
+	let lte = null, nr = null;
+
+	// token with A-F -> hex, else decimal; empty -> null
+	let num = (s) => match(trim(s ?? ''), /[A-Fa-f]/) ? hxtok(s) : numtok(s);
+
+	// 255 is the "no measurement" sentinel and empty slots appear during a
+	// cell change (partial row) — both must stay null: +'' would read 0
+	// and hex('0x') would read 0, latching zeros into the serving cell
+	let hx = hxtok;
+	let dec = numtok;
+	let band = band_of;
+	let rsrp = rsrp_of;
+	let rsrq = (v) => (v != null && v != 255) ? (v - 34) / 2.0 - 3 : null;
+	let sinr = (v) => (v != null && v != 255) ? v / 2.0 : null;
+	let rsrp_nr = (v) => (v != null && v != 255) ? v / 2.0 - 121 : null;
+	let rsrq_nr = (v) => (v != null && v != 255) ? (v - 87) / 2.0 : null;
+	let bw_mhz = (v) => (v != null && v != 255 && v > 0) ? v / 5.0 : null;
+
+	// ambiguous pure-digit token (T700 decimal vs FM190 hex): decimal first,
+	// but take hex when only that reading lands in the reported band. Empty
+	// slots (partial row during a cell change) stay null — never 0.
+	let dec_or_hex = (s, want_band) => {
+		if (!length(trim(s ?? '')))
+			return null;
+
+		let d = +s;
+		// lte_band returns band names as strings ('B40') — compare numerically
+		let fits = (x) => {
+			let b = arfcn_bands.lte_band(x)?.band;
+
+			return (b != null) ? (+substr(b, 1) == want_band) : false;
+		};
+
+		if (want_band == null || fits(d))
+			return d;
+
+		let h = hex('0x' + s);
+
+		return fits(h) ? h : d;
+	};
+
+	// identity fields: the LONG all-F token (FFFFFFF / 00FFFFFFF) is the
+	// modem's "no identity" placeholder on the NR row — surface it as null,
+	// never as a huge bogus tac/cid. Short all-F values are legitimate
+	// (TAC 0xFF, ECI 0xFFFFFF) and parse normally.
+	let hxid = (s) => {
+		let t = trim(s ?? '');
+
+		return (length(t) >= 7 && match(t, /^0*F+$/)) ? null : hx(s);
+	};
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /^\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]*)\s*,\s*([0-9]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)/);
+
+		if (!m)
+			continue;
+
+		let rat = +m[2];
+
+		// an LTE row must carry mcc/mnc — empty identity is a partial/corrupt
+		// read (keep the last-known cell). The T700's NR row legitimately
+		// carries them EMPTY (identity lives on the LTE row — field-verified:
+		// 1,9,,,FFFFFFF,00FFFFFFF,<arfcn>,<pci>,<band>...)
+		if (rat != 9 && !length(trim(m[3] ?? '')))
+			continue;
+
+		if (rat == 9) {
+			let nb = num(m[9]);
+
+			nr = {
+				mcc: dec(m[3]), mnc: dec(m[4]),
+				tac: hxid(m[5]), cid: hxid(m[6]),
+				arfcn: num(m[7]), pci: num(m[8]),
+				// the +5000 band offset holds for NR (5078 = n78 FM190,
+				// 5041 = n41 T700); the trailing metrics carry NR scales
+				// (cross-validated against simultaneous GTCAINFO reads —
+				// see the header comment)
+				band:  (nb != null && nb >= 5000) ? nb - 5000 : null,
+				rsrp: rsrp_nr(num(m[13])), rsrq: rsrq_nr(num(m[14])),
+				sinr: sinr(num(m[11])),
+				bw_mhz: bw_mhz(num(m[10])),
+			};
+		}
+		else {
+			let b = band(num(m[9]));
+			let earfcn = null;
+			let pci = null;
+
+			if (length(trim(m[7] ?? ''))) {
+				earfcn = (match(m[7], /[A-Fa-f]/) != null)
+					? hx(m[7]) : dec_or_hex(m[7], b);
+
+				if (length(trim(m[8] ?? ''))) {
+					// pci reads on the same base the earfcn decision picked
+					pci = (match(m[8], /[A-Fa-f]/) != null)
+						? hx(m[8]) : ((earfcn == +m[7]) ? +m[8] : hx(m[8]));
+				}
+			}
+
+			lte = {
+				mcc: dec(m[3]), mnc: dec(m[4]),
+				tac: hxid(m[5]), cid: hxid(m[6]),
+				earfcn: earfcn, pci: pci,
+				band: b,
+				rsrp: rsrp(num(m[13])), rsrq: rsrq(num(m[14])),
+				sinr: sinr(num(m[11])),
+				bw_mhz: bw_mhz(num(m[10])),
+			};
+		}
+	}
+
+	return (lte || nr) ? { lte: lte, nr: nr } : null;
+};
+
+// GTCAINFO yields no per-RAT rsrq/sinr and no neighbours: only the serving
+// cells (LTE anchor + NR carrier under EN-DC) and the LTE aggregation SCCs
+// make it into the standard cells shape.
+function tel_fibocom_signal(self, cb)
+{
+	csq_first(self, cb);
+};
+
+// the carrier/CA table for the fibocom telemetry: the EN-DC primary carriers
+// (the GTCAINFO PCC rows — LTE anchor + NR carrier; GTCCINFO enriches them
+// with rsrq/sinr via the serving rows) plus any LTE SCC aggregation rows.
+// 0.1 dB scaling matches the QMI CA entries so the LuCI table renders both
+// backends identically. Exported for the unit tests.
+export function ca_entries(serving, sccs)
+{
+	let ca = [];
+
+	if (serving?.lte)
+		push(ca, {
+			role: 'PCC LTE',
+			earfcn: serving.lte.earfcn,
+			rb: null,
+			bandwidth_mhz: serving.lte.bw_mhz ?? null,
+			band: serving.lte.band,
+			pci: serving.lte.pci,
+			rsrp: (serving.lte.rsrp != null) ? serving.lte.rsrp * 10 : null,
+			rsrq: (serving.lte.rsrq != null) ? serving.lte.rsrq * 10 : null,
+		});
+
+	if (serving?.nr)
+		push(ca, {
+			role: 'PCC NR',
+			earfcn: serving.nr.arfcn,
+			rb: null,
+			bandwidth_mhz: serving.nr.bw_mhz ?? null,
+			band: serving.nr.band,
+			pci: serving.nr.pci,
+			rsrp: (serving.nr.rsrp != null) ? serving.nr.rsrp * 10 : null,
+			rsrq: (serving.nr.rsrq != null) ? serving.nr.rsrq * 10 : null,
+		});
+
+	for (let s in (sccs ?? []))
+		push(ca, {
+			role: 'SCC',
+			earfcn: s.earfcn,
+			rb: null,
+			bandwidth_mhz: null,
+			band: s.band,
+			pci: s.pci,
+			rsrp: (s.rsrp != null) ? s.rsrp * 10 : null,
+		});
+
+	return ca;
+};
+
+function tel_fibocom_cells(self, cb)
+{
+	// shared assembly: fill the standard cells shape from a parsed serving
+	// descriptor (GTCAINFO or GTCCINFO), keep any GTCAINFO SCC aggregation
+	// rows; the serving-row builders (mk_lte/mk_nr) are module-level
+
+	let apply_serving = (serving, sccs) => {
+		// the fibocom signal block has no source of its own beyond the CSQ
+		// rssi floor — refresh signal.{lte,nr5g} from the serving cells on
+		// every tick (the shared fill keeps first-fill values otherwise)
+		assemble_cells(self, serving, { intra: [], inter: [] }, null, true);
+
+		if (!self.cells)
+			return;
+
+		let ca = ca_entries(serving, sccs);
+
+		if (length(ca))
+			self.cells.ca = ca;
+	};
+
+	// best of both read-backs: GTCCINFO enriches a GTCAINFO serving cell with
+	// the identity (mcc/mnc/tac/cid) and rsrq/sinr/bw the PCC row lacks; it
+	// also covers the moment right after a cell change where GTCAINFO is
+	// empty. The two reads are sequential (~1 s apart): a handover between
+	// them would put TWO DIFFERENT CELLS on the wire — the enrichment is
+	// therefore paired per RAT on pci+band (null on either side = unknown,
+	// not a mismatch) and a non-matching GTCCINFO row is dropped whole
+	// (identity included: never glue the old cell's tac/cid onto the new
+	// one). GTCAINFO stays authoritative — it is the fresher read and the
+	// only source of the signed rsrp.
+	let enrich_and_apply = (serving, sccs) => {
+		if (!serving)
+			return cb();
+
+		modem_common.telemetry_at(self).send('AT+GTCCINFO?', (e3, r3) => {
+			let c = e3 ? null : parse_gtccinfo(r3?.lines);
+
+			// a partial row (cell change) must not overwrite/zero-fill the
+			// serving identity — only enrich with plausible values
+			let fill = (dst, v) => (v != null && v != 0) ? v : dst;
+
+			let same_cell = (a, b) => {
+				if (!a || !b)
+					return false;
+
+				for (let k in [ 'pci', 'band' ])
+					if (a[k] != null && b[k] != null && a[k] != b[k])
+						return false;
+
+				return true;
+			};
+
+			if (same_cell(serving.lte, c?.lte)) {
+				serving.lte.mcc = fill(serving.lte.mcc, c.lte.mcc);
+				serving.lte.mnc = fill(serving.lte.mnc, c.lte.mnc);
+				serving.lte.cid = fill(serving.lte.cid, c.lte.cid);
+				serving.lte.tac = fill(serving.lte.tac, c.lte.tac);
+				serving.lte.band = fill(serving.lte.band, c.lte.band);
+				serving.lte.rsrq = fill(serving.lte.rsrq, c.lte.rsrq);
+				serving.lte.sinr = fill(serving.lte.sinr, c.lte.sinr);
+				serving.lte.bw_mhz = fill(serving.lte.bw_mhz, c.lte.bw_mhz);
+			}
+
+			// the NR PCC row lacks rsrq/sinr/bw — the GTCCINFO NR row
+			// carries them (NR scales, see parse_gtccinfo). The signed
+			// GTCAINFO rsrp stays untouched (it is the authoritative,
+			// directly-reported value; the derived one only feeds the
+			// GTCCINFO-only create path below).
+			if (same_cell(serving.nr, c?.nr)) {
+				serving.nr.band = fill(serving.nr.band, c.nr.band);
+				serving.nr.rsrq = fill(serving.nr.rsrq, c.nr.rsrq);
+				serving.nr.sinr = fill(serving.nr.sinr, c.nr.sinr);
+				serving.nr.bw_mhz = fill(serving.nr.bw_mhz, c.nr.bw_mhz);
+			}
+
+			if (c?.nr && !serving?.nr)
+				serving.nr = {
+					arfcn: c.nr.arfcn, pci: c.nr.pci,
+					mcc: c.nr.mcc, mnc: c.nr.mnc, cid: c.nr.cid, tac: c.nr.tac,
+					band: c.nr.band, rsrp: c.nr.rsrp, rsrq: c.nr.rsrq,
+					sinr: c.nr.sinr, bw_mhz: c.nr.bw_mhz,
+				};
+
+			apply_serving(serving, sccs);
+			cb();
+		});
+	};
+
+	modem_common.telemetry_at(self).send('AT+GTCAINFO?', (err, res) => {
+		let g = err ? null : parse_gtcainfo(res?.lines);
+
+		if (g) {
+			let serving = {};
+
+			if (g.lte)
+				serving.lte = mk_lte(g.lte);
+
+			if (g.nr)
+				serving.nr = mk_nr(g.nr);
+
+			return enrich_and_apply(serving, g.sccs);
+		}
+
+		// T700 firmwares answer GTCAINFO? with an empty body — GTCCINFO? is
+		// their serving-cell row (field-verified on a real FM350-GL)
+		modem_common.telemetry_at(self).send('AT+GTCCINFO?', (e2, r2) => {
+			let c = e2 ? null : parse_gtccinfo(r2?.lines);
+
+			if (!c)
+				return cb();
+
+			let serving = {};
+
+			if (c.lte)
+				serving.lte = mk_lte(c.lte);
+
+			if (c.nr)
+				serving.nr = mk_nr(c.nr);
+
+			// the serving descriptor is already complete (parsed from this same
+			// read) — apply directly instead of the GTCAINFO-path enrichment
+			// re-query, which would just re-ask GTCCINFO? for identical values
+			apply_serving(serving, []);
+			cb();
+		});
+	});
+};
+
+const TELEMETRY_FIBOCOM = {
+	signal: tel_fibocom_signal, cells: tel_fibocom_cells,
+	ca: tel_noop, reg_detail: tel_ceer_reg_detail,
+	// HW-validated on a WH3000 Pro + FM350-GL (GTCAINFO PCC/SCC +
+	// GTCCINFO enrichment, field offsets cross-checked live)
+};
+
 const TELEMETRY_GENERIC = {
 	signal: tel_generic_signal, cells: tel_noop,
 	ca: tel_noop, reg_detail: tel_ceer_reg_detail,
@@ -481,4 +1019,5 @@ const TELEMETRY_GENERIC = {
 export const QUECTEL = TELEMETRY_QUECTEL;
 export const HUAWEI  = TELEMETRY_HUAWEI;
 export const MEIG    = TELEMETRY_MEIG;
+export const FIBOCOM = TELEMETRY_FIBOCOM;
 export const GENERIC = TELEMETRY_GENERIC;

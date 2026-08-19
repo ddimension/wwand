@@ -71,10 +71,7 @@ export function create(opts)
 
 		if (cfg.ipv4_available && length(cfg.ipv4_addresses ?? [])) {
 			let a = cfg.ipv4_addresses[0];
-			let prefix = self.config.use_pushed_prefix ? a.prefix : 32;
-
-			if (!self.config.use_pushed_prefix && a.prefix != 32)
-				log('debug', sprintf('network pushed ipv4 prefix /%d, forcing /32', a.prefix));
+			let prefix = context_common.v4_prefix(self.config, a.prefix, log);
 
 			out.ipv4 = {
 				addr: a.address, prefix: prefix, pushed_prefix: a.prefix,

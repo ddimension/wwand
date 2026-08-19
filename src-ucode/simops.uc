@@ -48,9 +48,12 @@ export function install(self, o)
 			}
 
 			// a different slot may hold a different eUICC — drop the cached
-			// eSIM/APDU backends so they are re-probed
+			// eSIM/APDU backends so they are re-probed, and clear the
+			// once-per-object refresh guard + the stale surface data
 			delete entry.modem._esim_be;
 			delete entry.modem._apdu_be;
+			delete entry.modem._esim_refreshed;
+			delete entry.modem.esim_info;
 
 			log('notice', sprintf('modem %s: switched to SIM slot %d', ref, physical));
 			cb(null, { slot: physical });

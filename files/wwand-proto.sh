@@ -120,7 +120,10 @@ _wwand_apply_settings() {
 		proto_add_ipv4_address "$v4_addr" "${v4_prefix:-32}"
 		# no gateway on the default route (old dialer behavior): the address
 		# is a /32 on a p2p link, so the modem-reported gateway is off-link
-		# and a via-route would be rejected — a device route always works
+		# and a via-route would be rejected — a device route always works.
+		# RNDIS datapaths additionally run with ARP disabled (the daemon sets
+		# NOARP on rndis_host netdevs), so the device route needs no
+		# neighbour resolution either.
 		[ "$defaultroute" = 0 ] || proto_add_ipv4_route "0.0.0.0" 0
 
 		[ "$peerdns" = 0 ] || {
@@ -138,12 +141,16 @@ _wwand_apply_settings() {
 		[ -n "$v6_gateway" ] && proto_add_ipv6_route "$v6_gateway" 128
 		[ "$defaultroute" = 0 ] || \
 			proto_add_ipv6_route "::0" 0 "$v6_gateway" "" "" "${v6_addr}/${v6_plen:-64}"
+	}
 
-		[ "$peerdns" = 0 ] || {
-			for d in $v6_dns; do
-				proto_add_dns_server "$d"
-			done
-		}
+	# the v6 DNS push covers BOTH shapes: with a v6 address (dual-stack) and
+	# the addr-less DNS-only bucket (ipv6-only PDP — the entries are the
+	# DNS64 resolvers, host addressing arrives via the modem's RA, so there
+	# is no address/route to push, only the DNS servers)
+	[ "$peerdns" = 0 ] || {
+		for d in $v6_dns; do
+			proto_add_dns_server "$d"
+		done
 	}
 
 	proto_send_update "$interface"

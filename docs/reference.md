@@ -113,7 +113,7 @@ config wwand_sim 'vodafone'          # optional per-card override
 	option modem 'm0'
 	option iccid '89490...'
 	option pincode '5678'
-	option apn 'web.vodafone.de'
+	option apn 'internet'
 
 config interface 'wan'
 	option proto 'wwand'
@@ -217,6 +217,41 @@ For example, a stock `proto ncm` interface is rewritten in place:
 
 wwand then detects at runtime (by the `cdc_ncm` driver) that it is an NCM modem.
 
+### RNDIS IPv6 — the dhcpv6 subinterface
+
+On an **RNDIS datapath** (e.g. the Fibocom FM350-GL) the modem's IPv6 arrives
+via **router advertisements on the parent netdev** — there is no separate v6
+session device of its own. To let netifd run the v6 client natively, wwand
+ensures a **dhcpv6 subinterface** named **`<parent>_6`** (the OpenWrt
+convention for companion interfaces, e.g. `sim_6` for `sim`):
+
+```
+config interface 'sim_6'
+	option proto 'dhcpv6'
+	option device '@sim'   # the @-alias: the parent's L3 device
+	option auto '1'
+	option zone 'wan'      # the parent's firewall zone (read-only lookup)
+```
+
+The section is **persisted** (it appears on the LuCI Interfaces page) and
+**never deleted by wwand**. `auto: 1` hands the lifecycle to netifd (the
+subif follows the parent's device across reconnects and re-enumeration);
+`option zone` joins it to the parent's firewall zone (fw4 reads it from the
+network dump). Because a freshly written section reaches netifd only at the
+next config evaluation — and wwand never triggers one — the instance is
+additionally started at **runtime via `add_dynamic`** with the same config
+inline plus an explicit idempotent `up` (a fresh dynamic instance does not
+reliably self-start); the next evaluation (LuCI apply, reboot) replaces it
+with the config-backed instance under the same name.
+
+- **Created automatically** when a context on an `rndis_host` datapath with a
+  v6-capable PDP (`ipv6`/`ipv4v6`) connects (a status probe keeps it
+  idempotent).
+- **User-defined section wins:** a section with `option device '@<parent>'`
+  (or legacy `ifname`) + proto dhcpv6 — wwand writes nothing.
+- Applies to **every RNDIS-class modem**, not only the FM350-GL. QMI/MBIM
+  modems handle v6 backend-natively — this does not apply.
+
 ### Modem section — `config wwand_modem`
 
 The full modem option set, with defaults:
@@ -250,7 +285,7 @@ config wwand_modem 'm0'
 	                                 #   (`usb_path` still accepted as option name)
 	option serial '99efe861'         # bind by USB iSerial — stable identity, matched
 	                                 #   pre-open; follows the modem across re-enum
-	option imei '868965060008609'    # bind by IMEI — verified post-open; a mismatch
+	option imei '350000000000000'    # bind by IMEI (example value) — verified post-open; a mismatch
 	                                 #   blocks bring-up (wrong-modem safety)
 	option tty ''                    # AT port override (auto-detected otherwise)
 	option pincode '1234'            # SIM PIN; entered on each start
@@ -746,8 +781,8 @@ router is the requesting router, the P-GW the delegating server (often backed by
 RADIUS, RFC 4818). Most consumer APNs do not enable it — a PD `SOLICIT` then goes
 unanswered and you are left with the shared `/64`; the standard-compliant
 link-local source is fine there, the network simply offers no PD. Verified on this
-project's SIMs: Vodafone DE (`web.vodafone.de`) and Telekom DE
-(`nonbonding.hybrid`) return no delegation on either a link-local or a global
+project's test SIMs — a consumer web/dial-up APN and a hybrid-stack APN both
+return no delegation on either a link-local or a global
 source. Business / M2M APNs with explicit PD provisioning are where a delegated
 prefix actually appears.
 
@@ -855,7 +890,7 @@ when called from LuCI).
 
 | Method | Arguments | Description |
 |---|---|---|
-| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary) + contexts + `board` (detected profile, power/reset capability) |
+| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran) + contexts + `board` (detected profile, power/reset capability) |
 | `reload` | — | re-read UCI and apply the **diff** — only changed/added/removed modems and contexts are touched (idempotent; see *Idempotent reload*) |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
@@ -870,7 +905,7 @@ when called from LuCI).
 | `modem_plmn_lists` | `modem` | read the PLMN selector lists: `user` (EF 6F60), `nas` (QMI preferred networks), `operator`/`home` (read-only) and `fplmn` (EF 6F7B forbidden) |
 | `modem_plmn_set` | `modem`, `list_type`, `entries` | write a PLMN list to the SIM/modem; `list_type` = `user`\|`nas`\|`fplmn`; `entries` = `[{mcc,mnc[,gsm,utran,eutran,ngran]}]` (fplmn carries no AcT). Reads back for cross-verification (write ACL) |
 | `modem_plmn_restore` | `modem` | re-apply the modem's effective configured list (per-SIM `plmn_list` wins over the modem's) — the same list restored before every radio-on (write ACL) |
-| `modem_sim_slots` | `modem` | physical slots: card presence, active, ICCID, eUICC flag, EID |
+| `modem_sim_slots` | `modem` | physical slots: card presence, active, ICCID, eUICC flag, EID, per-slot `cpin`/`atr` (Fibocom `AT+ESLOTSINFO` carries all six per slot; other vendors via their own slot recipes) |
 | `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
 | `modem_sim_switch_slot` | `modem`, `slot` | switch the active physical SIM slot (drops the connection) |
 | `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
@@ -884,7 +919,7 @@ when called from LuCI).
 | `modem_sms_send` | `modem`, `number`, `text` | send an SMS (SMS-SUBMIT, GSM7/UCS2, auto-segmented): QMI WMS RAW_SEND (native/passthrough) else AT+CMGS PDU mode (write ACL) |
 | `modem_repower` | `modem?` | hardware repower: pulse the modem `reset_gpio` (or, single-modem only, the board default), else power-cycle the modem USB power (also single-modem only — on a multi-modem box the board lines would hit the wrong hardware: error `multi_modem_needs_reset_gpio`). Same path as the recovery ladder; recovers a hung / vanished modem |
 | `modem_set_protocol` | `modem`, `protocol` | switch the control protocol (`qmi` ⇄ `mbim`); the modem resets |
-| `modem_reattach` | `modem` | detach/re-attach at the registration level (QMI DMS low-power→online bounce natively, `AT+COPS=2`→`0` fallback) without a full modem reset (write ACL) |
+| `modem_reattach` | `modem` | detach/re-attach at the registration level (QMI DMS low-power→online bounce natively, `AT+COPS=2`→`0` fallback; on NCM the COPS bounce also down→up's every CONNECTED context — the T700's data path does not survive the deregister/attach cycle) without a full modem reset (write ACL) |
 | `modem_datapath` | `modem` | datapath diagnostics: driver/protocol, mux channels, aggregation state, netdev counters |
 | `migrate` | `interfaces?`, `apply?` | plan (default) or apply the config migration of the named (or all) stock `proto qmi`/`mbim`/`ncm` interfaces to the network-native `proto wwand` model (same engine as the `/usr/libexec/wwand/migrate` CLI and the LuCI *Migrate selected* button) |
 | `context_up` / `context_down` | `context` or `interface` | connect / disconnect (deferred reply with the IP config) |
@@ -974,6 +1009,25 @@ to 1):
    The eUICC issues a REFRESH; the SIM stack re-initialises and the existing
    recovery/registration path re-establishes the connection.
 
+**Dual-SIM modems (e.g. Fibocom FM350-GL):** the eUICC is a separate physical
+slot — `AT+GTDUALSIM=<0|1>` parks the active slot on the eSIM before eSIM
+operations (`modem_sim_slots` shows both slots; `AT+ESLOTSINFO` supplies the
+per-slot CPIN/ATR/EID/ICCID surface). On the T700 the modem-internal LPA
+re-claims the ISD-R, so host APDU access only exists in a **window**: it opens
+after the slot switch and stays usable while the card idles (measured stable
+≥10 min; modem events and daemon restarts close it, and it is not yet open
+right after the switch — an early probe times out). wwand re-probes the APDU
+backend **per operation** (`backend.forget`) instead of caching a dead channel,
+so an op run inside the window succeeds; the T700 answers `CCHO` with a **bare
+session id** (no `+CCHO:` prefix — parsed). While an eSIM op runs, the NCM
+URC-driven background actions are paused (`_esim_op` quiet flag) so long APDU
+sessions are not starved behind poll bursts. After the esim-surface probes the
+modem emits an **`esim_ready`** event; the daemon then refreshes `eid` +
+`profiles` into the status `esim` field (bring-up refresh — no manual poll
+needed). Enabling/disabling a profile hot-resets the SIM (or falls back to a
+full modem reset) so the modem drops its stale identity; disable the
+`wwand_globals` eSIM support by not installing `wwand-esim`.
+
 **Switching to the eSIM permanently:** set `option sim_slot` to the eUICC's
 physical slot (so it is selected on every start) and enable the desired profile.
 Activation codes and confirmation codes are validated for shell-safe characters
@@ -1044,7 +1098,8 @@ Built-in profiles: MikroTik Chateau 5G (`modem-power` + `modem-reset` + 5 signal
 LEDs), Zyxel LTE3301-plus / -m209 / -q222 (`power_modem`/`usbpower` + mobile/LTE
 LEDs), Zyxel LTE5398-M904 (`lte_power` + red/green/orange mobile LEDs), Cudy
 LT300 (MeiG SLM770A, reset GPIO `4g`; the autosetup HW-verify platform), NR7101
-(no dedicated GPIO/LED). An **unknown board** yields a no-op
+(no dedicated GPIO/LED), Huasifei WH3000 Pro (INVERTED `modem_power` GPIO — 1 =
+off, no reset line, no modem LEDs). An **unknown board** yields a no-op
 profile — wwand runs unchanged, and any GPIO/LED can still be named per modem
 (`reset_gpio`). LuCI's reset-GPIO picker lists every named GPIO line the kernel
 exposes. Adding a profile: see [extending.md](extending.md#7-adding-a-board-profile).
@@ -1055,8 +1110,8 @@ With `stats_interval > 0` the daemon logs one compact line per interval and
 caches the structured data (query it via `modem_cells`):
 
 ```
-telemetry: tech=LTE plmn=262/01 (Telekom.de) roaming=no
-  lte=[plmn 262/01 tac 3071 gci 29582339 earfcn 1300 pci 246 rsrp -97.4 rsrq -10.9 neigh 2]
+telemetry: tech=LTE plmn=001/01 (TestNet) roaming=no
+  lte=[plmn 001/01 tac 1 gci 1 earfcn 6300 pci 100 rsrp -97.4 rsrq -10.9 neigh 2]
   sig_lte=[rssi -66 rsrp -98 snr 15.0] temp=42C
 ```
 

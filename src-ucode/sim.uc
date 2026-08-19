@@ -536,6 +536,11 @@ export function slot_status(modem, cb)
 	if (modem._slot_status_unsupported)
 		return cb({ error: 'unsupported' }, null);
 
+	// NCM/AT modems: dual-slot management via the vendor AT recipe
+	// (modem_ncm.slot_status — Fibocom GTDUALSIM etc.)
+	if (modem.slot_status)
+		return modem.slot_status(cb);
+
 	// native MBIM slot CIDs (MS BCE SysCaps/SlotInfoStatus/DeviceSlotMappings)
 	// — the pure-MBIM fallback. They carry no per-slot ICCID/EID, so fill the
 	// active slot's identity from what the modem itself reported.
@@ -609,6 +614,10 @@ export function switch_slot(modem, physical, cb)
 	let via_mbim = () => modem.mbim_slots
 		? modem.mbim_slots.switch_to(physical, cb)
 		: cb({ error: 'no_uim_client' });
+
+	// NCM/AT modems: vendor AT slot switch (modem_ncm.switch_slot)
+	if (modem.switch_slot)
+		return modem.switch_slot(physical, cb);
 
 	if (modem._slot_via_mbim)
 		return via_mbim();
@@ -713,7 +722,9 @@ function at_apdu_open(modem, aid_hex, cb)
 			return cb(err, null);
 
 		for (let l in (res?.lines ?? [])) {
-			let m = match(l, /\+CCHO: *([0-9]+)/);
+			// the session id comes either with a +CCHO: prefix or as a BARE
+			// integer line — the T700 answers the bare form (field-verified)
+			let m = match(l, /\+CCHO: *([0-9]+)/) ?? match(l, /^([0-9]+)$/);
 
 			if (m)
 				return cb(null, { channel: +m[1], select_response: '' });

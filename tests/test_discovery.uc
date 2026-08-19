@@ -143,7 +143,7 @@ let short_fx = fakefx.create({
 	links: { '/sys/class/usbmisc/cdc-wdm0/device': '../../../3-1:1.4' },
 	files: { '/sys/bus/usb/devices/3-1/serial': '99efe861\n' },
 });
-eq(discovery.device_for_imei('868965060008609', short_fx), null,
+eq(discovery.device_for_imei('350000000000000', short_fx), null,
 	'imei: a short vendor serial does not false-match an IMEI');
 
 // the EG06 dummy iSerial (0123456789ABCDEF) never false-hits either
