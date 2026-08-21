@@ -492,11 +492,20 @@ function run_daemon()
 						// The caller only gets here for an ipv4v6/ipv6 context
 						// (daemon.uc gates on pdp_type != 'ipv4').
 						if (ret == 0) {
-							logmod.log('info', sprintf('dhcpv6 subinterface %s: re-running up (v6-capable context connected)',
+							// netifd's `up` is a NO-OP on an interface that is
+							// already up (interface_up() returns early unless the
+							// state is IFS_DOWN) — verified live: the subinterface
+							// kept its uptime across the call. So re-assert it with
+							// a real down->up, which re-runs the proto handler and
+							// restarts odhcp6c into a fresh SOLICIT. `down` also
+							// clears autostart, so the `up` MUST follow it — hence
+							// the chain rather than two independent calls.
+							logmod.log('info', sprintf('dhcpv6 subinterface %s: re-asserting (down/up) for the v6-capable context',
 								name));
 
-							return conn.defer('network.interface', 'up', { interface: name },
-								netifd_cb('up ' + name));
+							return conn.defer('network.interface', 'down', { interface: name },
+								() => conn.defer('network.interface', 'up', { interface: name },
+									netifd_cb('up ' + name)));
 						}
 
 						let blob = { name: name, proto: 'dhcpv6', device: want, auto: true };
