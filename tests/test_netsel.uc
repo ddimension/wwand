@@ -205,6 +205,80 @@ run = () => {
 								let sset2 = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
 								eq(length(sset2), length(sset),
 									'set_settings unchanged: no new SET reached the modem');
+								eq(wl.ext_lte_band, null,
+									'set_settings: legacy-only modem gets no extended LTE band TLV');
+
+							// (6c) firmware shaping: a modem that reports an extended
+							// LTE band mask must get ONLY the extended TLV (0x24) —
+							// a Quectel RG502Q rejects the legacy (0x15) + extended
+							// pair with INVALID_ARGUMENT (48).
+							mock.handlers.GET_SYSTEM_SELECTION_PREFERENCE = {
+								mode_preference: 0x18, roaming_preference: 0xFF,
+								lte_band_preference: 524420, usage_preference: 1,
+								network_selection: 0,
+								ext_lte_band: { mask_low: 524420, mask_mid_low: 0,
+								                mask_mid_high: 0, mask_high: 0 },
+							};
+
+							daemon.modem_set_settings('m0', { lte_bands: [ 1, 3, 8 ] }, (eerr, eres) => {
+								eq(eerr, null, 'set_settings ext: no error');
+								eq(eres.applied, [ 'ext_lte_band' ],
+									'set_settings ext: only the extended TLV reported applied');
+
+								let esets = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
+								let el = esets[length(esets) - 1].args;
+								eq(el.ext_lte_band, { mask_low: 133, mask_mid_low: 0,
+								                      mask_mid_high: 0, mask_high: 0 },
+									'set_settings ext: band list -> extended mask');
+								eq(el.lte_band_preference, null,
+									'set_settings ext: legacy LTE band TLV NOT sent alongside');
+
+								// (6d) an NR5G band TLV needs a mode preference in the
+								// same request (RG502Q answers MISSING_ARGUMENT (17)
+								// without one). The idempotency guard strips the
+								// unchanged mode_preference, so the current value is
+								// re-added — without counting as "applied".
+								daemon.modem_set_settings('m0', { nr5g_sa_bands: [ 1, 3 ] }, (nerr, nres) => {
+									eq(nerr, null, 'set_settings nr: no error');
+									eq(nres.applied, [ 'nr5g_sa_band' ],
+										'set_settings nr: only the band counts as applied');
+
+									let nsets = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
+									let nl = nsets[length(nsets) - 1].args;
+									eq(nl.nr5g_sa_band.m0, 5, 'set_settings nr: band list -> mask');
+									eq(nl.mode_preference, 0x18,
+										'set_settings nr: current mode preference carried alongside the NR band TLV');
+
+									// (6e) the OTHER firmware flavour: a modem that
+									// reports an extended mask but refuses it in SET.
+									// Which of the two TLVs a firmware takes cannot be
+									// probed up front, so one retry with the other one
+									// rescues it instead of surfacing a bare "qmi".
+									mock.handlers.SET_SYSTEM_SELECTION_PREFERENCE = (a) =>
+										(a.ext_lte_band != null) ? { __error: 48 } : {};
+
+									daemon.modem_set_settings('m0', { lte_bands: [ 1, 3 ] }, (rerr, rres) => {
+										eq(rerr, null, 'set_settings retry: rejection did not reach the caller');
+										eq(rres.applied, [ 'lte_band_preference' ],
+											'set_settings retry: fell back to the legacy TLV');
+
+										let rsets = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
+										ok(rsets[length(rsets) - 2].args.ext_lte_band != null,
+											'set_settings retry: first attempt carried the extended TLV');
+
+										let rl = rsets[length(rsets) - 1].args;
+										eq(rl.lte_band_preference, 5, 'set_settings retry: retry carried the legacy mask');
+										eq(rl.ext_lte_band, null, 'set_settings retry: retry dropped the extended TLV');
+
+										// a second failure is NOT retried again — it is the
+										// caller's error
+										mock.handlers.SET_SYSTEM_SELECTION_PREFERENCE = { __error: 48 };
+
+										daemon.modem_set_settings('m0', { lte_bands: [ 1, 5 ] }, (ferr) => {
+											eq(ferr.error, 'qmi', 'set_settings retry: exhausted retry surfaces the error');
+											eq(ferr.detail.code, 48, 'set_settings retry: original qmi code preserved');
+
+											mock.handlers.SET_SYSTEM_SELECTION_PREFERENCE = {};
 
 							// (7) no_such_modem guard preserved
 							daemon.modem_scan('nope', (gerr) => {
@@ -250,7 +324,11 @@ run = () => {
 									poll();
 								});
 							});
-								});
+										});   // (6e-b) retry exhausted
+									});       // (6e) one-shot retry to the other TLV
+								});   // (6d) NR band + mode preference
+								});   // (6c) extended LTE band TLV only
+								});   // (6b) idempotency guard
 						});
 					});
 				});

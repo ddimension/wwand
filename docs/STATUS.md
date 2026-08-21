@@ -3,6 +3,55 @@
 _Last updated: 2026-08-21. 47 host suites, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
 
+## Band selection: two Quectel firmware quirks in the NAS set path (2026-08-21)
+
+Field report from 242 (Zyxel NR7101, Quectel RG502Q-EA, `…R13A04M4G_ZYXEL`):
+unchecking a single LTE band in the LuCI modem tools failed with a bare
+"Failed: qmi". Root-caused over ubus on the live modem. **Reproduced identically
+on 245** (MikroTik Chateau, Quectel RG650E-EU `…R01A04G8G`) — same error codes,
+same TLV combinations — so this is Quectel line behaviour, not one model or one
+vendor build. All fixes HW-verified on BOTH boxes (band 8 off/on, NR band off/on,
+neither connection dropped).
+
+- **Never send both LTE band TLVs** (`netsel_ops.uc`). The `lte_bands` list was
+  converted into BOTH the legacy `lte_band_preference` (0x15, u64) and
+  `ext_lte_band` (0x24, 4×u64) and both went out in one
+  SET_SYSTEM_SELECTION_PREFERENCE. The RG502Q answers that pair with
+  **INVALID_ARGUMENT (48)**; either TLV alone is accepted and the firmware
+  mirrors it into the other. The request now carries exactly one: the extended
+  TLV (the only one that can express bands > 64), falling back to the legacy one
+  only on a modem whose GET reports no extended mask. Both masks are still
+  filled before the idempotency guard so it can compare against whichever the
+  modem reports.
+- **An NR5G band TLV needs a mode preference beside it** (same file). 0x2F/0x30
+  alone → **MISSING_ARGUMENT (17)** on the RG502Q; with `mode_preference` (0x11)
+  in the same request they apply. Since the idempotency guard strips an
+  unchanged `mode_preference`, every NR-only band edit from LuCI failed. The
+  current value is now re-added when an NR band TLV survives the guard — it is
+  what the modem already runs, so it stays out of the `applied` list.
+- **LuCI surfaced no detail** (`luci-app-wwand` settings.js): a failing
+  `modem_set_settings` printed only `error` ("qmi") and dropped `detail`.
+  `describeError()` now appends result/code, which is the difference between
+  "it does not work" and a diagnosable answer.
+- Schemas were NOT at fault — 0x15/0x24/0x2F/0x30 re-verified against
+  libqmi 1.38.0 `qmi-service-nas.json` (ids and field formats all correct).
+  Firmware behaviour, so no `modem_quirks.uc` entry: sending one band TLV and
+  pairing NR bands with a mode preference is correct on every modem.
+- **One-shot retry to the other LTE band TLV** (same file). Which of the two a
+  firmware accepts cannot be probed up front — the pick above reads the GET
+  response, which is a good signal but not a guarantee. A rejected band request
+  is therefore retried once with the other TLV before the error reaches the
+  caller; a second failure is the caller's error, no further retry.
+- **LuCI dropped the mode bits it does not render** (settings.js). `MODE_BITS`
+  covers GSM/UMTS/LTE/NR5G, and `collect()` rebuilt `mode_preference` from the
+  checkboxes alone — so every save silently cleared CDMA (0x01), HDR/EVDO (0x02)
+  and TD-SCDMA (0x20). Caught on the RG650E, where a LuCI save turned 0x7F into
+  0x5C. The mask now starts from the unrendered bits of the reported value.
+- Regression-tested in `test_netsel` (extended-mask modem → ext TLV only, legacy
+  TLV absent; NR band → mode preference carried, not reported applied; rejected
+  TLV → retried with the other one; second rejection → error surfaces with its
+  qmi code) and `test_daemon` (legacy-only modem → legacy TLV only).
+
 ## Audit follow-up: eSIM quiet refcount, slot-switch watchdog (2026-08-21)
 
 Post-merge audit of the FM350-GL round; two concurrency/liveness gaps closed

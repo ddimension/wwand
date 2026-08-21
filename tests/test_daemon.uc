@@ -311,9 +311,12 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 												let set = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
 												eq(set[length(set) - 1].args.usage_preference, 2, 'set: value reached modem');
 												eq(set[length(set) - 1].args.change_duration, 1, 'set: permanent duration');
-												// bands 1,3,8 -> bits 0,2,7 -> 0x85
+												// bands 1,3,8 -> bits 0,2,7 -> 0x85. This mock reports no
+												// extended LTE band mask, so the legacy TLV is the one sent —
+												// never both (a Quectel RG502Q rejects that pair); the
+												// extended-modem case is covered in test_netsel.
 												eq(set[length(set) - 1].args.lte_band_preference, 133, 'set: band list -> mask');
-												eq(set[length(set) - 1].args.ext_lte_band.mask_low, 133, 'set: ext mask word 0');
+												eq(set[length(set) - 1].args.ext_lte_band, null, 'set: no extended TLV alongside the legacy one');
 
 												// non-whitelisted key is rejected before the modem
 												conn_cli.defer('wwand', 'modem_set_settings',

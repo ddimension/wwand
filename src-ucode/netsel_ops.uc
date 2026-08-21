@@ -480,7 +480,10 @@ export function install(self, o)
 		if (!entry)
 			return;
 
-		// band-number lists (LuCI-safe) are converted to masks here
+		// band-number lists (LuCI-safe) are converted to masks here. Both LTE
+		// band TLVs are filled so the idempotency guard below can compare
+		// against whichever one the modem reports — only ONE of them is
+		// actually sent (see the firmware shaping there).
 		settings = { ...(settings ?? {}) };
 
 		if (type(settings.lte_bands) == 'array') {
@@ -545,23 +548,83 @@ export function install(self, o)
 					return cb(null, { applied: [], unchanged: true });
 				}
 
-				nas.request('SET_SYSTEM_SELECTION_PREFERENCE', args, (err) => {
-					if (err)
-						return cb({ error: 'qmi', detail: err });
+				// --- firmware shaping of the outgoing request ---------------
+				// Firmwares are picky about WHICH band TLVs may travel together.
+				// Both rules below are vendor-neutral (they describe what the
+				// TLVs mean, not who built the modem) and HW-proven across the
+				// Quectel line: RG502Q-EA (Zyxel R13) and RG650E-EU (R01)
+				// behave identically. No-ops on a modem that accepts anything.
 
-					log('notice', sprintf('modem %s: system selection preference set: %s%s',
-						ref, join(' ', changed),
-						q.settings_deferred ? ' (deferred until modem reset)' : ''));
+				// (1) NEVER send the legacy LTE band TLV (0x15) and the
+				// extended one (0x24) in the same request — Quectel firmwares
+				// answer that pair with INVALID_ARGUMENT (48), which is why
+				// unchecking a single LTE band failed. A modem mirrors one into
+				// the other anyway, so one is enough. Prefer the extended TLV
+				// (the only one that can express bands > 64); a modem whose GET
+				// reports no extended mask gets the legacy one.
+				let lte_alt = null;   // the other TLV, kept for a one-shot retry
 
-					let res = { applied: changed };
+				if (args.lte_band_preference != null && args.ext_lte_band != null) {
+					let sent = (!gerr && cur && cur.ext_lte_band == null)
+						? 'lte_band_preference' : 'ext_lte_band';
+					let spare = (sent == 'ext_lte_band')
+						? 'lte_band_preference' : 'ext_lte_band';
 
-					if (q.settings_deferred) {
-						res.deferred = true;
-						res.apply = 'modem_reset';
-					}
+					lte_alt = { sent: sent, spare: spare, value: args[spare] };
+					delete args[spare];
+					changed = filter(changed, (k) => k != spare);
+				}
 
-					cb(null, res);
-				});
+				// (2) An NR5G band TLV (0x2F/0x30) needs a mode preference
+				// (0x11) alongside it — without one the firmware answers
+				// MISSING_ARGUMENT (17). The guard above strips an unchanged
+				// mode_preference, so re-add the value the modem already runs:
+				// it changes nothing, hence it stays out of `changed`.
+				if ((args.nr5g_sa_band != null || args.nr5g_nsa_band != null) &&
+				    args.mode_preference == null &&
+				    !gerr && cur?.mode_preference != null)
+					args.mode_preference = cur.mode_preference;
+
+				// A firmware that wants the OTHER LTE band TLV than the one
+				// rule (1) picked is rescued by a single retry instead of
+				// bubbling a bare "qmi" up to the UI — which of the two a
+				// firmware accepts is not something we can probe up front.
+				let send;   // forward-declared (self-referencing arrow)
+
+				send = (payload, applied, alt) => {
+					nas.request('SET_SYSTEM_SELECTION_PREFERENCE', payload, (err) => {
+						if (err) {
+							if (!alt)
+								return cb({ error: 'qmi', detail: err });
+
+							log('notice', sprintf('modem %s: firmware rejected %s (qmi code %s) — retrying with %s',
+								ref, alt.sent, err.code ?? '?', alt.spare));
+
+							let retry = { ...payload };
+
+							delete retry[alt.sent];
+							retry[alt.spare] = alt.value;
+
+							return send(retry,
+								map(applied, (k) => (k == alt.sent) ? alt.spare : k), null);
+						}
+
+						log('notice', sprintf('modem %s: system selection preference set: %s%s',
+							ref, join(' ', applied),
+							q.settings_deferred ? ' (deferred until modem reset)' : ''));
+
+						let res = { applied: applied };
+
+						if (q.settings_deferred) {
+							res.deferred = true;
+							res.apply = 'modem_reset';
+						}
+
+						cb(null, res);
+					});
+				};
+
+				send(args, changed, lte_alt);
 			});
 		});
 	};
