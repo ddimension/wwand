@@ -5,12 +5,11 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as config from 'wwand/config.uc';
 
-// Adoption of bare legacy `proto qmi` interfaces is opt-in (global `takeover`,
-// default off). Most tests below exercise the parsing/adoption engine, so they
-// parse with takeover ON via padopt(); the dedicated "takeover gate" block near
-// the end verifies the default-off behavior with a plain config.parse().
+// wwand manages `proto wwand` and nothing else — a stock `proto qmi` interface
+// is never adopted, so exactly one stack owns any given interface. padopt() used
+// to enable the old global `takeover` for the adoption tests; it is now a plain
+// parse and kept only so the call sites below read unchanged.
 function padopt(raw) {
-	raw.network.g = { '.type': 'wwand_globals', takeover: '1' };
 	return config.parse(raw);
 }
 
@@ -100,16 +99,16 @@ ok(length(filter(r.warnings, (w) => match(w, /wwand_sim s0: unknown option 'pn'/
 
 r = padopt({
 	network: {
-		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0',
+		wan: { '.type': 'interface', proto: 'wwand', device: 'wwan0',
 		       apn: 'internet.telekom', pincode: '4321', modes: 'lte',
 		       username: 'tm', password: 'tm', ipv6: '0',
 		       zero_rx_timeout: '3600', failreboot: '50', delay: '5',
 		       dhcp: '1', strongestnetwork: '1', location: '2',
 		       metric: '10', use_pushed_mtu: '1', mtu: '1430' },
-		wanb: { '.type': 'interface', proto: 'qmi', device: 'wwan0m2',
+		wanb: { '.type': 'interface', proto: 'wwand', device: 'wwan0m2',
 		        apn: 'work', ipv4: '1', ipv6: '1',
 		        lock_4g: [ '1300:246' ], lock_persist: '1', sim_slot: '2' },
-		wanc: { '.type': 'interface', proto: 'qmi', device: 'wwan0m3',
+		wanc: { '.type': 'interface', proto: 'wwand', device: 'wwan0m3',
 		        apn: 'off', disabled: '1' },
 		lan: { '.type': 'interface', proto: 'static' },
 	},
@@ -175,7 +174,7 @@ eq(length(keys(r.modems)), 0, 'edge: modem without device dropped');
 // indirect @device reference is skipped with warning
 r = padopt({
 	network: {
-		wan: { '.type': 'interface', proto: 'qmi', device: '@wan6', apn: 'x' },
+		wan: { '.type': 'interface', proto: 'wwand', device: '@wan6', apn: 'x' },
 	},
 });
 eq(length(keys(r.contexts)), 0, 'edge: @device skipped');
@@ -183,8 +182,8 @@ eq(length(keys(r.contexts)), 0, 'edge: @device skipped');
 // pincode conflict: first wins, warning emitted
 r = padopt({
 	network: {
-		a: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'x', pincode: '1111' },
-		b: { '.type': 'interface', proto: 'qmi', device: 'wwan0m1', apn: 'y', pincode: '2222' },
+		a: { '.type': 'interface', proto: 'wwand', device: 'wwan0', apn: 'x', pincode: '1111' },
+		b: { '.type': 'interface', proto: 'wwand', device: 'wwan0m1', apn: 'y', pincode: '2222' },
 	},
 });
 eq(r.modems.compat_wwan0.pincode, '1111', 'edge: first pincode wins');
@@ -194,7 +193,7 @@ ok(length(filter(r.warnings, (w) => index(w, 'conflicting pincode') >= 0)) == 1,
 // 'pdptype' option variant (seen in deployed configs) wins over flags
 r = padopt({
 	network: {
-		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0',
+		wan: { '.type': 'interface', proto: 'wwand', device: 'wwan0',
 		       apn: 'x', pdptype: 'ipv4', ipv4: '1', ipv6: '1' },
 	},
 });
@@ -213,8 +212,8 @@ eq(r.modems.m0.lock_persist, true, 'native: lock_persist');
 // mixed muxed/unmuxed contexts on one modem: the unmuxed one gets a channel
 r = padopt({
 	network: {
-		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'a' },
-		wanb: { '.type': 'interface', proto: 'qmi', device: 'wwan0m1', apn: 'b' },
+		wan: { '.type': 'interface', proto: 'wwand', device: 'wwan0', apn: 'a' },
+		wanb: { '.type': 'interface', proto: 'wwand', device: 'wwan0m1', apn: 'b' },
 	},
 });
 eq(r.contexts.wanb.mux_id, 1, 'automux: explicit mux kept');
@@ -225,7 +224,7 @@ ok(length(filter(r.warnings, (w) => index(w, 'auto-assigned mux id') >= 0)) == 1
 // no mux anywhere: nothing auto-assigned
 r = padopt({
 	network: {
-		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'a' },
+		wan: { '.type': 'interface', proto: 'wwand', device: 'wwan0', apn: 'a' },
 	},
 });
 eq(r.contexts.wan.mux_id, 0, 'automux: plain modem untouched');
@@ -233,8 +232,8 @@ eq(r.contexts.wan.mux_id, 0, 'automux: plain modem untouched');
 // explicit m0 device: muxed with auto channel, link keeps the configured name
 r = padopt({
 	network: {
-		wwan0m0: { '.type': 'interface', proto: 'qmi', device: 'wwan0m0', apn: 'a' },
-		wwan0m1: { '.type': 'interface', proto: 'qmi', device: 'wwan0m1', apn: 'b' },
+		wwan0m0: { '.type': 'interface', proto: 'wwand', device: 'wwan0m0', apn: 'a' },
+		wwan0m1: { '.type': 'interface', proto: 'wwand', device: 'wwan0m1', apn: 'b' },
 	},
 });
 eq(r.contexts.wwan0m1.mux_id, 1, 'm0: explicit channel kept');
@@ -245,7 +244,7 @@ eq(r.contexts.wwan0m0.mux_link, 'wwan0m0', 'm0: link name preserved');
 // m0 alone also enables muxing
 r = padopt({
 	network: {
-		wwan0m0: { '.type': 'interface', proto: 'qmi', device: 'wwan0m0', apn: 'a' },
+		wwan0m0: { '.type': 'interface', proto: 'wwand', device: 'wwan0m0', apn: 'a' },
 	},
 });
 eq(r.contexts.wwan0m0.mux_id, 1, 'm0-solo: channel assigned');
@@ -267,7 +266,7 @@ r = padopt({
 		telekom: { '.type': 'wwand_sim', modem: 'm0', iccid: '8949...01',
 		           pincode: '5678', apn: 'internet.t-d1.de', auth: 'chap' },
 		// connection: references the modem, connection options inline
-		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0',
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
 		       apn: 'internet', pdp_type: 'ipv4v6', auth: 'chap' },
 	},
 });
@@ -294,7 +293,7 @@ eq(r.modems.m0.sims[0].apn, 'internet.t-d1.de', 'net: sim override apn');
 r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', usb_path: '1-1' },
-		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0', pdptype: 'ipv4' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', pdptype: 'ipv4' },
 	},
 });
 eq(r.contexts.wan.pdp_type, 'ipv4', 'net: legacy pdptype alias honoured');
@@ -313,8 +312,8 @@ eq(r.contexts.wan.apn, 'internet', 'net: proto wwand apn inline');
 r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'rmnet' },
-		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0', device: 'wwan0m1', apn: 'internet' },
-		ims: { '.type': 'interface', proto: 'qmi', modem: 'm0', device: 'wwan0m2', apn: 'ims' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'wwan0m1', apn: 'internet' },
+		ims: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'wwan0m2', apn: 'ims' },
 	},
 });
 eq(r.contexts.wan.mux_id, 1, 'net-mux: wan channel 1');
@@ -326,7 +325,7 @@ eq(r.contexts.ims.modem, 'm0', 'net-mux: both share the modem (2)');
 r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'rmnet' },
-		wan: { '.type': 'interface', proto: 'qmi', modem: 'm0', mux_id: '3', apn: 'internet' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', mux_id: '3', apn: 'internet' },
 	},
 });
 eq(r.contexts.wan.mux_id, 3, 'net: explicit mux_id honoured');
@@ -358,7 +357,7 @@ eq(r.contexts.wan.mux_link, 'wwan0m2', 'net: explicit muxed device name used as-
 // (regression: the compat path ignored mux_id and only read the device suffix)
 r = padopt({
 	network: {
-		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', mux_id: '4', apn: 'internet' },
+		wan: { '.type': 'interface', proto: 'wwand', device: 'wwan0', mux_id: '4', apn: 'internet' },
 	},
 });
 eq(r.contexts.wan.mux_id, 4, 'compat: explicit mux_id honoured');
@@ -394,7 +393,7 @@ eq(r.contexts.b.l3_name, 'wwand1', 'l3: auto assignment skips the pinned name');
 // a control-device path never becomes an L3 name
 r = padopt({
 	network: {
-		wan: { '.type': 'interface', proto: 'qmi', device: '/dev/cdc-wdm0', apn: 'x' },
+		wan: { '.type': 'interface', proto: 'wwand', device: '/dev/cdc-wdm0', apn: 'x' },
 	},
 });
 eq(r.contexts.wan.l3_name, 'wwand0', 'l3: /dev control path -> auto name');
@@ -426,7 +425,7 @@ r = padopt({
 		m0: { '.type': 'wwand_modem', usb_path: '1-1' },
 		bad_sim: { '.type': 'wwand_sim', modem: 'm0' },              // no iccid
 		orphan: { '.type': 'wwand_sim', modem: 'nope', iccid: 'x' }, // unknown modem
-		wan: { '.type': 'interface', proto: 'qmi', modem: 'ghost' }, // unknown modem
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'ghost' }, // unknown modem
 	},
 });
 ok(length(filter(r.warnings, w => index(w, 'no iccid') >= 0)) == 1, 'guard: wwand_sim without iccid warns');
@@ -434,31 +433,32 @@ ok(length(filter(r.warnings, w => index(w, "unknown modem 'nope'") >= 0)) == 1, 
 ok(length(filter(r.warnings, w => index(w, "unknown modem 'ghost'") >= 0)) == 1, 'guard: interface unknown modem warns');
 eq(r.contexts.wan, null, 'guard: interface with unknown modem builds no context');
 
-// --- takeover gate (default off) ---------------------------------------------
-// Adoption of a bare legacy `proto qmi` interface is opt-in. By default (no
-// takeover) wwand ignores it — uqmi keeps it — while a `proto wwand` interface,
-// and any interface carrying `option modem`, is always managed. Enabling the
-// global `takeover` restores adoption of the bare qmi interface.
+// --- proto ownership: `proto qmi` is never adopted ---------------------------
+// uqmi owns `proto qmi`. wwand claims only `proto wwand`, so a given interface
+// (and its control device) has exactly one owner and netifd's handler load order
+// never decides anything. There is no switch that changes this — the former
+// global `takeover` is gone.
 r = config.parse({
 	network: {
 		q: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'a' },
 		w: { '.type': 'interface', proto: 'wwand', device: 'wwan1', apn: 'b' },
 	},
 });
-eq(r.contexts.q, null, 'gate: bare proto qmi NOT adopted when takeover off');
-ok(r.contexts.w != null, 'gate: proto wwand always managed regardless of takeover');
+eq(r.contexts.q, null, 'ownership: bare proto qmi is left to uqmi');
+ok(r.contexts.w != null, 'ownership: proto wwand is managed');
 
+// a stale `option takeover` in a carried-over config must not resurrect it
 r = config.parse({
 	network: {
 		g: { '.type': 'wwand_globals', takeover: '1' },
 		q: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'a' },
 	},
 });
-ok(r.contexts.q != null, 'gate: bare proto qmi adopted when takeover on');
+eq(r.contexts.q, null, 'ownership: a leftover option takeover does not re-enable adoption');
+eq(r.globals.takeover, null, 'ownership: takeover is no longer a global');
 
-// migrate_plan is the explicit (user-triggered) conversion path — independent of
-// the takeover gate; it converts regardless.
-eq(r.globals.takeover, true, 'gate: takeover parsed true');
+// migrate_plan is the explicit (user-triggered) conversion path and converts a
+// `proto qmi` interface regardless — that is how an interface changes owner.
 
 // --- migrate_plan: convert old configs to the network-native model -----------
 

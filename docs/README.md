@@ -25,7 +25,8 @@ whether you are a user, a developer, or an AI assistant working on the tree.
   override), `interface … proto wwand` + `option modem` (the connection),
   `wwand_globals`. wwand coexists with the stock uqmi/umbim/comgt-ncm packages;
   migrate a stock `proto qmi/mbim/ncm` interface to wwand on demand from the LuCI
-  modem list (or set `option takeover '1'` for the old automatic behavior).
+  modem list, with `/usr/libexec/wwand/migrate --apply`, or unattended at the
+  next boot via the example uci-defaults script in `/usr/share/wwand/examples/`.
 - **One daemon** (`/usr/sbin/wwand`) owns modems and contexts, drives netifd
   over ubus (`no_proto_task`), touches only the link layer — netifd owns all
   addressing/routing (VRF-safe).

@@ -45,12 +45,13 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   feed repo).
 - **Config: all in `/etc/config/network`** (WireGuard-style: `wwand_modem` /
   `wwand_sim` (per-ICCID override) / `interface proto wwand + option modem` /
-  `wwand_globals`). Proto is **`wwand`**. Good-citizen default: wwand manages only
-  `proto wwand` interfaces; the shim registers the legacy **`qmi`** alias and the
-  daemon adopts bare `proto qmi` interfaces ONLY when `option takeover '1'`
-  (default off). No `/etc/config/wwand` for new installs; migration to the native
-  model is user-triggered (LuCI modem list / `config.migrate_plan`) or auto on
-  upgrade only under `takeover`.
+  `wwand_globals`). Proto is **`wwand`**. Good citizen: wwand manages ONLY
+  `proto wwand` interfaces and the shim registers ONLY that proto — the `qmi`
+  name stays uqmi's, and a bare `proto qmi` interface is never adopted. There is
+  no switch for it (the former `option takeover` is gone). No `/etc/config/wwand`
+  for new installs; migration to the native model is always user-triggered (LuCI
+  modem list / `config.migrate_plan` / `/usr/libexec/wwand/migrate`, or the
+  example uci-defaults script in `/usr/share/wwand/examples/`).
   Full model in `docs/reference.md`; how to extend in `docs/extending.md`.
 - **Zero-config autosetup** (default ON, opt-out `wwand_globals option
   autosetup '0'`): modem appears on an unconfigured box → daemon hotplug
@@ -120,10 +121,9 @@ and drives netifd over ubus (deps in `main.uc`: `kick_interface`=up,
 - wwand restart is non-destructive (`stop_local`, not `shutdown`): WAN + traffic
   survive; the daemon **adopts** the live session on `registered`.
 Shim: `files/wwand-proto.sh` → `/lib/netifd/proto/wwand.sh`
-(`proto_wwand_setup/teardown/renew`, with thin `proto_qmi_*` aliases;
-always `add_protocol wwand`, and `add_protocol qmi` ONLY when
-`uci get network.@wwand_globals[0].takeover` is set (default off);
-`_wwand_apply_settings` builds the netifd update).
+(`proto_wwand_setup/teardown/renew`; `add_protocol wwand` and nothing else —
+netifd sources every handler in /lib/netifd/proto, so two claiming `qmi` would
+be decided by load order; `_wwand_apply_settings` builds the netifd update).
 
 ## Invariants / conventions
 - **VRF**: the daemon touches only the link layer (mux/MTU/carrier via
@@ -196,10 +196,9 @@ bit** on the files that get *executed* — this bit twice:
 So after a tar/cp deploy: **`chmod +x /usr/sbin/wwand /lib/netifd/proto/wwand.sh`**,
 then `/etc/init.d/wwand restart` + `/etc/init.d/network restart`. The `.uc`
 modules under `/usr/share/ucode/wwand/` are imported, not exec'd — they don't
-need +x. The apk pkg is fine (Makefile uses INSTALL_BIN). Note: with `takeover`
-off wwand does NOT register `proto qmi`, so uqmi’s `qmi.sh` keeps
-`proto qmi` — expected coexistence, not a bug. (Only under `takeover` do both
-register `qmi`; then a **stale `qmi.sh`** could still shadow wwand.)
+need +x. The apk pkg is fine (Makefile uses INSTALL_BIN). Note: wwand never
+registers `proto qmi`, so uqmi's `qmi.sh` keeps it — expected coexistence, not
+a bug.
 Modem is normally in **QMI mode**
 (`qmi_wwan`); MBIM mode → switch back with `AT+QCFG="usbnet",0` + `AT+CFUN=1,1`.
 

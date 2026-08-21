@@ -8,7 +8,7 @@ The single biggest objection ("a second implementation that replaces uqmi/umbim/
 
 - **All `CONFLICTS` removed.** The packages install *alongside* uqmi/umbim/comgt-ncm.
 - wwand manages **only `proto wwand`** interfaces. It does not touch existing `proto qmi`/`mbim`/`ncm`.
-- Adopting the stock stack (registering the `qmi` proto alias, managing bare `proto qmi`, auto-migrating on upgrade) is gated behind a single global **`option takeover '1'`, default off**.
+- wwand registers **only `proto wwand`** and never the `qmi` alias, and it never adopts a bare `proto qmi` interface. There is no switch that changes this: the former global `option takeover` was removed, because netifd settles two handlers claiming the same proto name by load order and no package can control that.
 - Moving one interface to wwand is **user-triggered** (a "Migratable interfaces" list in the LuCI modem page; converts it in place to `proto wwand`).
 
 So nothing is replaced unless the operator explicitly opts in, per interface.
@@ -68,7 +68,9 @@ On the bot's Makefile:215 (reuse stock `ucode-mod-io`): evaluated — the stock 
 
 ## 6. On device ownership under coexistence (bot's question)
 
-`CONFLICTS` previously guaranteed only one stack could touch a given `/dev/cdc-wdmX`. Under coexistence that guarantee is now a **runtime** property: wwand opens a control device only for an interface it manages (`proto wwand`, or `proto qmi` only under `takeover`), so with `takeover` off it never contends with uqmi for the same node. The LuCI migration flow additionally warns the operator to stop/disable the stock dialer for a modem it's taking over. This is the same additive-ownership model ModemManager uses.
+`CONFLICTS` previously guaranteed only one stack could touch a given `/dev/cdc-wdmX`. Under coexistence that guarantee is a **runtime** property: wwand opens a control device only for an interface it manages, and it manages `proto wwand` exclusively — so it never contends with uqmi for a node behind a `proto qmi` interface. The LuCI migration flow additionally warns the operator to stop/disable the stock dialer for a modem it is taking over. This is the same additive-ownership model ModemManager uses.
+
+One case is NOT covered by that argument and is called out honestly in the review thread: zero-config **autosetup** is on by default, so on a box with no wwand configuration at all a newly appeared modem is claimed by the generated `wwand_modem` + interface. Setting `option autosetup '0'` disables it.
 
 ## 7. Request
 

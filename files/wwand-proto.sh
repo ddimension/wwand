@@ -279,17 +279,12 @@ proto_wwand_renew() {
 # onto the same functions. New configs use `proto wwand`; the daemon and LuCI
 # accept both, and migration/LuCI rewrite to `wwand` on save.
 proto_qmi_init_config() { proto_wwand_init_config "$@"; }
-proto_qmi_setup()       { proto_wwand_setup "$@"; }
-proto_qmi_teardown()    { proto_wwand_teardown "$@"; }
-proto_qmi_renew()       { proto_wwand_renew "$@"; }
-
 [ -n "$INCLUDE_ONLY" ] || {
+	# wwand registers its OWN proto and nothing else. The historical `qmi` name
+	# stays uqmi's: netifd sources every script in /lib/netifd/proto, so two
+	# handlers claiming `qmi` would be decided by load order, which no package
+	# can control. Moving an interface to wwand is explicit and rewrites it to
+	# `proto wwand` — LuCI modem list, /usr/libexec/wwand/migrate, or the
+	# example uci-defaults script in /usr/share/wwand/examples.
 	add_protocol wwand
-	# The historical `qmi` alias (uqmi’s proto name) is only
-	# claimed when takeover is enabled (global wwand_globals option takeover,
-	# default off) — otherwise wwand stays a good citizen and leaves `proto qmi`
-	# to uqmi. Explicitly-migrated interfaces use `proto wwand` regardless.
-	case "$(uci -q get network.@wwand_globals[0].takeover)" in
-		1|true|yes|on) add_protocol qmi ;;
-	esac
 }
