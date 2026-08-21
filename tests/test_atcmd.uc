@@ -639,6 +639,75 @@ tr3.reply('AT+CEREG?\r\n+CEREG: 2,1\r\nOK\r\n+CGEV: ME PDN DEACT 1\r\n+CTZV: "26
 eq(urcs2, [ '+CGEV: ME PDN DEACT 1', '+CTZV: "26/08/19,14:00:00+32"' ],
 	'engine: URCs buffered behind OK dispatch');
 
+// --- engine: URCs arriving INSIDE a command window ---------------------------
+//
+// They used to be pushed into the response lines and never reached on_urc at
+// all — on a chatty modem a third of every PDN/registration event was lost, and
+// the reply carried lines that were never an answer. A URC is framed exactly
+// like a result code (manual 2.4.3), so the decision is per LINE.
+
+let urcs3 = [], got3 = null;
+let tr5 = fake_transport();
+let at5 = atcmd.create(tr5, { log: silent, on_urc: (l) => push(urcs3, l) });
+
+at5.send('AT+CGACT=1,1', (e, r) => got3 = r);
+tr5.reply('\r\n+CTZV: +32,0\r\n+CGEV: ME PDN ACT 1\r\nOK\r\n');
+
+eq(urcs3, [ '+CTZV: +32,0', '+CGEV: ME PDN ACT 1' ],
+	'engine: URCs inside a command window reach on_urc');
+eq(got3?.lines, [], 'engine: ... and stay OUT of the response lines');
+
+// the running command's OWN prefix is its answer, never a URC — AT+CEREG?
+// legitimately replies "+CEREG:", and a +CEREG URC may ride along with it
+let urcs4 = [], got4 = null;
+let tr6 = fake_transport();
+let at6 = atcmd.create(tr6, { log: silent, on_urc: (l) => push(urcs4, l) });
+
+at6.send('AT+CEREG?', (e, r) => got4 = r);
+tr6.reply('\r\n+CEREG: 3,5,"718B","01D8A467",13,0,0\r\n+EONSNWNAME: 0\r\nOK\r\n');
+
+eq(got4?.lines, [ '+CEREG: 3,5,"718B","01D8A467",13,0,0' ],
+	'engine: the command\'s own prefix stays an answer');
+eq(urcs4, [ '+EONSNWNAME: 0' ], 'engine: the foreign URC beside it is dispatched');
+
+// a BARE-value answer (AT+CGMI -> "Fibocom") must survive a URC in the same
+// window: losing it degraded the modem to the generic vendor recipe for the
+// rest of the session
+let urcs5 = [], got5 = null;
+let tr7 = fake_transport();
+let at7 = atcmd.create(tr7, { log: silent, on_urc: (l) => push(urcs5, l) });
+
+at7.send('AT+CGMI', (e, r) => got5 = r);
+tr7.reply('\r\n+CGEV: ME PDN DEACT 1\r\nFibocom\r\nOK\r\n');
+
+eq(got5?.lines, [ 'Fibocom' ], 'engine: bare-value answer survives a URC beside it');
+eq(urcs5, [ '+CGEV: ME PDN DEACT 1' ], 'engine: the URC went to on_urc instead');
+
+// ... and a PREFIX-LESS urc must not be mistaken for that bare value
+let urcs6 = [], got6 = null;
+let tr8 = fake_transport();
+let at8 = atcmd.create(tr8, { log: silent, on_urc: (l) => push(urcs6, l) });
+
+at8.send('AT+CGMI', (e, r) => got6 = r);
+tr8.reply('\r\nRING\r\nFibocom\r\nOK\r\n');
+
+eq(got6?.lines, [ 'Fibocom' ], 'engine: a bare RING never becomes the manufacturer');
+eq(urcs6, [ 'RING' ], 'engine: prefix-less URC dispatched');
+
+// one buffer for the whole stream: a line split across a command boundary used
+// to be torn in half — its head dropped and its tail pushed into the NEXT
+// command's answer as if it were a reply
+let urcs7 = [], got7 = null;
+let tr9 = fake_transport();
+let at9 = atcmd.create(tr9, { log: silent, on_urc: (l) => push(urcs7, l) });
+
+tr9.reply('\r\n+CGEV: ME PDN');            // partial line, no newline yet
+at9.send('AT+CGMI', (e, r) => got7 = r);
+tr9.reply(' DEACT 1\r\nFibocom\r\nOK\r\n');
+
+eq(got7?.lines, [ 'Fibocom' ], 'engine: split line does not leak into the next answer');
+eq(urcs7, [ '+CGEV: ME PDN DEACT 1' ], 'engine: split URC is reassembled, not lost');
+
 // auth commands never log credentials
 let auth_logs = [];
 let tr4 = fake_transport();

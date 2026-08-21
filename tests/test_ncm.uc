@@ -810,7 +810,10 @@ push(scenarios, {
 			eq(settings?.ipv4?.addr, '192.0.2.190', 'fibocom ipv4 addr from CGPADDR');
 			eq(settings?.ipv4?.prefix, 32, 'fibocom ipv4 stays /32 (host-route model)');
 			eq(settings?.ipv4?.gateway, null, 'fibocom gateway stays null (device route + NOARP on rndis)');
-			eq(settings?.ipv4?.dns, [ '192.0.2.22' ], 'fibocom dns from the CGCONTRDP tail');
+			// BOTH resolvers survive: the local/gateway slots are empty, so the
+			// first DNS is no longer promoted to the address and then discarded
+			eq(settings?.ipv4?.dns, [ '192.0.2.1', '192.0.2.22' ],
+				'fibocom: both CGCONTRDP resolvers kept (none eaten as the address)');
 			eq(settings?.mtu, 1500, 'fibocom mtu falls back to the netdev mtu (1500)');
 
 			// IPv6 parity: the CGCONTRDP v6 line survives the static v4 path
@@ -1092,6 +1095,24 @@ eq(fb_slots.parse([]), null, 'fibocom gtdualsim parse: empty -> null');
 eq(ncm_vendors.vendor_for('MediaTek Fibocom Wireless Inc.'), ncm_vendors.VENDORS.fibocom,
 	'vendor_for: fibocom wins over the mediatek match');
 
+// The MODEL is the fallback key. AT+CGMI is the one identify answer a modem may
+// withhold — the T700 returns nothing at all for it while a PDN teardown runs —
+// and a null manufacturer used to drop the modem to `generic` for the whole
+// session, taking ip_config/dials/telemetry with it. AT+CGMM answered correctly
+// in the very same chain.
+eq(ncm_vendors.vendor_for(null, 'FM350-GL'), ncm_vendors.VENDORS.fibocom,
+	'vendor_for: empty CGMI falls back to the model (FM350-GL -> fibocom)');
+eq(ncm_vendors.vendor_for('', 'RG650E-EU'), ncm_vendors.VENDORS.quectel,
+	'vendor_for: model fallback resolves quectel');
+eq(ncm_vendors.vendor_for('', 'SLM770A'), ncm_vendors.VENDORS.meig,
+	'vendor_for: model fallback resolves meig');
+eq(ncm_vendors.vendor_for('Quectel', 'FM350-GL'), ncm_vendors.VENDORS.quectel,
+	'vendor_for: a known manufacturer still wins over the model');
+eq(ncm_vendors.vendor_for(null, 'WEIRD-9000'), ncm_vendors.VENDORS.generic,
+	'vendor_for: unknown on both keys -> generic');
+eq(ncm_vendors.vendor_name(ncm_vendors.VENDORS.fibocom), 'fibocom',
+	'vendor_name: recipe maps back to its key (for the log line)');
+
 push(scenarios, {
 	name: 's9f_fibocom_dual_slot',
 	script: fscript(),
@@ -1180,11 +1201,14 @@ push(scenarios, {
 		env.ctx.up((err, settings) => {
 			eq(err, null, 's9g: context up succeeds');
 			eq(settings?.ipv4?.addr, '192.0.2.190', 's9g: v4 from CGPADDR unaffected');
-			eq(settings?.ipv6, null, 's9g: DNS-pair tokens never applied as a v6 address');
-			// the pair DOES surface as DNS (GTDNS unsupported here -> fallback)
-			eq(settings?.ipv4?.dns,
+			eq(settings?.ipv6?.addr, null, 's9g: DNS tokens never applied as a v6 address');
+			ok(settings?.ipv6?.unmanaged, 's9g: v6 stays unmanaged (host v6 = RA/SLAAC)');
+			// the resolvers are IPv6, so they belong in the IPv6 bucket — they
+			// used to be dumped into ipv4.dns regardless of family
+			eq(settings?.ipv6?.dns,
 				[ '2001:4860:4860:0:0:0:0:8888', '2001:4860:0:0:0:0:0:1' ],
-				's9g: the DNS64 pair surfaces as dns (fallback)');
+				's9g: the v6 resolvers land in the v6 bucket');
+			eq(settings?.ipv4?.dns, [], 's9g: no v4 resolver on this line — none invented');
 			env.finish();
 		});
 	},
@@ -1205,9 +1229,11 @@ push(scenarios, {
 		env.ctx.up((err, settings) => {
 			eq(err, null, 's9h: context up succeeds');
 			ok(env.tr.saw(/^AT\+GTDNS=1$/) != null, 's9h: GTDNS queried');
-			eq(settings?.ipv4?.dns,
+			eq(settings?.ipv6?.dns,
 				[ '2001:4860:4860::8888', '2001:4860:4860::8844' ],
-				's9h: GTDNS resolvers win');
+				's9h: GTDNS v6 resolvers win — in the v6 bucket');
+			eq(settings?.ipv4?.dns, [ '192.0.2.1', '192.0.2.22' ],
+				's9h: v4 keeps its own CGCONTRDP resolvers (no cross-family mixing)');
 			env.finish();
 		});
 	},
@@ -1229,7 +1255,7 @@ push(scenarios, {
 		env.ctx.up((err, settings) => {
 			eq(err, null, 's9i: context up succeeds');
 			eq(settings?.ipv4?.addr, '192.0.2.190', 's9i: CGPADDR address wins (gateway token never the addr)');
-			eq(settings?.ipv4?.dns, [ '192.0.2.22' ], 's9i: v4 DNS tail intact');
+			eq(settings?.ipv4?.dns, [ '192.0.2.1', '192.0.2.22' ], 's9i: both v4 resolvers intact');
 			env.finish();
 		});
 	},
@@ -1275,8 +1301,8 @@ push(scenarios, {
 		env.ctx.up((err, settings) => {
 			eq(err, null, 's9k: context up succeeds');
 			eq(settings?.ipv4?.addr, '192.0.2.190', 's9k: v4 from CGPADDR');
-			eq(settings?.ipv4?.dns, [ '192.0.2.22' ],
-				's9k: empty v6 pair falls through to the CGCONTRDP v4 DNS (null, not [])');
+			eq(settings?.ipv4?.dns, [ '192.0.2.1', '192.0.2.22' ],
+				's9k: the CGCONTRDP v4 resolvers survive in full');
 			eq(settings?.ipv6, null, 's9k: no v6 surfaced');
 			env.finish();
 		});
@@ -1295,7 +1321,8 @@ push(scenarios, {
 	run: (env) => {
 		env.ctx.up((err, settings) => {
 			eq(err, null, 's9l: context up succeeds');
-			eq(settings?.ipv4?.dns, [ '192.0.2.22' ], 's9l: GTDNS ERROR -> v4 tail fallback');
+			eq(settings?.ipv4?.dns, [ '192.0.2.1', '192.0.2.22' ],
+				's9l: GTDNS ERROR -> both CGCONTRDP v4 resolvers');
 			env.finish();
 		});
 	},
@@ -1315,8 +1342,10 @@ push(scenarios, {
 	run: (env) => {
 		env.ctx.up((err, settings) => {
 			eq(err, null, 's9m: context up succeeds');
-			eq(settings?.ipv4?.dns, [ '2001:4860:4860::8888' ],
-				's9m: embedded-v4 GTDNS token skipped, real resolver kept');
+			eq(settings?.ipv6?.dns, [ '2001:4860:4860::8888' ],
+				's9m: embedded-v4 GTDNS token skipped, real v6 resolver kept');
+			eq(settings?.ipv4?.dns, [ '192.0.2.1', '192.0.2.22' ],
+				's9m: GTDNS carried no v4 resolver -> the CGCONTRDP v4 pair stands');
 			env.finish();
 		});
 	},
@@ -1383,6 +1412,48 @@ push(scenarios, {
 			eq(settings?.ipv6?.gateway, null, 's9p: no v6 gateway from the pair');
 			eq(settings?.ipv6?.dns, [ '2404:d800:f0:0:0:0:53:10', '2404:d800:f0:0:0:0:53:22' ],
 				's9p: the DNS64 pair rides in dns (the DNS-only bucket)');
+			env.finish();
+		});
+	},
+});
+
+// s9w: THE live WH3000 Pro / FM350-GL capture on Singtel, verbatim. Both
+// CGCONTRDP lines carry empty local+gateway slots and nothing but resolvers;
+// CGPADDR's v6 slot is the network-assigned interface identifier with a zeroed
+// prefix (host v6 = RA/SLAAC). Before the slot-aware parse this produced
+// ipv4.addr = 165.21.83.88 — a Singtel DNS server installed as the WAN address
+// (mwan3 "no usable default route", odhcpd ra_lifetime 0) — and on the v6 side
+// 2400:d800::1 pushed as a /128 whose /64 then landed on br-lan via RFC 7278.
+push(scenarios, {
+	name: 's9w_fibocom_live_singtel_capture',
+	script: fscript([
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 1,6,"internet.MNC001.MCC525.GPRS","","","165.21.100.88","165.21.83.88","","",0,,1280,,,,,,,,,,,,0',
+			'+CGCONTRDP: 1,6,"internet.MNC001.MCC525.GPRS","","","36.0.216.0.0.0.0.0.0.0.0.0.0.0.0.1","36.0.216.0.0.0.0.0.0.0.0.0.0.0.0.2","","",0,,1280,,,,,,,,,,,,0',
+		] },
+		{ re: /^AT\+CGPADDR=1$/, lines: [
+			'+CGPADDR: 1,"172.24.225.36","0.0.0.0.0.0.0.0.70.130.89.86.198.214.226.197"',
+		] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	datapath: { netdev: 'wwand0', fx: s9a_fx },
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 's9w: context up succeeds');
+
+			eq(settings?.ipv4?.addr, '172.24.225.36', 's9w: v4 address from CGPADDR');
+			ok(settings?.ipv4?.addr != '165.21.100.88' && settings?.ipv4?.addr != '165.21.83.88',
+				's9w: no DNS server was promoted to the v4 address');
+			eq(settings?.ipv4?.dns, [ '165.21.100.88', '165.21.83.88' ],
+				's9w: both v4 resolvers, in the v4 bucket');
+
+			// host v6 is RA/SLAAC only: no address, no gateway, resolvers kept
+			eq(settings?.ipv6?.addr, null, 's9w: no v6 address invented from a resolver');
+			eq(settings?.ipv6?.gateway, null, 's9w: no v6 gateway invented');
+			ok(settings?.ipv6?.unmanaged, 's9w: v6 marked unmanaged (host v6 = RA/SLAAC)');
+			eq(settings?.ipv6?.dns, [ '2400:d800:0:0:0:0:0:1', '2400:d800:0:0:0:0:0:2' ],
+				's9w: v6 resolvers in the v6 bucket, not mixed into ipv4.dns');
+
 			env.finish();
 		});
 	},
@@ -1490,15 +1561,29 @@ let cgp4 = ncm_vendors.parse_cgpaddr([ '+CGPADDR: 1,"0.0.0.0.0.0.0.0.0.1.0.0.192
 eq(cgp4?.addr, '192.0.2.48', 'parse_cgpaddr: embedded v4 extracted from the dotted token');
 eq(cgp4?.v6, null, 'parse_cgpaddr: no v6 in the embedded form');
 
-// the empty-local misread is REAL — the hook gates on the raw line before
-// this parser runs; here it must keep DNS extraction correct anyway
+// the empty-local form: fields 3 (<local_addr and subnet_mask>) and 4 (<gw_addr>)
+// are EMPTY and the only tokens are the resolvers. The parser must return NO
+// address — the misread it used to produce here (first DNS promoted to the
+// address) put a carrier resolver on the WAN and, via RFC 7278, its /64 on the
+// LAN. Field-seen on a WH3000 Pro / FM350-GL, on both families.
 let empty_rdp = modem_ncm.parse_cgcontrdp([
 	'+CGCONTRDP: 1,5,"internet","","","192.0.2.1","192.0.2.22"',
 ]);
 
-eq(empty_rdp.ipv4?.addr, '192.0.2.1', 'empty-local CGCONTRDP: gateway lands in the addr slot (hook gates on this)');
+eq(empty_rdp.ipv4?.addr, null, 'empty-local CGCONTRDP: empty address slot -> NO address');
 eq(empty_rdp.ipv4?.gateway, null, 'empty-local CGCONTRDP: no gateway slot');
-eq(empty_rdp.ipv4?.dns, [ '192.0.2.22' ], 'empty-local CGCONTRDP: DNS tail intact');
+eq(empty_rdp.ipv4?.dns, [ '192.0.2.1', '192.0.2.22' ], 'empty-local CGCONTRDP: BOTH resolvers kept as dns');
+
+// the same shape on the v6 line — the live WH3000 capture. 2400:d800::1/::2 are
+// Singtel's resolvers; one of them was being pushed as the host address.
+let empty_rdp6 = modem_ncm.parse_cgcontrdp([
+	'+CGCONTRDP: 1,6,"internet","","","36.0.216.0.0.0.0.0.0.0.0.0.0.0.0.1","36.0.216.0.0.0.0.0.0.0.0.0.0.0.0.2"',
+]);
+
+eq(empty_rdp6.ipv6?.addr, null, 'empty-local CGCONTRDP v6: no address from a DNS slot');
+eq(empty_rdp6.ipv6?.gateway, null, 'empty-local CGCONTRDP v6: no gateway invented');
+eq(empty_rdp6.ipv6?.dns, [ '2400:d800:0:0:0:0:0:1', '2400:d800:0:0:0:0:0:2' ],
+	'empty-local CGCONTRDP v6: both resolvers kept as dns');
 
 // embedded-v4 on the CGCONTRDP path (the v6-only PDP): the 16-octet token
 // must extract the real v4 — and never corrupt the v6 bucket even when its

@@ -441,6 +441,44 @@ export function open_transport(path, baud, log)
 
 // --- engine ------------------------------------------------------------------
 
+// Unsolicited result codes seen on the control ports we drive. Kept HERE as the
+// single source of truth: the same list used to live (in two slightly different
+// spellings) in modem_ncm's identify filter and its URC handler, so a prefix
+// added to one was silently missing from the other.
+//
+// A prefix in this list is only treated as unsolicited when it differs from the
+// running command's OWN prefix — AT+CEREG? legitimately answers "+CEREG:", and
+// its answer must not be mistaken for the URC of the same name.
+export const DEFAULT_URC_PREFIXES = [
+	'CREG', 'CGREG', 'CEREG', 'C5GREG',   // registration
+	'CGEV',                                // PDP/PDN lifecycle
+	'CTZV', 'CTZE', 'NITZ',                // time zone
+	'CSCON',                               // signalling connection
+	'ESIMS', 'CIREPI', 'CNEMIU', 'EONSNWNAME',
+	'CMTI', 'CMT', 'CDS', 'CBM',           // SMS delivery
+	'CUSD', 'CIEV', 'QIND',
+	'RSSI', 'MODE', 'SIMST', 'SRVST',      // ^-prefixed (Huawei/MeiG/Sierra)
+];
+
+// Unsolicited codes that carry NO prefix at all (V.250 call progress). They
+// matter because a bare answer — AT+CGMI's "Fibocom", AT+CGMM's "FM350-GL",
+// the IMEI/IMSI digits — is taken verbatim by its caller: without this list a
+// stray RING landing in that window would become the manufacturer. No identify
+// value can collide with them, so matching the whole line exactly is safe.
+export const DEFAULT_URC_BARE = [
+	'RING', 'NO CARRIER', 'BUSY', 'NO ANSWER', 'NO DIALTONE', 'RING 1',
+];
+
+// the result-code prefix a command answers with: AT+CEREG? -> CEREG,
+// AT+CGACT=1,1 -> CGACT. Commands whose answer is a bare value (AT+CGMI)
+// still resolve to their own name, which simply never appears in the reply.
+function cmd_prefix(cmd)
+{
+	let m = match(cmd ?? '', /^AT[+^$]([A-Z0-9]+)/i);
+
+	return m ? uc(m[1]) : null;
+};
+
 export function create(transport, opts)
 {
 	let log = opts?.log ?? ((level, msg) => warn(sprintf('%s: at: %s\n', level, msg)));
@@ -448,9 +486,21 @@ export function create(transport, opts)
 	let self = {
 		queue: [],
 		current: null,
+		// ONE buffer for the whole byte stream. The modem sends a single
+		// stream; splitting it per command state used to tear a line that
+		// straddled a command boundary into two buffers — its head was
+		// dropped and the tail was pushed into the NEXT command's lines as
+		// if it were an answer (a bare-value command like AT+CGMI would
+		// have taken that fragment as the manufacturer).
 		buffer: '',
-		urc_buffer: '',
 		on_urc: opts?.on_urc ?? null,
+		// prefixes that are unsolicited on this port. A URC is framed exactly
+		// like a result code (manual 2.4.3: <CR><LF>…<CR><LF>), so it always
+		// arrives as a WHOLE line and can be classified per line — but it may
+		// land between the lines of a multi-line response, which is why every
+		// line is classified, not just the first.
+		urc_prefixes: opts?.urc_prefixes ?? DEFAULT_URC_PREFIXES,
+		urc_bare: opts?.urc_bare ?? DEFAULT_URC_BARE,
 	};
 
 	let finish, next;
@@ -478,31 +528,68 @@ export function create(transport, opts)
 		return replace(cmd, /(,[^,"]*)(,[^,"]*)$/, ',***,***');
 	};
 
-	// drain complete lines from a buffer field: URCs can arrive while idle
+	// is this line an unsolicited code rather than `cur`'s answer? A URC is
+	// framed exactly like a result code, so the decision is per LINE. The
+	// running command's own prefix always wins: AT+CEREG? answers "+CEREG:",
+	// and that answer must stay an answer.
+	let is_urc_line = (line, own) => {
+		// prefixed form. The prefix class covers AT+/AT^/AT$ — Huawei, MeiG
+		// and Sierra emit vendor URCs with ^ and $.
+		let m = match(line, /^[+^$]([A-Z0-9]+)[:\s]/);
+
+		if (m) {
+			if (own != null && m[1] == own)
+				return false;   // the running command's own answer
+
+			for (let p in self.urc_prefixes)
+				if (m[1] == p)
+					return true;
+
+			return false;
+		}
+
+		// prefix-less call-progress codes: compared as a WHOLE line so a bare
+		// identify value can never be swallowed by a substring match
+		let u = uc(trim(line));
+
+		for (let b in self.urc_bare)
+			if (u == b)
+				return true;
+
+		return false;
+	};
+
+	let emit_urc = (line) => {
+		if (self.on_urc)
+			self.on_urc(line);
+		else
+			log('debug', sprintf('urc: %s', line));
+	};
+
+	// drain complete lines while NO command is running: URCs arrive while idle
 	// AND buffered BEHIND a finished command (the T700's first +CTZV lands
 	// right after AT+CTZR=1's OK, a +CGEV right after a dial read) — surface
-	// URC-looking lines, discard the rest
-	let drain_urcs = (key) => {
+	// URC-looking lines, discard the rest. The partial tail stays in the
+	// buffer: it is the head of a line whose rest has not arrived yet, and
+	// dropping it is how a URC used to get lost across a command boundary.
+	let drain_urcs = () => {
 		let idx;
 
-		while ((idx = index(self[key], '\n')) >= 0) {
-			let line = trim(substr(self[key], 0, idx));
+		while ((idx = index(self.buffer, '\n')) >= 0) {
+			let line = trim(substr(self.buffer, 0, idx));
 
-			self[key] = substr(self[key], idx + 1);
+			self.buffer = substr(self.buffer, idx + 1);
 
 			if (line == '' || !match(line, /^\s*\+[A-Z]/))
 				continue;
 
-			if (self.on_urc)
-				self.on_urc(line);
-			else
-				log('debug', sprintf('urc: %s', line));
+			emit_urc(line);
 		}
 	};
 
 	// drain leftover URCs BEFORE the callback — it may synchronously queue
-	// the next command, which resets the buffer
-	let dispatch_urcs = () => drain_urcs('buffer');
+	// the next command
+	let dispatch_urcs = () => drain_urcs();
 
 	finish = (err, lines) => {
 		let cur = self.current;
@@ -538,8 +625,11 @@ export function create(transport, opts)
 
 		let cur = self.current = shift(self.queue);
 
-		self.buffer = '';
+		// the buffer is NOT cleared: it belongs to the byte stream, not to a
+		// command. Anything still in it is either a partial line whose rest is
+		// on the way, or idle noise the line loop below skips.
 		cur.lines = [];
+		cur.prefix = cmd_prefix(cur.cmd);
 
 		cur.timer = uloop.timer(cur.timeout, () => {
 			log('warn', sprintf('timeout waiting for reply to %s', redact(cur.cmd)));
@@ -552,23 +642,28 @@ export function create(transport, opts)
 	transport.on_data((chunk) => {
 		let cur = self.current;
 
+		self.buffer += chunk;
+
 		if (!cur) {
-			// unsolicited data outside a command: buffer it and surface
-			// URC-looking lines (+CODE...), discard the rest
-			self.urc_buffer += chunk;
-			drain_urcs('urc_buffer');
+			// unsolicited data outside a command: surface URC-looking lines
+			// (+CODE...), discard the rest
+			drain_urcs();
 			return;
 		}
-
-		self.buffer += chunk;
 
 		// PDU-prompt commands (AT+CMGS=<len>): the modem answers with a bare
 		// '> ' prompt (NO newline) and then waits for the payload + Ctrl-Z. Send
 		// it once the prompt appears, before the line loop (which needs '\n').
-		if (cur.payload != null && !cur.payload_sent && index(self.buffer, '>') >= 0) {
-			cur.payload_sent = true;
-			self.buffer = '';
-			transport.write(cur.payload + '\x1a');
+		if (cur.payload != null && !cur.payload_sent) {
+			let p = index(self.buffer, '>');
+
+			if (p >= 0) {
+				cur.payload_sent = true;
+				// consume only THROUGH the prompt — wiping the whole buffer
+				// would also drop anything the modem already sent behind it
+				self.buffer = substr(self.buffer, p + 1);
+				transport.write(cur.payload + '\x1a');
+			}
 		}
 
 		let idx;
@@ -591,6 +686,16 @@ export function create(transport, opts)
 
 			if (m)
 				return finish({ error: lc(m[1]), code: m[2] }, cur.lines);
+
+			// a URC that lands between the lines of a response is NOT part of
+			// the answer: route it to the state machine instead of letting it
+			// pose as a reply line (it used to be pushed here and never
+			// reached on_urc at all — every PDN/registration event arriving
+			// inside a command window was lost).
+			if (is_urc_line(line, cur.prefix)) {
+				emit_urc(line);
+				continue;
+			}
 
 			push(cur.lines, line);
 		}
