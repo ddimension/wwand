@@ -478,10 +478,26 @@ function run_daemon()
 
 				conn.defer('network.interface', 'status', { interface: name },
 					(ret, reply) => {
-						// an instance exists (ours or a user's static section) —
-						// netifd manages it (auto), nothing to create
-						if (ret == 0)
-							return;
+						// An instance exists (ours or a user's static section) —
+						// netifd manages it, so there is nothing to CREATE. It
+						// still needs an explicit up: whether the subinterface
+						// exists says nothing about whether its v6 client is
+						// running against the family we just connected with.
+						// Switching the APN from ipv4 to ipv6-only (or ipv4v6)
+						// changes nothing in uci, so netifd never re-evaluates
+						// the section and odhcp6c keeps its old state — field-
+						// seen on the FM350-GL, where only a REBOOT brought v6
+						// up again. `up` is idempotent for netifd and restarts
+						// the client, which re-solicits (and may reconfigure).
+						// The caller only gets here for an ipv4v6/ipv6 context
+						// (daemon.uc gates on pdp_type != 'ipv4').
+						if (ret == 0) {
+							logmod.log('info', sprintf('dhcpv6 subinterface %s: re-running up (v6-capable context connected)',
+								name));
+
+							return conn.defer('network.interface', 'up', { interface: name },
+								netifd_cb('up ' + name));
+						}
 
 						let blob = { name: name, proto: 'dhcpv6', device: want, auto: true };
 
