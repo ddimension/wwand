@@ -74,9 +74,23 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: shellcheck files/
         # -S error only: OpenWrt init/hotplug scripts source procd/netifd
-        # helpers shellcheck cannot see; style warnings would be noise
+        # helpers shellcheck cannot see; style warnings would be noise.
+        #
+        # The file list is DERIVED, not hand-kept. The hand-kept one drifted
+        # both ways: it broke this job when files/wwand.defaults was removed,
+        # and it had silently never linted files/wwand.hotplug.wwan.
+        #
+        # Selection cannot go by shebang — the hotplug snippets have none, they
+        # are sourced by the hotplug framework. So it is everything tracked
+        # under files/ minus the two things that are not shell:
+        #   files/wwand-migrate  is ucode (#!/usr/bin/env ucode)
+        #   files/wwand.config   is a UCI config sample, not a script
+        # Adding a new shell file needs no change here; adding a new NON-shell
+        # one fails loudly, which is the right way round.
         run: |
-          shellcheck -S error -s sh \
-            files/wwand.init files/wwand.defaults files/wwand-proto.sh \
-            files/wwand.hotplug files/wwand.hotplug.net files/wwand.hotplug.tty \
-            tests/run_tests.sh
+          set -eu
+          list=$(git ls-files 'files/*' 'tests/*.sh' \
+                 | grep -vE '^files/(wwand-migrate|wwand\.config)$')
+          echo "linting:"; echo "$list" | sed 's/^/  /'
+          # shellcheck disable=SC2086  # word splitting is intended
+          shellcheck -S error -s sh $list
