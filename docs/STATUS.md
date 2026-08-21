@@ -1,7 +1,35 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-20. 47 host suites, all green._
+_Last updated: 2026-08-21. 47 host suites, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
+
+## Audit follow-up: eSIM quiet refcount, slot-switch watchdog (2026-08-21)
+
+Post-merge audit of the FM350-GL round; two concurrency/liveness gaps closed
+(both regression-tested — the new checks fail on the pre-fix sources).
+
+- **eSIM quiet mode is a refcount, not a flag** (`esim_bridge.uc`). The daemon's
+  bring-up eSIM refresh and a user op share `modem._esim_op`; as a bool the
+  first completion re-opened the AT queue while the other op was still running,
+  so a long APDU run could be starved behind URC poll bursts after all. Each op
+  now holds a `quiet_claim` released exactly once (double-release guarded), and
+  the ops that outlive their ack (in-modem AT download, lpac download,
+  notif-process) raise their long-lived claim BEFORE the ack, so the count never
+  dips to zero in between. Readers still only test truthiness.
+- **Slot-switch re-enumeration watchdog** (`modem_ncm.uc`). `step_simslot` ends
+  the switch with a CFUN reset and stops the modem for the re-enumeration the
+  hotplug 'add' restarts it from — a firmware that keeps the USB device across
+  the reset fires no hotplug at all and the modem sat ABSENT forever. A
+  `timing.reenum` (60 s) watchdog now resumes the bring-up in place; `start()`
+  is state-guarded, so a modem the hotplug already restarted is untouched.
+- **One switch attempt per modem object** (same path): the reset re-runs the
+  whole chain, so a firmware that accepts `GTDUALSIM=` without ever making the
+  slot active would reset in a loop (true before the watchdog too, via the
+  hotplug restart). The second pass only reads the slot status and reports where
+  we ended up. An `unchanged` short-circuit does not count as the attempt.
+- Left as-is by decision: the `nudge_rs` disable_ipv6 window vs a static v6 on
+  RNDIS (RA-only on the T700), and `ensure_wan6` rewriting a same-named
+  non-dhcpv6 user section.
 
 ## FM350-GL field round: RNDIS v6 subif, EN-DC merge, netdev counters (2026-08-20)
 

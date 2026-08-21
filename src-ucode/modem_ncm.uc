@@ -27,6 +27,12 @@ const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
 	reg_poll: 2000,
 	at_drain: 60000,
+	// grace period for the USB re-enumeration a slot-switch CFUN reset
+	// triggers (step_simslot's watchdog). Generous on purpose: a real
+	// re-enumeration must always win the race (the T700 comes back slowly),
+	// and the watchdog only has to self-heal a firmware that keeps the
+	// device across the reset — where nothing else would ever fire.
+	reenum: 60000,
 };
 
 // The vendor model (PDP/auth builders, per-vendor dial tables + recipes,
@@ -178,6 +184,7 @@ export function create(opts)
 
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, reg_poll_timer = null, settle_timer = null;
+	let reenum_timer = null;   // slot-switch re-enumeration watchdog (step_simslot)
 	let poll_inflight = false;   // one register-poll chain at a time (URC fast-path coalescing)
 	let poll;   // the register poll (forward-declared; the URC fast path re-runs it)
 
@@ -677,8 +684,33 @@ export function create(opts)
 		if (!want || !self.vendor?.slots)
 			return step_sim();
 
+		// ONE switch attempt per modem object: the switch ends in a CFUN reset
+		// that re-runs this whole chain (via the hotplug restart, or the
+		// watchdog below — both reuse this object). A firmware that accepts
+		// the command without ever making the slot active would otherwise
+		// reset in a loop. The second pass only reports where we ended up.
+		if (self._slot_switch_tried) {
+			self.slot_status((serr, slots) => {
+				let act = filter(slots ?? [], (s) => s.active)[0]?.physical;
+
+				if (act != want)
+					log('warn', sprintf('sim_slot %d: still not active after the switch + reset (active slot %s) — continuing there',
+						want, act ?? '?'));
+				else
+					log('info', sprintf('sim_slot %d active after the switch', want));
+
+				step_sim();
+			});
+			return;
+		}
+
+		self._slot_switch_tried = true;
+
 		sim.switch_slot(self, want, (err, res) => {
 			if (res?.unchanged) {
+				// nothing was sent and nothing reset — this does not count
+				// as the one attempt
+				self._slot_switch_tried = false;
 				log('info', sprintf('sim_slot %d already active', want));
 				return step_sim();
 			}
@@ -690,9 +722,26 @@ export function create(opts)
 
 			// the switch fired the CFUN reset — the modem re-enumerates and
 			// the daemon re-runs the bring-up on the configured slot (the
-			// device-gone path). Nothing further to do on this instance.
+			// hotplug 'add' restarts every ABSENT modem that has no AT port).
 			log('notice', sprintf('sim_slot %d: switched, modem re-enumerating', want));
 			self.stop();
+
+			// ...but only IF it re-enumerates: firmwares that keep the USB
+			// device across the CFUN reset fire no hotplug at all, and this
+			// object would sit ABSENT forever. Resume the bring-up in place
+			// once the reset has had time to settle. start() is state-guarded
+			// (self.at set / state != ABSENT), so a modem the hotplug already
+			// restarted is left untouched — the timer is armed AFTER stop(),
+			// whose teardown() would otherwise cancel it right away.
+			reenum_timer = uloop.timer(self.timing.reenum, () => {
+				reenum_timer = null;
+
+				if (self.at || self.state != 'ABSENT')
+					return;   // the hotplug path already restarted us
+
+				log('notice', sprintf('sim_slot %d: no re-enumeration after the switch, resuming the bring-up in place', want));
+				self.start();
+			});
 		});
 	};
 
@@ -1112,12 +1161,12 @@ export function create(opts)
 
 	self.teardown = function() {
 		for (let t in [ retry_timer, reg_timer, reg_poll_timer, settle_timer, at_drain_timer,
-		                telemetry_timer ])
+		                telemetry_timer, reenum_timer ])
 			if (t)
 				t.cancel();
 
 		retry_timer = reg_timer = reg_poll_timer = settle_timer = at_drain_timer = null;
-		telemetry_timer = null;
+		telemetry_timer = reenum_timer = null;
 		telem_watch.stop();
 
 		modem_common.close_at(self);

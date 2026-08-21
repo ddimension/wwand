@@ -445,6 +445,15 @@ see [Configuration](#configuration). Physical slot switching:
 `ubus call wwand modem_sim_switch_slot` or the SIM panel in LuCI Modem Tools
 (`option sim_slot` selects the boot-time slot).
 
+On the **NCM/AT backend** the slot is switched through the vendor slot recipe
+(Fibocom `AT+GTDUALSIM`; a modem without a recipe raises a `sim_slot` config
+warning and keeps the active slot). The switch always ends in a modem reset, so
+bring-up asserts it **once per modem**: the reset normally re-enumerates the USB
+device and the hotplug restarts the bring-up on the new slot; if the firmware
+keeps the device across the reset a 60 s watchdog resumes the bring-up in place.
+Should the slot still not be the configured one on that second pass, wwand logs
+a warning and continues on the active slot rather than resetting again.
+
 ### eSIM: download and switch profiles
 
 LuCI → Modem Tools → eSIM (or `ubus call wwand modem_esim`): list profiles,

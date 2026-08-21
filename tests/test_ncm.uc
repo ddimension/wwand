@@ -74,6 +74,9 @@ function at_mock(handlers)
 				return c;
 		return null;
 	};
+	// how often a command was written — distinguishes a re-run bring-up from
+	// the first one (the written history survives a close/re-open)
+	self.count = (re) => length(filter(self.written, (c) => match(c, re)));
 
 	return self;
 }
@@ -133,15 +136,18 @@ function run_next()
 	modem = modem_ncm.create({
 		id: s.name, device: '/dev/cdc-wdm0',
 		config: { tty: '/dev/ttyUSB2', stats_interval: 1, zero_rx_timeout: 0, ...(s.mconfig ?? {}) },
-		timing: { settle: 1, reg_timeout: 500, reg_poll: 5, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		timing: { settle: 1, reg_timeout: 500, reg_poll: 5, backoff_min: 1, backoff_max: 5, at_drain: 1,
+		          ...(s.mtiming ?? {}) },
 		datapath: s.datapath,
-		at: { open_transport: () => tr },   // inject the scripted tty
+		// inject the scripted tty; a re-opened tty is not closed (a scenario
+		// that restarts the modem re-opens the same mock and keeps its history)
+		at: { open_transport: () => { tr.closed = false; return tr; } },
 		deps: {
 			log: () => null,
 			on_event: (m, event, data) => {
 				push(mevents, { event: event, data: data });
 
-				if (event == 'registered' && !ctx) {
+				if (event == 'registered' && !ctx && !s.run_at_start) {
 					ctx = context_ncm.create({
 						name: 'wan', modem: m, config: s.cconfig,
 						timing: s.ctx_timing,
@@ -160,7 +166,23 @@ function run_next()
 
 	guard = uloop.timer(3000, () => { ok(false, s.name + ': timed out'); finish(); });
 	modem.start();
+
+	// a scenario that never reaches 'registered' on its own (the slot switch
+	// stops the modem before the SIM step) drives itself from start()
+	if (s.run_at_start)
+		s.run({ ctx: null, modem: modem, tr: tr,
+		        cevents: cevents, mevents: mevents, finish: finish });
 }
+
+// poll `cond` until it holds, then run `then` (bounded — the scenario guard
+// timer reports a real hang; the assertions after `then` report the failure)
+let wait_for;
+wait_for = (cond, then, n) => {
+	if (cond() || (n ?? 0) > 400)
+		return then();
+
+	uloop.timer(5, () => wait_for(cond, then, (n ?? 0) + 1));
+};
 
 function last_event(arr, name)
 {
@@ -1099,6 +1121,41 @@ push(scenarios, {
 					eq(res?.unchanged, true, 's9f back-switch short-circuits (mock still on SUB1)');
 					env.finish();
 				});
+			});
+		});
+	},
+});
+
+// s9h: slot-switch re-enumeration watchdog + the one-attempt latch.
+// `option sim_slot 2` with the mock permanently reporting SUB1: step_simslot
+// fires the switch (GTDUALSIM=1 + CFUN reset) and stops the modem for the
+// expected re-enumeration — which never comes here (no hotplug on a mocked
+// tty, exactly like a firmware that keeps the USB device across the reset).
+// The watchdog must resume the bring-up in place instead of leaving the modem
+// parked ABSENT forever, and the latch must not fire a SECOND switch (that
+// would reset-loop on a firmware that never takes the switch).
+push(scenarios, {
+	name: 's9h_fibocom_slot_switch_watchdog',
+	script: fscript(),
+	mconfig: { sim_slot: 2 },
+	mtiming: { reenum: 20 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run_at_start: true,
+	run: (env) => {
+		// phase 1: the switch fires and parks the modem for the re-enumeration
+		wait_for(() => env.tr.saw(/^AT\+CFUN=1,1$/) != null, () => {
+			ok(env.tr.saw(/^AT\+GTDUALSIM=1$/) != null, 's9h slot switch issued');
+
+			// phase 2: nothing re-enumerates — the watchdog has to carry the
+			// bring-up through to registration on its own
+			wait_for(() => any_event(env.mevents, 'registered'), () => {
+				ok(any_event(env.mevents, 'registered'),
+					's9h watchdog resumed the bring-up in place (no hotplug came)');
+				eq(env.tr.count(/^AT\+CGMI$/), 2,
+					's9h exactly one restart of the identify chain');
+				eq(env.tr.count(/^AT\+GTDUALSIM=1$/), 1,
+					's9h one switch attempt per modem object (no CFUN reset loop)');
+				env.finish();
 			});
 		});
 	},

@@ -96,7 +96,9 @@ let esim_fake = {
 	del: (m, s, iccid, cb) => cb(null, { ok: true, via: 'esim' }),
 };
 
-let entry = { modem: { id: 'm0', _esim_op: false } };
+// _esim_op is a REFCOUNT (0 = idle, n>0 = quiet); readers only test
+// truthiness, so the assertions below pin exactly that contract
+let entry = { modem: { id: 'm0', _esim_op: 0 } };
 let br = bridge.create({ esim: esim_fake, log: () => null,
 	modem_of: (r) => (r == 'm0') ? entry : null,
 	lpac_path: '/nonexistent-lpac' });
@@ -109,15 +111,23 @@ let expect = (op, params, err_name, then) =>
 let run_chain;   // forward-declared (self-referencing arrow — ucode TDZ)
 run_chain = (idx) => {
 	if (idx >= length(chain)) {
-		// the last download's run is still open (its completion was parked).
-		// One tick lets the ack's quiet re-raise unwind (it runs after the
-		// synchronous done() chain) — then: raised while running, cleared
-		// when the modem finishes.
+		// the last download's run is still open (its completion was parked):
+		// quiet stays raised until the modem reports the download finished.
 		uloop.timer(0, () => {
-			eq(entry.modem._esim_op, true, 'router: quiet raised while the download runs');
-			dl_completion(null, { ret: 0 });   // simulate the modem finishing
-			eq(entry.modem._esim_op, false, 'router: quiet cleared at download completion');
-			done('test_esim_bridge');
+			eq(!!entry.modem._esim_op, true, 'router: quiet raised while the download runs');
+
+			// the refcount contract: a SECOND op that starts and finishes
+			// while the download is still running must not re-open the AT
+			// queue — as a plain flag its done() cleared the download's
+			// claim too (the daemon's bring-up refresh races user ops here)
+			br.modem_esim('m0', 'profiles', {}, () => {
+				eq(!!entry.modem._esim_op, true,
+					'router: a parallel op completing leaves the running download quiet');
+
+				dl_completion(null, { ret: 0 });   // simulate the modem finishing
+				eq(!!entry.modem._esim_op, false, 'router: quiet cleared at download completion');
+				done('test_esim_bridge');
+			});
 		});
 		return;
 	}

@@ -84,6 +84,38 @@ return {
 		let dl = { state: 'idle' };   // one host download at a time
 		let mgmt_busy = false;        // one lpac profile-management op at a time
 
+		// --- quiet mode (modem._esim_op) ------------------------------------
+		// While an eSIM op runs, URC-driven background actions (the NCM
+		// register fast-path poll, +CGEV pokes) stay out of the AT queue so a
+		// long APDU run is not starved behind poll bursts. It is a REFCOUNT,
+		// not a flag: the daemon's bring-up eSIM refresh and a concurrent user
+		// op both raise it, and as a plain bool the first completion re-opened
+		// the queue while the other op was still running. Readers only test
+		// truthiness, so 0 (idle) / n>0 (quiet) keeps their contract.
+		let quiet_raise = (m) => {
+			if (m)
+				m._esim_op = (+(m._esim_op ?? 0)) + 1;
+		};
+
+		// one claim on the quiet mode, released exactly once: a long op whose
+		// completion handler is also reachable from an error path must never
+		// release twice — that would re-open the queue for a parallel op.
+		let quiet_claim = (m) => {
+			let released = false;
+
+			quiet_raise(m);
+
+			return () => {
+				if (released || !m)
+					return;
+
+				released = true;
+
+				let n = (+(m._esim_op ?? 0)) - 1;
+				m._esim_op = (n > 0) ? n : 0;
+			};
+		};
+
 		// spawn lpac for a host-side op (download / chip / notif-list /
 		// notif-process) and bridge its stdio APDU protocol; on_done(err, log)
 		let lpac_run = (ref, slot, op, code, conf, on_done) => {
@@ -221,13 +253,15 @@ return {
 
 		// host-side download via lpac; on success chain the install-ack
 		// notification to the SM-DP+ (ES9+) unless auto_notify is disabled
-		let download_lpac = (ref, slot, code, conf, cb, auto_notify) => {
+		// `release` is this run's quiet-mode claim (quiet_claim): the lpac run
+		// outlives the ack, so the caller raises it before starting us and we
+		// drop it when the run really ends.
+		let download_lpac = (ref, slot, code, conf, cb, auto_notify, release) => {
 			dl = { state: 'running', via: 'lpac', logf: ESIM_LOGF, phase: 'download' };
 
 			let finish = (state, extra) => {
 				dl = { state, via: 'lpac', ...extra };
-				let m = modem_of(ref)?.modem;
-				if (m) m._esim_op = false;   // run finished — URCs may resume
+				release?.();   // run finished — this op's quiet claim is dropped
 				log('notice', sprintf('modem %s: eSIM download %s%s', ref, state,
 					extra?.notified != null ? sprintf(' (ack %s)', extra.notified ? 'sent' : 'skipped') : ''));
 			};
@@ -254,6 +288,7 @@ return {
 
 			if (!p) {
 				dl = { state: 'failed', via: 'lpac', code: -1 };
+				release?.();   // never started — drop the claim right away
 				return cb({ error: 'esim_not_installed' });
 			}
 
@@ -330,13 +365,12 @@ return {
 
 				let slot = +(params?.slot ?? 1);
 				let iccid = params?.iccid ?? '';
-				// quiet mode: while an eSIM op runs, URC-driven background
-				// actions (register fast-path polls, +CGEV pokes) stay out of
-				// the AT queue — long APDU ops must not have their commands
-				// starved behind poll bursts
-				entry.modem._esim_op = true;
+				// quiet mode for the duration of this call (see quiet_claim);
+				// ops that outlive their ack raise a SECOND, longer-lived
+				// claim of their own below
+				let release = quiet_claim(entry.modem);
 				let done = (err, res) => {
-					entry.modem._esim_op = false;
+					release();
 					cb(err ? { error: 'esim', detail: err } : null, res);
 				};
 
@@ -368,27 +402,32 @@ return {
 					return esim.backend(entry.modem, slot, (be) => {
 						if (be == 'at') {
 							dl = { state: 'running', via: 'modem' };
+
+							// the in-modem download runs long after this ack —
+							// its own claim spans the whole run and is raised
+							// BEFORE the ack, so the count never dips to zero
+							// in between (nor if download_at answers inline)
+							let at_quiet = quiet_claim(entry.modem);
+
 							esim.download_at(entry.modem, code, params?.confirmation_code, (err, res) => {
 								dl = err
 									? { state: 'failed', via: 'modem', error: err.error, ret: err.ret }
 									: { state: 'done', via: 'modem', ret: res?.ret };
-								entry.modem._esim_op = false;   // run finished — URCs may resume
+								at_quiet();   // run finished — URCs may resume
 								log('notice', sprintf('modem %s: eSIM AT download %s', ref, dl.state));
 							});
 
-							// the in-modem download runs long after this ack —
-							// keep the quiet mode up for its whole duration
 							done(null, { started: true, via: 'modem' });
-							entry.modem._esim_op = true;
 							return;
 						}
 
+						// same for the host-side lpac run: raise its claim
+						// first, download_lpac drops it when the run ends (or
+						// immediately when the spawn never happened)
+						let lpac_quiet = quiet_claim(entry.modem);
+
 						download_lpac(ref, slot, code, params?.confirmation_code,
-							(err, res) => {
-								done(err, res);
-								if (!err)
-									entry.modem._esim_op = true;   // stays quiet for the whole lpac run
-							}, auto_notify);
+							done, auto_notify, lpac_quiet);
 					});
 				}
 
@@ -411,29 +450,33 @@ return {
 						return done({ error: 'esim_not_installed' });
 					return;
 
-				case 'notify':
+				case 'notify': {
 					if (dl?.state == 'running' || mgmt_busy)
 						return done({ error: 'busy' });
 
 					dl = { state: 'running', via: 'notify', logf: ESIM_LOGF };
 
+					// notif-process runs long after this ack — its own claim
+					// spans the whole run (raised before the ack, dropped by
+					// the completion handler or on a failed spawn)
+					let notify_quiet = quiet_claim(entry.modem);
+
 					if (!lpac_run(ref, slot, 'notif-process', '', '', (err, out) => {
 						dl = { state: err ? 'failed' : 'done', via: 'notify',
 						       code: err?.code ?? 0, log: out };
-						entry.modem._esim_op = false;   // run finished — URCs may resume
+						notify_quiet();   // run finished — URCs may resume
 						log('notice', sprintf('modem %s: eSIM notifications %s', ref, dl.state));
 					})) {
 						// lpac missing / spawn failed: never leave dl wedged
 						// 'running' — every later download/notify would read busy
 						dl = { state: 'failed', via: 'notify', code: -1 };
+						notify_quiet();
 						return done({ error: 'esim_not_installed' });
 					}
 
-					// notif-process runs long after this ack — keep the quiet
-					// mode up for its whole duration
 					done(null, { started: true, via: 'notify' });
-					entry.modem._esim_op = true;
 					return;
+				}
 
 				case 'profiles': return esim.profiles(entry.modem, slot, done);
 				case 'eid':      return esim.get_eid(entry.modem, slot, done);
