@@ -3,6 +3,45 @@
 _Last updated: 2026-08-21. 47 host suites, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
 
+## ucode bytecode: source by default, and a guard for the mismatch (2026-08-21)
+
+Raised in the openwrt/packages review (#30185): precompiled bytecode is coupled
+to the interpreter, and the package cannot express that.
+
+The coupling is real and the suggested fix does not cover it. Bytecode carries
+`UCODE_BYTECODE_VERSION` (ucode's `include/ucode/vm.h`, currently `0x02`), which
+is a VM constant entirely separate from libucode's `PKG_ABI_VERSION` / SONAME
+(`20230711`) — the two move independently, so depending on the ABI-versioned
+name would be a proxy that only sometimes holds. No package in openwrt or the
+packages feed ships precompiled ucode at all, which is why no mechanism exists.
+
+Failure is clean but fatal: `program.c` rejects a mismatched version with
+"Bytecode version mismatch, got 0xNN, expected 0xNN" and the load fails, so the
+daemon exits at once — and procd respawns it forever with nothing explaining
+why.
+
+- **Source is now the default** (`CONFIG_WWAND_UCODE_PRECOMPILE`, default off —
+  the old `WWAND_UCODE_SOURCE` opt-out is inverted). Precompiling stays
+  available for a self-built image, where ucode and wwand come from the same
+  tree and the coupling holds by construction. In a feed, where ucode upgrades
+  on its own, we must not create it.
+- **The init script refuses instead of respawning** (`wwand_modules_loadable`):
+  it probes one module through the system ucode and, on exactly the two
+  bytecode failures, logs what happened and what to do. Any other import error
+  falls through, so an unrelated problem never blocks the daemon. Verified
+  against a hand-patched version byte (`0x02` -> `0x09`), which produces the
+  expected message and is caught.
+- What the precompile is worth, measured over 20 runs importing
+  `daemon`/`config`/`ubus`: **41 ms -> 5 ms** per start on x86, tree 1.2 MB ->
+  860 KB. Real, but not worth an inexpressible coupling in a distro feed.
+- Note: an openwrt-25.12 base never had the exposure — its ucode predates the
+  flags the CMake capability probe requires, so that build already fell back to
+  source. Snapshot was the exposed case.
+
+Still open upstream: ucode itself should expose the bytecode version (a
+`PROVIDES`, or bumping `PKG_ABI_VERSION` when `UCODE_BYTECODE_VERSION` changes)
+so consumers *can* express it. Until then no package can ship bytecode safely.
+
 ## FM350-GL: a DNS server as the WAN address — AT layer + CGCONTRDP (2026-08-21)
 
 Field report (WH3000 Pro / FM350-GL, Singtel) plus an independent reproduction:
