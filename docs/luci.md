@@ -23,9 +23,9 @@ still has stock `proto qmi`/`mbim`/`ncm`/`modemmanager` interfaces that wwand
 does not manage yet. Tick the ones to convert and press **Migrate selected**: each is rewritten
 **in place** to `proto wwand` (its name, firewall zone and IP settings are kept)
 and a `wwand_modem` section is created and linked — wwand then takes over managing
-it. This is the recommended way to hand a stock cellular interface to wwand; the
-global `option takeover` (default off) is only needed for the old fully-automatic
-adoption.
+it. This is the recommended way to hand a stock cellular interface to wwand. For
+an unattended one-shot conversion there is an example uci-defaults script in
+`/usr/share/wwand/examples/` that runs the same migration at the next boot.
 
 ## Modem config
 

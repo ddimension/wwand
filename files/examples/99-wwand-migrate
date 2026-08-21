@@ -1,0 +1,45 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 André Valentin <avalentin@marcant.net>
+#
+# EXAMPLE — not active. wwand never migrates your configuration on its own.
+#
+# Copy this to /etc/uci-defaults/ to have the migration run once, on the next
+# boot, unattended:
+#
+#     cp /usr/share/wwand/examples/99-wwand-migrate /etc/uci-defaults/
+#     chmod +x /etc/uci-defaults/99-wwand-migrate
+#     reboot
+#
+# uci-defaults scripts run once at boot and are removed afterwards when they
+# exit 0, so this converts the configuration exactly once and then disappears.
+#
+# What it does: converts stock `proto qmi` (uqmi), `proto mbim` (umbim) and
+# `proto ncm` (comgt-ncm) interfaces IN PLACE into the network-native wwand
+# model — a `config wwand_modem` section plus `proto wwand` + `option modem` on
+# the interface, all in /etc/config/network. The interface name, APN, PIN,
+# credentials and firewall membership are preserved.
+#
+# After this, wwand owns those interfaces and the stock dialer no longer does.
+# DISABLE THE STOCK PACKAGE for the modems you migrate, or two dialers will
+# race for the same control device:
+#
+#     /etc/init.d/... stop      # whatever drove the interface before
+#
+# To see what WOULD change without touching anything, run the same tool by
+# hand — this is the recommended first step:
+#
+#     /usr/libexec/wwand/migrate            # dry run, prints the plan
+#     /usr/libexec/wwand/migrate --apply    # convert
+#
+# The same conversion is available interactively in LuCI under
+# Network -> Modems -> "Migratable interfaces".
+#
+# migrate is idempotent: an already-converted configuration is left unchanged,
+# so re-running it is safe.
+
+[ -x /usr/libexec/wwand/migrate ] || exit 0
+
+/usr/libexec/wwand/migrate --apply >/dev/null 2>&1
+
+exit 0

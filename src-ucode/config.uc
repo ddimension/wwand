@@ -112,15 +112,6 @@ function apply_globals(s, result)
 		result.globals.autosetup = bool_opt(s.autosetup, true);
 
 	// opt-in adoption of the stock/legacy netifd stack (default OFF). When off,
-	// wwand is a good citizen: it ignores bare `proto qmi` interfaces (uqmi keeps
-	// them), the netifd shim registers only `proto wwand`, and install/upgrade
-	// never auto-migrates. When on, wwand adopts legacy `proto qmi` interfaces and
-	// the shim also registers the historical `qmi` alias (the old behavior).
-	// Explicit migration to `proto wwand` is always available on demand (the LuCI
-	// modem list / the migrate CLI), independent of this switch.
-	if (s.takeover != null)
-		result.globals.takeover = bool_opt(s.takeover, false);
-
 	if (s.hold_max != null) {
 		let hm = +s.hold_max;
 
@@ -420,9 +411,14 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 function compat_translate(raw, result)
 {
 	for (let name, s in (raw.network ?? {})) {
-		// `wwand` is the current proto name; `qmi` is the historical alias the
-		// netifd shim still registers (legacy + stock-migrated configs).
-		if (s['.type'] != 'interface' || (s.proto != 'wwand' && s.proto != 'qmi'))
+		// `wwand` is the ONLY proto wwand manages. A stock `proto qmi` interface
+		// belongs to uqmi and is never adopted, so exactly one stack owns a given
+		// interface and its control device — netifd sources every handler in
+		// /lib/netifd/proto, and two of them claiming `qmi` would be settled by
+		// load order, which no package can control. Moving an interface over is an
+		// explicit act that rewrites it to `proto wwand`: the LuCI modem list,
+		// /usr/libexec/wwand/migrate, or the example uci-defaults script.
+		if (s['.type'] != 'interface' || s.proto != 'wwand')
 			continue;
 
 		// a disabled interface is not brought up by netifd; don't synthesize a
@@ -479,13 +475,7 @@ function compat_translate(raw, result)
 			continue;
 		}
 
-		// A bare legacy interface (no `option modem`). Stock `proto qmi` is only
-		// adopted when takeover is enabled — otherwise leave it to uqmi (the
-		// good-citizen default). `proto wwand` is wwand's own proto, always managed.
-		if (s.proto == 'qmi' && !result.globals.takeover)
-			continue;
-
-		// --- legacy-style qmi interface ---------------------------
+		// --- inline/legacy-style interface (no `option modem`) ----
 
 		for (let opt in OLD_DEPRECATED)
 			if (s[opt] != null && s[opt] != '' && s[opt] != '0')
@@ -686,8 +676,7 @@ export function parse(raw)
 	let result = {
 		// hold_max: seconds the daemon holds a lost interface up while
 		// reconnecting in place before giving up and downing it (netifd teardown)
-		globals: { log_level: 'info', hold_max: 90, write_device: true, autosetup: true,
-		           takeover: false },
+		globals: { log_level: 'info', hold_max: 90, write_device: true, autosetup: true },
 		modems: {},
 		contexts: {},
 		sims: {},

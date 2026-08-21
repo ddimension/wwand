@@ -3,6 +3,40 @@
 _Last updated: 2026-08-21. 47 host suites, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
 
+## `takeover` removed: one owner per interface, migration is always the user's (2026-08-21)
+
+Raised in the openwrt/packages review (#30185): with `CONFLICTS` gone, uqmi's
+`qmi.sh` and wwand's shim can be installed together, and under `takeover` both
+registered `proto qmi` — netifd sources every handler in `/lib/netifd/proto`, so
+which one won was decided by load order, which no package can control.
+
+The switch is gone rather than documented as a caveat.
+
+- **The shim registers `wwand` and nothing else.** The `qmi` proto name stays
+  uqmi's. The `proto_qmi_*` alias functions are removed with it.
+- **A bare `proto qmi` interface is never adopted.** `config.uc` accepts only
+  `proto wwand` in the interface loop, so exactly one dialer owns any interface
+  and its control device. The old two-step (accept `qmi`, then gate on
+  `takeover`) collapsed into one condition — no dead branch left behind.
+- **Migration is always explicit**, and now has three equal entry points: the
+  LuCI modem list, `/usr/libexec/wwand/migrate --apply`, and a new **example
+  uci-defaults script** for an unattended one-shot conversion at the next boot.
+- **Nothing is installed under `/etc/uci-defaults` any more.** The old
+  `99-wwand-migrate` hook ran on every install/upgrade (gated on `takeover`);
+  the replacement ships inert in `/usr/share/wwand/examples/` and only does
+  anything once the user copies it. Installing or upgrading wwand can no longer
+  rewrite an existing configuration under any setting.
+
+`migrate_plan` is untouched — it still converts `proto qmi`/`mbim`/`ncm`, which
+is how an interface changes owner. The compat parser is untouched too: it is
+reached by `proto wwand` without `option modem`, which is what the adoption
+tests now exercise.
+
+This closes the packaging side of the ownership question. The remaining honest
+gap, called out in the review rather than papered over: zero-config **autosetup**
+is on by default, so on a box with no wwand configuration at all a newly
+appeared modem is still claimed (`option autosetup '0'` disables it).
+
 ## ucode bytecode: source by default, and a guard for the mismatch (2026-08-21)
 
 Raised in the openwrt/packages review (#30185): precompiled bytecode is coupled

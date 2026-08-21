@@ -74,8 +74,7 @@ wwand section types plus the netifd interface — no separate config file:
   multiple mux contexts on one modem.
 - **`config wwand_globals 'globals'`** — `log_level`, `hold_max`, `write_device`
   (write the resolved L3 name back onto interfaces, default on), `autosetup`
-  (zero-config autosetup, default on), `takeover` (adopt the stock/legacy stack,
-  **default off** — see below).
+  (zero-config autosetup, default on).
 - **`config wwand_plmnlist '<name>'`** *(optional)* — a named PLMN list wwand
   restores to the SIM/modem **before every radio-on** (so operator edits and
   modem reboots don't lose it): `option type 'nas'|'user'|'fplmn'` (default
@@ -93,11 +92,11 @@ wwand section types plus the netifd interface — no separate config file:
 > cellular interfaces. wwand is a **good citizen by default**: it manages only
 > `proto wwand` interfaces and coexists with the stock uqmi/umbim/comgt-ncm
 > packages (no package conflict). It does **not** touch existing `proto
-> qmi`/`mbim`/`ncm` interfaces unless you either (a) migrate specific interfaces
-> from the LuCI modem list (converts them to `proto wwand` in place), or
-> (b) set the global **`option takeover '1'`**, which makes wwand adopt legacy
-> `proto qmi` interfaces and register the historical `qmi` proto alias (the old
-> automatic behavior, including auto-migration on upgrade).
+> qmi`/`mbim`/`ncm` interfaces unless you migrate them — from the LuCI modem
+> list, with `/usr/libexec/wwand/migrate --apply`, or unattended at the next boot
+> via the example uci-defaults script (see below). Migration converts an
+> interface to `proto wwand` **in place**; wwand never claims the `qmi` proto
+> name, so uqmi keeps every interface you do not move.
 
 ```
 config wwand_modem 'm0'
@@ -190,9 +189,19 @@ qmi`/`mbim`/`ncm` interfaces untouched. Two ways to move an interface to wwand:
   programs the LTE attach profile from the connection's `apn`/`pdp_type`.
   **After migrating, stop and remove the ModemManager service** — it would
   otherwise keep claiming the modem's control port.
-- **Opt-in automatic.** Setting the global `option takeover '1'` makes wwand adopt
-  legacy `proto qmi` interfaces at runtime, register the `qmi` proto alias, and
-  auto-migrate everything on the next install/upgrade — the historical behavior.
+- **Unattended, once, at the next boot.** The package ships an example
+  uci-defaults script that runs the same migration for you:
+
+  ```sh
+  cp /usr/share/wwand/examples/99-wwand-migrate /etc/uci-defaults/
+  chmod +x /etc/uci-defaults/99-wwand-migrate
+  reboot
+  ```
+
+  uci-defaults scripts run once at boot and are removed afterwards, so the
+  conversion happens exactly once. It is not installed active: wwand never
+  migrates a configuration on its own. Stop the stock dialer for the modems you
+  migrate, or two dialers race for the same control device.
 
 *(The pre-network-native `/etc/config/wwand` file — `config modem`/`config
 context` — is no longer read at runtime; migrate it via the network-native model
@@ -265,11 +274,6 @@ config wwand_globals 'globals'
 	option write_device '1'          # write the resolved wwandN L3 name back onto
 	                                 #   the interface as `option device` (0 = off)
 	option autosetup '1'             # zero-config autosetup (0 = off)
-	option takeover '0'              # adopt the stock/legacy proto qmi/mbim/ncm
-	                                 #   stack: register the `qmi` alias, manage
-	                                 #   bare `proto qmi` interfaces, auto-migrate
-	                                 #   on upgrade. Default 0 (coexist, no takeover;
-	                                 #   migrate interfaces from the LuCI modem list)
 
 config wwand_modem 'm0'
 	option device '/dev/cdc-wdm0'    # control port, or a netdev name (`wwan0`)
@@ -485,9 +489,9 @@ default. Open **Network → Modems** in LuCI: the *Migratable interfaces* sectio
 lists your `proto qmi`/`mbim`/`ncm`/`modemmanager` interfaces — select them and
 press *Migrate
 selected* to convert them **in place** to `proto wwand` (name/firewall/IP kept).
-The CLI equivalent is `/usr/libexec/wwand/migrate` (dry-run) / `--apply`. To
-restore the old fully-automatic behavior (adopt + auto-migrate on upgrade), set
-`option takeover '1'`. Details: [Configuration](#configuration) (migration notes).
+The CLI equivalent is `/usr/libexec/wwand/migrate` (dry-run) / `--apply`, and
+`/usr/share/wwand/examples/99-wwand-migrate` does it unattended at the next boot.
+Details: [Configuration](#configuration) (migration notes).
 
 ## netifd integration (no-proto-task)
 
@@ -1270,8 +1274,9 @@ leaves their `proto qmi`/`mbim`/`ncm`/`modemmanager` interfaces alone by default
 To hand one to
 wwand, migrate it from **Network → Modems** (*Migratable interfaces* → *Migrate
 selected*) — it is rewritten in place to `proto wwand`. CLI equivalent:
-`/usr/libexec/wwand/migrate` (dry run) then `--apply`. Setting `option takeover
-'1'` restores the old automatic adoption + auto-migration-on-upgrade behavior.
+`/usr/libexec/wwand/migrate` (dry run) then `--apply`, or copy
+`/usr/share/wwand/examples/99-wwand-migrate` into `/etc/uci-defaults/` to have it
+done once at the next boot.
 (The pre-network-native `/etc/config/wwand` file is no longer read at runtime.)
 
 **Lock to a specific cell?** `option lock_4g 'earfcn:pci'` (LTE) or

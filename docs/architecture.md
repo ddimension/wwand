@@ -59,8 +59,8 @@ One process. Zero per-context spawns. ~3 MB resident. The measured baseline:
                discovery.uc (control-type detection), modeswitch/protocol_switch
  integration:  daemon.uc + netsel_ops.uc (registry/policy), config.uc
                (+migrate/compat), ubus.uc, main.uc
- shell:        wwand-proto.sh (thin netifd shim → wwand.sh, proto `wwand` + opt-in `qmi`), init, hotplug,
-               wwand-migrate + uci-defaults (opt-in config migration, `option takeover`)
+ shell:        wwand-proto.sh (thin netifd shim → wwand.sh, proto `wwand` only), init, hotplug,
+               wwand-migrate + an example uci-defaults script (user-triggered config migration)
 ```
 
 The three control backends (QMI, MBIM, NCM) sit behind one **daemon-neutral
@@ -503,15 +503,18 @@ into status.
 All config lives in `/etc/config/network` (WireGuard-style typed sections):
 `wwand_modem` (hardware + SIM slot + radio), `wwand_sim` (per-ICCID override),
 `interface` with `proto wwand` + `option modem` (the connection), `wwand_globals`.
-The netifd shim registers `wwand`; the legacy `qmi` alias only when the global
-`option takeover` is set. **wwand is a good citizen by default:** it installs
+The netifd shim registers **`wwand` and nothing else** — the `qmi` proto name
+stays uqmi's. That is deliberate: netifd sources every script in
+`/lib/netifd/proto`, so two handlers claiming `qmi` would be settled by load
+order, which no package can control. **wwand is a good citizen:** it installs
 alongside the stock uqmi/umbim/comgt-ncm packages (no CONFLICTS) and manages only
 `proto wwand` interfaces — bare `proto qmi`/`mbim`/`ncm` interfaces are left to the
-stock stack. Moving one to wwand is explicit: `config.migrate_plan` converts it
-**in place** to `proto wwand` (+ a linked `wwand_modem`), driven from the LuCI
-modem list (the `migrate` ubus method) or the `wwand-migrate` CLI. Setting
-`option takeover '1'` restores the old automatic behavior (adopt legacy
-interfaces at runtime + auto-migrate on install/upgrade). See `docs/reference.md`.
+stock stack, so exactly one dialer owns any interface and its control device.
+Moving one to wwand is always explicit: `config.migrate_plan` converts it **in
+place** to `proto wwand` (+ a linked `wwand_modem`), driven from the LuCI modem
+list (the `migrate` ubus method), the `wwand-migrate` CLI, or the example
+uci-defaults script in `/usr/share/wwand/examples/` for a one-shot unattended
+conversion at the next boot. See `docs/reference.md`.
 
 ## 8. Roadmap
 

@@ -118,8 +118,9 @@ config interface 'wan'
 
 `ifup wan` — done. wwand installs alongside the stock uqmi/umbim/comgt-ncm
 packages and leaves their `proto qmi`/`mbim`/`ncm` interfaces alone; migrate one
-to `proto wwand` on demand from the LuCI modem list (or set `option takeover '1'`
-for the old automatic behavior). See
+to `proto wwand` on demand from the LuCI modem list, with
+`/usr/libexec/wwand/migrate --apply`, or unattended at the next boot via the
+example uci-defaults script in `/usr/share/wwand/examples/`. See
 [docs/reference.md](docs/reference.md) for every option.
 
 ## Documentation

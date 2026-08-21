@@ -22,7 +22,7 @@ the daemon renews in place on transient loss, preserving IPv6-PD and VRF).
 
 It is now a **good citizen**: no `CONFLICTS`, manages only `proto wwand`, and
 coexists with uqmi/umbim/comgt-ncm. Adopting the stock stack is opt-in
-(`option takeover`, default off) or per-interface user-triggered migration.
+user-triggered migration, per interface or as a one-shot uci-defaults script.
 
 One-line positioning: *a lightweight WWAN control daemon providing a unified
 control plane for **QMI and MBIM** modems, with Qualcomm-specific datapaths
