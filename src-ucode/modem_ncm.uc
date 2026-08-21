@@ -360,20 +360,20 @@ export function create(opts)
 	step_identify = () => {
 		self.set_state('INIT_SERVICES');
 
-		let ask = (cmd, done, o) => self.at.send(cmd, (err, res) => {
+		// The AT layer now routes interleaved URCs to on_urc, so a line
+		// arriving here is the command's own answer. It can still be MISSING:
+		// the T700 answers AT+CGMI with nothing at all while a PDN teardown is
+		// in flight (field-seen: the reply carried only a +CGEV and an OK).
+		// An empty answer used to yield null -> vendor_for(null) -> generic,
+		// silently losing ip_config/dials/telemetry for the whole session.
+		// One retry covers the transient.
+		let ask;
+
+		ask = (cmd, done, o, retried) => self.at.send(cmd, (err, res) => {
 			let val = null;
 
 			for (let line in (res?.lines ?? [])) {
 				let bare = trim(line);
-
-				// a URC interleaved into the response is never the answer:
-				// the modem emits +CGEV/+ESIMS/+CIREPI/+CNEMIU/+CTZV... bursts
-				// right while the identify chain runs after a reset, and taking
-				// one shifts every identify value by one command — the vendor
-				// then resolves to generic (HW-seen: generic CSQ+CESQ telemetry
-				// and the generic ip_config path after a daemon restart)
-				if (match(bare, /^\+(CGEV|ESIMS|CIREPI|CNEMIU|CTZV|EONSNWNAME|CEREG|C5GREG|CREG|CGREG)[:\s]/))
-					continue;
 
 				// skip AT+... response prefixes ("+CGMI: ...") -> take the value
 				let m = match(bare, /^\+[A-Z]+:\s*(.*)/);
@@ -384,28 +384,49 @@ export function create(opts)
 					break;
 			}
 
+			if (!err && (val == null || val == '') && !retried) {
+				log('debug', sprintf('%s: empty reply, retrying once', cmd));
+				return ask(cmd, done, o, true);
+			}
+
 			done(err ? null : val);
 		}, o);
 
 		ask('AT+CGMI', (manuf) => {
 			self.info.manufacturer = manuf;
-			self.vendor = vendor_for(manuf);
-
-			// `option sim_slot` gate: with a vendor AT slots recipe the
-			// configured slot is asserted at init (step_simslot, QMI parity);
-			// without one it cannot be selected — surface a warning instead
-			// of silently running the active slot
-			if (+(self.config?.sim_slot ?? 0) && !self.vendor.slots) {
-				self.config_warnings = self.config_warnings ?? [];
-				push(self.config_warnings, {
-					check: 'sim_slot', severity: 'warn',
-					message: 'option sim_slot needs a vendor slot recipe on the NCM/AT backend — this modem has none (active slot left unchanged)',
-					expected: sprintf('slot %d', +self.config.sim_slot), actual: null,
-				});
-			}
 
 			ask('AT+CGMM', (model) => {
 				self.info.model = model;
+
+				// resolve the recipe from manufacturer AND model: the model is
+				// the answer a modem does not withhold, and it keeps a missing
+				// CGMI from silently degrading everything (ip_config, dials,
+				// telemetry, slots, eSIM) to `generic` for the whole session.
+				self.vendor = vendor_for(manuf, model);
+
+				let vname = ncm_vendors.vendor_name(self.vendor);
+
+				// the recipe in use was never logged — a degraded modem looked
+				// exactly like a healthy one apart from missing vendor commands
+				if (vname == 'generic' && (manuf ?? '') == '')
+					log('warn', sprintf('vendor recipe: generic — no manufacturer and model %s matches none; vendor IP config/dial/telemetry are NOT available',
+						model ?? '?'));
+				else
+					log('info', sprintf('vendor recipe: %s (cgmi %s, cgmm %s)',
+						vname, manuf ?? '-', model ?? '-'));
+
+				// `option sim_slot` gate: with a vendor AT slots recipe the
+				// configured slot is asserted at init (step_simslot, QMI parity);
+				// without one it cannot be selected — surface a warning instead
+				// of silently running the active slot
+				if (+(self.config?.sim_slot ?? 0) && !self.vendor.slots) {
+					self.config_warnings = self.config_warnings ?? [];
+					push(self.config_warnings, {
+						check: 'sim_slot', severity: 'warn',
+						message: 'option sim_slot needs a vendor slot recipe on the NCM/AT backend — this modem has none (active slot left unchanged)',
+						expected: sprintf('slot %d', +self.config.sim_slot), actual: null,
+					});
+				}
 
 				ask('AT+CGMR', (rev) => {
 					self.info.revision = rev;

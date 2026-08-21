@@ -3,6 +3,84 @@
 _Last updated: 2026-08-21. 47 host suites, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
 
+## FM350-GL: a DNS server as the WAN address — AT layer + CGCONTRDP (2026-08-21)
+
+Field report (WH3000 Pro / FM350-GL, Singtel) plus an independent reproduction:
+after a live `pdp_type` change the interface came up with
+`ipv4 config: 165.21.83.88/32` — the carrier's DNS server installed as the WAN
+address (mwan3 "no usable default route", odhcpd `ra_lifetime 0`, `sim_6` RS
+failing). On the v6 side the same defect put `2400:d800::1` (a resolver) on the
+WAN and, via the shim's RFC 7278 prefix extension, `2400:d800::1/64` on br-lan.
+
+Three independent faults chained into it; all three are fixed.
+
+- **`parse_cgcontrdp` threw away the field position** (`ncm_vendors.uc`). It
+  tokenised the whole line with one `/[, \t]+/` split — collapsing the
+  separators — bucketed the tokens by family and then assigned
+  `[0]=addr, [1]=gateway, rest=dns` *within the bucket*. With the modem
+  answering `…,"","","165.21.100.88","165.21.83.88",…` (empty
+  `<local_addr and subnet_mask>` and `<gw_addr>`, both resolvers in the DNS
+  slots) the first DNS became the address. The parser now splits on **commas
+  first** so the 3GPP field index survives, then on whitespace (the RG650E packs
+  a v4 and a v6 token into one field). Only fields 3 and 4 can yield an address;
+  a token from field 5 on is a resolver and can never be promoted. Family
+  bucketing stays — it is what makes the RG650E's interleaved shape work.
+- **`valid_host_v6` could not have caught it.** It tests the first hextet for
+  `2000::/3`/`fc00::/7`; a carrier resolver is ordinary global unicast. The
+  filter was never the wrong idea, it was at the wrong layer — the defect is one
+  step earlier, in the parse. It stays as the backstop it was written to be.
+- **GTDNS was family-blind.** `dns_from_gt` returned one flat list that the
+  caller assigned wholesale to `ipv4.dns` — live on the sponsor router two IPv6
+  resolvers sat in the v4 bucket. It now returns `{v4, v6}` and each bucket gets
+  its own family, falling back to the CGCONTRDP DNS slots of the *same* family.
+  `+GTDNS` (manual 12.2.17) is the documented, NAMED resolver query; `+CGPADDR`
+  (12.2.5) the documented address source. The vendor path leans on both instead
+  of mining CGCONTRDP for either.
+- **CGPADDR's v6 slot is an interface identifier, not an address.** The FM350
+  answers `0:0:0:0:4682:5956:c6d6:e2c5` — 3GPP assigns the IID, the /64 arrives
+  by RA. It is no longer taken as a host address (it only ever survived because
+  `valid_host_v6` happened to reject a zeroed prefix).
+- Regression-tested with the **verbatim live capture** (`s9w`), plus the two
+  parse-level shapes on both families.
+
+### The AT layer lost every URC that arrived inside a command window
+
+The trigger for the above was a vendor degradation: `AT+CGMI` returned only a
+`+CGEV: ME PDN DEACT 1` (the T700 drops the answer while a PDN teardown runs),
+so the manufacturer came back null, `vendor_for(null)` returned `generic`, and
+the Fibocom `ip_config` — the compensation for the broken parse — was gone for
+the whole session. Silently: the recipe in use was never logged.
+
+- **One buffer, never discarded** (`atcmd.uc`). `buffer` (in-command) and
+  `urc_buffer` (idle) were separate and never reconciled, and `next()` wiped the
+  former at every command start. A line straddling a command boundary was torn
+  in half: its head dropped, its tail pushed into the *next* command's lines as
+  if it were an answer — enough for a bare-value command like `AT+CGMI` to take
+  a headless fragment as the manufacturer.
+- **URCs are classified per line, during commands too.** They were pushed into
+  `cur.lines` and never reached `on_urc` at all: in a 245-line field log 5 of 17
+  URCs were lost, including all three `+CGEV: ME PDN ACT/DEACT` events the NCM
+  state machine has a handler for. A URC is framed exactly like a result code
+  (manual 2.4.3: `<CR><LF>…<CR><LF>`), so it always arrives whole — but it lands
+  *between* the lines of a multi-line response, hence per-line. The running
+  command's own prefix always wins, so `AT+CEREG?`'s answer stays an answer.
+  Prefix-less codes (`RING`, `NO CARRIER`, …) are matched as whole lines so they
+  cannot be mistaken for a bare-value answer. The prefix set now lives once, in
+  the AT layer — it used to exist twice, in two different spellings.
+- **Identify retries an empty answer once**, and **`vendor_for` falls back to the
+  model**: `AT+CGMM` answered `FM350-GL` correctly in the very same chain.
+- **The resolved recipe is logged**, and a `generic` fallback despite a known
+  model warns. The degradation was previously invisible.
+
+There is no second channel to move the events to: `+GTUSBMODE` 40/41 both expose
+exactly one AT interface, `+GTDIPCMODE <md_at_interface>` only moves it between
+USB and PCIe, and the manual contains no MBIM/QMI at all. `+CGEREP`/`+CGEV` are
+not documented either — so the URCs stay an accelerator and the state polls
+(`+CGACT?`, `+CEREG?`) stay the truth.
+
+**Not HW-verified yet** — the FM350 box was unreachable for the whole
+implementation window. Host suite: 47/47, 2711 checks.
+
 ## Band selection: two Quectel firmware quirks in the NAS set path (2026-08-21)
 
 Field report from 242 (Zyxel NR7101, Quectel RG502Q-EA, `…R13A04M4G_ZYXEL`):

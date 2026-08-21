@@ -102,37 +102,46 @@ function dotted_group(tok)
 	return { n: n, parts: parts, ev4: (n == 16) ? embedded_v4(parts) : null };
 }
 
-// assign an ordered list of dotted-octet tokens (each an array of octet strings)
-// for one family to { addr, prefix/plen, gateway, dns[] }
+// assign an ordered token list for one family to { addr, prefix/plen, gateway,
+// dns[] }. Each entry is { p: <octet strings>, a: <came from an address slot> }.
+//
+// `a` is the whole point: only 3GPP fields 3 (<local_addr and subnet_mask>) and
+// 4 (<gw_addr>) can hold an address. A token from field 5 and beyond is a DNS
+// or P-CSCF server and must NEVER become the interface address — that is how a
+// carrier resolver ended up on the WAN (and, via RFC 7278, its /64 on the LAN)
+// whenever the modem answered with empty local/gateway slots.
 function assign_family(tokens, is_v6)
 {
 	if (!length(tokens))
 		return null;
 
-	let t0 = tokens[0];
 	let out = { addr: null, gateway: null, dns: [] };
-	let has_mask;
-
-	if (is_v6) {
-		has_mask = (length(t0) == 32);
-		out.addr = bytes_to_ipv6(slice(t0, 0, 16));
-		out.plen = has_mask ? mask_to_prefix(slice(t0, 16, 32)) : 64;
-	}
-	else {
-		has_mask = (length(t0) == 8);
-		out.addr = join('.', slice(t0, 0, 4));
-		out.prefix = has_mask ? mask_to_prefix(slice(t0, 4, 8)) : null;
-	}
-
-	let idx = 1;
 	let render = (t) => is_v6 ? bytes_to_ipv6(slice(t, 0, 16)) : join('.', slice(t, 0, 4));
+	let has_mask = false;
+	let idx = 0;
 
-	// gateway slot: present for IPv6 (link-local gw) or a masked IPv4 address
-	if ((is_v6 || has_mask) && idx < length(tokens))
-		out.gateway = render(tokens[idx++]);
+	if (tokens[0].a) {
+		let t0 = tokens[0].p;
+
+		has_mask = is_v6 ? (length(t0) == 32) : (length(t0) == 8);
+		out.addr = render(t0);
+		idx = 1;
+	}
+
+	if (is_v6)
+		out.plen = (out.addr != null && has_mask) ? mask_to_prefix(slice(tokens[0].p, 16, 32)) : 64;
+	else
+		out.prefix = (out.addr != null && has_mask) ? mask_to_prefix(slice(tokens[0].p, 4, 8)) : null;
+
+	// gateway slot: only meaningful once an address was taken — it is the token
+	// that follows it (IPv6 always carries a link-local gateway; IPv4 only when
+	// the address came masked). Without an address there is nothing to gateway,
+	// and the remaining tokens are all resolvers.
+	if (out.addr != null && (is_v6 || has_mask) && idx < length(tokens))
+		out.gateway = render(tokens[idx++].p);
 
 	for (; idx < length(tokens); idx++)
-		push(out.dns, render(tokens[idx]));
+		push(out.dns, render(tokens[idx].p));
 
 	return out;
 }
@@ -147,23 +156,38 @@ export function parse_cgcontrdp(lines)
 		if (!m)
 			continue;
 
-		// tokenize on comma AND whitespace (RG650E mixes them), strip quotes,
-		// keep only dotted-decimal groups (skips cid/bearer ints and the apn)
-		for (let tok in split(replace(m[1], /"/g, ''), /[, \t]+/)) {
-			let g = dotted_group(tok);
+		// Split on COMMAS FIRST so the 3GPP field index survives (empty fields
+		// included) — the old single-pass /[, \t]+/ tokenizer collapsed the
+		// separators and lost it, which is what let a DNS server slide into the
+		// address position. Only then split each field on whitespace: some
+		// firmwares pack a v4 AND a v6 token into ONE field, space-separated
+		// (RG650E, field-seen), so the family bucket below still has to sort
+		// them out.
+		//
+		//   field 3 = <local_addr and subnet_mask>   \ the only slots that
+		//   field 4 = <gw_addr>                      / can carry an address
+		//   field 5+ = <DNS_prim>, <DNS_sec>, <P-CSCF...>
+		let fields = split(replace(m[1], /"/g, ''), ',');
 
-			if (!g)
-				continue;
+		for (let i = 0; i < length(fields); i++) {
+			let addr_slot = (i == 3 || i == 4);
 
-			// the embedded-v4 form is 16 octets but a V4 address — extract it
-			// BEFORE the family bucket, or it would corrupt the v6 assignment
-			// (first token wins) when its line precedes the real v6 line
-			if (g.ev4)
-				push(v4, g.ev4);
-			else if (g.n == 4 || g.n == 8)
-				push(v4, g.parts);
-			else if (g.n == 16 || g.n == 32)
-				push(v6, g.parts);
+			for (let tok in split(trim(fields[i]), /[ \t]+/)) {
+				let g = dotted_group(trim(tok));
+
+				if (!g)
+					continue;
+
+				// the embedded-v4 form is 16 octets but a V4 address — extract it
+				// BEFORE the family bucket, or it would corrupt the v6 assignment
+				// (first token wins) when its line precedes the real v6 line
+				if (g.ev4)
+					push(v4, { p: g.ev4, a: addr_slot });
+				else if (g.n == 4 || g.n == 8)
+					push(v4, { p: g.parts, a: addr_slot });
+				else if (g.n == 16 || g.n == 32)
+					push(v6, { p: g.parts, a: addr_slot });
+			}
 		}
 	}
 
@@ -760,7 +784,13 @@ export const VENDORS = {
 					if (e3 || !r3?.lines)
 						return done(null);
 
-					let dns = [];
+					// Split BY FAMILY. GTDNS (manual 12.2.17) answers
+					// <cid>,<Primary_DNS_addr>,<Secondary_DNS_addr> for whichever
+					// families the PDP carries, and the flat list this used to
+					// return was assigned wholesale to ipv4.dns — which is how
+					// two IPv6 resolvers ended up in the v4 bucket on the live
+					// WH3000.
+					let v4 = [], v6 = [];
 
 					for (let l in r3.lines) {
 						for (let tok in split(replace(l, /"/g, ''), /[, \t]+/)) {
@@ -773,19 +803,45 @@ export const VENDORS = {
 									continue;
 
 								if (g.n == 4)
-									push(dns, tok);
+									push(v4, tok);
 								else if (g.n == 16 || g.n == 32)
-									push(dns, bytes_to_ipv6(slice(g.parts, 0, 16)));
+									push(v6, bytes_to_ipv6(slice(g.parts, 0, 16)));
 							}
 							else if (tok != '::' &&
 							         match(tok, /^[0-9a-fA-F:]+:[0-9a-fA-F:]+$/) && index(tok, '.') < 0)
-								push(dns, tok);
+								push(v6, tok);
 						}
 					}
 
-					done(length(dns) ? dns : null);
+					done((length(v4) || length(v6)) ? { v4: v4, v6: v6 } : null);
 				}, { timeout: 8000 });
 			};
+
+			// Assemble the final buckets. Resolvers come from GTDNS (documented,
+			// NAMED per family) and fall back to the CGCONTRDP DNS slots of the
+			// same family — never across families, and never from an address
+			// slot. A v6-DNS-only bucket keeps its resolvers so the shim can
+			// push them without inventing an address.
+			let finish_dns = (v4, v6, rdp, v6_pair) => dns_from_gt((gdns) => {
+				let d4 = (length(gdns?.v4 ?? []) ? gdns.v4 : null) ?? (rdp.ipv4?.dns ?? []);
+				let d6 = (length(gdns?.v6 ?? []) ? gdns.v6 : null)
+					?? (length(rdp.ipv6?.dns ?? []) ? rdp.ipv6.dns : null)
+					?? (v6_pair ?? []);
+
+				if (v4)
+					v4.dns = d4;
+
+				if (v6)
+					v6.dns = d6;
+
+				// a v4-only bucket must not lose the v6 resolvers the network
+				// advertised: with no v6 bucket to carry them they ride along
+				// (netifd sorts DNS by family when it installs them)
+				if (v4 && !v6 && length(d6))
+					v4.dns = [ ...d4, ...d6 ];
+
+				cb(null, { ipv4: v4, ipv6: v6 });
+			});
 
 			modem.at.send(sprintf('AT+CGCONTRDP=%d', cid), (err, res) => {
 				if (err)
@@ -854,10 +910,12 @@ export const VENDORS = {
 				// tokens ON them are the DNS pair — field-analyzed)
 				let static_path = false;
 				let v6_real = false;
+				let pair_line = false;
 
 				for (let l in (res?.lines ?? [])) {
 					if (is_empty_local(l) || is_pair_form(l)) {
 						static_path = true;
+						pair_line = pair_line || is_pair_form(l);
 						continue;
 					}
 
@@ -869,75 +927,59 @@ export const VENDORS = {
 					}
 				}
 
-				// on an ipv6-only PDP the CGCONTRDP v6 tokens are NEVER a
-				// host assignment — host v6 arrives via the modem's RA/SLAAC
-				// (field-verified twice: the only v6 data is the DNS64 pair,
-				// in EITHER the empty-local gw+dns slots OR, right after a
-				// PDP-type change, the addr+subnet slots)
+				// On an ipv6-only PDP the CGCONTRDP v6 tokens are NEVER a host
+				// assignment — host v6 arrives via the modem's RA/SLAAC
+				// (field-verified twice).
 				if (cfg.pdp_type == 'ipv6')
 					v6_real = false;
 
-				if (!static_path && cfg.pdp_type != 'ipv6')
-					return cb(null, rdp);
+				// The address slot decides, not a heuristic: parse_cgcontrdp
+				// only fills `addr` from 3GPP fields 3/4, so an empty local
+				// slot now yields addr == null instead of promoting a resolver.
+				// CGPADDR (manual 12.2.5) is the documented address source and
+				// is asked whenever CGCONTRDP carried none.
+				let need_cgpaddr = static_path || cfg.pdp_type == 'ipv6' ||
+				                   rdp.ipv4?.addr == null;
 
-				// static path: address from CGPADDR (over AT — the modem's
-				// canonical address source on this platform); the CGCONTRDP v4
-				// tokens in the empty-local/pair forms are [gateway, dns...] —
-				// their tail is the DNS list, the leading gateway is discarded
-				// (not on our /30).
+				// the pair-in-address-slots transient (field-seen right after a
+				// PDP-type change): fields 3+4 hold the resolver PAIR, not an
+				// address. The parser cannot tell — those ARE the address slots
+				// — so the vendor hands the two tokens on as DNS instead.
+				let v6_pair = pair_line
+					? filter([ rdp.ipv6?.addr, rdp.ipv6?.gateway ], (x) => x != null)
+					: [];
+
+				if (!need_cgpaddr)
+					return finish_dns(rdp.ipv4, v6_real ? rdp.ipv6 : null, rdp, v6_pair);
+
 				modem.at.send(sprintf('AT+CGPADDR=%d', cid), (e2, r2) => {
 					if (e2)
 						return cb(e2);
 
 					let a = parse_cgpaddr(r2?.lines);
 
-					// the pair: the v6 tokens the CGCONTRDP line carries in
-					// its addr/gateway slots (BOTH observed forms) — the
-					// provider's DNS64 pair, field-verified live. A real v6
-					// assignment (v6_real, never on an ipv6-only PDP) owns
-					// those slots — no pair fallback then; on a v4-only PDP
-					// the family-appropriate CGCONTRDP v4 DNS wins over the
-					// (unreachable) v6 pair. An empty pair is null, not an
-					// empty array — the ?? chain below would otherwise treat
-					// it as truthy and drop the CGCONTRDP v4 DNS.
-					let pair = filter([ rdp.ipv6?.addr, rdp.ipv6?.gateway ], (x) => x != null);
-					let fallback_dns = (v6_real || !length(pair)) ? null : pair;
-
-					// on the ipv6-only PDP the v6 bucket is DNS-ONLY: no
-					// address, no gateway (host v6 = the modem's RA/SLAAC) —
-					// the pair rides in dns so the shim can push the resolvers
-					// without assigning a bogus /128
-					let v6 = v6_real
-						? rdp.ipv6
-						: (a?.v6
-							? { addr: a.v6, plen: 64, gateway: null, dns: [] }
-							: ((cfg.pdp_type == 'ipv6')
-								? { addr: null, plen: null, gateway: null, dns: [] }
-								: null));
+					// The CGPADDR v6 slot is the network-assigned INTERFACE
+					// IDENTIFIER with a zeroed prefix (3GPP: the /64 arrives by
+					// RA) — "0:0:0:0:4682:5956:c6d6:e2c5" on the live FM350. It
+					// is never a host address, so it is not one here either;
+					// only a real field-3 assignment counts.
+					let v6 = v6_real ? rdp.ipv6
+						: ((cfg.pdp_type == 'ipv6' || length(rdp.ipv6?.dns ?? []))
+							? { addr: null, plen: null, gateway: null, dns: [] }
+							: null);
 
 					let v4 = null;
 
-					if (cfg.pdp_type != 'ipv6' && a?.addr)
+					if (cfg.pdp_type != 'ipv6' && (a?.addr ?? rdp.ipv4?.addr))
 						v4 = {
-							addr: a.addr,
+							addr: a?.addr ?? rdp.ipv4.addr,
 							prefix: null,   // /32 p2p, gateway-less (NOARP device route)
 							gateway: null,
 							dns: [],   // filled below
 							mtu: null,
 						};
 
-					dns_from_gt((gdns) => {
-						let dns = gdns
-							?? ((cfg.pdp_type == 'ipv4') ? (rdp.ipv4?.dns ?? []) : fallback_dns)
-							?? (rdp.ipv4?.dns ?? []);
-
-						if (v4)
-							v4.dns = dns;
-						else if (v6)
-							v6.dns = dns;
-
-						cb(null, { ipv4: v4, ipv6: v6 });
-					});
+					finish_dns(v4, v6, rdp, v6_pair);
 				}, { timeout: 8000 });
 			}, { timeout: 15000 });
 		},
@@ -1013,9 +1055,27 @@ export const VENDORS = {
 	},
 };
 
-// pick the vendor recipe from the AT+CGMI manufacturer string; generic (match
-// null) is skipped in the scan and returned last.
-export function vendor_for(manufacturer)
+// AT+CGMM model families that identify a vendor on their own. The manufacturer
+// string is the primary key, but it is the one identify answer a modem may
+// withhold (the T700 returns an empty AT+CGMI while a PDN teardown is running).
+// The model is answered reliably in the same chain, and these families are
+// unambiguous — so a missing/unknown manufacturer falls back to them instead of
+// silently degrading the modem to `generic` for the rest of the session.
+const MODEL_VENDORS = [
+	[ /^(fm[0-9]|fg[0-9]|nl6|l8[0-9][0-9])/, 'fibocom' ],
+	[ /^(ec[0-9]|eg[0-9]|em[0-9]|ep[0-9]|rg[0-9]|rm[0-9]|bg[0-9]|ag[0-9]|ux[0-9])/, 'quectel' ],
+	[ /^slm[0-9]/, 'meig' ],
+	[ /^(me9|mu[0-9]|ms2|brovi|e35|e36|e37)/, 'huawei' ],
+	[ /^(le9|ln9|lm9|fn9|he9)/, 'telit' ],
+	[ /^sim[0-9]/, 'simcom' ],
+	[ /^(em7|em9|mc7|rc7|em06|wp7)/, 'sierra' ],
+	[ /^(ml[0-9]|mf[0-9])/, 'zte' ],
+];
+
+// pick the vendor recipe from the AT+CGMI manufacturer string, falling back to
+// the AT+CGMM model when the manufacturer is empty or unrecognised; generic
+// (match null) is skipped in the scan and returned last.
+export function vendor_for(manufacturer, model)
 {
 	let s = lc(manufacturer ?? '');
 
@@ -1023,14 +1083,32 @@ export function vendor_for(manufacturer)
 	// whose CGMI reports the die vendor ("MediaTek") instead of the brand
 	// must still resolve to the fibocom recipe (its ip_config/slots/eSIM
 	// paths), never to the bare mediatek one.
-	if (VENDORS.fibocom.match && match(s, VENDORS.fibocom.match))
+	if (s != '' && VENDORS.fibocom.match && match(s, VENDORS.fibocom.match))
 		return VENDORS.fibocom;
 
-	for (let name, v in VENDORS)
-		if (v.match && match(s, v.match))
-			return v;
+	if (s != '')
+		for (let name, v in VENDORS)
+			if (v.match && match(s, v.match))
+				return v;
+
+	let m = lc(model ?? '');
+
+	if (m != '')
+		for (let e in MODEL_VENDORS)
+			if (match(m, e[0]))
+				return VENDORS[e[1]];
 
 	return VENDORS.generic;
+};
+
+// recipe -> its key, for logging (the recipes carry no name of their own)
+export function vendor_name(v)
+{
+	for (let name, cand in VENDORS)
+		if (cand == v)
+			return name;
+
+	return '?';
 };
 
 // AT command sequence to program a PDP context + auth from a context config
