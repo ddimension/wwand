@@ -3,3 +3,6 @@ build-host/
 *.so
 !tests/**
 uc.out
+
+# vendor AT manuals — reference only, never redistributed via the repo/release
+docs/devicedoc/
