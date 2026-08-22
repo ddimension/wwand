@@ -180,6 +180,10 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		eq(c2, 0, 'status: ok');
 		eq(st.modems.m0.state, 'READY', 'status: modem READY');
 		eq(st.modems.m0.model, 'RG502Q-EA', 'status: model');
+		// the protocol-switch capability must be a MODEL property, not "the
+		// modem currently speaks QMI/MBIM" — a UI that gates on the latter
+		// offers the switch on hardware whose recipe does not exist
+		eq(st.modems.m0.proto_switch, true, 'status: proto_switch true for a known recipe (RG502Q)');
 		eq(st.contexts.wan.state, 'CONNECTED', 'status: context CONNECTED');
 		eq(st.contexts.wan.interface, 'wan', 'status: interface mapping');
 

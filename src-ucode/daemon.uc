@@ -1223,6 +1223,12 @@ export function create(opts)
 				at_tty: entry.modem?.at_tty,
 				// at2 released for external tools
 				at2_released: entry.modem?.at2_released,
+				// can this model's control protocol be switched (QMI <-> MBIM)?
+				// The AT recipe is per-model and hardware-unverified ones are
+				// deliberately not offered, so a UI must gate on this rather
+				// than on "the modem currently speaks QMI or MBIM" — which is
+				// true of nearly every modem and says nothing about switching.
+				proto_switch: entry.modem?.protocol_switch_supported?.() ?? false,
 				// cell/freq lock read-back (Quectel QNWLOCK / MeiG ^CELLLOCK), null if none
 				locks: entry.modem?.locks,
 				registration: entry.modem?.reg,
