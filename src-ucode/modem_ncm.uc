@@ -212,40 +212,19 @@ export function create(opts)
 	// Registration URCs act as a fast path — an immediate re-poll instead of
 	// waiting out the poll timer (polling stays the fallback; the URCs are
 	// best-effort, the parse decision remains the poll's).
+	// the shared handler (NITZ, +CGEV PDN) is installed by scaffolding above;
+	// NCM adds the registration fast-path on top instead of re-implementing it
+	let urc_shared = self.at_on_urc;
+
 	self.at_on_urc = (line) => {
 		log('debug', sprintf('urc: %s', line));
 
+		// a registration-class URC short-circuits the REGISTERING poll interval
 		if (self.state == 'REGISTERING' && poll && !self._esim_op &&
 		    match(line, /^\+?(CEREG|C5GREG|CREG|CGREG|CTZV|EONSNWNAME)[:\s]/))
 			poll();
 
-		// NITZ (network identity/time — pushed at attach): parse the T700's
-		// +CTZV frame and feed the shared clock path (the daemon applies it
-		// only when the system clock is clearly unset — RTC-less router
-		// before NTP). Hint only: this provider doesn't push NITZ regularly.
-		let tz = modem_common.nitz_ctzv(line);
-
-		if (tz) {
-			self.network_time = { epoch: tz.epoch, tz_offset_min: tz.tz_offset_min };
-			log('info', sprintf('network time (NITZ): %d utc, tz %+d min', tz.epoch, tz.tz_offset_min));
-			if (deps.set_clock)
-				deps.set_clock(tz.epoch, tz.tz_offset_min);
-		}
-
-		// +CGEV PDN events are the modem's own session notifications:
-		// DEACT pokes the affected context's liveness probe immediately
-		// (the probe's result decides, not the URC), ACT pokes a settings
-		// re-read (the network may have reassigned IPs on re-activation)
-		let m = match(line, /^\+CGEV:.*\bPDN (ACT|DEACT)\s*(\d*)/);
-
-		if (m && !self._esim_op) {
-			let cid = +m[2];
-			let is_deact = (m[1] == 'DEACT');
-
-			for (let c in (self.contexts ?? []))
-				if (!cid || c.cid == cid)
-					is_deact ? c.liveness_poke?.() : c.settings_poke?.();
-		}
+		urc_shared(line);
 	};
 
 	// `option sim_slot` needs a slot transport — on the AT-only backend that
@@ -405,6 +384,15 @@ export function create(opts)
 				self.vendor = vendor_for(manuf, model);
 
 				let vname = ncm_vendors.vendor_name(self.vendor);
+
+				// the vendor's own URC prefixes can only be merged now: which
+				// codes a modem pushes unsolicited is a property of the
+				// manufacturer, and the AT port was opened before we knew it
+				if (length(self.vendor.urcs ?? [])) {
+					self.at?.add_urc_prefixes(self.vendor.urcs);
+					self.at_telemetry?.add_urc_prefixes?.(self.vendor.urcs);
+					log('debug', sprintf('vendor URC prefixes: %s', join(' ', self.vendor.urcs)));
+				}
 
 				// the recipe in use was never logged — a degraded modem looked
 				// exactly like a healthy one apart from missing vendor commands

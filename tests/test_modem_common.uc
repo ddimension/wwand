@@ -662,4 +662,49 @@ ok(!mc.qeng_ok({ info: { manufacturer: 'Fibocom' } }), 'qeng_ok: Fibocom -> no')
 ok(!mc.qeng_ok({ info: { manufacturer: 'Foxconn' } }), 'qeng_ok: Foxconn -> no');
 ok(!mc.qeng_ok({ info: {} }), 'qeng_ok: unknown -> no');
 
+// --- urc_common: NITZ + PDN events are backend-neutral -----------------------
+//
+// Until now only the NCM backend consumed URCs: open_at passed on_urc: null
+// unless the backend defined a handler, and only modem_ncm did. A QMI or MBIM
+// modem with an AT port emits the same codes and dropped every one of them.
+
+let uc_clock = [], uc_liveness = 0, uc_settings = 0;
+let uc_self = {
+	contexts: [
+		{ cid: 1, liveness_poke: () => uc_liveness++, settings_poke: () => uc_settings++ },
+		{ cid: 2, liveness_poke: () => uc_liveness++, settings_poke: () => uc_settings++ },
+	],
+};
+let uc_h = mc.urc_common(uc_self, {
+	log: (lvl, msg) => null,
+	deps: { set_clock: (e, tz) => push(uc_clock, [ e, tz ]) },
+});
+
+uc_h('+CTZV: "26/08/22,10:15:00+08"');
+eq(length(uc_clock), 1, 'urc_common: NITZ reaches set_clock');
+eq(uc_self.network_time?.tz_offset_min, 120, 'urc_common: NITZ tz offset decoded (8 quarters)');
+
+uc_h('+CGEV: ME PDN DEACT 1');
+eq(uc_liveness, 1, 'urc_common: PDN DEACT pokes only the matching cid');
+eq(uc_settings, 0, 'urc_common: PDN DEACT does not poke settings');
+
+uc_h('+CGEV: ME PDN ACT 2');
+eq(uc_settings, 1, 'urc_common: PDN ACT pokes settings on the matching cid');
+
+// no cid -> every context
+uc_liveness = 0;
+uc_h('+CGEV: ME PDN DEACT');
+eq(uc_liveness, 2, 'urc_common: a cid-less PDN event reaches every context');
+
+// an eSIM operation drives its own long AT sequence — PDN pokes are suppressed
+uc_self._esim_op = true;
+uc_liveness = 0;
+uc_h('+CGEV: ME PDN DEACT 1');
+eq(uc_liveness, 0, 'urc_common: PDN events suppressed during an eSIM op');
+uc_self._esim_op = false;
+
+// an unrelated line is simply ignored
+uc_h('+CEREG: 5,"718B","01D8A467",13,0,0');
+eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
+
 done('test_modem_common');

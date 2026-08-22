@@ -441,10 +441,16 @@ export function open_transport(path, baud, log)
 
 // --- engine ------------------------------------------------------------------
 
-// Unsolicited result codes seen on the control ports we drive. Kept HERE as the
-// single source of truth: the same list used to live (in two slightly different
+// GENERIC (3GPP / V.250) unsolicited result codes. Kept HERE as the single
+// source of truth: the same list used to live (in two slightly different
 // spellings) in modem_ncm's identify filter and its URC handler, so a prefix
 // added to one was silently missing from the other.
+//
+// Vendor-specific codes do NOT belong here — a prefix in this list is filtered
+// out of the responses of EVERY modem, so a wrong entry breaks parsing on
+// hardware it was never meant for. They live on the vendor recipe (ncm_vendors
+// `urcs`) and are merged in via at.add_urc_prefixes() once identify has
+// resolved the manufacturer.
 //
 // A prefix in this list is only treated as unsolicited when it differs from the
 // running command's OWN prefix — AT+CEREG? legitimately answers "+CEREG:", and
@@ -456,8 +462,7 @@ export const DEFAULT_URC_PREFIXES = [
 	'CSCON',                               // signalling connection
 	'ESIMS', 'CIREPI', 'CNEMIU', 'EONSNWNAME',
 	'CMTI', 'CMT', 'CDS', 'CBM',           // SMS delivery
-	'CUSD', 'CIEV', 'QIND',
-	'RSSI', 'MODE', 'SIMST', 'SRVST',      // ^-prefixed (Huawei/MeiG/Sierra)
+	'CUSD', 'CIEV',
 ];
 
 // Unsolicited codes that carry NO prefix at all (V.250 call progress). They
@@ -700,6 +705,28 @@ export function create(transport, opts)
 			push(cur.lines, line);
 		}
 	});
+
+	// The URC set is extended AFTER the port is open: which vendor URCs a modem
+	// emits is only known once identify has run, and identify runs over this very
+	// engine. Merged, never replaced — the 3GPP defaults always apply.
+	self.add_urc_prefixes = function(list) {
+		let seen = {};
+
+		for (let p in self.urc_prefixes)
+			seen[p] = true;
+
+		for (let p in (list ?? [])) {
+			// a prefix is stored without its sigil; tolerate '+QIND' / '^RSSI'
+			let u = uc(trim(replace(trim(p), /^[+^$]/, '')));
+
+			if (u != '' && !seen[u]) {
+				seen[u] = true;
+				push(self.urc_prefixes, u);
+			}
+		}
+
+		return self.urc_prefixes;
+	};
 
 	self.send = function(cmd, cb, o) {
 		push(self.queue, {

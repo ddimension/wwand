@@ -708,6 +708,61 @@ tr9.reply(' DEACT 1\r\nFibocom\r\nOK\r\n');
 eq(got7?.lines, [ 'Fibocom' ], 'engine: split line does not leak into the next answer');
 eq(urcs7, [ '+CGEV: ME PDN DEACT 1' ], 'engine: split URC is reassembled, not lost');
 
+// --- vendor URC prefixes are merged, not replaced ----------------------------
+//
+// Which codes a modem pushes unsolicited is a property of the manufacturer, and
+// the AT port is open before identify resolves it — so the set is extended at
+// runtime. The generic 3GPP defaults must survive that.
+
+let urcs8 = [], gotv = null;
+let trv = fake_transport();
+let atv = atcmd.create(trv, { log: silent, on_urc: (l) => push(urcs8, l) });
+
+// before the merge: a vendor code is NOT a URC, so it stays in the response
+atv.send('AT+QNETDEVCTL?', (e, r) => gotv = r);
+trv.reply('\r\n+QIND: SMS DONE\r\n+QNETDEVCTL: 1,1,1,1\r\nOK\r\n');
+
+eq(gotv?.lines, [ '+QIND: SMS DONE', '+QNETDEVCTL: 1,1,1,1' ],
+	'urc-merge: an unknown vendor code stays a response line');
+eq(urcs8, [], 'urc-merge: ... and is not dispatched');
+
+atv.add_urc_prefixes([ '+QIND', '+QUSIM' ]);
+
+gotv = null;
+atv.send('AT+QNETDEVCTL?', (e, r) => gotv = r);
+trv.reply('\r\n+QIND: SMS DONE\r\n+QNETDEVCTL: 1,1,1,1\r\nOK\r\n');
+
+eq(gotv?.lines, [ '+QNETDEVCTL: 1,1,1,1' ], 'urc-merge: after the merge it is filtered out');
+eq(urcs8, [ '+QIND: SMS DONE' ], 'urc-merge: ... and dispatched instead');
+
+// the generic set still applies after a merge
+gotv = null;
+atv.send('AT+CGMI', (e, r) => gotv = r);
+trv.reply('\r\n+CGEV: ME PDN ACT 1\r\nQuectel\r\nOK\r\n');
+
+eq(gotv?.lines, [ 'Quectel' ], 'urc-merge: generic defaults survive the merge');
+
+// sigils are optional and the merge is idempotent
+let before = length(atv.urc_prefixes);
+atv.add_urc_prefixes([ 'QIND', '+QIND', '^QIND' ]);
+eq(length(atv.urc_prefixes), before, 'urc-merge: duplicates and sigil spellings collapse');
+
+// A vendor code that shares its name with a DIFFERENT command's answer is the
+// dangerous case. Huawei's dial-status URC is ^NDISSTAT, while the status query
+// AT^NDISSTATQRY? answers ^NDISSTATQRY — different names, so exact matching
+// keeps the query answer intact.
+let urcs9 = [], goth = null;
+let trh = fake_transport();
+let ath = atcmd.create(trh, { log: silent, on_urc: (l) => push(urcs9, l) });
+
+ath.add_urc_prefixes([ '^NDISSTAT', '^RSSI' ]);
+ath.send('AT^NDISSTATQRY?', (e, r) => goth = r);
+trh.reply('\r\n^NDISSTAT: 1,,,,IPV4\r\n^NDISSTATQRY: 1,,,,IPV4\r\nOK\r\n');
+
+eq(goth?.lines, [ '^NDISSTATQRY: 1,,,,IPV4' ],
+	'urc-merge: ^NDISSTATQRY answer survives while ^NDISSTAT is taken as a URC');
+eq(urcs9, [ '^NDISSTAT: 1,,,,IPV4' ], 'urc-merge: the ^-sigil URC is dispatched');
+
 // auth commands never log credentials
 let auth_logs = [];
 let tr4 = fake_transport();
