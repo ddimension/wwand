@@ -209,6 +209,50 @@ export function nitz_ctzv(line)
 
 // derive a coarse mode from NAS radio interfaces (last-resort fallback; can't
 // see NSA — an NSA anchor reports LTE only here). radio_ifs: 8=LTE, 12=5GNR.
+// Backend-neutral URC handling. NITZ and the +CGEV PDN notifications are not
+// NCM-specific — a QMI or MBIM modem with an AT port emits them just the same,
+// and until now nothing consumed them there (open_at passed on_urc: null unless
+// the backend defined one, which only NCM did).
+//
+// Returns a handler; a backend that needs more composes on top rather than
+// re-implementing these two.
+export function urc_common(self, o)
+{
+	let log = o.log;
+	let deps = o.deps ?? {};
+
+	return (line) => {
+		// NITZ (network identity/time, pushed at attach). The daemon applies it
+		// only when the system clock is clearly unset (RTC-less router before
+		// NTP), so recording it is always safe.
+		let tz = nitz_ctzv(line);
+
+		if (tz) {
+			self.network_time = { epoch: tz.epoch, tz_offset_min: tz.tz_offset_min };
+			log('info', sprintf('network time (NITZ): %d utc, tz %+d min', tz.epoch, tz.tz_offset_min));
+
+			if (deps.set_clock)
+				deps.set_clock(tz.epoch, tz.tz_offset_min);
+		}
+
+		// +CGEV PDN events are the modem's own session notifications: DEACT pokes
+		// the affected context's liveness probe (the probe's result decides, not
+		// the URC), ACT pokes a settings re-read (the network may have reassigned
+		// IPs on re-activation). Suppressed during an eSIM op, which drives its
+		// own long-running AT sequence.
+		let m = match(line, /^\+CGEV:.*\bPDN (ACT|DEACT)\s*(\d*)/);
+
+		if (m && !self._esim_op) {
+			let cid = +m[2];
+			let is_deact = (m[1] == 'DEACT');
+
+			for (let c in (self.contexts ?? []))
+				if (!cid || c.cid == cid)
+					is_deact ? c.liveness_poke?.() : c.settings_poke?.();
+		}
+	};
+};
+
 export function dsd_from_radio(radio_ifs)
 {
 	let lte = false, nr = false;
@@ -314,6 +358,10 @@ export function check_identity(self, o)
 //   o.rec   — recovery instance
 export function scaffolding(self, o)
 {
+	// every backend gets the shared URC handling; one that needs more composes
+	// on top by wrapping self.at_on_urc (see modem_ncm)
+	self.at_on_urc = urc_common(self, o);
+
 	let deps = o.deps;
 	let log = o.log;
 	let rec = o.rec;
@@ -896,9 +944,15 @@ export function open_at(self, o)
 		return o.next();
 	}
 
+	// on_urc is LATE-BOUND on purpose: a backend may install or wrap its handler
+	// after the port is open, and the lazily opened telemetry channel below must
+	// reach the same one. urc_prefixes likewise — the vendor recipe that extends
+	// the set is only known after identify, which runs after this.
+	let dispatch_urc = (line) => self.at_on_urc?.(line);
+
 	self.at = atcmd.create(tr, {
 		log: (level, msg) => log(level, sprintf('at: %s', msg)),
-		on_urc: self.at_on_urc ?? null,
+		on_urc: dispatch_urc,
 	});
 	self.at_tty = tty;
 	log('notice', sprintf('AT port: %s', tty));
@@ -930,7 +984,14 @@ export function open_at(self, o)
 				return;
 			}
 
-			self.at_telemetry = atcmd.create(tr2, { log: (level, msg) => log(level, sprintf('at2: %s', msg)) });
+			// the telemetry channel carries URCs too — on many modems it is THE
+			// port they arrive on. It used to get no handler at all, so every
+			// URC landing there was dropped.
+			self.at_telemetry = atcmd.create(tr2, {
+				log: (level, msg) => log(level, sprintf('at2: %s', msg)),
+				on_urc: dispatch_urc,
+				urc_prefixes: self.at.urc_prefixes,
+			});
 			self.at_telemetry_tty = ch.telemetry;
 			log('notice', sprintf('AT telemetry channel: %s', ch.telemetry));
 		}

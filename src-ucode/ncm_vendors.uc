@@ -549,6 +549,15 @@ const DIAL_ICMAUTOCONN = {
 // hardware check.
 //
 //   modem_init:               commands run ONCE at modem bring-up (e.g. CFUN=1)
+//   urcs:                     vendor-specific UNSOLICITED result-code prefixes,
+//                             merged into the AT engine's generic 3GPP set once
+//                             identify resolves the manufacturer. Only list a
+//                             code the modem really pushes on its own: a prefix
+//                             here is filtered OUT of that modem's command
+//                             responses. A code that shares its name with a
+//                             query answer is safe either way (the running
+//                             command's own prefix always wins), but one that
+//                             names a DIFFERENT command's answer is not.
 //   define(cid, pdp, apn)     -> the context-definition command (default CGDCONT)
 //   auth_cmd(cid, ctxtype, apn, cfg) -> the command carrying username/password
 //                                       (or null when the dial/define carries it)
@@ -569,6 +578,9 @@ export const VENDORS = {
 	// to CGACT for the RG5xx/SDX 5G modems (RG650E) that lack it. QGDCNT counters.
 	quectel: {
 		match: /quectel/,
+		// +QIND carries SMS-full / SIM / PB-done notifications; +QUSIM is pushed
+		// on SIM (re)initialisation. Both are notification-only names.
+		urcs: [ '+QIND', '+QUSIM' ],
 		modem_init: [ 'AT+CFUN=1' ],
 		auth_cmd: (cid, ctxtype, apn, cfg) => sprintf(
 			'AT+QICSGP=%d,%d,"%s","%s","%s",%d', cid, ctxtype, apn,
@@ -625,6 +637,10 @@ export const VENDORS = {
 	// Huawei: ^NDISDUP carries apn/auth inline.
 	huawei: {
 		match: /huawei/,
+		// ^NDISSTAT is the dial-status notification pushed after ^NDISDUP. It is
+		// a DIFFERENT name from ^NDISSTATQRY, the answer to the status query at
+		// DIAL_NDISDUP.status — exact-name matching keeps the two apart.
+		urcs: [ '^NDISSTAT', '^RSSI', '^HCSQ', '^MODE', '^SIMST', '^SRVST' ],
 		// disable the modem's internal auto-dialer so it does not connect behind
 		// wwand's back (best-effort; modems without it just warn). QModem disables
 		// it in the hangup path — we do it once at init so it never races the
