@@ -107,6 +107,9 @@ ok(conn_srv != null && conn_cli != null, 'ubus connections established');
 
 let events = [];
 let iface_up = false;
+// netifd's runtime autostart flag: cleared by `ifdown` and by nothing else (a
+// vanished device reads up=false/available=false but autostart=TRUE)
+let iface_autostart = true;
 let mock = mockhub.create({ handlers: handlers() });
 let dpfx = fakefx.create();
 
@@ -119,7 +122,7 @@ let daemon = daemon_mod.create({
 		kick_interface: (iface) => push(events, { type: 'kick', data: iface }),
 		renew_interface: (iface) => push(events, { type: 'renew', data: iface }),
 		down_interface: (iface) => push(events, { type: 'down', data: iface }),
-		iface_status: (iface, cb) => cb({ up: iface_up }),   // async: false -> kick, true -> adopt
+		iface_status: (iface, cb) => cb({ up: iface_up, autostart: iface_autostart }),   // async: false -> kick, true -> adopt
 		datapath_fx: dpfx,
 		// context_up re-reads config from disk on every up: return a version
 		// with a changed apn so the refresh path is exercised

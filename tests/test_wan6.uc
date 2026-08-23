@@ -23,6 +23,9 @@ const TIMING = { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
 
 // one stubbed daemon: the modem stub carries the rndis_host datapath and both
 // create() calls capture their on_event bindings; ensure_wan6 is recorded
+let kicks = [];
+let autostart = true;
+
 function mk(pdp, ensures)
 {
 	let ctx_on_event = null;
@@ -57,10 +60,10 @@ function mk(pdp, ensures)
 				},
 			}),
 			emit_event: () => null,
-			kick_interface: () => null,
+			kick_interface: (i) => push(kicks, i),
 			renew_interface: () => null,
 			down_interface: () => null,
-			iface_status: (iface, cb) => cb({ up: false }),
+			iface_status: (iface, cb) => cb({ up: false, autostart: autostart }),
 			datapath_fx: null,
 			read_config: () => config.parse({ network: {
 				m0: { '.type': 'wwand_modem', device: '/dev/mock0' },
@@ -215,5 +218,38 @@ dpath.apply_config(parsed_p);
 eq(started, [], 'blocklist: a bus= claim blocks the modem it resolves to');
 ok(match(dpath.modems.m0.control_note ?? '', /bus=1-1 is owned by interface wan \(proto wwan\)/),
 	'blocklist: control_note names the option, value and owner');
+
+// --- operator ifdown: netifd's autostart is the durable record ---------------
+//
+// `wanted` lives in the daemon's memory and every interface-bound context is
+// rebuilt with wanted=true on start/reload, so it cannot carry operator intent
+// across a restart. Reproduced on a Cudy LT300 (2026-08-23): ifdown wwan0, then
+// /etc/init.d/wwand restart, and the interface came back up on its own.
+//
+// netifd's RUNTIME autostart flag is the discriminator. Measured on the same
+// box: during a modem repower the interface read up=false, available=false but
+// autostart=TRUE, so keying on it cannot swallow the reconnect after a modem
+// reset — device presence lives in `available`, not here.
+
+kicks = [];
+autostart = true;
+let dkick = mk('ipv4', []);
+dkick.modem()('registered');
+eq(kicks, [ 'wan' ], 'ifdown: a normally-down interface is still kicked up once registered');
+
+kicks = [];
+autostart = false;
+let ddown = mk('ipv4', []);
+ddown.modem()('registered');
+eq(kicks, [], 'ifdown: an administratively down interface (autostart=false) is left alone');
+ok(ddown.d.contexts.wan.wanted == false,
+	'ifdown: the operator intent is recorded so later modem-ready cycles skip it too');
+
+// device loss must NOT look like an ifdown
+kicks = [];
+autostart = true;
+let dgone = mk('ipv4', []);
+dgone.modem()('registered');
+eq(kicks, [ 'wan' ], 'ifdown: a vanished device (autostart still true) reconnects as before');
 
 done('test_wan6');

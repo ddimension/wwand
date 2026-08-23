@@ -172,6 +172,26 @@ export function create(opts)
 					log('info', sprintf('adopting live interface %s after modem ready', centry.cfg.interface));
 					retry_activate(cname);
 				}
+				else if (st?.autostart === false) {
+					// The operator ran `ifdown`. netifd's RUNTIME autostart flag is
+					// the only durable record of that: `wanted` lives in this
+					// process's memory, and every interface-bound context is rebuilt
+					// with wanted=true on start/reload — which is how a wwand restart
+					// used to resurrect an interface somebody had deliberately taken
+					// down (reproduced on the Cudy LT300, 2026-08-23: ifdown, then
+					// restart, and the link came back by itself).
+					//
+					// Safe to key on: autostart is cleared by ifdown and NOTHING else.
+					// Measured during a modem repower on the same box — while the
+					// device was gone the interface read up=false, available=false,
+					// autostart=TRUE — so this cannot swallow the reconnect after a
+					// modem reset. Device presence lives in `available`.
+					if (centry.wanted) {
+						centry.wanted = false;
+						log('notice', sprintf('interface %s is administratively down (ifdown), leaving it alone',
+							centry.cfg.interface));
+					}
+				}
 				else if ((centry.cfg.auto ?? true) && deps.kick_interface) {
 					// IDLE context while netifd holds the interface 'pending' = an
 					// ORPHANED setup (e.g. a wwand restart mid-setup). 'up' no-ops on a
@@ -502,8 +522,28 @@ export function create(opts)
 				entry._kick_after_connect = false;
 
 				if (deps.kick_interface && entry.cfg.interface) {
-					log('info', sprintf('kicking interface %s to adopt the connected session', entry.cfg.interface));
-					deps.kick_interface(entry.cfg.interface);
+					let kentry = entry, kiface = entry.cfg.interface;
+
+					let do_kick = () => {
+						log('info', sprintf('kicking interface %s to adopt the connected session', kiface));
+						deps.kick_interface(kiface);
+					};
+
+					// re-check: the connect takes seconds, and an ifdown landing in
+					// that window must not be undone by the kick that follows it
+					if (deps.iface_status)
+						deps.iface_status(kiface, (st) => {
+							if (st?.autostart === false) {
+								kentry.wanted = false;
+								log('notice', sprintf('interface %s went administratively down while connecting, not kicking it up',
+									kiface));
+								return;
+							}
+
+							do_kick();
+						});
+					else
+						do_kick();
 				}
 			}
 			break;
