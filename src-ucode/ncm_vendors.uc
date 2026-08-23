@@ -617,7 +617,14 @@ export const VENDORS = {
 		// ^NDISSTAT vs ^NDISSTATQRY). MeiG shares the ^ dialect with Huawei,
 		// which is why four of these appear in that recipe too.
 		urcs: [ '^SRVST', '^MODE', '^SIMST', '^SMMEMFULL', '^HCSQ',
-		        '^DSFLOWRPT', '^RRCSTAT' ],
+		        '^DSFLOWRPT', '^RRCSTAT',
+		        // the bearer notifications (manual 10.10). Listing them matters
+		        // for the window right after AT+ECMDUP, where ^DCONN arrives
+		        // INSIDE the command and would otherwise be filed as a response
+		        // line and never reach the URC handler. Safe to list: nothing
+		        // parses them out of a command's answer (the dial status reads
+		        // +ECMDUP:, a different name).
+		        '^DCONN', '^DEND' ],
 		modem_init: [ 'AT+CFUN=1' ],
 		auth_cmd: (cid, ctxtype, apn, cfg) => {
 			if (!cfg.username && !cfg.password)
@@ -634,6 +641,91 @@ export const VENDORS = {
 				cfg.password ?? '', cfg.username ?? '');
 		},
 		dials: [ DIAL_ECMDUP, DIAL_QCRMCALL_MEIG, DIAL_CGACT ],
+		// ^SRVST / ^MODE: the service state and the RAT, pushed. Values from the
+		// manual (8.13 table 145, 8.7 table 133):
+		//   ^SRVST: 0 = no service, 1 = restricted service, 2 = effective service
+		//     (a Cudy LT300 also emits an undocumented 3 in passing, 2026-08-23)
+		//   ^MODE: <sys_mode>,<cell_service> — sys 0 = no service, 3 = GSM,
+		//     5 = WCDMA, 9 = LTE; cell 71 = FDD LTE, 72 = TDD LTE, 0 = none
+		//
+		// ^SRVST: 1 is the vendor's own word for the state that shows up as
+		// registration <stat> 11 — both were emitted in the same second on every
+		// registration cycle observed on the LT300, which is what confirmed the
+		// reading of that stat.
+		service_urc: (line) => {
+			// ONE field only: the push is `^SRVST: <service_status>`, while the
+			// answer to AT^SRVST? is `^SRVST: <enable>,<service_status>`. A
+			// loose match would read that answer's ENABLE flag as the service
+			// state. (The engine files a command's own answer as a response
+			// rather than a URC, so this is belt and braces — but the two forms
+			// share a name, which is exactly how ^CELLLOCK-class bugs start.)
+			let m = match(line, /\^SRVST:\s*(-?[0-9]+)\s*$/);
+
+			if (m)
+				return { kind: 'service', service: +m[1] };
+
+			m = match(line, /\^MODE:\s*(-?[0-9]+),\s*(-?[0-9]+)/);
+
+			if (m)
+				return { kind: 'mode', sys_mode: +m[1], cell_service: +m[2] };
+
+			return null;
+		},
+
+		// the registered operator. AT+COPS? also works but is SLOW on this
+		// firmware (>8 s, seen timing out at that limit) and carries no name;
+		// ^EONS answers instantly with both names and the SPN. It is a SET
+		// command — a bare AT^EONS is a syntax error (CME 4) — and without a
+		// <plmn_id> it reports the network currently registered:
+		//   ^EONS: 1,26202,"Vodafone.de","Vodafone",0,"DATA ONLY"
+		operator_query: 'AT^EONS=1',
+		parse_operator: (lines) => {
+			for (let l in (lines ?? [])) {
+				let m = match(l, /\^EONS:\s*[0-9]+,\s*([0-9]{5,6})\s*,\s*"([^"]*)"(\s*,\s*"([^"]*)")?/);
+
+				if (!m)
+					continue;
+
+				let id = m[1];
+
+				// 5 digits = 2-digit MNC, 6 = 3-digit (the split is positional,
+				// there is no separator in the PLMN id)
+				return {
+					mcc: +substr(id, 0, 3),
+					mnc: +substr(id, 3),
+					description: (length(m[2]) ? m[2] : null) ?? m[4],
+				};
+			}
+
+			return null;
+		},
+
+		// the startup value of the service state: the URC only fires on a CHANGE,
+		// so without this read the state stays unknown until the network moves.
+		// Second field — see the warning in service_urc.
+		service_query: 'AT^SRVST?',
+		parse_service: (lines) => {
+			for (let l in (lines ?? [])) {
+				let m = match(l, /\^SRVST:\s*-?[0-9]+,\s*(-?[0-9]+)/);
+
+				if (m)
+					return +m[1];
+			}
+
+			return null;
+		},
+
+		// ^DCONN/^DEND: <pdpid>,<status>,<pdp_type> — the modem announcing its
+		// own bearer coming up / going down (manual 10.10, table 195;
+		// <status> 0 = disconnect, 1 = established). Field-seen on a Cudy
+		// LT300: ^DEND 21:05:54, ^DCONN 21:05:59 — the modem re-established
+		// the session by itself five seconds later, which is why the context
+		// treats this as a hint to VERIFY rather than a verdict to act on.
+		session_urc: (line) => {
+			let m = match(line, /\^(DCONN|DEND):\s*([0-9]+),([0-9]+)/);
+
+			return m ? { cid: +m[2], up: (+m[3] == 1) } : null;
+		},
 		stats: 'AT^DSFLOWQRY',
 		parse_stats: (lines) => {
 			for (let l in (lines ?? [])) {

@@ -199,6 +199,48 @@ function any_event(arr, name)
 	return false;
 }
 
+// --- s_c5greg: an unsupported AT+C5GREG? is asked once, then dropped ---------
+//
+// The 5GS registration probe sits between CEREG and the legacy CREG fallback.
+// A modem without 5G refuses it for good (MeiG SLM770A, LTE Cat4: bare ERROR),
+// but the registration poll repeats every couple of seconds for as long as the
+// modem is searching — so an unlatched probe costs a round-trip and a warning
+// line per poll, precisely while the log is worth reading. Ask once.
+//
+// The CEREG handler object is kept mutable so the scenario can let the modem
+// register at the end (first match wins; the mock reads .lines per write).
+let c5_cereg = { re: /^AT\+CEREG\?$/, lines: [ '+CEREG: 2,0' ] };
+
+push(scenarios, {
+	name: 's_c5greg_latch',
+	script: script([
+		c5_cereg,
+		{ re: /^AT\+C5GREG\?$/, term: 'ERROR', lines: [] },
+		{ re: /^AT\+CREG\?$/, lines: [ '+CREG: 2,0' ] },
+	]),
+	cconfig: { apn: 'internet' },
+	run_at_start: true,
+	run: (env) => {
+		wait_for(() => env.tr.count(/^AT\+CEREG\?$/) >= 4, () => {
+			eq(env.tr.count(/^AT\+C5GREG\?$/), 1,
+				'c5greg: the refused probe is sent exactly once, not once per poll');
+			ok(env.tr.count(/^AT\+CREG\?$/) >= 4,
+				'c5greg: the CREG fallback still runs on every poll');
+
+			// the latch must not cost registration: let CEREG succeed
+			c5_cereg.lines = [ '+CEREG: 2,1' ];
+
+			wait_for(() => any_event(env.mevents, 'registered'), () => {
+				ok(any_event(env.mevents, 'registered'),
+					'c5greg: registration still completes with the probe latched off');
+				eq(env.tr.count(/^AT\+C5GREG\?$/), 1,
+					'c5greg: still not re-probed after registering');
+				env.finish();
+			});
+		});
+	},
+});
+
 // --- s1: lifecycle + settings shape + auth reaches QICSGP -------------------
 
 push(scenarios, {
@@ -348,6 +390,24 @@ push(scenarios, {
 
 		eq(m.info.model, 'SLM770A', 'meig model from CGMM');
 		ok(m.dial.connect(1) == 'AT+ECMDUP=1,1,2', 'meig ECMDUP dial selected from CGMI (default ipv4v6)');
+
+		// the service/RAT indications reach the live modem object and are
+		// remembered, so a modem that looks registered but carries nothing is
+		// distinguishable from a healthy one
+		m.at_on_urc('^SRVST: 1', 'at');
+		eq(m.service_state, 1, 'urc: ^SRVST restricted service recorded on the modem');
+		m.at_on_urc('^SRVST: 2', 'at');
+		eq(m.service_state, 2, 'urc: ^SRVST effective service recorded');
+
+		m.at_on_urc('^MODE: 9,71', 'at');
+		eq(m.rat_mode, 71, 'urc: ^MODE RAT recorded (71 = FDD LTE)');
+
+		// a repeat of the SAME value must not re-trigger anything (the modem
+		// mirrors its URCs onto both AT ports, so every event arrives twice)
+		let before_meng = env.tr.count(/^AT\+MENG=/);
+		m.at_on_urc('^MODE: 9,71', 'at2');
+		eq(env.tr.count(/^AT\+MENG=/), before_meng,
+			'urc: the mirrored duplicate of a ^MODE does not refresh telemetry again');
 		ok(m.dial.connect(1, { pdp_type: 'ipv4' }) == 'AT+ECMDUP=1,1,0', 'ECMDUP carries pdp_type (ipv4)');
 
 		env.ctx.up((err, settings) => {
@@ -367,6 +427,223 @@ push(scenarios, {
 			env.ctx.down(() => {
 				ok(env.tr.saw(/^AT\+ECMDUP=1,0$/) != null, 'ECMDUP disconnect issued');
 				env.finish();
+			});
+		});
+	},
+});
+
+// --- vendor service / RAT indications (^SRVST, ^MODE) -----------------------
+//
+// Values from the SLM770A manual (8.13 table 145, 8.7 table 133). ^SRVST: 1
+// "restricted service" is the vendor's own word for the state that shows up as
+// registration <stat> 11 — both appeared in the same second on every
+// registration cycle observed on a Cudy LT300 (2026-08-23), which is what
+// settled the reading of that stat.
+let meig_v = ncm_vendors.vendor_for('MEIG INCORPORATED', 'SLM770A-R');
+
+eq(meig_v.service_urc('^SRVST: 2')?.service, 2, 'service_urc: ^SRVST effective service');
+eq(meig_v.service_urc('^SRVST: 1')?.kind, 'service', 'service_urc: ^SRVST classified as a service change');
+eq(meig_v.service_urc('^SRVST: 0')?.service, 0, 'service_urc: ^SRVST no service');
+// the firmware emits an undocumented 3 in passing — it must parse, not throw
+eq(meig_v.service_urc('^SRVST: 3')?.service, 3, 'service_urc: an undocumented ^SRVST value still parses');
+
+eq(meig_v.service_urc('^MODE: 9,71')?.kind, 'mode', 'service_urc: ^MODE classified as a RAT change');
+eq(meig_v.service_urc('^MODE: 9,71')?.sys_mode, 9, 'service_urc: ^MODE sys_mode 9 = LTE');
+eq(meig_v.service_urc('^MODE: 9,71')?.cell_service, 71, 'service_urc: ^MODE cell_service 71 = FDD LTE');
+eq(meig_v.service_urc('^MODE: 0,0')?.cell_service, 0, 'service_urc: ^MODE 0,0 = no service');
+
+// must not swallow anything else — ^DCONN/^DEND belong to session_urc, and the
+// registration codes are the poll's business
+eq(meig_v.service_urc('^DCONN: 1,1,"IPV4"'), null, 'service_urc: leaves the bearer URCs alone');
+eq(meig_v.service_urc('+CEREG: 5,"88ce"'), null, 'service_urc: leaves registration URCs alone');
+eq(meig_v.service_urc('^CELLLOCK: 1'), null, 'service_urc: leaves the cell-lock read-back alone');
+
+// the two parsers stay disjoint in the other direction too
+eq(meig_v.session_urc('^SRVST: 2'), null, 'session_urc: ignores a service change');
+
+// the push (one field) and the answer to AT^SRVST? (<enable>,<status>) share a
+// name. The URC parser must not read that answer's ENABLE flag as the state,
+// and the query parser must take the SECOND field.
+eq(meig_v.service_urc('^SRVST: 1,2'), null,
+	'service_urc: the two-field query answer is not mistaken for a push');
+eq(meig_v.parse_service([ '^SRVST: 1,2' ]), 2,
+	'parse_service: reads <service_status>, not the <enable> flag');
+eq(meig_v.parse_service([ '^SRVST: 1,0' ]), 0, 'parse_service: no service');
+eq(meig_v.parse_service([ 'OK' ]), null, 'parse_service: no answer line -> null');
+eq(meig_v.service_query, 'AT^SRVST?', 'service_query: the documented read command');
+
+// --- the registered operator -------------------------------------------------
+//
+// The QMI backend gets this from the serving-system indication; on the AT path
+// nobody asked, so every NCM modem showed an empty operator — and LuCI's status
+// page, which reads reg.plmn, rendered a dash. ^EONS answers instantly with the
+// names; AT+COPS? also works but takes over 8 s on this firmware and carries no
+// name at all, which is why the vendor command is tried first.
+eq(meig_v.operator_query, 'AT^EONS=1', 'operator_query: the vendor command, not COPS');
+
+let op = meig_v.parse_operator([ '^EONS: 1,26202,"Vodafone.de","Vodafone",0,"DATA ONLY"' ]);
+eq(op?.mcc, 262, 'parse_operator: mcc split off the PLMN id');
+eq(op?.mnc, 2, 'parse_operator: 5-digit id -> 2-digit mnc');
+eq(op?.description, 'Vodafone.de', 'parse_operator: the long name');
+
+// 6-digit ids carry a 3-digit MNC — the split is positional, there is no
+// separator, so the length IS the information
+let op6 = meig_v.parse_operator([ '^EONS: 1,310260,"T-Mobile","TMO"' ]);
+eq(op6?.mcc, 310, 'parse_operator: 6-digit id -> mcc 310');
+eq(op6?.mnc, 260, 'parse_operator: 6-digit id -> 3-digit mnc');
+
+// an empty long name falls back to the short one rather than reporting ''
+eq(meig_v.parse_operator([ '^EONS: 1,26202,"","Vodafone"' ])?.description, 'Vodafone',
+	'parse_operator: empty long name falls back to the short name');
+
+eq(meig_v.parse_operator([ 'OK' ]), null, 'parse_operator: no answer line -> null');
+
+// --- s5d/s5e: the modem's own bearer notification (^DEND / ^DCONN) ----------
+//
+// Field-seen on a Cudy LT300 (2026-08-23): ^DEND at 21:05:54, ^DCONN at
+// 21:05:59 — the SLM770A dropped and re-established the session by itself in
+// five seconds. So ^DEND must NOT tear the context down on its own; it arms a
+// verification that only acts if a real status probe agrees, and a ^DCONN
+// arriving first cancels it. Without any of this the drop is invisible until
+// the next stats tick (up to 60 s).
+
+// the status handler is kept MUTABLE so a scenario can flip the bearer from
+// up to down mid-run: handing it back "down" from the start would let the
+// ordinary liveness poll tear the context down before the URC is ever tested
+function meig_session_script(status_handler)
+{
+	let s = meig_script();
+
+	unshift(s, status_handler);
+
+	return s;
+}
+
+let s5d_status = { re: /^AT\+ECMDUP\?$/, lines: [ '+ECMDUP: 1,1,"IPV4",0,"IPV6"' ] };
+let s5e_status = { re: /^AT\+ECMDUP\?$/, lines: [ '+ECMDUP: 1,1,"IPV4",0,"IPV6"' ] };
+
+// s5d: ^DEND followed by ^DCONN — the session heals, nothing happens
+push(scenarios, {
+	name: 's5d_meig_dend_then_dconn',
+	script: meig_session_script(s5d_status),
+	ctx_timing: { stats_interval: 5000, zero_rx_ms: 0, session_confirm_ms: 30 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'dend/dconn: context up');
+
+			env.ctx.modem_event('session_urc', { cid: 1, up: false });
+			env.ctx.modem_event('session_urc', { cid: 1, up: true });
+
+			// well past session_confirm_ms
+			uloop.timer(80, () => {
+				eq(env.ctx.state, 'CONNECTED',
+					'dend/dconn: a ^DCONN before the grace period expires keeps the session');
+				env.finish();
+			});
+		});
+	},
+});
+
+// s5e: ^DEND alone, and the status probe confirms the bearer is gone
+push(scenarios, {
+	name: 's5e_meig_dend_confirmed',
+	script: meig_session_script(s5e_status),
+	ctx_timing: { stats_interval: 5000, zero_rx_ms: 0, session_confirm_ms: 30 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'dend: context up');
+
+			// a foreign cid must be ignored outright
+			env.ctx.modem_event('session_urc', { cid: 7, up: false });
+
+			uloop.timer(80, () => {
+				eq(env.ctx.state, 'CONNECTED',
+					'dend: a ^DEND for another cid is not ours to act on');
+
+				// now the bearer really is gone, and OUR cid is announced
+				s5e_status.lines = [ '+ECMDUP: 1,0,"IPV4",0,"IPV6"' ];
+				env.ctx.modem_event('session_urc', { cid: 1, up: false });
+
+				uloop.timer(80, () => {
+					ok(env.ctx.state != 'CONNECTED',
+						'dend: verified by the status probe, the context goes down');
+					ok(any_event(env.cevents, 'down'),
+						'dend: the drop is reported to the daemon');
+					env.finish();
+				});
+			});
+		});
+	},
+});
+
+// s5f: ^DEND verified by an EMPTY status answer. Field-seen 2026-08-23 when the
+// network dropped the modem: AT+ECMDUP? came back with no rows at all, because
+// "no contexts" is exactly how the MeiG answers once the bearer is gone. An
+// "=== 0" test did nothing and the drop went unnoticed for 53 s.
+let s5f_status = { re: /^AT\+ECMDUP\?$/, lines: [ '+ECMDUP: 1,1,"IPV4",0,"IPV6"' ] };
+
+push(scenarios, {
+	name: 's5f_meig_dend_empty_status',
+	script: meig_session_script(s5f_status),
+	ctx_timing: { stats_interval: 5000, zero_rx_ms: 0, session_confirm_ms: 30 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'dend-empty: context up');
+
+			// the bearer is gone: the modem now lists no context at all
+			s5f_status.lines = [];
+			env.ctx.modem_event('session_urc', { cid: 1, up: false });
+
+			uloop.timer(80, () => {
+				ok(env.ctx.state != 'CONNECTED',
+					'dend-empty: an empty context list confirms the drop too');
+				env.finish();
+			});
+		});
+	},
+});
+
+// --- s5c: a vendor byte-counter command the firmware refuses ----------------
+//
+// HW-found on the Cudy LT300 / SLM770A-R: AT^DSFLOWQRY answers +CME ERROR on
+// every stats tick, forever. The poll already fell back to the netdev counter,
+// but it re-sent the doomed command (and logged a warning) once per interval
+// for the life of the connection. Retire it — but only after a RUN of
+// refusals, because a CME error can also be a passing condition, unlike the
+// bare ERROR that retires the C5GREG probe on the first try.
+
+function meig_nostats_script()
+{
+	let s = meig_script();
+
+	// first match wins, so prepend the refusal over the working handler
+	unshift(s, { re: /^AT\^DSFLOWQRY$/, term: '+CME ERROR: 100', lines: [] });
+
+	return s;
+}
+
+push(scenarios, {
+	name: 's5c_meig_stats_refused',
+	script: meig_nostats_script(),
+	ctx_timing: { stats_interval: 5, zero_rx_ms: 0 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'stats-refused: context still comes up');
+
+			// let the stats poll run well past the give-up threshold
+			wait_for(() => env.tr.count(/^AT\^DSFLOWQRY$/) >= 3, () => {
+				// a few more intervals must add nothing
+				uloop.timer(60, () => {
+					eq(env.tr.count(/^AT\^DSFLOWQRY$/), 3,
+						'stats-refused: asked exactly 3 times, then retired');
+					eq(env.ctx.state, 'CONNECTED',
+						'stats-refused: the context stays up on the netdev counter');
+					env.finish();
+				});
 			});
 		});
 	},
@@ -741,6 +1018,9 @@ function fscript(over)
 		{ re: /^AT\+CGMM$/, lines: [ 'FM350-GL' ] },
 		{ re: /^AT\+CGMR$/, lines: [ 'FM350GL_04.02.10' ] },
 		{ re: /^AT\+CGSN$/, lines: [ '350000000000000' ] },
+		// the FM350 has no vendor operator command -> the generic AT+COPS? path,
+		// answering at the 3GPP default format 0 (a NAME, no mcc/mnc)
+		{ re: /^AT\+COPS\?$/, lines: [ '+COPS: 0,0,"Telekom.de",7' ] },
 		{ re: /^AT\+GTFCCEFFSTATUS\?$/, lines: [ '+GTFCCEFFSTATUS: 0' ] },
 		{ re: /^AT\+SIMTYPE\?$/, lines: [ '+SIMTYPE: 0' ] },
 		{ re: /^AT\+ESLOTSINFO/, lines: [ '+ESLOTSINFO: 2, "+CPIN: READY", "1", "0", "3B00000000000000", "", "89000000000000000000", "+CPIN: EMPTY_EUICC", "1", "1", "3B9F00000000000000000000", "89000000000000000000000000000000", ""' ] },
@@ -796,6 +1076,7 @@ push(scenarios, {
 		ok(type(env.ctx.liveness_poke) == 'function' && type(env.ctx.settings_poke) == 'function',
 			's9a: URC poke entry points exposed');
 		eq(m.fcc_lock, 0, 's9a: FCC-lock probe read (unlocked)');
+
 		eq(m.esim_state, '89000000000000000000000000000000', 's9a: eSIM surface probes run (EID last)');
 		ok(any_event(env.mevents, 'esim_ready'), 's9a: esim_ready emitted after the probes');
 		eq(s9a_fx.files['/proc/sys/net/ipv6/conf/wwand0/accept_ra'], '2',
@@ -834,6 +1115,18 @@ push(scenarios, {
 					's9a: RS nudge restores IPv6 on the netdev');
 				ok(length(s9a_fx.matching('/proc/sys/net/ipv6/conf/wwand0/disable_ipv6')) >= 3,
 					's9a: RS nudge toggled disable_ipv6 (datapath + 1/0 pair)');
+
+				// the operator on the GENERIC path: the FM350 documents no
+				// vendor operator command (^EONS is MeiG/Huawei dialect), so it
+				// goes through AT+COPS? — and at the 3GPP default format that
+				// answer is a NAME with no mcc/mnc. Accepting only the numeric
+				// form would leave every Fibocom reporting no operator at all.
+				// (Asserted here, not at 'registered': the read is async.)
+				eq(env.modem.reg?.plmn?.description, 'Telekom.de',
+					's9a: operator name taken from a format-0 COPS answer');
+				eq(env.modem.reg?.plmn?.mcc, null,
+					's9a: a name-format answer carries no mcc');
+
 				env.finish();
 			});
 		});
@@ -1645,6 +1938,40 @@ eq(modem_ncm.parse_creg([ '+C5GREG: 2,5' ])?.roaming, true, 'parse_creg: +C5GREG
 eq(modem_ncm.parse_creg([ '+C5GREG: 2,0' ])?.registered, false, 'parse_creg: +C5GREG not registered');
 eq(modem_ncm.parse_creg([ '+CEREG: 2,1' ])?.registered, true, 'parse_creg: +CEREG still parses');
 eq(modem_ncm.parse_creg([ '+CREG: 2,5' ])?.roaming, true, 'parse_creg: +CREG still parses');
+
+// 27.007 <stat> beyond 0-5. Field-observed on a MeiG SLM770A (2026-08-23): every
+// registration cycle passes through stat 11 — in the same second as its
+// ^SRVST: 1 (limited service) — before settling on 5. Both +CREG and +CEREG
+// report it simultaneously, which is what rules out a merged-line artefact.
+eq(modem_ncm.parse_creg([ '+CEREG: 11,"88ce","00c52a16",7' ])?.stat, 11,
+	'parse_creg: URC form with tac/ci reads stat 11, not the <n> of a query');
+eq(modem_ncm.parse_creg([ '+CEREG: 11,"88ce","00c52a16",7' ])?.registered, false,
+	'parse_creg: RLOS (11) is attached but NOT usable for data');
+eq(modem_ncm.parse_creg([ '+CEREG: 11' ])?.restricted, true,
+	'parse_creg: RLOS (11) is reported as a restricted attach');
+
+// CSFB-not-preferred is a FULL data registration — the old stat==1||stat==5
+// test left modems polling forever on networks that signal 9/10
+eq(modem_ncm.parse_creg([ '+CEREG: 9' ])?.registered, true,
+	'parse_creg: CSFB-not-preferred home (9) counts as registered');
+eq(modem_ncm.parse_creg([ '+CEREG: 10' ])?.registered, true,
+	'parse_creg: CSFB-not-preferred roaming (10) counts as registered');
+eq(modem_ncm.parse_creg([ '+CEREG: 10' ])?.roaming, true,
+	'parse_creg: stat 10 is a roaming registration');
+
+// SMS-only and emergency-only are attachments no PDP context can live on
+eq(modem_ncm.parse_creg([ '+CREG: 7,"88ce","00c52a16",7' ])?.registered, false,
+	'parse_creg: SMS-only roaming (7) is not usable for data');
+eq(modem_ncm.parse_creg([ '+CREG: 7' ])?.roaming, true,
+	'parse_creg: stat 7 still reports roaming');
+eq(modem_ncm.parse_creg([ '+CEREG: 8' ])?.registered, false,
+	'parse_creg: emergency-only (8) is not usable for data');
+
+// the query form keeps winning over the URC form: <n>,<stat>
+eq(modem_ncm.parse_creg([ '+CEREG: 2,3' ])?.stat, 3,
+	'parse_creg: query form still reads <stat>, not <n>');
+ok(index(modem_ncm.parse_creg([ '+CEREG: 2,3' ])?.why ?? '', 'denied') >= 0,
+	'parse_creg: a denial carries a human-readable reason for the log');
 
 // Fibocom auth is a best-effort chain: +MGAUTH (the Qualcomm FM150/FM350
 // form) first, +CGAUTH as the fallback for the MediaTek T700 (FM350-GL)

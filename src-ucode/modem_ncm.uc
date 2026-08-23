@@ -22,6 +22,7 @@ import * as telemetry_ncm from 'wwand.telemetry_ncm';
 import * as netlink from 'wwand.netlink';
 import * as sim from 'wwand.sim';
 import * as ncm_vendors from 'wwand.ncm_vendors';
+import * as atcmd_parse from 'wwand.atcmd_parse';
 
 const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
@@ -74,8 +75,50 @@ function parse_cpin(lines)
 	return null;
 }
 
-// +CEREG/+C5GREG/+CREG: <n>,<stat>[,...] — registered when stat is 1 (home) or
-// 5 (roaming). Handles both the query echo (<n>,<stat>) and the URC (<stat>).
+// Vendor service states (MeiG ^SRVST, manual 8.13 table 145). Numeric keys must
+// be quoted in a ucode object literal and looked up via sprintf('%d', n).
+const SERVICE_STATE = {
+	'0': 'no service',
+	'1': 'restricted service',
+	'2': 'effective service',
+};
+
+// 3GPP TS 27.007 <stat>, shared by +CREG/+CGREG/+CEREG/+C5GREG:
+//    0 not registered, not searching     1 registered, home
+//    2 searching                         3 registration denied
+//    4 unknown                           5 registered, roaming
+//    6 registered, SMS only, home        7 registered, SMS only, roaming
+//    8 emergency bearer services only    9 registered, CSFB not preferred, home
+//   10 registered, CSFB not preferred, roaming
+//   11 attached for access to RLOS (restricted local operator services)
+//
+// `registered` means USABLE FOR DATA, which is narrower than "attached":
+//   - 9/10 ARE full data registrations — only CS fallback is deprioritised.
+//     Counting them as unregistered (the old stat==1||stat==5 test) left the
+//     modem polling forever on any network that signals them.
+//   - 6/7 (SMS only), 8 (emergency) and 11 (RLOS) are real attachments that no
+//     PDP context can live on, so they stay out of `registered` — but they are
+//     reported as `restricted` so the wait can say WHY it is waiting. Observed
+//     on a MeiG SLM770A: every registration cycle passes through stat 11,
+//     in the same second as its ^SRVST: 1 (limited service), before settling
+//     on 5. Until now the log said nothing at all for those seconds.
+const REG_USABLE     = [ 1, 5, 9, 10 ];
+const REG_ROAMING    = [ 5, 7, 10 ];
+const REG_RESTRICTED = [ 6, 7, 8, 11 ];
+
+// human-readable reason for a wait, for the log line only
+const REG_WHY = {
+	'0': 'not registered, not searching',
+	'2': 'searching',
+	'3': 'registration denied',
+	'4': 'state unknown',
+	'6': 'SMS only (home)',
+	'7': 'SMS only (roaming)',
+	'8': 'emergency bearer services only',
+	'11': 'restricted local operator services only',
+};
+
+// Handles both the query echo (<n>,<stat>) and the URC (<stat>).
 export function parse_creg(lines)
 {
 	for (let l in (lines ?? [])) {
@@ -89,7 +132,13 @@ export function parse_creg(lines)
 
 		let stat = +m[2];
 
-		return { stat: stat, registered: (stat == 1 || stat == 5), roaming: (stat == 5) };
+		return {
+			stat: stat,
+			registered: index(REG_USABLE, stat) >= 0,
+			roaming: index(REG_ROAMING, stat) >= 0,
+			restricted: index(REG_RESTRICTED, stat) >= 0,
+			why: REG_WHY[sprintf('%d', stat)],
+		};
 	}
 
 	return null;
@@ -186,6 +235,13 @@ export function create(opts)
 	let retry_timer = null, reg_timer = null, reg_poll_timer = null, settle_timer = null;
 	let reenum_timer = null;   // slot-switch re-enumeration watchdog (step_simslot)
 	let poll_inflight = false;   // one register-poll chain at a time (URC fast-path coalescing)
+	let no_c5greg = false;       // modem answered ERROR to AT+C5GREG? — stop asking
+	// forward-declared: the URC handler below refreshes telemetry on a RAT
+	// change, and a ucode closure captures only variables ALREADY declared when
+	// it is created — a plain `let` further down reads as undeclared here
+	let refresh_signal, refresh_cells, refresh_reg_detail, emit_telemetry;
+	let read_operator;
+	let last_reg_stat = null;    // last logged registration <stat> (log on change only)
 	let poll;   // the register poll (forward-declared; the URC fast path re-runs it)
 
 	// shared radio cycle: CFUN 0 -> settle -> CFUN 1 -> settle -> then()
@@ -216,15 +272,50 @@ export function create(opts)
 	// NCM adds the registration fast-path on top instead of re-implementing it
 	let urc_shared = self.at_on_urc;
 
-	self.at_on_urc = (line) => {
-		log('debug', sprintf('urc: %s', line));
+	self.at_on_urc = (line, ch) => {
+		// (the line itself is logged once, with its channel, by open_at)
+
+		// vendor service / RAT indications. Same contract as the registration
+		// URCs: a hint that shortens a wait or refreshes stale telemetry, never
+		// a state decision of its own — the poll stays the authority.
+		let vev = self.vendor?.service_urc?.(line);
+
+		// Recorded, not acted on: the registration URCs (+CEREG/+CREG) arrive in
+		// the SAME burst as ^SRVST and already drive the registration poll, so
+		// re-polling here would only be swallowed by poll_inflight. What this
+		// adds is the information itself — "registered but carrying nothing" was
+		// previously indistinguishable from a healthy modem.
+		if (vev?.kind == 'service' && self.service_state != vev.service) {
+			self.service_state = vev.service;
+			log('info', sprintf('service state: %s',
+				SERVICE_STATE[sprintf('%d', vev.service)] ?? sprintf('unknown (%d)', vev.service)));
+		}
+		else if (vev?.kind == 'mode' && self.rat_mode != vev.cell_service) {
+			self.rat_mode = vev.cell_service;
+
+			// This one is NOT redundant: signal and cells come only from the
+			// stats poll, so without acting on the push the old radio is shown
+			// for up to a full interval (60 s) after a RAT change.
+			if (self.state == 'READY' && refresh_signal)
+				refresh_signal(() => {
+					if (self.state == 'READY')
+						refresh_cells(() => emit_telemetry());
+				});
+		}
+
+		// the vendor's own bearer notification goes to the contexts, which
+		// decide what to do with it (they own the session state, not the modem)
+		let sev = self.vendor?.session_urc?.(line);
+
+		if (sev)
+			scaffold.notify_contexts('session_urc', sev);
 
 		// a registration-class URC short-circuits the REGISTERING poll interval
 		if (self.state == 'REGISTERING' && poll && !self._esim_op &&
 		    match(line, /^\+?(CEREG|C5GREG|CREG|CGREG|CTZV|EONSNWNAME)[:\s]/))
 			poll();
 
-		urc_shared(line);
+		urc_shared(line, ch);
 	};
 
 	// `option sim_slot` needs a slot transport — on the AT-only backend that
@@ -393,6 +484,22 @@ export function create(opts)
 					self.at_telemetry?.add_urc_prefixes?.(self.vendor.urcs);
 					log('debug', sprintf('vendor URC prefixes: %s', join(' ', self.vendor.urcs)));
 				}
+
+				// seed the service state: ^SRVST is pushed on CHANGE only, so a
+				// modem that is already in (or already out of) service when the
+				// daemon starts would otherwise report nothing at all until the
+				// network next moves. Best-effort — an error just leaves it null.
+				if (self.vendor.service_query && self.at)
+					self.at.send(self.vendor.service_query, (serr, sres) => {
+						let sv = serr ? null : self.vendor.parse_service?.(sres?.lines);
+
+						if (sv == null)
+							return;
+
+						self.service_state = sv;
+						log('info', sprintf('service state: %s',
+							SERVICE_STATE[sprintf('%d', sv)] ?? sprintf('unknown (%d)', sv)));
+					});
 
 				// the recipe in use was never logged — a degraded modem looked
 				// exactly like a healthy one apart from missing vendor commands
@@ -873,6 +980,7 @@ export function create(opts)
 
 	step_register_go = () => {
 		self.set_state('REGISTERING');
+		last_reg_stat = null;
 
 		if (reg_timer) reg_timer.cancel();
 		reg_timer = uloop.timer(self.timing.reg_timeout, () => {
@@ -902,6 +1010,17 @@ export function create(opts)
 					if (rr?.registered)
 						return on_registered(rr);
 
+					// say WHY the wait continues, once per change of reason. A
+					// registration wait used to be completely silent at notice
+					// level: "not registered" for minutes, with the denial or
+					// the restricted attach only visible under debug.
+					if (rr?.stat != null && rr.stat != last_reg_stat) {
+						last_reg_stat = rr.stat;
+						log('notice', sprintf('waiting for registration: %s (stat %d)',
+							rr.why ?? (rr.restricted ? 'attached, but not usable for data' : 'not registered'),
+							rr.stat));
+					}
+
 					if (self.state == 'REGISTERING') {
 						// the URC fast path can re-enter poll() while a timer is
 						// still pending — cancel first, or both fire
@@ -915,22 +1034,40 @@ export function create(opts)
 				if (r?.registered)
 					return after(r);
 
+				// legacy CREG, the last rung of the chain
+				let then_creg = (rr5) => {
+					if (rr5?.registered)
+						return after(rr5);
+
+					self.at.send('AT+CREG?', (e2, r2) =>
+						after((!e2 && parse_creg(r2?.lines)?.registered) ? parse_creg(r2.lines) : r));
+				};
+
 				// 5G-SA: EPS registration (CEREG) can read not-registered while the
 				// device is attached via 5GS only — try C5GREG, then legacy CREG.
+				//
+				// A modem without 5G refuses the command for good (SLM770A, LTE
+				// Cat4: plain ERROR). Latch it off on the first refusal: otherwise
+				// every 2 s registration poll pays a round-trip for it AND logs a
+				// warning, which on a small box is the bulk of the log while the
+				// modem is searching — exactly when the log is worth reading.
+				if (no_c5greg)
+					return then_creg(null);
+
 				self.at.send('AT+C5GREG?', (e5, r5) => {
 					if (self.state != 'REGISTERING' || !self.at) {
 						poll_inflight = false;
 						return;
 					}
 
+					if (e5) {
+						no_c5greg = true;
+						log('info', 'AT+C5GREG? refused — no 5GS registration polling on this modem');
+					}
+
 					let r5p = e5 ? null : parse_creg(r5?.lines);
-					let rr5 = (r5p?.registered) ? r5p : null;
 
-					if (rr5?.registered)
-						return after(rr5);
-
-					self.at.send('AT+CREG?', (e2, r2) =>
-						after((!e2 && parse_creg(r2?.lines)?.registered) ? parse_creg(r2.lines) : r));
+					then_creg((r5p?.registered) ? r5p : null);
 				});
 			});
 		};
@@ -939,6 +1076,55 @@ export function create(opts)
 	};
 
 	// forward-declared above: referenced by step_register's poll closure
+	// vendor command first (fast, carries the name), else the 3GPP read. COPS
+	// gets a long timeout on purpose: on the SLM770A it takes over 8 seconds and
+	// times out at the default, which is exactly why the vendor path is tried
+	// first rather than as a fallback.
+	read_operator = () => {
+		if (!self.at)
+			return;
+
+		// a name-only answer (COPS format 0) carries no mcc/mnc and is still
+		// worth having — the status page shows the name, which is what a human
+		// reads anyway
+		let store = (p) => {
+			if (p?.mcc || length(p?.description ?? ''))
+				self.reg.plmn = p;
+		};
+
+		if (self.vendor?.operator_query) {
+			self.at.send(self.vendor.operator_query, (err, res) => {
+				if (!err && self.reg)
+					store(self.vendor.parse_operator?.(res?.lines));
+			});
+
+			return;
+		}
+
+		self.at.send('AT+COPS?', (err, res) => {
+			if (err || !self.reg)
+				return;
+
+			let c = atcmd_parse.parse_cops_read(res?.lines);
+
+			if (!c)
+				return;
+
+			// Both answer shapes are useful and BOTH occur in the field: the
+			// 3GPP default format is 0 (long alphanumeric), so a modem left at
+			// the default reports a NAME and no mcc/mnc — accepting only the
+			// numeric form would silently report nothing at all on it (the
+			// Fibocom FM350 documents no vendor operator command, so this
+			// generic path is the only one it has).
+			if (c.plmn != null && match(c.plmn, /^[0-9]{5,6}$/))
+				return store({ mcc: +substr(c.plmn, 0, 3), mnc: +substr(c.plmn, 3),
+				               description: null });
+
+			if (length(c.oper ?? ''))
+				store({ mcc: null, mnc: null, description: c.oper });
+		}, { timeout: 20000 });
+	};
+
 	on_registered = (r) => {
 		if (reg_timer) { reg_timer.cancel(); reg_timer = null; }
 		if (reg_poll_timer) { reg_poll_timer.cancel(); reg_poll_timer = null; }
@@ -946,6 +1132,13 @@ export function create(opts)
 		self.reg = { registration: 1, roaming: r.roaming };
 		self.reg_detail = null;   // registered: clear any stale reject info
 		self.counters.attempts = 0;
+
+		// who we are registered WITH. The QMI backend gets this from the serving
+		// system indication (current_plmn); on the AT path nobody ever asked, so
+		// every NCM modem reported an empty operator — and LuCI's status page,
+		// which reads reg.plmn, showed a dash where the network name belongs.
+		// Best-effort and asynchronous: a failure just leaves it unset.
+		read_operator();
 
 		log('notice', sprintf('registered (%s)', r.roaming ? 'roaming' : 'home'));
 		enter_ready();
@@ -982,7 +1175,6 @@ export function create(opts)
 	// telemetry reads route through the vendor telemetry block, falling back to
 	// the 3GPP-generic block. Each step is best-effort — an erroring command is
 	// swallowed and the last-known value kept.
-	let refresh_signal, refresh_cells, refresh_reg_detail;
 
 	refresh_signal = (cb) => {
 		cb = cb ?? (() => null);
@@ -1018,7 +1210,7 @@ export function create(opts)
 		vendor_telemetry(self).reg_detail(self, cb);
 	};
 
-	let emit_telemetry = () => emit('telemetry', { signal: self.signal, cells: self.cells, reg: self.reg });
+	emit_telemetry = () => emit('telemetry', { signal: self.signal, cells: self.cells, reg: self.reg });
 
 	let log_telemetry = () => {
 		log('debug', sprintf('telemetry: %s', modem_common.format_telemetry(self)));
