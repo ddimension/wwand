@@ -418,6 +418,29 @@ function compat_translate(raw, result)
 		// load order, which no package can control. Moving an interface over is an
 		// explicit act that rewrites it to `proto wwand`: the LuCI modem list,
 		// /usr/libexec/wwand/migrate, or the example uci-defaults script.
+		// Device blocklist: a non-wwand interface OWNS the device it names, and
+		// wwand must not touch it — two dialers on one control node is the one
+		// failure the coexistence model has to prevent, and packaging cannot
+		// express it. Collected here, logged once at start, enforced when a
+		// modem binds and when autosetup considers claiming a device.
+		//
+		// A DISABLED interface is skipped: netifd never brings it up, so it owns
+		// nothing — a stale section must not block a device forever. `@name`
+		// references an interface, not a device, so it is skipped too.
+		if (s['.type'] == 'interface' && s.proto != 'wwand' &&
+		    !bool_opt(s.disabled, false)) {
+			for (let opt in [ 'device', 'ifname', 'ctldevice' ]) {
+				let dev = s[opt];
+
+				if (dev == null || dev == '' || substr(dev, 0, 1) == '@')
+					continue;
+
+				// first claimant wins the attribution; the device is blocked
+				// either way
+				result.blocked[dev] ??= { interface: name, proto: s.proto ?? '?' };
+			}
+		}
+
 		if (s['.type'] != 'interface' || s.proto != 'wwand')
 			continue;
 
@@ -677,6 +700,8 @@ export function parse(raw)
 		// hold_max: seconds the daemon holds a lost interface up while
 		// reconnecting in place before giving up and downing it (netifd teardown)
 		globals: { log_level: 'info', hold_max: 90, write_device: true, autosetup: true },
+		// devices owned by a non-wwand interface -> { interface, proto }
+		blocked: {},
 		modems: {},
 		contexts: {},
 		sims: {},

@@ -460,6 +460,51 @@ eq(r.globals.takeover, null, 'ownership: takeover is no longer a global');
 // migrate_plan is the explicit (user-triggered) conversion path and converts a
 // `proto qmi` interface regardless — that is how an interface changes owner.
 
+// --- device blocklist --------------------------------------------------------
+// A device named by a NON-wwand interface belongs to that stack. Two dialers on
+// one control node is the one failure the coexistence model has to prevent, and
+// packaging cannot express it — so the daemon collects the claims here.
+r = config.parse({
+	network: {
+		wan:  { '.type': 'interface', proto: 'qmi', device: '/dev/cdc-wdm0' },
+		lan:  { '.type': 'interface', proto: 'static', device: 'br-lan' },
+		ncm:  { '.type': 'interface', proto: 'ncm', ifname: 'wwan1', ctldevice: '/dev/ttyUSB2' },
+		mine: { '.type': 'interface', proto: 'wwand', device: 'wwan0', apn: 'a' },
+	},
+});
+
+eq(r.blocked['/dev/cdc-wdm0'], { interface: 'wan', proto: 'qmi' },
+	'blocklist: a stock qmi interface claims its control device');
+eq(r.blocked['br-lan'], { interface: 'lan', proto: 'static' },
+	'blocklist: any non-wwand proto claims its device, not just cellular ones');
+eq(r.blocked.wwan1, { interface: 'ncm', proto: 'ncm' }, 'blocklist: ifname counts');
+eq(r.blocked['/dev/ttyUSB2'], { interface: 'ncm', proto: 'ncm' }, 'blocklist: ctldevice counts');
+eq(r.blocked.wwan0, null, 'blocklist: wwand-owned devices are NOT blocked');
+
+// a DISABLED interface is never brought up by netifd, so it owns nothing — a
+// stale section must not block a device forever
+r = config.parse({
+	network: {
+		old: { '.type': 'interface', proto: 'qmi', device: '/dev/cdc-wdm0', disabled: '1' },
+	},
+});
+eq(r.blocked['/dev/cdc-wdm0'], null, 'blocklist: a disabled interface claims nothing');
+
+// `@name` references an interface, not a device
+r = config.parse({
+	network: { six: { '.type': 'interface', proto: 'dhcpv6', device: '@wan' } },
+});
+eq(r.blocked['@wan'], null, 'blocklist: an @alias is not a device claim');
+
+// first claimant wins the attribution; the device is blocked either way
+r = config.parse({
+	network: {
+		a: { '.type': 'interface', proto: 'qmi', device: '/dev/cdc-wdm0' },
+		b: { '.type': 'interface', proto: 'mbim', device: '/dev/cdc-wdm0' },
+	},
+});
+eq(r.blocked['/dev/cdc-wdm0'].interface, 'a', 'blocklist: first claimant is attributed');
+
 // --- migrate_plan: convert old configs to the network-native model -----------
 
 function mp_set(ch, section, opt) {

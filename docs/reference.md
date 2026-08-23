@@ -493,6 +493,35 @@ The CLI equivalent is `/usr/libexec/wwand/migrate` (dry-run) / `--apply`, and
 `/usr/share/wwand/examples/99-wwand-migrate` does it unattended at the next boot.
 Details: [Configuration](#configuration) (migration notes).
 
+## Device ownership (blocklist)
+
+wwand manages `proto wwand` interfaces only, and it will not touch a device that
+some **other** interface in `/etc/config/network` names. At start it collects
+every `device` / `ifname` / `ctldevice` from non-wwand interface sections and
+logs the set once:
+
+```
+device blocklist: /dev/cdc-wdm0 (interface wan, proto qmi) — owned by a
+non-wwand interface, wwand will not touch it
+```
+
+A `wwand_modem` pointing at a blocked device is **not started**; the reason
+appears on its `control_note` in `status()` and in LuCI, so it reads as
+"someone else owns this" rather than as a missing modem. Zero-config autosetup
+refuses such a device too, which is the case the proto check alone missed — a
+`proto dhcp` on `wwan0` left over from a comgt-ncm setup is not a cellular proto
+but still owns the netdev.
+
+Two exclusions:
+
+- a **disabled** interface (`option disabled '1'`) claims nothing — netifd never
+  brings it up, so a stale section must not block a device forever;
+- `option device '@name'` references an *interface*, not a device.
+
+To hand a device to wwand, migrate the owning interface (LuCI modem list,
+`/usr/libexec/wwand/migrate --apply`, or the example uci-defaults script) — it
+is rewritten to `proto wwand` in place and stops being a foreign claim.
+
 ## netifd integration (no-proto-task)
 
 The proto handler sets `no_proto_task=1`: after setup the interface stays

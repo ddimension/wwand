@@ -732,6 +732,18 @@ export function create(opts)
 		entry.netdev = want;
 	};
 
+	// is this device claimed by a foreign interface? Checked against BOTH the
+	// configured name and the resolved one: `option device wwan0` and the
+	// /dev/cdc-wdm0 it resolves to are the same hardware, and a foreign section
+	// may name either.
+	let blocked_by = (...devs) => {
+		for (let d in devs)
+			if (d != null && d != '' && self.blocked?.[d])
+				return { device: d, ...self.blocked[d] };
+
+		return null;
+	};
+
 	let start_modem = (name, cfg, muxinfo, l3name) => {
 		// decide how this modem is controlled (qmi/mbim/ncm/ppp). resolve_control
 		// classifies EVERY modem, incl. NCM modems with no cdc-wdm.
@@ -756,6 +768,26 @@ export function create(opts)
 
 				control = { protocol: proto, device: device, netdev: cfg.netdev, tty: cfg.tty };
 			}
+		}
+
+		// refuse to bind a device another stack owns, rather than contending for
+		// it. Surfaced as control_note so status()/LuCI show WHY the modem is
+		// idle instead of it looking merely absent.
+		let claim = blocked_by(cfg.device, cfg.ctldevice, control?.device, control?.netdev);
+
+		if (claim) {
+			log('warn', sprintf('modem %s: device %s is owned by interface %s (proto %s) — ignoring this modem',
+				name, claim.device, claim.interface, claim.proto));
+
+			self.modems[name] = {
+				cfg: cfg, device: null, netdev: null, muxinfo: muxinfo,
+				l3_name: l3name ?? null, modem: null, protocol: null,
+				control_note: sprintf('device %s is owned by interface %s (proto %s)',
+					claim.device, claim.interface, claim.proto),
+				_sig: self.modems[name]?._sig,
+			};
+
+			return;
 		}
 
 		let entry = {
@@ -922,6 +954,8 @@ export function create(opts)
 	// --- public API --------------------------------------------------------
 
 	let config_sig = null;
+	// last-logged blocklist, so the notice repeats only when the set changes
+	let blocked_sig = null;
 
 	self.apply_config = function(parsed) {
 		// l3-device learn-back switch; read before the no-op short-circuit so a
@@ -930,6 +964,27 @@ export function create(opts)
 
 		// zero-config autosetup gate (default on; wwand_globals option autosetup)
 		self.autosetup = parsed.globals?.autosetup ?? true;
+
+		// Device blocklist: every device a non-wwand interface names belongs to
+		// that stack. Logged when the set CHANGES (not on every reload trigger —
+		// netifd fires those for unrelated edits), so the reason a modem is being
+		// left alone is in the log without repeating forever.
+		self.blocked = parsed.blocked ?? {};
+
+		let bsig = sprintf('%J', self.blocked);
+
+		if (bsig != blocked_sig) {
+			blocked_sig = bsig;
+
+			let items = [];
+
+			for (let dev, o in self.blocked)
+				push(items, sprintf('%s (interface %s, proto %s)', dev, o.interface, o.proto));
+
+			if (length(items))
+				log('notice', sprintf('device blocklist: %s — owned by a non-wwand interface, wwand will not touch %s',
+					join(', ', sort(items)), length(items) > 1 ? 'them' : 'it'));
+		}
 
 		// unchanged whole config is a no-op: the reload trigger also fires for
 		// unrelated network edits, so skip the diff entirely when nothing changed.

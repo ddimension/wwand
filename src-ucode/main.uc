@@ -334,6 +334,31 @@ function run_daemon()
 				let dev = (substr(devname ?? '', 0, 7) == 'cdc-wdm')
 					? '/dev/' + devname : devname;
 
+				// device blocklist: even on an otherwise unconfigured box, a
+				// non-wwand interface may already name this exact device (the
+				// proto check above only catches the cellular ones — a
+				// `proto dhcp` on wwan0 from a comgt-ncm setup would slip past).
+				// Never auto-claim hardware someone else points at.
+				let owner = null;
+
+				cursor.foreach('network', 'interface', (s) => {
+					if (s.proto == 'wwand' ||
+					    (s.disabled != null && s.disabled != '0' && s.disabled != ''))
+						return;
+
+					for (let opt in [ 'device', 'ifname', 'ctldevice' ])
+						if (s[opt] == dev || s[opt] == devname) {
+							owner = { interface: s['.name'], proto: s.proto ?? '?' };
+							return false;
+						}
+				});
+
+				if (owner) {
+					logmod.log('notice', 'autosetup: %s is owned by interface %s (proto %s) — not claiming it',
+						dev, owner.interface, owner.proto);
+					return false;
+				}
+
 				// bind by the sysfs path (stable across USB enumeration order); device
 				// name is only the fallback when the path can't be resolved
 				let clink = (substr(devname ?? '', 0, 7) == 'cdc-wdm')

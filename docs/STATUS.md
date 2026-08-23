@@ -3,6 +3,36 @@
 _Last updated: 2026-08-21. 47 host suites, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
 
+## Device blocklist: never touch hardware another interface names (2026-08-23)
+
+The counterpart to the `takeover` removal, and the answer to the one review
+thread still open on openwrt/packages#30185: dropping the `qmi` proto alias gave
+exactly one owner per *interface*, but said nothing about the *device* behind it.
+A `proto dhcp` on `wwan0` left over from a comgt-ncm setup is not a cellular
+proto, so the autosetup guard did not see it, and a hand-written `wwand_modem`
+pointing at a device uqmi drives was never checked at all.
+
+- **`config.parse` collects the claims** into `result.blocked`: every
+  `device`/`ifname`/`ctldevice` on a non-wwand interface section, mapped to the
+  owning interface and proto. Two exclusions, both deliberate — a **disabled**
+  interface claims nothing (netifd never brings it up, so a stale section must
+  not block a device forever), and `@name` references an interface rather than a
+  device.
+- **The daemon refuses to bind** a blocked device instead of contending for it,
+  and checks the configured *and* resolved names (`option device wwan0` and the
+  `/dev/cdc-wdm0` it resolves to are the same hardware; a foreign section may
+  name either). The modem entry survives with a `control_note` naming the owner,
+  so status/LuCI say "someone else owns this" rather than showing an absent
+  modem.
+- **Autosetup refuses too.** Its existing guard only recognised cellular protos.
+- **Logged once, on change** — netifd fires the reload trigger for unrelated
+  edits, so the notice repeats only when the claim set actually changes.
+
+This is a runtime guarantee, which is what the review asked about: packaging
+cannot express device ownership. It does not close the honest gap either — with
+autosetup on, an unconfigured box still claims a modem nobody has claimed. It
+closes the case where somebody HAS.
+
 ## `takeover` removed: one owner per interface, migration is always the user's (2026-08-21)
 
 Raised in the openwrt/packages review (#30185): with `CONFLICTS` gone, uqmi's

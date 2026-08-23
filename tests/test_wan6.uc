@@ -118,4 +118,62 @@ s4.ctx()('up');
 
 eq(ensures, [], 'wan6: qmi_wwan datapath -> no dhcpv6 subinterface');
 
+// --- device blocklist: a modem on a foreign-owned device is not started ------
+//
+// The coexistence model rests on exactly one dialer owning a control node.
+// Packaging cannot express that, so the daemon enforces it: a device named by a
+// non-wwand interface is refused, with the reason on the modem's control_note
+// rather than the modem merely looking absent.
+
+let started = [];
+let blk_logs = [];
+
+function mkblk(raw)
+{
+	let parsed = config.parse(raw);
+	let d = daemon_mod.create({
+		timing: TIMING,
+		deps: {
+			log: (lvl, msg) => push(blk_logs, msg),
+			load_qmi: () => ({
+				modem: { create: (o) => { push(started, o.config.device ?? '?');
+					return { id: 'm', start: () => null, stop: () => null,
+					         note_connect_success: () => null, note_connect_failure: () => null,
+					         datapath: {} }; } },
+				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem }) },
+			}),
+			emit_event: () => null, kick_interface: () => null, renew_interface: () => null,
+			down_interface: () => null, iface_status: (i, cb) => cb({ up: false }),
+			datapath_fx: null, read_config: () => parsed,
+			resolve_modem_device: (cfg) => cfg.device,
+			resolve_netdev: () => 'wwan0',
+			learn_device: () => null, learn_modem_path: () => null,
+		},
+	});
+	d.apply_config(parsed);
+	return d;
+}
+
+// the modem points at a device a stock `proto qmi` interface owns
+let dblk = mkblk({ network: {
+	m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+	wan: { '.type': 'interface', proto: 'qmi', device: '/dev/cdc-wdm0' },
+} });
+
+eq(started, [], 'blocklist: a modem on a foreign-owned device is never started');
+ok(dblk.modems.m0 != null, 'blocklist: the modem entry still exists (so status can explain it)');
+ok(match(dblk.modems.m0.control_note ?? '', /owned by interface wan \(proto qmi\)/),
+	'blocklist: control_note names the owning interface and proto');
+ok(length(filter(blk_logs, (m) => match(m, /device blocklist:/))) == 1,
+	'blocklist: the claim set is logged once at start');
+
+// same modem, no foreign claim -> started normally
+started = [];
+let dok = mkblk({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+} });
+
+eq(started, [ '/dev/cdc-wdm0' ], 'blocklist: an unclaimed device starts as before');
+eq(dok.modems.m0.control_note ?? null, null, 'blocklist: no note when nothing claims it');
+
 done('test_wan6');
