@@ -605,6 +605,19 @@ export const VENDORS = {
 	//                    (all fields HEXADECIMAL)
 	meig: {
 		match: /meig/,
+		// From the SLM770A AT manual's own URC table (AT^CURCEX bit->code map):
+		// ^SRVST service state, ^MODE network mode, ^SIMST SIM state,
+		// ^SMMEMFULL SMS storage full, ^HCSQ signal quality. Plus the two the
+		// manual lists as "active reporting": ^DSFLOWRPT (traffic) and
+		// ^RRCSTAT (RRC state changes).
+		//
+		// ^DSFLOWRPT is the notification; the recipe's stats poll uses
+		// AT^DSFLOWQRY, whose answer is ^DSFLOWQRY — a different name, so
+		// exact matching keeps the two apart (same shape as Huawei's
+		// ^NDISSTAT vs ^NDISSTATQRY). MeiG shares the ^ dialect with Huawei,
+		// which is why four of these appear in that recipe too.
+		urcs: [ '^SRVST', '^MODE', '^SIMST', '^SMMEMFULL', '^HCSQ',
+		        '^DSFLOWRPT', '^RRCSTAT' ],
 		modem_init: [ 'AT+CFUN=1' ],
 		auth_cmd: (cid, ctxtype, apn, cfg) => {
 			if (!cfg.username && !cfg.password)

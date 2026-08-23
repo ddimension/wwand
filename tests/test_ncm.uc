@@ -1113,6 +1113,17 @@ eq(ncm_vendors.vendor_for(null, 'WEIRD-9000'), ncm_vendors.VENDORS.generic,
 eq(ncm_vendors.vendor_name(ncm_vendors.VENDORS.fibocom), 'fibocom',
 	'vendor_name: recipe maps back to its key (for the log line)');
 
+// vendor URC sets: only codes the vendor documentation actually attests, since
+// a prefix here is filtered OUT of that modem's command responses
+ok(index(ncm_vendors.VENDORS.meig.urcs, '^DSFLOWRPT') >= 0,
+	'meig urcs: the traffic REPORT is listed');
+eq(index(ncm_vendors.VENDORS.meig.urcs, '^DSFLOWQRY'), -1,
+	'meig urcs: the QUERY answer is NOT — it is this recipe\'s own stats command');
+eq(index(ncm_vendors.VENDORS.huawei.urcs, '^NDISSTATQRY'), -1,
+	'huawei urcs: likewise the NDISSTATQRY answer is not treated as a URC');
+eq(length(ncm_vendors.VENDORS.generic.urcs ?? []), 0,
+	'generic: no vendor codes guessed for an unidentified modem');
+
 push(scenarios, {
 	name: 's9f_fibocom_dual_slot',
 	script: fscript(),
