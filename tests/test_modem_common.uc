@@ -12,43 +12,28 @@ import * as mc from 'wwand/modem_common.uc';
 
 uloop.init();
 
-// --- lazy telemetry channel (at2) --------------------------------------------
-// telemetry_at() must open the dedicated 'at2' engine only on first use, reuse
-// it afterwards, and fall back to the control channel when there is none.
+// --- telemetry channel selection (at2) ---------------------------------------
+// telemetry_at() is a pure selector: open_at() opens BOTH ports up front (at2 is
+// a URC source first and a poll channel second), so this only has to return the
+// dedicated engine when there is one and the control channel otherwise.
 
 // (1) direct telemetry_at semantics on a hand-built modem
-let opens = 0;
 let at2_engine = { tag: 'at2' };
-let s = { at: { tag: 'ctrl' } };
-s.at_telemetry = s.at;
-s._at2_open = () => { opens++; s.at_telemetry = at2_engine; };
+let s = { at: { tag: 'ctrl' }, at_telemetry: at2_engine };
 
-eq(opens, 0, 'lazy: at2 not opened before first telemetry poll');
-eq(mc.telemetry_at(s), at2_engine, 'lazy: first telemetry_at opens + returns at2');
-eq(opens, 1, 'lazy: opened exactly once');
-eq(mc.telemetry_at(s), at2_engine, 'lazy: second call reuses the open engine');
-eq(opens, 1, 'lazy: not reopened on reuse');
+eq(mc.telemetry_at(s), at2_engine, 'at2: telemetry_at returns the dedicated engine');
+eq(mc.telemetry_at(s), at2_engine, 'at2: selection is stable across calls');
 
-// no second port -> always the control channel, never an open attempt
+// no second port -> the control channel (open_at aliased at_telemetry to at)
 let s2 = { at: { tag: 'ctrl' } };
 s2.at_telemetry = s2.at;
-s2._at2_open = null;
-eq(mc.telemetry_at(s2), s2.at, 'lazy: no at2 port -> control channel');
-
-// a failing opener (leaves at_telemetry untouched) -> control channel, once
-let tried = 0;
-let s3 = { at: { tag: 'ctrl' } };
-s3.at_telemetry = s3.at;
-s3._at2_open = () => { tried++; /* open failed: do not set at_telemetry */ };
-eq(mc.telemetry_at(s3), s3.at, 'lazy: failed open falls back to control');
-eq(mc.telemetry_at(s3), s3.at, 'lazy: failed open not retried every poll');
-eq(tried, 1, 'lazy: open attempted once, then given up');
+eq(mc.telemetry_at(s2), s2.at, 'at2: no second port -> control channel');
 
 // a torn-down modem (close_at ran: at/at_telemetry nulled) must NOT yield null —
 // stale in-flight callbacks call telemetry_at(self).send(...) unguarded; they
 // get a stub engine that errors immediately instead of crashing the daemon
 // (the Cudy LT300 autosetup-reload crash: reload inside the 'registered' emit)
-let s4 = { at: null, at_telemetry: null, _at2_open: null };
+let s4 = { at: null, at_telemetry: null };
 let stub = mc.telemetry_at(s4);
 ok(stub != null, 'teardown: telemetry_at never returns null');
 let stub_err = 'unset';
@@ -65,7 +50,6 @@ function temp_modem(mfr, resp) {
 	m = {
 		info: { manufacturer: mfr },
 		at_telemetry: { send: (cmd, cb) => { m._sent = cmd; cb(null, { lines: resp }); } },
-		_at2_open: null,
 	};
 	return m;
 }
@@ -101,7 +85,7 @@ ok(tu._temp_unavail === true, 'temp: unknown vendor latches off');
 // failure latch: an AT error (unsupported command / dead AT port) stops retries
 let tf;
 tf = {
-	info: { manufacturer: 'Quectel' }, _at2_open: null,
+	info: { manufacturer: 'Quectel' },
 	at_telemetry: { send: (cmd, cb) => { tf._n = (tf._n ?? 0) + 1; cb('closed', null); } },
 };
 mc.collect_temperature(tf, () => null);
@@ -114,9 +98,10 @@ eq(tf._n, 1, 'temp latch: no re-send on later ticks after a failure');
 ok(index(mc.format_telemetry({ reg: { radio_ifs: [] }, temperature: { celsius: 44 } }), 'temp=44C') >= 0,
 	'format_telemetry: temperature in the log line');
 
-// (2) open_at must NOT open the at2 tty eagerly (the #5 fix). Drive the real
-// open_at with a mock fx (RG650E-style 2c7c:0122 -> ttyUSB2 at + ttyUSB3 at2)
-// and a transport opener that records which ttys it opens.
+// (2) open_at must open BOTH ttys up front: at2 is a URC source, and a port
+// nobody holds open drops what the modem pushes there. Drive the real open_at
+// with a mock fx (RG650E-style 2c7c:0122 -> ttyUSB2 at + ttyUSB3 at2) and a
+// transport opener that records which ttys it opens.
 function fake_fx(vidpid, ttys) {
 	return {
 		read: (p) => {
@@ -136,8 +121,18 @@ function fake_fx(vidpid, ttys) {
 }
 
 let opened_ttys = [];
-let fake_transport = () => ({ write: () => true, on_data: () => null, close: () => null, drain: () => null });
-let open_transport = (tty) => { push(opened_ttys, tty); return fake_transport(); };
+let opened_tr = [];
+let fake_transport = () => {
+	let t = { write: () => true, close: () => null, drain: () => null };
+	t.on_data = (cb) => { t.data_cb = cb; };
+	return t;
+};
+let open_transport = (tty) => {
+	let t = fake_transport();
+	push(opened_ttys, tty);
+	push(opened_tr, t);
+	return t;
+};
 
 let modem = { device: '/dev/cdc-wdm0', config: {}, info: {} };
 let reached_next = false;
@@ -153,15 +148,47 @@ mc.open_at(modem, {
 });
 
 ok(reached_next, 'open_at: completed init');
-eq(opened_ttys, [ '/dev/ttyUSB2' ], 'open_at: only the control tty is opened eagerly (at2 stays lazy)');
+eq(opened_ttys, [ '/dev/ttyUSB2', '/dev/ttyUSB3' ], 'open_at: both control and at2 ttys are opened up front');
 ok(modem.at != null, 'open_at: control engine created');
-eq(modem.at_telemetry, modem.at, 'open_at: telemetry aliases control until at2 is needed');
-ok(modem._at2_open != null, 'open_at: a lazy at2 opener was stashed');
+ok(modem.at_telemetry != modem.at, 'open_at: at2 gets its own engine');
+eq(modem.at_telemetry_tty, '/dev/ttyUSB3', 'open_at: at2 engine bound to the second tty');
+eq(mc.telemetry_at(modem), modem.at_telemetry, 'open_at: telemetry_at selects the at2 engine');
 
-// first telemetry_at opens ttyUSB3
-mc.telemetry_at(modem);
-eq(opened_ttys, [ '/dev/ttyUSB2', '/dev/ttyUSB3' ], 'open_at: at2 tty opened on first telemetry_at');
-ok(modem.at_telemetry != modem.at, 'open_at: telemetry now on the dedicated at2 engine');
+// the at2 engine must dispatch URCs, not just carry polls: a code arriving there
+// while no command runs reaches the modem's handler (the whole point of opening
+// it before the first poll — on NCM that poll only happens at state READY)
+let at2_urcs = [];
+modem.at_on_urc = (line, ch) => push(at2_urcs, sprintf('%s/%s', ch, line));
+opened_tr[1].data_cb("\r\n^SIMST: 1\r\n");
+eq(at2_urcs, [ 'at2/^SIMST: 1' ], 'open_at: at2 dispatches URCs, tagged with its channel');
+
+// and the control channel tags itself distinctly — a modem that mirrors its
+// URCs onto both ports is otherwise indistinguishable from one sending twice
+opened_tr[0].data_cb("\r\n^SRVST: 2\r\n");
+eq(at2_urcs, [ 'at2/^SIMST: 1', 'at/^SRVST: 2' ], 'open_at: control-channel URCs are tagged at');
+
+// a vendor merge on the control engine must NOT leak into at2 (each engine owns
+// its list); the backend merges into both explicitly
+modem.at.add_urc_prefixes([ '^NDISSTAT' ]);
+ok(!length(filter(modem.at_telemetry.urc_prefixes, (p) => p == 'NDISSTAT')),
+	'open_at: control-engine prefixes are not aliased into at2');
+
+// at2_external keeps wwand off the second port entirely
+opened_ttys = [];
+opened_tr = [];
+let modem_x = { device: '/dev/cdc-wdm0', config: { at2_external: '1' }, info: {} };
+mc.open_at(modem_x, {
+	at_opts: {
+		fx: fake_fx('2c7c:0122', [ { ifn: 2, tty: 'ttyUSB2' }, { ifn: 3, tty: 'ttyUSB3' } ]),
+		open_transport: open_transport,
+	},
+	log: (level, msg) => null,
+	set_drain_timer: () => null,
+	next: () => null,
+});
+eq(opened_ttys, [ '/dev/ttyUSB2' ], 'at2_external: the second tty is left alone');
+eq(modem_x.at_telemetry, modem_x.at, 'at2_external: telemetry falls back to control');
+eq(modem_x.at2_released, '/dev/ttyUSB3', 'at2_external: the released port is reported');
 
 // --- scaffolding: shared modem plumbing --------------------------------------
 // The state-transition / context / recovery-passthrough plumbing that was

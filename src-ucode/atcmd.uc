@@ -504,8 +504,15 @@ export function create(transport, opts)
 		// arrives as a WHOLE line and can be classified per line — but it may
 		// land between the lines of a multi-line response, which is why every
 		// line is classified, not just the first.
-		urc_prefixes: opts?.urc_prefixes ?? DEFAULT_URC_PREFIXES,
-		urc_bare: opts?.urc_bare ?? DEFAULT_URC_BARE,
+		// COPIED, never aliased: add_urc_prefixes() extends this list in place
+		// when the vendor recipe is known, and the defaults are a module-level
+		// const shared by every engine in the process. Storing the reference let
+		// one modem's vendor codes leak into every AT engine created afterwards
+		// — including other modems' — which is how a code that is really a
+		// command's own answer elsewhere (the ^CELLLOCK class) could start
+		// eating that answer on a modem that never had it.
+		urc_prefixes: [ ...(opts?.urc_prefixes ?? DEFAULT_URC_PREFIXES) ],
+		urc_bare: [ ...(opts?.urc_bare ?? DEFAULT_URC_BARE) ],
 	};
 
 	let finish, next;

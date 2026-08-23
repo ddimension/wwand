@@ -663,10 +663,9 @@ export function watch_driver(o)
 	};
 };
 
-// telemetry_at(self): the AT engine a telemetry poll runs over. Opens the modem's
-// dedicated 'at2' channel lazily on first use (if it has one); otherwise returns
-// the control channel (self.at). This keeps the second tty lazy: QMI/MBIM that
-// never hit the AT fallback never open it; NCM opens it on its first tick.
+// telemetry_at(self): the AT engine a telemetry poll runs over — the dedicated
+// 'at2' channel when the modem has one, else the control channel (self.at).
+// Both are opened up front by open_at(); this only selects between them.
 //
 // NEVER returns null: a torn-down modem (close_at ran — teardown/reload can happen
 // synchronously under an emit while a poll callback is still in flight) gets a stub
@@ -676,12 +675,6 @@ export function watch_driver(o)
 // the modem down inside the 'registered' emit; the READY hook then ran on the corpse).
 export function telemetry_at(self)
 {
-	if (self._at2_open) {
-		let open = self._at2_open;
-		self._at2_open = null;      // one-shot: never retry a failed open per poll
-		open();                     // sets self.at_telemetry on success
-	}
-
 	return self.at_telemetry ?? {
 		send: (cmd, cb) => { if (cb) cb('closed', null); },
 		run_sequence: (cmds, cb) => { if (cb) cb(); },
@@ -911,7 +904,6 @@ export function close_at(self)
 	self.at_telemetry = null;
 	self.at_tty = null;
 	self.at_telemetry_tty = null;
-	self._at2_open = null;
 };
 
 // best-effort AT side-channel bring-up: discover + open the AT tty, run
@@ -948,19 +940,39 @@ export function open_at(self, o)
 	// after the port is open, and the lazily opened telemetry channel below must
 	// reach the same one. urc_prefixes likewise — the vendor recipe that extends
 	// the set is only known after identify, which runs after this.
-	let dispatch_urc = (line) => self.at_on_urc?.(line);
+	//
+	// The channel is passed along and logged here — ONE site for all backends,
+	// and the only place that still knows which port a line came off. Modems
+	// that mirror their URCs onto both AT interfaces (MeiG SLM770A) otherwise
+	// produce two identical, unattributable log lines per event.
+	let dispatch_urc = (ch) => (line) => {
+		log('debug', sprintf('urc[%s]: %s', ch, line));
+		self.at_on_urc?.(line, ch);
+	};
 
 	self.at = atcmd.create(tr, {
 		log: (level, msg) => log(level, sprintf('at: %s', msg)),
-		on_urc: dispatch_urc,
+		on_urc: dispatch_urc('at'),
 	});
 	self.at_tty = tty;
 	log('notice', sprintf('AT port: %s', tty));
 
 	// dedicated telemetry channel ('at2'): telemetry polls run over a separate
-	// engine so they don't serialize behind control/dial commands. Opened LAZILY
-	// on the first poll (see telemetry_at) to avoid wasting an fd on QMI/MBIM that
-	// rarely touch AT. Until it opens, telemetry falls back to the control channel.
+	// engine so they don't serialize behind control/dial commands. It is opened
+	// EAGERLY, together with the control channel, because the port is a URC
+	// source first and a poll channel second.
+	//
+	// It used to open lazily on the first telemetry poll, to save an fd on
+	// QMI/MBIM that rarely touch AT. But an unopened port does not merely go
+	// unparsed: nothing holds the fd, so whatever the modem pushes there is
+	// gone. On NCM the first poll only runs at state READY, which left the
+	// entire SIM and registration phase unwatched on the very port some modems
+	// report it on (MeiG SLM770A: ^SIMST, ^SRVST, ^MODE). A second AT port is
+	// now read for URCs exactly like the primary one.
+	//
+	// Falls back to the control channel when there is no distinct second port,
+	// or when opening it fails — telemetry then shares the control engine as
+	// before.
 	self.at_telemetry = self.at;
 	self.at_telemetry_tty = tty;
 
@@ -973,29 +985,29 @@ export function open_at(self, o)
 		ch = { ...ch, telemetry: null };
 	}
 
-	// one-shot opener telemetry_at() runs on first use; null when there is no
-	// distinct second AT port (telemetry then stays on control).
-	self._at2_open = (ch.telemetry && ch.telemetry != tty)
-		? () => {
-			let tr2 = open_transport(ch.telemetry, 115200, (level, msg) => log(level, msg));
+	if (ch.telemetry && ch.telemetry != tty) {
+		let tr2 = open_transport(ch.telemetry, 115200, (level, msg) => log(level, msg));
 
-			if (!tr2) {
-				log('warn', sprintf('cannot open AT telemetry channel %s (using control channel)', ch.telemetry));
-				return;
-			}
-
+		if (tr2) {
 			// the telemetry channel carries URCs too — on many modems it is THE
 			// port they arrive on. It used to get no handler at all, so every
 			// URC landing there was dropped.
+			//
+			// urc_prefixes is seeded from the control engine and COPIED there;
+			// the vendor recipe, known only after identify, is merged into BOTH
+			// engines by the backend (modem_ncm), not propagated between them.
 			self.at_telemetry = atcmd.create(tr2, {
 				log: (level, msg) => log(level, sprintf('at2: %s', msg)),
-				on_urc: dispatch_urc,
+				on_urc: dispatch_urc('at2'),
 				urc_prefixes: self.at.urc_prefixes,
 			});
 			self.at_telemetry_tty = ch.telemetry;
 			log('notice', sprintf('AT telemetry channel: %s', ch.telemetry));
 		}
-		: null;
+		else {
+			log('warn', sprintf('cannot open AT telemetry channel %s (using control channel)', ch.telemetry));
+		}
+	}
 
 	// model quirks + configured at_init list, then cell locks
 	let cmds = [
