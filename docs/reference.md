@@ -512,6 +512,21 @@ refuses such a device too, which is the case the proto check alone missed — a
 `proto dhcp` on `wwan0` left over from a comgt-ncm setup is not a cellular proto
 but still owns the netdev.
 
+The stock handlers bind hardware two ways, and only one of them is a device
+name — so both spellings are collected:
+
+| handler | options |
+|---|---|
+| `qmi` (uqmi), `mbim` (umbim) | `device`, **`devpath`** |
+| `wwan` (generic auto-detect) | **`bus`** — declares no `device` at all |
+| any interface | `device`, `ifname`, `ctldevice` |
+
+`devpath` is an absolute sysfs path and `bus` a USB bus id; both are normalised
+to the `/sys/devices/`-relative form wwand stores in `option path` and compared
+on the hardware path, so a claim on a USB device also covers its functions. A
+claim that resolves nowhere under `/sys/devices` is dropped rather than matched
+against everything.
+
 Two exclusions:
 
 - a **disabled** interface (`option disabled '1'`) claims nothing — netifd never

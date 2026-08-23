@@ -574,6 +574,31 @@ function run_daemon()
 			resolve_protocol: discovery.protocol_of,
 			// how this modem is controlled (qmi/mbim/ncm/ppp), incl. NCM (no cdc-wdm)
 			resolve_control: discovery.resolve_control,
+			// hardware-path comparison for the device blocklist: a foreign
+			// `devpath`/`bus` claim names the same modem without naming its
+			// device node, so the block has to be decided on the sysfs path.
+			hw_path: {
+				claim: (raw) => discovery.claim_path(raw),
+				same: (a, b) => discovery.same_hw_path(a, b),
+				// an explicit `option path` is authoritative; otherwise resolve
+				// from whichever node the modem actually got bound to
+				modem: (cfg, control) => {
+					if (cfg?.usb_path != null && cfg.usb_path != '')
+						return cfg.usb_path;
+
+					let dev = control?.device ?? cfg?.device;
+					let nd = control?.netdev ?? cfg?.netdev;
+					let m = dev ? match(dev, /^\/dev\/(cdc-wdm[0-9]+)$/) : null;
+
+					if (m)
+						return discovery.sysfs_path_of(sprintf('/sys/class/usbmisc/%s/device', m[1]));
+
+					if (nd)
+						return discovery.sysfs_path_of(sprintf('/sys/class/net/%s/device', nd));
+
+					return null;
+				},
+			},
 			// one-time usbnet mode switch for a PPP-only modem (serial port only)
 			modeswitch: (o, cb) => modeswitch.attempt(o, cb),
 			resolve_ep_id: (cfg, device, netdev) =>

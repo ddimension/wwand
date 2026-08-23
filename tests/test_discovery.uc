@@ -552,4 +552,51 @@ eq(discovery.protocol_of('/dev/cdc-wdm0', {
 	readlink: (p) => (p == '/sys/class/usbmisc/cdc-wdm0/device/driver') ? '/x/cdc_mbim' : null,
 }), 'mbim', 'cdc-wdm still classified by driver (not affected by the wwan branch)');
 
+// --- foreign device claims: devpath / bus normalisation ----------------------
+//
+// The stock handlers bind hardware two ways, and only one of them is a device
+// name: uqmi/umbim take `devpath` (an absolute sysfs path used as a glob base)
+// and wwan.sh takes `bus` (a USB bus id) — wwan.sh declares no `device` option
+// at all. Both must reduce to the same shape sysfs_path_of() produces, or the
+// blocklist cannot compare them against a modem.
+
+let cp_fx = {
+	realpath: (p) => {
+		// a bus id resolves through /sys/bus/usb/devices/<id>
+		if (p == '/sys/bus/usb/devices/1-1')
+			return '/sys/devices/platform/soc@0/7000000.usb/usb1/1-1';
+		if (p == '/sys/bus/usb/devices/nope')
+			return null;
+		return p;
+	},
+};
+
+eq(discovery.claim_path('/sys/devices/platform/soc@0/7000000.usb/usb1/1-1', cp_fx),
+	'platform/soc@0/7000000.usb/usb1/1-1', 'claim_path: devpath -> /sys/devices-relative');
+eq(discovery.claim_path('1-1', cp_fx),
+	'platform/soc@0/7000000.usb/usb1/1-1', 'claim_path: bus id resolved through /sys/bus/usb/devices');
+// real sysfs nests the interface dir under the device dir: .../1-1/1-1:1.4
+eq(discovery.claim_path('/sys/devices/platform/x/usb1/1-1/1-1:1.4', cp_fx),
+	'platform/x/usb1/1-1',
+	'claim_path: the USB interface component is trimmed, like sysfs_path_of');
+eq(discovery.claim_path('nope', cp_fx), null,
+	'claim_path: a bus id that resolves nowhere is not comparable');
+eq(discovery.claim_path('/etc/passwd', cp_fx), null,
+	'claim_path: anything outside /sys/devices is rejected, never a wildcard match');
+eq(discovery.claim_path('', cp_fx), null, 'claim_path: empty -> null');
+eq(discovery.claim_path(null, cp_fx), null, 'claim_path: null -> null');
+
+// same_hw_path: a claim on a USB device covers its functions and vice versa
+ok(discovery.same_hw_path('a/usb1/1-1', 'a/usb1/1-1'), 'same_hw_path: identical');
+ok(discovery.same_hw_path('a/usb1/1-1', 'a/usb1/1-1/1-1.2'),
+	'same_hw_path: a device claim covers a deeper function');
+ok(discovery.same_hw_path('a/usb1/1-1/1-1.2', 'a/usb1/1-1'),
+	'same_hw_path: ... and the other direction');
+ok(!discovery.same_hw_path('a/usb1/1-1', 'a/usb1/1-2'),
+	'same_hw_path: sibling devices do NOT match');
+ok(!discovery.same_hw_path('a/usb1/1-1', 'a/usb3/1-1'),
+	'same_hw_path: same leaf under a different controller does not match');
+ok(!discovery.same_hw_path(null, 'a/usb1/1-1') && !discovery.same_hw_path('a', null),
+	'same_hw_path: null never matches');
+
 done('test_discovery');

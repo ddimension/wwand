@@ -176,4 +176,44 @@ let dok = mkblk({ network: {
 eq(started, [ '/dev/cdc-wdm0' ], 'blocklist: an unclaimed device starts as before');
 eq(dok.modems.m0.control_note ?? null, null, 'blocklist: no note when nothing claims it');
 
+// a PATH-shaped claim blocks too: uqmi/umbim `devpath` and wwan.sh `bus` name
+// the same hardware without naming its device node, so the match is made on the
+// sysfs path via deps.hw_path
+started = [];
+let dpath = null;
+let parsed_p = config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', path: 'platform/x/usb1/1-1' },
+	wan: { '.type': 'interface', proto: 'wwan', bus: '1-1' },
+} });
+
+dpath = daemon_mod.create({
+	timing: TIMING,
+	deps: {
+		log: (lvl, msg) => push(blk_logs, msg),
+		load_qmi: () => ({
+			modem: { create: (o) => { push(started, o.config.device ?? '?');
+				return { id: 'm', start: () => null, stop: () => null,
+				         note_connect_success: () => null, note_connect_failure: () => null,
+				         datapath: {} }; } },
+			context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem }) },
+		}),
+		emit_event: () => null, kick_interface: () => null, renew_interface: () => null,
+		down_interface: () => null, iface_status: (i, cb) => cb({ up: false }),
+		datapath_fx: null, read_config: () => parsed_p,
+		resolve_modem_device: (cfg) => cfg.device,
+		resolve_netdev: () => 'wwan0',
+		learn_device: () => null, learn_modem_path: () => null,
+		hw_path: {
+			claim: (raw) => (raw == '1-1') ? 'platform/x/usb1/1-1' : null,
+			same: (a, b) => a == b,
+			modem: (cfg) => cfg.usb_path,
+		},
+	},
+});
+dpath.apply_config(parsed_p);
+
+eq(started, [], 'blocklist: a bus= claim blocks the modem it resolves to');
+ok(match(dpath.modems.m0.control_note ?? '', /bus=1-1 is owned by interface wan \(proto wwan\)/),
+	'blocklist: control_note names the option, value and owner');
+
 done('test_wan6');

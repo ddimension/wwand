@@ -439,6 +439,22 @@ function compat_translate(raw, result)
 				// either way
 				result.blocked[dev] ??= { interface: name, proto: s.proto ?? '?' };
 			}
+
+			// PATH-shaped claims. The stock handlers bind hardware two ways and
+			// only one of them is a device name: uqmi and umbim take `devpath`
+			// (an absolute sysfs path used as a glob base) and wwan.sh takes
+			// `bus` (a USB bus id) — wwan.sh declares no `device` option at all.
+			// Those are exactly the configurations a careful user writes, so
+			// they must not be the ones that slip through. Kept raw here;
+			// config.uc stays filesystem-free, the daemon resolves them.
+			for (let opt in [ 'devpath', 'bus' ]) {
+				let raw = s[opt];
+
+				if (raw == null || raw == '')
+					continue;
+
+				result.blocked_paths[raw] ??= { interface: name, proto: s.proto ?? '?', opt: opt };
+			}
 		}
 
 		if (s['.type'] != 'interface' || s.proto != 'wwand')
@@ -702,6 +718,9 @@ export function parse(raw)
 		globals: { log_level: 'info', hold_max: 90, write_device: true, autosetup: true },
 		// devices owned by a non-wwand interface -> { interface, proto }
 		blocked: {},
+		// path-shaped claims (devpath/bus) -> { interface, proto, opt }; resolved
+		// against a modem's hardware path by the daemon, which has the fs access
+		blocked_paths: {},
 		modems: {},
 		contexts: {},
 		sims: {},

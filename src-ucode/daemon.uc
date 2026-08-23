@@ -744,6 +744,29 @@ export function create(opts)
 		return null;
 	};
 
+	// A path-shaped claim (uqmi/umbim `devpath`, wwan.sh `bus`) names the same
+	// hardware without naming the device node, so it has to be compared on the
+	// sysfs path. deps.hw_path does the resolving — daemon.uc stays free of fs
+	// and discovery imports.
+	let blocked_by_path = (cfg, control) => {
+		if (!length(keys(self.blocked_paths ?? {})) || !deps.hw_path)
+			return null;
+
+		let mine = deps.hw_path.modem(cfg, control);
+
+		if (!mine)
+			return null;
+
+		for (let raw, o in self.blocked_paths) {
+			let theirs = deps.hw_path.claim(raw);
+
+			if (theirs && deps.hw_path.same(mine, theirs))
+				return { device: sprintf('%s=%s', o.opt, raw), path: theirs, ...o };
+		}
+
+		return null;
+	};
+
 	let start_modem = (name, cfg, muxinfo, l3name) => {
 		// decide how this modem is controlled (qmi/mbim/ncm/ppp). resolve_control
 		// classifies EVERY modem, incl. NCM modems with no cdc-wdm.
@@ -773,7 +796,8 @@ export function create(opts)
 		// refuse to bind a device another stack owns, rather than contending for
 		// it. Surfaced as control_note so status()/LuCI show WHY the modem is
 		// idle instead of it looking merely absent.
-		let claim = blocked_by(cfg.device, cfg.ctldevice, control?.device, control?.netdev);
+		let claim = blocked_by(cfg.device, cfg.ctldevice, control?.device, control?.netdev)
+			?? blocked_by_path(cfg, control);
 
 		if (claim) {
 			log('warn', sprintf('modem %s: device %s is owned by interface %s (proto %s) — ignoring this modem',
@@ -970,8 +994,9 @@ export function create(opts)
 		// netifd fires those for unrelated edits), so the reason a modem is being
 		// left alone is in the log without repeating forever.
 		self.blocked = parsed.blocked ?? {};
+		self.blocked_paths = parsed.blocked_paths ?? {};
 
-		let bsig = sprintf('%J', self.blocked);
+		let bsig = sprintf('%J', [ self.blocked, self.blocked_paths ]);
 
 		if (bsig != blocked_sig) {
 			blocked_sig = bsig;
@@ -980,6 +1005,9 @@ export function create(opts)
 
 			for (let dev, o in self.blocked)
 				push(items, sprintf('%s (interface %s, proto %s)', dev, o.interface, o.proto));
+
+			for (let raw, o in self.blocked_paths)
+				push(items, sprintf('%s=%s (interface %s, proto %s)', o.opt, raw, o.interface, o.proto));
 
 			if (length(items))
 				log('notice', sprintf('device blocklist: %s — owned by a non-wwand interface, wwand will not touch %s',

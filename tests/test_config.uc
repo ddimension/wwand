@@ -505,6 +505,24 @@ r = config.parse({
 });
 eq(r.blocked['/dev/cdc-wdm0'].interface, 'a', 'blocklist: first claimant is attributed');
 
+// path-shaped claims: uqmi/umbim `devpath` and wwan.sh `bus`. wwan.sh declares
+// NO `device` option at all, so without these two a `proto wwan` interface
+// claims a modem entirely invisibly.
+r = config.parse({
+	network: {
+		q: { '.type': 'interface', proto: 'qmi',  devpath: '/sys/devices/platform/x/usb1/1-1' },
+		w: { '.type': 'interface', proto: 'wwan', bus: '1-2' },
+		d: { '.type': 'interface', proto: 'mbim', devpath: '/sys/devices/y', disabled: '1' },
+	},
+});
+
+eq(r.blocked_paths['/sys/devices/platform/x/usb1/1-1'],
+	{ interface: 'q', proto: 'qmi', opt: 'devpath' }, 'blocklist: qmi devpath collected');
+eq(r.blocked_paths['1-2'], { interface: 'w', proto: 'wwan', opt: 'bus' },
+	'blocklist: wwan bus collected (that proto has no device option at all)');
+eq(r.blocked_paths['/sys/devices/y'], null,
+	'blocklist: a disabled interface claims no path either');
+
 // --- migrate_plan: convert old configs to the network-native model -----------
 
 function mp_set(ch, section, opt) {

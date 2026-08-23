@@ -14,7 +14,18 @@ pointing at a device uqmi drives was never checked at all.
 
 - **`config.parse` collects the claims** into `result.blocked`: every
   `device`/`ifname`/`ctldevice` on a non-wwand interface section, mapped to the
-  owning interface and proto. Two exclusions, both deliberate — a **disabled**
+  owning interface and proto.
+- **Path-shaped claims too** (`result.blocked_paths`). Reading the stock
+  handlers rather than assuming showed the first cut would have missed the
+  configurations that matter most: `qmi.sh` and `mbim.sh` both take `devpath`
+  (an absolute sysfs path used as a glob base) beside `device`, and `wwan.sh`
+  — installed on both test boxes — declares **no `device` option at all**, only
+  `bus`. A device-name-only blocklist is blind to exactly the stable-binding
+  configuration a careful user writes. `discovery.claim_path()` normalises both
+  spellings to the `/sys/devices/`-relative form `sysfs_path_of()` produces, and
+  `same_hw_path()` compares on component boundaries so a claim on a USB device
+  covers its functions. A claim resolving nowhere under `/sys/devices` is
+  dropped, never treated as a wildcard. Two exclusions, both deliberate — a **disabled**
   interface claims nothing (netifd never brings it up, so a stale section must
   not block a device forever), and `@name` references an interface rather than a
   device.

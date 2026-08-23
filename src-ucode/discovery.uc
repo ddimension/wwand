@@ -211,6 +211,71 @@ export function usb_device_of(name, fx)
 // `class_link` is a /sys/class/.../device link; for a USB function the resolved
 // INTERFACE dir (…/3-1:1.4) has its trailing interface component dropped so the
 // path names the USB *device* (…/usb3/3-1). null when unresolvable.
+// A device claim made by a FOREIGN proto handler, normalised to the same shape
+// sysfs_path_of() returns (and that wwand stores in `option path`), so the two
+// can be compared at all. The stock handlers use two different spellings:
+//
+//   uqmi / umbim  `option devpath`  an ABSOLUTE sysfs path, used directly as a
+//                                   glob base: "$devpath"/usbmisc/cdc-wdm*
+//   wwan.sh       `option bus`      a USB bus id, looked up under
+//                                   /sys/bus/usb/devices/<bus>
+//
+// Returns null for anything that does not resolve under /sys/devices — an
+// unresolvable claim must not silently match every modem.
+export function claim_path(raw, fx)
+{
+	if (raw == null || trim(raw) == '')
+		return null;
+
+	fx = fx ?? default_fx();
+
+	let p = trim(raw);
+
+	// no leading slash -> a bus id rather than a path
+	if (substr(p, 0, 1) != '/')
+		p = sprintf('/sys/bus/usb/devices/%s', p);
+
+	// resolve the symlink when the device is present; fall back to the literal
+	// spelling so a claim on absent hardware still blocks by text
+	let real = (fx.realpath ? fx.realpath(p) : null) ?? p;
+	let m = match(real, /^\/sys\/devices\/(.+)$/);
+
+	if (!m)
+		return null;
+
+	let out = replace(m[1], /\/+$/, '');
+	let parts = split(out, '/');
+
+	// same interface-component trim as sysfs_path_of, so ".../3-1:1.4" and
+	// ".../3-1" name the same USB device
+	if (match(parts[-1], /^[0-9]+-[0-9.]+:[0-9.]+$/))
+		out = join('/', slice(parts, 0, length(parts) - 1));
+
+	return (out != '') ? out : null;
+};
+
+// do two hardware paths name the same device? A claim on a USB device also
+// covers its functions (and vice versa), so a component-boundary prefix match
+// in EITHER direction counts — `.../usb1/1-1` and `.../usb1/1-1/1-1.2` are the
+// same physical modem seen at different depths.
+export function same_hw_path(a, b)
+{
+	if (a == null || b == null || a == '' || b == '')
+		return false;
+
+	if (a == b)
+		return true;
+
+	let pa = split(a, '/'), pb = split(b, '/');
+	let n = (length(pa) < length(pb)) ? length(pa) : length(pb);
+
+	for (let i = 0; i < n; i++)
+		if (pa[i] != pb[i])
+			return false;
+
+	return true;
+};
+
 export function sysfs_path_of(class_link, fx)
 {
 	fx = fx ?? default_fx();
