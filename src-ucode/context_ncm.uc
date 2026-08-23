@@ -53,6 +53,16 @@ export function create(opts)
 	// tears the session down as 'disconnected'.
 	let stats_timer = null;
 	let stats_interval = opts.timing?.stats_interval ?? 60000;
+	// the vendor byte-counter command, once the modem has refused it for good.
+	// Unlike the C5GREG probe (a bare ERROR = "unknown command", latched on the
+	// first refusal), a CME error can be a passing condition, so this needs a
+	// run of them before giving up. The netdev counter takes over — it feeds the
+	// same zero-rx watchdog, so nothing but a wasted round-trip is lost.
+	let vendor_stats_refused = false;
+	let vendor_stats_errors = 0;
+	// pending ^DEND verification (see modem_event 'session_urc')
+	let session_confirm_timer = null;
+	let session_confirm_ms = opts.timing?.session_confirm_ms ?? 10000;
 	let rx_watch = context_common.rx_stall_watch({
 		limit_ms: () => context_common.zero_rx_limit_ms(self.modem.config, opts.timing),
 		interval_ms: stats_interval,
@@ -62,6 +72,7 @@ export function create(opts)
 	// captures stop_stats (ucode resolves lexical refs only for bindings
 	// already declared at definition time)
 	let start_stats, stop_stats, sample_stats, refresh_settings;
+	let clear_session_confirm, confirm_session_gone;
 
 	// shared emit/set_state/fail_finish (context_common.ctx_scaffolding)
 	let sc = context_common.ctx_scaffolding(self, {
@@ -216,6 +227,10 @@ export function create(opts)
 	};
 
 	stop_stats = () => {
+		// every teardown path funnels through here, so a pending ^DEND
+		// verification cannot outlive the session it was asking about
+		clear_session_confirm();
+
 		if (stats_timer) {
 			stats_timer.cancel();
 			stats_timer = null;
@@ -328,7 +343,7 @@ export function create(opts)
 			if (self.state != 'CONNECTED')
 				return;
 
-			if (!vendor.stats) {
+			if (!vendor.stats || vendor_stats_refused) {
 				// no byte counter AND no dial status query = zero liveness. Poll the
 				// assigned address (AT+CGPADDR — every 3GPP modem answers); a clearly
 				// empty reply for our cid is a dropped bearer. Conservative: an AT
@@ -376,6 +391,21 @@ export function create(opts)
 			self.modem.at.send(vendor.stats, (err, res) => {
 				if (self.state != 'CONNECTED')
 					return;
+
+				// count only a REFUSAL (ERROR / +CME / +CMS); a timeout or a
+				// closed port says nothing about whether the modem knows the
+				// command, and must not retire it
+				if (err && (err.error == 'ERROR' || err.error == 'cme' || err.error == 'cms')) {
+					if (++vendor_stats_errors >= 3) {
+						vendor_stats_refused = true;
+						log('notice', sprintf('%s refused %d times (%s%s) — falling back to the netdev byte counter',
+							vendor.stats, vendor_stats_errors, err.error,
+							err.code ? sprintf(' %s', err.code) : ''));
+					}
+				}
+				else if (!err) {
+					vendor_stats_errors = 0;
+				}
 
 				let s = err ? null : vendor.parse_stats(res?.lines);
 
@@ -643,8 +673,74 @@ export function create(opts)
 		emit('down', { reason: 'disconnected', data: data });
 	};
 
+	// The modem's own bearer notification (MeiG ^DCONN/^DEND) is a HINT, not a
+	// verdict — the same rule the registration URCs follow: the probe stays the
+	// authority. A ^DEND is verified by an actual dial-status query after a
+	// grace period, because the SLM770A has been seen re-establishing the
+	// bearer on its own five seconds later (2026-08-23: ^DEND 21:05:54,
+	// ^DCONN 21:05:59). Tearing down on the notification alone would kill a
+	// session that was about to heal; ignoring it altogether costs up to a full
+	// stats interval (60 s) to notice a drop that is real.
+	clear_session_confirm = () => {
+		if (session_confirm_timer) {
+			session_confirm_timer.cancel();
+			session_confirm_timer = null;
+		}
+	};
+
+	confirm_session_gone = () => {
+		session_confirm_timer = null;
+
+		let dial = self.modem?.dial;
+
+		if (self.state != 'CONNECTED' || !dial?.status || !self.modem?.at)
+			return;
+
+		self.modem.at.send(dial.status, (err, res) => {
+			if (self.state != 'CONNECTED')
+				return;
+
+			// An AT ERROR leaves the session alone — it says nothing about the
+			// bearer. A successful query does, in two shapes: our cid listed as
+			// down (=== 0), or NO ROW AT ALL (null). The second one is not an
+			// unparsable answer, it is how the MeiG reports "no contexts" —
+			// field-seen 2026-08-23: ^DEND at 21:51:13, and the verification's
+			// AT+ECMDUP? came back completely empty, so an === 0 test did
+			// nothing and the drop was only noticed 53 s later by the stats
+			// poll. Accepting the empty answer is safe HERE and only here: we
+			// arrive with the modem's own ^DEND already on the record, so two
+			// independent signals agree before anything is torn down.
+			if (err)
+				return;
+
+			let st = dial.status_state(res?.lines, self.cid);
+
+			if (st === 0 || st == null) {
+				log('warn', sprintf('modem reported the bearer down and the status probe agrees (%s)',
+					(st === 0) ? 'cid down' : 'no context listed'));
+				self._connection_lost({ reason: 'session_ended' });
+			}
+		});
+	};
+
 	self.modem_event = function(event, data) {
 		switch (event) {
+		case 'session_urc':
+			// not ours (the modem announces every cid it dials)
+			if (data?.cid != null && data.cid != self.cid)
+				break;
+
+			if (data?.up) {
+				// the bearer is back before we even asked — drop the doubt
+				clear_session_confirm();
+				break;
+			}
+
+			if (self.state == 'CONNECTED' && self.modem?.dial?.status && !session_confirm_timer)
+				session_confirm_timer = uloop.timer(session_confirm_ms, confirm_session_gone);
+
+			break;
+
 		case 'ready':
 			emit('modem_ready', {});
 			break;
