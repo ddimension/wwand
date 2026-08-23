@@ -66,12 +66,22 @@ export function install(self, o)
 		let rg = cfg?.reset_gpio ?? (board_gpio_ok() ? board.profile?.reset_gpio : null);
 		let off = cfg?.repower_time ? +cfg.repower_time * 1000 : null;
 
-		if (rg)
+		// say who pulsed: the recovery ladder logs its own line and modem_reset
+		// logs 'admin-requested', but this path used to log nothing at all, so
+		// an operator-triggered pulse was indistinguishable in the log from one
+		// the ladder fired — which is exactly what has to be told apart when
+		// two pulses overlap.
+		if (rg) {
+			log('warn', sprintf('modem %s: admin-requested repower (GPIO %s pulse)', ref ?? '-', rg));
+
 			return board.reset_pulse(rg, off) ?
 				{ ok: true, action: 'reset', gpio: rg } : { error: 'reset_gpio_unavailable' };
+		}
 
 		if (!board_gpio_ok())
 			return { error: 'multi_modem_needs_reset_gpio' };
+
+		log('warn', sprintf('modem %s: admin-requested repower (board power cycle)', ref ?? '-'));
 
 		return board.power_cycle(off) ?
 			{ ok: true, action: 'power_cycle' } : { error: 'no_power_control' };

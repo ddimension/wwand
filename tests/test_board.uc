@@ -201,4 +201,72 @@ eq(board.bars_from_signal(null), 0, 'bars: no signal -> 0');
 eq(board.bars_from_signal({ rsrp: -85 }), 4, 'bars: flat rsrp (native MBIM) -> 4');
 eq(board.bars_from_signal({ rssi: -80 }), 3, 'bars: flat rssi (native MBIM) -> 3');
 
+
+// --- 9. reset_pulse: one pulse at a time, and a stated polarity --------------
+//
+// Field failure on a Cudy LT300 (2026-08-23): the modem was pulsed twice ~7 s
+// apart — the recovery ladder and an operator both land in reset_pulse, and a
+// 30 s pulse shows nothing, so a second click is the natural reaction. The
+// second call sampled the ALREADY-ASSERTED line, took the asserted level for
+// the resting one and inverted itself: its release drove the modem down and
+// left it there, and every later pulse inherited the inversion (modem up for
+// the hold, down for good afterwards). The box needed a mains power cycle.
+
+// (a) a second pulse while one is in flight is ignored, not stacked
+let fx9 = mkfx({ [`${G}/4g/value`]: '0' });
+let b9 = board.create({ id: 'cudy,lt300-v3', fx: fx9, reset_ms: 30, log: () => {} });
+
+ok(b9.reset_pulse(), 'reset_pulse: first pulse runs');
+ok(fx9.has(`${G}/4g/value=1`), 'reset_pulse: asserted (cudy runs at 0, so assert is 1)');
+
+let writes_before = length(fx9.writes);
+ok(b9.reset_pulse(), 'reset_pulse: an overlapping call reports success (the reset IS happening)');
+eq(length(fx9.writes), writes_before, 'reset_pulse: but it drives the line exactly zero more times');
+
+uloop.timer(60, () => uloop.end());
+uloop.run();
+
+ok(fx9.has(`${G}/4g/value=0`), 'reset_pulse: released back to the run level');
+// exactly one assert + one release, no second pair
+eq(length(filter(fx9.writes, (w) => w == `${G}/4g/value=1`)), 1, 'reset_pulse: one assert total');
+eq(length(filter(fx9.writes, (w) => w == `${G}/4g/value=0`)), 1, 'reset_pulse: one release total');
+
+// (b) a stated reset_run is authoritative: the pin is NOT consulted, so a line
+// left in the wrong state cannot invert the next pulse
+let fx9b = mkfx({ [`${G}/4g/value`]: '1' });   // line sitting at the asserted level
+let b9b = board.create({ id: 'cudy,lt300-v3', fx: fx9b, reset_ms: 30, log: () => {} });
+
+ok(b9b.reset_pulse(), 'reset_pulse: runs with the line left asserted');
+ok(fx9b.has(`${G}/4g/value=1`), 'reset_pulse: still asserts the same level (no inversion)');
+
+uloop.timer(60, () => uloop.end());
+uloop.run();
+
+ok(fx9b.has(`${G}/4g/value=0`), 'reset_pulse: still releases to the run level — recovers a stuck line');
+
+// (c) back-to-back pulses stay in phase: after two sequential pulses the line
+// is at the run level, not flipped
+let fx9c = mkfx({ [`${G}/4g/value`]: '0' });
+let b9c = board.create({ id: 'cudy,lt300-v3', fx: fx9c, reset_ms: 20, log: () => {} });
+
+b9c.reset_pulse();
+uloop.timer(50, () => uloop.end());
+uloop.run();
+b9c.reset_pulse();
+uloop.timer(50, () => uloop.end());
+uloop.run();
+
+eq(fx9c.read(`${G}/4g/value`), '0', 'reset_pulse: two sequential pulses leave the modem running');
+
+// (d) an unmeasured board keeps the sampled-polarity fallback
+let fx9d = mkfx({ [`${G}/modem-reset/value`]: '1' });
+let b9d = board.create({ id: 'mikrotik,chateau-5g-r17-ax', fx: fx9d, reset_ms: 20, log: () => {} });
+
+ok(b9d.reset_pulse(), 'reset_pulse: profile without reset_run still works');
+ok(fx9d.has(`${G}/modem-reset/value=0`), 'reset_pulse: sampled polarity drives the inverse');
+
+uloop.timer(50, () => uloop.end());
+uloop.run();
+ok(fx9d.has(`${G}/modem-reset/value=1`), 'reset_pulse: sampled polarity restores the rest level');
+
 done('test_board');

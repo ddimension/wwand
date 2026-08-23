@@ -227,7 +227,11 @@ const PROFILES = {
 		reset_gpio: 'gpio515',
 	},
 	// Cudy LT300 (MT7628, MeiG SLM770A-R): the modem RESET/power-enable line is
-	// exported as the named gpio `4g` (value 1 = modem on). No separate
+	// exported as the named gpio `4g`. The line is ACTIVE LOW: value 0 runs the
+	// modem, 1 holds it down — measured on a v3 on 2026-08-23 (the modem
+	// enumerates within seconds of the line going to 0 and disconnects the
+	// moment it goes to 1, over several independent pulses). An older comment
+	// here claimed the opposite; it did not survive the meter. No separate
 	// switchable USB power rail; status LEDs are OS-owned -> none here.
 	// The SLM770A's serial (AT) interfaces are vendor-class (0xff) and the stock
 	// `option` driver has no id for 2dee:4d57/4d58, so no ttyUSB appear and the
@@ -235,6 +239,10 @@ const PROFILES = {
 	// HW-verified on the v3.
 	'cudy,lt300-v3': {
 		reset_gpio: '4g',
+		// the level at which the modem RUNS (see above: active low). Stating it
+		// removes the need to infer polarity from the live pin — see
+		// reset_pulse for why inferring is unsafe.
+		reset_run: 0,
 		option_ids: [ '2dee 4d57', '2dee 4d58' ],
 	},
 	// Huasifei WH3000 Pro (MT7981B Filogic 820; 5G M.2 slot wired to USB). The
@@ -264,6 +272,9 @@ export function create(opts)
 	let log = opts?.log ?? ((level, msg) => warn(sprintf('%s: %s\n', level, msg)));
 	let id = opts?.id ?? detect_id(fx);
 	let profile = (id != null) ? PROFILES[id] : null;
+	// in-flight reset pulse (see reset_pulse): one at a time, and the guard is
+	// what keeps a concurrent caller from sampling a driven line
+	let pulse_timer = null;
 	// timings are injectable so tests can drive the deferred halves quickly
 	let power_off_ms = opts?.power_off_ms ?? POWER_OFF_MS;
 	let reset_ms = opts?.reset_ms ?? RESET_ASSERT_MS;
@@ -341,10 +352,29 @@ export function create(opts)
 	};
 
 	// assert a modem RESET line for RESET_ASSERT_MS then restore it. `name` is a
-	// per-modem `reset_gpio` (config) or the board default. Per spec: read the
-	// current level, drive the inverse, wait 30 s, drive the original back.
-	// Returns true if a usable reset GPIO was found.
+	// per-modem `reset_gpio` (config) or the board default. Returns true if a
+	// usable reset GPIO was found.
 	// `hold_ms` optionally overrides the assert duration (config `repower_time`).
+	//
+	// Two things here are load-bearing, both learned the hard way on a Cudy
+	// LT300 whose modem stayed dead until the box was power-cycled:
+	//
+	//  - ONE pulse at a time. A second call while a pulse is in flight used to
+	//    start its own assert/release pair. Its release landed ~7 s after the
+	//    first one, on an already-recovered modem, and put it straight back
+	//    down. Overlapping callers are real: the recovery ladder, the ubus
+	//    modem_reset/modem_repower methods and the LuCI button all land here,
+	//    and a second click while nothing visibly happens is the normal human
+	//    reaction to a 30 s pulse.
+	//
+	//  - NEVER infer the resting level from the live pin while it may be
+	//    driven. Sampling an asserted line reads the ASSERTED level as the
+	//    resting one, so the pulse inverts: its "release" drives the modem
+	//    down and leaves it there, and every later pulse inherits the
+	//    inversion (modem up for the hold, down forever after). A profile that
+	//    knows its wiring says so in `reset_run` — the level at which the
+	//    modem runs — and the pin is not consulted at all. Sampling stays the
+	//    fallback for boards whose polarity nobody has measured.
 	self.reset_pulse = function(name, hold_ms) {
 		let g = name ?? profile?.reset_gpio;
 
@@ -353,16 +383,29 @@ export function create(opts)
 		if (!g || !safe_gpio(g))
 			return false;
 
+		if (pulse_timer) {
+			log('notice', sprintf('board %s: modem reset already in progress (gpio %s), ignoring',
+				id ?? '?', g));
+			return true;
+		}
+
 		let hold = (hold_ms > 0) ? hold_ms : reset_ms;
-		let cur = gpio_read(g);
-		// default the "rest" level to high (1) when we cannot read it
-		let rest = (cur == '0') ? 0 : 1;
+		let run = profile?.reset_run;
+
+		if (run == null) {
+			// unmeasured board: fall back to the pin. Safe here because no
+			// pulse is in flight (guarded above), so the line is at rest.
+			let cur = gpio_read(g);
+			// default the "rest" level to high (1) when we cannot read it
+			run = (cur == '0') ? 0 : 1;
+		}
 
 		log('err', sprintf('board %s: asserting modem reset (gpio %s) for %ds',
 			id ?? '?', g, hold / 1000));
-		gpio_set(g, rest ? 0 : 1);
-		uloop.timer(hold, () => {
-			gpio_set(g, rest);
+		gpio_set(g, run ? 0 : 1);
+		pulse_timer = uloop.timer(hold, () => {
+			pulse_timer = null;
+			gpio_set(g, run);
 			log('notice', sprintf('board %s: modem reset released (gpio %s)', id ?? '?', g));
 		});
 
