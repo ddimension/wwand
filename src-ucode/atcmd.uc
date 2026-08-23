@@ -533,6 +533,30 @@ export function create(transport, opts)
 		return replace(cmd, /(,[^,"]*)(,[^,"]*)$/, ',***,***');
 	};
 
+	// prefix-less call-progress codes (RING, NO CARRIER, ...): compared as a
+	// WHOLE line so a bare identify value can never be swallowed by a substring
+	// match. Shared by both recognition paths.
+	let is_bare_urc = (line) => {
+		let u = uc(trim(line));
+
+		for (let b in self.urc_bare)
+			if (u == b)
+				return true;
+
+		return false;
+	};
+
+	// does this line LOOK like a result code at all? Used by the idle path,
+	// where there is no command to confuse it with, so anything code-shaped is
+	// surfaced rather than dropped — an unknown vendor code stays visible.
+	//
+	// The prefix class MUST match is_urc_line's: Huawei, MeiG and Sierra emit
+	// their codes with ^ and $. It did not, and the whole huawei `urcs:` list
+	// is ^-prefixed — so those reached on_urc only when a command happened to
+	// be running, and were dropped the rest of the time, which is most of it.
+	let looks_unsolicited = (line) =>
+		match(line, /^\s*[+^$][A-Z]/) != null || is_bare_urc(line);
+
 	// is this line an unsolicited code rather than `cur`'s answer? A URC is
 	// framed exactly like a result code, so the decision is per LINE. The
 	// running command's own prefix always wins: AT+CEREG? answers "+CEREG:",
@@ -553,15 +577,7 @@ export function create(transport, opts)
 			return false;
 		}
 
-		// prefix-less call-progress codes: compared as a WHOLE line so a bare
-		// identify value can never be swallowed by a substring match
-		let u = uc(trim(line));
-
-		for (let b in self.urc_bare)
-			if (u == b)
-				return true;
-
-		return false;
+		return is_bare_urc(line);
 	};
 
 	let emit_urc = (line) => {
@@ -585,7 +601,7 @@ export function create(transport, opts)
 
 			self.buffer = substr(self.buffer, idx + 1);
 
-			if (line == '' || !match(line, /^\s*\+[A-Z]/))
+			if (line == '' || !looks_unsolicited(line))
 				continue;
 
 			emit_urc(line);

@@ -708,6 +708,38 @@ tr9.reply(' DEACT 1\r\nFibocom\r\nOK\r\n');
 eq(got7?.lines, [ 'Fibocom' ], 'engine: split line does not leak into the next answer');
 eq(urcs7, [ '+CGEV: ME PDN DEACT 1' ], 'engine: split URC is reassembled, not lost');
 
+// --- idle and in-command recognition must agree ------------------------------
+//
+// The two paths drifted: the in-command classifier took +, ^ and $ while the
+// idle drain took only +. The whole huawei `urcs:` list is ^-prefixed, so those
+// codes reached on_urc when a command happened to be running and were dropped
+// the rest of the time — which is most of it.
+
+let urcs10 = [];
+let tr10 = fake_transport();
+let at10 = atcmd.create(tr10, { log: silent, on_urc: (l) => push(urcs10, l) });
+
+tr10.reply('^RSSI: 21\r\n');
+tr10.reply('$MYURC: 1\r\n');
+tr10.reply('+CGEV: ME PDN ACT 1\r\n');
+tr10.reply('RING\r\n');
+tr10.reply('not a result code\r\n');
+
+eq(urcs10, [ '^RSSI: 21', '$MYURC: 1', '+CGEV: ME PDN ACT 1', 'RING' ],
+	'idle: ^ and $ codes dispatch like + ones, bare call progress too, garbage dropped');
+
+// the same codes inside a command window reach the same handler
+let urcs11 = [], got11 = null;
+let tr11 = fake_transport();
+let at11 = atcmd.create(tr11, { log: silent, on_urc: (l) => push(urcs11, l) });
+
+at11.add_urc_prefixes([ '^RSSI' ]);
+at11.send('AT^NDISSTATQRY?', (e, r) => got11 = r);
+tr11.reply('\r\n^RSSI: 21\r\n^NDISSTATQRY: 1\r\nOK\r\n');
+
+eq(urcs11, [ '^RSSI: 21' ], 'in-command: the same ^ code is dispatched, not kept as an answer');
+eq(got11?.lines, [ '^NDISSTATQRY: 1' ], 'in-command: the command\'s own answer survives');
+
 // --- vendor URC prefixes are merged, not replaced ----------------------------
 //
 // Which codes a modem pushes unsolicited is a property of the manufacturer, and
