@@ -1,7 +1,142 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-21. 47 host suites, all green._
+_Last updated: 2026-08-23. 47 host suites / 2843 checks, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
+
+## A field session on the AT path: URCs, a reset that killed the modem, and an ifdown that would not stay down (2026-08-23)
+
+An evening on the Cudy LT300 / MeiG SLM770A, with the network operator kicking
+the modem off on request. Almost everything below was found by watching real
+hardware rather than by reading code, and two of the fixes correct code written
+earlier the same evening.
+
+### Both AT ports are read now, and every URC says which one it came from
+
+`open_at` used to open the second AT port (`at2`) LAZILY, on the first telemetry
+poll, to save an fd on QMI/MBIM. But an unopened port does not go unparsed — it
+goes UNREAD: nothing holds the fd, so whatever the modem pushes there is gone.
+On NCM the first poll only runs at state READY, which left the whole SIM and
+registration phase unwatched on a port some modems report it on. Both ports are
+opened up front now; `at2_external` remains the only way to keep wwand off one.
+
+The dispatch carries its channel and logs it at ONE site for all backends
+(`urc[at]:` / `urc[at2]:`). That paid for itself immediately: the SLM770A
+mirrors most URCs onto both ports, but `^DCONN` arrived on **at2 only**.
+
+Two traps closed on the way. `atcmd.create` stored `DEFAULT_URC_PREFIXES` by
+REFERENCE while `add_urc_prefixes` pushes in place, so the first modem's vendor
+codes leaked into every AT engine in the process — including other modems'. The
+arrays are copied per engine now. And `log.uc` DELETED control characters, which
+made an embedded CR invisible: a merged line read as one seamless entry with no
+hint that two had been joined. CR and LF are escaped instead, which is what
+later ruled out a framing bug rather than merely suspecting one.
+
+### The modem-reset GPIO had a latent polarity inversion
+
+Two repower clicks 7 s apart left the modem dead until the box was mains-cycled.
+`reset_pulse` derived the resting level from the CURRENT pin level, so the
+second call sampled a line the first was still driving, took the ASSERTED level
+for the resting one, and inverted itself: its release drove the modem down and
+left it there, and every later pulse inherited the inversion (up for the hold,
+down for good afterwards).
+
+- **One pulse at a time.** A second call while one is in flight is ignored.
+  Overlapping callers are real: the recovery ladder, `modem_reset`,
+  `modem_repower` and the LuCI button all land here, and a second click while
+  nothing visibly happens is the normal human reaction to a 30 s pulse.
+- **Polarity is stated, not inferred.** A profile that knows its wiring sets
+  `reset_run` (the level at which the modem RUNS); the pin is not consulted.
+  `cudy,lt300-v3` is **active low** — measured, and the opposite of what the
+  profile comment claimed. Sampling stays the fallback for unmeasured boards.
+- `modem_repower` now logs who pulsed. It was the only one of the three paths
+  that logged nothing, which is exactly what has to be told apart when two
+  pulses overlap.
+
+Exercised for real when the network kicked the modem: recovery asserted the
+reset, the modem returned 40 s later and registered.
+
+### `ifdown` did not survive a daemon restart
+
+Reported as "the interface came back up on its own". An isolated `ifdown` is
+clean; the trigger is a restart afterwards. Every interface-bound context is
+built with `wanted: (cfg.interface != null)` — unconditionally true — so
+operator intent lived only in the daemon's memory and died with the process.
+
+netifd's RUNTIME `autostart` flag is the durable record, and it is safe to key
+on: measured during a modem repower, the interface read `up=false`,
+`available=false` but `autostart=TRUE`. Device presence lives in `available`.
+The kick decision consults it and writes `wanted=false` back; the NCM
+connect-first path re-checks before its own kick, so an `ifdown` landing in that
+window is not undone by it.
+
+### Registration `<stat>`: 9/10 are registrations, 11 is not
+
+`parse_creg` treated only 1 and 5 as registered. **9 and 10 (CSFB not
+preferred) are full data registrations** — on a network signalling them the
+modem would have polled forever. 6/7 (SMS only), 8 (emergency) and 11 are real
+attachments no PDP context can live on; they are reported as `restricted`
+instead.
+
+Stat 11 was observed on every registration cycle, in the same second as the
+vendor's `^SRVST: 1` — which the SLM770A manual defines as "restricted
+service". Two independent signals agreeing is what settled the reading; the
+MeiG manual itself documents only `<stat>` 0-5.
+
+The wait now says WHY it continues, once per change of reason
+(`waiting for registration: registration denied (stat 3)`). It used to be
+completely silent at notice level for minutes.
+
+### Three commands this firmware refuses, and what to do about it
+
+- **`AT+C5GREG?`** — a Cat4 modem answers a bare ERROR forever, and the
+  registration poll asks every 2 s while searching. Latched off on the first
+  refusal: an unknown command is unambiguous.
+- **`AT^DSFLOWQRY`** — `+CME ERROR: 3` on every stats tick. Retired after THREE
+  consecutive refusals, not one: a CME error can be a passing condition. The
+  netdev counter takes over and feeds the same zero-rx watchdog, so only a
+  wasted round-trip is lost. (The manual explains it: the command depends on
+  `AT^DSFLOWRPT=1`, which it marks "to be developed". Enabling that does make it
+  answer — tested — but the byte fields did not move against the netdev counters
+  in a 60 s window, so the mapping stayed unproven and the idea was dropped.)
+- **`AT+URCCFG`** — "Set the Active Reporting Port", documented in manual V2.5
+  and answered with a CME error by firmware `B.0.3_EQ101`. That is why URCs
+  arrive twice: we could not steer them to one port even if we wanted to.
+
+### What the modem pushes, and what is worth doing with it
+
+- **`^DEND`/`^DCONN`** (bearer down/up) are wired, but as HINTS: a `^DEND` arms
+  a verification and only a real status probe tears the context down. The
+  SLM770A was seen re-establishing a session by itself five seconds later, so
+  acting on the notification alone would kill a session about to heal. First
+  field firing showed the verification was too strict — `AT+ECMDUP?` came back
+  EMPTY, which is how this modem says "no contexts", and an `=== 0` test did
+  nothing. An empty list counts as confirmation now, but only there, where the
+  modem's own `^DEND` is already on the record.
+- **`^SRVST`** is recorded, not acted on: the registration URCs arrive in the
+  same burst and already drive the poll. The VALUE is the gain — "registered
+  but carrying nothing" was previously indistinguishable from a healthy modem.
+  Seeded at init from `AT^SRVST?`, since the URC only fires on a change.
+- **`^MODE`** refreshes telemetry, and that one is not redundant: signal and
+  cells come only from the 60 s stats poll, so the old radio was shown for up to
+  a minute after a RAT change.
+
+`^SRVST` push and query share a name but not their field count
+(`^SRVST: <status>` vs `^SRVST: <enable>,<status>`) — the URC parser is anchored
+to one field so a query echo can never be read as a state. The `^CELLLOCK`
+class of bug, caught before it happened.
+
+### NCM reports an operator now
+
+`on_registered` built `reg` without a PLMN, so every NCM modem showed an empty
+operator — and LuCI r16, which read `reg.plmn`, threw on it and left the status
+page at "loading...". QMI gets this free from the serving-system indication.
+
+`^EONS=1` (MeiG) answers instantly with names; `AT+COPS?` is the generic
+fallback and takes over 8 s on this firmware. Both answer shapes are accepted:
+numeric gives mcc/mnc, and the 3GPP DEFAULT format 0 gives a name with no
+numbers at all — which is what a Fibocom FM350 returns, and rejecting it would
+have made the generic path a no-op on exactly the modem that has no vendor
+command.
 
 ## Device blocklist: never touch hardware another interface names (2026-08-23)
 
