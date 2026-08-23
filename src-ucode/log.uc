@@ -63,9 +63,15 @@ export function log(level, fmt, ...args)
 	if (sev > threshold)
 		return;
 
-	// strip control characters (e.g. the \x0b some modems prefix to the PLMN
-	// name) so each entry stays on one clean line
-	let body = replace(sprintf(fmt, ...args), /[[:cntrl:]]/g, '');
+	// Control characters must not reach syslog raw — one entry has to stay one
+	// line (e.g. the \x0b some modems prefix to the PLMN name). CR and LF are
+	// ESCAPED rather than dropped, though: a modem that separates two URCs with
+	// a bare CR used to produce one seamless log line with no hint that two
+	// lines had been merged, which makes a framing bug unreadable in exactly
+	// the log you would use to find it. Everything else is still dropped.
+	let body = replace(sprintf(fmt, ...args), /\r/g, '\\r');
+	body = replace(body, /\n/g, '\\n');
+	body = replace(body, /[[:cntrl:]]/g, '');
 
 	// primary: /dev/log with the real priority. syslog_emit connects on demand
 	// and reconnects once if logd restarted; a false return (no /dev/log) drops

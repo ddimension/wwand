@@ -29,7 +29,11 @@ let script = 'import * as log from "wwand/log.uc"; ' +
 	'log.err("errlevel-err"); ' +
 	'log.set_level("debug"); ' +
 	'log.debug("now-debug"); ' +
-	'log.notice("ctrl-\\x0bscrubbed");';
+	'log.notice("ctrl-\\x0bscrubbed"); ' +
+	// a URC pair the modem separated with a bare CR: the merge must stay
+	// VISIBLE (one log line, but the boundary spelled out) instead of reading
+	// like one seamless line
+	'log.notice("+CEREG: 1\\r1,\\"88ce\\"");';
 
 let testdir = fs.dirname(sourcepath());
 let cmd = sprintf(`%s -L '%s/*.uc' -e '%s' 2>&1`, ucode, testdir, script);
@@ -41,9 +45,13 @@ eq(lines, [
 	'err: errlevel-err',
 	'debug: now-debug',
 	'notice: ctrl-scrubbed',
+	'notice: +CEREG: 1\\r1,"88ce"',
 ], 'log: threshold defaults, set_level, prefix + control-char scrub');
 
 ok(index(out, '\x0b') < 0, 'log: control character stripped from output');
+ok(index(out, "+CEREG: 1\\r1") >= 0, 'log: an embedded CR is escaped, not silently dropped');
+ok(length(filter(split(out, '\n'), (l) => index(l, '+CEREG') >= 0)) == 1,
+	'log: escaping keeps the entry on ONE syslog line');
 
 // --- syslog seam: priority mapping via an injected fake io (in-process) -------
 // emit succeeds, so nothing hits stderr; assert the exact (severity, body) the
