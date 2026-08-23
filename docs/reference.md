@@ -515,11 +515,17 @@ but still owns the netdev.
 The stock handlers bind hardware two ways, and only one of them is a device
 name — so both spellings are collected:
 
-| handler | options |
+| handler | uci options it binds hardware with |
 |---|---|
-| `qmi` (uqmi), `mbim` (umbim) | `device`, **`devpath`** |
+| `qmi` (uqmi) | `device`, **`devpath`** |
+| `mbim` (umbim) | `device`, **`devpath`** |
+| `ncm` (comgt) | `device`, `ifname` |
 | `wwan` (generic auto-detect) | **`bus`** — declares no `device` at all |
-| any interface | `device`, `ifname`, `ctldevice` |
+
+(Read off the handlers' own `proto_config_add_*` lists. `PROTO_DEFAULT_OPTIONS`
+is `defaultroute peerdns metric`, so nothing device-shaped arrives through
+`proto_config_add_defaults`. wwand additionally reads its own legacy
+`ctldevice`.)
 
 `devpath` is an absolute sysfs path and `bus` a USB bus id; both are normalised
 to the `/sys/devices/`-relative form wwand stores in `option path` and compared

@@ -25,7 +25,12 @@ pointing at a device uqmi drives was never checked at all.
   spellings to the `/sys/devices/`-relative form `sysfs_path_of()` produces, and
   `same_hw_path()` compares on component boundaries so a claim on a USB device
   covers its functions. A claim resolving nowhere under `/sys/devices` is
-  dropped, never treated as a wildcard. Two exclusions, both deliberate — a **disabled**
+  dropped, never treated as a wildcard.
+- **Coverage checked against the handlers, not assumed.** `qmi.sh` and `mbim.sh`
+  bind with `device`/`devpath`, `ncm.sh` (comgt, now in openwrt core at
+  `package/network/utils/comgt`) with `device`/`ifname`, `wwan.sh` with `bus`
+  alone. `PROTO_DEFAULT_OPTIONS` is `defaultroute peerdns metric`, so
+  `proto_config_add_defaults` adds nothing device-shaped. All four are covered. Two exclusions, both deliberate — a **disabled**
   interface claims nothing (netifd never brings it up, so a stale section must
   not block a device forever), and `@name` references an interface rather than a
   device.
