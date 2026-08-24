@@ -1211,6 +1211,61 @@ push(scenarios, {
 	},
 });
 
+// s9n: 5G drops away and the NR signal block must go with it.
+//
+// Reported on an FM350-GL riding out heavy rain (openwrt/luci#8917): the modem
+// fell back from 5G to LTE, the serving cell correctly read LTE/B3, and the two
+// 5G bars underneath kept showing the last NR reading forever.
+//
+// fill_signal_from_serving() starts from a COPY of the previous signal block,
+// so a branch that simply is not written on a tick survived untouched. The
+// values are the ones from that report: rsrp -83 dBm (raw 76), sinr 10 dB
+// (raw 20).
+let s9n_cells = { re: /^AT\+GTCCINFO\?$/, lines: [
+	'+GTCCINFO:',
+	'1,4,001,01,0001,001DBE47B,38927,272,140,100,13,54,54,12',
+	'2,9,,,FFFFFFF,00FFFFFFF,646272,500,5078,100,20,0,76,67',
+] };
+
+push(scenarios, {
+	name: 's9n_fibocom_nr_dropout',
+	script: fscript([
+		{ re: /^AT\+GTCAINFO/, lines: [ '+GTCAINFO:' ] },
+		s9n_cells,
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 's9n context up succeeds');
+
+			env.modem.watch();
+
+			wait_for(() => env.modem.signal?.nr5g?.rsrp != null, () => {
+				// NR scales divide by 2.0, so these are doubles — eq() compares
+				// the JSON form, where -83.0 and -83 are not the same text
+				eq(env.modem.signal?.nr5g?.rsrp, -83.0, 's9n: NR rsrp while 5G is serving');
+				eq(env.modem.signal?.nr5g?.snr, 100.0, 's9n: NR sinr while 5G is serving (0.1 dB)');
+				eq(env.modem.signal?.lte?.rsrp, -87, 's9n: LTE rsrp alongside it');
+
+				// heavy rain: the NR row is gone, LTE alone remains
+				s9n_cells.lines = [
+					'+GTCCINFO:',
+					'1,4,001,01,0001,001DBE47B,38927,272,140,100,13,54,54,12',
+				];
+				env.modem.watch();
+
+				wait_for(() => env.modem.cells?.serving?.nr == null, () => {
+					eq(env.modem.signal?.nr5g, null,
+						's9n: the NR signal block disappears with the NR serving cell');
+					eq(env.modem.signal?.lte?.rsrp, -87,
+						's9n: the LTE branch is untouched by the NR dropout');
+					env.finish();
+				});
+			});
+		});
+	},
+});
+
 push(scenarios, {
 	name: 's9d_fibocom_gtccinfo_fallback',
 	script: fscript([

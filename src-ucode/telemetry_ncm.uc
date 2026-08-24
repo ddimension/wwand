@@ -124,6 +124,22 @@ function fill_signal_from_serving(self, serving, refresh)
 		sig.nr5g = cur;
 	}
 
+	// Drop the branch the serving read does NOT report. `sig` starts as a copy
+	// of the previous signal block, so a branch that is merely not written this
+	// tick would survive unchanged — which is how a modem falling back from 5G
+	// to LTE kept showing its last NR RSRP/SINR forever (reported on an FM350-GL
+	// riding out heavy rain: serving cell LTE/B3, and two frozen 5G bars under
+	// it). Safe here because assemble_cells() returns before this point unless
+	// the serving read produced at least one branch, so an empty or failed read
+	// never reaches us and cannot blank a live reading. The signal block now
+	// follows the serving cells exactly, which is what the status page shows
+	// next to it.
+	if (!serving?.lte)
+		delete sig.lte;
+
+	if (!serving?.nr)
+		delete sig.nr5g;
+
 	self.signal = sig;
 }
 
