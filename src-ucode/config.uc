@@ -438,6 +438,19 @@ function compat_translate(raw, result)
 				// first claimant wins the attribution; the device is blocked
 				// either way
 				result.blocked[dev] ??= { interface: name, proto: s.proto ?? '?' };
+
+				// `device` is not always a device NAME. modemmanager's proto
+				// takes a sysfs path there ("validate sysfs path given in
+				// config" — modemmanager.sh), which would never match a
+				// /dev node or a netdev name, so it also has to be recorded
+				// as a path-shaped claim. Keyed on the /sys/ prefix: a
+				// modemmanager `device` may instead be an mmcli index or a
+				// D-Bus path, and neither names hardware we could resolve.
+				// (comgt's 3g and directip use `device:device`, a real device
+				// node, and are covered by the name above.)
+				if (substr(dev, 0, 5) == '/sys/')
+					result.blocked_paths[dev] ??= { interface: name,
+						proto: s.proto ?? '?', opt: opt };
 			}
 
 			// PATH-shaped claims. The stock handlers bind hardware two ways and

@@ -523,6 +523,37 @@ eq(r.blocked_paths['1-2'], { interface: 'w', proto: 'wwan', opt: 'bus' },
 eq(r.blocked_paths['/sys/devices/y'], null,
 	'blocklist: a disabled interface claims no path either');
 
+// `device` is not always a device NAME. Raised by a maintainer on
+// openwrt/packages#30185: the coexistence check covered qmi/mbim/ncm/wwan but
+// not 3g, directip and modemmanager. comgt's 3g and directip declare
+// `device:device` — a real device node, already covered by the name branch.
+// modemmanager declares a plain `device` and puts a SYSFS PATH in it
+// ("validate sysfs path given in config", modemmanager.sh), which can never
+// match a /dev node or a netdev name, so it has to be recorded as a path too.
+r = config.parse({
+	network: {
+		mm: { '.type': 'interface', proto: 'modemmanager',
+		      device: '/sys/devices/platform/soc/usb1/1-1' },
+		g3: { '.type': 'interface', proto: '3g',       device: '/dev/ttyUSB0' },
+		di: { '.type': 'interface', proto: 'directip', device: '/dev/ttyUSB2' },
+		ix: { '.type': 'interface', proto: 'modemmanager', device: '0' },
+	},
+});
+
+eq(r.blocked_paths['/sys/devices/platform/soc/usb1/1-1'],
+	{ interface: 'mm', proto: 'modemmanager', opt: 'device' },
+	'blocklist: a modemmanager sysfs path in `device` is a PATH claim');
+eq(r.blocked['/sys/devices/platform/soc/usb1/1-1'].proto, 'modemmanager',
+	'blocklist: and stays a literal claim as well');
+eq(r.blocked['/dev/ttyUSB0'], { interface: 'g3', proto: '3g' },
+	'blocklist: comgt 3g binds by device node, covered by the name branch');
+eq(r.blocked['/dev/ttyUSB2'], { interface: 'di', proto: 'directip' },
+	'blocklist: comgt directip likewise');
+eq(r.blocked_paths['/dev/ttyUSB0'], null,
+	'blocklist: a device NODE is not turned into a path claim');
+eq(r.blocked_paths['0'], null,
+	'blocklist: an mmcli index names no hardware and is not a path claim');
+
 // --- migrate_plan: convert old configs to the network-native model -----------
 
 function mp_set(ch, section, opt) {
