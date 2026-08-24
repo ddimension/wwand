@@ -485,7 +485,7 @@ export function create(opts)
 			    entry?.cfg?.interface && ctx.config?.pdp_type != 'ipv4') {
 				log('info', sprintf('interface %s: ensuring the dynamic dhcpv6 subinterface (RNDIS v6 model)',
 					entry.cfg.interface));
-				deps.ensure_wan6(entry.cfg.interface);
+				deps.ensure_wan6(entry.cfg.interface, ctx.config?.pdp_type);
 			}
 
 			// detect an address change vs the last applied settings. When the IP

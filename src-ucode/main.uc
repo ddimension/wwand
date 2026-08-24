@@ -450,9 +450,24 @@ function run_daemon()
 			// an explicit idempotent up (same name). A user-defined section
 			// (device/ifname @<parent> + proto dhcpv6) wins: nothing is
 			// written.
-			ensure_wan6: (parent) => {
+			ensure_wan6: (parent, pdp_type) => {
 				let name = parent + '_6';
 				let want = '@' + parent;
+
+				// RFC 7278 on an IPv6-ONLY APN. A mobile network hands out a
+				// single /64 on the WAN link and delegates no prefix, so
+				// odhcp6c has nothing to give the LAN and clients get no
+				// address at all. `extendprefix` is what makes it share that
+				// /64 (dhcpv6.script: mask 64 + no PREFIXES + EXTENDPREFIX ->
+				// proto_add_ipv6_prefix). The `proto wwand` path already does
+				// the equivalent itself in the shim; this is the subinterface,
+				// which is the only place the ipv6-only RNDIS/NCM model has an
+				// address at all — there the modem's RA is the whole story.
+				//
+				// Only for ipv6-only: on ipv4v6 the v4 half keeps LAN clients
+				// working, so defaulting a prefix-sharing behaviour on is a
+				// bigger change than this warrants.
+				let want_extend = (pdp_type == 'ipv6');
 
 				// the parent's firewall zone (read-only lookup): carried as
 				// `option zone`, so fw4 joins the subif to that zone and
@@ -479,12 +494,13 @@ function run_daemon()
 				// netifd manages it, nothing to write. Both spellings of the
 				// device reference count (ifname is the legacy uci option,
 				// device the modern one).
-				let have = false;
+				let have = false, have_name = null;
 				let cursor = libuci.cursor();
 				cursor.foreach('network', 'interface', (s) => {
 					if ((s.device == want || s.ifname == want) &&
 					    (s.proto == 'dhcpv6' || s.proto == 'dhcpv6c')) {
 						have = true;
+						have_name = s['.name'];
 						return false;
 					}
 				});
@@ -498,6 +514,26 @@ function run_daemon()
 					if (zone)
 						cursor.set('network', name, 'zone', zone);
 
+					if (want_extend)
+						cursor.set('network', name, 'extendprefix', '1');
+
+					cursor.commit('network');
+				}
+				else if (want_extend && have_name == name &&
+				         cursor.get('network', have_name, 'extendprefix') == null) {
+					// OUR OWN section from an earlier connect, predating this
+					// default: fill it in. That is the case that matters in the
+					// field — the subinterface already exists, so the creation
+					// branch above never runs again.
+					//
+					// Gated on the name being ours (`<parent>_6`). A section a
+					// user wrote themselves is left completely alone, which is
+					// the promise made in docs/reference.md; and an explicit
+					// `extendprefix 0` is an operator decision, so only an
+					// ABSENT option is ever filled in.
+					log('notice', sprintf('interface %s: ipv6-only APN — defaulting extendprefix=1 (RFC 7278)',
+						have_name));
+					cursor.set('network', have_name, 'extendprefix', '1');
 					cursor.commit('network');
 				}
 

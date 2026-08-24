@@ -73,7 +73,7 @@ function mk(pdp, ensures)
 			resolve_netdev: (cfg, device) => 'wwand0',
 			learn_device: () => null,
 			learn_modem_path: () => null,
-			ensure_wan6: (p) => push(ensures, p),
+			ensure_wan6: (p, pdp) => push(ensures, sprintf('%s/%s', p, pdp ?? '-')),
 		},
 	});
 
@@ -91,7 +91,18 @@ let s1 = mk('ipv6', ensures);
 
 s1.ctx()('up');
 
-eq(ensures, [ 'wan' ], 'wan6: context up on rndis + ipv6 pdp -> ensure_wan6(wan)');
+eq(ensures, [ 'wan/ipv6' ],
+	'wan6: context up on rndis + ipv6 pdp -> ensure_wan6(wan) with the pdp type');
+
+// The pdp type has to REACH ensure_wan6: it is what decides whether the
+// subinterface gets extendprefix=1 (RFC 7278). A mobile network hands out a
+// single /64 and delegates no prefix, so without it odhcp6c has nothing to
+// give the LAN and clients get no address at all.
+ensures = [];
+let s1b = mk('ipv4v6', ensures);
+s1b.ctx()('up');
+eq(ensures, [ 'wan/ipv4v6' ],
+	'wan6: an ipv4v6 context passes its own pdp type (no extendprefix default there)');
 
 // --- scenario 2: pdp ipv4 -> no v6 subinterface ------------------------------
 ensures = [];

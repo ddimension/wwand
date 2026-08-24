@@ -237,9 +237,10 @@ convention for companion interfaces, e.g. `sim_6` for `sim`):
 ```
 config interface 'sim_6'
 	option proto 'dhcpv6'
-	option device '@sim'   # the @-alias: the parent's L3 device
+	option device '@sim'      # the @-alias: the parent's L3 device
 	option auto '1'
-	option zone 'wan'      # the parent's firewall zone (read-only lookup)
+	option zone 'wan'         # the parent's firewall zone (read-only lookup)
+	option extendprefix '1'   # ipv6-only APN only — see below
 ```
 
 The section is **persisted** (it appears on the LuCI Interfaces page) and
@@ -258,6 +259,23 @@ with the config-backed instance under the same name.
   idempotent).
 - **User-defined section wins:** a section with `option device '@<parent>'`
   (or legacy `ifname`) + proto dhcpv6 — wwand writes nothing.
+- **`extendprefix '1'` on an ipv6-only APN** (RFC 7278). A mobile network hands
+  out a single `/64` on the WAN link and delegates no prefix, so odhcp6c has
+  nothing to give the LAN and clients end up with no address at all. This flag
+  is what makes it share that `/64` (`dhcpv6.script`: mask 64 + no delegated
+  prefix + `EXTENDPREFIX` → `proto_add_ipv6_prefix`). The `proto wwand` path
+  needs no equivalent — the shim already shares its own `/64` — so this applies
+  precisely where the ipv6-only RNDIS model has its only address.
+
+  Set **only for `pdp_type 'ipv6'`**: on `ipv4v6` the v4 half keeps LAN clients
+  working, so turning prefix sharing on by default there would be a larger
+  change than the situation warrants. Set it by hand if you want it.
+
+  It is a **default, not a policy**: an explicit `option extendprefix '0'`
+  is never overwritten, and only a section wwand named itself (`<parent>_6`)
+  is ever filled in — a section you wrote is left alone, as above. A
+  subinterface created before this default existed gets it on the next
+  ipv6-only connect (logged once at `notice`).
 - Applies to **every RNDIS-class modem**, not only the FM350-GL. QMI/MBIM
   modems handle v6 backend-natively — this does not apply.
 

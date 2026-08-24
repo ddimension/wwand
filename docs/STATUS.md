@@ -1,7 +1,69 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-23. 47 host suites / 2843 checks, all green._
+_Last updated: 2026-08-24. 47 host suites / 2856 checks, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
+
+## Two field reports and a maintainer review (2026-08-24)
+
+### The NR signal block outlived the 5G it described
+
+Reported on an FM350-GL riding out heavy rain: the modem fell back from 5G to
+LTE, the serving cell correctly read LTE/B3, and the two 5G bars underneath kept
+showing the last NR reading — RSRP -83 dBm, SINR 10 dB, frozen.
+
+`fill_signal_from_serving()` builds the new signal block from a COPY of the
+previous one and then writes `sig.lte` / `sig.nr5g` only for the branches the
+serving read reports. A branch not written on a tick therefore survived
+untouched, forever. The cells block is rebuilt from scratch and did not have the
+problem, which is why the page showed a serving cell and a signal block that
+contradicted each other.
+
+A branch the serving read does not report is deleted now. Safe exactly here:
+`assemble_cells()` returns before this point unless the read produced at least
+one branch, so an empty or failed read can never blank a live reading. The
+regression test replays the report and fails without the fix — checked, because
+a regression test that passes either way is worth nothing.
+
+QMI does not share the bug: it replaces `self.signal` wholesale.
+
+### `extendprefix` on an ipv6-only APN
+
+A mobile network hands out a single `/64` on the WAN link and delegates no
+prefix, so odhcp6c has nothing to give the LAN. RFC 7278 is what shares that
+`/64`, and in OpenWrt it is off unless `extendprefix` is set.
+
+The `proto wwand` path already did the equivalent in the shim
+(`proto_add_ipv6_prefix`). The gap was the **dhcpv6 subinterface** — which is
+precisely where the ipv6-only RNDIS model has its only address, since there the
+modem's RA is the whole story and there is nothing for the shim to push.
+
+The subinterface now gets `extendprefix '1'` when the APN is ipv6-only, both at
+creation and — the case that matters in the field — filled into a section from
+an earlier connect. Two limits keep it a default rather than a policy: an
+explicit `extendprefix '0'` is never overwritten, and only a section wwand named
+itself (`<parent>_6`) is touched, because reference.md promises that a
+user-written section is left alone. `ipv4v6` is deliberately not covered: the v4
+half keeps LAN clients working there.
+
+Note the spelling — the netifd option is `extendprefix`, not `extendedprefix`.
+
+### Device blocklist: `device` is not always a device name
+
+A maintainer on openwrt/packages#30185 asked whether the blocklist covers
+`3g`, `directip` and `modemmanager`. Checked against the handlers rather than
+reasoned about: comgt's `3g` and `directip` declare `device:device` — a real
+device node — and were already covered. `modemmanager` declares a plain
+`device` and puts a **sysfs path** in it, which can never match a `/dev` node or
+a netdev name, so such an interface claimed its modem invisibly.
+
+A `device` under `/sys/` is a path-shaped claim now, resolved through the same
+`claim_path()`/`same_hw_path()` comparison as uqmi's `devpath` and `wwan.sh`'s
+`bus`. Keyed on the prefix, not the proto name: `mmcli --modem=` also takes an
+index or a D-Bus path, and neither names hardware anything could resolve.
+
+The general shape of the mistake is worth keeping: the enumeration was over
+*protocols*, asking which options each uses. The question that actually decides
+coverage is what KIND OF VALUE an option holds.
 
 ## A field session on the AT path: URCs, a reset that killed the modem, and an ifdown that would not stay down (2026-08-23)
 
