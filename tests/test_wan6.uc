@@ -25,7 +25,6 @@ const TIMING = { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
 // create() calls capture their on_event bindings; ensure_wan6 is recorded
 let kicks = [];
 let autostart = true;
-let ctx_settings = null;   // what the context actually got (see the v6-only test)
 
 function mk(pdp, ensures)
 {
@@ -54,8 +53,7 @@ function mk(pdp, ensures)
 				},
 				context: {
 					create: (o) => {
-						let ctx = { state: 'IDLE', config: o.config, modem: o.modem,
-						            settings: ctx_settings };
+						let ctx = { state: 'IDLE', config: o.config, modem: o.modem };
 						ctx_on_event = (ev) => o.deps.on_event(ctx, ev, null);
 						return ctx;
 					},
@@ -106,25 +104,12 @@ s1b.ctx()('up');
 eq(ensures, [ 'wan/ipv4v6' ],
 	'wan6: an ipv4v6 context passes its own pdp type (no extendprefix default there)');
 
-// v6-only is decided by what the context ACTUALLY got, not only by the
-// configured pdp_type. Reported from the field: the saved subinterface had no
-// extendprefix, on a box whose interface never spelled out `pdp_type` — so it
-// read as the ipv4v6 default here while the network handed out no IPv4 at all.
-ensures = [];
-ctx_settings = { ipv6: { addr: '2001:db8::1' } };   // connected, no ipv4
-let s1c = mk('ipv4v6', ensures);
-s1c.ctx()('up');
-eq(ensures, [ 'wan/ipv6' ],
-	'wan6: an ipv4v6 pdp that came up WITHOUT ipv4 counts as v6-only');
-
-ensures = [];
-ctx_settings = { ipv4: { addr: '10.0.0.2' }, ipv6: { addr: '2001:db8::1' } };
-let s1d = mk('ipv4v6', ensures);
-s1d.ctx()('up');
-eq(ensures, [ 'wan/ipv4v6' ],
-	'wan6: a genuinely dual-stack context stays ipv4v6 (v4 keeps the LAN working)');
-
-ctx_settings = null;
+// extendprefix is set for EVERY v6-capable PDP, ipv4v6 included, and the
+// subinterface only exists for those — so the pdp type that arrives here is
+// diagnostic, not a decision. Keying the option on ipv6-only was too narrow
+// twice: pdp_type defaults to ipv4v6, so an interface that never spelled it
+// out never qualified; and a dual-stack PDP whose network hands out no usable
+// IPv4 leaves the LAN just as empty.
 
 // --- scenario 2: pdp ipv4 -> no v6 subinterface ------------------------------
 ensures = [];

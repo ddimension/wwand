@@ -485,15 +485,9 @@ export function create(opts)
 			    entry?.cfg?.interface && ctx.config?.pdp_type != 'ipv4') {
 				log('info', sprintf('interface %s: ensuring the dynamic dhcpv6 subinterface (RNDIS v6 model)',
 					entry.cfg.interface));
-				// v6-only is decided by what the context ACTUALLY got, not only
-				// by the configured pdp_type. `pdp_type` defaults to ipv4v6, so
-				// an interface that never spelled it out looks dual-stack here
-				// even when the network hands out no IPv4 at all — and that is
-				// precisely the case that needs RFC 7278 prefix sharing.
-				let v6_only = (ctx.config?.pdp_type == 'ipv6') ||
-				              (ctx.settings != null && ctx.settings.ipv4 == null);
-
-				deps.ensure_wan6(entry.cfg.interface, v6_only ? 'ipv6' : ctx.config?.pdp_type);
+				// the pdp type rides along for the log only — this gate has
+				// already established that the context is v6-capable
+				deps.ensure_wan6(entry.cfg.interface, ctx.config?.pdp_type);
 			}
 
 			// detect an address change vs the last applied settings. When the IP

@@ -464,20 +464,18 @@ function run_daemon()
 				// which is the only place the ipv6-only RNDIS/NCM model has an
 				// address at all — there the modem's RA is the whole story.
 				//
-				// Only for ipv6-only: on ipv4v6 the v4 half keeps LAN clients
-				// working, so defaulting a prefix-sharing behaviour on is a
-				// bigger change than this warrants.
-				let want_extend = (pdp_type == 'ipv6');
+				// Set for EVERY v6-capable PDP, ipv4v6 included — and reaching
+				// this function already means the context is one (the daemon
+				// gates on pdp_type != 'ipv4'). Keying it on ipv6-only was too
+				// narrow twice over: pdp_type defaults to ipv4v6, so an
+				// interface that never spelled it out never qualified, and a
+				// dual-stack PDP on a network that hands out no usable IPv4
+				// has the same empty LAN either way. The /64 is there to be
+				// shared in all of those cases.
+				let want_extend = true;
 
-				// Say what was decided, either way. The first field report on
-				// this feature was "the section it writes has no extendprefix",
-				// and answering it meant reasoning about a pdp_type nobody
-				// could see. A one-line verdict in the log makes the next one
-				// answer itself.
-				log('info', sprintf('dhcpv6 subinterface %s: %s (pdp %s)', name,
-					want_extend ? 'extendprefix=1 (v6-only, RFC 7278)'
-					            : 'no extendprefix (not v6-only)',
-					pdp_type ?? '?'));
+				log('info', sprintf('dhcpv6 subinterface %s: extendprefix=1 (RFC 7278, pdp %s)',
+					name, pdp_type ?? 'v6-capable'));
 
 				// the parent's firewall zone (read-only lookup): carried as
 				// `option zone`, so fw4 joins the subif to that zone and

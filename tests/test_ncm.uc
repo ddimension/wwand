@@ -221,7 +221,10 @@ push(scenarios, {
 	cconfig: { apn: 'internet' },
 	run_at_start: true,
 	run: (env) => {
-		wait_for(() => env.tr.count(/^AT\+CEREG\?$/) >= 4, () => {
+		// wait on the LAST command of the poll chain, not the first: CREG is
+		// sent after CEREG, so waiting for four CEREGs can observe only three
+		// CREGs and the assertion below races the fourth
+		wait_for(() => env.tr.count(/^AT\+CREG\?$/) >= 4, () => {
 			eq(env.tr.count(/^AT\+C5GREG\?$/), 1,
 				'c5greg: the refused probe is sent exactly once, not once per poll');
 			ok(env.tr.count(/^AT\+CREG\?$/) >= 4,
