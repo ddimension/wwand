@@ -469,6 +469,16 @@ function run_daemon()
 				// bigger change than this warrants.
 				let want_extend = (pdp_type == 'ipv6');
 
+				// Say what was decided, either way. The first field report on
+				// this feature was "the section it writes has no extendprefix",
+				// and answering it meant reasoning about a pdp_type nobody
+				// could see. A one-line verdict in the log makes the next one
+				// answer itself.
+				log('info', sprintf('dhcpv6 subinterface %s: %s (pdp %s)', name,
+					want_extend ? 'extendprefix=1 (v6-only, RFC 7278)'
+					            : 'no extendprefix (not v6-only)',
+					pdp_type ?? '?'));
+
 				// the parent's firewall zone (read-only lookup): carried as
 				// `option zone`, so fw4 joins the subif to that zone and
 				// tracks its IP updates. The zone IDENTIFIER is the zone's
@@ -505,17 +515,26 @@ function run_daemon()
 					}
 				});
 
+				// ONE description of the subinterface, written to uci AND handed
+				// to add_dynamic below. They used to be assembled separately,
+				// which is exactly how they came apart: extendprefix reached
+				// the saved section and never the running instance, so the
+				// config on disk and the interface actually doing the work
+				// disagreed — reported from the field, and the kind of split
+				// that is invisible until someone reads both.
+				let opts = { proto: 'dhcpv6', device: want, auto: '1' };
+
+				if (zone)
+					opts.zone = zone;
+
+				if (want_extend)
+					opts.extendprefix = '1';
+
 				if (!have) {
 					cursor.set('network', name, 'interface');
-					cursor.set('network', name, 'proto', 'dhcpv6');
-					cursor.set('network', name, 'device', want);
-					cursor.set('network', name, 'auto', '1');
 
-					if (zone)
-						cursor.set('network', name, 'zone', zone);
-
-					if (want_extend)
-						cursor.set('network', name, 'extendprefix', '1');
+					for (let k, v in opts)
+						cursor.set('network', name, k, v);
 
 					cursor.commit('network');
 				}
@@ -569,10 +588,9 @@ function run_daemon()
 									netifd_cb('up ' + name)));
 						}
 
-						let blob = { name: name, proto: 'dhcpv6', device: want, auto: true };
-
-						if (zone)
-							blob.zone = zone;
+						// same option set as the uci section above — `auto` is a
+						// real boolean over ubus, a '1' string in uci
+						let blob = { name: name, ...opts, auto: true };
 
 						conn.defer('network', 'add_dynamic', blob, (aret, areply) => {
 							if (aret != 0) {
