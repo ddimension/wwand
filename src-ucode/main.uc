@@ -444,12 +444,12 @@ function run_daemon()
 			// v6 arrives via RA on the parent netdev; a dhcpv6 subinterface
 			// <parent>_6 on @<parent> lets netifd run the v6 client natively.
 			// Persisted (LuCI-visible, never deleted, auto 1, parent's zone
-			// as `option zone`); a fresh section reaches netifd only at the
-			// next config evaluation — which wwand never triggers — so the
-			// instance is additionally started at runtime via add_dynamic +
-			// an explicit idempotent up (same name). A user-defined section
-			// (device/ifname @<parent> + proto dhcpv6) wins: nothing is
-			// written.
+			// as `option zone`), then committed and brought up with a
+			// `network reload` + down/up — the same sequence /sbin/ifup runs.
+			// The commit is the load-bearing step: netifd re-reads uci on
+			// reload, so the section must be on disk first. A user-defined
+			// section (device/ifname @<parent> + proto dhcpv6) wins: nothing
+			// is written, and the up targets THAT section's name.
 			ensure_wan6: (parent, pdp_type) => {
 				let name = parent + '_6';
 				let want = '@' + parent;
@@ -513,13 +513,13 @@ function run_daemon()
 					}
 				});
 
-				// ONE description of the subinterface, written to uci AND handed
-				// to add_dynamic below. They used to be assembled separately,
-				// which is exactly how they came apart: extendprefix reached
-				// the saved section and never the running instance, so the
-				// config on disk and the interface actually doing the work
-				// disagreed — reported from the field, and the kind of split
-				// that is invisible until someone reads both.
+				// ONE description of the subinterface. There used to be a
+				// second one — the add_dynamic payload — assembled separately
+				// from the same intent, and that is exactly how they came
+				// apart: extendprefix reached the saved section and never the
+				// running instance, so the config on disk and the interface
+				// actually doing the work disagreed. There is now only the
+				// section, and netifd builds the interface from it.
 				let opts = { proto: 'dhcpv6', device: want, auto: '1' };
 
 				if (zone)
@@ -554,60 +554,32 @@ function run_daemon()
 					cursor.commit('network');
 				}
 
-				conn.defer('network.interface', 'status', { interface: name },
-					(ret, reply) => {
-						// An instance exists (ours or a user's static section) —
-						// netifd manages it, so there is nothing to CREATE. It
-						// still needs an explicit up: whether the subinterface
-						// exists says nothing about whether its v6 client is
-						// running against the family we just connected with.
-						// Switching the APN from ipv4 to ipv6-only (or ipv4v6)
-						// changes nothing in uci, so netifd never re-evaluates
-						// the section and odhcp6c keeps its old state — field-
-						// seen on the FM350-GL, where only a REBOOT brought v6
-						// up again. `up` is idempotent for netifd and restarts
-						// the client, which re-solicits (and may reconfigure).
-						// The caller only gets here for an ipv4v6/ipv6 context
-						// (daemon.uc gates on pdp_type != 'ipv4').
-						if (ret == 0) {
-							// netifd's `up` is a NO-OP on an interface that is
-							// already up (interface_up() returns early unless the
-							// state is IFS_DOWN) — verified live: the subinterface
-							// kept its uptime across the call. So re-assert it with
-							// a real down->up, which re-runs the proto handler and
-							// restarts odhcp6c into a fresh SOLICIT. `down` also
-							// clears autostart, so the `up` MUST follow it — hence
-							// the chain rather than two independent calls.
-							logmod.log('info', sprintf('dhcpv6 subinterface %s: re-asserting (down/up) for the v6-capable context',
-								name));
+				// A committed section plus a reload IS the interface — which is
+				// why nothing dynamic is created here any more. netifd re-reads
+				// uci on `network reload`, so the commit above is the load-
+				// bearing step; /sbin/ifup does exactly this (reload, then
+				// down+up) and it is the sequence an operator would run by hand.
+				//
+				// down/up rather than a bare up, for two reasons: netifd's `up`
+				// returns early on an interface that is already up (verified
+				// live — the subinterface kept its uptime across the call), and
+				// switching the APN between families changes nothing in uci, so
+				// netifd never re-evaluates the section on its own and odhcp6c
+				// keeps its old state. Field-seen on the FM350-GL, where only a
+				// REBOOT used to bring v6 back. `down` also clears autostart, so
+				// the `up` MUST follow it — hence the chain.
+				//
+				// The target is the section that actually exists: a user's may
+				// carry our device alias under a different name.
+				let target = have ? have_name : name;
 
-							return conn.defer('network.interface', 'down', { interface: name },
-								() => conn.defer('network.interface', 'up', { interface: name },
-									netifd_cb('up ' + name)));
-						}
+				logmod.log('info', sprintf('dhcpv6 subinterface %s: reload + down/up for the v6-capable context',
+					target));
 
-						// same option set as the uci section above — `auto` is a
-						// real boolean over ubus, a '1' string in uci
-						let blob = { name: name, ...opts, auto: true };
-
-						conn.defer('network', 'add_dynamic', blob, (aret, areply) => {
-							if (aret != 0) {
-								logmod.log('warn', sprintf('dhcpv6 subinterface %s: add_dynamic failed (%J)',
-									name, areply));
-								return;
-							}
-
-							logmod.log('notice', sprintf('started the dhcpv6 subinterface %s (device %s, auto%s)',
-								name, want, zone ? sprintf(', zone %s', zone) : ''));
-
-							// first-time bring-up: a freshly added dynamic
-							// instance does not reliably self-start (auto: 1
-							// only applies at the next config evaluation) —
-							// an explicit up is idempotent and closes the gap
-							conn.defer('network.interface', 'up', { interface: name },
-								netifd_cb('up ' + name));
-						});
-					});
+				conn.defer('network', 'reload', {}, () =>
+					conn.defer('network.interface', 'down', { interface: target }, () =>
+						conn.defer('network.interface', 'up', { interface: target },
+							netifd_cb('up ' + target))));
 
 				return true;
 			},

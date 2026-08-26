@@ -247,16 +247,26 @@ The section is **persisted** (it appears on the LuCI Interfaces page) and
 **never deleted by wwand**. `auto: 1` hands the lifecycle to netifd (the
 subif follows the parent's device across reconnects and re-enumeration);
 `option zone` joins it to the parent's firewall zone (fw4 reads it from the
-network dump). Because a freshly written section reaches netifd only at the
-next config evaluation — and wwand never triggers one — the instance is
-additionally started at **runtime via `add_dynamic`** with the same config
-inline plus an explicit idempotent `up` (a fresh dynamic instance does not
-reliably self-start); the next evaluation (LuCI apply, reboot) replaces it
-with the config-backed instance under the same name.
+network dump).
+
+The section is then **committed** and brought up with `network reload` +
+`down`/`up` — the same sequence `/sbin/ifup` performs, which calls
+`ubus call network reload` before its down+up for exactly this reason. The
+**commit is the load-bearing step**: netifd re-reads uci on reload, so the
+section has to be on disk before it. `down`/`up` rather than a bare `up`,
+because netifd's `up` returns early on an interface that is already up, and
+switching the APN between families changes nothing in uci — so netifd never
+re-evaluates the section on its own and odhcp6c would keep its old state
+(field-seen on the FM350-GL, where only a reboot used to bring v6 back).
+
+Nothing is created at runtime any more. There used to be a second description
+of the same interface — an `add_dynamic` payload assembled separately from the
+uci section — and the two came apart on the first option that was added to only
+one of them.
 
 - **Created automatically** when a context on an `rndis_host` datapath with a
-  v6-capable PDP (`ipv6`/`ipv4v6`) connects (a status probe keeps it
-  idempotent).
+  v6-capable PDP (`ipv6`/`ipv4v6`) connects. Re-running it is harmless: an
+  existing section is not rewritten, and reload + down/up is idempotent.
 - **User-defined section wins:** a section with `option device '@<parent>'`
   (or legacy `ifname`) + proto dhcpv6 — wwand writes nothing.
 - **`extendprefix '1'` on an ipv6-only APN** (RFC 7278). A mobile network hands
