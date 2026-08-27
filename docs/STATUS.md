@@ -1,7 +1,59 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-26. 48 host suites / 2903 checks, all green._
+_Last updated: 2026-08-27. 48 host suites / 2935 checks, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
+
+## Open after 1.5.0 (2026-08-27)
+
+Things a later session should not have to rediscover. None of these block the
+release; each is either waiting on hardware we do not have or on somebody else.
+
+**The SIGSEGV fix is reasoned, not reproduced.** `transport.uc`/`atcmd.uc` freed
+a uloop handle from inside its own callback — a use-after-free that a 64-bit
+allocator absorbs and MIPS32 does not. The report is from a RUTM11 (ramips); the
+Cudy LT300 here is the same mipsel_24kc but drives NCM over AT ttys and never
+opens a cdc-wdm control device, so it does not execute the faulty path at all
+(five restarts clean). Confirmation has to come from the reporter running 1.5.0.
+
+**The R4 cannot hold a SIM**, so MHI coverage stops at SIM_BLOCKED. Everything
+up to and including the datapath is HW-validated; registration, bearer
+activation, live telemetry, the reconnect path and the zero-rx watchdog are not,
+and cannot be until that board's SIM1 path is repaired or the modem moves to
+another host.
+
+**`atcmd_mbim.attach()` is unproven on hardware.** The `open()` half — our own
+MBIM client on a modem some other backend drives — is HW-verified on the R4.
+The borrowed-client half has no witness: the one MBIM-driven modem to hand (an
+RM520N-GL on a GL-X3000) ADVERTISES the QDU service in DEVICE_SERVICES and then
+never answers CID 8, so it exercises the decline path only. Different firmware
+(RM520NGLAAR03A03M4G vs …APR01A04M4G on the R4) — QDU support is per-firmware,
+not per-model, which is why the probe exists.
+
+**The kernel DUN patch is downstream only.** `patches/kernel/969-*.patch`, scoped
+to the mediatek target. Upstreaming it properly means the two-patch shape
+described in that README — teach `mhi_wwan_ctrl` to decline a port whose channel
+the device refuses to start, THEN widen the generic channel list — because MHI
+has no capability exchange and over-declaring otherwise yields a port that
+cannot be opened.
+
+**LuCI row actions wrap but stack.** The overflow is fixed and confirmed on
+screen; with nine buttons in a narrow column most lines hold one button, so the
+row is tall. Folding the rare actions (Reboot/Repower/Delete) into an overflow
+menu would be nicer — a design decision, not a defect, so it was not made
+unilaterally.
+
+**Nine PR threads wait on the reviewer**, not on us: every one has an answer,
+including the ENOEXEC question (bytecode keeps the `#!` line, so no ENOEXEC —
+measured on the packaged artifacts). `#30185` stays at CHANGES_REQUESTED until
+they are resolved. `~/.local/bin/wwand-pr-status` reports this in ~1.4 s from
+cache and exits 1 while anything is genuinely unanswered.
+
+**1.5.0 is the first release shipping bytecode.** The polarity is now an opt-out
+(`CONFIG_WWAND_UCODE_SOURCE`), so a symbol lost to defconfig lands on the
+intended behaviour instead of silently reverting it. The remaining unknown is
+whether the SDK's per-package mode can build `ucode/host`; verification so far
+is from a buildroot. If it cannot, it now fails the build loudly rather than
+shipping source while reporting success.
 
 ## PCIe/MHI bring-up on a BananaPi BPi-R4 (2026-08-26)
 
