@@ -172,7 +172,7 @@ export function create(opts)
 					log('info', sprintf('adopting live interface %s after modem ready', centry.cfg.interface));
 					retry_activate(cname);
 				}
-				else if (st?.autostart === false) {
+				else if (st?.autostart === false && !centry._our_down) {
 					// The operator ran `ifdown`. netifd's RUNTIME autostart flag is
 					// the only durable record of that: `wanted` lives in this
 					// process's memory, and every interface-bound context is rebuilt
@@ -181,11 +181,21 @@ export function create(opts)
 					// down (reproduced on the Cudy LT300, 2026-08-23: ifdown, then
 					// restart, and the link came back by itself).
 					//
-					// Safe to key on: autostart is cleared by ifdown and NOTHING else.
-					// Measured during a modem repower on the same box — while the
-					// device was gone the interface read up=false, available=false,
-					// autostart=TRUE — so this cannot swallow the reconnect after a
-					// modem reset. Device presence lives in `available`.
+					// It is NOT enough on its own, though, and the `_our_down` guard
+					// above is why. netifd's ubus `down` runs interface_set_down(),
+					// which does `iface->autostart = false` — so OUR OWN downs leave
+					// exactly the same trace as an operator's. A modem that went
+					// SIM_BLOCKED (wrong PIN, say) and then came back therefore found
+					// its interface marked "administratively down" by the very down
+					// wwand had issued, and sat there until someone ran ifup by hand.
+					// Field-reported on an EG060K-EA: PIN entered, modem registered,
+					// context never activated. The earlier claim here that autostart
+					// "is cleared by ifdown and NOTHING else" was simply wrong.
+					//
+					// Device presence still lives in `available`, not here: measured
+					// during a modem repower, a vanished device reads up=false,
+					// available=false, autostart=TRUE, so this cannot swallow the
+					// reconnect after a modem reset.
 					if (centry.wanted) {
 						centry.wanted = false;
 						log('notice', sprintf('interface %s is administratively down (ifdown), leaving it alone',
@@ -193,6 +203,14 @@ export function create(opts)
 					}
 				}
 				else if ((centry.cfg.auto ?? true) && deps.kick_interface) {
+					// our own down is being undone here; the kick re-arms
+					// netifd's autostart, so the marker has served its purpose
+					if (centry._our_down) {
+						log('info', sprintf('interface %s was taken down by wwand, bringing it back up',
+							centry.cfg.interface));
+						centry._our_down = false;
+					}
+
 					// IDLE context while netifd holds the interface 'pending' = an
 					// ORPHANED setup (e.g. a wwand restart mid-setup). 'up' no-ops on a
 					// pending interface, so 'down' first, then the kick re-runs setup.
@@ -254,6 +272,21 @@ export function create(opts)
 			if (entry.cfg.modem == modem.id && entry.cfg.interface) {
 				clear_reconnect(name);
 				entry.wanted = false;
+
+				// A SIM block is not a decision, it is a condition — and it can
+				// end: the PIN gets entered, the card gets reseated. Re-arm the
+				// context so a later `registered` picks it up again, the same
+				// marker a reconnect-hold give-up uses. Without it the context
+				// was parked for good and only a manual ifup revived it (field
+				// report on an EG060K-EA: PIN entered, modem registered, nothing
+				// happened).
+				entry.reconnect_on_register = true;
+
+				// ...and remember that WE took the interface down. netifd's ubus
+				// `down` clears autostart, which the ready path otherwise reads
+				// as an operator ifdown.
+				entry._our_down = true;
+
 				if (deps.down_interface)
 					deps.down_interface(entry.cfg.interface);
 			}

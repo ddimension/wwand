@@ -170,6 +170,11 @@ export function install(self, o)
 				entry.wanted = false;
 				entry._holdexpiry = true;
 
+				// netifd's ubus `down` clears autostart, which the ready path
+				// reads as operator intent — mark it so our own down is not
+				// mistaken for an ifdown (see daemon.uc, modem_registered)
+				entry._our_down = true;
+
 				if (down_interface && entry.cfg.interface)
 					down_interface(entry.cfg.interface);
 			}

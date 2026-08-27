@@ -270,4 +270,33 @@ let dgone = mk('ipv4', []);
 dgone.modem()('registered');
 eq(kicks, [ 'wan' ], 'ifdown: a vanished device (autostart still true) reconnects as before');
 
+// ...and neither must OUR OWN down. netifd's ubus `down` runs
+// interface_set_down(), which does `iface->autostart = false`, so a down wwand
+// issued itself leaves exactly the trace an operator's ifdown leaves. Without
+// the marker, a modem that went SIM_BLOCKED and then came back found its own
+// interface flagged "administratively down" and stayed off until someone ran
+// ifup by hand — field-reported on an EG060K-EA after entering the PIN.
+kicks = [];
+autostart = true;
+let dsim = mk('ipv4', []);
+
+dsim.modem()('sim_blocked', { reason: 'pin' });
+eq(dsim.d.contexts.wan.wanted, false, 'sim_blocked: the context is parked');
+ok(dsim.d.contexts.wan._our_down == true, 'sim_blocked: the down is marked as ours');
+
+// the PIN is entered, the modem re-inits and comes back — netifd still reports
+// autostart=false, because WE cleared it
+kicks = [];
+autostart = false;
+dsim.modem()('registered');
+eq(kicks, [ 'wan' ], 'sim_blocked: our own down is undone once the modem is ready again');
+ok(dsim.d.contexts.wan._our_down == false, 'sim_blocked: the marker is cleared by the kick');
+
+// an operator ifdown that lands AFTER ours must still win
+kicks = [];
+autostart = false;
+let dboth = mk('ipv4', []);
+dboth.modem()('registered');
+eq(kicks, [], 'ifdown: without our marker, autostart=false is still operator intent');
+
 done('test_wan6');
