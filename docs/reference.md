@@ -332,6 +332,11 @@ config wwand_modem 'm0'
 	                                 #    (gpsd, scripts) — wwand never opens it; telemetry
 	                                 #    runs over the control channel. The released tty
 	                                 #    shows up as `at2_released` in `ubus call wwand status`
+	option at_mbim '1'               # 0: never carry AT over MBIM. A PCIe/MHI modem often
+	                                 #    has no AT tty (no DUN channel); wwand then opens the
+	                                 #    MBIM sibling of its control port as an AT pipe
+	                                 #    (Quectel QDU CID 8). Only used when there is no tty,
+	                                 #    and it carries no URCs — polls only.
 	option fcc_auth 'auto'           # RF unlock for laptop-SKU modems that boot radio-locked
 	                                 #    (Lenovo/Dell/HP variants of Quectel EM1xx, Foxconn
 	                                 #    SDX55/SDX62, DW5821e-class). QMI values:

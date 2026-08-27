@@ -516,7 +516,189 @@ list (the `migrate` ubus method), the `wwand-migrate` CLI, or the example
 uci-defaults script in `/usr/share/wwand/examples/` for a one-shot unattended
 conversion at the next boot. See `docs/reference.md`.
 
-## 8. Roadmap
+## 8. PCIe/MHI transport
+
+A PCIe modem speaks the same QMI/MBIM the USB ones do, but everything *around*
+the protocol differs: how the control node is found, where the data netdev
+lives, and which sysfs knobs exist. Measured on a Quectel RM520N-GL
+(`qcom-sdx65m`) in the M.2 key-B slot of a BananaPi BPi-R4, kernel 6.18.
+
+### 8.1 Control port: one modem, several nodes
+
+The kernel `wwan` framework publishes each control channel separately:
+
+```
+/sys/class/wwan/wwan0qmi0   type QMI
+/sys/class/wwan/wwan0mbim0  type MBIM
+/sys/class/wwan/wwan0qcdm0  type QCDM
+```
+
+They attach in the kernel's order, not in ours, so binding whichever hotplug
+fires first is a coin toss — on the R4, MBIM attached before QMI and autosetup
+took the weaker channel. `discovery.preferred_wwan_port()` resolves a hotplug
+name to the best sibling *on the same wwan device*: QMI over MBIM, never AT.
+Ports of a different `wwanN` are not siblings and are never adopted.
+
+Both families are bare kernel names in the hotplug event and both live under
+`/dev`, so autosetup prefixes `wwanNqmi0` exactly like `cdc-wdmN`. Without that
+the daemon reported `control device not present` for a node sitting right there.
+
+### 8.2 Data netdev: not under the wwan device
+
+`mhi_wwan_mbim` hangs its netdev off the wwan device, and the exact-match
+lookup in `discovery.netdev_for_device()` finds it. `mhi_net` does **not**: the
+control ports live at `…/mhiN/wwan/wwanN` while the data channels are siblings
+one level up.
+
+```
+…/mhi0/wwan/wwan0        <- control ports
+…/mhi0/mhi0_IP_HW0       <- mhi_hwip0, hardware-accelerated data channel
+…/mhi0/mhi0_IP_SW0       <- mhi_swip0, software path
+```
+
+So the search widens to the shared `mhiN` parent and takes the hardware
+channel, falling back to the software one. A second MHI instance is not
+mistaken for the same modem.
+
+### 8.3 The `qmi` sysfs group is qmi_wwan's, not everyone's
+
+`raw_ip`, `pass_through`, `add_mux` and `rx_urb_size` live in
+`/sys/class/net/<dev>/qmi/` — a **qmi_wwan** group. `mhi_net` has no such
+directory: it is raw-IP by construction and hands frames up untouched. wwand
+therefore treats a *missing group* as "nothing to configure" and only a knob
+missing from an *existing* group as fatal. Before that distinction, MHI died at
+`raw_ip unavailable` on a link that needed no configuring.
+
+### 8.4 Multiple PDP contexts
+
+Same model as USB QMI — QMAP plus kernel `rmnet`, one child netdev per
+`mux_id`, stacked on the parent; the parent is renamed out of the way so the
+child can carry the configured L3 name.
+
+The one structural difference: `pass_through` exists only because `qmi_wwan`
+would otherwise parse the QMAP frames itself. A driver without the `qmi` group
+never does, so rmnet stacks on it directly — `select_backend` accepts rmnet on
+such a device without looking for a knob that cannot exist. (While it did look,
+MHI answered `mux_backend_unavailable` and multi-PDP was impossible there.)
+`qmimux` is genuinely unavailable on MHI, since it *is* a qmi_wwan feature.
+
+**RX buffers are sized by the MTU.** This is the part worth remembering.
+On USB, `rx_urb_size` bounds the aggregated frame. On MHI there is no such
+attribute — `mhi_net` sizes each RX buffer as
+
+```c
+size = mhi_netdev->mru ? mhi_netdev->mru : READ_ONCE(ndev->mtu);
+```
+
+and `mru` comes from the controller profile. `mhi_qcom_sdx65_info` sets no
+`mru_default` (only the MBIM profiles do, 32768), so **the parent netdev's MTU
+is the receive buffer size**. wwand sets it to `urb_size` = datagram + 4, which
+is what makes it match the `dl_max_size` negotiated over WDA. Raising
+`dl_datagram_max_size` per modem carries the MTU along, and `mhi_net` allows up
+to 0xffff — but decoupling the two would silently truncate aggregated frames.
+
+Measured with two contexts (`mux_id` 1 and 2):
+
+```
+wda format negotiated: llp 2, ul/dl aggregation 5/5, dl max 32 x 4096 bytes, ul max 11 x 4096
+datapath: parent wwand0 renamed to raw wwan0 so the mux child can take the name
+datapath: rmnet, urb 4100, mux [wwand0 wwand1]
+
+10: wwan0:        <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 4100   <- parent = RX buffer
+13: wwand0@wwan0: <UP,LOWER_UP> mtu 1500
+14: wwand1@wwan0: <UP,LOWER_UP> mtu 1500
+```
+
+The RM520N refuses MAPv5 (`requested proto 8` -> aggregation `0/0`) and accepts
+plain QMAP (`proto 5` -> `5/5`); the existing v5-then-fallback path handles it.
+
+### 8.5 Runtime PM must be pinned off
+
+`mhi-pci-generic` runtime-suspends the endpoint into D3 a few seconds after it
+goes idle, and this modem does not survive the resume: the link comes back
+throwing `Uncorrectable (Non-Fatal)` / `CmpltTO` and the endpoint stops
+answering permanently. Nothing in software recovers it — `remove`+`rescan`, the
+bridge's `reset_subordinate` (secondary bus reset) and a re-probe of the whole
+`mtk-pcie-gen3` controller all end at `LTSSM detect.quiet`. Only a cold boot
+does, and the board has no modem GPIO to pulse (M.2 slot power is hard-wired,
+PERST# comes off the PCIe pinmux).
+
+So `netlink.pin_runtime_pm()` climbs from the control port to the PCI endpoint
+and its bridge and pins both to `power/control = on`. The daemon calls it the
+moment the control device is known present — before the state machine, because
+a later suspend is unrecoverable and the fatal one hit while the modem sat idle
+in `SIM_BLOCKED` with the polls stopped. Silent no-op on USB.
+
+### 8.6 No AT port, and why
+
+The generic Qualcomm entry `PCI_DEVICE(PCI_VENDOR_ID_QCOM, 0x0308)` ->
+`mhi_qcom_sdx65_info` uses `modem_qcom_v1_mhi_channels`, which declares DIAG,
+MBIM, QMI, IPCR, FIREHOSE, IP_SW0 and IP_HW0 — but **no DUN**. `mhi_wwan_ctrl`
+maps `DUN` to `WWAN_PORT_AT`, i.e. `/dev/wwanNat0`, so without the channel
+there is no AT port at all. The vendor profiles (Quectel EM1xx, Telit FN990,
+Sierra EM919x) all declare DUN 32/33; the generic one does not, and a module
+that identifies only as `17cb:0308` — subsystem `17cb:0308`, no vendor
+subsystem — falls through to it.
+
+QMI service `0x08` is not a substitute. It is Qualcomm's
+`access_terminal_service_v01` (ATCoP *forwarding*, IDL 1.6 — the `8(1.6)` the
+modem advertises): a client registers AT command **names that the modem then
+forwards to it**; no message executes an AT command. Probing confirms the IDL
+exactly — `0x0020/0x0022/0x0024/0x0025/0x0027` exist, the indication ids
+`0x0021/0x0023/0x0026` answer error 71 when sent as requests, and `0x0027`,
+present only from IDL minor 6, answers and so pins the version.
+
+**The way in is AT over MBIM.** Even on a QMI-mode modem the MBIM channel is a
+separate MHI channel with its own `/dev/wwanNmbim0`, and Quectel exposes an AT
+pipe there: service **`6427015f-579d-48f5-8c54-f43ed1e76f83` (QDU), CID 8**,
+SET only.
+
+```
+request  InformationBuffer = u32 LE CommandType (0 = AT, 1 = SYSTEM) || raw ASCII
+response InformationBuffer = u32 LE Status      (0 = OK)             || raw ASCII
+```
+
+Both byte arrays are *unsized and unpadded* — no offset/length pair, unlike
+ordinary MBIM string fields. The modem echoes the command back as the first
+response line, so strip through the first `\n`. HW-verified on the RM520N-GL
+over MHI while the QMI backend held `/dev/wwan0qmi0`: `MBIM_OPEN` succeeds, the
+device-services list carries the QDU UUID, and `ATI` returns the model banner.
+
+wwand implements this as `atcmd_mbim.uc`, an ordinary atcmd transport: the
+engine above writes `cmd + CR` as it always does, the transport buffers until a
+command is complete, runs one QDU transaction, strips the echo and hands the
+answer back through the same `on_data` callback a tty would use. `open_at()`
+reaches for it only when `find_at_channels` finds no tty — a real port is
+full-duplex and carries URCs, which this cannot. `option at_mbim '0'` opts out.
+Reached through the plain-script shim `atcmd_mbim_lazy.uc`, so the
+backend-neutral base package never pulls in the MBIM codec.
+
+**Limitation:** a request/response pipe has no unsolicited output. Everything
+wwand *polls* works — identify, telemetry, `AT+QSIMDET`, `protocol_switch` —
+but a URC never arrives. That is the one reason a DUN channel remains the
+better long-term answer: it is a real port, and it needs no MBIM.
+
+HW-verified end to end on the RM520N-GL: `ubus call wwand modem_at` returns
+parsed responses and correct CME codes on a modem with no AT port at all.
+
+### 8.7 SIM diagnosis on a board with no AT
+
+`GET_SLOT_STATUS` and `GET_CARD_STATUS` report through **different enums**, and
+conflating them costs hours. Slot status carries `QmiUimPhysicalCardState`
+(0 unknown / 1 absent / 2 present) — that view follows the slot's card-detect
+line, which is reported inverted on some BPi-R4 units. Card status carries
+`QmiUimCardState` (**0 absent / 1 present / 2 error**) plus a per-card
+`error_code` (`QmiUimCardError`).
+
+A card that is physically there but never answers sits in `CARD_STATE_ERROR`
+with `error_code 3 = no ATR received` — which is what a SIM inserted the wrong
+way round, or not fully seated, looks like. An empty slot reports
+`CARD_STATE_ABSENT` instead. wwand reports the two apart rather than calling
+both `no_sim`, and names the modem's own reason; it also stops reading EFs off
+a slot it already knows it cannot read (`modem._no_card`), which otherwise cost
+four `err 48` warnings per LuCI status poll.
+
+## 9. Roadmap
 
 1. Byte-trace captures from real modems as codec regression fixtures.
 2. QMI-native cell-lock / PDC (replacing the AT `QNWLOCK` / `QMBNCFG` quirks).

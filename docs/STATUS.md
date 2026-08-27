@@ -1,7 +1,104 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-24. 47 host suites / 2856 checks, all green._
+_Last updated: 2026-08-26. 48 host suites / 2903 checks, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
+
+## PCIe/MHI bring-up on a BananaPi BPi-R4 (2026-08-26)
+
+A Quectel RM520N-GL in the M.2 key-B slot, kernel 6.18, driven over QMI. It went
+from "no control device" to a working muxed datapath plus an AT channel. The
+mechanics live in `docs/architecture.md` §8; what follows is what was wrong and
+how it was found, since none of it was visible from the USB side.
+
+**Port and device naming.** The kernel publishes QMI, MBIM and QCDM as separate
+nodes of one wwan device and attaches them in its own order, so first-come
+binding took MBIM. `discovery.preferred_wwan_port()` now picks the best sibling
+on the same device. Autosetup also wrote `wwan0qmi0` bare into uci — only
+`cdc-wdm*` was being prefixed — so the daemon reported `control device not
+present` for a node that existed.
+
+**Datapath.** `mhi_net` does not hang its netdev off the wwan device; the data
+channels are siblings under `mhiN`. The lookup widened to that parent, choosing
+`IP_HW0` over `IP_SW0`. Then setup died on `raw_ip unavailable`: those knobs are
+qmi_wwan's `qmi` sysfs group, which a raw-IP-by-construction driver does not
+have. A missing GROUP is now "nothing to configure"; a knob missing from an
+existing group stays fatal.
+
+**Multi-PDP works, and one thing about it is easy to get wrong.** rmnet stacks
+on `mhi_net` directly — `pass_through` exists only because qmi_wwan would
+otherwise parse QMAP itself — so `select_backend` no longer demands a knob that
+cannot exist there. Verified with two contexts. The subtle part: on MHI there is
+no `rx_urb_size`; `mhi_net` sizes RX buffers from `mru`, and our profile sets
+none, so the **parent MTU is the receive buffer**. It must stay coupled to the
+negotiated `dl_max_size` or aggregated frames get truncated silently.
+
+**Uplink aggregation never worked anywhere.** Chasing "uplink aggregation
+unavailable, kernel default kept: Invalid argument" led to
+`WW_ETHTOOL_MSG_COALESCE_SET` being defined as 21 in `io/src/wwand-io.c`.
+`ETHTOOL_MSG_COALESCE_SET` is **20**; 21 is `PAUSE_GET`. Every request was sent
+as a pause query carrying coalesce attributes, which the kernel answered with
+EINVAL — on every transport, not just MHI, for as long as the call has existed.
+The log line said "unavailable" and was taken at face value. With the id fixed
+the kernel ACKs and both children report `uplink aggregation on (11 frames /
+4096 bytes)`.
+
+**The modem died twice before any of this.** `mhi-pci-generic` runtime-suspends
+the endpoint into D3, and this one does not survive the resume: the link returns
+`Uncorrectable (Non-Fatal)` / `CmpltTO` and never answers again. `remove`+
+`rescan`, the bridge's `reset_subordinate` and a re-probe of the whole
+`mtk-pcie-gen3` controller all end at `LTSSM detect.quiet`; only a cold boot
+recovers it, and the board has no modem GPIO to pulse. So `netlink.pin_runtime_pm()`
+pins the endpoint and its bridge to `power/control = on` the moment the control
+device is seen — before the state machine, because the fatal suspend hit while
+the modem sat idle in `SIM_BLOCKED`.
+
+**AT on a modem with no AT port.** The generic Qualcomm MHI profile declares no
+DUN channel, so there is no `/dev/wwanNat0` — and `protocol_switch`, `QSIMDET`
+and AT telemetry all need AT. QMI service 0x08 is not a way in (it is ATCoP
+*forwarding*: a client registers command names the modem forwards *to* it; the
+IDL was confirmed against the modem, including `0x0027`, which exists only from
+minor 6 and pins the version). The way in is Quectel's AT-over-MBIM pipe — QDU
+service, CID 8 — reachable because MBIM is a separate MHI channel even while
+QMI drives the modem. `atcmd_mbim.uc` implements it as an ordinary atcmd
+transport; `ubus call wwand modem_at` now answers on this hardware. It carries
+no URCs, so a real DUN channel remains the better long-term answer.
+
+**The R4's SIM1 holder is faulty on this unit — MHI validation stops at
+SIM_BLOCKED.** Worth recording so nobody repeats the hunt. The board hardwires
+SIM1 to the M.2 slot and SIM2/SIM3 to the two mini-PCIe slots (device tree, and
+confirmed by BPI's developer in the forum: there is no GPIO muxing, "the slots
+are hardwired to one specific slot"), so only SIM1 can reach our modem. In SIM1
+the modem drives the card lines and gets nothing back: `CARD_STATE_ERROR` with
+`error 3 = no ATR received`, and `power off` -> `power down` -> `power on` ->
+`no ATR` again, so the slot obeys and genuinely retries. `AT+CPIN?` answers
+`CME 10`, `AT+QSIMSTAT?` reads `0,0` with detection enabled in BOTH polarities,
+and `AT+QCCID` answers `CME 13`. The same card works in another device, and
+another user runs exactly this modem on SIM1 successfully — so it is neither the
+card nor the design, but this board's SIM1 path.
+
+Consequence for coverage: everything up to and including the datapath is
+HW-validated on MHI (port selection, `/dev` naming, `mhi_net` netdev discovery,
+the absent `qmi` sysfs group, QMAP + rmnet with two contexts, uplink
+aggregation, the runtime-PM pin, AT over both DUN and MBIM). Registration,
+bearer activation, live telemetry, the reconnect path and the zero-rx watchdog
+remain untested on MHI until that board can hold a SIM.
+
+**A caution about `no ATR received`.** With `AT+QSIMDET` disabled — the default
+on this modem — the modem ignores the detect pin and simply tries the card, so
+an EMPTY slot reports the same `no ATR` as a card that will not answer. It does
+not distinguish "empty" from "present but silent" on this board, and reading it
+that way sent this investigation down the wrong path for a while. Enabling
+detection is what makes the modem report `no_sim` instead — but leave it
+disabled where the detect line may be unwired, or a perfectly good card becomes
+invisible.
+
+**SIM diagnosis without AT.** `GET_SLOT_STATUS` and `GET_CARD_STATUS` use
+DIFFERENT enums — `QmiUimPhysicalCardState` (0 unknown/1 absent/2 present)
+versus `QmiUimCardState` (0 absent/1 present/**2 error**). A card that is there
+but never answers sits in state 2 with `error_code 3 = no ATR received`; wwand
+reported that as `no_sim` and sent us hunting the slot wiring for hours. It now
+names the modem's own reason, and stops reading EFs off a slot it knows it
+cannot read (four `err 48` warnings per LuCI poll otherwise).
 
 ## Two field reports and a maintainer review (2026-08-24)
 
