@@ -83,7 +83,7 @@ endif()
 
 # ES modules (top-level `export`) -> compiled with -cmodule
 set(WWAND_UCODE_MODULES
-  apndb.uc atcmd_parse.uc atcmd.uc backend.uc board.uc callend.uc client.uc
+  apndb.uc atcmd_mbim.uc atcmd_parse.uc atcmd.uc backend.uc board.uc callend.uc client.uc
   codec/arfcn_bands.uc codec/hex.uc codec/mbim.uc codec/qmux.uc codec/tlv.uc
   codec/mbim_schema/basic_connect.uc codec/mbim_schema/compal.uc
   codec/mbim_schema/fibocom.uc codec/mbim_schema/ms_basic_connect_ext.uc
@@ -111,7 +111,7 @@ set(WWAND_UCODE_PROGRAMS
 # source — require() parses source at runtime and nothing `import`s them; they
 # may freely import the bytecode modules above.
 set(WWAND_UCODE_PLAIN
-  atport.uc esim.uc esim_bridge.uc mbim_lazy.uc ncm_lazy.uc qmi_lazy.uc
+  atcmd_mbim_lazy.uc atport.uc esim.uc esim_bridge.uc mbim_lazy.uc ncm_lazy.uc qmi_lazy.uc
   codec/schema/loc_lazy.uc codec/schema/wms_lazy.uc
 )
 

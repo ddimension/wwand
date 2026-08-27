@@ -15,6 +15,7 @@ import * as nasmod from 'wwand.codec.schema.nas';
 import * as ratmod from 'wwand.codec.schema.rat';
 import * as merge from 'wwand.codec.schema.merge';
 import * as arfcn_bands from 'wwand.codec.arfcn_bands';
+import * as discovery from 'wwand.discovery';
 
 // scrub NAS cell-info sentinel metrics (-32768 = "not measured") to null so
 // consumers never render the sentinel as a real dBm value.
@@ -912,6 +913,107 @@ export function close_at(self)
 //   o = { at_opts?, log, drain_interval?, set_drain_timer, next, reopen_next?,
 //         base_override? — explicit sysfs USB-device base for tty discovery
 //         (NCM: the datapath netdev's USB parent; there is no cdc-wdm anchor) }
+// shared tail: wire the engine on an AT-over-MBIM transport, whichever way it
+// was obtained, and run the same init commands the tty path runs. There is
+// deliberately no second (telemetry) channel — the pipe is request/response
+// and one is all the modem offers, so telemetry shares the control engine
+// exactly as it does on a single-port tty modem.
+//
+// The QDU AT pipe is a VENDOR extension: plenty of MBIM modems do not
+// implement CID 8 and answer every command with an MBIM error. So the engine
+// is only kept if a bare `AT` comes back — otherwise this is indistinguishable
+// from having no AT at all, and pretending otherwise would turn one silent
+// absence into a failure on every command wwand ever sends.
+function finish_mbim_at(self, o, tr, path, log)
+{
+	let engine = atcmd.create(tr, {
+		log: (level, msg) => log(level, sprintf('at: %s', msg)),
+		on_urc: (line) => {
+			log('debug', sprintf('urc[at]: %s', line));
+			self.at_on_urc?.(line, 'at');
+		},
+	});
+
+	engine.send('AT', (err) => {
+		if (err) {
+			log('info', sprintf('no AT over MBIM on %s (%J) — continuing without AT',
+				path, err));
+			engine.close();
+			return o.next();
+		}
+
+		self.at = engine;
+		self.at_tty = path;
+		self.at_telemetry = engine;
+		self.at_over_mbim = true;
+		log('notice', sprintf('AT over MBIM ready on %s', path));
+
+		let cmds = [
+			...atcmd.model_init_commands(self.info?.model),
+			...(self.config.at_init ?? []),
+			...atcmd.cell_lock_commands(self.config),
+		];
+
+		if (!length(cmds))
+			return o.next();
+
+		engine.run_sequence(cmds, () => o.next());
+	}, { timeout: 5000 });
+}
+
+// AT over MBIM: the fallback when a modem exposes no AT tty at all (PCIe/MHI
+// without a DUN channel). Opens the MBIM sibling of the control port purely as
+// an AT pipe and wires the same engine the tty path builds — callers above see
+// no difference. Non-fatal throughout: no sibling, disabled by config, or a
+// failed open all end in o.next() with self.at unset, exactly like "no AT port".
+//
+// There is deliberately NO second (telemetry) channel here: the pipe is
+// request/response and one is all the modem offers. telemetry_at() therefore
+// shares the control engine, which is the same thing a single-port tty modem does.
+function open_at_over_mbim(self, o, fxi, log)
+{
+	if (self.config?.at_mbim == '0' || self.config?.at_mbim === false) {
+		log('info', 'no AT port found (AT over MBIM disabled by config)');
+		return o.next();
+	}
+
+	// When MBIM is what DRIVES this modem, the AT pipe rides the client the
+	// backend already owns. Opening a second one on the same node is not an
+	// option: MBIM_OPEN resets the function and would drop a live data
+	// session. (HW: a GL-X3000 runs an RM520N this way, connected for days.)
+	if (self.mbim) {
+		return require('wwand.atcmd_mbim_lazy')
+			.attach(self.mbim, self.device, { log: log }, (tr) => tr
+				? finish_mbim_at(self, o, tr, self.device, log)
+				: o.next());
+	}
+
+	// Otherwise the modem is driven by some other backend and its MBIM channel
+	// is idle — that is the PCIe/MHI case, where the control ports are separate
+	// nodes of one wwan device.
+	let sibling = o.at_opts?.mbim_at_device ??
+		discovery.wwan_sibling_port(self.device, 'mbim', o.at_opts?.discovery_fx);
+
+	if (!sibling) {
+		log('info', 'no AT port found');
+		return o.next();
+	}
+
+	let opener = o.at_opts?.open_mbim_at ?? ((path, oo, cb) => {
+		// via the plain-script shim: require() cannot load an ES module,
+		// and importing it at top level would drag the MBIM codec into the
+		// backend-neutral base package.
+		let mod = require('wwand.atcmd_mbim_lazy');
+		return mod.open(path, oo, cb);
+	});
+
+	log('info', sprintf('no AT tty — trying AT over MBIM on %s', sibling));
+
+	opener(sibling, { log: log }, (tr) => tr
+		? finish_mbim_at(self, o, tr, sibling, log)
+		: o.next());
+}
+
 export function open_at(self, o)
 {
 	let log = o.log;
@@ -923,17 +1025,24 @@ export function open_at(self, o)
 	let ch = atcmd.find_at_channels(fxi, self.device, self.config.tty, o.base_override);
 	let tty = ch.primary;
 
-	if (!tty) {
-		log('info', 'no AT port found');
-		return o.next();
-	}
+	// No tty is not necessarily no AT. A PCIe/MHI modem usually has no DUN
+	// channel and therefore no /dev/wwanNat0 — but its MBIM channel is a
+	// separate node on the same wwan device, and Quectel carries an AT pipe
+	// there (atcmd_mbim.uc). Reach for it only when there is no real port:
+	// a tty is a full-duplex channel that also delivers URCs, which a
+	// request/response pipe cannot. `option at_mbim '0'` opts out.
+	if (!tty)
+		return open_at_over_mbim(self, o, fxi, log);
 
 	let open_transport = o.at_opts?.open_transport ?? atcmd.open_transport;
 	let tr = open_transport(tty, 115200, (level, msg) => log(level, msg));
 
 	if (!tr) {
+		// A port that will not open is as good as absent — another process may
+		// hold it, or it may have vanished between discovery and here. Try the
+		// MBIM pipe rather than giving up on AT entirely.
 		log('warn', sprintf('cannot open AT port %s', tty));
-		return o.next();
+		return open_at_over_mbim(self, o, fxi, log);
 	}
 
 	// on_urc is LATE-BOUND on purpose: a backend may install or wrap its handler
@@ -955,85 +1064,113 @@ export function open_at(self, o)
 		on_urc: dispatch_urc('at'),
 	});
 	self.at_tty = tty;
-	log('notice', sprintf('AT port: %s', tty));
 
-	// dedicated telemetry channel ('at2'): telemetry polls run over a separate
-	// engine so they don't serialize behind control/dial commands. It is opened
-	// EAGERLY, together with the control channel, because the port is a URC
-	// source first and a poll channel second.
+	// A port that OPENS is not necessarily a port that answers. On a PCIe/MHI
+	// modem the DUN channel can accept writes and then go silent: seen on an
+	// RM520N-GL after an AT+CFUN=1,1, and it stayed silent across a wwand
+	// restart and a reboot before coming back on a later one — flaky, not
+	// permanently dead, which is worse, because nothing distinguishes the two
+	// from here. Throughout, the same AT processor kept answering over MBIM.
+	// Without this check wwand settles on the mute channel with a working one
+	// right beside it, and every AT-backed feature times out.
 	//
-	// It used to open lazily on the first telemetry poll, to save an fd on
-	// QMI/MBIM that rarely touch AT. But an unopened port does not merely go
-	// unparsed: nothing holds the fd, so whatever the modem pushes there is
-	// gone. On NCM the first poll only runs at state READY, which left the
-	// entire SIM and registration phase unwatched on the very port some modems
-	// report it on (MeiG SLM770A: ^SIMST, ^SRVST, ^MODE). A second AT port is
-	// now read for URCs exactly like the primary one.
-	//
-	// Falls back to the control channel when there is no distinct second port,
-	// or when opening it fails — telemetry then shares the control engine as
-	// before.
-	self.at_telemetry = self.at;
-	self.at_telemetry_tty = tty;
+	// Only silence disqualifies a port. A modem that answers ERROR (or a CME
+	// error) to a bare AT has answered, and stays the control channel.
+	let at_ready = () => {
 
-	// config `at2_external`: the secondary AT port is reserved for EXTERNAL
-	// tools (gpsd, user scripts, ...) — wwand must never open it. Telemetry
-	// stays on the control channel; log which tty is being left alone.
-	if (self.config?.at2_external && ch.telemetry && ch.telemetry != tty) {
-		log('notice', sprintf('secondary AT port %s released for external use (at2_external)', ch.telemetry));
-		self.at2_released = ch.telemetry;
-		ch = { ...ch, telemetry: null };
-	}
+		// dedicated telemetry channel ('at2'): telemetry polls run over a separate
+		// engine so they don't serialize behind control/dial commands. It is opened
+		// EAGERLY, together with the control channel, because the port is a URC
+		// source first and a poll channel second.
+		//
+		// It used to open lazily on the first telemetry poll, to save an fd on
+		// QMI/MBIM that rarely touch AT. But an unopened port does not merely go
+		// unparsed: nothing holds the fd, so whatever the modem pushes there is
+		// gone. On NCM the first poll only runs at state READY, which left the
+		// entire SIM and registration phase unwatched on the very port some modems
+		// report it on (MeiG SLM770A: ^SIMST, ^SRVST, ^MODE). A second AT port is
+		// now read for URCs exactly like the primary one.
+		//
+		// Falls back to the control channel when there is no distinct second port,
+		// or when opening it fails — telemetry then shares the control engine as
+		// before.
+		self.at_telemetry = self.at;
+		self.at_telemetry_tty = tty;
 
-	if (ch.telemetry && ch.telemetry != tty) {
-		let tr2 = open_transport(ch.telemetry, 115200, (level, msg) => log(level, msg));
-
-		if (tr2) {
-			// the telemetry channel carries URCs too — on many modems it is THE
-			// port they arrive on. It used to get no handler at all, so every
-			// URC landing there was dropped.
-			//
-			// urc_prefixes is seeded from the control engine and COPIED there;
-			// the vendor recipe, known only after identify, is merged into BOTH
-			// engines by the backend (modem_ncm), not propagated between them.
-			self.at_telemetry = atcmd.create(tr2, {
-				log: (level, msg) => log(level, sprintf('at2: %s', msg)),
-				on_urc: dispatch_urc('at2'),
-				urc_prefixes: self.at.urc_prefixes,
-			});
-			self.at_telemetry_tty = ch.telemetry;
-			log('notice', sprintf('AT telemetry channel: %s', ch.telemetry));
+		// config `at2_external`: the secondary AT port is reserved for EXTERNAL
+		// tools (gpsd, user scripts, ...) — wwand must never open it. Telemetry
+		// stays on the control channel; log which tty is being left alone.
+		if (self.config?.at2_external && ch.telemetry && ch.telemetry != tty) {
+			log('notice', sprintf('secondary AT port %s released for external use (at2_external)', ch.telemetry));
+			self.at2_released = ch.telemetry;
+			ch = { ...ch, telemetry: null };
 		}
-		else {
-			log('warn', sprintf('cannot open AT telemetry channel %s (using control channel)', ch.telemetry));
+
+		if (ch.telemetry && ch.telemetry != tty) {
+			let tr2 = open_transport(ch.telemetry, 115200, (level, msg) => log(level, msg));
+
+			if (tr2) {
+				// the telemetry channel carries URCs too — on many modems it is THE
+				// port they arrive on. It used to get no handler at all, so every
+				// URC landing there was dropped.
+				//
+				// urc_prefixes is seeded from the control engine and COPIED there;
+				// the vendor recipe, known only after identify, is merged into BOTH
+				// engines by the backend (modem_ncm), not propagated between them.
+				self.at_telemetry = atcmd.create(tr2, {
+					log: (level, msg) => log(level, sprintf('at2: %s', msg)),
+					on_urc: dispatch_urc('at2'),
+					urc_prefixes: self.at.urc_prefixes,
+				});
+				self.at_telemetry_tty = ch.telemetry;
+				log('notice', sprintf('AT telemetry channel: %s', ch.telemetry));
+			}
+			else {
+				log('warn', sprintf('cannot open AT telemetry channel %s (using control channel)', ch.telemetry));
+			}
 		}
-	}
 
-	// model quirks + configured at_init list, then cell locks
-	let cmds = [
-		...atcmd.model_init_commands(self.info?.model),
-		...(self.config.at_init ?? []),
-		...atcmd.cell_lock_commands(self.config),
-	];
+		// model quirks + configured at_init list, then cell locks
+		let cmds = [
+			...atcmd.model_init_commands(self.info?.model),
+			...(self.config.at_init ?? []),
+			...atcmd.cell_lock_commands(self.config),
+		];
 
-	// M9200B: periodically drain stale serial output (empty_serial_buffers quirk)
-	if (index(self.info?.revision ?? '', 'M9200B') >= 0) {
-		let interval = o.drain_interval ?? 60000;
-		let tick;
+		// M9200B: periodically drain stale serial output (empty_serial_buffers quirk)
+		if (index(self.info?.revision ?? '', 'M9200B') >= 0) {
+			let interval = o.drain_interval ?? 60000;
+			let tick;
 
-		tick = () => {
-			self.at.drain();
+			tick = () => {
+				self.at.drain();
+				o.set_drain_timer(uloop.timer(interval, tick));
+			};
+
 			o.set_drain_timer(uloop.timer(interval, tick));
-		};
+			log('notice', 'M9200B detected, enabling serial drain');
+		}
 
-		o.set_drain_timer(uloop.timer(interval, tick));
-		log('notice', 'M9200B detected, enabling serial drain');
-	}
+		if (!length(cmds))
+			return o.next();
 
-	if (!length(cmds))
-		return o.next();
+		self.at.run_sequence(cmds, o.next);
+	};
 
-	self.at.run_sequence(cmds, o.next);
+	self.at.send('AT', (perr) => {
+		if (perr?.error != 'timeout' && perr?.error != 'closed') {
+			log('notice', sprintf('AT port: %s', tty));
+			return at_ready();
+		}
+
+		log('warn', sprintf('AT port %s opens but does not answer (%s) — trying AT over MBIM',
+			tty, perr.error));
+		self.at.close();
+		self.at = null;
+		self.at_tty = null;
+		self.at_telemetry = null;
+		open_at_over_mbim(self, o, fxi, log);
+	}, { timeout: o.at_opts?.probe_timeout ?? 10000 });
 };
 
 // format_telemetry(o): the single telemetry log line for EVERY backend, defensive

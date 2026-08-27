@@ -570,7 +570,11 @@ scenario('at-init', {
 		eq(modem.at_tty, '/dev/ttyUSB2', 'at: tty from config override');
 		// model RG502Q-EA -> QMBNCFG quirk, then configured ATE0 (validate_config
 		// later appends its AT+QCFG="autoconnect" probe, so check just the prefix)
-		eq(slice(at_tr.written, 0, 2), [ 'AT+QMBNCFG="AutoSel",1', 'ATE0' ], 'at: quirk + at_init sequence');
+		// a bare AT goes first: open_at probes the port before committing to
+		// it, so a channel that opens but never answers is dropped in favour
+		// of the MBIM pipe instead of silently swallowing every command
+		eq(at_tr.written[0], 'AT', 'at: the port is probed before it is used');
+		eq(slice(at_tr.written, 1, 3), [ 'AT+QMBNCFG="AutoSel",1', 'ATE0' ], 'at: quirk + at_init sequence');
 		ok(index(at_tr.written, 'AT+QCFG="autoconnect"') >= 0, 'at: autoconnect probed at validate');
 	});
 

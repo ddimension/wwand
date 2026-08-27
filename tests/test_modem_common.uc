@@ -123,7 +123,19 @@ function fake_fx(vidpid, ttys) {
 let opened_ttys = [];
 let opened_tr = [];
 let fake_transport = () => {
-	let t = { write: () => true, close: () => null, drain: () => null };
+	// A real port answers a bare AT, and open_at now checks that before
+	// committing to a channel — a port that opens but stays silent is dropped
+	// in favour of the MBIM pipe. The fake has to behave like a modem for that
+	// much, or every AT bring-up in these tests looks like a dead channel.
+	let t = { close: () => null, drain: () => null };
+
+	t.write = (d) => {
+		if (t.data_cb && match(d ?? '', /^AT\r?$/))
+			t.data_cb("\r\nOK\r\n");
+
+		return true;
+	};
+
 	t.on_data = (cb) => { t.data_cb = cb; };
 	return t;
 };
