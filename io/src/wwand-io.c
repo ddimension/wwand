@@ -888,7 +888,14 @@ qmit_rmnet_mux_id(uc_vm_t *vm, size_t nargs)
  */
 #define WW_ETHTOOL_GENL_NAME                     "ethtool"
 #define WW_ETHTOOL_GENL_VERSION                  1
-#define WW_ETHTOOL_MSG_COALESCE_SET              21
+/* ethtool_message_types: ...CHANNELS_SET=18, COALESCE_GET=19, COALESCE_SET=20,
+ * PAUSE_GET=21. This was 21 — i.e. every uplink-aggregation request was sent
+ * as PAUSE_GET carrying coalesce attributes, which the kernel answers with
+ * EINVAL. Host-side UL QMAP aggregation therefore never actually engaged on
+ * any transport; the log line said "unavailable, kernel default kept" and was
+ * taken at face value. Verified against
+ * include/uapi/linux/ethtool_netlink_generated.h (6.18). */
+#define WW_ETHTOOL_MSG_COALESCE_SET              20
 #define WW_ETHTOOL_A_COALESCE_HEADER             1
 #define WW_ETHTOOL_A_HEADER_DEV_NAME             2
 #define WW_ETHTOOL_A_COALESCE_TX_AGGR_MAX_BYTES  26
