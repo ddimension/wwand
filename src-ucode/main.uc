@@ -331,8 +331,20 @@ function run_daemon()
 				if (occupied || cursor.get('network', 'wwan0') != null)
 					return false;
 
-				let dev = (substr(devname ?? '', 0, 7) == 'cdc-wdm')
-					? '/dev/' + devname : devname;
+				// A kernel-`wwan` modem offers several control ports and the
+				// hotplug that fires first is an accident of attach order, not
+				// a choice — so ask for the best sibling on the same device
+				// (qmi over mbim) instead of taking what arrived.
+				devname = discovery.preferred_wwan_port(devname);
+
+				// Both families are bare kernel names in the hotplug event and
+				// both live under /dev. Only cdc-wdm used to be prefixed, so a
+				// wwan port was written to uci as `wwan0mbim0` and the daemon
+				// then reported "control device not present" for a node that
+				// was sitting right there (BPi-R4, MHI).
+				let dev = (substr(devname ?? '', 0, 1) == '/') ? devname
+					: (match(devname ?? '', /^(cdc-wdm|wwan[0-9]+(qmi|mbim))/)
+						? '/dev/' + devname : devname);
 
 				// device blocklist: even on an otherwise unconfigured box, a
 				// non-wwand interface may already name this exact device (the

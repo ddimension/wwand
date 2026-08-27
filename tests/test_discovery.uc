@@ -478,6 +478,67 @@ uloop.run();
 		'wwan: QMI control device (PCIe/MHI, no pre-open serial)');
 	eq(pres[1].protocol, 'mbim', 'wwan: MBIM control port too');
 
+	// Port PREFERENCE. One MHI modem exposes several control ports on the same
+	// wwan device and the kernel attaches them in its own order, so the hotplug
+	// that fires first is an accident — on a BPi-R4 mbim attached before qmi and
+	// first-come binding took the weaker channel.
+	eq(discovery.preferred_wwan_port('wwan0mbim0', fx), 'wwan0qmi0',
+		'wwan: an mbim hotplug resolves to the qmi sibling on the same device');
+	eq(discovery.preferred_wwan_port('wwan0qmi0', fx), 'wwan0qmi0',
+		'wwan: qmi stays qmi');
+	eq(discovery.preferred_wwan_port('cdc-wdm0', fx), 'cdc-wdm0',
+		'wwan: a cdc-wdm name is not a wwan port and passes through');
+
+	// a second modem must not be treated as a sibling of the first
+	let fx2 = { ...fx,
+		glob: (p) => (p == '/sys/class/wwan/*')
+			? [ '/sys/class/wwan/wwan0qmi0', '/sys/class/wwan/wwan1mbim0' ] : [],
+		read: (p) => ({
+			'/sys/class/wwan/wwan0qmi0/type':  'QMI\n',
+			'/sys/class/wwan/wwan1mbim0/type': 'MBIM\n',
+		})[p],
+	};
+	eq(discovery.preferred_wwan_port('wwan1mbim0', fx2), 'wwan1mbim0',
+		'wwan: wwan1 does not borrow wwan0\'s qmi port');
+
+	// mhi_net datapath: control ports under .../mhi0/wwan/wwan0, data channels
+	// as siblings under .../mhi0 — the hardware channel wins over the software one.
+	let MHI_ROOT = '/sys/devices/platform/soc/11280000.pcie/pci0003:00/0003:00:00.0/0003:01:00.0/mhi0';
+	let fx3 = {
+		lsdir: (p) => null,
+		glob: (p) => (p == '/sys/class/net/*')
+			? [ '/sys/class/net/eth0', '/sys/class/net/mhi_swip0', '/sys/class/net/mhi_hwip0' ]
+			: [],
+		realpath: (p) => ({
+			'/sys/class/wwan/wwan0qmi0/device': MHI_ROOT + '/wwan/wwan0',
+			'/sys/class/net/mhi_hwip0/device':  MHI_ROOT + '/mhi0_IP_HW0',
+			'/sys/class/net/mhi_swip0/device':  MHI_ROOT + '/mhi0_IP_SW0',
+			'/sys/class/net/eth0/device':       '/sys/devices/platform/soc/15100000.ethernet',
+		})[p],
+	};
+
+	eq(discovery.netdev_for_device('/dev/wwan0qmi0', fx3), 'mhi_hwip0',
+		'wwan: mhi_net datapath found via the shared mhi parent, HW channel preferred');
+
+	// software channel only -> still found
+	let fx4 = { ...fx3,
+		glob: (p) => (p == '/sys/class/net/*')
+			? [ '/sys/class/net/eth0', '/sys/class/net/mhi_swip0' ] : [],
+	};
+	eq(discovery.netdev_for_device('/dev/wwan0qmi0', fx4), 'mhi_swip0',
+		'wwan: falls back to the software channel when there is no IP_HW');
+
+	// a netdev of a DIFFERENT mhi instance is not adopted
+	let fx5 = { ...fx3,
+		glob: (p) => (p == '/sys/class/net/*') ? [ '/sys/class/net/mhi_hwip0' ] : [],
+		realpath: (p) => (p == '/sys/class/wwan/wwan0qmi0/device')
+			? MHI_ROOT + '/wwan/wwan0'
+			: (p == '/sys/class/net/mhi_hwip0/device'
+				? replace(MHI_ROOT, /mhi0$/, 'mhi1') + '/mhi1_IP_HW0' : null),
+	};
+	eq(discovery.netdev_for_device('/dev/wwan0qmi0', fx5), null,
+		'wwan: a second MHI instance is not mistaken for the same modem');
+
 	eq(discovery.device_for_usb_path(MHI_PATH, fx), '/dev/wwan0qmi0',
 		'wwan: full MHI sysfs path binds to the control device');
 	eq(discovery.device_for_usb_path(

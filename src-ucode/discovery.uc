@@ -169,6 +169,34 @@ export function netdev_for_device(device, fx)
 				if (fx.realpath(sprintf('/sys/class/net/%s/device', nd)) == devdir)
 					return nd;
 			}
+
+		// mhi_net does NOT hang its netdev off the wwan device: the control
+		// ports live at .../mhiN/wwan/wwanN while the data channels are
+		// siblings at .../mhiN/mhiN_IP_HW0 (hardware-accelerated) and
+		// .../mhiN_IP_SW0 (software path). So widen the search to the shared
+		// mhiN parent and take the hardware channel. (Quectel RM520N-GL on a
+		// BPi-R4: exact-match found nothing and the QMI datapath was skipped.)
+		let m = devdir ? match(devdir, /^(.*\/mhi[0-9]+)(\/|$)/) : null;
+
+		if (m) {
+			let root = m[1], fallback = null;
+
+			for (let path in (fx.glob('/sys/class/net/*') ?? [])) {
+				let nd = basename(path);
+				let rp = fx.realpath(sprintf('/sys/class/net/%s/device', nd));
+
+				if (!rp || substr(rp, 0, length(root) + 1) != root + '/')
+					continue;
+
+				if (match(rp, /_IP_HW[0-9]+$/))
+					return nd;
+
+				fallback = fallback ?? nd;
+			}
+
+			if (fallback)
+				return fallback;
+		}
 	}
 
 	return null;
@@ -371,6 +399,70 @@ function wwan_control_ports(fx)
 
 	return out;
 }
+
+// Pick the control port to bind on a kernel-`wwan` modem. One modem exposes
+// SEVERAL ports on the same wwan device — an MHI board shows wwan0qcdm0,
+// wwan0mbim0 and wwan0qmi0 — and the kernel attaches them in its own order, so
+// whichever hotplug fires first is not a choice, it is an accident. Observed on
+// a BPi-R4: mbim attached before qmi, and first-come binding took the weaker
+// channel.
+//
+// QMI wins over MBIM: it is the backend wwand drives natively, while the MBIM
+// path tunnels QMI over it anyway. qcdm never appears here — it is a diagnostic
+// port and wwan_port_protocol() only reports qmi/mbim.
+//
+// Ports are grouped by the `wwanN` prefix the kernel builds the names from, so
+// a second modem (wwan1*) is never considered a sibling of the first.
+// The sibling control port of a given protocol on the SAME kernel-wwan device.
+// A PCIe/MHI modem publishes QMI, MBIM and QCDM as separate nodes of one
+// device, so a QMI-driven modem can still reach the MBIM channel — which is
+// where Quectel's AT pipe lives (see atcmd_mbim.uc). Returns null for a USB
+// modem: there is no wwan device to have siblings on.
+export function wwan_sibling_port(name, protocol, fx)
+{
+	fx = fx ?? default_fx();
+
+	let base = basename(name ?? '');
+	let m = match(base, /^(wwan[0-9]+)/);
+
+	if (!m)
+		return null;
+
+	for (let p in wwan_control_ports(fx)) {
+		if (p.name == base)
+			continue;
+
+		if (substr(p.name, 0, length(m[1])) == m[1] && p.protocol == protocol)
+			return sprintf('/dev/%s', p.name);
+	}
+
+	return null;
+};
+
+export function preferred_wwan_port(name, fx)
+{
+	fx = fx ?? default_fx();
+
+	let m = match(name ?? '', /^(wwan[0-9]+)/);
+
+	if (!m)
+		return name;
+
+	let best = null;
+
+	for (let p in wwan_control_ports(fx)) {
+		if (substr(p.name, 0, length(m[1])) != m[1])
+			continue;
+
+		if (p.protocol == 'qmi')
+			return p.name;          // nothing outranks it
+
+		if (p.protocol == 'mbim' && !best)
+			best = p.name;
+	}
+
+	return best ?? name;
+};
 
 // enumerate the modem control devices physically present now — cdc-wdm nodes
 // (qmi/mbim), wwan-framework control ports (PCIe/MHI) and NCM datapath netdevs —
