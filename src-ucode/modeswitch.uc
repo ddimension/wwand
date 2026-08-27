@@ -37,6 +37,17 @@ const RECIPES = [
 		want: '0',
 		set: 'AT+QCFG="usbnet",0',
 		reset: 'AT+CFUN=1,1',
+		// `usbnet` is not the whole story on these: AT+QCFG="data_interface"
+		// moves the DATA path to PCIe, and then the USB composition offers
+		// serial ports only — while `usbnet` still cheerfully reports 0 (RmNet).
+		// Field-hit on a Chateau/RG650E: no cdc-wdm, no netdev, and the switch
+		// concluding "already in a rich usbnet mode, nothing to switch".
+		// We only ever run on a USB-attached modem (the ppp-only path), so a
+		// data path pointed at PCIe is wrong by construction here.
+		extra_query: 'AT+QCFG="data_interface"',
+		extra_re: /\+QCFG:\s*"data_interface",([0-9]+)/,
+		extra_bad: '1',
+		extra_set: 'AT+QCFG="data_interface",0,0',
 	},
 	{
 		// Huawei: ^SETPORT / ^U2DIAG select the USB profile. The profile string
@@ -146,6 +157,43 @@ export function attempt(opts, cb)
 						}
 
 					if (cur == recipe.want) {
+						// The mode matches and yet we are here, on a modem with
+						// nothing but serial ports — so something else moved the
+						// data path away. Ask before declaring victory.
+						if (recipe.extra_query) {
+							at.send(recipe.extra_query, (eerr, eres) => {
+								let val = null;
+
+								if (!eerr)
+									for (let line in (eres?.lines ?? [])) {
+										let m = match(line, recipe.extra_re);
+
+										if (m) { val = m[1]; break; }
+									}
+
+								if (val != recipe.extra_bad) {
+									log('notice', sprintf('usbnet already in mode %s; nothing to switch', cur));
+									return finish(null, { switched: false });
+								}
+
+								log('notice', sprintf('usbnet is %s but the data path is not on USB — correcting', cur));
+
+								at.send(recipe.extra_set, (serr) => {
+									if (serr) {
+										log('warn', sprintf('data path correction failed: %J', serr));
+										return finish(null, { switched: false });
+									}
+
+									at.send(recipe.reset, () => {
+										log('notice', 'data path moved back to USB, modem resetting');
+										finish(null, { switched: true, target: recipe.target });
+									}, { timeout: 5000 });
+								}, { timeout: 8000 });
+							}, { timeout: 8000 });
+
+							return;
+						}
+
 						log('notice', sprintf('usbnet already in mode %s; nothing to switch', cur));
 						return finish(null, { switched: false });
 					}

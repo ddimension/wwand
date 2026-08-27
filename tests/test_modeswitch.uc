@@ -115,6 +115,48 @@ push(scenarios, {
 	},
 });
 
+// --- Quectel: usbnet says QMI, but the data path was moved to PCIe -----------
+//
+// `usbnet` is not the whole story. AT+QCFG="data_interface" can point the DATA
+// path at PCIe, and the USB composition then offers serial ports only — while
+// usbnet still reports 0 (RmNet). Field-hit on a Chateau/RG650E: no cdc-wdm, no
+// netdev, and the switch concluding "already in a rich usbnet mode". We only
+// run on a USB-attached modem, so a data path on PCIe is wrong by construction.
+
+push(scenarios, {
+	name: 'quectel_data_interface_pcie',
+	script: [
+		{ re: /^AT\+CGMI$/, lines: [ 'Quectel' ] },
+		{ re: /^AT\+CGMM$/, lines: [ 'RG650E-EU' ] },
+		{ re: /^AT\+QCFG="usbnet"$/, lines: [ '+QCFG: "usbnet",0' ] },
+		{ re: /^AT\+QCFG="data_interface"$/, lines: [ '+QCFG: "data_interface",1,0' ] },
+		{ re: /^AT\+QCFG="data_interface",0,0$/, lines: [] },
+	],
+	check: (err, res, tr) => {
+		eq(res?.switched, true, 'data path on pcie: treated as a switch');
+		ok(tr.saw(/^AT\+QCFG="data_interface",0,0$/) != null,
+			'data path on pcie: moved back to USB');
+		ok(tr.saw(/^AT\+CFUN=1,1$/) != null, 'data path on pcie: modem reset to re-enumerate');
+		eq(tr.saw(/^AT\+QCFG="usbnet",0$/), null,
+			'data path on pcie: usbnet is right already and is not rewritten');
+	},
+});
+
+// ...and when the data path IS on USB, the no-op stands
+push(scenarios, {
+	name: 'quectel_data_interface_usb',
+	script: [
+		{ re: /^AT\+CGMI$/, lines: [ 'Quectel' ] },
+		{ re: /^AT\+CGMM$/, lines: [ 'RG650E-EU' ] },
+		{ re: /^AT\+QCFG="usbnet"$/, lines: [ '+QCFG: "usbnet",0' ] },
+		{ re: /^AT\+QCFG="data_interface"$/, lines: [ '+QCFG: "data_interface",0,0' ] },
+	],
+	check: (err, res, tr) => {
+		eq(res?.switched, false, 'data path on usb: still a no-op');
+		eq(tr.saw(/^AT\+CFUN=1,1$/), null, 'data path on usb: no reset');
+	},
+});
+
 // --- unknown modem -> generic no-op -----------------------------------------
 
 push(scenarios, {

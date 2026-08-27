@@ -1,0 +1,35 @@
+From: André Valentin <avalentin@marcant.net>
+Subject: [PATCH] bus: mhi: host: pci_generic: declare DUN on the generic qcom profile
+
+The generic Qualcomm entry, PCI_DEVICE(PCI_VENDOR_ID_QCOM, 0x0308) ->
+mhi_qcom_sdx65_info, uses modem_qcom_v1_mhi_channels, which declares DIAG,
+MBIM, QMI, IPCR, FIREHOSE, IP_SW0 and IP_HW0 but no DUN. mhi_wwan_ctrl maps
+DUN to WWAN_PORT_AT, i.e. /dev/wwanXat0, so a module matching only that entry
+comes up with no AT port at all — and with it no vendor AT commands, no
+protocol switch, no AT telemetry.
+
+Every vendor profile for these modems declares DUN 32/33 (Quectel EM1xx,
+Telit FN990, Sierra EM919x); the generic one does not, and a Quectel RM520N-GL
+that identifies solely as 17cb:0308 — subsystem 17cb:0308, no vendor subsystem
+to match on — falls through to it. Verified on a BananaPi BPi-R4: with the
+channel declared, `wwan wwan0: port wwan0at0 attached` and AT works.
+
+Kept downstream and scoped to mediatek for now, because MHI has no capability
+exchange: mhi_create_devices() walks the host-declared channel list, so a
+device that lacks DUN would get a port node that cannot be opened. Fixing that
+properly means teaching mhi_wwan_ctrl not to publish a port whose channel the
+device refuses to start, which is a separate change.
+
+Signed-off-by: André Valentin <avalentin@marcant.net>
+---
+--- a/drivers/bus/mhi/host/pci_generic.c
++++ b/drivers/bus/mhi/host/pci_generic.c
+@@ -314,6 +314,8 @@ static const struct mhi_channel_config m
+ 	MHI_CHANNEL_CONFIG_DL(15, "QMI", 4, 0),
+ 	MHI_CHANNEL_CONFIG_UL(20, "IPCR", 8, 0),
+ 	MHI_CHANNEL_CONFIG_DL(21, "IPCR", 8, 0),
++	MHI_CHANNEL_CONFIG_UL(32, "DUN", 32, 0),
++	MHI_CHANNEL_CONFIG_DL(33, "DUN", 32, 0),
+ 	MHI_CHANNEL_CONFIG_UL_FP(34, "FIREHOSE", 32, 0),
+ 	MHI_CHANNEL_CONFIG_DL_FP(35, "FIREHOSE", 32, 0),
+ 	MHI_CHANNEL_CONFIG_UL(46, "IP_SW0", 64, 2),
