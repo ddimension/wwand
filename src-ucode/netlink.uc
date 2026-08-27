@@ -691,6 +691,14 @@ export function setup_mbim(fx, opts)
 	let mux_devs = [];
 	let mux_mtus = {};
 
+	// Same as the QMI path: children the current config no longer names are
+	// removed before any naming work. This was fixed in setup() first and
+	// missed here, which left the cdc_mbim session path with exactly the defect
+	// it was fixed for — a VLAN child of a dropped session keeps its name and
+	// pins the parent.
+	prune_mux_children(fx, netdev,
+		map(opts.mux ?? [], (e) => e.name ?? sprintf('%s.%d', netdev, e.id)));
+
 	// A muxed child cannot share the parent's name. This happens when the parent
 	// still carries a stable "wwandN" name from a previous untagged (session-0)
 	// config and is now being muxed — move the parent back to a raw kernel name
