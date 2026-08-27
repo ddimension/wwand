@@ -81,6 +81,7 @@ export function default_fx(log)
 	};
 
 	self.exists = (path) => fs.access(path) == true;
+	self.realpath = (path) => fs.realpath(path);
 	self.glob = (...patterns) => fs.glob(...patterns);
 	self.run = (argv) => system(argv);
 	self.log = log ?? ((level, msg) => warn(sprintf('%s: %s\n', level, msg)));
@@ -251,6 +252,56 @@ export function board_dgram_size(fx, override, model)
 	return DEFAULT_DGRAM_SIZE;
 };
 
+// Pin PCIe runtime PM off for an MHI modem's endpoint (and its bridge).
+//
+// mhi-pci-generic autosuspends the endpoint into D3 a few seconds after it goes
+// idle. A Quectel RM520N-GL (qcom-sdx65m) on a BPi-R4 does not survive the
+// resume: the link comes back throwing Uncorrectable(Non-Fatal)/CmpltTO, the
+// endpoint stops answering for good, and NOTHING in software gets it back —
+// remove+rescan, the bridge's secondary-bus reset and a re-probe of the whole
+// mtk-pcie-gen3 controller all leave it at `LTSSM detect.quiet`. Only a cold
+// boot does. The board has no modem GPIO to pulse either (M.2 slot power is
+// hard-wired, PERST# comes off the PCIe pinmux), so there is no recovery to
+// fall back on — which makes NOT suspending the only cure.
+//
+// wwand holds the control channel open, so the modem is normally busy enough
+// not to idle out; the fatal suspend came while the modem sat in SIM_BLOCKED
+// with the polls stopped. Hence: pin at bind time, not at datapath setup.
+//
+// Silent no-op for a USB modem — there is no PCI ancestor to find.
+export function pin_runtime_pm(fx, device)
+{
+	if (!device)
+		return null;
+
+	let name = substr(device, rindex(device, '/') + 1);
+
+	if (substr(name, 0, 4) != 'wwan')
+		return null;
+
+	let dir = fx.realpath ? fx.realpath(sprintf('/sys/class/wwan/%s/device', name)) : null;
+	let pinned = [];
+
+	// climb to the PCI endpoint (…/0003:01:00.0), then to its bridge
+	while (dir && dir != '/' && length(pinned) < 2) {
+		let base = substr(dir, rindex(dir, '/') + 1);
+
+		if (match(base, /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]$/)) {
+			let knob = sprintf('%s/power/control', dir);
+
+			if (fx.exists(knob) && write_attr(fx, knob, 'on', 'runtime pm'))
+				push(pinned, base);
+		}
+
+		dir = substr(dir, 0, rindex(dir, '/'));
+	}
+
+	if (length(pinned))
+		fx.log('info', sprintf('mhi: pinned PCIe runtime PM off for %s', join(', ', pinned)));
+
+	return length(pinned) ? pinned : null;
+};
+
 // decide the mux backend for a modem
 //   cfg_mux: 'auto' | 'rmnet' | 'qmimux' | 'none'
 export function select_backend(fx, netdev, cfg_mux, want_mux)
@@ -258,7 +309,12 @@ export function select_backend(fx, netdev, cfg_mux, want_mux)
 	if (!want_mux || cfg_mux == 'none')
 		return 'none';
 
-	let has_passthrough = fx.exists(sprintf('/sys/class/net/%s/qmi/pass_through', netdev));
+	// pass_through is qmi_wwan's way of handing raw QMAP frames to rmnet.
+	// A driver without the `qmi` group never parses the frames itself, so it
+	// needs no such switch — rmnet stacks on it directly (mhi_net/MHI).
+	let no_qmi_group = !fx.exists(sprintf('/sys/class/net/%s/qmi', netdev));
+	let has_passthrough = no_qmi_group ||
+		fx.exists(sprintf('/sys/class/net/%s/qmi/pass_through', netdev));
 	let has_rmnet = fx.exists('/sys/module/rmnet');
 	let has_add_mux = fx.exists(sprintf('/sys/class/net/%s/qmi/add_mux', netdev));
 
@@ -473,12 +529,22 @@ export function setup(fx, opts)
 
 	// driver link-layer format: essential, bail out on failure. raw_ip must
 	// be set first — the driver refuses pass-through on a non-raw-ip device.
-	if (!write_attr(fx, sprintf('%s/raw_ip', sys), 'Y', 'driver format'))
-		return { ok: false, error: 'raw_ip unavailable' };
+	// The knobs live in qmi_wwan's `qmi` sysfs group; a driver that is raw-IP
+	// by construction (mhi_net on a PCIe/MHI modem) has no such group at all,
+	// and there is then nothing to set and nothing to fail on. Only a knob
+	// MISSING from an EXISTING group is fatal.
+	if (fx.exists(sys)) {
+		if (!write_attr(fx, sprintf('%s/raw_ip', sys), 'Y', 'driver format'))
+			return { ok: false, error: 'raw_ip unavailable' };
 
-	if (backend == 'rmnet' &&
-	    !write_attr(fx, sprintf('%s/pass_through', sys), 'Y', 'driver format'))
-		return { ok: false, error: 'pass_through unavailable' };
+		if (backend == 'rmnet' &&
+		    !write_attr(fx, sprintf('%s/pass_through', sys), 'Y', 'driver format'))
+			return { ok: false, error: 'pass_through unavailable' };
+	}
+	else {
+		fx.log('info', sprintf('datapath: %s has no qmi sysfs group — raw-IP driver, link-layer format left to it',
+			netdev));
+	}
 
 	// rx urb size: the sysfs attribute only exists on kernels carrying the
 	// vendor patch; mainline usbnet derives the urb size from the parent

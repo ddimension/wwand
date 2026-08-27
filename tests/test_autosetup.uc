@@ -12,12 +12,15 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as daemon_mod from 'wwand/daemon.uc';
 
+let netifd_reloads = 0;
+
 function mk(present, created, opts)
 {
 	return daemon_mod.create({ deps: {
 		log: (lvl, msg) => null,
 		autosetup_create: (dev) => { push(created, dev); return opts?.create_result ?? true; },
 		list_present: () => present,
+		network_reload: () => netifd_reloads++,
 	} });
 }
 
@@ -30,6 +33,10 @@ d.reload = () => reloads++;
 d.autosetup_scan();
 eq(created, [ 'usb0' ], 'scan: ncm netdev replayed into autosetup_create');
 eq(reloads, 1, 'scan: successful create triggers a config reload');
+// netifd has to be told as well: the sections went straight into uci, so until
+// it re-reads them `network.interface.wwan0` does not exist for it (NOT_FOUND
+// on every kick — a virgin BPi-R4 sat there with a created-but-unknown iface).
+eq(netifd_reloads, 1, 'scan: successful create also reloads netifd');
 
 // (2) cdc-wdm control device -> replayed as the hotplug BASENAME ('cdc-wdm0'),
 // not the /dev path (autosetup_create re-prefixes /dev/ itself)
@@ -58,6 +65,14 @@ d = mk([ { kind: 'ncm', netdev: 'usb0' } ], created);
 d.autosetup = false;
 d.autosetup_scan();
 eq(created, [], 'scan: gated by the autosetup global');
+
+// (6) no create -> netifd is left alone
+netifd_reloads = 0;
+created = [];
+d = mk([ { kind: 'ncm', netdev: 'usb0' } ], created, { create_result: false });
+d.autosetup_scan();
+eq(created, [ 'usb0' ], 'scan: candidate offered');
+eq(netifd_reloads, 0, 'scan: a declined create does not reload netifd');
 
 // (6) nothing present -> nothing created
 created = [];

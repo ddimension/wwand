@@ -901,6 +901,13 @@ export function create(opts)
 		let device = entry.device;
 		let proto = control.protocol ?? 'qmi';
 
+		// A PCIe/MHI modem must not be allowed to runtime-suspend: on the
+		// hardware seen so far the resume kills the endpoint outright and no
+		// software reset gets it back. Do it here, the moment the control
+		// device is known present — a later suspend is unrecoverable, and the
+		// one that killed the modem hit while it sat idle in SIM_BLOCKED.
+		nlmod.pin_runtime_pm(nlmod.default_fx((level, msg) => log(level, msg)), device);
+
 		entry.protocol = proto;
 
 		// pin the discovery-resolved tty so AT-driven backends (NCM) and the AT
@@ -1645,6 +1652,14 @@ export function create(opts)
 
 				if (self.reload)
 					self.reload();
+
+				// ...and tell NETIFD too, not just ourselves. The sections were
+				// written straight into uci, so until netifd re-reads it the
+				// interface simply does not exist for it — every kick/down on
+				// wwan0 came back NOT_FOUND (ubus status 4), seen on a virgin
+				// BPi-R4. Phase 2 (autosetup_fill) had this all along.
+				if (deps.network_reload)
+					deps.network_reload();
 			}
 
 			// start modems that couldn't be resolved before (boot enumeration race)

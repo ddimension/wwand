@@ -48,7 +48,24 @@ export function create(opts)
 	};
 
 	self.exists = function(path) {
-		return self.present[path] == true;
+		if (self.present[path] == true)
+			return true;
+
+		// sysfs directories exist by virtue of their children — a driver that
+		// exposes any `qmi/<attr>` also has the `qmi` group. Tests register the
+		// attributes; deriving the parent here keeps them honest without
+		// listing every directory by hand.
+		let pfx = path + '/';
+
+		for (let k in keys(self.present))
+			if (self.present[k] == true && substr(k, 0, length(pfx)) == pfx)
+				return true;
+
+		for (let k in keys(self.files))
+			if (substr(k, 0, length(pfx)) == pfx)
+				return true;
+
+		return false;
 	};
 
 	self.run = function(argv) {

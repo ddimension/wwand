@@ -169,11 +169,57 @@ eq(length(fx.matching('rx_urb_size')), 0, 'nourb: no urb write when the attribut
 ok(fx.action_index('link_set wwan0 mtu 4100') >= 0,
 	'nourb: parent MTU carries the urb size (4100)');
 
-// essential attribute missing: setup fails with clear error
-fx = fakefx.create();
+// essential attribute missing from a group that DOES exist: setup fails clearly
+fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi': true } });
 res = netlink.setup(fx, { netdev: 'wwan0', backend: 'none', dgram_size: 4096 });
 eq(res.ok, false, 'noattr: raw_ip missing is fatal');
 eq(res.error, 'raw_ip unavailable', 'noattr: error names the attribute');
+
+// no `qmi` group at all: a raw-IP-by-construction driver (mhi_net on PCIe/MHI).
+// There is no knob to set, so the datapath must come up rather than fail.
+fx = fakefx.create();
+res = netlink.setup(fx, { netdev: 'mhi_hwip0', backend: 'none', dgram_size: 4096 });
+eq(res.ok, true, 'mhi: no qmi sysfs group is not an error');
+eq(length(fx.matching('raw_ip')), 0, 'mhi: nothing written into a group that does not exist');
+ok(fx.action_index('link_set mhi_hwip0 up') > 0, 'mhi: datapath brought up');
+
+// ...and rmnet may still stack on it: pass_through is qmi_wwan-specific
+fx = fakefx.create({ present: { '/sys/module/rmnet': true } });
+eq(netlink.select_backend(fx, 'mhi_hwip0', 'auto', true), 'rmnet',
+	'mhi: rmnet selected without a pass_through knob');
+fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/add_mux': true } });
+eq(netlink.select_backend(fx, 'wwan0', 'rmnet', true), null,
+	'qmi_wwan without pass_through still cannot do rmnet');
+
+// --- MHI runtime PM pin ------------------------------------------------------
+//
+// The endpoint must never runtime-suspend: on the RM520N/BPi-R4 the resume
+// kills it beyond any software reset. Pin the endpoint AND its bridge.
+
+let PCI_EP = '/sys/devices/platform/soc/11280000.pcie/pci0003:00/0003:00:00.0/0003:01:00.0';
+
+fx = fakefx.create({ present: {
+	[PCI_EP + '/power/control']: true,
+	['/sys/devices/platform/soc/11280000.pcie/pci0003:00/0003:00:00.0/power/control']: true,
+} });
+fx.realpath = (p) => (p == '/sys/class/wwan/wwan0qmi0/device')
+	? PCI_EP + '/mhi0/wwan/wwan0' : null;
+
+eq(netlink.pin_runtime_pm(fx, '/dev/wwan0qmi0'), [ '0003:01:00.0', '0003:00:00.0' ],
+	'mhi: endpoint and bridge both pinned');
+ok(fx.action_index('write ' + PCI_EP + '/power/control on') >= 0,
+	'mhi: the endpoint knob is actually written');
+
+// a USB modem has no PCI ancestor — silent no-op, no writes at all
+fx = fakefx.create();
+eq(netlink.pin_runtime_pm(fx, '/dev/cdc-wdm0'), null, 'usb: nothing to pin');
+eq(length(fx.matching('power/control')), 0, 'usb: no runtime-pm writes');
+
+// wwan port whose parent chain carries no PCI node (a USB modem behind the
+// kernel wwan framework) — the climb must simply come up empty
+fx = fakefx.create();
+fx.realpath = (p) => '/sys/devices/platform/soc/usb@11200000/wwan/wwan0';
+eq(netlink.pin_runtime_pm(fx, '/dev/wwan0qmi0'), null, 'wwan-over-usb: nothing to pin');
 
 // --- plain raw-ip ------------------------------------------------------------
 
