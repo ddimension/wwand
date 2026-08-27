@@ -131,12 +131,27 @@ export function open(path, cbs)
 
 		txq = [];
 
-		if (hub._uhandle) {
-			hub._uhandle.delete();
-			hub._uhandle = null;
-		}
+		// Release the fd registration one loop iteration later, never inline.
+		// close() is reachable FROM the read handle's own callback (device
+		// gone), and deleting a uloop handle while uloop is still holding it
+		// for the duration of that call is a use-after-free. A 64-bit
+		// allocator absorbs the read that follows it; MIPS32 does not, and it
+		// surfaces as SIGSEGV inside libucode — field-reported on a ramips
+		// RUTM11, where `/etc/init.d/wwand restart` crashed the interpreter.
+		//
+		// Everything that makes the hub inert (the closed flag, the timer, the
+		// queue) has already happened above, so callers see a synchronous
+		// close either way.
+		let uh = hub._uhandle;
 
-		handle.close();
+		hub._uhandle = null;
+
+		uloop.timer(0, () => {
+			if (uh)
+				uh.delete();
+
+			handle.close();
+		});
 	};
 
 	hub._dispatch = function(dec) {
@@ -158,6 +173,11 @@ export function open(path, cbs)
 	};
 
 	hub._uhandle = uloop.handle(handle.fileno(), (events) => {
+		// a closed hub may still get one more readable event before the
+		// deferred delete above lands
+		if (hub.closed)
+			return;
+
 		while (true) {
 			let msg = handle.read();
 

@@ -110,7 +110,17 @@ eq(length(unhandled), 2, 'unregister: message now lands in on_unhandled');
 hub.close();
 eq(hub.send('after-close'), false, 'close: send refused');
 hub.close();
-eq(closed >= 1, true, 'close: native handle closed');
+
+// The fd registration is released one loop iteration later, never inline:
+// close() is reachable from the read handle's OWN callback (device gone), and
+// deleting a uloop handle while uloop still holds it is a use-after-free —
+// absorbed on 64-bit, SIGSEGV inside libucode on MIPS32. The hub is inert
+// immediately (send refused above); only the teardown is deferred.
+eq(closed, 0, 'close: the native handle is NOT closed inline');
+uloop.timer(1, () => uloop.end());
+uloop.run();
+eq(closed >= 1, true, 'close: native handle closed on the next loop iteration');
+eq(closed, 1, 'close: a second close() does not close the handle twice');
 
 hub2.close();
 uloop.done();

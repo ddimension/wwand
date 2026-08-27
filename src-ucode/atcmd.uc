@@ -403,6 +403,9 @@ export function open_transport(path, baud, log)
 	let data_cb = null;
 
 	let uhandle = uloop.handle(handle.fileno(), (events) => {
+		if (self.closed)
+			return;
+
 		while (true) {
 			let chunk = handle.read();
 
@@ -430,10 +433,20 @@ export function open_transport(path, baud, log)
 
 		self.closed = true;
 
-		if (uhandle)
-			uhandle.delete();
+		// Deferred for the same reason as the hub in transport.uc: close() is
+		// reachable from a command callback, which runs inside this handle's
+		// own uloop callback, and deleting the handle there frees something
+		// uloop is still using. Harmless on 64-bit, SIGSEGV on MIPS32.
+		let uh = uhandle;
 
-		handle.close();
+		uhandle = null;
+
+		uloop.timer(0, () => {
+			if (uh)
+				uh.delete();
+
+			handle.close();
+		});
 	};
 
 	return self;
