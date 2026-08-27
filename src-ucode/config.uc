@@ -46,16 +46,29 @@ function conn_fields(s)
 
 // The mux child's chosen NAME (what netifd claims). Explicit wwan0mN used as-is;
 // a bare netdev + `mux_id` derives <netdev>m<mux_id> (NEVER the bare netdev — it
-// would collide with the parent); no device -> given netdev, else 'wwan0'. null
-// => runtime re-derives from the real netdev. Shared by both interface parsers,
-// which must never drift.
+// would collide with the parent). null => runtime re-derives from the real
+// netdev. Shared by both interface parsers, which must never drift.
+//
+// It used to fall back to the literal 'wwan0' when no netdev was known — which
+// is the normal case for a modem bound by `path` or `serial`, since the netdev
+// only exists once the hardware is found. That guess names a child inside
+// ANOTHER device's namespace as soon as a box has a second modem: a GL-X3000
+// with a Huawei on qmi_wwan (netdev wwan0) and an RM520N on cdc_mbim (wwan1)
+// ended up with `wwan0m1@wwan1` — a child of wwan1 carrying wwan0's name, which
+// every parser then reads back as "mux child 1 of the Huawei". Not guessing is
+// strictly better: null is already defined to mean "re-derive at runtime", and
+// at runtime the real parent is known.
 function derive_mux_link(nd, device, mux_id, muxed, fallback_netdev)
 {
 	if (!muxed)
 		return null;
 
-	return (nd?.muxed ?? false) ? device
-		: sprintf('%sm%d', nd?.netdev ?? fallback_netdev ?? 'wwan0', mux_id);
+	if (nd?.muxed ?? false)
+		return device;
+
+	let parent = nd?.netdev ?? fallback_netdev;
+
+	return parent ? sprintf('%sm%d', parent, mux_id) : null;
 }
 
 export function modem_defaults(over)
