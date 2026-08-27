@@ -8,6 +8,7 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as uloop from 'uloop';
 import * as sim from 'wwand/sim.uc';
+import * as sim_plmn from 'wwand/sim_plmn.uc';
 import * as uimmod from 'wwand/codec/schema/uim.uc';
 
 uloop.init();
@@ -219,6 +220,33 @@ scenario('uim: no sim after poll exhaustion', (next) => {
 	sim.unlock(m, (err) => {
 		eq(err.blocked, true, 'uim-nosim: blocked');
 		eq(err.reason, 'no_sim', 'uim-nosim: reason');
+		// the verdict is remembered so EF reads stop asking an empty slot
+		eq(m._no_card, true, 'uim-nosim: empty slot recorded on the modem');
+
+		// ...and read_ef honours it without touching the UIM at all
+		let asked = 0;
+		let m2 = { _no_card: true, log_fn: () => null,
+			uim: { request: (...a) => { asked++; } } };
+		let got = 'unset';
+
+		sim_plmn.read_ef(m2, { file_id: 0x6F60, path: '' }, (v) => got = v);
+		eq(asked, 0, 'uim-nosim: read_ef sends nothing on an empty slot');
+		eq(got, null, 'uim-nosim: read_ef answers null');
+
+		next();
+	});
+});
+
+scenario('uim: a present card clears the empty-slot flag', (next) => {
+	let m = { timing: T, config: { pincode: '' }, _no_card: true, uim: mkclient({
+		GET_CARD_STATUS: { card_status: { cards: [
+			{ card_state: uimmod.CARD_STATE_PRESENT, applications: [
+				{ type: uimmod.APP_TYPE_USIM, state: uimmod.APP_STATE_READY,
+				  pin1_state: 4, pin1_retries: 0 } ] } ] } },
+	}, []) };
+
+	sim.unlock(m, () => {
+		eq(m._no_card, false, 'uim-card: flag cleared once a card is seen again');
 		next();
 	});
 });

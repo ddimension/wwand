@@ -395,6 +395,29 @@ export function install(self, o)
 		self.set_state('SIM_UNLOCK');
 		resolve_active_sim(() => sim.unlock(self, (err, status) => {
 			if (err?.blocked) {
+				// an EMPTY slot has no card to identify: reading EF-ICCID and
+				// EF-IMSI off it just yields two UIM errors and a `sim blocked:
+				// imsi ?, iccid ?` that names neither the card nor the reason.
+				// Say what is actually wrong instead. (BPi-R4 bring-up with no
+				// SIM inserted — the log read like a fault.)
+				if (err.reason == 'no_sim') {
+					log('err', 'no SIM card present');
+					sim_block(err);
+					return;
+				}
+
+				// card present but unusable — name the modem's own reason
+				// rather than reading EFs off a card that answers nothing.
+				if (err.reason == 'card_error') {
+					log('err', sprintf('SIM card not responding: %s%s',
+						err.card_error ?? 'unknown',
+						err.card_error_code == 3
+							? ' — check the card is the right way round and fully seated'
+							: ''));
+					sim_block(err);
+					return;
+				}
+
 				// identify the card before going terminal so the log says *which*
 				// SIM tripped the PIN guard. EF-IMSI is PIN-protected (may read null
 				// on a locked card); the MF-level ICCID is readable regardless.

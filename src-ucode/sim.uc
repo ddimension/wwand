@@ -110,8 +110,33 @@ function unlock_uim(modem, cb, tries)
 				return;
 			}
 
+			// remember it: every EF read on an unusable slot answers err 48,
+			// and the LuCI status poll asks for four PLMN files a time
+			// (6F60/61/62/7B) — four warnings per poll for a slot we already
+			// know we cannot read.
+			modem._no_card = true;
+
+			// "no application" is not the same as "no card". A card that is
+			// physically there but never answers sits in CARD_STATE_ERROR with
+			// an error code that says why — `no ATR received` is what a SIM
+			// inserted the wrong way round looks like, and reporting that as
+			// `no_sim` sends people hunting for the wrong fault (it did:
+			// BPi-R4 bring-up, hours spent on the slot wiring and the modem).
+			for (let card in (data.card_status?.cards ?? [])) {
+				if (card.card_state != uimmod.CARD_STATE_ERROR)
+					continue;
+
+				let why = uimmod.CARD_ERRORS[sprintf('%d', card.error_code)]
+					?? sprintf('code %d', card.error_code);
+
+				return cb({ blocked: true, reason: 'card_error',
+				            card_error: why, card_error_code: card.error_code });
+			}
+
 			return cb({ blocked: true, reason: 'no_sim' });
 		}
+
+		modem._no_card = false;
 
 		let app = found.app;
 

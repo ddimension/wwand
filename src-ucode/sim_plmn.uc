@@ -23,6 +23,14 @@ const arr_to_hex = hexmod.arr_to_hex;
 
 export function read_ef(modem, ef, cb, session_type)
 {
+	// an empty slot rejects every EF read (err 48) and each one is retried on
+	// the card session first, so a poll of the four PLMN files costs eight
+	// round trips and four warnings. GET_CARD_STATUS already told us there is
+	// no card; the flag is (re)set on every unlock attempt, so it cannot go
+	// stale behind an inserted SIM.
+	if (modem._no_card)
+		return cb(null);
+
 	session_type = session_type ?? uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING;
 
 	// optional EF reads (PLMN lists, identity) that a modem rejects with

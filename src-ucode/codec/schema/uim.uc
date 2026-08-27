@@ -10,6 +10,19 @@ export const CARD_STATE_ABSENT = 0;
 export const CARD_STATE_PRESENT = 1;
 export const CARD_STATE_ERROR = 2;
 
+// QmiUimCardError — why a card sits in CARD_STATE_ERROR. Worth naming: the
+// difference between "slot empty" and "card in backwards" is one of these.
+export const CARD_ERRORS = {
+	'0': 'unknown',
+	'1': 'power down',
+	'2': 'poll error',
+	'3': 'no ATR received',
+	'4': 'voltage mismatch',
+	'5': 'parity error',
+	'6': 'unknown, possibly removed',
+	'7': 'technical problem',
+};
+
 // QmiUimCardApplicationState
 export const APP_STATE_UNKNOWN = 0;
 export const APP_STATE_DETECTED = 1;
