@@ -191,6 +191,81 @@ fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/add_mux': true } });
 eq(netlink.select_backend(fx, 'wwan0', 'rmnet', true), null,
 	'qmi_wwan without pass_through still cannot do rmnet');
 
+// --- stale mux children ------------------------------------------------------
+//
+// Nothing used to remove mux children when the configuration stopped asking for
+// them. On a BPi-R4 that left `wwand0@mhi_hwip0` and `wwand1@mhi_hwip0`
+// attached after the muxed interfaces were deleted: the parent stayed pinned at
+// the rmnet MTU (link_set mtu 1500 -> EPERM, a device with rmnet children
+// refuses it) and the name the next non-mux setup wanted for its L3 device was
+// already taken by an orphan.
+//
+// Identified by iflink, not by devtype: a real rmnet child's uevent carries
+// only INTERFACE and IFINDEX (checked on hardware), so a devtype filter would
+// pass here against an invented fixture and match nothing in the field.
+
+fx = fakefx.create({
+	present: {
+		'/sys/class/net/wwan0': true,
+		'/sys/class/net/wwan0m1': true,
+		'/sys/class/net/wwan0m2': true,
+		'/sys/class/net/eth0.7': true,
+	},
+	files: {
+		'/sys/class/net/wwan0/ifindex':   '10
+',
+		'/sys/class/net/wwan0m1/ifindex': '13
+',
+		'/sys/class/net/wwan0m1/iflink':  '10
+',
+		'/sys/class/net/wwan0m2/ifindex': '14
+',
+		'/sys/class/net/wwan0m2/iflink':  '10
+',
+		// somebody else's vlan on the same parent — not ours to remove
+		'/sys/class/net/eth0.7/ifindex':  '15
+',
+		'/sys/class/net/eth0.7/iflink':   '3
+',
+		'/sys/class/net/eth0.7/uevent':   "DEVTYPE=vlan
+",
+	},
+});
+
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'none', dgram_size: 4096 });
+eq(res.ok, true, 'prune: plain raw-ip setup succeeds');
+ok(fx.action_index('link_del wwan0m1') >= 0, 'prune: a child the config dropped is removed');
+ok(fx.action_index('link_del wwan0m2') >= 0, 'prune: the second one too');
+eq(fx.action_index('link_del eth0.7'), -1, 'prune: a link stacked on another parent is left alone');
+
+// a child the config still wants survives
+fx = fakefx.create({
+	present: {
+		'/sys/class/net/wwan0': true,
+		'/sys/class/net/wwan0m1': true,
+		'/sys/class/net/wwan0m2': true,
+		'/sys/class/net/wwan0/qmi/raw_ip': true,
+		'/sys/module/rmnet': true,
+	},
+	files: {
+		'/sys/class/net/wwan0/ifindex':   '10
+',
+		'/sys/class/net/wwan0m1/ifindex': '13
+',
+		'/sys/class/net/wwan0m1/iflink':  '10
+',
+		'/sys/class/net/wwan0m2/ifindex': '14
+',
+		'/sys/class/net/wwan0m2/iflink':  '10
+',
+	},
+});
+
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'rmnet',
+	mux: [ { id: 1 } ], dgram_size: 4096 });
+eq(fx.action_index('link_del wwan0m1'), -1, 'prune: the child still configured is kept');
+ok(fx.action_index('link_del wwan0m2') >= 0, 'prune: the one dropped from the config goes');
+
 // --- MHI runtime PM pin ------------------------------------------------------
 //
 // The endpoint must never runtime-suspend: on the RM520N/BPi-R4 the resume

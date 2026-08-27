@@ -47,6 +47,13 @@ export function create(opts)
 		return true;
 	};
 
+	self.link_del = function(name) {
+		push(self.actions, sprintf('link_del %s', name));
+		delete self.present[sprintf('/sys/class/net/%s', name)];
+
+		return true;
+	};
+
 	self.exists = function(path) {
 		if (self.present[path] == true)
 			return true;

@@ -138,6 +138,22 @@ export function default_fx(log)
 		return rtnl_request(0, payload);
 	};
 
+	// remove a link we created. rtnl_request() is RTM_NEWLINK-only, so this
+	// issues its own request.
+	self.link_del = (dev) => {
+		rtnl = rtnl ?? require('rtnl');
+
+		let r = rtnl.request(rtnl['const'].RTM_DELLINK, 0, { dev: dev });
+
+		if (r === false) {
+			self.last_error = rtnl.error();
+
+			return false;
+		}
+
+		return true;
+	};
+
 	// 802.1q VLAN sub-device (cdc_mbim session mux: VLAN id == session id)
 	self.link_add_vlan = (name, parent, vid) => {
 		rtnl = rtnl ?? require('rtnl');
@@ -301,6 +317,54 @@ export function pin_runtime_pm(fx, device)
 
 	return length(pinned) ? pinned : null;
 };
+
+// Remove mux children of `netdev` that the CURRENT configuration does not ask
+// for. Nothing did this before, so a config that dropped multiplexing left its
+// children behind: on a BPi-R4, deleting the muxed interfaces left
+// `wwand0@mhi_hwip0` and `wwand1@mhi_hwip0` attached, the parent stuck at the
+// rmnet MTU 1504 (`link_set mhi_hwip0 mtu 1500` -> EPERM, a device with rmnet
+// children refuses it), and — worst — the name the next non-mux setup wants for
+// its L3 device already taken by an orphan.
+//
+// Identified by `iflink` alone: sysfs does NOT expose the rtnl link kind. A
+// real rmnet child's uevent carries only INTERFACE and IFINDEX — no DEVTYPE —
+// so a devtype filter matches nothing on hardware (it did pass against a
+// fixture that invented one, which is why this note is here). Stacking is the
+// signal, and it is enough: wwand owns the link layer of a modem datapath
+// netdev by design, so a stacked child of it that the config does not name is
+// ours to remove — rmnet on the QMI path, VLAN on the cdc_mbim session path.
+function prune_mux_children(fx, netdev, wanted)
+{
+	if (!fx.link_del)
+		return;
+
+	let ifindex = trim(fx.read(sprintf('/sys/class/net/%s/ifindex', netdev)) ?? '');
+
+	if (!length(ifindex))
+		return;
+
+	let keep = {};
+
+	for (let w in (wanted ?? []))
+		keep[w] = true;
+
+	for (let path in (fx.glob('/sys/class/net/*') ?? [])) {
+		let name = substr(path, rindex(path, '/') + 1);
+
+		if (name == netdev || keep[name])
+			continue;
+
+		if (trim(fx.read(sprintf('%s/iflink', path)) ?? '') != ifindex)
+			continue;
+
+		if (fx.link_del(name))
+			fx.log('notice', sprintf('datapath: removed stale mux child %s of %s',
+				name, netdev));
+		else
+			fx.log('warn', sprintf('datapath: could not remove stale mux child %s%s',
+				name, fx.last_error ? sprintf(': %s', fx.last_error) : ''));
+	}
+}
 
 // decide the mux backend for a modem
 //   cfg_mux: 'auto' | 'rmnet' | 'qmimux' | 'none'
@@ -481,6 +545,12 @@ export function setup(fx, opts)
 	let netdev = opts.netdev;
 	let backend = opts.backend ?? 'none';
 	let mux = opts.mux ?? [];
+
+	// Drop children the current config no longer asks for, BEFORE any naming
+	// work: a stale child may be sitting on the very name this setup wants,
+	// and it also pins the parent's MTU.
+	prune_mux_children(fx, netdev,
+		map(mux, (e) => e.name ?? sprintf('%sm%d', netdev, e.id)));
 
 	// A mux child cannot share the parent's name. This happens when the parent
 	// still carries a stable "wwandN" name from a previous NON-mux config (the
