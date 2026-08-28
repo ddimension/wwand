@@ -913,6 +913,32 @@ export function close_at(self)
 //   o = { at_opts?, log, drain_interval?, set_drain_timer, next, reopen_next?,
 //         base_override? — explicit sysfs USB-device base for tty discovery
 //         (NCM: the datapath netdev's USB parent; there is no cdc-wdm anchor) }
+// atcmd_mbim lives in wwand-mbim, because it needs that package's MBIM client
+// and codec. An MHI box is exactly the case where it is wanted and may be
+// absent: such a modem installs wwand-qmi + wwand-mhi, and nothing there pulls
+// wwand-mbim in. A bare require() would then throw out of open_at.
+//
+// Same shape as daemon.uc's lazy_backend(): try once, remember the failure,
+// report the capability as absent rather than crashing.
+let _at_mbim = null, _at_mbim_failed = false;
+
+let load_at_mbim = () => {
+	if (_at_mbim_failed)
+		return null;
+
+	if (_at_mbim == null) {
+		try {
+			_at_mbim = require('wwand.atcmd_mbim_lazy');
+		}
+		catch (e) {
+			_at_mbim_failed = true;
+			_at_mbim = null;
+		}
+	}
+
+	return _at_mbim;
+};
+
 // shared tail: wire the engine on an AT-over-MBIM transport, whichever way it
 // was obtained, and run the same init commands the tty path runs. There is
 // deliberately no second (telemetry) channel — the pipe is request/response
@@ -981,11 +1007,21 @@ function open_at_over_mbim(self, o, fxi, log)
 	// backend already owns. Opening a second one on the same node is not an
 	// option: MBIM_OPEN resets the function and would drop a live data
 	// session. (HW: a GL-X3000 runs an RM520N this way, connected for days.)
+	// injectable like open_transport/open_mbim_at: the module is always present
+	// in a source tree, so absence can only be exercised through a seam
+	let load = o.at_opts?.load_at_mbim ?? load_at_mbim;
+
 	if (self.mbim) {
-		return require('wwand.atcmd_mbim_lazy')
-			.attach(self.mbim, self.device, { log: log }, (tr) => tr
-				? finish_mbim_at(self, o, tr, self.device, log)
-				: o.next());
+		let mod = load();
+
+		if (!mod) {
+			log('info', 'no AT port found (AT over MBIM needs the wwand-mbim package)');
+			return o.next();
+		}
+
+		return mod.attach(self.mbim, self.device, { log: log }, (tr) => tr
+			? finish_mbim_at(self, o, tr, self.device, log)
+			: o.next());
 	}
 
 	// Otherwise the modem is driven by some other backend and its MBIM channel
@@ -1003,8 +1039,9 @@ function open_at_over_mbim(self, o, fxi, log)
 		// via the plain-script shim: require() cannot load an ES module,
 		// and importing it at top level would drag the MBIM codec into the
 		// backend-neutral base package.
-		let mod = require('wwand.atcmd_mbim_lazy');
-		return mod.open(path, oo, cb);
+		let mod = load();
+
+		return mod ? mod.open(path, oo, cb) : cb(null);
 	});
 
 	log('info', sprintf('no AT tty — trying AT over MBIM on %s', sibling));

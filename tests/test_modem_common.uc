@@ -746,4 +746,27 @@ uc_self._esim_op = false;
 uc_h('+CEREG: 5,"718B","01D8A467",13,0,0');
 eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 
+// wwand-mbim absent: atcmd_mbim lives there (it needs that package's MBIM
+// client and codec), and an MHI box installs wwand-qmi + wwand-mhi without it.
+// A bare require() threw straight out of open_at; the capability must simply be
+// reported absent instead.
+(function() {
+	let modem = { device: '/dev/wwan0qmi0', config: {}, info: {}, mbim: {} };
+	let reached = false, logs = [];
+
+	mc.open_at(modem, {
+		at_opts: {
+			fx: fake_fx('none', []),          // no tty at all -> the MBIM path
+			open_transport: () => null,
+			load_at_mbim: () => null,         // wwand-mbim not installed
+		},
+		log: (level, msg) => push(logs, msg),
+		set_drain_timer: () => null,
+		next: () => { reached = true; },
+	});
+
+	ok(reached, 'no wwand-mbim: open_at still completes instead of throwing');
+	eq(modem.at, null, 'no wwand-mbim: no AT engine is left behind');
+})();
+
 done('test_modem_common');
