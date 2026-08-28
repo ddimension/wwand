@@ -48,12 +48,46 @@ measured on the packaged artifacts). `#30185` stays at CHANGES_REQUESTED until
 they are resolved. `~/.local/bin/wwand-pr-status` reports this in ~1.4 s from
 cache and exits 1 while anything is genuinely unanswered.
 
-**1.5.0 is the first release shipping bytecode.** The polarity is now an opt-out
-(`CONFIG_WWAND_UCODE_SOURCE`), so a symbol lost to defconfig lands on the
-intended behaviour instead of silently reverting it. The remaining unknown is
-whether the SDK's per-package mode can build `ucode/host`; verification so far
-is from a buildroot. If it cannot, it now fails the build loudly rather than
-shipping source while reporting success.
+**Bytecode ships on snapshot only — and that is correct, not a defect.**
+Measured on the published r45: the snapshot package carries bytecode
+(`#!/usr/bin/env ucode\n\x1bucb`, 175 KB), the openwrt-25.12 one carries source
+(`// SPDX-…`, 266 KB). Two earlier claims here were wrong and are corrected:
+this is not "the first release shipping bytecode" without qualification, and a
+failure does NOT surface as a loud build error — the cmake capability probe
+falls back to source on purpose, which is why the run is green.
+
+The cause is exact. 25.12 ships ucode 2026.01.16, snapshot 2026.07.09, and the
+older one does not know the `-cmodule` flag at all:
+
+    $ ucode -s -cmodule,dynlink=fs -o out probe.uc      # 25.12
+    Unrecognized -c flag "module", ignoring
+    Syntax error: Exports may only appear at top level of a module
+
+It ignores the flag, compiles the file as a program, and `export` is illegal
+there — the syntax error is a consequence, not the cause. `ucode/host` builds
+fine and the dependency resolves; nothing is broken.
+
+There is no workaround, which was checked rather than assumed:
+
+- A PROGRAM with `import` does compile on 25.12 (`-cdynlink=fs`, rc=0, and the
+  result runs), so `/usr/sbin/wwand` and `wwandctl` could be bytecode there.
+  Not worth taking: the win is the ~45-file module tree (the 41 ms -> 5 ms in
+  the Kconfig help is "for the core imports"), while the interpreter-version
+  coupling arrives in full the moment any part is bytecode.
+- Compiling the modules elsewhere and merely SHIPPING them does not work
+  either: the 25.12 interpreter cannot LOAD a bytecode module. It reads the
+  file as source and stops at the magic (`Unexpected character`, byte 1), with
+  or without an interpreter line. Producing and consuming precompiled modules
+  evidently arrived together with `-cmodule`.
+
+So this needs no code: 25.12 flips to bytecode by itself once its ucode carries
+the flag.
+
+**ucode bytecode is NOT architecture-specific.** A module taken from the
+published aarch64 snapshot package loaded in an x86-64 interpreter and exposed
+its ten exports. The binding constraint is the format version alone — which is
+what the init-script guard and the Makefile note are about, and the reason
+those speak of the interpreter rather than the target.
 
 ## PCIe/MHI bring-up on a BananaPi BPi-R4 (2026-08-26)
 
