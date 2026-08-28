@@ -32,9 +32,17 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   imports resolve at runtime via the search path); `-s` keeps the bytecode
   relocatable; a typo'd import is still a compile error. **Graceful fallback:** a
   configure-time capability probe checks the host ucode can actually emit a
-  bytecode module with these flags — an older/absent ucode (e.g. openwrt-25.12
-  ships an older ucode than snapshot) DOES NOT fail the build, it ships the
-  ucode SOURCE instead (functional, no bytecode start-up win). Dev opt-out:
+  bytecode module with these flags — an older/absent ucode DOES NOT fail the
+  build, it ships the ucode SOURCE instead (functional, no bytecode start-up
+  win). That is not hypothetical and not a defect: **openwrt-25.12 ships source,
+  snapshot ships bytecode**, because 25.12's ucode (2026.01.16) does not know
+  `-cmodule` at all — it ignores the flag, compiles the file as a program, and
+  `export` is illegal there. Nor is there a way around it: that interpreter
+  cannot even LOAD a bytecode module (it reads the file as source and stops at
+  the magic), so producing them elsewhere does not help. It flips by itself once
+  the branch carries a newer ucode. Note the coupling is to the ucode VERSION,
+  not the target: bytecode is architecture-independent (a module from the
+  aarch64 package loads in an x86-64 interpreter). Dev opt-out:
   `CONFIG_WWAND_UCODE_SOURCE` (feed menuconfig) / `-DUCODE_PRECOMPILE=OFF`.
   **Invariants (configure fails otherwise): imports namespaced
   (`wwand.codec.tlv`), NEVER relative; no hyphens in module paths (hence
