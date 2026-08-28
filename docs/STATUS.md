@@ -128,6 +128,15 @@ and `AT+QCCID` answers `CME 13`. The same card works in another device, and
 another user runs exactly this modem on SIM1 successfully — so it is neither the
 card nor the design, but this board's SIM1 path.
 
+Two things that look like the answer and are not. A BPi-R4 write-up
+(github.com/Phwatang-Blog/BPIR4-with-RM520NGLAA) reports that the board very
+easily fails to power the SIM1 slot and that a TRUE cold boot — mains removed,
+not `reboot` — recovers it; every test here was already a cold boot with the
+power pulled, so that is not it. The same write-up warns that the RM520N-GLAP
+carries no USB at all, unlike the GLAA: this board's modem reports
+`RM520NGLAPR01A04M4G`, which is why it never enumerates over USB and why MHI is
+the only path to it. That one is worth knowing, but it does not touch the SIM.
+
 Consequence for coverage: everything up to and including the datapath is
 HW-validated on MHI (port selection, `/dev` naming, `mhi_net` netdev discovery,
 the absent `qmi` sysfs group, QMAP + rmnet with two contexts, uplink
