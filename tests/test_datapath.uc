@@ -577,6 +577,30 @@ netlink.setup(fakefx.create({ present: vendor_caps }), {
 
 eq(pruned, [ [ 'wwan0', [ 'wwand0' ] ] ], 'plugin: own prune() used when provided');
 
+// the pre() hook: the backend's own driver-format switch, before the urb/MTU
+// work. rmnet's pass_through goes through it (the built-ins use the same
+// contract as an add-on), and a plugin can fail the whole setup from there.
+let prefx = fakefx.create({ present: vendor_caps });
+res = netlink.setup(prefx, {
+	netdev: 'wwan0', backend: 'vendorx', dgram_size: 4096,
+	plugins: { vendorx: { ...plug, pre: () => 'vendor knob missing' } },
+	mux: [ { id: 1, name: 'wwand0' } ],
+});
+eq(res, { ok: false, error: 'vendor knob missing' }, 'pre: a string aborts setup with it');
+eq(prefx.action_index('link_set wwan0 mtu 4100'), -1, 'pre: nothing after it ran');
+
+// the built-in rmnet takes the same route for pass_through
+let ptfx = fakefx.create({ present: caps_rmnet });
+netlink.setup(ptfx, { netdev: 'wwan0', backend: 'rmnet',
+	mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096 });
+ok(ptfx.action_index('write /sys/class/net/wwan0/qmi/pass_through Y') > 0,
+	'pre: rmnet still writes pass_through (through the same hook)');
+
+// an add-on cannot shadow a built-in name
+eq(netlink.select_backend(fakefx.create({ present: caps_rmnet }), 'wwan0', 'rmnet', true,
+	{ rmnet: { links: () => [], probe: () => false } }), 'rmnet',
+	'plugin: a built-in name resolves to the built-in, not to an add-on');
+
 // built-in names ignore a passed plugin entirely
 eq(netlink.builtin_mux('rmnet'), true, 'builtin_mux: rmnet');
 eq(netlink.builtin_mux('vendorx'), false, 'builtin_mux: a plugin name is not built-in');

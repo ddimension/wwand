@@ -215,10 +215,21 @@ return {
     // children by iflink, which covers anything that is a real netdev child.
     prune: (fx, netdev, wanted) => { /* … */ },
 
+    // optional: your own driver-format switch, run before the urb/MTU work —
+    // this is where the built-in rmnet writes qmi_wwan's pass_through. Return
+    // true, or an error string to fail the setup with.
+    pre: (fx, ctx) => true,
+
     // optional: opt into the rmnet-style uplink aggregation call
     tx_aggr: true,
 };
 ```
+
+The two built-in datapaths are entries in **this same table** (`BUILTIN` in
+`netlink.uc`), not a private shortcut beside it — so the path your package takes
+is the one every install exercises, rather than a seam only third parties ever
+touch. A built-in name always resolves to the built-in; an add-on cannot shadow
+`rmnet`.
 
 `links(fx, ctx)` is the only part that is yours. `ctx` carries `netdev` (the
 parent — possibly already renamed, use this one), `sys`

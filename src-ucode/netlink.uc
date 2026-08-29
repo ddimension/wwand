@@ -29,7 +29,10 @@ export const RMNET_EGRESS_CKSUMV5 = 0x20;
 
 // --- datapath plugins --------------------------------------------------------
 //
-// wwand ships two QMI mux datapaths (rmnet, qmimux). A third party can add one
+// wwand ships two QMI mux datapaths (rmnet, qmimux), and they are entries in
+// this same interface (see BUILTIN further down) rather than a private shortcut
+// beside it — so the path an add-on takes is the path every install exercises,
+// instead of a seam only third parties ever touch. A third party can add one
 // — a vendor driver with its own mux mechanism — WITHOUT patching wwand: an
 // add-on package ships `wwand/datapath_<name>.uc`, a require()-able plain script
 // that RETURNS its implementation. The daemon require()s it when a modem's
@@ -47,6 +50,11 @@ export const RMNET_EGRESS_CKSUMV5 = 0x20;
 //   // wwand/datapath_vendorx.uc
 //   'use strict';
 //   return {
+//       // optional: your own driver-format switch, run before the urb/MTU
+//       // work — this is where the built-in rmnet writes qmi_wwan's
+//       // pass_through. Return true, or an error string to fail setup with.
+//       pre: (fx, ctx) => true,
+//
 //       // Does this box belong to me? A plugin that answers yes here is
 //       // preferred over the built-ins under `option mux 'auto'`, so the probe
 //       // IS the contract — make it specific. Omit probe entirely to be
@@ -86,12 +94,6 @@ export const RMNET_EGRESS_CKSUMV5 = 0x20;
 // fits must be asked for by name. Should several probes match, the first by name
 // wins and the others are named in the log; the choice is logged at notice
 // either way, and status reports the datapath that actually came up.
-
-// mux modes this module implements itself (everything else needs a plugin)
-export function builtin_mux(name)
-{
-	return name == 'auto' || name == 'none' || name == 'rmnet' || name == 'qmimux';
-};
 
 // a plugin object is only usable if it can actually build the links
 export function valid_plugin(impl)
@@ -440,73 +442,6 @@ function prune_mux_children(fx, netdev, wanted)
 
 // decide the mux backend for a modem
 //   cfg_mux: 'auto' | 'rmnet' | 'qmimux' | 'none'
-// `plugins` is a name -> implementation object IN PREFERENCE ORDER (ucode keeps
-// insertion order; the daemon inserts by declared `auto` priority). `info`
-// carries what the caller knows about the modem, currently { model }.
-export function select_backend(fx, netdev, cfg_mux, want_mux, plugins, info)
-{
-	if (!want_mux || cfg_mux == 'none')
-		return 'none';
-
-	// named outright: that one or nothing — never a quiet substitution
-	if (!builtin_mux(cfg_mux)) {
-		let plugin = plugins?.[cfg_mux];
-
-		if (!valid_plugin(plugin))
-			return null;   // caller reports the missing package
-
-		return (!plugin.probe || plugin.probe(fx, netdev, info)) ? cfg_mux : null;
-	}
-
-	// 'auto': a plugin that recognises the box comes before the built-ins (see
-	// the plugin comment above). No probe = no offer.
-	if (cfg_mux == 'auto') {
-		let matched = [];
-
-		for (let name, impl in (plugins ?? {}))
-			if (valid_plugin(impl) && impl.probe && impl.probe(fx, netdev, info))
-				push(matched, name);
-
-		if (length(matched)) {
-			// deterministic, and a second match is a packaging mistake worth
-			// seeing rather than a coin flip
-			sort(matched);
-
-			if (length(matched) > 1)
-				fx.log('warn', sprintf('datapath: %d plugins claim this device (%s) — using %s; name one with `option mux` to be sure',
-					length(matched), join(', ', matched), matched[0]));
-
-			fx.log('notice', sprintf('datapath: %s selected by probe (over the built-ins)', matched[0]));
-
-			return matched[0];
-		}
-	}
-
-	// pass_through is qmi_wwan's way of handing raw QMAP frames to rmnet.
-	// A driver without the `qmi` group never parses the frames itself, so it
-	// needs no such switch — rmnet stacks on it directly (mhi_net/MHI).
-	let no_qmi_group = !fx.exists(sprintf('/sys/class/net/%s/qmi', netdev));
-	let has_passthrough = no_qmi_group ||
-		fx.exists(sprintf('/sys/class/net/%s/qmi/pass_through', netdev));
-	let has_rmnet = fx.exists('/sys/module/rmnet');
-	let has_add_mux = fx.exists(sprintf('/sys/class/net/%s/qmi/add_mux', netdev));
-
-	if (cfg_mux == 'rmnet')
-		return (has_passthrough && has_rmnet) ? 'rmnet' : null;
-
-	if (cfg_mux == 'qmimux')
-		return has_add_mux ? 'qmimux' : null;
-
-	// auto: prefer rmnet pass-through (preserved preference)
-	if (has_passthrough && has_rmnet)
-		return 'rmnet';
-
-	if (has_add_mux)
-		return 'qmimux';
-
-	return null;
-};
-
 // resolve a mux child / raw-ip MTU: a configured value above the IPv4 minimum
 // (576) is used as-is, otherwise 1500. An explicitly configured but out-of-range
 // value is logged (not silently swallowed) so a typo is visible; an unset value
@@ -628,6 +563,110 @@ function setup_qmimux_links(fx, netdev, sys, mux, urb_size, mux_mtus)
 	return mux_devs;
 }
 
+// pass_through is qmi_wwan's way of handing raw QMAP frames to rmnet. A driver
+// without the `qmi` group never parses the frames itself, so it needs no such
+// switch — rmnet stacks on it directly (mhi_net/MHI).
+function rmnet_usable(fx, netdev)
+{
+	let no_qmi_group = !fx.exists(sprintf('/sys/class/net/%s/qmi', netdev));
+
+	return (no_qmi_group ||
+	        fx.exists(sprintf('/sys/class/net/%s/qmi/pass_through', netdev))) &&
+	       fx.exists('/sys/module/rmnet');
+}
+
+// The built-in datapaths, expressed through the SAME contract as an add-on
+// (see the plugin comment at the top of this file). Deliberately not a private
+// shortcut next to a public plugin path: one code path means the extension
+// point is exercised by every install rather than by third parties only — the
+// way an unused seam quietly stops working.
+const BUILTIN = {
+	rmnet: {
+		probe: (fx, netdev) => rmnet_usable(fx, netdev),
+		// qmi_wwan hands the raw QMAP frames to rmnet only with this set; a
+		// driver without the `qmi` group has nothing to switch (mhi_net/MHI)
+		pre: (fx, ctx) => {
+			if (!fx.exists(ctx.sys))
+				return true;
+
+			return write_attr(fx, sprintf('%s/pass_through', ctx.sys), 'Y', 'driver format')
+				? true : 'pass_through unavailable';
+		},
+		links: (fx, ctx) => setup_rmnet_links(fx, ctx.netdev, ctx.mux, ctx.v5,
+			ctx.urb_size, ctx.mux_mtus),
+		// mainline rmnet is the one with the ethtool egress-coalesce knob
+		tx_aggr: true,
+	},
+	qmimux: {
+		probe: (fx, netdev) => fx.exists(sprintf('/sys/class/net/%s/qmi/add_mux', netdev)),
+		links: (fx, ctx) => setup_qmimux_links(fx, ctx.netdev, ctx.sys, ctx.mux,
+			ctx.urb_size, ctx.mux_mtus),
+	},
+};
+
+// preference among the built-ins under 'auto' (add-ons are tried before these)
+const BUILTIN_ORDER = [ 'rmnet', 'qmimux' ];
+
+// mux modes this module implements itself (everything else needs a plugin)
+export function builtin_mux(name)
+{
+	return name == 'auto' || name == 'none' || exists(BUILTIN, name);
+};
+
+// `plugins` is a name -> implementation object IN PREFERENCE ORDER (ucode keeps
+// insertion order; the daemon inserts by declared `auto` priority). `info`
+// carries what the caller knows about the modem, currently { model }.
+export function select_backend(fx, netdev, cfg_mux, want_mux, plugins, info)
+{
+	if (!want_mux || cfg_mux == 'none')
+		return 'none';
+
+	// named outright: that one or nothing — never a quiet substitution. Built-in
+	// or add-on makes no difference here; both answer the same probe().
+	if (cfg_mux != 'auto') {
+		let impl = BUILTIN[cfg_mux] ?? plugins?.[cfg_mux];
+
+		if (!valid_plugin(impl))
+			return null;   // caller reports the missing package
+
+		return (!impl.probe || impl.probe(fx, netdev, info)) ? cfg_mux : null;
+	}
+
+	// 'auto': an add-on that recognises the box comes before the built-ins (see
+	// the plugin comment above). No probe = no offer.
+	{
+		let matched = [];
+
+		for (let name, impl in (plugins ?? {}))
+			if (!BUILTIN[name] && valid_plugin(impl) && impl.probe &&
+			    impl.probe(fx, netdev, info))
+				push(matched, name);
+
+		if (length(matched)) {
+			// deterministic, and a second match is a packaging mistake worth
+			// seeing rather than a coin flip
+			sort(matched);
+
+			if (length(matched) > 1)
+				fx.log('warn', sprintf('datapath: %d plugins claim this device (%s) — using %s; name one with `option mux` to be sure',
+					length(matched), join(', ', matched), matched[0]));
+
+			fx.log('notice', sprintf('datapath: %s selected by probe (over the built-ins)', matched[0]));
+
+			return matched[0];
+		}
+	}
+
+	// then the built-ins, in their own preference order (rmnet pass-through
+	// first — preserved from years of field use, not alphabetical luck)
+	for (let name in BUILTIN_ORDER)
+		if (BUILTIN[name].probe(fx, netdev, info))
+			return name;
+
+	return null;
+};
+
+
 // lowest free `<prefix>N` netdev name (prefix defaults to 'wwan'), e.g. the raw
 // kernel-style name to move a stale-renamed parent back to. (Declared before
 // setup() — ucode resolves module-level names textually, no hoisting.)
@@ -654,9 +693,19 @@ export function setup(fx, opts)
 	// Drop children the current config no longer asks for, BEFORE any naming
 	// work: a stale child may be sitting on the very name this setup wants,
 	// and it also pins the parent's MTU.
+	// built-in or add-on: one lookup, one contract (see the plugin comment at
+	// the top). 'none' is the only backend that has no implementation — it is
+	// plain raw-ip, not a mux.
+	let impl = BUILTIN[backend] ?? opts.plugins?.[backend];
+
+	if (!valid_plugin(impl))
+		impl = null;
+
+	if (backend != 'none' && !impl)
+		return { ok: false, error: sprintf('no implementation for datapath backend %J', backend) };
+
 	let wanted = map(mux, (e) => e.name ?? sprintf('%sm%d', netdev, e.id));
-	let prune = (type(opts.plugins?.[backend]?.prune) == 'function' && !builtin_mux(backend))
-		? opts.plugins[backend].prune : prune_mux_children;
+	let prune = (type(impl?.prune) == 'function') ? impl.prune : prune_mux_children;
 
 	prune(fx, netdev, wanted);
 
@@ -714,14 +763,23 @@ export function setup(fx, opts)
 	if (fx.exists(sys)) {
 		if (!write_attr(fx, sprintf('%s/raw_ip', sys), 'Y', 'driver format'))
 			return { ok: false, error: 'raw_ip unavailable' };
-
-		if (backend == 'rmnet' &&
-		    !write_attr(fx, sprintf('%s/pass_through', sys), 'Y', 'driver format'))
-			return { ok: false, error: 'pass_through unavailable' };
 	}
 	else {
 		fx.log('info', sprintf('datapath: %s has no qmi sysfs group — raw-IP driver, link-layer format left to it',
 			netdev));
+	}
+
+	// the backend's own driver-format switch, before the urb/MTU work: rmnet
+	// needs qmi_wwan's pass_through here, and a vendor datapath is likely to
+	// need a knob of its own at exactly this point. Returns true, or the error
+	// string to fail the whole setup with.
+	if (impl?.pre) {
+		let perr = impl.pre(fx, { netdev: netdev, sys: sys, opts: opts });
+
+		if (perr !== true)
+			return { ok: false,
+			         error: (type(perr) == 'string') ? perr
+			                : sprintf('%s: driver format not available', backend) };
 	}
 
 	// rx urb size: the sysfs attribute only exists on kernels carrying the
@@ -735,27 +793,18 @@ export function setup(fx, opts)
 			write_attr(fx, urb_attr, sprintf('%d', urb_size), 'urb size');
 	}
 
-	let plug = !builtin_mux(backend) ? opts.plugins?.[backend] : null;
-
-	if (plug && !valid_plugin(plug))
-		plug = null;
-
-	if (backend == 'rmnet')
-		mux_devs = setup_rmnet_links(fx, netdev, mux, opts.v5, urb_size, mux_mtus);
-	else if (backend == 'qmimux')
-		mux_devs = setup_qmimux_links(fx, netdev, sys, mux, urb_size, mux_mtus);
-	else if (plug)
-		mux_devs = plug.links(fx, {
+	if (impl)
+		mux_devs = impl.links(fx, {
 			netdev: netdev, sys: sys, mux: mux, urb_size: urb_size,
 			v5: opts.v5, mux_mtus: mux_mtus, opts: opts,
-			// the helpers this module uses itself, so a plugin needs no
+			// the helpers this module uses itself, so an add-on needs no
 			// wwand imports (whose instances would be its own copies anyway)
 			link: (what, dev, o) => link_op(fx, what, dev, o),
 			write_attr: (path, value, what) => write_attr(fx, path, value, what),
 			child_mtu: (mtu, what) => child_mtu(mtu, fx, what),
 		}) ?? [];
 	else
-		// plain raw-ip: plain MTU on the parent (config or 1500)
+		// 'none' — plain raw-ip: plain MTU on the parent (config or 1500)
 		link_op(fx, 'mtu', netdev, { mtu: child_mtu(opts.mtu, fx, netdev) });
 
 	// the aggregation buffer belongs on the parent for every muxed backend —
@@ -789,7 +838,7 @@ export function setup(fx, opts)
 	// ethtool TX-aggregation coalesce (default max_frames=1 = off); best-effort,
 	// rmnet-only (qmimux/none/mbim have no such knob). Aggregation is shared per
 	// real_dev port, so configuring any one child updates it.
-	if ((backend == 'rmnet' || plug?.tx_aggr) && fx.rmnet_tx_aggr &&
+	if (impl?.tx_aggr && fx.rmnet_tx_aggr &&
 	    opts.ul_agg && (opts.ul_agg.count ?? 0) > 1 && (opts.ul_agg.size ?? 0) > 0) {
 		for (let child in mux_devs) {
 			if (fx.rmnet_tx_aggr(child, opts.ul_agg.size, opts.ul_agg.count, 800))

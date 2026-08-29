@@ -179,7 +179,9 @@ both `SET_DATA_FORMAT` and `BIND_MUX_DATA_PORT`; the bind also tags the client a
 tethered (`client_type`). A vendor `qmi_wwan` that gates each mux behind a
 `link_state` sysfs node is opened per channel (existence-gated, no-op on mainline).
 
-**Pluggable.** A third datapath — a vendor driver with its own mux mechanism —
+**Pluggable.** rmnet and qmimux are entries in one datapath interface
+(probe/pre/links/prune), not special cases beside it. A third datapath — a vendor
+driver with its own mux mechanism —
 can be added as an add-on package without patching wwand: `option mux` names it,
 the daemon `require()`s `wwand.datapath_<name>` and threads the returned
 implementation into `netlink.setup()`, which calls it for the one step that is
