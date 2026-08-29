@@ -336,6 +336,16 @@ export function decode(buf)
 	case MSG_INDICATE_STATUS: {
 		// fragment(8) + uuid(16) + cid(4) [+ status(4) for DONE] + infolen(4)
 		let p = 12 + 8;
+		// A truncated frame must be REJECTED, not thrown on: struct.unpack of a
+		// short substr returns null and the [0] below would throw out of the
+		// read handler, taking the whole message loop with it — for one bad
+		// frame from the modem. The sibling branches above already length-check;
+		// this one did not.
+		let need = p + 16 + 4 + ((h[0] == MSG_COMMAND_DONE) ? 4 : 0) + 4;
+
+		if (length(buf) < need)
+			return null;
+
 		msg.service = uuid_str(substr(buf, p, 16)); p += 16;
 		msg.cid = struct.unpack('<I', substr(buf, p, 4))[0]; p += 4;
 
@@ -344,6 +354,13 @@ export function decode(buf)
 		}
 
 		let ilen = struct.unpack('<I', substr(buf, p, 4))[0]; p += 4;
+
+		// and the declared information length is the modem's claim, not a fact:
+		// clamp it to what actually arrived rather than handing decode_info a
+		// short buffer it would read past (it bounds-checks, but silently).
+		if (p + ilen > length(buf))
+			ilen = length(buf) - p;
+
 		msg.info = substr(buf, p, ilen);
 		break;
 	}

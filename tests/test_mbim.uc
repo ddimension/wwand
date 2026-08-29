@@ -3,6 +3,7 @@
 'use strict';
 
 import { eq, ok, done } from './lib/check.uc';
+import * as struct from 'struct';
 import * as mbim from 'wwand/codec/mbim.uc';
 import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
 import * as context_mbim from 'wwand/context_mbim.uc';
@@ -278,5 +279,34 @@ let fctx2 = context_mbim.create({
 });
 fctx2.up(() => null);
 eq(length(recmds2), 1, 'deactivate-retry: no deactivate when CONNECT never activated');
+
+// --- a malformed frame is rejected, never thrown on ---------------------------
+//
+// decode()'s COMMAND_DONE/INDICATE branch used to unpack at fixed offsets with
+// no length check while its siblings checked: struct.unpack of a short substr
+// returns null, and the [0] on it throws out of the read handler — one bad
+// frame from the modem would stop the message loop.
+{
+	let full = struct.pack('<III', 0x80000003, 48, 7) +   // COMMAND_DONE
+		struct.pack('<II', 1, 0) +                        // fragment
+		'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10' +
+		struct.pack('<III', 5, 0, 0);                     // cid, status, infolen
+
+	ok(mbim.decode(full) != null, 'decode: a complete COMMAND_DONE still decodes');
+
+	let threw = 0;
+
+	for (let n = 12; n < length(full); n++) {
+		try { mbim.decode(substr(full, 0, n)); }
+		catch (e) { threw++; }
+	}
+
+	eq(threw, 0, 'decode: no truncation of it throws');
+	eq(mbim.decode(substr(full, 0, 30)), null, 'decode: a short COMMAND_DONE is rejected');
+
+	// the declared information length is the modem's claim, not a fact
+	let liar = substr(full, 0, length(full) - 4) + struct.pack('<I', 9999);
+	eq(length(mbim.decode(liar).info), 0, 'decode: an over-long infolen is clamped to what arrived');
+}
 
 done('test_mbim');

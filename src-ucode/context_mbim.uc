@@ -36,6 +36,15 @@ export function create(opts)
 	let deps = opts.deps ?? {};
 	let log = deps.log ?? ((l, m) => warn(sprintf('%s: interface %s: %s\n', l, self.name, m)));
 	let up_cb = null;
+	// Bring-up generation. Every asynchronous re-entry of the activation path
+	// checks it, because `up_cb` is ONE slot: a reply belonging to an attempt
+	// that was aborted (registration lost, modem gone — see modem_event
+	// 'lost'/'suspend', which clear up_cb and drop the context to IDLE) would
+	// otherwise set CONNECTED behind the daemon's back, and if a new attempt had
+	// already started, complete THAT attempt's callback with the old result.
+	// Same guard context.uc has carried since the QMI path; NCM checks the
+	// state. This is the parity fix.
+	let up_gen = 0;
 	// true once our CONNECT activated the session — the modem then holds it, so a
 	// failure/retry path must DEACTIVATE first or the next CONNECT hits MBIM
 	// status 13 (max activated contexts).
@@ -197,6 +206,9 @@ export function create(opts)
 
 		up_cb = cb;
 		activated = false;
+
+		let gen = ++up_gen;
+
 		set_state('ACTIVATING');
 
 		// empty APN = network default: MBIM CONNECT with a blank access string
@@ -222,6 +234,13 @@ export function create(opts)
 			self.session_id, profile == '' ? '(network default)' : sprintf('\'%s\'', profile), ip_type));
 
 		self.modem.command('CONNECT', 'set', args, (err, data) => {
+			// attempt aborted while the modem was answering — drop the late
+			// reply. A successful one leaves the session up on the modem; the
+			// next CONNECT reconciles that, since ACTIVATION_ACTIVATED is
+			// accepted as success just below.
+			if (gen != up_gen || self.state != 'ACTIVATING')
+				return;
+
 			if (err)
 				return self._fail({ stage: 'connect', err: err });
 
@@ -236,6 +255,9 @@ export function create(opts)
 			// query the assigned IP configuration
 			self.modem.command('IP_CONFIGURATION', 'query',
 				{ session_id: self.session_id }, (e2, cfg) => {
+				if (gen != up_gen || self.state != 'ACTIVATING')
+					return;   // attempt aborted — drop the late reply
+
 				if (e2)
 					return self._fail({ stage: 'ip_config', err: e2 });
 
