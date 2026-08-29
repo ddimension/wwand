@@ -698,37 +698,6 @@ function validate(result)
 				push(m.sims, sim);
 			}
 
-	for (let name, ctx in result.contexts) {
-		if (ctx.modem == null) {
-			push(result.warnings, sprintf("interface %s: no modem reference, ignoring", name));
-			delete result.contexts[name];
-			continue;
-		}
-
-		if (!result.modems[ctx.modem]) {
-			push(result.warnings, sprintf("interface %s: unknown modem '%s', ignoring", name, ctx.modem));
-			delete result.contexts[name];
-			continue;
-		}
-
-		if (ctx.mux_id > 0 && result.modems[ctx.modem].mux == 'raw_ip') {
-			push(result.warnings, sprintf("interface %s: mux_id set but modem '%s' has mux disabled", name, ctx.modem));
-			ctx.mux_id = 0;
-		}
-
-		// The NCM backend interpolates these into QUOTED AT strings, which have
-		// no escape mechanism: a control character would split the command in
-		// two on the wire (atcmd refuses such a command outright, see there) and
-		// a bare quote just makes the modem answer ERROR. QMI and MBIM carry the
-		// same fields as binary TLVs and do not care — hence a warning rather
-		// than a rejection. The value itself is never logged.
-		for (let f in [ 'apn', 'username', 'password' ])
-			if (type(ctx[f]) == 'string' && match(ctx[f], /["[:cntrl:]]/))
-				push(result.warnings, sprintf(
-					"interface %s: %s contains a quote or control character - AT-based backends cannot send it",
-					name, f));
-	}
-
 	// `option mux` names a datapath: the built-ins (auto/raw_ip/rmnet/qmimux/
 	// vlan) or a plugin package, which the daemon require()s as
 	// wwand.datapath_<name>. The value therefore ends up in a MODULE PATH, so
@@ -749,6 +718,45 @@ function validate(result)
 			push(result.warnings, sprintf("modem %s: invalid mux %J, using 'auto'", mname, m.mux));
 			m.mux = 'auto';
 		}
+	}
+
+	for (let name, ctx in result.contexts) {
+		if (ctx.modem == null) {
+			push(result.warnings, sprintf("interface %s: no modem reference, ignoring", name));
+			delete result.contexts[name];
+			continue;
+		}
+
+		if (!result.modems[ctx.modem]) {
+			push(result.warnings, sprintf("interface %s: unknown modem '%s', ignoring", name, ctx.modem));
+			delete result.contexts[name];
+			continue;
+		}
+
+		// `option mux 'raw_ip'` on the modem beats a channel on the interface.
+		// Clearing mux_id alone is not enough and never was: `muxed` drives the
+		// auto-assign pass further down, which would hand the channel straight
+		// back, and `mux_link` is the name netifd would then look for. All three
+		// go, so the context ends up on the plain parent — which is what the
+		// modem was configured for.
+		if (ctx.mux_id > 0 && result.modems[ctx.modem].mux == 'raw_ip') {
+			push(result.warnings, sprintf("interface %s: mux_id set but modem '%s' has mux disabled", name, ctx.modem));
+			ctx.mux_id = 0;
+			ctx.muxed = false;
+			ctx.mux_link = null;
+		}
+
+		// The NCM backend interpolates these into QUOTED AT strings, which have
+		// no escape mechanism: a control character would split the command in
+		// two on the wire (atcmd refuses such a command outright, see there) and
+		// a bare quote just makes the modem answer ERROR. QMI and MBIM carry the
+		// same fields as binary TLVs and do not care — hence a warning rather
+		// than a rejection. The value itself is never logged.
+		for (let f in [ 'apn', 'username', 'password' ])
+			if (type(ctx[f]) == 'string' && match(ctx[f], /["[:cntrl:]]/))
+				push(result.warnings, sprintf(
+					"interface %s: %s contains a quote or control character - AT-based backends cannot send it",
+					name, f));
 	}
 
 	// same reasoning for the PIN (AT+CPIN="…"), which is digits by definition

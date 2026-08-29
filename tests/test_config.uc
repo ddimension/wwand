@@ -446,6 +446,28 @@ ok(length(filter(r.warnings, (w) => index(w, 'invalid mux') >= 0)) == 1,
 eq(r.modems.m3.mux, 'raw_ip', 'mux name: legacy `none` canonicalises to raw_ip');
 eq(r.modems.m4.mux, 'raw_ip', 'mux name: hyphenated raw-ip canonicalises too');
 
+// `option mux` off on the modem beats a channel on the interface — for EVERY
+// spelling, which needs the canonicalisation to run before the interface loop
+// reads it. And clearing mux_id alone is not enough: `muxed` drives the
+// auto-assign pass, which would hand the channel straight back, and `mux_link`
+// is the name netifd would then look for on a datapath that builds no child.
+for (let spelling in [ 'none', 'raw-ip', 'raw_ip' ]) {
+	let off = padopt({
+		network: {
+			m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: spelling },
+			wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+			       device: 'wwand0', mux_id: '1', apn: 'internet' },
+		},
+	});
+
+	eq(off.contexts.wan.mux_id, 0, sprintf('mux off (%s): the channel is dropped', spelling));
+	eq(off.contexts.wan.muxed, false, sprintf('mux off (%s): ...and not auto-assigned back', spelling));
+	eq(off.contexts.wan.mux_link, null, sprintf('mux off (%s): ...and no mux child is expected', spelling));
+	eq(off.contexts.wan.l3_name, 'wwand0', sprintf('mux off (%s): the parent carries the stable name', spelling));
+	ok(length(filter(off.warnings, (w) => index(w, 'has mux disabled') >= 0)) == 1,
+		sprintf('mux off (%s): and it is warned about', spelling));
+}
+
 // the compat parser (no `option modem`) resolves the channel through the same
 // helper — the two interface parsers must not drift
 r = padopt({

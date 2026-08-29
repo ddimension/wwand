@@ -219,6 +219,19 @@ reported at notice with the ordering that would fix it, and shown on the status
 page (`nss_shim: absent`), rather than acted on. The name still says rmnet_nss
 because that is what the datapath is FOR.
 
+**Review catch: `option mux` off did not switch muxing off.** Two defects, one
+of them mine. The interface loop compares the modem's mux against `'raw_ip'`,
+but canonicalisation ran AFTER it — so a legacy `option mux 'none'`, the very
+spelling the alias exists for, never matched the guard. The canonicalisation
+moved above the loop.
+
+The older one: the guard cleared `mux_id` and left `muxed` alone, and the
+auto-assign pass a few lines down hands a channel back to every context whose
+`muxed` is set. So "mux disabled" never disabled anything, in any spelling —
+the config asked for a plain parent and got a mux child name netifd would then
+look for on a datapath that builds none. `muxed` and `mux_link` are cleared too
+now. Covered for all three spellings.
+
 **Not on hardware yet.** Everything above is host-tested only. The NSS datapath
 has no witness at all here — it needs kuncy7's IPQ807x + RG500Q, and the first
 thing to check there is whether the WDA format negotiation wwand does itself
