@@ -158,8 +158,83 @@ res = netlink.setup(fx, {
 	mux: [ { id: 1 }, { id: 2 } ], dgram_size: 4096,
 });
 eq(res.mux_devs, [ 'wwan0_1' ], 'overflow: the channels that exist are still adopted');
-ok(length(filter(fx.actions, (a) => match(a, /qmap_mode=1.*modprobe/) != null)) == 1,
-	'overflow: the error names qmap_mode and where to change it');
+ok(length(filter(fx.actions, (a) => match(a, /channel 2 needs qmap_mode >= 2 but .* was loaded with 1.*modprobe/) != null)) == 1,
+	'overflow: the error names the shortfall and where to change it');
+
+// --- adopting is not the same as trusting a name -----------------------------
+//
+// Three ways the rename/adopt path can be handed a device that is not ours.
+// None of them may end with that device in mux_devs: the shared code would set
+// its MTU and netifd would bind to it, while the real channel stays unclaimed —
+// link up, no traffic, which is the exact failure this datapath exists to avoid.
+
+// (a) the target name is taken by something else while the vendor child is there
+fx = vendor_fx(2, { '/sys/class/net/wwand0': true });
+res = netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
+	mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
+});
+eq(res.mux_devs, [ ], 'taken: the channel is left unclaimed, not bound to a stranger');
+eq(fx.action_index('link_set wwan0_1 name wwand0'), -1, 'taken: no rename is even attempted');
+ok(length(filter(fx.actions, (a) => match(a, /cannot give wwan0_1 the name wwand0/) != null)) == 1,
+	'taken: and the collision is named');
+
+// (b) the rename itself fails
+fx = fakefx.create({
+	present: { '/sys/module/rmnet_nss': true, '/sys/class/net/wwan0_1': true },
+	files: { '/sys/class/net/wwan0/qmap_mode': "1\n" },
+	rc: { 'link_set wwan0_1 name wwand0': 2 },
+});
+res = netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
+	mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
+});
+eq(res.mux_devs, [ ], 'renamefail: a failed rename does not report the target anyway');
+
+// (c) on a restart, a device carrying the target name that is NOT a child of
+// this parent. The driver copies the parent's MAC onto every child, so a
+// differing address rules it out (an all-zero raw-IP address proves nothing,
+// which is why this rejects rather than confirms).
+fx = fakefx.create({
+	present: { '/sys/module/rmnet_nss': true, '/sys/class/net/wwand0': true },
+	files: { '/sys/class/net/wwan0/qmap_mode': "2\n",
+	         '/sys/class/net/wwan0/address': "02:11:22:33:44:55\n",
+	         '/sys/class/net/wwand0/address': "02:aa:bb:cc:dd:ee\n" },
+});
+res = netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
+	mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
+});
+eq(res.mux_devs, [ ], 'foreign: a same-named device with another MAC is refused');
+ok(length(filter(fx.actions, (a) => match(a, /not a child of wwan0 \(different MAC\)/) != null)) == 1,
+	'foreign: and the reason is the identity, not the name');
+
+// ...while the real child, which carries the parent's MAC, is adopted
+fx = fakefx.create({
+	present: { '/sys/module/rmnet_nss': true, '/sys/class/net/wwand0': true },
+	files: { '/sys/class/net/wwan0/qmap_mode': "2\n",
+	         '/sys/class/net/wwan0/address': "02:11:22:33:44:55\n",
+	         '/sys/class/net/wwand0/address': "02:11:22:33:44:55\n" },
+});
+res = netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
+	mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
+});
+eq(res.mux_devs, [ 'wwand0' ], 'restart: the real child is still adopted');
+
+// (d) an earlier configuration renamed this channel to a name nothing uses now:
+// neither the canonical nor the wanted name exists, though qmap_mode says the
+// channel is there. Only a driver reload restores it, so the error says that
+// rather than blaming qmap_mode.
+fx = vendor_fx(0, {});
+fx.files['/sys/class/net/wwan0/qmap_mode'] = "2\n";
+res = netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
+	mux: [ { id: 1, name: 'wwand5', mtu: 1500 } ], dgram_size: 4096,
+});
+eq(res.mux_devs, [ ], 'stale-name: nothing is adopted');
+ok(length(filter(fx.actions, (a) => match(a, /an earlier configuration renamed this channel/) != null)) == 1,
+	'stale-name: and the error points at the reload, not at qmap_mode');
 
 // --- the adopted child takes the context's stable name -----------------------
 //

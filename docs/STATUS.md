@@ -249,6 +249,31 @@ client for this exact driver (quectel-cm sends `qmap_version = 0x05`). First
 thing to check on hardware — and the plain-QMAP fallback still catches a modem
 that refuses v5 outright.
 
+**A Codex review of the run found three more in the adopt path**, all the same
+shape: a NAME was treated as an identity.
+
+- The rename's return value was ignored, and the target pushed into `mux_devs`
+  regardless. If the name was taken, the shared code then set the MTU on a
+  device we do not own and netifd bound to it, while the real channel stayed
+  unclaimed — link up, no traffic, the exact failure this datapath exists to
+  avoid. It now refuses to rename onto an occupied name, checks the result, and
+  drops the channel with a reason.
+- On a restart, ANY netdev carrying the target name was adopted. It now has to
+  carry the parent's MAC, which the driver copies onto every child
+  (`__dev_addr_set(qmap_net, real_dev->dev_addr)`). That proves nothing between
+  two all-zero raw-IP addresses, but it rejects an ordinary netdev that happens
+  to hold the name.
+- A channel whose configured name CHANGED found neither the canonical nor the
+  new name and was skipped under an error blaming `qmap_mode`. The two causes
+  are told apart now: too few channels (a modprobe.d edit) versus renamed by an
+  earlier configuration (only a driver reload restores it).
+
+Chasing those also corrected a wrong claim in the code: the comment said the
+default prune would delete these children. It would not — it matches on
+`iflink` pointing at the parent, and the vendor driver sets no `ndo_get_iflink`
+and links no upper device, so each child's iflink is its own ifindex. Overriding
+`prune` is still right; the reason in the comment was not.
+
 **Not on hardware yet.** Everything above is host-tested only. The NSS datapath
 has no witness at all here — it needs kuncy7's IPQ807x + RG500Q, and the first
 thing to check there is whether the WDA format negotiation wwand does itself

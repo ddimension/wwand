@@ -61,6 +61,12 @@ function vendor_attr(netdev, name)
 	return sprintf('/sys/class/net/%s/%s', netdev, name);
 }
 
+// a netdev's MAC, for the one identity check the driver makes available
+function mac(fx, netdev)
+{
+	return trim(fx.read(sprintf('/sys/class/net/%s/address', netdev)) ?? '');
+}
+
 // the name qmi_wwan_q gives channel `id`: sprintf("%s_%d", real_dev->name,
 // offset_id + 1), so channel 1 is <parent>_1
 function vendor_child(netdev, id)
@@ -147,9 +153,15 @@ return {
 	// datapath_qmi still catches a modem that refuses v5 outright.
 	qmap_v5: true,
 
-	// The children belong to the KERNEL. The default prune removes every netdev
-	// whose iflink is this parent and that the config does not name — which here
-	// would delete channels only a module reload can bring back. Never prune.
+	// The children belong to the KERNEL: only a qmi_wwan_q reload creates or
+	// removes them. Never prune.
+	//
+	// Note what this is NOT protecting against. The shared prune matches a child
+	// by its `iflink` pointing at the parent, and these children do not report
+	// one — the driver sets no ndo_get_iflink and does not link them as an upper
+	// device, so iflink is each child's own ifindex. The default would therefore
+	// find nothing to delete rather than delete the wrong thing. This override
+	// makes the intent explicit and keeps it true if that ever changes.
 	prune: (fx, netdev, wanted) => null,
 
 	// what the status page shows beyond the generic rows: the driver's own view
@@ -179,23 +191,55 @@ return {
 			let child = ctx.child_name(entry);
 
 			if (!fx.exists(sprintf('/sys/class/net/%s', from))) {
-				// tolerate a restart that already renamed it
+				// A restart that already renamed it. Adoption is by NAME here,
+				// which a name alone cannot justify, so take the one identity
+				// the driver gives us: it copies the parent's MAC onto every
+				// child (__dev_addr_set(qmap_net, real_dev->dev_addr)). That
+				// proves nothing about WHICH parent when both are raw-IP
+				// devices with an all-zero address, but it does reject an
+				// ordinary netdev that happens to carry this name.
 				if (fx.exists(sprintf('/sys/class/net/%s', child))) {
-					ctx.mux_mtus[child] = entry.mtu;
-					push(out, child);
+					if (mac(fx, child) == mac(fx, ctx.netdev)) {
+						ctx.mux_mtus[child] = entry.mtu;
+						push(out, child);
+					}
+					else {
+						fx.log('err', sprintf('rmnet_nss: %s exists but is not a child of %s (different MAC) — channel %d left unclaimed rather than binding the wrong device',
+							child, ctx.netdev, entry.id));
+					}
+
 					continue;
 				}
 
-				// precise, because the fix is a specific one: the channel count
-				// is fixed at insmod, so this is a modprobe.d edit, not a config
-				// one. Skipping (rather than failing) matches the built-ins.
-				fx.log('err', sprintf('rmnet_nss: %s does not exist — qmi_wwan_q was loaded with qmap_mode=%d, so channels 1..%d exist; raise it in modprobe.d to use channel %d',
-					from, have, have, entry.id));
+				// Two different causes, two different fixes, so say which.
+				if (entry.id > have)
+					fx.log('err', sprintf('rmnet_nss: channel %d needs qmap_mode >= %d but qmi_wwan_q was loaded with %d — raise it in modprobe.d (it is a module parameter, fixed at insmod)',
+						entry.id, entry.id, have));
+				else
+					fx.log('err', sprintf('rmnet_nss: neither %s nor %s exists though qmap_mode is %d — an earlier configuration renamed this channel to a name it no longer uses, and only a qmi_wwan_q reload restores it',
+						from, child, have));
+
 				continue;
 			}
 
-			if (child != from)
-				ctx.link('rmnet_nss rename', from, { rename: child });
+			// Never rename onto an occupied name: the rename fails, and pushing
+			// the target anyway would report a device we do not own — the shared
+			// code would then set the MTU on it and netifd bind to it, with the
+			// real channel left unclaimed. (The parent holding the name is
+			// handled before links() runs; this is anything else.)
+			if (child != from) {
+				if (fx.exists(sprintf('/sys/class/net/%s', child))) {
+					fx.log('err', sprintf('rmnet_nss: cannot give %s the name %s — it is taken by another device; channel %d left unclaimed',
+						from, child, entry.id));
+					continue;
+				}
+
+				if (!ctx.link('rmnet_nss rename', from, { rename: child })) {
+					fx.log('err', sprintf('rmnet_nss: renaming %s to %s failed; channel %d left unclaimed',
+						from, child, entry.id));
+					continue;
+				}
+			}
 
 			ctx.mux_mtus[child] = entry.mtu;
 			push(out, child);
