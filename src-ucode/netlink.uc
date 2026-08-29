@@ -73,6 +73,19 @@ export const RMNET_EGRESS_CKSUMV5 = 0x20;
 //       // (by iflink) covers anything that is a real netdev child of netdev.
 //       prune: (fx, netdev, wanted) => { … },
 //
+//       // optional, default = `aggregate`: QMAP frames ride the PARENT, so the
+//       // parent-vs-children packet ratio measures aggregation and the WDA data
+//       // format applies. Distinct from `aggregate`, which says whether WWAND
+//       // does the urb/MTU arithmetic — a datapath adopting a driver's channels
+//       // has QMAP on the wire while the driver owns the buffers.
+//       qmap: true,
+//
+//       // optional, default false: this datapath can carry MAPv5 checksum
+//       // offload, so the WDA format is negotiated as QMAPv5 first (with the
+//       // plain-QMAP fallback). Kept a capability rather than a name test —
+//       // the built-in rmnet is not the only datapath that can do it.
+//       qmap_v5: true,
+//
 //       // optional: extra rows for the status page — whatever this datapath
 //       // knows that the generic block cannot (the vendor NSS one reports the
 //       // driver's channel count, its RX buffer and whether the shim loaded).
@@ -699,6 +712,8 @@ const BUILTIN = {
 	rmnet: {
 		proto: [ 'qmi' ],
 		description: 'QMAP over the kernel rmnet driver (qmi_wwan pass-through)',
+		// mainline rmnet carries MAPv5 checksum offload
+		qmap_v5: true,
 		probe: (fx, netdev) => rmnet_usable(fx, netdev),
 		// qmi_wwan hands the raw QMAP frames to rmnet only with this set; a
 		// driver without the `qmi` group has nothing to switch (mhi_net/MHI)
@@ -883,6 +898,31 @@ export function select_backend(fx, netdev, cfg_mux, want_mux, plugins, info)
 	return want_mux ? null : 'raw_ip';
 };
 
+
+// What a datapath can do, by name — for the callers that used to test the name
+// itself. Those tests were the same mistake in three places: `backend ==
+// 'rmnet'` decided QMAPv5 and uplink coalescing, and `!= 'rmnet' && != 'qmimux'`
+// decided whether the aggregation ratio means anything, so every datapath added
+// later silently fell outside all three.
+export function datapath_caps(backend, plugins)
+{
+	let n = canon_mux(backend) ?? '';
+	let impl = BUILTIN[n] ?? plugins?.[n];
+	let aggregate = impl ? (impl.aggregate !== false) : false;
+
+	return {
+		// wwand does the urb/parent-MTU arithmetic
+		aggregate: aggregate,
+		// QMAP is on the wire (defaults to the above; a datapath that adopts a
+		// driver's channels overrides it — the driver owns the buffers, but the
+		// frames are still QMAP)
+		qmap: impl ? (impl.qmap ?? aggregate) : false,
+		// MAPv5 checksum offload may be negotiated
+		qmap_v5: (impl?.qmap_v5 === true),
+		// host-side uplink coalescing is available
+		tx_aggr: (impl?.tx_aggr === true),
+	};
+};
 
 // Extra status rows a datapath contributes, or null. Looked up by NAME because
 // that is all the running modem records — the implementation itself is not kept

@@ -1771,7 +1771,11 @@ export function create(opts)
 		if (parent) {
 			out.stats = nlmod.datapath_stats(null, parent, children ?? []);
 
-			if (dp.backend != 'rmnet' && dp.backend != 'qmimux') {
+			// the parent-vs-children packet ratio only MEASURES aggregation
+			// where QMAP rides the parent. Asked of the datapath rather than
+			// matched against a list of names, which a datapath added later
+			// (the vendor NSS one) would have fallen out of.
+			if (!nlmod.datapath_caps(dp.backend, list_datapaths()).qmap) {
 				delete out.stats.rx_aggregation;
 				delete out.stats.tx_aggregation;
 			}

@@ -211,6 +211,17 @@ eq(netlink.datapath_status(fakefx.create(), 'rmnet', 'wwan0', null), null,
 eq(netlink.datapath_status(fakefx.create(), 'rmnet_nss', null, plugins), null,
 	'status: ...and neither does one with no netdev');
 
+// --- capabilities -------------------------------------------------------------
+//
+// The driver owns the RX buffers (rx_urb_size = qmap_size at bind), but QMAP is
+// on the wire — so the aggregation ratio on the status page means what it means
+// everywhere else, and the WDA format still applies. MAPv5 follows the
+// reference client for this driver (quectel-cm: qmap_version = 0x05), since the
+// driver fixes its own version at bind and exposes it nowhere.
+eq(netlink.datapath_caps('rmnet_nss', plugins),
+	{ aggregate: false, qmap: true, qmap_v5: true, tx_aggr: false },
+	'caps: driver owns the buffers, QMAP on the wire, v5 offered, no ethtool knob');
+
 // --- selection ---------------------------------------------------------------
 
 // under 'auto' the add-on beats the built-ins on a box where both would probe

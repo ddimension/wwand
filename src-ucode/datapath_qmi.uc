@@ -81,6 +81,10 @@ export function setup(self, dp, o, next)
 			}
 
 			let dgram = netlink.board_dgram_size(fxi, dp.dgram_size, self.info.model);
+			// what this datapath can do, asked of the datapath instead of
+			// inferred from its name — the name tests here covered the built-in
+			// rmnet and silently excluded every datapath added since
+			let caps = netlink.datapath_caps(backend, dp.plugins);
 			let negotiate;
 
 			// rmnet supports MAPv5 checksum offload; try it first there and
@@ -89,7 +93,7 @@ export function setup(self, dp, o, next)
 			negotiate = (dap, allow_fallback) => {
 				let args = { qos: 0, llp: wdamod.LLP_RAW_IP };
 
-				if (backend != 'raw_ip') {
+				if (caps.qmap) {
 					args.ul_protocol = dap;
 					args.dl_protocol = dap;
 					args.dl_max_datagrams = DL_MAX_DATAGRAMS;
@@ -112,7 +116,7 @@ export function setup(self, dp, o, next)
 						wdata.dl_max_datagrams ?? 0, wdata.dl_max_size ?? 0,
 						wdata.ul_max_datagrams ?? 0, wdata.ul_max_size ?? 0, dap, dgram));
 
-					let aggr_ok = (backend == 'raw_ip') ||
+					let aggr_ok = !caps.qmap ||
 						((wdata.dl_protocol == wdamod.DAP_QMAP ||
 						  wdata.dl_protocol == wdamod.DAP_QMAPV5) &&
 						 (wdata.dl_max_size ?? 0) > 0);
@@ -178,8 +182,8 @@ export function setup(self, dp, o, next)
 							ul_max_size: wdata.ul_max_size,
 							ul_max_datagrams: wdata.ul_max_datagrams,
 						},
-						// host-side uplink aggregation we asked rmnet to coalesce
-						ul_agg: (backend == 'rmnet' &&
+						// host-side uplink aggregation we asked the datapath to coalesce
+						ul_agg: (caps.tx_aggr &&
 						         (wdata.ul_max_datagrams ?? 0) > 1) ?
 							{ size: wdata.ul_max_size, count: wdata.ul_max_datagrams } : null,
 					};
@@ -192,7 +196,9 @@ export function setup(self, dp, o, next)
 				});
 			};
 
-			negotiate((backend == 'rmnet') ? wdamod.DAP_QMAPV5 : wdamod.DAP_QMAP,
-				backend == 'rmnet');
+			// MAPv5 first where the datapath carries checksum offload, with the
+			// plain-QMAP fallback for modems that answer v5 with aggregation off
+			negotiate(caps.qmap_v5 ? wdamod.DAP_QMAPV5 : wdamod.DAP_QMAP,
+				caps.qmap_v5);
 		});
 };

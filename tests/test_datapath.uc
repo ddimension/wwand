@@ -837,6 +837,34 @@ eq(netlink.mux_available(fakefx.create({ present: { '/sys/class/net/wwan0/vendor
 	'wwan0', 'qmi', { vendorx: plug }), true,
 	'mux_available: an add-on datapath counts as available');
 
+// --- capabilities, asked of the datapath instead of its name -----------------
+//
+// Three callers used to test the NAME: `backend == 'rmnet'` decided QMAPv5 and
+// uplink coalescing, `!= 'rmnet' && != 'qmimux'` decided whether the
+// aggregation ratio means anything. Every datapath added later fell outside all
+// three silently, which is what these capabilities exist to prevent.
+eq(netlink.datapath_caps('rmnet', null),
+	{ aggregate: true, qmap: true, qmap_v5: true, tx_aggr: true },
+	'caps: rmnet does all of it');
+eq(netlink.datapath_caps('qmimux', null),
+	{ aggregate: true, qmap: true, qmap_v5: false, tx_aggr: false },
+	'caps: qmimux aggregates QMAP but has neither v5 nor the coalesce knob');
+eq(netlink.datapath_caps('vlan', null).qmap, false,
+	'caps: a VLAN mux is not QMAP');
+eq(netlink.datapath_caps('raw_ip', null).qmap, false, 'caps: no mux, no QMAP');
+eq(netlink.datapath_caps('none', null).qmap, false, 'caps: ...under the old spelling too');
+eq(netlink.datapath_caps('nosuch', null),
+	{ aggregate: false, qmap: false, qmap_v5: false, tx_aggr: false },
+	'caps: an unknown datapath claims nothing');
+
+// `qmap` defaults to `aggregate` but is a DIFFERENT question: aggregate is who
+// sizes the buffers, qmap is what rides the wire. A datapath adopting a
+// driver's channels answers false and true.
+eq(netlink.datapath_caps('x', { x: { links: () => [], aggregate: false } }).qmap, false,
+	'caps: qmap follows aggregate by default');
+eq(netlink.datapath_caps('x', { x: { links: () => [], aggregate: false, qmap: true } }).qmap, true,
+	'caps: ...and can be set the other way when the driver owns the buffers');
+
 // --- the catalog a UI offers for `option mux` --------------------------------
 //
 // netlink owns the list of what it implements; a UI carrying its own copy is a

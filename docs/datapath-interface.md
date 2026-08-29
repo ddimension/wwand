@@ -59,6 +59,8 @@ return {
     child_name:      (netdev, entry) => …,      // own naming (optional)
     map_id:          (entry) => entry.id,       // QMAP id on the wire (optional)
     status:          (fx, netdev) => ({ … }),   // extra status rows (optional)
+    qmap:            true,               // QMAP rides the parent (default: aggregate)
+    qmap_v5:         false,              // may negotiate MAPv5 checksum offload
     aggregate:       true,               // QMAP arithmetic on the parent
     programs_parent: true,               // reprograms the parent's link format
     tx_aggr:         false,              // rmnet-style uplink coalesce
@@ -103,7 +105,20 @@ the historical behaviour.
   something to program (a `qmi` sysfs group, or a `pre`), so a parent with
   neither is left alone.
 - **`tx_aggr`** (default false) — opt into the mainline-rmnet ethtool egress
-  coalesce call.
+  coalesce call. Also decides whether the negotiated uplink maxima are reported
+  as `ul_agg`.
+- **`qmap`** (default: `aggregate`) — QMAP frames ride the parent. A different
+  question from `aggregate`, which is about who sizes the buffers: a datapath
+  adopting a driver's channels answers `aggregate: false, qmap: true`. It
+  decides whether the WDA data format applies and whether the parent-vs-children
+  packet ratio measures anything.
+- **`qmap_v5`** (default false) — this datapath carries MAPv5 checksum offload,
+  so the WDA format is negotiated as QMAPv5 first, with the plain-QMAP fallback.
+
+`netlink.datapath_caps(backend, plugins)` answers all four by name. Three
+callers used to test the name itself (`backend == 'rmnet'` for v5 and uplink
+coalescing, `!= 'rmnet' && != 'qmimux'` for the aggregation ratio), which every
+datapath added later fell outside of, silently.
 
 ### Naming and the id on the wire
 

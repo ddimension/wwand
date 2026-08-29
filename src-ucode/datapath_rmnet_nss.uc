@@ -133,6 +133,20 @@ return {
 	// writable knob; the parent MTU is not the aggregation buffer here.
 	aggregate: false,
 
+	// ...but QMAP is very much on the wire: the parent carries aggregated frames
+	// and the children the demuxed packets, so the aggregation ratio on the
+	// status page means what it means everywhere else. `aggregate` is about who
+	// sizes the buffers, which here is the driver.
+	qmap: true,
+
+	// MAPv5. Not measurable from here — the driver fixes qmap_version at bind
+	// from its own table (driver_info->data >> 8) and exposes it nowhere — so
+	// this follows the reference client for this exact driver: quectel-cm sends
+	// `static int qmap_version = 0x05`. First thing to check on hardware; if a
+	// board disagrees it is this one line, and the plain-QMAP fallback in
+	// datapath_qmi still catches a modem that refuses v5 outright.
+	qmap_v5: true,
+
 	// The children belong to the KERNEL. The default prune removes every netdev
 	// whose iflink is this parent and that the config does not name — which here
 	// would delete channels only a module reload can bring back. Never prune.

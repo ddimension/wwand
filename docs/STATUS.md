@@ -232,6 +232,23 @@ the config asked for a plain parent and got a mux child name netifd would then
 look for on a datapath that builds none. `muxed` and `mux_link` are cleared too
 now. Covered for all three spellings.
 
+**...and the same mistake in three more places.** Chasing the review finding
+turned up its siblings: `backend == 'rmnet'` decided both QMAPv5 negotiation and
+uplink coalescing, and `dp.backend != 'rmnet' && != 'qmimux'` decided whether
+the aggregation ratio on the status page means anything. Every datapath added
+later fell outside all three without a word — the NSS one would have negotiated
+plain QMAP and shown no aggregation ratio. They are capabilities now
+(`netlink.datapath_caps`): `qmap` (QMAP on the wire — a different question from
+`aggregate`, which is who sizes the buffers), `qmap_v5`, `tx_aggr`. Behaviour
+for the three built-ins is unchanged; the matrix is pinned by tests.
+
+The NSS datapath declares `aggregate: false, qmap: true, qmap_v5: true`. The
+last one is the only unmeasurable choice in it: the driver fixes `qmap_version`
+at bind from its own table and exposes it nowhere, so it follows the reference
+client for this exact driver (quectel-cm sends `qmap_version = 0x05`). First
+thing to check on hardware — and the plain-QMAP fallback still catches a modem
+that refuses v5 outright.
+
 **Not on hardware yet.** Everything above is host-tested only. The NSS datapath
 has no witness at all here — it needs kuncy7's IPQ807x + RG500Q, and the first
 thing to check there is whether the WDA format negotiation wwand does itself
