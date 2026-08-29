@@ -98,6 +98,53 @@ export function create(opts)
 	let load_ncm_fn = deps.load_ncm ?? load_ncm;
 	let load_datapath_fn = deps.load_datapath ?? load_datapath;
 
+	// Installed datapath plugins, by name. Scanned ONCE: the module directory
+	// is globbed for datapath_*.uc and each is require()d — which is what lets
+	// a plugin be chosen under `option mux 'auto'` at all. Without a scan the
+	// daemon could only load what a config already named, so an accelerated
+	// datapath (rmnet_nss on ipq807x) could never introduce itself on a
+	// zero-config box, which is precisely where it has to. Whether one is USED
+	// is still its own probe()'s answer; this only finds them.
+	let installed_dp = null;
+
+	let list_datapaths = () => {
+		if (installed_dp != null)
+			return installed_dp;
+
+		installed_dp = {};
+
+		let dir = deps.ucode_dir ?? '/usr/share/ucode/wwand';
+		let fx = deps.datapath_fx;
+		let found = (type(fx?.glob) == 'function') ? (fx.glob(dir + '/datapath_*.uc') ?? []) : [];
+
+		// name order: the tie-break when two plugins claim the same device is
+		// decided in select_backend, and it must not depend on glob order
+		let names = [];
+
+		for (let path in found) {
+			let m = match(path, /datapath_([a-z][a-z0-9_]*)\.uc$/);
+
+			if (m)
+				push(names, m[1]);
+		}
+
+		sort(names);
+
+		for (let n in names) {
+			let impl = load_datapath_fn(n);
+
+			if (nlmod.valid_plugin(impl))
+				installed_dp[n] = impl;
+			else
+				log('warn', sprintf('datapath plugin %s: not usable (no links()), ignored', n));
+		}
+
+		if (length(installed_dp))
+			log('info', sprintf('datapath plugins installed: %s', join(', ', keys(installed_dp))));
+
+		return installed_dp;
+	};
+
 	// resolve a control protocol to its backend module + a human package name
 	let backend_for = (proto) =>
 		(proto == 'mbim') ? { be: load_mbim_fn(), pkg: 'wwand-mbim' } :
@@ -1042,24 +1089,35 @@ export function create(opts)
 		// muxes over VLANs and NCM has no mux at all.
 		let mux = cfg.mux ?? 'auto';
 
-		let dp_plugin = null;
+		// the datapath candidates handed to netlink.select_backend: exactly the
+		// one named by `option mux`, or — under 'auto' — every installed plugin,
+		// each of which decides for itself via probe() whether this box is its
+		// hardware. Only the QMI datapath is pluggable: MBIM muxes over VLANs
+		// and NCM has no mux at all.
+		let dp_plugins = null;
 
-		if (proto != 'mbim' && proto != 'ncm' && !nlmod.builtin_mux(mux)) {
-			dp_plugin = load_datapath_fn(mux);
+		if (proto != 'mbim' && proto != 'ncm') {
+			if (!nlmod.builtin_mux(mux)) {
+				let impl = load_datapath_fn(mux);
 
-			if (!nlmod.valid_plugin(dp_plugin)) {
-				log('err', sprintf('modem %s: mux backend %J needs the wwand-datapath-%s package, which is not installed (or does not provide a datapath)',
-					name, mux, mux));
-				entry.control_note = sprintf('wwand-datapath-%s package not installed', mux);
-				return;
+				if (!nlmod.valid_plugin(impl)) {
+					log('err', sprintf('modem %s: mux backend %J needs the wwand-datapath-%s package, which is not installed (or does not provide a datapath)',
+						name, mux, mux));
+					entry.control_note = sprintf('wwand-datapath-%s package not installed', mux);
+					return;
+				}
+
+				dp_plugins = { [mux]: impl };
 			}
+			else if (mux == 'auto')
+				dp_plugins = list_datapaths();
 		}
 
 		let datapath =
 			(proto == 'mbim') ? { netdev: entry.netdev, mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx } :
 			(proto == 'ncm')  ? { netdev: entry.netdev, fx: deps.datapath_fx } :
 			                    { netdev: entry.netdev, ep_id: ep_id, ep_type: ep_type, mux: cfg.mux,
-			                      plugin: dp_plugin,
+			                      plugins: dp_plugins,
 			                      dgram_size: cfg.dl_datagram_max_size,
 			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx };
 
@@ -1455,6 +1513,10 @@ export function create(opts)
 				fcc_lock: entry.modem?.fcc_lock,
 				// eSIM surface from the bring-up refresh (eUICC active only)
 				esim: entry.modem?.esim_info ?? null,
+				// the datapath that actually came up (rmnet/qmimux/none or a
+				// plugin name) — with 'auto' able to land on a plugin, "which
+				// one won" must be visible without reading the log
+				datapath: entry.modem?.datapath?.backend,
 				proto_errors: entry.modem?.counters?.proto_errors,
 				qmi_errors: entry.modem?.counters?.proto_errors,   // deprecated alias
 

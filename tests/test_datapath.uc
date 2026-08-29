@@ -496,25 +496,51 @@ const vendor_caps = { ...caps_rmnet,
 
 let pfx = fakefx.create({ present: vendor_caps });
 
+// candidates are passed as a name -> impl map (the daemon builds it)
+let plugmap = { vendorx: plug };
+
 // named explicitly -> the plugin, after its own probe
-eq(netlink.select_backend(pfx, 'wwan0', 'vendorx', true, plug), 'vendorx',
+eq(netlink.select_backend(pfx, 'wwan0', 'vendorx', true, plugmap), 'vendorx',
 	'plugin: chosen when option mux names it');
 eq(netlink.select_backend(pfx, 'wwan0', 'vendorx', true, null), null,
 	'plugin: named but package missing -> null (caller reports it)');
-eq(netlink.select_backend(pfx, 'wwan0', 'vendorx', true, { probe: () => true }), null,
+eq(netlink.select_backend(pfx, 'wwan0', 'vendorx', true, { vendorx: { probe: () => true } }), null,
 	'plugin: object without links() is not a datapath');
 
 // a plugin whose probe says no is not silently replaced by a built-in
-eq(netlink.select_backend(fakefx.create({ present: caps_rmnet }), 'wwan0', 'vendorx', true, plug),
+eq(netlink.select_backend(fakefx.create({ present: caps_rmnet }), 'wwan0', 'vendorx', true, plugmap),
 	null, 'plugin: probe false -> null, never falls back to rmnet');
 
-// ... and it never wins 'auto', however capable it claims to be
-eq(netlink.select_backend(pfx, 'wwan0', 'auto', true, plug), 'rmnet',
-	'plugin: auto stays with the built-ins');
+// --- auto: the probe decides -------------------------------------------------
+//
+// An installed plugin that recognises the box is preferred over the built-ins —
+// that is how an accelerated datapath (rmnet_nss on ipq807x) takes over on a
+// zero-config box, where nobody will ever write `option mux`.
+eq(netlink.select_backend(pfx, 'wwan0', 'auto', true, plugmap), 'vendorx',
+	'auto: a matching plugin beats rmnet');
+
+// ... on hardware it does not fit, it changes nothing
+eq(netlink.select_backend(fakefx.create({ present: caps_rmnet }), 'wwan0', 'auto', true, plugmap),
+	'rmnet', 'auto: a plugin whose probe says no leaves rmnet alone');
+
+// no probe = cannot tell = must be asked for by name
+eq(netlink.select_backend(pfx, 'wwan0', 'auto', true, { blind: { links: () => [] } }), 'rmnet',
+	'auto: a plugin without probe() never self-selects');
+eq(netlink.select_backend(pfx, 'wwan0', 'blind', true, { blind: { links: () => [] } }), 'blind',
+	'auto: ... but naming it still works');
+
+// two claimants: deterministic by name, and loud about it
+let twofx = fakefx.create({ present: vendor_caps });
+let logs2 = [];
+twofx.log = (lvl, msg) => push(logs2, sprintf('%s %s', lvl, msg));
+eq(netlink.select_backend(twofx, 'wwan0', 'auto', true,
+	{ zeta: plug, alpha: plug }), 'alpha', 'auto: several matches -> first by name');
+ok(length(filter(logs2, (m) => match(m, /^warn .*plugins claim this device/))) == 1,
+	'auto: a second claimant is warned about, not silently dropped');
 
 // the generic parts of setup() must still run around links()
 res = netlink.setup(pfx, {
-	netdev: 'wwan0', backend: 'vendorx', plugin: plug,
+	netdev: 'wwan0', backend: 'vendorx', plugins: plugmap,
 	mux: [ { id: 1, name: 'wwand0' }, { id: 2, name: 'wwand1', mtu: 1430 } ],
 	dgram_size: 4096,
 });
@@ -545,7 +571,7 @@ let pruned = [];
 let plug2 = { ...plug, prune: (a, nd, wanted) => push(pruned, [ nd, wanted ]) };
 
 netlink.setup(fakefx.create({ present: vendor_caps }), {
-	netdev: 'wwan0', backend: 'vendorx', plugin: plug2,
+	netdev: 'wwan0', backend: 'vendorx', plugins: { vendorx: plug2 },
 	mux: [ { id: 1, name: 'wwand0' } ], dgram_size: 4096,
 });
 

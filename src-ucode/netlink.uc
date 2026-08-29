@@ -47,8 +47,11 @@ export const RMNET_EGRESS_CKSUMV5 = 0x20;
 //   // wwand/datapath_vendorx.uc
 //   'use strict';
 //   return {
-//       // usable on this device? (sysfs probe; optional)
-//       probe: (fx, netdev) => fx.exists('/sys/class/net/' + netdev + '/vendor_mux'),
+//       // Does this box belong to me? A plugin that answers yes here is
+//       // preferred over the built-ins under `option mux 'auto'`, so the probe
+//       // IS the contract — make it specific. Omit probe entirely to be
+//       // explicit-only (usable, but only when `option mux` names you).
+//       probe: (fx, netdev, info) => fx.exists('/sys/module/rmnet_nss'),
 //
 //       // create/adopt the children, fill ctx.mux_mtus, return their names
 //       links: (fx, ctx) => { … return [ 'wwand0' ]; },
@@ -70,8 +73,19 @@ export const RMNET_EGRESS_CKSUMV5 = 0x20;
 // child's name, urb/MTU handling, link up, the vendor link_state gate and
 // uplink aggregation.
 //
-// A plugin is used ONLY when `option mux` names it explicitly, never from
-// 'auto': installing a package must not silently move a working modem off rmnet.
+// Choosing one. `option mux 'vendorx'` names it outright and always wins. Under
+// the default 'auto' the rule is just the probe: an installed plugin whose
+// probe() recognises the box is preferred over the built-ins. That is how an
+// accelerated datapath takes over on the hardware it belongs to (rmnet_nss on an
+// ipq807x with NSS) without anyone editing a config — a zero-config autosetup
+// box included, which is exactly where nobody will.
+//
+// The probe is therefore the whole contract, and it must be specific: a plugin
+// installed on hardware it does not fit has to say so and change nothing. A
+// plugin with NO probe is explicit-only — something that cannot tell whether it
+// fits must be asked for by name. Should several probes match, the first by name
+// wins and the others are named in the log; the choice is logged at notice
+// either way, and status reports the datapath that actually came up.
 
 // mux modes this module implements itself (everything else needs a plugin)
 export function builtin_mux(name)
@@ -426,18 +440,46 @@ function prune_mux_children(fx, netdev, wanted)
 
 // decide the mux backend for a modem
 //   cfg_mux: 'auto' | 'rmnet' | 'qmimux' | 'none'
-export function select_backend(fx, netdev, cfg_mux, want_mux, plugin)
+// `plugins` is a name -> implementation object IN PREFERENCE ORDER (ucode keeps
+// insertion order; the daemon inserts by declared `auto` priority). `info`
+// carries what the caller knows about the modem, currently { model }.
+export function select_backend(fx, netdev, cfg_mux, want_mux, plugins, info)
 {
 	if (!want_mux || cfg_mux == 'none')
 		return 'none';
 
-	// an add-on datapath is taken only when `option mux` named it (see the
-	// plugin comment above): 'auto' stays the built-ins' business
+	// named outright: that one or nothing — never a quiet substitution
 	if (!builtin_mux(cfg_mux)) {
+		let plugin = plugins?.[cfg_mux];
+
 		if (!valid_plugin(plugin))
 			return null;   // caller reports the missing package
 
-		return (!plugin.probe || plugin.probe(fx, netdev)) ? cfg_mux : null;
+		return (!plugin.probe || plugin.probe(fx, netdev, info)) ? cfg_mux : null;
+	}
+
+	// 'auto': a plugin that recognises the box comes before the built-ins (see
+	// the plugin comment above). No probe = no offer.
+	if (cfg_mux == 'auto') {
+		let matched = [];
+
+		for (let name, impl in (plugins ?? {}))
+			if (valid_plugin(impl) && impl.probe && impl.probe(fx, netdev, info))
+				push(matched, name);
+
+		if (length(matched)) {
+			// deterministic, and a second match is a packaging mistake worth
+			// seeing rather than a coin flip
+			sort(matched);
+
+			if (length(matched) > 1)
+				fx.log('warn', sprintf('datapath: %d plugins claim this device (%s) — using %s; name one with `option mux` to be sure',
+					length(matched), join(', ', matched), matched[0]));
+
+			fx.log('notice', sprintf('datapath: %s selected by probe (over the built-ins)', matched[0]));
+
+			return matched[0];
+		}
 	}
 
 	// pass_through is qmi_wwan's way of handing raw QMAP frames to rmnet.
@@ -613,8 +655,8 @@ export function setup(fx, opts)
 	// work: a stale child may be sitting on the very name this setup wants,
 	// and it also pins the parent's MTU.
 	let wanted = map(mux, (e) => e.name ?? sprintf('%sm%d', netdev, e.id));
-	let prune = (!builtin_mux(backend) && type(opts.plugin?.prune) == 'function')
-		? opts.plugin.prune : prune_mux_children;
+	let prune = (type(opts.plugins?.[backend]?.prune) == 'function' && !builtin_mux(backend))
+		? opts.plugins[backend].prune : prune_mux_children;
 
 	prune(fx, netdev, wanted);
 
@@ -693,7 +735,10 @@ export function setup(fx, opts)
 			write_attr(fx, urb_attr, sprintf('%d', urb_size), 'urb size');
 	}
 
-	let plug = (!builtin_mux(backend) && valid_plugin(opts.plugin)) ? opts.plugin : null;
+	let plug = !builtin_mux(backend) ? opts.plugins?.[backend] : null;
+
+	if (plug && !valid_plugin(plug))
+		plug = null;
 
 	if (backend == 'rmnet')
 		mux_devs = setup_rmnet_links(fx, netdev, mux, opts.v5, urb_size, mux_mtus);

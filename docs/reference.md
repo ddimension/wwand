@@ -428,11 +428,18 @@ see [Troubleshooting](#troubleshooting).
 **Datapath plugins.** `option mux` also accepts the name of an add-on datapath
 package: `option mux 'vendorx'` makes the daemon load `wwand.datapath_vendorx`
 (shipped by a `wwand-datapath-vendorx` package) and use it instead of
-rmnet/qmimux. A plugin is used **only** when named explicitly — never picked by
-`auto` — so installing one cannot move a working modem off rmnet. If the package
-is missing, the modem is not started and its `control_note` says which package
-to install; there is deliberately no fallback to a datapath the config did not
-ask for. Writing one: `docs/extending.md`.
+rmnet/qmimux — that one or nothing. If the package is missing, the modem is not
+started and its `control_note` says which package to install; there is
+deliberately no fallback to a datapath the config did not ask for.
+
+Under `auto` (the default) the daemon looks at every installed plugin and lets
+each decide via its own probe whether this box is its hardware; one that says yes
+is preferred over rmnet/qmimux. This is how an accelerated datapath — e.g.
+`rmnet_nss` on an ipq807x with NSS offload — takes over on the boards it belongs
+to without any configuration, autosetup included. A plugin that ships no probe is
+never self-selected. `ubus call wwand status` reports the datapath each modem
+actually came up on (`modems.<name>.datapath`), and the choice is logged.
+Writing one: `docs/extending.md`.
 
 ### Old-style configurations (compat layer)
 

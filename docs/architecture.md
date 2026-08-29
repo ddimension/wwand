@@ -187,9 +187,12 @@ actually specific (creating/adopting the children) and keeps everything else
 shared. Deliberately threaded through rather than collected in a module-level
 registry: ucode gives a `require()`d plain script its **own copies** of the
 modules it imports, so a plugin registering itself in `netlink.uc` would
-populate a different instance than the daemon's and silently do nothing. A
-plugin is only ever used when named explicitly — `auto` stays with the built-ins.
-See [extending.md §4](extending.md#4-adding-a-datapath-backend).
+populate a different instance than the daemon's and silently do nothing. Under
+`auto` the daemon scans its module directory for installed plugins and each
+decides by its own `probe()` whether the box is its hardware — that is how an
+accelerated datapath (`rmnet_nss` on ipq807x/NSS) takes over on a zero-config
+box; a plugin without a probe is explicit-only, and `option mux` naming one wins
+over everything. See [extending.md §4](extending.md#4-adding-a-datapath-backend).
 All of it stays **capability-gated**: aggregation is applied only when the modem
 confirms QMAP in its echo (non-zero DL size) — a non-QMAP modem, or a config
 without a mux, drops to plain raw-ip framing and the extra TLVs are harmless.

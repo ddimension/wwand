@@ -212,7 +212,7 @@ started = [];
 let dp_asked = [];
 let dplug = { links: () => [] };
 
-function mkdp(mux, impl, real)
+function mkdp(mux, impl, real, scandir)
 {
 	let parsed = config.parse({ network: {
 		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', mux: mux },
@@ -225,7 +225,7 @@ function mkdp(mux, impl, real)
 			// of a stub — the packaging contract, see below
 			load_datapath: real ? null : ((n) => { push(dp_asked, n); return impl; }),
 			load_qmi: () => ({
-				modem: { create: (o) => { push(started, o.datapath?.plugin ?? 'builtin');
+				modem: { create: (o) => { push(started, o.datapath?.plugins ?? 'builtin');
 					return { id: 'm', start: () => null, stop: () => null,
 					         note_connect_success: () => null, note_connect_failure: () => null,
 					         datapath: {} }; } },
@@ -233,7 +233,10 @@ function mkdp(mux, impl, real)
 			}),
 			emit_event: () => null, kick_interface: () => null, renew_interface: () => null,
 			down_interface: () => null, iface_status: (i, cb) => cb({ up: false }),
-			datapath_fx: null, read_config: () => parsed,
+			// the module-dir scan behind `option mux 'auto'` runs over fx.glob
+			ucode_dir: scandir,
+			datapath_fx: scandir ? { glob: (pat) => fs.glob(pat) } : null,
+			read_config: () => parsed,
 			resolve_modem_device: (cfg) => cfg.device,
 			resolve_netdev: () => 'wwan0',
 			learn_device: () => null, learn_modem_path: () => null,
@@ -245,7 +248,7 @@ function mkdp(mux, impl, real)
 
 let dp_ok = mkdp('vendorx', dplug);
 eq(dp_asked, [ 'vendorx' ], 'plugin: the daemon asks for wwand.datapath_vendorx');
-eq(started, [ dplug ], 'plugin: the loaded object reaches the modem datapath');
+eq(started, [ { vendorx: dplug } ], 'plugin: the loaded object reaches the modem datapath');
 eq(dp_ok.modems.m0.control_note ?? null, null, 'plugin: no note when it loaded');
 
 started = []; dp_asked = [];
@@ -254,11 +257,11 @@ eq(started, [], 'plugin: a modem whose datapath package is missing is not starte
 ok(match(dp_missing.modems.m0.control_note ?? '', /wwand-datapath-vendory package not installed/),
 	'plugin: control_note names the package to install');
 
-// a built-in never consults the loader
+// a named built-in never consults the loader (nor the scan)
 started = []; dp_asked = [];
 mkdp('rmnet', null);
-eq(dp_asked, [], 'plugin: a built-in mux does not go looking for a package');
-eq(started, [ 'builtin' ], 'plugin: built-in starts with no plugin object');
+eq(dp_asked, [], 'plugin: a named built-in mux does not go looking for a package');
+eq(started, [ 'builtin' ], 'plugin: built-in starts with no candidates');
 
 // ... and the same over the daemon's OWN loader against a REAL module file on
 // the search path: the packaging contract end to end — module name
@@ -278,8 +281,16 @@ push(global.REQUIRE_SEARCH_PATH, dpdir + '/*.uc');
 started = [];
 let dp_real = mkdp('testplug', null, true);
 eq(dp_real.modems.m0.control_note ?? null, null, 'plugin: real require() found the module');
-ok(type(started[0]) == 'object' && type(started[0].links) == 'function',
+ok(type(started[0]?.testplug?.links) == 'function',
 	'plugin: the module\'s returned implementation reaches the modem');
+
+// 'auto' hands over every INSTALLED plugin, found by scanning the module dir —
+// without that scan a plugin could never introduce itself on a zero-config box
+started = [];
+let dp_auto = mkdp('auto', null, true, dpdir + '/wwand');
+ok(type(started[0]?.testplug?.links) == 'function',
+	'auto: the installed plugin is discovered by the module scan');
+eq(dp_auto.modems.m0.control_note ?? null, null, 'auto: nothing to complain about');
 
 // an installed-but-broken module (no links()) is refused like a missing one
 pf = fs.open(dpdir + '/wwand/datapath_brokenplug.uc', 'w');

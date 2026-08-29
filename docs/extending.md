@@ -191,8 +191,10 @@ Ship `wwand/datapath_<name>.uc` as a `require()`-able **plain script** (top-leve
 'use strict';
 
 return {
-    // usable on this device? optional; without it the backend is assumed usable
-    probe: (fx, netdev) => fx.exists(sprintf('/sys/class/net/%s/vendor_mux', netdev)),
+    // Does this box belong to me? Under `option mux 'auto'` a plugin that says
+    // yes here is preferred over the built-ins — so this probe is the whole
+    // contract; make it specific. Omit it entirely to be explicit-only.
+    probe: (fx, netdev, info) => fx.exists('/sys/module/rmnet_nss'),
 
     // create or adopt the mux children, fill ctx.mux_mtus, return their names
     links: (fx, ctx) => {
@@ -239,13 +241,34 @@ aggregation.
 > implementation is returned and threaded through instead. Pure helpers are
 > fine; anything stateful is not.
 
-Selecting it: `option mux 'vendorx'` on the `wwand_modem`. The daemon then
-`require()`s `wwand.datapath_vendorx` before the modem starts. A plugin is used
-**only** when named explicitly — never chosen by `auto` — so installing a package
-cannot move a working modem off rmnet. Missing package → the modem is not
-started and `control_note` says which one to install (no fallback to a datapath
-the config did not ask for). The name must match `^[a-z][a-z0-9_]*$`; it ends up
-in a module path and `config.uc` rejects anything else.
+**Selecting it.** `option mux 'vendorx'` on the `wwand_modem` names it outright
+and always wins; the daemon `require()`s `wwand.datapath_vendorx` before the
+modem starts. Missing package → the modem is not started and `control_note` says
+which one to install, deliberately without falling back to a datapath the config
+did not ask for. The name must match `^[a-z][a-z0-9_]*$` — it ends up in a module
+path, and `config.uc` rejects anything else.
+
+Under the default `option mux 'auto'` the daemon scans its module directory for
+installed `datapath_*.uc`, and **a plugin whose `probe()` recognises the box is
+preferred over the built-ins**. That is the point of the probe: an accelerated
+datapath — `rmnet_nss` on an ipq807x with NSS — takes over on the hardware it
+belongs to without anyone editing a config, including on a zero-config autosetup
+box, where nobody ever will. Make the probe narrow: on hardware it does not fit,
+your plugin must change nothing. A plugin **without** a probe is explicit-only —
+something that cannot tell whether it fits has to be asked for by name. If two
+plugins claim the same device, the first by name wins and the other is named in
+a warning; the choice is logged at notice either way, and `ubus call wwand
+status` reports the datapath that actually came up.
+
+```
+# nothing configured -> rmnet_nss probes true on this box and takes over
+config wwand_modem 'm0'
+	option device '/dev/cdc-wdm0'
+
+# ... or pin it, either way
+	option mux 'rmnet_nss'      # this one or nothing
+	option mux 'rmnet'          # a built-in: plugins are not consulted at all
+```
 
 Package it like the backend packages: `wwand-datapath-vendorx`, `DEPENDS +wwand`
 (plus `+wwand-qmi`, since only the QMI datapath is pluggable — MBIM muxes over
