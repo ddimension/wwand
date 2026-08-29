@@ -160,6 +160,13 @@ be decided by load order; `_wwand_apply_settings` builds the netifd update).
 - `Date.now()`/`new Date()`/`Math.random()` unavailable; `time()` is a builtin
   (works in the daemon; not in Workflow scripts).
 - `replace(s, /-/g, '')` for global replace (string arg replaces first only).
+- **`require()` gives the loaded script its OWN copies of imported modules.** A
+  plain script pulled in with `require()` does NOT share module instances with
+  the importing side, so module-level mutable state (a registry, a cache) is
+  invisible across that boundary — and silently so. Verified on the host
+  interpreter; it is why the datapath plugins RETURN their implementation
+  instead of registering it (`netlink.uc`, `docs/extending.md` §4). The
+  `*_lazy.uc` shims are unaffected because they only hand back factories.
 - **Module-level `export function f() {…}` MUST end with `};`** — the OpenWrt
   ucode parser errors ("Expecting ';'" at the next export) without it; the
   newer host-built ucode is lenient, so `run_tests.sh` does NOT catch this.
@@ -194,9 +201,9 @@ RG650E-EU. **Reflashed often → SSH host key changes** (hence UserKnownHostsFil
 No sftp/scp on the device → deploy via `tar | ssh` or install the .apk.
 **Always `sync` after a file deploy.** A `tar x`/`cp` deploy **drops the +x
 bit** on the files that get *executed* — this bit twice:
-- `/lib/netifd/proto/wwand.sh` — netifd can't exec it, the `wwand`/`qmi` proto
-  handlers never register (`ubus call network get_proto_handlers` has no `wwand`),
-  and interfaces fall back to `proto: none` (up, no L3 config).
+- `/lib/netifd/proto/wwand.sh` — netifd can't exec it, the `wwand` proto handler
+  never registers (`ubus call network get_proto_handlers` has no `wwand`), and
+  interfaces fall back to `proto: none` (up, no L3 config).
 - `/usr/sbin/wwand` (the daemon, a ucode script with `#!/usr/bin/env ucode`) —
   procd exec fails with **exit 127**, respawn retries exhaust, and wwand is dead
   (the WAN persists by no-proto-task design, so ping still works — misleading).

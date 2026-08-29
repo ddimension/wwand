@@ -421,6 +421,22 @@ ok(length(filter(r.warnings, (w) => index(w, 'pincode must be digits') >= 0)) ==
 ok(!length(filter(r.warnings, (w) => index(w, 'ATD*99#') >= 0)),
 	'at-safe: the offending value is never put in the warning');
 
+// `option mux` may name a datapath plugin, which the daemon require()s as
+// wwand.datapath_<name> — so the value lands in a MODULE PATH and its shape is
+// checked here. Whether the package exists is a runtime question (control_note).
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'vendor_x2' },
+		m1: { '.type': 'wwand_modem', usb_path: '1-2', mux: '../evil' },
+		m2: { '.type': 'wwand_modem', usb_path: '1-3', mux: 'rmnet' },
+	},
+});
+eq(r.modems.m0.mux, 'vendor_x2', 'mux name: a plugin name passes through');
+eq(r.modems.m1.mux, 'auto', 'mux name: a path-shaped value is refused');
+eq(r.modems.m2.mux, 'rmnet', 'mux name: built-ins unaffected');
+ok(length(filter(r.warnings, (w) => index(w, 'invalid mux') >= 0)) == 1,
+	'mux name: exactly the bad one warns');
+
 // the compat parser (no `option modem`) resolves the channel through the same
 // helper — the two interface parsers must not drift
 r = padopt({

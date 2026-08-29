@@ -724,6 +724,18 @@ function validate(result)
 					name, f));
 	}
 
+	// `option mux` names a datapath: the built-ins (auto/none/rmnet/qmimux) or a
+	// plugin package, which the daemon require()s as wwand.datapath_<name>. The
+	// value therefore ends up in a MODULE PATH, so the shape is checked here —
+	// and an unusable value falls back to 'auto' rather than reaching require().
+	// Whether a named plugin is actually installed can only be decided at
+	// runtime; the daemon reports that as a control_note.
+	for (let mname, m in result.modems)
+		if (m.mux != null && !match(m.mux, /^[a-z][a-z0-9_]*$/)) {
+			push(result.warnings, sprintf("modem %s: invalid mux %J, using 'auto'", mname, m.mux));
+			m.mux = 'auto';
+		}
+
 	// same reasoning for the PIN (AT+CPIN="…"), which is digits by definition
 	for (let mname, m in result.modems)
 		if (type(m.pincode) == 'string' && length(m.pincode) && match(m.pincode, /[^0-9]/))

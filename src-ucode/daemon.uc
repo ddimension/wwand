@@ -41,6 +41,32 @@ let lazy_backend = (mod) => {
 	};
 };
 
+// datapath plugins: a modem whose `option mux` names something other than a
+// built-in (rmnet/qmimux/none/auto) pulls in `wwand.datapath_<name>`, which
+// registers itself with netlink (see the registry comment in netlink.uc). Same
+// shape as the control backends above: cached, and a missing package is a
+// control_note rather than a crash. The name is restricted before it reaches
+// require() — it comes from uci and ends up as a module path.
+let dp_plugins = {};
+
+let load_datapath = (name) => {
+	if (!match(name ?? '', /^[a-z][a-z0-9_]*$/))
+		return null;
+
+	if (!exists(dp_plugins, name)) {
+		try {
+			// the plain script RETURNS its implementation — it cannot register
+			// itself anywhere, see the plugin comment in netlink.uc
+			dp_plugins[name] = require('wwand.datapath_' + name);
+		}
+		catch (e) {
+			dp_plugins[name] = null;
+		}
+	}
+
+	return dp_plugins[name];
+};
+
 let load_qmi = lazy_backend('wwand.qmi_lazy');
 let load_mbim = lazy_backend('wwand.mbim_lazy');
 // NCM support (cdc_ncm / cdc_ether, AT-controlled) is a separate package (wwand-ncm)
@@ -70,6 +96,7 @@ export function create(opts)
 	let load_qmi_fn = deps.load_qmi ?? load_qmi;
 	let load_mbim_fn = deps.load_mbim ?? load_mbim;
 	let load_ncm_fn = deps.load_ncm ?? load_ncm;
+	let load_datapath_fn = deps.load_datapath ?? load_datapath;
 
 	// resolve a control protocol to its backend module + a human package name
 	let backend_for = (proto) =>
@@ -1009,10 +1036,30 @@ export function create(opts)
 
 		let be = chosen.be;
 
+		// same for the datapath: `option mux` may name an add-on backend, which
+		// has to be loaded (and registered with netlink) BEFORE the modem starts
+		// its datapath bring-up. Only the QMI datapath is pluggable today — MBIM
+		// muxes over VLANs and NCM has no mux at all.
+		let mux = cfg.mux ?? 'auto';
+
+		let dp_plugin = null;
+
+		if (proto != 'mbim' && proto != 'ncm' && !nlmod.builtin_mux(mux)) {
+			dp_plugin = load_datapath_fn(mux);
+
+			if (!nlmod.valid_plugin(dp_plugin)) {
+				log('err', sprintf('modem %s: mux backend %J needs the wwand-datapath-%s package, which is not installed (or does not provide a datapath)',
+					name, mux, mux));
+				entry.control_note = sprintf('wwand-datapath-%s package not installed', mux);
+				return;
+			}
+		}
+
 		let datapath =
 			(proto == 'mbim') ? { netdev: entry.netdev, mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx } :
 			(proto == 'ncm')  ? { netdev: entry.netdev, fx: deps.datapath_fx } :
 			                    { netdev: entry.netdev, ep_id: ep_id, ep_type: ep_type, mux: cfg.mux,
+			                      plugin: dp_plugin,
 			                      dgram_size: cfg.dl_datagram_max_size,
 			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx };
 

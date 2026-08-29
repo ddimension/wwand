@@ -5,7 +5,7 @@ usually means adding a row to a table; adding a feature means adding one
 declarative schema entry or one small module behind an existing contract. This
 guide is the map: what to touch, where, and how to test it.
 
-Every change is host-testable — see [§8 Testing](#8-testing). Run the suites
+Every change is host-testable — see [§9 Testing](#9-testing). Run the suites
 before every commit; reproduce a field problem as a mock scenario first.
 
 **Contents**
@@ -13,11 +13,12 @@ before every commit; reproduce a field problem as a mock scenario first.
 1. [Adding a modem / firmware quirk](#1-adding-a-modem--firmware-quirk)
 2. [Adding a config option](#2-adding-a-config-option)
 3. [Adding a control backend](#3-adding-a-control-backend)
-4. [Adding telemetry](#4-adding-telemetry)
-5. [Adding a ubus method](#5-adding-a-ubus-method)
-6. [Extending the LuCI UI](#6-extending-the-luci-ui)
-7. [Adding a board profile](#7-adding-a-board-profile)
-8. [Testing](#8-testing)
+4. [Adding a datapath backend](#4-adding-a-datapath-backend)
+5. [Adding telemetry](#5-adding-telemetry)
+6. [Adding a ubus method](#6-adding-a-ubus-method)
+7. [Extending the LuCI UI](#7-extending-the-luci-ui)
+8. [Adding a board profile](#8-adding-a-board-profile)
+9. [Testing](#9-testing)
 
 ---
 
@@ -174,7 +175,92 @@ depends on `wwand-qmi`.
 
 ---
 
-## 4. Adding telemetry
+## 4. Adding a datapath backend
+
+The control backend talks to the modem; the **datapath** builds the kernel side
+of the data link. wwand ships two for QMI — `rmnet` (QMAP pass-through, the
+default where available) and `qmimux` (qmi_wwan's own `add_mux`) — plus `none`
+for plain raw-ip. A vendor driver with its own mux mechanism can be added as an
+**add-on package, without patching wwand**.
+
+Ship `wwand/datapath_<name>.uc` as a `require()`-able **plain script** (top-level
+`return`, like the `*_lazy.uc` shims) that RETURNS its implementation:
+
+```js
+// wwand/datapath_vendorx.uc
+'use strict';
+
+return {
+    // usable on this device? optional; without it the backend is assumed usable
+    probe: (fx, netdev) => fx.exists(sprintf('/sys/class/net/%s/vendor_mux', netdev)),
+
+    // create or adopt the mux children, fill ctx.mux_mtus, return their names
+    links: (fx, ctx) => {
+        let out = [];
+
+        for (let e in ctx.mux) {
+            let child = e.name ?? sprintf('%sm%d', ctx.netdev, e.id);
+
+            ctx.mux_mtus[child] = e.mtu;
+            ctx.write_attr(sprintf('%s/vendor_add', ctx.sys), sprintf('%d', e.id), 'vendor add');
+            push(out, child);
+        }
+
+        return out;
+    },
+
+    // optional: drop children this config no longer wants. The default matches
+    // children by iflink, which covers anything that is a real netdev child.
+    prune: (fx, netdev, wanted) => { /* … */ },
+
+    // optional: opt into the rmnet-style uplink aggregation call
+    tx_aggr: true,
+};
+```
+
+`links(fx, ctx)` is the only part that is yours. `ctx` carries `netdev` (the
+parent — possibly already renamed, use this one), `sys`
+(`/sys/class/net/<netdev>/qmi`), `mux` (`[{ id, name?, mtu? }]`), `urb_size`,
+`v5` (MAPv5 checksum offload negotiated over WDA), `mux_mtus` (fill it: child →
+configured MTU) and the full `opts`. It also carries the three helpers this
+layer uses itself — `ctx.link(what, dev, opts)`, `ctx.write_attr(path, value,
+what)`, `ctx.child_mtu(mtu, what)` — so the common case needs **no imports at
+all**.
+
+Everything around `links()` stays shared and you do not reimplement it: pruning
+stale children, moving a parent off a child's name, the urb-size write, the
+parent MTU, bringing links up, child MTUs, the vendor `link_state` gate, uplink
+aggregation.
+
+> **Do not import wwand modules for shared state.** ucode hands a `require()`d
+> plain script its **own copies** of the modules it imports, so a plugin that
+> called a `register_backend()` in `netlink.uc` would populate a *different*
+> instance than the daemon's and vanish without a trace. That is why the
+> implementation is returned and threaded through instead. Pure helpers are
+> fine; anything stateful is not.
+
+Selecting it: `option mux 'vendorx'` on the `wwand_modem`. The daemon then
+`require()`s `wwand.datapath_vendorx` before the modem starts. A plugin is used
+**only** when named explicitly — never chosen by `auto` — so installing a package
+cannot move a working modem off rmnet. Missing package → the modem is not
+started and `control_note` says which one to install (no fallback to a datapath
+the config did not ask for). The name must match `^[a-z][a-z0-9_]*$`; it ends up
+in a module path and `config.uc` rejects anything else.
+
+Package it like the backend packages: `wwand-datapath-vendorx`, `DEPENDS +wwand`
+(plus `+wwand-qmi`, since only the QMI datapath is pluggable — MBIM muxes over
+VLANs and NCM has no mux), with an explicit per-file install list. Out of tree
+you compile the module yourself or ship source; in tree, add it to
+`WWAND_UCODE_PLAIN` in the root `CMakeLists.txt`.
+
+Testing: `tests/test_datapath.uc` exercises a plugin against the fake `fx` with
+no hardware — pass your object to `netlink.select_backend()` / `netlink.setup()`
+and assert the action trace. `tests/test_wan6.uc` covers the daemon side
+(`deps.load_datapath`), including the missing-package `control_note`.
+
+---
+
+## 5. Adding telemetry
 
 Telemetry decoders live in the per-transport backends and are chosen per
 capability:
@@ -206,7 +292,7 @@ capability:
 
 ---
 
-## 5. Adding a ubus method
+## 6. Adding a ubus method
 
 1. **Daemon method** — implement `self.my_method(args…, cb)` in `src-ucode/daemon.uc`.
 2. **ubus binding** — in `src-ucode/ubus.uc`, add the method. For a deferred
@@ -231,7 +317,7 @@ capability:
 
 ---
 
-## 6. Extending the LuCI UI
+## 7. Extending the LuCI UI
 
 Two packages, both editing `/etc/config/network` and calling the `wwand` ubus
 object:
@@ -251,7 +337,7 @@ like and where a new field lands), see [luci.md](luci.md).
 
 ---
 
-## 7. Adding a board profile
+## 8. Adding a board profile
 
 Board-specific modem power/reset GPIOs and status LEDs live in one table in
 `src-ucode/board.uc`, keyed by the `/etc/board.json` model id. To support a new
@@ -280,7 +366,7 @@ the `modem_repower` ubus method pick this up automatically; the config
 
 ---
 
-## 8. Testing
+## 9. Testing
 
 ```
 cd wwand/tests && sh run_tests.sh      # host-side, no hardware

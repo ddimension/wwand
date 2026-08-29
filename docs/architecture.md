@@ -178,6 +178,18 @@ modems (e.g. RG500Q on M.2) are typed correctly instead of a hardcoded HSUSB, in
 both `SET_DATA_FORMAT` and `BIND_MUX_DATA_PORT`; the bind also tags the client as
 tethered (`client_type`). A vendor `qmi_wwan` that gates each mux behind a
 `link_state` sysfs node is opened per channel (existence-gated, no-op on mainline).
+
+**Pluggable.** A third datapath — a vendor driver with its own mux mechanism —
+can be added as an add-on package without patching wwand: `option mux` names it,
+the daemon `require()`s `wwand.datapath_<name>` and threads the returned
+implementation into `netlink.setup()`, which calls it for the one step that is
+actually specific (creating/adopting the children) and keeps everything else
+shared. Deliberately threaded through rather than collected in a module-level
+registry: ucode gives a `require()`d plain script its **own copies** of the
+modules it imports, so a plugin registering itself in `netlink.uc` would
+populate a different instance than the daemon's and silently do nothing. A
+plugin is only ever used when named explicitly — `auto` stays with the built-ins.
+See [extending.md §4](extending.md#4-adding-a-datapath-backend).
 All of it stays **capability-gated**: aggregation is applied only when the modem
 confirms QMAP in its echo (non-zero DL size) — a non-QMAP modem, or a config
 without a mux, drops to plain raw-ip framing and the extra TLVs are harmless.

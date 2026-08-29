@@ -459,4 +459,102 @@ eq(ntb.tx_timer_usecs, 400, 'ntb: coalescing timer');
 eq(netlink.cdc_ncm_params({ read: () => null }, 'wwan0'), null,
 	'ntb: non-cdc_ncm device -> null');
 
+// --- datapath plugins --------------------------------------------------------
+//
+// A third-party datapath is handed in as an object (never registered in a
+// module-level table: a require()d plain script gets its OWN copies of the
+// modules it imports, so registering would populate a different netlink
+// instance than the daemon's — see the plugin comment in netlink.uc).
+
+let calls = [];
+let plug = {
+	probe: (pfx, netdev) => pfx.exists(sprintf('/sys/class/net/%s/vendor_mux', netdev)),
+	links: (pfx, ctx) => {
+		push(calls, ctx);
+
+		let out = [];
+
+		for (let e in ctx.mux) {
+			let child = e.name ?? sprintf('%sm%d', ctx.netdev, e.id);
+
+			ctx.mux_mtus[child] = e.mtu;
+			ctx.write_attr(sprintf('%s/vendor_add', ctx.sys), sprintf('%d', e.id), 'vendor add');
+			ctx.link('vendor rename', sprintf('vendor%d', e.id), { rename: child });
+			push(out, child);
+		}
+
+		return out;
+	},
+};
+
+// the plugin's own sysfs node exists here; write_attr() skips absent ones (so a
+// vendor knob missing on this kernel is a warning, not a failure)
+const vendor_caps = { ...caps_rmnet,
+	'/sys/class/net/wwan0/vendor_mux': true,
+	'/sys/class/net/wwan0/qmi/vendor_add': true,
+};
+
+let pfx = fakefx.create({ present: vendor_caps });
+
+// named explicitly -> the plugin, after its own probe
+eq(netlink.select_backend(pfx, 'wwan0', 'vendorx', true, plug), 'vendorx',
+	'plugin: chosen when option mux names it');
+eq(netlink.select_backend(pfx, 'wwan0', 'vendorx', true, null), null,
+	'plugin: named but package missing -> null (caller reports it)');
+eq(netlink.select_backend(pfx, 'wwan0', 'vendorx', true, { probe: () => true }), null,
+	'plugin: object without links() is not a datapath');
+
+// a plugin whose probe says no is not silently replaced by a built-in
+eq(netlink.select_backend(fakefx.create({ present: caps_rmnet }), 'wwan0', 'vendorx', true, plug),
+	null, 'plugin: probe false -> null, never falls back to rmnet');
+
+// ... and it never wins 'auto', however capable it claims to be
+eq(netlink.select_backend(pfx, 'wwan0', 'auto', true, plug), 'rmnet',
+	'plugin: auto stays with the built-ins');
+
+// the generic parts of setup() must still run around links()
+res = netlink.setup(pfx, {
+	netdev: 'wwan0', backend: 'vendorx', plugin: plug,
+	mux: [ { id: 1, name: 'wwand0' }, { id: 2, name: 'wwand1', mtu: 1430 } ],
+	dgram_size: 4096,
+});
+
+eq(res.ok, true, 'plugin: setup ok');
+eq(res.mux_devs, [ 'wwand0', 'wwand1' ], 'plugin: children reported');
+eq(res.urb_size, 4100, 'plugin: urb still dgram + qmap header');
+eq(length(calls), 1, 'plugin: links() called once');
+eq(calls[0].netdev, 'wwan0', 'plugin ctx: parent');
+eq(calls[0].sys, '/sys/class/net/wwan0/qmi', 'plugin ctx: sysfs dir');
+eq(calls[0].urb_size, 4100, 'plugin ctx: urb size');
+eq(length(calls[0].mux), 2, 'plugin ctx: mux entries');
+
+ok(pfx.action_index('write /sys/class/net/wwan0/qmi/vendor_add 1') > 0,
+	'plugin: its own sysfs write ran (ctx.write_attr)');
+let i_purb = pfx.action_index('link_set wwan0 mtu 4100');
+let i_pup = pfx.action_index('link_set wwan0 up');
+ok(i_purb > pfx.action_index('write /sys/class/net/wwan0/qmi/vendor_add 2'),
+	'plugin: shared parent mtu after links()');
+ok(i_pup > i_purb, 'plugin: shared link up after that');
+ok(pfx.action_index('link_set wwand1 mtu 1430') > i_pup,
+	'plugin: shared child mtu from the ctx.mux_mtus it filled');
+ok(pfx.action_index('write /sys/class/net/wwan0/qmi/rx_urb_size 4100') > 0,
+	'plugin: shared urb-size write still happens');
+
+// prune stays the shared one unless the plugin brings its own
+let pruned = [];
+let plug2 = { ...plug, prune: (a, nd, wanted) => push(pruned, [ nd, wanted ]) };
+
+netlink.setup(fakefx.create({ present: vendor_caps }), {
+	netdev: 'wwan0', backend: 'vendorx', plugin: plug2,
+	mux: [ { id: 1, name: 'wwand0' } ], dgram_size: 4096,
+});
+
+eq(pruned, [ [ 'wwan0', [ 'wwand0' ] ] ], 'plugin: own prune() used when provided');
+
+// built-in names ignore a passed plugin entirely
+eq(netlink.builtin_mux('rmnet'), true, 'builtin_mux: rmnet');
+eq(netlink.builtin_mux('vendorx'), false, 'builtin_mux: a plugin name is not built-in');
+eq(netlink.valid_plugin({ links: () => [] }), true, 'valid_plugin: needs links()');
+eq(netlink.valid_plugin({}), false, 'valid_plugin: rejects an object without it');
+
 done('test_datapath');

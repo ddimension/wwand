@@ -326,6 +326,8 @@ config wwand_modem 'm0'
 	option mcc '262'                 # manual PLMN selection (optional, needs mnc)
 	option mnc '01'
 	option mux 'auto'                # auto|rmnet|qmimux|none — QMAP datapath backend
+	                                 #   (or the name of a datapath plugin
+	                                 #    package, see below)
 	option dl_datagram_max_size '0'  # QMAP DL aggregation bytes; 0 = model/board table
 	list at_init 'ATE0'              # extra AT commands, sent once before registration
 	option at2_external '0'          # 1: reserve the secondary AT port for external tools
@@ -415,6 +417,22 @@ see [Troubleshooting](#troubleshooting).
   auto-assigned; a warning names the assignment.
 - A device name `wwan0m0` means "muxed, auto-assign the channel, keep this link
   name" (QMAP channel 0 itself is invalid).
+- Two contexts of one modem cannot share a channel. If they do, the first in
+  uci order keeps it, the second is auto-assigned another and a warning names
+  both. Channels are per modem, so the same id on two modems is fine.
+- `mux_id` is a QMAP channel: **1–254** (0 means "no mux"). Out of range is
+  warned about and disables muxing for that interface, rather than being passed
+  down to a kernel that would either refuse it or — after the 16-bit cast —
+  silently use a different channel.
+
+**Datapath plugins.** `option mux` also accepts the name of an add-on datapath
+package: `option mux 'vendorx'` makes the daemon load `wwand.datapath_vendorx`
+(shipped by a `wwand-datapath-vendorx` package) and use it instead of
+rmnet/qmimux. A plugin is used **only** when named explicitly — never picked by
+`auto` — so installing one cannot move a working modem off rmnet. If the package
+is missing, the modem is not started and its `control_note` says which package
+to install; there is deliberately no fallback to a datapath the config did not
+ask for. Writing one: `docs/extending.md`.
 
 ### Old-style configurations (compat layer)
 
@@ -1198,7 +1216,7 @@ LT300 (MeiG SLM770A, reset GPIO `4g`; the autosetup HW-verify platform), NR7101
 off, no reset line, no modem LEDs). An **unknown board** yields a no-op
 profile — wwand runs unchanged, and any GPIO/LED can still be named per modem
 (`reset_gpio`). LuCI's reset-GPIO picker lists every named GPIO line the kernel
-exposes. Adding a profile: see [extending.md](extending.md#7-adding-a-board-profile).
+exposes. Adding a profile: see [extending.md](extending.md#8-adding-a-board-profile).
 
 ## Telemetry & diagnostics
 

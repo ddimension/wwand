@@ -55,7 +55,8 @@ export function setup(self, dp, o, next)
 			self.wda = wda;
 
 			let fxi = dp.fx ?? netlink.default_fx((level, msg) => log(level, msg));
-			let backend = netlink.select_backend(fxi, dp.netdev, dp.mux ?? 'auto', want_mux);
+			let backend = netlink.select_backend(fxi, dp.netdev, dp.mux ?? 'auto',
+				want_mux, dp.plugin);
 
 			if (backend == null)
 				return fail('datapath', { error: 'mux_backend_unavailable', mux: dp.mux });
@@ -111,6 +112,9 @@ export function setup(self, dp, o, next)
 					let r = netlink.setup(fxi, {
 						netdev: dp.netdev,
 						backend: backend,
+						// the add-on datapath, when `option mux` named one
+						// (loaded by the daemon; null for the built-ins)
+						plugin: dp.plugin,
 						v5: v5,
 						mux: map(dp.mux_links ?? [], (e) => ({
 							id: e.id,

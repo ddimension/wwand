@@ -10,11 +10,16 @@
 //   - modem 'removed' -> NO daemon action (netifd auto-manages the dynamic
 //     subinterface across device loss; the @device alias re-arms it)
 //   - a non-rndis datapath -> never touched
+//
+// It also covers the two other cases where the daemon REFUSES to start a modem
+// and has to explain itself through control_note rather than looking absent: a
+// control device a foreign dialer owns, and a missing datapath-plugin package.
 
 'use strict';
 
 import { eq, ok, done } from './lib/check.uc';
 import * as uloop from 'uloop';
+import * as fs from 'fs';
 import * as config from 'wwand/config.uc';
 import * as daemon_mod from 'wwand/daemon.uc';
 
@@ -196,6 +201,99 @@ let dok = mkblk({ network: {
 
 eq(started, [ '/dev/cdc-wdm0' ], 'blocklist: an unclaimed device starts as before');
 eq(dok.modems.m0.control_note ?? null, null, 'blocklist: no note when nothing claims it');
+
+// --- datapath plugin package -------------------------------------------------
+//
+// `option mux` may name an add-on datapath (wwand.datapath_<name>, require()d
+// by the daemon and threaded down to netlink.setup). Missing package -> the same
+// treatment as a missing control backend: a control_note, no crash, no silent
+// fallback to a datapath the config did not ask for.
+started = [];
+let dp_asked = [];
+let dplug = { links: () => [] };
+
+function mkdp(mux, impl, real)
+{
+	let parsed = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', mux: mux },
+	} });
+	let d = daemon_mod.create({
+		timing: TIMING,
+		deps: {
+			log: (lvl, msg) => push(blk_logs, msg),
+			// `real` exercises the daemon's OWN require()-based loader instead
+			// of a stub — the packaging contract, see below
+			load_datapath: real ? null : ((n) => { push(dp_asked, n); return impl; }),
+			load_qmi: () => ({
+				modem: { create: (o) => { push(started, o.datapath?.plugin ?? 'builtin');
+					return { id: 'm', start: () => null, stop: () => null,
+					         note_connect_success: () => null, note_connect_failure: () => null,
+					         datapath: {} }; } },
+				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem }) },
+			}),
+			emit_event: () => null, kick_interface: () => null, renew_interface: () => null,
+			down_interface: () => null, iface_status: (i, cb) => cb({ up: false }),
+			datapath_fx: null, read_config: () => parsed,
+			resolve_modem_device: (cfg) => cfg.device,
+			resolve_netdev: () => 'wwan0',
+			learn_device: () => null, learn_modem_path: () => null,
+		},
+	});
+	d.apply_config(parsed);
+	return d;
+}
+
+let dp_ok = mkdp('vendorx', dplug);
+eq(dp_asked, [ 'vendorx' ], 'plugin: the daemon asks for wwand.datapath_vendorx');
+eq(started, [ dplug ], 'plugin: the loaded object reaches the modem datapath');
+eq(dp_ok.modems.m0.control_note ?? null, null, 'plugin: no note when it loaded');
+
+started = []; dp_asked = [];
+let dp_missing = mkdp('vendory', null);
+eq(started, [], 'plugin: a modem whose datapath package is missing is not started');
+ok(match(dp_missing.modems.m0.control_note ?? '', /wwand-datapath-vendory package not installed/),
+	'plugin: control_note names the package to install');
+
+// a built-in never consults the loader
+started = []; dp_asked = [];
+mkdp('rmnet', null);
+eq(dp_asked, [], 'plugin: a built-in mux does not go looking for a package');
+eq(started, [ 'builtin' ], 'plugin: built-in starts with no plugin object');
+
+// ... and the same over the daemon's OWN loader against a REAL module file on
+// the search path: the packaging contract end to end — module name
+// wwand.datapath_<name>, a require()-able plain script that RETURNS its
+// implementation (it cannot register itself anywhere; a require()d script gets
+// its own copies of whatever it imports).
+let dpdir = sprintf('%s/wwand-test-dp', getenv('TMPDIR') ?? '/tmp');
+
+try { fs.mkdir(dpdir); } catch (e) { }
+try { fs.mkdir(dpdir + '/wwand'); } catch (e) { }
+
+let pf = fs.open(dpdir + '/wwand/datapath_testplug.uc', 'w');
+pf.write("'use strict';\nreturn { probe: () => true, links: () => [ 'wwand0' ] };\n");
+pf.close();
+push(global.REQUIRE_SEARCH_PATH, dpdir + '/*.uc');
+
+started = [];
+let dp_real = mkdp('testplug', null, true);
+eq(dp_real.modems.m0.control_note ?? null, null, 'plugin: real require() found the module');
+ok(type(started[0]) == 'object' && type(started[0].links) == 'function',
+	'plugin: the module\'s returned implementation reaches the modem');
+
+// an installed-but-broken module (no links()) is refused like a missing one
+pf = fs.open(dpdir + '/wwand/datapath_brokenplug.uc', 'w');
+pf.write("'use strict';\nreturn { probe: () => true };\n");
+pf.close();
+
+started = [];
+let dp_broken = mkdp('brokenplug', null, true);
+eq(started, [], 'plugin: a module without links() does not start the modem');
+ok(match(dp_broken.modems.m0.control_note ?? '', /wwand-datapath-brokenplug/),
+	'plugin: broken module reported like a missing package');
+
+fs.unlink(dpdir + '/wwand/datapath_testplug.uc');
+fs.unlink(dpdir + '/wwand/datapath_brokenplug.uc');
 
 // a PATH-shaped claim blocks too: uqmi/umbim `devpath` and wwan.sh `bus` name
 // the same hardware without naming its device node, so the match is made on the

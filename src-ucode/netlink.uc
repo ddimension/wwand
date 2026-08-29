@@ -27,6 +27,64 @@ export const RMNET_INGRESS_DEAGGREGATION = 0x01;
 export const RMNET_INGRESS_CKSUMV5 = 0x10;
 export const RMNET_EGRESS_CKSUMV5 = 0x20;
 
+// --- datapath plugins --------------------------------------------------------
+//
+// wwand ships two QMI mux datapaths (rmnet, qmimux). A third party can add one
+// — a vendor driver with its own mux mechanism — WITHOUT patching wwand: an
+// add-on package ships `wwand/datapath_<name>.uc`, a require()-able plain script
+// that RETURNS its implementation. The daemon require()s it when a modem's
+// `option mux` names it (the lazy pattern and the control_note of the
+// control-backend packages) and threads the object down to setup() here.
+//
+// Threaded through deliberately, NOT collected in a module-level registry:
+// ucode gives a require()d plain script its OWN copies of the modules it
+// imports, so a plugin calling a register_backend() in this file would populate
+// a DIFFERENT netlink instance than the daemon's and vanish without a trace
+// (verified on the interpreter — the shared-state assumption looks right and
+// silently is not). For the same reason a plugin should not import wwand
+// modules for anything but pure helpers; everything it needs is handed to it.
+//
+//   // wwand/datapath_vendorx.uc
+//   'use strict';
+//   return {
+//       // usable on this device? (sysfs probe; optional)
+//       probe: (fx, netdev) => fx.exists('/sys/class/net/' + netdev + '/vendor_mux'),
+//
+//       // create/adopt the children, fill ctx.mux_mtus, return their names
+//       links: (fx, ctx) => { … return [ 'wwand0' ]; },
+//
+//       // optional: drop children this config no longer wants. The default
+//       // (by iflink) covers anything that is a real netdev child of netdev.
+//       prune: (fx, netdev, wanted) => { … },
+//
+//       // optional: opt into the rmnet-style uplink aggregation call
+//       tx_aggr: true,
+//   };
+//
+// links() gets a ctx carrying { netdev (the parent, possibly already renamed),
+// sys (its /sys/class/net/<dev>/qmi), mux ([{ id, name?, mtu? }]), urb_size, v5,
+// mux_mtus (OUT: child -> configured mtu), opts } plus the three helpers this
+// module uses itself — ctx.link(what, dev, opts), ctx.write_attr(path, value,
+// what) and ctx.child_mtu(mtu, what) — so the common case needs no imports at
+// all. Everything around links() stays shared: pruning, moving a parent off a
+// child's name, urb/MTU handling, link up, the vendor link_state gate and
+// uplink aggregation.
+//
+// A plugin is used ONLY when `option mux` names it explicitly, never from
+// 'auto': installing a package must not silently move a working modem off rmnet.
+
+// mux modes this module implements itself (everything else needs a plugin)
+export function builtin_mux(name)
+{
+	return name == 'auto' || name == 'none' || name == 'rmnet' || name == 'qmimux';
+};
+
+// a plugin object is only usable if it can actually build the links
+export function valid_plugin(impl)
+{
+	return type(impl) == 'object' && type(impl.links) == 'function';
+};
+
 // board_name prefix -> aggregation size (SoC capability)
 const BOARD_DGRAM_SIZES = [
 	{ prefix: 'zyxel,lte3301-plus', size: 31 * 1024 },
@@ -368,10 +426,19 @@ function prune_mux_children(fx, netdev, wanted)
 
 // decide the mux backend for a modem
 //   cfg_mux: 'auto' | 'rmnet' | 'qmimux' | 'none'
-export function select_backend(fx, netdev, cfg_mux, want_mux)
+export function select_backend(fx, netdev, cfg_mux, want_mux, plugin)
 {
 	if (!want_mux || cfg_mux == 'none')
 		return 'none';
+
+	// an add-on datapath is taken only when `option mux` named it (see the
+	// plugin comment above): 'auto' stays the built-ins' business
+	if (!builtin_mux(cfg_mux)) {
+		if (!valid_plugin(plugin))
+			return null;   // caller reports the missing package
+
+		return (!plugin.probe || plugin.probe(fx, netdev)) ? cfg_mux : null;
+	}
 
 	// pass_through is qmi_wwan's way of handing raw QMAP frames to rmnet.
 	// A driver without the `qmi` group never parses the frames itself, so it
@@ -469,8 +536,6 @@ function setup_rmnet_links(fx, netdev, mux, v5, urb_size, mux_mtus)
 		push(mux_devs, child);
 	}
 
-	link_op(fx, 'parent mtu', netdev, { mtu: urb_size });
-
 	return mux_devs;
 }
 
@@ -518,8 +583,6 @@ function setup_qmimux_links(fx, netdev, sys, mux, urb_size, mux_mtus)
 		push(mux_devs, child);
 	}
 
-	link_op(fx, 'parent mtu', netdev, { mtu: urb_size });
-
 	return mux_devs;
 }
 
@@ -549,8 +612,11 @@ export function setup(fx, opts)
 	// Drop children the current config no longer asks for, BEFORE any naming
 	// work: a stale child may be sitting on the very name this setup wants,
 	// and it also pins the parent's MTU.
-	prune_mux_children(fx, netdev,
-		map(mux, (e) => e.name ?? sprintf('%sm%d', netdev, e.id)));
+	let wanted = map(mux, (e) => e.name ?? sprintf('%sm%d', netdev, e.id));
+	let prune = (!builtin_mux(backend) && type(opts.plugin?.prune) == 'function')
+		? opts.plugin.prune : prune_mux_children;
+
+	prune(fx, netdev, wanted);
 
 	// A mux child cannot share the parent's name. This happens when the parent
 	// still carries a stable "wwandN" name from a previous NON-mux config (the
@@ -627,13 +693,31 @@ export function setup(fx, opts)
 			write_attr(fx, urb_attr, sprintf('%d', urb_size), 'urb size');
 	}
 
+	let plug = (!builtin_mux(backend) && valid_plugin(opts.plugin)) ? opts.plugin : null;
+
 	if (backend == 'rmnet')
 		mux_devs = setup_rmnet_links(fx, netdev, mux, opts.v5, urb_size, mux_mtus);
 	else if (backend == 'qmimux')
 		mux_devs = setup_qmimux_links(fx, netdev, sys, mux, urb_size, mux_mtus);
+	else if (plug)
+		mux_devs = plug.links(fx, {
+			netdev: netdev, sys: sys, mux: mux, urb_size: urb_size,
+			v5: opts.v5, mux_mtus: mux_mtus, opts: opts,
+			// the helpers this module uses itself, so a plugin needs no
+			// wwand imports (whose instances would be its own copies anyway)
+			link: (what, dev, o) => link_op(fx, what, dev, o),
+			write_attr: (path, value, what) => write_attr(fx, path, value, what),
+			child_mtu: (mtu, what) => child_mtu(mtu, fx, what),
+		}) ?? [];
 	else
 		// plain raw-ip: plain MTU on the parent (config or 1500)
 		link_op(fx, 'mtu', netdev, { mtu: child_mtu(opts.mtu, fx, netdev) });
+
+	// the aggregation buffer belongs on the parent for every muxed backend —
+	// shared here rather than repeated in each one (a plugin that needs a
+	// different parent MTU sets it in links(), which runs just above)
+	if (backend != 'none')
+		link_op(fx, 'parent mtu', netdev, { mtu: urb_size });
 
 	// child MTUs and link up
 	link_op(fx, 'link up', netdev, { up: true });
@@ -660,7 +744,7 @@ export function setup(fx, opts)
 	// ethtool TX-aggregation coalesce (default max_frames=1 = off); best-effort,
 	// rmnet-only (qmimux/none/mbim have no such knob). Aggregation is shared per
 	// real_dev port, so configuring any one child updates it.
-	if (backend == 'rmnet' && fx.rmnet_tx_aggr &&
+	if ((backend == 'rmnet' || plug?.tx_aggr) && fx.rmnet_tx_aggr &&
 	    opts.ul_agg && (opts.ul_agg.count ?? 0) > 1 && (opts.ul_agg.size ?? 0) > 0) {
 		for (let child in mux_devs) {
 			if (fx.rmnet_tx_aggr(child, opts.ul_agg.size, opts.ul_agg.count, 800))
