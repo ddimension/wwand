@@ -22,6 +22,10 @@ eq(netlink.board_dgram_size(fx, 8192, 'RG650E-EU'), 8192, 'quirk: override beats
 
 // --- backend selection -------------------------------------------------------
 
+// minimal caps for the no-channel plugin check further down (the full
+// vendor_caps live with the plugin suite at the end of the file)
+const vendor_caps_early = { '/sys/class/net/wwan0/qmi/raw_ip': true };
+
 let caps_rmnet = {
 	'/sys/class/net/wwan0/qmi/pass_through': true,
 	'/sys/class/net/wwan0/qmi/raw_ip': true,
@@ -33,8 +37,30 @@ let caps_rmnet = {
 fx = fakefx.create({ present: caps_rmnet });
 eq(netlink.select_backend(fx, 'wwan0', 'auto', true), 'rmnet', 'backend: auto prefers rmnet');
 eq(netlink.select_backend(fx, 'wwan0', 'qmimux', true), 'qmimux', 'backend: forced qmimux');
-eq(netlink.select_backend(fx, 'wwan0', 'none', true), 'none', 'backend: forced none');
-eq(netlink.select_backend(fx, 'wwan0', 'auto', false), 'none', 'backend: no mux wanted');
+eq(netlink.select_backend(fx, 'wwan0', 'raw_ip', true), 'raw_ip', 'backend: forced raw_ip');
+
+// `want_mux` does NOT skip the probes any more: a box with no channels still
+// gets identified, which is the only way an accelerated add-on can claim
+// hardware where nobody ever writes `option mux`. What want_mux decides is what
+// an UNCLAIMED box is — an error when a mux was required, raw_ip otherwise.
+eq(netlink.select_backend(fx, 'wwan0', 'auto', false), 'rmnet',
+	'backend: the probes run even with no channels configured');
+eq(netlink.select_backend(fakefx.create(), 'wwan0', 'auto', false), 'raw_ip',
+	'backend: unclaimed and no mux required -> raw_ip, not an error');
+eq(netlink.select_backend(fakefx.create(), 'wwan0', 'auto', true), null,
+	'backend: unclaimed but a mux WAS required -> the caller must report it');
+
+// the no-mux datapath was called 'none' until 1.6 and is written 'raw-ip' in
+// prose. Every config carrying either spelling must keep selecting it — the
+// alternative is muxing silently switching back ON on an upgrade.
+eq(netlink.select_backend(fx, 'wwan0', 'none', true), 'raw_ip',
+	'backend: legacy `none` still selects raw_ip');
+eq(netlink.select_backend(fx, 'wwan0', 'raw-ip', true), 'raw_ip',
+	'backend: hyphenated raw-ip selects raw_ip');
+eq(netlink.canon_mux('none'), 'raw_ip', 'canon: none -> raw_ip');
+eq(netlink.canon_mux('raw-ip'), 'raw_ip', 'canon: raw-ip -> raw_ip');
+eq(netlink.canon_mux('rmnet_nss'), 'rmnet_nss', 'canon: a plugin name is untouched');
+eq(netlink.canon_mux(null), null, 'canon: unset stays unset');
 
 fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/add_mux': true } });
 eq(netlink.select_backend(fx, 'wwan0', 'auto', true), 'qmimux', 'backend: qmimux fallback');
@@ -173,12 +199,15 @@ ok(fx.action_index('link_set wwan0 mtu 4100') >= 0,
 fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi': true } });
 res = netlink.setup(fx, { netdev: 'wwan0', backend: 'none', dgram_size: 4096 });
 eq(res.ok, false, 'noattr: raw_ip missing is fatal');
+eq(netlink.setup(fakefx.create({ present: { '/sys/class/net/wwan0/qmi': true } }),
+	{ netdev: 'wwan0', backend: 'raw_ip', dgram_size: 4096 }).error, 'raw_ip unavailable',
+	'noattr: the legacy `none` and canonical `raw_ip` spellings behave identically');
 eq(res.error, 'raw_ip unavailable', 'noattr: error names the attribute');
 
 // no `qmi` group at all: a raw-IP-by-construction driver (mhi_net on PCIe/MHI).
 // There is no knob to set, so the datapath must come up rather than fail.
 fx = fakefx.create();
-res = netlink.setup(fx, { netdev: 'mhi_hwip0', backend: 'none', dgram_size: 4096 });
+res = netlink.setup(fx, { netdev: 'mhi_hwip0', backend: 'raw_ip', dgram_size: 4096 });
 eq(res.ok, true, 'mhi: no qmi sysfs group is not an error');
 eq(length(fx.matching('raw_ip')), 0, 'mhi: nothing written into a group that does not exist');
 ok(fx.action_index('link_set mhi_hwip0 up') > 0, 'mhi: datapath brought up');
@@ -232,7 +261,7 @@ fx = fakefx.create({
 	},
 });
 
-res = netlink.setup(fx, { netdev: 'wwan0', backend: 'none', dgram_size: 4096 });
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'raw_ip', dgram_size: 4096 });
 eq(res.ok, true, 'prune: plain raw-ip setup succeeds');
 ok(fx.action_index('link_del wwan0m1') >= 0, 'prune: a child the config dropped is removed');
 ok(fx.action_index('link_del wwan0m2') >= 0, 'prune: the second one too');
@@ -296,11 +325,52 @@ fx = fakefx.create();
 fx.realpath = (p) => '/sys/devices/platform/soc/usb@11200000/wwan/wwan0';
 eq(netlink.pin_runtime_pm(fx, '/dev/wwan0qmi0'), null, 'wwan-over-usb: nothing to pin');
 
+// A backend selected on a box with NO channels must not apply its framing:
+// rmnet's pass_through hands the raw QMAP frames to a child that does not
+// exist — link up, no traffic. This is what makes probing an unmuxed box safe,
+// so it is pinned rather than assumed.
+fx = fakefx.create({ present: caps_rmnet });
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'rmnet', mux: [], dgram_size: 4096 });
+eq(res.ok, true, 'nochan: setup succeeds');
+eq(res.backend, 'raw_ip', 'nochan: the effective backend is raw_ip, and says so');
+eq(res.urb_size, null, 'nochan: no aggregation buffer');
+eq(length(fx.matching('pass_through')), 0, 'nochan: rmnet pre() never runs');
+eq(length(fx.matching('rx_urb_size')), 0, 'nochan: no urb write');
+eq(fx.action_index('link_set wwan0 mtu 4100'), -1, 'nochan: no aggregation MTU on the parent');
+ok(fx.action_index('write /sys/class/net/wwan0/qmi/raw_ip Y') >= 0,
+	'nochan: ...but raw_ip framing is still programmed, as for any unmuxed modem');
+ok(fx.action_index('link_set wwan0 mtu 1500') >= 0, 'nochan: plain child MTU on the parent');
+ok(length(filter(fx.actions, (a) => match(a, /no mux channels configured/) != null)) == 1,
+	'nochan: the drop to raw_ip is logged, not silent');
+
+// the same for an add-on, which is the case that made this necessary
+fx = fakefx.create({ present: vendor_caps_early });
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'vendorx', mux: [],
+	plugins: { vendorx: { links: () => [ 'never' ] } }, dgram_size: 4096 });
+eq(res.backend, 'raw_ip', 'nochan: a plugin with no channels is raw_ip too');
+eq(res.mux_devs, [], 'nochan: its links() is never called');
+
+// ...but its OWN prune() still does: a datapath whose children the kernel owns
+// (a vendor driver creating them at module load) keeps them by overriding
+// prune, and dropping to raw_ip before that would reach the default prune and
+// delete exactly those — unrecoverable without a module reload.
+let pruned_early = [];
+fx = fakefx.create({ present: vendor_caps_early });
+netlink.setup(fx, { netdev: 'wwan0', backend: 'vendorx', mux: [], dgram_size: 4096,
+	plugins: { vendorx: { links: () => [], prune: (f, nd, w) => push(pruned_early, nd) } } });
+eq(pruned_early, [ 'wwan0' ], 'nochan: the backend prune()s before the fallback, not the default one');
+
+// a config that names only channels producing no child (MBIM session 0) is the
+// same case — the count that decides is children, not mux entries
+fx = fakefx.create();
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'vlan', mux: [ { id: 0, name: null } ] });
+eq(res.backend, 'raw_ip', 'nochan: session-0-only reports raw_ip, not a vlan with no children');
+
 // --- plain raw-ip ------------------------------------------------------------
 
 fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/raw_ip': true } });
 
-res = netlink.setup(fx, { netdev: 'wwan0', backend: 'none', dgram_size: 4096, mtu: 1430 });
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'raw_ip', dgram_size: 4096, mtu: 1430 });
 
 eq(res.ok, true, 'plain: ok');
 eq(res.mux_devs, [], 'plain: no mux devices');
@@ -312,26 +382,39 @@ ok(fx.action_index('link_set wwan0 up') > 0, 'plain: up');
 
 // invalid configured MTU is logged (not silently swallowed) and falls to 1500
 fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/raw_ip': true } });
-res = netlink.setup(fx, { netdev: 'wwan0', backend: 'none', dgram_size: 4096, mtu: 400 });
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'raw_ip', dgram_size: 4096, mtu: 400 });
 eq(res.ok, true, 'badmtu: setup ok');
 ok(fx.action_index('link_set wwan0 mtu 1500') > 0, 'badmtu: too-small mtu falls to 1500');
 ok(fx.action_index('log warn wwan0: ignoring invalid MTU 400') >= 0, 'badmtu: substitution is logged');
 
 // an unset MTU uses the default WITHOUT a warning (no noise on the common path)
 fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/raw_ip': true } });
-netlink.setup(fx, { netdev: 'wwan0', backend: 'none', dgram_size: 4096 });
+netlink.setup(fx, { netdev: 'wwan0', backend: 'raw_ip', dgram_size: 4096 });
 eq(length(fx.matching('ignoring invalid MTU')), 0, 'badmtu: no warning when mtu is unset');
 
-// --- cdc_mbim session datapath ----------------------------------------------
+// --- cdc_mbim session datapath (the built-in `vlan` backend) ----------------
+//
+// It goes through the SAME netlink.setup() as the QMI backends — it used to be
+// a setup_mbim() of its own and the copy drifted (the stale-child prune was
+// fixed in setup() and missed there). What follows therefore also pins the
+// parts of that shared path a VLAN mux must NOT get: no QMAP urb arithmetic,
+// and no parent bounce.
 
 fx = fakefx.create();
 
-res = netlink.setup_mbim(fx, {
-	netdev: 'wwan0',
+res = netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'vlan',
 	mux: [ { id: 1, name: 'wwan0m1', mtu: 1500 }, { id: 2, name: 'wwan0m2' } ],
 });
 
 eq(res.ok, true, 'mbim: ok');
+eq(res.backend, 'vlan', 'mbim: setup reports the backend it ran');
+eq(res.urb_size, null, 'mbim: no QMAP urb size on a VLAN mux');
+eq(length(fx.matching('rx_urb_size')), 0, 'mbim: no urb write');
+// the parent carries a live session on a daemon restart; bouncing it to
+// reprogram a link-layer format this backend does not touch would drop it
+eq(fx.action_index('link_set wwan0 down'), -1, 'mbim: parent is never bounced');
+eq(length(fx.matching('raw_ip')), 0, 'mbim: no qmi_wwan format write');
 eq(res.mux_devs, [ 'wwan0m1', 'wwan0m2' ], 'mbim: vlan children named after mux_link');
 eq(res.parent, 'wwan0', 'mbim: parent name reported');
 ok(fx.action_index('link_add_vlan wwan0m1 link wwan0 id 1') >= 0, 'mbim: session 1 vlan');
@@ -342,8 +425,19 @@ ok(fx.action_index('link_set wwan0m1 up') >= 0, 'mbim: child up');
 
 // session 0 rides the parent netdev — no sub-device
 fx = fakefx.create();
-res = netlink.setup_mbim(fx, { netdev: 'wwan0', mux: [ { id: 0, name: null } ] });
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'vlan', mux: [ { id: 0, name: null } ] });
 eq(res.mux_devs, [], 'mbim: session 0 has no vlan child');
+eq(length(fx.matching('link_add_vlan')), 0, 'mbim: session 0 creates no link');
+
+// ...and the shared prune must not delete a child on account of a session-0
+// entry naming nothing: child_name() returning null means "no child", not "a
+// child called null" that nothing in the wanted list can match.
+fx = fakefx.create({ present: { '/sys/class/net/wwan0.1': true },
+	files: { '/sys/class/net/wwan0/ifindex': "3\n",
+	         '/sys/class/net/wwan0.1/iflink': "3\n" } });
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'vlan',
+	mux: [ { id: 0, name: null }, { id: 1, name: 'wwan0.1', mtu: 1500 } ] });
+eq(fx.action_index('link_del wwan0.1'), -1, 'mbim: a wanted child survives a session-0 sibling');
 
 // stale parent name: a mux child wants the parent's own name (parent still
 // carries a stable wwandN name from a prior untagged session-0 config). The
@@ -351,11 +445,30 @@ eq(res.mux_devs, [], 'mbim: session 0 has no vlan child');
 // (raw parent + wwandN child). Regression: without this the VLAN silently
 // collapses onto the untagged parent and no traffic flows.
 fx = fakefx.create({ present: { '/sys/class/net/wwand0': true } });
-res = netlink.setup_mbim(fx, { netdev: 'wwand0', mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ] });
+res = netlink.setup(fx, { netdev: 'wwand0', backend: 'vlan',
+	mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ] });
 eq(res.parent, 'wwan0', 'mbim-stale: parent moved to a free raw name (wwan0)');
 ok(fx.action_index('link_set wwand0 name wwan0') >= 0, 'mbim-stale: parent renamed off the child name');
 ok(fx.action_index('link_add_vlan wwand0 link wwan0 id 1') >= 0, 'mbim-stale: vlan child wwand0 created on the raw parent');
 eq(res.mux_devs, [ 'wwand0' ], 'mbim-stale: child keeps the stable name wwand0');
+
+// default naming when a context named no link: VLAN children are <parent>.<id>,
+// not the QMAP <parent>m<id> — netifd binds on that name.
+fx = fakefx.create();
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'vlan', mux: [ { id: 3 } ] });
+eq(res.mux_devs, [ 'wwan0.3' ], 'mbim: default child name is <parent>.<session>');
+
+// selection: 'auto' on an MBIM modem lands on vlan and never on a qmi_wwan mux,
+// even on a box whose kernel offers both (the rmnet module is global).
+fx = fakefx.create({ present: caps_rmnet });
+eq(netlink.select_backend(fx, 'wwan0', 'auto', true, null, { proto: 'mbim' }), 'vlan',
+	'mbim: auto selects vlan for an mbim modem');
+eq(netlink.select_backend(fx, 'wwan0', 'auto', true, null, { proto: 'qmi' }), 'rmnet',
+	'mbim: the same box still gets rmnet for a qmi modem');
+eq(netlink.select_backend(fx, 'wwan0', 'auto', true, null, { proto: 'ncm' }), null,
+	'mbim: a protocol with no mux gets no built-in');
+eq(netlink.select_backend(fx, 'wwan0', 'raw_ip', true, null, { proto: 'mbim' }), 'raw_ip',
+	'mbim: raw_ip switches the session mux off');
 
 // --- VRF compatibility invariant --------------------------------------------
 // The datapath layer must only ever touch the link layer (mux creation, MTU,
@@ -606,5 +719,149 @@ eq(netlink.builtin_mux('rmnet'), true, 'builtin_mux: rmnet');
 eq(netlink.builtin_mux('vendorx'), false, 'builtin_mux: a plugin name is not built-in');
 eq(netlink.valid_plugin({ links: () => [] }), true, 'valid_plugin: needs links()');
 eq(netlink.valid_plugin({}), false, 'valid_plugin: rejects an object without it');
+
+// a plugin is for the control protocols it declares (default qmi): under 'auto'
+// an MBIM box must not be handed a qmi_wwan mux, which cannot work there
+eq(netlink.select_backend(pfx, 'wwan0', 'auto', true, plugmap, { proto: 'mbim' }), 'vlan',
+	'plugin: a qmi-only plugin does not claim an mbim modem');
+eq(netlink.select_backend(pfx, 'wwan0', 'auto', true,
+	{ vendorx: { ...plug, proto: [ 'qmi', 'mbim' ] } }, { proto: 'mbim' }), 'vendorx',
+	'plugin: ... one that declares mbim does');
+// The declared protocol is enforced even when the datapath is NAMED, unlike the
+// probe's "you asked for it" latitude: a protocol a datapath does not serve is
+// not a risky choice but an impossible one — rmnet's QMAP framing on a cdc_mbim
+// session cannot carry traffic however firmly it was named. Refused like a
+// missing package, and said out loud.
+{
+	let logs3 = [];
+	let lfx = fakefx.create({ present: vendor_caps });
+	lfx.log = (lvl, msg) => push(logs3, sprintf('%s %s', lvl, msg));
+
+	eq(netlink.select_backend(lfx, 'wwan0', 'vendorx', true, plugmap, { proto: 'mbim' }), null,
+		'plugin: naming a qmi datapath on an mbim modem is refused');
+	ok(length(filter(logs3, (m) => match(m, /^err .*serves qmi, not mbim/) != null)) == 1,
+		'plugin: ...and the reason names both protocols');
+
+	// the same datapath on the protocol it does serve is of course fine
+	eq(netlink.select_backend(pfx, 'wwan0', 'vendorx', true, plugmap, { proto: 'qmi' }), 'vendorx',
+		'plugin: named and serving this protocol -> chosen');
+
+	// a built-in is not special: naming the MBIM session mux on a QMI modem is
+	// refused the same way
+	eq(netlink.select_backend(pfx, 'wwan0', 'vlan', true, null, { proto: 'qmi' }), null,
+		'builtin: naming vlan on a qmi modem is refused too');
+	eq(netlink.select_backend(fakefx.create({ present: caps_rmnet }), 'wwan0', 'rmnet', true,
+		null, { proto: 'mbim' }), null,
+		'builtin: ...and rmnet on an mbim modem');
+}
+
+// `aggregate: false` opts out of the QMAP arithmetic: no header add-on, no
+// rx_urb_size, no aggregation buffer forced onto the parent MTU — the backend
+// sizes the parent inside links() (this is what the built-in vlan does)
+fx = fakefx.create({ present: vendor_caps });
+res = netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'vendorx', dgram_size: 4096,
+	plugins: { vendorx: { ...plug, aggregate: false } },
+	mux: [ { id: 1, name: 'wwan0m1' } ],
+});
+eq(res.ok, true, 'plugin-noagg: ok');
+eq(res.urb_size, null, 'plugin-noagg: no urb size reported');
+eq(length(fx.matching('rx_urb_size')), 0, 'plugin-noagg: no urb write');
+eq(fx.action_index('link_set wwan0 mtu 4100'), -1, 'plugin-noagg: parent MTU left to links()');
+
+// `programs_parent: false` says "I touch no driver format" — so the parent is
+// neither bounced nor written to. A plugin that does program one (the default)
+// still gets the bounce.
+fx = fakefx.create({ present: vendor_caps });
+netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'vendorx', dgram_size: 4096,
+	plugins: { vendorx: { ...plug, programs_parent: false } },
+	mux: [ { id: 1, name: 'wwan0m1' } ],
+});
+eq(fx.action_index('link_set wwan0 down'), -1, 'plugin-nofmt: parent not bounced');
+eq(length(fx.matching('qmi/raw_ip')), 0, 'plugin-nofmt: driver format left alone');
+
+// child_name() is the ONE naming rule: the shared prune, the parent-rename
+// collision check and links() must agree, or a stale child survives under a
+// name the wanted list never mentions
+fx = fakefx.create({ present: { ...vendor_caps, '/sys/class/net/vx1': true },
+	files: { '/sys/class/net/wwan0/ifindex': "3\n",
+	         '/sys/class/net/vx1/iflink': "3\n" } });
+netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'vendorx', dgram_size: 4096,
+	plugins: { vendorx: { ...plug,
+		child_name: (nd, e) => sprintf('vx%d', e.id) } },
+	mux: [ { id: 1 } ],
+});
+eq(fx.action_index('link_del vx1'), -1,
+	'plugin-naming: prune keeps the child the plugin would name itself');
+
+// --- autosetup: may this modem carry a mux channel? ---------------------------
+//
+// What decides whether the zero-config path writes a `mux_id`. Per MODEM: rmnet
+// is a global module, but qmimux reads THIS netdev's add_mux node and an add-on
+// probes this device — so on a two-modem box the answer may differ, and a check
+// keyed on the box would be wrong.
+eq(netlink.mux_available(fakefx.create({ present: caps_rmnet }), 'wwan0', 'qmi', null), true,
+	'mux_available: qmi modem on an rmnet box');
+eq(netlink.mux_available(fakefx.create({ present: { '/sys/class/net/wwan0/qmi/add_mux': true } }),
+	'wwan0', 'qmi', null), true, 'mux_available: qmimux counts too');
+eq(netlink.mux_available(fakefx.create(), 'wwan0', 'qmi', null), false,
+	'mux_available: no mux datapath on this box');
+eq(netlink.mux_available(fakefx.create({ present: caps_rmnet }), null, 'qmi', null), false,
+	'mux_available: no netdev resolved yet -> no channel');
+
+// the other backends keep their defaults: an MBIM session is not a QMAP channel
+// and NCM has no mux at all
+eq(netlink.mux_available(fakefx.create({ present: caps_rmnet }), 'wwan0', 'mbim', null), false,
+	'mux_available: mbim keeps its default');
+eq(netlink.mux_available(fakefx.create({ present: caps_rmnet }), 'wwan0', 'ncm', null), false,
+	'mux_available: ncm keeps its default');
+eq(netlink.mux_available(fakefx.create({ present: caps_rmnet }), 'wwan0', null, null), false,
+	'mux_available: unknown protocol keeps its default');
+
+// two modems, one box: the second has no mux node of its own, so it is NOT
+// given a channel just because the first one could take it
+{
+	let twobox = fakefx.create({ present: {
+		'/sys/class/net/wwan0/qmi/add_mux': true,   // modem A can mux
+		'/sys/class/net/wwan1/qmi/raw_ip': true,    // modem B cannot
+	} });
+
+	eq(netlink.mux_available(twobox, 'wwan0', 'qmi', null), true,  'mux_available: modem A yes');
+	eq(netlink.mux_available(twobox, 'wwan1', 'qmi', null), false, 'mux_available: modem B no');
+}
+
+// an add-on that claims the box makes it available even without a built-in
+eq(netlink.mux_available(fakefx.create({ present: { '/sys/class/net/wwan0/vendor_mux': true } }),
+	'wwan0', 'qmi', { vendorx: plug }), true,
+	'mux_available: an add-on datapath counts as available');
+
+// --- the catalog a UI offers for `option mux` --------------------------------
+//
+// netlink owns the list of what it implements; a UI carrying its own copy is a
+// list that goes stale the day a datapath is added.
+let cat = netlink.datapath_catalog();
+let byname = {};
+for (let e in cat)
+	byname[e.name] = e;
+
+eq(sort(keys(byname)), [ 'auto', 'qmimux', 'raw_ip', 'rmnet', 'vlan' ],
+	'catalog: every built-in and pseudo-mode is listed');
+eq(byname.rmnet.proto, [ 'qmi' ], 'catalog: rmnet is a qmi datapath');
+eq(byname.qmimux.proto, [ 'qmi' ], 'catalog: qmimux too');
+// the catalog is BUILT from the datapaths, not a second table beside them — so
+// a datapath and its catalog entry cannot disagree about what it serves
+eq(netlink.datapath_protos({ proto: [ 'mbim' ] }), [ 'mbim' ], 'catalog: declared protos are read back');
+eq(netlink.datapath_protos({}), [ 'qmi' ], 'catalog: qmi is the default for an add-on that says nothing');
+eq(netlink.datapath_protos(null), [ 'qmi' ], 'catalog: ...and for no object at all');
+eq(byname.vlan.proto, [ 'mbim' ], 'catalog: vlan is an mbim datapath');
+eq(byname.auto.proto, null, 'catalog: a mode applies to every protocol');
+eq(byname.raw_ip.kind, 'mode', 'catalog: raw_ip is a mode, not an implementation');
+ok(length(byname.qmimux.description) > 0, 'catalog: every entry describes itself');
+
+// the caller gets copies — editing what it was handed must not edit the table
+byname.rmnet.proto[0] = 'clobbered';
+eq(netlink.datapath_catalog()[2].proto, [ 'qmi' ], 'catalog: the module table is not aliased');
 
 done('test_datapath');

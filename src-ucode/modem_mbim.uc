@@ -338,28 +338,56 @@ export function create(opts)
 		}, { timeout: 3000 });
 	};
 
-	// session datapath: parent netdev up, one VLAN sub-device per session id
-	// > 0 (named after the context's mux_link so netifd's device binding
-	// matches). Skipped gracefully when no datapath info is wired (host tests).
+	// Session datapath. It goes through the SAME netlink.setup() as QMI — the
+	// cdc_mbim session mux is the built-in `vlan` backend there (one VLAN
+	// sub-device per session id > 0, named after the context's mux_link so
+	// netifd's device binding matches). It used to be a netlink.setup_mbim() of
+	// its own, and the copy drifted: the stale-child prune was fixed in setup()
+	// and missed here, leaving this path with the very defect it was fixed for.
+	// Skipped gracefully when no datapath info is wired (host tests).
 	step_datapath = () => {
 		let dp = opts.datapath;
 
 		if (!dp?.netdev || !dp.fx) {
-			self.datapath = { backend: 'none', netdev: dp?.netdev ?? null, mux: [] };
+			self.datapath = { backend: 'raw_ip', netdev: dp?.netdev ?? null, mux: [] };
 			return step_simslot();
 		}
 
-		let r = netlink.setup_mbim(dp.fx, {
+		let mux_links = dp.mux_links ?? [];
+		let want_mux = length(filter(mux_links, (e) => e.id > 0)) > 0;
+		let backend = netlink.select_backend(dp.fx, dp.netdev, dp.mux ?? 'auto',
+			want_mux, dp.plugins, { model: self.info?.model, proto: 'mbim' });
+
+		// `option mux` named a datapath whose package is not installed. Never
+		// substitute another one silently (the contract in netlink.uc): the
+		// sessions would come up on the wrong link names and netifd would bind
+		// nothing. Reported the way a missing control backend is.
+		if (backend == null) {
+			if (want_mux)
+				return fail('datapath', { error: 'mux_backend_unavailable', mux: dp.mux });
+
+			backend = 'raw_ip';
+		}
+
+		let r = netlink.setup(dp.fx, {
 			netdev: dp.netdev,
-			mux: dp.mux_links ?? [],
+			backend: backend,
+			plugins: dp.plugins,
+			mux: mux_links,
+			mtu: dp.mtu,
 		});
 
-		// setup_mbim may move the parent to a raw kernel name (freeing a stale
+		if (!r.ok)
+			return fail('datapath', r);
+
+		// setup() may move the parent to a raw kernel name (freeing a stale
 		// stable-L3 name for a mux child) — follow it
 		let parent = r.parent ?? dp.netdev;
 
 		self.datapath = {
-			backend: 'cdc_mbim',
+			// what setup() ACTUALLY ran: it drops to raw_ip when the selected
+			// backend has no channels to build (session 0 only)
+			backend: r.backend ?? backend,
 			netdev: parent,
 			parent: parent,
 			ep_id: null,
@@ -367,7 +395,7 @@ export function create(opts)
 			mux_devs: r.mux_devs,
 		};
 
-		log('notice', sprintf('datapath: cdc_mbim, parent %s, mux [%s]', parent, join(' ', r.mux_devs)));
+		log('notice', sprintf('datapath: %s, parent %s, mux [%s]', backend, parent, join(' ', r.mux_devs)));
 		step_simslot();
 	};
 

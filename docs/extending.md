@@ -177,11 +177,18 @@ depends on `wwand-qmi`.
 
 ## 4. Adding a datapath backend
 
+> The full contract — every field, the selection rules, what `setup()` returns
+> and what `status` exposes — is [datapath-interface.md](datapath-interface.md).
+> What follows is the how-to.
+
 The control backend talks to the modem; the **datapath** builds the kernel side
-of the data link. wwand ships two for QMI — `rmnet` (QMAP pass-through, the
-default where available) and `qmimux` (qmi_wwan's own `add_mux`) — plus `none`
-for plain raw-ip. A vendor driver with its own mux mechanism can be added as an
-**add-on package, without patching wwand**.
+of the data link. wwand ships three: `rmnet` (QMAP pass-through, the QMI default
+where available), `qmimux` (qmi_wwan's own `add_mux`) and `vlan` (cdc_mbim
+sessions as 802.1q sub-devices, the MBIM one) — plus `raw_ip`, which is not an
+implementation but the absence of one: a plain raw-IP interface. (`raw_ip` was
+spelled `none` until 1.6; both spellings, and `raw-ip`, still select it.) A
+vendor driver with its own mux mechanism can be added as an **add-on package,
+without patching wwand**.
 
 Ship `wwand/datapath_<name>.uc` as a `require()`-able **plain script** (top-level
 `return`, like the `*_lazy.uc` shims) that RETURNS its implementation:
@@ -222,14 +229,52 @@ return {
 
     // optional: opt into the rmnet-style uplink aggregation call
     tx_aggr: true,
+
+    // optional, default [ 'qmi' ]: the control protocols this datapath serves.
+    // ENFORCED, not advisory: under 'auto' a modem is only offered datapaths
+    // that list its protocol, and naming one it does not list is refused with
+    // an error rather than built and left broken — QMAP framing on a cdc_mbim
+    // session cannot carry traffic however firmly it was named. The default is
+    // 'qmi' because an add-on written before this field existed was necessarily
+    // a QMI one. The built-ins declare it too (rmnet/qmimux qmi, vlan mbim),
+    // and the LuCI dropdown offers each modem only what its protocol serves.
+    proto: [ 'qmi' ],
+
+    // optional, default true: this datapath aggregates QMAP frames on the
+    // parent, so the shared code adds the QMAP header to the datagram size,
+    // writes rx_urb_size and puts that size on the parent MTU. Set false if you
+    // mux some other way — then you size the parent yourself inside links()
+    // (this is what the built-in vlan does).
+    aggregate: true,
+
+    // optional, default true: this datapath reprograms the parent driver's
+    // link-layer format (qmi_wwan's raw_ip, whatever `pre` writes), which the
+    // driver only accepts while the parent is DOWN — so the shared code bounces
+    // it first. false means "I touch no driver format", and therefore "do not
+    // bounce it": on a daemon restart that adopts a live session, the bounce
+    // would drop the very traffic being adopted.
+    programs_parent: true,
+
+    // optional: your own child naming, used by the shared prune and the
+    // parent-rename collision check as well as by links() (ctx.child_name).
+    // Return null for a mux entry that gets no child at all — vlan does this
+    // for session 0, which rides the parent untagged.
+    child_name: (netdev, entry) => entry.name ?? sprintf('%sm%d', netdev, entry.id),
+
+    // optional: a one-line description; it reaches the LuCI dropdown through
+    // `status` globals.datapaths.
+    description: 'QMAP over the vendor NSS datapath',
 };
 ```
 
-The two built-in datapaths are entries in **this same table** (`BUILTIN` in
-`netlink.uc`), not a private shortcut beside it — so the path your package takes
+**All three** built-in datapaths are entries in **this same table** (`BUILTIN` in
+`netlink.uc`), not private shortcuts beside it — so the path your package takes
 is the one every install exercises, rather than a seam only third parties ever
-touch. A built-in name always resolves to the built-in; an add-on cannot shadow
-`rmnet`.
+touch. That is not decoration: the MBIM datapath was a `setup_mbim()` of its own
+until 1.6, and the copy drifted — a stale-child prune fix landed in the shared
+`setup()` and was missed there, leaving the MBIM path with exactly the defect it
+had been fixed for. A built-in name always resolves to the built-in; an add-on
+cannot shadow `rmnet`.
 
 `links(fx, ctx)` is the only part that is yours. `ctx` carries `netdev` (the
 parent — possibly already renamed, use this one), `sys`
@@ -237,8 +282,9 @@ parent — possibly already renamed, use this one), `sys`
 `v5` (MAPv5 checksum offload negotiated over WDA), `mux_mtus` (fill it: child →
 configured MTU) and the full `opts`. It also carries the three helpers this
 layer uses itself — `ctx.link(what, dev, opts)`, `ctx.write_attr(path, value,
-what)`, `ctx.child_mtu(mtu, what)` — so the common case needs **no imports at
-all**.
+what)`, `ctx.child_mtu(mtu, what)` and `ctx.child_name(entry)` (the same naming
+the shared prune and rename use, yours included) — so the common case needs **no
+imports at all**.
 
 Everything around `links()` stays shared and you do not reimplement it: pruning
 stale children, moving a parent off a child's name, the urb-size write, the
@@ -257,14 +303,25 @@ and always wins; the daemon `require()`s `wwand.datapath_vendorx` before the
 modem starts. Missing package → the modem is not started and `control_note` says
 which one to install, deliberately without falling back to a datapath the config
 did not ask for. The name must match `^[a-z][a-z0-9_]*$` — it ends up in a module
-path, and `config.uc` rejects anything else.
+path, and `config.uc` rejects anything else (after canonicalising: a hyphen
+becomes an underscore, so `raw-ip` is not rejected as path-shaped).
 
 Under the default `option mux 'auto'` the daemon scans its module directory for
 installed `datapath_*.uc`, and **a plugin whose `probe()` recognises the box is
 preferred over the built-ins**. That is the point of the probe: an accelerated
 datapath — `rmnet_nss` on an ipq807x with NSS — takes over on the hardware it
 belongs to without anyone editing a config, including on a zero-config autosetup
-box, where nobody ever will. Make the probe narrow: on hardware it does not fit,
+box, where nobody ever will. **The probe runs on every box**, muxed or not — it
+used to be skipped when a config had no channels, which is precisely where an
+add-on has to introduce itself.
+
+What the probe does not do is conjure channels. A datapath selected on a modem
+whose config names no `mux_id` has no children to build, so `setup()` drops it to
+`raw_ip` and says so in the log — applying the framing anyway would write
+qmi_wwan's `pass_through` with no rmnet child behind it, which is a link that is
+up and carries nothing. So an add-on still needs one `mux_id` to carry traffic;
+what it no longer needs is to be named by hand to be *seen*. The fallback runs
+after your `prune()`, so a datapath whose children the kernel owns keeps them. Make the probe narrow: on hardware it does not fit,
 your plugin must change nothing. A plugin **without** a probe is explicit-only —
 something that cannot tell whether it fits has to be asked for by name. If two
 plugins claim the same device, the first by name wins and the other is named in
@@ -282,13 +339,40 @@ config wwand_modem 'm0'
 ```
 
 Package it like the backend packages: `wwand-datapath-vendorx`, `DEPENDS +wwand`
-(plus `+wwand-qmi`, since only the QMI datapath is pluggable — MBIM muxes over
-VLANs and NCM has no mux), with an explicit per-file install list. Out of tree
+(plus the backend package of whatever `proto` you declare — QMI and MBIM both go
+through this interface; NCM's cdc_ncm/cdc_ether datapath has no mux to choose),
+with an explicit per-file install list. `wwand-datapath-rmnet_nss` in the feed is
+the worked example, underscore included: the package name carries the datapath
+name verbatim because that name is also the ucode module name and what the
+daemon's "package not installed" note is built from. Out of tree
 you compile the module yourself or ship source; in tree, add it to
 `WWAND_UCODE_PLAIN` in the root `CMakeLists.txt`.
 
-Testing: `tests/test_datapath.uc` exercises a plugin against the fake `fx` with
-no hardware — pass your object to `netlink.select_backend()` / `netlink.setup()`
+**A worked example ships in tree.** `src-ucode/datapath_rmnet_nss.uc` is the
+Qualcomm NSS datapath for the vendor `qmi_wwan_q` driver, and it uses every
+optional field above because it has to — it is the case the interface was
+generalised for. Its head comments cite the driver lines each field comes from;
+the short version:
+
+- The children **already exist**. `qmi_wwan_q` registers one per `qmap_mode` in
+  its USB probe and calls `nss_cb->nss_create()` on each — mainline rmnet makes
+  no such call, which is why the built-in `rmnet` datapath yields children that
+  forward on the CPU. So `links()` adopts and creates nothing, and `prune()` is a
+  no-op: the default would delete channels only a module reload brings back.
+- Naming and the wire id **differ from the config**: children are
+  `<parent>_<n>`, and `priv->mux_id = 0x81 + offset`, so channel 1 is `0x81` on
+  the wire. That is what `map_id` is for — binding WDS to the config number
+  instead makes the driver drop every downlink frame as an unknown mux id.
+- The driver's sysfs group carries no `.name`, so its knobs sit directly on the
+  netdev and there is **no `qmi/` group at all** — no raw_ip, no rx_urb_size.
+  Hence `programs_parent: false` and `aggregate: false`.
+- The probe requires rmnet_nss **loaded**, not merely installed: the driver
+  captures `use_qca_nss = !!nss_cb` when it creates a child, so a module loaded
+  afterwards is too late and the offload would be silently absent.
+
+Testing: `tests/test_datapath_nss.uc` pins all of that against the vendor
+sources, and `tests/test_datapath.uc` exercises a plugin against the fake `fx`
+with no hardware — pass your object to `netlink.select_backend()` / `netlink.setup()`
 and assert the action trace. `tests/test_wan6.uc` covers the daemon side
 (`deps.load_datapath`), including the missing-package `control_note`.
 

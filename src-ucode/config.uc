@@ -12,6 +12,11 @@
 
 'use strict';
 
+// only for canon_mux(): `option mux` names a datapath, and the one place that
+// decides what a datapath is called is netlink.uc — spelling it out a second
+// time here is how the two drift apart.
+import * as netlink from 'wwand.netlink';
+
 const OLD_DEPRECATED = [ 'dhcp', 'autocreateif', 'customroutes', 'strongestnetwork' ];
 
 const PDP_TYPES = { ipv4: true, ipv6: true, ipv4v6: true };
@@ -706,7 +711,7 @@ function validate(result)
 			continue;
 		}
 
-		if (ctx.mux_id > 0 && result.modems[ctx.modem].mux == 'none') {
+		if (ctx.mux_id > 0 && result.modems[ctx.modem].mux == 'raw_ip') {
 			push(result.warnings, sprintf("interface %s: mux_id set but modem '%s' has mux disabled", name, ctx.modem));
 			ctx.mux_id = 0;
 		}
@@ -724,17 +729,27 @@ function validate(result)
 					name, f));
 	}
 
-	// `option mux` names a datapath: the built-ins (auto/none/rmnet/qmimux) or a
-	// plugin package, which the daemon require()s as wwand.datapath_<name>. The
-	// value therefore ends up in a MODULE PATH, so the shape is checked here —
-	// and an unusable value falls back to 'auto' rather than reaching require().
-	// Whether a named plugin is actually installed can only be decided at
-	// runtime; the daemon reports that as a control_note.
-	for (let mname, m in result.modems)
+	// `option mux` names a datapath: the built-ins (auto/raw_ip/rmnet/qmimux/
+	// vlan) or a plugin package, which the daemon require()s as
+	// wwand.datapath_<name>. The value therefore ends up in a MODULE PATH, so
+	// the shape is checked here — and an unusable value falls back to 'auto'
+	// rather than reaching require(). Whether a named plugin is actually
+	// installed can only be decided at runtime; the daemon reports that as a
+	// control_note.
+	//
+	// Canonicalised first: 'none' is what every config written before 1.6 says
+	// for "no mux", and a hyphen is how anyone would type 'raw-ip'. Both are
+	// the same datapath as 'raw_ip', and neither may reach the regex as
+	// written — a hyphen would be rejected outright and silently become 'auto',
+	// i.e. muxing turned back ON in a config that asked for it off.
+	for (let mname, m in result.modems) {
+		m.mux = netlink.canon_mux(m.mux);
+
 		if (m.mux != null && !match(m.mux, /^[a-z][a-z0-9_]*$/)) {
 			push(result.warnings, sprintf("modem %s: invalid mux %J, using 'auto'", mname, m.mux));
 			m.mux = 'auto';
 		}
+	}
 
 	// same reasoning for the PIN (AT+CPIN="…"), which is digits by definition
 	for (let mname, m in result.modems)

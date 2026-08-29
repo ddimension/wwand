@@ -361,7 +361,7 @@ export function create(opts)
 			if (mux_id > 0) {
 				let dp = self.modem.datapath;
 
-				if (!dp || dp.backend == 'none')
+				if (!dp || dp.backend == 'raw_ip')
 					return done({ stage: 'mux', err: 'mux_unavailable' });
 
 				if (dp.ep_id == null)
@@ -369,9 +369,18 @@ export function create(opts)
 
 				let orig_start = () => start_activation();
 
+				// The QMAP id on the WIRE is not always the config's channel
+				// number: a datapath that ADOPTS a driver's own children
+				// inherits that driver's numbering (qmi_wwan_q starts at 0x81),
+				// and binding the session to the config number instead makes
+				// the driver drop every downlink frame as an unknown mux id.
+				// netlink.setup() reports the mapping; equal for every datapath
+				// that creates its own children.
+				let map_id = dp.map_ids?.[sprintf('%d', mux_id)] ?? mux_id;
+
 				client.request('BIND_MUX_DATA_PORT', {
 					endpoint: { type: dp.ep_type ?? ENDPOINT_TYPE_HSUSB, iface: dp.ep_id },
-					mux_id: mux_id,
+					mux_id: map_id,
 					client_type: 1,   // QMI_WDS_CLIENT_TYPE_TETHERED
 				}, (berr) => {
 					if (berr)

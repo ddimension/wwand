@@ -28,10 +28,21 @@ export function setup(self, dp, o, next)
 
 		self.set_state('INIT_DATAPATH');
 
-		let want_mux = length(dp.mux_links ?? []) > 0;
+		// Whether this config HAS channels — the only thing that makes a missing
+		// mux backend fatal.
+		let need_mux = length(dp.mux_links ?? []) > 0;
+
+		// ...and the probes run either way. Asking the datapaths to identify
+		// themselves costs a few sysfs lookups and is how an accelerated
+		// datapath (rmnet_nss on an ipq807x with NSS) gets to claim the box at
+		// all; gating the probe on "this config already has channels" meant it
+		// never ran where nobody writes `option mux`. A backend selected with no
+		// channels to build falls back to raw_ip in netlink.setup(), so this is
+		// safe rather than merely optimistic.
+		let want_mux = true;
 
 		if (!dp.netdev) {
-			if (want_mux)
+			if (need_mux)
 				return fail('datapath', { error: 'netdev_unknown' });
 
 			log('info', 'netdev unknown, skipping datapath setup');
@@ -41,7 +52,7 @@ export function setup(self, dp, o, next)
 		// modems without WDA keep their default framing (old behavior:
 		// "no wda support, skipping data format switch")
 		if (!self.services[sprintf('%d', wdamod.default.service)]) {
-			if (want_mux)
+			if (need_mux)
 				return fail('datapath', { error: 'wda_unavailable_for_mux' });
 
 			log('info', 'no wda service, skipping data format setup');
@@ -56,10 +67,18 @@ export function setup(self, dp, o, next)
 
 			let fxi = dp.fx ?? netlink.default_fx((level, msg) => log(level, msg));
 			let backend = netlink.select_backend(fxi, dp.netdev, dp.mux ?? 'auto',
-				want_mux, dp.plugins, { model: self.info?.model });
+				want_mux, dp.plugins, { model: self.info?.model, proto: 'qmi' });
 
-			if (backend == null)
-				return fail('datapath', { error: 'mux_backend_unavailable', mux: dp.mux });
+			// Nothing claimed the box, or `option mux` named a package that is not
+			// installed. Fatal only when channels were actually configured —
+			// otherwise the plain raw-IP parent is exactly what this modem wanted,
+			// and it is what an unmuxed modem got before the probes ran at all.
+			if (backend == null) {
+				if (need_mux)
+					return fail('datapath', { error: 'mux_backend_unavailable', mux: dp.mux });
+
+				backend = 'raw_ip';
+			}
 
 			let dgram = netlink.board_dgram_size(fxi, dp.dgram_size, self.info.model);
 			let negotiate;
@@ -70,7 +89,7 @@ export function setup(self, dp, o, next)
 			negotiate = (dap, allow_fallback) => {
 				let args = { qos: 0, llp: wdamod.LLP_RAW_IP };
 
-				if (backend != 'none') {
+				if (backend != 'raw_ip') {
 					args.ul_protocol = dap;
 					args.dl_protocol = dap;
 					args.dl_max_datagrams = DL_MAX_DATAGRAMS;
@@ -93,7 +112,7 @@ export function setup(self, dp, o, next)
 						wdata.dl_max_datagrams ?? 0, wdata.dl_max_size ?? 0,
 						wdata.ul_max_datagrams ?? 0, wdata.ul_max_size ?? 0, dap, dgram));
 
-					let aggr_ok = (backend == 'none') ||
+					let aggr_ok = (backend == 'raw_ip') ||
 						((wdata.dl_protocol == wdamod.DAP_QMAP ||
 						  wdata.dl_protocol == wdamod.DAP_QMAPV5) &&
 						 (wdata.dl_max_size ?? 0) > 0);
@@ -133,7 +152,14 @@ export function setup(self, dp, o, next)
 						return fail('datapath', r);
 
 					self.datapath = {
-						backend: backend,
+						// what setup() ACTUALLY ran: it drops to raw_ip when the
+						// selected backend has no channels to build
+						backend: r.backend ?? backend,
+						// config channel -> the QMAP id the modem must tag it
+						// with. Equal unless the datapath adopts a driver's own
+						// children (see map_id in netlink.uc); context.uc binds
+						// WDS to this, not to the config number.
+						map_ids: r.map_ids,
 						v5: v5,
 						urb_size: r.urb_size,
 						mux_devs: r.mux_devs,

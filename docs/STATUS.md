@@ -1,7 +1,206 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-27. 48 host suites / 2935 checks, all green._
+_Last updated: 2026-08-30. 49 host suites / 3133 checks, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
+
+## One datapath interface: MBIM joins it, and `none` becomes `raw_ip` (2026-08-29)
+
+Three changes to the same seam, in the order they were asked for.
+
+**`none` -> `raw_ip`.** The no-mux datapath now says what the parent IS (plain
+raw-IP framing) instead of what it is not. `netlink.canon_mux()` is the one place
+that decides, and it keeps two older spellings alive: `none`, which is what every
+config written before this says, and `raw-ip`, which is how the thing is written
+in prose and therefore what people type. That second alias is not politeness — a
+hyphen would have failed `config.uc`'s shape check and silently fallen back to
+`auto`, i.e. muxing switched back ON in a config that asked for it off. The
+underscore is canonical because a datapath name doubles as the module name of an
+add-on package, and a module path cannot carry a hyphen.
+
+**The MBIM session mux is now a datapath like the others.** It was
+`netlink.setup_mbim()`, a second implementation beside `setup()`, and the two had
+already drifted: the stale-child prune was fixed in `setup()` and missed there,
+leaving the MBIM path with exactly the defect it had been fixed for (its own
+comment said so). It is the built-in `vlan` backend now — one `links()` that
+creates the 802.1q sub-devices and sizes the trunk, with prune, parent rename,
+child MTU and link-up coming from the shared path. `modem_mbim` calls
+`select_backend()` + `setup()` like `datapath_qmi` does, so `option mux` works on
+MBIM for the first time: `raw_ip` turns the session mux off, and an add-on
+package can claim an MBIM box.
+
+Getting a VLAN mux through a path built for QMAP took two new contract fields
+rather than an `if (backend == 'vlan')`, and both are behavioral:
+
+- `aggregate` (default true) — the QMAP header add-on, `rx_urb_size`, and the
+  aggregation buffer on the parent MTU. vlan sizes the trunk itself (largest
+  child + 4 for the tag), so it opts out.
+- `programs_parent` (default true) — whether this datapath reprograms the parent
+  driver's link-layer format, which the driver accepts only while the parent is
+  DOWN. vlan programs nothing, and the bounce is not free: on a restart that
+  adopts a live session it would drop the traffic it is adopting. The bounce now
+  also needs something to actually program (a `qmi` sysfs group or a backend
+  `pre`), so an unmuxed MBIM parent is left alone too.
+
+Plus `child_name()`, because the three places that must agree on what a child is
+called — the shared prune, the parent-rename collision check, and `links()` —
+cannot agree if only one of them knows the naming rule. Returning null means "no
+child at all", which is MBIM session 0 riding the parent untagged.
+
+`select_backend()` is protocol-aware for the same reason: under `auto` an MBIM
+box must never be handed a qmi_wwan mux, and the rmnet module being loaded is a
+property of the kernel, not of the modem. Built-ins have a per-protocol
+preference order; a plugin declares `proto` (default `[ 'qmi' ]`). Naming a
+datapath outright is still honoured whatever the protocol — an explicit act is
+not second-guessed.
+
+**The LuCI list comes from the daemon.** `status` `globals.datapaths` is a
+catalog — name, kind (mode/builtin/plugin), the control protocols it applies to,
+a one-line description — assembled from what `netlink.uc` implements plus the
+add-on packages actually installed. The dropdown builds itself from that, so an
+installed `rmnet_nss` is offered with no UI change. One limit worth knowing: LuCI
+options are per-column, not per-section, so on a box with both a QMI and an MBIM
+modem the list is the union of both and the protocol tag on each entry is what
+tells the rows apart.
+
+48 suites / 3068 checks green (was 2935). New coverage: the alias spellings
+through `select_backend`, `setup` and `config.parse`; the vlan backend through
+the shared `setup()`, including the two things it must NOT get (urb arithmetic,
+parent bounce); the per-protocol auto selection; `aggregate`/`programs_parent`/
+`child_name` on a plugin; the catalog. `test_modem_mbim` now drives a real
+datapath through `modem_mbim`, so "MBIM goes through `netlink.setup()`" is
+asserted end to end rather than by reading.
+
+**The probe gate is gone (same day).** `select_backend()` used to short-circuit
+to `raw_ip` before running a single probe whenever the config had no channels —
+which meant an add-on datapath could not introduce itself on exactly the installs
+that never write `option mux`, autosetup boxes included. `datapath_qmi` now
+always asks (`want_mux = true`), and the two things that gate used to protect are
+handled where the information actually is:
+
+- **unclaimed box.** `select_backend` under `auto` falls back to `raw_ip` instead
+  of null when no mux was required; the caller fails with
+  `mux_backend_unavailable` only when `mux_links` is non-empty. Every previous
+  failure survives — a configured channel with no available backend still fails
+  loudly.
+- **claimed but no channels.** `setup()` drops any backend with no children to
+  build back to `raw_ip` and logs it. Not cosmetic: rmnet's `pre` writes
+  qmi_wwan's `pass_through`, which hands raw QMAP frames to an rmnet child that
+  does not exist — link up, no traffic. The drop happens AFTER the backend's own
+  `prune()`, so a datapath whose children the KERNEL owns (a vendor driver
+  creating them at module load) keeps them instead of having the default prune
+  delete them.
+
+The measured matrix, QMI: channels+rmnet -> rmnet; channels+no mux driver ->
+FAIL; no channels+rmnet -> selected, effective `raw_ip`; no channels+nothing ->
+`raw_ip`. MBIM: a session-0-only config reports `raw_ip`, not a `vlan` with no
+children — the count that decides is children, not mux entries. `status` reports
+the datapath that actually ran (`setup()` returns it), not the one selected.
+
+**Autosetup writes a mux channel on QMI (same day).** The zero-config path
+created a single unmuxed interface, so the probes it now runs found a datapath
+and then had nothing to build. It writes `mux_id '1'` when — and only when — the
+modem can carry one: `netlink.mux_available(fx, netdev, proto, plugins)`, QMI
+only, against the netdev resolved from THAT modem's control device. Per modem,
+not per box, and the distinction is real: rmnet is a global module but qmimux
+reads the device's own `add_mux` node and an add-on probes the device, so a
+two-modem box can legitimately answer differently for each. MBIM and NCM keep
+their defaults — an MBIM session is not a QMAP channel and NCM has no mux.
+
+The decision lives in `netlink.uc` rather than `main.uc` so it is testable at
+all; `main.uc` only supplies the two discovery answers (protocol, netdev) and
+the daemon hands over its installed-datapath map, since it is the side that
+scans for them. Parser output for the written section was checked rather than
+assumed: `device 'wwand0'` + `mux_id 1` yields `mux_link wwand0`, muxed — the
+parent keeps its raw kernel name and the stable name moves to the child, which
+is the existing rename-collision path.
+
+**The rmnet_nss vendor datapath, written from the driver sources.**
+`src-ucode/datapath_rmnet_nss.uc` (in `WWAND_UCODE_PLAIN`; the feed still has to
+package it). Four things came out of reading `qmi_wwan_q.c` / `rmnet_nss.c` /
+quectel-cm that no amount of reasoning would have produced, and one of them
+needed a contract change:
+
+- **The QMAP id is not the channel number.** `priv->mux_id = QUECTEL_QMAP_MUX_ID
+  + offset_id`, `QUECTEL_QMAP_MUX_ID = 0x81`; quectel-cm agrees
+  (`profile.muxid = <digit> + 0x80`). wwand bound WDS to the config number,
+  which the driver drops outright ("drop qmap unknow mux_id"). New optional
+  `map_id(entry)` on the datapath contract; `setup()` returns `map_ids` and
+  `context.uc` binds to that. Identical to the channel number for every datapath
+  that creates its own children, so nothing else moves.
+- **The driver's attribute group has no `.name`**, so `qmap_mode`, `qmap_size`
+  and `link_state` sit DIRECTLY on the netdev — there is no `qmi/` group, hence
+  no raw_ip, no pass_through, no rx_urb_size (`dev->rx_urb_size = qmap_size` is
+  set by the driver at bind). `programs_parent: false`, `aggregate: false`.
+  wwand's existing `link_state` path already used the flat location and the
+  driver's semantics (`offset_id = (link_state & 0x7F) - 1`, 0x80 clears) match
+  what it writes — verified, not assumed.
+- **The children are the kernel's**, registered in the USB probe, one per the
+  `qmap_mode` module parameter (S_IRUGO — fixed at insmod). `links()` adopts,
+  `prune()` is a no-op, and a channel beyond `qmap_mode` produces an error that
+  names the number and says modprobe.d, because that is the actual fix.
+- **rmnet_nss must be loaded before the modem's driver binds.** `use_qca_nss =
+  !!nss_cb` is captured at child creation. So the probe gates on loaded, not
+  installed: claiming an installed-but-unloaded box would hand back children
+  with no NSS context and no way to tell.
+
+The probe is `/sys/module/rmnet_nss` AND a `qmap_mode` node on THIS netdev —
+specific enough that it cannot claim a mainline qmi_wwan box, whose knobs live
+under `qmi/`. Worth knowing why that matters: mainline `rmnet`'s own probe is
+satisfied by a vendor parent (it wants `/sys/module/rmnet` and the ABSENCE of a
+qmi group), so without the add-on installed, `auto` lands on `rmnet` and builds
+children that forward on the CPU — which is exactly the reported symptom. A test
+pins both halves of that.
+
+**The protocol restriction moved onto the datapaths themselves.** It used to
+live in two places beside them — an `AUTO_ORDER` map per protocol and a `CATALOG`
+table repeating `proto` for the UI — with the built-ins carrying no declaration
+at all. Now every datapath states its own `proto` (rmnet/qmimux qmi, vlan mbim,
+add-ons defaulting to qmi), `BUILTIN_ORDER` is one list filtered by it, and the
+catalog is BUILT from the entries, so a datapath and its catalog line cannot
+disagree about what it serves.
+
+It is also enforced now where it was not: naming a datapath whose protocol does
+not match used to be honoured ("an explicit act"), which was the right rule for
+a probe and the wrong one here — rmnet's QMAP framing on a cdc_mbim session
+cannot carry traffic however firmly it was named. It is refused with an error
+naming both protocols, the way a missing package is.
+
+LuCI filters PER ROW, which needed a `renderWidget` override: a LuCI option
+object is shared by every section of a GridSection, so `o.value()` is per column
+and the plain list was the union across a QMI and an MBIM modem — offering each
+of them datapaths the daemon now refuses. The rendering hook is the one place
+that knows which section it is drawing. Unknown protocol (modem not running)
+shows everything, and the value already configured is always kept in its own
+dropdown.
+
+**`wwand-datapath-rmnet_nss` is its own feed package** (`+wwand-qmi`), with the
+underscore intact: the datapath name is also the ucode module name and what the
+daemon's "package not installed" note is built from, so the three must read
+alike. It deliberately does NOT depend on the vendor driver or the NSS shim —
+those come from the board's kernel tree, and the package has to stay installable
+next to them rather than try to name them. The base package's install list is
+per-file, so nothing overlaps.
+
+**Status page.** `modem_datapath` gained an `extra` block fed by an optional
+`status(fx, netdev)` on the datapath, because the generic rows know QMAP and NTB
+and nothing about a vendor datapath — the NSS one reports `qmap_mode`,
+`qmap_size` and whether the shim is loaded; LuCI renders whatever keys arrive.
+Asking that question also surfaced a real defect in the first cut of the NSS
+datapath: it adopted the driver's `wwan0_1` and never renamed it, so netifd —
+which binds `option device` to the context's stable `wwandN` — would have left
+the interface unclaimed, and every child-side status row (channels, counters,
+learned device) would have been empty. It renames now, tolerating a restart that
+already did; the NSS context is keyed on the netdev, not its name.
+
+**Not on hardware yet.** Everything above is host-tested only. The NSS datapath
+has no witness at all here — it needs kuncy7's IPQ807x + RG500Q, and the first
+thing to check there is whether the WDA format negotiation wwand does itself
+(quectel-cm's job until now) is accepted by `qmi_wwan_q` with `qmap_mode` set.
+This also wants a cold-boot autosetup run on the Cudy LT300 (the autosetup HW-verify platform, but
+NCM — so it must come up UNMUXED there) and a QMI box for the muxed case. The MBIM datapath
+change wants a run on 246 (EG06), and the QMI side a regression run on 245 —
+`option mux` is unchanged there in effect, but the parent-bounce condition is
+new code on a path every QMI modem takes.
 
 ## Open after 1.5.0 (2026-08-27)
 

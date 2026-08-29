@@ -14,13 +14,20 @@ import * as daemon_mod from 'wwand/daemon.uc';
 
 let netifd_reloads = 0;
 
+let created_plugins = null;
+
 function mk(present, created, opts)
 {
 	return daemon_mod.create({ deps: {
 		log: (lvl, msg) => null,
-		autosetup_create: (dev) => { push(created, dev); return opts?.create_result ?? true; },
+		autosetup_create: (dev, plugins) => {
+			push(created, dev);
+			created_plugins = plugins;
+			return opts?.create_result ?? true;
+		},
 		list_present: () => present,
 		network_reload: () => netifd_reloads++,
+		...(opts?.deps ?? {}),
 	} });
 }
 
@@ -44,6 +51,20 @@ created = [];
 d = mk([ { kind: 'cdc-wdm', device: '/dev/cdc-wdm0', protocol: 'qmi' } ], created);
 d.autosetup_scan();
 eq(created, [ 'cdc-wdm0' ], 'scan: cdc-wdm replayed as basename');
+
+// autosetup decides whether the interface it creates carries a mux channel, and
+// it can only do that if the daemon hands it the datapaths installed on THIS
+// box — the daemon is the side that scans for them.
+created = [];
+d = mk([ { kind: 'cdc-wdm', device: '/dev/cdc-wdm0', protocol: 'qmi' } ], created, {
+	deps: {
+		datapath_fx: { glob: () => [ '/usr/share/ucode/wwand/datapath_vendorx.uc' ] },
+		load_datapath: (n) => (n == 'vendorx') ? { links: () => [] } : null,
+	},
+});
+d.autosetup_scan();
+ok(created_plugins != null && created_plugins.vendorx != null,
+	'scan: the installed datapaths are handed to autosetup_create');
 
 // (3) one-shot: only the first candidate is replayed
 created = [];

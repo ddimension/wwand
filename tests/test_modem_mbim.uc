@@ -17,6 +17,7 @@ import { eq, ok, done } from './lib/check.uc';
 import * as uloop from 'uloop';
 import * as struct from 'struct';
 import * as mbim_mockhub from './lib/mbim_mockhub.uc';
+import * as fakefx from './lib/fakefx.uc';
 import * as modem_mbim from 'wwand/modem_mbim.uc';
 import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
 import * as ext from 'wwand/codec/mbim_schema/ms_basic_connect_ext.uc';
@@ -170,11 +171,18 @@ function assert_puk_block() {
 	let mock2 = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h2 });
 	let m2 = null, m2_done = false;
 
+	// the session datapath runs before the SIM steps, so this instance also
+	// covers it: MBIM goes through the SHARED netlink.setup() (built-in `vlan`
+	// backend) rather than a datapath function of its own.
+	let dpfx = fakefx.create();
+
 	m2 = modem_mbim.create({
 		id: 'm_puk', device: '/dev/mock1',
 		config: { apn: 'internet', pincode: '1234' },
 		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
 		at: { fx: { read: () => null, glob: () => [] } },
+		datapath: { netdev: 'wwan0', fx: dpfx, mux: 'auto',
+		            mux_links: [ { id: 1, name: 'wwan0.1', mtu: 1500 } ] },
 		deps: {
 			transport_open: mock2.transport_open,
 			log: () => null,
@@ -184,6 +192,14 @@ function assert_puk_block() {
 					eq(data.reason, 'puk_required', 'puk: terminal reason puk_required');
 					eq(m2.state, 'SIM_BLOCKED', 'puk: state SIM_BLOCKED, no recovery ladder');
 					eq(m2.pin1?.state, 1, 'puk: pin1 status populated (MBIM parity)');
+					eq(m2.datapath?.backend, 'vlan',
+						'datapath: mbim auto-selects the built-in vlan backend');
+					eq(m2.datapath?.mux_devs, [ 'wwan0.1' ],
+						'datapath: the session child is created');
+					ok(dpfx.action_index('link_add_vlan wwan0.1 link wwan0 id 1') >= 0,
+						'datapath: through netlink.setup(), not a private path');
+					eq(dpfx.action_index('link_set wwan0 down'), -1,
+						'datapath: the parent is not bounced for a VLAN mux');
 					m2.stop();
 					finish();
 				}

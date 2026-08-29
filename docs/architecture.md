@@ -2,7 +2,7 @@
 
 A from-scratch native QMI/MBIM/NCM stack in ~3 MB — a tenth of ModemManager —
 that has survived a dwc3/swiotlb 4-byte-URB storm, provider-side SIM purges, and
-four datapath variants (rmnet / qmimux / raw-ip / NCM-ECM-RNDIS) in production. This
+five datapath variants (rmnet / qmimux / vlan / raw_ip / NCM-ECM-RNDIS) in production. This
 document is how it's built and why each decision was forced by the field; read
 [`connection-flow.md`](connection-flow.md) next to it for the runtime bring-up
 sequence, and [`luci.md`](luci.md) for the web UI.
@@ -179,9 +179,11 @@ both `SET_DATA_FORMAT` and `BIND_MUX_DATA_PORT`; the bind also tags the client a
 tethered (`client_type`). A vendor `qmi_wwan` that gates each mux behind a
 `link_state` sysfs node is opened per channel (existence-gated, no-op on mainline).
 
-**Pluggable.** rmnet and qmimux are entries in one datapath interface
-(probe/pre/links/prune), not special cases beside it. A third datapath — a vendor
-driver with its own mux mechanism —
+**Pluggable.** rmnet, qmimux and the cdc_mbim session mux (`vlan`) are entries
+in one datapath interface (probe/pre/links/prune/child_name), not special cases
+beside it — the MBIM one had a `setup_mbim()` of its own until 1.6 and the copy
+drifted, which is the argument for one path rather than two. A further datapath
+— a vendor driver with its own mux mechanism —
 can be added as an add-on package without patching wwand: `option mux` names it,
 the daemon `require()`s `wwand.datapath_<name>` and threads the returned
 implementation into `netlink.setup()`, which calls it for the one step that is
@@ -191,10 +193,12 @@ registry: ucode gives a `require()`d plain script its **own copies** of the
 modules it imports, so a plugin registering itself in `netlink.uc` would
 populate a different instance than the daemon's and silently do nothing. Under
 `auto` the daemon scans its module directory for installed plugins and each
-decides by its own `probe()` whether the box is its hardware — that is how an
+decides, by its declared control protocol and its own `probe()`, whether the box
+is its hardware — that is how an
 accelerated datapath (`rmnet_nss` on ipq807x/NSS) takes over on a zero-config
 box; a plugin without a probe is explicit-only, and `option mux` naming one wins
-over everything. See [extending.md §4](extending.md#4-adding-a-datapath-backend).
+over everything. Contract: [datapath-interface.md](datapath-interface.md); how
+to write one: [extending.md §4](extending.md#4-adding-a-datapath-backend).
 All of it stays **capability-gated**: aggregation is applied only when the modem
 confirms QMAP in its echo (non-zero DL size) — a non-QMAP modem, or a config
 without a mux, drops to plain raw-ip framing and the extra TLVs are harmless.

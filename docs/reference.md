@@ -35,6 +35,16 @@ is removed — afterwards the config is an ordinary hand-editable config. No
 table match keeps the APN empty, which attaches with the SIM/modem-
 provisioned APN.
 
+On **QMI** the created interface also gets a `mux_id '1'` — but only when this
+modem can actually carry a channel: the question is asked per modem, against the
+netdev behind its own control device, so a datapath must claim it (rmnet,
+qmimux, or an installed add-on). A modem with no mux datapath is left unmuxed,
+and so are **MBIM and NCM**, which keep their defaults — an MBIM session is not
+a QMAP channel and NCM has no mux at all. The point of the channel is what hangs
+off it: an accelerated datapath attaches to the QMAP child, and a second APN
+added later needs no re-plumbing. With the channel, the parent keeps its raw
+kernel name and the stable `wwand0` moves onto the mux child.
+
 Disable with `option autosetup '0'` in `config wwand_globals`. Autosetup
 never runs when any wwand config exists, and the one-shot fill never
 overwrites operator-set values.
@@ -325,9 +335,9 @@ config wwand_modem 'm0'
 	option modes 'lte,nr5g'          # lte umts gsm nr5g td-scdma cdma / all / unset
 	option mcc '262'                 # manual PLMN selection (optional, needs mnc)
 	option mnc '01'
-	option mux 'auto'                # auto|rmnet|qmimux|none — QMAP datapath backend
-	                                 #   (or the name of a datapath plugin
-	                                 #    package, see below)
+	option mux 'auto'                # auto|raw_ip|rmnet|qmimux|vlan — the kernel
+	                                 #   datapath (or the name of a datapath
+	                                 #   plugin package, see below)
 	option dl_datagram_max_size '0'  # QMAP DL aggregation bytes; 0 = model/board table
 	list at_init 'ATE0'              # extra AT commands, sent once before registration
 	option at2_external '0'          # 1: reserve the secondary AT port for external tools
@@ -425,6 +435,15 @@ see [Troubleshooting](#troubleshooting).
   down to a kernel that would either refuse it or — after the 16-bit cast —
   silently use a different channel.
 
+**The datapaths.** `rmnet` (QMAP through the kernel rmnet driver) and `qmimux`
+(qmi_wwan's own `add_mux`) carry QMI modems; `vlan` carries MBIM ones, where each
+session > 0 is an 802.1q sub-device of the parent. `raw_ip` is no multiplexing at
+all — one plain raw-IP interface. `auto`, the default, picks per hardware and
+control protocol, so there is normally nothing to set here.
+
+The no-mux datapath was called `none` until 1.6 and that spelling still works
+(as does `raw-ip`); both mean `raw_ip`, which is what `status` reports.
+
 **Datapath plugins.** `option mux` also accepts the name of an add-on datapath
 package: `option mux 'vendorx'` makes the daemon load `wwand.datapath_vendorx`
 (shipped by a `wwand-datapath-vendorx` package) and use it instead of
@@ -432,14 +451,29 @@ rmnet/qmimux — that one or nothing. If the package is missing, the modem is no
 started and its `control_note` says which package to install; there is
 deliberately no fallback to a datapath the config did not ask for.
 
-Under `auto` (the default) the daemon looks at every installed plugin and lets
-each decide via its own probe whether this box is its hardware; one that says yes
-is preferred over rmnet/qmimux. This is how an accelerated datapath — e.g.
+Every datapath declares which control protocols it serves — `rmnet` and
+`qmimux` QMI, `vlan` MBIM, an add-on whatever it says (QMI by default). That is
+enforced rather than advisory: a modem is only ever given a datapath for its own
+protocol, and `option mux` naming one that does not serve it is refused with an
+error instead of coming up broken. LuCI offers each modem only the datapaths its
+protocol can use.
+
+Under `auto` (the default) the daemon looks at every installed plugin that
+serves this modem's protocol and lets each decide via its own probe whether this
+box is its hardware; one that says yes is preferred over the built-ins. This is how an accelerated datapath — e.g.
 `rmnet_nss` on an ipq807x with NSS offload — takes over on the boards it belongs
-to without any configuration, autosetup included. A plugin that ships no probe is
+to without any configuration, autosetup included — the probes run whether or not
+the config has channels. An interface still needs a `mux_id` for a mux datapath
+to carry anything: with no channel to build, the selected datapath drops back to
+`raw_ip` (logged), since muxed framing with no mux child is a link that is up and
+passes no traffic. A plugin that ships no probe is
 never self-selected. `ubus call wwand status` reports the datapath each modem
-actually came up on (`modems.<name>.datapath`), and the choice is logged.
-Writing one: `docs/extending.md`.
+actually came up on (`modems.<name>.datapath`), and the choice is logged. The
+same call lists what is selectable on this box in `globals.datapaths` — name,
+kind (`mode`/`builtin`/`plugin`), the control protocols it applies to and a
+one-line description — which is where LuCI's dropdown comes from, so an
+installed plugin needs no UI change to be offered. Writing one:
+`docs/extending.md`.
 
 ### Old-style configurations (compat layer)
 

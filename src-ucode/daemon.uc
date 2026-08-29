@@ -42,10 +42,11 @@ let lazy_backend = (mod) => {
 };
 
 // datapath plugins: a modem whose `option mux` names something other than a
-// built-in (rmnet/qmimux/none/auto) pulls in `wwand.datapath_<name>`, which
-// registers itself with netlink (see the registry comment in netlink.uc). Same
-// shape as the control backends above: cached, and a missing package is a
-// control_note rather than a crash. The name is restricted before it reaches
+// built-in (auto/raw_ip/rmnet/qmimux/vlan) pulls in `wwand.datapath_<name>`,
+// which RETURNS its implementation for the daemon to thread down to netlink
+// (never a registry — see the comment there). Same shape as the control
+// backends above: cached, and a missing package is a control_note rather than
+// a crash. The name is restricted before it reaches
 // require() — it comes from uci and ends up as a module path.
 let dp_plugins = {};
 
@@ -143,6 +144,26 @@ export function create(opts)
 			log('info', sprintf('datapath plugins installed: %s', join(', ', keys(installed_dp))));
 
 		return installed_dp;
+	};
+
+	// the catalog a UI needs for `option mux`: what netlink implements plus the
+	// add-ons found on this box. A plugin describes itself through the same
+	// optional fields the datapath contract already has (`proto`, `description`).
+	let datapath_catalog = () => {
+		let out = nlmod.datapath_catalog();
+
+		for (let n, impl in list_datapaths())
+			push(out, {
+				name: n,
+				kind: 'plugin',
+				// same defaulting as the selection uses, from the one place that
+				// defines it — a UI that offered a datapath the daemon then
+				// refuses would be worse than no list at all
+				proto: nlmod.datapath_protos(impl),
+				description: impl.description ?? sprintf('add-on datapath %s', n),
+			});
+
+		return out;
 	};
 
 	// resolve a control protocol to its backend module + a human package name
@@ -1084,19 +1105,21 @@ export function create(opts)
 		let be = chosen.be;
 
 		// same for the datapath: `option mux` may name an add-on backend, which
-		// has to be loaded (and registered with netlink) BEFORE the modem starts
-		// its datapath bring-up. Only the QMI datapath is pluggable today — MBIM
-		// muxes over VLANs and NCM has no mux at all.
-		let mux = cfg.mux ?? 'auto';
+		// has to be loaded BEFORE the modem starts its datapath bring-up.
+		// Canonical spelling from here on — the name doubles as a module name
+		// (`wwand.datapath_<mux>`), so a legacy `none` or a typed `raw-ip` must
+		// not reach require() as written.
+		let mux = nlmod.canon_mux(cfg.mux) ?? 'auto';
 
 		// the datapath candidates handed to netlink.select_backend: exactly the
 		// one named by `option mux`, or — under 'auto' — every installed plugin,
 		// each of which decides for itself via probe() whether this box is its
-		// hardware. Only the QMI datapath is pluggable: MBIM muxes over VLANs
-		// and NCM has no mux at all.
+		// hardware. QMI and MBIM both go through it (their built-ins are entries
+		// in that same interface); NCM's cdc_ncm/cdc_ether datapath has no mux
+		// to choose, so it is left out.
 		let dp_plugins = null;
 
-		if (proto != 'mbim' && proto != 'ncm') {
+		if (proto != 'ncm') {
 			if (!nlmod.builtin_mux(mux)) {
 				let impl = load_datapath_fn(mux);
 
@@ -1114,9 +1137,10 @@ export function create(opts)
 		}
 
 		let datapath =
-			(proto == 'mbim') ? { netdev: entry.netdev, mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx } :
+			(proto == 'mbim') ? { netdev: entry.netdev, mux: mux, plugins: dp_plugins,
+			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx } :
 			(proto == 'ncm')  ? { netdev: entry.netdev, fx: deps.datapath_fx } :
-			                    { netdev: entry.netdev, ep_id: ep_id, ep_type: ep_type, mux: cfg.mux,
+			                    { netdev: entry.netdev, ep_id: ep_id, ep_type: ep_type, mux: mux,
 			                      plugins: dp_plugins,
 			                      dgram_size: cfg.dl_datagram_max_size,
 			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx };
@@ -1513,9 +1537,9 @@ export function create(opts)
 				fcc_lock: entry.modem?.fcc_lock,
 				// eSIM surface from the bring-up refresh (eUICC active only)
 				esim: entry.modem?.esim_info ?? null,
-				// the datapath that actually came up (rmnet/qmimux/none or a
-				// plugin name) — with 'auto' able to land on a plugin, "which
-				// one won" must be visible without reading the log
+				// the datapath that actually came up (rmnet/qmimux/vlan/raw_ip
+				// or a plugin name) — with 'auto' able to land on a plugin,
+				// "which one won" must be visible without reading the log
 				datapath: entry.modem?.datapath?.backend,
 				proto_errors: entry.modem?.counters?.proto_errors,
 				qmi_errors: entry.modem?.counters?.proto_errors,   // deprecated alias
@@ -1547,7 +1571,17 @@ export function create(opts)
 
 		return { modems: modems, contexts: contexts,
 		         board: board,
-		         globals: { hold_max_ms: self._hold_max_ms() } };
+		         globals: {
+		             hold_max_ms: self._hold_max_ms(),
+		             // Datapaths selectable via `option mux` on THIS box: the
+		             // pseudo-modes and built-ins netlink knows, plus every
+		             // installed add-on package — so a UI offers what is
+		             // actually there instead of a hardcoded list that goes
+		             // stale. Each entry carries the control protocols it
+		             // applies to, since offering an MBIM modem a qmi_wwan mux
+		             // is offering a config that cannot work.
+		             datapaths: datapath_catalog(),
+		         } };
 	};
 
 	// resolve a modem ref for a cb-style ubus method: returns the entry, or reports
@@ -1711,6 +1745,14 @@ export function create(opts)
 			channels: chan,         // live mux channels (id -> l3 device)
 		};
 
+		// whatever the datapath itself wants shown: the generic block above knows
+		// QMAP and NTB, and nothing about a vendor datapath's own view of the
+		// link. Absent for every datapath that contributes none.
+		let extra = nlmod.datapath_status(deps.datapath_fx, dp.backend, parent,
+			list_datapaths());
+		if (extra)
+			out.extra = extra;
+
 		// MBIM/NCM aggregate via NTB (cdc_ncm framing) instead of QMAP — surface
 		// the NTB parameters from sysfs so muxing/aggregation is observable there
 		// too. Absent (null) on a QMI qmi_wwan parent.
@@ -1788,8 +1830,10 @@ export function create(opts)
 			// autosetup phase 1: a modem appears while NOTHING wwand-related is
 			// configured -> create wwmodem_auto + interface wwan0 (wan zone) and
 			// reload. Gated by autosetup; autosetup_create re-checks live uci.
+			// the installed datapaths go with it: autosetup decides from them
+			// whether the interface it creates carries a QMAP mux channel
 			if ((self.autosetup ?? true) && !length(keys(self.modems)) &&
-			    deps.autosetup_create && deps.autosetup_create(devname)) {
+			    deps.autosetup_create && deps.autosetup_create(devname, list_datapaths())) {
 				log('notice', sprintf('autosetup: modem %s appeared without any configuration — created wwmodem_auto + interface wwan0 (wan zone)', devname));
 
 				if (self.reload)

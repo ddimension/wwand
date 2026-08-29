@@ -429,6 +429,8 @@ r = padopt({
 		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'vendor_x2' },
 		m1: { '.type': 'wwand_modem', usb_path: '1-2', mux: '../evil' },
 		m2: { '.type': 'wwand_modem', usb_path: '1-3', mux: 'rmnet' },
+		m3: { '.type': 'wwand_modem', usb_path: '1-4', mux: 'none' },
+		m4: { '.type': 'wwand_modem', usb_path: '1-5', mux: 'raw-ip' },
 	},
 });
 eq(r.modems.m0.mux, 'vendor_x2', 'mux name: a plugin name passes through');
@@ -436,6 +438,13 @@ eq(r.modems.m1.mux, 'auto', 'mux name: a path-shaped value is refused');
 eq(r.modems.m2.mux, 'rmnet', 'mux name: built-ins unaffected');
 ok(length(filter(r.warnings, (w) => index(w, 'invalid mux') >= 0)) == 1,
 	'mux name: exactly the bad one warns');
+
+// The no-mux datapath is `raw_ip` since 1.6. Both older spellings must survive
+// the shape check: `none` is what every config written before it says, and
+// `raw-ip` is how anyone types it — and a hyphen would fail the regex and turn
+// into 'auto', i.e. muxing switched back ON in a config that asked for it off.
+eq(r.modems.m3.mux, 'raw_ip', 'mux name: legacy `none` canonicalises to raw_ip');
+eq(r.modems.m4.mux, 'raw_ip', 'mux name: hyphenated raw-ip canonicalises too');
 
 // the compat parser (no `option modem`) resolves the channel through the same
 // helper — the two interface parsers must not drift

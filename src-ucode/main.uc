@@ -229,6 +229,29 @@ function run_daemon()
 			logmod.log('warn', 'netifd %s: ubus status %d', what, ret);
 	};
 
+	// one effects object for every datapath question: the daemon's setup and the
+	// autosetup probe below must see the same sysfs.
+	let datapath_fx = netlink.default_fx((level, msg) => logmod.log(level, '%s', msg));
+
+	// Autosetup: the mux channel the interface it creates should carry, or null
+	// for none (plain raw-IP parent, the previous behaviour).
+	//
+	// Asked per MODEM, not per box. rmnet is a global kernel module, but
+	// qmimux's probe reads THIS netdev's own `add_mux` node and an add-on
+	// answers with its own probe against this device — so on a two-modem box the
+	// answer can legitimately differ, and the netdev is resolved from the
+	// control device rather than assumed.
+	let autosetup_mux_id = (dev, plugins) => {
+		let proto = discovery.protocol_of(dev);
+
+		// resolving the netdev is only meaningful for the protocol that can mux;
+		// a missing one (enumeration race) leaves the interface unmuxed rather
+		// than writing a channel nothing can carry. The modem still comes up.
+		let netdev = (proto == 'qmi') ? discovery.netdev_for_device(dev) : null;
+
+		return netlink.mux_available(datapath_fx, netdev, proto, plugins) ? 1 : null;
+	};
+
 	let daemon = daemon_mod.create({
 		// operational timing from global config (re-read live on reload)
 		timing: { hold_max_ms: (parsed.globals.hold_max ?? 90) * 1000 },
@@ -238,7 +261,7 @@ function run_daemon()
 			// re-parse uci on demand (context_up refreshes params on every up)
 			read_config: load_config,
 			emit_event: (type, data) => conn.event(type, data),
-			datapath_fx: netlink.default_fx((level, msg) => logmod.log(level, '%s', msg)),
+			datapath_fx: datapath_fx,
 			// board profile: modem power/reset GPIOs + status LEDs (no-op on an
 			// unknown board). Recovery power-cycles/resets the modem through it.
 			board: board.create({ log: (level, msg) => logmod.log(level, '%s', msg) }),
@@ -309,8 +332,9 @@ function run_daemon()
 			},
 			// autosetup phase 1: create initial config for the first modem on an
 			// unconfigured box (wwmodem_auto + interface wwan0, wan zone). Returns
-			// true when written.
-			autosetup_create: (devname) => {
+			// true when written. `plugins` is the daemon's installed-datapath map,
+			// needed to answer the mux question below.
+			autosetup_create: (devname, plugins) => {
 				let cursor = libuci.cursor();
 
 				// re-check emptiness against LIVE config (a manual edit may be newer)
@@ -389,6 +413,23 @@ function run_daemon()
 				cursor.set('network', 'wwan0', 'device', 'wwand0');
 				cursor.set('network', 'wwan0', 'modem', 'wwmodem_auto');
 				cursor.set('network', 'wwan0', 'autosetup', '1');
+
+				// QMI gets a mux channel when this modem can actually carry one.
+				// Muxing is the better datapath on QMI (a QMAP channel is what an
+				// accelerated datapath attaches to, and a second APN later needs
+				// no re-plumbing), but only where it works — so the question is
+				// asked per MODEM, against this device's own netdev, not once per
+				// box: qmimux reads that netdev's `add_mux` node and an add-on
+				// answers with its own probe. MBIM and NCM keep their defaults:
+				// MBIM sessions need no channel and NCM has no mux at all.
+				let mux_id = autosetup_mux_id(dev, plugins);
+
+				if (mux_id != null) {
+					cursor.set('network', 'wwan0', 'mux_id', sprintf('%d', mux_id));
+					logmod.log('notice', 'autosetup: %s carries a QMAP mux channel (mux_id %d)',
+						dev, mux_id);
+				}
+
 				cursor.commit('network');
 
 				// join the default wan firewall zone
