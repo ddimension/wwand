@@ -208,12 +208,16 @@ say the value is the channel number, which is what wwand's shared code already
 writes — and it is not optional on 5G modems, where the driver starts with
 `link_state = !lte_a`, carrier off until someone writes it.
 
-A vendor box WITHOUT the NSS shim is still declined (the capture happens at
-child creation, so a later modprobe is too late) but now says so at notice,
-naming the ordering. Worth a decision later: on such a box `auto` falls through
-to mainline rmnet, whose probe a vendor parent satisfies — which builds rmnet
-children on a parent that already demuxes QMAP itself. Declining is safe for the
-NSS case and leaves that one unimproved.
+**And that decision was taken: the probe is the vendor signature alone.** What
+the datapath does is adopt qmi_wwan_q's children; they need adopting whether or
+not NSS is loaded, and the driver decides the offload by itself. Gating on the
+shim too was worse than useless — a non-NSS vendor box then fell through to
+mainline rmnet, whose probe such a parent satisfies (it asks for
+`/sys/module/rmnet` and the ABSENCE of a `qmi` group), and rmnet built its own
+children on a parent that already demuxes QMAP internally. A missing shim is now
+reported at notice with the ordering that would fix it, and shown on the status
+page (`nss_shim: absent`), rather than acted on. The name still says rmnet_nss
+because that is what the datapath is FOR.
 
 **Not on hardware yet.** Everything above is host-tested only. The NSS datapath
 has no witness at all here — it needs kuncy7's IPQ807x + RG500Q, and the first

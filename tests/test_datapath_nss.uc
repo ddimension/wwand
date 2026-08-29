@@ -59,10 +59,12 @@ eq(plug.probe(fakefx.create({ present: {
 		'probe: qmap_mode 1 without a registered child is not claimed');
 }
 
-// vendor children present but the NSS shim is not loaded. Deliberately NOT
-// claimed — qmi_wwan_q captured use_qca_nss when it created them, so loading it
-// now is too late — but said out loud, because the fix is an ordering one and
-// nothing else would reveal it.
+// Vendor children present but the NSS shim is not loaded: STILL claimed. These
+// children need adopting whether or not the offload is there, and declining was
+// actively harmful — `auto` then fell through to mainline rmnet, whose probe a
+// vendor parent satisfies (it wants /sys/module/rmnet and the ABSENCE of a qmi
+// group), and rmnet built its own children on a parent that already demuxes
+// QMAP internally. The missing shim is reported, not acted on.
 {
 	let logs = [];
 	let noshim = fakefx.create({
@@ -71,9 +73,22 @@ eq(plug.probe(fakefx.create({ present: {
 	});
 	noshim.log = (lvl, msg) => push(logs, sprintf('%s %s', lvl, msg));
 
-	eq(plug.probe(noshim, 'wwan0'), false, 'probe: vendor children without rmnet_nss are not claimed');
-	ok(length(filter(logs, (m) => match(m, /^notice .*load rmnet_nss BEFORE qmi_wwan_q/) != null)) == 1,
-		'probe: ...and the ordering requirement is named');
+	eq(plug.probe(noshim, 'wwan0'), true, 'probe: vendor children are claimed without the shim too');
+	ok(length(filter(logs, (m) => match(m, /^notice .*no NSS offload.*BEFORE qmi_wwan_q/) != null)) == 1,
+		'probe: ...but the missing offload and its ordering are named');
+
+	// and it still beats mainline rmnet there — the case that made the gate a
+	// mistake in the first place
+	let bare = fakefx.create({
+		present: { '/sys/class/net/wwan0_1': true, '/sys/module/rmnet': true },
+		files: { '/sys/class/net/wwan0/qmap_mode': "1\n" },
+	});
+	eq(netlink.select_backend(bare, 'wwan0', 'auto', true, plugins, { proto: 'qmi' }), 'rmnet_nss',
+		'probe: a vendor box without NSS is not left to mainline rmnet');
+
+	// the status page still tells the two cases apart
+	eq(netlink.datapath_status(noshim, 'rmnet_nss', 'wwan0', plugins).nss_shim, 'absent',
+		'probe: status reports the shim as absent');
 }
 
 // --- naming and the QMAP id on the wire --------------------------------------

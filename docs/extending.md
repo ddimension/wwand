@@ -366,9 +366,14 @@ the short version:
 - The driver's sysfs group carries no `.name`, so its knobs sit directly on the
   netdev and there is **no `qmi/` group at all** — no raw_ip, no rx_urb_size.
   Hence `programs_parent: false` and `aggregate: false`.
-- The probe requires rmnet_nss **loaded**, not merely installed: the driver
-  captures `use_qca_nss = !!nss_cb` when it creates a child, so a module loaded
-  afterwards is too late and the offload would be silently absent.
+- The probe is the **vendor signature alone** — `<netdev>_1` exists — not the
+  NSS shim. What the datapath does is adopt qmi_wwan_q's children, and they need
+  adopting whether or not the offload is there. Gating on the shim as well made
+  a non-NSS vendor box fall through to mainline rmnet, whose probe such a parent
+  satisfies, which then built rmnet children on a parent that already demuxes
+  QMAP itself. A missing shim is reported (at notice, and on the status page)
+  rather than acted on — it cannot be fixed after the fact anyway, since the
+  driver captured `use_qca_nss = !!nss_cb` when it created each child.
 
 Testing: `tests/test_datapath_nss.uc` pins all of that against the vendor
 sources, and `tests/test_datapath.uc` exercises a plugin against the fake `fx`

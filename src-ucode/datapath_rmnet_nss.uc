@@ -39,12 +39,19 @@
 //     exist and the write no-ops. It matters on 5G modems: the driver starts
 //     them with `link_state = !lte_a`, i.e. carrier off until someone writes.
 //
-// Availability is gated on rmnet_nss being LOADED, not merely installed, and
-// that is not pedantry: qmi_wwan_q captures `use_qca_nss = !!nss_cb` when it
-// creates each child, so a module loaded after the modem's driver bound is too
-// late — the children exist without an NSS context. An installed-but-unloaded
-// rmnet_nss is reported rather than claimed, since claiming it would hand back
-// a datapath with no offload and no way to tell.
+// What this datapath IS, precisely: the adopter for qmi_wwan_q's own QMAP
+// children. NSS is what makes it worth having — and what it is named after —
+// but it is not a condition for using it. The driver decides the offload by
+// itself (`use_qca_nss = !!nss_cb`, captured when it creates each child, so a
+// module loaded after it bound is too late), and either way these children need
+// a datapath that adopts rather than creates.
+//
+// So the probe is the vendor signature alone. Gating it on the shim as well was
+// worse than useless: on a vendor box without NSS this declined, `auto` fell
+// through to mainline rmnet — whose probe a vendor parent satisfies, since it
+// asks for /sys/module/rmnet and the ABSENCE of a `qmi` group — and rmnet then
+// built its own children on a parent that already demuxes QMAP internally. A
+// missing shim is reported instead, once, with the ordering that would fix it.
 
 'use strict';
 
@@ -73,7 +80,7 @@ function qmap_mode(fx, netdev)
 return {
 	proto: [ 'qmi' ],
 
-	description: 'QMAP over the vendor qmi_wwan_q with Qualcomm NSS offload',
+	description: 'QMAP over the vendor qmi_wwan_q (Qualcomm NSS offload when the shim is loaded)',
 
 	// Specific on purpose (the contract asks for it), and keyed on what is
 	// actually observable rather than on what `qmap_mode` implies.
@@ -91,18 +98,16 @@ return {
 		if (!fx.exists(sprintf('/sys/class/net/%s', vendor_child(netdev, 1))))
 			return false;
 
-		if (fx.exists('/sys/module/rmnet_nss'))
-			return true;
+		// Claimed either way — these children need adopting, not creating. But a
+		// missing shim cannot be fixed after the fact (the driver captured the
+		// answer when it created them), so say so rather than let the operator
+		// wonder why the offload never appeared. `status` carries the same fact
+		// to the status page.
+		if (!fx.exists('/sys/module/rmnet_nss'))
+			fx.log('notice', sprintf('rmnet_nss: adopting the vendor QMAP channels of %s, but /sys/module/rmnet_nss is absent — no NSS offload; load rmnet_nss BEFORE qmi_wwan_q binds',
+				netdev));
 
-		// The vendor driver is here with channels, but the NSS shim is not — and
-		// it cannot be fixed after the fact: qmi_wwan_q captures whether NSS is
-		// available at the moment it creates each child, so a modprobe now would
-		// leave them without an NSS context and nothing would say so. Say it
-		// once, here, rather than let the operator wonder why nothing changed.
-		fx.log('notice', sprintf('rmnet_nss: %s has vendor QMAP channels but /sys/module/rmnet_nss is absent — load rmnet_nss BEFORE qmi_wwan_q binds to get the offload; not claiming this datapath',
-			netdev));
-
-		return false;
+		return true;
 	},
 
 	// The name the child ends up with: the context's stable wwandN when the
