@@ -58,6 +58,36 @@ function conn_fields(s)
 // every parser then reads back as "mux child 1 of the Huawei". Not guessing is
 // strictly better: null is already defined to mean "re-derive at runtime", and
 // at runtime the real parent is known.
+// QMAP/rmnet mux ids are 8 bit wide, with 0 reserved for the untagged parent:
+// the kernel takes 1..254 (rmnet_config.c rejects anything above
+// RMNET_MAX_LOGICAL_EP - 1 with -ERANGE; qmimux is the same range). Validate
+// the configured value HERE, because neither layer below complains usefully:
+// wwand_io casts it to uint16_t for IFLA_RMNET_MUX_ID, so 65537 would silently
+// become channel 1 and collide with whatever really uses channel 1, while 300
+// only surfaces as an obscure link-creation errno. An out-of-range id is
+// warned about and disables muxing for that interface rather than guessing a
+// channel.
+const MUX_ID_MAX = 254;
+
+// resolve the mux channel of one interface section: an explicit `option mux_id`
+// wins (the 2-field UX), else it is derived from a wwan0mN device name.
+// Shared by both interface parsers, which must never drift.
+function resolve_mux(s, nd, name, warnings)
+{
+	let raw = s.mux_id;
+	let mux_id = (raw != null) ? +raw : (nd?.mux_id ?? 0);
+	let muxed = (mux_id > 0) || (nd?.muxed ?? false);
+
+	if (mux_id != int(mux_id) || mux_id < 0 || mux_id > MUX_ID_MAX) {
+		push(warnings, sprintf("interface %s: mux_id '%s' out of range (0-%d), muxing disabled",
+			name, raw ?? nd?.mux_id, MUX_ID_MAX));
+
+		return { mux_id: 0, muxed: false };
+	}
+
+	return { mux_id: mux_id, muxed: muxed };
+}
+
 function derive_mux_link(nd, device, mux_id, muxed, fallback_netdev)
 {
 	if (!muxed)
@@ -501,10 +531,8 @@ function compat_translate(raw, result)
 			}
 
 			let nd = parse_netdev(s.device);
-			// mux channel: an explicit `option mux_id` wins (the 2-field UX), else
-			// it is derived from a wwan0mN device name.
-			let mux_id = (s.mux_id != null) ? +s.mux_id : (nd?.mux_id ?? 0);
-			let muxed = (mux_id > 0) || (nd?.muxed ?? false);
+			let mux = resolve_mux(s, nd, name, result.warnings);
+			let mux_id = mux.mux_id, muxed = mux.muxed;
 			// accept both pdp_type (preferred) and the legacy proto-js pdptype
 			let pdp_in = s.pdp_type ?? s.pdptype;
 
@@ -587,10 +615,9 @@ function compat_translate(raw, result)
 		if (PDP_TYPES[s.pdptype])
 			pdp = s.pdptype;
 
-		// mux channel: same rule as the native path — explicit `option mux_id`
-		// wins, else derived from a wwan0mN device name.
-		let cmux_id = (s.mux_id != null) ? +s.mux_id : (nd?.mux_id ?? 0);
-		let cmuxed = (cmux_id > 0) || (nd?.muxed ?? false);
+		// mux channel: same rule (and same validation) as the native path
+		let cmux = resolve_mux(s, nd, name, result.warnings);
+		let cmux_id = cmux.mux_id, cmuxed = cmux.muxed;
 
 		result.contexts[name] = context_defaults({
 			...conn_fields(s),

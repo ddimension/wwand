@@ -30,6 +30,12 @@ const ESIM_LOGF = '/tmp/wwand/esim-download.log';
 // lpac (binary here) and our self-contained wwand-lpac (a thin wrapper here that
 // execs its static /usr/lib/lpac). Calling this path works for either.
 const ESIM_LPAC = '/usr/bin/lpac';
+// Nothing read from lpac for this long -> the run is stuck (curl waiting on a
+// dead SM-DP+ socket, or an APDU the modem never answers). Without a timeout
+// dl.state stays 'running' forever and every later download is refused as
+// 'busy'. Generous on purpose: the ES9+ profile transfer is one quiet HTTPS
+// POST and is slow over a bad link.
+const ESIM_IDLE_MS = 300000;
 
 // classify one lpac stdout line — the testable core of the stdio bridge.
 // Protocol fields are pulled with match() because ucode's json() throws
@@ -81,6 +87,7 @@ return {
 	create: function(deps) {
 		let esim = deps.esim, log = deps.log, modem_of = deps.modem_of;
 		let lpac = deps.lpac_path ?? ESIM_LPAC;   // test seam for the lpac binary
+		let idle_ms = deps.idle_ms ?? ESIM_IDLE_MS;   // test seam for the watchdog
 		let dl = { state: 'idle' };   // one host download at a time
 		let mgmt_busy = false;        // one lpac profile-management op at a time
 
@@ -147,10 +154,12 @@ return {
 			// handler reaps all children, so h.close()'s waitpid can lose the
 			// race and not know the status (returns null) — the marker line is
 			// then the only reliable source. (No exec: the shell must survive
-			// lpac to echo the marker.)
+			// lpac to echo the marker.) The marker's own stderr is dropped: an
+			// aborted run (inactivity timeout) closes the pipe under the shell,
+			// and its "echo: I/O error" would reach the log as a wwand error.
 			let qmit = require('wwand_io');
 			let h = qmit.spawn([ '/bin/sh', '-c',
-				sprintf("mkdir -p /tmp/wwand; env LPAC_APDU=stdio LPAC_HTTP=curl %s %s 2>>%s; echo \"__EXIT:$?\"",
+				sprintf("mkdir -p /tmp/wwand; env LPAC_APDU=stdio LPAC_HTTP=curl %s %s 2>>%s; echo \"__EXIT:$?\" 2>/dev/null",
 					lpac, cmd, ESIM_LOGF) ]);
 
 			if (!h) { if (logf) logf.close(); return null; }
@@ -163,14 +172,57 @@ return {
 				if (logf) { logf.write(s + '\n'); logf.flush(); }
 				log('notice', sprintf('modem %s: esim[%s]: %s', ref, op, s));
 			};
-			let send = (ecode, data) =>
-				h.write(sprintf('{"type":"apdu","payload":{"ecode":%d,"data":"%s"}}\n', ecode, data ?? ''));
+			// h.write() may write only PART of the string (it returns the byte
+			// count) or nothing at all (null = EAGAIN, lpac's stdin pipe full);
+			// false is a hard error. Dropping the remainder would leave lpac
+			// waiting for an APDU answer that never arrives, so keep the tail
+			// and retry it from a timer rather than spinning in the callback.
+			let wq = '', wtimer = null, wdead = false;
+
+			let pump;
+			pump = () => {
+				wtimer = null;
+
+				while (length(wq)) {
+					let n = h.write(wq);
+
+					if (n === false) {   // hard error: lpac's stdin is gone
+						wdead = true;
+						wq = '';
+
+						return logline('write to lpac failed - aborting');
+					}
+
+					if (n === null || n === 0)   // would block: retry shortly
+						return (wtimer = uloop.timer(20, pump));
+
+					wq = substr(wq, n);
+				}
+			};
+
+			let send = (ecode, data) => {
+				if (wdead)
+					return;
+
+				wq += sprintf('{"type":"apdu","payload":{"ecode":%d,"data":"%s"}}\n', ecode, data ?? '');
+
+				if (!wtimer)
+					pump();
+			};
 			let field = (s, re) => { let m = match(s, re); return m ? m[1] : null; };
 
 			let inband_ec = null;   // exit status from the __EXIT stdout marker
+			let idle = null;        // inactivity watchdog (ESIM_IDLE_MS)
+			let done = false;
 
 			let finish;   // forward-declare (ucode TDZ on self-referencing arrows)
-			finish = () => {
+			finish = (err) => {
+				if (done)
+					return;
+
+				done = true;
+				idle?.cancel();   idle = null;
+				wtimer?.cancel(); wtimer = null;
 				if (uh) { uh.delete(); uh = null; }
 				// close() returns null when uloop already reaped the child
 				// (status unknown) — the in-band marker fills the gap; with
@@ -180,7 +232,8 @@ return {
 				if (ec === null)
 					ec = inband_ec ?? 0;
 				if (logf) { logf.close(); logf = null; }
-				on_done(ec == 0 ? null : { error: 'lpac', code: ec }, trim(fs.readfile(ESIM_LOGF) ?? ''));
+				on_done(err ?? (ec == 0 ? null : { error: 'lpac', code: ec }),
+					trim(fs.readfile(ESIM_LOGF) ?? ''));
 			};
 
 			// dispatch a classified lpac line (parse_lpac_line above). APDU ops
@@ -228,12 +281,22 @@ return {
 			// h.read() is non-blocking (edge-triggered fd): drain all available
 			// bytes, then process every complete line
 			uh = uloop.handle(h.fileno(), () => {
+				let eof = false;
+
+				idle?.set(idle_ms);   // any output means the run is alive
+
 				while (true) {
 					let chunk = h.read();
-					if (chunk === false) return finish();   // EOF: lpac exited
-					if (chunk === null) break;               // no more data right now
+					if (chunk === false) { eof = true; break; }   // lpac exited
+					if (chunk === null) break;                    // no more data right now
 					buf += chunk;
 				}
+
+				// EOF and the last payload arrive in the SAME drain cycle for a
+				// short-lived child: process what is buffered BEFORE finishing -
+				// that tail carries lpac's result line and the __EXIT marker.
+				if (eof && length(trim(buf)))
+					buf += '\n';   // terminate a trailing unterminated line
 
 				let nl;
 				while ((nl = index(buf, '\n')) >= 0) {
@@ -246,7 +309,17 @@ return {
 
 					if (length(s)) handle_line(s);
 				}
+
+				if (eof)
+					finish();
 			}, uloop.ULOOP_READ);
+
+			idle = uloop.timer(idle_ms, () => {
+				idle = null;
+				logline(sprintf('timeout: no output from lpac for %d s - aborting',
+					idle_ms / 1000));
+				finish({ error: 'timeout', code: -1 });
+			});
 
 			return h;
 		};

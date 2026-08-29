@@ -332,6 +332,53 @@ eq(r.contexts.wan.mux_id, 3, 'net: explicit mux_id honoured');
 eq(r.contexts.wan.muxed, true, 'net: explicit mux_id -> muxed');
 eq(r.contexts.wan.mux_link, 'wwand0', 'net: derived mux child now auto-named wwand0');
 
+// mux_id range. QMAP/rmnet channels are 8 bit with 0 = untagged parent, so the
+// kernel takes 1..254. An out-of-range value used to be passed straight down to
+// wwand_io, which casts it to uint16_t for IFLA_RMNET_MUX_ID: 65537 SILENTLY
+// became channel 1 and collided with a real one, while 300 only surfaced as an
+// obscure link-creation errno. Now it warns and drops muxing for the interface.
+let mux_bad = (raw) => padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'rmnet' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', mux_id: raw, apn: 'internet' },
+	},
+});
+
+r = mux_bad('65537');
+eq(r.contexts.wan.mux_id, 0, 'mux range: 65537 rejected (would alias channel 1)');
+eq(r.contexts.wan.muxed, false, 'mux range: rejected id disables muxing');
+ok(length(filter(r.warnings, (w) => index(w, 'mux_id') >= 0)) == 1,
+	'mux range: 65537 warns');
+
+r = mux_bad('300');
+eq(r.contexts.wan.mux_id, 0, 'mux range: 300 rejected (kernel -ERANGE)');
+
+r = mux_bad('255');
+eq(r.contexts.wan.mux_id, 0, 'mux range: 255 rejected (RMNET_MAX_LOGICAL_EP - 1)');
+
+r = mux_bad('254');
+eq(r.contexts.wan.mux_id, 254, 'mux range: 254 is the highest valid channel');
+eq(r.contexts.wan.muxed, true, 'mux range: 254 muxed');
+
+r = mux_bad('-1');
+eq(r.contexts.wan.mux_id, 0, 'mux range: negative rejected');
+
+r = mux_bad('abc');
+eq(r.contexts.wan.mux_id, 0, 'mux range: non-numeric rejected');
+
+r = mux_bad('1.5');
+eq(r.contexts.wan.mux_id, 0, 'mux range: fractional rejected');
+
+// the compat parser (no `option modem`) resolves the channel through the same
+// helper — the two interface parsers must not drift
+r = padopt({
+	network: {
+		wanq: { '.type': 'interface', proto: 'wwand', device: 'wwan0',
+		        mux_id: '9999', apn: 'internet' },
+	},
+});
+eq(r.contexts.wanq?.mux_id, 0, 'mux range: compat parser validates too');
+
 // native path: a BARE netdev device + mux_id must derive <netdev>m<mux_id>, not
 // name the child the same as the parent (regression: mux_link was 'wwan0')
 r = padopt({

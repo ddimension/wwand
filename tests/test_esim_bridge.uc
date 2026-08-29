@@ -7,6 +7,7 @@
 
 'use strict';
 
+import * as fs from 'fs';
 import * as uloop from 'uloop';
 import { eq, ok, done } from './lib/check.uc';
 
@@ -108,6 +109,7 @@ let chain = [];
 let expect = (op, params, err_name, then) =>
 	push(chain, { op: op, params: params, err: err_name, then: then });
 
+let lpac_stdio_tests;   // declared here: the chain end calls it (defined below)
 let run_chain;   // forward-declared (self-referencing arrow — ucode TDZ)
 run_chain = (idx) => {
 	if (idx >= length(chain)) {
@@ -126,7 +128,7 @@ run_chain = (idx) => {
 
 				dl_completion(null, { ret: 0 });   // simulate the modem finishing
 				eq(!!entry.modem._esim_op, false, 'router: quiet cleared at download completion');
-				done('test_esim_bridge');
+				lpac_stdio_tests();
 			});
 		});
 		return;
@@ -174,6 +176,91 @@ expect('download', { activation_code: 'LPA:1$a$b' }, null, (res) => {
 	eq(res, { started: true, via: 'modem' }, 'router download: AT backend starts in-modem');
 	eq(dl_at_called, 'LPA:1$a$b', 'router download: code handed to download_at');
 });
+
+// --- the lpac stdio bridge, over a REAL spawned child -----------------------
+//
+// A stub standing in for /usr/bin/lpac: it speaks the stdio protocol and exits
+// straight away, which is exactly the case the drain loop used to lose. A pipe
+// whose writer is gone hands the buffered bytes to the first read() and EOF to
+// the SECOND one — so data and EOF land in the SAME uloop cycle, and returning
+// on EOF (as the old code did) dropped every complete line still in the buffer:
+// lpac's `result: code=0` line and the __EXIT marker among them, turning a
+// successful download into a reported failure.
+
+let tmp = getenv('TMPDIR') ?? '/tmp';
+let fake_ok = sprintf('%s/wwand-test-lpac-ok.sh', tmp);
+let fake_mute = sprintf('%s/wwand-test-lpac-mute.sh', tmp);
+
+let write_stub = (path, body) => {
+	let f = fs.open(path, 'w');
+	f.write(body);
+	f.close();
+	fs.chmod(path, 0o755);
+};
+
+// lpac_run opens the log file before the child runs; without the directory it
+// silently logs nowhere (and the bridge then sees no result line at all)
+try { fs.mkdir('/tmp/wwand'); } catch (e) { }
+
+write_stub(fake_ok,
+	"#!/bin/sh\n" +
+	"printf '%s\\n' '{\"type\":\"progress\",\"payload\":{\"message\":\"es9p_initiate_authentication\"}}'\n" +
+	"printf '%s\\n' '{\"type\":\"lpa\",\"payload\":{\"code\":0,\"message\":\"success\",\"data\":\"8900\"}}'\n" +
+	"exit 0\n");
+
+// stays silent past the (test-shortened) inactivity watchdog, like an lpac
+// blocked in curl on a dead SM-DP+ socket
+write_stub(fake_mute, "#!/bin/sh\nsleep 1\nexit 0\n");
+
+let entry2 = { modem: { id: 'm0', _esim_op: 0 } };
+let mk = (path, idle) => bridge.create({ esim: esim_fake, log: () => null,
+	modem_of: (r) => (r == 'm0') ? entry2 : null,
+	lpac_path: path, idle_ms: idle });
+
+// poll download_status until the run leaves 'running' (bounded, so a
+// regression fails the suite instead of hanging it)
+let await_state;   // forward-declared (self-referencing arrow — ucode TDZ)
+await_state = (b, left, cb) =>
+	b.modem_esim('m0', 'download_status', {}, (e, res) => {
+		if (res?.state != 'running' || left <= 0)
+			return cb(res);
+
+		uloop.timer(50, () => await_state(b, left - 1, cb));
+	});
+
+lpac_stdio_tests = () => {
+	backend_at = false;   // back to the host-side (lpac) download path
+	dl_auto = true;
+
+	let b = mk(fake_ok, null);
+
+	b.modem_esim('m0', 'download', { activation_code: 'LPA:1$a$b' }, (err, res) => {
+		eq(err, null, 'lpac stdio: download starts');
+		eq(res?.via, 'lpac', 'lpac stdio: takes the lpac path');
+
+		await_state(b, 40, (st) => {
+			eq(st?.state, 'done',
+				'lpac stdio: result line arriving with EOF is still parsed');
+			eq(!!entry2.modem._esim_op, false, 'lpac stdio: quiet claim released');
+
+			// the watchdog: a child that says nothing must not wedge the
+			// bridge at 'running' forever (every later op would answer 'busy')
+			let bm = mk(fake_mute, 150);
+
+			bm.modem_esim('m0', 'download', { activation_code: 'LPA:1$a$b' }, () => {
+				await_state(bm, 40, (mst) => {
+					eq(mst?.state, 'failed', 'lpac stdio: silent lpac times out');
+					eq(!!entry2.modem._esim_op, false,
+						'lpac stdio: timeout releases the quiet claim');
+
+					fs.unlink(fake_ok);
+					fs.unlink(fake_mute);
+					done('test_esim_bridge');
+				});
+			});
+		});
+	});
+};
 
 // the no_such_modem early return precedes the done wrapper (no flag set yet) —
 // the raw error shape, not the esim wrapper

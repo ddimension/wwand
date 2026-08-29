@@ -645,6 +645,17 @@ qmit_rmnet_add(uc_vm_t *vm, size_t nargs)
 		return ucv_boolean_new(false);
 	}
 
+	/* IFLA_RMNET_MUX_ID is a u16 on the wire but a QMAP channel is 8 bit:
+	 * the kernel rejects > RMNET_MAX_LOGICAL_EP - 1 (254) with -ERANGE.
+	 * Refuse out-of-range here rather than let the cast below wrap it —
+	 * 65537 would otherwise become a perfectly valid-looking channel 1 and
+	 * silently collide with whatever really uses channel 1. */
+	if (ucv_int64_get(mux_id) < 0 || ucv_int64_get(mux_id) > 254) {
+		last_errno = ERANGE;
+
+		return ucv_boolean_new(false);
+	}
+
 	parent_idx = if_nametoindex(ucv_string_get(parent));
 
 	if (!parent_idx) {
