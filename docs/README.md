@@ -15,6 +15,7 @@ whether you are a user, a developer, or an AI assistant working on the tree.
 | Understand the design / internals | [architecture.md](architecture.md) — layering, mechanisms, invariants |
 | Add a quirk, option, backend, telemetry, ubus method, board | [extending.md](extending.md) — one checklist per extension type |
 | Write or port a control backend | [backend-interface.md](backend-interface.md) — the duck-typed modem/context contract |
+| Write or port a datapath (mux) backend | [datapath-interface.md](datapath-interface.md) — the datapath contract and how one is chosen |
 | Know which modem exposes which telemetry | [telemetry-survey.md](telemetry-survey.md) — a dated, point-in-time survey |
 | See what changed / current test counts / open items | [STATUS.md](STATUS.md) — running continuation log |
 

@@ -76,7 +76,8 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   reset at the end. `option at2_external '1'` releases the secondary AT
   port for external tools (status `at2_released`; telemetry falls back to
   the control channel).
-- `docs/architecture.md`, `docs/backend-interface.md`, `docs/extending.md`,
+- `docs/architecture.md`, `docs/backend-interface.md`,
+  `docs/datapath-interface.md`, `docs/extending.md`,
   `docs/telemetry-survey.md`, `docs/STATUS.md`.
 
 ## Core layering (src-ucode)
