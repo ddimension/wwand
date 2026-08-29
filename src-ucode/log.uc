@@ -7,7 +7,13 @@
 
 'use strict';
 
-const LEVELS = { err: 3, warn: 4, notice: 5, info: 6, debug: 7 };
+// 'error'/'warning' are accepted as aliases of the syslog names: they are what
+// one types by reflex, and a level the table does not know used to be demoted
+// to debug — which SILENTLY hid the message at the default threshold. That bit
+// exactly once, on an AT-command refusal that was supposed to be loud.
+const LEVELS = { err: 3, error: 3, warn: 4, warning: 4, notice: 5, info: 6, debug: 7 };
+// severity -> canonical name (numeric object keys must be quoted in ucode)
+const NAMES = { '3': 'err', '4': 'warn', '5': 'notice', '6': 'info', '7': 'debug' };
 const LOG_DAEMON = 3;   // syslog facility
 
 let threshold = LEVELS.info;
@@ -58,10 +64,17 @@ export function set_target(name)
 
 export function log(level, fmt, ...args)
 {
-	let sev = LEVELS[level] ?? LEVELS.debug;
+	// an unknown level is a caller mistake, so keep the message VISIBLE rather
+	// than demote it to debug: whoever wrote the call meant it to be logged
+	let sev = LEVELS[level] ?? LEVELS.notice;
 
 	if (sev > threshold)
 		return;
+
+	// the stderr prefix is the CANONICAL name for that severity, not what the
+	// caller typed: 'error' and 'err' must not produce two spellings of the
+	// same line, and 'chatty:' would be a prefix nothing greps for
+	let tag = NAMES[sprintf('%d', sev)] ?? 'notice';
 
 	// Control characters must not reach syslog raw — one entry has to stay one
 	// line (e.g. the \x0b some modems prefix to the PLMN name). CR and LF are
@@ -79,7 +92,7 @@ export function log(level, fmt, ...args)
 	if (io && target != 'stderr' && io.syslog_emit(sev, body))
 		return;
 
-	warn(sprintf('%s: %s', level, body) + "\n");
+	warn(sprintf('%s: %s', tag, body) + "\n");
 };
 
 export function err(fmt, ...args)    { log('err', fmt, ...args); };

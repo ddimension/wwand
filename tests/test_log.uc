@@ -11,6 +11,7 @@ import * as logmod from 'wwand/log.uc';
 
 ok(logmod.valid_level('debug'), 'valid_level: debug');
 ok(logmod.valid_level('err'), 'valid_level: err');
+ok(logmod.valid_level('error'), 'valid_level: error accepted as an err alias');
 ok(!logmod.valid_level('chatty'), 'valid_level: unknown rejected');
 ok(!logmod.valid_level(null), 'valid_level: null rejected');
 
@@ -33,7 +34,13 @@ let script = 'import * as log from "wwand/log.uc"; ' +
 	// a URC pair the modem separated with a bare CR: the merge must stay
 	// VISIBLE (one log line, but the boundary spelled out) instead of reading
 	// like one seamless line
-	'log.notice("+CEREG: 1\\r1,\\"88ce\\"");';
+	'log.notice("+CEREG: 1\\r1,\\"88ce\\""); ' +
+	// a level the table does not know must stay VISIBLE. It used to fall back
+	// to debug, which hid it at the default threshold — how an AT-command
+	// refusal logged as 'error' (not a syslog name) never reached the log.
+	'log.set_level("info"); ' +
+	'log.log("error", "alias-error-visible"); ' +
+	'log.log("chatty", "unknown-level-still-visible");';
 
 let testdir = fs.dirname(sourcepath());
 let cmd = sprintf(`%s -L '%s/*.uc' -e '%s' 2>&1`, ucode, testdir, script);
@@ -46,6 +53,8 @@ eq(lines, [
 	'debug: now-debug',
 	'notice: ctrl-scrubbed',
 	'notice: +CEREG: 1\\r1,"88ce"',
+	'err: alias-error-visible',
+	'notice: unknown-level-still-visible',
 ], 'log: threshold defaults, set_level, prefix + control-char scrub');
 
 ok(index(out, '\x0b') < 0, 'log: control character stripped from output');

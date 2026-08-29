@@ -3,11 +3,12 @@
 // wwand — configuration model. parse(raw) is pure (raw = uci get_all() section
 // objects) so it stays host-testable; UCI access itself lives in main.uc.
 //
-// Compat: stock/legacy-style qmi interfaces (proto 'wwand'|'qmi' with the
-// connection carried inline, no `option modem`) are translated in-memory (parent
-// netdev -> synthesized modem, interface -> context); bash-only options warn +
-// are ignored. The one-shot migrator (migrate_plan) upgrades them to the
-// network-native model on install.
+// Compat: legacy-style interfaces (proto 'wwand' with the connection carried
+// inline, no `option modem`) are translated in-memory (parent netdev ->
+// synthesized modem, interface -> context); bash-only options warn + are
+// ignored. `proto wwand` is the only proto read here — a stock `proto qmi`
+// interface stays uqmi's until the user migrates it (migrate_plan rewrites it
+// to `proto wwand`), it is merely noted as a device claim (see `blocked`).
 
 'use strict';
 

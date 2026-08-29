@@ -44,9 +44,9 @@ start_service() {
 }
 
 service_triggers() {
-	# also watch /etc/config/network: the compat layer derives modems and
-	# contexts from the proto-qmi interface sections, so edits there must
-	# reach the daemon the same way wwand config edits do
+	# also watch /etc/config/network: that is where the whole model lives
+	# (wwand_modem/wwand_sim/wwand_globals plus the proto-wwand interface
+	# sections), so edits there must reach the daemon
 	procd_add_reload_trigger "wwand" "network"
 }
 

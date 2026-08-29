@@ -418,8 +418,8 @@ see [Troubleshooting](#troubleshooting).
 
 ### Old-style configurations (compat layer)
 
-Interfaces with `proto wwand`|`qmi` and **no** `option modem`/`option context`
-are read the old way
+Interfaces with `proto wwand` and **no** `option modem`/`option context` are
+read the old way
 (options on the interface section: `device wwan0`/`wwan0mN`, `apn` incl. `#N`,
 `auth`, `username`, `password`, `pincode`, `modes`, `mcc`/`mnc`, `ipv4`/`ipv6`/
 `pdptype`, `mtu`, `use_pushed_mtu`, `sim_slot`, `at_init`, `lock_4g`/`lock_5g`/

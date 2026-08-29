@@ -804,7 +804,7 @@ export function create(transport, opts)
 	};
 
 	let refuse = (cmd, cb) => {
-		log('error', sprintf('refusing AT command with embedded control characters: %s',
+		log('err', sprintf('refusing AT command with embedded control characters: %s',
 			redact(visible(type(cmd) == 'string' ? cmd : ''))));
 
 		// async like every other completion, so callers cannot be re-entered
