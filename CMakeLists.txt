@@ -113,6 +113,8 @@ set(WWAND_UCODE_PROGRAMS
 set(WWAND_UCODE_PLAIN
   atcmd_mbim_lazy.uc atport.uc esim.uc esim_bridge.uc mbim_lazy.uc ncm_lazy.uc qmi_lazy.uc
   codec/schema/loc_lazy.uc codec/schema/wms_lazy.uc
+  # datapath add-ons: require()d plain scripts that RETURN their implementation
+  datapath_rmnet_nss.uc
 )
 
 # native/extern extensions resolved at runtime

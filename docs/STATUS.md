@@ -192,6 +192,29 @@ the interface unclaimed, and every child-side status row (channels, counters,
 learned device) would have been empty. It renames now, tolerating a restart that
 already did; the NSS context is keyed on the netdev, not its name.
 
+**A second pass over the vendor sources caught two more.** `qmap_mode > 0` is
+not the same as "there are children to adopt": qmi_wwan_q registers them only
+when `use_rmnet_usb` is set (qmap_mode > 1, or three idProducts), so with
+qmap_mode == 1 on anything else the PARENT carries the QMAP and no child exists
+— and no `nss_create()` ran either. The probe now tests for `<netdev>_1`, which
+is what the vendor's own dialer script tests before falling back to the bare
+parent. And `map_id` is `0x80 + channel`, the driver's arithmetic, not the bit
+set that only happens to agree below channel 128.
+
+Also confirmed rather than assumed: `link_state`. The driver reads
+`offset_id = (link_state & 0x7F) - 1` with 0x80 clearing; quectel-cm writes
+`(link_state ? 0 : 0x80) + (muxid - 0x80)` where muxid is `0x80 + channel`. Both
+say the value is the channel number, which is what wwand's shared code already
+writes — and it is not optional on 5G modems, where the driver starts with
+`link_state = !lte_a`, carrier off until someone writes it.
+
+A vendor box WITHOUT the NSS shim is still declined (the capture happens at
+child creation, so a later modprobe is too late) but now says so at notice,
+naming the ordering. Worth a decision later: on such a box `auto` falls through
+to mainline rmnet, whose probe a vendor parent satisfies — which builds rmnet
+children on a parent that already demuxes QMAP itself. Declining is safe for the
+NSS case and leaves that one unimproved.
+
 **Not on hardware yet.** Everything above is host-tested only. The NSS datapath
 has no witness at all here — it needs kuncy7's IPQ807x + RG500Q, and the first
 thing to check there is whether the WDA format negotiation wwand does itself
