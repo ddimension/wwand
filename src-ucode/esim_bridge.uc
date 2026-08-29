@@ -189,8 +189,13 @@ return {
 					if (n === false) {   // hard error: lpac's stdin is gone
 						wdead = true;
 						wq = '';
+						logline('write to lpac failed - aborting');
 
-						return logline('write to lpac failed - aborting');
+						// end the run HERE. lpac is waiting for an APDU answer
+						// it will never get, so nothing more arrives on stdout
+						// either: without this the run would sit there until
+						// the inactivity watchdog fires minutes later.
+						return finish({ error: 'lpac_stdin', code: -1 });
 					}
 
 					if (n === null || n === 0)   // would block: retry shortly
@@ -224,6 +229,17 @@ return {
 				idle?.cancel();   idle = null;
 				wtimer?.cancel(); wtimer = null;
 				if (uh) { uh.delete(); uh = null; }
+
+				// An ABORTED run (watchdog, dead stdin) still has a live child:
+				// close() below only drops the pipes and reaps without blocking,
+				// and a process stuck elsewhere does not notice its stdout
+				// going away — an lpac blocked in curl on a dead SM-DP+ socket
+				// would keep running (and keep the APDU channel claimed) long
+				// after wwand considers the run over. h.kill() signals the whole
+				// process group; guarded because an older wwand_io.so has no
+				// such method (then it stays as before: orphaned, not fatal).
+				if (err && type(h.kill) == 'function')
+					h.kill();
 				// close() returns null when uloop already reaped the child
 				// (status unknown) — the in-band marker fills the gap; with
 				// neither (shell killed) the missing result line is the

@@ -764,7 +764,59 @@ export function create(transport, opts)
 		return self.urc_prefixes;
 	};
 
+	// An AT command is terminated by CR, so a control character INSIDE one
+	// splits it into two commands on the wire: a modem told to dial
+	// `AT+CGDCONT=1,"IP","x<CR>ATD*99#"` executes the second half. Config
+	// values (apn, username, password) are interpolated into these strings by
+	// the per-vendor tables, and quoted AT strings have no escape mechanism at
+	// all — so the command is refused HERE, the one point every command passes
+	// through, instead of escaping at each of those build sites (and every
+	// future one). A plain `"` cannot inject anything; it only makes the modem
+	// answer ERROR, and config.uc warns about it when parsing.
+	// scanned BYTE-WISE on purpose: ucode's regexes run on a C string and stop
+	// at a NUL, so match(/[[:cntrl:]]/) reports "clean" for "ATI\0…\rATD…" —
+	// it never sees the CR behind the NUL. length()/ord() are NUL-safe.
+	let ctrl_at = (s) => {
+		for (let i = 0; i < length(s); i++) {
+			let c = ord(s, i);
+
+			if (c < 0x20 || c == 0x7f)
+				return i;
+		}
+
+		return -1;
+	};
+
+	let unsendable = (cmd) => (type(cmd) != 'string') || ctrl_at(cmd) >= 0;
+
+	// for the log only: control bytes as '.', built byte-wise for the same
+	// reason (a replace() would silently drop everything past a NUL)
+	let visible = (s) => {
+		let out = '';
+
+		for (let i = 0; i < length(s); i++) {
+			let c = ord(s, i);
+
+			out += (c < 0x20 || c == 0x7f) ? '.' : chr(c);
+		}
+
+		return out;
+	};
+
+	let refuse = (cmd, cb) => {
+		log('error', sprintf('refusing AT command with embedded control characters: %s',
+			redact(visible(type(cmd) == 'string' ? cmd : ''))));
+
+		// async like every other completion, so callers cannot be re-entered
+		// from inside their own send() call
+		if (cb)
+			uloop.timer(0, () => cb({ error: 'invalid_command' }, []));
+	};
+
 	self.send = function(cmd, cb, o) {
+		if (unsendable(cmd))
+			return refuse(cmd, cb);
+
 		push(self.queue, {
 			cmd: cmd,
 			cb: cb,
@@ -778,6 +830,9 @@ export function create(transport, opts)
 	// prompt, then write `payload` + Ctrl-Z. cb gets the final reply lines (e.g.
 	// "+CMGS: <ref>"). Longer default timeout — sending includes an OTA round trip.
 	self.send_pdu = function(cmd, payload, cb, o) {
+		if (unsendable(cmd))
+			return refuse(cmd, cb);
+
 		push(self.queue, {
 			cmd: cmd,
 			payload: payload,

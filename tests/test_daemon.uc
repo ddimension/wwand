@@ -179,6 +179,17 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 	eq(daemon.contexts.wan.cfg.apn, 'web2', 'context_up: apn refreshed from disk on up');
 	ok(dpfx.action_index('link_set wwand0 mtu 1430') >= 0, 'context_up: mtu applied via rtnl layer');
 
+	// A deferred method whose backend answers SYNCHRONOUSLY (argument
+	// validation: no such modem) — over the real bus, not a fake request. The
+	// reply then happens inside the handler call itself, which is the ordering
+	// ubus.defer() has to get right; a request left incomplete here would
+	// surface as a ubus timeout rather than this reply.
+	conn_cli.defer('wwand', 'modem_reset', { modem: 'nosuch' }, (c1, r1) => {
+		eq(c1, 0, 'sync reply: request completes over real ubus');
+		eq(r1?.ok, false, 'sync reply: error envelope');
+		eq(r1?.error, 'no_such_modem', 'sync reply: validation error passed through');
+	});
+
 	conn_cli.defer('wwand', 'status', {}, (c2, st) => {
 		eq(c2, 0, 'status: ok');
 		eq(st.modems.m0.state, 'READY', 'status: modem READY');

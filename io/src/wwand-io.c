@@ -248,6 +248,13 @@ qmit_spawn(uc_vm_t *vm, size_t nargs)
 	}
 
 	if (pid == 0) {
+		/* Own process group. The command we spawn is a SHELL PIPELINE, so the
+		 * shell forks the real worker (e.g. lpac, which in turn runs curl) and
+		 * signalling the shell alone would orphan it. A group of our own lets
+		 * kill() below take the whole tree — and costs nothing else here, as
+		 * the daemon has no job control to inherit. */
+		setpgid(0, 0);
+
 		/* child: stdin <- in[0], stdout -> out[1], stderr inherited */
 		if (dup2(in[0], STDIN_FILENO) < 0 ||
 		    dup2(out[1], STDOUT_FILENO) < 0)
@@ -261,6 +268,11 @@ qmit_spawn(uc_vm_t *vm, size_t nargs)
 	}
 
 	/* parent (pipe fds are already FD_CLOEXEC from pipe2) */
+
+	/* also set the group from HERE: whichever side runs first wins, so a
+	 * kill() right after spawn can never race the child's own setpgid() */
+	setpgid(pid, pid);
+
 	close(in[0]);
 	close(out[1]);
 	free_argv(args);
@@ -511,7 +523,10 @@ qmit_free(void *ptr)
 				;
 
 			if (r == 0) {
-				kill(t->pid, SIGTERM);
+				/* the group (see setpgid in spawn), so a shell's
+				 * worker child goes down with it */
+				if (kill(-t->pid, SIGTERM) < 0)
+					kill(t->pid, SIGTERM);
 
 				while (waitpid(t->pid, &status, WNOHANG) < 0 && errno == EINTR)
 					;
@@ -522,12 +537,64 @@ qmit_free(void *ptr)
 	}
 }
 
+/*
+ * h.kill([signal]) -> true when the child was signalled
+ *
+ * Terminate a still-running spawn child. close() deliberately does NOT do this
+ * (it only closes the pipes and reaps without blocking), which is right for the
+ * normal path where the child has already exited — but closing the pipes does
+ * not stop a child that is blocked elsewhere: an lpac waiting on curl in a dead
+ * TCP connection keeps running after an aborted run. Callers that abort a run
+ * (a watchdog firing) must say so explicitly.
+ *
+ * The whole process GROUP is signalled (see setpgid() in spawn): the direct
+ * child is a shell, and the worker it forked is the process that actually
+ * hangs.
+ *
+ * Probed with WNOHANG first for the same reason as the destructor: once uloop's
+ * SIGCHLD handler has reaped the child, the pid may be RECYCLED and a blind
+ * kill() would hit an unrelated process. r != 0 therefore means "already gone,
+ * nothing to signal", not a failure to report.
+ */
+static uc_value_t *
+qmit_kill(uc_vm_t *vm, size_t nargs)
+{
+	wwand_io_t *t = qmit_this(vm);
+	uc_value_t *sig = uc_fn_arg(0);
+	int s = (ucv_type(sig) == UC_INTEGER) ? (int)ucv_int64_get(sig) : SIGTERM;
+	int status;
+	pid_t r;
+
+	last_errno = 0;
+
+	if (!t || t->pid <= 0)
+		return ucv_boolean_new(false);
+
+	while ((r = waitpid(t->pid, &status, WNOHANG)) < 0 && errno == EINTR)
+		;
+
+	if (r != 0) {
+		t->pid = -1;
+
+		return ucv_boolean_new(false);
+	}
+
+	if (kill(-t->pid, s) < 0 && kill(t->pid, s) < 0) {
+		last_errno = errno;
+
+		return ucv_boolean_new(false);
+	}
+
+	return ucv_boolean_new(true);
+}
+
 static const uc_function_list_t transport_fns[] = {
 	{ "read",   qmit_read },
 	{ "write",  qmit_write },
 	{ "fileno", qmit_fileno },
 	{ "flush",  qmit_flush },
 	{ "close",  qmit_close },
+	{ "kill",   qmit_kill },
 };
 
 /*

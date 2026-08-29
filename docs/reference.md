@@ -383,7 +383,7 @@ alongside `option modem`:
 
 ```
 config interface 'wan'
-	option proto 'wwand'             # legacy 'qmi' also accepted
+	option proto 'wwand'             # wwand manages this proto and no other
 	option modem 'm0'                # the wwand_modem this connection runs on
 	option device 'wwand0'           # optional: pin the stable L3 name (else auto)
 	option mux_id '1'                # QMAP channel; the L3 device gets a wwandN name

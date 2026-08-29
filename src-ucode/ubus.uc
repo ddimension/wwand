@@ -42,8 +42,14 @@ export function defer(req, run, watchdog_ms)
 		req.reply(obj);
 	};
 
-	run(reply);
+	// defer BEFORE running: a handler that validates its arguments answers
+	// synchronously, and then reply() would land on a request not yet marked
+	// deferred. It happens to be harmless in the current ubus binding (the
+	// post-handler completion path is skipped once `replied` is set), but that
+	// is an internal detail of the binding, not a contract — and the deferred
+	// pattern the binding documents is defer-then-reply.
 	req.defer();
+	run(reply);
 };
 
 // ok_reply(reply): the standard deferred-method completion — adapts a daemon

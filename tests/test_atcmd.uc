@@ -835,6 +835,37 @@ for (let c in auth_matrix) {
 		sprintf('auth: %s masked', substr(c, 0, 22)));
 }
 
+// --- AT command injection ----------------------------------------------------
+//
+// Config values (apn/username/password) are interpolated into quoted AT strings
+// by the per-vendor tables, and a quoted AT string has no escape mechanism: a CR
+// inside one ends the command and makes the rest a SECOND command the modem
+// executes. The engine is the one point every command passes through, so it
+// refuses the write there instead of relying on each build site to escape.
+let tri = fake_transport();
+let ilogs = [];
+let ati = atcmd.create(tri, { log: (level, msg) => push(ilogs, msg) });
+let ierr = null;
+
+ati.send("AT+CGDCONT=1,\"IP\",\"evil\rATD*99#\"", (err) => { ierr = err; });
+
+eq(tri.written, [ ], 'injection: command with embedded CR never written');
+
+// the NUL case is not academic: ucode's regexes run on a C string and stop at
+// the first NUL, so a match(/[[:cntrl:]]/) check reports "clean" for the third
+// one here and would let the CR behind the NUL straight through
+for (let c in [ "AT+CGDCONT=1,\"IP\",\"a\nb\"", "ATI\x00", "ATI\x00x\rATD*99#" ])
+	ati.send(c, () => null);
+
+eq(tri.written, [ ], 'injection: LF, NUL and CR-behind-NUL refused too');
+ok(length(filter(ilogs, (m) => match(m, /control characters/))) == 4,
+	'injection: each refusal logged');
+
+// a plain quote cannot inject anything (the modem just answers ERROR), so it
+// must still go out — config.uc warns about it instead
+ati.send('AT+CGDCONT=1,"IP","in"ternet"', () => null);
+eq(length(tri.written), 1, 'injection: a bare quote is not the engine\'s business');
+
 // the timeout log path redacts too
 let tlogs = [];
 let trt = fake_transport();
@@ -843,6 +874,7 @@ let att = atcmd.create(trt, { log: (level, msg) => push(tlogs, msg) });
 att.send('AT+CGAUTH=1,3,"user","secret123"', () => null, { timeout: 200 });
 uloop.timer(600, () => {
 	ok(!match(join(' ', tlogs), /secret123/), 'auth: timeout log redacted');
+	eq(ierr, { error: 'invalid_command' }, 'injection: caller gets an error back');
 	done('test_atcmd');
 });
 

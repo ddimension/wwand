@@ -369,6 +369,58 @@ eq(r.contexts.wan.mux_id, 0, 'mux range: non-numeric rejected');
 r = mux_bad('1.5');
 eq(r.contexts.wan.mux_id, 0, 'mux range: fractional rejected');
 
+// two contexts of ONE modem must not claim the same QMAP channel: the second
+// rmnet link cannot be created on that parent, and whichever comes up owns the
+// other's downlink frames. The first claimant (uci order) keeps the id.
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'rmnet' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', mux_id: '3', apn: 'a' },
+		ims: { '.type': 'interface', proto: 'wwand', modem: 'm0', mux_id: '3', apn: 'b' },
+	},
+});
+eq(r.contexts.wan.mux_id, 3, 'mux dup: first claimant keeps the channel');
+ok(r.contexts.ims.mux_id != 3 && r.contexts.ims.mux_id > 0,
+	'mux dup: second gets a different channel');
+eq(r.contexts.ims.muxed, true, 'mux dup: second stays muxed');
+ok(length(filter(r.warnings, (w) => index(w, 'already used by interface wan') >= 0)) == 1,
+	'mux dup: collision warned, naming the other interface');
+
+// the same channel on DIFFERENT modems is fine
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'rmnet' },
+		m1: { '.type': 'wwand_modem', usb_path: '1-2', mux: 'rmnet' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', mux_id: '1', apn: 'a' },
+		wanb: { '.type': 'interface', proto: 'wwand', modem: 'm1', mux_id: '1', apn: 'b' },
+	},
+});
+eq(r.contexts.wan.mux_id, 1, 'mux dup: per-modem namespace (m0)');
+eq(r.contexts.wanb.mux_id, 1, 'mux dup: per-modem namespace (m1)');
+eq(length(filter(r.warnings, (w) => index(w, 'already used') >= 0)), 0,
+	'mux dup: no warning across modems');
+
+// AT backends interpolate apn/user/password into QUOTED AT strings, which have
+// no escape mechanism — the engine refuses such a command outright, so warn at
+// parse time where the user can still see why. QMI/MBIM carry them as TLVs.
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1', pincode: '12ab' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+		       apn: 'inter"net', username: "a\rATD*99#", password: 'ok' },
+	},
+});
+ok(length(filter(r.warnings, (w) => index(w, 'interface wan: apn contains') >= 0)) == 1,
+	'at-safe: quoted apn warned');
+ok(length(filter(r.warnings, (w) => index(w, 'interface wan: username contains') >= 0)) == 1,
+	'at-safe: control char in username warned');
+eq(length(filter(r.warnings, (w) => index(w, 'password contains') >= 0)), 0,
+	'at-safe: clean password not warned');
+ok(length(filter(r.warnings, (w) => index(w, 'pincode must be digits') >= 0)) == 1,
+	'at-safe: non-numeric pincode warned');
+ok(!length(filter(r.warnings, (w) => index(w, 'ATD*99#') >= 0)),
+	'at-safe: the offending value is never put in the warning');
+
 // the compat parser (no `option modem`) resolves the channel through the same
 // helper — the two interface parsers must not drift
 r = padopt({

@@ -709,7 +709,28 @@ function validate(result)
 			push(result.warnings, sprintf("interface %s: mux_id set but modem '%s' has mux disabled", name, ctx.modem));
 			ctx.mux_id = 0;
 		}
+
+		// The NCM backend interpolates these into QUOTED AT strings, which have
+		// no escape mechanism: a control character would split the command in
+		// two on the wire (atcmd refuses such a command outright, see there) and
+		// a bare quote just makes the modem answer ERROR. QMI and MBIM carry the
+		// same fields as binary TLVs and do not care — hence a warning rather
+		// than a rejection. The value itself is never logged.
+		for (let f in [ 'apn', 'username', 'password' ])
+			if (type(ctx[f]) == 'string' && match(ctx[f], /["[:cntrl:]]/))
+				push(result.warnings, sprintf(
+					"interface %s: %s contains a quote or control character - AT-based backends cannot send it",
+					name, f));
 	}
+
+	// same reasoning for the PIN (AT+CPIN="…"), which is digits by definition
+	for (let mname, m in result.modems)
+		if (type(m.pincode) == 'string' && length(m.pincode) && match(m.pincode, /[^0-9]/))
+			push(result.warnings, sprintf("modem %s: pincode must be digits only", mname));
+
+	for (let sname, sim in result.sims)
+		if (type(sim.pincode) == 'string' && length(sim.pincode) && match(sim.pincode, /[^0-9]/))
+			push(result.warnings, sprintf("wwand_sim %s: pincode must be digits only", sname));
 
 	for (let name, modem in result.modems) {
 		if (modem.device == null && modem.netdev == null && modem.usb_path == null) {
@@ -730,7 +751,25 @@ function validate(result)
 
 		if (ctx.mux_id > 0) {
 			used[ctx.modem] = used[ctx.modem] ?? {};
-			used[ctx.modem][sprintf('%d', ctx.mux_id)] = true;
+
+			let key = sprintf('%d', ctx.mux_id);
+
+			// two contexts of one modem cannot share a QMAP channel: the second
+			// rmnet link fails to be created (the kernel refuses the duplicate
+			// mux id on the same parent) and, worse, whichever one comes up owns
+			// the other's downlink frames. The FIRST claimant keeps the id (uci
+			// order, so this is stable); the later one is auto-assigned below.
+			if (used[ctx.modem][key]) {
+				push(result.warnings, sprintf(
+					"interface %s: mux id %d already used by interface %s on modem '%s', auto-assigning another",
+					name, ctx.mux_id, used[ctx.modem][key], ctx.modem));
+
+				ctx.mux_id = 0;
+				needs_id[ctx.modem] = needs_id[ctx.modem] ?? [];
+				push(needs_id[ctx.modem], name);
+			}
+			else
+				used[ctx.modem][key] = name;
 		}
 		else {
 			needs_id[ctx.modem] = needs_id[ctx.modem] ?? [];
@@ -751,7 +790,7 @@ function validate(result)
 			while (used[modem][sprintf('%d', id)])
 				id++;
 
-			used[modem][sprintf('%d', id)] = true;
+			used[modem][sprintf('%d', id)] = name;
 			ctx.mux_id = id;
 
 			if (!ctx.muxed) {

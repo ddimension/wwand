@@ -273,12 +273,12 @@ proto_wwand_renew() {
 	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns"
 }
 
-# Back-compat: `proto qmi` is the name this handler shipped under historically
-# (and stock uqmi used). Interfaces still saved that way — plus
-# stock configs migrated in place — must keep working, so the legacy name maps
-# onto the same functions. New configs use `proto wwand`; the daemon and LuCI
-# accept both, and migration/LuCI rewrite to `wwand` on save.
-proto_qmi_init_config() { proto_wwand_init_config "$@"; }
+# There used to be a `proto_qmi_init_config()` alias here, from when this
+# handler still claimed the historical `qmi` name. It had to go: netifd sources
+# EVERY script in /lib/netifd/proto into one shell, so our definition simply
+# overwrote uqmi's (qmi.sh sorts before wwand.sh) and stock uqmi interfaces were
+# then offered wwand's config options — the opposite of coexisting politely.
+# Nothing called it either, since we never register `qmi`.
 [ -n "$INCLUDE_ONLY" ] || {
 	# wwand registers its OWN proto and nothing else. The historical `qmi` name
 	# stays uqmi's: netifd sources every script in /lib/netifd/proto, so two

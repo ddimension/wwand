@@ -58,7 +58,7 @@ A quick tour of the LuCI UI (modems overview · modem config · interface · SIM
 
 | Area | What |
 |---|---|
-| **Connectivity** | QMI / MBIM / NCM behind one `proto wwand` (legacy `qmi` still accepted) · IPv4/IPv6/dual-stack · IPv4 /32 p-t-p or pushed prefix · IPv6 RFC-7278 PD · QMAP mux (multiple contexts/modem) with full **bidirectional aggregation** — downlink (modem→host) *and* uplink (host→modem, WDA-negotiated + rmnet egress coalesce), capability-gated so a non-QMAP modem falls back to plain framing |
+| **Connectivity** | QMI / MBIM / NCM behind one `proto wwand` · IPv4/IPv6/dual-stack · IPv4 /32 p-t-p or pushed prefix · IPv6 RFC-7278 PD · QMAP mux (multiple contexts/modem) with full **bidirectional aggregation** — downlink (modem→host) *and* uplink (host→modem, WDA-negotiated + rmnet egress coalesce), capability-gated so a non-QMAP modem falls back to plain framing |
 | **Attach** | Attach profile programmed from config **before** registration → correct APN/IP family, avoids the EMM-33 IPv4-only reject |
 | **SIM** | PIN unlock (UIM → DMS fallback, retry-guarded) · multi-slot switching · PIN enable/disable · per-SIM overrides by ICCID (`wwand_sim`) |
 | **eSIM/eUICC** | Native ES10c list/enable/disable/delete · **SM-DP+ download** via bundled lpac · APDU transport auto-chosen: QMI UIM → **native MBIM MS UICC Low Level Access** → AT — so eSIM works on MBIM modems without an AT port |

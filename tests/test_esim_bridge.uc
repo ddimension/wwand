@@ -209,8 +209,14 @@ write_stub(fake_ok,
 	"exit 0\n");
 
 // stays silent past the (test-shortened) inactivity watchdog, like an lpac
-// blocked in curl on a dead SM-DP+ socket
-write_stub(fake_mute, "#!/bin/sh\nsleep 1\nexit 0\n");
+// blocked in curl on a dead SM-DP+ socket. It records its own pid so the test
+// can check the abort actually TERMINATED it: closing the pipes does not stop a
+// process blocked elsewhere. Note the tree is wrapper-sh -> stub-sh -> sleep,
+// i.e. the pid below is a GRANDchild of the daemon — only a process-group kill
+// reaches it.
+let mute_pidf = sprintf('%s/wwand-test-lpac-mute.pid', tmp);
+
+write_stub(fake_mute, sprintf("#!/bin/sh\necho $$ > %s\nsleep 3\nexit 0\n", mute_pidf));
 
 let entry2 = { modem: { id: 'm0', _esim_op: 0 } };
 let mk = (path, idle) => bridge.create({ esim: esim_fake, log: () => null,
@@ -253,9 +259,23 @@ lpac_stdio_tests = () => {
 					eq(!!entry2.modem._esim_op, false,
 						'lpac stdio: timeout releases the quiet claim');
 
-					fs.unlink(fake_ok);
-					fs.unlink(fake_mute);
-					done('test_esim_bridge');
+					let pid = +trim(fs.readfile(mute_pidf) ?? '');
+					ok(pid > 0, 'lpac stdio: stub recorded its pid');
+
+					// give the signalled tree a moment to be reaped
+					uloop.timer(200, () => {
+						let stat = fs.readfile(sprintf('/proc/%d/stat', pid));
+						let alive = stat != null &&
+							!match(stat, /\) Z /);   // a zombie is on its way out
+
+						eq(alive, false,
+							'lpac stdio: the aborted run terminates the child tree');
+
+						fs.unlink(fake_ok);
+						fs.unlink(fake_mute);
+						fs.unlink(mute_pidf);
+						done('test_esim_bridge');
+					});
 				});
 			});
 		});
