@@ -632,8 +632,13 @@ scenario('ladder', {
 		let modes = map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args.mode);
 		// rung: low_power (1) then online (0), plus one normal online per cycle
 		ok(index(modes, 1) >= 0, 'ladder: low_power sent');
-		eq(ladder_fx.files['/state/ladder.json'], '{ "attempts": 8, "proto_errors": 0, "rung": 1, "proto_hw": 0 }',
-			'ladder: state persisted (rung 1 = opmode_cycle fired)');
+		// `proto_ok: 1` is the load-bearing part: this modem answered its QMI
+		// requests, so the hardware rungs are armed and the ladder is allowed to
+		// escalate. A modem that never answered gets 0 here and nothing physical
+		// happens — see the gate tests in test_recovery.
+		eq(ladder_fx.files['/state/ladder.json'],
+			'{ "attempts": 8, "proto_errors": 0, "rung": 1, "proto_hw": 0, "proto_ok": 1, "proto_name": "qmi" }',
+			'ladder: state persisted (rung 1 = opmode_cycle fired, arming recorded)');
 	});
 
 // --- 10: AT init runs model quirks + configured commands ---------------------

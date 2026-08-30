@@ -68,7 +68,13 @@ export function create(opts)
 		id: opts.id,
 		failreboot: +(opts.failreboot ?? 100),
 		proto_error_limit: +(opts.proto_error_limit ?? PROTO_ERROR_LIMIT),
-		counters: { attempts: 0, proto_errors: 0, rung: 0, proto_hw: 0 },
+		// `proto_ok` is STICKY, unlike proto_errors: it records that at least one
+		// request has ever completed on this control channel with the protocol
+		// currently selected. Everything physical is gated on it — see the
+		// comment at the hardware rungs below. `proto_name` exists only to clear
+		// it again when the selected protocol changes.
+		counters: { attempts: 0, proto_errors: 0, rung: 0, proto_hw: 0,
+		            proto_ok: 0, proto_name: null },
 		rebooting: false,
 	};
 
@@ -96,6 +102,12 @@ export function create(opts)
 			self.counters.attempts = att ? +att[1] : 0;
 			self.counters.proto_errors = perr ? +perr[1] : 0;
 			self.counters.proto_hw = phw ? +phw[1] : 0;
+
+			let pok = match(data, /"proto_ok": *([0-9]+)/);
+			let pnm = match(data, /"proto_name": *"([a-z0-9_]*)"/);
+
+			self.counters.proto_ok = pok ? +pok[1] : 0;
+			self.counters.proto_name = pnm ? pnm[1] : null;
 			self.counters.rung = rung ? +rung[1] : rungs_reached(self.counters.attempts);
 			log('notice', sprintf('restored recovery state: attempts %d, proto_errors %d, rung %d',
 				self.counters.attempts, self.counters.proto_errors, self.counters.rung));
@@ -125,6 +137,24 @@ export function create(opts)
 		// jump past a threshold does not fire several rungs at once, and never
 		// skips one. These run INDEPENDENT of failreboot: disabling the reboot
 		// must not disable the cheaper hardware recovery below it.
+		// NOTHING PHYSICAL until the modem has answered us at least once with the
+		// protocol we chose. A misdetected control device fails every attempt
+		// exactly like a wedged one, and the ladder used to escalate through
+		// opmode cycle, modem reset and board power-cycle against hardware that
+		// was never broken — reported from the field on 2026-08-30, where a
+		// huawei_cdc_ncm modem classified as QMI was power-cycled for it. If we
+		// have never completed one request, the errors are evidence about our own
+		// detection, not about the modem.
+		if (!self.counters.proto_ok && self.counters.rung < length(RUNGS) &&
+		    n >= RUNGS[self.counters.rung].at) {
+			if (n == RUNGS[self.counters.rung].at)
+				log('warn', sprintf('%d failed attempts and the %s control channel has never answered — not touching the hardware; check `option protocol` and the driver',
+					n, self.counters.proto_name ?? 'modem'));
+
+			self.persist();
+			return 'retry';
+		}
+
 		if (self.counters.rung < length(RUNGS) && n >= RUNGS[self.counters.rung].at) {
 			let action = RUNGS[self.counters.rung].action;
 			self.counters.rung++;
@@ -142,6 +172,19 @@ export function create(opts)
 
 		self.persist();
 		return 'retry';
+	};
+
+	// Called whenever the daemon settles on a control protocol. A change means
+	// the previous "it answered once" says nothing about the new choice, so the
+	// permission to touch hardware is withdrawn until the new protocol proves
+	// itself. This is what makes a corrected misdetection safe.
+	self.note_protocol = function(name) {
+		if (self.counters.proto_name == name)
+			return;
+
+		self.counters.proto_name = name;
+		self.counters.proto_ok = 0;
+		self.persist();
 	};
 
 	self.on_connect_success = function() {
@@ -173,6 +216,17 @@ export function create(opts)
 		// self-powered modem, so a wedge only a modem reset clears would otherwise
 		// reboot-loop (observed on the NR7101). Independent of failreboot — the
 		// cheaper hardware recovery must run even when reboots are disabled.
+		// Same gate as the attempt ladder, and this is the path the field report
+		// actually took: a control channel that never answered produces nothing
+		// BUT protocol errors, so this counter is the only one that climbs.
+		if (n > self.proto_error_limit && !self.counters.proto_ok) {
+			if (n == self.proto_error_limit + 1)
+				log('warn', sprintf('%d protocol errors and the %s control channel has never answered — refusing the hardware reset; this looks like the wrong protocol, not broken hardware',
+					n, self.counters.proto_name ?? 'modem'));
+
+			return 'retry';
+		}
+
 		if (n > self.proto_error_limit && !self.counters.proto_hw) {
 			self.counters.proto_hw = 1;
 			self.persist();
@@ -182,7 +236,7 @@ export function create(opts)
 		// Reboot only after the hardware reset has been tried and errors persist a
 		// further full window. Same gate as the attempt ladder: never reboot when
 		// failreboot<=0 — a headless install keeps retrying instead of cycling.
-		if (n > self.proto_error_limit * 2) {
+		if (n > self.proto_error_limit * 2 && self.counters.proto_ok) {
 			self.persist();
 			return (self.failreboot > 0) ? 'reboot' : 'retry';
 		}
@@ -191,9 +245,16 @@ export function create(opts)
 	};
 
 	self.on_proto_success = function() {
-		if (self.counters.proto_errors != 0 || self.counters.proto_hw != 0) {
+		let first = !self.counters.proto_ok;
+
+		if (first)
+			log('info', sprintf('%s control channel answered — hardware recovery armed',
+				self.counters.proto_name ?? 'modem'));
+
+		if (first || self.counters.proto_errors != 0 || self.counters.proto_hw != 0) {
 			self.counters.proto_errors = 0;
 			self.counters.proto_hw = 0;
+			self.counters.proto_ok = 1;
 			self.persist();
 		}
 	};

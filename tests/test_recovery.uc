@@ -15,6 +15,7 @@ const silent = (level, msg) => null;
 
 let fx = fakefx.create();
 let r = recovery.create({ id: 'm0', failreboot: 30, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();   /* the control channel answered: hardware rungs armed */
 
 let actions = [];
 
@@ -38,6 +39,7 @@ eq(r.counters.rung, 0, 'ladder: success resets the fired-rung index');
 // count can leap past a threshold. The rung is a crossing, fired once, in order.
 fx = fakefx.create();
 r = recovery.create({ id: 'jump', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();   /* the control channel answered: hardware rungs armed */
 
 for (let i = 1; i <= 7; i++) r.on_attempt();       // attempts=7, no rung yet
 eq(r.counters.rung, 0, 'jump: no rung fired below threshold 8');
@@ -54,12 +56,14 @@ eq(r.on_attempt(), 'retry', 'jump: rung does not re-fire on the next attempt');
 // --- restart mid-outage: rung index persists, no skip and no re-run ----------
 fx = fakefx.create();
 r = recovery.create({ id: 'restart', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();   /* the control channel answered: hardware rungs armed */
 for (let i = 1; i <= 8; i++) r.on_attempt();        // fires opmode at 8 -> rung=1
 eq(r.counters.rung, 1, 'restart: opmode fired before restart');
 
 // a fresh daemon restores the persisted state (attempts=8, rung=1)
 let rr = recovery.create({ id: 'restart', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
 rr.load();
+rr.on_proto_success();   /* the control channel answered: hardware rungs armed */
 eq(rr.counters.attempts, 8, 'restart: attempts restored');
 eq(rr.counters.rung, 1, 'restart: fired-rung index restored (opmode not re-run)');
 // climbing continues from the restored rung; modem_reset next at 16
@@ -72,6 +76,7 @@ eq(acts2[7], 'modem_reset', 'restart: attempt 16 modem_reset (next rung, not ski
 fx.files['/state/legacy.json'] = '{ "attempts": 23, "proto_errors": 0 }';
 let rl = recovery.create({ id: 'legacy', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
 rl.load();
+rl.on_proto_success();   /* the control channel answered: hardware rungs armed */
 eq(rl.counters.rung, 2, 'legacy: rung index defaulted from attempts (23 -> opmode+reset done)');
 eq(rl.on_attempt(), 'usb_repower', 'legacy: next rung (24) still reachable after default');
 
@@ -79,6 +84,7 @@ eq(rl.on_attempt(), 'usb_repower', 'legacy: next rung (24) still reachable after
 // recovery rungs still fire (headless GPIO-reset / keep-router-up use case),
 // and the ladder then retries forever instead of ever rebooting.
 r = recovery.create({ id: 'm1', failreboot: 0, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();   /* control channel answered */
 
 let acts0 = [];
 for (let i = 1; i <= 200; i++)
@@ -103,6 +109,7 @@ ok(no_reboot0, 'failreboot=0: never reboots, keeps retrying');
 // full window (> 2x limit). A reboot doesn't power-cycle a self-powered modem, so
 // the cheaper reset must be tried first (fixes the NR7101 reboot-loop).
 r = recovery.create({ id: 'm2', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();   /* control channel answered */
 
 let acts = [];
 for (let i = 1; i <= 51; i++)
@@ -120,6 +127,7 @@ eq(r.counters.proto_hw, 0, 'errors: success clears the hardware-reset flag');
 
 // the proto-error thresholds scale with the configurable proto_error_limit
 r = recovery.create({ id: 'plim', failreboot: 100, proto_error_limit: 3, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();   /* control channel answered */
 let pacts = [];
 for (let i = 1; i <= 7; i++)
 	push(pacts, r.on_proto_error());
@@ -129,6 +137,7 @@ eq(pacts[6], 'reboot', 'errors: limit 3 -> reboot at the 7th error (> 2x3)');
 // the proto-error reboot is gated by failreboot too: <=0 never reboots, but the
 // hardware reset still fires (cheaper recovery runs even with reboots disabled)
 r = recovery.create({ id: 'pgate', failreboot: 0, proto_error_limit: 3, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();   /* control channel answered: hardware rungs armed */
 let pg_reboot = false, pg_repower = false;
 for (let i = 1; i <= 30; i++) {
 	let a = r.on_proto_error();
@@ -142,6 +151,7 @@ ok(pg_repower, 'errors: failreboot=0 still fires the hardware reset');
 
 fx = fakefx.create();
 r = recovery.create({ id: 'wan', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();   /* control channel answered */
 
 r.on_attempt();
 r.on_attempt();
@@ -156,9 +166,40 @@ r2.load();
 eq(r2.counters.attempts, 2, 'persist: attempts restored');
 eq(r2.counters.proto_errors, 5, 'persist: proto errors restored at milestone');
 
+// --- the gate: a control channel that never answered ------------------------
+// A misdetected control device fails exactly like a wedged one. Until 1.6.x the
+// ladder escalated through opmode cycle, modem reset and board power-cycle
+// against hardware that was never broken — reported from the field on
+// 2026-08-30, where a huawei_cdc_ncm modem classified as QMI was power-cycled
+// for it. With no successful request on record the errors say something about
+// our own detection, so nothing physical may happen.
+fx = fakefx.create();
+let rg = recovery.create({ id: 'gate', failreboot: 0, proto_error_limit: 3,
+	fx: fx, state_dir: '/state', log: silent });
+
+let gate_acts = [];
+for (let i = 1; i <= 40; i++) push(gate_acts, rg.on_proto_error());
+eq(length(filter(gate_acts, (a) => a != 'retry')), 0,
+	'gate: proto errors alone never reach hardware when nothing ever answered');
+
+for (let i = 1; i <= 30; i++) push(gate_acts, rg.on_attempt());
+eq(length(filter(gate_acts, (a) => a != 'retry')), 0,
+	'gate: the attempt rungs are blocked too, not just the repower');
+
+// ...and one successful request lifts it: the attempts are long past every
+// threshold by now, so the very next one fires the first not-yet-fired rung
+rg.on_proto_success();
+eq(rg.on_attempt(), 'opmode_cycle', 'gate: an answer arms the ladder again');
+
+// a protocol change withdraws the permission — what "it answered once" proved
+// says nothing about the new choice
+rg.note_protocol('mbim');
+eq(rg.counters.proto_ok, 0, 'gate: switching protocol withdraws the arming');
+
 // corrupted state file is ignored
 fx.files['/state/bad.json'] = 'not json{';
 let r3 = recovery.create({ id: 'bad', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r3.on_proto_success();   /* control channel answered */
 r3.load();
 eq(r3.counters.attempts, 0, 'persist: corrupt state ignored');
 
@@ -166,6 +207,7 @@ eq(r3.counters.attempts, 0, 'persist: corrupt state ignored');
 
 fx = fakefx.create();
 r = recovery.create({ id: 'm3', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();   /* control channel answered */
 
 eq(r.usb_repower(), true, 'repower: runs external tool');
 eq(fx.matching('run usb-repower'), [ 'run usb-repower' ], 'repower: command invoked');
@@ -173,11 +215,13 @@ eq(fx.matching('run usb-repower'), [ 'run usb-repower' ], 'repower: command invo
 // missing tool: non-zero rc reported, no crash
 fx = fakefx.create({ rc: { 'usb-repower': 127 } });
 r = recovery.create({ id: 'm4', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();   /* control channel answered */
 eq(r.usb_repower(), false, 'repower: missing tool tolerated');
 
 // reboot is deferred and deduplicated
 fx = fakefx.create();
 r = recovery.create({ id: 'm5', failreboot: 100, fx: fx, state_dir: '/state', log: silent, reboot_delay: 10 });
+r.on_proto_success();   /* control channel answered */
 
 r.reboot('test');
 r.reboot('test again');

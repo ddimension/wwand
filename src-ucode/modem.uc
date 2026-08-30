@@ -150,7 +150,7 @@ export function create(opts)
 	let transport_open = deps.transport_open ?? transport_mod.open;
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: modem %s: %s\n', level, self.id, msg)));
 
-	let rec = modem_common.make_recovery(self, opts, log);
+	let rec = modem_common.make_recovery(self, opts, log, 'qmi');
 
 	// shared one-shot timer holder; teardown cancels whatever is pending.
 	let tm = { retry: null, reg: null, settle: null, at_drain: null, probe: null };

@@ -540,7 +540,7 @@ export function note_connect_failure_light(self, rec, handlers)
 // shared modem-factory preamble (identical in all three backends): recovery
 // instance wired to the board repower hook, persisted counters loaded, and the
 // counters/recovery/log_fn fields attached to self. Returns the rec instance.
-export function make_recovery(self, opts, log)
+export function make_recovery(self, opts, log, proto)
 {
 	let rec = recovery_mod.create({
 		id: opts.id,
@@ -555,6 +555,14 @@ export function make_recovery(self, opts, log)
 	});
 
 	rec.load();
+
+	// Tell the ladder which control protocol this modem run settled on. It
+	// withdraws the permission to touch hardware whenever that changes, because
+	// "the modem answered once" was proved with the PREVIOUS choice and says
+	// nothing about the new one. Without this a corrected misdetection would
+	// inherit the arming from the wrong protocol.
+	rec.note_protocol(proto ?? opts.protocol ?? null);
+
 	self.counters = rec.counters;
 	self.recovery = rec;
 	self.log_fn = log;

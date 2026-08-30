@@ -85,7 +85,7 @@ export function create(opts)
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: modem %s: %s\n', level, self.id, msg)));
 	self.log_fn = log;
 
-	let rec = modem_common.make_recovery(self, opts, log);
+	let rec = modem_common.make_recovery(self, opts, log, 'mbim');
 
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, settle_timer = null, at_drain_timer = null,
