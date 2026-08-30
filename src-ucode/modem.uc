@@ -1114,6 +1114,16 @@ export function create(opts)
 		// the things that only fire when something goes wrong.
 		self._uim_refresh_armed = false;
 
+		// The same class of bug, and older than the UIM work: both of these
+		// guard an install ON A CLIENT that teardown destroys. Leaving them set
+		// meant a modem that tore down and retried never re-sent the NAS event
+		// report (so RF-band and reject-reason pushes stopped for good) and
+		// never re-registered the DSD indication (so the data-system mode fell
+		// back to polling) — for the whole remaining life of the daemon, with
+		// nothing in the log to say so.
+		self._nas_evt_armed = false;
+		self._dsd_ind_armed = false;
+
 		// Fail any long-APDU reassembly still waiting instead of leaving its
 		// caller on a 30 s timer for a client that no longer exists. Clearing
 		// the map is also what lets install_apdu_reassembly() run again.

@@ -951,6 +951,11 @@ scenario('indications', {
 		// parts that only fire when something goes wrong.
 		modem.teardown();
 		eq(modem._uim_refresh_armed, false, 'teardown: uim handlers can be installed again');
+		// same class, and these two predate the UIM work: both guard an install
+		// on a client teardown destroys, so a stale flag silently cost the
+		// RF-band push and the DSD data-mode push for the rest of the run
+		eq(modem._nas_evt_armed, false, 'teardown: the nas event report is re-armable');
+		eq(modem._dsd_ind_armed, false, 'teardown: so is the dsd indication');
 		eq(modem._apdu_long, null, 'teardown: the reassembly table is cleared with them');
 		eq(modem.thermal, null, 'teardown: thermal readings do not outlive their client');
 		ok(modem._gen > 0, 'teardown: the lifecycle generation advanced');
