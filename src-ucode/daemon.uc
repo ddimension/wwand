@@ -1111,6 +1111,13 @@ export function create(opts)
 			// names the driver's reading. An AT-driven backend uses it to refuse
 			// weak evidence: on a QMI/MBIM modem pinned to NCM the AT port
 			// answers perfectly well and proves nothing (modem_ncm).
+			//
+			// Only NCM needs it, and the asymmetry is not an oversight. QMI and
+			// MBIM take their evidence from a response FRAME carrying our
+			// transaction id, which nothing but that protocol can produce — a
+			// modem pinned to the wrong one of the two simply never answers, so
+			// there is no false positive to guard against. AT is the generic
+			// channel: nearly every modem has one, whatever it speaks.
 			pinned_over: control?.pinned_over ?? null,
 			recovery: {
 				fx: deps.recovery_fx,
