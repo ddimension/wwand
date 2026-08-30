@@ -94,6 +94,24 @@ export function create(opts)
 	// that capture them (ucode resolves lexical refs only for bindings
 	// already declared at definition time)
 	let prepare, check_pdp_type, activate_family, fetch_settings, release_family;
+
+	// A teardown destroys the WDS config client and reports `cancelled` to every
+	// pending callback SYNCHRONOUSLY, with the hub still live. Every callback in
+	// the profile paths below either issues another request or calls a
+	// continuation, and both are wrong then: the request lands on a client
+	// mid-destruction — and these are NV PROFILE WRITES, not reads — while the
+	// continuation resumes the context or the modem init chain behind the very
+	// teardown meant to stop them.
+	//
+	// One helper rather than a check per site: there are seven, and the eighth
+	// will be written by someone who has not read this comment. It also catches
+	// the client being REPLACED, which a retry does.
+	//
+	// Declared HERE, next to the forward declarations, because a `let` further
+	// down is not hoisted in ucode — the arrows above would capture a name that
+	// does not exist yet and fail at call time, not at parse time.
+	let torn_down = (err, wds) => (err?.error == 'cancelled' ||
+	                               self.modem.wds_cfg != wds);
 	let mon;   // context_monitor_qmi handle (stats sampler + settings refresh)
 
 	// shared emit/set_state/fail_finish (context_common.ctx_scaffolding)
@@ -170,14 +188,7 @@ export function create(opts)
 			base.password = cfg('password');
 
 		let do_write = () => wds.request('MODIFY_PROFILE', base, (err) => {
-			// A teardown destroys this client and reports `cancelled` here
-			// SYNCHRONOUSLY, with the hub still live. The retry below is
-			// deliberately unconditional — it exists because the first write can
-			// fail on roaming_disallowed alone — but "write the profile again"
-			// is the wrong response to "we are going away": it would put an NV
-			// PROFILE WRITE on a client mid-destruction and then continue the
-			// context chain behind it. Stop; the teardown owns what happens next.
-			if (err?.error == 'cancelled')
+			if (torn_down(err, wds))
 				return;
 
 			if (err)
@@ -185,7 +196,7 @@ export function create(opts)
 
 			// preserved: retry including roaming_disallowed=no, ignore result
 			wds.request('MODIFY_PROFILE', { ...base, roaming_disallowed: 0 },
-				(e2) => check_pdp_type(profile, done));
+				(e2) => torn_down(e2, wds) ? null : check_pdp_type(profile, done));
 		});
 
 		// idempotency guard: skip both NV writes when the profile already
@@ -197,6 +208,10 @@ export function create(opts)
 		wds.request('GET_PROFILE_SETTINGS', {
 			profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: profile.index },
 		}, (gerr, curp) => {
+			// a cancelled read is not "the profile differs, write it"
+			if (torn_down(gerr, wds))
+				return;
+
 			let same = !gerr && curp &&
 				lc(curp.apn ?? '') == lc(base.apn ?? '') &&
 				(curp.apn_disabled ?? 0) == 0 &&
@@ -218,6 +233,9 @@ export function create(opts)
 		let want = PDP_MAP[self.config.pdp_type ?? 'ipv4v6'];
 
 		let evaluate = (err, data) => {
+			if (torn_down(err, wds))
+				return;
+
 			if (err) {
 				log('warn', sprintf('get profile settings failed: %J', err));
 				return done();
@@ -235,6 +253,9 @@ export function create(opts)
 				profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: profile.index },
 				pdp_type: want,
 			}, (e2) => {
+				if (torn_down(e2, wds))
+					return;
+
 				if (e2)
 					log('warn', sprintf('pdp type change failed: %J', e2));
 
@@ -272,6 +293,10 @@ export function create(opts)
 		let prof = { type: wdsmod.PROFILE_TYPE_3GPP, index: index };
 
 		wds.request('GET_PROFILE_SETTINGS', { profile: prof }, (err, data) => {
+			// continuing here resumes the MODEM INIT chain behind a teardown
+			if (torn_down(err, wds))
+				return;
+
 			if (err) {
 				log('warn', sprintf('attach profile %d read failed: %J', index, err));
 				return done(false);
@@ -317,6 +342,9 @@ export function create(opts)
 				index, need_apn ? apn : card_apn, data.pdp_type, want_pdp));
 
 			wds.request('MODIFY_PROFILE', mod, (e2) => {
+				if (torn_down(e2, wds))
+					return;
+
 				if (e2)
 					log('warn', sprintf('attach profile %d modify failed: %J', index, e2));
 

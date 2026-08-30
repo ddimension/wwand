@@ -708,4 +708,35 @@ for (let i = 0; i < 200000 && !_all_done; i++)
 	ok(time() - a > 1000000000, 'mono: distinct clock from wall-time() (not epoch)');
 })();
 
+// --- a teardown must not let the profile paths write or continue -------------
+// Destroying the WDS config client reports `cancelled` to every pending
+// callback SYNCHRONOUSLY while the hub is live. These callbacks issue NV PROFILE
+// WRITES and resume the context/init chain, so carrying on through a
+// cancellation writes to a dying client and restarts work the teardown was
+// meant to stop.
+(() => {
+	let sent = [], done_called = 0;
+	let wds = {
+		request: (name, args, cb) => {
+			push(sent, name);
+			cb({ error: 'cancelled' }, null);
+		},
+	};
+	let ctx = context_mod.create({
+		name: 'tdwn',
+		modem: { wds_cfg: wds, alloc: () => null, attach_context: () => null },
+		config: { apn: 'internet', pdp_type: 'ipv4v6' },
+		deps: { log: () => null, on_event: () => null },
+	});
+
+	// the attach-profile path: a cancelled read must not write, and must not
+	// resume the modem init chain that is waiting on done()
+	ctx.ensure_attach_profile(1, () => done_called++);
+
+	eq(sent, [ 'GET_PROFILE_SETTINGS' ],
+		'teardown: a cancelled attach-profile read issues no MODIFY_PROFILE');
+	eq(done_called, 0,
+		'teardown: ...and does not resume the init chain behind the teardown');
+})();
+
 done('test_context');
