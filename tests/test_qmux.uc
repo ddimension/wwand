@@ -157,4 +157,28 @@ eq([ wda.DAP_DISABLED, wda.DAP_TLP, wda.DAP_QC_NCM, wda.DAP_MBIM, wda.DAP_RNDIS,
    [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ], 'wda: the aggregation enum matches libqmi 1.38');
 eq(wda.DAP_QMAPV1, wda.DAP_QMAP, 'wda: QMAP and QMAPV1 are the same value (5)');
 
+
+// --- WDA SET_DATA_FORMAT: the three request TLVs libqmi does not model --------
+// 0x18/0x19/0x1A are declared but deliberately never sent. This pins their wire
+// ids and widths so a later change that starts sending one cannot quietly move
+// them — a wrong tag decodes garbage rather than failing.
+let sdf_req = wda.default.messages.SET_DATA_FORMAT.req;
+eq(sdf_req.qos_header_format.t, 0x18, 'wda: qos_header_format is request TLV 0x18');
+eq(sdf_req.dl_min_padding.t,    0x19, 'wda: dl_min_padding is request TLV 0x19');
+eq(sdf_req.flow_control.t,      0x1A, 'wda: flow_control is request TLV 0x1A');
+eq(sdf_req.dl_min_padding.f,   'u32', 'wda: dl_min_padding is 32 bit');
+
+// the RESPONSE has its own TLV space — 0x18 there is ul_max_size. Conflating the
+// two namespaces is exactly how a decoder ends up reading the wrong field.
+eq(wda.default.messages.SET_DATA_FORMAT.resp.ul_max_size.t, 0x18,
+	'wda: response 0x18 is ul_max_size, a different namespace');
+
+// none of the three is emitted unless the caller sets it — tlv.pack() writes
+// only the fields present in the args, so declaring them costs nothing on the
+// wire until something deliberately sets one
+let sdf_packed = tlv.pack(sdf_req, { llp: 2 });
+eq(index(sdf_packed, chr(0x18)), -1, 'wda: qos_header_format not sent unless set');
+eq(index(sdf_packed, chr(0x1A)), -1, 'wda: flow_control not sent unless set');
+
 done('test_qmux');
+
