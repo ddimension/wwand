@@ -971,10 +971,16 @@ export function resolve_control(cfg, fx)
 		};
 	}
 
-	// 3. only a serial/ACM port -> PPP (needs a usbnet mode switch first)
+	// 3. ONLY a serial/ACM port -> PPP (needs a usbnet mode switch first).
+	// `unidentified` gates it because that precondition is the whole point: a
+	// device that already exposes a management channel is not a mode-switch
+	// candidate, whatever else it also has. Letting an unknown cdc-wdm reach
+	// here would send AT switch commands at a modem that is merely unlisted —
+	// worse than the qmi guess this all replaced, which at least spoke to the
+	// control node. Refusal (below) is the honest outcome there.
 	let tty = cfg.tty ? cfg.tty : (cfg.usb_path ? tty_for_usb_path(fx, cfg.usb_path) : null);
 
-	if (tty) {
+	if (tty && !unidentified) {
 		return {
 			protocol: pin ?? 'ppp',
 			device: null,

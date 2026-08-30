@@ -213,6 +213,20 @@ let cdm3 = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: null }, dm_
 eq(cdm3.unknown, true, 'DM channel alone -> still unknown');
 eq(cdm3.driver, 'cdc_wdm', 'DM channel alone: driver named for the refusal');
 
+// An unidentified control node plus a TTY must NOT become a mode-switch
+// candidate. The PPP branch means "only a serial port and nothing else"; a
+// device that already exposes a management channel is not that, whatever else
+// it also has. Getting this wrong is worse than the qmi guess it replaced —
+// that at least talked to the control node, while this would send AT switch
+// commands at a modem that is merely unlisted.
+let dm_plus_tty_fx = fakefx.create({
+	present: { '/dev/cdc-wdm0': true, '/dev/ttyUSB2': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/cdc_wdm' },
+});
+let cdt = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: '/dev/ttyUSB2' }, dm_plus_tty_fx);
+eq(cdt.protocol, null, 'unknown control + tty: not classified as ppp');
+eq(cdt.unknown, true, 'unknown control + tty: refused, not mode-switched');
+
 // A VENDOR FORK of qmi_wwan still speaks QMI. Quectel's qmi_wwan_q is the
 // driver our own rmnet_nss datapath add-on exists for, so refusing it would have
 // broken exactly the QSDK boxes that add-on serves — and it would have been a

@@ -120,29 +120,59 @@ def makefile_owners(mk, uc):
 
         g = re.search(r'\$\(WWAND_UCODE\)/(\S+)/\*\.uc', line)
         if g:
+            # DIRECT children only: a shell glob does not descend, so claiming
+            # every descendant would report a nested file as installed when the
+            # real install step would silently omit it — a false negative
+            # against the one invariant this tool exists for.
+            prefix = g.group(1) + '/'
             for f in uc:
-                if f.startswith(g.group(1) + '/'):
+                if f.startswith(prefix) and '/' not in f[len(prefix):]:
                     claim(f, pkg)
             continue
 
+        # only real install commands count — INSTALL_DATA for the modules and
+        # INSTALL_BIN for main.uc/wwandctl.uc, which install as executables.
+        # Matching any mention would let a COMMENT naming a module make an
+        # uninstalled file look owned, which is exactly the kind of false clean
+        # bill this tool must not give.
         m = re.search(r'\$\(WWAND_UCODE\)/(\S+\.uc)', line)
-        if m:
+        if m and ('INSTALL_DATA' in line or 'INSTALL_BIN' in line):
             claim(m.group(1), pkg)
 
     return owners
 
 
-def cmake_listed(root):
-    """The explicit source lists the repo-root CMakeLists.txt builds from."""
+def cmake_listed(root, tarball=None):
+    """The explicit source lists the repo-root CMakeLists.txt builds from.
+
+    Read from the TARBALL when one is given. Reading the working tree's copy
+    while checking a release compares two different trees: a stale release
+    passes because the tree has since been fixed, and an older good release
+    fails against newer lists. Either way the answer would be about the wrong
+    thing.
+    """
+    if tarball:
+        with tarfile.open(tarball) as tf:
+            member = next((n for n in tf.getnames()
+                           if n.split('/', 1)[-1] == 'CMakeLists.txt'), None)
+            if not member:
+                return None
+            raw = tf.extractfile(member).read().decode('utf-8', 'replace')
+            return _cmake_lists(raw)
+
     path = os.path.join(root, 'CMakeLists.txt')
     if not os.path.exists(path):
         return None
 
+    return _cmake_lists(open(path).read())
+
+
+def _cmake_lists(raw):
     # Strip comments FIRST. These lists carry explanatory comments between the
     # entries, and a `)` inside one (`require()d`, say) ends a non-greedy match
     # early — which reported two perfectly well-listed files as missing the
     # first time this ran. A checker that cries wolf gets switched off.
-    txt = re.sub(r'#[^\n]*', '', open(path).read())
+    txt = re.sub(r'#[^\n]*', '', raw)
     listed = set()
     for var in ('WWAND_UCODE_MODULES', 'WWAND_UCODE_PROGRAMS', 'WWAND_UCODE_PLAIN'):
         m = re.search(r'set\(%s\b(.*?)^\)' % var, txt, re.S | re.M)
@@ -175,7 +205,7 @@ def main():
     print('source: %s — %d .uc files, %d files/ entries' % (where, len(uc), len(files)))
 
     # --- build-side list (working tree only; a tarball has the same file) ---
-    listed = cmake_listed(args.root)
+    listed = cmake_listed(args.root, args.tarball)
     if listed is not None:
         for f in uc:
             if f not in listed:
