@@ -27,7 +27,34 @@ eq(callend.describe(null, { type: 99, reason: 1 }).text, 'type 99 cause 1', 'unk
 // verbose type 2 (modem-internal, libqmi VERBOSE_CALL_END_REASON_INTERNAL)
 eq(callend.describe(null, { type: 2, reason: 204 }).text, 'unknown cause code', 'internal 204 named');
 eq(callend.describe(null, { type: 2, reason: 206 }).text, 'network-initiated termination', 'internal 206 named');
-eq(callend.describe(null, { type: 2, reason: 241 }).text, 'PDP context already in use', 'internal 241 named');
+// 241 is libqmi's INTERFACE_IN_USE_CONFIG_MATCH. This assertion used to demand
+// "PDP context already in use", which is the meaning of 236 — the test froze the
+// mislabelling in place, which is why it survived so long.
+eq(callend.describe(null, { type: 2, reason: 241 }).text,
+	'interface in use, config matches an existing call', 'internal 241 named');
+eq(callend.describe(null, { type: 2, reason: 236 }).text,
+	'call already present', 'internal 236 is the OTHER one');
+
+// the table used to stop at 220, so everything above it fed the recovery ladder
+// a bare number — including the reasons that say retrying cannot help
+eq(callend.describe(null, { type: 2, reason: 243 }).text,
+	'thermal mitigation', 'internal 243: the modem is hot, not broken');
+eq(callend.describe(null, { type: 2, reason: 255 }).text,
+	'call disallowed in roaming', 'internal 255 named');
+
+// verbose type 3 (call manager) had no table at all
+eq(callend.describe(null, { type: 3, reason: 523 }).text,
+	'thermal emergency', 'cm 523 named');
+eq(callend.describe(null, { type: 3, reason: 1010 }).text,
+	'PLMN not allowed', 'cm 1010 named');
+eq(callend.describe(null, { type: 3, reason: 1053 }).text,
+	'LTE RRC connection establishment failure access barred', 'cm 1053 named');
+eq(callend.describe(null, { type: 3, reason: 99999 }).text,
+	'call manager cause 99999', 'cm fallback keeps the type name');
+
+// 0x0C is past libqmi's type enum but is emitted on a handoff teardown
+eq(callend.describe(null, { type: 12, reason: 7 }).type_name,
+	'handoff', 'type 0x0C is named, not "type 12"');
 eq(callend.describe(null, { type: 2, reason: 999 }).text, 'internal cause 999', 'internal fallback keeps type name');
 
 // coarse reason only / ext only / nothing
