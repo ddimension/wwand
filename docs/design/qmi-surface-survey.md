@@ -74,6 +74,41 @@ Also note **0xE3 is claimed three ways** — libqmi assigns it to Foxconn, the
 Qualcomm BSP to an internal service, this firmware to Quectel. Any code keying
 off 0xE3 must key off the manufacturer too. Same hazard at 0xE7/0xE8.
 
+## Considered and declined, with the reason
+
+Three items from the ranked list below were implemented as *decisions not to
+build*, which is a deliverable too:
+
+- **eDRX (NAS 0x00BA/0x00BB) and PSM (DMS 0x0060–0x0067).** Both extend how long
+  the modem sleeps between paging occasions or TAU cycles. That is the right
+  trade on a battery IoT device and the wrong one here: wwand exists to hold a
+  router's WAN up, and every second of extra sleep is a second of added latency
+  for anything arriving inbound — or, with PSM, of no connectivity at all. These
+  are not missing features, they are features whose defaults point away from
+  what this daemon is for. Building them behind a config flag would add a
+  footgun with no caller.
+- **Modem-assisted keepalive (WDS 0x00D6/0x00D7/0x00D8, DSD 0x0041).** Keeps a
+  carrier-NAT binding alive without waking the host. Genuinely useful on an idle
+  link — but a router WAN carrying a VPN, a monitoring agent or any background
+  traffic keeps its own binding alive, so the case where this helps is a box
+  that is doing nothing, which is not the case that hurts. Revisit if someone
+  reports a NAT timeout that traffic does not already prevent.
+
+Two more dissolved on inspection rather than being declined:
+
+- **`RF_BAND_INFO_IND` (0x0066) is already covered.** wwand receives the same
+  band changes through `SET_EVENT_REPORT` (0x0002) TLV 0x11, which libqmi does
+  model and wwand already arms. The survey listed it as a one-line addition; it
+  would have been a duplicate.
+- **`ERR_RATE_IND` (0x0053) carries no LTE or NR.** Its five TLVs are CDMA frame,
+  HDR packet, GSM bit, WCDMA block and TD-SCDMA block error rates. On the modems
+  this project targets it is permanently empty. (The survey said as much in
+  passing — "METRICS_LTE_BLER is the LTE block-error-rate feed that NAS
+  GET_ERR_RATE does not provide" — but still ranked the indication.)
+- **`LIMIT_SYS_INFO_IND_REPORTING` (0x0070) has nothing to limit.** It throttles
+  the SYS_INFO indication, and wwand never arms that one: it registers
+  serving-system, signal-info and network-time only.
+
 ## Delivered from this survey
 
 - **Call-end reasons** (`callend.uc`) — the internal table completed to 268, the
@@ -86,6 +121,18 @@ off 0xE3 must key off the manufacturer too. Same hazard at 0xE7/0xE8.
   sent. DEVICE + VENDOR agreeing on ids and widths.
 - **Multi-SIM shape reporting** (`sim.multisim`) — read-only, MBIM SYS_CAPS
   exact, QMI inferred and marked as such.
+- **UIM card diagnostics** — four of the eleven unused `REGISTER_EVENTS` bits
+  armed: session closed (with cause and the offending file id), SIM busy,
+  internal card recovery, card activation. Plus the refresh handshake libqmi
+  structurally cannot complete: `REFRESH_OK` (0x002B) and the `vote_for_init`
+  TLV, so a refresh no longer pulls the session out from under a live data call.
+- **Long APDU** — the token-and-indication path for a card answer too large for
+  one message. Previously read as "the card said nothing", which is silent
+  truncation exactly where eSIM lives.
+- **TMD thermal mitigation** (service 0x18) — whether the modem is throttling
+  its own radio, pushed on change. Entirely GPL-sourced, so citable upstream.
+- **CAT toolkit routing** (service 0x0A, `option cat_mode`) — lets a headless box
+  stop advertising a terminal profile it cannot honour. Off by default.
 
 ## Open, ranked by value per line of code
 
