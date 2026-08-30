@@ -170,6 +170,16 @@ export function create(opts)
 			base.password = cfg('password');
 
 		let do_write = () => wds.request('MODIFY_PROFILE', base, (err) => {
+			// A teardown destroys this client and reports `cancelled` here
+			// SYNCHRONOUSLY, with the hub still live. The retry below is
+			// deliberately unconditional — it exists because the first write can
+			// fail on roaming_disallowed alone — but "write the profile again"
+			// is the wrong response to "we are going away": it would put an NV
+			// PROFILE WRITE on a client mid-destruction and then continue the
+			// context chain behind it. Stop; the teardown owns what happens next.
+			if (err?.error == 'cancelled')
+				return;
+
 			if (err)
 				log('warn', sprintf('profile modify failed: %J', err));
 

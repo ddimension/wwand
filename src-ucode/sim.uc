@@ -864,7 +864,20 @@ export function switch_slot(modem, physical, cb)
 	// idempotency guard: switching to the already-active slot would still
 	// bounce the SIM (and with it the registration) on most firmwares —
 	// read the slot status first and no-op when nothing would change.
-	modem.uim.request('GET_SLOT_STATUS', {}, (gerr, data) => {
+	// captured so the second request cannot go out on a client that has been
+	// destroyed or replaced underneath us — see the cancellation check below
+	let uim = modem.uim;
+
+	uim.request('GET_SLOT_STATUS', {}, (gerr, data) => {
+		// A teardown destroys this client and reports `cancelled` to this
+		// callback SYNCHRONOUSLY, with the hub still live. Falling through
+		// would then send SWITCH_SLOT — a slot change! — down a client
+		// mid-destruction, and arm a timer that outlives the pending table it
+		// should have died with. A cancellation is not "we could not read the
+		// current slot, so switch anyway".
+		if (gerr?.error == 'cancelled' || modem.uim != uim)
+			return cb({ error: 'cancelled' });
+
 		let cur = null;
 
 		if (!gerr)
@@ -875,7 +888,7 @@ export function switch_slot(modem, physical, cb)
 		if (cur != null && cur == +physical)
 			return cb(null, { unchanged: true });
 
-		modem.uim.request('SWITCH_SLOT', {
+		uim.request('SWITCH_SLOT', {
 			logical: 1, physical: physical,
 		}, (err) => cb(err ?? null));
 	});
@@ -900,10 +913,20 @@ export function power_cycle(modem, slot, cb)
 	slot = (+slot >= 1) ? +slot : 1;
 
 	let via_uim = () => {
-		modem.uim.request('POWER_OFF_SIM', { slot: slot }, (offerr) => {
-			// power on regardless: if off failed because the card was already
-			// down, on still brings it back
-			modem.uim.request('POWER_ON_SIM', { slot: slot }, (onerr) =>
+		let uim = modem.uim;
+
+		uim.request('POWER_OFF_SIM', { slot: slot }, (offerr) => {
+			// Power on regardless: if off failed because the card was already
+			// down, on still brings it back. That intent is right for a real
+			// error and wrong for a CANCELLATION — a teardown reports one
+			// synchronously while destroying this client, and powering the SIM
+			// back on from there sends through a client mid-destruction. Worse
+			// than the send itself: it would leave the card powered on behalf of
+			// a modem that no longer exists.
+			if (offerr?.error == 'cancelled' || modem.uim != uim)
+				return cb({ error: 'cancelled' });
+
+			uim.request('POWER_ON_SIM', { slot: slot }, (onerr) =>
 				cb(onerr ?? offerr ?? null));
 		});
 	};

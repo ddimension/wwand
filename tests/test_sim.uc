@@ -555,6 +555,77 @@ scenario('plmn write: invalid plmn rejected', (next) => {
 	});
 });
 
+// --- a teardown must not let a two-step UIM sequence issue its second step ---
+// Destroying a client reports `cancelled` to its pending callbacks
+// SYNCHRONOUSLY, while the hub is still live. Both of these sequences read any
+// error as "carry on", which sent the second request down a client that was
+// being destroyed — and armed a timer that outlives the pending table it should
+// have died with. In the slot case the second request is a SLOT SWITCH.
+scenario('slot switch: a cancelled read does not switch anyway', (next) => {
+	let sent = [];
+	let m = { timing: T, config: {} };
+
+	m.uim = {
+		request: (name, args, cb) => {
+			push(sent, name);
+			// what a destroy() does to everything pending
+			if (name == 'GET_SLOT_STATUS')
+				return cb({ error: 'cancelled' }, null);
+			cb(null, {});
+		},
+	};
+
+	sim.switch_slot(m, 2, (err, res) => {
+		eq(err?.error, 'cancelled', 'slot switch: the caller is told, not silently switched');
+		eq(sent, [ 'GET_SLOT_STATUS' ], 'slot switch: no SWITCH_SLOT during teardown');
+		next();
+	});
+});
+
+scenario('sim power cycle: a cancelled power-off does not power on', (next) => {
+	let sent = [];
+	let m = { timing: T, config: {} };
+
+	m.uim = {
+		request: (name, args, cb) => {
+			push(sent, name);
+			if (name == 'POWER_OFF_SIM')
+				return cb({ error: 'cancelled' }, null);
+			cb(null, {});
+		},
+	};
+
+	sim.power_cycle(m, 1, (err) => {
+		eq(err?.error, 'cancelled', 'power cycle: reported as cancelled');
+		eq(sent, [ 'POWER_OFF_SIM' ],
+			'power cycle: the card is not powered back on for a modem that is going away');
+		next();
+	});
+});
+
+// ...and a REAL error still carries on, which is the behaviour these sequences
+// were written for: a power-off that failed because the card was already down
+// must not stop the power-on.
+scenario('sim power cycle: a real error still powers back on', (next) => {
+	let sent = [];
+	let m = { timing: T, config: {} };
+
+	m.uim = {
+		request: (name, args, cb) => {
+			push(sent, name);
+			if (name == 'POWER_OFF_SIM')
+				return cb({ error: 'qmi', code: 26 }, null);
+			cb(null, {});
+		},
+	};
+
+	sim.power_cycle(m, 1, (err) => {
+		eq(sent, [ 'POWER_OFF_SIM', 'POWER_ON_SIM' ],
+			'power cycle: a genuine failure still brings the card back');
+		next();
+	});
+});
+
 // --- long APDU: the card's answer did not fit in one message -----------------
 // The modem then returns NO response TLV and a token, and the bytes arrive as
 // indications. Read as "no response TLV" that is a card with nothing to say —
