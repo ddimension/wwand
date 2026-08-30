@@ -934,6 +934,9 @@ export function resolve_control(cfg, fx)
 		// branch below have its turn; it is returned only if nothing else fits.
 		unidentified = {
 			protocol: null,
+			// nothing to contradict: the driver had no opinion (and a pin never
+			// reaches here — it makes `proto` non-null and returns above)
+			pinned_over: null,
 			// explicit: "we looked and could not tell", as opposed to a caller
 			// that simply never filled the field in. Only this flag refuses the
 			// modem, so a hand-built control object keeps working.
@@ -975,6 +978,9 @@ export function resolve_control(cfg, fx)
 	if (netdev) {
 		return {
 			protocol: pin ?? 'ncm',
+			// this branch's own reading is 'ncm' — an AT-driven netdev — so a pin
+			// to anything else contradicts it just as branch 1's does
+			pinned_over: (pin != null && pin != 'ncm') ? 'ncm' : null,
 			device: null,
 			netdev: netdev,
 			tty: tty_for_netdev(fx, netdev, cfg.tty),
@@ -993,6 +999,7 @@ export function resolve_control(cfg, fx)
 	if (tty && !unidentified) {
 		return {
 			protocol: pin ?? 'ppp',
+			pinned_over: (pin != null && pin != 'ppp') ? 'ppp' : null,
 			device: null,
 			netdev: null,
 			tty: tty,

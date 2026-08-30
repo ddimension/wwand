@@ -298,6 +298,17 @@ let c3 = discovery.resolve_control({ netdev: 'wwan0', tty: null }, ncm_fx);
 eq(c3.protocol, 'ncm', 'cdc_ncm netdev -> ncm');
 eq(c3.device, null, 'ncm: no cdc-wdm control device');
 eq(c3.netdev, 'wwan0', 'ncm: datapath netdev');
+eq(c3.pinned_over, null, 'ncm: nothing pinned, nothing contradicted');
+
+// the branch has its own reading too, so a pin away from it is a contradiction
+// like any other — and, the case that matters, a pin TO ncm here is not one:
+// this is a genuine NCM modem, and it must keep its hardware recovery.
+let c3p = discovery.resolve_control({ netdev: 'wwan0', protocol: 'ncm', tty: null }, ncm_fx);
+eq(c3p.pinned_over, null, 'ncm: pinning ncm on an ncm netdev contradicts nothing');
+
+let c3q = discovery.resolve_control({ netdev: 'wwan0', protocol: 'qmi', tty: null }, ncm_fx);
+eq(c3q.protocol, 'qmi', 'ncm: a pin overrides the netdev reading too');
+eq(c3q.pinned_over, 'ncm', 'ncm: ...and the overridden reading is recorded');
 eq(c3.tty, '/dev/ttyUSB2', 'ncm: AT tty resolved from the netdev USB parent');
 
 // netdev_driver + control_of_netdev directly

@@ -667,7 +667,12 @@ export function multisim(slots, caps)
 	if (!n_slots)
 		return null;
 
-	// Distinct logical slots actually IN USE. Only active slots count: QMI
+	// Distinct logical slots actually IN USE. This can UNDER-count a genuine
+	// dual-executor modem whose second stack happens to be idle, and that is the
+	// safe direction: the count only ever feeds a floor, so under-counting
+	// weakens a claim and never invents one.
+	//
+	// Only active slots count: QMI
 	// reports a logical_slot on inactive ones too, and the value is stale
 	// rather than meaningful there — HW on an RG650E with one active slot,
 	// where the empty second slot also reports logical_slot 1, and libqmi
