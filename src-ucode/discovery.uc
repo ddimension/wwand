@@ -23,7 +23,15 @@ import { glob, readlink, lsdir, access, open, realpath } from 'fs';
 import * as atcmd from 'wwand.atcmd';
 
 // datapath drivers that mean "no rich control protocol — driven over AT"
-const NCM_DRIVERS = { cdc_ncm: true, cdc_ether: true, rndis_host: true };
+// Drivers whose control is AT rather than a rich protocol. `huawei_cdc_ncm` is
+// a CDC-NCM driver that ALSO registers a cdc-wdm node (it includes both
+// cdc_ncm.h and cdc-wdm.h; kernel drivers/net/usb/huawei_cdc_ncm.c) — so the
+// presence of a cdc-wdm says nothing about the protocol on its own, and reading
+// the driver is the only honest answer. Field-reported 2026-08-30: without this
+// entry the device fell through to the old qmi guess and got CTL SYNC.
+const NCM_DRIVERS = {
+	cdc_ncm: true, cdc_ether: true, rndis_host: true, huawei_cdc_ncm: true,
+};
 
 // fs-backed effects; tests inject a fake object with the same method shape.
 export function default_fx()
@@ -874,8 +882,24 @@ export function resolve_control(cfg, fx)
 	let device = resolve_modem_device(cfg, fx);
 
 	if (device) {
+		// NO fallback protocol. An unrecognised driver means we do not KNOW what
+		// this device speaks, and until 1.6.0 that answered 'qmi' — so an
+		// unknown cdc-wdm silently became a QMI modem, wwand demanded the
+		// wwand-qmi package and then ran CTL SYNC at a device that does not
+		// speak QMI. Every request timed out, the protocol-error counter
+		// climbed, and the recovery ladder eventually power-cycled a modem that
+		// was never broken (field report, 2026-08-30). Report null and let the
+		// caller say what it could not identify; `option protocol` pins it by
+		// hand. The driver comes along so the message can name it.
+		let proto = pin ?? protocol_of(device, fx);
+
 		return {
-			protocol: pin ?? protocol_of(device, fx) ?? 'qmi',
+			protocol: proto,
+			// explicit: "we looked and could not tell", as opposed to a caller
+			// that simply never filled the field in. Only this flag refuses the
+			// modem, so a hand-built control object keeps working.
+			unknown: proto == null,
+			driver: driver_of(device, fx),
 			device: device,
 			netdev: resolve_netdev(cfg, device, fx),
 			tty: cfg.tty,

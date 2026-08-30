@@ -961,10 +961,25 @@ export function create(opts)
 			if (device) {
 				let proto = cfg.protocol;
 
-				if (proto == null || proto == 'auto')
-					proto = (deps.resolve_protocol ? deps.resolve_protocol(device) : null) ?? 'qmi';
+				// Fallback path, taken only when no resolve_control dep is wired
+				// (production wires both — see main.uc). `unknown` means WE
+				// LOOKED AND COULD NOT TELL, which is what refuses the modem
+				// below; with no resolver at hand nobody looked, so the historic
+				// qmi default stands rather than every modem being refused.
+				let looked = false;
 
-				control = { protocol: proto, device: device, netdev: cfg.netdev, tty: cfg.tty };
+				if (proto == null || proto == 'auto') {
+					if (deps.resolve_protocol) {
+						proto = deps.resolve_protocol(device);
+						looked = true;
+					}
+					else {
+						proto = 'qmi';
+					}
+				}
+
+				control = { protocol: proto, unknown: looked && proto == null,
+				            device: device, netdev: cfg.netdev, tty: cfg.tty };
 			}
 		}
 
@@ -983,6 +998,29 @@ export function create(opts)
 				l3_name: l3name ?? null, modem: null, protocol: null,
 				control_note: sprintf('device %s is owned by interface %s (proto %s)',
 					claim.device, claim.interface, claim.proto),
+				_sig: self.modems[name]?._sig,
+			};
+
+			return;
+		}
+
+		// A control device we cannot identify must not be driven on a guess. It
+		// stays visible with a note saying what was seen, exactly like a device
+		// another stack owns — the modem is idle for a stated reason instead of
+		// looking merely absent, and no backend is loaded, no request is sent
+		// and no recovery rung can fire on errors we would have caused
+		// ourselves. `option protocol 'qmi'|'mbim'|'ncm'` overrides it.
+		if (control?.unknown && control.device) {
+			let drv = control.driver;
+
+			log('err', sprintf('modem %s: cannot identify the control protocol of %s (%s) — set `option protocol` to qmi, mbim or ncm, or report the driver so it can be added',
+				name, control.device, drv ? sprintf('driver %s', drv) : 'no driver bound'));
+
+			self.modems[name] = {
+				cfg: cfg, device: control.device, netdev: control.netdev ?? null,
+				muxinfo: muxinfo, l3_name: l3name ?? null, modem: null, protocol: null,
+				control_note: sprintf('unknown control protocol on %s (%s) — set `option protocol`',
+					control.device, drv ? sprintf('driver %s', drv) : 'no driver bound'),
 				_sig: self.modems[name]?._sig,
 			};
 
@@ -1032,7 +1070,8 @@ export function create(opts)
 		entry.control_note = null;
 
 		let device = entry.device;
-		let proto = control.protocol ?? 'qmi';
+		// non-null by here: an unidentified device was refused above
+		let proto = control.protocol ?? cfg.protocol;
 
 		// A PCIe/MHI modem must not be allowed to runtime-suspend: on the
 		// hardware seen so far the resume kills the endpoint outright and no

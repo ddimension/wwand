@@ -171,6 +171,39 @@ eq(c2.device, '/dev/cdc-wdm0', 'mbim: control device');
 let c2p = discovery.resolve_control({ device: '/dev/cdc-wdm0', protocol: 'qmi', tty: null }, mbim_fx);
 eq(c2p.protocol, 'qmi', 'protocol pin overrides driver classification');
 
+// --- 2b. a cdc-wdm whose driver is AT-controlled, and the unknown case -------
+// huawei_cdc_ncm is a CDC-NCM driver that ALSO registers a cdc-wdm, so the mere
+// presence of a control node says nothing about the protocol. Field-reported
+// 2026-08-30: this device was classified as QMI, wwand demanded wwand-qmi and
+// then ran CTL SYNC against it until the recovery ladder power-cycled a modem
+// that was never broken.
+let huawei_fx = fakefx.create({
+	present: { '/dev/cdc-wdm0': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/huawei_cdc_ncm' },
+	dirs: { '/sys/class/usbmisc/cdc-wdm0/device/net': [ 'wwan0' ] },
+});
+let chw = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: null }, huawei_fx);
+eq(chw.protocol, 'ncm', 'cdc-wdm huawei_cdc_ncm -> ncm, not qmi');
+eq(chw.unknown, false, 'huawei: identified, so not flagged unknown');
+
+// ...and a driver we genuinely do not know stays UNKNOWN rather than becoming
+// QMI by default. Guessing is what caused the above; "unknown" is the honest
+// answer and the daemon refuses the modem with a note instead of driving it.
+let alien_fx = fakefx.create({
+	present: { '/dev/cdc-wdm0': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/some_vendor_thing' },
+	dirs: { '/sys/class/usbmisc/cdc-wdm0/device/net': [ 'wwan0' ] },
+});
+let cal = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: null }, alien_fx);
+eq(cal.protocol, null, 'unknown driver -> no protocol guess');
+eq(cal.unknown, true, 'unknown driver -> flagged so the daemon can refuse it');
+eq(cal.driver, 'some_vendor_thing', 'unknown driver is reported so it can be added');
+
+// a pin still wins: an operator who knows better is not blocked by our table
+let calp = discovery.resolve_control({ device: '/dev/cdc-wdm0', protocol: 'ncm', tty: null }, alien_fx);
+eq(calp.protocol, 'ncm', 'unknown driver: `option protocol` overrides');
+eq(calp.unknown, false, 'unknown driver: a pin clears the unknown flag');
+
 // --- 3. NCM netdev (no cdc-wdm) ---------------------------------------------
 
 let ncm_fx = fakefx.create({
