@@ -25,10 +25,12 @@ import * as wdsmod from '../wwand/codec/schema/wds.uc';
 import * as wdamod from '../wwand/codec/schema/wda.uc';
 import * as locmod from '../wwand/codec/schema/loc.uc';
 import * as dsdmod from '../wwand/codec/schema/dsd.uc';
+import * as catmod from '../wwand/codec/schema/cat.uc';
+import * as tmdmod from '../wwand/codec/schema/tmd.uc';
 
 const SCHEMAS = [ ctlmod.default, dmsmod.default, nasmod.default,
                   uimmod.default, wdsmod.default, wdamod.default,
-                  locmod.default, dsdmod.default ];
+                  locmod.default, dsdmod.default, catmod.default, tmdmod.default ];
 
 // per-service indexes: request messages by id, indications by name
 let req_index = {}, ind_index = {};

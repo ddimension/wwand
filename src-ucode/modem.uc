@@ -694,8 +694,20 @@ export function create(opts)
 
 			self.cat = null;
 
+			// The generation has to be re-checked INSIDE the release callback,
+			// not only before starting it. RELEASE_CID is asynchronous, and a
+			// teardown that begins while it is in flight destroys CTL first —
+			// which reports `cancelled` to this very callback, synchronously.
+			// Continuing there resumed the old init chain into _read_info()
+			// while teardown was still tearing down, and could schedule work
+			// after teardown's timer-cancellation pass, overlapping the retry.
+			// Checking once at the top of finish() is not enough: the
+			// continuation escapes behind it.
 			if (client)
-				return self.release(client, () => cb());
+				return self.release(client, () => {
+					if (self._gen == gen)
+						cb();
+				});
 
 			cb();
 		};

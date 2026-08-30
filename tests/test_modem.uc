@@ -1038,6 +1038,70 @@ scenario('fcc-off', {
 		   length(mock.calls_for('FOXCONN_SET_FCC_AUTHENTICATION_V2')), 0, 'fcc-off: no foxconn fcc message');
 	});
 
+// --- CAT: a teardown while RELEASE_CID is in flight must not resume init ------
+// RELEASE_CID is asynchronous. A teardown starting while it is pending destroys
+// CTL FIRST, which reports `cancelled` to the release callback synchronously —
+// so a continuation there resumed the old init chain into _read_info() while
+// teardown was still running, and could schedule work past teardown's
+// timer-cancellation pass, overlapping the retry that follows.
+//
+// The mock swallows RELEASE_CID (a null handler withholds the reply), so the
+// release is still pending when we tear down.
+scenario('cat-release-teardown', {
+	handlers: base_handlers({
+		// CAT (0x0A = 10) has to be advertised or the whole path is skipped
+		GET_VERSION_INFO: { services: [
+			{ service: 1, major: 1, minor: 60 },
+			{ service: 2, major: 1, minor: 14 },
+			{ service: 3, major: 1, minor: 25 },
+			{ service: 10, major: 1, minor: 22 },
+			{ service: 11, major: 1, minor: 22 },
+			{ service: 26, major: 1, minor: 16 },
+		] },
+		GET_CONFIGURATION: { mode: 2 },       // differs from 'disabled' -> a SET runs
+		SET_CONFIGURATION: {},
+		RELEASE_CID: () => null,              // never answered
+	}),
+	config: { cat_mode: 'disabled' },
+	// wait until the release is genuinely IN FLIGHT (sent, and swallowed by the
+	// null handler), then make the device vanish — which is a real teardown,
+	// with CTL destroyed first, exactly the ordering under test
+	setup: (mock, modem) => {
+		let poll = null;
+
+		poll = uloop.timer(10, () => {
+			if (length(mock.calls_for('RELEASE_CID')) >= 1) {
+				mock.calls_at_teardown = length(mock.calls);
+				mock.trigger_gone();
+				return;
+			}
+
+			poll.set(10);
+		});
+	},
+}, 'removed',
+	(modem, mock, events) => {
+		ok(length(mock.calls_for('SET_CONFIGURATION')) >= 1,
+			'cat: the toolkit mode was applied');
+		ok(mock.calls_at_teardown != null,
+			'cat: the release was in flight when the device went away');
+
+		// Nothing may be issued after that point. The release callback fires
+		// with `cancelled` while teardown destroys CTL, and continuing there
+		// would resume the init chain into _read_info() on a modem that is
+		// being torn down — and schedule work past teardown's timer cancel.
+		// THE assertion. Without the generation check inside the release
+		// callback, the cancelled release resumed the init chain — which then
+		// ran against nulled clients, failed, and retried: seven `error` events
+		// where a clean teardown produces none. Counting mock traffic does NOT
+		// catch this (the resumed requests never reach the mock, because the
+		// clients they would go through are already gone), which is why the
+		// observable is the retry storm rather than the wire.
+		eq(length(filter(events, (e) => e.event == 'error')), 0,
+			'cat: a cancelled release does not restart the init chain');
+		eq(modem.cat, null, 'cat: the client is gone with the rest');
+	});
+
 uloop.run();
 
 // parse_modes edge cases (pure function)
