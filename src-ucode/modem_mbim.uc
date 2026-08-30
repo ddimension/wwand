@@ -212,9 +212,16 @@ export function create(opts)
 		// this modem rather than inferring it. Getter, not a copy: the value
 		// only exists after the first slot query.
 		self.multisim_caps = null;
-		self.refresh_multisim_caps = () => {
-			self.multisim_caps = self.mbim?._multisim_caps ?? null;
-			return self.multisim_caps;
+		self.read_multisim_caps = (cb) => {
+			if (self.multisim_caps)
+				return cb(self.multisim_caps);
+
+			mbim_backend.sys_caps(self.mbim, (err, caps) => {
+				if (!err && caps)
+					self.multisim_caps = caps;
+
+				cb(self.multisim_caps);
+			});
 		};
 
 		self.mbim.open((err) => {

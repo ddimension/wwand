@@ -32,13 +32,15 @@ export function install(self, o)
 			// descriptive — see sim.multisim. It is the one thing we cannot
 			// determine for hardware we do not own, so it is worth reporting
 			// wherever someone does own it.
-			cb(null, {
-				slots: slots,
-				multisim: sim.multisim(slots,
-					entry.modem?.refresh_multisim_caps
-						? entry.modem.refresh_multisim_caps()
-						: null),
-			});
+			// On MBIM the exact figures come from SYS_CAPS, and they are worth
+			// one extra round trip: a modem carrying the QMI-over-MBIM
+			// passthrough answers the slot list over QMI-UIM, so without asking
+			// separately we would infer what the modem can simply state.
+			if (entry.modem?.read_multisim_caps)
+				return entry.modem.read_multisim_caps((caps) =>
+					cb(null, { slots: slots, multisim: sim.multisim(slots, caps) }));
+
+			cb(null, { slots: slots, multisim: sim.multisim(slots, null) });
 		});
 	};
 

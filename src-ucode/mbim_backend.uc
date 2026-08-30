@@ -239,6 +239,26 @@ const SLOT_STATES = {
 // executor 0, SLOT_INFO_STATUS (sequential, 0-based) the per-slot card state.
 // The native CIDs carry no per-slot ICCID/EID — those stay null (the caller
 // may fill the active slot's identity from the modem info).
+// Ask MS Basic Connect Extensions how many cellular stacks this modem has and
+// how many may run at once — the question QMI has no message for. Standalone,
+// because on a modem that carries the QMI-over-MBIM passthrough the slot list
+// comes from QMI-UIM and slot_status() below is never reached, which would
+// otherwise leave the only exact source unread.
+export function sys_caps(mc, cb)
+{
+	mc.command(ext, 'SYS_CAPS', 'query', {}, (err, caps) => {
+		if (err || !caps)
+			return cb(err ?? { error: 'unsupported' }, null);
+
+		cb(null, {
+			number_of_executors: caps.number_of_executors ?? null,
+			number_of_slots: caps.number_of_slots ?? null,
+			concurrency: caps.concurrency ?? null,
+			modem_id: caps.modem_id ?? null,
+		});
+	});
+};
+
 export function slot_status(mc, cb)
 {
 	mc.command(ext, 'SYS_CAPS', 'query', {}, (err, caps) => {
