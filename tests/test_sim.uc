@@ -555,6 +555,62 @@ scenario('plmn write: invalid plmn rejected', (next) => {
 	});
 });
 
+// --- long APDU: the card's answer did not fit in one message -----------------
+// The modem then returns NO response TLV and a token, and the bytes arrive as
+// indications. Read as "no response TLV" that is a card with nothing to say —
+// silent truncation, and eSIM is exactly where it bites.
+scenario('apdu: a long response is reassembled from its chunks', (next) => {
+	let ind_cb = null;
+	let m = { timing: T, config: {} };
+
+	m.uim = {
+		on: (name, cb) => { if (name == 'SEND_APDU_IND') ind_cb = cb; },
+		request: (name, args, cb) => {
+			// no response TLV, a token instead
+			cb(null, { long_response: { total_length: 5, token: 77 } });
+		},
+	};
+
+	sim.install_apdu_reassembly(m);
+	ok(ind_cb != null, 'long apdu: the indication handler is installed up front');
+
+	let got = 'unset';
+	sim.apdu_send(m, 1, 1, '00A40004', (e, hex) => { got = e ?? hex; });
+
+	eq(got, 'unset', 'long apdu: the caller waits rather than getting a short answer');
+
+	// chunks, deliberately out of order — the offset is authoritative
+	ind_cb({ chunk: { token: 77, total_length: 5, offset: 3, apdu: [ 0x90, 0x00 ] } });
+	eq(got, 'unset', 'long apdu: still waiting on the missing head');
+	ind_cb({ chunk: { token: 77, total_length: 5, offset: 0, apdu: [ 0xAA, 0xBB, 0xCC ] } });
+
+	// lowercase: that is what arr_to_hex produces, and every existing caller
+	// (lpac's stdio driver included) already consumes it that way
+	eq(got, 'aabbcc9000', 'long apdu: reassembled in offset order, not arrival order');
+
+	// a token that is not ours must be ignored rather than corrupt anything
+	ind_cb({ chunk: { token: 999, total_length: 2, offset: 0, apdu: [ 1, 2 ] } });
+	eq(got, 'aabbcc9000', 'long apdu: a foreign token changes nothing');
+
+	next();
+});
+
+scenario('apdu: a short response still takes the direct path', (next) => {
+	let m = { timing: T, config: {} };
+
+	m.uim = {
+		on: () => null,
+		request: (name, args, cb) => cb(null, { response: [ 0x6F, 0x00 ] }),
+	};
+
+	sim.install_apdu_reassembly(m);
+	sim.apdu_send(m, 1, 1, '00A4', (e, hex) => {
+		eq(e, null, 'short apdu: no error');
+		eq(hex, '6f00', 'short apdu: returned directly, no token dance');
+		next();
+	});
+});
+
 // --- physical slots: passthrough bring-up + native MBIM fallback -------------
 
 // QMI-shaped GET_SLOT_STATUS canned response (2 slots, slot 1 active)

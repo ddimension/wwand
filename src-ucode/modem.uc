@@ -585,6 +585,10 @@ export function create(opts)
 			                         status: st, status_text: name });
 		});
 
+		// Long-APDU reassembly: installed here, with the other UIM handlers, so
+		// a response chunk cannot arrive before something is listening for it.
+		sim.install_apdu_reassembly(self);
+
 		// Arm the mask. Best-effort as a whole: a modem that refuses the extra
 		// bits gets one more try with card-status alone, because losing the
 		// PIN-readiness indication to gain diagnostics would be a bad trade.

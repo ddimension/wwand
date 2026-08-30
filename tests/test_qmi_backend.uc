@@ -318,4 +318,19 @@ eq(tmdmod.device_label('something_new'), 'something_new',
 // it does not impose it. Pinned so a later "completeness" patch has to argue.
 eq(T.SET_MITIGATION_LEVEL, null, 'tmd: wwand never commands mitigation');
 
+// the long-APDU wire shapes, where a wrong count width is silent corruption
+let la = tlvmod.unpack(U.SEND_APDU.resp, tlv(0x11, u16(600) + u32(77)));
+eq(la.response, null, 'long apdu: no response TLV when the answer did not fit');
+eq(la.long_response.total_length, 600, 'long apdu: total length');
+eq(la.long_response.token, 77, 'long apdu: token to reassemble against');
+
+// the chunk array carries a u16 count (QMI_IDL_FLAGS_SZ_IS_16, max 1024) — a
+// u8 count would decode the first chunk as garbage of plausible length
+let ch = tlvmod.unpack(U.SEND_APDU_IND.ind,
+	tlv(0x01, u32(77) + u16(5) + u16(0) + u16(3) + u8(0xAA) + u8(0xBB) + u8(0xCC)));
+eq(ch.chunk.token, 77, 'long apdu ind: token');
+eq(ch.chunk.total_length, 5, 'long apdu ind: total');
+eq(ch.chunk.offset, 0, 'long apdu ind: offset');
+eq(ch.chunk.apdu, [ 0xAA, 0xBB, 0xCC ], 'long apdu ind: u16-counted chunk body');
+
 done('test_qmi_backend');

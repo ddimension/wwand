@@ -231,9 +231,41 @@ export default {
 				slot:       { t: 0x01, f: 'u8' },
 				apdu:       { t: 0x02, f: { n: 'u16', of: 'u8' } },
 				channel_id: { t: 0x10, f: 'u8' },
+				// Declared, deliberately not sent. 0x00 (the default, and what
+				// we get today) returns intermediate procedure bytes; 0x01 asks
+				// the card for the final result and status words only. The
+				// current behaviour is HW-proven with lpac, which does its own
+				// 61xx/6Cxx handling, so changing what we ask for would be a
+				// change to a working path for no established gain.
+				procedure_bytes: { t: 0x11, f: 'u8' },
+				// Uplink chunking, for an APDU too large for one QMI message:
+				// same token across the chunks, offset counting from 0.
+				long_request: { t: 0x12, f: {
+					total_length: 'u16', token: 'u32', offset: 'u16' } },
 			},
 			resp: {
 				response: { t: 0x10, f: { n: 'u16', of: 'u8' } },
+				// The card's answer did not fit in the response. Then TLV 0x10 is
+				// ABSENT and this carries the token to reassemble from the
+				// SEND_APDU indications instead. Modelled by neither libqmi nor,
+				// until now, wwand — so a long answer read as "no response TLV"
+				// looked like a card that had nothing to say. That is silent
+				// truncation, and eSIM is exactly where it bites: an ES10 profile
+				// list or a certificate routinely exceeds one message.
+				long_response: { t: 0x11, f: {
+					total_length: 'u16', token: 'u32' } },
+			},
+		},
+
+		// The chunks of a long response. `apdu` carries a u16 count
+		// (QMI_IDL_FLAGS_SZ_IS_16 in the IDL, max 1024) — a u8 count would
+		// decode the first chunk as garbage of plausible length.
+		SEND_APDU_IND: {
+			id: 0x003B,
+			ind: {
+				chunk: { t: 0x01, f: {
+					token: 'u32', total_length: 'u16', offset: 'u16',
+					apdu: { n: 'u16', of: 'u8' } } },
 			},
 		},
 

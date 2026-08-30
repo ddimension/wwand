@@ -965,6 +965,59 @@ export function apdu_open(modem, slot, aid_hex, cb)
 	});
 };
 
+// Long APDU responses. When the card's answer does not fit in the SEND_APDU
+// response, the modem returns NO response TLV and a token instead; the bytes
+// then arrive as SEND_APDU indications carrying { token, total_length, offset,
+// chunk }. Without this the missing TLV read as "the card said nothing" —
+// silent truncation, and eSIM is where it bites: an ES10 profile list or a
+// certificate routinely exceeds one message.
+//
+// Installed once per UIM client (from modem.uc, at the same point as the other
+// UIM handlers) so a chunk cannot arrive before there is anything to catch it.
+export function install_apdu_reassembly(modem)
+{
+	if (!modem.uim || modem._apdu_long)
+		return;
+
+	// token (as a string key) -> { total, parts, cb, timer }
+	modem._apdu_long = {};
+
+	modem.uim.on('SEND_APDU_IND', (data) => {
+		let c = data?.chunk;
+
+		if (c?.token == null)
+			return;
+
+		let key = sprintf('%u', c.token);
+		let w = modem._apdu_long[key];
+
+		if (!w)
+			return;   // not ours, or already completed/timed out
+
+		// Chunks are ordered in practice but the offset is authoritative, so
+		// place by offset rather than append — a reordered chunk would
+		// otherwise corrupt the middle of a certificate and still look valid.
+		w.parts[sprintf('%u', c.offset ?? 0)] = c.apdu ?? [];
+		w.have += length(c.apdu ?? []);
+
+		if (w.have < (w.total ?? c.total_length ?? 0))
+			return;
+
+		w.timer?.cancel();
+		delete modem._apdu_long[key];
+
+		// reassemble in offset order
+		let offs = sort(map(keys(w.parts), (k) => +k), (a, b) => a - b);
+		let out = [];
+
+		for (let o in offs)
+			for (let b in w.parts[sprintf('%u', o)])
+				push(out, b);
+
+		w.cb(null, arr_to_hex(out));
+	});
+};
+
 export function apdu_send(modem, slot, channel, apdu_hex, cb)
 {
 	if (modem._apdu_be == 'mbim')
@@ -982,7 +1035,40 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 		if (err)
 			return cb(err, null);
 
-		cb(null, arr_to_hex(data.response));
+		// the ordinary case: the whole answer came back in the response
+		if (data.response != null)
+			return cb(null, arr_to_hex(data.response));
+
+		let lr = data.long_response;
+
+		// no response and no token is a card that genuinely said nothing
+		if (lr?.token == null)
+			return cb(null, arr_to_hex(data.response));
+
+		if (!modem._apdu_long) {
+			// nothing is listening for the chunks, so waiting would hang
+			return cb({ error: 'long_apdu_unsupported',
+			            detail: 'no reassembly handler installed' }, null);
+		}
+
+		let key = sprintf('%u', lr.token);
+		let done = false;
+		let finish = (e, v) => {
+			if (done)
+				return;
+			done = true;
+			cb(e, v);
+		};
+
+		modem._apdu_long[key] = {
+			total: lr.total_length ?? 0, parts: {}, have: 0, cb: finish,
+			// the chunks are pushed, so nothing else would ever fail this
+			timer: uloop.timer(30000, () => {
+				delete modem._apdu_long[key];
+				finish({ error: 'long_apdu_timeout',
+				         detail: sprintf('token %u incomplete', lr.token) }, null);
+			}),
+		};
 	}, { timeout: 30000 });
 };
 
