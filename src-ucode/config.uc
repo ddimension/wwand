@@ -181,7 +181,13 @@ const MODEM_KNOWN_OPTS = [ 'device', 'netdev', 'path', 'usb_path', 'serial',
 	'mux', 'dl_datagram_max_size', 'tty', 'at2_external', 'fcc_auth',
 	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'zero_rx_timeout', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
-	'stats_interval', 'auto_correct_config', 'plmn_list' ];
+	'stats_interval', 'auto_correct_config', 'plmn_list',
+	// the AT-over-MBIM pipe: `at_over_mbim` forces it and picks the vendor CID
+	// flavour, `at_mbim '0'` disables the automatic fallback. Both are read by
+	// the backends (modem_mbim step_at, modem_common open_at_over_mbim) and
+	// neither was listed here or copied below — so setting either produced an
+	// "unknown option" warning AND did nothing.
+	'at_over_mbim', 'at_mbim' ];
 const SIM_KNOWN_OPTS = [ 'modem', 'iccid', 'imsi', 'pincode', 'apn', 'auth',
 	'username', 'password', 'plmn_list' ];
 
@@ -243,6 +249,11 @@ function modem_from_section(s)
 		// release the secondary AT port ('at2') for external tools: wwand then
 		// never opens it and runs telemetry over the control channel instead
 		at2_external: bool_opt(s.at2_external, false),
+		// '' / unset = automatic (a tty when there is one, else the MBIM pipe);
+		// 'fibocom' | 'compal' | '1' forces the pipe and picks the vendor CID
+		at_over_mbim: s.at_over_mbim,
+		// '0' disables the automatic AT-over-MBIM fallback entirely
+		at_mbim: s.at_mbim,
 		fcc_auth: s.fcc_auth,
 		at_init: (type(s.at_init) == 'array') ? s.at_init :
 		         (s.at_init != null ? [ s.at_init ] : []),

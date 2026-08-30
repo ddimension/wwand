@@ -421,6 +421,21 @@ ok(length(filter(r.warnings, (w) => index(w, 'pincode must be digits') >= 0)) ==
 ok(!length(filter(r.warnings, (w) => index(w, 'ATD*99#') >= 0)),
 	'at-safe: the offending value is never put in the warning');
 
+// The AT-over-MBIM options must REACH the backends. Both are read
+// (modem_mbim step_at, modem_common open_at_over_mbim) but neither was in
+// MODEM_KNOWN_OPTS nor copied into the parsed modem, so setting either earned
+// an "unknown option" warning and then did nothing at all.
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', usb_path: '1-1',
+		      at_over_mbim: 'compal', at_mbim: '0' },
+	},
+});
+eq(r.modems.m0.at_over_mbim, 'compal', 'at-over-mbim: the vendor CID flavour reaches the backend');
+eq(r.modems.m0.at_mbim, '0', 'at-over-mbim: ...and so does the opt-out');
+eq(length(filter(r.warnings, (w) => index(w, 'unknown option') >= 0)), 0,
+	'at-over-mbim: and neither is reported as unknown any more');
+
 // `option mux` may name a datapath plugin, which the daemon require()s as
 // wwand.datapath_<name> — so the value lands in a MODULE PATH and its shape is
 // checked here. Whether the package exists is a runtime question (control_note).

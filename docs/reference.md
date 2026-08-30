@@ -341,6 +341,10 @@ config wwand_modem 'm0'
 	option dl_datagram_max_size '0'  # QMAP DL aggregation bytes; 0 = model/board table
 	list at_init 'ATE0'              # extra AT commands, sent once before registration
 	option at2_external '0'          # 1: reserve the secondary AT port for external tools
+	option at_mbim '0'               # 0: disable the automatic AT-over-MBIM fallback
+	option at_over_mbim ''           # force AT over the vendor MBIM CID instead of a
+	                                 #   tty: fibocom|compal|1 (unset = automatic:
+	                                 #   a tty when there is one, else the MBIM pipe)
 	                                 #    (gpsd, scripts) — wwand never opens it; telemetry
 	                                 #    runs over the control channel. The released tty
 	                                 #    shows up as `at2_released` in `ubus call wwand status`

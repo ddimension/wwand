@@ -288,11 +288,18 @@ export function create(opts)
 	// switching. Shared with the QMI backend (also gains model-init + M9200B
 	// drain via the common helper).
 	//
-	// `option at_over_mbim '<fibocom|compal|1>'` (default off): the modem has no
-	// usable cdc-wdm AT port, so route AT over the vendor AT-over-MBIM CID instead
-	// of opening a serial port. The tunnel engine is duck-typed exactly like the
-	// tty engine, so step_at_ident and the telemetry fallbacks use it unchanged
-	// (telemetry_at returns self.at_telemetry). NOT HW-validated — opt-in only.
+	// `option at_over_mbim '<fibocom|compal|1>'` (default unset): route AT over
+	// the vendor AT-over-MBIM CID instead of opening a serial port. The tunnel
+	// engine is duck-typed exactly like the tty engine, so step_at_ident and the
+	// telemetry fallbacks use it unchanged (telemetry_at returns
+	// self.at_telemetry). NOT HW-validated.
+	//
+	// It is not the only way in, and the comment used to claim otherwise:
+	// modem_common.open_at() falls back to the same pipe on its own whenever
+	// there is no tty or the tty will not open. What this option adds is
+	// FORCING it past a working tty, and choosing the vendor CID flavour — the
+	// automatic path cannot pick 'compal'. `option at_mbim '0'` turns the
+	// automatic fallback off.
 	step_at = () => {
 		let aom = self.config?.at_over_mbim;
 
