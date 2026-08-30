@@ -49,12 +49,21 @@ Measured on 2026-08-30 with the read-only `multisim` summary on `modem_sim_slots
 
 | Box | Modem | slots | executors | concurrency | mode | source |
 |---|---|---|---|---|---|---|
-| Chateau (245) | RG650E, QMI | 2 | 1 | — | DSSA | inferred |
-| NR7101 (242) | RG502Q, QMI | 2 | 1 | — | DSSA | inferred |
+| Chateau (245) | RG650E, QMI | 2 | ≥1 | — | — | inferred |
+| NR7101 (242) | RG502Q, QMI | 2 | ≥1 | — | — | inferred |
 | GL-X3000 (93) | RM520N-GL, MBIM | 2 | **1** | **1** | DSSA | **SYS_CAPS, exact** |
 | Cudy LT300 (97) | SLM770A, NCM | — | — | — | — | no slot query on AT |
 
-**Everything reachable is single-executor.** That is not a gap in the reporting:
+Note the two QMI rows report **no mode at all**, which is the point of the
+column. Over QMI the executor count is a count of distinct logical slots in use
+— a lower bound — and a lower bound of one rules nothing out: a modem with a
+second executor whose other slot is empty looks exactly like this. Only the
+MBIM row states a mode, because only there did the modem state the numbers.
+(`mode_min` carries what a lower bound *can* support: two logical slots in use
+would floor at DSDS. Neither box reaches it.)
+
+**Everything reachable is single-executor** as far as anything here can show.
+That is not a gap in the reporting:
 the RG650E's own firmware settles it, since Qualcomm's MBIM implementation
 (`mbimd`) writes `NumberOfExecutors` and `Concurrency` as literal `1` instead of
 asking the modem — decompiled, not inferred.

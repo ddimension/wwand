@@ -815,16 +815,37 @@ let ms_qmi = sim.multisim([
 ], null);
 eq(ms_qmi.slots, 2, 'multisim: both physical slots counted');
 eq(ms_qmi.executors, 1, 'multisim: one distinct logical slot -> one executor');
-eq(ms_qmi.mode, 'dssa', 'multisim: one executor is dual-SIM single-active');
 eq(ms_qmi.exact, false, 'multisim: the QMI figure is a lower bound, not a report');
 eq(ms_qmi.concurrency, null, 'multisim: QMI cannot answer concurrency at all');
+
+// ...and a lower bound of one supports NO categorical claim: a modem with a
+// second executor whose other slot is empty reports exactly this. Calling it
+// DSSA would state as fact the one thing the observation cannot reach.
+eq(ms_qmi.mode, null, 'multisim: an inferred count never yields a definite mode');
+eq(ms_qmi.mode_min, null, 'multisim: one logical slot rules nothing out either');
+
+// two logical slots in use is different: two stacks ARE registered at once, so
+// DSSA is ruled out. Whether it is really DSDA stays unanswerable over QMI.
+let ms_two = sim.multisim([
+	{ physical: 1, active: true, logical_slot: 1 },
+	{ physical: 2, active: true, logical_slot: 2 },
+], null);
+eq(ms_two.executors, 2, 'multisim: two distinct logical slots -> two executors');
+eq(ms_two.mode, null, 'multisim: still no definite mode without concurrency');
+eq(ms_two.mode_min, 'dsds', 'multisim: but the floor rules out single-active');
 
 // MBIM reports the numbers instead of us inferring them
 let ms_dsds = sim.multisim([{ physical: 1 }, { physical: 2 }],
 	{ number_of_executors: 2, number_of_slots: 2, concurrency: 1, modem_id: 'abc' });
 eq(ms_dsds.mode, 'dsds', 'multisim: two executors, concurrency 1 -> dual standby');
+eq(ms_dsds.mode_min, 'dsds', 'multisim: an exact mode is its own floor');
 eq(ms_dsds.exact, true, 'multisim: MBIM figures are exact');
 eq(ms_dsds.modem_id, 'abc', 'multisim: modem identity carried through');
+
+// an EXACT count of one is a real DSSA report, unlike the inferred one above
+let ms_dssa = sim.multisim([{ physical: 1 }, { physical: 2 }],
+	{ number_of_executors: 1, number_of_slots: 2, concurrency: 1 });
+eq(ms_dssa.mode, 'dssa', 'multisim: an exact single executor IS dual-SIM single-active');
 
 let ms_dsda = sim.multisim([{ physical: 1 }, { physical: 2 }],
 	{ number_of_executors: 2, concurrency: 2 });
@@ -835,10 +856,10 @@ eq(ms_dsda.mode, 'dsda', 'multisim: concurrency 2 -> dual active');
 let ms_part = sim.multisim([{ physical: 1 }, { physical: 2 }],
 	{ number_of_executors: 2 });
 eq(ms_part.mode, null, 'multisim: executors without concurrency is not classified');
+eq(ms_part.mode_min, 'dsds', 'multisim: two executors still floor at dual standby');
 
 eq(sim.multisim([], null), null, 'multisim: no slots, nothing to say');
 
 done('test_sim');
 	});
 });
-

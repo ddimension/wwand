@@ -650,6 +650,14 @@ export function slot_status(modem, cb)
 //   >1, concurrency 1       -> DSDS, both registered, one carries traffic
 //   concurrency >1          -> DSDA, both usable at once
 //
+// `mode` is only ever set from EXACT counts, and therefore only over MBIM. The
+// QMI inference is a lower bound, and a lower bound of one proves nothing: a
+// modem with a second executor that currently has no card in the other slot
+// reports exactly one logical slot, so calling it DSSA would state as fact the
+// very thing we could not observe. What a lower bound does support is a FLOOR,
+// which is what `mode_min` carries — it rules modes out (two logical slots in
+// use cannot be DSSA) without ever claiming the modem can do no more.
+//
 // wwand implements DSSA. The rest is reported so that anyone holding hardware
 // that can do more can say so, which is the one thing we cannot do ourselves.
 export function multisim(slots, caps)
@@ -668,27 +676,45 @@ export function multisim(slots, caps)
 			logical[sprintf('%d', s.logical_slot)] = true;
 
 	let inferred = length(keys(logical));
+	let exact = caps != null;
 	let executors = caps?.number_of_executors ?? (inferred > 0 ? inferred : null);
 	let concurrency = caps?.concurrency ?? null;
-	let mode = null;
+	let mode = null, mode_min = null;
 
-	if (executors != null && executors <= 1)
-		mode = 'dssa';
-	else if (executors != null && concurrency != null)
-		mode = (concurrency > 1) ? 'dsda' : 'dsds';
+	// determined: the modem told us both numbers
+	if (exact && executors != null) {
+		if (executors <= 1)
+			mode = 'dssa';
+		else if (concurrency != null)
+			mode = (concurrency > 1) ? 'dsda' : 'dsds';
+	}
+
+	// the floor the evidence supports. Over QMI `executors` is a count of
+	// distinct logical slots in use: two of them means two stacks are registered
+	// at once, so the modem is at least DSDS — whether it is really DSDA is not
+	// askable here, because QMI has no concurrency to ask for. One logical slot
+	// supports no floor at all, which is why nothing is said in that case.
+	if (mode != null)
+		mode_min = mode;
+	else if (executors != null && executors > 1)
+		mode_min = 'dsds';
 
 	return {
 		slots: n_slots,
 		executors: executors,
 		concurrency: concurrency,
+		// what the modem IS, stated only when the counts are exact
 		mode: mode,
+		// ...and the weakest mode consistent with the evidence, which is all an
+		// inferred count can support. Equal to `mode` whenever that is known.
+		mode_min: mode_min,
 		// 64-bit modem identity, MBIM only. Its purpose there is to tell you
 		// that several control nodes belong to one physical modem; over QMI the
 		// question does not arise, because there is only ever one node.
 		modem_id: caps?.modem_id ?? null,
 		// where the numbers came from, because they are not equally trustworthy
-		source: caps ? 'mbim-sys-caps' : 'qmi-logical-slots',
-		exact: caps != null,
+		source: exact ? 'mbim-sys-caps' : 'qmi-logical-slots',
+		exact: exact,
 	};
 };
 
