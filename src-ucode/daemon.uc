@@ -1564,6 +1564,13 @@ export function create(opts)
 				// (session closed and why / internal recovery / activation)
 				sim_busy: entry.modem?.sim_busy ?? false,
 				sim_note: entry.modem?.sim_note ?? null,
+				// Die/board temperature, read over the AT side channel. It lived
+				// only on the `modem_cells` reply, and BOTH consumers reached for
+				// it on the status object instead — so `wwandctl status` and the
+				// LuCI temperature row have never rendered once. It belongs here:
+				// it is a property of the modem, not of the serving cell, and it
+				// now sits next to the mitigation state it wants to be read with.
+				temperature: entry.modem?.temperature ?? null,
 				// the modem's own thermal mitigation (QMI TMD): which parts of it
 				// are holding back and how far. `mitigated` is the one-bit answer
 				// to "is throughput down because the modem decided so".

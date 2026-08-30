@@ -141,6 +141,25 @@ function cmd_status(args)
 		if (m.temperature?.celsius != null)
 			printf('  temp        %d °C\n', m.temperature.celsius);
 
+		// what the modem decided to do about it. `mitigated` counts only
+		// radio-affecting devices — an environmental one (the modem noting it is
+		// cold, a battery limit) is listed but is not throttling.
+		if (m.thermal?.mitigated)
+			printf('  thermal     THROTTLING at level %d (%s)\n', m.thermal.level ?? 0,
+				join(', ', map(filter(m.thermal.active ?? [], (d) => d.rf),
+					(d) => sprintf('%s %d/%d', d.label ?? d.id, d.level, d.max))));
+		else if (length(filter(m.thermal?.active ?? [], (d) => !d.rf)))
+			printf('  thermal     %s (not throttling)\n',
+				join(', ', map(filter(m.thermal.active, (d) => !d.rf),
+					(d) => sprintf('%s %d/%d', d.label ?? d.id, d.level, d.max))));
+
+		// what the CARD last said about itself
+		if (m.sim_busy)
+			printf('  sim         busy — reads will fail until it clears\n');
+
+		if (m.sim_note)
+			printf('  sim_note    %s\n', m.sim_note);
+
 		if (m.fcc_lock != null && m.fcc_lock != 0)
 			printf('  fcc_lock    mode %d (radio locked — fcc_auth may unlock)\n', m.fcc_lock);
 
@@ -504,6 +523,24 @@ case 'slots': {
 			s.cpin ? sprintf(' cpin %s', s.cpin) : '',
 			s.service ? sprintf(' service %s', s.service) : '',
 			s.atr ? sprintf(' atr %s', s.atr) : '');
+
+	// The multi-SIM shape, which the slot list alone does not tell you: two
+	// slots is not two usable SIMs. `mode` is stated only when the counts are
+	// exact (MBIM SYS_CAPS); over QMI the executor count is a lower bound, so
+	// the most that can be said is a floor — printed with ">=" so it never
+	// reads as a fact.
+	let ms = res.multisim;
+
+	if (ms) {
+		let mode = ms.mode ? uc(ms.mode)
+			: (ms.mode_min ? sprintf('>= %s', uc(ms.mode_min)) : 'unknown');
+
+		printf('multi-sim: %d slot(s), %s%d executor(s), concurrency %s, %s (%s)\n',
+			ms.slots, ms.exact ? '' : '>= ', ms.executors ?? 0,
+			ms.concurrency != null ? sprintf('%d', ms.concurrency) : '?',
+			mode, ms.exact ? ms.source : sprintf('%s, inferred', ms.source));
+	}
+
 	break;
 }
 
