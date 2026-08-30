@@ -122,6 +122,14 @@ export function publish(conn, daemon, log)
 				daemon.modem_sim_slots(req.args.modem, ok_reply(reply))),
 		},
 
+		// the modem's own eUICC profile read (no lpac). For an M2M eUICC whose
+		// ES10 is SM-SR-managed, this is the only enumeration that works.
+		modem_euicc_profiles: {
+			args: { modem: '', slot: 0, ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_euicc_profiles(req.args.modem, req.args.slot, ok_reply(reply))),
+		},
+
 		// detected modems for the LuCI stable-binding picker (managed + present)
 		modem_probe: {
 			args: { ubus_rpc_session: '' },

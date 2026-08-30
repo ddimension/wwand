@@ -44,6 +44,23 @@ export function install(self, o)
 		});
 	};
 
+	// The modem's own read of an eUICC's profiles, without lpac. See
+	// sim.euicc_profiles: this is for the card lpac structurally cannot
+	// enumerate — an M2M eUICC with no local ES10 — not a replacement for it.
+	self.modem_euicc_profiles = function(ref, slot, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		sim.euicc_profiles(entry.modem, slot, (err, profiles) => {
+			if (err)
+				return cb({ error: 'euicc_read', detail: err });
+
+			cb(null, { slot: +(slot ?? 1) || 1, profiles: profiles });
+		});
+	};
+
 	self.modem_sim_switch_slot = function(ref, physical, cb) {
 		let entry = check_modem(ref, cb);
 

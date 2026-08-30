@@ -732,6 +732,90 @@ export function multisim(slots, caps)
 	};
 };
 
+// The modem's own view of an eUICC's profiles — no LPA, no APDU channel.
+//
+// lpac stays the tool for anything that CHANGES a profile, and for ordinary
+// consumer eUICCs it is also the better reader. This exists for the case lpac
+// structurally cannot serve: an SGP.02 M2M eUICC has no local ES10 (it is
+// managed over the air by its SM-SR and answers STORE DATA with 6985 —
+// HW-observed on the Chateau's card, 2026-08), so host-driven enumeration is
+// impossible by design. The modem's internal path is not subject to that.
+//
+// Read-only. Nothing here enables, disables or downloads anything.
+//
+// HW RESULT (2026-08-30): neither modem here implements it. The RG650E and the
+// RG502Q both answer QMI error 94 (not supported) to 0x0064 on slot 1 and slot
+// 2 alike — even though 0x0064 IS listed in the RG650E's own service-object
+// message table. Being in the table means the id is declared, not that the
+// firmware handles it, which is a sharper version of the same lesson as service
+// reachability. So this path is untested against a modem that answers, and its
+// value is entirely prospective; the first-index failure is reported as
+// `no_native_euicc` precisely so a caller falls back to lpac rather than
+// believing in an empty card.
+export function euicc_profiles(modem, slot, cb)
+{
+	if (!modem.uim)
+		return cb({ error: 'no_uim_client' }, null);
+
+	slot = +(slot ?? 1) || 1;
+
+	// how many profiles to ask for. There is no "list" message — each profile is
+	// fetched by index — so walk until the card says it has no more. 16 is a
+	// ceiling, not an expectation: consumer eUICCs hold a handful.
+	const MAX_PROFILES = 16;
+
+	let out = [];
+	let i = 1, step;
+
+	step = () => {
+		if (i > MAX_PROFILES)
+			return cb(null, out);
+
+		let id = i++;
+
+		modem.uim.request('GET_PROFILE_INFO',
+			{ slot: slot, profile_id: id }, (err, data) => {
+				// The first index the card declines ends the walk. An error here
+				// is the normal terminator, not a failure — but if the FIRST
+				// index already fails, say so, because then the modem has no
+				// native eUICC interface at all and the caller should fall back
+				// to lpac rather than believe in an empty card.
+				if (err) {
+					if (id == 1)
+						return cb({ error: 'no_native_euicc', detail: err }, null);
+
+					return cb(null, out);
+				}
+
+				let iccid = length(data?.iccid ?? []) ? decode_iccid(arr_to_hex(data.iccid)) : null;
+
+				push(out, {
+					index:    id,
+					iccid:    iccid,
+					state:    uimmod.PROFILE_STATES[sprintf('%d', data?.state ?? -1)]
+					          ?? sprintf('%d', data?.state ?? -1),
+					active:   data?.state == 1,
+					nickname: (data?.nickname != '') ? data?.nickname : null,
+					spn:      (data?.spn != '') ? data?.spn : null,
+					name:     (data?.name != '') ? data?.name : null,
+					class:    uimmod.PROFILE_CLASSES[sprintf('%d', data?.class ?? -1)]
+					          ?? sprintf('%d', data?.class ?? -1),
+					// why a profile may refuse to go away, which is otherwise a
+					// mystery the operator has to resolve
+					policy: {
+						disable_not_allowed: !!((data?.policy ?? 0) & uimmod.PROFILE_POLICY_DISABLE_NOT_ALLOWED),
+						delete_not_allowed:  !!((data?.policy ?? 0) & uimmod.PROFILE_POLICY_DELETE_NOT_ALLOWED),
+						delete_on_disable:   !!((data?.policy ?? 0) & uimmod.PROFILE_POLICY_DELETE_ON_DISABLE),
+					},
+				});
+
+				step();
+			}, { no_recovery: true, timeout: 10000 });
+	};
+
+	step();
+};
+
 export function switch_slot(modem, physical, cb)
 {
 	// native MBIM DEVICE_SLOT_MAPPINGS set — pure-MBIM fallback (carries its

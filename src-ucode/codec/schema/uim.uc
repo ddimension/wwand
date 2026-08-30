@@ -84,6 +84,18 @@ export const EVENTS_WANTED = EVENT_CARD_STATUS | EVENT_SESSION_CLOSE |
                              EVENT_SIM_BUSY | EVENT_RECOVERY_COMPLETE |
                              EVENT_CARD_ACTIVATION;
 
+// uim_profile_state_enum / class / policy — what GET_PROFILE_INFO reports
+export const PROFILE_STATES = { '0': 'inactive', '1': 'active' };
+
+export const PROFILE_CLASSES = {
+	'0': 'test', '1': 'provisioning', '2': 'operational',
+};
+
+// profile_policy_rules bitmask: why a profile may refuse to be removed
+export const PROFILE_POLICY_DISABLE_NOT_ALLOWED = (1 << 0);
+export const PROFILE_POLICY_DELETE_NOT_ALLOWED  = (1 << 1);
+export const PROFILE_POLICY_DELETE_ON_DISABLE   = (1 << 2);
+
 // QmiUimSessionCloseCause — why the card dropped our provisioning session.
 // This is the difference between "we closed it" and "the card is failing", and
 // until now the session simply went away without a word.
@@ -413,6 +425,49 @@ export default {
 				// width wrong here would not fail, it would silently swallow the
 				// following TLV.
 				enforcement: { t: 0x11, f: 'u64' },
+			},
+		},
+
+		// --- native eUICC reads, no LPA needed ---------------------------------
+		// The modem's own view of what is on the eUICC. wwand normally drives
+		// lpac for this, which is the right tool and stays the default — but
+		// lpac talks ES10 to the card over an APDU channel, and an SGP.02 M2M
+		// eUICC has NO local ES10: it is managed over the air by its SM-SR and
+		// answers STORE DATA with 6985 (HW-observed on the Chateau's card).
+		// There, host-driven enumeration is impossible by design and this is the
+		// only way to see what the card holds. It is read-only: nothing here
+		// enables, disables or downloads a profile.
+		//
+		// TLV widths were read from the IDL rather than inferred, because three
+		// of them are counter-intuitive: profile_id in the REQUEST is four bytes
+		// (not the one byte a 1..N index suggests), state and class are four,
+		// and the policy-rule mask is EIGHT.
+		GET_EID: {
+			id: 0x0065,
+			req:  { slot: { t: 0x01, f: 'u8' } },
+			resp: { eid:  { t: 0x10, f: 'lstring' } },
+		},
+
+		GET_PROFILE_INFO: {
+			id: 0x0064,
+			req: {
+				slot:       { t: 0x01, f: 'u8' },
+				profile_id: { t: 0x02, f: 'u32' },
+			},
+			resp: {
+				iccid:     { t: 0x10, f: { n: 'u8', of: 'u8' } },
+				state:     { t: 0x11, f: 'u32' },
+				nickname:  { t: 0x12, f: 'lstring' },
+				spn:       { t: 0x13, f: 'lstring' },
+				name:      { t: 0x14, f: 'lstring' },
+				icon_type: { t: 0x15, f: 'u32' },
+				// icon data is u16-counted (SZ_IS_16) — decoded past, not into,
+				// because a router status page has no use for a bitmap
+				class:     { t: 0x17, f: 'u32' },
+				// EIGHT bytes: the rules that decide whether a profile may be
+				// disabled or deleted at all, which is why a profile can refuse
+				// to go away and the operator has to do it
+				policy:    { t: 0x18, f: 'u64' },
 			},
 		},
 

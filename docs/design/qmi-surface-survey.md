@@ -55,6 +55,15 @@ beyond the nine wwand models:
 | 0x4E | DFC | |
 | 0x55–0x5A, 0x5C | ? | unidentified, present |
 
+**A third, from implementing it:** the survey said of the native eUICC block
+that "every one of 0x0052, 0x0053, 0x0064–0x006D, 0x0075–0x0077 is in the
+RG650E request table, which retires the 'unverified on router modems' caveat".
+It does not. `GET_PROFILE_INFO` (0x0064) is implemented and answers **QMI error
+94, not supported**, on both the RG650E and the RG502Q, on either slot. Being
+listed in a service object's message table means the id is declared; it says
+nothing about whether the firmware handles it. Same lesson as reachability, one
+level down.
+
 **Two results that correct the survey's own conclusions:**
 
 - **TS (0x17) is on the link.** The survey found no TS service object in the
