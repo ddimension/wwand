@@ -186,6 +186,25 @@ let chw = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: null }, huaw
 eq(chw.protocol, 'ncm', 'cdc-wdm huawei_cdc_ncm -> ncm, not qmi');
 eq(chw.unknown, false, 'huawei: identified, so not flagged unknown');
 
+// A VENDOR FORK of qmi_wwan still speaks QMI. Quectel's qmi_wwan_q is the
+// driver our own rmnet_nss datapath add-on exists for, so refusing it would have
+// broken exactly the QSDK boxes that add-on serves — and it would have been a
+// regression introduced BY the no-guessing change, since the old fallback
+// happened to carry it. The prefix is matched, not a fixed list.
+let vendor_fx = fakefx.create({
+	present: { '/dev/cdc-wdm0': true },
+	links: {
+		'/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/qmi_wwan_q',
+		'/sys/class/net/wwan0/device/driver': '/sys/bus/usb/drivers/qmi_wwan_q',
+	},
+	dirs: { '/sys/class/usbmisc/cdc-wdm0/device/net': [ 'wwan0' ] },
+});
+let cvq = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: null }, vendor_fx);
+eq(cvq.protocol, 'qmi', 'vendor fork qmi_wwan_q -> qmi');
+eq(cvq.unknown, false, 'vendor fork: identified, not refused');
+eq(discovery.control_of_netdev('wwan0', vendor_fx), 'qmi',
+	'vendor fork classified from the netdev too');
+
 // ...and a driver we genuinely do not know stays UNKNOWN rather than becoming
 // QMI by default. Guessing is what caused the above; "unknown" is the honest
 // answer and the daemon refuses the modem with a note instead of driving it.

@@ -81,6 +81,16 @@ function wwan_port_protocol(name, fx)
 	return (type == 'QMI') ? 'qmi' : (type == 'MBIM') ? 'mbim' : null;
 }
 
+// A vendor fork of qmi_wwan speaks QMI just the same: Quectel ships qmi_wwan_q
+// (the driver our wwand-datapath-rmnet_nss add-on exists for), and the family
+// keeps growing. Matching the prefix rather than a fixed list matters now that
+// an unrecognised driver REFUSES the modem instead of falling back to a guess —
+// a missing name used to cost nothing and now costs the whole modem.
+function is_qmi_driver(drv)
+{
+	return drv == 'qmi_wwan' || substr(drv ?? '', 0, 9) == 'qmi_wwan_';
+}
+
 // control protocol of a modem control DEVICE, or null if unknown.
 export function protocol_of(device, fx)
 {
@@ -102,7 +112,7 @@ export function protocol_of(device, fx)
 
 	let drv = driver_of(device, fx);
 
-	if (drv == 'qmi_wwan')
+	if (is_qmi_driver(drv))
 		return 'qmi';
 
 	if (drv == 'cdc_mbim')
@@ -136,7 +146,7 @@ export function control_of_netdev(netdev, fx)
 {
 	let drv = netdev_driver(netdev, fx);
 
-	if (drv == 'qmi_wwan')
+	if (is_qmi_driver(drv))
 		return 'qmi';
 
 	if (drv == 'cdc_mbim')
