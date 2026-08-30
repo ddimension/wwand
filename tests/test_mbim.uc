@@ -271,6 +271,23 @@ function stub_connect_err(rec) {
 	return m;
 }
 
+// a modem that accepts every command but never answers CONNECT: leaves an
+// attempt in flight so the abort paths can be exercised
+function stub_never_answers() {
+	let m;
+	m = {
+		state: 'READY', mbim: {}, contexts: [],
+		attach_context: function(c) { push(m.contexts, c); },
+		command: function(name, kind, args, cb) {
+			if (name == 'CONNECT')
+				return;   // never calls back
+
+			return cb(null, {});
+		},
+	};
+	return m;
+}
+
 let recmds2 = [];
 let fctx2 = context_mbim.create({
 	name: 'wan', modem: stub_connect_err(recmds2),
@@ -279,6 +296,40 @@ let fctx2 = context_mbim.create({
 });
 fctx2.up(() => null);
 eq(length(recmds2), 1, 'deactivate-retry: no deactivate when CONNECT never activated');
+
+// --- an aborted attempt must not take a later one with it ---------------------
+//
+// `up_cb` is one slot and DEACTIVATE is asynchronous, so every path that ends an
+// attempt has to move the generation, not just the state — a new attempt can be
+// back in ACTIVATING before an old reply lands.
+{
+	let ctx = context_mbim.create({
+		name: 'wan', modem: stub_connect_err([]),
+		config: { apn: 'internet', mux_id: 0 },
+		deps: { on_event: () => null, log: () => null },
+	});
+
+	// down() while nothing is in flight must still settle cleanly
+	let downed = 0;
+	ctx.down(() => downed++);
+	eq(downed, 1, 'abort: down() on an idle context completes');
+
+	// an up() whose callback is still pending when down() runs must be answered
+	// rather than stranded and then overwritten by the next up()
+	let first = null, second = null;
+	let ctx2 = context_mbim.create({
+		name: 'wan', modem: stub_never_answers(),
+		config: { apn: 'internet', mux_id: 0 },
+		deps: { on_event: () => null, log: () => null },
+	});
+
+	ctx2.up((e) => { first = e; });
+	ctx2.down(() => null);
+	ok(first != null, 'abort: down() completes a pending up() instead of stranding it');
+
+	ctx2.up((e) => { second = e; });
+	eq(second, null, 'abort: the next up() has its own callback');
+}
 
 // --- a malformed frame is rejected, never thrown on ---------------------------
 //

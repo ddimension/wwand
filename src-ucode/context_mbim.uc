@@ -45,6 +45,21 @@ export function create(opts)
 	// Same guard context.uc has carried since the QMI path; NCM checks the
 	// state. This is the parity fix.
 	let up_gen = 0;
+
+	// End the in-flight attempt, if any. Bumping the generation is what makes
+	// the guards reliable — a state check alone is not enough, because a new
+	// attempt can put the context back into ACTIVATING before an old reply
+	// lands. Settles `up_cb` in the same breath so it can never be stranded and
+	// then overwritten by the next up().
+	let abort_attempt = (reason) => {
+		up_gen++;
+
+		let cb = up_cb;
+		up_cb = null;
+
+		if (cb)
+			cb({ error: reason });
+	};
 	// true once our CONNECT activated the session — the modem then holds it, so a
 	// failure/retry path must DEACTIVATE first or the next CONNECT hits MBIM
 	// status 13 (max activated contexts).
@@ -234,12 +249,20 @@ export function create(opts)
 			self.session_id, profile == '' ? '(network default)' : sprintf('\'%s\'', profile), ip_type));
 
 		self.modem.command('CONNECT', 'set', args, (err, data) => {
-			// attempt aborted while the modem was answering — drop the late
-			// reply. A successful one leaves the session up on the modem; the
-			// next CONNECT reconciles that, since ACTIVATION_ACTIVATED is
-			// accepted as success just below.
-			if (gen != up_gen || self.state != 'ACTIVATING')
+			let took = !err && (data?.activation_state == bc.ACTIVATION_ACTIVATED ||
+			                    data?.activation_state == bc.ACTIVATION_ACTIVATING);
+
+			// Attempt aborted while the modem was answering — drop the late
+			// reply, but NOT the fact it carries: if it succeeded, the modem is
+			// holding this session now and only `activated` makes down() tear it
+			// down. Without this the session leaks until some later attempt
+			// happens to adopt it, which is not a teardown.
+			if (gen != up_gen || self.state != 'ACTIVATING') {
+				if (took)
+					activated = true;
+
 				return;
+			}
 
 			if (err)
 				return self._fail({ stage: 'connect', err: err });
@@ -293,13 +316,19 @@ export function create(opts)
 
 	self.down = function(cb) {
 		let was = self.state;
+		let held = activated;
 
 		stop_stats();
+		abort_attempt('down');
 		set_state('IDLE');
 		self.settings = null;
 		activated = false;
 
-		if (was == 'IDLE' || !self.modem.mbim)
+		// `was == IDLE` is not the same as "the modem holds nothing": an
+		// activation aborted by lost/suspend can have been followed by a late
+		// successful CONNECT, which sets `activated` on an IDLE context. Tear
+		// that down instead of returning early and leaking it.
+		if ((was == 'IDLE' && !held) || !self.modem.mbim)
 			return cb ? cb(null) : null;
 
 		deactivate((err) => {
@@ -327,7 +356,19 @@ export function create(opts)
 		let cb = up_cb;
 		up_cb = null;
 
-		let finish = () => sc.fail_finish(err, cb);
+		// DEACTIVATE is asynchronous, and by the time it answers the context may
+		// have been dropped and re-activated. fail_finish() forces IDLE, clears
+		// settings and emits 'error' — landing that on a NEWER attempt would
+		// take a healthy session down. Pin the generation here and check it
+		// there. (`up_gen` is not bumped: this attempt is already the current
+		// one, and bumping would invalidate nothing that is not ours.)
+		let fgen = up_gen;
+		let finish = () => {
+			if (fgen != up_gen)
+				return;   // a newer attempt owns the context now
+
+			sc.fail_finish(err, cb);
+		};
 
 		// if our CONNECT already activated the session the modem still holds it;
 		// deactivate first so the daemon's retry doesn't hit MBIM status 13.
@@ -383,11 +424,9 @@ export function create(opts)
 				emit('down', { reason: 'modem_lost' });
 			}
 
-			if (up_cb) {
-				let cb = up_cb;
-				up_cb = null;
-				cb({ error: 'modem_lost' });
-			}
+			// bumps the generation as well, so a reply still in flight cannot
+			// land on the attempt that follows this one
+			abort_attempt('modem_lost');
 
 			break;
 
@@ -396,14 +435,12 @@ export function create(opts)
 			// the daemon requeues it (parity with context.uc / context_ncm —
 			// without this netifd's setup gets a hard failure mid-flap)
 			if (self.state == 'ACTIVATING') {
-				let cb = up_cb;
-				up_cb = null;
-
 				set_state('IDLE');
 				self.settings = null;
 
-				if (cb)
-					cb({ error: 'suspended' });
+				// same as 'lost': the generation moves, so the aborted attempt's
+				// reply can no longer complete a later one
+				abort_attempt('suspended');
 			}
 
 			emit('suspend', data);
