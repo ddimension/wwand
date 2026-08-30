@@ -784,6 +784,15 @@ export function euicc_profiles(modem, slot, cb)
 					if (id == 1)
 						return cb({ error: 'no_native_euicc', detail: err }, null);
 
+					// A TIMEOUT ends the whole walk, not just this index. An
+					// unsupported message answers immediately (error 94 on both
+					// modems here), so a timeout means the modem is not talking
+					// — and continuing would spend 10 s per remaining index with
+					// the ubus caller waiting on all of it.
+					if (err.error == 'timeout')
+						return cb({ error: 'euicc_timeout', detail: err,
+						            partial: out }, null);
+
 					return cb(null, out);
 				}
 
@@ -1082,9 +1091,18 @@ export function install_apdu_reassembly(modem)
 		// place by offset rather than append — a reordered chunk would
 		// otherwise corrupt the middle of a certificate and still look valid.
 		w.parts[sprintf('%u', c.offset ?? 0)] = c.apdu ?? [];
-		w.have += length(c.apdu ?? []);
 
-		if (w.have < (w.total ?? c.total_length ?? 0))
+		// Recount from the parts map rather than accumulating. A retransmitted
+		// chunk overwrites its slot but would have incremented a running total
+		// twice, and the reassembly would then "complete" early — with a HOLE in
+		// the middle and the right length, which is the worst possible shape for
+		// a certificate: it parses far enough to be believed.
+		let have = 0;
+
+		for (let k, part in w.parts)
+			have += length(part);
+
+		if (have < (w.total ?? c.total_length ?? 0))
 			return;
 
 		w.timer?.cancel();
@@ -1145,7 +1163,7 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 		};
 
 		modem._apdu_long[key] = {
-			total: lr.total_length ?? 0, parts: {}, have: 0, cb: finish,
+			total: lr.total_length ?? 0, parts: {}, cb: finish,
 			// the chunks are pushed, so nothing else would ever fail this
 			timer: uloop.timer(30000, () => {
 				delete modem._apdu_long[key];

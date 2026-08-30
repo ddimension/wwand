@@ -595,6 +595,34 @@ scenario('apdu: a long response is reassembled from its chunks', (next) => {
 	next();
 });
 
+// A retransmitted chunk must not complete the reassembly early. Accumulating a
+// running total counted the same bytes twice, and the result then had the right
+// LENGTH with a hole in the middle — the worst possible shape for a certificate,
+// because it parses far enough to be believed.
+scenario('apdu: a duplicate chunk does not fake completion', (next) => {
+	let ind_cb = null;
+	let m = { timing: T, config: {} };
+
+	m.uim = {
+		on: (name, cb) => { if (name == 'SEND_APDU_IND') ind_cb = cb; },
+		request: (name, args, cb) => cb(null, { long_response: { total_length: 6, token: 5 } }),
+	};
+
+	sim.install_apdu_reassembly(m);
+
+	let got = 'unset';
+	sim.apdu_send(m, 1, 1, '00A4', (e, hex) => { got = e ?? hex; });
+
+	ind_cb({ chunk: { token: 5, total_length: 6, offset: 0, apdu: [ 1, 2, 3 ] } });
+	ind_cb({ chunk: { token: 5, total_length: 6, offset: 0, apdu: [ 1, 2, 3 ] } });
+	eq(got, 'unset', 'apdu dup: the same offset twice is still only 3 of 6 bytes');
+
+	ind_cb({ chunk: { token: 5, total_length: 6, offset: 3, apdu: [ 4, 5, 6 ] } });
+	eq(got, '010203040506', 'apdu dup: completes only once the gap is genuinely filled');
+
+	next();
+});
+
 scenario('apdu: a short response still takes the direct path', (next) => {
 	let m = { timing: T, config: {} };
 
@@ -607,6 +635,46 @@ scenario('apdu: a short response still takes the direct path', (next) => {
 	sim.apdu_send(m, 1, 1, '00A4', (e, hex) => {
 		eq(e, null, 'short apdu: no error');
 		eq(hex, '6f00', 'short apdu: returned directly, no token dance');
+		next();
+	});
+});
+
+// The eUICC walk must not spend its timeout budget index by index. An
+// unsupported message answers immediately (error 94 on both modems here), so a
+// TIMEOUT means the modem is not talking — and 16 indices x 10 s would leave a
+// ubus caller waiting nearly three minutes.
+scenario('euicc: a timeout ends the walk instead of repeating it', (next) => {
+	let asked = 0;
+	let m = { timing: T, config: {}, uim: {
+		on: () => null,
+		request: (name, args, cb) => {
+			asked++;
+			// index 1 answers, then the modem goes quiet
+			if (args.profile_id == 1)
+				return cb(null, { iccid: [], state: 1, nickname: '', spn: '', name: '' });
+			cb({ error: 'timeout' }, null);
+		},
+	} };
+
+	sim.euicc_profiles(m, 1, (err, profiles) => {
+		eq(err?.error, 'euicc_timeout', 'euicc: a silent modem is reported, not waited out');
+		eq(asked, 2, 'euicc: exactly one timeout is spent, not sixteen');
+		eq(length(err?.partial ?? []), 1, 'euicc: what was already read is handed back');
+		next();
+	});
+});
+
+// ...and a modem that simply has no native interface says so on the FIRST index,
+// so the caller falls back to lpac rather than believing in an empty card
+scenario('euicc: an unsupported first index is not an empty card', (next) => {
+	let m = { timing: T, config: {}, uim: {
+		on: () => null,
+		request: (name, args, cb) => cb({ error: 'qmi', code: 94 }, null),
+	} };
+
+	sim.euicc_profiles(m, 1, (err, profiles) => {
+		eq(err?.error, 'no_native_euicc', 'euicc: reported as unsupported, not as zero profiles');
+		eq(profiles, null, 'euicc: and no list is invented');
 		next();
 	});
 });
