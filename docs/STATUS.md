@@ -45,6 +45,22 @@ all, which is correct — QMAP is not on the wire there.
 
 ## Known open
 
+- **TODO — the recovery ladder must not touch hardware on a protocol it has
+  never spoken.** `recovery.uc:176` escalates to `usb_repower` once the
+  protocol-error counter passes its limit. That rung exists for a real case (an
+  NR7101 can wedge so that only a power cycle clears it, and without the rung
+  the router reboot-loops), but it assumes protocol errors mean the modem
+  stopped answering. They can equally mean wwand picked the wrong control
+  protocol and is talking QMI at a device that does not speak it — reported from
+  the field on 2026-08-30, where a misdetected modem was power-cycled for it.
+  The missing discriminator is whether **one** successful exchange has ever
+  completed on this channel with the currently selected protocol; if none has,
+  the errors are evidence about our detection, not about the hardware, and no
+  hardware rung may fire. Gate all of them on that, not just the repower.
+  Related and awaiting the reporter's driver output: `discovery.uc:878` falls
+  back to `'qmi'` when `protocol_of()` cannot identify the driver (same fallback
+  at `daemon.uc:965` and `:1035`) — a guess where "unknown" is the honest answer,
+  and the reason the misdetection happened at all.
 - **openwrt/packages#30185** is `CHANGES_REQUESTED` on scope, which is a
   maintainer decision, not a defect list — all 34 review threads are resolved.
   The full build/runtime CI has not run on that PR since `8ffb9e3`; only the
