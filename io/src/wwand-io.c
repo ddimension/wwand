@@ -822,6 +822,174 @@ qmit_rmnet_add(uc_vm_t *vm, size_t nargs)
 	return ucv_boolean_new(true);
 }
 
+/*
+ * rmnet_flags_set(name, mux_id, flags, mask): re-assert IFLA_RMNET_FLAGS on an EXISTING rmnet
+ * link — an RTM_NEWLINK *changelink* (no NLM_F_CREATE, addressed by ifi_index),
+ * so an adopted child ends up with the format the CURRENT negotiation asked for.
+ *
+ * Why this has to exist. The flags are not a property of the child but of its
+ * PARENT: the kernel keeps one `port->data_format` per real_dev, and
+ * rmnet_changelink() simply ASSIGNS `flags->flags & flags->mask` to it. A daemon
+ * restart adopts children left over from an earlier run, so without this call the
+ * port keeps whatever QMAP version THAT run negotiated. Raising v1 -> v5 then
+ * leaves rmnet decoding v1 headers while the modem sends v5, and every downlink
+ * frame is dropped — the field symptom is tx climbing while rx stays at 0, with
+ * only an `ip link del` of the child clearing it.
+ *
+ * Deliberately separate from rmnet_add() rather than a mode of it: create and
+ * change are different netlink operations (IFLA_IFNAME + IFLA_LINK vs an
+ * ifi_index), and the create path is the one that must not regress.
+ * The MAP id has to be passed even though nothing about it changes: the kernel
+ * runs rmnet_rtnl_validate() on a change as well as on a create, and that
+ * function rejects a message without IFLA_RMNET_MUX_ID outright ("MUX ID not
+ * specified", -EINVAL) — the flags are never reached. rmnet_changelink() then
+ * re-hashes the endpoint into the bucket it already occupies, which is a no-op
+ * as long as the caller passes the id the link CURRENTLY has. Pass the kernel's
+ * own value (rmnet_mux_id), never the config's: on the adopt path they can
+ * disagree, and this call must not silently remap a live channel.
+ * The mask is the caller's, not `flags` itself, because the kernel does NOT
+ * assign the value — rmnet_changelink() applies it masked:
+ *   port->data_format &= ~flags->mask;
+ *   port->data_format |= flags->flags & flags->mask;
+ * With mask == flags a downgrade therefore leaves the previous version's bits
+ * standing (v5 -> v1 keeps the v5 checksum bits and the port keeps misparsing),
+ * which is precisely the failure this function exists to repair. Which bits are
+ * "ours" is policy, so it lives with rmnet_flags() in netlink.uc rather than
+ * being hardcoded here.
+ *   qmit.rmnet_flags_set("wwan0m1", 1, 0x31, 0x3d)  ->  true | false
+ */
+static uc_value_t *
+qmit_rmnet_flags_set(uc_vm_t *vm, size_t nargs)
+{
+	uc_value_t *name = uc_fn_arg(0);
+	uc_value_t *mux_id = uc_fn_arg(1);
+	uc_value_t *flags = uc_fn_arg(2);
+	uc_value_t *mask = uc_fn_arg(3);
+
+	struct {
+		struct nlmsghdr nlh;
+		struct ifinfomsg ifi;
+		char buf[256];
+	} req;
+
+	uint16_t mux;
+
+	struct rtattr *linkinfo, *infodata;
+	struct ifla_rmnet_flags rf;
+	struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
+	unsigned int idx;
+	/* union: nlmsghdr alignment for the recv buffer (see rmnet_add) */
+	union { char b[1024]; struct nlmsghdr h; } resp;
+	ssize_t rlen;
+	int fd, err;
+
+	last_errno = 0;
+
+	if (ucv_type(name) != UC_STRING || ucv_type(mux_id) != UC_INTEGER ||
+	    ucv_type(flags) != UC_INTEGER || ucv_type(mask) != UC_INTEGER ||
+	    ucv_int64_get(flags) < 0 || ucv_int64_get(flags) > 0xFFFFFFFF ||
+	    ucv_int64_get(mask) < 0 || ucv_int64_get(mask) > 0xFFFFFFFF) {
+		last_errno = EINVAL;
+
+		return ucv_boolean_new(false);
+	}
+
+	/* same range the kernel enforces (RMNET_MAX_LOGICAL_EP - 1); see rmnet_add */
+	if (ucv_int64_get(mux_id) < 0 || ucv_int64_get(mux_id) > 254) {
+		last_errno = ERANGE;
+
+		return ucv_boolean_new(false);
+	}
+
+	idx = if_nametoindex(ucv_string_get(name));
+
+	if (!idx) {
+		last_errno = ENODEV;
+
+		return ucv_boolean_new(false);
+	}
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+	req.nlh.nlmsg_type = RTM_NEWLINK;
+	/* no CREATE, no EXCL: this must fail rather than conjure a link */
+	req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	req.nlh.nlmsg_seq = 1;
+	req.ifi.ifi_family = AF_UNSPEC;
+	req.ifi.ifi_index = (int)idx;
+
+	linkinfo = nla_begin(&req.nlh, sizeof(req), IFLA_LINKINFO);
+
+	/* every nla_* checked — a full tail makes a later nla_begin return NULL */
+	if (!linkinfo ||
+	    !nla_put(&req.nlh, sizeof(req), IFLA_INFO_KIND, "rmnet", 6)) {
+		last_errno = EMSGSIZE;
+
+		return ucv_boolean_new(false);
+	}
+
+	infodata = nla_begin(&req.nlh, sizeof(req), IFLA_INFO_DATA);
+
+	/* The kernel stores `flags & mask`, so mask == flags yields exactly the
+	 * requested set — including clearing a bit the previous negotiation left
+	 * standing, because this is an assignment and not a read-modify-write.
+	 * The MAP id rides along only to satisfy the kernel's validate (see above);
+	 * it is the one the link already has, so it changes nothing. */
+	rf.flags = (uint32_t)ucv_int64_get(flags);
+	rf.mask = (uint32_t)ucv_int64_get(mask);
+	mux = (uint16_t)ucv_int64_get(mux_id);
+
+	if (!infodata ||
+	    !nla_put(&req.nlh, sizeof(req), IFLA_RMNET_MUX_ID, &mux, sizeof(mux)) ||
+	    !nla_put(&req.nlh, sizeof(req), IFLA_RMNET_FLAGS, &rf, sizeof(rf))) {
+		last_errno = EMSGSIZE;
+
+		return ucv_boolean_new(false);
+	}
+
+	nla_end(&req.nlh, infodata);
+	nla_end(&req.nlh, linkinfo);
+
+	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+
+	if (fd < 0) {
+		last_errno = errno;
+
+		return ucv_boolean_new(false);
+	}
+
+	if (sendto(fd, &req, req.nlh.nlmsg_len, 0,
+	           (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		last_errno = errno;
+		close(fd);
+
+		return ucv_boolean_new(false);
+	}
+
+	rlen = nl_recv(fd, resp.b, sizeof(resp.b));
+	close(fd);
+
+	/* NLM_F_ACK guarantees an nlmsgerr reply — a missed/short read must NOT
+	 * be reported as success (see rmnet_add) */
+	if (rlen < (ssize_t)NLMSG_LENGTH(sizeof(struct nlmsgerr)) ||
+	    resp.h.nlmsg_len > (size_t)rlen ||
+	    resp.h.nlmsg_type != NLMSG_ERROR) {
+		last_errno = EIO;
+
+		return ucv_boolean_new(false);
+	}
+
+	err = ((struct nlmsgerr *)NLMSG_DATA(&resp.h))->error;
+
+	if (err != 0) {
+		last_errno = -err;
+
+		return ucv_boolean_new(false);
+	}
+
+	return ucv_boolean_new(true);
+}
+
 /* find the first rtattr of `type` within [buf, buf+len); NULL if absent */
 static struct rtattr *
 rta_find(void *buf, size_t len, unsigned short type)
@@ -1290,6 +1458,7 @@ static const uc_function_list_t global_fns[] = {
 	{ "spawn",         qmit_spawn },
 	{ "rmnet_add",     qmit_rmnet_add },
 	{ "rmnet_mux_id",  qmit_rmnet_mux_id },
+	{ "rmnet_flags_set", qmit_rmnet_flags_set },
 	{ "rmnet_tx_aggr", qmit_rmnet_tx_aggr },
 	{ "last_error",    qmit_last_error },
 	{ "syslog_open",   qmit_syslog_open },

@@ -45,6 +45,23 @@ export function rmnet_flags(qmap_version)
 	return f;
 };
 
+// The bits rmnet_flags() can produce, i.e. the QMAP format bits this datapath
+// OWNS. A correction on an existing link needs it because the kernel does not
+// assign the flags, it applies them MASKED (rmnet_changelink(),
+// drivers/net/ethernet/qualcomm/rmnet/rmnet_config.c; checked against 6.18.41):
+//   port->data_format &= ~flags->mask;  port->data_format |= flags->flags & mask
+// so a mask of only the wanted bits leaves the previous version's standing —
+// downgrading v5 -> v1 with mask 0x01 keeps the v5 checksum bits and the port
+// still misparses. With this mask a correction produces the same format a fresh
+// create would for every bit wwand manages. Deliberately NOT included:
+// RMNET_FLAGS_INGRESS_MAP_COMMANDS (0x02), which wwand never sets and which is
+// not ours to clear — so that one bit is the exception to the sentence above,
+// surviving a correction where rmnet_newlink() (whose base is
+// INGRESS_DEAGGREGATION alone) would have dropped it.
+export const RMNET_FLAGS_MASK = RMNET_INGRESS_DEAGGREGATION |
+	RMNET_INGRESS_CKSUMV4 | RMNET_EGRESS_CKSUMV4 |
+	RMNET_INGRESS_CKSUMV5 | RMNET_EGRESS_CKSUMV5;
+
 // --- datapath plugins --------------------------------------------------------
 //
 // wwand ships three datapaths — two QMI mux backends (rmnet, qmimux) and the
@@ -368,6 +385,25 @@ export function default_fx(log)
 	if (type(require('wwand_io').rmnet_mux_id) == 'function')
 		self.rmnet_mux_id = (name) => require('wwand_io').rmnet_mux_id(name);
 
+	// re-assert the QMAP flags on an ALREADY EXISTING rmnet child (netlink
+	// changelink). Needed on the adopt path only: the flags live on the PARENT
+	// (`port->data_format`, one per real_dev) and the kernel assigns them
+	// wholesale, so a child surviving a restart otherwise keeps the format the
+	// PREVIOUS run negotiated. Same guard as above — an older wwand_io.so
+	// leaves it unset and the adopt path skips the correction rather than
+	// failing the adoption.
+	if (type(require('wwand_io').rmnet_flags_set) == 'function')
+		self.rmnet_flags_set = (name, mux_id, flags, mask) => {
+			let qmit = require('wwand_io');
+
+			if (qmit.rmnet_flags_set(name, mux_id, flags, mask ?? flags))
+				return true;
+
+			self.last_error = qmit.last_error();
+
+			return false;
+		};
+
 	// enable rmnet uplink (egress) QMAP aggregation via the ethtool coalesce
 	// TX-aggregation params. Best-effort: false when the kernel/driver has no
 	// such knob (e.g. plain mainline without the coalesce op) — callers ignore.
@@ -609,6 +645,48 @@ function setup_rmnet_links(fx, netdev, mux, qmap_version, urb_size, mux_mtus, ch
 			if (kid != null && kid != id)
 				fx.log('warn', sprintf('rmnet %s: kernel MAP id %d != config %d (kept existing link)',
 					child, kid, id));
+
+			// The child is kept, but its FORMAT must still follow this run's
+			// negotiation: the flags sit on the parent port and the kernel keeps
+			// whatever the previous run set. A box moving from plain QMAP to v5
+			// would otherwise come back from a restart decoding the wrong header
+			// — tx climbing, rx flat, and no message anywhere. Done
+			// unconditionally rather than after reading the flags back: with the
+			// full mask the correction is idempotent, so the same-version case
+			// costs one netlink round trip and needs no getter.
+			// The MAP id goes along because the kernel's validate rejects a
+			// change message without one; pass the id the link ACTUALLY has, so a
+			// config that drifted (warned about just above) cannot remap it here.
+			let corrected = false;
+
+			if (fx.rmnet_flags_set)
+				corrected = fx.rmnet_flags_set(child, kid ?? id, flags, RMNET_FLAGS_MASK);
+			else
+				fx.log('warn', sprintf('rmnet %s: this wwand_io.so has no rmnet_flags_set — the adopted link cannot be brought to this run\'s QMAP format',
+					child));
+
+			// A link whose format could not be corrected must not be reported as a
+			// working mux: that is the exact silent failure this whole path exists
+			// to end. Recreating restores correctness through the create path,
+			// which the kernel treats as an assignment. It costs the
+			// non-destructive restart, so it happens ONLY here — never on the
+			// normal adopt, where the correction succeeds.
+			if (!corrected) {
+				fx.log('notice', sprintf('rmnet %s: recreating the adopted link to apply QMAP flags 0x%02x%s',
+					child, flags, fx.last_error ? sprintf(' (%s)', fx.last_error) : ''));
+
+				if (!fx.link_del || !fx.link_del(child)) {
+					fx.log('err', sprintf('rmnet %s: could not delete the stale link — channel %d left unclaimed rather than reported as working',
+						child, id));
+					continue;
+				}
+
+				if (!fx.link_add_rmnet(child, netdev, id, flags)) {
+					fx.log('err', sprintf('rmnet %s: recreate failed%s — channel %d left unclaimed',
+						child, fx.last_error ? sprintf(': %s', fx.last_error) : '', id));
+					continue;
+				}
+			}
 		}
 
 		push(mux_devs, child);

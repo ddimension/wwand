@@ -101,7 +101,28 @@ the historical behaviour.
   the driver accepts only while the parent is **down**, so the shared code
   bounces it first. False means "I touch no driver format" and therefore "do not
   bounce it" — not cosmetic: on a restart that adopts a live session the bounce
-  drops the very traffic being adopted. The bounce additionally requires
+  drops the very traffic being adopted. Adoption has one obligation the built-in
+  rmnet path discharges for you: the QMAP flags are **not** a property of the
+  child but of its parent (`port->data_format`, one per real_dev), so a child
+  surviving a restart carries the format the PREVIOUS run negotiated. The
+  adopt path therefore re-asserts them with a netlink changelink
+  (`fx.rmnet_flags_set(child, kernel_map_id, flags, RMNET_FLAGS_MASK)`); without
+  it a box moving from plain QMAP to v5 comes back decoding the wrong header —
+  tx climbs, rx stays at zero, and nothing is logged. Two details that are easy
+  to get wrong, both enforced by the kernel rather than by us:
+  `rmnet_rtnl_validate()` rejects a change message carrying no
+  `IFLA_RMNET_MUX_ID`, so the id goes along (the kernel's, never the config's);
+  and `rmnet_changelink()` applies the flags MASKED
+  (`data_format &= ~mask; data_format |= flags & mask`) rather than assigning
+  them, so the mask has to cover every format bit wwand owns — a mask of just
+  the wanted bits leaves the previous version's standing and a downgrade fixes
+  nothing. If the correction cannot be made at all, the link is deleted and
+  recreated rather than reported as a working mux.
+
+  Note what this does *not* solve: the modem latches the aggregation format
+  while a data session is up. Changing the version on a running modem is
+  accepted but not acted on — HW-observed on the RG650E — until every context
+  on that modem has been taken down. The bounce additionally requires
   something to program (a `qmi` sysfs group, or a `pre`), so a parent with
   neither is left alone.
 - **`tx_aggr`** (default false) — opt into the mainline-rmnet ethtool egress

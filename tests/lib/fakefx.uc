@@ -171,7 +171,44 @@ export function create(opts)
 		if (self.rc[action])
 			return false;
 
+		// the kernel refuses NLM_F_EXCL over an existing name; modelling that
+		// here (rather than only through an rc override) is what makes the
+		// adopt-then-recreate path testable — the same action must fail while
+		// the link is there and succeed once it has been deleted
+		if (self.present[sprintf('/sys/class/net/%s', name)]) {
+			self.last_error = 'File exists';
+
+			return false;
+		}
+
 		self.present[sprintf('/sys/class/net/%s', name)] = true;
+
+		return true;
+	};
+
+	// netlink changelink of the QMAP flags on an EXISTING rmnet child — the
+	// adopt path's format correction. Present here unconditionally because the
+	// caller guards on it; an rc override drives the "kernel refused" branch.
+	// Models the KERNEL's semantics, not the request: rmnet_changelink() applies
+	// `data_format &= ~mask; data_format |= flags & mask`. Recording the
+	// resulting format (not just the requested flags) is what lets a test catch
+	// a mask too narrow to clear the previous version's bits.
+	self.rmnet_data_format = opts?.rmnet_data_format ?? 0;
+
+	self.rmnet_flags_set = function(name, mux_id, flags, mask) {
+		let action = sprintf('rmnet_flags_set %s mux_id %d flags 0x%x mask 0x%x',
+			name, mux_id ?? -1, flags ?? 0, mask ?? 0);
+
+		push(self.actions, action);
+
+		if (self.rc[action]) {
+			self.last_error = 'mock: changelink refused';
+
+			return false;
+		}
+
+		self.rmnet_data_format &= ~(mask ?? 0);
+		self.rmnet_data_format |= (flags ?? 0) & (mask ?? 0);
 
 		return true;
 	};

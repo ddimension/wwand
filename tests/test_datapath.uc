@@ -109,6 +109,79 @@ fx = fakefx.create({
 res = netlink.setup(fx, { netdev: 'wwan0', backend: 'rmnet', mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096 });
 eq(res.mux_devs, [ 'wwan0m1' ], 'rmnet: existing link tolerated');
 
+// ...and the adopted link must be brought to THIS run's QMAP format. The flags
+// live on the parent port and the kernel keeps the previous run's, so a v1 -> v5
+// change across a restart would otherwise decode the wrong header: tx climbs,
+// rx stays flat, nothing is logged. (HW-hit on the Chateau after the QMAPv5
+// constant fix — only `ip link del` cleared it.)
+ok(fx.action_index('rmnet_flags_set wwan0m1 mux_id 1 flags 0x1 mask 0x3d') >= 0,
+	'rmnet: adopted link gets this run\'s flags re-asserted');
+
+fx = fakefx.create({
+	present: { ...caps_rmnet, '/sys/class/net/wwan0m1': true },
+	rc: { 'link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x31': 2 },
+});
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'rmnet', v5: true,
+	mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096 });
+eq(res.mux_devs, [ 'wwan0m1' ], 'adopt v5: link adopted');
+ok(fx.action_index('rmnet_flags_set wwan0m1 mux_id 1 flags 0x31 mask 0x3d') >= 0,
+	'adopt v5: deagg + cksum v5 re-asserted on the surviving child');
+
+// A DOWNGRADE is the case a too-narrow mask gets wrong. The kernel does not
+// assign the flags, it applies them masked, so correcting v5 -> v1 with
+// mask == flags would leave the v5 checksum bits standing and the port would go
+// on misparsing — the very failure being fixed, just quieter. The fake models
+// the kernel arithmetic, so this asserts the resulting FORMAT, not the request.
+fx = fakefx.create({
+	present: { ...caps_rmnet, '/sys/class/net/wwan0m1': true },
+	rmnet_data_format: 0x31,   // left behind by a previous v5 run
+	rc: { 'link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x1': 2 },
+});
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'rmnet',
+	mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096 });
+eq(res.mux_devs, [ 'wwan0m1' ], 'downgrade: link adopted');
+eq(fx.rmnet_data_format, 0x1, 'downgrade: v5 checksum bits cleared, not merely v1 added');
+
+// ...and the reverse, to pin that the mask does not clear what it must set
+fx = fakefx.create({
+	present: { ...caps_rmnet, '/sys/class/net/wwan0m1': true },
+	rmnet_data_format: 0x1,
+	rc: { 'link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x31': 2 },
+});
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'rmnet', v5: true,
+	mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096 });
+eq(fx.rmnet_data_format, 0x31, 'upgrade: v1 -> v5 format applied');
+
+// a kernel that refuses the changelink must not lose the adoption — the link is
+// still the one carrying traffic; the operator gets a warning naming the fix
+fx = fakefx.create({
+	present: { ...caps_rmnet, '/sys/class/net/wwan0m1': true },
+	rc: { 'rmnet_flags_set wwan0m1 mux_id 1 flags 0x31 mask 0x3d': 2 },
+});
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'rmnet', v5: true,
+	mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096 });
+eq(res.mux_devs, [ 'wwan0m1' ], 'adopt v5: refused changelink still yields a usable channel');
+ok(fx.action_index('link_del wwan0m1') >= 0,
+	'adopt v5: an uncorrectable link is deleted, not reported as working');
+// the create is ATTEMPTED first (fails EEXIST), then the delete, then the real
+// create — so it is the second occurrence that proves the recreate happened
+eq(length(filter(fx.actions, (a) => a == 'link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x31')), 2,
+	'adopt v5: ...and recreated through the create path');
+
+// an older wwand_io.so without the helper must not silently skip the correction
+// either — same recreate, plus a warning naming the reason
+fx = fakefx.create({
+	present: { ...caps_rmnet, '/sys/class/net/wwan0m1': true },
+});
+delete fx.rmnet_flags_set;
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'rmnet', v5: true,
+	mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096 });
+eq(res.mux_devs, [ 'wwan0m1' ], 'no helper: channel still usable');
+ok(fx.action_index('link_del wwan0m1') >= 0,
+	'no helper: link recreated rather than adopted with an unknown format');
+ok(length(filter(fx.actions, (a) => match(a, /^log warn .*no rmnet_flags_set/))) > 0,
+	'no helper: the skew is reported');
+
 // stale-renamed parent occupies the mux child name (a config update bounced the
 // datapath through a channel-less snapshot, which renamed the raw netdev to the
 // stable L3 name): the parent must move back to a raw kernel name and the child
