@@ -43,6 +43,38 @@ Neither QMI modem accepts QMAP v4; both take v5 and fall back to v1 when asked
 for something they decline. The MBIM and NCM paths report no QMAP version at
 all, which is correct — QMAP is not on the wire there.
 
+## Multi-SIM: what the hardware here actually is
+
+Measured on 2026-08-30 with the read-only `multisim` summary on `modem_sim_slots`:
+
+| Box | Modem | slots | executors | concurrency | mode | source |
+|---|---|---|---|---|---|---|
+| Chateau (245) | RG650E, QMI | 2 | 1 | — | DSSA | inferred |
+| NR7101 (242) | RG502Q, QMI | 2 | 1 | — | DSSA | inferred |
+| GL-X3000 (93) | RM520N-GL, MBIM | 2 | **1** | **1** | DSSA | **SYS_CAPS, exact** |
+| Cudy LT300 (97) | SLM770A, NCM | — | — | — | — | no slot query on AT |
+
+**Everything reachable is single-executor.** That is not a gap in the reporting:
+the RG650E's own firmware settles it, since Qualcomm's MBIM implementation
+(`mbimd`) writes `NumberOfExecutors` and `Concurrency` as literal `1` instead of
+asking the modem — decompiled, not inferred.
+
+So **DSSA is the shape wwand supports, and the only shape we can test.** DSDS and
+DSDA are understood down to message ids and TLVs (two independent sources: a
+vendor IDL tree and the RG650E's own `libqmiservices.so`), but nothing here can
+exercise them, and for the NAS half there is no openly licensed carrier of those
+ids — so an upstream submission would have to rest on observed behaviour we
+cannot produce. Reported rather than implemented, which is why the summary exists
+at all: someone holding a dual-executor modem can answer in one command what we
+cannot answer for ourselves.
+
+Two things worth knowing if that ever changes. The subscription encoding is **not
+uniform**: NAS and WMS use one byte, 0-based; WDS, DMS, QOS and DSD four bytes,
+1-based with 0 meaning "default" — a shared codec silently binds the wrong stack.
+And DSDA cannot be commanded at all: there is no `SET_MSIM_SUB_MODE`, and
+`nas_standby_pref_enum_v01` has no "dual active" member. It is a device property,
+reported only.
+
 ## Known open
 
 - **TODO — the recovery ladder must not touch hardware on a protocol it has
