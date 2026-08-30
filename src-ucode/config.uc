@@ -176,7 +176,7 @@ function apply_globals(s, result)
 // unknown options: those are silently dead config, usually a typo ('pin'
 // instead of 'pincode' cost a HW debugging session — the daemon saw "PIN
 // required but none configured" and safety-blocked the SIM).
-const MODEM_KNOWN_OPTS = [ 'device', 'netdev', 'path', 'usb_path', 'serial',
+const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
 	'imei', 'repower_time', 'reset_gpio', 'pincode', 'modes', 'mcc', 'mnc',
 	'mux', 'dl_datagram_max_size', 'tty', 'at2_external', 'fcc_auth',
 	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
@@ -229,6 +229,12 @@ function unknown_opts(s, known, warnings, label)
 function modem_from_section(s)
 {
 	return modem_defaults({
+		// Pin the control protocol, overriding what the driver says. This is the
+		// documented remedy for a control node wwand cannot classify — the
+		// daemon's own error message tells the user to set it — and it was
+		// missing from BOTH lists here, so it warned "unknown option" and did
+		// nothing. `auto`/unset means detect (discovery.resolve_control).
+		protocol: (s.protocol != null && s.protocol != '') ? lc(s.protocol) : null,
 		device: s.device,
 		netdev: s.netdev,
 		// `path` is the stable USB topology anchor (named like wireless
@@ -370,6 +376,19 @@ function parse_network_sections(raw, result)
 			// per-modem status warnings can surface it in LuCI too
 			result.modems[name].config_notes = unknown_opts(s, MODEM_KNOWN_OPTS,
 				result.warnings, sprintf('wwand_modem %s', name));
+
+			// a protocol wwand has no backend for is a typo, and a silent one:
+			// it would override a perfectly good detection with a name nothing
+			// answers to, and then look exactly like broken hardware.
+			if (s.protocol != null && s.protocol != '' &&
+			    !(lc(s.protocol) in [ 'auto', 'qmi', 'mbim', 'ncm', 'ppp' ])) {
+				let m = sprintf("wwand_modem %s: protocol '%s' is not one of qmi, mbim, ncm, ppp (or auto/unset for detection) — ignored, the driver decides",
+					name, s.protocol);
+
+				push(result.warnings, m);
+				push(result.modems[name].config_notes, m);
+				result.modems[name].protocol = null;
+			}
 
 			// a value the QMAP ladder cannot act on is silently reinterpreted
 			// (see qmap_version above), so say so through the same channel as a

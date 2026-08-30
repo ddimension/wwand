@@ -497,4 +497,33 @@ eq(ext.decode_lte_attach_config(p32(0)), { contexts: [] }, 'lte-attach: decode e
 eq(ext.decode_lte_attach_config(p32(1) + p32(12) + p32(52)),
 	{ contexts: [] }, 'lte-attach: decode truncated struct stays bounded');
 
+// --- on_answer: what counts as "the modem answered MBIM" ---------------------
+// The hardware-recovery gate asks whether this endpoint speaks the protocol we
+// chose, not whether the command worked. A FUNCTION_ERROR carrying OUR
+// transaction id settles that as firmly as a COMMAND_DONE does — the function
+// parsed our frame and rejected it — and leaving it out would let a modem that
+// answers only function errors stay unarmed for good.
+let fe_answers = 0;
+let fe_errs = [];
+let fec = mbim_client.create({ send_raw: () => true, register: () => null,
+	unregister: () => null },
+	{ on_answer: () => fe_answers++, on_error: (c, k) => push(fe_errs, k) });
+
+// a pending request, then a function error naming its transaction
+let fe_cb = 'unset';
+fec.raw_send('', 7, (err) => { fe_cb = err; });
+fec.on_message({ type: mbim.MSG_FUNCTION_ERROR, txn: 7, error: 3 });
+eq(fe_answers, 1, 'on_answer: a MATCHED function error is the modem answering MBIM');
+eq(fe_cb?.error, 'function_error', 'on_answer: the caller still gets its error');
+
+// ...and one that matches nothing is not our modem answering us: it may not
+// even be a reply to this client
+fec.on_message({ type: mbim.MSG_FUNCTION_ERROR, txn: 4242, error: 3 });
+eq(fe_answers, 1, 'on_answer: an UNMATCHED function error arms nothing');
+
+// an indication is unsolicited, and deliberately not counted either — the
+// criterion is a frame answering a transaction of ours
+fec.on_message({ type: mbim.MSG_INDICATE_STATUS, service: 'x', cid: 1, info: '' });
+eq(fe_answers, 1, 'on_answer: an indication is not an answer to anything we asked');
+
 done('test_mbim_backend');

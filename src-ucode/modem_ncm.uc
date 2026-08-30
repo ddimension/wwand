@@ -234,9 +234,18 @@ export function create(opts)
 	// see the on_answer note at open_at below: a contradicted pin makes the AT
 	// port's answer worthless as protocol evidence, so nothing will ever arm the
 	// hardware ladder here. Say so once rather than leaving it a silent property.
-	if (opts.pinned_over)
+	if (opts.pinned_over) {
 		log('warn', sprintf('`option protocol ncm` overrides the driver, which says %s — hardware recovery stays disarmed for this modem, because an AT port answers on %s modems too and would prove nothing',
 			opts.pinned_over, opts.pinned_over));
+
+		// ...and REVOKE any permission already on file. Refusing to arm again
+		// is not enough: the persisted state can already say proto_ok, from an
+		// earlier run of this same id and protocol name, and note_protocol only
+		// withdraws when the NAME changes — which it has not. Without this the
+		// warning above is simply false, and the very next failed attempt walks
+		// straight into the CFUN cycle, the reset and the power-cycle.
+		rec.revoke_arming('the pinned protocol contradicts the driver, so nothing an AT port says can prove it');
+	}
 
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, reg_poll_timer = null, settle_timer = null;

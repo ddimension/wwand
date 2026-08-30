@@ -206,6 +206,22 @@ export function create(opts)
 		self.persist();
 	};
 
+	// Withdraw a persisted arming outright. note_protocol() only withdraws on a
+	// protocol CHANGE, which is the wrong hook when the protocol name is right
+	// and the EVIDENCE behind it is not: a modem pinned to a protocol its driver
+	// contradicts inherits proto_ok from the state file, and refusing to arm it
+	// again does nothing about the permission it already holds. Persisted, so a
+	// restart does not hand it back.
+	self.revoke_arming = function(reason) {
+		if (!self.counters.proto_ok)
+			return;
+
+		self.counters.proto_ok = 0;
+		log('warn', sprintf('withdrawing hardware recovery for %s: %s',
+			self.counters.proto_name ?? 'modem', reason));
+		self.persist();
+	};
+
 	self.on_connect_success = function() {
 		if (self.counters.attempts != 0 || self.counters.rung != 0) {
 			self.counters.attempts = 0;

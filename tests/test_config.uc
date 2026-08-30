@@ -122,6 +122,50 @@ for (let v in [ '0', '1', '4', '5' ]) {
 		sprintf('qmapver: %s is accepted without a note', v));
 }
 
+// `option protocol` pins the control protocol. It is the documented remedy for
+// a control node wwand cannot classify — the daemon's own error message tells
+// the user to set it — and it was in NEITHER the known-options list nor the
+// section parser, so it warned "unknown option" and did nothing at all.
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', protocol: 'ncm' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.protocol, 'ncm', 'protocol: the pin reaches the modem config');
+eq(length(filter(r.warnings, (w) => match(w, /unknown option 'protocol'/))), 0,
+	'protocol: and is not reported as dead config');
+
+// unset means detect
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.protocol, null, 'protocol: unset stays null (detection decides)');
+
+// a protocol no backend answers to would override a good detection with a name
+// nothing responds to, and then look exactly like broken hardware
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', protocol: 'qmi2' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+ok(length(filter(r.warnings, (w) => match(w, /protocol 'qmi2' is not one of/))) == 1,
+	'protocol: a name with no backend is reported');
+eq(r.modems.m0.protocol, null, 'protocol: ...and dropped, so detection still runs');
+
+// case is not the operator's problem
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', protocol: 'MBIM' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.protocol, 'mbim', 'protocol: accepted case-insensitively');
+
 // --- old-style compat --------------------------------------------------------
 
 r = padopt({

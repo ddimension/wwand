@@ -114,6 +114,7 @@ config wwand_modem 'm0'
 	# option path 'platform/soc/8af8800.usb/xhci-hcd.2.auto/usb3/3-1'
 	#                                # preferred: stable sysfs path (like
 	#                                # wifi-device `path`); bare '3-1' works too
+	# option protocol 'qmi'          # pin the control protocol; unset = detect
 	option pincode '1234'
 	option sim_slot '1'
 	option modes 'lte,nr5g'
@@ -1254,6 +1255,15 @@ applied in two stages: when errors first cross the limit the modem gets one
 hardware repower/reset; only when they reach **2× the limit** does it reboot (and
 that reboot is gated by `failreboot` — with `failreboot 0` it keeps retrying
 instead). A success resets the counter.
+
+**`option protocol`** (`qmi` | `mbim` | `ncm` | `ppp`; unset or `auto` = detect)
+pins the control protocol when the driver cannot be classified — wwand refuses
+to guess, and the daemon's error names this option. A pin that *contradicts* a
+driver wwand does recognise is honoured, but it is also recorded: an AT port
+answers on QMI and MBIM modems too, so on an AT-driven backend nothing it says
+can prove the pin right, and hardware recovery stays disarmed for that modem
+(withdrawn even if an earlier run had armed it). Correct the pin, or report the
+driver so it can be added, and the arming returns.
 
 **Nothing physical happens until the modem has answered once** in the protocol
 wwand chose for it — a QMI or MBIM response with our transaction id (whatever

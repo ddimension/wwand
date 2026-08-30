@@ -249,6 +249,34 @@ eq(rp.counters.proto_ok, 0, 'proto switch: arming withdrawn');
 eq(rp.on_attempt(), 'retry',
 	'proto switch: past failreboot with an exhausted ladder still does not reboot');
 
+// A pin the driver contradicts must revoke a permission ALREADY on file.
+// note_protocol only withdraws on a name change, and here the name does not
+// change — the state file says 'ncm' and the pin says 'ncm'; what is wrong is
+// the evidence behind it. Refusing to arm again leaves the old grant standing,
+// and the next failed attempt walks into the hardware ladder.
+fx = fakefx.create();
+fx.files['/state/pinned.json'] =
+	'{ "attempts": 7, "proto_errors": 0, "rung": 0, "proto_hw": 0, "proto_ok": 1, "proto_name": "ncm" }';
+let rv = recovery.create({ id: 'pinned', failreboot: 40, fx: fx, state_dir: '/state', log: silent });
+rv.load();
+rv.note_protocol('ncm');
+eq(rv.counters.proto_ok, 1, 'revoke: an unchanged protocol name keeps the grant (note_protocol alone)');
+
+rv.revoke_arming('the driver says qmi');
+eq(rv.counters.proto_ok, 0, 'revoke: withdrawn explicitly');
+eq(rv.on_attempt(), 'retry', 'revoke: attempt 8 no longer reaches the opmode cycle');
+
+// and it does not come back across a restart
+let rv2 = recovery.create({ id: 'pinned', failreboot: 40, fx: fx, state_dir: '/state', log: silent });
+rv2.load();
+eq(rv2.counters.proto_ok, 0, 'revoke: the withdrawal is persisted, not just in memory');
+
+// revoking what was never granted is a no-op, not a rewrite
+fx = fakefx.create();
+let rv3 = recovery.create({ id: 'never', failreboot: 40, fx: fx, state_dir: '/state', log: silent });
+rv3.revoke_arming('nothing to take');
+eq(rv3.counters.proto_ok, 0, 'revoke: harmless when nothing was armed');
+
 // note_answer arms WITHOUT touching the error counters — that is what separates
 // it from on_proto_success, and conflating the two would silently disable the
 // proto-error ladder (every service error would reset its own counter).

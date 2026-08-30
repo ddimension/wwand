@@ -322,6 +322,7 @@ push(scenarios, {
 		ok(m.at != null, 'pinned: the AT port answered — the modem is talking to us');
 		eq(m.counters.proto_ok, 0,
 			'pinned: but an AT answer proves nothing when the driver says qmi');
+		eq(m.counters.proto_name, 'ncm', 'pinned: recorded against the pinned protocol');
 		env.finish();
 	},
 });
