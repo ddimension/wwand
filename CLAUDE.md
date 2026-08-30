@@ -79,9 +79,14 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   reset at the end. `option at2_external '1'` releases the secondary AT
   port for external tools (status `at2_released`; telemetry falls back to
   the control channel).
+- **`docs/gotchas.md`** — beliefs that look right and are wrong, each with the
+  evidence that settles it. Read it before debugging anything in the datapath,
+  the QMAP negotiation or the LuCI rendering; it is the cheapest file in the
+  tree per hour saved.
 - `docs/architecture.md`, `docs/backend-interface.md`,
   `docs/datapath-interface.md`, `docs/extending.md`,
-  `docs/datapath-interface.md`, `docs/STATUS.md`; contributor notes under
+  `docs/datapath-interface.md`, `docs/STATUS.md` (current state; the dated
+  log is `docs/status-archive.md`); contributor notes under
   `docs/design/` (research) and `docs/upstream/` (submission material).
 
 ## Core layering (src-ucode)
@@ -149,8 +154,28 @@ be decided by load order; `_wwand_apply_settings` builds the netifd update).
   `/vol/release/chateau/openwrt/build_dir/.../libqmi-1.38.0/data/qmi-service-*.json`
   (request TLVs vs `input`, response vs `output`, resolve `common-ref` ids).
   A wrong tag silently decodes garbage (e.g. the packet-dropped 0x1D/0x1E fix).
+- **Kernel behaviour must be verified against the kernel source**, the same way
+  QMI schemas are verified against libqmi. The tree is at
+  `/vol/release/chateau/openwrt/build_dir/target-*/linux-*/linux-*/drivers/`.
+  This rule exists because it was missing: a datapath fix was built on the
+  assumption that `rmnet_changelink()` ASSIGNS the QMAP flags, it applies them
+  masked, and the hardware test passed anyway because the case tried happened to
+  be a bit extension. See `docs/gotchas.md`.
+- **Anchor every external claim, and date it.** Anything asserted about libqmi,
+  the kernel, netifd, luci.js, apk or a modem's firmware carries the source and
+  the version it was checked against — `(rmnet_config.c, 6.18.41)`,
+  `(luci.js:1394-1396)`, `(HW-observed on the RG650E, 2026-08-30)`. An
+  unanchored claim cannot be re-verified, only believed, and it decays silently
+  when the dependency moves. This applies to code comments as much as to docs.
 - **LuCI ubus**: every ucode ubus method called from LuCI must accept
   `ubus_rpc_session: ''` in its args (rpcd injects it).
+- **Packaging is checkable, not just documented**: `tools/check-packaging.py`
+  asserts that every `.uc` is installed by exactly one package, that nothing
+  named is missing, and that every `files/…` path resolves — against the working
+  tree or a release tarball. Run it before a release and after any rename:
+
+      tools/check-packaging.py --makefile ../repository/wwand/Makefile
+      tools/check-packaging.py --makefile <pkgs>/net/wwand/Makefile --tarball wwand-X.Y.Z.tar.gz
 
 ## ucode gotchas (hit repeatedly)
 - **Imports MUST be namespaced** (`import … from 'wwand.codec.tlv'`), never
