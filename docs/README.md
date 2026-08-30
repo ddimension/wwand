@@ -16,7 +16,9 @@ whether you are a user, a developer, or an AI assistant working on the tree.
 | Add a quirk, option, backend, telemetry, ubus method, board | [extending.md](extending.md) — one checklist per extension type |
 | Write or port a control backend | [backend-interface.md](backend-interface.md) — the duck-typed modem/context contract |
 | Write or port a datapath (mux) backend | [datapath-interface.md](datapath-interface.md) — the datapath contract and how one is chosen |
-| See what changed / current test counts / open items | [STATUS.md](STATUS.md) — running continuation log |
+| See the current state, test counts, open items | [STATUS.md](STATUS.md) — what is true NOW |
+| See how it got here (dated log) | [status-archive.md](status-archive.md) — history, not present tense |
+| Avoid a trap that already cost someone a day | [gotchas.md](gotchas.md) — beliefs that look right and are wrong |
 
 ### Contributor notes
 
@@ -59,7 +61,7 @@ and superseded by the reference docs above wherever the two disagree.
   libmbim JSON definitions — a wrong TLV/CID decodes garbage silently.
 - Tests are the spec: `tests/run_tests.sh` (host, mocked I/O over the real
   codec). Every behavior change lands with a scenario; current counts in
-  [STATUS.md](STATUS.md).
+  [STATUS.md](STATUS.md) (and [status-archive.md](status-archive.md) for the log).
 - The three backends implement one contract
   ([backend-interface.md](backend-interface.md)); prefer fixing shared code
   (`modem_common.uc`, `context_common.uc`, `backend.uc`) over per-backend
