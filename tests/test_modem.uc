@@ -346,6 +346,109 @@ scenario('dms-fallback', {
 		eq(modem.info.imsi, '262019876543210', 'dms: imsi via legacy path');
 	});
 
+// --- 5b: minimal-service QMI stack (2011-era, the Huawei E1820 class) --------
+//
+// Only CTL/WDS/DMS/NAS-1.0 + the 0xE0 placeholder: no UIM, no DSD, no WDA.
+// NAS 1.0 rejects every message newer than itself (71 = Invalid QMI command)
+// but answers GET_SIGNAL_STRENGTH (0x0020). The datapath: no WDA service ->
+// `ethernet` (802.3 kept, NOARP) — the datapath probes would claim rmnet,
+// the WDA-less gate must beat them.
+// (let/assignment: the arrows inside reference the transport itself)
+let e1820_at_tr;
+e1820_at_tr = {
+	write: (d) => {
+		// answer the open_at probe and the CSQ floor read; everything else
+		// (QCFG autoconnect check, CEER, temperature probes) gets a bare OK —
+		// a silent command would hang the atcmd engine
+		if (e1820_at_tr.data_cb && match(d ?? '', /^AT\r?$/))
+			e1820_at_tr.data_cb('\r\nOK\r\n');
+		else if (e1820_at_tr.data_cb && index(d ?? '', 'AT+CSQ') == 0)
+			e1820_at_tr.data_cb('\r\n+CSQ: 20,99\r\n\r\nOK\r\n');
+		else if (e1820_at_tr.data_cb)
+			e1820_at_tr.data_cb('\r\nOK\r\n');
+	},
+	on_data: (cb) => { e1820_at_tr.data_cb = cb; },
+	close: () => null,
+	drain: () => null,
+};
+const e1820_dpfx = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/add_mux': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('e1820', {
+	handlers: base_handlers({
+		GET_VERSION_INFO: { services: [
+			{ service: 1, major: 1, minor: 5 },
+			{ service: 2, major: 1, minor: 2 },
+			{ service: 3, major: 1, minor: 0 },
+			{ service: 224, major: 0, minor: 0 },
+		] },
+		GET_MODEL: { model: '8' },
+		GET_REVISION: { revision: '21.200.07.00.00' },
+		GET_IDS: { imei: '359740023613407' },
+		GET_MANUFACTURER: { manufacturer: 'huawei' },
+		GET_SERVING_SYSTEM: {
+			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+			                  selected_network: 1, radio_ifs: [ 8 ] },
+			roaming: 0,
+			current_plmn: { mcc: 515, mnc: 66, description: 'DITO' },
+		},
+		GET_PIN_STATUS: { pin1: { status: 3, verify_retries: 3, unblock_retries: 10 } },
+		GET_IMSI: { imsi: '515661009472658' },
+		GET_ICCID: { iccid: '8963112400000000000' },
+		GET_SIGNAL_STRENGTH: {
+			rssi_list: [ { rssi: 73, radio_if: 8 } ],
+			rsrq: { rsrq: -11, radio_if: 8 },
+			lte_snr: 115,
+			lte_rsrp: -97,
+		},
+		GET_SIGNAL_INFO: { __error: 71 },
+		GET_CELL_LOCATION_INFO: { __error: 71 },
+		GET_LTE_CPHY_CA_INFO: { __error: 71 },
+		GET_SYSTEM_INFO: { __error: 71 },
+		GET_SYSTEM_SELECTION_PREFERENCE: { __error: 71 },
+		// the 2011 stack does not answer CTL SYNC (field-observed; the
+		// host mock expresses it as a rejection — same error path, and
+		// a real silence costs 3s x SYNC_TRIES in the suite) — the
+		// bring-up must continue on the version query, not hard-fail
+		SYNC: { __error: 71 },
+	}),
+	config: { tty: '/dev/ttyUSB3' },
+	datapath: { netdev: 'wwan0', mux: 'auto', mux_links: [], dgram_size: 0, fx: e1820_dpfx },
+	at: { fx: fakefx.create(), open_transport: () => e1820_at_tr },
+	setup: (mock, modem) => {
+		let poll = null;
+		poll = uloop.timer(10, () => {
+			if (modem.state == 'READY')
+				modem.watch();   // the fast loop only runs while watched
+			poll.set(10);
+		});
+	},
+}, 'telemetry',
+	(modem, mock, events) => {
+		eq(modem.state, 'READY', 'e1820: state READY');
+		eq(length(mock.calls_for('SYNC')), 11, 'e1820: SYNC retried the full ladder, then continued');
+		eq(modem.uim, null, 'e1820: no uim client');
+		eq(modem.dsd, null, 'e1820: no dsd client');
+		eq(modem.datapath?.backend, 'ethernet', 'e1820: ethernet datapath (no WDA, probes beaten)');
+		eq(length(mock.calls_for('SET_DATA_FORMAT')), 0, 'e1820: no WDA negotiation at all');
+		ok(e1820_dpfx.action_index('write /sys/class/net/wwan0/qmi/raw_ip N') > 0,
+			'e1820: raw_ip asserted OFF (802.3 kept)');
+		ok(e1820_dpfx.action_index('link_set wwan0 noarp') > 0, 'e1820: NOARP on the 802.3 parent');
+		eq(length(mock.calls_for('GET_PIN_STATUS')), 1, 'e1820: DMS pin-status fallback used');
+		eq(modem.info.imsi, '515661009472658', 'e1820: imsi via the DMS legacy path');
+		eq(modem.signal?.lte?.rssi, -73, 'e1820: rssi from GET_SIGNAL_STRENGTH (negative dBm)');
+		eq(modem.signal?.lte?.rsrp, -97, 'e1820: rsrp from GET_SIGNAL_STRENGTH');
+		eq(modem.signal?.lte?.snr, 115, 'e1820: snr from GET_SIGNAL_STRENGTH (0.1 dB)');
+		eq(modem.signal?.lte?.rsrq, -11, 'e1820: rsrq from GET_SIGNAL_STRENGTH');
+		eq(modem.dsd_status?.mode, 'LTE', 'e1820: data mode resolved via the nas radio_ifs fallback');
+		eq(modem.counters?.proto_errors ?? 0, 0,
+			'e1820: rejected polls did not feed the recovery counter');
+	});
+
 // --- 6: configured modes + manual PLMN ---------------------------------------
 
 scenario('modes', {
@@ -632,7 +735,7 @@ scenario('ladder', {
 		let modes = map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args.mode);
 		// rung: low_power (1) then online (0), plus one normal online per cycle
 		ok(index(modes, 1) >= 0, 'ladder: low_power sent');
-		eq(ladder_fx.files['/state/ladder.json'], '{ "attempts": 8, "proto_errors": 0, "rung": 1, "proto_hw": 0 }',
+		eq(ladder_fx.files['/state/ladder.json'], '{ "attempts": 8, "proto_errors": 0, "rung": 1, "proto_hw": 0, "proven": true, "protocol": null }',
 			'ladder: state persisted (rung 1 = opmode_cycle fired)');
 	});
 

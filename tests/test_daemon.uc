@@ -200,6 +200,9 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		eq(st.modems.m0.proto_switch, true, 'status: proto_switch true for a known recipe (RG502Q)');
 		eq(st.contexts.wan.state, 'CONNECTED', 'status: context CONNECTED');
 		eq(st.contexts.wan.interface, 'wan', 'status: interface mapping');
+		// the recovery hardware ladder is armed only after a successful
+		// exchange with the current protocol (recovery proven gate)
+		eq(st.modems.m0.proven, true, 'status: recovery gate proven after connect');
 
 		// In-place model: a settings change and a transient drop NEVER tear the
 		// interface down — the daemon reconnects/renews in place. Only an admin
@@ -469,11 +472,15 @@ rd.shutdown();
 // explicit `device` so the auto wwandN numbering can't renumber survivors and
 // confound the diff (that stability is itself the point of the pinned names).
 let rl_events = [];
+let rl_modem_opts = {};   // id -> the opts the modem create() was called with
 let fake_qmi = {
-	modem: { create: (o) => ({
-		start: () => push(rl_events, 'mstart:' + o.id),
-		stop:  () => push(rl_events, 'mstop:' + o.id),
-	}) },
+	modem: { create: (o) => {
+		rl_modem_opts[o.id] = o;
+		return {
+			start: () => push(rl_events, 'mstart:' + o.id),
+			stop:  () => push(rl_events, 'mstop:' + o.id),
+		};
+	} },
 	context: { create: (o) => ({
 		state: 'CONNECTED',
 		down: (cb) => { push(rl_events, 'cdown:' + o.name); if (cb) cb(); },
@@ -487,7 +494,7 @@ let rld = daemon_mod.create({ timing: TIMING, deps: {
 let netcfg = (mut) => {
 	let net = {
 		g:    { '.type': 'wwand_globals' },
-		m0:   { '.type': 'wwand_modem', device: '/dev/mock0' },
+		m0:   { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
 		m1:   { '.type': 'wwand_modem', device: '/dev/mock1' },
 		wanA: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', pdp_type: 'ipv4' },
 		wanB: { '.type': 'interface', proto: 'wwand', modem: 'm1', device: 'l3b', apn: 'b', pdp_type: 'ipv4' },
@@ -501,6 +508,8 @@ rld.apply_config(netcfg());
 eq(sort(keys(rld.modems)), [ 'm0', 'm1' ], 'reload init: both modems present');
 eq(sort(keys(rld.contexts)), [ 'wanA', 'wanB' ], 'reload init: both contexts present');
 ok(rld.modems.m0.modem != null && rld.contexts.wanA.ctx != null, 'reload init: m0/wanA built');
+eq(rl_modem_opts.m0.protocol, 'qmi', 'reload init: an explicit option protocol reaches the modem create');
+eq(rl_modem_opts.m1.protocol, 'qmi', 'reload init: the historic qmi default reaches the modem create');
 
 let m0_obj = rld.modems.m0.modem, m1_obj = rld.modems.m1.modem;
 let ctxA_obj = rld.contexts.wanA.ctx, ctxB_obj = rld.contexts.wanB.ctx;
@@ -663,6 +672,73 @@ uloop.timer(3200, () => {
 		uloop.end();
 	});
 });
+
+// --- dhcpv6 subinterface gate -------------------------------------------------
+// The RNDIS v6 model applies to EVERY AT-driven NCM datapath: the E3372H on
+// huawei_cdc_ncm shows the same kernel_ra addresses on the parent netdev
+// (HW-observed 2026-08-30). A context 'up' from such a datapath must trigger
+// ensure_wan6 like rndis_host does; a v4-only PDP never qualifies.
+let wan6_calls = [];
+let w6_on_event = null;
+
+let w6 = daemon_mod.create({
+	timing: TIMING,
+	deps: {
+		load_qmi: () => ({
+			modem: { create: (o) => ({
+				start: () => null,
+				stop: () => null,
+				note_connect_success: () => null,
+				datapath: { backend: 'huawei_cdc_ncm' },
+			}) },
+			context: { create: (o) => {
+				w6_on_event = o.deps.on_event;
+				return {
+					state: 'IDLE',
+					modem: o.modem,
+					config: { pdp_type: o.config.pdp_type },
+					up: (cb) => cb?.(null, {}),
+					down: (cb) => cb?.(),
+					attach: () => null,
+					detach: () => null,
+				};
+			} },
+		}),
+		log: (level, msg) => null,
+		emit_event: (type, data) => null,
+		kick_interface: (iface) => null,
+		renew_interface: (iface) => null,
+		down_interface: (iface) => null,
+		iface_status: (iface, cb) => cb({ up: false }),
+		ensure_wan6: (parent, pdp) => push(wan6_calls, parent + ':' + pdp),
+		datapath_fx: dpfx,
+		read_config: () => config.parse({ network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/mock0' },
+			wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', pdp_type: 'ipv4v6' },
+		} }),
+		resolve_modem_device: (cfg) => cfg.device,
+		resolve_netdev: (cfg, device) => 'wwan0',
+	},
+});
+
+w6.apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0' },
+	wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', pdp_type: 'ipv4v6' },
+} }));
+
+ok(w6_on_event != null && w6.contexts.wan.ctx != null, 'wan6 gate: context wired');
+
+w6_on_event(w6.contexts.wan.ctx, 'up', {});
+ok(index(wan6_calls, 'wan:ipv4v6') >= 0,
+	'wan6 gate: huawei_cdc_ncm context up -> dhcpv6 subinterface ensured');
+
+// v4-only PDP: the same datapath must NOT trigger ensure_wan6
+wan6_calls = [];
+w6.contexts.wan.ctx.config.pdp_type = 'ipv4';
+w6_on_event(w6.contexts.wan.ctx, 'up', {});
+eq(length(wan6_calls), 0, 'wan6 gate: a v4-only PDP never qualifies');
+
+w6.shutdown();
 
 uloop.run();
 done('test_daemon');

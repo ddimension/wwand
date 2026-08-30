@@ -33,6 +33,13 @@ const NCM_DRIVERS = {
 	cdc_ncm: true, cdc_ether: true, rndis_host: true, huawei_cdc_ncm: true,
 };
 
+// does this driver's control channel carry AT rather than a rich protocol?
+// (the NCM_DRIVERS table, shared with protocol_of)
+export function is_at_driver(drv)
+{
+	return NCM_DRIVERS[drv] ?? false;
+};
+
 // fs-backed effects; tests inject a fake object with the same method shape.
 export function default_fx()
 {
@@ -342,6 +349,32 @@ export function sysfs_path_of(class_link, fx)
 		p = join('/', slice(parts, 0, length(parts) - 1));
 
 	return p;
+};
+
+// /dev node ('/dev/cdc-wdm0', '/dev/wwan0qmi0', a bare basename) -> the
+// wireless-style stable anchor for `option path`: the short USB id for a
+// usbmisc control node ('1-1.3.4'), the full sysfs path for a wwan-framework
+// control port, null when unresolvable (the caller keeps the raw device then).
+// Used by the migration so a modem is anchored on hardware, not on an
+// enumeration-order-dependent /dev node.
+export function path_of_device(dev, fx)
+{
+	fx = fx ?? default_fx();
+
+	let name = substr(dev ?? '', rindex(dev ?? '', '/') + 1);
+
+	if (name == '')
+		return null;
+
+	// cdc-wdm (QMI/MBIM control and the huawei_cdc_ncm AT channel)
+	if (fx.readlink(sprintf('/sys/class/usbmisc/%s/device', name)) != null)
+		return usb_device_of(name, fx);
+
+	// wwan-framework control ports (PCIe/MHI)
+	if (fx.readlink(sprintf('/sys/class/wwan/%s/device', name)) != null)
+		return sysfs_path_of(sprintf('/sys/class/wwan/%s/device', name), fx);
+
+	return null;
 };
 
 // does the candidate's full sysfs path (relative to /sys/devices) fall under

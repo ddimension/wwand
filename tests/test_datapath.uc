@@ -38,6 +38,9 @@ fx = fakefx.create({ present: caps_rmnet });
 eq(netlink.select_backend(fx, 'wwan0', 'auto', true), 'rmnet', 'backend: auto prefers rmnet');
 eq(netlink.select_backend(fx, 'wwan0', 'qmimux', true), 'qmimux', 'backend: forced qmimux');
 eq(netlink.select_backend(fx, 'wwan0', 'raw_ip', true), 'raw_ip', 'backend: forced raw_ip');
+eq(netlink.select_backend(fx, 'wwan0', 'ethernet', true), 'ethernet', 'backend: forced ethernet (802.3, qmi)');
+eq(netlink.select_backend(fx, 'wwan0', 'ethernet', true, null, { proto: 'mbim' }), null,
+	'backend: ethernet is qmi-only — an mbim modem is refused');
 
 // `want_mux` does NOT skip the probes any more: a box with no channels still
 // gets identified, which is the only way an accelerated add-on can claim
@@ -464,6 +467,51 @@ ok(fx.action_index('log warn wwan0: ignoring invalid MTU 400') >= 0, 'badmtu: su
 fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/raw_ip': true } });
 netlink.setup(fx, { netdev: 'wwan0', backend: 'raw_ip', dgram_size: 4096 });
 eq(length(fx.matching('ignoring invalid MTU')), 0, 'badmtu: no warning when mtu is unset');
+
+// --- ethernet (802.3, kernel framing kept) -----------------------------------
+//
+// The pseudo-mode for old QMI stacks that cannot negotiate the link-layer
+// format (no WDA service): the parent keeps the kernel's 802.3 framing
+// (raw_ip re-asserted to N — idempotent) and gets NOARP (static /32 + device
+// route on a point-to-point hop, the RNDIS optimization).
+
+fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/raw_ip': true } });
+
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'ethernet', dgram_size: 4096, mtu: 1430 });
+
+eq(res.ok, true, 'eth: ok');
+eq(res.backend, 'ethernet', 'eth: setup reports the backend it ran');
+eq(res.mux_devs, [], 'eth: no mux devices');
+eq(res.urb_size, null, 'eth: urb_size null — nothing aggregates');
+eq(length(fx.matching('rx_urb_size')), 0, 'eth: no urb write');
+ok(fx.action_index('write /sys/class/net/wwan0/qmi/raw_ip N') > 0, 'eth: raw_ip re-asserted to N (802.3)');
+eq(fx.action_index('write /sys/class/net/wwan0/qmi/raw_ip Y'), -1, 'eth: never raw-ip');
+ok(fx.action_index('link_set wwan0 mtu 1430') > 0, 'eth: configured mtu');
+ok(fx.action_index('link_set wwan0 noarp') > 0, 'eth: NOARP set (p2p hop)');
+ok(fx.action_index('link_set wwan0 noarp') < fx.action_index('link_set wwan0 up'),
+	'eth: NOARP applied before the link comes up');
+ok(fx.action_index('link_set wwan0 up') > 0, 'eth: up');
+
+// already 802.3 (the driver default): the N write is skipped as idempotent
+fx = fakefx.create({
+	present: { '/sys/class/net/wwan0/qmi/raw_ip': true },
+	files: { '/sys/class/net/wwan0/qmi/raw_ip': 'N\n' },
+});
+
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'ethernet', dgram_size: 4096 });
+
+eq(res.ok, true, 'eth-idem: ok');
+eq(length(fx.matching('raw_ip')), 0, 'eth-idem: no write when already N');
+
+// a mux link on an ethernet datapath is impossible config — the parent is the
+// datapath, and there is nothing to bind a child to
+fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/raw_ip': true } });
+
+res = netlink.setup(fx, { netdev: 'wwan0', backend: 'ethernet', dgram_size: 4096,
+                          mux: [ { id: 1, name: 'wwan0m1' } ] });
+
+eq(res.ok, true, 'eth-mux: setup ok (caller guards the config)');
+eq(res.mux_devs, [], 'eth-mux: no children built on an unmuxed datapath');
 
 // --- cdc_mbim session datapath (the built-in `vlan` backend) ----------------
 //
@@ -931,11 +979,16 @@ eq(netlink.mux_available(fakefx.create({ present: { '/sys/class/net/wwan0/vendor
 // aggregation ratio means anything. Every datapath added later fell outside all
 // three silently, which is what these capabilities exist to prevent.
 eq(netlink.datapath_caps('rmnet', null),
-	{ aggregate: true, qmap: true, qmap_versions: [ 5, 4, 1 ], tx_aggr: true },
+	{ aggregate: true, qmap: true, qmap_versions: [ 5, 4, 1 ], tx_aggr: true, llp_802_3: false },
 	'caps: rmnet drives every QMAP version it has rmnet flags for');
 eq(netlink.datapath_caps('qmimux', null),
-	{ aggregate: true, qmap: true, qmap_versions: [ 1 ], tx_aggr: false },
+	{ aggregate: true, qmap: true, qmap_versions: [ 1 ], tx_aggr: false, llp_802_3: false },
 	'caps: qmimux aggregates plain QMAP only, and has no coalesce knob');
+eq(netlink.datapath_caps('ethernet', null),
+	{ aggregate: false, qmap: false, qmap_versions: [ ], tx_aggr: false, llp_802_3: true },
+	'caps: ethernet is the 802.3 link — no QMAP, no aggregation');
+eq(netlink.datapath_caps('raw_ip', null).llp_802_3, false,
+	'caps: raw_ip is raw framing, not 802.3');
 
 // the ladder is descending preference, and it is what the negotiation walks
 eq(netlink.datapath_caps('rmnet', null).qmap_versions[0], 5, 'caps: best first');
@@ -947,7 +1000,7 @@ eq(netlink.datapath_caps('vlan', null).qmap, false,
 eq(netlink.datapath_caps('raw_ip', null).qmap, false, 'caps: no mux, no QMAP');
 eq(netlink.datapath_caps('none', null).qmap, false, 'caps: ...under the old spelling too');
 eq(netlink.datapath_caps('nosuch', null),
-	{ aggregate: false, qmap: false, qmap_versions: [ ], tx_aggr: false },
+	{ aggregate: false, qmap: false, qmap_versions: [ ], tx_aggr: false, llp_802_3: false },
 	'caps: an unknown datapath claims nothing');
 
 // `qmap` defaults to `aggregate` but is a DIFFERENT question: aggregate is who
@@ -967,7 +1020,7 @@ let byname = {};
 for (let e in cat)
 	byname[e.name] = e;
 
-eq(sort(keys(byname)), [ 'auto', 'qmimux', 'raw_ip', 'rmnet', 'vlan' ],
+eq(sort(keys(byname)), [ 'auto', 'ethernet', 'qmimux', 'raw_ip', 'rmnet', 'vlan' ],
 	'catalog: every built-in and pseudo-mode is listed');
 eq(byname.rmnet.proto, [ 'qmi' ], 'catalog: rmnet is a qmi datapath');
 eq(byname.qmimux.proto, [ 'qmi' ], 'catalog: qmimux too');
@@ -979,10 +1032,11 @@ eq(netlink.datapath_protos(null), [ 'qmi' ], 'catalog: ...and for no object at a
 eq(byname.vlan.proto, [ 'mbim' ], 'catalog: vlan is an mbim datapath');
 eq(byname.auto.proto, null, 'catalog: a mode applies to every protocol');
 eq(byname.raw_ip.kind, 'mode', 'catalog: raw_ip is a mode, not an implementation');
+eq(byname.ethernet.kind, 'mode', 'catalog: ethernet is a mode too (802.3, no implementation)');
 ok(length(byname.qmimux.description) > 0, 'catalog: every entry describes itself');
 
 // the caller gets copies — editing what it was handed must not edit the table
 byname.rmnet.proto[0] = 'clobbered';
-eq(netlink.datapath_catalog()[2].proto, [ 'qmi' ], 'catalog: the module table is not aliased');
+eq(netlink.datapath_catalog()[3].proto, [ 'qmi' ], 'catalog: the module table is not aliased');
 
 done('test_datapath');

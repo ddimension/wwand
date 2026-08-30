@@ -67,6 +67,9 @@ export function install(self, o)
 		self.cells = data;
 	};
 
+	// forward-declared: refresh_fast calls it from the signal-fallback path
+	let strength_signal;
+
 	// one fast-telemetry refresh cycle: signal first, then cells, then (while
 	// watched) CA + data-system mode, then emit. Calls done() exactly once when
 	// the cycle finishes or bails (channel gone) — the shared watch_driver uses
@@ -77,6 +80,26 @@ export function install(self, o)
 			// keep last-known on an empty/invalid answer instead of blanking it
 			if (!serr && tlv.has_payload(sdata))
 				self.signal = sdata;
+			else if (serr)
+				// NAS 1.0 fallback: old stacks reject GET_SIGNAL_INFO
+				// ("Invalid QMI command") but answer GET_SIGNAL_STRENGTH
+				// (0x0020, the 1.0-era message — HW-observed on the E1820).
+				// Fire-and-forget; on failure the CSQ floor read supplies the
+				// rssi baseline. All three are OPTIONAL reads — they must not
+				// feed the recovery counter on a modem that rejects them by
+				// design.
+				self.nas.request('GET_SIGNAL_STRENGTH', {}, (s2err, s2data) => {
+					if (!s2err && tlv.has_payload(s2data)) {
+						let s = strength_signal(s2data);
+
+						if (s)
+							self.signal = { ...(self.signal ?? {}), ...s };
+					}
+					else if (s2err)
+						modem_common.telemetry_at(self).send('AT+CSQ', (aerr, ares) =>
+							modem_common.sig_csq_floor(self,
+								aerr ? null : modem_common.parse_csq(ares?.lines)));
+				}, { no_recovery: true });
 
 			if (!self.nas)
 				return done();
@@ -86,7 +109,10 @@ export function install(self, o)
 					store_cells(cdata);
 
 				let after = () => {
-					if (self.cells)
+					// emit with cells when there are any, or with a per-RAT
+					// signal alone when the modem has no cell environment at all
+					// (old stacks) — the signal is what a watcher can still show
+					if (self.cells || self.signal?.lte != null || self.signal?.nr5g != null)
 						emit('telemetry', { cells: self.cells, signal: self.signal, reg: self.reg });
 
 					done();
@@ -94,9 +120,12 @@ export function install(self, o)
 
 				// per-carrier CA info, then the data-system mode (NSA/SA/LTE) —
 				// both only while watched (LuCI open). Extracted into named
-				// methods to keep this poll pyramid shallow.
+				// methods to keep this poll pyramid shallow. A modem without a
+				// cell environment (old stacks reject the location query
+				// permanently) skips the cell-derived steps but still resolves
+				// the data-system mode from the NAS radio_ifs fallback.
 				if (!self.cells)
-					return after();
+					return self.reg ? self._determine_data_mode(after) : after();
 
 				self._fetch_ca_info(() => self._determine_data_mode(() => {
 					// vendor-neutral serving band/bandwidth from the CA-info PCC —
@@ -108,8 +137,38 @@ export function install(self, o)
 					modem_common.fill_serving_band(self);
 					modem_common.fetch_nr_neighbours(self, after);
 				}));
-			});
-		});
+			}, { no_recovery: true });
+		}, { no_recovery: true });
+	};
+
+	// GET_SIGNAL_STRENGTH (NAS 0x0020) LTE entries -> the SIGNAL_INFO shape,
+	// so status renders identically. The RSSI u8 is the NEGATIVE dBm value
+	// (128 = -128 dBm, the no-signal floor — qmicli-verified on the E1820).
+	// RSRQ/SNR/RSRP are signed dBm/0.1 dB like the modern message carries.
+	strength_signal = (sdata) => {
+		let lte = null;
+
+		for (let e in (sdata?.rssi_list ?? []))
+			if (e.radio_if == 8)
+				lte = { rssi: (e.rssi != null && e.rssi <= 128) ? -e.rssi : null,
+				        rsrq: null, rsrp: null, snr: null };
+
+		if (sdata?.rsrq?.radio_if == 8) {
+			lte ??= { rssi: null, rsrq: null, rsrp: null, snr: null };
+			lte.rsrq = sdata.rsrq.rsrq;
+		}
+
+		if (sdata?.lte_snr != null) {
+			lte ??= { rssi: null, rsrq: null, rsrp: null, snr: null };
+			lte.snr = sdata.lte_snr;
+		}
+
+		if (sdata?.lte_rsrp != null) {
+			lte ??= { rssi: null, rsrq: null, rsrp: null, snr: null };
+			lte.rsrp = sdata.lte_rsrp;
+		}
+
+		return lte ? { lte: lte } : null;
 	};
 
 	telem_watch = modem_common.watch_driver({
@@ -235,6 +294,14 @@ export function install(self, o)
 				else if (err.error != 'cancelled')
 					log('warn', sprintf('telemetry: cell location query failed: %J', err));
 
+				// a modem whose QMI signal message never answers (old stacks)
+				// still gets an rssi floor per tick — the slow loop is the one
+				// place status updates even when nobody watches
+				if (self.signal?.lte == null && self.signal?.nr5g == null)
+					modem_common.telemetry_at(self).send('AT+CSQ', (aerr, ares) =>
+						modem_common.sig_csq_floor(self,
+							aerr ? null : modem_common.parse_csq(ares?.lines)));
+
 				// modem temperature + active access-tech (IoT/RedCap) over the AT
 				// side channel (best-effort, slow loop) — then log the full
 				// telemetry line and reschedule
@@ -246,7 +313,7 @@ export function install(self, o)
 					if (self.nas)
 						telemetry_timer = uloop.timer(interval, tick);
 				}));
-			});
+			}, { no_recovery: true });
 		};
 
 		telemetry_timer = uloop.timer(first, tick);

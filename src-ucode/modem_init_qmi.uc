@@ -87,11 +87,20 @@ export function install(self, o)
 					return;
 				}
 
-				return fail('sync', err);
+				// SYNC is best-effort, like libqmi treats it: a session reset
+				// the modem may simply not implement. Old stacks answer no
+				// SYNC at all (HW-observed on the 2011-era E1820) while
+				// GET_VERSION_INFO works fine — the service query right
+				// after this is the real bring-up gate, and a dead modem
+				// still fails there.
+				log('warn', sprintf('control SYNC unanswered (%s) — continuing, the version query is the real gate',
+					err?.error ?? 'error'));
+
+				return step_services();
 			}
 
 			step_services();
-		}, { timeout: 3000 });
+		}, { timeout: 3000, no_recovery: true });
 	};
 
 	step_services = () => {
@@ -647,7 +656,7 @@ export function install(self, o)
 				if (!e2)
 					self._update_serving(d2);
 			});
-		});
+		}, { no_recovery: true });
 	};
 
 	// register() is re-entered by _update_serving when registration is lost

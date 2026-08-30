@@ -10,6 +10,164 @@ buried at the top invites reading an old entry as present tense.
 
 ---
 
+## Device support pass: sponsor field fixes + huawei-cdc (2026-08-30)
+
+Driven by the Huasifei WH3000 Pro field report (Fibocom FM350-GL + two Huawei
+modems; full report from the OpenWrt forum thread). Six fixes, one new seam.
+
+**Recovery ladder proven-gated.** The recovery hardware rungs (opmode cycle,
+modem reset, repower, reboot — both ladders) no longer fire until at least one
+successful protocol exchange has ever completed with the currently selected
+protocol. The field case that made this non-negotiable: a misdetected modem was
+power-cycled at 25 protocol errors — the errors were evidence about our own
+detection, not the hardware. `recovery.uc` persists `proven` + `protocol` with
+the counters; a protocol change (`option protocol` or a re-detection picking
+another backend) invalidates the proof on load; while gated, the rung index
+does NOT advance, so the rung stays armed for when the protocol is proven.
+`daemon.uc` passes the resolved control protocol into `make_recovery` (the
+switch_protocol rebuild goes through the same path, so a switched modem must
+re-earn the proof too), and `status()` now surfaces `proven` so the gate is
+visible in LuCI/logs. HW-verified on the sponsor box (FM350/NCM: `proven: true`
+persisted with `protocol: "ncm"` after the deploy).
+
+**cdc-wdm as the AT channel.** `huawei_cdc_ncm` registers its cdc-wdm as the
+embedded AT port alongside the NCM datapath — the E3372H field case has no
+usable AT tty (its serial siblings are PCUI/diag). `open_at` now falls back,
+in order: tty → an AT-bearing cdc-wdm (gated on the AT-driver table — AT is
+never poked into a QMI/MBIM control channel) → the MBIM pipe. `atcmd.open_transport`
+opens a cdc-wdm as a plain stream (termios would fail with ENOTTY);
+`option tty '/dev/cdc-wdmN'` pins the channel explicitly. On the box the probe
+also settled what the E3372H's cdc-wdm is: pure AT (uqmi times out), while the
+E182E answers partial QMI via `qmi_wwan new_id` (no data endpoint — a PPP
+stick; the new_id experiment was reverted).
+
+**E3372H end-to-end (the huawei-cdc proof, same day).** The E2E migration on
+the sponsor box surfaced three things the morning probes could not see, each
+fixed and HW-validated:
+
+- **The dial must go over the wdm.** ttyUSB3 answers generic AT (CGDCONT/CSQ/
+  telemetry all work) — but `^NDISDUP` sent there leaves `^NDISSTATQRY` at 0,
+  silently. The same dial over the cdc-wdm connects. `open_at` therefore
+  PREFERS the wdm for `huawei_cdc_ncm` (an explicit `option tty` still wins;
+  a silent wdm falls back to the tty search). The wdm proved to be a full AT
+  channel incl. URCs (`^RSSI`/`^HCSQ`/`^NDISSTAT` all arrive there; the tty
+  gets none).
+- **IP via CGPADDR.** Stick firmware 21.200 implements neither CGCONTRDP nor
+  GTDNS (bare ERROR) — the PDP address comes from `AT+CGPADDR` (also empty
+  until the dial has bound the bearer). The huawei recipe got an `ip_config`
+  hook: CGCONTRDP first (newer firmware), CGPADDR fallback in the /32
+  gateway-less p2p model; no DNS over AT (the operator config covers it).
+- **v6 via RA, and the dhcpv6 subinterface gate opened.** The v6 model was
+  gated on `rndis_host`; the E3372H shows the same `kernel_ra` addresses on
+  the parent netdev, so `ensure_wan6` now triggers for every AT-driven NCM
+  datapath (`discovery.is_at_driver`). `lte_6` (dhcpv6, extendprefix=1) was
+  created live and DITO handed out global v6. The huawei `^NDISSTAT` bearer
+  push (up/down per family, reason 36 = regular deactivation per 3GPP
+  TS 24.008) is parsed as a `session_urc` — the context verifies via
+  `^NDISSTATQRY` before acting. End-to-end proven on the box: a disconnect
+  produced the pushes, the verify agreed, the session was torn down and the
+  daemon reconnected automatically. `^MODE`/`^SRVST`/`^SIMST` do not exist on
+  this firmware (queries ERROR) — no parser is built on them. `^DSFLOWRPT`
+  (the traffic report) pushes every ~2 s and is filtered as a URC, not parsed.
+  The third stick — E182E — DOES expose a CDC ethernet function (interface
+  1.1: class 02/sub 06 + a CDC data interface), but the kernel deliberately
+  refuses it for wwand's purposes: `cdc_ether.c` blacklists 12d1:14ac/iface 1
+  ("egregiously nonconformant with the CDC Ethernet specs" — the id_table IS
+  the blacklist and even a dynamic new_id lands in the same
+  `driver_info == 0 → -ENODEV` probe, usbnet.c; a host-MAC quirk was the
+  tell, per Bjørn Mork's 2013 thread), and `qmi_wwan` — which the entry
+  defers to — rejects the class-02 layout (`qmi_wwan.c`: interface-number
+  matches bind only vendor-specific functions). Its QMI (via new_id) is
+  incomplete anyway (DMS answers, NAS = "Invalid QMI command"). `AT^SETPORT?`
+  is not implemented. Verdict: NCM/ECM would take a kernel patch — out of
+  scope; the stick stays a PPP serial modem (wwand manages no PPP, by design).
+  The usbmode composition toggle (SCSI message `…1106…`) flips the layout and
+  is reversible via USB re-authorization — original state restored.
+
+---
+
+## 802.3 `ethernet` datapath + minimal-service QMI support (2026-08-30/31)
+
+The E1820 audit above ended in "outside wwand's scope"; the follow-up brought
+it inside. A new **`ethernet` pseudo-mode** beside `raw_ip` (`netlink.uc`):
+no multiplexing, the parent KEEPS the kernel's 802.3 framing (`raw_ip`
+re-asserted to N, idempotent) and gets **NOARP** (the RNDIS p2p optimization —
+static /32 from WDS + device route needs no neighbour resolution). The WDA
+`SET_DATA_FORMAT` link-layer protocol is now datapath-driven
+(`datapath_caps().llp_802_3` → `LLP_802_3`, previously hardcoded
+`LLP_RAW_IP` in `modem_datapath_qmi.uc`). **Auto-selection**: a QMI modem
+WITHOUT a WDA service (no format negotiation possible — the kernel link is
+what stays) selects `ethernet` under `auto`, beating the datapath probes; an
+explicit `option mux` keeps its historic behavior. The E1820's DMS model
+string turned out to be literally "8" — the service table, not the model, is
+the anchor. Backend tolerances pinned by a dedicated `e1820` scenario
+(minimal service table, `__error: 71` for every NAS-1.1+ message): the UIM/
+DSD/WDA-less paths are all graceful by design; the QMI signal chain is now
+**GET_SIGNAL_INFO → GET_SIGNAL_STRENGTH (NAS 0x0020, the 1.0-era message —
+qmicli-verified on the stick: RSSI/RSRQ/SNR/RSRP) → AT+CSQ floor** (the
+shared parse/sig_csq_floor moved to `modem_common`), the data-mode ladder
+resolves from NAS radio_ifs without cells, and every optional poll
+(GET_SIGNAL_INFO / GET_CELL_LOCATION_INFO / GET_LTE_CPHY_CA_INFO) carries
+`no_recovery` so a stack that rejects them by design cannot climb the
+recovery ladder. The transport puzzle of the session — wwand frames got no
+answer while uqmi did — turned out to be the CTL **client id**: the 2011
+stack accepts CTL only on cid 0, which is what wwand's modem always used
+(the probe scripts used 1). A second bring-up blocker surfaced live: the
+stack answers **no QMI_CTL_SYNC at all** — SYNC is now best-effort
+(no_recovery, continue on the version query, like libqmi), and the DMS
+GET_IDS IMEI comes back padded with uninitialised bytes on this stack, so
+the field is trimmed to its leading 15 digits (box-verified:
+"359740023613407"). Box-verified without a SIM: services 0(1.3) 1(1.5)
+2(1.2) 3(1.0) 224(0.0), `datapath: ethernet selected — no WDA service`,
+raw_ip=N kept, NOARP set on the parent, REGISTERING (registration 0) as
+documented. A `files/wwand.hotplug.e1820` hotplug fragment re-creates the
+12d1:14ac qmi_wwan new_id bind on every replug (the feed Makefile install
+line ships with the next bump). `modem_quirks.uc` documents the class
+caveats (empty SIM slot = registration timeout, not SIM_BLOCKED). E2E
+connect still awaits a SIM in the stick's slot.
+
+---
+  `--get-versions` returns exactly five services — CTL 1.3, **WDS 1.5**, DMS
+  1.2, NAS 1.0, and 0xE0 v0.0 (the pre-0x1A WDA id) — **no UIM, no PDS, no
+  CAT/LOC/WMS/DSD**. Live probes: DMS IMEI ✓; NAS Get Serving System ✓
+  (`not_registered` — no SIM in the slot) but **Get Signal Info = "Invalid
+  QMI command"** (NAS 1.0 predates it); WDS answers status/settings and
+  ACCEPTS Start Network (no "Invalid" — it hangs instead, consistent with
+  no-SIM/no-registration). `qmi_wwan`'s data link reports **raw_ip=N**
+  (802.3 framing; the in-driver WDA handshake is gone in 6.18 and the
+  `raw_ip` sysfs flag is manually settable, so raw-ip capability stays
+  unverified without a SIM to drive a real session). Code-side this audit
+  also confirmed `modem_init_qmi` treats UIM as OPTIONAL (dms fallback) and
+  the telemetry data-mode has a DSD→QENG→radio_ifs fallback chain — the
+  wwand QMI backend is old-stack-tolerant by design; the E1820 stays out
+  for the missing NAS signal message, the unverified 802.3 link and the
+  empty SIM slot, not for a hard UIM dependency.
+
+**Fibocom RSRP-0 sentinel.** The FM350/T700 reports RSRP 0 when the signal is
+too weak to measure; the status page read that as a perfect 0 dBm. Anything
+above -44 dBm (the physical RSRP ceiling, 3GPP TS 36.133 9.1.4) is now null,
+like the 255 sentinel on the offset-coded rows.
+
+**ReferenceError in the RNDIS v6 path.** `ensure_wan6` called a bare `log(...)`
+that does not exist in that scope — every RNDIS v6 connect threw and crashed
+the daemon ("FM350 disconnects often" was very likely this crash-loop).
+Both call sites now use `logmod.log`.
+
+**Migration anchors on hardware, not /dev nodes.** `config.migrate_plan`
+accepts `opts.resolve_path`; `/dev/cdc-wdmN` resolves to the wireless-style
+`option path` (`1-1.3.4` short USB id; a wwan-framework port keeps its sysfs
+path) via the new `discovery.path_of_device` — a `/dev` node is an
+enumeration-order artifact that can flip with a second modem. Wired through
+`daemon.migrate` (ubus, LuCI, `wwandctl migrate`) and `/usr/libexec/wwand/migrate`.
+
+Also on the box (observation, not code): after an EMI reset the E3372H can
+come back with stale descriptors ("CDC Union missing" on rebind); USB
+re-authorization (`echo 0/1 > authorized`) heals it. A candidate for a
+recovery rung cheaper than power-cycle — documented, not built.
+
+---
+
+
 ## One datapath interface: MBIM joins it, and `none` becomes `raw_ip` (2026-08-29)
 
 Three changes to the same seam, in the order they were asked for.

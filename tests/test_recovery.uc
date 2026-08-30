@@ -16,6 +16,10 @@ const silent = (level, msg) => null;
 let fx = fakefx.create();
 let r = recovery.create({ id: 'm0', failreboot: 30, fx: fx, state_dir: '/state', log: silent });
 
+// the hardware rungs are gated on `proven` — one successful exchange with the
+// selected protocol. Prove it first, so this block exercises the ladder itself.
+r.on_proto_success();
+
 let actions = [];
 
 for (let i = 1; i <= 31; i++)
@@ -38,6 +42,7 @@ eq(r.counters.rung, 0, 'ladder: success resets the fired-rung index');
 // count can leap past a threshold. The rung is a crossing, fired once, in order.
 fx = fakefx.create();
 r = recovery.create({ id: 'jump', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();
 
 for (let i = 1; i <= 7; i++) r.on_attempt();       // attempts=7, no rung yet
 eq(r.counters.rung, 0, 'jump: no rung fired below threshold 8');
@@ -54,6 +59,7 @@ eq(r.on_attempt(), 'retry', 'jump: rung does not re-fire on the next attempt');
 // --- restart mid-outage: rung index persists, no skip and no re-run ----------
 fx = fakefx.create();
 r = recovery.create({ id: 'restart', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();
 for (let i = 1; i <= 8; i++) r.on_attempt();        // fires opmode at 8 -> rung=1
 eq(r.counters.rung, 1, 'restart: opmode fired before restart');
 
@@ -73,12 +79,81 @@ fx.files['/state/legacy.json'] = '{ "attempts": 23, "proto_errors": 0 }';
 let rl = recovery.create({ id: 'legacy', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
 rl.load();
 eq(rl.counters.rung, 2, 'legacy: rung index defaulted from attempts (23 -> opmode+reset done)');
-eq(rl.on_attempt(), 'usb_repower', 'legacy: next rung (24) still reachable after default');
+// no `proven` in a legacy file -> unproven -> the hardware rung is GATED
+eq(rl.on_attempt(), 'retry', 'legacy: unproven -> rung gated, retry');
+// one successful exchange proves the protocol; the armed rung fires on the next failure
+rl.on_proto_success();
+eq(rl.on_attempt(), 'usb_repower', 'legacy: rung fires after the protocol is proven');
+
+// --- the proven gate ----------------------------------------------------------
+// Field case 2026-08-30: a misdetected modem (wrong protocol selected) climbs
+// the ladders without a single successful exchange. NO hardware rung may fire
+// then — repowering a modem that was never broken only adds outages, and the
+// errors are evidence about our own detection, not about the hardware.
+fx = fakefx.create();
+r = recovery.create({ id: 'unproven', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+
+let gated = [];
+for (let i = 1; i <= 200; i++)
+	push(gated, r.on_attempt());
+
+let hw = filter(gated, (a) => a != 'retry');
+eq(length(hw), 0, 'gate: unproven ladder never fires a hardware rung (200 failures)');
+eq(r.counters.rung, 0, 'gate: rung index NOT advanced while gated');
+
+// one successful exchange proves the protocol — the armed rung fires on the
+// next failure, and the ladder works from there
+r.on_proto_success();
+eq(r.on_attempt(), 'opmode_cycle', 'gate: proven -> the armed opmode rung fires next');
+
+// the proto-error path is gated the same way
+fx = fakefx.create();
+r = recovery.create({ id: 'unproven2', failreboot: 100, proto_error_limit: 25, fx: fx, state_dir: '/state', log: silent });
+
+let gerr = [];
+for (let i = 1; i <= 60; i++)
+	push(gerr, r.on_proto_error());
+
+eq(length(filter(gerr, (a) => a != 'retry')), 0,
+	'gate: unproven proto-error storm never repowers or reboots (60 errors)');
+eq(r.counters.proto_hw, 0, 'gate: hardware-reset flag not consumed while gated');
+
+r.on_proto_success();
+eq(r.on_proto_error(), 'retry', 'gate: proven + below limit -> retry');
+r.counters.proto_errors = 25;
+eq(r.on_proto_error(), 'usb_repower', 'gate: proven -> the proto-error repower fires');
+
+// `proven` is tied to the protocol it was earned with: a changed protocol
+// (option protocol, or a re-detection picking another backend) invalidates it
+fx = fakefx.create();
+r = recovery.create({ id: 'proto', protocol: 'qmi', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();
+
+let rq = recovery.create({ id: 'proto', protocol: 'qmi', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+rq.load();
+eq(rq.counters.proven, true, 'proto: proven restored under the same protocol');
+
+let rn = recovery.create({ id: 'proto', protocol: 'ncm', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+rn.load();
+eq(rn.counters.proven, false, 'proto: a protocol change invalidates proven');
+
+// a state file that never recorded the protocol is corrected on load: without
+// that, the NEXT load compares against nothing and a switch would let proven
+// survive (the box wrote exactly such a file before this fix — proven rides
+// along only when a counter event triggers a persist)
+fx = fakefx.create();
+fx.files['/state/stale.json'] = '{ "attempts": 3, "proven": true }';
+let rs = recovery.create({ id: 'stale', protocol: 'qmi', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+rs.load();
+eq(rs.counters.proven, true, 'stale: proven itself restores (same modem, no recorded protocol)');
+ok(index(fx.files['/state/stale.json'] ?? '', '"protocol": "qmi"') >= 0,
+	'stale: load rewrites the state with the current protocol');
 
 // failreboot = 0 disables ONLY the final reboot rung: the cheaper hardware
 // recovery rungs still fire (headless GPIO-reset / keep-router-up use case),
 // and the ladder then retries forever instead of ever rebooting.
 r = recovery.create({ id: 'm1', failreboot: 0, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();
 
 let acts0 = [];
 for (let i = 1; i <= 200; i++)
@@ -103,6 +178,7 @@ ok(no_reboot0, 'failreboot=0: never reboots, keeps retrying');
 // full window (> 2x limit). A reboot doesn't power-cycle a self-powered modem, so
 // the cheaper reset must be tried first (fixes the NR7101 reboot-loop).
 r = recovery.create({ id: 'm2', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();
 
 let acts = [];
 for (let i = 1; i <= 51; i++)
@@ -120,6 +196,7 @@ eq(r.counters.proto_hw, 0, 'errors: success clears the hardware-reset flag');
 
 // the proto-error thresholds scale with the configurable proto_error_limit
 r = recovery.create({ id: 'plim', failreboot: 100, proto_error_limit: 3, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();
 let pacts = [];
 for (let i = 1; i <= 7; i++)
 	push(pacts, r.on_proto_error());
@@ -129,6 +206,7 @@ eq(pacts[6], 'reboot', 'errors: limit 3 -> reboot at the 7th error (> 2x3)');
 // the proto-error reboot is gated by failreboot too: <=0 never reboots, but the
 // hardware reset still fires (cheaper recovery runs even with reboots disabled)
 r = recovery.create({ id: 'pgate', failreboot: 0, proto_error_limit: 3, fx: fx, state_dir: '/state', log: silent });
+r.on_proto_success();
 let pg_reboot = false, pg_repower = false;
 for (let i = 1; i <= 30; i++) {
 	let a = r.on_proto_error();
@@ -143,6 +221,8 @@ ok(pg_repower, 'errors: failreboot=0 still fires the hardware reset');
 fx = fakefx.create();
 r = recovery.create({ id: 'wan', failreboot: 100, fx: fx, state_dir: '/state', log: silent });
 
+r.on_proto_success();
+
 r.on_attempt();
 r.on_attempt();
 // qmi errors persist at 5-count milestones (debounced to avoid a write storm
@@ -155,6 +235,7 @@ r2.load();
 
 eq(r2.counters.attempts, 2, 'persist: attempts restored');
 eq(r2.counters.proto_errors, 5, 'persist: proto errors restored at milestone');
+eq(r2.counters.proven, true, 'persist: proven survives a restart');
 
 // corrupted state file is ignored
 fx.files['/state/bad.json'] = 'not json{';

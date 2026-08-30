@@ -13,11 +13,19 @@ it, not special cases beside it.
 | `qmimux` | qmi | QMAP through qmi_wwan's own `add_mux` |
 | `vlan` | mbim | cdc_mbim sessions as 802.1q sub-devices |
 | `raw_ip` | all | no multiplexing — the plain raw-IP parent (not an implementation) |
+| `ethernet` | qmi | no multiplexing — the parent keeps the kernel's 802.3 framing (raw_ip off), NOARP point-to-point hop; for QMI stacks without a WDA service (not an implementation) |
 | *add-on* | declared | `rmnet_nss` (vendor `qmi_wwan_q`, USB) and `rmnet_nss_mhi` (vendor `pcie_mhi`, PCIe/MHI) keep Qualcomm NSS offload by adopting the children those drivers register |
 
 `raw_ip` was spelled `none` before 1.6 and both spellings — plus `raw-ip` — still
 select it. Underscore is canonical: a datapath name doubles as the ucode module
 name of its add-on package, and a module path cannot carry a hyphen.
+
+`ethernet` is the QMI counterpart of `raw_ip` for modems whose link-layer format
+was never negotiable: `auto` selects it when the modem has no WDA service (the
+kernel link — qmi_wwan's 802.3 default — is what stays), and `option mux
+'ethernet'` names it outright. The WDA `SET_DATA_FORMAT` then carries
+`llp = 802-3` when a WDA service exists after all; the IPv4/IPv6 configuration
+still comes over the QMI channel (WDS).
 
 Everything here lives in **`src-ucode/netlink.uc`**. How to *write* an add-on and
 package it is [extending.md §4](extending.md#4-adding-a-datapath-backend); this

@@ -294,7 +294,7 @@ eq(netlink.datapath_status(fakefx.create(), 'rmnet_nss', null, plugins), null,
 // `qmap_version = 0x05` is the enum value for plain QMAP (v5 is 0x09), and it
 // only raises it when the driver reports v5 over an ioctl we cannot make.
 eq(netlink.datapath_caps('rmnet_nss', plugins),
-	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], tx_aggr: false },
+	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], tx_aggr: false, llp_802_3: false },
 	'caps: driver owns the buffers, QMAP on the wire, plain QMAP only');
 
 // --- selection ---------------------------------------------------------------

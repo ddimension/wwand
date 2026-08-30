@@ -8,6 +8,7 @@
 
 import * as uloop from 'uloop';
 import * as apndb from 'wwand.apndb';
+import * as discovery from 'wwand.discovery';
 import * as netsel_ops from 'wwand.netsel_ops';
 import * as simops from 'wwand.simops';
 import * as hwops from 'wwand.hwops';
@@ -614,7 +615,11 @@ export function create(opts)
 			// lets netifd run the v6 client (address/route/DNS/PD) natively —
 			// runtime-only (netifd ubus add_dynamic, nothing in uci), and netifd
 			// manages its lifecycle on its own; a matching user section wins.
-			if (deps.ensure_wan6 && ctx.modem?.datapath?.backend == 'rndis_host' &&
+			// Every AT-driven NCM datapath works this way, not just rndis_host:
+			// the E3372H on huawei_cdc_ncm shows the same kernel_ra addresses on
+			// the parent netdev (HW-observed 2026-08-30). is_at_driver() is the
+			// same table the AT-channel detection uses.
+			if (deps.ensure_wan6 && discovery.is_at_driver(ctx.modem?.datapath?.backend) &&
 			    entry?.cfg?.interface && ctx.config?.pdp_type != 'ipv4') {
 				log('info', sprintf('interface %s: ensuring the dynamic dhcpv6 subinterface (RNDIS v6 model)',
 					entry.cfg.interface));
@@ -1105,6 +1110,13 @@ export function create(opts)
 		let common = {
 			id: name,
 			device: device,
+			// the resolved control protocol (detected, or `option protocol`):
+			// recovery persists it with the counters so a protocol change
+			// invalidates `proven` on the next load (recovery.uc load()) — the
+			// new protocol must re-earn the proof before any hardware rung may
+			// fire. The switch_protocol rebuild goes through here too: the
+			// modem object is recreated and re-detection picks the new protocol.
+			protocol: proto,
 			config: cfg,
 			timing: self.timing,
 			recovery: {
@@ -1590,6 +1602,11 @@ export function create(opts)
 				qmi_errors: entry.modem?.counters?.proto_errors,   // deprecated alias
 
 				attempts: entry.modem?.counters?.attempts,
+				// false while the recovery hardware ladder (opmode/reset/repower/
+				// reboot) is gated off: no protocol exchange has succeeded with
+				// the current control protocol yet — a misdetected modem must
+				// not be repowered
+				proven: entry.modem?.counters?.proven,
 			};
 		}
 

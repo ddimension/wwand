@@ -503,6 +503,21 @@ scenario('mux-unavailable', {
 	});
 });
 
+// the 802.3 `ethernet` datapath has no QMAP channel either — a mux_id is the
+// same impossible bind
+scenario('mux-unavailable-ethernet', {
+	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 1 },
+}, (ctx, mock, events, next) => {
+	ctx.modem.datapath = { backend: 'ethernet', ep_id: null, mux_devs: [] };
+
+	ctx.up((err, settings) => {
+		ok(err != null, 'muxna-eth: error reported');
+		eq(err.stage, 'mux', 'muxna-eth: mux stage');
+		eq(length(mock.calls_for('BIND_MUX_DATA_PORT')), 0, 'muxna-eth: no bind attempt on an unmuxed datapath');
+		next();
+	});
+});
+
 // --- K: zero-rx watchdog trips on stalled counters ---------------------------
 
 scenario('zero-rx', {

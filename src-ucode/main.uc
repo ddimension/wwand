@@ -534,8 +534,13 @@ function run_daemon()
 				// it out never qualified.
 				let want_extend = true;
 
-				log('info', sprintf('dhcpv6 subinterface %s: extendprefix=1 (RFC 7278, pdp %s)',
-					name, pdp_type ?? 'v6-capable'));
+				// logmod, not bare log — there is no `log` in this scope (the
+				// deps arrows live outside daemon.create's opts); a bare call
+				// here threw "Reference error: access to undeclared variable
+				// log" on every RNDIS v6 connect (sponsor field report,
+				// 2026-08-30)
+				logmod.log('info', 'dhcpv6 subinterface %s: extendprefix=1 (RFC 7278, pdp %s)',
+					name, pdp_type ?? 'v6-capable');
 
 				// the parent's firewall zone (read-only lookup): carried as
 				// `option zone`, so fw4 joins the subif to that zone and
@@ -608,8 +613,8 @@ function run_daemon()
 					// the promise made in docs/reference.md; and an explicit
 					// `extendprefix 0` is an operator decision, so only an
 					// ABSENT option is ever filled in.
-					log('notice', sprintf('interface %s: IPv6 without a delegated prefix — defaulting extendprefix=1 (RFC 7278)',
-						have_name));
+					logmod.log('notice', 'interface %s: IPv6 without a delegated prefix — defaulting extendprefix=1 (RFC 7278)',
+						have_name);
 					cursor.set('network', have_name, 'extendprefix', '1');
 					cursor.commit('network');
 				}
@@ -763,7 +768,10 @@ function run_daemon()
 			net = scoped;
 		}
 
-		let changes = config.migrate_plan({ network: net });
+		let changes = config.migrate_plan({ network: net }, {
+			// anchor modems on the stable sysfs path, not the /dev node
+			resolve_path: discovery.path_of_device,
+		});
 
 		if (!apply)
 			return { changes: changes };

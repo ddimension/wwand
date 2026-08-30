@@ -544,6 +544,8 @@ export function make_recovery(self, opts, log)
 {
 	let rec = recovery_mod.create({
 		id: opts.id,
+		// persisted with the counters: a protocol change invalidates `proven`
+		protocol: opts.protocol,
 		failreboot: (opts.config ?? {}).failreboot,
 		proto_error_limit: (opts.config ?? {}).proto_error_limit,
 		fx: opts.recovery?.fx ?? netlink.default_fx((l, m) => log(l, m)),
@@ -681,6 +683,39 @@ export function telemetry_at(self)
 		run_sequence: (cmds, cb) => { if (cb) cb(); },
 		close: () => null,
 	};
+};
+
+// +CSQ: <rssi>,<ber> — rssi 0..31 coded (99 = unknown) -> dBm. The shared CSQ
+// floor read for signal fallback paths (NCM baseline, and the QMI backend's
+// fallback when the modem has no working QMI signal message).
+export function parse_csq(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+CSQ:\s*([0-9]+),/);
+
+		if (m) {
+			let raw = +m[1];
+
+			return { rssi_raw: raw, rssi: (raw != 99) ? (-113 + 2 * raw) : null };
+		}
+	}
+
+	return null;
+};
+
+// merge a CSQ RSSI floor into self.signal without clobbering per-RAT metrics
+export function sig_csq_floor(self, s)
+{
+	let base = { ...(self.signal ?? {}) };
+
+	if (s) {
+		base.rssi_raw = s.rssi_raw;
+
+		if (base.lte == null && base.nr5g == null)
+			base.rssi = s.rssi;
+	}
+
+	self.signal = base;
 };
 
 // the ONLY source of NR5G neighbour cells — QMI Get Cell Location Info carries
@@ -1051,6 +1086,73 @@ function open_at_over_mbim(self, o, fxi, log)
 		: o.next());
 }
 
+// forward-declared: open_at dispatches to it, and ucode closures capture only
+// already-declared variables (module-level functions are not hoisted)
+let open_at_tty;
+
+// The cdc-wdm control node of an AT-driven NCM modem can BE the AT channel:
+// huawei_cdc_ncm registers its wdm as the embedded AT port alongside the NCM
+// datapath (kernel drivers/net/usb/huawei_cdc_ncm.c), and the modem's serial
+// siblings may be PCUI/diag ports that never answer AT (field-observed on an
+// E3372H). Gated on the AT-driver table — AT must never be poked into a
+// QMI/MBIM control channel. One channel only: telemetry shares the engine.
+function open_at_over_wdm(self, o, fxi, log, next)
+{
+	let dev = self.device;
+
+	if (dev == null || !match(dev, /^\/dev\/cdc-wdm[0-9]+$/) ||
+	    !discovery.is_at_driver(discovery.driver_of(dev, fxi)))
+		return next();
+
+	log('info', sprintf('no AT tty — trying the cdc-wdm control channel %s', dev));
+
+	let open_transport = o.at_opts?.open_transport ?? atcmd.open_transport;
+	let tr = open_transport(dev, 115200, (level, msg) => log(level, msg));
+
+	if (!tr) {
+		log('warn', sprintf('cannot open AT channel %s', dev));
+		return next();
+	}
+
+	self.at = atcmd.create(tr, {
+		log: (level, msg) => log(level, sprintf('at: %s', msg)),
+		on_urc: (line) => {
+			log('debug', sprintf('urc[at]: %s', line));
+			self.at_on_urc?.(line, 'at');
+		},
+	});
+	self.at_tty = dev;
+	self.at_telemetry = self.at;
+	self.at_telemetry_tty = dev;
+
+	// the same liveness probe as the tty path: only silence disqualifies
+	self.at.send('AT', (perr) => {
+		if (perr?.error != 'timeout' && perr?.error != 'closed') {
+			log('notice', sprintf('AT channel: %s (cdc-wdm)', dev));
+
+			let cmds = [
+				...atcmd.model_init_commands(self.info?.model),
+				...(self.config.at_init ?? []),
+				...atcmd.cell_lock_commands(self.config),
+			];
+
+			if (!length(cmds))
+				return o.next();
+
+			self.at.run_sequence(cmds, o.next);
+			return;
+		}
+
+		log('warn', sprintf('cdc-wdm AT channel %s opens but does not answer (%s)',
+			dev, perr.error));
+		self.at.close();
+		self.at = null;
+		self.at_tty = null;
+		self.at_telemetry = null;
+		next();
+	}, { timeout: o.at_opts?.probe_timeout ?? 10000 });
+}
+
 export function open_at(self, o)
 {
 	let log = o.log;
@@ -1059,17 +1161,45 @@ export function open_at(self, o)
 		return (o.reopen_next ?? o.next)();
 
 	let fxi = o.at_opts?.fx ?? netlink.default_fx((level, msg) => log(level, msg));
+
+	// huawei_cdc_ncm: the cdc-wdm IS the embedded AT channel (the driver
+	// registers it as such — huawei_cdc_ncm.c); the serial siblings are
+	// PCUI/diag ports and the firmware ignores the NCM dial (^NDISDUP)
+	// everywhere else. HW-observed on the E3372H, 2026-08-30: the tty
+	// answered generic AT, but a dial over it left ^NDISSTATQRY at 0 while
+	// the same dial over the wdm connected. Prefer the wdm — an explicit
+	// `option tty` still wins, and a wdm that stays silent falls back to
+	// the normal tty search. (The readlink guard keeps driver_of out of
+	// test fakes that never had to answer sysfs driver lookups.)
+	let dev = self.device;
+
+	if (dev != null && match(dev, /^\/dev\/cdc-wdm[0-9]+$/) &&
+	    self.config?.tty == null && fxi.readlink != null &&
+	    discovery.driver_of(dev, fxi) == 'huawei_cdc_ncm')
+		return open_at_over_wdm(self, o, fxi, log, () => {
+			let ch = atcmd.find_at_channels(fxi, self.device, self.config.tty, o.base_override);
+			open_at_tty(self, o, fxi, log, ch);
+		});
+
 	let ch = atcmd.find_at_channels(fxi, self.device, self.config.tty, o.base_override);
+
+	open_at_tty(self, o, fxi, log, ch);
+};
+
+open_at_tty = function(self, o, fxi, log, ch)
+{
 	let tty = ch.primary;
 
-	// No tty is not necessarily no AT. A PCIe/MHI modem usually has no DUN
-	// channel and therefore no /dev/wwanNat0 — but its MBIM channel is a
-	// separate node on the same wwan device, and Quectel carries an AT pipe
-	// there (atcmd_mbim.uc). Reach for it only when there is no real port:
-	// a tty is a full-duplex channel that also delivers URCs, which a
-	// request/response pipe cannot. `option at_mbim '0'` opts out.
+	// No tty is not necessarily no AT. An AT-driven NCM modem's control
+	// cdc-wdm can be the AT channel itself (huawei_cdc_ncm); otherwise a
+	// PCIe/MHI modem usually has no DUN channel and therefore no /dev/wwanNat0
+	// — but its MBIM channel is a separate node on the same wwan device, and
+	// Quectel carries an AT pipe there (atcmd_mbim.uc). Reach for those only
+	// when there is no real port: a tty is a full-duplex channel that also
+	// delivers URCs, which a request/response pipe cannot. `option at_mbim
+	// '0'` opts out.
 	if (!tty)
-		return open_at_over_mbim(self, o, fxi, log);
+		return open_at_over_wdm(self, o, fxi, log, () => open_at_over_mbim(self, o, fxi, log));
 
 	let open_transport = o.at_opts?.open_transport ?? atcmd.open_transport;
 	let tr = open_transport(tty, 115200, (level, msg) => log(level, msg));
@@ -1200,13 +1330,13 @@ export function open_at(self, o)
 			return at_ready();
 		}
 
-		log('warn', sprintf('AT port %s opens but does not answer (%s) — trying AT over MBIM',
+		log('warn', sprintf('AT port %s opens but does not answer (%s) — trying the next channel',
 			tty, perr.error));
 		self.at.close();
 		self.at = null;
 		self.at_tty = null;
 		self.at_telemetry = null;
-		open_at_over_mbim(self, o, fxi, log);
+		open_at_over_wdm(self, o, fxi, log, () => open_at_over_mbim(self, o, fxi, log));
 	}, { timeout: o.at_opts?.probe_timeout ?? 10000 });
 };
 

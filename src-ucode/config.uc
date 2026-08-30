@@ -765,13 +765,14 @@ function validate(result)
 			continue;
 		}
 
-		// `option mux 'raw_ip'` on the modem beats a channel on the interface.
-		// Clearing mux_id alone is not enough and never was: `muxed` drives the
-		// auto-assign pass further down, which would hand the channel straight
-		// back, and `mux_link` is the name netifd would then look for. All three
-		// go, so the context ends up on the plain parent — which is what the
-		// modem was configured for.
-		if (ctx.mux_id > 0 && result.modems[ctx.modem].mux == 'raw_ip') {
+		// `option mux 'raw_ip'` (or 'ethernet') on the modem beats a channel on
+		// the interface. Clearing mux_id alone is not enough and never was:
+		// `muxed` drives the auto-assign pass further down, which would hand the
+		// channel straight back, and `mux_link` is the name netifd would then
+		// look for. All three go, so the context ends up on the plain parent —
+		// which is what the modem was configured for.
+		if (ctx.mux_id > 0 && (result.modems[ctx.modem].mux == 'raw_ip' ||
+		                       result.modems[ctx.modem].mux == 'ethernet')) {
 			push(result.warnings, sprintf("interface %s: mux_id set but modem '%s' has mux disabled", name, ctx.modem));
 			ctx.mux_id = 0;
 			ctx.muxed = false;
@@ -1019,7 +1020,10 @@ function mm_plmn(v)
 	return { mcc: substr(s, 0, 3), mnc: substr(s, 3) };
 }
 
-export function migrate_plan(raw)
+// opts.resolve_path('/dev/...') -> the stable hardware anchor (`option path`
+// value) or null; injected by the caller (discovery.path_of_device on the
+// box, a fake in the tests) so the plan itself stays pure.
+export function migrate_plan(raw, opts)
 {
 	let net = raw?.network ?? {};
 	let changes = [];
@@ -1067,10 +1071,25 @@ export function migrate_plan(raw)
 			// legacy interface `device` is a NETDEV name (wwan0 / wwan0mN), not a
 			// control /dev node. Anchor the modem on it in `device` — for a muxed
 			// child use the PARENT netdev (mN is the connection's mux channel).
-			// discovery resolves a non-/dev `device` as a netdev name; a real
-			// /dev/... path is kept as-is.
+			// discovery resolves a non-/dev `device` as a netdev name.
+			//
+			// A /dev/... node is an enumeration-order artifact, not an anchor:
+			// with a second modem the cdc-wdm number can flip. When the caller
+			// supplied a resolver, anchor on the stable hardware `path` instead
+			// (sponsor field report: migrate wrote `option device
+			// /dev/cdc-wdm0`; the modem section should default to the sysfs
+			// path). Unresolvable (absent hardware) -> the raw device stays.
 			if (k == 'device' && v != null && v != '') {
-				let nd = (substr(v, 0, 1) == '/') ? null : parse_netdev(v);
+				if (substr(v, 0, 1) == '/' && opts?.resolve_path) {
+					let p = opts.resolve_path(v);
+
+					if (p) {
+						put(name, 'path', p);
+						continue;
+					}
+				}
+
+				let nd = parse_netdev(v);
 				put(name, 'device', (nd && nd.muxed) ? nd.netdev : v);
 				continue;
 			}

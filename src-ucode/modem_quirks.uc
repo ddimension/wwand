@@ -54,6 +54,20 @@ const QUIRKS = [
 		settings_deferred: true,
 		warn: [ 'selection/band changes apply at the next modem reset (deferred)' ],
 	},
+
+	// Huawei E1820-class minimal-service QMI stacks (2011-era: CTL/WDS/DMS/
+	// NAS 1.0 only — no UIM, no DSD, no WDA). Field-verified on the E1820
+	// (21.200.07.00.00, 2026-08-30): the DMS model string is literally "8",
+	// the datapath falls to the 802.3 `ethernet` mode (no WDA to negotiate
+	// with), signal comes from NAS GET_SIGNAL_STRENGTH (0x0020) or the CSQ
+	// floor, and SIM state runs over the DMS legacy fallback.
+	{
+		match: /^E1820|^8$/,
+		warn: [
+			'no UIM service: SIM status runs over the DMS legacy fallback — an empty SIM slot is indistinguishable from no PIN facility, so a missing SIM surfaces as registration timeout, not SIM_BLOCKED',
+			'NAS 1.0: signal is GET_SIGNAL_STRENGTH/AT+CSQ floor — no GET_SIGNAL_INFO, no cell environment',
+		],
+	},
 ];
 
 // resolve every matching entry for a model into one merged descriptor.

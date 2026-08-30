@@ -99,6 +99,8 @@ const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
 // QmiNasScellState: 0 deconfigured, 1 deactivated, 2 activated.
 export function get_ca(nas, cb)
 {
+	// an optional read — modems that reject it (old stacks: Invalid QMI
+	// command) must not feed the recovery counter
 	nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) => {
 		if (e || (!d?.pcell && !d?.scells))
 			return cb(null);
@@ -121,7 +123,7 @@ export function get_ca(nas, cb)
 			            state: s.state });
 
 		cb(out);
-	});
+	}, { no_recovery: true });
 };
 
 // data_mode_from_systems(available_systems): map a DSD available-systems list
@@ -263,7 +265,10 @@ export function read_info(dms, cb)
 		}),
 		(next) => dms.request('GET_IDS', {}, (e, d) => {
 			if (!e) {
-				info.imei = d.imei;
+				// old stacks pad the field past the 15-digit IMEI with
+				// uninitialised bytes (field-seen on the 2011-era E1820) —
+				// take the leading 15 digits; anything else is not an IMEI
+				info.imei = match(d.imei ?? '', /^[0-9]{15}/)?.[0] ?? null;
 				info.meid = d.meid;
 			}
 			next();

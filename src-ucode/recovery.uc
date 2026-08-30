@@ -66,9 +66,14 @@ export function create(opts)
 
 	let self = {
 		id: opts.id,
+		// the protocol the modem is currently driven with. `proven` (in the
+		// counters) means at least ONE exchange ever completed with this
+		// protocol; the name rides along in the persisted state so a protocol
+		// change invalidates the proof on the next load.
+		protocol: opts.protocol ?? null,
 		failreboot: +(opts.failreboot ?? 100),
 		proto_error_limit: +(opts.proto_error_limit ?? PROTO_ERROR_LIMIT),
-		counters: { attempts: 0, proto_errors: 0, rung: 0, proto_hw: 0 },
+		counters: { attempts: 0, proto_errors: 0, rung: 0, proto_hw: 0, proven: false },
 		rebooting: false,
 	};
 
@@ -91,14 +96,34 @@ export function create(opts)
 		// re-run rungs that already fired (attempts>=24 -> all three done).
 		let rung = match(data, /"rung": *([0-9]+)/);
 		let phw = match(data, /"proto_hw": *([0-9]+)/);
+		let prov = match(data, /"proven": *(true|false|[01])/);
+		let rproto = match(data, /"protocol": *"([^"]*)"/);
 
-		if (att || perr) {
+		if (att || perr || prov || rproto) {
 			self.counters.attempts = att ? +att[1] : 0;
 			self.counters.proto_errors = perr ? +perr[1] : 0;
 			self.counters.proto_hw = phw ? +phw[1] : 0;
 			self.counters.rung = rung ? +rung[1] : rungs_reached(self.counters.attempts);
-			log('notice', sprintf('restored recovery state: attempts %d, proto_errors %d, rung %d',
-				self.counters.attempts, self.counters.proto_errors, self.counters.rung));
+			self.counters.proven = prov ? (prov[1] == 'true' || prov[1] == '1') : false;
+
+			// the proof was earned with the protocol recorded in the file — a
+			// changed `option protocol` (or a re-detection that picked a
+			// different backend) must not let the new, unproven protocol fire
+			// hardware rungs. No recorded protocol (legacy file) = unproven.
+			if (rproto && self.protocol != null && rproto[1] != self.protocol)
+				self.counters.proven = false;
+
+			// persist the current protocol once NOW when the file lacks the
+			// field (or records another): a state file that never learns the
+			// protocol compares as "no proof tied to anything" on the next
+			// load, and a switch would then let proven survive — exactly what
+			// the invalidation exists to stop
+			if (rproto?.[1] != self.protocol)
+				self.persist();
+
+			log('notice', sprintf('restored recovery state: attempts %d, proto_errors %d, rung %d, proven %s',
+				self.counters.attempts, self.counters.proto_errors, self.counters.rung,
+				self.counters.proven ? 'yes' : 'no'));
 		}
 	};
 
@@ -106,13 +131,26 @@ export function create(opts)
 		if (!fx?.write)
 			return;
 
-		if (!fx.write(state_file, sprintf('%J', self.counters)))
+		// the protocol name rides along so a protocol change invalidates the
+		// proof on the next load (see load())
+		let blob = { ...self.counters, protocol: self.protocol };
+
+		if (!fx.write(state_file, sprintf('%J', blob)))
 			log('warn', sprintf('failed to persist recovery state to %s%s', state_file,
 				fx.last_error ? sprintf(': %s', fx.last_error) : ''));
 	};
 
 	// record a failed connection cycle, return the ladder action:
 	// 'retry' | 'opmode_cycle' | 'modem_reset' | 'usb_repower' | 'reboot'
+	//
+	// Every hardware rung — opmode cycle, modem reset, repower, reboot — is
+	// gated on `proven`: at least one exchange must have ever completed with
+	// the currently selected protocol. While unproven, the errors are evidence
+	// about our own detection, not about the hardware; repowering a modem that
+	// was never broken only adds outages (field case 2026-08-30: a misdetected
+	// modem was power-cycled at 25 protocol errors). The rung index is NOT
+	// advanced while gated, so the rung stays armed for when the protocol does
+	// get proven.
 	self.on_attempt = function() {
 		self.counters.attempts++;
 
@@ -125,7 +163,8 @@ export function create(opts)
 		// jump past a threshold does not fire several rungs at once, and never
 		// skips one. These run INDEPENDENT of failreboot: disabling the reboot
 		// must not disable the cheaper hardware recovery below it.
-		if (self.counters.rung < length(RUNGS) && n >= RUNGS[self.counters.rung].at) {
+		if (self.counters.proven &&
+		    self.counters.rung < length(RUNGS) && n >= RUNGS[self.counters.rung].at) {
 			let action = RUNGS[self.counters.rung].action;
 			self.counters.rung++;
 			self.persist();
@@ -135,7 +174,7 @@ export function create(opts)
 		// Reboot is the final rung, gated by failreboot: <=0 disables ONLY the
 		// reboot and the ladder retries forever (router stays up for
 		// logging/debugging); >0 reboots once the count passes it.
-		if (self.failreboot > 0 && n > self.failreboot) {
+		if (self.counters.proven && self.failreboot > 0 && n > self.failreboot) {
 			self.persist();
 			return 'reboot';
 		}
@@ -145,9 +184,13 @@ export function create(opts)
 	};
 
 	self.on_connect_success = function() {
-		if (self.counters.attempts != 0 || self.counters.rung != 0) {
+		if (self.counters.attempts != 0 || self.counters.rung != 0 || !self.counters.proven) {
 			self.counters.attempts = 0;
 			self.counters.rung = 0;
+			// a working data connection is itself the strongest proof the
+			// protocol is right (the NCM/AT backend proves here — it has no
+			// per-request hook to feed on_proto_success)
+			self.counters.proven = true;
 			self.persist();
 		}
 	};
@@ -173,7 +216,12 @@ export function create(opts)
 		// self-powered modem, so a wedge only a modem reset clears would otherwise
 		// reboot-loop (observed on the NR7101). Independent of failreboot — the
 		// cheaper hardware recovery must run even when reboots are disabled.
-		if (n > self.proto_error_limit && !self.counters.proto_hw) {
+		//
+		// Same `proven` gate as the attempt ladder: this counter also climbs
+		// while the modem is misdetected, and repowering it then is exactly the
+		// field failure this gate exists for.
+		if (self.counters.proven &&
+		    n > self.proto_error_limit && !self.counters.proto_hw) {
 			self.counters.proto_hw = 1;
 			self.persist();
 			return 'usb_repower';
@@ -182,7 +230,7 @@ export function create(opts)
 		// Reboot only after the hardware reset has been tried and errors persist a
 		// further full window. Same gate as the attempt ladder: never reboot when
 		// failreboot<=0 — a headless install keeps retrying instead of cycling.
-		if (n > self.proto_error_limit * 2) {
+		if (self.counters.proven && n > self.proto_error_limit * 2) {
 			self.persist();
 			return (self.failreboot > 0) ? 'reboot' : 'retry';
 		}
@@ -191,9 +239,12 @@ export function create(opts)
 	};
 
 	self.on_proto_success = function() {
-		if (self.counters.proto_errors != 0 || self.counters.proto_hw != 0) {
+		if (self.counters.proto_errors != 0 || self.counters.proto_hw != 0 || !self.counters.proven) {
 			self.counters.proto_errors = 0;
 			self.counters.proto_hw = 0;
+			// one successful exchange proves the protocol — from here the
+			// hardware rungs may fire again (and the counters reset)
+			self.counters.proven = true;
 			self.persist();
 		}
 	};

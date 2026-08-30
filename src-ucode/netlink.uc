@@ -197,6 +197,14 @@ export const RMNET_FLAGS_MASK = RMNET_INGRESS_DEAGGREGATION |
 // `raw_ip` is the one name with no implementation behind it: it means "no mux
 // at all", the plain raw-IP parent. It was spelled `none` until 1.6 and that
 // spelling still works everywhere a config can carry it — see canon_mux().
+//
+// `ethernet` is the second such pseudo-mode (QMI-only): "no mux, and the
+// parent KEEPS the kernel's 802.3 ethernet framing" — setup() re-asserts
+// raw_ip = N (idempotent) and sets NOARP (static /32 + device route on a
+// point-to-point hop, the RNDIS optimization). It is the datapath for old
+// QMI stacks that cannot negotiate the link-layer format at all (no WDA
+// service — the kernel link is whatever the driver chose, and 802.3 is the
+// qmi_wwan default). Nothing aggregates, nothing muxes.
 
 // a plugin object is only usable if it can actually build the links
 export function valid_plugin(impl)
@@ -887,6 +895,8 @@ const MODES = [
 	  description: 'pick the best datapath for this hardware' },
 	{ name: 'raw_ip', kind: 'mode',
 	  description: 'no multiplexing — one plain raw-IP interface' },
+	{ name: 'ethernet', kind: 'mode',
+	  description: 'no multiplexing — the parent stays in 802.3 ethernet framing (raw_ip off), ARP off (point-to-point hop)' },
 ];
 
 // What a UI offering `option mux` may show, built from the datapaths themselves
@@ -914,7 +924,7 @@ export function builtin_mux(name)
 {
 	let n = canon_mux(name);
 
-	return n == 'auto' || n == 'raw_ip' || exists(BUILTIN, n);
+	return n == 'auto' || n == 'raw_ip' || n == 'ethernet' || exists(BUILTIN, n);
 };
 
 // `plugins` is a name -> implementation object IN PREFERENCE ORDER (ucode keeps
@@ -937,6 +947,19 @@ export function select_backend(fx, netdev, cfg_mux, want_mux, plugins, info)
 	// error when a mux was required, the plain raw-IP parent otherwise.
 	if (mux == 'raw_ip')
 		return 'raw_ip';
+
+	// `ethernet` is the other explicit pseudo-mode: keep the kernel-chosen 802.3
+	// framing. Unlike raw_ip it is a QMI-only concept — an NCM datapath IS the
+	// driver's ethernet-style link already, and MBIM rides a raw-IP trunk.
+	if (mux == 'ethernet') {
+		if (proto != 'qmi') {
+			fx.log('err', sprintf('datapath: ethernet serves qmi, not %s — `option mux` names a datapath this modem cannot use',
+				proto));
+			return null;
+		}
+
+		return 'ethernet';
+	}
 
 	// Named outright: that one or nothing — never a quiet substitution. Built-in
 	// or add-on makes no difference here; both answer the same probe().
@@ -1030,6 +1053,10 @@ export function datapath_caps(backend, plugins)
 			: [],
 		// host-side uplink coalescing is available
 		tx_aggr: (impl?.tx_aggr === true),
+		// the wire framing the parent carries: 802.3 (the kernel default) or
+		// raw-IP. A boolean, not the WDA enum — netlink stays codec-free; the
+		// caller maps it onto the WDA link-layer protocol value.
+		llp_802_3: (n == 'ethernet'),
 	};
 };
 
@@ -1085,14 +1112,14 @@ export function setup(fx, opts)
 	let mux = opts.mux ?? [];
 
 	// built-in or add-on: one lookup, one contract (see the plugin comment at
-	// the top). 'raw_ip' is the only backend that has no implementation — it is
-	// the plain raw-IP parent, not a mux.
+	// the top). 'raw_ip' and 'ethernet' are the backends that have no
+	// implementation — they are the plain parent, not a mux.
 	let impl = BUILTIN[backend] ?? opts.plugins?.[backend];
 
 	if (!valid_plugin(impl))
 		impl = null;
 
-	if (backend != 'raw_ip' && !impl)
+	if (backend != 'raw_ip' && backend != 'ethernet' && !impl)
 		return { ok: false, error: sprintf('no implementation for datapath backend %J', backend) };
 
 	// one naming rule per backend, used by the prune below, by the parent-rename
@@ -1209,9 +1236,15 @@ export function setup(fx, opts)
 	// by construction (mhi_net on a PCIe/MHI modem) has no such group at all,
 	// and there is then nothing to set and nothing to fail on. Only a knob
 	// MISSING from an EXISTING group is fatal.
+	//
+	// `ethernet` writes 'N' — an idempotent re-assert of the kernel default.
+	// The write still matters: the parent may carry raw_ip=Y from a previous
+	// raw-ip config on the same modem, and an 802.3 link with the raw-ip flag
+	// set carries garbage.
 	if (programs_parent) {
 		if (fx.exists(sys)) {
-			if (!write_attr(fx, sprintf('%s/raw_ip', sys), 'Y', 'driver format'))
+			if (!write_attr(fx, sprintf('%s/raw_ip', sys),
+			                (backend == 'ethernet') ? 'N' : 'Y', 'driver format'))
 				return { ok: false, error: 'raw_ip unavailable' };
 		}
 		else {
@@ -1260,9 +1293,17 @@ export function setup(fx, opts)
 			child_mtu: (mtu, what) => child_mtu(mtu, fx, what),
 			child_name: (e) => child_of(netdev, e),
 		}) ?? [];
-	else
-		// 'raw_ip' — no mux: plain MTU on the parent (config or 1500)
+	else {
+		// 'raw_ip' / 'ethernet' — no mux: plain MTU on the parent (config or 1500)
 		link_op(fx, 'mtu', netdev, { mtu: child_mtu(opts.mtu, fx, netdev) });
+
+		// 802.3 link, point-to-point hop: the addressing is static (WDS /32 +
+		// device route), so ARP would only burn radio airtime on a neighbour
+		// that is never resolved — the same NOARP optimization the RNDIS
+		// datapath runs (p2p framing, no neighbour resolution needed).
+		if (backend == 'ethernet')
+			link_op(fx, 'noarp', netdev, { noarp: true });
+	}
 
 	// the aggregation buffer belongs on the parent for every QMAP backend —
 	// shared here rather than repeated in each one (a backend that needs a

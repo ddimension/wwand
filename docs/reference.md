@@ -199,6 +199,13 @@ qmi`/`mbim`/`ncm` interfaces untouched. Two ways to move an interface to wwand:
   programs the LTE attach profile from the connection's `apn`/`pdp_type`.
   **After migrating, stop and remove the ModemManager service** — it would
   otherwise keep claiming the modem's control port.
+
+  A legacy `option device` naming a `/dev/...` node is an
+  enumeration-order artifact, not an anchor: with a second modem the
+  cdc-wdm/tty number can flip. Migration resolves it to the stable
+  wireless-style `option path` instead (`/dev/cdc-wdm0` on USB → the short
+  port id `1-1.3.4`, a wwan-framework port → its sysfs path); a node that
+  does not resolve (hardware absent) keeps the raw device.
 - **Unattended, once, at the next boot.** The package ships an example
   uci-defaults script that runs the same migration for you:
 
@@ -329,13 +336,16 @@ config wwand_modem 'm0'
 	                                 #   pre-open; follows the modem across re-enum
 	option imei '350000000000000'    # bind by IMEI (example value) — verified post-open; a mismatch
 	                                 #   blocks bring-up (wrong-modem safety)
-	option tty ''                    # AT port override (auto-detected otherwise)
+	option tty ''                    # AT port override (auto-detected otherwise). May be
+	                                 #   a cdc-wdm node: `option tty '/dev/cdc-wdm0'`
+	                                 #   pins the huawei_cdc_ncm-style AT channel
+	                                 #   explicitly (see the at_mbim note below)
 	option pincode '1234'            # SIM PIN; entered on each start
 	option sim_slot '0'              # physical slot to activate (0 = leave as-is)
 	option modes 'lte,nr5g'          # lte umts gsm nr5g td-scdma cdma / all / unset
 	option mcc '262'                 # manual PLMN selection (optional, needs mnc)
 	option mnc '01'
-	option mux 'auto'                # auto|raw_ip|rmnet|qmimux|vlan — the kernel
+	option mux 'auto'                # auto|raw_ip|ethernet|rmnet|qmimux|vlan — the kernel
 	                                 #   datapath (or the name of a datapath
 	                                 #   plugin package, see below)
 	option dl_datagram_max_size '0'  # QMAP DL aggregation bytes; 0 = model/board table
@@ -361,6 +371,11 @@ config wwand_modem 'm0'
 	                                 #    MBIM sibling of its control port as an AT pipe
 	                                 #    (Quectel QDU CID 8). Only used when there is no tty,
 	                                 #    and it carries no URCs — polls only.
+	                                 #    AT channel order without `option tty`: a detected
+	                                 #    tty → an AT-bearing cdc-wdm (huawei_cdc_ncm
+	                                 #    registers its wdm as the AT port — the fallback
+	                                 #    is gated on the driver table, AT is never poked
+	                                 #    into a QMI/MBIM channel) → the MBIM pipe.
 	option fcc_auth 'auto'           # RF unlock for laptop-SKU modems that boot radio-locked
 	                                 #    (Lenovo/Dell/HP variants of Quectel EM1xx, Foxconn
 	                                 #    SDX55/SDX62, DW5821e-class). QMI values:
@@ -450,8 +465,13 @@ see [Troubleshooting](#troubleshooting).
 **The datapaths.** `rmnet` (QMAP through the kernel rmnet driver) and `qmimux`
 (qmi_wwan's own `add_mux`) carry QMI modems; `vlan` carries MBIM ones, where each
 session > 0 is an 802.1q sub-device of the parent. `raw_ip` is no multiplexing at
-all — one plain raw-IP interface. `auto`, the default, picks per hardware and
-control protocol, so there is normally nothing to set here.
+all — one plain raw-IP interface. `ethernet` is also no multiplexing, but keeps
+the kernel's 802.3 ethernet framing (raw_ip off) with ARP disabled on the
+point-to-point hop — the datapath for old QMI stacks that cannot negotiate the
+link-layer format at all (no WDA service): under `auto` such a modem selects
+`ethernet` on its own, and the IPv4/IPv6 configuration still comes over the QMI
+channel (WDS). `auto` picks per hardware and control protocol, so there is
+normally nothing to set here.
 
 The no-mux datapath was called `none` until 1.6 and that spelling still works
 (as does `raw-ip`); both mean `raw_ip`, which is what `status` reports.
@@ -1359,7 +1379,7 @@ extending a table, not branching the code — see
 
 | Quirk | Mechanism | Example |
 |---|---|---|
-| AT port discovery | 4-level fallback: `option tty` → board table → the `atport.uc` udev table (generated from ModemManager) → first-ttyUSB heuristic | — |
+| AT port discovery | fallback: `option tty` → board table → the `atport.uc` udev table (generated from ModemManager) → first-ttyUSB heuristic → an AT-bearing cdc-wdm (huawei_cdc_ncm) → AT over the MBIM pipe (Quectel QDU CID 8) | — |
 | Init AT commands | `MODEL_QUIRKS` (atcmd.uc): model pattern → commands run once before registration | EG06/EM06/RG50xQ → `AT+QMBNCFG="AutoSel",1` (carrier-config auto-select) |
 | QMAP aggregation size | `board_dgram_size`: DL datagram size per model, then per board, overridable via `dl_datagram_max_size` | RG650E-EU → 31 KB (else 4 KB default) |
 | QMAP DAP fallback | rmnet requests MAPv5 checksum offload, renegotiates plain QMAP when the modem declines aggregation | RG650E declines DAP 8 edge cases |

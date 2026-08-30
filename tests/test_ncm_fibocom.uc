@@ -104,6 +104,31 @@ eq(t7?.sccs?.[0]?.earfcn, 38927, 't700 gtca: scc1 earfcn');
 eq(t7?.sccs?.[0]?.rsrp, -88, 't700 gtca: scc1 rsrp (signed last field)');
 eq(t7?.sccs?.[1]?.band, 1, 't700 gtca: scc2 band (101 -> 1)');
 
+// T700 0-sentinel: an unmeasurable RSRP reports 0 (VERBATIM live capture,
+// WH3000 Pro 2026-08-30) — that 0 must NOT surface as a "perfect" 0 dBm
+// (the status page showed full bars for an unreadably weak signal). Anything
+// above the physical RSRP ceiling (-44 dBm, 3GPP TS 36.133) is a sentinel.
+let t7b = telemetry_ncm.parse_gtcainfo([
+	'+GTCAINFO:',
+	'PCC:105,251,2460,50,50,1,1,1,1,0',
+]);
+
+eq(t7b?.lte?.rsrp, null, 't700 gtca: 0 rsrp (unmeasurable) -> null, not 0 dBm');
+
+let t7c = telemetry_ncm.parse_gtcainfo([
+	'+GTCAINFO:',
+	'PCC:103,272,1350,75,75,1,1,1,3,-44',
+]);
+
+eq(t7c?.lte?.rsrp, -44, 't700 gtca: -44 dBm (physical ceiling) still a measurement');
+
+let t7d = telemetry_ncm.parse_gtcainfo([
+	'+GTCAINFO:',
+	'PCC:103,272,1350,75,75,1,1,1,3,-20',
+]);
+
+eq(t7d?.lte?.rsrp, null, 't700 gtca: -20 dBm (above ceiling) -> null');
+
 // 255 sentinels must never surface as measurements (field-seen right after a
 // cell change: rsrp/rsrq slots read 255 -> garbage would latch into signal)
 let t8 = telemetry_ncm.parse_gtccinfo([

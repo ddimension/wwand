@@ -510,6 +510,25 @@ for (let spelling in [ 'none', 'raw-ip', 'raw_ip' ]) {
 		sprintf('mux off (%s): and it is warned about', spelling));
 }
 
+// the 802.3 `ethernet` mode is mux-less the same way — a channel on the
+// interface has nothing to bind to
+{
+	let off = padopt({
+		network: {
+			m0: { '.type': 'wwand_modem', usb_path: '1-1', mux: 'ethernet' },
+			wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+			       device: 'wwand0', mux_id: '1', apn: 'internet' },
+		},
+	});
+
+	eq(off.modems.m0.mux, 'ethernet', 'mux ethernet: the mode survives the shape check');
+	eq(off.contexts.wan.mux_id, 0, 'mux ethernet: the channel is dropped');
+	eq(off.contexts.wan.muxed, false, 'mux ethernet: ...and not auto-assigned back');
+	eq(off.contexts.wan.mux_link, null, 'mux ethernet: ...and no mux child is expected');
+	ok(length(filter(off.warnings, (w) => index(w, 'has mux disabled') >= 0)) == 1,
+		'mux ethernet: and it is warned about');
+}
+
 // the compat parser (no `option modem`) resolves the channel through the same
 // helper — the two interface parsers must not drift
 r = padopt({
@@ -821,6 +840,30 @@ eq(mp_set(ch, 'wwmodem0', 'device'), 'wwan0', 'migrate-path: modem anchored on n
 eq(mp_set(ch, 'wwmodem0', 'usb_path'), null, 'migrate-path: usb_path NOT set on modem');
 eq(mp_set(ch, 'wwmodem0', 'path'), null, 'migrate-path: path NOT actively set on modem');
 ok(mp_has(ch, 'delete', 'wan', 'usb_path'), 'migrate-path: usb_path stripped off interface');
+
+// a /dev control node + resolver -> the modem is anchored on the STABLE
+// hardware path, not the enumeration-order-dependent /dev node (sponsor
+// field report: migrate wrote `option device /dev/cdc-wdm0`)
+ch = config.migrate_plan({ network: {
+	wan: { '.type': 'interface', proto: 'ncm', device: '/dev/cdc-wdm0', apn: 'internet' },
+} }, { resolve_path: (dev) => dev == '/dev/cdc-wdm0' ? '1-1.3.4' : null });
+eq(mp_set(ch, 'wwmodem0', 'path'), '1-1.3.4', 'migrate-devnode: resolved to option path');
+eq(mp_set(ch, 'wwmodem0', 'device'), null, 'migrate-devnode: no device left on the modem');
+ok(mp_has(ch, 'delete', 'wan', 'device'), 'migrate-devnode: device stripped off interface');
+
+// resolver returns null (absent hardware) -> the raw device stays, as before
+ch = config.migrate_plan({ network: {
+	wan: { '.type': 'interface', proto: 'ncm', device: '/dev/cdc-wdm9', apn: 'internet' },
+} }, { resolve_path: () => null });
+eq(mp_set(ch, 'wwmodem0', 'device'), '/dev/cdc-wdm9', 'migrate-devnode: unresolvable keeps raw device');
+eq(mp_set(ch, 'wwmodem0', 'path'), null, 'migrate-devnode: unresolvable sets no path');
+
+// a netdev-name device is unaffected by the resolver
+ch = config.migrate_plan({ network: {
+	wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'internet' },
+} }, { resolve_path: () => '1-1.3.4' });
+eq(mp_set(ch, 'wwmodem0', 'device'), 'wwan0', 'migrate-devnode: netdev device untouched');
+eq(mp_set(ch, 'wwmodem0', 'path'), null, 'migrate-devnode: netdev device sets no path');
 
 // the modem `path` option is read (preferred), with `usb_path` still accepted
 r = padopt({ network: {
