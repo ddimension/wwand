@@ -122,6 +122,11 @@ export function create(opts)
 		// decided in select_backend, and it must not depend on glob order
 		let names = [];
 
+		// `datapath_<name>.uc` is the ADD-ON namespace and nothing else may live
+		// in it: our own QMI datapath bring-up used to be `datapath_qmi.uc` and
+		// this glob dutifully offered it as a plugin, logging "plugin qmi: not
+		// usable" on every start. It is `modem_datapath_qmi.uc` now — an
+		// internal module gets an internal name.
 		for (let path in found) {
 			let m = match(path, /datapath_([a-z][a-z0-9_]*)\.uc$/);
 

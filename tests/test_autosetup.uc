@@ -66,6 +66,22 @@ d.autosetup_scan();
 ok(created_plugins != null && created_plugins.vendorx != null,
 	'scan: the installed datapaths are handed to autosetup_create');
 
+// `datapath_<name>.uc` is the ADD-ON namespace: only a real plugin may answer
+// this glob. Our own QMI bring-up used to sit there as datapath_qmi.uc and was
+// offered as a plugin on every start; it is modem_datapath_qmi.uc now, so the
+// glob no longer sees it at all.
+created = [];
+d = mk([ { kind: 'cdc-wdm', device: '/dev/cdc-wdm0', protocol: 'qmi' } ], created, {
+	deps: {
+		datapath_fx: { glob: () => [ '/usr/share/ucode/wwand/modem_datapath_qmi.uc',
+		                             '/usr/share/ucode/wwand/datapath_vendorx.uc' ] },
+		load_datapath: (n) => (n == 'vendorx') ? { links: () => [] } : null,
+	},
+});
+d.autosetup_scan();
+eq(keys(created_plugins ?? {}), [ 'vendorx' ],
+	'scan: an internal module outside the add-on namespace is not scanned');
+
 // (3) one-shot: only the first candidate is replayed
 created = [];
 d = mk([ { kind: 'cdc-wdm', device: '/dev/cdc-wdm0' },

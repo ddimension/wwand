@@ -20,7 +20,7 @@ import * as qmi_backend from 'wwand.qmi_backend';
 import * as modem_common from 'wwand.modem_common';
 import * as modem_quirks from 'wwand.modem_quirks';
 import * as atcmd from 'wwand.atcmd';
-import * as datapath_qmi from 'wwand.datapath_qmi';
+import * as datapath_qmi from 'wwand.modem_datapath_qmi';
 import * as nasmod from 'wwand.codec.schema.nas';
 import * as dmsmod from 'wwand.codec.schema.dms';
 import * as uimmod from 'wwand.codec.schema.uim';
@@ -243,7 +243,7 @@ export function install(self, o)
 		step_datapath();
 	};
 
-	// datapath bring-up (datapath_qmi.uc)
+	// datapath bring-up (modem_datapath_qmi.uc)
 	step_datapath = () => datapath_qmi.setup(self, dp, { log: log, fail: fail }, step_opmode);
 
 	step_opmode = () => {
