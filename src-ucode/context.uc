@@ -399,7 +399,9 @@ export function create(opts)
 			if (mux_id > 0) {
 				let dp = self.modem.datapath;
 
-				if (!dp || dp.backend == 'raw_ip')
+				// an unmuxed datapath (raw_ip, or the 802.3 ethernet mode) has
+				// nothing to bind a QMAP channel to
+				if (!dp || dp.backend == 'raw_ip' || dp.backend == 'ethernet')
 					return done({ stage: 'mux', err: 'mux_unavailable' });
 
 				if (dp.ep_id == null)

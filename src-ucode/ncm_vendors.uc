@@ -745,7 +745,20 @@ export const VENDORS = {
 		// ^NDISSTAT is the dial-status notification pushed after ^NDISDUP. It is
 		// a DIFFERENT name from ^NDISSTATQRY, the answer to the status query at
 		// DIAL_NDISDUP.status — exact-name matching keeps the two apart.
-		urcs: [ '^NDISSTAT', '^RSSI', '^HCSQ', '^MODE', '^SIMST', '^SRVST' ],
+		//
+		// What the E3372H actually pushes (21.200, field-observed over the wdm
+		// AT channel, 2026-08-30): ^RSSI + ^HCSQ (signal, in the query formats
+		// the telemetry poll already parses — the poll stays the authority, no
+		// event is derived from these), ^NDISSTAT (the bearer push, parsed as
+		// session_urc below) and ^DSFLOWRPT every ~2 s (the traffic report —
+		// 7 hex fields, tx/rx totals in fields 5/6; listed here so an
+		// interleaved answer never carries it, NOT parsed: the stats poll is
+		// the counter source, and this firmware's ^DSFLOWQRY read is untested).
+		// ^MODE/^SRVST/^SIMST do NOT exist on this firmware — their QUERIES
+		// all answer bare ERROR — so no parser is built on them; the prefix
+		// list only keeps such pushes out of command responses should another
+		// huawei firmware emit them.
+		urcs: [ '^NDISSTAT', '^RSSI', '^HCSQ', '^DSFLOWRPT', '^MODE', '^SIMST', '^SRVST' ],
 		// disable the modem's internal auto-dialer so it does not connect behind
 		// wwand's back (best-effort; modems without it just warn). QModem disables
 		// it in the hangup path — we do it once at init so it never races the
@@ -755,6 +768,76 @@ export const VENDORS = {
 		dials: [ DIAL_NDISDUP, DIAL_CGACT ],
 		stats: null,
 		parse_stats: () => null,
+		// ^NDISSTAT is the bearer push (the ^NDISSTATQRY ANSWER is a different
+		// name — exact-match filtered apart). Field-seen on the E3372H
+		// (2026-08-30): one line per family, dual-stack pushes two:
+		//   ^NDISSTAT:1,,,"IPV4"      up: <conn> 1, the reason fields empty
+		//   ^NDISSTAT:0,36,,"IPV4"    down: <conn> 0, <reason> = the 3GPP
+		//     deactivation cause (36 = regular deactivation, TS 24.008 — a
+		//     normal NDISDUP=1,0 teardown reports exactly this)
+		// A hint to verify, like every session_urc: the context confirms via
+		// the ^NDISSTATQRY status query (DIAL_NDISDUP.status) before tearing
+		// anything down. No cid in the event — the push names no PDP id, and
+		// this modem class runs a single NDIS session, so every context owns
+		// it (the consumer's cid filter passes a null cid through).
+		session_urc: (line) => {
+			let m = match(line, /^\^NDISSTAT:\s*/);
+
+			if (!m)
+				return null;
+
+			// <conn>,<r1>,<r2>,"IPV4"[,...] — newer firmware folds both
+			// families into ONE line; the walk covers both shapes (a family
+			// token follows its block three fields after the conn state)
+			let f = split(replace(substr(line, length(m[0])), /"/g, ''), /\s*,\s*/);
+			let up = false;
+
+			for (let i = 0; i + 3 < length(f); i++) {
+				let fam = f[i + 3];
+
+				if (fam == 'IPV4' || fam == 'IPV6')
+					up = up || (+f[i] == 1);
+			}
+
+			return { up: up };
+		},
+		// ip_config: the E3372H on stick firmware 21.200 (HW-observed on the
+		// WH3000 Pro, 2026-08-30) does NOT implement CGCONTRDP or GTDNS (both
+		// answer bare ERROR); its PDP address comes from CGPADDR, which is
+		// also empty until the dial has actually bound the bearer. No gateway
+		// and no DNS over AT then — the /32 p2p model needs no gateway (the
+		// shim pushes a plain device route), and DNS is whatever the operator
+		// configured on the interface. Firmware that FILLS CGCONTRDP takes the
+		// generic path and never reaches CGPADDR.
+		ip_config: (modem, cid, cfg, cb) => {
+			modem.at.send(sprintf('AT+CGCONTRDP=%d', cid), (err, res) => {
+				if (!err) {
+					let rdp = parse_cgcontrdp(res?.lines);
+
+					if (rdp.ipv4?.addr || rdp.ipv6?.addr)
+						return cb(null, rdp);
+				}
+
+				modem.at.send(sprintf('AT+CGPADDR=%d', cid), (e2, r2) => {
+					if (e2)
+						return cb(e2);
+
+					let a = parse_cgpaddr(r2?.lines);
+
+					// the CGPADDR v6 slot is an interface identifier, never a host
+					// assignment (see the fibocom note); v6 arrives via the
+					// dhcpv6 subinterface (RA) like on every NCM modem
+					let v4 = (a?.addr && cfg.pdp_type != 'ipv6')
+						? { addr: a.addr, prefix: null, gateway: null, dns: [], mtu: null }
+						: null;
+
+					if (!v4 && cfg.pdp_type != 'ipv6')
+						return cb(err ?? 'no address assigned');
+
+					cb(null, { ipv4: v4, ipv6: null });
+				}, { timeout: 8000 });
+			}, { timeout: 15000 });
+		},
 	},
 
 	// Sierra Wireless / Netgear: $QCPDPP sets auth (password THEN username);

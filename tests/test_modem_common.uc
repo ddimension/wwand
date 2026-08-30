@@ -202,6 +202,102 @@ eq(opened_ttys, [ '/dev/ttyUSB2' ], 'at2_external: the second tty is left alone'
 eq(modem_x.at_telemetry, modem_x.at, 'at2_external: telemetry falls back to control');
 eq(modem_x.at2_released, '/dev/ttyUSB3', 'at2_external: the released port is reported');
 
+// huawei_cdc_ncm-style modem: no ttys at all, the control cdc-wdm IS the AT
+// channel (the driver registers it as the embedded AT port). open_at must open
+// the wdm itself, wire the engine, and skip the MBIM pipe.
+opened_ttys = [];
+opened_tr = [];
+let wdm_fx = (drv) => ({
+	read: (p) => null,
+	glob: (p) => [],
+	readlink: (p) => (index(p, '/cdc-wdm0/device/driver') >= 0)
+		? sprintf('/x/%s', drv)
+		: null,
+});
+let modem_w = { device: '/dev/cdc-wdm0', config: {}, info: {} };
+let reached_w = false;
+
+mc.open_at(modem_w, {
+	at_opts: {
+		fx: wdm_fx('huawei_cdc_ncm'),
+		open_transport: open_transport,
+	},
+	log: (level, msg) => null,
+	set_drain_timer: () => null,
+	next: () => { reached_w = true; },
+});
+
+ok(reached_w, 'wdm-at: completed init');
+eq(opened_ttys, [ '/dev/cdc-wdm0' ], 'wdm-at: the cdc-wdm itself is the AT channel');
+ok(modem_w.at != null, 'wdm-at: engine created on the wdm channel');
+eq(modem_w.at_telemetry, modem_w.at, 'wdm-at: one channel — telemetry shares the engine');
+eq(modem_w.at_tty, '/dev/cdc-wdm0', 'wdm-at: channel reported as the at tty');
+
+// a QMI-bound wdm must never be poked with AT — falls through to the MBIM
+// pipe (absent here: no channel, no engine, clean next)
+let modem_q = { device: '/dev/cdc-wdm0', config: {}, info: {} };
+let reached_q = false;
+
+mc.open_at(modem_q, {
+	at_opts: {
+		fx: wdm_fx('qmi_wwan'),
+		open_transport: open_transport,
+	},
+	log: (level, msg) => null,
+	set_drain_timer: () => null,
+	next: () => { reached_q = true; },
+});
+
+ok(reached_q, 'wdm-at: non-AT driver falls through cleanly');
+eq(modem_q.at, null, 'wdm-at: no engine on a qmi_wwan control node');
+
+// a huawei_cdc_ncm modem WITH a viable serial AT port: the wdm must still win.
+// HW-observed on the E3372H (2026-08-30): the tty answers generic AT, but the
+// firmware ignores the NCM dial (^NDISDUP) there — the dial has to go over the
+// wdm, so the whole channel belongs there.
+let hw_fx = (drv) => {
+	let usb = fake_fx('12d1:1506', [ { ifn: 2, tty: 'ttyUSB2' }, { ifn: 3, tty: 'ttyUSB3' } ]);
+
+	return {
+		read: usb.read,
+		glob: usb.glob,
+		readlink: (p) => (index(p, '/cdc-wdm0/device/driver') >= 0)
+			? sprintf('/x/%s', drv)
+			: null,
+	};
+};
+let modem_hw = { device: '/dev/cdc-wdm0', config: {}, info: {} };
+let reached_hw = false;
+opened_ttys = [];
+opened_tr = [];
+
+mc.open_at(modem_hw, {
+	at_opts: { fx: hw_fx('huawei_cdc_ncm'), open_transport: open_transport },
+	log: (level, msg) => null,
+	set_drain_timer: () => null,
+	next: () => { reached_hw = true; },
+});
+
+ok(reached_hw, 'huawei-wdm: completed init');
+eq(opened_ttys, [ '/dev/cdc-wdm0' ], 'huawei-wdm: the wdm is preferred over the viable tty');
+eq(modem_hw.at_tty, '/dev/cdc-wdm0', 'huawei-wdm: channel reported as the wdm');
+eq(modem_hw.at_telemetry, modem_hw.at, 'huawei-wdm: one channel — telemetry shares the engine');
+
+// an explicit option tty still wins over the wdm preference
+let modem_hwt = { device: '/dev/cdc-wdm0', config: { tty: '/dev/ttyUSB2' }, info: {} };
+let reached_hwt = false;
+opened_ttys = [];
+
+mc.open_at(modem_hwt, {
+	at_opts: { fx: hw_fx('huawei_cdc_ncm'), open_transport: open_transport },
+	log: (level, msg) => null,
+	set_drain_timer: () => null,
+	next: () => { reached_hwt = true; },
+});
+
+ok(reached_hwt, 'huawei-wdm: explicit tty completed init');
+eq(opened_ttys[0], '/dev/ttyUSB2', 'huawei-wdm: option tty overrides the wdm preference');
+
 // --- scaffolding: shared modem plumbing --------------------------------------
 // The state-transition / context / recovery-passthrough plumbing that was
 // byte-identical in all three modem state machines.

@@ -26,22 +26,6 @@ function dsd_from_serving(serving)
 	return d;
 }
 
-// +CSQ: <rssi>,<ber> — rssi 0..31 coded (99 = unknown) -> dBm
-function parse_csq(lines)
-{
-	for (let l in (lines ?? [])) {
-		let m = match(l, /\+CSQ:\s*([0-9]+),/);
-
-		if (m) {
-			let raw = +m[1];
-
-			return { rssi_raw: raw, rssi: (raw != 99) ? (-113 + 2 * raw) : null };
-		}
-	}
-
-	return null;
-}
-
 // --- per-vendor telemetry ----------------------------------------------------
 //
 // Each block provides best-effort steps, each taking the modem `self` + a
@@ -63,27 +47,14 @@ function parse_csq(lines)
 //     (the atcmd parsers already ×10) so they render through LuCI's sig10 (÷10)
 //     path exactly like the QMI GET_CELL_LOCATION_INFO set.
 
-// merge a CSQ RSSI floor into self.signal without clobbering per-RAT metrics
-function sig_csq_floor(self, s)
-{
-	let base = { ...(self.signal ?? {}) };
-
-	if (s) {
-		base.rssi_raw = s.rssi_raw;
-
-		if (base.lte == null && base.nr5g == null)
-			base.rssi = s.rssi;
-	}
-
-	self.signal = base;
-}
-
 // every vendor signal block opens with the CSQ floor read (the shared
-// rssi baseline) before its own per-RAT extras — one opener, not four copies
+// rssi baseline) before its own per-RAT extras — one opener, not four copies.
+// parse_csq/sig_csq_floor live in modem_common (shared with the QMI backend's
+// signal fallback).
 function csq_first(self, then)
 {
 	modem_common.telemetry_at(self).send('AT+CSQ', (err, res) => {
-		sig_csq_floor(self, err ? null : parse_csq(res?.lines));
+		modem_common.sig_csq_floor(self, err ? null : modem_common.parse_csq(res?.lines));
 		then();
 	});
 }
@@ -586,11 +557,16 @@ export function parse_gtcainfo(lines)
 
 	// T700 layout (field-verified on a real FM350-GL): "PCC:" and "SCC n:"
 	// labels, and the LAST field is the RSRP as a SIGNED dBm value (-88) —
-	// no offset. 255 marks "no measurement".
+	// no offset. 255 marks "no measurement" on the offset-coded rows; on the
+	// signed row the T700 reports 0 when the signal is too weak to measure
+	// (HW-observed on the live FM350-GL, 2026-08-30 — the status page read
+	// that 0 as a perfect 0 dBm). RSRP is physically bounded to -140..-44
+	// dBm (3GPP TS 36.133, 9.1.4), so anything above -44 is a sentinel too,
+	// never a measurement.
 	let last_signed = (fields) => {
 		let v = f(fields, length(fields) - 1);
 
-		return (v != null && v != 255) ? v : null;
+		return (v != null && v != 255 && v <= -44) ? v : null;
 	};
 
 	for (let l in (lines ?? [])) {

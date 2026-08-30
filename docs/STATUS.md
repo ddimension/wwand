@@ -1,7 +1,9 @@
 # wwand — current state
 
-_State of 2026-08-30, release **v1.6.0**. 50 host suites / 3382 checks, all
-green (`cd tests && sh run_tests.sh`)._
+_State of 2026-08-31, after v1.6.0 (feed r53; the QMI-surface and device-support
+work of 2026-08-30/31 lives in HEAD, not yet released). 50 host suites, all green
+(`cd tests && sh run_tests.sh` — it prints the count, which moves too often to
+be worth repeating here)._
 
 This file describes **what is true now**. The dated log of how it got here is
 `status-archive.md`; beliefs that looked right and were not are in
@@ -25,12 +27,12 @@ is always user-triggered.
 | | |
 |---|---|
 | Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed |
-| Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), fallback `raw_ip`; add-ons `rmnet_nss`, `rmnet_nss_mhi` |
+| Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
 | Feed | ddimension/openwrt-repo — `wwand` r49, `luci-app-wwand` r23, `luci-proto-wwand` r11 |
 | Upstream | openwrt/packages#30185 (pins v1.6.0), openwrt/luci#8917 |
 
-## Hardware verified (2026-08-30, on r49)
+## Hardware verified (2026-08-30, on r49 + the same day's device-support HEAD)
 
 | Box | Modem / backend | Datapath | Result |
 |---|---|---|---|
@@ -38,6 +40,9 @@ is always user-triggered.
 | Zyxel NR7101 (`242`) | RG502Q, QMI | `rmnet · QMAP v5` | connected, 5G-NSA |
 | GL.iNet GL-X3000 (`3.93`) | RM520N-GL, MBIM | `vlan` | connected, traffic |
 | Cudy LT300 v3 (`3.97`) | SLM770A, NCM | `cdc_ether` | connected, traffic |
+| Huasifei WH3000 Pro (sponsor) | FM350-GL, NCM | `rndis_host` | connected, traffic |
+| Huasifei WH3000 Pro (sponsor) | E3372H, NCM | `huawei_cdc_ncm` | connected, traffic — AT on the cdc-wdm control channel, IP via CGPADDR (CGCONTRDP/GTDNS absent on stick firmware 21.200), v6 via RA + dhcpv6 subinterface |
+| Huasifei WH3000 Pro (sponsor) | E1820, QMI (minimal 2011 stack) | `ethernet` | READY without SIM — no UIM/DSD/WDA; DMS fallback, GET_SIGNAL_STRENGTH signal, 802.3 kept + NOARP; E2E connect open (empty SIM slot) |
 
 Neither QMI modem accepts QMAP v4; both take v5 and fall back to v1 when asked
 for something they decline. The MBIM and NCM paths report no QMAP version at
@@ -159,19 +164,12 @@ reported only.
   the feed, or a fail-loud internal API version constant checked at start-up —
   the point being that it must be loud, since the silent stall is the whole
   problem. Raised in review, 2026-08-30.
-- **TODO — the NCM/AT backend must accept a `cdc-wdm` as its AT port.** Stock
-  `comgt-ncm` sends AT straight to `option device`, whatever it is:
-  `gcom -d "$device"`, with an explicit usbmisc branch
-  (`package/network/utils/comgt/files/ncm.sh:79`). On a `huawei_cdc_ncm` modem
-  that device IS `/dev/cdc-wdm0` — the driver registers a cdc-wdm carrying AT
-  alongside its NCM datapath. wwand instead resolves a **tty** and uses the
-  cdc-wdm only as an anchor to find one on the same USB device
-  (`atcmd.uc:209-240`), so a modem whose AT lives on the wdm node has no AT
-  channel at all even though its protocol is now identified correctly. Field
-  case (2026-08-30) also has `ttyUSB0`/`ttyUSB1`, so it may work there by
-  accident; that is not a fix. The native io module already does
-  message-oriented cdc-wdm I/O for QMI/MBIM, so the port layer is the piece that
-  needs to accept it.
+- **DONE (2026-08-31) — the NCM/AT backend accepts a `cdc-wdm` as its AT port.**
+  On a `huawei_cdc_ncm` modem the AT channel IS `/dev/cdc-wdm0` (the driver
+  registers a cdc-wdm carrying AT alongside its NCM datapath), and wwand only
+  resolved ttys, using the wdm as an anchor to find one. Delivered by the
+  device-support branch: a cdc-wdm is a char device, not a tty, so it skips
+  termios setup and uses the message-oriented path the io module already has.
 - **openwrt/packages#30185** is `CHANGES_REQUESTED` on scope, which is a
   maintainer decision, not a defect list — all 34 review threads are resolved.
   The full build/runtime CI has not run on that PR since `8ffb9e3`; only the
@@ -181,6 +179,11 @@ reported only.
 - **eSIM over MBIM UICC** is wire-verified against libmbim 1.32 + lpac but not
   end-to-end: no eUICC-capable MBIM modem is on hand (the RG650E rejects
   MBIM_OPEN, the EG06 card has no eUICC).
+- **The E1820-class QMI support is not E2E-verified**: the sponsor stick's SIM
+  slot is empty, so START_NETWORK/GET_CURRENT_SETTINGS on real firmware (and
+  the NOARP + /32 device-route traffic path) await a SIM. Also note the DMS
+  fallback caveat — without UIM an empty slot surfaces as registration
+  timeout, not SIM_BLOCKED (documented in `modem_quirks.uc`).
 - **v1 (plain QMAP) end-to-end on the RG650E** did not carry traffic in a
   deliberate downgrade test even through the create path, while v5 does. Not
   chased: no configuration here runs v1.

@@ -223,9 +223,22 @@ export function create(opts)
 	};
 
 	self.on_connect_success = function() {
-		if (self.counters.attempts != 0 || self.counters.rung != 0) {
+		// A working data connection is the strongest proof the protocol is
+		// right — stronger than a single answered request — and it is the only
+		// proof some backends can offer at all: an AT-driven one has no
+		// per-request hook to feed note_answer(). Taken from the device-support
+		// branch, which arrived at the same invariant independently and covered
+		// this case where this implementation did not.
+		let first = !self.counters.proto_ok;
+
+		if (first)
+			log('info', sprintf('%s connected — hardware recovery armed',
+				self.counters.proto_name ?? 'modem'));
+
+		if (first || self.counters.attempts != 0 || self.counters.rung != 0) {
 			self.counters.attempts = 0;
 			self.counters.rung = 0;
+			self.counters.proto_ok = 1;
 			self.persist();
 		}
 	};

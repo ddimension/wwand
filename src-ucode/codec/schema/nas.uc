@@ -420,6 +420,26 @@ export default {
 			id: 0x0051,
 			ind: SIGNAL_INFO_F,
 		},
+
+		// The NAS 1.0-era signal message: old stacks (HW-observed on the
+		// Huawei E1820, 2026-08-30) reject GET_SIGNAL_INFO with
+		// "Invalid QMI command" but answer this. TLV layouts verified against
+		// libqmi 1.38 data/qmi-service-nas.json ("Get Signal Strength"
+		// 0x0020, since 1.0). RSSI/ECIO lists are u16-counted {value,
+		// radio_if} pairs; RSRQ is a {value, radio_if} sequence; LTE SNR /
+		// LTE RSRP are bare gint16. The 0x14 SINR is EVDO-only — never read
+		// for LTE.
+		GET_SIGNAL_STRENGTH: {
+			id: 0x0020,
+			req: {},
+			resp: {
+				rssi_list: { t: 0x11, f: { n: 'u16', of: { rssi: 'u8', radio_if: 'i8' } } },
+				ecio_list: { t: 0x12, f: { n: 'u16', of: { ecio: 'u8', radio_if: 'i8' } } },
+				rsrq:      { t: 0x16, f: { rsrq: 'i8', radio_if: 'i8' } },
+				lte_snr:   { t: 0x17, f: 'i16' },
+				lte_rsrp:  { t: 0x18, f: 'i16' },
+			},
+		},
 	},
 };
 

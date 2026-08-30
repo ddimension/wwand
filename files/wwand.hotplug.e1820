@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 André Valentin <avalentin@marcant.net>
+# wwand — bind qmi_wwan to the Huawei E1820's ethernet function (USB 12d1:14ac,
+# interface 1, class 02/06 — the 802.3 layout). The kernel defers the device
+# to qmi_wwan (cdc_ether blacklists it: "handled by qmi_wwan", and the
+# qmi_wwan table entry requires vendor-specific class, which this old stack's
+# layout does not carry), so the dynamic new_id entry — scoped to this exact
+# VID/PID/class — is what makes the control channel appear at all. The entry
+# is volatile: every replug/enumeration needs it re-created. Installed as
+# /etc/hotplug.d/usb/21-wwand-e1820.
+
+[ "$ACTION" = add ] || return 0 2>/dev/null || exit 0
+
+case "$PRODUCT" in
+	12d1/14ac/*) ;;
+	*) return 0 2>/dev/null || exit 0 ;;
+esac
+
+# only when interface 1 is unbound (idempotent across replugs)
+[ -e "/sys/bus/usb/devices/${DEVPATH#/devices/}:1.1/driver" ] && \
+	return 0 2>/dev/null || exit 0
+
+echo "12d1 14ac 02" > /sys/bus/usb/drivers/qmi_wwan/new_id 2>/dev/null
+
+return 0 2>/dev/null || exit 0

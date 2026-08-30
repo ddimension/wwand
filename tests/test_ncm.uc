@@ -1511,8 +1511,76 @@ eq(index(ncm_vendors.VENDORS.meig.urcs, '^DSFLOWQRY'), -1,
 	'meig urcs: the QUERY answer is NOT — it is this recipe\'s own stats command');
 eq(index(ncm_vendors.VENDORS.huawei.urcs, '^NDISSTATQRY'), -1,
 	'huawei urcs: likewise the NDISSTATQRY answer is not treated as a URC');
+ok(index(ncm_vendors.VENDORS.huawei.urcs, '^DSFLOWRPT') >= 0,
+	'huawei urcs: the traffic-report push is filtered (field-seen every ~2 s on the E3372H)');
 eq(length(ncm_vendors.VENDORS.generic.urcs ?? []), 0,
 	'generic: no vendor codes guessed for an unidentified modem');
+
+// huawei ip_config: the E3372H on stick firmware 21.200 (HW-observed on the
+// WH3000 Pro, 2026-08-30) does NOT implement CGCONTRDP or GTDNS — both answer
+// bare ERROR. The PDP address comes from CGPADDR; the /32 p2p model needs no
+// gateway and there is no DNS-over-AT at all (operator config covers it).
+let hw_sent = [];
+let hw_at = {
+	send: (cmd, cb) => {
+		push(hw_sent, cmd);
+
+		if (match(cmd, /CGCONTRDP/))
+			return cb({ error: 'ERROR' }, null);
+
+		if (match(cmd, /CGPADDR/))
+			return cb(null, { lines: [ '+CGPADDR: 1,"100.67.207.142"' ] });
+
+		return cb({ error: 'unexpected command' }, null);
+	},
+};
+let hw_res = null;
+
+ncm_vendors.VENDORS.huawei.ip_config({ at: hw_at }, 1, { pdp_type: 'ipv4v6' },
+	(e, rdp) => { hw_res = { e: e, rdp: rdp }; });
+eq(hw_sent, [ 'AT+CGCONTRDP=1', 'AT+CGPADDR=1' ],
+	'huawei ip_config: CGCONTRDP tried first, CGPADDR on ERROR');
+eq(hw_res.e, null, 'huawei ip_config: no error');
+eq(hw_res.rdp.ipv4.addr, '100.67.207.142', 'huawei ip_config: v4 addr from CGPADDR');
+eq(hw_res.rdp.ipv4.gateway, null, 'huawei ip_config: gateway-less /32 p2p model');
+eq(hw_res.rdp.ipv4.prefix, null, 'huawei ip_config: prefix left to the shim (/32)');
+eq(length(hw_res.rdp.ipv4.dns ?? []), 0, 'huawei ip_config: no DNS over AT on this firmware');
+eq(hw_res.rdp.ipv6, null, 'huawei ip_config: no v6 claim (RA/dhcpv6 subinterface covers it)');
+
+// firmware that FILLS CGCONTRDP takes the generic path — CGPADDR never sent
+let hw_sent2 = [];
+let hw_res2 = null;
+
+ncm_vendors.VENDORS.huawei.ip_config({ at: {
+	send: (cmd, cb) => {
+		push(hw_sent2, cmd);
+
+		if (match(cmd, /CGCONTRDP/))
+			return cb(null, { lines: [
+				'+CGCONTRDP: 1,5,internet,100.64.0.5.255.255.255.252,100.64.0.6,1.1.1.1,1.0.0.1',
+			] });
+
+		return cb({ error: 'unexpected command' }, null);
+	},
+} }, 1, { pdp_type: 'ipv4v6' }, (e, rdp) => { hw_res2 = { e: e, rdp: rdp }; });
+eq(hw_sent2, [ 'AT+CGCONTRDP=1' ], 'huawei ip_config: a filled CGCONTRDP ends the probe');
+eq(hw_res2.rdp.ipv4.addr, '100.64.0.5', 'huawei ip_config: generic parse result kept');
+eq(hw_res2.rdp.ipv4.gateway, '100.64.0.6', 'huawei ip_config: gateway from CGCONTRDP');
+
+// huawei session_urc: ^NDISSTAT is the bearer push (field-seen on the E3372H
+// 21.200, 2026-08-30). One line per family on this firmware, one folded line
+// on newer — both must parse; the ^NDISSTATQRY ANSWER is a different name and
+// must never read as a push.
+let hw_surc = ncm_vendors.VENDORS.huawei.session_urc;
+
+eq(hw_surc('^NDISSTAT:1,,,"IPV4"'), { up: true }, 'huawei surc: v4 up');
+eq(hw_surc('^NDISSTAT:0,36,,"IPV4"'), { up: false }, 'huawei surc: v4 down (reason 36 = regular deactivation)');
+eq(hw_surc('^NDISSTAT:1,,,"IPV6"'), { up: true }, 'huawei surc: v6 up');
+eq(hw_surc('^NDISSTAT:0,,,"IPV4",0,33,,"IPV6"'), { up: false }, 'huawei surc: folded dual line, both down');
+eq(hw_surc('^NDISSTAT:0,36,,"IPV4",1,,,"IPV6"'), { up: true }, 'huawei surc: folded line with v6 still up');
+eq(hw_surc('^NDISSTATQRY: 1,,,"IPV4",1,,,"IPV6"'), null, 'huawei surc: the query ANSWER is not a push');
+eq(hw_surc('^HCSQ:"LTE",36,28,126,22'), null, 'huawei surc: unrelated URC ignored');
+
 
 push(scenarios, {
 	name: 's9f_fibocom_dual_slot',

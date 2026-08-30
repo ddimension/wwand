@@ -52,11 +52,161 @@ export function setup(self, dp, o, next)
 			return next();
 		}
 
-		// modems without WDA keep their default framing (old behavior:
-		// "no wda support, skipping data format switch")
+		// backend selection runs AHEAD of the WDA gate now: the ethernet
+		// pseudo-mode is decided for WDA-less modems below, and a named
+		// datapath must be validated (or reported missing) the same whether
+		// or not a WDA service exists.
+		let fxi = dp.fx ?? netlink.default_fx((level, msg) => log(level, msg));
+		let backend = netlink.select_backend(fxi, dp.netdev, dp.mux ?? 'auto',
+			want_mux, dp.plugins, { model: self.info?.model, proto: 'qmi' });
+
+		// Nothing claimed the box, or `option mux` named a package that is not
+		// installed. Fatal only when channels were actually configured —
+		// otherwise the plain raw-IP parent is exactly what this modem wanted,
+		// and it is what an unmuxed modem got before the probes ran at all.
+		if (backend == null) {
+			if (need_mux)
+				return fail('datapath', { error: 'mux_backend_unavailable', mux: dp.mux });
+
+			backend = 'raw_ip';
+		}
+
+		let dgram = netlink.board_dgram_size(fxi, dp.dgram_size, self.info.model);
+		// QMAP header version → the WDA aggregation-protocol value. The
+		// ladder is the datapath's own (rmnet: v5, v4, plain), capped by
+		// `option qmap_version` when the operator pins one — which is also
+		// how a specific version gets exercised on hardware.
+		const DAP_FOR = { '5': wdamod.DAP_QMAPV5, '4': wdamod.DAP_QMAPV4,
+		                  '1': wdamod.DAP_QMAP };
+		// what this datapath can do, asked of the datapath instead of
+		// inferred from its name — the name tests here covered the built-in
+		// rmnet and silently excluded every datapath added since
+		let caps = netlink.datapath_caps(backend, dp.plugins);
+		// forward-declared: negotiate() walks this ladder from inside its own
+		// body, and ucode does not hoist a `let` to where an earlier arrow
+		// can see it
+		let rungs = [];
+		let negotiate;
+		// the shared tail — forward-declared and assigned BEFORE the WDA gate
+		// so the WDA-less ethernet path can reach it without a WDA client
+		let finish;
+
+		// netlink.setup + record + announce + next, shared by the negotiated
+		// (WDA) path and the WDA-less ethernet path. wdata/ver are null there:
+		// no SET_DATA_FORMAT ever ran, the kernel framing is what stays.
+		finish = (wdata, ver) => {
+			let v5 = (ver == 5);
+
+			let r = netlink.setup(fxi, {
+				netdev: dp.netdev,
+				backend: backend,
+				// the add-on datapaths the daemon loaded (the named one,
+				// or all installed ones under 'auto'); setup() picks the
+				// implementation for the backend chosen above
+				plugins: dp.plugins,
+				qmap_version: ver,
+				v5: v5,   // derived; for add-ons written before v4
+				mux: map(dp.mux_links ?? [], (e) => ({
+					id: e.id,
+					name: e.name ?? sprintf('%sm%d', dp.netdev, e.id),
+					mtu: e.mtu,
+				})),
+				dgram_size: ((wdata?.dl_max_size ?? 0) > 0) ? wdata.dl_max_size : dgram,
+				mtu: dp.mtu,
+				// negotiated uplink aggregation maxima (item 3: host-side
+				// rmnet egress coalesce, best-effort where supported)
+				ul_agg: { count: wdata?.ul_max_datagrams ?? 0, size: wdata?.ul_max_size ?? 0 },
+			});
+
+			if (!r.ok)
+				return fail('datapath', r);
+
+			// A version change while a data session is UP is accepted by
+			// SET_DATA_FORMAT but not acted on: HW-observed on the
+			// RG650E, where v5 -> v1 left the downlink silent — nothing
+			// reached even the USB parent, so it is upstream of rmnet and
+			// not a demux problem. The modem latches the aggregation
+			// format while a session is active. Taking every context on
+			// the modem down is enough (HW-verified); a modem reset also
+			// works but is the bigger hammer. Say which, rather than
+			// leave the operator with a datapath reporting the new
+			// version while no traffic flows.
+			let was = self.datapath?.qmap_version;
+
+			if (caps.qmap && was != null && was != ver)
+				log('notice', sprintf('QMAP version changed v%d -> v%d while a session was up; the modem latches the format until every context on it goes down (ifdown), so bring them down and back up if the data session stays silent',
+					was, ver));
+
+			self.datapath = {
+				// what setup() ACTUALLY ran: it drops to raw_ip when the
+				// selected backend has no channels to build
+				backend: r.backend ?? backend,
+				// config channel -> the QMAP id the modem must tag it
+				// with. Equal unless the datapath adopts a driver's own
+				// children (see map_id in netlink.uc); context.uc binds
+				// WDS to this, not to the config number.
+				map_ids: r.map_ids,
+				// the QMAP header version actually negotiated (1|4|5),
+				// and null where QMAP is not on the wire at all: the
+				// ladder falls back to rung 1 for a datapath that has no
+				// versions to offer (raw_ip), and reporting that as
+				// "QMAP v1" would describe a header nobody sends.
+				// `v5` stays for everything reading the old boolean
+				qmap_version: caps.qmap ? ver : null,
+				v5: v5,
+				urb_size: r.urb_size,
+				mux_devs: r.mux_devs,
+				// netlink.setup may move the parent to a raw kernel
+				// name (freeing a stale L3 name for a mux child)
+				parent: r.parent ?? dp.netdev,
+				ep_id: dp.ep_id,
+				ep_type: dp.ep_type,
+				// the WDA data-aggregation the modem actually negotiated
+				// (what makes muxing/aggregation observable in status);
+				// null on the WDA-less ethernet path — nothing was asked
+				wda: wdata ? {
+					dl_protocol: wdata.dl_protocol,
+					ul_protocol: wdata.ul_protocol,
+					dl_max_size: wdata.dl_max_size,
+					dl_max_datagrams: wdata.dl_max_datagrams,
+					ul_max_size: wdata.ul_max_size,
+					ul_max_datagrams: wdata.ul_max_datagrams,
+				} : null,
+				// host-side uplink aggregation we asked the datapath to coalesce
+				ul_agg: (caps.tx_aggr &&
+				         (wdata?.ul_max_datagrams ?? 0) > 1) ?
+					{ size: wdata.ul_max_size, count: wdata.ul_max_datagrams } : null,
+			};
+
+			// always name the version — it used to appear only for v5,
+			// so "datapath: rmnet" left you guessing between v1 and v4
+			log('notice', sprintf('datapath: %s%s%s, mux [%s]',
+				backend, caps.qmap ? sprintf('/qmap v%d', ver) : '',
+				(r.urb_size != null) ? sprintf(', urb %d', r.urb_size) : '',
+				join(' ', r.mux_devs)));
+			next();
+		};
+
+		// Modems without a WDA service cannot negotiate the link-layer
+		// format at all. Under 'auto' the kernel link is authoritative —
+		// and what the driver chose stays (qmi_wwan's default: 802.3) — so
+		// the honest datapath is `ethernet`: raw_ip asserted OFF, NOARP
+		// point-to-point hop. An explicitly named raw_ip/qmap on such a
+		// modem keeps the historic behavior: no format setup at all, the
+		// link left entirely to the driver (old behavior: "no wda support,
+		// skipping data format switch").
 		if (!self.services[sprintf('%d', wdamod.default.service)]) {
 			if (need_mux)
 				return fail('datapath', { error: 'wda_unavailable_for_mux' });
+
+			if (dp.mux == 'auto')
+				backend = 'ethernet';
+
+			if (backend == 'ethernet') {
+				caps = netlink.datapath_caps(backend, dp.plugins);
+				log('notice', 'datapath: ethernet selected — no WDA service, kernel keeps 802.3 framing (arp off, p2p)');
+				return finish(null, null);
+			}
 
 			log('info', 'no wda service, skipping data format setup');
 			return next();
@@ -68,43 +218,16 @@ export function setup(self, dp, o, next)
 
 			self.wda = wda;
 
-			let fxi = dp.fx ?? netlink.default_fx((level, msg) => log(level, msg));
-			let backend = netlink.select_backend(fxi, dp.netdev, dp.mux ?? 'auto',
-				want_mux, dp.plugins, { model: self.info?.model, proto: 'qmi' });
-
-			// Nothing claimed the box, or `option mux` named a package that is not
-			// installed. Fatal only when channels were actually configured —
-			// otherwise the plain raw-IP parent is exactly what this modem wanted,
-			// and it is what an unmuxed modem got before the probes ran at all.
-			if (backend == null) {
-				if (need_mux)
-					return fail('datapath', { error: 'mux_backend_unavailable', mux: dp.mux });
-
-				backend = 'raw_ip';
-			}
-
-			let dgram = netlink.board_dgram_size(fxi, dp.dgram_size, self.info.model);
-			// QMAP header version → the WDA aggregation-protocol value. The
-			// ladder is the datapath's own (rmnet: v5, v4, plain), capped by
-			// `option qmap_version` when the operator pins one — which is also
-			// how a specific version gets exercised on hardware.
-			const DAP_FOR = { '5': wdamod.DAP_QMAPV5, '4': wdamod.DAP_QMAPV4,
-			                  '1': wdamod.DAP_QMAP };
-			// what this datapath can do, asked of the datapath instead of
-			// inferred from its name — the name tests here covered the built-in
-			// rmnet and silently excluded every datapath added since
-			let caps = netlink.datapath_caps(backend, dp.plugins);
-			// forward-declared: negotiate() walks this ladder from inside its own
-			// body, and ucode does not hoist a `let` to where an earlier arrow
-			// can see it
-			let rungs = [];
-			let negotiate;
-
 			// rmnet supports MAPv5 checksum offload; try it first there and
 			// renegotiate plain QMAP when the modem rejects it (some answer
 			// a v5 request with aggregation fully disabled)
 			negotiate = (dap, ver) => {
-				let args = { qos: 0, llp: wdamod.LLP_RAW_IP };
+				// the wire framing follows the datapath: raw-IP everywhere
+				// except the ethernet pseudo-mode, which keeps 802.3 (only
+				// reachable here when a WDA service exists after all — the
+				// WDA-less gate above handles that case)
+				let args = { qos: 0,
+					llp: caps.llp_802_3 ? wdamod.LLP_802_3 : wdamod.LLP_RAW_IP };
 
 				if (caps.qmap) {
 					args.ul_protocol = dap;
@@ -163,96 +286,9 @@ export function setup(self, dp, o, next)
 					if (!aggr_ok)
 						return fail('wda_format', { error: 'aggregation_rejected', echo: wdata });
 
-					let v5 = (ver == 5);
-
-					// the modem may clamp the aggregation size; follow it
-					let r = netlink.setup(fxi, {
-						netdev: dp.netdev,
-						backend: backend,
-						// the add-on datapaths the daemon loaded (the named one,
-						// or all installed ones under 'auto'); setup() picks the
-						// implementation for the backend chosen above
-						plugins: dp.plugins,
-						qmap_version: ver,
-						v5: v5,   // derived; for add-ons written before v4
-						mux: map(dp.mux_links ?? [], (e) => ({
-							id: e.id,
-							name: e.name ?? sprintf('%sm%d', dp.netdev, e.id),
-							mtu: e.mtu,
-						})),
-						dgram_size: (wdata.dl_max_size > 0) ? wdata.dl_max_size : dgram,
-						mtu: dp.mtu,
-						// negotiated uplink aggregation maxima (item 3: host-side
-						// rmnet egress coalesce, best-effort where supported)
-						ul_agg: { count: wdata.ul_max_datagrams ?? 0, size: wdata.ul_max_size ?? 0 },
-					});
-
-					if (!r.ok)
-						return fail('datapath', r);
-
-					// A version change while a data session is UP is accepted by
-					// SET_DATA_FORMAT but not acted on: HW-observed on the
-					// RG650E, where v5 -> v1 left the downlink silent — nothing
-					// reached even the USB parent, so it is upstream of rmnet and
-					// not a demux problem. The modem latches the aggregation
-					// format while a session is active. Taking every context on
-					// the modem down is enough (HW-verified); a modem reset also
-					// works but is the bigger hammer. Say which, rather than
-					// leave the operator with a datapath reporting the new
-					// version while no traffic flows.
-					let was = self.datapath?.qmap_version;
-
-					if (caps.qmap && was != null && was != ver)
-						log('notice', sprintf('QMAP version changed v%d -> v%d while a session was up; the modem latches the format until every context on it goes down (ifdown), so bring them down and back up if the data session stays silent',
-							was, ver));
-
-					self.datapath = {
-						// what setup() ACTUALLY ran: it drops to raw_ip when the
-						// selected backend has no channels to build
-						backend: r.backend ?? backend,
-						// config channel -> the QMAP id the modem must tag it
-						// with. Equal unless the datapath adopts a driver's own
-						// children (see map_id in netlink.uc); context.uc binds
-						// WDS to this, not to the config number.
-						map_ids: r.map_ids,
-						// the QMAP header version actually negotiated (1|4|5),
-						// and null where QMAP is not on the wire at all: the
-						// ladder falls back to rung 1 for a datapath that has no
-						// versions to offer (raw_ip), and reporting that as
-						// "QMAP v1" would describe a header nobody sends.
-						// `v5` stays for everything reading the old boolean
-						qmap_version: caps.qmap ? ver : null,
-						v5: v5,
-						urb_size: r.urb_size,
-						mux_devs: r.mux_devs,
-						// netlink.setup may move the parent to a raw kernel
-						// name (freeing a stale L3 name for a mux child)
-						parent: r.parent ?? dp.netdev,
-						ep_id: dp.ep_id,
-						ep_type: dp.ep_type,
-						// the WDA data-aggregation the modem actually negotiated
-						// (what makes muxing/aggregation observable in status)
-						wda: {
-							dl_protocol: wdata.dl_protocol,
-							ul_protocol: wdata.ul_protocol,
-							dl_max_size: wdata.dl_max_size,
-							dl_max_datagrams: wdata.dl_max_datagrams,
-							ul_max_size: wdata.ul_max_size,
-							ul_max_datagrams: wdata.ul_max_datagrams,
-						},
-						// host-side uplink aggregation we asked the datapath to coalesce
-						ul_agg: (caps.tx_aggr &&
-						         (wdata.ul_max_datagrams ?? 0) > 1) ?
-							{ size: wdata.ul_max_size, count: wdata.ul_max_datagrams } : null,
-					};
-
-					// always name the version — it used to appear only for v5,
-					// so "datapath: rmnet" left you guessing between v1 and v4
-					log('notice', sprintf('datapath: %s%s%s, mux [%s]',
-						backend, caps.qmap ? sprintf('/qmap v%d', ver) : '',
-						(r.urb_size != null) ? sprintf(', urb %d', r.urb_size) : '',
-						join(' ', r.mux_devs)));
-					next();
+					// the modem may clamp the aggregation size; follow it —
+					// the shared tail does netlink.setup + record + announce
+					finish(wdata, ver);
 				});
 			};
 

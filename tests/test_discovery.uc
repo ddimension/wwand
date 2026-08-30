@@ -199,6 +199,15 @@ let chw = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: null }, huaw
 eq(chw.protocol, 'ncm', 'cdc-wdm huawei_cdc_ncm -> ncm, not qmi');
 eq(chw.unknown, false, 'huawei: identified, so not flagged unknown');
 
+// is_at_driver: the gate for using a control cdc-wdm as the AT channel
+eq(discovery.is_at_driver('huawei_cdc_ncm'), true, 'is_at_driver: huawei_cdc_ncm');
+eq(discovery.is_at_driver('rndis_host'), true, 'is_at_driver: rndis_host');
+eq(discovery.is_at_driver('cdc_ether'), true, 'is_at_driver: cdc_ether');
+eq(discovery.is_at_driver('cdc_ncm'), true, 'is_at_driver: cdc_ncm');
+eq(discovery.is_at_driver('qmi_wwan'), false, 'is_at_driver: qmi_wwan is not AT');
+eq(discovery.is_at_driver('cdc_mbim'), false, 'is_at_driver: cdc_mbim is not AT');
+eq(discovery.is_at_driver(null), false, 'is_at_driver: null driver');
+
 // A standalone cdc_wdm is a CDC "device management" channel (subclass DMM) whose
 // payload the spec leaves vendor-defined, so the driver name says nothing about
 // the protocol. Such a device normally pairs it with an AT-driven netdev — and
@@ -565,6 +574,33 @@ uloop.run();
 	// legacy bare id still goes through the readlink matcher (null here)
 	eq(discovery.device_for_usb_path('3-1', fx), null,
 		'path: bare id uses the legacy matcher (no readlink in this fx)');
+})();
+
+// --- path_of_device: /dev node -> stable anchor (migration) --------------------
+(function() {
+	const USB_IF = '../../../../devices/platform/soc/11200000.usb/usb1/1-1/1-1.3/1-1.3.4/1-1.3.4:1.2';
+	const MHI_DEV = '/sys/devices/platform/soc@0/1c08000.pcie/pci0000:00/0000:01:00.0/mhi0';
+
+	let fx = {
+		readlink: (p) => ({
+			'/sys/class/usbmisc/cdc-wdm0/device': USB_IF,
+			'/sys/class/wwan/wwan0qmi0/device': MHI_DEV,
+		})[p],
+		realpath: (p) => (p == '/sys/class/wwan/wwan0qmi0/device') ? MHI_DEV : null,
+		glob: (p) => [], read: (p) => null, lsdir: (p) => null, access: (p) => false,
+	};
+
+	eq(discovery.path_of_device('/dev/cdc-wdm0', fx), '1-1.3.4',
+		'path_of_device: usbmisc node -> short usb id');
+	eq(discovery.path_of_device('cdc-wdm0', fx), '1-1.3.4',
+		'path_of_device: bare basename accepted');
+	eq(discovery.path_of_device('/dev/wwan0qmi0', fx),
+		'platform/soc@0/1c08000.pcie/pci0000:00/0000:01:00.0/mhi0',
+		'path_of_device: wwan port -> full sysfs path');
+	eq(discovery.path_of_device('/dev/cdc-wdm7', fx), null,
+		'path_of_device: unknown node -> null');
+	eq(discovery.path_of_device(null, fx), null,
+		'path_of_device: null -> null');
 })();
 
 // --- wwan framework (PCIe/MHI) control-device discovery ----------------------

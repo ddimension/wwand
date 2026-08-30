@@ -390,7 +390,13 @@ export function open_transport(path, baud, log)
 	// deferred import: wwand_io is a native module, tests never load it
 	let qmit = require('wwand_io');
 
-	let handle = qmit.open_tty(path, baud ?? 115200);
+	// a cdc-wdm is a char device, not a tty — termios setup would fail with
+	// ENOTTY. The huawei_cdc_ncm AT channel lives on one (the driver registers
+	// its wdm as the embedded AT port; kernel drivers/net/usb/huawei_cdc_ncm.c),
+	// so open it as a plain stream — the same raw open the QMI/MBIM sessions use.
+	let handle = match(path ?? '', /^\/dev\/cdc-wdm[0-9]+$/)
+		? qmit.open(path)
+		: qmit.open_tty(path, baud ?? 115200);
 
 	if (!handle) {
 		if (log)

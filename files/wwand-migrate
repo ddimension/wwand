@@ -20,13 +20,15 @@
 
 import * as libuci from 'uci';
 import * as config from 'wwand.config';
+import * as discovery from 'wwand.discovery';
 
 const apply = (ARGV[0] == '--apply');
 
 let cursor = libuci.cursor();
 let raw = { network: cursor.get_all('network') };
 
-let changes = config.migrate_plan(raw);
+// anchor modems on the stable sysfs path, not the /dev node
+let changes = config.migrate_plan(raw, { resolve_path: discovery.path_of_device });
 
 if (!length(changes)) {
 	print("nothing to migrate: config is already network-native (or has nothing to convert)\n");
