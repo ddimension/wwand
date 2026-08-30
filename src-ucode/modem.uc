@@ -134,6 +134,13 @@ export function create(opts)
 		active_sim: null,  // matched per-SIM override (config wwand_sim) for the
 		                   // inserted card: overrides pincode + apn/auth/pdp
 		pin1: null,        // SIM PIN-lock state { state, retries, enabled }
+		// what the card last told us about ITSELF, from the UIM indications
+		// armed in _install_uim_refresh. Both are diagnostics, not state the
+		// machine acts on: a busy card explains failing reads, and sim_note
+		// carries the last named card-side event (session closed and why, an
+		// internal recovery, an activation that failed).
+		sim_busy: false,
+		sim_note: null,
 
 		services: {},      // service id (string) -> { major, minor }
 		info: {},          // model, revision, imei, ...
@@ -482,17 +489,117 @@ export function create(opts)
 			return;
 		self._uim_refresh_armed = true;
 
+		let session = () => ({
+			session_type: uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING, aid: '',
+		});
+
 		self.uim.on('REFRESH_IND', (data) => {
 			let stage = data?.event?.stage;
-			log('info', sprintf('sim refresh (stage %d)', stage ?? -1));
+			let enf = data?.enforcement;
+
+			// What the card is prepared to interrupt to get this through. Worth
+			// logging because DATA_CALL means our WAN is about to be pulled and
+			// nothing else would explain it.
+			let forced = (enf != null && (enf & uimmod.REFRESH_ENFORCE_DATA_CALL))
+				? ' (will interrupt an active data call)' : '';
+
+			log('info', sprintf('sim refresh (stage %d)%s', stage ?? -1, forced));
+
+			// WAIT_FOR_OK: the card is ASKING. It reached this stage because we
+			// voted for init below, and it now waits for an answer — so answer.
+			// A vote with no reply is worse than not voting at all: the card
+			// blocks until its own timeout instead of refreshing immediately.
+			// We always say yes; the point of voting was never to refuse, it was
+			// to be told first rather than have the session vanish mid-call.
+			if (stage == uimmod.REFRESH_STAGE_WAIT_FOR_OK) {
+				self.uim.request('REFRESH_OK', {
+					session: session(), ok: { ok_to_refresh: 1 },
+				}, (e) => {
+					if (e)
+						log('warn', sprintf('refresh-ok refused (%s) — the card may stall until its own timeout',
+							e.error ?? '?'));
+				}, { no_recovery: true });
+
+				return;
+			}
+
 			// full reapply only once the refresh completed successfully
 			if (stage == uimmod.REFRESH_STAGE_END_SUCCESS)
 				self.reapply_sim();
 		});
 
+		// Diagnostics. Each of these was previously invisible: the card would
+		// simply stop answering, and the ladder would count protocol errors at a
+		// modem that was telling us exactly what was wrong.
+		self.uim.on('SESSION_CLOSED_IND', (data) => {
+			let cause = data?.cause;
+			let name = uimmod.SESSION_CLOSE_CAUSES[sprintf('%d', cause ?? 0)]
+				?? sprintf('unknown (%d)', cause ?? -1);
+			let file = (data?.file_id != null)
+				? sprintf(' (file %04X)', data.file_id) : '';
+
+			log('warn', sprintf('uim session closed: %s%s', name, file));
+			self.sim_note = sprintf('session closed: %s', name);
+			emit('sim_session_closed', { cause: cause, cause_text: name,
+			                             file_id: data?.file_id ?? null });
+		});
+
+		self.uim.on('SIM_BUSY_STATUS_IND', (data) => {
+			// one byte per slot; report the one we are using
+			let busy = data?.busy?.[(+(self.config?.sim_slot ?? 1) || 1) - 1];
+
+			if (busy == null || !!self.sim_busy == !!busy)
+				return;
+
+			self.sim_busy = !!busy;
+			log(busy ? 'warn' : 'info',
+				sprintf('sim card %s', busy ? 'busy (reads will fail until it clears)' : 'no longer busy'));
+			emit('sim_busy', { busy: !!busy });
+		});
+
+		self.uim.on('RECOVERY_IND', (data) => {
+			// the card recovered internally: sessions, logical channels and
+			// anything read from it are stale. Re-read rather than trust.
+			log('warn', sprintf('sim card recovered internally (slot %d) — re-reading identity',
+				data?.slot ?? -1));
+			self.sim_note = 'card recovered';
+			emit('sim_recovery', { slot: data?.slot ?? null });
+			self.reapply_sim();
+		});
+
+		self.uim.on('CARD_ACTIVATION_STATUS_IND', (data) => {
+			let st = data?.status;
+			let name = uimmod.CARD_ACTIVATION_STATES[sprintf('%d', st ?? 0)]
+				?? sprintf('unknown (%d)', st ?? -1);
+
+			// the window where a card is present but not yet usable, which
+			// otherwise reads as a broken SIM
+			log(st == uimmod.CARD_ACTIVATION_END_FAILURE ? 'warn' : 'info',
+				sprintf('card activation %s (slot %d)', name, data?.slot ?? -1));
+			self.sim_note = (st == uimmod.CARD_ACTIVATION_END_SUCCESS)
+				? null : sprintf('card activation %s', name);
+			emit('sim_activation', { slot: data?.slot ?? null,
+			                         status: st, status_text: name });
+		});
+
+		// Arm the mask. Best-effort as a whole: a modem that refuses the extra
+		// bits gets one more try with card-status alone, because losing the
+		// PIN-readiness indication to gain diagnostics would be a bad trade.
+		self.uim.request('REGISTER_EVENTS', { mask: uimmod.EVENTS_WANTED }, (e) => {
+			if (!e)
+				return;
+
+			log('debug', 'uim event registration refused for the full mask, falling back to card status');
+			self.uim.request('REGISTER_EVENTS', { mask: uimmod.EVENT_CARD_STATUS },
+				(e2) => null, { no_recovery: true });
+		}, { no_recovery: true });
+
 		self.uim.request('REFRESH_REGISTER_ALL', {
-			session:  { session_type: uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING, aid: '' },
+			session:  session(),
 			register: { register_flag: 1 },
+			// ask to be consulted before a refresh rather than after. Safe only
+			// because the WAIT_FOR_OK handler above always answers.
+			vote:     { vote_for_init: 1 },
 		}, (e) => {
 			if (e)
 				log('debug', 'uim refresh register failed (sim-refresh notifications unavailable)');

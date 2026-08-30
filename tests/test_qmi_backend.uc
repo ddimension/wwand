@@ -19,6 +19,8 @@ import * as backend from 'wwand/qmi_backend.uc';
 import * as nasmod from 'wwand/codec/schema/nas.uc';
 import * as wdsmod from 'wwand/codec/schema/wds.uc';
 import * as dsdmod from 'wwand/codec/schema/dsd.uc';
+import * as uimmod from 'wwand/codec/schema/uim.uc';
+import * as tlvmod from 'wwand/codec/tlv.uc';
 
 uloop.init();
 
@@ -208,5 +210,69 @@ eq(nasmod.active_band_name(145), 'LTE B20', 'active band: 145 = LTE B20 (non-con
 eq(nasmod.active_band_name(269), 'NR n78', 'active band: 269 = NR n78');
 eq(nasmod.active_band_name(45), 'GSM 900', 'active band: 45 = GSM 900');
 eq(nasmod.active_band_name(9999), 'band 9999', 'active band: unknown value passthrough');
+
+// --- UIM card diagnostics: the four indications EVENTS_WANTED arms -----------
+// Hand-built wire buffers, decoded through the schema itself, because these are
+// exactly the decoders where a wrong tag or width produces plausible garbage
+// rather than an error. Each was previously invisible: the card would simply
+// stop answering and the recovery ladder would count protocol errors at a modem
+// that was telling us what was wrong.
+
+let U = uimmod.default.messages;
+
+// SESSION_CLOSED (0x0043). `cause` is FOUR bytes in the IDL even though every
+// defined value fits in one — decoding it as u8 would swallow the file_id TLV
+// that follows and say nothing about it.
+let sc = tlvmod.unpack(U.SESSION_CLOSED_IND.ind,
+	tlv(0x01, u8(1)) + tlv(0x11, u8(2)) + tlv(0x12, u8(0)) +
+	tlv(0x13, u32(11)) + tlv(0x14, u16(0x6F07)));
+eq(sc.slot, 1, 'uim ind: session closed slot');
+eq(sc.channel_id, 2, 'uim ind: logical channel id');
+eq(sc.cause, 11, 'uim ind: cause decoded from a 4-byte field');
+eq(sc.file_id, 0x6F07, 'uim ind: the missing file is named (EF_IMSI)');
+eq(uimmod.SESSION_CLOSE_CAUSES[sprintf('%d', sc.cause)], 'mandatory file missing',
+	'uim ind: ...and the cause has a name');
+eq(uimmod.SESSION_CLOSE_CAUSES['4'], 'card removed', 'uim ind: card removed named');
+eq(uimmod.SESSION_CLOSE_CAUSES['7'], 'internal card recovery', 'uim ind: recovery named');
+
+// a session we closed ourselves must not read as a fault
+eq(uimmod.SESSION_CLOSE_CAUSES['1'], 'client request', 'uim ind: our own close is named as such');
+
+// SIM_BUSY (0x004A): one byte per slot, array with a u8 count
+let sb = tlvmod.unpack(U.SIM_BUSY_STATUS_IND.ind, tlv(0x10, u8(2) + u8(0) + u8(1)));
+eq(sb.busy, [ 0, 1 ], 'uim ind: sim busy is per-slot, slot 2 busy');
+
+// RECOVERY (0x0050): the card recovered internally, everything cached is stale
+let rc = tlvmod.unpack(U.RECOVERY_IND.ind, tlv(0x01, u8(2)));
+eq(rc.slot, 2, 'uim ind: recovery names the slot');
+
+// CARD_ACTIVATION (0x0055): slot 1 byte, status 4 bytes
+let ca2 = tlvmod.unpack(U.CARD_ACTIVATION_STATUS_IND.ind,
+	tlv(0x01, u8(1)) + tlv(0x02, u32(2)));
+eq(ca2.slot, 1, 'uim ind: activation slot');
+eq(ca2.status, uimmod.CARD_ACTIVATION_END_FAILURE, 'uim ind: activation failed');
+eq(uimmod.CARD_ACTIVATION_STATES['2'], 'failed', 'uim ind: activation state named');
+
+// REFRESH (0x0033) now carries the enforcement mask as well — u64, and reading
+// it as u32 would leave four bytes that decode as the head of the next TLV
+let rf = tlvmod.unpack(U.REFRESH_IND.ind,
+	tlv(0x10, u8(0) + u8(1) + u8(0)) + tlv(0x11, u64(2)));
+eq(rf.event.stage, uimmod.REFRESH_STAGE_WAIT_FOR_OK, 'uim ind: refresh asks first');
+ok((rf.enforcement & uimmod.REFRESH_ENFORCE_DATA_CALL) != 0,
+	'uim ind: ...and says it will interrupt a data call');
+
+// the event mask we actually arm
+ok((uimmod.EVENTS_WANTED & uimmod.EVENT_CARD_STATUS) != 0,
+	'uim events: card status stays armed (PIN readiness depends on it)');
+for (let b in [ uimmod.EVENT_SESSION_CLOSE, uimmod.EVENT_SIM_BUSY,
+                uimmod.EVENT_RECOVERY_COMPLETE, uimmod.EVENT_CARD_ACTIVATION ])
+	ok((uimmod.EVENTS_WANTED & b) != 0, sprintf('uim events: bit %d armed', b));
+eq(uimmod.EVENTS_WANTED & uimmod.EVENT_SAP_CONNECTION, 0,
+	'uim events: nothing armed that has no decoder');
+
+// REFRESH_OK exists at the id the open sources attest, with the vote TLV that
+// makes it reachable — the pair libqmi models neither half of
+eq(U.REFRESH_OK.id, 0x002B, 'uim: refresh-ok message id');
+eq(U.REFRESH_REGISTER_ALL.req.vote.t, 0x10, 'uim: vote-for-init is TLV 0x10');
 
 done('test_qmi_backend');

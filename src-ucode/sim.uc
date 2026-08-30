@@ -172,8 +172,12 @@ function unlock_uim(modem, cb, tries)
 			if (!pincode)
 				return cb({ blocked: true, reason: 'pin_required_no_pin' });
 
-			// best-effort: get card status change indications for readiness
-			uim.request('REGISTER_EVENTS', { mask: uimmod.EVENT_CARD_STATUS },
+			// best-effort: get card status change indications for readiness.
+			// The FULL mask, not just card status — modem.uc arms the same set
+			// when it brings UIM up, and REGISTER_EVENTS replaces the mask
+			// rather than adding to it, so asking for less here would silently
+			// switch the card diagnostics back off.
+			uim.request('REGISTER_EVENTS', { mask: uimmod.EVENTS_WANTED },
 				(e) => null);
 
 			let pin_id = app.upin_replaces_pin1 ? uimmod.PIN_ID_UPIN : uimmod.PIN_ID_PIN1;

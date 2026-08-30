@@ -1559,6 +1559,11 @@ export function create(opts)
 				apdu_backend: entry.modem?._apdu_be,   // mbim | qmi | at (once probed)
 				pin1: entry.modem?.pin1,
 				sim_block: entry.modem?.sim_block,  // { reason, retries } when SIM_BLOCKED
+				// card-side diagnostics from the UIM indications: a busy card
+				// (reads fail until it clears) and the last named card event
+				// (session closed and why / internal recovery / activation)
+				sim_busy: entry.modem?.sim_busy ?? false,
+				sim_note: entry.modem?.sim_note ?? null,
 				manufacturer: entry.modem?.info?.manufacturer,
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,

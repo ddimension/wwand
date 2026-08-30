@@ -56,8 +56,68 @@ export const PIN_ID_UPIN = 3;
 export const SESSION_TYPE_PRIMARY_GW_PROVISIONING = 0;
 export const SESSION_TYPE_CARD_SLOT_1 = 6;
 
-// QmiUimEventRegistrationFlag
-export const EVENT_CARD_STATUS = (1 << 0);
+// QmiUimEventRegistrationFlag — the mask of QMI_UIM_EVENT_REG (0x002E).
+//
+// libqmi models four of these (0, 1, 2, 4). The rest are device-observed: every
+// bit below is documented in the vendor IDL and every indication it unlocks is
+// present in the RG650E's own UIM request/indication table (2026-08-30). We arm
+// the four that turn a silent SIM failure into a named event and leave the rest
+// declared — SAP, simlock and the reduced/extended card-status variants have no
+// consumer here, and arming an indication nothing decodes only costs wakeups.
+export const EVENT_CARD_STATUS          = (1 << 0);
+export const EVENT_SAP_CONNECTION       = (1 << 1);
+export const EVENT_EXT_CARD_STATUS      = (1 << 2);
+export const EVENT_SESSION_CLOSE        = (1 << 3);
+export const EVENT_SLOT_STATUS          = (1 << 4);
+export const EVENT_SIM_BUSY             = (1 << 5);
+export const EVENT_REDUCED_CARD_STATUS  = (1 << 6);
+export const EVENT_RECOVERY_COMPLETE    = (1 << 7);
+export const EVENT_SUPPLY_VOLTAGE       = (1 << 8);
+export const EVENT_CARD_ACTIVATION      = (1 << 9);
+export const EVENT_SIMLOCK_CONFIG       = (1 << 10);
+export const EVENT_SIMLOCK_TEMP_UNLOCK  = (1 << 11);
+
+// what wwand actually asks for: card status, plus the four diagnostics below.
+// Kept as one constant so the request site reads as a decision rather than a
+// bit-fiddle, and so a modem that refuses the whole mask fails in one place.
+export const EVENTS_WANTED = EVENT_CARD_STATUS | EVENT_SESSION_CLOSE |
+                             EVENT_SIM_BUSY | EVENT_RECOVERY_COMPLETE |
+                             EVENT_CARD_ACTIVATION;
+
+// QmiUimSessionCloseCause — why the card dropped our provisioning session.
+// This is the difference between "we closed it" and "the card is failing", and
+// until now the session simply went away without a word.
+export const SESSION_CLOSE_CAUSES = {
+	'0':  'unknown',
+	'1':  'client request',
+	'2':  'card error',
+	'3':  'card powered down',
+	'4':  'card removed',
+	'5':  'refresh',
+	'6':  'PIN status unavailable',
+	'7':  'internal card recovery',
+	'8':  'FDN enabled but unsupported by the terminal',
+	'9':  'personalization failure',
+	'10': 'file content invalid',
+	'11': 'mandatory file missing',
+};
+
+// card_activation_status_enum_v01
+export const CARD_ACTIVATION_START        = 0;
+export const CARD_ACTIVATION_END_SUCCESS  = 1;
+export const CARD_ACTIVATION_END_FAILURE  = 2;
+
+export const CARD_ACTIVATION_STATES = {
+	'0': 'started', '1': 'completed', '2': 'failed',
+};
+
+// refresh_enforcement_policy_mask on REFRESH_IND (0x0033) — what the card is
+// willing to interrupt to push the refresh through. DATA_CALL is the one that
+// matters on a router: it means the card will pull the session out from under
+// an active data call rather than wait.
+export const REFRESH_ENFORCE_NAVIGATING_MENU = (1 << 0);
+export const REFRESH_ENFORCE_DATA_CALL       = (1 << 1);
+export const REFRESH_ENFORCE_VOICE_CALL      = (1 << 2);
 
 // UIM Session TLV: mandatory on most requests. aid stays empty for
 // provisioning sessions.
@@ -286,14 +346,89 @@ export default {
 			req: {
 				session:  SESSION,
 				register: { t: 0x02, f: { register_flag: 'u8' } },
+				// Optional, and the half of the refresh protocol libqmi does not
+				// model. Voting for init puts us in the WAIT_FOR_OK stage: the
+				// card asks before it refreshes and waits for REFRESH_OK (0x002B).
+				// Both answers have a cost — a client that votes and never
+				// answers stalls the card, one that does not vote gets its
+				// session pulled mid-data-call — so this is only sent together
+				// with a handler that always replies. See modem.uc.
+				vote:     { t: 0x10, f: { vote_for_init: 'u8' } },
+			},
+			resp: {},
+		},
+
+		// The answer to a WAIT_FOR_OK refresh. libqmi models neither this message
+		// nor the vote above, so a libqmi-based stack structurally cannot complete
+		// that handshake. Message id is openly attested (Gobi eQMI_UIM_REFRESH_OK
+		// = 43 = 0x2B) and present in the RG650E request table; the TLV pair is
+		// device-observed: 0x01 session (aggregate), 0x02 ok_to_refresh u8.
+		REFRESH_OK: {
+			id: 0x002B,
+			req: {
+				session: SESSION,
+				ok:      { t: 0x02, f: { ok_to_refresh: 'u8' } },
 			},
 			resp: {},
 		},
 
 		REFRESH_IND: {
 			id: 0x0033,
-			ind: { event: { t: 0x10, f: {
-				stage: 'u8', mode: 'u8', session_type: 'u8' } } },
+			ind: {
+				event: { t: 0x10, f: {
+					stage: 'u8', mode: 'u8', session_type: 'u8' } },
+				// u64, not u32 — the IDL marks it GENERIC_8_BYTE. Getting the
+				// width wrong here would not fail, it would silently swallow the
+				// following TLV.
+				enforcement: { t: 0x11, f: 'u64' },
+			},
+		},
+
+		// --- diagnostics: the four indications EVENTS_WANTED arms ---------------
+		// Every one of these is a failure the daemon could previously only observe
+		// as "the SIM stopped working". TLV ids are device-observed against the
+		// vendor IDL encoder tables and cross-checked against the RG650E's own
+		// indication table.
+
+		// A provisioning session the card closed on us, with the reason. Note
+		// `cause` is FOUR bytes (GENERIC_4_BYTE in the IDL) even though every
+		// defined value fits in one.
+		SESSION_CLOSED_IND: {
+			id: 0x0043,
+			ind: {
+				slot:         { t: 0x01, f: 'u8' },
+				aid:          { t: 0x10, f: 'lstring' },
+				channel_id:   { t: 0x11, f: 'u8' },
+				session_type: { t: 0x12, f: 'u8' },
+				cause:        { t: 0x13, f: 'u32' },
+				// which mandatory file was missing or unreadable, when that is
+				// the cause — the one field that says *what* to go and look at
+				file_id:      { t: 0x14, f: 'u16' },
+			},
+		},
+
+		// "the card is busy" — one byte per slot. A busy card refuses reads, and
+		// without this a PIN or ICCID read just times out for no visible reason.
+		SIM_BUSY_STATUS_IND: {
+			id: 0x004A,
+			ind: { busy: { t: 0x10, f: { n: 'u8', of: 'u8' } } },
+		},
+
+		// the card completed an internal recovery: everything cached about it
+		// (sessions, channels, file contents) is now suspect
+		RECOVERY_IND: {
+			id: 0x0050,
+			ind: { slot: { t: 0x01, f: 'u8' } },
+		},
+
+		// card activation start/end — the window in which a card is present but
+		// not yet usable, which otherwise reads as a broken SIM
+		CARD_ACTIVATION_STATUS_IND: {
+			id: 0x0055,
+			ind: {
+				slot:   { t: 0x01, f: 'u8' },
+				status: { t: 0x02, f: 'u32' },
+			},
 		},
 	},
 };
