@@ -9,10 +9,25 @@
 export const LLP_802_3 = 1;
 export const LLP_RAW_IP = 2;
 
-// QmiWdaDataAggregationProtocol
+// QmiWdaDataAggregationProtocol — the full ladder, because taking the two we
+// use out of context is how the v5 value came to be wrong: it was 8, which is
+// QMAPv4. libqmi 1.38 (src/libqmi-glib/qmi-enums-wda.h) has QMAPV4 = 0x08 and
+// QMAPV5 = 0x09, and quectel-cm agrees from the other side — it sends 0x05 or
+// 0x09 and nothing in between (`if (qmap_version != 0x09) qmap_version = 0x05`).
+//
+// The old value has a field symptom on record: the RG650E "declining DAP 8
+// aggregation edge cases" and renegotiating plain QMAP was not a firmware
+// quirk. We were asking for QMAPv4.
 export const DAP_DISABLED = 0;
-export const DAP_QMAP = 5;
-export const DAP_QMAPV5 = 8;
+export const DAP_TLP      = 1;
+export const DAP_QC_NCM   = 2;
+export const DAP_MBIM     = 3;
+export const DAP_RNDIS    = 4;
+export const DAP_QMAP     = 5;
+export const DAP_QMAPV2   = 6;
+export const DAP_QMAPV3   = 7;
+export const DAP_QMAPV4   = 8;
+export const DAP_QMAPV5   = 9;
 
 // QmiDataEndpointType
 export const ENDPOINT_TYPE_HSUSB = 2;

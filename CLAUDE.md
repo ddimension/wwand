@@ -230,5 +230,8 @@ Modem is normally in **QMI mode**
   rewrite removes the monitor entirely; this class of wedge is gone.
 - RG650E firmware **rejects MBIM_OPEN** (STATUS_FAILURE) — reference mbimcli
   fails identically → firmware bug, not wwand. MBIM stays QMI-only on this HW.
-- RG650E declines QMAP DAP 8 aggregation edge cases → renegotiate plain QMAP;
+- RG650E "declines QMAP DAP 8" was OUR bug, not its firmware: DAP 8 is QMAPv4
+  (libqmi QMI_WDA_DATA_AGGREGATION_PROTOCOL_QMAPV4 = 0x08; v5 is 0x09, and
+  quectel-cm only ever sends 0x05 or 0x09). `DAP_QMAPV5` was 8 and is 9 now, so
+  the renegotiation that used to fire here should stop. Re-verify on HW;
   `dl_datagram_max_size` (default model table = 31 KB) is overridable per modem.

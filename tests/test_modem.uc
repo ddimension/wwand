@@ -446,7 +446,10 @@ scenario('datapath', {
 		let sdf = mock.calls_for('SET_DATA_FORMAT');
 		eq(length(sdf), 1, 'dp: one wda format request');
 		eq(sdf[0].args.llp, 2, 'dp: raw-ip requested');
-		eq(sdf[0].args.ul_protocol, 8, 'dp: qmap v5 requested for rmnet');
+		// 9, not 8: libqmi's QMAPV4 is 0x08 and QMAPV5 is 0x09. This assertion
+		// held the wrong value and so froze the bug — asking for v4 and calling
+		// it v5, which the modem answered by renegotiating.
+		eq(sdf[0].args.ul_protocol, 9, 'dp: qmap v5 (0x09) requested for rmnet');
 		eq(modem.datapath.v5, true, 'dp: v5 negotiated');
 		eq(sdf[0].args.dl_max_size, 4096, 'dp: aggregation size');
 		eq(sdf[0].args.endpoint, { type: 2, iface: 4 }, 'dp: endpoint tlv');
@@ -468,7 +471,8 @@ let dpfx2 = fakefx.create({ present: {
 scenario('datapath-v5-declined', {
 	handlers: base_handlers({
 		SET_DATA_FORMAT: (args, meta) => {
-			if (args.dl_protocol == 8)
+			// a modem that refuses v5 (0x09) — the renegotiation fixture
+			if (args.dl_protocol == 9)
 				return { qos: 0, llp: 2, ul_protocol: 0, dl_protocol: 0,
 				         dl_max_datagrams: 0, dl_max_size: 0 };
 

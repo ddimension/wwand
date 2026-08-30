@@ -145,13 +145,13 @@ return {
 	// sizes the buffers, which here is the driver.
 	qmap: true,
 
-	// MAPv5. Not measurable from here — the driver fixes qmap_version at bind
-	// from its own table (driver_info->data >> 8) and exposes it nowhere — so
-	// this follows the reference client for this exact driver: quectel-cm sends
-	// `static int qmap_version = 0x05`. First thing to check on hardware; if a
-	// board disagrees it is this one line, and the plain-QMAP fallback in
-	// datapath_qmi still catches a modem that refuses v5 outright.
-	qmap_v5: true,
+	// MAPv5 is deliberately NOT declared. An earlier version of this file did,
+	// reasoning that quectel-cm "sends 0x05" — but 0x05 is the enum value for
+	// plain QMAP; v5 is 0x09. quectel-cm defaults to exactly that and raises it
+	// only when the DRIVER reports v5 through rmnet_info, which it reads over an
+	// ioctl this datapath has no equivalent for. So plain QMAP is what the
+	// reference client does here by default, and it is what we do. A board that
+	// wants v5 needs the driver's answer, not a guess from us.
 
 	// The children belong to the KERNEL: only a qmi_wwan_q reload creates or
 	// removes them. Never prune.

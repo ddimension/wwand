@@ -3,6 +3,7 @@
 'use strict';
 
 import { eq, ok, done } from './lib/check.uc';
+import * as wda from 'wwand/codec/schema/wda.uc';
 import * as qmux from 'wwand/codec/qmux.uc';
 import * as tlv from 'wwand/codec/tlv.uc';
 import ctl from 'wwand/codec/schema/ctl.uc';
@@ -145,5 +146,14 @@ let good = qmux.encode(0x01, 0x05, 7, 0x0022, tlv.pack({ x: { t: 1, f: 'u32' } }
 for (let cut = 12; cut < length(good); cut++)
 	qmux.decode(substr(good, 0, cut));
 ok(true, 'progressive truncation survived');
+
+// The WDA data-aggregation ladder, pinned against libqmi 1.38
+// (src/libqmi-glib/qmi-enums-wda.h) because getting one wrong is invisible:
+// DAP_QMAPV5 was 8 — which is QMAPv4 — and the modem simply renegotiated, so
+// it looked like a firmware quirk ("RG650E declines DAP 8") for months.
+// quectel-cm confirms the pair from the other side: it sends 0x05 or 0x09.
+eq([ wda.DAP_DISABLED, wda.DAP_TLP, wda.DAP_QC_NCM, wda.DAP_MBIM, wda.DAP_RNDIS,
+     wda.DAP_QMAP, wda.DAP_QMAPV2, wda.DAP_QMAPV3, wda.DAP_QMAPV4, wda.DAP_QMAPV5 ],
+   [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ], 'wda: the aggregation enum matches libqmi 1.38');
 
 done('test_qmux');
