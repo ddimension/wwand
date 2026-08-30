@@ -216,6 +216,12 @@ export function create(opts)
 		// only exists after the first slot query.
 		self.multisim_caps = null;
 		self.read_multisim_caps = (cb) => {
+			// slot_status() parks its own SYS_CAPS answer on the client. Take
+			// that before asking again — the comment above always said "getter,
+			// not a copy", but this read the local field only, so a status page
+			// that had just listed the slots paid for a second identical query.
+			self.multisim_caps = self.multisim_caps ?? self.mbim?._multisim_caps;
+
 			if (self.multisim_caps)
 				return cb(self.multisim_caps);
 
