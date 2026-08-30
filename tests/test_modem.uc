@@ -1038,6 +1038,30 @@ scenario('fcc-off', {
 		   length(mock.calls_for('FOXCONN_SET_FCC_AUTHENTICATION_V2')), 0, 'fcc-off: no foxconn fcc message');
 	});
 
+// --- UIM: a teardown while REGISTER_EVENTS is pending must not send again -----
+// Same lesson as the CAT release, one layer up. Destroying the client reports
+// `cancelled` to the pending callback SYNCHRONOUSLY, and reading that as "the
+// modem refused the wide mask" fired the card-status fallback down a client
+// mid-destruction: a send that escapes teardown, and a timer that outlives the
+// pending table it should have been cancelled with.
+//
+// A null handler leaves REGISTER_EVENTS pending forever. Init does not wait on
+// it, so the modem still reaches READY with the request in flight — which is
+// exactly the state we need, and with a LIVE hub (a device-gone teardown would
+// not expose this, the hub is already closed there).
+scenario('uim-events-teardown', {
+	handlers: base_handlers({ REGISTER_EVENTS: () => null }),
+}, 'registered',
+	(modem, mock, events) => {
+		let sent = length(mock.calls_for('REGISTER_EVENTS'));
+		eq(sent, 1, 'uim-events: the wide mask went out once and is still pending');
+
+		modem.teardown();
+
+		eq(length(mock.calls_for('REGISTER_EVENTS')), sent,
+			'uim-events: a cancelled registration is not a refusal, so no fallback is sent');
+	});
+
 // --- CAT: a teardown while RELEASE_CID is in flight must not resume init ------
 // RELEASE_CID is asynchronous. A teardown starting while it is pending destroys
 // CTL FIRST, which reports `cancelled` to the release callback synchronously —

@@ -599,12 +599,26 @@ export function create(opts)
 		// Arm the mask. Best-effort as a whole: a modem that refuses the extra
 		// bits gets one more try with card-status alone, because losing the
 		// PIN-readiness indication to gain diagnostics would be a bad trade.
-		self.uim.request('REGISTER_EVENTS', { mask: uimmod.EVENTS_WANTED }, (e) => {
+		//
+		// The retry needs a guard, and it is the same lesson as the CAT release:
+		// a teardown while this request is pending destroys the client, which
+		// reports `cancelled` to this callback SYNCHRONOUSLY. Read as a refusal,
+		// that fired the fallback down a client mid-destruction — a send that
+		// escapes teardown, and a timer that outlives the pending table it was
+		// supposed to be cancelled with. `cancelled` is teardown, not "no".
+		let gen = self._gen;
+		let uim = self.uim;
+
+		uim.request('REGISTER_EVENTS', { mask: uimmod.EVENTS_WANTED }, (e) => {
 			if (!e)
 				return;
 
+			// not a refusal: the modem never got a chance to answer
+			if (e.error == 'cancelled' || self._gen != gen || self.uim != uim)
+				return;
+
 			log('debug', 'uim event registration refused for the full mask, falling back to card status');
-			self.uim.request('REGISTER_EVENTS', { mask: uimmod.EVENT_CARD_STATUS },
+			uim.request('REGISTER_EVENTS', { mask: uimmod.EVENT_CARD_STATUS },
 				(e2) => null, { no_recovery: true });
 		}, { no_recovery: true });
 
