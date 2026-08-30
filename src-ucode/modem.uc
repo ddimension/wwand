@@ -143,6 +143,7 @@ export function create(opts)
 		// internal recovery, an activation that failed).
 		sim_busy: false,
 		sim_note: null,
+		cat: null,          // toolkit client, alive only while cat_mode is applied
 		tmd: null,          // thermal-mitigation client, when the modem has TMD
 		thermal: null,      // { devices: [{id,label,max,level}], mitigated, level }
 		// Lifecycle generation. Bumped by teardown, so any callback still in
@@ -670,13 +671,52 @@ export function create(opts)
 		if (want == null || !self.services[sprintf('%d', catmod.default.service)])
 			return cb();
 
+		// This one IS on the critical path — it is one or two requests, and the
+		// toolkit configuration should be settled before the card is used. That
+		// makes teardown safety the whole problem: a teardown mid-request
+		// destroys the client, the callback fires with `cancelled`, and without
+		// a guard it would release a CID through a destroyed CTL and then
+		// resume init on a modem that no longer exists.
+		//
+		// `self.cat` exists so teardown destroys the client with the others;
+		// `gen` is what stops the continuation.
+		let gen = self._gen;
+
+		// every exit from here goes through this: it continues init exactly
+		// once, and never after a teardown
+		let finish = (client) => {
+			if (self._gen != gen) {
+				// teardown already destroyed it and CTL with it; releasing the
+				// CID is not possible and not ours to do any more
+				self.cat = null;
+				return;
+			}
+
+			self.cat = null;
+
+			if (client)
+				return self.release(client, () => cb());
+
+			cb();
+		};
+
 		self.alloc(catmod.default, (err, cat) => {
 			if (err || !cat)
-				return cb();
+				return finish(null);
+
+			if (self._gen != gen) {
+				self.release(cat);
+				return;
+			}
+
+			self.cat = cat;
 
 			// read before write: the tree's rule everywhere else, and here it
 			// also avoids re-announcing a terminal profile to a card mid-session
 			cat.request('GET_CONFIGURATION', {}, (ge, gd) => {
+				if (self._gen != gen)
+					return finish(null);
+
 				let have = ge ? null : gd?.mode;
 
 				// release(), not destroy(): destroy() drops our local client and
@@ -684,10 +724,13 @@ export function create(opts)
 				// init, and an init can repeat — a modem has a finite CID pool.
 				if (have == want) {
 					log('debug', sprintf('sim toolkit already %s', catmod.mode_name(want)));
-					return self.release(cat, () => cb());
+					return finish(cat);
 				}
 
 				cat.request('SET_CONFIGURATION', { mode: want }, (se) => {
+					if (self._gen != gen)
+						return finish(null);
+
 					if (se)
 						log('warn', sprintf('sim toolkit: cannot set %s (%s)',
 							catmod.mode_name(want), se.error ?? '?'));
@@ -696,7 +739,7 @@ export function create(opts)
 							have != null ? catmod.mode_name(have) : 'unknown',
 							catmod.mode_name(want)));
 
-					self.release(cat, () => cb());
+					finish(cat);
 				}, { no_recovery: true });
 			}, { no_recovery: true });
 		});
@@ -777,15 +820,27 @@ export function create(opts)
 			});
 
 			tmd.request('GET_MITIGATION_DEVICE_LIST', {}, (le, ld) => {
+				// Teardown destroys this client, which reports `cancelled` to
+				// this callback SYNCHRONOUSLY — and by then CTL is gone too, so
+				// a release() from here could never complete. Check first.
+				if (self._gen != gen || self.tmd == null)
+					return;
+
 				let list = le ? [] : (ld?.devices ?? []);
 
 				if (!length(list)) {
 					// the service exists but names no devices — nothing to
 					// watch. Release rather than drop: the CID is allocated on
 					// the modem until we hand it back.
+					//
+					// And do NOT call cb(): init was already continued at the
+					// top of this function. Calling it here advanced the state
+					// machine a SECOND time, on an empty list or a list timeout
+					// alike — the hazard of moving work off the critical path
+					// while leaving its continuation behind.
 					let dead = self.tmd;
 					self.tmd = null;
-					return self.release(dead, () => cb());
+					return self.release(dead);
 				}
 
 				self.thermal = {
@@ -1097,11 +1152,13 @@ export function create(opts)
 		// sees a stale generation.
 		self._gen++;
 
-		for (let c in [ self.ctl, self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg, self.dsd, self.tmd ])
+		for (let c in [ self.ctl, self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg,
+		               self.dsd, self.tmd, self.cat, self.wms ])
 			if (c)
 				c.destroy();
 
-		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = self.dsd = self.tmd = null;
+		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = null;
+		self.dsd = self.tmd = self.cat = self.wms = null;
 		// the readings belong to the client that is going away; keeping them
 		// would show a stale mitigation level for a modem we no longer talk to
 		self.thermal = null;
@@ -1123,6 +1180,11 @@ export function create(opts)
 		// nothing in the log to say so.
 		self._nas_evt_armed = false;
 		self._dsd_ind_armed = false;
+		// ...and WMS, which is worse than the other two: it is allocated lazily
+		// on the first SMS op and cached. Left set, a retry handed every later
+		// SMS the OLD client — bound to a hub that is closed — and never
+		// allocated a replacement, so SMS stayed broken with no way back.
+		self._wms_tried = false;
 
 		// Fail any long-APDU reassembly still waiting instead of leaving its
 		// caller on a 30 s timer for a client that no longer exists. Clearing

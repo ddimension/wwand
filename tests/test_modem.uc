@@ -956,6 +956,12 @@ scenario('indications', {
 		// RF-band push and the DSD data-mode push for the rest of the run
 		eq(modem._nas_evt_armed, false, 'teardown: the nas event report is re-armable');
 		eq(modem._dsd_ind_armed, false, 'teardown: so is the dsd indication');
+		// WMS is the worst of the family: allocated lazily on the first SMS op
+		// and cached, so a stale flag handed every later SMS a client bound to a
+		// hub that is closed, with no way back
+		eq(modem._wms_tried, false, 'teardown: wms can be allocated again');
+		eq(modem.wms, null, 'teardown: and the stale wms client is gone');
+		eq(modem.cat, null, 'teardown: the toolkit client too');
 		eq(modem._apdu_long, null, 'teardown: the reassembly table is cleared with them');
 		eq(modem.thermal, null, 'teardown: thermal readings do not outlive their client');
 		ok(modem._gen > 0, 'teardown: the lifecycle generation advanced');

@@ -678,6 +678,46 @@ scenario('apdu: a reused token fails the old waiter, not the new one', (next) =>
 	next();
 });
 
+// A chunk beyond the announced total sorts LAST, so a naive gap check trips on
+// it after coverage is already complete — and a finished response then sits
+// until its timer fires.
+scenario('apdu: a chunk past the end does not stall a complete response', (next) => {
+	let ind_cb = null;
+	let m = { timing: T, config: {} };
+
+	m.uim = {
+		on: (name, cb) => { if (name == 'SEND_APDU_IND') ind_cb = cb; },
+		request: (name, args, cb) => cb(null, { long_response: { total_length: 3, token: 11 } }),
+	};
+
+	sim.install_apdu_reassembly(m);
+
+	let got = 'unset';
+	sim.apdu_send(m, 1, 1, '00A4', (e, hex) => { got = e ?? hex; });
+
+	ind_cb({ chunk: { token: 11, total_length: 3, offset: 5, apdu: [ 0xEE ] } });
+	ind_cb({ chunk: { token: 11, total_length: 3, offset: 0, apdu: [ 1, 2, 3 ] } });
+
+	eq(got, '010203', 'apdu: the stray chunk past total is ignored, not read as a gap');
+	next();
+});
+
+// A long response announcing zero bytes has nothing to wait for. Parking a
+// waiter would cost the caller a full 30 s and then report a timeout, when what
+// happened is that the modem answered nonsense.
+scenario('apdu: a zero-length long response fails at once', (next) => {
+	let m = { timing: T, config: {}, uim: {
+		on: () => null,
+		request: (name, args, cb) => cb(null, { long_response: { total_length: 0, token: 3 } }),
+	} };
+
+	sim.install_apdu_reassembly(m);
+	sim.apdu_send(m, 1, 1, '00A4', (e, hex) => {
+		eq(e?.error, 'long_apdu_empty', 'apdu: reported immediately, not after a timeout');
+		next();
+	});
+});
+
 scenario('apdu: a short response still takes the direct path', (next) => {
 	let m = { timing: T, config: {} };
 

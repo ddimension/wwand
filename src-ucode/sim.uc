@@ -1117,6 +1117,13 @@ export function install_apdu_reassembly(modem)
 		let pos = 0, out = [];
 
 		for (let o in offs) {
+			// Everything we were promised is already covered. A chunk sitting
+			// BEYOND `total` must not be read as a gap — sorted last, it would
+			// otherwise trip the check below and a response that was complete
+			// would sit there until its timer fired.
+			if (pos >= total)
+				break;
+
 			// a gap: nothing has covered [pos, o) yet, so we are not done
 			if (o > pos)
 				return;
@@ -1179,6 +1186,13 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 			return cb({ error: 'long_apdu_unsupported',
 			            detail: 'no reassembly handler installed' }, null);
 		}
+
+		// A token with nothing to fetch. Waiting on indications that will never
+		// come would cost the caller the full 30 s and then report a timeout,
+		// when what actually happened is that the modem answered nonsense.
+		if (!(+(lr.total_length ?? 0) > 0))
+			return cb({ error: 'long_apdu_empty',
+			            detail: 'long response announced with zero length' }, null);
 
 		let key = sprintf('%u', lr.token);
 
