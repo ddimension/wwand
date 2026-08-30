@@ -57,7 +57,7 @@ return {
     pre:             (fx, ctx) => true,  // own driver-format switch (optional)
     prune:           (fx, netdev, wanted) => …, // own child removal (optional)
     child_name:      (netdev, entry) => …,      // own naming (optional)
-    map_id:          (entry) => entry.id,       // QMAP id on the wire (optional)
+    map_id:          (entry, netdev, fx) => entry.id,  // wire id (optional)
     status:          (fx, netdev) => ({ … }),   // extra status rows (optional)
     qmap:            true,               // QMAP rides the parent (default: aggregate)
     qmap_v5:         false,              // may negotiate MAPv5 checksum offload
@@ -133,14 +133,24 @@ Whatever a child is called while it is being built, it must END as
 unclaimed. `qmimux` renames its `qmimuxN`, and an adopting datapath renames the
 driver's child the same way.
 
-`map_id(entry)` is the QMAP id the **modem** must tag the channel with, when it
-differs from the config's channel number. Only a datapath that adopts a driver's
+`map_id(entry, netdev, fx)` is the id the **modem** must tag the channel with,
+when it differs from the config's channel number. It gets the netdev and the
+effects object because the answer can be a property of the device that has to be
+READ: the Quectel MHI driver offsets MBIM session ids by 112 on an SDX7x
+(PCI 17cb:0309) and by nothing elsewhere, and those PCI ids are not under the
+netdev's own `device` — they sit on an ancestor. Only a datapath that adopts a driver's
 own children knows this: the vendor `qmi_wwan_q` numbers its children `0x81`
 upwards, so config channel 1 is `0x81` on the wire, and binding WDS to 1 makes
 the driver drop every downlink frame as an unknown mux id. `setup()` returns the
-mapping as `map_ids` (keyed by the config channel), `context.uc` binds
-`BIND_MUX_DATA_PORT` to that. Default: `entry.id`, which is right for every
-datapath that creates its own children.
+mapping as `map_ids` (keyed by the config channel), `context.uc` binds `BIND_MUX_DATA_PORT` to that, and on MBIM it is the **session
+id** — used for CONNECT, DEACTIVATE, IP_CONFIGURATION and, easy to forget,
+for matching the unsolicited CONNECT indication back to its context. Default:
+`entry.id`, which is right for every datapath that creates its own children.
+
+The chain is `netlink.setup()` → `r.map_ids` → `modem.datapath.map_ids` →
+`context.wire_session()` → the wire. Every link has to be present; the mapping
+was inert once because the MBIM modem dropped `map_ids` when it stored the
+datapath, and nothing noticed because no test drove a remap through it.
 
 ## Selection
 

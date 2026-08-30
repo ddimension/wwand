@@ -297,6 +297,52 @@ let fctx2 = context_mbim.create({
 fctx2.up(() => null);
 eq(length(recmds2), 1, 'deactivate-retry: no deactivate when CONNECT never activated');
 
+// --- the wire session id follows the datapath, not the config -----------------
+//
+// A datapath that adopts a driver's own children inherits its numbering; on MBIM
+// that number IS the session id. The chain is netlink.setup() -> r.map_ids ->
+// modem.datapath.map_ids -> context wire_session() -> every on-wire command. It
+// was broken end to end once, because modem_mbim dropped map_ids on the floor
+// and nothing exercised it.
+{
+	let seen = [];
+	let mstub;
+	mstub = {
+		state: 'READY', mbim: {}, contexts: [],
+		// what a remapping datapath left behind (SDX7x: channel 1 -> session 113)
+		datapath: { backend: 'rmnet_nss_mhi', map_ids: { '1': 113 } },
+		attach_context: function(c) { push(mstub.contexts, c); },
+		command: function(name, kind, args, cb) {
+			if (name == 'CONNECT')
+				push(seen, args.session_id);
+			return cb({ error: 'mbim', status: 12 });
+		},
+	};
+
+	let ctx = context_mbim.create({
+		name: 'wan', modem: mstub,
+		config: { apn: 'internet', mux_id: 1 },
+		deps: { on_event: () => null, log: () => null },
+	});
+
+	eq(ctx.session_id, 1, 'wire: the CONFIGURED channel stays what the operator wrote');
+	eq(ctx.wire_session(), 113, 'wire: ...while the wire id follows the datapath');
+
+	ctx.up(() => null);
+	eq(seen, [ 113 ], 'wire: CONNECT is sent with the remapped session id');
+	eq(ctx.status().wire_session_id, 113, 'wire: status shows it when it differs');
+
+	// and with no remapping datapath the two are the same, which is every
+	// board that exists today
+	let plain = context_mbim.create({
+		name: 'wan', modem: stub_connect_err([]),
+		config: { apn: 'internet', mux_id: 2 },
+		deps: { on_event: () => null, log: () => null },
+	});
+	eq(plain.wire_session(), 2, 'wire: identity without a remap');
+	eq(plain.status().wire_session_id, null, 'wire: ...and status does not clutter');
+}
+
 // --- an aborted attempt must not take a later one with it ---------------------
 //
 // `up_cb` is one slot and DEACTIVATE is asynchronous, so every path that ends an

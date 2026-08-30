@@ -391,6 +391,11 @@ export function create(opts)
 			netdev: parent,
 			parent: parent,
 			ep_id: null,
+			// config channel -> the id the modem must tag it with. On MBIM that
+			// IS the session id (context_mbim.wire_session), so dropping it here
+			// silently disables every remap a datapath asks for — which is
+			// exactly what happened until this line existed.
+			map_ids: r.map_ids,
 			mux: r.mux_devs,
 			mux_devs: r.mux_devs,
 		};
@@ -651,9 +656,18 @@ export function create(opts)
 	};
 
 	self._on_connect_ind = function(data) {
-		for (let ctx in self.contexts)
-			if (ctx.session_id == data.session_id && ctx.connect_indication)
+		// match on the WIRE session id: a datapath that adopts a driver's own
+		// children can remap it (the Quectel MHI driver offsets MBIM sessions by
+		// 112 on an SDX7x), and matching the configured channel number would
+		// silently drop every indication — taking MBIM's primary
+		// session-loss signal with it. Identity wherever nothing remaps.
+		for (let ctx in self.contexts) {
+			let sid = (type(ctx.wire_session) == 'function')
+				? ctx.wire_session() : ctx.session_id;
+
+			if (sid == data.session_id && ctx.connect_indication)
 				ctx.connect_indication(data);
+		}
 	};
 
 	self._update_register = function(data) {

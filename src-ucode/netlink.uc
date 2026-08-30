@@ -116,14 +116,20 @@ export const RMNET_EGRESS_CKSUMV5 = 0x20;
 //       // untagged). Default: entry.name, else '<parent>m<id>'.
 //       child_name: (netdev, entry) => entry.name ?? sprintf('%sm%d', netdev, entry.id),
 //
-//       // optional: the QMAP id the MODEM must tag this channel with, when it
-//       // differs from the config's channel number. Only a datapath whose
-//       // children the kernel already created knows this — the vendor
+//       // optional: the id the MODEM must tag this channel with on the wire,
+//       // when it differs from the config's channel number. Only a datapath
+//       // whose children the kernel already created knows this — the vendor
 //       // qmi_wwan_q numbers its children 0x81 upwards, so a config channel 1
 //       // is QMAP id 0x81 on the wire and binding WDS to 1 makes the driver
-//       // drop every frame ("unknow mux_id"). setup() returns these as
-//       // `map_ids` for the caller's BIND_MUX_DATA_PORT. Default: entry.id.
-//       map_id: (entry) => entry.id,
+//       // drop every frame ("unknow mux_id"). `netdev` is passed because the
+//       // answer can depend on the device: the Quectel MHI driver offsets MBIM
+//       // session ids by 112 on an SDX7x and by nothing elsewhere.
+//       // setup() returns these as `map_ids`; the QMI context binds
+//       // BIND_MUX_DATA_PORT to it and the MBIM context uses it as the session
+//       // id. `fx` comes along so the answer can be READ rather than assumed,
+//       // through the same injectable effects object everything else uses.
+//       // Default: entry.id.
+//       map_id: (entry, netdev, fx) => entry.id,
 //   };
 //
 // links() gets a ctx carrying { netdev (the parent, possibly already renamed),
@@ -1076,7 +1082,7 @@ export function setup(fx, opts)
 
 	for (let entry in mux)
 		map_ids[sprintf('%d', entry.id)] =
-			(type(impl?.map_id) == 'function') ? impl.map_id(entry) : entry.id;
+			(type(impl?.map_id) == 'function') ? impl.map_id(entry, netdev, fx) : entry.id;
 
 	let urb_size = opts.dgram_size ?? DEFAULT_DGRAM_SIZE;
 

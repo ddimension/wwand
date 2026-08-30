@@ -1,6 +1,6 @@
 # wwand — status / continuation notes
 
-_Last updated: 2026-08-30. 49 host suites / 3133 checks, all green._
+_Last updated: 2026-08-30. 50 host suites / 3224 checks, all green._
 Three control backends (QMI, MBIM, NCM) behind one daemon-neutral contract.
 
 ## One datapath interface: MBIM joins it, and `none` becomes `raw_ip` (2026-08-29)
@@ -273,6 +273,46 @@ default prune would delete these children. It would not — it matches on
 `iflink` pointing at the parent, and the vendor driver sets no `ndo_get_iflink`
 and links no upper device, so each child's iflink is its own ifindex. Overriding
 `prune` is still right; the reason in the comment was not.
+
+**A second NSS datapath, for PCIe/MHI (2026-08-30).** Research into whether the
+Quectel manager does MBIM with rmnet_nss turned up that it does — but through
+the DRIVER and only on PCIe/MHI. `qmap_bridge_mode.c` has three paths: MBIM over
+USB is an 802.1q VLAN (no QMAP child, so no `nss_create()` hook — which is
+exactly what wwand's `vlan` datapath builds), MBIM over MHI has real QMAP
+children, and QMI over USB is the `qmi_wwan_q` case already shipped. The NSS
+hook lives in `mhi_netdev_quectel.c` and is protocol-independent.
+
+`datapath_rmnet_nss_mhi.uc` adopts those children. Nearly every detail differs
+from the USB sibling — dot-separated child names, a child MAC whose last octet
+is the channel number, both control protocols — and the wire id is where reading
+the driver mattered:
+
+    u16 tci = mux_id;                 // priv->mux_id = mbim_mux_id + offset
+    if (qmap_mode > 1) tci += 1;      // "rmnet_mhi0.X map to session X"
+
+with the RX side indexing `mpQmapNetDev[tci - 1 - mbim_mux_id]`. So the MBIM
+session id is `mbim_mux_id + n`, and `mbim_mux_id` is 0 everywhere except an
+SDX7x (PCI 17cb:0309), where it is 112 — meaning on ordinary hardware the wire
+id already EQUALS wwand's channel number and nothing is remapped. A prior
+research note had this as `mbim_mux_id + offset`; the driver's `+1` is what
+turns the common case from "needs a mapping" into "already correct".
+
+Carrying that into MBIM took `map_id(entry, netdev, fx)` (the answer is a
+property of the device and must be read, not assumed) and a `wire_session()` in
+`context_mbim` feeding CONNECT, DEACTIVATE, IP_CONFIGURATION — and the
+unsolicited CONNECT indication, which `modem_mbim` matches to a context BY
+SESSION ID. That last one would have silently swallowed MBIM's primary
+session-loss signal.
+
+An audit of the change before commit found the chain was inert anyway:
+`modem_mbim` did not store `map_ids` when it built `self.datapath`, so every
+remap was dead code and no test noticed, because none drove MBIM setup through
+the modem with a remapping datapath. Two more from the same audit: the SDX7x
+detection read the PCI ids under the netdev's own `device`, where they do not
+exist (`SET_NETDEV_DEV(ndev, &mhi_dev->dev)` — they are on an ancestor), and the
+probe checked only that the module was loaded, not that the netdev belonged to
+it. The test fixture now models the real sysfs shape rather than inventing the
+convenient one.
 
 **Not on hardware yet.** Everything above is host-tested only. The NSS datapath
 has no witness at all here — it needs kuncy7's IPQ807x + RG500Q, and the first

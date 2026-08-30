@@ -200,6 +200,11 @@ function assert_puk_block() {
 						'datapath: through netlink.setup(), not a private path');
 					eq(dpfx.action_index('link_set wwan0 down'), -1,
 						'datapath: the parent is not bounced for a VLAN mux');
+					// map_ids must survive setup() into the datapath the context
+					// reads — it was dropped here once, which silently disabled
+					// every session-id remap a datapath can ask for
+					eq(m2.datapath?.map_ids, { '1': 1 },
+						'datapath: the wire-id mapping is carried onto the modem');
 					m2.stop();
 					finish();
 				}

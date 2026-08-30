@@ -44,6 +44,23 @@ export function create(opts)
 	// already started, complete THAT attempt's callback with the old result.
 	// Same guard context.uc has carried since the QMI path; NCM checks the
 	// state. This is the parity fix.
+	// The session id ON THE WIRE is not always the configured channel number.
+	// A datapath that adopts a driver's own children inherits that driver's
+	// numbering, and netlink.setup() reports the mapping as `map_ids` — the QMI
+	// context binds BIND_MUX_DATA_PORT to it, and here it is the MBIM session
+	// id. Identity for every datapath that creates its own children (the
+	// built-in vlan declares no map_id), so this changes nothing on the paths
+	// that exist today.
+	let wire_session = () => {
+		let dp = self.modem?.datapath;
+
+		return dp?.map_ids?.[sprintf('%d', self.session_id)] ?? self.session_id;
+	};
+
+	// exposed: modem_mbim routes an unsolicited CONNECT indication to the owning
+	// context BY SESSION ID, and the indication carries the wire value
+	self.wire_session = () => wire_session();
+
 	let up_gen = 0;
 
 	// End the in-flight attempt, if any. Bumping the generation is what makes
@@ -180,7 +197,7 @@ export function create(opts)
 			return;
 
 		self.modem.command('IP_CONFIGURATION', 'query',
-			{ session_id: self.session_id }, (err, cfg) => {
+			{ session_id: wire_session() }, (err, cfg) => {
 			if (err || self.state != 'CONNECTED')
 				return;
 
@@ -203,7 +220,7 @@ export function create(opts)
 	// cleanup). ip_type DEFAULT / empty strings per the MBIM deactivate form.
 	let deactivate = (cb) => {
 		self.modem.command('CONNECT', 'set', {
-			session_id: self.session_id,
+			session_id: wire_session(),
 			activation_command: bc.ACTIVATION_CMD_DEACTIVATE,
 			access_string: '', user_name: '', password: '',
 			compression: 0, auth_protocol: bc.AUTH_NONE,
@@ -234,7 +251,7 @@ export function create(opts)
 		let ip_type = bc.IP_TYPE_FROM_PDP[self.config.pdp_type ?? 'ipv4v6'];
 
 		let args = {
-			session_id: self.session_id,
+			session_id: wire_session(),
 			activation_command: bc.ACTIVATION_CMD_ACTIVATE,
 			access_string: profile,
 			user_name: context_common.conn_cfg(self, 'username') ?? '',
@@ -277,7 +294,7 @@ export function create(opts)
 
 			// query the assigned IP configuration
 			self.modem.command('IP_CONFIGURATION', 'query',
-				{ session_id: self.session_id }, (e2, cfg) => {
+				{ session_id: wire_session() }, (e2, cfg) => {
 				if (gen != up_gen || self.state != 'ACTIVATING')
 					return;   // attempt aborted — drop the late reply
 
@@ -463,6 +480,8 @@ export function create(opts)
 			state: self.state,
 			protocol: 'mbim',
 			session_id: self.session_id,
+			// what the modem is actually tagged with, when a datapath remaps it
+			wire_session_id: (wire_session() != self.session_id) ? wire_session() : null,
 			settings: self.settings,
 			stats: (self.state == 'CONNECTED') ? self.stats : null,
 			uptime: (self.state == 'CONNECTED' && self.connected_since)
