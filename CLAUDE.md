@@ -78,7 +78,8 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   the control channel).
 - `docs/architecture.md`, `docs/backend-interface.md`,
   `docs/datapath-interface.md`, `docs/extending.md`,
-  `docs/telemetry-survey.md`, `docs/STATUS.md`.
+  `docs/datapath-interface.md`, `docs/STATUS.md`; contributor notes under
+  `docs/design/` (research) and `docs/upstream/` (submission material).
 
 ## Core layering (src-ucode)
 native `wwand_io.so` → codec (`qmux.uc`, `tlv.uc`, `hex.uc`, `schema/*.uc`

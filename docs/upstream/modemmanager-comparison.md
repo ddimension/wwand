@@ -1,3 +1,7 @@
+<!-- Upstream-submission material: this note argues wwand's position next to
+     ModemManager and drives an "adopt from MM" backlog. It is contributor
+     documentation, not user documentation — see ../README.md for the map. -->
+
 # wwand vs ModemManager — feature/architecture comparison & backlog
 
 ModemManager (freedesktop, v1.24) is the incumbent full-featured WWAN daemon and
@@ -31,12 +35,12 @@ choices, flagged as such.
 | eSIM download / LPA | **no profile download** (reports EID only) | **full LPA**: ES10c enable/disable/delete + SM-DP+ via lpac | **wwand better (headline)** |
 | Signal / cell / DSD | Signal + GetCellInfo | signal + cells + DSD NSA/SA + CA + reject-cause + temp | parity/wwand better |
 | Location GPS/NMEA/AGPS | GPS raw + NMEA + AGPS/SUPL | QMI LOC fix; yields port to gpsd | near-parity (no NMEA producer / AGPS) |
-| SMS | send + receive | **receive-only** | **MISSING (send)** (MED) |
+| SMS | send + receive | send + receive (PDU encoder; QMI WMS / MBIM / `AT+CMGS`) | parity |
 | USSD | yes | — | **MISSING** (MED, prepaid balance) |
 | Voice | yes | — | missing by design (LOW) |
 | Recovery / robustness | reconnect; no HW reset | recovery ladder + board GPIO reset + zero-rx watchdog + persistent counters | **wwand better (decisive for routers)** |
 | Non-destructive restart | bounces sessions | WAN + traffic survive, session adopted | **wwand better** |
-| Control API | rich DBus (mmcli) | ubus (~30 methods) + events | parity for router use; no CLI |
+| Control API | rich DBus (mmcli) | ubus (~30 methods) + events + `wwandctl` | parity for router use |
 | netifd integration | PPP-oriented, one bearer | no-proto-task, VRF-safe, in-place renew, idempotent reload | **wwand better** |
 | Zero-config | manual APN typical | autosetup + ICCID→APN fill | **wwand better** |
 | Low-power / thermal | `lowpower` on ifdown; temp | op-mode low-power internal; temp read | near-parity (no user lowpower knob) |
@@ -48,8 +52,11 @@ choices, flagged as such.
 
 1. **Roaming gate** (`option allow_roaming`) — HIGH/low. Gate `context_up` on the
    serving-system roaming flag (or set QMI NAS roaming-preference home-only).
-2. **SMS send** — MED/med. Add a PDU encoder (mirror `sms_pdu.uc` decode) + QMI
-   WMS RawSend / MBIM / `AT+CMGS` to `sms.uc`; `modem_sms_send` ubus + ACL.
+   Note the option name is already *recognised* on the migration path — it is in
+   `MIGRATE_STRIP_IFACE_MM` (`config.uc`), i.e. stripped from a migrated
+   `proto modemmanager` interface because wwand has no home for it yet.
+2. ~~**SMS send**~~ — **SHIPPED.** PDU encoder + QMI WMS RawSend / MBIM /
+   `AT+CMGS`, `modem_sms_send` on ubus, LuCI inbox on the Modem Tools page.
 3. **USSD** — MED/med. `modem_ussd` → QMI NAS/VS or `AT+CUSD`; reuse the GSM-7
    codec. Prepaid balance/top-up is a real cellular-router use case.
 4. **Distinct attach-bearer credentials** (`init_apn`/`init_auth`/`init_user`/
@@ -63,9 +70,9 @@ choices, flagged as such.
    Quectel-only QMBNCFG quirk. Already a roadmap item.
 7. **`lowpower`-on-ifdown power state** — MED/low. `option lowpower` sets DMS
    op-mode low-power on context-down (uses existing `set_opmode`). Battery/solar.
-8. **Thin `wwand` CLI** — LOW-MED/low. A small wrapper over the `wwand` ubus
-   object (status/signal/cells/at/sms/reset) — an `mmcli`-like verb surface for
-   docs/support without LuCI.
+8. ~~**Thin `wwand` CLI**~~ — **SHIPPED** as `wwandctl` (`src-ucode/wwandctl.uc`,
+   installed to `/usr/bin/wwandctl`): an `mmcli`-like verb surface over the ubus
+   object, with `--json` for scripting.
 9. **Preferred-RAT tier + signal delta thresholds** — LOW/low. Extend
    `modem_set_settings` with a preferred-RAT ranking + QMI NAS signal-threshold
    config (report on delta, not just interval).
@@ -95,7 +102,8 @@ calls, firmware/fwupd, suspend/resume.
   guard**.
 - **Footprint** — ~2.9 MB RSS, one process, no per-context spawns; MM+libqmi+glib
   is 15–30 MB.
-- **Testability** — effect-injection host suites (39 suites), schemas verified
+- **Testability** — effect-injection host suites (count in
+  [STATUS.md](../STATUS.md)), schemas verified
   against libqmi-1.38 / libmbim-1.32; the AT-port table is generated from MM's
   own udev rules (`tools/gen-atport-table.py`).
 

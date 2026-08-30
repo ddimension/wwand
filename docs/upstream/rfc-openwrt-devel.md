@@ -53,7 +53,7 @@ discovery already enumerates control devices from the kernel `wwan` framework
 by sysfs path — the remaining PCIe/MHI work is HW validation on an M.2 module, not
 a redesign. This transport-independent, control/datapath-separated model is the
 part I think is genuinely worth having in-tree regardless of the QMI-vs-MBIM
-balance. (A fuller vendor/interface survey is in `docs/interface-landscape.md`.)
+balance. (A fuller vendor/interface survey is in `docs/design/interface-landscape.md`.)
 
 ## The question
 

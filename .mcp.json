@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "codex": {
+      "type": "stdio",
+      "command": "/home/avalentin/.local/bin/codex",
+      "args": [
+        "mcp-server"
+      ],
+      "env": {}
+    }
+  }
+}

@@ -36,15 +36,18 @@ A quick tour of the LuCI UI (modems overview · modem config · interface · SIM
 ## Why wwand
 
 - **Tiny & quiet** — ~3 MB RSS, **zero** processes spawned in normal operation,
-  one uloop, fully indication-driven (no polling). Compare ModemManager +
-  libqmi + glib at 15–30 MB.
+  one uloop. State changes arrive as modem indications rather than polls; what
+  does poll is bounded and purposeful (telemetry while a UI is watching, the
+  zero-rx watchdog). Compare ModemManager + libqmi + glib at 15–30 MB.
 - **Three backends, one contract** — QMI, MBIM and NCM sit behind a single
   daemon-neutral interface, so netifd, the ubus API and the UI never care which
   a modem speaks. MBIM even tunnels the whole QMI stack over an
   [MBIM passthrough](docs/architecture.md#5-control-backends-qmi-mbim-ncm).
 - **Multi-modem, multi-context** — several modems, and several parallel PDP
-  contexts per modem via QMAP multiplexing (rmnet / qmimux, auto-selected, auto
-  channel assignment).
+  contexts per modem via QMAP multiplexing (rmnet / qmimux on QMI, 802.1q
+  sessions on MBIM, auto-selected; channels auto-assigned once a modem is
+  muxed). A vendor datapath can be added as an add-on package without patching
+  wwand — see [docs/datapath-interface.md](docs/datapath-interface.md).
 - **VRF-safe by construction** — the daemon touches only the link layer; all
   addressing/routing goes through netifd, so `ip4table`/`ip6table`/VRF just work.
 - **Robust** — a persisted recovery ladder (retry → op-mode cycle → modem reset
@@ -61,7 +64,7 @@ A quick tour of the LuCI UI (modems overview · modem config · interface · SIM
 | **Connectivity** | QMI / MBIM / NCM behind one `proto wwand` · IPv4/IPv6/dual-stack · IPv4 /32 p-t-p or pushed prefix · IPv6 RFC-7278 PD · QMAP mux (multiple contexts/modem) with full **bidirectional aggregation** — downlink (modem→host) *and* uplink (host→modem, WDA-negotiated + rmnet egress coalesce), capability-gated so a non-QMAP modem falls back to plain framing |
 | **Attach** | Attach profile programmed from config **before** registration → correct APN/IP family, avoids the EMM-33 IPv4-only reject |
 | **SIM** | PIN unlock (UIM → DMS fallback, retry-guarded) · multi-slot switching · PIN enable/disable · per-SIM overrides by ICCID (`wwand_sim`) |
-| **eSIM/eUICC** | Native ES10c list/enable/disable/delete · **SM-DP+ download** via bundled lpac · APDU transport auto-chosen: QMI UIM → **native MBIM MS UICC Low Level Access** → AT — so eSIM works on MBIM modems without an AT port |
+| **eSIM/eUICC** | Native ES10c list/enable/disable/delete · **SM-DP+ download** via bundled lpac · APDU transport auto-chosen: **native MBIM MS UICC Low Level Access** → QMI UIM (native or over the passthrough) → AT — so eSIM works on MBIM modems without an AT port |
 | **Binding** | Pin a modem by USB **serial**, **IMEI**, or a stable **device path** (sysfs topology, PCIe/MHI-ready) so the right SIM/APN follows the right modem across re-enumeration; **stable L3 names** `wwand0…wwand100` (auto-assigned, kernel netdev renamed, written back) survive USB renumbering on multi-modem boxes |
 | **RF unlock** | `option fcc_auth` unlocks laptop-SKU modems that boot radio-locked (Lenovo/Dell/HP Quectel EM1xx, Foxconn SDX55/SDX62, DW5821e) — QMI DMS/Foxconn auto-chain, MBIM Quectel radio-state |
 | **Setup** | **Zero-config autosetup** (default on): a modem on an unconfigured box creates `wwmodem_auto` + interface `wwan0` (L3 device `wwand0`) in the default wan firewall zone, then a one-shot internal **ICCID/IMSI → APN table** copies the carrier defaults (APN, PDP type, auth, credentials) into the config |
@@ -89,9 +92,15 @@ for device setup (apk/opkg lines and signing keys).
 | `wwand-ncm` | NCM/ECM backend (`DEPENDS wwand`) |
 | `wwand-mhi` | PCIe/MHI transport + MHI drivers (`DEPENDS wwand`; backend-neutral, add wwand-qmi or wwand-mbim) |
 | `wwand-esim` | eSIM management + SM-DP+ download (`DEPENDS wwand-qmi + lpac`) |
+| `wwand-datapath-rmnet_nss` | optional QMI datapath add-on: adopts the vendor `qmi_wwan_q` QMAP children on Qualcomm NSS builds (`DEPENDS wwand-qmi`) |
 
-The ucode tree ships **precompiled to bytecode** by default (faster start, no
-on-device parse); build with `CONFIG_WWAND_UCODE_SOURCE` for editable source.
+The ucode tree can ship **precompiled to bytecode** (faster start, no on-device
+parse) or as readable source. Which is the default depends on the packaging: the
+ddimension feed precompiles unless `CONFIG_WWAND_UCODE_SOURCE` is set, while the
+openwrt/packages submission ships source and precompiles only under
+`CONFIG_WWAND_UCODE_PRECOMPILE`. Bytecode also needs a host ucode that can emit
+relocatable modules — where it cannot, the build falls back to source on its own
+rather than failing.
 
 A typical QMI router installs **`wwand-qmi`** (which pulls in `wwand`). The LuCI
 UI is [luci-proto-wwand](https://github.com/ddimension/luci-proto-wwand) +
@@ -133,7 +142,11 @@ example uci-defaults script in `/usr/share/wwand/examples/`. See
 | [docs/connection-flow.md](docs/connection-flow.md) | How a connection comes up — wwand, modem and network side, phase by phase |
 | [docs/architecture.md](docs/architecture.md) | How it works: layering, backends, netifd coupling, VRF, recovery |
 | [docs/extending.md](docs/extending.md) | Add a modem/quirk, a config option, a backend, telemetry, a ubus method |
-| [docs/backend-interface.md](docs/backend-interface.md) | The daemon-neutral backend contract |
+| [docs/backend-interface.md](docs/backend-interface.md) | The daemon-neutral control-backend contract |
+| [docs/datapath-interface.md](docs/datapath-interface.md) | The datapath (mux) contract and how one is chosen |
+
+The full map, including the design notes and the running log, is
+**[docs/README.md](docs/README.md)**.
 
 ## Layout
 

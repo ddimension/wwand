@@ -16,8 +16,19 @@ whether you are a user, a developer, or an AI assistant working on the tree.
 | Add a quirk, option, backend, telemetry, ubus method, board | [extending.md](extending.md) — one checklist per extension type |
 | Write or port a control backend | [backend-interface.md](backend-interface.md) — the duck-typed modem/context contract |
 | Write or port a datapath (mux) backend | [datapath-interface.md](datapath-interface.md) — the datapath contract and how one is chosen |
-| Know which modem exposes which telemetry | [telemetry-survey.md](telemetry-survey.md) — a dated, point-in-time survey |
 | See what changed / current test counts / open items | [STATUS.md](STATUS.md) — running continuation log |
+
+### Contributor notes
+
+Not user documentation, and deliberately kept apart from it: research that
+informed the design, and material written for the upstream submission. Dated,
+and superseded by the reference docs above wherever the two disagree.
+
+| Note | What |
+|---|---|
+| [design/interface-landscape.md](design/interface-landscape.md) | Which control/datapath/transport interfaces the modem market actually offers, and how wwand's split maps onto them |
+| [design/telemetry-survey.md](design/telemetry-survey.md) | Point-in-time catalogue of the QMI messages and Quectel AT commands that carry useful telemetry, with what has since shipped |
+| [upstream/modemmanager-comparison.md](upstream/modemmanager-comparison.md) | wwand next to ModemManager, dimension by dimension, and the "adopt from MM" backlog |
 
 ## The 60-second model
 

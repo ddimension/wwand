@@ -7,6 +7,12 @@
 
 # WWAN modem interface landscape
 
+> **Design note, not a feature matrix.** Research that informed wwand's
+> control/datapath/transport split (see [architecture.md](../architecture.md));
+> dated, and superseded by the reference docs wherever the two disagree. Exact
+> USB compositions vary by module and firmware — treat every cell as "what the
+> market broadly offers", not as a support claim.
+
 wwand is designed to support multiple modem control/data-plane interfaces. The current modem market can broadly be divided into Qualcomm/QMI-oriented devices and standards-based MBIM-oriented devices.
 
 ## Modem manufacturer / interface matrix

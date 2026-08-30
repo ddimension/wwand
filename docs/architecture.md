@@ -21,7 +21,7 @@ co-equal first-class control backends (the market splits QMI/QMAP —
 Quectel/SIMCom/MeiG — vs MBIM — Sierra-Semtech/Telit/Fibocom/u-blox); QMAP is a
 *datapath capability*, not a synonym for QMI; and the control plane does not bake
 in USB, so `control=QMI datapath=QMAP transport=PCIe/MHI` (and QRTR) plug in
-without a redesign. See [`interface-landscape.md`](interface-landscape.md) for
+without a redesign. See [`design/interface-landscape.md`](design/interface-landscape.md) for
 the vendor/interface survey behind this.
 
 ## 1. Measured baseline (Chateau)

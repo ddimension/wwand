@@ -1,13 +1,13 @@
 # Telemetry & statistics survey — QMI + Quectel AT (RG650E / SDX72)
 
-[← docs map](README.md)
+[← docs map](../README.md)
 
 > **Point-in-time survey (dated 21 Jul 2026), kept for reference.** It catalogued
 > which QMI messages and Quectel AT commands carry useful data and which were worth
 > adding — and **most of the "Tier 1 — worth adding" wishlist has since shipped**
 > (marked ✅ inline below). For **what is live now**, see
-> [connection-flow.md](connection-flow.md) (§3 *The network's view* and the
-> *Monitor* step) and [reference.md#telemetry--diagnostics](reference.md#telemetry--diagnostics).
+> [connection-flow.md](../connection-flow.md) (§3 *The network's view* and the
+> *Monitor* step) and [reference.md#telemetry--diagnostics](../reference.md#telemetry--diagnostics).
 
 Which QMI messages and Quectel AT commands carry *useful statistical / diagnostic*
 information, what wwand already surfaces, and what is worth adding. Target modem:

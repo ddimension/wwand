@@ -55,7 +55,7 @@ SIM_UNLOCK → CONFIGURE_NET → REGISTERING → READY`:
 - **QMI** (`modem.uc` + `modem_init_qmi.uc`): CTL sync, service version probe,
   client allocation (DMS/NAS/UIM/WDS/WDA/DSD), AT side channel
   (`modem_common.open_at`), datapath negotiation (`datapath_qmi.uc`:
-  QMAP/rmnet vs qmimux vs none, `SET_DATA_FORMAT`), operating mode online
+  QMAP/rmnet vs qmimux vs raw_ip, `SET_DATA_FORMAT`), operating mode online
   with the **FCC unlock chain** for RF-locked laptop modems
   (`GET_OPERATING_MODE` verify → `qmi_backend.fcc_auth`), SIM slot assert,
   SIM/PIN machine (`sim.uc`), identity read (IMSI/ICCID/MSISDN with per-field
