@@ -61,6 +61,19 @@ all, which is correct — QMAP is not on the wire there.
   back to `'qmi'` when `protocol_of()` cannot identify the driver (same fallback
   at `daemon.uc:965` and `:1035`) — a guess where "unknown" is the honest answer,
   and the reason the misdetection happened at all.
+- **TODO — the NCM/AT backend must accept a `cdc-wdm` as its AT port.** Stock
+  `comgt-ncm` sends AT straight to `option device`, whatever it is:
+  `gcom -d "$device"`, with an explicit usbmisc branch
+  (`package/network/utils/comgt/files/ncm.sh:79`). On a `huawei_cdc_ncm` modem
+  that device IS `/dev/cdc-wdm0` — the driver registers a cdc-wdm carrying AT
+  alongside its NCM datapath. wwand instead resolves a **tty** and uses the
+  cdc-wdm only as an anchor to find one on the same USB device
+  (`atcmd.uc:209-240`), so a modem whose AT lives on the wdm node has no AT
+  channel at all even though its protocol is now identified correctly. Field
+  case (2026-08-30) also has `ttyUSB0`/`ttyUSB1`, so it may work there by
+  accident; that is not a fix. The native io module already does
+  message-oriented cdc-wdm I/O for QMI/MBIM, so the port layer is the piece that
+  needs to accept it.
 - **openwrt/packages#30185** is `CHANGES_REQUESTED` on scope, which is a
   maintainer decision, not a defect list — all 34 review threads are resolved.
   The full build/runtime CI has not run on that PR since `8ffb9e3`; only the
