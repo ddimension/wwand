@@ -181,4 +181,3 @@ eq(index(sdf_packed, chr(0x18)), -1, 'wda: qos_header_format not sent unless set
 eq(index(sdf_packed, chr(0x1A)), -1, 'wda: flow_control not sent unless set');
 
 done('test_qmux');
-

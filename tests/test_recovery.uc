@@ -196,6 +196,57 @@ eq(rg.on_attempt(), 'opmode_cycle', 'gate: an answer arms the ladder again');
 rg.note_protocol('mbim');
 eq(rg.counters.proto_ok, 0, 'gate: switching protocol withdraws the arming');
 
+// --- the two ways an unarmed modem could still reach the reboot -------------
+// The gate above used to wrap only the RUNG branch, so it stopped applying the
+// moment the ladder ran out of rungs — and execution fell straight through to
+// the reboot. Both routes there are the migration case the gate exists for, so
+// both get a test. Note failreboot > 0 here: the block above runs with 0, which
+// is exactly why neither showed up.
+
+// (a) a legacy state file whose attempt count puts the rung index at the end of
+// the ladder. Nothing ever answered; the router must not reboot for it.
+fx = fakefx.create();
+fx.files['/state/oldstate.json'] = '{ "attempts": 30, "proto_errors": 0 }';
+let ro = recovery.create({ id: 'oldstate', failreboot: 40, fx: fx, state_dir: '/state', log: silent });
+ro.load();
+eq(ro.counters.rung, 3, 'unarmed reboot: legacy state restored with the ladder exhausted');
+eq(ro.counters.proto_ok, 0, 'unarmed reboot: a state file without the key is not armed');
+
+let old_acts = [];
+for (let i = 1; i <= 30; i++) push(old_acts, ro.on_attempt());
+eq(length(filter(old_acts, (a) => a != 'retry')), 0,
+	'unarmed reboot: an exhausted ladder does not fall through to the reboot');
+
+// ...and the arming still works from there: the count is far past failreboot
+ro.note_answer();
+eq(ro.on_attempt(), 'reboot', 'unarmed reboot: once it answers, the reboot rung is reachable');
+
+// (b) a protocol change on a modem that had already climbed every rung
+fx = fakefx.create();
+let rp = recovery.create({ id: 'protoswitch', failreboot: 40, fx: fx, state_dir: '/state', log: silent });
+rp.note_protocol('qmi');
+rp.note_answer();
+for (let i = 1; i <= 45; i++) rp.on_attempt();
+eq(rp.counters.rung, 3, 'proto switch: every rung fired while armed');
+
+rp.note_protocol('ncm');   // detection corrected: the old proof is void
+eq(rp.counters.proto_ok, 0, 'proto switch: arming withdrawn');
+eq(rp.on_attempt(), 'retry',
+	'proto switch: past failreboot with an exhausted ladder still does not reboot');
+
+// note_answer arms WITHOUT touching the error counters — that is what separates
+// it from on_proto_success, and conflating the two would silently disable the
+// proto-error ladder (every service error would reset its own counter).
+fx = fakefx.create();
+let rn = recovery.create({ id: 'answer', failreboot: 100, proto_error_limit: 3,
+	fx: fx, state_dir: '/state', log: silent });
+for (let i = 1; i <= 3; i++) rn.on_proto_error();
+rn.note_answer();
+eq(rn.counters.proto_ok, 1, 'note_answer: arms');
+eq(rn.counters.proto_errors, 3, 'note_answer: leaves the error counter alone');
+rn.on_proto_success();
+eq(rn.counters.proto_errors, 0, 'on_proto_success: still clears it');
+
 // corrupted state file is ignored
 fx.files['/state/bad.json'] = 'not json{';
 let r3 = recovery.create({ id: 'bad', failreboot: 100, fx: fx, state_dir: '/state', log: silent });

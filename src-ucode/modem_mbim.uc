@@ -114,6 +114,9 @@ export function create(opts)
 				kind ?? '?', self.counters.proto_errors));
 		},
 		on_success: (c) => rec.on_proto_success(),
+		// see the QMI side: "the modem answered MBIM", which a failure status
+		// establishes as well as a success (recovery.note_answer)
+		on_answer: (c) => rec.note_answer(),
 	};
 
 	// backend-neutral NAS accessor (daemon settings / network-selection paths):

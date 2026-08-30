@@ -256,6 +256,14 @@ push(scenarios, {
 
 		ok(true, 'modem reached READY (openAT->identify->sim->attach->register)');
 		eq(m.info.model, 'RG650E-EU', 'model from CGMM');
+
+		// AT is this backend's control protocol, so a port that answered is
+		// what arms hardware recovery. QMI and MBIM arm from their clients;
+		// NCM had no such path at all, so every NCM modem stayed unarmed for
+		// its whole life and could never reach the opmode cycle, the modem
+		// reset or the board power-cycle it may genuinely need.
+		eq(m.counters.proto_ok, 1, 'ncm: an answering AT port arms hardware recovery');
+		eq(m.counters.proto_name, 'ncm', 'ncm: armed against the protocol actually in use');
 		eq(m.info.imei, '359072060000000', 'imei from CGSN');
 		eq(m.info.imsi, '262011234567890', 'imsi from CIMI');
 		eq(m.info.iccid, '89490200001022832490', 'iccid from QCCID');

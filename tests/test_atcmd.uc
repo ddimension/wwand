@@ -866,6 +866,33 @@ ok(length(filter(ilogs, (m) => match(m, /control characters/))) == 4,
 ati.send('AT+CGDCONT=1,"IP","in"ternet"', () => null);
 eq(length(tri.written), 1, 'injection: a bare quote is not the engine\'s business');
 
+// --- on_answer: the port answered, whatever it answered ----------------------
+// This is what arms hardware recovery on an NCM modem, where AT *is* the
+// control protocol. The question it answers is "does the modem speak AT here",
+// not "did the command work" — so an ERROR counts and only silence does not.
+let ansn = 0;
+let tra = fake_transport();
+let ata = atcmd.create(tra, { log: silent, on_answer: () => ansn++ });
+
+ata.send('AT+CGMI', () => null);
+tra.reply('Quectel\r\nOK\r\n');
+eq(ansn, 1, 'on_answer: OK is an answer');
+
+ata.send('AT+NOSUCH', () => null);
+tra.reply('ERROR\r\n');
+eq(ansn, 2, 'on_answer: a bare ERROR is just as much an answer');
+
+ata.send('AT+CPIN?', () => null);
+tra.reply('+CME ERROR: 10\r\n');
+eq(ansn, 3, 'on_answer: a CME error too — the modem parsed and refused');
+
+// ...and the one completion that proves nothing about the port
+let anst = 0;
+let trs = fake_transport();
+let ats = atcmd.create(trs, { log: silent, on_answer: () => anst++ });
+
+ats.send('AT', () => null, { timeout: 100 });
+
 // the timeout log path redacts too
 let tlogs = [];
 let trt = fake_transport();
@@ -874,6 +901,7 @@ let att = atcmd.create(trt, { log: (level, msg) => push(tlogs, msg) });
 att.send('AT+CGAUTH=1,3,"user","secret123"', () => null, { timeout: 200 });
 uloop.timer(600, () => {
 	ok(!match(join(' ', tlogs), /secret123/), 'auth: timeout log redacted');
+	eq(anst, 0, 'on_answer: a timeout is silence, and silence is not an answer');
 	eq(ierr, { error: 'invalid_command' }, 'injection: caller gets an error back');
 	done('test_atcmd');
 });

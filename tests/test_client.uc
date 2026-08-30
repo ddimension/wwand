@@ -20,8 +20,11 @@ let hub = {
 	unregister: (c) => null,
 };
 
+let answers = 0;
+
 let hooks = {
 	on_error: (c, kind) => push(errors, kind),
+	on_answer: (c) => answers++,
 };
 
 let c = client.create(hub, dms, 5, hooks);
@@ -97,6 +100,17 @@ eq(synced, 1, 'indication handler fired');
 cc.next_txn = 0xff;
 cc.request('SYNC', {}, null);
 eq(cc.next_txn, 1, 'ctl txn wraps to 1');
+
+// --- on_answer: a matched response is the modem speaking QMI -----------------
+// A different question from on_success, and a strictly weaker one: the hardware
+// recovery gate asks "is this the right protocol", which a SERVICE ERROR
+// answers just as well as a result-0 response. Arming on success alone would
+// strand a modem that talks to us fluently but refuses everything we ask.
+ok(answers >= 2, 'on_answer: fired for the success AND for the QMI error response');
+
+let a0 = answers;
+c.dispatch({ kind: 'response', txn: 4242, msg_id: 0x0022, tlvs: resp_tlvs });
+eq(answers, a0, 'on_answer: an unmatched txn is not our modem answering us');
 
 // --- txn collision: a wrapped id must skip a still-pending request ----------
 

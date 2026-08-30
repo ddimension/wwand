@@ -1074,7 +1074,7 @@ when called from LuCI).
 | `modem_plmn_lists` | `modem` | read the PLMN selector lists: `user` (EF 6F60), `nas` (QMI preferred networks), `operator`/`home` (read-only) and `fplmn` (EF 6F7B forbidden) |
 | `modem_plmn_set` | `modem`, `list_type`, `entries` | write a PLMN list to the SIM/modem; `list_type` = `user`\|`nas`\|`fplmn`; `entries` = `[{mcc,mnc[,gsm,utran,eutran,ngran]}]` (fplmn carries no AcT). Reads back for cross-verification (write ACL) |
 | `modem_plmn_restore` | `modem` | re-apply the modem's effective configured list (per-SIM `plmn_list` wins over the modem's) — the same list restored before every radio-on (write ACL) |
-| `modem_sim_slots` | `modem` | physical slots: card presence, active, ICCID, eUICC flag, EID, per-slot `cpin`/`atr` (Fibocom `AT+ESLOTSINFO` carries all six per slot; other vendors via their own slot recipes) |
+| `modem_sim_slots` | `modem` | `slots[]` — physical slots: card presence, active, ICCID, eUICC flag, EID, per-slot `cpin`/`atr` (Fibocom `AT+ESLOTSINFO` carries all six per slot; other vendors via their own slot recipes) — plus `multisim`, the read-only shape summary below |
 | `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
 | `modem_sim_switch_slot` | `modem`, `slot` | switch the active physical SIM slot (drops the connection) |
 | `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
@@ -1254,6 +1254,19 @@ applied in two stages: when errors first cross the limit the modem gets one
 hardware repower/reset; only when they reach **2× the limit** does it reboot (and
 that reboot is gated by `failreboot` — with `failreboot 0` it keeps retrying
 instead). A success resets the counter.
+
+**Nothing physical happens until the modem has answered once** in the protocol
+wwand chose for it — a QMI or MBIM response with our transaction id (whatever
+result or status it carries), or, on NCM, an AT port that replies at all.
+A *misdetected* control device fails every attempt exactly like a wedged one, so
+without this the ladder escalates through op-mode cycle, modem reset and board
+power-cycle against hardware that was never broken. Until that first answer every
+rung — the reboot included — is held and the ladder simply retries, logging the
+reason at each threshold it would have acted on. The permission is sticky, it
+survives a daemon restart, and it is **withdrawn again whenever the selected
+protocol changes**, because "it answered once" was proved with the previous
+choice. On an existing install whose persisted state predates this, the first
+answer after the upgrade re-arms it.
 - **Status LEDs** — driven from the modem's registration + signal: a **5-bar
   signal graph** (e.g. MikroTik Chateau `green:mobile-1..5`) or a **mobile / LTE**
   set (e.g. Zyxel `…:red/green:mobile`, `…:lte`).
@@ -1343,6 +1356,29 @@ context config before registration; if it persists, check `apn` and `pdp_type`
 on a valid NSA anchor but never gets an NR carrier, `modem_cells` → `dsd` shows
 `nr: false`: the network is not granting EN-DC for this subscription
 (DCNR-restricted / the tariff excludes 5G). Not a wwand or modem issue.
+
+**Multi-SIM shape.** `modem_sim_slots` → `multisim` describes what the modem
+*is*, and never changes it:
+
+```json
+"multisim": { "slots": 2, "executors": 1, "concurrency": 1,
+              "mode": "dssa", "mode_min": "dssa",
+              "modem_id": "…", "source": "mbim-sys-caps", "exact": true }
+```
+
+The vocabulary is MBIM's, because MBIM is the protocol that names it: a **slot**
+holds a card, an **executor** is a cellular stack that can register, and
+**concurrency** is how many may carry traffic at once. One executor is *DSSA*
+(dual SIM, single active — slot switching, which is what wwand implements); more
+than one with concurrency 1 is *DSDS*; concurrency above 1 is *DSDA*.
+
+`mode` is stated **only when the counts are exact**, which today means only over
+MBIM (`SYS_CAPS`). QMI has no message for this at all, so there the executor
+count is inferred from how many distinct logical slots are in use — a lower
+bound, flagged by `exact: false`. A lower bound of one supports no claim: a modem
+with a second executor and an empty second slot reports exactly that. `mode_min`
+carries what the evidence *does* support (two logical slots in use floor at
+DSDS), and equals `mode` whenever the mode is known.
 
 **SIM.** `modem_sim_slots` shows slot/card/eUICC state; `option sim_slot`
 selects the physical slot; `modem_sim_pin_lock` enables/disables the PIN lock.

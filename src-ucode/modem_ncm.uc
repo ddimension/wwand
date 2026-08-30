@@ -412,6 +412,13 @@ export function create(opts)
 		modem_common.open_at(self, {
 			at_opts: at_opts,
 			log: log,
+			// AT is this backend's control protocol, so a port that answers —
+			// OK or ERROR, the engine does not care which — is exactly the
+			// "the modem answered us" the hardware-recovery gate waits for.
+			// QMI and MBIM arm from their own clients; without this NCM never
+			// armed at all and a genuinely wedged NCM modem could no longer
+			// reach the opmode cycle, the reset or the board power-cycle.
+			on_answer: () => rec.note_answer(),
 			drain_interval: self.timing.at_drain,
 			set_drain_timer: (t) => { at_drain_timer = t; },
 			base_override: (self.device == null && anchor != null)

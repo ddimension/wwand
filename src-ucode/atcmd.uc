@@ -512,6 +512,11 @@ export function create(transport, opts)
 		// have taken that fragment as the manufacturer).
 		buffer: '',
 		on_urc: opts?.on_urc ?? null,
+		// called whenever a command completes with a RESULT CODE — OK, ERROR or
+		// a CME/CMS error alike. Not "the command worked": the fact on offer is
+		// that the port answered at all, which is what tells a caller the modem
+		// speaks AT here. A timeout is the one completion that proves nothing.
+		on_answer: opts?.on_answer ?? null,
 		// prefixes that are unsolicited on this port. A URC is framed exactly
 		// like a result code (manual 2.4.3: <CR><LF>…<CR><LF>), so it always
 		// arrives as a WHOLE line and can be classified per line — but it may
@@ -646,6 +651,10 @@ export function create(transport, opts)
 		// drain leftover URCs BEFORE the callback — it may synchronously queue
 		// the next command, which resets the buffer
 		dispatch_urcs();
+
+		// the port answered (see on_answer above) — everything except silence
+		if (self.on_answer && err?.error != 'timeout' && err?.error != 'closed')
+			self.on_answer();
 
 		// every exchange at debug level, raw response lines included — the
 		// field-analysis gold (CGCONTRDP/CGPADDR dotted tokens, GTDNS, …).

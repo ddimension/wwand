@@ -145,6 +145,14 @@ export function create(hub, schema, cid, hooks)
 			else if (data._result.result != 0)
 				err = { error: 'qmi', result: data._result.result, code: data._result.error };
 
+			// Reaching this point means a well-formed QMUX response carrying OUR
+			// transaction id came back: the modem speaks QMI on this node. That
+			// is a strictly weaker fact than `!err` and a different question —
+			// a service error (or an unparsable payload) still answers "is this
+			// the right protocol", which is all the hardware gate asks.
+			if (hooks?.on_answer)
+				hooks.on_answer(self);
+
 			if (err && hooks?.on_error && !p.no_recovery)
 				hooks.on_error(self, err.error, p.name);
 			else if (!err && hooks?.on_success)

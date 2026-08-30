@@ -966,6 +966,7 @@ function finish_mbim_at(self, o, tr, path, log)
 			log('debug', sprintf('urc[at]: %s', line));
 			self.at_on_urc?.(line, 'at');
 		},
+		on_answer: o.on_answer,
 	});
 
 	engine.send('AT', (err) => {
@@ -1107,6 +1108,12 @@ export function open_at(self, o)
 	self.at = atcmd.create(tr, {
 		log: (level, msg) => log(level, sprintf('at: %s', msg)),
 		on_urc: dispatch_urc('at'),
+		// only the CONTROL engine, and only where the caller asks for it: on an
+		// NCM modem AT *is* the control protocol, so a port that answers is the
+		// evidence the recovery gate wants. On QMI/MBIM the AT port is a side
+		// channel and says nothing about the protocol we drive the modem with —
+		// which is why this is passed down rather than wired in here.
+		on_answer: o.on_answer,
 	});
 	self.at_tty = tty;
 

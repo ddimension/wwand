@@ -132,11 +132,6 @@ export function create(opts)
 
 		log('info', sprintf('connection attempt %d failed', n));
 
-		// Fire the next not-yet-fired hardware rung once we've reached its
-		// threshold. One rung per call (escalate step by step), in order — a
-		// jump past a threshold does not fire several rungs at once, and never
-		// skips one. These run INDEPENDENT of failreboot: disabling the reboot
-		// must not disable the cheaper hardware recovery below it.
 		// NOTHING PHYSICAL until the modem has answered us at least once with the
 		// protocol we chose. A misdetected control device fails every attempt
 		// exactly like a wedged one, and the ladder used to escalate through
@@ -145,9 +140,20 @@ export function create(opts)
 		// huawei_cdc_ncm modem classified as QMI was power-cycled for it. If we
 		// have never completed one request, the errors are evidence about our own
 		// detection, not about the modem.
-		if (!self.counters.proto_ok && self.counters.rung < length(RUNGS) &&
-		    n >= RUNGS[self.counters.rung].at) {
-			if (n == RUNGS[self.counters.rung].at)
+		//
+		// This guard sits ABOVE the whole ladder, reboot included, and returns
+		// before any of it. It used to wrap only the rung branch, which left two
+		// ways to reach the reboot unarmed — both of them the migration case this
+		// gate exists for: a legacy state file whose restored attempt count puts
+		// `rung` at the end of the ladder (rungs_reached), and a protocol change
+		// on a modem that had already climbed all three rungs. In either the rung
+		// branch is skipped for being exhausted, not for being unarmed, and
+		// execution fell through to the reboot.
+		if (!self.counters.proto_ok) {
+			// once per threshold we would have acted on, so the operator sees it
+			// at the same points the ladder would have escalated
+			if ((self.counters.rung < length(RUNGS) && n == RUNGS[self.counters.rung].at) ||
+			    (self.failreboot > 0 && n == self.failreboot + 1))
 				log('warn', sprintf('%d failed attempts and the %s control channel has never answered — not touching the hardware; check `option protocol` and the driver',
 					n, self.counters.proto_name ?? 'modem'));
 
@@ -155,6 +161,11 @@ export function create(opts)
 			return 'retry';
 		}
 
+		// Fire the next not-yet-fired hardware rung once we've reached its
+		// threshold. One rung per call (escalate step by step), in order — a
+		// jump past a threshold does not fire several rungs at once, and never
+		// skips one. These run INDEPENDENT of failreboot: disabling the reboot
+		// must not disable the cheaper hardware recovery below it.
 		if (self.counters.rung < length(RUNGS) && n >= RUNGS[self.counters.rung].at) {
 			let action = RUNGS[self.counters.rung].action;
 			self.counters.rung++;
@@ -242,6 +253,25 @@ export function create(opts)
 		}
 
 		return 'retry';
+	};
+
+	// "the modem answered us in the protocol we chose" — the ONLY thing the
+	// hardware gate needs, and deliberately weaker than a successful request.
+	// A modem that decodes our request and replies with a service error has
+	// answered; so has one that returns a command-done with a failure status.
+	// Arming on success alone would leave a modem that talks to us perfectly
+	// well but refuses everything we ask (locked SIM, unsupported message set)
+	// permanently unable to reach the recovery it may genuinely need. Sticky,
+	// and it must NOT touch the error counters — those measure something else,
+	// and resetting them here would defeat the proto-error ladder entirely.
+	self.note_answer = function() {
+		if (self.counters.proto_ok)
+			return;
+
+		self.counters.proto_ok = 1;
+		log('info', sprintf('%s control channel answered — hardware recovery armed',
+			self.counters.proto_name ?? 'modem'));
+		self.persist();
 	};
 
 	self.on_proto_success = function() {

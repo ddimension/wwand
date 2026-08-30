@@ -197,6 +197,15 @@ export function create(hub, hooks)
 			delete self.pending[key];
 			p.timer.cancel();
 
+			// A done-frame carrying OUR transaction id is the modem answering
+			// MBIM, whatever status it holds — a strictly weaker fact than a
+			// successful command, and the only one the hardware-recovery gate
+			// asks for (see recovery.note_answer). Deliberately also on
+			// OPEN_DONE: a firmware that REFUSES MBIM_OPEN, as the RG650E does,
+			// still refused it in MBIM.
+			if (hooks?.on_answer)
+				hooks.on_answer(self);
+
 			if (p.cb)
 				p.cb(null, msg);
 

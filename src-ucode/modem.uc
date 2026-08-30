@@ -179,6 +179,11 @@ export function create(opts)
 		on_success: (client) => {
 			rec.on_proto_success();
 		},
+		// Weaker than on_success and asked a different question: did the modem
+		// answer QMI at all? A service error answers it just as well as a
+		// result-0 response, and arming the hardware ladder on success alone
+		// would strand a modem that talks to us but refuses what we ask.
+		on_answer: (client) => rec.note_answer(),
 	};
 
 	self.alloc = function(schema, cb) {
