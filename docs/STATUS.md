@@ -86,22 +86,35 @@ reported only.
 
 ## Known open
 
-- **TODO — the recovery ladder must not touch hardware on a protocol it has
-  never spoken.** `recovery.uc:176` escalates to `usb_repower` once the
-  protocol-error counter passes its limit. That rung exists for a real case (an
-  NR7101 can wedge so that only a power cycle clears it, and without the rung
-  the router reboot-loops), but it assumes protocol errors mean the modem
-  stopped answering. They can equally mean wwand picked the wrong control
-  protocol and is talking QMI at a device that does not speak it — reported from
-  the field on 2026-08-30, where a misdetected modem was power-cycled for it.
-  The missing discriminator is whether **one** successful exchange has ever
-  completed on this channel with the currently selected protocol; if none has,
-  the errors are evidence about our detection, not about the hardware, and no
-  hardware rung may fire. Gate all of them on that, not just the repower.
-  Related and awaiting the reporter's driver output: `discovery.uc:878` falls
-  back to `'qmi'` when `protocol_of()` cannot identify the driver (same fallback
-  at `daemon.uc:965` and `:1035`) — a guess where "unknown" is the honest answer,
-  and the reason the misdetection happened at all.
+- **DONE (2026-08-30) — the recovery ladder no longer touches hardware on a
+  protocol it has never spoken.** Every rung, the reboot included, is gated on
+  one answer having arrived in the selected protocol; the permission is sticky,
+  persisted, withdrawn on a protocol change, and withdrawn again when
+  `option protocol` contradicts the driver (an AT port answers on QMI and MBIM
+  modems too, so it cannot prove an NCM pin). `option protocol` itself is parsed
+  now — it was documented, advised by the daemon's own error message, and
+  silently dropped by `config.uc`.
+- **TODO — recovery state has no identity boundary.** The counters, `proto_ok`
+  included, are keyed on the modem *id* and persist across daemon restarts
+  within a boot (tmpfs). Swap the physical modem behind that id and the
+  replacement inherits the arming the previous one earned. There is no sound
+  fix without evidence: a modem at that id which never answers is
+  indistinguishable from the same modem gone silent, which is precisely the case
+  the hardware rungs exist for — so refusing to inherit would disarm the wedged
+  modem this feature was built for. Hooking it to the IMEI does not help either,
+  because the IMEI only arrives *after* the modem has answered, by which point
+  the replacement has earned its own arming anyway. Recorded because it is a
+  real narrowing of the invariant ("this modem answered", not "a modem at this
+  id answered"), not because a fix is known. Raised in review, 2026-08-30.
+- **TODO — nothing catches a mismatched split-package install.** The ucode tree
+  ships as a base package plus per-backend ones, and the feed's DEPENDS carry no
+  version. A base from one release running backends from another fails the way
+  a partial deploy did here on 2026-08-30: HEAD's `modem.uc` against r49's
+  `discovery.uc` stalled at `open_at` with **no log line at all**, which cost
+  several rounds of suspecting the new code. Worth an exact-version DEPENDS in
+  the feed, or a fail-loud internal API version constant checked at start-up —
+  the point being that it must be loud, since the silent stall is the whole
+  problem. Raised in review, 2026-08-30.
 - **TODO — the NCM/AT backend must accept a `cdc-wdm` as its AT port.** Stock
   `comgt-ncm` sends AT straight to `option device`, whatever it is:
   `gcom -d "$device"`, with an explicit usbmisc branch
