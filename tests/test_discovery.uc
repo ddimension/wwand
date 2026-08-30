@@ -186,6 +186,33 @@ let chw = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: null }, huaw
 eq(chw.protocol, 'ncm', 'cdc-wdm huawei_cdc_ncm -> ncm, not qmi');
 eq(chw.unknown, false, 'huawei: identified, so not flagged unknown');
 
+// A standalone cdc_wdm is a CDC "device management" channel (subclass DMM) whose
+// payload the spec leaves vendor-defined, so the driver name says nothing about
+// the protocol. Such a device normally pairs it with an AT-driven netdev — and
+// THAT is the answer, exactly as the stock stack would have it. An
+// unidentifiable control node must therefore not end the search.
+let dm_plus_ncm_fx = fakefx.create({
+	present: { '/dev/cdc-wdm0': true, '/sys/class/net/wwan0': true },
+	links: {
+		'/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/cdc_wdm',
+		'/sys/class/net/wwan0/device/driver': '/sys/bus/usb/drivers/cdc_ncm',
+	},
+	dirs: { '/sys/class/usbmisc/cdc-wdm0/device/net': [ 'wwan0' ] },
+});
+let cdm2 = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: null }, dm_plus_ncm_fx);
+eq(cdm2.protocol, 'ncm', 'unidentified DM channel + cdc_ncm netdev -> ncm');
+eq(cdm2.unknown ?? false, false, 'DM+ncm: answered, not refused');
+
+// ...but with nothing else to go on it still comes back unknown, so the daemon
+// can refuse it by name instead of reporting the modem as merely absent
+let dm_only_fx = fakefx.create({
+	present: { '/dev/cdc-wdm0': true },
+	links: { '/sys/class/usbmisc/cdc-wdm0/device/driver': '/sys/bus/usb/drivers/cdc_wdm' },
+});
+let cdm3 = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: null }, dm_only_fx);
+eq(cdm3.unknown, true, 'DM channel alone -> still unknown');
+eq(cdm3.driver, 'cdc_wdm', 'DM channel alone: driver named for the refusal');
+
 // A VENDOR FORK of qmi_wwan still speaks QMI. Quectel's qmi_wwan_q is the
 // driver our own rmnet_nss datapath add-on exists for, so refusing it would have
 // broken exactly the QSDK boxes that add-on serves — and it would have been a

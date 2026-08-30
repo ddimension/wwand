@@ -891,24 +891,43 @@ export function resolve_control(cfg, fx)
 	// 1. cdc-wdm control device present?
 	let device = resolve_modem_device(cfg, fx);
 
+	// NO fallback protocol. An unrecognised driver means we do not KNOW what
+	// this device speaks, and until 1.6.0 that answered 'qmi' — so an unknown
+	// cdc-wdm silently became a QMI modem, wwand demanded the wwand-qmi package
+	// and then ran CTL SYNC at a device that does not speak QMI. Every request
+	// timed out, the protocol-error counter climbed, and the recovery ladder
+	// eventually power-cycled a modem that was never broken (field report,
+	// 2026-08-30). `option protocol` pins it by hand; the driver is carried
+	// along so the refusal can name it.
+	let unidentified = null;
+
 	if (device) {
-		// NO fallback protocol. An unrecognised driver means we do not KNOW what
-		// this device speaks, and until 1.6.0 that answered 'qmi' — so an
-		// unknown cdc-wdm silently became a QMI modem, wwand demanded the
-		// wwand-qmi package and then ran CTL SYNC at a device that does not
-		// speak QMI. Every request timed out, the protocol-error counter
-		// climbed, and the recovery ladder eventually power-cycled a modem that
-		// was never broken (field report, 2026-08-30). Report null and let the
-		// caller say what it could not identify; `option protocol` pins it by
-		// hand. The driver comes along so the message can name it.
 		let proto = pin ?? protocol_of(device, fx);
 
-		return {
-			protocol: proto,
+		if (proto != null)
+			return {
+				protocol: proto,
+				unknown: false,
+				driver: driver_of(device, fx),
+				device: device,
+				netdev: resolve_netdev(cfg, device, fx),
+				tty: cfg.tty,
+			};
+
+		// An unidentifiable control node is not the end of the search. The
+		// standalone cdc_wdm driver binds any CDC interface of subclass DMM —
+		// "device management" — and the spec leaves the payload vendor-defined,
+		// so the kernel name says nothing beyond "some management channel".
+		// Such a device normally pairs that channel with a cdc_ncm/cdc_ether
+		// netdev, which IS the answer: an AT-driven NCM modem, exactly what the
+		// stock stack would make of it. So hold the unknown and let the netdev
+		// branch below have its turn; it is returned only if nothing else fits.
+		unidentified = {
+			protocol: null,
 			// explicit: "we looked and could not tell", as opposed to a caller
 			// that simply never filled the field in. Only this flag refuses the
 			// modem, so a hand-built control object keeps working.
-			unknown: proto == null,
+			unknown: true,
 			driver: driver_of(device, fx),
 			device: device,
 			netdev: resolve_netdev(cfg, device, fx),
@@ -937,6 +956,12 @@ export function resolve_control(cfg, fx)
 	if (!netdev && cfg.usb_path)
 		netdev = ncm_netdev_for_usb_path(cfg.usb_path, fx);
 
+	// the netdev an unidentifiable control node pointed at, when that netdev is
+	// one of the AT-driven kinds — the standalone-DM-channel case above
+	if (!netdev && unidentified?.netdev &&
+	    NCM_DRIVERS[netdev_driver(unidentified.netdev, fx)])
+		netdev = unidentified.netdev;
+
 	if (netdev) {
 		return {
 			protocol: pin ?? 'ncm',
@@ -958,6 +983,12 @@ export function resolve_control(cfg, fx)
 		};
 	}
 
-	// 4. nothing present yet
+	// 4. an unidentifiable control device and nothing else to go on: hand it
+	// back so the daemon can refuse it BY NAME rather than reporting the modem
+	// as merely absent. This is the only path that still answers `unknown`.
+	if (unidentified)
+		return unidentified;
+
+	// 5. nothing present yet
 	return null;
 };
