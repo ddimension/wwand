@@ -102,6 +102,35 @@ reported only.
   eight unused UIM `REGISTER_EVENTS` mask bits, `UIM_REFRESH_OK` (which libqmi
   structurally cannot answer, so an operator OTA can stall the card), and the
   three indications libqmi can arm but not decode. Nothing there is scheduled.
+- **TODO — the cancellation family is mapped but not closed.** Destroying a QMI
+  client reports `cancelled` to every pending callback **synchronously**, while
+  the hub is still live. Any callback that reads "error" as "carry on" then
+  issues its next request on a client mid-destruction and resumes a chain the
+  teardown existed to stop. Everything inside the 2026-08-30 range is fixed and
+  tested; a whole-tree sweep in review found the rest, all of it older:
+  - `qmi_backend.set_opmode()` hands `cancelled` to its continuation, so the
+    recovery cycle, the admin reset and the SIM-reapply radio cycle all carry on.
+  - a cancelled `STOP_NETWORK` immediately sends a second `STOP_NETWORK` on the
+    dying client (the preserved retry treats every error alike).
+  - `netsel_ops`: a cancelled GET falls through to a **permanent modem write**,
+    and a cancelled SET is read as "the firmware rejected one LTE TLV" and
+    retries the alternate write.
+  - `sim.set_pin_lock()` reads a cancellation as "try the next transport" and
+    walks UIM → DMS → AT; the APDU probe can cache `_apdu_be = 'none'`.
+  - the init chain does not capture `_gen` at all: SYNC, VERSION, ALLOCATE,
+    `read_info`, opmode, SIM-slot, unlock, identity, system-preference and
+    `config_check` all continue or re-arm timers.
+  - telemetry continues across a cancellation and can cache degraded backend
+    choices (`_ca_be`, `_dsd_be`) that survive into the retry.
+
+  **This wants one convention, not twenty patches.** The shape that worked here
+  is a captured generation plus a `torn_down(err, client)` helper next to the
+  forward declarations (a `let` further down is not hoisted in ucode and fails at
+  CALL time). Doing it piecemeal is how the last several rounds went, and each
+  fix introduced the next hole. Severity is real but the window is narrow — a
+  teardown with a request in flight — with the worst cases being writes that
+  outlive their modem: a slot switch, an NV profile write, a network-selection
+  write. Raised in review, 2026-08-30.
 - **TODO — recovery state has no identity boundary.** The counters, `proto_ok`
   included, are keyed on the modem *id* and persist across daemon restarts
   within a boot (tmpfs). Swap the physical modem behind that id and the
