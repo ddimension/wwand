@@ -8,6 +8,7 @@ import * as mockhub from './lib/mockhub.uc';
 import * as modem_mod from 'wwand/modem.uc';
 import * as context_mod from 'wwand/context.uc';
 import * as context_common from 'wwand/context_common.uc';
+import * as context_monitor_qmi from 'wwand/context_monitor_qmi.uc';
 
 uloop.init();
 
@@ -765,6 +766,46 @@ for (let i = 0; i < 200000 && !_all_done; i++)
 		'teardown: a cancelled attach-profile read issues no MODIFY_PROFILE');
 	eq(done_called, 0,
 		'teardown: ...and does not resume the init chain behind the teardown');
+})();
+
+// --- a cancelled settings walk must not step on, and must not stick ---------
+// Two properties, both of which cost something real. The walk reads each family
+// in turn: continuing after a cancelled read issues the IPv6 read into the same
+// destruction loop that just cancelled the IPv4 one. And the `refreshing` latch
+// guards against overlapping walks — a context object is REUSED across a
+// reconnect, so a latch left set disables live settings refresh for the rest of
+// that context's life, silently, because the slow poll keeps running and only
+// the values go stale.
+(() => {
+	let fetched = [], answer = null;
+	let fake = {
+		state: 'CONNECTED',
+		// two families: the walk would read 4 then 6
+		families: { '4': { settings: {}, pdh: 1 }, '6': { settings: {}, pdh: 2 } },
+		modem: { config: {} },
+	};
+
+	let mon = context_monitor_qmi.install(fake, {
+		log: () => null,
+		emit: () => null,
+		timing: {},
+		fetch: (family, cb) => { push(fetched, family); answer = cb; },
+	});
+
+	mon.refresh();
+	eq(fetched, [ 4 ], 'refresh: the walk starts with the first family');
+
+	// what a teardown does to the pending read
+	answer({ error: 'cancelled' });
+	eq(fetched, [ 4 ],
+		'refresh: a cancelled read does not issue the next family into the same teardown');
+
+	// stop() ends the session, and nothing from it may reach into the next one:
+	// neither the latch nor the cooldown, or a reused context comes back with
+	// settings refresh disabled or throttled for no reason that still applies
+	mon.stop();
+	mon.refresh();
+	eq(length(fetched), 2, 'refresh: a stopped session does not disable the next one');
 })();
 
 done('test_context');

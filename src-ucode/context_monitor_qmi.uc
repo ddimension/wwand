@@ -72,6 +72,21 @@ export function install(self, o)
 			settings_timer.cancel();
 			settings_timer = null;
 		}
+
+		// The refresh latch and its cooldown belong here too. A context object
+		// is REUSED across a reconnect, so anything left set by an abandoned
+		// refresh carries into the next session: a stuck latch disables live
+		// settings refresh for the rest of that context's life — silently,
+		// because the slow poll keeps running and only the values go stale —
+		// and a live cooldown throttles the first refresh after reconnecting
+		// for no reason that still applies. A stopped session must not reach
+		// into the next one.
+		refreshing = false;
+
+		if (refresh_cooldown) {
+			refresh_cooldown.cancel();
+			refresh_cooldown = null;
+		}
 	};
 
 	sample_stats = () => {
@@ -252,10 +267,20 @@ export function install(self, o)
 			let before_obj = self.families[key]?.settings;
 
 			fetch_settings(+key, (err) => {
-				// a cancelled read means the family clients are being destroyed;
-				// stepping on would issue the IPv6 read into that same loop
-				if (err?.error == 'cancelled')
+				// A cancelled read means the family clients are being destroyed;
+				// stepping on would issue the IPv6 read into that same loop.
+				//
+				// The latch MUST be released on the way out. Returning without
+				// it left `refreshing` set forever, and since a context object
+				// is REUSED across a reconnect, a transient suspend or loss with
+				// a refresh pending disabled live settings refresh for the rest
+				// of that context's life — silently, because the slow poll still
+				// runs and the values only go stale. stop_stats() does not clear
+				// it either, so this was the only place that could.
+				if (err?.error == 'cancelled') {
+					refreshing = false;
 					return;
+				}
 
 				let fam = self.families[key];
 
