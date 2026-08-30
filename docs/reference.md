@@ -341,7 +341,12 @@ config wwand_modem 'm0'
 	option dl_datagram_max_size '0'  # QMAP DL aggregation bytes; 0 = model/board table
 	option qmap_version '0'          # cap the QMAP header version the datapath
 	                                 #   negotiates: 5|4|1 (0 = whatever the
-	                                 #   datapath can drive, trying best first)
+	                                 #   datapath can drive, trying best first).
+	                                 #   Changing it on a RUNNING modem needs
+	                                 #   every context on it down first (ifdown):
+	                                 #   the modem accepts the new format but
+	                                 #   latches the old one while a session is
+	                                 #   up, and the downlink goes silent.
 	list at_init 'ATE0'              # extra AT commands, sent once before registration
 	option at2_external '0'          # 1: reserve the secondary AT port for external tools
 	option at_mbim '0'               # 0: disable the automatic AT-over-MBIM fallback
