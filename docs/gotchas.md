@@ -145,3 +145,30 @@ an hour.
 which parses the lists — and note that its first two versions had false positives
 of their own, for the same reason in reverse (a `)` inside a comment, and a
 pattern that ran past the end of a variable into the prose after it).
+
+### A load-bearing test proves the guard is right
+**No — it proves the guard and the test agree.** The cancellation guard in the
+settings-refresh walk checked `err.error == 'cancelled'`, and its unit test
+injected exactly that. The test passed, and it failed when the guard was removed,
+so it looked like proof. But `context.uc`'s `fetch_settings` WRAPS the client
+error as `{ stage: 'settings', err }`, so the guard never matched in production
+and the test was describing an interface that does not exist (2026-08-31).
+
+Reverting the fix to see the test go red is necessary and not sufficient. The
+fixture also has to be the shape the real caller passes. When a callback is
+reached through a wrapper, read the wrapper — do not infer the shape from the
+guard you just wrote.
+
+### `client.destroy()` is a quiet operation
+**It is not: it fails every pending request SYNCHRONOUSLY, with the hub still
+live.** So a callback that treats "error" as "carry on" issues its next request
+on a client mid-destruction, and arms timers after teardown's cancellation pass
+has already run. That is one bug class with many instances — a slot switch, an
+NV profile write and a data-session START were all reachable this way. The
+convention that works is a captured generation plus one `torn_down(err, client)`
+helper, applied at once; fixing instances one at a time is how each fix came to
+introduce the next hole (2026-08-30/31).
+
+**The AT engine is different**, and worth knowing so it is not "fixed" too:
+`atcmd.close()` cancels the timer, nulls the active command and clears the queue
+WITHOUT invoking pending callbacks, so the AT chains cannot resume this way.

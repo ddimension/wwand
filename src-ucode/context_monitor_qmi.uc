@@ -268,16 +268,19 @@ export function install(self, o)
 
 			fetch_settings(+key, (err) => {
 				// A cancelled read means the family clients are being destroyed;
-				// stepping on would issue the IPv6 read into that same loop.
+				// stepping on would issue the IPv6 read into that same loop,
+				// before the loop has reached IPv6.
 				//
-				// The latch MUST be released on the way out. Returning without
-				// it left `refreshing` set forever, and since a context object
-				// is REUSED across a reconnect, a transient suspend or loss with
-				// a refresh pending disabled live settings refresh for the rest
-				// of that context's life — silently, because the slow poll still
-				// runs and the values only go stale. stop_stats() does not clear
-				// it either, so this was the only place that could.
-				if (err?.error == 'cancelled') {
+				// The shape matters and I got it wrong the first time: fetch()
+				// WRAPS the client error as { stage: 'settings', err }, so a bare
+				// `err.error == 'cancelled'` never matched in production. The
+				// unit test agreed with the guard rather than with the caller,
+				// because it injected the unwrapped shape — green, load-bearing,
+				// and testing an interface that does not exist.
+				//
+				// The latch is released on the way out as well; stop_stats()
+				// clears it too, so no exit from this walk can leak it.
+				if (err?.error == 'cancelled' || err?.err?.error == 'cancelled') {
 					refreshing = false;
 					return;
 				}

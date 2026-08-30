@@ -128,9 +128,10 @@ reported only.
   forward declarations (a `let` further down is not hoisted in ucode and fails at
   CALL time). Doing it piecemeal is how the last several rounds went, and each
   fix introduced the next hole. Severity is real but the window is narrow — a
-  teardown with a request in flight — with the worst cases being writes that
-  outlive their modem: a slot switch, an NV profile write, a network-selection
-  write. Raised in review, 2026-08-30.
+  teardown with a request in flight. The worst of the family are writes that
+  outlive their modem — a slot switch, an NV profile write, a network-selection
+  write; the first two are fixed in this range, the network-selection ones are
+  among the open sites above. Raised in review, 2026-08-30.
 - **TODO — recovery state has no identity boundary.** The counters, `proto_ok`
   included, are keyed on the modem *id* and persist across daemon restarts
   within a boot (tmpfs). Swap the physical modem behind that id and the

@@ -771,16 +771,21 @@ for (let i = 0; i < 200000 && !_all_done; i++)
 // --- a cancelled settings walk must not step on, and must not stick ---------
 // Two properties, both of which cost something real. The walk reads each family
 // in turn: continuing after a cancelled read issues the IPv6 read into the same
-// destruction loop that just cancelled the IPv4 one. And the `refreshing` latch
-// guards against overlapping walks — a context object is REUSED across a
-// reconnect, so a latch left set disables live settings refresh for the rest of
-// that context's life, silently, because the slow poll keeps running and only
-// the values go stale.
+// destruction loop that just cancelled the IPv4 one, before that loop has
+// reached IPv6. And the `refreshing` latch guards against overlapping walks — a
+// context object is REUSED across a reconnect, so a latch left set disables live
+// settings refresh for the rest of that context's life, silently, because the
+// slow poll keeps running and only the values go stale.
+//
+// THE SHAPE IS THE POINT. context.uc's fetch_settings WRAPS the client error as
+// { stage: 'settings', err }, and the first version of this test injected a bare
+// { error: 'cancelled' } — so it agreed with the guard instead of with the
+// caller, passed, failed when the guard was removed, and still described an
+// interface that does not exist. The fixture below is the production shape.
 (() => {
 	let fetched = [], answer = null;
 	let fake = {
 		state: 'CONNECTED',
-		// two families: the walk would read 4 then 6
 		families: { '4': { settings: {}, pdh: 1 }, '6': { settings: {}, pdh: 2 } },
 		modem: { config: {} },
 	};
@@ -792,20 +797,32 @@ for (let i = 0; i < 200000 && !_all_done; i++)
 		fetch: (family, cb) => { push(fetched, family); answer = cb; },
 	});
 
+	// exactly what context.uc hands back when the client is destroyed
+	let wrapped = { stage: 'settings', err: { error: 'cancelled' } };
+
 	mon.refresh();
 	eq(fetched, [ 4 ], 'refresh: the walk starts with the first family');
 
-	// what a teardown does to the pending read
-	answer({ error: 'cancelled' });
+	answer(wrapped);
 	eq(fetched, [ 4 ],
 		'refresh: a cancelled read does not issue the next family into the same teardown');
 
-	// stop() ends the session, and nothing from it may reach into the next one:
-	// neither the latch nor the cooldown, or a reused context comes back with
-	// settings refresh disabled or throttled for no reason that still applies
+	// The latch, tested synchronously after all: leave a walk PENDING, stop the
+	// session, and a later refresh must run. That proves stop() cleared both the
+	// latch and the ten-second cooldown — neither of which may reach into the
+	// next session, since the context object is reused across a reconnect.
+	fetched = [];
+	mon.refresh();                       // blocked by the cooldown from above
 	mon.stop();
 	mon.refresh();
-	eq(length(fetched), 2, 'refresh: a stopped session does not disable the next one');
+	eq(fetched, [ 4 ], 'refresh: stop() clears the latch and the cooldown together');
+
+	// ...and a walk abandoned mid-flight does not wedge the next one either
+	fetched = [];
+	answer = null;
+	mon.stop();
+	mon.refresh();
+	eq(fetched, [ 4 ], 'refresh: a walk left pending at stop does not disable the next');
 })();
 
 done('test_context');
