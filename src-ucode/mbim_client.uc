@@ -229,6 +229,13 @@ export function create(hub, hooks)
 				delete self.pending[sprintf('%d', msg.txn)];
 				p.timer.cancel();
 
+				// a function error carrying our transaction id is as much an
+				// MBIM answer as a done-frame is: the function parsed the frame
+				// and rejected it. Leaving it out would let a modem that only
+				// ever returns function errors stay unarmed for good.
+				if (hooks?.on_answer)
+					hooks.on_answer(self);
+
 				if (p.cb)
 					p.cb({ error: 'function_error', code: msg.error }, null);
 			}

@@ -150,10 +150,18 @@ export function create(opts)
 		// branch is skipped for being exhausted, not for being unarmed, and
 		// execution fell through to the reboot.
 		if (!self.counters.proto_ok) {
-			// once per threshold we would have acted on, so the operator sees it
-			// at the same points the ladder would have escalated
-			if ((self.counters.rung < length(RUNGS) && n == RUNGS[self.counters.rung].at) ||
-			    (self.failreboot > 0 && n == self.failreboot + 1))
+			// Once per threshold we would have acted on, so the operator sees it
+			// at the same points the ladder would have escalated. Compared
+			// against EVERY rung, not against the current one: `rung` cannot
+			// advance while we return early here, so keying on it would have
+			// reported 8 forever and never 16 or 24.
+			let at_rung = false;
+
+			for (let r in RUNGS)
+				if (n == r.at)
+					at_rung = true;
+
+			if (at_rung || (self.failreboot > 0 && n == self.failreboot + 1))
 				log('warn', sprintf('%d failed attempts and the %s control channel has never answered — not touching the hardware; check `option protocol` and the driver',
 					n, self.counters.proto_name ?? 'modem'));
 

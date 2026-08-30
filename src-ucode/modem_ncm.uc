@@ -231,6 +231,13 @@ export function create(opts)
 
 	let rec = modem_common.make_recovery(self, opts, log, 'ncm');
 
+	// see the on_answer note at open_at below: a contradicted pin makes the AT
+	// port's answer worthless as protocol evidence, so nothing will ever arm the
+	// hardware ladder here. Say so once rather than leaving it a silent property.
+	if (opts.pinned_over)
+		log('warn', sprintf('`option protocol ncm` overrides the driver, which says %s — hardware recovery stays disarmed for this modem, because an AT port answers on %s modems too and would prove nothing',
+			opts.pinned_over, opts.pinned_over));
+
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, reg_poll_timer = null, settle_timer = null;
 	let reenum_timer = null;   // slot-switch re-enumeration watchdog (step_simslot)
@@ -418,7 +425,15 @@ export function create(opts)
 			// QMI and MBIM arm from their own clients; without this NCM never
 			// armed at all and a genuinely wedged NCM modem could no longer
 			// reach the opmode cycle, the reset or the board power-cycle.
-			on_answer: () => rec.note_answer(),
+			//
+			// UNLESS the driver said this is a QMI or MBIM modem and `option
+			// protocol ncm` overrode it. Those modems expose a working AT port
+			// too, so its answer is consistent with the pin being WRONG and
+			// cannot arm anything — the exact mirror of the misdetection this
+			// gate exists to prevent, just reached from the other side. Such a
+			// modem stays unarmed until the pin is corrected; nothing physical
+			// happens to it, which is the safe direction.
+			on_answer: opts.pinned_over ? null : (() => rec.note_answer()),
 			drain_interval: self.timing.at_drain,
 			set_drain_timer: (t) => { at_drain_timer = t; },
 			base_override: (self.device == null && anchor != null)

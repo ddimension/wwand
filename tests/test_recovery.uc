@@ -221,6 +221,21 @@ eq(length(filter(old_acts, (a) => a != 'retry')), 0,
 ro.note_answer();
 eq(ro.on_attempt(), 'reboot', 'unarmed reboot: once it answers, the reboot rung is reachable');
 
+// ...and the unarmed warning reaches EVERY threshold. Keying it on the current
+// rung index reported 8 forever and never 16 or 24, because `rung` cannot
+// advance while the guard returns early.
+fx = fakefx.create();
+let glogs = [];
+let rw = recovery.create({ id: 'warnings', failreboot: 40, fx: fx, state_dir: '/state',
+	log: (level, msg) => push(glogs, msg) });
+
+for (let i = 1; i <= 45; i++) rw.on_attempt();
+
+let warned = filter(glogs, (m) => match(m, /never answered/) != null);
+eq(length(warned), 4, 'unarmed log: one line per threshold — 8, 16, 24 and the reboot');
+ok(match(warned[1], /^16 failed/) != null, 'unarmed log: the second rung is reported');
+ok(match(warned[2], /^24 failed/) != null, 'unarmed log: and the third');
+
 // (b) a protocol change on a modem that had already climbed every rung
 fx = fakefx.create();
 let rp = recovery.create({ id: 'protoswitch', failreboot: 40, fx: fx, state_dir: '/state', log: silent });

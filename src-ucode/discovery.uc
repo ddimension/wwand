@@ -902,12 +902,22 @@ export function resolve_control(cfg, fx)
 	let unidentified = null;
 
 	if (device) {
-		let proto = pin ?? protocol_of(device, fx);
+		let detected = protocol_of(device, fx);
+		let proto = pin ?? detected;
 
 		if (proto != null)
 			return {
 				protocol: proto,
 				unknown: false,
+				// The pin and the driver DISAGREE, and this names what the
+				// driver said. It is not an error — pinning exists precisely to
+				// override a wrong reading — but it does mean a second opinion
+				// is on record, and callers that treat "the modem answered" as
+				// proof of the chosen protocol must not accept an answer the
+				// contradicted protocol could equally have produced. See
+				// modem_ncm, where an AT port answers on QMI modems too.
+				pinned_over: (pin != null && detected != null && detected != pin)
+					? detected : null,
 				driver: driver_of(device, fx),
 				device: device,
 				netdev: resolve_netdev(cfg, device, fx),

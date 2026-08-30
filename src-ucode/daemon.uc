@@ -1107,6 +1107,11 @@ export function create(opts)
 			device: device,
 			config: cfg,
 			timing: self.timing,
+			// non-null when `option protocol` overrode what the driver said, and
+			// names the driver's reading. An AT-driven backend uses it to refuse
+			// weak evidence: on a QMI/MBIM modem pinned to NCM the AT port
+			// answers perfectly well and proves nothing (modem_ncm).
+			pinned_over: control?.pinned_over ?? null,
 			recovery: {
 				fx: deps.recovery_fx,
 				state_dir: opts?.state_dir,

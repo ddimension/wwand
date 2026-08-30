@@ -574,6 +574,16 @@ scenario('slots: MBIM modem brings up the passthrough UIM on demand', (next) => 
 		eq(length(slots), 2, 'slots: both slots listed');
 		eq(slots[0].active, true, 'slots: slot 1 active');
 		eq(slots[1].card, 'present', 'slots: slot 2 present');
+
+		// ...and the multi-SIM summary over the REAL mapper output, which is
+		// where a hand-built fixture can quietly lie: the inactive slot here
+		// carries logical_slot 0, exactly as a modem reports it, and counting
+		// it would turn a single-SIM-active modem into a dual-standby claim.
+		let ms = sim.multisim(slots, null);
+		eq(ms.executors, 1, 'slots: one ACTIVE logical slot through the real mapper');
+		eq(ms.mode, null, 'slots: an inferred count states no mode');
+		eq(ms.mode_min, null, 'slots: and floors at nothing');
+
 		next();
 	});
 });
@@ -824,7 +834,19 @@ eq(ms_qmi.concurrency, null, 'multisim: QMI cannot answer concurrency at all');
 eq(ms_qmi.mode, null, 'multisim: an inferred count never yields a definite mode');
 eq(ms_qmi.mode_min, null, 'multisim: one logical slot rules nothing out either');
 
-// two logical slots in use is different: two stacks ARE registered at once, so
+// Only ACTIVE slots count. QMI reports a logical_slot on inactive slots too and
+// the value there is stale, not meaningful — HW-observed on the RG650E, whose
+// empty second slot also answers logical_slot 1, and the canned QMI fixture
+// above has the inactive slot answering 0. Either read as a live stack would
+// floor a plain single-SIM modem at DSDS on no evidence whatsoever.
+let ms_stale = sim.multisim([
+	{ physical: 1, active: true,  logical_slot: 1 },
+	{ physical: 2, active: false, logical_slot: 0 },
+], null);
+eq(ms_stale.executors, 1, 'multisim: an inactive slot\'s logical_slot does not count');
+eq(ms_stale.mode_min, null, 'multisim: and cannot floor the modem at dual standby');
+
+// two logical slots ACTIVE at once is different: two stacks ARE registered, so
 // DSSA is ruled out. Whether it is really DSDA stays unanswerable over QMI.
 let ms_two = sim.multisim([
 	{ physical: 1, active: true, logical_slot: 1 },

@@ -171,6 +171,19 @@ eq(c2.device, '/dev/cdc-wdm0', 'mbim: control device');
 let c2p = discovery.resolve_control({ device: '/dev/cdc-wdm0', protocol: 'qmi', tty: null }, mbim_fx);
 eq(c2p.protocol, 'qmi', 'protocol pin overrides driver classification');
 
+// ...and the overridden reading is kept. Not an error — that is what a pin is
+// for — but it records that a second opinion exists, which an AT-driven backend
+// needs: on a QMI/MBIM modem pinned to NCM the AT port answers perfectly well,
+// so its answer is consistent with the pin being wrong and cannot be treated as
+// proof of the protocol (modem_ncm refuses to arm hardware recovery on it).
+eq(c2p.pinned_over, 'mbim', 'a contradicted pin records what the driver said');
+
+let c2q = discovery.resolve_control({ device: '/dev/cdc-wdm0', protocol: 'mbim', tty: null }, mbim_fx);
+eq(c2q.pinned_over, null, 'a pin that AGREES with the driver contradicts nothing');
+
+let c2n = discovery.resolve_control({ device: '/dev/cdc-wdm0', tty: null }, mbim_fx);
+eq(c2n.pinned_over, null, 'no pin, nothing overridden');
+
 // --- 2b. a cdc-wdm whose driver is AT-controlled, and the unknown case -------
 // huawei_cdc_ncm is a CDC-NCM driver that ALSO registers a cdc-wdm, so the mere
 // presence of a control node says nothing about the protocol. Field-reported
@@ -263,6 +276,8 @@ eq(cal.driver, 'some_vendor_thing', 'unknown driver is reported so it can be add
 let calp = discovery.resolve_control({ device: '/dev/cdc-wdm0', protocol: 'ncm', tty: null }, alien_fx);
 eq(calp.protocol, 'ncm', 'unknown driver: `option protocol` overrides');
 eq(calp.unknown, false, 'unknown driver: a pin clears the unknown flag');
+eq(calp.pinned_over, null,
+	'unknown driver: a pin contradicts nothing, because the driver said nothing');
 
 // --- 3. NCM netdev (no cdc-wdm) ---------------------------------------------
 

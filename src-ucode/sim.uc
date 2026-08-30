@@ -667,12 +667,17 @@ export function multisim(slots, caps)
 	if (!n_slots)
 		return null;
 
-	// distinct logical slots actually claimed by a card; null where the modem
-	// does not report one (MBIM's native path only knows the active slot's)
+	// Distinct logical slots actually IN USE. Only active slots count: QMI
+	// reports a logical_slot on inactive ones too, and the value is stale
+	// rather than meaningful there — HW on an RG650E with one active slot,
+	// where the empty second slot also reports logical_slot 1, and libqmi
+	// documents the field as significant only while the slot is active. Taking
+	// it at face value would read two stale values as two live stacks and
+	// floor the modem at DSDS on nothing at all.
 	let logical = {};
 
 	for (let s in slots)
-		if (s.logical_slot != null)
+		if (s.active && s.logical_slot != null)
 			logical[sprintf('%d', s.logical_slot)] = true;
 
 	let inferred = length(keys(logical));

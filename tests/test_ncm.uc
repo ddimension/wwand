@@ -139,6 +139,7 @@ function run_next()
 		timing: { settle: 1, reg_timeout: 500, reg_poll: 5, backoff_min: 1, backoff_max: 5, at_drain: 1,
 		          ...(s.mtiming ?? {}) },
 		datapath: s.datapath,
+		pinned_over: s.pinned_over,
 		// inject the scripted tty; a re-opened tty is not closed (a scenario
 		// that restarts the modem re-opens the same mock and keeps its history)
 		at: { open_transport: () => { tr.closed = false; return tr; } },
@@ -300,6 +301,28 @@ push(scenarios, {
 				env.finish();
 			});
 		});
+	},
+});
+
+// --- s1b: a pin the driver contradicts must NOT arm hardware recovery -------
+// `option protocol ncm` on a modem whose driver says QMI or MBIM: those modems
+// expose a working AT port too, so an AT answer is equally consistent with the
+// pin being wrong. Arming on it would power-cycle hardware for our own bad
+// configuration — the same mistake as the misdetection this gate exists for,
+// only reached from the other side.
+
+push(scenarios, {
+	name: 's1b_pinned_over',
+	script: script(),
+	cconfig: { apn: 'internet', mux_id: 0 },
+	pinned_over: 'qmi',
+	run: (env) => {
+		let m = env.modem;
+
+		ok(m.at != null, 'pinned: the AT port answered — the modem is talking to us');
+		eq(m.counters.proto_ok, 0,
+			'pinned: but an AT answer proves nothing when the driver says qmi');
+		env.finish();
 	},
 });
 
