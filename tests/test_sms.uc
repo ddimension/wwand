@@ -66,4 +66,34 @@ sms.sms_list({}, 'SM', (err, res) => {
 	eq(err.error, 'unsupported_on_backend', 'no wms -> unsupported_on_backend');
 });
 
+// A SEND can be the first SMS operation on a modem, and WMS is allocated
+// lazily — the list/read/delete path reaches _ensure_wms through
+// sms_backend(), the send path did not. On a QMI-only modem that meant
+// send-first found modem.wms null and fell through to an AT path that may not
+// exist at all.
+{
+	let ensured = 0, sent = [];
+	// forward-declared: the closure refers to `m` (ucode has no hoisting)
+	let m;
+	m = {
+		_ensure_wms: function(cb) {
+			ensured++;
+			// what the real one does: allocate, then hand control back
+			m.wms = { request: (name, args, rcb) => {
+				push(sent, name);
+				rcb(null, { message_id: 1 });
+			} };
+			cb();
+		},
+	};
+
+	sms.sms_send(m, '+491700000000', 'hi', (err, res) => {
+		eq(err, null, 'send-first: succeeds without a prior list');
+		eq(res.parts, 1, 'send-first: one part');
+	});
+
+	eq(ensured, 1, 'send-first: the WMS client is allocated on the send itself');
+	eq(sent, [ 'RAW_SEND' ], 'send-first: and the message goes out over WMS, not AT');
+}
+
 done('test_sms');

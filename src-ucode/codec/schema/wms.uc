@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI Wireless Messaging Service (WMS) message schema (service 0x05).
-// Receive/list/read/delete only (no send). TLV layouts + message ids + enum
+// List/read/delete and send (RAW_SEND, below). TLV layouts + message ids + enum
 // values verified against libqmi 1.38 data/qmi-service-wms.json and
 // qmi-enums-wms.h:
 //   Raw Read 0x0022, Delete 0x0024, List Messages 0x0031.

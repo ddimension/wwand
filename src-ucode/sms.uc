@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — backend-neutral SMS access (list / read / delete stored messages).
+// wwand — backend-neutral SMS access (list / read / delete stored messages,
+// and send).
 //
 // Mirrors sim.apdu_backend: pick the transport once per modem via backend.choose
 // (QMI WMS, native or over the MBIM passthrough → AT CMGL/CMGR/CMGD), cache it,
 // and dispatch each op by name. All backends return raw PDUs, decoded by the one
-// shared sms_pdu.uc. Receive-only — there is no send path.
+// shared sms_pdu.uc.
+//
+// SEND takes a different route on purpose: it does not go through
+// backend.choose, because that probes with a List Messages and a modem can be
+// perfectly able to send while rejecting List (the Quectel case below). It
+// picks QMI WMS whenever a WMS client is up and falls back to AT.
 //
 // The QMI candidate PROBES by actually issuing a List Messages: some firmware
 // (e.g. Quectel RG650E) rejects WMS List with QMI MISSING_ARGUMENT, so the probe
@@ -338,6 +344,16 @@ export function sms_send(modem, number, text, cb)
 	concat_ref = (concat_ref + 1) & 0xff;
 	let pdus = sms_pdu.encode_submit(number, text, { ref: concat_ref });
 
+	// WMS is allocated lazily, and a SEND can be the first SMS operation on the
+	// modem — the list/read/delete path reaches _ensure_wms through
+	// sms_backend(), this one does not. Without this a send-first on a QMI-only
+	// modem found modem.wms null and fell through to an AT path that may not
+	// exist, which is not what "lazily on first use" promises anywhere else.
+	// forward-declared: ucode has no hoisting, and this is referenced from the
+	// _ensure_wms continuation below before its own initialiser is reached
+	let go;
+
+	go = () => {
 	// QMI WMS whenever a WMS client is up (native or passthrough); else AT
 	if (modem.wms) {
 		let refs = [], i = 0, step;
@@ -391,5 +407,16 @@ export function sms_send(modem, number, text, cb)
 		return;
 	}
 
-	cb({ error: 'unsupported_on_backend' });
+		cb({ error: 'unsupported_on_backend' });
+	};
+
+	// WMS is allocated lazily, and a SEND can be the first SMS operation on the
+	// modem — the list/read/delete path reaches _ensure_wms through
+	// sms_backend(), this one does not. Without this a send-first on a QMI-only
+	// modem found modem.wms null and fell through to an AT path that may not
+	// exist, which is not what "lazily on first use" promises anywhere else.
+	if (!modem.wms && type(modem._ensure_wms) == 'function')
+		return modem._ensure_wms(() => go());
+
+	return go();
 };

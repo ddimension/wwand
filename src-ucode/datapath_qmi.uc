@@ -6,8 +6,11 @@
 // (QMAP/QMAPv5 with rmnet-first checksum-offload and plain-QMAP fallback,
 // board/model-clamped aggregation size) and build the kernel datapath
 // (netlink.setup: rmnet/qmimux children, MTU, UL aggregation). Stores the
-// result on self.datapath ({ backend, v5, netdev, urb_size, mux_devs,
-// ep_id, ep_type }) and calls next(); every failure goes through the shared
+// result on self.datapath ({ backend, v5, parent, urb_size, mux_devs,
+// map_ids, wda, ul_agg, ep_id, ep_type }) — note `parent`, not `netdev`: the
+// name can move when a mux child claims the stable one, and a reader that
+// looked for `netdev` here silently got nothing. Calls next(); every failure
+// goes through the shared
 // fail(stage, err) (recovery-ladder aware). Skips gracefully on modems
 // without netdev/WDA when no mux is required.
 

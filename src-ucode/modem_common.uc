@@ -286,7 +286,7 @@ export const MODEM_STATES = {
 	SIM_UNLOCK: true,
 	SIM_BLOCKED: true,     // terminal until reload (PIN/PUK)
 	CONFIGURE_NET: true,   // QMI only
-	CONFIGURING: true,     // QMI only (deferred-settings apply)
+	CONFIGURING: true,     // QMI (deferred-settings apply) and NCM (attach cfg)
 	INIT_DATAPATH: true,
 	ATTACHING: true,       // MBIM packet-service attach
 	REGISTERING: true,

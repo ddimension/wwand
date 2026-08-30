@@ -139,7 +139,12 @@ export function install(self, o)
 				// watchdog see real numbers.
 				if (valid && !agg.rx_packets && !agg.tx_packets) {
 					let mux = +(self.config.mux_id ?? 0);
-					let parent = self.modem.datapath?.netdev;
+					// `parent` is what the QMI datapath stores (netlink.setup may
+					// have moved the raw netdev to a different name); `netdev` is
+					// the MBIM/NCM spelling. Reading only `netdev` made this
+					// fallback dead on QMI — exactly where it is needed, since an
+					// unmuxed context then had no device to read statistics from.
+					let parent = self.modem.datapath?.parent ?? self.modem.datapath?.netdev;
 					let dev = (mux > 0)
 						? (self.config.mux_link ?? (parent ? sprintf('%sm%d', parent, mux) : null))
 						: parent;
