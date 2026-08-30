@@ -1,6 +1,6 @@
 # wwand — current state
 
-_State of 2026-08-30, release **v1.6.0**. 50 host suites / 3268 checks, all
+_State of 2026-08-30, release **v1.6.0**. 50 host suites / 3382 checks, all
 green (`cd tests && sh run_tests.sh`)._
 
 This file describes **what is true now**. The dated log of how it got here is
