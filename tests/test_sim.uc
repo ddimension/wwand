@@ -804,6 +804,41 @@ sw_self.modem_sim_switch_slot('m0', 1, (err) => {
 	sw_self.modem_sim_switch_slot('m0', 1, (e2, r2) => {
 		eq(r2?.unchanged, true, 'slot-clear: unchanged switch short-circuits');
 		eq(sw_modem._esim_refreshed, true, 'slot-clear: caches kept on an unchanged switch');
-		done('test_sim');
+		// --- multi-SIM shape, read-only ---------------------------------------------
+// The vocabulary is MBIM's because MBIM is the protocol that names it. QMI has
+// no message meaning "concurrency" at all — Qualcomm's own MBIM stack writes
+// the executor count as a literal 1 rather than asking — so over QMI the count
+// is inferred from distinct logical slots and marked inexact.
+let ms_qmi = sim.multisim([
+	{ physical: 1, active: true,  logical_slot: 1 },
+	{ physical: 2, active: false, logical_slot: null },
+], null);
+eq(ms_qmi.slots, 2, 'multisim: both physical slots counted');
+eq(ms_qmi.executors, 1, 'multisim: one distinct logical slot -> one executor');
+eq(ms_qmi.mode, 'dssa', 'multisim: one executor is dual-SIM single-active');
+eq(ms_qmi.exact, false, 'multisim: the QMI figure is a lower bound, not a report');
+eq(ms_qmi.concurrency, null, 'multisim: QMI cannot answer concurrency at all');
+
+// MBIM reports the numbers instead of us inferring them
+let ms_dsds = sim.multisim([{ physical: 1 }, { physical: 2 }],
+	{ number_of_executors: 2, number_of_slots: 2, concurrency: 1, modem_id: 'abc' });
+eq(ms_dsds.mode, 'dsds', 'multisim: two executors, concurrency 1 -> dual standby');
+eq(ms_dsds.exact, true, 'multisim: MBIM figures are exact');
+eq(ms_dsds.modem_id, 'abc', 'multisim: modem identity carried through');
+
+let ms_dsda = sim.multisim([{ physical: 1 }, { physical: 2 }],
+	{ number_of_executors: 2, concurrency: 2 });
+eq(ms_dsda.mode, 'dsda', 'multisim: concurrency 2 -> dual active');
+
+// a modem that reports executors but no concurrency stays honest rather than
+// guessing which of the two it is
+let ms_part = sim.multisim([{ physical: 1 }, { physical: 2 }],
+	{ number_of_executors: 2 });
+eq(ms_part.mode, null, 'multisim: executors without concurrency is not classified');
+
+eq(sim.multisim([], null), null, 'multisim: no slots, nothing to say');
+
+done('test_sim');
 	});
 });
+

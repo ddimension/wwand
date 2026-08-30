@@ -24,8 +24,22 @@ export function install(self, o)
 		if (!entry)
 			return;
 
-		sim.slot_status(entry.modem, (err, slots) =>
-			cb(err ? { error: 'sim_transport', detail: err } : null, err ? null : { slots: slots }));
+		sim.slot_status(entry.modem, (err, slots) => {
+			if (err)
+				return cb({ error: 'sim_transport', detail: err });
+
+			// alongside the slots, what SHAPE of multi-SIM this modem is. Purely
+			// descriptive — see sim.multisim. It is the one thing we cannot
+			// determine for hardware we do not own, so it is worth reporting
+			// wherever someone does own it.
+			cb(null, {
+				slots: slots,
+				multisim: sim.multisim(slots,
+					entry.modem?.refresh_multisim_caps
+						? entry.modem.refresh_multisim_caps()
+						: null),
+			});
+		});
 	};
 
 	self.modem_sim_switch_slot = function(ref, physical, cb) {

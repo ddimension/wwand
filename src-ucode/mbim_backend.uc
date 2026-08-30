@@ -250,6 +250,17 @@ export function slot_status(mc, cb)
 		if (n < 1)
 			return cb({ error: 'unsupported' }, null);
 
+		// SYS_CAPS answers what QMI cannot be asked: how many cellular stacks
+		// this modem has and how many may run at once. We only need the slot
+		// count here, but throwing the rest away would discard the only exact
+		// source either protocol has for it — hand it to the caller.
+		mc._multisim_caps = {
+			number_of_executors: caps?.number_of_executors ?? null,
+			number_of_slots: n,
+			concurrency: caps?.concurrency ?? null,
+			modem_id: caps?.modem_id ?? null,
+		};
+
 		mc.command(ext, 'DEVICE_SLOT_MAPPINGS', 'query', {}, (merr, mapping) => {
 			let active = merr ? null : mapping?.slots?.[0];
 			let out = [];

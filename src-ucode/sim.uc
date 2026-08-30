@@ -632,6 +632,66 @@ export function slot_status(modem, cb)
 	});
 };
 
+// Summarise the multi-SIM shape of a modem from a slot list. Read-only: this
+// says what the hardware IS, never changes it.
+//
+// The vocabulary is MBIM's, because MBIM is the protocol that names it — a
+// *slot* holds a card, an *executor* is a cellular stack that can register, and
+// the two are mapped onto each other. MS Basic Connect Extensions reports the
+// counts directly (SYS_CAPS: NumberOfExecutors / NumberOfSlots / Concurrency).
+// QMI has no equivalent message at all: Qualcomm's own MBIM implementation
+// writes the executor count and concurrency as literal 1 rather than asking the
+// modem, which is as clear a statement as one could want that the question is
+// not askable over QMI. There the executor count is inferred from how many
+// DISTINCT logical slots the physical slots report, which is a lower bound and
+// is marked as such.
+//
+//   1 executor              -> DSSA, dual SIM single active (slot switching)
+//   >1, concurrency 1       -> DSDS, both registered, one carries traffic
+//   concurrency >1          -> DSDA, both usable at once
+//
+// wwand implements DSSA. The rest is reported so that anyone holding hardware
+// that can do more can say so, which is the one thing we cannot do ourselves.
+export function multisim(slots, caps)
+{
+	let n_slots = length(slots ?? []);
+
+	if (!n_slots)
+		return null;
+
+	// distinct logical slots actually claimed by a card; null where the modem
+	// does not report one (MBIM's native path only knows the active slot's)
+	let logical = {};
+
+	for (let s in slots)
+		if (s.logical_slot != null)
+			logical[sprintf('%d', s.logical_slot)] = true;
+
+	let inferred = length(keys(logical));
+	let executors = caps?.number_of_executors ?? (inferred > 0 ? inferred : null);
+	let concurrency = caps?.concurrency ?? null;
+	let mode = null;
+
+	if (executors != null && executors <= 1)
+		mode = 'dssa';
+	else if (executors != null && concurrency != null)
+		mode = (concurrency > 1) ? 'dsda' : 'dsds';
+
+	return {
+		slots: n_slots,
+		executors: executors,
+		concurrency: concurrency,
+		mode: mode,
+		// 64-bit modem identity, MBIM only. Its purpose there is to tell you
+		// that several control nodes belong to one physical modem; over QMI the
+		// question does not arise, because there is only ever one node.
+		modem_id: caps?.modem_id ?? null,
+		// where the numbers came from, because they are not equally trustworthy
+		source: caps ? 'mbim-sys-caps' : 'qmi-logical-slots',
+		exact: caps != null,
+	};
+};
+
 export function switch_slot(modem, physical, cb)
 {
 	// native MBIM DEVICE_SLOT_MAPPINGS set — pure-MBIM fallback (carries its

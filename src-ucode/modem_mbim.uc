@@ -206,6 +206,17 @@ export function create(opts)
 			switch_to: (physical, cb) => mbim_backend.slot_switch(self.mbim, physical, cb),
 		};
 
+		// SYS_CAPS answers the executor/concurrency question exactly, which QMI
+		// cannot be asked at all. slot_status() parks it on the client when it
+		// reads the slot count; expose it so status() can report the shape of
+		// this modem rather than inferring it. Getter, not a copy: the value
+		// only exists after the first slot query.
+		self.multisim_caps = null;
+		self.refresh_multisim_caps = () => {
+			self.multisim_caps = self.mbim?._multisim_caps ?? null;
+			return self.multisim_caps;
+		};
+
 		self.mbim.open((err) => {
 			if (err)
 				return fail('open', err);
