@@ -47,6 +47,14 @@ export function install(self, o)
 
 	// manual hardware repower (ubus modem_repower): reset-GPIO pulse when one
 	// applies, else board power-cycle — both gated for multi-modem boxes.
+	//
+	// Deliberately NOT routed through recovery.usb_repower(), which refuses to
+	// act on a modem that has never answered in the selected protocol. That rule
+	// is about wwand escalating on its own evidence; a human pressing the button
+	// is evidence of a different kind, and a modem that never answered is
+	// exactly the one they are most likely to be trying to revive. Keep this
+	// path direct — routing it through the primitive to "share the code" would
+	// silently take the button away in the case it is for.
 	self.repower_modem = function(ref) {
 		if (!board)
 			return { error: 'no_board_profile' };
