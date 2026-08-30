@@ -1737,6 +1737,10 @@ export function create(opts)
 			backend: dp.backend,
 			protocol: entry.modem.protocol,
 			parent: parent,
+			// the negotiated QMAP header version (1|4|5). `v5` stays for
+			// compatibility, but on its own it cannot tell v1 from v4 — which
+			// is exactly the question when aggregation looks wrong.
+			qmap_version: dp.qmap_version,
 			v5: dp.v5,
 			urb_size: dp.urb_size,
 			ep_id: dp.ep_id,

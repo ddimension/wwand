@@ -124,10 +124,13 @@ export function setup(self, dp, o, next)
 					if (werr)
 						return fail('wda_format', werr);
 
-					log('info', sprintf('wda format negotiated: llp %d, ul/dl aggregation %d/%d, dl max %d x %d bytes, ul max %d x %d bytes (requested proto %d, %d bytes)',
-						wdata.llp, wdata.ul_protocol ?? 0, wdata.dl_protocol ?? 0,
+					// name the version, do not make the reader decode the enum:
+					// "aggregation 9/9" is only meaningful if you know 9 is v5.
+					log('info', sprintf('wda format negotiated: QMAP v%d (proto %d) ul/dl, llp %d, dl max %d x %d bytes, ul max %d x %d bytes (requested v%d / proto %d, %d bytes)',
+						ver, wdata.dl_protocol ?? 0, wdata.llp,
 						wdata.dl_max_datagrams ?? 0, wdata.dl_max_size ?? 0,
-						wdata.ul_max_datagrams ?? 0, wdata.ul_max_size ?? 0, dap, dgram));
+						wdata.ul_max_datagrams ?? 0, wdata.ul_max_size ?? 0,
+						ver, dap, dgram));
 
 					// accepted only if the modem echoed the version we asked for:
 					// a different one is a version we cannot drive (rmnet has no
@@ -209,8 +212,10 @@ export function setup(self, dp, o, next)
 							{ size: wdata.ul_max_size, count: wdata.ul_max_datagrams } : null,
 					};
 
+					// always name the version — it used to appear only for v5,
+					// so "datapath: rmnet" left you guessing between v1 and v4
 					log('notice', sprintf('datapath: %s%s%s, mux [%s]',
-						backend, v5 ? '/qmapv5' : '',
+						backend, caps.qmap ? sprintf('/qmap v%d', ver) : '',
 						(r.urb_size != null) ? sprintf(', urb %d', r.urb_size) : '',
 						join(' ', r.mux_devs)));
 					next();

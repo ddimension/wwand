@@ -147,6 +147,17 @@ function cmd_status(args)
 		if (m.apdu_backend)
 			printf('  apdu        %s\n', m.apdu_backend);
 
+		// the datapath that actually came up, with the QMAP header version it
+		// negotiated. `status` carries only the backend name, and the version is
+		// exactly the thing you come looking for when aggregation misbehaves.
+		if (m.datapath) {
+			let dp = call('modem_datapath', { modem: name });
+
+			printf('  datapath    %s%s%s\n', m.datapath,
+				(dp?.qmap_version != null) ? sprintf(' · QMAP v%d', dp.qmap_version) : '',
+				(dp?.urb_size != null) ? sprintf(' · urb %d', dp.urb_size) : '');
+		}
+
 		if (m.esim?.eid)
 			printf('  esim        eid %s (%d profile%s)\n', m.esim.eid,
 				length(m.esim.profiles ?? []), length(m.esim.profiles ?? []) == 1 ? '' : 's');
