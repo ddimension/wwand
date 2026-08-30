@@ -155,5 +155,6 @@ ok(true, 'progressive truncation survived');
 eq([ wda.DAP_DISABLED, wda.DAP_TLP, wda.DAP_QC_NCM, wda.DAP_MBIM, wda.DAP_RNDIS,
      wda.DAP_QMAP, wda.DAP_QMAPV2, wda.DAP_QMAPV3, wda.DAP_QMAPV4, wda.DAP_QMAPV5 ],
    [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ], 'wda: the aggregation enum matches libqmi 1.38');
+eq(wda.DAP_QMAPV1, wda.DAP_QMAP, 'wda: QMAP and QMAPV1 are the same value (5)');
 
 done('test_qmux');

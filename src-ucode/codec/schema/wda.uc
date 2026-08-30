@@ -23,7 +23,9 @@ export const DAP_TLP      = 1;
 export const DAP_QC_NCM   = 2;
 export const DAP_MBIM     = 3;
 export const DAP_RNDIS    = 4;
-export const DAP_QMAP     = 5;
+export const DAP_QMAP     = 5;   // QMAP v1 — what libqmi simply calls QMAP
+export const DAP_QMAPV1   = 5;   // the same value, spelled so the ladder reads
+                                 // v1..v5 and 5-means-v1 cannot be misread again
 export const DAP_QMAPV2   = 6;
 export const DAP_QMAPV3   = 7;
 export const DAP_QMAPV4   = 8;
