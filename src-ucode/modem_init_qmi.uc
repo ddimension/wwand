@@ -611,6 +611,14 @@ export function install(self, o)
 			signal_info: 1,
 			network_time: 1,
 		}, (err) => {
+			// A teardown destroys the NAS client and reports `cancelled` here
+			// SYNCHRONOUSLY. Everything below arms fresh timers — after
+			// teardown's timer-cancellation pass has already run — and issues
+			// GET_SERVING_SYSTEM on the dying client. A cancellation is not a
+			// modem that "lacks this message".
+			if (err?.error == 'cancelled')
+				return;
+
 			// some modems lack this; fall back to the initial query result
 			if (err)
 				log('warn', sprintf('register indications failed: %J', err));

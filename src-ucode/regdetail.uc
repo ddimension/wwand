@@ -50,6 +50,12 @@ export function collect(self, log, cb)
 
 		wds.request('GET_PROFILE_SETTINGS',
 			{ profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: 1 } }, (err, p) => {
+			// finish() here feeds the registration-timeout continuation, which
+			// can go on to call fail() — behind a teardown that is already
+			// tearing this modem down
+			if (err?.error == 'cancelled')
+				return;
+
 			if (!err) {
 				d = d ?? {};
 				d.attach = {

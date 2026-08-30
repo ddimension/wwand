@@ -252,6 +252,11 @@ export function install(self, o)
 			let before_obj = self.families[key]?.settings;
 
 			fetch_settings(+key, (err) => {
+				// a cancelled read means the family clients are being destroyed;
+				// stepping on would issue the IPv6 read into that same loop
+				if (err?.error == 'cancelled')
+					return;
+
 				let fam = self.families[key];
 
 				if (!err && fam && +key == 6)

@@ -431,6 +431,15 @@ export function create(opts)
 			start_activation = () => client.request('SET_IP_FAMILY', {
 				preference: (family == 6) ? wdsmod.IP_FAMILY_IPV6 : wdsmod.IP_FAMILY_IPV4,
 			}, (e2) => {
+				// The worst place in this file to carry on through a
+				// cancellation: the next step is START_NETWORK, i.e. bringing a
+				// DATA SESSION UP. `lost` destroys the family clients before it
+				// moves the context to IDLE, so the destroy reports `cancelled`
+				// here while the attempt still looks active — and the session
+				// would be started on the way down, with nothing left to own it.
+				if (e2?.error == 'cancelled')
+					return done({ stage: 'cancelled', err: e2 });
+
 				if (e2)
 					log('warn', sprintf('set ip family %d failed: %J', family, e2));
 

@@ -177,6 +177,34 @@ function run_next()
 	modem.start();
 }
 
+// --- teardown during activation must not start a data session ----------------
+// The worst instance of the cancellation family, and the one review reproduced:
+// the step after SET_IP_FAMILY is START_NETWORK — bringing a DATA SESSION UP.
+// `lost` destroys the family clients BEFORE moving the context to IDLE, so the
+// destroy reports `cancelled` while the attempt still looks active, and the
+// session would be started on the way down with nothing left to own it.
+//
+// A null handler leaves SET_IP_FAMILY pending; `lost` then destroys the client
+// underneath it, which is exactly what a real teardown does.
+scenario('lost-during-ipfamily', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	handlers: { SET_IP_FAMILY: () => null },
+}, (ctx, mock, events, next) => {
+	ctx.up(() => null);
+
+	uloop.timer(60, () => {
+		ok(length(mock.calls_for('SET_IP_FAMILY')) >= 1,
+			'lost/ipfamily: the family set went out and is pending');
+
+		let before = length(mock.calls_for('START_NETWORK'));
+		ctx.modem_event('lost');
+
+		eq(length(mock.calls_for('START_NETWORK')), before,
+			'lost/ipfamily: a cancelled family set never starts a data session');
+		next();
+	});
+});
+
 // --- A: dual-stack happy path ------------------------------------------------
 
 scenario('dual', { config: { apn: 'web', pdp_type: 'ipv4v6' } }, (ctx, mock, events, next) => {
