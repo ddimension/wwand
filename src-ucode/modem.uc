@@ -29,6 +29,7 @@ import * as dmsmod from 'wwand.codec.schema.dms';
 import * as nasmod from 'wwand.codec.schema.nas';
 import * as uimmod from 'wwand.codec.schema.uim';
 import * as tmdmod from 'wwand.codec.schema.tmd';
+import * as catmod from 'wwand.codec.schema.cat';
 // loc.uc + wms.uc are lazy-loaded (require of a *_lazy shim) only when GPS /
 // SMS is actually used, keeping those schemas off the heap on the common path.
 
@@ -636,6 +637,55 @@ export function create(opts)
 				if (e)
 					log('debug', 'dms set-event-report failed (external opmode watch unavailable)');
 			}, { no_recovery: true });
+	};
+
+	// SIM toolkit routing. Only ever runs when `option cat_mode` says so — the
+	// default is to leave the modem exactly as the vendor configured it, because
+	// changing toolkit behaviour unasked can break a working deployment in ways
+	// that show up on one operator's network and nowhere else.
+	//
+	// What it is FOR: a headless CPE has no UI. In a phone-shaped mode the modem
+	// advertises a terminal profile promising to render SETUP MENU and DISPLAY
+	// TEXT, an operator OTA campaign takes it at its word, and the card then
+	// waits on a response nothing here will ever send. `cat_mode 'disabled'`
+	// stops routing toolkit to a control point at all.
+	self._apply_cat_mode = function(cb) {
+		cb = cb ?? (() => null);
+
+		let want = catmod.MODES[self.config?.cat_mode ?? ''];
+
+		if (want == null || !self.services[sprintf('%d', catmod.default.service)])
+			return cb();
+
+		self.alloc(catmod.default, (err, cat) => {
+			if (err || !cat)
+				return cb();
+
+			// read before write: the tree's rule everywhere else, and here it
+			// also avoids re-announcing a terminal profile to a card mid-session
+			cat.request('GET_CONFIGURATION', {}, (ge, gd) => {
+				let have = ge ? null : gd?.mode;
+
+				if (have == want) {
+					log('debug', sprintf('sim toolkit already %s', catmod.mode_name(want)));
+					cat.destroy();
+					return cb();
+				}
+
+				cat.request('SET_CONFIGURATION', { mode: want }, (se) => {
+					if (se)
+						log('warn', sprintf('sim toolkit: cannot set %s (%s)',
+							catmod.mode_name(want), se.error ?? '?'));
+					else
+						log('notice', sprintf('sim toolkit routing: %s -> %s',
+							have != null ? catmod.mode_name(have) : 'unknown',
+							catmod.mode_name(want)));
+
+					cat.destroy();
+					cb();
+				}, { no_recovery: true });
+			}, { no_recovery: true });
+		});
 	};
 
 	// TMD — the modem's own thermal mitigation. Answers a question nothing else

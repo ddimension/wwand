@@ -22,6 +22,7 @@ import * as dsdmod from 'wwand/codec/schema/dsd.uc';
 import * as uimmod from 'wwand/codec/schema/uim.uc';
 import * as tlvmod from 'wwand/codec/tlv.uc';
 import * as tmdmod from 'wwand/codec/schema/tmd.uc';
+import * as catmod from 'wwand/codec/schema/cat.uc';
 
 uloop.init();
 
@@ -332,5 +333,21 @@ eq(ch.chunk.token, 77, 'long apdu ind: token');
 eq(ch.chunk.total_length, 5, 'long apdu ind: total');
 eq(ch.chunk.offset, 0, 'long apdu ind: offset');
 eq(ch.chunk.apdu, [ 0xAA, 0xBB, 0xCC ], 'long apdu ind: u16-counted chunk body');
+
+// --- CAT: the toolkit mode byte that must not be guessed ---------------------
+// cat_config_mode is declared in C as a 32-bit enum (the -2147483647 forcing
+// idiom) and encoded by the IDL as ONE byte. Reading the C declaration and
+// assuming four would silently swallow the TLV behind it.
+let C = catmod.default.messages;
+let cc = tlvmod.unpack(C.GET_CONFIGURATION.resp,
+	tlv(0x10, u8(catmod.MODE_ANDROID)) + tlv(0x11, u8(2) + u8(0xFF) + u8(0x00)));
+eq(cc.mode, catmod.MODE_ANDROID, 'cat: mode is one byte, not four');
+eq(cc.custom_tp, [ 0xFF, 0x00 ], 'cat: ...and the terminal profile behind it survives');
+
+eq(tlvmod.pack(C.SET_CONFIGURATION.req, { mode: catmod.MODE_DISABLED }),
+	tlv(0x01, u8(0)), 'cat: disabled re-encodes to a single mandatory byte');
+eq(catmod.default.service, 0x0A, 'cat: service id');
+eq(catmod.mode_name(0), 'disabled', 'cat: mode names');
+eq(catmod.mode_name(99), 'unknown (99)', 'cat: an undefined mode is not invented');
 
 done('test_qmi_backend');

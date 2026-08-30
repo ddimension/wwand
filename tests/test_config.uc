@@ -166,6 +166,39 @@ r = padopt({
 });
 eq(r.modems.m0.protocol, 'mbim', 'protocol: accepted case-insensitively');
 
+// SIM toolkit routing. Unset must mean "leave the modem alone" — this changes
+// how the card and the network talk to each other, and a default would break a
+// working deployment on one operator's network and nowhere else.
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.cat_mode, null, 'cat_mode: unset means do not touch the modem');
+
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', cat_mode: 'DISABLED' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.cat_mode, 'disabled', 'cat_mode: accepted, case-insensitively');
+eq(length(filter(r.warnings, (w) => match(w, /unknown option 'cat_mode'/))), 0,
+	'cat_mode: not reported as dead config');
+
+// a mode the CAT service does not define would go out as a literal byte and
+// mean something else entirely
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', cat_mode: 'off' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+ok(length(filter(r.warnings, (w) => match(w, /cat_mode 'off' is not one of/))) == 1,
+	'cat_mode: an undefined mode is reported');
+eq(r.modems.m0.cat_mode, null, 'cat_mode: ...and dropped, so the modem keeps its own');
+
 // --- old-style compat --------------------------------------------------------
 
 r = padopt({

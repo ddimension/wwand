@@ -115,6 +115,7 @@ config wwand_modem 'm0'
 	#                                # preferred: stable sysfs path (like
 	#                                # wifi-device `path`); bare '3-1' works too
 	# option protocol 'qmi'          # pin the control protocol; unset = detect
+	# option cat_mode 'disabled'     # SIM toolkit routing; unset = leave as-is
 	option pincode '1234'
 	option sim_slot '1'
 	option modes 'lte,nr5g'
@@ -1255,6 +1256,17 @@ applied in two stages: when errors first cross the limit the modem gets one
 hardware repower/reset; only when they reach **2× the limit** does it reboot (and
 that reboot is gated by `failreboot` — with `failreboot 0` it keeps retrying
 instead). A success resets the counter.
+
+**`option cat_mode`** (`disabled` | `gobi` | `android` | `decoded` |
+`decoded_pullonly` | `custom_raw` | `custom_decoded`; unset = leave the modem
+as the vendor configured it) controls how SIM Application Toolkit is routed.
+A headless CPE has no UI: in a phone-shaped mode the modem advertises a terminal
+profile promising to render SETUP MENU and DISPLAY TEXT, an operator OTA
+campaign takes it at its word, and the card then waits on a response nothing
+here will ever send. `disabled` stops routing toolkit to a control point at all.
+Applied read-before-write, and never applied unless you set it — changing
+toolkit behaviour unasked can break a working deployment on one operator's
+network and nowhere else.
 
 **`option protocol`** (`qmi` | `mbim` | `ncm` | `ppp`; unset or `auto` = detect)
 pins the control protocol when the driver cannot be classified — wwand refuses

@@ -16,6 +16,7 @@
 // decides what a datapath is called is netlink.uc — spelling it out a second
 // time here is how the two drift apart.
 import * as netlink from 'wwand.netlink';
+import * as catmod from 'wwand.codec.schema.cat';
 
 const OLD_DEPRECATED = [ 'dhcp', 'autocreateif', 'customroutes', 'strongestnetwork' ];
 
@@ -188,6 +189,10 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	// neither was listed here or copied below — so setting either produced an
 	// "unknown option" warning AND did nothing.
 	'at_over_mbim', 'at_mbim',
+	// SIM Application Toolkit routing (QMI CAT). Unset = leave the modem as the
+	// vendor configured it; 'disabled' stops the card expecting a terminal that
+	// can render proactive commands, which a headless CPE cannot.
+	'cat_mode',
 	// cap the QMAP header version the datapath may negotiate (1 | 4 | 5;
 	// unset/0 = whatever the datapath can drive). Mostly a bring-up handle:
 	// pinning it is how a specific version gets exercised on real hardware.
@@ -264,6 +269,8 @@ function modem_from_section(s)
 		at_over_mbim: s.at_over_mbim,
 		// '0' disables the automatic AT-over-MBIM fallback entirely
 		at_mbim: s.at_mbim,
+		// SIM toolkit routing, see cat.uc. null = do not touch the modem.
+		cat_mode: (s.cat_mode != null && s.cat_mode != '') ? lc(s.cat_mode) : null,
 		// 0/unset = automatic (the datapath's best); otherwise a CAP on the
 		// version ladder. Only 1|4|5 exist as far as wwand is concerned —
 		// anything else is reported as a config note (see modem_from_section's
@@ -376,6 +383,18 @@ function parse_network_sections(raw, result)
 			// per-modem status warnings can surface it in LuCI too
 			result.modems[name].config_notes = unknown_opts(s, MODEM_KNOWN_OPTS,
 				result.warnings, sprintf('wwand_modem %s', name));
+
+			// a toolkit mode the CAT service does not define would be sent as
+			// a literal byte and mean something else entirely
+			if (s.cat_mode != null && s.cat_mode != '' &&
+			    catmod.MODES[lc(s.cat_mode)] == null) {
+				let m = sprintf("wwand_modem %s: cat_mode '%s' is not one of %s — ignored, the modem keeps its own toolkit configuration",
+					name, s.cat_mode, join(', ', sort(keys(catmod.MODES))));
+
+				push(result.warnings, m);
+				push(result.modems[name].config_notes, m);
+				result.modems[name].cat_mode = null;
+			}
 
 			// a protocol wwand has no backend for is a typo, and a silent one:
 			// it would override a perfectly good detection with a name nothing

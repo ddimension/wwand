@@ -137,7 +137,9 @@ export function install(self, o)
 							// TMD (Thermal Mitigation Device): optional, tells us
 							// when the modem throttles ITSELF. Brought up after
 							// DSD so a modem lacking either still proceeds.
-							let after_dsd = () => self._install_thermal(() => self._read_info(step_at));
+							let after_dsd = () => self._install_thermal(
+								() => self._apply_cat_mode(
+									() => self._read_info(step_at)));
 
 							if (self.services[sprintf('%d', dsdmod.default.service)]) {
 								self.alloc(dsdmod.default, (e5, dsd) => {
