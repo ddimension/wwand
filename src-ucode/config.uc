@@ -258,6 +258,11 @@ function modem_from_section(s)
 		at_over_mbim: s.at_over_mbim,
 		// '0' disables the automatic AT-over-MBIM fallback entirely
 		at_mbim: s.at_mbim,
+		// 0/unset = automatic (the datapath's best); otherwise a CAP on the
+		// version ladder. Only 1|4|5 exist as far as wwand is concerned —
+		// anything else is reported as a config note (see modem_from_section's
+		// caller), because the ladder filters `v <= want` and would otherwise
+		// turn a stray 3 into v1 and a stray 99 into "automatic" without a word.
 		qmap_version: +(s.qmap_version ?? 0),
 		fcc_auth: s.fcc_auth,
 		at_init: (type(s.at_init) == 'array') ? s.at_init :
@@ -365,6 +370,17 @@ function parse_network_sections(raw, result)
 			// per-modem status warnings can surface it in LuCI too
 			result.modems[name].config_notes = unknown_opts(s, MODEM_KNOWN_OPTS,
 				result.warnings, sprintf('wwand_modem %s', name));
+
+			// a value the QMAP ladder cannot act on is silently reinterpreted
+			// (see qmap_version above), so say so through the same channel as a
+			// dead option — it reaches the per-modem warnings and LuCI
+			if (s.qmap_version != null && !(+(s.qmap_version) in [ 0, 1, 4, 5 ])) {
+				let m = sprintf("wwand_modem %s: qmap_version '%s' is not one of 1, 4, 5 (or 0/unset for automatic) — the closest lower version is used instead",
+					name, s.qmap_version);
+
+				push(result.warnings, m);
+				push(result.modems[name].config_notes, m);
+			}
 			break;
 
 		case 'wwand_sim':

@@ -500,6 +500,66 @@ scenario('datapath-all-declined', {
 			'alld: links with deaggregation only');
 	});
 
+// a modem that echoes the requested version downlink but a DIFFERENT one uplink
+// has not agreed to what was asked: both directions are configured from this one
+// answer (dl drives the rmnet ingress flags, ul the egress ones and the uplink
+// coalescing), so accepting it would apply v5 egress framing the modem never
+// confirmed. The ladder must treat it as a refusal.
+let dpfx_asym = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-asymmetric-echo', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => {
+			// v5 downlink, plain QMAP uplink — a half-agreement
+			if (args.dl_protocol == 9)
+				return { qos: 0, llp: 2, ul_protocol: 5, dl_protocol: 9,
+				         dl_max_datagrams: 32, dl_max_size: args.dl_max_size };
+
+			return { qos: 0, llp: 2,
+				ul_protocol: args.ul_protocol, dl_protocol: args.dl_protocol,
+				dl_max_datagrams: 32, dl_max_size: args.dl_max_size };
+		},
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [ { id: 1 } ], dgram_size: 0, fx: dpfx_asym,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		ok(modem.datapath.qmap_version != 5,
+			'asym: a half-echoed v5 is not recorded as v5');
+		eq(dpfx_asym.action_index('link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x31'), -1,
+			'asym: ...and no v5 checksum flags are programmed');
+	});
+
+// raw-IP: no QMAP on the wire at all. The ladder still bottoms out at rung 1
+// internally (it needs SOMETHING to ask for), but reporting that as "QMAP v1"
+// would name a header format nobody sends — status pages read this field.
+let dpfx_raw = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+} });
+
+scenario('datapath-raw-ip-version', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => ({ qos: 0, llp: 2,
+			ul_protocol: args.ul_protocol ?? 0, dl_protocol: args.dl_protocol ?? 0,
+			dl_max_datagrams: 0, dl_max_size: 0 }),
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'off',
+		mux_links: [], dgram_size: 0, fx: dpfx_raw,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.datapath.backend, 'raw_ip', 'rawver: raw-IP datapath');
+		eq(modem.datapath.qmap_version, null,
+			'rawver: no QMAP version is reported where QMAP is not on the wire');
+	});
+
 scenario('datapath-v5-declined', {
 	handlers: base_handlers({
 		SET_DATA_FORMAT: (args, meta) => {

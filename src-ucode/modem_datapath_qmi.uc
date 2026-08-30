@@ -135,8 +135,22 @@ export function setup(self, dp, o, next)
 					// accepted only if the modem echoed the version we asked for:
 					// a different one is a version we cannot drive (rmnet has no
 					// flags for v2/v3), so it is treated as a refusal.
+					//
+					// Both directions are checked, because both are configured
+					// from this one answer: dl drives the rmnet ingress flags, ul
+					// the egress ones and the uplink coalescing. A modem echoing
+					// dl=9 but ul=5 would otherwise be recorded as v5 and get v5
+					// egress framing it never agreed to. An ABSENT ul_protocol is
+					// not a mismatch — some modems omit the TLV — so it is only
+					// compared when the modem actually sent one.
+					let ul_ok = (wdata.ul_protocol == null) || (wdata.ul_protocol == dap);
 					let aggr_ok = !caps.qmap ||
-						(wdata.dl_protocol == dap && (wdata.dl_max_size ?? 0) > 0);
+						(wdata.dl_protocol == dap && ul_ok &&
+						 (wdata.dl_max_size ?? 0) > 0);
+
+					if (caps.qmap && wdata.dl_protocol == dap && !ul_ok)
+						log('notice', sprintf('modem echoed dl proto %d but ul proto %d — not the symmetric v%d it was asked for',
+							wdata.dl_protocol ?? 0, wdata.ul_protocol, ver));
 
 					if (!aggr_ok && length(rungs)) {
 						let next_v = shift(rungs);
@@ -176,6 +190,22 @@ export function setup(self, dp, o, next)
 					if (!r.ok)
 						return fail('datapath', r);
 
+					// A version change while a data session is UP is accepted by
+					// SET_DATA_FORMAT but not acted on: HW-observed on the
+					// RG650E, where v5 -> v1 left the downlink silent — nothing
+					// reached even the USB parent, so it is upstream of rmnet and
+					// not a demux problem. The modem latches the aggregation
+					// format while a session is active. Taking every context on
+					// the modem down is enough (HW-verified); a modem reset also
+					// works but is the bigger hammer. Say which, rather than
+					// leave the operator with a datapath reporting the new
+					// version while no traffic flows.
+					let was = self.datapath?.qmap_version;
+
+					if (caps.qmap && was != null && was != ver)
+						log('notice', sprintf('QMAP version changed v%d -> v%d while a session was up; the modem latches the format until every context on it goes down (ifdown), so bring them down and back up if the data session stays silent',
+							was, ver));
+
 					self.datapath = {
 						// what setup() ACTUALLY ran: it drops to raw_ip when the
 						// selected backend has no channels to build
@@ -185,9 +215,13 @@ export function setup(self, dp, o, next)
 						// children (see map_id in netlink.uc); context.uc binds
 						// WDS to this, not to the config number.
 						map_ids: r.map_ids,
-						// the QMAP header version actually negotiated (1|4|5);
+						// the QMAP header version actually negotiated (1|4|5),
+						// and null where QMAP is not on the wire at all: the
+						// ladder falls back to rung 1 for a datapath that has no
+						// versions to offer (raw_ip), and reporting that as
+						// "QMAP v1" would describe a header nobody sends.
 						// `v5` stays for everything reading the old boolean
-						qmap_version: ver,
+						qmap_version: caps.qmap ? ver : null,
 						v5: v5,
 						urb_size: r.urb_size,
 						mux_devs: r.mux_devs,

@@ -95,6 +95,33 @@ eq(length(r.modems.m0.config_notes), 2, 'unknown-opt: notes attached to the mode
 ok(length(filter(r.warnings, (w) => match(w, /wwand_sim s0: unknown option 'pn'/))) == 1,
 	'unknown-opt: sim section checked too');
 
+// A qmap_version the ladder cannot act on is not an error but it IS silently
+// reinterpreted (the ladder filters `v <= want`, so 3 means v1 and 99 means
+// automatic). Say so through the same channel as a dead option rather than let
+// the operator wonder which version they actually got.
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', qmap_version: '3' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+ok(length(filter(r.warnings, (w) => match(w, /qmap_version '3' is not one of 1, 4, 5/))) == 1,
+	'qmapver: an unusable cap is reported');
+eq(length(r.modems.m0.config_notes), 1, 'qmapver: ...and travels with the modem config');
+eq(r.modems.m0.qmap_version, 3, 'qmapver: the value itself is still passed to the ladder');
+
+// the usable ones stay silent
+for (let v in [ '0', '1', '4', '5' ]) {
+	let rv = padopt({
+		network: {
+			m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', qmap_version: v },
+			wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+		},
+	});
+	eq(length(filter(rv.warnings, (w) => match(w, /qmap_version/))), 0,
+		sprintf('qmapver: %s is accepted without a note', v));
+}
+
 // --- old-style compat --------------------------------------------------------
 
 r = padopt({
