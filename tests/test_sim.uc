@@ -623,6 +623,61 @@ scenario('apdu: a duplicate chunk does not fake completion', (next) => {
 	next();
 });
 
+// Completion means CONTIGUOUS coverage, not a length that happens to add up.
+// Overlapping or out-of-range chunks can reach the total with a gap still in
+// the middle, and the result then has the right length and a hole.
+scenario('apdu: overlapping chunks cannot paper over a gap', (next) => {
+	let ind_cb = null;
+	let m = { timing: T, config: {} };
+
+	m.uim = {
+		on: (name, cb) => { if (name == 'SEND_APDU_IND') ind_cb = cb; },
+		request: (name, args, cb) => cb(null, { long_response: { total_length: 6, token: 9 } }),
+	};
+
+	sim.install_apdu_reassembly(m);
+
+	let got = 'unset';
+	sim.apdu_send(m, 1, 1, '00A4', (e, hex) => { got = e ?? hex; });
+
+	// 0..2 and 4..6 — six bytes of payload, but nothing covers offset 3
+	ind_cb({ chunk: { token: 9, total_length: 6, offset: 0, apdu: [ 1, 2, 3 ] } });
+	ind_cb({ chunk: { token: 9, total_length: 6, offset: 4, apdu: [ 5, 6, 7 ] } });
+	eq(got, 'unset', 'apdu gap: six bytes present, but not contiguous — not complete');
+
+	// the missing byte, overlapping the tail we already hold
+	ind_cb({ chunk: { token: 9, total_length: 6, offset: 3, apdu: [ 4, 5 ] } });
+	eq(got, '010203040506', 'apdu gap: completes once covered, overlap counted once');
+
+	next();
+});
+
+// A token handed out twice while the first is still open must not orphan the
+// first caller — and its timer must not later delete the second waiter.
+scenario('apdu: a reused token fails the old waiter, not the new one', (next) => {
+	let ind_cb = null;
+	let m = { timing: T, config: {} };
+
+	m.uim = {
+		on: (name, cb) => { if (name == 'SEND_APDU_IND') ind_cb = cb; },
+		request: (name, args, cb) => cb(null, { long_response: { total_length: 2, token: 4 } }),
+	};
+
+	sim.install_apdu_reassembly(m);
+
+	let a = 'unset', b = 'unset';
+	sim.apdu_send(m, 1, 1, '00A4', (e, hex) => { a = e ?? hex; });
+	sim.apdu_send(m, 1, 1, '00A4', (e, hex) => { b = e ?? hex; });
+
+	eq(a?.error, 'long_apdu_token_reused', 'apdu token: the first caller is told, not abandoned');
+	eq(b, 'unset', 'apdu token: the second is still waiting');
+
+	ind_cb({ chunk: { token: 4, total_length: 2, offset: 0, apdu: [ 0x90, 0x00 ] } });
+	eq(b, '9000', 'apdu token: and completes normally');
+
+	next();
+});
+
 scenario('apdu: a short response still takes the direct path', (next) => {
 	let m = { timing: T, config: {} };
 
@@ -666,6 +721,25 @@ scenario('euicc: a timeout ends the walk instead of repeating it', (next) => {
 
 // ...and a modem that simply has no native interface says so on the FIRST index,
 // so the caller falls back to lpac rather than believing in an empty card
+// A transport failure is not "the end of the list" at any index. Reporting a
+// truncated enumeration as a complete one is how a profile silently disappears.
+scenario('euicc: a transport error is never mistaken for the end of the list', (next) => {
+	let m = { timing: T, config: {}, uim: {
+		on: () => null,
+		request: (name, args, cb) => {
+			if (args.profile_id == 1)
+				return cb(null, { iccid: [], state: 1, nickname: '', spn: '', name: '' });
+			cb({ error: 'proto', detail: 'truncated response' }, null);
+		},
+	} };
+
+	sim.euicc_profiles(m, 1, (err, profiles) => {
+		eq(err?.error, 'euicc_transport', 'euicc: a decode failure is reported as one');
+		eq(length(err?.partial ?? []), 1, 'euicc: with what was already read');
+		next();
+	});
+});
+
 scenario('euicc: an unsupported first index is not an empty card', (next) => {
 	let m = { timing: T, config: {}, uim: {
 		on: () => null,

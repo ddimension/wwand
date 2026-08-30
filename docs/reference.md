@@ -1066,7 +1066,7 @@ when called from LuCI).
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
 | `modem_signal` | `modem` | last raw signal info (LTE/NR5G/WCDMA/GSM metrics) |
-| `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` + `temperature` (`{ celsius, source }`, per-vendor AT: Quectel `QTEMP` / MeiG `TEMP` / Huawei `CHIPTEMP` / SIMCom `CPMUTEMP`) |
+| `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` + `temperature` (also on `status`, which is the canonical place — same field, kept here for compatibility) |
 | `modem_location` | `modem` | last QMI LOC fix (when `location` is enabled) |
 | `modem_at` | `modem`, `command`, `timeout?` | run an AT command on the modem's AT port |
 | `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor. Sets are **idempotent**: values the modem already carries are dropped; nothing left → `unchanged: true`, no NV write, no radio disturbance |
@@ -1378,6 +1378,24 @@ context config before registration; if it persists, check `apn` and `pdp_type`
 on a valid NSA anchor but never gets an NR carrier, `modem_cells` → `dsd` shows
 `nr: false`: the network is not granting EN-DC for this subscription
 (DCNR-restricted / the tariff excludes 5G). Not a wwand or modem issue.
+
+**Thermal.** `status` → `temperature` (`{ celsius, source }`, read over AT:
+Quectel `QTEMP` / MeiG `TEMP` / Huawei `CHIPTEMP` / SIMCom `CPMUTEMP` / Fibocom
+`ETHERMAL`) says how warm the modem is; `status` → `thermal` says what the modem
+decided to do about it, from QMI TMD:
+
+```json
+"thermal": { "mitigated": false, "level": 0, "devices": 28,
+             "active": [ { "id": "cpr_cold", "label": "cpr_cold",
+                           "max": 3, "level": 1, "rf": false } ] }
+```
+
+`mitigated` counts only devices that hold back the **radio**. An environmental
+one — a low-temperature limit, a battery or charge state — uses the same
+interface but costs no throughput, and appears in `active` with `rf: false`. It
+is not an alarm: an NR7101 sits at `cpr_cold` level 1 permanently whenever it is
+cold. `active` lists only the devices actually holding back; `devices` is how
+many exist in total.
 
 **Multi-SIM shape.** `modem_sim_slots` → `multisim` describes what the modem
 *is*, and never changes it:

@@ -1769,6 +1769,11 @@ export function create(opts)
 			signal: entry.modem.signal,
 			cells: entry.modem.cells,
 			dsd: entry.modem.dsd_status,
+			// Also on `status`, which is where both in-tree consumers look and
+			// where it belongs (it is a property of the modem, not of the
+			// serving cell). Kept here as well rather than moved: this is the
+			// documented location and an out-of-tree script may read it. Both
+			// come from the same field, so they cannot drift.
 			temperature: entry.modem.temperature,
 		};
 	};

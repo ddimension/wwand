@@ -145,6 +145,12 @@ export function create(opts)
 		sim_note: null,
 		tmd: null,          // thermal-mitigation client, when the modem has TMD
 		thermal: null,      // { devices: [{id,label,max,level}], mitigated, level }
+		// Lifecycle generation. Bumped by teardown, so any callback still in
+		// flight can tell it belongs to a previous incarnation of this modem and
+		// stop, rather than writing into state that was rebuilt underneath it or
+		// issuing requests on a destroyed client. The retry path REUSES this
+		// object, which is what makes the distinction necessary.
+		_gen: 0,
 
 		services: {},      // service id (string) -> { major, minor }
 		info: {},          // model, revision, imei, ...
@@ -509,12 +515,11 @@ export function create(opts)
 
 			log('info', sprintf('sim refresh (stage %d)%s', stage ?? -1, forced));
 
-			// WAIT_FOR_OK: the card is ASKING. It reached this stage because we
-			// voted for init below, and it now waits for an answer — so answer.
-			// A vote with no reply is worse than not voting at all: the card
-			// blocks until its own timeout instead of refreshing immediately.
-			// We always say yes; the point of voting was never to refuse, it was
-			// to be told first rather than have the session vanish mid-call.
+			// WAIT_FOR_OK: the card is ASKING and is now waiting for an answer.
+			// wwand does not ASK to be asked (see the registration below), but a
+			// card can reach this stage for its own reasons, and then the only
+			// safe thing is to answer — a card waiting on a terminal response is
+			// a card that can stall.
 			if (stage == uimmod.REFRESH_STAGE_WAIT_FOR_OK) {
 				self.uim.request('REFRESH_OK', {
 					session: session(), ok: { ok_to_refresh: 1 },
@@ -605,9 +610,17 @@ export function create(opts)
 		self.uim.request('REFRESH_REGISTER_ALL', {
 			session:  session(),
 			register: { register_flag: 1 },
-			// ask to be consulted before a refresh rather than after. Safe only
-			// because the WAIT_FOR_OK handler above always answers.
-			vote:     { vote_for_init: 1 },
+			// vote_for_init is DELIBERATELY not sent. Voting asks the card to
+			// consult us before it refreshes, which sounds strictly better —
+			// until the reply does not happen. Then the card waits out its own
+			// timeout instead of refreshing immediately, and every way the reply
+			// can be lost (the request failing, the client being torn down and
+			// rebuilt mid-refresh) turns a brief session interruption into a
+			// stall. Not voting is the status quo: the card refreshes at once
+			// and may pull the session, which is worse in one narrow case and
+			// better in every failure case. The TLV stays modelled, and the
+			// WAIT_FOR_OK handler above stays, so a card that asks anyway still
+			// gets an answer.
 		}, (e) => {
 			if (e)
 				log('debug', 'uim refresh register failed (sim-refresh notifications unavailable)');
@@ -666,10 +679,12 @@ export function create(opts)
 			cat.request('GET_CONFIGURATION', {}, (ge, gd) => {
 				let have = ge ? null : gd?.mode;
 
+				// release(), not destroy(): destroy() drops our local client and
+				// leaves the CID allocated ON THE MODEM. This runs once per
+				// init, and an init can repeat — a modem has a finite CID pool.
 				if (have == want) {
 					log('debug', sprintf('sim toolkit already %s', catmod.mode_name(want)));
-					cat.destroy();
-					return cb();
+					return self.release(cat, () => cb());
 				}
 
 				cat.request('SET_CONFIGURATION', { mode: want }, (se) => {
@@ -681,8 +696,7 @@ export function create(opts)
 							have != null ? catmod.mode_name(have) : 'unknown',
 							catmod.mode_name(want)));
 
-					cat.destroy();
-					cb();
+					self.release(cat, () => cb());
 				}, { no_recovery: true });
 			}, { no_recovery: true });
 		});
@@ -701,9 +715,27 @@ export function create(opts)
 		if (!self.services[sprintf('%d', tmdmod.default.service)])
 			return cb();
 
+		// NOT on the critical path. A modem has ~30 mitigation devices (28 on
+		// the RG650E) and the walk below is one request pair each; at the
+		// default 10 s timeout a modem that goes quiet part-way would hold
+		// bring-up for over nine minutes. Nothing about the connection depends
+		// on knowing the thermal state, so init continues immediately and the
+		// walk fills `self.thermal` in the background.
+		cb();
+
+		// Generation guard: teardown bumps `_gen`, so a callback that arrives
+		// after a teardown — or after a retry has rebuilt this modem — finds a
+		// stale generation and stops instead of dereferencing a nulled
+		// `self.thermal` or issuing requests on a dead client.
+		let gen = self._gen;
+		let alive = () => (self._gen == gen && self.tmd != null && self.thermal != null);
+
 		self.alloc(tmdmod.default, (err, tmd) => {
 			if (err || !tmd)
-				return cb();
+				return;
+
+			if (self._gen != gen)
+				return self.release(tmd);   // torn down while allocating
 
 			self.tmd = tmd;
 
@@ -711,7 +743,7 @@ export function create(opts)
 				let id = data?.device?.dev_id;
 				let lvl = data?.level;
 
-				if (id == null || lvl == null)
+				if (id == null || lvl == null || !alive())
 					return;
 
 				for (let d in (self.thermal?.devices ?? []))
@@ -748,9 +780,12 @@ export function create(opts)
 				let list = le ? [] : (ld?.devices ?? []);
 
 				if (!length(list)) {
-					// the service exists but names no devices — nothing to watch
+					// the service exists but names no devices — nothing to
+					// watch. Release rather than drop: the CID is allocated on
+					// the modem until we hand it back.
+					let dead = self.tmd;
 					self.tmd = null;
-					return cb();
+					return self.release(dead, () => cb());
 				}
 
 				self.thermal = {
@@ -768,18 +803,33 @@ export function create(opts)
 				// initial level per device, then subscribe. Sequential rather
 				// than parallel: these are cheap and a modem that dislikes one
 				// of them should not lose the rest.
+				//
+				// Bounded as a whole, not just per request: a modem that stops
+				// answering half-way would otherwise spend one timeout per
+				// remaining device. The first timeout ends the walk — whatever
+				// was already read stays, and the subscriptions already placed
+				// keep working.
 				let i = 0, step;
 
 				step = () => {
-					if (i >= length(self.thermal.devices)) {
-						self._refresh_thermal();
-						return cb();
-					}
+					if (!alive())
+						return;   // torn down mid-walk
+
+					if (i >= length(self.thermal.devices))
+						return self._refresh_thermal();
 
 					let d = self.thermal.devices[i++];
 
 					tmd.request('GET_MITIGATION_LEVEL',
 						{ device: { dev_id: d.id } }, (ge, gd) => {
+							if (!alive())
+								return;
+
+							if (ge?.error == 'timeout') {
+								log('debug', 'thermal: modem stopped answering, ending the device walk');
+								return self._refresh_thermal();
+							}
+
 							if (!ge && gd?.current != null)
 								d.level = gd.current;
 
@@ -797,7 +847,7 @@ export function create(opts)
 	// roll the per-device levels up into the one fact the rest of the system
 	// cares about: is this modem currently holding itself back at all?
 	self._refresh_thermal = function() {
-		if (!self.thermal)
+		if (!self.thermal || !length(self.thermal.devices ?? []))
 			return;
 
 		let worst = 0;
@@ -1042,6 +1092,11 @@ export function create(opts)
 
 		modem_common.close_at(self);
 
+		// Anything still in flight belongs to the incarnation we are ending.
+		// Bump FIRST, so a callback that fires during the destroys below already
+		// sees a stale generation.
+		self._gen++;
+
 		for (let c in [ self.ctl, self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg, self.dsd, self.tmd ])
 			if (c)
 				c.destroy();
@@ -1050,6 +1105,24 @@ export function create(opts)
 		// the readings belong to the client that is going away; keeping them
 		// would show a stale mitigation level for a modem we no longer talk to
 		self.thermal = null;
+
+		// The UIM handlers are installed ON THE CLIENT, so a new client needs
+		// them installed again. This flag is what says "already done", and
+		// leaving it set meant a modem that tore down and retried came back with
+		// NONE of the card diagnostics, the refresh handling or the long-APDU
+		// reassembly attached — silently, because everything still worked except
+		// the things that only fire when something goes wrong.
+		self._uim_refresh_armed = false;
+
+		// Fail any long-APDU reassembly still waiting instead of leaving its
+		// caller on a 30 s timer for a client that no longer exists. Clearing
+		// the map is also what lets install_apdu_reassembly() run again.
+		for (let key, w in (self._apdu_long ?? {})) {
+			w.timer?.cancel();
+			w.cb({ error: 'cancelled', detail: 'modem torn down' }, null);
+		}
+
+		self._apdu_long = null;
 
 		if (self.hub) {
 			self.hub.close();

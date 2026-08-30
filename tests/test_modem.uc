@@ -937,6 +937,23 @@ scenario('indications', {
 		// decode prove the schema and wiring).
 		ok(length(mock.calls_for('REFRESH_REGISTER_ALL')) >= 1, 'ind: uim refresh registered');
 		ok(modem._uim_refresh_armed === true, 'ind: uim refresh handler armed');
+
+		// vote_for_init is deliberately NOT sent: voting asks the card to
+		// consult us first, and every way the reply can be lost turns a brief
+		// session interruption into the card waiting out its own timeout.
+		let rr = mock.calls_for('REFRESH_REGISTER_ALL')[0];
+		eq(rr.args.vote, null, 'ind: we do not ask the card to wait for us');
+
+		// The handlers live ON THE CLIENT, so a teardown must clear the "already
+		// installed" flag — otherwise a retry rebuilds the modem with a NEW uim
+		// client and none of the card diagnostics, refresh handling or long-APDU
+		// reassembly attached. Silently, because everything works except the
+		// parts that only fire when something goes wrong.
+		modem.teardown();
+		eq(modem._uim_refresh_armed, false, 'teardown: uim handlers can be installed again');
+		eq(modem._apdu_long, null, 'teardown: the reassembly table is cleared with them');
+		eq(modem.thermal, null, 'teardown: thermal readings do not outlive their client');
+		ok(modem._gen > 0, 'teardown: the lifecycle generation advanced');
 	});
 
 // --- 15: UIM refresh END_SUCCESS drives an async identity re-read -------------

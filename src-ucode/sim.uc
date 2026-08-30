@@ -781,16 +781,29 @@ export function euicc_profiles(modem, slot, cb)
 				// native eUICC interface at all and the caller should fall back
 				// to lpac rather than believe in an empty card.
 				if (err) {
-					if (id == 1)
-						return cb({ error: 'no_native_euicc', detail: err }, null);
-
-					// A TIMEOUT ends the whole walk, not just this index. An
+					// A TIMEOUT is never "no more profiles" — at any index. An
 					// unsupported message answers immediately (error 94 on both
-					// modems here), so a timeout means the modem is not talking
-					// — and continuing would spend 10 s per remaining index with
-					// the ubus caller waiting on all of it.
+					// modems here), so silence means the modem stopped talking,
+					// and saying "that is the end of the list" would report a
+					// truncated enumeration as a complete one.
 					if (err.error == 'timeout')
 						return cb({ error: 'euicc_timeout', detail: err,
+						            partial: out }, null);
+
+					// Only a QMI-level refusal on the FIRST index means "this
+					// modem has no native eUICC interface". Anything else at
+					// index 1 is a transport problem and must not be dressed up
+					// as one.
+					if (id == 1)
+						return cb({ error: (err.error == 'qmi') ? 'no_native_euicc'
+						                                       : 'euicc_transport',
+						            detail: err }, null);
+
+					// A refusal at a LATER index is the normal terminator: there
+					// is no list message, so the walk ends where the card stops
+					// having profiles. A transport error is not that.
+					if (err.error != 'qmi')
+						return cb({ error: 'euicc_transport', detail: err,
 						            partial: out }, null);
 
 					return cb(null, out);
@@ -1092,29 +1105,43 @@ export function install_apdu_reassembly(modem)
 		// otherwise corrupt the middle of a certificate and still look valid.
 		w.parts[sprintf('%u', c.offset ?? 0)] = c.apdu ?? [];
 
-		// Recount from the parts map rather than accumulating. A retransmitted
-		// chunk overwrites its slot but would have incremented a running total
-		// twice, and the reassembly would then "complete" early — with a HOLE in
-		// the middle and the right length, which is the worst possible shape for
-		// a certificate: it parses far enough to be believed.
-		let have = 0;
+		// Completion is CONTIGUOUS COVERAGE from offset 0 to total, not a sum of
+		// lengths. Summing was wrong twice over: a chunk repeated at the same
+		// offset counted twice, and overlapping or out-of-range chunks can still
+		// reach the total with a gap left in the middle. The result then has the
+		// right LENGTH and a hole — the worst possible shape for a certificate,
+		// because it parses far enough to be believed. So walk the offsets and
+		// require each to start no later than where the last one ended.
+		let total = w.total ?? c.total_length ?? 0;
+		let offs = sort(map(keys(w.parts), (k) => +k), (a, b) => a - b);
+		let pos = 0, out = [];
 
-		for (let k, part in w.parts)
-			have += length(part);
+		for (let o in offs) {
+			// a gap: nothing has covered [pos, o) yet, so we are not done
+			if (o > pos)
+				return;
 
-		if (have < (w.total ?? c.total_length ?? 0))
+			let part = w.parts[sprintf('%u', o)];
+
+			// an overlap is tolerated but never trusted to extend coverage
+			// twice: take only the bytes beyond what we already hold
+			for (let n = pos - o; n < length(part); n++)
+				push(out, part[n]);
+
+			if (o + length(part) > pos)
+				pos = o + length(part);
+		}
+
+		if (pos < total)
 			return;
 
 		w.timer?.cancel();
 		delete modem._apdu_long[key];
 
-		// reassemble in offset order
-		let offs = sort(map(keys(w.parts), (k) => +k), (a, b) => a - b);
-		let out = [];
-
-		for (let o in offs)
-			for (let b in w.parts[sprintf('%u', o)])
-				push(out, b);
+		// a card that sent MORE than it promised is not a card to trust the tail
+		// of; keep exactly what was announced
+		if (length(out) > total)
+			out = slice(out, 0, total);
 
 		w.cb(null, arr_to_hex(out));
 	});
@@ -1154,6 +1181,19 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 		}
 
 		let key = sprintf('%u', lr.token);
+
+		// A token the modem has handed out twice while the first is still open.
+		// Overwriting the slot would orphan the first caller AND leave its timer
+		// running, which would then delete the NEW waiter out from under itself.
+		// Fail the old one explicitly and take its timer with it.
+		let prev = modem._apdu_long[key];
+
+		if (prev) {
+			prev.timer?.cancel();
+			prev.cb({ error: 'long_apdu_token_reused',
+			          detail: sprintf('token %u handed out again while still open', lr.token) }, null);
+		}
+
 		let done = false;
 		let finish = (e, v) => {
 			if (done)
