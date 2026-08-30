@@ -187,7 +187,11 @@ const MODEM_KNOWN_OPTS = [ 'device', 'netdev', 'path', 'usb_path', 'serial',
 	// the backends (modem_mbim step_at, modem_common open_at_over_mbim) and
 	// neither was listed here or copied below — so setting either produced an
 	// "unknown option" warning AND did nothing.
-	'at_over_mbim', 'at_mbim' ];
+	'at_over_mbim', 'at_mbim',
+	// cap the QMAP header version the datapath may negotiate (1 | 4 | 5;
+	// unset/0 = whatever the datapath can drive). Mostly a bring-up handle:
+	// pinning it is how a specific version gets exercised on real hardware.
+	'qmap_version' ];
 const SIM_KNOWN_OPTS = [ 'modem', 'iccid', 'imsi', 'pincode', 'apn', 'auth',
 	'username', 'password', 'plmn_list' ];
 
@@ -254,6 +258,7 @@ function modem_from_section(s)
 		at_over_mbim: s.at_over_mbim,
 		// '0' disables the automatic AT-over-MBIM fallback entirely
 		at_mbim: s.at_mbim,
+		qmap_version: +(s.qmap_version ?? 0),
 		fcc_auth: s.fcc_auth,
 		at_init: (type(s.at_init) == 'array') ? s.at_init :
 		         (s.at_init != null ? [ s.at_init ] : []),

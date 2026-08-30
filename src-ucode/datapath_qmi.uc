@@ -84,16 +84,26 @@ export function setup(self, dp, o, next)
 			}
 
 			let dgram = netlink.board_dgram_size(fxi, dp.dgram_size, self.info.model);
+			// QMAP header version → the WDA aggregation-protocol value. The
+			// ladder is the datapath's own (rmnet: v5, v4, plain), capped by
+			// `option qmap_version` when the operator pins one — which is also
+			// how a specific version gets exercised on hardware.
+			const DAP_FOR = { '5': wdamod.DAP_QMAPV5, '4': wdamod.DAP_QMAPV4,
+			                  '1': wdamod.DAP_QMAP };
 			// what this datapath can do, asked of the datapath instead of
 			// inferred from its name — the name tests here covered the built-in
 			// rmnet and silently excluded every datapath added since
 			let caps = netlink.datapath_caps(backend, dp.plugins);
+			// forward-declared: negotiate() walks this ladder from inside its own
+			// body, and ucode does not hoist a `let` to where an earlier arrow
+			// can see it
+			let rungs = [];
 			let negotiate;
 
 			// rmnet supports MAPv5 checksum offload; try it first there and
 			// renegotiate plain QMAP when the modem rejects it (some answer
 			// a v5 request with aggregation fully disabled)
-			negotiate = (dap, allow_fallback) => {
+			negotiate = (dap, ver) => {
 				let args = { qos: 0, llp: wdamod.LLP_RAW_IP };
 
 				if (caps.qmap) {
@@ -119,20 +129,24 @@ export function setup(self, dp, o, next)
 						wdata.dl_max_datagrams ?? 0, wdata.dl_max_size ?? 0,
 						wdata.ul_max_datagrams ?? 0, wdata.ul_max_size ?? 0, dap, dgram));
 
+					// accepted only if the modem echoed the version we asked for:
+					// a different one is a version we cannot drive (rmnet has no
+					// flags for v2/v3), so it is treated as a refusal.
 					let aggr_ok = !caps.qmap ||
-						((wdata.dl_protocol == wdamod.DAP_QMAP ||
-						  wdata.dl_protocol == wdamod.DAP_QMAPV5) &&
-						 (wdata.dl_max_size ?? 0) > 0);
+						(wdata.dl_protocol == dap && (wdata.dl_max_size ?? 0) > 0);
 
-					if (!aggr_ok && allow_fallback && dap != wdamod.DAP_QMAP) {
-						log('notice', sprintf('modem rejected aggregation protocol %d, renegotiating plain qmap', dap));
-						return negotiate(wdamod.DAP_QMAP, false);
+					if (!aggr_ok && length(rungs)) {
+						let next_v = shift(rungs);
+
+						log('notice', sprintf('modem rejected aggregation protocol %d, trying qmap v%d',
+							dap, next_v));
+						return negotiate(DAP_FOR[sprintf('%d', next_v)], next_v);
 					}
 
 					if (!aggr_ok)
 						return fail('wda_format', { error: 'aggregation_rejected', echo: wdata });
 
-					let v5 = (wdata.dl_protocol == wdamod.DAP_QMAPV5);
+					let v5 = (ver == 5);
 
 					// the modem may clamp the aggregation size; follow it
 					let r = netlink.setup(fxi, {
@@ -142,7 +156,8 @@ export function setup(self, dp, o, next)
 						// or all installed ones under 'auto'); setup() picks the
 						// implementation for the backend chosen above
 						plugins: dp.plugins,
-						v5: v5,
+						qmap_version: ver,
+						v5: v5,   // derived; for add-ons written before v4
 						mux: map(dp.mux_links ?? [], (e) => ({
 							id: e.id,
 							name: e.name ?? sprintf('%sm%d', dp.netdev, e.id),
@@ -167,6 +182,9 @@ export function setup(self, dp, o, next)
 						// children (see map_id in netlink.uc); context.uc binds
 						// WDS to this, not to the config number.
 						map_ids: r.map_ids,
+						// the QMAP header version actually negotiated (1|4|5);
+						// `v5` stays for everything reading the old boolean
+						qmap_version: ver,
 						v5: v5,
 						urb_size: r.urb_size,
 						mux_devs: r.mux_devs,
@@ -201,7 +219,17 @@ export function setup(self, dp, o, next)
 
 			// MAPv5 first where the datapath carries checksum offload, with the
 			// plain-QMAP fallback for modems that answer v5 with aggregation off
-			negotiate(caps.qmap_v5 ? wdamod.DAP_QMAPV5 : wdamod.DAP_QMAP,
-				caps.qmap_v5);
+			// the versions to try, best first: what the datapath can drive,
+			// capped by an explicit `option qmap_version`
+			let want = +(dp.qmap_version ?? 0);
+
+			rungs = filter(caps.qmap_versions, (v) => !want || v <= want);
+
+			if (!length(rungs))
+				rungs = [ 1 ];
+
+			let first = shift(rungs);
+
+			negotiate(DAP_FOR[sprintf('%d', first)], first);
 		});
 };

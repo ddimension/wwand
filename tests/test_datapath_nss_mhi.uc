@@ -185,7 +185,7 @@ eq(netlink.select_backend(mhi_fx(), 'rmnet_mhi0', 'auto', true, plugins, { proto
 eq(netlink.select_backend(mhi_fx(), 'rmnet_mhi0', 'auto', true, plugins, { proto: 'qmi' }),
 	'rmnet_nss_mhi', 'select: ...and a QMI one, the driver serves both');
 eq(netlink.datapath_caps('rmnet_nss_mhi', plugins),
-	{ aggregate: false, qmap: true, qmap_v5: false, tx_aggr: false },
-	'caps: driver owns the buffers, QMAP on the wire');
+	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], tx_aggr: false },
+	'caps: driver owns the buffers, QMAP on the wire, plain QMAP only');
 
 done('test_datapath_nss_mhi');

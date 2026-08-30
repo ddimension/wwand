@@ -468,6 +468,38 @@ let dpfx2 = fakefx.create({ present: {
 	'/sys/module/rmnet': true,
 } });
 
+let dpfx3 = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+// refuses every checksum version: the ladder has to bottom out at plain QMAP
+// rather than keep trying or give up on aggregation altogether
+scenario('datapath-all-declined', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => {
+			if (args.dl_protocol == 9 || args.dl_protocol == 8)
+				return { qos: 0, llp: 2, ul_protocol: 0, dl_protocol: 0,
+				         dl_max_datagrams: 0, dl_max_size: 0 };
+
+			return { qos: 0, llp: 2,
+				ul_protocol: args.ul_protocol, dl_protocol: args.dl_protocol,
+				dl_max_datagrams: 32, dl_max_size: args.dl_max_size };
+		},
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [ { id: 1 } ], dgram_size: 0, fx: dpfx3,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(length(mock.calls_for('SET_DATA_FORMAT')), 3, 'alld: tried v5, v4, then plain');
+		eq(modem.datapath.qmap_version, 1, 'alld: bottomed out at plain QMAP');
+		ok(dpfx3.action_index('link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x1') >= 0,
+			'alld: links with deaggregation only');
+	});
+
 scenario('datapath-v5-declined', {
 	handlers: base_handlers({
 		SET_DATA_FORMAT: (args, meta) => {
@@ -487,11 +519,17 @@ scenario('datapath-v5-declined', {
 	},
 }, 'registered',
 	(modem, mock, events) => {
-		eq(length(mock.calls_for('SET_DATA_FORMAT')), 2, 'v5d: renegotiated');
-		eq(modem.datapath.v5, false, 'v5d: fell back to plain qmap');
+		// the ladder steps DOWN one version, it does not jump to plain: this
+		// modem refuses v5 but takes v4, and v4 has its own rmnet flag pair
+		// (CKSUMV4 0x04|0x08, not CKSUMV5 0x10|0x20). Telling rmnet the wrong
+		// pair is a misparse, not a downgrade — which is why the version is
+		// carried through instead of a boolean.
+		eq(length(mock.calls_for('SET_DATA_FORMAT')), 2, 'v5d: renegotiated once');
+		eq(modem.datapath.qmap_version, 4, 'v5d: landed on v4');
+		eq(modem.datapath.v5, false, 'v5d: and the old boolean says not-v5');
 		eq(modem.datapath.urb_size, 4100, 'v5d: urb from requested size, not the zeroed echo');
-		ok(dpfx2.action_index('link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x1') >= 0,
-			'v5d: links with deagg only');
+		ok(dpfx2.action_index('link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0xd') >= 0,
+			'v5d: links with deagg + the v4 checksum pair');
 	});
 
 // --- 8: mux wanted but unsupported modem -> error ----------------------------

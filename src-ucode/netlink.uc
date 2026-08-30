@@ -24,8 +24,26 @@ export const DEFAULT_DGRAM_SIZE = 4096;
 
 // RMNET_FLAGS_* (linux/if_link.h)
 export const RMNET_INGRESS_DEAGGREGATION = 0x01;
+export const RMNET_INGRESS_CKSUMV4 = 0x04;
+export const RMNET_EGRESS_CKSUMV4 = 0x08;
 export const RMNET_INGRESS_CKSUMV5 = 0x10;
 export const RMNET_EGRESS_CKSUMV5 = 0x20;
+
+// rmnet ingress/egress flags for a negotiated QMAP version. v1 carries no
+// checksum offload at all, so it is deaggregation only; v4 and v5 are separate
+// header formats with separate flags — telling rmnet the wrong one is not a
+// downgrade, it is a misparse.
+export function rmnet_flags(qmap_version)
+{
+	let f = RMNET_INGRESS_DEAGGREGATION;
+
+	if (qmap_version == 5)
+		f |= RMNET_INGRESS_CKSUMV5 | RMNET_EGRESS_CKSUMV5;
+	else if (qmap_version == 4)
+		f |= RMNET_INGRESS_CKSUMV4 | RMNET_EGRESS_CKSUMV4;
+
+	return f;
+};
 
 // --- datapath plugins --------------------------------------------------------
 //
@@ -551,16 +569,15 @@ function child_mtu(mtu, fx, what)
 // rmnet backend: one rmnet child per mux entry, tolerating pre-existing links
 // on a daemon restart. Fills mux_mtus, returns the created child dev names.
 // (preserved MTU dance: 1504 while adding links, then the urb size on the parent)
-function setup_rmnet_links(fx, netdev, mux, v5, urb_size, mux_mtus, child_name)
+function setup_rmnet_links(fx, netdev, mux, qmap_version, urb_size, mux_mtus, child_name)
 {
 	let mux_devs = [];
 
 	link_op(fx, 'rmnet mtu', netdev, { mtu: 1504 });
 
-	// deaggregation is mandatory (multi-packet QMAP frames); v5 adds checksum
-	// offload negotiated via WDA
-	let rmnet_flags = RMNET_INGRESS_DEAGGREGATION |
-		(v5 ? (RMNET_INGRESS_CKSUMV5 | RMNET_EGRESS_CKSUMV5) : 0);
+	// deaggregation is mandatory (multi-packet QMAP frames); v4/v5 add the
+	// checksum offload WDA negotiated, each with its own flag pair
+	let flags = rmnet_flags(qmap_version);
 
 	for (let entry in mux) {
 		let id = entry.id;
@@ -568,7 +585,7 @@ function setup_rmnet_links(fx, netdev, mux, v5, urb_size, mux_mtus, child_name)
 
 		mux_mtus[child] = entry.mtu;
 
-		if (!fx.link_add_rmnet(child, netdev, id, rmnet_flags)) {
+		if (!fx.link_add_rmnet(child, netdev, id, flags)) {
 			// tolerate pre-existing links (daemon restart)
 			if (!fx.exists(sprintf('/sys/class/net/%s', child))) {
 				fx.log('err', sprintf('failed to create rmnet link %s%s', child,
@@ -730,8 +747,12 @@ const BUILTIN = {
 			return write_attr(fx, sprintf('%s/pass_through', ctx.sys), 'Y', 'driver format')
 				? true : 'pass_through unavailable';
 		},
-		links: (fx, ctx) => setup_rmnet_links(fx, ctx.netdev, ctx.mux, ctx.v5,
-			ctx.urb_size, ctx.mux_mtus, ctx.child_name),
+		links: (fx, ctx) => setup_rmnet_links(fx, ctx.netdev, ctx.mux,
+			ctx.qmap_version, ctx.urb_size, ctx.mux_mtus, ctx.child_name),
+		// the QMAP header formats this datapath can drive, best first — the
+		// caller negotiates down this ladder. rmnet has a flag pair for v4 and
+		// for v5; anything else is plain QMAP.
+		qmap_versions: [ 5, 4, 1 ],
 		// mainline rmnet is the one with the ethtool egress-coalesce knob
 		tx_aggr: true,
 	},
@@ -923,8 +944,12 @@ export function datapath_caps(backend, plugins)
 		// driver's channels overrides it — the driver owns the buffers, but the
 		// frames are still QMAP)
 		qmap: impl ? (impl.qmap ?? aggregate) : false,
-		// MAPv5 checksum offload may be negotiated
-		qmap_v5: (impl?.qmap_v5 === true),
+		// the QMAP header versions this datapath can drive, best first. Default
+		// [1]: plain QMAP is the only thing a datapath that says nothing can be
+		// assumed to handle, since v4 and v5 need format-specific handling.
+		qmap_versions: impl
+			? [ ...(impl.qmap_versions ?? (impl.qmap_v5 === true ? [ 5, 1 ] : [ 1 ])) ]
+			: [],
 		// host-side uplink coalescing is available
 		tx_aggr: (impl?.tx_aggr === true),
 	};
@@ -1144,7 +1169,12 @@ export function setup(fx, opts)
 	if (impl)
 		mux_devs = impl.links(fx, {
 			netdev: netdev, sys: sys, mux: mux, urb_size: urb_size,
-			v5: opts.v5, mux_mtus: mux_mtus, opts: opts,
+			// the negotiated QMAP header version (1 | 4 | 5). `v5` stays as the
+			// boolean it always was so an add-on written before v4 existed keeps
+			// working unchanged.
+			qmap_version: opts.qmap_version ?? (opts.v5 ? 5 : 1),
+			v5: opts.v5 ?? (opts.qmap_version == 5),
+			mux_mtus: mux_mtus, opts: opts,
 			// the helpers this module uses itself, so an add-on needs no
 			// wwand imports (whose instances would be its own copies anyway)
 			link: (what, dev, o) => link_op(fx, what, dev, o),

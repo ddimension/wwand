@@ -1143,6 +1143,7 @@ export function create(opts)
 			                    { netdev: entry.netdev, ep_id: ep_id, ep_type: ep_type, mux: mux,
 			                      plugins: dp_plugins,
 			                      dgram_size: cfg.dl_datagram_max_size,
+			                      qmap_version: cfg.qmap_version,
 			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx };
 
 		entry.modem = be.modem.create({ ...common, datapath: datapath });

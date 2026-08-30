@@ -844,17 +844,23 @@ eq(netlink.mux_available(fakefx.create({ present: { '/sys/class/net/wwan0/vendor
 // aggregation ratio means anything. Every datapath added later fell outside all
 // three silently, which is what these capabilities exist to prevent.
 eq(netlink.datapath_caps('rmnet', null),
-	{ aggregate: true, qmap: true, qmap_v5: true, tx_aggr: true },
-	'caps: rmnet does all of it');
+	{ aggregate: true, qmap: true, qmap_versions: [ 5, 4, 1 ], tx_aggr: true },
+	'caps: rmnet drives every QMAP version it has rmnet flags for');
 eq(netlink.datapath_caps('qmimux', null),
-	{ aggregate: true, qmap: true, qmap_v5: false, tx_aggr: false },
-	'caps: qmimux aggregates QMAP but has neither v5 nor the coalesce knob');
+	{ aggregate: true, qmap: true, qmap_versions: [ 1 ], tx_aggr: false },
+	'caps: qmimux aggregates plain QMAP only, and has no coalesce knob');
+
+// the ladder is descending preference, and it is what the negotiation walks
+eq(netlink.datapath_caps('rmnet', null).qmap_versions[0], 5, 'caps: best first');
+eq(netlink.rmnet_flags(5), 0x01 | 0x10 | 0x20, 'flags: v5 = deagg + CKSUMV5 pair');
+eq(netlink.rmnet_flags(4), 0x01 | 0x04 | 0x08, 'flags: v4 = deagg + CKSUMV4 pair');
+eq(netlink.rmnet_flags(1), 0x01, 'flags: plain QMAP is deaggregation only');
 eq(netlink.datapath_caps('vlan', null).qmap, false,
 	'caps: a VLAN mux is not QMAP');
 eq(netlink.datapath_caps('raw_ip', null).qmap, false, 'caps: no mux, no QMAP');
 eq(netlink.datapath_caps('none', null).qmap, false, 'caps: ...under the old spelling too');
 eq(netlink.datapath_caps('nosuch', null),
-	{ aggregate: false, qmap: false, qmap_v5: false, tx_aggr: false },
+	{ aggregate: false, qmap: false, qmap_versions: [ ], tx_aggr: false },
 	'caps: an unknown datapath claims nothing');
 
 // `qmap` defaults to `aggregate` but is a DIFFERENT question: aggregate is who
