@@ -44,9 +44,16 @@ export default {
 				dl_max_datagrams: { t: 0x15, f: 'u32' },
 				dl_max_size:      { t: 0x16, f: 'u32' },
 				endpoint:         { t: 0x17, f: { type: 'u32', iface: 'u32' } },
+				// DOWNLINK minimum padding — grouped with the uplink block below
+				// by tag order alone, which read as if it were one of them.
+				// NOTE: libqmi 1.38 lists no 0x19 for Set Data Format (its input
+				// set is 0x10-0x17, 0x1B, 0x1C), so this tag is from the QMI WDA
+				// spec rather than verified against a binding. Nothing sets it
+				// today; if something ever does, that is the moment to check it
+				// on hardware.
+				dl_min_padding:   { t: 0x19, f: 'u32' },
 				// uplink QMAP aggregation: tell the modem to expect host-batched
 				// UL frames. Optional — only emitted when the caller sets them.
-				dl_min_padding:   { t: 0x19, f: 'u32' },
 				ul_max_datagrams: { t: 0x1B, f: 'u32' },
 				ul_max_size:      { t: 0x1C, f: 'u32' },
 			},
