@@ -111,10 +111,11 @@ eq(ensures, [ 'wan/ipv4v6' ],
 
 // extendprefix is set for EVERY v6-capable PDP, ipv4v6 included, and the
 // subinterface only exists for those — so the pdp type that arrives here is
-// diagnostic, not a decision. Keying the option on ipv6-only was too narrow
-// twice: pdp_type defaults to ipv4v6, so an interface that never spelled it
-// out never qualified; and a dual-stack PDP whose network hands out no usable
-// IPv4 leaves the LAN just as empty.
+// diagnostic, not a decision. What RFC 7278 answers is IPv6 with no delegated
+// prefix; the presence of IPv4 is irrelevant to it (that is RFC 6877's
+// problem). A dual-stack PDP gets the same undelegated /64, so its LAN is
+// equally without IPv6 — working IPv4 just hides it. And keying on ipv6-only
+// missed almost everything anyway, since pdp_type defaults to ipv4v6.
 
 // --- scenario 2: pdp ipv4 -> no v6 subinterface ------------------------------
 ensures = [];

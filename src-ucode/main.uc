@@ -519,12 +519,19 @@ function run_daemon()
 				//
 				// Set for EVERY v6-capable PDP, ipv4v6 included — and reaching
 				// this function already means the context is one (the daemon
-				// gates on pdp_type != 'ipv4'). Keying it on ipv6-only was too
-				// narrow twice over: pdp_type defaults to ipv4v6, so an
-				// interface that never spelled it out never qualified, and a
-				// dual-stack PDP on a network that hands out no usable IPv4
-				// has the same empty LAN either way. The /64 is there to be
-				// shared in all of those cases.
+				// gates on pdp_type != 'ipv4').
+				//
+				// What makes RFC 7278 necessary is IPv6 WITHOUT a delegated
+				// prefix, and nothing else. Whether IPv4 is also present does
+				// not enter into it: a dual-stack PDP is handed the same single
+				// /64 with no delegation, so its LAN clients get no IPv6 either
+				// — the working IPv4 merely hides the symptom. (The
+				// IPv4-unavailable case is a different problem with a different
+				// answer, RFC 6877 / 464XLAT, which lives in the modem or the
+				// network, not here.) Keying the option on ipv6-only was
+				// therefore wrong on its own terms, and doubly so because
+				// pdp_type defaults to ipv4v6 — an interface that never spelled
+				// it out never qualified.
 				let want_extend = true;
 
 				log('info', sprintf('dhcpv6 subinterface %s: extendprefix=1 (RFC 7278, pdp %s)',
@@ -601,7 +608,7 @@ function run_daemon()
 					// the promise made in docs/reference.md; and an explicit
 					// `extendprefix 0` is an operator decision, so only an
 					// ABSENT option is ever filled in.
-					log('notice', sprintf('interface %s: ipv6-only APN — defaulting extendprefix=1 (RFC 7278)',
+					log('notice', sprintf('interface %s: IPv6 without a delegated prefix — defaulting extendprefix=1 (RFC 7278)',
 						have_name));
 					cursor.set('network', have_name, 'extendprefix', '1');
 					cursor.commit('network');
