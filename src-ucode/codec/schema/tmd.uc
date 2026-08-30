@@ -46,6 +46,38 @@ export function device_label(id)
 	return DEVICE_LABELS[id ?? ''] ?? (id ?? 'unknown');
 };
 
+// Does a mitigation device throttle the RADIO, or is it reporting an
+// environmental condition that happens to use the same interface?
+//
+// This distinction is not academic and it was not obvious: HW on the NR7101
+// (RG502Q) shows `cpr_cold` sitting at level 1 of 3 on a perfectly healthy
+// modem — Core Power Reduction for LOW temperature, i.e. the modem noting that
+// it is cold, which is a normal operating state and costs no throughput.
+// Treating it as "the modem is throttling itself" would put a permanent warning
+// on the status page of a box that is working fine.
+//
+// A denylist rather than an allowlist, because device names are per-modem: the
+// RG650E has 28 and the RG502Q 19, with only partial overlap, and new ones must
+// default to "this is about the radio" so a real thermal event is never missed.
+const ENVIRONMENTAL = [
+	/_cold$/,       // cpr_cold, cpuv_restriction_cold — low-temperature limits
+	/^cpr/,         // core power reduction
+	/^cpuv/,        // CPU voltage restriction
+	/^vbatt/,       // battery voltage
+	/^charge/,      // charging state
+	/^bcl$/,        // battery current limit
+	/^wlan/,        // the Wi-Fi side of a combo SoC, not the cellular link
+];
+
+export function is_rf_device(id)
+{
+	for (let re in ENVIRONMENTAL)
+		if (match(id ?? '', re))
+			return false;
+
+	return true;
+};
+
 export default {
 	service: 0x18,
 	messages: {

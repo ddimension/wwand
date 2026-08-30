@@ -734,7 +734,9 @@ export function create(opts)
 
 				// What is worth saying out loud is the TRANSITION: this modem
 				// started, or stopped, holding itself back at all.
-				if (!!was != !!self.thermal.mitigated)
+				// only an RF-class transition is worth a line; an environmental
+				// device crossing zero is not news
+				if (!!was != !!self.thermal.mitigated && tmdmod.is_rf_device(id))
 					log(self.thermal.mitigated ? 'warn' : 'notice',
 						self.thermal.mitigated
 							? sprintf('thermal mitigation active: %s at level %d — the modem is throttling itself',
@@ -800,8 +802,12 @@ export function create(opts)
 
 		let worst = 0;
 
+		// Only RF-class devices set the headline. An environmental one — the
+		// modem noting that it is cold, or a battery/charge limit — uses the
+		// same interface but costs no throughput, and HW-observed on the NR7101
+		// `cpr_cold` sits at level 1 permanently on a healthy modem.
 		for (let d in self.thermal.devices)
-			if ((d.level ?? 0) > worst)
+			if ((d.level ?? 0) > worst && tmdmod.is_rf_device(d.id))
 				worst = d.level;
 
 		self.thermal.mitigated = worst > 0;
@@ -811,7 +817,13 @@ export function create(opts)
 		// holding back. The full list is init-log material — a status page that
 		// polls does not want thirty rows of "level 0" on every request, and the
 		// interesting case is always the short list.
-		self.thermal.active = filter(self.thermal.devices, (d) => (d.level ?? 0) > 0);
+		// ...but `active` lists EVERYTHING holding back, each saying which class
+		// it is in. The environmental ones are still worth seeing — "this modem
+		// is cold" explains a slow start on a winter rooftop — they just must
+		// not raise an alarm.
+		self.thermal.active = map(
+			filter(self.thermal.devices, (d) => (d.level ?? 0) > 0),
+			(d) => ({ ...d, rf: tmdmod.is_rf_device(d.id) }));
 	};
 
 	self._install_nas_handlers = function() {

@@ -319,6 +319,24 @@ eq(tmdmod.device_label('something_new'), 'something_new',
 // it does not impose it. Pinned so a later "completeness" patch has to argue.
 eq(T.SET_MITIGATION_LEVEL, null, 'tmd: wwand never commands mitigation');
 
+// RF vs environmental. HW-observed on the NR7101 (RG502Q): `cpr_cold` sits at
+// level 1 of 3 on a perfectly healthy modem — Core Power Reduction for LOW
+// temperature, a normal operating state costing no throughput. Counting it as
+// "the modem is throttling itself" would put a permanent warning on the status
+// page of a box that is working fine.
+ok(!tmdmod.is_rf_device('cpr_cold'), 'tmd: cold-temperature limits are not throttling');
+ok(!tmdmod.is_rf_device('cpuv_restriction_cold'), 'tmd: nor CPU voltage restriction');
+ok(!tmdmod.is_rf_device('vbatt_low'), 'tmd: nor a battery limit');
+ok(!tmdmod.is_rf_device('wlan_bw'), 'tmd: nor the Wi-Fi side of a combo SoC');
+ok(tmdmod.is_rf_device('pa'), 'tmd: the power amplifier is');
+ok(tmdmod.is_rf_device('modem_skin'), 'tmd: so is modem skin temperature');
+ok(tmdmod.is_rf_device('pa_nr_sdr0_scg_dsc'), 'tmd: and the fine-grained RF ones');
+
+// a name nobody has seen before must default to RF, so a real thermal event on
+// a modem we have never met is never silently dropped
+ok(tmdmod.is_rf_device('some_new_vendor_thing'),
+	'tmd: an unknown device counts as radio-affecting rather than being ignored');
+
 // the long-APDU wire shapes, where a wrong count width is silent corruption
 let la = tlvmod.unpack(U.SEND_APDU.resp, tlv(0x11, u16(600) + u32(77)));
 eq(la.response, null, 'long apdu: no response TLV when the answer did not fit');
