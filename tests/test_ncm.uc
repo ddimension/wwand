@@ -323,6 +323,13 @@ push(scenarios, {
 		eq(m.counters.proto_ok, 0,
 			'pinned: but an AT answer proves nothing when the driver says qmi');
 		eq(m.counters.proto_name, 'ncm', 'pinned: recorded against the pinned protocol');
+
+		// the AT replies still drive this state machine — they can bring a
+		// context up — so the zero-rx watchdog is reachable on a modem whose
+		// protocol was never proved. It must not repower it.
+		eq(m.recovery.usb_repower(), false,
+			'pinned: the zero-rx watchdog cannot repower an unproven modem either');
+
 		env.finish();
 	},
 });

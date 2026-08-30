@@ -101,11 +101,17 @@ reported only.
   fix without evidence: a modem at that id which never answers is
   indistinguishable from the same modem gone silent, which is precisely the case
   the hardware rungs exist for — so refusing to inherit would disarm the wedged
-  modem this feature was built for. Hooking it to the IMEI does not help either,
-  because the IMEI only arrives *after* the modem has answered, by which point
-  the replacement has earned its own arming anyway. Recorded because it is a
-  real narrowing of the invariant ("this modem answered", not "a modem at this
-  id answered"), not because a fix is known. Raised in review, 2026-08-30.
+  modem this feature was built for. The IMEI does not *fully* close the window
+  either, since it only arrives after the modem has answered, by which point the
+  replacement has earned its own arming anyway — but it is not useless: once a
+  replacement IS detected, the inherited attempts/rung/proto-error counters are
+  the previous modem's outage and should be reset rather than escalated on. The
+  USB **iSerial** is the better lever, because this tree already reads it
+  pre-open (`discovery.resolve_modem_device`), so for hardware that exposes a
+  stable one the boundary can be closed opportunistically. Recorded because it
+  is a real narrowing of the invariant ("a modem at this id answered", not "this
+  modem answered"), and because the partial fixes are worth more than the
+  absolute framing suggested. Raised in review, 2026-08-30.
 - **TODO — nothing catches a mismatched split-package install.** The ucode tree
   ships as a base package plus per-backend ones, and the feed's DEPENDS carry no
   version. A base from one release running backends from another fails the way

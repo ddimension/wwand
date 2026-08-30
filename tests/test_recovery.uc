@@ -277,6 +277,45 @@ let rv3 = recovery.create({ id: 'never', failreboot: 40, fx: fx, state_dir: '/st
 rv3.revoke_arming('nothing to take');
 eq(rv3.counters.proto_ok, 0, 'revoke: harmless when nothing was armed');
 
+// The gate lives at the PRIMITIVE, because the ladder is not its only caller.
+// The zero-rx watchdog repowers directly (modem_common.trip_zero_rx), which is
+// reachable on a modem that never proved its protocol: a contradicted NCM pin
+// still lets AT replies drive the state machine far enough to bring a context
+// up, and a stall on that context would then power-cycle healthy hardware.
+fx = fakefx.create();
+let rz = recovery.create({ id: 'zerorx', failreboot: 40, fx: fx, state_dir: '/state',
+	log: silent, reboot_delay: 10 });
+
+eq(rz.usb_repower(), false, 'primitive: no repower while the channel has never answered');
+eq(length(fx.matching('run usb-repower')), 0, 'primitive: ...and nothing was run');
+
+rz.reboot('attempt limit');
+uloop.timer(30, () => uloop.end());
+uloop.run();
+eq(length(fx.matching('run reboot')), 0, 'primitive: no reboot either, for the same reason');
+
+// ...and once the modem does answer, both are available again
+rz.note_answer();
+eq(rz.usb_repower(), true, 'primitive: an answer restores the repower');
+
+// the full path your reviewer asked for: persisted arming, revoked by a
+// contradicted pin, zero-rx must then do nothing
+fx = fakefx.create();
+fx.files['/state/ztrip.json'] =
+	'{ "attempts": 3, "proto_errors": 0, "rung": 0, "proto_hw": 0, "proto_ok": 1, "proto_name": "ncm" }';
+let rt = recovery.create({ id: 'ztrip', failreboot: 40, fx: fx, state_dir: '/state', log: silent });
+rt.load();
+rt.note_protocol('ncm');
+eq(rt.counters.proto_ok, 1, 'zero-rx: the inherited grant is there to lose');
+
+rt.revoke_arming('the driver says qmi');
+eq(rt.usb_repower(), false, 'zero-rx: a revoked modem is not repowered by the watchdog');
+eq(length(fx.matching('run usb-repower')), 0, 'zero-rx: nothing physical happened');
+
+// remove the contradiction, get legitimate evidence, and it works again
+rt.note_answer();
+eq(rt.usb_repower(), true, 'zero-rx: legitimate evidence restores it');
+
 // note_answer arms WITHOUT touching the error counters — that is what separates
 // it from on_proto_success, and conflating the two would silently disable the
 // proto-error ladder (every service error would reset its own counter).

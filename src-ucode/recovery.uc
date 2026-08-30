@@ -319,6 +319,20 @@ export function create(opts)
 	// replaces the old external `usb-repower` tool; the fx.run fallback stays
 	// only for hosts that still ship such a tool and have no board profile.
 	self.usb_repower = function() {
+		// The gate lives HERE, at the primitive, not only in the ladder that
+		// usually calls it. The ladder is not the only caller: the zero-rx
+		// watchdog repowers directly (modem_common.trip_zero_rx), and it is
+		// reachable on a modem that never proved its protocol — a contradicted
+		// NCM pin still lets AT replies drive the state machine far enough to
+		// bring a context up, and a stall on that context would then power-cycle
+		// hardware we have no evidence is broken. Anything that grows a new
+		// caller inherits the rule instead of having to remember it.
+		if (!self.counters.proto_ok) {
+			log('warn', sprintf('refusing to repower: the %s control channel has never answered, so nothing here is evidence about the hardware',
+				self.counters.proto_name ?? 'modem'));
+			return false;
+		}
+
 		if (opts.repower) {
 			log('err', 'recovery: triggering modem repower (board)');
 			return opts.repower() ? true : false;
@@ -337,6 +351,14 @@ export function create(opts)
 	self.reboot = function(reason) {
 		if (self.rebooting)
 			return;
+
+		// same rule, same reasoning as usb_repower above: a router must not
+		// reboot itself over a modem that has never answered us
+		if (!self.counters.proto_ok) {
+			log('warn', sprintf('refusing to reboot (%s): the %s control channel has never answered',
+				reason, self.counters.proto_name ?? 'modem'));
+			return;
+		}
 
 		self.rebooting = true;
 		log('err', sprintf('recovery: rebooting system (%s) in %ds',
