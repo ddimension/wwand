@@ -94,6 +94,14 @@ reported only.
   modems too, so it cannot prove an NCM pin). `option protocol` itself is parsed
   now — it was documented, advised by the daemon's own error message, and
   silently dropped by `config.uc`.
+- **TODO — the QMI surface survey is a map, not a plan.**
+  `docs/design/qmi-surface-survey.md` records what the vendor QMI/RIL surface
+  has that wwand does not model, ranked by value per line, with each item's
+  provenance marked (citable / device-observed / proprietary) because that
+  decides whether it can ever be upstreamed. Cheapest high-value items: the
+  eight unused UIM `REGISTER_EVENTS` mask bits, `UIM_REFRESH_OK` (which libqmi
+  structurally cannot answer, so an operator OTA can stall the card), and the
+  three indications libqmi can arm but not decode. Nothing there is scheduled.
 - **TODO — recovery state has no identity boundary.** The counters, `proto_ok`
   included, are keyed on the modem *id* and persist across daemon restarts
   within a boot (tmpfs). Swap the physical modem behind that id and the

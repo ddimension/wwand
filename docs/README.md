@@ -30,6 +30,7 @@ and superseded by the reference docs above wherever the two disagree.
 |---|---|
 | [design/interface-landscape.md](design/interface-landscape.md) | Which control/datapath/transport interfaces the modem market actually offers, and how wwand's split maps onto them |
 | [design/telemetry-survey.md](design/telemetry-survey.md) | Point-in-time catalogue of the QMI messages and Quectel AT commands that carry useful telemetry, with what has since shipped |
+| [design/qmi-surface-survey.md](design/qmi-surface-survey.md) | What the vendor QMI/RIL surface has that wwand does not model — ranked by value, each item marked citable / device-observed / proprietary, plus which services are actually reachable on the QMUX link |
 | [upstream/modemmanager-comparison.md](upstream/modemmanager-comparison.md) | wwand next to ModemManager, dimension by dimension, and the "adopt from MM" backlog |
 
 ## The 60-second model
