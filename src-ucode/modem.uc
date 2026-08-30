@@ -28,6 +28,7 @@ import * as ctlmod from 'wwand.codec.schema.ctl';
 import * as dmsmod from 'wwand.codec.schema.dms';
 import * as nasmod from 'wwand.codec.schema.nas';
 import * as uimmod from 'wwand.codec.schema.uim';
+import * as tmdmod from 'wwand.codec.schema.tmd';
 // loc.uc + wms.uc are lazy-loaded (require of a *_lazy shim) only when GPS /
 // SMS is actually used, keeping those schemas off the heap on the common path.
 
@@ -141,6 +142,8 @@ export function create(opts)
 		// internal recovery, an activation that failed).
 		sim_busy: false,
 		sim_note: null,
+		tmd: null,          // thermal-mitigation client, when the modem has TMD
+		thermal: null,      // { devices: [{id,label,max,level}], mitigated, level }
 
 		services: {},      // service id (string) -> { major, minor }
 		info: {},          // model, revision, imei, ...
@@ -631,6 +634,116 @@ export function create(opts)
 			}, { no_recovery: true });
 	};
 
+	// TMD — the modem's own thermal mitigation. Answers a question nothing else
+	// here can: throughput that collapsed while the signal bars stayed put is
+	// usually the modem cutting its own transmit power, and until now that was
+	// indistinguishable from a bad cell. Read-only by design (see the schema:
+	// SET_MITIGATION_LEVEL is deliberately not modelled — the modem's thermal
+	// management is the authority, and a host that overrides it can cook the
+	// hardware). Entirely best-effort: cb() runs whatever happens.
+	self._install_thermal = function(cb) {
+		cb = cb ?? (() => null);
+
+		if (!self.services[sprintf('%d', tmdmod.default.service)])
+			return cb();
+
+		self.alloc(tmdmod.default, (err, tmd) => {
+			if (err || !tmd)
+				return cb();
+
+			self.tmd = tmd;
+
+			tmd.on('MITIGATION_LEVEL_REPORT_IND', (data) => {
+				let id = data?.device?.dev_id;
+				let lvl = data?.level;
+
+				if (id == null || lvl == null)
+					return;
+
+				for (let d in (self.thermal?.devices ?? []))
+					if (d.id == id) {
+						if (d.level == lvl)
+							return;   // re-report of a level we already hold
+
+						d.level = lvl;
+					}
+
+				self._refresh_thermal();
+
+				// level 0 is normal operation; anything above it is the modem
+				// deliberately holding itself back, which is worth saying out loud
+				log(lvl > 0 ? 'warn' : 'notice',
+					sprintf('thermal mitigation: %s now at level %d%s',
+						tmdmod.device_label(id), lvl,
+						lvl > 0 ? ' (the modem is throttling itself)' : ' (cleared)'));
+			});
+
+			tmd.request('GET_MITIGATION_DEVICE_LIST', {}, (le, ld) => {
+				let list = le ? [] : (ld?.devices ?? []);
+
+				if (!length(list)) {
+					// the service exists but names no devices — nothing to watch
+					self.tmd = null;
+					return cb();
+				}
+
+				self.thermal = {
+					devices: map(list, (d) => ({
+						id: d.dev_id, label: tmdmod.device_label(d.dev_id),
+						max: d.max_level, level: null,
+					})),
+					mitigated: false,
+				};
+
+				log('info', sprintf('thermal mitigation devices: %s',
+					join(', ', map(self.thermal.devices,
+						(d) => sprintf('%s (0..%d)', d.id, d.max)))));
+
+				// initial level per device, then subscribe. Sequential rather
+				// than parallel: these are cheap and a modem that dislikes one
+				// of them should not lose the rest.
+				let i = 0, step;
+
+				step = () => {
+					if (i >= length(self.thermal.devices)) {
+						self._refresh_thermal();
+						return cb();
+					}
+
+					let d = self.thermal.devices[i++];
+
+					tmd.request('GET_MITIGATION_LEVEL',
+						{ device: { dev_id: d.id } }, (ge, gd) => {
+							if (!ge && gd?.current != null)
+								d.level = gd.current;
+
+							tmd.request('REGISTER_NOTIFICATION',
+								{ device: { dev_id: d.id } },
+								(re) => step(), { no_recovery: true });
+						}, { no_recovery: true });
+				};
+
+				step();
+			}, { no_recovery: true });
+		});
+	};
+
+	// roll the per-device levels up into the one fact the rest of the system
+	// cares about: is this modem currently holding itself back at all?
+	self._refresh_thermal = function() {
+		if (!self.thermal)
+			return;
+
+		let worst = 0;
+
+		for (let d in self.thermal.devices)
+			if ((d.level ?? 0) > worst)
+				worst = d.level;
+
+		self.thermal.mitigated = worst > 0;
+		self.thermal.level = worst;
+	};
+
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
@@ -847,11 +960,14 @@ export function create(opts)
 
 		modem_common.close_at(self);
 
-		for (let c in [ self.ctl, self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg, self.dsd ])
+		for (let c in [ self.ctl, self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg, self.dsd, self.tmd ])
 			if (c)
 				c.destroy();
 
-		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = self.dsd = null;
+		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = self.dsd = self.tmd = null;
+		// the readings belong to the client that is going away; keeping them
+		// would show a stale mitigation level for a modem we no longer talk to
+		self.thermal = null;
 
 		if (self.hub) {
 			self.hub.close();

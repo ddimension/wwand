@@ -21,6 +21,7 @@ import * as wdsmod from 'wwand/codec/schema/wds.uc';
 import * as dsdmod from 'wwand/codec/schema/dsd.uc';
 import * as uimmod from 'wwand/codec/schema/uim.uc';
 import * as tlvmod from 'wwand/codec/tlv.uc';
+import * as tmdmod from 'wwand/codec/schema/tmd.uc';
 
 uloop.init();
 
@@ -274,5 +275,47 @@ eq(uimmod.EVENTS_WANTED & uimmod.EVENT_SAP_CONNECTION, 0,
 // makes it reachable — the pair libqmi models neither half of
 eq(U.REFRESH_OK.id, 0x002B, 'uim: refresh-ok message id');
 eq(U.REFRESH_REGISTER_ALL.req.vote.t, 0x10, 'uim: vote-for-init is TLV 0x10');
+
+// --- TMD: is the modem throttling itself ------------------------------------
+// Everything here is citable from the GPL kernel, and the one wire trap is the
+// string encoding: a mitigation device id is a QMI_STRING nested in a struct,
+// so it carries a 1-byte length and NO trailing NUL. Reading it as a bare
+// string would consume the max_level byte behind it, and the level of a device
+// called "pa" would silently become part of its name.
+let T = tmdmod.default.messages;
+let lstr = (v) => u8(length(v)) + v;
+
+let dl = tlvmod.unpack(T.GET_MITIGATION_DEVICE_LIST.resp,
+	tlv(0x10, u8(2) + lstr('pa') + u8(3) + lstr('modem') + u8(4)));
+eq(length(dl.devices), 2, 'tmd: both mitigation devices decoded');
+eq(dl.devices[0].dev_id, 'pa', 'tmd: nested string carries its own length');
+eq(dl.devices[0].max_level, 3, 'tmd: ...and the level behind it survives');
+eq(dl.devices[1].dev_id, 'modem', 'tmd: second device id');
+eq(dl.devices[1].max_level, 4, 'tmd: second max level');
+
+// current vs requested: they differ while a change is in flight, and a
+// persistent gap means the modem declined what was asked of it
+let ml = tlvmod.unpack(T.GET_MITIGATION_LEVEL.resp, tlv(0x10, u8(2)) + tlv(0x11, u8(3)));
+eq(ml.current, 2, 'tmd: current level');
+eq(ml.requested, 3, 'tmd: requested level is a separate field');
+
+// the push
+let mi = tlvmod.unpack(T.MITIGATION_LEVEL_REPORT_IND.ind,
+	tlv(0x01, lstr('pa')) + tlv(0x02, u8(3)));
+eq(mi.device.dev_id, 'pa', 'tmd ind: device id');
+eq(mi.level, 3, 'tmd ind: new level');
+
+// the request side has to encode the same way round
+let req = tlvmod.pack(T.GET_MITIGATION_LEVEL.req, { device: { dev_id: 'pa' } });
+eq(req, tlv(0x01, lstr('pa')), 'tmd: request re-encodes the nested string identically');
+
+eq(tmdmod.default.service, 0x18, 'tmd: service id');
+eq(tmdmod.device_label('pa'), 'power amplifier', 'tmd: device labels are readable');
+eq(tmdmod.device_label('something_new'), 'something_new',
+	'tmd: an unknown device passes through rather than vanishing');
+
+// SET_MITIGATION_LEVEL is deliberately absent — wwand reports thermal state,
+// it does not impose it. Pinned so a later "completeness" patch has to argue.
+eq(T.SET_MITIGATION_LEVEL, null, 'tmd: wwand never commands mitigation');
 
 done('test_qmi_backend');

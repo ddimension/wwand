@@ -134,17 +134,22 @@ export function install(self, o)
 
 							// DSD (Data System Determination): optional, gives the
 							// clean LTE / 5G-NSA / 5G-SA status; absent on older modems.
+							// TMD (Thermal Mitigation Device): optional, tells us
+							// when the modem throttles ITSELF. Brought up after
+							// DSD so a modem lacking either still proceeds.
+							let after_dsd = () => self._install_thermal(() => self._read_info(step_at));
+
 							if (self.services[sprintf('%d', dsdmod.default.service)]) {
 								self.alloc(dsdmod.default, (e5, dsd) => {
 									self.dsd = e5 ? null : dsd;
 									if (self.dsd)
 										self._arm_data_mode_ind();
-									self._read_info(step_at);
+									after_dsd();
 								});
 							}
 							else {
 								self.dsd = null;
-								self._read_info(step_at);
+								after_dsd();
 							}
 						});
 					};

@@ -1564,6 +1564,10 @@ export function create(opts)
 				// (session closed and why / internal recovery / activation)
 				sim_busy: entry.modem?.sim_busy ?? false,
 				sim_note: entry.modem?.sim_note ?? null,
+				// the modem's own thermal mitigation (QMI TMD): which parts of it
+				// are holding back and how far. `mitigated` is the one-bit answer
+				// to "is throughput down because the modem decided so".
+				thermal: entry.modem?.thermal ?? null,
 				manufacturer: entry.modem?.info?.manufacturer,
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,
