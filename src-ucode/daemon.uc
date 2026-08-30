@@ -1567,7 +1567,14 @@ export function create(opts)
 				// the modem's own thermal mitigation (QMI TMD): which parts of it
 				// are holding back and how far. `mitigated` is the one-bit answer
 				// to "is throughput down because the modem decided so".
-				thermal: entry.modem?.thermal ?? null,
+				thermal: entry.modem?.thermal ? {
+					mitigated: entry.modem.thermal.mitigated,
+					level:     entry.modem.thermal.level ?? 0,
+					// only the devices actually throttling, plus how many exist
+					// in total — thirty "level 0" rows per poll help nobody
+					active:    entry.modem.thermal.active ?? [],
+					devices:   length(entry.modem.thermal.devices ?? []),
+				} : null,
 				manufacturer: entry.modem?.info?.manufacturer,
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,

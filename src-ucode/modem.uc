@@ -668,14 +668,24 @@ export function create(opts)
 						d.level = lvl;
 					}
 
+				let was = self.thermal?.mitigated;
+
 				self._refresh_thermal();
 
-				// level 0 is normal operation; anything above it is the modem
-				// deliberately holding itself back, which is worth saying out loud
-				log(lvl > 0 ? 'warn' : 'notice',
-					sprintf('thermal mitigation: %s now at level %d%s',
-						tmdmod.device_label(id), lvl,
-						lvl > 0 ? ' (the modem is throttling itself)' : ' (cleared)'));
+				// Per-device changes go to debug. A modem has ~30 mitigation
+				// devices (28 on the RG650E), several of them 0..255 fine-grained
+				// backoff counters, and logging every step of those at notice
+				// would drown the log the moment the box gets warm.
+				log('debug', sprintf('thermal: %s level %d', id, lvl));
+
+				// What is worth saying out loud is the TRANSITION: this modem
+				// started, or stopped, holding itself back at all.
+				if (!!was != !!self.thermal.mitigated)
+					log(self.thermal.mitigated ? 'warn' : 'notice',
+						self.thermal.mitigated
+							? sprintf('thermal mitigation active: %s at level %d — the modem is throttling itself',
+								tmdmod.device_label(id), lvl)
+							: 'thermal mitigation cleared');
 			});
 
 			tmd.request('GET_MITIGATION_DEVICE_LIST', {}, (le, ld) => {
@@ -742,6 +752,12 @@ export function create(opts)
 
 		self.thermal.mitigated = worst > 0;
 		self.thermal.level = worst;
+
+		// What status() reports: the roll-up plus ONLY the devices actually
+		// holding back. The full list is init-log material — a status page that
+		// polls does not want thirty rows of "level 0" on every request, and the
+		// interesting case is always the short list.
+		self.thermal.active = filter(self.thermal.devices, (d) => (d.level ?? 0) > 0);
 	};
 
 	self._install_nas_handlers = function() {
