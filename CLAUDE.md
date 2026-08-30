@@ -20,9 +20,12 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   the separate `ucode-mod-wwand-io` package is gone, `PROVIDES` covers old
   configs), `wwand-qmi`, `wwand-mbim` (DEPENDS wwand-qmi), `wwand-ncm`,
   `wwand-mhi` (PCIe/MHI transport + MHI kmods + the wwan-subsystem hotplug;
-  backend-neutral, pair with wwand-qmi/-mbim), `wwand-esim`. Backends do **not**
-  CONFLICTS the stock handlers — wwand coexists with uqmi/umbim/comgt-ncm and
-  manages only `proto wwand`.
+  backend-neutral, pair with wwand-qmi/-mbim), `wwand-esim`, plus two optional
+  DATAPATH add-ons — `wwand-datapath-rmnet_nss` (vendor `qmi_wwan_q`, USB) and
+  `wwand-datapath-rmnet_nss_mhi` (vendor `pcie_mhi`, PCIe/MHI) — which adopt the
+  QMAP children those drivers register so Qualcomm NSS offload survives.
+  Backends do **not** CONFLICTS the stock handlers — wwand coexists with
+  uqmi/umbim/comgt-ncm and manages only `proto wwand`.
 - **ucode is shipped precompiled to bytecode by default** (production builds),
   built by the **repo-root `CMakeLists.txt`** alongside `wwand_io.so` — one
   compiler invocation per file over **explicit source lists** (no glob as build
@@ -86,7 +89,9 @@ native `wwand_io.so` → codec (`qmux.uc`, `tlv.uc`, `hex.uc`, `schema/*.uc`
 incl. `schema/rat.uc` = canonical RAT/IoT vocabulary, `mbim*.uc`) → session
 (`transport.uc`, `client.uc`) → state machines
 (`modem.uc` + its extracted QMI helpers `modem_init_qmi.uc` / `telemetry_qmi.uc`
-/ `regdetail.uc` / `config_check.uc` / `datapath_qmi.uc`; `modem_mbim.uc` +
+/ `regdetail.uc` / `config_check.uc` / `datapath_qmi.uc`; the datapath
+interface lives in `netlink.uc` with `datapath_*.uc` add-ons beside it
+(docs/datapath-interface.md); `modem_mbim.uc` +
 `telemetry_mbim.uc`; `modem_ncm.uc` + `ncm_vendors.uc` (vendor dial/auth tables)
 + `telemetry_ncm.uc`; `context.uc` + `context_monitor_qmi.uc`; `sim.uc`; shared
 `modem_common.uc` / `context_common.uc` / `backend.uc`) → system (`netlink.uc`

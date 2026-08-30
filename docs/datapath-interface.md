@@ -13,7 +13,7 @@ it, not special cases beside it.
 | `qmimux` | qmi | QMAP through qmi_wwan's own `add_mux` |
 | `vlan` | mbim | cdc_mbim sessions as 802.1q sub-devices |
 | `raw_ip` | all | no multiplexing — the plain raw-IP parent (not an implementation) |
-| *add-on* | declared | e.g. `rmnet_nss`, the vendor NSS datapath |
+| *add-on* | declared | `rmnet_nss` (vendor `qmi_wwan_q`, USB) and `rmnet_nss_mhi` (vendor `pcie_mhi`, PCIe/MHI) keep Qualcomm NSS offload by adopting the children those drivers register |
 
 `raw_ip` was spelled `none` before 1.6 and both spellings — plus `raw-ip` — still
 select it. Underscore is canonical: a datapath name doubles as the ucode module

@@ -460,9 +460,11 @@ protocol can use.
 
 Under `auto` (the default) the daemon looks at every installed plugin that
 serves this modem's protocol and lets each decide via its own probe whether this
-box is its hardware; one that says yes is preferred over the built-ins. This is how an accelerated datapath — e.g.
-`rmnet_nss` on an ipq807x with NSS offload — takes over on the boards it belongs
-to without any configuration, autosetup included — the probes run whether or not
+box is its hardware; one that says yes is preferred over the built-ins. This is
+how an accelerated datapath — `wwand-datapath-rmnet_nss` on a Qualcomm NSS build
+with the vendor `qmi_wwan_q` driver, or `-rmnet_nss_mhi` for its PCIe/MHI
+counterpart — takes over on the boards it belongs to without any configuration,
+autosetup included — the probes run whether or not
 the config has channels. An interface still needs a `mux_id` for a mux datapath
 to carry anything: with no channel to build, the selected datapath drops back to
 `raw_ip` (logged), since muxed framing with no mux child is a link that is up and

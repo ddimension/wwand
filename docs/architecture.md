@@ -194,9 +194,9 @@ modules it imports, so a plugin registering itself in `netlink.uc` would
 populate a different instance than the daemon's and silently do nothing. Under
 `auto` the daemon scans its module directory for installed plugins and each
 decides, by its declared control protocol and its own `probe()`, whether the box
-is its hardware — that is how an
-accelerated datapath (`rmnet_nss` on ipq807x/NSS) takes over on a zero-config
-box; a plugin without a probe is explicit-only, and `option mux` naming one wins
+is its hardware — that is how an accelerated datapath (`rmnet_nss` and
+`rmnet_nss_mhi`, which adopt the QMAP children a vendor driver registered so
+Qualcomm NSS offload survives) takes over on a zero-config box; a plugin without a probe is explicit-only, and `option mux` naming one wins
 over everything. Contract: [datapath-interface.md](datapath-interface.md); how
 to write one: [extending.md §4](extending.md#4-adding-a-datapath-backend).
 All of it stays **capability-gated**: aggregation is applied only when the modem

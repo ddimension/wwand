@@ -92,7 +92,8 @@ for device setup (apk/opkg lines and signing keys).
 | `wwand-ncm` | NCM/ECM backend (`DEPENDS wwand`) |
 | `wwand-mhi` | PCIe/MHI transport + MHI drivers (`DEPENDS wwand`; backend-neutral, add wwand-qmi or wwand-mbim) |
 | `wwand-esim` | eSIM management + SM-DP+ download (`DEPENDS wwand-qmi + lpac`) |
-| `wwand-datapath-rmnet_nss` | optional QMI datapath add-on: adopts the vendor `qmi_wwan_q` QMAP children on Qualcomm NSS builds (`DEPENDS wwand-qmi`) |
+| `wwand-datapath-rmnet_nss` | optional datapath add-on: adopts the vendor `qmi_wwan_q` QMAP children (USB) so they keep their Qualcomm NSS offload (`DEPENDS wwand-qmi`) |
+| `wwand-datapath-rmnet_nss_mhi` | the same for Quectel's vendor `pcie_mhi` driver (PCIe/MHI, QMI *and* MBIM) (`DEPENDS wwand`) |
 
 The ucode tree can ship **precompiled to bytecode** (faster start, no on-device
 parse) or as readable source. Which is the default depends on the packaging: the

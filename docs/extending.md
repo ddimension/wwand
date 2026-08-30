@@ -230,14 +230,29 @@ config wwand_modem 'm0'
 	option mux 'rmnet'          # a built-in: plugins are not consulted at all
 ```
 
-**A worked example ships in tree.** `src-ucode/datapath_rmnet_nss.uc` is the
-Qualcomm NSS datapath for the vendor `qmi_wwan_q` driver, packaged as
-`wwand-datapath-rmnet_nss`. It uses nearly every optional field, because it has
-to: the children already exist (the driver registers them in its USB probe), so
-it adopts instead of creating and renames them onto the context's stable name;
-its `prune()` is a no-op; and the QMAP id on the wire is `0x80 + channel`, not
-the config's channel number. Its head comments cite the driver lines each
-decision comes from, and `tests/test_datapath_nss.uc` pins them.
+**Two worked examples ship in tree**, and the pair is the point: same idea, two
+vendor drivers, almost no shared detail.
+
+`src-ucode/datapath_rmnet_nss.uc` (USB, `qmi_wwan_q`) and
+`datapath_rmnet_nss_mhi.uc` (PCIe/MHI, `pcie_mhi`) both keep Qualcomm NSS
+offload by ADOPTING children the driver already registered — the driver calls
+`nss_create()` on each, and mainline rmnet would build a second set on a parent
+that already demuxes. So neither creates anything, both rename onto the
+context's stable name, and both make `prune()` a no-op.
+
+What differs is everything else, and it is why they are two datapaths rather
+than one with a flag:
+
+| | `rmnet_nss` (USB) | `rmnet_nss_mhi` (PCIe/MHI) |
+|---|---|---|
+| child name | `<parent>_<n>` | `<parent>.<n>` — a dot |
+| child MAC | the parent's | the parent's, last octet = channel |
+| wire id | `0x80 + n` | QMAP `0x80 + n`; MBIM the session id, `112 + n` on an SDX7x and `n` elsewhere |
+| serves | QMI | QMI and MBIM |
+
+Their head comments cite the driver lines each decision comes from, and
+`tests/test_datapath_nss.uc` / `test_datapath_nss_mhi.uc` pin them. Neither has
+run on hardware — read the caveat in each file before trusting a number.
 
 ## 5. Adding telemetry
 
