@@ -1407,8 +1407,23 @@ export function datapath_stats(fx, parent, children)
 	// aggregation ratio only makes sense when a parent frame count exists and is
 	// distinct from the children (QMAP); round to 2 decimals. NB ucode does
 	// integer division for int/int — force float with the 100.0 factor.
-	let ratio = (num, den) => (den && den > 0 && num != null) ?
-		(int(num * 100.0 / den) / 100.0) : null;
+	//
+	// Below 1.0 the number is not a low ratio, it is a MEANINGLESS one: every
+	// parent frame carries at least one child packet, so a mean under one can
+	// only mean the two counters do not cover the same period — the child is
+	// younger than its parent (any recreation: a config change, a QMAP
+	// renegotiation, a manual `ip link del`) or parent frames go somewhere the
+	// child list does not cover. These are lifetime counters, so that state
+	// persists until the parent is reset. Report nothing rather than a "0.00"
+	// that reads as "aggregation is off".
+	let ratio = (num, den) => {
+		if (!den || den <= 0 || num == null)
+			return null;
+
+		let r = int(num * 100.0 / den) / 100.0;
+
+		return (r < 1.0) ? null : r;
+	};
 
 	return {
 		parent: p ? { dev: parent, ...p } : null,

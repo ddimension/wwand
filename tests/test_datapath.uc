@@ -623,6 +623,20 @@ eq(ds.rx_aggregation, 2.5, 'stats: rx aggregation = 250 demuxed / 100 frames');
 eq(ds.tx_aggregation, 2.0, 'stats: tx aggregation = 40 host pkts / 20 frames');
 eq(ds.children['wwan0m1'].rx_bytes, 300000, 'stats: child byte counter');
 
+// a child younger than its parent (recreated on a QMAP renegotiation, a config
+// change, a manual `ip link del`) makes the two lifetime counters cover
+// different periods. The quotient then falls below 1, which no real aggregation
+// can be — every parent frame carries at least one child packet — so it must be
+// reported as absent, not as "0.00" (which the status page reads as "no
+// aggregation"). Observed on the Chateau: child 409 packets, parent 66941.
+stat = {};
+cnt('wwan0', 66941, 56525, 4016924, 3079448);
+cnt('wwan0m1', 409, 367, 25649, 26997);
+let ds_young = netlink.datapath_stats(statfx, 'wwan0', [ 'wwan0m1' ]);
+eq(ds_young.rx_aggregation, null, 'stats: sub-unity ratio suppressed (child younger than parent)');
+eq(ds_young.tx_aggregation, null, 'stats: sub-unity tx ratio suppressed');
+eq(ds_young.children['wwan0m1'].rx_packets, 409, 'stats: raw counters still reported');
+
 // unreadable counters -> null ratio, no throw
 stat = {};
 let ds2 = netlink.datapath_stats(statfx, 'wwanX', [ 'wwanXm1' ]);
