@@ -148,15 +148,21 @@ export default {
 			resp: {},
 		},
 
+		// The legacy DMS card getters — `qmicli --dms-uim-get-iccid` /
+		// `--dms-uim-get-imsi`. They predate the UIM service, so they are what
+		// identifies the card on a modem too old to have one, and the fallback
+		// when a UIM that exists refuses a raw EF read (the EG06 does).
+		// Verified vs libqmi 1.38 qmi-service-dms.json: "UIM Get ICCID" 0x003C
+		// and "UIM Get IMSI" 0x0043, both since 1.0, value in output TLV 0x01
+		// as a string. Chained in sim.uc read_iccid / read_identity behind the
+		// UIM EF read and ahead of AT.
 		GET_ICCID: {
-			// legacy DMS path
 			id: 0x003C,
 			req:  {},
 			resp: { iccid: { t: 0x01, f: 'string' } },
 		},
 
 		GET_IMSI: {
-			// legacy DMS path
 			id: 0x0043,
 			req:  {},
 			resp: { imsi: { t: 0x01, f: 'string' } },

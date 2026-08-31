@@ -988,6 +988,34 @@ scenario('read_identity: no dms -> AT chain, no crash', (next) => {
 	});
 });
 
+// A UIM that REJECTS the raw EF read must fall through to the legacy DMS
+// getters, not give up. This is the shape the comment at read_iccid describes
+// (the EG06 answers an error to an MF-level EF read) and the reason old modems
+// keep working at all: DMS UIM Get ICCID / Get IMSI are message 0x003C / 0x0043
+// with the value in TLV 0x01 (libqmi 1.38 qmi-service-dms.json, both "since
+// 1.0"), and they predate the UIM service entirely.
+scenario('identity: a rejecting uim falls through to the legacy DMS getters', (next) => {
+	let asked = [];
+	let m = { timing: T, config: {},
+		uim: { request: (name, args, cb) => uloop.timer(1, () => cb({ error: 'ef_read' }, null)) },
+		dms: { request: (name, args, cb) => {
+			push(asked, name);
+			uloop.timer(1, () => cb(null, {
+				imsi: '262031234567890',
+				iccid: '89490260007654321',
+				msisdn: null,
+			}));
+		} } };
+
+	sim.read_identity(m, (id) => {
+		eq(id.imsi, '262031234567890', 'identity-dms: imsi from the legacy DMS getter');
+		eq(id.iccid, '89490260007654321', 'identity-dms: iccid from the legacy DMS getter');
+		ok(index(asked, 'GET_IMSI') >= 0, 'identity-dms: GET_IMSI was actually asked');
+		ok(index(asked, 'GET_ICCID') >= 0, 'identity-dms: GET_ICCID was actually asked');
+		next();
+	});
+});
+
 // --- PUK unblock chain (sim.unblock_puk) --------------------------------------
 
 // UIM UNBLOCK_PIN succeeds -> done, no fallback

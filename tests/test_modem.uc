@@ -359,6 +359,10 @@ scenario('dms-fallback', {
 		eq(modem.uim, null, 'dms: no uim client');
 		eq(length(mock.calls_for('GET_PIN_STATUS')), 1, 'dms: legacy pin status used');
 		eq(modem.info.imsi, '262019876543210', 'dms: imsi via legacy path');
+		// the ICCID rides the same legacy path and was the half nothing pinned:
+		// DMS UIM Get ICCID, message 0x003C, value in TLV 0x01 (libqmi 1.38,
+		// "since 1.0") — what identifies the card on a modem too old for UIM
+		eq(modem.info.iccid, '8949020000012345678', 'dms: iccid via legacy path');
 	});
 
 // --- 6: configured modes + manual PLMN ---------------------------------------
