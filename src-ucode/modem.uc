@@ -213,8 +213,19 @@ export function create(opts)
 
 	self.alloc = function(schema, cb) {
 		self.ctl.request('ALLOCATE_CID', { service: schema.service }, (err, data) => {
-			if (err || !data?.allocation)
+			if (err || !data?.allocation) {
+				// ClientIdsExhausted (CTL error 5): the modem's client table
+				// is full. Old stacks keep a tiny table (~5 slots) and a failed
+				// attempt can leak a slot, so plain retries only burn attempts
+				// — reset the modem stack instead: AT+CFUN=1,1 re-initializes
+				// the protocol stack and the table (HW-verified on the Huawei
+				// E1820, 2026-08-31: the modem re-enumerates and comes back
+				// with a fresh table). Fire-and-forget; the retry runs anyway.
+				if (err?.code == 5)
+					self._reset_stack_at();
+
 				return cb(err ?? { error: 'proto', detail: 'no allocation tlv' }, null);
+			}
 
 			log('debug', sprintf('allocated cid %d for service %d',
 				data.allocation.cid, schema.service));
@@ -274,6 +285,20 @@ export function create(opts)
 
 	let dp = opts.datapath ?? {};
 	let at_opts = opts.at ?? {};
+
+	// one-shot modem stack reset over the AT port (ClientIdsExhausted). Runs
+	// at alloc time, before the init chain's own open_at — so the reset goes
+	// through modem_common.reset_stack_at, which opens a RAW transport and
+	// writes AT+CFUN=1,1 without any of the daemon's AT engines (they may not
+	// be opened yet, and the failure path tears the modem object down right
+	// after — the reset must already be on the wire by then).
+	self._reset_stack_at = function() {
+		if (self._reset_stack_sent)
+			return;
+
+		self._reset_stack_sent = true;
+		modem_common.reset_stack_at(self, at_opts, log);
+	};
 
 
 	let fail = modem_common.make_fail(self, {
@@ -1274,10 +1299,28 @@ export function create(opts)
 		// sees a stale generation.
 		self._gen++;
 
-		for (let c in [ self.ctl, self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg,
-		               self.dsd, self.tmd, self.cat, self.wms, self.pdc ])
-			if (c)
+		// RELEASE the service clients on the modem (CTL RELEASE_CID) while the
+		// transport is still up, rather than only dropping them here. A
+		// destroyed-but-not-released client stays in the MODEM's client table
+		// until its stack resets, and on a stack with a tiny table (the E1820
+		// class) a few failed attempts exhaust it. self.release() destroys the
+		// client locally as well, so this replaces the bare destroy rather than
+		// adding to it. Fire-and-forget: the release frame is written
+		// synchronously, and destroying ctl just below cancels the answers we do
+		// not need. ctl goes LAST, and is only destroyed — it is the implicit
+		// client (cid 0) and it is what carries RELEASE_CID for all the others.
+		for (let c in [ self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg,
+		               self.dsd, self.tmd, self.cat, self.wms, self.pdc ]) {
+			if (!c)
+				continue;
+
+			if (self.hub && !self.hub.closed)
+				self.release(c, (e) => { if (e) log('debug', 'release failed'); });
+			else
 				c.destroy();
+		}
+
+		self.ctl?.destroy();
 
 		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = null;
 		self.dsd = self.tmd = self.cat = self.wms = self.pdc = null;

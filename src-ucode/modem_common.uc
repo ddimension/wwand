@@ -756,6 +756,45 @@ export function telemetry_at(self)
 	};
 };
 
+// reset_stack_at(self, at_opts, log): emergency modem stack reset over a raw
+// AT write (AT+CFUN=1,1) — the escape hatch for a wedged QMI side
+// (ClientIdsExhausted). Deliberately bypasses the daemon's atcmd engines:
+// they are not opened yet at alloc time (this runs in the ALLOCATE_CID
+// error path), and the failure path tears the modem object down right after,
+// so the reset must be on the wire by the time the error propagates. Opens
+// the AT transport directly, writes, closes — no probe, no queue, no answer
+// expected (the modem resets itself regardless; HW-verified on the Huawei
+// E1820, 2026-08-31: CFUN re-enumerates the device and the table comes back
+// fresh).
+export function reset_stack_at(self, at_opts, log)
+{
+	let fxi = at_opts?.fx;
+
+	if (!fxi) {
+		log('warn', 'modem reset (CFUN) impossible — no sysfs/at accessor');
+		return;
+	}
+
+	let ch = atcmd.find_at_channels(fxi, self.device, self.config?.tty);
+
+	if (!ch.primary) {
+		log('warn', 'modem reset (CFUN) impossible — no AT port');
+		return;
+	}
+
+	let open_transport = at_opts?.open_transport ?? atcmd.open_transport;
+	let tr = open_transport(ch.primary, 115200, (level, msg) => log(level, msg));
+
+	if (!tr) {
+		log('warn', sprintf('modem reset (CFUN) impossible — AT port %s will not open', ch.primary));
+		return;
+	}
+
+	tr.write('AT+CFUN=1,1\r');
+	tr.close();
+	log('notice', 'modem reset (CFUN) sent — client table exhausted');
+};
+
 // +CSQ: <rssi>,<ber> — rssi 0..31 coded (99 = unknown) -> dBm. The shared CSQ
 // floor read for signal fallback paths (NCM baseline, and the QMI backend's
 // fallback when the modem has no working QMI signal message).

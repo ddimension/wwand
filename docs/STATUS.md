@@ -42,7 +42,7 @@ is always user-triggered.
 | Cudy LT300 v3 (`3.97`) | SLM770A, NCM | `cdc_ether` | connected, traffic |
 | Huasifei WH3000 Pro (sponsor) | FM350-GL, NCM | `rndis_host` | connected, traffic |
 | Huasifei WH3000 Pro (sponsor) | E3372H, NCM | `huawei_cdc_ncm` | connected, traffic — AT on the cdc-wdm control channel, IP via CGPADDR (CGCONTRDP/GTDNS absent on stick firmware 21.200), v6 via RA + dhcpv6 subinterface |
-| Huasifei WH3000 Pro (sponsor) | E1820, QMI (minimal 2011 stack) | `ethernet` | READY without SIM — no UIM/DSD/WDA; DMS fallback, GET_SIGNAL_STRENGTH signal, 802.3 kept + NOARP; E2E connect open (empty SIM slot) |
+| Huasifei WH3000 Pro (sponsor) | E1820, QMI (minimal 2011 stack) | `ethernet` | **E2E verified: CONNECTED + traffic on 2G** (sponsor SIM). No UIM/DSD/WDA; DMS fallback, GET_SIGNAL_STRENGTH signal, 802.3 kept with ARP on (the function is an L2 bridge into the GGSN segment — NOARP broke the traffic path, HW-proven) |
 
 Neither QMI modem accepts QMAP v4; both take v5 and fall back to v1 when asked
 for something they decline. The MBIM and NCM paths report no QMAP version at
@@ -185,11 +185,17 @@ reported only.
 - **eSIM over MBIM UICC** is wire-verified against libmbim 1.32 + lpac but not
   end-to-end: no eUICC-capable MBIM modem is on hand (the RG650E rejects
   MBIM_OPEN, the EG06 card has no eUICC).
-- **The E1820-class QMI support is not E2E-verified**: the sponsor stick's SIM
-  slot is empty, so START_NETWORK/GET_CURRENT_SETTINGS on real firmware (and
-  the NOARP + /32 device-route traffic path) await a SIM. Also note the DMS
-  fallback caveat — without UIM an empty slot surfaces as registration
-  timeout, not SIM_BLOCKED (documented in `modem_quirks.uc`).
+- **The E1820-class QMI support is now E2E-verified** (2026-08-31, sponsor box
+  with a Globe SIM): CONNECTED on 2G and traffic through the 802.3 function.
+  Two HW-forced corrections landed on the way: the `ethernet` datapath must
+  keep **ARP on** (the function is an L2 bridge into the GGSN segment; NOARP
+  left the host with a zero dest MAC and no traffic — the mwan3 track ping
+  through the modem was the proof), and the client table is tiny — failed
+  attempts leaked slots (teardown destroyed clients without CTL RELEASE_CID),
+  so teardown now releases while the transport is up and ClientIdsExhausted
+  triggers an AT+CFUN stack reset instead of a retry spiral. The DMS fallback
+  caveat stays — without UIM an empty slot surfaces as registration timeout,
+  not SIM_BLOCKED (documented in `modem_quirks.uc`).
 - **v1 (plain QMAP) end-to-end on the RG650E** did not carry traffic in a
   deliberate downgrade test even through the create path, while v5 does. Not
   chased: no configuration here runs v1.
