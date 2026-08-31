@@ -1681,6 +1681,10 @@ export function create(opts)
 				at_tty: entry.modem?.at_tty,
 				// at2 released for external tools
 				at2_released: entry.modem?.at2_released,
+				// the modem's NMEA port, reported for gpsd to be pointed at.
+				// wwand never opens it and never links it — asking the daemon is
+				// the interface, so a re-enumerated modem answers with its new tty
+				gps_port: entry.modem?.gps_tty,
 				// can this model's control protocol be switched (QMI <-> MBIM)?
 				// The AT recipe is per-model and hardware-unverified ones are
 				// deliberately not offered, so a UI must gate on this rather

@@ -141,6 +141,7 @@ export function modem_defaults(over)
 		mux: 'auto', dl_datagram_max_size: 0, tty: null,
 		at_init: [], location: false, delay: 0,
 		at2_external: false,   // release the secondary AT port for external tools
+		gnss: false,           // switch the modem's GNSS receiver on (NMEA port)
 		fcc_auth: null,        // RF unlock for laptop-SKU modems (see reference.md)
 		failreboot: 100, proto_error_limit: 25, zero_rx_timeout: 21600,
 		lock_4g: [], lock_5g: null, lock_persist: false,
@@ -202,7 +203,7 @@ function apply_globals(s, result)
 // required but none configured" and safety-blocked the SIM).
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
 	'imei', 'repower_time', 'reset_gpio', 'pincode', 'modes', 'mcc', 'mnc',
-	'mux', 'dl_datagram_max_size', 'tty', 'at2_external', 'fcc_auth',
+	'mux', 'dl_datagram_max_size', 'tty', 'at2_external', 'gnss', 'fcc_auth',
 	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'zero_rx_timeout', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
@@ -295,6 +296,7 @@ function modem_from_section(s, warnings)
 		// release the secondary AT port ('at2') for external tools: wwand then
 		// never opens it and runs telemetry over the control channel instead
 		at2_external: bool_opt(s.at2_external, false),
+		gnss: bool_opt(s.gnss, false),
 		// '' / unset = automatic (a tty when there is one, else the MBIM pipe);
 		// 'fibocom' | 'compal' | '1' forces the pipe and picks the vendor CID
 		at_over_mbim: s.at_over_mbim,

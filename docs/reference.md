@@ -405,6 +405,10 @@ config wwand_modem 'm0'
 	                                 #   up, and the downlink goes silent.
 	list at_init 'ATE0'              # extra AT commands, sent once before registration
 	option at2_external '0'          # 1: reserve the secondary AT port for external tools
+	option gnss '0'                  # 1: start the modem's GNSS receiver, so its NMEA port
+	                                 #    streams. The port itself is REPORTED, never opened
+	                                 #    and never linked — read `gps_port` from
+	                                 #    `ubus call wwand status` and point gpsd at it
 	option at_mbim '0'               # 0: disable the automatic AT-over-MBIM fallback
 	option at_over_mbim ''           # force AT over the vendor MBIM CID instead of a
 	                                 #   tty: fibocom|compal|1 (unset = automatic:
@@ -1125,7 +1129,7 @@ when called from LuCI).
 
 | Method | Arguments | Description |
 |---|---|---|
-| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran) + contexts + `board` (detected profile, power/reset capability) |
+| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `gps_port` — the modem's NMEA tty when its port table names one (wwand never opens it; see `option gnss`), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran) + contexts + `board` (detected profile, power/reset capability) |
 | `reload` | — | re-read UCI and apply the **diff** — only changed/added/removed modems and contexts are touched (idempotent; see *Idempotent reload*) |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |

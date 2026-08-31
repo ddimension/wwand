@@ -44,8 +44,11 @@ const BOARD_TTYS = [
 // devices missing from the generated ModemManager table (atport.uc);
 // verified on real hardware
 const LOCAL_PORTS = {
-	// Quectel RG650E: 0 DIAG, 1 NMEA, 2 AT, 3 AT secondary
-	'2c7c:0122': { '2': 'at', '3': 'at2' },
+	// Quectel RG650E: 0 DIAG, 1 NMEA, 2 AT, 3 AT secondary. The NMEA role was
+	// in the comment but not in the table, so nothing could find the port:
+	// HW-verified on 2026-08-31 — AT+QGPS=1 answers OK (AT+QGPS? read back 0
+	// before, 1 after) and /dev/ttyUSB1 then streams $GPGGA/$GPRMC/$GPVTG/$GPGSA.
+	'2c7c:0122': { '1': 'gps', '2': 'at', '3': 'at2' },
 	// MeiG SLM770A (ASR): if2 DIAG, if3 AT secondary, if4 AT, if5 NMEA
 	// (HW-verified on a Cudy LT300; first-ttyUSB heuristic picks the mute
 	// DIAG port). 4d57 = RNDIS composition, 4d58 = ECM.
@@ -304,18 +307,26 @@ export function find_tty(fx, device, tty_override, base_override)
 };
 
 // find_at_channels: the primary AT port (find_tty) plus a DEDICATED secondary
-// AT channel (port role 'at2') when the modem exposes one. Running telemetry
+// AT channel (port role 'at2') when the modem exposes one, plus the NMEA port
+// (role 'gps') when the table names one. Running telemetry
 // polls on the secondary keeps them from serializing behind dial / cell-lock /
 // user (modem_at) commands on the control channel — the AT queue is per-tty.
-// Returns { primary, telemetry }; telemetry is null when there is no distinct
-// second AT port (the caller then reuses the primary). Only an explicitly
-// role-tagged 'at2' port is used — never a guessed one, which could hang.
+// Returns { primary, telemetry, gps }; telemetry is null when there is no
+// distinct second AT port (the caller then reuses the primary). Only an
+// explicitly role-tagged 'at2' port is used — never a guessed one, which could
+// hang.
+//
+// `gps` is the modem's NMEA stream, and wwand NEVER opens it: it is reported so
+// gpsd can be pointed at it (see modem_common, which publishes a stable
+// /dev/wwand-gpsN symlink for it). The role was already in the generated table
+// for 60-odd USB ids — it came from ModemManager's udev rules along with the AT
+// roles — and nothing had ever read it.
 export function find_at_channels(fx, device, tty_override, base_override)
 {
 	let primary = find_tty(fx, device, tty_override, base_override);
 
 	if (!primary)
-		return { primary: null, telemetry: null };
+		return { primary: null, telemetry: null, gps: null };
 
 	// resolve the USB-device dir to enumerate sibling ttys for the 'at2' role:
 	// explicit base, else the cdc-wdm device, else the primary tty's own USB
@@ -353,13 +364,17 @@ export function find_at_channels(fx, device, tty_override, base_override)
 	}
 
 	if (base == null)
-		return { primary: primary, telemetry: null };
+		return { primary: primary, telemetry: null, gps: null };
 
 	let ports = LOCAL_PORTS[sprintf('%s:%s', vid, pid)] ?? atport_table()[sprintf('%s:%s', vid, pid)];
 
 	if (!ports)
-		return { primary: primary, telemetry: null };
+		return { primary: primary, telemetry: null, gps: null };
 
+	let telemetry = null, gps = null;
+
+	// One pass for both roles. It used to return from inside the loop on the
+	// first 'at2', so a 'gps' port enumerating after it would never be seen.
 	for (let path in (fx.glob(sprintf('%s/*/tty*', base)) ?? [])) {
 		let tty = substr(path, rindex(path, '/') + 1);
 
@@ -370,16 +385,18 @@ export function find_at_channels(fx, device, tty_override, base_override)
 		let ifnum_raw = trim(fx.read(sprintf('%s/bInterfaceNumber', ifdir)) ?? '');
 		let ifnum = length(ifnum_raw) ? hex('0x' + ifnum_raw) : null;
 		let role = (ifnum != null) ? ports[sprintf('%d', ifnum)] : null;
+		let dev = sprintf('/dev/%s', tty);
 
-		if (role == 'at2') {
-			let dev = sprintf('/dev/%s', tty);
+		if (role == 'at2' && telemetry == null && dev != primary)
+			telemetry = dev;
 
-			if (dev != primary)
-				return { primary: primary, telemetry: dev };
-		}
+		// never the port we talk AT on: a modem that maps both roles to one
+		// interface would otherwise have gpsd and wwand on the same fd
+		else if (role == 'gps' && gps == null && dev != primary)
+			gps = dev;
 	}
 
-	return { primary: primary, telemetry: null };
+	return { primary: primary, telemetry: telemetry, gps: gps };
 };
 
 // --- transport ---------------------------------------------------------------

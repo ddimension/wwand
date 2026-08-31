@@ -163,6 +163,65 @@ export function qeng_ok(self)
 	return !!match(lc(sprintf('%s', self.info?.manufacturer ?? '')), QENG_VENDORS);
 };
 
+// `option gnss`: switch the receiver on so the NMEA port actually streams.
+// Reporting the port (see open_at_tty) is only half of it — on most modems the
+// port exists from boot and stays silent until GNSS is started, and the command
+// that starts it is vendor AT, not QMI. So wwand does it, because wwand owns the
+// AT port; what comes out of the NMEA port is then gpsd's business.
+//
+// Deliberately a small table, not a guess: an unknown vendor gets a log line and
+// nothing sent. An AT command invented for a modem that does not know it is at
+// best an ERROR and at worst a different command that firmware DOES implement.
+const GNSS_START = [
+	// Quectel (and the ASR-based modems that copy its AT set). "+CME ERROR: 504"
+	// is "session is ongoing" — already running, which is success for us.
+	{ vendors: /quectel|asr/, cmd: 'AT+QGPS=1', ok_errors: /504/ },
+];
+
+export function start_gnss(self, log, cb)
+{
+	cb = cb ?? (() => null);
+
+	if (!self.config?.gnss || self.gnss_started)
+		return cb(null);
+
+	if (!self.at)
+		return cb({ error: 'unsupported', detail: 'no at channel' });
+
+	let mfr = lc(sprintf('%s', self.info?.manufacturer ?? ''));
+	let recipe = null;
+
+	for (let r in GNSS_START)
+		if (match(mfr, r.vendors)) {
+			recipe = r;
+			break;
+		}
+
+	if (!recipe) {
+		log('info', sprintf('option gnss is set but no GNSS start command is known for %J — leaving the receiver alone',
+			self.info?.manufacturer ?? '?'));
+		return cb({ error: 'unsupported', detail: 'unknown vendor' });
+	}
+
+	self.at.send(recipe.cmd, (err, res) => {
+		let line = join(' ', res?.lines ?? []);
+		let already = err && recipe.ok_errors && match(line, recipe.ok_errors);
+
+		if (err && !already) {
+			log('warn', sprintf('gnss: %s failed: %J', recipe.cmd, err));
+			return cb(err);
+		}
+
+		// latch only on success, so a failed start is retried on the next
+		// bring-up instead of being remembered as done
+		self.gnss_started = true;
+		log('notice', sprintf('gnss: receiver on (%s)%s%s', recipe.cmd,
+			already ? ' — was already running' : '',
+			self.gps_tty ? sprintf(', NMEA on %s', self.gps_tty) : ''));
+		cb(null);
+	}, { timeout: 10000 });
+};
+
 export function dsd_from_serving(serving)
 {
 	let lte = serving?.lte != null;
@@ -468,6 +527,10 @@ export function scaffolding(self, o)
 		self.set_state('READY');
 		emit('registered', self.reg);
 		notify_contexts('ready');
+
+		// best-effort and fire-and-forget: GNSS is not part of being connected,
+		// and a modem that will not start it must not hold up the interface
+		start_gnss(self, log);
 
 		if (self.state == 'READY' && after)
 			after();
@@ -1283,6 +1346,19 @@ open_at_tty = function(self, o, fxi, log, ch)
 		// before.
 		self.at_telemetry = self.at;
 		self.at_telemetry_tty = tty;
+
+		// The NMEA port (role 'gps' in the generated port table). wwand NEVER
+		// opens it — same rule as at2_external, and for the same reason: it
+		// belongs to gpsd. It is REPORTED, not linked: wwand writes nothing into
+		// /dev, so whoever wants the port asks the daemon for it (`gps` in
+		// `ubus call wwand status`) and points gpsd there. The name is re-read on
+		// every bring-up, so a modem that re-enumerates onto another ttyUSB
+		// answers with the new one.
+		if (ch.gps) {
+			self.gps_tty = ch.gps;
+			log('notice', sprintf('NMEA port %s available (wwand does not open it; see `gps_port` in ubus status)',
+				ch.gps));
+		}
 
 		// config `at2_external`: the secondary AT port is reserved for EXTERNAL
 		// tools (gpsd, user scripts, ...) — wwand must never open it. Telemetry

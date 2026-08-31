@@ -865,4 +865,51 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 	eq(modem.at, null, 'no wwand-mbim: no AT engine is left behind');
 })();
 
+// --- option gnss: start the receiver, and only where we know how -------------
+// Reporting the NMEA port is half the job: on most modems the port exists from
+// boot and stays silent until GNSS is started, and the command that starts it is
+// vendor AT. Sending an invented one to a modem that does not know it is at best
+// an ERROR and at worst a DIFFERENT command its firmware does implement, so the
+// table is small on purpose and an unknown vendor gets nothing sent.
+(() => {
+	let sent = [];
+	let mk = (mfr, cfg, answer) => ({
+		info: { manufacturer: mfr },
+		config: cfg,
+		at: { send: (cmd, cb) => { push(sent, cmd); cb(...(answer ?? [ null, { lines: [ 'OK' ] } ])); } },
+	});
+
+	sent = [];
+	let m = mk('Quectel', { gnss: true });
+	mc.start_gnss(m, () => null);
+	eq(sent, [ 'AT+QGPS=1' ], 'gnss: a Quectel modem is started');
+	eq(m.gnss_started, true, 'gnss: ...and the start is latched');
+
+	// second call does nothing: the receiver is already on
+	mc.start_gnss(m, () => null);
+	eq(length(sent), 1, 'gnss: an already-started receiver is left alone');
+
+	sent = [];
+	mc.start_gnss(mk('Fibocom', { gnss: true }), () => null);
+	eq(sent, [ ], 'gnss: an unknown vendor gets NO invented command');
+
+	sent = [];
+	mc.start_gnss(mk('Quectel', {}), () => null);
+	eq(sent, [ ], 'gnss: off by default, nothing is sent');
+
+	// "+CME ERROR: 504" is Quectel's "session is ongoing" — already running,
+	// which is success, and must latch like one
+	sent = [];
+	let m2 = mk('Quectel', { gnss: true },
+		[ { error: 'cme', code: 504 }, { lines: [ '+CME ERROR: 504' ] } ]);
+	mc.start_gnss(m2, () => null);
+	eq(m2.gnss_started, true, 'gnss: "session is ongoing" counts as started');
+
+	// a REAL failure must not latch, or the next bring-up would skip the retry
+	let m3 = mk('Quectel', { gnss: true },
+		[ { error: 'cme', code: 4 }, { lines: [ '+CME ERROR: 4' ] } ]);
+	mc.start_gnss(m3, () => null);
+	eq(m3.gnss_started, null, 'gnss: a failed start is not latched away');
+})();
+
 done('test_modem_common');

@@ -40,6 +40,23 @@ let ch2 = atcmd.find_at_channels(fake_fx('2c7c:0306', [ {ifn:1, tty:'ttyUSB1'}, 
 eq(ch2.primary, '/dev/ttyUSB2', 'single-at: primary = the at port');
 eq(ch2.telemetry, null, 'single-at: no dedicated telemetry channel (falls back to control)');
 
+// ...and its NMEA port comes back too. The 'gps' role has been in this table for
+// 60-odd devices since it was generated from ModemManager's udev rules, and
+// nothing read it. wwand never opens the port — it reports it, so gpsd can be
+// pointed at it (`gps_port` in ubus status).
+eq(ch2.gps, '/dev/ttyUSB1', 'gps: the NMEA port is reported');
+eq(ch.gps, null, 'gps: a modem whose table names no gps port reports none');
+
+// Both roles in ONE pass. The loop used to return from inside on the first
+// 'at2', so on a device that enumerates at2 BEFORE gps the NMEA port was
+// invisible — which is most of them, gps usually sitting on a lower interface
+// only by luck.
+let ch3 = atcmd.find_at_channels(
+	fake_fx('1bc7:1060', [ {ifn:4, tty:'ttyUSB4'}, {ifn:5, tty:'ttyUSB5'}, {ifn:3, tty:'ttyUSB3'} ]),
+	'/dev/cdc-wdm0', null, null);
+eq(ch3.telemetry, '/dev/ttyUSB5', 'gps: at2 still found when it enumerates first');
+eq(ch3.gps, '/dev/ttyUSB3', 'gps: ...and the gps port after it is found in the same pass');
+
 // known devices we care about
 eq(atport['2c7c:0306']['2'], 'at', 'EG06 AT port on interface 2');
 eq(atport['2c7c:0306']['1'], 'gps', 'EG06 GPS port on interface 1');
