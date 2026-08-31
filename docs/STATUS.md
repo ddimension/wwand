@@ -89,6 +89,26 @@ And DSDA cannot be commanded at all: there is no `SET_MSIM_SUB_MODE`, and
 `nas_standby_pref_enum_v01` has no "dual active" member. It is a device property,
 reported only.
 
+## Startup banner (2026-08-31)
+
+Three lines at every start, so a posted log answers the questions that used to
+need a reply from the operator:
+
+```
+wwand 2026.08.30~199a2f8a-r53; backends: qmi, mbim, ncm
+datapath: built-in auto, raw_ip, ethernet, rmnet, qmimux, vlan; add-ons rmnet_nss, rmnet_nss_mhi
+backend qmi loaded
+```
+
+The version is read from the package database (`version.uc`), never a constant in
+the tree: the package version is assembled from PKG_SOURCE_DATE, the commit and
+PKG_RELEASE, so a constant would be a second truth that starts lying the first
+time somebody forgets to bump it. A hand-deployed tree says `unpackaged`.
+Availability is a file check on each backend's lazy shim — probing by
+`require()` would defeat the lazy loading the package split exists for, and each
+shim ships in its own backend package, so the file IS the answer. "Loaded" is
+announced separately, once, when a modem actually asks for a backend.
+
 ## Known open
 
 - **DONE (2026-08-30) — the recovery ladder no longer touches hardware on a
@@ -110,11 +130,30 @@ reported only.
   than being deferred (RF-band changes already arrive by another route, the
   error-rate indication carries no LTE or NR, and the sys-info rate limiter
   throttles an indication wwand never arms).
-- **TODO — the cancellation family is mapped but not closed.** Destroying a QMI
-  client reports `cancelled` to every pending callback **synchronously**, while
-  the hub is still live. Any callback that reads "error" as "carry on" then
-  issues its next request on a client mid-destruction and resumes a chain the
-  teardown existed to stop. Everything inside the 2026-08-30/31 range is fixed,
+- **The cancellation family is closed AT THE PRIMITIVE (2026-08-31); a residue
+  remains at the callers.** `client.destroy()` used to report `cancelled` to
+  every pending callback while the client was still registered and its pending
+  map still live, so a callback that reads "error" as "carry on" issued its next
+  request from inside that loop: the frame went out, a timeout timer was armed,
+  and the pending entry it created was wiped a moment later by the very loop
+  that had called it. The response could then never be dispatched while the
+  timer still fired and reported a protocol TIMEOUT on a client that no longer
+  exists — straight into the recovery error counter that drives the reboot
+  ladder. `destroy()` now refuses further requests and detaches from the hub
+  BEFORE running a single callback, and `request()` on a destroyed client
+  answers `cancelled` synchronously, so no QMI request can reach the wire from a
+  cancellation callback any more.
+
+  **What that does NOT close, and what the list below is now about:** a
+  cancellation callback can still (a) fall through to a NON-QMI transport —
+  verified, `sim.set_pin_lock()` reads `cancelled` as a transport rejection and
+  walks on to an AT write, which does reach the modem; (b) arm a uloop timer —
+  the init chain's SYNC retry re-arms up to SYNC_TRIES times after teardown,
+  bounded and now wire-less, but still running; (c) mutate cached state that
+  survives into the next attempt. Read the sites below with that in mind: the
+  mechanical half is gone, the state half is not.
+
+  The historical description of the family, for the sites below: Everything inside the 2026-08-30/31 range is fixed,
   with tests that use the PRODUCTION error shape — the first attempt did not, and
   a guard checking a bare `err.error` never matched a caller that wraps it as
   `{ stage, err }`, with a green load-bearing test agreeing with the guard
@@ -134,15 +173,17 @@ reported only.
   - telemetry continues across a cancellation and can cache degraded backend
     choices (`_ca_be`, `_dsd_be`) that survive into the retry.
 
-  **This wants one convention, not twenty patches.** The shape that worked here
-  is a captured generation plus a `torn_down(err, client)` helper next to the
-  forward declarations (a `let` further down is not hoisted in ucode and fails at
-  CALL time). Doing it piecemeal is how the last several rounds went, and each
-  fix introduced the next hole. Severity is real but the window is narrow — a
-  teardown with a request in flight. The worst of the family are writes that
-  outlive their modem — a slot switch, an NV profile write, a network-selection
-  write; the first two are fixed in this range, the network-selection ones are
-  among the open sites above. Raised in review, 2026-08-30.
+  **It wanted one convention, and got one — in the primitive rather than at the
+  callers.** Twenty patches was the wrong shape and the entry said so; what it
+  did not see was that the trap belonged to `client.uc`, which could close it
+  once for everybody. The per-caller convention (a captured generation plus a
+  `torn_down(err, client)` helper next to the forward declarations, since a
+  `let` further down is not hoisted in ucode and fails at CALL time) is still
+  what the remaining state-half sites want, and modem_mbim's reattach got one on
+  2026-08-31 for exactly that reason. Severity was always narrow — a teardown
+  with a request in flight. The worst of the family are writes that outlive their
+  modem: a slot switch, an NV profile write, a network-selection write. Raised in
+  review 2026-08-30, primitive closed 2026-08-31.
 - **TODO — recovery state has no identity boundary.** The counters, `proto_ok`
   included, are keyed on the modem *id* and persist across daemon restarts
   within a boot (tmpfs). Swap the physical modem behind that id and the

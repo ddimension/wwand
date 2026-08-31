@@ -160,6 +160,21 @@ same trap applies to every earlier `-C <dir>` deploy in this repo's instructions
 which is why `/usr/share/ucode/wwand` had been owned by a foreign uid for weeks
 without anyone noticing (mode 0775 there, so nothing broke).
 
+### A test suite that prints "0 failures" ran all its checks
+**Not if the chain died.** The scenario-driven suites run one scenario at a
+time, each starting the next from its own completion. mockhub `die()`s on a
+message no handler covers; that exception leaves the uloop callback, uloop.run()
+returns early — and the summary still reads 0 failures, because no check ever
+FAILED, they simply never ran. `test_modem` reported 83 of its 213 checks that
+way, and the only visible symptom was a number nobody was comparing against
+anything. The `die()` message itself never reached the output.
+
+Every chained suite now asserts `current == length(scenarios)` after the loop
+(test_context asserts its pump finished rather than running out of iterations).
+When a suite's count drops, that is the first thing to check — and a new
+scenario against a minimal-service mock is the usual cause, since base_handlers
+carries only what most scenarios need.
+
 ### A basename `grep` proves a file is listed in a build or packaging list
 **Wrong.** It also matches comments and prose. Use `tools/check-packaging.py`,
 which parses the lists — and note that its first two versions had false positives

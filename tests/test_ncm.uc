@@ -2305,4 +2305,13 @@ eq(length(filter(q_setup, (c) => match(c, /^AT\+CGDCONT=/) != null)), 1, 'quecte
 run_next();
 uloop.run();
 
+// A scenario chain that DIES reports success: mockhub die()s on a message no
+// handler covers, that exception leaves the uloop callback, uloop.run() returns
+// early — and the summary still reads "0 failures" because no check ever
+// failed. test_modem ran 83 of its 213 checks that way for a while, with
+// nothing in the output to say so. The count is the only thing that knows.
+ok(current == length(scenarios),
+	sprintf('every scenario ran (%d of %d) — a chain that ends early is not a pass',
+		current, length(scenarios)));
+
 done('test_ncm');

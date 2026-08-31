@@ -776,6 +776,13 @@ run_next();
 for (let i = 0; i < 200000 && !_all_done; i++)
 	uloop.run(2);
 
+// ...and if the pump ran out of iterations instead of running out of scenarios,
+// the rest were skipped and every check that did run still passed. A truncated
+// chain must not read as a pass: test_modem reported 83 of its 213 checks that
+// way for a while, with nothing in the output to say so.
+ok(_all_done, sprintf('every scenario ran (%d of %d) — the pump did not run out first',
+	current, length(scenarios)));
+
 // --- per-SIM override precedence (context_common.conn_cfg) -------------------
 // the wwand_sim carrier bundle wins over the interface's value; empty strings
 // count as unset on both levels; the interface is the generic default.

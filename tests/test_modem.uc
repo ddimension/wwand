@@ -397,8 +397,12 @@ const e1820_dpfx = fakefx.create({ present: {
 	'/sys/module/rmnet': true,
 } });
 
-scenario('e1820', {
-	handlers: base_handlers({
+// The minimal-stack handler set, shared by every scenario that models this
+// class of modem. Extracted because a scenario that omits one of these does
+// not fail a check: mockhub die()s on an unhandled message, the exception
+// leaves the uloop callback, and the REST OF THE RUN is skipped while the
+// summary still reads 0 failures.
+const E1820_HANDLERS = {
 		GET_VERSION_INFO: { services: [
 			{ service: 1, major: 1, minor: 5 },
 			{ service: 2, major: 1, minor: 2 },
@@ -434,7 +438,10 @@ scenario('e1820', {
 		// a real silence costs 3s x SYNC_TRIES in the suite) — the
 		// bring-up must continue on the version query, not hard-fail
 		SYNC: { __error: 71 },
-	}),
+};
+
+scenario('e1820', {
+	handlers: base_handlers(E1820_HANDLERS),
 	config: { tty: '/dev/ttyUSB3' },
 	datapath: { netdev: 'wwan0', mux: 'auto', mux_links: [], dgram_size: 0, fx: e1820_dpfx },
 	at: { fx: fakefx.create(), open_transport: () => e1820_at_tr },
@@ -527,7 +534,9 @@ scenario('e1820_exhaust', {
 
 // --- 5d: teardown releases the lazy WMS client too ---------------------------
 scenario('wms_release', {
-	handlers: base_handlers({
+	// the same minimal stack as e1820, plus WMS (service 5) — that is the whole
+	// point here, a lazily allocated SMS client that teardown has to release
+	handlers: base_handlers({ ...E1820_HANDLERS,
 		GET_VERSION_INFO: { services: [
 			{ service: 1, major: 1, minor: 5 },
 			{ service: 2, major: 1, minor: 2 },
@@ -542,8 +551,12 @@ scenario('wms_release', {
 	setup: (mock, modem) => {
 		let poll = null;
 		poll = uloop.timer(10, () => {
-			if (modem.state == 'READY')
+			if (modem.state == 'READY') {
+				// watch() first: the fast telemetry loop only runs while
+				// watched, and 'telemetry' is what this scenario waits for
+				modem.watch();
 				modem._ensure_wms(() => null);
+			}
 			poll.set(10);
 		});
 	},
@@ -1378,6 +1391,15 @@ scenario('cat-release-teardown', {
 	});
 
 uloop.run();
+
+// A scenario chain that DIES reports success. mockhub die()s on a message no
+// handler covers, that exception leaves the uloop callback, uloop.run() returns
+// early — and the summary below still reads "0 failures" because no check ever
+// failed. That is how this file quietly ran 83 of its 212 checks for a while,
+// with nothing in the output to say so. The count is the only thing that knows.
+ok(current == length(scenarios),
+	sprintf('every scenario ran (%d of %d) — a chain that ends early is not a pass',
+		current, length(scenarios)));
 
 // parse_modes edge cases (pure function)
 eq(modem_mod.parse_modes('all') != null, true, 'parse_modes all');
