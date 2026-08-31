@@ -1532,6 +1532,15 @@ export function create(opts)
 		if (!m?.modem || !m.cfg?.lowpower || !m.modem.set_opmode)
 			return;
 
+		// Only a modem that is FINISHED coming up. The init chain sets the
+		// operating mode online itself, so parking the radio from here while
+		// that is still running is two writers on one setting — and which one
+		// lands last is timing. A modem that is not READY is either on its way
+		// there (it will be up in a moment and a later down parks it) or on its
+		// way out (nothing to park).
+		if (m.modem.state != 'READY')
+			return;
+
 		for (let n, e in self.contexts)
 			if (e !== entry && e.cfg?.modem == mref && e.wanted)
 				return;   // another interface on this modem still wants the radio

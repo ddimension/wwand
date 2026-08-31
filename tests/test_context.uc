@@ -877,6 +877,16 @@ for (let i = 0; i < 200000 && !_all_done; i++)
 	eq(mods[0].password, 'p', 'attach: and password');
 	ok(mods[0].auth != null, 'attach: and auth method');
 
+	// A password cannot be read back, so it cannot be compared — and comparing
+	// nothing means "always differs". Unchecked that rewrote the attach profile
+	// on every bring-up, which during an outage is an NV write per retry.
+	mods = [];
+	let ctx2 = mkctx({ init_apn: 'internet', init_pass: 'p' });
+	ctx2.ensure_attach_profile(1, () => null);
+	eq(length(mods), 1, 'attach: a configured password writes once');
+	ctx2.ensure_attach_profile(1, () => null);
+	eq(length(mods), 1, 'attach: ...and not again on the next bring-up');
+
 	// credentials alone do not touch a profile whose APN already matches — the
 	// config parser warns about that combination, and it must not silently
 	// apply a user to whatever APN the profile happened to hold

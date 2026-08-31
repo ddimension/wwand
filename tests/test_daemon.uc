@@ -787,6 +787,18 @@ uloop.run();
 	d.context_down('wanB', () => null);
 	eq(ops, [ 'm0:low_power' ], 'lowpower: with nothing left up, the radio is parked');
 
+	// a modem still coming up must not be parked: its init chain sets the mode
+	// online itself, and two writers on one setting is decided by timing
+	let d3 = mk('1');
+	for (let n, e in d3.contexts)
+		e.wanted = true;
+	d3.modems.m0.modem.state = 'INIT_SERVICES';
+
+	ops = [];
+	d3.context_down('wanA', () => null);
+	d3.context_down('wanB', () => null);
+	eq(ops, [ ], 'lowpower: a modem that is not READY is left alone');
+
 	// and with the option off, nothing happens at all
 	let d2 = mk('0');
 	for (let n, e in d2.contexts)

@@ -340,9 +340,20 @@ export function create(opts)
 			// never is, so a configured one always writes.
 			let want_auth = (init && mc.init_auth != null)
 				? (AUTH_MAP[mc.init_auth] ?? wdsmod.AUTH_BOTH) : null;
+			// A password can never be read back, so it cannot be compared — and
+			// comparing nothing means "always differs". Left that way it wrote
+			// the attach profile on EVERY bring-up, which during an outage is
+			// once per retry: an NV write per retry, against a tree whose rule
+			// everywhere else is read-before-write precisely to avoid that.
+			//
+			// So a configured password forces the write ONCE per modem object.
+			// The object is rebuilt when the config signature changes, so a
+			// changed password still lands; a reconnect loop does not rewrite.
+			let pass_pending = init && mc.init_pass != null && !self.modem._init_pass_written;
+
 			let need_auth = init && ((want_auth != null && data.auth != want_auth) ||
 			                         (mc.init_user != null && data.username != mc.init_user) ||
-			                         mc.init_pass != null);
+			                         pass_pending);
 
 			if (!need_apn && !need_pdp && !need_auth) {
 				log('debug', sprintf('attach profile %d up to date (apn %J pdp %J)',
@@ -364,8 +375,10 @@ export function create(opts)
 				if (mc.init_user != null)
 					mod.username = mc.init_user;
 
-				if (mc.init_pass != null)
+				if (mc.init_pass != null) {
 					mod.password = mc.init_pass;
+					self.modem._init_pass_written = true;
+				}
 			}
 
 			if (want_pdp != null)
