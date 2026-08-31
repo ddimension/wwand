@@ -6,6 +6,7 @@ import { eq, ok, done } from './lib/check.uc';
 import * as wda from 'wwand/codec/schema/wda.uc';
 import * as qmux from 'wwand/codec/qmux.uc';
 import * as tlv from 'wwand/codec/tlv.uc';
+import * as struct from 'struct';
 import ctl from 'wwand/codec/schema/ctl.uc';
 import nas from 'wwand/codec/schema/nas.uc';
 import uim from 'wwand/codec/schema/uim.uc';
@@ -179,5 +180,42 @@ eq(wda.default.messages.SET_DATA_FORMAT.resp.ul_max_size.t, 0x18,
 let sdf_packed = tlv.pack(sdf_req, { llp: 2 });
 eq(index(sdf_packed, chr(0x18)), -1, 'wda: qos_header_format not sent unless set');
 eq(index(sdf_packed, chr(0x1A)), -1, 'wda: flow_control not sent unless set');
+
+// --- the declared frame is the bound, not the buffer -------------------------
+// A read does not always contain exactly one frame: it can carry padding, or a
+// second frame behind the first. Every bound after the header check used to be
+// measured against the BUFFER, so a frame declaring an early end could take its
+// message header, its TLVs and its result from bytes that are not part of it —
+// and this layer's whole hazard is that a wrong field does not fail, it decodes
+// something that looks like an answer.
+//
+// Build one valid DMS response and glue a second frame behind it.
+let one = qmux.encode(2, 5, 7, 0x0022,
+	tlv.pack({ model: { t: 0x01, f: 'string' } }, { model: 'REAL' }));
+let two = qmux.encode(2, 5, 8, 0x0023,
+	tlv.pack({ model: { t: 0x01, f: 'string' } }, { model: 'OTHERFRAME' }));
+
+let joined = qmux.decode(one + two);
+
+eq(joined.msg_id, 0x0022, 'qmux: a trailing frame does not change the decoded message');
+eq(length(joined.tlvs), length(one) - 13,
+	'qmux: ...and the TLV span stops at the declared end, not at the end of the read');
+
+// The case that actually needs the bound: a frame whose MESSAGE length claims
+// more than the QMUX header declares. Measured against the buffer, the decoder
+// reads on into whatever followed in the same read — bytes of the next frame,
+// presented as TLVs of this one. Message length is the 16-bit field at offset
+// 11 (6 QMUX + 1 service flags + 2 txn + 2 message id).
+let lying = substr(one, 0, 11) + struct.pack('<H', length(one) - 13 + 20) + substr(one, 13);
+let liar = qmux.decode(lying + two);
+
+eq(length(liar.tlvs), length(one) - 13,
+	'qmux: a message length past the declared end is clamped to the frame, not to the read');
+ok(index(liar.tlvs, 'OTHERFRAME') < 0,
+	'qmux: ...so no byte of the following frame is presented as a TLV of this one');
+
+// a header claiming more than the buffer holds is still refused outright
+eq(qmux.decode(substr(one, 0, length(one) - 4)), null,
+	'qmux: a frame shorter than its header claims is rejected');
 
 done('test_qmux');

@@ -141,4 +141,37 @@ c.request('GET_MODEL', {}, (err) => { cancelled = (err?.error == 'cancelled'); }
 c.destroy();
 ok(cancelled, 'destroy cancels pending requests');
 
+// --- a callback that "carries on" during destroy must not reach the wire -----
+// This is the cancellation family at its source. destroy() reports `cancelled`
+// to every pending callback; a callback that treats an error as "carry on" then
+// issued its next request from inside that loop, while the hub was still live.
+// The frame went out and a timeout timer was armed — and the pending entry it
+// created was wiped a moment later by the very loop that had called it. So the
+// response could never arrive, while the timer still fired and reported a
+// protocol timeout on a client that no longer exists, straight into the
+// recovery error counter that drives the reboot ladder.
+let c2 = client.create(hub, dms, 6, hooks);
+let carried = 'unset';
+
+c2.request('GET_MODEL', {}, () => {
+	/* the "carry on" pattern, verbatim */
+	c2.request('GET_REVISION', {}, (e2) => { carried = e2?.error ?? 'sent'; });
+});
+
+/* only what the teardown itself causes counts */
+sent = [];
+errors = [];
+
+c2.destroy();
+
+eq(length(sent), 0, 'destroy: a request issued from a cancellation callback never reaches the hub');
+eq(carried, 'cancelled', 'destroy: ...it is refused synchronously, the shape callers already handle');
+eq(length(errors), 0, 'destroy: ...and nothing is charged to the recovery error counter');
+
+// a second destroy is a no-op rather than a second round of callbacks
+let again = 0;
+c2.request('GET_MODEL', {}, () => { again++; });
+c2.destroy();
+eq(again, 1, 'destroy: after teardown a request answers once, and destroy does not run again');
+
 done('test_client');

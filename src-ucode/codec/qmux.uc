@@ -60,6 +60,14 @@ export function decode(buf)
 	if (qlen + 1 > len)
 		return null;
 
+	// From here on the bound is the frame the HEADER declares, not how many
+	// bytes the read happened to return. Those are not always the same — a read
+	// can carry padding or a second frame behind this one — and every check
+	// below used to measure against the buffer, so a frame declaring an early
+	// end could still take its message header, its TLVs and its result from
+	// bytes outside itself. This layer's whole hazard is that a wrong tag does
+	// not fail, it decodes garbage that looks like an answer.
+	let end = qlen + 1;
 	let pos = 6;
 	let sflags = ord(buf, pos++);
 	let txn, kind;
@@ -69,7 +77,7 @@ export function decode(buf)
 		kind = (sflags & 0x02) ? 'indication' : ((sflags & 0x01) ? 'response' : 'request');
 	}
 	else {
-		if (pos + 2 > len)
+		if (pos + 2 > end)
 			return null;
 
 		txn = struct.unpack('<H', substr(buf, pos, 2))[0];
@@ -77,7 +85,7 @@ export function decode(buf)
 		kind = (sflags & 0x04) ? 'indication' : ((sflags & 0x02) ? 'response' : 'request');
 	}
 
-	if (pos + 4 > len)
+	if (pos + 4 > end)
 		return null;
 
 	let mh = struct.unpack('<HH', substr(buf, pos, 4));
@@ -86,9 +94,10 @@ export function decode(buf)
 
 	let mlen = mh[1];
 
-	// tolerate short frames, tlv.unpack() flags truncation
-	if (pos + mlen > len)
-		mlen = len - pos;
+	// tolerate short frames, tlv.unpack() flags truncation — but only within the
+	// declared frame: truncation is reported, borrowed bytes are not
+	if (pos + mlen > end)
+		mlen = end - pos;
 
 	return {
 		service: service,

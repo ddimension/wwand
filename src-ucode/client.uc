@@ -34,6 +34,8 @@ export function create(hub, schema, cid, hooks)
 		handlers: {},
 		next_txn: 1,
 		ind_by_id: {},
+		// set by destroy() before it runs a single callback; request() reads it
+		destroyed: false,
 	};
 
 	// index indication messages by id for dispatch
@@ -63,6 +65,24 @@ export function create(hub, schema, cid, hooks)
 	};
 
 	self.request = function(name, args, cb, opts) {
+		// A destroyed client takes no new requests, and this is where the
+		// "cancellation family" is closed once instead of at every caller.
+		// destroy() reports `cancelled` to each pending callback; a callback
+		// that treats an error as "carry on" then issued its next request from
+		// INSIDE that loop, while the hub was still live. The frame went out
+		// and a timeout timer was armed — and the pending entry it created was
+		// wiped a moment later by the very loop that had called it. So the
+		// response could never be dispatched, while the timer still fired and
+		// reported a protocol timeout on a client that no longer exists,
+		// straight into the recovery error counter. Seconds after a teardown,
+		// on hardware that was fine.
+		if (self.destroyed) {
+			if (cb)
+				cb({ error: 'cancelled' }, null);
+
+			return false;
+		}
+
 		let msg = schema.messages[name];
 
 		if (!msg) {
@@ -179,16 +199,27 @@ export function create(hub, schema, cid, hooks)
 
 	// cancel all pending requests, detach from hub (does not release the CID
 	// on the modem — that is the owner's job via CTL RELEASE_CID)
+	//
+	// The ORDER is the load-bearing part. Refuse further requests and detach
+	// from the hub before running a single callback, and take the pending map
+	// away from the loop first, so a callback can neither reach the wire nor
+	// add an entry to the map being iterated (see request()).
 	self.destroy = function() {
-		for (let key, p in self.pending) {
+		if (self.destroyed)
+			return;
+
+		self.destroyed = true;
+		hub.unregister(self);
+
+		let pend = self.pending;
+		self.pending = {};
+
+		for (let key, p in pend) {
 			p.timer.cancel();
 
 			if (p.cb)
 				p.cb({ error: 'cancelled' }, null);
 		}
-
-		self.pending = {};
-		hub.unregister(self);
 	};
 
 	hub.register(self);
