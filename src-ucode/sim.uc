@@ -1340,8 +1340,46 @@ export function read_iccid(modem, cb)
 		push(chain, (done) => modem.dms.request('GET_ICCID', {}, (e, d) =>
 			done((!e && length(d?.iccid ?? '')) ? d.iccid : null), { no_recovery: true }));
 	if (modem.at)
-		push(chain, (done) => modem.at.send('AT+QCCID', (e, r) =>
-			done(e ? null : at_digits(r?.lines, 18))));
+		push(chain, (done) => {
+			// same ICCID chain as the NCM init step: the 3GPP-generic
+			// AT+CRSM READ BINARY on EF-ICCID first — answered either as
+			// "+CRSM: 144,0,\"<raw hex>\"" (nibble-swapped EF bytes) or as a
+			// vendor translation (Huawei: "^ICCID: <ascii>") — then the
+			// vendor-varying fallbacks (Quectel QCCID, Huawei CICCID/^ICCID,
+			// 3GPP-ish CCID, MeiG ICCID)
+			let iccid_from = (lines) => {
+				for (let l in (lines ?? [])) {
+					let h = match(trim(l), /"([0-9A-Fa-f]{16,24})"/);
+
+					if (h)
+						return hexmod.bytes_to_iccid(hexmod.hex_to_arr(h[1]));
+
+					let d = match(trim(l), /([0-9]{18,20})/);
+
+					if (d)
+						return d[1];
+				}
+
+				return null;
+			};
+			let cmds = [ 'AT+QCCID', 'AT+CICCID', 'AT^ICCID', 'AT+CCID', 'AT+ICCID' ];
+			let tryi;
+
+			tryi = (i) => {
+				if (i >= length(cmds))
+					return done(null);
+
+				modem.at.send(cmds[i], (e, r) => {
+					let d = e ? null : iccid_from(r?.lines);
+					d ? done(d) : tryi(i + 1);
+				});
+			};
+
+			modem.at.send('AT+CRSM=176,12258,0,0,10', (e, r) => {
+				let d = e ? null : iccid_from(r?.lines);
+				d ? done(d) : tryi(0);
+			});
+		});
 
 	first_of(chain, cb);
 };

@@ -566,6 +566,20 @@ eq(meig_v.service_urc('^CELLLOCK: 1'), null, 'service_urc: leaves the cell-lock 
 // the two parsers stay disjoint in the other direction too
 eq(meig_v.session_urc('^SRVST: 2'), null, 'session_urc: ignores a service change');
 
+// --- huawei service_urc: ^HCSQ/^RSSI pushes trigger a signal refresh --------
+let huawei_v = ncm_vendors.vendor_for('huawei', 'E3372');
+
+eq(huawei_v.service_urc('^HCSQ:"LTE",39,27,101,14')?.kind, 'signal',
+	'service_urc: ^HCSQ push classified as a signal refresh hint');
+eq(huawei_v.service_urc('^HCSQ:"WCDMA",18,115,0')?.kind, 'signal',
+	'service_urc: WCDMA ^HCSQ push too');
+eq(huawei_v.service_urc('^RSSI:15')?.kind, 'signal',
+	'service_urc: ^RSSI push classified as a signal refresh hint');
+eq(huawei_v.service_urc('^NDISSTAT:1,,,"IPV4"'), null,
+	'service_urc: leaves the bearer push alone');
+eq(huawei_v.service_urc('+CREG: 1'), null,
+	'service_urc: leaves registration URCs alone');
+
 // the push (one field) and the answer to AT^SRVST? (<enable>,<status>) share a
 // name. The URC parser must not read that answer's ENABLE flag as the state,
 // and the query parser must take the SECOND field.
@@ -978,6 +992,9 @@ push(scenarios, {
 		// index->dBm: rssi 46-121=-75, rsrp 55-141=-86, sinr 146*0.2-20=9.2,
 		// rsrq 26*0.5-19.5=-6.5
 		{ re: /^AT\^HCSQ\?$/, lines: [ '^HCSQ: "LTE",46,55,146,26' ] },
+		// the E3372H firmware answers the 3GPP CRSM read on EF-ICCID with its
+		// own "^ICCID: <ascii>" translation (HW-verified 2026-08-31)
+		{ re: /^AT\+CRSM=176,12258,0,0,10$/, lines: [ '^ICCID: 89636621100189132881' ] },
 		{ re: /^AT\^MONSC$/, lines: [ '^MONSC: LTE,262,01,1300,1C36403,246,BFF,-93,-11,-61' ] },
 		{ re: /^AT\^MONNC$/, lines: [ '^MONNC: LTE,1300,155,-99,-13,0,8' ] },
 		{ re: /^AT\+CEER$/, lines: [ '+CEER: EMM cause 33, requested service option not subscribed' ] },
@@ -994,6 +1011,13 @@ push(scenarios, {
 			eq(m.signal?.lte?.rsrq, -6.5, 'huawei: HCSQ rsrq index 26 -> -6.5 dB');
 			ok(m.signal?.lte?.snr >= 91.9 && m.signal?.lte?.snr <= 92.1,
 				'huawei: HCSQ sinr index 146 -> ~9.2 dB (snr in 0.1 dB)');
+
+			// the HCSQ mode string carries the network type into reg.tech —
+			// the status page's tech source for a cells-less huawei-cdc stack
+			eq(m.reg?.tech, 'lte', 'huawei: reg.tech from the HCSQ mode string');
+
+			// ICCID via the 3GPP CRSM read, answered in the Huawei translation
+			eq(m.info.iccid, '89636621100189132881', 'huawei: iccid from the CRSM read');
 
 			// MONSC serving identifiers -> lte_intra (QMI shape)
 			let li = m.cells?.lte_intra;
@@ -1014,6 +1038,39 @@ push(scenarios, {
 			eq(m.dsd_status?.mode, 'LTE', 'huawei: dsd mode LTE from cell source');
 
 			env.finish();
+		});
+	},
+});
+
+// --- s7b2: MONSC/MONNC miss latch ---------------------------------------------
+//
+// A Huawei stick that rejects BOTH reads (the E3372H over the huawei_cdc_ncm
+// wdm channel answers ERROR on every read) must be asked exactly once — the
+// latch stops the per-tick ERROR spam for the rest of the session.
+
+push(scenarios, {
+	name: 's7b2_huawei_mon_latch',
+	script: script([
+		{ re: /^AT\+CGMI$/, lines: [ 'Huawei' ] },
+		{ re: /^AT\+CGMM$/, lines: [ 'E3372h-320' ] },
+		{ re: /^AT\+CSQ$/,  lines: [ '+CSQ: 18,99' ] },
+		{ re: /^AT\^HCSQ\?$/, lines: [ '^HCSQ: "LTE",46,55,146,26' ] },
+		{ re: /^AT\^MONSC$/, lines: [], term: 'ERROR' },
+		{ re: /^AT\^MONNC$/, lines: [], term: 'ERROR' },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6', mux_id: 0 },
+	run: (env) => {
+		let m = env.modem;
+
+		wait_for(() => env.tr.count(/^AT\^MONSC$/) >= 1, () => {
+			// one full miss latches the pair — let further telemetry ticks
+			// pass and prove no more MONSC/MONNC requests go out
+			uloop.timer(1500, () => {
+				eq(env.tr.count(/^AT\^MONSC$/), 1, 'huawei: MONSC asked once, latched after the miss');
+				eq(env.tr.count(/^AT\^MONNC$/), 1, 'huawei: MONNC asked once, latched after the miss');
+				eq(m.cells, null, 'huawei: no cells from a rejecting stack');
+				env.finish();
+			});
 		});
 	},
 });

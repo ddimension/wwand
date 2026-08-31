@@ -23,6 +23,7 @@ import * as netlink from 'wwand.netlink';
 import * as sim from 'wwand.sim';
 import * as ncm_vendors from 'wwand.ncm_vendors';
 import * as atcmd_parse from 'wwand.atcmd_parse';
+import * as hexmod from 'wwand.codec.hex';
 
 const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
@@ -346,6 +347,14 @@ export function create(opts)
 						refresh_cells(() => emit_telemetry());
 				});
 		}
+		else if (vev?.kind == 'signal' && self.state == 'READY' && refresh_signal)
+			// ^HCSQ/^RSSI push: the poll re-reads the signal (its parsers are
+			// the authority — the URC only shortens the wait), then re-emits;
+			// the cells did not change, so no cell refresh here
+			refresh_signal(() => {
+				if (self.state == 'READY')
+					emit_telemetry();
+			});
 
 		// the vendor's own bearer notification goes to the contexts, which
 		// decide what to do with it (they own the session state, not the modem)
@@ -592,22 +601,46 @@ export function create(opts)
 						ask('AT+CIMI', (imsi) => {
 							self.info.imsi = imsi;
 
-							// ICCID command varies by vendor: Quectel AT+QCCID,
-							// 3GPP-ish AT+CCID, MeiG (ASR) only AT+ICCID
-							// (HW-verified on the SLM770A-R — QCCID/CCID both
-							// ERROR there and the identity ended up iccid '?')
-							let iccid_cmds = [ 'AT+QCCID', 'AT+CCID', 'AT+ICCID' ];
+							// ICCID read: the 3GPP-generic AT+CRSM READ BINARY on
+							// EF-ICCID (0x2FE2) first — every 27.007 modem answers,
+							// either the standard "+CRSM: 144,0,\"<raw hex>\""
+							// (nibble-swapped EF bytes) or a vendor translation
+							// (the E3372H firmware answers "^ICCID: <ascii>" for
+							// exactly this read — HW-verified 2026-08-31). Then the
+							// vendor-varying chain: Quectel QCCID, Huawei CICCID/
+							// ^ICCID, 3GPP-ish CCID, MeiG (ASR) only ICCID.
+							let iccid_cmds = [ 'AT+QCCID', 'AT+CICCID', 'AT^ICCID', 'AT+CCID', 'AT+ICCID' ];
+							let iccid_from = (val) => {
+								if (!val)
+									return null;
+
+								let h = match(val, /"([0-9A-Fa-f]{16,24})"/);
+
+								if (h)
+									return hexmod.bytes_to_iccid(hexmod.hex_to_arr(h[1]));
+
+								let d = match(val, /([0-9]{18,20})/);
+
+								return d ? d[1] : null;
+							};
+							let finish_iccid;
 							let try_iccid;
 
-							try_iccid = (idx, done2) => {
+							try_iccid = (idx) => {
 								if (idx >= length(iccid_cmds))
-									return done2(null);
+									return finish_iccid(null);
 
 								ask(iccid_cmds[idx], (iccid) =>
-									iccid ? done2(iccid) : try_iccid(idx + 1, done2));
+									iccid_from(iccid) ? finish_iccid(iccid_from(iccid)) : try_iccid(idx + 1));
 							};
 
-							try_iccid(0, (iccid) => {
+							ask('AT+CRSM=176,12258,0,0,10', (val) => {
+								let iccid = iccid_from(val);
+
+								iccid ? finish_iccid(iccid) : try_iccid(0);
+							});
+
+							finish_iccid = (iccid) => {
 								// strip the '+[Q]ICCID: ' echo some firmwares keep
 								let m = iccid ? match(iccid, /([0-9]{18,20})/) : null;
 								self.info.iccid = m ? m[1] : iccid;
@@ -683,7 +716,7 @@ export function create(opts)
 									return;
 
 								step_resolve_dial();
-							});
+							};
 						});
 					});
 				});
@@ -1398,8 +1431,23 @@ export function create(opts)
 					cb(null);
 			};
 
-			// same vendor-varying ICCID chain as the init step
-			let cmds = [ 'AT+QCCID', 'AT+CCID', 'AT+ICCID' ];
+			// same ICCID chain as the init step: 3GPP CRSM first, then the
+			// vendor-varying fallbacks (Quectel QCCID, Huawei CICCID/^ICCID,
+			// 3GPP-ish CCID, MeiG ICCID)
+			let iccid_from = (r) => {
+				if (!r)
+					return null;
+
+				let h = match(r, /"([0-9A-Fa-f]{16,24})"/);
+
+				if (h)
+					return hexmod.bytes_to_iccid(hex('0x' + h[1]));
+
+				let d = match(r, /([0-9]{18,20})/);
+
+				return d ? d[1] : null;
+			};
+			let cmds = [ 'AT+QCCID', 'AT+CICCID', 'AT^ICCID', 'AT+CCID', 'AT+ICCID' ];
 			let tryi;
 
 			tryi = (i) => {
@@ -1407,12 +1455,15 @@ export function create(opts)
 					return finish(null);
 
 				q(cmds[i], (r) => {
-					let m = r ? match(r, /([0-9]{18,20})/) : null;
-					m ? finish(m[1]) : tryi(i + 1);
+					let m = iccid_from(r);
+					m ? finish(m) : tryi(i + 1);
 				});
 			};
 
-			tryi(0);
+			q('AT+CRSM=176,12258,0,0,10', (r) => {
+				let m = iccid_from(r);
+				m ? finish(m) : tryi(0);
+			});
 		});
 	};
 

@@ -369,6 +369,13 @@ function tel_huawei_signal(self, cb)
 		modem_common.telemetry_at(self).send('AT^HCSQ?', (e2, r2) => {
 			let h = e2 ? null : atcmd.parse_hcsq(r2?.lines);
 
+			// ^HCSQ names the active radio mode ("LTE"/"WCDMA"/"GSM") — the
+			// only tech source a cells-less huawei-cdc stack (E3372H) offers;
+			// carries it into reg so the status page can name the network
+			// type generically (no cells -> no serving-cell derivation)
+			if (h?.mode && self.reg)
+				self.reg.tech = lc(h.mode);
+
 			if (h?.lte) {
 				let sig = { ...(self.signal ?? {}) };
 				let cur = { ...(sig.lte ?? {}) };
@@ -426,11 +433,23 @@ function sc_to_serving(sc)
 
 function tel_huawei_cells(self, cb)
 {
+	// a stick that rejects BOTH reads rejects them forever — latch the pair
+	// off after one full miss instead of re-asking (and re-logging the ERROR)
+	// on every telemetry tick. HW: the E3372H over the huawei_cdc_ncm wdm
+	// channel answers ^MONSC/^MONNC with ERROR on every read (2026-08-31).
+	if (self._mon_latched)
+		return cb();
+
 	modem_common.telemetry_at(self).send('AT^MONSC', (err, res) => {
 		let sc = err ? null : atcmd.parse_monsc(res?.lines);
 
 		modem_common.telemetry_at(self).send('AT^MONNC', (e2, r2) => {
 			let nc = e2 ? null : atcmd.parse_monnc(r2?.lines);
+
+			if (!sc && !nc) {
+				self._mon_latched = true;
+				return cb();
+			}
 
 			if (sc) {
 				let serving = sc_to_serving(sc);

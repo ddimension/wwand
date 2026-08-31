@@ -793,6 +793,18 @@ export const VENDORS = {
 		// list only keeps such pushes out of command responses should another
 		// huawei firmware emit them.
 		urcs: [ '^NDISSTAT', '^RSSI', '^HCSQ', '^DSFLOWRPT', '^MODE', '^SIMST', '^SRVST' ],
+
+		// ^RSSI / ^HCSQ are pushed on every signal change (21.200 pushes them
+		// on a ~5 s cadence, field-observed). NOT parsed here — the telemetry
+		// poll's parsers stay the authority — but the push triggers a signal
+		// refresh, so a change shows within a poll instead of after a full
+		// stats interval. The same hint contract as ^MODE above.
+		service_urc: (line) => {
+			if (match(line, /\^HCSQ:\s*"[^"]+",/) || match(line, /\^RSSI:\s*[0-9]+/))
+				return { kind: 'signal' };
+
+			return null;
+		},
 		// disable the modem's internal auto-dialer so it does not connect behind
 		// wwand's back (best-effort; modems without it just warn). QModem disables
 		// it in the hangup path — we do it once at init so it never races the
