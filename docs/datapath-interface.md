@@ -16,6 +16,116 @@ it, not special cases beside it.
 | `ethernet` | qmi | no multiplexing — the parent keeps the kernel's 802.3 framing (raw_ip off), NOARP point-to-point hop; for QMI stacks without a WDA service (not an implementation) |
 | *add-on* | declared | `rmnet_nss` (vendor `qmi_wwan_q`, USB) and `rmnet_nss_mhi` (vendor `pcie_mhi`, PCIe/MHI) keep Qualcomm NSS offload by adopting the children those drivers register |
 
+### The two axes
+
+The single most common misreading of this layer is that "QMI modem" implies a
+datapath. It does not: the control protocol decides how wwand *talks to the
+modem*, and the datapath decides how the *kernel* carries the packets. One QMI
+modem may end up on any of four of them.
+
+```mermaid
+flowchart LR
+  subgraph CTRL["control backend — talks to the modem"]
+    Q["QMI<br/><small>/dev/cdc-wdm, QMUX</small>"]
+    M["MBIM<br/><small>/dev/cdc-wdm, MBIM</small>"]
+    N["NCM<br/><small>AT on a tty or cdc-wdm</small>"]
+  end
+  subgraph DP["datapath — builds the kernel link"]
+    RM["rmnet"]
+    QM["qmimux"]
+    ETH["ethernet"]
+    RIP["raw_ip"]
+    VL["vlan"]
+    NSS["rmnet_nss<br/><small>add-on</small>"]
+  end
+  Q --> RM
+  Q --> QM
+  Q --> ETH
+  Q --> RIP
+  Q --> NSS
+  M --> VL
+  M --> RIP
+  N --> RIP
+  N --> ETH
+```
+
+`vlan` serves only MBIM and the QMAP datapaths only QMI — that is the `proto`
+field, and it is **enforced**, not advisory: rmnet's QMAP framing on a cdc_mbim
+session cannot carry traffic however firmly it was named.
+
+### Which driver leads where
+
+Discovery reads the driver bound to the control node, and that alone decides the
+control protocol. There is no guessing: an unrecognised driver refuses the modem
+rather than defaulting to QMI, because a wrong guess costs the whole modem and
+used to cost a power cycle as well.
+
+```mermaid
+flowchart TD
+  DEV["control device<br/>/dev/cdc-wdmN"] --> DRV{"driver?"}
+  DRV -->|"qmi_wwan<br/>qmi_wwan_* (vendor forks)"| QMI["protocol qmi"]
+  DRV -->|cdc_mbim| MBIM["protocol mbim"]
+  DRV -->|"cdc_ncm · cdc_ether<br/>rndis_host · huawei_cdc_ncm"| NCM["protocol ncm<br/><small>AT control</small>"]
+  DRV -->|unknown| REFUSE["refused —<br/>control_note, no backend loaded"]
+  NODEV["no control device,<br/>only a netdev"] --> NCM
+  ONLYTTY["only a serial port"] --> PPP["ppp — mode-switch candidate"]
+```
+
+`huawei_cdc_ncm` is the awkward one: it registers a cdc-wdm **and** an NCM
+netdev, so the presence of a control node says nothing. Its wdm carries AT, not
+a rich protocol, which is why the NCM driver table is consulted before the node
+is believed.
+
+### What the kernel side looks like, per implementation
+
+Same four datapaths, drawn as the netdevs they actually produce. `wwandN` is the
+stable name a configured context renames its child to; the parent keeps the
+driver's name.
+
+```mermaid
+flowchart TD
+  subgraph A["QMI · rmnet — QMAP multiplexing"]
+    A1["qmi_wwan → wwan0<br/><small>raw_ip=Y, pass_through=Y</small>"]
+    A1 --> A2["wwand0<br/><small>rmnet child, mux id 1</small>"]
+    A1 --> A3["wwand1<br/><small>rmnet child, mux id 2</small>"]
+  end
+  subgraph B["QMI · qmimux — the driver's own mux"]
+    B1["qmi_wwan → wwan0<br/><small>raw_ip=Y, add_mux</small>"]
+    B1 --> B2["wwand0<br/><small>qmimux child</small>"]
+  end
+  subgraph C["QMI · ethernet — no WDA service"]
+    C1["qmi_wwan → wwan0<br/><small>raw_ip=N (802.3 kept), NOARP</small>"]
+  end
+  subgraph D["MBIM · vlan — sessions as 802.1q"]
+    D1["cdc_mbim → wwan0<br/><small>raw-IP trunk</small>"]
+    D1 --> D2["wwan0.1<br/><small>SessionId 1</small>"]
+  end
+```
+
+```mermaid
+flowchart TD
+  subgraph E["NCM · cdc_ncm / cdc_ether — AT-driven, no mux"]
+    E1["cdc_ncm → wwan0<br/><small>802.3, one session</small>"]
+    E2["AT: ttyUSB2 or /dev/cdc-wdm0"] -.->|"dial, CGDCONT"| E1
+  end
+  subgraph F["NCM · rndis_host — the RNDIS variant"]
+    F1["rndis_host → usb0<br/><small>802.3, one session</small>"]
+    F2["AT: ttyUSB"] -.->|"vendor dial"| F1
+  end
+  subgraph G["QMI · rmnet_nss — vendor children, adopted"]
+    G1["qmi_wwan_q → wwan0<br/><small>driver registers its own QMAP children</small>"]
+    G1 --> G2["wwan0_1 → renamed wwand0<br/><small>created by the driver, adopted</small>"]
+    G2 -.->|"nss_create() at probe"| G3["NSS offload"]
+  end
+```
+
+Two things those pictures are meant to make obvious. The NCM and RNDIS cases
+have **no children at all** — one netdev, one session, the mux question does not
+arise; what varies is only where AT lives. And `rmnet_nss` is the one datapath
+that **creates nothing**: the vendor driver made those children in its USB probe
+and called the NSS shim on each, so wwand adopts and renames them, and a
+`prune()` that deleted them would take the offload with it.
+
 `raw_ip` was spelled `none` before 1.6 and both spellings — plus `raw-ip` — still
 select it. Underscore is canonical: a datapath name doubles as the ucode module
 name of its add-on package, and a module path cannot carry a hyphen.
@@ -79,6 +189,30 @@ return {
 never reimplemented: pruning stale children, moving a parent off a child's name,
 the urb-size write, the parent MTU, link up, child MTUs, the vendor `link_state`
 gate and uplink aggregation.
+
+```mermaid
+sequenceDiagram
+  participant S as setup()
+  participant D as datapath
+  participant K as kernel
+  S->>D: probe(fx, netdev, info)
+  Note over S: selection (see below)
+  S->>D: prune(fx, netdev, wanted)
+  Note right of D: default: children whose<br/>iflink is this parent
+  S->>D: pre(fx, ctx)
+  Note right of D: own driver-format switch<br/>(rmnet writes pass_through)
+  S->>K: parent off a child's name, if it holds one
+  S->>D: links(fx, ctx)
+  D->>K: create or adopt children
+  D-->>S: child names, ctx.mux_mtus filled
+  S->>K: urb size, parent MTU, link up
+  S->>K: child MTUs, link_state gate, uplink aggregation
+  S-->>S: no children built → drop to raw_ip
+```
+
+The order is the contract: `prune()` runs **before** `links()` so a datapath
+that owns its children can keep them, and the drop to `raw_ip` happens **after**
+`prune()` for the same reason.
 
 ### `links(fx, ctx)`
 
@@ -195,6 +329,27 @@ datapath, and nothing noticed because no test drove a remap through it.
    their own preference order, filtered the same way.
 4. **Nothing claimed it** — `null` when a mux was required (the caller reports
    `mux_backend_unavailable`), `raw_ip` otherwise.
+
+```mermaid
+flowchart TD
+  START["setup()"] --> MUX{"option mux"}
+  MUX -->|"raw_ip / none / raw-ip"| RIP["raw_ip — no mux"]
+  MUX -->|ethernet| ETH["ethernet — 802.3 kept, NOARP"]
+  MUX -->|"a name"| NAMED{"installed AND<br/>serves this protocol?"}
+  NAMED -->|yes| USE["that one"]
+  NAMED -->|"wrong protocol"| ERR["refused — impossible, not risky"]
+  NAMED -->|"not installed"| NULLB["null → control_note"]
+  MUX -->|auto| ADDON{"an add-on whose<br/>probe() claims the box?"}
+  ADDON -->|yes| USE
+  ADDON -->|no| BI{"a built-in whose<br/>probe() claims it?"}
+  BI -->|yes| USE
+  BI -->|no| NEED{"were channels<br/>required?"}
+  NEED -->|yes| NULLB
+  NEED -->|no| RIP
+  USE --> CH{"did links()<br/>build any child?"}
+  CH -->|no| DROP["dropped to raw_ip,<br/>logged — after its own prune()"]
+  CH -->|yes| DONE["that datapath"]
+```
 
 Two rules are worth stating explicitly because they pull in opposite directions:
 

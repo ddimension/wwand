@@ -22,6 +22,22 @@ before every commit; reproduce a field problem as a mock scenario first.
 
 ---
 
+**Where a change belongs**, before the recipes below — most of the time the
+answer is "a table, not a branch":
+
+```mermaid
+flowchart TD
+  Q{"what are you adding?"}
+  Q -->|"one modem misbehaves"| A["modem_quirks.uc<br/><small>a table entry, keyed by model</small>"]
+  Q -->|"a vendor's AT dialect"| B["ncm_vendors.uc<br/><small>dial / auth / telemetry recipe</small>"]
+  Q -->|"a config option"| C["config.uc<br/><small>KNOWN_OPTS + the section parser</small>"]
+  Q -->|"a whole control protocol"| D["a new backend package<br/><small>the daemon-neutral contract</small>"]
+  Q -->|"a way to build the kernel link"| E["datapath_&lt;name&gt;.uc<br/><small>an add-on package</small>"]
+  Q -->|"a value to show"| F["telemetry_*.uc → status → LuCI"]
+  Q -->|"a new ubus call"| G["ubus.uc + the ACL file"]
+  Q -->|"a board's GPIOs or LEDs"| H["board.uc<br/><small>a profile keyed by board.json</small>"]
+```
+
 ## 1. Adding a modem / firmware quirk
 
 Quirks are **pattern-gated data tables**. You match the modem model (a regex)

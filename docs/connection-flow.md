@@ -29,6 +29,37 @@ called out.
 | 10. Configure | read settings (IP/DNS/MTU), push to netifd | — | — |
 | 11. Monitor | telemetry, stats, zero-rx watchdog, recovery ladder | signal/serving indications | handover, reject causes |
 
+The same three timelines as a sequence — the table above says *what* happens in
+each column, this says *who waits for whom*:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant W as wwand
+  participant M as modem
+  participant N as network
+  W->>M: open control channel (QMI CTL sync / MBIM OPEN)
+  W->>M: identity (DMS / ATI), quirks, identity gate
+  W->>M: datapath: QMAP/mux negotiation, rename to wwandN
+  W->>M: operating mode online (+ FCC unlock if RF-locked)
+  M->>N: cell search, measurement
+  W->>M: SIM: ICCID pre-PIN, match wwand_sim, verify PIN
+  W->>M: write the initial-attach profile
+  Note over W,M: before attach — a stale attach APN gets the<br/>whole attach rejected (EMM #33)
+  M->>N: RRC + NAS attach / registration
+  N-->>M: auth, subscriber check, accept
+  M-->>W: serving-system indication → REGISTERING ends
+  W->>M: activate PDP per family (START_NETWORK / CONNECT / CGACT)
+  M->>N: PDN connectivity request
+  N-->>M: IP, DNS, MTU, bearer
+  M-->>W: settings
+  W->>W: push to netifd (proto_send_update)
+  loop while connected
+    W->>M: telemetry, packet stats
+    M-->>W: signal / serving / call-end indications
+  end
+```
+
 ## 1. wwand's view (the daemon)
 
 Everything below runs inside one `uloop` process (`main.uc` → `daemon.uc`).
@@ -49,8 +80,32 @@ Zero-config boxes get `wwmodem_auto` + `interface wwan0` created by autosetup
 ### Bring-up chain (per modem)
 
 `daemon.uc start_modem` builds the backend object; the per-backend init chain
-drives states `INIT_TRANSPORT → INIT_SERVICES → INIT_DATAPATH → SET_OPMODE →
-SIM_UNLOCK → CONFIGURE_NET → REGISTERING → READY`:
+drives the modem state machine below. These are the names `ubus call wwand
+status` prints, so a stuck bring-up can be read straight off the status page.
+
+```mermaid
+stateDiagram-v2
+  [*] --> ABSENT
+  ABSENT --> INIT_TRANSPORT: control device present
+  ABSENT --> ABSENT: waiting for hotplug<br/>(control_note, re-logged every 30 s)
+  INIT_TRANSPORT --> INIT_SERVICES: channel open
+  INIT_SERVICES --> INIT_DATAPATH: clients allocated, identity read
+  INIT_DATAPATH --> SET_OPMODE: mux negotiated, netdev renamed
+  SET_OPMODE --> SIM_UNLOCK: radio online (FCC unlock if locked)
+  SIM_UNLOCK --> CONFIGURE_NET: PIN accepted or none needed
+  SIM_UNLOCK --> SIM_BLOCKED: PIN/PUK required, or too few retries left
+  SIM_BLOCKED --> SIM_UNLOCK: PIN supplied
+  CONFIGURE_NET --> REGISTERING: attach profile + settings written
+  REGISTERING --> READY: registered
+  READY --> ABSENT: device gone, teardown, or a failed step
+  INIT_TRANSPORT --> ABSENT: any step fails →<br/>recovery ladder, capped backoff, retry
+  note right of SIM_BLOCKED
+    permanent: the daemon takes the
+    interface DOWN rather than holding it
+  end note
+```
+
+The chain in words:
 
 - **QMI** (`modem.uc` + `modem_init_qmi.uc`): CTL sync, service version probe,
   client allocation (DMS/NAS/UIM/WDS/WDA/DSD), AT side channel
@@ -103,10 +158,47 @@ modem when the config leaves it empty) — `context_common.conn_cfg`.
   90 s) and reconnects the session in place (renew — IPv6-PD and VRF
   bindings survive). Permanent losses (`sim_blocked`, admin down) drop the
   interface immediately.
+
+  That distinction is the whole point of the no-proto-task model, so it is
+  worth seeing: the interface only goes down when holding it up would be a
+  lie.
+
+```mermaid
+stateDiagram-v2
+  [*] --> IDLE
+  IDLE --> PREPARING: up() — profile, attach APN
+  PREPARING --> ACTIVATING: profile ready
+  ACTIVATING --> CONNECTED: settings pushed to netifd
+  CONNECTED --> CONNECTED: renew in place<br/>(session reconnected, no teardown)
+  CONNECTED --> IDLE: permanent loss<br/>(sim_blocked, admin down)
+  ACTIVATING --> IDLE: activation failed → backoff, retry
+  note left of CONNECTED
+    a transient loss stays HERE for up to
+    hold_max (90 s): netifd never sees a down,
+    so IPv6-PD and the VRF binding survive
+  end note
+```
 - The **zero-rx watchdog** (`context_common.rx_stall_watch`) and the
-  **recovery ladder** (`recovery.uc`: opmode-cycle @8 failed attempts, modem
-  reset @16, board power-cycle/reset-GPIO @24, reboot at `failreboot`)
-  handle everything else. A vanished control device detaches the modem into
+  **recovery ladder** (`recovery.uc`) handle everything else:
+
+```mermaid
+flowchart TD
+  F["a connection attempt failed"] --> P{"has the modem ever ANSWERED<br/>in the selected protocol?"}
+  P -->|no| R["retry only —<br/>nothing physical happens"]
+  P -->|yes| L{"attempts"}
+  L -->|"&lt; 8"| RT["retry with backoff"]
+  L -->|"≥ 8"| OC["op-mode cycle"]
+  L -->|"≥ 16"| MR["modem reset"]
+  L -->|"≥ 24"| PW["board power-cycle<br/>or reset-GPIO pulse"]
+  L -->|"&gt; failreboot"| RB["system reboot"]
+  RB -.->|"failreboot = 0"| RT
+```
+
+  The gate is the load-bearing part: a misdetected control device fails every
+  attempt exactly like a wedged one, and the ladder used to escalate all the way
+  to a power cycle against hardware that was never broken. Each rung fires once
+  per outage, tracked by a persisted index, so a restart mid-outage neither
+  repeats nor skips one. A vanished control device detaches the modem into
   the waiting state; presence is re-checked by the tick, so recovery does
   not depend on a hotplug event (HW-proven with a provider-side SIM reset).
 - wwand restarts are non-destructive: the WAN stays up and the new daemon

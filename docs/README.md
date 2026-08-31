@@ -15,7 +15,7 @@ whether you are a user, a developer, or an AI assistant working on the tree.
 | Understand the design / internals | [architecture.md](architecture.md) — layering, mechanisms, invariants |
 | Add a quirk, option, backend, telemetry, ubus method, board | [extending.md](extending.md) — one checklist per extension type |
 | Write or port a control backend | [backend-interface.md](backend-interface.md) — the duck-typed modem/context contract |
-| Write or port a datapath (mux) backend | [datapath-interface.md](datapath-interface.md) — the datapath contract and how one is chosen |
+| Write or port a datapath (mux) backend | [datapath-interface.md](datapath-interface.md) — the datapath contract, how one is chosen, and what each produces on the kernel side |
 | See the current state, test counts, open items | [STATUS.md](STATUS.md) — what is true NOW |
 | See how it got here (dated log) | [status-archive.md](status-archive.md) — history, not present tense |
 | Avoid a trap that already cost someone a day | [gotchas.md](gotchas.md) — beliefs that look right and are wrong |
@@ -67,3 +67,8 @@ and superseded by the reference docs above wherever the two disagree.
   ([backend-interface.md](backend-interface.md)); prefer fixing shared code
   (`modem_common.uc`, `context_common.uc`, `backend.uc`) over per-backend
   copies, and keep backend parity when adding features.
+
+The diagrams in these files are **mermaid** in fenced blocks, so GitHub and most
+markdown viewers render them inline and a plain `less` still shows readable
+source. They are checked with `mmdc` before committing — a diagram that does not
+parse is worse than none, because nobody notices it is missing.

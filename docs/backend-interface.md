@@ -143,6 +143,24 @@ daemon reads off a modem object: `state`, `info`, `reg`, `reg_detail`, `signal`,
 `on_proto_error`/`on_proto_success`) is protocol-neutral; only its rungs
 (`opmode_cycle`, `modem_reset`) call a backend operation (`set_opmode`).
 
+```mermaid
+flowchart LR
+  subgraph MOD["modem emits"]
+    ME["state · registered · deregistered<br/>serving_system · sim_blocked<br/>removed · telemetry · protocol_switch"]
+  end
+  subgraph CTX["context emits"]
+    CE["up · down · renew"]
+  end
+  ME --> D["daemon"]
+  CE --> D
+  D -->|"drives over ubus"| NF["netifd<br/><small>up · renew · down</small>"]
+  D -->|"reads off the object"| ST["status()<br/><small>state · info · reg · reg_detail<br/>signal · counters</small>"]
+```
+
+The events are the same three words whatever protocol produced them, which is
+what lets everything above the backend layer stay protocol-agnostic. The daemon
+never asks *how* a modem registered — only that it did.
+
 ## Backend selection
 
 Per modem: `option protocol 'qmi'|'mbim'|'ncm'|'auto'` (default `auto`), else the

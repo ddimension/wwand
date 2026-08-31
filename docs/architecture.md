@@ -63,6 +63,72 @@ One process. Zero per-context spawns. ~3 MB resident. The measured baseline:
                wwand-migrate + an example uci-defaults script (user-triggered config migration)
 ```
 
+As a picture — the ASCII block above is the inventory, this is the shape:
+
+```mermaid
+flowchart TD
+  subgraph SH["shell"]
+    NETIFD["netifd shim<br/><small>wwand.sh — proto wwand only</small>"]
+    HOT["hotplug, init, migrate"]
+  end
+  subgraph INT["integration"]
+    D["daemon.uc<br/><small>modem + context registry, policy</small>"]
+    CFG["config.uc"]
+    UB["ubus.uc"]
+  end
+  subgraph BE["backends — one daemon-neutral contract"]
+    QB["QMI<br/><small>modem.uc / context.uc</small>"]
+    MB["MBIM<br/><small>modem_mbim / context_mbim</small>"]
+    NB["NCM<br/><small>modem_ncm / context_ncm</small>"]
+    SC["shared core<br/><small>modem_common · context_common · backend · sim</small>"]
+  end
+  subgraph SYS["system"]
+    NL["netlink.uc<br/><small>datapath</small>"]
+    RC["recovery.uc"]
+    BD["board.uc<br/><small>GPIO, LEDs</small>"]
+    AT["atcmd.uc"]
+    DISC["discovery.uc"]
+  end
+  subgraph SESS["session"]
+    TR["transport.uc<br/><small>hub / routing</small>"]
+    CL["client.uc<br/><small>QMI correlation</small>"]
+    MC["mbim_client.uc"]
+    PT["qmi_over_mbim.uc<br/><small>passthrough</small>"]
+  end
+  subgraph COD["codec — declarative"]
+    QX["qmux · tlv · schema/*"]
+    MX["mbim · mbim_schema/*"]
+  end
+  IO["wwand_io.so<br/><small>native: message-oriented cdc-wdm/tty I/O, rmnet netlink</small>"]
+
+  NETIFD <--> D
+  HOT --> D
+  CFG --> D
+  D <--> UB
+  D --> QB & MB & NB
+  DISC --> D
+  QB & MB & NB --- SC
+  QB --> CL
+  MB --> MC
+  NB --> AT
+  MC -.->|"tunnels QMI"| PT
+  PT --> CL
+  CL --> TR
+  MC --> TR
+  CL --> QX
+  MC --> MX
+  TR --> IO
+  AT --> IO
+  D --> NL & RC & BD
+  NL --> IO
+```
+
+Two edges in that picture are the ones worth remembering. **MBIM reaches the QMI
+client** through the passthrough — that is why `wwand-mbim` depends on
+`wwand-qmi`. And **the netifd shim is bidirectional**: it hands wwand the
+interface, and wwand drives netifd back over ubus, because the daemon owns the
+lifecycle and the shim runs no monitor process.
+
 The three control backends (QMI, MBIM, NCM) sit behind one **daemon-neutral
 contract** (`docs/backend-interface.md`): identical modem methods and an
 identical context `settings` shape, so everything above the backend layer is

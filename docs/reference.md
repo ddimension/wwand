@@ -159,8 +159,50 @@ How the sections relate (all in `/etc/config/network`):
                                                optional)          PIN + carrier APN
 ```
 
+```mermaid
+erDiagram
+  INTERFACE ||--|| WWAND_MODEM : "option modem"
+  WWAND_MODEM ||--o{ WWAND_SIM : "matched by ICCID"
+  WWAND_GLOBALS ||--o{ WWAND_MODEM : "daemon-wide defaults"
+  INTERFACE {
+    string proto "wwand"
+    string modem "which wwand_modem"
+    string apn
+    string pdp_type
+    string auth
+    string mux_id "one mux channel"
+  }
+  WWAND_MODEM {
+    string device "control anchor"
+    string path "stable sysfs topology"
+    string protocol "pin, or detect"
+    string pincode "default"
+    string sim_slot
+    string modes "radio"
+  }
+  WWAND_SIM {
+    string iccid "the key"
+    string pincode "wins over the modem's"
+    string apn "wins over the interface's"
+  }
+```
+
 Two interfaces share one `wwand_modem` = two mux contexts on one modem. A
 `wwand_sim` is picked by the inserted card's ICCID (modem binding optional).
+
+**Precedence, drawn once because it is asked about repeatedly** — the more
+specific section wins, and PIN and APN resolve on different paths:
+
+```mermaid
+flowchart LR
+  subgraph PIN["PIN"]
+    P1["wwand_sim.pincode<br/><small>matched by ICCID</small>"] -->|else| P2["wwand_modem.pincode"]
+  end
+  subgraph APN["APN / auth / credentials"]
+    A1["active wwand_sim"] -->|else| A2["the interface"]
+    A2 -->|else| A3["card-provisioned<br/><small>MBN / attach profile</small>"]
+  end
+```
 
 ### Device naming
 
