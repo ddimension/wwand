@@ -1101,4 +1101,53 @@ ok(mp_has(ch, 'add', 'wwmodem1', null), 'migrate-collision: new section is wwmod
 ok(!mp_has(ch, 'add', 'wwmodem0', null), 'migrate-collision: existing wwmodem0 untouched');
 eq(mp_set(ch, 'wan', 'modem'), 'wwmodem1', 'migrate-collision: interface links the fresh wwmodem1');
 
+// --- a modem is identified by more than a device node ---------------------
+// `option serial` / `option imei` are documented standalone bindings: the modem
+// is found by USB iSerial in sysfs before it is opened, or verified by IMEI
+// after. A parse that demands device/netdev/path drops exactly those configs,
+// and it drops them SILENTLY as far as the user is concerned -- the interface
+// survives, bound to a modem that no longer exists.
+let idr = config.parse({ network: {
+	ms: { '.type': 'wwand_modem', serial: '99efe861', protocol: 'qmi' },
+	mi: { '.type': 'wwand_modem', imei: '350000000000000', protocol: 'qmi' },
+	wa: { '.type': 'interface', proto: 'wwand', modem: 'ms', apn: 'internet' },
+} });
+
+ok(idr.modems.ms != null, 'identity: a modem bound by serial survives the parse');
+ok(idr.modems.mi != null, 'identity: ...and one bound by imei');
+ok(idr.contexts.wa != null, 'identity: its interface keeps its modem');
+
+// ...and a modem with NO identity at all still goes, together with the
+// interfaces that referenced it -- an orphan context whose modem was deleted
+// out from under it is a permanently unbindable interface.
+let orf = config.parse({ network: {
+	m0: { '.type': 'wwand_modem', protocol: 'qmi' },
+	wb: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet' },
+} });
+
+eq(orf.modems.m0, null, 'identity: a modem with no identity is dropped');
+eq(orf.contexts.wb, null, 'identity: ...and its orphaned interface goes with it');
+
+// --- a mistyped number must not reach a timer ------------------------------
+// `+('sixty')` is NaN, and NaN fails every comparison -- including the
+// `interval <= 0` guard the telemetry loops already have. It therefore slips
+// through to uloop, where a NaN delay fires immediately and keeps firing.
+// (`0` is fine and stays fine: the loops read it as "telemetry off".)
+let nn = config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0',
+	      stats_interval: 'sixty', zero_rx_timeout: 'never' },
+	g:  { '.type': 'wwand_globals', settings_poll: 'often' },
+} });
+
+eq(nn.modems.m0.stats_interval, 60, 'num: a non-numeric interval falls back to the default');
+eq(nn.modems.m0.zero_rx_timeout, 21600, 'num: ...and so does a non-numeric timeout');
+ok(length(filter(nn.warnings, (w) => index(w, 'stats_interval') >= 0)) > 0,
+	'num: ...and the user is told, rather than the daemon spinning quietly');
+
+let zz = config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', stats_interval: '0' },
+} });
+
+eq(zz.modems.m0.stats_interval, 0, 'num: 0 is kept — the loops read it as telemetry off');
+
 done('test_config');

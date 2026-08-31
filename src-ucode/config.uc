@@ -22,6 +22,29 @@ const OLD_DEPRECATED = [ 'dhcp', 'autocreateif', 'customroutes', 'strongestnetwo
 
 const PDP_TYPES = { ipv4: true, ipv6: true, ipv4v6: true };
 
+
+// A numeric option that a typo turns into NaN is worse than one that is simply
+// wrong: `+('sixty')` is NaN, and NaN fails EVERY comparison -- `interval <= 0`
+// is false for it -- so it slips past the guards the consumers do have and
+// reaches uloop, where a NaN delay fires immediately, over and over. Verified
+// on the host interpreter (2026-08-31): a timer re-armed with NaN spins.
+// So: parse here, and hand on a number or the default, never NaN.
+function num_opt(value, dflt, what, warnings)
+{
+	if (value == null || value == '')
+		return dflt;
+
+	let n = +value;
+
+	// the only value that is not equal to itself
+	if (n != n) {
+		push(warnings ?? [], sprintf('%s: %J is not a number, using %d', what, value, dflt));
+		return dflt;
+	}
+
+	return n;
+}
+
 function bool_opt(v, dflt)
 {
 	if (v == null)
@@ -32,16 +55,16 @@ function bool_opt(v, dflt)
 
 // the connection option bundle every context flavor shares (apn/auth/creds/mtu/
 // cadence); flavor-specific fields stay at the call sites.
-function conn_fields(s)
+function conn_fields(s, warnings)
 {
 	return {
 		apn: s.apn,
 		auth: s.auth,
 		username: s.username,
 		password: s.password,
-		mtu: (s.mtu != null) ? +s.mtu : null,
+		mtu: (s.mtu != null) ? num_opt(s.mtu, null, 'mtu', warnings) : null,
 		use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
-		settings_poll: +(s.settings_poll ?? 300),
+		settings_poll: num_opt(s.settings_poll, 300, 'settings_poll', warnings),
 		// on a reconnect that changes the IP, do a netifd link down->up instead of
 		// an in-place renew, so dependent tunnels/xfrm re-follow the new local
 		// address (netifd ignores an in-place address update for resolved host
@@ -239,7 +262,7 @@ function unknown_opts(s, known, warnings, label)
 }
 
 // build a modem config from a raw `config wwand_modem` section.
-function modem_from_section(s)
+function modem_from_section(s, warnings)
 {
 	return modem_defaults({
 		// Pin the control protocol, overriding what the driver says. This is the
@@ -267,7 +290,7 @@ function modem_from_section(s)
 		mcc: s.mcc,
 		mnc: s.mnc,
 		mux: s.mux ?? 'auto',
-		dl_datagram_max_size: +(s.dl_datagram_max_size ?? 0),
+		dl_datagram_max_size: num_opt(s.dl_datagram_max_size, 0, 'dl_datagram_max_size', warnings),
 		tty: s.tty,
 		// release the secondary AT port ('at2') for external tools: wwand then
 		// never opens it and runs telemetry over the control channel instead
@@ -297,21 +320,21 @@ function modem_from_section(s)
 		// anything else is reported as a config note (see modem_from_section's
 		// caller), because the ladder filters `v <= want` and would otherwise
 		// turn a stray 3 into v1 and a stray 99 into "automatic" without a word.
-		qmap_version: +(s.qmap_version ?? 0),
+		qmap_version: num_opt(s.qmap_version, 0, 'qmap_version', warnings),
 		fcc_auth: s.fcc_auth,
 		at_init: (type(s.at_init) == 'array') ? s.at_init :
 		         (s.at_init != null ? [ s.at_init ] : []),
 		location: bool_opt(s.location, false),
-		delay: +(s.delay ?? 0),
-		failreboot: +(s.failreboot ?? 100),
-		proto_error_limit: +(s.proto_error_limit ?? 25),
-		zero_rx_timeout: +(s.zero_rx_timeout ?? 21600),
+		delay: num_opt(s.delay, 0, 'delay', warnings),
+		failreboot: num_opt(s.failreboot, 100, 'failreboot', warnings),
+		proto_error_limit: num_opt(s.proto_error_limit, 25, 'proto_error_limit', warnings),
+		zero_rx_timeout: num_opt(s.zero_rx_timeout, 21600, 'zero_rx_timeout', warnings),
 		lock_4g: (type(s.lock_4g) == 'array') ? s.lock_4g :
 		         (s.lock_4g != null ? [ s.lock_4g ] : []),
 		lock_5g: s.lock_5g,
 		lock_persist: bool_opt(s.lock_persist, false),
-		sim_slot: +(s.sim_slot ?? 0),
-		stats_interval: +(s.stats_interval ?? 60),
+		sim_slot: num_opt(s.sim_slot, 0, 'sim_slot', warnings),
+		stats_interval: num_opt(s.stats_interval, 60, 'stats_interval', warnings),
 		auto_correct_config: bool_opt(s.auto_correct_config, false),
 		// optional named user-PLMN list to restore before radio-on (wwand_plmnlist)
 		plmn_list: (s.plmn_list != null && s.plmn_list != '') ? s.plmn_list : null,
@@ -399,7 +422,7 @@ function parse_network_sections(raw, result)
 			break;
 
 		case 'wwand_modem':
-			result.modems[name] = modem_from_section(s);
+			result.modems[name] = modem_from_section(s, result.warnings);
 			// dead-option detection travels with the modem config so the
 			// per-modem status warnings can surface it in LuCI too
 			result.modems[name].config_notes = unknown_opts(s, MODEM_KNOWN_OPTS,
@@ -661,7 +684,7 @@ function compat_translate(raw, result)
 				push(result.warnings, sprintf("interface %s: invalid pdp_type '%s', using ipv4v6", name, pdp_in));
 
 			result.contexts[name] = context_defaults({
-				...conn_fields(s),
+				...conn_fields(s, result.warnings),
 				modem: s.modem,
 				interface: name,
 				mux_id: mux_id,
@@ -741,7 +764,7 @@ function compat_translate(raw, result)
 		let cmux_id = cmux.mux_id, cmuxed = cmux.muxed;
 
 		result.contexts[name] = context_defaults({
-			...conn_fields(s),
+			...conn_fields(s, result.warnings),
 			modem: mkey,
 			interface: name,
 			mux_id: cmux_id,
@@ -835,6 +858,24 @@ function validate(result)
 		}
 	}
 
+	// Drop modems that name no hardware AT ALL -- before the contexts are
+	// validated against them, not after. Validating first left an interface
+	// bound to a modem this same function then deleted: permanently unbindable,
+	// and reported as a modem-less warning nobody connects to the interface.
+	//
+	// `serial` and `imei` count as identity. They are documented standalone
+	// bindings (serial matched in sysfs before the modem is opened, imei
+	// verified after) and demanding a device node here dropped exactly those
+	// configs -- the stable bindings, the ones chosen precisely because the
+	// device node is what moves.
+	for (let name, modem in result.modems) {
+		if (modem.device == null && modem.netdev == null && modem.usb_path == null &&
+		    modem.serial == null && modem.imei == null) {
+			push(result.warnings, sprintf("modem %s: no device/netdev/path/serial/imei, ignoring", name));
+			delete result.modems[name];
+		}
+	}
+
 	for (let name, ctx in result.contexts) {
 		if (ctx.modem == null) {
 			push(result.warnings, sprintf("interface %s: no modem reference, ignoring", name));
@@ -884,12 +925,6 @@ function validate(result)
 		if (type(sim.pincode) == 'string' && length(sim.pincode) && match(sim.pincode, /[^0-9]/))
 			push(result.warnings, sprintf("wwand_sim %s: pincode must be digits only", sname));
 
-	for (let name, modem in result.modems) {
-		if (modem.device == null && modem.netdev == null && modem.usb_path == null) {
-			push(result.warnings, sprintf("modem %s: no device/netdev/usb_path, ignoring", name));
-			delete result.modems[name];
-		}
-	}
 
 	// with QMAP active the parent device only carries mux frames — when any
 	// context of a modem is muxed, every other context needs a channel too.

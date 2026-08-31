@@ -259,6 +259,42 @@ ok(fx.action_index('write /sys/class/net/wwan0/qmi/raw_ip Y') > 0, 'qmimux: raw_
 ok(fx.action_index('write /sys/class/net/wwan0/qmi/add_mux 3') > 0, 'qmimux: add_mux written');
 ok(fx.action_index('link_set qmimux0 name wwan0m3') > 0, 'qmimux: renamed');
 
+// A rename that fails must NOT be reported as a working channel. The kernel's
+// qmimux0 stays behind under its own name while MTU, link-up and netifd all
+// address the name we wanted, so a setup reported ok here hands the control
+// backend a device that does not exist: a modem that looks connected with no
+// usable interface. Unclaimed is the honest outcome, and setup must fail.
+fx = fakefx.create({
+	present: {
+		'/sys/class/net/wwan0/qmi/add_mux': true,
+		'/sys/class/net/wwan0/qmi/raw_ip': true,
+	},
+	rc: { 'link_set qmimux0 name wwan0m3': true },
+});
+
+res = netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'qmimux',
+	mux: [ { id: 3, name: 'wwan0m3' } ], dgram_size: 16384,
+});
+
+eq(res.ok, false, 'qmimux: a failed rename fails the setup');
+ok(index(res.error ?? '', 'wwan0m3') >= 0, 'qmimux: ...naming the channel that was not created');
+eq(res.mux_devs, [ ], 'qmimux: ...and no phantom child is reported');
+
+// The same completeness rule for rmnet, whose links() already skips a channel
+// it could not build ("left unclaimed rather than reported as working") —
+// skipping was only half of it until setup acted on the shortfall.
+fx = fakefx.create({ present: caps_rmnet,
+	rc: { 'link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x1': true } });
+
+res = netlink.setup(fx, {
+	netdev: 'wwan0', backend: 'rmnet',
+	mux: [ { id: 1, name: 'wwan0m1' } ], dgram_size: 4096,
+});
+
+eq(res.ok, false, 'rmnet: a channel that could not be created fails the setup');
+ok(index(res.error ?? '', 'wwan0m1') >= 0, 'rmnet: ...naming the channel');
+
 // urb size attribute missing (mainline usbnet): silently skipped, parent MTU
 // carries the urb size — setup still succeeds and writes no urb attribute
 fx = fakefx.create({ present: {

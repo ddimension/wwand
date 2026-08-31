@@ -734,8 +734,19 @@ function setup_qmimux_links(fx, netdev, sys, mux, urb_size, mux_mtus, child_name
 				}
 			}
 
-			if (created)
-				link_op(fx, 'qmimux rename', created, { rename: child });
+			if (created) {
+				// A rename that fails (name already taken, netlink error)
+				// leaves the kernel's qmimuxN in place while everything
+				// downstream — MTU, link up, netifd — addresses the name we
+				// wanted. Unclaimed is the honest outcome; the completeness
+				// check in setup() turns it into a failed setup.
+				if (!link_op(fx, 'qmimux rename', created, { rename: child })) {
+					fx.log('err', sprintf('could not rename %s to %s%s — mux id %d left unclaimed',
+						created, child,
+						fx.last_error ? sprintf(': %s', fx.last_error) : '', id));
+					continue;
+				}
+			}
 			else {
 				// couldn't create/identify the link — skip it (don't add a
 				// phantom to mux_devs, matching the rmnet path's behaviour)
@@ -1277,7 +1288,7 @@ export function setup(fx, opts)
 			write_attr(fx, urb_attr, sprintf('%d', urb_size), 'urb size');
 	}
 
-	if (impl)
+	if (impl) {
 		mux_devs = impl.links(fx, {
 			netdev: netdev, sys: sys, mux: mux, urb_size: urb_size,
 			// the negotiated QMAP header version (1 | 4 | 5). `v5` stays as the
@@ -1293,6 +1304,28 @@ export function setup(fx, opts)
 			child_mtu: (mtu, what) => child_mtu(mtu, fx, what),
 			child_name: (e) => child_of(netdev, e),
 		}) ?? [];
+
+		// Every channel the config asked for must have come back as a link.
+		// The backends above deliberately skip one they could not create or
+		// bring to this run's QMAP format — "left unclaimed rather than
+		// reported as working", as the rmnet path puts it. Skipping was only
+		// half of that intent: reported ok from here, the control backend goes
+		// on to establish a WDS/MBIM session against a netifd device that does
+		// not exist, and the result is a modem that looks connected and has no
+		// usable interface. `wanted` is already the non-null child names, so
+		// session 0 riding the parent (MBIM VLAN) is not counted as missing.
+		let have = {};
+
+		for (let d in mux_devs)
+			have[d] = true;
+
+		let missing = filter(wanted, (n) => !have[n]);
+
+		if (length(missing))
+			return { ok: false, backend: backend, mux_devs: mux_devs,
+			         error: sprintf('%s: mux channel not created: %s',
+			                        backend, join(', ', missing)) };
+	}
 	else {
 		// 'raw_ip' / 'ethernet' — no mux: plain MTU on the parent (config or 1500)
 		link_op(fx, 'mtu', netdev, { mtu: child_mtu(opts.mtu, fx, netdev) });
