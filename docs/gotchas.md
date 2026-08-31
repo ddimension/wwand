@@ -140,6 +140,26 @@ repository — including `downloads.openwrt.org`. That symptom was misread as "C
 has not built this architecture yet" on 2026-08-30; the build had been ready for
 an hour.
 
+### `tar cf - -C $STAGING . | ssh box 'tar xf - -C /'` only writes the files
+**It writes the DIRECTORY it was told to archive, too — including `/`.** `tar`
+stores an entry for `.` itself, carrying that directory's mode and ownership, and
+extracting into `/` applies both to the root directory. A staging tree built with
+`mktemp -d` is mode 0700 and owned by the developer's uid, so `/` becomes
+`drwx------ 1000:1000`.
+
+Root keeps working — it bypasses the permission check — so ssh, ping and the
+running daemon all look healthy. Everything NOT running as root loses the ability
+to traverse `/`: ubus clients cannot reach the socket, rpcd and the web interface
+die, and `ubus list` answers "Failed to connect to ubus" while `pgrep ubusd`
+shows it alive and sleeping with 30 open fds. Done on the Chateau, 2026-08-31.
+
+Name the subtrees instead of `.` (`tar cf - -C $ST ./usr ./etc ./www`), or pass
+`--owner=root --group=root`, or extract somewhere that is not `/`. Afterwards,
+`find / -xdev \( -uid <yours> -o -gid <yours> \)` finds what was mis-owned; the
+same trap applies to every earlier `-C <dir>` deploy in this repo's instructions,
+which is why `/usr/share/ucode/wwand` had been owned by a foreign uid for weeks
+without anyone noticing (mode 0775 there, so nothing broke).
+
 ### A basename `grep` proves a file is listed in a build or packaging list
 **Wrong.** It also matches comments and prose. Use `tools/check-packaging.py`,
 which parses the lists — and note that its first two versions had false positives
