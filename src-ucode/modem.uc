@@ -561,8 +561,21 @@ export function create(opts)
 			// that knows — the configured `sim_slot` is often unset and is never
 			// updated by a runtime slot switch, so indexing with it reported
 			// another slot's card, or none.
-			let slot = +(self.active_slot ?? self.config?.sim_slot ?? 1) || 1;
-			let busy = data?.busy?.[slot - 1];
+			//
+			// And when NOTHING knows yet, do not guess. A single-entry
+			// indication is unambiguous whatever the slot is called; a
+			// multi-entry one without a known active slot is dropped, because
+			// naming slot 1 there is a coin toss that reaches the status page
+			// as a fact.
+			let list = data?.busy ?? [];
+			let slot = +(self.active_slot ?? self.config?.sim_slot ?? 0) || 0;
+
+			if (!slot && length(list) != 1)
+				return;
+
+			// (a slot we cannot attribute is dropped, not guessed — see above)
+
+			let busy = (length(list) == 1 && !slot) ? list[0] : list[slot - 1];
 
 			if (busy == null || !!self.sim_busy == !!busy)
 				return;

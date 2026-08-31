@@ -75,6 +75,9 @@ export function create(opts)
 		// it again when the selected protocol changes.
 		counters: { attempts: 0, proto_errors: 0, rung: 0, proto_hw: 0,
 		            proto_ok: 0, proto_name: null },
+		// set by revoke_arming(): no path may grant the permission any more.
+		// Not persisted — it is re-derived from the config on every build.
+		arm_blocked: false,
 		rebooting: false,
 	};
 
@@ -213,6 +216,19 @@ export function create(opts)
 	// again does nothing about the permission it already holds. Persisted, so a
 	// restart does not hand it back.
 	self.revoke_arming = function(reason) {
+		// Refuse ALL later arming, not just this one grant. Three different
+		// paths can set proto_ok — note_answer, on_proto_success and
+		// on_connect_success — and clearing the flag while leaving them free to
+		// set it again made the withdrawal last until the next one fired. That
+		// is how a modem pinned to a protocol its driver contradicts re-armed
+		// through a connection "up", which on NCM means the dial and the IP read
+		// completed and proves nothing about packets moving.
+		//
+		// In memory, deliberately NOT persisted: it is derived from the current
+		// configuration every time the modem is built, so correcting the pin
+		// lifts it by simply not setting it again.
+		self.arm_blocked = true;
+
 		if (!self.counters.proto_ok)
 			return;
 
@@ -222,6 +238,16 @@ export function create(opts)
 		self.persist();
 	};
 
+	// the one place that grants it, so no caller can bypass the block above
+	let arm = () => {
+		if (self.arm_blocked || self.counters.proto_ok)
+			return false;
+
+		self.counters.proto_ok = 1;
+
+		return true;
+	};
+
 	self.on_connect_success = function() {
 		// A working data connection is the strongest proof the protocol is
 		// right — stronger than a single answered request — and it is the only
@@ -229,16 +255,17 @@ export function create(opts)
 		// per-request hook to feed note_answer(). Taken from the device-support
 		// branch, which arrived at the same invariant independently and covered
 		// this case where this implementation did not.
-		let first = !self.counters.proto_ok;
+		let armed = arm();
 
-		if (first)
+		if (armed)
 			log('info', sprintf('%s connected — hardware recovery armed',
 				self.counters.proto_name ?? 'modem'));
 
-		if (first || self.counters.attempts != 0 || self.counters.rung != 0) {
+		// the counters reset either way: a connection that came up IS progress,
+		// whether or not it is allowed to prove the protocol
+		if (armed || self.counters.attempts != 0 || self.counters.rung != 0) {
 			self.counters.attempts = 0;
 			self.counters.rung = 0;
-			self.counters.proto_ok = 1;
 			self.persist();
 		}
 	};
@@ -302,26 +329,24 @@ export function create(opts)
 	// and it must NOT touch the error counters — those measure something else,
 	// and resetting them here would defeat the proto-error ladder entirely.
 	self.note_answer = function() {
-		if (self.counters.proto_ok)
+		if (!arm())
 			return;
 
-		self.counters.proto_ok = 1;
 		log('info', sprintf('%s control channel answered — hardware recovery armed',
 			self.counters.proto_name ?? 'modem'));
 		self.persist();
 	};
 
 	self.on_proto_success = function() {
-		let first = !self.counters.proto_ok;
+		let armed = arm();
 
-		if (first)
+		if (armed)
 			log('info', sprintf('%s control channel answered — hardware recovery armed',
 				self.counters.proto_name ?? 'modem'));
 
-		if (first || self.counters.proto_errors != 0 || self.counters.proto_hw != 0) {
+		if (armed || self.counters.proto_errors != 0 || self.counters.proto_hw != 0) {
 			self.counters.proto_errors = 0;
 			self.counters.proto_hw = 0;
-			self.counters.proto_ok = 1;
 			self.persist();
 		}
 	};

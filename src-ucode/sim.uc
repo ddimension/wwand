@@ -893,6 +893,11 @@ export function switch_slot(modem, physical, cb)
 				if (s.slot_status == 1 && s.logical_slot == 1)
 					cur = i + 1;
 
+		// record what the read just told us, whatever happens next — an
+		// unchanged or refused switch still learned which slot is active
+		if (cur != null)
+			modem.active_slot = cur;
+
 		if (cur != null && cur == +physical)
 			return cb(null, { unchanged: true });
 

@@ -193,6 +193,10 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	// vendor configured it; 'disabled' stops the card expecting a terminal that
 	// can render proactive commands, which a headless CPE cannot.
 	'cat_mode',
+	// The INITIAL-ATTACH bearer, when it differs from the data connection.
+	// Unset = the attach profile keeps using the interface's APN, which is the
+	// common case and stays the default.
+	'init_apn', 'init_auth', 'init_user', 'init_pass',
 	// cap the QMAP header version the datapath may negotiate (1 | 4 | 5;
 	// unset/0 = whatever the datapath can drive). Mostly a bring-up handle:
 	// pinning it is how a specific version gets exercised on real hardware.
@@ -271,6 +275,15 @@ function modem_from_section(s)
 		at_mbim: s.at_mbim,
 		// SIM toolkit routing, see cat.uc. null = do not touch the modem.
 		cat_mode: (s.cat_mode != null && s.cat_mode != '') ? lc(s.cat_mode) : null,
+		// Initial-attach bearer. The attach happens BEFORE wwand activates a
+		// data session, and on some networks it needs its own APN and
+		// credentials — an IMS or admin bearer — while the data connection uses
+		// another. Unset means "the same as the interface", which is what every
+		// deployment did before these existed.
+		init_apn:  (s.init_apn  != null && s.init_apn  != '') ? s.init_apn  : null,
+		init_auth: (s.init_auth != null && s.init_auth != '') ? lc(s.init_auth) : null,
+		init_user: (s.init_user != null && s.init_user != '') ? s.init_user : null,
+		init_pass: (s.init_pass != null && s.init_pass != '') ? s.init_pass : null,
 		// 0/unset = automatic (the datapath's best); otherwise a CAP on the
 		// version ladder. Only 1|4|5 exist as far as wwand is concerned —
 		// anything else is reported as a config note (see modem_from_section's
@@ -383,6 +396,30 @@ function parse_network_sections(raw, result)
 			// per-modem status warnings can surface it in LuCI too
 			result.modems[name].config_notes = unknown_opts(s, MODEM_KNOWN_OPTS,
 				result.warnings, sprintf('wwand_modem %s', name));
+
+			// an auth method the profile write cannot express would silently
+			// become "both", which is not what was asked for
+			if (s.init_auth != null && s.init_auth != '' &&
+			    !(lc(s.init_auth) in [ 'none', 'pap', 'chap', 'both' ])) {
+				let m = sprintf("wwand_modem %s: init_auth '%s' is not one of none, pap, chap, both — ignored, the attach profile keeps its own auth",
+					name, s.init_auth);
+
+				push(result.warnings, m);
+				push(result.modems[name].config_notes, m);
+				result.modems[name].init_auth = null;
+			}
+
+			// credentials without an APN are almost certainly a mistake: the
+			// attach profile would then carry a user for whatever APN it
+			// already had
+			if (result.modems[name].init_apn == null &&
+			    (result.modems[name].init_user != null || result.modems[name].init_pass != null)) {
+				let m = sprintf('wwand_modem %s: init_user/init_pass without init_apn — the attach profile keeps its own APN, so the credentials would apply to that one',
+					name);
+
+				push(result.warnings, m);
+				push(result.modems[name].config_notes, m);
+			}
 
 			// a toolkit mode the CAT service does not define would be sent as
 			// a literal byte and mean something else entirely

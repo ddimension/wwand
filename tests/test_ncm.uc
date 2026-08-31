@@ -330,6 +330,18 @@ push(scenarios, {
 		eq(m.recovery.usb_repower(), false,
 			'pinned: the zero-rx watchdog cannot repower an unproven modem either');
 
+		// AND a connection coming up must not re-arm it. On NCM "up" means the
+		// dial and the IP read completed — it does not prove packets move, so a
+		// QMI or MBIM modem forced to ncm could otherwise arm here, hit the
+		// zero-rx watchdog and get repowered: the exact bypass the withdrawal
+		// exists to stop. The earlier version of this test stopped before the
+		// context came up and missed it.
+		m.recovery.on_connect_success();
+		eq(m.counters.proto_ok, 0,
+			'pinned: a connection coming up does not prove a contradicted pin');
+		eq(m.recovery.usb_repower(), false,
+			'pinned: ...so the modem still cannot be repowered');
+
 		env.finish();
 	},
 });

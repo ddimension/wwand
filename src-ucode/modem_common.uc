@@ -1129,6 +1129,11 @@ function open_at_over_wdm(self, o, fxi, log, next)
 			log('debug', sprintf('urc[at]: %s', line));
 			self.at_on_urc?.(line, 'at');
 		},
+		// Same hook as the tty path. A huawei_cdc_ncm modem carries its AT on
+		// the cdc-wdm, so this IS its control channel — omitting the hook left
+		// exactly those modems unproven until a context reached "up", although
+		// AT had been answering since init.
+		on_answer: o.on_answer,
 	});
 	self.at_tty = dev;
 	self.at_telemetry = self.at;

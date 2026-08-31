@@ -935,6 +935,41 @@ scenario('indications', {
 		// END_SUCCESS re-read + sim_refresh emit are async and complete after
 		// registration, so they are not asserted here — the register + clean
 		// decode prove the schema and wiring).
+		// SIM_BUSY carries one byte PER SLOT, so the handler has to know which
+		// slot is in use. With none known, a MULTI-slot indication is dropped
+		// rather than attributed to slot 1 — that guess would reach the status
+		// page as a fact. A single-entry one is unambiguous whatever the slot is
+		// numbered, and still counts.
+		// dispatched directly rather than through mock.indicate(), which is
+		// asynchronous — this exercises the same handler synchronously
+		let busy_ind = (arr) => modem.uim.dispatch({
+			kind: 'indication', msg_id: 0x004A,
+			tlvs: chr(0x10) + chr(length(arr) + 1) + chr(0) + chr(length(arr)) +
+			      join('', map(arr, (b) => chr(b))),
+		});
+
+		modem.active_slot = null;
+		modem.config.sim_slot = null;
+		modem.sim_busy = false;
+		// slot 1 BUSY, slot 2 idle, and nothing knows which is in use. The old
+		// code defaulted to slot 1 and reported busy — a coin toss that reaches
+		// the status page as a fact. (The reverse order is not discriminating:
+		// it reads false either way.)
+		busy_ind([ 1, 0 ]);
+		eq(modem.sim_busy, false, 'ind: a two-slot busy with no known active slot is not guessed');
+
+		busy_ind([ 1 ]);
+		eq(modem.sim_busy, true, 'ind: a single-slot busy needs no slot to be known');
+
+		// ...and once the active slot IS known, the right byte is read
+		modem.sim_busy = false;
+		modem.active_slot = 2;
+		busy_ind([ 0, 1 ]);
+		eq(modem.sim_busy, true, 'ind: with slot 2 active, slot 2\'s byte is the one read');
+
+		busy_ind([ 1, 0 ]);
+		eq(modem.sim_busy, false, 'ind: ...not slot 1\'s');
+
 		ok(length(mock.calls_for('REFRESH_REGISTER_ALL')) >= 1, 'ind: uim refresh registered');
 		ok(modem._uim_refresh_armed === true, 'ind: uim refresh handler armed');
 
@@ -957,6 +992,7 @@ scenario('indications', {
 		eq(modem.sim_busy, false, 'teardown: the card diagnostics are cleared');
 		eq(modem.sim_note, null, 'teardown: ...including the last card event');
 		eq(modem.active_slot, null, 'teardown: and the remembered active slot');
+
 		// same class, and these two predate the UIM work: both guard an install
 		// on a client teardown destroys, so a stale flag silently cost the
 		// RF-band push and the DSD data-mode push for the rest of the run

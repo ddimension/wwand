@@ -16,9 +16,19 @@ case "$PRODUCT" in
 	*) return 0 2>/dev/null || exit 0 ;;
 esac
 
-# only when interface 1 is unbound (idempotent across replugs)
-[ -e "/sys/bus/usb/devices/${DEVPATH#/devices/}:1.1/driver" ] && \
+# Only when interface 1 is unbound (idempotent across replugs).
+#
+# Spelled as an explicit `if`, because the obvious one-liner does the OPPOSITE
+# of what it reads like:
+#
+#   [ -e "$d" ] && return 0 2>/dev/null || exit 0
+#
+# When the path does NOT exist — the case we want to continue past — the test
+# fails, so `&&` is skipped and `||` fires `exit 0`. The binder below was
+# unreachable in exactly the situation it exists for, and reachable in none.
+if [ -e "/sys/bus/usb/devices/${DEVPATH#/devices/}:1.1/driver" ]; then
 	return 0 2>/dev/null || exit 0
+fi
 
 echo "12d1 14ac 02" > /sys/bus/usb/drivers/qmi_wwan/new_id 2>/dev/null
 

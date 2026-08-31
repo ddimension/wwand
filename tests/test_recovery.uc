@@ -312,9 +312,28 @@ rt.revoke_arming('the driver says qmi');
 eq(rt.usb_repower(), false, 'zero-rx: a revoked modem is not repowered by the watchdog');
 eq(length(fx.matching('run usb-repower')), 0, 'zero-rx: nothing physical happened');
 
-// remove the contradiction, get legitimate evidence, and it works again
+// A withdrawal blocks EVERY later arming path, not just the grant it cleared.
+// Three of them can set the permission — note_answer, on_proto_success and
+// on_connect_success — and leaving them free to set it again made the
+// withdrawal last only until the next one fired. That is how a modem pinned to
+// a protocol its driver contradicts re-armed through a connection coming "up",
+// which on NCM means the dial and the IP read finished and says nothing about
+// packets moving.
 rt.note_answer();
-eq(rt.usb_repower(), true, 'zero-rx: legitimate evidence restores it');
+eq(rt.counters.proto_ok, 0, 'zero-rx: an answer does not lift a withdrawal');
+rt.on_proto_success();
+eq(rt.counters.proto_ok, 0, 'zero-rx: nor a successful request');
+rt.on_connect_success();
+eq(rt.counters.proto_ok, 0, 'zero-rx: nor a connection coming up');
+eq(rt.usb_repower(), false, 'zero-rx: so the watchdog still cannot repower it');
+
+// ...and the block is NOT persisted: it is derived from the configuration on
+// every build, so correcting the pin lifts it by simply not setting it again.
+let rt2 = recovery.create({ id: 'ztrip', failreboot: 40, fx: fx, state_dir: '/state', log: silent });
+rt2.load();
+rt2.note_protocol('ncm');
+rt2.note_answer();
+eq(rt2.counters.proto_ok, 1, 'zero-rx: a rebuild without the contradiction arms normally');
 
 // note_answer arms WITHOUT touching the error counters — that is what separates
 // it from on_proto_success, and conflating the two would silently disable the

@@ -80,6 +80,12 @@ export function install(self, o)
 			// keep last-known on an empty/invalid answer instead of blanking it
 			if (!serr && tlv.has_payload(sdata))
 				self.signal = sdata;
+			// A cancellation is the client being destroyed, not a modem that
+			// rejects the message. Falling through would submit the fallback on
+			// the client mid-destruction — and that one's failure submits an AT
+			// command after it.
+			else if (serr?.error == 'cancelled')
+				return done();
 			else if (serr)
 				// NAS 1.0 fallback: old stacks reject GET_SIGNAL_INFO
 				// ("Invalid QMI command") but answer GET_SIGNAL_STRENGTH
@@ -289,9 +295,16 @@ export function install(self, o)
 				return;
 
 			self.nas.request('GET_CELL_LOCATION_INFO', {}, (err, data) => {
+				// The client is being destroyed. Everything below submits more
+				// work — an AT CSQ floor read, a temperature read, an IoT-RAT
+				// probe — and then re-arms this timer, all on the way down.
+				// Nothing here is worth doing for a modem that is going away.
+				if (err?.error == 'cancelled')
+					return;
+
 				if (!err)
 					store_cells(data);
-				else if (err.error != 'cancelled')
+				else
 					log('warn', sprintf('telemetry: cell location query failed: %J', err));
 
 				// a modem whose QMI signal message never answers (old stacks)
