@@ -10,12 +10,22 @@ import * as board from 'wwand/board.uc';
 
 uloop.init();
 
-function mkfx(files, dirs) {
+// `fail` marks paths whose write reports failure, the way fs.open() does for a
+// line that does not exist or a read-only sysfs.
+function mkfx(files, dirs, fail) {
 	let writes = [];
 	return {
 		writes: writes,
 		read: (p) => files[p],
-		write: (p, v) => { push(writes, sprintf('%s=%s', p, v)); files[p] = v; return true; },
+		write: (p, v) => {
+			push(writes, sprintf('%s=%s', p, v));
+
+			if (fail?.[p])
+				return false;
+
+			files[p] = v;
+			return true;
+		},
 		list: (p) => dirs?.[p] ?? [],
 		has: function(s) { for (let w in writes) if (w == s) return true; return false; },
 	};
@@ -268,5 +278,26 @@ ok(fx9d.has(`${G}/modem-reset/value=0`), 'reset_pulse: sampled polarity drives t
 uloop.timer(50, () => uloop.end());
 uloop.run();
 ok(fx9d.has(`${G}/modem-reset/value=1`), 'reset_pulse: sampled polarity restores the rest level');
+
+// --- a GPIO write that fails must not be reported as a completed action ------
+// The recovery ladder reads these return values: false sends it on to the next
+// rung, true means the hardware was driven. A true that wrote nothing consumes
+// the hardware rung without touching the hardware, and the box then sits until
+// the reboot rung far above it -- which on a remote installation is the
+// difference between an automatic recovery and a site visit.
+let ffx = mkfx({ [`${G}/modem-power/value`]: '1', [`${G}/modem-reset/value`]: '1' },
+	{}, { [`${G}/modem-power/value`]: true, [`${G}/modem-reset/value`]: true });
+let fb = board.create({ id: 'mikrotik,chateau-5g-r17-ax', fx: ffx,
+                        power_off_ms: 5, reset_ms: 5, log: () => {} });
+
+eq(fb.power_cycle(), false, 'gpio-fail: a power cycle that could not switch the line reports false');
+eq(fb.reset_pulse('modem-reset', 5), false, 'gpio-fail: and so does a reset pulse');
+
+// ...and the failed pulse must not have taken the single-pulse latch with it:
+// a later attempt on a working line has to be able to run
+let okfx = mkfx({ [`${G}/modem-reset/value`]: '1' });
+let okb = board.create({ id: 'mikrotik,chateau-5g-r17-ax', fx: okfx,
+                         power_off_ms: 5, reset_ms: 5, log: () => {} });
+eq(okb.reset_pulse('modem-reset', 5), true, 'gpio-fail: a working line still pulses');
 
 done('test_board');

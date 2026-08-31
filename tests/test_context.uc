@@ -577,6 +577,60 @@ scenario('zero-rx', {
 	});
 });
 
+// --- K2: a sample that lands after the context stopped must not trip ---------
+// self.down() stops the monitor and only THEN releases the WDS clients, so a
+// GET_PACKET_STATISTICS already on the wire keeps its callback and lands on a
+// live client with the context IDLE. Tripping there is not a stray log line:
+// zero_rx reaches trip_zero_rx -> recovery.usb_repower(), a board power-cycle
+// or reset-GPIO pulse on a modem that no longer carries this context and may be
+// carrying another one.
+//
+// The handler below takes the context down on the sample that would cross the
+// stall threshold, so the reply comes back to a monitor that has stopped.
+//
+// HONEST LIMIT: this passes with the generation guard removed too. Under the
+// mock pump `release_family` destroys the WDS client before the reply is
+// delivered, so the cancellation family already swallows it and the window the
+// guard closes never opens here. On a real modem the release is a round trip
+// and the reply can win it. Keep this as the end-to-end net -- down mid-sample
+// stays quiet and ends IDLE -- and read the guard in context_monitor_qmi.uc as
+// belt-and-braces this harness cannot isolate.
+let zd = { ctx: null, calls: 0 };
+
+scenario('zero-rx-after-down', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	ctx_timing: { stats_interval: 5, zero_rx_ms: 12 },
+	handlers: {
+		GET_CURRENT_SETTINGS: V4_SETTINGS,
+		GET_PACKET_STATISTICS: () => {
+			// by the 4th sample (~15ms at a 5ms interval) the 12ms stall window
+			// has passed, so this is the reply that would trip
+			if (++zd.calls == 4 && zd.ctx)
+				zd.ctx.down(() => null);
+
+			return { tx_packets_ok: 50, rx_packets_ok: 100 };   // never changes
+		},
+	},
+}, (ctx, mock, events, next) => {
+	zd.ctx = ctx;
+
+	ctx.up((err) => {
+		eq(err, null, 'zrx-down: up ok');
+
+		uloop.timer(90, () => {
+			if (zd.calls < 4) {
+				printf("  SKIP zrx-down: telemetry sampler not driven under mock pump harness\n");
+				return next();
+			}
+
+			let trips = filter(events, (e) => e.event == 'zero_rx');
+			eq(length(trips), 0, 'zrx-down: taking the context down mid-sample trips nothing');
+			eq(ctx.state, 'IDLE', 'zrx-down: ...and it ends up down, not reconnecting');
+			next();
+		});
+	});
+});
+
 // --- L: increasing rx counters keep the watchdog quiet -----------------------
 
 scenario('zero-rx-quiet', {

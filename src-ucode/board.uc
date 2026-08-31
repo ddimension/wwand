@@ -297,12 +297,27 @@ export function create(opts)
 	let gpio_read = (name) =>
 		safe_gpio(name) ? fx.read(sprintf('%s/%s/value', GPIO_DIR, name)) : null;
 
+	// Returns whether the LINE ACTUALLY MOVED. Both callers below decide from
+	// it, and they must: a `false` sends the recovery ladder on to the next
+	// rung, while a `true` that wrote nothing consumes the hardware rung
+	// without touching the hardware, and the box then waits for the reboot rung
+	// far above it. A line that does not exist, a read-only sysfs and a name the
+	// profile has wrong all land here.
+	//
+	// Only the VALUE write decides. `direction` is best-effort on purpose: a
+	// GPIO already claimed as an output (or exported by a driver) can refuse it
+	// while the value write works fine.
 	let gpio_set = (name, v) => {
 		if (!safe_gpio(name))
-			return;
+			return false;
 
 		fx.write(sprintf('%s/%s/direction', GPIO_DIR, name), 'out');
-		fx.write(sprintf('%s/%s/value', GPIO_DIR, name), v ? '1' : '0');
+
+		if (fx.write(sprintf('%s/%s/value', GPIO_DIR, name), v ? '1' : '0'))
+			return true;
+
+		log('err', sprintf('board %s: gpio %s: could not write value', id ?? '?', name));
+		return false;
 	};
 
 	let self = {
@@ -345,8 +360,20 @@ export function create(opts)
 
 		log('err', sprintf('board %s: power-cycling modem (gpio %s, off %ds)',
 			id, profile.power_gpio, off / 1000));
-		gpio_set(profile.power_gpio, power_off == '1');
-		uloop.timer(off, () => gpio_set(profile.power_gpio, power_on == '1'));
+
+		// nothing was switched off -> report it, so the caller can try something
+		// else rather than wait out a power cycle that is not happening
+		if (!gpio_set(profile.power_gpio, power_off == '1'))
+			return false;
+
+		uloop.timer(off, () => {
+			// A failure HERE is the dangerous one: the modem is off and stays
+			// off. Nothing here can fix it, but it must be in the log, or the
+			// box looks like a dead modem instead of a board we switched off.
+			if (!gpio_set(profile.power_gpio, power_on == '1'))
+				log('err', sprintf('board %s: gpio %s: MODEM LEFT POWERED OFF — the power-on write failed',
+					id, profile.power_gpio));
+		});
 
 		return true;
 	};
@@ -402,11 +429,22 @@ export function create(opts)
 
 		log('err', sprintf('board %s: asserting modem reset (gpio %s) for %ds',
 			id ?? '?', g, hold / 1000));
-		gpio_set(g, run ? 0 : 1);
+		// the assert has to land before we claim a reset is under way: arming the
+		// release timer for a line that never moved would report a reset, hold
+		// the single-pulse latch for its duration, and reset nothing
+		if (!gpio_set(g, run ? 0 : 1))
+			return false;
+
 		pulse_timer = uloop.timer(hold, () => {
 			pulse_timer = null;
-			gpio_set(g, run);
-			log('notice', sprintf('board %s: modem reset released (gpio %s)', id ?? '?', g));
+
+			// a release that fails leaves the modem held in reset — it cannot be
+			// fixed from here, but it must not be silent
+			if (gpio_set(g, run))
+				log('notice', sprintf('board %s: modem reset released (gpio %s)', id ?? '?', g));
+			else
+				log('err', sprintf('board %s: gpio %s: MODEM LEFT IN RESET — the release write failed',
+					id ?? '?', g));
 		});
 
 		return true;

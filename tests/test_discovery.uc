@@ -802,11 +802,20 @@ eq(discovery.claim_path('/etc/passwd', cp_fx), null,
 eq(discovery.claim_path('', cp_fx), null, 'claim_path: empty -> null');
 eq(discovery.claim_path(null, cp_fx), null, 'claim_path: null -> null');
 
-// same_hw_path: a claim on a USB device covers its functions and vice versa
+// same_hw_path: a claim on a USB device covers its functions and vice versa.
+// The FUNCTION case is handled before this function sees anything: claim_path()
+// and sysfs_path_of() both trim the ":<config>.<interface>" component, so two
+// views of one device arrive as the same string.
 ok(discovery.same_hw_path('a/usb1/1-1', 'a/usb1/1-1'), 'same_hw_path: identical');
-ok(discovery.same_hw_path('a/usb1/1-1', 'a/usb1/1-1/1-1.2'),
-	'same_hw_path: a device claim covers a deeper function');
-ok(discovery.same_hw_path('a/usb1/1-1/1-1.2', 'a/usb1/1-1'),
+ok(discovery.same_hw_path('a/usb1/1-1/mhi0', 'a/usb1/1-1'),
+	'same_hw_path: a claim on the parent covers a child that is part of it');
+
+// ...but a deeper USB DEVICE id is a different device: "1-1" is a hub port and
+// "1-1.2" a separate modem behind it. Treating them as one let a foreign claim
+// on either blocklist the other, so wwand refused a modem nobody had claimed.
+ok(!discovery.same_hw_path('a/usb1/1-1', 'a/usb1/1-1/1-1.2'),
+	'same_hw_path: a device behind a hub is not the hub port');
+ok(!discovery.same_hw_path('a/usb1/1-1/1-1.2', 'a/usb1/1-1'),
 	'same_hw_path: ... and the other direction');
 ok(!discovery.same_hw_path('a/usb1/1-1', 'a/usb1/1-2'),
 	'same_hw_path: sibling devices do NOT match');

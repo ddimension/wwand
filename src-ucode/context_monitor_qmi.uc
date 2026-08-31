@@ -34,6 +34,15 @@ export function install(self, o)
 	// MBIM/NCM contexts); this context only feeds it its rx-packet total.
 	let stats_timer = null;
 	let stats_interval = o.timing?.stats_interval ?? 60000;
+	// Which run of the monitor a sample belongs to. stop_stats() cancels the
+	// timer, but a GET_PACKET_STATISTICS already on the wire keeps its callback:
+	// self.down() stops the monitor and only THEN releases the WDS clients, so
+	// that callback lands on a live client with the context already IDLE. It
+	// would feed the zero-rx watchdog, and a trip there does not just log — it
+	// reaches trip_zero_rx -> recovery.usb_repower(), i.e. a board power-cycle
+	// or a reset-GPIO pulse on a modem that is no longer carrying this context
+	// and may well be carrying another one.
+	let stats_gen = 0;
 	let rx_watch = context_common.rx_stall_watch({
 		limit_ms: () => context_common.zero_rx_limit_ms(self.modem.config, o.timing),
 		interval_ms: stats_interval,
@@ -64,6 +73,8 @@ export function install(self, o)
 	};
 
 	stop_stats = () => {
+		stats_gen++;
+
 		if (stats_timer) {
 			stats_timer.cancel();
 			stats_timer = null;
@@ -90,6 +101,7 @@ export function install(self, o)
 	};
 
 	sample_stats = () => {
+		let gen = stats_gen;
 		let fams = values(self.families);
 		let pend = length(fams);
 		let valid = true;
@@ -124,6 +136,11 @@ export function install(self, o)
 
 		for (let fam in fams) {
 			qmi_backend.get_packet_stats(fam.client, (data) => {
+				// abandoned round (see stats_gen): the context stopped or
+				// reconnected while this was in flight
+				if (gen != stats_gen || self.state != 'CONNECTED')
+					return;
+
 				if (data == null) {
 					valid = false;   // preserved: skip the check this round
 				}

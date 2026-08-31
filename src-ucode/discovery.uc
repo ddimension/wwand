@@ -326,6 +326,22 @@ export function same_hw_path(a, b)
 		if (pa[i] != pb[i])
 			return false;
 
+	// Common prefix, one deeper. That is only the SAME hardware if the extra
+	// component is part of the same device -- an MHI/PCI child, say. A USB
+	// device id ("1-1.2" under "1-1") is NOT: "1-1" is then a hub port and
+	// "1-1.2" a separate modem hanging off it, so treating them as one made a
+	// foreign claim on either blocklist the other, and wwand refused a modem
+	// nobody had claimed.
+	//
+	// The interface case this prefix rule was written for is already handled
+	// before we get here: both claim_path() and sysfs_path_of() trim the
+	// ":<config>.<interface>" component, so a claim on "1-1:1.4" and one on
+	// "1-1" arrive as the same string and match exactly.
+	let deeper = (length(pa) > length(pb)) ? pa[n] : ((length(pb) > length(pa)) ? pb[n] : null);
+
+	if (deeper != null && match(deeper, /^[0-9]+-[0-9]+(\.[0-9]+)*$/))
+		return false;
+
 	return true;
 };
 
