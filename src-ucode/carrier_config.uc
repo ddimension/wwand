@@ -152,6 +152,14 @@ export function list(modem, cb)
 
 				ask(modem, 'GET_CONFIG_INFO',
 					{ config: { config_type: c.config_type, id: c.id } }, (ie, info) => {
+						// A timeout ends the WALK, not just this entry. A modem
+						// that stops indicating would otherwise cost 15 s per
+						// remaining config — ten of them is two and a half
+						// minutes with the ubus caller waiting on all of it.
+						// Any other error is per-config and tolerated below.
+						if (ie?.error == 'pdc_timeout')
+							return cb(null, out);
+
 						push(out, {
 							id: arr_to_hex(c.id),
 							description: ie ? null : (info?.description ?? null),
