@@ -15,13 +15,21 @@ import * as hwops from 'wwand.hwops';
 import * as nlmod from 'wwand.netlink';
 import * as reconnect from 'wwand.reconnect';
 import * as ctx_settings from 'wwand.ctx_settings';
+// module scope: the lazy backend loaders live outside create(), so they cannot
+// use its injected `log` dep and go to the shared sink directly
+import * as logmod from 'wwand.log';
 
 // backends load lazily; a missing package returns null (cached failure) so
 // start_modem reports it clearly instead of crashing. Lazy also so a QMI-only
 // install never loads MBIM's ~1.4k lines/schema. require() cannot load ES
 // modules directly (`export` is a syntax error in plain scripts) — the *_lazy
 // names are exportless wrapper scripts.
-let lazy_backend = (mod) => {
+// `announce` fires ONCE, the first time the module actually reaches memory.
+// Which backends are INSTALLED and which are LOADED are different questions: a
+// box can carry all three packages and only ever load the one its modem needs,
+// and a log that answers only the first cannot tell a missing package from a
+// backend nothing asked for.
+let lazy_backend = (mod, announce) => {
 	let m = null, failed = false;
 
 	return () => {
@@ -31,6 +39,9 @@ let lazy_backend = (mod) => {
 		if (m == null) {
 			try {
 				m = require(mod);
+
+				if (announce)
+					announce();
 			}
 			catch (e) {
 				failed = true;
@@ -69,12 +80,14 @@ let load_datapath = (name) => {
 	return dp_plugins[name];
 };
 
-let load_qmi = lazy_backend('wwand.qmi_lazy');
-let load_mbim = lazy_backend('wwand.mbim_lazy');
+let loaded_note = (name) => () => logmod.log('notice', 'backend %s loaded', name);
+
+let load_qmi = lazy_backend('wwand.qmi_lazy', loaded_note('qmi'));
+let load_mbim = lazy_backend('wwand.mbim_lazy', loaded_note('mbim'));
 // NCM support (cdc_ncm / cdc_ether, AT-controlled) is a separate package (wwand-ncm)
-let load_ncm = lazy_backend('wwand.ncm_lazy');
+let load_ncm = lazy_backend('wwand.ncm_lazy', loaded_note('ncm'));
 // optional eSIM module (wwand-esim); absent => feature reports esim_not_installed
-let load_esim = lazy_backend('wwand.esim');
+let load_esim = lazy_backend('wwand.esim', loaded_note('esim'));
 
 // "registered" across backends: QMI stores the numeric NAS value, MBIM/NCM
 // store 1/0 — never compare against a string. Radio list is the strongest
@@ -146,8 +159,13 @@ export function create(opts)
 				log('warn', sprintf('datapath plugin %s: not usable (no links()), ignored', n));
 		}
 
-		if (length(installed_dp))
-			log('info', sprintf('datapath plugins installed: %s', join(', ', keys(installed_dp))));
+		// notice, not info: on a box whose datapath does not behave, the first
+		// question is always which implementations were even available, and the
+		// built-ins belong in that answer as much as the add-ons do
+		log('notice', sprintf('datapath: built-in %s%s',
+			join(', ', map(nlmod.datapath_catalog(), (d) => d.name)),
+			length(installed_dp) ? sprintf('; add-ons %s', join(', ', keys(installed_dp)))
+			                     : ' (no add-on datapath installed)'));
 
 		return installed_dp;
 	};

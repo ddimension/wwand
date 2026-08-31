@@ -28,6 +28,7 @@ import * as config from 'wwand.config';
 import * as daemon_mod from 'wwand.daemon';
 import * as ubus_api from 'wwand.ubus';
 import * as discovery from 'wwand.discovery';
+import * as versionmod from 'wwand.version';
 import * as modeswitch from 'wwand.modeswitch';
 import * as netlink from 'wwand.netlink';
 import * as board from 'wwand.board';
@@ -214,6 +215,24 @@ function run_daemon()
 		level: cli_log_level ?? parsed.globals.log_level,
 		target: cli_log_target ?? 'auto',
 	});
+
+	// Startup banner, before anything can go wrong with the config. Three
+	// questions a log has to answer without anyone asking the operator: which
+	// build is this, what can it drive, and what did it actually load.
+	//
+	// The version comes from the package database rather than a constant in this
+	// tree — the package version is assembled from the source date, the commit
+	// and PKG_RELEASE, so a constant here would be a second truth that starts
+	// lying the first time somebody forgets to bump it. Files dropped over an
+	// installed package say so instead of borrowing its version.
+	//
+	// Backend availability is a FILE check, not a require(): probing by loading
+	// would defeat the lazy loading the whole package split exists for. The
+	// modules actually loaded announce themselves later, when a modem asks.
+	let have_be = filter([ 'qmi', 'mbim', 'ncm' ],
+		(b) => fs.access(sprintf('/usr/share/ucode/wwand/%s_lazy.uc', b)) == true);
+
+	logmod.notice('%s', versionmod.banner(versionmod.installed('wwand'), have_be, []));
 
 	for (let w in parsed.warnings)
 		logmod.warning('config: %s', w);

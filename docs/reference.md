@@ -1439,6 +1439,32 @@ rather than e.g. `-3276.8 dBm`.
 
 ## Troubleshooting
 
+- **What is running.** The first three lines of every start say it, so a posted
+  log needs no follow-up questions:
+
+  ```
+  wwand 2026.08.30~199a2f8a-r53; backends: qmi, mbim, ncm
+  datapath: built-in auto, raw_ip, ethernet, rmnet, qmimux, vlan; add-ons rmnet_nss, rmnet_nss_mhi
+  backend qmi loaded
+  ```
+
+  The **version** is read from the package database (apk, or opkg on older
+  builds), not from a constant in the source: the package version is assembled
+  from the source date, the commit and `PKG_RELEASE`, so a constant would be a
+  second truth that starts lying the first time somebody forgets to bump it. A
+  tree whose files were deployed by hand over an installed package reports
+  `unpackaged (files deployed by hand)` rather than borrowing the version of the
+  package the files were dropped on.
+
+  **`backends:`** is what is INSTALLED — a file check on each backend package's
+  lazy shim, which is what decides whether the daemon could load it. A bare
+  `wwand` with no backend package says `NONE` and names what to install, since
+  that is the one thing worth knowing on a box whose modem never comes up. A
+  backend package at a different release than the base is called out with its
+  version (a base at r49 with backends at r28 has happened, and is not
+  supportable). **`backend X loaded`** appears later and separately, when a modem
+  actually asks for one — a box may carry all three and only ever load one.
+
 - **Logging.** wwand logs to **`/dev/log`** with real syslog priorities when it
   is reachable (so `logread` shows `daemon.info` / `daemon.notice` / `daemon.warn`
   / `daemon.err` per message, not everything as `daemon.err`), and falls back to

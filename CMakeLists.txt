@@ -101,6 +101,7 @@ set(WWAND_UCODE_MODULES
   protocol_switch.uc qmi_backend.uc qmi_over_mbim.uc reconnect.uc recovery.uc
   regdetail.uc simops.uc sim_plmn.uc sim.uc sms_pdu.uc sms.uc
   telemetry_mbim.uc telemetry_ncm.uc telemetry_qmi.uc transport.uc ubus.uc
+  version.uc
 )
 
 # executable scripts (shebang) -> compiled with -c, interpreter line preserved
