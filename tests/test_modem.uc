@@ -951,6 +951,12 @@ scenario('indications', {
 		// parts that only fire when something goes wrong.
 		modem.teardown();
 		eq(modem._uim_refresh_armed, false, 'teardown: uim handlers can be installed again');
+		// card-side diagnostics belong to the card we were talking to; a
+		// transient busy left set would survive the reconnect and keep claiming
+		// the reads are failing long after they stopped
+		eq(modem.sim_busy, false, 'teardown: the card diagnostics are cleared');
+		eq(modem.sim_note, null, 'teardown: ...including the last card event');
+		eq(modem.active_slot, null, 'teardown: and the remembered active slot');
 		// same class, and these two predate the UIM work: both guard an install
 		// on a client teardown destroys, so a stale flag silently cost the
 		// RF-band push and the DSD data-mode push for the rest of the run

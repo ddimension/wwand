@@ -621,6 +621,14 @@ export function slot_status(modem, cb)
 			let info = data.info?.[i];
 			let eid = data.eids?.[i]?.eid;
 
+			// Remember which slot is actually active. It is the only
+			// authoritative source for it, and the SIM_BUSY indication needs it:
+			// that message carries one byte PER SLOT, and indexing it with the
+			// configured `sim_slot` is wrong twice over — the option is often
+			// unset, and a runtime slot switch never updates it.
+			if (s.slot_status == 1)
+				modem.active_slot = i + 1;
+
 			return {
 				physical: i + 1,
 				card: CARD_STATES[sprintf('%d', s.card_status)] ?? sprintf('%d', s.card_status),
@@ -890,7 +898,16 @@ export function switch_slot(modem, physical, cb)
 
 		uim.request('SWITCH_SLOT', {
 			logical: 1, physical: physical,
-		}, (err) => cb(err ?? null));
+		}, (err) => {
+			// A runtime switch is the other thing that changes which card is in
+			// use, and the configured `sim_slot` never follows it. Without this
+			// the SIM_BUSY indication — one byte per slot — would keep reading
+			// the slot we switched AWAY from.
+			if (!err)
+				modem.active_slot = +physical;
+
+			cb(err ?? null);
+		});
 	});
 };
 

@@ -133,8 +133,12 @@ Two more dissolved on inspection rather than being declined:
 - **UIM card diagnostics** — four of the eleven unused `REGISTER_EVENTS` bits
   armed: session closed (with cause and the offending file id), SIM busy,
   internal card recovery, card activation. Plus the refresh handshake libqmi
-  structurally cannot complete: `REFRESH_OK` (0x002B) and the `vote_for_init`
-  TLV, so a refresh no longer pulls the session out from under a live data call.
+  structurally cannot complete: `REFRESH_OK` (0x002B) is modelled and answered.
+  The `vote_for_init` TLV is modelled and deliberately NOT sent — voting asks
+  the card to consult us first, and every way that reply can be lost turns a
+  brief session interruption into the card waiting out its own timeout. So a
+  refresh can still pull the session out from under a live data call; that is
+  the status quo, and it is better in every failure case than a stall.
 - **Long APDU** — the token-and-indication path for a card answer too large for
   one message. Previously read as "the card said nothing", which is silent
   truncation exactly where eSIM lives.
@@ -145,14 +149,16 @@ Two more dissolved on inspection rather than being declined:
 
 ## Open, ranked by value per line of code
 
-1. **UIM `REGISTER_EVENTS` (0x002E) mask bits.** wwand sets 4 of 12. Bits 3, 5,
+1. ~~**UIM `REGISTER_EVENTS` (0x002E) mask bits.**~~ **DELIVERED 2026-08-30.**
+   wwand set 4 of 12. Bits 3, 5,
    7, 9 unlock `SESSION_CLOSED_IND 0x0043` (with a 12-value cause enum:
    CARD_ERROR, CARD_REMOVED, REFRESH, RECOVERY, …), `SIM_BUSY_STATUS_IND 0x004A`,
    `RECOVERY_IND 0x0050`, `CARD_ACTIVATION_STATUS_IND 0x0055`. wwand already
    sends the message — this is a constant and four decoders, and it turns a
    class of silent SIM failures into named events. VENDOR for the bit meanings,
    but the ids are DEVICE-confirmed.
-2. **UIM `REFRESH_OK` (0x002B) and the refresh enforcement policy.** libqmi
+2. ~~**UIM `REFRESH_OK` (0x002B) and the refresh enforcement policy.**~~
+   **DELIVERED 2026-08-30**, except the vote, which is deliberately not sent. libqmi
    models neither, so a libqmi-based stack cannot answer a `WAIT_FOR_OK` refresh
    stage at all. A box that votes for init and never sends REFRESH_OK stalls the
    card; one that does not vote gets its session pulled mid-data-call. **OPEN**

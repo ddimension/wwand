@@ -143,6 +143,7 @@ export function create(opts)
 		// internal recovery, an activation that failed).
 		sim_busy: false,
 		sim_note: null,
+		active_slot: null,  // which physical slot holds the card in use (slot status)
 		cat: null,          // toolkit client, alive only while cat_mode is applied
 		tmd: null,          // thermal-mitigation client, when the modem has TMD
 		thermal: null,      // { devices: [{id,label,max,level}], mitigated, level }
@@ -555,8 +556,13 @@ export function create(opts)
 		});
 
 		self.uim.on('SIM_BUSY_STATUS_IND', (data) => {
-			// one byte per slot; report the one we are using
-			let busy = data?.busy?.[(+(self.config?.sim_slot ?? 1) || 1) - 1];
+			// One byte per slot; report the one we are actually using.
+			// `active_slot` comes from the slot status, which is the only thing
+			// that knows — the configured `sim_slot` is often unset and is never
+			// updated by a runtime slot switch, so indexing with it reported
+			// another slot's card, or none.
+			let slot = +(self.active_slot ?? self.config?.sim_slot ?? 1) || 1;
+			let busy = data?.busy?.[slot - 1];
 
 			if (busy == null || !!self.sim_busy == !!busy)
 				return;
@@ -1196,6 +1202,13 @@ export function create(opts)
 		// reassembly attached — silently, because everything still worked except
 		// the things that only fire when something goes wrong.
 		self._uim_refresh_armed = false;
+
+		// card-side diagnostics belong to the card we were talking to. A
+		// transient busy left set would otherwise survive the reconnect and
+		// keep claiming the reads are failing long after they stopped.
+		self.sim_busy = false;
+		self.sim_note = null;
+		self.active_slot = null;
 
 		// The same class of bug, and older than the UIM work: both of these
 		// guard an install ON A CLIENT that teardown destroys. Leaving them set

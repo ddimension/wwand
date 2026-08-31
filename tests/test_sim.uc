@@ -577,6 +577,7 @@ scenario('slot switch: a cancelled read does not switch anyway', (next) => {
 
 	sim.switch_slot(m, 2, (err, res) => {
 		eq(err?.error, 'cancelled', 'slot switch: the caller is told, not silently switched');
+		eq(m.active_slot, null, 'slot switch: a refused switch does not claim the new slot');
 		eq(sent, [ 'GET_SLOT_STATUS' ], 'slot switch: no SWITCH_SLOT during teardown');
 		next();
 	});
@@ -883,6 +884,10 @@ scenario('slots: MBIM modem brings up the passthrough UIM on demand', (next) => 
 		eq(length(slots), 2, 'slots: both slots listed');
 		eq(slots[0].active, true, 'slots: slot 1 active');
 		eq(slots[1].card, 'present', 'slots: slot 2 present');
+		// the SIM_BUSY indication carries one byte PER SLOT, and the configured
+		// sim_slot is often unset and never follows a runtime switch — the slot
+		// status is the only thing that knows which card is in use
+		eq(m.active_slot, 1, 'slots: the active slot is recorded for the busy indication');
 
 		// ...and the multi-SIM summary over the REAL mapper output, which is
 		// where a hand-built fixture can quietly lie: the inactive slot here

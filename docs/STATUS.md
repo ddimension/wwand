@@ -103,16 +103,22 @@ reported only.
   `docs/design/qmi-surface-survey.md` records what the vendor QMI/RIL surface
   has that wwand does not model, ranked by value per line, with each item's
   provenance marked (citable / device-observed / proprietary) because that
-  decides whether it can ever be upstreamed. Cheapest high-value items: the
-  eight unused UIM `REGISTER_EVENTS` mask bits, `UIM_REFRESH_OK` (which libqmi
-  structurally cannot answer, so an operator OTA can stall the card), and the
-  three indications libqmi can arm but not decode. Nothing there is scheduled.
+  decides whether it can ever be upstreamed. Its top items are DELIVERED — the
+  UIM card diagnostics, `UIM_REFRESH_OK`, long APDU, TMD thermal and CAT toolkit
+  routing all landed on 2026-08-30/31, and the file marks them as such. What
+  remains is unscheduled, and three entries there dissolved on inspection rather
+  than being deferred (RF-band changes already arrive by another route, the
+  error-rate indication carries no LTE or NR, and the sys-info rate limiter
+  throttles an indication wwand never arms).
 - **TODO — the cancellation family is mapped but not closed.** Destroying a QMI
   client reports `cancelled` to every pending callback **synchronously**, while
   the hub is still live. Any callback that reads "error" as "carry on" then
   issues its next request on a client mid-destruction and resumes a chain the
-  teardown existed to stop. Everything inside the 2026-08-30 range is fixed and
-  tested; a whole-tree sweep in review found the rest, all of it older:
+  teardown existed to stop. Everything inside the 2026-08-30/31 range is fixed,
+  with tests that use the PRODUCTION error shape — the first attempt did not, and
+  a guard checking a bare `err.error` never matched a caller that wraps it as
+  `{ stage, err }`, with a green load-bearing test agreeing with the guard
+  instead of the caller. A whole-tree sweep in review found the rest, all older:
   - `qmi_backend.set_opmode()` hands `cancelled` to its continuation, so the
     recovery cycle, the admin reset and the SIM-reapply radio cycle all carry on.
   - a cancelled `STOP_NETWORK` immediately sends a second `STOP_NETWORK` on the
