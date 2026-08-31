@@ -1150,4 +1150,19 @@ let zz = config.parse({ network: {
 
 eq(zz.modems.m0.stats_interval, 0, 'num: 0 is kept — the loops read it as telemetry off');
 
+// --- a per-SIM override reaches the AT builders and must be checked too ------
+// The interface fields were warned about; the OVERRIDE was not — and the
+// override is the one that wins, being the more specific match. An APN with a
+// quote in it therefore reached the quoted-AT builders without a word.
+let qw = config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+	s1: { '.type': 'wwand_sim', iccid: '8949', apn: 'foo"bar', password: 'p"w' },
+	w1: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet' },
+} });
+
+ok(length(filter(qw.warnings, (w) => index(w, 'wwand_sim s1: apn') >= 0)) > 0,
+	'sim-quote: an override apn with a quote is reported');
+ok(length(filter(qw.warnings, (w) => index(w, 'wwand_sim s1: password') >= 0)) > 0,
+	'sim-quote: ...and so is the password');
+
 done('test_config');

@@ -333,6 +333,28 @@ push(scenarios, {
 	},
 });
 
+// --- s1d: an unsendable APN must stop the dial, not ride along ---------------
+// apn/username/password are interpolated into QUOTED AT strings, which have no
+// escape mechanism. A `"` ends the argument early, CGDCONT answers ERROR — and
+// run_sequence is best-effort, so it steps on and DIALS. The modem then connects
+// on whatever PDP profile was already programmed: the wrong APN, nothing
+// surfaced to the user, and a session that looks perfectly established. So the
+// activation is refused before the first write.
+push(scenarios, {
+	name: 's1d_bad_apn',
+	script: script(),
+	cconfig: { apn: 'foo"bar', pdp_type: 'ipv4', mux_id: 0 },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err?.error, 'invalid_at_argument', 'bad-apn: the activation is refused');
+			eq(err?.field, 'apn', 'bad-apn: ...naming the field that cannot be sent');
+			ok(env.tr.saw(/CGDCONT=.*foo/) == null, 'bad-apn: ...and nothing was written first');
+			ok(env.tr.saw(/QNETDEVCTL=1,1/) == null, 'bad-apn: ...and it never dialled');
+			env.finish();
+		});
+	},
+});
+
 // --- s1b: a pin the driver contradicts must NOT arm hardware recovery -------
 // `option protocol ncm` on a modem whose driver says QMI or MBIM: those modems
 // expose a working AT port too, so an AT answer is equally consistent with the

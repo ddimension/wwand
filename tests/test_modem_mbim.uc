@@ -330,4 +330,48 @@ modem.start();
 
 uloop.run();
 
+// --- a reattach interrupted by teardown must stop, not switch transport ------
+// reattach is radio OFF, wait, radio ON — half-finished at every await. A
+// teardown landing in the middle used to read as "this transport declined, try
+// the other one": the cancelled passthrough allocation fell through to via_radio
+// and sent a NATIVE MBIM RADIO_STATE_OFF into the teardown. The QMI client
+// refuses further requests by itself now, but MBIM is a different transport and
+// still reaches the modem. Worse, the settle timers were armed unconditionally
+// from those callbacks — teardown cancels its timers BEFORE destroying the
+// clients whose callbacks arm them, so such a timer is never cancelled, and by
+// the time it fires `self.mbim` is null and the command throws.
+(() => {
+	let mock3 = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: handlers() });
+	let m3 = modem_mbim.create({
+		id: 'm_reattach', device: '/dev/mock3',
+		config: { apn: 'internet' },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		deps: { transport_open: mock3.transport_open, log: () => null,
+		        on_event: () => null },
+	});
+
+	// no MBIM client and no passthrough: the honest answer is "this backend
+	// cannot do it", and that must stay distinct from a cancellation
+	let plain = 'unset';
+	m3._ensure_pt = (cb) => cb(false);
+	m3.reattach((err) => plain = err?.error);
+	eq(plain, 'unsupported_on_backend', 'reattach: no mbim client is unsupported, not cancelled');
+
+	// Now the race, driven by hand so it is exact: hold the passthrough
+	// callback, tear the session down, then let the callback land — which is
+	// precisely what a destroy does, synchronously, from inside teardown.
+	let got = 'unset', armed = false, pending = null;
+	// teardown destroys the client, so the fake needs the shape the real one has
+	m3.mbim = { command: () => { armed = true; }, destroy: () => null };
+	m3._ensure_pt = (cb) => { pending = cb; };
+	m3.reattach((err) => got = err?.error);
+
+	m3.teardown();
+	pending(false);   // the passthrough answers after the session is gone
+
+	eq(got, 'cancelled', 'reattach: a teardown mid-flight ends it as cancelled');
+	eq(armed, false, 'reattach: ...and no radio command is sent into the teardown');
+})();
+
 done('test_modem_mbim');

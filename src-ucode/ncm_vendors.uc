@@ -40,6 +40,40 @@ const AUTH_CGAUTH = (cid, ctxtype, apn, cfg) => (cfg.username || cfg.password)
 		cfg.username ?? '', cfg.password ?? '')
 	: null;
 
+// Values that cannot survive interpolation into a QUOTED AT string. A quoted AT
+// argument has no escape mechanism at all, so a `"` ends the argument early and
+// the modem answers ERROR; a control character would split the command, which
+// atcmd refuses at its choke point.
+//
+// Either way the command does not take effect — and the setup sequence is
+// best-effort, so it steps on and DIALS. The modem then connects with whatever
+// PDP profile was already programmed: not the configured APN, no error to the
+// user, and a session that looks established. Hence a refusal before the first
+// write rather than a warning after it.
+export function unsendable_conn(cfg)
+{
+	for (let f in [ 'apn', 'username', 'password' ]) {
+		let v = cfg?.[f];
+
+		if (type(v) != 'string')
+			continue;
+
+		if (index(v, '"') >= 0)
+			return f;
+
+		// byte-wise: ucode regexes stop at a NUL, so a control byte behind one
+		// would read as clean (same reasoning as atcmd's ctrl_at)
+		for (let i = 0; i < length(v); i++) {
+			let c = ord(v, i);
+
+			if (c < 0x20 || c == 0x7f)
+				return f;
+		}
+	}
+
+	return null;
+};
+
 // standard 3GPP context definition — the default `define` for most vendors
 function cgdcont(cid, pdp, apn)
 {

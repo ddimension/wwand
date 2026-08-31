@@ -923,9 +923,20 @@ function validate(result)
 		if (type(m.pincode) == 'string' && length(m.pincode) && match(m.pincode, /[^0-9]/))
 			push(result.warnings, sprintf("modem %s: pincode must be digits only", mname));
 
-	for (let sname, sim in result.sims)
+	for (let sname, sim in result.sims) {
 		if (type(sim.pincode) == 'string' && length(sim.pincode) && match(sim.pincode, /[^0-9]/))
 			push(result.warnings, sprintf("wwand_sim %s: pincode must be digits only", sname));
+
+		// The same quoted-AT problem as the interface fields above — and this is
+		// the side that MATTERS, because a per-SIM override is more specific and
+		// therefore wins. Only the pincode was ever checked here, so an APN with
+		// a quote in an override reached the AT builders without a word.
+		for (let f in [ 'apn', 'username', 'password' ])
+			if (type(sim[f]) == 'string' && match(sim[f], /["[:cntrl:]]/))
+				push(result.warnings, sprintf(
+					"wwand_sim %s: %s contains a quote or control character - AT-based backends cannot send it",
+					sname, f));
+	}
 
 
 	// with QMAP active the parent device only carries mux frames — when any

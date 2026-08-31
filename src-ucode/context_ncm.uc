@@ -472,10 +472,25 @@ export function create(opts)
 			return cb({ error: 'unsupported_multi_context',
 			            detail: 'NCM modems support a single active context (one shared netdev)' });
 
+		let ccfg = eff_config();
+
+		// Refuse before the first write. These values are interpolated into
+		// QUOTED AT strings, which have no escape mechanism: the command answers
+		// ERROR, the setup sequence is best-effort and steps on, and the dial
+		// then connects on whatever PDP profile was already programmed — the
+		// wrong APN, no error surfaced, a session that looks fine. config.uc
+		// warns about the INTERFACE fields, but a per-SIM override is what wins
+		// here and it reaches this point unchecked, so the check belongs on the
+		// EFFECTIVE config, which is what eff_config() just produced.
+		let bad = ncm.unsendable_conn(ccfg);
+
+		if (bad)
+			return cb({ error: 'invalid_at_argument', field: bad,
+			            detail: sprintf('%s contains a quote or control character and cannot be sent in a quoted AT command', bad) });
+
 		up_cb = cb;
 		activated = false;
 
-		let ccfg = eff_config();
 		let prof = resolve_cid(ccfg);
 		self.cid = prof.index;
 

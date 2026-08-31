@@ -63,6 +63,12 @@ export function create(opts)
 		timing: { ...TIMING_DEFAULTS, ...(opts.timing ?? {}) },
 
 		state: 'ABSENT',
+		// Which incarnation of this modem a callback belongs to. Bumped FIRST in
+		// teardown, because teardown cancels its timers before destroying the
+		// passthrough clients — and destroying one fires its pending callbacks
+		// synchronously, so a callback that arms a timer arms it AFTER the
+		// cancellation pass has run. Same role as `_gen` in modem.uc.
+		_gen: 0,
 		hub: null,
 		mbim: null,
 		pt: null,          // lazy QMI-over-MBIM passthrough stack { shim, ctl, nas, dsd }
@@ -1039,17 +1045,40 @@ export function create(opts)
 	// online (identical to the HW-proven QMI path), else native RADIO_STATE
 	// off -> on. Implemented here because netsel_ops' AT+COPS fallback rides a
 	// port that is frequently dead in MBIM mode (EG06: AT times out).
+	// A reattach is radio OFF, wait, radio ON — so it is half-finished at every
+	// await, and a teardown landing in the middle used to be read as a reason to
+	// carry on. The generation captured here is what tells the two apart: a
+	// cancellation is the session ending, not a transport declining.
 	self.reattach = function(cb) {
 		cb = cb ?? (() => null);
 
+		let gen = self._gen;
+		let gone = () => self._gen != gen;
+
 		let via_radio = () => {
+			if (gone())
+				return cb({ error: 'cancelled' });
+
+			// a modem that never had an MBIM client is a different answer from
+			// one whose session ended under us — keep them apart
 			if (!self.mbim)
 				return cb({ error: 'unsupported_on_backend' });
 
 			log('notice', 'network reattach (MBIM radio off -> on)');
 			self.mbim.command(bc, 'RADIO_STATE', 'set',
 				{ radio_state: bc.RADIO_STATE_OFF }, () => {
+					// Arming here is what outlived teardown: it cancels its
+					// timers first and destroys the clients after, so a timer
+					// armed from a cancellation callback is never cancelled —
+					// and by the time it fires `self.mbim` is null and the
+					// command below throws.
+					if (gone())
+						return cb({ error: 'cancelled' });
+
 					settle_timer = uloop.timer(self.timing.settle, () => {
+						if (gone() || !self.mbim)
+							return cb({ error: 'cancelled' });
+
 						self.mbim.command(bc, 'RADIO_STATE', 'set',
 							{ radio_state: bc.RADIO_STATE_ON }, (err) => {
 								cb(err ? { error: 'mbim', detail: err } : null,
@@ -1060,10 +1089,21 @@ export function create(opts)
 		};
 
 		self._ensure_pt((up) => {
+			if (gone())
+				return cb({ error: 'cancelled' });
+
 			if (!up)
 				return via_radio();
 
 			self.pt.ctl.request('ALLOCATE_CID', { service: dmsmod.default.service }, (aerr, adata) => {
+				// A cancelled allocation is the session ending. Falling through
+				// to via_radio() here sent a native MBIM RADIO_STATE_OFF into a
+				// teardown — the QMI client refuses further requests by itself
+				// now, but MBIM is a different transport and still reaches the
+				// modem.
+				if (gone() || aerr?.error == 'cancelled')
+					return cb({ error: 'cancelled' });
+
 				if (aerr || !adata?.allocation)
 					return via_radio();
 
@@ -1071,7 +1111,13 @@ export function create(opts)
 
 				log('notice', 'network reattach (passthrough DMS low_power -> online)');
 				qmi_backend.set_opmode(dms, 'low_power', () => {
+					if (gone())
+						return cb({ error: 'cancelled' });
+
 					settle_timer = uloop.timer(self.timing.settle, () => {
+						if (gone())
+							return cb({ error: 'cancelled' });
+
 						qmi_backend.set_opmode(dms, 'online', (err) => {
 							cb(err ? { error: 'qmi', detail: err } : null,
 								{ ok: true, action: 'reattach', via: 'qmi_passthrough' });
@@ -1111,6 +1157,10 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
+		// first, so anything the destroys below call back into can tell that its
+		// session is over (see `_gen` at the declaration)
+		self._gen++;
+
 		for (let t in [ retry_timer, reg_timer, settle_timer, at_drain_timer, sim_poll_timer ])
 			if (t)
 				t.cancel();

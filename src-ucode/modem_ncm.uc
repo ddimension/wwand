@@ -42,6 +42,7 @@ const TIMING_DEFAULTS = {
 // atcmd.uc re-exporting atcmd_parse.
 export const vendor_for = ncm_vendors.vendor_for;
 export const build_pdp_setup = ncm_vendors.build_pdp_setup;
+export const unsendable_conn = ncm_vendors.unsendable_conn;
 export const parse_cgdcont = ncm_vendors.parse_cgdcont;
 export const pdp_setup_matches = ncm_vendors.pdp_setup_matches;
 
