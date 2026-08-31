@@ -30,6 +30,16 @@ if [ -e "/sys/bus/usb/devices/${DEVPATH#/devices/}:1.1/driver" ]; then
 	return 0 2>/dev/null || exit 0
 fi
 
+# the device loads no module by modalias (nothing matches its class-02
+# layout), so qmi_wwan may not be loaded yet when this hotplug fires at
+# boot — bring it up and wait briefly for the driver directory
+if [ ! -d /sys/bus/usb/drivers/qmi_wwan ]; then
+	modprobe qmi_wwan 2>/dev/null
+	sleep 1
+fi
+
+[ -d /sys/bus/usb/drivers/qmi_wwan ] || return 0 2>/dev/null || exit 0
+
 echo "12d1 14ac 02" > /sys/bus/usb/drivers/qmi_wwan/new_id 2>/dev/null
 
 return 0 2>/dev/null || exit 0
