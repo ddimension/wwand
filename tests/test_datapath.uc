@@ -508,8 +508,9 @@ eq(length(fx.matching('ignoring invalid MTU')), 0, 'badmtu: no warning when mtu 
 //
 // The pseudo-mode for old QMI stacks that cannot negotiate the link-layer
 // format (no WDA service): the parent keeps the kernel's 802.3 framing
-// (raw_ip re-asserted to N — idempotent) and gets NOARP (static /32 + device
-// route on a point-to-point hop, the RNDIS optimization).
+// (raw_ip re-asserted to N — idempotent). NO NOARP: the 802.3 function is an
+// L2 bridge into the GGSN segment and the gateway resolves via (proxy-)ARP
+// from the network side (HW-verified on the Huawei E1820, 2026-08-31).
 
 fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/raw_ip': true } });
 
@@ -523,9 +524,7 @@ eq(length(fx.matching('rx_urb_size')), 0, 'eth: no urb write');
 ok(fx.action_index('write /sys/class/net/wwan0/qmi/raw_ip N') > 0, 'eth: raw_ip re-asserted to N (802.3)');
 eq(fx.action_index('write /sys/class/net/wwan0/qmi/raw_ip Y'), -1, 'eth: never raw-ip');
 ok(fx.action_index('link_set wwan0 mtu 1430') > 0, 'eth: configured mtu');
-ok(fx.action_index('link_set wwan0 noarp') > 0, 'eth: NOARP set (p2p hop)');
-ok(fx.action_index('link_set wwan0 noarp') < fx.action_index('link_set wwan0 up'),
-	'eth: NOARP applied before the link comes up');
+eq(fx.action_index('link_set wwan0 noarp'), -1, 'eth: NOARP NOT set (ARP stays on, L2 bridge)');
 ok(fx.action_index('link_set wwan0 up') > 0, 'eth: up');
 
 // already 802.3 (the driver default): the N write is skipped as idempotent

@@ -13,7 +13,7 @@ it, not special cases beside it.
 | `qmimux` | qmi | QMAP through qmi_wwan's own `add_mux` |
 | `vlan` | mbim | cdc_mbim sessions as 802.1q sub-devices |
 | `raw_ip` | all | no multiplexing — the plain raw-IP parent (not an implementation) |
-| `ethernet` | qmi | no multiplexing — the parent keeps the kernel's 802.3 framing (raw_ip off), NOARP point-to-point hop; for QMI stacks without a WDA service (not an implementation) |
+| `ethernet` | qmi | no multiplexing — the parent keeps the kernel's 802.3 framing (raw_ip off), ARP stays on (the function is an L2 bridge into the GGSN segment; the gateway resolves via proxy-ARP); for QMI stacks without a WDA service (not an implementation) |
 | *add-on* | declared | `rmnet_nss` (vendor `qmi_wwan_q`, USB) and `rmnet_nss_mhi` (vendor `pcie_mhi`, PCIe/MHI) keep Qualcomm NSS offload by adopting the children those drivers register |
 
 ### The two axes

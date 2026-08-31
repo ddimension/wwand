@@ -1327,15 +1327,15 @@ export function setup(fx, opts)
 			                        backend, join(', ', missing)) };
 	}
 	else {
-		// 'raw_ip' / 'ethernet' — no mux: plain MTU on the parent (config or 1500)
+		// 'raw_ip' / 'ethernet' — no mux: plain MTU on the parent (config or 1500).
+		// NO NOARP on 'ethernet': the modem's 802.3 function is an L2 bridge
+		// into the GGSN segment, not a point-to-point hop — the gateway
+		// resolves via (proxy-)ARP from the network side, and NOARP leaves the
+		// host with a zero destination MAC the firmware drops. HW-verified on
+		// the Huawei E1820, 2026-08-31: traffic only flowed with ARP on (the
+		// mwan3 track ping through the modem was the proof). RNDIS keeps its
+		// NOARP (true p2p framing) — that one lives in modem_ncm.uc.
 		link_op(fx, 'mtu', netdev, { mtu: child_mtu(opts.mtu, fx, netdev) });
-
-		// 802.3 link, point-to-point hop: the addressing is static (WDS /32 +
-		// device route), so ARP would only burn radio airtime on a neighbour
-		// that is never resolved — the same NOARP optimization the RNDIS
-		// datapath runs (p2p framing, no neighbour resolution needed).
-		if (backend == 'ethernet')
-			link_op(fx, 'noarp', netdev, { noarp: true });
 	}
 
 	// the aggregation buffer belongs on the parent for every QMAP backend —
