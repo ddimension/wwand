@@ -43,6 +43,8 @@ One process. Zero per-context spawns. ~3 MB resident. The measured baseline:
  native (C):   wwand_io.so       — message-oriented cdc-wdm/tty I/O
                                    (protocol-agnostic), rmnet netlink helper
  codec:        qmux.uc, tlv.uc, hex.uc, schema/*.uc  — QMI, declarative
+               schema: ctl/dms/nas/wds/wda/uim/wms/loc/dsd/rat + pdc (carrier
+               config), tmd (thermal mitigation), cat (SIM toolkit)
                mbim.uc, mbim_schema/*.uc             — MBIM, declarative
  session:      transport.uc (hub/routing), client.uc (QMI correlation),
                mbim_client.uc, qmi_over_mbim.uc (QMI-over-MBIM passthrough hub)
@@ -55,6 +57,7 @@ One process. Zero per-context spawns. ~3 MB resident. The measured baseline:
                       modem_common.uc, context_common.uc, backend.uc,
                       qmi_backend.uc, mbim_backend.uc, sim.uc
  system:       netlink.uc (datapath), recovery.uc, board.uc (power/reset/LEDs),
+               carrier_config.uc (MBN selection over PDC — token/indication),
                atcmd.uc + atcmd_parse.uc (+atport),
                discovery.uc (control-type detection), modeswitch/protocol_switch
  integration:  daemon.uc + netsel_ops.uc (registry/policy), config.uc
@@ -86,6 +89,7 @@ flowchart TD
     NL["netlink.uc<br/><small>datapath</small>"]
     RC["recovery.uc"]
     BD["board.uc<br/><small>GPIO, LEDs</small>"]
+    CC["carrier_config.uc<br/><small>MBN over PDC</small>"]
     AT["atcmd.uc"]
     DISC["discovery.uc"]
   end
@@ -119,7 +123,8 @@ flowchart TD
   MC --> MX
   TR --> IO
   AT --> IO
-  D --> NL & RC & BD
+  D --> NL & RC & BD & CC
+  CC --> CL
   NL --> IO
 ```
 

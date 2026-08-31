@@ -1148,6 +1148,7 @@ when called from LuCI).
 | `modem_sim_pin_verify` | `modem`, `pin?` | manual PIN release past the low-retry safety block (the daemon refuses to auto-enter with ≤1 attempt left, to avoid a PUK lock); `pin` overrides the configured one for this attempt (write ACL) |
 | `modem_sim_puk` | `modem`, `puk`, `new_pin` | **PUK entry**: unblock a PUK-locked SIM and set a NEW PIN in one operation (UIM Unblock PIN → native MBIM PIN/PUK1 → `AT+CPIN="puk","pin"`; the chain never re-tries a PUK on a second transport — wrong PUKs brick the SIM). PUK = 8 digits, new PIN 4–8 digits. On success the modem restarts its bring-up with the new PIN as one-shot override; **update the configured `pincode` afterwards** (write ACL) |
 | `modem_esim` | `modem`, `op`, … | eSIM (list/enable/disable/eid/download/…); needs the optional `wwand-esim` package |
+| `modem_euicc_profiles` | `modem`, `slot` | the MODEM's own eUICC profile read (QMI UIM), no lpac. For a card lpac structurally cannot enumerate: an SGP.02 **M2M eUICC** has no local ES10 — it is managed over the air by its SM-SR and refuses STORE DATA — so host-driven enumeration is impossible by design there, while the modem's own interface does not go through ES10 at all. Read-only. Not every firmware implements it (both modems here answer *not supported*), and a failure on the FIRST index is reported as `no_native_euicc` so a caller falls back to lpac rather than believing in an empty card. Note the eUICC is not necessarily in the ACTIVE slot — pass the slot that holds it |
 | `modem_apdu` | `modem`, `op`, … | raw ISO-7816 APDU channel (advanced) |
 | `modem_sms_list` | `modem`, `storage?` | list stored SMS (decoded: sender, timestamp, text, multipart merged); `storage` `SM` (SIM, default) or `ME` (modem) |
 | `modem_sms_read` | `modem`, `storage?`, `index` | read one stored SMS by index |
@@ -1464,6 +1465,16 @@ context config before registration; if it persists, check `apn` and `pdp_type`
 on a valid NSA anchor but never gets an NR carrier, `modem_cells` → `dsd` shows
 `nr: false`: the network is not granting EN-DC for this subscription
 (DCNR-restricted / the tariff excludes 5G). Not a wwand or modem issue.
+
+**Card diagnostics.** `status` → `sim_busy` (bool) and `sim_note` (string or
+null) carry what the card last said about ITSELF, from the UIM indications
+wwand arms: a busy card (reads of ICCID, IMSI and the PIN state fail until it
+clears, which is why those rows can be missing), a provisioning session the card
+closed and why — `card removed`, `mandatory file missing` with the file id,
+`internal card recovery` — and a card activation that did not complete. Before
+these existed the card simply stopped answering and the protocol-error counter
+climbed at a modem that was explaining itself the whole time. Both are cleared
+on teardown: they belong to the card we were talking to.
 
 **Thermal.** `status` → `temperature` (`{ celsius, source }`, read over AT:
 Quectel `QTEMP` / MeiG `TEMP` / Huawei `CHIPTEMP` / SIMCom `CPMUTEMP` / Fibocom
