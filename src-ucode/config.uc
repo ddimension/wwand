@@ -193,6 +193,10 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	// vendor configured it; 'disabled' stops the card expecting a terminal that
 	// can render proactive commands, which a headless CPE cannot.
 	'cat_mode',
+	// Put the RADIO to sleep while no context of this modem is up. For
+	// battery and solar installs; off by default, because a sleeping radio is
+	// not reachable and most routers want the opposite.
+	'lowpower',
 	// The INITIAL-ATTACH bearer, when it differs from the data connection.
 	// Unset = the attach profile keeps using the interface's APN, which is the
 	// common case and stays the default.
@@ -275,6 +279,10 @@ function modem_from_section(s)
 		at_mbim: s.at_mbim,
 		// SIM toolkit routing, see cat.uc. null = do not touch the modem.
 		cat_mode: (s.cat_mode != null && s.cat_mode != '') ? lc(s.cat_mode) : null,
+		// radio low-power while nothing is up (battery/solar). Default off: a
+		// modem in low power has no radio, so an incoming-reachable install
+		// must not get this by accident.
+		lowpower: bool_opt(s.lowpower, false),
 		// Initial-attach bearer. The attach happens BEFORE wwand activates a
 		// data session, and on some networks it needs its own APN and
 		// credentials — an IMS or admin bearer — while the data connection uses

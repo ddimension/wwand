@@ -6,6 +6,8 @@
 
 'use strict';
 
+import * as carrier from 'wwand.carrier_config';
+
 export function install(self, o)
 {
 	let log = o.log;
@@ -43,6 +45,41 @@ export function install(self, o)
 		log('warn', sprintf('modem %s: admin-requested modem reset (backend)', ref));
 		entry.modem.reset((err, res) =>
 			cb(err, err ? null : { ...res, action: 'backend' }));
+	};
+
+	// Carrier configuration (MBN) over QMI PDC: what the modem runs, what else
+	// it has, and selecting one. `op` = 'list' | 'get' | 'set'.
+	//
+	// A selection only takes effect after a modem reset, and the reply says so
+	// rather than implying the radio changed underneath the caller — PDC reports
+	// it as `pending` until then.
+	self.modem_carrier_config = function(ref, op, id, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		if (!entry.modem?.pdc)
+			return cb({ error: 'no_pdc',
+			            detail: 'this modem has no QMI PDC service (carrier config unavailable)' });
+
+		if (op == 'list')
+			return carrier.list(entry.modem, (err, l) =>
+				err ? cb({ error: 'pdc', detail: err }) : cb(null, { configs: l }));
+
+		if (op == 'get')
+			return carrier.selected(entry.modem, (err, sel) =>
+				err ? cb({ error: 'pdc', detail: err }) : cb(null, sel));
+
+		if (op == 'set') {
+			if (!id || id == '')
+				return cb({ error: 'no_config_id' });
+
+			return carrier.select(entry.modem, id, (err, r) =>
+				err ? cb({ error: 'pdc', detail: err }) : cb(null, r));
+		}
+
+		cb({ error: 'invalid_op', op: op });
 	};
 
 	// manual hardware repower (ubus modem_repower): reset-GPIO pulse when one

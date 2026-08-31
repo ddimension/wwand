@@ -840,4 +840,49 @@ for (let i = 0; i < 200000 && !_all_done; i++)
 	eq(fetched, [ 4 ], 'refresh: a walk left pending at stop does not disable the next');
 })();
 
+// --- the attach bearer can differ from the data connection -------------------
+// The attach happens BEFORE any data session, and some networks want their own
+// APN and credentials for it. Unset init_apn means "the same as the interface",
+// which is what every deployment did before these options existed.
+(() => {
+	let mods = [];
+	let mkwds = (current) => ({
+		request: (name, args, cb) => {
+			if (name == 'GET_PROFILE_SETTINGS')
+				return cb(null, current);
+			push(mods, args);
+			cb(null, {});
+		},
+	});
+
+	let mkctx = (mcfg) => context_mod.create({
+		name: 'atp',
+		modem: { wds_cfg: mkwds({ apn: 'internet', pdp_type: 3, auth: 0, username: '' }),
+		         config: mcfg, alloc: () => null, attach_context: () => null },
+		config: { apn: 'internet', pdp_type: 'ipv4v6' },
+		deps: { log: () => null, on_event: () => null },
+	});
+
+	// no init_apn: the interface APN is already on the profile, nothing to write
+	mkctx({}).ensure_attach_profile(1, () => null);
+	eq(length(mods), 0, 'attach: without init_apn the interface APN is used, and matches');
+
+	// init_apn set: the ATTACH profile gets its own APN, not the data one
+	mods = [];
+	mkctx({ init_apn: 'ims', init_auth: 'chap',
+	        init_user: 'u', init_pass: 'p' }).ensure_attach_profile(1, () => null);
+	eq(length(mods), 1, 'attach: a distinct init_apn writes the profile');
+	eq(mods[0].apn, 'ims', 'attach: ...with the attach APN, not the data APN');
+	eq(mods[0].username, 'u', 'attach: and its own user');
+	eq(mods[0].password, 'p', 'attach: and password');
+	ok(mods[0].auth != null, 'attach: and auth method');
+
+	// credentials alone do not touch a profile whose APN already matches — the
+	// config parser warns about that combination, and it must not silently
+	// apply a user to whatever APN the profile happened to hold
+	mods = [];
+	mkctx({ init_user: 'u' }).ensure_attach_profile(1, () => null);
+	eq(length(mods), 0, 'attach: credentials without init_apn write nothing');
+})();
+
 done('test_context');

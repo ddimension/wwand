@@ -741,4 +741,61 @@ eq(length(wan6_calls), 0, 'wan6 gate: a v4-only PDP never qualifies');
 w6.shutdown();
 
 uloop.run();
+// --- option lowpower: park the radio when nothing on this modem is up --------
+// For battery and solar installs. Two things make it dangerous if done naively,
+// and both are asserted: it must fire only on an OPERATOR down (a transient
+// loss keeps the interface up by design and is exactly when the radio must
+// stay on), and only when no OTHER context of the same modem still wants up —
+// two interfaces commonly share one modem.
+(() => {
+	let ops = [];
+	let mk = (lp) => {
+		let fake = {
+			modem: { create: (o) => ({
+				id: o.id, state: 'READY', config: o.config,
+				start: () => null, stop: () => null,
+				set_opmode: (mode, cb) => { push(ops, o.id + ':' + mode); cb(null); },
+			}) },
+			context: { create: (o) => ({
+				state: 'CONNECTED', name: o.name,
+				down: (cb) => cb ? cb() : null,
+			}) },
+		};
+		let d = daemon_mod.create({ timing: TIMING,
+			deps: { log: () => null, load_qmi: () => fake } });
+		d.apply_config(config.parse({ network: {
+			m0:   { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi',
+			        lowpower: lp },
+			wanA: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+			        device: 'l3a', apn: 'a', pdp_type: 'ipv4' },
+			wanB: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+			        device: 'l3b', apn: 'b', pdp_type: 'ipv4' },
+		} }));
+		return d;
+	};
+
+	// both interfaces want up; downing one must NOT park the shared radio
+	let d = mk('1');
+	for (let n, e in d.contexts)
+		e.wanted = true;
+
+	ops = [];
+	d.context_down('wanA', () => null);
+	eq(ops, [ ], 'lowpower: the other interface still wants the modem, radio stays on');
+
+	// now the last one goes down too
+	d.context_down('wanB', () => null);
+	eq(ops, [ 'm0:low_power' ], 'lowpower: with nothing left up, the radio is parked');
+
+	// and with the option off, nothing happens at all
+	let d2 = mk('0');
+	for (let n, e in d2.contexts)
+		e.wanted = true;
+
+	ops = [];
+	d2.context_down('wanA', () => null);
+	d2.context_down('wanB', () => null);
+	eq(ops, [ ], 'lowpower: off by default, the radio is never parked');
+})();
+
 done('test_daemon');

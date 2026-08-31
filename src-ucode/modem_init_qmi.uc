@@ -147,8 +147,9 @@ export function install(self, o)
 							// when the modem throttles ITSELF. Brought up after
 							// DSD so a modem lacking either still proceeds.
 							let after_dsd = () => self._install_thermal(
-								() => self._apply_cat_mode(
-									() => self._read_info(step_at)));
+								() => self._install_pdc(
+									() => self._apply_cat_mode(
+										() => self._read_info(step_at))));
 
 							if (self.services[sprintf('%d', dsdmod.default.service)]) {
 								self.alloc(dsdmod.default, (e5, dsd) => {

@@ -116,6 +116,8 @@ config wwand_modem 'm0'
 	#                                # wifi-device `path`); bare '3-1' works too
 	# option protocol 'qmi'          # pin the control protocol; unset = detect
 	# option cat_mode 'disabled'     # SIM toolkit routing; unset = leave as-is
+	# option init_apn 'ims'          # attach bearer, when it differs from the data one
+	# option lowpower '1'            # park the radio while nothing is up (battery/solar)
 	option pincode '1234'
 	option sim_slot '1'
 	option modes 'lte,nr5g'
@@ -1139,6 +1141,7 @@ when called from LuCI).
 | `modem_plmn_set` | `modem`, `list_type`, `entries` | write a PLMN list to the SIM/modem; `list_type` = `user`\|`nas`\|`fplmn`; `entries` = `[{mcc,mnc[,gsm,utran,eutran,ngran]}]` (fplmn carries no AcT). Reads back for cross-verification (write ACL) |
 | `modem_plmn_restore` | `modem` | re-apply the modem's effective configured list (per-SIM `plmn_list` wins over the modem's) — the same list restored before every radio-on (write ACL) |
 | `modem_sim_slots` | `modem` | `slots[]` — physical slots: card presence, active, ICCID, eUICC flag, EID, per-slot `cpin`/`atr` (Fibocom `AT+ESLOTSINFO` carries all six per slot; other vendors via their own slot recipes) — plus `multisim`, the read-only shape summary below |
+| `modem_carrier_config` | `modem`, `op`, `id` | carrier configuration (MBN) over QMI PDC. `op` = `list` (every config with its description and version) \| `get` (the active one, plus `pending` when a switch is waiting for a reset) \| `set` (select `id`). A selection takes effect only after a **modem reset** and is reported as `pending` until then. The protocol-native form of what `AT+QMBNCFG` does on Quectel alone; wwand selects among the blobs the vendor shipped and never writes or deletes one |
 | `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
 | `modem_sim_switch_slot` | `modem`, `slot` | switch the active physical SIM slot (drops the connection) |
 | `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
@@ -1318,6 +1321,27 @@ applied in two stages: when errors first cross the limit the modem gets one
 hardware repower/reset; only when they reach **2× the limit** does it reboot (and
 that reboot is gated by `failreboot` — with `failreboot 0` it keeps retrying
 instead). A success resets the counter.
+
+**`option init_apn` / `init_auth` / `init_user` / `init_pass`** — the
+**initial-attach bearer**, when the network wants a different one from the data
+connection. The attach happens *before* wwand activates any session, and some
+networks want their own APN and credentials for it (an IMS or admin bearer)
+while the data connection uses another. Unset means "the same as the interface",
+which is what every deployment did before these existed and stays the default.
+Credentials come along only with an `init_apn`: applying them to whatever APN
+the attach profile already held would be a change nobody asked for, and a
+warning says so.
+
+**`option lowpower`** (default off) parks the **radio** once no context of this
+modem is up — DMS low-power on QMI, `AT+CFUN=0` on NCM. For battery and solar
+installs, where an idle modem still spends a couple of watts holding a
+registration nobody is using. Two conditions, both deliberate: only on an
+**operator** down, never on a transient loss (those keep the interface up by
+design and are exactly when the radio must stay on), and only when **no other
+context of the same modem** still wants up — two interfaces commonly share one
+modem. Coming back is netifd's job: an `ifup` runs the normal bring-up, which
+sets the mode online again. Off by default because a parked radio is not
+reachable, which is the opposite of what most routers want.
 
 **`option cat_mode`** (`disabled` | `gobi` | `android` | `decoded` |
 `decoded_pullonly` | `custom_raw` | `custom_decoded`; unset = leave the modem

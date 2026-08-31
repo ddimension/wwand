@@ -260,6 +260,28 @@ export function create(opts)
 	let last_reg_stat = null;    // last logged registration <stat> (log on change only)
 	let poll;   // the register poll (forward-declared; the URC fast path re-runs it)
 
+	// Backend operation `set_opmode`, the AT spelling. CFUN 0 is the radio off
+	// (what `option lowpower` wants), CFUN 1 is on, CFUN 1,1 is the reset.
+	// `offline` maps to 0 as well: AT has no separate offline state.
+	self.set_opmode = function(mode, cb) {
+		cb = cb ?? (() => null);
+
+		if (!self.at)
+			return cb({ error: 'unsupported', detail: 'no at channel' });
+
+		const AT_MODE = {
+			online: 'AT+CFUN=1', low_power: 'AT+CFUN=0',
+			offline: 'AT+CFUN=0', reset: 'AT+CFUN=1,1',
+		};
+
+		let cmd = AT_MODE[mode];
+
+		if (!cmd)
+			return cb({ error: 'unsupported', mode: mode });
+
+		self.at.send(cmd, (e) => cb(e ?? null), { timeout: 15000 });
+	};
+
 	// shared radio cycle: CFUN 0 -> settle -> CFUN 1 -> settle -> then()
 	// (the recovery ladder's opmode_cycle and step_attach's re-attach both
 	// use exactly this dance)

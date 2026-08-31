@@ -89,10 +89,10 @@ set(WWAND_UCODE_MODULES
   codec/mbim_schema/fibocom.uc codec/mbim_schema/ms_basic_connect_ext.uc
   codec/mbim_schema/qmi_passthrough.uc codec/mbim_schema/quectel.uc
   codec/schema/cat.uc codec/schema/ctl.uc codec/schema/dms.uc codec/schema/dsd.uc
-  codec/schema/loc.uc codec/schema/merge.uc codec/schema/nas.uc
+  codec/schema/loc.uc codec/schema/merge.uc codec/schema/nas.uc codec/schema/pdc.uc
   codec/schema/rat.uc codec/schema/tmd.uc codec/schema/uim.uc codec/schema/wda.uc
   codec/schema/wds.uc codec/schema/wms.uc
-  config_check.uc config.uc context_common.uc context_mbim.uc
+  carrier_config.uc config_check.uc config.uc context_common.uc context_mbim.uc
   context_monitor_qmi.uc context_ncm.uc context.uc ctx_settings.uc daemon.uc
   discovery.uc hwops.uc log.uc mbim_backend.uc mbim_client.uc
   modem_datapath_qmi.uc

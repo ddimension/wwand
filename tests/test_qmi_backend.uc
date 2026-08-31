@@ -23,6 +23,7 @@ import * as uimmod from 'wwand/codec/schema/uim.uc';
 import * as tlvmod from 'wwand/codec/tlv.uc';
 import * as tmdmod from 'wwand/codec/schema/tmd.uc';
 import * as catmod from 'wwand/codec/schema/cat.uc';
+import * as pdcmod from 'wwand/codec/schema/pdc.uc';
 
 uloop.init();
 
@@ -367,5 +368,45 @@ eq(tlvmod.pack(C.SET_CONFIGURATION.req, { mode: catmod.MODE_DISABLED }),
 eq(catmod.default.service, 0x0A, 'cat: service id');
 eq(catmod.mode_name(0), 'disabled', 'cat: mode names');
 eq(catmod.mode_name(99), 'unknown (99)', 'cat: an undefined mode is not invented');
+
+// --- PDC: two traps, both found on hardware ---------------------------------
+// PDC answers on INDICATIONS carrying the request's token, so the response says
+// nothing. Both of the wire details below cost a round on the RG650E.
+let P = pdcmod.default.messages;
+
+// 1. The config-type TLV id is 0x01 in GET_SELECTED_CONFIG but 0x11 in
+//    LIST_CONFIGS — same field, two ids, because libqmi defines it once as a
+//    common-ref and once inline. The wrong one is not a decode problem: the
+//    modem answers MISSING_ARGUMENT (QMI error 17), which is how it was found.
+eq(P.GET_SELECTED_CONFIG.req.config_type.t, 0x01,
+	'pdc: get-selected takes the config type at 0x01 (common-ref)');
+eq(P.LIST_CONFIGS.req.config_type.t, 0x11,
+	'pdc: list-configs takes it at 0x11 (its own inline definition)');
+
+eq(tlvmod.pack(P.GET_SELECTED_CONFIG.req, { config_type: 1, token: 7 }),
+	tlv(0x01, u32(1)) + tlv(0x10, u32(7)),
+	'pdc: ...and the request encodes with both TLVs the modem demands');
+
+// 2. Description is length-prefixed. Read as a bare string it came back with
+//    the length byte glued to the front — HW: "\x13Commercial-DT-VOLTE".
+let ci = tlvmod.unpack(P.GET_CONFIG_INFO_IND.ind,
+	tlv(0x10, u32(7)) + tlv(0x01, u32(0)) + tlv(0x11, u32(50036)) +
+	tlv(0x12, u8(19) + 'Commercial-DT-VOLTE') + tlv(0x13, u32(167845663)));
+eq(ci.description, 'Commercial-DT-VOLTE', 'pdc: the description drops its length prefix');
+eq(ci.total_size, 50036, 'pdc: size');
+eq(ci.token, 7, 'pdc: the token that ties it to our request');
+
+// the list indication: an array of { type, opaque id }
+let pl = tlvmod.unpack(P.LIST_CONFIGS_IND.ind,
+	tlv(0x10, u32(3)) + tlv(0x01, u32(0)) +
+	tlv(0x11, u8(1) + u32(1) + u8(2) + u8(0xAB) + u8(0xCD)));
+eq(length(pl.configs), 1, 'pdc: one config listed');
+eq(pl.configs[0].config_type, pdcmod.CONFIG_TYPE_DEVICE, 'pdc: a carrier (device) config');
+eq(pl.configs[0].id, [ 0xAB, 0xCD ], 'pdc: the id is opaque bytes, round-tripped');
+
+// the write half is deliberately absent — those blobs are firmware, and a wrong
+// one is a brick rather than a misconfiguration
+eq(P.LOAD_CONFIG, null, 'pdc: wwand never writes a carrier config');
+eq(P.DELETE_CONFIG, null, 'pdc: nor deletes one');
 
 done('test_qmi_backend');

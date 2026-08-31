@@ -1509,6 +1509,42 @@ export function create(opts)
 		return settings_result(name, entry, derive_netdev(entry));
 	};
 
+	// Declared HERE, before context_down uses it: a ucode `function` further
+	// down is not hoisted into an enclosing function body, so the call failed
+	// at RUN time with "undeclared variable" rather than at parse time.
+	//
+	// `option lowpower`: park the RADIO once nothing on this modem is up. For
+	// battery and solar installs, where an idle modem still costs a couple of
+	// watts holding a registration nobody is using.
+	//
+	// Only on an OPERATOR down, never on a transient loss — those keep the
+	// interface up by design and are exactly when the radio must stay on. And
+	// only when no OTHER context of the same modem still wants to be up: two
+	// interfaces commonly share one modem, and putting the radio to sleep for
+	// one of them would take the other down with it.
+	//
+	// Coming back is netifd's job: an ifup runs the normal bring-up, which sets
+	// the operating mode online again.
+	let maybe_lowpower = (entry) => {
+		let mref = entry?.cfg?.modem;
+		let m = mref ? self.modems[mref] : null;
+
+		if (!m?.modem || !m.cfg?.lowpower || !m.modem.set_opmode)
+			return;
+
+		for (let n, e in self.contexts)
+			if (e !== entry && e.cfg?.modem == mref && e.wanted)
+				return;   // another interface on this modem still wants the radio
+
+		log('notice', sprintf('modem %s: no context up and `option lowpower` is set — parking the radio',
+			mref));
+
+		m.modem.set_opmode('low_power', (err) => {
+			if (err)
+				log('warn', sprintf('modem %s: low-power failed: %J', mref, err));
+		});
+	};
+
 	self.context_down = function(ref, cb) {
 		let name = self.resolve_context(ref);
 		let entry = name ? self.contexts[name] : null;
@@ -1545,8 +1581,12 @@ export function create(opts)
 		entry.wanted = false;
 		entry.reconnect_on_register = false;
 		clear_reconnect(name);
-		entry.ctx.down(() => cb(null, {}));
+		entry.ctx.down(() => {
+			cb(null, {});
+			maybe_lowpower(entry);
+		});
 	};
+
 
 	self.context_status = function(ref) {
 		let name = self.resolve_context(ref);

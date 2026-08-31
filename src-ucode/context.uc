@@ -283,7 +283,20 @@ export function create(opts)
 	// activation time — this only fixes the *attach* that happens earlier.
 	self.ensure_attach_profile = function(index, done) {
 		let wds = self.modem.wds_cfg;
-		let apn = cfg('apn');
+		let mc = self.modem.config ?? {};
+
+		// The INITIAL-ATTACH bearer, when the network wants a different one from
+		// the data connection. The attach happens before wwand activates any
+		// session, and some networks want their own APN and credentials for it —
+		// an IMS or admin bearer — while the data connection uses another.
+		//
+		// `init_apn` unset means "the same as the interface", which is what
+		// every deployment did before these options existed and stays the
+		// default. Credentials come along only with an APN: applying them to
+		// whatever APN the profile already held would be a change nobody asked
+		// for (config.uc warns about that combination).
+		let init = (mc.init_apn != null && mc.init_apn != '');
+		let apn = init ? mc.init_apn : cfg('apn');
 
 		// '#N' means "use modem profile N as-is" — never rewrite it
 		if (!wds || !index || (apn != null && substr(apn, 0, 1) == '#'))
@@ -322,7 +335,16 @@ export function create(opts)
 			let need_apn = configured && (card_apn != apn);
 			let need_pdp = (want_pdp != null && data.pdp_type != want_pdp);
 
-			if (!need_apn && !need_pdp) {
+			// the attach bearer's own credentials, when one was named. Read
+			// back for comparison where the modem returns them — the password
+			// never is, so a configured one always writes.
+			let want_auth = (init && mc.init_auth != null)
+				? (AUTH_MAP[mc.init_auth] ?? wdsmod.AUTH_BOTH) : null;
+			let need_auth = init && ((want_auth != null && data.auth != want_auth) ||
+			                         (mc.init_user != null && data.username != mc.init_user) ||
+			                         mc.init_pass != null);
+
+			if (!need_apn && !need_pdp && !need_auth) {
 				log('debug', sprintf('attach profile %d up to date (apn %J pdp %J)',
 					index, data.apn, data.pdp_type));
 				return done(false);
@@ -335,11 +357,24 @@ export function create(opts)
 				mod.apn_disabled = 0;
 			}
 
+			if (need_auth) {
+				if (want_auth != null)
+					mod.auth = want_auth;
+
+				if (mc.init_user != null)
+					mod.username = mc.init_user;
+
+				if (mc.init_pass != null)
+					mod.password = mc.init_pass;
+			}
+
 			if (want_pdp != null)
 				mod.pdp_type = want_pdp;
 
-			log('notice', sprintf('attach profile %d: apn %J, pdp %J->%J',
-				index, need_apn ? apn : card_apn, data.pdp_type, want_pdp));
+			log('notice', sprintf('attach profile %d: apn %J%s, pdp %J->%J',
+				index, need_apn ? apn : card_apn,
+				init ? ' (init_apn — distinct from the data APN)' : '',
+				data.pdp_type, want_pdp));
 
 			wds.request('MODIFY_PROFILE', mod, (e2) => {
 				if (torn_down(e2, wds))

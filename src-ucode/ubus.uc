@@ -122,6 +122,15 @@ export function publish(conn, daemon, log)
 				daemon.modem_sim_slots(req.args.modem, ok_reply(reply))),
 		},
 
+		// carrier configuration (MBN) over QMI PDC — list / get / set. The
+		// protocol-native form of what `AT+QMBNCFG` does on Quectel only.
+		modem_carrier_config: {
+			args: { modem: '', op: '', id: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_carrier_config(req.args.modem, req.args.op ?? 'get',
+					req.args.id, ok_reply(reply))),
+		},
+
 		// the modem's own eUICC profile read (no lpac). For an M2M eUICC whose
 		// ES10 is SM-SR-managed, this is the only enumeration that works.
 		modem_euicc_profiles: {

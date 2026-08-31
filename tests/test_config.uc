@@ -199,6 +199,60 @@ ok(length(filter(r.warnings, (w) => match(w, /cat_mode 'off' is not one of/))) =
 	'cat_mode: an undefined mode is reported');
 eq(r.modems.m0.cat_mode, null, 'cat_mode: ...and dropped, so the modem keeps its own');
 
+// The initial-attach bearer, when the network wants a different one from the
+// data connection. Unset = same as the interface, which is what every
+// deployment did before these options existed.
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0',
+		       init_apn: 'ims', init_auth: 'CHAP', init_user: 'u', init_pass: 'p' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.init_apn, 'ims', 'attach: init_apn parsed');
+eq(r.modems.m0.init_auth, 'chap', 'attach: init_auth lowercased');
+eq(r.modems.m0.init_user, 'u', 'attach: init_user parsed');
+
+// an auth method the profile write cannot express would silently become "both"
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0',
+		       init_apn: 'ims', init_auth: 'eap' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+ok(length(filter(r.warnings, (w) => match(w, /init_auth 'eap' is not one of/))) == 1,
+	'attach: an unsupported auth method is reported');
+eq(r.modems.m0.init_auth, null, 'attach: ...and dropped rather than guessed');
+
+// credentials without an APN would apply to whatever APN the profile held
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', init_user: 'u' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+ok(length(filter(r.warnings, (w) => match(w, /init_user\/init_pass without init_apn/))) == 1,
+	'attach: credentials without an APN are flagged');
+
+// `option lowpower` parks the radio when nothing is up. Off by default: a modem
+// in low power has no radio, and most routers want to stay reachable.
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.lowpower, false, 'lowpower: off unless asked for');
+
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', lowpower: '1' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.lowpower, true, 'lowpower: enabled when set');
+
 // --- old-style compat --------------------------------------------------------
 
 r = padopt({

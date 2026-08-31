@@ -30,6 +30,8 @@ import * as nasmod from 'wwand.codec.schema.nas';
 import * as uimmod from 'wwand.codec.schema.uim';
 import * as tmdmod from 'wwand.codec.schema.tmd';
 import * as catmod from 'wwand.codec.schema.cat';
+import * as pdcmod from 'wwand.codec.schema.pdc';
+import * as carrier from 'wwand.carrier_config';
 // loc.uc + wms.uc are lazy-loaded (require of a *_lazy shim) only when GPS /
 // SMS is actually used, keeping those schemas off the heap on the common path.
 
@@ -145,6 +147,7 @@ export function create(opts)
 		sim_note: null,
 		active_slot: null,  // which physical slot holds the card in use (slot status)
 		cat: null,          // toolkit client, alive only while cat_mode is applied
+		pdc: null,          // carrier-config client, when the modem has PDC
 		tmd: null,          // thermal-mitigation client, when the modem has TMD
 		thermal: null,      // { devices: [{id,label,max,level}], mitigated, level }
 		// Lifecycle generation. Bumped by teardown, so any callback still in
@@ -686,6 +689,44 @@ export function create(opts)
 			}, { no_recovery: true });
 	};
 
+	// Carrier configuration (MBN) over PDC. Read-only at init: bring the client
+	// up and subscribe, so `modem_carrier_config` can answer without a round of
+	// setup on every call. Nothing is selected here — switching is an explicit
+	// operator action, because it only takes effect after a modem reset.
+	//
+	// This is the protocol-native form of the Quectel-only `AT+QMBNCFG` quirk,
+	// which stays where it is: that one asks the modem to AUTO-select on every
+	// boot, which is a different thing from reporting what it chose, and it is
+	// the only lever on firmware without PDC.
+	self._install_pdc = function(cb) {
+		cb = cb ?? (() => null);
+
+		if (!self.services[sprintf('%d', pdcmod.default.service)])
+			return cb();
+
+		let gen = self._gen;
+
+		self.alloc(pdcmod.default, (err, pdc) => {
+			if (err || !pdc)
+				return cb();
+
+			if (self._gen != gen)
+				return self.release(pdc);
+
+			self.pdc = pdc;
+			carrier.install(self);
+
+			// without this the modem accepts every PDC request and indicates
+			// nothing, which reads exactly like a modem that has no PDC
+			pdc.request('REGISTER', { enable: 1 }, (rerr) => {
+				if (rerr)
+					log('debug', 'pdc registration refused — carrier config unavailable');
+
+				cb();
+			}, { no_recovery: true });
+		});
+	};
+
 	// SIM toolkit routing. Only ever runs when `option cat_mode` says so — the
 	// default is to leave the modem exactly as the vendor configured it, because
 	// changing toolkit behaviour unasked can break a working deployment in ways
@@ -1027,6 +1068,20 @@ export function create(opts)
 
 	// registration-detail collector (regdetail.uc); kept as a method for
 	// daemon/status callers.
+	// Backend operation `set_opmode` (docs/backend-interface.md): online /
+	// low_power / offline / reset. Documented as part of the contract and never
+	// actually exposed as a modem method — the recovery ladder reached past it
+	// straight to qmi_backend. `option lowpower` is the first caller that has to
+	// be protocol-neutral, so here it is.
+	self.set_opmode = function(mode, cb) {
+		cb = cb ?? (() => null);
+
+		if (!self.dms)
+			return cb({ error: 'unsupported', detail: 'no dms client' });
+
+		qmi_backend.set_opmode(self.dms, mode, (err) => cb(err ?? null));
+	};
+
 	self.collect_regdetail = function(cb) {
 		regdetail.collect(self, log, cb);
 	};
@@ -1198,12 +1253,21 @@ export function create(opts)
 		self._gen++;
 
 		for (let c in [ self.ctl, self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg,
-		               self.dsd, self.tmd, self.cat, self.wms ])
+		               self.dsd, self.tmd, self.cat, self.wms, self.pdc ])
 			if (c)
 				c.destroy();
 
 		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = null;
-		self.dsd = self.tmd = self.cat = self.wms = null;
+		self.dsd = self.tmd = self.cat = self.wms = self.pdc = null;
+
+		// fail any PDC operation still waiting on an indication that will now
+		// never come, and clear the table so a rebuild can install again
+		for (let key, w in (self._pdc_waits ?? {})) {
+			w.timer?.cancel();
+			w.cb({ error: 'cancelled', detail: 'modem torn down' }, null);
+		}
+
+		self._pdc_waits = null;
 		// the readings belong to the client that is going away; keeping them
 		// would show a stale mitigation level for a modem we no longer talk to
 		self.thermal = null;
