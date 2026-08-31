@@ -100,6 +100,13 @@ export function install(self, o)
 
 						if (s)
 							self.signal = { ...(self.signal ?? {}), ...s };
+						else
+							// answered, but no entry we can map (e.g. a
+							// GSM-only stack whose rssi row is not LTE) —
+							// the CSQ floor still fills the generic rssi
+							modem_common.telemetry_at(self).send('AT+CSQ', (aerr, ares) =>
+								modem_common.sig_csq_floor(self,
+									aerr ? null : modem_common.parse_csq(ares?.lines)));
 					}
 					else if (s2err)
 						modem_common.telemetry_at(self).send('AT+CSQ', (aerr, ares) =>
@@ -147,17 +154,25 @@ export function install(self, o)
 		}, { no_recovery: true });
 	};
 
-	// GET_SIGNAL_STRENGTH (NAS 0x0020) LTE entries -> the SIGNAL_INFO shape,
+	// GET_SIGNAL_STRENGTH (NAS 0x0020) entries -> the SIGNAL_INFO shape,
 	// so status renders identically. The RSSI u8 is the NEGATIVE dBm value
 	// (128 = -128 dBm, the no-signal floor — qmicli-verified on the E1820).
 	// RSRQ/SNR/RSRP are signed dBm/0.1 dB like the modern message carries.
+	// Non-LTE rows map onto the gsm_rssi / wcdma fields so a 2G/3G-camped
+	// modem (the E1820 on GSM) still reports its signal.
 	strength_signal = (sdata) => {
-		let lte = null;
+		let lte = null, gsm = null, wcdma = null;
 
-		for (let e in (sdata?.rssi_list ?? []))
+		for (let e in (sdata?.rssi_list ?? [])) {
 			if (e.radio_if == 8)
 				lte = { rssi: (e.rssi != null && e.rssi <= 128) ? -e.rssi : null,
 				        rsrq: null, rsrp: null, snr: null };
+			else if (e.radio_if == 4)
+				gsm = (e.rssi != null && e.rssi <= 128) ? -e.rssi : null;
+			else if (e.radio_if == 5)
+				wcdma = { rssi: (e.rssi != null && e.rssi <= 128) ? -e.rssi : null,
+				          ecio: null };
+		}
 
 		if (sdata?.rsrq?.radio_if == 8) {
 			lte ??= { rssi: null, rsrq: null, rsrp: null, snr: null };
@@ -174,7 +189,13 @@ export function install(self, o)
 			lte.rsrp = sdata.lte_rsrp;
 		}
 
-		return lte ? { lte: lte } : null;
+		let out = {};
+
+		if (lte) out.lte = lte;
+		if (gsm != null) out.gsm_rssi = gsm;
+		if (wcdma) out.wcdma = wcdma;
+
+		return length(keys(out)) ? out : null;
 	};
 
 	telem_watch = modem_common.watch_driver({

@@ -238,6 +238,13 @@ function tel_quectel_signal(self, cb)
 						if (slot == 'lte' && cur.rssi == null) cur.rssi = sig.rssi;
 
 						sig[slot] = cur;
+						// the branch this read does NOT report must not survive
+						// from a previous RAT — a 5G->LTE fallback kept showing
+						// its last NR RSRP/SINR forever (same finding as the
+						// fibocom serving path; field-reported on an FM350-GL
+						// in heavy rain). The cells mirror below re-fills the
+						// dropped branch when the serving read still reports it.
+						delete sig[(slot == 'nr5g') ? 'lte' : 'nr5g'];
 						self.signal = sig;
 					}
 
@@ -371,6 +378,10 @@ function tel_huawei_signal(self, cb)
 				if (h.lte.rsrq != null) cur.rsrq = h.lte.rsrq;
 				if (h.lte.sinr != null) cur.snr = h.lte.sinr * 10;
 				sig.lte = cur;
+				// ^HCSQ has no NR branch — an LTE report means the modem is not
+				// on NR; a stale nr5g from an earlier serving read must not
+				// survive (same freeze finding as the quectel/fibocom paths)
+				delete sig.nr5g;
 				self.signal = sig;
 			}
 
