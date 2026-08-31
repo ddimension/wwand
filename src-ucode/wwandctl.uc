@@ -390,6 +390,12 @@ Status
   cells [modem]          cells, registration detail, temperature
   datapath [modem]       datapath / mux / aggregation diagnostics
   slots [modem]          SIM slot status (ICCID, eUICC, CPIN, service, active)
+  carrier [modem]        carrier configuration (MBN): which one is active
+  carrier [modem] list   every carrier config the modem holds
+  carrier [modem] set <id>   select one (takes effect after a modem reset)
+  euicc [modem] [slot]   the MODEM's own eUICC profile read, without lpac —
+                         for an M2M eUICC whose ES10 the card refuses. Many
+                         modems answer "not supported"; lpac stays the tool.
   plmn [modem]           PLMN selector lists (user/nas/operator/home/fplmn)
   settings [modem]       NAS settings / band prefs (settings editor data)
   probe                  detected modems (managed + present, for stable binding)
@@ -508,6 +514,47 @@ case 'cells': {
 case 'datapath': {
 	let r = resolve_modem(status(), args[0]);
 	dump(call_ok('modem_datapath', { modem: r.modem }), '  ');
+	break;
+}
+
+case 'carrier': {
+	let r = resolve_modem(status(), args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+	let op = rest[0] ?? 'get';
+	let res = call_ok('modem_carrier_config',
+		{ modem: r.modem, op: op, id: rest[1] ?? '' });
+
+	if (op == 'list') {
+		for (let c in (res.configs ?? []))
+			printf('%-24s %s%s\n', c.description ?? '(unnamed)', c.id,
+				c.version != null ? sprintf('  v%d', c.version) : '');
+	}
+	else if (op == 'set') {
+		printf('selected %s — %s\n', res.selected, res.note ?? 'applied');
+	}
+	else {
+		printf('active   %s\n', res.active ?? '(none)');
+
+		// A pending selection means the radio is STILL RUNNING THE OLD ONE.
+		// Saying only "active X" there would be true and misleading.
+		if (res.pending)
+			printf('pending  %s  (takes effect after a modem reset)\n', res.pending);
+	}
+
+	break;
+}
+
+case 'euicc': {
+	let r = resolve_modem(status(), args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+	let res = call_ok('modem_euicc_profiles',
+		{ modem: r.modem, slot: +(rest[0] ?? 1) || 1 });
+
+	for (let p in (res.profiles ?? []))
+		printf('%d: %-10s %-22s %s%s\n', p.index, p.state,
+			p.name ?? p.nickname ?? p.spn ?? '(unnamed)', p.iccid ?? '',
+			p.policy?.delete_not_allowed ? '  [delete not allowed]' : '');
+
 	break;
 }
 
