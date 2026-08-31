@@ -389,8 +389,12 @@ eq(tlvmod.pack(P.GET_SELECTED_CONFIG.req, { config_type: 1, token: 7 }),
 
 // 2. Description is length-prefixed. Read as a bare string it came back with
 //    the length byte glued to the front — HW: "\x13Commercial-DT-VOLTE".
+// The result TLV is TWO bytes (libqmi "Indication Result", guint16). Pinned as
+// four it decoded to null on a real failure — and a null result reads as
+// success, so a refused config selection was reported as done. The test agreed
+// with the bug, which is why it is now written with the true width.
 let ci = tlvmod.unpack(P.GET_CONFIG_INFO_IND.ind,
-	tlv(0x10, u32(7)) + tlv(0x01, u32(0)) + tlv(0x11, u32(50036)) +
+	tlv(0x10, u32(7)) + tlv(0x01, u16(0)) + tlv(0x11, u32(50036)) +
 	tlv(0x12, u8(19) + 'Commercial-DT-VOLTE') + tlv(0x13, u32(167845663)));
 eq(ci.description, 'Commercial-DT-VOLTE', 'pdc: the description drops its length prefix');
 eq(ci.total_size, 50036, 'pdc: size');
@@ -398,7 +402,7 @@ eq(ci.token, 7, 'pdc: the token that ties it to our request');
 
 // the list indication: an array of { type, opaque id }
 let pl = tlvmod.unpack(P.LIST_CONFIGS_IND.ind,
-	tlv(0x10, u32(3)) + tlv(0x01, u32(0)) +
+	tlv(0x10, u32(3)) + tlv(0x01, u16(0)) +
 	tlv(0x11, u8(1) + u32(1) + u8(2) + u8(0xAB) + u8(0xCD)));
 eq(length(pl.configs), 1, 'pdc: one config listed');
 eq(pl.configs[0].config_type, pdcmod.CONFIG_TYPE_DEVICE, 'pdc: a carrier (device) config');
@@ -406,6 +410,12 @@ eq(pl.configs[0].id, [ 0xAB, 0xCD ], 'pdc: the id is opaque bytes, round-tripped
 
 // the write half is deliberately absent — those blobs are firmware, and a wrong
 // one is a brick rather than a misconfiguration
+// a FAILURE must decode as a failure — this is the case the wrong width lost
+let pf = tlvmod.unpack(P.SET_SELECTED_CONFIG_IND.ind,
+	tlv(0x10, u32(9)) + tlv(0x01, u16(3)));
+eq(pf.result, 3, 'pdc: a non-zero result decodes, so a refused selection is not read as done');
+eq(pf.token, 9, 'pdc: with the token that identifies whose it was');
+
 eq(P.LOAD_CONFIG, null, 'pdc: wwand never writes a carrier config');
 eq(P.DELETE_CONFIG, null, 'pdc: nor deletes one');
 

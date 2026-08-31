@@ -227,6 +227,21 @@ scenario('late-reg', {
 		// TLV (as on a cell reselection) must keep the last-known plmn
 		modem._update_serving({ serving_system: { registration: 1, radio_ifs: [ 8 ] } });
 		eq(modem.reg.plmn?.mnc, 2, 'reselection without Current-PLMN keeps last plmn');
+
+		// PARKED (option lowpower): we switched the radio off ourselves, so the
+		// deregistration that follows is the consequence, not a fault. Re-entering
+		// the registration chain here would fight the parking, fail, and walk the
+		// recovery ladder into an op-mode cycle and a power-cycle — for a modem
+		// doing exactly what it was told.
+		modem.lowpower_parked = true;
+		modem._update_serving({ serving_system: { registration: 0, radio_ifs: [] } });
+		eq(modem.state, 'READY', 'parked: losing registration does not re-enter the register chain');
+
+		// ...and unparked, the same loss DOES chase it — otherwise the guard
+		// above would be indistinguishable from never supervising at all
+		modem.lowpower_parked = false;
+		modem._update_serving({ serving_system: { registration: 0, radio_ifs: [] } });
+		eq(modem.state, 'REGISTERING', 'unparked: a real registration loss is chased');
 	});
 
 // --- 3: PIN required, verified via UIM ---------------------------------------

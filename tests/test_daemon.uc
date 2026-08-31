@@ -754,10 +754,19 @@ uloop.run();
 			modem: { create: (o) => ({
 				id: o.id, state: 'READY', config: o.config,
 				start: () => null, stop: () => null,
-				set_opmode: (mode, cb) => { push(ops, o.id + ':' + mode); cb(null); },
+				// mirrors the real set_opmode: it is the SUCCESSFUL write that
+				// records the parked state, and the supervisors read that flag
+				set_opmode: function(mode, cb) {
+					push(ops, o.id + ':' + mode);
+					this.lowpower_parked = (mode == 'low_power');
+					cb(null);
+				},
 			}) },
 			context: { create: (o) => ({
-				state: 'CONNECTED', name: o.name,
+				// the real context carries its modem, and activate() reads
+				// `ctx.modem.state` before anything else — a fixture without it
+				// cannot exercise the bring-up path at all
+				state: 'CONNECTED', name: o.name, modem: o.modem,
 				down: (cb) => cb ? cb() : null,
 			}) },
 		};
@@ -786,6 +795,14 @@ uloop.run();
 	// now the last one goes down too
 	d.context_down('wanB', () => null);
 	eq(ops, [ 'm0:low_power' ], 'lowpower: with nothing left up, the radio is parked');
+
+	// ...and an ifup must WAKE it. Parking without a wake path is worse than
+	// never parking: the radio is off, so activating would dial a modem that
+	// cannot register, and the interface would stay down until something else
+	// happened to power the radio back up.
+	ops = [];
+	d.context_up('wanA', () => null);
+	eq(ops[0], 'm0:online', 'lowpower: an ifup on a parked modem wakes the radio first');
 
 	// a modem still coming up must not be parked: its init chain sets the mode
 	// online itself, and two writers on one setting is decided by timing

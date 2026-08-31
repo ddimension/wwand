@@ -279,7 +279,12 @@ export function create(opts)
 		if (!cmd)
 			return cb({ error: 'unsupported', mode: mode });
 
-		self.at.send(cmd, (e) => cb(e ?? null), { timeout: 15000 });
+		self.at.send(cmd, (e) => {
+			if (!e)
+				self.lowpower_parked = (mode == 'low_power');
+
+			cb(e ?? null);
+		}, { timeout: 15000 });
 	};
 
 	// shared radio cycle: CFUN 0 -> settle -> CFUN 1 -> settle -> then()
@@ -1315,6 +1320,18 @@ export function create(opts)
 				let r = err ? null : parse_creg(res?.lines);
 
 				if (r && !r.registered) {
+					// PARKED (option lowpower): we switched the radio off
+					// ourselves, so losing registration is the consequence, not a
+					// fault — re-registering here would fight the parking and walk
+					// the recovery ladder. Same reasoning as modem.uc.
+					if (self.lowpower_parked) {
+						log('info', 'registration released (radio parked)');
+						emit('deregistered', self.reg);
+						self.reg = { registration: 0 };
+						notify_contexts('suspend', self.reg);
+						return;
+					}
+
 					log('warn', 'registration lost');
 					emit('deregistered', self.reg);
 					self.reg = { registration: 0 };

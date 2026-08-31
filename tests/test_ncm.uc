@@ -304,6 +304,35 @@ push(scenarios, {
 	},
 });
 
+// --- s1c: option lowpower parks the radio, and the park is remembered -------
+// The remembering is the load-bearing half. `lowpower_parked` is what tells the
+// registration poll below that the loss it is about to see was ordered, not
+// suffered — without it the poll chases a radio we switched off ourselves,
+// fails, and walks the recovery ladder into a power-cycle.
+
+push(scenarios, {
+	name: 's1c_lowpower',
+	script: script([ { re: /^AT\+CFUN=0$/, lines: [] },
+	                 { re: /^AT\+CFUN=1$/, lines: [] } ]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4', mux_id: 0 },
+	run_at_start: true,
+	run: (env) => {
+		let m = env.modem;
+
+		m.set_opmode('low_power', (e1) => {
+			eq(e1, null, 'ncm lowpower: CFUN=0 accepted');
+			ok(env.tr.saw(/^AT\+CFUN=0$/) != null, 'ncm lowpower: the radio is switched off over AT');
+			eq(m.lowpower_parked, true, 'ncm lowpower: ...and the modem remembers WE parked it');
+
+			m.set_opmode('online', (e2) => {
+				eq(e2, null, 'ncm lowpower: CFUN=1 accepted');
+				eq(m.lowpower_parked, false, 'ncm lowpower: waking clears the parked mark');
+				env.finish();
+			});
+		});
+	},
+});
+
 // --- s1b: a pin the driver contradicts must NOT arm hardware recovery -------
 // `option protocol ncm` on a modem whose driver says QMI or MBIM: those modems
 // expose a working AT port too, so an AT answer is equally consistent with the

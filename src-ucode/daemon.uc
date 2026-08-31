@@ -1464,6 +1464,29 @@ export function create(opts)
 
 		// netifd asked us up → mark wanted so the daemon keeps it up until context_down.
 		entry.wanted = true;
+
+		// Parked by `option lowpower` on the last context-down: the radio is off,
+		// so activating now would dial into a modem that cannot register. Wake it
+		// first. Parking without this is worse than never parking — the interface
+		// would stay down until something else happened to power the radio.
+		let m = self.modems[entry.cfg?.modem];
+
+		if (m?.modem?.lowpower_parked && m.modem.set_opmode) {
+			log('notice', sprintf('modem %s: waking the parked radio for %s',
+				entry.cfg.modem, name));
+
+			return m.modem.set_opmode('online', (err) => {
+				// Failing to wake is worth saying, but not worth refusing the
+				// bring-up over: the modem may already be online (someone else
+				// woke it), and the activation below reports its own failure.
+				if (err)
+					log('warn', sprintf('modem %s: wake-up failed: %J',
+						entry.cfg.modem, err));
+
+				activate(name, cb);
+			});
+		}
+
 		activate(name, cb);
 	};
 

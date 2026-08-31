@@ -887,6 +887,22 @@ for (let i = 0; i < 200000 && !_all_done; i++)
 	ctx2.ensure_attach_profile(1, () => null);
 	eq(length(mods), 1, 'attach: ...and not again on the next bring-up');
 
+	// ...but a write that FAILED must not latch: the credential would then never
+	// reach the profile on any later retry with this modem object
+	let failing = { request: (name, args, cb) => {
+		if (name == 'GET_PROFILE_SETTINGS')
+			return cb(null, { apn: 'internet', pdp_type: 3, auth: 0, username: '' });
+		cb({ error: 'qmi', code: 3 }, null);
+	} };
+	let m3 = { wds_cfg: failing, config: { init_apn: 'internet', init_pass: 'p' },
+	           alloc: () => null, attach_context: () => null };
+	let ctx3 = context_mod.create({ name: 'atp3', modem: m3,
+		config: { apn: 'internet', pdp_type: 'ipv4v6' },
+		deps: { log: () => null, on_event: () => null } });
+
+	ctx3.ensure_attach_profile(1, () => null);
+	eq(m3._init_pass_written, null, 'attach: a failed write does not latch the password away');
+
 	// credentials alone do not touch a profile whose APN already matches — the
 	// config parser warns about that combination, and it must not silently
 	// apply a user to whatever APN the profile happened to hold

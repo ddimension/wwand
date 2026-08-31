@@ -47,6 +47,8 @@ export function install(modem)
 
 	modem._pdc_waits = {};
 	modem._pdc_token = 0;
+	// which incarnation of this modem these waiters belong to
+	modem._pdc_gen = modem._gen;
 
 	let deliver = (data) => {
 		let key = sprintf('%u', data?.token ?? 0);
@@ -77,6 +79,13 @@ function ask(modem, name, args, cb)
 {
 	if (!modem.pdc || !modem._pdc_waits)
 		return cb({ error: 'no_pdc_client' }, null);
+
+	// The client is destroyed BEFORE the table is nulled, so between those two
+	// the check above still passes while every request answers `cancelled`.
+	// The lifecycle generation is what distinguishes them — captured when the
+	// waiters were installed, bumped first thing in teardown.
+	if (modem._gen != modem._pdc_gen)
+		return cb({ error: 'cancelled' }, null);
 
 	let token = ++modem._pdc_token;
 	let key = sprintf('%u', token);
@@ -159,6 +168,13 @@ export function list(modem, cb)
 						// Any other error is per-config and tolerated below.
 						if (ie?.error == 'pdc_timeout')
 							return cb(null, out);
+
+						// A teardown destroys the client and reports `cancelled`
+						// SYNCHRONOUSLY while `self.pdc` and the waiter table are
+						// still live, so stepping on submits another request into
+						// the destruction. Terminal, like the timeout.
+						if (ie?.error == 'cancelled' || ie?.error == 'no_pdc_client')
+							return cb(ie, null);
 
 						push(out, {
 							id: arr_to_hex(c.id),

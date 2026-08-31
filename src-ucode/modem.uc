@@ -145,6 +145,9 @@ export function create(opts)
 		// internal recovery, an activation that failed).
 		sim_busy: false,
 		sim_note: null,
+		// we asked for low power (option lowpower) and the radio is off. The
+		// deregistration that follows is expected, and an ifup wakes it.
+		lowpower_parked: false,
 		active_slot: null,  // which physical slot holds the card in use (slot status)
 		cat: null,          // toolkit client, alive only while cat_mode is applied
 		pdc: null,          // carrier-config client, when the modem has PDC
@@ -1079,7 +1082,14 @@ export function create(opts)
 		if (!self.dms)
 			return cb({ error: 'unsupported', detail: 'no dms client' });
 
-		qmi_backend.set_opmode(self.dms, mode, (err) => cb(err ?? null));
+		qmi_backend.set_opmode(self.dms, mode, (err) => {
+			// remember that WE parked it: the registration that follows is a
+			// consequence, and the supervisor above must not treat it as a fault
+			if (!err)
+				self.lowpower_parked = (mode == 'low_power');
+
+			cb(err ?? null);
+		});
 	};
 
 	self.collect_regdetail = function(cb) {
@@ -1135,6 +1145,18 @@ export function create(opts)
 			}
 		}
 		else if (self.state == 'READY') {
+			// PARKED: we asked for low power ourselves, so losing registration
+			// is the expected consequence, not a fault. Re-entering the
+			// registration chain here would fight the parking, fail, and walk
+			// the recovery ladder into an op-mode cycle and a power-cycle — for
+			// a modem doing exactly what it was told.
+			if (self.lowpower_parked) {
+				log('info', 'registration released (radio parked)');
+				emit('deregistered', self.reg);
+				notify_contexts('suspend', self.reg);
+				return;
+			}
+
 			log('warn', sprintf('registration lost (%d)', ss.registration));
 			emit('deregistered', self.reg);
 			notify_contexts('suspend', self.reg);

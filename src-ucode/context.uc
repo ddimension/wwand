@@ -375,10 +375,8 @@ export function create(opts)
 				if (mc.init_user != null)
 					mod.username = mc.init_user;
 
-				if (mc.init_pass != null) {
+				if (mc.init_pass != null)
 					mod.password = mc.init_pass;
-					self.modem._init_pass_written = true;
-				}
 			}
 
 			if (want_pdp != null)
@@ -395,6 +393,12 @@ export function create(opts)
 
 				if (e2)
 					log('warn', sprintf('attach profile %d modify failed: %J', index, e2));
+				else if (mod.password != null)
+					// Latch only on SUCCESS. Set before the answer, a rejected
+					// or cancelled write suppressed the password on every later
+					// retry with this modem object — the credential would then
+					// never reach the profile at all.
+					self.modem._init_pass_written = true;
 
 				done(!e2);
 			});

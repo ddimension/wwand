@@ -15,6 +15,11 @@
 // Provenance: entirely **libqmi 1.38** (`data/qmi-service-pdc.json`, since
 // 1.18), so every id and TLV here is citable — no proprietary source involved.
 //
+// The result TLV on the indications is **two** bytes (libqmi: "Indication
+// Result", guint16). Decoded as four it comes back null on a real failure —
+// and a null result reads as success, so a refused config selection would have
+// been reported as done.
+//
 // THE SHAPE THAT MATTERS: PDC is indication-driven. A request is acknowledged
 // almost empty, and the answer arrives later as an INDICATION carrying the same
 // **token** the request sent. So every call needs a token, a handler, and a
@@ -56,7 +61,7 @@ export default {
 			id: 0x0024,
 			ind: {
 				token:  { t: 0x10, f: 'u32' },
-				result: { t: 0x01, f: 'u32' },
+				result: { t: 0x01, f: 'u16' },
 				// each id is an opaque blob — a hash the modem uses to name the
 				// config. It is not text and must round-trip byte for byte.
 				configs: { t: 0x11, f: { n: 'u8', of: {
@@ -87,7 +92,7 @@ export default {
 			id: 0x0022,
 			ind: {
 				token:      { t: 0x10, f: 'u32' },
-				result:     { t: 0x01, f: 'u32' },
+				result:     { t: 0x01, f: 'u16' },
 				active_id:  { t: 0x11, f: { n: 'u8', of: 'u8' } },
 				// set when a switch has been made but not yet taken effect —
 				// PDC changes need a modem reset before they apply
@@ -110,7 +115,7 @@ export default {
 			id: 0x0028,
 			ind: {
 				token:       { t: 0x10, f: 'u32' },
-				result:      { t: 0x01, f: 'u32' },
+				result:      { t: 0x01, f: 'u16' },
 				total_size:  { t: 0x11, f: 'u32' },
 				// 'lstring', not 'string': libqmi marks it
 				// "size-prefix-format": "guint8", so the payload is one length
@@ -138,7 +143,7 @@ export default {
 			id: 0x0023,
 			ind: {
 				token:  { t: 0x10, f: 'u32' },
-				result: { t: 0x01, f: 'u32' },
+				result: { t: 0x01, f: 'u16' },
 			},
 		},
 
