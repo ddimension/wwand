@@ -476,7 +476,31 @@ return {
 					if (!length(code))
 						return done({ error: 'missing_argument' });
 
-					// shell-safe: activation codes are LPA:1$host$token style
+					// shell-safe: activation codes are LPA:1$host$token style.
+					//
+					// The byte-wise check comes FIRST because the regex cannot do
+					// it: ucode regexes run on a C string and stop at a NUL, so
+					// "LPA:1$h$t\0anything" matches this anchored allowlist on its
+					// prefix alone. Nothing is injected — sprintf truncates at the
+					// same NUL, so the shell only ever sees the prefix (measured,
+					// 2026-08-31) — but then the string we VALIDATED and the string
+					// we ACT on are different, and the profile downloaded is not
+					// the one the caller named. A boundary should refuse what it
+					// cannot carry faithfully. Same reasoning as atcmd's ctrl_at.
+					let ctrl = (v) => {
+						for (let i = 0; i < length(v ?? ''); i++) {
+							let c = ord(v, i);
+
+							if (c < 0x20 || c == 0x7f)
+								return true;
+						}
+
+						return false;
+					};
+
+					if (ctrl(code) || ctrl(params?.confirmation_code))
+						return done({ error: 'invalid_argument' });
+
 					if (!match(code, /^[A-Za-z0-9$:._+-]+$/) ||
 					    (params?.confirmation_code != null &&
 					     !match(params.confirmation_code, /^[A-Za-z0-9._-]*$/)))

@@ -223,6 +223,16 @@ export function decode_deliver(pdu_hex)
 		smsc = (((toa >> 4) & 0x07) == 1 ? '+' : '') + digits;
 	}
 
+	// Every field below is read through b(), which answers 0 outside the buffer.
+	// That is right for a field the sender omitted, and wrong for a PDU that
+	// simply STOPS: without this check a truncated one decoded into a complete,
+	// plausible message — a sender built from zero bytes, a zero timestamp, a
+	// NUL-filled body — rather than being rejected. These bytes come off the
+	// air from anyone who knows the number, so the length has to be believed
+	// only as far as the buffer backs it.
+	if (pos + smsc_len > length(a))
+		return null;
+
 	pos += smsc_len;
 
 	let first = b(a, pos++);
@@ -234,6 +244,11 @@ export function decode_deliver(pdu_hex)
 
 	let oa = decode_address(a, pos);
 	pos = oa.next;
+
+	// originator address, PID, DCS, the 7-byte timestamp and the UDL all have to
+	// be present — decode_address() walks a length taken from the PDU itself
+	if (oa.next > length(a) || pos + 10 > length(a))
+		return null;
 
 	let pid = b(a, pos++);
 	let dcs = b(a, pos++);
@@ -259,13 +274,28 @@ export function decode_deliver(pdu_hex)
 
 	if (encoding == 'gsm7')
 		text = gsm7_text(unpack7(a, ud_off, udl, skip_septets));
-	else if (encoding == 'ucs2')
-		text = ucs2_text(a, ud_off + skip_octets, length(a) - (ud_off + skip_octets));
 	else {
-		// 8-bit: emit raw bytes as-is (after any UDH)
-		text = '';
-		for (let i = ud_off + skip_octets; i < length(a); i++)
-			text += chr(b(a, i));
+		// For UCS2 and 8-bit the UDL counts OCTETS, so the user data ends where
+		// it says it ends. Both paths used to read to the end of the buffer
+		// instead — so anything trailing the PDU (padding, or a second PDU that
+		// arrived in the same read) was appended to the message text. GSM7 has
+		// always honoured udl; these two now do too.
+		let ud_start = ud_off + skip_octets;
+		let ud_end = ud_off + udl;
+
+		if (ud_end > length(a))
+			ud_end = length(a);
+
+		let n = (ud_end > ud_start) ? ud_end - ud_start : 0;
+
+		if (encoding == 'ucs2')
+			text = ucs2_text(a, ud_start, n);
+		else {
+			// 8-bit: emit raw bytes as-is (after any UDH)
+			text = '';
+			for (let i = ud_start; i < ud_start + n; i++)
+				text += chr(b(a, i));
+		}
 	}
 
 	return {
@@ -295,7 +325,15 @@ export function reassemble(msgs)
 			continue;
 		}
 
-		let key = sprintf('%d', m.udh.ref);
+		// Group by SENDER and store as well as the reference. The concatenation
+		// reference is picked by the sending SMSC out of 8 bits (or 16), so it
+		// is reused constantly — on the reference alone, two multipart messages
+		// from different senders merged into one: their parts overwrote each
+		// other by part number, the result carried the first sender's identity
+		// with the other's text mixed in, and because `indexes` then spans both,
+		// deleting that message deleted a stranger's parts too.
+		let key = sprintf('%s|%s|%d|%d', m.storage ?? '', m.sender ?? '',
+			m.udh.ref, m.udh.total);
 
 		if (!groups[key]) {
 			groups[key] = { ref: m.udh.ref, total: m.udh.total, parts: {}, first: m };

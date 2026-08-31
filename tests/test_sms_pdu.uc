@@ -204,4 +204,71 @@ eq(sms.decode_deliver('0001'), null, '6: MTI!=DELIVER -> null (SUBMIT first octe
 	ok(index(s3[1].pdu, '0500034202') >= 0, 'submit: same ref/total on part 2');
 })();
 
+// --- a truncated PDU is not a message ---------------------------------------
+// Every field is read through a helper that answers 0 outside the buffer, which
+// is right for an omitted field and wrong for a PDU that simply stops: a short
+// one decoded into a complete, plausible message — sender built from zero
+// bytes, zero timestamp, NUL-filled body — instead of being refused. These
+// bytes arrive from whoever knows the number.
+(function () {
+	let full = [ 0x00, 0x04, ...addr_intl('49123'), 0x00, 0x00,
+		bcd2(2), bcd2(1), bcd2(1), 0, 0, 0, 0x80, 1, 0x41 ];
+
+	ok(sms.decode_deliver(hex(full)) != null, 'trunc: the intact PDU still decodes');
+
+	// cut inside the timestamp
+	eq(sms.decode_deliver(hex(slice(full, 0, length(full) - 6))), null,
+		'trunc: a PDU cut inside its header is refused');
+
+	// an SMSC length longer than the bytes that follow it
+	eq(sms.decode_deliver(hex([ 0x08, 0x91, 0x44 ])), null,
+		'trunc: an SMSC length past the end of the buffer is refused');
+})();
+
+// --- the declared user-data length bounds the text --------------------------
+// For UCS2 and 8-bit the UDL counts octets, and both paths used to read to the
+// END OF THE BUFFER instead. Anything trailing the PDU — padding, or a second
+// PDU that arrived in the same read — was appended to the message text.
+(function () {
+	let ud = [ 0x00, 0x41, 0x00, 0x42 ];                     // "AB" in UCS2
+	let pdu = [ 0x00, 0x04, ...addr_intl('49123'), 0x00, 0x08,
+		bcd2(2), bcd2(1), bcd2(1), 0, 0, 0, 0x80, length(ud), ...ud,
+		0x00, 0x43, 0x00, 0x44 ];                            // trailing "CD"
+
+	eq(sms.decode_deliver(hex(pdu)).text, 'AB',
+		'udl: UCS2 text stops at the declared length, not at the end of the read');
+
+	let ud8 = [ 0x41, 0x42 ];
+	let pdu8 = [ 0x00, 0x04, ...addr_intl('49123'), 0x00, 0x04,   // DCS = 8-bit
+		bcd2(2), bcd2(1), bcd2(1), 0, 0, 0, 0x80, length(ud8), ...ud8, 0x43, 0x44 ];
+
+	eq(sms.decode_deliver(hex(pdu8)).text, 'AB',
+		'udl: 8-bit text stops at the declared length too');
+})();
+
+// --- two senders may share a concatenation reference ------------------------
+// The reference is chosen by the sending SMSC out of 8 bits, so it is reused
+// constantly. Grouped on the reference alone, two multipart messages from
+// different senders merged: parts overwrote each other by number, the result
+// carried the first sender's identity with the other's text in it, and the
+// merged `indexes` spanned both — so deleting it deleted a stranger's parts.
+(function () {
+	let a1 = { udh: { ref: 0x42, total: 2, part: 1 }, sender: '+49111', text: 'AA', index: 1 };
+	let a2 = { udh: { ref: 0x42, total: 2, part: 2 }, sender: '+49111', text: 'BB', index: 2 };
+	let b1 = { udh: { ref: 0x42, total: 2, part: 1 }, sender: '+49222', text: 'XX', index: 3 };
+	let b2 = { udh: { ref: 0x42, total: 2, part: 2 }, sender: '+49222', text: 'YY', index: 4 };
+
+	let out = sms.reassemble([ a1, a2, b1, b2 ]);
+
+	eq(length(out), 2, 'concat: same ref from two senders stays two messages');
+
+	let by = {};
+	for (let m in out)
+		by[m.sender] = m;
+
+	eq(by['+49111'].text, 'AABB', 'concat: the first sender keeps its own text');
+	eq(by['+49222'].text, 'XXYY', 'concat: ...and so does the second');
+	eq(by['+49111'].indexes, [ 1, 2 ], 'concat: delete indexes do not span senders');
+})();
+
 done('test_sms_pdu');

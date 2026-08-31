@@ -150,6 +150,14 @@ run_chain = (idx) => {
 
 expect('download', {}, 'missing_argument');
 expect('download', { activation_code: 'LPA:1$x;rm$y' }, 'invalid_argument');
+// A NUL walks straight through the anchored allowlist: ucode regexes run on a C
+// string and stop there, so this matches on its prefix alone. Nothing is
+// injected — sprintf truncates at the same NUL, so the shell only ever sees the
+// prefix — but the string VALIDATED and the string ACTED ON then differ, and
+// the profile downloaded is not the one the caller named.
+expect('download', { activation_code: 'LPA:1$a$b' + chr(0) + '$evil' }, 'invalid_argument');
+expect('download', { activation_code: 'LPA:1$a$b', confirmation_code: 'x' + chr(0) + 'y' },
+	'invalid_argument');
 expect('download', { activation_code: 'LPA:1$a$b' }, 'esim_not_installed');
 expect('notifications', {}, 'esim_not_installed');
 expect('notify', {}, 'esim_not_installed');
