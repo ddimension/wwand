@@ -679,11 +679,20 @@ function compat_translate(raw, result)
 			let nd = parse_netdev(s.device);
 			let mux = resolve_mux(s, nd, name, result.warnings);
 			let mux_id = mux.mux_id, muxed = mux.muxed;
-			// accept both pdp_type (preferred) and the legacy proto-js pdptype
-			let pdp_in = s.pdp_type ?? s.pdptype;
+			// accept both pdp_type (preferred) and the legacy proto-js pdptype,
+			// and accept them in ANY case. The stock qmi/mbim protos and the
+			// tools people migrate from write IPV4V6 / IPV4, and the lookup
+			// below is case-sensitive: an uppercase value matched nothing and
+			// fell back to the ipv4v6 default. For IPV4V6 that is invisible,
+			// because the fallback happens to be the same value — but IPV4
+			// silently became DUAL-STACK, turning an IPv4-only interface into
+			// something the subscription may reject. Field-found on a migrated
+			// config (2026-09-01, sponsor box: pdp_type='IPV4V6').
+			let pdp_raw = s.pdp_type ?? s.pdptype;
+			let pdp_in = (pdp_raw != null) ? lc(sprintf('%s', pdp_raw)) : null;
 
 			if (pdp_in != null && !PDP_TYPES[pdp_in])
-				push(result.warnings, sprintf("interface %s: invalid pdp_type '%s', using ipv4v6", name, pdp_in));
+				push(result.warnings, sprintf("interface %s: invalid pdp_type '%s', using ipv4v6", name, pdp_raw));
 
 			result.contexts[name] = context_defaults({
 				...conn_fields(s, result.warnings),

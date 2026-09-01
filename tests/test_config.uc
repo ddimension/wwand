@@ -1165,4 +1165,34 @@ ok(length(filter(qw.warnings, (w) => index(w, 'wwand_sim s1: apn') >= 0)) > 0,
 ok(length(filter(qw.warnings, (w) => index(w, 'wwand_sim s1: password') >= 0)) > 0,
 	'sim-quote: ...and so is the password');
 
+// --- pdp_type in any case -----------------------------------------------
+// The stock qmi/mbim protos and the tools people migrate from write IPV4V6 /
+// IPV4. The lookup is case-sensitive, so an uppercase value matched nothing and
+// took the ipv4v6 default. For IPV4V6 that is invisible — the fallback IS the
+// intended value — which is exactly why it survived: the harmless spelling hid
+// that IPV4 silently became DUAL-STACK, turning an IPv4-only interface into
+// something the subscription may reject. Found on a migrated sponsor config.
+for (let pair in [ [ 'IPV4', 'ipv4' ], [ 'IPv6', 'ipv6' ], [ 'IPV4V6', 'ipv4v6' ],
+                   [ 'ipv4', 'ipv4' ] ]) {
+	let pr = config.parse({ network: {
+		m: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		w: { '.type': 'interface', proto: 'wwand', modem: 'm', apn: 'a', pdp_type: pair[0] },
+	} });
+
+	eq(pr.contexts.w?.pdp_type, pair[1],
+		sprintf('pdp-case: %s is read as %s', pair[0], pair[1]));
+	eq(length(filter(pr.warnings, (w) => index(w, 'pdp_type') >= 0)), 0,
+		sprintf('pdp-case: ...without warning about a value that is fine (%s)', pair[0]));
+}
+
+// a genuinely unknown value is still reported, and still falls back
+let pbad = config.parse({ network: {
+	m: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+	w: { '.type': 'interface', proto: 'wwand', modem: 'm', apn: 'a', pdp_type: 'nonsense' },
+} });
+
+eq(pbad.contexts.w?.pdp_type, 'ipv4v6', 'pdp-case: an unknown value still falls back');
+ok(length(filter(pbad.warnings, (w) => index(w, 'nonsense') >= 0)) > 0,
+	'pdp-case: ...and is reported with the spelling the user wrote');
+
 done('test_config');
