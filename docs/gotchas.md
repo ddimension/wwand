@@ -160,6 +160,26 @@ same trap applies to every earlier `-C <dir>` deploy in this repo's instructions
 which is why `/usr/share/ucode/wwand` had been owned by a foreign uid for weeks
 without anyone noticing (mode 0775 there, so nothing broke).
 
+### Upgrading luci-app-wwand makes browsers fetch the new JS
+**No. The cache-busting token is luci-base's version, not the app's.** `luci.js`
+appends `?v=${env.resource_version}` to every resource it loads — app views
+included — and `resource_version` is the *luci-base* version
+(`?v=26.239.42882~e60322b`). Upgrade only `luci-app-wwand` and that token does
+not move, so a browser holding the old `view/wwand/modems.js` keeps serving it
+under heuristic freshness and never asks the server, even though uhttpd has a new
+ETag and Last-Modified for it.
+
+The symptom is a page built from a MIX: old JS against a new daemon, new ACL and
+new ubus surface. It presents as the app misbehaving — up to "cannot save any
+change" — with nothing wrong on the box. Verified on the sponsor's WH3000 Pro
+(2026-09-01) after an app-only r23 → r24 upgrade; the served file matched the
+package byte for byte and every ubus method the page calls was granted.
+
+Clearing `/tmp/luci-indexcache*` and `/tmp/luci-modulecache` does NOT help: those
+are the server's own caches. The browser needs a hard reload (Ctrl-Shift-R) or a
+site-data clear. So when someone reports odd LuCI behaviour right after a package
+update, ask for that FIRST — before reading the JS for a bug that is not there.
+
 ### A test suite that prints "0 failures" ran all its checks
 **Not if the chain died.** The scenario-driven suites run one scenario at a
 time, each starting the next from its own completion. mockhub `die()`s on a
