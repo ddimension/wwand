@@ -160,6 +160,29 @@ same trap applies to every earlier `-C <dir>` deploy in this repo's instructions
 which is why `/usr/share/ucode/wwand` had been owned by a foreign uid for weeks
 without anyone noticing (mode 0775 there, so nothing broke).
 
+### NSS offload is on once rmnet_nss is loaded and the children are adopted
+**Two more things have to be true, and neither is visible from wwand.**
+
+The vendor driver decides whether a child gets an NSS context ONCE, when it
+creates it: `qmi_wwan_q` calls `nss_cb->nss_create(qmap_net)` in its USB probe.
+Load `rmnet_nss` afterwards and the children exist, traffic flows, and every
+packet goes through the CPU — nothing fails, the offload is simply absent.
+wwand logs it at probe time because it cannot fix it: the answer was captured
+before wwand saw the device. That is a property of the STOCK driver; turning the
+single attempt into a bounded delayed-work retry removes the ordering
+requirement entirely (kuncy7/aw1000-nss-builder carries such a patch for
+quectel-qmi-wwan), but it is a kernel-module change and no wwand package can
+apply it.
+
+Second, on an NSS build the ECM has to accelerate raw-IP flows at all: the ECM
+in the Julius EDMA tree no longer enables `ECM_INTERFACE_RAWIP_ENABLE`, so rmnet
+flows are not accelerated unless it is turned back on. Reported from an
+Arcadyan AW1000 (IPQ807x, RG500Q-EA), 2026-09-03.
+
+So "rmnet_nss is loaded, the children are adopted, the link is up" is not the
+same as "the datapath is offloaded", and the difference costs throughput
+silently. Check the NSS side before concluding wwand is the problem.
+
 ### Upgrading luci-app-wwand makes browsers fetch the new JS
 **No. The cache-busting token is luci-base's version, not the app's.** `luci.js`
 appends `?v=${env.resource_version}` to every resource it loads — app views

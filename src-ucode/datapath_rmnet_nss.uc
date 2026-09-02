@@ -123,7 +123,7 @@ return {
 		// wonder why the offload never appeared. `status` carries the same fact
 		// to the status page.
 		if (!fx.exists('/sys/module/rmnet_nss'))
-			fx.log('notice', sprintf('rmnet_nss: adopting the vendor QMAP channels of %s, but /sys/module/rmnet_nss is absent — no NSS offload; load rmnet_nss BEFORE qmi_wwan_q binds',
+			fx.log('notice', sprintf('rmnet_nss: adopting the vendor QMAP channels of %s, but /sys/module/rmnet_nss is absent — no NSS offload; load rmnet_nss BEFORE qmi_wwan_q binds (or patch the driver to retry the attach)',
 				netdev));
 
 		return true;

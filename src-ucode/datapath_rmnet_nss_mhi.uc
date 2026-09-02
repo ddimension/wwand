@@ -148,7 +148,7 @@ return {
 		// missing shim cannot be fixed afterwards (the driver captures whether
 		// NSS is available when it creates each child), so say so once.
 		if (!fx.exists('/sys/module/rmnet_nss'))
-			fx.log('notice', sprintf('rmnet_nss_mhi: adopting the vendor QMAP channels of %s, but /sys/module/rmnet_nss is absent — no NSS offload; load rmnet_nss BEFORE pcie_mhi binds',
+			fx.log('notice', sprintf('rmnet_nss_mhi: adopting the vendor QMAP channels of %s, but /sys/module/rmnet_nss is absent — no NSS offload; load rmnet_nss BEFORE pcie_mhi binds (or patch the driver to retry the attach)',
 				netdev));
 
 		return true;
