@@ -237,6 +237,32 @@ def main():
         if r not in files:
             fail('%s is installed but does not exist in the source' % r)
 
+    # ...and the other direction, which is the one that actually bit. A file
+    # under files/ that no package installs ships in the tarball and lands
+    # nowhere: the feature it carries is simply absent at runtime, with nothing
+    # failing to say so. wwand.hotplug.e1820 reached an upstream PR that way
+    # (2026-09-02) — the .uc lists had been updated for the release and the
+    # hotplug scripts had not, and this tool reported "ok" because it only ever
+    # asked whether the named paths exist.
+    # Deliberately shipped-but-not-installed. Keep this list short and give each
+    # entry its reason: it is the escape hatch that would hide the next miss.
+    NOT_INSTALLED = {
+        # the Makefile says so itself: kept in the source tree as a documented
+        # example of the legacy /etc/config/wwand, never installed anywhere
+        'files/wwand.config',
+    }
+
+    for f in files:
+        if f.endswith('/') or f in refs or f in NOT_INSTALLED:
+            continue
+
+        # a directory entry (tarball listings carry them without the slash too)
+        if any(o.startswith(f + '/') for o in files):
+            continue
+
+        fail('%s exists in the source but NO package installs it '
+             '(it would ship in the tarball and land nowhere)' % f)
+
     if not bad:
         print('ok: %s owns every .uc exactly once and all %d files/ paths resolve'
               % (os.path.basename(os.path.dirname(args.makefile)), len(refs)))
