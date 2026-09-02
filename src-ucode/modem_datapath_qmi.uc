@@ -58,7 +58,8 @@ export function setup(self, dp, o, next)
 		// or not a WDA service exists.
 		let fxi = dp.fx ?? netlink.default_fx((level, msg) => log(level, msg));
 		let backend = netlink.select_backend(fxi, dp.netdev, dp.mux ?? 'auto',
-			want_mux, dp.plugins, { model: self.info?.model, proto: 'qmi' });
+			want_mux, dp.plugins, { model: self.info?.model, proto: 'qmi',
+			                        kernel_netdev: dp.netdev_kernel });
 
 		// Nothing claimed the box, or `option mux` named a package that is not
 		// installed. Fatal only when channels were actually configured —

@@ -335,9 +335,22 @@ export function create(opts)
 					// pending interface, so 'down' first, then the kick re-runs setup.
 					if (st?.pending && deps.down_interface) {
 						log('info', sprintf('interface %s stuck pending, resetting before setup', centry.cfg.interface));
-						// mark the down as our own so context_down doesn't read it as
-						// operator intent (clearing `wanted`) or kill the activation below
+						// Two markers, because two different readers ask two different
+						// questions about this down.
+						//
+						// `_reset_pending` is for context_down: keep `wanted` and
+						// restart the aborted activation once the teardown settles.
+						//
+						// `_our_down` is for the status poll above, and it was
+						// missing. netifd's `down` clears autostart whoever issued
+						// it, so the next poll saw autostart=false with no marker it
+						// recognised, read OUR OWN reset as an operator ifdown, and
+						// cleared `wanted` — the interface then stayed down until
+						// somebody ran ifup again. Reported from the field on an
+						// IPQ807x board (2026-09-03): `ifup wan` while the modem was
+						// still initialising, and it never came up.
 						centry._reset_pending = true;
+						centry._our_down = true;
 						deps.down_interface(centry.cfg.interface);
 					}
 
@@ -927,6 +940,15 @@ export function create(opts)
 
 		log('notice', sprintf('modem %s: netdev %s renamed to %s (stable L3 device name)',
 			name, entry.netdev, want));
+
+		// Keep the name the KERNEL gave it. A vendor QMAP driver names its
+		// children after the parent ONCE, in its USB probe
+		// (sprintf("%s_%d", real_dev->name, ...)), and that name never changes
+		// afterwards — so after this rename the children still carry the old
+		// stem and a datapath probing for `<new>_1` finds nothing, falls back
+		// to raw_ip, and leaves a parent that is actually in QMAP framing with
+		// no traffic. Field-found on an IPQ807x/RG500Q NSS board (2026-09-03).
+		entry.netdev_kernel = entry.netdev;
 		entry.netdev = want;
 	};
 
@@ -1222,12 +1244,17 @@ export function create(opts)
 				dp_plugins = list_datapaths();
 		}
 
+		// netdev_kernel: the pre-rename name, when rename_l3 changed it. A
+		// datapath whose children were named by the driver after the ORIGINAL
+		// parent needs it to find them at all (see rename_l3).
 		let datapath =
 			(proto == 'mbim') ? { netdev: entry.netdev, mux: mux, plugins: dp_plugins,
+			                      netdev_kernel: entry.netdev_kernel,
 			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx } :
 			(proto == 'ncm')  ? { netdev: entry.netdev, fx: deps.datapath_fx } :
 			                    { netdev: entry.netdev, ep_id: ep_id, ep_type: ep_type, mux: mux,
 			                      plugins: dp_plugins,
+			                      netdev_kernel: entry.netdev_kernel,
 			                      dgram_size: cfg.dl_datagram_max_size,
 			                      qmap_version: cfg.qmap_version,
 			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx };

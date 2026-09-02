@@ -312,4 +312,52 @@ eq(netlink.select_backend(fx, 'wwan0', 'auto', true, null, { proto: 'qmi' }), 'r
 eq(netlink.mux_available(fx, 'wwan0', 'qmi', plugins), true,
 	'autosetup: an NSS box is offered a mux channel');
 
+// --- a renamed parent still finds its children --------------------------------
+// The vendor driver names the children after the parent ONCE, in its USB probe
+// (sprintf("%s_%d", real_dev->name, ...)), and that name never changes. wwand
+// renames the parent to the context's stable L3 name a second BEFORE the
+// datapath is probed, so by then the children are wwan0_1..N while the parent
+// is wwand0. Probing only `<netdev>_1` finds nothing, the box falls back to
+// raw_ip — on a parent that IS in QMAP framing — and no traffic can flow: the
+// interface never leaves IDLE, with nothing failing to say why.
+//
+// Field-found on an Arcadyan AW1000 (IPQ807x) with an RG500Q-EA, 2026-09-03.
+{
+	// parent already renamed to wwand0; children still carry the kernel stem
+	let renamed = fakefx.create({
+		present: {
+			'/sys/module/rmnet_nss': true,
+			'/sys/class/net/wwan0_1': true,
+			'/sys/class/net/wwan0_2': true,
+		},
+		files: { '/sys/class/net/wwand0/qmap_mode': "2\n" },
+	});
+
+	eq(plug.probe(renamed, 'wwand0'), false,
+		'rename: without the pre-rename name there is nothing to go on');
+
+	eq(plug.probe(renamed, 'wwand0', { kernel_netdev: 'wwan0' }), true,
+		'rename: the kernel name finds the children the driver actually created');
+
+	// ...and the adoption has to follow the same stem, or the backend is
+	// selected and then adopts nothing
+	let adopted = [];
+	let ctx = {
+		netdev: 'wwand0',
+		opts: { netdev_kernel: 'wwan0' },
+		mux: [ { id: 1, name: 'wwand0m1', mtu: 1500 } ],
+		mux_mtus: {},
+		child_name: (e) => e.name,
+		link: (what, dev, o) => { push(adopted, sprintf('%s:%s', what, dev)); return true; },
+		write_attr: () => true,
+		child_mtu: (m) => m ?? 1500,
+	};
+
+	let devs = plug.links(renamed, ctx);
+
+	eq(devs, [ 'wwand0m1' ], 'rename: the child is adopted under the stable name');
+	ok(length(filter(adopted, (a) => index(a, 'wwan0_1') >= 0)) > 0,
+		'rename: ...having been found under the kernel stem it still carries');
+}
+
 done('test_datapath_nss');

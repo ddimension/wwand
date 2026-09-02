@@ -100,8 +100,21 @@ return {
 	// bare parent when `<netdev>_1` is missing, so that is the discriminator
 	// used here. It also rules out mainline qmi_wwan, whose knobs live under
 	// `qmi/` and which never creates such a child.
-	probe: (fx, netdev) => {
-		if (!fx.exists(sprintf('/sys/class/net/%s', vendor_child(netdev, 1))))
+	probe: (fx, netdev, info) => {
+		// The children are named after the parent as it was AT DRIVER PROBE
+		// TIME and never renamed afterwards, so a parent that wwand has since
+		// renamed to its stable L3 name no longer shares their stem. Probing
+		// only `<netdev>_1` then finds nothing and the box falls back to
+		// raw_ip — on a parent that IS in QMAP framing, so no traffic can flow
+		// and the interface never leaves IDLE. Self-fulfilling and silent.
+		// Field-found on an IPQ807x/RG500Q NSS board (2026-09-03).
+		//
+		// `info.kernel_netdev` is that pre-rename name, which the daemon keeps
+		// precisely because only it can answer this. No MAC guessing needed:
+		// wwand did the rename and therefore knows both names.
+		if (!fx.exists(sprintf('/sys/class/net/%s', vendor_child(netdev, 1))) &&
+		    !(info?.kernel_netdev &&
+		      fx.exists(sprintf('/sys/class/net/%s', vendor_child(info.kernel_netdev, 1)))))
 			return false;
 
 		// Claimed either way — these children need adopting, not creating. But a
@@ -186,8 +199,18 @@ return {
 		let out = [];
 		let have = qmap_mode(fx, ctx.netdev);
 
+		// Same reason as in probe(): after a parent rename the children still
+		// carry the kernel's original stem, so look for them under that name
+		// when the current one yields nothing.
+		let stem = ctx.netdev;
+
+		if (!fx.exists(sprintf('/sys/class/net/%s', vendor_child(stem, 1))) &&
+		    ctx.opts?.netdev_kernel &&
+		    fx.exists(sprintf('/sys/class/net/%s', vendor_child(ctx.opts.netdev_kernel, 1))))
+			stem = ctx.opts.netdev_kernel;
+
 		for (let entry in ctx.mux) {
-			let from = vendor_child(ctx.netdev, entry.id);
+			let from = vendor_child(stem, entry.id);
 			let child = ctx.child_name(entry);
 
 			if (!fx.exists(sprintf('/sys/class/net/%s', from))) {
