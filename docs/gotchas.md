@@ -78,6 +78,42 @@ HW-proven on the EG06. Structurally blocked in `qmi_over_mbim.send`.
 
 ---
 
+### `/sys/bus/usb/devices/$DEVPATH` addresses a USB interface
+**Neither half of that is true, and both were believed at once** in the E1820
+hotplug binder.
+
+`/sys/bus/usb/devices/` holds only FLAT kobject names — `3-1`, `3-1:1.1` — as
+symlinks into `/sys/devices`. A `$DEVPATH`-shaped path
+(`platform/soc@0/.../usb3/3-1`) never appears there, so a guard built from
+`${DEVPATH#/devices/}` matches nothing at all and falls through every time.
+
+The obvious repair is wrong too: an interface is not a SIBLING of its device,
+so `/sys$DEVPATH:1.1` does not exist either. It is a CHILD:
+
+```
+/sys/bus/usb/devices/3-1:1.1 -> /sys/devices/platform/.../usb3/3-1/3-1:1.1
+                                                             ^^^^ inside 3-1
+```
+
+So the addressable forms are `/sys$DEVPATH/${DEVPATH##*/}:1.1` or the flat
+`/sys/bus/usb/devices/${DEVPATH##*/}:1.1`.
+
+Two more things a USB hotplug script has to know, both of which bit here:
+
+- **`PRODUCT` is exported on interface uevents, not just the device one.**
+  `usb_uevent()` handles `is_usb_interface(dev)` explicitly and emits `PRODUCT`
+  from the parent device's descriptor. A `case "$PRODUCT"` match with no
+  `DEVTYPE=usb_device` gate therefore fires once per interface on top of once
+  for the device.
+- **`new_id` is not idempotent.** `usb_store_new_id()` kzallocs a `usb_dynid`
+  and `list_add_tail()`s it with no duplicate check, so every write appends
+  another entry to the driver's list.
+
+*Evidence:* `drivers/usb/core/driver.c` (6.18.41) for both kernel claims; the
+sysfs shapes HW-checked on a MikroTik Chateau 5G, 2026-09-05. Guarded by
+`tests/test_hotplug_e1820`, which asserts the path shapes separately from the
+behaviour so a kernel layout change says which one moved (2026-09-05).
+
 ## ucode
 
 ### `require()` shares module instances with the importer

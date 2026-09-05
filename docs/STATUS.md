@@ -1,7 +1,7 @@
 # wwand — current state
 
 _State of 2026-08-31, after v1.6.0 (feed r53; the QMI-surface and device-support
-work of 2026-08-30/31 lives in HEAD, not yet released). 50 host suites, all green
+work of 2026-08-30/31 lives in HEAD, not yet released). 52 host suites, all green
 (`cd tests && sh run_tests.sh` — it prints the count, which moves too often to
 be worth repeating here)._
 

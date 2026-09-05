@@ -16,7 +16,26 @@ case "$PRODUCT" in
 	*) return 0 2>/dev/null || exit 0 ;;
 esac
 
+# The device event, not its interfaces. usb_uevent() handles is_usb_interface()
+# too and emits PRODUCT from the parent device's descriptor
+# (drivers/usb/core/driver.c, 6.18.41), so the PRODUCT match above fires once
+# for the device AND once per interface. That matters for the binder below:
+# usb_store_new_id() (same file) kzallocs and list_add_tail()s without checking
+# for a duplicate, so an ungated body appends one dynid per event, every replug.
+if [ "$DEVTYPE" != usb_device ]; then
+	return 0 2>/dev/null || exit 0
+fi
+
 # Only when interface 1 is unbound (idempotent across replugs).
+#
+# The interface directory lives INSIDE the device's own, so the path is
+# $DEVPATH/<bus-id>:1.1. /sys/bus/usb/devices holds only flat kobject names
+# (`3-1`, `3-1:1.1`), never a $DEVPATH-shaped one, so the earlier
+# "/sys/bus/usb/devices/${DEVPATH#/devices/}:1.1" matched nothing at all and
+# this guard never fired. Note $DEVPATH:1.1 is wrong for the same reason — it
+# makes the interface a SIBLING of the device. (HW-checked on a MikroTik
+# Chateau 5G, 2026-09-05: /sys/bus/usb/devices/3-1:1.1 resolves to
+# .../usb3/3-1/3-1:1.1, a child of 3-1.)
 #
 # Spelled as an explicit `if`, because the obvious one-liner does the OPPOSITE
 # of what it reads like:
@@ -26,7 +45,7 @@ esac
 # When the path does NOT exist — the case we want to continue past — the test
 # fails, so `&&` is skipped and `||` fires `exit 0`. The binder below was
 # unreachable in exactly the situation it exists for, and reachable in none.
-if [ -e "/sys/bus/usb/devices/${DEVPATH#/devices/}:1.1/driver" ]; then
+if [ -e "/sys$DEVPATH/${DEVPATH##*/}:1.1/driver" ]; then
 	return 0 2>/dev/null || exit 0
 fi
 
