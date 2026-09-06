@@ -42,7 +42,14 @@ const IF1 = DEV + '/1-1:1.1';
 
 let root = sh('mktemp -d');
 
-ok(length(root) > 0, 'fixture: a temp root');
+// die(), not ok(): every command below builds an ABSOLUTE path from this, so a
+// failed mktemp would point them at the host's own /sys and write a script to
+// /script.sh. ok() only counts a failure and lets the file run on, which is the
+// same shape as the tar-into-/ accident in docs/gotchas.md — refuse instead.
+if (!length(root) || substr(root, 0, 1) != '/')
+	die(sprintf('fixture: mktemp -d gave no usable directory (%s)', root));
+
+ok(true, 'fixture: a temp root');
 
 // the miniature, plus the script with its /sys rewritten onto it
 sh(sprintf('mkdir -p %s/sys%s %s/sys/bus/usb/devices %s/sys/bus/usb/drivers/qmi_wwan',
