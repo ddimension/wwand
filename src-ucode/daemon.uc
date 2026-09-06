@@ -643,9 +643,15 @@ export function create(opts)
 
 			// RNDIS v6 model: the modem's v6 arrives via RA on the parent netdev.
 			// A dhcpv6 subinterface on the parent's device (@<parent>, auto:1)
-			// lets netifd run the v6 client (address/route/DNS/PD) natively —
-			// runtime-only (netifd ubus add_dynamic, nothing in uci), and netifd
-			// manages its lifecycle on its own; a matching user section wins.
+			// lets netifd run the v6 client (address/route/DNS/PD) natively; a
+			// matching user section wins. It is PERSISTED to uci, not dynamic:
+			// ensure_wan6() writes the section and commits, because netifd
+			// re-reads uci on reload and the section has to be on disk first.
+			// This comment claimed the opposite ("runtime-only, nothing in
+			// uci") until a user posted the `config interface 'wanb_6'` block
+			// out of their own /etc/config/network (ddimension/wwand#11) —
+			// two comments about one function, disagreeing, and the wrong one
+			// was the one people read first.
 			// Every AT-driven NCM datapath works this way, not just rndis_host:
 			// the E3372H on huawei_cdc_ncm shows the same kernel_ra addresses on
 			// the parent netdev (HW-observed 2026-08-30). is_at_driver() is the

@@ -629,8 +629,11 @@ uloop.run();
 
 	let pres = discovery.list_present(fx);
 	eq(length(pres), 2, 'wwan: QMI + MBIM control ports enumerated, AT skipped');
-	eq(pres[0], { kind: 'wwan', device: '/dev/wwan0qmi0', protocol: 'qmi', path: MHI_PATH, serial: null },
-		'wwan: QMI control device (PCIe/MHI, no pre-open serial)');
+	// the vendor keys are carried on every kind, null where there is no USB
+	// device to read them from — a consumer must not have to switch on `kind`
+	eq(pres[0], { kind: 'wwan', device: '/dev/wwan0qmi0', protocol: 'qmi', path: MHI_PATH, serial: null,
+		vendor_id: null, product_id: null, manufacturer: null },
+		'wwan: QMI control device (PCIe/MHI, no pre-open serial or vendor)');
 	eq(pres[1].protocol, 'mbim', 'wwan: MBIM control port too');
 
 	// Port PREFERENCE. One MHI modem exposes several control ports on the same
@@ -736,7 +739,8 @@ uloop.run();
 	eq(length(pres), 1, 'wwan mbim-only: only the MBIM control port is a modem');
 	eq(pres[0], { kind: 'wwan', device: '/dev/wwan0mbim0', protocol: 'mbim',
 	              path: 'platform/soc@0/1c08000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/mhi0',
-	              serial: null }, 'wwan mbim-only: MBIM device + protocol');
+	              serial: null, vendor_id: null, product_id: null, manufacturer: null },
+	   'wwan mbim-only: MBIM device + protocol');
 })();
 
 // MHI data netdev resolution (HW-confirmed T99W175/DELL X55 layout: the wwan0
@@ -823,5 +827,45 @@ ok(!discovery.same_hw_path('a/usb1/1-1', 'a/usb3/1-1'),
 	'same_hw_path: same leaf under a different controller does not match');
 ok(!discovery.same_hw_path(null, 'a/usb1/1-1') && !discovery.same_hw_path('a', null),
 	'same_hw_path: null never matches');
+
+
+// --- usb_vendor_of: which modem is this, without cross-referencing sysfs -----
+//
+// Asked for on ddimension/wwand#10 and #11. On a two-modem box the netdev
+// names and /dev nodes shuffle between boots; the vendor/product pair does
+// not, so it is the field that says WHICH stick a `present` entry describes.
+(function() {
+	const ATTR = {
+		'/sys/bus/usb/devices/3-1/idVendor': "12d1\n",
+		'/sys/bus/usb/devices/3-1/idProduct': "1506\n",
+		'/sys/bus/usb/devices/3-1/manufacturer': "HUAWEI_MOBILE\n",
+		// a device that exports the ids but no manufacturer string
+		'/sys/bus/usb/devices/2-1/idVendor': "2c7c\n",
+		'/sys/bus/usb/devices/2-1/idProduct': "0122\n",
+		'/sys/bus/usb/devices/2-1/manufacturer': "   \n",
+	};
+	let fx = { read: (p) => ATTR[p] ?? null };
+
+	eq(discovery.usb_vendor_of('3-1', fx),
+		{ vendor_id: '12d1', product_id: '1506', manufacturer: 'HUAWEI_MOBILE' },
+		'vendor: ids and manufacturer, whitespace trimmed');
+
+	// blank is not a value: an all-whitespace attribute must read as absent, or
+	// a consumer renders an empty cell and believes the modem reported one
+	eq(discovery.usb_vendor_of('2-1', fx),
+		{ vendor_id: '2c7c', product_id: '0122', manufacturer: null },
+		'vendor: a blank manufacturer is null, not an empty string');
+
+	// no usb anchor at all (PCIe/MHI): the KEYS still exist, so a consumer need
+	// not switch on `kind` to know which fields a record has
+	eq(discovery.usb_vendor_of(null, fx),
+		{ vendor_id: null, product_id: null, manufacturer: null },
+		'vendor: no usb id -> every key present and null');
+
+	// a path that vanished between listing and reading
+	eq(discovery.usb_vendor_of('9-9', fx),
+		{ vendor_id: null, product_id: null, manufacturer: null },
+		'vendor: unreadable attributes do not throw');
+})();
 
 done('test_discovery');

@@ -418,6 +418,37 @@ export function usb_serial_of(usbid, fx)
 	return (s != null) ? trim(s) : null;
 };
 
+// USB vendor identity for a discovered device: the numeric ids the kernel
+// matches drivers on, plus the manufacturer string when the device carries one.
+//
+// Asked for on ddimension/wwand#11 and #10, and it earns its place on a
+// multi-modem box: with two sticks the netdev names and /dev nodes shuffle
+// between boots, while `12d1:1506` does not — it is the one field that says
+// WHICH modem a `present` entry is without cross-referencing sysfs by hand.
+//
+// Every part is optional. A composite behind a hub, a driver that exports no
+// manufacturer string, a path that vanished between listing and reading: each
+// yields null rather than dropping the entry.
+export function usb_vendor_of(usbid, fx)
+{
+	fx = fx ?? default_fx();
+
+	if (!usbid)
+		return { vendor_id: null, product_id: null, manufacturer: null };
+
+	let rd = (a) => {
+		let v = fx.read(sprintf('/sys/bus/usb/devices/%s/%s', usbid, a));
+
+		return (v != null && length(trim(v))) ? trim(v) : null;
+	};
+
+	return {
+		vendor_id: rd('idVendor'),
+		product_id: rd('idProduct'),
+		manufacturer: rd('manufacturer'),
+	};
+};
+
 // USB iSerial -> '/dev/cdc-wdmX' | null. Matches ONLY when exactly one physical
 // USB device carries that serial (several cdc-wdm nodes on the *same* modem are
 // fine — grouped by USB device); an empty/duplicated serial across two modems is
@@ -553,6 +584,7 @@ export function list_present(fx)
 			usb_path: usbid,
 			path: sysfs_path_of(sprintf('/sys/class/usbmisc/%s/device', name), fx),
 			serial: usb_serial_of(usbid, fx),
+			...usb_vendor_of(usbid, fx),
 		});
 	}
 
@@ -566,6 +598,10 @@ export function list_present(fx)
 			protocol: p.protocol,
 			path: sysfs_path_of(sprintf('/sys/class/wwan/%s/device', p.name), fx),
 			serial: null,
+			// PCIe/MHI has no USB identity to read. The keys are still present
+			// and null: a consumer that switches on `kind` to know which fields
+			// exist is a consumer that breaks on the next transport.
+			vendor_id: null, product_id: null, manufacturer: null,
 		});
 	}
 
@@ -586,6 +622,7 @@ export function list_present(fx)
 			usb_path: usbid,
 			path: sysfs_path_of(sprintf('/sys/class/net/%s/device', netdev), fx),
 			serial: usb_serial_of(usbid, fx),
+			...usb_vendor_of(usbid, fx),
 		});
 	}
 
