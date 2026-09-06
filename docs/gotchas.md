@@ -114,6 +114,31 @@ sysfs shapes HW-checked on a MikroTik Chateau 5G, 2026-09-05. Guarded by
 `tests/test_hotplug_e1820`, which asserts the path shapes separately from the
 behaviour so a kernel layout change says which one moved (2026-09-05).
 
+### Every OpenWrt build can install a source-specific IPv6 route
+**No — it is a build option, and at least one in-tree target turns it off.**
+The IPv6 default route the proto shim asks for carries a source prefix
+(`default from <addr>/<plen> via <gw>`), which is what uqmi's `qmi.sh` builds
+line for line. The kernel needs `CONFIG_IPV6_SUBTREES` for that, exposed as
+`KERNEL_IPV6_SUBTREES` in `config/Config-kernel.in` and itself depending on
+`IPV6_MULTIPLE_TABLES`. `target/linux/airoha/*/config-6.18` has
+`# CONFIG_IPV6_SUBTREES is not set`.
+
+Where it is off, netifd reports the route in `ubus call network.interface.X
+status` and the kernel does not have it. Nothing logs an error, the interface
+comes up, addresses are configured, and IPv6 has no default route. `ip -6 route
+show table all` shows neither the default nor a `from` entry.
+
+The escape hatch is `option sourcefilter '0'` on the interface (ModemManager's
+name and semantics), which installs a plain default instead.
+
+*Evidence:* HW-measured by a reporter on ImmortalWrt 25.12-SNAPSHOT,
+mediatek/filogic (ddimension/wwand#8, 2026-09-06). Adding the default by hand
+**with the gateway wwand reports** worked and pinged; the same route with a
+`from` prefix was never installed; `option sourcefilter '0'` made netifd install
+`default via … proto static` and IPv6 worked. So the gateway was fine and the
+source filter was the whole problem. Note this hits **stock uqmi identically**
+on such a build.
+
 ## ucode
 
 ### `require()` shares module instances with the importer
