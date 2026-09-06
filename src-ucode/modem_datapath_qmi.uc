@@ -82,7 +82,7 @@ export function setup(self, dp, o, next)
 		// what this datapath can do, asked of the datapath instead of
 		// inferred from its name — the name tests here covered the built-in
 		// rmnet and silently excluded every datapath added since
-		let caps = netlink.datapath_caps(backend, dp.plugins);
+		let caps = netlink.datapath_caps(backend, dp.plugins, fxi, dp.netdev);
 		// forward-declared: negotiate() walks this ladder from inside its own
 		// body, and ucode does not hoist a `let` to where an earlier arrow
 		// can see it
@@ -204,7 +204,7 @@ export function setup(self, dp, o, next)
 				backend = 'ethernet';
 
 			if (backend == 'ethernet') {
-				caps = netlink.datapath_caps(backend, dp.plugins);
+				caps = netlink.datapath_caps(backend, dp.plugins, fxi, dp.netdev);
 				log('notice', 'datapath: ethernet selected — no WDA service, kernel keeps 802.3 framing (arp off, p2p)');
 				return finish(null, null);
 			}
@@ -298,6 +298,17 @@ export function setup(self, dp, o, next)
 			// the versions to try, best first: what the datapath can drive,
 			// capped by an explicit `option qmap_version`
 			let want = +(dp.qmap_version ?? 0);
+
+			// The pin can only LOWER the ladder — it selects from what the
+			// datapath declares it can drive, it does not add to it. Say so
+			// when it therefore does nothing, because "accepted and ignored" is
+			// how an operator ends up believing a knob was tried: pinning 5 on
+			// a datapath that declares [1] leaves [1], and the status page then
+			// still reads QMAP v1 with no explanation anywhere (reported from
+			// the field, 2026-09-06).
+			if (want && index(caps.qmap_versions, want) < 0)
+				log('warn', sprintf('datapath %s declares QMAP %J — `option qmap_version %d` selects from that list and cannot add to it, so it has no effect here',
+					backend, caps.qmap_versions, want));
 
 			rungs = filter(caps.qmap_versions, (v) => !want || v <= want);
 

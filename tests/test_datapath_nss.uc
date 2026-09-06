@@ -293,9 +293,45 @@ eq(netlink.datapath_status(fakefx.create(), 'rmnet_nss', null, plugins), null,
 // everywhere else, and the WDA format still applies. NOT v5: quectel-cm's
 // `qmap_version = 0x05` is the enum value for plain QMAP (v5 is 0x09), and it
 // only raises it when the driver reports v5 over an ioctl we cannot make.
+// Asked WITHOUT a device, the answer stays plain QMAP: the version is a
+// property of the driver on a particular parent, and a caller that supplies
+// none gets the safe declaration.
 eq(netlink.datapath_caps('rmnet_nss', plugins),
 	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], tx_aggr: false, llp_802_3: false },
-	'caps: driver owns the buffers, QMAP on the wire, plain QMAP only');
+	'caps: no device -> plain QMAP only');
+
+// Asked WITH one, the driver decides. qmi_wwan_q fixes the header version per
+// USB id at compile time and exports no qmap_version — but the same table entry
+// sets the RX buffer size, which it DOES export, so the size answers the
+// question: (5<<8)|4 and (5<<8)|16 are v1, (9<<8)|31 is v5.
+//
+// Getting this wrong is silent and total: the netdev counts the frame as sent,
+// the modem discards it without counting it against the bearer, and the link
+// sits CONNECTED and addressed with 100% loss. That is the field report this
+// came from, on a 31 KB device driven as plain QMAP.
+function sized_fx(bytes) {
+	let f = { '/sys/class/net/wwan0/qmap_mode': "2\n" };
+
+	if (bytes != null)
+		f['/sys/class/net/wwan0/qmap_size'] = sprintf("%d\n", bytes);
+
+	return fakefx.create({ present: { '/sys/module/rmnet_nss': true,
+		'/sys/class/net/wwan0_1': true, '/sys/class/net/wwan0_2': true }, files: f });
+}
+
+eq(netlink.datapath_caps('rmnet_nss', plugins, sized_fx(31744), 'wwan0').qmap_versions,
+	[ 5, 1 ], 'caps: 31 KB is the sdx55 entry -> v5 first, v1 as fallback');
+eq(netlink.datapath_caps('rmnet_nss', plugins, sized_fx(4096), 'wwan0').qmap_versions,
+	[ 1 ], 'caps: 4 KB is a v1 entry');
+eq(netlink.datapath_caps('rmnet_nss', plugins, sized_fx(16384), 'wwan0').qmap_versions,
+	[ 1 ], 'caps: 16 KB likewise');
+
+// An unknown size must NOT be rounded up to v5: declaring v5 wrongly is the
+// failure above, declaring v1 wrongly costs only checksum offload.
+eq(netlink.datapath_caps('rmnet_nss', plugins, sized_fx(65536), 'wwan0').qmap_versions,
+	[ 1 ], 'caps: an undocumented size stays on plain QMAP');
+eq(netlink.datapath_caps('rmnet_nss', plugins, sized_fx(null), 'wwan0').qmap_versions,
+	[ 1 ], 'caps: an unreadable qmap_size stays on plain QMAP');
 
 // --- selection ---------------------------------------------------------------
 
@@ -359,5 +395,30 @@ eq(netlink.mux_available(fx, 'wwan0', 'qmi', plugins), true,
 	ok(length(filter(adopted, (a) => index(a, 'wwan0_1') >= 0)) > 0,
 		'rename: ...having been found under the kernel stem it still carries');
 }
+
+
+// --- a negotiated QMAP format with no channel is a REFUSAL, not a fallback ----
+//
+// setup() runs AFTER the WDA negotiation, so by the time it finds no mux link
+// the modem has already been told to send QMAP frames. Degrading to a plain
+// raw-IP parent then produces a link that comes up, gets an address and moves
+// nothing: the netdev counts the frames as transmitted and the modem's WDS
+// counters stay flat. Reported from the field on an AW1000 (2026-09-06):
+// rmnet_nss selected, no `option mux_id`, interface IDLE, 100% loss.
+(function() {
+	let fx = vendor_fx(2);
+
+	let r = netlink.setup(fx, { netdev: 'wwan0', backend: 'rmnet_nss',
+		plugins: plugins, qmap_version: 5, mux: [] });
+	eq(r.ok, false, 'no-mux: a negotiated QMAP format refuses rather than degrades');
+	ok(index(r.error ?? '', 'mux_id') > 0,
+		'no-mux: ...and the error names the option that fixes it');
+
+	// without a negotiated format the fallback is still right: a config that
+	// names no channel simply IS raw_ip
+	let r2 = netlink.setup(vendor_fx(2), { netdev: 'wwan0', backend: 'rmnet_nss',
+		plugins: plugins, mux: [] });
+	eq(r2.ok, true, 'no-mux: with no QMAP negotiated, raw-IP remains the answer');
+})();
 
 done('test_datapath_nss');

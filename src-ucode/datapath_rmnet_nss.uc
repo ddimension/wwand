@@ -158,13 +158,52 @@ return {
 	// sizes the buffers, which here is the driver.
 	qmap: true,
 
-	// MAPv5 is deliberately NOT declared. An earlier version of this file did,
-	// reasoning that quectel-cm "sends 0x05" — but 0x05 is the enum value for
-	// plain QMAP; v5 is 0x09. quectel-cm defaults to exactly that and raises it
-	// only when the DRIVER reports v5 through rmnet_info, which it reads over an
-	// ioctl this datapath has no equivalent for. So plain QMAP is what the
-	// reference client does here by default, and it is what we do. A board that
-	// wants v5 needs the driver's answer, not a guess from us.
+	// The header version is the DRIVER's, not ours, and getting it wrong is
+	// silent: the netdev counts the frame as transmitted and the modem discards
+	// it without counting it against the bearer, so the link is CONNECTED,
+	// addressed, and moves nothing. Field-measured on an AW1000 with an
+	// RG500Q-EA (ddimension/wwand#…, forum report 2026-09-06): 100% loss, the
+	// WDS byte counters flat to the byte, and rmnet_nss_tx_exceptions not
+	// moving at all while quectel-cm on the same box raised it by exactly the
+	// number of pings.
+	//
+	// qmi_wwan_q fixes the version per USB id at COMPILE time and exports no
+	// `qmap_version` attribute:
+	//
+	//     .data = (5<<8)|4    // QMAP v1, 4 KB
+	//     .data = (5<<8)|16   // QMAP v1, 16 KB
+	//     .data = (9<<8)|31   // QMAP v5, 31 KB   (sdx55)
+	//
+	// The high byte is the format enum — 5 is plain QMAP, 9 is v5, confirmed in
+	// the vendor MHI driver we ship, which spells it out: `u32 qmap_version;
+	// // 5 ~ QMAP V1, 9 ~ QMAP V5` (pcie_mhi, mhi_netdev_quectel.c). The low
+	// byte is the RX buffer size in KB, and THAT the driver does export, as
+	// `qmap_size`. So the size is not a guess about the version: both come from
+	// the same table entry, and reading one tells us the other.
+	//
+	// The authoritative answer is the ioctl quectel-cm uses — 0x89F3
+	// (SIOCDEVPRIVATE+3), which fills RMNET_INFO with qmap_version, the mux ids,
+	// rx_urb_size and dl_minimum_padding in one call (same driver, line ~1759).
+	// wwand has no ioctl helper in its native module yet; when it grows one this
+	// derivation should be replaced by it, because a table read through a
+	// side-channel stays a table read. Until then an UNKNOWN size stays on
+	// plain QMAP rather than guessing upwards: declaring v5 wrongly is the
+	// failure above, declaring v1 wrongly costs only checksum offload.
+	qmap_versions: (fx, netdev) => {
+		let raw = fx.read(vendor_attr(netdev, 'qmap_size'));
+		let kb = raw ? (+trim(raw) / 1024) : 0;
+
+		if (kb == 31)
+			return [ 5, 1 ];
+
+		if (kb == 4 || kb == 16)
+			return [ 1 ];
+
+		fx.log('info', sprintf('rmnet_nss: qmap_size %s is not one this driver documents (4/16 KB = v1, 31 KB = v5) — staying on plain QMAP',
+			raw ? trim(raw) : 'unreadable'));
+
+		return [ 1 ];
+	},
 
 	// The children belong to the KERNEL: only a qmi_wwan_q reload creates or
 	// removes them. Never prune.

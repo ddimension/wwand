@@ -1043,7 +1043,7 @@ export function select_backend(fx, netdev, cfg_mux, want_mux, plugins, info)
 // 'rmnet'` decided QMAPv5 and uplink coalescing, and `!= 'rmnet' && != 'qmimux'`
 // decided whether the aggregation ratio means anything, so every datapath added
 // later silently fell outside all three.
-export function datapath_caps(backend, plugins)
+export function datapath_caps(backend, plugins, fx, netdev)
 {
 	let n = canon_mux(backend) ?? '';
 	let impl = BUILTIN[n] ?? plugins?.[n];
@@ -1059,8 +1059,19 @@ export function datapath_caps(backend, plugins)
 		// the QMAP header versions this datapath can drive, best first. Default
 		// [1]: plain QMAP is the only thing a datapath that says nothing can be
 		// assumed to handle, since v4 and v5 need format-specific handling.
+		//
+		// May be a FUNCTION (fx, netdev) for a datapath that adopts a driver's
+		// children: there the header version is the DRIVER's, fixed at compile
+		// time per USB id, and the wrong answer is silent — the netdev counts
+		// the frame as transmitted and the modem discards it without counting
+		// it against the bearer. A static declaration cannot express that; only
+		// the device can. `fx`/`netdev` are absent when the caller only wants
+		// the static shape (the daemon's `qmap` probe), and the function is
+		// then not called.
 		qmap_versions: impl
-			? [ ...(impl.qmap_versions ?? (impl.qmap_v5 === true ? [ 5, 1 ] : [ 1 ])) ]
+			? [ ...(type(impl.qmap_versions) == 'function'
+				? (fx && netdev ? (impl.qmap_versions(fx, netdev) ?? [ 1 ]) : [ 1 ])
+				: (impl.qmap_versions ?? (impl.qmap_v5 === true ? [ 5, 1 ] : [ 1 ]))) ]
 			: [],
 		// host-side uplink coalescing is available
 		tx_aggr: (impl?.tx_aggr === true),
@@ -1160,6 +1171,23 @@ export function setup(fx, opts)
 	// module load) overrides prune to keep them, and letting the fallback reach
 	// the default prune instead would delete exactly those.
 	if (impl && !length(wanted)) {
+		// If a QMAP format was already NEGOTIATED, falling back here cannot
+		// work and must not be attempted: WDA has told the modem to send QMAP
+		// frames, and a plain raw-IP parent has nothing to unwrap them. The
+		// link comes up, gets an address, and moves nothing — the netdev counts
+		// the frames as transmitted while the modem's own WDS counters stay
+		// flat. That is the same self-fulfilling shape as adopting a child
+		// under the wrong name, one layer up, and it was reported as exactly
+		// that (forum, 2026-09-06: rmnet_nss selected, no mux_id, IDLE and
+		// 100% loss). Refuse, and name the option that fixes it.
+		if (opts.qmap_version)
+			return { ok: false,
+				error: sprintf('datapath %s negotiated QMAP v%d but the interface configures no mux channel — add `option mux_id` (a plain raw-IP parent cannot carry QMAP frames)',
+					backend, opts.qmap_version) };
+
+		// Without a negotiated format the fallback is right and deliberate: a
+		// config that names no channel IS raw_ip, whatever was selected.
+		//
 		// notice, not info: select_backend announces a probe match at notice, so
 		// leaving the outcome below the default level would print "rmnet_nss
 		// selected" and never say it went unused.
