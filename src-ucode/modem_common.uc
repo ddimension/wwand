@@ -997,7 +997,7 @@ export function probe_iot_rat(self, cb)
 // collect_temperature(self, cb): read the modem die/board temperature over the
 // shared AT side channel and store self.temperature = { celsius, source:'at' }.
 // The command + parser are picked per manufacturer (QModem-derived): Quectel
-// AT+QTEMP, MeiG AT+TEMP, Huawei AT^CHIPTEMP, SIMCom AT+CPMUTEMP. Slow-loop only
+// AT+QTEMP, MeiG AT+TEMP, Huawei AT^CHIPTEMP?, SIMCom AT+CPMUTEMP. Slow-loop only
 // (temperature drifts slowly). Best-effort: an unknown vendor or a no-AT modem
 // (e.g. EG06 in MBIM mode) skips silently and keeps the last-known value.
 export function collect_temperature(self, cb)
@@ -1015,7 +1015,11 @@ export function collect_temperature(self, cb)
 
 	if (index(mfr, 'quectel') >= 0)     { cmd = 'AT+QTEMP';    parse = atcmd.parse_qtemp; }
 	else if (index(mfr, 'meig') >= 0)   { cmd = 'AT+TEMP';     parse = atcmd.parse_meig_temp; }
-	else if (index(mfr, 'huawei') >= 0) { cmd = 'AT^CHIPTEMP'; parse = atcmd.parse_chiptemp; }
+	// the READ form, with the '?'. Bare AT^CHIPTEMP is rejected, and a reject
+	// latches _temp_unavail, so the modem reported no temperature ever again
+	// for the rest of the session (ddimension/wwand#12, demonstrated on the
+	// reporter's device: `at^chiptemp?` -> "^CHIPTEMP: 389,389,65535,28,19").
+	else if (index(mfr, 'huawei') >= 0) { cmd = 'AT^CHIPTEMP?'; parse = atcmd.parse_chiptemp; }
 	else if (index(mfr, 'simcom') >= 0) { cmd = 'AT+CPMUTEMP'; parse = atcmd.parse_cpmutemp; }
 	// FM350/T700 (MediaTek): AT+ETHERMAL? (field-verified — the FM350 REJECTS
 	// the 3ginfo-lite NL952 command AT+MTSM=1)

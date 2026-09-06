@@ -998,7 +998,9 @@ push(scenarios, {
 		{ re: /^AT\^MONSC$/, lines: [ '^MONSC: LTE,262,01,1300,1C36403,246,BFF,-93,-11,-61' ] },
 		{ re: /^AT\^MONNC$/, lines: [ '^MONNC: LTE,1300,155,-99,-13,0,8' ] },
 		{ re: /^AT\+CEER$/, lines: [ '+CEER: EMM cause 33, requested service option not subscribed' ] },
-		{ re: /^AT\^CHIPTEMP/, lines: [ '^CHIPTEMP: 42' ] },
+		// anchored on the '?': a prefix match also accepts the bare form, which
+		// the modem rejects — that is how the wrong command survived (#12)
+		{ re: /^AT\^CHIPTEMP\?$/, lines: [ '^CHIPTEMP: 42' ] },
 	]),
 	cconfig: { apn: 'internet', pdp_type: 'ipv4v6', mux_id: 0 },
 	run: (env) => {

@@ -435,6 +435,11 @@ eq(atcmd.parse_ethermal([ 'OK' ]), null, 'ethermal: no line -> null');
 
 // Huawei ^CHIPTEMP: first plausible sensor across the CSV
 eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 0,38,41,45' ]), 38, 'chiptemp: first in-range (0 skipped)');
+// a real reply from the field (ddimension/wwand#12): five sensors, two of them
+// out of the plausibility window at either end — 389 reads like tenths of a
+// degree and 65535 is the "no sensor" sentinel
+eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 389,389,65535,28,19' ]), 28,
+	'chiptemp: tenths-looking and sentinel values are both skipped');
 eq(atcmd.parse_chiptemp([ 'OK' ]), null, 'chiptemp: none -> null');
 
 // SIMCom AT+CPMUTEMP: single Celsius value
