@@ -136,6 +136,38 @@ RUNTIME. Forward-declare: `let f; f = () => {…}`.
 
 ## LuCI
 
+### Wrapping a widget from `renderWidget()` is harmless
+**It is not, and the code comment that said so was wrong for weeks.** Returning
+the super's node inside a container —
+
+```js
+return E('div', {}, [ node, hint ]);   // WRONG
+```
+
+— breaks `getUIElement()` for that option. It resolves with
+`map.findElement('id', cbid)` and then `dom.findClassInstance(node)`, and
+**findClassInstance walks UPWARDS** through `parentNode` until it finds a bound
+class. An extra parent changes what that walk reaches, so the option resolves to
+an instance that is not its widget. For a `form.Flag` the next thing that
+happens is `Flag.formvalue()` calling `isChecked()` on it, which throws and
+takes the whole modal save with it.
+
+Append into the node instead:
+
+```js
+node.appendChild(hint);
+return node;                            // RIGHT
+```
+
+*Evidence:* measured in the browser on OpenWrt 25.12-SNAPSHOT with
+`luci-base 26.246.70755` — for the one wrapped option both
+`cbid.network.wan.at2_external` and `widget.cbid.network.wan.at2_external`
+resolved to an instance without `isChecked`, while every unwrapped flag on the
+same form (`lowpower`, `location`, `defaultroute`, `peerdns`, …) resolved to a
+`Checkbox` (ddimension/luci-app-wwand#3, 2026-09-06). A careful reading of
+`getUIElement` had concluded the opposite, twice — it looks only at the id, and
+the id does not move. The walk does.
+
 ### `E('td', {}, someString)` escapes the string
 **Wrong — it renders it as MARKUP.** In `dom.append` a bare string child is
 assigned through `innerHTML` (luci.js:1394-1396); only an ARRAY child becomes a
