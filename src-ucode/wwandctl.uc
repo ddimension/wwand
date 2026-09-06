@@ -73,7 +73,45 @@ function fmt_plmn(reg)
 	if (!p)
 		return '-';
 
-	return sprintf('%s (%d/%02d)', trim(p.description ?? '?'), p.mcc, p.mnc);
+	// Two shapes: QMI reports mcc/mnc separately, MBIM reports one concatenated
+	// ProviderId ("46015"). The daemon emits both from 1.6.2 on; an older one
+	// under a newer wwandctl is a pairing people run, and printing %d of a
+	// missing mcc gave "(0/00)" — reported as such (ddimension/wwand#8).
+	let mcc = p.mcc, mnc = p.mnc, digits = p.mnc_digits ?? 2;
+
+	// bound it: the padding below loops until this width, and the value comes
+	// over ubus. 2 and 3 are the only MNC lengths 3GPP defines.
+	if (digits != 2 && digits != 3)
+		digits = 2;
+
+	let id = sprintf('%s', p.id ?? '');
+
+	if ((mcc == null || mnc == null) && match(id, /^[0-9]{5,6}$/)) {
+		mcc = +substr(id, 0, 3);
+		mnc = +substr(id, 3);
+		digits = length(id) - 3;
+	}
+
+	// The NAME can be unusable — a firmware with no entry for the network emits
+	// junk ("-5" for China Broadcasting Network, same over AT+COPS). Then the
+	// number is the only thing that identifies the operator, so never drop it,
+	// and never print a placeholder pair when there is no number either.
+	let name = trim(p.description ?? '');
+	// ucode's sprintf has no dynamic field width ('%0*d' is printed verbatim),
+	// so pad by hand — and the width matters: 460/15 and 460/015 are different
+	// networks.
+	let mnc_s = (mnc != null) ? sprintf('%d', mnc) : null;
+
+	while (mnc_s != null && length(mnc_s) < digits)
+		mnc_s = '0' + mnc_s;
+
+	let pair = (mcc != null && mnc_s != null)
+		? sprintf('%d/%s', mcc, mnc_s) : null;
+
+	if (name && pair)
+		return sprintf('%s (%s)', name, pair);
+
+	return pair ?? (length(name) ? name : '-');
 }
 
 function fmt_sig(sig)

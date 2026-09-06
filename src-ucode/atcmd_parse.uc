@@ -815,8 +815,40 @@ function first_temp(lines, marker)
 // Quectel AT+QTEMP: bare "+QTEMP: 35" or +QTEMP: "sensor","35" (multi-line).
 export function parse_qtemp(lines)    { return first_temp(lines, /\+QTEMP:/); };
 
-// Huawei AT^CHIPTEMP: "^CHIPTEMP: <a>,<b>,<c>,<d>" (several sensors).
-export function parse_chiptemp(lines) { return first_temp(lines, /\^CHIPTEMP:/i); };
+// Huawei AT^CHIPTEMP? — five comma-separated fields, whose meaning comes from
+// community testing rather than Huawei documentation (ddimension/wwand#12):
+//
+//   0  PA shutdown threshold, TENTHS of a degree (420 = 42.0 C)
+//   1  PA alarm threshold, tenths
+//   2  reserved, usually 65535 (0xFFFF) = not available
+//   3  chipset/board temperature, whole degrees   <- the reading we want
+//   4  PA temperature, whole degrees
+//
+// Taking field 3 by POSITION rather than "first plausible value". The heuristic
+// happened to give the same answer on the samples seen so far, but only because
+// the thresholds are in tenths and therefore fall outside the 10..120 window —
+// a firmware that reports them in whole degrees would have handed us a
+// threshold as if it were a reading, and nothing would have looked wrong.
+//
+// Shorter replies (four fields, or a single value) keep the old scan: this is
+// one firmware family's layout, not a promise every Huawei makes.
+export function parse_chiptemp(lines)
+{
+	for (let l in (lines ?? [])) {
+		if (!match(l, /\^CHIPTEMP:/i))
+			continue;
+
+		let f = match(l, /-?[0-9]+/g);
+
+		if (f && length(f) >= 5) {
+			let v = +f[3][0];
+
+			return (v > 10 && v < 120) ? v : null;
+		}
+	}
+
+	return first_temp(lines, /\^CHIPTEMP:/i);
+};
 
 // SIMCom AT+CPMUTEMP: "+CPMUTEMP: 35" (single value, already Celsius).
 export function parse_cpmutemp(lines) { return first_temp(lines, /\+CPMUTEMP:/i); };

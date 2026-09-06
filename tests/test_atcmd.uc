@@ -435,11 +435,22 @@ eq(atcmd.parse_ethermal([ 'OK' ]), null, 'ethermal: no line -> null');
 
 // Huawei ^CHIPTEMP: first plausible sensor across the CSV
 eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 0,38,41,45' ]), 38, 'chiptemp: first in-range (0 skipped)');
-// a real reply from the field (ddimension/wwand#12): five sensors, two of them
-// out of the plausibility window at either end — 389 reads like tenths of a
-// degree and 65535 is the "no sensor" sentinel
+// The five-field layout, explained by the reporter (ddimension/wwand#12):
+// PA shutdown threshold and PA alarm threshold in TENTHS, a reserved 65535,
+// then the chipset temperature and the PA temperature in whole degrees.
 eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 389,389,65535,28,19' ]), 28,
-	'chiptemp: tenths-looking and sentinel values are both skipped');
+	'chiptemp: field 3 is the chipset reading');
+eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 420,420,65535,29,23' ]), 29,
+	'chiptemp: ...on the second field sample too');
+// the case the old "first plausible value" scan would have got WRONG: a
+// firmware reporting its thresholds in whole degrees would have handed back
+// the threshold, and nothing would have looked amiss
+eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 42,42,65535,29,23' ]), 29,
+	'chiptemp: a whole-degree threshold is not mistaken for a reading');
+// shorter replies keep the scan — this layout is one firmware family's, not a
+// promise every Huawei makes
+eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 0,38,41,45' ]), 38,
+	'chiptemp: a four-field reply falls back to the scan');
 eq(atcmd.parse_chiptemp([ 'OK' ]), null, 'chiptemp: none -> null');
 
 // SIMCom AT+CPMUTEMP: single Celsius value
