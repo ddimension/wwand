@@ -64,12 +64,49 @@ function uuid_str(bytes)
 		substr(h, 16, 4), substr(h, 20, 12));
 }
 
+// MBIM strings are UTF-16LE; ucode strings are UTF-8 byte strings. Both
+// directions have to convert by hand, because ucode's chr() is BYTE-oriented:
+// chr(0x4E2D) yields 0xff, not a three-byte UTF-8 sequence. The first version
+// of the decoder did `chr(c & 0xff)`, which discards the high byte of every
+// code unit — fine for ASCII, garbage for anything else. A Chinese operator
+// name came back as "-\xef\xbf\xbd5" (ddimension/wwand#8, RM520F-GL on a 460
+// IMSI); the encoder had the mirror defect, packing a UTF-8 *byte* as if it
+// were a code unit.
 export function utf16le_encode(s)
 {
 	let out = '';
 
-	for (let i = 0; i < length(s); i++)
-		out += struct.pack('<H', ord(s, i));   // ASCII/latin subset is enough
+	for (let i = 0; i < length(s); ) {
+		let b = ord(s, i);
+		let cp, n;
+
+		// decode one UTF-8 sequence; an invalid lead byte is passed through as
+		// U+00FF-and-below rather than dropped, so a malformed input still
+		// round-trips to something of the same length instead of vanishing
+		if (b < 0x80)                  { cp = b; n = 1; }
+		else if ((b & 0xe0) == 0xc0)   { cp = b & 0x1f; n = 2; }
+		else if ((b & 0xf0) == 0xe0)   { cp = b & 0x0f; n = 3; }
+		else if ((b & 0xf8) == 0xf0)   { cp = b & 0x07; n = 4; }
+		else                           { cp = b;        n = 1; }
+
+		if (i + n > length(s))
+			n = 1;
+
+		for (let k = 1; k < n; k++)
+			cp = (cp << 6) | (ord(s, i + k) & 0x3f);
+
+		i += n;
+
+		if (cp < 0x10000) {
+			out += struct.pack('<H', cp);
+		}
+		else {
+			// above the BMP: one surrogate pair
+			cp -= 0x10000;
+			out += struct.pack('<H', 0xd800 + (cp >> 10));
+			out += struct.pack('<H', 0xdc00 + (cp & 0x3ff));
+		}
+	}
 
 	return out;
 };
@@ -84,7 +121,26 @@ export function utf16le_decode(bytes)
 		if (c == 0)
 			break;
 
-		out += chr(c & 0xff);
+		// a high surrogate followed by a low one is ONE code point
+		if (c >= 0xd800 && c <= 0xdbff && i + 3 < length(bytes)) {
+			let lo = struct.unpack('<H', substr(bytes, i + 2, 2))[0];
+
+			if (lo >= 0xdc00 && lo <= 0xdfff) {
+				c = 0x10000 + ((c - 0xd800) << 10) + (lo - 0xdc00);
+				i += 2;
+			}
+		}
+
+		if (c < 0x80)
+			out += chr(c);
+		else if (c < 0x800)
+			out += chr(0xc0 | (c >> 6)) + chr(0x80 | (c & 0x3f));
+		else if (c < 0x10000)
+			out += chr(0xe0 | (c >> 12)) + chr(0x80 | ((c >> 6) & 0x3f)) +
+			       chr(0x80 | (c & 0x3f));
+		else
+			out += chr(0xf0 | (c >> 18)) + chr(0x80 | ((c >> 12) & 0x3f)) +
+			       chr(0x80 | ((c >> 6) & 0x3f)) + chr(0x80 | (c & 0x3f));
 	}
 
 	return out;

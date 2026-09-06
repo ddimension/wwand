@@ -406,4 +406,47 @@ eq(length(recmds2), 1, 'deactivate-retry: no deactivate when CONNECT never activ
 	eq(length(mbim.decode(liar).info), 0, 'decode: an over-long infolen is clamped to what arrived');
 }
 
+
+// --- UTF-16LE <-> UTF-8, both directions -------------------------------------
+//
+// The decoder used to do `chr(c & 0xff)`, throwing away the high byte of every
+// code unit. ASCII survived that, which is why it went unnoticed until a
+// non-Latin operator name came back as mojibake in a field report
+// (ddimension/wwand#8: `registered: plmn "-\xef\xbf\xbd5"` on a China Mobile
+// SIM). The encoder had the mirror defect. ucode's chr() is byte-oriented —
+// chr(0x4E2D) is 0xff — so both conversions are hand-rolled and worth pinning.
+(function() {
+	// ASCII, the case that always worked
+	eq(mbim.utf16le_decode(mbim.utf16le_encode('PLAY')), 'PLAY',
+		'utf16: ASCII round-trips');
+
+	// Latin-1: one code unit, TWO utf-8 bytes — the old decoder emitted one raw
+	// byte here, which is not valid utf-8 and reached ubus as such
+	eq(mbim.utf16le_decode(mbim.utf16le_encode('Télé')), 'Télé',
+		'utf16: Latin-1 round-trips');
+
+	// BMP beyond Latin-1: the case from the report
+	eq(mbim.utf16le_decode(mbim.utf16le_encode('中国移动')), '中国移动',
+		'utf16: CJK round-trips');
+
+	// above the BMP: a surrogate PAIR must become one code point, not two
+	eq(mbim.utf16le_decode(mbim.utf16le_encode('a😀b')), 'a😀b',
+		'utf16: a surrogate pair round-trips as one code point');
+
+	// decode from a hand-built buffer, so this does not merely test the encoder
+	// against itself: 4E2D 56FD = 中国, little-endian
+	eq(mbim.utf16le_decode(chr(0x2d, 0x4e, 0xfd, 0x56)), '中国',
+		'utf16: decode of a hand-built LE buffer');
+
+	// the encoder must produce exactly those bytes
+	let enc = mbim.utf16le_encode('中国');
+	eq(length(enc), 4, 'utf16: two BMP code points are four bytes');
+	eq(ord(enc, 0), 0x2d, 'utf16: low byte first');
+	eq(ord(enc, 1), 0x4e, 'utf16: ...then high byte');
+
+	// a NUL terminates, as MBIM strings do
+	eq(mbim.utf16le_decode(chr(0x41, 0x00, 0x00, 0x00, 0x42, 0x00)), 'A',
+		'utf16: decoding stops at the NUL');
+})();
+
 done('test_mbim');
