@@ -282,6 +282,21 @@ export function urc_common(self, o)
 	let deps = o.deps ?? {};
 
 	return (line) => {
+		// A temperature that arrives OUTSIDE its command. The EG18 answers
+		// AT+QTEMP with a bare OK and prints "+QTEMP: \"xo_therm_buf\",\"32\"" a
+		// moment later, so the reading lands in a window where no command is
+		// running (ddimension/wwand#12, picocom transcript). Other Quectels
+		// answer inline and never reach here — same command, same parser, two
+		// firmware behaviours.
+		if (match(line, /^\+QTEMP:/)) {
+			let c = atcmd.parse_qtemp([ line ]);
+
+			if (c != null) {
+				self.temperature = { celsius: c, source: 'at' };
+				log('debug', sprintf('temperature %d C (late +QTEMP)', c));
+			}
+		}
+
 		// NITZ (network identity/time, pushed at attach). The daemon applies it
 		// only when the system clock is clearly unset (RTC-less router before
 		// NTP), so recording it is always safe.
@@ -1034,7 +1049,13 @@ export function collect_temperature(self, cb)
 			self._temp_unavail = true;   // AT error / timeout / unsupported -> latch off
 		else {
 			let c = parse(res?.lines);
-			self.temperature = (c != null) ? { celsius: c, source: 'at' } : null;
+
+			// A successful command that parsed to nothing must NOT blank a
+			// known value: on the EG18 the reading arrives just after the OK
+			// and reaches us through the URC path instead, so clearing here
+			// would erase it again on every slow tick.
+			if (c != null)
+				self.temperature = { celsius: c, source: 'at' };
 		}
 		cb();
 	});

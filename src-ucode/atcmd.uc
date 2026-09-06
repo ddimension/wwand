@@ -499,6 +499,16 @@ export const DEFAULT_URC_PREFIXES = [
 	'ESIMS', 'CIREPI', 'CNEMIU', 'EONSNWNAME',
 	'CMTI', 'CMT', 'CDS', 'CBM',           // SMS delivery
 	'CUSD', 'CIEV',
+
+	// Quectel temperature. Vendor-specific, and normally that would put it on
+	// the vendor recipe — but it has to work on MBIM and QMI too, where no NCM
+	// recipe is consulted, and the own-prefix rule above makes it safe here:
+	// AT+QTEMP's OWN answer is never taken for a URC, so the only lines this
+	// affects are +QTEMP: lines arriving OUTSIDE that command, which is
+	// precisely the case it exists for. The EG18 answers OK first and prints
+	// the reading afterwards (ddimension/wwand#12, picocom transcript), so
+	// without this the value is emitted into a window nothing is listening on.
+	'QTEMP',
 ];
 
 // Unsolicited codes that carry NO prefix at all (V.250 call progress). They

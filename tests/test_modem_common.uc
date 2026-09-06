@@ -912,4 +912,30 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 	eq(m3.gnss_started, null, 'gnss: a failed start is not latched away');
 })();
 
+
+// --- a temperature that arrives after its own OK ------------------------------
+//
+// The EG18 answers AT+QTEMP with a bare OK and prints the reading a moment
+// later, so it lands in a window where no command is running
+// (ddimension/wwand#12, picocom transcript). urc_common has to pick it up, and
+// the polling side must not blank a value it already has just because its own
+// parse came back empty.
+(function() {
+	let self = { temperature: null };
+	let urc = mc.urc_common(self, { log: () => null, deps: {} });
+
+	urc('+QTEMP: "xo_therm_buf","32"');
+	eq(self.temperature, { celsius: 32, source: 'at' },
+		'temp urc: a late +QTEMP is captured');
+
+	// a line below the plausibility floor must not overwrite a good reading
+	urc('+QTEMP: "modem-ambient","3"');
+	eq(self.temperature?.celsius, 32,
+		'temp urc: an implausible value leaves the last one standing');
+
+	// and an unrelated URC must not touch it
+	urc('+CIEV: 2,3');
+	eq(self.temperature?.celsius, 32, 'temp urc: other URCs are ignored here');
+})();
+
 done('test_modem_common');
