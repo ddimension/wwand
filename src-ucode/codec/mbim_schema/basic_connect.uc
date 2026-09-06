@@ -204,6 +204,10 @@ export const commands = {
 		// MbimRadioSwitchState hardware/software radio state (CID 3).
 		RADIO_STATE: {
 			cid: 3,
+			// query carries no payload; the response is the same pair as the
+			// notification (mbim-service-basic-connect.json, libmbim 1.32:
+			// query is empty, response is HwRadioState + SwRadioState)
+			query: {},
 			set: { radio_state: 'u32' },
 			response: { hw_radio_state: 'u32', sw_radio_state: 'u32' },
 			notification: { hw_radio_state: 'u32', sw_radio_state: 'u32' },

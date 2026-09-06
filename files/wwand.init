@@ -3,7 +3,19 @@
 # Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 # wwand — QMI connection manager daemon
 
-START=25
+# Before S20network, because netifd is a CONSUMER of this daemon: it sources
+# /lib/netifd/proto/wwand.sh and, for an interface with `option auto 1`, runs
+# proto_wwand_setup during its own start. The shim does wait for the daemon
+# (`ubus wait_for`), so this is not the only guard, but starting after the
+# process that immediately calls us is the wrong way round and was field-
+# reported as an interface left down after a cold boot until a manual ifup
+# (ddimension/wwand#6). ubusd does not come from rc.d at all — procd starts it
+# in preinit — so nothing wwand needs is later than this slot.
+#
+# STOP stays at 85, i.e. wwand still stops BEFORE network: teardown at shutdown
+# does not need the daemon, and moving it would change behaviour no report asks
+# about.
+START=19
 STOP=85
 
 USE_PROCD=1

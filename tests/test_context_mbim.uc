@@ -64,6 +64,11 @@ function base_handlers(extra) {
 			subscriber_id: '262011234567890', sim_iccid: '89490200001022832490',
 			ready_info: 0, telephone_numbers_count: 0,
 		},
+		// init reads the radio state before registering; these suites are not
+		// about the radio, so answer "already on" and no write follows
+		RADIO_STATE: {
+			hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_ON,
+		},
 		REGISTER_STATE: {
 			nw_error: 0, register_state: bc.REGISTER_STATE_HOME, register_mode: 1,
 			available_data_classes: 0x20, current_cellular_class: 1,

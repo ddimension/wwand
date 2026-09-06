@@ -49,6 +49,11 @@ function base_handlers() {
 			subscriber_id: IMSI, sim_iccid: ICCID,
 			ready_info: 0, telephone_numbers_count: 0,
 		},
+		// init reads the radio state before registering; these suites are not
+		// about the radio, so answer "already on" and no write follows
+		RADIO_STATE: {
+			hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_ON,
+		},
 		REGISTER_STATE: {
 			nw_error: 0, register_state: bc.REGISTER_STATE_HOME, register_mode: 1,
 			available_data_classes: ext.DATA_CLASS_LTE, current_cellular_class: 1,

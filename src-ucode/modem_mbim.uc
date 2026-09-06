@@ -139,7 +139,7 @@ export function create(opts)
 
 	// --- step chain --------------------------------------------------------
 
-	let step_open, step_fcc, step_caps, step_at, step_at_ident, step_datapath, step_simslot, step_sim, step_attach_profile, step_register, step_attach;
+	let step_open, step_fcc, step_caps, step_at, step_at_ident, step_datapath, step_simslot, step_sim, step_attach_profile, step_register, do_register, step_attach;
 
 	let fail = modem_common.make_fail(self, {
 		log: log, timing: self.timing, emit: emit,
@@ -851,6 +851,40 @@ export function create(opts)
 	};
 
 	step_register = () => {
+		// The SOFTWARE radio can be off, and stay off across reboots: some modems
+		// ship that way. Nothing else in this backend ever turns it on — the two
+		// existing RADIO_STATE writers both cycle off->on inside a flow that only
+		// runs on an attach-profile change or a low-power wake — so registration
+		// simply never started. Field-reported on an EG18 in MBIM mode
+		// (ddimension/wwand#3): `umbim radio` showed hwradiostate on,
+		// swradiostate off, and stopping wwand to run `umbim radio on` by hand
+		// was the workaround.
+		//
+		// Read before write, like every other setting the daemon applies: a modem
+		// whose radio is already on sees no command at all. The hardware switch
+		// is reported too but deliberately not acted on — no software write can
+		// clear a physical kill switch, and saying so beats a silent retry.
+		self.mbim.command(bc, 'RADIO_STATE', 'query', {}, (err, data) => {
+			if (err || data?.sw_radio_state != bc.RADIO_STATE_OFF) {
+				if (!err && data?.hw_radio_state == bc.RADIO_STATE_OFF)
+					log('warn', 'hardware radio switch is off — registration will not start');
+
+				return do_register();
+			}
+
+			log('notice', 'software radio is off, switching it on');
+
+			self.mbim.command(bc, 'RADIO_STATE', 'set',
+				{ radio_state: bc.RADIO_STATE_ON }, (serr) => {
+				if (serr)
+					log('warn', sprintf('could not switch the radio on: %J', serr));
+
+				settle_timer = uloop.timer(self.timing.settle, do_register);
+			});
+		});
+	};
+
+	do_register = () => {
 		// before registering: debug-dump the NAS preferred list + SIM/network,
 		// then restore the configured list (per-SIM wins over per-modem) — via the
 		// QMI-over-MBIM passthrough NAS / AT+CPOL. Best-effort, never blocks.

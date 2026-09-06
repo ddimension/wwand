@@ -116,6 +116,11 @@ function handlers() {
 			subscriber_id: '262011234567890', sim_iccid: '89490200001022832490',
 			ready_info: 0, telephone_numbers_count: 0,
 		},
+		// the default modem boots with its radio already on, so init must not
+		// write RADIO_STATE at all — the off case is its own scenario below
+		RADIO_STATE: {
+			hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_ON,
+		},
 		REGISTER_STATE: {
 			nw_error: 0, register_state: bc.REGISTER_STATE_HOME, register_mode: 1,
 			available_data_classes: ext.DATA_CLASS_LTE, current_cellular_class: 1,
@@ -153,6 +158,62 @@ function finish() {
 
 // captures sim_refresh emitted by the SUBSCRIBER_READY_STATUS handler
 let ready_events = [];
+
+// A modem whose SOFTWARE radio is off must be switched on during init, or it
+// never registers — the case obsy reported on an EG18 (ddimension/wwand#3),
+// where stopping wwand and running `umbim radio on` by hand was the only way
+// to connect. The write must be conditional: the default modem in this suite
+// boots with the radio on and is checked below to receive no RADIO_STATE set
+// at all, so a future "just always write it" cannot pass both halves.
+function assert_radio_off() {
+	let h3 = handlers();
+	h3.RADIO_STATE = { hw_radio_state: bc.RADIO_STATE_ON,
+	                   sw_radio_state: bc.RADIO_STATE_OFF };
+
+	let mock3 = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h3 });
+	let m3 = null, m3_done = false;
+
+	m3 = modem_mbim.create({
+		id: 'm_radio', device: '/dev/mock2',
+		config: { apn: 'internet' },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: {
+			transport_open: mock3.transport_open,
+			log: () => null,
+			on_event: (m, event) => {
+				if (event != 'registered' || m3_done)
+					return;
+
+				m3_done = true;
+
+				let sets = filter(mock3.calls,
+					(c) => c.name == 'RADIO_STATE' && c.kind == 'set');
+
+				eq(length(sets), 1, 'radio: an off software radio is switched on once');
+				eq(sets[0]?.args?.radio_state, bc.RADIO_STATE_ON,
+					'radio: ...and switched ON, not cycled off first');
+				ok(length(filter(mock3.calls,
+					(c) => c.name == 'RADIO_STATE' && c.kind == 'query')) > 0,
+					'radio: the state is READ before it is written');
+
+				// the modem still got all the way to registration afterwards
+				eq(m3.state, 'READY', 'radio: init continues to READY after the switch');
+
+				// and the default (radio already on) instance wrote nothing
+				eq(length(filter(mock.calls,
+					(c) => c.name == 'RADIO_STATE' && c.kind == 'set')), 0,
+					'radio: a modem already on is left alone');
+
+				m3.stop();
+				finish();
+			},
+		},
+	});
+
+	m3.start();
+}
 
 // PUK-locked SIM must terminal-block (SIM_BLOCKED reason puk_required), NOT
 // loop PIN1-ENTER -> fail('pin_verify') -> recovery ladder (resets a SIM only
@@ -206,7 +267,7 @@ function assert_puk_block() {
 					eq(m2.datapath?.map_ids, { '1': 1 },
 						'datapath: the wire-id mapping is carried onto the modem');
 					m2.stop();
-					finish();
+					assert_radio_off();
 				}
 			},
 		},
@@ -214,6 +275,7 @@ function assert_puk_block() {
 
 	m2.start();
 }
+
 
 // inline NwError capture: a denied REGISTER_STATE with a reject cause must
 // surface in reg_detail IMMEDIATELY (no telemetry tick involved); a clean
