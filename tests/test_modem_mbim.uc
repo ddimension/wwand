@@ -124,6 +124,7 @@ function handlers() {
 		REGISTER_STATE: {
 			nw_error: 0, register_state: bc.REGISTER_STATE_HOME, register_mode: 1,
 			available_data_classes: ext.DATA_CLASS_LTE, current_cellular_class: 1,
+			// a 2-digit MNC with a leading zero: 262/01, not 262/1
 			provider_id: '26201', provider_name: 'Telekom.de',
 			roaming_text: '', registration_flag: 0,
 		},
@@ -303,6 +304,17 @@ function assert_inline_reject() {
 
 		uloop.timer(100, function() {
 			eq(modem.reg_detail, null, 'inline: clean registration clears the cause');
+
+			// MBIM reports the operator as ONE concatenated string; every
+			// consumer was written against QMI's separate mcc/mnc, so an MBIM
+			// modem showed no operator at all (ddimension/luci-app-wwand#4).
+			// The pair is now emitted alongside the raw id.
+			eq(modem.reg?.plmn?.id, '26201', 'plmn: the raw MBIM ProviderId is kept');
+			eq(modem.reg?.plmn?.mcc, 262, 'plmn: MCC is the first three digits');
+			eq(modem.reg?.plmn?.mnc, 1, 'plmn: MNC is what follows');
+			eq(modem.reg?.plmn?.mnc_digits, 2,
+				'plmn: ...and its DIGIT COUNT, because 260/06 and 260/060 differ');
+			eq(modem.reg?.plmn?.description, 'Telekom.de', 'plmn: name unchanged');
 			assert_puk_block();
 		});
 	});

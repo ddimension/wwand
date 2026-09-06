@@ -141,6 +141,33 @@ export function create(opts)
 
 	let step_open, step_fcc, step_caps, step_at, step_at_ident, step_datapath, step_simslot, step_sim, step_attach_profile, step_register, do_register, step_attach;
 
+	// MBIM reports the operator as one concatenated MCC+MNC string
+	// (MbimRegisterState ProviderId, "26006"), while QMI reports the pair
+	// separately — and every consumer was written against the QMI shape, so an
+	// MBIM modem showed no operator at all (ddimension/luci-app-wwand#4).
+	//
+	// Emit BOTH: the split pair for anything reading mcc/mnc, and `id`
+	// unchanged so nothing that already reads it breaks. MCC is always three
+	// digits; whatever follows is the MNC, two or three of them, and the count
+	// is significant — 260/06 and 260/060 are different networks, so the raw
+	// string is kept alongside the numbers that lose a leading zero.
+	let plmn_of = (data) => {
+		if (!data?.provider_id)
+			return null;
+
+		let id = trim(sprintf('%s', data.provider_id));
+		let out = { description: data.provider_name, id: id };
+
+		if (match(id, /^[0-9]{5,6}$/)) {
+			out.mcc = +substr(id, 0, 3);
+			out.mnc = +substr(id, 3);
+			out.mnc_digits = length(id) - 3;
+		}
+
+		return out;
+	};
+
+
 	let fail = modem_common.make_fail(self, {
 		log: log, timing: self.timing, emit: emit,
 		set_retry_timer: (t) => retry_timer = t,
@@ -718,7 +745,7 @@ export function create(opts)
 		self.reg = {
 			registration: registered ? 1 : 0,
 			roaming: (st == bc.REGISTER_STATE_ROAMING),
-			plmn: data.provider_id ? { description: data.provider_name, id: data.provider_id } : null,
+			plmn: plmn_of(data),
 			data_class: data.available_data_classes,
 		};
 
