@@ -1045,7 +1045,7 @@ ch = config.migrate_plan({ network: {
 	       username: 't', password: 'p', pincode: '1234', iptype: 'ipv4',
 	       plmn: '26201', allowedmode: '4g|5g', preferredmode: '5g',
 	       signalrate: '30', allow_roaming: '1', init_epsbearer: 'none',
-	       metric: '10' },
+	       sourcefilter: '0', metric: '10' },
 } });
 ok(mp_has(ch, 'add', 'wwmodem0', null), 'migrate-mm: wwand_modem created');
 eq(mp_set(ch, 'wwmodem0', 'path'), 'platform/soc/8af8800.usb/usb1/1-1',
@@ -1067,6 +1067,11 @@ ok(mp_has(ch, 'delete', 'wan', 'init_epsbearer'), 'migrate-mm: init_* stripped (
 ok(mp_has(ch, 'delete', 'wan', 'allow_roaming'), 'migrate-mm: allow_roaming stripped');
 ok(!mp_has(ch, 'delete', 'wan', 'apn'), 'migrate-mm: apn kept on interface');
 ok(!mp_has(ch, 'delete', 'wan', 'metric'), 'migrate-mm: metric kept (generic netifd)');
+// sourcefilter used to be stripped, which SILENTLY changed behaviour: an MM
+// interface set to 0 (plain IPv6 default route) came out with a source-specific
+// one. The proto handler now has the same option, so migration must keep it.
+ok(!mp_has(ch, 'delete', 'wan', 'sourcefilter'),
+	'migrate-mm: sourcefilter kept — the shim has the same option now');
 
 // edge cases: string-form auth, bare usb id, unmappable mode/auth -> omitted
 ch = config.migrate_plan({ network: {

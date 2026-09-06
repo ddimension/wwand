@@ -1095,12 +1095,18 @@ const MIGRATE_STRIP_IFACE = [ 'usb_path', 'path', 'ctldevice', 'dhcp',
 // --- ModemManager (`proto modemmanager`) translation --------------------------
 // MM's option set maps mostly 1:1; what has no wwand home is stripped and
 // documented (reference.md): preferredmode (wwand has only the allowed set),
-// sourcefilter/lowpower/allow_roaming/force_connection (MM runtime behaviors),
-// and the init_* attach-bearer group (wwand programs the LTE attach profile
-// from the connection's apn/pdp_type). apn/username/password/metric stay.
+// lowpower/allow_roaming/force_connection (MM runtime behaviors), and the
+// init_* attach-bearer group (wwand programs the LTE attach profile from the
+// connection's apn/pdp_type). apn/username/password/metric stay.
+//
+// `sourcefilter` is NOT stripped: the proto shim grew the same option, with
+// MM's name and semantics, so an interface migrated from ModemManager keeps
+// the behaviour it had. Dropping it used to be silent AND behaviour-changing —
+// an MM interface set to `0` (plain IPv6 default route) came out of migration
+// with a source-specific one instead.
 const MM_MODE_MAP = { '2g': 'gsm', '3g': 'umts', '4g': 'lte', '5g': 'nr5g' };
 const MIGRATE_STRIP_IFACE_MM = [ 'device', 'allowedauth', 'allowedmode',
-	'preferredmode', 'pincode', 'iptype', 'plmn', 'signalrate', 'sourcefilter',
+	'preferredmode', 'pincode', 'iptype', 'plmn', 'signalrate',
 	'lowpower', 'allow_roaming', 'force_connection', 'init_epsbearer',
 	'init_iptype', 'init_allowedauth', 'init_user', 'init_password', 'init_apn' ];
 

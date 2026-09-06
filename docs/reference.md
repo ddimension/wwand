@@ -240,9 +240,11 @@ qmi`/`mbim`/`ncm` interfaces untouched. Two ways to move an interface to wwand:
   `allowedmode` → modem `modes` (`4g|5g` → `lte,nr5g`); `plmn` → modem
   `mcc`/`mnc`; `signalrate` → modem `stats_interval`; `pincode` moves to the
   modem. `apn`/`username`/`password`/`metric` stay on the interface.
-  `preferredmode`, `sourcefilter`, `lowpower`, `allow_roaming`,
-  `force_connection` and the `init_*` attach-bearer group are dropped — wwand
-  programs the LTE attach profile from the connection's `apn`/`pdp_type`.
+  `preferredmode`, `lowpower`, `allow_roaming`, `force_connection` and the
+  `init_*` attach-bearer group are dropped — wwand programs the LTE attach
+  profile from the connection's `apn`/`pdp_type`. **`sourcefilter` is kept**:
+  the proto handler has the same option with MM's semantics, so a migrated
+  interface keeps the IPv6 default route it had.
   **After migrating, stop and remove the ModemManager service** — it would
   otherwise keep claiming the modem's control port.
 
@@ -1336,6 +1338,16 @@ which is what every deployment did before these existed and stays the default.
 Credentials come along only with an `init_apn`: applying them to whatever APN
 the attach profile already held would be a change nobody asked for, and a
 warning says so.
+
+**`option sourcefilter`** (default on, i.e. the filter is applied) controls how
+the IPv6 default route is installed. By default it carries a source prefix
+(`default from <addr>/<plen> via <gw>`), which is what uqmi's `qmi.sh` does
+line for line — this is the stock OpenWrt behaviour, not something wwand
+invented, and it is the right default: with a delegated prefix, a source filter
+stops the modem's default from capturing traffic that belongs to another
+uplink. Set it to `0` on an interface to install a plain default instead. The
+name and semantics are ModemManager's, which has carried the same switch for
+the same reason, so nobody has to learn a third spelling for it.
 
 **`option lowpower`** (default off) parks the **radio** once no context of this
 modem is up — DMS low-power on QMI, `AT+CFUN=0` on NCM. For battery and solar

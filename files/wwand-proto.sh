@@ -31,6 +31,18 @@ proto_wwand_init_config() {
 	proto_config_add_string settings_poll
 	proto_config_add_string hard_reconnect_on_ip_change
 
+	# The IPv6 default route is installed SOURCE-SPECIFIC by default — the same
+	# thing uqmi's qmi.sh does, character for character, so this is the stock
+	# behaviour and not a wwand invention. It is the right default: with a
+	# delegated prefix, a source filter keeps the modem's route from capturing
+	# traffic that belongs to another uplink.
+	#
+	# `option sourcefilter 0` drops the filter and installs a plain default
+	# instead. The name and semantics are ModemManager's (its own
+	# modemmanager.sh has had the same switch for the same reason), so an
+	# operator who needs it does not have to learn a third spelling.
+	proto_config_add_boolean sourcefilter
+
 	# legacy dialer options: accepted so old configs keep parsing;
 	# interpreted by the wwand compat layer, not by this shim
 	proto_config_add_string "device:device"
@@ -65,7 +77,7 @@ proto_wwand_init_config() {
 # VRF invariant, addressing/routing stays entirely in netifd (proto_add_*),
 # never direct netlink. Args: interface netdev resp defaultroute peerdns
 _wwand_apply_settings() {
-	local interface="$1" netdev="$2" resp="$3" defaultroute="$4" peerdns="$5"
+	local interface="$1" netdev="$2" resp="$3" defaultroute="$4" peerdns="$5" sourcefilter="$6"
 
 	# extract everything from the reply FIRST — proto_init_update and the
 	# reply parsing share the same jshn state, mixing them corrupts the
@@ -139,8 +151,13 @@ _wwand_apply_settings() {
 		[ "${v6_plen:-64}" -lt 128 ] 2>/dev/null && \
 			proto_add_ipv6_prefix "${v6_addr}/${v6_plen:-64}"
 		[ -n "$v6_gateway" ] && proto_add_ipv6_route "$v6_gateway" 128
-		[ "$defaultroute" = 0 ] || \
-			proto_add_ipv6_route "::0" 0 "$v6_gateway" "" "" "${v6_addr}/${v6_plen:-64}"
+		[ "$defaultroute" = 0 ] || {
+			if [ "$sourcefilter" = 0 ]; then
+				proto_add_ipv6_route "::0" 0 "$v6_gateway"
+			else
+				proto_add_ipv6_route "::0" 0 "$v6_gateway" "" "" "${v6_addr}/${v6_plen:-64}"
+			fi
+		}
 	}
 
 	# the v6 DNS push covers BOTH shapes: with a v6 address (dual-stack) and
@@ -158,8 +175,8 @@ _wwand_apply_settings() {
 
 proto_wwand_setup() {
 	local interface="$1"
-	local defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
-	json_get_vars defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
+	local defaultroute peerdns metric sourcefilter $PROTO_DEFAULT_OPTIONS
+	json_get_vars defaultroute peerdns metric sourcefilter $PROTO_DEFAULT_OPTIONS
 
 	# wait for the daemon
 	ubus -t 30 wait_for wwand 2>/dev/null || {
@@ -223,7 +240,7 @@ proto_wwand_setup() {
 	# MTU (incl. use_pushed_mtu semantics) is applied by the daemon itself
 	# via rtnl before it reports the context up — nothing to do here
 
-	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns"
+	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns" "$sourcefilter"
 
 	# no-proto-task: no supervisor process. The interface now stays up; the
 	# daemon reconnects transient drops in place (renew) and only drives
@@ -245,8 +262,8 @@ proto_wwand_teardown() {
 # delta — so PD/VRF dependencies are preserved.
 proto_wwand_renew() {
 	local interface="$1"
-	local defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
-	json_get_vars defaultroute peerdns metric $PROTO_DEFAULT_OPTIONS
+	local defaultroute peerdns metric sourcefilter $PROTO_DEFAULT_OPTIONS
+	json_get_vars defaultroute peerdns metric sourcefilter $PROTO_DEFAULT_OPTIONS
 
 	local resp
 	resp="$(ubus -t 30 call wwand context_settings "{\"interface\":\"$interface\"}" 2>/dev/null)" || return 0
@@ -270,7 +287,7 @@ proto_wwand_renew() {
 		proto_send_update "$interface"
 	}
 
-	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns"
+	_wwand_apply_settings "$interface" "$netdev" "$resp" "$defaultroute" "$peerdns" "$sourcefilter"
 }
 
 # There used to be a `proto_qmi_init_config()` alias here, from when this
