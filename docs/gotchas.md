@@ -139,6 +139,29 @@ mediatek/filogic (ddimension/wwand#8, 2026-09-06). Adding the default by hand
 source filter was the whole problem. Note this hits **stock uqmi identically**
 on such a build.
 
+### An "UNTRUSTED signature" from the feed means the key is wrong
+**Not on openwrt-25.12, where it usually means there is no signature to check.**
+That branch signs the package INDEX and nothing else: `SIGN_EACH_PACKAGE` does
+not exist in its `config/Config-build.in`, and its `include/package-pack.mk`
+carries no `--sign` at all. Per-package signing arrived after 25.12 and lives
+only on snapshot/master.
+
+The practical consequence is only visible when you bypass the index:
+
+- `apk add <name>=<version>` over a configured feed works on both branches —
+  the index is signed on both, and a package listed in a trusted index is
+  trusted by its hash.
+- `apk add ./file.apk` works on snapshot and **always** fails on 25.12, for any
+  feed including OpenWrt's own. `--allow-untrusted` is the normal answer there,
+  not a symptom of a broken key.
+
+*Evidence:* `apk verify` on one router, same keys, same apk 3.0.5 — the
+snapshot build of a package says `OK`, the 25.12 build of the same package and
+version says `UNTRUSTED signature` (2026-09-06). That looks exactly like a key
+mismatch and is not one; the CI passes the same `PRIVATE_KEY` to every matrix
+entry, and the difference is upstream capability. Diagnosed wrongly here first,
+as "the 25.12 branch of the feed is unusable" — it is not.
+
 ## ucode
 
 ### `require()` shares module instances with the importer
