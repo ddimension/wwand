@@ -172,8 +172,11 @@ export function install(self, o)
 
 				// netifd's ubus `down` clears autostart, which the ready path
 				// reads as operator intent — mark it so our own down is not
-				// mistaken for an ifdown (see daemon.uc, modem_registered)
+				// mistaken for an ifdown (see daemon.uc, modem_registered).
+				// STAMPED, because that marker is now bounded: an unstamped one
+				// reads as infinitely old and would be ignored outright.
 				entry._our_down = true;
+				entry._our_down_at = time();
 
 				if (down_interface && entry.cfg.interface)
 					down_interface(entry.cfg.interface);

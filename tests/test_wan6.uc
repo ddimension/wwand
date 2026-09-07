@@ -552,47 +552,85 @@ eq(mb_kicks, [], 'connect-first: an ifdown during the connect is still honoured'
 eq(dop.d.contexts.wan.wanted, false,
 	'connect-first: and the operator intent is recorded');
 
-// --- our-down is bounded: it must not shadow a LATER operator ifdown ---------
+// --- our-down is bounded, where nothing else can vouch for it ----------------
 //
 // netifd runs interface_set_down() for every `down` and offers no way to tell
-// two of them apart, so this marker is the only discriminator wwand has. That
-// makes its lifetime load-bearing: left standing, it swallows a genuine
-// `ifdown` issued minutes later, because the next `registered` reads that as
-// wwand's own down and undoes it. Found by audit (2026-09-07) — the report was
-// about the connect-first window, and the same hole is reachable from the
-// sim_blocked path, which can sit marked for as long as the SIM stays blocked.
+// two of them apart, so this marker is the only discriminator wwand has — and
+// an unbounded one swallows a genuine `ifdown` issued later.
 //
-// The window a legitimate marker needs is the one between our down and the kick
-// that answers it. Anything older is not evidence about the current state.
+// Not every path needs the bound. wwand's DELIBERATE downs (a SIM block, a
+// reconnect-hold give-up) set `reconnect_on_register`, which context_down
+// clears on an operator ifdown — "operator intent wins" — so that flag is
+// authoritative bookkeeping and the marker is refreshed from it. The path with
+// no such record is the stuck-pending reset: it marks and connects, and only
+// the clock says whether the cleared autostart is still that reset's doing.
+// Found by audit, 2026-09-07.
 
-kicks = [];
-autostart = true;
-let dttl = mk('ipv4', []);
+mb_kicks = []; mb_downs = [];
+mb_autostart = true; mb_pending = true;
 
-dttl.modem()('sim_blocked', { reason: 'pin' });
-ok(dttl.d.contexts.wan._our_down == true, 'ttl: the down is marked as ours');
-ok(dttl.d.contexts.wan._our_down_at > 0, 'ttl: ...and stamped with when');
-
-// age it past the bound, then let the operator take the interface down
-dttl.d.contexts.wan._our_down_at -= 100000;
-
-kicks = [];
-autostart = false;
+let dttl = mkmbim();
 dttl.modem()('registered');
 
-eq(kicks, [], 'ttl: a stale marker no longer claims an operator ifdown as ours');
+ok(dttl.d.contexts.wan._our_down == true, 'ttl: the pending reset is marked as ours');
+ok(dttl.d.contexts.wan._our_down_at > 0, 'ttl: ...and stamped with when');
+ok(dttl.d.contexts.wan.reconnect_on_register != true,
+	'ttl: a pending reset has no re-arm record to vouch for it later');
+
+// the operator takes the interface down long afterwards
+dttl.d.contexts.wan._our_down_at -= 100000;
+mb_kicks = [];
+mb_pending = false;
+mb_autostart = false;
+dttl.modem()('registered');
+
+eq(mb_kicks, [], 'ttl: a stale marker no longer claims an operator ifdown as ours');
 eq(dttl.d.contexts.wan.wanted, false, 'ttl: the operator intent is recorded instead');
 
-// a FRESH marker still wins, which is the case the marker exists for
+// ...while a FRESH one still wins, which is the case the marker exists for
+mb_kicks = []; mb_downs = [];
+mb_autostart = true; mb_pending = true;
+
+let dfresh = mkmbim();
+dfresh.modem()('registered');
+
+mb_kicks = [];
+mb_pending = false;
+mb_autostart = false;
+dfresh.modem()('registered');
+
+// MBIM connects first and kicks on the session's own 'up' — driving the event
+// is what makes this test the connect-first path rather than a no-op that
+// would pass whatever the marker said
+dfresh.ctx()('up');
+
+eq(mb_kicks, [ 'wan' ], 'ttl: a fresh marker still undoes our own down');
+
+// --- a give-up that wwand recorded is NOT subject to the clock ---------------
+//
+// A blackhole can outlast any sane TTL, so the sim_blocked / hold-expiry
+// give-up would be lost if it depended on one. It does not: reaching the
+// re-arm PROVES the down was ours (context_down clears the flag on an operator
+// ifdown), so the marker is refreshed there. Without that refresh the interface
+// the daemon has just decided to reconnect is read one line later as an
+// operator ifdown and stays down for good.
+
 kicks = [];
 autostart = true;
-let dfresh = mk('ipv4', []);
-dfresh.modem()('sim_blocked', { reason: 'pin' });
+let dgive = mk('ipv4', []);
 
+dgive.modem()('sim_blocked', { reason: 'pin' });
+eq(dgive.d.contexts.wan.wanted, false, 'giveup: the context is parked');
+ok(dgive.d.contexts.wan.reconnect_on_register == true, 'giveup: ...but re-armable');
+
+// hours later the PIN is entered and the modem comes back
+dgive.d.contexts.wan._our_down_at -= 100000;
 kicks = [];
 autostart = false;
-dfresh.modem()('registered');
-eq(kicks, [ 'wan' ], 'ttl: a fresh marker still undoes our own down');
+dgive.modem()('registered');
 
+eq(kicks, [ 'wan' ],
+	'giveup: a recorded give-up reconnects however long it was parked');
+ok(dgive.d.contexts.wan.wanted == true, 'giveup: and the context is wanted again');
 
 done('test_wan6');

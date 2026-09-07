@@ -340,6 +340,16 @@ export function create(opts)
 				entry.wanted = true;
 				log('notice', sprintf('interface %s: service returned, reconnecting after earlier give-up',
 					entry.cfg.interface));
+
+				// This marker is set from our OWN bookkeeping, not from netifd:
+				// `reconnect_on_register` is only ever set by context_down for a
+				// hold-expiry give-up, so reaching here PROVES the cleared
+				// autostart below is the down we issued ourselves. Refreshing it
+				// here is what lets the marker be time-bounded at all — a
+				// blackhole can outlast any sane TTL, and without this the
+				// give-up we just decided to undo would be read one line later as
+				// an operator ifdown and left down forever.
+				mark_our_down(entry);
 			}
 
 			// capture per iteration: the netifd status probe is async, so the
