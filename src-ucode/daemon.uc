@@ -2010,6 +2010,14 @@ export function create(opts)
 				configured_imei: entry.cfg?.imei,
 				imei: entry.modem?.info?.imei,
 				model: entry.modem?.info?.model,
+				// The MANUFACTURER as the modem reports it over the control
+				// channel, which is a different fact from the USB vendor id in
+				// `present` and worth both: "Quectel" names who made it,
+				// 2c7c:0125 names which one it is. Asked for on
+				// ddimension/wwand#10, where the vendor landed on `present` and
+				// `managed` was left with only the model.
+				manufacturer: entry.modem?.info?.manufacturer,
+				revision: entry.modem?.info?.revision,
 				device: entry.device,
 				netdev: entry.netdev,
 				registered: is_registered(entry.modem?.reg),
@@ -2018,6 +2026,17 @@ export function create(opts)
 
 		// enrich each present device with the IMEI/model of the managed modem on
 		// the same control node, so the picker can offer both anchors
+		// ...and the other way: a managed modem also gets the USB ids of the
+		// control node it sits on, so a caller reading `managed` alone can still
+		// tell two identical models apart.
+		for (let m in managed)
+			for (let p in present)
+				if (p.device && m.device && p.device == m.device) {
+					m.vendor_id = p.vendor_id ?? null;
+					m.product_id = p.product_id ?? null;
+					break;
+				}
+
 		for (let p in present)
 			for (let m in managed)
 				if ((p.device && p.device == m.device) || (p.netdev && p.netdev == m.netdev)) {
