@@ -83,6 +83,33 @@ export function setup(self, dp, o, next)
 		// inferred from its name — the name tests here covered the built-in
 		// rmnet and silently excluded every datapath added since
 		let caps = netlink.datapath_caps(backend, dp.plugins, fxi, dp.netdev);
+
+		// An unmuxed config is not a broken muxed one. When the interface names
+		// no channel there is nothing for a channel-building datapath to build,
+		// so the honest answer is a plain raw-IP parent — and, crucially, the
+		// modem must never be ASKED for QMAP framing we would then have nothing
+		// to unwrap with. Settling that here, ahead of the WDA gate, is what
+		// keeps `option mux_id` optional.
+		//
+		// It was not always here, and the cost was immediate: the probe claims
+		// the box for `rmnet` whether or not channels are configured (see
+		// want_mux above), so an ordinary unmuxed modem walked the whole QMAP
+		// ladder and then died in netlink.setup() with "add `option mux_id`".
+		// An EC25-E that had worked for months stopped connecting at all
+		// (openwrt/packages#30185, 2026-09-07). Plenty of modems only ever do
+		// plain raw-IP; they must not have to opt out of muxing.
+		//
+		// An ADOPTING datapath is the exception and is left alone: its driver
+		// created QMAP children at module load, so the modem is already in QMAP
+		// no matter what wwand negotiates, and netlink.setup() refuses that
+		// combination with an error naming the option that fixes it.
+		if (!need_mux && caps.qmap && !caps.adopts) {
+			log('notice', sprintf('datapath: %s needs mux channels and none are configured — plain raw-IP parent, no QMAP negotiated (add `option mux_id` to mux this modem)',
+				backend));
+			backend = 'raw_ip';
+			caps = netlink.datapath_caps(backend, dp.plugins, fxi, dp.netdev);
+		}
+
 		// forward-declared: negotiate() walks this ladder from inside its own
 		// body, and ucode does not hoist a `let` to where an earlier arrow
 		// can see it

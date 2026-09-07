@@ -297,7 +297,7 @@ eq(netlink.datapath_status(fakefx.create(), 'rmnet_nss', null, plugins), null,
 // property of the driver on a particular parent, and a caller that supplies
 // none gets the safe declaration.
 eq(netlink.datapath_caps('rmnet_nss', plugins),
-	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], tx_aggr: false, llp_802_3: false },
+	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], adopts: true, tx_aggr: false, llp_802_3: false },
 	'caps: no device -> plain QMAP only');
 
 // Asked WITH one, the driver decides. qmi_wwan_q fixes the header version per

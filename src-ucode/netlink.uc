@@ -1073,6 +1073,15 @@ export function datapath_caps(backend, plugins, fx, netdev)
 				? (fx && netdev ? (impl.qmap_versions(fx, netdev) ?? [ 1 ]) : [ 1 ])
 				: (impl.qmap_versions ?? (impl.qmap_v5 === true ? [ 5, 1 ] : [ 1 ]))) ]
 			: [],
+		// this datapath ADOPTS children the kernel already owns (a vendor
+		// driver creating them at module load) rather than building its own.
+		// The distinction decides what "no mux channel configured" means: for
+		// a builder it means there is nothing to build and a plain raw-IP
+		// parent is correct; for an adopter the driver has already put the
+		// modem into QMAP and no unmuxed configuration can work at all.
+		// `prune` is the existing marker for it — an adopter overrides it to
+		// keep the children the kernel made.
+		adopts: (type(impl?.prune) == 'function'),
 		// host-side uplink coalescing is available
 		tx_aggr: (impl?.tx_aggr === true),
 		// the wire framing the parent carries: 802.3 (the kernel default) or
@@ -1180,10 +1189,18 @@ export function setup(fx, opts)
 		// under the wrong name, one layer up, and it was reported as exactly
 		// that (forum, 2026-09-06: rmnet_nss selected, no mux_id, IDLE and
 		// 100% loss). Refuse, and name the option that fixes it.
-		if (opts.qmap_version)
+		// ...but ONLY where the kernel owns the children. For a datapath that
+		// BUILDS them, "no channel configured" is an ordinary unmuxed modem and
+		// the caller must not have negotiated QMAP in the first place; refusing
+		// here punished the config instead of the mistake, and broke plain
+		// raw-IP modems that had always worked (EC25-E, openwrt/packages#30185,
+		// 2026-09-07 — three WDA rungs, then a fatal datapath error on a config
+		// whose only sin was having no `mux_id`). That decision now lives in
+		// modem_datapath_qmi before the WDA gate.
+		if (opts.qmap_version && type(impl?.prune) == 'function')
 			return { ok: false,
-				error: sprintf('datapath %s negotiated QMAP v%d but the interface configures no mux channel — add `option mux_id` (a plain raw-IP parent cannot carry QMAP frames)',
-					backend, opts.qmap_version) };
+				error: sprintf('datapath %s adopts the QMAP channels its driver created, but the interface configures no mux channel — add `option mux_id` (the driver has already put this modem into QMAP; a plain raw-IP parent cannot unwrap those frames)',
+					backend) };
 
 		// Without a negotiated format the fallback is right and deliberate: a
 		// config that names no channel IS raw_ip, whatever was selected.

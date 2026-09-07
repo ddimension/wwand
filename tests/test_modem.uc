@@ -722,6 +722,59 @@ scenario('datapath-all-declined', {
 			'alld: links with deaggregation only');
 	});
 
+// --- an UNMUXED modem must never be asked for QMAP -------------------------
+//
+// The datapath probe claims the box for `rmnet` whether or not channels are
+// configured (that is deliberate — an accelerated datapath has to be able to
+// identify itself before anyone writes `option mux`). What must NOT follow is a
+// QMAP negotiation: with no channel to build there is nothing to unwrap the
+// frames the modem would then send, and plenty of modems only ever do plain
+// raw-IP.
+//
+// This regressed once, hard: the "no mux channel" case was caught in
+// netlink.setup() AFTER the WDA ladder had already run, so an ordinary unmuxed
+// modem walked v5 -> v4 -> v1 and then died with "add `option mux_id`".
+// Reported on an EC25-E that had worked for months, which then failed to
+// connect at all (openwrt/packages#30185, 2026-09-07). `option mux_id` is
+// optional and has to stay optional.
+
+let dpfx_nomux = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-unmuxed', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => ({
+			qos: 0, llp: args.llp,
+			ul_protocol: args.ul_protocol, dl_protocol: args.dl_protocol,
+			dl_max_datagrams: args.dl_max_datagrams ?? 0,
+			dl_max_size: args.dl_max_size ?? 0,
+		}),
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [], dgram_size: 0, fx: dpfx_nomux,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.state, 'READY', 'nomux: the modem connects — this is not an error');
+		eq(modem.datapath.backend, 'raw_ip', 'nomux: a plain raw-IP parent');
+
+		let sdf = mock.calls_for('SET_DATA_FORMAT');
+		eq(length(sdf), 1, 'nomux: one format request, no ladder');
+		eq(sdf[0].args.llp, 2, 'nomux: raw-IP link layer still requested');
+		eq(sdf[0].args.ul_protocol, null, 'nomux: no uplink QMAP protocol asked for');
+		eq(sdf[0].args.dl_protocol, null, 'nomux: no downlink QMAP protocol asked for');
+		eq(sdf[0].args.dl_max_datagrams, null, 'nomux: no aggregation requested');
+		eq(modem.datapath.qmap_version, null, 'nomux: nothing QMAP was negotiated');
+
+		// and no rmnet child was built for a config that named none
+		ok(dpfx_nomux.action_index('link_add_rmnet') < 0,
+			'nomux: no mux child created');
+	});
+
 // a modem that echoes the requested version downlink but a DIFFERENT one uplink
 // has not agreed to what was asked: both directions are configured from this one
 // answer (dl drives the rmnet ingress flags, ul the egress ones and the uplink

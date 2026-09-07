@@ -1014,13 +1014,13 @@ eq(netlink.mux_available(fakefx.create({ present: { '/sys/class/net/wwan0/vendor
 // aggregation ratio means anything. Every datapath added later fell outside all
 // three silently, which is what these capabilities exist to prevent.
 eq(netlink.datapath_caps('rmnet', null),
-	{ aggregate: true, qmap: true, qmap_versions: [ 5, 4, 1 ], tx_aggr: true, llp_802_3: false },
+	{ aggregate: true, qmap: true, qmap_versions: [ 5, 4, 1 ], adopts: false, tx_aggr: true, llp_802_3: false },
 	'caps: rmnet drives every QMAP version it has rmnet flags for');
 eq(netlink.datapath_caps('qmimux', null),
-	{ aggregate: true, qmap: true, qmap_versions: [ 1 ], tx_aggr: false, llp_802_3: false },
+	{ aggregate: true, qmap: true, qmap_versions: [ 1 ], adopts: false, tx_aggr: false, llp_802_3: false },
 	'caps: qmimux aggregates plain QMAP only, and has no coalesce knob');
 eq(netlink.datapath_caps('ethernet', null),
-	{ aggregate: false, qmap: false, qmap_versions: [ ], tx_aggr: false, llp_802_3: true },
+	{ aggregate: false, qmap: false, qmap_versions: [ ], adopts: false, tx_aggr: false, llp_802_3: true },
 	'caps: ethernet is the 802.3 link — no QMAP, no aggregation');
 eq(netlink.datapath_caps('raw_ip', null).llp_802_3, false,
 	'caps: raw_ip is raw framing, not 802.3');
@@ -1035,7 +1035,7 @@ eq(netlink.datapath_caps('vlan', null).qmap, false,
 eq(netlink.datapath_caps('raw_ip', null).qmap, false, 'caps: no mux, no QMAP');
 eq(netlink.datapath_caps('none', null).qmap, false, 'caps: ...under the old spelling too');
 eq(netlink.datapath_caps('nosuch', null),
-	{ aggregate: false, qmap: false, qmap_versions: [ ], tx_aggr: false, llp_802_3: false },
+	{ aggregate: false, qmap: false, qmap_versions: [ ], adopts: false, tx_aggr: false, llp_802_3: false },
 	'caps: an unknown datapath claims nothing');
 
 // `qmap` defaults to `aggregate` but is a DIFFERENT question: aggregate is who
