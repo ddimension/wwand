@@ -37,8 +37,15 @@ function at_mock(handlers)
 
 		let h = null;
 
+		// `after`: an entry that only applies once a given command has been
+		// written. Modems change what a query ANSWERS based on an earlier
+		// setting — AT+COPS=3,2 switches the read format — and a matcher that
+		// cannot express that can only test one side of such a pair.
 		for (let e in handlers)
-			if (match(cmd, e.re)) { h = e; break; }
+			if (match(cmd, e.re) && (!e.after || index(self.written, e.after) >= 0)) {
+				h = e;
+				break;
+			}
 
 		let lines = h?.lines ?? [];
 		let urcs = h?.urcs ?? [];
@@ -1184,6 +1191,12 @@ function fscript(over)
 		{ re: /^AT\+CGSN$/, lines: [ '350000000000000' ] },
 		// the FM350 has no vendor operator command -> the generic AT+COPS? path,
 		// answering at the 3GPP default format 0 (a NAME, no mcc/mnc)
+		// The 3GPP default read format is 0 (long alphanumeric), so a modem left
+		// alone answers with a NAME and no mcc/mnc. wwand asks once more after
+		// AT+COPS=3,2, which is when the numeric form appears — this mock
+		// switches its answer on that command exactly as a modem does.
+		{ re: /^AT\+COPS=3,[02]$/, lines: [] },
+		{ re: /^AT\+COPS\?$/, after: 'AT+COPS=3,2', lines: [ '+COPS: 0,2,"26201",7' ] },
 		{ re: /^AT\+COPS\?$/, lines: [ '+COPS: 0,0,"Telekom.de",7' ] },
 		{ re: /^AT\+GTFCCEFFSTATUS\?$/, lines: [ '+GTFCCEFFSTATUS: 0' ] },
 		{ re: /^AT\+SIMTYPE\?$/, lines: [ '+SIMTYPE: 0' ] },
@@ -1288,8 +1301,14 @@ push(scenarios, {
 				// (Asserted here, not at 'registered': the read is async.)
 				eq(env.modem.reg?.plmn?.description, 'Telekom.de',
 					's9a: operator name taken from a format-0 COPS answer');
-				eq(env.modem.reg?.plmn?.mcc, null,
-					's9a: a name-format answer carries no mcc');
+				// ...and the numbers arrive from the follow-up read, so a modem
+				// at the default format no longer reports a nameless PLMN
+				// (ddimension/luci-app-wwand#4, a Huawei with mcc/mnc null)
+				eq(env.modem.reg?.plmn?.mcc, 262,
+					's9a: mcc comes from the numeric follow-up');
+				eq(env.modem.reg?.plmn?.mnc, 1, 's9a: ...and mnc');
+				eq(env.modem.reg?.plmn?.mnc_digits, 2,
+					's9a: ...with its digit count, 262/01 not 262/1');
 
 				env.finish();
 			});

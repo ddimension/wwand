@@ -1210,10 +1210,32 @@ export function create(opts)
 			// generic path is the only one it has).
 			if (c.plmn != null && match(c.plmn, /^[0-9]{5,6}$/))
 				return store({ mcc: +substr(c.plmn, 0, 3), mnc: +substr(c.plmn, 3),
-				               description: null });
+				               mnc_digits: length(c.plmn) - 3, description: null });
 
-			if (length(c.oper ?? ''))
-				store({ mcc: null, mnc: null, description: c.oper });
+			if (!length(c.oper ?? ''))
+				return;
+
+			// A NAME and no numbers: the modem is at the 3GPP default read
+			// format (0, long alphanumeric) and will stay there, so mcc/mnc
+			// would never appear — reported on a Huawei whose status showed
+			// `"mcc": null, "mnc": null, "description": "Orange"`
+			// (ddimension/luci-app-wwand#4). Ask once for the numeric form and
+			// merge it in, then put the format back the way it was: this is a
+			// modem-wide setting, and leaving it changed would surprise anyone
+			// else reading COPS by hand.
+			store({ mcc: null, mnc: null, description: c.oper });
+
+			self.at.send('AT+COPS=3,2', () => {
+				self.at.send('AT+COPS?', (nerr, nres) => {
+					let n = nerr ? null : atcmd_parse.parse_cops_read(nres?.lines);
+
+					if (n?.plmn != null && match(n.plmn, /^[0-9]{5,6}$/) && self.reg)
+						store({ mcc: +substr(n.plmn, 0, 3), mnc: +substr(n.plmn, 3),
+						        mnc_digits: length(n.plmn) - 3, description: c.oper });
+
+					self.at.send('AT+COPS=3,0', () => null, { timeout: 10000 });
+				}, { timeout: 20000 });
+			}, { timeout: 10000 });
 		}, { timeout: 20000 });
 	};
 
