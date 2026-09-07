@@ -339,6 +339,21 @@ export function publish(conn, daemon, log)
 			},
 		},
 
+		// for an external connection monitor — see daemon.context_failed
+		context_failed: {
+			args: { context: '', interface: '', reason: '', ubus_rpc_session: '' },
+			call: (req) => {
+				let ref = req.args.context ?? req.args.interface;
+
+				if (ref == null)
+					return { error: 'missing_argument' };
+
+				defer(req, (reply) =>
+					daemon.context_failed(ref, req.args.reason,
+						(err, result) => reply(err ? { ...err } : result)));
+			},
+		},
+
 		hotplug: {
 			args: { action: '', device: '', ubus_rpc_session: '' },
 			call: (req) => {

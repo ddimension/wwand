@@ -828,6 +828,86 @@ uloop.run();
 })();
 
 
+// --- context_failed: an external prober drives the rungs it cannot reach -----
+//
+// L3 reachability is measured OUTSIDE (watchcat, mwan3, cron): with policy
+// routing in play the source address and table are decided elsewhere, so a
+// probe the daemon built itself would fail towards false alarms and tear down
+// working sessions. What the daemon owns is the recovery ladder, and nothing
+// external can drive it — `ifup` is a no-op on a live no_proto_task interface
+// and `context_down` records operator intent, the opposite of what a prober
+// means. See ddimension/wwand#13.
+(() => {
+	let climbed = 0, downs = 0;
+	let ctxs = [];
+
+	let fake = {
+		modem: { create: (o) => ({
+			id: o.id, state: 'READY', config: o.config,
+			start: () => null, stop: () => null,
+			note_connect_success: () => null,
+			note_connect_failure: (done) => { climbed++; done('opmode_cycle'); },
+		}) },
+		context: { create: (o) => {
+			// forward-declared: the object's own `down` references it, and a
+			// self-referencing `let` throws "Can't access lexical declaration
+			// before initialization" — the ucode TDZ trap, hit here while
+			// writing the very test that audits for it
+			let c;
+
+			c = { state: 'CONNECTED', name: o.name, modem: o.modem,
+			      config: o.config,
+			      down: (cb) => { downs++; c.state = 'IDLE'; return cb ? cb() : null; },
+			      up: (cb) => cb(null) };
+			push(ctxs, c);
+			return c;
+		} },
+	};
+
+	let d = daemon_mod.create({ timing: { ...TIMING, failed_min_gap: 30 },
+		deps: { log: () => null, load_qmi: () => fake } });
+
+	d.apply_config(config.parse({ network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+		       device: 'l3a', apn: 'a', pdp_type: 'ipv4' },
+	} }));
+
+	d.contexts.wan.wanted = true;
+
+	let got = null;
+	d.context_failed('wan', 'probe', (err, res) => { got = err ?? res; });
+
+	eq(downs, 1, 'failed: the live session is dropped so the redial is honest');
+	eq(climbed, 1, 'failed: ...and it counts against the recovery ladder');
+	eq(got.action, 'opmode_cycle', 'failed: the rung the ladder chose is reported back');
+
+	// `wanted` must survive: this is NOT an operator ifdown, and clearing it
+	// would park the interface instead of reconnecting it — the exact thing
+	// context_down does and this method exists to avoid
+	eq(d.contexts.wan.wanted, true, 'failed: the context is still wanted');
+
+	// This drives HARDWARE, so a stuck prober loop must not walk a healthy modem
+	// to the reboot rung in a minute. A second call inside the window is refused
+	// out loud rather than silently ignored.
+	let again = null;
+	d.context_failed('wan', 'probe', (err, res) => { again = err ?? res; });
+
+	eq(climbed, 1, 'failed: a second call inside the window does not climb again');
+	eq(again.throttled, true, 'failed: ...and the caller is told, not ignored');
+	ok(again.retry_in > 0, 'failed: with how long to wait');
+
+	// once the window has passed it counts again
+	d.contexts.wan._failed_at -= 100;
+	d.context_failed('wan', 'probe', (err, res) => null);
+	eq(climbed, 2, 'failed: past the window it climbs once more');
+
+	// an unknown interface is an error, not a silent no-op
+    let bad = null;
+	d.context_failed('nosuch', 'probe', (err, res) => { bad = err ?? res; });
+	eq(bad.error, 'no_such_context', 'failed: an unknown context is refused by name');
+})();
+
 // --- the outage state must survive EVERY rebuild, not just the normal one -----
 //
 // start_modem builds a fresh entry on each hotplug re-add and each 30 s

@@ -1893,6 +1893,68 @@ export function create(opts)
 	};
 
 
+	// An external prober (watchcat's `option script`, an mwan3 hotplug, cron)
+	// declaring this connection dead. L3 reachability is deliberately NOT
+	// measured in here: with mwan3 or a policy rule steering, the source address
+	// and the table are decided elsewhere and can change under the daemon, so a
+	// probe it built itself would fail in the direction of FALSE ALARMS — tearing
+	// down a working session because its own packet took the wrong path. That is
+	// the expensive mistake; missing a dead session merely costs the next probe
+	// (ddimension/wwand#13, and the reporter is who made that the deciding
+	// argument).
+	//
+	// What the daemon has and no external tool can reach is the recovery ladder:
+	// redial, opmode cycle, modem reset, board power-cycle / reset GPIO, reboot.
+	// So the division is prober outside, rungs inside. `ifup` cannot express this
+	// (on a no_proto_task interface the session is live and the interface already
+	// up, so it changes nothing) and `context_down` says the opposite of what a
+	// prober means — it records OPERATOR intent and parks the context.
+	self.context_failed = function(ref, reason, cb) {
+		let name = self.resolve_context(ref);
+		let entry = name ? self.contexts[name] : null;
+
+		if (!entry?.ctx)
+			return cb({ error: 'no_such_context', ref: ref });
+
+		// Rate limit, because this drives HARDWARE. A prober with a stuck loop
+		// or a one-second cron would otherwise walk a healthy modem up to the
+		// reboot rung in under a minute. The bound is per context and generous
+		// next to any sane probe interval; a caller that trips it gets told so
+		// rather than silently ignored.
+		let now = time();
+		let since = now - (entry._failed_at ?? 0);
+		let min_gap = self.timing?.failed_min_gap ?? 30;
+
+		if (entry._failed_at != null && since < min_gap)
+			return cb(null, { throttled: true, retry_in: min_gap - since,
+			                  interface: entry.cfg?.interface });
+
+		entry._failed_at = now;
+
+		log('warn', sprintf('interface %s: declared dead by %s — redialling and counting it against the recovery ladder',
+			entry.cfg?.interface ?? name,
+			(reason != null && reason != '') ? reason : 'an external monitor'));
+
+		let modem = entry.ctx.modem;
+
+		// the session goes first, so the redial is honest: retry_activate
+		// refuses a context it still believes is CONNECTED. `wanted` is
+		// untouched — this is not operator intent — so the context's own 'down'
+		// event re-enters the reconnect path.
+		let climb = () => {
+			if (!modem?.note_connect_failure)
+				return cb(null, { interface: entry.cfg?.interface, action: null });
+
+			modem.note_connect_failure((action) =>
+				cb(null, { interface: entry.cfg?.interface, action: action ?? null }));
+		};
+
+		if (entry.ctx.state == 'CONNECTED')
+			entry.ctx.down(climb);
+		else
+			climb();
+	};
+
 	self.context_status = function(ref) {
 		let name = self.resolve_context(ref);
 		let entry = name ? self.contexts[name] : null;

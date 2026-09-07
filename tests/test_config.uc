@@ -31,6 +31,11 @@ let r = padopt({
 
 eq(r.globals.log_level, 'debug', 'native: log level');
 eq(r.globals.hold_max, 120, 'native: hold_max parsed (seconds)');
+
+// context_failed's rate limit. It has a DEFAULT because the method drives
+// hardware: a prober stuck in a loop must not walk a healthy modem up to the
+// reboot rung, and a config that never mentions the option is the common case.
+eq(r.globals.failed_min_gap, 30, 'native: failed_min_gap defaults to 30s');
 eq(r.modems.m0.device, '/dev/cdc-wdm0', 'native: modem device');
 eq(r.modems.m0.at_init, [ 'ATI' ], 'native: at_init list');
 eq(r.modems.m0.location, true, 'native: location bool');
@@ -431,6 +436,21 @@ r = padopt({
 
 eq(r.globals.log_level, 'notice', 'net: wwand_globals log_level');
 eq(r.globals.hold_max, 45, 'net: wwand_globals hold_max');
+
+{
+	// 0 is a legitimate value — "no limit" for a caller that rate limits itself
+	// — so the guard is >= 0, not > 0 like hold_max's. A negative one is a typo
+	// and keeps the default rather than disabling the protection silently.
+	let g = (v) => config.parse({ network: {
+		globals: { '.type': 'wwand_globals', failed_min_gap: v },
+	} });
+
+	eq(g('5').globals.failed_min_gap, 5, 'globals: failed_min_gap parsed');
+	eq(g('0').globals.failed_min_gap, 0, 'globals: 0 means no limit, and is kept');
+	eq(g('-1').globals.failed_min_gap, 30, 'globals: a negative one keeps the default');
+	ok(length(filter(g('-1').warnings, (w) => match(w, /failed_min_gap/))) == 1,
+		'globals: ...and says so');
+}
 eq(r.modems.m0.usb_path, '1-1.2', 'net: wwand_modem usb_path');
 eq(r.modems.m0.pincode, '1234', 'net: wwand_modem pincode (default)');
 eq(r.modems.m0.sim_slot, 1, 'net: wwand_modem sim_slot');

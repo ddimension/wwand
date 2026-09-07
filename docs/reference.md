@@ -1167,6 +1167,48 @@ when called from LuCI).
 | `migrate` | `interfaces?`, `apply?` | plan (default) or apply the config migration of the named (or all) stock `proto qmi`/`mbim`/`ncm` interfaces to the network-native `proto wwand` model (same engine as the `/usr/libexec/wwand/migrate` CLI and the LuCI *Migrate selected* button) |
 | `context_up` / `context_down` | `context` or `interface` | connect / disconnect (deferred reply with the IP config) |
 | `context_status` / `context_settings` | `context` or `interface` | state, per-family cid/pdh, IP settings |
+| `context_failed` | `context` or `interface`, `reason?` | an external connection monitor declaring this connection dead: drop the session, redial, and **count it against the recovery ladder**. See below |
+
+### Connection monitoring (`context_failed`)
+
+wwand does not ping. L3 reachability is measured **outside** the daemon, by
+whatever already knows the routing: `watchcat` in `restart_iface` mode with its
+`option script`, an `mwan3` hotplug, or a cron one-liner. That is a correctness
+choice, not a shortcut — with mwan3 or a policy rule steering, the source
+address and the routing table are decided elsewhere and can change under the
+daemon, so a probe wwand built itself would fail in the direction of *false
+alarms*: tearing down a working session because its own packet took the wrong
+path.
+
+What the daemon owns, and no external tool can reach, is the **recovery
+ladder**. `context_failed` is the join between the two:
+
+    ubus call wwand context_failed '{"interface":"wan","reason":"probe"}'
+
+It drops the live session, redials, and counts the failure against the ladder —
+redial, opmode cycle, modem reset, board power-cycle / reset GPIO, reboot. The
+reply names the rung that fired (`action`), or `throttled: true` with
+`retry_in` when called again too soon.
+
+Why not the obvious alternatives:
+
+- **`ifup`** does nothing useful here. On a `no_proto_task` interface the
+  session is live and the interface is already up, so netifd has nothing to
+  re-run.
+- **`context_down`** says the opposite of what a monitor means: it records
+  **operator** intent and parks the context. `context_failed` leaves the
+  context `wanted`, so the daemon reconnects it.
+
+It is rate limited per context (30 s, `wwand_globals option failed_min_gap`)
+because it drives hardware: a prober stuck in a loop would otherwise walk a
+healthy modem up to the reboot rung in under a minute. A call inside the window
+is refused out loud rather than silently dropped.
+
+Example, as a watchcat recovery script:
+
+    #!/bin/sh
+    # /usr/libexec/wwand-monitor — watchcat `option script`
+    ubus call wwand context_failed "{\"interface\":\"$1\",\"reason\":\"watchcat\"}"
 
 ### Idempotent sets & deferred apply
 

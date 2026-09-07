@@ -273,7 +273,8 @@ function run_daemon()
 
 	let daemon = daemon_mod.create({
 		// operational timing from global config (re-read live on reload)
-		timing: { hold_max_ms: (parsed.globals.hold_max ?? 90) * 1000 },
+		timing: { hold_max_ms: (parsed.globals.hold_max ?? 90) * 1000,
+		          failed_min_gap: parsed.globals.failed_min_gap ?? 30 },
 		deps: {
 			transport_open: transport.open,
 			log: (level, msg) => logmod.log(level, '%s', msg),

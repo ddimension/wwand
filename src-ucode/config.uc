@@ -195,6 +195,21 @@ function apply_globals(s, result)
 			push(result.warnings, sprintf('invalid hold_max %J, keeping %d',
 				s.hold_max, result.globals.hold_max));
 	}
+
+	// smallest gap between two accepted context_failed calls on one context.
+	// It exists because that method drives HARDWARE — a prober stuck in a loop
+	// would otherwise walk a healthy modem up the recovery ladder to the reboot
+	// rung in under a minute. 0 is accepted and means "no limit", for a caller
+	// that does its own rate limiting and says so.
+	if (s.failed_min_gap != null) {
+		let fg = +s.failed_min_gap;
+
+		if (fg >= 0)
+			result.globals.failed_min_gap = fg;
+		else
+			push(result.warnings, sprintf('invalid failed_min_gap %J, keeping %d',
+				s.failed_min_gap, result.globals.failed_min_gap));
+	}
 }
 
 // every option the wwand_modem / wwand_sim parsers consume — used to flag
@@ -1016,7 +1031,8 @@ export function parse(raw)
 	let result = {
 		// hold_max: seconds the daemon holds a lost interface up while
 		// reconnecting in place before giving up and downing it (netifd teardown)
-		globals: { log_level: 'info', hold_max: 90, write_device: true, autosetup: true },
+		globals: { log_level: 'info', hold_max: 90, write_device: true, autosetup: true,
+		           failed_min_gap: 30 },
 		// devices owned by a non-wwand interface -> { interface, proto }
 		blocked: {},
 		// path-shaped claims (devpath/bus) -> { interface, proto, opt }; resolved
