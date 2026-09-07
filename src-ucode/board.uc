@@ -225,6 +225,16 @@ const PROFILES = {
 	// falling through to a full router reboot. Status LEDs are OS-owned -> none.
 	'zyxel,nr7101': {
 		reset_gpio: 'gpio515',
+		// The level at which the modem RUNS. Measured on the device
+		// (2026-09-07): driving gpio515 to 1 disconnects the modem from USB in
+		// under 5 s, driving it back to 0 re-enumerates it in about 10 — over
+		// several independent transitions. Stating it matters: without
+		// `reset_run` the pulse INFERS the rest level from the pin, which is
+		// right while the line is at rest and wrong the moment it is not. A
+		// pulse issued while the line already sat high therefore asserted 0,
+		// released back to 1, and left the modem held down — observed exactly
+		// once, in the test that produced this measurement.
+		reset_run: 0,
 	},
 	// Cudy LT300 (MT7628, MeiG SLM770A-R): the modem RESET/power-enable line is
 	// exported as the named gpio `4g`. The line is ACTIVE LOW: value 0 runs the

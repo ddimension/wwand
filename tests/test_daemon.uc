@@ -827,4 +827,55 @@ uloop.run();
 	eq(ops, [ ], 'lowpower: off by default, the radio is never parked');
 })();
 
+
+// --- a modem that vanished must climb the ladder, not wait forever ------------
+//
+// Measured on a Zyxel NR7101 (2026-09-07): the modem disconnected during
+// operation and was still gone 13 hours later, with wwand logging "waiting for
+// hotplug" every 30 s and touching nothing. The recovery ladder could not help
+// — it hangs off the modem object that detach destroys, and counts CONNECTION
+// attempts, of which there are none without a modem.
+//
+// Both rungs were measured on that board: the reset GPIO does work (line high
+// -> USB disconnect in under 5 s, low -> re-enumeration in ~10 s) but did NOT
+// revive the modem from that hung state; only a reboot did. So the reset comes
+// first and the reboot must stay reachable.
+(function() {
+	const T = { vanish_reset_after: 120, vanish_reboot_after: 900 };
+	let v = (o) => daemon_mod.vanish_action(o, 1000, T);
+
+	// a cold boot is NOT a vanish: `vanished` is set only by modem_removed, and
+	// is deliberately not persisted — after a restart we cannot know the modem
+	// was ever there, and a boot-time wait must never reboot the router
+	eq(v({ waiting_since: 0, _vanish_rung: 0 }), null,
+		'vanish: a boot-time wait escalates to nothing');
+	eq(v({ vanished: true, modem: {}, waiting_since: 0 }), null,
+		'vanish: a modem that is back escalates to nothing');
+	eq(v({ vanished: true }), null, 'vanish: no waiting_since, no action');
+
+	// below the first threshold nothing happens — a modem may re-enumerate on
+	// its own, and pulsing reset at second one would fight that
+	eq(v({ vanished: true, waiting_since: 950 }), null,
+		'vanish: 50s gone is too early to touch anything');
+
+	eq(v({ vanished: true, waiting_since: 880 }), 'reset',
+		'vanish: past the first threshold -> reset the modem');
+	eq(v({ vanished: true, waiting_since: 880, _vanish_rung: 1 }), null,
+		'vanish: the reset fires once, not every tick');
+
+	// the expensive rung, and the reason it exists: on that board the reset was
+	// not enough
+	eq(v({ vanished: true, waiting_since: 50, _vanish_rung: 1 }), 'reboot',
+		'vanish: still gone much later -> reboot');
+	eq(v({ vanished: true, waiting_since: 50, _vanish_rung: 2 }), null,
+		'vanish: and the reboot fires once');
+
+	// `failreboot 0` disables ONLY the reboot — same gate as the ladder's final
+	// rung, so a headless box can log forever without restarting under itself
+	eq(v({ vanished: true, waiting_since: 50, _vanish_rung: 1, cfg: { failreboot: '0' } }), 'none',
+		'vanish: failreboot 0 reaches the rung but declines to reboot');
+	eq(v({ vanished: true, waiting_since: 50, _vanish_rung: 1, cfg: { failreboot: '5' } }), 'reboot',
+		'vanish: a positive failreboot still reboots');
+})();
+
 done('test_daemon');

@@ -102,6 +102,37 @@ function is_registered(reg)
 	return reg?.registration == 1 || reg?.registration == 'registered';
 }
 
+// Which escalation step a vanished modem has earned, or null. Pure: the caller
+// records the rung and performs the action, the same split recovery.on_attempt()
+// uses — a decision that is only reachable through a timer is a decision that
+// cannot be tested.
+//
+//   'reset'  pulse the board's modem reset / power GPIO
+//   'reboot' restart the router
+//
+// Only ever for a modem that WAS running (`entry.vanished`). A cold-boot wait
+// must never reboot the router, and after a daemon restart we cannot know the
+// modem was ever there — so the flag is deliberately not persisted.
+export function vanish_action(entry, now, timing)
+{
+	if (!entry || entry.modem || !entry.vanished || !entry.waiting_since)
+		return null;
+
+	let gone = now - entry.waiting_since;
+	let rung = entry._vanish_rung ?? 0;
+	let t = timing ?? {};
+
+	if (rung < 1 && gone >= (t.vanish_reset_after ?? 120))
+		return 'reset';
+
+	// The reboot gate is the ladder's own: `failreboot <= 0` disables ONLY the
+	// reboot, so a headless box can log forever without restarting under itself.
+	if (rung < 2 && gone >= (t.vanish_reboot_after ?? 900))
+		return (+(entry.cfg?.failreboot ?? 100) > 0) ? 'reboot' : 'none';
+
+	return null;
+};
+
 export function create(opts)
 {
 	let deps = opts?.deps ?? {};
@@ -397,6 +428,12 @@ export function create(opts)
 		entry.control_note = 'waiting for modem (device vanished)';
 		entry.waiting_since = time();
 		entry._waiting_logged = time();
+		// THIS is what separates a vanish from a cold boot, and the escalation in
+		// the tick keys on it. Deliberately not persisted: after a daemon restart
+		// we no longer know the modem was ever running, and a boot-time wait must
+		// never reboot the router.
+		entry.vanished = true;
+		entry._vanish_rung = 0;
 	};
 
 	let modem_sim_blocked = (modem) => {
@@ -849,6 +886,32 @@ export function create(opts)
 	// multi-modem answer.
 	let board_gpio_ok = () => length(keys(self.modems)) <= 1;
 
+	// hardware repower: a modem `reset_gpio` (or the single-modem board default)
+	// pulses RESET without cutting power; else power-cycle the USB power GPIO.
+	// Board fallbacks gated by board_gpio_ok (multi-modem would hit the wrong
+	// hardware). No-op when nothing safe is available. Named rather than inlined
+	// because the vanish escalation in the tick needs the SAME action the ladder
+	// uses — two spellings of "reset this modem" is how they drift apart.
+	//
+	// Must stay BELOW board_gpio_ok: ucode does not hoist a `let`, and a closure
+	// written above one compiles the name as a global lookup rather than a local
+	// slot — so it fails at CALL time with "access to undeclared variable", not
+	// at parse time. Found on hardware, because the host suite runs this path
+	// with no board dep at all (NR7101, 2026-09-07).
+	let board_repower = (cfg) => {
+		if (!deps.board)
+			return false;
+
+		let rg = cfg?.reset_gpio ?? (board_gpio_ok() ? deps.board.profile?.reset_gpio : null);
+		let off = cfg?.repower_time ? +cfg.repower_time * 1000 : null;
+
+		if (rg)
+			return deps.board.reset_pulse(rg, off);
+
+		return board_gpio_ok() ? deps.board.power_cycle(off) : false;
+	};
+
+
 	// detach a dead modem: drop the modem object, reset device/netdev to their
 	// configured values, unbind this modem's contexts (their ctx is bound to the
 	// dead modem; queued activations would wait forever). The next rebuild builds
@@ -1089,6 +1152,17 @@ export function create(opts)
 			// carry the last-applied reload signature across internal rebuilds
 			// (hotplug re-add, waiting-modem retry) — they don't change the config
 			_sig: self.modems[name]?._sig,
+			// ...and the outage state, for the same reason. The waiting-modem
+			// retry runs every 30 s and builds a fresh entry each time, so
+			// anything recorded about the CURRENT outage has to be carried or it
+			// is erased before it can be acted on. That is what happened to the
+			// vanish escalation on its first hardware test: the markers were set,
+			// wiped 30 s later, set again, and the "gone for Ns" clock never
+			// advanced past one interval (NR7101, 2026-09-07).
+			_had_modem: self.modems[name]?._had_modem,
+			vanished: self.modems[name]?.vanished,
+			_vanish_rung: self.modems[name]?._vanish_rung,
+			waiting_since: self.modems[name]?.waiting_since,
 		};
 
 		self.modems[name] = entry;
@@ -1101,9 +1175,25 @@ export function create(opts)
 			control.device != null);
 
 		if (!present) {
+			// A modem we ONCE had is a vanish, whatever route it took to get
+			// here. _device_gone() only fires when the transport notices the
+			// disappearance by itself; when the device goes while requests are
+			// in flight the modem instead fails, tears down and lands ABSENT,
+			// and the periodic rebuild then arrives here — which used to look
+			// exactly like a cold boot and escalated to nothing. Measured on an
+			// NR7101 (2026-09-07) by pulling the modem's reset line under a live
+			// session: the log showed the boot-style wait and no escalation.
+			if (entry._had_modem && !entry.vanished) {
+				entry.vanished = true;
+				entry._vanish_rung = 0;
+				entry.waiting_since = entry.waiting_since ?? time();
+			}
+
 			log('warn', sprintf('modem %s: control interface not present yet, waiting for hotplug', name));
 			// surface the wait to status()/netifd; the periodic tick re-logs it every 30s.
-			entry.control_note = 'waiting for modem (control device not present)';
+			entry.control_note = entry.vanished
+				? 'waiting for modem (device vanished)'
+				: 'waiting for modem (control device not present)';
 			entry.waiting_since = entry.waiting_since ?? time();
 			return;
 		}
@@ -1119,6 +1209,11 @@ export function create(opts)
 			entry.modeswitch_liveness = null;
 		}
 		entry.control_note = null;
+		// the modem answered again: this outage is over, so the next one starts
+		// at the bottom of the escalation rather than where this one stopped
+		entry.vanished = false;
+		entry._vanish_rung = 0;
+		entry.waiting_since = null;
 
 		let device = entry.device;
 		// non-null by here: an unidentified device was refused above
@@ -1185,13 +1280,7 @@ export function create(opts)
 				// default) pulses RESET without cutting power; else power-cycle the USB
 				// power GPIO. Board fallbacks gated by board_gpio_ok (multi-modem would
 				// hit the wrong hardware). No-op when nothing safe is available.
-				repower: deps.board ? (() => {
-					let rg = cfg.reset_gpio ?? (board_gpio_ok() ? deps.board.profile?.reset_gpio : null);
-					let off = cfg.repower_time ? +cfg.repower_time * 1000 : null;
-					if (rg)
-						return deps.board.reset_pulse(rg, off);
-					return board_gpio_ok() ? deps.board.power_cycle(off) : false;
-				}) : null,
+				repower: deps.board ? (() => board_repower(cfg)) : null,
 			},
 			at: {
 				fx: deps.datapath_fx,
@@ -1266,6 +1355,10 @@ export function create(opts)
 			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx };
 
 		entry.modem = be.modem.create({ ...common, datapath: datapath });
+		// remembered for the vanish escalation below: "this control device was
+		// once ours" is the only thing separating a modem that fell out of the
+		// machine from one that never showed up.
+		entry._had_modem = true;
 		entry.modem.start();
 	};
 
@@ -1437,6 +1530,51 @@ export function create(opts)
 			let tick;
 			tick = () => {
 				let now = time();
+
+				// A modem that WAS running and then vanished is not a boot race.
+				// The hardware went away under us, and nothing on the wire will
+				// bring it back — measured on a Zyxel NR7101 (2026-09-07): the
+				// modem disconnected mid-operation and was still gone 13 hours
+				// later, while wwand logged "waiting for hotplug" every 30 s and
+				// touched nothing. The recovery ladder could not help, because it
+				// hangs off the MODEM object that detach destroys and counts
+				// CONNECTION attempts, of which there are none without a modem.
+				//
+				// So escalate on time instead, through the same two actions the
+				// ladder's top rungs use. Both were measured on that board: the
+				// reset GPIO does work (line high -> USB disconnect in under 5 s,
+				// low -> re-enumeration in ~10 s), but it did NOT revive the modem
+				// from that hung state — only a reboot did. Hence both rungs, in
+				// that order; the cheap one first, and the expensive one still
+				// reachable, which is the whole point.
+				for (let name, entry in self.modems) {
+					let act = vanish_action(entry, now, self.timing);
+
+					if (!act)
+						continue;
+
+					let gone = now - entry.waiting_since;
+
+					if (act == 'reset') {
+						entry._vanish_rung = 1;
+						log('warn', sprintf('modem %s: gone for %ds — pulsing the board reset', name, gone));
+
+						if (!board_repower(entry.cfg))
+							log('warn', sprintf('modem %s: no usable reset or power GPIO for this board', name));
+					}
+					else {
+						entry._vanish_rung = 2;
+
+						if (act == 'reboot') {
+							log('err', sprintf('modem %s: gone for %ds and the reset did not bring it back — rebooting', name, gone));
+							uloop.timer(self.timing?.reboot_delay ?? 5000,
+								() => deps.recovery_fx?.run?.([ 'reboot' ]));
+						}
+						else {
+							log('warn', sprintf('modem %s: gone for %ds and the reset did not bring it back; `option failreboot 0` keeps the router up', name, gone));
+						}
+					}
+				}
 
 				// waiting modems: periodically re-check presence and rebuild via
 				// start_modem — recovers modems whose hotplug 'add' never fired.
