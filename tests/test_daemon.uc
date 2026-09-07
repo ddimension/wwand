@@ -828,6 +828,69 @@ uloop.run();
 })();
 
 
+// --- the outage state must survive EVERY rebuild, not just the normal one -----
+//
+// start_modem builds a fresh entry on each hotplug re-add and each 30 s
+// waiting-modem retry, and there are THREE places it does so: the two early
+// returns (device owned by another stack, control protocol unidentifiable) and
+// the normal one. Only the normal one carried the outage markers.
+//
+// The unknown-protocol return is reachable exactly when it costs most. A device
+// that re-appears after the ladder pulsed its reset spends a moment with its
+// node present and no driver bound yet — which IS that path — so the rebuild
+// wiped `_had_modem` and the outage clock, the next tick classified the wait as
+// a cold boot, and the reboot rung could never be reached. The reboot rung is
+// the one that actually recovered the NR7101. Found by audit, 2026-09-07.
+{
+	let ctl = null;
+	let logs = [];
+	let parsed = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+	} });
+
+	let d = daemon_mod.create({
+		timing: { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
+		          reg_timeout: 500, backoff_min: 40, backoff_max: 60 },
+		deps: {
+			log: (lvl, msg) => push(logs, msg),
+			load_qmi: () => ({ modem: { create: () => ({ id: 'm', start: () => null,
+				stop: () => null, note_connect_success: () => null,
+				note_connect_failure: () => null, datapath: {} }) },
+				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem }) } }),
+			emit_event: () => null, kick_interface: () => null,
+			renew_interface: () => null, down_interface: () => null,
+			iface_status: (i, cb) => cb({ up: false }),
+			datapath_fx: null, read_config: () => parsed,
+			resolve_control: () => ctl,
+			resolve_netdev: () => null,
+			learn_device: () => null, learn_modem_path: () => null,
+		},
+	});
+
+	// the modem was there and running, then vanished: this is the state the
+	// ladder reads
+	d.apply_config(parsed);
+	d.modems.m0._had_modem = true;
+	d.modems.m0.vanished = true;
+	d.modems.m0.waiting_since = 111;
+	d.modems.m0._vanish_rung = 1;
+
+	// it comes back mid-enumeration: the node is there, no driver bound yet.
+	// Driven through hotplug, which is how the real retry re-runs start_modem —
+	// apply_config short-circuits on an unchanged config signature and would
+	// have tested nothing.
+	ctl = { device: '/dev/cdc-wdm0', unknown: true, driver: null, protocol: null };
+	d.hotplug('add', 'cdc-wdm0');
+
+	ok(match(d.modems.m0.control_note ?? '', /unknown control protocol/),
+		'rebuild: the unidentifiable device is reported, not driven');
+	eq(d.modems.m0._had_modem, true,
+		'rebuild: ...and the unknown-protocol path still knows the modem WAS running');
+	eq(d.modems.m0.waiting_since, 111, 'rebuild: the outage clock is not restarted');
+	eq(d.modems.m0._vanish_rung, 1, 'rebuild: the rung already climbed is not forgotten');
+	eq(d.modems.m0.vanished, true, 'rebuild: still flagged as a vanish, not a cold boot');
+}
+
 // --- a modem that vanished must climb the ladder, not wait forever ------------
 //
 // Measured on a Zyxel NR7101 (2026-09-07): the modem disconnected during
@@ -849,8 +912,13 @@ uloop.run();
 	// was ever there, and a boot-time wait must never reboot the router
 	eq(v({ waiting_since: 0, _vanish_rung: 0 }), null,
 		'vanish: a boot-time wait escalates to nothing');
-	eq(v({ vanished: true, modem: {}, waiting_since: 0 }), null,
-		'vanish: a modem that is back escalates to nothing');
+	// waiting_since must be NONZERO here, or this proves nothing: the guard
+	// rejects a falsy timestamp too, so with `waiting_since: 0` the assertion
+	// stayed green with the `entry.modem` test removed altogether. Caught by
+	// audit (2026-09-07) — a test can agree with the code and still describe
+	// nothing, which is the failure mode docs/gotchas.md warns about.
+	eq(v({ vanished: true, modem: {}, waiting_since: 50 }), null,
+		'vanish: a modem that is back escalates to nothing, however long it was gone');
 	eq(v({ vanished: true }), null, 'vanish: no waiting_since, no action');
 
 	// below the first threshold nothing happens — a modem may re-enumerate on

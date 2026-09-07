@@ -400,7 +400,18 @@ kicks = [];
 autostart = false;
 dsim.modem()('registered');
 eq(kicks, [ 'wan' ], 'sim_blocked: our own down is undone once the modem is ready again');
-ok(dsim.d.contexts.wan._our_down == false, 'sim_blocked: the marker is cleared by the kick');
+// NOT cleared by the kick. kick_interface is fire-and-forget (main.uc hands
+// netifd's `up` to conn.defer and only logs the reply), so a marker cleared on
+// intent is gone even when the up never lands — and the next poll then reads
+// our own down as operator intent and parks the interface for good.
+ok(dsim.d.contexts.wan._our_down == true,
+	'sim_blocked: the marker SURVIVES the kick — the up is not yet proven');
+
+// ...and is cleared by evidence from netifd, not by us asking
+autostart = true;
+dsim.modem()('registered');
+ok(dsim.d.contexts.wan._our_down == false,
+	'sim_blocked: the marker is cleared once netifd shows autostart back on');
 
 // an operator ifdown that lands AFTER ours must still win
 kicks = [];
@@ -519,8 +530,8 @@ eq(mb_kicks, [ 'wan' ],
 	'connect-first: our own down does not block the kick that adopts the session');
 ok(dmb.d.contexts.wan.wanted != false,
 	'connect-first: the context stays wanted (it was never an operator ifdown)');
-ok(dmb.d.contexts.wan._our_down == false,
-	'connect-first: the marker is cleared by the kick');
+ok(dmb.d.contexts.wan._our_down == true,
+	'connect-first: the marker survives the kick until netifd confirms the up');
 
 // counter-check: an operator ifdown landing DURING the connect must still win,
 // which is the case this re-check exists for in the first place
@@ -540,5 +551,48 @@ dop.ctx()('up');
 eq(mb_kicks, [], 'connect-first: an ifdown during the connect is still honoured');
 eq(dop.d.contexts.wan.wanted, false,
 	'connect-first: and the operator intent is recorded');
+
+// --- our-down is bounded: it must not shadow a LATER operator ifdown ---------
+//
+// netifd runs interface_set_down() for every `down` and offers no way to tell
+// two of them apart, so this marker is the only discriminator wwand has. That
+// makes its lifetime load-bearing: left standing, it swallows a genuine
+// `ifdown` issued minutes later, because the next `registered` reads that as
+// wwand's own down and undoes it. Found by audit (2026-09-07) — the report was
+// about the connect-first window, and the same hole is reachable from the
+// sim_blocked path, which can sit marked for as long as the SIM stays blocked.
+//
+// The window a legitimate marker needs is the one between our down and the kick
+// that answers it. Anything older is not evidence about the current state.
+
+kicks = [];
+autostart = true;
+let dttl = mk('ipv4', []);
+
+dttl.modem()('sim_blocked', { reason: 'pin' });
+ok(dttl.d.contexts.wan._our_down == true, 'ttl: the down is marked as ours');
+ok(dttl.d.contexts.wan._our_down_at > 0, 'ttl: ...and stamped with when');
+
+// age it past the bound, then let the operator take the interface down
+dttl.d.contexts.wan._our_down_at -= 100000;
+
+kicks = [];
+autostart = false;
+dttl.modem()('registered');
+
+eq(kicks, [], 'ttl: a stale marker no longer claims an operator ifdown as ours');
+eq(dttl.d.contexts.wan.wanted, false, 'ttl: the operator intent is recorded instead');
+
+// a FRESH marker still wins, which is the case the marker exists for
+kicks = [];
+autostart = true;
+let dfresh = mk('ipv4', []);
+dfresh.modem()('sim_blocked', { reason: 'pin' });
+
+kicks = [];
+autostart = false;
+dfresh.modem()('registered');
+eq(kicks, [ 'wan' ], 'ttl: a fresh marker still undoes our own down');
+
 
 done('test_wan6');

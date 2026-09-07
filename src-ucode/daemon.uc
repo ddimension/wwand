@@ -262,6 +262,35 @@ export function create(opts)
 
 	// --- modem event handlers ---------------------------------------------
 
+	// `_our_down` records that netifd's cleared `autostart` is OUR doing. netifd
+	// runs interface_set_down() for every `down` and exposes no way to tell two
+	// of them apart, so the marker is the only discriminator there is — and that
+	// makes both of its edges load-bearing.
+	//
+	// BOUNDED, because an unbounded marker shadows the next genuine `ifdown`:
+	// wwand downs an interface (a SIM block, a stuck-pending reset), the
+	// operator later runs `ifdown` deliberately, and the modem's next
+	// `registered` would read that as our own down and undo it. The window a
+	// legitimate marker needs is the one between our down and the kick that
+	// answers it — seconds. Anything older is not evidence about the current
+	// state any more (found by audit, 2026-09-07).
+	//
+	// Cleared on EVIDENCE, never on intent: kick_interface is fire-and-forget
+	// (main.uc hands netifd's `up` to conn.defer and only logs the reply), so
+	// clearing the marker when we ASK for the up threw away the one explanation
+	// for autostart=false whenever that up did not land. It is cleared when a
+	// later status actually shows the interface back — see decide().
+	const OUR_DOWN_TTL = 180;
+
+	let mark_our_down = (entry) => {
+		entry._our_down = true;
+		entry._our_down_at = time();
+	};
+
+	let our_down = (entry) =>
+		(entry?._our_down === true) &&
+		((time() - (entry._our_down_at ?? 0)) < OUR_DOWN_TTL);
+
 	// modem reached service: write back l3 device names, run autosetup APN
 	// fill, (re)establish this modem's IDLE interface-bound contexts.
 	let modem_registered = (modem, data) => {
@@ -318,11 +347,21 @@ export function create(opts)
 			let cname = name, centry = entry;
 
 			let decide = (st) => {
+				// The interface is back up, or netifd has re-armed autostart:
+				// whatever down we issued has been answered, so the marker has
+				// done its job and must not outlive the state it describes. This
+				// is the ONLY place it is cleared — on evidence from netifd, not
+				// on our intent to kick (see the comment at mark_our_down).
+				if (st && (st.up || st.autostart === true)) {
+					centry._our_down = false;
+					centry._our_down_at = null;
+				}
+
 				if (st?.up) {
 					log('info', sprintf('adopting live interface %s after modem ready', centry.cfg.interface));
 					retry_activate(cname);
 				}
-				else if (st?.autostart === false && !centry._our_down) {
+				else if (st?.autostart === false && !our_down(centry)) {
 					// The operator ran `ifdown`. netifd's RUNTIME autostart flag is
 					// the only durable record of that: `wanted` lives in this
 					// process's memory, and every interface-bound context is rebuilt
@@ -355,11 +394,9 @@ export function create(opts)
 				else if ((centry.cfg.auto ?? true) && deps.kick_interface) {
 					// our own down is being undone here; the kick re-arms
 					// netifd's autostart, so the marker has served its purpose
-					if (centry._our_down) {
+					if (our_down(centry))
 						log('info', sprintf('interface %s was taken down by wwand, bringing it back up',
 							centry.cfg.interface));
-						centry._our_down = false;
-					}
 
 					// IDLE context while netifd holds the interface 'pending' = an
 					// ORPHANED setup (e.g. a wwand restart mid-setup). 'up' no-ops on a
@@ -381,7 +418,7 @@ export function create(opts)
 						// IPQ807x board (2026-09-03): `ifup wan` while the modem was
 						// still initialising, and it never came up.
 						centry._reset_pending = true;
-						centry._our_down = true;
+						mark_our_down(centry);
 						deps.down_interface(centry.cfg.interface);
 					}
 
@@ -454,12 +491,38 @@ export function create(opts)
 				// ...and remember that WE took the interface down. netifd's ubus
 				// `down` clears autostart, which the ready path otherwise reads
 				// as an operator ifdown.
-				entry._our_down = true;
+				mark_our_down(entry);
 
 				if (deps.down_interface)
 					deps.down_interface(entry.cfg.interface);
 			}
 		}
+	};
+
+	// Everything an internal rebuild MUST carry across. start_modem builds a
+	// fresh entry on every hotplug re-add and on every 30 s waiting-modem
+	// retry, so anything recorded about the CURRENT outage is erased unless it
+	// is copied — and it is recorded precisely because the outage outlives one
+	// interval.
+	//
+	// A function, not four lines repeated at each `self.modems[name] = {...}`:
+	// there are THREE such sites (owned-by-another-stack, unknown-protocol, and
+	// the normal one) and only the last one carried them. The two early returns
+	// are reachable exactly when it hurts most — a device that re-appears after
+	// the ladder pulsed reset spends a moment with its node present and no
+	// driver bound yet, which is the `unknown` path, and that rebuild reset the
+	// outage clock so the reboot rung could never be reached (found by audit,
+	// 2026-09-07; the reboot rung is the one that recovered the NR7101).
+	let carry_over = (name) => {
+		let prev = self.modems[name];
+
+		return {
+			_sig: prev?._sig,
+			_had_modem: prev?._had_modem,
+			vanished: prev?.vanished,
+			_vanish_rung: prev?._vanish_rung,
+			waiting_since: prev?.waiting_since,
+		};
 	};
 
 	// learn-back: a config with no pinned IMEI records the discovered one so a
@@ -760,20 +823,22 @@ export function create(opts)
 					// up=false/autostart=false, and only a manual `ifup` recovered it.
 					if (deps.iface_status)
 						deps.iface_status(kiface, (st) => {
-							if (st?.autostart === false && !kentry._our_down) {
+							if (st?.autostart === false && !our_down(kentry)) {
 								kentry.wanted = false;
 								log('notice', sprintf('interface %s went administratively down while connecting, not kicking it up',
 									kiface));
 								return;
 							}
 
-							// our own down is being undone; the kick re-arms netifd's
-							// autostart, so the marker has served its purpose
-							if (kentry._our_down) {
+							// our own down is being undone. The marker is NOT cleared
+							// here: the kick is fire-and-forget, so an up that never
+							// lands would leave autostart=false with nothing left to
+							// explain it, and the next poll would read our own down as
+							// operator intent. It is cleared once a status shows the
+							// interface actually back.
+							if (our_down(kentry))
 								log('info', sprintf('interface %s was taken down by wwand, bringing it back up',
 									kiface));
-								kentry._our_down = false;
-							}
 
 							do_kick();
 						});
@@ -1133,7 +1198,7 @@ export function create(opts)
 				l3_name: l3name ?? null, modem: null, protocol: null,
 				control_note: sprintf('device %s is owned by interface %s (proto %s)',
 					claim.device, claim.interface, claim.proto),
-				_sig: self.modems[name]?._sig,
+				...carry_over(name),
 			};
 
 			return;
@@ -1156,7 +1221,7 @@ export function create(opts)
 				muxinfo: muxinfo, l3_name: l3name ?? null, modem: null, protocol: null,
 				control_note: sprintf('unknown control protocol on %s (%s) — set `option protocol`',
 					control.device, drv ? sprintf('driver %s', drv) : 'no driver bound'),
-				_sig: self.modems[name]?._sig,
+				...carry_over(name),
 			};
 
 			return;
@@ -1170,20 +1235,8 @@ export function create(opts)
 			l3_name: l3name ?? null,   // stable L3 target (false: mux owns naming)
 			modem: null,
 			protocol: control?.protocol,
-			// carry the last-applied reload signature across internal rebuilds
-			// (hotplug re-add, waiting-modem retry) — they don't change the config
-			_sig: self.modems[name]?._sig,
-			// ...and the outage state, for the same reason. The waiting-modem
-			// retry runs every 30 s and builds a fresh entry each time, so
-			// anything recorded about the CURRENT outage has to be carried or it
-			// is erased before it can be acted on. That is what happened to the
-			// vanish escalation on its first hardware test: the markers were set,
-			// wiped 30 s later, set again, and the "gone for Ns" clock never
-			// advanced past one interval (NR7101, 2026-09-07).
-			_had_modem: self.modems[name]?._had_modem,
-			vanished: self.modems[name]?.vanished,
-			_vanish_rung: self.modems[name]?._vanish_rung,
-			waiting_since: self.modems[name]?.waiting_since,
+			// the reload signature and the outage state — see carry_over()
+			...carry_over(name),
 		};
 
 		self.modems[name] = entry;
