@@ -181,8 +181,14 @@ export function setup(self, dp, o, next)
 
 			// always name the version — it used to appear only for v5,
 			// so "datapath: rmnet" left you guessing between v1 and v4
-			log('notice', sprintf('datapath: %s%s%s, mux [%s]',
-				backend, caps.qmap ? sprintf('/qmap v%d', ver) : '',
+			// the EFFECTIVE backend, for the reason given in modem_mbim.uc:
+			// setup() drops to raw_ip when the selected one has no channels to
+			// build, and naming the selection here contradicted status()
+			let eff = self.datapath.backend;
+
+			log('notice', sprintf('datapath: %s%s%s%s, mux [%s]',
+				eff, (eff != backend) ? sprintf(' (%s not applicable here)', backend) : '',
+				caps.qmap ? sprintf('/qmap v%d', ver) : '',
 				(r.urb_size != null) ? sprintf(', urb %d', r.urb_size) : '',
 				join(' ', r.mux_devs)));
 			next();

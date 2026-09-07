@@ -467,7 +467,16 @@ export function create(opts)
 			mux_devs: r.mux_devs,
 		};
 
-		log('notice', sprintf('datapath: %s, parent %s, mux [%s]', backend, parent, join(' ', r.mux_devs)));
+		// name what setup() ACTUALLY ran, not what was selected: the two differ
+		// whenever the fallback above fires, and a log line reading "datapath:
+		// vlan" beside a status reading "datapath": "raw_ip" costs a reader the
+		// same minutes twice (asked in ddimension/wwand#5). The configured name
+		// stays visible when it was overridden, so the fallback is still legible.
+		let eff = self.datapath.backend;
+
+		log('notice', sprintf('datapath: %s%s, parent %s, mux [%s]',
+			eff, (eff != backend) ? sprintf(' (%s not applicable here)', backend) : '',
+			parent, join(' ', r.mux_devs)));
 		step_simslot();
 	};
 
