@@ -744,14 +744,35 @@ export function create(opts)
 					};
 
 					// re-check: the connect takes seconds, and an ifdown landing in
-					// that window must not be undone by the kick that follows it
+					// that window must not be undone by the kick that follows it.
+					//
+					// `_our_down` has to be consulted here for the same reason the
+					// ready path consults it: netifd's ubus `down` runs
+					// interface_set_down(), which clears autostart no matter who
+					// asked. On a connect-first backend the down that precedes this
+					// connect is very often OUR OWN — the stuck-pending reset a few
+					// lines above issues one and then immediately arms
+					// `_kick_after_connect`, so this re-check ran against a flag wwand
+					// itself had just cleared, read it as an operator ifdown, and left
+					// the interface down with a CONNECTED session behind it. That is
+					// exactly the divergence reported in ddimension/wwand#5 (EG18-EA
+					// on a MikroTik Chateau, 2026-09-07): wwand CONNECTED, netifd
+					// up=false/autostart=false, and only a manual `ifup` recovered it.
 					if (deps.iface_status)
 						deps.iface_status(kiface, (st) => {
-							if (st?.autostart === false) {
+							if (st?.autostart === false && !kentry._our_down) {
 								kentry.wanted = false;
 								log('notice', sprintf('interface %s went administratively down while connecting, not kicking it up',
 									kiface));
 								return;
+							}
+
+							// our own down is being undone; the kick re-arms netifd's
+							// autostart, so the marker has served its purpose
+							if (kentry._our_down) {
+								log('info', sprintf('interface %s was taken down by wwand, bringing it back up',
+									kiface));
+								kentry._our_down = false;
 							}
 
 							do_kick();

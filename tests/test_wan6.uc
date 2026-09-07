@@ -409,4 +409,136 @@ let dboth = mk('ipv4', []);
 dboth.modem()('registered');
 eq(kicks, [], 'ifdown: without our marker, autostart=false is still operator intent');
 
+// --- the connect-first kick must not read OUR OWN down as an ifdown ----------
+//
+// MBIM/NCM connect before netifd runs proto setup, so the ready path arms
+// `_kick_after_connect` and kicks once the session is up. When netifd was still
+// holding the interface `pending` (a boot ifup that queued behind an
+// initialising modem), the ready path FIRST issues its own `down` to clear the
+// orphaned setup — and netifd's interface_set_down() clears autostart for that
+// down exactly as it does for an operator's `ifdown`.
+//
+// The re-check in front of the kick did not consult `_our_down`, so it read the
+// trace of wwand's own reset as operator intent, cleared `wanted` and left the
+// interface down with a CONNECTED session behind it. Reported in
+// ddimension/wwand#5 with the full sequence in one second of log (EG18-EA on a
+// MikroTik Chateau, 2026-09-07):
+//
+//   interface wan stuck pending, resetting before setup
+//   interface wan: state ACTIVATING -> CONNECTED
+//   interface wan went administratively down while connecting, not kicking it up
+//
+// ...after which ifstatus read up:false / autostart:false while `ubus call
+// wwand status` read CONNECTED, and only a manual `ifup wan` recovered it.
+
+let mb_kicks = [], mb_downs = [];
+let mb_autostart = true, mb_pending = true;
+
+function mkmbim()
+{
+	let ctx_on_event = null, modem_on_event = null;
+
+	let modem_stub = {
+		id: 'm0', state: 'READY',
+		start: () => null, stop: () => null,
+		note_connect_success: () => null, note_connect_failure: () => null,
+		datapath: {},
+	};
+
+	let cfg = { network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'mbim' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0' },
+	} };
+
+	let be = {
+		modem: {
+			create: (o) => {
+				modem_on_event = (ev) => o.deps.on_event(modem_stub, ev, null);
+				return modem_stub;
+			},
+		},
+		context: {
+			create: (o) => {
+				let ctx = {
+					state: 'IDLE', config: o.config, modem: o.modem,
+					up: (cb) => cb(null),
+					down: (cb) => cb(null),
+				};
+				ctx_on_event = (ev) => o.deps.on_event(ctx, ev, null);
+				return ctx;
+			},
+		},
+	};
+
+	let d = daemon_mod.create({
+		timing: TIMING,
+		deps: {
+			log: () => null,
+			load_mbim: () => be,
+			load_qmi: () => be,
+			emit_event: () => null,
+			kick_interface: (i) => push(mb_kicks, i),
+			renew_interface: () => null,
+			down_interface: (i) => push(mb_downs, i),
+			// netifd's own answer: `pending` until setup completes, and
+			// autostart follows whatever the last down did
+			iface_status: (iface, cb) => cb({ up: false, pending: mb_pending,
+				autostart: mb_autostart }),
+			datapath_fx: null,
+			read_config: () => config.parse(cfg),
+			resolve_modem_device: (cfg2) => cfg2.device,
+			resolve_netdev: () => 'wwand0',
+			learn_device: () => null,
+			learn_modem_path: () => null,
+		},
+	});
+
+	d.apply_config(config.parse(cfg));
+
+	return { d: d, ctx: () => ctx_on_event, modem: () => modem_on_event };
+}
+
+mb_kicks = []; mb_downs = [];
+mb_autostart = true; mb_pending = true;
+
+let dmb = mkmbim();
+dmb.modem()('registered');
+
+eq(dmb.d.modems.m0.protocol, 'mbim', 'connect-first: the modem is on the mbim backend');
+eq(mb_downs, [ 'wan' ], 'connect-first: a pending interface is reset before setup');
+ok(dmb.d.contexts.wan._our_down == true, 'connect-first: that reset is marked as ours');
+ok(dmb.d.contexts.wan._kick_after_connect == true,
+	'connect-first: the kick is deferred until the session is up');
+eq(mb_kicks, [], 'connect-first: nothing is kicked before the session connects');
+
+// netifd now reports what OUR OWN down left behind: autostart cleared
+mb_autostart = false;
+dmb.ctx()('up');
+
+eq(mb_kicks, [ 'wan' ],
+	'connect-first: our own down does not block the kick that adopts the session');
+ok(dmb.d.contexts.wan.wanted != false,
+	'connect-first: the context stays wanted (it was never an operator ifdown)');
+ok(dmb.d.contexts.wan._our_down == false,
+	'connect-first: the marker is cleared by the kick');
+
+// counter-check: an operator ifdown landing DURING the connect must still win,
+// which is the case this re-check exists for in the first place
+mb_kicks = []; mb_downs = [];
+mb_autostart = true; mb_pending = false;
+
+let dop = mkmbim();
+dop.modem()('registered');
+
+eq(mb_downs, [], 'connect-first: a non-pending interface is not reset');
+ok(dop.d.contexts.wan._our_down != true, 'connect-first: no down of ours to mark');
+
+mb_kicks = [];
+mb_autostart = false;
+dop.ctx()('up');
+
+eq(mb_kicks, [], 'connect-first: an ifdown during the connect is still honoured');
+eq(dop.d.contexts.wan.wanted, false,
+	'connect-first: and the operator intent is recorded');
+
 done('test_wan6');
