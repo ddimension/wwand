@@ -180,6 +180,28 @@ modules on the target after deploying.
 reschedule) throws "Can't access lexical declaration before initialization" at
 RUNTIME. Forward-declare: `let f; f = () => {…}`.
 
+### A string decoder that passes every test you have is a correct decoder
+**Only for the inputs you tried, and ASCII is the trap.** `codec/mbim.uc`'s
+`utf16le_decode` did `chr(c & 0xff)`, discarding the high byte of every UTF-16
+code unit. ASCII survives that untouched, so every operator name, device name
+and APN anyone had looked at came through perfectly — for months, across a full
+wire-buffer test suite built from captures that were all ASCII.
+
+It took a China Broadcasting SIM to show it (ddimension/wwand#8):
+
+    中国广电  ->  U+4E2D U+56FD U+5E7F U+7535
+              ->  chr(0x2D) chr(0xFD) chr(0x7F) chr(0x35)
+              ->  "-ý\x7f5"   which reaches a terminal or a JSON reader as  -5
+
+And it cost the reporter an extra round, because the reply told him the junk
+name came from his modem: the mangling is indistinguishable from a modem
+answering badly, and "the modem is lying" is the cheaper explanation to reach
+for. Note `chr()` is byte-oriented in ucode — `chr(0x4E2D)` gives `0xff`, not a
+character — so encoding needs the same care in reverse.
+
+**Any codec test whose fixtures are all ASCII has not tested the codec.** Put
+one multi-byte string in each direction.
+
 ---
 
 ## LuCI
