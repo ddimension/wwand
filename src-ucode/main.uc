@@ -331,6 +331,26 @@ function run_daemon()
 				logmod.log('notice', 'learn_path: modem %s rebound to stable USB path %s (dropped cdc-wdm node artifact)',
 					section, spath);
 			},
+			// A protocol switch just made `option protocol` wrong. Clearing it
+			// is the point (see daemon.modem_set_protocol): a pin that
+			// contradicts the recognised driver disarms hardware recovery for
+			// that modem, persistently. Only ever REMOVES, and only when the pin
+			// disagrees with what was just switched to.
+			clear_protocol_pin: (section, target) => {
+				if (!section || !target)
+					return;
+
+				let cursor = libuci.cursor();
+				let pin = cursor.get('network', section, 'protocol');
+
+				if (pin == null || pin == '' || pin == target)
+					return;   // nothing pinned, or it already names the new one
+
+				cursor.delete('network', section, 'protocol');
+				cursor.commit('network');
+				logmod.log('notice', 'modem %s: switched to %s — cleared the stale `option protocol %s` (a pin the driver contradicts disarms hardware recovery)',
+					section, target, pin);
+			},
 			// learn-back: record the resolved l3 device name on the interface as
 			// `option device` (one stable handle for VRF/firewall/LuCI). Idempotent;
 			// NEVER overwrites a user value. commit() only (no netifd reload → no bounce).

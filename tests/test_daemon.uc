@@ -828,6 +828,60 @@ uloop.run();
 })();
 
 
+// --- a firmware protocol switch must not leave a pin that disarms recovery ---
+//
+// `option protocol` pins which protocol wwand uses to drive a modem. A pin that
+// contradicts the driver wwand recognises is NOT inert: recovery.revoke_arming
+// withdraws the permission to touch hardware for that modem, persistently. So a
+// modem switched from QMI to MBIM while pinned to `qmi` comes back with its
+// reset and power-cycle rungs silently disabled, and nothing says why.
+//
+// Cleared, not rewritten to the target: the option exists for a device wwand
+// cannot classify ("leave on detect"), and the reason for the pin — detection
+// failing on the OLD protocol — usually does not survive the switch. Raised in
+// review on openwrt/luci#8917 (the Tools page carries a second control with the
+// same label and issues this switch).
+(() => {
+	let cleared = [], switched = [];
+	let fail = false;
+
+	let fake = {
+		modem: { create: (o) => ({
+			id: o.id, state: 'READY', config: o.config,
+			start: () => null, stop: () => null,
+			note_connect_success: () => null, note_connect_failure: () => null,
+			switch_protocol: (t, cb) => { push(switched, t); cb(fail ? { error: 'x' } : null, {}); },
+		}) },
+		context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem }) },
+	};
+
+	let mk = () => daemon_mod.create({ timing: TIMING, deps: {
+		log: () => null, load_qmi: () => fake,
+		clear_protocol_pin: (sec, target) => push(cleared, sec + ':' + target),
+	} });
+
+	let d = mk();
+	d.apply_config(config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+	} }));
+
+	d.modem_set_protocol('m0', 'mbim', () => null);
+	eq(switched, [ 'mbim' ], 'setproto: the switch is issued');
+	eq(cleared, [ 'm0:mbim' ],
+		'setproto: ...and the now-stale pin is cleared, by uci SECTION name');
+
+	// a switch that FAILED leaves the pin alone — it still describes reality
+	cleared = []; switched = []; fail = true;
+	let d2 = mk();
+	d2.apply_config(config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+	} }));
+	d2.modem_set_protocol('m0', 'mbim', () => null);
+
+	eq(switched, [ 'mbim' ], 'setproto: the failing switch was attempted');
+	eq(cleared, [], 'setproto: a failed switch does not touch the pin');
+})();
+
 // --- context_failed: an external prober drives the rungs it cannot reach -----
 //
 // L3 reachability is measured OUTSIDE (watchcat, mwan3, cron): with policy

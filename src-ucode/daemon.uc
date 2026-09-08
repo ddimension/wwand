@@ -2416,7 +2416,32 @@ export function create(opts)
 		if (!entry)
 			return;
 
-		entry.modem.switch_protocol(target, cb);
+		entry.modem.switch_protocol(target, (err, res) => {
+			// A successful firmware switch invalidates a `option protocol` pin
+			// that named the OLD protocol, and a pin contradicting the driver
+			// wwand recognises is not inert: recovery.revoke_arming withdraws
+			// the permission to touch hardware for that modem, persistently. So
+			// the modem would come back on the new protocol with its reset and
+			// power-cycle rungs silently disabled, and nothing saying why.
+			//
+			// CLEARED, not rewritten to the target. The option exists for a
+			// control device wwand cannot classify ("leave on detect"), and the
+			// reason this one was pinned — detection failing on the OLD
+			// protocol — usually does not survive the switch. Writing the target
+			// would leave a pin that outlives its cause and has to be cleaned up
+			// by hand; clearing returns the modem to the recommended state, and
+			// if detection is broken on the new protocol too the daemon says so
+			// with the remedy ("cannot identify the control protocol ... set
+			// `option protocol`"). A stated failure beats a silent one.
+			//
+			// Deliberately NOT gated on auto_correct_config: that gate is for
+			// the daemon correcting config on its own initiative. This runs only
+			// because an operator asked for the switch.
+			if (!err && deps.clear_protocol_pin && entry.modem?.id)
+				deps.clear_protocol_pin(entry.modem.id, target);
+
+			cb(err, res);
+		});
 	};
 
 	self.hotplug = function(action, devname) {
