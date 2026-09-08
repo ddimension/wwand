@@ -206,6 +206,34 @@ one multi-byte string in each direction.
 
 ## LuCI
 
+### A `null` in an `E()` children array is skipped
+**Not on openwrt-25.12, where it paints the word "null" into the page.** That
+branch's `dom.append` tests the wrong thing:
+
+    // openwrt-25.12, luci.js:1382
+    else if (children !== null && children !== undefined)   // the ARRAY
+        node.appendChild(document.createTextNode(`${children[i]}`));
+
+    // master, after 7b02b9add
+    else if (children[i] !== null && children[i] !== undefined)   // the MEMBER
+
+`children` is the array and is always truthy, so every null MEMBER falls through
+to `createTextNode(String(null))`. Fixed upstream on 2026-05-11 by `7b02b9add`
+("luci-base: fix \"null\" text appearing in modal") and **not backported** — the
+branches have diverged, so 25.12 still has it.
+
+The consequence is that a conditional child written the obvious way —
+`(function(){ if (!x) return null; return E(...); })()` inside a children array
+— is invisible on master and prints `null` on the release users actually run.
+Return `''` instead: an empty text node, invisible on both.
+
+Found the expensive way (ddimension/luci-app-wwand#6): reported as "displays
+null", answered once with an unrelated PLMN fix that was also real, retested,
+still there — and only settled when the reporter sent a DOM-inspector shot
+pinning the stray `#text` node inside the Cell lock section. Grepping our own
+source for the visible string would never have found it; the string is LuCI's.
+
+
 ### Wrapping a widget from `renderWidget()` is harmless
 **It is not, and the code comment that said so was wrong for weeks.** Returning
 the super's node inside a container —
