@@ -239,6 +239,13 @@ scenario('noprofile', {
 			'noprofile: the rejected index is NOT sent');
 		eq(sn[0].args.apn, 'internet.globe.com.ph',
 			'noprofile: ...and the apn goes inline instead');
+
+		// SET_IP_FAMILY is a separate command an old stack need not implement,
+		// so the family must ride IN the request too — Start Network's own
+		// TLV 0x19 (libqmi 1.38 qmi-service-wds.json:787,842), which the bash
+		// dialer always passed as `ip-type=4`. Without it the session starts
+		// with no family preference at all.
+		eq(sn[0].args.ip_family, 4, 'noprofile: the ip family rides in the request');
 		next();
 	});
 });
@@ -263,6 +270,8 @@ scenario('dual', { config: { apn: 'web', pdp_type: 'ipv4v6' } }, (ctx, mock, eve
 		eq(length(mock.calls_for('START_NETWORK')), 2, 'dual: two start-network calls');
 		eq(mock.calls_for('START_NETWORK')[0].args.profile_3gpp, 1, 'dual: profile 1');
 		eq(mock.calls_for('START_NETWORK')[0].args.apn, 'web', 'dual: apn in start-network');
+		eq(mock.calls_for('START_NETWORK')[0].args.ip_family, 4, 'dual: v4 family in the request');
+		eq(mock.calls_for('START_NETWORK')[1].args.ip_family, 6, 'dual: v6 family in the request');
 
 		let sif = mock.calls_for('SET_IP_FAMILY');
 		eq(sif[0].args.preference, 4, 'dual: family v4 set');

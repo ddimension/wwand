@@ -513,20 +513,31 @@ export function create(opts)
 				// apn/auth also passed here (old behavior): several contexts
 				// may share a profile index, the request TLVs take precedence.
 				//
-				// The index itself is only sent when it MEANS something. The
-				// bash dialer this replaces spelled that as
-				// `${profile:+,3gpp-profile=$profile}` — the index went on the
-				// wire only where the operator had configured one. wwand invents
-				// an index when none is configured (mux_id, else 1), and sending
-				// an invented one to a modem whose WDS namespace has no such
-				// profile makes the dial ask for something that is not there.
-				// HW: Huawei E182E on the sponsor's box (2026-09-08) answers
-				// MODIFY_PROFILE with INVALID_PROFILE and then never completes
-				// START_NETWORK. So: send it when the operator named it, or when
-				// the profile write proved it exists; otherwise dial on the
-				// inline APN alone, exactly as the old dialer did.
-				let start_args = {};
+				// The IP family goes IN the request, always. SET_IP_FAMILY
+				// (WDS 0x004D) is a separate command an old stack need not
+				// implement — the Huawei E182E answers it with
+				// INVALID_QMI_COMMAND (71) — and relying on it alone starts the
+				// session with no family preference at all. Start Network
+				// carries its own "IP Family Preference" TLV 0x19 for exactly
+				// this (libqmi 1.38, qmi-service-wds.json:787,842), and the bash
+				// dialer this replaces always passed it: `ip-type=4` / `=6` on
+				// every start-network. Sending both is what that dialer did in
+				// effect, and modems that accept SET_IP_FAMILY see the same
+				// value twice.
+				let start_args = {
+					ip_family: (family == 6) ? wdsmod.IP_FAMILY_IPV6
+					                         : wdsmod.IP_FAMILY_IPV4,
+				};
 
+				// The profile index is sent unless the modem has just told us it
+				// does not exist. NOTE the earlier claim here — that the bash
+				// dialer only sent an index the operator had configured — was a
+				// misreading: it sets `profile=1` in every branch, so
+				// `${profile:+...}` always expands. The index is dropped only on
+				// a modem that answered MODIFY_PROFILE with INVALID_PROFILE
+				// (protocol error 10), where asking for it cannot help; a NAMED
+				// one is always sent, so a wrong `option profile` still fails
+				// loudly instead of being silently ignored.
 				if (profile.named || !profile.invalid)
 					start_args.profile_3gpp = profile.index;
 
