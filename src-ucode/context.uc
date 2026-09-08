@@ -154,11 +154,14 @@ export function create(opts)
 			return { index: +substr(apn, 1), modify: false };
 
 		let index = +(self.config.profile ?? 0);
+		// `option profile` (or `apn '#N'` above) is the operator NAMING a
+		// profile; anything else is us picking one to write the APN into.
+		let named = (index > 0);
 
 		if (!index)
 			index = +(self.config.mux_id ?? 0) || 1;
 
-		return { index: index, modify: (apn != null && apn != '') };
+		return { index: index, named: named, modify: (apn != null && apn != '') };
 	};
 
 	// --- PREPARING ---------------------------------------------------------
@@ -191,8 +194,18 @@ export function create(opts)
 			if (torn_down(err, wds))
 				return;
 
-			if (err)
+			if (err) {
 				log('warn', sprintf('profile modify failed: %J', err));
+
+				// INVALID_PROFILE (QMI protocol error 10, libqmi 1.38
+				// qmi-errors.h:240) means this index does not exist in the
+				// modem's WDS profile namespace at all — a 2009-era stack may
+				// have no profile management. Remember it: dialling with a
+				// 3gpp-profile the modem just called invalid is asking for
+				// something that is not there.
+				if (err.error == 'qmi' && err.code == 10)
+					profile.invalid = true;
+			}
 
 			// preserved: retry including roaming_disallowed=no, ignore result
 			wds.request('MODIFY_PROFILE', { ...base, roaming_disallowed: 0 },
@@ -498,8 +511,24 @@ export function create(opts)
 					log('warn', sprintf('set ip family %d failed: %J', family, e2));
 
 				// apn/auth also passed here (old behavior): several contexts
-				// may share a profile index, the request TLVs take precedence
-				let start_args = { profile_3gpp: profile.index };
+				// may share a profile index, the request TLVs take precedence.
+				//
+				// The index itself is only sent when it MEANS something. The
+				// bash dialer this replaces spelled that as
+				// `${profile:+,3gpp-profile=$profile}` — the index went on the
+				// wire only where the operator had configured one. wwand invents
+				// an index when none is configured (mux_id, else 1), and sending
+				// an invented one to a modem whose WDS namespace has no such
+				// profile makes the dial ask for something that is not there.
+				// HW: Huawei E182E on the sponsor's box (2026-09-08) answers
+				// MODIFY_PROFILE with INVALID_PROFILE and then never completes
+				// START_NETWORK. So: send it when the operator named it, or when
+				// the profile write proved it exists; otherwise dial on the
+				// inline APN alone, exactly as the old dialer did.
+				let start_args = {};
+
+				if (profile.named || !profile.invalid)
+					start_args.profile_3gpp = profile.index;
 
 				if (profile.modify) {
 					start_args.apn = cfg('apn');
@@ -513,8 +542,11 @@ export function create(opts)
 					}
 				}
 
-				log('notice', sprintf('starting ipv%d: apn \'%s\', profile %d',
-					family, cfg('apn') ?? '(profile default)', profile.index));
+				log('notice', sprintf('starting ipv%d: apn \'%s\', %s',
+					family, cfg('apn') ?? '(profile default)',
+					(start_args.profile_3gpp != null)
+						? sprintf('profile %d', profile.index)
+						: 'no profile (the modem rejected the index — inline apn)'));
 
 				client.request('START_NETWORK', start_args, (e3, d3) => {
 					if (e3 || d3?.pdh == null) {

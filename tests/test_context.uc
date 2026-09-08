@@ -208,6 +208,41 @@ scenario('lost-during-ipfamily', {
 
 // --- A: dual-stack happy path ------------------------------------------------
 
+// --- a modem with no WDS profile namespace dials on the inline APN ----------
+//
+// wwand invents a profile index when none is configured (mux_id, else 1) and
+// used to put it into START_NETWORK unconditionally. The bash dialer this
+// replaces did not: `${profile:+,3gpp-profile=$profile}` sent the index only
+// where the operator had configured one, and that difference is what a 2009-era
+// stack needs. HW: Huawei E182E on the sponsor's box (2026-09-08) answers
+// MODIFY_PROFILE with INVALID_PROFILE (QMI protocol error 10) and then never
+// completes a START_NETWORK that carries `3gpp-profile=1`.
+//
+// So: an invented index the modem has just rejected is left out, and the dial
+// runs on the APN alone. A NAMED one (`option profile`) is always sent — that
+// is the operator asking for it, and a wrong index should fail loudly.
+scenario('noprofile', {
+	config: { apn: 'internet.globe.com.ph', pdp_type: 'ipv4' },
+	handlers: {
+		// __error is mockhub's way of failing a request with a QMI error code;
+		// 10 is INVALID_PROFILE (libqmi 1.38 qmi-errors.h:240)
+		MODIFY_PROFILE: () => ({ __error: 10 }),
+		GET_PROFILE_SETTINGS: () => ({ __error: 10 }),
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'noprofile: the modem still connects');
+
+		let sn = mock.calls_for('START_NETWORK');
+		eq(length(sn), 1, 'noprofile: one start-network');
+		eq(sn[0].args.profile_3gpp, null,
+			'noprofile: the rejected index is NOT sent');
+		eq(sn[0].args.apn, 'internet.globe.com.ph',
+			'noprofile: ...and the apn goes inline instead');
+		next();
+	});
+});
+
 scenario('dual', { config: { apn: 'web', pdp_type: 'ipv4v6' } }, (ctx, mock, events, next) => {
 	ctx.up((err, settings) => {
 		eq(err, null, 'dual: no error');
