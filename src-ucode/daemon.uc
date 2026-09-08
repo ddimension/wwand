@@ -1677,8 +1677,22 @@ export function create(opts)
 						entry._vanish_rung = 1;
 						log('warn', sprintf('modem %s: gone for %ds — pulsing the board reset', name, gone));
 
-						if (!board_repower(entry.cfg))
-							log('warn', sprintf('modem %s: no usable reset or power GPIO for this board', name));
+						// Say WHICH of the two reasons it was. On a box with more
+						// than one modem the board's own lines are refused
+						// (board_gpio_ok) because they would hit the wrong
+						// hardware — but status() still reports has_power: true
+						// for the board, so "no usable GPIO" reads as a
+						// contradiction and hides the remedy. Field-seen on the
+						// sponsor's 3-modem WH3000 (2026-09-08), where an E182E
+						// dropped off the bus with a USB -71 and the escalation
+						// had nothing it was allowed to pulse.
+						if (!board_repower(entry.cfg)) {
+							if (!entry.cfg?.reset_gpio && !board_gpio_ok() && deps.board)
+								log('warn', sprintf('modem %s: the board reset/power line is shared and this box has %d modems, so it would hit the wrong hardware — set `option reset_gpio` on this modem to allow a reset',
+									name, length(keys(self.modems))));
+							else
+								log('warn', sprintf('modem %s: no usable reset or power GPIO for this board', name));
+						}
 					}
 					else {
 						entry._vanish_rung = 2;
