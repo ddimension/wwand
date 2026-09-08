@@ -840,13 +840,15 @@ uloop.run();
 (() => {
 	let climbed = 0, downs = 0;
 	let ctxs = [];
+	// the order events actually happen in, so a race between them is visible
+	let seq = [];
 
 	let fake = {
 		modem: { create: (o) => ({
 			id: o.id, state: 'READY', config: o.config,
 			start: () => null, stop: () => null,
 			note_connect_success: () => null,
-			note_connect_failure: (done) => { climbed++; done('opmode_cycle'); },
+			note_connect_failure: (done) => { climbed++; push(seq, 'climb'); done('opmode_cycle'); },
 		}) },
 		context: { create: (o) => {
 			// forward-declared: the object's own `down` references it, and a
@@ -857,8 +859,21 @@ uloop.run();
 
 			c = { state: 'CONNECTED', name: o.name, modem: o.modem,
 			      config: o.config,
-			      down: (cb) => { downs++; c.state = 'IDLE'; return cb ? cb() : null; },
-			      up: (cb) => cb(null) };
+			      /* Faithful to every real context (context.uc:757,
+			         context_mbim.uc, context_ncm.uc): the 'down' EVENT is emitted
+			         BEFORE the callback runs. A fake that only flips state and
+			         calls back cannot see an ordering bug, and this one did not —
+			         the daemon's own down handler reconnects a still-wanted
+			         context, so downing before the ladder climbs raced a redial
+			         against the recovery rung. Found by audit, 2026-09-08. */
+			      down: (cb) => {
+			              downs++;
+			              c.state = 'IDLE';
+			              push(seq, 'down');
+			              o.deps.on_event(c, 'down', { reason: 'admin' });
+			              return cb ? cb() : null;
+			      },
+			      up: (cb) => { push(seq, 'up'); return cb(null); } };
 			push(ctxs, c);
 			return c;
 		} },
@@ -882,6 +897,13 @@ uloop.run();
 	eq(climbed, 1, 'failed: ...and it counts against the recovery ladder');
 	eq(got.action, 'opmode_cycle', 'failed: the rung the ladder chose is reported back');
 
+	// the ladder picks (and runs) its rung BEFORE anything tears the session
+	// down, so no activation can start against a modem that is about to be
+	// opmode-cycled, reset or power-cycled
+	eq(seq[0], 'climb', 'failed: the rung is chosen before the teardown');
+	eq(index(seq, 'down') > index(seq, 'climb'), true,
+		'failed: ...and the redial cannot race the recovery it asked for');
+
 	// `wanted` must survive: this is NOT an operator ifdown, and clearing it
 	// would park the interface instead of reconnecting it — the exact thing
 	// context_down does and this method exists to avoid
@@ -901,6 +923,67 @@ uloop.run();
 	d.contexts.wan._failed_at -= 100;
 	d.context_failed('wan', 'probe', (err, res) => null);
 	eq(climbed, 2, 'failed: past the window it climbs once more');
+
+	// The rate limit guards HARDWARE, so it must survive the very thing it
+	// guards against causing: a rung that re-enumerates the modem tears the
+	// contexts down (detach_modem keeps the entry, clears ctx) and the 30 s
+	// retry re-binds them. A rebuild that dropped `_failed_at` reset the limit
+	// on every recovery action — so a looping prober climbed the ladder as fast
+	// as it could call. Found by audit, 2026-09-08.
+	d.contexts.wan._failed_at -= 5;      // still well inside the window
+	let stamp = d.contexts.wan._failed_at;
+
+	// `ctx = null` with the entry kept is exactly the state detach_modem leaves
+	// behind (daemon.uc: "centry.ctx = null" in the loop over self.contexts),
+	// and it is what makes hotplug's rebind loop pick the context up again.
+	// Modelled directly because detach_modem is a local, not part of the API.
+	d.contexts.wan.ctx = null;
+	d.hotplug('add', 'cdc-wdm0');
+
+	ok(d.contexts.wan.ctx != null, 'failed: the context was re-bound');
+	eq(d.contexts.wan._failed_at, stamp,
+		'failed: the rate limit survives a modem detach + re-bind');
+
+	// ...and so does the marker that says a cleared autostart is OUR doing.
+	// Losing it let the next `registered` read our own down as an operator
+	// ifdown and park the interface — reachable after a SIM block or a
+	// hold-expiry give-up followed by a re-enumeration.
+	d.contexts.wan._our_down = true;
+	d.contexts.wan._our_down_at = 4711;
+	d.contexts.wan.reconnect_on_register = true;
+
+	d.contexts.wan.ctx = null;
+	d.hotplug('add', 'cdc-wdm0');
+
+	eq(d.contexts.wan._our_down, true, 'failed: our-down survives the re-bind');
+	eq(d.contexts.wan._our_down_at, 4711, 'failed: ...with its stamp, or it reads as stale');
+	eq(d.contexts.wan.reconnect_on_register, true,
+		'failed: and so does the give-up re-arm');
+
+	// The limit has to follow a RELOAD. It is the knob an operator raises to
+	// contain a prober stuck in a loop, and one that needs a daemon restart to
+	// take effect is no use in exactly that moment — the daemon reload path
+	// updates hold_max through a setter it has to remember, and this one was
+	// not on that list. Read from globals in apply_config instead, which cannot
+	// be forgotten. Found by audit, 2026-09-08.
+	d.apply_config(config.parse({ network: {
+		globals: { '.type': 'wwand_globals', failed_min_gap: '300' },
+		m0:  { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+		       device: 'l3a', apn: 'a', pdp_type: 'ipv4' },
+	} }));
+
+	eq(d.failed_min_gap, 300, 'failed: a reload changes the rate limit');
+
+	d.contexts.wan.wanted = true;
+	d.contexts.wan._failed_at = time() - 60;   // past the OLD 30s, inside the new
+	climbed = 0;
+
+	let late = null;
+	d.context_failed('wan', 'probe', (err, res) => { late = err ?? res; });
+
+	eq(climbed, 0, 'failed: ...and the new value is what the next call is judged by');
+	eq(late.throttled, true, 'failed: the caller is told the raised limit applies');
 
 	// an unknown interface is an error, not a silent no-op
     let bad = null;

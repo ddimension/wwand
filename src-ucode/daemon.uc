@@ -1452,11 +1452,37 @@ export function create(opts)
 		// interface-bound contexts default wanted=true so the daemon (re)establishes
 		// them on modem-ready without waiting for netifd — adopts a session that
 		// survived a wwand restart.
+		let prev = self.contexts[name];
+
 		let base = { cfg: cfg, ctx: null, pending_up: [], wanted: (cfg.interface != null),
 		             retry_timer: null, hold_timer: null, retry_n: 0,
 		             // preserve the last-applied reload signature across internal
 		             // re-binds (hotplug) — the config itself is unchanged there
-		             _sig: self.contexts[name]?._sig };
+		             _sig: prev?._sig,
+
+		             // ...and everything that describes the CURRENT outage rather
+		             // than the config. This entry is rebuilt whenever a modem
+		             // vanishes and returns — detach_modem keeps the entry but
+		             // clears ctx, and the 30 s retry then re-binds it — so a
+		             // field not carried here is erased by an event that says
+		             // nothing about it. The modem side learned this the hard way
+		             // (see carry_over above).
+		             //
+		             // `_failed_at` is context_failed's rate limit, and it guards
+		             // HARDWARE: losing it lets a recovery rung that re-enumerated
+		             // the modem reset the very limit that would have slowed the
+		             // next probe, so a looping prober climbs the ladder as fast
+		             // as it can call.
+		             //
+		             // `_our_down` says netifd's cleared autostart is ours. Lost,
+		             // the next `registered` reads our own down as an operator
+		             // ifdown and parks the interface — reachable after a SIM
+		             // block or a hold-expiry give-up followed by a modem
+		             // re-enumeration, which is a common enough pair.
+		             _failed_at: prev?._failed_at,
+		             _our_down: prev?._our_down,
+		             _our_down_at: prev?._our_down_at,
+		             reconnect_on_register: prev?.reconnect_on_register };
 
 		if (!mentry?.modem) {
 			log('warn', sprintf('interface %s: modem %s not started', name, cfg.modem));
@@ -1496,6 +1522,14 @@ export function create(opts)
 
 		// zero-config autosetup gate (default on; wwand_globals option autosetup)
 		self.autosetup = parsed.globals?.autosetup ?? true;
+
+		// context_failed's rate limit, live on reload. Read HERE and not through
+		// a daemon.set_* the reload path has to remember (the way hold_max is
+		// done), because the value that matters is the one an operator raises to
+		// contain a prober stuck in a loop — a knob that needs a restart to take
+		// effect is no use in exactly that moment.
+		if (parsed.globals?.failed_min_gap != null)
+			self.failed_min_gap = +parsed.globals.failed_min_gap;
 
 		// Device blocklist: every device a non-wwand interface names belongs to
 		// that stack. Logged when the set CHANGES (not on every reload trigger —
@@ -1923,7 +1957,7 @@ export function create(opts)
 		// rather than silently ignored.
 		let now = time();
 		let since = now - (entry._failed_at ?? 0);
-		let min_gap = self.timing?.failed_min_gap ?? 30;
+		let min_gap = self.failed_min_gap ?? self.timing?.failed_min_gap ?? 30;
 
 		if (entry._failed_at != null && since < min_gap)
 			return cb(null, { throttled: true, retry_in: min_gap - since,
@@ -1937,22 +1971,37 @@ export function create(opts)
 
 		let modem = entry.ctx.modem;
 
-		// the session goes first, so the redial is honest: retry_activate
-		// refuses a context it still believes is CONNECTED. `wanted` is
-		// untouched — this is not operator intent — so the context's own 'down'
-		// event re-enters the reconnect path.
-		let climb = () => {
-			if (!modem?.note_connect_failure)
-				return cb(null, { interface: entry.cfg?.interface, action: null });
+		// ORDER MATTERS, and the obvious order is wrong. `ctx.down()` emits its
+		// 'down' event BEFORE invoking the callback (context.uc, context_mbim.uc,
+		// context_ncm.uc all do), and the daemon's own handler for that event
+		// calls enter_reconnecting() for a context that is still `wanted` — which
+		// this one deliberately is. Downing first therefore starts an activation
+		// against the modem a moment before the ladder decides to opmode-cycle,
+		// reset or power-cycle it: the redial races the recovery it asked for.
+		//
+		// So climb first. The rung is chosen (and executed) while the session is
+		// still up, and the teardown that follows re-enters the reconnect path
+		// with the modem's state already reflecting whatever the rung did —
+		// retry_activate simply schedules until it is READY again.
+		let redial = () => {
+			if (entry.ctx.state == 'CONNECTED')
+				return entry.ctx.down(() => null);
 
-			modem.note_connect_failure((action) =>
-				cb(null, { interface: entry.cfg?.interface, action: action ?? null }));
+			// nothing to tear down; ask for the reconnect explicitly, since no
+			// 'down' event will arrive to trigger it
+			if (entry.wanted)
+				enter_reconnecting(name);
 		};
 
-		if (entry.ctx.state == 'CONNECTED')
-			entry.ctx.down(climb);
-		else
-			climb();
+		if (!modem?.note_connect_failure) {
+			redial();
+			return cb(null, { interface: entry.cfg?.interface, action: null });
+		}
+
+		modem.note_connect_failure((action) => {
+			redial();
+			cb(null, { interface: entry.cfg?.interface, action: action ?? null });
+		});
 	};
 
 	self.context_status = function(ref) {
