@@ -422,7 +422,7 @@ export default {
 		},
 
 		// The NAS 1.0-era signal message: old stacks (HW-observed on the
-		// Huawei E1820, 2026-08-30) reject GET_SIGNAL_INFO with
+		// Huawei E182E, 2026-08-30) reject GET_SIGNAL_INFO with
 		// "Invalid QMI command" but answer this. TLV layouts verified against
 		// libqmi 1.38 data/qmi-service-nas.json ("Get Signal Strength"
 		// 0x0020, since 1.0). RSSI/ECIO lists are u16-counted {value,

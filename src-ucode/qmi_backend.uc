@@ -266,7 +266,7 @@ export function read_info(dms, cb)
 		(next) => dms.request('GET_IDS', {}, (e, d) => {
 			if (!e) {
 				// old stacks pad the field past the 15-digit IMEI with
-				// uninitialised bytes (field-seen on the 2011-era E1820) —
+				// uninitialised bytes (field-seen on the 2011-era E182E) —
 				// take the leading 15 digits; anything else is not an IMEI
 				info.imei = match(d.imei ?? '', /^[0-9]{15}/)?.[0] ?? null;
 				info.meid = d.meid;

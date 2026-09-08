@@ -365,7 +365,7 @@ scenario('dms-fallback', {
 		eq(modem.info.iccid, '8949020000012345678', 'dms: iccid via legacy path');
 	});
 
-// --- 5b: minimal-service QMI stack (2011-era, the Huawei E1820 class) --------
+// --- 5b: minimal-service QMI stack (2011-era, the Huawei E182E class) --------
 //
 // Only CTL/WDS/DMS/NAS-1.0 + the 0xE0 placeholder: no UIM, no DSD, no WDA.
 // NAS 1.0 rejects every message newer than itself (71 = Invalid QMI command)
@@ -373,24 +373,24 @@ scenario('dms-fallback', {
 // `ethernet` (802.3 kept, NOARP) — the datapath probes would claim rmnet,
 // the WDA-less gate must beat them.
 // (let/assignment: the arrows inside reference the transport itself)
-let e1820_at_tr;
-e1820_at_tr = {
+let e182e_at_tr;
+e182e_at_tr = {
 	write: (d) => {
 		// answer the open_at probe and the CSQ floor read; everything else
 		// (QCFG autoconnect check, CEER, temperature probes) gets a bare OK —
 		// a silent command would hang the atcmd engine
-		if (e1820_at_tr.data_cb && match(d ?? '', /^AT\r?$/))
-			e1820_at_tr.data_cb('\r\nOK\r\n');
-		else if (e1820_at_tr.data_cb && index(d ?? '', 'AT+CSQ') == 0)
-			e1820_at_tr.data_cb('\r\n+CSQ: 20,99\r\n\r\nOK\r\n');
-		else if (e1820_at_tr.data_cb)
-			e1820_at_tr.data_cb('\r\nOK\r\n');
+		if (e182e_at_tr.data_cb && match(d ?? '', /^AT\r?$/))
+			e182e_at_tr.data_cb('\r\nOK\r\n');
+		else if (e182e_at_tr.data_cb && index(d ?? '', 'AT+CSQ') == 0)
+			e182e_at_tr.data_cb('\r\n+CSQ: 20,99\r\n\r\nOK\r\n');
+		else if (e182e_at_tr.data_cb)
+			e182e_at_tr.data_cb('\r\nOK\r\n');
 	},
-	on_data: (cb) => { e1820_at_tr.data_cb = cb; },
+	on_data: (cb) => { e182e_at_tr.data_cb = cb; },
 	close: () => null,
 	drain: () => null,
 };
-const e1820_dpfx = fakefx.create({ present: {
+const e182e_dpfx = fakefx.create({ present: {
 	'/sys/class/net/wwan0/qmi/raw_ip': true,
 	'/sys/class/net/wwan0/qmi/pass_through': true,
 	'/sys/class/net/wwan0/qmi/add_mux': true,
@@ -402,7 +402,7 @@ const e1820_dpfx = fakefx.create({ present: {
 // not fail a check: mockhub die()s on an unhandled message, the exception
 // leaves the uloop callback, and the REST OF THE RUN is skipped while the
 // summary still reads 0 failures.
-const E1820_HANDLERS = {
+const E182E_HANDLERS = {
 		GET_VERSION_INFO: { services: [
 			{ service: 1, major: 1, minor: 5 },
 			{ service: 2, major: 1, minor: 2 },
@@ -440,11 +440,11 @@ const E1820_HANDLERS = {
 		SYNC: { __error: 71 },
 };
 
-scenario('e1820', {
-	handlers: base_handlers(E1820_HANDLERS),
+scenario('e182e', {
+	handlers: base_handlers(E182E_HANDLERS),
 	config: { tty: '/dev/ttyUSB3' },
-	datapath: { netdev: 'wwan0', mux: 'auto', mux_links: [], dgram_size: 0, fx: e1820_dpfx },
-	at: { fx: fakefx.create(), open_transport: () => e1820_at_tr },
+	datapath: { netdev: 'wwan0', mux: 'auto', mux_links: [], dgram_size: 0, fx: e182e_dpfx },
+	at: { fx: fakefx.create(), open_transport: () => e182e_at_tr },
 	setup: (mock, modem) => {
 		let poll = null;
 		poll = uloop.timer(10, () => {
@@ -455,32 +455,32 @@ scenario('e1820', {
 	},
 }, 'telemetry',
 	(modem, mock, events) => {
-		eq(modem.state, 'READY', 'e1820: state READY');
-		eq(length(mock.calls_for('SYNC')), 11, 'e1820: SYNC retried the full ladder, then continued');
-		eq(modem.uim, null, 'e1820: no uim client');
-		eq(modem.dsd, null, 'e1820: no dsd client');
-		eq(modem.datapath?.backend, 'ethernet', 'e1820: ethernet datapath (no WDA, probes beaten)');
-		eq(length(mock.calls_for('SET_DATA_FORMAT')), 0, 'e1820: no WDA negotiation at all');
-		ok(e1820_dpfx.action_index('write /sys/class/net/wwan0/qmi/raw_ip N') > 0,
-			'e1820: raw_ip asserted OFF (802.3 kept)');
-		eq(e1820_dpfx.action_index('link_set wwan0 noarp'), -1,
-			'e1820: NOARP NOT set — the 802.3 bridge needs ARP (HW-verified)');
-		eq(length(mock.calls_for('GET_PIN_STATUS')), 1, 'e1820: DMS pin-status fallback used');
-		eq(modem.info.imsi, '515661009472658', 'e1820: imsi via the DMS legacy path');
-		eq(modem.signal?.lte?.rssi, -73, 'e1820: rssi from GET_SIGNAL_STRENGTH (negative dBm)');
-		eq(modem.signal?.lte?.rsrp, -97, 'e1820: rsrp from GET_SIGNAL_STRENGTH');
-		eq(modem.signal?.lte?.snr, 115, 'e1820: snr from GET_SIGNAL_STRENGTH (0.1 dB)');
-		eq(modem.signal?.lte?.rsrq, -11, 'e1820: rsrq from GET_SIGNAL_STRENGTH');
-		eq(modem.dsd_status?.mode, 'LTE', 'e1820: data mode resolved via the nas radio_ifs fallback');
+		eq(modem.state, 'READY', 'e182e: state READY');
+		eq(length(mock.calls_for('SYNC')), 11, 'e182e: SYNC retried the full ladder, then continued');
+		eq(modem.uim, null, 'e182e: no uim client');
+		eq(modem.dsd, null, 'e182e: no dsd client');
+		eq(modem.datapath?.backend, 'ethernet', 'e182e: ethernet datapath (no WDA, probes beaten)');
+		eq(length(mock.calls_for('SET_DATA_FORMAT')), 0, 'e182e: no WDA negotiation at all');
+		ok(e182e_dpfx.action_index('write /sys/class/net/wwan0/qmi/raw_ip N') > 0,
+			'e182e: raw_ip asserted OFF (802.3 kept)');
+		eq(e182e_dpfx.action_index('link_set wwan0 noarp'), -1,
+			'e182e: NOARP NOT set — the 802.3 bridge needs ARP (HW-verified)');
+		eq(length(mock.calls_for('GET_PIN_STATUS')), 1, 'e182e: DMS pin-status fallback used');
+		eq(modem.info.imsi, '515661009472658', 'e182e: imsi via the DMS legacy path');
+		eq(modem.signal?.lte?.rssi, -73, 'e182e: rssi from GET_SIGNAL_STRENGTH (negative dBm)');
+		eq(modem.signal?.lte?.rsrp, -97, 'e182e: rsrp from GET_SIGNAL_STRENGTH');
+		eq(modem.signal?.lte?.snr, 115, 'e182e: snr from GET_SIGNAL_STRENGTH (0.1 dB)');
+		eq(modem.signal?.lte?.rsrq, -11, 'e182e: rsrq from GET_SIGNAL_STRENGTH');
+		eq(modem.dsd_status?.mode, 'LTE', 'e182e: data mode resolved via the nas radio_ifs fallback');
 		eq(modem.counters?.proto_errors ?? 0, 0,
-			'e1820: rejected polls did not feed the recovery counter');
+			'e182e: rejected polls did not feed the recovery counter');
 
 		// teardown releases the live service clients on the modem (CTL
 		// RELEASE_CID), not just locally — old stacks with a tiny client
 		// table leak a slot per attempt otherwise
 		modem.stop();
 		eq(length(mock.calls_for('RELEASE_CID')), 3,
-			'e1820: teardown released dms/nas/wds on the modem');
+			'e182e: teardown released dms/nas/wds on the modem');
 	});
 
 // --- 5c: exhausted client table (ClientIdsExhausted, CTL error 5) ------------
@@ -488,20 +488,20 @@ scenario('e1820', {
 // The 2011-era stack keeps ~5 client slots; a failed attempt can leak one and
 // plain retries only burn attempts, so the daemon resets the modem stack over
 // AT (CFUN=1,1) instead — fire-and-forget, then the normal failure path.
-let e1820_at_writes = [];
-let e1820_at_log_tr;
-e1820_at_log_tr = {
+let e182e_at_writes = [];
+let e182e_at_log_tr;
+e182e_at_log_tr = {
 	write: (d) => {
-		push(e1820_at_writes, d ?? '');
-		if (e1820_at_log_tr.data_cb)
-			e1820_at_log_tr.data_cb('\r\nOK\r\n');
+		push(e182e_at_writes, d ?? '');
+		if (e182e_at_log_tr.data_cb)
+			e182e_at_log_tr.data_cb('\r\nOK\r\n');
 	},
-	on_data: (cb) => { e1820_at_log_tr.data_cb = cb; },
+	on_data: (cb) => { e182e_at_log_tr.data_cb = cb; },
 	close: () => null,
 	drain: () => null,
 };
 
-scenario('e1820_exhaust', {
+scenario('e182e_exhaust', {
 	handlers: base_handlers({
 		GET_VERSION_INFO: { services: [
 			{ service: 1, major: 1, minor: 5 },
@@ -517,8 +517,8 @@ scenario('e1820_exhaust', {
 		SYNC: { __error: 71 },
 	}),
 	config: { tty: '/dev/ttyUSB3' },
-	datapath: { netdev: 'wwan0', mux: 'auto', mux_links: [], dgram_size: 0, fx: e1820_dpfx },
-	at: { fx: fakefx.create(), open_transport: () => e1820_at_log_tr },
+	datapath: { netdev: 'wwan0', mux: 'auto', mux_links: [], dgram_size: 0, fx: e182e_dpfx },
+	at: { fx: fakefx.create(), open_transport: () => e182e_at_log_tr },
 }, 'error',
 	(modem, mock, events) => {
 		ok(length(mock.calls_for('ALLOCATE_CID')) >= 1, 'exhaust: allocation attempted');
@@ -526,7 +526,7 @@ scenario('e1820_exhaust', {
 		eq(last?.event, 'error', 'exhaust: the init failed');
 		eq(last?.data?.err?.code, 5, 'exhaust: the failure carried ClientIdsExhausted');
 		eq(last?.data?.stage, 'alloc_dms', 'exhaust: dms allocation is the first client');
-		ok(length(e1820_at_writes) > 0 && index(e1820_at_writes[0], 'AT+CFUN=1,1') == 0,
+		ok(length(e182e_at_writes) > 0 && index(e182e_at_writes[0], 'AT+CFUN=1,1') == 0,
 			'exhaust: modem stack reset (CFUN) sent over AT');
 		eq(last?.data?.action, 'retry', 'exhaust: failure handled, retry pending');
 		eq(length(mock.calls_for('RELEASE_CID')), 0, 'exhaust: nothing was allocated, nothing to release');
@@ -534,9 +534,9 @@ scenario('e1820_exhaust', {
 
 // --- 5d: teardown releases the lazy WMS client too ---------------------------
 scenario('wms_release', {
-	// the same minimal stack as e1820, plus WMS (service 5) — that is the whole
+	// the same minimal stack as e182e, plus WMS (service 5) — that is the whole
 	// point here, a lazily allocated SMS client that teardown has to release
-	handlers: base_handlers({ ...E1820_HANDLERS,
+	handlers: base_handlers({ ...E182E_HANDLERS,
 		GET_VERSION_INFO: { services: [
 			{ service: 1, major: 1, minor: 5 },
 			{ service: 2, major: 1, minor: 2 },
@@ -546,8 +546,8 @@ scenario('wms_release', {
 		] },
 	}),
 	config: { tty: '/dev/ttyUSB3' },
-	datapath: { netdev: 'wwan0', mux: 'auto', mux_links: [], dgram_size: 0, fx: e1820_dpfx },
-	at: { fx: fakefx.create(), open_transport: () => e1820_at_tr },
+	datapath: { netdev: 'wwan0', mux: 'auto', mux_links: [], dgram_size: 0, fx: e182e_dpfx },
+	at: { fx: fakefx.create(), open_transport: () => e182e_at_tr },
 	setup: (mock, modem) => {
 		let poll = null;
 		poll = uloop.timer(10, () => {

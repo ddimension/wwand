@@ -219,7 +219,7 @@ export function create(opts)
 				// attempt can leak a slot, so plain retries only burn attempts
 				// — reset the modem stack instead: AT+CFUN=1,1 re-initializes
 				// the protocol stack and the table (HW-verified on the Huawei
-				// E1820, 2026-08-31: the modem re-enumerates and comes back
+				// E182E, 2026-08-31: the modem re-enumerates and comes back
 				// with a fresh table). Fire-and-forget; the retry runs anyway.
 				if (err?.code == 5)
 					self._reset_stack_at();
@@ -1302,7 +1302,7 @@ export function create(opts)
 		// RELEASE the service clients on the modem (CTL RELEASE_CID) while the
 		// transport is still up, rather than only dropping them here. A
 		// destroyed-but-not-released client stays in the MODEM's client table
-		// until its stack resets, and on a stack with a tiny table (the E1820
+		// until its stack resets, and on a stack with a tiny table (the E182E
 		// class) a few failed attempts exhaust it. self.release() destroys the
 		// client locally as well, so this replaces the bare destroy rather than
 		// adding to it. Fire-and-forget: the release frame is written

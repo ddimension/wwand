@@ -510,7 +510,7 @@ eq(length(fx.matching('ignoring invalid MTU')), 0, 'badmtu: no warning when mtu 
 // format (no WDA service): the parent keeps the kernel's 802.3 framing
 // (raw_ip re-asserted to N — idempotent). NO NOARP: the 802.3 function is an
 // L2 bridge into the GGSN segment and the gateway resolves via (proxy-)ARP
-// from the network side (HW-verified on the Huawei E1820, 2026-08-31).
+// from the network side (HW-verified on the Huawei E182E, 2026-08-31).
 
 fx = fakefx.create({ present: { '/sys/class/net/wwan0/qmi/raw_ip': true } });
 

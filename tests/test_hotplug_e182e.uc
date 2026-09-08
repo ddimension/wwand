@@ -1,4 +1,4 @@
-// wwand tests — the E1820 hotplug binder's two guards.
+// wwand tests — the E182E hotplug binder's two guards.
 //
 // This script writes to qmi_wwan's `new_id`, and usb_store_new_id() appends a
 // dynid without checking for a duplicate (drivers/usb/core/driver.c, 6.18.41:
@@ -56,7 +56,7 @@ sh(sprintf('mkdir -p %s/sys%s %s/sys/bus/usb/devices %s/sys/bus/usb/drivers/qmi_
 	root, IF1, root, root));
 sh(sprintf('ln -sf %s/sys%s %s/sys/bus/usb/devices/1-1', root, DEV, root));
 sh(sprintf('ln -sf %s/sys%s %s/sys/bus/usb/devices/1-1:1.1', root, IF1, root));
-sh(sprintf("sed 's#/sys#%s/sys#g' ../files/wwand.hotplug.e1820 > %s/script.sh", root, root));
+sh(sprintf("sed 's#/sys#%s/sys#g' ../files/wwand.hotplug.e182e > %s/script.sh", root, root));
 
 // --- the path shapes, stated as checks ---------------------------------------
 //
@@ -90,26 +90,26 @@ function fires(action, product, devtype, bound)
 	return length(sh(sprintf('cat %s%s', root, NEW_ID))) > 0;
 }
 
-const E1820 = '12d1/14ac/102';
+const E182E = '12d1/14ac/102';
 
-ok(fires('add', E1820, 'usb_device', false),
-	'binds when the E1820 appears with interface 1 unbound — the whole point');
+ok(fires('add', E182E, 'usb_device', false),
+	'binds when the E182E appears with interface 1 unbound — the whole point');
 
 // the reason the device gate exists: PRODUCT is on the interface events too, so
 // without it one plug wrote new_id once per interface as well
-ok(!fires('add', E1820, 'usb_interface', false),
+ok(!fires('add', E182E, 'usb_interface', false),
 	'interface events are ignored (PRODUCT is exported on those too)');
 
 // the reason the unbound check exists: re-binding an already-bound interface is
 // pointless work, and each attempt leaves another dynid behind
-ok(!fires('add', E1820, 'usb_device', true),
+ok(!fires('add', E182E, 'usb_device', true),
 	'no second bind once interface 1 already has a driver');
 
 ok(!fires('add', '2c7c/0122/515', 'usb_device', false),
 	'another vendor is left alone');
-ok(!fires('remove', E1820, 'usb_device', false),
+ok(!fires('remove', E182E, 'usb_device', false),
 	'only `add` binds');
 
 sh(sprintf('rm -rf %s', root));
 
-done('test_hotplug_e1820');
+done('test_hotplug_e182e');

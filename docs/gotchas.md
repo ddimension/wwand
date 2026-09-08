@@ -79,7 +79,7 @@ HW-proven on the EG06. Structurally blocked in `qmi_over_mbim.send`.
 ---
 
 ### `/sys/bus/usb/devices/$DEVPATH` addresses a USB interface
-**Neither half of that is true, and both were believed at once** in the E1820
+**Neither half of that is true, and both were believed at once** in the E182E
 hotplug binder.
 
 `/sys/bus/usb/devices/` holds only FLAT kobject names — `3-1`, `3-1:1.1` — as
@@ -111,7 +111,7 @@ Two more things a USB hotplug script has to know, both of which bit here:
 
 *Evidence:* `drivers/usb/core/driver.c` (6.18.41) for both kernel claims; the
 sysfs shapes HW-checked on a MikroTik Chateau 5G, 2026-09-05. Guarded by
-`tests/test_hotplug_e1820`, which asserts the path shapes separately from the
+`tests/test_hotplug_e182e`, which asserts the path shapes separately from the
 behaviour so a kernel layout change says which one moved (2026-09-05).
 
 ### Every OpenWrt build can install a source-specific IPv6 route

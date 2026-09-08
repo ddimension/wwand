@@ -42,7 +42,7 @@ is always user-triggered.
 | Cudy LT300 v3 (`3.97`) | SLM770A, NCM | `cdc_ether` | connected, traffic |
 | Huasifei WH3000 Pro (sponsor) | FM350-GL, NCM | `rndis_host` | connected, traffic |
 | Huasifei WH3000 Pro (sponsor) | E3372H, NCM | `huawei_cdc_ncm` | connected, traffic — AT on the cdc-wdm control channel, IP via CGPADDR (CGCONTRDP/GTDNS absent on stick firmware 21.200), v6 via RA + dhcpv6 subinterface |
-| Huasifei WH3000 Pro (sponsor) | E1820, QMI (minimal 2011 stack) | `ethernet` | **E2E verified: CONNECTED + traffic on 2G** (sponsor SIM). No UIM/DSD/WDA; DMS fallback, GET_SIGNAL_STRENGTH signal, 802.3 kept with ARP on (the function is an L2 bridge into the GGSN segment — NOARP broke the traffic path, HW-proven) |
+| Huasifei WH3000 Pro (sponsor) | E182E, QMI (minimal 2011 stack) | `ethernet` | **E2E verified: CONNECTED + traffic on 2G** (sponsor SIM). No UIM/DSD/WDA; DMS fallback, GET_SIGNAL_STRENGTH signal, 802.3 kept with ARP on (the function is an L2 bridge into the GGSN segment — NOARP broke the traffic path, HW-proven) |
 
 Neither QMI modem accepts QMAP v4; both take v5 and fall back to v1 when asked
 for something they decline. The MBIM and NCM paths report no QMAP version at
@@ -226,7 +226,7 @@ announced separately, once, when a modem actually asks for a backend.
 - **eSIM over MBIM UICC** is wire-verified against libmbim 1.32 + lpac but not
   end-to-end: no eUICC-capable MBIM modem is on hand (the RG650E rejects
   MBIM_OPEN, the EG06 card has no eUICC).
-- **The E1820-class QMI support is now E2E-verified** (2026-08-31, sponsor box
+- **The E182E-class QMI support is now E2E-verified** (2026-08-31, sponsor box
   with a Globe SIM): CONNECTED on 2G and traffic through the 802.3 function.
   Two HW-forced corrections landed on the way: the `ethernet` datapath must
   keep **ARP on** (the function is an L2 bridge into the GGSN segment; NOARP

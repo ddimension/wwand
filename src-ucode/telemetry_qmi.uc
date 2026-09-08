@@ -89,7 +89,7 @@ export function install(self, o)
 			else if (serr)
 				// NAS 1.0 fallback: old stacks reject GET_SIGNAL_INFO
 				// ("Invalid QMI command") but answer GET_SIGNAL_STRENGTH
-				// (0x0020, the 1.0-era message — HW-observed on the E1820).
+				// (0x0020, the 1.0-era message — HW-observed on the E182E).
 				// Fire-and-forget; on failure the CSQ floor read supplies the
 				// rssi baseline. All three are OPTIONAL reads — they must not
 				// feed the recovery counter on a modem that rejects them by
@@ -156,10 +156,10 @@ export function install(self, o)
 
 	// GET_SIGNAL_STRENGTH (NAS 0x0020) entries -> the SIGNAL_INFO shape,
 	// so status renders identically. The RSSI u8 is the NEGATIVE dBm value
-	// (128 = -128 dBm, the no-signal floor — qmicli-verified on the E1820).
+	// (128 = -128 dBm, the no-signal floor — qmicli-verified on the E182E).
 	// RSRQ/SNR/RSRP are signed dBm/0.1 dB like the modern message carries.
 	// Non-LTE rows map onto the gsm_rssi / wcdma fields so a 2G/3G-camped
-	// modem (the E1820 on GSM) still reports its signal.
+	// modem (the E182E on GSM) still reports its signal.
 	strength_signal = (sdata) => {
 		let lte = null, gsm = null, wcdma = null;
 

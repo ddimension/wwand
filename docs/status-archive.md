@@ -88,7 +88,7 @@ fixed and HW-validated:
 
 ## 802.3 `ethernet` datapath + minimal-service QMI support (2026-08-30/31)
 
-The E1820 audit above ended in "outside wwand's scope"; the follow-up brought
+The E182E audit above ended in "outside wwand's scope"; the follow-up brought
 it inside. A new **`ethernet` pseudo-mode** beside `raw_ip` (`netlink.uc`):
 no multiplexing, the parent KEEPS the kernel's 802.3 framing (`raw_ip`
 re-asserted to N, idempotent) and gets **NOARP** (the RNDIS p2p optimization —
@@ -98,9 +98,9 @@ static /32 from WDS + device route needs no neighbour resolution). The WDA
 `LLP_RAW_IP` in `modem_datapath_qmi.uc`). **Auto-selection**: a QMI modem
 WITHOUT a WDA service (no format negotiation possible — the kernel link is
 what stays) selects `ethernet` under `auto`, beating the datapath probes; an
-explicit `option mux` keeps its historic behavior. The E1820's DMS model
+explicit `option mux` keeps its historic behavior. The E182E's DMS model
 string turned out to be literally "8" — the service table, not the model, is
-the anchor. Backend tolerances pinned by a dedicated `e1820` scenario
+the anchor. Backend tolerances pinned by a dedicated `e182e` scenario
 (minimal service table, `__error: 71` for every NAS-1.1+ message): the UIM/
 DSD/WDA-less paths are all graceful by design; the QMI signal chain is now
 **GET_SIGNAL_INFO → GET_SIGNAL_STRENGTH (NAS 0x0020, the 1.0-era message —
@@ -120,7 +120,7 @@ the field is trimmed to its leading 15 digits (box-verified:
 "359740023613407"). Box-verified without a SIM: services 0(1.3) 1(1.5)
 2(1.2) 3(1.0) 224(0.0), `datapath: ethernet selected — no WDA service`,
 raw_ip=N kept, NOARP set on the parent, REGISTERING (registration 0) as
-documented. A `files/wwand.hotplug.e1820` hotplug fragment re-creates the
+documented. A `files/wwand.hotplug.e182e` hotplug fragment re-creates the
 12d1:14ac qmi_wwan new_id bind on every replug (the feed Makefile install
 line ships with the next bump). `modem_quirks.uc` documents the class
 caveats (empty SIM slot = registration timeout, not SIM_BLOCKED). E2E
@@ -139,7 +139,7 @@ connect still awaits a SIM in the stick's slot.
   unverified without a SIM to drive a real session). Code-side this audit
   also confirmed `modem_init_qmi` treats UIM as OPTIONAL (dms fallback) and
   the telemetry data-mode has a DSD→QENG→radio_ifs fallback chain — the
-  wwand QMI backend is old-stack-tolerant by design; the E1820 stays out
+  wwand QMI backend is old-stack-tolerant by design; the E182E stays out
   for the missing NAS signal message, the unverified 802.3 link and the
   empty SIM slot, not for a hard UIM dependency.
 

@@ -240,7 +240,7 @@ def main():
     # ...and the other direction, which is the one that actually bit. A file
     # under files/ that no package installs ships in the tarball and lands
     # nowhere: the feature it carries is simply absent at runtime, with nothing
-    # failing to say so. wwand.hotplug.e1820 reached an upstream PR that way
+    # failing to say so. wwand.hotplug.e182e reached an upstream PR that way
     # (2026-09-02) — the .uc lists had been updated for the release and the
     # hotplug scripts had not, and this tool reported "ok" because it only ever
     # asked whether the named paths exist.
@@ -253,13 +253,13 @@ def main():
     }
 
     # A file one packaging deliberately omits is not the same as one nobody
-    # installs, and the difference is per-Makefile: the feed ships the E1820
+    # installs, and the difference is per-Makefile: the feed ships the E182E
     # binder, the upstream package does not (its only known hardware calls it
     # unvalidated). Declaring that in the Makefile keeps the exemption where the
     # decision was made, so the OTHER Makefile still fails if the install is
     # ever dropped there by accident — which a global allowlist would hide.
     #
-    #   # check-packaging: not-installed files/wwand.hotplug.e1820 (reason)
+    #   # check-packaging: not-installed files/wwand.hotplug.e182e (reason)
     declared = set()
     for m in re.finditer(r'^#\s*check-packaging:\s*not-installed\s+(\S+)',
                          mk, re.M):

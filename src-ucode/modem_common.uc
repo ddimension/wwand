@@ -779,7 +779,7 @@ export function telemetry_at(self)
 // so the reset must be on the wire by the time the error propagates. Opens
 // the AT transport directly, writes, closes — no probe, no queue, no answer
 // expected (the modem resets itself regardless; HW-verified on the Huawei
-// E1820, 2026-08-31: CFUN re-enumerates the device and the table comes back
+// E182E, 2026-08-31: CFUN re-enumerates the device and the table comes back
 // fresh).
 export function reset_stack_at(self, at_opts, log)
 {

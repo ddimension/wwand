@@ -1377,7 +1377,7 @@ export function setup(fx, opts)
 		// into the GGSN segment, not a point-to-point hop — the gateway
 		// resolves via (proxy-)ARP from the network side, and NOARP leaves the
 		// host with a zero destination MAC the firmware drops. HW-verified on
-		// the Huawei E1820, 2026-08-31: traffic only flowed with ARP on (the
+		// the Huawei E182E, 2026-08-31: traffic only flowed with ARP on (the
 		// mwan3 track ping through the modem was the proof). RNDIS keeps its
 		// NOARP (true p2p framing) — that one lives in modem_ncm.uc.
 		link_op(fx, 'mtu', netdev, { mtu: child_mtu(opts.mtu, fx, netdev) });

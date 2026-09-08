@@ -89,7 +89,7 @@ export function install(self, o)
 
 				// SYNC is best-effort, like libqmi treats it: a session reset
 				// the modem may simply not implement. Old stacks answer no
-				// SYNC at all (HW-observed on the 2011-era E1820) while
+				// SYNC at all (HW-observed on the 2011-era E182E) while
 				// GET_VERSION_INFO works fine — the service query right
 				// after this is the real bring-up gate, and a dead modem
 				// still fails there.
