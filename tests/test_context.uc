@@ -224,10 +224,13 @@ scenario('lost-during-ipfamily', {
 scenario('noprofile', {
 	config: { apn: 'internet.globe.com.ph', pdp_type: 'ipv4' },
 	handlers: {
-		// __error is mockhub's way of failing a request with a QMI error code;
-		// 10 is INVALID_PROFILE (libqmi 1.38 qmi-errors.h:240)
+		// __error is mockhub's way of failing a request with a QMI error code.
+		// This is the E182E shape: 10 = INVALID_PROFILE (no WDS profile
+		// namespace) and 71 = INVALID_QMI_COMMAND (no SET_IP_FAMILY) —
+		// libqmi 1.38, qmi-errors.h:240 and :298.
 		MODIFY_PROFILE: () => ({ __error: 10 }),
 		GET_PROFILE_SETTINGS: () => ({ __error: 10 }),
+		SET_IP_FAMILY: () => ({ __error: 71 }),
 	},
 }, (ctx, mock, events, next) => {
 	ctx.up((err) => {
@@ -240,12 +243,13 @@ scenario('noprofile', {
 		eq(sn[0].args.apn, 'internet.globe.com.ph',
 			'noprofile: ...and the apn goes inline instead');
 
-		// SET_IP_FAMILY is a separate command an old stack need not implement,
-		// so the family must ride IN the request too — Start Network's own
-		// TLV 0x19 (libqmi 1.38 qmi-service-wds.json:787,842), which the bash
-		// dialer always passed as `ip-type=4`. Without it the session starts
-		// with no family preference at all.
-		eq(sn[0].args.ip_family, 4, 'noprofile: the ip family rides in the request');
+		// SET_IP_FAMILY is refused by this stack, so the family has to ride IN
+		// the request — Start Network's own TLV 0x19 (libqmi 1.38
+		// qmi-service-wds.json:787,842), which the bash dialer always passed as
+		// `ip-type=4`. Without it the session starts with no family preference
+		// and the modem fails it with an internal error.
+		eq(sn[0].args.ip_family, 4,
+			'noprofile: SET_IP_FAMILY refused -> the family rides in the request');
 		next();
 	});
 });
@@ -270,8 +274,10 @@ scenario('dual', { config: { apn: 'web', pdp_type: 'ipv4v6' } }, (ctx, mock, eve
 		eq(length(mock.calls_for('START_NETWORK')), 2, 'dual: two start-network calls');
 		eq(mock.calls_for('START_NETWORK')[0].args.profile_3gpp, 1, 'dual: profile 1');
 		eq(mock.calls_for('START_NETWORK')[0].args.apn, 'web', 'dual: apn in start-network');
-		eq(mock.calls_for('START_NETWORK')[0].args.ip_family, 4, 'dual: v4 family in the request');
-		eq(mock.calls_for('START_NETWORK')[1].args.ip_family, 6, 'dual: v6 family in the request');
+		// ...and where SET_IP_FAMILY is accepted, the request is unchanged:
+		// the fallback must not alter what a working modem receives today
+		eq(mock.calls_for('START_NETWORK')[0].args.ip_family, null,
+			'dual: SET_IP_FAMILY accepted -> no redundant family TLV');
 
 		let sif = mock.calls_for('SET_IP_FAMILY');
 		eq(sif[0].args.preference, 4, 'dual: family v4 set');

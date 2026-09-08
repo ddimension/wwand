@@ -513,21 +513,23 @@ export function create(opts)
 				// apn/auth also passed here (old behavior): several contexts
 				// may share a profile index, the request TLVs take precedence.
 				//
-				// The IP family goes IN the request, always. SET_IP_FAMILY
-				// (WDS 0x004D) is a separate command an old stack need not
-				// implement — the Huawei E182E answers it with
-				// INVALID_QMI_COMMAND (71) — and relying on it alone starts the
-				// session with no family preference at all. Start Network
-				// carries its own "IP Family Preference" TLV 0x19 for exactly
-				// this (libqmi 1.38, qmi-service-wds.json:787,842), and the bash
-				// dialer this replaces always passed it: `ip-type=4` / `=6` on
-				// every start-network. Sending both is what that dialer did in
-				// effect, and modems that accept SET_IP_FAMILY see the same
-				// value twice.
-				let start_args = {
-					ip_family: (family == 6) ? wdsmod.IP_FAMILY_IPV6
-					                         : wdsmod.IP_FAMILY_IPV4,
-				};
+				let start_args = {};
+
+				// SET_IP_FAMILY (WDS 0x004D) is a separate command an old stack
+				// need not implement: the Huawei E182E answers it with
+				// INVALID_QMI_COMMAND (71), and relying on it alone starts the
+				// session with no family preference at all — the modem then
+				// fails START_NETWORK with an internal error. Start Network
+				// carries its own "IP Family Preference" TLV for exactly this
+				// (0x19; libqmi 1.38, qmi-service-wds.json:787,842), and the
+				// bash dialer wwand replaces always passed it as `ip-type=4`.
+				//
+				// Only when the command actually failed, so a modem that
+				// accepts SET_IP_FAMILY keeps receiving exactly the request it
+				// receives today.
+				if (e2)
+					start_args.ip_family = (family == 6) ? wdsmod.IP_FAMILY_IPV6
+					                                     : wdsmod.IP_FAMILY_IPV4;
 
 				// The profile index is sent unless the modem has just told us it
 				// does not exist. NOTE the earlier claim here — that the bash
