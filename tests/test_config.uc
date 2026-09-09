@@ -912,6 +912,33 @@ eq(r.blocked_paths['/dev/ttyUSB0'], null,
 eq(r.blocked_paths['0'], null,
 	'blocklist: an mmcli index names no hardware and is not a path claim');
 
+// --- migrate_plan must never touch a `proto 3g` interface --------------------
+//
+// `proto 3g` is OpenWrt's PPP dialer, and an interface using it is very likely
+// on a PPP-only device — which wwand does not drive. Converting one would take
+// a working connection away and give nothing back. It is also a deliberate
+// choice for some operators even on capable modems, for `proto 3g`'s
+// auto-reconnect. Asked for explicitly by the hardware sponsor (2026-09-09);
+// asserted here so a later widening of the candidate list cannot take it
+// silently.
+{
+	let plan = config.migrate_plan({ network: {
+		wan3g: { '.type': 'interface', proto: '3g', device: '/dev/ttyUSB0',
+		         apn: 'internet', service: 'umts' },
+		// a migratable one beside it, so this proves selection and not that the
+		// engine simply did nothing
+		wanq:  { '.type': 'interface', proto: 'qmi', device: '/dev/cdc-wdm0',
+		         apn: 'internet' },
+	} });
+
+	let touched = {};
+	for (let c in plan)
+		touched[c[2]] = true;
+
+	eq(touched.wan3g, null, 'migrate: a `proto 3g` interface is never converted');
+	ok(touched.wanq == true, 'migrate: ...while the qmi one beside it still is');
+}
+
 // --- migrate_plan: convert old configs to the network-native model -----------
 
 function mp_set(ch, section, opt) {

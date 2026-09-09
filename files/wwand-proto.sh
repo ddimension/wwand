@@ -130,13 +130,46 @@ _wwand_apply_settings() {
 
 	[ -n "$v4_addr" ] && {
 		proto_add_ipv4_address "$v4_addr" "${v4_prefix:-32}"
-		# no gateway on the default route (old dialer behavior): the address
-		# is a /32 on a p2p link, so the modem-reported gateway is off-link
-		# and a via-route would be rejected — a device route always works.
-		# RNDIS datapaths additionally run with ARP disabled (the daemon sets
-		# NOARP on rndis_host netdevs), so the device route needs no
-		# neighbour resolution either.
-		[ "$defaultroute" = 0 ] || proto_add_ipv4_route "0.0.0.0" 0
+
+		# A device route ("default dev X scope link") carries no nexthop, so
+		# the kernel has to resolve the DESTINATION on that link. That is
+		# correct on a NOARP point-to-point link — rndis_host and raw-IP, where
+		# the daemon sets NOARP and there is no neighbour to resolve — and it is
+		# wrong on an ethernet-framed one, where it silently requires the modem
+		# to proxy-ARP the entire internet. Some do (a Huawei E182E), most do
+		# not.
+		#
+		# Measured on the sponsor's box (2026-09-09) with a Huawei E3372: the
+		# device route left `9.9.9.9 FAILED` in the netdev's neighbour table and
+		# moved two packets before the kernel gave up. It looked healthy only
+		# because the main table had a better default on another interface and
+		# the traffic went out there; mwan3's per-interface table has no such
+		# escape, which is where it showed. Swapping only the route shape, three
+		# times alternating: 100% loss on the device route, 0% via the gateway.
+		#
+		# So: a nexthop wherever the link resolves neighbours and the modem gave
+		# us one. NOARP links keep exactly what they had, which is every RNDIS
+		# and raw-IP deployment.
+		#
+		# The host route first is not optional: the address is forced to /32, so
+		# the gateway is off-link and `ip route add default via ...` is refused
+		# with "Nexthop has invalid gateway" until it is on-link. The IPv6 half
+		# below has always done it in this order.
+		local v4_noarp=0
+		[ -n "$netdev" ] && [ -r "/sys/class/net/$netdev/flags" ] && {
+			local _fl
+			read -r _fl < "/sys/class/net/$netdev/flags"
+			[ $(( _fl & 0x80 )) -ne 0 ] && v4_noarp=1   # IFF_NOARP
+		}
+
+		[ "$defaultroute" = 0 ] || {
+			if [ -n "$v4_gateway" ] && [ "$v4_noarp" = 0 ]; then
+				proto_add_ipv4_route "$v4_gateway" 32
+				proto_add_ipv4_route "0.0.0.0" 0 "$v4_gateway"
+			else
+				proto_add_ipv4_route "0.0.0.0" 0
+			fi
+		}
 
 		[ "$peerdns" = 0 ] || {
 			for d in $v4_dns; do

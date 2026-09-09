@@ -1413,9 +1413,17 @@ Applied read-before-write, and never applied unless you set it — changing
 toolkit behaviour unasked can break a working deployment on one operator's
 network and nowhere else.
 
-**`option protocol`** (`qmi` | `mbim` | `ncm` | `ppp`; unset or `auto` = detect)
+**`option protocol`** (`qmi` | `mbim` | `ncm`; unset or `auto` = detect)
 pins the control protocol when the driver cannot be classified — wwand refuses
-to guess, and the daemon's error names this option. A pin that *contradicts* a
+to guess, and the daemon's error names this option. **`ppp` is not among the
+values**: wwand drives QMI, MBIM and NCM only, and PPP-only devices are out of
+scope by decision rather than omission — OpenWrt's own `proto 3g` handles them,
+with better auto-reconnect than wwand offers for them. A modem that presents
+nothing but a serial port gets ONE usbnet mode switch (many such sticks can do
+QMI and simply boot in the wrong mode); if that is unavailable or fails, the
+daemon says so and names `proto 3g`, and `status()` carries the same in
+`control_note`. Migration never converts a `proto 3g` interface for the same
+reason. A pin that *contradicts* a
 driver wwand does recognise is honoured, but it is also recorded: an AT port
 answers on QMI and MBIM modems too, so on an AT-driven backend nothing it says
 can prove the pin right, and hardware recovery stays disarmed for that modem

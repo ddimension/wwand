@@ -917,6 +917,21 @@ export function create(opts)
 	// object built — no PPP dialer). Per-modem guard so it never loops.
 	let modeswitch_tried = {};
 
+	// Every dead end of the mode switch lands on a PPP-only device, and wwand
+	// does not drive PPP — by decision, not omission: it speaks QMI, MBIM and
+	// NCM, and OpenWrt's own `proto 3g` already handles serial modems with
+	// better auto-reconnect than wwand offers for them. Saying only "leaving
+	// unmanaged" tells an operator nothing about what to do next, which is the
+	// complaint that prompted this (hardware sponsor, 2026-09-09). One helper,
+	// so the three exits cannot drift apart.
+	let ppp_unsupported = (name, entry, why) => {
+		log('err', sprintf('modem %s: %s — this looks like a PPP-only device, which wwand does not support; configure it with OpenWrt\'s `proto 3g` instead',
+			name, why));
+
+		if (entry)
+			entry.control_note = sprintf('PPP-only device (%s) — unsupported; use `proto 3g`', why);
+	};
+
 	let try_modeswitch = (name, entry, tty) => {
 		log('warn', sprintf('modem %s: only a serial port present (ppp), no rich control interface', name));
 
@@ -927,15 +942,11 @@ export function create(opts)
 
 		modeswitch_tried[name] = true;
 
-		if (!deps.modeswitch) {
-			log('warn', sprintf('modem %s: no mode-switch backend, leaving unmanaged', name));
-			return;
-		}
+		if (!deps.modeswitch)
+			return ppp_unsupported(name, entry, 'no mode-switch backend installed');
 
-		if (!tty) {
-			log('warn', sprintf('modem %s: no AT port to mode-switch on, leaving unmanaged', name));
-			return;
-		}
+		if (!tty)
+			return ppp_unsupported(name, entry, 'no AT port to mode-switch on');
 
 		log('notice', sprintf('modem %s: attempting one-time usbnet mode switch on %s', name, tty));
 
@@ -945,7 +956,8 @@ export function create(opts)
 		}, (err, res) => {
 			if (err) {
 				log('warn', sprintf('modem %s: usbnet mode switch failed: %J', name, err));
-				return;
+				return ppp_unsupported(name, entry,
+					sprintf('the one-time usbnet mode switch failed (%J)', err));
 			}
 
 			if (res?.switched) {
