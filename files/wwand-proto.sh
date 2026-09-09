@@ -155,12 +155,31 @@ _wwand_apply_settings() {
 		# the gateway is off-link and `ip route add default via ...` is refused
 		# with "Nexthop has invalid gateway" until it is on-link. The IPv6 half
 		# below has always done it in this order.
-		local v4_noarp=0
-		[ -n "$netdev" ] && [ -r "/sys/class/net/$netdev/flags" ] && {
-			local _fl
+		# IFF_NOARP (0x80) out of the kernel's own flag word. Validated before
+		# the arithmetic and NOT because the kernel writes junk — it writes
+		# "0x%x" — but because `$(( ))` on a non-number makes ash ABORT THE
+		# SCRIPT ("Illegal number"), and this script is netifd's proto handler:
+		# dying here leaves the interface with no address and no route at all.
+		# A guard that cannot fire is cheap; the failure it prevents is not.
+		# (Verified under dash: a garbage flags file kills the script outright.)
+		local v4_noarp=0 _fl= _hex=
+
+		[ -n "$netdev" ] && [ -r "/sys/class/net/$netdev/flags" ] &&
 			read -r _fl < "/sys/class/net/$netdev/flags"
-			[ $(( _fl & 0x80 )) -ne 0 ] && v4_noarp=1   # IFF_NOARP
-		}
+
+		case "$_fl" in 0x*) _hex=${_fl#0x} ;; esac
+		case "$_hex" in
+			""|*[!0-9a-fA-F]*) ;;   # unreadable: treat as an ARP link (below)
+			*) [ $(( 0x$_hex & 0x80 )) -ne 0 ] && v4_noarp=1 ;;
+		esac
+
+		# 0.0.0.0 is "unspecified", not an address: a via-route to it is either
+		# refused or installed and useless, and the context still reports
+		# CONNECTED — the connected-but-no-traffic shape this tree keeps paying
+		# for. The backends pass a decoded gateway through without judging it
+		# (context.uc, context_mbim.uc, context_ncm.uc), so the judgement belongs
+		# here, where it is acted on.
+		case "$v4_gateway" in 0.0.0.0|0) v4_gateway= ;; esac
 
 		[ "$defaultroute" = 0 ] || {
 			if [ -n "$v4_gateway" ] && [ "$v4_noarp" = 0 ]; then

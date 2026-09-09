@@ -62,7 +62,7 @@ const QUIRKS = [
 	// with), signal comes from NAS GET_SIGNAL_STRENGTH (0x0020) or the CSQ
 	// floor, and SIM state runs over the DMS legacy fallback.
 	//
-	// The model name was E182E here until 2026-09-08 and that alternative
+	// The model name was E1820 here until 2026-09-08 and that alternative
 	// could never match: the stick calls itself E182E (`AT+CGMM` on the
 	// sponsor's box, revision 11.825.03.00.00 — lsusb's id table says "E815"
 	// for 12d1:14ac, and neither name is the one we had). Only the `^8$` arm

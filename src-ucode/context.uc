@@ -207,9 +207,22 @@ export function create(opts)
 					profile.invalid = true;
 			}
 
-			// preserved: retry including roaming_disallowed=no, ignore result
+			// preserved: retry including roaming_disallowed=no, ignore result —
+			// except for INVALID_PROFILE, which is a fact about the modem and
+			// not about this write. The first attempt can fail for an unrelated
+			// reason and the retry be the one that reports the index does not
+			// exist; dropping it there left `profile.invalid` unset and sent the
+			// invented index to START_NETWORK after all.
 			wds.request('MODIFY_PROFILE', { ...base, roaming_disallowed: 0 },
-				(e2) => torn_down(e2, wds) ? null : check_pdp_type(profile, done));
+				(e2) => {
+					if (torn_down(e2, wds))
+						return;
+
+					if (e2?.error == 'qmi' && e2.code == 10)
+						profile.invalid = true;
+
+					check_pdp_type(profile, done);
+				});
 		});
 
 		// idempotency guard: skip both NV writes when the profile already

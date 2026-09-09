@@ -208,6 +208,35 @@ scenario('lost-during-ipfamily', {
 
 // --- A: dual-stack happy path ------------------------------------------------
 
+// --- INVALID_PROFILE from the RETRY counts too -------------------------------
+//
+// prepare() writes the profile twice: once, then again with
+// roaming_disallowed=0, and the second result was ignored wholesale. So a first
+// write failing for an unrelated reason and the RETRY reporting
+// INVALID_PROFILE left the flag unset, and the invented index went to
+// START_NETWORK after all — the exact thing the fallback exists to avoid.
+// Found by audit, 2026-09-09.
+scenario('noprofile_retry', {
+	config: { apn: 'internet.globe.com.ph', pdp_type: 'ipv4' },
+	handlers: {
+		GET_PROFILE_SETTINGS: () => ({ __error: 10 }),
+		// 2 = QMI "failure" on the first write, 10 = INVALID_PROFILE on the retry
+		MODIFY_PROFILE: (args, meta) => ({ __error: (meta.count == 1) ? 2 : 10 }),
+		SET_IP_FAMILY: () => ({ __error: 71 }),
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'retry: the modem still connects');
+		eq(length(mock.calls_for('MODIFY_PROFILE')), 2, 'retry: both writes were made');
+
+		let sn = mock.calls_for('START_NETWORK');
+		eq(sn[0].args.profile_3gpp, null,
+			'retry: an index the RETRY rejected is not sent either');
+		eq(sn[0].args.apn, 'internet.globe.com.ph', 'retry: dials on the inline apn');
+		next();
+	});
+});
+
 // --- a modem with no WDS profile namespace dials on the inline APN ----------
 //
 // wwand invents a profile index when none is configured (mux_id, else 1) and
