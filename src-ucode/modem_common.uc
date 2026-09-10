@@ -1518,6 +1518,33 @@ open_at_tty = function(self, o, fxi, log, ch, tried)
 	}, { timeout: o.at_opts?.probe_timeout ?? 10000 });
 };
 
+// A decoded QMI signal reply carries the TLVs as they sit on the wire, and ONE
+// of them is not in the unit its name suggests: WCDMA Ec/Io is a raw gint16 in
+// units of -0.5 dB, which libqmi renders as (-0.5)*raw before printing it
+// (qmicli-nas.c:460-462, libqmi 1.38.0) — a raw 20 means -10.0 dB, and the sign
+// flips too. The AT path already reports real dB (atcmd_parse.uc:356), so a raw
+// value left in place makes one documented key mean two different things
+// depending on which path answered, with nothing at the consumer able to tell.
+//
+// THIS LIVES HERE BECAUSE THERE ARE THREE DOORS, not one: the solicited
+// GET_SIGNAL_INFO (telemetry_qmi), the SIGNAL_INFO_IND indication (modem.uc)
+// and the same request over the QMI-over-MBIM passthrough (telemetry_mbim).
+// Normalising only the first one was worse than normalising none: indications
+// arrive between refreshes, so the value would have alternated between -10 and
+// 20 for the same measurement. Every assignment of a raw QMI signal reply to
+// self.signal goes through here.
+//
+// Returns a shallow copy of the wcdma sub-object rather than mutating it in
+// place, so re-normalising an already-normalised reply is impossible by
+// construction: the caller stores what we return and the decoder's buffer is
+// left alone.
+export function normalise_qmi_signal(sdata) {
+	if (sdata?.wcdma?.ecio != null)
+		return { ...sdata, wcdma: { ...sdata.wcdma, ecio: -0.5 * sdata.wcdma.ecio } };
+
+	return sdata;
+};
+
 // format_telemetry(o): the single telemetry log line for EVERY backend, defensive
 // about per-backend shape differences so all produce the same style of line:
 //   - tech:  numeric NAS radio_ifs (QMI) -> else string reg.mode/reg.tech (NCM);

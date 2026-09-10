@@ -27,7 +27,7 @@ quirks and recovery strategies were ported deliberately, its bugs left behind.
 
 ## Screenshots
 
-A quick tour of the LuCI UI (modems overview · modem config · interface · SIM/APN/PIN · Modem Tools with eSIM · live status) — full-size, captioned gallery in **[docs/luci.md](docs/luci.md)**:
+A quick tour of the LuCI UI (modems overview · modem config · interface · connection · SIM/APN/PIN · Modem Tools with eSIM · live status with signal graphs) — full-size, captioned gallery in **[docs/luci.md](docs/luci.md)**:
 
 [![wwand in LuCI — slideshow](docs/images/luci-slideshow.gif)](docs/luci.md)
 
@@ -56,6 +56,10 @@ A quick tour of the LuCI UI (modems overview · modem config · interface · SIM
 - **Diagnostic** — EMM reject cause + limited-service flag (QMI + `AT+CEER`),
   live cell environment (serving + neighbours, LTE & NR5G), signal, operator,
   data-system mode (LTE/NSA/SA), all on ubus.
+- **Watchable** — the LuCI status page graphs the signal live, one series per
+  radio technology, so a modem falling from 5G to LTE or a hand on the antenna
+  is something you see rather than infer. The history is kept in the browser;
+  nothing is sampled or stored on the router while nobody is looking.
 
 ## Features at a glance
 

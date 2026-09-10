@@ -1,6 +1,6 @@
 # wwand — current state
 
-_State of 2026-09-10, after v1.6.3. 53 host suites, all green (`cd tests && sh
+_State of 2026-09-10, after v1.6.4. 53 host suites, all green (`cd tests && sh
 run_tests.sh` — it prints the count, which moves too often to be worth repeating
 here)._
 
@@ -28,7 +28,7 @@ is always user-triggered.
 | Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed |
 | Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
-| Feed | ddimension/openwrt-repo — `wwand` r69, `luci-app-wwand` r30, `luci-proto-wwand` r15 |
+| Feed | ddimension/openwrt-repo — `wwand` r71, `luci-app-wwand` r32, `luci-proto-wwand` r17 |
 | Upstream | openwrt/packages#30185 (pins v1.6.3), openwrt/luci#8917 |
 
 ## Hardware verified (2026-08-30, on r49 + the same day's device-support HEAD)
@@ -132,11 +132,68 @@ A token is refused on a raw-IP link — the kernel takes one only where neighbou
 discovery happens — so on rmnet modems only the control-protocol path applies.
 It cannot help against a rotating *prefix*; nothing can.
 
-Verified on the RG650E (`245`, O2): without the option three sessions produced
+**In LuCI it is the stock "IPv6 suffix" box** on Advanced Settings, not a wwand
+field. `ip6ifaceid` is a generic netifd option and luci-mod-network claims it
+for every protocol with `nettools.replaceOption(s, 'advanced', ...)` *after* a
+protocol handler has added its own options — so the field luci-proto-wwand
+briefly carried under that name was created and then replaced without a word,
+and its validator never ran while the daemon went on refusing the values it was
+written to catch. The duplicate is gone (LuCI Master 26.220.05397, checked on
+hardware 2026-09-10). That box's datatype is `ip6hostid`, so `eui64` / `random`
+/ `stable` have to be set through uci.
+
+Verified on the RG650E (`245`, Telekom 262/01 — the box's own
+registration and its 2a01:598 prefix; an earlier note here said O2): without the option three sessions produced
 three identifiers under one stable /64; with `::1234:5678` the address held
 across reconnects, traffic flowed from it, and removing the option restored the
 network-assigned identifier. The token path was verified against 6.18.41 in a
 netns (set/clear, `IFF_NOARP` refused, survives enabling IPv6 and a link bounce).
+
+## Modem status page: live signal graphs (2026-09-10)
+
+The LuCI status page is now warnings → **graphs** → panels. The old signal-bar
+panel and its peak-hold button are gone; the graphs carry current, average and
+peak over the window that is actually on screen.
+
+- **One quantity per canvas** — RSRP, SINR, RSRQ, 3G Ec/Io — each with its own
+  published thresholds drawn as labelled rules. Sharing a unit is not sharing a
+  scale: SINR and RSRQ are both dB and were briefly on one axis, which graded a
+  normal -12 dB RSRQ against SINR's rules.
+- **One series per RAT**, never a line that changes meaning when the modem
+  switches. On EN-DC the LTE anchor and the NR carrier arrive in the same reply
+  and differ widely, and a gap in the 5G line *is* the information that 5G
+  stopped serving. Solid = the serving cell's own power (RSRP, RSCP on 3G),
+  dashed = the band-wide RSSI in the same colour. An RSSI keeps the RAT that
+  measured it; the untagged line appears only when nothing tagged is on offer —
+  a NAS 1.0 stack's AT+CSQ floor (E182E).
+- **Canvases and legend rows appear with their data.** An LTE-only modem never
+  shows the Ec/Io graph; a 2G-camped one shows nothing but its RSSI.
+- **The history lives in the browser** (ddimension/wwand#14): no daemon-side
+  buffer to serialise into every status call, and no sampling while nobody is
+  watching. It starts empty and a reload clears it.
+- Thresholds are the published vendor tables, and they are the same ladder
+  `board.bars_from_signal()` steps the signal LEDs at — what the case shows and
+  what the browser shows agree. Sources and caveats hang off each heading as a
+  mouse-over.
+
+Two unit traps were closed on the way, both of the same shape — one key meaning
+two things depending on which path answered:
+
+- **WCDMA Ec/Io** arrives over QMI as a raw gint16 in -0.5 dB units
+  (`qmicli-nas.c:460-462`, libqmi 1.38.0) but over AT already in dB
+  (`atcmd_parse.uc:356`). `modem_common.normalise_qmi_signal()` converts at the
+  edge — at **all three** doors that store a raw QMI signal reply: the polled
+  `GET_SIGNAL_INFO`, the `SIGNAL_INFO_IND` indication and the same request over
+  the QMI-over-MBIM passthrough. Converting only the first was worse than
+  converting none: indications arrive between refreshes.
+- **NR RSRQ is not inside `nr5g`.** QMI carries NR RSRP/SNR in TLV 0x17 and RSRQ
+  in TLV 0x18 of its own, so the reply has a top-level `nr5g_rsrq`, in plain dB
+  while the neighbouring SNR is in tenths (`qmicli-nas.c:581-584`).
+
+`tools/luci-screenshot.py` captures the documentation screenshots: headless
+Chrome over CDP, stops the one-second refresh, masks the subscriber identifiers
+and addresses, and **refuses to write a file** unless a second pass proves
+nothing repainted over the mask.
 
 ## Known open
 

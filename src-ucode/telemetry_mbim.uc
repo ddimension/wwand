@@ -59,8 +59,10 @@ export function install(self, o)
 
 			if (be == 'qmi')
 				return self.pt.nas.request('GET_SIGNAL_INFO', {}, (e, d) => {
+					// the passthrough is the same QMI reply over another
+					// transport — it needs the same unit conversion
 					if (!e && tlv.has_payload(d))
-						self.signal = d;
+						self.signal = modem_common.normalise_qmi_signal(d);
 					cb();
 				}, { no_recovery: true });
 

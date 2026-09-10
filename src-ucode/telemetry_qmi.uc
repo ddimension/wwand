@@ -70,8 +70,6 @@ export function install(self, o)
 	// forward-declared: refresh_fast calls it from the signal-fallback path
 	let strength_signal;
 
-	// one fast-telemetry refresh cycle: signal first, then cells, then (while
-	// watched) CA + data-system mode, then emit. Calls done() exactly once when
 	// the cycle finishes or bails (channel gone) — the shared watch_driver uses
 	// done() to schedule the next cycle non-overlapping. The adaptive cadence /
 	// decay / teardown all live in modem_common.watch_driver now.
@@ -79,7 +77,7 @@ export function install(self, o)
 		self.nas.request('GET_SIGNAL_INFO', {}, (serr, sdata) => {
 			// keep last-known on an empty/invalid answer instead of blanking it
 			if (!serr && tlv.has_payload(sdata))
-				self.signal = sdata;
+				self.signal = modem_common.normalise_qmi_signal(sdata);
 			// A cancellation is the client being destroyed, not a modem that
 			// rejects the message. Falling through would submit the fallback on
 			// the client mid-destruction — and that one's failure submits an AT

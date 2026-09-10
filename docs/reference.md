@@ -1412,6 +1412,18 @@ included, which is a trap rather than a choice under this option's name.
 netifd's own `ip6ifaceid` defaults to `::1`; wwand deliberately does not copy
 that, because it would silently renumber every existing installation on upgrade.
 
+**In LuCI it is the stock "IPv6 suffix" box** on an interface's *Advanced
+Settings* tab — not a wwand field. `ip6ifaceid` is a generic netifd option, and
+luci-mod-network claims it for every protocol with
+`nettools.replaceOption(s, 'advanced', ...)` *after* the protocol handler has
+contributed its own options, so a field a proto adds under that name is created
+and then replaced without a word (LuCI Master 26.220.05397, checked on hardware
+2026-09-10). That box's datatype is `ip6hostid`: it takes a literal suffix such
+as `::1`, but not the `eui64` / `random` / `stable` generation-mode names —
+those have to be set through uci or the CLI:
+
+    uci set network.wwand0.ip6ifaceid='eui64' && uci commit network
+
 There are two ways an IPv6 address reaches a cellular interface, and the option
 covers both — with different mechanisms and different limits:
 

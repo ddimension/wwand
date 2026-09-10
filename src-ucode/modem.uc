@@ -1048,7 +1048,11 @@ export function create(opts)
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
-			self.signal = data;
+			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:419-422), so it
+			// carries the same raw WCDMA Ec/Io and needs the same conversion —
+			// an indication landing between refreshes would otherwise flip the
+			// unit back under a consumer that just read the polled value
+			self.signal = modem_common.normalise_qmi_signal(data);
 		});
 		// Network Time / NITZ (operator-pushed UTC clock): store for status and
 		// hand epoch+tz to the daemon, which decides whether to apply it (only

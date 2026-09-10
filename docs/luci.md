@@ -2,8 +2,18 @@
 
 The LuCI web UI (`luci-app-wwand` + `luci-proto-wwand`) drives the whole
 `/etc/config/network` model — every screen below writes the same config you
-could edit by hand (see [reference.md](reference.md)). ICCID / IMSI / IMEI /
-EID are masked in these screenshots.
+could edit by hand (see [reference.md](reference.md)).
+
+ICCID / IMSI / IMEI / EID and the assigned addresses are masked in these
+screenshots — a public IPv6 prefix identifies a subscriber line as surely as an
+IMSI does. They are captured by `tools/luci-screenshot.py`, which stops the
+one-second refresh, applies that masking and grabs the full page, so redoing
+them after a UI change is one command and not an afternoon with an image
+editor:
+
+    tools/luci-screenshot.py --login root \
+        --url http://ROUTER/cgi-bin/luci/admin/status/wwand \
+        --out docs/images/luci-status-chateau.png
 
 ![LuCI slideshow](images/luci-slideshow.gif)
 
@@ -46,6 +56,17 @@ Resilience.
 
 ![Interface config](images/luci-interface-config.png)
 
+The **Connection** tab holds the data-bearer settings: APN, PDP type and auth,
+the QMAP **mux channel** that lets several connections share one modem, the
+3GPP **attach profile index**, MTU handling and the reconnect behaviour.
+
+![Interface config — Connection tab](images/luci-interface-connection.png)
+
+Note that `ip6ifaceid` — pinning the IPv6 interface identifier against a carrier
+that rotates it — is *not* on this tab. It is netifd's own option and LuCI
+claims it for every protocol as the **IPv6 suffix** box under *Advanced
+Settings*; see [reference.md](reference.md).
+
 ## Per-SIM override editor (SIM / APN / PIN)
 
 Match a specific card by its ICCID and give it a PIN — and optionally its own
@@ -66,12 +87,38 @@ SMS.
 
 ## Modem status
 
-Live signal (aim-the-antenna bars with peak hold), serving cell, SIM slots,
-the active connection (IP/DNS/MTU, uptime, data), carrier aggregation and
-neighbour cells. Refreshes about once a second.
+Configuration warnings first, then **live signal graphs**, then the panels:
+modem identity, serving cell, SIM slots, the active connection (IP/DNS/MTU,
+uptime, data), datapath and muxing, carrier aggregation and neighbour cells.
+Refreshes about once a second.
 
-![Modem status — Chateau (dual modem)](images/luci-status-chateau.png)
+The graphs keep the last few minutes **in the browser** — nothing is stored on
+the router, so the window starts empty and a reload clears it. That is the job
+they are for: watching what turning an antenna does, while turning it.
 
-A single-modem box (Zyxel NR7101):
+Each canvas carries **one quantity** with its own quality thresholds, and one
+**series per radio technology** rather than a single line that quietly changes
+meaning when the modem switches: on EN-DC the LTE anchor and the NR carrier
+arrive in the same reply and can differ by 10 dB, and a gap in the 5G line is
+itself the information that 5G stopped serving. Solid lines are the serving
+cell's own power (RSRP, or RSCP on 3G); dashed lines are the band-wide RSSI in
+the same colour, and an RSSI keeps the RAT that measured it — only a modem
+reporting an untagged value gets the plain amber line.
+
+A canvas and its legend rows **appear with their data**: an LTE-only modem
+never shows the 3G Ec/Io graph, and a 2G-camped one shows nothing but its RSSI.
+The thresholds come from the published vendor tables (and match the ladder the
+router's own signal LEDs step at) — hover a heading or its legend for the
+sources and the caveats.
+
+![Modem status — MikroTik Chateau, LTE](images/luci-status-chateau.png)
+
+The **Modem** selector above the graphs appears once a box has more than one
+configured modem; each keeps its own history, so switching back to one shows
+the window it had rather than starting over.
+
+A Zyxel NR7101 on **5G NSA** — both radios report at once, so every canvas
+carries an LTE line and a 5G line, and a break in the purple one is 5G dropping
+out rather than a missing reading:
 
 ![Modem status — NR7101](images/luci-status-nr7101.png)

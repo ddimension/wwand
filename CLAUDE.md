@@ -225,6 +225,13 @@ be decided by load order; `_wwand_apply_settings` builds the netifd update).
   before every commit (current count lives in docs/STATUS.md); mockhub
   over the real codec + a private ubusd. Run before every commit.
 - **JS syntax:** `node --check <file>.js` for LuCI resources.
+- **Doc screenshots:** `tools/luci-screenshot.py --login root --url <luci page>
+  --out docs/images/<name>.png` — headless Chrome over CDP; it stops the
+  one-second refresh (`L.Poll.stop()`), masks ICCID/IMSI/IMEI/EID and the
+  assigned addresses, and captures the full page. REDO THE STATUS SHOTS AFTER A
+  UI CHANGE: they went stale unnoticed once because the recipe lived nowhere.
+  The signal graphs fill a browser-side buffer from empty, so `--settle` needs
+  ~100 s for the lines to show anything.
 - **C module (cross):** aarch64 toolchain at
   `/vol/release/chateau/openwrt/staging_dir/toolchain-aarch64_cortex-a53_gcc-14.4.0_musl`;
   build against `staging_dir/target-aarch64_cortex-a53_musl` (`-shared -fPIC

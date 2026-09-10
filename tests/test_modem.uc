@@ -568,6 +568,63 @@ scenario('wms_release', {
 		eq(length(mock.calls_for('RELEASE_CID')), 4, 'wms: teardown released dms/nas/wds/wms on the modem');
 	});
 
+// GET_SIGNAL_INFO hands the decoded TLVs straight to consumers, so any field
+// whose wire unit is not its apparent unit has to be converted at this edge.
+// WCDMA Ec/Io is the one: a raw gint16 in units of -0.5 dB, which libqmi renders
+// as (-0.5)*raw (qmicli-nas.c:460-462, 1.38.0). Left raw it disagreed with the
+// AT path, which already reports real dB (atcmd_parse.uc:356) — one key, two
+// units, and no way for a consumer to tell which backend answered.
+scenario('signal_units', {
+	handlers: base_handlers({
+		GET_SIGNAL_INFO: {
+			lte: { rssi: -66, rsrq: -11, rsrp: -94, snr: 138 },
+			wcdma: { rssi: -85, ecio: 20 },
+			gsm_rssi: -78,
+		},
+		// the rest of the fast cycle: stubbed out so the scenario reaches
+		// 'telemetry' on the signal read alone, which is what it is about
+		GET_CELL_LOCATION_INFO: { __error: 71 },
+		GET_LTE_CPHY_CA_INFO: { __error: 71 },
+		GET_SYSTEM_INFO: { __error: 71 },
+	}),
+	setup: (mock, modem) => {
+		let poll = null;
+		poll = uloop.timer(10, () => {
+			if (modem.state == 'READY')
+				modem.watch();
+			poll.set(10);
+		});
+	},
+}, 'telemetry',
+	(modem, mock, events) => {
+		// -10.0, not -10: the conversion yields a double, and the half-dB
+		// resolution is real — a raw 21 is -10.5 dB, not a rounding artefact
+		eq(modem.signal?.wcdma?.ecio, -10.0,
+			'signal: wcdma ec/io converted from raw -0.5 dB units to dB');
+		eq(modem.signal?.wcdma?.rssi, -85, 'signal: wcdma rssi passes through as dBm');
+		eq(modem.signal?.gsm_rssi, -78, 'signal: gsm rssi passes through as dBm');
+		eq(modem.signal?.lte?.rsrp, -94, 'signal: lte fields are untouched');
+		eq(modem.signal?.lte?.snr, 138, 'signal: lte snr stays in tenths of a dB');
+
+		// THE INDICATION IS THE SECOND DOOR. NAS SIGNAL_INFO_IND carries the
+		// same TLV layout (schema/nas.uc:419-422) and arrives BETWEEN refreshes,
+		// so a conversion applied only to the polled reply would let the raw
+		// value straight back in — the same key alternating between -10 dB and
+		// 20 for one measurement. Found by review, not by the first test.
+		// The registered handler is invoked directly, the way the reselection
+		// case below does for SERVING_SYSTEM_IND — the mock's indicate() is
+		// asynchronous and this assertion has to be deterministic.
+		for (let cb in (modem.nas.handlers['SIGNAL_INFO_IND'] ?? []))
+			cb({ wcdma: { rssi: -85, ecio: 24 } });
+
+		eq(modem.signal?.wcdma?.ecio, -12.0,
+			'signal: an indication is normalised the same way as a poll');
+		eq(modem.signal?.lte, null,
+			'signal: the indication replaced the reply, it did not merge into it');
+
+		modem.stop();
+	});
+
 // --- 6: configured modes + manual PLMN ---------------------------------------
 
 scenario('modes', {
