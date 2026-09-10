@@ -102,6 +102,7 @@ set(WWAND_UCODE_MODULES
   regdetail.uc simops.uc sim_plmn.uc sim.uc sms_pdu.uc sms.uc
   telemetry_mbim.uc telemetry_ncm.uc telemetry_qmi.uc transport.uc ubus.uc
   version.uc
+  wwandctl_fmt.uc
 )
 
 # executable scripts (shebang) -> compiled with -c, interpreter line preserved
