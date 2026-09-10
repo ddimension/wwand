@@ -63,6 +63,13 @@ const LOCAL_PORTS = {
 	// first-tty heuristic would land on a mute META port).
 	'0e8d:7126': { '4': 'at' },
 	'0e8d:7127': { '6': 'at' },
+	// Quectel EC200A (ECM composition): if4 is the AT port. Reported and
+	// field-confirmed on a Teltonika RUT200 (issue #16, 2026-09-10) — the
+	// kernel log maps 1-1:1.4 -> ttyUSB2, and that is the port the modem
+	// answers on; ttyUSB0 (if2) opens and stays silent, which is what the
+	// first-tty heuristic used to settle on. Only the role that was actually
+	// observed is pinned: if2/if3 are left untagged rather than guessed.
+	'2c7c:6005': { '4': 'at' },
 };
 
 // model-specific init sequences (old proto_qmi_serial_init)
@@ -215,17 +222,34 @@ export function find_mhi_at(fx)
 //                 under (used by discovery.uc for NCM/PPP modems, which have no
 //                 cdc-wdm to anchor on — the base is the netdev's or usb_path's
 //                 USB device dir).
-export function find_tty(fx, device, tty_override, base_override)
+// `skip` (optional): ttys already PROVEN mute — a port that opens but never
+// answers AT. Discovery cannot tell those apart from the real control port in
+// advance, so the caller probes, and hands back what failed to get the next
+// candidate. Without it a modem whose USB id is not in the port table was
+// decided by the heuristic alone ("first tty, sorted") and there was no second
+// guess: the Quectel EC200A on a Teltonika RUT200 answers on ttyUSB2, wwand
+// picked ttyUSB0, and reported "no AT port found" with two untried ports still
+// there (issue #16, 2026-09-10).
+export function find_tty(fx, device, tty_override, base_override, skip)
 {
+	let skipped = (t) => {
+		for (let s in (skip ?? []))
+			if (s == t)
+				return true;
+		return false;
+	};
+
+	// An EXPLICIT port that stays mute is not replaced by a guess: the operator
+	// named it, and quietly using a different one would hide the real fault.
 	if (tty_override != null && tty_override != '')
-		return tty_override;
+		return skipped(tty_override) ? null : tty_override;
 
 	// board quirks first: integrated modems
 	let board = trim(fx.read('/tmp/sysinfo/board_name') ?? '');
 
 	for (let b in BOARD_TTYS)
 		if (substr(board, 0, length(b.prefix)) == b.prefix)
-			return b.tty;
+			return skipped(b.tty) ? null : b.tty;
 
 	let base = base_override;
 
@@ -266,6 +290,9 @@ export function find_tty(fx, device, tty_override, base_override)
 		let ifdir = substr(path, 0, rindex(path, '/'));
 		let ifnum_raw = trim(fx.read(sprintf('%s/bInterfaceNumber', ifdir)) ?? '');
 
+		if (skipped(sprintf('/dev/%s', tty)))
+			continue;
+
 		push(found, {
 			tty: tty,
 			ifnum: length(ifnum_raw) ? hex('0x' + ifnum_raw) : null,
@@ -274,8 +301,11 @@ export function find_tty(fx, device, tty_override, base_override)
 
 	// no USB tty siblings: on a PCIe/MHI modem the AT port is an MHI/wwan char
 	// device instead — probe those before giving up
-	if (!length(found))
-		return find_mhi_at(fx);
+	if (!length(found)) {
+		let mhi = find_mhi_at(fx);
+
+		return skipped(mhi) ? null : mhi;
+	}
 
 	// exact role lookup via USB ids
 	let vid = lc(trim(fx.read(sprintf('%s/idVendor', base)) ?? ''));
@@ -321,9 +351,9 @@ export function find_tty(fx, device, tty_override, base_override)
 // /dev/wwand-gpsN symlink for it). The role was already in the generated table
 // for 60-odd USB ids — it came from ModemManager's udev rules along with the AT
 // roles — and nothing had ever read it.
-export function find_at_channels(fx, device, tty_override, base_override)
+export function find_at_channels(fx, device, tty_override, base_override, skip)
 {
-	let primary = find_tty(fx, device, tty_override, base_override);
+	let primary = find_tty(fx, device, tty_override, base_override, skip);
 
 	if (!primary)
 		return { primary: null, telemetry: null, gps: null };

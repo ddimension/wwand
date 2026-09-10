@@ -33,6 +33,10 @@ import * as callend from 'wwand.callend';
 // setup on a congested cell); only then declare the activation dead.
 const START_NETWORK_TIMEOUT_MS = 120000;
 
+// AT+CGDCONT on the old sticks that need the fallback below can take seconds to
+// answer, and the answer is not what decides success anyway.
+const AT_DEFINE_TIMEOUT_MS = 10000;
+
 const wds_schema = wdsmod.default;
 
 const AUTH_MAP = {
@@ -46,6 +50,16 @@ const PDP_MAP = {
 	ipv4:   wdsmod.PDP_TYPE_IPV4,
 	ipv6:   wdsmod.PDP_TYPE_IPV6,
 	ipv4v6: wdsmod.PDP_TYPE_IPV4V6,
+};
+
+// The same three PDP types as PDP_MAP, spelled the way 3GPP TS 27.007 AT+CGDCONT
+// wants them. Used only by the AT fallback below. (Deliberately a local copy and
+// not an import of ncm_vendors' PDP_STR: that module ships in wwand-ncm, this
+// one in wwand-qmi, and a QMI-only install must not need it.)
+const AT_PDP_STR = {
+	ipv4:   'IP',
+	ipv6:   'IPV6',
+	ipv4v6: 'IPV4V6',
 };
 
 const netmask_to_prefix = context_common.netmask_to_prefix;
@@ -94,6 +108,7 @@ export function create(opts)
 	// that capture them (ucode resolves lexical refs only for bindings
 	// already declared at definition time)
 	let prepare, check_pdp_type, activate_family, fetch_settings, release_family;
+	let at_define_context;
 
 	// A teardown destroys the WDS config client and reports `cancelled` to every
 	// pending callback SYNCHRONOUSLY, with the hub still live. Every callback in
@@ -198,13 +213,16 @@ export function create(opts)
 				log('warn', sprintf('profile modify failed: %J', err));
 
 				// INVALID_PROFILE (QMI protocol error 10, libqmi 1.38
-				// qmi-errors.h:240) means this index does not exist in the
-				// modem's WDS profile namespace at all — a 2009-era stack may
-				// have no profile management. Remember it: dialling with a
-				// 3gpp-profile the modem just called invalid is asking for
-				// something that is not there.
+				// qmi-errors.h:240) SUGGESTS this index does not exist in the
+				// modem's WDS profile namespace — a 2009-era stack may have no
+				// profile management. Provisional only: on the Huawei E182E the
+				// very next step reads the same index back without complaint
+				// (HW-observed on the sponsor box, 2026-09-09), i.e. error 10
+				// there reports "I do not do profile WRITES", not an absent
+				// index. check_pdp_type() revokes the flag when the read
+				// succeeds; see the comment there.
 				if (err.error == 'qmi' && err.code == 10)
-					profile.invalid = true;
+					profile.invalid = profile.write_refused = true;
 			}
 
 			// preserved: retry including roaming_disallowed=no, ignore result —
@@ -219,9 +237,15 @@ export function create(opts)
 						return;
 
 					if (e2?.error == 'qmi' && e2.code == 10)
-						profile.invalid = true;
+						profile.invalid = profile.write_refused = true;
 
-					check_pdp_type(profile, done);
+					// The QMI write bounced, so the APN never reached the modem
+					// and dialling that index would use whatever preset it
+					// carries. AT+CGDCONT still lands on this hardware — that is
+					// what finally connected the E182E (sponsor box,
+					// 2026-09-09). Nothing else changes: the dial still uses
+					// profile.index, which is why the fallback writes THAT cid.
+					at_define_context(profile, () => check_pdp_type(profile, done));
 				});
 		});
 
@@ -254,6 +278,51 @@ export function create(opts)
 		});
 	};
 
+	// --- AT fallback for the APN ---------------------------------------------
+	//
+	// A modem that answers MODIFY_PROFILE with INVALID_PROFILE (10) does not
+	// take APN writes over QMI at all. Its WDS profiles are still READ- and
+	// dial-able, so wwand keeps using the index (see check_pdp_type) — but the
+	// index carries whatever the vendor preset says, not the configured APN, and
+	// START_NETWORK's inline APN TLV is not honoured by such a stack: the Huawei
+	// E182E (Qualcomm 8200A, firmware 2009-11-13) failed every dial with call
+	// end reason 11 until the APN was actually IN the context, and connected
+	// immediately afterwards (sponsor box, HW-observed 2026-09-09).
+	//
+	// AT+CGDCONT is the other way in, and the one thing that matters here is
+	// that it writes THE SAME index the dial will ask for: `profile.index` goes
+	// to START_NETWORK as profile_3gpp, so the cid written here is that number
+	// and nothing else. Defining cid 1 and dialling profile 2 would configure a
+	// context nobody uses.
+	//
+	// Best effort by construction: no AT port, or a modem that rejects the
+	// command, simply leaves things as they were — the dial then fails the way
+	// it did before, which is no worse. The reply is NOT waited on for a verdict
+	// either: this stack answers so late that wwand books the answer as a URC
+	// and the send reports a timeout even though the write landed (visible in
+	// the field log as `urc[at]: +CGDCONT: 1,...` with the new APN).
+	at_define_context = (profile, done) => {
+		let apn = cfg('apn');
+
+		if (!profile.write_refused || !self.modem?.at || apn == null || apn == '')
+			return done();
+
+		let pdp = AT_PDP_STR[self.config.pdp_type ?? 'ipv4v6'] ?? 'IP';
+		let cmd = sprintf('AT+CGDCONT=%d,"%s","%s"', profile.index, pdp, apn);
+
+		log('notice', sprintf('qmi profile write refused — defining context %d over AT instead: %s %s',
+			profile.index, pdp, apn));
+
+		self.modem.at.send(cmd, (err) => {
+			// A timeout here is not evidence of failure on this hardware, so it
+			// is logged and stepped over rather than treated as an error.
+			if (err)
+				log('debug', sprintf('at context definition returned %J (continuing)', err));
+
+			done();
+		}, { timeout: AT_DEFINE_TIMEOUT_MS });
+	};
+
 	check_pdp_type = (profile, done, pre) => {
 		let wds = self.modem.wds_cfg;
 		let want = PDP_MAP[self.config.pdp_type ?? 'ipv4v6'];
@@ -265,6 +334,19 @@ export function create(opts)
 			if (err) {
 				log('warn', sprintf('get profile settings failed: %J', err));
 				return done();
+			}
+
+			// The read settles what MODIFY_PROFILE could only suggest: this
+			// index is readable, so it EXISTS and may be dialled with, whatever
+			// the failed write claimed. Revoking the flag here costs no extra
+			// traffic — the request is the one prepare() already had to make —
+			// and it is what keeps the E182E dialling: dropping 3gpp-profile
+			// from START_NETWORK makes that modem answer "internal error".
+			// A read that FAILS leaves the flag as the write set it.
+			if (profile.invalid) {
+				profile.invalid = false;
+				log('notice', sprintf('profile %d is readable — keeping the index despite the rejected write',
+					profile.index));
 			}
 
 			if (data.pdp_type == want) {

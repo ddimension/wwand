@@ -399,14 +399,23 @@ function tel_huawei_signal(self, cb)
 
 // shared serving-row builders: every vendor parser feeds the same shape —
 // fields a source row lacks (GTCAINFO has no identity/rsrq/sinr, GTCCINFO NR
-// has no band/rsrp) come out null
+// has no band/rsrp) come out null.
+//
+// The channel bandwidth is `bandwidth_mhz`, spelled the way the rest of the
+// tree spells it (qmi_backend.uc, atcmd_parse.uc) and the way the status page
+// reads it (status.js:543/555/635). It used to be `bw_mhz` here and nowhere
+// else, so ca_entries() had to translate on the way out and the SERVING rows —
+// which nothing translated — carried a name the page never looks at: a modem
+// that reported its bandwidth had it silently dropped from the Frequency row.
+// Invisible on the FM350-GL, whose GTCCINFO row leaves that slot empty, which
+// is why it survived (found 2026-09-10). One name, no translation.
 function mk_lte(r)
 {
 	return {
 		band: r.band ?? null, earfcn: r.earfcn ?? null, pci: r.pci ?? null,
 		mcc: r.mcc ?? null, mnc: r.mnc ?? null, cid: r.cid ?? null, tac: r.tac ?? null,
 		rsrp: r.rsrp ?? null, rsrq: r.rsrq ?? null, sinr: r.sinr ?? null,
-		bw_mhz: r.bw_mhz ?? null,
+		bandwidth_mhz: r.bandwidth_mhz ?? null,
 	};
 }
 
@@ -416,7 +425,7 @@ function mk_nr(r)
 		band: r.band ?? null, arfcn: r.arfcn ?? null, pci: r.pci ?? null,
 		mcc: r.mcc ?? null, mnc: r.mnc ?? null, cid: r.cid ?? null, tac: r.tac ?? null,
 		rsrp: r.rsrp ?? null, rsrq: r.rsrq ?? null, sinr: r.sinr ?? null,
-		bw_mhz: r.bw_mhz ?? null,
+		bandwidth_mhz: r.bandwidth_mhz ?? null,
 	};
 }
 
@@ -778,8 +787,18 @@ export function parse_gtccinfo(lines)
 		return (length(t) >= 7 && match(t, /^0*F+$/)) ? null : hx(s);
 	};
 
+	// The sinr slot (group 11) is the one field of the row that is SIGNED, and
+	// it must be allowed to be — a row whose sinr reads `-6` failed the match
+	// outright and was skipped, losing mcc/mnc/tac/cid/earfcn/pci/rsrp/rsrq with
+	// it. That is backwards: sinr goes negative exactly when the cell is weak,
+	// so the serving-cell block went blank precisely when its numbers matter.
+	// Field-observed on the FM350-GL at RSRP -115 dBm (sponsor box, 2026-09-10):
+	//   1,4,515,3,BF7E,0022F5D68,2460,251,,,-6,25,25,0
+	// The value layer was always ready for it (numtok accepts /^-?[0-9]+$/);
+	// only this pattern refused. The other metric slots are unsigned indices in
+	// this format (rsrp = v-141, rsrq = (v-34)/2-3), so they stay as they were.
 	for (let l in (lines ?? [])) {
-		let m = match(l, /^\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]*)\s*,\s*([0-9]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)/);
+		let m = match(l, /^\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]*)\s*,\s*([0-9]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*(-?[0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)\s*,\s*([0-9A-Fa-f]*)/);
 
 		if (!m)
 			continue;
@@ -807,7 +826,7 @@ export function parse_gtccinfo(lines)
 				band:  (nb != null && nb >= 5000) ? nb - 5000 : null,
 				rsrp: rsrp_nr(num(m[13])), rsrq: rsrq_nr(num(m[14])),
 				sinr: sinr(num(m[11])),
-				bw_mhz: bw_mhz(num(m[10])),
+				bandwidth_mhz: bw_mhz(num(m[10])),
 			};
 		}
 		else {
@@ -833,7 +852,7 @@ export function parse_gtccinfo(lines)
 				band: b,
 				rsrp: rsrp(num(m[13])), rsrq: rsrq(num(m[14])),
 				sinr: sinr(num(m[11])),
-				bw_mhz: bw_mhz(num(m[10])),
+				bandwidth_mhz: bw_mhz(num(m[10])),
 			};
 		}
 	}
@@ -863,7 +882,7 @@ export function ca_entries(serving, sccs)
 			role: 'PCC LTE',
 			earfcn: serving.lte.earfcn,
 			rb: null,
-			bandwidth_mhz: serving.lte.bw_mhz ?? null,
+			bandwidth_mhz: serving.lte.bandwidth_mhz ?? null,
 			band: serving.lte.band,
 			pci: serving.lte.pci,
 			rsrp: (serving.lte.rsrp != null) ? serving.lte.rsrp * 10 : null,
@@ -875,7 +894,7 @@ export function ca_entries(serving, sccs)
 			role: 'PCC NR',
 			earfcn: serving.nr.arfcn,
 			rb: null,
-			bandwidth_mhz: serving.nr.bw_mhz ?? null,
+			bandwidth_mhz: serving.nr.bandwidth_mhz ?? null,
 			band: serving.nr.band,
 			pci: serving.nr.pci,
 			rsrp: (serving.nr.rsrp != null) ? serving.nr.rsrp * 10 : null,
@@ -957,7 +976,7 @@ function tel_fibocom_cells(self, cb)
 				serving.lte.band = fill(serving.lte.band, c.lte.band);
 				serving.lte.rsrq = fill(serving.lte.rsrq, c.lte.rsrq);
 				serving.lte.sinr = fill(serving.lte.sinr, c.lte.sinr);
-				serving.lte.bw_mhz = fill(serving.lte.bw_mhz, c.lte.bw_mhz);
+				serving.lte.bandwidth_mhz = fill(serving.lte.bandwidth_mhz, c.lte.bandwidth_mhz);
 			}
 
 			// the NR PCC row lacks rsrq/sinr/bw — the GTCCINFO NR row
@@ -969,7 +988,7 @@ function tel_fibocom_cells(self, cb)
 				serving.nr.band = fill(serving.nr.band, c.nr.band);
 				serving.nr.rsrq = fill(serving.nr.rsrq, c.nr.rsrq);
 				serving.nr.sinr = fill(serving.nr.sinr, c.nr.sinr);
-				serving.nr.bw_mhz = fill(serving.nr.bw_mhz, c.nr.bw_mhz);
+				serving.nr.bandwidth_mhz = fill(serving.nr.bandwidth_mhz, c.nr.bandwidth_mhz);
 			}
 
 			if (c?.nr && !serving?.nr)
@@ -977,7 +996,7 @@ function tel_fibocom_cells(self, cb)
 					arfcn: c.nr.arfcn, pci: c.nr.pci,
 					mcc: c.nr.mcc, mnc: c.nr.mnc, cid: c.nr.cid, tac: c.nr.tac,
 					band: c.nr.band, rsrp: c.nr.rsrp, rsrq: c.nr.rsrq,
-					sinr: c.nr.sinr, bw_mhz: c.nr.bw_mhz,
+					sinr: c.nr.sinr, bandwidth_mhz: c.nr.bandwidth_mhz,
 				};
 
 			apply_serving(serving, sccs);

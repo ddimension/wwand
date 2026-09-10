@@ -129,6 +129,49 @@ let t7d = telemetry_ncm.parse_gtcainfo([
 
 eq(t7d?.lte?.rsrp, null, 't700 gtca: -20 dBm (above ceiling) -> null');
 
+// --- a NEGATIVE sinr must not take the whole row with it ---------------------
+//
+// The row regex accepted only [0-9A-Fa-f] in the sinr slot, so a row reading
+// `-6` failed the match outright and was skipped — losing mcc/mnc/tac/cid/
+// earfcn/pci/rsrp/rsrq along with it, and leaving the serving cell (and the
+// signal block that mirrors it) empty. Backwards, because sinr goes negative
+// exactly when the cell is weak. Live row from an FM350-GL sitting at
+// RSRP -115 dBm (sponsor box, 2026-09-10):
+let neg = telemetry_ncm.parse_gtccinfo([
+	'1,4,515,3,BF7E,0022F5D68,2460,251,,,-6,25,25,0',
+]);
+
+ok(neg != null, 'gtccinfo: a negative sinr does not void the row');
+eq(neg?.lte?.sinr, -3.0, 'gtccinfo: negative sinr -6 -> -3.0 dB');
+eq(neg?.lte?.mcc, 515, 'gtccinfo: identity survives a negative sinr');
+eq(neg?.lte?.mnc, 3, 'gtccinfo: mnc survives');
+eq(neg?.lte?.earfcn, 2460, 'gtccinfo: earfcn survives');
+eq(neg?.lte?.pci, 251, 'gtccinfo: pci survives');
+
+// the two metrics the panel actually draws, cross-checked against the modem's
+// OWN +CESQ read taken at the same moment: `+CESQ: 16,99,255,255,0,25,...`
+// -> rsrp index 25 = -140+25 = -115 dBm, rsrq index 0 = -19.5 dB. The GTCCINFO
+// scales land within a dB of that, which is what makes them trustworthy here.
+eq(neg?.lte?.rsrp, -116, 'gtccinfo: rsrp parsed (CESQ agrees: -115)');
+eq(neg?.lte?.rsrq, -20.0, 'gtccinfo: rsrq parsed (CESQ agrees: -19.5)');
+
+// the same row with a positive sinr always worked — it must keep working
+let pos = telemetry_ncm.parse_gtccinfo([
+	'1,4,515,3,BF7E,0022F5D68,2460,251,,,6,25,25,0',
+]);
+
+eq(pos?.lte?.sinr, 3.0, 'gtccinfo: positive sinr still parses');
+eq(pos?.lte?.mcc, 515, 'gtccinfo: positive-sinr row unchanged');
+
+// an empty sinr slot (partial row during a cell change) stays null, and the
+// added sign must not turn a lone '-' into a measurement
+let bare = telemetry_ncm.parse_gtccinfo([
+	'1,4,515,3,BF7E,0022F5D68,2460,251,,,,25,25,0',
+]);
+
+eq(bare?.lte?.sinr, null, 'gtccinfo: empty sinr slot -> null');
+eq(bare?.lte?.rsrp, -116, 'gtccinfo: ...and the rest of the row still reads');
+
 // 255 sentinels must never surface as measurements (field-seen right after a
 // cell change: rsrp/rsrq slots read 255 -> garbage would latch into signal)
 let t8 = telemetry_ncm.parse_gtccinfo([
@@ -204,7 +247,7 @@ eq(g5?.lte?.band, 40, 'gtccinfo: band (140 -> 40)');
 eq(g5?.lte?.rsrp, -87, 'gtccinfo: rsrp (54 -> -87 dBm)');
 ok(g5?.lte?.rsrq == -14, 'gtccinfo: rsrq ((12-34)/2-3)');
 eq(g5?.lte?.sinr, 6.5, 'gtccinfo: sinr (13/2)');
-eq(g5?.lte?.bw_mhz, 20.0, 'gtccinfo: bw (100/5 -> 20 MHz)');
+eq(g5?.lte?.bandwidth_mhz, 20.0, 'gtccinfo: bw (100/5 -> 20 MHz)');
 eq(g5?.nr, null, 'gtccinfo: no NR row');
 
 // partial row during a cell change: empty tac/cid slots -> null, never 0
@@ -285,7 +328,7 @@ eq(g14?.nr?.arfcn, 532002, 'en-dc gtcc: nr arfcn');
 eq(g14?.nr?.rsrp, -86.5, 'en-dc gtcc: nr rsrp (69/2-121 -> -86.5, matches the PCC row)');
 eq(g14?.nr?.rsrq, -11.0, 'en-dc gtcc: nr rsrq ((65-87)/2 — the 3ginfo FM350 formula)');
 eq(g14?.nr?.sinr, 14.0, 'en-dc gtcc: nr sinr (28/2)');
-eq(g14?.nr?.bw_mhz, 60.0, 'en-dc gtcc: nr bw (300/5 -> 60 MHz n41, the convert_bw table)');
+eq(g14?.nr?.bandwidth_mhz, 60.0, 'en-dc gtcc: nr bw (300/5 -> 60 MHz n41, the convert_bw table)');
 eq(g14?.nr?.mcc, null, 'en-dc gtcc: nr mcc empty -> null (not a reject)');
 eq(g14?.nr?.tac, null, 'en-dc gtcc: all-F tac placeholder -> null');
 eq(g14?.nr?.cid, null, 'en-dc gtcc: all-F cid placeholder -> null');
@@ -299,14 +342,58 @@ let g15 = telemetry_ncm.parse_gtccinfo([
 eq(g15?.lte?.tac, 255, 'gtccinfo: TAC 0xFF is a real TAC, not a placeholder');
 eq(g15?.lte?.cid, 16777215, 'gtccinfo: ECI 0xFFFFFF is a real ECI, not a placeholder');
 
+// --- the bandwidth field is named the way the page reads it -------------------
+//
+// The NCM parsers used to publish `bw_mhz`, a name used nowhere else in the
+// tree: qmi_backend.uc and atcmd_parse.uc say `bandwidth_mhz`, and so does the
+// status page (`svl.bandwidth_mhz` at status.js:543, `sn.bandwidth_mhz` at
+// :555). ca_entries() translated on the way out, so the carrier table was
+// right — but the SERVING rows went out untranslated, and the Frequency row
+// simply never showed a channel bandwidth on an NCM modem. It stayed hidden
+// because the FM350-GL leaves that slot empty in its GTCCINFO row (`,,`); a
+// modem that fills it had the value silently dropped (found 2026-09-10).
+//
+// This drives the REAL path — FIBOCOM.cells over a stubbed AT channel — rather
+// than the parser alone, because the parser was never the part that was wrong:
+// the name is decided by the shared serving-row builders and has to survive
+// into `cells.serving`, which is the object the page reads.
+(function () {
+	let asked = [];
+	// GTCAINFO gives the serving cell; the GTCCINFO row enriches it and is
+	// where the bandwidth comes from (index 100 -> 20 MHz). Same pci/band, so
+	// the two reads pair as one cell.
+	let self = { at_telemetry: { send: (cmd, cb) => {
+		push(asked, cmd);
+		cb(null, { lines: (cmd == 'AT+GTCAINFO?') ? cap1
+			: [ '1,4,001,01,0001,0000001,1279,120,103,100,13,52,52,18' ] });
+	} } };
+
+	telemetry_ncm.FIBOCOM.cells(self, () => {
+		eq(asked, [ 'AT+GTCAINFO?', 'AT+GTCCINFO?' ],
+			'bw name: both serving reads were made');
+
+		let svl = self.cells?.serving?.lte;
+
+		ok(svl != null, 'bw name: a serving cell was published');
+		eq(svl?.bandwidth_mhz, 20.0,
+			'bw name: the bandwidth reaches serving.lte under the name the page reads');
+		eq(svl?.bw_mhz, null,
+			'bw name: and not under the old bw_mhz spelling');
+
+		// the carrier table keys on the same name and must not need a rename
+		eq(self.cells?.ca?.[0]?.bandwidth_mhz, 20.0,
+			'bw name: ca_entries passes it through without translating');
+	});
+})();
+
 // --- the CA/carrier table from the EN-DC reads --------------------------------
 // the two primary carriers (LTE anchor + NR carrier) feed the status page's
 // carrier table, GTCCINFO-enriched (rsrq/sinr/bw) — 0.1 dB scale like the QMI
 // backend, bandwidth in MHz from the GTCCINFO bw field (v/5, the 3ginfo
 // convert_bw table for both rats)
 let tca = telemetry_ncm.ca_entries(
-	{ lte: { earfcn: 1775, band: 3, pci: 272, rsrp: -85, rsrq: -9.0, bw_mhz: 15 },
-	  nr:  { arfcn: 532002, band: 41, pci: 770, rsrp: -86, rsrq: -11.0, bw_mhz: 60 } },
+	{ lte: { earfcn: 1775, band: 3, pci: 272, rsrp: -85, rsrq: -9.0, bandwidth_mhz: 15 },
+	  nr:  { arfcn: 532002, band: 41, pci: 770, rsrp: -86, rsrq: -11.0, bandwidth_mhz: 60 } },
 	[ { earfcn: 150, band: 1, pci: 300, rsrp: -95 } ]);
 
 eq(length(tca), 3, 'ca: both PCC carriers + one SCC');

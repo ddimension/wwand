@@ -132,6 +132,7 @@ function run_next()
 	let guard = null;
 
 	let modem;
+	let at_cmds = [];
 
 	modem = modem_mod.create({
 		id: s.name, device: '/dev/mock0',
@@ -142,6 +143,27 @@ function run_next()
 			log: (level, msg) => null,
 			on_event: (m, event, data) => {
 				if (event == 'registered' && !finished) {
+					// An `at` stub in the scenario cfg gives the modem an AT
+					// channel, so the APN fallback in context.uc has somewhere
+					// to write. Recorded commands reach the scenario as the 5th
+					// argument. Without it modem.at stays absent, which is what
+					// every other scenario wants.
+					if (s.cfg.at)
+						m.at = {
+							send: (cmd, cb, o) => {
+								push(at_cmds, cmd);
+								cb(s.cfg.at.err ?? null, s.cfg.at.res ?? {});
+							},
+							// modem.stop() -> modem_common.close_at() calls
+							// close(); without it the teardown throws and the
+							// whole run dies after this scenario.
+							close: () => null,
+							drain: () => null,
+							run_sequence: (cmds, done) => done(),
+							add_urc_prefixes: () => null,
+							urc_prefixes: [],
+						};
+
 					// modem ready: hand over to the scenario
 					let ctx = context_mod.create({
 						name: s.name + '_ctx',
@@ -162,7 +184,7 @@ function run_next()
 						guard.cancel();
 						modem.stop();
 						uloop.timer(1, run_next);
-					});
+					}, at_cmds);
 				}
 			},
 		},
@@ -279,6 +301,133 @@ scenario('noprofile', {
 		// and the modem fails it with an internal error.
 		eq(sn[0].args.ip_family, 4,
 			'noprofile: SET_IP_FAMILY refused -> the family rides in the request');
+		next();
+	});
+});
+
+// --- a REJECTED WRITE is not a missing profile ------------------------------
+//
+// The E182E's real shape, and it is not the one above: MODIFY_PROFILE answers
+// INVALID_PROFILE (10) but GET_PROFILE_SETTINGS on that same index SUCCEEDS
+// one request later ("profile pdp type 0 unchanged" in the field log,
+// HW-observed on the sponsor box 2026-09-09). Error 10 from this stack means
+// "I do not do profile writes", not "that index does not exist" — so treating
+// the write's verdict as final dropped 3gpp-profile from START_NETWORK, and
+// the modem answered `internal error`. A readable profile is a real profile:
+// the read revokes the flag and the index is dialled with.
+scenario('write_only_reject', {
+	config: { apn: 'internet.globe.com.ph', pdp_type: 'ipv4' },
+	handlers: {
+		MODIFY_PROFILE: () => ({ __error: 10 }),
+		// readable, but carrying a different apn -> the idempotency guard in
+		// prepare() does NOT skip the write, exactly as in the field. pdp_type
+		// 0 = IPv4, which is what this context wants, so nothing is rewritten.
+		GET_PROFILE_SETTINGS: () => ({ apn: 'preset.example', pdp_type: 0 }),
+		SET_IP_FAMILY: () => ({ __error: 71 }),
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'write_only: the modem connects');
+		eq(length(mock.calls_for('MODIFY_PROFILE')), 2,
+			'write_only: both writes were attempted and both refused');
+
+		let sn = mock.calls_for('START_NETWORK');
+		eq(length(sn), 1, 'write_only: one start-network');
+		eq(sn[0].args.profile_3gpp, 1,
+			'write_only: the index survives — the read proved it exists');
+		eq(sn[0].args.apn, 'internet.globe.com.ph',
+			'write_only: the apn still rides inline');
+		eq(sn[0].args.ip_family, 4,
+			'write_only: SET_IP_FAMILY refused -> family in the request');
+		next();
+	});
+});
+
+// --- the APN goes in over AT when QMI refuses the write ----------------------
+//
+// The E182E end of the story. Its WDS profiles are readable and dial-able but
+// not writable (MODIFY_PROFILE -> INVALID_PROFILE), so the configured APN never
+// reached the modem and every dial died with call end reason 11 — START_NETWORK
+// carrying the APN inline does not move this stack. Writing AT+CGDCONT into the
+// SAME index the dial asks for connected it (sponsor box, HW 2026-09-09).
+scenario('at_apn_fallback', {
+	config: { apn: 'internet.globe.com.ph', pdp_type: 'ipv4' },
+	at: {},
+	handlers: {
+		MODIFY_PROFILE: () => ({ __error: 10 }),
+		GET_PROFILE_SETTINGS: () => ({ apn: 'preset.example', pdp_type: 0 }),
+		SET_IP_FAMILY: () => ({ __error: 71 }),
+	},
+}, (ctx, mock, events, next, at_cmds) => {
+	ctx.up((err) => {
+		eq(err, null, 'at_apn: the modem connects');
+		eq(length(at_cmds), 1, 'at_apn: exactly one AT definition was written');
+		eq(at_cmds[0], 'AT+CGDCONT=1,"IP","internet.globe.com.ph"',
+			'at_apn: the configured apn goes into the context over AT');
+
+		// the whole point of the index discipline: the cid just written IS the
+		// profile the dial asks for.
+		let sn = mock.calls_for('START_NETWORK');
+		eq(sn[0].args.profile_3gpp, 1,
+			'at_apn: ...and that same index is dialled');
+		next();
+	});
+});
+
+// index discipline, the part that would silently misconfigure: with `option
+// profile 3` the definition must land on cid 3, not on the invented 1. Writing
+// one context and dialling another looks like it works and never connects.
+scenario('at_apn_named_index', {
+	config: { apn: 'internet.globe.com.ph', pdp_type: 'ipv4', profile: 3 },
+	at: {},
+	handlers: {
+		MODIFY_PROFILE: () => ({ __error: 10 }),
+		GET_PROFILE_SETTINGS: () => ({ apn: 'preset.example', pdp_type: 0 }),
+		SET_IP_FAMILY: () => ({ __error: 71 }),
+	},
+}, (ctx, mock, events, next, at_cmds) => {
+	ctx.up((err) => {
+		eq(err, null, 'named_index: connects');
+		eq(at_cmds[0], 'AT+CGDCONT=3,"IP","internet.globe.com.ph"',
+			'named_index: the AT write follows the configured index');
+		eq(mock.calls_for('START_NETWORK')[0].args.profile_3gpp, 3,
+			'named_index: the dial uses the index that was just defined');
+		next();
+	});
+});
+
+// A modem that takes the QMI write must NOT be poked over AT — the fallback is
+// for stacks that refused, and rewriting a working profile over AT would be a
+// gratuitous NV write on every dial.
+scenario('at_apn_not_when_qmi_works', {
+	config: { apn: 'internet.globe.com.ph', pdp_type: 'ipv4' },
+	at: {},
+	handlers: {
+		GET_PROFILE_SETTINGS: () => ({ apn: 'other.example', pdp_type: 0 }),
+	},
+}, (ctx, mock, events, next, at_cmds) => {
+	ctx.up((err) => {
+		eq(err, null, 'no_at: connects');
+		eq(length(at_cmds), 0, 'no_at: a modem that accepts MODIFY_PROFILE is left alone');
+		next();
+	});
+});
+
+// The reply is not the verdict: this hardware answers so late that wwand books
+// the answer as a URC and the send reports a timeout, while the write landed.
+// A dial must not be lost over that.
+scenario('at_apn_timeout_is_not_fatal', {
+	config: { apn: 'internet.globe.com.ph', pdp_type: 'ipv4' },
+	at: { err: { error: 'timeout' } },
+	handlers: {
+		MODIFY_PROFILE: () => ({ __error: 10 }),
+		GET_PROFILE_SETTINGS: () => ({ apn: 'preset.example', pdp_type: 0 }),
+		SET_IP_FAMILY: () => ({ __error: 71 }),
+	},
+}, (ctx, mock, events, next, at_cmds) => {
+	ctx.up((err) => {
+		eq(err, null, 'at_timeout: a timed-out AT write does not fail the dial');
+		eq(length(at_cmds), 1, 'at_timeout: the command was still sent');
 		next();
 	});
 });

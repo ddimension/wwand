@@ -1327,9 +1327,11 @@ export function open_at(self, o)
 	open_at_tty(self, o, fxi, log, ch);
 };
 
-open_at_tty = function(self, o, fxi, log, ch)
+open_at_tty = function(self, o, fxi, log, ch, tried)
 {
 	let tty = ch.primary;
+
+	tried ??= [];
 
 	// No tty is not necessarily no AT. An AT-driven NCM modem's control
 	// cdc-wdm can be the AT channel itself (huawei_cdc_ncm); otherwise a
@@ -1496,6 +1498,22 @@ open_at_tty = function(self, o, fxi, log, ch)
 		self.at = null;
 		self.at_tty = null;
 		self.at_telemetry = null;
+
+		// "the next channel" used to mean only the cdc-wdm and MBIM fallbacks,
+		// so on a modem with several ttys and no port-table entry the search
+		// ended at the first one. Ask discovery again, telling it what has just
+		// been disproven: a mute port is the one thing a sysfs walk cannot know
+		// in advance. Each port is tried at most once (`tried` only grows), so
+		// this terminates; the cost of an unlucky modem is one probe timeout
+		// per port before the wdm/MBIM fallbacks are reached.
+		push(tried, tty);
+
+		let nch = atcmd.find_at_channels(fxi, self.device, self.config.tty,
+		                                 o.base_override, tried);
+
+		if (nch.primary)
+			return open_at_tty(self, o, fxi, log, nch, tried);
+
 		open_at_over_wdm(self, o, fxi, log, () => open_at_over_mbim(self, o, fxi, log));
 	}, { timeout: o.at_opts?.probe_timeout ?? 10000 });
 };

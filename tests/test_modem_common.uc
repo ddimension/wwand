@@ -938,4 +938,63 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 	eq(self.temperature?.celsius, 32, 'temp urc: other URCs are ignored here');
 })();
 
+// --- a mute control port must not end the AT search (issue #16) --------------
+//
+// A port that OPENS but never answers is indistinguishable from the real one
+// until it is probed, and discovery's last resort for an unlisted USB id is
+// "first tty, sorted". So on the Quectel EC200A (Teltonika RUT200) wwand landed
+// on ttyUSB0, got silence, and logged "no AT port found" — while the modem was
+// answering on ttyUSB2 the whole time (reported 2026-09-10). The warning even
+// said "trying the next channel", but the only next channels were the cdc-wdm
+// and MBIM fallbacks, and this modem has neither.
+(function () {
+	let opened = [];
+
+	// only ttyUSB2 answers a bare AT; the other two accept the write and stay
+	// silent, which is exactly the failure shape being reproduced
+	let mk = (tty) => {
+		let t = { close: () => null, drain: () => null };
+
+		t.write = (d) => {
+			if (t.data_cb && match(d ?? '', /^AT\r?$/) && tty == '/dev/ttyUSB2')
+				t.data_cb("\r\nOK\r\n");
+
+			return true;
+		};
+
+		t.on_data = (cb) => { t.data_cb = cb; };
+		return t;
+	};
+
+	// 'dead:beef' is deliberately absent from the port table, so the heuristic
+	// decides and the walk is what has to find the working port
+	let fx = fake_fx('dead:beef', [ { ifn: 2, tty: 'ttyUSB0' },
+	                                { ifn: 3, tty: 'ttyUSB1' },
+	                                { ifn: 4, tty: 'ttyUSB2' } ]);
+
+	let m = { device: 'usb0', config: {}, info: {} };
+	let reached = false;
+
+	mc.open_at(m, {
+		at_opts: {
+			fx: fx,
+			open_transport: (tty) => { push(opened, tty); return mk(tty); },
+			probe_timeout: 20,
+		},
+		log: (level, msg) => null,
+		set_drain_timer: () => null,
+		next: () => { reached = true; uloop.end(); },
+	});
+
+	// guard: without the fix `next` is never called and this ends the run
+	uloop.timer(3000, () => uloop.end());
+	uloop.run();
+
+	ok(reached, 'mute walk: open_at completes on the third port');
+	eq(opened, [ '/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2' ],
+		'mute walk: every port is probed once, in order');
+	eq(m.at_tty, '/dev/ttyUSB2', 'mute walk: settles on the port that answers');
+	ok(m.at != null, 'mute walk: a control engine is left behind');
+})();
+
 done('test_modem_common');

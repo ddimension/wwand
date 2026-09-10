@@ -416,3 +416,72 @@ introduce the next hole (2026-08-30/31).
 **The AT engine is different**, and worth knowing so it is not "fixed" too:
 `atcmd.close()` cancels the timer, nulls the active command and clears the queue
 WITHOUT invoking pending callbacks, so the AT chains cannot resume this way.
+
+### INVALID_PROFILE means the profile index does not exist
+**Not necessarily — on an old stack it means "I do not do profile WRITES".**
+The Huawei E182E (Qualcomm 8200A, firmware 2009-11-13) answers every
+`WDS MODIFY_PROFILE` with QMI protocol error 10, and then answers
+`GET_PROFILE_SETTINGS` on that very index without complaint, one request later.
+The index is real, readable and dial-able; only writing it is unimplemented.
+
+wwand used to take the write's verdict as final and drop `3gpp-profile` from
+START_NETWORK. The modem then failed the dial with call end reason 11 (internal
+error) after ~36 s, every time. So the read now revokes the flag
+(`context.uc` `check_pdp_type`): a profile that can be read exists
+(HW-observed, sponsor box 2026-09-09).
+
+### START_NETWORK's inline APN TLV is enough, so the profile write is optional
+**It is not enough on such a modem — the APN has to actually be IN the context.**
+This is the other half of the same bug, and the half that really kept the E182E
+offline. With the correct APN passed inline and the correct profile index sent,
+the dial still failed with reason 11; the modem's `AT+CGDCONT?` showed the index
+still carrying the vendor preset (`internet`, for a SIM that needs
+`internet.globe.com.ph`). Writing the APN over `AT+CGDCONT` into **the same index
+the dial asks for** connected it immediately.
+
+Hence the AT fallback in `context.uc` (`at_define_context`), which fires only
+when QMI refused the write. Two things about it are load-bearing:
+- **The cid must equal `profile.index`**, the number that goes to START_NETWORK
+  as `profile_3gpp`. Defining cid 1 and dialling profile 2 looks correct in the
+  log and never connects.
+- **The AT reply is not the verdict.** This hardware answers so late that wwand
+  books the answer as an unsolicited line and the send reports a timeout, while
+  the write has landed — visible as `urc[at]: +CGDCONT: 1,...` carrying the new
+  APN right after `AT+CGDCONT? -> error: timeout`. Gating the dial on that reply
+  would throw away a write that worked.
+
+### A stricter field pattern is the safe choice for a parser
+**Not when the row is all-or-nothing.** `parse_gtccinfo` matched the whole
+GTCCINFO row with one regex and skipped any line that did not match. The sinr
+slot accepted `[0-9A-Fa-f]*`, so a row reading `-6` failed the match and was
+dropped **entirely** — mcc, mnc, tac, cid, earfcn, pci, rsrp and rsrq went with
+it, the serving cell stayed empty, and `fill_signal_from_serving` therefore left
+`signal.lte` empty too. `registration.rat` was null for the same reason.
+
+The failure mode is the inversion that makes it worth remembering: **sinr is
+negative exactly when the cell is weak**, so the serving-cell block went blank
+precisely in the situation its numbers are wanted for. On a healthy cell
+everything parsed, which is why it survived so long. Field-observed on an
+FM350-GL at RSRP -115 dBm (sponsor box, 2026-09-10):
+
+    1,4,515,3,BF7E,0022F5D68,2460,251,,,-6,25,25,0
+
+`numtok` had always accepted `/^-?[0-9]+$/` — only the row pattern refused, so
+the value layer was never the problem. When one pattern gates a whole record,
+every field it describes has to admit the full range that field can actually
+carry; a slot that is too strict does not degrade that field, it deletes the
+record.
+
+### An empty signal panel means the modem is not registered
+**It means we have no RSRP — a different claim, and often a false one.** The
+status page drew signal only from `lte.rsrp` / `nr5g.rsrp` and otherwise printed
+"no signal (modem not registered)", while the Serving cell panel beside it read
+`registered` from the registration block for the same modem. Both were on screen
+at once (sponsor box, 2026-09-10).
+
+The generic `rssi` is the common floor and for some modems it is all there is:
+the FM350-GL on NCM, the EG06 on native MBIM (`telemetry_mbim.uc:42`) and any
+QMI modem camped on 2G/3G report it alone. Two of the three modems on that one
+box hit the dead end, on two different backends. Registration is what the
+registration block says (`fmt.regShort`); the absence of a measurement is not
+evidence about it.

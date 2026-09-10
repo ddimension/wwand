@@ -539,6 +539,91 @@ eq(atcmd.find_tty(ufx, '/dev/cdc-wdm0', null), '/dev/ttyUSB2', 'find: heuristic 
 let nfx = fakefx.create();
 eq(atcmd.find_tty(nfx, '/dev/cdc-wdm0', null), null, 'find: none present');
 
+// --- a mute port must not end the search (issue #16) -------------------------
+//
+// Discovery cannot tell a mute port from the control port by walking sysfs, so
+// the caller probes and hands back what stayed silent. Before this, a modem
+// whose USB id is not in the port table got ONE guess from the heuristic
+// ("first tty, sorted") and wwand then reported "no AT port found" with the
+// working port sitting right there: the Quectel EC200A on a Teltonika RUT200
+// answers on ttyUSB2, and ttyUSB0/1 are mute (reported 2026-09-10).
+const EBASE = '/sys/class/net/usb0/device/..';
+
+let ec200a_fx = fakefx.create({
+	files: {
+		// an id deliberately absent from the port table -> heuristic territory.
+		// NOT the EC200A's own 2c7c:6005 any more: that one is in LOCAL_PORTS
+		// now (see the role test below), and this case has to keep exercising
+		// the heuristic path that every unlisted modem still falls through to.
+		[sprintf('%s/idVendor', EBASE)]: "1234\n",
+		[sprintf('%s/idProduct', EBASE)]: "5678\n",
+		[sprintf('%s/1-1:1.2/bInterfaceNumber', EBASE)]: "02\n",
+		[sprintf('%s/1-1:1.3/bInterfaceNumber', EBASE)]: "03\n",
+		[sprintf('%s/1-1:1.4/bInterfaceNumber', EBASE)]: "04\n",
+	},
+	globs: {
+		[sprintf('%s/*/tty*', EBASE)]: [
+			sprintf('%s/1-1:1.2/ttyUSB0', EBASE),
+			sprintf('%s/1-1:1.3/ttyUSB1', EBASE),
+			sprintf('%s/1-1:1.4/ttyUSB2', EBASE),
+		],
+	},
+});
+
+eq(atcmd.find_tty(ec200a_fx, 'usb0', null), '/dev/ttyUSB0',
+	'skip: the first guess is unchanged');
+eq(atcmd.find_tty(ec200a_fx, 'usb0', null, null, [ '/dev/ttyUSB0' ]), '/dev/ttyUSB1',
+	'skip: a mute first port yields the second');
+eq(atcmd.find_tty(ec200a_fx, 'usb0', null, null, [ '/dev/ttyUSB0', '/dev/ttyUSB1' ]), '/dev/ttyUSB2',
+	'skip: ...and then the third — the one the EC200A answers on');
+eq(atcmd.find_tty(ec200a_fx, 'usb0', null, null,
+	[ '/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2' ]), null,
+	'skip: exhausted -> null, so the caller stops instead of looping');
+
+// find_at_channels threads it through
+eq(atcmd.find_at_channels(ec200a_fx, 'usb0', null, null, [ '/dev/ttyUSB0' ]).primary,
+	'/dev/ttyUSB1', 'skip: find_at_channels passes it on');
+
+// The role table still decides where it applies — skipping only removes
+// candidates, it must not demote a properly tagged port to the heuristic.
+eq(atcmd.find_tty(quectel_fx(), '/dev/cdc-wdm0', null, null, [ '/dev/ttyUSB2' ]),
+	'/dev/ttyUSB3', 'skip: role preference still ranks the rest');
+
+// An EXPLICIT port that stays mute is not silently replaced by a guess: the
+// operator named it, and substituting another would hide the real fault.
+eq(atcmd.find_tty(ec200a_fx, 'usb0', '/dev/ttyUSB0', null, [ '/dev/ttyUSB0' ]), null,
+	'skip: a mute explicit override is reported, not worked around');
+
+// same for a board quirk
+let bskip = quectel_fx({ files: { '/tmp/sysinfo/board_name': "zyxel,nr7101\n" } });
+eq(atcmd.find_tty(bskip, '/dev/cdc-wdm0', null, null, [ '/dev/ttyUSB2' ]), null,
+	'skip: a mute board-quirk port is not swapped for a guess');
+
+// ...and with the EC200A's real id (2c7c:6005) now carrying its observed role,
+// the same layout resolves straight to the working port — no probing at all.
+// The walk above is a safety net for unlisted modems, not a substitute for
+// knowing one. Interface map from the reporter's kernel log: 1-1:1.2 ttyUSB0,
+// 1-1:1.3 ttyUSB1, 1-1:1.4 ttyUSB2 (the port that answers).
+let ec200a_known = fakefx.create({
+	files: {
+		[sprintf('%s/idVendor', EBASE)]: "2c7c\n",
+		[sprintf('%s/idProduct', EBASE)]: "6005\n",
+		[sprintf('%s/1-1:1.2/bInterfaceNumber', EBASE)]: "02\n",
+		[sprintf('%s/1-1:1.3/bInterfaceNumber', EBASE)]: "03\n",
+		[sprintf('%s/1-1:1.4/bInterfaceNumber', EBASE)]: "04\n",
+	},
+	globs: {
+		[sprintf('%s/*/tty*', EBASE)]: [
+			sprintf('%s/1-1:1.2/ttyUSB0', EBASE),
+			sprintf('%s/1-1:1.3/ttyUSB1', EBASE),
+			sprintf('%s/1-1:1.4/ttyUSB2', EBASE),
+		],
+	},
+});
+
+eq(atcmd.find_tty(ec200a_known, 'usb0', null), '/dev/ttyUSB2',
+	'EC200A: the port table takes it straight to if4, no probing');
+
 // local override for devices missing in the generated table (RG650E)
 let rg650 = quectel_fx({ files: { [sprintf('%s/idProduct', BASE)]: "0122\n" } });
 eq(atcmd.find_tty(rg650, '/dev/cdc-wdm0', null), '/dev/ttyUSB2', 'find: RG650E local override');
