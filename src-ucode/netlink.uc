@@ -505,14 +505,14 @@ function write_attr(fx, path, value, what)
 //   - 'eui64' / 'random' -> addr_gen_mode, which is the kernel's own naming for
 //     exactly those two and is a plain sysctl.
 // 'stable' maps to stable-privacy (RFC 7217) for completeness; note it hashes
-// secret + prefix + perm_addr + dad_count (addrconf.c:3389-3393,
-// 6.18.41), so it changes with BOTH the prefix and the MAC.
+// secret + prefix + perm_addr + dad_count (addrconf.c:3389-3393, 6.18.41), so
+// it changes with BOTH the prefix and the MAC.
 //
 // An empty/absent value changes nothing at all — wwand's default is to leave
 // the kernel alone, unlike netifd's ip6ifaceid which defaults to ::1.
 //
 // The token is refusable BY DESIGN and the refusals are worth reporting rather
-// than swallowing (inet6_set_iftoken(), addrconf.c:5902-5936): loopback, a
+// than swallowing (inet6_set_iftoken(), addrconf.c:5902-5936, 6.18.41): loopback, a
 // device with IFF_NOARP — which every raw-IP cellular link is — accept_ra
 // disabled, or router solicitations turned off. So on an rmnet/raw-IP modem
 // this cannot work and the log has to say why, or the option looks broken.

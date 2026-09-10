@@ -177,6 +177,22 @@ be decided by load order; `_wwand_apply_settings` builds the netifd update).
       tools/check-packaging.py --makefile ../repository/wwand/Makefile
       tools/check-packaging.py --makefile <pkgs>/net/wwand/Makefile --tarball wwand-X.Y.Z.tar.gz
 
+- **A green test on an unreachable helper is worse than no test.**
+  `tools/check-exports.py` reports exported symbols nothing uses, and — the
+  point of it — exports whose ONLY caller is the suite. That shape looks covered
+  and proves nothing about shipped behaviour; `fmt.signalKind()` in
+  luci-app-wwand was found by an external reviewer, not by its own nine tests.
+  `codec/schema/**` is skipped (protocol vocabulary is deliberately complete)
+  and a symbol used inside its own module is not dead.
+
+- **The `file:line` anchors this tree insists on are checkable too.**
+  `tools/check-anchors.py` resolves them and fails on one that points past the
+  end of its file; out-of-tree anchors need a version or date in the same
+  comment block, or they cannot be re-verified once that tree moves. Pass the
+  foreign trees explicitly:
+
+      tools/check-anchors.py --extern <kernel>/net/ipv6 --extern <netifd> --extern <luci>
+
 ## ucode gotchas (hit repeatedly)
 - **Imports MUST be namespaced** (`import … from 'wwand.codec.tlv'`), never
   relative (`'./codec/tlv.uc'`) — the bytecode precompile resolves modules only

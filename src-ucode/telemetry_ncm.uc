@@ -403,7 +403,7 @@ function tel_huawei_signal(self, cb)
 //
 // The channel bandwidth is `bandwidth_mhz`, spelled the way the rest of the
 // tree spells it (qmi_backend.uc, atcmd_parse.uc) and the way the status page
-// reads it (status.js:543/555/635). It used to be `bw_mhz` here and nowhere
+// reads it (view/wwand/status.js:543/555/635). It used to be `bw_mhz` here and nowhere
 // else, so ca_entries() had to translate on the way out and the SERVING rows —
 // which nothing translated — carried a name the page never looks at: a modem
 // that reported its bandwidth had it silently dropped from the Frequency row.

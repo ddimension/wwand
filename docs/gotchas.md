@@ -268,7 +268,7 @@ the id does not move. The walk does.
 
 ### `E('td', {}, someString)` escapes the string
 **Wrong — it renders it as MARKUP.** In `dom.append` a bare string child is
-assigned through `innerHTML` (luci.js:1394-1396); only an ARRAY child becomes a
+assigned through `innerHTML` (luci.js:1394-1396, checked 2026-09-10); only an ARRAY child becomes a
 `createTextNode` (:1382-1383). So `E('td', {}, [ str ])` escapes and
 `E('td', {}, str)` does not.
 
@@ -504,7 +504,7 @@ addrconf.c:2911-2924, 6.18.41). Three things about it are easy to get wrong:
 
 - **`addr_gen_mode` is not a substitute.** It selects eui64/none/stable/random,
   never a *chosen* identifier — and `stable_privacy` hashes
-  `secret + prefix + perm_addr + dad_count` (addrconf.c:3389-3393), so it moves with the
+  `secret + prefix + perm_addr + dad_count` (addrconf.c:3389-3393, 6.18.41), so it moves with the
   prefix *and* with the MAC.
 - **There is no sysctl for the token** (`/proc/sys/net/ipv6/conf/<if>/` has
   `addr_gen_mode` and `stable_secret`, no `token`), and ucode's `rtnl` module
@@ -512,7 +512,7 @@ addrconf.c:2911-2924, 6.18.41). Three things about it are easy to get wrong:
   `flags`, `conf`. Hence the raw-netlink helper in `wwand_io.so`, for the same
   reason `IFLA_RMNET_FLAGS` lives there.
 - **A raw-IP link cannot take one at all.** `inet6_set_iftoken()` rejects
-  `IFF_NOARP` with "Device does not do neighbour discovery" (addrconf.c:5920) —
+  `IFF_NOARP` with "Device does not do neighbour discovery" (addrconf.c:5920, 6.18.41) —
   and every rmnet/raw-IP cellular link is `IFF_NOARP`. It also needs `accept_ra`
   on and router solicitations enabled. So on those modems the option only works
   through the control-protocol path, and the refusal has to be logged in those
@@ -524,7 +524,7 @@ The ordering question — can the token be set before IPv6 is enabled on the lin
 down/up (netns against 6.18.41, 2026-09-10). The sysctl marks the `inet6_dev`
 disabled, it does not destroy it. That is what lets wwand set the identifier
 before the first RA can arrive. A re-enumerated netdev is a different matter: a
-fresh `inet6_dev` starts with `token = in6addr_any` (addrconf.c:452), so it must
+fresh `inet6_dev` starts with `token = in6addr_any` (addrconf.c:452, 6.18.41), so it must
 be re-applied on every bring-up.
 
 **And the default is empty, not `::1`.** netifd's own `ip6ifaceid` defaults to

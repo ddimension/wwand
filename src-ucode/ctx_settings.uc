@@ -94,7 +94,7 @@ export function install(self, o)
 	//
 	// Re-applied on every up because a re-enumerated netdev starts with no
 	// token (a fresh inet6_dev is created with token = in6addr_any,
-	// addrconf.c:452), and applied BEFORE _enable_ipv6 because the token only
+	// addrconf.c:452, 6.18.41), and applied BEFORE _enable_ipv6 because the token only
 	// affects addresses formed from RAs received after it is set.
 	//
 	// That ordering is safe and was verified rather than assumed: a token CAN

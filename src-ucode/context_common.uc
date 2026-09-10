@@ -331,7 +331,7 @@ export function apply_iface_id(addr, value)
 	//     (`fe80::1`, `2001:db8::1`). Silently keeping its low half would hide
 	//     the mistake and hand out an address the operator never asked for.
 	//     netifd refuses the same thing for its own ip6ifaceid — it checks the
-	//     top two words and errors out (interface.c:1021-1023).
+	//     top two words and errors out (interface.c:1021-1023, netifd 2026-09-10).
 	//   - an all-zero identifier (`::`, `::0`, `1::`) makes <prefix>:: — the
 	//     subnet-router ANYCAST address, which is not a host address at all.
 	//

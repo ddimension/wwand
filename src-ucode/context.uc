@@ -213,7 +213,7 @@ export function create(opts)
 				log('warn', sprintf('profile modify failed: %J', err));
 
 				// INVALID_PROFILE (QMI protocol error 10, libqmi 1.38
-				// qmi-errors.h:240) SUGGESTS this index does not exist in the
+				// libqmi-glib/qmi-errors.h:240) SUGGESTS this index does not exist in the
 				// modem's WDS profile namespace — a 2009-era stack may have no
 				// profile management. Provisional only: on the Huawei E182E the
 				// very next step reads the same index back without complaint

@@ -1459,7 +1459,7 @@ qmit_syslog_close(uc_vm_t *vm, size_t nargs)
  * the kernel uses when it forms a SLAAC address from a received RA.
  *
  * `token` is an IPv6 literal; only its low 64 bits are used (the kernel copies
- * exactly those — inet6_set_iftoken(), addrconf.c:5941). "::" clears it and
+ * exactly those — inet6_set_iftoken(), addrconf.c:5941, 6.18.41). "::" clears it and
  * restores the default generation (stable-privacy, else EUI-64).
  *
  * Why this lives here and not in ucode: the attribute is IFLA_INET6_TOKEN,
@@ -1473,7 +1473,7 @@ qmit_syslog_close(uc_vm_t *vm, size_t nargs)
  * checks it FIRST for a /64 PIO, before stable-privacy and EUI-64
  * (addrconf.c:2911-2924, 6.18.41) — and it only affects addresses formed from
  * RAs received AFTER it is set. A fresh inet6_dev starts with no token
- * (addrconf.c:452), so a re-enumerated netdev needs it applied again.
+ * (addrconf.c:452, 6.18.41), so a re-enumerated netdev needs it applied again.
  */
 static uc_value_t *
 qmit_set_iface_token(uc_vm_t *vm, size_t nargs)
