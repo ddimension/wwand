@@ -719,12 +719,43 @@ export function create(opts)
 		// (a real IP change / relink) and any doubt (no probe, probe fails) fall
 		// through to the renew, so this can only ever SKIP a genuine no-op.
 		let renew_iface = (force) => {
+			// Everything netifd is told in one update — addresses AND the routes
+			// derived from them. The default route carries the gateway, and with
+			// `sourcefilter` on (the default) it also carries the address prefix
+			// as its source, so "the addresses are unchanged" is NOT on its own a
+			// reason to skip the push.
+			//
+			// This mattered little while every reconnect also changed the
+			// address; `option ip6ifaceid` makes the address STAY THE SAME across
+			// reconnects by design, and the gateway still changes with each
+			// session (observed on the RG650E: `…:1b9:8e02:68b7:f042` ->
+			// `…:1c92:590d:8921:2d0e` between two sessions of the same bearer,
+			// 2026-09-10). Comparing addresses alone would then skip the renew
+			// and leave netifd with the previous session's nexthop and its
+			// <gw>/128 host route — a default route pointing at an address that
+			// is no longer there.
+			// The WHOLE settings object, not a hand-picked subset: it is exactly
+			// what context_settings hands the shim, so anything that can change
+			// what netifd is told is in it — gateway, netmask/prefix, DNS, MTU.
+			// Picking fields by hand would leave a DNS- or MTU-only refresh
+			// looking identical here while netifd keeps the stale values, and
+			// context_monitor_qmi already decides "did the settings change" the
+			// same way (settings_sig, :226).
+			let cur_sig = sprintf('%J', ctx.settings);
+
 			let do_renew = () => {
+				entry._applied_sig = cur_sig;
+
 				if (deps.renew_interface && entry?.cfg?.interface)
 					deps.renew_interface(entry.cfg.interface);
 			};
 
 			if (force || !deps.iface_status || !entry?.cfg?.interface)
+				return do_renew();
+
+			// anything but a byte-identical repeat of what we last pushed goes
+			// through, whatever netifd's addresses say
+			if (entry._applied_sig != cur_sig)
 				return do_renew();
 
 			let first_addr = (arr) =>
@@ -1777,6 +1808,7 @@ export function create(opts)
 
 	let refresh_context_cfg = self._refresh_context_cfg;
 	let apply_mtu = self._apply_mtu;
+	let apply_iface_id = self._apply_iface_id;
 	let enable_ipv6 = self._enable_ipv6;
 	let settings_result = self._settings_result;
 
@@ -1848,6 +1880,7 @@ export function create(opts)
 		let netdev = derive_netdev(entry);
 
 		apply_mtu(name, entry, netdev);
+		apply_iface_id(name, entry, netdev);
 		enable_ipv6(name, entry, netdev);
 
 		return settings_result(name, entry, netdev);

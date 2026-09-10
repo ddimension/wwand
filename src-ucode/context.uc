@@ -710,7 +710,8 @@ export function create(opts)
 			}
 			else {
 				fam.settings = {
-					addr: data.ipv6?.addr,
+					addr: context_common.apply_iface_id(data.ipv6?.addr,
+					                                    cfg('ip6ifaceid')),
 					plen: data.ipv6?.plen,
 					gateway: data.ipv6_gateway?.addr,
 					dns: filter([ data.ipv6_dns1, data.ipv6_dns2 ], (d) => d != null),

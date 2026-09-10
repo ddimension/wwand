@@ -393,6 +393,24 @@ export function default_fx(log)
 	if (type(require('wwand_io').rmnet_mux_id) == 'function')
 		self.rmnet_mux_id = (name) => require('wwand_io').rmnet_mux_id(name);
 
+	// set the kernel's IPv6 interface identifier (IFLA_INET6_TOKEN), nested
+	// two levels inside IFLA_AF_SPEC -> AF_INET6. ucode's rtnl module does not
+	// expose it (its af_spec.inet6 table has only mode/flags/conf) and there is
+	// no sysctl for it either, so it lives in wwand_io beside the rmnet
+	// helpers. Same tolerance as those: an older .so leaves this unset and the
+	// caller reports the option as unsupported instead of failing.
+	if (type(require('wwand_io').set_iface_token) == 'function')
+		self.set_iface_token = (name, token) => {
+			let qmit = require('wwand_io');
+
+			if (qmit.set_iface_token(name, token))
+				return true;
+
+			self.last_error = qmit.last_error();
+
+			return false;
+		};
+
 	// re-assert the QMAP flags on an ALREADY EXISTING rmnet child (netlink
 	// changelink). Needed on the adopt path only: the flags live on the PARENT
 	// (`port->data_format`, one per real_dev) and the kernel assigns them
@@ -471,6 +489,92 @@ function write_attr(fx, path, value, what)
 
 	return true;
 }
+
+// --- IPv6 interface identifier (option ip6ifaceid / ifaceid) -----------------
+//
+// apply_iface_id(fx, netdev, value, log): make the KERNEL use `value` as the
+// interface identifier when it forms a SLAAC address from an RA the modem
+// sends. This is the RA path only — an address the modem hands us over the
+// control protocol never passes through the kernel's generation and is
+// rewritten in context_common.apply_iface_id() instead.
+//
+// Two mechanisms behind one option, because the kernel splits them:
+//   - a literal `::x`  -> IFLA_INET6_TOKEN. It wins over everything else:
+//     addrconf_prefix_rcv() checks the token FIRST for a /64 PIO, before
+//     stable-privacy and EUI-64 (addrconf.c:2911-2924, 6.18.41).
+//   - 'eui64' / 'random' -> addr_gen_mode, which is the kernel's own naming for
+//     exactly those two and is a plain sysctl.
+// 'stable' maps to stable-privacy (RFC 7217) for completeness; note it hashes
+// secret + prefix + perm_addr + dad_count (addrconf.c:3389-3393,
+// 6.18.41), so it changes with BOTH the prefix and the MAC.
+//
+// An empty/absent value changes nothing at all — wwand's default is to leave
+// the kernel alone, unlike netifd's ip6ifaceid which defaults to ::1.
+//
+// The token is refusable BY DESIGN and the refusals are worth reporting rather
+// than swallowing (inet6_set_iftoken(), addrconf.c:5902-5936): loopback, a
+// device with IFF_NOARP — which every raw-IP cellular link is — accept_ra
+// disabled, or router solicitations turned off. So on an rmnet/raw-IP modem
+// this cannot work and the log has to say why, or the option looks broken.
+// IN6_ADDR_GEN_MODE_*, minus NONE (1). NONE stops the kernel generating any
+// address at all, link-local included — under an option called "interface
+// identifier" that is a trap, not a choice, and it is not an identifier.
+const ADDR_GEN_MODE = { eui64: 0, stable: 2, random: 3 };
+
+export function apply_iface_id(fx, netdev, value, log)
+{
+	log ??= fx.log;
+	value = trim(value ?? '');
+
+	if (value == '')
+		return { applied: null };
+
+	let mode = ADDR_GEN_MODE[lc(value)];
+
+	if (mode != null) {
+		let path = sprintf('/proc/sys/net/ipv6/conf/%s/addr_gen_mode', netdev);
+
+		if (!write_attr(fx, path, sprintf('%d', mode), 'ifaceid'))
+			return { applied: null, error: 'addr_gen_mode' };
+
+		log('info', sprintf('%s: ipv6 identifier from addr_gen_mode %s', netdev, lc(value)));
+
+		return { applied: 'addr_gen_mode' };
+	}
+
+	if (type(fx.set_iface_token) != 'function') {
+		log('warn', sprintf('%s: option ip6ifaceid needs a newer wwand_io.so — ignoring %s',
+			netdev, value));
+
+		return { applied: null, error: 'unsupported' };
+	}
+
+	if (fx.set_iface_token(netdev, value)) {
+		log('info', sprintf('%s: ipv6 interface identifier %s (kernel token)', netdev, value));
+
+		return { applied: 'token' };
+	}
+
+	// name the two refusals an operator can actually act on
+	let why = fx.last_error ?? 'failed';
+	let flags = trim(fx.read(sprintf('/sys/class/net/%s/flags', netdev)) ?? '');
+	let noarp = false;
+
+	if (substr(flags, 0, 2) == '0x') {
+		let v = hex(flags);
+
+		noarp = (v != null) && ((v & 0x80) != 0);
+	}
+
+	if (noarp)
+		log('warn', sprintf('%s: ip6ifaceid %s rejected — this is a raw-IP link (IFF_NOARP) and the kernel only takes a token on a link that does neighbour discovery; use it on an 802.3/ethernet-framed modem, or set the identifier on the address the modem hands us instead',
+			netdev, value));
+	else
+		log('warn', sprintf('%s: ip6ifaceid %s rejected: %s (needs accept_ra on and router solicitations enabled)',
+			netdev, value, why));
+
+	return { applied: null, error: why };
+};
 
 export function board_dgram_size(fx, override, model)
 {

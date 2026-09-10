@@ -150,7 +150,9 @@ export function create(opts)
 
 		if (rdp.ipv6 && (v6_addr || length(rdp.ipv6.dns ?? []))) {
 			out.ipv6 = {
-				addr: v6_addr, plen: rdp.ipv6.plen,
+				addr: context_common.apply_iface_id(v6_addr,
+					context_common.conn_cfg(self, 'ip6ifaceid')),
+				plen: rdp.ipv6.plen,
 				gateway: rdp.ipv6.gateway,
 				dns: rdp.ipv6.dns ?? [],
 				mtu: rdp.ipv6.mtu,

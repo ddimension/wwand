@@ -485,3 +485,48 @@ QMI modem camped on 2G/3G report it alone. Two of the three modems on that one
 box hit the dead end, on two different backends. Registration is what the
 registration block says (`fmt.regShort`); the absence of a measurement is not
 evidence about it.
+
+### `ip6ifaceid` is one option, so it is one mechanism
+**It is two, because the kernel splits them, and one of them is refusable.**
+An IPv6 address reaches a cellular interface by two entirely different routes,
+and pinning the interface identifier means something different on each:
+
+- the modem hands the address over the control protocol (QMI/MBIM/NCM) and wwand
+  pushes it to netifd. Nothing in the kernel generated that address, so nothing
+  in the kernel can influence it — the substitution happens in
+  `context_common.apply_iface_id()` as the settings are assembled.
+- the modem sends RAs and the kernel forms the address. Now the identifier is
+  the kernel's, and only the kernel can set it.
+
+For the second, `IFLA_INET6_TOKEN` is the mechanism and it beats everything else
+(`addrconf_prefix_rcv()` checks it before stable-privacy and EUI-64,
+addrconf.c:2911-2924, 6.18.41). Three things about it are easy to get wrong:
+
+- **`addr_gen_mode` is not a substitute.** It selects eui64/none/stable/random,
+  never a *chosen* identifier — and `stable_privacy` hashes
+  `secret + prefix + perm_addr + dad_count` (addrconf.c:3389-3393), so it moves with the
+  prefix *and* with the MAC.
+- **There is no sysctl for the token** (`/proc/sys/net/ipv6/conf/<if>/` has
+  `addr_gen_mode` and `stable_secret`, no `token`), and ucode's `rtnl` module
+  cannot encode it either — its `af_spec.inet6` table carries only `mode`,
+  `flags`, `conf`. Hence the raw-netlink helper in `wwand_io.so`, for the same
+  reason `IFLA_RMNET_FLAGS` lives there.
+- **A raw-IP link cannot take one at all.** `inet6_set_iftoken()` rejects
+  `IFF_NOARP` with "Device does not do neighbour discovery" (addrconf.c:5920) —
+  and every rmnet/raw-IP cellular link is `IFF_NOARP`. It also needs `accept_ra`
+  on and router solicitations enabled. So on those modems the option only works
+  through the control-protocol path, and the refusal has to be logged in those
+  terms or it looks like a bug.
+
+The ordering question — can the token be set before IPv6 is enabled on the link?
+— was measured rather than reasoned: **yes**, it can be set while
+`disable_ipv6` is still 1, it survives the 1→0 transition and it survives a link
+down/up (netns against 6.18.41, 2026-09-10). The sysctl marks the `inet6_dev`
+disabled, it does not destroy it. That is what lets wwand set the identifier
+before the first RA can arrive. A re-enumerated netdev is a different matter: a
+fresh `inet6_dev` starts with `token = in6addr_any` (addrconf.c:452), so it must
+be re-applied on every bring-up.
+
+**And the default is empty, not `::1`.** netifd's own `ip6ifaceid` defaults to
+`::1`; copying that would silently renumber every existing installation on
+upgrade.

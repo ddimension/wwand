@@ -193,3 +193,153 @@ export function v4_prefix(config, pushed, log)
 
 	return 32;
 };
+
+// expand an IPv6 literal to exactly eight hextet strings, or null.
+//
+// The QMI/MBIM codec and the NCM byte decoder all produce the uncompressed
+// eight-group form already (tlv.uc `ipv6`, ncm_vendors.bytes_to_ipv6), so this
+// is a no-op for them. It exists for the one source that does not:
+// ncm_vendors.parse_cgpaddr takes the modem's v6 slot VERBATIM, and a modem is
+// free to print `::` there. Splitting such a string on ':' without expanding it
+// would silently build an address out of the wrong groups.
+function expand_v6(a)
+{
+	if (index(a, ':') < 0)
+		return null;
+
+	let parts = split(a, '::');
+
+	if (length(parts) > 2)
+		return null;
+
+	let head = (length(parts[0]) ? split(parts[0], ':') : []);
+	let tail = (length(parts) == 2 && length(parts[1])) ? split(parts[1], ':') : [];
+
+	// no '::' -> the literal must already be complete
+	if (length(parts) == 1) {
+		if (length(head) != 8)
+			return null;
+
+		tail = [];
+	}
+
+	// With `::` present it must compress AT LEAST ONE group (RFC 4291 §2.2):
+	// eight groups already written out plus a `::` is not a shorthand, it is
+	// malformed. Accepting it meant a bad verbatim CGPADDR slot — the one
+	// source that is not normalised — still produced a rewritten address
+	// instead of being left alone. Only for the compressed spelling: an
+	// uncompressed literal legitimately has all eight.
+	if (length(head) + length(tail) > (length(parts) == 2 ? 7 : 8))
+		return null;
+
+	let out = [ ...head ];
+
+	if (length(parts) == 2)
+		for (let i = length(head) + length(tail); i < 8; i++)
+			push(out, '0');
+
+	for (let t in tail)
+		push(out, t);
+
+	if (length(out) != 8)
+		return null;
+
+	for (let g in out)
+		if (!match(g, /^[0-9A-Fa-f]{1,4}$/))
+			return null;
+
+	return out;
+}
+
+// an expanded literal is usable as an interface identifier when its network
+// half is empty and its host half is not.
+function valid_iface_id(g)
+{
+	if (type(g) != 'array' || length(g) != 8)
+		return false;
+
+	for (let i = 0; i < 4; i++)
+		if (hex(g[i]) != 0)
+			return false;
+
+	for (let i = 4; i < 8; i++)
+		if (hex(g[i]) != 0)
+			return true;
+
+	return false;
+};
+
+// --- IPv6 interface identifier (option ip6ifaceid / ifaceid) -----------------
+//
+// apply_iface_id(addr, value): keep the /64 the network gave us and replace the
+// low 64 bits with a configured identifier. This is the CONTROL-PROTOCOL path —
+// the address the modem hands us over QMI/MBIM/NCM, which we push to netifd
+// ourselves and which the kernel's SLAAC generation never touches. The RA path
+// is the kernel's business and lives in netlink.apply_iface_id().
+//
+// Operators want this because some networks rotate the address on a live
+// bearer: the interface identifier changes every minute or so while the prefix
+// stays put, and every source-restricted route, firewall rule and DNS record
+// pinned to the address dies with it. A fixed identifier inside the same /64 is
+// legitimate on 3GPP — the whole /64 belongs to this UE (RFC 6459 §5.2), and a
+// modem forwarding traffic from a self-chosen identifier has been confirmed on
+// hardware (RM520F-GL, reported 2026-09-10).
+//
+// It does NOT stabilise anything if the operator rotates the PREFIX; nothing
+// can, and the docs say so.
+//
+// Only a literal `::x` applies here. 'eui64'/'random'/'stable' name the
+// KERNEL's generation modes, which have no meaning for an address that was
+// handed to us rather than generated — those values are honoured on the RA path
+// and deliberately ignored here.
+//
+// Returns the rewritten address, or `addr` unchanged when there is nothing to
+// do or the input is not something we can safely take apart.
+// iface_id_ok(value): would apply_iface_id() accept this literal? config.uc
+// calls it to warn at parse time instead of leaving the operator to wonder why
+// a value they set changed nothing. Kernel generation-mode names are not
+// literals and are not this function's business.
+export function iface_id_ok(value)
+{
+	let g = expand_v6(trim(value ?? ''));
+
+	return g ? valid_iface_id(g) : false;
+};
+
+export function apply_iface_id(addr, value)
+{
+	value = trim(value ?? '');
+
+	if (addr == null || addr == '' || value == '')
+		return addr;
+
+	// the kernel-mode names are not identifiers — leave the address alone
+	if (index([ 'eui64', 'random', 'stable', 'none' ], lc(value)) >= 0)
+		return addr;
+
+	let host = expand_v6(value);
+	let base = expand_v6(addr);
+
+	if (!host || !base)
+		return addr;
+
+	// An identifier is the LOW half and nothing else. Two refusals, both of
+	// which would otherwise produce a plausible-looking wrong address rather
+	// than an error:
+	//
+	//   - a non-zero network part is a whole address in the wrong field
+	//     (`fe80::1`, `2001:db8::1`). Silently keeping its low half would hide
+	//     the mistake and hand out an address the operator never asked for.
+	//     netifd refuses the same thing for its own ip6ifaceid — it checks the
+	//     top two words and errors out (interface.c:1021-1023).
+	//   - an all-zero identifier (`::`, `::0`, `1::`) makes <prefix>:: — the
+	//     subnet-router ANYCAST address, which is not a host address at all.
+	//
+	// Refusing means leaving the address exactly as the network assigned it;
+	// config.uc warns about the value so this is not silent.
+	if (!valid_iface_id(host))
+		return addr;
+
+	// prefix from the network, identifier from the config
+	return join(':', [ ...slice(base, 0, 4), ...slice(host, 4, 8) ]);
+};

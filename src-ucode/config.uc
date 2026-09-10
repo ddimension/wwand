@@ -15,6 +15,7 @@
 // only for canon_mux(): `option mux` names a datapath, and the one place that
 // decides what a datapath is called is netlink.uc — spelling it out a second
 // time here is how the two drift apart.
+import * as context_common from 'wwand.context_common';
 import * as netlink from 'wwand.netlink';
 import * as catmod from 'wwand.codec.schema.cat';
 
@@ -244,6 +245,36 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	// unset/0 = whatever the datapath can drive). Mostly a bring-up handle:
 	// pinning it is how a specific version gets exercised on real hardware.
 	'qmap_version' ];
+// option ip6ifaceid / ifaceid — resolve the alias and say so when the value is
+// one apply_iface_id() will refuse. Without the warning a typo'd identifier is
+// perfectly silent: the address simply stays what the network assigned, which
+// is also what a CORRECT empty setting does, so nothing distinguishes the two.
+//
+// The kernel generation-mode names are not literals and are checked against the
+// names netlink.apply_iface_id() actually implements — keeping this list here
+// and that one there in sync is exactly the drift a warning should catch.
+const IFACE_ID_MODES = [ 'eui64', 'stable', 'random' ];
+
+function iface_id(name, s, result)
+{
+	let v = (s.ip6ifaceid != null && s.ip6ifaceid != '') ? s.ip6ifaceid : (s.ifaceid ?? null);
+
+	if (v == null || v == '')
+		return null;
+
+	if (index(IFACE_ID_MODES, lc(trim(v))) >= 0)
+		return lc(trim(v));
+
+	if (!context_common.iface_id_ok(v)) {
+		push(result.warnings, sprintf("interface %s: option ip6ifaceid '%s' is not a usable interface identifier (expected ::x with an empty network part, or %s) — ignoring",
+			name, v, join('/', IFACE_ID_MODES)));
+
+		return null;
+	}
+
+	return v;
+};
+
 const SIM_KNOWN_OPTS = [ 'modem', 'iccid', 'imsi', 'pincode', 'apn', 'auth',
 	'username', 'password', 'plmn_list' ];
 
@@ -726,6 +757,14 @@ function compat_translate(raw, result)
 				          substr(s.device, 0, 1) != '/' &&
 				          (!muxed || (nd?.muxed ?? false))) ? s.device : null,
 				pdp_type: PDP_TYPES[pdp_in] ? pdp_in : 'ipv4v6',
+				// IPv6 interface identifier. `ifaceid` is accepted as the
+				// alias because that is the spelling odhcp6c's proto has
+				// carried for years (dhcpv6.sh reads ip6ifaceid, then falls
+				// back to ifaceid), and an operator moving an interface over
+				// should not have to notice. Default EMPTY = change nothing:
+				// netifd's own ip6ifaceid defaults to ::1, which would silently
+				// renumber every existing installation on upgrade.
+				ip6ifaceid: iface_id(name, s, result),
 				profile: (s.profile != null) ? +s.profile : null,
 				use_pushed_mtu: bool_opt(s.use_pushed_mtu, true),
 				auto: bool_opt(s.auto, true),

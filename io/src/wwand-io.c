@@ -24,6 +24,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
 #include <net/if.h>
 #include <signal.h>
 #include <stdio.h>
@@ -38,6 +39,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <linux/if_link.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/genetlink.h>
@@ -1452,6 +1454,137 @@ qmit_syslog_close(uc_vm_t *vm, size_t nargs)
 	return ucv_boolean_new(true);
 }
 
+/*
+ * set_iface_token(name, token): set (or clear) the IPv6 interface identifier
+ * the kernel uses when it forms a SLAAC address from a received RA.
+ *
+ * `token` is an IPv6 literal; only its low 64 bits are used (the kernel copies
+ * exactly those — inet6_set_iftoken(), addrconf.c:5941). "::" clears it and
+ * restores the default generation (stable-privacy, else EUI-64).
+ *
+ * Why this lives here and not in ucode: the attribute is IFLA_INET6_TOKEN,
+ * nested two levels deep in IFLA_AF_SPEC -> AF_INET6, and ucode's rtnl module
+ * does not expose it — its af_spec.inet6 table carries only `mode`, `flags` and
+ * `conf` (lib/rtnl.c). Same reason IFLA_RMNET_FLAGS is encoded by hand above.
+ * There is no procfs path either: /proc/sys/net/ipv6/conf/<if>/ has
+ * addr_gen_mode and stable_secret but no token (checked on 6.18.41).
+ *
+ * The token wins over every other generation mode — addrconf_prefix_rcv()
+ * checks it FIRST for a /64 PIO, before stable-privacy and EUI-64
+ * (addrconf.c:2911-2924, 6.18.41) — and it only affects addresses formed from
+ * RAs received AFTER it is set. A fresh inet6_dev starts with no token
+ * (addrconf.c:452), so a re-enumerated netdev needs it applied again.
+ */
+static uc_value_t *
+qmit_set_iface_token(uc_vm_t *vm, size_t nargs)
+{
+	uc_value_t *name = uc_fn_arg(0);
+	uc_value_t *token = uc_fn_arg(1);
+
+	struct {
+		struct nlmsghdr nlh;
+		struct ifinfomsg ifi;
+		char buf[256];
+	} req;
+
+	struct rtattr *afspec, *af6;
+	struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
+	struct in6_addr tok;
+	union { char b[1024]; struct nlmsghdr h; } resp;
+	unsigned int idx;
+	ssize_t rlen;
+	int fd, err;
+
+	last_errno = 0;
+
+	if (ucv_type(name) != UC_STRING || ucv_type(token) != UC_STRING) {
+		last_errno = EINVAL;
+
+		return ucv_boolean_new(false);
+	}
+
+	if (inet_pton(AF_INET6, ucv_string_get(token), &tok) != 1) {
+		last_errno = EINVAL;
+
+		return ucv_boolean_new(false);
+	}
+
+	idx = if_nametoindex(ucv_string_get(name));
+
+	if (!idx) {
+		last_errno = ENODEV;
+
+		return ucv_boolean_new(false);
+	}
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+	req.nlh.nlmsg_type = RTM_SETLINK;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	req.nlh.nlmsg_seq = 1;
+	req.ifi.ifi_family = AF_UNSPEC;
+	req.ifi.ifi_index = (int)idx;
+
+	afspec = nla_begin(&req.nlh, sizeof(req), IFLA_AF_SPEC);
+
+	if (!afspec) {
+		last_errno = EMSGSIZE;
+
+		return ucv_boolean_new(false);
+	}
+
+	af6 = nla_begin(&req.nlh, sizeof(req), AF_INET6);
+
+	if (!af6 ||
+	    !nla_put(&req.nlh, sizeof(req), IFLA_INET6_TOKEN, &tok, sizeof(tok))) {
+		last_errno = EMSGSIZE;
+
+		return ucv_boolean_new(false);
+	}
+
+	nla_end(&req.nlh, af6);
+	nla_end(&req.nlh, afspec);
+
+	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+
+	if (fd < 0) {
+		last_errno = errno;
+
+		return ucv_boolean_new(false);
+	}
+
+	if (sendto(fd, &req, req.nlh.nlmsg_len, 0,
+	           (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		last_errno = errno;
+		close(fd);
+
+		return ucv_boolean_new(false);
+	}
+
+	rlen = nl_recv(fd, resp.b, sizeof(resp.b));
+	close(fd);
+
+	/* NLM_F_ACK guarantees an nlmsgerr reply; a short read is a failure, not
+	 * a silent success (the caller would believe the token is in place) */
+	if (rlen < (ssize_t)NLMSG_LENGTH(sizeof(struct nlmsgerr)) ||
+	    resp.h.nlmsg_len > (size_t)rlen ||
+	    resp.h.nlmsg_type != NLMSG_ERROR) {
+		last_errno = EIO;
+
+		return ucv_boolean_new(false);
+	}
+
+	err = ((struct nlmsgerr *)NLMSG_DATA(&resp.h))->error;
+
+	if (err != 0) {
+		last_errno = -err;
+
+		return ucv_boolean_new(false);
+	}
+
+	return ucv_boolean_new(true);
+}
+
 static const uc_function_list_t global_fns[] = {
 	{ "open",          qmit_open },
 	{ "open_tty",      qmit_open_tty },
@@ -1460,6 +1593,7 @@ static const uc_function_list_t global_fns[] = {
 	{ "rmnet_mux_id",  qmit_rmnet_mux_id },
 	{ "rmnet_flags_set", qmit_rmnet_flags_set },
 	{ "rmnet_tx_aggr", qmit_rmnet_tx_aggr },
+	{ "set_iface_token", qmit_set_iface_token },
 	{ "last_error",    qmit_last_error },
 	{ "syslog_open",   qmit_syslog_open },
 	{ "syslog_emit",   qmit_syslog_emit },

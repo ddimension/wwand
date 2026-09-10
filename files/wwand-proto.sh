@@ -43,6 +43,16 @@ proto_wwand_init_config() {
 	# operator who needs it does not have to learn a third spelling.
 	proto_config_add_boolean sourcefilter
 
+	# IPv6 interface identifier: keep the network's /64 but pin the host part, for
+	# carriers that rotate the identifier on a live bearer. `ifaceid` is accepted
+	# as the alias because that is the spelling odhcp6c's proto has carried for
+	# years. NOT declared with the :ip6addr datatype the way dhcpv6.sh does it —
+	# the value may also be `eui64` or `random`, which name the kernel's own
+	# generation modes. Declared here so netifd tracks them; the daemon reads them
+	# from uci and does the work.
+	proto_config_add_string ip6ifaceid
+	proto_config_add_string ifaceid
+
 	# legacy dialer options: accepted so old configs keep parsing;
 	# interpreted by the wwand compat layer, not by this shim
 	proto_config_add_string "device:device"

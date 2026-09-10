@@ -8,17 +8,20 @@
 // its call sites read unchanged):
 //   _refresh_context_cfg   re-read connection params from disk on every up
 //   _apply_mtu             effective MTU on the l3 link (use_pushed_mtu, rtnl)
+//   _apply_iface_id        kernel IPv6 identifier for the RA path (ip6ifaceid)
 //   _enable_ipv6           clear disable_ipv6 on the l3 link before netifd
 //   _settings_result       the settings payload the proto shim consumes
 // o = { log, read_config, datapath_fx } — modem/context state stays on self.
 
 'use strict';
 
+import * as netlink from 'wwand.netlink';
+
 // connection params re-read from disk on every up (structural changes still go
 // through the reload trigger). entry.cfg is the object the context reads live,
 // so updating it in place makes the next activation use the fresh values.
 const CTX_LIVE_FIELDS = [ 'apn', 'pdp_type', 'auth', 'username', 'password',
-                          'profile', 'mtu', 'use_pushed_mtu' ];
+                          'profile', 'mtu', 'use_pushed_mtu', 'ip6ifaceid' ];
 
 export function install(self, o)
 {
@@ -77,6 +80,37 @@ export function install(self, o)
 
 		if (fx.exists(v6mtu) && !fx.write(v6mtu, sprintf('%d', mtu)))
 			log('warn', sprintf('interface %s: setting IPv6 MTU on %s failed', name, netdev));
+	};
+
+	// option ip6ifaceid, RA path: tell the KERNEL which interface identifier to
+	// use for addresses it forms from the modem's router advertisements. The
+	// address a modem hands us over the control protocol never passes through
+	// this — that one is rewritten in context_common.apply_iface_id() as the
+	// settings are assembled.
+	//
+	// Deliberately NOT gated on settings.ipv6 the way _enable_ipv6 is: the whole
+	// point of this path is the case where the control protocol gives us no
+	// address at all and IPv6 arrives purely by RA.
+	//
+	// Re-applied on every up because a re-enumerated netdev starts with no
+	// token (a fresh inet6_dev is created with token = in6addr_any,
+	// addrconf.c:452), and applied BEFORE _enable_ipv6 because the token only
+	// affects addresses formed from RAs received after it is set.
+	//
+	// That ordering is safe and was verified rather than assumed: a token CAN
+	// be set while disable_ipv6 is still 1, it SURVIVES the 1->0 transition,
+	// and it survives a link down/up — the sysctl marks the inet6_dev disabled,
+	// it does not destroy it (checked against 6.18.41 in a netns, 2026-09-10).
+	// So the identifier is in place before the first RA can be processed.
+	self._apply_iface_id = function(name, entry, netdev) {
+		let fx = datapath_fx;
+		let want = entry.cfg?.ip6ifaceid;
+
+		if (!fx || !netdev || want == null || want == '')
+			return;
+
+		netlink.apply_iface_id(fx, netdev, want,
+			(level, msg) => log(level, sprintf('interface %s: %s', name, msg)));
 	};
 
 	// enable IPv6 on the l3 link before netifd configures it (disable_ipv6=0)

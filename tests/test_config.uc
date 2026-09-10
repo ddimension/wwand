@@ -451,6 +451,41 @@ eq(r.globals.hold_max, 45, 'net: wwand_globals hold_max');
 	ok(length(filter(g('-1').warnings, (w) => match(w, /failed_min_gap/))) == 1,
 		'globals: ...and says so');
 }
+// --- option ip6ifaceid / ifaceid ---------------------------------------------
+//
+// A value that apply_iface_id() would refuse must be reported at parse time.
+// Without that it is perfectly silent: the address simply stays what the
+// network assigned — which is also what a CORRECT empty setting does, so
+// nothing tells the operator their typo did nothing.
+{
+	let g = (v, key) => config.parse({ network: {
+		m0: { '.type': 'wwand_modem', path: '1-1' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+		       [key ?? 'ip6ifaceid']: v },
+	} });
+
+	eq(g('::1').contexts.wan.ip6ifaceid, '::1', 'ifaceid: a literal is kept');
+	eq(g('::1234:5678').contexts.wan.ip6ifaceid, '::1234:5678', 'ifaceid: multi-group literal');
+
+	// `ifaceid` is the alias odhcp6c's proto has carried for years
+	eq(g('::9', 'ifaceid').contexts.wan.ip6ifaceid, '::9', 'ifaceid: the plain alias works too');
+
+	// generation-mode names pass through, normalised
+	eq(g('EUI64').contexts.wan.ip6ifaceid, 'eui64', 'ifaceid: a mode name is lowercased');
+	eq(g('random').contexts.wan.ip6ifaceid, 'random', 'ifaceid: random is a mode');
+
+	// unset stays unset — the default must change nothing
+	eq(g('').contexts.wan.ip6ifaceid, null, 'ifaceid: empty stays unset');
+
+	// and every refusal is dropped AND reported
+	for (let bad in [ '::', 'fe80::1', '::1:2:3:4:5', 'garbage', 'none' ]) {
+		eq(g(bad).contexts.wan.ip6ifaceid, null,
+			sprintf('ifaceid: %s is not used', bad));
+		ok(length(filter(g(bad).warnings, (w) => match(w, /ip6ifaceid/))) == 1,
+			sprintf('ifaceid: ...and %s is reported', bad));
+	}
+}
+
 eq(r.modems.m0.usb_path, '1-1.2', 'net: wwand_modem usb_path');
 eq(r.modems.m0.pincode, '1234', 'net: wwand_modem pincode (default)');
 eq(r.modems.m0.sim_slot, 1, 'net: wwand_modem sim_slot');

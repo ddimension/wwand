@@ -1,9 +1,8 @@
 # wwand — current state
 
-_State of 2026-08-31, after v1.6.0 (feed r53; the QMI-surface and device-support
-work of 2026-08-30/31 lives in HEAD, not yet released). 52 host suites, all green
-(`cd tests && sh run_tests.sh` — it prints the count, which moves too often to
-be worth repeating here)._
+_State of 2026-09-10, after v1.6.3. 53 host suites, all green (`cd tests && sh
+run_tests.sh` — it prints the count, which moves too often to be worth repeating
+here)._
 
 This file describes **what is true now**. The dated log of how it got here is
 `status-archive.md`; beliefs that looked right and were not are in
@@ -29,8 +28,8 @@ is always user-triggered.
 | Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed |
 | Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
-| Feed | ddimension/openwrt-repo — `wwand` r49, `luci-app-wwand` r23, `luci-proto-wwand` r11 |
-| Upstream | openwrt/packages#30185 (pins v1.6.0), openwrt/luci#8917 |
+| Feed | ddimension/openwrt-repo — `wwand` r69, `luci-app-wwand` r30, `luci-proto-wwand` r15 |
+| Upstream | openwrt/packages#30185 (pins v1.6.3), openwrt/luci#8917 |
 
 ## Hardware verified (2026-08-30, on r49 + the same day's device-support HEAD)
 
@@ -108,6 +107,36 @@ Availability is a file check on each backend's lazy shim — probing by
 `require()` would defeat the lazy loading the package split exists for, and each
 shim ships in its own backend package, so the file IS the answer. "Loaded" is
 announced separately, once, when a modem actually asks for a backend.
+
+## IPv6 interface identifier (2026-09-10)
+
+`option ip6ifaceid` (alias `ifaceid`) pins the low 64 bits of an interface's
+IPv6 address while the network keeps assigning the prefix. Carriers that rotate
+the identifier on a live bearer break every source-restricted route, firewall
+rule and DNS record naming the address; the /64 belongs to the UE on 3GPP
+(RFC 6459 §5.2), so choosing the host part is legitimate. Full description in
+`reference.md`; the traps are in `gotchas.md`.
+
+**The default is empty and changes nothing** — netifd's own `ip6ifaceid`
+defaults to `::1`, which would renumber every existing installation on upgrade.
+
+One option, two mechanisms, because an address reaches a cellular interface two
+ways:
+
+| source | who forms the address | what wwand does |
+|---|---|---|
+| control protocol (QMI/MBIM/NCM) | wwand, from the modem's reply | rewrites it as the settings are assembled (`context_common.apply_iface_id`) |
+| router advertisement | the kernel | sets the kernel's IPv6 **token** (`IFLA_INET6_TOKEN`, new `wwand_io.set_iface_token`), or `addr_gen_mode` for `eui64`/`stable`/`random` |
+
+A token is refused on a raw-IP link — the kernel takes one only where neighbour
+discovery happens — so on rmnet modems only the control-protocol path applies.
+It cannot help against a rotating *prefix*; nothing can.
+
+Verified on the RG650E (`245`, O2): without the option three sessions produced
+three identifiers under one stable /64; with `::1234:5678` the address held
+across reconnects, traffic flowed from it, and removing the option restored the
+network-assigned identifier. The token path was verified against 6.18.41 in a
+netns (set/clear, `IFF_NOARP` refused, survives enabling IPv6 and a link bounce).
 
 ## Known open
 

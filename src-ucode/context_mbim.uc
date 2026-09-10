@@ -126,7 +126,9 @@ export function create(opts)
 			let a = cfg.ipv6_addresses[0];
 
 			out.ipv6 = {
-				addr: a.address, plen: a.prefix,
+				addr: context_common.apply_iface_id(a.address,
+					context_common.conn_cfg(self, 'ip6ifaceid')),
+				plen: a.prefix,
 				gateway: cfg.ipv6_gateway,
 				dns: cfg.ipv6_dns ?? [],
 				mtu: cfg.ipv6_mtu,

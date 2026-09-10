@@ -38,6 +38,9 @@ const V4_SETTINGS = {
 	dns1: '9.9.9.9', dns2: '1.1.1.1', mtu: 1430, ip_family: 4,
 };
 
+// what netifd is pretending to have configured (see iface_status below)
+let netifd_v4 = null;
+
 function handlers()
 {
 	return {
@@ -78,8 +81,19 @@ function handlers()
 			(meta.count <= 2) ? { pdh: 4242 } : { __error: 0x0001 },
 		// activation returns the base settings; a later refresh (triggered by
 		// a serving-system change) returns a changed address -> renew
+		// count 1 = the base settings; 2 = a changed address (drives the renew
+		// test); 3+ = the SAME address with a DIFFERENT GATEWAY, which is the
+		// shape `option ip6ifaceid` makes normal — the address is pinned, the
+		// session's nexthop still moves.
+		// count 1 = base; 2 = a changed address; 3 = the SAME address with a
+		// DIFFERENT GATEWAY (the shape ip6ifaceid makes normal); 4+ = same
+		// address AND same gateway, only the DNS moved — netifd would keep the
+		// stale resolver if the renew decision looked at addresses alone.
 		GET_CURRENT_SETTINGS: (args, meta) =>
-			(meta.count <= 1) ? V4_SETTINGS : { ...V4_SETTINGS, ipv4: '10.11.12.99' },
+			(meta.count <= 1) ? V4_SETTINGS
+			                  : { ...V4_SETTINGS, ipv4: '10.11.12.99',
+			                      gateway: (meta.count <= 2) ? '10.11.12.14' : '10.11.12.200',
+			                      dns1: (meta.count <= 3) ? '9.9.9.9' : '8.8.4.4' },
 		STOP_NETWORK: {},
 		// the stats sample now fires immediately on connect
 		GET_PACKET_STATISTICS: { tx_packets_ok: 0, rx_packets_ok: 0 },
@@ -122,7 +136,12 @@ let daemon = daemon_mod.create({
 		kick_interface: (iface) => push(events, { type: 'kick', data: iface }),
 		renew_interface: (iface) => push(events, { type: 'renew', data: iface }),
 		down_interface: (iface) => push(events, { type: 'down', data: iface }),
-		iface_status: (iface, cb) => cb({ up: iface_up, autostart: iface_autostart }),   // async: false -> kick, true -> adopt
+		// async: false -> kick, true -> adopt. The address list matters for the
+		// idempotence guard in renew_iface: without it every comparison differs
+		// and the skip branch is never reached, so a test of that branch would
+		// prove nothing. `netifd_v4` is what netifd is pretending to hold.
+		iface_status: (iface, cb) => cb({ up: iface_up, autostart: iface_autostart,
+			'ipv4-address': netifd_v4 ? [ { address: netifd_v4 } ] : [] }),
 		datapath_fx: dpfx,
 		// context_up re-reads config from disk on every up: return a version
 		// with a changed apn so the refresh path is exercised
@@ -224,6 +243,62 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 			uloop.timer(80, () => {
 				ok(length(filter(events, (e) => e.type == 'renew' && e.data == 'wan')) > renews0,
 					'settings change -> in-place renew');
+
+				// (1b) SAME address, NEW gateway -> must still renew.
+				//
+				// netifd now holds exactly the address the session has, so the
+				// address comparison alone says "nothing to do". But everything
+				// netifd gets goes out in ONE update, and the default route in it
+				// carries the gateway (and, with sourcefilter on, the address
+				// prefix as its source). Skipping here would leave netifd with the
+				// previous session's nexthop and its <gw>/128 host route.
+				//
+				// Rare while every reconnect also changed the address; `option
+				// ip6ifaceid` pins the address on purpose and makes this the
+				// normal case.
+				// the guard only reaches its skip branch when netifd reports the
+				// interface UP and holding the same address — both have to be
+				// true here or this proves nothing
+				netifd_v4 = '10.11.12.99';
+				iface_up = true;
+				// NOTE this stays true through (2) below, which therefore also
+				// runs through the guard's skip branch for the first time — the
+				// transient-drop reconnect comes back on the same address, so it
+				// is the same situation and the assertion there gets stricter
+				// rather than different. Reset in the inner timer.
+
+				let renews_gw = length(filter(events, (e) => e.type == 'renew' && e.data == 'wan'));
+
+				mock.indicate(3, 0xff, 'SERVING_SYSTEM_IND', {
+					serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+					                  selected_network: 1, radio_ifs: [ 8 ] },
+					current_plmn: { mcc: 262, mnc: 1, description: 'Testnet' },
+				});
+
+				uloop.timer(80, () => {
+					ok(length(filter(events, (e) => e.type == 'renew' && e.data == 'wan')) > renews_gw,
+						'same address but a new gateway -> still renewed');
+
+					// (1c) address AND gateway identical, only the DNS moved.
+					// Everything netifd is told rides in one update, so a
+					// resolver change has to reach it too — picking a few fields
+					// to compare would leave netifd on the old server forever.
+					let renews_dns = length(filter(events, (e) => e.type == 'renew' && e.data == 'wan'));
+
+					mock.indicate(3, 0xff, 'SERVING_SYSTEM_IND', {
+						serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+						                  selected_network: 1, radio_ifs: [ 8 ] },
+						current_plmn: { mcc: 262, mnc: 1, description: 'Testnet' },
+					});
+
+					uloop.timer(80, () => {
+						ok(length(filter(events, (e) => e.type == 'renew' && e.data == 'wan')) > renews_dns,
+							'same address and gateway, changed DNS -> still renewed');
+
+						iface_up = false;
+						netifd_v4 = null;
+					});
+				});
 
 				// (2) transient drop: must NOT down the interface; the daemon
 				// reconnects the session and renews again — all in place.

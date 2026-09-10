@@ -1074,4 +1074,113 @@ ok(length(byname.qmimux.description) > 0, 'catalog: every entry describes itself
 byname.rmnet.proto[0] = 'clobbered';
 eq(netlink.datapath_catalog()[3].proto, [ 'qmi' ], 'catalog: the module table is not aliased');
 
+// --- option ip6ifaceid, the RA path (netlink.apply_iface_id) ----------------
+//
+// Two kernel mechanisms behind one option: a literal identifier goes in as the
+// IPv6 token (netlink only — no sysctl exists for it), while `eui64`/`random`
+// are the kernel's own generation modes and are plain addr_gen_mode writes.
+(function () {
+	let mkfx = (o) => {
+		let f = fakefx.create({
+			files: {
+				'/proc/sys/net/ipv6/conf/wwan0/addr_gen_mode': "0\n",
+				'/sys/class/net/wwan0/flags': (o?.noarp ? "0x1083\n" : "0x1003\n"),
+			},
+			// fakefx.exists() keys off `present`, not `files`
+			present: { '/proc/sys/net/ipv6/conf/wwan0/addr_gen_mode': true },
+		});
+
+		f.tokens = [];
+		f.logs = [];
+
+		if (!o?.no_native)
+			f.set_iface_token = (dev, tok) => {
+				push(f.tokens, [ dev, tok ]);
+
+				if (o?.refuse) {
+					f.last_error = o.refuse;
+					return false;
+				}
+
+				return true;
+			};
+
+		return f;
+	};
+
+	let log = (f) => (level, msg) => push(f.logs, level + ': ' + msg);
+
+	// EMPTY IS THE DEFAULT: nothing is written, nothing is sent. wwand does not
+	// copy netifd's ::1 default, which would renumber existing installations.
+	let f = mkfx();
+	let r = netlink.apply_iface_id(f, 'wwan0', '', log(f));
+
+	eq(r.applied, null, 'ifaceid: empty applies nothing');
+	eq(length(f.tokens), 0, 'ifaceid: empty sends no token');
+	eq(trim(f.read('/proc/sys/net/ipv6/conf/wwan0/addr_gen_mode')), '0',
+		'ifaceid: empty leaves addr_gen_mode alone');
+
+	f = mkfx();
+	eq(netlink.apply_iface_id(f, 'wwan0', null, log(f)).applied, null,
+		'ifaceid: unset applies nothing');
+
+	// a literal identifier -> token
+	f = mkfx();
+	r = netlink.apply_iface_id(f, 'wwan0', '::1234', log(f));
+
+	eq(r.applied, 'token', 'ifaceid: a literal goes in as the kernel token');
+	eq(f.tokens, [ [ 'wwan0', '::1234' ] ], 'ifaceid: token sent verbatim to the device');
+
+	// the kernel's own modes -> addr_gen_mode, no token traffic
+	// (values from IN6_ADDR_GEN_MODE_*: eui64 0, none 1, stable_privacy 2, random 3)
+	for (let c in [ [ 'eui64', '0' ], [ 'random', '3' ], [ 'stable', '2' ] ]) {
+		f = mkfx();
+		r = netlink.apply_iface_id(f, 'wwan0', c[0], log(f));
+
+		eq(r.applied, 'addr_gen_mode', sprintf('ifaceid: %s uses addr_gen_mode', c[0]));
+		eq(trim(f.read('/proc/sys/net/ipv6/conf/wwan0/addr_gen_mode')), c[1],
+			sprintf('ifaceid: %s -> addr_gen_mode %s', c[0], c[1]));
+		eq(length(f.tokens), 0, sprintf('ifaceid: %s sends no token', c[0]));
+	}
+
+	// `none` is deliberately NOT a mode here. IN6_ADDR_GEN_MODE_NONE stops the
+	// kernel generating any address at all, link-local included — under an
+	// option called "interface identifier" that is a trap rather than a choice,
+	// and it is not an identifier. config.uc refuses the value before it can
+	// reach this function (see test_config).
+	f = mkfx();
+	netlink.apply_iface_id(f, 'wwan0', 'none', log(f));
+	eq(trim(f.read('/proc/sys/net/ipv6/conf/wwan0/addr_gen_mode')), '0',
+		'ifaceid: none is not a generation mode and writes no addr_gen_mode');
+
+	// A RAW-IP LINK CANNOT TAKE A TOKEN. The kernel refuses on IFF_NOARP
+	// ("Device does not do neighbour discovery", inet6_set_iftoken(),
+	// addrconf.c:5920-5924), which is every rmnet/raw-IP cellular link. The
+	// refusal has to be reported in terms the operator can act on, or the
+	// option just looks broken.
+	f = mkfx({ noarp: true, refuse: 'Invalid argument' });
+	r = netlink.apply_iface_id(f, 'wwan0', '::1234', log(f));
+
+	eq(r.applied, null, 'ifaceid: a refused token applies nothing');
+	ok(length(filter(f.logs, (l) => index(l, 'IFF_NOARP') >= 0)) == 1,
+		'ifaceid: the raw-IP refusal names IFF_NOARP');
+
+	// same refusal on an ARP-capable link is a different cause and must not
+	// claim raw-IP
+	f = mkfx({ refuse: 'Invalid argument' });
+	f.logs = [];
+	netlink.apply_iface_id(f, 'wwan0', '::1234', log(f));
+
+	ok(length(filter(f.logs, (l) => index(l, 'IFF_NOARP') >= 0)) == 0,
+		'ifaceid: an ARP link is not blamed on raw-IP');
+	ok(length(filter(f.logs, (l) => index(l, 'accept_ra') >= 0)) == 1,
+		'ifaceid: ...it points at accept_ra / router solicitations instead');
+
+	// an older wwand_io.so has no token setter at all: say so, do not crash
+	f = mkfx({ no_native: true });
+	r = netlink.apply_iface_id(f, 'wwan0', '::1234', log(f));
+
+	eq(r.error, 'unsupported', 'ifaceid: an old wwand_io.so is reported, not fatal');
+})();
+
 done('test_datapath');
