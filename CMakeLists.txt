@@ -103,6 +103,7 @@ set(WWAND_UCODE_MODULES
   telemetry_mbim.uc telemetry_ncm.uc telemetry_qmi.uc transport.uc ubus.uc
   version.uc
   wwandctl_fmt.uc
+  deps.uc
 )
 
 # executable scripts (shebang) -> compiled with -c, interpreter line preserved
