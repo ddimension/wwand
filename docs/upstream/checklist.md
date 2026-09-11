@@ -43,10 +43,9 @@ Nothing below is pushed/posted. Order matters (the PR Makefile must point at a
    WWAN/netifd maintainers — the architecture discussion the maintainer asked for.
 
 ## E. Feed (ddimension/openwrt-repo)
-8. Feed is at **r26 / `b2d8176`** (pushed this window, MIRROR_HASH
-   `6477620d…`). The uncommitted feed prep (wwand-mhi, explicit-list install,
-   qmi-advanced scrub, CI config) lands as **r27** after the fleet is on the r26
-   apk — a push aborts the running per-package CI, so only on explicit go.
+8. The feed has its own release chain — channels `main`/`stable`,
+   `scripts/bump-source.sh`, `scripts/release-stable.sh`; rules in the feed's
+   `CLAUDE.md`. State 2026-09-11: stable ships wwand 1.6.5, main 1.6.5_p7.
 
 ## Notes
 - The E392 FPLMN limitation (old Huawei firmware refuses UIM + CRSM writes) is a
