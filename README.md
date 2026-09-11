@@ -82,11 +82,14 @@ A quick tour of the LuCI UI (modems overview · modem config · interface · con
 The daemon is a backend-neutral base plus per-backend packages — install only
 what your modems need. Package definitions live in the
 [openwrt-repo](https://github.com/ddimension/openwrt-repo) feed, which also
-publishes **prebuilt, signed binary repositories** (snapshot, 25.12 and 24.10
-across seven architectures) at
-`https://ddimension.github.io/openwrt-repo/<release>/<arch>/` — see the
-[feed README](https://github.com/ddimension/openwrt-repo#binary-package-repositories)
-for device setup (apk/opkg lines and signing keys).
+publishes **prebuilt, signed binary repositories** (snapshot and 25.12 across
+seven architectures) in two channels,
+`https://ddimension.github.io/openwrt-repo/<channel>/<release>/<arch>/`:
+`stable` carries the tagged releases (wwand vX.Y.Z as package version X.Y.Z),
+`main` the development state in between (X.Y.Z_pN, N commits after the tag).
+See the [feed README](https://github.com/ddimension/openwrt-repo#binary-package-repositories)
+for device setup (the `ddimension-feed` package, signing keys, switching
+channels).
 
 | Package | Role |
 |---|---|
