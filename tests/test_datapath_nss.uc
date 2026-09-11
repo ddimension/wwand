@@ -102,6 +102,105 @@ eq(plug.map_id({ id: 2 }), 0x82, 'map: ...+ offset for the next');
 // link_state write reads muxid back as (muxid - 0x80), which addition preserves
 eq(plug.map_id({ id: 200 }), 0x80 + 200, 'map: it is addition, not a bit set');
 
+// --- what the DRIVER reports, when it answers --------------------------------
+//
+// The version and the mux ids used to be derived: the version from the exported
+// `qmap_size` (the low byte of the same compile-time table entry), the id as
+// 0x80 + channel from a constant read out of the driver source. Both are right
+// on the hardware seen so far, and both are side-channel reads. The driver
+// answers SIOCDEVPRIVATE+3 (0x89F3) with its own numbers — the call quectel-cm
+// makes — so it is asked first and the derivation is what happens when it does
+// not answer, which is every mainline driver and every vendor driver not in
+// QMAP mode.
+function info_fx(info, size) {
+	let f = {};
+
+	if (size != null)
+		f['/sys/class/net/wwan0/qmap_size'] = sprintf('%d\n', size);
+
+	f['/sys/class/net/wwan0/qmap_mode'] = "2\n";
+
+	let fx = fakefx.create({ present: { '/sys/module/rmnet_nss': true,
+		'/sys/class/net/wwan0': true,
+		'/sys/class/net/wwan0_1': true, '/sys/class/net/wwan0_2': true }, files: f });
+
+	fx.rmnet_info = (name) => info;
+
+	return fx;
+}
+
+// the id comes back matched BY NAME, which is what stays right if the vendor
+// ever renumbers — the arithmetic cannot notice that
+let named = info_fx({ qmap_version: 9, rx_urb_size: 31744, dl_minimum_padding: 0,
+	ifname: [ 'wwan0_1', 'wwan0_2' ], mux_id: [ 0x91, 0x92 ] });
+
+eq(plug.map_id({ id: 1 }, 'wwan0', named), 0x91,
+	'rmnet_info: the driver\'s own id wins over the arithmetic');
+eq(plug.map_id({ id: 2 }, 'wwan0', named), 0x92, 'rmnet_info: ...for each channel');
+
+// a channel the driver does not list falls back rather than inventing one
+eq(plug.map_id({ id: 5 }, 'wwan0', named), 0x85,
+	'rmnet_info: an unlisted channel falls back to 0x80 + n');
+
+// AFTER A RENAME, which this datapath does on every setup: RMNET_INFO.ifname
+// holds what the driver called the child in its PROBE and is never updated,
+// while wwand renames parent and children onto their stable wwandN names. A
+// full-name comparison could then only miss — fall back to the arithmetic and
+// quietly defeat the point of asking. The channel number survives the rename in
+// the driver's own `<parent>_<n>` naming, so that is what is matched.
+eq(plug.map_id({ id: 1, name: 'wwand0' }, 'wwand0', named), 0x91,
+	'rename: the driver\'s id is still found once parent and child were renamed');
+eq(plug.map_id({ id: 2, name: 'wwand1' }, 'wwand0', named), 0x92,
+	'rename: ...for the second channel too');
+
+// ...and the suffix must be a real one: `wwan0_12` is channel 12, never
+// channel 2, so a bare substring test would bind the wrong mux
+let two_digit = info_fx({ qmap_version: 9,
+	ifname: [ 'wwan0_12' ], mux_id: [ 0x9c ] });
+
+eq(plug.map_id({ id: 2 }, 'wwan0', two_digit), 0x82,
+	'rename: _12 is not _2 — no false match');
+eq(plug.map_id({ id: 12 }, 'wwan0', two_digit), 0x9c,
+	'rename: and channel 12 does match it');
+
+// no ioctl at all -> the old behaviour, unchanged
+eq(plug.map_id({ id: 1 }, 'wwan0', fakefx.create({})), 0x81,
+	'rmnet_info: without the ioctl the derivation still answers');
+eq(plug.map_id({ id: 1 }), 0x81, 'rmnet_info: and with no netdev/fx at all');
+
+// THE VERSION, asked instead of derived. 9 is v5 and 5 is v1 in the vendor
+// header (`u32 qmap_version; // 5 ~ QMAP V1, 9 ~ QMAP V5`).
+eq(netlink.datapath_caps('rmnet_nss', plugins,
+	info_fx({ qmap_version: 9, ifname: [], mux_id: [] }, 4096), 'wwan0').qmap_versions,
+	[ 5, 1 ], 'rmnet_info: the driver says v5 even where the SIZE says v1');
+eq(netlink.datapath_caps('rmnet_nss', plugins,
+	info_fx({ qmap_version: 5, ifname: [], mux_id: [] }, 31744), 'wwan0').qmap_versions,
+	[ 1 ], 'rmnet_info: ...and v1 even where the size says v5');
+
+// a version the header does not document falls back to the size derivation
+// rather than guessing upward — declaring v5 wrongly is the silent-total
+// failure this whole area exists to avoid
+eq(netlink.datapath_caps('rmnet_nss', plugins,
+	info_fx({ qmap_version: 7, ifname: [], mux_id: [] }, 31744), 'wwan0').qmap_versions,
+	[ 5, 1 ], 'rmnet_info: an unknown version falls back to the size');
+eq(netlink.datapath_caps('rmnet_nss', plugins,
+	info_fx({ qmap_version: 7, ifname: [], mux_id: [] }, 4096), 'wwan0').qmap_versions,
+	[ 1 ], 'rmnet_info: ...which can say v1 just as well');
+
+// dl_minimum_padding exists NOWHERE else — no sysfs attribute carries it — so
+// the status row is the only way anyone sees it
+let info_st = netlink.datapath_status(
+	info_fx({ qmap_version: 9, rx_urb_size: 31744, dl_minimum_padding: 4,
+		ifname: [ 'wwan0_1' ], mux_id: [ 0x81 ] }, 31744), 'rmnet_nss', 'wwan0', plugins);
+
+eq(info_st.driver_reported, true, 'status: says the numbers came from the driver');
+eq(info_st.dl_minimum_padding, 4, 'status: and carries the one value nothing else exposes');
+eq(info_st.rx_urb_size, 31744, 'status: with the buffer size it reports');
+
+let info_st2 = netlink.datapath_status(info_fx(null, 31744), 'rmnet_nss', 'wwan0', plugins);
+eq(info_st2.driver_reported, null, 'status: no ioctl -> no claim that there was one');
+eq(info_st2.qmap_size, 31744, 'status: the derived rows are unchanged');
+
 // --- setup(): adopt, never create --------------------------------------------
 
 let fx = vendor_fx(2);

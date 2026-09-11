@@ -32,6 +32,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
@@ -1585,6 +1586,154 @@ qmit_set_iface_token(uc_vm_t *vm, size_t nargs)
 	return ucv_boolean_new(true);
 }
 
+/*
+ * rmnet_info(netdev): what the VENDOR QMAP driver knows about its own setup,
+ * asked instead of derived.
+ *
+ * Quectel's out-of-tree drivers (pcie_mhi's mhi_netdev_quectel, and qmi_wwan_q
+ * on USB) answer SIOCDEVPRIVATE+3 — 0x89F3 — by copying an RMNET_INFO out to
+ * the caller. quectel-cm uses exactly this. The struct, verbatim from
+ * mhi_netdev_quectel.c:283-293 (the copy in package/feeds/wwand/pcie_mhi):
+ *
+ *     typedef struct {
+ *         unsigned int size;                // = sizeof(RMNET_INFO)
+ *         unsigned int rx_urb_size;
+ *         unsigned int ep_type;             // 3 = DATA_EP_TYPE_PCIE
+ *         unsigned int iface_id;
+ *         unsigned int qmap_mode;
+ *         unsigned int qmap_version;        // 5 = QMAP v1, 9 = QMAP v5
+ *         unsigned int dl_minimum_padding;
+ *         char ifname[8][16];
+ *         unsigned char mux_id[8];
+ *     } RMNET_INFO;
+ *
+ * Why it is worth a C helper at all: the datapath currently DERIVES the QMAP
+ * version from the `qmap_size` sysfs attribute and computes the mux ids as
+ * `0x80 + channel` from a constant read out of the driver source. Both are
+ * right today and both are side-channel reads of a compile-time table. This
+ * asks the table directly, and brings dl_minimum_padding with it — a value
+ * nothing else exposes.
+ *
+ * The driver answers only when it is actually in rmnet mode
+ * (`if (mhi_netdev->use_rmnet_usb)`, :2556-2559); otherwise the ioctl returns
+ * -EOPNOTSUPP. A failure is therefore ORDINARY — every mainline driver, and a
+ * vendor driver not in QMAP mode, will refuse it — so this returns null rather
+ * than raising, and the caller keeps its derivation.
+ *
+ * TWO THINGS THE PROTOCOL DOES NOT DO, and both decide the code below.
+ *
+ * It carries no userspace buffer length: the driver copies ITS OWN
+ * `sizeof(RMNET_INFO)` (:2558) and cannot be told how much room there is. A
+ * driver whose struct is larger than ours would therefore write past the object
+ * we hand it — before any check of ours could run. So the buffer is
+ * deliberately over-sized and the struct is read out of its head; the ioctl can
+ * then only overrun something that is already slack.
+ *
+ * And `size` is the only version marker there is. A driver reporting a
+ * different one has a layout we cannot interpret — a longer struct is not
+ * "ours plus extra", the prefix is only conventionally stable — so the match is
+ * EXACT. Accepting `>=` would read whatever that driver happened to put at our
+ * offsets and call it a mux id.
+ */
+
+#define WWAND_RMNET_INFO_IOCTL   0x89F3
+#define WWAND_RMNET_MAX_LINKS    8
+
+typedef struct {
+	unsigned int size;
+	unsigned int rx_urb_size;
+	unsigned int ep_type;
+	unsigned int iface_id;
+	unsigned int qmap_mode;
+	unsigned int qmap_version;
+	unsigned int dl_minimum_padding;
+	char ifname[WWAND_RMNET_MAX_LINKS][16];
+	unsigned char mux_id[WWAND_RMNET_MAX_LINKS];
+} wwand_rmnet_info_t;
+
+static uc_value_t *
+qmit_rmnet_info(uc_vm_t *vm, size_t nargs)
+{
+	uc_value_t *name = uc_fn_arg(0);
+	/* Room for a driver whose struct grew: the ioctl writes sizeof(ITS struct)
+	   with no regard for ours. 1 KB is ~6x the 164 bytes in the vendor source
+	   and costs nothing on the stack. */
+	union {
+		wwand_rmnet_info_t info;
+		unsigned char slack[1024];
+	} buf;
+	wwand_rmnet_info_t *info = &buf.info;
+	struct ifreq ifr;
+	uc_value_t *obj, *names, *ids;
+	int fd, rc, i;
+
+	last_errno = 0;
+
+	if (ucv_type(name) != UC_STRING) {
+		last_errno = EINVAL;
+		return NULL;
+	}
+
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+	if (fd < 0) {
+		last_errno = errno;
+		return NULL;
+	}
+
+	memset(&buf, 0, sizeof(buf));
+	memset(&ifr, 0, sizeof(ifr));
+	strncpy(ifr.ifr_name, ucv_string_get(name), IFNAMSIZ - 1);
+	ifr.ifr_data = (void *)&buf;
+
+	rc = ioctl(fd, WWAND_RMNET_INFO_IOCTL, &ifr);
+	last_errno = (rc < 0) ? errno : 0;
+	close(fd);
+
+	/* Not a vendor QMAP driver, or not in QMAP mode. The expected answer on
+	   every mainline driver — the caller falls back to its derivation. */
+	if (rc < 0)
+		return NULL;
+
+	/* A struct that is not exactly ours is one we cannot read: `size` is the
+	   only version marker, and at a different one the offsets below mean
+	   whatever that driver put there. EPROTO so the caller can tell this apart
+	   from "the ioctl refused", which is the ordinary case. */
+	if (info->size != sizeof(wwand_rmnet_info_t)) {
+		last_errno = EPROTO;
+		return NULL;
+	}
+
+	obj = ucv_object_new(vm);
+
+	ucv_object_add(obj, "rx_urb_size", ucv_uint64_new(info->rx_urb_size));
+	ucv_object_add(obj, "ep_type", ucv_uint64_new(info->ep_type));
+	ucv_object_add(obj, "iface_id", ucv_uint64_new(info->iface_id));
+	ucv_object_add(obj, "qmap_mode", ucv_uint64_new(info->qmap_mode));
+	ucv_object_add(obj, "qmap_version", ucv_uint64_new(info->qmap_version));
+	ucv_object_add(obj, "dl_minimum_padding", ucv_uint64_new(info->dl_minimum_padding));
+
+	/* Only the first `qmap_mode` entries are meaningful — the arrays are fixed
+	   at 8 and the rest is zero padding, not channels. */
+	names = ucv_array_new(vm);
+	ids = ucv_array_new(vm);
+
+	for (i = 0; i < WWAND_RMNET_MAX_LINKS && (unsigned int)i < info->qmap_mode; i++) {
+		char nm[17];
+
+		memcpy(nm, info->ifname[i], 16);
+		nm[16] = 0;
+
+		ucv_array_push(names, ucv_string_new(nm));
+		ucv_array_push(ids, ucv_uint64_new(info->mux_id[i]));
+	}
+
+	ucv_object_add(obj, "ifname", names);
+	ucv_object_add(obj, "mux_id", ids);
+
+	return obj;
+}
+
 static const uc_function_list_t global_fns[] = {
 	{ "open",          qmit_open },
 	{ "open_tty",      qmit_open_tty },
@@ -1593,6 +1742,7 @@ static const uc_function_list_t global_fns[] = {
 	{ "rmnet_mux_id",  qmit_rmnet_mux_id },
 	{ "rmnet_flags_set", qmit_rmnet_flags_set },
 	{ "rmnet_tx_aggr", qmit_rmnet_tx_aggr },
+	{ "rmnet_info",    qmit_rmnet_info },
 	{ "set_iface_token", qmit_set_iface_token },
 	{ "last_error",    qmit_last_error },
 	{ "syslog_open",   qmit_syslog_open },

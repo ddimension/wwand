@@ -137,10 +137,40 @@ return {
 	child_name: (netdev, entry) => entry.name ?? vendor_child(netdev, entry.id),
 
 	// ...and the id the modem must tag it with, which is the driver's, not the
-	// config's: priv->mux_id = QUECTEL_QMAP_MUX_ID(0x81) + offset_id, i.e.
-	// 0x80 + channel. Written as the driver's arithmetic rather than as a bit
-	// set, which only happens to agree while the channel stays below 128.
-	map_id: (entry) => 0x80 + entry.id,
+	// config's.
+	//
+	// ASKED FIRST, derived second. The driver reports its own mux ids through
+	// SIOCDEVPRIVATE+3 alongside the names it gave the children, so the two can
+	// be paired — which is the only thing that stays right if the vendor ever
+	// renumbers. The arithmetic below is the fallback and was the whole answer
+	// until this landed: priv->mux_id = QUECTEL_QMAP_MUX_ID(0x81) + offset_id,
+	// i.e. 0x80 + channel. Written as the driver's arithmetic rather than as a
+	// bit set, which only happens to agree while the channel stays below 128.
+	//
+	// MATCHED ON THE SUFFIX, not the whole name. RMNET_INFO.ifname holds what
+	// the driver called each child in its probe and is never updated, while
+	// this datapath renames both the parent and the children onto their stable
+	// wwandN names — so by the time map_id runs, a full-name comparison can
+	// only miss, fall back to the arithmetic, and quietly defeat the point of
+	// asking. The channel number survives that: the driver names them
+	// `<parent>_<n>`, so the trailing `_<n>` identifies the channel whatever
+	// the stem has become.
+	map_id: (entry, netdev, fx) => {
+		let info = (netdev && type(fx?.rmnet_info) == 'function')
+			? fx.rmnet_info(netdev) : null;
+		let suffix = sprintf('_%d', entry.id);
+
+		for (let i = 0; i < length(info?.ifname ?? []); i++) {
+			let nm = info.ifname[i] ?? '';
+
+			if (length(nm) > length(suffix) &&
+			    substr(nm, length(nm) - length(suffix)) == suffix &&
+			    info.mux_id[i] != null)
+				return info.mux_id[i];
+		}
+
+		return 0x80 + entry.id;
+	},
 
 	// no driver format to program (there is no `qmi` sysfs group) and therefore
 	// no reason to bounce the parent — which matters here more than elsewhere:
@@ -181,15 +211,36 @@ return {
 	// `qmap_size`. So the size is not a guess about the version: both come from
 	// the same table entry, and reading one tells us the other.
 	//
-	// The authoritative answer is the ioctl quectel-cm uses — 0x89F3
-	// (SIOCDEVPRIVATE+3), which fills RMNET_INFO with qmap_version, the mux ids,
-	// rx_urb_size and dl_minimum_padding in one call (same driver, line ~1759).
-	// wwand has no ioctl helper in its native module yet; when it grows one this
-	// derivation should be replaced by it, because a table read through a
-	// side-channel stays a table read. Until then an UNKNOWN size stays on
+	// THE AUTHORITATIVE ANSWER IS THE IOCTL, and wwand asks it first now:
+	// 0x89F3 (SIOCDEVPRIVATE+3), the call quectel-cm makes, fills RMNET_INFO
+	// with qmap_version, the mux ids, rx_urb_size and dl_minimum_padding in one
+	// go (mhi_netdev_quectel.c:2556-2559, struct at :283-293). The size
+	// derivation below is what happens when it does NOT answer, which is every
+	// mainline driver and every vendor driver not in QMAP mode — a table read
+	// through a side channel stays a table read, but it is the right fallback
+	// because it reads the same table entry. An UNKNOWN size stays on
 	// plain QMAP rather than guessing upwards: declaring v5 wrongly is the
 	// failure above, declaring v1 wrongly costs only checksum offload.
 	qmap_versions: (fx, netdev) => {
+		// The driver's own answer, when it gives one. `qmap_version` is the
+		// format enum the vendor header spells out — 5 is plain QMAP, 9 is v5
+		// (mhi_netdev_quectel.c: `u32 qmap_version; // 5 ~ QMAP V1, 9 ~ QMAP
+		// V5`) — so this is the same table entry the size derivation reaches
+		// through a side channel, read directly.
+		let info = (type(fx?.rmnet_info) == 'function') ? fx.rmnet_info(netdev) : null;
+
+		if (info?.qmap_version == 9)
+			return [ 5, 1 ];
+
+		if (info?.qmap_version == 5)
+			return [ 1 ];
+
+		if (info != null)
+			fx.log('info', sprintf('rmnet_nss: driver reports qmap_version %J, which is neither 5 (v1) nor 9 (v5) — falling back to the size derivation',
+				info.qmap_version));
+
+		// No ioctl (mainline driver, or not in QMAP mode): derive it from the
+		// size, which comes from the same compile-time table entry.
 		let raw = fx.read(vendor_attr(netdev, 'qmap_size'));
 		let kb = raw ? (+trim(raw) / 1024) : 0;
 
@@ -222,12 +273,28 @@ return {
 	// the modem's driver bound or it did not.
 	status: (fx, netdev) => {
 		let size = fx.read(vendor_attr(netdev, 'qmap_size'));
+		let info = (type(fx?.rmnet_info) == 'function') ? fx.rmnet_info(netdev) : null;
 
-		return {
+		let out = {
 			nss_shim: fx.exists('/sys/module/rmnet_nss') ? 'loaded' : 'absent',
 			qmap_mode: qmap_mode(fx, netdev),
 			qmap_size: size ? +trim(size) : null,
 		};
+
+		// Reported by the driver rather than derived, when it answers. Worth
+		// showing because it is the difference between "we worked this out" and
+		// "it told us" — and `dl_minimum_padding` is not available anywhere
+		// else at all: no sysfs attribute carries it, so without this ioctl the
+		// value simply does not exist outside the driver.
+		if (info) {
+			out.driver_reported = true;
+			out.qmap_version = info.qmap_version;
+			out.rx_urb_size = info.rx_urb_size;
+			out.dl_minimum_padding = info.dl_minimum_padding;
+			out.mux_id = info.mux_id;
+		}
+
+		return out;
 	},
 
 	// Adopt, never create — then rename onto the context's stable name, which is

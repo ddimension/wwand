@@ -448,6 +448,31 @@ export function default_fx(log)
 		return ok;
 	};
 
+	// What the VENDOR QMAP driver says about its own setup, or null.
+	//
+	// SIOCDEVPRIVATE+3 (0x89F3) on Quectel's out-of-tree drivers — the call
+	// quectel-cm makes. It answers only while the driver is in rmnet mode, so
+	// null is the ordinary result on every mainline driver and the caller keeps
+	// whatever it derived. See the helper in io/src/wwand-io.c for the struct.
+	self.rmnet_info = (name) => {
+		let qmit = require('wwand_io');
+
+		// robust against an older wwand_io.so without this getter
+		if (type(qmit.rmnet_info) != 'function')
+			return null;
+
+		let info = qmit.rmnet_info(name);
+
+		// last_error distinguishes the ordinary refusal (EOPNOTSUPP — not a
+		// vendor QMAP driver, or not in QMAP mode) from a driver that answered
+		// with a struct we cannot read (EPROTO). Both yield null; only the
+		// second is worth noticing.
+		if (!info)
+			self.last_error = qmit.last_error();
+
+		return info;
+	};
+
 	return self;
 };
 

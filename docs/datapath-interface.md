@@ -229,6 +229,36 @@ case needs **no imports at all**:
 | `ctx.child_mtu(mtu, what)` | the configured MTU or 1500, invalid values logged |
 | `ctx.child_name(entry)` | **the** naming rule — the same one prune and the rename check use |
 
+### `fx.rmnet_info(netdev)` — asking the vendor driver instead of deriving
+
+Quectel's out-of-tree QMAP drivers answer `SIOCDEVPRIVATE+3` (**0x89F3**) with
+an `RMNET_INFO` struct — the call `quectel-cm` makes. It carries, in one go,
+what the datapath otherwise has to work out:
+
+| field | otherwise |
+|---|---|
+| `qmap_version` | derived from the exported `qmap_size` (the low byte of the same compile-time table entry) |
+| `mux_id[]`, `ifname[]` | computed as `0x80 + channel` from a constant read out of the driver source |
+| `rx_urb_size` | the driver programs it itself |
+| `dl_minimum_padding` | **nowhere else at all** — no sysfs attribute carries it |
+
+`null` is the ordinary answer: every mainline driver refuses the ioctl, and so
+does a vendor driver that is not in QMAP mode. A datapath that uses it must keep
+whatever it derived for that case — `rmnet_nss` does, and its derivation is
+still the only path exercised on mainline hardware.
+
+Two properties of the protocol shape the helper, and both are worth knowing
+before adding a second caller. It carries **no userspace buffer length** — the
+driver copies its own `sizeof` — so the helper reads into an over-sized buffer;
+and `size` is the **only** version marker, so the match is exact rather than
+`>=`: a different struct is one whose offsets we cannot interpret. A rejected
+answer reports `EPROTO` through `fx.last_error`, an unsupported one `EOPNOTSUPP`.
+
+One thing the struct does *not* survive: `ifname[]` holds the names the driver
+gave the children **in its probe** and is never updated, while this datapath
+renames both parent and children onto their stable `wwandN` names. Pair the
+entries by the channel suffix (`_<n>`), not by the whole name.
+
 ### The three flags, and why they are behavioural
 
 Defaults are what the QMI mux backends do, so an add-on that says nothing gets
