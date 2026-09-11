@@ -20,6 +20,7 @@ import * as fs from 'fs';
 import * as tlv from 'wwand.codec.tlv';
 import * as qmi_backend from 'wwand.qmi_backend';
 import * as context_common from 'wwand.context_common';
+import * as cfgmod from 'wwand.config';
 
 export function install(self, o)
 {
@@ -170,7 +171,13 @@ export function install(self, o)
 				// netdev's kernel statistics so usage display and the zero-rx
 				// watchdog see real numbers.
 				if (valid && !agg.rx_packets && !agg.tx_packets) {
-					let mux = +(self.config.mux_id ?? 0);
+					// the EFFECTIVE channel, not the configured one. An
+					// `auto` channel that the modem refused was never built,
+					// so mux_link names a device that does not exist — and
+					// this fallback would then find nothing, leave the
+					// counters at zero and let the zero-rx watchdog tear down
+					// a session that is carrying traffic on the parent.
+					let mux = cfgmod.effective_mux_id(self.config, self.modem.datapath);
 					// `parent` is what the QMI datapath stores (netlink.setup may
 					// have moved the raw netdev to a different name); `netdev` is
 					// the MBIM/NCM spelling. Reading only `netdev` made this

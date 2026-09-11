@@ -823,7 +823,13 @@ export function telemetry_at(self)
 							cmd, AT_RETIRE_AFTER));
 					}
 				}
-				else if (!err && self._at_errors)
+				else if (self._at_errors)
+					// ANY other outcome breaks the streak, not just success.
+					// Counting a bare ERROR either side of a `+CME ERROR` or a
+					// timeout as "consecutive" would retire on evidence that is
+					// not about the firmware at all — those two say the modem is
+					// busy or the port is wedged, i.e. exactly the conditions
+					// under which a working command answers badly.
 					delete self._at_errors[cmd];
 
 				if (cb)

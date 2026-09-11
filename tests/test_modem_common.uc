@@ -93,6 +93,27 @@ for (let i = 0; i < 6; i++) {
 eq(length(mix_sent), 6, 'retire: a success in between resets the count — never retired');
 ok(!(mix._at_retired?.['AT+QTEMP']), 'retire: and nothing is recorded');
 
+// COUNTERPROOF 1b: "three consecutive" has to mean consecutive. A bare ERROR
+// on either side of a soft one is NOT a streak — `+CME ERROR` and a timeout say
+// the modem is busy or the port is wedged, which are exactly the conditions
+// under which a command the firmware DOES implement answers badly. Counting
+// through them would retire on evidence that is not about the firmware.
+let ivl_sent = [];
+let ivl_reply = { error: 'ERROR' };
+let ivl = {
+	_at_log: (l, m) => null,
+	at_telemetry: { send: (cmd, cb) => { push(ivl_sent, cmd); cb(ivl_reply, { lines: [] }); },
+	                close: () => null },
+};
+
+for (let r in [ { error: 'ERROR' }, { error: 'cme', code: '10' }, { error: 'ERROR' },
+                { error: 'timeout' }, { error: 'ERROR' }, { error: 'ERROR' } ]) {
+	ivl_reply = r;
+	mc.telemetry_at(ivl).send('AT+QNWINFO', () => null);
+}
+eq(length(ivl_sent), 6, 'retire: a soft error breaks the streak — six sends, nothing retired');
+ok(!(ivl._at_retired?.['AT+QNWINFO']), 'retire: and the command is not recorded');
+
 // COUNTERPROOF 2: only a BARE ERROR retires. `+CME ERROR: n` is a runtime
 // condition (SIM busy, no network) and a timeout is a wedged port — retiring on
 // either would silence telemetry that works perfectly once the modem settles.

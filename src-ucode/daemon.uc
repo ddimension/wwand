@@ -2257,7 +2257,11 @@ export function create(opts)
 			contexts[name] = {
 				interface: entry.cfg.interface,
 				modem: entry.cfg.modem,
-				mux_id: entry.cfg.mux_id,
+				// what is in force, so it cannot disagree with l3_device on
+				// the next line (a demoted `auto` context reports 0 and the
+				// parent, not channel 1 and a device that does not exist)
+				mux_id: cfgmod.effective_mux_id(entry.cfg,
+					self.modems[entry.cfg.modem]?.modem?.datapath),
 				l3_device: derive_netdev(entry),
 				state: entry.ctx?.state ?? 'UNBOUND',
 				last_error: entry.ctx?.last_error,
@@ -2444,7 +2448,13 @@ export function create(opts)
 		let chan = [];
 
 		for (let cname, centry in self.contexts) {
-			if (centry.cfg.modem != ref || !(centry.cfg.mux_id > 0))
+			// the EFFECTIVE channel: a demoted `auto` context has no mux child,
+			// and listing it here would report a channel that was never built —
+			// worse, derive_netdev() then yields the PARENT, so the parent would
+			// be counted among its own children and the aggregation ratio
+			// (parent frames vs child packets) would be meaningless.
+			if (centry.cfg.modem != ref ||
+			    !(cfgmod.effective_mux_id(centry.cfg, entry.modem?.datapath) > 0))
 				continue;
 
 			// the live L3 device (same resolution status uses for l3_device):
@@ -2455,7 +2465,8 @@ export function create(opts)
 				continue;
 
 			push(children, l3);
-			push(chan, { mux_id: centry.cfg.mux_id, netdev: l3,
+			push(chan, { mux_id: cfgmod.effective_mux_id(centry.cfg, entry.modem?.datapath),
+			             netdev: l3,
 			             interface: centry.cfg.interface });
 		}
 

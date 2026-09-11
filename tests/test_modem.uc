@@ -973,6 +973,82 @@ scenario('datapath-auto-adopts', {
 			'auto-adopts: and says why, rather than demoting into a silent mismatch');
 	});
 
+// AN ADOPTING DATAPATH IS NOT DEMOTABLE AT *ANY* OF THE THREE SITES.
+//
+// The terminal "aggregation disabled" case had the guard from the start; the
+// WDA-less gate and the 802.3 echo did not, and the invariant is worthless if
+// it holds at one site out of three. Both of these would have announced an
+// unmuxed 802.3 parent for a device whose vendor driver had already built QMAP
+// children at module load — an interface that comes up and carries nothing,
+// and whose children the ethernet path's ordinary pruning would then remove.
+let adopter = () => ({
+	proto: [ 'qmi' ],
+	qmap: true,
+	prune: (fx, netdev) => [],     // `prune` is what marks an adopter
+	links: (fx, ctx) => ({ ok: true, mux_devs: [], map_ids: {} }),
+	probe: (fx, netdev) => true,
+});
+
+let dpfx_adopt_nowda = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-auto-adopts-no-wda', {
+	// WDA (service 26) absent from the version table — the same way the
+	// pinned-channel `wda_unavailable_for_mux` case is built
+	handlers: base_handlers({
+		GET_VERSION_INFO: { services: [
+			{ service: 1, major: 1, minor: 60 },
+			{ service: 2, major: 1, minor: 14 },
+			{ service: 3, major: 1, minor: 25 },
+			{ service: 11, major: 1, minor: 22 },
+		] },
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'vendorqmap',
+		mux_links: [ { id: 1 } ], mux_auto: true,
+		dgram_size: 0, fx: dpfx_adopt_nowda,
+		plugins: { vendorqmap: adopter() },
+	},
+}, 'error',
+	(modem, mock, events) => {
+		let errs = filter(events, (e) => e.event == 'error');
+
+		ok(length(errs) > 0, 'adopt-nowda: fails instead of demoting to ethernet');
+		eq(errs[0].data?.err?.error, 'wda_unavailable_for_mux',
+			'adopt-nowda: named for what is missing');
+	});
+
+let dpfx_adopt_llp = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-auto-adopts-llp', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => ({
+			qos: 0, llp: 1, ul_protocol: 0, dl_protocol: 0,
+			dl_max_datagrams: 0, dl_max_size: 0,
+		}),
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'vendorqmap',
+		mux_links: [ { id: 1 } ], mux_auto: true,
+		dgram_size: 0, fx: dpfx_adopt_llp,
+		plugins: { vendorqmap: adopter() },
+	},
+}, 'error',
+	(modem, mock, events) => {
+		let errs = filter(events, (e) => e.event == 'error');
+
+		ok(length(errs) > 0, 'adopt-llp: fails instead of demoting to ethernet');
+		eq(errs[0].data?.err?.error, 'no_raw_ip_support',
+			'adopt-llp: named for what the modem refused');
+	});
+
 // A MODEM THAT REFUSES RAW IP. wwand asks for raw-IP framing everywhere except
 // the `ethernet` pseudo-mode; the modem echoes its choice in the WDA answer's
 // `llp`, and that echo used to be logged and never read. Carrying on would put

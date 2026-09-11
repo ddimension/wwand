@@ -91,6 +91,10 @@ export function setup(self, dp, o, next)
 		// otherwise the plain raw-IP parent is exactly what this modem wanted,
 		// and it is what an unmuxed modem got before the probes ran at all.
 		if (backend == null) {
+			// No adopts-check here, and none is needed: `backend == null` means
+			// NOTHING claimed this device, so there is no adopting datapath to
+			// contradict. (`caps` is not even in scope yet — it is derived from
+			// the chosen backend below.)
 			if (need_mux && !mux_auto)
 				return fail('datapath', { error: 'mux_backend_unavailable', mux: dp.mux });
 
@@ -264,7 +268,14 @@ export function setup(self, dp, o, next)
 			// no QMAP: the kernel keeps the driver's 802.3 framing and the
 			// honest datapath is `ethernet`. For an auto channel that is a
 			// fallback like any other; for a pinned one it stays fatal.
-			if (need_mux && !mux_auto)
+			// An ADOPTING datapath cannot be demoted here any more than at the
+			// terminal refusal below: its vendor driver built QMAP children at
+			// module load, so the parent carries QMAP framing whatever wwand
+			// decides. Announcing an unmuxed 802.3 parent would leave the
+			// interface up and unable to carry anything — and the ethernet path
+			// runs the ordinary stale-child pruning, which would remove the
+			// children the adopter exists to keep.
+			if (need_mux && (!mux_auto || caps.adopts))
 				return fail('datapath', { error: 'wda_unavailable_for_mux' });
 
 			if (need_mux)
@@ -342,7 +353,9 @@ export function setup(self, dp, o, next)
 					// so a modem that will not do raw IP cannot carry QMAP at
 					// all. `ethernet` is exactly the datapath for that.
 					if (!caps.llp_802_3 && wdata.llp == wdamod.LLP_802_3) {
-						if (need_mux && !mux_auto)
+						// ...and an adopting datapath is not demotable here
+						// either, for the reason given at the WDA gate above.
+						if (need_mux && (!mux_auto || caps.adopts))
 							return fail('wda_format', { error: 'no_raw_ip_support', echo: wdata });
 
 						log('notice', 'modem answered the data-format request with 802.3 framing after raw-IP was asked for — it cannot do raw IP, so the kernel keeps 802.3 too (arp off, p2p) and nothing is muxed');
