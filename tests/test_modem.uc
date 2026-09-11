@@ -832,6 +832,58 @@ scenario('datapath-unmuxed', {
 			'nomux: no mux child created');
 	});
 
+// A MODEM THAT DOES NO QMAP AT ALL, on a config that asks for mux channels.
+//
+// "protocol 0" in the WDA answer means aggregation DISABLED — it is an answer,
+// not a refusal. The Huawei E392 (M9200B, 2012 firmware) has WDA 1.0 and gives
+// llp 2 / proto 0 to v5, v4 and v1 alike, so the ladder bottoms out with
+// nothing agreed (observed on a Chateau, 2026-09-11). Muxing is then genuinely
+// impossible and the bring-up must fail — but it has to say WHY and name the
+// option that fixes it, instead of reporting "aggregation_rejected" with a raw
+// echo, which reads like a protocol error and tells an operator nothing.
+//
+// (Unmuxed, this modem never gets asked in the first place — see
+// `datapath-unmuxed` above. That is the path the same stick takes on a current
+// build.)
+let dpfx_noqmap = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-no-qmap', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => ({
+			qos: 0, llp: 2, ul_protocol: 0, dl_protocol: 0,
+			dl_max_datagrams: 0, dl_max_size: 0,
+		}),
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [ { id: 1 } ], dgram_size: 0, fx: dpfx_noqmap,
+	},
+}, 'error',
+	(modem, mock, events) => {
+		eq(length(mock.calls_for('SET_DATA_FORMAT')), 3,
+			'noqmap: the whole ladder was offered — v5, v4, v1');
+
+		let errs = filter(events, (e) => e.event == 'error');
+
+		ok(length(errs) > 0, 'noqmap: the bring-up fails, muxing really is impossible');
+		eq(errs[0].data?.stage, 'wda_format', 'noqmap: fails in the format stage');
+		eq(errs[0].data?.err?.error, 'no_qmap_support',
+			'noqmap: named as "no QMAP support", not as a rejected protocol');
+		eq(errs[0].data?.err?.echo?.dl_protocol, 0,
+			'noqmap: the modem answer is carried for the record');
+
+		// Worth pinning because it is what an operator sees on the box: the
+		// daemon retries, so a permanent mismatch cycles ABSENT -> INIT ->
+		// ABSENT rather than settling. Whether that should become a sticky
+		// config error is a separate question; this records today's answer.
+		eq(errs[0].data?.action, 'retry',
+			'noqmap: today this retries rather than settling as a config error');
+	});
+
 // a modem that echoes the requested version downlink but a DIFFERENT one uplink
 // has not agreed to what was asked: both directions are configured from this one
 // answer (dl drives the rmnet ingress flags, ul the egress ones and the uplink

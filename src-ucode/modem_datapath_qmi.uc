@@ -317,8 +317,27 @@ export function setup(self, dp, o, next)
 						return negotiate(DAP_FOR[sprintf('%d', next_v)], next_v);
 					}
 
-					if (!aggr_ok)
-						return fail('wda_format', { error: 'aggregation_rejected', echo: wdata });
+					if (!aggr_ok) {
+						// "PROTOCOL 0" IS AN ANSWER, NOT A REFUSAL: it means
+						// aggregation disabled. A modem that gives it for every
+						// rung does not do QMAP at all — the Huawei E392
+						// (M9200B, 2012 firmware) has WDA 1.0 and answers
+						// llp 2 / proto 0 to v5, v4 and v1 alike (observed on a
+						// Chateau, 2026-09-11). Reporting that as
+						// "aggregation_rejected" with a raw echo tells an
+						// operator nothing and reads like a protocol error;
+						// what they need to know is that the modem cannot be
+						// muxed and which option to drop.
+						let none = (wdata.dl_protocol ?? 0) == 0 &&
+						           (wdata.ul_protocol ?? 0) == 0;
+
+						if (none)
+							log('err', sprintf('modem answered "aggregation disabled" to every QMAP version offered — this modem does not do QMAP, so it cannot carry mux channels; remove `option mux_id` from its interface to run it as a plain raw-IP modem'));
+
+						return fail('wda_format', {
+							error: none ? 'no_qmap_support' : 'aggregation_rejected',
+							echo: wdata });
+					}
 
 					// the modem may clamp the aggregation size; follow it —
 					// the shared tail does netlink.setup + record + announce
