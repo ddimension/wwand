@@ -14,6 +14,7 @@ import * as simops from 'wwand.simops';
 import * as hwops from 'wwand.hwops';
 import * as nlmod from 'wwand.netlink';
 import * as reconnect from 'wwand.reconnect';
+import * as recoverymod from 'wwand.recovery';
 import * as ctx_settings from 'wwand.ctx_settings';
 // module scope: the lazy backend loaders live outside create(), so they cannot
 // use its injected `log` dep and go to the shared sink directly
@@ -2074,6 +2075,43 @@ export function create(opts)
 	};
 
 	self.status = function() {
+		// One place that turns the persisted counters into something readable.
+		// `rung` is the FIRED index (how many rungs have gone off this outage),
+		// which is what makes "next" meaningful — the ladder fires each rung
+		// once per outage on a threshold crossing, so attempts alone cannot say
+		// whether one is still pending.
+		let recovery_view = (name, entry) => {
+			let c = entry.modem?.counters;
+
+			if (!c)
+				return null;
+
+			let fired = +(c.rung ?? 0);
+			let attempts = +(c.attempts ?? 0);
+			let table = recoverymod.rungs();
+			let next = null;
+
+			for (let i = 0; i < length(table); i++)
+				if (i >= fired) {
+					next = { at: table[i].at, action: table[i].action,
+					         in: (table[i].at > attempts) ? (table[i].at - attempts) : 0 };
+					break;
+				}
+
+			return {
+				attempts: attempts,
+				fired: fired,
+				// gated off until one exchange has succeeded in the selected
+				// protocol — a misdetected modem must never be repowered
+				armed: !!c.proto_ok,
+				rungs: map(table, (r, i) => ({ at: r.at, action: r.action,
+				                               fired: i < fired })),
+				next: next,
+				// what `usb_repower` would really do on THIS box for THIS modem
+				hardware: self.repower_plan ? self.repower_plan(name) : null,
+			};
+		};
+
 		let modems = {};
 
 		for (let name, entry in self.modems) {
@@ -2168,6 +2206,16 @@ export function create(opts)
 				// and any consumer expect). Coerced, because a status field
 				// should be a bool rather than the 0/1 the state file carries.
 				proven: !!entry.modem?.counters?.proto_ok,
+
+				// THE LADDER, not just the counter. `attempts` alone told an
+				// operator a number; what they need when a box is misbehaving
+				// is which escalations have already fired, what comes next and
+				// how far away it is — and, at the hardware rung, WHICH of the
+				// two actions their box would actually take. A Chateau with two
+				// modems and no per-modem reset_gpio cannot use the board
+				// power-cycle at all (hwops.board_gpio_ok), and nothing said so
+				// anywhere.
+				recovery: recovery_view(name, entry),
 			};
 		}
 

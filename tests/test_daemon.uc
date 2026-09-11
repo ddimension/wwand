@@ -535,7 +535,71 @@ delete rdeps.board.profile.reset_gpio;
 rp = rd.repower_modem('m0');
 eq(rp.action, 'power_cycle', 'repower single: falls back to power cycle');
 eq(cycles, 1, 'repower single: power_cycle fired');
+// THE PLAN MUST MATCH THE ACTION. The status page shows what a repower would do
+// on this box for this modem; if that answer came from a second copy of the
+// precedence it would drift from the one that fires. repower_modem() is built
+// on repower_plan(), so asking is the same as doing — minus the doing.
+rdeps.board.profile.reset_gpio = 'gpio900';
+rd.modems = { m0: mk_entry({}, false) };
+eq(rd.repower_plan('m0').action, 'reset_gpio', 'plan: board reset line, as the action takes');
+eq(rd.repower_plan('m0').source, 'board', 'plan: and says whose gpio it is');
+rd.modems = { m0: mk_entry({ reset_gpio: 'gpio7' }, false) };
+eq(rd.repower_plan('m0').gpio, 'gpio7', 'plan: a per-modem gpio wins');
+eq(rd.repower_plan('m0').source, 'modem', 'plan: named as the modem\'s own');
+
+// two modems and no per-modem gpio: the board lines would hit the wrong modem,
+// so the hardware rung has nothing to fire — and now says so instead of being
+// a silent no-op at the moment it matters
+rd.modems = { m0: mk_entry({}, false), m1: mk_entry({}, false) };
+eq(rd.repower_plan('m0').action, 'none', 'plan: multi-modem box cannot use board lines');
+eq(rd.repower_plan('m0').error, 'multi_modem_needs_reset_gpio',
+	'plan: and names why, which is what an operator has to act on');
+eq(rd.repower_modem('m0').error, 'multi_modem_needs_reset_gpio',
+	'plan: the action agrees with the plan');
+
 rd.shutdown();
+
+// --- the recovery ladder, as status reports it ------------------------------
+//
+// `attempts` alone is a number. What an operator needs when a box misbehaves is
+// which escalations have already fired, what comes next and how far off it is —
+// and at the hardware rung, WHICH of the two actions this box would take. The
+// numbers come from recovery.rungs() rather than a copy here, so the UI cannot
+// still say 8/16/24 after the ladder moves.
+(function() {
+	let sdeps = { ...rdeps };
+	let sd = daemon_mod.create({ timing: TIMING, deps: sdeps });
+
+	sdeps.board.profile.reset_gpio = 'gpio900';
+	sd.modems = { m0: { cfg: {}, modem: { stop: () => null,
+		counters: { attempts: 17, rung: 2, proto_ok: 1, proto_errors: 0 } } } };
+
+	let st = sd.status();
+	let r = st.modems.m0.recovery;
+
+	eq(r.attempts, 17, 'recovery view: attempts carried');
+	eq(r.fired, 2, 'recovery view: two rungs have gone off this outage');
+	eq(r.armed, true, 'recovery view: armed once the protocol has proven itself');
+	eq(length(r.rungs), 3, 'recovery view: the whole ladder is listed');
+	eq(r.rungs[0].fired, true, 'recovery view: opmode cycle already fired');
+	eq(r.rungs[2].fired, false, 'recovery view: the hardware rung has not');
+	eq(r.next?.action, 'usb_repower', 'recovery view: names what comes next');
+	eq(r.next?.at, 24, 'recovery view: and at which attempt count');
+	eq(r.next?.in, 7, 'recovery view: and how many attempts away it is');
+
+	// WHAT THE HARDWARE RUNG WOULD ACTUALLY DO on this box, for this modem
+	eq(r.hardware?.action, 'reset_gpio', 'recovery view: a reset line, not a power cycle');
+	eq(r.hardware?.source, 'board', 'recovery view: and whose line it is');
+
+	// the ladder is gated until one exchange has succeeded in the selected
+	// protocol — a misdetected modem must never be repowered, and the page has
+	// to show that rather than promising an escalation that cannot fire
+	sd.modems.m0.modem.counters.proto_ok = 0;
+	eq(sd.status().modems.m0.recovery.armed, false,
+		'recovery view: not armed while the protocol is unproven');
+
+	sd.shutdown();
+})();
 
 // --- idempotent reload diff -------------------------------------------------
 // apply_config must bounce ONLY what actually changed: an unrelated edit leaves

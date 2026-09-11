@@ -92,14 +92,17 @@ export function install(self, o)
 	// exactly the one they are most likely to be trying to revive. Keep this
 	// path direct — routing it through the primitive to "share the code" would
 	// silently take the button away in the case it is for.
-	self.repower_modem = function(ref) {
+	// WHAT a repower would do, without doing it. Extracted so the status page
+	// can show the operator which of the two hardware actions their box would
+	// actually take — and extracted rather than reimplemented there, because a
+	// second copy of this precedence is a second answer that drifts from the
+	// first. repower_modem() below is its only other caller.
+	self.repower_plan = function(ref) {
 		if (!board)
-			return { error: 'no_board_profile' };
+			return { action: 'none', error: 'no_board_profile' };
 
-		// a named-but-unknown ref must error — silently falling back to the
-		// first modem would pulse ANOTHER modem's reset GPIO
 		if (ref && !self.modems[ref])
-			return { error: 'no_such_modem', ref: ref };
+			return { action: 'none', error: 'no_such_modem', ref: ref };
 
 		let cfg = ref ? self.modems[ref].cfg : null;
 
@@ -109,7 +112,33 @@ export function install(self, o)
 		// board defaults only when they unambiguously target this modem (see
 		// board_gpio_ok): per-modem reset_gpio is the multi-modem path.
 		let rg = cfg?.reset_gpio ?? (board_gpio_ok() ? board.profile?.reset_gpio : null);
-		let off = cfg?.repower_time ? +cfg.repower_time * 1000 : null;
+
+		if (rg)
+			return { action: 'reset_gpio', gpio: rg,
+			         source: cfg?.reset_gpio ? 'modem' : 'board',
+			         off_ms: cfg?.repower_time ? +cfg.repower_time * 1000 : null };
+
+		if (!board_gpio_ok())
+			return { action: 'none', error: 'multi_modem_needs_reset_gpio' };
+
+		// `has_power` is REPORTED, not gated on. The old path simply called
+		// power_cycle() and reported no_power_control when the call came back
+		// false, and turning that into a precondition changed behaviour: a
+		// board object without the flag (the test's, and any profile that does
+		// not set it) stopped power-cycling at all. A plan describes the
+		// intent; whether the pins are there is the board's answer to give.
+		return { action: 'power_cycle', has_power: !!board.has_power,
+		         off_ms: cfg?.repower_time ? +cfg.repower_time * 1000 : null };
+	};
+
+	self.repower_modem = function(ref) {
+		let plan = self.repower_plan(ref);
+
+		if (plan.error && plan.action == 'none')
+			return { error: plan.error, ref: plan.ref };
+
+		let rg = (plan.action == 'reset_gpio') ? plan.gpio : null;
+		let off = plan.off_ms;
 
 		// say who pulsed: the recovery ladder logs its own line and modem_reset
 		// logs 'admin-requested', but this path used to log nothing at all, so
@@ -122,9 +151,6 @@ export function install(self, o)
 			return board.reset_pulse(rg, off) ?
 				{ ok: true, action: 'reset', gpio: rg } : { error: 'reset_gpio_unavailable' };
 		}
-
-		if (!board_gpio_ok())
-			return { error: 'multi_modem_needs_reset_gpio' };
 
 		log('warn', sprintf('modem %s: admin-requested repower (board power cycle)', ref ?? '-'));
 

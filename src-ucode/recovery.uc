@@ -46,6 +46,15 @@ const RUNGS = [
 	{ at: 24, action: 'usb_repower' },  // board repower / reset-GPIO pulse
 ];
 
+// The ladder, for anyone who has to explain a box's behaviour rather than
+// produce it — the status page shows which rungs have fired and what comes
+// next. Exported from here so there is one table, not a copy in the UI that
+// says 8/16/24 long after these numbers moved.
+export function rungs()
+{
+	return map(RUNGS, (r) => ({ at: r.at, action: r.action }));
+};
+
 // how many rungs a given attempt count has already passed (used only to default
 // the fired-rung index when restoring a legacy state file that predates `rung`).
 function rungs_reached(n)
