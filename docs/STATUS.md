@@ -330,12 +330,17 @@ nothing repainted over the mask.
 ## Before a release
 
 1. `cd tests && sh run_tests.sh` — all green.
-2. `tools/check-packaging.py --makefile ../repository/wwand/Makefile` — and again
+2. `tools/check-export-terminators.py` — the suite CANNOT catch this one. The
+   host ucode accepts an `export function` closed with a bare `}`; OpenWrt's
+   refuses the module and blames the next export several lines down. It shipped
+   that way in v1.6.4 (`wwandctl_fmt.uc`, ddimension/wwand#17) with every test
+   green.
+3. `tools/check-packaging.py --makefile ../repository/wwand/Makefile` — and again
    with `--makefile <pkgs>/net/wwand/Makefile --tarball <release>.tar.gz`.
-3. Tag, pinning the **commit** (`git rev-parse vX.Y.Z^{commit}`), never the tag
+4. Tag, pinning the **commit** (`git rev-parse vX.Y.Z^{commit}`), never the tag
    object.
-4. Feed: bump `PKG_RELEASE`/`PKG_SOURCE_VERSION`/`_DATE`, then
+5. Feed: bump `PKG_RELEASE`/`PKG_SOURCE_VERSION`/`_DATE`, then
    `scripts/update-hashes.sh` — and verify the Makefile actually changed.
-5. One feed push, then wait: the feed CI is `cancel-in-progress`.
+6. One feed push, then wait: the feed CI is `cancel-in-progress`.
 
-The traps in steps 3-5 have each fired at least once; `gotchas.md` says how.
+The traps in steps 2 and 4-6 have each fired at least once; `gotchas.md` says how.

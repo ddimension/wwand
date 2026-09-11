@@ -218,7 +218,12 @@ be decided by load order; `_wwand_apply_settings` builds the netifd update).
 - **Module-level `export function f() {…}` MUST end with `};`** — the OpenWrt
   ucode parser errors ("Expecting ';'" at the next export) without it; the
   newer host-built ucode is lenient, so `run_tests.sh` does NOT catch this.
-  Always sanity-import changed modules on the target after deploy.
+  **`tools/check-export-terminators.py` does** — run it before every release;
+  it is step 2 of the checklist in docs/STATUS.md. This warning existed and was
+  still shipped in v1.6.4 (`wwandctl_fmt.uc`, a file extracted that same day),
+  which is why it is now enforced rather than remembered. Always sanity-import
+  changed modules on the target after deploy: `ucode -L /usr/share/ucode -e
+  "import * as m from 'wwand.<module>';"`.
 
 ## Build / test / deploy
 - **Tests (host):** `cd tests && sh run_tests.sh` — all suites must be green

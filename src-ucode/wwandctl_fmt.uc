@@ -59,7 +59,7 @@ export function fmt_plmn(reg)
 		return sprintf('%s (%s)', name, pair);
 
 	return pair ?? (length(name) ? name : '-');
-}
+};
 
 export function fmt_sig(sig)
 {
@@ -85,7 +85,7 @@ export function fmt_sig(sig)
 		push(parts, sprintf('rssi %d dBm', sig.rssi));
 
 	return length(parts) ? join(', ', parts) : '-';
-}
+};
 
 export function reg_text(m)
 {
@@ -102,4 +102,4 @@ export function reg_text(m)
 	return m.registration_detail?.reject_text
 		? sprintf('not registered: %s', m.registration_detail.reject_text)
 		: 'not registered';
-}
+};
