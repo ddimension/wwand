@@ -226,9 +226,10 @@ the top point of confusion, so keep them straight:
   `path`/`serial`/`imei` over it on multi-modem boxes.
 - On **`config interface`** it is the **L3 device name** — the datapath device
   the connection runs on. Leave it empty and the daemon assigns a stable
-  **`wwand0…wwand100`** name (auto, one flat namespace across all modems),
+  **`wwand0…wwand100`** name (one flat namespace across all modems),
   **renames the kernel netdev** (or creates the mux child) to match, and writes
-  the name back here. Set a value to pin it. This `wwandN` name is what you
+  the name back here. That name is only a SUGGESTION — set any name you like and
+  it is used instead, muxed or not. Whichever name ends up here is what you
   reference in a VRF `list ports` or a firewall `option device`. Full rules in
   [Stable L3 names](#deployment-examples) below.
 
@@ -486,8 +487,9 @@ alongside `option modem`:
 config interface 'wan'
 	option proto 'wwand'             # wwand manages this proto and no other
 	option modem 'm0'                # the wwand_modem this connection runs on
-	option device 'wwand0'           # optional: pin the stable L3 name (else auto)
-	option mux_id '1'                # QMAP channel; the L3 device gets a wwandN name
+	option device 'wwand0'           # optional: pin the L3 name, any name you like
+	                                 #   (else wwand suggests the next wwandN)
+	option mux_id '1'                # QMAP channel: 1-254, or 'auto'
 	option profile '1'               # 3GPP profile (CID) for the attach + bearer
 	                                 #   (default: mux_id, else 1)
 	option apn 'internet'            # or '#2' = use modem profile 2 untouched
@@ -874,22 +876,33 @@ config interface 'dmz'
 	option ip6assign '64'             # carve a /64 for the DMZ (see Dual-stack)
 ```
 
-**Stable L3 names (`wwand0` … `wwand100`).** Every wwand interface gets a
-deterministic L3 device name, independent of the modem and of USB enumeration
-order:
+**Stable L3 names.** Every wwand interface gets a deterministic L3 device name,
+independent of the modem and of USB enumeration order. **The name is yours** —
+`wwandN` is only what wwand *suggests* when nothing was said, which is the case
+for a new device or for autosetup:
 
+- An explicit `option device` **pins** the name, on a muxed interface as much as
+  an unmuxed one (a legacy `wwan0m1`-style muxed name additionally derives the
+  mux id from its `…mN` suffix). Any name is accepted; a `/dev/...` path is not
+  a name at all but a control device, and is ignored here.
 - With no `option device`, the daemon auto-assigns `wwand0`, `wwand1`, … in
   config order — one flat namespace across all modems and both mux and non-mux
   interfaces.
-- An explicit `option device` **pins** the name (any netdev name; a legacy
-  `wwan0m1`-style muxed name additionally derives the mux id from its `…mN`
-  suffix, and a bare parent name is never used for a mux child).
+- **One exception, and it is a disambiguation rather than a restriction:** on a
+  *muxed* interface, a name that is this modem's own parent netdev (`option
+  device wwan0` where the modem is bound to `wwan0`) reads as "this modem is the
+  one on wwan0" — the meaning `option device` carries in uqmi-style configs —
+  far more often than as "call the mux child wwan0". Taking it as a child name
+  would put the child on the parent's name and displace the parent, which works
+  but is nobody's intent. wwand keeps the suggested name there and **says so in
+  a warning**; pin the child with any other name.
 - **Non-mux datapaths** (QMI/MBIM without mux, NCM/ECM): the daemon **renames
   the kernel netdev** (netlink) to the assigned name. A name conflict is logged
   as an error and the kernel name is kept.
 - **Mux children** are created directly under the assigned name.
 
-**Muxing is opt-in** (`option mux_id 'N'`, or a muxed explicit device name);
+**Muxing is opt-in** (`option mux_id 'N'` or `'auto'`, or a muxed explicit device
+name);
 without it QMI/MBIM run raw on the modem netdev (single PDN); **NCM never
 muxes**. Enabling muxing on QMI is also a throughput win — see
 [Performance & tuning](#performance--tuning). Whichever form applies, the

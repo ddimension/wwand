@@ -1370,11 +1370,12 @@ am1.apply_config(config.parse({ network: {
 	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
 	a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: 'auto' },
 } }));
-// the ASSIGNED wwandN, not the `option device` — a muxed context discards an
-// explicit device name (the child is claimed under the stable one), and an auto
-// context has to answer the same in both outcomes or the name would still move
-eq(am1.modems.m0?.l3_name, 'wwand0',
-	'automux-name: a demotable modem renames its parent to the stable name');
+// the name the interface pinned: an explicit `option device` is honoured on a
+// muxed context too (wwandN is only what wwand suggests when nobody said
+// otherwise), and a demotable modem has to answer the same in BOTH outcomes or
+// the device name would still move with the modem
+eq(am1.modems.m0?.l3_name, 'l3a',
+	'automux-name: a demotable modem renames its parent to the pinned name');
 
 am_opts = {};
 let am2 = am_daemon();

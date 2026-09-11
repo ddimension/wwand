@@ -169,6 +169,35 @@ export function effective_mux_id(cfg, dp)
 	return (dp.backend == 'raw_ip' || dp.backend == 'ethernet') ? 0 : id;
 };
 
+// The L3 name an interface pins, or null to take wwand's suggestion (wwandN).
+//
+// A path is a control device and was never a name. Everything else is the
+// operator's choice — EXCEPT a muxed context naming its own modem's parent
+// netdev, which reads as "this modem is the one on wwan0" far more often than
+// as "call the mux child wwan0"; see the call site.
+function l3_pin(device, muxed, modem, iface, warnings)
+{
+	if (device == null || device == '' || substr(device, 0, 1) == '/')
+		return null;
+
+	if (muxed && modem) {
+		let parent = (modem.netdev != null && modem.netdev != '')
+			? modem.netdev
+			: ((modem.device != null && substr(sprintf('%s', modem.device), 0, 1) != '/')
+				? modem.device : null);
+
+		if (parent != null && parent == device) {
+			push(warnings, sprintf(
+				"interface %s: `option device %s` is this modem's own netdev, so it names the PARENT, not the mux child — the child takes the assigned name instead. Use a different name to pin the child.",
+				iface, device));
+
+			return null;
+		}
+	}
+
+	return device;
+}
+
 function derive_mux_link(nd, device, mux_id, muxed, fallback_netdev)
 {
 	if (!muxed)
@@ -799,28 +828,32 @@ function compat_translate(raw, result)
 				mux_auto: mux.mux_auto ?? false,
 				mux_link: derive_mux_link(nd, s.device, mux_id, muxed,
 					result.modems[s.modem]?.netdev),
-				// explicit `option device` pins the L3 name; a path
-				// (/dev/...) is a control device, never an L3 name — and a
-				// BARE parent netdev on a muxed context is not one either
-				// (the child must never shadow the parent): those fall back
-				// to the auto wwandN assignment.
+				// THE NAME IS THE OPERATOR'S. An explicit `option device`
+				// is the L3 name, muxed or not; `wwandN` is only what wwand
+				// SUGGESTS when nobody said otherwise — a new device, or
+				// autosetup. A path (/dev/...) is the one exception: that is a
+				// control device and was never a name for the L3 interface.
 				//
-				// The test is broader than that reason: parse_netdev() answers
-				// `{ muxed: false }` for ANY name that is not <netdev>m<N>, so a
-				// stable name of one's own (`option device lte0`) is discarded
-				// on a muxed context exactly like the parent's own name would
-				// be, though it can shadow nothing. Narrowing it would rename
-				// live interfaces on upgrade — every muxed context carrying such
-				// a name is on wwandN today and would move — so the rule stands
-				// and validate() now SAYS it is being applied, which is the part
-				// that was actually wrong: it happened in silence.
-				l3_name: (s.device != null && s.device != '' &&
-				          substr(s.device, 0, 1) != '/' &&
-				          (!muxed || (nd?.muxed ?? false))) ? s.device : null,
-				// what the config asked for, kept only until validate() has
-				// compared it with what was assigned (deleted there)
-				_device_pin: (s.device != null && s.device != '' &&
-				              substr(s.device, 0, 1) != '/') ? s.device : null,
+				// It used to be discarded on every muxed context, on the
+				// reasoning that a mux child must never shadow its parent. The
+				// reasoning is sound; the test was not. parse_netdev() answers
+				// `{ muxed: false }` for ANY name that is not <netdev>m<N>, so
+				// `option device lte0` was dropped exactly like the parent's own
+				// name would be, though it can shadow nothing at all.
+				//
+				// One case is kept, and only one: the name IS this modem's own
+				// parent netdev. There the string has two readings — "call the
+				// child wwan0" and "this modem is the one on wwan0" — and the
+				// second is what people write, carried over from uqmi-style
+				// configs where `option device` named exactly that. Guessing the
+				// first would rename the child onto the parent's name and
+				// displace the parent, which is survivable (netlink.setup moves
+				// it aside) but is nobody's intent. It is disambiguated with
+				// what the config already says — the modem's own netdev — and
+				// warned about rather than dropped in silence, which is how it
+				// went unnoticed before.
+				l3_name: l3_pin(s.device, muxed, result.modems[s.modem], name,
+					result.warnings),
 				pdp_type: PDP_TYPES[pdp_in] ? pdp_in : 'ipv4v6',
 				// IPv6 interface identifier. `ifaceid` is accepted as the
 				// alias because that is the spelling odhcp6c's proto has
@@ -1067,22 +1100,6 @@ function validate(result)
 					sname, f));
 	}
 
-
-	// An `option device` that was dropped because the context is muxed. Silent
-	// until now, so the interface simply appeared under wwandN and nothing said
-	// why. Reported per interface, naming both the value given and the one in
-	// force, because the only way to notice otherwise is to go looking.
-	for (let name, ctx in result.contexts) {
-		if (!ctx.muxed || !ctx._device_pin || ctx.l3_name == ctx._device_pin)
-			continue;
-
-		push(result.warnings, sprintf(
-			"interface %s: `option device %s` is not used as the L3 name on a muxed context (the mux child is claimed under the stable name); it is %s",
-			name, ctx._device_pin, ctx.l3_name ?? '?'));
-	}
-
-	for (let name, ctx in result.contexts)
-		delete ctx._device_pin;
 
 	// with QMAP active the parent device only carries mux frames — when any
 	// context of a modem is muxed, every other context needs a channel too.

@@ -444,16 +444,14 @@ eq(config.effective_mux_id({ mux_id: 1, mux_auto: true }, null), 1,
 eq(config.effective_mux_id({ mux_id: 0, mux_auto: false }, { backend: 'rmnet' }), 0,
 	'effective: an unmuxed context stays unmuxed');
 
-// AN `option device` DROPPED ON A MUXED CONTEXT IS SAID OUT LOUD.
+// THE NAME IS THE OPERATOR'S; wwandN IS ONLY A SUGGESTION.
 //
-// The rule itself is older than `auto`: a muxed context takes the assigned
-// wwandN, because the mux CHILD is claimed under the stable name and a child
-// must never shadow its parent. But the test behind it is broader than that
-// reason — parse_netdev() answers `{ muxed: false }` for any name that is not
-// <netdev>m<N>, so `option device lte0` is discarded exactly like the parent's
-// own name would be, though it can shadow nothing. Narrowing it would rename
-// live interfaces on upgrade, so the rule stands; what was wrong is that it
-// applied in silence, and an operator's only way to notice was to go looking.
+// An explicit `option device` is the L3 name whether or not the context is
+// muxed. It used to be discarded on a muxed one, on the reasoning that a mux
+// child must never shadow its parent — sound, but the test was not: it dropped
+// ANY name that was not <netdev>m<N>, so `lte0` went the same way as the
+// parent's own name although it can shadow nothing. wwandN is what wwand
+// SUGGESTS when nobody said otherwise: a new device, or autosetup.
 r = padopt({
 	network: {
 		m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
@@ -461,33 +459,75 @@ r = padopt({
 		     device: 'lte0', mux_id: '1' },
 	},
 });
-eq(r.contexts.a.l3_name, 'wwand0', 'devpin: the assigned name is what is in force');
-ok(length(filter(r.warnings, (w) => index(w, '`option device lte0`') >= 0)) == 1,
-	'devpin: and the dropped pin is reported, naming both values');
+eq(r.contexts.a.l3_name, 'lte0', 'devpin: a muxed context keeps its own name');
+eq(r.contexts.a.mux_link, 'lte0', 'devpin: and the mux child is claimed under it');
+eq(length(r.warnings), 0, 'devpin: nothing to warn about');
 
-// ...and it fires in that case ONLY. Each of these keeps its pin or never had
-// one, so a warning here would be noise an operator learns to ignore.
-let no_devpin_warn = (iface, label) => {
-	let rr = padopt({
-		network: {
-			m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
-			a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', ...iface },
-		},
-	});
-	ok(length(filter(rr.warnings, (w) => index(w, 'option device') >= 0)) == 0, label);
-};
+// the same for an auto channel — the name must not depend on the outcome
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a',
+		     device: 'lte0', mux_id: 'auto' },
+	},
+});
+eq(r.contexts.a.l3_name, 'lte0', 'devpin: an auto channel keeps it too');
 
-no_devpin_warn({ device: 'lte0' },
-	'devpin: an unmuxed context keeps its pin — no warning');
-no_devpin_warn({ device: 'wwan0m1' },
-	'devpin: a muxed device NAME is a valid L3 pin — no warning');
-no_devpin_warn({ mux_id: '1' },
-	'devpin: nothing pinned, nothing dropped');
-no_devpin_warn({ device: '/dev/cdc-wdm0', mux_id: '1' },
-	'devpin: a control path was never an L3 name — no warning');
+// no name given -> the suggestion. This is the autosetup/new-device case, and
+// it is the ONLY case that produces wwandN.
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', mux_id: '1' },
+	},
+});
+eq(r.contexts.a.l3_name, 'wwand0', 'devpin: nothing said -> wwand suggests wwandN');
 
-// the scratch field must not survive into the parsed config
-ok(!exists(r.contexts.a, '_device_pin'), 'devpin: the comparison field is deleted');
+// a control device is not a name and never was
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a',
+		     device: '/dev/cdc-wdm0', mux_id: '1' },
+	},
+});
+eq(r.contexts.a.l3_name, 'wwand0', 'devpin: a /dev path is a control device, not an L3 name');
+
+// ONE name is not taken at face value: this modem's own parent netdev on a
+// muxed context. Two readings — "call the child wwan0" and "this modem is the
+// one on wwan0" — and the second is what people write. Disambiguated with what
+// the config already says, and warned about rather than dropped in silence.
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', '.name': 'm0', device: 'wwan0', mux: 'rmnet' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a',
+		     device: 'wwan0', mux_id: '1' },
+	},
+});
+eq(r.contexts.a.l3_name, 'wwand0', 'devpin: the modem\'s own netdev names the parent, not the child');
+ok(length(filter(r.warnings, (w) => index(w, 'names the PARENT') >= 0)) == 1,
+	'devpin: and it is said out loud');
+
+// a parent-SHAPED name that is not THIS modem's parent is just a name
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a',
+		     device: 'wwan5', mux_id: '1' },
+	},
+});
+eq(r.contexts.a.l3_name, 'wwan5', 'devpin: only THIS modem\'s netdev is ambiguous');
+eq(length(r.warnings), 0, 'devpin: no warning for a name that collides with nothing');
+
+// unmuxed, the same string simply IS the parent — no child, nothing ambiguous
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', '.name': 'm0', device: 'wwan0' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', device: 'wwan0' },
+	},
+});
+eq(r.contexts.a.l3_name, 'wwan0', 'devpin: unmuxed, the parent name is the L3 name');
+eq(length(r.warnings), 0, 'devpin: and needs no warning');
 
 // no mux anywhere: nothing auto-assigned
 r = padopt({
@@ -840,6 +880,12 @@ r = padopt({
 });
 eq(r.contexts.wan.mux_id, 1, 'net: bare-netdev device + mux_id -> mux_id 1');
 eq(r.contexts.wan.mux_link, 'wwand0', 'net: bare parent + mux_id -> auto wwand0 (never the parent name)');
+// ...and it now SAYS so. Naming a muxed interface after its own modem's netdev
+// reads as "this modem is the one on wwan0", which is what uqmi-style configs
+// meant by `option device`; taking it as a child name would put the child on
+// the parent's name and displace the parent. Every OTHER name is honoured.
+ok(length(filter(r.warnings, (w) => index(w, "names the PARENT") >= 0)) == 1,
+	'net: and the ambiguous name is reported rather than dropped in silence');
 
 // native path: an explicit muxed device name is used as-is + its suffix -> mux_id
 r = padopt({
