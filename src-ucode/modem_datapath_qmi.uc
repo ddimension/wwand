@@ -115,6 +115,9 @@ export function setup(self, dp, o, next)
 		// can see it
 		let rungs = [];
 		let negotiate;
+		// every WDA answer so far has reported aggregation disabled (see the
+		// refusal below); starts true and can only go false
+		let all_zero = true;
 		// the shared tail — forward-declared and assigned BEFORE the WDA gate
 		// so the WDA-less ethernet path can reach it without a WDA client
 		let finish;
@@ -300,6 +303,10 @@ export function setup(self, dp, o, next)
 					// egress framing it never agreed to. An ABSENT ul_protocol is
 					// not a mismatch — some modems omit the TLV — so it is only
 					// compared when the modem actually sent one.
+					// carried across the ladder for the message below
+					all_zero = all_zero && (wdata.dl_protocol ?? 0) == 0 &&
+					           (wdata.ul_protocol ?? 0) == 0;
+
 					let ul_ok = (wdata.ul_protocol == null) || (wdata.ul_protocol == dap);
 					let aggr_ok = !caps.qmap ||
 						(wdata.dl_protocol == dap && ul_ok &&
@@ -328,7 +335,14 @@ export function setup(self, dp, o, next)
 						// operator nothing and reads like a protocol error;
 						// what they need to know is that the modem cannot be
 						// muxed and which option to drop.
-						let none = (wdata.dl_protocol ?? 0) == 0 &&
+						// EVERY rung, not just the last one. Inferring this
+						// from the final reply alone would claim "answered
+						// disabled to every version offered" on a modem that
+						// echoed a real but unusable protocol for v5 and only
+						// went to 0 further down the ladder — a different fault
+						// wearing this one's name.
+						let none = all_zero &&
+						           (wdata.dl_protocol ?? 0) == 0 &&
 						           (wdata.ul_protocol ?? 0) == 0;
 
 						if (none)

@@ -884,6 +884,39 @@ scenario('datapath-no-qmap', {
 			'noqmap: today this retries rather than settling as a config error');
 	});
 
+// ...and a modem that answers v5 with a REAL but unusable protocol before going
+// to zero further down is NOT the same fault. Claiming "answered disabled to
+// every version offered" there would name the wrong thing; the ladder has to
+// remember what it was told, not just what it was told last.
+let dpfx_mixed = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-mixed-refusal', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => (args.dl_protocol == 9)
+			// v5: a real protocol, but not the one asked for -> a refusal that
+			// is NOT "aggregation disabled"
+			? { qos: 0, llp: 2, ul_protocol: 6, dl_protocol: 6,
+			    dl_max_datagrams: 32, dl_max_size: 4096 }
+			: { qos: 0, llp: 2, ul_protocol: 0, dl_protocol: 0,
+			    dl_max_datagrams: 0, dl_max_size: 0 },
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [ { id: 1 } ], dgram_size: 0, fx: dpfx_mixed,
+	},
+}, 'error',
+	(modem, mock, events) => {
+		let errs = filter(events, (e) => e.event == 'error');
+
+		ok(length(errs) > 0, 'mixed: still fails — nothing usable was agreed');
+		eq(errs[0].data?.err?.error, 'aggregation_rejected',
+			'mixed: NOT reported as "no QMAP support" — v5 offered a protocol');
+	});
+
 // a modem that echoes the requested version downlink but a DIFFERENT one uplink
 // has not agreed to what was asked: both directions are configured from this one
 // answer (dl drives the rmnet ingress flags, ul the egress ones and the uplink

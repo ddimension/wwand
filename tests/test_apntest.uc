@@ -40,7 +40,7 @@ eq(r.globals.run_budget, 1800, 'plan: run_budget defaults to 1800');
 eq(r.globals.restore_sim, true, 'plan: the box is put back as it was by default');
 
 // GROUPING IS THE SWEEP. Two SIMs, three tests -> two selections, not three.
-eq(r.switches, 2, 'plan: one SIM selection per card, not one per test');
+eq(r.selections, 2, 'plan: one SIM selection per card, not one per test');
 eq(length(r.groups), 2, 'plan: two groups');
 eq(r.groups[0].sim.name, 'cda', 'plan: first group is the first SIM named');
 eq(length(r.groups[0].tests), 2, 'plan: both cda tests are in one group');
@@ -121,6 +121,67 @@ eq(sv.tests[0].checks[2].service, 'apn-vf_cda_accounting',
 	'plan: an unlabelled later check is named after its plugin');
 eq(sv.tests[0].checks[1].arg, '192.168.192.1',
 	'plan: the label does not leak into the argument');
+
+// --- the four things the audit found, each pinned ---------------------------
+
+// ORDER INDEPENDENCE. A test may name a sim or an account declared BELOW it;
+// uci section order is not something a plan should depend on. The first cut
+// reported "not configured" from a half-built map and could not retract it.
+let ord = plan.parse({
+	globals: { '.type': 'apntest', modem: 'm0' },
+	t: { '.type': 'apntest', sim: 'later', apn: 'a', account: 'acc_later',
+	     sim_id: '1', check: [ 'ping:1.1.1.1', 'accounting' ] },
+	later: { '.type': 'apntest_sim', slot: '1' },
+	acc_later: { '.type': 'apntest_account', type: 'mccp', base_url: 'https://x' },
+});
+
+eq(length(ord.errors), 0, 'plan: a sim declared after its test is still found');
+eq(length(ord.groups), 1, 'plan: and the group is built');
+
+// TWO CHECKS ON ONE SERVICE make the second result invisible in monitoring
+// rather than wrong, which is worse.
+let dup = plan.parse({
+	globals: { '.type': 'apntest', modem: 'm0' },
+	s1: { '.type': 'apntest_sim', slot: '1' },
+	t: { '.type': 'apntest', sim: 's1', apn: 'a', service: 'apn-x',
+	     check: [ 'ping:a', 'ping:b', 'ping:c' ] },
+});
+
+// two pings do not collide (apn-x, apn-x_ping); the THIRD does
+ok(length(filter(dup.errors, (e) => index(e, 'two checks would report to service') >= 0)) == 1,
+	'plan: a third ping collides with the second and is refused');
+
+let dup2 = plan.parse({
+	globals: { '.type': 'apntest', modem: 'm0' },
+	s1: { '.type': 'apntest_sim', slot: '1' },
+	t: { '.type': 'apntest', sim: 's1', apn: 'a', service: 'apn-x',
+	     check: [ 'ping:a', 'ping:b#routing', 'ping:c#routing' ] },
+});
+
+ok(length(filter(dup2.errors, (e) => index(e, 'two checks would report to service') >= 0)) == 1,
+	'plan: so does a repeated label');
+
+// A LABEL ON THE FIRST CHECK would leave the test's own service with nothing
+// reporting to it — the Centreon definition then goes stale in silence.
+let lab = plan.parse({
+	globals: { '.type': 'apntest', modem: 'm0' },
+	s1: { '.type': 'apntest_sim', slot: '1' },
+	t: { '.type': 'apntest', sim: 's1', apn: 'a', service: 'apn-x',
+	     check: [ 'ping:a#primary' ] },
+});
+
+ok(length(filter(lab.errors, (e) => index(e, 'first check reports under') >= 0)) == 1,
+	'plan: a label on the first check is refused, not silently honoured');
+
+// `'' + true` is the perfectly good plugin name "true"
+let bad = plan.parse({
+	globals: { '.type': 'apntest', modem: 'm0' },
+	s1: { '.type': 'apntest_sim', slot: '1' },
+	t: { '.type': 'apntest', sim: 's1', apn: 'a', check: [ true, 'ping:a' ] },
+});
+
+ok(length(filter(bad.errors, (e) => index(e, 'is not a string') >= 0)) == 1,
+	'plan: a non-string check entry is refused, not coerced into a plugin name');
 
 // --- the typo that cost eleven boxes their pool check ------------------------
 

@@ -121,7 +121,15 @@ function parse_checks(raw, where, errors)
 	let list = [];
 
 	for (let c in (type(raw) == 'array' ? raw : (raw != null ? [ raw ] : []))) {
-		let s = trim('' + c);
+		// TYPE FIRST, then coerce. `'' + true` is the perfectly valid plugin
+		// name "true", so a malformed list would have scheduled a plugin called
+		// true instead of being refused.
+		if (type(c) != 'string') {
+			push(errors, sprintf('%s: check %J is not a string', where, c));
+			continue;
+		}
+
+		let s = trim(c);
 
 		if (s == '')
 			continue;
@@ -225,10 +233,32 @@ function parse_test(name, s, sims, accounts, errors)
 	// `apn-vf_cda_accounting` (01-vf_routing / 99-accounting on .16). Making it
 	// a rule rather than a habit means a second check can never silently
 	// overwrite the first one's service.
-	for (let i = 0; i < length(checks); i++)
+	let seen_service = {};
+
+	// A LABEL ON THE FIRST CHECK would leave nothing reporting under the test's
+	// own service: monitoring keeps a definition for `apn-vf_cda` that goes
+	// stale the moment someone adds a descriptive label to the leading check,
+	// and nothing says so. The first check is the test; label the later ones.
+	if (length(checks) && checks[0].label != null)
+		push(errors, sprintf('test %s: the first check reports under the test\'s own service %J — move the label %J to a later check',
+			name, service, checks[0].label));
+
+	for (let i = 0; i < length(checks); i++) {
 		checks[i].service = (i == 0 && checks[i].label == null)
 			? service
 			: sprintf('%s_%s', service, checks[i].label ?? checks[i].name);
+
+		// TWO CHECKS ON ONE SERVICE is the failure this naming exists to
+		// prevent, and the rule above does not prevent it by itself: two
+		// `accounting` checks, or two carrying the same label, land on the same
+		// name and the second verdict overwrites the first in monitoring — the
+		// result being invisible rather than wrong, which is worse.
+		if (seen_service[checks[i].service])
+			push(errors, sprintf('test %s: two checks would report to service %J — give one of them its own label (`plugin:arg#label`)',
+				name, checks[i].service));
+
+		seen_service[checks[i].service] = true;
+	}
 
 	if (!length(checks))
 		push(errors, sprintf('test %s: no check — it would dial and conclude nothing', name));
@@ -311,21 +341,26 @@ export function parse(raw)
 	let errors = [];
 	let globals = {}, sims = {}, accounts = {}, tests = [];
 
+	// TWO PASSES, because a test may name a sim or an account declared after it
+	// and uci section order is not something a plan should depend on. The first
+	// cut did this in one pass with a re-check at the end, which could not work:
+	// parse_test() had already reported "sim is not configured" by then, and
+	// nothing retracts an error once pushed. Declaring the sim below its test
+	// produced a plan that refused to load for no reason.
 	for (let name in (raw ?? {})) {
 		let s = raw[name];
 		let t = s?.['.type'];
 
-		if (t == 'apntest_sim') {
+		if (t == 'apntest_sim')
 			sims[name] = parse_sim(name, s, errors);
-			continue;
-		}
-
-		if (t == 'apntest_account') {
+		else if (t == 'apntest_account')
 			accounts[name] = parse_account(name, s, errors);
-			continue;
-		}
+	}
 
-		if (t != 'apntest')
+	for (let name in (raw ?? {})) {
+		let s = raw[name];
+
+		if (s?.['.type'] != 'apntest')
 			continue;
 
 		// the globals section is an `apntest` section by name, as in the tool
@@ -348,14 +383,6 @@ export function parse(raw)
 		push(tests, parse_test(name, s, sims, accounts, errors));
 	}
 
-	// A second pass would be needed if a test named a SIM declared after it;
-	// uci section order is not something a plan should depend on, so re-check
-	// the bindings once every section has been seen.
-	for (let t in tests)
-		if (t.sim != null && !sims[t.sim] &&
-		    !length(filter(errors, (e) => index(e, sprintf('test %s: sim', t.name)) == 0)))
-			push(errors, sprintf('test %s: sim %J is not configured', t.name, t.sim));
-
 	let groups = group_by_sim(tests, sims);
 
 	if (!length(groups) && !length(errors))
@@ -368,8 +395,11 @@ export function parse(raw)
 		tests: tests,
 		groups: groups,
 		errors: errors,
-		// how many SIM selections this plan costs, which is the number worth
-		// looking at when a sweep does not fit into its schedule
-		switches: length(groups),
+		// How many SIM SELECTIONS this plan schedules — not how many switches a
+		// run performs. parse() is given no runtime state, so it cannot know
+		// that the first group's card is already the active one; calling this
+		// `switches` claimed a cost it cannot compute. The runner subtracts
+		// that case when it knows the active SIM.
+		selections: length(groups),
 	};
 };

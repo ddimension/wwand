@@ -134,8 +134,13 @@ export function install(self, o)
 	self.repower_modem = function(ref) {
 		let plan = self.repower_plan(ref);
 
+		// the error SHAPE is preserved: the old path returned { error } alone
+		// for the errors that carry no reference, and a consumer testing the
+		// response shape would see a new `ref: null` member otherwise
 		if (plan.error && plan.action == 'none')
-			return { error: plan.error, ref: plan.ref };
+			return plan.ref != null
+				? { error: plan.error, ref: plan.ref }
+				: { error: plan.error };
 
 		let rg = (plan.action == 'reset_gpio') ? plan.gpio : null;
 		let off = plan.off_ms;

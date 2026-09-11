@@ -50,9 +50,22 @@ const RUNGS = [
 // produce it — the status page shows which rungs have fired and what comes
 // next. Exported from here so there is one table, not a copy in the UI that
 // says 8/16/24 long after these numbers moved.
-export function rungs()
+export function rungs(failreboot)
 {
-	return map(RUNGS, (r) => ({ at: r.at, action: r.action }));
+	let out = map(RUNGS, (r) => ({ at: r.at, action: r.action }));
+
+	// THE REBOOT IS PART OF THE LADDER and was missing from this list, which
+	// made the status page show "nothing comes next" while a reboot was still
+	// pending — at attempts 25 with the default failreboot 100 there are 76
+	// failures to go, and the page said the escalation was exhausted. It is
+	// gated separately (<=0 disables only the reboot, the hardware rungs still
+	// run), so it is included only when it can actually fire.
+	let fr = +(failreboot ?? 0);
+
+	if (fr > 0)
+		push(out, { at: fr + 1, action: 'reboot' });
+
+	return out;
 };
 
 // how many rungs a given attempt count has already passed (used only to default

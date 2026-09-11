@@ -2088,7 +2088,7 @@ export function create(opts)
 
 			let fired = +(c.rung ?? 0);
 			let attempts = +(c.attempts ?? 0);
-			let table = recoverymod.rungs();
+			let table = recoverymod.rungs(entry.cfg?.failreboot ?? 100);
 			let next = null;
 
 			for (let i = 0; i < length(table); i++)

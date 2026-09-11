@@ -580,7 +580,11 @@ rd.shutdown();
 	eq(r.attempts, 17, 'recovery view: attempts carried');
 	eq(r.fired, 2, 'recovery view: two rungs have gone off this outage');
 	eq(r.armed, true, 'recovery view: armed once the protocol has proven itself');
-	eq(length(r.rungs), 3, 'recovery view: the whole ladder is listed');
+	// four, not three: the reboot is part of the ladder. Leaving it out made the
+	// page say "nothing comes next" while a reboot was still pending — at 25
+	// attempts with the default failreboot of 100 there are 76 failures to go.
+	eq(length(r.rungs), 4, 'recovery view: the whole ladder is listed, reboot included');
+	eq(r.rungs[3].action, 'reboot', 'recovery view: and the reboot is last');
 	eq(r.rungs[0].fired, true, 'recovery view: opmode cycle already fired');
 	eq(r.rungs[2].fired, false, 'recovery view: the hardware rung has not');
 	eq(r.next?.action, 'usb_repower', 'recovery view: names what comes next');
@@ -590,6 +594,14 @@ rd.shutdown();
 	// WHAT THE HARDWARE RUNG WOULD ACTUALLY DO on this box, for this modem
 	eq(r.hardware?.action, 'reset_gpio', 'recovery view: a reset line, not a power cycle');
 	eq(r.hardware?.source, 'board', 'recovery view: and whose line it is');
+
+	// `option failreboot 0` disables ONLY the reboot; the hardware rungs still
+	// run, so the ladder shown must shrink by exactly one entry
+	sd.modems.m0.cfg = { failreboot: '0' };
+	let nr = sd.status().modems.m0.recovery;
+	eq(length(nr.rungs), 3, 'recovery view: failreboot 0 drops the reboot rung');
+	eq(nr.rungs[2].action, 'usb_repower', 'recovery view: ...and nothing else');
+	sd.modems.m0.cfg = {};
 
 	// the ladder is gated until one exchange has succeeded in the selected
 	// protocol — a misdetected modem must never be repowered, and the page has
