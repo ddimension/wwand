@@ -762,12 +762,76 @@ export function watch_driver(o)
 // `telemetry_at(self).send(...)` call sites degrade to an AT error instead of
 // crashing on `null.send` (HW-hit: autosetup phase-2 reload on the Cudy LT300 tore
 // the modem down inside the 'registered' emit; the READY hook then ran on the corpse).
+// How many bare ERRORs in a row retire a telemetry command.
+//
+// Not one. AT+CHIPTEMP was latched off on its FIRST error and the modem then
+// reported no temperature for the rest of the session, because the command form
+// was wrong rather than the command absent (ddimension/wwand#12). A modem also
+// answers a plain ERROR while it is busy. Three consecutive refusals with no
+// success in between is firmware, not weather.
+const AT_RETIRE_AFTER = 3;
+
+// The telemetry AT channel, with a memory of what this firmware refuses.
+//
+// The polling loops ask 21 different vendor commands, most of them specific to
+// one manufacturer's AT set, and a modem that does not implement one answers
+// ERROR every time it is asked. atcmd logs every error at warn — deliberately,
+// so a silent line-drop cannot hide a failure — so an unimplemented command
+// polled on the fast loop writes a warn line per second, forever. A Quectel
+// EC200A on a RUT200 produced four of them per second (AT+QRSRP?, AT+QRSRQ?,
+// AT+QSINR?, AT+QCAINFO) and drowned the log (ddimension/wwand#19, 2026-09-11).
+//
+// A per-manufacturer gate cannot fix this and the same report proves it: the
+// EC200A IS a Quectel, and AT+QENG="servingcell" — gated on exactly that
+// manufacturer — works on it. The Q-command set is not one set; it varies by
+// module, and a model table would never be finished. So ask the modem, once,
+// and believe its answer.
+//
+// Only a BARE `ERROR` retires a command. `+CME ERROR: <n>` is a runtime
+// condition (SIM not ready, no network) that says nothing about whether the
+// firmware knows the command, and a timeout means the port is wedged, not that
+// the command is unknown — retiring on either would silence telemetry that
+// works. atcmd already separates the three (atcmd.uc:796 vs :801 vs :749).
+//
+// The memory is cleared with the AT channel (close_at), so a re-open after a
+// protocol switch or a re-enumeration asks again from scratch.
 export function telemetry_at(self)
 {
-	return self.at_telemetry ?? {
-		send: (cmd, cb) => { if (cb) cb('closed', null); },
-		run_sequence: (cmds, cb) => { if (cb) cb(); },
-		close: () => null,
+	let at = self.at_telemetry;
+
+	if (!at)
+		return {
+			send: (cmd, cb) => { if (cb) cb('closed', null); },
+			run_sequence: (cmds, cb) => { if (cb) cb(); },
+			close: () => null,
+		};
+
+	return {
+		send: (cmd, cb) => {
+			if (self._at_retired?.[cmd])
+				return cb ? cb({ error: 'unsupported', detail: 'retired after repeated ERROR' }, null) : null;
+
+			at.send(cmd, (err, res) => {
+				if (err?.error == 'ERROR') {
+					self._at_errors ??= {};
+					self._at_errors[cmd] = (self._at_errors[cmd] ?? 0) + 1;
+
+					if (self._at_errors[cmd] >= AT_RETIRE_AFTER) {
+						self._at_retired ??= {};
+						self._at_retired[cmd] = true;
+						self._at_log?.('notice', sprintf('%s refused %d times — this firmware does not implement it; not asking again (re-probed on the next modem init)',
+							cmd, AT_RETIRE_AFTER));
+					}
+				}
+				else if (!err && self._at_errors)
+					delete self._at_errors[cmd];
+
+				if (cb)
+					cb(err, res);
+			});
+		},
+		run_sequence: (cmds, cb) => at.run_sequence(cmds, cb),
+		close: () => at.close(),
 	};
 };
 
@@ -1075,6 +1139,14 @@ export function close_at(self)
 	self.at_telemetry = null;
 	self.at_tty = null;
 	self.at_telemetry_tty = null;
+
+	// a new AT channel is re-probed from scratch. What telemetry_at() retired
+	// was a fact about the firmware behind the OLD channel, and the reason to
+	// re-open one is usually that something about the modem changed (protocol
+	// switch, re-enumeration after a reset) — exactly when a stale "this
+	// command does not exist" would silence telemetry that now works.
+	self._at_retired = null;
+	self._at_errors = null;
 };
 
 // best-effort AT side-channel bring-up: discover + open the AT tty, run
@@ -1122,6 +1194,9 @@ let load_at_mbim = () => {
 // absence into a failure on every command wwand ever sends.
 function finish_mbim_at(self, o, tr, path, log)
 {
+	// the retirement notice in telemetry_at() has no logger of its own
+	self._at_log = (level, msg) => log(level, sprintf('at: %s', msg));
+
 	let engine = atcmd.create(tr, {
 		log: (level, msg) => log(level, sprintf('at: %s', msg)),
 		on_urc: (line) => {
@@ -1250,6 +1325,8 @@ function open_at_over_wdm(self, o, fxi, log, next)
 		return next();
 	}
 
+	self._at_log = (level, msg) => log(level, sprintf('at: %s', msg));
+
 	self.at = atcmd.create(tr, {
 		log: (level, msg) => log(level, sprintf('at: %s', msg)),
 		on_urc: (line) => {
@@ -1368,6 +1445,8 @@ open_at_tty = function(self, o, fxi, log, ch, tried)
 		log('debug', sprintf('urc[%s]: %s', ch, line));
 		self.at_on_urc?.(line, ch);
 	};
+
+	self._at_log = (level, msg) => log(level, sprintf('at: %s', msg));
 
 	self.at = atcmd.create(tr, {
 		log: (level, msg) => log(level, sprintf('at: %s', msg)),

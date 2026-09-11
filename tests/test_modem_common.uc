@@ -17,17 +17,102 @@ uloop.init();
 // a URC source first and a poll channel second), so this only has to return the
 // dedicated engine when there is one and the control channel otherwise.
 
-// (1) direct telemetry_at semantics on a hand-built modem
-let at2_engine = { tag: 'at2' };
-let s = { at: { tag: 'ctrl' }, at_telemetry: at2_engine };
+// (1) direct telemetry_at semantics on a hand-built modem.
+//
+// Asserted by WHERE THE COMMAND LANDS, not by object identity: telemetry_at()
+// wraps the engine (it keeps the refusal memory below), so the returned object
+// is a proxy and comparing it to the engine would only prove that the wrapper
+// exists. Which port a command reaches is what the selector is for.
+// forward-declared: a `let` arrow that names its own binding hits ucode's TDZ
+let at2_engine, ctrl_engine;
+at2_engine = { tag: 'at2', send: (cmd, cb) => { at2_engine._sent = cmd; cb(null, { lines: [ 'OK' ] }); } };
+ctrl_engine = { tag: 'ctrl', send: (cmd, cb) => { ctrl_engine._sent = cmd; cb(null, { lines: [ 'OK' ] }); } };
+let s = { at: ctrl_engine, at_telemetry: at2_engine };
 
-eq(mc.telemetry_at(s), at2_engine, 'at2: telemetry_at returns the dedicated engine');
-eq(mc.telemetry_at(s), at2_engine, 'at2: selection is stable across calls');
+mc.telemetry_at(s).send('AT+CSQ', () => null);
+eq(at2_engine._sent, 'AT+CSQ', 'at2: telemetry goes to the dedicated engine');
+eq(ctrl_engine._sent, null, 'at2: and not to the control channel');
+
+at2_engine._sent = null;
+mc.telemetry_at(s).send('AT+CESQ', () => null);
+eq(at2_engine._sent, 'AT+CESQ', 'at2: selection is stable across calls');
 
 // no second port -> the control channel (open_at aliased at_telemetry to at)
-let s2 = { at: { tag: 'ctrl' } };
+ctrl_engine._sent = null;
+let s2 = { at: ctrl_engine };
 s2.at_telemetry = s2.at;
-eq(mc.telemetry_at(s2), s2.at, 'at2: no second port -> control channel');
+mc.telemetry_at(s2).send('AT+CSQ', () => null);
+eq(ctrl_engine._sent, 'AT+CSQ', 'at2: no second port -> control channel');
+
+// --- a command this firmware refuses is retired ------------------------------
+// A Quectel EC200A answers ERROR to AT+QRSRP?/QRSRQ?/QSINR?/QCAINFO. The fast
+// loop asks every second and atcmd logs every error at warn, so the modem wrote
+// four warn lines a second forever (ddimension/wwand#19).
+let ret_sent = [];
+let ret_modem = {
+	_at_log: (l, m) => null,
+	at_telemetry: { send: (cmd, cb) => { push(ret_sent, cmd); cb({ error: 'ERROR' }, { lines: [] }); },
+	                close: () => null },
+};
+ret_modem.at = ret_modem.at_telemetry;
+
+for (let i = 0; i < 8; i++)
+	mc.telemetry_at(ret_modem).send('AT+QRSRP?', () => null);
+
+eq(length(ret_sent), 3, 'retire: asked three times, then never again');
+ok(ret_modem._at_retired['AT+QRSRP?'], 'retire: recorded against the command');
+
+// the caller still gets an error, so every `err ? null : parse(...)` keeps working
+let ret_err = 'unset';
+mc.telemetry_at(ret_modem).send('AT+QRSRP?', (e) => { ret_err = e; });
+eq(ret_err?.error, 'unsupported', 'retire: a retired command answers unsupported');
+
+// ...and only THAT command. A second one is unaffected.
+ret_sent = [];
+mc.telemetry_at(ret_modem).send('AT+CSQ', () => null);
+eq(ret_sent, [ 'AT+CSQ' ], 'retire: other commands keep being sent');
+
+// COUNTERPROOF 1: a bare ERROR that is not consecutive never retires anything.
+// This is the ddimension/wwand#12 shape — AT^CHIPTEMP was latched off on its
+// first error and the modem reported no temperature again for the whole
+// session, because the command FORM was wrong, not the command absent.
+let mix_sent = [];
+let mix_fail = true;
+let mix = {
+	_at_log: (l, m) => null,
+	at_telemetry: { send: (cmd, cb) => {
+		push(mix_sent, cmd);
+		cb(mix_fail ? { error: 'ERROR' } : null, { lines: [ 'OK' ] });
+	} },
+};
+
+for (let i = 0; i < 6; i++) {
+	mix_fail = (i % 2) == 0;   // error, ok, error, ok, ...
+	mc.telemetry_at(mix).send('AT+QTEMP', () => null);
+}
+eq(length(mix_sent), 6, 'retire: a success in between resets the count — never retired');
+ok(!(mix._at_retired?.['AT+QTEMP']), 'retire: and nothing is recorded');
+
+// COUNTERPROOF 2: only a BARE ERROR retires. `+CME ERROR: n` is a runtime
+// condition (SIM busy, no network) and a timeout is a wedged port — retiring on
+// either would silence telemetry that works perfectly once the modem settles.
+for (let kind in [ { error: 'cme', code: '10' }, { error: 'timeout' }, { error: 'closed' } ]) {
+	let soft_sent = [];
+	let soft = {
+		_at_log: (l, m) => null,
+		at_telemetry: { send: (cmd, cb) => { push(soft_sent, cmd); cb(kind, { lines: [] }); } },
+	};
+
+	for (let i = 0; i < 6; i++)
+		mc.telemetry_at(soft).send('AT+QCAINFO', () => null);
+
+	eq(length(soft_sent), 6, sprintf('retire: %s never retires a command', kind.error));
+}
+
+// the memory is cleared with the channel: a re-opened AT port re-probes, so a
+// protocol switch or a re-enumeration cannot inherit a stale "does not exist"
+mc.close_at(ret_modem);
+eq(ret_modem._at_retired, null, 'retire: close_at forgets what was retired');
 
 // a torn-down modem (close_at ran: at/at_telemetry nulled) must NOT yield null —
 // stale in-flight callbacks call telemetry_at(self).send(...) unguarded; they
@@ -164,7 +249,16 @@ eq(opened_ttys, [ '/dev/ttyUSB2', '/dev/ttyUSB3' ], 'open_at: both control and a
 ok(modem.at != null, 'open_at: control engine created');
 ok(modem.at_telemetry != modem.at, 'open_at: at2 gets its own engine');
 eq(modem.at_telemetry_tty, '/dev/ttyUSB3', 'open_at: at2 engine bound to the second tty');
-eq(mc.telemetry_at(modem), modem.at_telemetry, 'open_at: telemetry_at selects the at2 engine');
+// ...and telemetry_at() dispatches there. Asserted by swapping a probe in for
+// the at2 engine rather than by comparing objects: telemetry_at() returns a
+// proxy (it carries the refusal memory), so an identity check would only prove
+// the proxy exists, not which port it talks to.
+let real_at2 = modem.at_telemetry;
+let picked = null;
+modem.at_telemetry = { send: (cmd, cb) => { picked = cmd; cb(null, { lines: [] }); }, close: () => null };
+mc.telemetry_at(modem).send('AT+CSQ', () => null);
+modem.at_telemetry = real_at2;
+eq(picked, 'AT+CSQ', 'open_at: telemetry_at selects the at2 engine');
 
 // the at2 engine must dispatch URCs, not just carry polls: a code arriving there
 // while no command runs reaches the modem's handler (the whole point of opening
