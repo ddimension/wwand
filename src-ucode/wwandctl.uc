@@ -8,9 +8,10 @@
 
 'use strict';
 
-import { fmt_plmn, fmt_sig, reg_text } from 'wwand.wwandctl_fmt';
+import { fmt_plmn, fmt_sig, reg_text, collectd_lines, collectd_interval } from 'wwand.wwandctl_fmt';
 
 import * as libubus from 'ubus';
+import * as fs from 'fs';
 
 let conn = null;
 
@@ -338,6 +339,9 @@ Status
   signal [modem]         raw signal metrics
   cells [modem]          cells, registration detail, temperature
   datapath [modem]       datapath / mux / aggregation diagnostics
+  collectd [modem...]    run as a collectd exec plugin: print PUTVAL lines until
+                         orphaned. Interval from COLLECTD_INTERVAL, floored at
+                         30 s (below that the modem never leaves 1 Hz telemetry)
   slots [modem]          SIM slot status (ICCID, eUICC, CPIN, service, active)
   carrier [modem]        carrier configuration (MBN): which one is active
   carrier [modem] list   every carrier config the modem holds
@@ -444,8 +448,77 @@ if (json_mode) {
 	exit(0);
 }
 
+// --- collectd exec feed ------------------------------------------------------
+//
+// Runs until orphaned, printing collectd PUTVAL lines. collectd's exec plugin
+// does NOT poll us: it forks this once and reads stdout forever, so the cadence
+// is ours to choose and `interval=` on each line is what RRD builds its files
+// from. COLLECTD_INTERVAL arrives in the environment as collectd's suggestion.
+//
+// WHY THE FLOOR. `modem_signal` keeps wwand's adaptive fast-telemetry loop warm
+// (daemon.uc calls modem.watch()); that loop polls the modem at 1 Hz and decays
+// 6 s after the last request (modem_common.uc:702-703). One sample therefore
+// costs ~6 s of 1 Hz modem traffic, so the duty cycle is 6/interval: 10 % at
+// 60 s, 20 % at 30 s, 60 % at 10 s — and at 6 s or below the loop NEVER decays
+// and the modem is polled around the clock. A global `Interval 10` in
+// collectd.conf would do that silently, so it is raised here and said once.
+function cmd_collectd(argv)
+{
+	let want = getenv('COLLECTD_INTERVAL');
+	let interval = collectd_interval(want);
+	let host = getenv('COLLECTD_HOSTNAME') ?? 'localhost';
+
+	if (interval != +(want ?? interval))
+		warn(sprintf('wwandctl collectd: interval %s raised to %d s — below that the modem never leaves 1 Hz telemetry\n',
+			want, interval));
+
+	// orphaned = collectd is gone; the exec plugin expects us to notice
+	let orphaned = () => {
+		let st = fs.readfile('/proc/self/status') ?? '';
+		let m = match(st, /PPid:[ \t]*([0-9]+)/);
+
+		return m && +m[1] == 1;
+	};
+
+	while (!orphaned()) {
+		// ONE status call covers every modem and context and does NOT wake the
+		// fast loop — only modem_signal and modem_cells do. Everything that can
+		// come from here instead of a per-modem request, does.
+		let st = call('status', {});
+		let names = length(argv) ? argv : sort(keys(st?.modems ?? {}));
+		let out = [];
+
+		for (let name in names) {
+			let m = st?.modems?.[name];
+
+			if (!m)
+				continue;
+
+			out = [ ...out, ...collectd_lines(host, name,
+				call('modem_signal', { modem: name }), m, interval) ];
+		}
+
+		for (let ctx, c in (st?.contexts ?? {}))
+			push(out, sprintf('PUTVAL "%s/wwand-%s/gauge-connected" interval=%d N:%d',
+				host, ctx, interval, (c.state == 'CONNECTED') ? 1 : 0));
+
+		if (length(out))
+			print(join('\n', out) + '\n');
+
+		// MANDATORY. ucode block-buffers stdout on a pipe, and collectd reads a
+		// pipe: without this the lines arrive in bursts, and since they carry
+		// `N:` (= now) they are stamped when they are FLUSHED rather than when
+		// they were sampled. Measured on the RG502Q — three lines printed 2 s
+		// apart arrived at the same second (2026-09-11).
+		fs.stdout.flush();
+
+		sleep(interval * 1000);
+	}
+}
+
 switch (cmd) {
 case 'status':   cmd_status(args); break;
+case 'collectd': cmd_collectd(args); break;
 case 'modems':   cmd_modems(); break;
 
 case 'signal': {

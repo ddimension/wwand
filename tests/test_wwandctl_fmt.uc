@@ -8,7 +8,7 @@
 
 'use strict';
 
-import { eq, done } from './lib/check.uc';
+import { eq, ok, done } from './lib/check.uc';
 import * as fmt from 'wwand/wwandctl_fmt.uc';
 
 // --- fmt_plmn: two wire shapes for one operator ------------------------------
@@ -92,5 +92,68 @@ eq(fmt.reg_text({ state: 'SIM_BLOCKED', sim_block: { reason: 'PIN', retries: 2 }
 	'SIM blocked: PIN (2 retries left)', 'reg: sim block with retries');
 eq(fmt.reg_text({ state: 'SIM_BLOCKED', sim_block: { reason: 'PUK' } }),
 	'SIM blocked: PUK', 'reg: sim block without a retry count');
+
+
+// --- collectd exec feed ------------------------------------------------------
+
+// THE CADENCE FLOOR. `modem_signal` keeps wwand's adaptive fast-telemetry loop
+// warm, and that loop decays only 6 s after the last request — so one sample
+// costs ~6 s of 1 Hz modem traffic and the duty cycle is 6/interval. At 6 s or
+// below the loop never decays at all and the modem is polled around the clock.
+// collectd's global `Interval` must therefore be raised, not obeyed.
+eq(fmt.collectd_interval('60'), 60, 'interval: a sane value is taken as given');
+eq(fmt.collectd_interval('30'), 30, 'interval: the floor itself is allowed');
+eq(fmt.collectd_interval('10'), 30, 'interval: below the floor it is RAISED, not obeyed');
+eq(fmt.collectd_interval('1'), 30, 'interval: and the pathological case too');
+eq(fmt.collectd_interval(null), 60, 'interval: absent -> collectd default 60');
+eq(fmt.collectd_interval('kaputt'), 60, 'interval: unparsable -> 60, never 0');
+eq(fmt.collectd_interval('0'), 60, 'interval: zero would busy-loop — refused');
+
+// A SENTINEL MUST NEVER REACH RRD. -32768 is the i16 "not measured" value; as a
+// data point it is a real reading that flattens every graph sharing its scale.
+// HW-observed on an RG650E camped on LTE: it reports nr5g rsrp/snr as -32768
+// alongside perfectly good LTE numbers (2026-09-11).
+let sig_hw = {
+	lte: { rssi: -64, rsrq: -13, rsrp: -100, snr: 154 },
+	nr5g: { rsrp: -32768, snr: -32768 },
+	nr5g_rsrq: -32768,
+};
+let lines = fmt.collectd_lines('h', 'wwmodem0', sig_hw,
+	{ state: 'READY', temperature: { celsius: 41 }, attempts: 0, proto_errors: 0 }, 30);
+let joined = join('\n', lines);
+
+eq(index(joined, '-32768'), -1, 'collectd: no sentinel reaches the output');
+eq(index(joined, 'nr5g'), -1, 'collectd: and no 5G series at all — it measured nothing');
+ok(index(joined, 'PUTVAL "h/wwand-wwmodem0/signal_power-rsrp_lte" interval=30 N:-100.000') >= 0,
+	'collectd: LTE RSRP as signal_power');
+ok(index(joined, 'gauge-sinr_lte" interval=30 N:15.400') >= 0,
+	'collectd: SINR converted from 0.1 dB and typed `gauge`');
+ok(index(joined, 'temperature-modem" interval=30 N:41.000') >= 0, 'collectd: temperature');
+ok(index(joined, 'gauge-registered" interval=30 N:1.000') >= 0, 'collectd: registered flag');
+
+// SINR IS NOT signal_quality (min 0) AND NOT signal_power (max 0): it runs
+// roughly -20..+30 dB, so either bound would silently discard half its range.
+// Both signs must survive, and both must carry the neutral type.
+let neg = join('\n', fmt.collectd_lines('h', 'm', { lte: { snr: -150 } }, {}, 30));
+ok(index(neg, 'gauge-sinr_lte" interval=30 N:-15.000') >= 0,
+	'collectd: a NEGATIVE SINR survives with its sign');
+eq(index(neg, 'signal_quality'), -1, 'collectd: never signal_quality — its floor is 0');
+
+// The untagged RSSI is only emitted when no RAT claimed one, so the same
+// measurement cannot land in two files under two names.
+let tagged = join('\n', fmt.collectd_lines('h', 'm', { rssi: -70, lte: { rssi: -64 } }, {}, 30));
+ok(index(tagged, 'signal_power-rssi_lte') >= 0, 'collectd: the tagged RSSI is emitted');
+eq(index(tagged, 'signal_power-rssi"'), -1, 'collectd: and the untagged one is not, beside it');
+
+let untagged = join('\n', fmt.collectd_lines('h', 'm', { rssi: -70 }, {}, 30));
+ok(index(untagged, 'signal_power-rssi" interval=30 N:-70.000') >= 0,
+	'collectd: with nothing tagged, the bare RSSI is what there is');
+
+// A modem with no readings at all still reports its state — a gap in the signal
+// graphs plus "registered 0" is exactly what an outage should look like.
+let dead = join('\n', fmt.collectd_lines('h', 'm', {}, { state: 'ABSENT', attempts: 7 }, 30));
+ok(index(dead, 'gauge-registered" interval=30 N:0.000') >= 0, 'collectd: not-ready reports 0');
+ok(index(dead, 'gauge-attempts" interval=30 N:7.000') >= 0, 'collectd: the recovery counter rides along');
+eq(index(dead, 'signal_power'), -1, 'collectd: and no invented signal values');
 
 done('test_wwandctl_fmt');

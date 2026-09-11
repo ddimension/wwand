@@ -1172,6 +1172,7 @@ wwandctl reset / repower             # modem reset / hardware repower
 wwandctl at AT+CSQ                   # raw AT command
 wwandctl migrate [apply]             # config migration plan/apply
 wwandctl log-level debug
+wwandctl collectd                    # collectd exec feed (runs until orphaned)
 wwandctl --json status               # machine mode (raw ubus reply)
 ```
 
@@ -1190,6 +1191,57 @@ after an attempt reached the card, and never auto-retries. After a successful
 unblock the daemon restarts the modem bring-up with the new PIN; update
 `option pincode` (or the per-SIM `wwand_sim` override) to the new PIN so the
 next boot unlocks cleanly.
+
+### Feeding collectd (`wwandctl collectd`)
+
+Long-lived RRD history for signal, temperature and connection state, using
+OpenWrt's own collectd. It needs no extra package beyond `collectd-mod-exec`:
+
+    config statistics 'collectd_exec'
+            option enable '1'
+
+    config collectd_exec_input
+            option cmdline '/usr/bin/wwandctl collectd'
+
+collectd's exec plugin does **not** poll the command: it forks it once and reads
+`PUTVAL` lines from its stdout for as long as it runs, so the cadence belongs to
+`wwandctl`, and the `interval=` on each line is what RRD builds its files from.
+`COLLECTD_INTERVAL` and `COLLECTD_HOSTNAME` arrive in the environment; naming
+modems as arguments (`wwandctl collectd wwmodem0`) restricts the feed to them.
+
+**The interval is floored at 30 s, and a lower one is raised with a warning.**
+`modem_signal` keeps the adaptive fast-telemetry loop warm, and that loop polls
+the modem at 1 Hz and decays 6 s after the last request — so one sample costs
+about 6 s of 1 Hz modem traffic. The duty cycle is 6/interval: 10 % at 60 s,
+20 % at 30 s, 60 % at 10 s, and **at 6 s or below the loop never decays at all**
+and the modem is polled around the clock. A global `Interval 10` in
+`collectd.conf` would do that silently.
+
+Per round it makes ONE `status` call — which covers every modem and context and
+does *not* wake the telemetry loop — plus one `modem_signal` per modem, which
+does. Byte counters are deliberately absent: `wwand0` is an ordinary netdev and
+collectd's own `interface` plugin already counts it.
+
+Emitted as `<host>/wwand-<modem>/<type>-<instance>`, one series per radio
+technology, and only for values the modem actually measured:
+
+| Value | collectd type | Instance |
+|---|---|---|
+| RSRP / RSCP, RSSI, RSRQ, Ec/Io | `signal_power` | `rsrp_lte`, `rssi_nr5g`, … |
+| SINR | `gauge` | `sinr_lte`, `sinr_nr5g` |
+| modem temperature | `temperature` | `modem` |
+| READY / attempts / protocol errors | `gauge` | `registered`, `attempts`, `proto_errors` |
+| per interface, CONNECTED as 0/1 | `gauge` | `<interface>` / `connected` |
+
+SINR is `gauge` on purpose: collectd's `signal_quality` has a floor of 0 and
+`signal_power` a ceiling of 0, and SINR runs roughly −20…+30 dB, so either would
+silently discard half its range — a sponsor box reported −2.5 dB and −0.8 dB on
+two modems at once. The `-32768` "not measured" sentinel is filtered before it
+can reach RRD, where it would be a real data point flattening every graph that
+shares its scale.
+
+luci-app-statistics renders graphs from a per-plugin definition, and there is no
+`wwand.js` there yet; without one the data still lands in RRD but is not drawn.
 
 ## ubus API
 

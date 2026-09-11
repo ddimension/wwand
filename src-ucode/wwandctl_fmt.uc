@@ -13,6 +13,8 @@
 
 'use strict';
 
+import * as tlv from 'wwand.codec.tlv';
+
 export function fmt_plmn(reg)
 {
 	let p = reg?.plmn;
@@ -102,4 +104,88 @@ export function reg_text(m)
 	return m.registration_detail?.reject_text
 		? sprintf('not registered: %s', m.registration_detail.reject_text)
 		: 'not registered';
+};
+
+// --- collectd exec feed ------------------------------------------------------
+
+// The cadence floor, and the reason for it. `modem_signal` keeps wwand's
+// adaptive fast-telemetry loop warm (daemon.uc calls modem.watch()); that loop
+// polls the modem at 1 Hz and decays 6 s after the last request
+// (modem_common.uc:702-703). One sample therefore costs ~6 s of 1 Hz modem
+// traffic, so the duty cycle is 6/interval: 10 % at 60 s, 20 % at 30 s, 60 % at
+// 10 s — and at 6 s or below the loop NEVER decays and the modem is polled
+// around the clock. A global `Interval 10` in collectd.conf would do exactly
+// that without anyone noticing, so it is raised rather than obeyed.
+export const COLLECTD_MIN_INTERVAL = 30;
+
+export function collectd_interval(want)
+{
+	let n = +(want ?? 0);
+
+	if (n != n || n <= 0)          // absent or unparsable -> collectd's own default
+		return 60;
+
+	return (n < COLLECTD_MIN_INTERVAL) ? COLLECTD_MIN_INTERVAL : int(n);
+};
+
+// One modem's PUTVAL lines.
+//
+// Types checked against collectd 5.12.0 types.db:
+//   signal_power   GAUGE U:0    dBm/dB, always <= 0   (rsrp, rscp, rssi, rsrq, ecio)
+//   temperature    GAUGE U:U
+//   gauge          GAUGE U:U
+// SINR is deliberately NOT `signal_quality` (min 0, would drop every negative
+// reading) and NOT `signal_power` (max 0, would drop every positive one): it
+// runs roughly -20..+30 dB, so either bound silently discards half its range.
+//
+// `-32768` is the i16 "not measured" sentinel, filtered on the RAW value with
+// the codec's own rule rather than a dBm floor — snr is in 0.1 dB, so a genuine
+// -15 dB is -150 and a display heuristic like fmt_sig's `> -140` would throw it
+// away. A sentinel reaching RRD is worse than no value at all: it is a real
+// data point at -32768 that flattens every graph sharing its scale.
+export function collectd_lines(host, modem, sig, m, interval)
+{
+	let out = [];
+	let val = (v) => tlv.is_unavailable(v, 'i16') ? null : v;
+
+	let put = (type, inst, v) => {
+		if (v == null)
+			return;
+
+		push(out, sprintf('PUTVAL "%s/wwand-%s/%s-%s" interval=%d N:%s',
+			host, modem, type, inst, interval, sprintf('%.3f', v)));
+	};
+
+	// one series per radio technology, never a single line that changes meaning
+	// when the modem switches — the same rule the LuCI graph follows
+	for (let rat, b in { lte: sig?.lte, nr5g: sig?.nr5g, wcdma: sig?.wcdma }) {
+		if (!b)
+			continue;
+
+		put('signal_power', sprintf('rsrp_%s', rat), val(b.rsrp) ?? val(b.rscp));
+		put('signal_power', sprintf('rssi_%s', rat), val(b.rssi));
+		put('signal_power', sprintf('rsrq_%s', rat), val(b.rsrq));
+		put('signal_power', sprintf('ecio_%s', rat), val(b.ecio));
+
+		let snr = val(b.snr);
+
+		if (snr != null)
+			put('gauge', sprintf('sinr_%s', rat), snr / 10.0);
+	}
+
+	// the untagged band RSSI, and only when no RAT claimed one — otherwise the
+	// same measurement would land in two files under two names
+	if (val(sig?.lte?.rssi) == null && val(sig?.wcdma?.rssi) == null)
+		put('signal_power', 'rssi', val(sig?.rssi));
+
+	// NR RSRQ arrives top-level on some firmware rather than inside nr5g
+	put('signal_power', 'rsrq_nr5g', val(sig?.nr5g_rsrq));
+
+	// from status(), which costs no modem traffic at all
+	put('temperature', 'modem', m?.temperature?.celsius);
+	put('gauge', 'registered', (m?.state == 'READY') ? 1 : 0);
+	put('gauge', 'attempts', +(m?.attempts ?? 0));
+	put('gauge', 'proto_errors', +(m?.proto_errors ?? 0));
+
+	return out;
 };
