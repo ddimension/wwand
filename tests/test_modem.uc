@@ -1387,6 +1387,94 @@ scenario('validate-lock', {
 			'validate: 4G lock read back over AT');
 	});
 
+// A CELL LOCK THE CONFIG NO LONGER ASKS FOR IS RELEASED.
+//
+// cell_lock_commands() only ever emits a lock when one is CONFIGURED, so
+// deleting `lock_4g` left the modem locked forever — nothing was sent, and it
+// kept searching for a cell that may not be there. With `lock_persist` the lock
+// sits in modem NV and survives reboots and AT+CFUN, so the box could not be
+// recovered by editing the config at all. HW-found on an NR7101 locked to
+// EARFCN 1300 / PCI 246, a cell not receivable at that site: permanent
+// "servingcell","SEARCH", +CGATT: 0. Releasing it attached within seconds on
+// EARFCN 6300 (2026-09-11).
+//
+// This transport answers the lock READ with an enabled lock and everything else
+// with OK, so the scenario is "config says no lock, modem says locked".
+function fake_at_locked()
+{
+	let self = { written: [], data_cb: null };
+
+	self.write = (data) => {
+		let cmd = trim(data);
+		push(self.written, cmd);
+
+		uloop.timer(1, () => self.data_cb(
+			(cmd == 'AT+QNWLOCK="common/4g"')
+				? '+QNWLOCK: "common/4g",1,1300,246\r\nOK\r\n'
+				: 'OK\r\n'));
+
+		return length(data);
+	};
+	self.on_data = (cb) => { self.data_cb = cb; };
+	self.drain = () => null;
+	self.close = () => null;
+
+	return self;
+}
+
+let at_tr_stale = fake_at_locked();
+
+scenario('lock-released', {
+	handlers: base_handlers({
+		GET_MODEL: { model: 'RG650E-EU' },
+		SET_SYSTEM_SELECTION_PREFERENCE: {},
+		GET_SYSTEM_SELECTION_PREFERENCE: { mode_preference: 1 << 4, network_selection: 0 },
+	}),
+	// NO lock_4g / lock_5g in the config — that is the whole point
+	config: { modes: 'lte', tty: '/dev/ttyUSB2' },
+	at: {
+		fx: fakefx.create(),
+		open_transport: (path, baud, log) => at_tr_stale,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		ok(index(at_tr_stale.written, 'AT+QNWLOCK="common/4g"') >= 0,
+			'lock-released: the modem is asked whether it carries a lock');
+		ok(index(at_tr_stale.written, 'AT+QNWLOCK="common/4g",0') >= 0,
+			'lock-released: and the lock it reports is switched off');
+		ok(index(at_tr_stale.written, 'AT+QNWLOCK="save_ctrl",1,1') >= 0,
+			'lock-released: the release is persisted — the old one may be in NV');
+
+		// the modem must still come up; a release is not a failure
+		eq(modem.state, 'READY', 'lock-released: the modem reaches READY');
+	});
+
+// ...and a modem that reports NO lock is not written to at all. Read-before-
+// write is the rule everywhere else in this tree and a needless NV write per
+// start is exactly what it exists to prevent.
+let at_tr_clean = fake_at_transport();
+
+scenario('lock-absent-no-write', {
+	handlers: base_handlers({
+		GET_MODEL: { model: 'RG650E-EU' },
+		SET_SYSTEM_SELECTION_PREFERENCE: {},
+		GET_SYSTEM_SELECTION_PREFERENCE: { mode_preference: 1 << 4, network_selection: 0 },
+	}),
+	config: { modes: 'lte', tty: '/dev/ttyUSB2' },
+	at: {
+		fx: fakefx.create(),
+		open_transport: (path, baud, log) => at_tr_clean,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		ok(index(at_tr_clean.written, 'AT+QNWLOCK="common/4g"') >= 0,
+			'lock-absent: still asked');
+		eq(index(at_tr_clean.written, 'AT+QNWLOCK="common/4g",0'), -1,
+			'lock-absent: nothing switched off — there was nothing to switch off');
+		eq(index(at_tr_clean.written, 'AT+QNWLOCK="save_ctrl",1,1'), -1,
+			'lock-absent: and no NV write');
+	});
+
 // --- 11: LOC positioning session ----------------------------------------------
 
 scenario('loc', {
