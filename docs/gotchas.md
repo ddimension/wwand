@@ -162,6 +162,84 @@ mismatch and is not one; the CI passes the same `PRIVATE_KEY` to every matrix
 entry, and the difference is upstream capability. Diagnosed wrongly here first,
 as "the 25.12 branch of the feed is unusable" — it is not.
 
+## Telemetry / signal
+
+### A value the serving-cell read provides can be filled in once and left alone
+**Wrong wherever nothing else provides it — it then freezes for the life of the
+session.** `fill_signal_from_serving()` fills a gap but does not overwrite, which
+is correct while the family's own signal command owns the value and wrong when
+there is no such command. A stale *good* reading is worse than none: a flat line
+on the live graph reads as a stable link while the real value moves, and it is
+the one fault a graph hides instead of showing.
+
+Two telemetry families sit in that position. **MeiG** polls `AT+CESQ`, which
+carries rsrp and rsrq and **no SINR field at all**, so its SINR can only ever
+come from the `AT+MENG` serving read. **Quectel** polls
+`AT+QRSRP?`/`QRSRQ?`/`QSINR?`, which is right until a module refuses all three
+and `AT+QENG` becomes the only source (ddimension/wwand#19, EC200A). Huawei's
+`^HCSQ?` carries the full set and keeps ownership unless it is itself retired;
+Fibocom's signal step is `AT+CSQ` alone, so its serving read already owned the
+block.
+
+`refresh` therefore takes a **set of field names** as well as a boolean: MeiG
+owns `snr` and nothing else, because its rsrp/rsrq from CESQ are real and better
+left alone.
+
+*Evidence:* driven against the real command formats — the modem reports SINR 20
+then SINR 3, and the display stayed at 20 across both reads. Pinned in
+`test_ncm` ("follows the modem down"); with ownership removed those two checks
+fail and nothing else does.
+
+### A vendor AT command that answers ERROR is harmless noise
+**Wrong on a polling loop.** The telemetry loops ask 21 different vendor
+commands, most specific to one manufacturer's AT set, and `atcmd` logs every
+error at `warn` — deliberately, so a silent line-drop cannot hide a failure. An
+unimplemented command on the fast loop therefore writes a warn line **per
+second, forever**, and burns a serial round-trip each time on a port that has
+other work. A Quectel EC200A on a RUT200 produced four of them per second and
+drowned the log (ddimension/wwand#19).
+
+A per-manufacturer gate cannot fix this, and the same report proves it: the
+EC200A **is** a Quectel, and `AT+QENG="servingcell"` — gated on exactly that
+manufacturer — works on it. The Q-command set is not one set; it varies by
+module.
+
+So `telemetry_at()` keeps a per-command memory: **three consecutive bare
+`ERROR`s** retire a command for that AT channel, with one notice naming it. Read
+the log that way — three warn lines then silence is the mechanism working, not
+the modem recovering.
+
+Three, and only a *bare* `ERROR`, for two reasons that are both mistakes already
+made here:
+
+- Retiring on the **first** error is how `AT^CHIPTEMP` was disabled for a whole
+  session when the command *form* was wrong rather than the command absent
+  (ddimension/wwand#12). Any success resets the count.
+- `+CME ERROR: <n>` is a runtime condition (SIM not ready, no network) and a
+  timeout means the port is wedged. Neither says the firmware lacks the command,
+  and a bare ERROR on either side of one is **not** a streak — counting through
+  them would retire on evidence that is not about the firmware at all.
+
+The memory is cleared with the AT channel (`close_at`), so a re-open after a
+protocol switch or a re-enumeration probes again from scratch.
+
+### A cell lock is gone once you remove it from the config
+**Wrong — nothing releases it.** `cell_lock_commands()` only ever emits a lock
+when one is *configured*, so deleting `lock_4g` sends nothing and the modem stays
+locked to whatever it was last given, searching for a cell that may not be there.
+With `lock_persist` the lock is in modem NV and survives reboots and `AT+CFUN`
+resets too: the config says "no lock", the hardware says "locked", and there is
+no way to say otherwise short of AT by hand.
+
+`config_check` now asks the modem and releases a lock the config does not
+request, followed by `save_ctrl` because the lock being cleared may have been
+persisted by an *earlier* config.
+
+*Evidence:* HW-found on an NR7101 pinned to EARFCN 1300 / PCI 246, a cell not
+receivable at that site — permanent `"servingcell","SEARCH"`, `+CGATT: 0`,
+unchanged by removing `lock_4g` and restarting. Releasing it attached within
+seconds on EARFCN 6300, Telekom.de, rsrp -60 (2026-09-11).
+
 ## ucode
 
 ### `require()` shares module instances with the importer
