@@ -1165,6 +1165,32 @@ eq(netlink.datapath_catalog()[3].proto, [ 'qmi' ], 'catalog: the module table is
 	ok(length(filter(f.logs, (l) => index(l, 'IFF_NOARP') >= 0)) == 1,
 		'ifaceid: the raw-IP refusal names IFF_NOARP');
 
+	// ...AND IT MUST NOT CRY WOLF when the identifier is already in place by the
+	// other route. On a raw-IP link the control-protocol path puts the literal
+	// on the address the modem hands us, so the token refusal costs nothing —
+	// yet the warning told the operator to "set the identifier on the address
+	// the modem hands us instead", which wwand had just done in the same second.
+	// Reported from a live RM520F-GL where the option demonstrably worked
+	// (ddimension/wwand#8, 2026-09-11).
+	f = mkfx({ noarp: true, refuse: 'Invalid argument' });
+	f.logs = [];
+	r = netlink.apply_iface_id(f, 'wwan0', '::1', log(f), true);
+
+	eq(r.applied, null, 'ifaceid: still applies no token when the address carries it');
+	eq(length(filter(f.logs, (l) => index(l, 'warn') == 0)), 0,
+		'ifaceid: no warning when the address already carries the identifier');
+	ok(length(filter(f.logs, (l) => index(l, 'not applicable on a raw-IP link') >= 0)) == 1,
+		'ifaceid: says the token is not needed here, rather than rejected');
+
+	// without that flag the same refusal is still a warning — a generation mode
+	// (eui64/random) has no other mechanism, so its refusal must stay loud
+	f = mkfx({ noarp: true, refuse: 'Invalid argument' });
+	f.logs = [];
+	netlink.apply_iface_id(f, 'wwan0', '::1', log(f));
+
+	ok(length(filter(f.logs, (l) => index(l, 'IFF_NOARP') >= 0)) == 1,
+		'ifaceid: still warns when nothing else applied the identifier');
+
 	// same refusal on an ARP-capable link is a different cause and must not
 	// claim raw-IP
 	f = mkfx({ refuse: 'Invalid argument' });

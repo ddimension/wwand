@@ -16,6 +16,7 @@
 'use strict';
 
 import * as netlink from 'wwand.netlink';
+import * as context_common from 'wwand.context_common';
 
 // connection params re-read from disk on every up (structural changes still go
 // through the reload trigger). entry.cfg is the object the context reads live,
@@ -109,8 +110,23 @@ export function install(self, o)
 		if (!fx || !netdev || want == null || want == '')
 			return;
 
+		// Did the OTHER mechanism already do it? A literal identifier is put on
+		// the address the modem hands us as the settings are assembled
+		// (context_common.apply_iface_id), and on a raw-IP link that is the only
+		// path there is — the kernel refuses a token on IFF_NOARP. Telling the
+		// kernel-token path so keeps its refusal from reading as a failure of
+		// the option itself.
+		//
+		// Only for a LITERAL: `eui64` / `random` / `stable` are generation modes
+		// the kernel applies to RA-formed addresses, so for those the token path
+		// is the only mechanism and its refusal stays a warning.
+		let addr = entry.ctx.settings?.ipv6?.addr;
+		let on_addr = (substr(want, 0, 2) == '::') && addr != null &&
+		              context_common.apply_iface_id(addr, want) == addr;
+
 		netlink.apply_iface_id(fx, netdev, want,
-			(level, msg) => log(level, sprintf('interface %s: %s', name, msg)));
+			(level, msg) => log(level, sprintf('interface %s: %s', name, msg)),
+			on_addr);
 	};
 
 	// enable IPv6 on the l3 link before netifd configures it (disable_ipv6=0)

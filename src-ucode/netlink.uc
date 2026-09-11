@@ -521,7 +521,7 @@ function write_attr(fx, path, value, what)
 // identifier" that is a trap, not a choice, and it is not an identifier.
 const ADDR_GEN_MODE = { eui64: 0, stable: 2, random: 3 };
 
-export function apply_iface_id(fx, netdev, value, log)
+export function apply_iface_id(fx, netdev, value, log, on_addr)
 {
 	log ??= fx.log;
 	value = trim(value ?? '');
@@ -566,7 +566,18 @@ export function apply_iface_id(fx, netdev, value, log)
 		noarp = (v != null) && ((v & 0x80) != 0);
 	}
 
-	if (noarp)
+	// `on_addr`: the identifier is ALREADY on the address the modem handed us,
+	// applied by the control-protocol path. Then this refusal costs nothing and
+	// must not be shouted about — the option demonstrably worked, and the old
+	// wording advised the operator to do the very thing wwand had just done in
+	// the same second ("set the identifier on the address ... instead"). Read on
+	// a live box it looked like the setting had failed while the address it
+	// produced was sitting in the log two lines below (ddimension/wwand#8,
+	// RM520F-GL on MBIM raw-IP, 2026-09-11).
+	if (noarp && on_addr)
+		log('info', sprintf('%s: ip6ifaceid %s is on the address the modem handed us; the kernel token is not applicable on a raw-IP link (IFF_NOARP) and is not needed here — it would only matter for an address formed from router advertisements',
+			netdev, value));
+	else if (noarp)
 		log('warn', sprintf('%s: ip6ifaceid %s rejected — this is a raw-IP link (IFF_NOARP) and the kernel only takes a token on a link that does neighbour discovery; use it on an 802.3/ethernet-framed modem, or set the identifier on the address the modem hands us instead',
 			netdev, value));
 	else
