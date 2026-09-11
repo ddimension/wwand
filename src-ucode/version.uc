@@ -3,8 +3,8 @@
 // wwand — what is installed, so a log says which build produced it.
 //
 // There is no version constant in this tree on purpose. The package version is
-// built from PKG_SOURCE_DATE, the commit and PKG_RELEASE
-// ("2026.08.30~199a2f8a-r53"), so a hand-maintained constant here would be a
+// the release it was built from ("1.6.6-r1", a development build "1.6.6_p3-r1"),
+// set by the feed, so a hand-maintained constant here would be a
 // second source of truth and would start lying the first time somebody forgot
 // to bump it. The package database already holds the answer and nobody has to
 // keep it in step.

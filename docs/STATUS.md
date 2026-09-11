@@ -28,7 +28,7 @@ is always user-triggered.
 | Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed |
 | Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
-| Feed | ddimension/openwrt-repo — `wwand` r71, `luci-app-wwand` r32, `luci-proto-wwand` r17 |
+| Feed | ddimension/openwrt-repo — stable (releases): `wwand`, `luci-app-wwand`, `luci-proto-wwand` 1.6.6; main: development pins as `1.6.6_pN` |
 | Upstream | openwrt/packages#30185 (pins v1.6.3), openwrt/luci#8917 |
 
 ## Hardware verified (2026-08-30, on r49 + the same day's device-support HEAD)
@@ -100,8 +100,8 @@ backend qmi loaded
 ```
 
 The version is read from the package database (`version.uc`), never a constant in
-the tree: the package version is assembled from PKG_SOURCE_DATE, the commit and
-PKG_RELEASE, so a constant would be a second truth that starts lying the first
+the tree: the package version is the release it was built from (`1.6.6-r1`, a
+development build `1.6.6_p3-r1`), so a constant would be a second truth that starts lying the first
 time somebody forgets to bump it. A hand-deployed tree says `unpackaged`.
 Availability is a file check on each backend's lazy shim — probing by
 `require()` would defeat the lazy loading the package split exists for, and each
@@ -339,8 +339,10 @@ nothing repainted over the mask.
    with `--makefile <pkgs>/net/wwand/Makefile --tarball <release>.tar.gz`.
 4. Tag, pinning the **commit** (`git rev-parse vX.Y.Z^{commit}`), never the tag
    object.
-5. Feed: bump `PKG_RELEASE`/`PKG_SOURCE_VERSION`/`_DATE`, then
-   `scripts/update-hashes.sh` — and verify the Makefile actually changed.
-6. One feed push, then wait: the feed CI is `cancel-in-progress`.
+5. Feed, on its main branch: `scripts/bump-source.sh wwand vX.Y.Z` (and the two
+   LuCI packages, tagged `vX.Y.Z` alongside) — version, release and SDK hash in
+   one go; verify the Makefile actually changed. Rules: the feed's CLAUDE.md.
+6. One feed push, then wait: the feed CI is `cancel-in-progress` per branch.
+   Devices get it when the feed's stable is released (`scripts/release-stable.sh`).
 
 The traps in steps 2 and 4-6 have each fired at least once; `gotchas.md` says how.

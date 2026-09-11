@@ -1638,14 +1638,15 @@ rather than e.g. `-3276.8 dBm`.
   log needs no follow-up questions:
 
   ```
-  wwand 2026.08.30~199a2f8a-r53; backends: qmi, mbim, ncm
+  wwand 1.6.6-r1; backends: qmi, mbim, ncm
   datapath: built-in auto, raw_ip, ethernet, rmnet, qmimux, vlan; add-ons rmnet_nss, rmnet_nss_mhi
   backend qmi loaded
   ```
 
   The **version** is read from the package database (apk, or opkg on older
-  builds), not from a constant in the source: the package version is assembled
-  from the source date, the commit and `PKG_RELEASE`, so a constant would be a
+  builds), not from a constant in the source: the package version is the
+  release it was built from (`1.6.6-r1`; a development build between releases
+  `1.6.6_p3-r1`), so a constant would be a
   second truth that starts lying the first time somebody forgets to bump it. A
   tree whose files were deployed by hand over an installed package reports
   `unpackaged (files deployed by hand)` rather than borrowing the version of the
