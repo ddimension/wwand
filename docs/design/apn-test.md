@@ -226,6 +226,60 @@ against QMI, MBIM and NCM — and makes it testable without a modem.
 deployed); a Prometheus textfile and syslog are the obvious companions. A
 verdict is a structure; where it goes is a list.
 
+## Accounting: accounts, not endpoints
+
+The field settled this before the design asked it. Four distinct endpoints are
+in use across the twelve reachable boxes:
+
+| endpoint | protocol | boxes |
+|---|---|---|
+| `api-ng.m-ccp.de` | basic auth in the URL, `/<simtype>/<simid>/status`, sum `.statusList[1].currentTraffic.counter[].bytesTotal` | 9 |
+| `m-ccp-be1.ioteasyconnect.de` | same protocol, different operator host | 2 |
+| `api.ioteasyconnect.de` | OAuth2 password grant, `/api/v1/simcard/<id>/status` -> `traffic_used`, then logout | 2 |
+| a `.cz` instance | same as the line above, own credentials | not on these boxes (operator-confirmed) |
+
+So there are **two protocols and N accounts**, not two providers. That is
+already visible on `.27`, where the shipped test has been refactored by hand
+into `iec_api_baseurl=` and `mccp_api_url=` variables — with the m-ccp path
+commented out, so that box counts through IEC only. The account model
+formalises what that edit was reaching for, and moves the credentials into
+`/etc/config` at 0600 instead of a packaged conffile.
+
+```
+config apntest_account 'iec_de'
+    option type     'iec'            # oauth2 + /api/v1/simcard/<id>/status
+    option base_url 'https://api.ioteasyconnect.de'
+    option client_id '…'
+    option client_secret '…'
+    option username '…'
+    option password '…'
+
+config apntest_account 'iec_cz'      # same protocol, own credentials
+    option type     'iec'
+    option base_url 'https://api.ioteasyconnect.cz'
+
+config apntest_account 'mccp'
+    option type     'mccp'           # basic auth, statusList
+    option base_url 'https://api-ng.m-ccp.de'
+
+config apntest 'vf_m2m'
+    option account  'iec_de'
+    option sim_id   '262021608171418'
+    option sim_type 'globalsim'      # simcard | globalsim
+    list  check     'accounting'
+```
+
+Two details worth carrying over rather than rediscovering:
+
+- **`.statusList[1]` is a hard-coded index into a list.** It is the second
+  entry, not a lookup, and nothing in the old code checks that the entry it
+  lands on describes the SIM being tested. Before the plugin copies that, the
+  shape of a real answer has to be looked at once.
+- **A check that cannot run must say so.** The old test returns 0 — success —
+  when `mccp_simid` or `mccp_simtype` is unset. Three boxes have no id set, so
+  their accounting has never run and has never said anything about it. Here
+  that is UNKNOWN with a reason.
+
 ## What this deliberately does not do
 
 No second dialler, no `udhcpc`, no PIN, registration, technology-preference or
