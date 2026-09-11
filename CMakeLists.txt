@@ -83,7 +83,7 @@ endif()
 
 # ES modules (top-level `export`) -> compiled with -cmodule
 set(WWAND_UCODE_MODULES
-  apndb.uc atcmd_mbim.uc atcmd_parse.uc atcmd.uc backend.uc board.uc callend.uc client.uc
+  apndb.uc apntest/plan.uc atcmd_mbim.uc atcmd_parse.uc atcmd.uc backend.uc board.uc callend.uc client.uc
   codec/arfcn_bands.uc codec/hex.uc codec/mbim.uc codec/qmux.uc codec/tlv.uc
   codec/mbim_schema/basic_connect.uc codec/mbim_schema/compal.uc
   codec/mbim_schema/fibocom.uc codec/mbim_schema/ms_basic_connect_ext.uc
