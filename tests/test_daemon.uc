@@ -1398,6 +1398,58 @@ am3.apply_config(config.parse({ network: {
 eq(am3.modems.m0?.l3_name, false,
 	'automux-name: a pinned channel leaves the parent on its kernel name');
 
+// A DEMOTABLE MODEM WHOSE NAME IS ALREADY TAKEN IS NOT AN ERROR.
+//
+// The stable name is asked for up front because the auto channel may turn out
+// not to exist. When it DOES exist, the mux child takes that name and the
+// parent keeping its kernel name is the correct outcome — so the rename losing
+// the race is one of two expected results, not a failure. Reported at error
+// level it meant a healthy muxed modem logged a daemon.err on every start
+// (HW-observed on an NR7101, 2026-09-11: "cannot rename netdev wwan0 to
+// wwand0: name already in use", once per restart, with the datapath up and
+// QMAP v5 negotiated).
+(function() {
+	let lines = [];
+	let fx = {
+		link_set: (dev, o) => true,
+		exists: (p) => true,          // the wanted name is always taken
+	};
+	let d = daemon_mod.create({ timing: TIMING, deps: {
+		log: (l, m) => push(lines, l + ':' + m),
+		datapath_fx: fx,
+		resolve_netdev: (cfg, dev) => 'wwan0',
+		load_qmi: () => am_qmi,
+	} });
+
+	d.apply_config(config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: 'auto' },
+	} }));
+
+	let errs = filter(lines, (l) => index(l, 'err:') == 0 && index(l, 'rename') >= 0);
+	eq(length(errs), 0, 'rename-taken: a demotable modem does not log an error');
+
+	let notes = filter(lines, (l) => index(l, 'is taken') >= 0);
+	eq(length(notes), 1, 'rename-taken: it says the mux child has the name');
+
+	// ...and a modem that is NOT demotable still reports a real conflict
+	lines = [];
+	let d2 = daemon_mod.create({ timing: TIMING, deps: {
+		log: (l, m) => push(lines, l + ':' + m),
+		datapath_fx: fx,
+		resolve_netdev: (cfg, dev) => 'wwan0',
+		load_qmi: () => am_qmi,
+	} });
+
+	d2.apply_config(config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a' },
+	} }));
+
+	ok(length(filter(lines, (l) => index(l, 'err:') == 0 && index(l, 'cannot rename') >= 0)) == 1,
+		'rename-taken: an unmuxed modem still reports the clash as an error');
+})();
+
 // ...and a pinned channel beside an auto one is not demotable either: the
 // modem needs QMAP for the pinned one regardless.
 am_opts = {};

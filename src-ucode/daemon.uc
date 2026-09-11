@@ -1140,9 +1140,21 @@ export function create(opts)
 		if (!want || want == entry.netdev)
 			return;
 
-		if (fx.exists(sprintf('/sys/class/net/%s', want)))
+		if (fx.exists(sprintf('/sys/class/net/%s', want))) {
+			// For a DEMOTABLE modem this is not a failure but the other of two
+			// expected outcomes. The name is asked for up front in case the
+			// auto channel turns out not to exist; when it does exist, the mux
+			// CHILD takes that name and the parent keeping its kernel name is
+			// exactly right. Reporting it at error level meant a perfectly
+			// healthy muxed modem logged a daemon.err on every single start
+			// (HW-observed on the NR7101, 2026-09-11).
+			if (entry.muxinfo?.demotable)
+				return log('info', sprintf('modem %s: %s is taken — the mux child has it, so netdev %s keeps its kernel name',
+					name, want, entry.netdev));
+
 			return log('err', sprintf('modem %s: cannot rename netdev %s to %s: name already in use — keeping %s',
 				name, entry.netdev, want, entry.netdev));
+		}
 
 		if (!fx.link_set(entry.netdev, { rename: want }))
 			return log('err', sprintf('modem %s: renaming netdev %s to %s failed (device busy?) — keeping %s',
