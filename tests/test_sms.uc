@@ -61,6 +61,84 @@ eq(deleted[0].memory_index, 4, 'delete: index passed');
 sms.sms_delete(modem, 'SM', 2, () => {});
 eq(deleted[1].storage, 0, 'delete: storage SM -> UIM(0)');
 
+// --- deleting a SET, which is what the UI actually needs ----------------------
+//
+// NOT a protocol "delete all", although every backend offers one. A bulk
+// primitive deletes what is in the store when the MODEM runs it, not what the
+// operator was shown, so a message arriving between the list and the click goes
+// with it (ddimension/luci-app-wwand#8). Deleting the listed indices cannot do
+// that.
+deleted = [];
+sms.sms_delete(modem, 'SM', [ 2, 5, 9 ], (err, res) => {
+	eq(err, null, 'multi: no error');
+	ok(res.ok, 'multi: ok');
+	eq(res.deleted, 3, 'multi: all three deleted');
+	eq(res.requested, 3, 'multi: and all three were requested');
+	eq(length(res.failed), 0, 'multi: nothing failed');
+});
+eq(map(deleted, (d) => d.memory_index), [ 9, 5, 2 ],
+	'multi: DESCENDING — a firmware that compacted its store could not shift a pending index');
+
+// duplicates and junk are dropped rather than sent twice
+deleted = [];
+sms.sms_delete(modem, 'SM', [ 3, 3, -1, 7 ], (err, res) => {
+	eq(res.deleted, 2, 'multi: duplicate collapsed, negative dropped');
+});
+eq(map(deleted, (d) => d.memory_index), [ 7, 3 ], 'multi: each surviving index sent once');
+
+// an empty set is an error, not a silent success — a UI bug must not read as
+// "deleted nothing, fine"
+sms.sms_delete(modem, 'SM', [], (err, res) => {
+	eq(err?.error, 'no_index', 'multi: an empty set is refused');
+	eq(res, null, 'multi: and returns no result');
+});
+
+// A SINGLE index keeps the reply shape it always had, because rpc callers and
+// the per-row Delete button still use it.
+deleted = [];
+sms.sms_delete(modem, 'SM', 6, (err, res) => {
+	eq(err, null, 'single: unchanged');
+	ok(res.ok, 'single: plain ok');
+	eq(res.deleted, null, 'single: no multi bookkeeping in the reply');
+});
+
+// --- one bad slot must not strand the rest -----------------------------------
+// The case this exists for is a full SIM: index 30 failing is no reason for
+// 31..47 to survive, and the caller needs to be told which one went wrong
+// rather than just "error".
+let flaky_deleted = [];
+let flaky = {
+	// backend pre-selected: this fixture exercises the LOOP, not the probe
+	_sms_be: 'qmi',
+	wms: {
+		request: function(name, args, cb) {
+			if (name != 'DELETE')
+				return cb({ error: 'unexpected', name: name });
+			if (args.memory_index == 5)
+				return cb({ error: 'qmi', result: 1, code: 48 });
+			push(flaky_deleted, args.memory_index);
+			return cb(null);
+		},
+	},
+};
+
+sms.sms_delete(flaky, 'SM', [ 2, 5, 9 ], (err, res) => {
+	eq(err, null, 'partial: not reported as a failed call');
+	ok(!res.ok, 'partial: but not ok either');
+	eq(res.deleted, 2, 'partial: the other two went');
+	eq(length(res.failed), 1, 'partial: one failure recorded');
+	eq(res.failed[0].index, 5, 'partial: named by index');
+	eq(res.failed[0].error?.detail?.code, 48,
+		'partial: with the backend error kept, in the shape it always had');
+});
+eq(flaky_deleted, [ 9, 2 ], 'partial: the failure did not stop the loop');
+
+// ...and a SINGLE index that fails still reports the bare error it always did
+sms.sms_delete(flaky, 'SM', 5, (err, res) => {
+	eq(err?.detail?.code, 48, 'single: a failure is still the plain error');
+	eq(res, null, 'single: and no result');
+});
+
 // --- no WMS -> unsupported_on_backend ----------------------------------------
 sms.sms_list({}, 'SM', (err, res) => {
 	eq(err.error, 'unsupported_on_backend', 'no wms -> unsupported_on_backend');

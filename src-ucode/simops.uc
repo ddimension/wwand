@@ -154,10 +154,19 @@ export function install(self, o)
 			sms.sms_read(entry.modem, storage ?? 'SM', +index, cb);
 	};
 
-	self.modem_sms_delete = function(ref, storage, index, cb) {
+	// `indices` deletes a SET in one call; `index` stays for the single-message
+	// callers that predate it (and keeps their plain { ok: true } reply shape).
+	// Not a "delete all": see the comment on sms.sms_delete for why a bulk
+	// primitive is the wrong thing to expose here at all.
+	self.modem_sms_delete = function(ref, storage, index, indices, cb) {
 		let entry = check_modem(ref, cb);
-		if (entry)
-			sms.sms_delete(entry.modem, storage ?? 'SM', +index, cb);
+
+		if (!entry)
+			return;
+
+		let which = (type(indices) == 'array' && length(indices)) ? indices : +index;
+
+		sms.sms_delete(entry.modem, storage ?? 'SM', which, cb);
 	};
 
 	self.modem_sms_send = function(ref, number, text, cb) {

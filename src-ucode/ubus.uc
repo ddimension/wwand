@@ -195,10 +195,14 @@ export function publish(conn, daemon, log)
 				daemon.modem_sms_send(req.args.modem, req.args.number, req.args.text, ok_reply(reply))),
 		},
 
+		// `indices` (a list) deletes several in one call and reports
+		// { deleted, requested, failed }; `index` (a single number) is kept for
+		// callers that predate it and still answers { ok: true }.
 		modem_sms_delete: {
-			args: { modem: '', storage: '', index: 0, ubus_rpc_session: '' },
+			args: { modem: '', storage: '', index: 0, indices: [], ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_sms_delete(req.args.modem, req.args.storage, req.args.index, ok_reply(reply))),
+				daemon.modem_sms_delete(req.args.modem, req.args.storage, req.args.index,
+					req.args.indices, ok_reply(reply))),
 		},
 
 		modem_plmn_lists: {

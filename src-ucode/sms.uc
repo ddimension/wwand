@@ -274,6 +274,29 @@ function sms_backend(modem, cb)
 	], cb);
 }
 
+// Delete one message, whichever backend serves this modem. The per-index step
+// the multi-delete below drives; kept separate so the loop has nothing in it
+// but the loop.
+function delete_one(modem, storage, index, cb)
+{
+	sms_backend(modem, (be) => {
+		if (be == 'qmi')
+			return modem.wms.request('DELETE', {
+				storage: qmi_storage(storage),
+				memory_index: +index,
+				message_mode: wmsmod.MODE_GSM_WCDMA,
+			}, (err) => cb(err ? { error: 'qmi', detail: err } : null,
+			               err ? null : { ok: true }));
+		if (be == 'mbim')
+			return modem.mbim_sms.del(+index, (err) =>
+				cb(err ? { error: 'mbim', detail: err } : null, err ? null : { ok: true }));
+		if (be == 'at')
+			return at_delete(modem, storage, index, cb);
+
+		cb({ error: 'unsupported_on_backend' }, null);
+	});
+}
+
 // --- public API --------------------------------------------------------------
 
 export function sms_list(modem, storage, cb)
@@ -309,24 +332,77 @@ export function sms_read(modem, storage, index, cb)
 	});
 };
 
+// Delete one message or a SET of them. `index` is a single index or an array.
+//
+// DELIBERATELY NOT "delete all", although every backend offers it: QMI's Memory
+// Index (0x10) is optional and omitting it clears the whole tag, MBIM has
+// SMS_FLAG_ALL, AT has `AT+CMGD=<n>,4`. All three delete what is in the store
+// when the MODEM executes them — not what the operator was shown. A cell
+// broadcast arriving between the list being rendered and the button being
+// pressed is exactly the message worth keeping, and a bulk primitive takes it
+// with no trace that it existed (ddimension/luci-app-wwand#8). Deleting the
+// indices that were actually listed cannot do that: a later message occupies a
+// slot that is not in the set.
+//
+// Descending order, and that is not cosmetic. The indices address storage slots
+// on all three backends (QMI's List Messages returns one `memory_index` per
+// message rather than relying on array position; AT's <index> is documented as
+// the memory location), so a delete should not renumber anything. "Should not"
+// is how the wrong message gets deleted, and descending order costs nothing: if
+// some firmware DID compact its store, every index still pending would be below
+// the one just removed and therefore unaffected.
+//
+// Every index is attempted even after one fails — a single bad slot must not
+// strand the other 46 — and the result reports what happened rather than the
+// first error: { ok, deleted, failed: [ { index, error } ] }. A caller that
+// passed one index still gets the plain { ok: true } it always did.
 export function sms_delete(modem, storage, index, cb)
 {
-	sms_backend(modem, (be) => {
-		if (be == 'qmi')
-			return modem.wms.request('DELETE', {
-				storage: qmi_storage(storage),
-				memory_index: +index,
-				message_mode: wmsmod.MODE_GSM_WCDMA,
-			}, (err) => cb(err ? { error: 'qmi', detail: err } : null,
-			               err ? null : { ok: true }));
-		if (be == 'mbim')
-			return modem.mbim_sms.del(+index, (err) =>
-				cb(err ? { error: 'mbim', detail: err } : null, err ? null : { ok: true }));
-		if (be == 'at')
-			return at_delete(modem, storage, index, cb);
+	let list = (type(index) == 'array') ? index : [ index ];
+	let single = (type(index) != 'array');
 
-		cb({ error: 'unsupported_on_backend' }, null);
-	});
+	// normalise, drop anything unusable, de-duplicate, and sort DESCENDING
+	let seen = {}, idx = [];
+
+	for (let raw in list) {
+		let n = +raw;
+
+		if (n != int(n) || n < 0 || seen[sprintf('%d', n)])
+			continue;
+
+		seen[sprintf('%d', n)] = true;
+		push(idx, n);
+	}
+
+	sort(idx, (a, b) => b - a);
+
+	if (!length(idx))
+		return cb({ error: 'no_index' }, null);
+
+	let failed = [], deleted = 0, i = 0, step;
+
+	step = () => {
+		if (i >= length(idx)) {
+			if (single)
+				return length(failed) ? cb(failed[0].error, null) : cb(null, { ok: true });
+
+			return cb(null, { ok: length(failed) == 0, deleted: deleted,
+			                  requested: length(idx), failed: failed });
+		}
+
+		let n = idx[i++];
+
+		delete_one(modem, storage, n, (err) => {
+			if (err)
+				push(failed, { index: n, error: err });
+			else
+				deleted++;
+
+			step();
+		});
+	};
+
+	step();
 };
 
 // rolling 8-bit concatenation reference for multipart sends (no RNG in ucode)
