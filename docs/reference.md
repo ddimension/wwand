@@ -560,6 +560,14 @@ A datapath that **adopts** a vendor driver's QMAP children (`rmnet_nss`,
 module load, so an unmuxed parent there carries QMAP frames with nothing to
 unwrap them.
 
+**The device name does not move with the outcome.** A muxed modem normally
+leaves its parent on the kernel name, because the mux child takes the stable
+`wwandN`. For a demotable modem that reasoning may turn out to be void, so the
+parent is renamed to the stable name up front and the child displaces it if the
+channel is built after all. The interface therefore has the same device name
+whether or not the modem does QMAP — otherwise swapping the modem would rename
+the interface, which is the instability stable L3 names exist to remove.
+
 **The datapaths.** `rmnet` (QMAP through the kernel rmnet driver) and `qmimux`
 (qmi_wwan's own `add_mux`) carry QMI modems; `vlan` carries MBIM ones, where each
 session > 0 is an 802.1q sub-device of the parent. `raw_ip` is no multiplexing at

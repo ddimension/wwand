@@ -444,6 +444,51 @@ eq(config.effective_mux_id({ mux_id: 1, mux_auto: true }, null), 1,
 eq(config.effective_mux_id({ mux_id: 0, mux_auto: false }, { backend: 'rmnet' }), 0,
 	'effective: an unmuxed context stays unmuxed');
 
+// AN `option device` DROPPED ON A MUXED CONTEXT IS SAID OUT LOUD.
+//
+// The rule itself is older than `auto`: a muxed context takes the assigned
+// wwandN, because the mux CHILD is claimed under the stable name and a child
+// must never shadow its parent. But the test behind it is broader than that
+// reason — parse_netdev() answers `{ muxed: false }` for any name that is not
+// <netdev>m<N>, so `option device lte0` is discarded exactly like the parent's
+// own name would be, though it can shadow nothing. Narrowing it would rename
+// live interfaces on upgrade, so the rule stands; what was wrong is that it
+// applied in silence, and an operator's only way to notice was to go looking.
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a',
+		     device: 'lte0', mux_id: '1' },
+	},
+});
+eq(r.contexts.a.l3_name, 'wwand0', 'devpin: the assigned name is what is in force');
+ok(length(filter(r.warnings, (w) => index(w, '`option device lte0`') >= 0)) == 1,
+	'devpin: and the dropped pin is reported, naming both values');
+
+// ...and it fires in that case ONLY. Each of these keeps its pin or never had
+// one, so a warning here would be noise an operator learns to ignore.
+let no_devpin_warn = (iface, label) => {
+	let rr = padopt({
+		network: {
+			m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
+			a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', ...iface },
+		},
+	});
+	ok(length(filter(rr.warnings, (w) => index(w, 'option device') >= 0)) == 0, label);
+};
+
+no_devpin_warn({ device: 'lte0' },
+	'devpin: an unmuxed context keeps its pin — no warning');
+no_devpin_warn({ device: 'wwan0m1' },
+	'devpin: a muxed device NAME is a valid L3 pin — no warning');
+no_devpin_warn({ mux_id: '1' },
+	'devpin: nothing pinned, nothing dropped');
+no_devpin_warn({ device: '/dev/cdc-wdm0', mux_id: '1' },
+	'devpin: a control path was never an L3 name — no warning');
+
+// the scratch field must not survive into the parsed config
+ok(!exists(r.contexts.a, '_device_pin'), 'devpin: the comparison field is deleted');
+
 // no mux anywhere: nothing auto-assigned
 r = padopt({
 	network: {

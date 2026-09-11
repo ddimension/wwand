@@ -1499,8 +1499,7 @@ export function create(opts)
 			                      // session id is available on every MBIM modem, so
 			                      // `auto` on one is an ordinary channel with nothing
 			                      // to fall back from.
-			                      mux_auto: (muxinfo?.auto ?? 0) == length(muxinfo?.list ?? []) &&
-			                                length(muxinfo?.list ?? []) == 1,
+			                      mux_auto: muxinfo?.demotable ?? false,
 			                      fx: deps.datapath_fx };
 
 		entry.modem = be.modem.create({ ...common, datapath: datapath });
@@ -1641,8 +1640,10 @@ export function create(opts)
 
 				push(mi.list, { id: cfg.mux_id, name: cfg.mux_link, mtu: cfg.mtu });
 
-				if (cfg.mux_auto ?? false)
+				if (cfg.mux_auto ?? false) {
 					mi.auto++;
+					mi.l3_name = cfg.l3_name;
+				}
 
 				// mux children are claimed under their own names — the raw
 				// parent keeps its kernel name (false = never rename)
@@ -1651,6 +1652,32 @@ export function create(opts)
 			else if (cfg.modem && l3_by_modem[cfg.modem] == null) {
 				l3_by_modem[cfg.modem] = cfg.l3_name;
 			}
+		}
+
+		// MAY THIS MODEM BE RUN UNMUXED AFTER ALL? One auto-allocated channel
+		// and nothing else. A second context has nowhere to go on a raw-IP
+		// parent (one parent carries one session), and a pinned channel beside
+		// it needs QMAP regardless — in both cases a modem that cannot mux is a
+		// configuration error to report, not a fallback to take.
+		//
+		// It decides the PARENT'S NAME as well as the datapath's permission,
+		// and the two have to be one answer. A muxed modem deliberately leaves
+		// the parent on its kernel name because the CHILD takes the stable
+		// wwandN; if the channel then turns out not to exist, that reasoning is
+		// void and the interface would sit on `wwan0` — so an interface's
+		// device name would depend on which modem is plugged in, which is the
+		// exact instability stable L3 names exist to remove.
+		//
+		// So a demotable modem is named as if unmuxed, and the muxed outcome is
+		// handled where it already was: netlink.setup() finds the parent
+		// occupying the child's name and moves it to a raw one first (the
+		// Chateau's "config update bounced the datapath through a channel-less
+		// snapshot" path — same displacement, now reached on purpose).
+		for (let mname, mi in mux_by_modem) {
+			mi.demotable = (mi.auto == length(mi.list)) && (length(mi.list) == 1);
+
+			if (mi.demotable && mi.l3_name)
+				l3_by_modem[mname] = mi.l3_name;
 		}
 
 		// Idempotent reload: bounce only what actually changed. A modem's signature

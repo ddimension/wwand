@@ -1354,6 +1354,49 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 eq(length(am_opts.m0?.datapath?.mux_links ?? []), 2,
 	'automux-demote: both channels are requested');
 
+// THE PARENT'S NAME FOLLOWS THE SAME DECISION.
+//
+// A muxed modem leaves its parent on the kernel name because the mux CHILD
+// takes the stable wwandN. For a demotable modem that reasoning may turn out to
+// be void — no channel is built — and the interface would then sit on `wwan0`.
+// An interface whose device name depends on which modem is plugged in is the
+// exact instability stable L3 names exist to remove, so a demotable modem is
+// named as if unmuxed. If the channel IS built, netlink.setup() moves the
+// parent out of the child's way (the displacement it already does for a config
+// that switches into muxing).
+am_opts = {};
+let am1 = am_daemon();
+am1.apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+	a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: 'auto' },
+} }));
+// the ASSIGNED wwandN, not the `option device` — a muxed context discards an
+// explicit device name (the child is claimed under the stable one), and an auto
+// context has to answer the same in both outcomes or the name would still move
+eq(am1.modems.m0?.l3_name, 'wwand0',
+	'automux-name: a demotable modem renames its parent to the stable name');
+
+am_opts = {};
+let am2 = am_daemon();
+am2.apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+	a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: 'auto' },
+	b:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3b', apn: 'b', mux_id: 'auto' },
+} }));
+eq(am2.modems.m0?.l3_name, false,
+	'automux-name: two channels are not demotable, so the children own the naming');
+
+// a pinned channel is never demoted, so the parent keeps its kernel name —
+// unchanged from before `auto` existed
+am_opts = {};
+let am3 = am_daemon();
+am3.apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+	a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: '1' },
+} }));
+eq(am3.modems.m0?.l3_name, false,
+	'automux-name: a pinned channel leaves the parent on its kernel name');
+
 // ...and a pinned channel beside an auto one is not demotable either: the
 // modem needs QMAP for the pinned one regardless.
 am_opts = {};
