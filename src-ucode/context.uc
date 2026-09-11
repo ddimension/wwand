@@ -28,6 +28,7 @@ import * as context_monitor_qmi from 'wwand.context_monitor_qmi';
 import * as wdsmod from 'wwand.codec.schema.wds';
 import { ENDPOINT_TYPE_HSUSB } from 'wwand.codec.schema.wda';
 import * as callend from 'wwand.callend';
+import * as cfgmod from 'wwand.config';
 
 // START_NETWORK can legitimately take a long time (network attach + bearer
 // setup on a congested cell); only then declare the activation dead.
@@ -553,12 +554,17 @@ export function create(opts)
 
 			let start_activation;
 
-			// muxed context: bind this wds client to its QMAP channel first
-			let mux_id = +(self.config.mux_id ?? 0);
+			// muxed context: bind this wds client to its QMAP channel first.
+			// `effective` is 0 where an AUTO channel was not built because the
+			// modem cannot carry QMAP — then this context runs on the plain
+			// parent, which is exactly what auto promises. A PINNED channel
+			// keeps its number and still fails below, because the operator
+			// asked for that channel and getting a different datapath silently
+			// is worse than being told.
+			let dp = self.modem.datapath;
+			let mux_id = cfgmod.effective_mux_id(self.config, dp);
 
 			if (mux_id > 0) {
-				let dp = self.modem.datapath;
-
 				// an unmuxed datapath (raw_ip, or the 802.3 ethernet mode) has
 				// nothing to bind a QMAP channel to
 				if (!dp || dp.backend == 'raw_ip' || dp.backend == 'ethernet')

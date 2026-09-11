@@ -31,9 +31,34 @@ export function setup(self, dp, o, next)
 
 		self.set_state('INIT_DATAPATH');
 
+		// The channels to build. MUTABLE: an `auto` channel is dropped again
+		// when the modem turns out to have no QMAP, and everything downstream
+		// (netlink.setup, the recorded mux_devs) must then see an empty list
+		// rather than a channel nobody built.
+		let mux_list = dp.mux_links ?? [];
+
 		// Whether this config HAS channels — the only thing that makes a missing
 		// mux backend fatal.
-		let need_mux = length(dp.mux_links ?? []) > 0;
+		let need_mux = length(mux_list) > 0;
+
+		// May those channels be given up? Set by the daemon only for a modem
+		// whose single channel was auto-allocated (`option mux_id 'auto'`).
+		// The whole point of `auto` is that the QUESTION "can this modem carry
+		// QMAP?" has exactly one authority — the modem's WDA answer — and it
+		// arrives here, three steps after the config had to guess. So: guess
+		// nothing in the config, and demote here when the answer says so.
+		let mux_auto = (dp.mux_auto ?? false) && need_mux;
+
+		// drop to an unmuxed parent, once, with a reason. Returns the new
+		// backend name so the caller can carry on in the same expression.
+		let demote = (to, why) => {
+			log('notice', sprintf('datapath: %s — running %s unmuxed (mux_id was `auto`, so this is a fallback, not a failure)',
+				why, dp.netdev));
+			mux_list = [];
+			need_mux = false;
+
+			return to;
+		};
 
 		// ...and the probes run either way. Asking the datapaths to identify
 		// themselves costs a few sysfs lookups and is how an accelerated
@@ -66,10 +91,12 @@ export function setup(self, dp, o, next)
 		// otherwise the plain raw-IP parent is exactly what this modem wanted,
 		// and it is what an unmuxed modem got before the probes ran at all.
 		if (backend == null) {
-			if (need_mux)
+			if (need_mux && !mux_auto)
 				return fail('datapath', { error: 'mux_backend_unavailable', mux: dp.mux });
 
-			backend = 'raw_ip';
+			backend = need_mux
+				? demote('raw_ip', 'no datapath claims this device')
+				: 'raw_ip';
 		}
 
 		let dgram = netlink.board_dgram_size(fxi, dp.dgram_size, self.info.model);
@@ -137,7 +164,7 @@ export function setup(self, dp, o, next)
 				plugins: dp.plugins,
 				qmap_version: ver,
 				v5: v5,   // derived; for add-ons written before v4
-				mux: map(dp.mux_links ?? [], (e) => ({
+				mux: map(mux_list, (e) => ({
 					id: e.id,
 					name: e.name ?? sprintf('%sm%d', dp.netdev, e.id),
 					mtu: e.mtu,
@@ -233,10 +260,16 @@ export function setup(self, dp, o, next)
 		// link left entirely to the driver (old behavior: "no wda support,
 		// skipping data format switch").
 		if (!self.services[sprintf('%d', wdamod.default.service)]) {
-			if (need_mux)
+			// No WDA means no link-layer negotiation at all, so it also means
+			// no QMAP: the kernel keeps the driver's 802.3 framing and the
+			// honest datapath is `ethernet`. For an auto channel that is a
+			// fallback like any other; for a pinned one it stays fatal.
+			if (need_mux && !mux_auto)
 				return fail('datapath', { error: 'wda_unavailable_for_mux' });
 
-			if (dp.mux == 'auto')
+			if (need_mux)
+				backend = demote('ethernet', 'no WDA service, so no QMAP');
+			else if (dp.mux == 'auto')
 				backend = 'ethernet';
 
 			if (backend == 'ethernet') {
@@ -292,6 +325,36 @@ export function setup(self, dp, o, next)
 						wdata.ul_max_datagrams ?? 0, wdata.ul_max_size ?? 0,
 						ver, dap, dgram));
 
+					// THE LINK-LAYER ECHO, which used to be logged and never
+					// read. wwand asks for raw-IP framing everywhere except the
+					// `ethernet` pseudo-mode; a modem that answers 802.3 has
+					// refused, and carrying on would put the kernel and the
+					// modem in different framings — netlink.setup() writes
+					// qmi_wwan's raw_ip=Y for every backend but `ethernet`, so
+					// the link comes up and carries nothing but garbage. The
+					// comment at that write already warns about the mirror
+					// image of this ("an 802.3 link with the raw-ip flag set
+					// carries garbage"); this is the direction nobody checked.
+					//
+					// It also settles muxing, and the kernel settles it the
+					// same way from the other side: pass-through mode can only
+					// be set on a raw-IP device (qmi_wwan.c:505-510, 6.18.41),
+					// so a modem that will not do raw IP cannot carry QMAP at
+					// all. `ethernet` is exactly the datapath for that.
+					if (!caps.llp_802_3 && wdata.llp == wdamod.LLP_802_3) {
+						if (need_mux && !mux_auto)
+							return fail('wda_format', { error: 'no_raw_ip_support', echo: wdata });
+
+						log('notice', 'modem answered the data-format request with 802.3 framing after raw-IP was asked for — it cannot do raw IP, so the kernel keeps 802.3 too (arp off, p2p) and nothing is muxed');
+
+						backend = need_mux
+							? demote('ethernet', 'the modem refuses raw-IP framing')
+							: 'ethernet';
+						caps = netlink.datapath_caps(backend, dp.plugins, fxi, dp.netdev);
+
+						return finish(wdata, null);
+					}
+
 					// accepted only if the modem echoed the version we asked for:
 					// a different one is a version we cannot drive (rmnet has no
 					// flags for v2/v3), so it is treated as a refusal.
@@ -345,8 +408,24 @@ export function setup(self, dp, o, next)
 						           (wdata.dl_protocol ?? 0) == 0 &&
 						           (wdata.ul_protocol ?? 0) == 0;
 
+						// The modem has now ANSWERED the question `auto` exists
+						// to ask, and the answer is no. Demote instead of
+						// failing — but only for a datapath that BUILDS its
+						// channels. One that ADOPTS them (a vendor driver made
+						// QMAP children at module load) cannot be demoted at
+						// all: the modem is already in QMAP whatever wwand
+						// negotiates, and an unmuxed parent there carries QMAP
+						// frames nothing unwraps.
+						if (none && mux_auto && !caps.adopts) {
+							backend = demote('raw_ip', 'the modem answered "aggregation disabled" to every QMAP version offered, so it does not do QMAP');
+							caps = netlink.datapath_caps(backend, dp.plugins, fxi, dp.netdev);
+
+							return finish(wdata, null);
+						}
+
 						if (none)
-							log('err', sprintf('modem answered "aggregation disabled" to every QMAP version offered — this modem does not do QMAP, so it cannot carry mux channels; remove `option mux_id` from its interface to run it as a plain raw-IP modem'));
+							log('err', sprintf('modem answered "aggregation disabled" to every QMAP version offered — this modem does not do QMAP, so it cannot carry mux channels; remove `option mux_id` from its interface to run it as a plain raw-IP modem%s',
+								caps.adopts ? ' (this datapath adopts the vendor driver\'s own QMAP children, so it cannot run unmuxed either — the modem and the driver disagree about QMAP)' : ''));
 
 						return fail('wda_format', {
 							error: none ? 'no_qmap_support' : 'aggregation_rejected',

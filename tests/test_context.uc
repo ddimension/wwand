@@ -775,6 +775,57 @@ scenario('mux-unavailable-ethernet', {
 	});
 });
 
+// ...but an AUTO channel on a demoted datapath is not a failure — it is the
+// outcome `mux_id 'auto'` exists to produce. The datapath asked the modem, the
+// modem said it cannot carry QMAP, and this context has to run on the plain
+// parent instead of reporting an impossible bind. Same datapath state as
+// `mux-unavailable` above; only `mux_auto` differs, and that is the whole
+// difference between "the operator asked for channel 1" and "wwand suggested
+// one".
+scenario('mux-auto-demoted', {
+	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 1, mux_auto: true },
+}, (ctx, mock, events, next) => {
+	ctx.modem.datapath = { backend: 'raw_ip', ep_id: null, mux_devs: [] };
+
+	ctx.up((err, settings) => {
+		eq(err, null, 'mux-auto: the context comes up on the plain parent');
+		eq(length(mock.calls_for('BIND_MUX_DATA_PORT')), 0,
+			'mux-auto: nothing is bound — there is no channel to bind to');
+		next();
+	});
+});
+
+// the 802.3 fallback is demotable in exactly the same way
+scenario('mux-auto-demoted-ethernet', {
+	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 1, mux_auto: true },
+}, (ctx, mock, events, next) => {
+	ctx.modem.datapath = { backend: 'ethernet', ep_id: null, mux_devs: [] };
+
+	ctx.up((err, settings) => {
+		eq(err, null, 'mux-auto-eth: up on the 802.3 parent');
+		eq(length(mock.calls_for('BIND_MUX_DATA_PORT')), 0, 'mux-auto-eth: no bind');
+		next();
+	});
+});
+
+// ...and an auto channel that WAS built is bound like any other: demotion is
+// the exception, not the new default.
+scenario('mux-auto-built', {
+	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 3, mux_auto: true },
+	handlers: { BIND_MUX_DATA_PORT: {} },
+}, (ctx, mock, events, next) => {
+	ctx.modem.datapath = { backend: 'rmnet', ep_id: 4, urb_size: 4100, mux_devs: [ 'wwan0m3' ] };
+
+	ctx.up((err, settings) => {
+		eq(err, null, 'mux-auto-built: up');
+
+		let binds = mock.calls_for('BIND_MUX_DATA_PORT');
+		eq(length(binds), 1, 'mux-auto-built: bound once');
+		eq(binds[0].args.mux_id, 3, 'mux-auto-built: on the allocated channel');
+		next();
+	});
+});
+
 // --- K: zero-rx watchdog trips on stalled counters ---------------------------
 
 scenario('zero-rx', {

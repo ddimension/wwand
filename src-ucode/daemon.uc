@@ -12,6 +12,7 @@ import * as discovery from 'wwand.discovery';
 import * as netsel_ops from 'wwand.netsel_ops';
 import * as simops from 'wwand.simops';
 import * as hwops from 'wwand.hwops';
+import * as cfgmod from 'wwand.config';
 import * as nlmod from 'wwand.netlink';
 import * as reconnect from 'wwand.reconnect';
 import * as recoverymod from 'wwand.recovery';
@@ -1480,7 +1481,27 @@ export function create(opts)
 			                      netdev_kernel: entry.netdev_kernel,
 			                      dgram_size: cfg.dl_datagram_max_size,
 			                      qmap_version: cfg.qmap_version,
-			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx };
+			                      mux_links: muxinfo?.list ?? [],
+			                      // May this modem drop to an unmuxed parent when it
+			                      // turns out it cannot carry QMAP? Only for a SINGLE
+			                      // auto-allocated channel. A second context has
+			                      // nowhere to go on a raw-IP parent — one parent
+			                      // carries one session — so demoting there would
+			                      // silently run interface A and leave B dead without
+			                      // naming a reason. Two APNs on a modem that cannot
+			                      // mux is a real configuration error and is reported
+			                      // as one. A pinned channel among them withholds the
+			                      // permission for the same reason: the modem needs
+			                      // QMAP for that one regardless.
+			                      //
+			                      // QMI only, and not because MBIM was forgotten:
+			                      // there is no capability question there. An MBIM
+			                      // session id is available on every MBIM modem, so
+			                      // `auto` on one is an ordinary channel with nothing
+			                      // to fall back from.
+			                      mux_auto: (muxinfo?.auto ?? 0) == length(muxinfo?.list ?? []) &&
+			                                length(muxinfo?.list ?? []) == 1,
+			                      fx: deps.datapath_fx };
 
 		entry.modem = be.modem.create({ ...common, datapath: datapath });
 		// remembered for the vanish escalation below: "this control device was
@@ -1616,9 +1637,12 @@ export function create(opts)
 
 		for (let name, cfg in parsed.contexts) {
 			if (cfg.mux_id > 0) {
-				let mi = mux_by_modem[cfg.modem] = mux_by_modem[cfg.modem] ?? { list: [] };
+				let mi = mux_by_modem[cfg.modem] = mux_by_modem[cfg.modem] ?? { list: [], auto: 0 };
 
 				push(mi.list, { id: cfg.mux_id, name: cfg.mux_link, mtu: cfg.mtu });
+
+				if (cfg.mux_auto ?? false)
+					mi.auto++;
 
 				// mux children are claimed under their own names — the raw
 				// parent keeps its kernel name (false = never rename)
@@ -1869,9 +1893,17 @@ export function create(opts)
 			if (entry.cfg.mux_id > 0 && netdev)
 				netdev = entry.cfg.mux_link ?? sprintf('%s.%d', netdev, entry.cfg.mux_id);
 		}
-		else if (entry.cfg.mux_id > 0 && netdev) {
-			// QMAP muxed contexts use their mux child link
-			netdev = entry.cfg.mux_link ?? sprintf('%sm%d', netdev, entry.cfg.mux_id);
+		else {
+			// QMAP muxed contexts use their mux child link — but an `auto`
+			// channel on a modem that turned out to have no QMAP was never
+			// built, and naming a child that does not exist would hand netifd
+			// a device it can never bind. cfgmod.effective_mux_id() is the one
+			// place that rule lives; context.uc asks it the same question
+			// before binding WDS, and the two must not drift.
+			let eff = cfgmod.effective_mux_id(entry.cfg, mentry?.modem?.datapath);
+
+			if (eff > 0 && netdev)
+				netdev = entry.cfg.mux_link ?? sprintf('%sm%d', netdev, eff);
 		}
 
 		return netdev;

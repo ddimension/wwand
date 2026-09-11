@@ -884,6 +884,169 @@ scenario('datapath-no-qmap', {
 			'noqmap: today this retries rather than settling as a config error');
 	});
 
+// THE SAME MODEM, with `option mux_id 'auto'` instead of a pinned channel.
+//
+// This is the whole point of `auto`: the only authority on whether a modem does
+// QMAP is its own WDA answer, and that arrives here — long after the config had
+// to decide. Autosetup cannot know it (the host-side probes say "the DRIVER can
+// mux", which on an E392 is true and useless), so it writes `auto` and the
+// datapath settles it. A modem that says no gets a plain raw-IP parent and
+// comes up, instead of a channel it cannot carry and a log line telling the
+// operator to remove an option the daemon wrote itself.
+let dpfx_autodemote = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-auto-demote', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => ({
+			qos: 0, llp: 2, ul_protocol: 0, dl_protocol: 0,
+			dl_max_datagrams: 0, dl_max_size: 0,
+		}),
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [ { id: 1 } ], mux_auto: true,
+		dgram_size: 0, fx: dpfx_autodemote,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.state, 'READY',
+			'auto-demote: the modem comes up — an auto channel is an offer, not a demand');
+		eq(modem.datapath.backend, 'raw_ip',
+			'auto-demote: demoted to the plain raw-IP parent');
+		eq(modem.datapath.qmap_version, null,
+			'auto-demote: no QMAP version recorded — none is on the wire');
+
+		eq(length(mock.calls_for('SET_DATA_FORMAT')), 3,
+			'auto-demote: the whole ladder was still offered before giving up');
+
+		ok(dpfx_autodemote.action_index('link_add_rmnet') < 0,
+			'auto-demote: no mux child was built');
+		eq(length(modem.datapath.mux_devs ?? []), 0,
+			'auto-demote: and none is reported in status');
+
+		let errs = filter(events, (e) => e.event == 'error');
+		eq(length(errs), 0, 'auto-demote: no error event at all');
+	});
+
+// ...but an ADOPTING datapath cannot be demoted, and this is the case that
+// makes the distinction necessary rather than tidy. A vendor driver
+// (qmi_wwan_q, pcie_mhi) creates its QMAP children at module load, so the modem
+// is in QMAP whatever wwand negotiates. An unmuxed parent there carries QMAP
+// frames with nothing to unwrap them — silent, and worse than the error.
+let dpfx_autoadopt = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-auto-adopts', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => ({
+			qos: 0, llp: 2, ul_protocol: 0, dl_protocol: 0,
+			dl_max_datagrams: 0, dl_max_size: 0,
+		}),
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'vendorqmap',
+		mux_links: [ { id: 1 } ], mux_auto: true,
+		dgram_size: 0, fx: dpfx_autoadopt,
+		plugins: { vendorqmap: {
+			proto: [ 'qmi' ],
+			qmap: true,
+			// `prune` is what marks an adopter (netlink.datapath_caps)
+			prune: (fx, netdev) => [],
+			links: (fx, ctx) => ({ ok: true, mux_devs: [], map_ids: {} }),
+			probe: (fx, netdev) => true,
+		} },
+	},
+}, 'error',
+	(modem, mock, events) => {
+		let errs = filter(events, (e) => e.event == 'error');
+
+		ok(length(errs) > 0,
+			'auto-adopts: still fails — the driver already put this modem in QMAP');
+		eq(errs[0].data?.err?.error, 'no_qmap_support',
+			'auto-adopts: and says why, rather than demoting into a silent mismatch');
+	});
+
+// A MODEM THAT REFUSES RAW IP. wwand asks for raw-IP framing everywhere except
+// the `ethernet` pseudo-mode; the modem echoes its choice in the WDA answer's
+// `llp`, and that echo used to be logged and never read. Carrying on would put
+// the kernel in raw-IP (netlink.setup writes qmi_wwan's raw_ip=Y for every
+// backend but `ethernet`) and the modem in 802.3 — link up, traffic garbage.
+//
+// It settles muxing too, and the kernel agrees from the other side:
+// pass-through can only be set on a raw-IP device (qmi_wwan.c:505-510,
+// 6.18.41), so a modem that will not do raw IP cannot carry QMAP either.
+let dpfx_llp = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-llp-802-3', {
+	handlers: base_handlers({
+		// asked for raw IP (llp 2), answers 802.3 (llp 1)
+		SET_DATA_FORMAT: (args, meta) => ({
+			qos: 0, llp: 1, ul_protocol: 0, dl_protocol: 0,
+			dl_max_datagrams: 0, dl_max_size: 0,
+		}),
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [ { id: 1 } ], mux_auto: true,
+		dgram_size: 0, fx: dpfx_llp,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.state, 'READY', 'llp: the modem comes up');
+		eq(modem.datapath.backend, 'ethernet',
+			'llp: the 802.3 datapath — the framing the modem actually chose');
+
+		// the kernel must be put in the SAME framing, which is what the
+		// ethernet backend exists to do
+		eq(trim(dpfx_llp.files['/sys/class/net/wwan0/qmi/raw_ip'] ?? ''), 'N',
+			'llp: the kernel is left in 802.3 too, not asserted to raw-IP');
+
+		eq(length(mock.calls_for('SET_DATA_FORMAT')), 1,
+			'llp: no QMAP ladder — the answer settled it on the first reply');
+		ok(dpfx_llp.action_index('link_add_rmnet') < 0,
+			'llp: no mux child, because 802.3 cannot carry QMAP');
+	});
+
+// ...and with a PINNED channel it stays an error: the operator asked for that
+// channel, and a modem that cannot do raw IP cannot provide it. Demoting a
+// pinned channel silently would be the same class of bug as ignoring the echo.
+let dpfx_llp_pin = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-llp-802-3-pinned', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => ({
+			qos: 0, llp: 1, ul_protocol: 0, dl_protocol: 0,
+			dl_max_datagrams: 0, dl_max_size: 0,
+		}),
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [ { id: 1 } ], dgram_size: 0, fx: dpfx_llp_pin,
+	},
+}, 'error',
+	(modem, mock, events) => {
+		let errs = filter(events, (e) => e.event == 'error');
+
+		ok(length(errs) > 0, 'llp-pinned: fails rather than quietly changing datapath');
+		eq(errs[0].data?.err?.error, 'no_raw_ip_support',
+			'llp-pinned: named for what the modem refused, not for the symptom');
+	});
+
 // ...and a modem that answers v5 with a REAL but unusable protocol before going
 // to zero further down is NOT the same fault. Claiming "answered disabled to
 // every version offered" there would name the wrong thing; the ladder has to

@@ -106,6 +106,27 @@ const MUX_ID_MAX = 254;
 function resolve_mux(s, nd, name, warnings)
 {
 	let raw = s.mux_id;
+
+	// `auto`: mux THIS modem if it can actually carry a QMAP channel, and run
+	// it as a plain raw-IP parent if it cannot. It resolves to channel 1 here
+	// so every name derived from it (the child device, the mux list, the L3
+	// naming rule) is built exactly as for a pinned `mux_id 1` — the fallback
+	// happens later, in the datapath, where the modem's own WDA answer is the
+	// evidence. `mux_auto` is what tells the runtime it may fall back; a PINNED
+	// channel still fails loudly, because the operator asked for that channel.
+	//
+	// Why the question cannot be settled here: the only authority on QMAP
+	// support is the modem's reply to WDA SET_DATA_FORMAT, which needs an open
+	// WDA client on a modem that may not even be enumerated when the config is
+	// parsed. Everything a config parser can see — the driver's sysfs nodes —
+	// answers "can the HOST mux", a different question with a different answer
+	// (a Huawei E392 passes every host-side probe and has no QMAP at all).
+	// The channel NUMBER is not decided here: two `auto` interfaces on the same
+	// modem need two different channels, and this function sees one interface
+	// at a time. assign_auto_mux() allocates them once every context is parsed.
+	if (type(raw) == 'string' && lc(trim(raw)) == 'auto')
+		return { mux_id: 0, muxed: true, mux_auto: true };
+
 	let mux_id = (raw != null) ? +raw : (nd?.mux_id ?? 0);
 	let muxed = (mux_id > 0) || (nd?.muxed ?? false);
 
@@ -116,8 +137,37 @@ function resolve_mux(s, nd, name, warnings)
 		return { mux_id: 0, muxed: false };
 	}
 
-	return { mux_id: mux_id, muxed: muxed };
+	return { mux_id: mux_id, muxed: muxed, mux_auto: false };
 }
+
+// The mux channel actually IN FORCE, as opposed to the one the config asked
+// for. They differ in exactly one case: `mux_id 'auto'` on a modem whose
+// datapath came up unmuxed, because the modem answered that it cannot carry
+// QMAP. Both callers that bind a context to a channel — the WDS mux bind in
+// context.uc and derive_netdev() in daemon.uc — must agree on this, and a
+// second copy of the rule would be a silent split-brain: one would announce
+// `wwan0m1` to netifd while the other ran the session on the parent.
+//
+// `dp` is the modem's LIVE datapath record (self.datapath), not config.
+export function effective_mux_id(cfg, dp)
+{
+	let id = +(cfg?.mux_id ?? 0);
+
+	if (id <= 0)
+		return 0;
+
+	// pinned by the operator: the config is the truth, and a datapath that
+	// cannot serve it is an error reported elsewhere, not a quiet demotion
+	if (!(cfg?.mux_auto ?? false))
+		return id;
+
+	// auto: only where the datapath really built channels. Absent datapath =
+	// not set up yet; keep the intent rather than demote on a race.
+	if (!dp)
+		return id;
+
+	return (dp.backend == 'raw_ip' || dp.backend == 'ethernet') ? 0 : id;
+};
 
 function derive_mux_link(nd, device, mux_id, muxed, fallback_netdev)
 {
@@ -157,7 +207,7 @@ export function context_defaults(over)
 {
 	return {
 		modem: null, interface: null, mux_id: 0,
-		muxed: false, mux_link: null,
+		muxed: false, mux_link: null, mux_auto: false,
 		l3_name: null,   // assigned datapath netdev name (wwandN / explicit device)
 		apn: null, pdp_type: 'ipv4v6', auth: null,
 		username: null, password: null, profile: null,
@@ -746,6 +796,7 @@ function compat_translate(raw, result)
 				interface: name,
 				mux_id: mux_id,
 				muxed: muxed,
+				mux_auto: mux.mux_auto ?? false,
 				mux_link: derive_mux_link(nd, s.device, mux_id, muxed,
 					result.modems[s.modem]?.netdev),
 				// explicit `option device` pins the L3 name; a path
@@ -834,6 +885,7 @@ function compat_translate(raw, result)
 			interface: name,
 			mux_id: cmux_id,
 			muxed: cmuxed,
+			mux_auto: cmux.mux_auto ?? false,
 			mux_link: derive_mux_link(nd, dev, cmux_id, cmuxed, null),
 			// same explicit-device rule as the native parser (see there)
 			l3_name: (dev != null && dev != '' && substr(dev, 0, 1) != '/' &&
@@ -1006,6 +1058,15 @@ function validate(result)
 	// context of a modem is muxed, every other context needs a channel too.
 	// Contexts named "...m0" request muxing but need a real channel assigned
 	// (QMAP channel 0 is invalid on kernel and modem side).
+	//
+	// `mux_id 'auto'` arrives here the same way, and deliberately so rather
+	// than through an allocator of its own: it is parsed as "muxed, channel not
+	// yet chosen" (muxed = true, mux_id = 0), so two auto interfaces on one
+	// modem get two different channels, a pinned `mux_id 2` beside them keeps
+	// its 2, and the duplicate-claim rule above covers all three without a
+	// second implementation to drift from this one. No warning is pushed for
+	// them: `muxed` is already true, and unlike a bare sibling that gets pulled
+	// into muxing, an auto interface asked for this.
 	let used = {}, needs_id = {}, has_mux = {};
 
 	for (let name, ctx in result.contexts) {

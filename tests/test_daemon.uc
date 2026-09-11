@@ -1314,4 +1314,55 @@ uloop.run();
 		'vanish: a positive failreboot still reboots');
 })();
 
+// `mux_id 'auto'` AND MORE THAN ONE CONTEXT — the case where demoting would be
+// the wrong kindness.
+//
+// One auto channel on a modem that turns out to have no QMAP can safely become
+// a plain raw-IP parent: that interface still works. TWO cannot. A raw-IP
+// parent carries ONE session, so demoting there would bring interface A up and
+// leave B dead with no error naming the reason — the daemon would have chosen
+// which of two configured APNs survives. That is a real configuration error
+// (two APNs on a modem that cannot mux) and has to be reported as one, so the
+// permission to demote is withheld and the datapath fails loudly instead.
+let am_opts = {};
+let am_qmi = {
+	modem: { create: (o) => { am_opts[o.id] = o; return { start: () => null, stop: () => null }; } },
+	context: { create: (o) => ({ state: 'IDLE', down: (cb) => cb ? cb() : null }) },
+};
+let am_daemon = () => daemon_mod.create({ timing: TIMING, deps: {
+	log: (l, m) => null,
+	load_qmi: () => am_qmi,
+} });
+
+am_daemon().apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+	a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: 'auto' },
+} }));
+eq(am_opts.m0?.datapath?.mux_auto, true,
+	'automux-demote: a lone auto channel may be given up');
+eq(length(am_opts.m0?.datapath?.mux_links ?? []), 1,
+	'automux-demote: and one channel is still requested first');
+
+am_opts = {};
+am_daemon().apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+	a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: 'auto' },
+	b:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3b', apn: 'b', mux_id: 'auto' },
+} }));
+eq(am_opts.m0?.datapath?.mux_auto, false,
+	'automux-demote: two contexts — no demotion, one parent cannot carry both');
+eq(length(am_opts.m0?.datapath?.mux_links ?? []), 2,
+	'automux-demote: both channels are requested');
+
+// ...and a pinned channel beside an auto one is not demotable either: the
+// modem needs QMAP for the pinned one regardless.
+am_opts = {};
+am_daemon().apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+	a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: 'auto' },
+	b:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3b', apn: 'b', mux_id: '4' },
+} }));
+eq(am_opts.m0?.datapath?.mux_auto, false,
+	'automux-demote: a pinned sibling keeps the modem on the muxed path');
+
 done('test_daemon');

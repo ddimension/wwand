@@ -269,7 +269,21 @@ function run_daemon()
 		// than writing a channel nothing can carry. The modem still comes up.
 		let netdev = (proto == 'qmi') ? discovery.netdev_for_device(dev) : null;
 
-		return netlink.mux_available(datapath_fx, netdev, proto, plugins) ? 1 : null;
+		// `auto`, not a channel NUMBER. What mux_available() can see is the
+		// HOST side — the driver's sysfs nodes and which datapath claims this
+		// netdev. Whether the MODEM does QMAP is only knowable from its WDA
+		// answer, which arrives much later, and writing a `1` on the strength
+		// of the host-side answer alone strands every modem that fails the
+		// other half: a Huawei E392 passes every probe here and answers
+		// "aggregation disabled" to every QMAP version, so it came up with a
+		// channel it could not carry and a log line telling the operator to
+		// remove an option the daemon had written itself.
+		//
+		// `auto` keeps the intent (mux where muxing works — a QMAP channel is
+		// what an accelerated datapath attaches to, and a second APN later
+		// needs no re-plumbing) and lets the datapath settle it against the
+		// modem's own answer.
+		return netlink.mux_available(datapath_fx, netdev, proto, plugins) ? 'auto' : null;
 	};
 
 	let daemon = daemon_mod.create({

@@ -384,6 +384,66 @@ eq(r.contexts.wan.mux_id, 2, 'automux: parent context assigned free channel');
 ok(length(filter(r.warnings, (w) => index(w, 'auto-assigned mux id') >= 0)) == 1,
 	'automux: warning emitted');
 
+// `mux_id 'auto'` — MULTIPLE CONTEXTS ON ONE MODEM, which is the case that
+// decides the design. `auto` cannot resolve to a channel NUMBER where it is
+// parsed: resolve_mux() sees one interface, and two auto interfaces are two
+// APNs that need two different channels. Giving both channel 1 would collide on
+// the WDS mux bind and the second context would take over the first one's
+// session. So it parses as "muxed, number not yet chosen" and goes through the
+// SAME allocator that has always numbered unnumbered siblings.
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', mux_id: 'auto' },
+		b: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'b', mux_id: 'auto' },
+		c: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'c', mux_id: '2' },
+	},
+});
+eq(r.contexts.c.mux_id, 2, 'auto: a pinned channel keeps its number');
+eq(r.contexts.a.mux_id, 1, 'auto: the first auto interface takes channel 1');
+eq(r.contexts.b.mux_id, 3, 'auto: the second gets 3 — 2 is taken, not shared');
+eq(r.contexts.a.mux_auto, true, 'auto: marked auto, so the datapath may demote it');
+eq(r.contexts.c.mux_auto, false, 'auto: a pinned channel is never demoted');
+eq(r.contexts.a.muxed, true, 'auto: muxed from the start (the parent is not renamed)');
+ok(length(filter(r.warnings, (w) => index(w, 'auto-assigned mux id') >= 0)) == 0,
+	'auto: no "auto-assigned" warning — this interface ASKED for a channel');
+
+// a single auto interface is the autosetup case
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', mux_id: 'auto' },
+	},
+});
+eq(r.contexts.a.mux_id, 1, 'auto-solo: channel 1');
+eq(r.contexts.a.mux_auto, true, 'auto-solo: still demotable');
+
+// spelling: the value is trimmed and case-insensitive, because it is typed by
+// hand into /etc/config/network as often as it is written by autosetup
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', '.name': 'm0', device: '/dev/cdc-wdm0' },
+		a: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', mux_id: ' AUTO ' },
+	},
+});
+eq(r.contexts.a.mux_auto, true, 'auto: accepted regardless of case and padding');
+
+// THE RULE THE RUNTIME USES. Both places that bind a context to a channel ask
+// this one function, because a second copy would be a split-brain: one would
+// announce wwan0m1 to netifd while the other ran the session on the parent.
+eq(config.effective_mux_id({ mux_id: 1, mux_auto: true }, { backend: 'rmnet' }), 1,
+	'effective: auto channel on a muxed datapath is in force');
+eq(config.effective_mux_id({ mux_id: 1, mux_auto: true }, { backend: 'raw_ip' }), 0,
+	'effective: auto channel demoted where the datapath came up unmuxed');
+eq(config.effective_mux_id({ mux_id: 1, mux_auto: true }, { backend: 'ethernet' }), 0,
+	'effective: 802.3 carries no QMAP either');
+eq(config.effective_mux_id({ mux_id: 1, mux_auto: false }, { backend: 'raw_ip' }), 1,
+	'effective: a PINNED channel keeps its number — the mismatch is reported, not hidden');
+eq(config.effective_mux_id({ mux_id: 1, mux_auto: true }, null), 1,
+	'effective: no datapath yet is not a demotion — keep the intent over a race');
+eq(config.effective_mux_id({ mux_id: 0, mux_auto: false }, { backend: 'rmnet' }), 0,
+	'effective: an unmuxed context stays unmuxed');
+
 // no mux anywhere: nothing auto-assigned
 r = padopt({
 	network: {

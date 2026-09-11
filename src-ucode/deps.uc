@@ -237,8 +237,8 @@ export function create(o)
 			let mux_id = autosetup_mux_id(dev, plugins);
 
 			if (mux_id != null) {
-				cursor.set('network', 'wwan0', 'mux_id', sprintf('%d', mux_id));
-				logmod.log('notice', 'autosetup: %s carries a QMAP mux channel (mux_id %d)',
+				cursor.set('network', 'wwan0', 'mux_id', sprintf('%s', mux_id));
+				logmod.log('notice', 'autosetup: %s can mux on the host side (mux_id %s) — the datapath settles it against the modem\'s own WDA answer and runs unmuxed if it says no',
 					dev, mux_id);
 			}
 

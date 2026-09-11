@@ -35,12 +35,22 @@ is removed — afterwards the config is an ordinary hand-editable config. No
 table match keeps the APN empty, which attaches with the SIM/modem-
 provisioned APN.
 
-On **QMI** the created interface also gets a `mux_id '1'` — but only when this
+On **QMI** the created interface also gets `mux_id 'auto'` — but only when this
 modem can actually carry a channel: the question is asked per modem, against the
 netdev behind its own control device, so a datapath must claim it (rmnet,
 qmimux, or an installed add-on). A modem with no mux datapath is left unmuxed,
 and so are **MBIM and NCM**, which keep their defaults — an MBIM session is not
-a QMAP channel and NCM has no mux at all. The point of the channel is what hangs
+a QMAP channel and NCM has no mux at all.
+
+`auto` rather than a channel number, because at this point only half the
+question can be answered. What autosetup can see is the HOST side: the driver's
+sysfs nodes and which datapath claims the netdev. Whether the **modem** speaks
+QMAP is only knowable from its reply to WDA `SET_DATA_FORMAT`, which arrives
+much later. Some modems pass the host-side test and have no QMAP at all — a
+Huawei E392 (WDA 1.0, 2012 firmware) answers "aggregation disabled" to every
+QMAP version offered — so writing a `1` here would strand exactly those with a
+channel they cannot carry. `auto` keeps the intent and lets the datapath settle
+it against the modem's own answer; see **`mux_id 'auto'`** below. The point of the channel is what hangs
 off it: an accelerated datapath attaches to the QMAP child, and a second APN
 added later needs no re-plumbing. With the channel, the parent keeps its raw
 kernel name and the stable `wwand0` moves onto the mux child.
@@ -513,6 +523,42 @@ see [Troubleshooting](#troubleshooting).
   warned about and disables muxing for that interface, rather than being passed
   down to a kernel that would either refuse it or — after the 16-bit cast —
   silently use a different channel.
+
+**`mux_id 'auto'`** — mux this modem if it can carry QMAP, run it as a plain
+raw-IP parent if it cannot. This is what autosetup writes, and it is worth
+writing by hand on a box whose modem may be replaced.
+
+The number is still allocated at config time, by the same allocator that numbers
+unnumbered siblings: the first `auto` interface on a modem takes the lowest free
+channel, a pinned `mux_id 2` beside it keeps its 2, and a second `auto`
+interface gets the next free one. Two `auto` interfaces never share a channel.
+
+What is deferred is the *decision to mux at all*. The datapath asks the modem
+and acts on the answer:
+
+| The modem's answer | What happens |
+|---|---|
+| QMAP v5/v4/v1 agreed | the channel is built; identical to a pinned `mux_id` |
+| "aggregation disabled" to every version | demoted to a plain raw-IP parent, one notice in the log, the interface comes up |
+| no WDA service at all | demoted to `ethernet` (802.3 framing kept, ARP off) |
+| 802.3 framing after raw IP was asked for | demoted to `ethernet` — the modem cannot do raw IP, and QMAP needs it |
+
+Two limits, both deliberate:
+
+- **A pinned `mux_id` is never demoted.** The operator asked for that channel;
+  getting a different datapath silently is worse than being told, so the
+  bring-up fails with `no_qmap_support`, `wda_unavailable_for_mux` or
+  `no_raw_ip_support`.
+- **Demotion needs the modem to have exactly one context.** A raw-IP parent
+  carries one session. With two APNs configured on a modem that turns out to
+  have no QMAP, demoting would bring one interface up and leave the other dead
+  without saying why — so the permission is withheld and the error is reported
+  instead.
+
+A datapath that **adopts** a vendor driver's QMAP children (`rmnet_nss`,
+`rmnet_nss_mhi`) is never demoted either: the driver put the modem into QMAP at
+module load, so an unmuxed parent there carries QMAP frames with nothing to
+unwrap them.
 
 **The datapaths.** `rmnet` (QMAP through the kernel rmnet driver) and `qmimux`
 (qmi_wwan's own `add_mux`) carry QMI modems; `vlan` carries MBIM ones, where each
