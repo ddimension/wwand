@@ -771,6 +771,19 @@ export function watch_driver(o)
 // success in between is firmware, not weather.
 const AT_RETIRE_AFTER = 3;
 
+// Has this AT channel given up on every one of these commands? The question a
+// telemetry family asks about its OWN signal source before deciding whether the
+// serving-cell read is authoritative: a modem that refuses AT+QSINR? has no
+// per-branch SINR, so the value in the QENG line is the only one there is.
+export function at_retired(self, ...cmds)
+{
+	for (let c in cmds)
+		if (!(self._at_retired?.[c]))
+			return false;
+
+	return length(cmds) > 0;
+};
+
 // The telemetry AT channel, with a memory of what this firmware refuses.
 //
 // The polling loops ask 21 different vendor commands, most of them specific to

@@ -66,18 +66,31 @@ function csq_first(self, then)
 // value unconditionally, so the signal block follows the cells tick for tick
 // instead of freezing on the first fill (?? keeps first-fill values to
 // protect the Quectel per-branch reads).
+// `refresh` says who OWNS the signal values: false = the family's own signal
+// command does, and the serving read may only fill a gap; true = the serving
+// read does. It also accepts a SET of field names — `{ snr: true }` — for the
+// case in between, where the family's signal command exists and works but has
+// no such field at all (MeiG polls AT+CESQ, which carries rsrp and rsrq and no
+// SINR whatsoever).
+//
+// That middle case is not hypothetical and was not visible: a value only the
+// serving read ever produces, combined with "fill only when empty", freezes at
+// the first reading and never moves again. On a MeiG SLM770A the modem can go
+// from SINR 20 to SINR 3 with the display still showing 20 — worse than showing
+// nothing, because a stale good number reads as a working link.
 function fill_signal_from_serving(self, serving, refresh)
 {
+	let owns = (f) => (type(refresh) == 'object') ? !!refresh[f] : !!refresh;
 	let sig = { ...(self.signal ?? {}) };
 
 	if (serving?.lte) {
 		let cur = { ...(sig.lte ?? {}) };
 
 		cur.rssi = cur.rssi ?? sig.rssi;
-		cur.rsrp = (refresh && serving.lte.rsrp != null) ? serving.lte.rsrp : (cur.rsrp ?? serving.lte.rsrp);
-		cur.rsrq = (refresh && serving.lte.rsrq != null) ? serving.lte.rsrq : (cur.rsrq ?? serving.lte.rsrq);
+		cur.rsrp = (owns('rsrp') && serving.lte.rsrp != null) ? serving.lte.rsrp : (cur.rsrp ?? serving.lte.rsrp);
+		cur.rsrq = (owns('rsrq') && serving.lte.rsrq != null) ? serving.lte.rsrq : (cur.rsrq ?? serving.lte.rsrq);
 
-		if (serving.lte.sinr != null && (refresh || cur.snr == null))
+		if (serving.lte.sinr != null && (owns('snr') || cur.snr == null))
 			cur.snr = serving.lte.sinr * 10;   // QMI snr is 0.1 dB
 
 		sig.lte = cur;
@@ -86,10 +99,10 @@ function fill_signal_from_serving(self, serving, refresh)
 	if (serving?.nr) {
 		let cur = { ...(sig.nr5g ?? {}) };
 
-		cur.rsrp = (refresh && serving.nr.rsrp != null) ? serving.nr.rsrp : (cur.rsrp ?? serving.nr.rsrp);
-		cur.rsrq = (refresh && serving.nr.rsrq != null) ? serving.nr.rsrq : (cur.rsrq ?? serving.nr.rsrq);
+		cur.rsrp = (owns('rsrp') && serving.nr.rsrp != null) ? serving.nr.rsrp : (cur.rsrp ?? serving.nr.rsrp);
+		cur.rsrq = (owns('rsrq') && serving.nr.rsrq != null) ? serving.nr.rsrq : (cur.rsrq ?? serving.nr.rsrq);
 
-		if (serving.nr.sinr != null && (refresh || cur.snr == null))
+		if (serving.nr.sinr != null && (owns('snr') || cur.snr == null))
 			cur.snr = serving.nr.sinr * 10;
 
 		sig.nr5g = cur;
@@ -263,7 +276,14 @@ function tel_quectel_cells(self, cb)
 		modem_common.telemetry_at(self).send('AT+QENG="neighbourcell"', (e2, r2) => {
 			let neigh = e2 ? null : atcmd.parse_qeng_neighbourcell(r2?.lines);
 
-			assemble_cells(self, serving, neigh);
+			// QRSRP/QRSRQ/QSINR are this family's signal source, so the
+			// serving read normally only fills a gap. A modem that refuses all
+			// three has no other source, and then the QENG line owns the whole
+			// block — otherwise the first reading would freeze there for good.
+			// (Quectel EC200A, ddimension/wwand#19: it answers ERROR to each.)
+			assemble_cells(self, serving, neigh, null,
+				modem_common.at_retired(self, 'AT+QRSRP?', 'AT+QRSRQ?', 'AT+QSINR?'));
+
 			if (self.cells)
 				self.cells.nr5g_neigh = (neigh && length(neigh.nr)) ? neigh.nr : null;
 			cb();
@@ -463,8 +483,12 @@ function tel_huawei_cells(self, cb)
 			if (sc) {
 				let serving = sc_to_serving(sc);
 				// serving.lte.rsrp is dBm; assemble_cells ×10 for the intra entry
+				// ^HCSQ? carries rssi/rsrp/sinr/rsrq, so it owns the block —
+				// unless this firmware has refused it, in which case the
+				// serving read is all there is (see the Quectel note).
 				assemble_cells(self, serving, { intra: nc ?? [], inter: [] },
-					{ mode: 'LTE', lte: true, nr: false, source: 'at' });
+					{ mode: 'LTE', lte: true, nr: false, source: 'at' },
+					modem_common.at_retired(self, 'AT^HCSQ?'));
 			}
 
 			cb();
@@ -485,8 +509,14 @@ function tel_meig_cells(self, cb)
 
 			if (sc) {
 				let serving = sc_to_serving(sc);
+				// This family polls AT+CESQ for signal, and CESQ has rsrp and
+				// rsrq but NO SINR field — so the serving read is the only
+				// source of SINR there will ever be and must own it. Without
+				// that the first reading stuck: a modem going from SINR 20 to
+				// SINR 3 kept displaying 20, which reads as a healthy link.
 				assemble_cells(self, serving, nc ?? { intra: [], inter: [] },
-					{ mode: 'LTE', lte: true, nr: false, source: 'at' });
+					{ mode: 'LTE', lte: true, nr: false, source: 'at' },
+					{ snr: true });
 			}
 
 			cb();

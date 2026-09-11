@@ -20,6 +20,7 @@ import * as modem_ncm from 'wwand/modem_ncm.uc';
 import * as context_ncm from 'wwand/context_ncm.uc';
 import * as ncm_vendors from 'wwand/ncm_vendors.uc';
 import * as modem_common from 'wwand/modem_common.uc';
+import * as telemetry_ncm from 'wwand/telemetry_ncm.uc';
 
 uloop.init();
 
@@ -2334,5 +2335,83 @@ uloop.run();
 ok(current == length(scenarios),
 	sprintf('every scenario ran (%d of %d) — a chain that ends early is not a pass',
 		current, length(scenarios)));
+
+// --- SIGNAL OWNERSHIP: a value only the serving read produces must MOVE ------
+//
+// `fill_signal_from_serving` fills a gap but does not overwrite, which is right
+// while the family's own signal command is the source. It is wrong when there
+// is no such source, and then the first reading freezes for the life of the
+// modem — a stale GOOD number, which reads as a healthy link and is worse than
+// showing nothing at all. Two families are in that position:
+//
+//   MeiG    polls AT+CESQ, which carries rsrp and rsrq and no SINR field at all
+//   Quectel polls AT+QRSRP?/QRSRQ?/QSINR? — fine until a modem refuses them
+//           (EC200A, ddimension/wwand#19), and then QENG is the only source
+//
+// Driven directly rather than through a scenario: the point is the second tick,
+// and what has to be observed is one field moving between two serving reads.
+(function() {
+	let LTE = '+%s: "servingcell","NOCONN","LTE","FDD",246,01,2C53A21,129,300,1,5,5,1FA5,-89,-11,-75,%d,38';
+
+	let modem = (mfr, tag) => {
+		let sinr = 20;
+		let m = { info: { manufacturer: mfr }, signal: {} };
+
+		m.at_telemetry = {
+			send: (cmd, cb) => {
+				if (index(cmd, sprintf('%s="servingcell"', tag)) >= 0)
+					return cb(null, { lines: [ sprintf(LTE, tag, sinr), 'OK' ] });
+				if (index(cmd, 'neighbourcell') >= 0)
+					return cb(null, { lines: [ 'OK' ] });
+				if (index(cmd, 'CESQ') >= 0)
+					return cb(null, { lines: [ '+CESQ: 52,99,255,255,23,52', 'OK' ] });
+				if (index(cmd, 'CSQ') >= 0)
+					return cb(null, { lines: [ '+CSQ: 20,99', 'OK' ] });
+				return cb({ error: 'ERROR' }, { lines: [] });
+			},
+			close: () => null,
+		};
+		m.at = m.at_telemetry;
+		m.drop_to = (v) => { sinr = v; };
+
+		return m;
+	};
+
+	let mg = modem('MeiG', 'MENG');
+	telemetry_ncm.MEIG.signal(mg, () => telemetry_ncm.MEIG.cells(mg, () => {
+		eq(mg.signal?.lte?.snr, 200, 'meig-sinr: the first serving read fills SINR');
+		eq(mg.signal?.lte?.rsrp, -88, 'meig-sinr: rsrp still comes from CESQ, which has it');
+
+		mg.drop_to(3);
+		telemetry_ncm.MEIG.signal(mg, () => telemetry_ncm.MEIG.cells(mg, () => {
+			eq(mg.signal?.lte?.snr, 30,
+				'meig-sinr: and it FOLLOWS the modem down — CESQ has no SINR to defend it');
+			eq(mg.signal?.lte?.rsrp, -88,
+				'meig-sinr: rsrp is untouched — only the orphaned field is owned');
+		}));
+	}));
+
+	// Quectel with its per-branch commands alive: the serving read must NOT take
+	// over, because QRSRP/QRSRQ/QSINR are the better (per-antenna) source.
+	let qa = modem('Quectel', 'QENG');
+	qa.signal = { lte: { snr: 999 } };
+	telemetry_ncm.QUECTEL.cells(qa, () => {
+		eq(qa.signal?.lte?.snr, 999,
+			'quectel-sinr: a live per-branch source keeps ownership');
+	});
+
+	// ...and the same modem once it has refused all three.
+	let qr = modem('Quectel', 'QENG');
+	qr._at_retired = { 'AT+QRSRP?': true, 'AT+QRSRQ?': true, 'AT+QSINR?': true };
+	telemetry_ncm.QUECTEL.cells(qr, () => {
+		eq(qr.signal?.lte?.snr, 200, 'quectel-sinr: retired commands hand QENG the block');
+
+		qr.drop_to(3);
+		telemetry_ncm.QUECTEL.cells(qr, () => {
+			eq(qr.signal?.lte?.snr, 30, 'quectel-sinr: and it tracks the modem');
+			eq(qr.signal?.lte?.rsrp, -89, 'quectel-sinr: rsrp comes from QENG too');
+		});
+	});
+})();
 
 done('test_ncm');
