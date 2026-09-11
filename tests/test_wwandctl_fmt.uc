@@ -149,6 +149,39 @@ let untagged = join('\n', fmt.collectd_lines('h', 'm', { rssi: -70 }, {}, 30));
 ok(index(untagged, 'signal_power-rssi" interval=30 N:-70.000') >= 0,
 	'collectd: with nothing tagged, the bare RSSI is what there is');
 
+// THE SENTINEL TYPE IS PER FIELD. QMI decodes the LTE/WCDMA/GSM RSSI and the
+// LTE RSRQ as i8 (sentinel -128) and rsrp/snr/ecio as i16 (sentinel -32768)
+// (codec/schema/nas.uc:108-112). A blanket i16 test lets an unavailable -128
+// through as a genuine -128 dBm — precisely the silent wrong value this filter
+// exists to stop.
+let i8s = join('\n', fmt.collectd_lines('h', 'm',
+	{ lte: { rsrp: -95, rssi: -128, rsrq: -128, snr: 120 } }, {}, 30));
+ok(index(i8s, 'rsrp_lte') >= 0, 'sentinel: the i16 field is kept');
+eq(index(i8s, '-128'), -1, 'sentinel: and no i8 sentinel is emitted as a reading');
+eq(index(i8s, 'rssi_lte'), -1, 'sentinel: the unavailable RSSI produces no series');
+eq(index(i8s, 'rsrq_lte'), -1, 'sentinel: nor the unavailable RSRQ');
+
+// ...and a real -128-adjacent reading is NOT clipped: only the exact sentinel
+// goes, so a genuine -127 dBm survives.
+let near = join('\n', fmt.collectd_lines('h', 'm', { lte: { rssi: -127 } }, {}, 30));
+ok(index(near, 'rssi_lte" interval=30 N:-127.000') >= 0,
+	'sentinel: -127 is a reading, not a sentinel');
+
+// 2G HAS NO STRUCT OF ITS OWN — just gsm_rssi beside the others. It used to be
+// read by nobody, so a GSM-camped modem recorded no band power at all.
+let g = join('\n', fmt.collectd_lines('h', 'm', { gsm_rssi: -90 }, {}, 30));
+ok(index(g, 'signal_power-rssi_gsm" interval=30 N:-90.000') >= 0,
+	'gsm: the 2G band power is emitted, tagged');
+eq(index(g, 'signal_power-rssi"'), -1, 'gsm: and not a second time as untagged');
+
+// The untagged suppression counts what was tagged rather than spot-checking two
+// RATs, so a technology the check does not know cannot produce a duplicate.
+let nr = join('\n', fmt.collectd_lines('h', 'm',
+	{ rssi: -70, nr5g: { rssi: -66 } }, {}, 30));
+ok(index(nr, 'rssi_nr5g" interval=30 N:-66.000') >= 0, 'untagged: the 5G RSSI is tagged');
+eq(index(nr, 'signal_power-rssi"'), -1,
+	'untagged: and the band-wide one is suppressed by it, not only by LTE/3G');
+
 // A modem with no readings at all still reports its state — a gap in the signal
 // graphs plus "registered 0" is exactly what an outage should look like.
 let dead = join('\n', fmt.collectd_lines('h', 'm', {}, { state: 'ABSENT', attempts: 7 }, 30));

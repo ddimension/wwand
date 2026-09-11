@@ -146,7 +146,27 @@ export function collectd_interval(want)
 export function collectd_lines(host, modem, sig, m, interval)
 {
 	let out = [];
-	let val = (v) => tlv.is_unavailable(v, 'i16') ? null : v;
+
+	// THE SENTINEL TYPE IS PER FIELD, not per struct. QMI decodes the LTE/WCDMA/
+	// GSM RSSI and the LTE RSRQ as i8 (sentinel -128) and rsrp/snr/ecio/
+	// nr5g_rsrq as i16 (sentinel -32768) — see codec/schema/nas.uc:108-112. A
+	// blanket i16 test therefore lets an unavailable -128 through as a genuine
+	// -128 dBm reading, which is the exact failure this filter exists to
+	// prevent. (-128 is below any real RSSI floor, so the i8 test costs nothing
+	// on the AT/MBIM paths where the value was parsed from text rather than
+	// decoded from a TLV.)
+	// The widths, straight from codec/schema/nas.uc: GET_SIGNAL_INFO decodes the
+	// LTE block as { rssi i8, rsrq i8, rsrp i16, snr i16 } (:110), WCDMA as
+	// { rssi i8, ecio i16 } (:109), gsm_rssi as i8 (:108), and everything 5G as
+	// i16 (:112 and the NR cell blocks). Guessing with a fallback does not work
+	// — an i8 sentinel of -128 passes the i16 test and comes out as a reading.
+	const WIDTH = {
+		lte:   { rssi: 'i8',  rsrq: 'i8',  rsrp: 'i16', snr: 'i16', ecio: 'i16' },
+		wcdma: { rssi: 'i8',  rsrq: 'i8',  rsrp: 'i16', snr: 'i16', ecio: 'i16' },
+		nr5g:  { rssi: 'i16', rsrq: 'i16', rsrp: 'i16', snr: 'i16', ecio: 'i16' },
+	};
+
+	let val = (v, w) => tlv.is_unavailable(v, w ?? 'i16') ? null : v;
 
 	let put = (type, inst, v) => {
 		if (v == null)
@@ -158,28 +178,47 @@ export function collectd_lines(host, modem, sig, m, interval)
 
 	// one series per radio technology, never a single line that changes meaning
 	// when the modem switches — the same rule the LuCI graph follows
+	let tagged = 0;
+
 	for (let rat, b in { lte: sig?.lte, nr5g: sig?.nr5g, wcdma: sig?.wcdma }) {
 		if (!b)
 			continue;
 
-		put('signal_power', sprintf('rsrp_%s', rat), val(b.rsrp) ?? val(b.rscp));
-		put('signal_power', sprintf('rssi_%s', rat), val(b.rssi));
-		put('signal_power', sprintf('rsrq_%s', rat), val(b.rsrq));
-		put('signal_power', sprintf('ecio_%s', rat), val(b.ecio));
+		let w = WIDTH[rat] ?? {};
 
-		let snr = val(b.snr);
+		put('signal_power', sprintf('rsrp_%s', rat), val(b.rsrp, w.rsrp) ?? val(b.rscp, w.rsrp));
+		put('signal_power', sprintf('rsrq_%s', rat), val(b.rsrq, w.rsrq));
+		put('signal_power', sprintf('ecio_%s', rat), val(b.ecio, w.ecio));
+
+		let rssi = val(b.rssi, w.rssi);
+
+		if (rssi != null) {
+			put('signal_power', sprintf('rssi_%s', rat), rssi);
+			tagged++;
+		}
+
+		let snr = val(b.snr, w.snr);
 
 		if (snr != null)
 			put('gauge', sprintf('sinr_%s', rat), snr / 10.0);
 	}
 
-	// the untagged band RSSI, and only when no RAT claimed one — otherwise the
-	// same measurement would land in two files under two names
-	if (val(sig?.lte?.rssi) == null && val(sig?.wcdma?.rssi) == null)
-		put('signal_power', 'rssi', val(sig?.rssi));
+	// 2G has no struct of its own — just a band RSSI beside the others
+	let gsm = val(sig?.gsm_rssi, 'i8');
+
+	if (gsm != null) {
+		put('signal_power', 'rssi_gsm', gsm);
+		tagged++;
+	}
+
+	// the untagged band RSSI, and only when NO radio claimed one — counted
+	// rather than spot-checked against two RATs, so a technology added later
+	// cannot let the same measurement land in two files under two names
+	if (!tagged)
+		put('signal_power', 'rssi', val(sig?.rssi, 'i8'));
 
 	// NR RSRQ arrives top-level on some firmware rather than inside nr5g
-	put('signal_power', 'rsrq_nr5g', val(sig?.nr5g_rsrq));
+	put('signal_power', 'rsrq_nr5g', val(sig?.nr5g_rsrq, 'i16'));
 
 	// from status(), which costs no modem traffic at all
 	put('temperature', 'modem', m?.temperature?.celsius);

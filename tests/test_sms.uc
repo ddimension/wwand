@@ -7,6 +7,7 @@
 
 import { eq, ok, done } from './lib/check.uc';
 import * as sms from 'wwand/sms.uc';
+import * as simops from 'wwand/simops.uc';
 
 // a minimal SMS-DELIVER PDU for gsm7 "hi" (SMSC 00, sender +12, UD e834)
 const PDU_HI = [ 0x00, 0x04, 0x02,0x91,0x21, 0x00,0x00,
@@ -101,6 +102,40 @@ sms.sms_delete(modem, 'SM', 6, (err, res) => {
 	ok(res.ok, 'single: plain ok');
 	eq(res.deleted, null, 'single: no multi bookkeeping in the reply');
 });
+
+// AN EMPTY SELECTION MUST NOT DELETE ANYTHING, and the ubus layer is where that
+// is decided. ubus fills a declared argument with its default when the caller
+// omits it, so `index` arrives as 0 whether or not anyone asked for slot 0 —
+// `indices: []` therefore used to fall through to "delete index 0" and issue a
+// real delete. HW-confirmed on an NR7101: the modem answered +CMS ERROR 321,
+// which it only does because the command was sent (2026-09-12).
+(function() {
+	let sent = [];
+	let fake = { _sms_be: 'qmi', wms: { request: (n, a, cb) => { push(sent, a.memory_index); cb(null); } } };
+	let ops = {};
+
+	simops.install(ops, {
+		log: (l, m) => null,
+		check_modem: (ref, cb) => (ref == 'm0') ? { modem: fake } : cb({ error: 'no_such_modem' }, null),
+	});
+
+	let got;
+	ops.modem_sms_delete('m0', 'SM', 0, [], (e, r) => { got = e; });
+	eq(got?.error, 'no_index', 'ubus: an empty selection is refused');
+	eq(length(sent), 0, 'ubus: and NOTHING was sent to the modem');
+
+	ops.modem_sms_delete('m0', 'SM', 0, null, (e, r) => { got = e; });
+	eq(got?.error, 'no_index', 'ubus: a bare index 0 is refused too — slots number from 1');
+	eq(length(sent), 0, 'ubus: still nothing sent');
+
+	// ...and a real request still goes through, both shapes
+	ops.modem_sms_delete('m0', 'SM', 3, [], (e, r) => { got = e; });
+	eq(sent, [ 3 ], 'ubus: a positive single index is deleted');
+
+	sent = [];
+	ops.modem_sms_delete('m0', 'SM', 0, [ 2, 5 ], (e, r) => { got = e; });
+	eq(sent, [ 5, 2 ], 'ubus: a list is deleted, highest first');
+})();
 
 // --- one bad slot must not strand the rest -----------------------------------
 // The case this exists for is a full SIM: index 30 failing is no reason for

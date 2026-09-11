@@ -164,7 +164,24 @@ export function install(self, o)
 		if (!entry)
 			return;
 
-		let which = (type(indices) == 'array' && length(indices)) ? indices : +index;
+		// AN EMPTY SELECTION MUST NOT DELETE ANYTHING.
+		//
+		// ubus fills a declared argument with its default when the caller omits
+		// it, so `index` arrives as 0 whether or not anyone asked for slot 0 —
+		// which means `indices: []` used to fall through to "delete index 0" and
+		// issue a real delete. HW-confirmed on an NR7101: the modem answered
+		// +CMS ERROR 321 (invalid memory index), which it only does because the
+		// command was actually sent. On a card whose slot 0 is occupied, that
+		// message would simply be gone (2026-09-12).
+		//
+		// So a positive index is required. SMS storage records are numbered from
+		// 1 (3GPP TS 51.011 EF_SMS is a linear fixed file, record 1 upwards), so
+		// this refuses nothing a modem can actually address.
+		let which = (type(indices) == 'array' && length(indices)) ? indices
+			: ((+index > 0) ? +index : null);
+
+		if (which == null)
+			return cb({ error: 'no_index' }, null);
 
 		sms.sms_delete(entry.modem, storage ?? 'SM', which, cb);
 	};

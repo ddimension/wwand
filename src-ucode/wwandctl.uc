@@ -472,12 +472,18 @@ function cmd_collectd(argv)
 		warn(sprintf('wwandctl collectd: interval %s raised to %d s — below that the modem never leaves 1 Hz telemetry\n',
 			want, interval));
 
-	// orphaned = collectd is gone; the exec plugin expects us to notice
+	// Orphaned = collectd is gone; the exec plugin expects us to notice.
+	//
+	// An UNREADABLE /proc counts as orphaned. `match()` answers null there, and
+	// treating that as "still parented" would leave the process running for
+	// ever, polling the modem for a collectd that is no longer listening. The
+	// cost of the opposite mistake is one restart — the exec plugin re-forks a
+	// program that exits — so the fail-safe direction is to stop.
 	let orphaned = () => {
-		let st = fs.readfile('/proc/self/status') ?? '';
-		let m = match(st, /PPid:[ \t]*([0-9]+)/);
+		let st = fs.readfile('/proc/self/status');
+		let m = (st != null) ? match(st, /PPid:[ \t]*([0-9]+)/) : null;
 
-		return m && +m[1] == 1;
+		return m ? (+m[1] == 1) : true;
 	};
 
 	while (!orphaned()) {
