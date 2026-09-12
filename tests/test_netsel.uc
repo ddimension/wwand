@@ -61,12 +61,18 @@ function handlers()
 		},
 		SET_SYSTEM_SELECTION_PREFERENCE: {},
 		// visible operators: home (current serving), a plain available one, and a
-		// forbidden one — covers the three status buckets
+		// forbidden one — covers the three status buckets. The status bytes also
+		// pin HOME (0x04) and PREFERRED (0x40) apart: they are different bits in
+		// QmiNasNetworkStatus, and reading home AS preferred is the bug this
+		// fixture was written around until 2026-09-12 — 0x0C was labelled
+		// "preferred" here and the code agreed with the label, so both were wrong
+		// together and the suite stayed green.
 		NETWORK_SCAN: {
 			network_information: [
 				{ mcc: 262, mnc: 1, network_status: 0x01, description: 'Testnet' },
-				{ mcc: 262, mnc: 2, network_status: 0x0C, description: 'Other' },   // preferred(0x04)+roaming(0x08)
+				{ mcc: 262, mnc: 2, network_status: 0x4C, description: 'Other' },   // home(0x04)+roaming(0x08)+preferred(0x40)
 				{ mcc: 262, mnc: 3, network_status: 0x10, description: 'Nope' },
+				{ mcc: 262, mnc: 4, network_status: 0x04, description: 'HomeOnly' }, // home, NOT preferred
 			],
 			// the separate RAT list: Testnet is on both LTE and UMTS (two entries
 			// for one PLMN), Other on 5G, Nope has none reported
@@ -146,11 +152,13 @@ run = () => {
 			eq(serr, null, 'scan: no error');
 			eq(sc.operators, [
 				{ mcc: 262, mnc: 1, plmn: '262/01', name: 'Testnet', status: 'current',
-				  roaming: false, preferred: false, rats: [ 'LTE', 'UMTS' ] },
+				  roaming: false, home: false, preferred: false, rats: [ 'LTE', 'UMTS' ] },
 				{ mcc: 262, mnc: 2, plmn: '262/02', name: 'Other', status: 'available',
-				  roaming: true, preferred: true, rats: [ 'NR5G' ] },
+				  roaming: true, home: true, preferred: true, rats: [ 'NR5G' ] },
 				{ mcc: 262, mnc: 3, plmn: '262/03', name: 'Nope', status: 'forbidden',
-				  roaming: false, preferred: false, rats: [] },
+				  roaming: false, home: false, preferred: false, rats: [] },
+				{ mcc: 262, mnc: 4, plmn: '262/04', name: 'HomeOnly', status: 'available',
+				  roaming: false, home: true, preferred: false, rats: [] },
 			], 'scan: operators + per-PLMN RAT list from NAS network scan (0x11 TLV)');
 
 			// (3) manual selection issues the right NAS request
@@ -302,11 +310,13 @@ run = () => {
 											eq(st.running, false, 'scan_status: job finished');
 											eq(st.operators, [
 												{ mcc: 262, mnc: 1, plmn: '262/01', name: 'Testnet', status: 'current',
-												  roaming: false, preferred: false, rats: [ 'LTE', 'UMTS' ] },
+												  roaming: false, home: false, preferred: false, rats: [ 'LTE', 'UMTS' ] },
 												{ mcc: 262, mnc: 2, plmn: '262/02', name: 'Other', status: 'available',
-												  roaming: true, preferred: true, rats: [ 'NR5G' ] },
+												  roaming: true, home: true, preferred: true, rats: [ 'NR5G' ] },
 												{ mcc: 262, mnc: 3, plmn: '262/03', name: 'Nope', status: 'forbidden',
-												  roaming: false, preferred: false, rats: [] },
+												  roaming: false, home: false, preferred: false, rats: [] },
+												{ mcc: 262, mnc: 4, plmn: '262/04', name: 'HomeOnly', status: 'available',
+												  roaming: false, home: true, preferred: false, rats: [] },
 											], 'scan_status: operators delivered async');
 
 											guard.cancel();

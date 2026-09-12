@@ -92,6 +92,24 @@ eq(rt.network_information[1],
 	{ mcc: 262, mnc: 3, network_status: 0x12, description: 'Op3' },
 	'network scan: round-trip second element');
 
+// Network Scan Result TLV 0x13 (guint32 QmiNasNetworkScanResult, libqmi 1.24+).
+// The case that matters is the one the RG502QEA produces: QMI says ok, the
+// operator array is EMPTY, and the only thing distinguishing "nothing is on the
+// air" from "the modem gave up" is this TLV.
+let aborted = tlv.unpack(nas.messages.NETWORK_SCAN.resp, hexdec(
+	'02040000000000' +     // result TLV (ok)
+	'1002000000' +         // netinfo TLV, 0 elements
+	'13040001000000'));    // scan result TLV = 1 (ABORT), u32 LE (len is 2 bytes)
+eq(length(aborted.network_information), 0, 'network scan: empty operator array');
+eq(aborted.scan_result, 1, 'network scan: ABORT reported in TLV 0x13');
+
+let scanned_ok = tlv.unpack(nas.messages.NETWORK_SCAN.resp, hexdec(
+	'02040000000000' + '1002000000' + '13040000000000'));
+eq(scanned_ok.scan_result, 0, 'network scan: SUCCESS reported in TLV 0x13');
+
+// a modem that omits 0x13 entirely must stay decodable (it is optional)
+eq(scan.scan_result, null, 'network scan: absent result TLV decodes as null');
+
 // --- NAS Set/Get Preferred Networks (0x0027 / 0x0026) -----------------------
 // TLV 0x10 = guint16-count array of { mcc:u16, mnc:u16, rat:u16 }; the rat is
 // the EF-6F60 AcT bitmask (0x8000 UTRAN, 0x4000 E-UTRAN, 0x0800 NG-RAN,

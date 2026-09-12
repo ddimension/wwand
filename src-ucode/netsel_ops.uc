@@ -69,10 +69,29 @@ export function install(self, o)
 		return masks;
 	};
 
-	// QmiNasNetworkStatus bits -> a coarse operator status label
+	// QmiNasNetworkStatus bits (qmi-enums-nas.h, libqmi 1.38.0):
+	//   1<<0 CURRENT_SERVING  1<<1 AVAILABLE  1<<2 HOME       1<<3 ROAMING
+	//   1<<4 FORBIDDEN        1<<5 NOT_FORBIDDEN  1<<6 PREFERRED  1<<7 NOT_PREFERRED
+	// The four odd bits are the negations, so a flag is only meaningful when its
+	// own bit is set — "not set" means the modem did not say, not "false".
+	const NET_CURRENT   = 0x01;
+	const NET_HOME      = 0x04;
+	const NET_ROAMING   = 0x08;
+	const NET_FORBIDDEN = 0x10;
+	const NET_PREFERRED = 0x40;
+
+	// QmiNasNetworkScanResult (qmi-enums-nas.h:493-495, libqmi 1.38.0). Keys are
+	// quoted and looked up through sprintf because a ucode object is indexed by
+	// STRING — SCAN_RESULT[0] does not find '0'.
+	const SCAN_RESULT = { '0': 'success', '1': 'abort', '2': 'radio_link_failure' };
+
+	let scan_result_name = (res) =>
+		(res == null) ? null : (SCAN_RESULT[sprintf('%d', res)] ?? sprintf('result %d', res));
+
+	// -> a coarse operator status label
 	let scan_status = (bits) =>
-		(bits & 0x01) ? 'current' :        // NET_STATUS_CURRENT_SERVING (bit 0)
-		(bits & 0x10) ? 'forbidden' :      // NET_STATUS_FORBIDDEN (bit 4)
+		(bits & NET_CURRENT)   ? 'current' :
+		(bits & NET_FORBIDDEN) ? 'forbidden' :
 		'available';
 
 	// normalize a NAS Network Scan response to
@@ -106,9 +125,14 @@ export function install(self, o)
 				plmn: sprintf('%d/%02d', e.mcc, e.mnc),
 				name: e.description ?? '',
 				status: scan_status(bits),
-				// extra scan flags carried in the status bitmask
-				roaming: (bits & 0x08) ? true : false,   // NET_STATUS_ROAMING (bit 3)
-				preferred: (bits & 0x04) ? true : false, // NET_STATUS_PREFERRED (bit 2)
+				// extra scan flags carried in the status bitmask. `preferred`
+				// read 0x04 until 2026-09-12, which is HOME — so every scan
+				// reported the home network as "preferred" and the real
+				// PREFERRED bit (0x40) was never read at all. Nothing rendered
+				// it, which is why it survived; the bus was wrong regardless.
+				roaming: (bits & NET_ROAMING) ? true : false,
+				home: (bits & NET_HOME) ? true : false,
+				preferred: (bits & NET_PREFERRED) ? true : false,
 				rats: rats[sprintf('%d/%d', e.mcc, e.mnc)] ?? [],
 			});
 		}
@@ -175,17 +199,17 @@ export function install(self, o)
 		// scan itself fails — some modems refuse a NAS network scan (HW-seen: the
 		// EG06 rejects it over the QMI-over-MBIM passthrough with result 1), so AT
 		// keeps MBIM/NCM at parity with QMI where the passthrough scan works.
-		let at_scan = () => {
+		let at_scan = (extra) => {
 			let at = entry.modem.at;
 
 			if (!at)
-				return cb({ error: 'unsupported_on_backend' });
+				return cb({ error: 'unsupported_on_backend', ...(extra ?? {}) });
 
 			at.send('AT+COPS=?', (err, res) => {
 				if (err)
-					return cb({ error: 'at', detail: err });
+					return cb({ error: 'at', detail: err, ...(extra ?? {}) });
 
-				cb(null, { operators: atcmd.parse_cops_scan(res?.lines) });
+				cb(null, { operators: atcmd.parse_cops_scan(res?.lines), ...(extra ?? {}) });
 			}, { timeout: SCAN_TIMEOUT_MS });
 		};
 
@@ -200,7 +224,25 @@ export function install(self, o)
 					return at_scan();
 				}
 
-				cb(null, { operators: scan_operators(data) });
+				let ops = scan_operators(data);
+				let res = data?.scan_result;
+
+				// QMI success is not scan success: an aborted scan comes back as
+				// a perfectly valid response with nothing in it, which reached
+				// the UI as "no operators found" — a different and much stronger
+				// claim than the modem made. TLV 0x13 carries the real outcome.
+				// An empty list is also worth one more try over AT, a separate
+				// code path in the firmware; that is cheap next to a scan that
+				// has already cost minutes, and it cannot make the answer worse.
+				if (!length(ops)) {
+					log('info', sprintf('modem %s: NAS network scan returned no operators (%s) — falling back to AT+COPS=?',
+						ref, scan_result_name(res) ?? 'no result TLV'));
+					return at_scan((res != null && res != 0)
+						? { scan_result: scan_result_name(res) } : {});
+				}
+
+				cb(null, { operators: ops,
+					...(res != null ? { scan_result: scan_result_name(res) } : {}) });
 			}, { timeout: SCAN_TIMEOUT_MS });
 		});
 	};
@@ -209,6 +251,15 @@ export function install(self, o)
 	// script_timeout is 60 s by default while the scan runs minutes), so the UI
 	// starts a job and polls. One job per modem; a finished job's result is kept
 	// until the next start.
+	//
+	// `started_at` is reported so a caller can SEE when the job began; it is not
+	// a duration source, and a caller must not subtract it from its own clock.
+	// Two reasons, both live on this hardware: the router and the caller are
+	// different machines (LuCI did exactly that and showed 624335s on the
+	// NR7101, 2026-09-12 — the skew, not the scan), and this box's own clock is
+	// not monotonic across the job either, since a scan that brings the modem up
+	// lets NTP step time() by days mid-flight. A caller that wants elapsed time
+	// measures it on the one clock it knows stands still: its own.
 	self.modem_scan_start = function(ref, cb) {
 		let entry = check_modem(ref, cb);
 

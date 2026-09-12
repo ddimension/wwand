@@ -213,6 +213,15 @@ export default {
 		//            serving-system Current PLMN name is) → 'lstring'; confirmed
 		//            against the libqmi test-generated.c NAS Network Scan buffer.
 		//   response Radio Access Technology 0x11 = the RAT per PLMN (gint8).
+		//   response Network Scan Result 0x13 = guint32 QmiNasNetworkScanResult
+		//            (since libqmi 1.24): 0 SUCCESS, 1 ABORT, 2 RADIO_LINK_FAILURE
+		//            (qmi-enums-nas.h:493-495, 1.38.0). A modem may answer the
+		//            scan with QMI success and an EMPTY operator list: HW-seen on
+		//            an RG502QEA (NR7101, 2026-09-12) for a scan fired while the
+		//            data session was being torn down and rebuilt — 180 s, no
+		//            operators, no error. The same modem listed three operators
+		//            over NAS ten minutes later. Which of the two happened is
+		//            only knowable from this TLV, and we were discarding it.
 		NETWORK_SCAN: {
 			id: 0x0021,
 			req: {
@@ -223,6 +232,7 @@ export default {
 					mcc: 'u16', mnc: 'u16', network_status: 'u8', description: 'lstring' } } },
 				radio_access_technology: { t: 0x11, f: { n: 'u16', of: {
 					mcc: 'u16', mnc: 'u16', radio_interface: 'i8' } } },
+				scan_result: { t: 0x13, f: 'u32' },
 			},
 		},
 
