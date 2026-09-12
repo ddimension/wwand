@@ -785,13 +785,23 @@ export function create(opts)
 			let es1 = self.eslots?.[0] ?? null;
 			let es2 = self.eslots?.[1] ?? null;
 
+			// CARD PRESENCE COMES FROM THE SLOT READ, not from a constant.
+			// ESLOTSINFO reports it per slot and the field was parsed and then
+			// ignored, so an EMPTY slot was published as "present" — the one
+			// thing this row exists to answer. Without the ESLOTSINFO read
+			// (a vendor that has no such command) there is no per-slot evidence
+			// either way, and the GTDUALSIM read-back that remains only names
+			// the ACTIVE slot: 'present' stays the answer there, because that is
+			// what the old behaviour asserted and nothing new contradicts it.
+			let card = (es) => (es == null) ? 'present' : (es.present ? 'present' : 'absent');
+
 			cb(null, [
-				{ physical: 1, card: 'present', active: st.sub == 1,
+				{ physical: 1, card: card(es1), active: st.sub == 1,
 				  logical_slot: null,
 				  iccid: es1?.iccid ?? ((st.sub == 1) ? (self.info?.iccid ?? null) : null),
 				  is_euicc: es1?.kind == 'euicc', eid: es1?.eid ?? null, cpin: es1?.cpin ?? null,
 				  service: (st.sub == 1) ? (st.service ?? null) : null },
-				{ physical: 2, card: 'present', active: st.sub == 2,
+				{ physical: 2, card: card(es2), active: st.sub == 2,
 				  logical_slot: null,
 				  iccid: es2?.iccid ?? ((st.sub == 2) ? (self.info?.iccid ?? null) : null),
 				  is_euicc: es2?.kind == 'euicc', eid: es2?.eid ?? null, cpin: es2?.cpin ?? null,

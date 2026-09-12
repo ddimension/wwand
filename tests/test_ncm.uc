@@ -1740,11 +1740,25 @@ push(scenarios, {
 			eq(slots?.[0]?.active, true, 's9f SUB1 (physical) active');
 			eq(slots?.[0]?.service, 'NR', 's9f GTDUALSIM service surfaced on the active slot');
 			eq(slots?.[0]?.iccid, '89000000000000000000', 's9f active slot carries the modem iccid');
-			eq(slots?.[0]?.cpin, '+CPIN: READY', 's9f USIM slot CPIN from ESLOTSINFO');
+			eq(slots?.[0]?.cpin, 'READY', 's9f USIM slot CPIN from ESLOTSINFO, prefix stripped');
+			eq(slots?.[0]?.card, 'present', 's9f card presence comes from the slot read');
 			eq(slots?.[1]?.is_euicc, true, 's9f SUB2 flagged eUICC');
 			eq(slots?.[1]?.eid, '89000000000000000000000000000000', 's9f eUICC EID from ESLOTSINFO');
-			eq(slots?.[1]?.cpin, '+CPIN: EMPTY_EUICC', 's9f eUICC CPIN state surfaced');
+			eq(slots?.[1]?.cpin, 'EMPTY_EUICC', 's9f eUICC CPIN state surfaced');
 			eq(slots?.[1]?.iccid, null, 's9f inactive slot identity unknown until switched');
+
+			// AN EMPTY TRAY MUST SAY SO. ESLOTSINFO reports presence per slot
+			// and that field was parsed and then ignored — `card` was the
+			// constant 'present' for both slots, which is the one thing the row
+			// exists to answer. Driven through the real path by seeding the
+			// slot read the way the ESLOTSINFO reply does.
+			m.eslots = [ { present: false, kind: 'usim', cpin: null, atr: null, eid: null, iccid: null },
+			             { present: true,  kind: 'euicc', cpin: 'READY', atr: null, eid: 'E', iccid: null } ];
+
+			m.slot_status((e4, s4) => {
+				eq(e4, null, 's9f empty-tray read succeeds');
+				eq(s4?.[0]?.card, 'absent', 's9f an empty tray reports absent');
+				eq(s4?.[1]?.card, 'present', 's9f ...and the populated one still reports present');
 
 			m.switch_slot(2, (e2) => {
 				eq(e2, null, 's9f switch_slot succeeds');
@@ -1756,6 +1770,7 @@ push(scenarios, {
 					eq(res?.unchanged, true, 's9f back-switch short-circuits (mock still on SUB1)');
 					env.finish();
 				});
+			});
 			});
 		});
 	},
@@ -2151,7 +2166,22 @@ eq(cgp5?.v6, null, 'parse_cgpaddr: single-slot has no v6');
 // parse_eslotsinfo: every per-slot field, both slot kinds, absent forms
 let es = ncm_vendors.parse_eslotsinfo([ '+ESLOTSINFO: 2, "+CPIN: READY", "1", "0", "3B00000000000000", "", "89000000000000000000", "+CPIN: EMPTY_EUICC", "1", "1", "3B9F00000000000000000000", "89000000000000000000000000000000", ""' ]);
 
-eq(es[0].cpin, '+CPIN: READY', 'eslotsinfo: slot1 cpin');
+// THE AT PREFIX IS STRIPPED. The FM350-GL writes a whole AT response into the
+// field where the state belongs, and this line asserted the wire format —
+// so the raw "+CPIN: READY" travelled to ubus and onto the status page, with
+// the test holding it in place (reported by obsy, ddimension/wwand#21).
+eq(es[0].cpin, 'READY', 'eslotsinfo: slot1 cpin, prefix stripped');
+eq(es[1].cpin, 'EMPTY_EUICC', 'eslotsinfo: the vendor eUICC state keeps its word');
+
+// a token WITHOUT a prefix is left exactly as it is — a modem that answers
+// properly must not be reshaped by a fix aimed at one that does not
+let esp = ncm_vendors.parse_eslotsinfo([ '+ESLOTSINFO: 1, "READY", "1", "0", "", "", ""' ]);
+eq(esp[0].cpin, 'READY', 'eslotsinfo: a bare state token is untouched');
+
+// and the prefix is matched by SHAPE, not by name: any "+NAME:" header is the
+// wire format leaking into a value
+let esq = ncm_vendors.parse_eslotsinfo([ '+ESLOTSINFO: 1, "+CPIN: SIM PIN", "1", "0", "", "", ""' ]);
+eq(esq[0].cpin, 'SIM PIN', 'eslotsinfo: a multi-word state survives the strip');
 eq(es[0].present, true, 'eslotsinfo: slot1 present');
 eq(es[0].kind, 'usim', 'eslotsinfo: slot1 kind usim');
 eq(es[0].atr, '3B00000000000000', 'eslotsinfo: slot1 atr');

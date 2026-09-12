@@ -281,6 +281,18 @@ export function parse_cgpaddr(lines)
 	return (v4 || v6) ? { addr: v4, v6: v6 } : null;
 };
 
+// "+CPIN: READY" -> "READY". A token that carries its own AT response header
+// is the wire format leaking into a value; anything after the first colon of a
+// leading "+NAME:" is the value. A token without one is returned unchanged, so
+// a modem that answers properly is not touched.
+function strip_at_prefix(tok)
+{
+	let t = trim(tok ?? '');
+	let m = match(t, /^\+[A-Za-z0-9]+:\s*(.*)$/);
+
+	return (m ? trim(m[1]) : t) || null;
+}
+
 // parse AT+ESLOTSINFO? — per-slot [cpin, present, kind, atr, eid, iccid]
 // (field-verified on the FM350-GL: field 5 carries the EID on the eUICC slot
 // and is empty on the USIM slot; the eUICC reports CPIN EMPTY_EUICC when no
@@ -301,7 +313,15 @@ export function parse_eslotsinfo(lines)
 			let b = i * 6;
 
 			push(slots, {
-				cpin: trim(toks[b] ?? '') || null,
+				// THE MODEM PUTS AN AT RESPONSE INSIDE A FIELD. The FM350-GL
+				// writes "+CPIN: READY" / "+CPIN: EMPTY_EUICC" where the token
+				// is supposed to be the state alone, and it was stored verbatim
+				// — so the ubus payload, and the status page under it, printed
+				// the wire format at the reader (reported by obsy, 2026-09-12,
+				// ddimension/wwand#21). parse_cpin strips exactly this prefix
+				// for the modem's own PIN flow; the per-slot field simply never
+				// went through it.
+				cpin: strip_at_prefix(toks[b]),
 				present: trim(toks[b + 1] ?? '') == '1',
 				kind: trim(toks[b + 2] ?? '') == '1' ? 'euicc' : 'usim',
 				atr: trim(toks[b + 3] ?? '') || null,
