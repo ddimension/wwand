@@ -663,6 +663,9 @@ export function create(opts)
 						: 'no profile (the modem rejected the index — inline apn)'));
 
 				client.request('START_NETWORK', start_args, (e3, d3) => {
+					if (e3 && e3.error == 'qmi' && e3.code == 26) { 
+						log('notice', sprintf('ipv%d: start_network NO_EFFECT (26) — already connected', family)); e3 = null;
+					}
 					if (e3 || d3?.pdh == null) {
 						return done({
 							stage: 'start_network',
