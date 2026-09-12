@@ -608,3 +608,62 @@ be re-applied on every bring-up.
 **And the default is empty, not `::1`.** netifd's own `ip6ifaceid` defaults to
 `::1`; copying that would silently renumber every existing installation on
 upgrade.
+
+## Testing a LuCI change in a browser: the `?v=` is not the one you can see
+
+Deploying a fixed `.js` to the router and reloading the page is **not** enough,
+and checking the file over HTTP is not proof that the page is running it.
+
+LuCI appends a cache-buster to every resource it loads —
+`…/view/wwand/modems.js?v=26.249.67624~9aff465-1789158346`. The value is keyed
+on the **LuCI build**, not on the file's mtime, so replacing the file on disk
+does not change the URL and the browser keeps serving its cached copy until that
+cache entry is evicted. It differs per box (242 and 245 carry three different
+values between them), and a `<script src>` you can read from the document is
+usually a *different* resource with a *different* value — which is the trap:
+
+- fetching the unversioned URL succeeds, is uncached, returns the new file, and
+  proves nothing;
+- fetching a `?v=` guessed from some other `<script src>` also returns the new
+  file, from a cache entry the page never reads;
+- both look like confirmation, and the page keeps running the old code.
+
+The reliable way is to ask what the page actually requested — in Claude-in-Chrome
+that is `read_network_requests` with a url pattern — take that exact URL, refetch
+it with `{cache:'reload'}`, and then hard-reload the page. Without the refetch a
+hard reload alone was not enough either.
+
+Measured twice on 2026-09-12: a status.js fix and a modems.js fix each looked
+"not applied" on hardware and each turned out to be applied and cached. Neither
+was a code defect. Budget the cache check **before** concluding a deployed change
+does not work.
+
+## A source `.uc` dropped into a bytecode tree kills the daemon, and imports fine first
+
+`docs/STATUS.md` and the repo guide both warn that a production build ships the
+ucode tree **precompiled**, and that a module file starting with a shebang is
+bytecode while a source module starts with `// SPDX`. What they did not say is
+what happens if you deploy a handful of source files over that tree, and how
+convincingly it looks fine on the way there.
+
+Measured on 2026-09-12, deploying six changed modules to a Chateau running the
+packaged (bytecode) build:
+
+- `ucode -L /usr/share/ucode -e 'import * as x from "wwand.<module>"'` **passed
+  for every one of the six**, individually, on the target;
+- the daemon then died on start with `Type error: left-hand side is not a
+  function` and `exit_code: 254`, respawning every five seconds;
+- the identical six files ran correctly on an NR7101 whose tree is all source.
+
+So the per-module import check does not cover it — it proves the file parses,
+not that the tree it joins is consistent. Two consequences worth planning
+around:
+
+- **Back up before you deploy.** `cd /usr/share/ucode/wwand && tar cf
+  /root/uc-backup/vorher.tar <the files you are about to replace>` turns the
+  recovery into one command. Restoring the bytecode and restarting brought the
+  box back with both contexts connected.
+- **Check what the target runs first**, per box, before deciding how to test:
+  `head -c 20 /usr/share/ucode/wwand/<any>.uc`. `// SPDX` = source, safe to
+  patch file-by-file. `#!/usr/bin/env ucode` = bytecode: test the change there
+  through a package build, not a file drop.
