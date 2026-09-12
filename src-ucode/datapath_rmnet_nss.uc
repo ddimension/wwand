@@ -288,7 +288,16 @@ return {
 		// value simply does not exist outside the driver.
 		if (info) {
 			out.driver_reported = true;
-			out.qmap_version = info.qmap_version;
+			// `driver_qmap_version`, NOT `qmap_version`. The two numbers are in
+			// different vocabularies: the datapath's own `qmap_version` is 4 or
+			// 5 (QMAP v4 / v5), while the driver's field is the libqmi data-
+			// aggregation-protocol enum, where 5 is QMAP v1 and 9 is QMAP v5
+			// (mhi_netdev_quectel.c: `u32 qmap_version; // 5 ~ QMAP V1, 9 ~
+			// QMAP V5`). Under one name the same reply showed "5" at the top
+			// and "9" inside `extra`, which reads as a contradiction — reported
+			// from an AW1000 with qmi_wwan_q + rmnet_nss, where it cost a
+			// second look (ddimension/wwand#20, 2026-09-12).
+			out.driver_qmap_version = info.qmap_version;
 			out.rx_urb_size = info.rx_urb_size;
 			out.dl_minimum_padding = info.dl_minimum_padding;
 			out.mux_id = info.mux_id;

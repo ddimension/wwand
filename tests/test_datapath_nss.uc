@@ -197,6 +197,14 @@ eq(info_st.driver_reported, true, 'status: says the numbers came from the driver
 eq(info_st.dl_minimum_padding, 4, 'status: and carries the one value nothing else exposes');
 eq(info_st.rx_urb_size, 31744, 'status: with the buffer size it reports');
 
+// TWO VOCABULARIES, TWO NAMES. The datapath's own `qmap_version` counts 4/5
+// (QMAP v4 / v5); the driver's field is the libqmi aggregation-protocol enum,
+// where 9 IS v5 (mhi_netdev_quectel.c). Emitted under one name, the same reply
+// read "5" at the top and "9" inside `extra` and looked self-contradictory —
+// reported from an AW1000, ddimension/wwand#20.
+eq(info_st.driver_qmap_version, 9, 'status: the driver enum keeps its own name');
+eq(info_st.qmap_version, null, 'status: ...and does not shadow the datapath\'s numbering');
+
 let info_st2 = netlink.datapath_status(info_fx(null, 31744), 'rmnet_nss', 'wwan0', plugins);
 eq(info_st2.driver_reported, null, 'status: no ioctl -> no claim that there was one');
 eq(info_st2.qmap_size, 31744, 'status: the derived rows are unchanged');
