@@ -189,4 +189,76 @@ ok(index(dead, 'gauge-registered" interval=30 N:0.000') >= 0, 'collectd: not-rea
 ok(index(dead, 'gauge-attempts" interval=30 N:7.000') >= 0, 'collectd: the recovery counter rides along');
 eq(index(dead, 'signal_power'), -1, 'collectd: and no invented signal values');
 
+// --- aggregation: carriers and summed bandwidth ------------------------------
+// The long-term half of ddimension/wwand#14 — the RRD keeps what the browser
+// graph only holds for as long as a page is open. Same counting rule as the
+// LuCI graph, because an RRD and the status page disagreeing is worse than
+// either being absent.
+
+let ca = fmt.carrier_counts({ ca: [
+	{ rat: 'lte', role: 'PCC', bandwidth_mhz: 20 },
+	{ rat: 'lte', role: 'SCC', bandwidth_mhz: 10, state: 2 },
+	{ rat: 'lte', role: 'SCC', bandwidth_mhz: 15, state: 0 },   // deconfigured
+	{ rat: 'nr',  role: 'PCC' },
+	{ rat: 'nr',  role: 'SCC' },
+] });
+eq([ ca.lte.n, ca.lte.mhz ], [ 2, 30 ], 'carriers: a deconfigured SCC is not a carrier');
+eq(ca.nr.n, 2, 'carriers: both 5G carriers counted under EN-DC');
+eq(ca.nr.have_mhz, false, 'carriers: no 5G width reported, none invented');
+
+// ...and an SCC whose state the parser could not read is COUNTED. A carrier the
+// modem listed and would not name a state for is more likely in use than not,
+// and the QCAINFO parser leaves `state` null for a token it does not know.
+ca = fmt.carrier_counts({ ca: [
+	{ rat: 'lte', role: 'PCC', bandwidth_mhz: 20 },
+	{ rat: 'lte', role: 'SCC', bandwidth_mhz: 10, state: null },
+] });
+eq([ ca.lte.n, ca.lte.mhz ], [ 2, 30 ], 'carriers: an SCC with an unknown state still counts');
+
+// no carrier list at all: the serving cell is still one carrier
+ca = fmt.carrier_counts({ serving: { lte: { bandwidth_mhz: 10 } } });
+eq([ ca.lte.n, ca.lte.mhz ], [ 1, 10 ], 'carriers: serving cell is the floor');
+
+// a 5G-capable modem parked on LTE reports the NR band it can SEE; that is not
+// a carrier, and dsd is what says so (HW-observed on an RG502QEA, 2026-09-12)
+ca = fmt.carrier_counts({ serving: { lte: {}, nr: { band: 'n1' } },
+                          dsd: { mode: 'LTE', nr: false } });
+eq(ca.nr.n, 0, 'carriers: a visible NR band with the leg down is not a carrier');
+
+ca = fmt.carrier_counts({ serving: { lte: {}, nr: { band: 'n78' } },
+                          dsd: { mode: 'NSA', nr: true } });
+eq(ca.nr.n, 1, 'carriers: ...and is one once the leg is serving');
+
+eq(fmt.carrier_counts(null).lte.n, 0, 'carriers: no cells at all is zero, not a crash');
+
+// The Fibocom telemetry (telemetry_ncm ca_entries) puts the leg in the ROLE
+// TEXT — 'PCC LTE' / 'PCC NR'. It carries `rat` now, but an installed base does
+// not, and a reader keyed on `rat` alone counted every Fibocom NR carrier as
+// LTE. Observed on a WH3000 Pro at a sponsor site, 2026-09-12.
+ca = fmt.carrier_counts({ ca: [
+	{ role: 'PCC LTE', bandwidth_mhz: 20 },
+	{ role: 'PCC NR' },
+	{ role: 'SCC', bandwidth_mhz: 10 },
+] });
+eq([ ca.lte.n, ca.nr.n ], [ 2, 1 ], 'carriers: the legacy role text still separates the legs');
+eq(ca.lte.mhz, 30, 'carriers: ...and the LTE widths still add up');
+
+// an explicit `rat` wins over the role text, so a tagged producer is never
+// second-guessed by a string match
+ca = fmt.carrier_counts({ ca: [ { rat: 'lte', role: 'PCC NRSOMETHING' } ] });
+eq([ ca.lte.n, ca.nr.n ], [ 1, 0 ], 'carriers: an explicit rat beats the role text');
+
+// the PUTVAL lines, and the absence of them
+let agg = join('\n', fmt.collectd_lines('h', 'm', {}, {}, 30,
+	{ ca: [ { rat: 'lte', role: 'PCC', bandwidth_mhz: 20 },
+	        { rat: 'lte', role: 'SCC', bandwidth_mhz: 20, state: 2 } ] }));
+ok(index(agg, 'gauge-carriers_lte" interval=30 N:2.000') >= 0, 'collectd: carrier count emitted');
+ok(index(agg, 'gauge-bandwidth_lte" interval=30 N:40.000') >= 0, 'collectd: bandwidth summed');
+eq(index(agg, 'carriers_nr'), -1, 'collectd: no 5G leg, no 5G series');
+
+// a caller that does not fetch cells records NOTHING, rather than a zero that
+// would read as "stopped aggregating"
+let nocells = join('\n', fmt.collectd_lines('h', 'm', {}, {}, 30));
+eq(index(nocells, 'carriers_'), -1, 'collectd: absent cells emit no aggregation at all');
+
 done('test_wwandctl_fmt');

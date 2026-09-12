@@ -500,8 +500,14 @@ function cmd_collectd(argv)
 			if (!m)
 				continue;
 
+			// modem_cells is fetched for the aggregation series. It wakes the
+			// same fast loop modem_signal already woke on the line above, so it
+			// costs one more request per interval and no extra wake-up — and
+			// the cell read is on the daemon's slow loop, so most of those
+			// requests are answered from what it already had.
 			out = [ ...out, ...collectd_lines(host, name,
-				call('modem_signal', { modem: name }), m, interval) ];
+				call('modem_signal', { modem: name }), m, interval,
+				call('modem_cells', { modem: name })?.cells) ];
 		}
 
 		for (let ctx, c in (st?.contexts ?? {}))

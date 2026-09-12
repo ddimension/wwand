@@ -113,12 +113,15 @@ export function get_ca(nas, cb)
 		// enum (EUTRAN_1=120…, non-linearly mapped) — NOT the 3GPP band number, and
 		// LuCI derives the band from the (disjoint) EARFCN anyway, so it is not
 		// surfaced here to avoid a misleading value.
+		// `rat` is stated rather than left out: this message is LTE-only, but the
+		// AT list beside it now carries both legs, and a consumer that has to
+		// tell them apart should not have to know which producer it is reading.
 		if (d.pcell)
-			push(out, { role: 'PCC', earfcn: d.pcell.earfcn, pci: d.pcell.pci,
+			push(out, { rat: 'lte', role: 'PCC', earfcn: d.pcell.earfcn, pci: d.pcell.pci,
 			            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', d.pcell.dl_bandwidth)] ?? null });
 
 		for (let s in (d.scells ?? []))
-			push(out, { role: 'SCC', earfcn: s.earfcn, pci: s.pci,
+			push(out, { rat: 'lte', role: 'SCC', earfcn: s.earfcn, pci: s.pci,
 			            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', s.dl_bandwidth)] ?? null,
 			            state: s.state });
 

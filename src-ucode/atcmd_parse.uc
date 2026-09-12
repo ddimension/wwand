@@ -34,27 +34,82 @@ export function parse_qnwlock(lines)
 // LTE downlink bandwidth in resource blocks -> MHz (E-UTRA transmission BW)
 const RB_MHZ = { '6': 1.4, '15': 3, '25': 5, '50': 10, '75': 15, '100': 20 };
 
-// parse AT+QCAINFO response lines into the active LTE carriers. Quectel format:
+// parse AT+QCAINFO response lines into the active carriers. Quectel format:
 //   +QCAINFO: "PCC",<earfcn>,<rb>,"LTE BAND <n>",<ul>,<pci>[,<rsrp>,<rsrq>,...]
 //   +QCAINFO: "SCC",<earfcn>,<rb>,"LTE BAND <n>",<state>,<pci>[,...]
-// returns [ { role, earfcn, rb, bandwidth_mhz, band, pci }, ... ]
+//   +QCAINFO: "PCC"/"SCC",<arfcn>,<bw>,"NR5G BAND n<n>",<scs>,<pci>
+// returns [ { rat, role, earfcn, rb, bandwidth_mhz, band, pci }, ... ]
+//
+// THE 5G ROWS USED TO BE DROPPED ON THE FLOOR. The band token was matched as
+// `BAND\s*([0-9]+)`, and a 5G band is written `n78` — so every NR5G row failed
+// the match and vanished without a trace, on a command whose whole purpose is
+// to enumerate the aggregated carriers. Under EN-DC that is most of the answer:
+// the LTE anchor and up to four more carriers were counted and the 5G ones were
+// not, which reads as a modem that stopped aggregating the moment it went 5G.
+//
+// `band` therefore stays the STRING the modem wrote ('20', 'n78'), not a
+// number: 20 and n20 are different bands and folding them into one integer
+// would make them indistinguishable downstream. `rat` says which is which.
+//
+// BANDWIDTH IS ONLY CONVERTED FOR LTE. Field 3 is a resource-block count on the
+// LTE rows (50 RB = 10 MHz, RB_MHZ above); on the NR5G rows the same position
+// is documented as a bandwidth, and the unit is not something to guess at from
+// a manual this tree does not carry — putting an NR row through RB_MHZ would
+// turn a 100 MHz carrier into 20 MHz and look plausible doing it. So it is left
+// null until an EN-DC modem is on hand to settle it, and the aggregate-
+// bandwidth graph simply has nothing to add for the 5G leg. A missing number is
+// recoverable; a confidently wrong one is not.
+// Quectel spells the secondary-cell state in words where QMI reports the
+// QmiNasScellState enum (0 deconfigured, 1 deactivated, 2 activated). Mapped
+// onto the QMI numbers so every consumer applies ONE rule to both producers
+// rather than each learning both vocabularies. An unrecognised token yields
+// null — unknown, which downstream counts (a carrier the modem listed and would
+// not name a state for is more likely in use than not).
+function scc_state(tok)
+{
+	switch (uc(tok ?? '')) {
+	case 'DECONFIGURED': return 0;
+	case 'DEACTIVATED':  return 1;
+	case 'DEACTIVE':     return 1;
+	case 'ACTIVATED':    return 2;
+	case 'ACTIVE':       return 2;
+	}
+
+	return match(tok, /^[0-9]+$/) ? +tok : null;
+}
+
 export function parse_qcainfo(lines)
 {
 	let out = [];
 
 	for (let l in (lines ?? [])) {
-		let m = match(l, /\+QCAINFO:\s*"(PCC|SCC)",([0-9]+),([0-9]+),"[A-Za-z ]*BAND\s*([0-9]+)",[^,]*,([0-9]+)/);
+		let m = match(l, /\+QCAINFO:\s*"(PCC|SCC)",([0-9]+),([0-9]+),"([A-Za-z0-9 ]*)BAND\s*(n?[0-9]+)","?([A-Za-z0-9]*)"?,([0-9]+)/);
 
 		if (!m)
 			continue;
 
+		let nr = (index(uc(m[4]), 'NR5G') >= 0) || (substr(m[5], 0, 1) == 'n');
+
 		push(out, {
+			rat:           nr ? 'nr' : 'lte',
 			role:          m[1],
 			earfcn:        +m[2],
 			rb:            +m[3],
-			bandwidth_mhz: RB_MHZ[m[3]] ?? null,
-			band:          +m[4],
-			pci:           +m[5],
+			bandwidth_mhz: nr ? null : (RB_MHZ[m[3]] ?? null),
+			band:          m[5],
+			// The field after the band means different things per row: an
+			// uplink flag on an LTE PCC, the sub-carrier spacing on ANY NR row,
+			// and on an LTE SCC the CELL STATE — which is the one that matters,
+			// because a secondary cell can be listed while carrying nothing.
+			// It was captured by `[^,]*` and thrown away, so a DECONFIGURED
+			// carrier counted as an aggregated one: an extra carrier and its
+			// bandwidth added to a link that was not using it.
+			//
+			// `!nr` is load-bearing: an NR SCC puts its SCS in that position,
+			// and reading it as a state files "SCS 1" as "deactivated" — which
+			// would then subtract a real 5G carrier from the count.
+			...((m[1] == 'SCC' && !nr) ? { state: scc_state(m[6]) } : {}),
+			pci:           +m[7],
 		});
 	}
 

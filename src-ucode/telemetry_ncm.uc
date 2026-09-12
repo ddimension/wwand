@@ -903,12 +903,22 @@ function tel_fibocom_signal(self, cb)
 // with rsrq/sinr via the serving rows) plus any LTE SCC aggregation rows.
 // 0.1 dB scaling matches the QMI CA entries so the LuCI table renders both
 // backends identically. Exported for the unit tests.
+//
+// `rat` is carried alongside the role, not only inside it. This producer said
+// which leg a carrier belonged to by writing it into the role text ('PCC LTE',
+// 'PCC NR'), which a reader can only recover by matching on a display string —
+// and the other two producers (QMI GET_LTE_CPHY_CA_INFO, AT+QCAINFO) say it in
+// neither place or in a band token. Found on a WH3000 Pro at a sponsor site
+// (FM350-GL, 2026-09-12): a consumer keyed on `rat` alone silently read every
+// Fibocom NR carrier as LTE. The role text stays exactly as it was — the status
+// table prints it.
 export function ca_entries(serving, sccs)
 {
 	let ca = [];
 
 	if (serving?.lte)
 		push(ca, {
+			rat: 'lte',
 			role: 'PCC LTE',
 			earfcn: serving.lte.earfcn,
 			rb: null,
@@ -921,6 +931,7 @@ export function ca_entries(serving, sccs)
 
 	if (serving?.nr)
 		push(ca, {
+			rat: 'nr',
 			role: 'PCC NR',
 			earfcn: serving.nr.arfcn,
 			rb: null,
@@ -933,6 +944,9 @@ export function ca_entries(serving, sccs)
 
 	for (let s in (sccs ?? []))
 		push(ca, {
+			// GTCAINFO's SCC rows are the LTE aggregation rows (the NR leg
+			// appears as its own PCC above), so they are the LTE leg
+			rat: 'lte',
 			role: 'SCC',
 			earfcn: s.earfcn,
 			rb: null,

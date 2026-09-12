@@ -143,7 +143,63 @@ export function collectd_interval(want)
 // -15 dB is -150 and a display heuristic like fmt_sig's `> -140` would throw it
 // away. A sentinel reaching RRD is worse than no value at all: it is a real
 // data point at -32768 that flattens every graph sharing its scale.
-export function collectd_lines(host, modem, sig, m, interval)
+// carrier_counts(cells): aggregated carriers and their summed bandwidth, per
+// leg -> { lte: {n, mhz}, nr: {n, mhz} }.
+//
+// THE SAME RULE THE LuCI GRAPH DRAWS (luci-app-wwand format.js carrierSample),
+// deliberately, because a number in an RRD and the line on the status page
+// disagreeing is worse than either being absent: an SCC that is configured but
+// not activated carries nothing and is not counted; a modem that reports no
+// carrier list at all still has its serving cell; and the 5G leg counts only
+// while it is actually serving, since a 5G-capable modem parked on LTE still
+// reports the NR band it can see (HW-observed on an RG502QEA, 2026-09-12).
+export function carrier_counts(cells)
+{
+	let out = { lte: { n: 0, mhz: 0, have_mhz: false },
+	            nr:  { n: 0, mhz: 0, have_mhz: false } };
+	let srv = cells?.serving ?? {};
+
+	for (let c in (cells?.ca ?? [])) {
+		// `rat` where the producer sets it; the role text is the fallback,
+		// because the Fibocom telemetry has said 'PCC NR' in the role since
+		// before there was a `rat` field and an installed base still answers
+		// that way. Same two-step in the LuCI graph, deliberately.
+		let leg = out[(c?.rat == 'nr' ||
+		               (c?.rat == null && index(uc(c?.role ?? ''), 'NR') >= 0)) ? 'nr' : 'lte'];
+
+		if (c?.role == 'SCC' && c?.state != null && c.state != 2)
+			continue;
+
+		leg.n++;
+
+		if (c?.bandwidth_mhz != null) {
+			leg.mhz += c.bandwidth_mhz;
+			leg.have_mhz = true;
+		}
+	}
+
+	if (!out.lte.n && srv.lte) {
+		out.lte.n = 1;
+
+		if (srv.lte.bandwidth_mhz != null) {
+			out.lte.mhz = srv.lte.bandwidth_mhz;
+			out.lte.have_mhz = true;
+		}
+	}
+
+	if (!out.nr.n && srv.nr && cells?.dsd?.nr) {
+		out.nr.n = 1;
+
+		if (srv.nr.bandwidth_mhz != null) {
+			out.nr.mhz = srv.nr.bandwidth_mhz;
+			out.nr.have_mhz = true;
+		}
+	}
+
+	return out;
+};
+
+export function collectd_lines(host, modem, sig, m, interval, cells)
 {
 	let out = [];
 
@@ -219,6 +275,23 @@ export function collectd_lines(host, modem, sig, m, interval)
 
 	// NR RSRQ arrives top-level on some firmware rather than inside nr5g
 	put('signal_power', 'rsrq_nr5g', val(sig?.nr5g_rsrq, 'i16'));
+
+	// aggregation, so the RRD carries what the live graph only keeps for the
+	// minutes a browser is open — the long-term half of ddimension/wwand#14.
+	// `cells` is optional: a caller that does not fetch it simply records no
+	// aggregation, rather than recording a zero that would read as "stopped
+	// aggregating".
+	if (cells != null) {
+		let ca = carrier_counts(cells);
+
+		for (let leg, v in ca) {
+			if (v.n)
+				put('gauge', sprintf('carriers_%s', leg), v.n);
+
+			if (v.have_mhz)
+				put('gauge', sprintf('bandwidth_%s', leg), v.mhz);
+		}
+	}
 
 	// from status(), which costs no modem traffic at all
 	put('temperature', 'modem', m?.temperature?.celsius);

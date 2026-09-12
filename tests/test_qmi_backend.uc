@@ -69,8 +69,11 @@ push(steps, (next) => {
 
 	backend.get_ca(nas, (ca) => {
 		eq(length(ca), 2, 'get_ca: pcell + one scell');
-		eq(ca[0], { role: 'PCC', earfcn: 1850, pci: 100, bandwidth_mhz: 20 }, 'get_ca: pcell shaped (bw 5->20MHz)');
-		eq(ca[1], { role: 'SCC', earfcn: 3200, pci: 200, bandwidth_mhz: 10, state: 2 }, 'get_ca: scell shaped (bw 3->10MHz, activated)');
+		// `rat` is stated even though this message is LTE-only: the AT carrier
+		// list beside it carries both legs, and a consumer telling them apart
+		// should not have to know which producer it is reading
+		eq(ca[0], { rat: 'lte', role: 'PCC', earfcn: 1850, pci: 100, bandwidth_mhz: 20 }, 'get_ca: pcell shaped (bw 5->20MHz)');
+		eq(ca[1], { rat: 'lte', role: 'SCC', earfcn: 3200, pci: 200, bandwidth_mhz: 10, state: 2 }, 'get_ca: scell shaped (bw 3->10MHz, activated)');
 		next();
 	});
 });

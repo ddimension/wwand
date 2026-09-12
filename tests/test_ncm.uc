@@ -966,7 +966,10 @@ push(scenarios, {
 			// QCAINFO -> ca
 			eq(length(m.cells?.ca), 2, 'QCAINFO -> two carriers');
 			eq(m.cells?.ca[0]?.role, 'PCC', 'ca[0] role PCC');
-			eq(m.cells?.ca[0]?.band, 3, 'ca[0] band 3');
+			// the band is the modem's own token, not an integer: '3' and 'n3'
+			// are different bands and an integer cannot hold both
+			eq(m.cells?.ca[0]?.band, '3', 'ca[0] band 3');
+			eq(m.cells?.ca[0]?.rat, 'lte', 'ca[0] tagged as the LTE leg');
 
 			// data-system mode from the QENG NR line
 			eq(m.dsd_status?.mode, 'NSA', 'dsd_status mode = NSA');

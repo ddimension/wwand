@@ -149,7 +149,7 @@ eq(atcmd.cell_lock_commands({ lock_persist: true }), [], 'lock: persist alone is
 // --- AT+QCAINFO parsing ------------------------------------------------------
 
 eq(atcmd.parse_qcainfo([ '+QCAINFO: "PCC",6300,50,"LTE BAND 20",1,409,-94,-10,-65,4' ]),
-	[ { role: 'PCC', earfcn: 6300, rb: 50, bandwidth_mhz: 10, band: 20, pci: 409 } ],
+	[ { rat: 'lte', role: 'PCC', earfcn: 6300, rb: 50, bandwidth_mhz: 10, band: '20', pci: 409 } ],
 	'qcainfo: PCC single carrier, 50 RB -> 10 MHz');
 
 eq(atcmd.parse_qcainfo([
@@ -157,12 +157,72 @@ eq(atcmd.parse_qcainfo([
 	'+QCAINFO: "SCC",6300,50,"LTE BAND 20","DECONFIGURED",0',
 	'+QCAINFO: "SCC",1450,75,"LTE BAND 3","ACTIVE",111,-95,-11,-70,6',
 ]), [
-	{ role: 'PCC', earfcn: 1300, rb: 100, bandwidth_mhz: 20, band: 3, pci: 246 },
-	{ role: 'SCC', earfcn: 6300, rb: 50, bandwidth_mhz: 10, band: 20, pci: 0 },
-	{ role: 'SCC', earfcn: 1450, rb: 75, bandwidth_mhz: 15, band: 3, pci: 111 },
+	{ rat: 'lte', role: 'PCC', earfcn: 1300, rb: 100, bandwidth_mhz: 20, band: '3', pci: 246 },
+	{ rat: 'lte', role: 'SCC', earfcn: 6300, rb: 50, bandwidth_mhz: 10, band: '20', state: 0, pci: 0 },
+	{ rat: 'lte', role: 'SCC', earfcn: 1450, rb: 75, bandwidth_mhz: 15, band: '3', state: 2, pci: 111 },
 ], 'qcainfo: PCC + two SCC, RB->MHz across widths');
 
+// THE SECONDARY-CELL STATE, which this fixture carried all along and the parser
+// threw away. A listed carrier is not a carrying one: "DECONFIGURED" counted as
+// aggregation, so a link on one carrier reported two and 10 MHz of bandwidth it
+// was not using. Mapped onto the QMI QmiNasScellState numbers (0 deconfigured,
+// 1 deactivated, 2 activated) so both producers speak one vocabulary.
+let sccs = atcmd.parse_qcainfo([
+	'+QCAINFO: "SCC",100,50,"LTE BAND 1","DECONFIGURED",1',
+	'+QCAINFO: "SCC",200,50,"LTE BAND 1","DEACTIVATED",2',
+	'+QCAINFO: "SCC",300,50,"LTE BAND 1","ACTIVATED",3',
+	'+QCAINFO: "SCC",400,50,"LTE BAND 1","ACTIVE",4',
+	'+QCAINFO: "SCC",500,50,"LTE BAND 1",2,5',
+	'+QCAINFO: "SCC",600,50,"LTE BAND 1","WHAT",6',
+]);
+eq(map(sccs, (e) => e.state), [ 0, 1, 2, 2, 2, null ],
+	'qcainfo: SCC states mapped onto the QMI numbers, unknown stays null');
+
+// a PCC carries no cell state — the same field is an uplink flag there, and on
+// an NR row the sub-carrier spacing. Neither is a state and neither is stored.
+let pcc = atcmd.parse_qcainfo([
+	'+QCAINFO: "PCC",6300,50,"LTE BAND 20",1,409',
+	'+QCAINFO: "PCC",632628,100,"NR5G BAND n78",1,321',
+]);
+eq([ pcc[0].state, pcc[1].state ], [ null, null ],
+	'qcainfo: the field after the band is only a state on an SCC');
+
 eq(atcmd.parse_qcainfo([ 'OK', '' ]), [], 'qcainfo: no carrier lines');
+
+// EN-DC: the 5G rows used to fail the band match ("n78" is not `[0-9]+`) and
+// vanish, so a modem aggregating five carriers reported the LTE ones only.
+eq(atcmd.parse_qcainfo([
+	'+QCAINFO: "PCC",1300,100,"LTE BAND 3",1,246,-90,-9,-60,10',
+	'+QCAINFO: "SCC",6300,50,"LTE BAND 20","ACTIVE",111,-95,-11,-70,6',
+	'+QCAINFO: "PCC",632628,100,"NR5G BAND n78",1,321',
+	'+QCAINFO: "SCC",504990,90,"NR5G BAND n1",1,77',
+]), [
+	{ rat: 'lte', role: 'PCC', earfcn: 1300,   rb: 100, bandwidth_mhz: 20, band: '3',   pci: 246 },
+	{ rat: 'lte', role: 'SCC', earfcn: 6300,   rb: 50,  bandwidth_mhz: 10, band: '20', state: 2, pci: 111 },
+	{ rat: 'nr',  role: 'PCC', earfcn: 632628, rb: 100, bandwidth_mhz: null, band: 'n78', pci: 321 },
+	{ rat: 'nr',  role: 'SCC', earfcn: 504990, rb: 90,  bandwidth_mhz: null, band: 'n1',  pci: 77 },
+], 'qcainfo: EN-DC keeps both legs, tagged, and n78 stays n78');
+
+// An NR SCC carries its SUB-CARRIER SPACING where an LTE SCC carries the cell
+// state. Read as a state, "SCS 1" becomes "deactivated" and a real 5G carrier
+// drops out of the count.
+let nrscc = atcmd.parse_qcainfo([ '+QCAINFO: "SCC",504990,90,"NR5G BAND n1",1,77' ]);
+eq(nrscc[0].state, null, 'qcainfo: an NR SCC has no cell state, only a spacing');
+
+// The NR width is NOT run through the LTE resource-block table. 100 there is
+// 100 RB = 20 MHz on an LTE row and something else entirely on an NR one; the
+// wrong answer would be indistinguishable from a right one.
+let endc = atcmd.parse_qcainfo([ '+QCAINFO: "PCC",632628,100,"NR5G BAND n78",1,321' ]);
+eq(endc[0].bandwidth_mhz, null, 'qcainfo: an NR width is left unconverted, not guessed');
+eq(endc[0].rb, 100, 'qcainfo: ...while the raw field is still carried');
+
+// band 20 and band n20 are different bands — folding both to the integer 20
+// would make them indistinguishable to everything downstream
+let b20 = atcmd.parse_qcainfo([
+	'+QCAINFO: "PCC",6300,50,"LTE BAND 20",1,409',
+	'+QCAINFO: "SCC",158200,50,"NR5G BAND n20",1,42',
+]);
+eq([ b20[0].band, b20[1].band ], [ '20', 'n20' ], 'qcainfo: 20 and n20 stay apart');
 
 // --- AT+QNWLOCK read-back parsing --------------------------------------------
 
