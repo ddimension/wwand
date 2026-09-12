@@ -57,6 +57,27 @@ w.reset();
 eq(w.feed(7), null, 'reset(): baseline re-primed after reconnect');
 eq(w.feed(7), null, 'reset(): +50ms below limit again');
 
+// A counter that goes BACKWARDS is a reset or a source change, not a stall.
+// Two ways it happens for real: the WDS per-call statistics restart at zero on
+// every new call, and the QMI monitor reads the kernel netdev instead whenever
+// the WDS rx is zero — two cumulative counters over different spans. Read as a
+// stall (what `total > last` did until 2026-09-12) the accumulator keeps
+// climbing while traffic flows, and fires a modem reset at a healthy link.
+w = cc.rx_stall_watch({ limit_ms: () => 100, interval_ms: 50 });
+eq(w.feed(50000), null, 'backwards: prime a high baseline (netdev-cumulative)');
+eq(w.feed(12), null, 'backwards: a drop is a counter reset, not a stall');
+eq(w.feed(24), null, 'backwards: and the new counter keeps counting from there');
+eq(w.feed(24), null, 'backwards: a real stall on the new counter starts at zero');
+eq(w.feed(24), 100, 'backwards: ...and still trips after a full window');
+
+// the regression in one line: after a drop, a RISING counter must never trip
+w = cc.rx_stall_watch({ limit_ms: () => 100, interval_ms: 50 });
+w.feed(50000);
+let tripped = null;
+for (let n = 1; n <= 10; n++)
+	tripped = w.feed(n) ?? tripped;
+eq(tripped, null, 'backwards: ten rising samples below the old high-water mark never trip');
+
 // limit can change between samples (live config edit): honoured immediately
 let lim = 100;
 w = cc.rx_stall_watch({ limit_ms: () => lim, interval_ms: 50 });

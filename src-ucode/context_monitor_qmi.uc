@@ -44,6 +44,9 @@ export function install(self, o)
 	// or a reset-GPIO pulse on a modem that is no longer carrying this context
 	// and may well be carrying another one.
 	let stats_gen = 0;
+	// which counter source this connection settled on — see the latch in
+	// sample_stats. Cleared on every (re)connect by start_stats.
+	let stats_src = null;
 	let rx_watch = context_common.rx_stall_watch({
 		limit_ms: () => context_common.zero_rx_limit_ms(self.modem.config, o.timing),
 		interval_ms: stats_interval,
@@ -69,6 +72,7 @@ export function install(self, o)
 		// stats_interval) so those values appear right after connect instead of
 		// only after the first interval.
 		rx_watch.reset();
+		stats_src = null;
 		self.connected_since = context_common.mono();
 		stats_timer = uloop.timer(0, sample_stats);
 	};
@@ -170,7 +174,42 @@ export function install(self, o)
 				// per-call counters stay 0 forever. Fall back to the context
 				// netdev's kernel statistics so usage display and the zero-rx
 				// watchdog see real numbers.
-				if (valid && !agg.rx_packets && !agg.tx_packets) {
+				//
+				// The gate is on RX ALONE, deliberately. It required rx AND tx to
+				// both be zero until 2026-09-12, which ties the RX watchdog's
+				// eyesight to the TX counter: one WDS-accounted transmit is enough
+				// to hold the fallback off, and the watchdog then reads a
+				// permanently frozen rx of 0 and tears down a link that is
+				// receiving. That is the shape of the trip measured on an NR7101
+				// (RG502QEA) — 600 s of "no rx packets" while the firewall was
+				// logging inbound packets on the very netdev this reads. An rx of
+				// zero is the whole reason to consult the netdev; what tx says
+				// about it is not evidence either way.
+				// ONE SOURCE PER CONNECTION. The two are cumulative over
+				// DIFFERENT SPANS — the WDS counters over this call, the
+				// kernel's over the netdev's life — so switching between them
+				// mid-session makes the published totals jump: netdev 8 GiB one
+				// second, a few hundred WDS bytes the next, and the data-usage
+				// display appears to lose everything the session moved. The
+				// watchdog tolerates that now (context_common rx_stall_watch),
+				// but these numbers are read by people and by the collectd feed,
+				// and they must not travel backwards because the reader changed.
+				//
+				// THE LATCH IS ON RX ALONE, for the same reason the fallback is:
+				// on a QMAP-offloaded modem the WDS counters see the control
+				// traffic and none of the data, so a non-zero TX proves nothing
+				// about whether WDS is accounting this session — latching on it
+				// would pin the reader to a source that reports a permanent
+				// rx of 0, which is the fault this whole path exists to avoid.
+				//
+				// Nothing is latched while both are at zero: right after connect
+				// that is the honest state of both, and choosing then is
+				// choosing by accident.
+				if (valid && stats_src == null && agg.rx_packets)
+					stats_src = 'wds';
+
+				if (valid && (stats_src == 'netdev' ||
+				              (stats_src == null && !agg.rx_packets))) {
 					// the EFFECTIVE channel, not the configured one. An
 					// `auto` channel that the modem refused was never built,
 					// so mux_link names a device that does not exist — and
@@ -200,6 +239,9 @@ export function install(self, o)
 						agg.tx_dropped = g('tx_dropped');
 						agg.rx_dropped = g('rx_dropped');
 						agg.source = 'netdev';
+
+						if (stats_src == null && (agg.rx_packets || agg.tx_packets))
+							stats_src = 'netdev';
 					}
 				}
 
@@ -212,7 +254,14 @@ export function install(self, o)
 					let stalled = rx_watch.feed(total);
 
 					if (stalled != null) {
-						log('err', sprintf('no rx packets for %dms, tripping zero-rx recovery', stalled));
+						// name the SOURCE and the numbers. This trip resets the
+						// modem, and the one measured on an NR7101 (2026-09-12)
+						// could not be told apart afterwards from a genuine stall:
+						// the log said only "no rx packets", while the firewall was
+						// logging inbound packets on the context's own netdev. Which
+						// counter was read is the whole question.
+						log('err', sprintf('no rx packets for %dms (rx %d tx %d from %s), tripping zero-rx recovery',
+							stalled, total, agg.tx_packets ?? -1, agg.source ?? 'wds'));
 						stop_stats();
 						emit('zero_rx', { stalled_ms: stalled, rx_total: total });
 						return;

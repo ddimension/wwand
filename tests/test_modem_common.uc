@@ -904,6 +904,25 @@ sca = { cells: { ca: [ { role: 'SCC', earfcn: 1500, bandwidth_mhz: 20 } ] } };
 mc.serving_from_ca(sca);
 ok(sca.cells.serving == null, 'serving_from_ca: no PCC -> no serving created');
 
+// EN-DC: the carrier list has a PRIMARY ROW PER LEG. "the first PCC" is then
+// whichever the modem printed first, and on a 5G-first modem that is an NR
+// carrier — which would be written straight into serving.LTE. It must pick the
+// LTE one wherever it sits in the list.
+sca = { cells: { ca: [
+	{ rat: 'nr',  role: 'PCC', earfcn: 632628, pci: 321, bandwidth_mhz: 100 },
+	{ rat: 'lte', role: 'PCC', earfcn: 1300,   pci: 246, bandwidth_mhz: 20 },
+] } };
+mc.serving_from_ca(sca);
+eq(sca.cells.serving.lte, { bandwidth_mhz: 20, earfcn: 1300, pci: 246 },
+	'serving_from_ca: EN-DC picks the LTE PCC, not the NR one printed first');
+
+// an entry with no `rat` is the QMI message, LTE by construction — absence of
+// the tag must not read as "unknown, skip it"
+sca = { cells: { ca: [ { role: 'PCC', earfcn: 6300, pci: 334, bandwidth_mhz: 10 } ] } };
+mc.serving_from_ca(sca);
+eq(sca.cells.serving.lte, { bandwidth_mhz: 10, earfcn: 6300, pci: 334 },
+	'serving_from_ca: an untagged PCC is still the LTE one');
+
 // --- qeng_ok: vendor gate for AT+QENG ----------------------------------------
 
 ok(mc.qeng_ok({ info: { manufacturer: 'Quectel' } }), 'qeng_ok: Quectel');
@@ -1111,5 +1130,43 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 	eq(m.at_tty, '/dev/ttyUSB2', 'mute walk: settles on the port that answers');
 	ok(m.at != null, 'mute walk: a control engine is left behind');
 })();
+
+// --- normalise_qmi_signal: the not-available sentinels never reach the bus ----
+//
+// A modem fills every metric it is not measuring with the sentinel for that
+// field's WIDTH — i8 -128, i16 -32768 (codec/tlv.uc SENTINEL; widths in
+// codec/schema/nas.uc SIGNAL_INFO_F). Measured on an RG650E parked on LTE
+// (2026-09-12): ubus carried nr5g.rsrp -32768, nr5g.snr -32768 and
+// nr5g_rsrq -32768 as if they were readings.
+
+let ns = mc.normalise_qmi_signal({
+	lte:       { rssi: -67, rsrq: -13, rsrp: -100, snr: 142 },
+	nr5g:      { rsrp: -32768, snr: -32768 },
+	nr5g_rsrq: -32768,
+});
+eq(ns.lte, { rssi: -67, rsrq: -13, rsrp: -100, snr: 142 },
+	'signal: a real LTE reading passes through untouched');
+eq(ns.nr5g, null, 'signal: an all-sentinel nr5g block is dropped, not emptied');
+eq(ns.nr5g_rsrq, null, 'signal: the scalar nr5g_rsrq sentinel is dropped');
+
+// width matters per field: -128 is unavailable for the i8 rssi/rsrq, and a
+// PERFECTLY VALID reading for the i16 rsrp/snr
+ns = mc.normalise_qmi_signal({ lte: { rssi: -128, rsrq: -128, rsrp: -128, snr: -128 } });
+eq(ns.lte, { rsrp: -128, snr: -128 },
+	'signal: -128 drops from the i8 fields and stays in the i16 ones');
+
+// a partially-measured block keeps what it has
+ns = mc.normalise_qmi_signal({ nr5g: { rsrp: -95, snr: -32768 } });
+eq(ns.nr5g, { rsrp: -95 }, 'signal: a half-populated block keeps the real half');
+
+// non-metric keys are carried, and ecio keeps its -0.5 dB scaling
+ns = mc.normalise_qmi_signal({ ok: true, wcdma: { rssi: -70, ecio: 20 } });
+eq(ns.ok, true, 'signal: non-metric keys survive');
+eq(ns.wcdma, { rssi: -70, ecio: -10.0 }, 'signal: ecio still scaled by -0.5 (a float, as before)');
+
+ns = mc.normalise_qmi_signal({ wcdma: { rssi: -128, ecio: -32768 } });
+eq(ns.wcdma, null, 'signal: an all-sentinel wcdma block is dropped before scaling');
+
+eq(mc.normalise_qmi_signal(null), null, 'signal: null in, null out');
 
 done('test_modem_common');

@@ -133,7 +133,17 @@ export function rx_stall_watch(o)
 			if (o.limit_ms() <= 0)
 				return null;
 
-			if (total > last || last < 0) {
+			// ANY change clears the stall, a decrease included. A cumulative rx
+			// counter that goes backwards has been reset or has changed source —
+			// a new call restarts the WDS per-call statistics at zero, and the
+			// QMI monitor switches between the WDS counters and the kernel
+			// netdev's, which are cumulative over different spans. Neither means
+			// "nothing arrived", but `total > last` read both as exactly that:
+			// `last` stayed at the old high-water mark and every later sample
+			// counted as stalled while traffic flowed, until the new counter
+			// climbed past a number belonging to a different measurement. That is
+			// a zero-rx recovery — a modem reset — fired at a healthy link.
+			if (total != last || last < 0) {
 				last = total;
 				stalled = 0;
 				return null;

@@ -94,9 +94,15 @@ export function serving_from_ca(self)
 	if (!self.cells || type(ca) != 'array')
 		return;
 
+	// THE LTE PCC, not the first PCC. Under EN-DC the AT carrier list carries a
+	// primary row for each leg — one "LTE BAND 3", one "NR5G BAND n78" — so
+	// "the first PCC" is whichever the modem happened to print first, and on a
+	// 5G-first modem that is an NR carrier being written into serving.LTE. An
+	// entry with no `rat` is the QMI path (GET_LTE_CPHY_CA_INFO), LTE by
+	// construction, so its absence means LTE rather than unknown.
 	let pcc = null;
 	for (let c in ca)
-		if (c?.role == 'PCC') { pcc = c; break; }
+		if (c?.role == 'PCC' && (c?.rat ?? 'lte') == 'lte') { pcc = c; break; }
 
 	if (!pcc || pcc.bandwidth_mhz == null)
 		return;
@@ -1636,11 +1642,67 @@ open_at_tty = function(self, o, fxi, log, ch, tried)
 // place, so re-normalising an already-normalised reply is impossible by
 // construction: the caller stores what we return and the decoder's buffer is
 // left alone.
-export function normalise_qmi_signal(sdata) {
-	if (sdata?.wcdma?.ecio != null)
-		return { ...sdata, wcdma: { ...sdata.wcdma, ecio: -0.5 * sdata.wcdma.ecio } };
+// Widths of every field in NAS SIGNAL_INFO (codec/schema/nas.uc SIGNAL_INFO_F),
+// because the not-available sentinel is per width: i8 is -128, i16 is -32768.
+// Getting this wrong is silent in both directions — a real -128 dBm dropped, or
+// a sentinel kept and plotted.
+const SIGNAL_WIDTH = {
+	gsm_rssi: 'i8',
+	wcdma:    { rssi: 'i8', ecio: 'i16' },
+	lte:      { rssi: 'i8', rsrq: 'i8', rsrp: 'i16', snr: 'i16' },
+	nr5g:     { rsrp: 'i16', snr: 'i16' },
+	nr5g_rsrq: 'i16',
+};
 
-	return sdata;
+// normalise_qmi_signal(sdata): the single funnel every QMI signal reading passes
+// through on its way to `modem.signal` — and therefore to ubus, LuCI, wwandctl
+// and the collectd feed.
+//
+// It strips the "not available" sentinels. A modem reports them for every metric
+// it is not currently measuring, and they used to reach the bus unchanged:
+// HW-seen on an RG650E (2026-09-12) parked on LTE, whose ubus signal carried
+// nr5g.rsrp = -32768, nr5g.snr = -32768 and nr5g_rsrq = -32768. Each consumer
+// then has to know the sentinel AND the field's width to defend itself, and only
+// one of them did (wwandctl_fmt) — so the fix belongs here, once. ABSENT means
+// unavailable: the key is dropped rather than nulled, and a sub-object left with
+// nothing in it goes too, so `if (sig.nr5g)` cannot open an empty 5G panel.
+export function normalise_qmi_signal(sdata) {
+	if (sdata == null)
+		return sdata;
+
+	let out = {};
+
+	for (let k, v in sdata) {
+		let w = SIGNAL_WIDTH[k];
+
+		// a field with no width entry is not a signal metric (ok/_result/…)
+		if (w == null) {
+			out[k] = v;
+			continue;
+		}
+
+		if (type(w) == 'string') {
+			if (!tlv.is_unavailable(v, w))
+				out[k] = v;
+
+			continue;
+		}
+
+		let sub = {};
+
+		for (let f, fv in (v ?? {}))
+			if (!tlv.is_unavailable(fv, w[f]))
+				sub[f] = fv;
+
+		if (length(sub))
+			out[k] = sub;
+	}
+
+	// ecio is reported in -0.5 dB units
+	if (out.wcdma?.ecio != null)
+		out.wcdma = { ...out.wcdma, ecio: -0.5 * out.wcdma.ecio };
+
+	return out;
 };
 
 // format_telemetry(o): the single telemetry log line for EVERY backend, defensive
