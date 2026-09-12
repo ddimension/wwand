@@ -733,6 +733,104 @@ push(scenarios, {
 	},
 });
 
+// --- s5g/s5h/s5i: a bearer that dies with NO urc at all ----------------------
+//
+// Field-seen on a Fibocom FM350-GL whose operator renumbers every 2 h
+// (ddimension/wwand#23, 2026-09-13): AT+CGACT? answered EMPTY and
+// AT+CGCONTRDP=1 returned ERROR once a minute for minutes on end, while
+// AT+CEREG? still said registered. The firmware sends no ^DEND-equivalent, so
+// confirm_session_gone — which does accept an empty list — never ran, and the
+// periodic poll only tested `st === 0`. The context stayed CONNECTED until the
+// interface was restarted by hand. The zero-rx watchdog is a 6 h backstop by
+// default and no help.
+//
+// The poll now takes a RUN of empty answers, and only while the rx byte count
+// stands still: two planes that cannot both look like this on a live bearer.
+let s5g_status = { re: /^AT\+ECMDUP\?$/, lines: [ '+ECMDUP: 1,1,"IPV4",0,"IPV6"' ] };
+
+push(scenarios, {
+	name: 's5g_no_urc_empty_status_run',
+	script: meig_session_script(s5g_status),
+	ctx_timing: { stats_interval: 5, zero_rx_ms: 0, empty_status_polls: 3 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'no-urc: context up');
+
+			// the bearer is gone and the modem says nothing about it
+			s5g_status.lines = [];
+
+			uloop.timer(60, () => {
+				ok(env.ctx.state != 'CONNECTED',
+					'no-urc: a run of empty status answers with frozen rx takes the context down');
+				ok(any_event(env.cevents, 'down'),
+					'no-urc: and the drop reaches the daemon, so it can reconnect');
+				env.finish();
+			});
+		});
+	},
+});
+
+// s5h: the SAME empty answers, but the bearer is carrying traffic. The data
+// plane vetoes the control plane — this is the case that must never trip, or a
+// firmware with an unparsable status answer would lose a working connection
+// every three polls.
+let s5h_status = { re: /^AT\+ECMDUP\?$/, lines: [ '+ECMDUP: 1,1,"IPV4",0,"IPV6"' ] };
+
+push(scenarios, {
+	name: 's5h_no_urc_empty_status_but_rx_moves',
+	script: meig_session_script(s5h_status),
+	ctx_timing: { stats_interval: 5, zero_rx_ms: 0, empty_status_polls: 3 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'rx-moves: context up');
+
+			s5h_status.lines = [];
+
+			let rx = 0;
+			let bump;
+			bump = () => {
+				env.ctx.stats = { rx_bytes: (rx += 4096), tx_bytes: 0 };
+				if (env.ctx.state == 'CONNECTED')
+					uloop.timer(2, bump);
+			};
+			bump();
+
+			uloop.timer(60, () => {
+				eq(env.ctx.state, 'CONNECTED',
+					'rx-moves: traffic on the bearer vetoes the empty control-plane answer');
+				env.finish();
+			});
+		});
+	},
+});
+
+// s5i: one empty answer is not a verdict. A single sample, then the modem
+// answers normally again — the run resets and nothing is torn down.
+let s5i_status = { re: /^AT\+ECMDUP\?$/, lines: [ '+ECMDUP: 1,1,"IPV4",0,"IPV6"' ] };
+
+push(scenarios, {
+	name: 's5i_no_urc_single_empty_status',
+	script: meig_session_script(s5i_status),
+	ctx_timing: { stats_interval: 5, zero_rx_ms: 0, empty_status_polls: 3 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'single-empty: context up');
+
+			s5i_status.lines = [];
+			uloop.timer(7, () => { s5i_status.lines = [ '+ECMDUP: 1,1,"IPV4",0,"IPV6"' ]; });
+
+			uloop.timer(60, () => {
+				eq(env.ctx.state, 'CONNECTED',
+					'single-empty: one empty answer is a hiccup, not a dropped bearer');
+				env.finish();
+			});
+		});
+	},
+});
+
 // --- s5c: a vendor byte-counter command the firmware refuses ----------------
 //
 // HW-found on the Cudy LT300 / SLM770A-R: AT^DSFLOWQRY answers +CME ERROR on

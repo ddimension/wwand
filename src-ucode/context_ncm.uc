@@ -60,6 +60,23 @@ export function create(opts)
 	// same zero-rx watchdog, so nothing but a wasted round-trip is lost.
 	let vendor_stats_refused = false;
 	let vendor_stats_errors = 0;
+	// A dial-status query that SUCCEEDS and lists no row for our cid means "no
+	// contexts" — the same shape `confirm_session_gone` already acts on. There
+	// it is safe on the first sight because the modem's own ^DEND is already on
+	// the record; here nothing corroborates it, so one sample is not enough and
+	// `st === 0` alone misses the drop entirely. Firmware that reports the loss
+	// with NO urc at all leaves the context CONNECTED until someone restarts
+	// the interface by hand: field-seen on a Fibocom FM350-GL whose operator
+	// renumbers every 2 h (AT+CGACT? answered empty and AT+CGCONTRDP=1 ERROR
+	// once a minute for minutes on end, ddimension/wwand#23, 2026-09-13).
+	// So take a RUN of them, and only while the data plane agrees: the rx byte
+	// count must not have moved across the whole run. Two independent planes,
+	// neither of which can look like this while the bearer is actually
+	// carrying traffic. The zero-rx watchdog is no help here — it is a 6 h
+	// backstop by default, not a reconnect path.
+	let empty_status_run = 0;
+	let empty_status_rx = null;
+	let empty_status_limit = opts.timing?.empty_status_polls ?? 3;
 	// pending ^DEND verification (see modem_event 'session_urc')
 	let session_confirm_timer = null;
 	let session_confirm_ms = opts.timing?.session_confirm_ms ?? 10000;
@@ -443,10 +460,39 @@ export function create(opts)
 				if (self.state != 'CONNECTED')
 					return;
 
-				let st = err ? null : dial.status_state(res?.lines, self.cid);
+				// An AT ERROR says nothing about the bearer (parity with
+				// confirm_session_gone) — it neither counts nor clears the run.
+				if (err)
+					return after_status();
+
+				let st = dial.status_state(res?.lines, self.cid);
 
 				if (st === 0)
 					return self._connection_lost({ reason: 'netdev_unbound' });
+
+				if (st == null) {
+					let rx = self.stats?.rx_bytes ?? null;
+
+					if (empty_status_run == 0)
+						empty_status_rx = rx;
+
+					// any rx since the run began: the bearer carries traffic,
+					// whatever the control plane failed to report. Start over.
+					if (empty_status_run > 0 && rx != empty_status_rx) {
+						empty_status_run = 0;
+						empty_status_rx = rx;
+					}
+
+					if (++empty_status_run >= empty_status_limit) {
+						log('warn', sprintf('dial status listed no context for cid %d on %d consecutive polls and rx did not move (%J) — bearer gone',
+							self.cid, empty_status_run, rx));
+						return self._connection_lost({ reason: 'session_ended' });
+					}
+				}
+				else {
+					empty_status_run = 0;
+					empty_status_rx = null;
+				}
 
 				after_status();
 			});
