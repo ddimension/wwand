@@ -11,6 +11,7 @@
 
 import { eq, ok, done } from './lib/check.uc';
 import * as daemon_mod from 'wwand/daemon.uc';
+import * as config from 'wwand/config.uc';
 
 let netifd_reloads = 0;
 
@@ -124,5 +125,88 @@ d = mk([ { kind: 'ncm' /* no netdev */ },
          { kind: 'ncm', netdev: 'usb1' } ], created);
 d.autosetup_scan();
 eq(created, [ 'usb1' ], 'scan: devname-less entry skipped');
+
+// ---------------------------------------------------------------------------
+// phase 2 (maybe_autosetup_fill): the APN table must not override an APN the
+// CARD already provisions.
+//
+// The table guesses an operator default from an IMSI prefix. A card that
+// provisions its own attach APN has answered the same question for this
+// SUBSCRIPTION, which an IMSI prefix cannot see. Measured on a Chateau
+// (RG650E, 2026-09-12): card APN "nonbonding.hybrid", IMSI matching the
+// Telekom DE consumer entry — the table won, the network answered "Requested
+// service option not subscribed" and then throttled the PDN. The box had no
+// WAN at all until the card's own APN was restored.
+
+let fills = [];
+
+function mk_fill(card_apn, iccid)
+{
+	let on_event = null;
+
+	let d = daemon_mod.create({ deps: {
+		log: (l, m) => null,
+		load_qmi: () => ({
+			modem: { create: (o) => { on_event = o.deps.on_event;
+			                          return { start: () => null, stop: () => null }; } },
+			context: { create: (o) => ({ state: 'IDLE', up: (cb) => cb?.(null, {}),
+			                             down: (cb) => cb?.(), attach: () => null,
+			                             detach: () => null }) },
+		}),
+		emit_event: () => null,
+		kick_interface: () => null,
+		renew_interface: () => null,
+		down_interface: () => null,
+		iface_status: (i, cb) => cb({ up: false }),
+		resolve_modem_device: (cfg) => cfg.device,
+		resolve_netdev: () => 'wwan0',
+		learn_device: () => null,
+		learn_modem_path: () => null,
+		network_reload: () => null,
+		autosetup_fill: (iface, vals) => { push(fills, { iface: iface, apn: vals.apn }); return true; },
+	} });
+
+	d.apply_config(config.parse({ network: {
+		m0:    { '.type': 'wwand_modem', device: '/dev/mock0' },
+		wwan0: { '.type': 'interface', proto: 'wwand', modem: 'm0', autosetup: '1' },
+	} }));
+
+	// swap in a modem stub carrying what the attach-profile read published
+	let modem = { id: 'm0', card_apn: card_apn,
+	              info: { iccid: iccid, imsi: '262011234567890' },
+	              stop: () => null };
+	d.modems.m0.modem = modem;
+	d.reload = () => null;
+
+	return { d: d, modem: modem, fire: () => on_event(modem, 'registered', {}) };
+}
+
+// (8) card provisions an APN -> the table is not consulted at all
+fills = [];
+let h = mk_fill('nonbonding.hybrid', '89490200001844967110');
+h.fire();
+eq(fills, [], 'fill: a card-provisioned APN is never overridden by the APN table');
+
+// (9) card provisions NOTHING -> the table is exactly what autosetup is for
+fills = [];
+h = mk_fill('', '89490200001844967110');
+h.fire();
+ok(length(fills) == 1 && fills[0].iface == 'wwan0',
+	'fill: an empty card APN still takes the operator default');
+
+// (10) UNKNOWN IS NOT "NONE". This asserted the opposite until 2026-09-12, and
+// the assertion was the bug: only a backend that has actually read the attach
+// profile can report one, and an autosetup interface has no configured APN —
+// which is exactly the condition under which MBIM skipped that read and NCM
+// never published what it read. So "unknown" was the ORDINARY case on two of
+// three backends, and treating it as "the card provides nothing" handed those
+// boxes straight back to the guess this whole guard exists to prevent.
+//
+// Declining is not "no APN": an empty APN attaches with whatever the card
+// provides, which is the value being protected.
+fills = [];
+h = mk_fill(null, '89490200001844967110');
+h.fire();
+eq(fills, [], 'fill: an unknown card APN does NOT license the table');
 
 done('test_autosetup');

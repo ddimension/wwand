@@ -433,6 +433,14 @@ export function create(opts)
 
 			self.effective_apn = configured ? apn : card_apn;
 
+			// Publish it on the MODEM, not just here: the attach profile is a
+			// property of the card, and zero-config autosetup needs it before it
+			// decides whether an operator-table APN is an improvement (see
+			// daemon.uc maybe_autosetup_fill). Recorded on every read so a SIM
+			// swap cannot leave a stale one behind.
+			if (self.modem)
+				self.modem.card_apn = card_apn;
+
 			if (!configured)
 				log('notice', sprintf('attach profile %d: no config APN — using SIM/modem-provisioned APN %s (pdp %J, auth %J%s)',
 					index, card_apn == '' ? '(network default)' : sprintf('%J', card_apn),

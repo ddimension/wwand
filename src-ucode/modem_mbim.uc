@@ -520,8 +520,25 @@ export function create(opts)
 
 		// ready_state 1 = initialized (unlocked). Other states need a PIN or
 		// signal a SIM problem.
-		if (self._ready_state == bc.READY_STATE_INITIALIZED)
+		if (self._ready_state == bc.READY_STATE_INITIALIZED) {
+			// ...and say so in `pin1`, which is the field every consumer reads
+			// to answer "is this card usable". An earlier attempt at QMI parity
+			// filled it in the PIN-query branch below — but that branch only
+			// runs for a LOCKED card, so on the ordinary unlocked one it stayed
+			// null and the status page had nothing to print (HW-seen on a
+			// GL-X3000 / RM520N-GL, 2026-09-12: the SIM column read "-" beside
+			// a modem that was registered and carrying traffic).
+			//
+			// `retries` and `enabled` stay NULL rather than being invented.
+			// MBIM reports the PIN it CURRENTLY requires; on an unlocked card
+			// there is none, so whether a PIN query is configured at all is not
+			// something this protocol can answer, and "not required" would be a
+			// claim about the card rather than about what we were told. Only
+			// the state is known, and the state is what is recorded.
+			self.pin1 = { state: 2, retries: null, enabled: null };
+
 			return step_attach_profile();
+		}
 
 		// no card: terminal like the QMI/NCM backends (sim_absent), NOT a
 		// retriable failure — climbing the recovery ladder cannot conjure a
@@ -822,9 +839,31 @@ export function create(opts)
 		let apn = context_common.conn_cfg(ctx, 'apn');
 
 		// no configured APN, or '#N' (use the modem-provisioned context as-is) —
-		// never overwrite the SIM/modem-provisioned attach context (QMI parity)
+		// never overwrite the SIM/modem-provisioned attach context (QMI parity).
+		//
+		// READ IT ANYWAY BEFORE LEAVING. Nothing is written on this path, but
+		// what the card provisions is exactly what zero-config autosetup needs
+		// to know before deciding whether an operator-table APN would be an
+		// improvement (daemon.uc maybe_autosetup_fill) — and an autosetup
+		// interface has no configured APN, so this early return was the only
+		// path it ever took. Returning here without looking left the daemon
+		// unable to tell "the card provides nothing" from "nobody asked", and
+		// it guessed. Best-effort: an error leaves card_apn unset, which the
+		// caller reads as unknown and declines to act on.
 		if (apn == null || apn == '' || substr(apn, 0, 1) == '#')
-			return step_register();
+			return mbim_backend.get_lte_attach_config(self.mbim, (gerr, cur) => {
+				if (!gerr) {
+					let home = null;
+
+					for (let c in (cur?.contexts ?? []))
+						if (c.roaming == ext.ROAMING_HOME) { home = c; break; }
+
+					home ??= (cur?.contexts ?? [])[0];
+					self.card_apn = home?.access_string ?? '';
+				}
+
+				step_register();
+			});
 
 		let want_ip = bc.IP_TYPE_FROM_PDP[ctx.config.pdp_type ?? 'ipv4v6'] ?? bc.IP_TYPE_IPV4V6;
 		let user = context_common.conn_cfg(ctx, 'username') ?? '';

@@ -686,6 +686,48 @@ export function create(opts)
 			autosetup_done[name] = true;
 
 			let info = self.modems[modem.id]?.modem?.info ?? {};
+
+			// A card that provisions its own attach APN has already answered the
+			// question this table exists to guess at, and it answered for THIS
+			// subscription rather than for the operator in general. Overriding it
+			// is how a working modem stops working: HW-measured on a Chateau
+			// (RG650E, 2026-09-12) whose card provisioned "nonbonding.hybrid" and
+			// whose IMSI matched the Telekom DE consumer default — autosetup wrote
+			// "internet.v6.telekom" over it and the network answered "Requested
+			// service option not subscribed", then throttled the PDN. M2M and
+			// business SIMs are exactly the ones an IMSI prefix cannot tell apart
+			// from a consumer card, and exactly the ones this breaks.
+			//
+			// The table stays for its real case: a card that provisions NOTHING,
+			// where an empty APN attaches to whatever the network defaults to.
+			let card_apn = self.modems[modem.id]?.modem?.card_apn;
+
+			if (card_apn != null && card_apn != '') {
+				log('notice', sprintf('autosetup: %s attaches with the card-provisioned APN %J — not overriding it from the APN table',
+					name, card_apn));
+				continue;
+			}
+
+			// UNKNOWN IS NOT "NONE", and treating it as none is how the guard
+			// above became decorative on most hardware: only a backend that has
+			// actually READ the attach profile can report one, and an autosetup
+			// interface has no configured APN — which is exactly the condition
+			// under which MBIM used to skip that read entirely and NCM never
+			// published what it read. So the card-wins rule protected the QMI
+			// happy path and nothing else, which is not where the outage was
+			// found.
+			//
+			// Doing nothing here is not "no APN": an empty APN attaches with the
+			// card-provisioned one, which is the value we are declining to
+			// overwrite. The table still does its job for a card that reports an
+			// EMPTY attach APN — a card that provisions nothing — which is the
+			// case it was written for.
+			if (card_apn == null) {
+				log('info', sprintf('autosetup: %s — the backend has not reported the card-provisioned APN, so the APN table is not applied (the empty APN attaches with whatever the card provides)',
+					name));
+				continue;
+			}
+
 			let vals = apndb.lookup(info.iccid, info.imsi);
 
 			if (!vals) {
@@ -2307,10 +2349,21 @@ export function create(opts)
 			};
 		}
 
-		// board profile info for LuCI: detected id, whether wwand can power-cycle the
-		// modem, and the board's default modem reset GPIO.
+		// board profile info for LuCI: detected id, whether wwand has a PROFILE for
+		// that id at all, whether it can power-cycle the modem, and the board's
+		// default modem reset GPIO.
+		//
+		// `profile` is reported because the two negatives it separates need
+		// different things from the reader. A board wwand knows, whose profile
+		// carries no power line, is a board that cannot be repowered — nothing to
+		// be done. A board wwand does NOT know reports exactly the same
+		// has_power:false and reset_gpio:null while its pins may be right there,
+		// unread: what that owner needs is a profile, not a shrug. Without this
+		// flag the status page could only say the first thing, and said it about
+		// a GL-X3000 that is simply not in the table (observed 2026-09-12).
 		let board = deps.board ? {
 			id: deps.board.id,
+			profile: deps.board.profile != null,
 			has_power: deps.board.has_power,
 			reset_gpio: deps.board.profile?.reset_gpio,
 		} : null;

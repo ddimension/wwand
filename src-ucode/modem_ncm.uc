@@ -1045,6 +1045,20 @@ export function create(opts)
 		let configured = (apn != null && apn != '' && substr(apn, 0, 1) != '#');
 
 		self.at.send('AT+CGDCONT?', (rerr, rres) => {
+			// PUBLISH WHAT THE CARD PROVISIONS. This read already happens on
+			// every bring-up and its answer was used only for the comparison
+			// below — while zero-config autosetup, which needs exactly this to
+			// decide whether an operator-table APN would be an improvement, had
+			// no way to see it and guessed instead (daemon.uc
+			// maybe_autosetup_fill). A read error leaves it unset, which the
+			// caller reads as unknown rather than as "the card provides none".
+			if (!rerr)
+				for (let e in ncm_vendors.parse_cgdcont(rres?.lines))
+					if (e.cid == 1) {
+						self.card_apn = e.apn ?? '';
+						break;
+					}
+
 			// changed = a concrete APN that context 1 does not already carry
 			// (pdp_setup_matches compares pdp-type + APN; a read error => assume
 			// changed and re-attach, the safe side)
