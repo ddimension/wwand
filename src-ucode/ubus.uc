@@ -80,6 +80,37 @@ export function publish(conn, daemon, log)
 			call: (req) => ok_sync(daemon.modem_signal(req.args.modem)),
 		},
 
+		// The four per-modem numbers the collectd feed needs from status(), and
+		// NOTHING else. This exists so telemetry can be read WITHOUT granting
+		// access to status(), which carries iccid/imsi/imei/msisdn — a ubus ACL
+		// cannot filter a result, so the only way to keep subscriber
+		// identifiers out of an unprivileged reader's hands is a method that
+		// never had them. Reached by `wwandctl collectd` running as `nobody`
+		// under collectd's exec plugin, which refuses to run as root
+		// (ddimension/wwand#14).
+		modem_telemetry: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => {
+				let st = daemon.status();
+				let want = req.args.modem;
+				let out = {};
+
+				for (let name, m in (st?.modems ?? {})) {
+					if (want != null && want != '' && name != want)
+						continue;
+
+					out[name] = {
+						state: m?.state,
+						temperature: m?.temperature,
+						attempts: +(m?.attempts ?? 0),
+						proto_errors: +(m?.proto_errors ?? 0),
+					};
+				}
+
+				return { modems: out };
+			},
+		},
+
 		// manual hardware repower/reset via the board profile (also the recovery
 		// path). modem optional; defaults to the first configured modem.
 		modem_repower: {

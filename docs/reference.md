@@ -1304,6 +1304,28 @@ OpenWrt's own collectd. It needs no extra package beyond `collectd-mod-exec`:
 
     config collectd_exec_input
             option cmdline '/usr/bin/wwandctl collectd'
+            option user 'nobody'
+
+**The user matters, and it is not optional.** collectd's exec plugin *refuses to
+run a command as root* — that is the plugin's rule, not ours — so the feed always
+runs unprivileged, and an unprivileged process reaches the daemon only through a
+ubus ACL. wwand ships one at `/usr/share/acl.d/wwand.json` for the user
+`nobody`, granting exactly three read methods: `modem_telemetry`, `modem_signal`
+and `modem_cells`. Run the feed as any other user and ubus answers
+
+    Not found: Failed to invoke function 'status' on object 'wwand'
+
+— ubus makes methods a caller may not use *invisible* rather than refusing them,
+so the error says "not found", not "denied". If you prefer another user, copy the
+shipped file and change its `"user"` field; ubusd reads every file in that
+directory.
+
+Note what is **not** in that ACL: `status`. It carries `iccid`, `imsi`, `imei`
+and `msisdn`, and a ubus ACL cannot filter a result — it can only allow or deny a
+whole method. `modem_telemetry` exists precisely so the feed can read the four
+per-modem values it graphs (state, temperature, attempts, protocol errors)
+without subscriber identifiers being readable by every process running as
+`nobody`.
 
 collectd's exec plugin does **not** poll the command: it forks it once and reads
 `PUTVAL` lines from its stdout for as long as it runs, so the cadence belongs to
@@ -1357,6 +1379,7 @@ when called from LuCI).
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
 | `modem_signal` | `modem` | last raw signal info (LTE/NR5G/WCDMA/GSM metrics) |
+| `modem_telemetry` | `modem` (optional) | per-modem state, temperature, attempts, protocol errors — **no subscriber identifiers**, so it can be granted to an unprivileged reader (see [Feeding collectd](#feeding-collectd-wwandctl-collectd)) |
 | `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` + `temperature` (also on `status`, which is the canonical place — same field, kept here for compatibility) |
 | `modem_location` | `modem` | last QMI LOC fix (when `location` is enabled) |
 | `modem_at` | `modem`, `command`, `timeout?` | run an AT command on the modem's AT port |

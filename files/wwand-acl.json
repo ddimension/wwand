@@ -1,0 +1,8 @@
+{
+	"user": "nobody",
+	"access": {
+		"wwand": {
+			"methods": [ "modem_telemetry", "modem_signal", "modem_cells" ]
+		}
+	}
+}

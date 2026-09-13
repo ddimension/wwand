@@ -209,6 +209,27 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		eq(r1?.error, 'no_such_modem', 'sync reply: validation error passed through');
 	});
 
+	// modem_telemetry is the UNPRIVILEGED read: the four numbers the collectd
+	// feed needs, and none of the subscriber identifiers status() carries. A
+	// ubus ACL cannot filter a result, so anything that leaks in here is
+	// readable by `nobody` on every box that installs the shipped ACL
+	// (ddimension/wwand#14).
+	conn_cli.defer('wwand', 'modem_telemetry', {}, (ct, tl) => {
+		eq(ct, 0, 'telemetry: ok');
+		eq(tl.modems.m0.state, 'READY', 'telemetry: carries the state collectd graphs');
+		eq(tl.modems.m0.attempts != null, true, 'telemetry: ...and the attempt counter');
+		eq(tl.modems.m0.proto_errors != null, true, 'telemetry: ...and the protocol errors');
+
+		for (let k in [ 'iccid', 'imsi', 'imei', 'msisdn', 'model', 'serial' ])
+			eq(tl.modems.m0[k], null, sprintf('telemetry: no %s — an ACL cannot filter a result', k));
+
+		// and it can be narrowed to one modem
+		conn_cli.defer('wwand', 'modem_telemetry', { modem: 'nosuch' }, (cn, tn) => {
+			eq(cn, 0, 'telemetry: a filter for an unknown modem is not an error');
+			eq(length(keys(tn.modems ?? {})), 0, 'telemetry: ...it just selects nothing');
+		});
+	});
+
 	conn_cli.defer('wwand', 'status', {}, (c2, st) => {
 		eq(c2, 0, 'status: ok');
 		eq(st.modems.m0.state, 'READY', 'status: modem READY');

@@ -49,6 +49,26 @@ function status()
 	return call('status', {});
 }
 
+// The optional add-on modules are require()d, never imported: an `import` would
+// make wwandctl itself fail to load on a box without the package. Plain
+// CommonJS-style scripts (top-level return), same shape as esim_bridge.uc.
+function load_qlog()
+{
+	let m = null;
+
+	try {
+		m = require('wwand.qlog');
+	}
+	catch (e) {
+		m = null;
+	}
+
+	if (m == null)
+		die('wwand-qlog package not installed');
+
+	return m;
+}
+
 // resolve the modem argument: explicit name, else the single managed modem.
 // Commands taking values after an optional modem call this with the first
 // argument — if it names a modem it is consumed, else the default applies.
@@ -326,6 +346,131 @@ function cmd_esim(st, args)
 	}
 }
 
+// Qualcomm diag capture through Quectel QLog (needs the wwand-qlog package,
+// which pulls in qlog). ON DEMAND ONLY: wwand starts nothing by itself, keeps
+// no ring buffer and relays nothing — it resolves the diag port, validates the
+// filter profile, and hands everything from `-s` on to QLog verbatim.
+function cmd_qlog(st, args)
+{
+	let qlog = load_qlog();
+	let fx = qlog.default_fx();
+
+	// `wwandctl qlog profiles` needs no modem: the profile list is a property of
+	// the qlog package, not of a modem, and it is the first thing a user wants.
+	if (args[0] == 'profiles' || args[0] == 'list-profiles') {
+		let ps = qlog.list_profiles(fx);
+
+		for (let pr in ps)
+			printf('%-4s %s\n', pr.tag ?? '-', pr.path);
+
+		if (!length(ps))
+			printf('no filter profiles in %s (is the qlog package installed?)\n', qlog.PROFILE_DIR);
+
+		return;
+	}
+
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+	let op = rest[0] ?? 'status';
+	let m = st.modems[r.modem];
+
+	if (op != 'start' && op != 'stop' && op != 'status')
+		die('usage: wwandctl qlog [modem] <start|stop|status> [...]  |  wwandctl qlog profiles');
+
+	// Everything before the first -s is ours, everything from it on is QLog's.
+	// One rule, so QLog's -n/-m/-D/-q (and anything a later version adds) keep
+	// working without a wwand release.
+	let sp = qlog.split_args(slice(rest, 1));
+	let port = null, port_explicit = false, profile = null;
+
+	for (let i = 0; i < length(sp.own); i++) {
+		switch (sp.own[i]) {
+		case '--port':
+		case '-p':
+			port = sp.own[++i];
+			port_explicit = true;
+			break;
+
+		case '--profile':
+		case '-f':
+			profile = sp.own[++i];
+			break;
+
+		default:
+			die(sprintf('unknown option %J before -s. wwandctl options are --port <dev> and '
+				+ '-f <profile>; everything from -s on goes to QLog', sp.own[i]));
+		}
+	}
+
+	// status.diag_port is resolved by the daemon (generated qcdm role table,
+	// vendor /dev/mhi_DIAG, kernel-wwan node) and overridden by the modem's
+	// `option diag_port`. --port beats all of it.
+	port ??= m?.diag_port;
+
+	if (op == 'status') {
+		let res = qlog.status(fx, { modem: r.modem, port: port });
+
+		printf('modem %s  diag port %s\n', r.modem, port ?? '(none found)');
+		printf('capture    %s\n', res.running
+			? sprintf('running (pid %d%s)', res.pid, res.tracked ? '' : ', untracked')
+			: 'not running');
+
+		if (res.running && res.tracked) {
+			printf('  profile  %s\n', length(res.profile ?? '') ? res.profile : '(QLog default filter)');
+			printf('  sink     %s (%s)\n', res.sink ?? '?', qlog.sink_kind(res.sink));
+			printf('  command  %s\n', res.command ?? '?');
+		}
+
+		for (let l in (res.log ?? []))
+			printf('  | %s\n', l);
+
+		return;
+	}
+
+	if (op == 'stop') {
+		let res = qlog.stop(fx, { modem: r.modem, port: port });
+
+		if (res.error)
+			die(sprintf('%s: %s', res.error, res.detail));
+
+		printf('capture stopped (pid %d on %s%s)\n', res.pid, res.port ?? '?',
+			res.tracked ? '' : ', was untracked');
+		return;
+	}
+
+	// start
+	if (length(profile ?? '')) {
+		let pr = qlog.resolve_profile(fx, profile);
+
+		if (pr.error)
+			die(pr.detail);
+
+		profile = pr.path;
+	}
+
+	let res = qlog.start(fx, {
+		modem: r.modem,
+		port: port,
+		port_explicit: port_explicit,
+		usbid: m?.usb,
+		profile: profile,
+		tail: sp.tail,
+		sink: sp.sink,
+	});
+
+	if (res.error)
+		die(sprintf('%s: %s', res.error, res.detail));
+
+	for (let w in (res.warnings ?? []))
+		warn(sprintf('wwandctl: warning: %s\n', w));
+
+	printf('capture started (pid %d) on %s\n', res.pid, res.port);
+	printf('  profile  %s\n', length(res.profile ?? '') ? res.profile : '(QLog default filter)');
+	printf('  sink     %s (%s)\n', res.sink, qlog.sink_kind(res.sink));
+	printf('  QLog log %s\n', res.logfile);
+	printf('stop it with `wwandctl qlog %s stop`\n', r.modem);
+}
+
 const HELP = `wwandctl — control the wwand cellular connection manager
 
 Usage: wwandctl [--json] <command> [modem] [args...]
@@ -382,6 +527,17 @@ eSIM (needs the wwand-esim package)
   esim [modem] download <activation_code> [confirmation_code] [--no-notify]
   esim [modem] download-status          poll a running download
   esim [modem] notifications | notify   pending eUICC notifications (ES9+)
+
+Diag capture (needs the wwand-qlog package, which pulls in qlog)
+  qlog profiles                          installed QLog filter profiles
+  qlog [modem] start [--port <dev>] [-f T2] -s <sink> [QLog options...]
+                                         start a capture. Everything from -s on
+                                         is passed to QLog verbatim; sinks are a
+                                         directory, "9000" (TCP server),
+                                         "IP:9000", "tftp:IP" or
+                                         "ftp:IP-user:xxx-pass:xxx"
+  qlog [modem] status                    is a capture running, and its QLog log
+  qlog [modem] stop                      stop it (SIGTERM, then SIGKILL)
 
 Maintenance
   reset [modem]          modem reset (GPIO if configured, else backend soft reset)
@@ -487,10 +643,15 @@ function cmd_collectd(argv)
 	};
 
 	while (!orphaned()) {
-		// ONE status call covers every modem and context and does NOT wake the
-		// fast loop — only modem_signal and modem_cells do. Everything that can
-		// come from here instead of a per-modem request, does.
-		let st = call('status', {});
+		// modem_telemetry, NOT status: it carries the same four per-modem
+		// numbers this loop needs (state/temperature/attempts/proto_errors) and
+		// none of the subscriber identifiers status() returns. That is what lets
+		// the ubus ACL grant this loop read access at all — collectd's exec
+		// plugin refuses to run as root, and an ACL cannot filter a result, so
+		// reading status() as `nobody` would have put iccid/imsi/imei in reach
+		// of every process running as that user (ddimension/wwand#14).
+		// It does NOT wake the fast loop — only modem_signal and modem_cells do.
+		let st = call('modem_telemetry', {});
 		let names = length(argv) ? argv : sort(keys(st?.modems ?? {}));
 		let out = [];
 
@@ -743,6 +904,12 @@ case 'probe': {
 
 case 'esim':
 	cmd_esim(status(), args);
+	break;
+
+case 'qlog':
+	// `qlog profiles` reads the filesystem, not the daemon — do not make a
+	// user with a dead wwand guess at the profile names
+	cmd_qlog((args[0] == 'profiles' || args[0] == 'list-profiles') ? {} : status(), args);
 	break;
 
 case 'reload':
