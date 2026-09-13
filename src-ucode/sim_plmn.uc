@@ -322,7 +322,17 @@ function read_plmn_lists_inner(modem, cb)
 		if (!at)
 			return done();
 
+		// AT+CPOL=,2 FIRST. 27.007 §7.19: a set command carrying only <format>
+		// changes the format the READ answers in, and the default is the long
+		// alphanumeric NAME — in which case the answer holds no mcc/mnc at all
+		// and every entry comes back {mcc: null, mnc: null} with only the AcT
+		// flags filled. That is how the operator list rendered as a column of
+		// blanks on a Fibocom FM350-GL (ddimension/luci-app-wwand#9, 2026-09-13).
+		// Best-effort: firmware that rejects it is still read, and parse_cpol
+		// decodes a numeric <oper> whatever format the record claims. Only the
+		// READ path needs this — the write path reads the list for its indices.
 		at.send('AT+CPLS=0', () => {
+			at.send('AT+CPOL=,2', () => {
 			at.send('AT+CPOL?', (err, res) => {
 				if (!err) {
 					let recs = atcmd.parse_cpol(res?.lines) ?? [];
@@ -333,6 +343,7 @@ function read_plmn_lists_inner(modem, cb)
 
 				done();
 			}, { timeout: 8000 });
+			}, { timeout: 5000 });
 		}, { timeout: 5000 });
 	};
 

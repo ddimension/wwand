@@ -830,8 +830,11 @@ export function parse_cpol(lines)
 			gsm: flag(3), utran: flag(5), eutran: flag(6), ngran: flag(7),
 		};
 
-		// numeric format carries the mcc/mnc directly
-		if (fmt == 2 && match(oper, /^[0-9]{5,6}$/)) {
+		// A numeric <oper> is decoded whatever <format> the record CLAIMS. The
+		// claim is not reliable, and leniency costs nothing: an operator NAME is
+		// never five or six bare digits, so this cannot misread an alphanumeric
+		// entry as a PLMN id.
+		if (match(oper, /^[0-9]{5,6}$/)) {
 			rec.mcc = substr(oper, 0, 3);
 			rec.mnc = substr(oper, 3);
 		}

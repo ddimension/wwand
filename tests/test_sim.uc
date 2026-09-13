@@ -401,6 +401,57 @@ function mock_at(sent)
 	};
 }
 
+// The READ path must ask for the NUMERIC format before dumping the list. Left to
+// its default the modem answers with long alphanumeric NAMES, and every entry
+// reaches the UI as {mcc: null, mnc: null} with only the AcT flags — the column
+// of blanks reported from a Fibocom FM350-GL (ddimension/luci-app-wwand#9).
+function mock_at_named(sent, numeric)
+{
+	return {
+		send: (cmd, cb, o) => {
+			push(sent, cmd);
+			if (match(cmd, /^AT\+CPOL\?$/))
+				return uloop.timer(1, () => cb(null, { lines: numeric
+					? [ '+CPOL: 1,2,"26202",1,0,1,1,0', 'OK' ]
+					: [ '+CPOL: 1,0,"Telekom.de",1,0,1,1,0', 'OK' ] }));
+			uloop.timer(1, () => cb(null, { lines: [ 'OK' ] }));
+		},
+	};
+}
+
+scenario('plmn read: asks for the numeric format before reading the list', (next) => {
+	let sent = [];
+	let m = { at: mock_at_named(sent, true), uim: null };
+
+	sim.read_plmn_lists(m, (res) => {
+		eq(sent[0], 'AT+CPLS=0', 'plmn read: selects the user-controlled list');
+		ok(index(sent, 'AT+CPOL=,2') >= 0, 'plmn read: requests the numeric format');
+		// index() returns -1 when absent, and -1 is less than any real position —
+		// so the ordering alone would pass with the command missing entirely
+		ok(index(sent, 'AT+CPOL=,2') >= 0 &&
+		   index(sent, 'AT+CPOL=,2') < index(sent, 'AT+CPOL?'),
+			'plmn read: ...BEFORE the read, or the answer is already formatted');
+		eq(res?.user?.[0]?.mcc, '262', 'plmn read: the operator actually has an mcc');
+		eq(res?.user?.[0]?.mnc, '02', 'plmn read: ...and an mnc');
+		next();
+	});
+});
+
+scenario('plmn read: firmware that ignores the format request is still read', (next) => {
+	let sent = [];
+	let m = { at: mock_at_named(sent, false), uim: null };
+
+	// the entry has no numeric id to recover — but the AcT flags still arrive and
+	// the read must not fail, because a name-only answer is a firmware choice,
+	// not an error
+	sim.read_plmn_lists(m, (res) => {
+		eq(res?.user != null, true, 'plmn read: a name-only answer still yields a list');
+		eq(res?.user?.[0]?.mcc, null, 'plmn read: no plmn id in a name');
+		eq(res?.user?.[0]?.eutran, true, 'plmn read: the AcT flags survive it');
+		next();
+	});
+});
+
 scenario('plmn write: CPLS + clear existing + write new list (AT+CPOL)', (next) => {
 	let sent = [];
 	// uim: null -> read-back returns nulls, but the AT write sequence still runs

@@ -480,6 +480,22 @@ eq(cpol[1].ngran, true, 'cpol: NG-RAN flag');
 eq(cpol[2].mcc, null, 'cpol: alpha format has no numeric mcc/mnc');
 eq(atcmd.parse_cpol([ 'OK' ]), [], 'cpol: empty');
 
+// A numeric <oper> is decoded whatever <format> the record claims. Firmware that
+// answers in a format it did not announce would otherwise hand the UI a column of
+// {mcc: null, mnc: null} rows — which is how a Fibocom FM350-GL's operator list
+// rendered (ddimension/luci-app-wwand#9). An operator NAME is never five or six
+// bare digits, so the leniency cannot misread an alphanumeric entry.
+let cpol_fmt = atcmd.parse_cpol([
+	'+CPOL: 1,0,"26202",0,0,0,1,0',   // numeric payload, format claims alpha
+	'+CPOL: 2,2,"Vodafone",0,0,1,1,0', // the reverse: a name under format 2
+	'+CPOL: 3,0,"310"',                // too short to be a plmn id
+]);
+eq(cpol_fmt[0].mcc, '262', 'cpol: numeric oper decoded despite an alpha format claim');
+eq(cpol_fmt[0].mnc, '02', 'cpol: ...mnc too');
+eq(cpol_fmt[0].eutran, true, 'cpol: ...and the AcT flags are unaffected');
+eq(cpol_fmt[1].mcc, null, 'cpol: a NAME is never mistaken for a plmn id');
+eq(cpol_fmt[2].mcc, null, 'cpol: three digits are not a plmn id');
+
 // --- temperature parsers (QModem-derived) ------------------------------------
 
 // Quectel AT+QTEMP: sensor-name digits skipped, first in-range value wins
