@@ -419,12 +419,79 @@ function mock_at_named(sent, numeric)
 	};
 }
 
+// EF 6F60 over AT+CRSM is tried BEFORE AT+CPOL, because the EF holds numeric
+// PLMN ids while CPOL renders them through the modem's operator-name table —
+// and an FM350-GL accepts AT+CPOL=,2 and still answers with names for the
+// entries it has a name for (ddimension/luci-app-wwand#9).
+function mock_at_crsm(sent, opts)
+{
+	return {
+		send: (cmd, cb, o) => {
+			push(sent, cmd);
+			// GET RESPONSE: TS 51.011 header, bytes 2..3 = file size (0x000A = 10)
+			if (match(cmd, /^AT\+CRSM=192,28512/))
+				return uloop.timer(1, () => cb(null, { lines: opts.getresp
+					? [ '+CRSM: 144,0,"0000000A6F60040011FF"', 'OK' ] : [ 'ERROR' ] }));
+			// READ BINARY: two 5-byte records, 26201 (E-UTRAN) and 26203 (GSM+UTRAN)
+			if (match(cmd, /^AT\+CRSM=176,28512/))
+				return uloop.timer(1, () => cb(null, { lines: opts.ef
+					? [ '+CRSM: 144,0,"62F210400062F2304080"', 'OK' ] : [ 'ERROR' ] }));
+			if (match(cmd, /^AT\+CPOL\?$/))
+				return uloop.timer(1, () => cb(null, { lines: [
+					'+CPOL: 1,0,"vodafone UK",1,0,1,0,0', 'OK' ] }));
+			uloop.timer(1, () => cb(null, { lines: [ 'OK' ] }));
+		},
+	};
+}
+
+scenario('plmn read: EF 6F60 over CRSM wins over the name-rendering CPOL', (next) => {
+	let sent = [];
+	let m = { at: mock_at_crsm(sent, { getresp: true, ef: true }), uim: null };
+
+	sim.read_plmn_lists(m, (res) => {
+		ok(index(sent, 'AT+CRSM=192,28512,0,0,15') >= 0, 'plmn read: asks the file size first');
+		ok(index(sent, 'AT+CRSM=176,28512,0,0,10') >= 0,
+			'plmn read: ...and reads exactly that many bytes, not a guess');
+		eq(length(res?.user ?? []), 2, 'plmn read: both records decoded');
+		eq(res.user[0].mcc, '262', 'plmn read: a real mcc from the EF');
+		eq(res.user[0].mnc, '01', 'plmn read: ...and mnc');
+		ok(index(sent, 'AT+CPOL?') < 0, 'plmn read: CPOL is not even asked once the EF answered');
+		next();
+	});
+});
+
+scenario('plmn read: no GET RESPONSE -> a generous read, still the EF', (next) => {
+	let sent = [];
+	let m = { at: mock_at_crsm(sent, { getresp: false, ef: true }), uim: null };
+
+	sim.read_plmn_lists(m, (res) => {
+		ok(index(sent, 'AT+CRSM=176,28512,0,0,250') >= 0,
+			'plmn read: falls back to a length that covers 50 records');
+		eq(res?.user?.[0]?.mcc, '262', 'plmn read: the EF still answers');
+		next();
+	});
+});
+
+scenario('plmn read: no EF access at all -> CPOL, as before', (next) => {
+	let sent = [];
+	let m = { at: mock_at_crsm(sent, { getresp: false, ef: false }), uim: null };
+
+	sim.read_plmn_lists(m, (res) => {
+		ok(index(sent, 'AT+CPOL?') >= 0, 'plmn read: CPOL is still the last resort');
+		eq(length(res?.user ?? []), 1, 'plmn read: and its entry survives');
+		next();
+	});
+});
+
 scenario('plmn read: asks for the numeric format before reading the list', (next) => {
 	let sent = [];
 	let m = { at: mock_at_named(sent, true), uim: null };
 
 	sim.read_plmn_lists(m, (res) => {
-		eq(sent[0], 'AT+CPLS=0', 'plmn read: selects the user-controlled list');
+		// CPOL is the LAST resort now, so CPLS=0 is no longer the first command —
+		// it is still sent, and still before the CPOL exchange it prepares
+		ok(index(sent, 'AT+CPLS=0') >= 0 && index(sent, 'AT+CPLS=0') < index(sent, 'AT+CPOL?'),
+			'plmn read: still selects the user-controlled list before using CPOL');
 		ok(index(sent, 'AT+CPOL=,2') >= 0, 'plmn read: requests the numeric format');
 		// index() returns -1 when absent, and -1 is less than any real position —
 		// so the ordering alone would pass with the command missing entirely
