@@ -232,6 +232,126 @@ def main():
             fail('%s is installed by %s — packages must stay co-installable'
                  % (f, ' and '.join(pkgs)))
 
+    # --- DEPENDS against what the modules actually import --------------------
+    #
+    # Two failure shapes, and only one of them is loud on a user's box.
+    #
+    # A module importing something its package does not pull in is an immediate
+    # crash — caught here rather than at first run.
+    #
+    # The quiet one is the reverse: a DEPENDS nothing needs any more. It costs
+    # nobody anything until the dependency is UNSATISFIABLE, and then it refuses
+    # an install for a reason that is no longer true. wwand-esim carried
+    # `+wwand-qmi` from the days when QMI-UIM was the only APDU transport; the
+    # AT (CCHO/CGLA) and MBIM-UICC transports arrived later, both in the base
+    # package, and the dependency was never revisited. It surfaced when an
+    # FM350-GL owner on an NCM-only box could not install eSIM at all, because
+    # his QMI drivers are built in and the kmod packages wwand-qmi requires do
+    # not exist on his build (ddimension/wwand#26, 2026-09-13).
+    deps = {}
+    pkg = None
+    for line in mk.splitlines():
+        d = re.match(r'define Package/([a-z0-9_-]+)\s*$', line)
+        if d:
+            pkg = d.group(1)
+            continue
+        if line.startswith('endef'):
+            pkg = None
+            continue
+        m = pkg and re.match(r'\s*DEPENDS:=(.*)', line)
+        if m:
+            deps[pkg] = re.findall(r'\+(wwand[a-z0-9_-]*)', m.group(1))
+
+    def base_pkg(owner):
+        # the base package's files are claimed as "wwand (WWAND_BASE_UC)"
+        return owner.split(' ')[0]
+
+    owner_of = {f: base_pkg(pkgs[0]) for f, pkgs in owners.items() if pkgs}
+
+    def reachable(p, seen=None):
+        seen = seen if seen is not None else set()
+        for d in deps.get(p, []):
+            if d not in seen:
+                seen.add(d)
+                reachable(d, seen)
+        return seen
+
+    # Who imports whom, so a base module that is backend-coupled BY DESIGN can
+    # be recognised instead of listed by hand. Several QMI helpers ship in the
+    # base package but are imported only by modem.uc / context.uc, which ship in
+    # wwand-qmi — they can never load without it, so their backend imports are
+    # not a packaging error. The rule below says exactly that, and a NEW base
+    # module reaching into a backend from somewhere reachable without it still
+    # fails.
+    importers = {}
+    srcs = {}
+    for f in uc:
+        try:
+            srcs[f] = open(os.path.join(args.root, 'src-ucode', f)).read()
+        except OSError:
+            continue
+    for f, src in srcs.items():
+        for mod in set(re.findall(r"from\s+'wwand[./]([a-zA-Z0-9_.]+)'", src)):
+            importers.setdefault(mod.replace('.', '/') + '.uc', set()).add(f)
+
+    def coupled_to(f, pkg):
+        """True when everything that imports f already needs pkg."""
+        who = importers.get(f, set())
+        if not who:
+            return False
+        for w in who:
+            wp = owner_of.get(w)
+            if wp is None or (wp != pkg and pkg not in reachable(wp)):
+                return False
+        return True
+
+    imported_from = {}
+    for f in uc:
+        src = srcs.get(f)
+        if src is None:
+            continue
+        # STATIC imports only. A require() is this tree's idiom for a module
+        # that may legitimately be absent — it sits inside a function behind a
+        # try/catch that reports "wwand-X package not installed" — so counting
+        # it here would flag the very mechanism that makes the split safe
+        # (wwandctl.uc's load_qlog, the *_lazy backend shims).
+        mods = set(re.findall(r"from\s+'wwand[./]([a-zA-Z0-9_.]+)'", src))
+        for mod in mods:
+            target = mod.replace('.', '/') + '.uc'
+            if target not in owner_of:
+                continue
+            op, ip = owner_of[target], owner_of.get(f)
+            if ip is None or op == ip:
+                continue
+            if coupled_to(f, op):
+                continue
+            if op not in reachable(ip) and op != 'wwand':
+                fail('%s (in %s) imports %s, which ships in %s — not reachable '
+                     'from %s DEPENDS' % (f, ip, mod, op, ip))
+            imported_from.setdefault(ip, set()).add(op)
+
+    # Runtime-only couplings: a DEPENDS that no import justifies, and should not.
+    # Each needs its reason, because this is where a stale dependency hides.
+    RUNTIME_DEPS = {
+        # the datapath add-ons adopt the QMAP children of the QMI backend's
+        # driver; they are plugins returned to netlink.uc, never imported
+        ('wwand-datapath-rmnet_nss', 'wwand-qmi'),
+        # MBIM tunnels the whole QMI stack over the passthrough, reaching
+        # qmi_backend through the lazy require() shim rather than an import
+        ('wwand-mbim', 'wwand-qmi'),
+    }
+    for p, ds in sorted(deps.items()):
+        for d in ds:
+            if d in ('wwand',) or d == p:
+                continue
+            if d in imported_from.get(p, set()):
+                continue
+            if (p, d) in RUNTIME_DEPS:
+                continue
+            fail('%s DEPENDS %s, but installs nothing that imports it and it is '
+                 'not a declared runtime coupling — a dependency nobody needs '
+                 'only ever refuses an install' % (p, d))
+
     refs = set(re.findall(r'\$\(PKG_BUILD_DIR\)/(files/[^\s\\)]+)', mk))
     for r in sorted(refs):
         if r not in files:
