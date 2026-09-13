@@ -337,7 +337,18 @@ function read_plmn_lists_inner(modem, cb)
 				if (!err) {
 					let recs = atcmd.parse_cpol(res?.lines) ?? [];
 
+					// CARRY THE NAME. parse_cpol has it and this mapping used to drop
+					// it, which is why the operator list rendered as a column of
+					// blanks: for an alphanumeric record the name is not a rendering
+					// of an id we could recover, it is the ONLY thing the modem has.
+					// HW-checked on two FM350-GLs: the card has no EF 6F60 at all
+					// (AT+CRSM=192,28512 answers SW 9404 'file not found' under every
+					// path), so this list comes from the modem's own operator table
+					// and the names are its content (ddimension/luci-app-wwand#9,
+					// sponsor box 2026-09-13: 42 of 44 records alphanumeric).
+					// Numeric records keep name null — there the id IS the identity.
 					out.user = map(recs, (r) => ({ mcc: r.mcc, mnc: r.mnc,
+						name: (r.mcc == null && r.oper != '') ? r.oper : null,
 						gsm: r.gsm, utran: r.utran, eutran: r.eutran, ngran: r.ngran }));
 				}
 

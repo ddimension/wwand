@@ -500,6 +500,7 @@ scenario('plmn read: asks for the numeric format before reading the list', (next
 			'plmn read: ...BEFORE the read, or the answer is already formatted');
 		eq(res?.user?.[0]?.mcc, '262', 'plmn read: the operator actually has an mcc');
 		eq(res?.user?.[0]?.mnc, '02', 'plmn read: ...and an mnc');
+		eq(res?.user?.[0]?.name, null, 'plmn read: a numeric record needs no name — the id is the identity');
 		next();
 	});
 });
@@ -514,6 +515,10 @@ scenario('plmn read: firmware that ignores the format request is still read', (n
 	sim.read_plmn_lists(m, (res) => {
 		eq(res?.user != null, true, 'plmn read: a name-only answer still yields a list');
 		eq(res?.user?.[0]?.mcc, null, 'plmn read: no plmn id in a name');
+		// and the NAME is carried, because for an alphanumeric record it is the
+		// only identity the modem has — two FM350-GLs have no EF 6F60 at all,
+		// so this list is the modem's own operator table
+		eq(res?.user?.[0]?.name, 'Telekom.de', 'plmn read: the operator name reaches the caller');
 		eq(res?.user?.[0]?.eutran, true, 'plmn read: the AcT flags survive it');
 		next();
 	});
@@ -585,7 +590,7 @@ scenario('plmn read: AT+CPOL fallback when UIM rejects the EF read', (next) => {
 
 	sim.read_plmn_lists(m, (lists) => {
 		eq(length(lists.user), 2, 'plmn read: user list came from AT+CPOL fallback');
-		eq(lists.user[0], { mcc: '262', mnc: '02', gsm: true, utran: true, eutran: true, ngran: false },
+		eq(lists.user[0], { mcc: '262', mnc: '02', name: null, gsm: true, utran: true, eutran: true, ngran: false },
 			'plmn read: first record decoded from CPOL');
 		eq(lists.user[1].mnc, '260', 'plmn read: 3-digit mnc');
 		eq(lists.user[1].ngran, true, 'plmn read: NG-RAN flag from CPOL');
