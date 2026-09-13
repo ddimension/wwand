@@ -171,6 +171,29 @@ r = padopt({
 });
 eq(r.modems.m0.protocol, 'mbim', 'protocol: accepted case-insensitively');
 
+// `option diag_port` — the explicit DM/DIAG node for the wwand-qlog add-on.
+// wwand never opens it; it is the escape hatch for a modem whose USB id has no
+// 'qcdm' row in the generated port table, and no table is ever complete.
+// It hit the same trap `protocol` did: an option in the defaults but missing
+// from MODEM_KNOWN_OPTS and the parser warns "unknown option" AND does nothing.
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', diag_port: '/dev/ttyUSB0' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.diag_port, '/dev/ttyUSB0', 'diag_port: the pin reaches the modem config');
+eq(length(filter(r.warnings, (w) => match(w, /unknown option 'diag_port'/))), 0,
+	'diag_port: and is not reported as dead config');
+
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.diag_port, null, 'diag_port: unset stays null (discovery decides)');
+
 // SIM toolkit routing. Unset must mean "leave the modem alone" — this changes
 // how the card and the network talk to each other, and a default would break a
 // working deployment on one operator's network and nowhere else.
@@ -1381,6 +1404,26 @@ eq(nn.modems.m0.stats_interval, 60, 'num: a non-numeric interval falls back to t
 eq(nn.modems.m0.zero_rx_timeout, 21600, 'num: ...and so does a non-numeric timeout');
 ok(length(filter(nn.warnings, (w) => index(w, 'stats_interval') >= 0)) > 0,
 	'num: ...and the user is told, rather than the daemon spinning quietly');
+
+// --- bearer_poll_count reaches the modem, and is a KNOWN option --------------
+//
+// The whole point of the option is that a reporter can shorten the dead-bearer
+// run on his own box (ddimension/wwand#25). If it parsed but never landed on
+// the modem, or tripped the unknown-option warning, it would look configured
+// and do nothing — the exact failure mode MODEM_KNOWN_OPTS exists to prevent.
+let bp = config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', bearer_poll_count: '2' },
+	m1: { '.type': 'wwand_modem', device: '/dev/cdc-wdm1' },
+	m2: { '.type': 'wwand_modem', device: '/dev/cdc-wdm2', bearer_poll_count: 'zwei' },
+} });
+
+eq(bp.modems.m0.bearer_poll_count, 2, 'bearer: the configured count reaches the modem');
+eq(bp.modems.m1.bearer_poll_count, 3, 'bearer: unset means the default 3');
+eq(bp.modems.m2.bearer_poll_count, 3, 'bearer: a non-number falls back to the default');
+eq(length(filter(bp.warnings, (w) => match(w, /unknown option 'bearer_poll_count'/))), 0,
+	'bearer: and it is a known option, not a silently ignored typo');
+ok(length(filter(bp.warnings, (w) => index(w, 'bearer_poll_count') >= 0)) > 0,
+	'bearer: ...while the non-numeric one is still reported');
 
 let zz = config.parse({ network: {
 	m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', stats_interval: '0' },

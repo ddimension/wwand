@@ -76,7 +76,7 @@ export function create(opts)
 	// backstop by default, not a reconnect path.
 	let empty_status_run = 0;
 	let empty_status_rx = null;
-	let empty_status_limit = opts.timing?.empty_status_polls ?? 3;
+	// resolved per poll: the modem config can change under a running context
 	// pending ^DEND verification (see modem_event 'session_urc')
 	let session_confirm_timer = null;
 	let session_confirm_ms = opts.timing?.session_confirm_ms ?? 10000;
@@ -483,7 +483,9 @@ export function create(opts)
 						empty_status_rx = rx;
 					}
 
-					if (++empty_status_run >= empty_status_limit) {
+					let limit = context_common.bearer_lost_polls(self.modem.config, opts.timing);
+
+					if (++empty_status_run >= limit) {
 						log('warn', sprintf('dial status listed no context for cid %d on %d consecutive polls and rx did not move (%J) — bearer gone',
 							self.cid, empty_status_run, rx));
 						return self._connection_lost({ reason: 'session_ended' });

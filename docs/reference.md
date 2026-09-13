@@ -70,7 +70,8 @@ wwand section types plus the netifd interface — no separate config file:
   *optional* stable USB topology anchor (like a wifi-device `path`, e.g. `1-1.2`,
   stable across renumbering on multi-modem setups). Plus tty, mux, sim_slot,
   pincode, modes, mcc, mnc, lock_4g/5g/persist, at_init, location, delay,
-  failreboot, zero_rx_timeout, stats_interval, dl_datagram_max_size, and
+  failreboot, zero_rx_timeout, bearer_poll_count, stats_interval,
+  dl_datagram_max_size, and
   **`reset_gpio`** — a named GPIO wired to the modem RESET line, pulsed by the
   recovery ladder instead of a USB power-cycle (see [Board integration](#board-integration)) —
   and **`repower_time`** (seconds, default 30) — how long the modem is held
@@ -422,6 +423,12 @@ config wwand_modem 'm0'
 	                                 #    streams. The port itself is REPORTED, never opened
 	                                 #    and never linked — read `gps_port` from
 	                                 #    `ubus call wwand status` and point gpsd at it
+	option diag_port '/dev/ttyUSB0'  # explicit DM/DIAG node for the wwand-qlog add-on.
+	                                 #    wwand NEVER opens it; it is REPORTED as
+	                                 #    `diag_port` in `ubus call wwand status`.
+	                                 #    Unset = resolved from the generated port-role
+	                                 #    table / the vendor /dev/mhi_DIAG / the
+	                                 #    kernel-wwan qcdm node. See "QLog diag capture"
 	option at_mbim '0'               # 0: disable the automatic AT-over-MBIM fallback
 	option at_over_mbim ''           # force AT over the vendor MBIM CID instead of a
 	                                 #   tty: fibocom|compal|1 (unset = automatic:
@@ -458,10 +465,32 @@ config wwand_modem 'm0'
 	option failreboot '100'          # attempts before the final reboot rung (0 = never reboot)
 	option proto_error_limit '25'    # protocol-error ceiling before a reboot (gated by failreboot)
 	option zero_rx_timeout '21600'   # no-rx watchdog in seconds (0 = off)
+	option bearer_poll_count '3'     # NCM only: consecutive dial-status answers that
+	                                 # list no context, with the rx counter standing
+	                                 # still, before the bearer counts as gone.
+	                                 # Minimum 2 — see below; values under it are lifted.
 	option repower_time '30'         # recovery power-cycle off / reset-hold seconds
 	option auto_correct_config '0'   # learn + write back a missing imei anchor so a
 	                                 #   loose config self-stabilises (default off)
 ```
+
+**Dead-bearer detection on NCM (`bearer_poll_count`).** An AT dial-status query
+that succeeds and lists no context for the connection's cid means "no contexts" —
+the bearer is gone. Some firmware announces this (`+CGEV: NW PDN DEACT`, a vendor
+`^DEND`) and wwand acts at once; some announces nothing at all, and then the
+periodic liveness poll is the only detector. Because a single empty answer may
+also be a firmware quirk wwand simply failed to parse, the verdict needs a **run**
+of them — `bearer_poll_count` of them, once per `stats_interval` — with the rx
+byte counter standing still across the whole run.
+
+Lowering it shortens the outage after an unannounced drop (at the default 60 s
+poll, 3 → roughly three minutes, 2 → two) and raises the chance of dropping a
+healthy connection. **The minimum is 2, and smaller values are lifted to it.**
+The rx condition is weaker than it looks: traffic on the bearer vetoes the
+verdict, but an *idle* bearer has a frozen counter exactly like a dead one, so
+the absence of traffic never confirms death by itself. At 1, one unparsed status
+answer on a quiet link would be enough to tear down a working connection — the
+run length is what makes it two independent observations rather than one.
 
 **Binding a modem to hardware.** The anchors are tried most-stable first:
 `serial` (USB iSerial, matched in sysfs before the modem is opened) → `imei` →
@@ -1169,6 +1198,9 @@ wwandctl sms                         # list stored SMS
 wwandctl sms-send +49170... "hi"     # send an SMS
 wwandctl sms-delete 3
 wwandctl reset / repower             # modem reset / hardware repower
+wwandctl qlog profiles               # QLog filter profiles (needs wwand-qlog)
+wwandctl qlog start -f T2 -s 9000    # start a diag capture (see below)
+wwandctl qlog status / stop
 wwandctl at AT+CSQ                   # raw AT command
 wwandctl migrate [apply]             # config migration plan/apply
 wwandctl log-level debug
@@ -1191,6 +1223,76 @@ after an attempt reached the card, and never auto-retries. After a successful
 unblock the daemon restarts the modem bring-up with the new PIN; update
 `option pincode` (or the per-SIM `wwand_sim` override) to the new PIN so the
 next boot unlocks cleanly.
+
+### QLog diag capture (`wwandctl qlog`)
+
+Raw Qualcomm diagnostic (QMDL) capture off the modem's DM/DIAG port, for a
+problem that only a QXDM/QCAT (or [`scat`](https://github.com/fgsect/scat)) log
+will settle — a registration or context-activation failure the modem reports as
+a bare cause code, say. It needs the optional **`wwand-qlog`** package, which
+pulls in **`qlog`** (Quectel's QLog V1.5.8: `/usr/sbin/QLog` plus the filter
+profiles under `/usr/share/qlog/conf/`).
+
+**On demand only, CLI only.** wwand starts nothing by itself, keeps no ring
+buffer, arms nothing on a failed attach and relays no bytes. What it contributes
+is the management around the tool:
+
+    wwandctl qlog profiles                            # what filters are installed
+    wwandctl qlog start -f T2 -s 9000                 # capture to a TCP server on :9000
+    wwandctl qlog start -f T2 -s 192.0.2.5:9000       # ...push to a TCP listener instead
+    wwandctl qlog start -f T2 -s tftp:192.0.2.5
+    wwandctl qlog start -f T2 -s /mnt/usb -n 8 -m 64  # 8 files of 64 MB on a USB stick
+    wwandctl qlog status                              # running? on which port? QLog's log
+    wwandctl qlog stop                                # SIGTERM, then SIGKILL after 10 s
+
+`T2` is `T2-registration-context-activation.cfg`, the profile for registration
+and PDP-context problems; `wwandctl qlog profiles` lists all seven. A full path
+works too.
+
+**Everything from `-s` on goes to QLog verbatim** — that is the whole storage
+story, and it is deliberately not wrapped: `-s` takes a directory, `"9000"` (QLog
+runs a TCP server you connect QPST/CATStudio or `nc` to), `"IP:9000"` (QLog
+connects out), `"tftp:IP"` or `"ftp:IP-user:xxx-pass:xxx"`; `-n`/`-m` cap the
+file count and size, `-D` deletes old logs first, `-q` exits on USB disconnect.
+Options *before* `-s` are wwand's: `--port <dev>` and `-f <profile>`.
+
+**Naming a sink is required.** Without `-s`, QLog writes into the relative
+directory `qlog_files` (`main.c:800`, V1.5.8) — on a router, flash. A QMDL grows
+by tens of MB per minute, so `wwandctl qlog` refuses to start without one and
+warns when the sink is a local directory.
+
+**The diag port** is resolved for you, in this order: `option diag_port` on the
+`wwand_modem` section → the `qcdm` role in wwand's generated port table (from
+ModemManager's udev rules) → the vendor `pcie_mhi` node `/dev/mhi_DIAG` → the
+mainline kernel-wwan node `/dev/wwanNqcdmM`. It is published as `diag_port` in
+`ubus call wwand status`; `--port /dev/ttyUSBn` overrides all of it. No table is
+ever complete — if nothing is found, the refusal says so and names `--port`.
+
+**One capture per modem.** A second `start` on the same diag port is refused.
+The running capture is tracked in `/tmp/wwand/qlog-<modem>.json` and QLog's own
+output goes to `/tmp/wwand/qlog-<modem>.log`, but `status` and `stop` also scan
+`/proc` for a QLog on that port — so a capture whose CLI was killed before the
+state file was written is still found and still stoppable, rather than running
+until the next reboot. Starting a capture deliberately outlives the CLI; `stop`
+is how it ends.
+
+**What QLog does and does not cover.** It speaks the Qualcomm, ASR and Unisoc
+diag protocols — but its device scan is a fixed VID/PID allow-list of **Quectel**
+modules (`usb_linux.c:259-268` plus `drv_is_asr`/`drv_is_unisoc`,
+`main.c:910-934`, V1.5.8): Quectel `2c7c:0xxx` (Qualcomm), `2c7c:6xxx` (ASR),
+`2c7c:0900` and `1782:4d00` (Unisoc), `3763:3c93` / `3c93:ffff`, and the old
+`05c6` reference ids of UC15/UC20/EC20/SDX12. A **Fibocom/MediaTek FM350-GL**, a
+MeiG SLM7xx, a Sierra or a Telit module is **not covered** — QLog reports "No
+Quectel Modules found" and keeps retrying. `wwandctl qlog start` warns when the
+modem's USB id is outside that list. It also does not accept a mainline
+kernel-wwan diag node (`main.c:1180-1226` routes only `/dev/mhi*`, `/dev/sdiag*`,
+`/dev/ttyUSB*`, `/dev/ttyACM*` and `/sys/bus/usb/…`), so on PCIe/MHI it needs
+Quectel's out-of-tree `pcie_mhi` driver; an auto-resolved `/dev/wwanNqcdmM` is
+refused with that reason, while an explicit `--port` only warns.
+
+> **Not hardware-verified.** The port resolution, the refusals and the process
+> management are host-tested (`tests/test_qlog.uc`); no QMDL has been captured
+> with this on a real modem by its author. Treat the first run as a bring-up.
 
 ### Feeding collectd (`wwandctl collectd`)
 
@@ -1250,7 +1352,7 @@ when called from LuCI).
 
 | Method | Arguments | Description |
 |---|---|---|
-| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `gps_port` — the modem's NMEA tty when its port table names one (wwand never opens it; see `option gnss`), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran) + contexts + `board` (detected profile, power/reset capability) |
+| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `gps_port` — the modem's NMEA tty when its port table names one (wwand never opens it; see `option gnss`), `diag_port` — the modem's DM/DIAG node, likewise resolved and never opened (see "QLog diag capture"), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran) + contexts + `board` (detected profile, power/reset capability) |
 | `reload` | — | re-read UCI and apply the **diff** — only changed/added/removed modems and contexts are touched (idempotent; see *Idempotent reload*) |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |

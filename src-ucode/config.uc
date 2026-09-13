@@ -219,11 +219,13 @@ export function modem_defaults(over)
 		repower_time: null,         // recovery power-cycle off / reset hold seconds
 		pincode: null, modes: null, mcc: null, mnc: null,
 		mux: 'auto', dl_datagram_max_size: 0, tty: null,
+		diag_port: null,       // explicit DM/DIAG node for wwand-qlog (never opened)
 		at_init: [], location: false, delay: 0,
 		at2_external: false,   // release the secondary AT port for external tools
 		gnss: false,           // switch the modem's GNSS receiver on (NMEA port)
 		fcc_auth: null,        // RF unlock for laptop-SKU modems (see reference.md)
 		failreboot: 100, proto_error_limit: 25, zero_rx_timeout: 21600,
+		bearer_poll_count: 3,  // empty dial-status polls before the bearer is gone (NCM)
 		lock_4g: [], lock_5g: null, lock_persist: false,
 		sim_slot: 0,
 		stats_interval: 60,
@@ -298,9 +300,9 @@ function apply_globals(s, result)
 // required but none configured" and safety-blocked the SIM).
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
 	'imei', 'repower_time', 'reset_gpio', 'pincode', 'modes', 'mcc', 'mnc',
-	'mux', 'dl_datagram_max_size', 'tty', 'at2_external', 'gnss', 'fcc_auth',
+	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'fcc_auth',
 	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
-	'zero_rx_timeout', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
+	'zero_rx_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
 	// the AT-over-MBIM pipe: `at_over_mbim` forces it and picks the vendor CID
 	// flavour, `at_mbim '0'` disables the automatic fallback. Both are read by
@@ -418,6 +420,10 @@ function modem_from_section(s, warnings)
 		mux: s.mux ?? 'auto',
 		dl_datagram_max_size: num_opt(s.dl_datagram_max_size, 0, 'dl_datagram_max_size', warnings),
 		tty: s.tty,
+		// explicit DM/DIAG node, the override for the generated 'qcdm' role
+		// table. wwand NEVER opens it — it is published as status.diag_port for
+		// the wwand-qlog add-on. No table is ever complete, hence this.
+		diag_port: s.diag_port,
 		// release the secondary AT port ('at2') for external tools: wwand then
 		// never opens it and runs telemetry over the control channel instead
 		at2_external: bool_opt(s.at2_external, false),
@@ -456,6 +462,7 @@ function modem_from_section(s, warnings)
 		failreboot: num_opt(s.failreboot, 100, 'failreboot', warnings),
 		proto_error_limit: num_opt(s.proto_error_limit, 25, 'proto_error_limit', warnings),
 		zero_rx_timeout: num_opt(s.zero_rx_timeout, 21600, 'zero_rx_timeout', warnings),
+		bearer_poll_count: num_opt(s.bearer_poll_count, 3, 'bearer_poll_count', warnings),
 		lock_4g: (type(s.lock_4g) == 'array') ? s.lock_4g :
 		         (s.lock_4g != null ? [ s.lock_4g ] : []),
 		lock_5g: s.lock_5g,
@@ -717,6 +724,9 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 
 	if (s.zero_rx_timeout != null)
 		modem.zero_rx_timeout = +s.zero_rx_timeout;
+
+	if (s.bearer_poll_count != null)
+		modem.bearer_poll_count = +s.bearer_poll_count;
 
 	if (s.stats_interval != null)
 		modem.stats_interval = +s.stats_interval;

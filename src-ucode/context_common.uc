@@ -94,6 +94,31 @@ export function mono()
 	return clock(true)[0];
 };
 
+// bearer_lost_polls(modem_config, timing): how many CONSECUTIVE dial-status
+// answers that list no context it takes to call the bearer gone, while the rx
+// byte count stands still. Default 3 (~3 min at the 60 s poll), the modem's
+// `bearer_poll_count` overrides it, and `timing.empty_status_polls` is the test
+// hook.
+//
+// FLOOR OF 2, deliberately. The rx condition is weaker than it first looks: a
+// bearer that is merely IDLE has a frozen rx counter too, exactly like a dead
+// one — traffic vetoes the verdict, but the absence of traffic does not confirm
+// it. So the run length is the real protection against a firmware whose status
+// answer wwand simply fails to parse, and at 1 a single unparsed answer on an
+// idle link would tear down a working connection. Asked for by a reporter who
+// wanted 2 to shave a minute off a 2-hourly renumber (ddimension/wwand#25);
+// 2 keeps two independent observations, 1 keeps none.
+export function bearer_lost_polls(modem_config, timing)
+{
+	if (timing?.empty_status_polls != null)
+		return timing.empty_status_polls;
+
+	let n = +(modem_config?.bearer_poll_count ?? 3);
+
+	// NaN fails this too, and lands on the floor — the same shape num_opt uses
+	return (n >= 2) ? n : 2;
+};
+
 export function zero_rx_limit_ms(modem_config, timing)
 {
 	if (timing?.zero_rx_ms != null)

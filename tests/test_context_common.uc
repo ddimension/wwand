@@ -18,6 +18,25 @@ eq(cc.zero_rx_limit_ms({ zero_rx_timeout: 30 }, { zero_rx_ms: 8 }), 8,
 eq(cc.zero_rx_limit_ms({ zero_rx_timeout: 30 }, { zero_rx_ms: 0 }), 0,
 	'limit: timing override of 0 disables');
 
+// --- bearer_lost_polls -------------------------------------------------------
+
+eq(cc.bearer_lost_polls({}, null), 3, 'polls: default 3');
+eq(cc.bearer_lost_polls({ bearer_poll_count: 5 }, null), 5, 'polls: config raises it');
+eq(cc.bearer_lost_polls({ bearer_poll_count: 2 }, null), 2,
+	'polls: 2 is allowed — the shortest run that is still two observations');
+eq(cc.bearer_lost_polls({ bearer_poll_count: 3 }, { empty_status_polls: 9 }), 9,
+	'polls: timing override wins over config');
+
+// The floor exists because the rx condition does NOT confirm death on its own:
+// an IDLE bearer has a frozen counter exactly like a dead one. At 1 a single
+// unparsed status answer on a quiet link would drop a working connection, so
+// 1 and 0 are lifted to 2 rather than obeyed (ddimension/wwand#25).
+eq(cc.bearer_lost_polls({ bearer_poll_count: 1 }, null), 2, 'polls: 1 is lifted to the floor');
+eq(cc.bearer_lost_polls({ bearer_poll_count: 0 }, null), 2, 'polls: 0 does not disable it');
+eq(cc.bearer_lost_polls({ bearer_poll_count: -4 }, null), 2, 'polls: negative lands on the floor');
+eq(cc.bearer_lost_polls({ bearer_poll_count: 'zwei' }, null), 2,
+	'polls: a non-number lands on the floor instead of NaN-comparing forever');
+
 // --- rx_stall_watch ----------------------------------------------------------
 
 // healthy link: the cumulative counter keeps rising -> never trips
