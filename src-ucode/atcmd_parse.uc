@@ -810,7 +810,38 @@ export function parse_cpol(lines)
 {
 	let out = [];
 
-	for (let l in (lines ?? [])) {
+	// ONE LINE CAN CARRY MORE THAN ONE RECORD. A lost separator joins two:
+	//
+	//   +CPOL: 58,0,"RO Vodafone RO",1,0,1,0,0+CPOL: 59,0,"m:tel",1,0,0,0,0
+	//
+	// field-seen on a Fibocom FM350-GL dumping 60+ records
+	// (ddimension/luci-app-wwand#9, 2026-09-13). Taking everything after the
+	// FIRST +CPOL: made that silently WRONG rather than merely incomplete:
+	// the trailing '+CPOL: 59...' became record 58's AcT fields, so 58 got
+	// bogus flags and 59 vanished without trace. Splitting on the prefix
+	// recovers both. An operator name cannot contain '+CPOL:', so this
+	// cannot tear a legitimate record.
+	//
+	// This is recovery, NOT a fix for the loss itself — the separator went
+	// missing below this layer and that is still open.
+	for (let raw in (lines ?? [])) {
+		// no lookahead in ucode's POSIX ERE, and a NUL sentinel does not survive
+		// a ucode string — cut the fragments by hand
+		let frags = [], rest = raw, at;
+
+		while ((at = index(rest, '+CPOL:')) >= 0) {
+			let nxt = index(substr(rest, at + 6), '+CPOL:');
+
+			if (nxt < 0) {
+				push(frags, substr(rest, at));
+				break;
+			}
+
+			push(frags, substr(rest, at, 6 + nxt));
+			rest = substr(rest, at + 6 + nxt);
+		}
+
+		for (let l in frags) {
 		let m = match(l, /\+CPOL:\s*(.*)/);
 
 		if (!m)
@@ -840,6 +871,7 @@ export function parse_cpol(lines)
 		}
 
 		push(out, rec);
+		}
 	}
 
 	return out;

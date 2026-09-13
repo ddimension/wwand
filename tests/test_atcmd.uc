@@ -496,6 +496,27 @@ eq(cpol_fmt[0].eutran, true, 'cpol: ...and the AcT flags are unaffected');
 eq(cpol_fmt[1].mcc, null, 'cpol: a NAME is never mistaken for a plmn id');
 eq(cpol_fmt[2].mcc, null, 'cpol: three digits are not a plmn id');
 
+// A LOST SEPARATOR PUTS TWO RECORDS ON ONE LINE. Verbatim from a Fibocom
+// FM350-GL dumping 60+ preferred-PLMN records (ddimension/luci-app-wwand#9,
+// 2026-09-13). Taking everything after the FIRST +CPOL: was not merely
+// incomplete, it was WRONG: the trailing record became the leading one's AcT
+// fields, so 58 got bogus flags and 59 disappeared without trace.
+let cpol_torn = atcmd.parse_cpol([
+	'+CPOL: 58,0,"RO Vodafone RO",1,0,1,0,0+CPOL: 59,0,"m:tel",1,0,0,0,0',
+	'+CPOL: 56,0,"CLARO ARGENTINA",1,0,1,0,+CPOL: 57,0,"A1 HR",1,0,1,0,0',
+]);
+eq(length(cpol_torn), 4, 'cpol: a torn line yields BOTH its records, not one');
+eq(cpol_torn[0].index, 58, 'cpol: the leading record');
+eq(cpol_torn[0].utran, true, 'cpol: ...with its own flags');
+eq(cpol_torn[0].ngran, false, 'cpol: ...and no flag invented from the next record');
+eq(cpol_torn[1].index, 59, 'cpol: the record that used to vanish');
+eq(cpol_torn[1].oper, 'm:tel', 'cpol: ...with its operator intact');
+eq(cpol_torn[1].gsm, true, 'cpol: ...and its flags');
+// the first of this pair also lost a character: 4 AcT fields, not 5
+eq(cpol_torn[2].index, 56, 'cpol: a record truncated mid-field is still read');
+eq(cpol_torn[3].index, 57, 'cpol: ...and the one behind it survives');
+eq(cpol_torn[3].oper, 'A1 HR', 'cpol: ...intact');
+
 // --- temperature parsers (QModem-derived) ------------------------------------
 
 // Quectel AT+QTEMP: sensor-name digits skipped, first in-range value wins
