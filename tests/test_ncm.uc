@@ -82,6 +82,14 @@ function at_mock(handlers)
 				return c;
 		return null;
 	};
+	// position in the written history — `saw` answers whether, this answers
+	// when, which is what an ordering assertion needs
+	self.at_pos = (re) => {
+		for (let i = 0; i < length(self.written); i++)
+			if (match(self.written[i], re))
+				return i;
+		return -1;
+	};
 	// how often a command was written — distinguishes a re-run bring-up from
 	// the first one (the written history survives a close/re-open)
 	self.count = (re) => length(filter(self.written, (c) => match(c, re)));
@@ -1717,6 +1725,8 @@ push(scenarios, {
 
 let fb_slots = ncm_vendors.VENDORS.fibocom.slots;
 
+eq(fb_slots.switch_prepare, 'AT+GTESIMCFG=0,0,0',
+	'fibocom slot switch carries the GTESIMCFG prerequisite');
 eq(fb_slots.switch(2), 'AT+GTDUALSIM=1', 'fibocom slot switch maps slot 2 -> GTDUALSIM=1');
 eq(fb_slots.switch(1), 'AT+GTDUALSIM=0', 'fibocom slot switch maps slot 1 -> GTDUALSIM=0');
 eq(fb_slots.parse([ '+GTDUALSIM : 0, "SUB1", "NR"' ])?.sub, 1, 'fibocom gtdualsim parse: SUB1 active');
@@ -1827,7 +1837,12 @@ eq(hw_surc('^HCSQ:"LTE",36,28,126,22'), null, 'huawei surc: unrelated URC ignore
 
 push(scenarios, {
 	name: 's9f_fibocom_dual_slot',
-	script: fscript(),
+	// The prerequisite answers ERROR here on purpose. Ignoring that is the
+	// load-bearing decision in this path — older Fibocom firmware has no
+	// GTESIMCFG at all, and refusing to switch because a preparatory command
+	// was unknown would break every modem that never needed it. Left to the
+	// mock's implicit OK the test would pass either way and prove nothing.
+	script: fscript([ { re: /^AT\+GTESIMCFG=0,0,0$/, term: 'ERROR', lines: [] } ]),
 	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
 	run: (env) => {
 		let m = env.modem;
@@ -1859,8 +1874,17 @@ push(scenarios, {
 				eq(s4?.[1]?.card, 'present', 's9f ...and the populated one still reports present');
 
 			m.switch_slot(2, (e2) => {
-				eq(e2, null, 's9f switch_slot succeeds');
+				eq(e2, null, 's9f switch_slot succeeds even though the prerequisite errored');
 				ok(env.tr.saw(/^AT\+GTDUALSIM=1$/) != null, 's9f GTDUALSIM=1 issued');
+
+				// THE PREREQUISITE, AND ITS ORDER. An FM350-GL answers ERROR to
+				// GTDUALSIM while GTESIMCFG is 0,1,0 and accepts it at 0,0,0, so the
+				// switch has to be prepared — and prepared BEFORE, which is the whole
+				// of it (ddimension/wwand#27, #28).
+				ok(env.tr.saw(/^AT\+GTESIMCFG=0,0,0$/) != null, 's9f GTESIMCFG prerequisite sent');
+				ok(env.tr.at_pos(/^AT\+GTESIMCFG=0,0,0$/) >= 0 &&
+					env.tr.at_pos(/^AT\+GTESIMCFG=0,0,0$/) < env.tr.at_pos(/^AT\+GTDUALSIM=1$/),
+					's9f ...and BEFORE the switch, which is the point of it');
 				ok(env.tr.saw(/^AT\+CFUN=1,1$/) != null, 's9f CFUN reset after the switch');
 
 				m.switch_slot(1, (e3, res) => {

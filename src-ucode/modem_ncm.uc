@@ -831,7 +831,13 @@ export function create(opts)
 			if (!st)
 				return cb(err ?? { error: 'no_slot_status' });
 
-			self.at.send(sl.switch(physical), (e2) => {
+			// A vendor prerequisite for the switch, where the firmware has one.
+			// ITS ERROR IS IGNORED on purpose: it exists to put the modem in a
+			// state where the switch is accepted, and a modem that does not know
+			// the command is already in that state — refusing to switch because a
+			// preparatory command was unknown would break every modem that never
+			// needed it. The switch itself still has to succeed.
+			let do_switch = () => self.at.send(sl.switch(physical), (e2) => {
 				// a rejected switch command (unsupported form, modem error) must
 				// not still fire the CFUN reset — that would drop a working
 				// registration for a switch that never took. Same principle as
@@ -843,6 +849,11 @@ export function create(opts)
 				// re-read after the reset — without it the switch never took
 				self.at.send('AT+CFUN=1,1', (f2) => cb(f2));
 			}, { timeout: 8000 });
+
+			if (!sl.switch_prepare)
+				return do_switch();
+
+			self.at.send(sl.switch_prepare, () => do_switch(), { timeout: 8000 });
 		}, { timeout: 8000 });
 	};
 

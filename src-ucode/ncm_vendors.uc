@@ -1268,6 +1268,15 @@ export const VENDORS = {
 				return null;
 			},
 			switch: (n) => sprintf('AT+GTDUALSIM=%d', n - 1),
+			// GTDUALSIM IS REFUSED UNTIL THIS IS SET. The FM350-GL answers
+			// ERROR to AT+GTDUALSIM=1 while GTESIMCFG is 0,1,0, and accepts it
+			// at 0,0,0 — so every slot switch failed on that module and the
+			// explanation lived in a 4pda thread rather than anywhere a wwand
+			// user would look (ddimension/wwand#27, #28; traced and confirmed
+			// in both directions by the reporter on firmware
+			// 81600.0000.00.29.23.24, 2026-09-13). Sent before the switch, and
+			// its own error ignored: older Fibocom firmware has no GTESIMCFG.
+			switch_prepare: 'AT+GTESIMCFG=0,0,0',
 		},
 		dials: [ DIAL_GTRNDIS, DIAL_CGACT ],
 		stats: null,
