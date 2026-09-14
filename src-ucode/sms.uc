@@ -150,7 +150,13 @@ function parse_cmgl(lines)
 	let out = [], pending = null;
 
 	for (let l in (lines ?? [])) {
-		let m = match(l, /^\+CMGL:\s*([0-9]+),([0-9]+),[^,]*,([0-9]+)/);
+		// WHITESPACE AROUND EVERY COMMA, not just after the colon. 27.005 does
+		// not forbid it and a Fibocom FM350-GL emits it — `+CMGL: 1, 1,, 32`.
+		// With the header unmatched `pending` stayed null, so the PDU line under
+		// it was dropped as well and a SIM holding four messages listed as empty,
+		// with nothing in the log to say why: the AT exchange looks perfect and
+		// the failure is one regex later (ddimension/wwand#29).
+		let m = match(l, /^\+CMGL:\s*([0-9]+)\s*,\s*([0-9]+)\s*,[^,]*,\s*([0-9]+)/);
 
 		if (m) {
 			pending = { index: +m[1] };
@@ -159,7 +165,12 @@ function parse_cmgl(lines)
 
 		let t = trim(l);
 
-		if (pending && length(t) && !match(t, /^\+/)) {
+		// The payload must LOOK like a PDU: even-length hex. "any non-empty line
+		// that does not start with +" also accepted OK, ERROR and RING, and the
+		// damage was not the bad entry — decode_deliver drops that — but the
+		// CLEARED `pending`, which then lost the real PDU if one followed.
+		// A status word can never be mistaken for a PDU this way.
+		if (pending && match(t, /^([0-9A-Fa-f][0-9A-Fa-f])+$/)) {
 			pending.pdu = t;
 			push(out, pending);
 			pending = null;

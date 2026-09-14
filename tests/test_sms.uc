@@ -209,4 +209,88 @@ sms.sms_list({}, 'SM', (err, res) => {
 	eq(sent, [ 'RAW_SEND' ], 'send-first: and the message goes out over WMS, not AT');
 }
 
+// --- AT path: the CMGL header a Fibocom actually sends -----------------------
+//
+// Verbatim from an FM350-GL holding four messages (ddimension/wwand#29). The
+// spaces after the commas are the whole bug: the header regex tolerated
+// whitespace only after the colon, so `+CMGL: 1, 1,, 32` did not match, the
+// pending entry stayed null, and the PDU line under it was dropped too. The AT
+// exchange in the log looks perfect and the list comes back empty.
+
+let at_sent = [];
+
+function at_modem(lines)
+{
+	return {
+		at: {
+			send: (cmd, cb) => {
+				push(at_sent, cmd);
+				cb(null, { lines: (cmd == 'AT+CMGL=4') ? lines : [ 'OK' ] });
+			},
+		},
+	};
+}
+
+// index 1 and 3 from his paste, with their real PDUs
+let FIB = [
+	'+CMGL: 1, 1,, 32',
+	'07912618016418F9040B912618420024F00000629041316165820EE8373B0CA297E774D0BC3DAF01',
+	'+CMGL: 3, 1,, 81',
+	'07912618482452950406D05826080000629041315312824A282C3305A286E5693368DA9C82D665D01B5E9687E96F39881D4EBB41E8B03B1F0649E135D86BDA9CBA40D9FA1A346D4E5B6137885E96D7E72078781D4E83B0CC10',
+	'OK',
+];
+
+sms.sms_list(at_modem(FIB), 'SM', (err, res) => {
+	eq(err, null, 'cmgl: spaced header is not an error');
+	eq(length(res?.messages ?? []), 2, 'cmgl: both messages come back, not zero');
+	eq(res.messages[0].index, 1, 'cmgl: the index from the spaced header');
+	eq(res.messages[1].index, 3, 'cmgl: ...and the second one');
+});
+
+// the canonical unspaced form must keep working
+let TIGHT = [
+	'+CMGL: 2,1,,33',
+	'07912618016418F9040B912618420024F000006290413143548210E8373B0C0AB7D3E7F71C74BF87DD',
+	'OK',
+];
+
+sms.sms_list(at_modem(TIGHT), 'SM', (err, res) => {
+	eq(err, null, 'cmgl: unspaced header still parses');
+	eq(length(res?.messages ?? []), 1, 'cmgl: ...and yields its message');
+	eq(res.messages[0].index, 2, 'cmgl: with its index');
+});
+
+// Text mode has a different field layout (`+CMGL: 1,"REC READ","62…","",…`) and
+// this modem can produce it — the reporter's cross-check did. The PDU-mode
+// header must not match it, or a text-mode listing would be paired with the
+// hex line under it and decoded as something it is not.
+let TEXT_MODE = [
+	'+CMGL: 1,"REC READ","62812400420","","2026/09/14 13:16:56+28"',
+	'0068006F006C00610020007400650073007400200073006D00730035',
+	'OK',
+];
+
+sms.sms_list(at_modem(TEXT_MODE), 'SM', (err, res) => {
+	eq(err, null, 'cmgl: a text-mode listing is not an error');
+	eq(length(res?.messages ?? []), 0, 'cmgl: ...and is not parsed as PDU mode');
+});
+
+// A LINE BETWEEN A HEADER AND ITS PDU. Accepting "any non-empty line that does
+// not start with +" as the payload meant an interleaved status word — RING here,
+// but OK or a bare vendor notice just as well — was stored as the PDU, cleared
+// `pending`, and the real PDU under it was then dropped with nothing pending to
+// attach it to. Requiring even-length hex makes the status word invisible and
+// the message survives.
+let INTERLEAVED = [
+	'+CMGL: 7, 1,, 32',
+	'RING',
+	'07912618016418F9040B912618420024F00000629041316165820EE8373B0CA297E774D0BC3DAF01',
+	'OK',
+];
+
+sms.sms_list(at_modem(INTERLEAVED), 'SM', (err, res) => {
+	eq(length(res?.messages ?? []), 1, 'cmgl: a status line between header and PDU does not lose the message');
+	eq(res.messages[0].index, 7, 'cmgl: ...and it keeps its index');
+});
+
 done('test_sms');
