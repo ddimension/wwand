@@ -222,8 +222,18 @@ def main():
     mk = open(args.makefile).read()
     owners = makefile_owners(mk, uc)
 
+    # `# check-packaging: not-installed <path> (reason)` — read once, for both
+    # the .uc modules and the files/ entries below. A packaging may legitimately
+    # carry a source tree it does not ship every part of: the upstream
+    # openwrt/packages Makefile has no wwand-apntest, so src-ucode/apntest/ is in
+    # its tarball and installed by nothing, on purpose. Declaring it in the
+    # Makefile that made the decision leaves the OTHER Makefile failing if the
+    # same install is ever dropped there by accident.
+    declared = set(re.findall(r'^#\s*check-packaging:\s*not-installed\s+(\S+)',
+                              mk, re.M))
+
     for f in uc:
-        if f not in owners:
+        if f not in owners and ('src-ucode/' + f) not in declared and f not in declared:
             fail('%s is installed by NO package (it would ship nowhere)' % f)
     for f, pkgs in sorted(owners.items()):
         if f not in uc:
@@ -380,11 +390,6 @@ def main():
     # ever dropped there by accident — which a global allowlist would hide.
     #
     #   # check-packaging: not-installed files/wwand.hotplug.e182e (reason)
-    declared = set()
-    for m in re.finditer(r'^#\s*check-packaging:\s*not-installed\s+(\S+)',
-                         mk, re.M):
-        declared.add(m.group(1))
-
     for f in files:
         if f.endswith('/') or f in refs or f in NOT_INSTALLED or f in declared:
             continue
