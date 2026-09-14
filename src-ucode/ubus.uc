@@ -192,6 +192,25 @@ export function publish(conn, daemon, log)
 
 		// eSIM management (optional wwand-esim package; reports
 		// esim_not_installed when absent)
+		// READ-ONLY twin of modem_esim's `profiles` op, and `op` is deliberately
+		// NOT a parameter: rpcd grants a METHOD, never a method with certain
+		// arguments, so modem_esim has to live in the WRITE set — its other ops
+		// enable, disable and delete profiles. That left the status page needing
+		// write permission to render a profile list, so a read-only operator was
+		// denied on every eUICC box (openwrt/luci#8917).
+		//
+		// NOT modem_euicc_profiles, which already exists and is read-granted:
+		// that one is the modem's own enumeration and needs a QMI UIM client, so
+		// it cannot serve an NCM modem at all. This goes through the same APDU
+		// ladder as the write method (MBIM UICC -> QMI UIM -> AT), which is what
+		// an FM350-GL on NCM is read with.
+		modem_esim_profiles: {
+			args: { modem: '', slot: 0, ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_esim(req.args.modem, 'profiles',
+					{ slot: req.args.slot }, ok_reply(reply))),
+		},
+
 		modem_esim: {
 			args: { modem: '', op: '', slot: 0, iccid: '',
 			        activation_code: '', confirmation_code: '',

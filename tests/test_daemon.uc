@@ -214,6 +214,30 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 	// ubus ACL cannot filter a result, so anything that leaks in here is
 	// readable by `nobody` on every box that installs the shipped ACL
 	// (ddimension/wwand#14).
+	// modem_esim_profiles is the READ-ONLY twin of modem_esim's `profiles` op.
+	// The property that matters is that `op` is not a parameter, so no caller
+	// can turn a read-granted method into a delete — rpcd grants a METHOD and
+	// cannot look at arguments (openwrt/luci#8917).
+	conn_cli.defer('wwand', 'modem_esim_profiles', { modem: 'm0' }, (ce, re) => {
+		eq(ce, 0, 'esim-read: the method exists and routes');
+		// the esim bridge is reached and reports the missing transport, which is
+		// what proves this is wired to the same implementation modem_esim uses
+		eq(re?.error, 'esim', 'esim-read: reaches the esim bridge');
+		eq(re?.detail?.error, 'no_esim_backend', 'esim-read: ...and it ran the read op');
+
+		// A caller must not be able to smuggle a write op past the argument
+		// policy — and the ICCID is deliberately INVALID so the two routes are
+		// distinguishable: `delete` rejects it with invalid_argument before it
+		// ever reaches a backend, while the hard-coded `profiles` gets as far as
+		// no_esim_backend. A valid ICCID would let both end in the same error
+		// and prove nothing.
+		conn_cli.defer('wwand', 'modem_esim_profiles',
+			{ modem: 'm0', op: 'delete', iccid: 'not-an-iccid' }, (cw, rw) => {
+			ok(cw != 0 || (rw?.error == 'esim' && rw?.detail?.error == 'no_esim_backend'),
+				'esim-read: an op argument is refused or ignored, never honoured');
+		});
+	});
+
 	conn_cli.defer('wwand', 'modem_telemetry', {}, (ct, tl) => {
 		eq(ct, 0, 'telemetry: ok');
 		eq(tl.modems.m0.state, 'READY', 'telemetry: carries the state collectd graphs');
