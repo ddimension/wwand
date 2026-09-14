@@ -23,7 +23,8 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   the separate `ucode-mod-wwand-io` package is gone, `PROVIDES` covers old
   configs), `wwand-qmi`, `wwand-mbim` (DEPENDS wwand-qmi), `wwand-ncm`,
   `wwand-mhi` (PCIe/MHI transport + MHI kmods + the wwan-subsystem hotplug;
-  backend-neutral, pair with wwand-qmi/-mbim), `wwand-esim`, plus two optional
+  backend-neutral, pair with wwand-qmi/-mbim), `wwand-esim`, `wwand-qlog`
+  (on-demand Quectel QLog diag capture, `wwandctl qlog`; backend-neutral), plus two optional
   DATAPATH add-ons — `wwand-datapath-rmnet_nss` (vendor `qmi_wwan_q`, USB) and
   `wwand-datapath-rmnet_nss_mhi` (vendor `pcie_mhi`, PCIe/MHI) — which adopt the
   QMAP children those drivers register so Qualcomm NSS offload survives.

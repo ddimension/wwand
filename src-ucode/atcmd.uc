@@ -48,12 +48,17 @@ const LOCAL_PORTS = {
 	// in the comment but not in the table, so nothing could find the port:
 	// HW-verified on 2026-08-31 — AT+QGPS=1 answers OK (AT+QGPS? read back 0
 	// before, 1 after) and /dev/ttyUSB1 then streams $GPGGA/$GPRMC/$GPVTG/$GPGSA.
-	'2c7c:0122': { '1': 'gps', '2': 'at', '3': 'at2' },
+	// The DIAG role ('qcdm') was likewise only in the comment. wwand never
+	// speaks DM on it; it is resolved so the wwand-qlog add-on can hand the
+	// node to Quectel QLog (-p). NOT HW-verified as a capture port — the
+	// interface number is the one the composition comment above records.
+	'2c7c:0122': { '0': 'qcdm', '1': 'gps', '2': 'at', '3': 'at2' },
 	// MeiG SLM770A (ASR): if2 DIAG, if3 AT secondary, if4 AT, if5 NMEA
 	// (HW-verified on a Cudy LT300; first-ttyUSB heuristic picks the mute
 	// DIAG port). 4d57 = RNDIS composition, 4d58 = ECM.
-	'2dee:4d57': { '4': 'at', '3': 'at2' },
-	'2dee:4d58': { '4': 'at', '3': 'at2' },
+	// (QLog itself does not accept this USB id — see qlog.uc `usbid_supported`.)
+	'2dee:4d57': { '2': 'qcdm', '4': 'at', '3': 'at2' },
+	'2dee:4d58': { '2': 'qcdm', '4': 'at', '3': 'at2' },
 	// Fibocom FM350-GL (MediaTek T700; RNDIS compositions only — AT+GTUSBMODE
 	// 40/41). AT port per the OpenWrt forum dumps + ModemManager udev rules for
 	// this module: iface 4 in mode 40 (0e8d:7126), iface 6 in mode 41
@@ -215,6 +220,30 @@ export function find_mhi_at(fx)
 	return null;
 };
 
+// The Qualcomm diagnostic (DM/DIAG) character device on a PCIe/MHI modem driven
+// by Quectel's out-of-tree `pcie_mhi` driver. wwand never opens it — it is
+// resolved so the wwand-qlog add-on can pass it to QLog's -p.
+//
+// Only the vendor driver's node is probed here. The MAINLINE mhi_wwan_ctrl
+// names its diag port /dev/wwan<N>qcdm<M> instead, and QLog 1.5.8 does not
+// accept that name: main.c:1180-1226 routes only /dev/mhi*, /dev/sdiag*,
+// /dev/ttyUSB*, /dev/ttyACM* and /sys/bus/usb/... — anything else falls through
+// to the USB-only scan in usb_linux.c:233 ql_find_quectel_modules(), which finds
+// nothing on a PCIe modem and loops "No Quectel Modules found" forever.
+// discovery.wwan_port_by_type() resolves the mainline node separately so the CLI
+// can say so rather than start a capture that can never work.
+export function find_mhi_diag(fx)
+{
+	for (let pat in [ '/dev/mhi_DIAG*', '/dev/mhi_*DIAG*' ]) {
+		let hits = sort(fx.glob(pat) ?? []);
+
+		if (length(hits))
+			return hits[0];
+	}
+
+	return null;
+};
+
 // find_tty(fx, device, tty_override, base_override):
 //   device        a cdc-wdm control device ('/dev/cdc-wdmN'); the USB parent is
 //                 derived from it. May be null when base_override is supplied.
@@ -341,10 +370,16 @@ export function find_tty(fx, device, tty_override, base_override, skip)
 // (role 'gps') when the table names one. Running telemetry
 // polls on the secondary keeps them from serializing behind dial / cell-lock /
 // user (modem_at) commands on the control channel — the AT queue is per-tty.
-// Returns { primary, telemetry, gps }; telemetry is null when there is no
+// Returns { primary, telemetry, gps, qcdm }; telemetry is null when there is no
 // distinct second AT port (the caller then reuses the primary). Only an
 // explicitly role-tagged 'at2' port is used — never a guessed one, which could
 // hang.
+//
+// `qcdm` is the Qualcomm diagnostic (DM/DIAG) port. Like `gps` it is REPORTED
+// and never opened: wwand has no DM decoder, the port exists so the optional
+// wwand-qlog add-on can hand it to Quectel QLog (`-p`). The role rides in the
+// same generated table as the others (ModemManager ID_MM_PORT_TYPE_QCDM); it
+// used to be dropped by tools/gen-atport-table.py.
 //
 // `gps` is the modem's NMEA stream, and wwand NEVER opens it: it is reported so
 // gpsd can be pointed at it (see modem_common, which publishes a stable
@@ -356,7 +391,7 @@ export function find_at_channels(fx, device, tty_override, base_override, skip)
 	let primary = find_tty(fx, device, tty_override, base_override, skip);
 
 	if (!primary)
-		return { primary: null, telemetry: null, gps: null };
+		return { primary: null, telemetry: null, gps: null, qcdm: null };
 
 	// resolve the USB-device dir to enumerate sibling ttys for the 'at2' role:
 	// explicit base, else the cdc-wdm device, else the primary tty's own USB
@@ -394,14 +429,14 @@ export function find_at_channels(fx, device, tty_override, base_override, skip)
 	}
 
 	if (base == null)
-		return { primary: primary, telemetry: null, gps: null };
+		return { primary: primary, telemetry: null, gps: null, qcdm: null };
 
 	let ports = LOCAL_PORTS[sprintf('%s:%s', vid, pid)] ?? atport_table()[sprintf('%s:%s', vid, pid)];
 
 	if (!ports)
-		return { primary: primary, telemetry: null, gps: null };
+		return { primary: primary, telemetry: null, gps: null, qcdm: null };
 
-	let telemetry = null, gps = null;
+	let telemetry = null, gps = null, qcdm = null;
 
 	// One pass for both roles. It used to return from inside the loop on the
 	// first 'at2', so a 'gps' port enumerating after it would never be seen.
@@ -424,9 +459,13 @@ export function find_at_channels(fx, device, tty_override, base_override, skip)
 		// interface would otherwise have gpsd and wwand on the same fd
 		else if (role == 'gps' && gps == null && dev != primary)
 			gps = dev;
+
+		// the DIAG port is never the one we talk AT on either
+		else if (role == 'qcdm' && qcdm == null && dev != primary)
+			qcdm = dev;
 	}
 
-	return { primary: primary, telemetry: telemetry, gps: gps };
+	return { primary: primary, telemetry: telemetry, gps: gps, qcdm: qcdm };
 };
 
 // --- transport ---------------------------------------------------------------

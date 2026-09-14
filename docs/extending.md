@@ -270,6 +270,25 @@ Their head comments cite the driver lines each decision comes from, and
 `tests/test_datapath_nss.uc` / `test_datapath_nss_mhi.uc` pin them. Neither has
 run on hardware — read the caveat in each file before trusting a number.
 
+### A tool that runs BESIDE wwand, not inside it
+
+Not every capability is a backend or a plugin. `wwand-qlog` is the shape to copy
+when the work is really "run an external tool against the modem, on demand":
+
+- the logic is one `require()`d plain script (`src-ucode/qlog.uc`) shipped by an
+  add-on package, so the base daemon neither loads nor pays for it;
+- `wwandctl` `require()`s it in a `try`/`catch` and says
+  `"wwand-qlog package not installed"` when it is absent — an `import` would make
+  the CLI itself fail to load on a box without the package;
+- the daemon's only contribution is to RESOLVE and REPORT what the tool needs
+  (`status.diag_port`, exactly like `gps_port`), never to open or drive it;
+- every effect goes through an injectable `fx`, so the whole thing — spawn
+  command, refusals, process reconciliation — is host-tested against a fake
+  `/proc` (`tests/test_qlog.uc`);
+- the external tool's own options are passed through VERBATIM rather than
+  re-modelled, so the wrapper does not need a release each time the tool grows a
+  flag.
+
 ## 5. Adding telemetry
 
 Telemetry decoders live in the per-transport backends and are chosen per

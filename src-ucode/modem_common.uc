@@ -1164,6 +1164,9 @@ export function close_at(self)
 	self.at_telemetry = null;
 	self.at_tty = null;
 	self.at_telemetry_tty = null;
+	// the diag node is never opened, but it is resolved next to the AT ports
+	// and must not survive a re-enumeration that renumbers the ttys
+	self.diag_tty = null;
 
 	// a new AT channel is re-probed from scratch. What telemetry_at() retired
 	// was a fact about the firmware behind the OLD channel, and the reason to
@@ -1396,6 +1399,27 @@ function open_at_over_wdm(self, o, fxi, log, next)
 	}, { timeout: o.at_opts?.probe_timeout ?? 10000 });
 }
 
+// The modem's Qualcomm diagnostic (DM/DIAG) node, RESOLVED AND NEVER OPENED —
+// exactly like the NMEA port above it. wwand has no DM decoder; the node is
+// published as `diag_port` in `ubus call wwand status` so the optional
+// wwand-qlog add-on (and `wwandctl qlog`) can hand it to Quectel QLog's -p.
+//
+// Order: explicit `option diag_port` > the generated USB role table ('qcdm')
+// > the vendor pcie_mhi node (/dev/mhi_DIAG) > the mainline kernel-wwan node
+// (/dev/wwanNqcdmM). The last one is reported even though QLog 1.5.8 refuses
+// it (see atcmd.find_mhi_diag) — knowing the port exists and why it cannot be
+// used is worth more than reporting nothing.
+export function resolve_diag_port(self, fxi, ch)
+{
+	let explicit = self.config?.diag_port;
+
+	if (length(explicit ?? ''))
+		return explicit;
+
+	return ch?.qcdm ?? atcmd.find_mhi_diag(fxi) ??
+	       discovery.wwan_port_by_type(self.device, 'QCDM', fxi);
+};
+
 export function open_at(self, o)
 {
 	let log = o.log;
@@ -1421,10 +1445,16 @@ export function open_at(self, o)
 	    discovery.driver_of(dev, fxi) == 'huawei_cdc_ncm')
 		return open_at_over_wdm(self, o, fxi, log, () => {
 			let ch = atcmd.find_at_channels(fxi, self.device, self.config.tty, o.base_override);
+			self.diag_tty = resolve_diag_port(self, fxi, ch);
 			open_at_tty(self, o, fxi, log, ch);
 		});
 
 	let ch = atcmd.find_at_channels(fxi, self.device, self.config.tty, o.base_override);
+
+	// resolved here, not inside open_at_tty: a modem with no AT tty at all
+	// (PCIe/MHI without a DUN channel) still has a diag node, and open_at_tty
+	// returns early in that case.
+	self.diag_tty = resolve_diag_port(self, fxi, ch);
 
 	open_at_tty(self, o, fxi, log, ch);
 };

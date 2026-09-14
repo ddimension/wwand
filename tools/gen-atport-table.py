@@ -11,7 +11,8 @@ mapping "vid:pid" -> { "<usb interface number>": role }, with roles:
   at2   AT secondary port
   ppp   AT/PPP port
   gps   NMEA/GPS data port
-Other tags (QCDM, AUDIO, IGNORE) are dropped to keep the table small.
+  qcdm  Qualcomm diagnostic (DM/DIAG) port -- the port QLog captures on
+Other tags (AUDIO, IGNORE) are dropped to keep the table small.
 """
 
 import re
@@ -24,6 +25,9 @@ ROLE_MAP = {
     'ID_MM_PORT_TYPE_AT_SECONDARY': 'at2',
     'ID_MM_PORT_TYPE_AT_PPP': 'ppp',
     'ID_MM_PORT_TYPE_GPS': 'gps',
+    # QCDM is the diag/DM port. wwand never speaks DM itself; it resolves the
+    # node so the wwand-qlog add-on can hand it to Quectel QLog (-p).
+    'ID_MM_PORT_TYPE_QCDM': 'qcdm',
 }
 
 LINE_RE = re.compile(
@@ -72,7 +76,7 @@ def main():
     except Exception:
         commit = 'unknown'
 
-    print('// wwand — AT/GPS port roles by USB id and interface number.')
+    print('// wwand — AT/GPS/QCDM port roles by USB id and interface number.')
     print('// GENERATED FILE, DO NOT EDIT.')
     print(f'// Source: ModemManager port-type udev rules (commit {commit}),')
     print('// https://gitlab.freedesktop.org/mobile-broadband/ModemManager')

@@ -119,6 +119,8 @@ set(WWAND_UCODE_PLAIN
   codec/schema/loc_lazy.uc codec/schema/wms_lazy.uc
   # datapath add-ons: require()d plain scripts that RETURN their implementation
   datapath_rmnet_nss.uc datapath_rmnet_nss_mhi.uc
+  # wwand-qlog: require()d by wwandctl, which must still load without the package
+  qlog.uc
 )
 
 # native/extern extensions resolved at runtime

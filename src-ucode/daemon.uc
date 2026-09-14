@@ -2279,6 +2279,13 @@ export function create(opts)
 				// wwand never opens it and never links it — asking the daemon is
 				// the interface, so a re-enumerated modem answers with its new tty
 				gps_port: entry.modem?.gps_tty,
+				// the modem's Qualcomm diagnostic (DM/DIAG) node, reported for
+				// the optional wwand-qlog add-on to point QLog at. Same rule as
+				// gps_port: wwand resolves it and never opens it, so a
+				// re-enumerated modem answers with its new node. Null when no
+				// 'qcdm' role is known for this USB id and no `option diag_port`
+				// is set — `wwandctl qlog --port` is then the way in.
+				diag_port: entry.modem?.diag_tty,
 				// can this model's control protocol be switched (QMI <-> MBIM)?
 				// The AT recipe is per-model and hardware-unverified ones are
 				// deliberately not offered, so a UI must gate on this rather

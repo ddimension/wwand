@@ -647,6 +647,30 @@ uloop.run();
 	eq(discovery.preferred_wwan_port('cdc-wdm0', fx), 'cdc-wdm0',
 		'wwan: a cdc-wdm name is not a wwan port and passes through');
 
+	// The diag node of the same wwan device. wwan_control_ports() deliberately
+	// reports only QMI/MBIM (a qcdm node must never be picked as a CONTROL
+	// port), so a QCDM lookup goes through its own narrower path. The
+	// wwand-qlog add-on is the consumer; wwand itself never opens it.
+	let fxq = { ...fx,
+		glob: (p) => (p == '/sys/class/wwan/*')
+			? [ '/sys/class/wwan/wwan0qmi0', '/sys/class/wwan/wwan0qcdm0' ] : [],
+		read: (p) => ({
+			'/sys/class/wwan/wwan0qmi0/type':  'QMI\n',
+			'/sys/class/wwan/wwan0qcdm0/type': 'QCDM\n',
+		})[p],
+	};
+	eq(discovery.wwan_port_by_type('/dev/wwan0qmi0', 'QCDM', fxq), '/dev/wwan0qcdm0',
+		'wwan: the diag sibling of a QMI-driven MHI modem is resolvable');
+	eq(discovery.wwan_port_by_type('wwan0qmi0', 'qcdm', fxq), '/dev/wwan0qcdm0',
+		'wwan: ...matched case-insensitively, bare name or /dev path');
+	eq(discovery.wwan_port_by_type('/dev/wwan0qmi0', 'FIREHOSE', fxq), null,
+		'wwan: a type this device does not expose is null, not a guess');
+	eq(discovery.wwan_port_by_type('/dev/cdc-wdm0', 'QCDM', fxq), null,
+		'wwan: a USB modem has no wwan device to have siblings on');
+	// and the qcdm node is still not a control port
+	eq(length(discovery.list_present(fxq)), 1,
+		'wwan: a qcdm node is never enumerated as a control device');
+
 	// a second modem must not be treated as a sibling of the first
 	let fx2 = { ...fx,
 		glob: (p) => (p == '/sys/class/wwan/*')
