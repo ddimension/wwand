@@ -93,7 +93,7 @@ export function publish(conn, daemon, log)
 			call: (req) => {
 				let st = daemon.status();
 				let want = req.args.modem;
-				let out = {};
+				let out = {}, ctxs = {};
 
 				for (let name, m in (st?.modems ?? {})) {
 					if (want != null && want != '' && name != want)
@@ -107,7 +107,21 @@ export function publish(conn, daemon, log)
 					};
 				}
 
-				return { modems: out };
+				// collectd also graphs whether each configured connection is up, and
+				// the feed used to get that from status() before this method existed —
+				// so dropping it here silently stopped `gauge-connected` from ever
+				// being emitted, against what reference.md promises. ONLY the state:
+				// the status context also carries addresses and the interface name,
+				// which this deliberately narrow endpoint has no business handing to
+				// an unprivileged reader.
+				for (let cname, c in (st?.contexts ?? {})) {
+					if (want != null && want != '' && c?.modem != want)
+						continue;
+
+					ctxs[cname] = { state: c?.state };
+				}
+
+				return { modems: out, contexts: ctxs };
 			},
 		},
 

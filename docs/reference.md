@@ -1245,7 +1245,7 @@ Note what is **not** in that ACL: `status`. It carries `iccid`, `imsi`, `imei`
 and `msisdn`, and a ubus ACL cannot filter a result — it can only allow or deny a
 whole method. `modem_telemetry` exists precisely so the feed can read the four
 per-modem values it graphs (state, temperature, attempts, protocol errors)
-without subscriber identifiers being readable by every process running as
+and the state of each context, without subscriber identifiers being readable by every process running as
 `nobody`.
 
 collectd's exec plugin does **not** poll the command: it forks it once and reads
@@ -1300,7 +1300,7 @@ when called from LuCI).
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
 | `modem_signal` | `modem` | last raw signal info (LTE/NR5G/WCDMA/GSM metrics) |
-| `modem_telemetry` | `modem` (optional) | per-modem state, temperature, attempts, protocol errors — **no subscriber identifiers**, so it can be granted to an unprivileged reader (see [Feeding collectd](#feeding-collectd-wwandctl-collectd)) |
+| `modem_telemetry` | `modem` (optional) | per-modem state, temperature, attempts and protocol errors, plus each context's state — **no subscriber identifiers**, so it can be granted to an unprivileged reader (see [Feeding collectd](#feeding-collectd-wwandctl-collectd)) |
 | `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` + `temperature` (also on `status`, which is the canonical place — same field, kept here for compatibility) |
 | `modem_location` | `modem` | last QMI LOC fix (when `location` is enabled) |
 | `modem_at` | `modem`, `command`, `timeout?` | run an AT command on the modem's AT port |

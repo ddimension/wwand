@@ -49,7 +49,6 @@ function status()
 	return call('status', {});
 }
 
-
 // resolve the modem argument: explicit name, else the single managed modem.
 // Commands taking values after an optional modem call this with the first
 // argument — if it names a modem it is consumed, else the default applies.
@@ -327,7 +326,6 @@ function cmd_esim(st, args)
 	}
 }
 
-
 const HELP = `wwandctl — control the wwand cellular connection manager
 
 Usage: wwandctl [--json] <command> [modem] [args...]
@@ -384,7 +382,6 @@ eSIM (needs the wwand-esim package)
   esim [modem] download <activation_code> [confirmation_code] [--no-notify]
   esim [modem] download-status          poll a running download
   esim [modem] notifications | notify   pending eUICC notifications (ES9+)
-
 
 Maintenance
   reset [modem]          modem reset (GPIO if configured, else backend soft reset)
@@ -752,7 +749,6 @@ case 'probe': {
 case 'esim':
 	cmd_esim(status(), args);
 	break;
-
 
 case 'reload':
 	call_ok('reload', {});

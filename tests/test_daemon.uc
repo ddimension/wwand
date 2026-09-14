@@ -244,6 +244,20 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		eq(tl.modems.m0.attempts != null, true, 'telemetry: ...and the attempt counter');
 		eq(tl.modems.m0.proto_errors != null, true, 'telemetry: ...and the protocol errors');
 
+		// the collectd feed graphs `gauge-connected` per interface out of this —
+		// it used to read status() for that, and when this method replaced the
+		// call the contexts were not carried over, so the series was silently
+		// never emitted. State ONLY: the status context also carries addresses
+		// and the interface name, which an unprivileged reader has no business
+		// getting from here.
+		// `?.` on purpose: a plain tl.contexts.wan THROWS when the field is
+		// missing, which aborts the rest of this callback — the suite then
+		// reports fewer checks and zero failures, and the counterproof looks
+		// like the fix was unnecessary. Ask the question so it can be answered
+		// with "no".
+		eq(tl?.contexts?.wan, { state: 'CONNECTED' }, 'telemetry: carries the context state');
+		eq(length(keys(tl?.contexts?.wan ?? {})), 1, 'telemetry: ...and nothing else about it');
+
 		for (let k in [ 'iccid', 'imsi', 'imei', 'msisdn', 'model', 'serial' ])
 			eq(tl.modems.m0[k], null, sprintf('telemetry: no %s — an ACL cannot filter a result', k));
 
@@ -251,6 +265,7 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		conn_cli.defer('wwand', 'modem_telemetry', { modem: 'nosuch' }, (cn, tn) => {
 			eq(cn, 0, 'telemetry: a filter for an unknown modem is not an error');
 			eq(length(keys(tn.modems ?? {})), 0, 'telemetry: ...it just selects nothing');
+			eq(length(keys(tn.contexts ?? {})), 0, 'telemetry: ...including its contexts');
 		});
 	});
 

@@ -371,7 +371,7 @@ function read_plmn_lists_inner(modem, cb)
 	let user_via_crsm = (done) => {
 		if (!modem.at)
 			return at_user(done);
-		
+
 		// GET RESPONSE first: the file is a list of 5-byte records and its size
 		// is per-card, so a fixed length would truncate a long list (this one has
 		// 30+) or overrun a short one. Falls back to a generous read when the
@@ -379,27 +379,27 @@ function read_plmn_lists_inner(modem, cb)
 		modem.at.send(sprintf('AT+CRSM=192,%d,0,0,15', EF_PLMN_USER.file_id), (gerr, gres) => {
 			let g = gerr ? null : atcmd.parse_crsm(gres?.lines);
 			let size = 0;
-			
+
 			// TS 51.011 §9.2.1: bytes 2..3 of the GET RESPONSE are the file size
 			if (g?.ok && g.data && length(g.data) >= 8) {
 				let b = hex_to_arr(g.data);
 				size = ((b[2] ?? 0) << 8) | (b[3] ?? 0);
 			}
-			
+
 			// 250 is under the 255 the CRSM length field can carry and covers 50
 			// records; a card with more needs the GET RESPONSE path anyway.
 			if (size <= 0 || size > 250)
 				size = 250;
-			
+
 			modem.at.send(sprintf('AT+CRSM=176,%d,0,0,%d', EF_PLMN_USER.file_id, size), (err, res) => {
 				let r = err ? null : atcmd.parse_crsm(res?.lines);
 				let ents = (r && r.ok && r.data) ? decode_plmn_act(hex_to_arr(r.data)) : null;
-				
+
 				if (ents != null && length(ents)) {
 					out.user = ents;
 					return done();
 				}
-				
+
 				at_user(done);
 			}, { timeout: 8000 });
 		}, { timeout: 5000 });
