@@ -314,7 +314,7 @@ def main():
         # that may legitimately be absent — it sits inside a function behind a
         # try/catch that reports "wwand-X package not installed" — so counting
         # it here would flag the very mechanism that makes the split safe
-        # (wwandctl.uc's load_qlog, the *_lazy backend shims).
+        # (the *_lazy backend shims, esim_bridge).
         mods = set(re.findall(r"from\s+'wwand[./]([a-zA-Z0-9_.]+)'", src))
         for mod in mods:
             target = mod.replace('.', '/') + '.uc'
