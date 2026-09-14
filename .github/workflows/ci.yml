@@ -85,12 +85,25 @@ jobs:
         # under files/ minus the two things that are not shell:
         #   files/wwand-migrate  is ucode (#!/usr/bin/env ucode)
         #   files/wwand.config   is a UCI config sample, not a script
+        #   files/*.json         data, and CHECKED AS JSON in the next step
         # Adding a new shell file needs no change here; adding a new NON-shell
-        # one fails loudly, which is the right way round.
+        # one fails loudly, which is the right way round — files/wwand-acl.json
+        # did exactly that when the ubus ACL landed, and the answer is not to
+        # silence it but to check it as what it is.
         run: |
           set -eu
           list=$(git ls-files 'files/*' 'tests/*.sh' \
-                 | grep -vE '^files/(wwand-migrate|wwand\.config)$')
+                 | grep -vE '^files/(wwand-migrate|wwand\.config)$|\.json$')
           echo "linting:"; echo "$list" | sed 's/^/  /'
           # shellcheck disable=SC2086  # word splitting is intended
           shellcheck -S error -s sh $list
+
+      - name: json files/
+        # what shellcheck cannot say anything about, so that excluding it from
+        # the list above is not the same as leaving it unchecked
+        run: |
+          set -eu
+          for f in $(git ls-files 'files/*.json'); do
+            echo "  $f"
+            python3 -m json.tool "$f" > /dev/null
+          done
