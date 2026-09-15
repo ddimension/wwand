@@ -56,6 +56,15 @@ function at_mock(handlers)
 				break;
 			}
 
+		// `on_write`: run something the MOMENT this command goes out, before its
+		// answer comes back. It is the only way to express "the modem vanished
+		// between two hops of a chain" — a real field sequence, since a slot
+		// switch calls modem.stop() and that nulls the AT engine a callback
+		// chain is still walking. Racing a timer against the code under test
+		// would not be a test.
+		if (h?.on_write)
+			h.on_write();
+
 		let lines = h?.lines ?? [];
 		let urcs = h?.urcs ?? [];
 		let term = h?.term ?? 'OK';
@@ -265,6 +274,42 @@ push(scenarios, {
 					'c5greg: still not re-probed after registering');
 				env.finish();
 			});
+		});
+	},
+});
+
+// --- a modem that vanishes between two hops of the activation chain ----------
+//
+// Every AT call in context_ncm runs from the callback of the one before it, and
+// modem.stop() — which a SIM slot switch calls — closes the AT engine and nulls
+// modem.at right in that gap. Five of those call sites guarded against it and
+// nine did not, and reading `.send` off the null throws inside a uloop callback,
+// where it does not fail the context: it takes the daemon down.
+//
+// Reproduced by nulling the engine the moment the dial command goes out, which
+// is what close_at() does, while leaving the mock able to answer — so the chain
+// really does continue into the next hop, the way it does in the field.
+//
+// NOTE this is NOT the crash reported in ddimension/wwand#34; that one is still
+// unlocated (its traceback carries bytecode offsets and no file). It is the same
+// SHAPE, found by inspection while reading that report.
+let vanish = {};
+
+push(scenarios, {
+	name: 's9i_context_survives_a_modem_that_vanishes_mid_chain',
+	script: script([ { re: /^AT\+QNETDEVCTL=1,1,1$/, on_write: () => vanish.fn && vanish.fn() } ]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		vanish.fn = () => { env.modem.at = null; };
+
+		env.ctx.up((err) => {
+			vanish.fn = null;
+
+			ok(err != null,
+				'vanished modem: activation fails cleanly instead of throwing');
+			ok(env.ctx.state != 'CONNECTED',
+				'vanished modem: the context does not report a bearer it never got');
+			env.finish();
 		});
 	},
 });

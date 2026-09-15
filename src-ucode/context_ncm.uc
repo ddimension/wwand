@@ -85,6 +85,25 @@ export function create(opts)
 		interval_ms: stats_interval,
 	});
 
+	// A MODEM CAN VANISH BETWEEN TWO HOPS OF A CHAIN. Every AT call below runs
+	// from the callback of the one before it, and modem.stop() — which a SIM
+	// slot switch calls, and which closes the AT engine and nulls modem.at —
+	// can land in that gap. Reading `.send` off that null throws, and the throw
+	// happens inside a uloop callback, where it does not fail the context: it
+	// takes the whole daemon down. Field-traced on an FM350-GL five seconds
+	// after `sim_slot 2: switched, modem re-enumerating` (ddimension/wwand#34).
+	//
+	// Reported to the caller as an ordinary AT error instead. Every callback
+	// here already branches on `err` and treats an unknown answer as "keep the
+	// context up", which is the right reading: the modem is being replaced, not
+	// the bearer lost, and the modem's own lifecycle drives what happens next.
+	let at_send = (cmd, cb, o) => {
+		if (!self.modem.at)
+			return cb({ error: 'modem_gone' });
+
+		return self.modem.at.send(cmd, cb, o);
+	};
+
 	// stats controls forward-declared BEFORE the scaffolding arrow that
 	// captures stop_stats (ucode resolves lexical refs only for bindings
 	// already declared at definition time)
@@ -278,7 +297,7 @@ export function create(opts)
 		if (self.modem.vendor?.ip_config)
 			return self.modem.vendor.ip_config(self.modem, self.cid, self.config, cb);
 
-		self.modem.at.send(sprintf('AT+CGCONTRDP=%d', self.cid), (err, res) => {
+		at_send(sprintf('AT+CGCONTRDP=%d', self.cid), (err, res) => {
 			if (err)
 				return cb(err);
 
@@ -368,7 +387,7 @@ export function create(opts)
 				// empty reply for our cid is a dropped bearer. Conservative: an AT
 				// error, an unparsable line, or any non-zero address keep the context up.
 				if (!dial.status) {
-					self.modem.at.send(sprintf('AT+CGPADDR=%d', self.cid), (err, res) => {
+					at_send(sprintf('AT+CGPADDR=%d', self.cid), (err, res) => {
 						if (self.state != 'CONNECTED')
 							return;
 
@@ -407,7 +426,7 @@ export function create(opts)
 				return;
 			}
 
-			self.modem.at.send(vendor.stats, (err, res) => {
+			at_send(vendor.stats, (err, res) => {
 				if (self.state != 'CONNECTED')
 					return;
 
@@ -456,7 +475,7 @@ export function create(opts)
 		};
 
 		if (dial.status)
-			self.modem.at.send(dial.status, (err, res) => {
+			at_send(dial.status, (err, res) => {
 				if (self.state != 'CONNECTED')
 					return;
 
@@ -561,102 +580,113 @@ export function create(opts)
 		// config (and no auth is configured — those cannot be read back), skip the
 		// CGDCONT/auth NV writes. Saves NV wear and avoids upsetting firmwares that
 		// dislike context rewrites while a bearer is being set up (MeiG ECMDUP).
-		let run_setup = (cmds) => self.modem.at.run_sequence(cmds, () => {
-			if (self.state != 'ACTIVATING')
-				return;   // aborted (modem lost) while configuring
+		// run_sequence's callback takes no error, so the modem-gone check cannot
+		// be reported through it the way at_send does — fail the activation here
+		// instead of walking into a null (see the at_send note above).
+		let run_setup = (cmds) => {
+			if (!self.modem.at)
+				return self._fail({ stage: 'pdp_setup', err: { error: 'modem_gone' } });
 
-			// 3. read the assigned IP configuration (shared by the fresh-dial
-			//    and the adopt-existing paths below)
-			let read_ip_config = () => {
-				activated = true;
-
-				read_rdp((e2, rdp) => {
-					if (self.state != 'ACTIVATING')
-						return;
-
-					if (e2)
-						return self._fail({ stage: 'ip_config', err: e2 });
-
-					self.settings = build_settings(rdp);
-
-					// an ipv6-only PDP legitimately carries no static address
-					// (host v6 = the modem's RA/SLAAC, host v4 = the separate
-					// 464xlat package) — only a v4-capable PDP with empty
-					// settings is an error
-					if ((!self.settings.ipv4 && !self.settings.ipv6) &&
-					    ccfg.pdp_type != 'ipv6')
-						return self._fail({ stage: 'ip_config', err: 'no address assigned' });
-
-					if (self.settings.ipv4)
-						log('notice', sprintf('ipv4 config: %s/%d gw %s dns [%s] mtu %J',
-							self.settings.ipv4.addr, self.settings.ipv4.prefix,
-							self.settings.ipv4.gateway ?? '-', join(' ', self.settings.ipv4.dns),
-							self.settings.ipv4.mtu));
-
-					if (self.settings.ipv6?.addr)
-						log('notice', sprintf('ipv6 config: %s/%d gw %s dns [%s]',
-							self.settings.ipv6.addr, self.settings.ipv6.plen,
-							self.settings.ipv6.gateway ?? '-', join(' ', self.settings.ipv6.dns)));
-					// NOT "ipv6-only": this branch is about the v6 half alone and
-					// says nothing about v4, which was logged above if present.
-					// The old wording claimed the PDP was v6-only even on a
-					// dual-stack context that had just printed its v4 address
-					// one line earlier, and a reporter read it as the cause of a
-					// missing v4 address (ddimension/wwand#32) — it never was.
-					else if (self.settings.ipv6)
-						log('notice', sprintf('ipv6 dns: [%s] (no static v6 address — host v6 via RA/SLAAC)',
-							join(' ', self.settings.ipv6.dns)));
-
-					if (!self.settings.ipv4 && !self.settings.ipv6)
-						log('notice', 'ip config: none (ipv6-only PDP — host v6 via RA/SLAAC, host v4 via 464xlat)');
-
-					self.last_error = null;   // a good connection clears the last failure
-					set_state('CONNECTED');
-					start_stats();
-					emit('up', self.settings);
-
-					let cb2 = up_cb;
-					up_cb = null;
-
-					if (cb2)
-						cb2(null, self.settings);
-				}, { timeout: 15000 });
-			};
-
-			// 2. dial: bind the cdc_ncm netdev to the bearer
-			self.modem.at.send(dial.connect(self.cid, ccfg), (err) => {
+			// `return` so the reformat from an expression-bodied arrow is exact:
+			// nothing reads run_setup's value today, and that is not a reason to
+			// change it silently.
+			return self.modem.at.run_sequence(cmds, () => {
 				if (self.state != 'ACTIVATING')
-					return;
+					return;   // aborted (modem lost) while configuring
 
-				if (!err)
-					return read_ip_config();
+				// 3. read the assigned IP configuration (shared by the fresh-dial
+				//    and the adopt-existing paths below)
+				let read_ip_config = () => {
+					activated = true;
 
-				// some modems auto-dial (or keep a previous bearer) and reject a
-				// dial while it is up (MeiG ECMDUP returns bare ERROR) — probe the
-				// dial status and adopt the live session instead of failing
-				if (dial.status && dial.status_state) {
-					return self.modem.at.send(dial.status, (serr, sres) => {
+					read_rdp((e2, rdp) => {
 						if (self.state != 'ACTIVATING')
 							return;
 
-						let st = serr ? null : dial.status_state(sres?.lines, self.cid);
+						if (e2)
+							return self._fail({ stage: 'ip_config', err: e2 });
 
-						if (st != 1)
-							return self._fail({ stage: 'connect', err: err });
+						self.settings = build_settings(rdp);
 
-						log('notice', sprintf('cid %d already connected, adopting live session', self.cid));
-						read_ip_config();
-					});
-				}
+						// an ipv6-only PDP legitimately carries no static address
+						// (host v6 = the modem's RA/SLAAC, host v4 = the separate
+						// 464xlat package) — only a v4-capable PDP with empty
+						// settings is an error
+						if ((!self.settings.ipv4 && !self.settings.ipv6) &&
+						    ccfg.pdp_type != 'ipv6')
+							return self._fail({ stage: 'ip_config', err: 'no address assigned' });
 
-				self._fail({ stage: 'connect', err: err });
-			}, { timeout: 60000 });
-		});
+						if (self.settings.ipv4)
+							log('notice', sprintf('ipv4 config: %s/%d gw %s dns [%s] mtu %J',
+								self.settings.ipv4.addr, self.settings.ipv4.prefix,
+								self.settings.ipv4.gateway ?? '-', join(' ', self.settings.ipv4.dns),
+								self.settings.ipv4.mtu));
+
+						if (self.settings.ipv6?.addr)
+							log('notice', sprintf('ipv6 config: %s/%d gw %s dns [%s]',
+								self.settings.ipv6.addr, self.settings.ipv6.plen,
+								self.settings.ipv6.gateway ?? '-', join(' ', self.settings.ipv6.dns)));
+						// NOT "ipv6-only": this branch is about the v6 half alone and
+						// says nothing about v4, which was logged above if present.
+						// The old wording claimed the PDP was v6-only even on a
+						// dual-stack context that had just printed its v4 address
+						// one line earlier, and a reporter read it as the cause of a
+						// missing v4 address (ddimension/wwand#32) — it never was.
+						else if (self.settings.ipv6)
+							log('notice', sprintf('ipv6 dns: [%s] (no static v6 address — host v6 via RA/SLAAC)',
+								join(' ', self.settings.ipv6.dns)));
+
+						if (!self.settings.ipv4 && !self.settings.ipv6)
+							log('notice', 'ip config: none (ipv6-only PDP — host v6 via RA/SLAAC, host v4 via 464xlat)');
+
+						self.last_error = null;   // a good connection clears the last failure
+						set_state('CONNECTED');
+						start_stats();
+						emit('up', self.settings);
+
+						let cb2 = up_cb;
+						up_cb = null;
+
+						if (cb2)
+							cb2(null, self.settings);
+					}, { timeout: 15000 });
+				};
+
+				// 2. dial: bind the cdc_ncm netdev to the bearer
+				at_send(dial.connect(self.cid, ccfg), (err) => {
+					if (self.state != 'ACTIVATING')
+						return;
+
+					if (!err)
+						return read_ip_config();
+
+					// some modems auto-dial (or keep a previous bearer) and reject a
+					// dial while it is up (MeiG ECMDUP returns bare ERROR) — probe the
+					// dial status and adopt the live session instead of failing
+					if (dial.status && dial.status_state) {
+						return at_send(dial.status, (serr, sres) => {
+							if (self.state != 'ACTIVATING')
+								return;
+
+							let st = serr ? null : dial.status_state(sres?.lines, self.cid);
+
+							if (st != 1)
+								return self._fail({ stage: 'connect', err: err });
+
+							log('notice', sprintf('cid %d already connected, adopting live session', self.cid));
+							read_ip_config();
+						});
+					}
+
+					self._fail({ stage: 'connect', err: err });
+				}, { timeout: 60000 });
+			});
+		};
 
 		if (!length(setup) || ccfg.username || ccfg.password)
 			return run_setup(setup);
 
-		self.modem.at.send('AT+CGDCONT?', (gerr, gres) => {
+		at_send('AT+CGDCONT?', (gerr, gres) => {
 			if (self.state != 'ACTIVATING')
 				return;
 
@@ -672,7 +702,7 @@ export function create(opts)
 
 	// best-effort unbind of the netdev + deactivate the bearer
 	let disconnect = (cb) => {
-		self.modem.at.send(self.modem.dial.disconnect(self.cid, self.config), (err) => {
+		at_send(self.modem.dial.disconnect(self.cid, self.config), (err) => {
 			// also deactivate the PDP context (CGACT) unless the vendor dial
 			// already does (Quectel QNETDEVCTL=0 tears the bearer down)
 			if (cb)
@@ -767,7 +797,7 @@ export function create(opts)
 		if (self.state != 'CONNECTED' || !dial?.status || !self.modem?.at)
 			return;
 
-		self.modem.at.send(dial.status, (err, res) => {
+		at_send(dial.status, (err, res) => {
 			if (self.state != 'CONNECTED')
 				return;
 
