@@ -301,3 +301,93 @@ export function collectd_lines(host, modem, sig, m, interval, cells)
 
 	return out;
 };
+
+// Cell/frequency lock read-back for the CLI, mirroring luci-app-wwand's
+// fmt.fmtLocks (format.js:645) so the two surfaces spell the same thing.
+//
+// The CLI printed `%J` of whatever the daemon held, which on an EC200A came out
+// as `locks lte={ "enabled": false, "values": [ 0, 0 ] }` — raw JSON at the
+// user, and worse, a lock reported on a modem that is not locked to anything
+// (ddimension/wwand#19). A DISARMED lock is not a lock: "locks" should not list
+// something the modem is not locked to.
+//
+// Daemon shape: { lte: { enabled, values: [earfcn, pci, …] },
+//                 nr5g: { enabled, values: [pci, arfcn, scs, band, …] } }
+// Rendered in the colon spelling the lock editor accepts. Returns null when
+// nothing is armed, so the caller can omit the line entirely.
+//
+// The fidelity claim is about THE SHAPES THE DAEMON EMITS, not about matching
+// JavaScript's string coercion for shapes that cannot arrive: a review noted
+// that a composite inside `values` would print `[ 1, 2 ]` here and `1,2` there,
+// and an object `{ }` against `[object Object]`. Both are unreachable over
+// ubus/JSON from this producer, and reproducing `[object Object]` would be
+// faithful to JS while being worse to read. Not done on purpose.
+export function fmt_locks(locks)
+{
+	// a lock container is an object; a scalar here is not "no locks", it is a
+	// caller error, and reading locks.lte off it would throw rather than say so
+	if (!locks || type(locks) != 'object')
+		return null;
+
+	let out = [];
+
+	let group = (l, width, label) => {
+		if (!l)
+			return;
+
+		// NOTE the object test comes first: unlike the JS this mirrors, ucode
+		// THROWS on a property read off ANY scalar — boolean, integer, double,
+		// string — so `l.enabled` on the bare `{ lte: true }` shape is not
+		// merely undefined, it ends the process.
+		//
+		// The check itself is loose on purpose: the daemon emits a real boolean
+		// today, but an `enabled: 0` from a future producer must skip too.
+		if (type(l) == 'object' && l.enabled != null && !l.enabled)
+			return;
+
+		// the payload arrives in more shapes than { values: [...] }; reading
+		// only `.values` would render every other one as a bare "armed" and
+		// silently drop what the lock actually holds.
+		let v;
+
+		if (l === true)
+			v = [];
+		else if (type(l) == 'array')
+			v = l;
+		else if (type(l) != 'object')
+			v = [ l ];
+		else if (type(l.values) == 'array')
+			v = l.values;
+		else if (l.values != null)
+			v = [ l.values ];
+		else {
+			v = [];
+			for (let kk, vv in l)
+				if (kk != 'enabled')
+					push(v, sprintf('%s=%s', kk, vv));
+			width = 0;   // k=v pairs are not positional
+		}
+
+		let items = [];
+
+		if (width && length(v) && length(v) % width == 0)
+			for (let i = 0; i < length(v); i += width)
+				push(items, join(':', slice(v, i, i + width)));
+		else if (length(v))
+			push(items, join(', ', v));
+
+		push(out, length(items) ? sprintf('%s %s', label, join(', ', items))
+		                        : sprintf('%s armed', label));
+	};
+
+	group(locks.lte, 2, 'LTE');
+	group(locks.nr5g, 4, 'NR5G');
+
+	// anything the daemon grows later is shown rather than silently dropped,
+	// just without a specific spelling
+	for (let k, v in locks)
+		if (k != 'lte' && k != 'nr5g')
+			group(v, 0, k);
+
+	return length(out) ? join(' · ', out) : null;
+};

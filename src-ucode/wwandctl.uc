@@ -8,7 +8,7 @@
 
 'use strict';
 
-import { fmt_plmn, fmt_sig, reg_text, collectd_lines, collectd_interval } from 'wwand.wwandctl_fmt';
+import { fmt_plmn, fmt_sig, fmt_locks, reg_text, collectd_lines, collectd_interval } from 'wwand.wwandctl_fmt';
 
 import * as libubus from 'ubus';
 import * as fs from 'fs';
@@ -131,16 +131,10 @@ function cmd_status(args)
 			printf('  esim        eid %s (%d profile%s)\n', m.esim.eid,
 				length(m.esim.profiles ?? []), length(m.esim.profiles ?? []) == 1 ? '' : 's');
 
-		if (m.locks) {
-			let ls = [];
+		let locks = fmt_locks(m.locks);
 
-			for (let k, v in m.locks)
-				if (v != null && v !== false)
-					push(ls, sprintf('%s=%J', k, v));
-
-			if (length(ls))
-				printf('  locks       %s\n', join(' ', ls));
-		}
+		if (locks)
+			printf('  locks       %s\n', locks);
 	}
 
 	for (let name, c in st.contexts) {

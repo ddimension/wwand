@@ -261,4 +261,54 @@ eq(index(agg, 'carriers_nr'), -1, 'collectd: no 5G leg, no 5G series');
 let nocells = join('\n', fmt.collectd_lines('h', 'm', {}, {}, 30));
 eq(index(nocells, 'carriers_'), -1, 'collectd: absent cells emit no aggregation at all');
 
+// --- fmt_locks: a disarmed lock is not a lock -------------------------------
+//
+// The CLI printed `%J` of the daemon's object, which on an EC200A read
+//   locks lte={ "enabled": false, "values": [ 0, 0 ] }
+// — raw JSON at the user, reporting a lock on a modem locked to nothing
+// (ddimension/wwand#19). luci-app-wwand already rendered this correctly
+// (format.js:645); this is the CLI catching up, and the expectations below are
+// deliberately the same ones, so the two surfaces cannot drift apart again.
+
+eq(fmt.fmt_locks(null), null, 'locks: nothing at all -> no line');
+eq(fmt.fmt_locks({}), null, 'locks: an empty object -> no line');
+eq(fmt.fmt_locks({ lte: { enabled: false, values: [ 0, 0 ] } }), null,
+	'locks: HIS case — disarmed, so there is nothing to report');
+eq(fmt.fmt_locks({ lte: { enabled: 0, values: [ 1850, 100 ] } }), null,
+	'locks: a numeric 0 disarms too, not only a real false');
+eq(fmt.fmt_locks({ lte: { enabled: 0.0, values: [ 1850, 100 ] } }), null,
+	'locks: ...and a double zero');
+eq(fmt.fmt_locks({ wcdma: { enabled: false, uarfcn: 10713 } }), null,
+	'locks: an unknown rat obeys the same disarmed rule as the known two');
+
+eq(fmt.fmt_locks({ lte: { enabled: true, values: [ 1850, 100 ] } }), 'LTE 1850:100',
+	'locks: an armed LTE lock is earfcn:pci, not JSON');
+eq(fmt.fmt_locks({ lte: { enabled: true, values: [ 1850, 100, 3200, 7 ] } }),
+	'LTE 1850:100, 3200:7', 'locks: two LTE cells group in pairs');
+eq(fmt.fmt_locks({ nr5g: { enabled: true, values: [ 7, 632448, 1, 78 ] } }),
+	'NR5G 7:632448:1:78', 'locks: NR5G groups in fours');
+eq(fmt.fmt_locks({ lte: { enabled: true, values: [ 1850, 100 ] },
+                   nr5g: { enabled: true, values: [ 7, 632448, 1, 78 ] } }),
+	'LTE 1850:100 · NR5G 7:632448:1:78', 'locks: both rats, in a fixed order');
+
+// shapes that are not { enabled, values } must not degrade to a bare "armed",
+// because that silently drops what the lock actually holds
+eq(fmt.fmt_locks({ lte: true }), 'LTE armed',
+	'locks: a payload-free true IS the armed-without-detail spelling');
+eq(fmt.fmt_locks({ lte: { enabled: true, values: [] } }), 'LTE armed',
+	'locks: armed with an empty value list says so rather than printing nothing');
+eq(fmt.fmt_locks({ lte: { enabled: true, values: [ 1850, 100, 3200 ] } }),
+	'LTE 1850, 100, 3200',
+	'locks: a value count that does not divide by the width is listed, not mis-paired');
+eq(fmt.fmt_locks({ wcdma: { enabled: true, uarfcn: 10713 } }), 'wcdma uarfcn=10713',
+	'locks: a rat the daemon grows later is shown, just without a spelling');
+eq(fmt.fmt_locks({ lte: [ 1850, 100 ] }), 'LTE 1850:100',
+	'locks: the payload may BE the array, with no wrapper');
+eq(fmt.fmt_locks({ lte: '1850:100' }), 'LTE 1850:100',
+	'locks: a scalar payload is its own value');
+// reading a property off a scalar THROWS in ucode (it is merely undefined in the
+// JS this mirrors), so the container type is checked before anything is indexed
+eq(fmt.fmt_locks('nonsense'), null, 'locks: a scalar container is refused, not dereferenced');
+eq(fmt.fmt_locks(true), null, 'locks: ...including a bare true');
+
 done('test_wwandctl_fmt');
