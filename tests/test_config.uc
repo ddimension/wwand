@@ -3,6 +3,7 @@
 'use strict';
 
 import { eq, ok, done } from './lib/check.uc';
+import * as fs from 'fs';
 import * as config from 'wwand/config.uc';
 
 // wwand manages `proto wwand` and nothing else — a stock `proto qmi` interface
@@ -55,6 +56,140 @@ eq(r.contexts.wan2.auto, false, 'native: auto 0 -> not proactively brought up');
 eq(r.contexts.wan.mux_id, 1, 'native: sibling context auto-muxed');
 eq(length(r.warnings), 1, 'native: only the auto-mux warning');
 eq(config.context_for_interface(r, 'wan2'), 'wan2', 'native: interface lookup');
+
+// --- sim_slot lives on the modem; on a native interface it is DEAD ----------
+//
+// Proven by probe, not assumed: with `option modem` present, an interface-level
+// `sim_slot` never reaches the modem — and said nothing about it. Silent dead
+// config is the worst way to be wrong about a setting; a reporter chasing slot
+// switches he had not asked for could not rule out that a leftover interface key
+// was still being applied (ddimension/wwand#34). It was not, and nothing said so.
+{
+	let rn = padopt({
+		network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+			wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i',
+			       sim_slot: '1' },
+		},
+	});
+
+	eq(rn.modems.m0.sim_slot, 0, 'sim_slot: a native interface key never reaches the modem');
+	eq(length(filter(rn.warnings, (w) => match(w, /option sim_slot` does nothing here/) &&
+	                                     match(w, /wwand_modem m0/))), 1,
+		'sim_slot: ...and now it says so, naming where the setting belongs');
+
+	// the modem section is where it works, and that must stay quiet
+	let rm = padopt({
+		network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', sim_slot: '2' },
+			wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+		},
+	});
+
+	eq(rm.modems.m0.sim_slot, 2, 'sim_slot: the modem section is where it applies');
+	eq(length(filter(rm.warnings, (w) => match(w, /does nothing here/))), 0,
+		'sim_slot: a correctly placed setting draws no warning');
+
+	// EVERY modem-only key warns, and the list is held against the merge
+	// function's own source rather than against a second hand-written copy: the
+	// list was derived by hand once and was already short by seven keys, which
+	// is how a warning like this quietly becomes a half-truth. Read the
+	// function, take the `s.<key>` it actually consumes, compare.
+	let src = fs.readfile('../src-ucode/config.uc') ?? '';
+	let fn = substr(src, index(src, 'function merge_iface_modem_opts'));
+	let body = substr(fn, 0, index(fn, "\n}\n"));
+	let consumed = {};
+
+	for (let m in (match(body, /[^A-Za-z0-9_.]s\.[a-z0-9_]+/g) ?? [])) {
+		// m[0] is "<one char>s.<key>" — the leading char is part of the match
+		// because ucode has no lookbehind, so the key starts at index 3
+		let k = substr(m[0], 3);
+		// `s.js` only ever appears inside a comment naming a .js file
+		if (k != 'js')
+			consumed[k] = true;
+	}
+
+	ok(length(keys(consumed)) > 15,
+		sprintf('inert opts: the source scan found the merge keys (%d)', length(keys(consumed))));
+
+	for (let k in keys(consumed))
+		ok(index(config.IFACE_MODEM_ONLY_OPTS, k) >= 0,
+			sprintf('inert opts: `%s` is consumed by the legacy merge and named in the warning list', k));
+
+	for (let k in config.IFACE_MODEM_ONLY_OPTS)
+		ok(consumed[k] == true,
+			sprintf('inert opts: `%s` is in the warning list and really is a legacy merge key', k));
+
+	// and each one actually produces its warning on a native interface
+	let iface = { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' };
+
+	for (let k in config.IFACE_MODEM_ONLY_OPTS)
+		iface[k] = (k == 'at_init' || k == 'lock_4g') ? [ '1' ] : '1';
+
+	let rk = padopt({
+		network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+			wan: iface,
+		},
+	});
+
+	eq(length(filter(rk.warnings, (w) => match(w, /does nothing here/))),
+		length(config.IFACE_MODEM_ONLY_OPTS),
+		'inert opts: every key in the list warns, exactly once');
+	// ...and a context option on the interface is NOT one of them
+	eq(length(filter(rk.warnings, (w) => match(w, /option apn` does nothing/))), 0,
+		'inert opts: a real interface option is left alone');
+
+	// LEGACY (no `option modem`): the same key still fills in the synthesized
+	// modem, which is the whole point of that path — and is not warned about
+	let rl = padopt({
+		network: {
+			wan: { '.type': 'interface', proto: 'wwand', ctldevice: '/dev/cdc-wdm0',
+			       apn: 'i', sim_slot: '1' },
+		},
+	});
+
+	let lm = values(rl.modems)[0];
+
+	eq(lm.sim_slot, 1, 'sim_slot: the legacy inline key still configures its synthesized modem');
+	eq(length(filter(rl.warnings, (w) => match(w, /does nothing here/))), 0,
+		'sim_slot: ...and the legacy spelling is not scolded for working');
+
+	// two legacy interfaces on ONE synthesized modem CAN disagree — that is a
+	// real conflict, and it now reads like its lock_4g/lock_5g neighbours
+	let rc = padopt({
+		network: {
+			wan: { '.type': 'interface', proto: 'wwand', ctldevice: '/dev/cdc-wdm0',
+			       apn: 'a', sim_slot: '2' },
+			wan2: { '.type': 'interface', proto: 'wwand', ctldevice: '/dev/cdc-wdm0',
+			        apn: 'b', sim_slot: '1' },
+		},
+	});
+
+	eq(length(filter(rc.warnings, (w) => match(w, /conflicting sim_slot 1 ignored/))), 1,
+		'sim_slot: two legacy interfaces disagreeing over one modem is named');
+}
+
+// bearer_poll_count was added to the modem options in d598e19 and never added to
+// the migration's move list, so migrating a config that carried it left the key
+// on the interface, where it does nothing — the migration was itself producing
+// the dead config the warning above reports.
+{
+	let ch = config.migrate_plan({ network: {
+		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0',
+		       apn: 'internet', bearer_poll_count: '7' },
+	} });
+
+	// a change is [ op, config, section, option, value ]
+	let moved = filter(ch, (c) => c[0] == 'set' && c[3] == 'bearer_poll_count');
+	let stripped = filter(ch, (c) => c[0] == 'delete' && c[2] == 'wan' &&
+	                                 c[3] == 'bearer_poll_count');
+
+	eq(length(moved), 1, 'migrate: bearer_poll_count is moved onto the modem section');
+	eq(moved[0]?.[4], '7', 'migrate: ...with its value');
+	ok(match(moved[0]?.[2] ?? '', /^wwmodem/) != null, 'migrate: ...onto the wwand_modem it created');
+	eq(length(stripped), 1, 'migrate: ...and stripped from the interface it does nothing on');
+}
 
 // --- named PLMN lists (wwand_plmnlist) + plmn_list attach --------------------
 r = config.parse({

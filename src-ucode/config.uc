@@ -654,6 +654,37 @@ export function parse_netdev(device)
 
 // merge the modem-level options a legacy-style qmi interface section
 // carries into the synthesized modem (first interface wins; conflicts warn).
+// The keys merge_iface_modem_opts() consumes are exactly the ones that mean
+// something on a LEGACY interface (no `option modem`, synthesized modem) and
+// NOTHING on a native one, where radio and SIM settings live on the wwand_modem
+// section. Left on a migrated interface they are dead config — and they were
+// dead in SILENCE, which is the worst way to be wrong about a setting: a
+// reporter chasing SIM-slot switches he had not asked for could not tell whether
+// an interface-level `sim_slot` he had left behind was still being applied
+// somewhere (ddimension/wwand#34). The answer was no, and nothing said so.
+//
+// Not a blanket unknown-option check: an `interface` section legitimately
+// carries whatever netifd and every other package put there, so only wwand's
+// own modem keys are named here.
+//
+// EXPORTED so the test can hold it against the merge function's own source and
+// fail when the two drift — the list was hand-derived once and was already short
+// by seven keys when a review checked it, which is precisely how a warning like
+// this decays into a half-truth.
+export const IFACE_MODEM_ONLY_OPTS = [ 'pincode', 'modes', 'mcc', 'mnc',
+	'at_init', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot', 'location',
+	'delay', 'failreboot', 'serial', 'imei', 'repower_time',
+	'proto_error_limit', 'zero_rx_timeout', 'bearer_poll_count',
+	'stats_interval' ];
+
+function warn_inert_modem_opts(s, name, mkey, warnings)
+{
+	for (let k in IFACE_MODEM_ONLY_OPTS)
+		if (s[k] != null)
+			push(warnings, sprintf("interface %s: `option %s` does nothing here — it is a modem setting, so put it on `config wwand_modem %s` (ignored)",
+				name, k, mkey));
+}
+
 function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 {
 	let scalars = { pincode: s.pincode, modes: s.modes, mcc: s.mcc, mnc: s.mnc, tty: null };
@@ -693,8 +724,21 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 	if (s.lock_persist != null)
 		modem.lock_persist = bool_opt(s.lock_persist, false);
 
-	if (s.sim_slot != null && !modem.sim_slot)
-		modem.sim_slot = +s.sim_slot;
+	// SAME PRECEDENCE AS THE CELL LOCKS ABOVE, and now the same visibility. The
+	// modem section owns the slot; an interface-level `sim_slot` is the legacy
+	// inline spelling and only fills in when the modem has none (LuCI writes the
+	// modem section and unsets the inline key, settings.js simSlotUci). A
+	// disagreement used to be dropped in silence, which is exactly the shape a
+	// user cannot debug: a reporter chasing unexplained slot switches asked
+	// which of the two places was authoritative and could not tell from the log
+	// (ddimension/wwand#34).
+	if (s.sim_slot != null) {
+		if (!modem.sim_slot)
+			modem.sim_slot = +s.sim_slot;
+		else if (modem.sim_slot != +s.sim_slot)
+			push(warnings, sprintf("interface %s: conflicting sim_slot %d ignored (modem %s asks for %d)",
+				name, +s.sim_slot, mkey, modem.sim_slot));
+	}
 
 	if (s.location != null)
 		modem.location = +s.location > 1;   // old gate: location > 1
@@ -805,6 +849,8 @@ function compat_translate(raw, result)
 				push(result.warnings, sprintf("interface %s references unknown modem '%s'", name, s.modem));
 				continue;
 			}
+
+			warn_inert_modem_opts(s, name, s.modem, result.warnings);
 
 			let nd = parse_netdev(s.device);
 			let mux = resolve_mux(s, nd, name, result.warnings);
@@ -1252,6 +1298,11 @@ const MIGRATE_MODEM_OPTS = [ 'device', 'netdev', 'serial', 'imei', 'tty', 'mux',
 	'dl_datagram_max_size', 'sim_slot', 'pincode', 'modes', 'mcc', 'mnc',
 	'lock_4g', 'lock_5g', 'lock_persist', 'at_init', 'location', 'delay',
 	'failreboot', 'proto_error_limit', 'zero_rx_timeout', 'stats_interval',
+	// `bearer_poll_count` was added to the modem options in d598e19 and never
+	// added here, so migrating a config that carried it produced an interface
+	// still holding a key that does nothing there — the migration was itself
+	// manufacturing the dead config the new warning reports.
+	'bearer_poll_count',
 	'repower_time' ];
 // options only stripped OFF the interface (moved to nowhere): the optional USB
 // anchor and legacy per-family flags/junk have no place on the interface.
