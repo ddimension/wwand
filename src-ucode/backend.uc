@@ -72,6 +72,55 @@ export function choose(obj, key, candidates, cb)
 	step();
 };
 
+// A CHOICE IS NOT FOREVER. choose() caches the first candidate that probes
+// available, which is exactly right for a transport a modem either has or has
+// not — but a transport can also STOP working mid-session, and then the cache is
+// a trap: every call dispatches to a backend that cannot answer, the consumer
+// keeps whatever it stored last, and a working fallback sits one candidate down
+// the list, never reconsidered.
+//
+// Field-traced on a Quectel RM520F-GL over MBIM (ddimension/wwand#30): the
+// QMI-over-MBIM passthrough served signal, cells and data-mode for an hour, then
+// began failing every request. Signal and cells froze on their last values —
+// visibly a flat line in LuCI — while the data-mode branch stored its null and
+// the telemetry read `tech=none`, all on a connection that stayed up and an AT
+// port that was answering AT+QENG correctly the whole time.
+//
+// So consumers report each outcome here, and a RUN of failures drops the cached
+// decision. One failure is not enough: a busy modem answers badly without having
+// lost anything. Dropping the cache re-probes from the TOP of the ladder, so a
+// preferred transport that has recovered can win the choice back — but only when
+// the ladder is walked again, which happens when whatever is chosen NOW fails
+// three times in its turn. This is not a health monitor and does not poll; it
+// only ends the certainty that the last choice is still the right one.
+//
+// A consumer must report "did the transport answer", NOT "did the answer contain
+// anything" — an empty carrier-aggregation list and an OK with an unparsable
+// body are answers, and counting them as failures makes this demote healthy
+// transports on a quiet modem.
+//
+// Returns true when the cache was dropped (the caller may want to log it).
+const DEMOTE_AFTER = 3;
+
+export function outcome(obj, key, ok)
+{
+	let fails = key + '_fails';
+
+	if (ok) {
+		delete obj[fails];
+		return false;
+	}
+
+	obj[fails] = (obj[fails] ?? 0) + 1;
+
+	if (obj[fails] < DEMOTE_AFTER)
+		return false;
+
+	delete obj[fails];
+	delete obj[key];
+	return true;
+};
+
 // forget the cached decision (e.g. on SIM slot switch / removable eUICC), so
 // the next call re-probes. Pass the same keys the features cache under.
 export function forget(obj, ...keys)

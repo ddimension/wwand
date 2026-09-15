@@ -94,16 +94,26 @@ export function fcc_auth(dms, variant, magic, cb)
 const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
 
 // get_ca(nas, cb): active LTE carrier aggregation, normalized to
-// [ { role, earfcn, pci, bandwidth_mhz, state? }, ... ], or null when the modem
-// reports no CA data. Band/frequency are derived from earfcn in the UI.
-// QmiNasScellState: 0 deconfigured, 1 deactivated, 2 activated.
+// [ { role, earfcn, pci, bandwidth_mhz, state? }, ... ]. Band/frequency are
+// derived from earfcn in the UI. QmiNasScellState: 0 deconfigured,
+// 1 deactivated, 2 activated.
+//
+// AN EMPTY LIST AND A NULL MEAN DIFFERENT THINGS, and collapsing them cost a
+// real bug: [] is a modem that ANSWERED and is not aggregating right now, null
+// is a request that failed. Callers that only render the list cannot tell the
+// difference, but callers that judge the transport by its answer can — and one
+// of those would have retired a perfectly healthy QMI CA read after three
+// ordinary non-aggregated polls (ddimension/wwand#30 review).
 export function get_ca(nas, cb)
 {
 	// an optional read — modems that reject it (old stacks: Invalid QMI
 	// command) must not feed the recovery counter
 	nas.request('GET_LTE_CPHY_CA_INFO', {}, (e, d) => {
-		if (e || (!d?.pcell && !d?.scells))
+		if (e)
 			return cb(null);
+
+		if (!d?.pcell && !d?.scells)
+			return cb([]);
 
 		let out = [];
 

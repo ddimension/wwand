@@ -367,7 +367,35 @@ function assert_telemetry() {
 	ok(length(filter(ready_events, function(e) { return e.event == 'sim_refresh' })) >= 1,
 		'ready-status: sim_refresh emitted on identity change');
 
-	assert_inline_reject();
+	// --- a transport that STOPS answering must be demoted, not believed --------
+	//
+	// Field shape (ddimension/wwand#30): on a Quectel RM520F-GL the QMI-over-MBIM
+	// passthrough served telemetry for an hour, then failed every request with
+	// exactly the error below. The cached choice kept dispatching to it, so signal
+	// and cells froze on their last values — a flat line in LuCI for an hour — and
+	// the data-mode branch stored its null, which read as `tech=none` on a modem
+	// that was registered and carrying traffic the whole time.
+	//
+	// Driven here against the NATIVE client, which is what this modem chose; the
+	// mechanism is the cache, not the transport.
+	let live_mbim = modem.mbim;
+	let was_mode = modem.dsd_status?.mode;
+
+	modem.mbim = { command: (svc, cid, op, args, cb) => cb({ error: 'mbim', status: 2 }, null) };
+
+	modem._refresh_data_mode(() => {
+		eq(modem.dsd_status?.mode, was_mode,
+			'demote: a failed read keeps the last known mode instead of storing null');
+		eq(modem._dsd_be, 'mbim', 'demote: one failure does not drop the choice');
+
+		modem._refresh_data_mode(() => modem._refresh_data_mode(() => {
+			eq(modem._dsd_be, null,
+				'demote: three consecutive failures drop it, so the ladder re-probes');
+
+			modem.mbim = live_mbim;
+			assert_inline_reject();
+		}));
+	});
 }
 
 modem = modem_mbim.create({

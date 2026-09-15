@@ -36,6 +36,15 @@ export function install(self, o)
 	let telemetry_timer = null;
 	let telem_watch;
 
+	// Report each refresh to the backend cache so a transport that STOPS working
+	// is demoted and the ladder re-probes (backend.outcome). Without this the
+	// passthrough could die mid-session and every reading below would freeze on
+	// its last value for as long as the modem stayed up (ddimension/wwand#30).
+	let outcome = (key, ok) => {
+		if (backend.outcome(self, key, ok))
+			log('notice', sprintf('%s: transport stopped answering — re-probing the ladder', key));
+	};
+
 	// signal: prefer the QMI passthrough (GET_SIGNAL_INFO — reuses the battle-
 	// tested QMI decode), then native MBIMEx v2 Signal State as a fallback for
 	// modems without the passthrough. (The native MS-ext buffer decode is not yet
@@ -55,13 +64,20 @@ export function install(self, o)
 				: ok(false) },
 		], (be) => {
 			if (be == 'mbim')
-				return mbim_backend.get_signal(self.mbim, (s) => { if (s) self.signal = s; cb(); });
+				return mbim_backend.get_signal(self.mbim, (s) => {
+					outcome('_sig_be', s != null);
+					if (s) self.signal = s;
+					cb();
+				});
 
 			if (be == 'qmi')
 				return self.pt.nas.request('GET_SIGNAL_INFO', {}, (e, d) => {
 					// the passthrough is the same QMI reply over another
 					// transport — it needs the same unit conversion
-					if (!e && tlv.has_payload(d))
+					let got = (!e && tlv.has_payload(d));
+
+					outcome('_sig_be', got);
+					if (got)
 						self.signal = modem_common.normalise_qmi_signal(d);
 					cb();
 				}, { no_recovery: true });
@@ -78,7 +94,14 @@ export function install(self, o)
 		cb = cb ?? (() => null);
 
 		let ca = self.cells?.ca;
-		let store = (c) => {
+		// `answered` separates "the transport replied" from "the reply had cells
+		// in it". They are the same question for the binary transports, and NOT
+		// the same for AT: an OK whose QENG body is empty or momentarily
+		// unparsable is an answer, and counting it as a transport failure would
+		// send the ladder back to probe the dead ones.
+		let store = (c, answered) => {
+			outcome('_cells_be', answered ?? (c != null));
+
 			if (c) {
 				if (ca != null)
 					c.ca = ca;
@@ -112,7 +135,7 @@ export function install(self, o)
 			if (be == 'at')
 				return modem_common.telemetry_at(self).send('AT+QENG="servingcell"', (e, r) => {
 					let serving = e ? null : atcmd.parse_qeng_servingcell(r?.lines);
-					store(serving ? { serving: serving } : null);
+					store(serving ? { serving: serving } : null, !e);
 				});
 
 			cb();
@@ -136,12 +159,19 @@ export function install(self, o)
 				: ok(false)) },
 			{ name: 'at', probe: (ok) => ok(!!self.at) },
 		], (be) => {
+			// an EMPTY list is a real answer here (no aggregation right now);
+			// only a null/error says the transport did not answer at all.
 			if (be == 'qmi')
-				return qmi_backend.get_ca(self.pt.nas, (ca) => store(ca ?? []));
+				return qmi_backend.get_ca(self.pt.nas, (ca) => {
+					outcome('_ca_be', ca != null);
+					store(ca ?? []);
+				});
 
 			if (be == 'at')
-				return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) =>
-					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
+				return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) => {
+					outcome('_ca_be', !e);
+					store(e ? [] : atcmd.parse_qcainfo(r?.lines));
+				});
 
 			store([]);
 		});
@@ -165,11 +195,22 @@ export function install(self, o)
 		], (be) => {
 			let tag = (s) => { if (s) s.source = be; return s; };
 
+			// KEEP THE LAST KNOWN MODE on a failed read. Storing the null here is
+			// what turned a dead passthrough into `tech=none` in the telemetry
+			// line while the modem was registered and carrying traffic.
 			if (be == 'mbim')
-				return mbim_backend.get_data_mode(self.mbim, (m) => { self.dsd_status = tag(m); cb(); });
+				return mbim_backend.get_data_mode(self.mbim, (m) => {
+					outcome('_dsd_be', m != null);
+					if (m) self.dsd_status = tag(m);
+					cb();
+				});
 
 			if (be == 'qmi')
-				return qmi_backend.get_data_mode(self.pt.dsd, (m) => { self.dsd_status = tag(m); cb(); });
+				return qmi_backend.get_data_mode(self.pt.dsd, (m) => {
+					outcome('_dsd_be', m != null);
+					if (m) self.dsd_status = tag(m);
+					cb();
+				});
 
 			if (be == 'at')
 				self.dsd_status = tag(modem_common.dsd_from_serving(self.cells?.serving));
@@ -192,10 +233,18 @@ export function install(self, o)
 				: ok(false) },
 		], (be) => {
 			if (be == 'mbim')
-				return mbim_backend.get_reg_detail(self.mbim, (d) => { if (d) self.reg_detail = d; cb(); });
+				return mbim_backend.get_reg_detail(self.mbim, (d) => {
+					outcome('_regd_be', d != null);
+					if (d) self.reg_detail = d;
+					cb();
+				});
 
 			if (be == 'qmi')
-				return qmi_backend.get_reg_detail(self.pt.nas, (d) => { if (d) self.reg_detail = d; cb(); });
+				return qmi_backend.get_reg_detail(self.pt.nas, (d) => {
+					outcome('_regd_be', d != null);
+					if (d) self.reg_detail = d;
+					cb();
+				});
 
 			cb();
 		});

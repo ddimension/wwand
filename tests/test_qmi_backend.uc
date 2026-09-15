@@ -36,7 +36,11 @@ function u64(v) { return struct.pack('<Q', v); }
 function tlv(t, v) { return chr(t) + struct.pack('<H', length(v)) + v; }
 
 const RESULT_OK = tlv(0x02, u16(0) + u16(0));   // QMI success result TLV
+// result 1 (failure) + error 0x0005 (INTERNAL) — a request the modem REFUSED,
+// which is a different thing from one it answered with nothing in it
+const RESULT_ERR = tlv(0x02, u16(1) + u16(5));
 let raw = (payload) => ({ __raw: RESULT_OK + payload });
+let raw_err = () => ({ __raw: RESULT_ERR });
 
 // --- mock wiring: each op reads a mutable response so scenarios can vary ------
 
@@ -78,10 +82,24 @@ push(steps, (next) => {
 	});
 });
 
-// get_ca: no CA TLVs at all -> null
+// get_ca: a successful reply carrying no CA TLVs
 push(steps, (next) => {
 	r_ca = raw('');
-	backend.get_ca(nas, (ca) => { eq(ca, null, 'get_ca: no pcell/scells -> null'); next(); });
+	backend.get_ca(nas, (ca) => {
+		// [] not null: the modem ANSWERED and is not aggregating. The difference
+		// is invisible to a renderer and load-bearing for backend.outcome, which
+		// judges the transport by whether it answered — collapsing the two
+		// retired a healthy CA read after three ordinary non-aggregated polls.
+		eq(ca, [], 'get_ca: a reply with no pcell/scells is an empty list, not a failure');
+		next();
+	});
+});
+
+// ...and the other half of that contract: a FAILED request is null, which is
+// what tells backend.outcome the transport did not answer.
+push(steps, (next) => {
+	r_ca = raw_err();
+	backend.get_ca(nas, (ca) => { eq(ca, null, 'get_ca: a REFUSED request is null'); next(); });
 });
 
 // === get_data_mode: DSD available_systems (t=0x10) ============================

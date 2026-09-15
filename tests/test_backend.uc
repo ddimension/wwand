@@ -104,4 +104,46 @@ eq(seq[-1], 'empty-ok', 'run_seq: empty step list still calls cb');
 	});
 }
 
+// outcome: a transport that STOPS answering is demoted, so the ladder can pick
+// the fallback that was there all along.
+//
+// The shape this exists for (ddimension/wwand#30): the QMI-over-MBIM passthrough
+// won the choice while it worked, then began failing every request. The cache
+// kept dispatching to it, the consumers kept their last values, and LuCI drew a
+// flat line for an hour on a modem whose AT port was answering fine.
+{
+	let obj = {};
+	let probes = [];
+	let ladder = [
+		{ name: 'tunnel', probe: (ok) => { push(probes, 'tunnel'); ok(!!obj._tunnel_up); } },
+		{ name: 'at',     probe: (ok) => { push(probes, 'at'); ok(true); } },
+	];
+
+	obj._tunnel_up = true;
+	backend.choose(obj, 'k', ladder, (be) => eq(be, 'tunnel', 'outcome: the tunnel wins while it works'));
+
+	// it breaks, but not every hiccup is a break
+	obj._tunnel_up = false;
+	eq(backend.outcome(obj, 'k', false), false, 'outcome: one failure does not demote');
+	eq(backend.outcome(obj, 'k', false), false, 'outcome: two do not either');
+	backend.choose(obj, 'k', ladder, (be) => eq(be, 'tunnel', 'outcome: ...and the choice still stands'));
+
+	// a success in between clears the streak — a busy modem is not a dead one
+	eq(backend.outcome(obj, 'k', true), false, 'outcome: a success breaks the streak');
+	eq(backend.outcome(obj, 'k', false), false, 'outcome: so the count starts over');
+	eq(backend.outcome(obj, 'k', false), false, 'outcome: still counting');
+	eq(backend.outcome(obj, 'k', false), true, 'outcome: the third consecutive failure demotes');
+
+	probes = [];
+	backend.choose(obj, 'k', ladder, (be) => eq(be, 'at', 'outcome: the ladder re-probes and the fallback takes over'));
+	eq(probes, [ 'tunnel', 'at' ], 'outcome: re-probed FROM THE TOP, so a recovered transport can win again');
+
+	// and it does win again once it answers
+	obj._tunnel_up = true;
+	eq(backend.outcome(obj, 'k', false), false, 'outcome: the fallback gets its own streak');
+	eq(backend.outcome(obj, 'k', false), false, 'outcome: ...');
+	eq(backend.outcome(obj, 'k', false), true, 'outcome: ...and is demoted on the same terms');
+	backend.choose(obj, 'k', ladder, (be) => eq(be, 'tunnel', 'outcome: a recovered transport is chosen again'));
+}
+
 done('test_backend');
