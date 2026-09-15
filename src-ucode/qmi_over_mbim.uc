@@ -100,7 +100,7 @@ export function create(mc, opts)
 			}
 
 			deliver(info);
-		});
+		}, { no_recovery: true });   // a vendor CID's refusal is not a channel fault
 
 		return true;
 	};

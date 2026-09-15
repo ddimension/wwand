@@ -26,7 +26,8 @@ let seen = {};
 // a canned GET_MODEL QMUX response (result TLV + model) delivered async — as the
 // real transport would, so client.request has registered its pending by then.
 let fake_mc = {
-	command_raw: function(service_uuid, cid, info, cb) {
+	command_raw: function(service_uuid, cid, info, cb, opts) {
+		seen.opts = opts;
 		seen.service = service_uuid;
 		seen.cid = cid;
 		let req = qmux.decode(info);
@@ -123,5 +124,14 @@ let direct = qmux.encode(nas.service, 6, 0, 0x0024, ss_tlv, 'indication');
 ind_cb(null, { info: direct });
 eq(hits['6'], 1, 'targeted indication: delivered to the addressed client');
 eq(hits['5'], null, 'targeted indication: not fanned out to other clients');
+
+// THE TUNNEL MUST NOT VOTE ON THE CHANNEL. mbim_client reports a non-success
+// status to the recovery hook, and a vendor CID this firmware does not implement
+// answers exactly that — an RM520F-GL refuses every passthrough request while its
+// MBIM works perfectly, and the ladder counted its way toward a repower and a
+// reboot (ddimension/wwand#30). The shim opts out per request; the client side of
+// the same fix is pinned in test_mbim_backend.
+eq(seen.opts?.no_recovery, true,
+	'passthrough: the shim asks mbim_client not to count its failures as channel faults');
 
 done('test_passthrough');

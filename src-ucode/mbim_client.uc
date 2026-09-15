@@ -158,7 +158,15 @@ export function create(hub, hooks)
 				return cb ? cb(err, null) : null;
 
 			if (msg.status != STATUS_SUCCESS) {
-				if (hooks?.on_error)
+				// `no_recovery`: a non-success status on a VENDOR CID is not evidence
+				// about the control channel. The QMI-over-MBIM tunnel is the case that
+				// matters — an RM520F-GL answers status 2 to every request through it,
+				// once per telemetry tick, while its MBIM is working perfectly. Counted
+				// as protocol errors those drove the hardware recovery ladder toward a
+				// repower and a reboot (ddimension/wwand#30). Native MBIM commands keep
+				// reporting, so a genuinely wedged channel is still caught by all of
+				// them; only this one optional tunnel stops voting.
+				if (hooks?.on_error && !opts?.no_recovery)
 					hooks.on_error(self, 'mbim');
 
 				return cb ? cb({ error: 'mbim', status: msg.status }, null) : null;

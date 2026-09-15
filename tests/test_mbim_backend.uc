@@ -109,15 +109,46 @@ function build_base_stations() {
 
 // --- client harness ----------------------------------------------------------
 
-function make_mc(schema, handlers) {
+function make_mc(schema, handlers, hooks) {
 	let mock = mbim_mockhub.create({ schema: schema, handlers: handlers });
-	let mc = mbim_client.create(mock, {});
+	let mc = mbim_client.create(mock, hooks ?? {});
 	mock.transport_open('/dev/mock', {
 		on_raw: (hub, msg) => { let dec = mbim.decode(msg); if (dec) mc.on_message(dec); },
 		on_gone: () => null,
 	});
 	return mc;
 }
+
+// --- no_recovery: an optional tunnel must not vote on the channel's health ----
+//
+// A vendor CID this firmware does not implement answers a non-success status,
+// and mbim_client reported every one of those to the recovery hook. The
+// QMI-over-MBIM passthrough is the case that bit: an RM520F-GL answers status 2
+// to every request through it, once per telemetry tick, while its MBIM is
+// working perfectly — and the ladder counted its way toward a repower and a
+// reboot (ddimension/wwand#30).
+//
+// The mock answers a service/cid it knows no schema for with a non-zero status,
+// which is exactly the shape of that firmware's refusal. It answers inline, so
+// no timer is needed — and must not be used: the scenario chain below ends the
+// uloop, and a timer racing that would simply never fire.
+(function() {
+	let errs = 0;
+	let mc = make_mc([], {}, { on_error: () => { errs++; } });
+	let unknown = '00000000-0000-0000-0000-0000000000ff';
+
+	// chained through the REPLY callbacks, not timers: the mock delivers on the
+	// next uloop iteration, and a timer would race the uloop.end() the scenario
+	// chain below issues — which is how an earlier version of this simply never
+	// ran and reported two fewer checks with no failures.
+	mc.command_raw(unknown, 1, '', () => {
+		eq(errs, 1, 'no_recovery: a plain vendor-CID failure still reports to recovery');
+
+		mc.command_raw(unknown, 1, '', () => {
+			eq(errs, 1, 'no_recovery: ...and with the flag it does not');
+		}, { no_recovery: true });
+	});
+})();
 
 // --- scenarios ---------------------------------------------------------------
 
