@@ -597,8 +597,14 @@ export function create(opts)
 						log('notice', sprintf('ipv6 config: %s/%d gw %s dns [%s]',
 							self.settings.ipv6.addr, self.settings.ipv6.plen,
 							self.settings.ipv6.gateway ?? '-', join(' ', self.settings.ipv6.dns)));
+					// NOT "ipv6-only": this branch is about the v6 half alone and
+					// says nothing about v4, which was logged above if present.
+					// The old wording claimed the PDP was v6-only even on a
+					// dual-stack context that had just printed its v4 address
+					// one line earlier, and a reporter read it as the cause of a
+					// missing v4 address (ddimension/wwand#32) — it never was.
 					else if (self.settings.ipv6)
-						log('notice', sprintf('ipv6 dns: [%s] (ipv6-only PDP — host addressing via RA/SLAAC)',
+						log('notice', sprintf('ipv6 dns: [%s] (no static v6 address — host v6 via RA/SLAAC)',
 							join(' ', self.settings.ipv6.dns)));
 
 					if (!self.settings.ipv4 && !self.settings.ipv6)
