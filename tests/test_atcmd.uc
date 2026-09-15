@@ -524,10 +524,27 @@ eq(atcmd.parse_qtemp([ '+QTEMP: "cpu0-0-usr","35"', '+QTEMP: "pa1","120"' ]), 35
 eq(atcmd.parse_qtemp([ '+QTEMP: 42' ]), 42, 'qtemp: bare value');
 eq(atcmd.parse_qtemp([ '+QTEMP: "modem-ambient","5"' ]), null, 'qtemp: below floor -> null');
 eq(atcmd.parse_qtemp([ 'OK' ]), null, 'qtemp: no line -> null');
-eq(atcmd.parse_ethermal([ '+ETHERMAL: 47' ]), 47.0, 'ethermal: single sensor');
-eq(atcmd.parse_ethermal([ '+ETHERMAL: 46,48' ]), 47.0, 'ethermal: two sensors averaged');
-eq(atcmd.parse_ethermal([ '+ETHERMAL: 46,48', '+ETHERMAL: 50' ]), 48.0, 'ethermal: multi-line averaged');
-eq(atcmd.parse_ethermal([ '+ETHERMAL: 999' ]), null, 'ethermal: out-of-range -> null');
+// THE DIE TEMPERATURE IS THE SECOND FIELD, and these two captures are the same
+// FM350-GL minutes apart — the first when the reported value was right, the
+// second when it was 10 °C low (ddimension/wwand#33). Averaging every in-range
+// integer pulled field 3, a second sensor, into the answer as soon as it rose
+// past the plausibility window's floor.
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 3, 39, 9, 0, 32767, 9236, 3, 0',
+                          '+ETHERMAL: 3, 39, -127, 0, 32767, 9236, 0, 255' ]), 39.0,
+	'ethermal: the die temperature, with the second sensor below the window');
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 3, 42, 14, 0, 32767, 9236, 1, 0',
+                          '+ETHERMAL: 3, 42, -127, 0, 32767, 9236, 0, 255' ]), 42.0,
+	'ethermal: ...and the same when the second sensor is INSIDE it — 42, not 32.7');
+// The two above are captures. Everything below tests OUR OWN contract — the
+// position rule and the window — not a claim about what some firmware answers:
+// the expectations that used to live here (a bare value, an average of two) were
+// invented, and inventing them is what made the averaging look right for years.
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 47' ]), null,
+	'ethermal: no second field, no temperature — field 0 is a sensor count, not degrees');
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 3, -127, 0' ]), null, 'ethermal: the -127 sentinel is not a reading');
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 3, 10, 0' ]), null, 'ethermal: the window is exclusive at the bottom');
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 3, 120, 0' ]), null, 'ethermal: ...and at the top');
+eq(atcmd.parse_ethermal([ '+ETHERMAL: 3, 32767, 0' ]), null, 'ethermal: the 32767 filler is not a reading');
 eq(atcmd.parse_ethermal([ 'OK' ]), null, 'ethermal: no line -> null');
 
 // Huawei ^CHIPTEMP: first plausible sensor across the CSV

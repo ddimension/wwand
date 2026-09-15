@@ -25,6 +25,12 @@ import * as ncm_vendors from 'wwand.ncm_vendors';
 import * as atcmd_parse from 'wwand.atcmd_parse';
 import * as hexmod from 'wwand.codec.hex';
 
+// The two answers that SELECT THE VENDOR RECIPE, and the only ones an ERROR is
+// worth waiting for. Every other command in step_identify is best-effort and
+// may legitimately be absent (AT+QCCID on a non-Quectel, AT+GTRNDIS on a
+// non-Fibocom): parking bring-up a second for each of those buys nothing.
+const IDENT_CMDS = [ 'AT+CGMI', 'AT+CGMM' ];
+
 const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
 	reg_poll: 2000,
@@ -35,6 +41,11 @@ const TIMING_DEFAULTS = {
 	// and the watchdog only has to self-heal a firmware that keeps the
 	// device across the reset — where nothing else would ever fire.
 	reenum: 60000,
+	// how long to wait before re-asking for the identity after an ERROR: long
+	// enough for a modem that is still coming up from AT+CFUN=1,1, short
+	// enough that a modem which simply has no CGMI costs one second at
+	// bring-up (step_identify, ddimension/wwand#32).
+	ident_retry: 1000,
 };
 
 // The vendor model (PDP/auth builders, per-vendor dial tables + recipes,
@@ -252,6 +263,7 @@ export function create(opts)
 	let at_opts = opts.at ?? {};
 	let retry_timer = null, reg_timer = null, reg_poll_timer = null, settle_timer = null;
 	let reenum_timer = null;   // slot-switch re-enumeration watchdog (step_simslot)
+	let ident_retry_timer = null;   // delayed CGMI/CGMM retry (step_identify)
 	let poll_inflight = false;   // one register-poll chain at a time (URC fast-path coalescing)
 	let no_c5greg = false;       // modem answered ERROR to AT+C5GREG? — stop asking
 	// forward-declared: the URC handler below refreshes telemetry on a RAT
@@ -507,6 +519,11 @@ export function create(opts)
 		// One retry covers the transient.
 		let ask;
 
+		// the AT engine this init run belongs to. close_at() nulls self.at and a
+		// restart installs a new one, so it doubles as the identity token that
+		// tells a pending retry whether its run is still the current one.
+		let ident_at = self.at;
+
 		ask = (cmd, done, o, retried) => self.at.send(cmd, (err, res) => {
 			let val = null;
 
@@ -522,9 +539,50 @@ export function create(opts)
 					break;
 			}
 
-			if (!err && (val == null || val == '') && !retried) {
-				log('debug', sprintf('%s: empty reply, retrying once', cmd));
-				return ask(cmd, done, o, true);
+			// AN ERROR IS A TRANSIENT TOO, and the more damaging one. Right after
+			// AT+CFUN=1,1 the port answers AT but not yet CGMI/CGMM, so both come
+			// back ERROR and the recipe latches to `generic` FOR THE SESSION —
+			// losing ip_config, dials, telemetry and slots on a modem that was
+			// identified correctly minutes earlier. Field-traced on an FM350-GL
+			// after a slot switch: with no vendor ip_config, AT+CGPADDR was never
+			// asked and the interface came up with no IPv4 address at all
+			// (ddimension/wwand#32).
+			//
+			// A modem that truly has no CGMI answers ERROR twice and costs one
+			// round trip; one that was merely still booting gets identified.
+			// This applies to the recipe-selecting commands ONLY (IDENT_CMDS):
+			// from a best-effort probe an ERROR is an answer, not a transient,
+			// and waiting on each of those would add seconds to every bring-up.
+			let ident = (index(IDENT_CMDS, cmd) >= 0);
+
+			if ((err ? ident : (val == null || val == '')) && !retried) {
+				// AFTER A DELAY when the modem ERRORED, immediately when it merely
+				// answered nothing. The two transients are different: an empty reply
+				// is a line that went to the wrong reader and is there the next time
+				// you ask, while an ERROR right after AT+CFUN=1,1 means the port is
+				// up and the modem is not — asking again in the same breath gets the
+				// same ERROR. Retrying without waiting is what an earlier version of
+				// this fix did, and it changed nothing.
+				log('debug', err
+					? sprintf('%s: error, retrying in %d ms', cmd, self.timing.ident_retry)
+					: sprintf('%s: empty reply, retrying once', cmd));
+
+				if (!err)
+					return ask(cmd, done, o, true);
+
+				// A WAIT MUST NOT OUTLIVE ITS MODEM. teardown() runs on exactly
+				// the path this fix is about — a slot switch tears the modem
+				// down and the device re-enumerates — so an untracked timer
+				// would fire into a closed engine and dereference a null
+				// self.at. Tracked here, cancelled in teardown, and dropped if
+				// the run it belongs to has been superseded meanwhile.
+				ident_retry_timer = uloop.timer(self.timing.ident_retry, () => {
+					ident_retry_timer = null;
+
+					if (self.at && self.at == ident_at)
+						ask(cmd, done, o, true);
+				});
+				return;
 			}
 
 			done(err ? null : val);
@@ -1541,12 +1599,12 @@ export function create(opts)
 
 	self.teardown = function() {
 		for (let t in [ retry_timer, reg_timer, reg_poll_timer, settle_timer, at_drain_timer,
-		                telemetry_timer, reenum_timer ])
+		                telemetry_timer, reenum_timer, ident_retry_timer ])
 			if (t)
 				t.cancel();
 
 		retry_timer = reg_timer = reg_poll_timer = settle_timer = at_drain_timer = null;
-		telemetry_timer = reenum_timer = null;
+		telemetry_timer = reenum_timer = ident_retry_timer = null;
 		telem_watch.stop();
 
 		modem_common.close_at(self);

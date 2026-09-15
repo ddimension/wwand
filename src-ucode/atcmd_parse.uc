@@ -947,29 +947,45 @@ export function parse_cpmutemp(lines) { return first_temp(lines, /\+CPMUTEMP:/i)
 // the 3ginfo-lite parser uses on the NL952 family (the FM350/T700 rejects it).
 export function parse_mtsm(lines) { return first_temp(lines, /\+MTSM:/); };
 
-// Fibocom/MediaTek AT+ETHERMAL?: "+ETHERMAL: <a>[,<b>…]" — die/board sensor
-// readings in Celsius (the 3ginfo-lite 0e8d7127 script's source for the
-// FM350/T700). Average of all in-range readings, rounded to 0.1 °C;
-// 3ginfo takes one sensor only.
+// Fibocom/MediaTek AT+ETHERMAL?: the die temperature is the SECOND field.
+//
+//   +ETHERMAL: 3, 42, 14, 0, 32767, 9236, 1, 0
+//   +ETHERMAL: 3, 42, -127, 0, 32767, 9236, 0, 255
+//              ^  ^   ^
+//              |  |   second sensor: -127 when unavailable, a real reading when not
+//              |  die temperature
+//              sensor count / type, never a temperature
+//
+// This used to average every integer in a plausibility window instead, which is
+// the same thing as trusting the window to tell sensors apart. It cannot: field 3
+// is a second sensor, and the moment it rises past 10 it joins the average and
+// drags the answer down — 42 and 14 and 42 report as 32.7 °C on a modem that is
+// at 42. Field-diagnosed on an FM350-GL, firmware 81600.0000.00.29.23.24, with
+// the same modem captured in both states (ddimension/wwand#33).
+//
+// A line WITHOUT a second field carries no temperature, and is not one either:
+// field 1 is the position this answer keeps, so falling back to field 0 would
+// report the sensor count as degrees. No firmware is known to answer the short
+// form — reading it would be a guess, and guessing is what this fix removes.
+// The plausibility window stays on top: it rejects the -127 sentinel and the
+// 32767 filler.
 export function parse_ethermal(lines)
 {
-	let sum = 0.0, n = 0;
-
 	for (let l in (lines ?? [])) {
-		if (!match(l, /\+ETHERMAL:/))
+		// anchored at the prefix so a number in front of it cannot shift the
+		// positions, and both fields matched in one go so field 1 is field 1.
+		let m = match(l, /\+ETHERMAL:\s*-?[0-9]+\s*,\s*(-?[0-9]+)/);
+
+		if (!m)
 			continue;
 
-		for (let m in (match(l, /-?[0-9]+/g) ?? [])) {
-			let v = +m[0];
+		let v = +m[1];
 
-			if (v > 10 && v < 120) {
-				sum += v;
-				n++;
-			}
-		}
+		if (v > 10 && v < 120)
+			return +sprintf('%.1f', v);
 	}
 
-	return n ? +sprintf('%.1f', sum / n) : null;
+	return null;
 };
 
 // MeiG AT+TEMP: '+TEMP: "sensor","value"'. The value is milli-Celsius on some

@@ -42,8 +42,16 @@ function at_mock(handlers)
 		// written. Modems change what a query ANSWERS based on an earlier
 		// setting — AT+COPS=3,2 switches the read format — and a matcher that
 		// cannot express that can only test one side of such a pair.
+		// `nth`: an entry that only applies from the nth occurrence of its own
+		// command onwards. A modem that answers ERROR while it is still coming
+		// up and the truth a second later could not be expressed before, so a
+		// retry could only be tested by racing a timer against the thing under
+		// test — which is not a test.
+		let seen = (re) => length(filter(self.written, (c) => match(c, re)));
+
 		for (let e in handlers)
-			if (match(cmd, e.re) && (!e.after || index(self.written, e.after) >= 0)) {
+			if (match(cmd, e.re) && (!e.after || index(self.written, e.after) >= 0) &&
+				(!e.nth || seen(e.re) >= e.nth)) {
 				h = e;
 				break;
 			}
@@ -1620,7 +1628,9 @@ push(scenarios, {
 			'1,4,001,01,0001,001DBE47B,1775,272,103,75,17,55,55,21',
 			'1,9,,,FFFFFFF,00FFFFFFF,532002,770,5041,300,28,69,69,65',
 		] },
-		{ re: /^AT\+ETHERMAL\?$/, lines: [ '+ETHERMAL: 47' ] },
+		// the real 8-field answer (the format is pinned by two verbatim FM350-GL
+		// captures in test_atcmd); this scenario only proves the plumbing
+		{ re: /^AT\+ETHERMAL\?$/, lines: [ '+ETHERMAL: 3, 47, 9, 0, 32767, 9236, 3, 0' ] },
 	]),
 	datapath: { netdev: 'wwand0', fx: s9s_fx },
 	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
@@ -1834,6 +1844,75 @@ eq(hw_surc('^NDISSTAT:0,36,,"IPV4",1,,,"IPV6"'), { up: true }, 'huawei surc: fol
 eq(hw_surc('^NDISSTATQRY: 1,,,"IPV4",1,,,"IPV6"'), null, 'huawei surc: the query ANSWER is not a push');
 eq(hw_surc('^HCSQ:"LTE",36,28,126,22'), null, 'huawei surc: unrelated URC ignored');
 
+
+// --- identity that answers ERROR while the modem is still booting ------------
+//
+// After AT+CFUN=1,1 the port answers AT but not yet CGMI/CGMM. Both came back
+// ERROR, the recipe latched to `generic` FOR THE SESSION, and with no vendor
+// ip_config the interface came up with no IPv4 address — the modem had been
+// identified correctly minutes before (ddimension/wwand#32). The empty-answer
+// retry did not cover this: it required `!err`.
+// first call errors, the retry gets the truth — exactly what a modem does while
+// it is still coming up from AT+CFUN=1,1. `nth` entries come first so they win
+// once their count is reached.
+let ident_script = [
+	{ re: /^AT\+CGMI$/, nth: 2, lines: [ 'Fibocom Wireless Inc.' ] },
+	{ re: /^AT\+CGMM$/, nth: 2, lines: [ 'FM350-GL' ] },
+	{ re: /^AT\+CGMI$/, term: 'ERROR', lines: [] },
+	{ re: /^AT\+CGMM$/, term: 'ERROR', lines: [] },
+	// a BEST-EFFORT probe that errors: the revision. This one must NOT be
+	// retried — an ERROR from a command the modem simply does not have is an
+	// answer, and waiting a second on each of them is seconds added to every
+	// bring-up (it stalled test_ncm_urc out of INIT_SERVICES when the retry
+	// was not scoped).
+	{ re: /^AT\+CGMR$/, term: 'ERROR', lines: [] },
+];
+
+push(scenarios, {
+	name: 's9g_identity_error_is_retried',
+	script: fscript(ident_script),
+	mtiming: { ident_retry: 25 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		eq(env.modem.info?.manufacturer, 'Fibocom Wireless Inc.',
+			'identity: an ERROR while booting is retried, not latched');
+		eq(ncm_vendors.vendor_name(env.modem.vendor), 'fibocom',
+			'identity: ...so the vendor recipe is the real one, not generic');
+		ok(env.tr.count(/^AT\+CGMI$/) >= 2, 'identity: the retry actually went out');
+		eq(env.tr.count(/^AT\+CGMR$/), 1,
+			'identity: an ERROR from a best-effort probe is an answer, asked once');
+		env.finish();
+	},
+});
+
+// --- the delayed retry must not outlive the modem -----------------------------
+//
+// teardown() runs on exactly the path this fix is about: a slot switch stops the
+// modem and the device re-enumerates. close_at() nulls self.at, so a retry timer
+// left running would fire into a closed engine and dereference it — the crash
+// would land in a uloop callback, which ends the run early rather than failing a
+// check (see the scenario-count assertion at the bottom, which is what catches
+// it). Stop the modem with a retry pending and prove nothing more goes out.
+push(scenarios, {
+	name: 's9h_ident_retry_dies_with_the_modem',
+	script: fscript([ { re: /^AT\+CGMI$/, term: 'ERROR', lines: [] } ]),
+	mtiming: { ident_retry: 40 },
+	run_at_start: true,
+	run: (env) => {
+		wait_for(() => env.tr.count(/^AT\+CGMI$/) >= 1, () => {
+			env.modem.stop();
+
+			let n = env.tr.count(/^AT\+CGMI$/);
+
+			// well past the retry deadline
+			uloop.timer(150, () => {
+				eq(env.tr.count(/^AT\+CGMI$/), n,
+					'identity: a retry pending at teardown is cancelled, not fired');
+				env.finish();
+			});
+		});
+	},
+});
 
 push(scenarios, {
 	name: 's9f_fibocom_dual_slot',
