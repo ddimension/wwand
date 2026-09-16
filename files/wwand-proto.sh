@@ -31,16 +31,36 @@ proto_wwand_init_config() {
 	proto_config_add_string settings_poll
 	proto_config_add_string hard_reconnect_on_ip_change
 
-	# The IPv6 default route is installed SOURCE-SPECIFIC by default — the same
-	# thing uqmi's qmi.sh does, character for character, so this is the stock
-	# behaviour and not a wwand invention. It is the right default: with a
-	# delegated prefix, a source filter keeps the modem's route from capturing
-	# traffic that belongs to another uplink.
+	# The IPv6 default route is installed SOURCE-SPECIFIC by default. The route
+	# line is uqmi's, character for character (qmi.sh:458) — with a delegated
+	# prefix a source filter keeps the modem's route from capturing traffic that
+	# belongs to another uplink, and that is the right default.
 	#
-	# `option sourcefilter 0` drops the filter and installs a plain default
-	# instead. The name and semantics are ModemManager's (its own
-	# modemmanager.sh has had the same switch for the same reason), so an
-	# operator who needs it does not have to learn a third spelling.
+	# BUT NOT THE SWITCH: uqmi has no unfiltered variant of that route at all,
+	# and spends `sourcefilter` on something else — it hands the flag down to the
+	# dhcpv6 subinterface (qmi.sh:478), where odhcp6c uses it to stop
+	# source-restricting the RA-derived routes (dhcpv6.sh:207 -> NOSOURCEFILTER,
+	# dhcpv6.script:119). wwand does BOTH: the option picks the route here, and
+	# deps.uc ensure_wan6 passes it to the subinterface as uqmi does. The name
+	# and semantics are ModemManager's, so an operator does not learn a third
+	# spelling.
+	#
+	# ONE KNOWN WAY THE FILTER TURNS FATAL rather than merely suboptimal: a
+	# kernel built without CONFIG_IPV6_SUBTREES REFUSES any route carrying a
+	# source prefix (net/ipv6/route.c:3805-3810, 6.18.41 — "Specifying source
+	# address requires IPV6_SUBTREES to be enabled"), so the default route is
+	# never installed and IPv6 is dead while everything else looks correct.
+	# OpenWrt turns the symbol on by default (config/Config-kernel.in
+	# KERNEL_IPV6_SUBTREES def_bool y) but targets do disable it —
+	# target/linux/airoha/an7581/config-6.18 does, in the same tree.
+	#
+	# A FIELD CASE WITH THE SAME SYMPTOM AND A DIFFERENT CAUSE, still open:
+	# address, on-link gateway route and delegated prefix all present, no ::/0
+	# anywhere, and `sourcefilter 0` fixed it outright — on a kernel that
+	# accepts such a route when added by hand (mediatek/filogic SNAPSHOT
+	# r35961, 6.18.44). So the shape is valid, the kernel takes it, and netifd
+	# still ends up with no ::/0. Unexplained (ddimension/wwand#31); do not
+	# reach for the SUBTREES story to close it.
 	proto_config_add_boolean sourcefilter
 
 	# IPv6 interface identifier: keep the network's /64 but pin the host part, for

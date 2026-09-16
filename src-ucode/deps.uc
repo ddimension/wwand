@@ -405,6 +405,44 @@ export function create(o)
 			if (want_extend)
 				opts.extendprefix = '1';
 
+			// `option sourcefilter '0'` HAS TO REACH HERE TOO. On this model
+			// the v6 default route comes from the modem's RA through odhcp6c,
+			// not from the shim — and odhcp6c source-restricts RA routes unless
+			// it is told otherwise (dhcpv6.sh:207 exports NOSOURCEFILTER=1,
+			// dhcpv6.script:119 then adds them without a source). Without this
+			// the option looked applied on the parent and silently did nothing
+			// for the half that actually installs the default route on this
+			// model — a split that cannot be debugged from the outside.
+			//
+			// ONE KNOWN WAY the filter turns fatal rather than merely
+			// suboptimal, stated because it is easy to reach for and hard to
+			// see: a kernel built without CONFIG_IPV6_SUBTREES refuses any
+			// route carrying a source prefix outright (net/ipv6/route.c:
+			// 3805-3810, 6.18.41 — "Specifying source address requires
+			// IPV6_SUBTREES to be enabled"), so no default route is installed
+			// and IPv6 is dead while everything else looks right. OpenWrt
+			// enables the symbol by default; targets do turn it off
+			// (target/linux/airoha/an7581/config-6.18 in this tree). NOTE this
+			// is NOT what ddimension/wwand#31 turned out to be — that reporter
+			// demonstrated his kernel accepting such a route by hand. It is a
+			// real failure mode, not that one's explanation.
+			//
+			// uqmi hands the same flag to its own subinterface for the same
+			// reason (qmi.sh:478); wwand read it in the shim and stopped there.
+			//
+			// BOTH SPELLINGS, AND ONLY THOSE TWO. The shim gets this option
+			// through netifd, which converts it with libuci: a boolean accepts
+			// exactly "true"/"1" and "false"/"0", case-sensitively, and REJECTS
+			// anything else outright — the option is then dropped and never
+			// reaches the handler at all (uci/blob.c:34-40, uci 2025.12.02). So
+			// `no`, `off`, `disabled` and `FALSE` do not disable the filter in
+			// the shim either; honouring them here would recreate the very split
+			// this inherits away, only in the other direction.
+			let sf = sprintf('%s', cursor.get('network', parent, 'sourcefilter') ?? '');
+
+			if (sf == '0' || sf == 'false')
+				opts.sourcefilter = '0';
+
 			if (!have) {
 				cursor.set('network', name, 'interface');
 
@@ -413,22 +451,33 @@ export function create(o)
 
 				cursor.commit('network');
 			}
-			else if (want_extend && have_name == name &&
-			         cursor.get('network', have_name, 'extendprefix') == null) {
-				// OUR OWN section from an earlier connect, predating this
-				// default: fill it in. That is the case that matters in the
-				// field — the subinterface already exists, so the creation
+			else if (have_name == name) {
+				// OUR OWN section from an earlier connect, predating one of
+				// these defaults: fill it in. That is the case that matters in
+				// the field — the subinterface already exists, so the creation
 				// branch above never runs again.
 				//
-				// Gated on the name being ours (`<parent>_6`). A section a
-				// user wrote themselves is left completely alone, which is
-				// the promise made in docs/reference.md; and an explicit
-				// `extendprefix 0` is an operator decision, so only an
-				// ABSENT option is ever filled in.
-				logmod.log('notice', 'interface %s: IPv6 without a delegated prefix — defaulting extendprefix=1 (RFC 7278)',
-					have_name);
-				cursor.set('network', have_name, 'extendprefix', '1');
-				cursor.commit('network');
+				// Gated on the name being ours (`<parent>_6`). A section a user
+				// wrote themselves is left completely alone, which is the
+				// promise made in docs/reference.md; and an explicit value is an
+				// operator decision, so only an ABSENT option is ever filled in.
+				let fill = (opt, val, msg) => {
+					if (val == null || cursor.get('network', have_name, opt) != null)
+						return false;
+
+					logmod.log('notice', msg, have_name);
+					cursor.set('network', have_name, opt, val);
+					return true;
+				};
+
+				let touched = fill('extendprefix', want_extend ? '1' : null,
+					'interface %s: IPv6 without a delegated prefix — defaulting extendprefix=1 (RFC 7278)');
+
+				touched = fill('sourcefilter', opts.sourcefilter,
+					'dhcpv6 subinterface %s: sourcefilter=0 inherited from the parent interface') || touched;
+
+				if (touched)
+					cursor.commit('network');
 			}
 
 			// A committed section plus a reload IS the interface — which is
