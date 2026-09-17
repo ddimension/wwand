@@ -143,6 +143,31 @@ eq(got.res.lines, [ 'Quectel', 'RG502Q-EA', 'Revision: R11' ], 'engine: echo and
 		'engine: an echo older than the memory is no longer recognised');
 }
 
+// A URC glued BEHIND a late echo must still reach the handler. Same mechanism
+// as above, opposite side: while no command is running, a line is only surfaced
+// when it looks unsolicited (+/^/$ …), and an echo in front of it kills that
+// test — so the event was discarded. On the NCM path that is a lost +CGEV, and
+// a dead bearer then goes unnoticed until the next poll.
+{
+	let t = fake_transport();
+	let seen = [];
+	let e = atcmd.create(t, { log: silent, on_urc: (l) => push(seen, l) });
+
+	e.send('AT+CGSN', () => null);
+	t.reply("AT+CGSN\r\n353165094409590\r\n\r\nOK\r\n");
+
+	// idle now: the modem pushes an event, with a stale echo glued in front —
+	// delivered in pieces, because the byte stream does not respect line
+	// boundaries and a fix that only works on whole-line delivery is not one
+	t.reply("AT+CG");
+	t.reply("SN\r+CGEV: ME ");
+	t.reply("PDN ACT 1\r");
+	t.reply("\n");
+
+	eq(seen, [ '+CGEV: ME PDN ACT 1' ],
+		'engine: a chunked urc behind a late echo still reaches the handler');
+}
+
 // --- engine: chunked input ---------------------------------------------------
 
 got = null;

@@ -74,7 +74,7 @@ function mkdeps(u, extra) {
 // On this model the v6 default route does not come from the shim at all — it
 // comes from the modem's RA through odhcp6c on the `<parent>_6` subinterface.
 // odhcp6c source-restricts those routes unless told otherwise (dhcpv6.sh:207
-// exports NOSOURCEFILTER=1, dhcpv6.script:119 then adds them without a source),
+// exports NOSOURCEFILTER=1; dhcpv6.script:119 reads it, :138-144 acts on it),
 // and wwand read the option in the shim and stopped there. So the option could
 // look applied on the parent while doing nothing for the half that installs the
 // default route on this model. uqmi hands it down (qmi.sh:478).
@@ -118,6 +118,24 @@ function mkdeps(u, extra) {
 
 	eq(u3.state.wan_6?.sourcefilter, '0', 'wan6: an existing subinterface of ours is filled in');
 	eq(u3.commits, 1, 'wan6: filling in one absent option commits once');
+
+	// BOTH defaults absent on an older section of ours. They are peers, filled
+	// in one pass and committed once — the case that catches the two fills
+	// being turned back into a short-circuiting chain, which the single-option
+	// cases above cannot see. (Breaking the extendprefix fill made nothing go
+	// red until this existed.)
+	let u3b = fake_uci({
+		wan:   { '.type': 'interface', proto: 'wwand', sourcefilter: '0' },
+		wan_6: { '.type': 'interface', proto: 'dhcpv6', device: '@wan' },
+	});
+	let d3b = mkdeps(u3b, { conn: conn, netifd_cb: () => (() => null) });
+
+	d3b.ensure_wan6('wan', 'ipv4v6');
+
+	eq(u3b.state.wan_6?.extendprefix, '1',
+		'wan6: an existing owned section gets the missing extendprefix');
+	eq(u3b.state.wan_6?.sourcefilter, '0', 'wan6: ...and the missing sourcefilter too');
+	eq(u3b.commits, 1, 'wan6: ...in one pass, committed once');
 
 	// ...but an EXPLICIT value there is the operator's, and is never overwritten
 	let u4 = fake_uci({

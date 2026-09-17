@@ -293,8 +293,9 @@ function expand_v6(a)
 // `2408:…:e53a::/64` is meant. netifd does not clean that up: it masks the
 // destination of an IPv4 route (interface-ip.c, "Mask out IPv4 host bits") and
 // it masks a delegated prefix (interface_ip_add_device_prefix ->
-// clear_if_addr), but a route SOURCE is passed through to RTA_SRC exactly as
-// given (netifd 2026.07.08, interface-ip.c:491-512). The kernel then masks it
+// clear_if_addr), but a route SOURCE is parsed WITHOUT masking and emitted as
+// given (netifd 2026.07.08 — parsed at interface-ip.c:491-504, put on the wire
+// at system-linux.c:3927-3931). The kernel then masks it
 // itself, so the result happens to be right — which is why this survived: it
 // was wrong in the field that carries it, not in the route that came out.
 //

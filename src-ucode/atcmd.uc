@@ -700,25 +700,6 @@ export function create(transport, opts)
 	// URC-looking lines, discard the rest. The partial tail stays in the
 	// buffer: it is the head of a line whose rest has not arrived yet, and
 	// dropping it is how a URC used to get lost across a command boundary.
-	let drain_urcs = () => {
-		let idx;
-
-		while ((idx = index(self.buffer, '\n')) >= 0) {
-			let line = trim(substr(self.buffer, 0, idx));
-
-			self.buffer = substr(self.buffer, idx + 1);
-
-			if (line == '' || !looks_unsolicited(line))
-				continue;
-
-			emit_urc(line);
-		}
-	};
-
-	// drain leftover URCs BEFORE the callback — it may synchronously queue
-	// the next command
-	let dispatch_urcs = () => drain_urcs();
-
 	// Strip our own commands back out of a response line.
 	//
 	//
@@ -755,6 +736,31 @@ export function create(transport, opts)
 		// had before, and no worse.
 		return join('\r', keep);
 	};
+
+	let drain_urcs = () => {
+		let idx;
+
+		while ((idx = index(self.buffer, '\n')) >= 0) {
+			// strip_echo HERE TOO, and for the same reason it exists at all:
+			// a URC that arrives glued BEHIND a late echo (`AT+CGSN\r+CGEV: …`)
+			// no longer starts with +/^/$, fails looks_unsolicited and is
+			// DISCARDED. On the NCM path that is a lost PDN event, so a dead
+			// bearer goes unnoticed until the next poll picks it up.
+			let line = strip_echo(trim(substr(self.buffer, 0, idx)));
+
+			self.buffer = substr(self.buffer, idx + 1);
+
+			if (line == '' || !looks_unsolicited(line))
+				continue;
+
+			emit_urc(line);
+		}
+	};
+
+	// drain leftover URCs BEFORE the callback — it may synchronously queue
+	// the next command
+	let dispatch_urcs = () => drain_urcs();
+
 
 	finish = (err, lines) => {
 		let cur = self.current;

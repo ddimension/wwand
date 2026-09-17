@@ -408,8 +408,8 @@ export function create(o)
 			// `option sourcefilter '0'` HAS TO REACH HERE TOO. On this model
 			// the v6 default route comes from the modem's RA through odhcp6c,
 			// not from the shim — and odhcp6c source-restricts RA routes unless
-			// it is told otherwise (dhcpv6.sh:207 exports NOSOURCEFILTER=1,
-			// dhcpv6.script:119 then adds them without a source). Without this
+			// it is told otherwise (dhcpv6.sh:207 exports NOSOURCEFILTER=1;
+			// dhcpv6.script:119 reads it and :138-144 acts on it). Without this
 			// the option looked applied on the parent and silently did nothing
 			// for the half that actually installs the default route on this
 			// model — a split that cannot be debugged from the outside.
