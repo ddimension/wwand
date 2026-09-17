@@ -33,6 +33,10 @@ function atport_table()
 }
 
 const DEFAULT_TIMEOUT = 5000;
+// how many written commands to remember for echo recognition. Deep enough that
+// an echo which arrives a few exchanges late is still recognised, shallow enough
+// that the list stays a glance rather than a search.
+const ECHO_MEMORY = 16;
 
 // boards whose integrated modem needs a fixed AT port (old
 // proto_qmi_find_primary_serial_interface hardcodes)
@@ -574,6 +578,21 @@ export function create(transport, opts)
 		// if it were an answer (a bare-value command like AT+CGMI would
 		// have taken that fragment as the manufacturer).
 		buffer: '',
+		// THE COMMANDS WE WROTE, most recent last. An echo is our own text
+		// coming back, and the only reliable way to know our own text is to
+		// remember it: comparing against the CURRENT command alone leaves a
+		// STALE echo — one belonging to a command that timed out or whose
+		// answer arrived late — to pose as the next command's reply. Field
+		// evidence, FM350-GL after a re-enumeration (ddimension/wwand#32):
+		//
+		//   ncm modem AT+CGMI (AT), imei AT+CGMR\rAT+CGSN, imsi 353165094409590
+		//
+		// — the manufacturer read as the echo of a bare `AT` probe, the model as
+		// the echo of AT+CGMI, the IMEI as TWO echoes glued together (the modem
+		// echoes with CR only and the line loop splits on LF, so they arrive as
+		// one line), and the real IMEI landed in the IMSI. Every field shifted
+		// by one, and the vendor recipe fell to `generic` on garbage.
+		sent: [],
 		on_urc: opts?.on_urc ?? null,
 		// called whenever a command completes with a RESULT CODE — OK, ERROR or
 		// a CME/CMS error alike. Not "the command worked": the fact on offer is
@@ -700,6 +719,43 @@ export function create(transport, opts)
 	// the next command
 	let dispatch_urcs = () => drain_urcs();
 
+	// Strip our own commands back out of a response line.
+	//
+	//
+	// Exactly our own text, never a guess: a piece is removed only when it is a
+	// command this engine actually wrote. That matters because a
+	// plausible-looking rule ("starts with AT") would eat a real answer — an
+	// operator called AT&T is a legitimate value for a bare-value command.
+	//
+	// Per PIECE rather than per line, so an echo glued to a real answer loses
+	// the echo instead of taking the answer down with it (or, worse, handing
+	// the caller both as one value).
+	//
+	// Split on CR, because a modem echoes with CR alone: with the line loop
+	// splitting on LF, two echoes that arrive back to back reach us as one line
+	// (`AT+CGMR\rAT+CGSN`) and no single-command comparison can match it. The
+	// framing itself is deliberately left as it is — it belongs to the byte
+	// stream, and every other reader in the tree depends on it.
+	let strip_echo = (line) => {
+		if (index(line, '\r') < 0)
+			return (index(self.sent, line) >= 0) ? '' : line;
+
+		let keep = [];
+
+		for (let part in split(line, '\r')) {
+			let t = trim(part);
+
+			if (t != '' && index(self.sent, t) < 0)
+				push(keep, t);
+		}
+
+		// what is left is the answer; nothing left means the whole line was
+		// ours. Rejoined with CR because that is how it arrived — a caller
+		// that gets two real values glued together has the same problem it
+		// had before, and no worse.
+		return join('\r', keep);
+	};
+
 	finish = (err, lines) => {
 		let cur = self.current;
 
@@ -749,6 +805,11 @@ export function create(transport, opts)
 			finish({ error: 'timeout' }, cur.lines);
 		});
 
+		push(self.sent, cur.cmd);
+
+		while (length(self.sent) > ECHO_MEMORY)
+			shift(self.sent);
+
 		transport.write(cur.cmd + '\r');
 	};
 
@@ -786,7 +847,9 @@ export function create(transport, opts)
 
 			self.buffer = substr(self.buffer, idx + 1);
 
-			if (line == '' || line == cur.cmd)   // skip blanks and echo
+			line = strip_echo(line);   // drop blanks and our own echo
+
+			if (line == '')
 				continue;
 
 			if (line == 'OK')

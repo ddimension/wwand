@@ -47,6 +47,102 @@ tr.reply("ATI\r\nQuectel\r\nRG502Q-EA\r\nRevision: R11\r\n\r\nOK\r\n");
 eq(got.err, null, 'engine: success');
 eq(got.res.lines, [ 'Quectel', 'RG502Q-EA', 'Revision: R11' ], 'engine: echo and blanks filtered');
 
+// --- engine: a STALE echo must not pose as the next command's answer ---------
+//
+// The buffer is deliberately shared across commands (it belongs to the byte
+// stream), so an echo left behind by an earlier exchange is still there when the
+// next command reads. Comparing only against the CURRENT command let it through
+// as a reply line.
+//
+// Field evidence, FM350-GL after a re-enumeration (ddimension/wwand#32):
+//
+//   ncm modem AT+CGMI (AT), imei AT+CGMR\rAT+CGSN, imsi 353165094409590
+//
+// Manufacturer = the echo of a bare `AT` probe, model = the echo of AT+CGMI,
+// IMEI = two echoes glued into one line (the modem terminates an echo with CR
+// alone while the line loop splits on LF), and the real IMEI shifted into the
+// IMSI. Every field off by one, and the vendor recipe fell to `generic`.
+{
+	let t = fake_transport();
+	let e = atcmd.create(t, { log: silent });
+	let cgmi = null, cgsn = null;
+
+	// the port probe completes normally
+	e.send('AT', () => null);
+	t.reply("AT\r\n\r\nOK\r\n");
+
+	// ...and then its echo turns up AGAIN, glued ahead of the next echo by a
+	// bare CR, which is exactly how the field capture reads
+	e.send('AT+CGMI', (err, res) => { cgmi = res?.lines; });
+	t.reply("AT\rAT+CGMI\r\nFibocom Wireless Inc.\r\n\r\nOK\r\n");
+
+	eq(cgmi, [ 'Fibocom Wireless Inc.' ],
+		'engine: a stale echo glued ahead of the current one is not the answer');
+
+	// the same one command further on, where the stale echo belongs to a
+	// command that is no longer anywhere near the head of the queue
+	e.send('AT+CGMR', () => null);
+	t.reply("AT+CGMR\r\n81600\r\n\r\nOK\r\n");
+
+	e.send('AT+CGSN', (err, res) => { cgsn = res?.lines; });
+	t.reply("AT+CGMR\rAT+CGSN\r\n353165094409590\r\n\r\nOK\r\n");
+
+	eq(cgsn, [ '353165094409590' ],
+		'engine: ...and neither is one from several exchanges back');
+}
+
+// ...and the recogniser must not eat a real answer that merely looks like one.
+// An operator called AT&T is a legitimate bare value, which is why the rule is
+// "exactly a command we wrote" and not "starts with AT".
+{
+	let t = fake_transport();
+	let e = atcmd.create(t, { log: silent });
+	let cops = null;
+
+	e.send('AT+COPS?', (err, res) => { cops = res?.lines; });
+	t.reply("AT+COPS?\r\nAT&T\r\n\r\nOK\r\n");
+
+	eq(cops, [ 'AT&T' ], 'engine: a value that looks like a command is kept');
+}
+
+// An echo glued to a REAL answer must lose the echo, not take the answer with
+// it — and not hand the caller both as one value either, which is what a
+// whole-line decision would do.
+{
+	let t = fake_transport();
+	let e = atcmd.create(t, { log: silent });
+	let lines = null;
+
+	e.send('AT+CGMI', (err, res) => { lines = res?.lines; });
+	t.reply("AT+CGMI\rFibocom Wireless Inc.\r\n\r\nOK\r\n");
+
+	eq(lines, [ 'Fibocom Wireless Inc.' ],
+		'engine: an echo glued to an answer is removed, the answer survives');
+}
+
+// The memory is deliberately bounded: a command far enough back is no longer
+// recognised as its own echo. Stated as a property, so the bound is a decision
+// rather than an accident.
+{
+	let t = fake_transport();
+	let e = atcmd.create(t, { log: silent });
+	let lines = null;
+
+	e.send('AT+OLD', () => null);
+	t.reply("AT+OLD\r\n\r\nOK\r\n");
+
+	for (let i = 0; i < 16; i++) {
+		e.send(sprintf('AT+NEW%d', i), () => null);
+		t.reply("\r\nOK\r\n");
+	}
+
+	e.send('AT+FINAL', (err, res) => { lines = res?.lines; });
+	t.reply("AT+OLD\r\n\r\nOK\r\n");
+
+	eq(lines, [ 'AT+OLD' ],
+		'engine: an echo older than the memory is no longer recognised');
+}
+
 // --- engine: chunked input ---------------------------------------------------
 
 got = null;
