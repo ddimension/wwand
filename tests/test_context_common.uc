@@ -191,4 +191,78 @@ eq(cc.apply_iface_id('2001:db8:1:2::1', '::42'), '2001:db8:1:2:0:0:0:42',
 	'iface_id: a real compression is still accepted');
 
 
+// --- v6_prefix: the network part, host bits cleared --------------------------
+//
+// A source-restricted route's source field is a PREFIX. netifd passes it
+// straight through to RTA_SRC — it masks an IPv4 destination and a delegated
+// prefix, but never this one — so handing it a host address with a length
+// stapled on put the wrong value in the field. The kernel masks before storing,
+// which is why the installed route looked right and this went unnoticed
+// (ddimension/wwand#31).
+
+// every boundary, including the ones inside a group where an off-by-one in the
+// shift would still look plausible
+let all_ones = 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff';
+let boundaries = {
+	'0':   '0:0:0:0:0:0:0:0',
+	'1':   '8000:0:0:0:0:0:0:0',
+	'15':  'fffe:0:0:0:0:0:0:0',
+	'16':  'ffff:0:0:0:0:0:0:0',
+	'17':  'ffff:8000:0:0:0:0:0:0',
+	'63':  'ffff:ffff:ffff:fffe:0:0:0:0',
+	'64':  'ffff:ffff:ffff:ffff:0:0:0:0',
+	'65':  'ffff:ffff:ffff:ffff:8000:0:0:0',
+	'127': 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe',
+	'128': 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+};
+
+for (let plen, want in boundaries)
+	eq(cc.v6_prefix(all_ones, +plen), want, sprintf('v6_prefix: /%s boundary', plen));
+
+eq(cc.v6_prefix('00e5:0000:0000:0000:0000:0000:0000:0001', 16), 'e5:0:0:0:0:0:0:0',
+	'v6_prefix: leading zeroes parse, and the output is canonical');
+
+eq(cc.v6_prefix('2408:844f:1521:e53a:20ce:e172:c052:1c79', 64),
+	'2408:844f:1521:e53a:0:0:0:0', 'v6_prefix: /64 keeps the network half');
+eq(cc.v6_prefix('2408:844f:1521:e53a:20ce:e172:c052:1c79', 56),
+	'2408:844f:1521:e500:0:0:0:0',
+	'v6_prefix: a length inside a group masks that group, not just whole ones');
+eq(cc.v6_prefix('2408:844f:1521:e53a:20ce:e172:c052:1c79', 128),
+	'2408:844f:1521:e53a:20ce:e172:c052:1c79',
+	'v6_prefix: /128 is the address itself');
+eq(cc.v6_prefix('2408:844f:1521:e53a:20ce:e172:c052:1c79', 0),
+	'0:0:0:0:0:0:0:0', 'v6_prefix: /0 is the unspecified address');
+eq(cc.v6_prefix('2001:db8::1', 64), '2001:db8:0:0:0:0:0:0',
+	'v6_prefix: a compressed literal expands first');
+eq(cc.v6_prefix('2001:db8:1:2:3:4:5:6', 48), '2001:db8:1:0:0:0:0:0',
+	'v6_prefix: /48 clears from the fourth group on');
+
+// an address already ON its prefix boundary must come back unchanged, or the
+// masking would be changing something it has no business changing
+eq(cc.v6_prefix('2408:844f:1521:e53a:0:0:0:0', 64), '2408:844f:1521:e53a:0:0:0:0',
+	'v6_prefix: an already-masked address is left as it is');
+
+// refusals: a caller gets null and decides, rather than a plausible wrong answer
+eq(cc.v6_prefix('nonsense', 64), null, 'v6_prefix: unparsable -> null');
+eq(cc.v6_prefix(null, 64), null, 'v6_prefix: no address -> null');
+eq(cc.v6_prefix('2001:db8::1', 129), null, 'v6_prefix: a length past 128 -> null');
+eq(cc.v6_prefix('2001:db8::1', -1), null, 'v6_prefix: ...and a negative one');
+eq(cc.v6_prefix('10.0.0.1', 64), null, 'v6_prefix: an IPv4 literal is not ours');
+
+// THE LENGTH IS CHECKED AS TEXT. `+x` on a non-numeric string is NaN, and every
+// comparison against NaN is false — so a range check written the obvious way
+// would let garbage through and return the address UNMASKED, which is the one
+// outcome this function must never produce.
+eq(cc.v6_prefix('2001:db8::1', '64'), '2001:db8:0:0:0:0:0:0',
+	'v6_prefix: a decimal string length is what ubus hands over, and is accepted');
+eq(cc.v6_prefix('2001:db8::1', 64.0), '2001:db8:0:0:0:0:0:0',
+	'v6_prefix: ...as is an integral float, which prints the same');
+eq(cc.v6_prefix('2001:db8::1', 'sixty-four'), null,
+	'v6_prefix: a non-numeric length is refused, not coerced to NaN and ignored');
+eq(cc.v6_prefix('2001:db8::1', true), null,
+	'v6_prefix: a boolean is refused rather than becoming /1');
+eq(cc.v6_prefix('2001:db8::1', 64.5), null,
+	'v6_prefix: a fraction is refused rather than truncating');
+eq(cc.v6_prefix('2001:db8::1', null), null, 'v6_prefix: a missing length is refused');
+
 done('test_context_common');

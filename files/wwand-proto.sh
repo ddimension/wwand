@@ -135,13 +135,15 @@ _wwand_apply_settings() {
 		json_select ..
 	fi
 
-	local v6_addr v6_plen v6_gateway v6_dns
+	local v6_addr v6_plen v6_prefix v6_gateway v6_dns
 	json_load "$resp"
 	json_get_type _t ipv6
 	if [ "$_t" = object ]; then
 		json_select ipv6
 		json_get_var v6_addr addr
 		json_get_var v6_plen plen
+		# the daemon's masked network part of v6_addr — see the route below
+		json_get_var v6_prefix prefix
 		json_get_var v6_gateway gateway
 		json_get_type _t dns
 		if [ "$_t" = array ]; then
@@ -237,7 +239,18 @@ _wwand_apply_settings() {
 			if [ "$sourcefilter" = 0 ]; then
 				proto_add_ipv6_route "::0" 0 "$v6_gateway"
 			else
-				proto_add_ipv6_route "::0" 0 "$v6_gateway" "" "" "${v6_addr}/${v6_plen:-64}"
+				# THE SOURCE IS A PREFIX, so it carries the network part —
+				# `2408:…:e53a:0:0:0:0/64`, not the host address with a length
+				# stapled on. netifd passes this field straight through to
+				# RTA_SRC: it masks an IPv4 destination and a delegated prefix
+				# (interface_ip_add_device_prefix -> clear_if_addr) but never
+				# this one (netifd 2026.07.08, interface-ip.c:491-512). The
+				# kernel masks it on the way in, so the installed route was
+				# right either way — which is exactly why the wrong field
+				# value survived this long. `${v6_addr}` is the fallback for a
+				# daemon too old to send `prefix`, i.e. a mismatched deploy.
+				proto_add_ipv6_route "::0" 0 "$v6_gateway" "" "" \
+					"${v6_prefix:-$v6_addr}/${v6_plen:-64}"
 			fi
 		}
 	}

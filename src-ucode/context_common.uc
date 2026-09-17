@@ -286,6 +286,59 @@ function expand_v6(a)
 	return out;
 }
 
+// v6_prefix(addr, plen): the NETWORK part of `addr`, host bits cleared.
+//
+// A source-restricted route's source field is a PREFIX, and we were handing it
+// a host address with a prefix length stapled on — `2408:…:c052:1c79/64` where
+// `2408:…:e53a::/64` is meant. netifd does not clean that up: it masks the
+// destination of an IPv4 route (interface-ip.c, "Mask out IPv4 host bits") and
+// it masks a delegated prefix (interface_ip_add_device_prefix ->
+// clear_if_addr), but a route SOURCE is passed through to RTA_SRC exactly as
+// given (netifd 2026.07.08, interface-ip.c:491-512). The kernel then masks it
+// itself, so the result happens to be right — which is why this survived: it
+// was wrong in the field that carries it, not in the route that came out.
+//
+// Returns null when the input cannot be taken apart safely, so callers can
+// decide rather than be handed a plausible wrong answer.
+export function v6_prefix(addr, plen)
+{
+	let g = expand_v6(trim(sprintf('%s', addr ?? '')));
+
+	// The LENGTH IS CHECKED AS TEXT, not by coercing it. `+x` turns a
+	// non-numeric string into NaN, and every comparison against NaN is false —
+	// so a range check written the obvious way lets a garbage length through
+	// and returns the address UNMASKED, which is precisely the plausible wrong
+	// answer this function exists not to give. `true` would coerce to /1 and a
+	// fraction would silently truncate. A decimal string and an integral float
+	// both print as their digits and are accepted, which is what the codecs and
+	// ubus actually hand over.
+	let ps = (plen == null) ? '' : trim(sprintf('%s', plen));
+
+	if (!g || !match(ps, /^[0-9]{1,3}$/))
+		return null;
+
+	let n = +ps;
+
+	if (n > 128)
+		return null;
+
+	let out = [];
+
+	for (let i = 0; i < 8; i++) {
+		let v = hex(g[i]);
+		let bits = n - (i * 16);   // bits of THIS group that are network
+
+		if (bits <= 0)
+			v = 0;
+		else if (bits < 16)
+			v &= (0xffff << (16 - bits)) & 0xffff;
+
+		push(out, sprintf('%x', v));
+	}
+
+	return join(':', out);
+};
+
 // an expanded literal is usable as an interface identifier when its network
 // half is empty and its host half is not.
 function valid_iface_id(g)

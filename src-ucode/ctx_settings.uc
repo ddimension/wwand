@@ -18,6 +18,25 @@
 import * as netlink from 'wwand.netlink';
 import * as context_common from 'wwand.context_common';
 
+// The shim's IPv6 settings, plus the masked `prefix`. THE SOURCE OF A
+// SOURCE-RESTRICTED ROUTE IS A PREFIX: netifd passes that field through to
+// RTA_SRC exactly as given (it masks an IPv4 destination and a delegated
+// prefix, but not this), so handing it a host address with a length stapled on
+// was wrong in the field that carries it. The kernel masks it before storing,
+// which is why the resulting route was still correct and this went unnoticed.
+//
+// A copy, not a mutation: ctx.settings is the context's own state and is handed
+// to other consumers unchanged.
+function v6_out(v6)
+{
+	if (!v6?.addr)
+		return v6;
+
+	let p = context_common.v6_prefix(v6.addr, v6.plen ?? 64);
+
+	return p ? { ...v6, prefix: p } : v6;
+}
+
 // connection params re-read from disk on every up (structural changes still go
 // through the reload trigger). entry.cfg is the object the context reads live,
 // so updating it in place makes the next activation use the fresh values.
@@ -158,7 +177,7 @@ export function install(self, o)
 			pushed_mtu: entry.ctx.settings?.mtu,
 			use_pushed_mtu: entry.cfg.use_pushed_mtu,
 			ipv4: entry.ctx.settings?.ipv4,
-			ipv6: entry.ctx.settings?.ipv6,
+			ipv6: v6_out(entry.ctx.settings?.ipv6),
 			relink: relink,
 		};
 	};

@@ -86,4 +86,43 @@ t = mkself({ ip6ifaceid: '::9' });
 t.self._apply_iface_id('wwan0', t.entry, null);
 eq(length(calls), 0, 'wiring: no netdev -> nothing attempted');
 
+// --- the shim's reply carries the MASKED prefix ------------------------------
+//
+// _settings_result is the one place that builds what the netifd shim reads, so
+// the masked source belongs here rather than in each backend's build_settings.
+// The shim puts it in the source field of the source-restricted default route,
+// which is a PREFIX — netifd forwards that field to RTA_SRC untouched.
+{
+	let tt = mkself({});
+
+	tt.entry.ctx.settings = {
+		ipv4: { addr: '10.1.2.3', prefix: 32 },
+		ipv6: { addr: '2408:844f:1521:e53a:20ce:e172:c052:1c79', plen: 64,
+		        dns: [ '2001:4860:4860::8888' ] },
+	};
+
+	let r = tt.self._settings_result('wwan0', tt.entry, 'wwand0');
+
+	eq(r.ipv6?.prefix, '2408:844f:1521:e53a:0:0:0:0',
+		'settings: the reply carries the masked network part');
+	eq(r.ipv6?.addr, '2408:844f:1521:e53a:20ce:e172:c052:1c79',
+		'settings: ...beside the host address, which the shim still needs');
+	eq(r.ipv6?.dns, [ '2001:4860:4860::8888' ], 'settings: the rest of the block is intact');
+
+	// a COPY, not a mutation: ctx.settings is the context's own state and goes
+	// to other consumers unchanged
+	eq(tt.entry.ctx.settings.ipv6.prefix, null,
+		'settings: the context state is not written to');
+
+	// an address the helper cannot take apart must not invent a prefix
+	tt.entry.ctx.settings.ipv6 = { addr: 'nonsense', plen: 64 };
+	eq(tt.self._settings_result('wwan0', tt.entry, 'wwand0').ipv6?.prefix, null,
+		'settings: an unparsable address yields no prefix rather than a wrong one');
+
+	// no v6 at all (ipv4-only PDP) must stay exactly as it was
+	tt.entry.ctx.settings.ipv6 = null;
+	eq(tt.self._settings_result('wwan0', tt.entry, 'wwand0').ipv6, null,
+		'settings: an ipv4-only context is untouched');
+}
+
 done('test_ctx_settings');
