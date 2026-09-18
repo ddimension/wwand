@@ -277,6 +277,30 @@ modules under `/usr/share/ucode/wwand/` are imported, not exec'd — they don't
 need +x. The apk pkg is fine (Makefile uses INSTALL_BIN). Note: wwand never
 registers `proto qmi`, so uqmi's `qmi.sh` keeps it — expected coexistence, not
 a bug.
+
+**STOP THE DAEMON AND WAIT FOR IT before unpacking.** `/etc/init.d/wwand stop`
+returns before procd has reaped the process, so a `tar x` that follows it
+immediately replaces modules under a daemon that is still alive — and because
+every backend and most helpers are imported LAZILY, that daemon then loads a
+module from the NEW tree into a process running the OLD one. The failure looks
+like a code defect and is not:
+
+    Type error: left-hand side is not a function
+    In [anonymous function](), file /usr/share/ucode/wwand/daemon.uc, line 2345
+      called from function [arrow function] (/usr/share/ucode/wwand/ubus.uc:70:33)
+
+— a `cfgmod.effective_mux_id(...)` that exists in both trees but not in the one
+half of the mix (Cudy LT300, 2026-09-18). The next start was clean, which is the
+tell: a real breakage does not fix itself on restart. So:
+
+    /etc/init.d/wwand stop; sleep 2; <unpack>; chmod +x …; sync
+    /etc/init.d/wwand start
+
+**And never `tar x` an archive with a `.` entry into `/`** — that entry carries
+the mode and owner of the staging directory and applies them to the root
+directory itself. Build the archive from explicit top-level names
+(`tar -czf - -C stage usr lib etc`) and check with `tar -tzf … | awk -F/ '{print $1}' | sort -u`
+that no `.` is in it.
 Modem is normally in **QMI mode**
 (`qmi_wwan`); MBIM mode → switch back with `AT+QCFG="usbnet",0` + `AT+CFUN=1,1`.
 
