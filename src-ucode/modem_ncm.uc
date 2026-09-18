@@ -820,6 +820,17 @@ export function create(opts)
 		tryNext();
 	};
 
+	// Every hop of a slot exchange, guarded. An entry check is not enough: the
+	// switch is a CHAIN — read the slots, optionally prepare, switch, reset —
+	// and a teardown landing between two hops finds `self.at` null at the next
+	// one. Same shape as context_ncm's at_send, same reason.
+	let slot_send = (cmd, cb, o) => {
+		if (!self.at)
+			return cb({ error: 'modem_gone' });
+
+		return self.at.send(cmd, cb, o);
+	};
+
 	// --- dual-SIM slots (sim.uc dispatches here for the AT backend) ----------
 	// slot_status: the vendor recipe's dual-sim query (Fibocom GTDUALSIM).
 	// Only the ACTIVE card's identity is readable — the inactive slot reports
@@ -830,7 +841,19 @@ export function create(opts)
 		if (!sl)
 			return cb({ error: 'unsupported' }, null);
 
-		self.at.send(sl.query, (err, res) => {
+		// A TORN-DOWN MODEM HAS NO AT PORT. Both of these are reachable from
+		// outside the init chain — from ubus, and from step_simslot's second
+		// pass — and a slot switch is precisely the path that tears the modem
+		// down and re-enumerates it, so `self.at` can be null by the time the
+		// call lands. Reading `.send` off it throws inside a uloop callback,
+		// which does not fail the call: it takes the daemon with it. Field-seen
+		// at modem_ncm.uc:833, and only with `sim_slot` configured — that is
+		// what makes step_simslot walk the second pass at all
+		// (ddimension/wwand#32).
+		if (!self.at)
+			return cb({ error: 'modem_gone' }, null);
+
+		slot_send(sl.query, (err, res) => {
 			let st = err ? null : sl.parse(res?.lines);
 
 			if (!st)
@@ -877,7 +900,11 @@ export function create(opts)
 		if (!sl)
 			return cb({ error: 'unsupported' });
 
-		self.at.send(sl.query, (err, res) => {
+		// see slot_status above — same reachability, same hazard
+		if (!self.at)
+			return cb({ error: 'modem_gone' });
+
+		slot_send(sl.query, (err, res) => {
 			let st = err ? null : sl.parse(res?.lines);
 
 			if (st && st.sub == +physical)
@@ -895,7 +922,7 @@ export function create(opts)
 			// the command is already in that state — refusing to switch because a
 			// preparatory command was unknown would break every modem that never
 			// needed it. The switch itself still has to succeed.
-			let do_switch = () => self.at.send(sl.switch(physical), (e2) => {
+			let do_switch = () => slot_send(sl.switch(physical), (e2) => {
 				// a rejected switch command (unsupported form, modem error) must
 				// not still fire the CFUN reset — that would drop a working
 				// registration for a switch that never took. Same principle as
@@ -905,13 +932,18 @@ export function create(opts)
 
 				// the CFUN error must not be swallowed: the new card is only
 				// re-read after the reset — without it the switch never took
-				self.at.send('AT+CFUN=1,1', (f2) => cb(f2));
+				slot_send('AT+CFUN=1,1', (f2) => cb(f2));
 			}, { timeout: 8000 });
 
 			if (!sl.switch_prepare)
 				return do_switch();
 
-			self.at.send(sl.switch_prepare, () => do_switch(), { timeout: 8000 });
+			// an ordinary refusal of the prerequisite is IGNORED on purpose (see
+			// above) — but a vanished transport is not a refusal, and pressing
+			// on would walk into the null this helper exists to catch.
+			slot_send(sl.switch_prepare,
+				(perr) => (perr?.error == 'modem_gone') ? cb(perr) : do_switch(),
+				{ timeout: 8000 });
 		}, { timeout: 8000 });
 	};
 

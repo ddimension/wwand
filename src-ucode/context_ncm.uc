@@ -28,6 +28,12 @@ import * as context_common from 'wwand.context_common';
 import * as ncm from 'wwand.modem_ncm';
 import * as netlink from 'wwand.netlink';
 
+// how long to wait before asking for the assigned address a second time. Long
+// enough for a PDP context that is still coming up after a re-registration,
+// short enough that a modem which genuinely has no address costs one second
+// before the bring-up fails honestly (context_ncm read_rdp).
+const IP_CONFIG_RETRY_MS = 1000;
+
 export function create(opts)
 {
 	let self = {
@@ -52,6 +58,10 @@ export function create(opts)
 	// status; a stalled rx byte count trips 'zero_rx', a lost netdev binding
 	// tears the session down as 'disconnected'.
 	let stats_timer = null;
+	// the one-shot address-read retry (read_rdp_activating). Tracked and
+	// cancelled with the rest, because a timer that outlives its context is the
+	// bug this file has already been bitten by twice.
+	let ip_config_retry_timer = null;
 	let stats_interval = opts.timing?.stats_interval ?? 60000;
 	// the vendor byte-counter command, once the modem has refused it for good.
 	// Unlike the C5GREG probe (a bare ERROR = "unknown command", latched on the
@@ -269,6 +279,11 @@ export function create(opts)
 		// verification cannot outlive the session it was asking about
 		clear_session_confirm();
 
+		if (ip_config_retry_timer) {
+			ip_config_retry_timer.cancel();
+			ip_config_retry_timer = null;
+		}
+
 		if (stats_timer) {
 			stats_timer.cancel();
 			stats_timer = null;
@@ -293,7 +308,22 @@ export function create(opts)
 	// carry the assigned address (Fibocom T700 — empty local fields, CGPADDR
 	// instead) supply their own reader. The default is the generic CGCONTRDP
 	// path, byte-identical to the previous behavior.
-	let read_rdp = (cb) => {
+	// ONE RETRY, AFTER A WAIT, BEFORE GIVING UP ON THE ADDRESS READ.
+	//
+	// Right after a re-registration the modem answers AT but its PDP context is
+	// not fully up yet, and the address query comes back a bare ERROR. That
+	// fails the whole bring-up: ACTIVATING -> IDLE, netifd sees the interface
+	// go down, and the context's own retry brings it back two seconds later and
+	// succeeds. Measured by a reporter across six deliberate SIM-slot switches:
+	// three of them failed exactly once on `AT+CGPADDR=1 -> ERROR` and came up
+	// on the next attempt (ddimension/wwand#32).
+	//
+	// So the information was there a moment later, and the cost of asking twice
+	// is one round trip against a visible interface bounce. Not a settle delay
+	// on every bring-up and not an `AT+CGACT?` probe before each read — both
+	// spend on every modem what only some need, and neither is any more certain
+	// than asking the question again.
+	let read_rdp_once = (cb) => {
 		if (self.modem.vendor?.ip_config)
 			return self.modem.vendor.ip_config(self.modem, self.cid, self.config, cb);
 
@@ -305,6 +335,25 @@ export function create(opts)
 		}, { timeout: 15000 });
 	};
 
+	// ACTIVATION ONLY. A live settings refresh runs while CONNECTED, where the
+	// state guard below would skip the retry anyway — so wrapping it there only
+	// delays an error by a second before discarding it, and lets a second read
+	// start on top of the first. It keeps the single-shot read.
+	let read_rdp_activating = (cb) => read_rdp_once((err, rdp) => {
+		if (!err)
+			return cb(err, rdp);
+
+		ip_config_retry_timer = uloop.timer(opts.timing?.ip_config_retry ?? IP_CONFIG_RETRY_MS, () => {
+			ip_config_retry_timer = null;
+
+			// torn down, or no longer activating, while we waited
+			if (self.state != 'ACTIVATING')
+				return;
+
+			read_rdp_once(cb);
+		});
+	});
+
 	// live IP-settings refresh (QMI/MBIM parity): re-read the assigned IP on
 	// the stats tick and, if the network pushed changed IP config, emit
 	// 'settings' so the daemon renews the interface in place.
@@ -312,7 +361,7 @@ export function create(opts)
 		if (self.state != 'CONNECTED' || !self.modem.at)
 			return;
 
-		read_rdp((err, rdp) => {
+		read_rdp_once((err, rdp) => {
 			if (err || self.state != 'CONNECTED')
 				return;
 
@@ -599,7 +648,7 @@ export function create(opts)
 				let read_ip_config = () => {
 					activated = true;
 
-					read_rdp((e2, rdp) => {
+					read_rdp_activating((e2, rdp) => {
 						if (self.state != 'ACTIVATING')
 							return;
 

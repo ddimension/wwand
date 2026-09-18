@@ -1959,6 +1959,92 @@ push(scenarios, {
 	},
 });
 
+// --- the slot calls must survive a modem that is already gone ----------------
+//
+// Both are reachable from outside the init chain — from ubus, and from
+// step_simslot's second pass — and a slot switch is exactly the path that tears
+// the modem down and re-enumerates it. Reading `.send` off a null `self.at`
+// throws inside a uloop callback, where it does not fail the call: it takes the
+// daemon with it. Field-seen at modem_ncm.uc:833, and ONLY with `sim_slot`
+// configured, which is what makes step_simslot walk the second pass at all
+// (ddimension/wwand#32 — the reporter isolated that himself by leaving the
+// option at 0 and watching the crash stop).
+// ...and the same between two hops of the switch itself. An entry check is not
+// enough: the switch is a CHAIN — read the slots, prepare, switch, reset — and
+// a teardown landing between two hops finds the engine gone at the next one.
+let vanish_mid = {};
+
+push(scenarios, {
+	name: 's9l_switch_survives_a_teardown_mid_chain',
+	script: fscript([
+		{ re: /^AT\+GTDUALSIM=1$/, on_write: () => vanish_mid.fn && vanish_mid.fn() },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		let m = env.modem;
+
+		// the engine disappears exactly as close_at() leaves it, while the mock
+		// stays able to answer — so the chain really does reach the next hop
+		vanish_mid.fn = () => { m.at = null; };
+
+		m.switch_slot(2, (err) => {
+			vanish_mid.fn = null;
+			eq(err?.error, 'modem_gone',
+				'switch chain: a teardown between two hops is reported, not dereferenced');
+			env.finish();
+		});
+	},
+});
+
+// --- the address read gets one more chance before the bring-up fails ---------
+//
+// Right after a re-registration the modem answers AT while its PDP context is
+// not up yet, and the address query comes back a bare ERROR. That used to fail
+// the whole activation: ACTIVATING -> IDLE, netifd sees the interface drop, and
+// the context's own retry brings it back two seconds later and succeeds. A
+// reporter measured it across six deliberate SIM-slot switches — three failed
+// exactly once on `AT+CGPADDR=1 -> ERROR` and came up on the next attempt
+// (ddimension/wwand#32). Asking twice costs one round trip; the bounce costs an
+// interface.
+push(scenarios, {
+	name: 's9k_ip_config_error_gets_one_retry',
+	script: script([
+		{ re: /^AT\+CGCONTRDP/, nth: 2, lines: [
+			'+CGCONTRDP: 1,5,internet,10.20.30.40.255.255.255.0,10.20.30.1,8.8.8.8,8.8.4.4' ] },
+		{ re: /^AT\+CGCONTRDP/, term: 'ERROR', lines: [] },
+	]),
+	mtiming: { ip_config_retry: 25 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'ip_config retry: a first ERROR no longer fails the activation');
+			eq(env.ctx.settings?.ipv4?.addr, '10.20.30.40',
+				'ip_config retry: ...the second answer is the one that counts');
+			ok(env.tr.count(/^AT\+CGCONTRDP/) >= 2, 'ip_config retry: it really was asked twice');
+			env.finish();
+		});
+	},
+});
+
+push(scenarios, {
+	name: 's9j_slot_calls_survive_a_gone_modem',
+	script: fscript([]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		let m = env.modem;
+		let got = [];
+
+		m.stop();   // teardown: close_at() nulls self.at
+
+		m.slot_status((err) => push(got, [ 'status', err?.error ]));
+		m.switch_slot(2, (err) => push(got, [ 'switch', err?.error ]));
+
+		eq(got, [ [ 'status', 'modem_gone' ], [ 'switch', 'modem_gone' ] ],
+			'gone modem: both slot calls report it instead of dereferencing null');
+		env.finish();
+	},
+});
+
 push(scenarios, {
 	name: 's9f_fibocom_dual_slot',
 	// The prerequisite answers ERROR here on purpose. Ignoring that is the
