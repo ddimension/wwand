@@ -344,7 +344,15 @@ export function install(self, o)
 					self.signal = { rssi_raw: data.rssi, rssi: dbm };
 				}
 
-				self._refresh_signal(() => self._refresh_data_mode(() => self._refresh_reg_detail(() => self._refresh_cells(() => self._refresh_serving(() =>
+				// THE SERVING CELL COMES BEFORE THE DATA MODE, because the
+				// data-mode ladder's last rung probes `self.cells.serving` —
+				// and `backend.choose` caches a 'none' verdict PERMANENTLY.
+				// Asked first, on the very first tick, every rung declines
+				// (passthrough dead, native MBIM has no usable class, serving
+				// not read yet) and the modem is marked as having no data-mode
+				// backend for the rest of its life, while QENG would have
+				// answered a moment later in this same tick.
+				self._refresh_signal(() => self._refresh_cells(() => self._refresh_serving(() => self._refresh_data_mode(() => self._refresh_reg_detail(() =>
 					// modem temperature + fine access-tech/caps (IoT/RedCap)
 					// over the AT side channel (best-effort, slow loop —
 					// QMI/NCM parity; status `rat`/`caps` stayed null on MBIM

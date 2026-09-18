@@ -232,7 +232,36 @@ function s_data_mode(next) {
 			mc3.open(() => backend.get_data_mode(mc3, (dm3) => {
 				eq(dm3.mode, 'LTE', 'data_mode: LTE only -> LTE');
 				eq(dm3.nr, false, 'data_mode: lte nr flag');
-				next();
+
+				// NO MODE IS NOT A MODE. An object with `mode: null` is truthy,
+				// so it reads as a successful answer, the chosen backend keeps
+				// the choice it won, and the RAT stays unknown forever — while
+				// the rung below could have read it off the serving cell.
+				//
+				// CUSTOM alone is the case that reached the field: libmbim's
+				// name for a class that is proprietary or not in the enum, which
+				// some modems report for 5G when the extensions were never
+				// negotiated. An RM520F-GL carried NR5G-SA while reporting
+				// exactly 0x80000000, and wwand showed no RAT (wwand#30).
+				let mc4 = make_mc(bc, { REGISTER_STATE: reg_state(ext.DATA_CLASS_CUSTOM) });
+				mc4.open(() => backend.get_data_mode(mc4, (dm4) => {
+					eq(dm4, null, 'data_mode: CUSTOM alone says nothing, so it answers nothing');
+
+					// a mask with no known RAT bit at all reads the same way
+					let mc5 = make_mc(bc, { REGISTER_STATE: reg_state(1 << 2) });
+					mc5.open(() => backend.get_data_mode(mc5, (dm5) => {
+						eq(dm5, null, 'data_mode: ...and so does any mask carrying no RAT we know');
+
+						// a mask that carries CUSTOM BESIDE a real class is still
+						// a real answer — CUSTOM is not poison, it is silence
+						let mc6 = make_mc(bc, {
+							REGISTER_STATE: reg_state(ext.DATA_CLASS_CUSTOM | ext.DATA_CLASS_5G_SA) });
+						mc6.open(() => backend.get_data_mode(mc6, (dm6) => {
+							eq(dm6?.mode, 'SA', 'data_mode: CUSTOM alongside a known class does not hide it');
+							next();
+						}));
+					}));
+				}));
 			}));
 		}));
 	}));

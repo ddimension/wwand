@@ -549,6 +549,20 @@ export function get_data_mode(mc, cb)
 		let nr = (dc & (ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA)) != 0;
 		let mode = nr ? (lte ? 'NSA' : 'SA') : (lte ? 'LTE' : null);
 
+		// NO MODE IS NOT A MODE. Returning { mode: null } here reads as a
+		// successful answer to every caller — it is a truthy object — so the
+		// backend keeps the choice it won and reports "unknown RAT" forever,
+		// while a rung further down the ladder could have read the serving cell
+		// and known the answer.
+		//
+		// Reached in the field by CUSTOM alone (0x80000000): libmbim's name for
+		// a class that is proprietary or not in the enum, which some modems
+		// report for 5G when the MBIM extensions were never negotiated. A
+		// Quectel RM520F-GL carried NR5G-SA traffic while reporting exactly
+		// that, and wwand showed no RAT at all (ddimension/wwand#30).
+		if (mode == null)
+			return cb(null);
+
 		cb({ mode: mode, lte: lte, nr: nr });
 	});
 };

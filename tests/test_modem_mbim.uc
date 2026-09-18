@@ -15,6 +15,7 @@
 
 import { eq, ok, done } from './lib/check.uc';
 import * as uloop from 'uloop';
+import * as fs from 'fs';
 import * as struct from 'struct';
 import * as mbim_mockhub from './lib/mbim_mockhub.uc';
 import * as fakefx from './lib/fakefx.uc';
@@ -392,8 +393,35 @@ function assert_telemetry() {
 			eq(modem._dsd_be, null,
 				'demote: three consecutive failures drop it, so the ladder re-probes');
 
-			modem.mbim = live_mbim;
-			assert_inline_reject();
+			// --- and what the ladder must land on: the serving cell ----------
+			//
+			// The case that reached the field (ddimension/wwand#30): an
+			// RM520F-GL reporting data class CUSTOM alone (0x80000000) while
+			// carrying NR5G-SA. That is a truthy answer with no mode in it, so
+			// the mbim rung used to count as answering, kept the choice, and
+			// the RAT stayed null — with QENG's serving cell one rung below,
+			// knowing the answer. The AT rung reads state only, no port needed.
+			modem.mbim = { command: (svc, cid, op, args, cb) => cb(null, {
+				nw_error: 0, register_state: bc.REGISTER_STATE_HOME, register_mode: 1,
+				available_data_classes: ext.DATA_CLASS_CUSTOM, current_cellular_class: 1,
+				provider_id: '26201', provider_name: 'Telekom.de',
+				roaming_text: '', registration_flag: 0,
+			}) };
+			modem.cells = modem.cells ?? {};
+			modem.cells.serving = { nr: { arfcn: 504990, band: 'n41' } };
+			delete modem._dsd_be;
+			delete modem._dsd_be_fails;
+
+			modem._refresh_data_mode(() => {
+				eq(modem._dsd_be, 'at',
+					'custom: a class that says nothing lets the ladder reach the serving cell');
+				eq(modem.dsd_status?.mode, 'SA',
+					'custom: ...which knows this is SA, where the mask knew nothing');
+				eq(modem.dsd_status?.source, 'at', 'custom: and the source says so');
+
+				modem.mbim = live_mbim;
+				assert_inline_reject();
+			});
 		}));
 	});
 }
@@ -475,5 +503,33 @@ uloop.run();
 	eq(got, 'cancelled', 'reattach: a teardown mid-flight ends it as cancelled');
 	eq(armed, false, 'reattach: ...and no radio command is sent into the teardown');
 })();
+
+// --- the slow tick must read the serving cell BEFORE choosing a data mode ----
+//
+// Not a style point, a trap: the data-mode ladder's last rung probes
+// `self.cells.serving`, and backend.choose caches a 'none' verdict PERMANENTLY.
+// Walked first, on a modem's very first tick, every rung declines — passthrough
+// dead, native MBIM reporting a class that says nothing, serving not read yet —
+// and that modem is marked as having no data-mode backend for the rest of its
+// life, though QENG answers a moment later in the same tick.
+//
+// Pinned against the source because the consequence is not reachable from this
+// harness: it has no AT port, so `_refresh_serving` cannot populate anything
+// here, and the cold start cannot be staged. Reverting the order leaves every
+// other check in this file green — which is exactly why this one exists.
+{
+	let src = fs.readfile('../src-ucode/telemetry_mbim.uc') ?? '';
+	let line = '';
+
+	for (let l in split(src, '\n'))
+		if (index(l, '_refresh_signal(() =>') >= 0 && index(l, '_refresh_data_mode') >= 0)
+			line = l;
+
+	ok(line != '', 'tick order: found the slow-tick chain');
+	ok(index(line, '_refresh_serving') < index(line, '_refresh_data_mode'),
+		'tick order: the serving cell is read before the data-mode ladder is walked');
+	ok(index(line, '_refresh_cells') < index(line, '_refresh_serving'),
+		'tick order: ...and the cells before the serving detail that hangs off them');
+}
 
 done('test_modem_mbim');

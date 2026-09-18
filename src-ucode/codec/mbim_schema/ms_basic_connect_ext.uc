@@ -31,6 +31,12 @@ export const service = SERVICE_UUID;
 export const DATA_CLASS_LTE    = 1 << 5;
 export const DATA_CLASS_5G_NSA = 1 << 6;
 export const DATA_CLASS_5G_SA  = 1 << 7;
+// ...and the one that means "I am not going to tell you": CUSTOM is libmbim's
+// spelling for a class that is proprietary or simply not in the enum, and a
+// modem that reports it ALONE has said nothing about its RAT. Field-seen on a
+// Quectel RM520F-GL carrying NR5G-SA traffic while reporting exactly
+// 0x80000000 (ddimension/wwand#30).
+export const DATA_CLASS_CUSTOM = 1 << 31;
 
 // MbimDataSubclass bits (mbim-enums.h MbimDataSubclass) — 5G connectivity detail
 export const DATA_SUBCLASS_5G_ENDC = 1 << 0;   // NR anchored on LTE (NSA)
