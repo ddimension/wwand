@@ -534,6 +534,58 @@ scenario('disconnect', { config: { apn: 'web', pdp_type: 'ipv4' } }, (ctx, mock,
 	});
 });
 
+// --- START_NETWORK answers NO_EFFECT: the call is already up -----------------
+//
+// A modem with autoconnect dials before anyone asks it to, so the first
+// START_NETWORK of a bring-up can land on a session that already exists and
+// come back as QMI_PROTOCOL_ERROR_NO_EFFECT (26). Reported as
+// ddimension/wwand#18 on a RUT956/EC25.
+//
+// THE SHAPE THAT DECIDES THE FIX, measured on an RG650E (2026-09-18, wwand's
+// own transport, second START_NETWORK on the same client):
+//
+//     #1  err=null                      pdh=3800184416
+//     #2  err={qmi, result 1, code 26}  pdh=0
+//
+// The reply carries a packet-data handle TLV of **0**, not an absent one. So
+// treating 26 as success and falling through to the ordinary `d3?.pdh == null`
+// guard stores 0 as the handle: wwand then logs "pdh 0", believes it owns a
+// session it never started, and on teardown sends STOP_NETWORK with handle 0.
+//
+// What is true instead is that we have NO handle, and the tree already knows
+// what a null handle means — _close_family releases the client and skips the
+// stop. This scenario nails all three halves: the context comes up, the handle
+// stays null (and says so), and the teardown sends nothing.
+scenario('start-network-no-effect', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	handlers: {
+		// mockhub encodes every key besides __error as a normal TLV, so this is
+		// the measured wire answer: result 1 / error 26, plus pdh 0.
+		START_NETWORK: () => ({ __error: 26, pdh: 0 }),
+		// the default handler keys off the started-map that START_NETWORK fills,
+		// which this override never does — answer the family directly.
+		GET_CURRENT_SETTINGS: () => V4_SETTINGS,
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'no-effect: an already-connected modem is not a failure');
+		eq(settings?.ipv4?.addr, '10.11.12.13',
+			'no-effect: the settings come from the client, not from a handle');
+
+		let fam = ctx.status().families[0];
+		eq(fam.pdh, null, 'no-effect: no handle is invented (0 is not a handle)');
+		eq(fam.adopted, true, 'no-effect: the family says it was adopted');
+
+		ctx.down((derr) => {
+			eq(derr, null, 'no-effect: teardown ok');
+			eq(ctx.state, 'IDLE', 'no-effect: IDLE');
+			eq(length(mock.calls_for('STOP_NETWORK')), 0,
+				'no-effect: a session we never started is never stopped');
+			next();
+		});
+	});
+});
+
 // --- E: administrative down --------------------------------------------------
 
 scenario('admin-down', { config: { apn: 'web', pdp_type: 'ipv4v6' } }, (ctx, mock, events, next) => {

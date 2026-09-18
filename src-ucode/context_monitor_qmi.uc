@@ -307,7 +307,12 @@ export function install(self, o)
 		if (self.state != 'CONNECTED' || refreshing || refresh_cooldown)
 			return;
 
-		let list = filter(keys(self.families), (k) => self.families[k]?.pdh != null);
+		// pdh != null means "this family has dialled"; an ADOPTED family has no
+		// handle of its own (context.uc, START_NETWORK NO_EFFECT) yet is just as
+		// connected, and GET_CURRENT_SETTINGS asks the client, not the handle —
+		// so it must be refreshed too, or its address changes go unnoticed.
+		let list = filter(keys(self.families),
+			(k) => self.families[k]?.pdh != null || self.families[k]?.adopted);
 
 		if (!length(list))
 			return;

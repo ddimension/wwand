@@ -38,6 +38,10 @@ const START_NETWORK_TIMEOUT_MS = 120000;
 // answer, and the answer is not what decides success anyway.
 const AT_DEFINE_TIMEOUT_MS = 10000;
 
+// QMI_PROTOCOL_ERROR_NO_EFFECT (libqmi 1.38, qmi-errors.json) — the request
+// asked for a state the modem is already in. sim.uc keeps its own copy.
+const QMI_ERR_NO_EFFECT = 26;
+
 const wds_schema = wdsmod.default;
 
 const AUTH_MAP = {
@@ -671,6 +675,43 @@ export function create(opts)
 						: 'no profile (the modem rejected the index — inline apn)'));
 
 				client.request('START_NETWORK', start_args, (e3, d3) => {
+					// NO_EFFECT: the session is ALREADY up. A modem with
+					// autoconnect dials before anyone asks it to, so the first
+					// START_NETWORK of a fresh bring-up can land on a call that
+					// exists (ddimension/wwand#18, reported on a RUT956/EC25).
+					//
+					// THE HANDLE IS NOT OURS AND MUST NOT BE FAKED. Measured on
+					// an RG650E: the NO_EFFECT reply carries a pdh TLV of 0, and
+					// 0 is not null — so clearing the error and falling through
+					// to the `d3?.pdh == null` guard below stores 0 as the
+					// handle. wwand then believes it owns a session it never
+					// started, logs "pdh 0", and on teardown sends STOP_NETWORK
+					// with handle 0, which the modem refuses.
+					//
+					// A null handle is the truth and the code already knows what
+					// to do with it: _close_family releases the client and skips
+					// the stop. The settings come from GET_CURRENT_SETTINGS,
+					// which asks the client, not the handle.
+					//
+					// The error still ticks the proto-error counter on its way
+					// here (client.uc:176 — no `no_recovery` on the dial, and
+					// there must not be: a dial that genuinely fails has to
+					// climb). That is deliberate and harmless: the very next
+					// successful request zeroes it (recovery.uc:369-370), and
+					// the same is already true of the NO_EFFECT that
+					// qmi_backend.set_opmode normalises. Raised by review,
+					// 2026-09-18.
+					if (e3?.error == 'qmi' && e3.code == QMI_ERR_NO_EFFECT) {
+						fam.pdh = null;
+						// a family is registered with pdh null BEFORE the dial,
+						// so null alone cannot tell "adopted" from "still
+						// dialling" — the monitor needs that distinction.
+						fam.adopted = true;
+						log('notice', sprintf('ipv%d already connected — adopting the running session (no handle of our own to stop later)',
+							family));
+						return done(null);
+					}
+
 					if (e3 || d3?.pdh == null) {
 						return done({
 							stage: 'start_network',
@@ -1064,6 +1105,7 @@ export function create(opts)
 				family: +k,
 				cid: self.families[k].client?.cid,
 				pdh: self.families[k].pdh,
+				adopted: self.families[k].adopted ? true : null,
 			})),
 		};
 	};
