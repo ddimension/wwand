@@ -1298,7 +1298,7 @@ scenario('ladder', {
 		// escalate. A modem that never answered gets 0 here and nothing physical
 		// happens — see the gate tests in test_recovery.
 		eq(ladder_fx.files['/state/ladder.json'],
-			'{ "attempts": 8, "proto_errors": 0, "rung": 1, "proto_hw": 0, "proto_ok": 1, "proto_name": "qmi" }',
+			'{ "attempts": 8, "proto_errors": 0, "rung": 1, "proto_hw": 0, "proto_hw_base": 0, "proto_ok": 1, "proto_name": "qmi" }',
 			'ladder: state persisted (rung 1 = opmode_cycle fired, arming recorded)');
 	});
 

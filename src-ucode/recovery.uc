@@ -95,8 +95,11 @@ export function create(opts)
 		// currently selected. Everything physical is gated on it — see the
 		// comment at the hardware rungs below. `proto_name` exists only to clear
 		// it again when the selected protocol changes.
+		// `proto_hw_base` is the error count when the hardware rung fired: the
+		// reboot gate measures its window from THERE, not from zero (see the
+		// rungs below). Found by a full review, 2026-09-19.
 		counters: { attempts: 0, proto_errors: 0, rung: 0, proto_hw: 0,
-		            proto_ok: 0, proto_name: null },
+		            proto_hw_base: 0, proto_ok: 0, proto_name: null },
 		// set by revoke_arming(): no path may grant the permission any more.
 		// Not persisted — it is re-derived from the config on every build.
 		arm_blocked: false,
@@ -127,6 +130,17 @@ export function create(opts)
 			self.counters.attempts = att ? +att[1] : 0;
 			self.counters.proto_errors = perr ? +perr[1] : 0;
 			self.counters.proto_hw = phw ? +phw[1] : 0;
+
+			// A state file written before the window base existed has proto_hw
+			// but no proto_hw_base, and defaulting that to 0 would make the
+			// gate below read the absolute count again — rebooting SOONER than
+			// either version intended. Start the window at the restored count
+			// instead: conservative, and it costs at most one extra window
+			// once, after an upgrade. Found by a full review, 2026-09-19.
+			let phwb = match(data, /"proto_hw_base": *([0-9]+)/);
+
+			self.counters.proto_hw_base = phwb ? +phwb[1]
+				: (self.counters.proto_hw ? self.counters.proto_errors : 0);
 
 			let pok = match(data, /"proto_ok": *([0-9]+)/);
 			let pnm = match(data, /"proto_name": *"([a-z0-9_]*)"/);
@@ -222,12 +236,33 @@ export function create(opts)
 	// the previous "it answered once" says nothing about the new choice, so the
 	// permission to touch hardware is withdrawn until the new protocol proves
 	// itself. This is what makes a corrected misdetection safe.
+	// THE WHOLE PROTO-ERROR LADDER IS PER-PROTOCOL EVIDENCE, not just the
+	// arming flag. Clearing proto_ok alone left the error count, the fired-once
+	// hardware flag and its window base behind, so the NEXT protocol inherited
+	// them: it skipped its own hardware reset (proto_hw was already 1) and then
+	// rebooted the router on a window measured partly under the protocol it had
+	// just stopped speaking. The attempt ladder is separate and still climbs,
+	// so a modem that fails under every protocol is still caught. Raised by
+	// Codex review, 2026-09-19.
+	let clear_proto_ladder = () => {
+		if (!self.counters.proto_errors && !self.counters.proto_hw &&
+		    !self.counters.proto_hw_base && !self.counters.proto_ok)
+			return false;
+
+		self.counters.proto_errors = 0;
+		self.counters.proto_hw = 0;
+		self.counters.proto_hw_base = 0;
+		self.counters.proto_ok = 0;
+
+		return true;
+	};
+
 	self.note_protocol = function(name) {
 		if (self.counters.proto_name == name)
 			return;
 
 		self.counters.proto_name = name;
-		self.counters.proto_ok = 0;
+		clear_proto_ladder();
 		self.persist();
 	};
 
@@ -251,12 +286,22 @@ export function create(opts)
 		// lifts it by simply not setting it again.
 		self.arm_blocked = true;
 
-		if (!self.counters.proto_ok)
+		// ...and the rest of the ladder with it. Returning early when proto_ok
+		// was already clear left proto_hw and its window base standing, and
+		// arm_blocked is deliberately NOT persisted — so after a restart with a
+		// corrected configuration the modem could arm afresh while still
+		// carrying a hardware rung it never fired in this incarnation, skip its
+		// own reset, and reboot on the old window. Raised by Codex review,
+		// 2026-09-19.
+		let had = self.counters.proto_ok;
+
+		if (!clear_proto_ladder())
 			return;
 
-		self.counters.proto_ok = 0;
-		log('warn', sprintf('withdrawing hardware recovery for %s: %s',
-			self.counters.proto_name ?? 'modem', reason));
+		if (had)
+			log('warn', sprintf('withdrawing hardware recovery for %s: %s',
+				self.counters.proto_name ?? 'modem', reason));
+
 		self.persist();
 	};
 
@@ -326,6 +371,19 @@ export function create(opts)
 
 		if (n > self.proto_error_limit && !self.counters.proto_hw) {
 			self.counters.proto_hw = 1;
+			// WHERE THE REBOOT WINDOW STARTS. Without this the gate below reads
+			// the ABSOLUTE count, and the count does not start climbing when the
+			// hardware rung fires — it climbs from the very first error. A
+			// channel that never answers sits at :319 returning 'retry' while n
+			// runs far past limit*2; the first decoded reply (an error reply
+			// counts) arms proto_ok, the next error fires this repower, and the
+			// error AFTER that satisfies `n > limit*2` on the strength of
+			// counting that happened before the reset was even attempted. So the
+			// router rebooted while the modem was still inside its reset hold —
+			// the exact reboot-loop this rung exists to prevent (NR7101). The
+			// comment below has always claimed "a further full window"; this is
+			// what makes it true. Found by a full review, 2026-09-19.
+			self.counters.proto_hw_base = n;
 			self.persist();
 			return 'usb_repower';
 		}
@@ -333,7 +391,12 @@ export function create(opts)
 		// Reboot only after the hardware reset has been tried and errors persist a
 		// further full window. Same gate as the attempt ladder: never reboot when
 		// failreboot<=0 — a headless install keeps retrying instead of cycling.
-		if (n > self.proto_error_limit * 2 && self.counters.proto_ok) {
+		// >=, not >: "a further full window" is proto_error_limit errors AFTER
+		// the reset, which is the boundary this has always had when the counter
+		// was armed from the start (base 26, limit 25 -> the 51st error). The
+		// base is what makes it hold when it was not.
+		if (self.counters.proto_hw && self.counters.proto_ok &&
+		    n - self.counters.proto_hw_base >= self.proto_error_limit) {
 			self.persist();
 			return (self.failreboot > 0) ? 'reboot' : 'retry';
 		}
@@ -369,6 +432,7 @@ export function create(opts)
 		if (armed || self.counters.proto_errors != 0 || self.counters.proto_hw != 0) {
 			self.counters.proto_errors = 0;
 			self.counters.proto_hw = 0;
+			self.counters.proto_hw_base = 0;
 			self.persist();
 		}
 	};

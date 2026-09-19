@@ -125,6 +125,44 @@ r.on_proto_success();
 eq(r.counters.proto_errors, 0, 'errors: success resets counter');
 eq(r.counters.proto_hw, 0, 'errors: success clears the hardware-reset flag');
 
+// THE REBOOT WINDOW STARTS AT THE HARDWARE RESET, NOT AT ZERO.
+//
+// The tests above arm the channel FIRST, so the count begins climbing with
+// proto_ok already set and the absolute `n > limit*2` gate happened to be
+// right. The field case is the opposite: a control channel that never answers
+// produces nothing but protocol errors, the ladder refuses the hardware rung
+// while unarmed (it looks like the wrong protocol, not broken hardware), and n
+// runs far past 2x limit sitting at 'retry'. The first decoded reply — an
+// error reply counts — arms proto_ok; the next error fires the repower; and
+// the error after THAT satisfied `n > limit*2` on the strength of counting
+// that happened before the reset was even attempted. The router rebooted while
+// the modem was still inside its reset hold, which is the reboot-loop this
+// rung was added to prevent (NR7101). Found by a full review, 2026-09-19.
+r = recovery.create({ id: 'unarmed', failreboot: 100, proto_error_limit: 3,
+	fx: fx, state_dir: '/state', log: silent });
+
+let uacts = [];
+
+/* 20 errors with the channel never having answered: far past 2x3 */
+for (let i = 1; i <= 20; i++)
+	push(uacts, r.on_proto_error());
+
+let physical = filter(uacts, (a) => a != 'retry');
+eq(length(physical), 0, 'window: nothing physical while the channel has never answered');
+
+r.note_answer();   /* the modem finally decodes something — an error reply */
+
+eq(r.on_proto_error(), 'usb_repower', 'window: the first error after arming takes the hardware rung');
+eq(r.counters.proto_hw_base, 21, 'window: ...and the window is anchored at that count');
+
+/* the modem is inside its reset hold: the next errors must NOT reboot */
+let after = [];
+for (let i = 1; i <= 3; i++)
+	push(after, r.on_proto_error());
+
+eq(after, [ 'retry', 'retry', 'reboot' ],
+	'window: a further full window (3) of errors is required before the reboot');
+
 // the proto-error thresholds scale with the configurable proto_error_limit
 r = recovery.create({ id: 'plim', failreboot: 100, proto_error_limit: 3, fx: fx, state_dir: '/state', log: silent });
 r.on_proto_success();   /* control channel answered */
@@ -270,6 +308,61 @@ eq(rv.on_attempt(), 'retry', 'revoke: attempt 8 no longer reaches the opmode cyc
 let rv2 = recovery.create({ id: 'pinned', failreboot: 40, fx: fx, state_dir: '/state', log: silent });
 rv2.load();
 eq(rv2.counters.proto_ok, 0, 'revoke: the withdrawal is persisted, not just in memory');
+
+// A PROTOCOL CHANGE VOIDS THE WHOLE PROTO-ERROR LADDER, not just the arming.
+//
+// note_protocol cleared proto_ok alone, so the next protocol inherited the
+// error count, the fired-once hardware flag and its window base: it skipped
+// its own hardware reset (proto_hw was already 1) and then rebooted the router
+// on a window measured partly under the protocol it had just stopped speaking.
+// Raised by Codex review, 2026-09-19.
+fx = fakefx.create();
+let rs = recovery.create({ id: 'ladderswitch', failreboot: 100, proto_error_limit: 3,
+	fx: fx, state_dir: '/state', log: silent });
+
+rs.note_protocol('qmi');
+rs.note_answer();
+
+let sacts = [];
+for (let i = 1; i <= 4; i++)
+	push(sacts, rs.on_proto_error());
+
+eq(sacts[3], 'usb_repower', 'switch: qmi took its hardware rung');
+eq(rs.counters.proto_hw, 1, 'switch: ...and recorded it');
+eq(rs.counters.proto_hw_base, 4, 'switch: ...with its window base');
+
+rs.note_protocol('mbim');
+eq([ rs.counters.proto_ok, rs.counters.proto_errors,
+     rs.counters.proto_hw, rs.counters.proto_hw_base ], [ 0, 0, 0, 0 ],
+	'switch: the new protocol inherits nothing from the old one');
+
+/* and it gets its OWN hardware reset before any reboot */
+rs.note_answer();
+
+let sacts2 = [];
+for (let i = 1; i <= 4; i++)
+	push(sacts2, rs.on_proto_error());
+
+eq(sacts2, [ 'retry', 'retry', 'retry', 'usb_repower' ],
+	'switch: mbim reaches its own reset, not a reboot');
+
+// REVOCATION TAKES THE HARDWARE RUNG TOO, even when the arming was already
+// gone. The early return left proto_hw and the window base standing, and
+// arm_blocked is deliberately not persisted — so after a restart with a
+// corrected configuration the modem could arm afresh while still carrying a
+// rung it never fired in this incarnation. Raised by Codex review, 2026-09-19.
+fx = fakefx.create();
+fx.files['/state/stale.json'] =
+	'{ "attempts": 0, "proto_errors": 9, "rung": 0, "proto_hw": 1, "proto_hw_base": 4, "proto_ok": 0, "proto_name": "ncm" }';
+let rstale = recovery.create({ id: 'stale', failreboot: 40, proto_error_limit: 3,
+	fx: fx, state_dir: '/state', log: silent });
+rstale.load();
+eq(rstale.counters.proto_hw, 1, 'revoke: the stale rung is on file');
+
+rstale.revoke_arming('the driver says qmi');
+eq([ rstale.counters.proto_hw, rstale.counters.proto_hw_base, rstale.counters.proto_errors ],
+	[ 0, 0, 0 ],
+	'revoke: ...and revocation takes it, not only the arming flag');
 
 // revoking what was never granted is a no-op, not a rewrite
 fx = fakefx.create();
