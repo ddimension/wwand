@@ -28,6 +28,21 @@ const TXQ_MAX = 64;
 // retry cadence for a congested cdc-wdm write (message-oriented, so a failed
 // write is retried whole)
 const TX_RETRY_MS = 5;
+// how many retries close() spends draining what is still queued. cdc-wdm takes
+// ONE message at a time, so a burst drains at roughly one frame per round trip:
+// the eleven clients modem.uc releases need eleven, and 20 x 5 ms bounds the
+// teardown at ~100 ms. The ordinary reconnect is 5 s away (modem_common.uc:380),
+// so nothing normally overlaps.
+//
+// RESIDUAL, named rather than hidden: a hotplug add for the same device inside
+// that window opens a SECOND fd (cdc-wdm refcounts opens, desc->count++ —
+// cdc-wdm.c wdm_open, 6.18.41) and the responses to the old session's releases
+// are then read by the new one. The old hub reads nothing any more (its uloop
+// registration is deleted on the first hop below), so it cannot mis-dispatch;
+// the new CTL client drops a response whose transaction id it has no request
+// for. A collision needs the same id within 100 ms of a teardown. Raised by
+// Codex review, 2026-09-19.
+const CLOSE_DRAIN_TRIES = 20;
 
 export function open(path, cbs)
 {
@@ -129,8 +144,6 @@ export function open(path, cbs)
 			tx_timer = null;
 		}
 
-		txq = [];
-
 		// Release the fd registration one loop iteration later, never inline.
 		// close() is reachable FROM the read handle's own callback (device
 		// gone), and deleting a uloop handle while uloop is still holding it
@@ -146,12 +159,66 @@ export function open(path, cbs)
 
 		hub._uhandle = null;
 
-		uloop.timer(0, () => {
-			if (uh)
+		// WHAT IS STILL QUEUED IS WRITTEN BEFORE THE FD GOES, not discarded.
+		//
+		// This used to be `txq = []` above, on the stated grounds that teardown
+		// writes its frames synchronously. It does not. cdc-wdm serves ONE
+		// control message at a time: with O_NONBLOCK a write issued while the
+		// previous URB is still in flight returns -EAGAIN (cdc-wdm.c:419-424,
+		// Linux 6.18.41), and WDM_IN_USE clears only in the completion callback
+		// (:161, :1334). So the first frame goes out and the SECOND almost
+		// always queues — and send() then queues every frame after it without
+		// even trying (:99-102).
+		//
+		// modem.uc teardown issues RELEASE_CID for up to eleven clients back to
+		// back and closes the hub in the same synchronous block, so ten of
+		// eleven releases were dropped before the 5 ms retry could run. The CIDs
+		// stayed allocated in the MODEM's table — exactly the leak that release
+		// burst exists to prevent, and on an E182E-class stack with a tiny table
+		// a few `/etc/init.d/wwand restart` cycles exhaust it. Found by a full
+		// review, 2026-09-19.
+		let drain_tries = 0;
+		let drain;
+
+		drain = () => {
+			// THE READ REGISTRATION GOES ON THE FIRST HOP, not at the end.
+			// The callback at :221 returns without reading once `closed` is set,
+			// and the fd is level-triggered — so leaving it registered for the
+			// length of the drain lets uloop re-dispatch a still-readable (or
+			// HUP) fd in a hot loop for up to 100 ms. Deleting it here still
+			// happens from a timer callback rather than inline, which is the
+			// whole point of deferring it (see above); the native fd stays open
+			// because the drain below still WRITES to it. Raised by Codex
+			// review, 2026-09-19.
+			if (uh) {
 				uh.delete();
+				uh = null;
+			}
+
+			while (length(txq)) {
+				let w = handle.write(txq[0]);
+
+				if (w === length(txq[0])) {
+					shift(txq);
+					continue;
+				}
+
+				// hard error: the device is gone, nothing left to save
+				if (w === false)
+					txq = [];
+
+				break;
+			}
+
+			if (length(txq) && ++drain_tries < CLOSE_DRAIN_TRIES)
+				return uloop.timer(TX_RETRY_MS, drain);
+
+			txq = [];
 
 			handle.close();
-		});
+		};
+
+		uloop.timer(0, drain);
 	};
 
 	hub._dispatch = function(dec) {

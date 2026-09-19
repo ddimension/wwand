@@ -439,7 +439,17 @@ export function create(opts)
 
 		log('warn', 'admin modem reset (DMS offline -> reset)');
 		qmi_backend.set_opmode(self.dms, 'offline', () => {
-			qmi_backend.set_opmode(self.dms, 'reset', () => {
+			qmi_backend.set_opmode(self.dms, 'reset', (err) => {
+				// A REFUSED RESET IS NOT A RESET. The error was dropped on
+				// the floor here and `resetting: true` reported either way,
+				// so LuCI and the ubus caller waited for a modem that was
+				// never going anywhere — and, since NO_EFFECT used to be
+				// normalized to success for every mode (qmi_backend.uc:63),
+				// a modem answering "that changed nothing" looked identical
+				// to one rebooting. Raised by Codex review, 2026-09-19.
+				if (err)
+					return cb({ error: 'qmi', detail: err });
+
 				notify_contexts('lost');
 				cb(null, { resetting: true });
 			});

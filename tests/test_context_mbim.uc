@@ -51,6 +51,34 @@ function build_ipcfg() {
 	return fixed + v4addr + gw + dns;
 }
 
+// the same buffer with an IPv6 /64 instead, so the interface identifier can be
+// varied between queries. `iid` is the last two bytes of the address.
+function build_ipcfg6(iid) {
+	let fixedlen = 4 * 15;
+	let v6addr_off = fixedlen;
+	let v6addr = p32(64) + chr(0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, (iid >> 8) & 0xff, iid & 0xff);
+	let gw6_off = v6addr_off + length(v6addr);
+	let gw6 = chr(0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1);
+	let dns6_off = gw6_off + length(gw6);
+	let dns6 = chr(0x20, 0x01, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88);
+
+	let fixed =
+		p32(0) +               // session_id
+		p32(0) + p32(1) +      // v4 avail, v6 avail
+		p32(0) + p32(0) +      // v4 count, v4 addr offset
+		p32(1) +               // v6 count
+		p32(v6addr_off) +      // v6 addr offset
+		p32(0) +               // v4 gw ref
+		p32(gw6_off) +         // v6 gw ref
+		p32(0) + p32(0) +      // v4 dns count, offset
+		p32(1) +               // v6 dns count
+		p32(dns6_off) +        // v6 dns offset
+		p32(0) + p32(1500);    // v4 mtu, v6 mtu
+
+	return fixed + v6addr + gw6 + dns6;
+}
+
 function base_handlers(extra) {
 	let h = {
 		DEVICE_CAPS: {
@@ -210,9 +238,54 @@ let scenario_zero_rx = {
 	},
 };
 
+// --- scenario 3: re-randomized IPv6 interface id must not renumber ----------
+//
+// Some firmware hands back a different low 64 bits on every IP_CONFIGURATION
+// query while prefix/gateway/DNS stay put (RG502Q). The refresh compared the
+// whole settings object with a flat %J, so every one of those read as a change
+// and renewed the interface — every 60 s in production, long enough to break
+// anything holding a v6 connection. The QMI monitor has guarded this since its
+// keep_stable_v6 (now context_common), and the MBIM comment claimed parity
+// with it while having none. Found by a full review, 2026-09-19.
+
+let scenario_v6_iid = {
+	name: 's3_v6_iid_stable',
+	ctx_timing: { stats_interval: 5 },
+	ctx_config: { apn: 'internet', pdp_type: 'ipv6' },
+	handlers: () => base_handlers({
+		// a new interface identifier on every query after the first
+		IP_CONFIGURATION: (args, meta) =>
+			({ __raw: build_ipcfg6(meta.count <= 1 ? 0x0002 : 0x1000 + meta.count) }),
+		PACKET_STATISTICS: (args, meta) => ({
+			in_octets: 1000 * meta.count, out_octets: 500 * meta.count,
+			in_packets: 100 * meta.count, out_packets: 50 * meta.count,
+			in_errors: 0, out_errors: 0, in_discards: 0, out_discards: 0,
+		}),
+	}),
+	run: (env) => {
+		env.ctx.up((err, settings) => {
+			eq(err, null, 'v6-iid: context connected');
+			eq(settings?.ipv6?.addr, '2001:db8:0:0:0:0:0:2', 'v6-iid: initial address');
+
+			let from = length(env.cevents);
+
+			// let several stats ticks run — each re-queries IP_CONFIGURATION
+			uloop.timer(60, () => {
+				ok(env.mock.counts.IP_CONFIGURATION > 1,
+					'v6-iid: the settings really were re-queried');
+				eq(length(filter(env.cevents, (e, i) => e.event == 'settings' && i >= from)), 0,
+					'v6-iid: a same-prefix identifier change emits no settings renew');
+				eq(env.ctx.status()?.settings?.ipv6?.addr, '2001:db8:0:0:0:0:0:2',
+					'v6-iid: the address netifd configured is kept');
+				env.finish();
+			});
+		});
+	},
+};
+
 // --- runner -----------------------------------------------------------------
 
-let scenarios = [ scenario_flow, scenario_zero_rx ];
+let scenarios = [ scenario_flow, scenario_zero_rx, scenario_v6_iid ];
 let current = 0;
 
 function run_next() {
@@ -250,7 +323,7 @@ function run_next() {
 				if (event == 'registered' && !ctx) {
 					ctx = context_mbim.create({
 						name: 'wan', modem: m,
-						config: { apn: 'internet.t-d1.de', mux_id: 0 },
+						config: s.ctx_config ?? { apn: 'internet.t-d1.de', mux_id: 0 },
 						timing: s.ctx_timing,
 						deps: {
 							log: () => null,

@@ -208,6 +208,17 @@ export function create(opts)
 			if (!next.ipv4 && !next.ipv6)
 				return;   // transient empty read — keep the current settings
 
+			// A RE-RANDOMIZED IPv6 INTERFACE IDENTIFIER IS NOT A NEW ADDRESS.
+			// Some firmware hands back a different low 64 bits on every query
+			// while prefix/gateway/DNS stay put (RG502Q). The flat %J compare
+			// below read every one of those as a change and renewed the
+			// interface — every 60 s by default, long enough to break anything
+			// holding a v6 connection. The QMI monitor has guarded this since
+			// its keep_stable_v6; the comment at :193 claimed parity with it
+			// and there was none. Found by a full review, 2026-09-19.
+			if (next.ipv6 && self.settings?.ipv6)
+				next.ipv6 = context_common.keep_stable_v6(self.settings.ipv6, next.ipv6);
+
 			if (sprintf('%J', next) == sprintf('%J', self.settings))
 				return;
 

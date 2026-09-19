@@ -388,10 +388,20 @@ function run_daemon()
 
 		cursor.commit('network');
 
-		// netifd re-reads the interfaces (now proto wwand) and the daemon re-reads
-		// its config so it starts managing them
-		conn.call('network', 'reload', {});
+		// The daemon re-reads its config FIRST, then netifd re-reads the
+		// interfaces (now proto wwand) and brings them up against a daemon that
+		// already knows them.
+		//
+		// This was a blocking conn.call, against this file's own rule at :241 —
+		// ucode's conn.call() parks the single uloop until netifd answers (up
+		// to its 30 s timeout), and a parked daemon cannot serve its own ubus.
+		// So the reload it just triggered had netifd calling the wwand proto
+		// handler for every migrated interface while the daemon could neither
+		// answer nor had yet re-read the config those interfaces refer to.
+		// Deferring it also puts daemon.reload() first, which is the order the
+		// comment always claimed. Found by a full review, 2026-09-19.
 		daemon.reload();
+		conn.defer('network', 'reload', {}, netifd_cb('reload'));
 
 		return { ok: true, applied: length(changes) };
 	};

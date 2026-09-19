@@ -20,6 +20,13 @@ import * as struct from 'struct';
 import * as mbim_mockhub from './lib/mbim_mockhub.uc';
 import * as fakefx from './lib/fakefx.uc';
 import * as modem_mbim from 'wwand/modem_mbim.uc';
+import * as qmi_mockhub from './lib/mockhub.uc';
+import * as client_mod from 'wwand/client.uc';
+import * as ctlmod from 'wwand/codec/schema/ctl.uc';
+import * as nasmod from 'wwand/codec/schema/nas.uc';
+import * as dsdmod from 'wwand/codec/schema/dsd.uc';
+import * as uimmod from 'wwand/codec/schema/uim.uc';
+import * as wmsmod from 'wwand/codec/schema/wms.uc';
 import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
 import * as ext from 'wwand/codec/mbim_schema/ms_basic_connect_ext.uc';
 
@@ -690,5 +697,81 @@ assert_sim_poll_teardown();
 	ok(index(line, '_refresh_cells') < index(line, '_refresh_serving'),
 		'tick order: ...and the cells before the serving detail that hangs off them');
 }
+
+// --- the passthrough gives its CIDs back -------------------------------------
+//
+// reattach and reset each ALLOCATE a DMS client out of the MODEM's client table
+// for the duration of one call, and nothing in the passthrough released
+// anything — not on success, not on error, not on cancellation. The table is
+// finite and small on some stacks (the E182E class has room for a handful), so
+// a scripted reattach loop walked it down and then took passthrough UIM and WMS
+// with it. modem.uc has released its clients since :296; the MBIM passthrough
+// never did. Found by a full review, 2026-09-19.
+
+function assert_passthrough_releases_cid(after) {
+	let qmock = qmi_mockhub.create({ handlers: { SET_OPERATING_MODE: {} } });
+	let pthub = qmock.transport_open('/dev/ptmock', {});
+	let ctl = client_mod.create(pthub, ctlmod.default, 0);
+
+	// stand in for a negotiated QMI-over-MBIM passthrough: the mock hub IS the
+	// shim as far as client.uc is concerned (send/register/unregister)
+	modem.pt = { shim: pthub, ctl: ctl };
+	modem._ensure_pt = (cb) => cb(true);
+
+	modem.reattach((err, res) => {
+		eq(err, null, 'pt-release: the passthrough reattach succeeded');
+		eq(res?.via, 'qmi_passthrough', 'pt-release: it really took the passthrough path');
+
+		let alloc = filter(qmock.calls, (c) => c.name == 'ALLOCATE_CID');
+		let rel = filter(qmock.calls, (c) => c.name == 'RELEASE_CID');
+
+		eq(length(alloc), 1, 'pt-release: one DMS client was allocated for the call');
+		eq(length(rel), 1, 'pt-release: and the CID is given back when it ends');
+		eq(rel[0]?.args?.release?.cid, alloc[0] ? qmock.next_cid - 1 : null,
+			'pt-release: the CID released is the one allocated');
+
+		after();
+	});
+}
+
+assert_passthrough_releases_cid(() => uloop.end());
+uloop.run();
+
+// --- teardown releases the session-long passthrough CIDs ---------------------
+//
+// pt.nas / pt.dsd were destroyed and uim / wms were not even that, and none of
+// the four was ever RELEASED — client.destroy() deliberately does not
+// (client.uc:201). Closing the HOST's MBIM session is not shown to reset the
+// modem's embedded QMI client table, so every daemon reload leaked up to four
+// CIDs out of a table that has room for a handful on the E182E class. The
+// native side has done this burst since modem.uc:1414. Raised by Codex review,
+// 2026-09-19.
+
+function assert_teardown_releases_pt_cids() {
+	let qmock = qmi_mockhub.create({ handlers: {} });
+	let pthub = qmock.transport_open('/dev/ptmock2', {});
+	let ctl = client_mod.create(pthub, ctlmod.default, 0);
+
+	modem.pt = {
+		shim: pthub, ctl: ctl,
+		nas: client_mod.create(pthub, nasmod.default, 11, {}),
+		dsd: client_mod.create(pthub, dsdmod.default, 12, {}),
+	};
+	modem.uim = client_mod.create(pthub, uimmod.default, 13, {});
+	modem.wms = client_mod.create(pthub, wmsmod.default, 14, {});
+
+	modem.teardown();
+
+	let rel = filter(qmock.calls, (c) => c.name == 'RELEASE_CID');
+	let cids = map(rel, (c) => c.args?.release?.cid);
+
+	eq(length(rel), 4, 'pt-teardown: all four session clients are released');
+
+	for (let want in [ 11, 12, 13, 14 ])
+		ok(index(cids, want) >= 0,
+			sprintf('pt-teardown: cid %d given back', want));
+}
+
+assert_teardown_releases_pt_cids();
 
 done('test_modem_mbim');

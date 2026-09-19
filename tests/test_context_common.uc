@@ -191,6 +191,40 @@ eq(cc.apply_iface_id('2001:db8:1:2::1', '::42'), '2001:db8:1:2:0:0:0:42',
 	'iface_id: a real compression is still accepted');
 
 
+// --- keep_stable_v6: an identifier change is not an address change -----------
+//
+// Some firmware hands back a different low 64 bits on every settings query
+// while prefix/gateway/DNS stay put (RG502Q); adopting each one renumbers the
+// interface on every poll. Lived as a local closure in context_monitor_qmi.uc,
+// so the MBIM refresh — whose comment claimed parity with it — had none.
+
+eq(cc.keep_stable_v6({ addr: '2001:db8::2', plen: 64 },
+                     { addr: '2001:db8::dead:beef', plen: 64, mtu: 1500 }).addr,
+	'2001:db8::2', 'keep_stable_v6: same /64, the configured address is kept');
+
+eq(cc.keep_stable_v6({ addr: '2001:db8::2', plen: 64 },
+                     { addr: '2001:db9::2', plen: 64 }).addr,
+	'2001:db9::2', 'keep_stable_v6: a different prefix IS a new address');
+
+eq(cc.keep_stable_v6({ addr: '2001:db8::2', plen: 64 },
+                     { addr: '2001:db8::2', plen: 56 }).plen,
+	56, 'keep_stable_v6: a changed prefix length is a new address');
+
+eq(cc.keep_stable_v6(null, { addr: '2001:db8::2', plen: 64 }).addr,
+	'2001:db8::2', 'keep_stable_v6: nothing to compare against -> take it');
+
+// SUB-BYTE PREFIXES. The comparison walked whole octets only (plen/8), so a
+// /65 was judged on its first 64 bits and two addresses in DIFFERENT /65
+// networks read as an identifier change — the one case where keeping the old
+// address is exactly wrong. Raised by Codex review, 2026-09-19.
+eq(cc.keep_stable_v6({ addr: '2001:db8::0:0:0:2', plen: 65 },
+                     { addr: '2001:db8:0:0:8000::2', plen: 65 }).addr,
+	'2001:db8:0:0:8000::2', 'keep_stable_v6: /65 sees the 65th bit flip');
+
+eq(cc.keep_stable_v6({ addr: '2001:db8::0:0:0:2', plen: 65 },
+                     { addr: '2001:db8::0:0:0:99', plen: 65 }).addr,
+	'2001:db8::0:0:0:2', 'keep_stable_v6: /65 within the same network still holds');
+
 // --- v6_prefix: the network part, host bits cleared --------------------------
 //
 // A source-restricted route's source field is a PREFIX. netifd passes it

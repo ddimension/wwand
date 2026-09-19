@@ -105,6 +105,57 @@ hub2._dispatch({ service: 3, cid: 1, kind: 'response', id: 'r2' });
 eq(got_a, [ 'r1', 'bcast' ], 'unregister: client no longer dispatched');
 eq(length(unhandled), 2, 'unregister: message now lands in on_unhandled');
 
+// --- close drains what is queued ---------------------------------------------
+//
+// close() used to do `txq = []`, on the stated grounds that teardown writes its
+// frames synchronously. It does not. cdc-wdm serves ONE control message at a
+// time: with O_NONBLOCK a write issued while the previous URB is still in
+// flight returns -EAGAIN (cdc-wdm.c:419-424, Linux 6.18.41), and WDM_IN_USE
+// clears only in the completion callback. So the first frame goes out and the
+// second queues — and send() queues everything after it without even trying.
+//
+// modem.uc teardown issues RELEASE_CID for up to eleven clients back to back
+// and closes the hub in the same synchronous block, so ten of eleven releases
+// were discarded before the 5 ms retry could run and their CIDs stayed
+// allocated in the modem's table. Found by a full review, 2026-09-19.
+
+let pp3 = fs.pipe();
+let wdm_written = [], wdm_closed = 0, wdm_busy = false;
+
+// models cdc-wdm: one message in flight; a refused write is where the previous
+// URB gets to complete, so the next attempt is accepted again
+let wdm = {
+	write: (frame) => {
+		if (wdm_busy) {
+			wdm_busy = false;
+			return 0;
+		}
+
+		wdm_busy = true;
+		push(wdm_written, frame);
+
+		return length(frame);
+	},
+	read:   () => null,
+	fileno: () => pp3[0].fileno(),
+	close:  () => wdm_closed++,
+};
+
+let hub3 = transport.open('/dev/fake2', { io_open: () => wdm });
+
+for (let f in [ 'rel1', 'rel2', 'rel3', 'rel4' ])
+	hub3.send(f);
+
+eq(wdm_written, [ 'rel1' ], 'drain: cdc-wdm took one frame, the rest queued');
+
+hub3.close();
+uloop.timer(60, () => uloop.end());
+uloop.run();
+
+eq(wdm_written, [ 'rel1', 'rel2', 'rel3', 'rel4' ],
+	'drain: close() writes the queued frames instead of discarding them');
+eq(wdm_closed, 1, 'drain: the fd is released once, after the queue is empty');
+
 // --- close -------------------------------------------------------------------
 
 hub.close();
@@ -128,5 +179,7 @@ pipe_r.close();
 pipe_w.close();
 pp2[0].close();
 pp2[1].close();
+pp3[0].close();
+pp3[1].close();
 
 done('test_transport');

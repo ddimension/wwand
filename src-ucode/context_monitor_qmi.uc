@@ -281,27 +281,9 @@ export function install(self, o)
 	// snapshot each family's serialized settings before and compare after.
 	let settings_sig = (s) => (s != null) ? sprintf('%J', s) : '';
 
-	// the modem may re-randomize the IPv6 interface identifier on every
-	// settings query while prefix/gateway/dns stay put (seen on the RG502Q):
-	// adopting each variant would renumber the interface on every poll. Treat
-	// a same-prefix address as unchanged and keep the one netifd configured.
-	let keep_stable_v6 = (before, after) => {
-		if (!before?.addr || !after?.addr || after.addr == before.addr ||
-		    after.plen != before.plen)
-			return after;
-
-		let ab = iptoarr(after.addr), bb = iptoarr(before.addr);
-		let n = int((after.plen ?? 64) / 8);
-
-		if (!ab || !bb)
-			return after;
-
-		for (let i = 0; i < n; i++)
-			if (ab[i] != bb[i])
-				return after;
-
-		return { ...after, addr: before.addr };
-	};
+	// shared with the MBIM context (context_common.keep_stable_v6) — the
+	// re-randomizing firmware is the modem's, not the control protocol's
+	let keep_stable_v6 = context_common.keep_stable_v6;
 
 	refresh_settings = () => {
 		if (self.state != 'CONNECTED' || refreshing || refresh_cooldown)

@@ -19,6 +19,7 @@ import * as backend from 'wwand/qmi_backend.uc';
 import * as nasmod from 'wwand/codec/schema/nas.uc';
 import * as wdsmod from 'wwand/codec/schema/wds.uc';
 import * as dsdmod from 'wwand/codec/schema/dsd.uc';
+import * as dmsmod from 'wwand/codec/schema/dms.uc';
 import * as uimmod from 'wwand/codec/schema/uim.uc';
 import * as tlvmod from 'wwand/codec/tlv.uc';
 import * as tmdmod from 'wwand/codec/schema/tmd.uc';
@@ -44,7 +45,7 @@ let raw_err = () => ({ __raw: RESULT_ERR });
 
 // --- mock wiring: each op reads a mutable response so scenarios can vary ------
 
-let r_ca, r_dsd, r_sysinfo, r_pkt, r_bearer, r_rates;
+let r_ca, r_dsd, r_sysinfo, r_pkt, r_bearer, r_rates, r_opmode;
 
 let mock = mockhub.create({ handlers: {
 	GET_LTE_CPHY_CA_INFO:               () => r_ca,
@@ -53,11 +54,13 @@ let mock = mockhub.create({ handlers: {
 	GET_PACKET_STATISTICS:              () => r_pkt,     // WDS
 	GET_CURRENT_DATA_BEARER_TECHNOLOGY: () => r_bearer,  // WDS
 	GET_CHANNEL_RATES:                  () => r_rates,   // WDS
+	SET_OPERATING_MODE:                 () => r_opmode,  // DMS
 } });
 
 let nas = client_mod.create(mock, nasmod.default, 5, {});
 let wds = client_mod.create(mock, wdsmod.default, 6, {});
 let dsd = client_mod.create(mock, dsdmod.default, 7, {});
+let dms = client_mod.create(mock, dmsmod.default, 8, {});
 
 // --- step driver (responses arrive async via uloop) --------------------------
 
@@ -212,6 +215,41 @@ push(steps, (next) => {
 	backend.get_channel_rates(wds, (r) => {
 		eq(r, { tx_rate: 50000, rx_rate: 150000, max_tx_rate: 75000, max_rx_rate: 300000 },
 			'get_channel_rates: current + max tx/rx decoded');
+		next();
+	});
+});
+
+// NO_EFFECT (QMI error 26) IS NOT SUCCESS FOR A RESET.
+//
+// "already in that mode" is a sensible normalization for online/low_power/
+// offline and a contradiction for reset: there is no state to already be in,
+// so NO_EFFECT there says the request changed nothing — the modem did NOT
+// reset. Folding it into success told every caller a reset was under way while
+// the modem sat unchanged: the admin reset reported `resetting: true`, the
+// recovery ladder counted a rung it never climbed, and the MBIM passthrough
+// skipped releasing the CID it had allocated for it because the client table
+// it expected to be wiped never was. Raised by Codex review, 2026-09-19.
+
+push(steps, (next) => {
+	r_opmode = { __error: 26 };
+	backend.set_opmode(dms, 'online', (err) => {
+		eq(err, null, 'set_opmode: NO_EFFECT on online is success (already there)');
+		next();
+	});
+});
+
+push(steps, (next) => {
+	r_opmode = { __error: 26 };
+	backend.set_opmode(dms, 'reset', (err) => {
+		eq(err?.code, 26, 'set_opmode: NO_EFFECT on reset is reported, not swallowed');
+		next();
+	});
+});
+
+push(steps, (next) => {
+	r_opmode = {};
+	backend.set_opmode(dms, 'reset', (err) => {
+		eq(err, null, 'set_opmode: an accepted reset still reports success');
 		next();
 	});
 });

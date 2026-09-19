@@ -1147,6 +1147,31 @@ export function create(opts)
 	// backend), falling back to AT+CFUN=1,1 for modems without the passthrough.
 	// The modem drops off the bus and re-enumerates; hotplug/discovery rebuild
 	// it and the daemon kicks the auto interfaces back up.
+	// GIVE THE CID BACK. Every passthrough client is allocated out of the
+	// MODEM's client table, and a destroyed-but-not-released one stays in it
+	// until the modem's stack resets — the same finite resource modem.uc's
+	// teardown release burst exists to protect (modem.uc:296,:1414). The
+	// session-long clients (pt.nas/dsd, uim, wms) are allocated once and go
+	// with the session; these two allocate PER CALL, so a scripted reattach
+	// loop walked the table down on its own. An E182E-class stack has room for
+	// a handful. Nothing in the passthrough released anything before this.
+	// Found by a full review, 2026-09-19.
+	let pt_release = (client) => {
+		if (!client)
+			return;
+
+		client.destroy();
+
+		// the session ending takes the whole table with it; asking a modem
+		// that is gone only logs a failure nobody can act on
+		if (self._gen != client._pt_gen || !self.pt?.ctl)
+			return;
+
+		self.pt.ctl.request('RELEASE_CID',
+			{ release: { service: client.service, cid: client.cid } },
+			() => null, { timeout: 3000, no_recovery: true });
+	};
+
 	self.reset = function(cb) {
 		let at_reset = () => {
 			if (!self.at)
@@ -1169,9 +1194,29 @@ export function create(opts)
 
 				let dms = client_mod.create(self.pt.shim, dmsmod.default, adata.allocation.cid, hooks);
 
+				dms._pt_gen = self._gen;
+
 				log('warn', 'admin modem reset (DMS offline -> reset over the MBIM passthrough)');
 				qmi_backend.set_opmode(dms, 'offline', () =>
-					qmi_backend.set_opmode(dms, 'reset', () => {
+					qmi_backend.set_opmode(dms, 'reset', (rerr) => {
+						// a reset that took wipes the modem's client table with
+						// it, so there is nothing to give back — and the request
+						// would chase a modem already on its way down. A REFUSED
+						// one leaves the modem and the CID exactly as they were,
+						// which is the case that leaked.
+						if (rerr)
+							pt_release(dms);
+						else
+							dms.destroy();
+
+						// and say which of the two happened. This reported
+						// `resetting: true` unconditionally, so a refusal read
+						// to LuCI and to the caller exactly like a reset under
+						// way — and they then waited for a modem that was never
+						// going anywhere. Raised by Codex review, 2026-09-19.
+						if (rerr)
+							return cb({ error: 'qmi', detail: rerr });
+
 						notify_contexts('lost');
 						cb(null, { resetting: true });
 					}));
@@ -1248,17 +1293,26 @@ export function create(opts)
 
 				let dms = client_mod.create(self.pt.shim, dmsmod.default, adata.allocation.cid, hooks);
 
+				dms._pt_gen = self._gen;
+
+				// this client exists for the duration of ONE reattach; every exit
+				// below goes through here, so the CID comes back on all of them
+				let done = (err, res) => {
+					pt_release(dms);
+					cb(err, res);
+				};
+
 				log('notice', 'network reattach (passthrough DMS low_power -> online)');
 				qmi_backend.set_opmode(dms, 'low_power', () => {
 					if (gone())
-						return cb({ error: 'cancelled' });
+						return done({ error: 'cancelled' });
 
 					settle_timer = uloop.timer(self.timing.settle, () => {
 						if (gone())
-							return cb({ error: 'cancelled' });
+							return done({ error: 'cancelled' });
 
 						qmi_backend.set_opmode(dms, 'online', (err) => {
-							cb(err ? { error: 'qmi', detail: err } : null,
+							done(err ? { error: 'qmi', detail: err } : null,
 								{ ok: true, action: 'reattach', via: 'qmi_passthrough' });
 						});
 					});
@@ -1331,7 +1385,31 @@ export function create(opts)
 		// handle to a shim that is still open with clients registered on it
 		// (qmi_over_mbim.uc:110). Raised by review, 2026-09-19.
 		if (self.pt) {
-			for (let c in [ self.pt.ctl, self.pt.nas, self.pt.dsd ]) {
+			// GIVE THE SESSION-LONG CIDs BACK FIRST, while ctl and the shim are
+			// still up. These were allocated out of the MODEM's client table
+			// and destroy() deliberately does not release them (client.uc:201)
+			// — closing the HOST's MBIM session is not shown to reset the
+			// modem's embedded QMI client table, so every daemon reload leaked
+			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
+			// table has room for a handful. Same burst modem.uc:1414 does for
+			// the native side, which the passthrough never had. Raised by
+			// Codex review, 2026-09-19. ctl is NOT in this list: it is the
+			// implicit client (cid 0) and it is what carries RELEASE_CID for
+			// all the others, so it has to outlive them.
+			for (let c in [ self.pt.nas, self.pt.dsd, self.uim, self.wms ]) {
+				if (!c || !self.pt.ctl)
+					continue;
+
+				try {
+					self.pt.ctl.request('RELEASE_CID',
+						{ release: { service: c.service, cid: c.cid } },
+						() => null, { timeout: 3000, no_recovery: true });
+				} catch (e) {
+					log('err', sprintf('teardown: releasing a passthrough CID threw: %s', e));
+				}
+			}
+
+			for (let c in [ self.pt.ctl, self.pt.nas, self.pt.dsd, self.uim, self.wms ]) {
 				if (!c)
 					continue;
 

@@ -57,10 +57,18 @@ export function parse_modes(str)
 
 // set_opmode(dms, mode, cb): mode is 'online'|'low_power'|'offline'|'reset'.
 // QMI error 26 ("no effect" — already in that mode) is normalized to success.
+//
+// EXCEPT FOR 'reset', where there is no such thing as "already in that mode":
+// NO_EFFECT there says the request changed nothing, i.e. the modem did NOT
+// reset. Folding that into success told every caller a reset was under way
+// while the modem sat unchanged — the admin reset reported `resetting: true`,
+// the recovery ladder counted a rung it never climbed, and the MBIM
+// passthrough skipped releasing the CID it had allocated for it because the
+// table it expected to be wiped never was. Raised by Codex review, 2026-09-19.
 export function set_opmode(dms, mode, cb)
 {
 	dms.request('SET_OPERATING_MODE', { mode: OPMODE[mode] }, (err) => {
-		if (err && err.error == 'qmi' && err.code == 26)
+		if (err && err.error == 'qmi' && err.code == 26 && mode != 'reset')
 			err = null;
 
 		if (cb)

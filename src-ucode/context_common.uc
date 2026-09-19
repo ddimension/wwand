@@ -388,6 +388,53 @@ function valid_iface_id(g)
 // calls it to warn at parse time instead of leaving the operator to wonder why
 // a value they set changed nothing. Kernel generation-mode names are not
 // literals and are not this function's business.
+// A MODEM THAT RE-RANDOMIZES THE IPv6 INTERFACE IDENTIFIER MUST NOT RENUMBER
+// THE INTERFACE. Some firmware hands back a different low 64 bits on every
+// settings query while prefix/gateway/DNS stay put (seen on the RG502Q), and
+// adopting each variant renews the interface on every poll — every 60 s by
+// default, which is long enough to break anything holding a v6 connection.
+// Treat a same-prefix address as unchanged and keep the one netifd configured.
+//
+// Lived in context_monitor_qmi.uc as a local closure. The MBIM refresh compared
+// its whole settings object with a flat %J and had no equivalent, while its own
+// comment claimed "QMI parity via context_monitor_qmi" — so on MBIM the same
+// firmware renumbered on every tick. Shared rather than copied. Found by a full
+// review, 2026-09-19.
+export function keep_stable_v6(before, after)
+{
+	if (!before?.addr || !after?.addr || after.addr == before.addr ||
+	    after.plen != before.plen)
+		return after;
+
+	let ab = iptoarr(after.addr), bb = iptoarr(before.addr);
+	let plen = after.plen ?? 64;
+	let n = int(plen / 8);
+
+	if (!ab || !bb)
+		return after;
+
+	for (let i = 0; i < n; i++)
+		if (ab[i] != bb[i])
+			return after;
+
+	// AND THE BITS THAT DO NOT FILL A BYTE. Comparing only whole octets meant
+	// a /65 was judged on its first 64 bits, so two addresses in DIFFERENT
+	// /65 networks read as an interface-identifier change and the old address
+	// was kept — the one case where keeping it is exactly wrong. /64 is the
+	// common case and unaffected (plen % 8 == 0). Raised by Codex review,
+	// 2026-09-19.
+	let rest = plen % 8;
+
+	if (rest) {
+		let mask = 0xff << (8 - rest);
+
+		if ((ab[n] & mask) != (bb[n] & mask))
+			return after;
+	}
+
+	return { ...after, addr: before.addr };
+};
+
 export function iface_id_ok(value)
 {
 	let g = expand_v6(trim(value ?? ''));
