@@ -1180,8 +1180,19 @@ export function create(opts)
 					let retries = null;
 
 					for (let l in (qres?.lines ?? [])) {
-						let m = match(l, /\+QPINC:\s*(?:"[^"]*",\s*)?([0-9]+)/);
-						if (m) { retries = +m[1]; break; }
+						// PLAIN GROUP, NOT (?:...). ucode's regexes are POSIX
+						// ERE and reject a non-capturing group outright —
+						// "Repetition not preceded by valid expression" on the
+						// target (aarch64 musl/TRE), "Invalid preceding regular
+						// expression" on the host build. The throw lands in this
+						// AT callback, i.e. inside uloop, and kills the daemon;
+						// procd respawns it into the identical crash. It only
+						// fires when a PIN is set AND the modem answers QPINC
+						// with a payload line, which is why it survived from
+						// 495afc8 (2026-07-24) until a full review found it.
+						// Hence capture 2 for the count.
+						let m = match(l, /\+QPINC:\s*("[^"]*",\s*)?([0-9]+)/);
+						if (m) { retries = +m[2]; break; }
 					}
 
 					let br = sim.pin_block_reason(retries, self.pin_force);

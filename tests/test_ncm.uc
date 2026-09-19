@@ -2052,6 +2052,85 @@ push(scenarios, {
 	},
 });
 
+// --- the PIN-required path, which nothing had ever walked ---------------------
+//
+// Every other scenario answers `+CPIN: READY`, so step_sim's PIN branch had NO
+// coverage at all — and it carried a regex the interpreter refuses to compile:
+// `(?:...)` is not POSIX ERE, which is what ucode uses. On the target
+// (aarch64 musl/TRE) it raises "Repetition not preceded by valid expression",
+// on the host build "Invalid preceding regular expression". The throw lands in
+// the AT callback, i.e. inside uloop, and takes the daemon with it; procd then
+// respawns into the identical crash, so PIN entry is unreachable and the box
+// stays down. Shipped in 495afc8 (2026-07-24), found by review 2026-09-19.
+//
+// A throw here ends the scenario run rather than failing a check, so the
+// scenario-count assertion at the bottom of this file is what catches a
+// regression — the same mechanism s9h relies on.
+let pin_script = [
+	{ re: /^AT\+CPIN\?$/,      lines: [ '+CPIN: SIM PIN' ] },
+	{ re: /^AT\+QPINC="SC"$/,  lines: [ '+QPINC: "SC",3,10' ] },
+	{ re: /^AT\+CPIN="1234"$/, lines: [] },
+];
+
+push(scenarios, {
+	name: 's9n_pin_required_path_walks',
+	script: fscript(pin_script),
+	mconfig: { pincode: '1234' },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		eq(env.tr.count(/^AT\+QPINC="SC"$/), 1,
+			'pin: the remaining-attempts query goes out before the PIN');
+		eq(env.tr.count(/^AT\+CPIN="1234"$/), 1,
+			'pin: ...and the PIN is entered, so the QPINC answer parsed without throwing');
+		eq(env.modem.sim_block, null, 'pin: 3 attempts left is not a block');
+		env.finish();
+	},
+});
+
+// ...and the safety block still fires on the LAST attempt, which is the whole
+// reason the QPINC query exists — proving the parse yields the NUMBER, not just
+// "it did not throw". Capture 2 now carries it; capture 1 is the facility.
+push(scenarios, {
+	name: 's9o_pin_last_attempt_is_refused',
+	script: fscript([
+		{ re: /^AT\+CPIN\?$/,     lines: [ '+CPIN: SIM PIN' ] },
+		{ re: /^AT\+QPINC="SC"$/, lines: [ '+QPINC: "SC",1,10' ] },
+	]),
+	mconfig: { pincode: '1234' },
+	run_at_start: true,
+	run: (env) => {
+		// `modem.sim_block` is set by the DAEMON (daemon.uc:573), which this
+		// harness does not run — the modem's own contract is the event.
+		let blocked = () => filter(env.mevents, (e) => e.event == 'sim_blocked')[0];
+
+		wait_for(() => blocked() != null, () => {
+			eq(blocked()?.data?.retries, 1,
+				'pin: the remaining count is read from capture 2, not the facility');
+			eq(env.tr.count(/^AT\+CPIN="1234"$/), 0,
+				'pin: ...and the last attempt is NOT burned');
+			env.finish();
+		});
+	},
+});
+
+// the modem without QPINC: retries stays null and the PIN proceeds (the
+// best-effort promise in the comment above the query).
+push(scenarios, {
+	name: 's9p_pin_without_qpinc_proceeds',
+	script: fscript([
+		{ re: /^AT\+CPIN\?$/,      lines: [ '+CPIN: SIM PIN' ] },
+		{ re: /^AT\+QPINC="SC"$/,  term: 'ERROR', lines: [] },
+		{ re: /^AT\+CPIN="1234"$/, lines: [] },
+	]),
+	mconfig: { pincode: '1234' },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		eq(env.tr.count(/^AT\+CPIN="1234"$/), 1,
+			'pin: no QPINC support is not a reason to refuse the PIN');
+		env.finish();
+	},
+});
+
 // --- the delayed retry must not outlive the modem -----------------------------
 //
 // teardown() runs on exactly the path this fix is about: a slot switch stops the
