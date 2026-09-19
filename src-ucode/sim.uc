@@ -91,13 +91,92 @@ export function pin_block_reason(retries, force)
 	return null;
 };
 
+// A CARD POLL MUST NOT OUTLIVE ITS SESSION. The retries below re-enter
+// unlock_uim/unlock_dms, which re-read modem.uim / modem.dms at entry — and
+// teardown nulls those (modem.uc:1329). An anonymous timer firing after an
+// unplug or a config reload inside the up-to-10 s poll window therefore
+// dereferenced null, and a throw inside a uloop callback ends the program: the
+// next timer never runs and uloop.run() does not return (measured 2026-09-19).
+// The generation says whether the wait still belongs to anyone.
+// Found by a full review, 2026-09-19.
+// A CANCELLED REQUEST IS NOT AN ANSWER ABOUT THE CARD. Teardown destroys the
+// clients, which completes everything in flight with `cancelled` — and every
+// callback below used to translate that into a statement it had no basis for:
+// "card_status failed", "the PIN was refused", "no PIN needed", "the unlock was
+// not confirmed". The last two are the dangerous ones. A refused PIN enters the
+// TERMINAL sim-blocked path, where make_fail's cancellation exemption never
+// applies, and "no PIN needed" advances the init chain for a modem that is
+// gone. Raised by review, 2026-09-19.
+function cancelled(err)
+{
+	return err?.error == 'cancelled';
+};
+
+function poll_again(modem, gen, fn)
+{
+	uloop.timer(modem.timing?.card_poll ?? CARD_POLL_MS, () => {
+		if ((modem._gen ?? 0) != gen)
+			return;
+
+		fn();
+	});
+};
+
+// install the card-readiness watch ONCE PER CLIENT and dispatch to whoever is
+// waiting now. client.on is append-only with no removal, so registering it per
+// PIN verify accumulated a closure for every re-unlock over the life of one
+// client — an eSIM or slot switch re-verifies, and every old handler then ran on
+// every indication. Keyed on the CLIENT, not the modem: a new incarnation gets a
+// new client and must hook it again. Found by a full review, 2026-09-19.
+function watch_card_ready(modem, uim, on_ready)
+{
+	// THE WAITER LIVES ON THE CLIENT, and carries an owner token. A single
+	// modem-wide slot let two unlocks steal from each other: init calls
+	// sim.unlock (modem_init_qmi.uc:413) while the eSIM path schedules its own
+	// (esim_bridge.uc:406), and nothing serialises them — the second overwrote
+	// the first, and whichever finished first cleared the OTHER's waiter.
+	// Raised by review, 2026-09-19.
+	let mine = {};
+
+	uim._card_ready_cb = on_ready;
+	uim._card_ready_owner = mine;
+
+	if (!uim._card_ready_hooked) {
+		uim._card_ready_hooked = true;
+
+		uim.on('CARD_STATUS_IND', (idata) => {
+			let f = find_app(idata.card_status);
+
+			if (f?.app?.state == uimmod.APP_STATE_READY && uim._card_ready_cb)
+				uim._card_ready_cb();
+		});
+	}
+
+	// retire — but only if the waiter is still ours
+	return () => {
+		if (uim._card_ready_owner != mine)
+			return;
+
+		uim._card_ready_cb = null;
+		uim._card_ready_owner = null;
+	};
+};
+
 function unlock_uim(modem, cb, tries)
 {
 	let uim = modem.uim;
+
+	// the session ended under a retry (see poll_again)
+	if (!uim)
+		return cb({ error: 'modem_gone' });
+
 	let pincode = effective_pincode(modem);
 	let settle = modem.timing?.sim_settle ?? 5000;
 
 	uim.request('GET_CARD_STATUS', {}, (err, data) => {
+		if (cancelled(err))
+			return cb({ error: 'cancelled' });
+
 		if (err)
 			return cb({ error: 'card_status', detail: err });
 
@@ -105,7 +184,7 @@ function unlock_uim(modem, cb, tries)
 
 		if (!found) {
 			if ((tries ?? 0) < CARD_POLL_TRIES) {
-				uloop.timer(modem.timing?.card_poll ?? CARD_POLL_MS,
+				poll_again(modem, modem._gen ?? 0,
 					() => unlock_uim(modem, cb, (tries ?? 0) + 1));
 				return;
 			}
@@ -152,7 +231,7 @@ function unlock_uim(modem, cb, tries)
 		case uimmod.APP_STATE_UNKNOWN:
 			// card still initializing
 			if ((tries ?? 0) < CARD_POLL_TRIES) {
-				uloop.timer(modem.timing?.card_poll ?? CARD_POLL_MS,
+				poll_again(modem, modem._gen ?? 0,
 					() => unlock_uim(modem, cb, (tries ?? 0) + 1));
 				return;
 			}
@@ -186,6 +265,11 @@ function unlock_uim(modem, cb, tries)
 				session: { session_type: uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING, aid: '' },
 				info: { pin_id: pin_id, pin: pincode },
 			}, (verr, vdata) => {
+				// NOT the terminal sim-blocked path: make_fail's cancellation
+				// exemption never reaches that one (see `cancelled` above)
+				if (cancelled(verr))
+					return cb({ error: 'cancelled' });
+
 				if (verr) {
 					return cb({
 						blocked: true,
@@ -199,11 +283,15 @@ function unlock_uim(modem, cb, tries)
 				// fall back to a settle timer + one re-check
 				let done = false;
 
+				let gen = modem._gen ?? 0;
+				let retire;
+
 				let finish = (ok, detail) => {
 					if (done)
 						return;
 
 					done = true;
+					retire();
 
 					if (ok)
 						cb(null, { status: 'ready' });
@@ -211,18 +299,34 @@ function unlock_uim(modem, cb, tries)
 						cb({ error: 'unlock_not_confirmed', detail: detail });
 				};
 
-				uim.on('CARD_STATUS_IND', (idata) => {
-					let f = find_app(idata.card_status);
-
-					if (f?.app?.state == uimmod.APP_STATE_READY)
-						finish(true);
-				});
+				retire = watch_card_ready(modem, uim, () => finish(true));
 
 				uloop.timer(settle, () => {
 					if (done)
 						return;
 
+					// the session ended under the settle wait: `uim` is the
+					// client captured above, so this would re-read a DESTROYED
+					// one — which answers `cancelled` and would be reported as
+					// unlock_not_confirmed, i.e. a failure the init ladder acts
+					// on. Say what actually happened instead; make_fail ignores
+					// a cancellation (modem_common.uc). Raised by review,
+					// 2026-09-19.
+					if ((modem._gen ?? 0) != gen || modem.uim != uim) {
+						done = true;
+						retire();
+						return cb({ error: 'cancelled' });
+					}
+
 					uim.request('GET_CARD_STATUS', {}, (e2, d2) => {
+						// teardown can land between the guard above and this
+						// answer, too
+						if (cancelled(e2)) {
+							done = true;
+							retire();
+							return cb({ error: 'cancelled' });
+						}
+
 						let f = find_app(d2?.card_status);
 						finish(f?.app?.state == uimmod.APP_STATE_READY, e2);
 					});
@@ -258,7 +362,7 @@ function unlock_uim(modem, cb, tries)
 			// DETECTED/UNKNOWN); if it never leaves state 4 (the Huawei quirk),
 			// let it through as ready.
 			if ((tries ?? 0) < CARD_POLL_TRIES) {
-				uloop.timer(modem.timing?.card_poll ?? CARD_POLL_MS,
+				poll_again(modem, modem._gen ?? 0,
 					() => unlock_uim(modem, cb, (tries ?? 0) + 1));
 				return;
 			}
@@ -288,10 +392,20 @@ function unlock_uim(modem, cb, tries)
 function unlock_dms(modem, cb, tries)
 {
 	let dms = modem.dms;
+
+	// the session ended under a retry (see poll_again)
+	if (!dms)
+		return cb({ error: 'modem_gone' });
 	let pincode = effective_pincode(modem);
 	let settle = modem.timing?.sim_settle ?? 5000;
 
 	dms.request('GET_PIN_STATUS', {}, (err, data) => {
+		// ...but a CANCELLED read says nothing about the PIN facility, and
+		// reporting "no pin needed" for it advances the init chain for a modem
+		// that is already gone (see `cancelled` above)
+		if (cancelled(err))
+			return cb({ error: 'cancelled' });
+
 		if (err) {
 			// modems without any PIN facility fail here; treat as unlocked
 			// (matches old code falling through when no pin status found)
@@ -306,7 +420,7 @@ function unlock_dms(modem, cb, tries)
 		switch (pin1.status) {
 		case 0: // not initialized ("UIM uninitialized" wait loop in old code)
 			if ((tries ?? 0) < CARD_POLL_TRIES) {
-				uloop.timer(modem.timing?.card_poll ?? CARD_POLL_MS,
+				poll_again(modem, modem._gen ?? 0,
 					() => unlock_dms(modem, cb, (tries ?? 0) + 1));
 				return;
 			}
@@ -331,6 +445,10 @@ function unlock_dms(modem, cb, tries)
 				info: { pin_id: 1, pin: pincode },
 			}, (verr, vdata) => {
 				if (verr) {
+					// not the terminal blocked path (see `cancelled` above)
+					if (cancelled(verr))
+						return cb({ error: 'cancelled' });
+
 					// "no effect" means the PIN was not needed after all
 					if (verr.error == 'qmi' && verr.code == QMI_ERR_NO_EFFECT)
 						return cb(null, { status: 'no_pin_needed' });
@@ -343,8 +461,18 @@ function unlock_dms(modem, cb, tries)
 					});
 				}
 
-				// settle before using the card (old: sleep 5)
-				uloop.timer(settle, () => cb(null, { status: 'ready' }));
+				// settle before using the card (old: sleep 5) — but do not
+				// report a ready card into a session that ended meanwhile; the
+				// init chain would carry on with a modem that is gone. Raised
+				// by review, 2026-09-19.
+				let dms_gen = modem._gen ?? 0;
+
+				uloop.timer(settle, () => {
+					if ((modem._gen ?? 0) != dms_gen || modem.dms != dms)
+						return cb({ error: 'cancelled' });
+
+					cb(null, { status: 'ready' });
+				});
 			});
 
 			return;

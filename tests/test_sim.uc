@@ -116,6 +116,154 @@ scenario('uim: pin verify ok (indication)', (next) => {
 	});
 });
 
+// A CARD POLL MUST NOT OUTLIVE ITS SESSION. The retry re-enters unlock_uim,
+// which re-reads modem.uim at entry — and teardown nulls it (modem.uc:1329). An
+// unplug or a config reload inside the up-to-10 s poll window therefore
+// dereferenced null, and a throw inside a uloop callback ends the program: the
+// next timer never runs and uloop.run() does not return (measured 2026-09-19).
+// Found by a full review, 2026-09-19.
+scenario('uim: a poll retry does not outlive the modem', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {}, _gen: 1, uim: mkclient({
+		// no application: the "card still initializing" retry path
+		GET_CARD_STATUS: { card_status: { cards: [] } },
+	}, calls) };
+
+	let answered = false;
+
+	// mkclient answers synchronously, so the first retry is already armed when
+	// unlock() returns — tear down right here, with no timer to race.
+	sim.unlock(m, (err) => { answered = true; });
+
+	m._gen = 2;
+	m.uim = null;
+
+	// well past two poll intervals: nothing must fire into the dead session
+	uloop.timer((T.card_poll ?? 1) * 4 + 30, () => {
+		let n = length(filter(calls, (c) => c == 'GET_CARD_STATUS'));
+
+		eq(n, 1, 'poll-teardown: the retry does not run after the session ended');
+		eq(answered, false, 'poll-teardown: ...and nothing answers into the void');
+		next();
+	});
+});
+
+// THE CARD-READY WATCH IS INSTALLED ONCE PER CLIENT. client.on is append-only
+// with no removal, so registering it per PIN verify left a closure behind for
+// every re-unlock over the life of one client — an eSIM or slot switch
+// re-verifies, and every old handler then ran on every indication. Found by a
+// full review, 2026-09-19.
+scenario('uim: the readiness watch is not re-registered per verify', (next) => {
+	let calls = [];
+	let hooks = 0;
+	let uim;
+
+	uim = mkclient({
+		GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_PIN1_OR_UPIN_PIN_REQUIRED, 3) },
+		REGISTER_EVENTS: {},
+		VERIFY_PIN: (args, cb) => {
+			cb(null, {});
+			uim._ind.CARD_STATUS_IND({ card_status: card(uimmod.APP_STATE_READY, 3) });
+		},
+	}, calls);
+
+	// count registrations of the readiness watch on this client
+	let real_on = uim.on;
+	uim.on = (ev, fn) => { if (ev == 'CARD_STATUS_IND') hooks++; return real_on(ev, fn); };
+
+	let m = { timing: T, config: { pincode: '1234' }, uim: uim };
+
+	sim.unlock(m, (e1) => {
+		eq(e1, null, 'watch-once: first unlock ok');
+
+		sim.unlock(m, (e2) => {
+			eq(e2, null, 'watch-once: second unlock ok');
+
+			sim.unlock(m, (e3) => {
+				eq(e3, null, 'watch-once: third unlock ok');
+				eq(hooks, 1,
+					'watch-once: three verifies on one client register ONE handler');
+				next();
+			});
+		});
+	});
+});
+
+// A SETTLE WAIT MUST NOT REPORT INTO A SESSION THAT ENDED. `uim` is captured
+// before the wait, so the re-check would go to a DESTROYED client — which
+// answers `cancelled`, and that was reported as unlock_not_confirmed, i.e. a
+// failure the init ladder acts on. Raised by review, 2026-09-19.
+scenario('uim: a settle wait reports cancellation, not a failed unlock', (next) => {
+	let calls = [];
+	let uim;
+
+	uim = mkclient({
+		GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_PIN1_OR_UPIN_PIN_REQUIRED, 3) },
+		REGISTER_EVENTS: {},
+		VERIFY_PIN: {},          // accepted, but no readiness indication follows
+	}, calls);
+
+	let m = { timing: T, config: { pincode: '1234' }, _gen: 1, uim: uim };
+
+	sim.unlock(m, (err) => {
+		eq(err?.error, 'cancelled',
+			'settle-teardown: the caller is told the session ended...');
+		ok(err?.error != 'unlock_not_confirmed',
+			'settle-teardown: ...not that the card refused the PIN');
+		next();
+	});
+
+	// torn down while the settle wait is pending
+	m._gen = 2;
+	m.uim = null;
+});
+
+// A CANCELLED REQUEST IS NOT AN ANSWER ABOUT THE CARD. Teardown completes
+// everything in flight with `cancelled`, and each of these callbacks used to
+// translate that into a statement it had no basis for. The two dangerous ones:
+// a "refused PIN" enters the TERMINAL sim-blocked path, where make_fail's
+// cancellation exemption never applies, and DMS "no pin needed" advances the
+// init chain for a modem that is gone. Raised by review, 2026-09-19.
+scenario('uim: a cancelled VERIFY_PIN is not a refused PIN', (next) => {
+	let calls = [];
+	let m = { timing: T, config: { pincode: '1234' }, _gen: 1, uim: mkclient({
+		GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_PIN1_OR_UPIN_PIN_REQUIRED, 3) },
+		REGISTER_EVENTS: {},
+		VERIFY_PIN: { __err: { error: 'cancelled' } },
+	}, calls) };
+
+	sim.unlock(m, (err) => {
+		eq(err?.error, 'cancelled', 'verify-cancelled: reported as a cancellation');
+		eq(err?.blocked, null, 'verify-cancelled: ...and NOT as a blocked SIM');
+		next();
+	});
+});
+
+scenario('dms: a cancelled pin status is not "no pin needed"', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {}, _gen: 1, dms: mkclient({
+		GET_PIN_STATUS: { __err: { error: 'cancelled' } },
+	}, calls) };
+
+	sim.unlock(m, (err, st) => {
+		eq(err?.error, 'cancelled', 'dms-cancelled: reported as a cancellation');
+		eq(st, null, 'dms-cancelled: ...and the init chain is not told the card is fine');
+		next();
+	});
+});
+
+scenario('uim: a cancelled card read is not a card_status failure', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {}, _gen: 1, uim: mkclient({
+		GET_CARD_STATUS: { __err: { error: 'cancelled' } },
+	}, calls) };
+
+	sim.unlock(m, (err) => {
+		eq(err?.error, 'cancelled', 'read-cancelled: reported as a cancellation');
+		next();
+	});
+});
+
 scenario('uim: low retries block auto-entry', (next) => {
 	let calls = [];
 	let m = { timing: T, config: { pincode: '1234' }, uim: mkclient({
