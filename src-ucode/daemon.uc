@@ -534,6 +534,12 @@ export function create(opts)
 			vanished: prev?.vanished,
 			_vanish_rung: prev?._vanish_rung,
 			waiting_since: prev?.waiting_since,
+			// what the hardware told us last time (detach_modem). A rebuild
+			// replaces the whole entry, so anything not listed here is
+			// forgotten — and forgetting this one costs an NCM modem its
+			// vendor recipe when it refuses to identify itself (wwand#32).
+			// Raised by review, 2026-09-19.
+			_ident: prev?._ident,
 		};
 	};
 
@@ -1100,6 +1106,20 @@ export function create(opts)
 	// dead modem; queued activations would wait forever). The next rebuild builds
 	// fresh modem + context objects.
 	detach_modem = (name, entry) => {
+		// KEEP WHAT THE HARDWARE TOLD US. The object goes, the modem does not:
+		// a slot switch re-enumerates the USB device and this entry is rebuilt
+		// for the same bound device. On an NCM/AT modem the vendor recipe comes
+		// from AT+CGMI/CGMM, and a firmware that refuses those for a few
+		// seconds after re-enumeration would otherwise be `generic` for the
+		// life of the new object — no vendor ip_config, no IPv4 (FM350-GL,
+		// ddimension/wwand#32). Only a complete answer is worth remembering.
+		if ((entry.modem?.info?.manufacturer ?? '') != '')
+			entry._ident = {
+				manufacturer: entry.modem.info.manufacturer,
+				model: entry.modem.info.model,
+				imei: entry.modem.info.imei,
+			};
+
 		entry.modem.stop();
 		entry.modem = null;
 		entry.device = entry.cfg.device;   // reset to configured value
@@ -1556,7 +1576,8 @@ export function create(opts)
 			                      mux_auto: muxinfo?.demotable ?? false,
 			                      fx: deps.datapath_fx };
 
-		entry.modem = be.modem.create({ ...common, datapath: datapath });
+		entry.modem = be.modem.create({ ...common, datapath: datapath,
+		                                known_ident: entry._ident ?? null });
 		// remembered for the vanish escalation below: "this control device was
 		// once ours" is the only thing separating a modem that fell out of the
 		// machine from one that never showed up.

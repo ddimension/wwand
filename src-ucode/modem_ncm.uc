@@ -224,6 +224,10 @@ export function create(opts)
 		state: 'ABSENT',
 		vendor: ncm_vendors.VENDORS.generic,
 		info: {},
+		// what the PREVIOUS object of this modem entry had identified, handed
+		// back by the daemon across a re-enumeration. Used only when this modem
+		// refuses to identify itself at all (step_identify).
+		known_ident: opts.known_ident ?? null,
 		reg: {},
 		reg_detail: null,
 		signal: {},
@@ -510,6 +514,10 @@ export function create(opts)
 	step_identify = () => {
 		self.set_state('INIT_SERVICES');
 
+		// set when the vendor recipe came from self.known_ident rather than
+		// from this modem's own answer; the IMEI read cross-checks it below.
+		let carried_ident = false;
+
 		// The AT layer now routes interleaved URCs to on_urc, so a line
 		// arriving here is the command's own answer. It can still be MISSING:
 		// the T700 answers AT+CGMI with nothing at all while a PDN teardown is
@@ -594,6 +602,41 @@ export function create(opts)
 			ask('AT+CGMM', (model) => {
 				self.info.model = model;
 
+				// A MODEM CAN WITHHOLD BOTH STRINGS. The FM350-GL does, for a
+				// few seconds after a slot switch re-enumerates it: AT+CGMI,
+				// CGMM and CGMR answer ERROR while the very same port answers
+				// AT+CGSN, CIMI, CRSM, CPIN? and CGDCONT correctly IN THE SAME
+				// SECOND (ddimension/wwand#32, reporter log 2026-09-19,
+				// 12:02:27-29 and 12:15:33-35). It is not a modem that is still
+				// booting, so waiting cannot fix it — the one-second ident retry
+				// above fires, gets the same ERROR, and gives up.
+				//
+				// The consequence was out of all proportion to the cause. The
+				// modem object is REBUILT on re-enumeration (the daemon detaches
+				// it and calls create() again, so `info` starts empty), and one
+				// refused read then decided `generic` for the whole life of that
+				// object: no vendor ip_config, and the interface came up with
+				// IPv6 DNS and NO IPv4 ADDRESS AT ALL. The same physical modem
+				// had been identified as fibocom minutes earlier.
+				//
+				// So carry the last identity over. What makes this safe is that
+				// the entry is bound to THIS device (serial/IMEI/path), and that
+				// a healthy modem answers — the carry-over is reachable only
+				// when the modem in front of us refuses too, and any real answer
+				// always wins over it. The IMEI read further down cross-checks
+				// it and warns if the hardware turns out to be different.
+				if ((manuf ?? '') == '' && (model ?? '') == '' &&
+				    (self.known_ident?.manufacturer ?? '') != '') {
+					manuf = self.known_ident.manufacturer;
+					model = self.known_ident.model;
+					self.info.manufacturer = manuf;
+					self.info.model = model;
+					carried_ident = true;
+
+					log('notice', sprintf('identity refused (CGMI/CGMM) — carried over from the last bring-up of this modem: %s %s',
+						manuf, model ?? '?'));
+				}
+
 				// resolve the recipe from manufacturer AND model: the model is
 				// the answer a modem does not withhold, and it keeps a missing
 				// CGMI from silently degrading everything (ip_config, dials,
@@ -655,6 +698,18 @@ export function create(opts)
 					ask('AT+CGSN', (imei) => {
 						self.info.imei = imei;
 						self.info.device_id = imei;
+
+						// the cross-check the carry-over above promised: the
+						// IMEI is the one identity this firmware does not
+						// withhold in that window. A mismatch means the recipe
+						// was taken from different hardware — say so rather
+						// than let it pass unremarked; the next successful
+						// CGMI corrects it.
+						if (carried_ident && (imei ?? '') != '' &&
+						    (self.known_ident?.imei ?? '') != '' &&
+						    imei != self.known_ident.imei)
+							log('warn', sprintf('carried-over identity belongs to imei %s but this modem reports %s — the vendor recipe may be wrong',
+								self.known_ident.imei, imei));
 
 						ask('AT+CIMI', (imsi) => {
 							self.info.imsi = imsi;

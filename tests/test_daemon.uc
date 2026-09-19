@@ -1302,6 +1302,10 @@ uloop.run();
 	d.modems.m0.vanished = true;
 	d.modems.m0.waiting_since = 111;
 	d.modems.m0._vanish_rung = 1;
+	// ...and what it had identified itself as, which an NCM modem needs back
+	// when it refuses AT+CGMI/CGMM after a re-enumeration (wwand#32)
+	d.modems.m0._ident = { manufacturer: 'Fibocom Wireless Inc.', model: 'FM350-GL',
+	                       imei: '353165094409590' };
 
 	// it comes back mid-enumeration: the node is there, no driver bound yet.
 	// Driven through hotplug, which is how the real retry re-runs start_modem —
@@ -1317,6 +1321,10 @@ uloop.run();
 	eq(d.modems.m0.waiting_since, 111, 'rebuild: the outage clock is not restarted');
 	eq(d.modems.m0._vanish_rung, 1, 'rebuild: the rung already climbed is not forgotten');
 	eq(d.modems.m0.vanished, true, 'rebuild: still flagged as a vanish, not a cold boot');
+	eq(d.modems.m0._ident?.manufacturer, 'Fibocom Wireless Inc.',
+		'rebuild: the identity the hardware gave us survives the rebuild');
+	eq(d.modems.m0._ident?.imei, '353165094409590',
+		'rebuild: ...including the imei that cross-checks it');
 }
 
 // --- a modem that vanished must climb the ladder, not wait forever ------------

@@ -173,6 +173,7 @@ function run_next()
 		          ...(s.mtiming ?? {}) },
 		datapath: s.datapath,
 		pinned_over: s.pinned_over,
+		known_ident: s.known_ident,
 		// inject the scripted tty; a re-opened tty is not closed (a scenario
 		// that restarts the modem re-opens the same mock and keeps its history)
 		at: { open_transport: () => { tr.closed = false; return tr; } },
@@ -1926,6 +1927,82 @@ push(scenarios, {
 		ok(env.tr.count(/^AT\+CGMI$/) >= 2, 'identity: the retry actually went out');
 		eq(env.tr.count(/^AT\+CGMR$/), 1,
 			'identity: an ERROR from a best-effort probe is an answer, asked once');
+		env.finish();
+	},
+});
+
+// --- a modem that refuses to identify itself at all ---------------------------
+//
+// s9g above covers the modem that is still BOOTING: it errors once, the retry
+// gets the truth. The FM350-GL does something else, and no retry reaches it.
+// After a slot switch re-enumerates it, AT+CGMI, CGMM and CGMR all answer ERROR
+// while the very same port answers AT+CGSN, CIMI, CRSM, CPIN? and CGDCONT
+// correctly IN THE SAME SECOND (ddimension/wwand#32, reporter log 2026-09-19,
+// 12:02:27-29 and again 12:15:33-35). Waiting longer cannot help — the modem is
+// up, it simply withholds those three strings.
+//
+// What made that catastrophic is that the modem OBJECT is rebuilt on
+// re-enumeration, so one refused read decided `generic` for its whole life: no
+// vendor ip_config, and the interface came up with IPv6 DNS and no IPv4 address
+// at all. So the daemon hands the previous object's identity back, and it is
+// used ONLY when this modem refuses too.
+let refuse_script = [
+	{ re: /^AT\+CGMI$/, term: 'ERROR', lines: [] },
+	{ re: /^AT\+CGMM$/, term: 'ERROR', lines: [] },
+	{ re: /^AT\+CGMR$/, term: 'ERROR', lines: [] },
+	// ...while everything else answers, which is the whole point
+	{ re: /^AT\+CGSN$/, lines: [ '353165094409590' ] },
+];
+
+push(scenarios, {
+	name: 's9i_refused_identity_is_carried_over',
+	script: fscript(refuse_script),
+	mtiming: { ident_retry: 25 },
+	known_ident: { manufacturer: 'Fibocom Wireless Inc.', model: 'FM350-GL',
+	               imei: '353165094409590' },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		eq(env.modem.info?.manufacturer, 'Fibocom Wireless Inc.',
+			'refused identity: the last known manufacturer is carried over');
+		eq(ncm_vendors.vendor_name(env.modem.vendor), 'fibocom',
+			'refused identity: ...so the recipe is fibocom, NOT generic');
+		ok(env.modem.vendor.ip_config != null,
+			'refused identity: which is the point — a vendor ip_config exists');
+		env.finish();
+	},
+});
+
+// ...and with nothing remembered it still degrades honestly, as before.
+push(scenarios, {
+	name: 's9j_refused_identity_without_memory_is_generic',
+	script: fscript(refuse_script),
+	mtiming: { ident_retry: 25 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		eq(ncm_vendors.vendor_name(env.modem.vendor), 'generic',
+			'refused identity: nothing remembered -> generic, not a guess');
+		env.finish();
+	},
+});
+
+// A REAL ANSWER ALWAYS WINS. The carry-over must never override what the modem
+// actually said — otherwise a modem swapped at the same bound device would keep
+// answering as its predecessor forever.
+push(scenarios, {
+	name: 's9k_a_real_answer_beats_the_memory',
+	script: fscript([
+		{ re: /^AT\+CGMI$/, lines: [ 'Quectel' ] },
+		{ re: /^AT\+CGMM$/, lines: [ 'EC25' ] },
+		{ re: /^AT\+CGSN$/, lines: [ '111111111111111' ] },
+	]),
+	known_ident: { manufacturer: 'Fibocom Wireless Inc.', model: 'FM350-GL',
+	               imei: '353165094409590' },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		eq(env.modem.info?.manufacturer, 'Quectel',
+			'carry-over: the modem answered, so its own answer stands');
+		eq(ncm_vendors.vendor_name(env.modem.vendor), 'quectel',
+			'carry-over: ...and the recipe follows the answer, not the memory');
 		env.finish();
 	},
 });
