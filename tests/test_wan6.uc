@@ -58,7 +58,11 @@ function mk(pdp, ensures)
 				},
 				context: {
 					create: (o) => {
-						let ctx = { state: 'IDLE', config: o.config, modem: o.modem };
+						// modem_event is part of the context contract
+						// (context.uc:1040): the daemon tells a bound context
+						// when its modem is removed
+						let ctx = { state: 'IDLE', config: o.config, modem: o.modem,
+						            modem_event: () => null };
 						ctx_on_event = (ev) => o.deps.on_event(ctx, ev, null);
 						return ctx;
 					},
@@ -167,7 +171,10 @@ function mkblk(raw)
 					return { id: 'm', start: () => null, stop: () => null,
 					         note_connect_success: () => null, note_connect_failure: () => null,
 					         datapath: {} }; } },
-				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem }) },
+				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
+					// part of the context contract (context.uc:1040); the
+					// daemon tells a bound context when its modem is removed
+					modem_event: () => null }) },
 			}),
 			emit_event: () => null, kick_interface: () => null, renew_interface: () => null,
 			down_interface: () => null, iface_status: (i, cb) => cb({ up: false }),
@@ -230,7 +237,10 @@ function mkdp(mux, impl, real, scandir)
 					return { id: 'm', start: () => null, stop: () => null,
 					         note_connect_success: () => null, note_connect_failure: () => null,
 					         datapath: {} }; } },
-				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem }) },
+				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
+					// part of the context contract (context.uc:1040); the
+					// daemon tells a bound context when its modem is removed
+					modem_event: () => null }) },
 			}),
 			emit_event: () => null, kick_interface: () => null, renew_interface: () => null,
 			down_interface: () => null, iface_status: (i, cb) => cb({ up: false }),
@@ -326,7 +336,10 @@ dpath = daemon_mod.create({
 				return { id: 'm', start: () => null, stop: () => null,
 				         note_connect_success: () => null, note_connect_failure: () => null,
 				         datapath: {} }; } },
-			context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem }) },
+			context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
+					// part of the context contract (context.uc:1040); the
+					// daemon tells a bound context when its modem is removed
+					modem_event: () => null }) },
 		}),
 		emit_event: () => null, kick_interface: () => null, renew_interface: () => null,
 		down_interface: () => null, iface_status: (i, cb) => cb({ up: false }),

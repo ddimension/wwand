@@ -1063,7 +1063,10 @@ uloop.run();
 			note_connect_success: () => null, note_connect_failure: () => null,
 			switch_protocol: (t, cb) => { push(switched, t); cb(fail ? { error: 'x' } : null, {}); },
 		}) },
-		context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem }) },
+		context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
+					// part of the context contract (context.uc:1040); the
+					// daemon tells a bound context when its modem is removed
+					modem_event: () => null }) },
 	};
 
 	let mk = () => daemon_mod.create({ timing: TIMING, deps: {
@@ -1266,6 +1269,76 @@ uloop.run();
 // The unknown-protocol return is reachable exactly when it costs most. A device
 // that re-appears after the ladder pulsed its reset spends a moment with its
 // node present and no driver bound yet — which IS that path — so the rebuild
+// --- hotplug 'remove' must enter the vanish state ----------------------------
+//
+// The remove branch only detached the modem: it set neither control_note nor
+// waiting_since nor `vanished`, so the tick's re-check and the vanish
+// escalation stayed disarmed and the modem was waited on passively forever. On
+// NCM this is the ONLY removal path — no on_gone is wired there — so the
+// recovery that the NR7101 incident produced could never fire at all.
+//
+// And the bound contexts were never told. Dropping `centry.ctx` releases only
+// the daemon's HANDLE; the context object lives on with its monitor timers
+// armed and its clients alive, polling a hub that was just closed.
+// Found by a full review, 2026-09-19.
+{
+	let ctl = { device: '/dev/cdc-wdm0', protocol: 'qmi',
+	            driver: 'qmi_wwan', netdev: 'wwan0' };
+	let lost = [];
+	let parsed2 = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		wwan0: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'web' },
+	} });
+
+	let d2 = daemon_mod.create({
+		timing: { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
+		          reg_timeout: 500, backoff_min: 40, backoff_max: 60 },
+		deps: {
+			log: () => null,
+			load_qmi: () => ({
+				// ONE sequence for both objects: the order is the point. A
+				// context told AFTER its modem was stopped is told too late —
+				// its clients are already talking to a closed hub.
+				modem: { create: () => ({ id: 'm0', start: () => null,
+					stop: () => { push(lost, 'stop'); },
+					note_connect_success: () => null,
+					note_connect_failure: () => null, datapath: {} }) },
+				context: { create: (o) => ({
+					state: 'CONNECTED', config: o.config, modem: o.modem,
+					modem_event: (ev) => push(lost, ev),
+				}) },
+			}),
+			emit_event: () => null, kick_interface: () => null,
+			renew_interface: () => null, down_interface: () => null,
+			iface_status: (i, cb) => cb({ up: false }),
+			datapath_fx: null, read_config: () => parsed2,
+			resolve_control: () => ctl,
+			resolve_netdev: () => null,
+			learn_device: () => null, learn_modem_path: () => null,
+		},
+	});
+
+	d2.apply_config(parsed2);
+	d2.modems.m0._had_modem = true;
+
+	ok(d2.modems.m0.modem != null, 'remove: the modem is running before the unplug');
+
+	ctl = null;
+	d2.hotplug('remove', 'cdc-wdm0');
+
+	eq(d2.modems.m0.modem, null, 'remove: the modem object is dropped');
+	ok(match(d2.modems.m0.control_note ?? '', /waiting for modem/),
+		'remove: ...and the wait is REPORTED, not silent');
+	ok(d2.modems.m0.waiting_since != null, 'remove: the outage clock starts');
+	eq(d2.modems.m0.vanished, true,
+		'remove: flagged as a vanish, which is what arms the escalation');
+	eq(lost, [ 'lost', 'stop' ],
+		'remove: the context is told BEFORE the modem stops, not after');
+	eq(d2.contexts.wwan0.ctx, null,
+		'remove: ...and the daemon then drops its handle to it');
+}
+
+
 // wiped `_had_modem` and the outage clock, the next tick classified the wait as
 // a cold boot, and the reboot rung could never be reached. The reboot rung is
 // the one that actually recovered the NR7101. Found by audit, 2026-09-07.
@@ -1284,7 +1357,10 @@ uloop.run();
 			load_qmi: () => ({ modem: { create: () => ({ id: 'm', start: () => null,
 				stop: () => null, note_connect_success: () => null,
 				note_connect_failure: () => null, datapath: {} }) },
-				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem }) } }),
+				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
+					// part of the context contract (context.uc:1040); the
+					// daemon tells a bound context when its modem is removed
+					modem_event: () => null }) } }),
 			emit_event: () => null, kick_interface: () => null,
 			renew_interface: () => null, down_interface: () => null,
 			iface_status: (i, cb) => cb({ up: false }),

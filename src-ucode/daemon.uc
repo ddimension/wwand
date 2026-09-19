@@ -1124,6 +1124,20 @@ export function create(opts)
 				imei: entry.modem.info.imei,
 			};
 
+		// TELL THE CONTEXTS FIRST, then stop the modem — the order _device_gone
+		// uses (modem_common.uc:580). Dropping `centry.ctx` below only releases
+		// the daemon's HANDLE: the context object itself lives on with its
+		// monitor timers armed and its WDS clients alive, polling a hub that
+		// entry.modem.stop() has just closed. One orphan per removal, and its
+		// late events can arm a spurious reconnect-hold on the rebuilt entry.
+		// `lost` is built for exactly this — it stops the monitor and destroys
+		// the family clients without attempting QMI cleanup (context.uc:1052).
+		// Found by a full review, 2026-09-19.
+		for (let cname, centry in self.contexts) {
+			if (centry.cfg.modem == name && centry.ctx)
+				centry.ctx.modem_event('lost');
+		}
+
 		entry.modem.stop();
 		entry.modem = null;
 		entry.device = entry.cfg.device;   // reset to configured value
@@ -2767,8 +2781,15 @@ export function create(opts)
 				let hit = (base && base == devname) ||
 				          (entry.netdev && entry.netdev == devname);
 
+				// modem_removed, NOT detach_modem: the latter drops the object
+				// but leaves control_note, waiting_since and `vanished` unset,
+				// so the tick's re-check and the vanish escalation stay
+				// disarmed and the modem is waited on passively forever. On
+				// NCM this is the ONLY removal path (no on_gone is wired), so
+				// there the recovery never fired at all. Found by a full
+				// review, 2026-09-19.
 				if (hit && entry.modem)
-					detach_modem(name, entry);
+					modem_removed(entry.modem);
 			}
 		}
 	};
