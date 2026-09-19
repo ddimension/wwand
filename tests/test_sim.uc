@@ -384,6 +384,76 @@ scenario('pinlock: blocked pin refuses up front', (next) => {
 	});
 });
 
+// A TIMEOUT IS NOT A TRANSPORT REJECTION. It is the one error that proves
+// nothing: the request may well have reached the card and only the answer
+// failed to come back. The guard used to read `(err.error != 'qmi') || …`,
+// which turned every non-QMI error into "the PIN was never touched" — so one
+// LuCI click on a slow stack replayed the same PIN over UIM, DMS and AT+CLCK
+// and could burn all three verify attempts, PUK-locking the card the user was
+// trying to unlock. unblock_puk (sim.uc:423) has had the right rule all along.
+// Found by a full review, 2026-09-19.
+scenario('pinlock: a timeout is terminal, not a fall-through', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {},
+		uim: mkclient({
+			// card() hardcodes pin1_state 2 = ENABLED, so disabling is the
+			// real operation here; asking to enable would short-circuit.
+			GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_READY, 3) },
+			SET_PIN_PROTECTION: { __err: { error: 'timeout' } },
+		}, calls),
+		dms: mkclient({
+			SET_PIN_PROTECTION: {},   // would succeed — must never be reached
+		}, calls),
+		at: { send: (cmd, cb) => { push(calls, 'AT'); cb(null, {}); } },
+	};
+
+	sim.set_pin_lock(m, false, '1234', (err) => {
+		ok(err != null, 'pinlock-timeout: the timeout surfaces as the result');
+		eq(err?.error, 'timeout', 'pinlock-timeout: ...unchanged, not remapped');
+		eq(length(filter(calls, (c) => c == 'SET_PIN_PROTECTION')), 1,
+			'pinlock-timeout: the PIN is sent ONCE — no second transport retries it');
+		ok(index(calls, 'AT') < 0, 'pinlock-timeout: and AT+CLCK is never reached');
+		next();
+	});
+});
+
+// ...while a genuine QMI reject code still falls through, which is the whole
+// point of the chain: those codes mean the request never reached the card.
+scenario('pinlock: a qmi reject code still falls through to AT', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {},
+		uim: mkclient({
+			GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_READY, 3) },
+			SET_PIN_PROTECTION: { __err: { error: 'qmi', code: 94 } },   // NotSupported
+		}, calls),
+		at: { send: (cmd, cb) => { push(calls, 'AT'); cb(null, {}); } },
+	};
+
+	sim.set_pin_lock(m, false, '1234', (err) => {
+		eq(err, null, 'pinlock-reject: the AT fallback completes it');
+		ok(index(calls, 'AT') >= 0, 'pinlock-reject: ...because AT+CLCK was reached');
+		next();
+	});
+});
+
+// a send failure is the same class as a timeout: the frame may be on the wire.
+scenario('pinlock: a send failure is terminal too', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {},
+		uim: mkclient({
+			GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_READY, 3) },
+			SET_PIN_PROTECTION: { __err: { error: 'send' } },
+		}, calls),
+		at: { send: (cmd, cb) => { push(calls, 'AT'); cb(null, {}); } },
+	};
+
+	sim.set_pin_lock(m, false, '1234', (err) => {
+		eq(err?.error, 'send', 'pinlock-send: surfaces, does not fall through');
+		ok(index(calls, 'AT') < 0, 'pinlock-send: AT+CLCK never reached');
+		next();
+	});
+});
+
 // --- write_user_plmn via AT+CPOL/CPLS ----------------------------------------
 
 // a mock AT channel: records every command; answers AT+CPOL? with two existing

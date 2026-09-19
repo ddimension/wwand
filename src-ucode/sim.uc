@@ -478,8 +478,20 @@ export function set_pin_lock(modem, enable, pin, cb)
 				return cb(null, { enabled: !!enable });
 
 			// transport rejected the op (PIN untouched) -> try the next; a real
-			// PIN error stops here so another transport can't burn a retry
-			let transport_reject = (err.error != 'qmi') || PINLOCK_FALLBACK[sprintf('%d', err.code)];
+			// PIN error stops here so another transport can't burn a retry.
+			//
+			// ONLY A QMI REJECT CODE CARRIES THAT GUARANTEE. This used to read
+			// `(err.error != 'qmi') || …`, which made every NON-QMI error a
+			// transport rejection — and a timeout is the one error that proves
+			// nothing at all: the request may well have reached the card and
+			// the answer merely failed to come back. The chain then replayed
+			// the same PIN over DMS and AT+CLCK, so one LuCI click on a slow
+			// stack could burn all three verify attempts and PUK-lock the card
+			// the user was only trying to unlock. unblock_puk (:423) has had
+			// the right rule all along, and the PINLOCK_FALLBACK comment states
+			// it: these are the codes where the transport rejected the op
+			// WITHOUT touching the PIN. Found by a full review, 2026-09-19.
+			let transport_reject = (err.error == 'qmi') && PINLOCK_FALLBACK[sprintf('%d', err.code)];
 
 			if (transport_reject && i < length(chain))
 				return attempt();
