@@ -279,10 +279,86 @@ lpac_stdio_tests = () => {
 						eq(alive, false,
 							'lpac stdio: the aborted run terminates the child tree');
 
-						fs.unlink(fake_ok);
-						fs.unlink(fake_mute);
-						fs.unlink(mute_pidf);
-						done('test_esim_bridge');
+						// LISTING NOTIFICATIONS DURING A RUN MUST BE REFUSED.
+						// It was the only lpac op with no claim, and it is not
+						// harmless for being read-only: lpac_run truncates the
+						// shared ESIM_LOGF on every start and opens its own
+						// APDU stream to the ISD-R. Listing while a download
+						// ran destroyed the log the download's own completion
+						// handler reads its verdict from — a profile that
+						// installed correctly was reported 'failed' and never
+						// auto-notified. Found by a full review, 2026-09-19.
+						let bn = mk(fake_mute, 5000);
+
+						bn.modem_esim('m0', 'download',
+							{ activation_code: 'LPA:1$a$b' }, () => {
+								bn.modem_esim('m0', 'notifications', {}, (nerr) => {
+									// the router wraps op errors as
+									// { error: 'esim', detail: <inner> }
+									eq(nerr?.detail?.error, 'busy',
+										'notifications: refused while a download runs');
+
+									// ...and the claim is RELEASED, which only the same
+									// instance can show: a flag left raised wedges
+									// every later op at 'busy' for the life of the
+									// bridge, and a fresh instance would never see
+									// it. Two listings in a row on one bridge.
+									// Raised by Codex review, 2026-09-19.
+									// THE WINDOW BETWEEN CHECKING AND CLAIMING. The
+									// download guard checked, then handed control to
+									// esim.backend(), which answers on a later turn —
+									// and only its callback set dl to running. Anything
+									// entering that gap passed the same guard: a second
+									// download, or this listing, which starts its own
+									// lpac and truncates the shared log the run reads
+									// its verdict from. The fake backend here answers
+									// synchronously, so the gap only exists with a
+									// deferred one — as the real backend probe is.
+									// Raised by Codex review, 2026-09-19.
+									let ba = bridge.create({
+										esim: { ...esim_fake,
+											backend: (m, sl, cb) => uloop.timer(5, () => cb('qmi')) },
+										log: () => null,
+										modem_of: (r) => (r == 'm0') ? entry2 : null,
+										lpac_path: fake_mute, idle_ms: 5000,
+									});
+
+									ba.modem_esim('m0', 'download',
+										{ activation_code: 'LPA:1$a$b' }, () => null);
+
+									// Recorded rather than asserted inline: an
+									// UNREFUSED listing starts lpac against the mute
+									// stub and its callback never comes, so asserting
+									// in there would simply not run — a check that
+									// vanishes is not a check that fails.
+									let seen = 'no answer';
+
+									ba.modem_esim('m0', 'notifications', {},
+										(rerr) => seen = rerr?.detail?.error ?? 'allowed');
+
+									uloop.timer(30, () => {
+									eq(seen, 'busy',
+										'notifications: refused inside the download start window');
+
+									let bq = mk(fake_ok, null);
+
+									bq.modem_esim('m0', 'notifications', {}, (n2) => {
+										eq(n2, null,
+											'notifications: succeeds when nothing is running');
+
+										bq.modem_esim('m0', 'notifications', {}, (n3) => {
+											eq(n3, null,
+												'notifications: ...and again, so the claim was released');
+
+											fs.unlink(fake_ok);
+											fs.unlink(fake_mute);
+											fs.unlink(mute_pidf);
+											done('test_esim_bridge');
+										});
+									});
+									});
+								});
+							});
 					});
 				});
 			});

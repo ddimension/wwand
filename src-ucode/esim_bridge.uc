@@ -510,6 +510,21 @@ return {
 					// callers pass auto_notify=false only for testing
 					let auto_notify = params?.auto_notify ?? true;
 
+					// CLAIM BEFORE THE ASYNCHRONOUS LOOKUP, not after it.
+					//
+					// The guard above checked `dl?.state == 'running' ||
+					// mgmt_busy` and then handed control to esim.backend(),
+					// which answers on a later turn — and only its callback set
+					// dl to running. Anything entering that window passed the
+					// same guard: a second download, or the notification list,
+					// which starts its own lpac and truncates the shared log
+					// this run reads its verdict from. Reserving here closes
+					// it, and the callback below refines the record rather
+					// than creating it. Placed after every validation return,
+					// so nothing can leave with the claim raised. Raised by
+					// Codex review, 2026-09-19.
+					dl = { state: 'running', via: 'starting' };
+
 					// AT modems download internally (AT+QESIM, no host data), QMI
 					// modems use the host-side lpac glue
 					return esim.backend(entry.modem, slot, (be) => {
@@ -557,11 +572,46 @@ return {
 				// pending eUICC notifications: after any profile op the eUICC
 				// queues notifications that confirm the operation to the SM-DP+
 				// (ES9+) — 'notifications' lists them, 'notify' sends them
-				case 'notifications':
-					if (!lpac_run(ref, slot, 'notif-list', '', '', (err, out) =>
-						done(err ? { error: 'lpac', ...err } : null, { ok: !err, log: out })))
+				case 'notifications': {
+					// THE ONLY lpac OP WITHOUT A CLAIM, and it is not harmless
+					// for being read-only: lpac_run TRUNCATES the shared
+					// ESIM_LOGF on every start (:148) and opens its own APDU
+					// stream to the ISD-R. Listing notifications during a
+					// download therefore destroyed the log the download's own
+					// completion handler reads its verdict from — a profile
+					// that installed correctly was reported 'failed' and never
+					// auto-notified — while a second host session talked to the
+					// eUICC at the same time. Every sibling op refuses instead
+					// (:427, :471, 'notify' below). Found by a full review,
+					// 2026-09-19.
+					if (dl?.state == 'running' || mgmt_busy)
+						return done({ error: 'busy' });
+
+					mgmt_busy = true;
+
+					let np = lpac_run(ref, slot, 'notif-list', '', '', (err, out) => {
+						mgmt_busy = false;
+						done(err ? { error: 'lpac', ...err } : null, { ok: !err, log: out });
+					});
+
+					// lpac_run returns false for "no binary" and null for a
+					// failed spawn; reporting both as esim_not_installed sent
+					// an operator looking for a package that is already there.
+					// Raised by Codex review, 2026-09-19.
+					if (np === false) {
+						mgmt_busy = false;
+
 						return done({ error: 'esim_not_installed' });
+					}
+
+					if (!np) {
+						mgmt_busy = false;
+
+						return done({ error: 'esim', detail: { error: 'spawn' } });
+					}
+
 					return;
+				}
 
 				case 'notify': {
 					if (dl?.state == 'running' || mgmt_busy)
