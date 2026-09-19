@@ -905,7 +905,21 @@ export function create(opts)
 						if (serr) {
 							release_family(family);
 
-							if (family == 4)
+							// SAME RULE AS THE ACTIVATION FAILURE ABOVE: v4 is
+							// fatal, and so is v6 when nothing is left to carry
+							// the interface. `got_any` cannot answer that here
+							// — it was set for THIS family a few lines up,
+							// before the settings were read — so ask what
+							// actually survived. Without this a `pdp_type
+							// 'ipv6'` context whose settings read failed
+							// reached CONNECTED with no families, no settings
+							// and a monitor that never re-arms
+							// (its settings refresh returns at context_monitor_qmi.uc:317 on an
+							// empty family set), and sat there until
+							// an operator ifdown. Found by a full review,
+							// 2026-09-19.
+							if (family == 4 ||
+							    (!length(keys(self.families)) && idx >= length(fams)))
 								return self._fail(serr);
 
 							return next();
@@ -917,8 +931,14 @@ export function create(opts)
 			};
 
 			finish = () => {
+				// `got_any` records that a family DIALLED; the families map
+				// records the ones that also got their settings. Both must
+				// hold, or the interface goes up owning nothing.
 				if (!got_any)
 					return self._fail({ stage: 'activate', err: 'no family connected' });
+
+				if (!length(keys(self.families)))
+					return self._fail({ stage: 'activate', err: 'no family kept its settings' });
 
 				self.settings = {
 					ipv4: self.families['4']?.settings,

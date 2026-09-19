@@ -586,6 +586,47 @@ scenario('start-network-no-effect', {
 	});
 });
 
+// AN IPV6-ONLY CONTEXT WHOSE SETTINGS READ FAILS MUST FAIL, not go up owning
+// nothing. `got_any` is set when a family DIALS, a few lines before the settings
+// are read — so a v6 settings failure released the family, left got_any true,
+// and finish() took the interface to CONNECTED with no families, no settings and
+// a settings refresh that returns on an empty family set
+// (context_monitor_qmi.uc:317). It sat there until
+// an operator ifdown. The activation-failure branch immediately above had the
+// right rule all along. Found by a full review, 2026-09-19.
+scenario('v6-only-settings-fail', {
+	config: { apn: 'web', pdp_type: 'ipv6' },
+	handlers: { GET_CURRENT_SETTINGS: () => ({ __error: 14 }) },
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		ok(err != null, 'v6-settings: the activation fails');
+		ok(ctx.state != 'CONNECTED',
+			'v6-settings: ...and the context does NOT report a bearer it never got');
+		eq(length(ctx.status().families ?? []), 0,
+			'v6-settings: no family is left behind');
+		next();
+	});
+});
+
+// ...while a DUAL-STACK context whose v6 settings fail still comes up on v4:
+// losing one family is a degrade, losing the last one is a failure.
+scenario('v6-settings-fail-but-v4-carries', {
+	config: { apn: 'web', pdp_type: 'ipv4v6' },
+	handlers: {
+		// families are walked 4 then 6, so the first read is v4's
+		GET_CURRENT_SETTINGS: (args, meta) =>
+			(meta.count == 1) ? V4_SETTINGS : { __error: 14 },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'v6-degrade: the context still comes up');
+		eq(ctx.status().settings?.ipv4?.addr, '10.11.12.13',
+			'v6-degrade: ...on v4, which kept its settings');
+		eq(ctx.status().settings?.ipv6, null, 'v6-degrade: and v6 is absent, not invented');
+		next();
+	});
+});
+
 // --- E: administrative down --------------------------------------------------
 
 scenario('admin-down', { config: { apn: 'web', pdp_type: 'ipv4v6' } }, (ctx, mock, events, next) => {

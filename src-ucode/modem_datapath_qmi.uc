@@ -161,6 +161,15 @@ export function setup(self, dp, o, next)
 
 			let r = netlink.setup(fxi, {
 				netdev: dp.netdev,
+				// THE PRE-RENAME NAME, which the vendor add-ons need and the
+				// probe was already given (:87). It was missing from THIS
+				// literal, so datapath_rmnet_nss's parent-rename recovery read
+				// `ctx.opts?.netdev_kernel` as undefined every time
+				// (datapath_rmnet_nss.uc:323) — the adoption the feature exists
+				// for could never fire on the AW1000/NSS case it was written
+				// for. The probe passed, then setup returned "mux channel not
+				// created". Found by a full review, 2026-09-19.
+				netdev_kernel: dp.netdev_kernel,
 				backend: backend,
 				// the add-on datapaths the daemon loaded (the named one,
 				// or all installed ones under 'auto'); setup() picks the

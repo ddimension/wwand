@@ -15,6 +15,7 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as fakefx from './lib/fakefx.uc';
 import * as netlink from 'wwand/netlink.uc';
+import * as dp_qmi from 'wwand/modem_datapath_qmi.uc';
 
 let plug = require('wwand.datapath_rmnet_nss');
 let plugins = { rmnet_nss: plug };
@@ -501,6 +502,61 @@ eq(netlink.mux_available(fx, 'wwan0', 'qmi', plugins), true,
 	eq(devs, [ 'wwand0m1' ], 'rename: the child is adopted under the stable name');
 	ok(length(filter(adopted, (a) => index(a, 'wwan0_1') >= 0)) > 0,
 		'rename: ...having been found under the kernel stem it still carries');
+
+	// ...AND THE STEM HAS TO ARRIVE FROM PRODUCTION, which the hand-built ctx
+	// above cannot prove. modem_datapath_qmi handed the pre-rename name to the
+	// BACKEND PROBE but left it out of the netlink.setup() opts literal, so
+	// datapath_rmnet_nss's recovery read `ctx.opts?.netdev_kernel` as undefined
+	// every time: the probe passed, the backend was selected, and setup then
+	// adopted nothing. Driving the real entry point is the only way to see it.
+	// Found by a full review, 2026-09-19.
+	{
+		let prod = fakefx.create({
+			present: {
+				'/sys/module/rmnet_nss': true,
+				'/sys/class/net/wwan0_1': true,
+			},
+			files: { '/sys/class/net/wwand0/qmap_mode': "2\n" },
+		});
+
+		let out = null;
+
+		// a modem with a WDA service that accepts QMAP — the gate before the
+		// datapath setup, and the only fixture this needs beyond the fx
+		let fake_wda = {
+			// echo the version that was asked for, as a modem does — a fixed
+			// one is read as a refusal by the ladder
+			request: (name, args, cb) => cb(null, {
+				llp: 2,                          // raw-IP, which wwand asks for
+				dl_protocol: args?.dl_protocol,
+				ul_protocol: args?.ul_protocol,
+				dl_max_datagrams: 32, dl_max_size: 31744,
+				ul_max_datagrams: 16, ul_max_size: 8192,
+			}),
+		};
+
+		dp_qmi.setup(
+			{ info: { model: 'RG500Q-EA' }, config: {},
+			  set_state: () => null, wds_cfg: null,
+			  services: { '26': { major: 1, minor: 0 } },   // WDA
+			  alloc: (schema, cb) => cb(null, fake_wda) },
+			{
+				netdev: 'wwand0',
+				netdev_kernel: 'wwan0',      // what the daemon records on a rename
+				fx: prod,
+				mux: 'auto',
+				mux_links: [ { id: 1, mtu: 1500 } ],
+				plugins: plugins,
+			},
+			{ log: () => null,
+			  fail: (stage, e) => { out = { failed: stage, detail: e }; } },
+			(r) => { out = out ?? { ok: true, r: r }; });
+
+		ok(out != null, 'rename/prod: the datapath setup ran to an answer');
+		eq(out?.failed, null,
+			'rename/prod: ...and it did not fail — the kernel stem reached the add-on');
+	}
+
 }
 
 
