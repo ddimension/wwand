@@ -195,6 +195,71 @@ Chrome over CDP, stops the one-second refresh, masks the subscriber identifiers
 and addresses, and **refuses to write a file** unless a second pass proves
 nothing repainted over the mask.
 
+## MBIMEx v3 (2026-09-19)
+
+wwand asks for **MBIMEx 3.0** at `open()` and reads the layouts of whatever the
+modem agrees to. This is not cosmetic: MBIMEx versions are different
+*structures*, not variants of one.
+
+What forced it. A GL.iNet GL-X3000 (RM520N-GL, MBIM) had a working connection
+until a daemon restart, after which every CONNECT returned
+`MBIM_STATUS_ERROR_INVALID_PARAMETERS` (21) and `imsi`/`iccid` read empty —
+while `AT+CIMI` and the UICC slot query read the card perfectly. Refuted along
+the way: missing eSIM profile, wrong APN, a session already active, session id
+out of range, ip_type, a malformed buffer (hex-dumped and decoded field by field
+against libmbim — it was well-formed), accumulated modem state. The answer was
+in the raw SUBSCRIBER_READY_STATUS response: its second u32 is `Flags`, a field
+that exists **only in v3**. The modem had been serving v3 layouts all along.
+
+What that means concretely (libmbim 1.32.0, `mbim-service-ms-basic-connect-v3.json`):
+
+- **SUBSCRIBER_READY_STATUS** inserts `Flags` (u32) after ReadyState. The fixed
+  part is positional, so reading a v3 answer as v1 takes `Flags` for the
+  SubscriberId offset — empty strings. The reverse is worse and was briefly
+  shipped in this branch: reading a v1 answer as v3 returns the IMSI **missing
+  its first digit** and a null ICCID. A plausible wrong answer, not a failure.
+  Held shut now by a hand-built v1 wire buffer in `test_mbim`.
+- **CONNECT** is redefined: reordered fixed fields, an added `MediaPreference`
+  u32, and the three strings as **MBIM TLVs** instead of offset/length pairs
+  (`encode_connect_v3`, `codec/mbim.uc`). Every CONNECT takes the agreed form —
+  the DEACTIVATE as much as the activation, through one `send_connect` in
+  `context_mbim.uc`; branching only the up path would leave the modem holding a
+  bearer the context reported as down.
+
+Which layout applies is decided **per modem**, from the negotiated version
+(`mbim.mbimex_v3(mc)`), for queries and indications alike — an indication
+resolves it when it arrives, because handlers are registered before `open()`.
+
+This supersedes `2df78a1`, which disabled the negotiation on the reasoning that
+asking for a version is a promise to speak it. The principle was right; the
+resolution was the wrong half. The answer was to speak v3.
+
+HW: GL-X3000 / RM520N-GL — `MBIMEx 3.0 agreed`, imsi/iccid populated, IPv4
+`10.24.245.13` + IPv6, ping 3/3 and 2/2, and an `ifdown`/`ifup` cycle back to
+CONNECTED (2026-09-19). Not exercised on a v3 modem other than this one.
+
+## MBIM failures say what failed (2026-09-19)
+
+The QMI client reports the failing message to the recovery hook and `modem.uc`
+logs it (`qmi error (qmi) svc N NAME, counter M`). MBIM reported only a kind, so
+every failure logged as `mbim proto error (mbim)` — identical whether the SIM
+was missing, the channel wedged, or a buffer had the wrong shape. That is why
+the v3 hunt above took a day.
+
+`mbim_client` now passes the command name and the `MBIM_STATUS_ERROR` to
+`on_error`, and the status decodes through a name table taken from libmbim
+1.32.0:
+
+    mbim error (mbim) basic_connect/SUBSCRIBER_READY_STATUS status 21 (InvalidParameters), counter 1
+    mbim error (mbim) 533fbeeb-14fe-4467-9f90-33a223e56c3f/cid 2 status 9 (NoDeviceSupport), counter 2
+
+The second is from hardware and shows the fallback working: a service wwand
+addresses by raw UUID with no schema file (SMS) prints its UUID, which is
+exactly the case where the UUID is the useful thing. Named services now include
+the standard libmbim set, not only the ones this tree has schemas for. At
+`debug`, like its QMI counterpart — `ubus call wwand set_log_level
+'{"level":"debug"}'`.
+
 ## Known open
 
 - **TODO — `pdp_type` cannot be configured per SIM, and two people expected it

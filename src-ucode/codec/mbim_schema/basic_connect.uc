@@ -7,6 +7,7 @@
 'use strict';
 
 import * as struct from 'struct';
+import * as mbimcodec from 'wwand.codec.mbim';
 
 export const SERVICE_UUID = 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df';
 
@@ -138,6 +139,27 @@ export function decode_signal_state_v2(info)
 	return res;
 };
 
+// SUBSCRIBER_READY_STATUS comes in two shapes; see the note at the command.
+const RDY_V1 = {
+	ready_state: 'u32', subscriber_id: 'string', sim_iccid: 'string',
+	ready_info: 'u32', telephone_numbers_count: 'u32',
+};
+
+const RDY_V3 = {
+	ready_state: 'u32', flags: 'u32', subscriber_id: 'string', sim_iccid: 'string',
+	ready_info: 'u32', telephone_numbers_count: 'u32',
+};
+
+// THE pairing of version to layout. Exposed on the command as `response_for`
+// so that anything which has to produce this buffer rather than read it — the
+// test mock, above all — derives the layout from the same place the decoder
+// does. A mock that hard-codes one layout while the client picks the other
+// tests nothing and fails confusingly.
+function rdy_fields(mc)
+{
+	return mbimcodec.mbimex_v3(mc) ? RDY_V3 : RDY_V1;
+}
+
 export const service = SERVICE_UUID;
 
 export const commands = {
@@ -152,16 +174,28 @@ export const commands = {
 			},
 		},
 
+		// v3 INSERTS `Flags` AFTER ReadyState, which moves SubscriberId and
+		// SimIccId four bytes along. Reading a v3 answer with the v1 layout
+		// takes Flags for the SubscriberId offset and yields nothing: an
+		// RM520N-GL reported an empty imsi/iccid for exactly this reason while
+		// AT+CIMI and the UICC slot query both read the card fine. libmbim
+		// 1.32.0, mbim-service-ms-basic-connect-v3.json. Found 2026-09-19.
+		//
+		// WHICH LAYOUT APPLIES IS DECIDED PER MODEM, not once for the tree. The
+		// mistake worth naming: the v3 field was briefly unconditional, on the
+		// reasoning that a v1 answer simply would not carry it and `string`
+		// reads its offsets out of the buffer anyway. It does — but the FIXED
+		// part is positional, so on a v1 buffer `flags` eats the SubscriberId
+		// offset and every field after it shifts by one. The result is not an
+		// obvious failure: the imsi comes back MISSING ITS FIRST DIGIT and the
+		// iccid null (measured). Same class as BASE_STATIONS_INFO in the ext
+		// schema — see the note there.
 		SUBSCRIBER_READY_STATUS: {
 			cid: 2,
-			response: {
-				ready_state: 'u32', subscriber_id: 'string', sim_iccid: 'string',
-				ready_info: 'u32', telephone_numbers_count: 'u32',
-			},
-			notification: {
-				ready_state: 'u32', subscriber_id: 'string', sim_iccid: 'string',
-				ready_info: 'u32', telephone_numbers_count: 'u32',
-			},
+			response: RDY_V1,
+			notification: RDY_V1,
+			response_for: rdy_fields,
+			decode: (info, mc) => mbimcodec.decode_info(rdy_fields(mc), info),
 		},
 
 		PIN: {

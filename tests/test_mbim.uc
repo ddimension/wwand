@@ -449,4 +449,213 @@ eq(length(recmds2), 1, 'deactivate-retry: no deactivate when CONNECT never activ
 		'utf16: decoding stops at the NUL');
 })();
 
+
+// --- MBIMEx v3: a different structure, not a variant --------------------------
+//
+// v3 reorders CONNECT's fixed fields, inserts MediaPreference, and carries the
+// three strings as TLVs instead of v1's offset/length pairs; SUBSCRIBER_READY_
+// STATUS gains a `Flags` u32 after ReadyState, moving SubscriberId and SimIccId
+// four bytes along. A modem serving v3 answers the v1 CONNECT with
+// MBIM_STATUS_ERROR_INVALID_PARAMETERS (21) and its subscriber strings read as
+// empty — both HW-observed on an RM520N-GL (GL-X3000), 2026-09-19, and both
+// fixed by speaking v3. Layouts from libmbim 1.32.0
+// (mbim-service-ms-basic-connect-v3.json); ModemManager picks between the two
+// the same way (mm-bearer-mbim.c).
+
+(function () {
+	let b = mbim.encode_connect_v3({
+		session_id: 1, activation_command: 1, compression: 0, auth_protocol: 0,
+		ip_type: 3, access_string: 'internet.m2mportal.de',
+	});
+	let hx = '';
+	for (let i = 0; i < length(b); i++) hx += sprintf('%02x', ord(b, i));
+
+	// fixed part: SessionId, ActivationCommand, Compression, AuthProtocol,
+	// IpType, ContextType(uuid), MediaPreference — then three WCHAR TLVs
+	eq(substr(hx, 0, 40), '0100000001000000000000000000000003000000',
+		'v3 connect: the five leading u32 in v3 order');
+	eq(substr(hx, 40, 32), '7e5e2a7e4e6f7272736b656e7e5e2a7e',
+		'v3 connect: the Internet context uuid');
+	eq(substr(hx, 72, 8), '00000000', 'v3 connect: MediaPreference (UNKNOWN)');
+
+	// TLV: type 10 (WCHAR_STR) u16, reserved 0, padding 2, data_length 42
+	eq(substr(hx, 80, 16), '0a0000022a000000',
+		'v3 connect: the access-string TLV header — type, reserved, padding, length');
+	eq(length(b), 108, 'v3 connect: 40 fixed + 8+42+2 + two empty TLVs');
+
+	// an empty string is still a TLV, with no data and no padding
+	eq(substr(hx, length(hx) - 32), '0a000000000000000a00000000000000',
+		'v3 connect: empty user name and password are present as empty TLVs');
+})();
+
+// The real SUBSCRIBER_READY_STATUS answer from that RM520N, byte for byte. Read
+// with the v1 layout it takes `Flags` for the SubscriberId offset and yields
+// nothing — which is exactly what the modem status showed for hours while
+// AT+CIMI and the UICC slot query both read the card fine.
+(function () {
+	let raw = '0100000001000000200000001e0000004000000028000000' +
+		'0000000000000000' +
+		'390030003100340030003500300030003400340032003700380039003800' + '0000' +
+		'38003900380038003200320038003000300030003000310039003200310035003500330030003300';
+	let buf = '';
+	for (let i = 0; i < length(raw); i += 2)
+		buf += chr(hex(substr(raw, i, 2)));
+
+	// through the schema's OWN version selection, not a hand-picked field spec:
+	// that is the code path the client takes, and picking the layout here would
+	// only prove that RDY_V3 decodes a v3 buffer — which was never in doubt.
+	let d = bc.commands.SUBSCRIBER_READY_STATUS.decode(buf, { mbimex_version: 0x0300 });
+
+	eq(d.ready_state, 1, 'v3 subscriber: ready state initialized');
+	eq(d.flags, 1, 'v3 subscriber: the Flags field v1 does not have');
+	eq(d.subscriber_id, '901405004427898', 'v3 subscriber: the imsi, not an empty string');
+	eq(d.sim_iccid, '89882280000192155303', 'v3 subscriber: ...and the iccid');
+})();
+
+
+// --- diagnostic vocabulary ---------------------------------------------------
+// The two numbers in every MBIM failure, made readable. Anchored to libmbim
+// 1.32.0 src/libmbim-glib/mbim-errors.h; 21 is the one that matters here,
+// because that is what an RM520N-GL answers to a v1 CONNECT while serving v3.
+eq(mbim.status_name(21), 'InvalidParameters', 'status_name: 21 is InvalidParameters');
+eq(mbim.status_name(0), 'None', 'status_name: success has a name too');
+eq(mbim.status_name(2), 'Failure', 'status_name: the generic refusal');
+eq(mbim.status_name(3), 'SimNotInserted', 'status_name: SIM states are in the table');
+// the vendor ranges (0x8743…/0x9100…) are what the UICC low-level access and
+// the MS extensions answer — they must survive the decimal-key lookup
+eq(mbim.status_name(0x87430001), 'NoLogicalChannels', 'status_name: the MS UICC vendor range');
+eq(mbim.status_name(0x91000007), 'DecodeOrParsingError', 'status_name: the MS extension range');
+// a code libmbim 1.32.0 does not name must come back null, never a wrong name
+eq(mbim.status_name(9999), null, 'status_name: an unnamed code stays unnamed');
+eq(mbim.status_name(null), null, 'status_name: and so does no code at all');
+
+eq(mbim.service_name('a289cc33-bcbb-8b4f-b6b0-133ec2aae6df'), 'basic_connect',
+	'service_name: basic connect');
+eq(mbim.service_name('d1a30bc2-f97a-6e43-bf65-c7e24fb0f0d3'), 'qmi_passthrough',
+	'service_name: the QMI tunnel');
+eq(mbim.service_name('c2f6588e-f037-4bc9-8665-f4d44bd09367'), 'ms_uicc_low_level',
+	'service_name: the eSIM/APDU service');
+// addressed by raw UUID from mbim_backend.uc, with no schema file — and the
+// first service a real failure named, so the table must not stop at our own
+eq(mbim.service_name('533fbeeb-14fe-4467-9f90-33a223e56c3f'), 'sms',
+	'service_name: a service we have no schema for is still named');
+// an unknown service is precisely where the raw UUID is the useful thing to
+// print, so it is returned verbatim rather than swallowed into a '?'
+eq(mbim.service_name('00000000-0000-0000-0000-0000000000ff'),
+	'00000000-0000-0000-0000-0000000000ff', 'service_name: an unknown service prints its UUID');
+
+// --- and the SAME command in its v1 shape -----------------------------------
+//
+// The buffer below is a genuine v1 SUBSCRIBER_READY_STATUS: seven u32 of fixed
+// part, no Flags. It is hand-built rather than produced by this tree, because a
+// buffer written with the same field spec it is then read with proves only that
+// the spec is self-consistent.
+//
+// This is the regression the v3 work introduced and this test exists to hold
+// shut: with the v3 field unconditional, the fixed part shifts by four bytes
+// and the decode does not fail — it returns the imsi MISSING ITS FIRST DIGIT
+// ('62011234567890') and a null iccid. A plausible-looking wrong answer is the
+// worst kind, and it would have hit every modem that does not speak MBIMEx v3,
+// the EG06 among them.
+(function () {
+	let raw = '010000001c0000001e0000003c000000280000000000000000000000' +
+		'320036003200300031003100320033003400350036003700380039003000' + '0000' +
+		'38003900340039003000320030003000300030003100300032003200380033003200340039003000';
+	let buf = '';
+	for (let i = 0; i < length(raw); i += 2)
+		buf += chr(hex(substr(raw, i, 2)));
+
+	// mbimex_version 0 = a modem that refused the handshake, or was never asked
+	let d = bc.commands.SUBSCRIBER_READY_STATUS.decode(buf, { mbimex_version: 0 });
+
+	eq(d.ready_state, 1, 'v1 subscriber: ready state initialized');
+	eq(d.flags, null, 'v1 subscriber: no Flags field is invented');
+	eq(d.subscriber_id, '262011234567890',
+		'v1 subscriber: the WHOLE imsi, not one digit short');
+	eq(d.sim_iccid, '89490200001022832490', 'v1 subscriber: and the iccid');
+})();
+
+// --- v3 strings are UTF-16, not widened bytes -------------------------------
+//
+// ucode strings are UTF-8 byte strings, so a byte-wise widen turns 'ä' (c3 a4)
+// into U+00C3 U+00A4 — two wrong characters of the right length, which ASCII
+// test data can never reveal. Credentials are the realistic case: an APN is
+// ASCII in practice, a password is not.
+(function () {
+	let buf = mbim.encode_connect_v3({ access_string: 'ä' });
+	let hx = '';
+	for (let i = 0; i < length(buf); i++)
+		hx += sprintf('%02x', ord(buf, i));
+
+	// the access-string TLV follows the fixed part (5 u32 + uuid + u32 = 40)
+	let tlv = substr(hx, 40 * 2, 12 * 2);
+
+	eq(tlv, '0a00000202000000e4000000',
+		'v3 strings: U+00E4 encodes as e4 00, padded to four bytes');
+})();
+
+// --- a v3 modem gets v3 for the WHOLE session -------------------------------
+//
+// The first cut branched only the activation. The deactivate kept sending the
+// v1 CONNECT, which a v3 modem answers with INVALID_PARAMETERS — and because
+// the teardown is best-effort, the context would have reported itself down
+// while the modem still held the bearer. Both directions go through the same
+// sender now, and both name themselves for the log (otherwise the one failure
+// the named logging was built for would print as 'basic_connect/cid 12').
+(function () {
+	let raws = [], v1s = [];
+	let m;
+
+	m = {
+		state: 'READY',
+		mbim: {
+			mbimex_version: 0x0300,
+			command_raw: (svc, cid, info, cb, opts) => {
+				push(raws, { cid: cid, info: info, name: opts?.name });
+				// answer as the modem does: activated, session 0
+				cb(null, mbim.encode_info(bc.commands.CONNECT.response,
+					{ session_id: 0, activation_state: bc.ACTIVATION_ACTIVATED,
+					  voice_call_state: 0, ip_type: 1,
+					  context_type: '7e5e2a7e-4e6f-7272-736b-656e7e5e2a7e', nw_error: 0 }));
+			},
+		},
+		contexts: [],
+		attach_context: function(c) { push(m.contexts, c); },
+		command: function(name, kind, args, cb) {
+			if (name == 'CONNECT')
+				push(v1s, args.activation_command);
+
+			if (name == 'IP_CONFIGURATION')
+				return cb(null, {
+					ipv4_available: 1, ipv4_count: 1,
+					ipv4_addresses: [ { address: '10.0.0.5', prefix: 30 } ],
+					ipv4_gateway: '10.0.0.6', ipv4_dns: [ '1.1.1.1' ], ipv4_mtu: 1500,
+					ipv6_available: 0, ipv6_addresses: [],
+				});
+
+			return cb(null, {});
+		},
+	};
+
+	let c3 = context_mbim.create({
+		name: 'wan', modem: m,
+		config: { apn: 'internet', mux_id: 0 },
+		deps: { on_event: () => null, log: () => null },
+	});
+
+	c3.up(() => null);
+	eq(c3.state, 'CONNECTED', 'v3 session: comes up');
+	eq(length(raws), 1, 'v3 session: the activation went out as a v3 buffer');
+	eq(raws[0]?.name, 'CONNECT',
+		'v3 session: ...and names itself, so a failure does not log "cid 12"');
+
+	c3.down(() => null);
+
+	eq(length(v1s), 0, 'v3 session: no CONNECT took the v1 path at all');
+	eq(length(raws), 2, 'v3 session: the teardown is a v3 buffer too');
+	// activation_command is the second u32 of the v3 fixed part
+	eq(struct.unpack('<I', substr(raws[1]?.info ?? '', 4, 4))[0],
+		bc.ACTIVATION_CMD_DEACTIVATE, 'v3 session: and it really is a DEACTIVATE');
+})();
+
 done('test_mbim');

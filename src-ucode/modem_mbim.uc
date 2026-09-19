@@ -109,7 +109,7 @@ export function create(opts)
 		// the client logs the negotiated MBIMEx version — only when one is
 		// requested at all, which it is not by default (mbim_client.open())
 		log: log,
-		on_error: (c, kind) => {
+		on_error: (c, kind, what, status) => {
 			let act = rec.on_proto_error();
 			// same escalation as QMI: a wedged control channel gets a hardware
 			// reset first; reboot only if that fails to clear it (the NR7101
@@ -119,8 +119,20 @@ export function create(opts)
 			else if (act == 'reboot')
 				rec.reboot('mbim error limit reached');
 
-			log('debug', sprintf('mbim proto error (%s), counter %d',
-				kind ?? '?', self.counters.proto_errors));
+			// the QMI side logs "qmi error (kind) svc N NAME" (modem.uc); this is
+			// its counterpart, with the MBIM_STATUS_ERROR decoded where there is
+			// one — the number alone is not readable, and it is usually the whole
+			// answer (status 21 InvalidParameters = the modem rejected the shape
+			// of the buffer, not its contents).
+			let nm = (kind == 'mbim') ? mbimmod.status_name(status) : null;
+
+			log('debug', sprintf('mbim error (%s) %s%s, counter %d',
+				kind ?? '?', what ?? '?',
+				(kind == 'mbim')
+					? sprintf(' status %d%s', status ?? -1,
+						nm ? sprintf(' (%s)', nm) : '')
+					: '',
+				self.counters.proto_errors));
 		},
 		on_success: (c) => rec.on_proto_success(),
 		// see the QMI side: "the modem answered MBIM", which a failure status

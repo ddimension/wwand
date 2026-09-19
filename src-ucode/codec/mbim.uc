@@ -192,6 +192,63 @@ function encode_scalar(fmt, v)
 	}
 }
 
+// MBIMEx v3 CONNECT (set). A DIFFERENT STRUCTURE, not a variant of the v1 one:
+// v3 reorders the fixed fields, inserts MediaPreference, and carries the three
+// strings as TLVs instead of v1's offset/length pairs (libmbim 1.32.0,
+// mbim-service-ms-basic-connect-v3.json; ModemManager chooses between the two
+// on mbim_device_check_ms_mbimex_version, mm-bearer-mbim.c:1340). A modem
+// serving v3 answers the v1 form with INVALID_PARAMETERS (21) — HW-observed on
+// an RM520N-GL whose SUBSCRIBER_READY_STATUS also came back in the v3 layout,
+// 2026-09-19.
+//
+// TLV header: type u16, reserved u8, padding u8, data_length u32, then the data
+// padded to a 4-byte boundary (libmbim mbim-tlv-private.h, struct tlv).
+const TLV_WCHAR_STR = 10;
+
+// A WCHAR_STR TLV: UTF-16LE payload, zero-padded to a 4-byte boundary, with the
+// pad count in the header and data_length the UNPADDED byte count (libmbim
+// 1.32.0, src/libmbim-glib/mbim-tlv.c). The encoding goes through
+// utf16le_encode, not a byte-wise widen: ucode strings are UTF-8 byte strings,
+// so widening each byte turns 'ä' (c3 a4) into U+00C3 U+00A4 instead of U+00E4.
+// ASCII is identical either way, which is why an APN never shows it and a
+// non-ASCII user name or password would have gone out corrupted.
+function tlv_wchar(str)
+{
+	let data = utf16le_encode(str ?? '');
+	let pad = (4 - (length(data) % 4)) % 4;
+	let head = struct.pack('<HBBI', TLV_WCHAR_STR, 0, pad, length(data));
+
+	for (let i = 0; i < pad; i++)
+		data += chr(0);
+
+	return head + data;
+}
+
+// Which MBIMEx generation the modem agreed to speak, settled by the version
+// handshake in mbim_client.open(); a modem that refused it, or that never got
+// the question, is v1 (`mbimex_version` 0). This lives here rather than in a
+// schema file because MORE THAN ONE schema layout depends on it — Basic Connect
+// (SUBSCRIBER_READY_STATUS, CONNECT) and the MS extensions (BASE_STATIONS_INFO)
+// — and a second copy of the predicate is a second thing to forget.
+export function mbimex_v3(mc)
+{
+	return (mc?.mbimex_version ?? 0) >= 0x0300;
+};
+
+// MbimAccessMediaType: ModemManager sends UNKNOWN (0) and lets the modem pick.
+export const ACCESS_MEDIA_UNKNOWN = 0;
+
+export function encode_connect_v3(a)
+{
+	return struct.pack('<IIIII', a.session_id ?? 0, a.activation_command ?? 0,
+			a.compression ?? 0, a.auth_protocol ?? 0, a.ip_type ?? 0) +
+		uuid_bytes(a.context_type ?? '7e5e2a7e-4e6f-7272-736b-656e7e5e2a7e') +
+		struct.pack('<I', a.media_preference ?? ACCESS_MEDIA_UNKNOWN) +
+		tlv_wchar(a.access_string ?? '') +
+		tlv_wchar(a.user_name ?? '') +
+		tlv_wchar(a.password ?? '');
+};
+
 export function encode_info(fields, args)
 {
 	let fixed = '';
@@ -444,4 +501,121 @@ export function decode(buf)
 	}
 
 	return msg;
+};
+
+// --- diagnostic vocabulary ---------------------------------------------------
+// Names for the two numbers that appear in every MBIM failure. They exist so a
+// failed command can say what it was and what the modem answered, instead of a
+// bare integer: an anonymous "status 21" cost a day of hardware bisection on an
+// RM520N-GL before it turned out to be InvalidParameters, returned because a
+// v1-shaped CONNECT had been sent to a modem serving MBIMEx v3 layouts
+// (HW-observed, 2026-09-19 — see encode_connect_v3 above).
+//
+// Values transcribed mechanically from libmbim 1.32.0
+// src/libmbim-glib/mbim-errors.h (MbimStatusError, nick= annotations); the
+// large ones are the vendor ranges (0x8743…, 0x9100…). ucode object literals
+// reject numeric keys, so the keys are quoted and looked up via sprintf.
+const STATUS_NAMES = {
+	'0': 'None',
+	'1': 'Busy',
+	'2': 'Failure',
+	'3': 'SimNotInserted',
+	'4': 'BadSim',
+	'5': 'PinRequired',
+	'6': 'PinDisabled',
+	'7': 'NotRegistered',
+	'8': 'ProvidersNotFound',
+	'9': 'NoDeviceSupport',
+	'10': 'ProviderNotVisible',
+	'11': 'DataClassNotAvailable',
+	'12': 'PacketServiceDetached',
+	'13': 'MaxActivatedContexts',
+	'14': 'NotInitialized',
+	'15': 'VoiceCallInProgress',
+	'16': 'ContextNotActivated',
+	'17': 'ServiceNotActivated',
+	'18': 'InvalidAccessString',
+	'19': 'InvalidUserNamePwd',
+	'20': 'RadioPowerOff',
+	'21': 'InvalidParameters',
+	'22': 'ReadFailure',
+	'23': 'WriteFailure',
+	'25': 'NoPhonebook',
+	'26': 'ParameterTooLong',
+	'27': 'StkBusy',
+	'28': 'OperationNotAllowed',
+	'29': 'MemoryFailure',
+	'30': 'InvalidMemoryIndex',
+	'31': 'MemoryFull',
+	'32': 'FilterNotSupported',
+	'33': 'DssInstanceLimit',
+	'34': 'InvalidDeviceServiceOperation',
+	'35': 'AuthIncorrectAuth',
+	'36': 'AuthSyncFailure',
+	'37': 'AuthAmfNotSet',
+	'38': 'ContextNotSupported',
+	'100': 'SmsUnknownSmscAddress',
+	'101': 'SmsNetworkTimeout',
+	'102': 'SmsLangNotSupported',
+	'103': 'SmsEncodingNotSupported',
+	'104': 'SmsFormatNotSupported',
+	'2269315073': 'NoLogicalChannels',
+	'2269315074': 'SelectFailed',
+	'2269315075': 'InvalidLogicalChannel',
+	'2432696321': 'InvalidSignature',
+	'2432696322': 'InvalidImei',
+	'2432696323': 'InvalidTimeStamp',
+	'2432696324': 'NetworkListTooLarge',
+	'2432696325': 'SignatureAlgorithmNotSupported',
+	'2432696326': 'FeatureNotSupported',
+	'2432696327': 'DecodeOrParsingError',
+};
+
+// MBIM_STATUS_ERROR nick for a status code, or null when the modem returned one
+// libmbim 1.32.0 does not name (a vendor code outside the documented ranges).
+export function status_name(status)
+{
+	return STATUS_NAMES[sprintf('%d', status ?? -1)] ?? null;
+};
+
+// A UUID in a log line is 36 characters nobody reads. The names are this tree's
+// own where it has a schema for the service (they match the file under
+// codec/mbim_schema/), and libmbim's otherwise.
+//
+// THE LIST IS NOT ONLY WHAT WE HAVE SCHEMAS FOR. The first real failure this
+// logging caught came from the SMS service, which wwand addresses by raw UUID
+// out of mbim_backend.uc and has no schema file for — it printed as
+// '533fbeeb-.../cid 2 status 9 (NoDeviceSupport)' (HW, RM520N-GL, 2026-09-19).
+// Standard-service UUIDs transcribed from libmbim 1.32.0
+// src/libmbim-glib/mbim-uuid.c.
+const SERVICE_NAMES = {
+	'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df': 'basic_connect',
+	'3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf': 'ms_basic_connect_ext',
+	'c2f6588e-f037-4bc9-8665-f4d44bd09367': 'ms_uicc_low_level',
+	'd1a30bc2-f97a-6e43-bf65-c7e24fb0f0d3': 'qmi_passthrough',
+	'a2a32a97-cab1-4f57-9ae1-451c74dda957': 'compal_at',
+	'ffffffff-abca-4b11-a4e2-f2fc87f94488': 'fibocom',
+	'11223344-5566-7788-99aa-bbccddeeff11': 'quectel',
+	'533fbeeb-14fe-4467-9f90-33a223e56c3f': 'sms',
+	'e550a0c8-5e82-479e-82f7-10abf4c3351f': 'ussd',
+	'4bf38476-1e6a-41db-b1d8-bed289c25bdb': 'phonebook',
+	'd8f20131-fcb5-4e17-8602-d6ed3816164c': 'stk',
+	'1d2b5ff7-0aa1-48b2-aa52-50f15767174e': 'auth',
+	'c08a26dd-7718-4382-8482-6e0d583c4d0e': 'dss',
+	'e9f7dea2-feaf-4009-93ce-90a3694103b6': 'ms_firmware_id',
+	'883b7c26-985f-43fa-9804-27d7fb80959c': 'ms_host_shutdown',
+	'68223d04-9f6c-4e0f-822d-28441fb72340': 'ms_sar',
+	'838cf7fb-8d0d-4d7f-871e-d71dbefbb39b': 'proxy_control',
+	'5967bdcc-7fd2-49a2-9f5c-b2e70e527db3': 'atds',
+	'6427015f-579d-48f5-8c54-f43ed1e76f83': 'qdu',
+	'8d8b9eba-37be-449b-8f1e-61cb034a702e': 'ms_voice_extensions',
+	'3e1e92cf-c53d-4f14-85d0-a86ad9e12245': 'google',
+};
+
+// Short name for a service UUID, or the UUID itself when it is not one of ours
+// — an unknown service is exactly the case where the raw UUID is the useful
+// thing to print.
+export function service_name(uuid)
+{
+	return SERVICE_NAMES[lc(uuid ?? '')] ?? (uuid ?? '?');
 };

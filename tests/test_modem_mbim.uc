@@ -81,34 +81,37 @@ function nr_serving_struct(provider, nci, pci, nrarfcn, tac, rsrp, rsrq, sinr) {
 }
 
 // Base Stations Info (v3): 96-byte fixed part + appended data regions
-// THE v1 LAYOUT, because that is what this modem session actually negotiated:
-// wwand requests no MBIMEx version (mbim_client.open()), so the device answers
-// v1 and v1 has no SystemSubType — every pointer sits 4 bytes earlier — and no
-// NR arrays at all. Hand-setting a version here to get the richer layout would
-// model a session that cannot exist: bring-up ran on v1 Basic Connect. The v3
-// layout is covered where it belongs, in test_mbim_backend. Raised by Codex
-// review, 2026-09-19.
+// THE v3 LAYOUT, because that is what this session negotiates: wwand asks for
+// MBIMEx 3.0 at open (mbim_client.uc) and the mock agrees, so the device
+// answers v3 — SystemSubType present, pointers four bytes along, NR arrays
+// carried. A modem that REFUSES the handshake answers v1 and is covered in
+// test_mbim_backend.
 function build_base_stations() {
 	let lte_serv = cell_struct('26201', [ 12345678, 1300, 42, 0x1234, -95, -10, 0 ]);
 	let lte_neigh = cell_struct('', [ 0, 1300, 99, 0, -105, -14 ]);
+	let nr_serv = nr_serving_struct('26201', 0x0000000100000002, 7, 632448, 0x5678, -80, -11, 25);
 
-	let base = 76;   // SystemType + 4 serving ms-structs + 5 array pointers
+	let base = 96;
 	let lte_serv_off = base;
 	let lte_neigh_off = lte_serv_off + length(lte_serv);
+	let nr_serv_off = lte_neigh_off + 4 + length(lte_neigh);
 
 	let ptrs = {};
-	ptrs[28] = [ lte_serv_off, length(lte_serv) ];
-	ptrs[60] = [ lte_neigh_off, 4 + length(lte_neigh) ];
+	ptrs[32] = [ lte_serv_off, length(lte_serv) ];
+	ptrs[64] = [ lte_neigh_off, 4 + length(lte_neigh) ];
+	ptrs[80] = [ nr_serv_off, 4 + length(nr_serv) ];
 
 	let fixed = '';
 	for (let off = 0; off < base; off += 4) {
-		if (off == 0)       fixed += p32(ext.DATA_CLASS_LTE);
+		if (off == 0)      fixed += p32(ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_SA);
+		else if (off == 4) fixed += p32(0);
 		else if (ptrs[off]) fixed += p32(ptrs[off][0]) + p32(ptrs[off][1]);
 		else if (ptrs[off - 4]) continue;
 		else fixed += p32(0);
 	}
 
-	return fixed + lte_serv + p32(1) + lte_neigh;
+	let data = lte_serv + p32(1) + lte_neigh + p32(1) + nr_serv;
+	return fixed + data;
 }
 
 // --- handlers ----------------------------------------------------------------
@@ -418,16 +421,14 @@ function assert_telemetry() {
 	eq(modem.signal.nr5g?.rsrp, -66, 'signal: nr5g rsrp dBm (coded 90)');
 
 	// cells (fast watch loop; native BASE_STATIONS_INFO) — QMI cell-location
-	// shape, read with the v1 offsets this session actually negotiated.
+	// shape, read with the v3 offsets this session negotiates.
 	ok(modem.cells?.lte_intra != null, 'cells: lte_intra populated via native backend');
 	eq(modem.cells.lte_intra.plmn, '262/01', 'cells: lte plmn');
 	eq(modem.cells.lte_intra.earfcn, 1300, 'cells: lte earfcn');
 	eq(modem.cells.lte_intra.serving_cell_id, 42, 'cells: lte serving pci');
 	eq(length(modem.cells.lte_intra.cells), 2, 'cells: serving + 1 neighbour');
-	// the v1 layout carries no NR arrays; the v3 ones are asserted in
-	// test_mbim_backend, against a buffer that declares that version
-	eq(modem.cells.nr5g_arfcn, null, 'cells: no NR arfcn in the v1 layout');
-	eq(modem.cells.nr5g_cell, null, 'cells: ...and no NR cell either');
+	eq(modem.cells.nr5g_arfcn, 632448, 'cells: nr arfcn');
+	eq(modem.cells.nr5g_cell?.pci, 7, 'cells: nr pci');
 
 	// data-system mode (slow tick; native register-state class mask)
 	ok(modem.dsd_status != null, 'dsd_status: populated via native backend');
@@ -779,5 +780,70 @@ function assert_teardown_releases_pt_cids() {
 }
 
 assert_teardown_releases_pt_cids();
+
+// --- the failure line a human actually reads ---------------------------------
+//
+// mbim_client hands the command name and the MBIM_STATUS_ERROR to on_error
+// (proven in test_mbim_backend); this asserts what modem_mbim then WRITES, and
+// it is worth asserting separately because a wrong sprintf produces a line that
+// looks fine and says nothing — which is the exact failure this change exists
+// to remove. The QMI counterpart is "qmi error (qmi) svc N NAME, counter M"
+// (modem.uc); this must read the same way, plus the decoded status.
+function assert_error_line_names_the_command() {
+	uloop.init();
+
+	let h = handlers();
+
+	// status 21 = MBIM_STATUS_ERROR_INVALID_PARAMETERS (libmbim 1.32.0) — the
+	// RM520N-GL answer to a v1-shaped CONNECT while it serves MBIMEx v3
+	h.SUBSCRIBER_READY_STATUS = { __error: 21 };
+	// a refused ready-state sends init down the PIN path, which the default
+	// handler set does not answer — say "no PIN" so the run reaches the
+	// assertions instead of dying in the mock
+	h.PIN = { pin_type: bc.PIN_TYPE_PIN1, pin_state: bc.PIN_STATE_UNLOCKED,
+	          remaining_attempts: 3 };
+
+	let mocke = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h });
+	let lines = [];
+
+	let me = modem_mbim.create({
+		id: 'm_errline', device: '/dev/mocke',
+		config: { apn: 'internet' },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5,
+		          at_drain: 1, card_poll: 5 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: {
+			transport_open: mocke.transport_open,
+			log: (level, msg) => push(lines, sprintf('%s %s', level, msg)),
+			on_event: () => null,
+		},
+	});
+
+	me.start();
+
+	uloop.timer(60, () => { me.stop(); uloop.end(); });
+	uloop.run();
+
+	let errs = filter(lines, (l) => index(l, 'mbim error') >= 0);
+
+	ok(length(errs) > 0, 'error line: a refused command is logged');
+
+	let l = errs[0] ?? '';
+
+	ok(index(l, 'debug ') == 0, 'error line: at debug, like the QMI counterpart');
+	ok(index(l, 'mbim error (mbim)') >= 0, 'error line: names the kind');
+	ok(index(l, 'basic_connect/SUBSCRIBER_READY_STATUS') >= 0,
+		'error line: names the service and the command');
+	ok(index(l, 'status 21 (InvalidParameters)') >= 0,
+		'error line: the status, decoded — not a bare number');
+	ok(index(l, 'counter ') >= 0, 'error line: and the recovery counter, as QMI does');
+	// the formatting trap this guards: an unnamed status must not print the
+	// empty parentheses that a naive sprintf would leave behind
+	ok(index(l, '()') < 0, 'error line: no empty parentheses anywhere');
+}
+
+assert_error_line_names_the_command();
 
 done('test_modem_mbim');

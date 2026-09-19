@@ -136,8 +136,10 @@ function build_base_stations_v1() {
 // --- client harness ----------------------------------------------------------
 
 function make_mc(schema, handlers, hooks, opts) {
-	let mock = mbim_mockhub.create({ schema: schema, handlers: handlers,
-		mbimex_version: opts?.mbimex_version });
+	// opts.schemas when the case needs more than one service registered — the
+	// MBIMEx VERSION cid lives in the extensions schema, not in basic connect
+	let mock = mbim_mockhub.create({ schema: schema, schemas: opts?.schemas,
+		handlers: handlers, mbimex_version: opts?.mbimex_version });
 	let mc = mbim_client.create(mock, hooks ?? {});
 	mock.transport_open('/dev/mock', {
 		on_raw: (hub, msg) => { let dec = mbim.decode(msg); if (dec) mc.on_message(dec); },
@@ -174,6 +176,89 @@ function make_mc(schema, handlers, hooks, opts) {
 		mc.command_raw(unknown, 1, '', () => {
 			eq(errs, 1, 'no_recovery: ...and with the flag it does not');
 		}, { no_recovery: true });
+	});
+})();
+
+// --- a failure must say what failed ------------------------------------------
+//
+// The QMI client reports the failing message to the recovery hook, and modem.uc
+// logs it ("qmi error (qmi) svc N NAME"). MBIM reported nothing but the kind,
+// so every failure in the log read "mbim proto error (mbim)" — identical
+// whether the SIM was missing, the channel wedged, or the buffer had the wrong
+// shape. That is how a v1-shaped CONNECT sent to a modem serving MBIMEx v3
+// layouts presented as an anonymous status 21, and it cost a day to place
+// (HW, RM520N-GL, 2026-09-19). The client must now name the command and pass
+// the MBIM_STATUS_ERROR through.
+(function() {
+	let seen = [];
+	// status 21 = MBIM_STATUS_ERROR_INVALID_PARAMETERS, the RM520N-GL answer
+	let sch = { service: bc.service, commands: { CONNECT: bc.commands.CONNECT } };
+	let mc = make_mc(sch, { CONNECT: { __error: 21 } },
+		{ on_error: (c, kind, what, status) => push(seen, [ kind, what, status ]) });
+
+	mc.command(sch, 'CONNECT', 'set', { session_id: 0 }, () => {
+		eq(length(seen), 1, 'named errors: the failure reached the recovery hook');
+		eq(seen[0]?.[0], 'mbim', 'named errors: kind');
+		eq(seen[0]?.[1], 'basic_connect/CONNECT',
+			'named errors: the service and the command, not just "mbim"');
+		eq(seen[0]?.[2], 21, 'named errors: the MBIM_STATUS_ERROR comes through');
+		eq(mbim.status_name(seen[0]?.[2]), 'InvalidParameters',
+			'named errors: ...and it decodes to the name that explains the v3 bug');
+
+		// command_raw has no schema to name, so it names the service and the
+		// bare CID — the passthrough and the vendor AT tunnels both land here
+		let seen2 = [];
+		let mc2 = make_mc([], {},
+			{ on_error: (c, kind, what, status) => push(seen2, [ kind, what, status ]) });
+
+		mc2.command_raw('00000000-0000-0000-0000-0000000000ff', 7, '', () => {
+			eq(seen2[0]?.[1], '00000000-0000-0000-0000-0000000000ff/cid 7',
+				'named errors: a schemaless command names its service UUID and CID');
+			ok(seen2[0]?.[2] != null, 'named errors: ...and carries a status');
+
+			// ...unless the caller knows better and says so. The v3 CONNECT
+			// goes out through command_raw, so without this the one failure
+			// the named logging was built for would log as 'cid 12'.
+			mc2.command_raw('00000000-0000-0000-0000-0000000000ff', 12, '', () => {
+				eq(seen2[1]?.[1], '00000000-0000-0000-0000-0000000000ff/CONNECT',
+					'named errors: opts.name wins over the bare CID');
+			}, { name: 'CONNECT' });
+		});
+	});
+})();
+
+// --- an out-of-contract version answer leaves BOTH sides on v1 --------------
+//
+// The client accepts a version answer only if the MBIM version echoes and the
+// extended version is non-zero and not above what it asked for (mbim_client.uc
+// open()). A modem answering outside that contract gets v1 — and everything
+// that follows must be read as v1, or the layouts silently disagree. This is
+// end-to-end on purpose: it is the pairing of the two sides that matters, and
+// an earlier mock that recorded its CONFIGURED version rather than its ANSWERED
+// one made exactly this case decode garbage.
+(function() {
+	let sch = { service: bc.service,
+		commands: { SUBSCRIBER_READY_STATUS: bc.commands.SUBSCRIBER_READY_STATUS } };
+
+	// 0x0400 is above the 3.0 the client asks for -> it must refuse the offer
+	let mc = make_mc(sch, {
+		VERSION: { __raw: struct.pack('<HH', 0x0100, 0x0400) },
+		SUBSCRIBER_READY_STATUS: {
+			ready_state: 1, subscriber_id: '262011234567890',
+			sim_iccid: '89490200001022832490', ready_info: 0,
+			telephone_numbers_count: 0,
+		},
+	}, {}, { schemas: [ sch, ext ] });
+
+	mc.open(() => {
+		eq(mc.mbimex_version, 0, 'version contract: an answer above the request is refused');
+
+		mc.command(sch, 'SUBSCRIBER_READY_STATUS', 'query', {}, (err, d) => {
+			eq(err, null, 'version contract: the query still works');
+			eq(d?.subscriber_id, '262011234567890',
+				'version contract: ...and reads the v1 layout, whole');
+			eq(d?.flags, null, 'version contract: no v3 field is invented');
+		});
 	});
 })();
 
@@ -259,9 +344,7 @@ function s_fragments(next) {
 	});
 }
 
-// A DEVICE THAT DID NEGOTIATE v3 IS DECODED WITH THE v3 LAYOUT — which is
-// not what wwand ships (it requests nothing), but the layout code is here for
-// whoever ports that generation, so it stays covered.
+// A MODEM THAT REFUSES THE HANDSHAKE IS DECODED WITH THE v1 LAYOUT.
 //
 // Nothing tells the modem the host speaks MBIMEx — deliberately, since v3
 // redefines Connect and three more CIDs this client does not implement
@@ -271,24 +354,22 @@ function s_fragments(next) {
 // checks absorb it and wwand publishes FABRICATED serving-cell PCI/TAC/RSRP
 // into telemetry and LuCI. `mbimex_version` is what settles it, and without a
 // request it stays 0. Found by a full review, 2026-09-19.
-function s_cells_v3(next) {
-	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations() } });
+function s_cells_v1(next) {
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations_v1() } },
+		null, { mbimex_version: 0 });
 
 	mc.open(() => {
-		// wwand requests no version (v3 redefines Connect and three more CIDs
-		// it does not implement — see mbim_client.open()), so this is set by
-		// hand: the layout code stays covered for whoever ports that generation.
-		mc.mbimex_version = 0x0300;
+		// the mock refuses the handshake for this instance, so v1 applies
 
 		backend.get_cells(mc, (cells) => {
-			ok(cells != null, 'cells v3: decoded');
-			eq(cells.lte_intra?.serving_cell_id, 42, 'cells v3: serving pci');
-			eq(cells.lte_intra?.tac, 0x1234, 'cells v3: tac');
-			eq(cells.lte_intra?.earfcn, 1300, 'cells v3: earfcn');
-			eq(cells.lte_intra?.cells[0]?.rsrp, -950, 'cells v3: rsrp');
-			eq(length(cells.lte_intra?.cells ?? []), 2, 'cells v3: serving + 1 neighbour');
-			eq(cells.nr5g_arfcn, 632448, 'cells v3: ...and the NR arrays the v1 layout does not have');
-			eq(cells.nr5g_cell?.pci, 7, 'cells v3: nr pci');
+			ok(cells != null, 'cells v1: decoded');
+			eq(cells.lte_intra?.serving_cell_id, 42, 'cells v1: the real serving pci, not a shifted read');
+			eq(cells.lte_intra?.tac, 0x1234, 'cells v1: tac');
+			eq(cells.lte_intra?.earfcn, 1300, 'cells v1: earfcn');
+			eq(cells.lte_intra?.cells[0]?.rsrp, -950, 'cells v1: rsrp');
+			eq(length(cells.lte_intra?.cells ?? []), 2, 'cells v1: serving + 1 neighbour');
+			eq(cells.nr5g_arfcn, null, 'cells v1: no NR arrays exist in the v1 layout');
+			eq(cells.nr5g_cell, null, 'cells v1: ...and no NR cell');
 			next();
 		});
 	});
@@ -299,10 +380,10 @@ function s_cells(next) {
 	// THE DEFAULT IS v1, because wwand asks for no MBIMEx version — see the
 	// comment in mbim_client.open(). A host that negotiates nothing gets the
 	// v1 layouts, and decoding those is the whole of what finding 24 needed.
-	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations_v1() } });
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations() } });
 
 	mc.open(() => backend.get_cells(mc, (cells) => {
-		eq(mc.mbimex_version, 0, 'cells: nothing was negotiated, so v1 applies');
+		eq(mc.mbimex_version, 0x0300, 'cells: the handshake agreed MBIMEx 3.0');
 		ok(cells != null, 'cells: decoded');
 		let li = cells.lte_intra;
 		eq(li.plmn, '262/01', 'cells: lte plmn from provider id');
@@ -317,9 +398,8 @@ function s_cells(next) {
 		eq(li.cells[0].rssi, null, 'cells: rssi unavailable in MBIM');
 		eq(li.cells[1].pci, 99, 'cells: neighbour pci');
 		eq(li.cells[1].rsrp, -1050, 'cells: neighbour rsrp 0.1 dB');
-		// the v1 layout has no NR arrays at all — the v3 case below covers those
-		eq(cells.nr5g_cell, null, 'cells: no NR cell in the v1 layout');
-		eq(cells.nr5g_arfcn, null, 'cells: ...and no NR arfcn either');
+		eq(cells.nr5g_arfcn, 632448, 'cells: nr arfcn');
+		eq(cells.nr5g_cell?.pci, 7, 'cells: nr pci');
 		next();
 	}));
 }
@@ -504,7 +584,7 @@ function s_at_over_mbim_compal(next) {
 
 // --- runner ------------------------------------------------------------------
 
-let scenarios = [ s_signal, s_cells, s_cells_v3, s_fragments, s_data_mode, s_reg_detail, s_slots,
+let scenarios = [ s_signal, s_cells, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
 	s_at_over_mbim, s_at_over_mbim_compal ];
 let i = 0;
 

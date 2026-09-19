@@ -14,6 +14,14 @@
 //   c.command(schema, 'CONNECT', 'set', args, (err, data) => { ... });
 //   c.on(schema, 'REGISTER_STATE', (data) => { ... });   // indications
 //   c.close();
+//
+// on_error(client, kind, what, status) — `kind` is 'send' | 'timeout' | 'mbim',
+// `what` names the command ('basic_connect/CONNECT', or 'qmi_passthrough/cid 1'
+// where there is no schema, or 'OPEN'/'CLOSE'), and `status` is the
+// MBIM_STATUS_ERROR for kind 'mbim'. The QMI client reports the same shape
+// (client.uc -> modem.uc: "qmi error (kind) svc N NAME"); before this, an MBIM
+// failure was anonymous, which is how a v1-shaped CONNECT to a v3 modem showed
+// up as a bare "status 21" and cost a day to place (HW, RM520N-GL, 2026-09-19).
 
 'use strict';
 
@@ -37,7 +45,7 @@ const MBIMEX_VERSION_3_0 = 0x0300;
 // value: see the comment in open(). Set to MBIMEX_VERSION_3_0 only together
 // with v3 encoders/decoders for Connect, Subscriber Ready Status, Packet
 // Service and IP Packet Filters.
-const MBIMEX_REQUEST = 0;
+const MBIMEX_REQUEST = MBIMEX_VERSION_3_0;
 
 // MBIM_STATUS_ERROR success code
 const STATUS_SUCCESS = 0;
@@ -51,10 +59,11 @@ export function create(hub, hooks)
 		opened: false,
 	};
 
-	self.raw_send = function(frame, txn, cb, timeout) {
+	// `what` names the command for the log — see the on_error contract above.
+	self.raw_send = function(frame, txn, cb, timeout, what) {
 		if (!hub.send_raw(frame)) {
 			if (hooks?.on_error)
-				hooks.on_error(self, 'send');
+				hooks.on_error(self, 'send', what);
 
 			if (cb)
 				cb({ error: 'send' }, null);
@@ -74,7 +83,7 @@ export function create(hub, hooks)
 			delete self.frags[sprintf('%d:%d', mbim.MSG_COMMAND_DONE, txn)];
 
 			if (hooks?.on_error)
-				hooks.on_error(self, 'timeout');
+				hooks.on_error(self, 'timeout', what);
 
 			if (cb)
 				cb({ error: 'timeout' }, null);
@@ -164,7 +173,7 @@ export function create(hub, hooks)
 						cb(null);
 				},
 				{ cmd_type: mbim.CMD_QUERY, timeout: OPEN_TIMEOUT });
-		}, OPEN_TIMEOUT);
+		}, OPEN_TIMEOUT, 'OPEN');
 	};
 
 	self.command = function(schema, name, kind, args, cb, opts) {
@@ -198,6 +207,7 @@ export function create(hub, hooks)
 		let txn = self.next_txn++;
 
 		let frame = mbim.encode_command(txn, schema.service, cmd.cid, cmd_type, info);
+		let what = sprintf('%s/%s', mbim.service_name(schema.service), name);
 
 		return self.raw_send(frame, txn, (err, msg) => {
 			if (err) {
@@ -209,7 +219,7 @@ export function create(hub, hooks)
 
 			if (msg.status != STATUS_SUCCESS) {
 				if (hooks?.on_error)
-					hooks.on_error(self, 'mbim');
+					hooks.on_error(self, 'mbim', what, msg.status);
 
 				if (cb)
 					cb({ error: 'mbim', status: msg.status }, null);
@@ -231,7 +241,7 @@ export function create(hub, hooks)
 
 			if (cb)
 				cb(null, data, msg.info);
-		}, opts?.timeout);
+		}, opts?.timeout, what);
 	};
 
 	// command_raw: send a COMMAND whose InformationBuffer is opaque bytes (not a
@@ -242,6 +252,13 @@ export function create(hub, hooks)
 	self.command_raw = function(service_uuid, cid, info, cb, opts) {
 		let txn = self.next_txn++;
 		let frame = mbim.encode_command(txn, service_uuid, cid, opts?.cmd_type ?? mbim.CMD_SET, info ?? '');
+		// opts.name: a caller that KNOWS the command names it, so the log reads
+		// 'basic_connect/CONNECT' rather than 'basic_connect/cid 12'. The v3
+		// CONNECT goes out through here, and that is precisely the failure the
+		// named logging exists for.
+		let what = opts?.name
+			? sprintf('%s/%s', mbim.service_name(service_uuid), opts.name)
+			: sprintf('%s/cid %d', mbim.service_name(service_uuid), cid);
 
 		return self.raw_send(frame, txn, (err, msg) => {
 			if (err)
@@ -257,7 +274,7 @@ export function create(hub, hooks)
 				// reporting, so a genuinely wedged channel is still caught by all of
 				// them; only this one optional tunnel stops voting.
 				if (hooks?.on_error && !opts?.no_recovery)
-					hooks.on_error(self, 'mbim');
+					hooks.on_error(self, 'mbim', what, msg.status);
 
 				return cb ? cb({ error: 'mbim', status: msg.status }, null) : null;
 			}
@@ -267,7 +284,7 @@ export function create(hub, hooks)
 
 			if (cb)
 				cb(null, msg.info);
-		}, opts?.timeout);
+		}, opts?.timeout, what);
 	};
 
 	self.on = function(schema, name, cb) {
@@ -279,7 +296,14 @@ export function create(hub, hooks)
 		let key = sprintf('%s:%d', schema.service, cmd.cid);
 
 		self.handlers[key] = self.handlers[key] ?? [];
-		push(self.handlers[key], { cb: cb, fields: cmd.notification ?? cmd.response ?? {} });
+		// `decode` is kept, not resolved: a command whose LAYOUT depends on the
+		// negotiated MBIMEx version must be decided when the indication ARRIVES,
+		// not when the handler is registered — registration happens before
+		// open(), so the version is not known yet. Freezing the field spec here
+		// is what made SUBSCRIBER_READY_STATUS indications decode with the wrong
+		// layout on a v3 modem while the query path had it right.
+		push(self.handlers[key], { cb: cb, decode: cmd.decode,
+			fields: cmd.notification ?? cmd.response ?? {} });
 	};
 
 	// called by the hub for every decoded MBIM frame on this device
@@ -384,7 +408,9 @@ export function create(hub, hooks)
 			let key = sprintf('%s:%d', msg.service, msg.cid);
 
 			for (let h in (self.handlers[key] ?? []))
-				h.cb(mbim.decode_info(h.fields, msg.info), msg);
+				h.cb((type(h.decode) == 'function')
+					? h.decode(msg.info, self)
+					: mbim.decode_info(h.fields, msg.info), msg);
 
 			return;
 		}
@@ -421,7 +447,7 @@ export function create(hub, hooks)
 
 			if (cb)
 				cb(null);
-		}, OPEN_TIMEOUT);
+		}, OPEN_TIMEOUT, 'CLOSE');
 	};
 
 	self.destroy = function() {

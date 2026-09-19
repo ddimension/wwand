@@ -17,6 +17,7 @@
 import * as uloop from 'uloop';
 import * as context_common from 'wwand.context_common';
 import * as bc from 'wwand.codec.mbim_schema.basic_connect';
+import * as mbimmod from 'wwand.codec.mbim';
 
 // pdp_type/auth -> MBIM enum maps live in basic_connect.uc (shared with
 // modem_mbim's LTE attach path — bc.IP_TYPE_FROM_PDP / bc.AUTH_FROM_CFG)
@@ -229,10 +230,28 @@ export function create(opts)
 		});
 	};
 
+	// EVERY CONNECT goes through here, in the form the modem agreed to speak.
+	// MBIMEx v3 redefines CID 12 — reordered fixed fields, a MediaPreference
+	// u32, and the three strings as TLVs instead of offset/length pairs — so a
+	// v3 modem answers the v1 form with MBIM_STATUS_ERROR_INVALID_PARAMETERS
+	// (21) (HW-observed, RM520N-GL, 2026-09-19). That applies to the DEACTIVATE
+	// as much as to the activation: branching only the up path would leave a
+	// session the modem still holds, while the context reports itself down.
+	let send_connect = (args, cb, opts) => {
+		if (!mbimmod.mbimex_v3(self.modem.mbim))
+			return self.modem.command('CONNECT', 'set', args, cb, opts);
+
+		return self.modem.mbim.command_raw(bc.service, bc.commands.CONNECT.cid,
+			mbimmod.encode_connect_v3(args),
+			(err, info) => cb(err, err ? null
+				: mbimmod.decode_info(bc.commands.CONNECT.response, info)),
+			{ timeout: opts?.timeout, name: 'CONNECT' });
+	};
+
 	// best-effort DEACTIVATE of this session (shared by admin down + failure
 	// cleanup). ip_type DEFAULT / empty strings per the MBIM deactivate form.
 	let deactivate = (cb) => {
-		self.modem.command('CONNECT', 'set', {
+		send_connect({
 			session_id: wire_session(),
 			activation_command: bc.ACTIVATION_CMD_DEACTIVATE,
 			access_string: '', user_name: '', password: '',
@@ -278,7 +297,13 @@ export function create(opts)
 		log('notice', sprintf('connecting session %d: apn %s, ip-type %d',
 			self.session_id, profile == '' ? '(network default)' : sprintf('\'%s\'', profile), ip_type));
 
-		self.modem.command('CONNECT', 'set', args, (err, data) => {
+		// v3 IS A DIFFERENT STRUCTURE, not a variant: reordered fixed fields, an
+		// extra MediaPreference, and the three strings as TLVs. A modem serving
+		// v3 answers the v1 form with INVALID_PARAMETERS (21). The RESPONSE needs
+		// no such split — v3 only appends fields after NwError, so the v1 schema
+		// reads the prefix this code uses. Found on an RM520N-GL, 2026-09-19;
+		// ModemManager makes the same choice at mm-bearer-mbim.c:1340.
+		let on_connect = (err, data) => {
 			let took = !err && (data?.activation_state == bc.ACTIVATION_ACTIVATED ||
 			                    data?.activation_state == bc.ACTIVATION_ACTIVATING);
 
@@ -341,7 +366,10 @@ export function create(opts)
 				if (cb2)
 					cb2(null, self.settings);
 			});
-		}, { timeout: 60000 });
+		};
+
+		send_connect(args, on_connect, { timeout: 60000 });
+
 	};
 
 	self.down = function(cb) {

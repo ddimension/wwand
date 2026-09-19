@@ -65,6 +65,8 @@ export function create(opts)
 		calls: [],
 		counts: {},
 		mbimex_version: opts?.mbimex_version ?? 0x0300,
+		// set only once a VERSION query has actually been answered
+		mbimex_agreed: 0,
 		device: null,
 		cbs: null,
 		closed: true,
@@ -140,8 +142,11 @@ export function create(opts)
 		// counts on v1 than on v3. Mirror that here or the decode goes wrong.
 		let spec = entry.cmd[kind];
 
+		// NEGOTIATED, not configured: the client builds its request from what
+		// it actually agreed to, so a mock that resolves the spec from its own
+		// configuration decodes a shape the client never sent.
 		if (type(spec) == 'function')
-			spec = spec({ mbimex_version: self.mbimex_version });
+			spec = spec({ mbimex_version: self.mbimex_agreed });
 
 		let args = mbim.decode_info(spec ?? {}, info);
 
@@ -153,11 +158,10 @@ export function create(opts)
 		let meta = { name: entry.name, cid: cid, kind: kind, count: self.counts[entry.name] };
 		let handler = self.handlers[entry.name];
 
-		// BUILT-IN: the MBIMEx version handshake, for whoever turns it back on
-		// (mbim_client.uc MBIMEX_REQUEST — 0 in the shipped tree, so open()
-		// does not send this at all today). Echo the requested MBIM version
-		// and agree to the mock's own `mbimex_version`. Set it to 0 to make
-		// the mock refuse, or override the VERSION handler outright.
+		// BUILT-IN: the MBIMEx version handshake (mbim_client.uc open() sends
+		// it; MBIMEX_REQUEST is 3.0). Echo the requested MBIM version and agree
+		// to the mock's own `mbimex_version`. Set it to 0 to make the mock
+		// refuse, or override the VERSION handler outright.
 		if (handler == null && entry.name == 'VERSION') {
 			if (!self.mbimex_version)
 				return reply_failure(uuid, cid, txn);
@@ -181,7 +185,39 @@ export function create(opts)
 		else if (obj.__raw != null)
 			ibuf = obj.__raw;
 		else
-			ibuf = mbim.encode_info(entry.cmd.response ?? {}, obj);
+			// a command whose layout depends on the negotiated MBIMEx version
+			// asks the schema which one is in force, exactly as the client's
+			// decoder does — otherwise the mock answers v1 to a client it just
+			// told "MBIMEx 3.0" and the mismatch reads like a decoder bug
+			ibuf = mbim.encode_info(
+				(type(entry.cmd.response_for) == 'function')
+					? entry.cmd.response_for({ mbimex_version: self.mbimex_agreed })
+					: (entry.cmd.response ?? {}), obj);
+
+		// WHAT THE MOCK ACTUALLY AGREED, read back out of the answer it just
+		// gave — not what it was configured with. A mock that is configured for
+		// MBIMEx 3.0 but never gets asked (the suite registered no extensions
+		// schema, so the VERSION query finds no handler) has agreed NOTHING,
+		// and a modem in that state serves v1 layouts. Deriving it from the
+		// configured value instead let the mock answer v3 buffers to a client
+		// that had settled on v1 — which reads as a decoder bug and is not one.
+		//
+		// The answer is then held to the SAME test the client applies
+		// (mbim_client.uc open(): MBIM version must echo, the extended version
+		// must be non-zero and not above what was asked). A suite that
+		// overrides VERSION with an out-of-contract answer makes the client
+		// stay on v1; without this check the mock would go to v3 on its own and
+		// the two would silently disagree.
+		if (entry.name == 'VERSION' && status == 0 && length(ibuf) >= 4) {
+			let mv = struct.unpack('<H', substr(ibuf, 0, 2))[0];
+			let ev = struct.unpack('<H', substr(ibuf, 2, 2))[0];
+			// the ceiling the client asked for, out of its own request buffer
+			let asked = (length(info) >= 4)
+				? struct.unpack('<H', substr(info, 2, 2))[0] : 0;
+
+			if (mv == 0x0100 && ev && ev <= asked)
+				self.mbimex_agreed = ev;
+		}
 
 		deliver(done_frame(txn, entry.schema.service, cid, status, ibuf));
 		return true;
@@ -201,7 +237,13 @@ export function create(opts)
 		if (!cmd)
 			die(sprintf('mbim_mockhub: unknown indication %s', name));
 
-		let ibuf = mbim.encode_info(cmd.notification ?? cmd.response ?? {}, args ?? {});
+		// same version-dependent layout as the command path above: an
+		// indication is decoded by the client with the negotiated layout, so
+		// the mock has to emit that one
+		let ibuf = mbim.encode_info(
+			(type(cmd.response_for) == 'function')
+				? cmd.response_for({ mbimex_version: self.mbimex_agreed })
+				: (cmd.notification ?? cmd.response ?? {}), args ?? {});
 		deliver(indicate_frame(sch.service, cmd.cid, ibuf));
 	};
 

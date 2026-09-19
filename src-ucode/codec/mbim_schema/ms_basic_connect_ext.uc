@@ -21,7 +21,7 @@
 'use strict';
 
 import * as struct from 'struct';
-import { utf16le_encode, utf16le_decode } from 'wwand.codec.mbim';
+import { utf16le_encode, utf16le_decode, mbimex_v3 } from 'wwand.codec.mbim';
 
 export const SERVICE_UUID = '3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf';
 export const service = SERVICE_UUID;
@@ -183,11 +183,6 @@ const F_NEIGH_NR = [
 // FABRICATED serving-cell PCI/TAC/RSRP. Which layout applies is settled by the
 // version handshake at mbim_client.uc open(); a modem that refused it is v1.
 // Found by a full review, 2026-09-19.
-export function mbimex_v3(mc)
-{
-	return (mc?.mbimex_version ?? 0) >= 0x0300;
-};
-
 export function decode_base_stations_info(info, mc)
 {
 	if (!mbimex_v3(mc))
