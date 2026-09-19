@@ -659,6 +659,23 @@ export function make_recovery(self, opts, log, proto)
 export function make_fail(self, o)
 {
 	return (stage, err) => {
+		// A CANCELLATION IS NOT A FAILURE. Destroying the clients on teardown
+		// delivers a synchronous `cancelled` to everything in flight, and the
+		// init chain's callbacks do not all filter it — so a modem that was
+		// deliberately stopped used to walk its own failure ladder, bump the
+		// PERSISTED attempt counter and arm `uloop.timer(backoff, self.start)`
+		// below, resurrecting itself. Over enough cycles a ghost can climb to a
+		// board power-cycle or a reboot.
+		//
+		// A generation check does NOT belong here, tempting as it looks:
+		// make_fail is built once per modem, so it cannot know the generation
+		// the bring-up started with, and reading self._gen when the callback
+		// arrives compares a value with itself. NCM has no generation counter
+		// at all, and this helper is shared with it. The cancellation is the
+		// signal. ddimension/wwand review, 2026-09-19.
+		if (err?.error == 'cancelled')
+			return o.log('debug', sprintf('%s: cancelled with the session, not a failure', stage));
+
 		o.log('err', sprintf('failed in %s: %J', stage, err));
 
 		// keep the last fresh registration problem on the persistent recovery
@@ -679,6 +696,16 @@ export function make_fail(self, o)
 				self.set_state('ABSENT');
 				return;   // no retry, reboot is pending
 			}
+
+			// NOT FROM INSIDE A TEARDOWN. The ladder's done() can be paid out
+			// by a teardown retiring the continuations it owes, and a retry
+			// armed there is armed AFTER that teardown's cancel pass — so it
+			// survives and restarts a modem the operator just stopped. The
+			// backend raises a depth counter around its teardown for exactly
+			// this question (modem.uc); a backend that does not set one reads 0
+			// and behaves as before. Raised by review, 2026-09-19.
+			if ((self._teardown_depth ?? 0) > 0)
+				return o.log('debug', sprintf('%s: failed during teardown — no retry armed', stage));
 
 			let backoff = min(o.timing.backoff_min * self.counters.attempts,
 			                  o.timing.backoff_max);

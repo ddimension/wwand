@@ -1912,6 +1912,32 @@ scenario('cat-release-teardown', {
 		eq(modem.cat, null, 'cat: the client is gone with the rest');
 	});
 
+// --- a settle timer must not outlive its incarnation --------------------------
+//
+// reattach bounces the radio: set_opmode(low_power) -> wait `settle` ->
+// set_opmode(online). The wait was an ANONYMOUS uloop.timer, so teardown's
+// `for (let t in values(tm))` could not reach it; opmode_cycle and reapply_sim
+// did park theirs in tm but re-armed AFTER the cancel pass, because destroying
+// the clients delivers a synchronous `cancelled` that their set_opmode callback
+// ignored. Either way the timer fires with self.dms already null
+// (modem.uc:1329) and qmi_backend.set_opmode dereferences it unguarded
+// (qmi_backend.uc:62) — a throw inside a uloop callback, which kills the daemon
+// and has procd respawn it. Found by a full review, 2026-09-19.
+//
+// The proof is the run itself: with the guard removed this scenario does not
+// fail a check, it ends the suite mid-run with the dereference — exactly what
+// the daemon does. `reattach_err` carries the positive half.
+let reattach_err = 'never called';
+
+scenario('reattach-teardown', { handlers: base_handlers() }, 'registered',
+	(modem, mock, events) => {
+		// in flight when the harness stops the modem a moment later
+		modem.reattach((err) => { reattach_err = err; });
+
+		ok(length(mock.calls_for('SET_OPERATING_MODE')) >= 1,
+			'reattach-teardown: the radio-off went out');
+	});
+
 uloop.run();
 
 // A scenario chain that DIES reports success. mockhub die()s on a message no
@@ -1964,5 +1990,159 @@ eq(plmn[0].ngran, true, 'plmn: ngran flag');
 eq(plmn[0].utran, false, 'plmn: no utran');
 eq(plmn[1].mcc, '214', 'plmn: second entry mcc');
 eq(plmn[1].gsm, true, 'plmn: gsm flag');
+
+// uloop has ended, so the settle timer either fired or was retired — and if it
+// fired into a torn-down modem we never got here at all.
+eq(reattach_err?.error, 'cancelled',
+	'reattach-teardown: the caller is told the session ended, not left hanging');
+
+// --- teardown while the settle timer is already ARMED -------------------------
+//
+// The scenario harness cannot reach this state: it stops the modem
+// synchronously right after verify(), while mockhub answers every request via
+// uloop.timer(0), so the outer set_opmode callback — the one that arms the wait
+// — can only run after the teardown. So this gets its own loop.
+//
+// It matters because the two halves fail differently. If the wait has NOT been
+// armed yet, settle_after's entry check sees the stale generation and calls the
+// continuation. If it HAS, teardown cancels the timer outright and its body
+// never runs — so without settle_retire() neither fn() nor gone() fires and a
+// ubus reattach waits for an answer that can no longer come. Raised by review,
+// 2026-09-19.
+{
+	uloop.init();
+
+	let mock = mockhub.create({ handlers: base_handlers() });
+	let armed_err = 'never called';
+	let armed_seen = false;
+	let m;
+
+	m = modem_mod.create({
+		id: 'reattach-armed', device: '/dev/mock0', config: {},
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		at: { fx: fakefx.create() },
+		timing: { ...TIMING, settle: 500 },   // long enough to still be waiting
+		deps: {
+			transport_open: mock.transport_open,
+			log: (level, msg) => null,
+			on_event: (mm, event, data) => {
+				if (event != 'registered' || armed_seen)
+					return;
+
+				armed_seen = true;
+				m.reattach((err) => { armed_err = err; });
+
+				// let the radio-off answer land and the wait arm (mockhub
+				// answers on uloop.timer(0)), THEN tear down.
+				uloop.timer(20, () => {
+					m.stop();
+					uloop.timer(20, () => uloop.end());
+				});
+			},
+		},
+	});
+
+	m.start();
+	uloop.timer(3000, () => uloop.end());
+	uloop.run();
+
+	ok(armed_seen, 'reattach-armed: the modem registered and reattach was issued');
+	eq(armed_err?.error, 'cancelled',
+		'reattach-armed: a wait cancelled by teardown still answers its caller');
+}
+
+// --- two waits in flight at once ---------------------------------------------
+//
+// `tm.settle` is a SHARED one-shot slot, written by the init chain too
+// (modem_init_qmi.uc:322, :383, :604). Parking radio-bounce waits there let a
+// second overwrite the first: teardown cancelled only the newest, the older
+// timer survived unreachable, and whichever body ran first cleared the other's
+// debt — so one of the two callers hung. Nothing serialises reattach, so two
+// ubus calls reach this directly. Raised by review, 2026-09-19.
+{
+	uloop.init();
+
+	let mock = mockhub.create({ handlers: base_handlers() });
+	let errs = [];
+	let issued = false;
+	let m;
+
+	m = modem_mod.create({
+		id: 'reattach-overlap', device: '/dev/mock0', config: {},
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		at: { fx: fakefx.create() },
+		timing: { ...TIMING, settle: 500 },
+		deps: {
+			transport_open: mock.transport_open,
+			log: (level, msg) => null,
+			on_event: (mm, event, data) => {
+				if (event != 'registered' || issued)
+					return;
+
+				issued = true;
+				m.reattach((err) => push(errs, err?.error ?? 'ok'));
+				m.reattach((err) => push(errs, err?.error ?? 'ok'));
+
+				uloop.timer(30, () => {
+					m.stop();
+					uloop.timer(20, () => uloop.end());
+				});
+			},
+		},
+	});
+
+	m.start();
+	uloop.timer(3000, () => uloop.end());
+	uloop.run();
+
+	eq(length(errs), 2, 'overlap: BOTH callers are answered, neither is orphaned');
+	eq(errs, [ 'cancelled', 'cancelled' ], 'overlap: ...and both are told the session ended');
+}
+
+// --- a continuation that throws must not disable retries forever -------------
+//
+// Paying the owed continuations is the one place teardown runs code it does not
+// own. Unguarded, a throw there skips the `_teardown_depth--` at the end, the
+// counter stays raised for the life of the object, and make_fail then refuses
+// to arm ANY future retry — a worse failure than the hang it pays off. Raised
+// by review, 2026-09-19.
+{
+	uloop.init();
+
+	let mock = mockhub.create({ handlers: base_handlers() });
+	let issued = false;
+	let m;
+
+	m = modem_mod.create({
+		id: 'reattach-throwing-cb', device: '/dev/mock0', config: {},
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		at: { fx: fakefx.create() },
+		timing: { ...TIMING, settle: 500 },
+		deps: {
+			transport_open: mock.transport_open,
+			log: (level, msg) => null,
+			on_event: (mm, event, data) => {
+				if (event != 'registered' || issued)
+					return;
+
+				issued = true;
+				m.reattach((err) => { die('a caller callback that throws'); });
+
+				uloop.timer(30, () => {
+					m.stop();
+					uloop.timer(20, () => uloop.end());
+				});
+			},
+		},
+	});
+
+	m.start();
+	uloop.timer(3000, () => uloop.end());
+	uloop.run();
+
+	ok(issued, 'throwing-cb: the modem registered and reattach was issued');
+	eq(m._teardown_depth, 0,
+		'throwing-cb: the depth is back to zero, so future retries still work');
+}
 
 done('test_modem');

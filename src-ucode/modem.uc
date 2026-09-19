@@ -180,6 +180,64 @@ export function create(opts)
 	// shared one-shot timer holder; teardown cancels whatever is pending.
 	let tm = { retry: null, reg: null, settle: null, at_drain: null, probe: null };
 
+	// A SETTLE TIMER MUST NOT OUTLIVE ITS INCARNATION, and parking it in `tm` is
+	// not enough on its own. Teardown walks `values(tm)` ONCE and then destroys the
+	// clients, which delivers a synchronous `cancelled` to everything in flight —
+	// so an outer set_opmode callback that ignores its error re-arms tm.settle
+	// AFTER the cancel pass. The new timer fires with self.dms already null
+	// (modem.uc:1329) and set_opmode dereferences it unguarded (qmi_backend.uc:62),
+	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
+	// respawns it. The MBIM twin has carried this guard since modem_mbim.uc:1164;
+	// the QMI side had three sites and none of them. Found by a full review,
+	// 2026-09-19.
+	//
+	// `gen` is captured where the OPERATION begins, not read here — by the time a
+	// callback arrives the generation has already moved.
+	// EACH WAIT OWNS ITS OWN TIMER AND ITS OWN DEBT. `tm.settle` is a shared
+	// one-shot slot, also written by the init chain (modem_init_qmi.uc:322,
+	// :383, :604), so parking radio-bounce waits there let a second one
+	// overwrite the first: teardown then cancelled only the newest, the older
+	// timer survived unreachable, and whichever fired first cleared the other's
+	// debt. Two reattach calls reach that directly — nothing serialises them.
+	// Raised by review, 2026-09-19.
+	let settles = [];
+
+	// pay every outstanding continuation. Teardown cancels the timers, so their
+	// bodies never run, and whoever asked (a ubus reattach, the daemon's
+	// note_connect_failure caller) would otherwise wait for an answer that can
+	// no longer come.
+	let settle_retire = () => {
+		let pend = settles;
+
+		settles = [];
+
+		for (let r in pend) {
+			r.timer.cancel();
+			r.gone();
+		}
+	};
+
+	let settle_after = (gen, fn, gone) => {
+		gone = gone ?? (() => null);
+
+		if (self._gen != gen || !self.dms)
+			return gone();
+
+		let rec = {};
+
+		rec.gone = gone;
+		rec.timer = uloop.timer(self.timing.settle, () => {
+			settles = filter(settles, (x) => x != rec);
+
+			if (self._gen != gen || !self.dms)
+				return gone();
+
+			fn();
+		});
+
+		push(settles, rec);
+	};
+
 	// protocol-neutral scaffolding (sets set_state/attach_context/… on self)
 	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
 	let emit = scaffold.emit;
@@ -335,13 +393,22 @@ export function create(opts)
 			if (!self.dms)
 				return done(action);
 
+			let cyc_gen = self._gen;
+
 			log('warn', 'recovery: cycling operating mode');
 			qmi_backend.set_opmode(self.dms, 'low_power', () => {
-				tm.settle = uloop.timer(self.timing.settle, () => {
+				// done() IS answered on the cancelled path. It is not only
+				// make_fail's internal continuation: the daemon passes a real
+				// caller's callback through note_connect_failure
+				// (daemon.uc:2199), and dropping it strands a ubus request.
+				// Restarting a torn-down modem is prevented where it belongs
+				// instead — make_fail now refuses a `cancelled` outright
+				// (modem_common.uc). Raised by review, 2026-09-19.
+				settle_after(cyc_gen, () => {
 					qmi_backend.set_opmode(self.dms, 'online', () => {
-						tm.settle = uloop.timer(self.timing.settle, () => done(action));
+						settle_after(cyc_gen, () => done(action), () => done(action));
 					});
-				});
+				}, () => done(action));
 			});
 			return;
 
@@ -390,14 +457,17 @@ export function create(opts)
 		if (!self.dms)
 			return cb({ error: 'unsupported_on_backend' });
 
+		let gen = self._gen;
+		let cancelled = () => cb({ error: 'cancelled' });
+
 		log('notice', 'network reattach (DMS low_power -> online)');
 		qmi_backend.set_opmode(self.dms, 'low_power', () => {
-			uloop.timer(self.timing.settle, () => {
+			settle_after(gen, () => {
 				qmi_backend.set_opmode(self.dms, 'online', (err) => {
 					cb(err ? { error: 'qmi', detail: err } : null,
 						{ ok: true, action: 'reattach', via: 'qmi' });
 				});
-			});
+			}, cancelled);
 		});
 	};
 
@@ -510,14 +580,14 @@ export function create(opts)
 				if (!ch)
 					return cb ? cb(changed) : null;
 
+				let sim_gen = self._gen;
+				let finish = () => cb ? cb(changed) : null;
+
 				log('notice', 'attach profile changed after sim reapply, cycling radio to re-attach');
 				qmi_backend.set_opmode(self.dms, 'low_power', () => {
-					tm.settle = uloop.timer(self.timing.settle, () => {
-						qmi_backend.set_opmode(self.dms, 'online', () => {
-							if (cb)
-								cb(changed);
-						});
-					});
+					settle_after(sim_gen, () => {
+						qmi_backend.set_opmode(self.dms, 'online', finish);
+					}, finish);
 				});
 			});
 		});
@@ -1289,11 +1359,40 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
+		// A DEPTH COUNTER, not a flag. settle_retire() below pays continuations
+		// synchronously, and one of them is the recovery ladder's done() — which
+		// on the make_fail path calls teardown() AGAIN and then arms
+		// `uloop.timer(backoff, () => self.start())`. Armed from inside an outer
+		// teardown that has already walked its cancel pass, that retry survives
+		// and restarts a modem the operator just stopped. A boolean would be
+		// cleared by the nested call; the depth is what tells "make_fail tore
+		// down on its own" apart from "make_fail ran INSIDE a teardown".
+		// make_fail reads it before arming (modem_common.uc). Raised by review,
+		// 2026-09-19.
+		self._teardown_depth = (self._teardown_depth ?? 0) + 1;
+
 		for (let t in values(tm))
 			if (t)
 				t.cancel();
 
 		tm.retry = tm.reg = tm.settle = tm.at_drain = null;
+
+		// a settle wait cancelled just above never runs its body, so the
+		// continuation it owed is paid here instead — otherwise a ubus reattach
+		// waits for an answer that can no longer come (see settle_after).
+		//
+		// GUARDED, because this is the one place teardown runs code it does not
+		// own: a continuation is a caller's callback. If one throws, the
+		// decrement below would never run and _teardown_depth would stay raised
+		// for the life of the object — which disables every future retry, a
+		// worse failure than the one this pays off. Raised by review,
+		// 2026-09-19.
+		try {
+			settle_retire();
+		} catch (e) {
+			log('err', sprintf('teardown: a settle continuation threw: %s', e));
+		}
+
 		telem.stop();
 
 		modem_common.close_at(self);
@@ -1327,6 +1426,8 @@ export function create(opts)
 		self.ctl?.destroy();
 
 		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = null;
+
+		self._teardown_depth--;
 		self.dsd = self.tmd = self.cat = self.wms = self.pdc = null;
 
 		// fail any PDC operation still waiting on an indication that will now

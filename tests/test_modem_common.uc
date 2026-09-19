@@ -543,6 +543,42 @@ eq(fm.last_state_data.retry_in, 30, 'make_fail: backoff = backoff_min * attempts
 ok(mf_retry != null, 'make_fail: retry timer scheduled for a retry action');
 mf_retry.cancel();
 
+// A CANCELLATION IS NOT A FAILURE. Destroying the clients on teardown delivers
+// a synchronous `cancelled` to everything in flight, and the init chain does not
+// filter it everywhere — so a modem that was deliberately stopped used to walk
+// its own failure ladder, bump the PERSISTED attempt counter and arm a retry
+// that restarts it. Over enough cycles a ghost climbs to a board power-cycle or
+// a reboot. Found by a full review, 2026-09-19.
+mf_events = []; torn = 0; started = 0; mf_retry = null;
+mf_action = 'retry';
+let mf_state_before = fm.state;
+fail('register', { error: 'cancelled' });
+eq(length(mf_events), 0, 'make_fail: a cancelled stage emits no error');
+eq(torn, 0, 'make_fail: ...tears nothing down');
+eq(mf_retry, null, 'make_fail: ...and above all schedules no restart');
+eq(fm.state, mf_state_before, 'make_fail: the state is left exactly where it was');
+
+// ...and a GENUINE failure reported while a teardown is running must not arm a
+// retry either. The ladder's done() can be paid out by teardown retiring the
+// continuations it owes; a retry armed there is armed after that teardown's
+// cancel pass, so it survives and restarts a modem the operator just stopped.
+// The depth counter is what tells that apart from make_fail tearing down on its
+// own, which must keep retrying. Raised by review, 2026-09-19.
+mf_events = []; torn = 0; started = 0; mf_retry = null;
+mf_action = 'retry';
+fm._teardown_depth = 1;                      // as if called from inside teardown
+fail('register', { error: 'real' });
+eq(length(mf_events), 1, 'make_fail: the error is still reported');
+eq(mf_retry, null, 'make_fail: ...but no retry is armed from inside a teardown');
+fm._teardown_depth = 0;
+
+// and with no teardown running, the same failure DOES retry — the counter must
+// not have turned the ladder off altogether
+mf_events = []; torn = 0; mf_retry = null;
+fail('register', { error: 'real' });
+ok(mf_retry != null, 'make_fail: outside a teardown the retry is armed as before');
+mf_retry.cancel();
+
 // a 'reboot' action: tears down but schedules NO retry (reboot pending)
 mf_events = []; torn = 0; mf_retry = null;
 mf_action = 'reboot';
