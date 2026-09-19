@@ -427,11 +427,22 @@ export function create(opts)
 		}
 
 		let hold = (hold_ms > 0) ? hold_ms : reset_ms;
-		let run = profile?.reset_run;
+
+		// `reset_run` DESCRIBES THE BOARD'S OWN RESET LINE and nothing else. A
+		// modem config `reset_gpio` names a different pin, whose polarity the
+		// profile knows nothing about — applying the measured rest level of
+		// one line to another inverts it when they disagree, so the "release"
+		// at the end of the pulse drove the modem into permanent reset, and
+		// the pin-sampling fallback that would have got it right was skipped
+		// precisely because the board HAD a measurement. Found by a full
+		// review, 2026-09-19.
+		let own = (sprintf('%s', g) == sprintf('%s', profile?.reset_gpio ?? ''));
+		let run = own ? profile?.reset_run : null;
 
 		if (run == null) {
-			// unmeasured board: fall back to the pin. Safe here because no
-			// pulse is in flight (guarded above), so the line is at rest.
+			// unmeasured board, or a pin the profile does not describe: fall
+			// back to the line itself. Safe here because no pulse is in flight
+			// (guarded above), so it is at rest.
 			let cur = gpio_read(g);
 			// default the "rest" level to high (1) when we cannot read it
 			run = (cur == '0') ? 0 : 1;

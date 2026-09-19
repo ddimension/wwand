@@ -127,6 +127,24 @@ uloop.timer(20, () => uloop.end());
 uloop.run();
 ok(fx.has(`${G}/gpio515/value=0`), 'nr7101: reset released back to rest level (0)');
 
+// A PER-MODEM reset_gpio IS NOT THE BOARD'S RESET LINE, and reset_run describes
+// only the latter. Applying the board's measured rest level to a pin the
+// profile knows nothing about inverts it when the two disagree: the assert
+// wrote the OTHER pin's rest level (so nothing reset) and the release drove it
+// into permanent reset — and the pin-sampling fallback that would have got it
+// right was skipped precisely because the board HAD a measurement. Here the
+// nr7101 profile says reset_run 0 while the named pin rests at 1. Found by a
+// full review, 2026-09-19.
+fx = mkfx({ [`${G}/othergpio/value`]: '1' });
+b = board.create({ id: 'zyxel,nr7101', fx: fx, reset_ms: 5, log: () => {} });
+ok(b.reset_pulse('othergpio'), 'nr7101: a per-modem reset gpio is accepted');
+ok(fx.has(`${G}/othergpio/value=0`),
+	'nr7101: asserted against THAT pin\'s rest level (1 -> 0), not the board\'s');
+uloop.timer(20, () => uloop.end());
+uloop.run();
+ok(fx.has(`${G}/othergpio/value=1`),
+	'nr7101: released back to 1 — not left holding the modem in reset');
+
 // --- 4d. Cudy LT300 (MeiG SLM770A): serial ports are vendor-class (0xff) and the
 // stock `option` driver has no id for them, so init() must bind them via new_id —
 // otherwise no ttyUSB appear and the NCM backend has no AT channel (modem ABSENT).

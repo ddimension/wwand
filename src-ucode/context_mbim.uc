@@ -376,11 +376,22 @@ export function create(opts)
 		// LuCI-visible failure reason (daemon status `last_error` — QMI parity;
 		// stayed null on MBIM before). nw_error carries the 3GPP cause when the
 		// network refused the attach/activation.
+		//
+		// LOOK INSIDE THE WRAPPER. Every caller here passes { stage, err: <the
+		// real error> } (:298, :315, :320), and this read error/status off the
+		// OUTER object, which has neither — so text and code were null for
+		// every MBIM-status and every timeout, which is precisely the reason
+		// this field exists to show. One site (:320) puts a bare string in
+		// `err`, so that shape is handled too. Found by a full review,
+		// 2026-09-19.
+		let inner = err?.err;
+		let inner_text = (type(inner) == 'string') ? inner : inner?.error;
+
 		self.last_error = {
 			stage: err?.stage ?? 'activation',
-			text:  err?.error ?? null,
-			code:  err?.status ?? err?.nw_error ?? null,
-			nw_error: err?.nw_error,
+			text:  err?.error ?? inner_text ?? null,
+			code:  err?.status ?? err?.nw_error ?? inner?.status ?? inner?.code ?? null,
+			nw_error: err?.nw_error ?? inner?.nw_error,
 		};
 
 		let cb = up_cb;
@@ -496,6 +507,12 @@ export function create(opts)
 			// what the modem is actually tagged with, when a datapath remaps it
 			wire_session_id: (wire_session() != self.session_id) ? wire_session() : null,
 			settings: self.settings,
+			// AND THE REASON THE LAST BRING-UP FAILED. _fail has maintained
+			// this since MBIM got QMI parity, and status() never carried it —
+			// so the field was built, twice over (see _fail), and nothing
+			// could ever read it. context.uc:1118 has surfaced the QMI twin
+			// all along. Found by a full review, 2026-09-19.
+			last_error: self.last_error,
 			stats: (self.state == 'CONNECTED') ? self.stats : null,
 			uptime: (self.state == 'CONNECTED' && self.connected_since)
 				? (context_common.mono() - self.connected_since) : null,

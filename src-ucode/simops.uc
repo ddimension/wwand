@@ -166,13 +166,21 @@ export function install(self, o)
 
 		// AN EMPTY SELECTION MUST NOT DELETE ANYTHING.
 		//
-		// ubus fills a declared argument with its default when the caller omits
-		// it, so `index` arrives as 0 whether or not anyone asked for slot 0 —
-		// which means `indices: []` used to fall through to "delete index 0" and
-		// issue a real delete. HW-confirmed on an NR7101: the modem answered
-		// +CMS ERROR 321 (invalid memory index), which it only does because the
-		// command was actually sent. On a card whose slot 0 is occupied, that
-		// message would simply be gone (2026-09-12).
+		// An omitted `index` reaches here as null, and `+null` is 0 in ucode
+		// (measured on the host interpreter, 2026-09-19) — so `indices: []`
+		// used to fall through to "delete index 0" and issue a real delete.
+		// HW-confirmed on an NR7101: the modem answered +CMS ERROR 321
+		// (invalid memory index), which it only does because the command was
+		// actually sent. On a card whose slot 0 is occupied, that message
+		// would simply be gone (2026-09-12).
+		//
+		// This used to say ubus DEFAULT-FILLS a declared argument. It does not:
+		// the policy in ubus.uc is validation only, and req.args carries what
+		// the caller sent and nothing else. The symptom was identical, which is
+		// why the wrong mechanism went unnoticed — and believing it invites
+		// "fixing" the `?? default` patterns elsewhere in this tree that work
+		// precisely because the key is absent. Found by a full review,
+		// 2026-09-19.
 		//
 		// So a positive index is required. SMS storage records are numbered from
 		// 1 (3GPP TS 51.011 EF_SMS is a linear fixed file, record 1 upwards), so

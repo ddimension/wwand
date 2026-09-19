@@ -283,9 +283,42 @@ let scenario_v6_iid = {
 	},
 };
 
+// --- scenario 4: a refused activation names its reason -----------------------
+//
+// _fail builds the LuCI-visible `last_error`, and every caller passes it
+// { stage, err: <the real error> } — while it read error/status off the OUTER
+// object, which has neither. So text and code were null for every MBIM status
+// and every timeout, which is exactly the case the field exists to explain.
+// Found by a full review, 2026-09-19.
+
+let scenario_fail_reason = {
+	name: 's4_fail_reason',
+	ctx_timing: { stats_interval: 5 },
+	handlers: () => base_handlers({
+		// MBIM_STATUS_FAILURE on the activation
+		CONNECT: (args) => (args.activation_command == bc.ACTIVATION_CMD_ACTIVATE)
+			? { __error: 1 }
+			: { session_id: args.session_id, activation_state: bc.ACTIVATION_DEACTIVATED,
+			    voice_call_state: 0, ip_type: 0,
+			    context_type: bc.CONTEXT_TYPE_INTERNET, nw_error: 0 },
+	}),
+	run: (env) => {
+		env.ctx.up((err) => {
+			ok(err != null, 'fail-reason: the refused activation is reported');
+
+			let le = env.ctx.status()?.last_error;
+
+			eq(le?.stage, 'connect', 'fail-reason: the stage is named');
+			eq(le?.text, 'mbim', 'fail-reason: ...and so is the error, not null');
+			eq(le?.code, 1, 'fail-reason: ...and the MBIM status that came with it');
+			env.finish();
+		});
+	},
+};
+
 // --- runner -----------------------------------------------------------------
 
-let scenarios = [ scenario_flow, scenario_zero_rx, scenario_v6_iid ];
+let scenarios = [ scenario_flow, scenario_zero_rx, scenario_v6_iid, scenario_fail_reason ];
 let current = 0;
 
 function run_next() {
