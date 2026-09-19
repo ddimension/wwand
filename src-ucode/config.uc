@@ -39,7 +39,10 @@ function num_opt(value, dflt, what, warnings)
 
 	// the only value that is not equal to itself
 	if (n != n) {
-		push(warnings ?? [], sprintf('%s: %J is not a number, using %d', what, value, dflt));
+		// %J, not %d: a null default (repower_time) printed as "using 0",
+		// which names a value the option never takes. Raised by review,
+		// 2026-09-19.
+		push(warnings ?? [], sprintf('%s: %J is not a number, using %J', what, value, dflt));
 		return dflt;
 	}
 
@@ -408,7 +411,8 @@ function modem_from_section(s, warnings)
 		// port changes — see discovery.resolve_modem_device / daemon identity check.
 		serial: s.serial,
 		imei: s.imei,
-		repower_time: (s.repower_time != null) ? +s.repower_time : null,
+		// the one numeric the native reader also took bare (review, 2026-09-19)
+		repower_time: num_opt(s.repower_time, null, 'repower_time', warnings),
 		// optional named GPIO wired to the modem RESET line; when set, recovery
 		// pulses it instead of power-cycling (see board.uc / daemon repower).
 		reset_gpio: s.reset_gpio,
@@ -733,24 +737,38 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 	// which of the two places was authoritative and could not tell from the log
 	// (ddimension/wwand#34).
 	if (s.sim_slot != null) {
+		// through num_opt like every other numeric on this path: a typo'd slot
+		// was NaN, and `!NaN` is false, so it neither took effect nor warned —
+		// it simply vanished. Raised by review, 2026-09-19.
+		let want = num_opt(s.sim_slot, 0, sprintf('interface %s: sim_slot', name), warnings);
+
 		if (!modem.sim_slot)
-			modem.sim_slot = +s.sim_slot;
-		else if (modem.sim_slot != +s.sim_slot)
+			modem.sim_slot = want;
+		else if (modem.sim_slot != want)
 			push(warnings, sprintf("interface %s: conflicting sim_slot %d ignored (modem %s asks for %d)",
-				name, +s.sim_slot, mkey, modem.sim_slot));
+				name, want, mkey, modem.sim_slot));
 	}
 
 	if (s.location != null)
-		modem.location = +s.location > 1;   // old gate: location > 1
+		// THROUGH num_opt, LIKE THE NATIVE PATH. A bare `+` turns a typo into
+		// NaN, and NaN fails every comparison — `interval <= 0` is false for it
+		// — so it slips past the guards the consumers do have. That is the whole
+		// reason num_opt exists (:33), and this legacy path was the one place
+		// that bypassed it: `option failreboot '100s'` silently turned the
+		// reboot rung off (recovery.uc reads it as a number), and a typo'd
+		// zero_rx_timeout silently turned the watchdog off. Warning-free, on
+		// this path only. Found by a full review, 2026-09-19. The defaults match
+		// the native reader at :456-466 so the two cannot drift apart.
+		modem.location = num_opt(s.location, 0, 'location', warnings) > 1;   // old gate: location > 1
 
 	if (s.delay != null)
-		modem.delay = +s.delay;
+		modem.delay = num_opt(s.delay, 0, 'delay', warnings);
 
 	if (s.failreboot != null)
-		modem.failreboot = +s.failreboot;
+		modem.failreboot = num_opt(s.failreboot, 100, 'failreboot', warnings);
 
 	if (s.proto_error_limit != null)
-		modem.proto_error_limit = +s.proto_error_limit;
+		modem.proto_error_limit = num_opt(s.proto_error_limit, 25, 'proto_error_limit', warnings);
 
 	if (s.serial != null)
 		modem.serial = s.serial;
@@ -759,16 +777,16 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 		modem.imei = s.imei;
 
 	if (s.repower_time != null)
-		modem.repower_time = +s.repower_time;
+		modem.repower_time = num_opt(s.repower_time, null, 'repower_time', warnings);
 
 	if (s.zero_rx_timeout != null)
-		modem.zero_rx_timeout = +s.zero_rx_timeout;
+		modem.zero_rx_timeout = num_opt(s.zero_rx_timeout, 21600, 'zero_rx_timeout', warnings);
 
 	if (s.bearer_poll_count != null)
-		modem.bearer_poll_count = +s.bearer_poll_count;
+		modem.bearer_poll_count = num_opt(s.bearer_poll_count, 3, 'bearer_poll_count', warnings);
 
 	if (s.stats_interval != null)
-		modem.stats_interval = +s.stats_interval;
+		modem.stats_interval = num_opt(s.stats_interval, 60, 'stats_interval', warnings);
 }
 
 function compat_translate(raw, result)
@@ -1422,12 +1440,56 @@ export function migrate_plan(raw, opts)
 
 	// create (once per identity) a wwand_modem section from an interface's radio/
 	// SIM options; return its name.
+	// what each synthesized modem section has actually been given, so a SECOND
+	// interface sharing the same modem can fill the gaps the first left.
+	let modem_written = {};
+
 	let ensure_modem = (ident, s) => {
-		if (modem_by_ident[ident])
-			return modem_by_ident[ident];
+		// A REPEAT IDENT IS NOT NOTHING TO DO. Two legacy interfaces can share
+		// one modem, and the options are spread across both — but this returned
+		// immediately, copying only the FIRST one's, while the strip loop below
+		// deletes MIGRATE_MODEM_OPTS from EVERY interface. A `pincode` carried
+		// only on the second section was therefore destroyed and never written
+		// anywhere, and the next PIN-required boot safety-blocked the SIM with
+		// no warning to say why. The runtime merge this migration replaces
+		// (merge_iface_modem_opts) read them all, first-wins — so this is a
+		// fidelity regression, not a design choice. Found by a full review,
+		// 2026-09-19.
+		if (modem_by_ident[ident]) {
+			let have = modem_by_ident[ident];
+
+			for (let k in MIGRATE_MODEM_OPTS) {
+				// first-wins: only what nobody has supplied yet
+				if (modem_written[have][k])
+					continue;
+
+				let v = s[k];
+
+				if (k == 'modes' && (v == null || v == ''))
+					v = s.mode;
+
+				// THE ANCHORS BELONG TO THE INTERFACE THE MODEM WAS CREATED
+				// FROM. `device` is the obvious one; `netdev` is the same
+				// thing by another name — discovery resolves the modem and
+				// picks its datapath from it (discovery.uc:943,952), so a
+				// second interface supplying a different one would bind the
+				// section to the wrong hardware. Everything else in
+				// MIGRATE_MODEM_OPTS is modem POLICY (pincode, modes, mux,
+				// tty, the numerics) and is exactly what needs collecting.
+				// Raised by review, 2026-09-19.
+				if (k == 'device' || k == 'netdev' || v == null || v == '')
+					continue;
+
+				modem_written[have][k] = true;
+				put(have, k, v);
+			}
+
+			return have;
+		}
 
 		let name = next_modem_name();
 		modem_by_ident[ident] = name;
+		modem_written[name] = {};
 		push(changes, [ 'add', 'network', name, null, 'wwand_modem' ]);
 
 		for (let k in MIGRATE_MODEM_OPTS) {
@@ -1455,6 +1517,8 @@ export function migrate_plan(raw, opts)
 				}
 
 				let nd = parse_netdev(v);
+
+				modem_written[name].device = true;
 				put(name, 'device', (nd && nd.muxed) ? nd.netdev : v);
 				continue;
 			}
@@ -1463,8 +1527,10 @@ export function migrate_plan(raw, opts)
 			if (k == 'modes' && (v == null || v == ''))
 				v = s.mode;
 
-			if (v != null && v != '')
+			if (v != null && v != '') {
+				modem_written[name][k] = true;
 				put(name, k, v);
+			}
 		}
 
 		return name;

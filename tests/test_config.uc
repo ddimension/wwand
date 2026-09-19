@@ -413,6 +413,61 @@ r = padopt({
 	},
 });
 
+// A TYPO IN A NUMERIC MUST NOT SILENTLY TURN A GUARD OFF. A bare `+` makes NaN,
+// and NaN fails every comparison — `interval <= 0` is false for it — so it slips
+// past the guards the consumers have. num_opt (config.uc:33) exists for exactly
+// that, and the legacy inline reader was the one path that bypassed it: a
+// misspelled failreboot silently disabled the reboot rung, a misspelled
+// zero_rx_timeout silently disabled the watchdog, and neither warned. Found by a
+// full review, 2026-09-19.
+{
+	let bad = padopt({
+		network: {
+			wan: { '.type': 'interface', proto: 'wwand', device: 'wwan9',
+			       apn: 'x', failreboot: '100s', zero_rx_timeout: 'sixty',
+			       stats_interval: 'often', delay: '5s' },
+		},
+	});
+
+	let bm = bad.modems.compat_wwan9;
+
+	eq(bm.failreboot, 100, 'num: a typo\'d failreboot falls back to the default');
+	eq(bm.zero_rx_timeout, 21600, 'num: ...and so does zero_rx_timeout');
+	eq(bm.stats_interval, 60, 'num: ...and stats_interval');
+	eq(bm.delay, 0, 'num: ...and delay');
+
+	// sim_slot took the same shortcut, and its failure was quieter still:
+	// `!NaN` is false, so a typo'd slot neither took effect nor warned — it
+	// simply vanished. Raised by review, 2026-09-19.
+	let bad2 = padopt({
+		network: {
+			wan: { '.type': 'interface', proto: 'wwand', device: 'wwan8',
+			       apn: 'x', sim_slot: 'two', proto_error_limit: 'many',
+			       bearer_poll_count: 'few' },
+		},
+	});
+
+	eq(bad2.modems.compat_wwan8.sim_slot, 0, 'num: a typo\'d sim_slot falls back, not to NaN');
+	eq(bad2.modems.compat_wwan8.proto_error_limit, 25, 'num: ...and proto_error_limit');
+	eq(bad2.modems.compat_wwan8.bearer_poll_count, 3, 'num: ...and bearer_poll_count');
+	ok(length(filter(bad2.warnings ?? [], (w) => match(w, /sim_slot/))) > 0,
+		'num: ...and the slot typo is NAMED, not swallowed');
+
+	// the defaults must be the SAME ones the native reader uses, or the two
+	// paths drift apart silently
+	let nat = padopt({
+		network: {
+			m9: { '.type': 'wwand_modem', netdev: 'wwan9' },
+		},
+	});
+
+	eq(bm.failreboot, nat.modems.m9.failreboot, 'num: legacy and native agree on failreboot');
+	eq(bm.zero_rx_timeout, nat.modems.m9.zero_rx_timeout, 'num: ...and on zero_rx_timeout');
+
+	ok(length(bad.warnings ?? []) >= 4,
+		'num: and every one of them WARNS instead of passing silently');
+}
+
 // a disabled qmi interface is ignored entirely (no context synthesized)
 eq(r.contexts.wanc, null, 'compat: disabled interface produces no context');
 
@@ -1233,6 +1288,66 @@ eq(r.blocked_paths['/dev/ttyUSB0'], null,
 	'blocklist: a device NODE is not turned into a path claim');
 eq(r.blocked_paths['0'], null,
 	'blocklist: an mmcli index names no hardware and is not a path claim');
+
+function filter_modems(ch)
+{
+	let m = {};
+	for (let c in ch)
+		if (c[0] == 'add' && c[4] == 'wwand_modem')
+			m[c[2]] = true;
+	return m;
+}
+
+// TWO INTERFACES, ONE MODEM: the options are spread across both, and the strip
+// loop deletes MIGRATE_MODEM_OPTS from EVERY interface. ensure_modem returned
+// immediately on a repeat identity, so anything carried only on the SECOND
+// section was deleted and written nowhere — a pincode most damagingly, which
+// safety-blocks the SIM on the next PIN-required boot with nothing to say why.
+// The runtime merge this migration replaces read them all, first-wins. Found by
+// a full review, 2026-09-19.
+{
+	let ch = config.migrate_plan({ network: {
+		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0',
+		       apn: 'internet' },
+		wanb: { '.type': 'interface', proto: 'qmi', device: 'wwan0m2',
+		        apn: 'work', pincode: '4321', imei: '353165094409590' },
+	} });
+
+	let set_of = (opt) => filter(ch, (c) => c[0] == 'set' && c[3] == opt);
+	let stripped = (sec, opt) => length(filter(ch, (c) => c[0] == 'delete' &&
+	                                                     c[2] == sec && c[3] == opt));
+
+	eq(length(keys(filter_modems(ch))), 1, 'migrate2: one modem for the shared parent');
+
+	eq(length(set_of('pincode')), 1,
+		'migrate2: a pincode carried only on the SECOND interface is still moved');
+	eq(set_of('pincode')[0]?.[4], '4321', 'migrate2: ...with its value');
+	ok(match(set_of('pincode')[0]?.[2] ?? '', /^wwmodem/) != null,
+		'migrate2: ...onto the wwand_modem section');
+
+	eq(length(set_of('imei')), 1, 'migrate2: and so is an imei only it carries');
+
+	ok(stripped('wanb', 'pincode') > 0,
+		'migrate2: the option IS deleted from the interface — which is why it had to be copied');
+
+	// the anchors still belong to the interface the modem was created from
+	let dev = set_of('device');
+	eq(dev[0]?.[4], 'wwan0', 'migrate2: the device anchor is the FIRST interface\'s parent');
+
+	// ...and netdev is an anchor too: discovery resolves the modem and picks
+	// its datapath from it, so a second interface must not supply a different
+	// one. Raised by review, 2026-09-19.
+	let ch2 = config.migrate_plan({ network: {
+		wan: { '.type': 'interface', proto: 'qmi', device: 'wwan0', apn: 'a' },
+		wanb: { '.type': 'interface', proto: 'qmi', device: 'wwan0m2',
+		        netdev: 'wwan7', apn: 'b', pincode: '1111' },
+	} });
+
+	eq(length(filter(ch2, (c) => c[0] == 'set' && c[3] == 'netdev')), 0,
+		'migrate2: a second interface cannot re-anchor the modem on its own netdev');
+	eq(length(filter(ch2, (c) => c[0] == 'set' && c[3] == 'pincode')), 1,
+		'migrate2: ...while its policy options are still collected');
+}
 
 // --- migrate_plan must never touch a `proto 3g` interface --------------------
 //
