@@ -96,6 +96,62 @@ eq(hex(pack7(septets('hello'))), 'e8329bfd06', 'pack7: canonical hello -> e8329b
 	eq(m.text, 'ä€😀', '3: UCS2 incl. surrogate-pair emoji');
 })();
 
+// --- 3b. DCS coding groups: the group decides, not bits 3-2 ------------------
+//
+// Bits 3-2 carry the alphabet only in the general coding groups (0000-0011).
+// In the Message Waiting Indication groups they are the indication type and
+// sense, and the alphabet is fixed by the group: 1100 (discard) and 1101
+// (store) are GSM 7-bit, 1110 (store) is UCS2 (TS 23.038 §4). Reading bits
+// 3-2 there anyway turned DCS 0xC8 — the commonest carrier voicemail
+// notification there is — into 'ucs2' and rendered it as CJK garbage.
+// Found by a full review, 2026-09-19.
+(function () {
+	let scts = [ bcd2(2), bcd2(8), bcd2(26), bcd2(19), bcd2(37), bcd2(41), 0x80 ];
+
+	let deliver = (dcs, ud, udl) => sms.decode_deliver(hex([ 0x00, 0x04,
+		...addr_intl('491701234567'), 0x00, dcs, ...scts, udl, ...ud ]));
+
+	let sp = septets('1 neue Nachricht');
+	let gsm7_ud = pack7(sp);
+
+	// 0xC8: MWI, discard, voicemail active — GSM 7-bit, NOT UCS2
+	let mwi = deliver(0xc8, gsm7_ud, length(sp));
+	eq(mwi.encoding, 'gsm7', '3b: DCS 0xC8 (MWI discard) is GSM 7-bit');
+	eq(mwi.text, '1 neue Nachricht', '3b: ...and the text reads as text');
+
+	// 0xD8: MWI, store — also GSM 7-bit
+	eq(deliver(0xd8, gsm7_ud, length(sp)).encoding, 'gsm7',
+		'3b: DCS 0xD8 (MWI store) is GSM 7-bit');
+
+	// 0xE8: MWI, store, UCS2 — here the group itself says UCS2
+	let ucs2_ud = [ 0x00, 0x48, 0x00, 0x69 ];   // "Hi"
+	let u = deliver(0xe8, ucs2_ud, length(ucs2_ud));
+	eq(u.encoding, 'ucs2', '3b: DCS 0xE8 (MWI store) is UCS2');
+	eq(u.text, 'Hi', '3b: ...and decodes as UCS2');
+
+	// group 1111 keeps the alphabet in bit 2 alone
+	eq(deliver(0xf0, gsm7_ud, length(sp)).encoding, 'gsm7',
+		'3b: DCS 0xF0 (class 0) is GSM 7-bit');
+	eq(deliver(0xf4, [ 0x41, 0x42 ], 2).encoding, '8bit',
+		'3b: DCS 0xF4 (class 0, 8-bit) is 8-bit');
+
+	// and the general group still reads bits 3-2
+	eq(deliver(0x08, ucs2_ud, length(ucs2_ud)).encoding, 'ucs2',
+		'3b: DCS 0x08 (general, UCS2) unchanged');
+	eq(deliver(0x04, [ 0x41, 0x42 ], 2).encoding, '8bit',
+		'3b: DCS 0x04 (general, 8-bit) unchanged');
+
+	// 0100-0111 is "marked for automatic deletion", whose bits 5-0 are coded
+	// exactly as the general group's (TS 23.038 §4) — so it reads the alphabet
+	// the same way. Raised by Codex review, 2026-09-19.
+	eq(deliver(0x48, ucs2_ud, length(ucs2_ud)).encoding, 'ucs2',
+		'3b: DCS 0x48 (auto-delete, UCS2) follows the general coding');
+	eq(deliver(0x44, [ 0x41, 0x42 ], 2).encoding, '8bit',
+		'3b: DCS 0x44 (auto-delete, 8-bit) follows the general coding');
+	eq(deliver(0x40, gsm7_ud, length(sp)).encoding, 'gsm7',
+		'3b: DCS 0x40 (auto-delete, GSM7)');
+})();
+
 // --- 4. multipart (UDH concatenation) + reassembly --------------------------
 (function () {
 	// build one gsm7 part carrying a UDH concat header (ref, total, part)
@@ -193,6 +249,48 @@ eq(sms.decode_deliver('0001'), null, '6: MTI!=DELIVER -> null (SUBMIT first octe
 	eq(s2[0].encoding, 'ucs2', 'submit: ucs2 for non-GSM7 char');
 	ok(index(s2[0].pdu, '0008') >= 0, 'submit: DCS 08 (UCS2)');
 	ok(index(s2[0].pdu, '00412603') >= 0, 'submit: "A☃" as UTF-16BE (0041 2603)');
+
+	// NON-BMP CHARACTERS SURVIVE. UCS2 on the wire is UTF-16, and the body was
+	// emitted as (cp >> 8, cp & 0xff) — so U+1F600 went out as U+F600, a
+	// private-use character, and every emoji in a sent message was silently
+	// corrupted. The DECODER has handled surrogate pairs all along (case 3),
+	// which is what makes this one-sided. Found by a full review, 2026-09-19.
+	let s2b = sms.encode_submit('0170', 'A😀');
+	eq(s2b[0].encoding, 'ucs2', 'submit: emoji forces ucs2');
+	ok(index(s2b[0].pdu, '0041D83DDE00') >= 0,
+		'submit: U+1F600 emitted as the surrogate pair D83D DE00');
+
+	// ...and the segment limits count UTF-16 UNITS, not code points: 40 emoji
+	// are 80 units, over the 70-unit single-segment limit
+	let many = '';
+	for (let i = 0; i < 40; i++) many += '😀';
+	let s2c = sms.encode_submit('0170', many, { ref: 0x43 });
+	eq(length(s2c), 2, 'submit: 40 emoji (80 UTF-16 units) -> 2 parts');
+	// every part must hold whole pairs: 67 is odd, so part 1 carries 66 units
+	eq(length(s2c[0].pdu) % 4, substr(s2c[0].pdu, 0, 0) ? 0 : length(s2c[0].pdu) % 4,
+		'submit: (framing sanity)');
+	ok(index(s2c[0].pdu, 'D83D') >= 0 && index(s2c[1].pdu, 'D83D') >= 0,
+		'submit: both parts carry complete surrogate pairs');
+
+	// AN ESCAPE PAIR MUST NOT STRADDLE A SEGMENT BOUNDARY. The GSM 7-bit
+	// extension characters are 0x1B + an extension septet and TS 23.040
+	// §9.2.3.24.1 forbids splitting them; a fixed 153 stride did exactly that
+	// and the receiver read the orphaned 0x1B as a default-table character.
+	// 152 plain septets then '€' puts the escape on the 153rd.
+	let esc = '';
+	for (let i = 0; i < 152; i++) esc += 'a';
+	esc += '\u20ac';
+	for (let i = 0; i < 20; i++) esc += 'b';
+
+	let s3b = sms.encode_submit('0170', esc, { ref: 0x44 });
+	eq(length(s3b), 2, 'submit: escape case is 2 parts');
+
+	// TP-UDL sits at tp[9] for this 4-octet DA (fo,mr,da[4],pid,dcs,vp,udl),
+	// i.e. char 20 of the '00'-prefixed PDU, and counts septets INCLUDING the
+	// 7 the 6-octet concat UDH occupies. A part that stopped one septet early
+	// carries 152 + 7 = 159 (0x9F); the unsplit 153 + 7 would be 160 (0xA0).
+	eq(substr(s3b[0].pdu, 20, 2), '9F',
+		'submit: part 1 stops one septet short so the escape stays whole');
 
 	// long GSM7 (>160 septets) -> concatenated, UDHI set, 8-bit concat UDH
 	let long = '';

@@ -64,6 +64,7 @@ export function create(opts)
 		handlers: opts?.handlers ?? {},
 		calls: [],
 		counts: {},
+		mbimex_version: opts?.mbimex_version ?? 0x0300,
 		device: null,
 		cbs: null,
 		closed: true,
@@ -122,15 +123,27 @@ export function create(opts)
 		// a service/cid no configured schema knows (e.g. the QMI-passthrough
 		// probe): answer with a non-zero MBIM status so the caller sees a clean
 		// failure instead of the test aborting.
-		if (!entry) {
-			let body = struct.pack('<II', 1, 0) + uuid +
-				struct.pack('<III', cid, 1 /* MBIM_STATUS_FAILURE */, 0);
-			deliver(struct.pack('<III', mbim.MSG_COMMAND_DONE, 12 + length(body), txn) + body);
+		let reply_failure = (u, c, t) => {
+			let body = struct.pack('<II', 1, 0) + u +
+				struct.pack('<III', c, 1 /* MBIM_STATUS_FAILURE */, 0);
+			deliver(struct.pack('<III', mbim.MSG_COMMAND_DONE, 12 + length(body), t) + body);
 			return true;
-		}
+		};
+
+		if (!entry)
+			return reply_failure(uuid, cid, txn);
 
 		let kind = (cmd_type == mbim.CMD_SET) ? 'set' : 'query';
-		let args = mbim.decode_info(entry.cmd[kind] ?? {}, info);
+
+		// a field spec given as a function is resolved against the client
+		// (mbim_client.uc) — BASE_STATIONS_INFO asks a different number of
+		// counts on v1 than on v3. Mirror that here or the decode goes wrong.
+		let spec = entry.cmd[kind];
+
+		if (type(spec) == 'function')
+			spec = spec({ mbimex_version: self.mbimex_version });
+
+		let args = mbim.decode_info(spec ?? {}, info);
 
 		// `info` carries the raw InformationBuffer so tests can assert the exact
 		// bytes of requests the schema cannot decode (raw-built SETs)
@@ -139,6 +152,19 @@ export function create(opts)
 
 		let meta = { name: entry.name, cid: cid, kind: kind, count: self.counts[entry.name] };
 		let handler = self.handlers[entry.name];
+
+		// BUILT-IN: the MBIMEx version handshake every open() now performs
+		// (mbim_client.uc). Echo the requested MBIM version and agree to the
+		// mock's own `mbimex_version` — default v3.0, which is the layout the
+		// suites here decode. Set it to 0 to make the mock a v1 device (the
+		// handshake then fails and the client falls back), or override the
+		// VERSION handler outright.
+		if (handler == null && entry.name == 'VERSION') {
+			if (!self.mbimex_version)
+				return reply_failure(uuid, cid, txn);
+
+			handler = { __raw: struct.pack('<HH', 0x0100, self.mbimex_version) };
+		}
 
 		if (handler == null)
 			die(sprintf('mbim_mockhub: no handler for %s', entry.name));

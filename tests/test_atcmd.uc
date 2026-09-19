@@ -365,9 +365,21 @@ eq(sc.state, 'NOCONN', 'qeng: serving state');
 eq(sc.lte, { mcc: 262, mnc: '01', cid: 29582339, tac: 3071, band: 3, earfcn: 1300,
 	pci: 246, bandwidth_mhz: 20, rsrp: -93, rsrq: -11, rssi: -61, sinr: 21 },
 	'qeng: LTE serving cell (dlbw idx 5 -> 20 MHz, mcc/mnc/cid/tac decoded)');
+// THE NR BANDWIDTH INDEX IS NOT THE LTE ONE. This asserted 10 MHz for index 3
+// because the NR branches ran the value through BW_IDX_MHZ — where index 0 is
+// 1.4 MHz, a bandwidth NR does not have, and anything above 5 is null. The
+// numbers looked plausible and were not. parse_qcainfo refuses the identical
+// conversion in the same file for the identical reason. The table that would
+// settle it is the Quectel RG50xQ AT manual's <NR_DL_bandwidth>, which this
+// tree does not carry and no modem on hand can confirm (the RG650E on the
+// bench registers LTE-only, 2026-09-19). So: null, and everything else about
+// the carrier still decodes. Found by a full review, 2026-09-19.
 eq(sc.nr, { mode: 'NSA', mcc: 262, mnc: '01', band: 1, arfcn: 431070, pci: 242,
-	bandwidth_mhz: 10, rsrp: -102, sinr: 19, rsrq: -11 },
-	'qeng: NR5G-NSA carrier (dlbw idx 3 -> 10 MHz)');
+	bandwidth_mhz: null, rsrp: -102, sinr: 19, rsrq: -11 },
+	'qeng: NR5G-NSA carrier decodes, bandwidth left null (NR index, not LTE)');
+
+// the LTE row in the SAME response still converts — the table is right there
+eq(sc.lte.bandwidth_mhz, 20, 'qeng: the LTE bandwidth is unaffected');
 
 eq(atcmd.parse_qeng_servingcell([ '+QENG: "servingcell","NOCONN"' ]),
 	{ state: 'NOCONN', lte: null, nr: null }, 'qeng: state only, no cells');

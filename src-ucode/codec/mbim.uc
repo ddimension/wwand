@@ -392,6 +392,27 @@ export function decode(buf)
 	case MSG_INDICATE_STATUS: {
 		// fragment(8) + uuid(16) + cid(4) [+ status(4) for DONE] + infolen(4)
 		let p = 12 + 8;
+
+		// THE FRAGMENT HEADER IS NOT PADDING. It was skipped unread, so a
+		// response larger than the negotiated MaxControlTransfer (4096) was
+		// silently TRUNCATED to its first fragment, and every continuation
+		// fragment — which carries only this header plus more InformationBuffer,
+		// no uuid/cid/status — was then parsed as though those 24 bytes were a
+		// service uuid and a cid, yielding a bogus message. Nothing reported an
+		// error; the data was simply short. It bites SMS read-all once a SIM
+		// holds enough PDUs. Reassembly is the client's job (it owns the
+		// pending-by-transaction map); the codec's job is to stop hiding this.
+		// Found by a full review, 2026-09-19.
+		if (length(buf) >= 12 + 8) {
+			msg.frag_total = struct.unpack('<I', substr(buf, 12, 4))[0];
+			msg.frag_index = struct.unpack('<I', substr(buf, 16, 4))[0];
+		}
+
+		// a continuation fragment is header + body, nothing else
+		if ((msg.frag_index ?? 0) > 0) {
+			msg.info = substr(buf, p) ?? '';
+			break;
+		}
 		// A truncated frame must be REJECTED, not thrown on: struct.unpack of a
 		// short substr returns null and the [0] below would throw out of the
 		// read handler, taking the whole message loop with it — for one bad

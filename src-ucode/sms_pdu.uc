@@ -256,9 +256,35 @@ export function decode_deliver(pdu_hex)
 	pos += 7;
 	let udl = b(a, pos++);
 
-	// data coding: bits 3-2 select the alphabet (00 GSM7, 01 8-bit, 10 UCS2)
-	let alpha = (dcs & 0x0c) >> 2;
-	let encoding = (alpha == 2) ? 'ucs2' : (alpha == 1) ? '8bit' : 'gsm7';
+	// DATA CODING: THE GROUP FIRST, THEN THE ALPHABET (TS 23.038 §4).
+	//
+	// Bits 3-2 carry the alphabet only in the general coding groups (0000-0011).
+	// In the Message Waiting Indication groups they are the indication type and
+	// sense, and the alphabet is fixed by the group itself: 1100 (discard) and
+	// 1101 (store) are GSM 7-bit, 1110 (store) is UCS2. Reading bits 3-2 there
+	// anyway turned an ordinary carrier voicemail notification — DCS 0xC8, the
+	// commonest MWI value there is — into 'ucs2', and it rendered as CJK
+	// garbage. Group 1111 puts the alphabet in bit 2 alone and happened to come
+	// out right, which is why this survived. Found by a full review,
+	// 2026-09-19.
+	let group = (dcs >> 4) & 0x0f;
+	let encoding;
+
+	// 0100-0111 is the "message marked for automatic deletion" group and TS
+	// 23.038 §4 says its bits 5-0 are coded exactly as the general group's, so
+	// it reads the alphabet the same way — DCS 0x48 is UCS2, not GSM7. Raised
+	// by Codex review, 2026-09-19.
+	if (group <= 0x07) {
+		let alpha = (dcs & 0x0c) >> 2;
+
+		encoding = (alpha == 2) ? 'ucs2' : (alpha == 1) ? '8bit' : 'gsm7';
+	}
+	else if (group == 0x0e)
+		encoding = 'ucs2';                        // MWI, store, UCS2
+	else if (group == 0x0f)
+		encoding = (dcs & 0x04) ? '8bit' : 'gsm7';   // coding/message class
+	else
+		encoding = 'gsm7';   // MWI 1100/1101, and the reserved 1000-1011
 
 	let udh = null, ud_off = pos, skip_septets = 0, skip_octets = 0;
 
@@ -498,16 +524,68 @@ export function encode_submit(number, text, opts)
 	if (gsm7) {
 		if (length(sep) <= 160)
 			segs = [ sep ];
-		else
-			for (let i = 0; i < length(sep); i += 153)
-				push(segs, slice(sep, i, i + 153));
+		else {
+			// AN ESCAPE PAIR MUST NOT STRADDLE A SEGMENT BOUNDARY. The GSM 7-bit
+			// extension characters (€ [ ] { } \ | ~ ^) are 0x1B followed by the
+			// extension septet, and TS 23.040 §9.2.3.24.1 forbids splitting
+			// them — the receiver reads a lone 0x1B as the default-table
+			// character it is not. A fixed 153 stride did exactly that: a long
+			// message whose 153rd septet was the escape showed " e" at the
+			// boundary. Cut one septet earlier instead; the orphan leads the
+			// next segment. Found by a full review, 2026-09-19.
+			let i = 0;
+
+			while (i < length(sep)) {
+				let n = min(153, length(sep) - i);
+
+				if (n == 153 && sep[i + n - 1] == 0x1b)
+					n--;
+
+				push(segs, slice(sep, i, i + n));
+				i += n;
+			}
+		}
 	}
 	else {
-		if (length(cps) <= 70)
-			segs = [ cps ];
-		else
-			for (let i = 0; i < length(cps); i += 67)
-				push(segs, slice(cps, i, i + 67));
+		// UCS2 ON THE WIRE IS UTF-16, NOT CODE POINTS.
+		//
+		// The body emitted (cp >> 8, cp & 0xff), so anything above U+FFFF lost
+		// its high bits: U+1F600 went out as U+F600, a private-use character —
+		// every emoji in a sent message was silently corrupted. And the 70/67
+		// limits counted CODE POINTS, so a segment holding non-BMP characters
+		// exceeded 140 octets of TP-UD. The DECODER has handled surrogate
+		// pairs all along (:123-127), which is what makes this one-sided.
+		// Found by a full review, 2026-09-19.
+		let units = [];
+
+		for (let cp in cps) {
+			if (cp > 0xffff) {
+				let v = cp - 0x10000;
+
+				push(units, 0xd800 | (v >> 10));
+				push(units, 0xdc00 | (v & 0x3ff));
+			}
+			else
+				push(units, cp);
+		}
+
+		if (length(units) <= 70)
+			segs = [ units ];
+		else {
+			let i = 0;
+
+			while (i < length(units)) {
+				let n = min(67, length(units) - i);
+				let last = units[i + n - 1];
+
+				// and a surrogate pair is no more splittable than an escape
+				if (n == 67 && last >= 0xd800 && last <= 0xdbff)
+					n--;
+
+				push(segs, slice(units, i, i + n));
+				i += n;
+			}
+		}
 	}
 
 	let total = length(segs);
@@ -538,7 +616,9 @@ export function encode_submit(number, text, opts)
 		else {
 			let seg = segs[n];
 			let body = [];
-			for (let cp in seg) { push(body, (cp >> 8) & 0xff); push(body, cp & 0xff); }
+
+			// seg holds UTF-16 code units, each exactly two octets
+			for (let u in seg) { push(body, (u >> 8) & 0xff); push(body, u & 0xff); }
 			push(tp, length(udh) + length(body));    // TP-UDL (octets)
 			for (let o in udh) push(tp, o);
 			for (let o in body) push(tp, o);

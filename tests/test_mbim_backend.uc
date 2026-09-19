@@ -107,10 +107,37 @@ function build_base_stations() {
 	return fixed + data;
 }
 
+// The same content in the v1 layout: no SystemSubType, so every pointer after
+// SystemType sits 4 bytes earlier, and there are no NR arrays at all (libmbim
+// 1.32.0, mbim-service-ms-basic-connect-extensions.json vs -v3.json).
+function build_base_stations_v1() {
+	let lte_serv = cell_struct('26201', [ 12345678, 1300, 42, 0x1234, -95, -10, 0 ]);
+	let lte_neigh = cell_struct('', [ 0, 1300, 99, 0, -105, -14 ]);
+
+	let base = 76;   // SystemType + 4 ms-structs + 5 array pointers
+	let lte_serv_off = base;
+	let lte_neigh_off = lte_serv_off + length(lte_serv);
+
+	let ptrs = {};
+	ptrs[28] = [ lte_serv_off, length(lte_serv) ];        // LteServingCell
+	ptrs[60] = [ lte_neigh_off, 4 + length(lte_neigh) ];  // LteNeighboringCells
+
+	let fixed = '';
+	for (let off = 0; off < base; off += 4) {
+		if (off == 0)       fixed += p32(ext.DATA_CLASS_LTE);
+		else if (ptrs[off]) fixed += p32(ptrs[off][0]) + p32(ptrs[off][1]);
+		else if (ptrs[off - 4]) continue;
+		else fixed += p32(0);
+	}
+
+	return fixed + lte_serv + p32(1) + lte_neigh;
+}
+
 // --- client harness ----------------------------------------------------------
 
-function make_mc(schema, handlers, hooks) {
-	let mock = mbim_mockhub.create({ schema: schema, handlers: handlers });
+function make_mc(schema, handlers, hooks, opts) {
+	let mock = mbim_mockhub.create({ schema: schema, handlers: handlers,
+		mbimex_version: opts?.mbimex_version });
 	let mc = mbim_client.create(mock, hooks ?? {});
 	mock.transport_open('/dev/mock', {
 		on_raw: (hub, msg) => { let dec = mbim.decode(msg); if (dec) mc.on_message(dec); },
@@ -174,11 +201,100 @@ function s_signal(next) {
 	}));
 }
 
+// A RESPONSE LARGER THAN MaxControlTransfer ARRIVES IN FRAGMENTS.
+//
+// The codec skipped the 8-byte fragment header unread, so fragment 0 was handed
+// up as the whole answer and every continuation — which carries only the
+// message and fragment headers plus more InformationBuffer, no uuid/cid/status
+// — was parsed as though those 24 bytes were a service uuid and a cid. Nothing
+// errored; the data was simply short. An SMS read-all on a SIM holding enough
+// PDUs lost its tail. Found by a full review, 2026-09-19.
+function s_fragments(next) {
+	// the handler swallows the command, so the request stays pending and we
+	// can deliver the answer ourselves, in pieces
+	let mc = make_mc(bc, { PACKET_SERVICE: () => null });
+
+	let frag = (txn, total, idx, body) => {
+		let payload = struct.pack('<II', total, idx) + body;
+
+		return struct.pack('<III', mbim.MSG_COMMAND_DONE, 12 + length(payload), txn) + payload;
+	};
+
+	mc.open(() => {
+		let head = '';
+		for (let i = 0; i < 40; i++) head += 'A';
+		let tail = '';
+		for (let i = 0; i < 24; i++) tail += 'B';
+
+		let txn = mc.next_txn;
+
+		mc.command(bc, 'PACKET_SERVICE', 'query', {}, (err, data, info) => {
+			eq(err, null, 'frag: the reassembled answer is delivered');
+			eq(length(info), length(head) + length(tail),
+				'frag: both fragments are in the information buffer');
+			eq(substr(info, length(head)), tail,
+				'frag: the continuation is appended, not parsed as its own message');
+			next();
+		});
+
+		// fragment 0: full header, declaring the TOTAL information length
+		mc.on_message(mbim.decode(frag(txn, 2, 0,
+			mbim.uuid_bytes(bc.service) + struct.pack('<III', 3 /* cid */, 0 /* status */,
+				length(head) + length(tail)) + head)));
+
+		// AN OUT-OF-ORDER FRAGMENT MUST NOT COMPLETE THE SET. Counting
+		// arrivals rather than checking the index meant fragment 2 arriving
+		// where 1 was due still satisfied the total — the answer completed
+		// with the wrong bytes, in arrival order. Raised by Codex review,
+		// 2026-09-19.
+		mc.on_message(mbim.decode(frag(txn, 2, 2, 'XX')));   // 1 was due
+
+		// that dropped the set, so a fresh fragment 0 starts it over
+		mc.on_message(mbim.decode(frag(txn, 2, 0,
+			mbim.uuid_bytes(bc.service) + struct.pack('<III', 3, 0,
+				length(head) + length(tail)) + head)));
+
+		// fragment 1: headers and the rest of the buffer, nothing else
+		mc.on_message(mbim.decode(frag(txn, 2, 1, tail)));
+	});
+}
+
+// A PRE-MBIMEx DEVICE MUST BE DECODED WITH THE v1 LAYOUT.
+//
+// Nothing was ever sent to tell the modem the host speaks MBIMEx, so a
+// spec-conforming device answers v1 — and v1 has no SystemSubType, putting
+// every ms-struct pointer 4 bytes earlier than the v3 layout wwand decoded.
+// That does not fail: the bounds checks absorb it and wwand publishes
+// FABRICATED serving-cell PCI/TAC/RSRP into telemetry and LuCI. The handshake
+// at open() settles which layout applies; a modem that refuses CID 15 is v1.
+// Found by a full review, 2026-09-19.
+function s_cells_v1(next) {
+	// mbimex_version 0 -> the mock refuses the handshake, like a v1 modem
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations_v1() } },
+		null, { mbimex_version: 0 });
+
+	mc.open(() => {
+		eq(mc.mbimex_version, 0, 'cells v1: the handshake was refused, so v1 it is');
+
+		backend.get_cells(mc, (cells) => {
+			ok(cells != null, 'cells v1: decoded');
+			eq(cells.lte_intra?.serving_cell_id, 42, 'cells v1: the real serving pci, not a shifted read');
+			eq(cells.lte_intra?.tac, 0x1234, 'cells v1: the real tac');
+			eq(cells.lte_intra?.earfcn, 1300, 'cells v1: the real earfcn');
+			eq(cells.lte_intra?.cells[0]?.rsrp, -950, 'cells v1: the real rsrp');
+			eq(length(cells.lte_intra?.cells ?? []), 2, 'cells v1: serving + 1 neighbour');
+			eq(cells.nr5g_cell, null, 'cells v1: no NR arrays exist in the v1 layout');
+			next();
+		});
+	});
+}
+
 // get_cells: LTE serving + 1 neighbour + NR serving
 function s_cells(next) {
 	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations() } });
 
 	mc.open(() => backend.get_cells(mc, (cells) => {
+		eq(mc.mbimex_version, 0x0300, 'cells: the handshake agreed MBIMEx 3.0');
 		ok(cells != null, 'cells: decoded');
 		let li = cells.lte_intra;
 		eq(li.plmn, '262/01', 'cells: lte plmn from provider id');
@@ -384,7 +500,7 @@ function s_at_over_mbim_compal(next) {
 
 // --- runner ------------------------------------------------------------------
 
-let scenarios = [ s_signal, s_cells, s_data_mode, s_reg_detail, s_slots,
+let scenarios = [ s_signal, s_cells, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
 	s_at_over_mbim, s_at_over_mbim_compal ];
 let i = 0;
 

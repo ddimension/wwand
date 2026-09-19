@@ -175,8 +175,31 @@ const F_NEIGH_NR = [
 //  80  NrServingCells 88 NrNeighborCells
 // Only the LTE + NR cells are decoded (the metrics wwand surfaces); the other
 // RATs are skipped by advancing past their pointers.
-export function decode_base_stations_info(info)
+// v1 HAS NO SystemSubType, so every pointer after it sits 4 bytes earlier and
+// there are no NR arrays at all (libmbim 1.32.0, mbim-service-ms-basic-connect-
+// extensions.json: SystemType, 4 serving ms-structs, 5 array pointers; the v3
+// file adds SystemSubType and the two NR arrays). Decoding a v1 answer with the
+// v3 offsets does not fail — the bounds checks absorb it — it publishes
+// FABRICATED serving-cell PCI/TAC/RSRP. Which layout applies is settled by the
+// version handshake at mbim_client.uc open(); a modem that refused it is v1.
+// Found by a full review, 2026-09-19.
+export function mbimex_v3(mc)
 {
+	return (mc?.mbimex_version ?? 0) >= 0x0300;
+};
+
+export function decode_base_stations_info(info, mc)
+{
+	if (!mbimex_v3(mc))
+		return {
+			system_type:     _u32(info, 0),
+			system_sub_type: null,
+			lte_serving:     _read_ms_struct(info, 28, F_SERVING_LTE),
+			lte_neighbors:   _read_ms_struct_array(info, 60, F_NEIGH_LTE),
+			nr_serving:      [],
+			nr_neighbors:    [],
+		};
+
 	return {
 		system_type:     _u32(info, 0),
 		system_sub_type: _u32(info, 4),
@@ -409,10 +432,18 @@ export const commands = {
 	// vs v3 JSON (MaxNrCount + Nr serving/neighbour arrays).
 	BASE_STATIONS_INFO: {
 		cid: 11,
-		query: {
-			max_gsm_count: 'u32', max_umts_count: 'u32', max_tdscdma_count: 'u32',
-			max_lte_count: 'u32', max_cdma_count: 'u32', max_nr_count: 'u32',
-		},
+		// v1 takes FIVE counts; MaxNrCount is a v3 addition. A field spec given
+		// as a function is resolved against the client (mbim_client.uc), so the
+		// negotiated version decides both halves of this command.
+		query: (mc) => mbimex_v3(mc)
+			? {
+				max_gsm_count: 'u32', max_umts_count: 'u32', max_tdscdma_count: 'u32',
+				max_lte_count: 'u32', max_cdma_count: 'u32', max_nr_count: 'u32',
+			}
+			: {
+				max_gsm_count: 'u32', max_umts_count: 'u32', max_tdscdma_count: 'u32',
+				max_lte_count: 'u32', max_cdma_count: 'u32',
+			},
 		decode: decode_base_stations_info,
 	},
 
