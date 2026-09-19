@@ -62,6 +62,18 @@
 // Callers driven by a user operation rather than a clock (sim.uc `_apdu_be`,
 // esim.uc, sms.uc) do NOT pass it — re-probing in the middle of an APDU session
 // would be both wasteful and unsafe.
+//
+// WHAT THIS DOES NOT REACH, so nobody has to rediscover it: a candidate can
+// decline for a reason of its own that outlives the re-probe. The MBIM
+// passthrough rungs all go through `modem_mbim._ensure_pt`, which latches
+// `_pt_failed` when the SHIM SETUP fails and then declines without trying again
+// until the modem is torn down (modem_mbim.uc:1019,1025,1295). That latch is
+// deliberate — it is what keeps a modem with no passthrough at all (RG650E)
+// from rebuilding a shim on every capability — so re-probing walks the ladder
+// and the top rung still says no. The field case this was written for is the
+// other one: a passthrough that WAS built and later stopped answering, where
+// `self.pt` exists and the probe is a real request. Raised by review,
+// 2026-09-19.
 const REPROBE_DEFAULT = 30;
 
 // obj: the modem (state carrier); key: the cache slot, e.g. '_apdu_be'.
@@ -71,10 +83,22 @@ export function choose(obj, key, candidates, cb, opts)
 {
 	let cached = obj[key];
 	let uses = key + '_uses';
+	let busy = key + '_probing';
 
 	// only a non-preferred choice is provisional; the top candidate winning is
 	// already the best answer the ladder has, and re-probing it proves nothing.
-	if (cached != null && opts?.reprobe && cached != candidates[0]?.name) {
+	//
+	// NOT WHILE A WALK IS ALREADY RUNNING. The probes are asynchronous, and the
+	// fast telemetry loop and the slow one call the same key independently
+	// (telemetry_mbim.uc refresh_fast / tick), so a second caller can arrive
+	// mid-walk. Dropping the cache under it starts a competing walk whose
+	// callbacks both write obj[key] — last one home wins, regardless of which
+	// is newer — and whose outcomes share one _fails counter. Raised by review,
+	// 2026-09-19. This guard removes the re-probe's contribution to that; a
+	// walk begun because the CURRENT choice failed can still overlap, which is
+	// older behaviour and self-correcting (the next outcome settles it).
+	if (cached != null && opts?.reprobe && !obj[busy] &&
+	    cached != candidates[0]?.name) {
 		obj[uses] = (obj[uses] ?? 0) + 1;
 
 		// `reprobe: true` takes the default; a number overrides it. Checked by
@@ -97,22 +121,76 @@ export function choose(obj, key, candidates, cb, opts)
 	if (cached != null)
 		return cb(cached == 'none' ? null : cached);
 
+	// ONE WALK PER KEY. A caller arriving while a walk is in flight waits for
+	// its result instead of racing it: two walks both write obj[key], the later
+	// one home wins regardless of which is newer, and their outcomes share one
+	// _fails counter. The probes are asynchronous and the fast telemetry loop
+	// calls the same key as the slow one, independently, so this is reachable —
+	// it merely became easier to reach when the re-probe gave the cache a second
+	// way to disappear. Raised by review, 2026-09-19.
+	let waiters = key + '_waiters';
+
+	if (obj[busy]) {
+		obj[waiters] = obj[waiters] ?? [];
+		push(obj[waiters], cb);
+		return;
+	}
+
 	let i = 0, step;
 
+	// A WALK IS IDENTIFIED, not just flagged. Clearing the shared marker is not
+	// enough to retire one: forget()/reset() runs on teardown and on a protocol
+	// change while probes are still outstanding, a new walk then starts, and the
+	// OLD walk's callback would still write obj[key], clear the new walk's
+	// marker and drain ITS waiters with a stale answer — resurrecting a cache
+	// that was deliberately dropped, for a modem that may be gone. The token
+	// makes a superseded walk a no-op. Raised by review, 2026-09-19.
+	let gen = key + '_gen';
+	let token = (obj[gen] ?? 0) + 1;
+
+	obj[gen] = token;
+	obj[busy] = true;
+
+	let settled = false;
+	let current = () => (obj[gen] == token);
+
+	let settle = (name) => {
+		// once, and only for the walk that is still the current one: a probe
+		// that calls back twice must not answer twice.
+		if (settled || !current())
+			return;
+
+		settled = true;
+		delete obj[uses];
+		delete obj[busy];
+
+		let queued = obj[waiters];
+		delete obj[waiters];
+
+		cb(name);
+
+		for (let w in (queued ?? []))
+			w(name);
+	};
+
 	step = () => {
+		if (!current())
+			return;
+
 		if (i >= length(candidates)) {
 			obj[key] = 'none';
-			delete obj[uses];
-			return cb(null);
+			return settle(null);
 		}
 
 		let c = candidates[i++];
 
 		c.probe((available) => {
+			if (!current())
+				return;
+
 			if (available) {
 				obj[key] = c.name;
-				delete obj[uses];
-				return cb(c.name);
+				return settle(c.name);
 			}
 
 			step();
@@ -182,6 +260,16 @@ export function forget(obj, ...keys)
 		delete obj[k];
 		delete obj[k + '_fails'];
 		delete obj[k + '_uses'];
+		// ...including the in-flight marker and anyone queued behind it: a walk
+		// abandoned by a teardown would otherwise block every later re-probe of
+		// this key, and hold references to callbacks of a modem that is gone.
+		delete obj[k + '_probing'];
+		delete obj[k + '_waiters'];
+		// ...and retire whatever walk was running: bumping the generation makes
+		// its outstanding callbacks no-ops rather than writers of a dropped
+		// cache. A caller queued behind it is dropped with it — its modem is
+		// being torn down, which is why forget() was called.
+		obj[k + '_gen'] = (obj[k + '_gen'] ?? 0) + 1;
 	}
 };
 

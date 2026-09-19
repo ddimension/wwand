@@ -1113,7 +1113,11 @@ export function create(opts)
 		// seconds after re-enumeration would otherwise be `generic` for the
 		// life of the new object — no vendor ip_config, no IPv4 (FM350-GL,
 		// ddimension/wwand#32). Only a complete answer is worth remembering.
-		if ((entry.modem?.info?.manufacturer ?? '') != '')
+		// ...and only what THIS modem said. A carried-over identity written back
+		// here would attach the old manufacturer to the new IMEI and outlive the
+		// mistake (raised by review, 2026-09-19).
+		if ((entry.modem?.info?.manufacturer ?? '') != '' &&
+		    !entry.modem.info.ident_carried)
 			entry._ident = {
 				manufacturer: entry.modem.info.manufacturer,
 				model: entry.modem.info.model,

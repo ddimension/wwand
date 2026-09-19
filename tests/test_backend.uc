@@ -274,4 +274,88 @@ eq(seq[-1], 'empty-ok', 'run_seq: empty step list still calls cb');
 		'reset: the decision and everything said about it are dropped together');
 }
 
+// --- a re-probe must not pull the cache out from under a running walk --------
+//
+// The probes are asynchronous and the fast telemetry loop calls the same key as
+// the slow one, independently (telemetry_mbim.uc). If the use-counter fires
+// while a ladder walk is still in flight, a second walk starts; both callbacks
+// write the cache, the later one home wins regardless of which is newer, and
+// their outcomes share one _fails counter. Found by review, 2026-09-19.
+{
+	let obj = {};
+	let pending = null;
+	let walks = 0;
+	let ladder = [
+		{ name: 'slow', probe: (okcb) => { walks++; pending = okcb; } },   // never answers by itself
+		{ name: 'fast', probe: (okcb) => okcb(true) },
+	];
+
+	// first walk: parks in the top candidate's probe
+	backend.choose(obj, 'k', ladder, () => null, { reprobe: 1 });
+	eq(walks, 1, 'inflight: the first walk started');
+	eq(obj.k, null, 'inflight: ...and has not decided yet');
+
+	// a caller arriving mid-walk must not start a second one
+	backend.choose(obj, 'k', ladder, () => null, { reprobe: 1 });
+	backend.choose(obj, 'k', ladder, () => null, { reprobe: 1 });
+	eq(walks, 1, 'inflight: no competing walk is started while one is running');
+
+	// the queued callers get the ONE walk's answer — they are not left hanging,
+	// which is the other half of not racing
+	let answers = [];
+	backend.choose(obj, 'k', ladder, (be) => push(answers, be), { reprobe: 1 });
+
+	// let it finish on the fallback
+	pending(false);
+	eq(obj.k, 'fast', 'inflight: the walk settles on the fallback');
+	eq(answers, [ 'fast' ], 'inflight: ...and a caller queued behind it is answered');
+
+	// and now the counter works again: reprobe 1 -> the next cached use re-walks
+	backend.choose(obj, 'k', ladder, () => null, { reprobe: 1 });
+	eq(walks, 2, 'inflight: once finished, re-probing resumes');
+	pending(false);
+
+	// forget() clears the marker too, or a walk abandoned by a teardown would
+	// block every later re-probe of this key
+	let o2 = { k: 'fast', k_probing: true };
+	backend.forget(o2, 'k');
+	eq(o2.k_probing, null, 'inflight: forget() clears an abandoned walk marker');
+}
+
+// ...and clearing the marker is NOT enough on its own. forget() runs on
+// teardown and on a protocol change while probes are still outstanding; the
+// retired walk's callback must not then write the cache, clear the new walk's
+// marker, or answer the new walk's waiters with its stale result — for a modem
+// that may already be gone. Found by review, 2026-09-19.
+{
+	let obj = {};
+	let held = null;
+	let ladder = [
+		{ name: 'slow', probe: (okcb) => { held = okcb; } },
+		{ name: 'fast', probe: (okcb) => okcb(true) },
+	];
+
+	let answered = [];
+	backend.choose(obj, 'k', ladder, (be) => push(answered, [ 'first', be ]));
+
+	// teardown while that walk is parked in its probe
+	backend.forget(obj, 'k');
+
+	// a new walk, which settles immediately on the fallback
+	let held2 = held;
+	held = null;
+	backend.choose(obj, 'k', ladder, (be) => push(answered, [ 'second', be ]));
+	held(false);
+
+	eq(obj.k, 'fast', 'retired walk: the new walk decided');
+	eq(answered, [ [ 'second', 'fast' ] ], 'retired walk: only the new one answered');
+
+	// now the RETIRED walk finally reports — and must change nothing
+	held2(true);
+
+	eq(obj.k, 'fast', 'retired walk: a superseded probe does not resurrect the cache');
+	eq(answered, [ [ 'second', 'fast' ] ],
+		'retired walk: ...and does not answer for a modem that was torn down');
+}
+
 done('test_backend');

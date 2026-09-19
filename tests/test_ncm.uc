@@ -2007,6 +2007,51 @@ push(scenarios, {
 	},
 });
 
+// A CARRY-OVER THAT TURNS OUT TO BE THE WRONG HARDWARE IS DROPPED, not merely
+// warned about. Running on another vendor's ip_config, dial, slot and URC
+// recipe is worse than running on none — and if it were left standing, the
+// daemon would write the old manufacturer back under the NEW imei at the next
+// detach, so one borrowed guess would become the remembered identity of every
+// object after it. Found by review, 2026-09-19.
+push(scenarios, {
+	name: 's9l_carry_over_is_dropped_on_an_imei_mismatch',
+	script: fscript([
+		{ re: /^AT\+CGMI$/, term: 'ERROR', lines: [] },
+		{ re: /^AT\+CGMM$/, term: 'ERROR', lines: [] },
+		{ re: /^AT\+CGMR$/, term: 'ERROR', lines: [] },
+		{ re: /^AT\+CGSN$/, lines: [ '999999999999999' ] },   // different modem
+	]),
+	mtiming: { ident_retry: 25 },
+	known_ident: { manufacturer: 'Fibocom Wireless Inc.', model: 'FM350-GL',
+	               imei: '353165094409590' },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		eq(ncm_vendors.vendor_name(env.modem.vendor), 'generic',
+			'imei mismatch: the borrowed recipe is put back, not kept');
+		eq(env.modem.info?.manufacturer, null,
+			'imei mismatch: ...and the borrowed manufacturer with it');
+		eq(env.modem.info?.ident_carried, null,
+			'imei mismatch: nothing is left for the daemon to write back');
+		env.finish();
+	},
+});
+
+// ...and a carry-over that DOES match is still marked as borrowed, so the
+// daemon can tell it apart from something this modem actually said.
+push(scenarios, {
+	name: 's9m_a_carried_identity_is_marked_as_borrowed',
+	script: fscript(refuse_script),
+	mtiming: { ident_retry: 25 },
+	known_ident: { manufacturer: 'Fibocom Wireless Inc.', model: 'FM350-GL',
+	               imei: '353165094409590' },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		eq(env.modem.info?.ident_carried, true,
+			'carry-over: the identity is flagged as borrowed, not as read');
+		env.finish();
+	},
+});
+
 // --- the delayed retry must not outlive the modem -----------------------------
 //
 // teardown() runs on exactly the path this fix is about: a slot switch stops the

@@ -632,6 +632,10 @@ export function create(opts)
 					self.info.manufacturer = manuf;
 					self.info.model = model;
 					carried_ident = true;
+					// borrowed, not read from this modem. detach_modem must not
+					// write it back as what THIS hardware said, or one carried
+					// guess becomes the remembered identity of the next object.
+					self.info.ident_carried = true;
 
 					log('notice', sprintf('identity refused (CGMI/CGMM) — carried over from the last bring-up of this modem: %s %s',
 						manuf, model ?? '?'));
@@ -702,14 +706,39 @@ export function create(opts)
 						// the cross-check the carry-over above promised: the
 						// IMEI is the one identity this firmware does not
 						// withhold in that window. A mismatch means the recipe
-						// was taken from different hardware — say so rather
-						// than let it pass unremarked; the next successful
-						// CGMI corrects it.
+						// was borrowed from DIFFERENT HARDWARE, and warning
+						// about it is not enough — running on another vendor's
+						// ip_config, dial, slot and URC recipe is worse than
+						// running on none. Put it back where it would have been
+						// without the carry-over: generic, and honest about it.
+						// Raised by review, 2026-09-19.
 						if (carried_ident && (imei ?? '') != '' &&
 						    (self.known_ident?.imei ?? '') != '' &&
-						    imei != self.known_ident.imei)
-							log('warn', sprintf('carried-over identity belongs to imei %s but this modem reports %s — the vendor recipe may be wrong',
+						    imei != self.known_ident.imei) {
+							log('warn', sprintf('carried-over identity belongs to imei %s but this modem reports %s — dropping it, the recipe is generic until this modem identifies itself',
 								self.known_ident.imei, imei));
+
+							carried_ident = false;
+							self.info.manufacturer = null;
+							self.info.model = null;
+							self.info.ident_carried = null;
+							self.vendor = vendor_for(null, null);
+							// the vendor's service query may already have
+							// answered under the borrowed recipe; that reading
+							// describes a modem we are no longer claiming to be.
+							self.service_state = null;
+							// WHAT CANNOT BE UNDONE: the borrowed recipe's URC
+							// prefixes were merged into the AT engine above, and
+							// add_urc_prefixes only adds. They are left in place
+							// deliberately — a prefix that matches nothing this
+							// modem emits is inert, and removing prefixes mid
+							// session would need an engine API that exists for
+							// no other reason. Noted rather than hidden (review,
+							// 2026-09-19); the clean cure is to not apply a
+							// recipe before the IMEI is known, which costs the
+							// identify chain a restructure this edge case does
+							// not justify.
+						}
 
 						ask('AT+CIMI', (imsi) => {
 							self.info.imsi = imsi;
