@@ -146,4 +146,132 @@ eq(seq[-1], 'empty-ok', 'run_seq: empty step list still calls cb');
 	backend.choose(obj, 'k', ladder, (be) => eq(be, 'tunnel', 'outcome: a recovered transport is chosen again'));
 }
 
+
+// --- a fallback is provisional: { reprobe: N } walks the ladder again --------
+//
+// outcome() only drops the cache when the CURRENT choice fails, so a rung that
+// answers RELIABLY while answering WORSE keeps the choice for the whole session
+// and the preferred rung is never asked whether it has recovered.
+//
+// This is not theory. ddimension/wwand#30, reporter log 2026-09-19 10:25-10:27:
+// a band switch took the RM520F-GL's AT port and its QMI-over-MBIM passthrough
+// down together for ~85 s; the passthrough missed three signal reads and lost
+// the choice; native MBIM SIGNAL_STATE won it and answers `rssi` and nothing
+// else. Passthrough and AT were both back a minute later, and the signal line
+// still read `LTE rssi -79 dBm` an hour on, because the rung holding the choice
+// never failed again.
+{
+	let obj = { up: false };
+	let probes = [];
+	let ladder = [
+		{ name: 'tunnel', probe: (okcb) => { push(probes, 'tunnel'); okcb(obj.up); } },
+		{ name: 'native', probe: (okcb) => { push(probes, 'native'); okcb(true); } },
+	];
+
+	// the tunnel is down, so the fallback wins — as it should
+	backend.choose(obj, 'k', ladder, (be) => eq(be, 'native', 'reprobe: the fallback wins while the tunnel is down'), { reprobe: 4 });
+	eq(obj.k, 'native', 'reprobe: and the choice is cached');
+
+	// it now recovers, but nothing asks: the fallback keeps answering
+	obj.up = true;
+	probes = [];
+
+	// the count runs over the CACHED uses; the call that made the choice is not
+	// one of them.
+	backend.choose(obj, 'k', ladder, (be) => eq(be, 'native', 'reprobe: cached use 1 of 4 — still the fallback'), { reprobe: 4 });
+	backend.choose(obj, 'k', ladder, (be) => eq(be, 'native', 'reprobe: cached use 2 of 4'), { reprobe: 4 });
+	backend.choose(obj, 'k', ladder, (be) => eq(be, 'native', 'reprobe: cached use 3 of 4'), { reprobe: 4 });
+	eq(probes, [], 'reprobe: no probing while the count runs — this is not a poll');
+
+	// the Nth use drops the cache and walks the ladder from the top
+	backend.choose(obj, 'k', ladder, (be) => eq(be, 'tunnel', 'reprobe: the Nth use re-walks the ladder and the recovered rung wins it back'), { reprobe: 4 });
+	eq(probes, [ 'tunnel' ], 'reprobe: re-probed FROM THE TOP, and stopped at the first hit');
+
+	// the preferred rung holding the choice is never re-probed: there is nothing
+	// better to find, and a probe would cost a request to prove it.
+	probes = [];
+	for (let i = 0; i < 20; i++)
+		backend.choose(obj, 'k', ladder, () => null, { reprobe: 4 });
+	eq(probes, [], 'reprobe: the top candidate is not re-probed — nothing above it to win');
+
+	// without the option a fallback is forever, which is what an operation-driven
+	// caller (sim.uc _apdu_be, esim.uc, sms.uc) wants: no ladder walk mid-session.
+	let o2 = { up: false };
+	let pr2 = [];
+	let l2 = [
+		{ name: 'tunnel', probe: (okcb) => { push(pr2, 'tunnel'); okcb(o2.up); } },
+		{ name: 'native', probe: (okcb) => { push(pr2, 'native'); okcb(true); } },
+	];
+
+	backend.choose(o2, 'k', l2, () => null);
+	o2.up = true;
+	pr2 = [];
+
+	for (let i = 0; i < 50; i++)
+		backend.choose(o2, 'k', l2, (be) => null);
+
+	eq(o2.k, 'native', 'reprobe: omitted -> the choice sticks until it fails');
+	eq(pr2, [], 'reprobe: omitted -> no ladder walk at all');
+
+	// a cached 'none' is provisional on the same terms. It is a verdict taken at
+	// one moment, and b426619 had to reorder a whole tick because a first-tick
+	// 'none' was permanent.
+	let o3 = { up: false };
+	let l3 = [ { name: 'only', probe: (okcb) => okcb(o3.up) } ];
+
+	backend.choose(o3, 'k', l3, (be) => eq(be, null, 'reprobe: nothing answers -> none'), { reprobe: 2 });
+	eq(o3.k, 'none', 'reprobe: cached as the none marker');
+	o3.up = true;
+	backend.choose(o3, 'k', l3, (be) => eq(be, null, 'reprobe: cached use 1 of 2 still returns none'), { reprobe: 2 });
+	backend.choose(o3, 'k', l3, (be) => eq(be, 'only', 'reprobe: ...and the 2nd re-probes, so none is not a life sentence'), { reprobe: 2 });
+
+	// outcome() must clear the use counter with the cache, or the count it left
+	// behind makes the NEXT choice re-probe early.
+	let o4 = { up: false };
+	let pr4 = [];
+	let l4 = [
+		{ name: 'tunnel', probe: (okcb) => { push(pr4, 'tunnel'); okcb(o4.up); } },
+		{ name: 'native', probe: (okcb) => { push(pr4, 'native'); okcb(true); } },
+	];
+
+	backend.choose(o4, 'k', l4, () => null, { reprobe: 4 });
+	backend.choose(o4, 'k', l4, () => null, { reprobe: 4 });   // uses = 1
+	backend.choose(o4, 'k', l4, () => null, { reprobe: 4 });   // uses = 2
+
+	backend.outcome(o4, 'k', false);
+	backend.outcome(o4, 'k', false);
+	eq(backend.outcome(o4, 'k', false), true, 'reprobe: three failures demote as before');
+	eq(o4.k_uses, null, 'reprobe: ...and the use count goes with the cache');
+
+	// ...and the other way round: a HALF-FINISHED streak must not be charged to
+	// whichever rung wins the ladder next. Without this, one failure of the
+	// fallback followed by a re-probe leaves the recovered preferred rung two
+	// failures from demotion instead of three — it inherits a debt it never ran
+	// up. Found by review, 2026-09-19.
+	let o5 = { up: false };
+	let l5 = [
+		{ name: 'tunnel', probe: (okcb) => okcb(o5.up) },
+		{ name: 'native', probe: (okcb) => okcb(true) },
+	];
+
+	backend.choose(o5, 'k', l5, () => null, { reprobe: 2 });
+	eq(backend.outcome(o5, 'k', false), false, 'reprobe: the fallback fails once');
+	eq(o5.k_fails, 1, 'reprobe: ...and carries a streak of one');
+
+	o5.up = true;
+	backend.choose(o5, 'k', l5, () => null, { reprobe: 2 });          // cached use 1
+	backend.choose(o5, 'k', l5, (be) => eq(be, 'tunnel', 'reprobe: the 2nd use re-probes and the tunnel wins'), { reprobe: 2 });
+
+	eq(o5.k_fails, null, 'reprobe: the old rung\'s streak did NOT follow it');
+	eq(backend.outcome(o5, 'k', false), false, 'reprobe: so the new choice starts at one...');
+	eq(backend.outcome(o5, 'k', false), false, 'reprobe: ...two...');
+	eq(backend.outcome(o5, 'k', false), true, 'reprobe: ...and is demoted on its own third, not its second');
+
+	// forget()/reset() drop the decision, so the bookkeeping goes too
+	let o6 = { k: 'native', k_fails: 2, k_uses: 7 };
+	backend.reset(o6, 'k');
+	eq([ o6.k, o6.k_fails, o6.k_uses ], [ null, null, null ],
+		'reset: the decision and everything said about it are dropped together');
+}
+
 done('test_backend');

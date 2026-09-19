@@ -40,11 +40,59 @@
 
 'use strict';
 
+// A FALLBACK IS PROVISIONAL, and so is 'none'. outcome() below drops the cache
+// when the CURRENT choice fails, which walks the ladder again — but ONLY then.
+// A lower rung that answers reliably while answering *worse* therefore holds the
+// choice for the rest of the session, and nothing ever asks the preferred rung
+// whether it has recovered.
+//
+// Field-traced on the same RM520F-GL as outcome() below (ddimension/wwand#30,
+// reporter log 2026-09-19 10:25-10:27): a band switch (n41 TDD -> n28 FDD) took
+// the modem's AT port and the QMI-over-MBIM passthrough down together for ~85 s.
+// The passthrough missed three signal reads, lost the choice as designed, and
+// native MBIM SIGNAL_STATE won it — which on this modem yields `rssi` and
+// nothing else. The passthrough then came back, the AT port answered QENG on
+// every tick again, and the signal line stayed `LTE rssi -79 dBm` because the
+// rung holding the choice never failed again.
+//
+// So a caller whose ladder runs on a tick passes `{ reprobe: N }`: after N uses
+// of a choice that is NOT the top candidate, the cache is dropped once and the
+// ladder is walked from the top. While the preferred rung holds the choice this
+// costs nothing at all; on a fallback it costs one probe per rung every N ticks.
+// Callers driven by a user operation rather than a clock (sim.uc `_apdu_be`,
+// esim.uc, sms.uc) do NOT pass it — re-probing in the middle of an APDU session
+// would be both wasteful and unsafe.
+const REPROBE_DEFAULT = 30;
+
 // obj: the modem (state carrier); key: the cache slot, e.g. '_apdu_be'.
 // cb(name) with the chosen backend name, or cb(null) if none is available.
-export function choose(obj, key, candidates, cb)
+// opts.reprobe: see above; omit for a choice that should stick until it fails.
+export function choose(obj, key, candidates, cb, opts)
 {
 	let cached = obj[key];
+	let uses = key + '_uses';
+
+	// only a non-preferred choice is provisional; the top candidate winning is
+	// already the best answer the ladder has, and re-probing it proves nothing.
+	if (cached != null && opts?.reprobe && cached != candidates[0]?.name) {
+		obj[uses] = (obj[uses] ?? 0) + 1;
+
+		// `reprobe: true` takes the default; a number overrides it. Checked by
+		// type rather than equality — in ucode a loose compare of a count
+		// against a boolean is a trap, not a shorthand.
+		let after = (type(opts.reprobe) == 'int') ? opts.reprobe : REPROBE_DEFAULT;
+
+		if (obj[uses] >= after) {
+			delete obj[uses];
+			delete obj[key];
+			// AND the streak: a half-finished run of failures belongs to the
+			// rung that earned it. Carried over, it would demote whatever wins
+			// the ladder next after two failures instead of three. Raised by
+			// review, 2026-09-19.
+			delete obj[key + '_fails'];
+			cached = null;
+		}
+	}
 
 	if (cached != null)
 		return cb(cached == 'none' ? null : cached);
@@ -54,6 +102,7 @@ export function choose(obj, key, candidates, cb)
 	step = () => {
 		if (i >= length(candidates)) {
 			obj[key] = 'none';
+			delete obj[uses];
 			return cb(null);
 		}
 
@@ -62,6 +111,7 @@ export function choose(obj, key, candidates, cb)
 		c.probe((available) => {
 			if (available) {
 				obj[key] = c.name;
+				delete obj[uses];
 				return cb(c.name);
 			}
 
@@ -118,15 +168,21 @@ export function outcome(obj, key, ok)
 
 	delete obj[fails];
 	delete obj[key];
+	delete obj[key + '_uses'];   // or a stale count re-probes the next choice early
 	return true;
 };
 
 // forget the cached decision (e.g. on SIM slot switch / removable eUICC), so
 // the next call re-probes. Pass the same keys the features cache under.
+// The per-key bookkeeping goes with the decision: a failure streak or a use
+// count that outlived the choice it described would be charged to the next one.
 export function forget(obj, ...keys)
 {
-	for (let k in keys)
+	for (let k in keys) {
 		delete obj[k];
+		delete obj[k + '_fails'];
+		delete obj[k + '_uses'];
+	}
 };
 
 // run value providers in order until one yields a non-null result; cb(value)
@@ -165,9 +221,9 @@ export function run_seq(steps, cb)
 };
 
 // drop cached backend choices so the next call re-probes — e.g. on a SIM slot
-// switch: reset(modem, '_apdu_be', '_esim_be')
+// switch: reset(modem, '_apdu_be', '_esim_be'). Same thing forget() does, under
+// the name the modem backends happen to call it by.
 export function reset(obj, ...keys)
 {
-	for (let k in keys)
-		delete obj[k];
+	return forget(obj, ...keys);
 };
