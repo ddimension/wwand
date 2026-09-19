@@ -33,6 +33,12 @@ const EXT_CID_VERSION    = 15;
 const MBIM_VERSION_1_0   = 0x0100;
 const MBIMEX_VERSION_3_0 = 0x0300;
 
+// WHICH MBIMEx VERSION TO ASK FOR, or 0 to ask for none. 0 is the shipped
+// value: see the comment in open(). Set to MBIMEX_VERSION_3_0 only together
+// with v3 encoders/decoders for Connect, Subscriber Ready Status, Packet
+// Service and IP Packet Filters.
+const MBIMEX_REQUEST = 0;
+
 // MBIM_STATUS_ERROR success code
 const STATUS_SUCCESS = 0;
 
@@ -91,38 +97,68 @@ export function create(hub, hooks)
 
 			self.opened = true;
 
-			// MBIMEx VERSION HANDSHAKE — without it every MBIMEx layout is a guess.
+			// WE DO NOT ASK FOR MBIMEx, AND THAT IS THE POINT.
 			//
-			// A device not told the host speaks MBIMEx MUST answer the v1 layouts
-			// (MBIM 1.0), and v1 BASE_STATIONS_INFO has no SystemSubType — so every
-			// ms-struct pointer after it sits 4 bytes EARLIER than the v3 layout
-			// wwand decodes (LteServingCell at 28, not 32; LteNeighboringCells at
-			// 60, not 64 — libmbim 1.32.0, mbim-service-ms-basic-connect-
-			// extensions.json vs -v3.json). The bounds checks hide it: nothing
-			// fails, wwand just publishes fabricated PCI/TAC/RSRP into telemetry
-			// and LuCI. The query was wrong too, 6 counts where v1 expects 5.
+			// A host that sends no MBIM_CID_VERSION gets the v1 layouts, which is
+			// what this client implements — so `mbimex_version` stays 0 and every
+			// version-aware decoder reads v1. That is the whole of finding 24: the
+			// bug was never "we fail to negotiate", it was "we decode v3 while
+			// negotiating nothing". Decoding what we actually get fixes it.
 			//
-			// Sent exactly as libmbim does (mbim-device.c:1710-1718, 1.32.0): a
-			// QUERY on MS Basic Connect Extensions CID 15 carrying our MBIM 1.0 and
-			// the ONE extended version we ask for. A modem that refuses it is a v1
-			// modem — the correct conclusion, not an error. Found by a full review,
-			// 2026-09-19.
+			// ASKING FOR A VERSION IS A COMMITMENT TO ENCODE THAT GENERATION,
+			// not a flag. MBIMEx v3 REDEFINES Connect in Basic Connect — a
+			// different field order plus MediaPreference and UnnamedIes — and
+			// also Subscriber Ready Status, Packet Service and IP Packet
+			// Filters; v2 redefines Register State, Packet Service and Signal
+			// State (libmbim 1.32.0, mbim-service-ms-basic-connect-v2.json and
+			// -v3.json). This client does not implement that generation
+			// consistently — Connect and friends are encoded in their v1 form,
+			// while the Signal State decode already reads the v2 tail — so
+			// negotiating it would have us sending and expecting layouts the
+			// agreed contract does not describe.
 			//
-			// NOT HW-VALIDATED. Host-tested against libmbim 1.32.0's own field
-			// definitions only. The assumption worth confirming on an EG06 is the
-			// converse case: a modem that answers MBIMEx layouts but does not
-			// implement CID 15 would now be read as v1 and decoded with the v1
-			// offsets. That is what the spec says such a device is, and it is the
-			// safe direction (v1 is the documented default), but it is a behaviour
-			// change for any firmware that was previously decoded correctly by
-			// accident. `mbimex_version` on the client says which way it went.
+			// The tested RM520N-GL agreed to 3.0 first try (GL-X3000,
+			// 2026-09-19), so the request alone is enough to enter that
+			// contract. (The CONNECT failure on that box is older than the
+			// experiment — MBIM_STATUS_ERROR_INVALID_PARAMETERS against an M2M
+			// APN, logged by the previous daemon before any of this was
+			// deployed — so it is NOT evidence either way, and is not claimed
+			// as such.)
+			//
+			// The handshake and the version-aware layouts stay in the tree because
+			// they are what such a port would build on; setting MBIMEX_REQUEST to
+			// 0x0300 turns it back on. Found by a full review, 2026-09-19; the
+			// regression caught on hardware the same day.
 			self.mbimex_version = 0;
 
+			if (!MBIMEX_REQUEST) {
+				if (cb)
+					cb(null);
+
+				return;
+			}
+
 			self.command_raw(EXT_SERVICE_UUID, EXT_CID_VERSION,
-				struct.pack('<HH', MBIM_VERSION_1_0, MBIMEX_VERSION_3_0),
+				struct.pack('<HH', MBIM_VERSION_1_0, MBIMEX_REQUEST),
 				(verr, info) => {
-					if (!verr && length(info ?? '') >= 4)
-						self.mbimex_version = struct.unpack('<H', substr(info, 2, 2))[0];
+					// VALIDATE BOTH HALVES before letting the answer pick a
+					// layout: an unexpected value here would select a decode
+					// this client does not implement, which is the very thing
+					// the request is withheld to avoid. Raised by Codex review,
+					// 2026-09-19.
+					if (!verr && length(info ?? '') >= 4) {
+						let mv = struct.unpack('<H', substr(info, 0, 2))[0];
+						let ev = struct.unpack('<H', substr(info, 2, 2))[0];
+
+						if (mv == MBIM_VERSION_1_0 && ev && ev <= MBIMEX_REQUEST)
+							self.mbimex_version = ev;
+					}
+
+					if (hooks?.log)
+						hooks.log('info', self.mbimex_version
+							? sprintf('MBIMEx %d.%d agreed', (self.mbimex_version >> 8) & 0xff,
+								self.mbimex_version & 0xff)
+							: 'no MBIMEx version agreed — reading the v1 layouts');
 
 					if (cb)
 						cb(null);

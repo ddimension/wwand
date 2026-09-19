@@ -153,12 +153,11 @@ export function create(opts)
 		let meta = { name: entry.name, cid: cid, kind: kind, count: self.counts[entry.name] };
 		let handler = self.handlers[entry.name];
 
-		// BUILT-IN: the MBIMEx version handshake every open() now performs
-		// (mbim_client.uc). Echo the requested MBIM version and agree to the
-		// mock's own `mbimex_version` — default v3.0, which is the layout the
-		// suites here decode. Set it to 0 to make the mock a v1 device (the
-		// handshake then fails and the client falls back), or override the
-		// VERSION handler outright.
+		// BUILT-IN: the MBIMEx version handshake, for whoever turns it back on
+		// (mbim_client.uc MBIMEX_REQUEST — 0 in the shipped tree, so open()
+		// does not send this at all today). Echo the requested MBIM version
+		// and agree to the mock's own `mbimex_version`. Set it to 0 to make
+		// the mock refuse, or override the VERSION handler outright.
 		if (handler == null && entry.name == 'VERSION') {
 			if (!self.mbimex_version)
 				return reply_failure(uuid, cid, txn);

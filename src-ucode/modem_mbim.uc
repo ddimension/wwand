@@ -106,6 +106,9 @@ export function create(opts)
 	let enter_ready = scaffold.enter_ready;
 
 	let hooks = {
+		// the client logs the negotiated MBIMEx version — only when one is
+		// requested at all, which it is not by default (mbim_client.open())
+		log: log,
 		on_error: (c, kind) => {
 			let act = rec.on_proto_error();
 			// same escalation as QMI: a wedged control channel gets a hardware

@@ -81,32 +81,34 @@ function nr_serving_struct(provider, nci, pci, nrarfcn, tac, rsrp, rsrq, sinr) {
 }
 
 // Base Stations Info (v3): 96-byte fixed part + appended data regions
+// THE v1 LAYOUT, because that is what this modem session actually negotiated:
+// wwand requests no MBIMEx version (mbim_client.open()), so the device answers
+// v1 and v1 has no SystemSubType — every pointer sits 4 bytes earlier — and no
+// NR arrays at all. Hand-setting a version here to get the richer layout would
+// model a session that cannot exist: bring-up ran on v1 Basic Connect. The v3
+// layout is covered where it belongs, in test_mbim_backend. Raised by Codex
+// review, 2026-09-19.
 function build_base_stations() {
 	let lte_serv = cell_struct('26201', [ 12345678, 1300, 42, 0x1234, -95, -10, 0 ]);
 	let lte_neigh = cell_struct('', [ 0, 1300, 99, 0, -105, -14 ]);
-	let nr_serv = nr_serving_struct('26201', 0x0000000100000002, 7, 632448, 0x5678, -80, -11, 25);
 
-	let base = 96;
+	let base = 76;   // SystemType + 4 serving ms-structs + 5 array pointers
 	let lte_serv_off = base;
 	let lte_neigh_off = lte_serv_off + length(lte_serv);
-	let nr_serv_off = lte_neigh_off + 4 + length(lte_neigh);
 
 	let ptrs = {};
-	ptrs[32] = [ lte_serv_off, length(lte_serv) ];
-	ptrs[64] = [ lte_neigh_off, 4 + length(lte_neigh) ];
-	ptrs[80] = [ nr_serv_off, 4 + length(nr_serv) ];
+	ptrs[28] = [ lte_serv_off, length(lte_serv) ];
+	ptrs[60] = [ lte_neigh_off, 4 + length(lte_neigh) ];
 
 	let fixed = '';
 	for (let off = 0; off < base; off += 4) {
-		if (off == 0)      fixed += p32(ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_SA);
-		else if (off == 4) fixed += p32(0);
+		if (off == 0)       fixed += p32(ext.DATA_CLASS_LTE);
 		else if (ptrs[off]) fixed += p32(ptrs[off][0]) + p32(ptrs[off][1]);
 		else if (ptrs[off - 4]) continue;
 		else fixed += p32(0);
 	}
 
-	let data = lte_serv + p32(1) + lte_neigh + p32(1) + nr_serv;
-	return fixed + data;
+	return fixed + lte_serv + p32(1) + lte_neigh;
 }
 
 // --- handlers ----------------------------------------------------------------
@@ -415,14 +417,17 @@ function assert_telemetry() {
 	eq(modem.signal.lte.snr, 70, 'signal: lte snr 0.1 dB (coded 60)');
 	eq(modem.signal.nr5g?.rsrp, -66, 'signal: nr5g rsrp dBm (coded 90)');
 
-	// cells (fast watch loop; native BASE_STATIONS_INFO) — QMI cell-location shape
+	// cells (fast watch loop; native BASE_STATIONS_INFO) — QMI cell-location
+	// shape, read with the v1 offsets this session actually negotiated.
 	ok(modem.cells?.lte_intra != null, 'cells: lte_intra populated via native backend');
 	eq(modem.cells.lte_intra.plmn, '262/01', 'cells: lte plmn');
 	eq(modem.cells.lte_intra.earfcn, 1300, 'cells: lte earfcn');
 	eq(modem.cells.lte_intra.serving_cell_id, 42, 'cells: lte serving pci');
 	eq(length(modem.cells.lte_intra.cells), 2, 'cells: serving + 1 neighbour');
-	eq(modem.cells.nr5g_arfcn, 632448, 'cells: nr arfcn');
-	eq(modem.cells.nr5g_cell?.pci, 7, 'cells: nr pci');
+	// the v1 layout carries no NR arrays; the v3 ones are asserted in
+	// test_mbim_backend, against a buffer that declares that version
+	eq(modem.cells.nr5g_arfcn, null, 'cells: no NR arfcn in the v1 layout');
+	eq(modem.cells.nr5g_cell, null, 'cells: ...and no NR cell either');
 
 	// data-system mode (slow tick; native register-state class mask)
 	ok(modem.dsd_status != null, 'dsd_status: populated via native backend');
@@ -525,6 +530,7 @@ modem = modem_mbim.create({
 				push(ready_events, { event: event, data: data });
 			if (event == 'registered') {
 				ok(true, 'modem reached READY (OPEN->CAPS->SUBSCRIBER->REGISTER->PACKET_SERVICE)');
+
 				// warm the fast loop (as daemon.modem_signal does), then read back
 				// after the fast loop + the first slow telemetry tick have run
 				m.watch();

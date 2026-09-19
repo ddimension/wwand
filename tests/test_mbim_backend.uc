@@ -259,31 +259,36 @@ function s_fragments(next) {
 	});
 }
 
-// A PRE-MBIMEx DEVICE MUST BE DECODED WITH THE v1 LAYOUT.
+// A DEVICE THAT DID NEGOTIATE v3 IS DECODED WITH THE v3 LAYOUT — which is
+// not what wwand ships (it requests nothing), but the layout code is here for
+// whoever ports that generation, so it stays covered.
 //
-// Nothing was ever sent to tell the modem the host speaks MBIMEx, so a
-// spec-conforming device answers v1 — and v1 has no SystemSubType, putting
-// every ms-struct pointer 4 bytes earlier than the v3 layout wwand decoded.
-// That does not fail: the bounds checks absorb it and wwand publishes
-// FABRICATED serving-cell PCI/TAC/RSRP into telemetry and LuCI. The handshake
-// at open() settles which layout applies; a modem that refuses CID 15 is v1.
-// Found by a full review, 2026-09-19.
-function s_cells_v1(next) {
-	// mbimex_version 0 -> the mock refuses the handshake, like a v1 modem
-	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations_v1() } },
-		null, { mbimex_version: 0 });
+// Nothing tells the modem the host speaks MBIMEx — deliberately, since v3
+// redefines Connect and three more CIDs this client does not implement
+// (mbim_client.open()) — so a spec-conforming device answers v1. And v1 has no
+// SystemSubType, putting every ms-struct pointer 4 bytes earlier than the v3
+// layout wwand used to decode unconditionally. That does not fail: the bounds
+// checks absorb it and wwand publishes FABRICATED serving-cell PCI/TAC/RSRP
+// into telemetry and LuCI. `mbimex_version` is what settles it, and without a
+// request it stays 0. Found by a full review, 2026-09-19.
+function s_cells_v3(next) {
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations() } });
 
 	mc.open(() => {
-		eq(mc.mbimex_version, 0, 'cells v1: the handshake was refused, so v1 it is');
+		// wwand requests no version (v3 redefines Connect and three more CIDs
+		// it does not implement — see mbim_client.open()), so this is set by
+		// hand: the layout code stays covered for whoever ports that generation.
+		mc.mbimex_version = 0x0300;
 
 		backend.get_cells(mc, (cells) => {
-			ok(cells != null, 'cells v1: decoded');
-			eq(cells.lte_intra?.serving_cell_id, 42, 'cells v1: the real serving pci, not a shifted read');
-			eq(cells.lte_intra?.tac, 0x1234, 'cells v1: the real tac');
-			eq(cells.lte_intra?.earfcn, 1300, 'cells v1: the real earfcn');
-			eq(cells.lte_intra?.cells[0]?.rsrp, -950, 'cells v1: the real rsrp');
-			eq(length(cells.lte_intra?.cells ?? []), 2, 'cells v1: serving + 1 neighbour');
-			eq(cells.nr5g_cell, null, 'cells v1: no NR arrays exist in the v1 layout');
+			ok(cells != null, 'cells v3: decoded');
+			eq(cells.lte_intra?.serving_cell_id, 42, 'cells v3: serving pci');
+			eq(cells.lte_intra?.tac, 0x1234, 'cells v3: tac');
+			eq(cells.lte_intra?.earfcn, 1300, 'cells v3: earfcn');
+			eq(cells.lte_intra?.cells[0]?.rsrp, -950, 'cells v3: rsrp');
+			eq(length(cells.lte_intra?.cells ?? []), 2, 'cells v3: serving + 1 neighbour');
+			eq(cells.nr5g_arfcn, 632448, 'cells v3: ...and the NR arrays the v1 layout does not have');
+			eq(cells.nr5g_cell?.pci, 7, 'cells v3: nr pci');
 			next();
 		});
 	});
@@ -291,10 +296,13 @@ function s_cells_v1(next) {
 
 // get_cells: LTE serving + 1 neighbour + NR serving
 function s_cells(next) {
-	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations() } });
+	// THE DEFAULT IS v1, because wwand asks for no MBIMEx version — see the
+	// comment in mbim_client.open(). A host that negotiates nothing gets the
+	// v1 layouts, and decoding those is the whole of what finding 24 needed.
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations_v1() } });
 
 	mc.open(() => backend.get_cells(mc, (cells) => {
-		eq(mc.mbimex_version, 0x0300, 'cells: the handshake agreed MBIMEx 3.0');
+		eq(mc.mbimex_version, 0, 'cells: nothing was negotiated, so v1 applies');
 		ok(cells != null, 'cells: decoded');
 		let li = cells.lte_intra;
 		eq(li.plmn, '262/01', 'cells: lte plmn from provider id');
@@ -309,13 +317,9 @@ function s_cells(next) {
 		eq(li.cells[0].rssi, null, 'cells: rssi unavailable in MBIM');
 		eq(li.cells[1].pci, 99, 'cells: neighbour pci');
 		eq(li.cells[1].rsrp, -1050, 'cells: neighbour rsrp 0.1 dB');
-		eq(cells.nr5g_arfcn, 632448, 'cells: nr arfcn');
-		eq(cells.nr5g_cell.plmn, '262/01', 'cells: nr plmn');
-		eq(cells.nr5g_cell.pci, 7, 'cells: nr pci');
-		eq(cells.nr5g_cell.global_cell_id, 0x0000000100000002, 'cells: nr nci');
-		eq(cells.nr5g_cell.rsrp, -800, 'cells: nr rsrp 0.1 dB');
-		eq(cells.nr5g_cell.rsrq, -110, 'cells: nr rsrq 0.1 dB');
-		eq(cells.nr5g_cell.snr, 250, 'cells: nr snr 0.1 dB (sinr x10)');
+		// the v1 layout has no NR arrays at all — the v3 case below covers those
+		eq(cells.nr5g_cell, null, 'cells: no NR cell in the v1 layout');
+		eq(cells.nr5g_arfcn, null, 'cells: ...and no NR arfcn either');
 		next();
 	}));
 }
@@ -500,7 +504,7 @@ function s_at_over_mbim_compal(next) {
 
 // --- runner ------------------------------------------------------------------
 
-let scenarios = [ s_signal, s_cells, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
+let scenarios = [ s_signal, s_cells, s_cells_v3, s_fragments, s_data_mode, s_reg_detail, s_slots,
 	s_at_over_mbim, s_at_over_mbim_compal ];
 let i = 0;
 

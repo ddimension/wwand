@@ -438,9 +438,18 @@ function plmn_str(provider_id)
 	return sprintf('%s/%s', substr(provider_id, 0, 3), substr(provider_id, 3));
 }
 
-// get_signal(mc, cb): per-RAT signal from the MBIMEx v2 Signal State, normalized
-// to the QMI self.signal shape { lte:{rssi,rsrq,rsrp,snr}, nr5g:{rsrp,snr} }, or
-// cb(null). MBIM v2 Signal State has no per-RAT RSRQ, so lte.rsrq is null.
+// get_signal(mc, cb): per-RAT signal from Signal State, normalized to the QMI
+// self.signal shape { lte:{rssi,rsrq,rsrp,snr}, nr5g:{rsrp,snr} }, or cb(null).
+// That layout has no per-RAT RSRQ, so lte.rsrq is null.
+//
+// v1/v2-COMPATIBLE, not v2-only, and the name of the schema entry oversells it:
+// wwand negotiates no MBIMEx version (mbim_client.open()), so a conforming
+// device answers the v1 Signal State — which is the first 20 bytes, identical
+// in both, with no RsrpSnr tail. The query is empty either way, and the loop
+// below simply finds nothing, leaving the RSSI-only line at the end. A device
+// that volunteers the v2 tail is read in full. So this degrades rather than
+// misparses; what it does NOT do is prove the device speaks v2. Raised by
+// Codex review, 2026-09-19.
 export function get_signal(mc, cb)
 {
 	mc.command(bc, 'SIGNAL_STATE_V2', 'query', {}, (err, data) => {
