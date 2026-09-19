@@ -127,6 +127,13 @@ export default {
 			resp: {},
 		},
 
+		// NOTE the MNC-PCS-digit TLV has a DIFFERENT id in the response (0x27)
+		// and the indication (0x29) — one of the several request/response id
+		// splits this service has. A single field, not an array: it qualifies
+		// the one PLMN in 0x12. Without it the serving MNC is a bare integer
+		// and 310/030 is indistinguishable from 310/30 — two operators — which
+		// is what the operator line rendered. libqmi 1.38 qmi-service-nas.json,
+		// (Get) Serving System output. Found by a full review, 2026-09-19.
 		GET_SERVING_SYSTEM: {
 			id: 0x0024,
 			req: {},
@@ -134,6 +141,8 @@ export default {
 				serving_system: SERVING_SYSTEM_F,
 				roaming:      ROAMING_F,
 				current_plmn: CURRENT_PLMN_F,
+				mnc_pcs_digit: { t: 0x27, f: {
+					mcc: 'u16', mnc: 'u16', includes_pcs_digit: 'u8' } },
 				lac:          { t: 0x1C, f: 'u16' },
 				cell_id:      { t: 0x1D, f: 'u32' },
 				lte_tac:      { t: 0x24, f: 'u16' },
@@ -146,6 +155,8 @@ export default {
 				serving_system: SERVING_SYSTEM_F,
 				roaming:      ROAMING_F,
 				current_plmn: CURRENT_PLMN_F,
+				mnc_pcs_digit: { t: 0x29, f: {
+					mcc: 'u16', mnc: 'u16', includes_pcs_digit: 'u8' } },
 				lac:          { t: 0x1D, f: 'u16' },
 				cell_id:      { t: 0x1E, f: 'u32' },
 				lte_tac:      { t: 0x25, f: 'u16' },

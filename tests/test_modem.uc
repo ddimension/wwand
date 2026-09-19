@@ -1555,6 +1555,77 @@ scenario('init-reset-debt-dedup', {
 			'debt-dedup: the same unapplied reset is recorded once, not once per pass');
 	});
 
+// THE SERVING MNC CARRIES ITS WIDTH.
+//
+// It arrives as a bare integer, so 310/030 and 310/30 — different operators —
+// are the same number here and the operator line rendered whichever a fixed
+// %02d produced. The modem says which in its own TLV (libqmi 1.38: Get Serving
+// System output 0x27, and 0x29 in the indication, which is a different id).
+// Found by a full review, 2026-09-19.
+
+scenario('serving-mnc-width', {
+	handlers: base_handlers({
+		GET_SERVING_SYSTEM: {
+			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+				selected_network: 1, radio_ifs: [ 8 ] },
+			roaming: 0,
+			current_plmn: { mcc: 310, mnc: 30, description: 'AT&T MVNO' },
+			mnc_pcs_digit: { mcc: 310, mnc: 30, includes_pcs_digit: 1 },
+		},
+	}),
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.reg.plmn.mnc, 30, 'mnc-width: the number is unchanged...');
+		eq(modem.reg.plmn.mnc_digits, 3, '...and it is declared as three digits');
+	});
+
+// ...AND AN UPDATE THAT OMITS THE TLV DOES NOT RETRACT IT. Serving-system
+// indications repeat the same PLMN constantly and the qualifier is optional,
+// so taking the new object wholesale dropped a width the GET had established
+// and the operator line flipped back on the next indication. Raised by Codex
+// review, 2026-09-19.
+scenario('serving-mnc-width-kept', {
+	handlers: base_handlers({
+		GET_SERVING_SYSTEM: {
+			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+				selected_network: 1, radio_ifs: [ 8 ] },
+			roaming: 0,
+			current_plmn: { mcc: 310, mnc: 30, description: 'AT&T MVNO' },
+			mnc_pcs_digit: { mcc: 310, mnc: 30, includes_pcs_digit: 1 },
+		},
+	}),
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.reg.plmn.mnc_digits, 3, 'mnc-width: established by the GET');
+
+		// the same PLMN again, this time without the optional qualifier
+		modem._update_serving({
+			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+				selected_network: 1, radio_ifs: [ 8 ] },
+			roaming: 0,
+			current_plmn: { mcc: 310, mnc: 30, description: 'AT&T MVNO' },
+		});
+
+		eq(modem.reg.plmn.mnc_digits, 3,
+			'mnc-width: an update that says nothing does not retract it');
+	});
+
+// ...and a modem that says nothing leaves the field absent rather than guessing
+scenario('serving-mnc-width-absent', {
+	handlers: base_handlers({
+		GET_SERVING_SYSTEM: {
+			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+				selected_network: 1, radio_ifs: [ 8 ] },
+			roaming: 0,
+			current_plmn: { mcc: 262, mnc: 1, description: 'Telekom.de' },
+		},
+	}),
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.reg.plmn.mnc_digits, null,
+			'mnc-width: no TLV, no claim — the formatter falls back');
+	});
+
 // --- 10c: cell-lock read-back over AT when the modem reports it unset ---------
 
 let at_tr_lock = fake_at_transport();

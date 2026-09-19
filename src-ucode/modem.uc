@@ -1221,11 +1221,32 @@ export function create(opts)
 		// instead of wiping them, so operator name + roaming don't blink out.
 		let prev = self.reg ?? {};
 
+		// carry the MNC's WIDTH with the PLMN. It arrives as a bare integer, so
+		// 310/030 and 310/30 — different operators — are the same number here,
+		// and the operator line rendered whichever a fixed %02d produced. The
+		// modem says which in its own TLV (libqmi 1.38: (Get) Serving System,
+		// 0x27 in the response and 0x29 in the indication). Found by a full
+		// review, 2026-09-19.
+		let plmn = data.current_plmn ?? prev.plmn;
+		let pcs = data.mnc_pcs_digit;
+
+		if (plmn && pcs && pcs.mcc == plmn.mcc && pcs.mnc == plmn.mnc)
+			plmn = { ...plmn, mnc_digits: pcs.includes_pcs_digit ? 3 : 2 };
+		else if (plmn && prev.plmn?.mnc_digits != null &&
+		         prev.plmn.mcc == plmn.mcc && prev.plmn.mnc == plmn.mnc)
+			// THE TLV IS OPTIONAL, AND AN UPDATE THAT OMITS IT IS NOT A
+			// RETRACTION. Serving-system indications repeat the same PLMN
+			// constantly; taking the new object wholesale dropped a width the
+			// GET had already established, and the operator line flipped back
+			// to 310/30 on the next indication. Same PLMN, no new claim: keep
+			// what we knew. Raised by Codex review, 2026-09-19.
+			plmn = { ...plmn, mnc_digits: prev.plmn.mnc_digits };
+
 		self.reg = {
 			registration: ss.registration,
 			radio_ifs: ss.radio_ifs,
 			roaming: (data.roaming != null) ? (data.roaming == 0) : prev.roaming,
-			plmn: data.current_plmn ?? prev.plmn,
+			plmn: plmn,
 		};
 
 		emit('serving_system', self.reg);
