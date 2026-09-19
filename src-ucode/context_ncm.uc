@@ -324,6 +324,17 @@ export function create(opts)
 	// spend on every modem what only some need, and neither is any more certain
 	// than asking the question again.
 	let read_rdp_once = (cb) => {
+		// THE VENDOR BRANCH NEEDS THE SAME GUARD. It dereferences modem.at
+		// itself (ncm_vendors.uc:879, :1116 and friends) instead of going
+		// through at_send, and the NCM teardown nulls modem.at without
+		// notifying the contexts — so an ACTIVATING context whose retry fires a
+		// second later used to call `.send` on null. A throw inside a uloop
+		// callback ends the program (measured 2026-09-19): the daemon dies and
+		// procd respawns it. Same class as ddimension/wwand#34, found by a full
+		// review, 2026-09-19.
+		if (!self.modem.at)
+			return cb({ error: 'modem_gone' });
+
 		if (self.modem.vendor?.ip_config)
 			return self.modem.vendor.ip_config(self.modem, self.cid, self.config, cb);
 
@@ -346,9 +357,20 @@ export function create(opts)
 		ip_config_retry_timer = uloop.timer(opts.timing?.ip_config_retry ?? IP_CONFIG_RETRY_MS, () => {
 			ip_config_retry_timer = null;
 
-			// torn down, or no longer activating, while we waited
+			// no longer activating: the context moved on and whoever asked has
+			// already been answered — saying anything now would be noise.
 			if (self.state != 'ACTIVATING')
 				return;
+
+			// ...but a MODEM that went away while we waited is different. The
+			// context state does not change when the modem is stopped
+			// administratively (its stop() does not notify the contexts), so
+			// the state alone said nothing about whether there is still an
+			// engine to ask — and the retry walked into a null one. ANSWER
+			// here rather than returning: the caller is still waiting, and a
+			// silent return hangs the activation instead of failing it.
+			if (!self.modem.at)
+				return cb(err);
 
 			read_rdp_once(cb);
 		});

@@ -315,6 +315,43 @@ push(scenarios, {
 	},
 });
 
+// THE VENDOR IP-CONFIG BRANCH NEEDS THE SAME GUARD as at_send. It dereferences
+// modem.at itself (ncm_vendors.uc:879, :1116) instead of going through at_send,
+// and the NCM teardown nulls modem.at WITHOUT notifying the contexts — so an
+// ACTIVATING context whose address-read retry fires a second later called
+// `.send` on null. A throw inside a uloop callback ends the program (measured
+// 2026-09-19). Same class as ddimension/wwand#34; found by a full review,
+// 2026-09-19.
+//
+// The Fibocom recipe is used here because it HAS a vendor ip_config; the
+// generic one falls through to at_send and was already guarded.
+push(scenarios, {
+	name: 's9q_vendor_ip_config_survives_a_vanishing_modem',
+	script: script([
+		{ re: /^AT\+CGMI$/, lines: [ 'Fibocom Wireless Inc.' ] },
+		{ re: /^AT\+CGMM$/, lines: [ 'FM350-GL' ] },
+		// the address read fails once, which arms the one-second retry
+		{ re: /^AT\+CGCONTRDP=/, term: 'ERROR', lines: [] },
+	]),
+	mtiming: { ip_config_retry: 20 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		eq(ncm_vendors.vendor_name(env.modem.vendor), 'fibocom',
+			'vendor-gone: the recipe with a vendor ip_config is in use');
+
+		env.ctx.up((err) => {
+			ok(err != null, 'vendor-gone: the activation fails instead of throwing');
+			ok(env.ctx.state != 'CONNECTED',
+				'vendor-gone: ...and no bearer is reported that was never got');
+			env.finish();
+		});
+
+		// the modem is stopped administratively while the retry is waiting —
+		// which does NOT change the context state
+		uloop.timer(5, () => { env.modem.at = null; });
+	},
+});
+
 // --- s1: lifecycle + settings shape + auth reaches QICSGP -------------------
 
 push(scenarios, {

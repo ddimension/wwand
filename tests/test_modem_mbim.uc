@@ -222,6 +222,85 @@ function assert_radio_off() {
 // a PUK can fix). Second modem instance: device-locked ready state + PIN query
 // answering pin_type PUK1. (Defined before its caller — this ucode treats
 // module-level function statements as non-hoisted under 'use strict'.)
+// --- the SIM poll must not outlive the session --------------------------------
+//
+// A card that answers NOT_INITIALIZED puts step_sim into a poll loop. Teardown
+// cancels sim_poll_timer and then destroys the client, which completes the
+// in-flight query with `cancelled` — and the callback used to walk on regardless
+// and re-arm the timer AFTER that cancel pass. When the new one fired,
+// self.mbim was null and `self.mbim.command` threw; a throw inside a uloop
+// callback ends the program (measured 2026-09-19), so the daemon dies and procd
+// respawns it. Reachable on any unplug or config reload inside the cold-boot
+// ready-state wait — the GL-X3000/RM520N case. Found by a full review,
+// 2026-09-19.
+function assert_sim_poll_teardown() {
+	uloop.init();
+
+	let h = handlers();
+
+	h.SUBSCRIBER_READY_STATUS = {
+		ready_state: bc.READY_STATE_NOT_INITIALIZED,
+		subscriber_id: '', sim_iccid: '', ready_info: 0, telephone_numbers_count: 0,
+	};
+
+	let mockp = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h });
+	let mp = null, swapped = false, poll_cb = null, alive = false;
+
+	mp = modem_mbim.create({
+		id: 'm_simpoll', device: '/dev/mockp',
+		config: { apn: 'internet' },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5,
+		          at_drain: 1, card_poll: 5 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: {
+			transport_open: mockp.transport_open,
+			log: () => null,
+			on_event: (m, event, data) => {
+				if (event != 'state' || data?.state != 'SIM_UNLOCK' || swapped)
+					return;
+
+				swapped = true;
+
+				// the poll wait is armed now. Swap in a client that CAPTURES
+				// the query instead of answering it, so the teardown below
+				// lands with a command genuinely in flight — which is the only
+				// state in which the bug fires.
+				mp.mbim = {
+					command: (svc, name, kind, args, cb) => { poll_cb = cb; },
+					destroy: () => null,
+				};
+			},
+		},
+	});
+
+	mp.start();
+
+	// past the poll deadline: the capturing client now holds the callback
+	uloop.timer(30, () => {
+		ok(poll_cb != null, 'sim-poll: a ready-state query is in flight');
+
+		mp.stop();            // gen++, client dropped, timers cancelled
+
+		// ...and only now does the query answer, as a cancellation
+		if (poll_cb)
+			poll_cb({ error: 'cancelled' });
+	});
+
+	// well past another poll interval: an unguarded re-arm fires here and
+	// dereferences the null client, which ends the whole run
+	uloop.timer(90, () => {
+		alive = true;
+		uloop.end();
+	});
+
+	uloop.run();
+
+	ok(alive, 'sim-poll: a cancelled query does not re-arm a poll into a dead session');
+	eq(mp.mbim, null, 'sim-poll: the client stayed gone');
+}
+
 function assert_puk_block() {
 	let h2 = handlers();
 	h2.SUBSCRIBER_READY_STATUS = {
@@ -459,6 +538,9 @@ guard = uloop.timer(6000, () => { ok(false, 'timed out before telemetry populate
 modem.start();
 
 uloop.run();
+
+// its own loop, because the main one above has ended
+assert_sim_poll_teardown();
 
 // --- a reattach interrupted by teardown must stop, not switch transport ------
 // reattach is radio OFF, wait, radio ON — half-finished at every await. A

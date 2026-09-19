@@ -516,6 +516,17 @@ export function create(opts)
 	};
 
 	step_sim = (tries) => {
+		// THE POLL MUST NOT OUTLIVE THE SESSION. Teardown cancels
+		// sim_poll_timer and then destroys the MBIM client, which completes the
+		// in-flight query with `cancelled` — and the callback below used to walk
+		// on regardless and re-arm the timer AFTER that cancel pass. When the
+		// new timer fired, self.mbim was null and `self.mbim.command` threw:
+		// a throw inside a uloop callback ends the program (measured
+		// 2026-09-19), so the daemon dies and procd respawns it. Reachable on
+		// any unplug or config reload inside the up-to-10 s cold-boot wait —
+		// the GL-X3000/RM520N case. Found by a full review, 2026-09-19.
+		let gen = self._gen;
+
 		self.set_state('SIM_UNLOCK');
 
 		// ready_state 1 = initialized (unlocked). Other states need a PIN or
@@ -563,7 +574,16 @@ export function create(opts)
 				return fail('sim_ready', { error: 'sim_not_initialized' });
 
 			sim_poll_timer = uloop.timer(self.timing.card_poll ?? SIM_POLL_MS, () => {
+				sim_poll_timer = null;
+
+				if (self._gen != gen || !self.mbim)
+					return;
+
 				self.mbim.command(bc, 'SUBSCRIBER_READY_STATUS', 'query', {}, (e2, d2) => {
+					// a cancellation is the session ending, not a slow card
+					if (e2?.error == 'cancelled' || self._gen != gen)
+						return;
+
 					if (!e2) {
 						self._ready_state = d2.ready_state;
 
@@ -657,6 +677,16 @@ export function create(opts)
 				new_pin: '',
 			}, (verr, vdata) => {
 				if (verr) {
+					// ...but a CANCELLATION is the session ending, not the
+					// firmware refusing. destroy() pays its pending callbacks
+					// synchronously and only then clears them
+					// (mbim_client.uc:267,275), so re-querying here enqueued a
+					// command into the client being torn down. Same shape as
+					// the ready-state poll above. Raised by review,
+					// 2026-09-19.
+					if (verr.error == 'cancelled' || self._gen != gen || !self.mbim)
+						return;
+
 					// A rejected ENTER is either a genuinely wrong PIN (a
 					// retry was consumed) or the firmware refusing the
 					// operation (SIM mid-init / PIN1 not enabled — no retry
