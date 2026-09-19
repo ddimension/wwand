@@ -245,10 +245,17 @@ export function create(opts)
 	// reconnect engine (activate/pending-up queue, capped-backoff retry, the
 	// transient-loss hold timer) — extracted to reconnect.uc; bound as locals
 	// so the call sites below read unchanged. Also installs set_hold_max_ms.
+	// forward-declared: reconnect.install() below is handed a reference to it
+	// and the definition sits further down, where the rest of the marker lives.
+	// A `let` referenced before its initialisation throws in ucode even from
+	// inside a closure (see wwand/CLAUDE.md), so the binding has to exist here.
+	let mark_our_down;
+
 	reconnect.install(self, {
 		log: log,
 		timing: opts?.timing,
 		down_interface: deps.down_interface,
+		mark_our_down: (entry) => mark_our_down(entry),
 	});
 
 	let activate = self._activate;
@@ -315,14 +322,55 @@ export function create(opts)
 		return false;
 	};
 
-	let mark_our_down = (entry) => {
-		entry._our_down = true;
-		entry._our_down_at = time();
+	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
+	// about an interface, and it used to live on the context entry — whose
+	// lifetime is SHORTER than the interface's. A config reload that cannot
+	// resolve an interface's modem produces no entry for it at all
+	// (config.uc:866-869 warns "references unknown modem" and skips it), so
+	// the carry-over that used to sit in build_context had nothing to carry
+	// from and the evidence was gone. Re-adding the modem then built a fresh
+	// entry with no marker, the status poll saw netifd's cleared autostart,
+	// and wwand parked an interface IT had taken down — "administratively
+	// down (ifdown), leaving it alone", until someone ran ifup.
+	//
+	// That is the tail of ddimension/wwand#35: the down was ours (13 failed
+	// attempts, hold expiry) at 18:48:02, the "unknown modem" warning landed
+	// at 18:47:49 between the two, and the first refusal at 18:49:57 is 115 s
+	// later — well inside OUR_DOWN_TTL, so the TTL is not what lost it. Found
+	// by a full review, 2026-09-19.
+	self._our_downs = {};
+
+	mark_our_down = (entry) => {
+		let iface = entry?.cfg?.interface;
+
+		if (iface)
+			self._our_downs[iface] = time();
 	};
 
-	let our_down = (entry) =>
-		(entry?._our_down === true) &&
-		((time() - (entry._our_down_at ?? 0)) < OUR_DOWN_TTL);
+	let clear_our_down = (entry) => {
+		let iface = entry?.cfg?.interface;
+
+		if (iface)
+			delete self._our_downs[iface];
+	};
+
+	let our_down = (entry) => {
+		let iface = entry?.cfg?.interface;
+		let at = iface ? self._our_downs[iface] : null;
+
+		if (at == null)
+			return false;
+
+		// prune on read: a marker past its TTL is not evidence, and leaving it
+		// there would make it look like one to the next reader too
+		if ((time() - at) >= OUR_DOWN_TTL) {
+			delete self._our_downs[iface];
+
+			return false;
+		}
+
+		return true;
+	};
 
 	// modem reached service: write back l3 device names, run autosetup APN
 	// fill, (re)establish this modem's IDLE interface-bound contexts.
@@ -396,8 +444,7 @@ export function create(opts)
 				// is the ONLY place it is cleared — on evidence from netifd, not
 				// on our intent to kick (see the comment at mark_our_down).
 				if (st && (st.up || st.autostart === true)) {
-					centry._our_down = false;
-					centry._our_down_at = null;
+					clear_our_down(centry);
 				}
 
 				if (st?.up) {
@@ -1705,14 +1752,11 @@ export function create(opts)
 		             // next probe, so a looping prober climbs the ladder as fast
 		             // as it can call.
 		             //
-		             // `_our_down` says netifd's cleared autostart is ours. Lost,
-		             // the next `registered` reads our own down as an operator
-		             // ifdown and parks the interface — reachable after a SIM
-		             // block or a hold-expiry give-up followed by a modem
-		             // re-enumeration, which is a common enough pair.
+		             // (`_our_down` used to be carried here too. It is keyed by
+		             // INTERFACE now — see mark_our_down — precisely because an
+		             // entry can fail to exist across a reload, and then there
+		             // is nothing to carry it from.)
 		             _failed_at: prev?._failed_at,
-		             _our_down: prev?._our_down,
-		             _our_down_at: prev?._our_down_at,
 		             reconnect_on_register: prev?.reconnect_on_register };
 
 		if (!mentry?.modem) {
@@ -1747,6 +1791,20 @@ export function create(opts)
 	let blocked_sig = null;
 
 	self.apply_config = function(parsed) {
+		// SWEEP THE OUR-DOWN MARKERS. They are keyed by interface, and prune-on-
+		// read only reaches names something still asks about — an interface
+		// renamed or deleted from the config leaves its key behind with nobody
+		// left to prune it. Deliberately NOT cleared when a context goes away:
+		// that is exactly the case the map exists for (an interface whose modem
+		// stopped resolving loses its entry and must still be recognised when
+		// it comes back). The clock is the right arbiter, and a reload is the
+		// natural moment to apply it. Raised by Codex review, 2026-09-19.
+		let now = time();
+
+		for (let iface, at in self._our_downs)
+			if ((now - at) >= OUR_DOWN_TTL)
+				delete self._our_downs[iface];
+
 		// l3-device learn-back switch; read before the no-op short-circuit so a
 		// globals-only edit still updates it
 		self.write_device = parsed.globals?.write_device ?? true;

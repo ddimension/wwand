@@ -405,7 +405,7 @@ let dsim = mk('ipv4', []);
 
 dsim.modem()('sim_blocked', { reason: 'pin' });
 eq(dsim.d.contexts.wan.wanted, false, 'sim_blocked: the context is parked');
-ok(dsim.d.contexts.wan._our_down == true, 'sim_blocked: the down is marked as ours');
+ok(dsim.d._our_downs.wan != null, 'sim_blocked: the down is marked as ours');
 
 // the PIN is entered, the modem re-inits and comes back — netifd still reports
 // autostart=false, because WE cleared it
@@ -417,13 +417,13 @@ eq(kicks, [ 'wan' ], 'sim_blocked: our own down is undone once the modem is read
 // netifd's `up` to conn.defer and only logs the reply), so a marker cleared on
 // intent is gone even when the up never lands — and the next poll then reads
 // our own down as operator intent and parks the interface for good.
-ok(dsim.d.contexts.wan._our_down == true,
+ok(dsim.d._our_downs.wan != null,
 	'sim_blocked: the marker SURVIVES the kick — the up is not yet proven');
 
 // ...and is cleared by evidence from netifd, not by us asking
 autostart = true;
 dsim.modem()('registered');
-ok(dsim.d.contexts.wan._our_down == false,
+ok(dsim.d._our_downs.wan == null,
 	'sim_blocked: the marker is cleared once netifd shows autostart back on');
 
 // an operator ifdown that lands AFTER ours must still win
@@ -530,7 +530,7 @@ dmb.modem()('registered');
 
 eq(dmb.d.modems.m0.protocol, 'mbim', 'connect-first: the modem is on the mbim backend');
 eq(mb_downs, [ 'wan' ], 'connect-first: a pending interface is reset before setup');
-ok(dmb.d.contexts.wan._our_down == true, 'connect-first: that reset is marked as ours');
+ok(dmb.d._our_downs.wan != null, 'connect-first: that reset is marked as ours');
 ok(dmb.d.contexts.wan._kick_after_connect == true,
 	'connect-first: the kick is deferred until the session is up');
 eq(mb_kicks, [], 'connect-first: nothing is kicked before the session connects');
@@ -543,7 +543,7 @@ eq(mb_kicks, [ 'wan' ],
 	'connect-first: our own down does not block the kick that adopts the session');
 ok(dmb.d.contexts.wan.wanted != false,
 	'connect-first: the context stays wanted (it was never an operator ifdown)');
-ok(dmb.d.contexts.wan._our_down == true,
+ok(dmb.d._our_downs.wan != null,
 	'connect-first: the marker survives the kick until netifd confirms the up');
 
 // counter-check: an operator ifdown landing DURING the connect must still win,
@@ -555,7 +555,7 @@ let dop = mkmbim();
 dop.modem()('registered');
 
 eq(mb_downs, [], 'connect-first: a non-pending interface is not reset');
-ok(dop.d.contexts.wan._our_down != true, 'connect-first: no down of ours to mark');
+ok(dop.d._our_downs.wan == null, 'connect-first: no down of ours to mark');
 
 mb_kicks = [];
 mb_autostart = false;
@@ -585,13 +585,13 @@ mb_autostart = true; mb_pending = true;
 let dttl = mkmbim();
 dttl.modem()('registered');
 
-ok(dttl.d.contexts.wan._our_down == true, 'ttl: the pending reset is marked as ours');
-ok(dttl.d.contexts.wan._our_down_at > 0, 'ttl: ...and stamped with when');
+ok(dttl.d._our_downs.wan != null, 'ttl: the pending reset is marked as ours');
+ok(dttl.d._our_downs.wan > 0, 'ttl: ...and stamped with when');
 ok(dttl.d.contexts.wan.reconnect_on_register != true,
 	'ttl: a pending reset has no re-arm record to vouch for it later');
 
 // the operator takes the interface down long afterwards
-dttl.d.contexts.wan._our_down_at -= 100000;
+dttl.d._our_downs.wan -= 100000;
 mb_kicks = [];
 mb_pending = false;
 mb_autostart = false;
@@ -619,6 +619,44 @@ dfresh.ctx()('up');
 
 eq(mb_kicks, [ 'wan' ], 'ttl: a fresh marker still undoes our own down');
 
+// AND IT SURVIVES THE INTERFACE LOSING ITS ENTRY ENTIRELY.
+//
+// The marker used to live ON the context entry, whose lifetime is shorter than
+// the interface's: a reload that cannot resolve an interface's modem produces
+// no entry for it at all (config.uc warns "references unknown modem" and skips
+// it), so the carry-over in build_context had nothing to carry from. Re-adding
+// the modem built a fresh entry with no marker, the poll read netifd's cleared
+// autostart as operator intent, and wwand parked an interface IT had taken
+// down — until someone ran ifup. That is the tail of ddimension/wwand#35,
+// where the "unknown modem" warning lands BETWEEN our down and the first
+// refusal, 115 s apart: well inside OUR_DOWN_TTL, so the clock is not what
+// lost it. Found by a full review, 2026-09-19.
+mb_kicks = []; mb_downs = [];
+mb_autostart = true; mb_pending = true;
+
+let dlost = mkmbim();
+dlost.modem()('registered');
+
+// the entry carries nothing — which since the move is simply always true, and
+// these deletes only make it explicit. What this scenario proves is the
+// CONSEQUENCE: the poll still recognises our own down with no help from the
+// entry at all. That the map itself survives a real rebuild is a separate
+// property, tested over apply_config in test_daemon. Raised by Codex review,
+// 2026-09-19.
+delete dlost.d.contexts.wan._our_down;
+delete dlost.d.contexts.wan._our_down_at;
+
+mb_kicks = [];
+mb_pending = false;
+mb_autostart = false;
+dlost.modem()('registered');
+dlost.ctx()('up');
+
+eq(mb_kicks, [ 'wan' ],
+	'entry-loss: our own down is still recognised after the entry was rebuilt');
+eq(dlost.d.contexts.wan.wanted, true,
+	'entry-loss: ...so the interface is not parked as an operator ifdown');
+
 // --- a give-up that wwand recorded is NOT subject to the clock ---------------
 //
 // A blackhole can outlast any sane TTL, so the sim_blocked / hold-expiry
@@ -637,7 +675,7 @@ eq(dgive.d.contexts.wan.wanted, false, 'giveup: the context is parked');
 ok(dgive.d.contexts.wan.reconnect_on_register == true, 'giveup: ...but re-armable');
 
 // hours later the PIN is entered and the modem comes back
-dgive.d.contexts.wan._our_down_at -= 100000;
+dgive.d._our_downs.wan -= 100000;
 kicks = [];
 autostart = false;
 dgive.modem()('registered');

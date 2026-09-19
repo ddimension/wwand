@@ -380,6 +380,12 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 						// (3) hold-fallback: another drop, but reconnection now fails
 						// (START_NETWORK errors) — after the bounded hold the daemon
 						// gives up and drives the interface down.
+						// nothing has marked this interface yet, so the marker asserted
+						// after the give-up below can only have come from the hold
+						// expiry itself. Raised by Codex review, 2026-09-19.
+						eq(daemon._our_downs.wan, null,
+							'hold expiry: no our-down marker before the give-up');
+
 						let downs1 = length(filter(events, (e) => e.type == 'down' && e.data == 'wan'));
 						mock.indicate(1, 0xff, 'PACKET_SERVICE_STATUS_IND', {
 							status: { status: 1, reconfigure: 0 }, call_end_reason: 2, ip_family: 4,
@@ -400,6 +406,17 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 							// reconnects, unlike an operator ifdown which stays down.
 							eq(daemon.contexts.wan._holdexpiry, true,
 								'hold expiry marks an involuntary give-up (re-armable)');
+
+							// ...AND THE DOWN IT ISSUES IS MARKED AS OURS. netifd's
+							// ubus `down` clears autostart, which the ready path
+							// otherwise reads as an operator ifdown and parks the
+							// interface for good. reconnect.uc wrote that marker onto
+							// the context entry, where it no longer lives — so the
+							// give-up path, the one ddimension/wwand#35 actually took,
+							// was unmarked for every reader. Raised by Codex review,
+							// 2026-09-19.
+							ok(daemon._our_downs.wan != null,
+								'hold expiry: its down is marked as ours');
 
 							ok(length(filter(events, (e) => e.type == 'kick' && e.data == 'wan')) >= 1,
 								'boot-race kick after modem ready');
@@ -721,6 +738,46 @@ eq(sort(keys(rld.contexts)), [ 'wanA', 'wanB' ], 'reload init: both contexts pre
 ok(rld.modems.m0.modem != null && rld.contexts.wanA.ctx != null, 'reload init: m0/wanA built');
 eq(rl_modem_opts.m0.protocol, 'qmi', 'reload init: an explicit option protocol reaches the modem create');
 eq(rl_modem_opts.m1.protocol, 'qmi', 'reload init: the historic qmi default reaches the modem create');
+
+// THE OUR-DOWN MARKERS ARE SWEPT ON RELOAD. They are keyed by interface and
+// pruned on read, which only reaches names something still asks about — an
+// interface renamed or deleted from the config leaves its key behind with
+// nobody left to prune it. Deliberately NOT cleared when a context goes away:
+// that is exactly the case the map exists for (an interface whose modem
+// stopped resolving loses its entry and must still be recognised when it comes
+// back, ddimension/wwand#35). The clock arbitrates, and a reload applies it.
+// Raised by Codex review, 2026-09-19.
+// ...AND THEY SURVIVE AN INTERFACE LOSING ITS ENTRY ENTIRELY, which is the
+// whole reason the marker left the entry. A reload that cannot resolve an
+// interface's modem produces no entry for it at all (config.uc warns
+// "references unknown modem" and skips it), so the old carry-over had nothing
+// to carry from: re-adding the modem built a fresh entry with no marker, the
+// poll read netifd's cleared autostart as operator intent, and wwand parked an
+// interface IT had taken down. ddimension/wwand#35. Found by a full review,
+// 2026-09-19.
+rld._our_downs.wanA = time();
+
+rld.apply_config(netcfg((n) => { delete n.m0; }));
+eq(index(sort(keys(rld.contexts)), 'wanA'), -1,
+	'rebuild: the interface really did lose its entry');
+ok(rld._our_downs.wanA != null, 'rebuild: the marker did not go with it');
+
+rld.apply_config(netcfg());
+ok(rld.contexts.wanA != null, 'rebuild: and the entry came back when the modem did');
+ok(rld._our_downs.wanA != null,
+	'rebuild: ...with our own down still recognisable');
+
+delete rld._our_downs.wanA;
+
+rld._our_downs.gone = time() - 10000;   // long past OUR_DOWN_TTL
+rld._our_downs.wanA = time();           // fresh
+
+rld.apply_config(netcfg());
+
+eq(rld._our_downs.gone, null, 'sweep: a marker past its TTL is dropped on reload');
+ok(rld._our_downs.wanA != null, 'sweep: ...and a fresh one is left alone');
+
+delete rld._our_downs.wanA;
 
 let m0_obj = rld.modems.m0.modem, m1_obj = rld.modems.m1.modem;
 let ctxA_obj = rld.contexts.wanA.ctx, ctxB_obj = rld.contexts.wanB.ctx;
@@ -1216,15 +1273,20 @@ uloop.run();
 	// Losing it let the next `registered` read our own down as an operator
 	// ifdown and park the interface — reachable after a SIM block or a
 	// hold-expiry give-up followed by a re-enumeration.
-	d.contexts.wan._our_down = true;
-	d.contexts.wan._our_down_at = 4711;
+	//
+	// It lives OUTSIDE the entry now, keyed by interface, because a reload
+	// that cannot resolve an interface's modem produces no entry at all
+	// (config.uc "references unknown modem") — and a carry-over has nothing
+	// to carry from when there was no previous entry. Found by a full review,
+	// 2026-09-19.
+	d._our_downs.wan = 4711;
 	d.contexts.wan.reconnect_on_register = true;
 
 	d.contexts.wan.ctx = null;
 	d.hotplug('add', 'cdc-wdm0');
 
-	eq(d.contexts.wan._our_down, true, 'failed: our-down survives the re-bind');
-	eq(d.contexts.wan._our_down_at, 4711, 'failed: ...with its stamp, or it reads as stale');
+	eq(d._our_downs.wan, 4711,
+		'failed: our-down survives the re-bind, stamp and all');
 	eq(d.contexts.wan.reconnect_on_register, true,
 		'failed: and so does the give-up re-arm');
 

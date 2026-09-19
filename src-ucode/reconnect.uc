@@ -14,7 +14,10 @@
 //   _retry_activate      capped-backoff supervisor retry loop
 //   _enter_reconnecting  transient-loss reconnect bounded by the hold timer
 //   set_hold_max_ms / _hold_max_ms   live reconnect-hold ceiling (reload/status)
-// o = { log, timing, down_interface } — modem/context state stays on self.
+// o = { log, timing, down_interface, mark_our_down } — modem/context state
+// stays on self. `mark_our_down` is the daemon's interface-keyed our-down
+// marker (daemon.uc); the hold-expiry give-up needs it and install() refuses
+// without it.
 
 'use strict';
 
@@ -27,6 +30,15 @@ export function install(self, o)
 	let log = o.log;
 	let timing = o.timing;
 	let down_interface = o.down_interface;
+	// NOT defaulted to a no-op. It is needed on exactly one path — the
+	// hold-expiry give-up — and a silent default there loses the marker that
+	// keeps netifd's cleared autostart from reading as an operator ifdown,
+	// which is a correctness invariant and not a nicety. Raised by Codex
+	// review, 2026-09-19.
+	let mark_our_down = o.mark_our_down;
+
+	if (type(mark_our_down) != 'function')
+		die('reconnect.install: mark_our_down dependency is required');
 
 	let hold_max_ms = timing?.hold_max_ms ?? 90000;
 
@@ -173,10 +185,15 @@ export function install(self, o)
 				// netifd's ubus `down` clears autostart, which the ready path
 				// reads as operator intent — mark it so our own down is not
 				// mistaken for an ifdown (see daemon.uc, modem_registered).
-				// STAMPED, because that marker is now bounded: an unstamped one
-				// reads as infinitely old and would be ignored outright.
-				entry._our_down = true;
-				entry._our_down_at = time();
+				// STAMPED, because that marker is bounded: an unstamped one reads
+				// as infinitely old and would be ignored outright.
+				//
+				// Through the DAEMON, because the marker is keyed by interface
+				// there and no longer lives on this entry — writing the old fields
+				// here left the hold-expiry give-up, the very path that reaches
+				// this line and the one ddimension/wwand#35 took, unmarked for
+				// every reader. Raised by Codex review, 2026-09-19.
+				mark_our_down(entry);
 
 				if (down_interface && entry.cfg.interface)
 					down_interface(entry.cfg.interface);
