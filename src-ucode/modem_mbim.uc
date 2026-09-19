@@ -1351,8 +1351,15 @@ export function create(opts)
 			self.pt = null;
 		}
 
-		// the passthrough-allocated UIM client (if any) rode on the shim just closed
+		// the passthrough-allocated clients (if any) rode on the shim just closed.
+		// BOTH of them: ensure_pt_client caches into self[field] and short-
+		// circuits when it is set, so a wms left behind here survived a
+		// teardown+retry on the same object and every later SMS op used a
+		// client bound to a shim that is gone — failing forever and feeding the
+		// proto-error counter, which eventually power-cycles a healthy modem.
+		// Found by a full review, 2026-09-19.
 		self.uim = null;
+		self.wms = null;
 		self._pt_failed = false;
 		backend.reset(self, '_sig_be', '_cells_be', '_ca_be', '_dsd_be', '_regd_be', '_apdu_be', '_esim_be');
 

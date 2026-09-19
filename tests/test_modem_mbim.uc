@@ -640,6 +640,27 @@ assert_sim_poll_teardown();
 	eq(shim_closed, true, 'teardown: ...and the shim is still closed, not stranded');
 	eq(m5.pt, null, 'teardown: the passthrough handle is dropped');
 	eq(m5._teardown_depth, 0, 'teardown: and the depth is balanced');
+
+	// BOTH passthrough clients go with the shim. ensure_pt_client caches into
+	// self[field] and short-circuits when it is set, so a wms left behind
+	// survived a teardown+retry on the same object and every later SMS op used
+	// a client bound to a shim that is gone — failing forever and feeding the
+	// proto-error counter, which eventually power-cycles a healthy modem.
+	// Found by a full review, 2026-09-19.
+	let m7 = modem_mbim.create({
+		id: 'teardown-wms', device: '/dev/mock6', config: {},
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		deps: { log: () => null, on_event: () => null },
+	});
+
+	m7.uim = { destroy: () => null };
+	m7.wms = { destroy: () => null };
+	m7.teardown();
+
+	eq(m7.uim, null, 'teardown: the passthrough UIM client is dropped');
+	eq(m7.wms, null, 'teardown: ...and so is the WMS one');
 })();
 
 // --- the slow tick must read the serving cell BEFORE choosing a data mode ----

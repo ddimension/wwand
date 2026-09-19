@@ -1587,6 +1587,16 @@ export function create(opts)
 		let tick;
 
 		tick = () => {
+			// THE HANDLE IS STALE THE MOMENT WE ARE HERE — this timer has
+			// fired. Clearing it at the top rather than at each exit is what
+			// makes the early returns below safe: they used to leave the spent
+			// handle in place, and `_start_telemetry` refuses to start while it
+			// is set. One registration loss therefore froze telemetry for the
+			// life of the modem object — and this tick IS the registration
+			// liveness check, so a second loss was never detected either.
+			// Found by a full review, 2026-09-19.
+			telemetry_timer = null;
+
 			if (!self.at || self.state != 'READY')
 				return;
 
