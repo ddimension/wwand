@@ -2438,6 +2438,17 @@ export function create(opts)
 				// else the QMI DMS / AT CGMR revision
 				firmware: entry.modem?.info?.firmware ?? entry.modem?.info?.revision,
 				imei: entry.modem?.info?.imei,
+				// MBIM ONLY: how many data sessions the modem declares (DEVICE_CAPS
+				// MaxSessions; null on QMI and NCM, which have no such field).
+				// Parsed since the backend was written and never surfaced —
+				// which matters because the session a context activates is the
+				// EFFECTIVE wire id (context_mbim's wire_session(), the mux
+				// channel mapped through the datapath's map_ids), and a wire id
+				// >= MaxSessions is a request the modem may refuse. Nothing in
+				// the status told you the number to compare it against. Found
+				// while debugging a refused CONNECT on an RM520N-GL (which
+				// declares 15, so session 1 was never the problem), 2026-09-19.
+				max_sessions: entry.modem?.info?.max_sessions,
 				imsi: entry.modem?.info?.imsi,
 				iccid: entry.modem?.info?.iccid,
 				msisdn: entry.modem?.info?.msisdn,

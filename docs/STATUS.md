@@ -197,6 +197,38 @@ nothing repainted over the mask.
 
 ## Known open
 
+- **TODO — `pdp_type` cannot be configured per SIM, and two people expected it
+  to be.** `wwand_sim` exists to carry the per-card half of a connection, and it
+  covers `pincode`, `apn`, `auth`, `username`, `password`, `plmn_list` — but not
+  `pdp_type`, which the parser rejects with "unknown option (ignored)"
+  (`SIM_KNOWN_OPTS`, config.uc). Accepting the key would not be enough on its
+  own: `context_common.conn_cfg` is generic and needs no change, but every
+  consumer reads the PDP type off the INTERFACE instead of asking it.
+
+  The full inventory, because the obvious half is not all of it:
+
+  | Where | What reads it |
+  |---|---|
+  | `context.uc` | four sites (profile setup, the AT `CGDCONT` string, the type check, the re-apply comparison) |
+  | `context_mbim.uc` | the MBIM `IpType` at activation |
+  | `context_ncm.uc` | via `eff_config()`, whose override list is exactly `apn, auth, username, password` |
+  | `modem_mbim.uc` | the ATTACH profile — two lines below a `conn_cfg` for username and password |
+  | `modem_ncm.uc` | `attach_cfg()`, which returns `ctx.config` unfiltered and drives the autonomous LTE attach |
+  | `daemon.uc` | the dynamic DHCPv6 subinterface gate (`ctx.config?.pdp_type != 'ipv4'`) |
+
+  That last row is the one that decides whether the feature is worth anything:
+  fix only the backends and a per-SIM `ipv4` would still get a v6 child, which
+  is the exact thing the request is for.
+
+  Asked for in ddimension/wwand#35. The reporter's case: an FM350-GL holding
+  eSIM profiles from three Indonesian carriers, where by their tcpdumps XL
+  answers IPv6 and Smartfren and IM3 do not (one RS, one SOLICIT, zero replies
+  on both). If that holds, the question is not "does this box want IPv6" but
+  "does this SIM's carrier have it", and a global knob cannot say that. The same
+  parser warning turned up independently on an RM520N-GL the next day, so the
+  expectation is not one person's. Unscheduled: it touches the schema, three
+  context paths, both attach paths and the daemon's v6 orchestration, and wants
+  its own tests rather than riding along with a fix.
 - **DONE (2026-08-30) — the recovery ladder no longer touches hardware on a
   protocol it has never spoken.** Every rung, the reboot included, is gated on
   one answer having arrived in the selected protocol; the permission is sticky,
