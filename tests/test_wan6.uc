@@ -31,7 +31,7 @@ const TIMING = { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
 let kicks = [];
 let autostart = true;
 
-function mk(pdp, ensures)
+function mk(pdp, ensures, fx, netdev)
 {
 	let ctx_on_event = null;
 	let modem_on_event = null;
@@ -40,7 +40,7 @@ function mk(pdp, ensures)
 		id: 'm0',
 		start: () => null, stop: () => null,
 		note_connect_success: () => null, note_connect_failure: () => null,
-		datapath: { backend: 'rndis_host' },
+		datapath: { backend: 'rndis_host', netdev: netdev },
 	};
 
 	let d = daemon_mod.create({
@@ -73,7 +73,7 @@ function mk(pdp, ensures)
 			renew_interface: () => null,
 			down_interface: () => null,
 			iface_status: (iface, cb) => cb({ up: false, autostart: autostart }),
-			datapath_fx: null,
+			datapath_fx: fx ?? null,
 			read_config: () => config.parse({ network: {
 				m0: { '.type': 'wwand_modem', device: '/dev/mock0' },
 				wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', pdp_type: pdp },
@@ -645,5 +645,66 @@ dgive.modem()('registered');
 eq(kicks, [ 'wan' ],
 	'giveup: a recorded give-up reconnects however long it was parked');
 ok(dgive.d.contexts.wan.wanted == true, 'giveup: and the context is wanted again');
+
+// --- the v6 subinterface waits for the parent's link-local -------------------
+//
+// Applying new IPv4 settings to the parent takes the device's fe80:: away for a
+// fraction of a second. ensure_wan6's down/up landed inside that gap, so
+// odhcp6c came up on a device it could not open an LLA socket on and its Router
+// Solicitation went nowhere ("Failed to send RS (Network unreachable)") — the
+// FIRST attempt lost. odhcp6c's own retry covers it on a network that answers,
+// which is why it stayed invisible: it costs a slow start, not the connection.
+// Field-captured on an FM350-GL where a profile switch changed the IPv4 address
+// (ddimension/wwand#35, 2026-09-19).
+{
+	uloop.init();
+
+	// /proc/net/if_inet6: addr ifindex prefixlen scope flags devname.
+	// scope 20 is link-local — and wwand0 has none yet.
+	let inet6 = "fe80000000000000ccdb20fffe616bae 03 40 20 80     eth0\n";
+	let fx = { read: (path) => (path == '/proc/net/if_inet6') ? inet6 : null };
+
+	let waited = [];
+	let w = mk('ipv6', waited, fx, 'wwand0');
+
+	w.ctx()('up');
+
+	eq(waited, [], 'lla: the subinterface is NOT started while the parent has no link-local');
+
+	// ...and it is started as soon as the address is back
+	inet6 += "fe80000000000000020011fffe121314 04 40 20 80   wwand0\n";
+
+	uloop.timer(600, () => uloop.end());
+	uloop.run();
+
+	eq(waited, [ 'wan/ipv6' ], 'lla: ...and started once it appears');
+}
+
+// ...and repeated `up` events must not stack parallel waits, each of which
+// would eventually bounce the subinterface again. Raised by review,
+// 2026-09-19.
+{
+	uloop.init();
+
+	let inet6 = "fe80000000000000ccdb20fffe616bae 03 40 20 80     eth0\n";
+	let fx = { read: (path) => (path == '/proc/net/if_inet6') ? inet6 : null };
+
+	let many = [];
+	let w2 = mk('ipv6', many, fx, 'wwand0');
+
+	w2.ctx()('up');
+	w2.ctx()('up');
+	w2.ctx()('up');
+
+	eq(many, [], 'lla/once: nothing starts while the link-local is missing');
+
+	inet6 += "fe80000000000000020011fffe121314 04 40 20 80   wwand0\n";
+
+	uloop.timer(600, () => uloop.end());
+	uloop.run();
+
+	eq(many, [ 'wan/ipv6' ],
+		'lla/once: three ups produce ONE subinterface start, not three');
+}
 
 done('test_wan6');

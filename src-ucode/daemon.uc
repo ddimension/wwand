@@ -284,6 +284,37 @@ export function create(opts)
 	// later status actually shows the interface back — see decide().
 	const OUR_DOWN_TTL = 180;
 
+	// A SUBINTERFACE MUST NOT BE STARTED WHILE THE PARENT HAS NO LINK-LOCAL
+	// ADDRESS. Applying new IPv4 settings to the parent takes the device's
+	// fe80:: away for a fraction of a second, and ensure_wan6's down/up landed
+	// inside that gap: odhcp6c came up on a device it could not open an LLA
+	// socket on, its Router Solicitation went nowhere ("Failed to send RS
+	// (Network unreachable)"), and the FIRST attempt was lost. Its retry
+	// covers it on a network that answers, which is why this stayed invisible —
+	// it costs a slow start, not the connection. Field-captured on an FM350-GL
+	// where a profile switch changed the IPv4 address (ddimension/wwand#35,
+	// 2026-09-19).
+	//
+	// scope 20 in /proc/net/if_inet6 is link-local; the columns are
+	// addr ifindex prefixlen scope flags devname.
+	const LLA_WAIT_MS = 250;
+	const LLA_WAIT_TRIES = 12;      // ~3 s, then start anyway
+
+	let has_lla = (netdev) => {
+		// cannot tell -> never block on it
+		if (!netdev || !deps.datapath_fx?.read)
+			return true;
+
+		for (let line in split(deps.datapath_fx.read('/proc/net/if_inet6') ?? '', '\n')) {
+			let f = split(trim(line), /[ \t]+/);
+
+			if (length(f) >= 6 && f[5] == netdev && f[3] == '20')
+				return true;
+		}
+
+		return false;
+	};
+
 	let mark_our_down = (entry) => {
 		entry._our_down = true;
 		entry._our_down_at = time();
@@ -851,9 +882,52 @@ export function create(opts)
 			    entry?.cfg?.interface && ctx.config?.pdp_type != 'ipv4') {
 				log('info', sprintf('interface %s: ensuring the dynamic dhcpv6 subinterface (RNDIS v6 model)',
 					entry.cfg.interface));
-				// the pdp type rides along for the log only — this gate has
-				// already established that the context is v6-capable
-				deps.ensure_wan6(entry.cfg.interface, ctx.config?.pdp_type);
+
+				// ...but wait for the parent's link-local first (see has_lla).
+				let dev = ctx.modem?.datapath?.netdev;
+				let iface = entry.cfg.interface;
+				let want = ctx.config?.pdp_type;
+				let mine = ctx;
+				let tries = 0;
+				let arm;
+
+				// ONE CHAIN PER ENTRY. Repeated `up` events would otherwise
+				// stack parallel waits, each eventually calling ensure_wan6 and
+				// bouncing the subinterface again. Raised by review, 2026-09-19.
+				if (entry._wan6_arming)
+					return;
+
+				entry._wan6_arming = true;
+
+				arm = () => {
+					// The context this belongs to is gone, or was replaced —
+					// and the ENTRY check is the load-bearing half: stop_context
+					// deletes the entry from self.contexts without clearing its
+					// ctx (:1238) and shutdown replaces the whole map (:2894),
+					// so a closure holding `entry` would still see
+					// `entry.ctx == mine` and bounce a freshly created
+					// subinterface. Raised by review, 2026-09-19.
+					if (self.contexts[name] != entry || entry.ctx != mine) {
+						entry._wan6_arming = false;
+						return;
+					}
+
+					if (!has_lla(dev)) {
+						if (++tries <= LLA_WAIT_TRIES)
+							return uloop.timer(LLA_WAIT_MS, arm);
+
+						log('warn', sprintf('interface %s: no link-local on %s after %d ms — starting the v6 subinterface anyway',
+							iface, dev ?? '?', LLA_WAIT_TRIES * LLA_WAIT_MS));
+					}
+
+					entry._wan6_arming = false;
+
+					// the pdp type rides along for the log only — this gate has
+					// already established that the context is v6-capable
+					deps.ensure_wan6(iface, want);
+				};
+
+				arm();
 			}
 
 			// detect an address change vs the last applied settings. When the IP
