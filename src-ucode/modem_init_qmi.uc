@@ -583,7 +583,16 @@ export function install(self, o)
 		let mask = qmi_backend.parse_modes(self.config.modes);
 		let sel = null;
 
+		// `option mnc '030'` and `option mnc '30'` are different operators and
+		// both become the integer 30 — so the width the config string carries
+		// has to travel with it (libqmi 1.38, Set System Selection Preference
+		// input 0x1A). Without it a configured 3-digit MNC was ambiguous on
+		// every single init, not just on a manual ubus call. Raised by Codex
+		// review, 2026-09-19.
+		let sel_width = 2;
+
 		if (self.config.mcc && self.config.mnc) {
+			sel_width = modem_common.mnc_width(self.config.mnc);
 			sel = {
 				mode: nasmod.NETWORK_SELECTION_MANUAL,
 				mcc: +self.config.mcc,
@@ -600,8 +609,10 @@ export function install(self, o)
 		if (mask != null)
 			args.mode_preference = mask;
 
-		if (sel)
+		if (sel) {
 			args.network_selection = sel;
+			args.mnc_pcs_digit = (sel_width == 3) ? 1 : 0;
+		}
 
 		let attempt;
 

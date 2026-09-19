@@ -702,7 +702,16 @@ export function parse_cops_scan(lines)
 				continue;   // no quoted PLMN id -> not an operator descriptor
 
 			let stat = +trim(f[0]);
-			let mcc = +substr(numeric, 0, 3), mnc = +substr(numeric, 3);
+			let mnc_s = substr(numeric, 3);
+			let mcc = +substr(numeric, 0, 3), mnc = +mnc_s;
+
+			// THE QUOTED PLMN ID SAYS HOW MANY MNC DIGITS THERE ARE, and it is
+			// the only thing that does: 310030 and 31030 name different
+			// operators and both become the integer 30. Reformatting with a
+			// fixed %02d below threw that away, so an entry picked from this
+			// list could not be selected again as what it was. Found by a full
+			// review, 2026-09-19.
+			let mnc_digits = length(mnc_s);
 
 			// optional 5th field = the access technology (3GPP 27.007 <AcT>);
 			// normalise through the canonical RAT map so NB-IoT (AcT 9) and
@@ -715,7 +724,8 @@ export function parse_cops_scan(lines)
 			push(out, {
 				mcc:    mcc,
 				mnc:    mnc,
-				plmn:   sprintf('%d/%02d', mcc, mnc),
+				mnc_digits: mnc_digits,
+				plmn:   sprintf('%d/%s', mcc, mnc_s),
 				name:   replace(trim(f[1]), /"/g, ''),
 				status: (stat == 2) ? 'current' : (stat == 3) ? 'forbidden' : 'available',
 				rats:   rat ? [ rat ] : [],

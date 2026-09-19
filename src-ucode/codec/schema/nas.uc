@@ -232,6 +232,14 @@ export default {
 					mcc: 'u16', mnc: 'u16', network_status: 'u8', description: 'lstring' } } },
 				radio_access_technology: { t: 0x11, f: { n: 'u16', of: {
 					mcc: 'u16', mnc: 'u16', radio_interface: 'i8' } } },
+				// which listed MNCs are three digits. 310/030 and 310/30 are
+				// different operators and arrive identically in TLV 0x10, so a
+				// UI choosing from this list could not round-trip the one with
+				// the leading zero. NOTE the size prefix is u16 here, unlike Set
+				// Preferred Networks' 0x11 which is u8 (libqmi 1.38, Network
+				// Scan output 0x12). Found by a full review, 2026-09-19.
+				mnc_pcs_digit: { t: 0x12, f: { n: 'u16', of: {
+					mcc: 'u16', mnc: 'u16', includes_pcs_digit: 'u8' } } },
 				scan_result: { t: 0x13, f: 'u32' },
 			},
 		},
@@ -247,6 +255,15 @@ export default {
 			resp: {
 				preferred_networks: { t: 0x10, f: { n: 'u16', of: {
 					mcc: 'u16', mnc: 'u16', rat: 'u16' } } },
+				// which of the entries above carry a third MNC digit — the
+				// read-back is advertised as a cross-verification of the
+				// write, and without this it cannot tell 310/030 from 310/30
+				// any better than the write could. Same common-ref as Set's
+				// 0x11, so the same u8-prefixed array (libqmi 1.38, Get
+				// Preferred Networks output 0x12). Found by a full review,
+				// 2026-09-19.
+				mnc_pcs_digit: { t: 0x12, f: { n: 'u8', of: {
+					mcc: 'u16', mnc: 'u16', includes_pcs_digit: 'u8' } } },
 			},
 		},
 
@@ -255,6 +272,16 @@ export default {
 			req: {
 				preferred_networks: { t: 0x10, f: { n: 'u16', of: {
 					mcc: 'u16', mnc: 'u16', rat: 'u16' } } },
+				// A 3-DIGIT MNC IS NOT KNOWABLE FROM THE NUMBER. 310/030 and
+				// 310/30 are different operators and both arrive here as the
+				// integer 30, so without this TLV the modem writes whichever
+				// its own default assumes — and reads it back the same way, so
+				// nothing downstream can tell either. Per-entry here (MCC, MNC,
+				// includes-PCS-digit), unlike SSP's plain flag: libqmi 1.38
+				// common-ref "NAS MNC PCS Digit Include Status", size prefix
+				// u8. Found by a full review, 2026-09-19.
+				mnc_pcs_digit: { t: 0x11, f: { n: 'u8', of: {
+					mcc: 'u16', mnc: 'u16', includes_pcs_digit: 'u8' } } },
 				clear_previous: { t: 0x12, f: 'u8' },
 			},
 			resp: {},
@@ -271,6 +298,12 @@ export default {
 				roaming_preference:{ t: 0x14, f: 'u16' },
 				lte_band_preference:{ t: 0x15, f: 'u64' },
 				network_selection: { t: 0x16, f: { mode: 'u8', mcc: 'u16', mnc: 'u16' } },
+				// whether the MNC in 0x16 above is three digits. A plain flag here,
+				// not the per-entry array Set Preferred Networks takes — libqmi 1.38
+				// qmi-service-nas.json, Set System Selection Preference input 0x1A,
+				// format guint8. Without it a manual selection of 310/030 goes out
+				// as 310/30, a different operator. Found by a full review, 2026-09-19.
+				mnc_pcs_digit: { t: 0x1a, f: 'u8' },
 				// QmiNasChangeDuration: 0 = until power cycle, 1 = permanent
 				change_duration:   { t: 0x17, f: 'u8' },
 				usage_preference:  { t: 0x21, f: 'u32' },

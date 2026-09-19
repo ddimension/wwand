@@ -318,11 +318,18 @@ export function publish(conn, daemon, log)
 		},
 
 		// network selection: mode 'auto' or 'manual' + mcc/mnc (write ACL)
+		// `mnc` is an INTEGER here, and 310/030 is not 310/30 — two different
+		// operators that both arrive as 30, so the leading zero cannot survive
+		// this boundary on its own. `mnc_digits` carries the width (2 or 3);
+		// omitting it keeps today's behaviour, and an MNC of 100 or more
+		// settles itself. Added rather than switching `mnc` to a string so
+		// existing callers keep working. Found by a full review, 2026-09-19.
 		modem_set_network_selection: {
-			args: { modem: '', mode: '', mcc: 0, mnc: 0, ubus_rpc_session: '' },
+			args: { modem: '', mode: '', mcc: 0, mnc: 0, mnc_digits: 0,
+				ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
 				daemon.modem_set_network_selection(req.args.modem, req.args.mode,
-					req.args.mcc, req.args.mnc, ok_reply(reply))),
+					req.args.mcc, req.args.mnc, ok_reply(reply), req.args.mnc_digits)),
 		},
 
 		modem_reattach: {

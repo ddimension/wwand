@@ -15,6 +15,7 @@ import * as qmi_backend from 'wwand.qmi_backend';
 import * as modem_quirks from 'wwand.modem_quirks';
 import * as atcmd from 'wwand.atcmd';
 import * as nasmod from 'wwand.codec.schema.nas';
+import * as modem_common from 'wwand.modem_common';
 
 // compare the live modem against self.config + modem_quirks and populate
 // self.config_warnings = [ { check, severity:'warn'|'info', message, expected,
@@ -84,11 +85,18 @@ export function validate(self, log, cb)
 		if (mask != null)
 			args.mode_preference = mask;
 
-		if (self.config.mcc && self.config.mnc)
+		// with the MNC's width alongside it: `option mnc '030'` and '30' are
+		// different operators and both become the integer 30 (libqmi 1.38, Set
+		// System Selection Preference input 0x1A). Raised by Codex review,
+		// 2026-09-19.
+		if (self.config.mcc && self.config.mnc) {
 			args.network_selection = {
 				mode: nasmod.NETWORK_SELECTION_MANUAL,
 				mcc: +self.config.mcc, mnc: +self.config.mnc,
 			};
+			args.mnc_pcs_digit =
+				(modem_common.mnc_width(self.config.mnc) == 3) ? 1 : 0;
+		}
 
 		if (mask == null && args.network_selection == null)
 			return done();

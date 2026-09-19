@@ -150,14 +150,17 @@ run = () => {
 		// (2) scan returns the parsed operator list with status buckets
 		daemon.modem_scan('m0', (serr, sc) => {
 			eq(serr, null, 'scan: no error');
+			// `mnc_digits` comes from the scan's own TLV 0x12 where the modem
+			// sends one, else from the number; the mock sends none here, so
+			// every 2-digit MNC reads as 2. 310/030 gets its own case below.
 			eq(sc.operators, [
-				{ mcc: 262, mnc: 1, plmn: '262/01', name: 'Testnet', status: 'current',
+				{ mcc: 262, mnc: 1, mnc_digits: 2, plmn: '262/01', name: 'Testnet', status: 'current',
 				  roaming: false, home: false, preferred: false, rats: [ 'LTE', 'UMTS' ] },
-				{ mcc: 262, mnc: 2, plmn: '262/02', name: 'Other', status: 'available',
+				{ mcc: 262, mnc: 2, mnc_digits: 2, plmn: '262/02', name: 'Other', status: 'available',
 				  roaming: true, home: true, preferred: true, rats: [ 'NR5G' ] },
-				{ mcc: 262, mnc: 3, plmn: '262/03', name: 'Nope', status: 'forbidden',
+				{ mcc: 262, mnc: 3, mnc_digits: 2, plmn: '262/03', name: 'Nope', status: 'forbidden',
 				  roaming: false, home: false, preferred: false, rats: [] },
-				{ mcc: 262, mnc: 4, plmn: '262/04', name: 'HomeOnly', status: 'available',
+				{ mcc: 262, mnc: 4, mnc_digits: 2, plmn: '262/04', name: 'HomeOnly', status: 'available',
 				  roaming: false, home: true, preferred: false, rats: [] },
 			], 'scan: operators + per-PLMN RAT list from NAS network scan (0x11 TLV)');
 
@@ -171,7 +174,6 @@ run = () => {
 				eq(last.network_selection, { mode: 1, mcc: 262, mnc: 3 },
 					'set_network_selection manual: NAS network_selection TLV');
 				eq(last.change_duration, 1, 'set_network_selection manual: permanent');
-
 				// (4) auto selection while the modem already runs auto (the mock's
 				// GET_SYSTEM_SELECTION_PREFERENCE says network_selection 0): the
 				// idempotency guard must SKIP the set — no radio disturbance —
@@ -309,13 +311,13 @@ run = () => {
 
 											eq(st.running, false, 'scan_status: job finished');
 											eq(st.operators, [
-												{ mcc: 262, mnc: 1, plmn: '262/01', name: 'Testnet', status: 'current',
+												{ mcc: 262, mnc: 1, mnc_digits: 2, plmn: '262/01', name: 'Testnet', status: 'current',
 												  roaming: false, home: false, preferred: false, rats: [ 'LTE', 'UMTS' ] },
-												{ mcc: 262, mnc: 2, plmn: '262/02', name: 'Other', status: 'available',
+												{ mcc: 262, mnc: 2, mnc_digits: 2, plmn: '262/02', name: 'Other', status: 'available',
 												  roaming: true, home: true, preferred: true, rats: [ 'NR5G' ] },
-												{ mcc: 262, mnc: 3, plmn: '262/03', name: 'Nope', status: 'forbidden',
+												{ mcc: 262, mnc: 3, mnc_digits: 2, plmn: '262/03', name: 'Nope', status: 'forbidden',
 												  roaming: false, home: false, preferred: false, rats: [] },
-												{ mcc: 262, mnc: 4, plmn: '262/04', name: 'HomeOnly', status: 'available',
+												{ mcc: 262, mnc: 4, mnc_digits: 2, plmn: '262/04', name: 'HomeOnly', status: 'available',
 												  roaming: false, home: true, preferred: false, rats: [] },
 											], 'scan_status: operators delivered async');
 
@@ -328,7 +330,99 @@ run = () => {
 											ok(length(opc) && opc[length(opc) - 1].args.mode == 1,
 												'reattach: QMI opmode low_power (bounce) issued');
 
-											uloop.end();
+											// A 3-DIGIT MNC IS NOT KNOWABLE FROM THE NUMBER. 310/030 and 310/30 are
+											// different operators and both arrive as the integer 30, so without TLV
+											// 0x1A the modem writes whichever its own default assumes — and reads it
+											// back the same way, so nothing downstream can tell either. libqmi 1.38,
+											// Set System Selection Preference input 0x1A, format guint8. Last in the
+											// chain because every step above reads "the last SET". Found by a full
+											// review, 2026-09-19.
+											daemon.modem_set_network_selection('m0', 'manual', 310, 30, (perr) => {
+												eq(perr, null, 'pcs: 310/030 selection accepted');
+
+												let s3 = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
+												let l3 = s3[length(s3) - 1].args;
+
+												eq(l3.network_selection, { mode: 1, mcc: 310, mnc: 30 },
+													'pcs: the PLMN TLV is unchanged...');
+												eq(l3.mnc_pcs_digit, 1,
+													'pcs: ...and TLV 0x1A says the MNC carries its third digit');
+
+												// AND A SCAN LISTS THE WIDTH IT SAW. 310/030 and 310/30 arrive
+			// identically in the scan's TLV 0x10, so TLV 0x12 is the only
+			// thing that tells them apart — without it a UI choosing an
+			// entry from the list could not round-trip the one with the
+			// leading zero. Found by a full review, 2026-09-19.
+			mock.handlers.NETWORK_SCAN = {
+				network_information: [
+					{ mcc: 310, mnc: 30, network_status: 0x01, description: 'Leading' },
+					{ mcc: 310, mnc: 260, network_status: 0x01, description: 'Plain' },
+				],
+				radio_access_technology: [],
+				mnc_pcs_digit: [
+					{ mcc: 310, mnc: 30, includes_pcs_digit: 1 },
+					{ mcc: 310, mnc: 260, includes_pcs_digit: 1 },
+				],
+				scan_result: 0,
+			};
+
+			daemon.modem_scan('m0', (zerr, zsc) => {
+				eq(zerr, null, 'pcs scan: no error');
+				eq(zsc.operators[0].mnc_digits, 3,
+					'pcs scan: TLV 0x12 marks 310/030 as a 3-digit MNC');
+				eq(zsc.operators[0].plmn, '310/030',
+					'pcs scan: ...and it renders with its leading zero');
+				eq(zsc.operators[1].plmn, '310/260',
+					'pcs scan: a plain 3-digit MNC is unaffected');
+			});
+
+			// a 2-digit MNC says so too, rather than leaving the modem to guess
+												daemon.modem_set_network_selection('m0', 'manual', 262, 3, (qerr) => {
+													eq(qerr, null, 'pcs: 262/03 selection accepted');
+
+													let s4 = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
+													eq(s4[length(s4) - 1].args.mnc_pcs_digit, 0,
+														'pcs: a 2-digit MNC sets the flag to 0');
+
+													// and an MNC of 100 or more settles its own width
+													daemon.modem_set_network_selection('m0', 'manual', 302, 220, (rerr) => {
+														eq(rerr, null, 'pcs: 302/220 selection accepted');
+
+														let s5 = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
+														eq(s5[length(s5) - 1].args.mnc_pcs_digit, 1,
+															'pcs: an MNC >= 100 needs no telling');
+
+														// THE WIDTH IS PART OF THE IDEMPOTENCY COMPARISON. Matching
+														// numerically made a serving 310/30 equal to a requested
+														// 310/030, so the guard skipped the very write that would have
+														// corrected it and reported `unchanged` — the fix above could
+														// never fire on the box that needed it. The serving cell carries
+														// no width of its own, so a 3-digit request is never treated as
+														// already applied. Raised by Codex review, 2026-09-19.
+														daemon.modems.m0.modem.cells = { serving: { lte: { mcc: 310, mnc: 30 } } };
+														mock.handlers.GET_SYSTEM_SELECTION_PREFERENCE = {
+															mode_preference: 0x18, roaming_preference: 0xFF,
+															lte_band_preference: 133, usage_preference: 1,
+															network_selection: 1,
+														};
+
+														daemon.modem_set_network_selection('m0', 'manual', 310, 30, (gerr, gres) => {
+															eq(gerr, null, 'guard: 310/30 against a serving 310/30');
+															eq(gres.unchanged, true,
+																'guard: the same 2-digit PLMN is still skipped');
+
+															daemon.modem_set_network_selection('m0', 'manual', 310, 30,
+																(herr, hres) => {
+																	eq(herr, null, 'guard: 310/030 against a serving 310/30');
+																	eq(hres.unchanged, null,
+																		'guard: a 3-digit request is NOT the serving 2-digit PLMN');
+
+																	uloop.end();
+																}, 3);
+														});
+													});
+												});
+											}, 3);
 										});
 									});
 									poll();

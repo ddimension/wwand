@@ -656,6 +656,40 @@ export function make_recovery(self, opts, log, proto)
 	return rec;
 };
 
+// A 3-DIGIT MNC IS NOT KNOWABLE FROM THE NUMBER. 310/030 and 310/30 are
+// different operators and both are the integer 30, so every writer that has
+// only the number has to be TOLD the width — QMI carries it in its own TLV
+// (libqmi 1.38: Set System Selection Preference input 0x1A, Set Preferred
+// Networks 0x11) and AT+COPS states it by how many digits it writes.
+//
+// `digits` wins when given; otherwise a string that still HAS three digits
+// settles it, and so does any value of 100 or more. Everything else stays two,
+// which is what shipped. Found by a full review, 2026-09-19.
+export function mnc_width(mnc, digits)
+{
+	if (+digits == 3 || +digits == 2)
+		return +digits;
+
+	if (type(mnc) == 'string' && length(replace(mnc, /[^0-9]/g, '')) == 3)
+		return 3;
+
+	return (+mnc >= 100) ? 3 : 2;
+};
+
+// zero-pad an MNC to that width. NOT sprintf('%0*d'): ucode's sprintf does not
+// implement the `*` width — it emits the directive verbatim and shifts the
+// remaining arguments along (measured on the host interpreter, 2026-09-19; the
+// same limitation is noted in wwandctl_fmt.uc:49).
+export function mnc_text(mnc, width)
+{
+	let out = sprintf('%d', +mnc);
+
+	while (length(out) < width)
+		out = '0' + out;
+
+	return out;
+};
+
 export function make_fail(self, o)
 {
 	return (stage, err) => {

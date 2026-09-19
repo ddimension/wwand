@@ -824,10 +824,13 @@ function mock_nas(store, calls) {
 			push(calls, name);
 			if (name == 'SET_PREFERRED_NETWORKS') {
 				store.pn = args.preferred_networks;
+				store.pcs = args.mnc_pcs_digit;
 				return uloop.timer(1, () => cb(null, {}));
 			}
 			if (name == 'GET_PREFERRED_NETWORKS')
-				return uloop.timer(1, () => cb(null, { preferred_networks: store.pn ?? [] }));
+				return uloop.timer(1, () => cb(null, {
+					preferred_networks: store.pn ?? [],
+					mnc_pcs_digit: store.pcs ?? [] }));
 			uloop.timer(1, () => cb({ error: 'unknown' }));
 		},
 	};
@@ -841,14 +844,40 @@ scenario('plmn write (nas): QMI NAS Set + read-back via NAS Get', (next) => {
 	sim.write_nas_plmn(m, [
 		{ mcc: '262', mnc: '01', utran: true, eutran: true },
 		{ mcc: '310', mnc: '260', eutran: true, ngran: true },
+		{ mcc: '310', mnc: '030', eutran: true },
 	], (err, res) => {
 		eq(err, null, 'nas write: ok');
 		eq(index(calls, 'SET_PREFERRED_NETWORKS') >= 0, true, 'nas write: used NAS Set');
 		eq(store.pn[0], { mcc: 262, mnc: 1, rat: 0xC000 }, 'nas write: record 0 mcc/mnc/rat');
 		eq(store.pn[1].rat, 0x4800, 'nas write: record 1 rat (E-UTRAN|NG-RAN)');
-		eq(length(res.nas), 2, 'nas write: read-back returns the nas list');
+		eq(length(res.nas), 3, 'nas write: read-back returns the nas list');
 		eq(res.nas[1], { mcc: '310', mnc: '260', gsm: false, utran: false, eutran: true, ngran: true },
 			'nas write: read-back decodes 3-digit mnc + AcT flags');
+
+		// A 3-DIGIT MNC IS NOT KNOWABLE FROM THE NUMBER. 310/030 and 310/30
+		// are different operators and both become the integer 30 in the
+		// record above, so the modem wrote whichever its own default assumed
+		// — and read it back the same way, so the list looked right on both
+		// sides while naming the wrong network. The width is in the string
+		// this writer receives; libqmi 1.38 carries it per entry in Set
+		// Preferred Networks TLV 0x11. Found by a full review, 2026-09-19.
+		eq(length(store.pcs ?? []), 3,
+			'nas write: a PCS-digit record accompanies every entry');
+		eq((store.pcs ?? [])[0], { mcc: 262, mnc: 1, includes_pcs_digit: 0 },
+			'nas write: 262/01 declared as a 2-digit MNC');
+		eq((store.pcs ?? [])[1], { mcc: 310, mnc: 260, includes_pcs_digit: 1 },
+			'nas write: 310/260 declared as a 3-digit MNC');
+		eq((store.pcs ?? [])[2], { mcc: 310, mnc: 30, includes_pcs_digit: 1 },
+			'nas write: 310/030 too — the leading zero is the whole point');
+
+		// AND THE READ-BACK AGREES. This list is advertised as a cross-
+		// verification of the write, and it reconstructed the width from
+		// `mnc >= 100` — which cannot see a leading zero, so 310/030 came back
+		// as 310/30 and the check confirmed a PLMN that was not the one
+		// written. libqmi 1.38 carries the companion array in Get Preferred
+		// Networks TLV 0x12. Raised by Codex review, 2026-09-19.
+		eq(res.nas[2].mnc, '030',
+			'nas read-back: 310/030 comes back with its leading zero');
 		next();
 	});
 });

@@ -305,13 +305,29 @@ function read_plmn_lists_inner(modem, cb)
 {
 	let out = { user: null, nas: null, operator: null, home: null, fplmn: null };
 
-	// map a QMI NAS preferred-networks array to the display shape
-	let map_nas = (arr) => map(arr ?? [], (e) => {
-		let f = plmn_act_flags(e.rat);
-		return { mcc: sprintf('%d', e.mcc),
-		         mnc: (e.mnc >= 100) ? sprintf('%d', e.mnc) : sprintf('%02d', e.mnc),
-		         gsm: f.gsm, utran: f.utran, eutran: f.eutran, ngran: f.ngran };
-	});
+	// map a QMI NAS preferred-networks array to the display shape. The width
+	// comes from the companion TLV 0x12 where the modem sent one, because
+	// `mnc >= 100` cannot see a leading zero: 310/030 read back as 310/30, so
+	// the cross-verification this list exists for confirmed a PLMN that was not
+	// the one written. Raised by Codex review, 2026-09-19.
+	let map_nas = (arr, pcs_arr) => {
+		let pcs = {};
+
+		for (let e in (pcs_arr ?? []))
+			pcs[sprintf('%d/%d', e.mcc, e.mnc)] = e.includes_pcs_digit ? 3 : 2;
+
+		return map(arr ?? [], (e) => {
+			let f = plmn_act_flags(e.rat);
+			let w = pcs[sprintf('%d/%d', e.mcc, e.mnc)] ?? ((e.mnc >= 100) ? 3 : 2);
+			let t = sprintf('%d', e.mnc);
+
+			while (length(t) < w)
+				t = '0' + t;
+
+			return { mcc: sprintf('%d', e.mcc), mnc: t,
+			         gsm: f.gsm, utran: f.utran, eutran: f.eutran, ngran: f.ngran };
+		});
+	};
 
 	// AT fallback for the USER list: some modems reject a UIM EF read of 6F60
 	// (HW-seen: Huawei E392 / EG06 return err 48) or have no UIM (NCM), yet
@@ -433,7 +449,7 @@ function read_plmn_lists_inner(modem, cb)
 
 			nas.request('GET_PREFERRED_NETWORKS', {}, (err, data) => {
 				if (!err && data?.preferred_networks != null)
-					out.nas = map_nas(data.preferred_networks);
+					out.nas = map_nas(data.preferred_networks, data.mnc_pcs_digit);
 
 				done();
 			});
@@ -590,17 +606,35 @@ export function write_nas_plmn(modem, entries, cb)
 
 		let pn = [];
 
-		for (let e in list) {
-			let mcc = +esc(e.mcc), mnc = +esc(e.mnc);
+		// A 3-DIGIT MNC IS NOT KNOWABLE FROM THE NUMBER. 310/030 and 310/30 are
+		// different operators and both become the integer 30 here, so the modem
+		// wrote whichever its own default assumed and read it back the same way
+		// — the list looked correct on both sides while naming the wrong
+		// network. The width is right there in the string this loop is about to
+		// discard (valid_plmn:77 already counts it), and libqmi 1.38 carries it
+		// per entry in Set Preferred Networks TLV 0x11. Found by a full review,
+		// 2026-09-19.
+		let pcs = [];
 
-			if (!(mcc >= 100 && mcc <= 999) || !(mnc >= 0 && mnc <= 999))
-				return cb({ error: 'invalid_plmn', plmn: esc(e.mcc) + esc(e.mnc) });
+		for (let e in list) {
+			let mcc_s = esc(e.mcc), mnc_s = esc(e.mnc);
+			let mcc = +mcc_s, mnc = +mnc_s;
+
+			// the SHAPE, not just the range: a well-formed PLMN is 3 MCC
+			// digits and 2 or 3 MNC digits (valid_plmn:77). The range check
+			// alone accepted a 1-digit MNC and an overlong zero-prefixed one,
+			// and includes_pcs_digit below would then have described malformed
+			// input as a 3-digit MNC. Raised by Codex review, 2026-09-19.
+			if (!valid_plmn(mcc_s, mnc_s))
+				return cb({ error: 'invalid_plmn', plmn: mcc_s + mnc_s });
 
 			push(pn, { mcc: mcc, mnc: mnc, rat: plmn_act_bits(e) });
+			push(pcs, { mcc: mcc, mnc: mnc,
+				includes_pcs_digit: (length(mnc_s) >= 3) ? 1 : 0 });
 		}
 
 		nas.request('SET_PREFERRED_NETWORKS',
-			{ preferred_networks: pn, clear_previous: 1 }, (err) => {
+			{ preferred_networks: pn, mnc_pcs_digit: pcs, clear_previous: 1 }, (err) => {
 				if (err)
 					return cb({ error: 'nas_set', detail: err });
 

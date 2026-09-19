@@ -21,6 +21,7 @@
 import * as quirks from 'wwand.modem_quirks';
 import * as atcmd from 'wwand.atcmd';
 import * as nasmod from 'wwand.codec.schema.nas';
+import * as modem_common from 'wwand.modem_common';
 
 // AT+COPS timeouts (netsel AT fallback): the format-set is instant, the read
 // can stall on a busy modem, and a manual COPS SET legitimately runs a full
@@ -117,12 +118,22 @@ export function install(self, o)
 
 		let out = [];
 
+		// which of these MNCs carry a third digit (TLV 0x12). Without it
+		// 310/030 and 310/30 render identically and a UI choosing an entry
+		// cannot say which it meant. Raised by Codex review, 2026-09-19.
+		let pcs = {};
+
+		for (let e in (data?.mnc_pcs_digit ?? []))
+			pcs[sprintf('%d/%d', e.mcc, e.mnc)] = e.includes_pcs_digit ? 3 : 2;
+
 		for (let e in (data?.network_information ?? [])) {
 			let bits = e.network_status ?? 0;
+			let w = pcs[sprintf('%d/%d', e.mcc, e.mnc)]
+				?? modem_common.mnc_width(e.mnc);
 
 			push(out, {
-				mcc: e.mcc, mnc: e.mnc,
-				plmn: sprintf('%d/%02d', e.mcc, e.mnc),
+				mcc: e.mcc, mnc: e.mnc, mnc_digits: w,
+				plmn: sprintf('%d/%s', e.mcc, modem_common.mnc_text(e.mnc, w)),
 				name: e.description ?? '',
 				status: scan_status(bits),
 				// extra scan flags carried in the status bitmask. `preferred`
@@ -322,7 +333,18 @@ export function install(self, o)
 	//   the setting is written but only takes effect at the next modem reboot;
 	//   the result carries `deferred: true` + `apply: 'modem_reset'` and the
 	//   CALLER decides (the LuCI page informs the user and offers the reset).
-	self.modem_set_network_selection = function(ref, mode, mcc, mnc, cb) {
+	// `mnc` may arrive as a NUMBER (the ubus policy says so) and 310/030 is not
+	// 310/30 — two different operators that both become 30. So the width comes
+	// either from the string form, when the caller had one, or from an explicit
+	// digit count; a value of 100 or more settles itself. Everything below that
+	// with no width given stays 2 digits, which is what shipped. Found by a full
+	// review, 2026-09-19.
+	// shared with the init writer and the config autocorrect — the width is a
+	// property of the PLMN, not of this entry point (modem_common.uc).
+	let mnc_text = modem_common.mnc_text;
+	let mnc_width = modem_common.mnc_width;
+
+	self.modem_set_network_selection = function(ref, mode, mcc, mnc, cb, mnc_digits) {
 		let entry = check_modem(ref, cb);
 
 		if (!entry)
@@ -336,12 +358,14 @@ export function install(self, o)
 		if (manual && !(+mcc > 0 && +mnc >= 0))
 			return cb({ error: 'missing_plmn' });
 
+		let width = mnc_width(mnc, mnc_digits);
+
 		let result = manual ? { mode: mode, mcc: +mcc, mnc: +mnc } : { mode: mode };
 		let q = quirks.for_model(entry.modem.info?.model);
 
 		let done_set = (via) => {
 			log('notice', sprintf('modem %s: network selection %s%s%s%s', ref, mode,
-				manual ? sprintf(' %d/%02d', +mcc, +mnc) : '', via,
+				manual ? sprintf(' %d/%s', +mcc, mnc_text(mnc, width)) : '', via,
 				q.netsel_deferred ? ' (deferred until modem reset)' : ''));
 
 			if (q.netsel_deferred) {
@@ -354,7 +378,7 @@ export function install(self, o)
 
 		let skip_set = (via) => {
 			log('info', sprintf('modem %s: network selection already %s%s%s — not touching the radio',
-				ref, mode, manual ? sprintf(' %d/%02d', +mcc, +mnc) : '', via));
+				ref, mode, manual ? sprintf(' %d/%s', +mcc, mnc_text(mnc, width)) : '', via));
 			cb(null, { ...result, unchanged: true });
 		};
 
@@ -367,8 +391,15 @@ export function install(self, o)
 					let cur_manual = (!gerr && cur?.network_selection != null)
 						? (cur.network_selection == 1) : null;
 					let sv = entry.modem.cells?.serving?.lte;
+					// THE WIDTH IS PART OF THE COMPARISON. Matching numerically
+					// made serving 310/30 equal to a requested 310/030, so the
+					// guard skipped the very write that would have corrected
+					// it and reported `unchanged`. The serving cell carries no
+					// width of its own, so a 3-digit request is never treated
+					// as already-applied. Raised by Codex review, 2026-09-19.
 					let same = (cur_manual != null) && (cur_manual == manual) &&
-						(!manual || (sv?.mcc != null && +sv.mcc == +mcc && +sv.mnc == +mnc));
+						(!manual || (width == 2 && sv?.mcc != null &&
+							+sv.mcc == +mcc && +sv.mnc == +mnc));
 
 					if (same)
 						return skip_set('');
@@ -379,8 +410,20 @@ export function install(self, o)
 						? { mode: 1, mcc: +mcc, mnc: +mnc }
 						: { mode: 0 };
 
-					nas.request('SET_SYSTEM_SELECTION_PREFERENCE',
-						{ network_selection: sel, change_duration: 1 }, (err) => {
+					// TLV 0x1A says whether the MNC in 0x16 is three digits
+					// (libqmi 1.38, Set System Selection Preference input,
+					// format guint8) — a plain flag here, unlike the per-entry
+					// array Set Preferred Networks takes.
+					// only for a MANUAL selection: on auto there is no MNC for
+					// the flag to qualify, and an unnecessary TLV is one more
+					// thing a firmware can refuse. Raised by Codex review,
+					// 2026-09-19.
+					let ssp = { network_selection: sel, change_duration: 1 };
+
+					if (manual)
+						ssp.mnc_pcs_digit = (width == 3) ? 1 : 0;
+
+					nas.request('SET_SYSTEM_SELECTION_PREFERENCE', ssp, (err) => {
 						if (err)
 							return cb({ error: 'qmi', detail: err });
 
@@ -401,12 +444,18 @@ export function install(self, o)
 					let cur = rerr ? null : atcmd.parse_cops_read(rres?.lines);
 					let same = cur &&
 						((!manual && cur.mode == 0) ||
-						 (manual && cur.mode == 1 && cur.plmn == sprintf('%d%02d', +mcc, +mnc)));
+						 (manual && cur.mode == 1 &&
+						  cur.plmn == sprintf('%d%s', +mcc, mnc_text(mnc, width))));
 
 					if (same)
 						return skip_set(' (AT)');
 
-					let cmd = manual ? sprintf('AT+COPS=1,2,"%d%02d"', +mcc, +mnc) : 'AT+COPS=0';
+					// the real width, not a fixed %02d: a 3-digit MNC written two
+			// digits wide names a different operator, and AT+COPS carries no
+			// flag to say which was meant — the digit count IS the statement.
+			let cmd = manual
+				? sprintf('AT+COPS=1,2,"%d%s"', +mcc, mnc_text(mnc, width))
+				: 'AT+COPS=0';
 
 					at.send(cmd, (err) => {
 						if (err)
