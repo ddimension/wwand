@@ -250,11 +250,12 @@ eq(sms.decode_deliver('0001'), null, '6: MTI!=DELIVER -> null (SUBMIT first octe
 	ok(index(s2[0].pdu, '0008') >= 0, 'submit: DCS 08 (UCS2)');
 	ok(index(s2[0].pdu, '00412603') >= 0, 'submit: "A☃" as UTF-16BE (0041 2603)');
 
-	// NON-BMP CHARACTERS SURVIVE. UCS2 on the wire is UTF-16, and the body was
-	// emitted as (cp >> 8, cp & 0xff) — so U+1F600 went out as U+F600, a
-	// private-use character, and every emoji in a sent message was silently
-	// corrupted. The DECODER has handled surrogate pairs all along (case 3),
-	// which is what makes this one-sided. Found by a full review, 2026-09-19.
+	// NON-BMP CHARACTERS SURVIVE. The body was emitted as (cp >> 8, cp & 0xff),
+	// so U+1F600 went out as U+F600, a private-use character. TS 23.038 §6.2.3
+	// says UCS-2, under which non-BMP is not representable at all — what
+	// settles it is that this file's own DECODER has resolved surrogate pairs
+	// all along (case 3), so silent truncation is wrong under either reading.
+	// Found by a full review, 2026-09-19.
 	let s2b = sms.encode_submit('0170', 'A😀');
 	eq(s2b[0].encoding, 'ucs2', 'submit: emoji forces ucs2');
 	ok(index(s2b[0].pdu, '0041D83DDE00') >= 0,
@@ -272,11 +273,11 @@ eq(sms.decode_deliver('0001'), null, '6: MTI!=DELIVER -> null (SUBMIT first octe
 	ok(index(s2c[0].pdu, 'D83D') >= 0 && index(s2c[1].pdu, 'D83D') >= 0,
 		'submit: both parts carry complete surrogate pairs');
 
-	// AN ESCAPE PAIR MUST NOT STRADDLE A SEGMENT BOUNDARY. The GSM 7-bit
-	// extension characters are 0x1B + an extension septet and TS 23.040
-	// §9.2.3.24.1 forbids splitting them; a fixed 153 stride did exactly that
-	// and the receiver read the orphaned 0x1B as a default-table character.
-	// 152 plain septets then '€' puts the escape on the 153rd.
+	// AN ESCAPE PAIR MUST NOT STRADDLE A SEGMENT BOUNDARY. Decoding is
+	// normative per segment (TS 23.038 §6.2.1.2.2), so an escape left at a
+	// segment end has no character to complete it there and §6.2.1 Note 1 has
+	// the receiver "display it as a space character". A fixed 153 stride did
+	// exactly that. 152 plain septets then '€' puts the escape on the 153rd.
 	let esc = '';
 	for (let i = 0; i < 152; i++) esc += 'a';
 	esc += '\u20ac';

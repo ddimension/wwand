@@ -116,22 +116,20 @@ export function parse_qcainfo(lines)
 	return out;
 };
 
-// LTE downlink bandwidth index (Quectel QENG/servingcell) -> MHz.
-//
-// LTE ONLY. The NR5G rows carry a <NR_DL_bandwidth> in the same position and it
-// is a DIFFERENT enumeration — index 0 renders as 1.4 MHz here, a bandwidth NR
-// does not have, and anything above 5 as null. Putting NR through this table
-// produced numbers that looked plausible and were not. parse_qcainfo refuses
-// the identical conversion twenty lines up for the identical reason, and says
-// why: a missing number is recoverable, a confidently wrong one is not.
-//
-// What would settle it is the Quectel RG50xQ AT manual's <NR_DL_bandwidth>,
-// which this tree does not carry and no modem on hand can confirm (the RG650E
-// on the test bench registers LTE-only — radio_ifs [8], nr5g rsrp -32768,
-// 2026-09-19). Reported as 0=5 MHz … 8=60 MHz by the review that found this;
-// unverified, so not implemented. Anyone holding the manual adds NR_BW_IDX_MHZ
-// here and uses it in the two NR branches. Found by a full review, 2026-09-19.
+// Downlink bandwidth index (Quectel QENG/servingcell) -> MHz. TWO TABLES: the
+// NR5G rows carry a <NR_DL_bandwidth> in the same position as LTE's <dlbw> and
+// it is a DIFFERENT enumeration. Running NR through the LTE table rendered
+// index 0 as 1.4 MHz — a bandwidth NR does not have — index 3 as 10 instead of
+// 20, and everything from 6 up (40-400 MHz, the usual 5G values) as null. The
+// numbers looked plausible and were wrong, which is the failure parse_qcainfo
+// refuses twenty lines up. Both tables per the Quectel RG50xQ & RM5xxQ AT
+// Commands Manual V1.2, pp. 104-105. Found by a full review, 2026-09-19.
 const BW_IDX_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
+const NR_BW_IDX_MHZ = {
+	'0': 5,   '1': 10,  '2': 15,  '3': 20,  '4': 25,
+	'5': 30,  '6': 40,  '7': 50,  '8': 60,  '9': 70,
+	'10': 80, '11': 90, '12': 100, '13': 200, '14': 400,
+};
 
 // parse AT+QENG="servingcell" into the serving LTE cell and any NR5G carrier.
 // Quectel formats (field counts vary by firmware; parse defensively):
@@ -192,7 +190,7 @@ export function parse_qeng_servingcell(lines)
 			out.nr = {
 				mode: 'NSA', mcc: num(f[0]), mnc: f[1], band: num(f[7]),
 				arfcn: num(f[6]), pci: num(f[2]),
-				bandwidth_mhz: null,   // NR index != the LTE table — see BW_IDX_MHZ
+				bandwidth_mhz: NR_BW_IDX_MHZ[f[8]] ?? null,
 				rsrp: num(f[3]), sinr: num(f[4]), rsrq: num(f[5]),
 			};
 		}
@@ -202,7 +200,7 @@ export function parse_qeng_servingcell(lines)
 			out.nr = {
 				mode: 'SA', mcc: num(f[1]), mnc: f[2], cid: hnum(f[3]),
 				tac: hnum(f[5]), band: num(f[7]), arfcn: num(f[6]), pci: num(f[4]),
-				bandwidth_mhz: null,   // NR index != the LTE table — see BW_IDX_MHZ
+				bandwidth_mhz: NR_BW_IDX_MHZ[f[8]] ?? null,
 				rsrp: num(f[9]), rsrq: num(f[10]), sinr: num(f[11]),
 			};
 		}

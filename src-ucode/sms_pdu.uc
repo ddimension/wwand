@@ -527,12 +527,15 @@ export function encode_submit(number, text, opts)
 		else {
 			// AN ESCAPE PAIR MUST NOT STRADDLE A SEGMENT BOUNDARY. The GSM 7-bit
 			// extension characters (€ [ ] { } \ | ~ ^) are 0x1B followed by the
-			// extension septet, and TS 23.040 §9.2.3.24.1 forbids splitting
-			// them — the receiver reads a lone 0x1B as the default-table
-			// character it is not. A fixed 153 stride did exactly that: a long
-			// message whose 153rd septet was the escape showed " e" at the
-			// boundary. Cut one septet earlier instead; the orphan leads the
-			// next segment. Found by a full review, 2026-09-19.
+			// extension septet, and decoding is normative PER SEGMENT: TS
+			// 23.038 §6.2.1.2.2, "the receiving entity shall decode all
+			// characters in the message (or the current segment in case of a
+			// concatenated message)". An escape left at a segment end has no
+			// character to complete it there, and §6.2.1 Note 1 says such a
+			// receiver "shall display it as a space character" — the " e" seen
+			// at the boundary. A fixed 153 stride did exactly that; cut one
+			// septet earlier instead, and the orphan leads the next segment.
+			// Found by a full review, 2026-09-19.
 			let i = 0;
 
 			while (i < length(sep)) {
@@ -547,15 +550,23 @@ export function encode_submit(number, text, opts)
 		}
 	}
 	else {
-		// UCS2 ON THE WIRE IS UTF-16, NOT CODE POINTS.
+		// NON-BMP CHARACTERS WERE SILENTLY CORRUPTED.
 		//
 		// The body emitted (cp >> 8, cp & 0xff), so anything above U+FFFF lost
-		// its high bits: U+1F600 went out as U+F600, a private-use character —
-		// every emoji in a sent message was silently corrupted. And the 70/67
-		// limits counted CODE POINTS, so a segment holding non-BMP characters
-		// exceeded 140 octets of TP-UD. The DECODER has handled surrogate
-		// pairs all along (:123-127), which is what makes this one-sided.
-		// Found by a full review, 2026-09-19.
+		// its high bits: U+1F600 went out as U+F600, a private-use character.
+		//
+		// The spec is no help in deciding what SHOULD happen: TS 23.038 §6.2.3
+		// says "Bits per character: 16, Character table: ISO/IEC 10646", and
+		// §6.1.2.3 counts 140 octets as "up to 70 UCS2 characters" — strictly
+		// read, non-BMP is not representable in UCS-2 at all. What settles it
+		// is this file's own inconsistency: the DECODER has resolved surrogate
+		// pairs since :123-127. Silent truncation is wrong under either
+		// reading; the choices are to emit the pairs or to refuse non-BMP
+		// outright, and emitting matches what we already accept.
+		//
+		// The length half needs no interpretation: 70 is a count of 16-bit
+		// units, and counting code points let a segment exceed 140 octets of
+		// TP-UD. Found by a full review, 2026-09-19.
 		let units = [];
 
 		for (let cp in cps) {

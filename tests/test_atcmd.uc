@@ -367,19 +367,26 @@ eq(sc.lte, { mcc: 262, mnc: '01', cid: 29582339, tac: 3071, band: 3, earfcn: 130
 	'qeng: LTE serving cell (dlbw idx 5 -> 20 MHz, mcc/mnc/cid/tac decoded)');
 // THE NR BANDWIDTH INDEX IS NOT THE LTE ONE. This asserted 10 MHz for index 3
 // because the NR branches ran the value through BW_IDX_MHZ — where index 0 is
-// 1.4 MHz, a bandwidth NR does not have, and anything above 5 is null. The
-// numbers looked plausible and were not. parse_qcainfo refuses the identical
-// conversion in the same file for the identical reason. The table that would
-// settle it is the Quectel RG50xQ AT manual's <NR_DL_bandwidth>, which this
-// tree does not carry and no modem on hand can confirm (the RG650E on the
-// bench registers LTE-only, 2026-09-19). So: null, and everything else about
-// the carrier still decodes. Found by a full review, 2026-09-19.
+// 1.4 MHz (a bandwidth NR does not have), index 3 is 10 rather than 20, and
+// everything from 6 up (40-400 MHz, the usual 5G values) is null. The numbers
+// looked plausible and were wrong. Both tables per the Quectel RG50xQ &
+// RM5xxQ AT Commands Manual V1.2, pp. 104-105. Found by a full review,
+// 2026-09-19.
 eq(sc.nr, { mode: 'NSA', mcc: 262, mnc: '01', band: 1, arfcn: 431070, pci: 242,
-	bandwidth_mhz: null, rsrp: -102, sinr: 19, rsrq: -11 },
-	'qeng: NR5G-NSA carrier decodes, bandwidth left null (NR index, not LTE)');
+	bandwidth_mhz: 20, rsrp: -102, sinr: 19, rsrq: -11 },
+	'qeng: NR5G-NSA index 3 is 20 MHz, not the LTE table\'s 10');
 
-// the LTE row in the SAME response still converts — the table is right there
+// the LTE row in the SAME response uses the OTHER table: its index 5 is also
+// 20 MHz, so the two agree here by coincidence and diverge everywhere else
 eq(sc.lte.bandwidth_mhz, 20, 'qeng: the LTE bandwidth is unaffected');
+
+// the range the LTE table cannot express at all: NR index 12 is 100 MHz
+// (BW_IDX_MHZ stops at 5 and would have yielded null)
+let sc_wide = atcmd.parse_qeng_servingcell([
+	'+QENG: "servingcell","NOCONN"',
+	'+QENG: "NR5G-NSA",262,01,242,-102,19,-11,431070,78,12,1',
+]);
+eq(sc_wide.nr?.bandwidth_mhz, 100, 'qeng: NR index 12 is 100 MHz');
 
 eq(atcmd.parse_qeng_servingcell([ '+QENG: "servingcell","NOCONN"' ]),
 	{ state: 'NOCONN', lte: null, nr: null }, 'qeng: state only, no cells');
