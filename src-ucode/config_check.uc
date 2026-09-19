@@ -43,6 +43,19 @@ export function validate(self, log, cb)
 			message: n, expected: null, actual: null,
 		});
 
+	// a deferred init reset that never took (refused, or acked and the modem
+	// stayed on the bus — modem_init_qmi.uc step_apply_init_reset). Nothing
+	// re-requests it: the NV values are already written, so the quirk probe and
+	// the idempotency guard both read "nothing to change" on every later boot
+	// while the LIVE modem keeps the old values. Carried on `self` because the
+	// reset happens before this function, which clears config_warnings.
+	for (let r in (self._reset_unapplied ?? []))
+		push(self.config_warnings, {
+			check: 'init_reset', severity: 'warn',
+			message: sprintf('%s needs a modem reset to take effect (the deferred init reset did not happen)', r),
+			expected: null, actual: null,
+		});
+
 	let add = (check, severity, message, expected, actual) =>
 		push(self.config_warnings, {
 			check: check, severity: severity, message: message,

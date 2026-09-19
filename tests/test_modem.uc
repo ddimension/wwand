@@ -107,6 +107,7 @@ function run_next()
 	let events = [];
 	let finished = false;
 	let guard = null;
+	let seen_until = 0;
 
 	let finish = (modem) => {
 		if (finished)
@@ -129,14 +130,18 @@ function run_next()
 		datapath: s.cfg.datapath,
 		recovery: s.cfg.recovery ?? { fx: fakefx.create(), state_dir: '/state' },
 		at: s.cfg.at ?? { fx: fakefx.create() },   // no AT port unless injected
-		timing: TIMING,
+		timing: { ...TIMING, ...(s.cfg.timing ?? {}) },
 		deps: {
 			transport_open: mock.transport_open,
 			log: (level, msg) => null,
 			on_event: (m, event, data) => {
 				push(events, { event: event, data: data });
 
-				if (event == s.until)
+				// `until_nth` lets a scenario observe a RETRY: make_fail arms
+				// `uloop.timer(backoff, () => self.start())` on the same modem
+				// object, so the second init pass is where per-instance state
+				// that should not accumulate shows up.
+				if (event == s.until && ++seen_until >= (s.cfg.until_nth ?? 1))
 					finish(m);
 			},
 		},
@@ -1360,6 +1365,194 @@ scenario('esim-quirk', {
 		// the fake acks "OK" (not lpa_enable,1) -> nothing to change -> no reset
 		eq(index(at_tr_esim.written, 'AT+CFUN=1,1'), -1,
 			'esim-quirk: no reset when the value is unchanged');
+	});
+
+// A REFUSED DEFERRED INIT RESET DOES NOT PARK THE MODEM.
+//
+// step_apply_init_reset batches every AT-config step that asked for a reset and
+// fires ONE. A successful reset takes the modem off the bus, so not continuing
+// the chain is right there. A REFUSED one re-enumerates nothing — and both
+// branches returned into a callback that only logged, so init stopped dead in
+// INIT_SERVICES. fail() was never called either, so the recovery ladder never
+// engaged: the modem just sat there, with one warning in the log. Found by a
+// full review, 2026-09-19.
+//
+// Here the RG650E reports its internal LPA enabled (so the eSIM quirk requests
+// a reset) and then refuses AT+CFUN=1,1. Reaching `registered` at all IS the
+// assertion — without the fix this scenario dies on the 3 s guard.
+
+let at_tr_reset_refused = fake_at_transport();
+at_tr_reset_refused.write = (data) => {
+	let cmd = trim(data);
+
+	push(at_tr_reset_refused.written, cmd);
+
+	uloop.timer(1, () => {
+		if (cmd == 'AT+QESIM="lpa_enable"')
+			at_tr_reset_refused.data_cb('+QESIM: "lpa_enable", 1\r\n\r\nOK\r\n');
+		else if (cmd == 'AT+CFUN=1,1')
+			at_tr_reset_refused.data_cb('ERROR\r\n');
+		else
+			at_tr_reset_refused.data_cb('OK\r\n');
+	});
+
+	return length(data);
+};
+
+scenario('init-reset-refused', {
+	handlers: base_handlers({ GET_MODEL: { model: 'RG650E-EU' } }),
+	config: { tty: '/dev/ttyUSB2' },
+	at: {
+		fx: fakefx.create(),
+		open_transport: (path, baud, log) => at_tr_reset_refused,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		ok(index(at_tr_reset_refused.written, 'AT+QESIM="lpa_enable",0') >= 0,
+			'init-reset: the quirk disabled the internal LPA (reset now due)');
+		ok(index(at_tr_reset_refused.written, 'AT+CFUN=1,1') >= 0,
+			'init-reset: the batched reset was attempted');
+		eq(modem.state, 'READY',
+			'init-reset: a refused reset resumes init instead of parking the modem');
+	});
+
+// A DEFERRED SETTINGS RESET IS ACTUALLY ISSUED.
+//
+// step_confnet_apply pushes 'system selection preference' onto _init_resets on
+// a settings_deferred model (MeiG SLM7xx: mode/PLMN NV writes take effect only
+// after a reboot). Its comment says step_apply_init_reset "issues ONE reset at
+// the end" — but that step ran seven links EARLIER in the chain, so the push
+// had no consumer and the reset never happened. The modes were accepted and
+// silently never applied, and the NV-vs-live idempotency guard then read them
+// back as already set on every later boot, hiding it for good. Found by a full
+// review, 2026-09-19.
+
+let at_tr_deferred = fake_at_transport();
+// refuse the reset, so init resumes and the scenario can reach `registered`:
+// a SUCCESSFUL one takes the modem off the bus by design and nothing follows.
+at_tr_deferred.write = (data) => {
+	let cmd = trim(data);
+
+	push(at_tr_deferred.written, cmd);
+	uloop.timer(1, () => at_tr_deferred.data_cb(cmd == 'AT+CFUN=1,1' ? 'ERROR\r\n' : 'OK\r\n'));
+
+	return length(data);
+};
+
+scenario('settings-deferred-reset', {
+	handlers: base_handlers({
+		GET_MODEL: { model: 'SLM770A' },
+		SET_SYSTEM_SELECTION_PREFERENCE: {},
+		GET_SYSTEM_SELECTION_PREFERENCE: { mode_preference: 0, network_selection: 0 },
+	}),
+	config: { modes: 'lte', tty: '/dev/ttyUSB2' },
+	at: {
+		fx: fakefx.create(),
+		open_transport: (path, baud, log) => at_tr_deferred,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		ok(index(at_tr_deferred.written, 'AT+CFUN=1,1') >= 0,
+			'settings-deferred: the deferred reset reaches the modem');
+	});
+
+// AN ACKNOWLEDGED RESET THAT NEVER HAPPENS DOES NOT PARK THE MODEM EITHER.
+//
+// A successful reset takes the modem off the bus, so step_apply_init_reset
+// deliberately does not continue — discovery re-inits the new incarnation. But
+// an ACK is not a reboot. A modem that answers OK to AT+CFUN=1,1 and stays put
+// left init parked in INIT_SERVICES with nothing pending and no fail(), so the
+// recovery ladder never engaged either. The watchdog gives that case an answer.
+// Raised by Codex review, 2026-09-19.
+//
+// The fake AT acks everything (fake_at_transport's default), so this is exactly
+// the "acked, still here" case; `timing.init_reset` is shortened so the guard
+// does not have to wait 30 s for it.
+
+let at_tr_reset_stuck = fake_at_transport();
+
+scenario('init-reset-no-reenum', {
+	handlers: base_handlers({ GET_MODEL: { model: 'RG650E-EU' } }),
+	config: { tty: '/dev/ttyUSB2' },
+	timing: { init_reset: 150 },
+	at: {
+		fx: fakefx.create(),
+		open_transport: (path, baud, log) => at_tr_reset_stuck,
+	},
+	setup: (mock, modem) => {
+		// make the eSIM quirk actually request a reset: report the internal
+		// LPA enabled, then ack the disable and the reset like a real modem
+		at_tr_reset_stuck.write = (data) => {
+			let cmd = trim(data);
+
+			push(at_tr_reset_stuck.written, cmd);
+			uloop.timer(1, () => at_tr_reset_stuck.data_cb(cmd == 'AT+QESIM="lpa_enable"'
+				? '+QESIM: "lpa_enable", 1\r\n\r\nOK\r\n' : 'OK\r\n'));
+
+			return length(data);
+		};
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		ok(index(at_tr_reset_stuck.written, 'AT+CFUN=1,1') >= 0,
+			'no-reenum: the reset was issued and acknowledged');
+		eq(modem.state, 'READY',
+			'no-reenum: init resumes instead of parking in INIT_SERVICES');
+		let w = filter(modem.config_warnings, (e) => e.check == 'init_reset');
+		eq(length(w), 1,
+			'no-reenum: the unapplied setting is surfaced, not just logged once');
+	});
+
+// THE UNAPPLIED-RESET DEBT DOES NOT ACCUMULATE ACROSS RETRIES.
+//
+// It is carried on `self` on purpose: the object lives for one device attach
+// (daemon.uc:1671), so a modem that really did reset comes back as a NEW
+// instance with no debt, and a re-init of THIS one means it did not. But
+// re-init on the same instance is exactly what the failure path does —
+// make_fail arms `uloop.timer(backoff, () => self.start())` (modem.uc:1367) —
+// so an un-deduplicated push grows one entry per pass and repeats the warning
+// as often. Raised by Codex review, 2026-09-19.
+//
+// Setup: the eSIM quirk requests a reset, the modem refuses it (debt recorded,
+// init continues), then the datapath finds no QMAP support and the pass fails.
+// The scenario ends on the SECOND such failure, i.e. after two full passes.
+
+let at_tr_debt = fake_at_transport();
+at_tr_debt.write = (data) => {
+	let cmd = trim(data);
+
+	push(at_tr_debt.written, cmd);
+	uloop.timer(1, () => at_tr_debt.data_cb(
+		cmd == 'AT+QESIM="lpa_enable"' ? '+QESIM: "lpa_enable", 1\r\n\r\nOK\r\n' :
+		cmd == 'AT+CFUN=1,1'           ? 'ERROR\r\n' : 'OK\r\n'));
+
+	return length(data);
+};
+
+scenario('init-reset-debt-dedup', {
+	handlers: base_handlers({
+		GET_MODEL: { model: 'RG650E-EU' },
+		SET_DATA_FORMAT: (args, meta) => ({
+			qos: 0, llp: 2, ul_protocol: 0, dl_protocol: 0,
+			dl_max_datagrams: 0, dl_max_size: 0,
+		}),
+	}),
+	config: { tty: '/dev/ttyUSB2' },
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [ { id: 1 } ], dgram_size: 0, fx: dpfx_noqmap,
+	},
+	until_nth: 2,
+	at: {
+		fx: fakefx.create(),
+		open_transport: (path, baud, log) => at_tr_debt,
+	},
+}, 'error',
+	(modem, mock, events) => {
+		eq(length(filter(events, (e) => e.event == 'error')), 2,
+			'debt-dedup: two init passes really happened');
+		eq(length(modem._reset_unapplied ?? []), 1,
+			'debt-dedup: the same unapplied reset is recorded once, not once per pass');
 	});
 
 // --- 10c: cell-lock read-back over AT when the modem reports it unset ---------

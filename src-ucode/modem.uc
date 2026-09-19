@@ -40,6 +40,8 @@ const TIMING_DEFAULTS = {
 	sync_retry: 1000,      // delay between CTL sync attempts
 	sim_settle: 5000,      // settle after PIN verify without indication (old: sleep 5)
 	card_poll: 1000,       // card-status re-poll while initializing
+	init_reset: 30000,     // wait for a deferred init reset to take the modem off
+	                       // the bus; it acked but stayed -> the reset did not take
 };
 
 
@@ -178,7 +180,7 @@ export function create(opts)
 	let rec = modem_common.make_recovery(self, opts, log, 'qmi');
 
 	// shared one-shot timer holder; teardown cancels whatever is pending.
-	let tm = { retry: null, reg: null, settle: null, at_drain: null, probe: null };
+	let tm = { retry: null, reg: null, settle: null, at_drain: null, probe: null, init_reset: null };
 
 	// A SETTLE TIMER MUST NOT OUTLIVE ITS INCARNATION, and parking it in `tm` is
 	// not enough on its own. Teardown walks `values(tm)` ONCE and then destroys the
@@ -1375,7 +1377,7 @@ export function create(opts)
 			if (t)
 				t.cancel();
 
-		tm.retry = tm.reg = tm.settle = tm.at_drain = null;
+		tm.retry = tm.reg = tm.settle = tm.at_drain = tm.probe = tm.init_reset = null;
 
 		// a settle wait cancelled just above never runs its body, so the
 		// continuation it owed is paid here instead — otherwise a ubus reattach
@@ -1395,12 +1397,19 @@ export function create(opts)
 
 		telem.stop();
 
-		modem_common.close_at(self);
-
 		// Anything still in flight belongs to the incarnation we are ending.
-		// Bump FIRST, so a callback that fires during the destroys below already
+		// Bump FIRST, so a callback that fires during the teardown below already
 		// sees a stale generation.
+		//
+		// This sat one line BELOW close_at() while saying the same thing, which
+		// was only true of the client destroys. atcmd.close() happens to drop
+		// pending callbacks silently (atcmd.uc:1017-1024 — it clears `current`
+		// and the queue without calling anything), so nothing exploited the gap;
+		// but that is a property of the AT engine, not a guarantee this function
+		// should lean on. Raised by Codex review, 2026-09-19.
 		self._gen++;
+
+		modem_common.close_at(self);
 
 		// RELEASE the service clients on the modem (CTL RELEASE_CID) while the
 		// transport is still up, rather than only dropping them here. A

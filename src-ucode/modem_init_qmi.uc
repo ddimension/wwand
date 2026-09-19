@@ -211,7 +211,7 @@ export function install(self, o)
 		let q = atcmd.esim_quirks(self.info.model);
 
 		if (!q.lpa_disable_for_host || !self.at)
-			return step_apply_init_reset();
+			return step_apply_init_reset(step_datapath);
 
 		self.at.send('AT+QESIM="lpa_enable"', (err, res) => {
 			let enabled = false;
@@ -221,11 +221,11 @@ export function install(self, o)
 					enabled = true;
 
 			if (err || !enabled)
-				return step_apply_init_reset();   // already disabled / unsupported
+				return step_apply_init_reset(step_datapath);   // already disabled / unsupported
 
 			self.at.send('AT+QESIM="lpa_enable",0', () => {
 				push(self._init_resets, 'esim: free the ISD-R from the internal LPA');
-				step_apply_init_reset();
+				step_apply_init_reset(step_datapath);
 			});
 		}, { timeout: 8000 });
 	};
@@ -234,30 +234,99 @@ export function install(self, o)
 	// re-enumerates the modem; discovery re-inits it (nothing left to change, so
 	// no reset that pass) and init proceeds normally. Do NOT continue init here
 	// when resetting — this instance is being torn down.
-	step_apply_init_reset = () => {
+	// `next` is where init resumes when NO reset is due (or one is refused). It
+	// is a parameter because there are TWO collection points and they are seven
+	// steps apart: the eSIM LPA quirk pushes before the datapath, and a deferred
+	// system-selection pushes from step_confnet_apply. Called once, after the
+	// quirk, the second push had no consumer left and the reset it asked for was
+	// never issued — on a MeiG SLM7xx the configured modes/PLMN were accepted
+	// and silently never applied, and the NV-vs-live idempotency guard at :574
+	// then reported them as already set on every later boot, so it stayed
+	// invisible. Found by a full review, 2026-09-19.
+	//
+	// Firing as EARLY as the pushed reasons allow is deliberate: the reset
+	// re-enumerates the modem and discovery re-inits it, so every step after
+	// the reset point is work thrown away.
+	step_apply_init_reset = (next) => {
 		if (!length(self._init_resets ?? []))
-			return step_datapath();
+			return next();
+
+		let reasons = self._init_resets;
+		let gen = self._gen;
+		let resumed = false;
+
+		// consumed: a later collection point gathers its own reasons
+		self._init_resets = [];
 
 		log('notice', sprintf('applying deferred init reset (%s)',
-			join('; ', self._init_resets)));
+			join('; ', reasons)));
 
-		// one batched reset: AT when a command port exists, else DMS offline->reset.
-		// A refused reset is only logged — the modem stays on its old settings and
-		// the next boot retries.
-		let logerr = (what) => (err) => {
-			if (err)
-				log('warn', sprintf('init reset via %s refused: %J — settings apply at the next reboot', what, err));
+		// THE RESET DID NOT TAKE — say so, and keep going.
+		//
+		// Reaching here means the settings this reset existed to apply are
+		// still not applied, and NOTHING WILL ASK AGAIN: the NV values were
+		// written, so next boot the eSIM quirk reads lpa_enable already 0 and
+		// the idempotency guard at :574 reads the modes back as already set.
+		// Neither enqueues a reset, and the modem keeps running on the old
+		// live values indefinitely. So the debt is carried on `self` (past
+		// validate_config, which clears config_warnings) and surfaced as a
+		// warning the operator can act on with the `modem_reset` ubus method.
+		//
+		// The generation guard is not decoration: teardown cancels `tm` ONCE
+		// and then destroys the clients, which delivers `cancelled` to the AT
+		// command in flight — so this callback can arrive AFTER the modem is
+		// gone, and next() would drive the init chain over a dead instance.
+		// Same trap as modem.uc:183.
+		let resume = (why) => {
+			if (resumed || self._gen != gen)
+				return;
+
+			resumed = true;
+
+			if (tm.init_reset) {
+				tm.init_reset.cancel();
+				tm.init_reset = null;
+			}
+
+			log('warn', sprintf('deferred init reset %s — %s stays unapplied until the modem is reset',
+				why, join('; ', reasons)));
+
+			// Deliberately NOT cleared on a later init pass. The object is
+			// created once per device attach (daemon.uc:1671), so a modem that
+			// really did reset comes back as a NEW instance with no debt — and
+			// a re-init of THIS instance means it did not, so the debt still
+			// holds. Deduplicated because a re-init re-derives the same reason
+			// and the list would otherwise grow one entry per pass, with the
+			// warning repeated as often. Raised by Codex review, 2026-09-19.
+			self._reset_unapplied ??= [];
+
+			for (let r in reasons)
+				if (index(self._reset_unapplied, r) < 0)
+					push(self._reset_unapplied, r);
+
+			next();
 		};
 
+		// A SUCCESSFUL reset takes the modem off the bus and discovery re-inits
+		// it, so there is deliberately no continuation on that path — this
+		// instance is being torn down. But an ACK is not a reboot: a modem that
+		// answers OK and stays put leaves init parked in INIT_SERVICES with
+		// nothing pending, and because fail() never ran the recovery ladder
+		// never engages either. Raised by Codex review, 2026-09-19.
+		tm.init_reset = uloop.timer(self.timing.init_reset ?? 30000,
+			() => resume('was acknowledged but the modem stayed on the bus'));
+
 		if (self.at)
-			return self.at.send('AT+CFUN=1,1', logerr('AT+CFUN=1,1'), { timeout: 5000 });
+			return self.at.send('AT+CFUN=1,1',
+				(err) => err ? resume(sprintf('refused: %J', err)) : null,
+				{ timeout: 5000 });
 
 		if (self.dms)
 			return qmi_backend.set_opmode(self.dms, 'offline', () =>
-				qmi_backend.set_opmode(self.dms, 'reset', logerr('DMS reset')));
+				qmi_backend.set_opmode(self.dms, 'reset',
+					(err) => err ? resume(sprintf('refused: %J', err)) : null));
 
-		log('warn', 'init reset requested but no AT port/DMS available — settings apply at the next reboot');
-		step_datapath();
+		resume('has no AT port and no DMS client to issue it');
 	};
 
 	// datapath bring-up (modem_datapath_qmi.uc)
@@ -524,7 +593,7 @@ export function install(self, o)
 
 		// preserved: never reset modes/PLMN to defaults when unset
 		if (mask == null && !sel)
-			return step_validate();
+			return step_apply_init_reset(step_validate);
 
 		let args = {};
 
@@ -550,7 +619,7 @@ export function install(self, o)
 					push(self._init_resets, 'system selection preference');
 				}
 
-				step_validate();
+				step_apply_init_reset(step_validate);
 			});
 		};
 
@@ -568,7 +637,7 @@ export function install(self, o)
 			}
 
 			if (!length(keys(args)))
-				return step_validate();
+				return step_apply_init_reset(step_validate);
 
 			if (args.mode_preference != null)
 				log('notice', sprintf('setting network modes "%s" (mask 0x%02x)', self.config.modes, args.mode_preference));

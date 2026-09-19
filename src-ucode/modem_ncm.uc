@@ -1692,8 +1692,19 @@ export function create(opts)
 
 				let h = match(r, /"([0-9A-Fa-f]{16,24})"/);
 
+				// hex_to_arr, NOT hex('0x'…). The latter parses the whole EF as
+				// one integer and SATURATES: a 20-digit payload becomes
+				// INT64_MAX, bytes_to_iccid then iterates a scalar zero times
+				// and hands back "" (measured 2026-09-19 on the real
+				// 982611121820291243F4 — "" against the correct
+				// 8962112181029221344). So reapply_sim's CRSM path never
+				// produced an ICCID at all, and after an eSIM switch on a
+				// generic-recipe modem the OLD card's iccid and its wwand_sim
+				// override survived — the exact wrong state this function exists
+				// to prevent. :762 and sim.uc:1495 have had it right all along.
+				// Found by a full review, 2026-09-19.
 				if (h)
-					return hexmod.bytes_to_iccid(hex('0x' + h[1]));
+					return hexmod.bytes_to_iccid(hexmod.hex_to_arr(h[1]));
 
 				let d = match(r, /([0-9]{18,20})/);
 

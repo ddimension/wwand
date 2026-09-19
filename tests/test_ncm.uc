@@ -352,6 +352,36 @@ push(scenarios, {
 	},
 });
 
+// REAPPLY_SIM NEVER PRODUCED AN ICCID FROM THE CRSM PATH. It decoded the EF with
+// hex('0x' + payload), which parses the whole 20-digit field as ONE integer and
+// SATURATES to INT64_MAX; bytes_to_iccid then iterates a scalar zero times and
+// hands back "". So after an eSIM switch on a generic-recipe modem the OLD
+// card's iccid and its wwand_sim override survived — the exact wrong state this
+// function exists to prevent. The init step at :762 and sim.uc:1495 have had the
+// right decode all along. Found by a full review, 2026-09-19.
+push(scenarios, {
+	name: 's9s_reapply_sim_decodes_the_iccid',
+	script: script([
+		// the card answers the 3GPP EF read; this is the real payload from a
+		// field log, whose ICCID is 8962112181029221344
+		{ re: /^AT\+CRSM=176,12258,0,0,10$/,
+		  lines: [ '+CRSM: 144, 0, "982611121820291243F4"' ] },
+		{ re: /^AT\+CIMI$/, lines: [ '510118102922134' ] },
+	]),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		env.modem.info.iccid = '89000000000000000000';   // the card that is leaving
+
+		env.modem.reapply_sim(() => {
+			eq(env.modem.info.iccid, '8962112181029221344',
+				'reapply: the CRSM payload is decoded, not saturated to ""');
+			ok(env.modem.info.iccid != '89000000000000000000',
+				'reapply: ...so the old card\'s iccid does not survive the switch');
+			env.finish();
+		});
+	},
+});
+
 // --- s1: lifecycle + settings shape + auth reaches QICSGP -------------------
 
 push(scenarios, {
