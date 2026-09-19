@@ -502,6 +502,62 @@ uloop.run();
 
 	eq(got, 'cancelled', 'reattach: a teardown mid-flight ends it as cancelled');
 	eq(armed, false, 'reattach: ...and no radio command is sent into the teardown');
+
+	// the teardown depth make_fail reads before arming a retry
+	// (modem_common.uc). It must come back to zero, or every later retry on
+	// this object is silently refused. Review follow-up, 2026-09-19.
+	eq(m3._teardown_depth, 0,
+		'reattach: the teardown depth is balanced, so retries still work');
+
+	// ...and it stays balanced when a client destroy pays a callback that
+	// throws. Destroying a client runs its pending callbacks synchronously
+	// (client.uc:217, mbim_client.uc:267) and those are not ours; an unguarded
+	// throw would skip the decrement and leave the depth raised for the life of
+	// the object, after which make_fail refuses every retry. Review follow-up,
+	// 2026-09-19.
+	let m4 = modem_mbim.create({
+		id: 'teardown-throw', device: '/dev/mock3', config: {},
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		deps: { log: () => null, on_event: () => null },
+	});
+
+	m4.mbim = { destroy: () => die('a client callback that throws'), command: () => null };
+	m4.teardown();
+
+	eq(m4._teardown_depth, 0,
+		'teardown: a throwing client callback still leaves the depth balanced');
+	eq(m4.mbim, null, 'teardown: ...and the client is dropped anyway');
+
+	// ...and one throwing cleanup must not skip the ones after it. A single
+	// catch around the whole passthrough block let the first bad destroy strand
+	// the remaining clients and the shim, after which `self.pt = null` dropped
+	// the only handle to a shim still open with clients on it
+	// (qmi_over_mbim.uc:110). Raised by review, 2026-09-19.
+	let m5 = modem_mbim.create({
+		id: 'teardown-partial', device: '/dev/mock4', config: {},
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		deps: { log: () => null, on_event: () => null },
+	});
+
+	let destroyed = [], shim_closed = false;
+
+	m5.pt = {
+		ctl: { destroy: () => die('the FIRST cleanup throws') },
+		nas: { destroy: () => push(destroyed, 'nas') },
+		dsd: { destroy: () => push(destroyed, 'dsd') },
+		shim: { close: () => { shim_closed = true; } },
+	};
+
+	m5.teardown();
+
+	eq(destroyed, [ 'nas', 'dsd' ], 'teardown: the cleanups after a throwing one still run');
+	eq(shim_closed, true, 'teardown: ...and the shim is still closed, not stranded');
+	eq(m5.pt, null, 'teardown: the passthrough handle is dropped');
+	eq(m5._teardown_depth, 0, 'teardown: and the depth is balanced');
 })();
 
 // --- the slow tick must read the serving cell BEFORE choosing a data mode ----

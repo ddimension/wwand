@@ -1725,6 +1725,14 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
+		// see modem.uc: make_fail refuses to arm a retry while this is raised,
+		// because a failure reported from INSIDE a teardown would arm it after
+		// the cancel pass below and restart a modem that is being stopped. NCM
+		// reaches that re-arm through close_at() further down, which can pay
+		// cfun_cycle's callbacks synchronously and let them arm a timer
+		// (:313/:315). Review follow-up, 2026-09-19.
+		self._teardown_depth = (self._teardown_depth ?? 0) + 1;
+
 		for (let t in [ retry_timer, reg_timer, reg_poll_timer, settle_timer, at_drain_timer,
 		                telemetry_timer, reenum_timer, ident_retry_timer ])
 			if (t)
@@ -1735,6 +1743,8 @@ export function create(opts)
 		telem_watch.stop();
 
 		modem_common.close_at(self);
+
+		self._teardown_depth--;
 	};
 
 	// stop() installed by modem_common.scaffolding

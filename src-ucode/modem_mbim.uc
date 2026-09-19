@@ -1266,6 +1266,14 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
+		// see modem.uc: make_fail refuses to arm a retry while this is raised,
+		// because a failure reported from INSIDE a teardown would arm it after
+		// the cancel pass below and restart a modem that is being stopped. The
+		// QMI backend grew this first; MBIM reaches the same re-arm by its own
+		// route (a synchronous cancellation from the recovery cycle re-arming
+		// settle_timer at :188/:191). Review follow-up, 2026-09-19.
+		self._teardown_depth = (self._teardown_depth ?? 0) + 1;
+
 		// first, so anything the destroys below call back into can tell that its
 		// session is over (see `_gen` at the declaration)
 		self._gen++;
@@ -1279,14 +1287,37 @@ export function create(opts)
 
 		modem_common.close_at(self);
 
-		// passthrough QMI stack (torn down before the mbim channel it rides on).
-		// A fresh session must re-probe, so forget the cached backend choices.
+		// GUARDED, because destroying a client pays its pending callbacks
+		// SYNCHRONOUSLY (client.uc:217, mbim_client.uc:267) and those callbacks
+		// are not ours. One that throws would skip the depth decrement at the
+		// end, leaving it raised for the life of the object — and make_fail then
+		// refuses every future retry, which is worse than whatever the callback
+		// was complaining about. The QMI teardown wraps its equivalent call for
+		// the same reason; NCM needs none, close_at() discards its queue without
+		// paying it (atcmd.uc:1017). Review follow-up, 2026-09-19.
+		// EACH CLEANUP GUARDED ON ITS OWN, not the sequence. One catch around the
+		// whole block means the first throwing destroy skips the clients after it
+		// AND the shim close — and `self.pt = null` below then drops the only
+		// handle to a shim that is still open with clients registered on it
+		// (qmi_over_mbim.uc:110). Raised by review, 2026-09-19.
 		if (self.pt) {
-			for (let c in [ self.pt.ctl, self.pt.nas, self.pt.dsd ])
-				if (c)
-					c.destroy();
+			for (let c in [ self.pt.ctl, self.pt.nas, self.pt.dsd ]) {
+				if (!c)
+					continue;
 
-			self.pt.shim.close();
+				try {
+					c.destroy();
+				} catch (e) {
+					log('err', sprintf('teardown: a passthrough client callback threw: %s', e));
+				}
+			}
+
+			try {
+				self.pt.shim.close();
+			} catch (e) {
+				log('err', sprintf('teardown: closing the passthrough shim threw: %s', e));
+			}
+
 			self.pt = null;
 		}
 
@@ -1296,7 +1327,12 @@ export function create(opts)
 		backend.reset(self, '_sig_be', '_cells_be', '_ca_be', '_dsd_be', '_regd_be', '_apdu_be', '_esim_be');
 
 		if (self.mbim) {
-			self.mbim.destroy();
+			try {
+				self.mbim.destroy();
+			} catch (e) {
+				log('err', sprintf('teardown: an mbim callback threw: %s', e));
+			}
+
 			self.mbim = null;
 			self.mbim_uicc = null;
 			self.mbim_sms = null;
@@ -1307,6 +1343,8 @@ export function create(opts)
 			self.hub.close();
 			self.hub = null;
 		}
+
+		self._teardown_depth--;
 	};
 
 	// stop() + _device_gone() installed by modem_common.scaffolding

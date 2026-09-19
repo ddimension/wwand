@@ -2148,6 +2148,13 @@ push(scenarios, {
 		wait_for(() => env.tr.count(/^AT\+CGMI$/) >= 1, () => {
 			env.modem.stop();
 
+			// the teardown depth make_fail reads before arming a retry
+			// (modem_common.uc). It must come back to zero, or every later
+			// retry on this object is silently refused. Review follow-up,
+			// 2026-09-19.
+			eq(env.modem._teardown_depth, 0,
+				'identity: the teardown depth is balanced, so retries still work');
+
 			let n = env.tr.count(/^AT\+CGMI$/);
 
 			// well past the retry deadline
