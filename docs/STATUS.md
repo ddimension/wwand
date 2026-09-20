@@ -346,6 +346,65 @@ the standard libmbim set, not only the ones this tree has schemas for. At
 `debug`, like its QMI counterpart — `ubus call wwand set_log_level
 '{"level":"debug"}'`.
 
+## A renew netifd cannot receive (2026-09-20)
+
+The daemon pushes new settings to netifd with `renew`. netifd drops that on the
+floor for an interface it is not holding: `interface_renew()` returns -1 for
+`IFS_DOWN` and `IFS_TEARDOWN` before the proto handler is reached
+(`interface.c:1380-1386`, netifd 2026.07.08~6088f7b3), and wwand's renew is
+fire-and-forget, so nothing said so. A CONNECTED context behind a down interface
+therefore stayed that way — and stayed that way indefinitely, because the path
+that kicks an interface up needs a MODEM transition to fire, and a modem that
+never moved never gives one.
+
+The renew decision now asks netifd what it is holding **before** deciding, and
+kicks instead of renewing when the answer is "nothing":
+
+| netifd says | wwand does |
+|---|---|
+| up, holding what we pushed | skip (unchanged) |
+| up, holding something else | renew in place |
+| `pending` (IFS_SETUP) | nothing — it is coming up by itself |
+| down, `auto 0` | nothing — wait for an `ifup` |
+| down, `autostart` cleared and not by us | nothing; record the operator's intent |
+| down, otherwise | **kick** (re-run setup), and drop the applied signature |
+
+The probe used to be skipped whenever the settings had changed, which is exactly
+when netifd is most likely not to be holding the interface — so the case was
+invisible from the one place that could see it.
+
+Two things this made necessary, both found by review rather than by the tests:
+
+- **The probe is deferred, and the world moves while it is out.** The callback
+  now revalidates that the entry and the context are still the daemon's current
+  ones, still CONNECTED, and still the same *connection* — `entry._conn_seq`,
+  bumped on every `up`, because a reconnect keeps the same entry and the same ctx
+  object and ends in CONNECTED again, so nothing else tells the two apart.
+- **One probe in flight per context, and the latch is the probe itself.** A
+  plain flag would be cleared only in a callback, so a request that never
+  answered would silence that interface's renews for the life of the daemon; the
+  latch carries when it went out and expires after 30 s. But an expiry makes two
+  probes live at once, so a callback that cannot tell whether it is still the
+  current one would act on a superseded answer *and* clear the live probe's
+  latch on the way out. Each probe is its own token; a superseded one says
+  nothing and touches nothing. A reconnect drops the latch outright — that
+  probe asks about a connection that has ended, and holding it would block the
+  renew that carries the new session's addresses to netifd.
+
+Also here: the v6 half of the idempotence test compares the **prefix**, not the
+whole address. The question is "is netifd still holding what we pushed", and the
+host half is not part of that answer — some firmware hands back different low 64
+bits on every settings read while prefix, gateway and DNS stay put (the monitor
+has compared this way for that reason since `keep_stable_v6`), and netifd may
+re-derive the identifier itself from an interface token.
+
+Measured on the GL-X3000 / RM520N (MBIM, 2026-09-20): a netifd restart against a
+CONNECTED context recovers on its own — its setup calls `context_up` and gets
+`up=1` straight back — so the sticking case is the unlucky window where that
+setup lands while the context is reconnecting. The hardware run confirms the new
+probe costs nothing in normal operation: a full `ifdown`/`ifup` cycle and a
+`killall netifd` both come back with addressing intact and no spurious kicks.
+
 ## Known open
 
 - **TODO — `pdp_type` cannot be configured per SIM, and two people expected it

@@ -293,6 +293,15 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 
 			let renews0 = length(filter(events, (e) => e.type == 'renew' && e.data == 'wan'));
 
+			// netifd has finished proto setup by now, so it reports the
+			// interface UP — up=false with pending=false is what it reports for
+			// an interface it is NOT holding, and the renew decision reads that
+			// as "kick it, a renew would go nowhere" (netifd ubus.c:829-830,
+			// 2026.07.08~6088f7b3). Leaving the fixture at its pre-connect
+			// default made the three renew checks below assert against a state
+			// netifd never reports at this point.
+			iface_up = true;
+
 			// (1) settings change -> in-place renew (no teardown)
 			mock.indicate(3, 0xff, 'SERVING_SYSTEM_IND', {
 				serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
@@ -1675,5 +1684,257 @@ am_daemon().apply_config(config.parse({ network: {
 } }));
 eq(am_opts.m0?.datapath?.mux_auto, false,
 	'automux-demote: a pinned sibling keeps the modem on the muxed path');
+
+// --- netifd holds the interface down while the session is connected ---------
+// The renew the daemon sends into that is thrown away: interface_renew()
+// returns -1 for IFS_DOWN and IFS_TEARDOWN before it ever reaches the proto
+// handler (netifd interface.c:1380-1386, 2026.07.08~6088f7b3), and our renew is
+// fire-and-forget, so nothing says so. The interface then stays down with a
+// CONNECTED context behind it — for as long as the modem stays registered,
+// because the path that kicks needs a MODEM transition to fire and a modem that
+// never moved never gives one.
+//
+// This is deliberately NOT part of the big integration chain above. Driving it
+// there means going through the monitor's settings refresh, which holds a
+// ten-second cooldown (context_monitor_qmi.uc, REFRESH_MIN_MS) and a reconnect
+// gated by `failed_min_gap` — so the test would be measuring timers. Here the
+// context event is handed to the daemon directly and the decision is all that
+// is left.
+(() => {
+	let calls = [];
+	let netifd = { up: false, autostart: true, pending: false,
+	               'ipv4-address': [ { address: '10.11.12.99' } ] };
+	let on_event;
+	let deferred = false, parked = [];
+	let answer = () => { let q = parked; parked = []; for (let cb in q) cb(netifd); };
+
+	let fake = {
+		modem: { create: (o) => ({ id: o.id, state: 'READY', config: o.config,
+		                           start: () => null, stop: () => null,
+		                           note_connect_success: () => null }) },
+		context: { create: (o) => {
+			on_event = o.deps.on_event;
+
+			let ctx = { state: 'CONNECTED', name: o.name, modem: o.modem,
+			            settings: { ipv4: { addr: '10.11.12.99' } },
+			            down: (cb) => cb ? cb() : null };
+			return ctx;
+		} },
+	};
+
+	let d = daemon_mod.create({ timing: TIMING, deps: {
+		log: () => null,
+		load_qmi: () => fake,
+		kick_interface:  (i) => push(calls, 'kick:'  + i),
+		renew_interface: (i) => push(calls, 'renew:' + i),
+		down_interface:  (i) => push(calls, 'down:'  + i),
+		// synchronous by default; `deferred` parks the callback so a test can
+		// run code BETWEEN the probe going out and its answer coming back —
+		// which is what the shipped dep does (a deferred ubus call) and what a
+		// synchronous fixture can never show.
+		iface_status: (i, cb) => deferred ? push(parked, cb) : cb(netifd),
+	} });
+
+	d.apply_config(config.parse({ network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+		       device: 'l3', apn: 'a', pdp_type: 'ipv4' },
+	} }));
+
+	let entry = d.contexts.wan;
+	ok(entry != null && on_event != null, 'netifd-down: context and event hook wired');
+	entry.wanted = true;
+
+	// (1) down, autostart still set: kicked up, and NOT renewed
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	eq(calls, [ 'kick:wan' ], 'netifd down + connected session -> kicked, not renewed');
+
+	// ...and the signature goes with it. It described what was pushed to an
+	// interface that is not holding it any more; setup will push the lot again.
+	eq(entry._applied_sig, null, 'netifd down: the stale applied-signature is dropped');
+
+	// (2) operator ifdown: autostart cleared by somebody who is not us. That is
+	// intent, so nothing is kicked and the context stops wanting the interface.
+	calls = [];
+	netifd.autostart = false;
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	eq(calls, [], 'administratively down -> not kicked up');
+	eq(entry.wanted, false, 'administratively down -> the context stops wanting it');
+
+	// (3) counter-proof for (1): with netifd holding the interface UP and the
+	// same address, the renew is skipped as before — the new branch has not
+	// swallowed the idempotence guard it sits in front of.
+	calls = [];
+	entry.wanted = true;
+	netifd.autostart = true;
+	netifd.up = true;
+	entry._applied_sig = sprintf('%J', entry.ctx.settings);
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	eq(calls, [], 'interface up and address unchanged -> still skipped');
+
+	// (4) and an up interface whose address moved still renews
+	calls = [];
+	entry.ctx.settings = { ipv4: { addr: '10.11.12.200' } };
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	eq(calls, [ 'renew:wan' ], 'interface up and address changed -> renewed');
+
+	// (5) `auto 0` waits for an ifup even with the session connected
+	calls = [];
+	netifd.up = false;
+	entry.cfg.auto = false;
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	eq(calls, [], 'auto=0 -> a down interface is left dormant');
+
+	// (6) THE v6 COMPARISON IS ON THE PREFIX, not the whole address.
+	//
+	// The question this guard asks is "is netifd still holding what we pushed",
+	// and the host half is not part of that answer: some firmware hands back
+	// different low 64 bits on every settings read while prefix, gateway and DNS
+	// stay put (RG502Q — context_common.keep_stable_v6 exists for exactly that,
+	// so the MONITOR already compared this way), and netifd can re-derive the
+	// identifier itself from an interface token. Comparing the literal address
+	// answered "changed" for an interface that had changed nothing.
+	entry.cfg.auto = true;
+	netifd.up = true;
+
+	let v6 = (netifd_addr, session_addr) => {
+		calls = [];
+		netifd['ipv6-address'] = [ { address: netifd_addr } ];
+		entry.ctx.settings = { ipv4: { addr: '10.11.12.99' },
+		                       ipv6: { addr: session_addr, plen: 64 } };
+		entry._applied_sig = sprintf('%J', entry.ctx.settings);
+		on_event(entry.ctx, 'settings', entry.ctx.settings);
+		return calls;
+	};
+
+	eq(v6('2a01:59d:b810:6d53:8d47:418:76aa:2f8f', '2a01:59d:b810:6d53::1'), [],
+		'v6: same /64, different host part -> still skipped');
+	eq(v6('2a01:59d:b810:6d54::1', '2a01:59d:b810:6d53::1'), [ 'renew:wan' ],
+		'v6: a different /64 -> renewed');
+
+	// (7) v4 is still half of the idempotence test. A v6 prefix that matches
+	// says nothing about the v4 address, and on a v4-only context both v6
+	// values are absent — so a guard that asks only the v6 question answers
+	// "unchanged" for every v4-only interface there is, whatever netifd holds.
+	calls = [];
+	netifd['ipv6-address'] = [];
+	netifd['ipv4-address'] = [ { address: '10.11.12.7' } ];
+	entry.ctx.settings = { ipv4: { addr: '10.11.12.99' } };
+	entry._applied_sig = sprintf('%J', entry.ctx.settings);
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	eq(calls, [ 'renew:wan' ], 'v4 moved under an unchanged signature -> still renewed');
+
+	// (8) THE PROBE IS DEFERRED, and the world moves while it is out.
+	//
+	// The `up` handler calls renew_iface() and clears `_kick_after_connect` on
+	// the next line, so a callback that reads the live flag finds it false and
+	// kicks on top of the kick that handler is already arranging. The flag has
+	// to be sampled when the probe goes out.
+	calls = [];
+	deferred = true;
+	netifd.up = false;
+	netifd['ipv4-address'] = [ { address: '10.11.12.99' } ];
+	entry._applied_sig = null;
+	entry._kick_after_connect = true;
+
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	entry._kick_after_connect = false;   // exactly what the `up` handler does
+	answer();
+
+	// it still renews (harmlessly — netifd drops that one, and the `up` handler's
+	// own kick follows); what it must not do is add a second kick.
+	eq(filter(calls, (c) => substr(c, 0, 5) == 'kick:'), [],
+		'connect-first: the probe does not kick behind the up handler');
+
+	// (9) one probe in flight per context: two settings events landing together
+	// must not both kick the same interface.
+	calls = [];
+	entry._kick_after_connect = false;
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	answer();
+	eq(calls, [ 'kick:wan' ], 'two settings events in flight -> one kick');
+
+	// (10) and a context retired while the probe is out is not acted on. A
+	// reload that cannot resolve an interface's modem deletes the entry
+	// (stop_context), and kicking an interface on behalf of a context the
+	// daemon has already dropped is how a torn-down interface comes back up.
+	calls = [];
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	delete d.contexts.wan;
+	answer();
+	eq(calls, [], 'context retired while the probe was out -> nothing kicked');
+
+	// (11) a lost probe must not silence the interface for good. Nothing here
+	// can cancel an outstanding ubus request, so the in-flight latch carries
+	// WHEN it went out and expires; a plain flag would be cleared in a callback
+	// that never comes.
+	d.contexts.wan = entry;
+	calls = [];
+	parked = [];
+	entry._renew_probe = { at: time() };
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	eq(length(parked), 0, 'a probe already in flight is not duplicated');
+
+	entry._renew_probe = { at: time() - 60 };   // older than PROBE_STALE_S
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	eq(length(parked), 1, 'a probe that never answered stops blocking later renews');
+
+	// (12) the connection generation. The same entry and the same ctx object
+	// survive a reconnect and the state is CONNECTED again at the end of it, so
+	// an answer about the PREVIOUS session passes every identity check there
+	// is. On a connect-first backend that reconnect arms its own kick, and this
+	// stale answer would add a second one.
+	calls = [];
+	parked = [];
+	// ...and clear the latch the case above deliberately left standing, or this
+	// probe is never sent and the absence below proves nothing.
+	entry._renew_probe = null;
+
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	eq(length(parked), 1, 'the probe this case is about was actually sent');
+
+	on_event(entry.ctx, 'up', {});      // the reconnect: a new generation
+
+	// The `up` handler must get a probe of its OWN out. That renew is how the
+	// new session's addresses reach netifd, so a latch still held by the old
+	// connection's probe would not merely delay it — netifd would keep the
+	// previous session's settings until the next refresh came round. (This
+	// assertion is the one that would have caught the earlier version of this
+	// test, whose comment claimed to drop a probe that was never sent.)
+	eq(length(parked), 2, 'the reconnect sends its own probe, not blocked by the old one');
+
+	let stale = parked[0];
+	parked = [];
+	stale(netifd);
+	eq(filter(calls, (c) => substr(c, 0, 5) == 'kick:'), [],
+		'an answer about the previous connection is not acted on');
+
+	// (13) the expiry lets a SECOND probe out while the first is still live,
+	// and both will eventually answer. A latch that only records "a probe
+	// exists" cannot tell them apart: the superseded one acts on its own stale
+	// answer, and clears the live probe's latch on the way out — which is the
+	// double action the latch exists to prevent, one step removed.
+	calls = [];
+	parked = [];
+	entry._renew_probe = null;
+	netifd.up = false;
+
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	entry._renew_probe.at -= 60;        // the first probe is now overdue
+	on_event(entry.ctx, 'settings', entry.ctx.settings);
+	eq(length(parked), 2, 'an overdue probe does not stop the next one');
+
+	let live = entry._renew_probe;
+
+	parked[0](netifd);                  // the superseded answer comes back
+	eq(filter(calls, (c) => substr(c, 0, 5) == 'kick:'), [],
+		'a superseded answer is not acted on');
+	ok(entry._renew_probe === live, '...and does not clear the live probe');
+
+	parked[1](netifd);                  // the current one
+	eq(filter(calls, (c) => substr(c, 0, 5) == 'kick:'), [ 'kick:wan' ],
+		'the current answer still acts, exactly once');
+})();
 
 done('test_daemon');

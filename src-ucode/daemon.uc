@@ -17,6 +17,7 @@ import * as nlmod from 'wwand.netlink';
 import * as reconnect from 'wwand.reconnect';
 import * as recoverymod from 'wwand.recovery';
 import * as ctx_settings from 'wwand.ctx_settings';
+import * as context_common from 'wwand.context_common';
 // module scope: the lazy backend loaders live outside create(), so they cannot
 // use its injected `log` dep and go to the shared sink directly
 import * as logmod from 'wwand.log';
@@ -312,6 +313,12 @@ export function create(opts)
 	//
 	// scope 20 in /proc/net/if_inet6 is link-local; the columns are
 	// addr ifindex prefixlen scope flags devname.
+	// How long a netifd status probe may be outstanding before the next renew
+	// stops waiting for it. Generous on purpose: this is not a request timeout
+	// (nothing here can cancel the request), only the point at which an answer
+	// that never came stops blocking the interface's renews.
+	const PROBE_STALE_S = 30;
+
 	const LLA_WAIT_MS = 250;
 	const LLA_WAIT_TRIES = 12;      // ~3 s, then start anyway
 
@@ -848,12 +855,19 @@ export function create(opts)
 	let on_context_event = (name, ctx, event, data) => {
 		let entry = self.contexts[name];
 
-		// idempotent renew: re-pushing the same addresses to netifd only churns it
-		// and its address-dependent consumers (odhcpd RAs, firewall reloads, host
-		// routes). Async-probe netifd's live v4/v6 and skip the renew when the link
-		// is up and both addresses already match what the session holds. `force`
-		// (a real IP change / relink) and any doubt (no probe, probe fails) fall
-		// through to the renew, so this can only ever SKIP a genuine no-op.
+		// Ask netifd what it is holding, then decide. Two answers matter:
+		//
+		//  - it is NOT holding the interface at all (down, and not mid-setup):
+		//    a renew is thrown away unread there — interface_renew() returns -1
+		//    for IFS_DOWN/IFS_TEARDOWN before the proto handler sees it (netifd
+		//    interface.c:1380-1386, 2026.07.08~6088f7b3) — so kick instead.
+		//  - it is holding exactly what we pushed: skip, because re-pushing the
+		//    same addresses only churns netifd and its address-dependent
+		//    consumers (odhcpd RAs, firewall reloads, host routes).
+		//
+		// `force` (a real IP change / relink) skips the probe entirely, and any
+		// doubt (no probe dep, probe fails) falls through to the renew — so the
+		// skip can still only ever drop a genuine no-op.
 		let renew_iface = (force) => {
 			// Everything netifd is told in one update — addresses AND the routes
 			// derived from them. The default route carries the gateway, and with
@@ -889,19 +903,172 @@ export function create(opts)
 			if (force || !deps.iface_status || !entry?.cfg?.interface)
 				return do_renew();
 
-			// anything but a byte-identical repeat of what we last pushed goes
-			// through, whatever netifd's addresses say
-			if (entry._applied_sig != cur_sig)
-				return do_renew();
+			// SAMPLED NOW, not read in the callback. The `up` handler calls
+			// renew_iface() and then clears `_kick_after_connect` on the very
+			// next line — synchronously, long before this probe answers — so a
+			// callback that reads the live flag always finds it false and kicks
+			// on top of the kick that block is already arranging. The tests'
+			// iface_status answers synchronously and cannot show this; the
+			// shipped one is a deferred ubus call.
+			let kick_pending = entry._kick_after_connect;
+
+			// One probe in flight per context. Two settings events landing
+			// together would otherwise both see the same down interface and
+			// both kick, and clearing `_applied_sig` is not a latch — it is
+			// cleared by the first callback, which the second has already
+			// passed.
+			//
+			// The latch holds WHEN the probe went out, not just that it did.
+			// A plain flag is cleared in the callback and nowhere else, so a
+			// request that never answers — a wedged ubusd is the way that
+			// happens — would silence every later renew for this context for
+			// the life of the daemon. Nothing here can cancel that request, so
+			// the latch expires instead.
+			//
+			// And the latch is the probe itself, not a mark that one exists:
+			// once an expiry lets a second probe out, BOTH are live, and a
+			// callback that cannot tell whether it is still the current one
+			// would act on a superseded answer and clear the live probe's latch
+			// on its way out — reintroducing exactly the double action the
+			// latch is here to prevent, one step removed.
+			if (entry._renew_probe && (time() - entry._renew_probe.at) < PROBE_STALE_S)
+				return;
+
+			let probe = { at: time() };
+
+			entry._renew_probe = probe;
+
+			// The connection this probe is asking about. A context can drop and
+			// come back while the answer is in flight, and it comes back on the
+			// same entry and the same ctx object (only a config reload builds a
+			// new one) — so identity and state both still match, and a stale
+			// answer would be acted on as if it described the live session.
+			// That is not academic on a connect-first backend: the reconnect
+			// arms `_kick_after_connect` and kicks by itself, and the old probe
+			// carries a `kick_pending` sampled before any of it.
+			let conn_seq = entry._conn_seq ?? 0;
 
 			let first_addr = (arr) =>
 				(type(arr) == 'array' && length(arr)) ? arr[0]?.address : null;
 			let same = (a, b) => (a ?? '') == (b ?? '');
 
+			// THE PREFIX, not the whole v6 address. This asks "does netifd still
+			// hold what we pushed", and the host half is not part of that answer:
+			// some firmware hands back different low 64 bits on every settings
+			// read while prefix, gateway and DNS stay put (RG502Q — see
+			// context_common.keep_stable_v6, which is why the MONITOR already
+			// compares this way), and netifd may re-derive the identifier itself
+			// from an interface token. Comparing the literal address made this
+			// guard answer "changed" for an interface that had changed nothing,
+			// which is the harmless direction — but it also means the guard was
+			// never measuring what it claimed to.
+			let v6_same = (a, b, plen) => {
+				if ((a ?? '') == (b ?? ''))
+					return true;
+
+				if (a == null || b == null)
+					return false;
+
+				let pa = context_common.v6_prefix(a, plen);
+				let pb = context_common.v6_prefix(b, plen);
+
+				return (pa != null && pa == pb);
+			};
+
 			deps.iface_status(entry.cfg.interface, (st) => {
+				// superseded: an expiry let a newer probe out, or a reconnect
+				// dropped this one. Say nothing, and leave the live probe's
+				// latch alone.
+				if (entry._renew_probe !== probe)
+					return;
+
+				entry._renew_probe = null;
+
+				// The probe is deferred, and a reload or an admin down can
+				// retire this context while it is out: stop_context() downs the
+				// context and deletes the entry, and build_context() replaces
+				// it. Acting on what we captured would then kick an interface
+				// that is being torn down, or push a retired context's
+				// settings. Nothing below is worth doing for a context the
+				// daemon has already moved on from.
+				if (self.contexts[name] !== entry || entry.ctx !== ctx ||
+				    ctx.state != 'CONNECTED' || (entry._conn_seq ?? 0) !== conn_seq)
+					return;
+
+				// NETIFD HAS THE INTERFACE DOWN, so there is nothing to renew
+				// into: interface_renew() returns -1 without doing anything for
+				// IFS_DOWN and IFS_TEARDOWN (netifd interface.c:1380-1386,
+				// 2026.07.08~6088f7b3), and our renew is fire-and-forget, so the
+				// failure is silent.
+				//
+				// A CONNECTED context behind a down interface is not a harmless
+				// state to leave alone, and nothing else picks it up: the ready
+				// path that kicks (see the `auto` branch above) needs a MODEM
+				// transition, and a modem that was ready all along never makes
+				// one. The way in is netifd's proto setup failing while the
+				// context happened to be reconnecting — a netifd restart lands
+				// there whenever it catches wwand mid-reconnect. (Measured on
+				// the GL-X3000/RM520N, 2026-09-20: a netifd restart against a
+				// CONNECTED context recovers by itself, because its setup calls
+				// context_up and gets up=1 straight back. It is only the
+				// unlucky window that sticks.)
+				//
+				// So kick instead of renewing — setup, not a session touch; the
+				// modem never noticed any of this. The same two guards as the
+				// ready path: an operator ifdown (autostart=false that is not
+				// our own) is intent and stays, and `auto 0` waits for an ifup.
+				// `pending` is netifd's IFS_SETUP (ubus.c:830, 2026.07.08~6088f7b3)
+				// — the interface is coming up right now, so leave it to that.
+				// `wanted` is deliberately NOT consulted: the daemon clears it
+				// when it downs an interface itself, and a wwand-issued down
+				// that is later undone is exactly one of the cases here (the
+				// `our_down` branch below says so, and test_wan6 pins it).
+				//
+				// Not when `_kick_after_connect` is armed: the connect-first
+				// backends (MBIM/NCM) kick a few lines further down as part of
+				// the `up` handling, with the same guards, and two kicks for one
+				// event is one more than netifd needs.
+				if (st && !st.up && !st.pending && !kick_pending) {
+					if (!(entry.cfg.auto ?? true))
+						return log('debug', sprintf('interface %s is down and auto=0, not kicking it for the renew',
+							entry.cfg.interface));
+
+					if (st.autostart === false && !our_down(entry)) {
+						if (entry.wanted) {
+							entry.wanted = false;
+							log('notice', sprintf('interface %s is administratively down (ifdown), leaving it alone',
+								entry.cfg.interface));
+						}
+						return;
+					}
+
+					if (!deps.kick_interface)
+						return;
+
+					log('notice', sprintf('interface %s is down with a connected session, kicking it up instead of renewing',
+						entry.cfg.interface));
+
+					// the signature describes what was pushed to an interface
+					// that no longer holds it; setup will push everything again
+					entry._applied_sig = null;
+					deps.kick_interface(entry.cfg.interface);
+					return;
+				}
+
+				// anything but a byte-identical repeat of what we last pushed
+				// goes through, whatever netifd's addresses say. This used to
+				// short-circuit BEFORE the status probe, which cost nothing
+				// then and hid the down case above: a changed settings push is
+				// exactly when netifd is most likely not to be holding the
+				// interface, and that push went out as a renew nobody received.
+				// The probe is one deferred ubus call either way.
+				if (entry._applied_sig != cur_sig)
+					return do_renew();
+
 				if (st?.up &&
 				    same(first_addr(st['ipv4-address']), ctx.settings?.ipv4?.addr) &&
-				    same(first_addr(st['ipv6-address']), ctx.settings?.ipv6?.addr)) {
+				    v6_same(first_addr(st['ipv6-address']), ctx.settings?.ipv6?.addr,
+				            ctx.settings?.ipv6?.plen)) {
 					log('info', sprintf('interface %s: v4/v6 unchanged (%s|%s), skipping renew',
 						entry.cfg.interface, ctx.settings?.ipv4?.addr ?? '',
 						ctx.settings?.ipv6?.addr ?? ''));
@@ -913,6 +1080,22 @@ export function create(opts)
 
 		switch (event) {
 		case 'up':
+			// A NEW CONNECTION GENERATION. Anything still waiting on an answer
+			// about the previous one has to drop it: the entry and the ctx are
+			// the same objects across a reconnect, and the state is CONNECTED
+			// again, so nothing else distinguishes the two.
+			if (entry) {
+				entry._conn_seq = (entry._conn_seq ?? 0) + 1;
+
+				// and drop the probe in flight, which is asking about the
+				// connection that just ended. Not merely stale — it is IN THE
+				// WAY: the renew further down is how the new session's
+				// addresses reach netifd, and the latch would make it return
+				// without sending anything, leaving netifd on the previous
+				// session's settings until the next refresh came round.
+				entry._renew_probe = null;
+			}
+
 			// a working data connection resets the recovery ladder
 			ctx.modem.note_connect_success();
 			clear_reconnect(name);
