@@ -245,8 +245,16 @@ export function install(self, o)
 			m.source = 'dsd';
 			let was = self.dsd_status?.mode;
 			self.dsd_status = m;
+			// DEBUG, not info. The DSD indication fires on every transition and
+			// an NSA carrier really does swap its NR leg in and out constantly
+			// — LTE/NSA alternating every few seconds, around two lines a
+			// minute, reported from the field (openwrt/packages#30185,
+			// 2026-09-19). The modem is behaving correctly and there is nothing
+			// for an operator to do about it, so it does not belong in the
+			// default log; the periodic telemetry line and `status` carry the
+			// current mode for anyone who wants it.
 			if (m.mode != was)
-				log('info', sprintf('data-system changed: %s', m.mode ?? 'none'));
+				log('debug', sprintf('data-system changed: %s', m.mode ?? 'none'));
 		});
 
 		self.dsd.request('SYSTEM_STATUS_CHANGE', { register: 1 }, (e) => {
