@@ -221,7 +221,7 @@ export function install(self, o)
 				return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) =>
 					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
 			store([]);
-		}, { reprobe: true });
+		}, { reprobe: true, log: log, what: 'carrier aggregation' });
 	};
 
 	// settle the data-system mode (NSA/SA/LTE): refresh the QENG serving detail
@@ -277,7 +277,7 @@ export function install(self, o)
 				else if (be == 'nas')
 					self.dsd_status = tag(modem_common.dsd_from_radio(self.reg?.radio_ifs));
 				cb();
-			}, { reprobe: true });
+			}, { reprobe: true, log: log, what: 'data mode' });
 		};
 
 		if (!self.at || !self.cells || !modem_common.qeng_ok(self))

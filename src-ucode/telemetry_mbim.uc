@@ -83,7 +83,7 @@ export function install(self, o)
 				}, { no_recovery: true });
 
 			cb();
-		}, { reprobe: true });
+		}, { reprobe: true, log: log, what: 'signal' });
 	};
 
 	// cells: passthrough NAS cell-location info (decoded + scrubbed exactly as the
@@ -139,7 +139,7 @@ export function install(self, o)
 				});
 
 			cb();
-		}, { reprobe: true });
+		}, { reprobe: true, log: log, what: 'cells' });
 	};
 
 	// carrier aggregation: passthrough NAS GET_LTE_CPHY_CA_INFO, else AT+QCAINFO
@@ -174,7 +174,7 @@ export function install(self, o)
 				});
 
 			store([]);
-		}, { reprobe: true });
+		}, { reprobe: true, log: log, what: 'carrier aggregation' });
 	};
 
 	// data-system mode (LTE/NSA/SA): passthrough DSD, else the native MBIM
@@ -216,7 +216,7 @@ export function install(self, o)
 				self.dsd_status = tag(modem_common.dsd_from_serving(self.cells?.serving));
 
 			cb();
-		}, { reprobe: true });
+		}, { reprobe: true, log: log, what: 'data mode' });
 	};
 
 	// registration detail (reject cause / limited service): passthrough NAS
@@ -247,7 +247,7 @@ export function install(self, o)
 				});
 
 			cb();
-		}, { reprobe: true });
+		}, { reprobe: true, log: log, what: 'registration detail' });
 	};
 
 	// serving-cell band/bandwidth over AT +QENG. Neither the native MBIM cell

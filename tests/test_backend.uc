@@ -358,4 +358,105 @@ eq(seq[-1], 'empty-ok', 'run_seq: empty step list still calls cb');
 		'retired walk: ...and does not answer for a modem that was torn down');
 }
 
+// --- the ladder says who won -------------------------------------------------
+//
+// It decides which transport answers a whole class of question — signal, cells,
+// data mode — and it decided in SILENCE: the demotion was logged, the
+// replacement was not, so a reader could see that something had been given up
+// and never which thing took over. "Where does this number come from" then
+// needed the daemon's source rather than its log, twice in one issue
+// (ddimension/wwand#30).
+(() => {
+	let lines = [];
+	let log = (lvl, msg) => push(lines, lvl + ':' + msg);
+	let obj = {};
+
+	let ladder = (avail, opts) => {
+		let got = null;
+		backend.choose(obj, '_sig_be', [
+			{ name: 'qmi',  probe: (ok) => ok(avail.qmi) },
+			{ name: 'mbim', probe: (ok) => ok(avail.mbim) },
+		], (n) => { got = n; }, opts);
+		return got;
+	};
+
+	// the preferred one wins and says so, once
+	eq(ladder({ qmi: true, mbim: true }, { log: log }), 'qmi', 'announce: the ladder still answers');
+	eq(lines, [ 'notice:_sig_be: answered by qmi' ], 'announce: ...and names the winner');
+
+	// ...and a caller that says WHAT the ladder is for gets that instead of the
+	// key. `_sig_be` sends its reader to the source to find out what the line
+	// is about, which is the failure this line exists to end.
+	{
+		let named = [], nobj = {};
+		backend.choose(nobj, '_sig_be', [ { name: 'qmi', probe: (ok) => ok(true) } ],
+			() => null, { log: (l, m) => push(named, m), what: 'signal' });
+		eq(named, [ 'signal: answered by qmi' ], 'announce: the ladder is named in words');
+	}
+
+	// ...and NOT again on every call. This runs on the fast telemetry path; a
+	// line per walk would drown the log it exists to make readable.
+	lines = [];
+	ladder({ qmi: true, mbim: true }, { log: log });
+	ladder({ qmi: true, mbim: true }, { log: log });
+	eq(lines, [], 'announce: an unchanged choice is not repeated');
+
+	// a demotion, and the REPLACEMENT is what the reader could never see
+	lines = [];
+	backend.outcome(obj, '_sig_be', false);
+	backend.outcome(obj, '_sig_be', false);
+	backend.outcome(obj, '_sig_be', false);
+	eq(ladder({ qmi: false, mbim: true }, { log: log }), 'mbim',
+		'announce: the ladder falls to the next rung');
+	eq(lines, [ 'notice:_sig_be: answered by mbim' ],
+		'announce: ...and the replacement is named');
+
+	// "nothing here can do this" is a decision with the same consequences
+	lines = [];
+	backend.forget(obj, '_sig_be');
+	eq(ladder({ qmi: false, mbim: false }, { log: log }), null, 'announce: nothing answers');
+	eq(lines, [ 'notice:_sig_be: no transport can serve this' ],
+		'announce: ...and that is said too');
+
+	// A DEMOTION IS ALWAYS FOLLOWED BY AN ANSWER, even when the same transport
+	// wins its place back. The reader has just been told this one stopped
+	// answering; leaving the sequel unsaid is the half that was missing.
+	// set the stage explicitly: mbim is the announced winner, and it is still
+	// the only one available — so the re-walk lands on the SAME name, which is
+	// the only shape that needs outcome() to clear the announcement.
+	backend.forget(obj, '_sig_be');
+	eq(ladder({ qmi: false, mbim: true }, { log: log }), 'mbim', 'announce: mbim holds the choice');
+	eq(obj._sig_be_said, 'mbim', 'announce: ...and is what was last said');
+
+	lines = [];
+	backend.outcome(obj, '_sig_be', false);
+	backend.outcome(obj, '_sig_be', false);
+	backend.outcome(obj, '_sig_be', false);
+	eq(ladder({ qmi: false, mbim: true }, { log: log }), 'mbim',
+		'announce: mbim wins its place back after its own demotion');
+	eq(lines, [ 'notice:_sig_be: answered by mbim' ],
+		'announce: ...and that is said, though the name did not change');
+
+	// ...while the PROVISIONAL re-probe is not a demotion: nothing failed, and
+	// the same answer there is noise rather than news.
+	lines = [];
+	obj._sig_be_uses = 999;
+	ladder({ qmi: false, mbim: true }, { log: log, reprobe: 1 });
+	eq(lines, [], 'announce: a re-probe landing on the same rung says nothing');
+
+	// a caller that passes no logger gets no logging, and still works
+	lines = [];
+	backend.forget(obj, '_sig_be');
+	eq(ladder({ qmi: true, mbim: true }, {}), 'qmi', 'announce: no logger, same answer');
+	eq(lines, [], 'announce: ...and no lines');
+
+	// forget() clears the announcement: after a teardown or a SIM change the
+	// next walk is a fresh decision and deserves saying, even on the same rung
+	lines = [];
+	backend.forget(obj, '_sig_be');
+	ladder({ qmi: true, mbim: true }, { log: log });
+	eq(lines, [ 'notice:_sig_be: answered by qmi' ],
+		'announce: a fresh decision is announced again after forget()');
+})();
+
 done('test_backend');

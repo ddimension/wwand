@@ -84,6 +84,10 @@ export function choose(obj, key, candidates, cb, opts)
 	let cached = obj[key];
 	let uses = key + '_uses';
 	let busy = key + '_probing';
+	// what was last ANNOUNCED, which is not the same as what is cached: the
+	// cache is dropped on a demotion and on a re-probe, and re-announcing the
+	// same winner each time would be noise, not news.
+	let said = key + '_said';
 
 	// only a non-preferred choice is provisional; the top candidate winning is
 	// already the best answer the ladder has, and re-probing it proves nothing.
@@ -163,6 +167,31 @@ export function choose(obj, key, candidates, cb, opts)
 		settled = true;
 		delete obj[uses];
 		delete obj[busy];
+
+		// SAY WHO WON, when it changes. The ladder decides which transport
+		// answers a whole class of question — signal, cells, data mode — and
+		// until now it decided in silence: the demotion was logged, the
+		// REPLACEMENT was not, so a reader could see that something had been
+		// given up and never which thing took over. Answering "where does this
+		// number come from" then needed the daemon's source rather than its
+		// log, twice in one issue (ddimension/wwand#30).
+		//
+		// Only on a CHANGE, and only where a caller passed a logger: this runs
+		// on the fast telemetry path, and a line per walk would drown the log
+		// it is meant to make readable. `none` is announced too — "nothing here
+		// can do this" is a decision with the same consequences.
+		if (opts?.log && obj[said] != (name ?? 'none')) {
+			obj[said] = name ?? 'none';
+
+			// `what` in words, because the KEY is internal shorthand — a line
+			// reading `_sig_be` sends its reader to the source to find out
+			// what it is about, which is the failure this whole line exists
+			// to end. The key remains the fallback so a caller that names
+			// nothing still says something.
+			opts.log('notice', sprintf('%s: %s', opts.what ?? key, (name != null)
+				? sprintf('answered by %s', name)
+				: 'no transport can serve this'));
+		}
 
 		let queued = obj[waiters];
 		delete obj[waiters];
@@ -247,6 +276,13 @@ export function outcome(obj, key, ok)
 	delete obj[fails];
 	delete obj[key];
 	delete obj[key + '_uses'];   // or a stale count re-probes the next choice early
+	// ...and what was announced, so the NEXT winner is always said out loud —
+	// including the same transport winning its place back. The reader has just
+	// been told this one stopped answering; leaving the sequel unsaid is the
+	// half of the story that was missing in the first place. The change-guard
+	// in choose() still suppresses the provisional re-probe, where nothing
+	// failed and the same answer is genuinely not news.
+	delete obj[key + '_said'];
 	return true;
 };
 
@@ -265,6 +301,10 @@ export function forget(obj, ...keys)
 		// this key, and hold references to callbacks of a modem that is gone.
 		delete obj[k + '_probing'];
 		delete obj[k + '_waiters'];
+		// ...and what was announced. forget() runs on a teardown or a SIM
+		// change, so the next walk is a fresh decision and deserves to be said
+		// out loud even when it lands on the same transport as before.
+		delete obj[k + '_said'];
 		// ...and retire whatever walk was running: bumping the generation makes
 		// its outstanding callbacks no-ops rather than writers of a dropped
 		// cache. A caller queued behind it is dropped with it — its modem is
