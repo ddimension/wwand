@@ -1578,6 +1578,52 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 eq(length(am_opts.m0?.datapath?.mux_links ?? []), 2,
 	'automux-demote: both channels are requested');
 
+// MBIM ASKS FOR NO CHANNEL AT ALL in the lone-auto case, where QMI asks for one
+// and gives it back if the modem cannot carry it. The difference is the
+// hardware: untagged traffic on a cdc_mbim parent already IS IPS session 0
+// (cdc_mbim.c:262-270, Linux 6.18.41), so taking a session id buys nothing and
+// costs an 802.1q tag on every frame in both directions plus a sub-device to
+// route through. QMAP has no session 0 to fall back on, which is why the
+// allocator numbers from 1 and why only MBIM can spend that 1.
+let am_mbim = {
+	modem: { create: (o) => { am_opts[o.id] = o; return { start: () => null, stop: () => null }; } },
+	context: { create: (o) => ({ state: 'IDLE', down: (cb) => cb ? cb() : null }) },
+};
+let am_mbim_daemon = () => daemon_mod.create({ timing: TIMING, deps: {
+	log: (l, m) => null,
+	load_mbim: () => am_mbim,
+	load_qmi: () => am_qmi,
+} });
+
+am_opts = {};
+am_mbim_daemon().apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'mbim' },
+	a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: 'auto' },
+} }));
+eq(length(am_opts.m0?.datapath?.mux_links ?? []), 0,
+	'automux-mbim: a lone auto channel asks for no session — untagged on the parent');
+
+// two contexts still need a tag each: one untagged parent carries one session.
+am_opts = {};
+am_mbim_daemon().apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'mbim' },
+	a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: 'auto' },
+	b:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3b', apn: 'b', mux_id: 'auto' },
+} }));
+eq(length(am_opts.m0?.datapath?.mux_links ?? []), 2,
+	'automux-mbim: two contexts still take a session each');
+
+// ...and a PINNED channel is the operator asking for a tagged session. It is
+// not auto, so it is not demotable, and it keeps the number it was given.
+am_opts = {};
+am_mbim_daemon().apply_config(config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'mbim' },
+	a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: '1' },
+} }));
+eq(length(am_opts.m0?.datapath?.mux_links ?? []), 1,
+	'automux-mbim: a pinned session 1 stays a tagged session 1');
+eq(am_opts.m0?.datapath?.mux_links?.[0]?.id, 1, 'automux-mbim: ...with its number intact');
+
 // THE PARENT'S NAME FOLLOWS THE SAME DECISION.
 //
 // A muxed modem leaves its parent on the kernel name because the mux CHILD
@@ -1672,6 +1718,91 @@ eq(am3.modems.m0?.l3_name, false,
 
 	ok(length(filter(lines, (l) => index(l, 'err:') == 0 && index(l, 'cannot rename') >= 0)) == 1,
 		'rename-taken: an unmuxed modem still reports the clash as an error');
+})();
+
+// ...BUT AN MBIM MODEM THAT ALREADY KNOWS IT WILL RUN UNTAGGED TAKES THE NAME
+// BACK, because there is not going to be a mux child.
+//
+// Coming from a tagged config the old vlan child still holds the stable name at
+// this moment; setup() prunes it a second later, after the rename has been
+// skipped, and nothing retries. The parent then keeps a raw kernel name that
+// depends on USB enumeration order — the instability stable names exist to
+// remove — and the next unchanged reload is a no-op, so it stays. HW-reproduced
+// on the GL-X3000/RM520N (2026-09-20).
+//
+// Deleting a network device on a name match alone is not something to get
+// wrong, so ownership is PROVEN, not assumed: stacked on this parent, DEVTYPE
+// vlan, and the VLAN id this modem's own config asked for.
+(function() {
+	let mk = (files, deleted) => {
+		let lines = [];
+		let renamed = [];
+		let d = daemon_mod.create({ timing: TIMING, deps: {
+			log: (l, m) => push(lines, l + ':' + m),
+			datapath_fx: {
+				// the name is taken until the device is deleted — the whole
+				// point of the reclaim is what happens after that
+				exists: (p) => (p == '/sys/class/net/l3a')
+					? !length(filter(deleted, (x) => x == 'l3a'))
+					: exists(files, p),
+				read: (p) => files[p],
+				link_del: (dev) => { push(deleted, dev); return true; },
+				link_set: (dev, o) => { push(renamed, dev + '->' + (o.rename ?? '')); return true; },
+			},
+			resolve_netdev: (cfg, dev) => 'wwan1',
+			load_mbim: () => am_qmi,
+			load_qmi: () => am_qmi,
+		} });
+
+		d.apply_config(config.parse({ network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'mbim' },
+			a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a', mux_id: 'auto' },
+		} }));
+
+		return { lines: lines, renamed: renamed };
+	};
+
+	// our own leftover: stacked on wwan1, a vlan, VID 1 (the channel the
+	// allocator handed this modem's lone auto context)
+	let mine = {};
+	mine['/sys/class/net/l3a/lower_wwan1'] = '';
+	mine['/sys/class/net/l3a/uevent'] = 'DEVTYPE=vlan\nINTERFACE=l3a\n';
+	mine['/proc/net/vlan/l3a'] = 'l3a  VID: 1\t REORDER_HDR: 1  dev->priv_flags: 81021\n';
+
+	let del1 = [];
+	let r1 = mk(mine, del1);
+	eq(del1, [ 'l3a' ], 'reclaim: our own leftover vlan child is removed');
+	eq(r1.renamed, [ 'wwan1->l3a' ], 'reclaim: ...and the parent then takes the name');
+	ok(length(filter(r1.lines, (l) => index(l, 'netifd still holds a device record') >= 0)) == 1,
+		'reclaim: ...and the operator is told netifd needs a restart, not a reload');
+
+	// NOT ours: same name, same parent, but a macvlan. An operator's own device
+	// on this modem is not wwand's to delete.
+	let foreign = { ...mine };
+	foreign['/sys/class/net/l3a/uevent'] = 'DEVTYPE=macvlan\nINTERFACE=l3a\n';
+	delete foreign['/proc/net/vlan/l3a'];
+
+	let del2 = [];
+	let r2 = mk(foreign, del2);
+	eq(del2, [], 'reclaim: a macvlan of the same name is left alone');
+	eq(r2.renamed, [], 'reclaim: ...and the parent keeps its kernel name');
+
+	// NOT ours: a vlan on this parent carrying a DIFFERENT session id
+	let othervid = { ...mine };
+	othervid['/proc/net/vlan/l3a'] = 'l3a  VID: 7\t REORDER_HDR: 1\n';
+
+	let del3 = [];
+	mk(othervid, del3);
+	eq(del3, [], 'reclaim: a vlan with another session id is left alone');
+
+	// NOT ours: a vlan of that name stacked on somebody else's parent
+	let elsewhere = { ...mine };
+	delete elsewhere['/sys/class/net/l3a/lower_wwan1'];
+	elsewhere['/sys/class/net/l3a/lower_eth0'] = '';
+
+	let del4 = [];
+	mk(elsewhere, del4);
+	eq(del4, [], 'reclaim: a vlan on another parent is left alone');
 })();
 
 // ...and a pinned channel beside an auto one is not demotable either: the

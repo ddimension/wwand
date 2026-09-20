@@ -185,6 +185,103 @@ let ready_events = [];
 // where stopping wwand and running `umbim radio on` by hand was the only way
 // to connect. The write must be conditional: the default modem in this suite
 // boots with the radio on and is checked below to receive no RADIO_STATE set
+// A FUNCTION ERROR on the MBIMEx version query is recoverable, and must be
+// recovered from.
+//
+// `self.opened` in mbim_client is that CLIENT's belief, not the device's: a
+// fresh client over a device a previous host session left in-session never
+// sends CLOSE, and the function answers the version query with a function
+// error. libmbim has a step for exactly that (an explicit CLOSE before OPEN
+// when the device may still be in session, mbim-device.c:2051-2058, 1.32.0).
+// Without it no version is agreed, the client falls back to the v1 layouts, and
+// a modem serving v3 answers the v1 CONNECT with status 21 every single time —
+// HW-reproduced on the GL-X3000/RM520N (2026-09-20), 30+ identical bring-up
+// failures cleared only by restarting the daemon.
+//
+// A DECLINED handshake is a different thing and must NOT be retried: that is
+// the modem answering, and asking again gets the same answer. Both halves are
+// asserted.
+function assert_version_function_error() {
+	let mockv = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: handlers(),
+	                                  mbimex_function_errors: 1 });
+	let mv = null, mv_done = false;
+
+	mv = modem_mbim.create({
+		id: 'm_ver', device: '/dev/mock3',
+		config: { apn: 'internet' },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: {
+			transport_open: mockv.transport_open,
+			log: () => null,
+			on_event: (m, event) => {
+				if (event != 'registered' || mv_done)
+					return;
+
+				mv_done = true;
+
+				let vers = filter(mockv.calls, (c) => c.name == 'VERSION');
+
+				eq(length(vers), 2, 'mbimex: a function error is retried exactly once');
+
+				// AND THE CLOSE IS THE POINT. Reopening without closing leaves
+				// the function in the session it is stuck in, so "two VERSION
+				// queries and a good answer" is not enough to show the retry
+				// does the thing that fixes it. The control frames, in order.
+				eq(map(filter(mockv.calls, (c) => c.kind == 'control' || c.name == 'VERSION'),
+					(c) => c.name),
+					[ 'OPEN', 'VERSION', 'CLOSE', 'OPEN', 'VERSION' ],
+					'mbimex: the retry CLOSES the channel before reopening it');
+
+				eq(mockv.mbimex_agreed, 0x0300,
+					'mbimex: ...and the second try agrees 3.0');
+				eq(m.mbim?.mbimex_version, 0x0300,
+					'mbimex: the client ends up on the v3 layouts, not v1');
+				eq(m.state, 'READY', 'mbimex: init completes after the reopen');
+
+				mv.stop();
+
+				// AND A DECLINED HANDSHAKE IS NOT RETRIED. The device answered;
+				// asking again would get the same answer, and the retry exists
+				// for a function that could not answer at all.
+				let mockd = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: handlers(),
+				                                  mbimex_version: 0 });
+				let md = null, md_done = false;
+
+				md = modem_mbim.create({
+					id: 'm_ver2', device: '/dev/mock4',
+					config: { apn: 'internet' },
+					timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+					at: { fx: { read: () => null, glob: () => [] } },
+					datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+					deps: {
+						transport_open: mockd.transport_open,
+						log: () => null,
+						on_event: (m2, ev2) => {
+							if (ev2 != 'registered' || md_done)
+								return;
+
+							md_done = true;
+
+							eq(length(filter(mockd.calls, (c) => c.name == 'VERSION')), 1,
+								'mbimex: a declined handshake is asked once and accepted');
+							eq(m2.mbim?.mbimex_version, 0,
+								'mbimex: ...and the client reads the v1 layouts');
+
+							md.stop();
+						},
+					},
+				});
+
+				md.start();
+			},
+		},
+	});
+
+	mv.start();
+}
+
 // at all, so a future "just always write it" cannot pass both halves.
 function assert_radio_off() {
 	let h3 = handlers();
@@ -368,6 +465,7 @@ function assert_puk_block() {
 						'datapath: the wire-id mapping is carried onto the modem');
 					m2.stop();
 					assert_radio_off();
+					assert_version_function_error();
 				}
 			},
 		},

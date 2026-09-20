@@ -132,7 +132,15 @@ function cmd_status(args)
 		if (m.datapath) {
 			let dp = call('modem_datapath', { modem: name });
 
-			printf('  datapath    %s%s%s\n', m.datapath,
+			// and what was ASKED for, when it is not what came up. `auto →
+			// untagged` is the common one and the one worth seeing: it says the
+			// modem is carrying its session on the bare parent with no 802.1q
+			// tag, which is a performance fact, not a fallback.
+			let want = dp?.configured;
+
+			printf('  datapath    %s%s%s\n',
+				(want != null && want != m.datapath)
+					? sprintf('%s → %s', want, m.datapath) : m.datapath,
 				(dp?.qmap_version != null) ? sprintf(' · QMAP v%d', dp.qmap_version) : '',
 				(dp?.urb_size != null) ? sprintf(' · urb %d', dp.urb_size) : '');
 		}

@@ -439,7 +439,7 @@ export function create(opts)
 		let dp = opts.datapath;
 
 		if (!dp?.netdev || !dp.fx) {
-			self.datapath = { backend: 'raw_ip', netdev: dp?.netdev ?? null, mux: [] };
+			self.datapath = { backend: 'untagged', netdev: dp?.netdev ?? null, mux: [] };
 			return step_simslot();
 		}
 
@@ -456,7 +456,10 @@ export function create(opts)
 			if (want_mux)
 				return fail('datapath', { error: 'mux_backend_unavailable', mux: dp.mux });
 
-			backend = 'raw_ip';
+			// a cdc_mbim parent with no channels is session 0 carried
+			// untagged, not a raw-IP trunk — see the `untagged` mode in
+			// netlink.uc
+			backend = 'untagged';
 		}
 
 		let r = netlink.setup(dp.fx, {
@@ -475,8 +478,8 @@ export function create(opts)
 		let parent = r.parent ?? dp.netdev;
 
 		self.datapath = {
-			// what setup() ACTUALLY ran: it drops to raw_ip when the selected
-			// backend has no channels to build (session 0 only)
+			// what setup() ACTUALLY ran: it drops to `untagged` when the
+			// selected backend has no channels to build (session 0 only)
 			backend: r.backend ?? backend,
 			netdev: parent,
 			parent: parent,

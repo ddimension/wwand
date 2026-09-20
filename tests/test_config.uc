@@ -1051,6 +1051,28 @@ for (let spelling in [ 'none', 'raw-ip', 'raw_ip' ]) {
 		'mux ethernet: and it is warned about');
 }
 
+// ...and so is MBIM's `untagged`, for a sharper reason than the other two. It
+// has no implementation, so the datapath builds nothing and ignores the mux
+// links it is handed, while a PINNED channel is never demoted — so a context
+// left holding session 1 would dial it against an untagged parent, come up,
+// take an address and pass no traffic. Raised by Codex review, 2026-09-20.
+{
+	let off = padopt({
+		network: {
+			m0: { '.type': 'wwand_modem', usb_path: '1-1', protocol: 'mbim', mux: 'untagged' },
+			wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+			       device: 'wwand0', mux_id: '1', apn: 'internet' },
+		},
+	});
+
+	eq(off.modems.m0.mux, 'untagged', 'mux untagged: the mode survives the shape check');
+	eq(off.contexts.wan.mux_id, 0, 'mux untagged: the pinned channel is dropped');
+	eq(off.contexts.wan.muxed, false, 'mux untagged: ...and not auto-assigned back');
+	eq(off.contexts.wan.mux_link, null, 'mux untagged: ...and no vlan child is expected');
+	ok(length(filter(off.warnings, (w) => index(w, 'has mux disabled') >= 0)) == 1,
+		'mux untagged: and it is warned about');
+}
+
 // the compat parser (no `option modem`) resolves the channel through the same
 // helper — the two interface parsers must not drift
 r = padopt({

@@ -1048,6 +1048,14 @@ const MODES = [
 	  description: 'no multiplexing — one plain raw-IP interface' },
 	{ name: 'ethernet', kind: 'mode',
 	  description: 'no multiplexing — the parent stays in 802.3 ethernet framing (raw_ip off), ARP off (point-to-point hop)' },
+	// cdc_mbim's no-mux answer, and a different thing from raw_ip even though
+	// both mean "the parent carries it": untagged traffic on a cdc_mbim parent
+	// IS IPS session 0 (drivers/net/usb/cdc_mbim.c:262-270, Linux 6.18.41 — no
+	// tag => session 0, as long as nobody created VID 4094, which wwand never
+	// does). There is no raw-IP knob to program and no 802.3 framing to keep;
+	// calling it raw_ip said the parent was something it is not.
+	{ name: 'untagged', kind: 'mode', proto: [ 'mbim' ],
+	  description: 'no multiplexing — MBIM session 0 rides the parent untagged (no 802.1q tag per frame)' },
 ];
 
 // What a UI offering `option mux` may show, built from the datapaths themselves
@@ -1057,7 +1065,10 @@ const MODES = [
 // the side that loads them.
 export function datapath_catalog()
 {
-	let out = map(MODES, (e) => ({ ...e, proto: null }));
+	// `proto: null` = applies to every control protocol, which is what a mode
+	// usually is. A mode may still name its own (`untagged` is cdc_mbim and
+	// nothing else), so the spread must not clobber a declared one.
+	let out = map(MODES, (e) => ({ ...e, proto: e.proto ?? null }));
 
 	for (let name in BUILTIN_ORDER)
 		push(out, {
@@ -1075,7 +1086,8 @@ export function builtin_mux(name)
 {
 	let n = canon_mux(name);
 
-	return n == 'auto' || n == 'raw_ip' || n == 'ethernet' || exists(BUILTIN, n);
+	return n == 'auto' || n == 'raw_ip' || n == 'ethernet' || n == 'untagged' ||
+	       exists(BUILTIN, n);
 };
 
 // `plugins` is a name -> implementation object IN PREFERENCE ORDER (ucode keeps
@@ -1110,6 +1122,21 @@ export function select_backend(fx, netdev, cfg_mux, want_mux, plugins, info)
 		}
 
 		return 'ethernet';
+	}
+
+	// `untagged` is the MBIM counterpart: IPS session 0 on the bare parent. It
+	// is not a QMI concept at all — a qmi_wwan parent with no channel is
+	// raw_ip, which is a different framing with a different sysfs knob behind
+	// it — so naming it on a QMI modem is the impossible choice, not a risky
+	// one, and is reported the way `ethernet` reports its own.
+	if (mux == 'untagged') {
+		if (proto != 'mbim') {
+			fx.log('err', sprintf('datapath: untagged serves mbim, not %s — `option mux` names a datapath this modem cannot use',
+				proto));
+			return null;
+		}
+
+		return 'untagged';
 	}
 
 	// Named outright: that one or nothing — never a quiet substitution. Built-in
@@ -1290,7 +1317,7 @@ export function setup(fx, opts)
 	if (!valid_plugin(impl))
 		impl = null;
 
-	if (backend != 'raw_ip' && backend != 'ethernet' && !impl)
+	if (backend != 'raw_ip' && backend != 'ethernet' && backend != 'untagged' && !impl)
 		return { ok: false, error: sprintf('no implementation for datapath backend %J', backend) };
 
 	// one naming rule per backend, used by the prune below, by the parent-rename
@@ -1348,10 +1375,19 @@ export function setup(fx, opts)
 		// notice, not info: select_backend announces a probe match at notice, so
 		// leaving the outcome below the default level would print "rmnet_nss
 		// selected" and never say it went unused.
-		fx.log('notice', sprintf('datapath: %s selected but no mux channels configured — plain raw-IP parent',
-			backend));
+		// ...and name what the parent actually becomes. `vlan` is cdc_mbim,
+		// where an unmuxed parent is IPS session 0 carried untagged — not a
+		// raw-IP trunk, which is a qmi_wwan framing mode with a sysfs knob
+		// behind it. The two were one name, and the status line then told an
+		// MBIM operator their modem was in a mode it does not have.
+		let plain = (backend == 'vlan') ? 'untagged' : 'raw_ip';
+
+		fx.log('notice', sprintf('datapath: %s selected but no mux channels configured — %s',
+			backend, (plain == 'untagged')
+				? 'MBIM session 0 on the parent, untagged'
+				: 'plain raw-IP parent'));
 		impl = null;
-		backend = 'raw_ip';
+		backend = plain;
 	}
 
 	// this datapath aggregates QMAP on the parent, and programs the parent
@@ -1359,7 +1395,11 @@ export function setup(fx, opts)
 	// (see the contract at the top). raw_ip aggregates nothing but still has its
 	// framing programmed: setting qmi_wwan's raw_ip is the whole point of it.
 	let aggregate = impl ? (impl.aggregate !== false) : false;
-	let programs_parent = impl ? (impl.programs_parent !== false) : true;
+	// `untagged` is cdc_mbim: no `qmi` sysfs group, no raw-IP knob, nothing to
+	// program. The exists(sys) guard further down would have caught it anyway,
+	// but saying it here means the parent is not bounced down for a write that
+	// was never going to happen.
+	let programs_parent = impl ? (impl.programs_parent !== false) : (backend != 'untagged');
 
 	// A mux child cannot share the parent's name. This happens when the parent
 	// still carries a stable "wwandN" name from a previous NON-mux config (the

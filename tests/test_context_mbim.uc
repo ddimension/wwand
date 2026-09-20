@@ -387,4 +387,37 @@ ok(current == length(scenarios),
 	sprintf('every scenario ran (%d of %d) — a chain that ends early is not a pass',
 		current, length(scenarios)));
 
+// --- which session goes on the wire ------------------------------------------
+// The number the config allocated is not always the number the modem is told.
+// On MBIM a lone `auto` channel resolves to session 0 — the untagged parent —
+// and dialling the allocated 1 there brings the session up, gets netifd an
+// address, and moves nothing: the modem tags session 1 and no device is
+// listening for that tag. HW-seen on the GL-X3000/RM520N (2026-09-20).
+(() => {
+	let ws = (cfg, dp) => context_mbim.create({
+		name: 'wan', modem: { datapath: dp, attach_context: () => null },
+		config: cfg,
+		deps: { log: () => null, on_event: () => null },
+	}).wire_session();
+
+	let auto1 = { apn: 'a', mux_id: 1, muxed: true, mux_auto: true };
+
+	eq(ws(auto1, { backend: 'untagged' }), 0,
+		'wire session: an auto channel on an untagged parent dials session 0');
+	eq(ws(auto1, { backend: 'vlan' }), 1,
+		'wire session: ...and dials its own channel when the parent is tagged');
+
+	// a PINNED channel is the operator asking for that session, and keeps it
+	eq(ws({ apn: 'a', mux_id: 1, muxed: true, mux_auto: false }, { backend: 'untagged' }), 1,
+		'wire session: a pinned channel is never demoted');
+
+	// the datapath's own remap still wins over both
+	eq(ws(auto1, { backend: 'vlan', map_ids: { '1': 7 } }), 7,
+		'wire session: a datapath remap is applied on top');
+
+	// no datapath yet (bring-up race): keep the configured intent rather than
+	// demoting on the absence of evidence — the same rule effective_mux_id has
+	eq(ws(auto1, null), 1, 'wire session: no datapath yet -> the configured channel');
+})();
+
 done('test_context_mbim');

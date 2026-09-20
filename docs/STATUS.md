@@ -405,6 +405,100 @@ setup lands while the context is reconnecting. The hardware run confirms the new
 probe costs nothing in normal operation: a full `ifdown`/`ifup` cycle and a
 `killall netifd` both come back with addressing intact and no spurious kicks.
 
+## `mux auto` on MBIM costs nothing now (2026-09-20)
+
+An `auto` channel used to take session 1 on MBIM, which means an 802.1q tag on
+every frame in both directions and a VLAN sub-device to route through. It bought
+nothing: untagged traffic on a cdc_mbim parent already IS IPS session 0
+(`drivers/net/usb/cdc_mbim.c:262-270`, Linux 6.18.41 — and `FLAG_IPS0_VLAN`, the
+flag that would change that, is only set when someone creates VID 4094, which
+wwand never does). The 1 came from the channel allocator, which counts from 1
+because QMAP channel 0 is invalid. MBIM's is not.
+
+A modem whose only muxed interface is `auto` now asks for no session:
+
+    modem wwmodem_wwan0: mux auto resolves to MBIM session 0 — untagged on the parent, no vlan child
+    datapath: vlan selected but no mux channels configured — MBIM session 0 on the parent, untagged
+    modem wwmodem_wwan0: datapath: untagged (vlan not applicable here), parent wwand0, mux []
+
+Two interfaces on one modem still take a tagged session each — one untagged
+parent carries one session — and a pinned `option mux_id '1'` is the operator
+asking for a tagged session and keeps it.
+
+**`untagged` is its own datapath name**, not `raw_ip`. Both mean "the parent
+carries it" and they are not the same parent: `raw_ip` is a qmi_wwan framing
+mode with a sysfs knob behind it, and calling an MBIM parent that told operators
+their modem was in a mode it does not have. It is a mode like `raw_ip` and
+`ethernet`, with no implementation behind it, and it declares `mbim` — naming it
+on a QMI modem is refused the way `ethernet` is refused on a non-QMI one.
+
+**One line was the whole bug.** `context_mbim` dialled `config.mux_id` directly
+while everything else — `derive_netdev`, the status children list, the QMI WDS
+binding — resolved through `effective_mux_id`. With the parent untagged and the
+context still dialling session 1, the session came up, netifd got an address,
+and not one frame arrived: the modem tagged session 1 and no device was
+listening for the tag. Found on hardware (GL-X3000/RM520N, 2026-09-20), not in
+the suite, because no test had ever made the two disagree. `derive_netdev` had
+the same split for MBIM and is now on the effective id too.
+
+Visible without guessing: `wwandctl status` prints `datapath auto → untagged`,
+and the LuCI status page shows the same under Datapath → Backend, whenever what
+was configured is not what came up.
+
+Three things the hardware found that the suite could not, all on the live
+tagged → untagged switch:
+
+- **The stable L3 name has to be reclaimed from the leftover child.** It is
+  asked for before the datapath runs, the old vlan child still holds it at that
+  moment, and setup() prunes that child a second later — after the rename has
+  already been skipped, with nothing to retry it. The parent then kept a raw
+  kernel name that depends on USB enumeration order, which is the instability
+  stable L3 names exist to remove, and the next unchanged reload was a no-op.
+  `rename_l3` now removes its own leftover child first, identified by
+  `lower_<parent>` so nothing else can be mistaken for it. Raised by Codex
+  review, reproduced on hardware.
+- **`option mux 'untagged'` has to disable a pinned `mux_id`**, like `raw_ip`
+  and `ethernet` do. It has no implementation, so setup() builds nothing and
+  ignores the links it is handed, while a pinned channel is never demoted — the
+  context would dial session 1 against an untagged parent. Also Codex.
+- **netifd needs a restart afterwards, and wwand now says so.** The name moves
+  from the mux child to the parent, and netifd still holds a device record for
+  it in its old shape; claiming it re-runs that record's setup against a parent
+  that is gone (`DEVICE_CLAIM_FAILED`, netifd `interface.c:1349-1353`). A reload
+  does not clear it. Nothing wwand can do from its side, so it logs the remedy.
+
+## The MBIMEx handshake had no second chance (2026-09-20)
+
+Found while switching a live MBIM modem's mux configuration, and unrelated to
+that: after the modem bounced, the version query came back a **function error**,
+no version was agreed, the client fell back to the v1 layouts — and a modem
+serving v3 answers the v1 CONNECT with status 21 (`InvalidParameters`). Every
+bring-up then failed identically, thirty-odd times, and only restarting the
+daemon cleared it. On the GL-X3000 / RM520N, 2026-09-20.
+
+`self.opened` in `mbim_client` is that CLIENT's belief, not the device's. A
+fresh client over a function a previous host session left in-session has
+`opened = false`, so it never sends CLOSE, and the function answers the version
+query with an error. libmbim has a step for exactly this — an explicit CLOSE
+before OPEN when the device may still be in session (`mbim-device.c:2051-2058`,
+1.32.0). wwand had none.
+
+Now: a function error on the version query closes the channel, reopens it and
+asks once more. A DECLINED handshake is not retried — that is the modem
+answering, and asking again gets the same answer; only an error from the
+function itself is recoverable. Both halves are pinned by tests, and the
+hardware shows the recovery working:
+
+    MBIMEx version query hit a function error — closing and reopening the channel once
+    MBIMEx 3.0 agreed (after reopening the channel)
+
+And the log line that hid this says why now. "no MBIMEx version agreed" on its
+own reported a decision with real consequences and gave nothing to act on; the
+same modem agreed 3.0 on one start and not on the next, and the log could not
+tell the two apart. It is a `warn` with the reason in it — `query failed
+(function_error)`, `answer too short (N bytes)`, or the versions the modem
+offered.
+
 ## Known open
 
 - **TODO — `pdp_type` cannot be configured per SIM, and two people expected it

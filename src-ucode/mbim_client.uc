@@ -94,17 +94,29 @@ export function create(hub, hooks)
 		return true;
 	};
 
+	// OPEN, then agree an MBIMEx version — with ONE close/re-open retry if that
+	// second step comes back a function error.
+	//
+	// `self.opened` is this CLIENT's belief, not the device's. A fresh client
+	// over a device the previous host session left in-session has opened=false
+	// and so never closes, and the function then answers the version query with
+	// a function error. libmbim has a step for exactly this — an explicit CLOSE
+	// before OPEN when the device may still be in session (mbim-device.c:2051-2058,
+	// 1.32.0) — and the consequence of not having it is not cosmetic: with no
+	// version agreed this client reads and writes the v1 layouts, and a v3 modem
+	// answers the v1 CONNECT with status 21 (InvalidParameters), every attempt,
+	// forever. HW-reproduced on the GL-X3000/RM520N (2026-09-20) after a config
+	// reload bounced the modem: 30+ identical bring-up failures, cleared only by
+	// restarting the daemon.
+	//
+	// Recovering here rather than closing pre-emptively on every start: the
+	// failure is what tells us the function needs it, and a CLOSE sent to a
+	// device that is not open is its own error to reason about.
 	self.open = function(cb) {
-		let txn = self.next_txn++;
+		let attempt = 0;
+		let do_open, do_version;
 
-		self.raw_send(mbim.encode_open(txn, 4096), txn, (err, msg) => {
-			if (err)
-				return cb ? cb(err) : null;
-
-			if (msg.status != STATUS_SUCCESS)
-				return cb ? cb({ error: 'open_failed', status: msg.status }) : null;
-
-			self.opened = true;
+		do_version = () => {
 
 			// WE DO NOT ASK FOR MBIMEx, AND THAT IS THE POINT.
 			//
@@ -138,15 +150,6 @@ export function create(hub, hooks)
 			// they are what such a port would build on; setting MBIMEX_REQUEST to
 			// 0x0300 turns it back on. Found by a full review, 2026-09-19; the
 			// regression caught on hardware the same day.
-			self.mbimex_version = 0;
-
-			if (!MBIMEX_REQUEST) {
-				if (cb)
-					cb(null);
-
-				return;
-			}
-
 			self.command_raw(EXT_SERVICE_UUID, EXT_CID_VERSION,
 				struct.pack('<HH', MBIM_VERSION_1_0, MBIMEX_REQUEST),
 				(verr, info) => {
@@ -155,25 +158,80 @@ export function create(hub, hooks)
 					// this client does not implement, which is the very thing
 					// the request is withheld to avoid. Raised by Codex review,
 					// 2026-09-19.
-					if (!verr && length(info ?? '') >= 4) {
+					let why = null;
+
+					if (verr)
+						why = sprintf('query failed (%s%s)', verr.error ?? 'error',
+							(verr.status != null) ? sprintf(' status %d', verr.status) : '');
+					else if (length(info ?? '') < 4)
+						why = sprintf('answer too short (%d bytes)', length(info ?? ''));
+					else {
 						let mv = struct.unpack('<H', substr(info, 0, 2))[0];
 						let ev = struct.unpack('<H', substr(info, 2, 2))[0];
 
 						if (mv == MBIM_VERSION_1_0 && ev && ev <= MBIMEX_REQUEST)
 							self.mbimex_version = ev;
+						else
+							why = sprintf('answered mbim %d.%d / ext %d.%d, outside what this client implements',
+								(mv >> 8) & 0xff, mv & 0xff, (ev >> 8) & 0xff, ev & 0xff);
+					}
+
+					// SAY WHY. "no MBIMEx version agreed" on its own is the
+					// worst kind of log line: it reports a decision with real
+					// consequences — a v3 modem answers the v1 CONNECT with
+					// status 21 (InvalidParameters) and every bring-up then
+					// fails identically — and gives nothing to act on. Seen on
+					// the GL-X3000/RM520N (2026-09-20): the same modem agreed
+					// 3.0 on one start and not on the next, and the log could
+					// not tell the two apart.
+					// ONE close/re-open, and only for an error from the
+					// FUNCTION: that is the signature of a device still in a
+					// session this client did not open. A short or unexpected
+					// ANSWER is the modem telling us what it supports, and
+					// asking again would get the same answer.
+					if (!self.mbimex_version && verr?.error == 'function_error' && attempt < 2) {
+						if (hooks?.log)
+							hooks.log('info', 'MBIMEx version query hit a function error — closing and reopening the channel once');
+
+						return self.close(() => do_open());
 					}
 
 					if (hooks?.log)
-						hooks.log('info', self.mbimex_version
-							? sprintf('MBIMEx %d.%d agreed', (self.mbimex_version >> 8) & 0xff,
-								self.mbimex_version & 0xff)
-							: 'no MBIMEx version agreed — reading the v1 layouts');
+						hooks.log(self.mbimex_version ? 'info' : 'warn', self.mbimex_version
+							? sprintf('MBIMEx %d.%d agreed%s', (self.mbimex_version >> 8) & 0xff,
+								self.mbimex_version & 0xff,
+								(attempt > 1) ? ' (after reopening the channel)' : '')
+							: sprintf('no MBIMEx version agreed (%s) — reading the v1 layouts', why));
 
 					if (cb)
 						cb(null);
 				},
 				{ cmd_type: mbim.CMD_QUERY, timeout: OPEN_TIMEOUT });
-		}, OPEN_TIMEOUT, 'OPEN');
+		};
+
+		do_open = () => {
+			attempt++;
+
+			let txn = self.next_txn++;
+
+			self.raw_send(mbim.encode_open(txn, 4096), txn, (err, msg) => {
+				if (err)
+					return cb ? cb(err) : null;
+
+				if (msg.status != STATUS_SUCCESS)
+					return cb ? cb({ error: 'open_failed', status: msg.status }) : null;
+
+				self.opened = true;
+				self.mbimex_version = 0;
+
+				if (!MBIMEX_REQUEST)
+					return cb ? cb(null) : null;
+
+				do_version();
+			}, OPEN_TIMEOUT, 'OPEN');
+		};
+
+		do_open();
 	};
 
 	self.command = function(schema, name, kind, args, cb, opts) {

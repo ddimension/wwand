@@ -476,7 +476,12 @@ eq(pruned_early, [ 'wwan0' ], 'nochan: the backend prune()s before the fallback,
 // same case — the count that decides is children, not mux entries
 fx = fakefx.create();
 res = netlink.setup(fx, { netdev: 'wwan0', backend: 'vlan', mux: [ { id: 0, name: null } ] });
-eq(res.backend, 'raw_ip', 'nochan: session-0-only reports raw_ip, not a vlan with no children');
+// ...and it reports `untagged`, not `raw_ip`. Both mean "the parent carries
+// it", and they are not the same parent: raw_ip is a qmi_wwan framing mode with
+// a sysfs knob behind it, while an unmuxed cdc_mbim parent is IPS session 0
+// carried untagged (cdc_mbim.c:262-270, Linux 6.18.41). One name for the two
+// told an MBIM operator their modem was in a mode it does not have.
+eq(res.backend, 'untagged', 'nochan: session-0-only reports untagged, not a vlan with no children');
 
 // --- plain raw-ip ------------------------------------------------------------
 
@@ -1055,7 +1060,7 @@ let byname = {};
 for (let e in cat)
 	byname[e.name] = e;
 
-eq(sort(keys(byname)), [ 'auto', 'ethernet', 'qmimux', 'raw_ip', 'rmnet', 'vlan' ],
+eq(sort(keys(byname)), [ 'auto', 'ethernet', 'qmimux', 'raw_ip', 'rmnet', 'untagged', 'vlan' ],
 	'catalog: every built-in and pseudo-mode is listed');
 eq(byname.rmnet.proto, [ 'qmi' ], 'catalog: rmnet is a qmi datapath');
 eq(byname.qmimux.proto, [ 'qmi' ], 'catalog: qmimux too');
@@ -1068,11 +1073,29 @@ eq(byname.vlan.proto, [ 'mbim' ], 'catalog: vlan is an mbim datapath');
 eq(byname.auto.proto, null, 'catalog: a mode applies to every protocol');
 eq(byname.raw_ip.kind, 'mode', 'catalog: raw_ip is a mode, not an implementation');
 eq(byname.ethernet.kind, 'mode', 'catalog: ethernet is a mode too (802.3, no implementation)');
+eq(byname.untagged.kind, 'mode', 'catalog: untagged is a mode (MBIM session 0 on the parent)');
+// ...but a mode that names its own protocol keeps it. `untagged` is cdc_mbim
+// and nothing else, and a UI offering it for a QMI modem offers a config the
+// daemon refuses — the catalog is where that is knowable without asking.
+eq(byname.untagged.proto, [ 'mbim' ], 'catalog: untagged serves mbim only');
+eq(byname.raw_ip.proto, null, 'catalog: ...while a mode that names none applies everywhere');
+
+// and naming it on a modem it does not serve is refused, not substituted
+let ufx = fakefx.create();
+eq(netlink.select_backend(ufx, 'wwan0', 'untagged', false, null, { proto: 'qmi' }), null,
+	'untagged: refused on a qmi modem, like ethernet on a non-qmi one');
+eq(netlink.select_backend(ufx, 'wwan0', 'untagged', false, null, { proto: 'mbim' }), 'untagged',
+	'untagged: taken on an mbim modem');
 ok(length(byname.qmimux.description) > 0, 'catalog: every entry describes itself');
 
 // the caller gets copies — editing what it was handed must not edit the table
+// by NAME, not by position: an index here breaks the moment a mode is added,
+// which says nothing about aliasing and everything about the test.
 byname.rmnet.proto[0] = 'clobbered';
-eq(netlink.datapath_catalog()[3].proto, [ 'qmi' ], 'catalog: the module table is not aliased');
+let again = {};
+for (let e in netlink.datapath_catalog())
+	again[e.name] = e;
+eq(again.rmnet.proto, [ 'qmi' ], 'catalog: the module table is not aliased');
 
 // --- option ip6ifaceid, the RA path (netlink.apply_iface_id) ----------------
 //

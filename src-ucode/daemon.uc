@@ -1562,6 +1562,70 @@ export function create(opts)
 			return;
 
 		if (fx.exists(sprintf('/sys/class/net/%s', want))) {
+			// RECLAIM THE NAME FROM OUR OWN LEFTOVER CHILD, when we already
+			// know there will not be one.
+			//
+			// An MBIM modem with a lone `auto` channel runs untagged (no
+			// session, no vlan child) and that is settled here, before the
+			// datapath runs — unlike QMI, where only the modem's WDA answer
+			// settles it. Coming from a TAGGED config the child still holds the
+			// stable name at this moment; setup() prunes it a second later, but
+			// the rename has already been skipped and nothing retries it. The
+			// parent then keeps a raw kernel name that depends on USB
+			// enumeration order, which is the instability stable L3 names exist
+			// to remove — and the next unchanged reload is a no-op, so it stays
+			// that way. (HW-reproduced on the GL-X3000/RM520N, 2026-09-20:
+			// tagged -> auto left the interface on `wwan1`.)
+			//
+			// THREE CONDITIONS, because deleting a network device on a name
+			// match alone is not something to get wrong. Stacking on this
+			// parent (`lower_<parent>`) says only that — an operator's own
+			// macvlan or a hand-made VLAN on the same modem would satisfy it
+			// just as well, and this code would have deleted it. So also:
+			//
+			//   - it is an 802.1q VLAN (`DEVTYPE=vlan` in the device's uevent;
+			//     a macvlan reads `DEVTYPE=macvlan`), and
+			//   - its VLAN id is the session id this modem's own config asked
+			//     for, which is what the vlan datapath would have built.
+			//
+			// Together that is the device WE created and nothing else. Layout
+			// verified on the GL-X3000/RM520N, 2026-09-20; ownership gap raised
+			// by Codex review the same day.
+			let ours = () => {
+				if (!fx.exists(sprintf('/sys/class/net/%s/lower_%s', want, entry.netdev)))
+					return false;
+
+				if (index(fx.read(sprintf('/sys/class/net/%s/uevent', want)) ?? '', 'DEVTYPE=vlan') < 0)
+					return false;
+
+				let vid = match(fx.read(sprintf('/proc/net/vlan/%s', want)) ?? '', /VID: *([0-9]+)/);
+				let want_vid = entry.muxinfo?.list?.[0]?.id;
+
+				return (vid != null && want_vid != null && +vid[1] == +want_vid);
+			};
+
+			if (entry.protocol == 'mbim' && entry.muxinfo?.demotable && fx.link_del &&
+			    fx.read && ours()) {
+				log('notice', sprintf('modem %s: %s is a leftover mux child of %s and this modem runs untagged — removing it to take the name',
+					name, want, entry.netdev));
+				fx.link_del(want);
+
+				// ...and netifd will not take it until it is restarted. It
+				// holds a device record for this name from when it WAS a vlan
+				// child, and claiming it re-runs that record's setup against a
+				// parent that no longer exists: interface_set_up() then reports
+				// DEVICE_CLAIM_FAILED and the interface sits down with a
+				// perfectly good session behind it (netifd interface.c:1349-1353,
+				// 2026.07.08~6088f7b3). A `reload` does not clear the record; a
+				// restart does. Nothing wwand can do from here, so say it
+				// rather than leave it to be found — HW-confirmed on the
+				// GL-X3000/RM520N, 2026-09-20.
+				log('notice', sprintf('modem %s: netifd still holds a device record for %s from when it was a mux child — if %s stays down, restart the network (`/etc/init.d/network restart`); a reload does not clear it',
+					name, want, entry.l3_name ?? want));
+			}
+		}
+
+		if (fx.exists(sprintf('/sys/class/net/%s', want))) {
 			// For a DEMOTABLE modem this is not a failure but the other of two
 			// expected outcomes. The name is asked for up front in case the
 			// auto channel turns out not to exist; when it does exist, the mux
@@ -1904,10 +1968,30 @@ export function create(opts)
 		// netdev_kernel: the pre-rename name, when rename_l3 changed it. A
 		// datapath whose children were named by the driver after the ORIGINAL
 		// parent needs it to find them at all (see rename_l3).
+		// MBIM: AN `auto` CHANNEL ON ITS OWN ASKS FOR NO CHANNEL AT ALL.
+		//
+		// Untagged traffic on a cdc_mbim parent already IS IPS session 0
+		// (cdc_mbim.c:262-270, Linux 6.18.41), so a lone auto context does not
+		// need a session id — and taking one costs an 802.1q tag on every frame
+		// in both directions, plus a sub-device to route through, for nothing.
+		// The channel number only exists because the allocator counts from 1:
+		// QMAP channel 0 is invalid, MBIM session 0 is not.
+		//
+		// `demotable` is the same predicate QMI uses for its own no-mux
+		// fallback — ONE auto-allocated channel and nothing else. A pinned
+		// `option mux_id` is the operator asking for a tagged session and keeps
+		// it; a second context needs tags for both, since one untagged parent
+		// carries one session.
+		let mbim_links = (muxinfo?.demotable ?? false) ? [] : (muxinfo?.list ?? []);
+
+		if ((muxinfo?.demotable ?? false) && proto == 'mbim')
+			log('info', sprintf('modem %s: mux auto resolves to MBIM session 0 — untagged on the parent, no vlan child',
+				name));
+
 		let datapath =
 			(proto == 'mbim') ? { netdev: entry.netdev, mux: mux, plugins: dp_plugins,
 			                      netdev_kernel: entry.netdev_kernel,
-			                      mux_links: muxinfo?.list ?? [], fx: deps.datapath_fx } :
+			                      mux_links: mbim_links, fx: deps.datapath_fx } :
 			(proto == 'ncm')  ? { netdev: entry.netdev, fx: deps.datapath_fx } :
 			                    { netdev: entry.netdev, ep_id: ep_id, ep_type: ep_type, mux: mux,
 			                      plugins: dp_plugins,
@@ -2360,10 +2444,20 @@ export function create(opts)
 		let netdev = mentry?.netdev;
 
 		if (mentry?.protocol == 'mbim') {
-			// MBIM: session 0 is the parent netdev, sessions > 0 are VLAN sub-devices
-			// named after the context's mux_link so netifd's device binding matches
-			if (entry.cfg.mux_id > 0 && netdev)
-				netdev = entry.cfg.mux_link ?? sprintf('%s.%d', netdev, entry.cfg.mux_id);
+			// MBIM: session 0 is the parent netdev, sessions > 0 are VLAN
+			// sub-devices named after the context's mux_link so netifd's device
+			// binding matches.
+			//
+			// The EFFECTIVE channel, like the QMI branch below — this read the
+			// raw `cfg.mux_id` while status read the effective one, so the two
+			// answered differently for the same interface. Harmless while MBIM
+			// could not demote; a lone `auto` channel now resolves to session 0
+			// (the untagged parent), and naming a vlan child that was never
+			// built would hand netifd a device it can never bind.
+			let eff = cfgmod.effective_mux_id(entry.cfg, mentry?.modem?.datapath);
+
+			if (eff > 0 && netdev)
+				netdev = entry.cfg.mux_link ?? sprintf('%s.%d', netdev, eff);
 		}
 		else {
 			// QMAP muxed contexts use their mux child link — but an `auto`
@@ -2994,6 +3088,12 @@ export function create(opts)
 
 		let out = {
 			backend: dp.backend,
+			// what `option mux` asked for, so a reader can see how `auto`
+			// resolved. The two differ routinely and for good reasons — `auto`
+			// picking a datapath, a selected backend with no channels to build
+			// dropping to the plain parent — and the backend name alone cannot
+			// say which of those happened, or that anything happened at all.
+			configured: nlmod.canon_mux(entry.cfg?.mux) ?? 'auto',
 			protocol: entry.modem.protocol,
 			parent: parent,
 			// the negotiated QMAP header version (1|4|5). `v5` stays for

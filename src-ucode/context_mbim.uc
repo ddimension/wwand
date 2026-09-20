@@ -18,6 +18,7 @@ import * as uloop from 'uloop';
 import * as context_common from 'wwand.context_common';
 import * as bc from 'wwand.codec.mbim_schema.basic_connect';
 import * as mbimmod from 'wwand.codec.mbim';
+import * as cfgmod from 'wwand.config';
 
 // pdp_type/auth -> MBIM enum maps live in basic_connect.uc (shared with
 // modem_mbim's LTE attach path — bc.IP_TYPE_FROM_PDP / bc.AUTH_FROM_CFG)
@@ -52,10 +53,24 @@ export function create(opts)
 	// id. Identity for every datapath that creates its own children (the
 	// built-in vlan declares no map_id), so this changes nothing on the paths
 	// that exist today.
+	// THE SESSION THIS CONTEXT DIALS. Two translations, in order.
+	//
+	// First the EFFECTIVE channel, which is what every other reader of a mux id
+	// uses (derive_netdev, the status children list, the QMI WDS binding in
+	// context.uc). `self.session_id` is the number the config allocated, and on
+	// MBIM a lone `auto` channel resolves to session 0 — the untagged parent —
+	// so the allocated 1 is not what goes on the wire. Dialling the allocated
+	// number against an untagged parent is the classic shape: the session comes
+	// up, netifd gets an address, and not one frame arrives, because the modem
+	// tags session 1 and nothing is listening for the tag. (HW-seen on the
+	// GL-X3000/RM520N, 2026-09-20 — this line was the whole bug.)
+	//
+	// Then the datapath's own remap, for a backend that renumbers channels.
 	let wire_session = () => {
 		let dp = self.modem?.datapath;
+		let eff = cfgmod.effective_mux_id(self.config, dp);
 
-		return dp?.map_ids?.[sprintf('%d', self.session_id)] ?? self.session_id;
+		return dp?.map_ids?.[sprintf('%d', eff)] ?? eff;
 	};
 
 	// exposed: modem_mbim routes an unsolicited CONNECT indication to the owning
@@ -302,8 +317,14 @@ export function create(opts)
 			context_type: bc.CONTEXT_TYPE_INTERNET,
 		};
 
-		log('notice', sprintf('connecting session %d: apn %s, ip-type %d',
-			self.session_id, profile == '' ? '(network default)' : sprintf('\'%s\'', profile), ip_type));
+		// the WIRE session, and the configured channel beside it when the two
+		// differ — a lone `auto` channel is allocated 1 and dials 0, and a log
+		// naming only one of them sends the reader looking for the other.
+		let ws = wire_session();
+
+		log('notice', sprintf('connecting session %d%s: apn %s, ip-type %d',
+			ws, (ws != self.session_id) ? sprintf(' (mux %d, untagged on the parent)', self.session_id) : '',
+			profile == '' ? '(network default)' : sprintf('\'%s\'', profile), ip_type));
 
 		// v3 IS A DIFFERENT STRUCTURE, not a variant: reordered fixed fields, an
 		// extra MediaPreference, and the three strings as TLVs. A modem serving

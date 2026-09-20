@@ -405,7 +405,7 @@ config wwand_modem 'm0'
 	option modes 'lte,nr5g'          # lte umts gsm nr5g td-scdma cdma / all / unset
 	option mcc '262'                 # manual PLMN selection (optional, needs mnc)
 	option mnc '01'
-	option mux 'auto'                # auto|raw_ip|ethernet|rmnet|qmimux|vlan — the kernel
+	option mux 'auto'                # auto|raw_ip|ethernet|untagged|rmnet|qmimux|vlan — the kernel
 	                                 #   datapath (or the name of a datapath
 	                                 #   plugin package, see below)
 	option dl_datagram_max_size '0'  # QMAP DL aggregation bytes; 0 = model/board table
@@ -596,7 +596,10 @@ the interface, which is the instability stable L3 names exist to remove.
 **The datapaths.** `rmnet` (QMAP through the kernel rmnet driver) and `qmimux`
 (qmi_wwan's own `add_mux`) carry QMI modems; `vlan` carries MBIM ones, where each
 session > 0 is an 802.1q sub-device of the parent. `raw_ip` is no multiplexing at
-all — one plain raw-IP interface. `ethernet` is also no multiplexing, but keeps
+all — one plain raw-IP interface. `untagged` is the MBIM counterpart: session 0
+carried on the bare parent with no 802.1q tag, which is what untagged traffic on
+a cdc_mbim device already is (`drivers/net/usb/cdc_mbim.c:262-270`, Linux
+6.18.41). `ethernet` is also no multiplexing, but keeps
 the kernel's 802.3 ethernet framing (raw_ip off) with ARP disabled on the
 point-to-point hop — the datapath for old QMI stacks that cannot negotiate the
 link-layer format at all (no WDA service): under `auto` such a modem selects
@@ -630,8 +633,30 @@ counterpart — takes over on the boards it belongs to without any configuration
 autosetup included — the probes run whether or not
 the config has channels. An interface still needs a `mux_id` for a mux datapath
 to carry anything: with no channel to build, the selected datapath drops back to
-`raw_ip` (logged), since muxed framing with no mux child is a link that is up and
-passes no traffic. A plugin that ships no probe is
+the plain parent (logged) — `raw_ip` on QMI, `untagged` on MBIM — since muxed
+framing with no mux child is a link that is up and passes no traffic.
+
+**`mux_id 'auto'` on MBIM asks for no session at all.** The channel allocator
+numbers auto channels from 1 because QMAP channel 0 is invalid; MBIM session 0
+is not — it is the parent device, untagged. So a modem whose only muxed
+interface is `auto` takes no session id, builds no sub-device, and carries no
+802.1q tag on any frame, and its datapath reports `untagged`. Two interfaces on
+one modem still take a tagged session each (one untagged parent carries one
+session), and a pinned `option mux_id '1'` is the operator asking for a tagged
+session 1 and keeps it. `wwandctl status` and the LuCI status page both print
+this as `auto → untagged`, so what `auto` settled on is visible without
+guessing.
+
+> **Changing a modem's mux configuration on a running system needs
+> `/etc/init.d/network restart`, not a reload.** Switching between a tagged
+> session and the untagged parent moves the stable L3 name from the mux child to
+> the parent device, and netifd still holds a device record for that name in its
+> old shape — claiming it re-runs that record's setup against a parent that is
+> gone, so `interface_set_up()` reports `DEVICE_CLAIM_FAILED` and the interface
+> stays down behind a perfectly good session (netifd `interface.c:1349-1353`,
+> 2026.07.08~6088f7b3). A `reload` does not clear the record; a restart does.
+> wwand logs a notice naming the interface and this remedy when it happens. A
+> fresh boot is unaffected. A plugin that ships no probe is
 never self-selected. `ubus call wwand status` reports the datapath each modem
 actually came up on (`modems.<name>.datapath`), and the choice is logged. The
 same call lists what is selectable on this box in `globals.datapaths` — name,

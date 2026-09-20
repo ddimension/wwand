@@ -65,6 +65,13 @@ export function create(opts)
 		calls: [],
 		counts: {},
 		mbimex_version: opts?.mbimex_version ?? 0x0300,
+		// Answer this many VERSION queries with a FUNCTION ERROR before
+		// behaving normally. That is what a device still in a session the
+		// client never opened does (HW-seen on the GL-X3000/RM520N,
+		// 2026-09-20), and it is a different thing from `mbimex_version: 0`,
+		// which is a device declining the handshake with a proper answer: the
+		// first is recoverable by closing and reopening, the second is not.
+		mbimex_function_errors: opts?.mbimex_function_errors ?? 0,
 		// set only once a VERSION query has actually been answered
 		mbimex_agreed: 0,
 		device: null,
@@ -99,12 +106,20 @@ export function create(opts)
 		let msg_type = struct.unpack('<I', substr(frame, 0, 4))[0];
 		let txn = struct.unpack('<I', substr(frame, 8, 4))[0];
 
+		// OPEN and CLOSE go into `calls` like everything else. They used not
+		// to, and a test of the open handshake could then only see its
+		// side-effects — "two VERSION queries and a good answer" passes just as
+		// well for a retry that skipped the CLOSE, which is the half that
+		// matters (the function is in session; reopening without closing does
+		// not get it out). Raised by Codex review, 2026-09-20.
 		if (msg_type == mbim.MSG_OPEN) {
+			push(self.calls, { name: 'OPEN', kind: 'control' });
 			deliver(struct.pack('<IIII', mbim.MSG_OPEN_DONE, 16, txn, 0));
 			return true;
 		}
 
 		if (msg_type == mbim.MSG_CLOSE) {
+			push(self.calls, { name: 'CLOSE', kind: 'control' });
 			deliver(struct.pack('<IIII', mbim.MSG_CLOSE_DONE, 16, txn, 0));
 			return true;
 		}
@@ -163,6 +178,15 @@ export function create(opts)
 		// to the mock's own `mbimex_version`. Set it to 0 to make the mock
 		// refuse, or override the VERSION handler outright.
 		if (handler == null && entry.name == 'VERSION') {
+			if (self.mbimex_function_errors > 0) {
+				self.mbimex_function_errors--;
+				// MBIM_FUNCTION_ERROR_MSG: header + one u32 error code.
+				// error 3 = MBIM_ERROR_NOT_OPENED, which is what a function
+				// left in session by a previous host answers.
+				deliver(struct.pack('<IIII', mbim.MSG_FUNCTION_ERROR, 16, txn, 3));
+				return true;
+			}
+
 			if (!self.mbimex_version)
 				return reply_failure(uuid, cid, txn);
 

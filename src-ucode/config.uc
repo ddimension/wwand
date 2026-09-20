@@ -169,7 +169,11 @@ export function effective_mux_id(cfg, dp)
 	if (!dp)
 		return id;
 
-	return (dp.backend == 'raw_ip' || dp.backend == 'ethernet') ? 0 : id;
+	// `untagged` joins them: it is what a cdc_mbim parent with no channels is,
+	// and like the other two it means the context rides the parent with no
+	// child device of its own.
+	return (dp.backend == 'raw_ip' || dp.backend == 'ethernet' ||
+	        dp.backend == 'untagged') ? 0 : id;
 };
 
 // The L3 name an interface pins, or null to take wwand's suggestion (wwandN).
@@ -1122,14 +1126,24 @@ function validate(result)
 			continue;
 		}
 
-		// `option mux 'raw_ip'` (or 'ethernet') on the modem beats a channel on
-		// the interface. Clearing mux_id alone is not enough and never was:
-		// `muxed` drives the auto-assign pass further down, which would hand the
-		// channel straight back, and `mux_link` is the name netifd would then
-		// look for. All three go, so the context ends up on the plain parent —
-		// which is what the modem was configured for.
-		if (ctx.mux_id > 0 && (result.modems[ctx.modem].mux == 'raw_ip' ||
-		                       result.modems[ctx.modem].mux == 'ethernet')) {
+		// `option mux 'raw_ip'` (or 'ethernet', or MBIM's 'untagged') on the
+		// modem beats a channel on the interface. Clearing mux_id alone is not
+		// enough and never was: `muxed` drives the auto-assign pass further
+		// down, which would hand the channel straight back, and `mux_link` is
+		// the name netifd would then look for. All three go, so the context
+		// ends up on the plain parent — which is what the modem was configured
+		// for.
+		//
+		// `untagged` belongs in this list for a reason worth stating: it has no
+		// implementation, so setup() builds nothing and silently ignores the
+		// mux links it was handed, while a PINNED channel is never demoted by
+		// effective_mux_id — so the context would dial session 1 against an
+		// untagged parent. Session up, address assigned, not one frame through:
+		// the exact failure the auto path was fixed for, reached by another
+		// door. Raised by Codex review, 2026-09-20.
+		let mmux = result.modems[ctx.modem].mux;
+
+		if (ctx.mux_id > 0 && (mmux == 'raw_ip' || mmux == 'ethernet' || mmux == 'untagged')) {
 			push(result.warnings, sprintf("interface %s: mux_id set but modem '%s' has mux disabled", name, ctx.modem));
 			ctx.mux_id = 0;
 			ctx.muxed = false;
