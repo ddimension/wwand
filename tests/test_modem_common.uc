@@ -875,6 +875,47 @@ mc.make_fail(frd2, { log: () => null, emit: () => null,
 	rec: rec_p2 })('registration_timeout', { reg: {} });
 eq(rec_p2.last_reg_detail, null, 'last_reg_detail: stale detail is not re-stashed');
 
+// --- last_attach_info: the attach cause survives the same way ----------------
+//
+// Same mechanism, same reason, and the reason is not hypothetical: the EPS
+// attach detail is written at the moment of the failure and the teardown that
+// follows destroys the modem object holding it. Before this, the attach cause
+// existed only in the log line — the status and the LuCI page read null every
+// time they looked, measured on a GL-X3000 with a deliberately wrong APN
+// (2026-09-20).
+let rec_a = {};
+let fai = { attach_info: { state: 0, state_text: 'detached', nw_error: 33,
+		nw_error_text: 'requested service option not subscribed',
+		apn: 'kaputt.invalid.test' },
+	counters: { attempts: 1 },
+	note_connect_failure: (cb) => cb('reboot'),
+	teardown: () => null, set_state: () => null, state: 'REGISTERING' };
+
+mc.make_fail(fai, { log: () => null, emit: () => null,
+	timing: { backoff_min: 1, backoff_max: 1 }, set_retry_timer: () => null,
+	rec: rec_a })('registration_timeout', { reg: {} });
+
+eq(rec_a.last_attach_info?.nw_error, 33,
+	'last_attach_info: make_fail stashes the attach cause on the recovery record');
+eq(rec_a.last_attach_info?.apn, 'kaputt.invalid.test',
+	'last_attach_info: ...with the APN that was refused');
+
+let seeded_a = { config: {}, reg_detail: null, attach_info: null,
+	state: 'ABSENT', contexts: [] };
+mc.scaffolding(seeded_a, { deps: {}, log: () => null, rec: rec_a });
+eq(seeded_a.attach_info?.nw_error, 33,
+	'last_attach_info: the recreated modem gets it back');
+eq(seeded_a.attach_info?.stale, true,
+	'last_attach_info: ...marked stale, so a fresh read replaces it');
+
+// ...and a stale one is not re-stashed, or it would resurrect forever
+let rec_a2 = {};
+mc.make_fail({ ...fai, attach_info: { nw_error: 33, stale: true } },
+	{ log: () => null, emit: () => null,
+	  timing: { backoff_min: 1, backoff_max: 1 }, set_retry_timer: () => null,
+	  rec: rec_a2 })('registration_timeout', { reg: {} });
+eq(rec_a2.last_attach_info, null, 'last_attach_info: a stale detail is not re-stashed');
+
 // --- preserve_serving: carry AT band forward across a band-less cell refresh --
 
 // same serving cell (EARFCN match) -> serving carried onto the new cells object

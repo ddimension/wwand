@@ -2468,6 +2468,30 @@ export function create(opts)
 					active:    entry.modem.thermal.active ?? [],
 					devices:   length(entry.modem.thermal.devices ?? []),
 				} : null,
+				// --- MBIMEx (v2/v3) additions, null on every other backend ---
+				//
+				// PUBLISHED, NOT ACTED ON. All of these are decoded from
+				// messages the MBIM backend already exchanges; nothing decides
+				// anything on them. A field the daemon reads and keeps to
+				// itself is a shape this tree has been caught in before
+				// (max_sessions sat parsed-and-hidden from the day the backend
+				// was written), so they go out with the rest.
+				//
+				// packet_service: frequency range (FR1/FR2), data subclass —
+				// the bitmask that separates 5G NSA from SA outright rather
+				// than by inference — and the tracking area.
+				packet_service: entry.modem?.packet_service ?? null,
+				// attach_info: what the EPS attach used, and under v3 the 3GPP
+				// cause when it was refused. Read on a registration timeout,
+				// which is the case it exists to explain.
+				attach_info: entry.modem?.attach_info ?? null,
+				// carrier configuration (MBN) over MBIM rather than QMI PDC,
+				// and the modem's last wake reason. Both v3-only and both
+				// optional: a firmware without them leaves these null — the
+				// RM520N-GL answers NotInitialized and NoDeviceSupport
+				// respectively (measured 2026-09-20).
+				modem_config: entry.modem?.modem_config ?? null,
+				wake_reason: entry.modem?.wake_reason ?? null,
 				manufacturer: entry.modem?.info?.manufacturer,
 				model: entry.modem?.info?.model,
 				revision: entry.modem?.info?.revision,

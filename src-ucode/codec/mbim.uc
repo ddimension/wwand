@@ -174,6 +174,7 @@ function ipv6_str(bytes, pos)
 function field_size(fmt)
 {
 	switch (fmt) {
+	case 'u16': return 2;
 	case 'u32': case 'ipv4': return 4;
 	case 'u64': return 8;
 	case 'uuid': case 'ipv6': return 16;
@@ -184,6 +185,7 @@ function field_size(fmt)
 function encode_scalar(fmt, v)
 {
 	switch (fmt) {
+	case 'u16': return struct.pack('<H', v ?? 0);
 	case 'u32': return struct.pack('<I', v ?? 0);
 	case 'u64': return struct.pack('<Q', v ?? 0);
 	case 'uuid': return uuid_bytes(v ?? '00000000-0000-0000-0000-000000000000');
@@ -203,7 +205,11 @@ function encode_scalar(fmt, v)
 //
 // TLV header: type u16, reserved u8, padding u8, data_length u32, then the data
 // padded to a 4-byte boundary (libmbim mbim-tlv-private.h, struct tlv).
-const TLV_WCHAR_STR = 10;
+// The types live HERE, above their first user, because module-level `const`
+// is not hoisted in ucode (libmbim 1.32.0, src/libmbim-glib/mbim-tlv.h).
+export const TLV_WCHAR_STR = 10;
+export const TLV_TAI = 9;
+export const TLV_UINT16_TBL = 11;
 
 // A WCHAR_STR TLV: UTF-16LE payload, zero-padded to a 4-byte boundary, with the
 // pad count in the header and data_length the UNPADDED byte count (libmbim
@@ -236,6 +242,65 @@ export function mbimex_v3(mc)
 };
 
 // MbimAccessMediaType: ModemManager sends UNKNOWN (0) and lets the modem pick.
+// --- TLV decode --------------------------------------------------------------
+// The counterpart to tlv_wchar above. MBIMEx v3 puts variable-length data in
+// TLVs rather than the v1 offset/length pairs, and three messages hand back a
+// TLV area the fixed part does not describe: Modem Configuration (a name plus
+// unnamed IEs), Wake Reason (one TLV whose meaning depends on the wake type),
+// and the v3 Connect response.
+//
+// Header: type u16, reserved u8, padding_length u8, data_length u32; the
+// payload is padded to a 4-byte boundary and data_length is the UNPADDED count
+// (libmbim 1.32.0, src/libmbim-glib/mbim-tlv.c).
+// Walk a TLV area into [ { type, data }, ... ]. A header that claims more bytes
+// than the buffer holds ends the walk rather than throwing — a truncated area
+// is a protocol error, and the caller sees the TLVs that were whole.
+export function decode_tlvs(buf, pos)
+{
+	let out = [];
+	let len = length(buf ?? '');
+
+	pos = pos ?? 0;
+
+	while (pos + 8 <= len) {
+		let hdr = struct.unpack('<HBBI', substr(buf, pos, 8));
+		let dlen = hdr[3];
+		let pad = hdr[2];
+
+		// THE PADDING COUNTS TOWARD THE RECORD. libmbim computes
+		// `sizeof(header) + data_length + padding_length` and refuses to read a
+		// TLV the buffer cannot hold in full (mbim-tlv.c:150-160, 1.32.0) — so
+		// a header claiming padding that is not there is a truncated record,
+		// not a complete one. Checking only data_length accepted
+		// `0a0000ff00000000` as a whole zero-length TLV while it claims 255
+		// bytes of absent padding. Raised by review, 2026-09-20.
+		if (pos + 8 + dlen + pad > len)
+			break;
+
+		push(out, { type: hdr[0], data: substr(buf, pos + 8, dlen) });
+
+		// the padding is not part of data_length but IS on the wire
+		pos += 8 + dlen + pad;
+	}
+
+	return out;
+};
+
+// The first TLV of a given type, decoded as a string. WCHAR_STR is UTF-16LE;
+// anything else is handed back as raw bytes, because guessing is how a codec
+// invents data.
+export function tlv_string(tlvs, type)
+{
+	for (let t in tlvs ?? []) {
+		if (t.type != (type ?? TLV_WCHAR_STR))
+			continue;
+
+		return (t.type == TLV_WCHAR_STR) ? utf16le_decode(t.data) : t.data;
+	}
+
+	return null;
+};
+
 export const ACCESS_MEDIA_UNKNOWN = 0;
 
 export function encode_connect_v3(a)
@@ -300,6 +365,7 @@ export function encode_info(fields, args)
 function decode_scalar(fmt, buf, pos)
 {
 	switch (fmt) {
+	case 'u16': return [ (pos + 2 <= length(buf)) ? struct.unpack('<H', substr(buf, pos, 2))[0] : null, pos + 2 ];
 	case 'u32': return [ (pos + 4 <= length(buf)) ? struct.unpack('<I', substr(buf, pos, 4))[0] : null, pos + 4 ];
 	case 'u64': return [ (pos + 8 <= length(buf)) ? struct.unpack('<Q', substr(buf, pos, 8))[0] : null, pos + 8 ];
 	case 'uuid': return [ (pos + 16 <= length(buf)) ? uuid_str(substr(buf, pos, 16)) : null, pos + 16 ];

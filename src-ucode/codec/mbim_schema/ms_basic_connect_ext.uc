@@ -21,6 +21,7 @@
 'use strict';
 
 import * as struct from 'struct';
+import * as mbimcodec from 'wwand.codec.mbim';
 import { utf16le_encode, utf16le_decode, mbimex_v3 } from 'wwand.codec.mbim';
 
 export const SERVICE_UUID = '3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf';
@@ -43,9 +44,19 @@ export const DATA_SUBCLASS_5G_ENDC = 1 << 0;   // NR anchored on LTE (NSA)
 export const DATA_SUBCLASS_5G_NR   = 1 << 1;   // NR standalone (SA)
 
 // MbimLteAttachState
-export const LTE_ATTACH_STATE_DETACHED  = 0;
-export const LTE_ATTACH_STATE_ATTACHING = 1;
-export const LTE_ATTACH_STATE_ATTACHED  = 2;
+// MbimLteAttachState has TWO values, not three (libmbim 1.32.0, mbim-enums.h
+// :1424-1425). An ATTACHING=1 / ATTACHED=2 triple sat here from b2d8176 — the
+// same commit that carried the wrong LTE_ATTACH_INFO layout, and the same kind
+// of mistake: written from what the states ought to be rather than read off the
+// spec. Nothing used it, so nothing broke; a modem reporting the real ATTACHED
+// (1) would have read as "attaching" and never as attached.
+export const LTE_ATTACH_STATE_DETACHED = 0;
+export const LTE_ATTACH_STATE_ATTACHED = 1;
+
+export const LTE_ATTACH_STATE = {
+	'0': 'detached',
+	'1': 'attached',
+};
 export const LTE_ATTACH_STATE_DETACHING = 3;
 
 // --- raw-buffer readers (for the ms-struct / ms-struct-array layouts) --------
@@ -342,6 +353,119 @@ export function decode_lte_attach_config(info)
 	return { contexts: out };
 };
 
+// Vocabulary for the two v3 diagnostics (libmbim 1.32.0, mbim-enums.h:
+// MbimModemConfigurationStatus, MbimWakeType). Numeric object keys are a parse
+// error in ucode, hence the quoted decimal strings.
+export const MODEM_CONFIG_STATUS = {
+	'0': 'unknown',
+	'1': 'started',
+	'2': 'completed',
+};
+
+export const WAKE_TYPE = {
+	'0': 'cid response',
+	'1': 'cid indication',
+	'2': 'packet',
+};
+
+// Extended DEVICE_CAPS comes in two shapes; see the note at the command.
+const CAPS_V1 = {
+	device_type: 'u32', cellular_class: 'u32', voice_class: 'u32',
+	sim_class: 'u32', data_class: 'u32', sms_caps: 'u32',
+	control_caps: 'u32', max_sessions: 'u32',
+	custom_data_class: 'string', device_id: 'string',
+	firmware_info: 'string', hardware_info: 'string',
+	executor_index: 'u32',
+};
+
+// ...and v3 is not merely reordered, it changes KIND partway through. Only the
+// first eleven fields are inline; everything from LteBandClass on is a TLV, and
+// the four strings are tlv-string rather than the v1 offset/length pairs
+// (libmbim 1.32.0, extensions-v3.json: `tlv-guint16-array`, `tlv-string`).
+// DataSubclass is a guint64 here — note it is a guint32 in Packet Service, the
+// same name at two widths in two messages, which is exactly the kind of detail
+// a from-memory schema gets wrong.
+const CAPS_V3_FIXED = {
+	device_type: 'u32', cellular_class: 'u32', voice_class: 'u32',
+	sim_class: 'u32', data_class: 'u32', sms_caps: 'u32',
+	control_caps: 'u32', data_subclass: 'u64', max_sessions: 'u32',
+	executor_index: 'u32', wcdma_band_class: 'u32',
+};
+
+// 7 * u32 + u64 + 3 * u32
+const CAPS_V3_FIXED_LEN = 48;
+
+// a UINT16_TBL payload is a bare sequence of guint16
+function u16_table(data)
+{
+	if (data == null)
+		return null;
+
+	let out = [];
+
+	for (let i = 0; i + 2 <= length(data); i += 2)
+		push(out, struct.unpack('<H', substr(data, i, 2))[0]);
+
+	return out;
+}
+
+function decode_caps_v3(info)
+{
+	let out = mbimcodec.decode_info(CAPS_V3_FIXED, info) ?? {};
+	let tlvs = mbimcodec.decode_tlvs(info, CAPS_V3_FIXED_LEN);
+
+	// POSITIONAL, with the type checked at each position — which is what
+	// libmbim does: `_mbim_message_read_tlv_string` reads the TLV AT the given
+	// offset and advances by its size, and the type check lives in
+	// `mbim_tlv_string_get` (mbim-message.c:1109-1133, 1.32.0). None of these
+	// fields is optional there; an empty value is still carried as a TLV.
+	//
+	// The tempting alternative — collect by type and take them in order — fails
+	// quietly on a firmware that omits one: every later field shifts up by one
+	// and `device_id` comes back holding the firmware string. A decode that
+	// lies is worse than one that stops, so a position whose type does not
+	// match ends the walk and leaves the rest null. Raised by review,
+	// 2026-09-20.
+	const ORDER = [
+		[ 'lte_band_class',    mbimcodec.TLV_UINT16_TBL ],
+		[ 'nr_band_class',     mbimcodec.TLV_UINT16_TBL ],
+		[ 'custom_data_class', mbimcodec.TLV_WCHAR_STR ],
+		[ 'device_id',         mbimcodec.TLV_WCHAR_STR ],
+		[ 'firmware_info',     mbimcodec.TLV_WCHAR_STR ],
+		[ 'hardware_info',     mbimcodec.TLV_WCHAR_STR ],
+	];
+
+	for (let i = 0; i < length(ORDER); i++) {
+		let t = tlvs[i];
+
+		if (t == null || t.type != ORDER[i][1])
+			break;
+
+		out[ORDER[i][0]] = (ORDER[i][1] == mbimcodec.TLV_UINT16_TBL)
+			? u16_table(t.data) : utf16le_decode(t.data);
+	}
+
+	return out;
+}
+
+// LTE Attach Info comes in two shapes; see the note at the command.
+const ATTACH_V1 = {
+	lte_attach_state: 'u32', ip_type: 'u32',
+	access_string: 'string', user_name: 'string', password: 'string',
+	compression: 'u32', auth_protocol: 'u32',
+};
+
+const ATTACH_V3 = {
+	lte_attach_state: 'u32', nw_error: 'u32', ip_type: 'u32',
+	access_string: 'string', user_name: 'string', password: 'string',
+	compression: 'u32', auth_protocol: 'u32',
+};
+
+function attach_fields(mc)
+{
+	return mbimex_v3(mc) ? ATTACH_V3 : ATTACH_V1;
+}
+
 export const commands = {
 	// Default LTE attach context of the inserted SIM's provider (CID 3, MBIMEx).
 	// Query returns the three roaming contexts (home/partner/non-partner); the
@@ -363,19 +487,27 @@ export const commands = {
 
 	// LTE attach status (CID 4). v3 response inserts NwError after LteAttachState;
 	// all fields are codec-expressible (u32 + strings). Verified vs v3 JSON.
+	// LTE attach state and the profile the modem attached with (CID 4).
+	//
+	// v3 INSERTS NwError after LteAttachState — it does not append it (libmbim
+	// 1.32.0, mbim-service-ms-basic-connect-extensions-v3.json vs the v1 file,
+	// checked 2026-09-20). So the layouts differ from the second field on, and
+	// everything after shifts by four bytes: read a v1 answer with the v3 spec
+	// and `nw_error` takes IpType, `ip_type` takes the AccessString OFFSET, and
+	// the APN comes back wrong or null. That is not hypothetical — this entry
+	// carried the v3 layout unconditionally from b2d8176 until now, and was
+	// only harmless because nothing called it.
+	//
+	// The addition is worth having: NwError is the 3GPP cause for a REFUSED
+	// attach, in the attach message itself. wwand otherwise reconstructs that
+	// from QMI system info plus AT+CEER (regdetail.uc).
 	LTE_ATTACH_INFO: {
 		cid: 4,
 		query: {},
-		response: {
-			lte_attach_state: 'u32', nw_error: 'u32', ip_type: 'u32',
-			access_string: 'string', user_name: 'string', password: 'string',
-			compression: 'u32', auth_protocol: 'u32',
-		},
-		notification: {
-			lte_attach_state: 'u32', nw_error: 'u32', ip_type: 'u32',
-			access_string: 'string', user_name: 'string', password: 'string',
-			compression: 'u32', auth_protocol: 'u32',
-		},
+		response: ATTACH_V1,
+		notification: ATTACH_V1,
+		response_for: attach_fields,
+		decode: (info, mc) => mbimcodec.decode_info(attach_fields(mc), info),
 	},
 
 	// System capabilities (CID 5): executor / SIM-slot counts. Verified vs the
@@ -409,17 +541,30 @@ export const commands = {
 	// Device capabilities, extensions variant (CID 6). Modeled on the v1/v2
 	// layout, which is codec-expressible; the v3 layout replaces the trailing
 	// fields with a guint64 DataSubclass and tlv strings (not decoded here).
+	// Extended device caps (CID 6) — NOT the basic-connect DEVICE_CAPS (CID 1),
+	// which v3 leaves alone and which is the one modem_mbim actually queries.
+	//
+	// v3 REORDERS this one: DataSubclass is inserted after ControlCaps, and
+	// ExecutorIndex plus three band-class fields move AHEAD of the strings
+	// (libmbim 1.32.0, extensions-v3.json vs the v1 file, checked 2026-09-20):
+	//
+	//   v1:  … ControlCaps, MaxSessions, [strings], ExecutorIndex
+	//   v3:  … ControlCaps, DataSubclass, MaxSessions, ExecutorIndex,
+	//           WcdmaBandClass, LteBandClass, NrBandClass, [strings]
+	//
+	// Same failure shape as SUBSCRIBER_READY_STATUS: a positional fixed part,
+	// shifted offsets, and a decode that yields plausible nonsense rather than
+	// an error. The v1 layout sat here unconditionally and was harmless only
+	// because nothing called it — which is the worst way for a schema to be
+	// right. The band classes are the reason somebody eventually will: they say
+	// what the radio can do per RAT without asking AT.
 	DEVICE_CAPS: {
 		cid: 6,
 		query: {},
-		response: {
-			device_type: 'u32', cellular_class: 'u32', voice_class: 'u32',
-			sim_class: 'u32', data_class: 'u32', sms_caps: 'u32',
-			control_caps: 'u32', max_sessions: 'u32',
-			custom_data_class: 'string', device_id: 'string',
-			firmware_info: 'string', hardware_info: 'string',
-			executor_index: 'u32',
-		},
+		response: CAPS_V1,
+		decode: (info, mc) => mbimex_v3(mc)
+			? decode_caps_v3(info)
+			: mbimcodec.decode_info(CAPS_V1, info),
 	},
 
 	// Base stations serving + neighbour cell info (CID 11). Query caps the count
@@ -440,6 +585,57 @@ export const commands = {
 				max_lte_count: 'u32', max_cdma_count: 'u32',
 			},
 		decode: decode_base_stations_info,
+	},
+
+	// Carrier configuration status (CID 16, MBIMEx v3.0). The MBIM counterpart
+	// of what hwops.uc reads over QMI PDC — and reachable on a modem with no
+	// PDC service at all, which is the point. The notification is the half
+	// worth having: a configuration switch announces itself instead of being
+	// polled for.
+	//
+	// The name is a WCHAR_STR TLV, not an offset/length string, so the whole
+	// response needs a custom decode.
+	MODEM_CONFIGURATION: {
+		cid: 16,
+		query: {},
+		decode: (info) => {
+			let st = mbimcodec.decode_info({ configuration_status: 'u32' }, info);
+			let tlvs = mbimcodec.decode_tlvs(info, 4);
+
+			return {
+				configuration_status: st?.configuration_status,
+				configuration_name: mbimcodec.tlv_string(tlvs),
+				ies: length(tlvs),
+			};
+		},
+	},
+
+	// Why the modem woke the host (CID 19, MBIMEx v3.0). WakeType says whether
+	// it was a CID response, a CID indication or a data packet; SessionId names
+	// the session for the packet case. The trailing TLV carries the detail and
+	// its meaning depends on the type, so it is handed back as raw bytes rather
+	// than guessed at.
+	//
+	// This is the missing half of the lowpower work: after a wake, the daemon
+	// currently cannot tell data from paging from a vendor event.
+	WAKE_REASON: {
+		cid: 19,
+		query: {},
+		decode: (info) => {
+			let fixed = mbimcodec.decode_info(
+				{ wake_type: 'u32', session_id: 'u32' }, info);
+			let tlvs = mbimcodec.decode_tlvs(info, 8);
+
+			return {
+				wake_type: fixed?.wake_type,
+				session_id: fixed?.session_id,
+				wake_tlv_type: tlvs[0]?.type,
+				// the one type worth naming here: a wake carrying a TAI says
+				// which tracking area the paging came from
+				wake_tlv_tai: (tlvs[0]?.type == mbimcodec.TLV_TAI),
+				wake_tlv_len: length(tlvs[0]?.data ?? ''),
+			};
+		},
 	},
 
 	// 5G registration parameters (CID 17, MBIMEx v3.0). Only the fixed leading

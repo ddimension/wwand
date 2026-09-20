@@ -218,7 +218,17 @@ export function create(hub, hooks)
 			}
 
 			if (msg.status != STATUS_SUCCESS) {
-				if (hooks?.on_error)
+				// `no_recovery` works here too, and it did not before: only
+				// command_raw honoured it, so a schema'd command could not opt
+				// out of voting on the channel. That gap matters for the
+				// OPTIONAL ones — an MBIMEx v3 diagnostic a firmware simply
+				// has not implemented answers a refusal per query, and counted
+				// as protocol errors those drive the hardware recovery ladder
+				// toward a repower for a command nothing depends on. Same
+				// argument as the QMI-over-MBIM tunnel (ddimension/wwand#30);
+				// mandatory commands keep reporting, so a wedged channel is
+				// still caught. Found by review, 2026-09-20.
+				if (hooks?.on_error && !opts?.no_recovery)
 					hooks.on_error(self, 'mbim', what, msg.status);
 
 				if (cb)

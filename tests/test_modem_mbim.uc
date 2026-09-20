@@ -129,6 +129,13 @@ function handlers() {
 			subscriber_id: '262011234567890', sim_iccid: '89490200001022832490',
 			ready_info: 0, telephone_numbers_count: 0,
 		},
+		// THE COMMON CASE for the two MBIMEx v3 diagnostics: a firmware that
+		// serves v3 layouts and has not implemented these CIDs. Status 9 is
+		// MBIM_STATUS_ERROR_NO_DEVICE_SUPPORT. They are queried with
+		// `no_recovery`, so this must not count against the control channel —
+		// asserted in its own scenario below.
+		MODEM_CONFIGURATION: { __error: 9 },
+		WAKE_REASON: { __error: 9 },
 		// the default modem boots with its radio already on, so init must not
 		// write RADIO_STATE at all — the off case is its own scenario below
 		RADIO_STATE: {
@@ -845,5 +852,157 @@ function assert_error_line_names_the_command() {
 }
 
 assert_error_line_names_the_command();
+
+// --- a registration that lands DURING the attach diagnostic must not fail ----
+//
+// The registration timeout now asks LTE Attach Info (and AT+CEER) before it
+// reports the failure, which is the point — but asking costs up to seven
+// seconds, and the modem can register inside them. The state test that guards
+// the timer is a statement about when it FIRED, not about now, so the callback
+// has to look again. Reporting a timeout for a modem that had just registered
+// would tear down a working session: a far worse bug than the missing
+// diagnostic the query adds. Raised by review, 2026-09-20.
+function assert_late_registration_survives_the_diagnostic() {
+	uloop.init();
+
+	let h = handlers();
+
+	// never registers on its own — the test drives the indication by hand
+	h.REGISTER_STATE = { nw_error: 0, register_state: bc.REGISTER_STATE_SEARCHING,
+		register_mode: 1, available_data_classes: 0, current_cellular_class: 1,
+		provider_id: '', provider_name: '', roaming_text: '', registration_flag: 0 };
+
+	// ...and the attach query is SWALLOWED, so the callback stays outstanding
+	// while the registration arrives. That is the window under test.
+	h.LTE_ATTACH_INFO = () => null;   /* answered by nobody: the mock swallows it */
+
+	let mock = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h });
+	let failures = [], states = [];
+	let m;
+
+	m = modem_mbim.create({
+		id: 'm_latereg', device: '/dev/mocklate',
+		config: { apn: 'internet' },
+		timing: { settle: 1, reg_timeout: 40, backoff_min: 1000, backoff_max: 1000,
+		          at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: {
+			transport_open: mock.transport_open,
+			log: () => null,
+			on_event: (mm, event, data) => {
+				if (event == 'state')
+					push(states, data?.state);
+				if (event == 'error')
+					push(failures, data?.stage ?? '?');
+			},
+		},
+	});
+
+	m.start();
+
+	// past reg_timeout: the timer has fired and the attach query is in flight
+	uloop.timer(90, () => {
+		// ...and NOW the network answers. Drive the indication the modem would
+		// have received, which takes it out of REGISTERING.
+		mock.indicate('REGISTER_STATE', { nw_error: 0,
+			register_state: bc.REGISTER_STATE_HOME, register_mode: 1,
+			available_data_classes: 0x8000, current_cellular_class: 1,
+			provider_id: '26201', provider_name: 'Telekom.de',
+			roaming_text: '', registration_flag: 0 });
+	});
+
+	// well past the attach query's own budget
+	uloop.timer(400, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+	uloop.run();
+
+	eq(length(filter(failures, (f) => f == 'registration_timeout')), 0,
+		'late-reg: a registration that lands during the diagnostic is not failed');
+	ok(index(states, 'REGISTERING') >= 0, 'late-reg: ...and the modem really did wait in REGISTERING');
+}
+
+assert_late_registration_survives_the_diagnostic();
+
+// --- the attach cause comes from AT+CEER when MBIM has none ------------------
+//
+// And that is the normal case, not the exception: MBIM reports the attach
+// STATE reliably and leaves NwError empty on most firmware. An RM520N-GL
+// answers this query with `detached` and no cause, which tells a reader
+// nothing they could not already see — the status page said "searching" and
+// "detached" and stopped there. The modem's own extended error report carries
+// the reason; asking for it is the same complementarity regdetail.uc already
+// relies on for the registration cause (HW-confirmed with a deliberately wrong
+// attach APN: "Requested service option not subscribed", 2026-09-20).
+function assert_attach_cause_from_ceer(ceer_line, want_text, want_cause, label) {
+	uloop.init();
+
+	let h = handlers();
+
+	// the v3 layout with NwError ZERO — present but saying nothing, which is
+	// what the hardware does
+	h.LTE_ATTACH_INFO = { lte_attach_state: 0, nw_error: 0, ip_type: 1,
+		access_string: 'internet', user_name: '', password: '',
+		compression: 0, auth_protocol: 0 };
+
+	let mock = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h });
+	let asked = [], got = null, done_ = false;
+	let m;
+
+	m = modem_mbim.create({
+		id: 'm_ceer', device: '/dev/mockceer',
+		config: { apn: 'internet' },
+		timing: { settle: 1, reg_timeout: 5000, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: {
+			transport_open: mock.transport_open,
+			log: () => null,
+			on_event: (mm, event) => {
+				if (event != 'registered' || done_)
+					return;
+
+				done_ = true;
+
+				// an AT channel that answers CEER and nothing else
+				m.at = {
+					send: (cmd, cb) => {
+						push(asked, cmd);
+
+						return cb(null, { lines: ceer_line ? [ ceer_line ] : [] });
+					},
+					close: () => null,
+				};
+
+				m._read_attach_info((e, info) => {
+					got = info;
+					uloop.timer(10, () => uloop.end());
+				});
+			},
+		},
+	});
+
+	m.start();
+	uloop.timer(3000, () => uloop.end());
+	uloop.run();
+
+	ok(index(asked, 'AT+CEER') >= 0, label + ': the modem was asked for its error report');
+	eq(got?.state_text, 'detached', label + ': the MBIM attach state is kept');
+	eq(got?.apn, 'internet', label + ': ...and the profile it used');
+	eq(got?.ceer_text, want_text, label + ': the extended error report is recorded');
+	eq(got?.nw_error, want_cause, label + ': ...and a numeric cause only when there is one');
+}
+
+// free text: stands on its own, no cause invented for it
+assert_attach_cause_from_ceer('+CEER: Requested service option not subscribed',
+	'Requested service option not subscribed', null, 'ceer/text');
+
+// a cause number in the text maps through the same 3GPP table the registration
+// reject uses
+assert_attach_cause_from_ceer('+CEER: EMM cause 33', 'EMM cause 33', 33, 'ceer/cause');
+
+// ...and a modem with nothing to say leaves both null rather than inventing
+assert_attach_cause_from_ceer(null, null, null, 'ceer/silent');
 
 done('test_modem_mbim');

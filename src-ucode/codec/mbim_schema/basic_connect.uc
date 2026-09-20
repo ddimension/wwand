@@ -206,20 +206,43 @@ export const commands = {
 
 		REGISTER_STATE: {
 			cid: 9,
+			// preferred_data_classes is the MBIMEx v2 addition, APPENDED after
+			// the v1 nine (libmbim 1.32.0, mbim-service-ms-basic-connect-v2.json,
+			// checked 2026-09-20) — so the same layout reads both and a v1 modem
+			// answers null for it. What the network PREFERS, as against
+			// available_data_classes, which is what it offers.
 			response: {
 				nw_error: 'u32', register_state: 'u32', register_mode: 'u32',
 				available_data_classes: 'u32', current_cellular_class: 'u32',
 				provider_id: 'string', provider_name: 'string',
 				roaming_text: 'string', registration_flag: 'u32',
+				preferred_data_classes: 'u32',
 			},
 			notification: {
 				nw_error: 'u32', register_state: 'u32', register_mode: 'u32',
 				available_data_classes: 'u32', current_cellular_class: 'u32',
 				provider_id: 'string', provider_name: 'string',
 				roaming_text: 'string', registration_flag: 'u32',
+				preferred_data_classes: 'u32',
 			},
 		},
 
+		// The three trailing fields are MBIMEx additions and are APPENDED, not
+		// inserted — the v1 five are an exact byte prefix of the v3 eight
+		// (libmbim 1.32.0, mbim-service-ms-basic-connect-v3.json vs
+		// -basic-connect.json, checked 2026-09-20). So one layout serves every
+		// version: a modem that speaks v1 simply stops after downlink_speed and
+		// the decoder answers null for the rest, which is what absent means.
+		//
+		// `data_subclass` is the one worth having. MbimDataSubclass is a
+		// bitmask — 5G_ENDC / 5G_NR / 5G_NEDC / 5G_ELTE / 5G_NGENDC — so it
+		// says NSA from SA outright, where the telemetry otherwise infers it.
+		// `tai` is MbimTai inline (PlmnMcc u16, PlmnMnc u16, Tac u32), which is
+		// why the codec needed a u16.
+		//
+		// NOTE for v2: that version names the third field CurrentDataClass
+		// rather than HighestAvailableDataClass. Same position, same width —
+		// the decode is right either way, the NAME is optimistic on a v2 modem.
 		PACKET_SERVICE: {
 			cid: 10,
 			set: { packet_service_action: 'u32' },
@@ -227,11 +250,15 @@ export const commands = {
 				nw_error: 'u32', packet_service_state: 'u32',
 				highest_available_data_class: 'u32',
 				uplink_speed: 'u64', downlink_speed: 'u64',
+				frequency_range: 'u32', data_subclass: 'u32',
+				tai_mcc: 'u16', tai_mnc: 'u16', tai_tac: 'u32',
 			},
 			notification: {
 				nw_error: 'u32', packet_service_state: 'u32',
 				highest_available_data_class: 'u32',
 				uplink_speed: 'u64', downlink_speed: 'u64',
+				frequency_range: 'u32', data_subclass: 'u32',
+				tai_mcc: 'u16', tai_mnc: 'u16', tai_tac: 'u32',
 			},
 		},
 

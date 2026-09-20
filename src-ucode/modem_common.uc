@@ -463,6 +463,16 @@ export function scaffolding(self, o)
 	if (self.reg_detail == null && o.rec?.last_reg_detail != null)
 		self.reg_detail = { ...o.rec.last_reg_detail, stale: true };
 
+	// ...and the same for the EPS attach detail, for the same reason and with
+	// the same tell. Without it the attach cause is written at the moment of
+	// the failure and destroyed by the teardown that follows it, so the only
+	// place it ever appeared was the log line — status and the LuCI page saw
+	// null every time they looked (measured on a GL-X3000 with a deliberately
+	// wrong APN: the timeout logged the attach state and `attach_info` in the
+	// status was null seconds later, 2026-09-20).
+	if (self.attach_info == null && o.rec?.last_attach_info != null)
+		self.attach_info = { ...o.rec.last_attach_info, stale: true };
+
 	let emit = (event, data) => {
 		if (deps.on_event)
 			deps.on_event(self, event, data);
@@ -717,6 +727,9 @@ export function make_fail(self, o)
 		// wipe the reject cause the user needs to see (scaffolding re-seeds it)
 		if (o.rec && self.reg_detail && !self.reg_detail.stale)
 			o.rec.last_reg_detail = self.reg_detail;
+
+		if (o.rec && self.attach_info && !self.attach_info.stale)
+			o.rec.last_attach_info = self.attach_info;
 
 		self.note_connect_failure((action) => {
 			o.emit('error', {

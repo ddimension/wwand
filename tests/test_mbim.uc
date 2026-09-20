@@ -6,6 +6,7 @@ import { eq, ok, done } from './lib/check.uc';
 import * as struct from 'struct';
 import * as mbim from 'wwand/codec/mbim.uc';
 import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
+import * as ext from 'wwand/codec/mbim_schema/ms_basic_connect_ext.uc';
 import * as context_mbim from 'wwand/context_mbim.uc';
 
 function p32(v) {
@@ -657,5 +658,221 @@ eq(mbim.service_name('00000000-0000-0000-0000-0000000000ff'),
 	eq(struct.unpack('<I', substr(raws[1]?.info ?? '', 4, 4))[0],
 		bc.ACTIVATION_CMD_DEACTIVATE, 'v3 session: and it really is a DEACTIVATE');
 })();
+
+// --- the MBIMEx additions, off the wire -------------------------------------
+//
+// Hand-built buffers throughout: a buffer produced with the same spec it is
+// then read with only proves the spec is self-consistent. Layouts checked
+// against libmbim 1.32.0 (mbim-service-ms-basic-connect-v3.json and
+// -extensions-v3.json), 2026-09-20.
+(function () {
+	let hex2buf = (raw) => {
+		let b = '';
+		for (let i = 0; i < length(raw); i += 2)
+			b += chr(hex(substr(raw, i, 2)));
+		return b;
+	};
+
+	// PACKET SERVICE. The three MBIMEx fields are APPENDED, so ONE layout has
+	// to read both generations — that is the claim under test, and it is only
+	// worth anything if both buffers go through the same spec.
+	let ps3 = mbim.decode_info(bc.commands.PACKET_SERVICE.response, hex2buf(
+		'00000000020000000080000080d1f0080000000000ca9a3b00000000' +
+		'0100000002000000' + '060101002c1b0000'));
+
+	eq(ps3.packet_service_state, 2, 'ps v3: the v1 fields still read');
+	eq(ps3.downlink_speed, 1000000000, 'ps v3: ...including the u64s');
+	eq(ps3.frequency_range, 1, 'ps v3: FR1');
+	eq(ps3.data_subclass, 2, 'ps v3: data subclass 5G_NR — NSA vs SA, stated');
+	eq(ps3.tai_mcc, 262, 'ps v3: the TAI plmn (u16, which the codec had to learn)');
+	eq(ps3.tai_mnc, 1, 'ps v3: ...mnc');
+	eq(ps3.tai_tac, 0x1b2c, 'ps v3: ...and the tracking area code');
+
+	// the same spec against a v1 modem, which stops after DownlinkSpeed
+	let ps1 = mbim.decode_info(bc.commands.PACKET_SERVICE.response, hex2buf(
+		'00000000020000000080000080d1f0080000000000ca9a3b00000000'));
+
+	eq(ps1.packet_service_state, 2, 'ps v1: reads with the same layout');
+	eq(ps1.downlink_speed, 1000000000, 'ps v1: ...to the end of what it sent');
+	eq(ps1.frequency_range, null, 'ps v1: absent means null, not zero');
+	eq(ps1.data_subclass, null, 'ps v1: ...and not a fabricated subclass');
+	eq(ps1.tai_mcc, null, 'ps v1: ...nor a fabricated TAI');
+
+	// REGISTER STATE: PreferredDataClasses is the v2 append. Same argument.
+	// fixed part is 52 bytes: 5 u32, three offset/length pairs, then
+	// RegistrationFlag and the v2 PreferredDataClasses
+	let rs = mbim.decode_info(bc.commands.REGISTER_STATE.response, hex2buf(
+		'00000000' + '01000000' + '01000000' + '00800000' + '01000000' +
+		'340000000a000000' + '3e00000014000000' + '0000000000000000' +
+		'00000000' + '00800000' +
+		'320036003200300031002e006400650000000000' +
+		'540065006c0065006b006f006d002e0064006500'));
+
+	eq(rs.register_state, 1, 'rs: the v1 fields read');
+	eq(rs.provider_id, '26201', 'rs: ...and the strings still resolve');
+	eq(rs.preferred_data_classes, 0x8000, 'rs: the v2 append is picked up');
+})();
+
+// --- the layouts that are SELECTED, not appended -----------------------------
+//
+// These are the dangerous ones: v3 INSERTS a field, so the fixed part shifts
+// and every string offset after it moves. A wrong choice here does not fail, it
+// returns a plausible APN or none at all — the same shape as the bug that made
+// the RM520N-GL unreachable. Both directions are asserted, because getting one
+// right and the other wrong is exactly what happened before.
+(function () {
+	let hex2buf = (raw) => {
+		let b = '';
+		for (let i = 0; i < length(raw); i += 2)
+			b += chr(hex(substr(raw, i, 2)));
+		return b;
+	};
+
+	// v1: LteAttachState, IpType, 3 strings, Compression, AuthProtocol.
+	// Fixed part 40 bytes, so the APN sits at offset 0x28.
+	let a1 = hex2buf('01000000' + '01000000' +
+		'2800000010000000' + '0000000000000000' + '0000000000000000' +
+		'00000000' + '00000000' +
+		'69006e007400650072006e0065007400');
+
+	// v3: NwError 33 (requested service option not subscribed) INSERTED after
+	// the state, so the fixed part is 44 and the APN moves to 0x2c
+	let a3 = hex2buf('01000000' + '21000000' + '01000000' +
+		'2c00000010000000' + '0000000000000000' + '0000000000000000' +
+		'00000000' + '00000000' +
+		'69006e007400650072006e0065007400');
+
+	let v1 = { mbimex_version: 0 }, v3 = { mbimex_version: 0x0300 };
+	let dec = ext.commands.LTE_ATTACH_INFO.decode;
+
+	eq(dec(a1, v1).access_string, 'internet', 'attach v1: the apn reads');
+	eq(dec(a1, v1).nw_error, null, 'attach v1: no cause field is invented');
+	eq(dec(a3, v3).access_string, 'internet', 'attach v3: the apn reads too');
+	eq(dec(a3, v3).nw_error, 33, 'attach v3: ...and the cause comes with it');
+
+	// THE COUNTERPROOF THE CODE EXISTS FOR: cross the buffers and the decode
+	// does not fail, it lies. Reading a v1 answer as v3 takes IpType for the
+	// cause and the APN offset for the ip type.
+	let wrong = dec(a1, v3);
+
+	eq(wrong.nw_error, 1, 'attach: a v1 buffer read as v3 reports IpType as a reject cause');
+	ok(wrong.access_string != 'internet',
+		'attach: ...and the apn is not the apn (this is why the layout is selected)');
+})();
+
+// --- the two v3-only diagnostics --------------------------------------------
+(function () {
+	let hex2buf = (raw) => {
+		let b = '';
+		for (let i = 0; i < length(raw); i += 2)
+			b += chr(hex(substr(raw, i, 2)));
+		return b;
+	};
+
+	// Modem Configuration: status u32, then the name as a WCHAR_STR TLV — not
+	// an offset/length string, which is why this needs TLV DEcoding and the
+	// codec only had TLV encoding.
+	let mc = ext.commands.MODEM_CONFIGURATION.decode(hex2buf(
+		'02000000' + '0a0000021e000000' +
+		'52004f0057005f00470065006e0065007200690063005f0033005f004700' + '0000'));
+
+	eq(mc.configuration_status, 2, 'modem config: status (2 = completed)');
+	eq(ext.MODEM_CONFIG_STATUS['2'], 'completed', 'modem config: ...with a name');
+	eq(mc.configuration_name, 'ROW_Generic_3_G', 'modem config: the carrier profile');
+
+	// Wake Reason: WakeType, SessionId, one TLV whose meaning follows the type
+	let wr = ext.commands.WAKE_REASON.decode(hex2buf(
+		'01000000' + '00000000' + '0900000008000000' + '0601010005000000'));
+
+	eq(wr.wake_type, 1, 'wake reason: type');
+	eq(ext.WAKE_TYPE['1'], 'cid indication', 'wake reason: ...named');
+	eq(wr.wake_tlv_type, 9, 'wake reason: the trailing TLV is identified (TAI)');
+	eq(wr.wake_tlv_len, 8, 'wake reason: ...and its payload measured, not guessed at');
+
+	// a TLV area that claims more than it carries must end the walk, not throw
+	eq(length(mbim.decode_tlvs(hex2buf('0a000002ff000000' + '4100'), 0)), 0,
+		'tlv: a truncated header yields nothing rather than reading past the end');
+
+	// PADDING IS ON THE WIRE BUT NOT IN data_length, and only a SECOND TLV can
+	// prove the walk skips it: with one TLV the pad sits at the end where
+	// ignoring it costs nothing. Here the first payload is 6 bytes with 2 of
+	// padding, so a decoder that adds only data_length starts the next header
+	// two bytes early and reads rubbish.
+	let two = mbim.decode_tlvs(hex2buf(
+		'0a00000206000000' + '610062006300' + '0000' +
+		'0a00000004000000' + '7a007a00'), 0);
+
+	eq(length(two), 2, 'tlv: both TLVs are found across the padding');
+	eq(mbim.tlv_string([ two[0] ]), 'abc', 'tlv: ...the first reads');
+	eq(mbim.tlv_string([ two[1] ]), 'zz', 'tlv: ...and so does the one behind the pad');
+})();
+
+// --- extended Device Caps (CID 6): reordered AND part-TLV in v3 -------------
+//
+// The nastiest of the version splits. v3 inserts DataSubclass as a guint64
+// (it is a guint32 in Packet Service — the same name at two widths), moves
+// ExecutorIndex and the band classes ahead of the strings, and turns everything
+// from LteBandClass on into TLVs. The v1 layout sat here unconditionally and
+// was harmless only because nothing called it.
+(function () {
+	let hex2buf = (raw) => {
+		let b = '';
+		for (let i = 0; i < length(raw); i += 2)
+			b += chr(hex(substr(raw, i, 2)));
+		return b;
+	};
+
+	let fixed = '01000000' + '01000000' + '00000000' + '02000000' +
+		'3f000080' + '03000000' + '01000000' +     /* … ControlCaps */
+		'0100000000000000' +                        /* DataSubclass, u64 */
+		'0f000000' + '00000000' + '00010000';       /* MaxSessions, Executor, Wcdma */
+	let tlvs = '0b00000004000000' + '03001400' +    /* LteBandClass table */
+		'0b00000004000000' + '4e000100' +           /* NrBandClass table */
+		'0a0000000c000000' + '350047002f005400440053' + '00' +
+		'0a0000021e000000' + '3300350039003000370032003000360030003000300030003000300030' + '000000' +
+		'0a00000010000000' + '52004d003500320030004e0047004c00' +
+		'0a00000212000000' + '52004d003500320030004e002d0047004c00' + '0000';
+
+	let d = ext.commands.DEVICE_CAPS.decode(hex2buf(fixed + tlvs),
+		{ mbimex_version: 0x0300 });
+
+	eq(d.max_sessions, 15, 'caps v3: MaxSessions reads — it sits AFTER the u64');
+	eq(d.data_subclass, 1, 'caps v3: DataSubclass is a u64 here, not a u32');
+	eq(d.lte_band_class, [ 3, 20 ], 'caps v3: the band table is a uint16 TLV');
+	eq(d.nr_band_class, [ 78, 1 ], 'caps v3: ...and so is the NR one');
+	eq(d.device_id, '359072060000000', 'caps v3: the strings are TLVs, not offset/length');
+	eq(d.hardware_info, 'RM520N-GL', 'caps v3: ...to the last of them');
+
+	// THE DISCRIMINATOR: the same bytes read as v1 must not quietly produce a
+	// plausible answer. v1 expects MaxSessions where v3 has the low half of
+	// DataSubclass, and offset/length strings where v3 has TLVs.
+	let v1 = ext.commands.DEVICE_CAPS.decode(hex2buf(fixed + tlvs),
+		{ mbimex_version: 0 });
+
+	ok(v1.max_sessions != 15, 'caps v3: read as v1 the session count is wrong');
+	ok(v1.device_id != '359072060000000', 'caps v3: ...and the IMEI is not the IMEI');
+
+	// A TRUNCATED TLV RUN STOPS, it does not shift. Drop the two band tables
+	// and the strings land at positions the walk checks the type of.
+	let short = ext.commands.DEVICE_CAPS.decode(hex2buf(fixed +
+		'0a00000212000000' + '52004d003500320030004e002d0047004c00' + '0000'),
+		{ mbimex_version: 0x0300 });
+
+	eq(short.lte_band_class, null, 'caps v3: a wrong type at position 0 ends the walk');
+	// the discriminator against the type-FILTERING version this replaced: it
+	// would have found the lone WCHAR_STR and put it in custom_data_class
+	eq(short.custom_data_class, null,
+		'caps v3: ...and does not collect the string by type from a later slot');
+	eq(short.device_id, null, 'caps v3: ...rather than shifting a string into the IMEI');
+	eq(short.max_sessions, 15, 'caps v3: the fixed part still decodes');
+})();
+
+// --- a TLV that claims padding it does not carry is truncated ----------------
+//
+// libmbim sizes a record as header + data_length + padding_length and refuses
+// to read one the buffer cannot hold in full (mbim-tlv.c:150-160, 1.32.0).
+// Checking only data_length accepted this as a complete zero-length TLV.
+eq(length(mbim.decode_tlvs('\x0a\x00\x00\xff\x00\x00\x00\x00', 0)), 0,
+	'tlv: a header claiming absent padding is a truncated record');
 
 done('test_mbim');

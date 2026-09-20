@@ -313,6 +313,32 @@ function make_mc(schema, handlers, hooks, opts) {
 	eq(held, 0, 'frags: a set past the byte ceiling is dropped, not grown');
 })();
 
+// --- no_recovery works on a SCHEMA'D command too -----------------------------
+//
+// It only ever worked on command_raw. The schema path reported every refusal
+// to the recovery hook, so an OPTIONAL command a firmware has not implemented
+// counted against the control channel and drove the hardware ladder toward a
+// repower — for a command nothing depends on. The MBIMEx v3 diagnostics are
+// exactly that shape: an RM520N-GL answers NotInitialized to Modem
+// Configuration and NoDeviceSupport to Wake Reason, once per start (measured
+// 2026-09-20). Same argument as the QMI-over-MBIM tunnel, ddimension/wwand#30.
+(function() {
+	let errs = [];
+	let sch = { service: bc.service, commands: { PACKET_SERVICE: bc.commands.PACKET_SERVICE } };
+	let mc = make_mc(sch, { PACKET_SERVICE: { __error: 9 } },
+		{ on_error: (c, kind, what, status) => push(errs, what) });
+
+	// without the flag a refusal still votes — mandatory commands must
+	mc.command(sch, 'PACKET_SERVICE', 'query', {}, () => {
+		eq(length(errs), 1, 'no_recovery/command: a plain refusal still reports');
+
+		mc.command(sch, 'PACKET_SERVICE', 'query', {}, () => {
+			eq(length(errs), 1,
+				'no_recovery/command: ...and with the flag it does not');
+		}, { no_recovery: true });
+	});
+})();
+
 // --- scenarios ---------------------------------------------------------------
 
 // get_signal: RSSI index + per-RAT coded RSRP/SNR (LTE + 5G-SA)

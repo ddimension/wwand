@@ -51,6 +51,10 @@ function base_handlers() {
 		},
 		// init reads the radio state before registering; these suites are not
 		// about the radio, so answer "already on" and no write follows
+		// see test_modem_mbim: the v3 diagnostics are optional and queried with
+		// no_recovery; a firmware without them answers NO_DEVICE_SUPPORT
+		MODEM_CONFIGURATION: { __error: 9 },
+		WAKE_REASON: { __error: 9 },
 		RADIO_STATE: {
 			hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_ON,
 		},

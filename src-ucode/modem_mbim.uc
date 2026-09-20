@@ -36,6 +36,7 @@ import * as qom from 'wwand.qmi_over_mbim';
 import * as client_mod from 'wwand.client';
 import * as ctlmod from 'wwand.codec.schema.ctl';
 import * as nasmod from 'wwand.codec.schema.nas';
+import * as atparse from 'wwand.atcmd_parse';
 import * as dsdmod from 'wwand.codec.schema.dsd';
 import * as uimmod from 'wwand.codec.schema.uim';
 import * as wmsmod from 'wwand.codec.schema.wms';
@@ -329,6 +330,13 @@ export function create(opts)
 				self.info.mbim_data_class = data.data_class;
 				self.info.mbim_custom_data_class = data.custom_data_class;
 			}
+
+			// MBIMEx v3 only, and ASKED ONLY WHEN IT WAS AGREED. These two CIDs
+			// exist solely in the v3 extensions service; putting them to a modem
+			// that negotiated v1 earns a refusal, and every refusal on a native
+			// command votes on the channel through the recovery ladder. The
+			// version gate is what keeps a diagnostic from looking like a fault.
+			self._read_v3_extras();
 
 			self.mbim.command(bc, 'SUBSCRIBER_READY_STATUS', 'query', {}, (e2, d2) => {
 				if (!e2) {
@@ -749,7 +757,10 @@ export function create(opts)
 				self.signal = { rssi_raw: data.rssi, rssi: dbm };
 			}
 		});
-		self.mbim.on(bc, 'PACKET_SERVICE', (data) => null);
+		// PACKET_SERVICE was discarded outright. Under MBIMEx it carries three
+		// fields the rest of the stack has to infer otherwise — see
+		// _update_packet_service.
+		self.mbim.on(bc, 'PACKET_SERVICE', (data) => self._update_packet_service(data));
 		// SIM ready-state changes (hot-swap, removal, post-PIN initialisation) —
 		// the MBIM counterpart of the QMI UIM CARD_STATUS_IND. Keep identity fresh
 		// and surface SIM removal instead of running stale. (Closes the one native
@@ -808,6 +819,38 @@ export function create(opts)
 		}
 	};
 
+	// The MBIMEx additions on PACKET_SERVICE (v2 appends FrequencyRange, v3 adds
+	// DataSubclass and Tai — all APPENDED, so a v1 modem simply answers null).
+	//
+	// `data_subclass` is the one that earns its keep: MbimDataSubclass is a
+	// bitmask naming 5G_ENDC / 5G_NR / 5G_NEDC / 5G_ELTE / 5G_NGENDC, which
+	// separates non-standalone from standalone outright. The backend otherwise
+	// derives that from the serving-cell shape (modem_common.dsd_from_serving),
+	// which is inference from what the cell looks like rather than the modem
+	// saying so.
+	//
+	// STORED, NOT ACTED ON. It is published through status/telemetry; nothing
+	// decides anything on it yet, and it must not silently start to.
+	self._update_packet_service = function(data) {
+		if (data == null)
+			return;
+
+		let ps = {};
+
+		if (data.frequency_range != null && data.frequency_range != 0)
+			ps.frequency_range = data.frequency_range;
+
+		if (data.data_subclass != null && data.data_subclass != 0)
+			ps.data_subclass = data.data_subclass;
+
+		// MbimTai: PlmnMcc/PlmnMnc as u16 each, then Tac. mcc 0 is not a PLMN,
+		// so it doubles as "the modem did not fill this in".
+		if (data.tai_mcc != null && data.tai_mcc != 0)
+			ps.tai = { mcc: data.tai_mcc, mnc: data.tai_mnc, tac: data.tai_tac };
+
+		self.packet_service = length(ps) ? ps : null;
+	};
+
 	self._update_register = function(data) {
 		let st = data.register_state;
 		let registered = (st == bc.REGISTER_STATE_HOME || st == bc.REGISTER_STATE_ROAMING ||
@@ -818,6 +861,9 @@ export function create(opts)
 			roaming: (st == bc.REGISTER_STATE_ROAMING),
 			plmn: plmn_of(data),
 			data_class: data.available_data_classes,
+			// MBIMEx v2 appends what the network PREFERS, as against
+			// available_data_classes, which is what it offers. Absent on v1.
+			preferred_data_class: data.preferred_data_classes,
 		};
 
 		// why (not) registered — MBIM carries the 3GPP reject cause (NwError)
@@ -1013,8 +1059,44 @@ export function create(opts)
 			self._install_indications();
 
 			reg_timer = uloop.timer(self.timing.reg_timeout, () => {
-				if (self.state == 'REGISTERING')
-					fail('registration_timeout', { reg: self.reg, detail: self.reg_detail });
+				if (self.state != 'REGISTERING')
+					return;
+
+				// ASK WHY BEFORE GIVING UP. A registration that never completes
+				// is the case LTE Attach Info exists for: under MBIMEx v3 it
+				// carries the 3GPP cause for a refused EPS attach, and a wrong
+				// attach APN is the commonest way to sit here forever —
+				// measured on a GL-X3000, where a bogus APN left the modem in
+				// REGISTERING with nothing in the log to say so (2026-09-20).
+				//
+				// The failure is reported either way; this only fills in the
+				// reason first. BOUNDED EXPLICITLY, because the defaults are no
+				// bound worth having on a failure path: mbim_client falls back
+				// to 15 s and atcmd to 5, and the teardown plus the recovery
+				// ladder wait behind this. The reason is worth a few seconds,
+				// not twenty.
+				let tgen = self._gen;
+
+				self._read_attach_info((e, info) => {
+					// ...AND RE-CHECKED AFTERWARDS. Asking costs up to seven
+					// seconds, and the modem can register inside them — the
+					// state test above is a statement about when the timer
+					// fired, not about now. Failing on it anyway would tear
+					// down a modem that had just succeeded, which is a far
+					// worse bug than the missing diagnostic this adds. The
+					// generation guard covers the other end: a teardown during
+					// the query answers `gone`, and that must not be reported
+					// as a registration timeout either. Raised by review,
+					// 2026-09-20.
+					if (self._gen != tgen || self.state != 'REGISTERING')
+						return;
+
+					fail('registration_timeout', {
+						reg: self.reg,
+						detail: self.reg_detail,
+						attach: info,
+					});
+				});
 			});
 
 			self.mbim.command(bc, 'REGISTER_STATE', 'query', {}, (err, data) => {
@@ -1031,12 +1113,171 @@ export function create(opts)
 			if (self.state != 'ATTACHING')
 				return;   // registration flapped while attaching
 
+			// the MBIMEx fields ride on this answer too (frequency range, data
+			// subclass, TAI) — same shape as the indication
+			self._update_packet_service(data);
+
 			// already-attached returns an error on some modems; tolerate it
 			self.counters.attempts = 0;
 			log('notice', sprintf('registered: plmn %J, roaming %J',
 				self.reg.plmn?.description, self.reg.roaming));
+
+			// ...and ask the modem WHY if the attach did not take. MBIMEx v3
+			// carries the 3GPP cause in LTE Attach Info (NwError, inserted
+			// after LteAttachState — see the schema note); on v1 the field is
+			// not there and this is a no-op. Best-effort and non-blocking: the
+			// bring-up continues either way, this only writes the reason down.
+			if (err || data?.nw_error)
+				self._read_attach_info();
+
 			enter_ready(() => self._start_telemetry());
 		});
+	};
+
+	// BOTH BOUNDED, and deliberately short. This runs on the registration
+	// timeout, which is a failure path: the failure report, the teardown and
+	// the recovery ladder all wait behind it. The reason a modem gives is worth
+	// a couple of seconds and not the 15 s mbim_client defaults to, nor that
+	// plus the 5 s atcmd defaults to on top.
+	const ATTACH_INFO_MS = 4000;
+	const ATTACH_CEER_MS = 3000;
+
+	// Two MBIMEx v3 diagnostics, read once at init and published through status.
+	//
+	// MODEM CONFIGURATION (CID 16) is the carrier configuration (MBN) the modem
+	// is running. wwand otherwise reads that over QMI PDC (hwops.uc), which a
+	// MBIM-only firmware does not offer at all — so on those boxes this is the
+	// only way to know what profile is loaded.
+	//
+	// WAKE REASON (CID 19) says why the modem last woke the host: a CID
+	// response, a CID indication, or a data packet. That is the half the
+	// lowpower work cannot see today.
+	//
+	// BOTH ARE BEST-EFFORT AND NEITHER GATES ANYTHING. A modem may implement
+	// v3 layouts and still not these CIDs; `no_recovery` keeps such a refusal
+	// from counting against the control channel, the same way the QMI-over-MBIM
+	// tunnel's refusals are excluded (ddimension/wwand#30).
+	self._read_v3_extras = function() {
+		if (!mbimmod.mbimex_v3(self.mbim))
+			return;
+
+		let gen = self._gen;
+
+		self.mbim.command(ext, 'MODEM_CONFIGURATION', 'query', {}, (err, data) => {
+			if (self._gen != gen)
+				return;
+
+			// SAY SO WHEN IT IS REFUSED. `no_recovery` keeps the refusal from
+			// voting on the channel, and it also keeps it out of the error log
+			// that on_error writes — so without this line an unimplemented CID
+			// is indistinguishable from one that was never asked, which for a
+			// diagnostic is the one thing it must not be.
+			if (err || data == null)
+				return log('debug', sprintf('carrier configuration unavailable: %J', err));
+
+			self.modem_config = {
+				status: data.configuration_status,
+				status_text: ext.MODEM_CONFIG_STATUS[sprintf('%d', data.configuration_status ?? -1)],
+				name: length(data.configuration_name ?? '') ? data.configuration_name : null,
+			};
+
+			log('info', sprintf('carrier configuration: %s (%s)',
+				self.modem_config.name ?? '-',
+				self.modem_config.status_text ?? '?'));
+		}, { no_recovery: true });
+
+		self.mbim.command(ext, 'WAKE_REASON', 'query', {}, (err, data) => {
+			if (self._gen != gen)
+				return;
+
+			if (err || data == null)
+				return log('debug', sprintf('wake reason unavailable: %J', err));
+
+			log('debug', sprintf('wake reason: %s (session %d)',
+				ext.WAKE_TYPE[sprintf('%d', data.wake_type ?? -1)] ?? '?',
+				data.session_id ?? -1));
+
+			self.wake_reason = {
+				type: data.wake_type,
+				type_text: ext.WAKE_TYPE[sprintf('%d', data.wake_type ?? -1)],
+				session_id: data.session_id,
+			};
+		}, { no_recovery: true });
+	};
+
+	// LTE Attach Info (CID 4): the profile the modem attached with, and under
+	// MBIMEx v3 the cause when it did not. Recorded on reg_detail so it reaches
+	// status and the failure path the same way a registration reject does.
+	self._read_attach_info = function(cb) {
+		let gen = self._gen;
+
+		// ALWAYS ANSWERS. The registration-timeout path waits on this callback
+		// before reporting its failure, so a silent return here would swallow
+		// the failure rather than delay it.
+		self.mbim.command(ext, 'LTE_ATTACH_INFO', 'query', {}, (err, data) => {
+			if (err || self._gen != gen || data == null)
+				return cb ? cb(err ?? { error: 'gone' }, null) : null;
+
+			self.attach_info = {
+				state: data.lte_attach_state,
+				state_text: ext.LTE_ATTACH_STATE[sprintf('%d', data.lte_attach_state ?? -1)],
+				ip_type: data.ip_type,
+				apn: length(data.access_string ?? '') ? data.access_string : null,
+			};
+
+			if (data.nw_error != null && data.nw_error != 0) {
+				self.attach_info.nw_error = data.nw_error;
+				self.attach_info.nw_error_text =
+					nasmod.REJECT_CAUSE[sprintf('%d', data.nw_error)] ??
+					sprintf('cause %d', data.nw_error);
+
+				log('warn', sprintf('attach: %s (apn %s)',
+					self.attach_info.nw_error_text,
+					self.attach_info.apn ?? '-'));
+
+				return cb ? cb(null, self.attach_info) : null;
+			}
+
+			// TOP UP FROM AT+CEER when MBIM gave no cause, and that is the
+			// common case rather than the exception: an RM520N-GL answers this
+			// query with state `detached` and NwError absent, which tells the
+			// reader nothing they did not already see (measured with a
+			// deliberately wrong attach APN, 2026-09-20 — the status page said
+			// "searching" and "detached" and stopped there).
+			//
+			// Same complementarity regdetail.uc already relies on for the
+			// registration cause: the structured protocol reliably reports the
+			// STATE, the modem's own extended error report carries the reason.
+			// Only when there is a channel to ask on — MBIM-only boxes have
+			// none, and then the answer is simply the state.
+			if (!self.at)
+				return cb ? cb(null, self.attach_info) : null;
+
+			self.at.send('AT+CEER', (aerr, ares) => {
+				if (self._gen != gen)
+					return cb ? cb({ error: 'gone' }, null) : null;
+
+				let c = aerr ? null : atparse.parse_ceer(ares?.lines);
+
+				if (c) {
+					self.attach_info.ceer_text = c.text;
+
+					// a numeric cause maps through the same 3GPP table the
+					// registration reject uses; a free-text one stands alone
+					if (c.cause != null) {
+						self.attach_info.nw_error = c.cause;
+						self.attach_info.nw_error_text =
+							nasmod.REJECT_CAUSE[sprintf('%d', c.cause)] ?? c.text;
+					}
+
+					log('warn', sprintf('attach: %s — %s (apn %s)',
+						self.attach_info.state_text ?? '?', c.text,
+						self.attach_info.apn ?? '-'));
+				}
+
+				return cb ? cb(null, self.attach_info) : null;
+			}, { timeout: ATTACH_CEER_MS });
+		}, { timeout: ATTACH_INFO_MS });
 	};
 
 	// --- rich telemetry ----------------------------------------------------
