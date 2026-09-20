@@ -30,6 +30,15 @@ export function valid_level(name)
 	return exists(LEVELS, name);
 };
 
+// The level IN FORCE, canonically named. A runtime override (ubus
+// set_log_level) is invisible otherwise: the configured value sits in uci and
+// says nothing about what the running process is doing, which makes a UI
+// control that sets the level unable to show its own state.
+export function level()
+{
+	return NAMES[sprintf('%d', threshold)] ?? 'info';
+};
+
 // Wire the native module + initial level/target once at startup. Kept optional:
 // host tests and an older wwand_io.so without the seam simply log to stderr.
 // Returns whether /dev/log was reachable at open time (informational).

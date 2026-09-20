@@ -2615,6 +2615,10 @@ export function create(opts)
 		         board: board,
 		         globals: {
 		             hold_max_ms: self._hold_max_ms(),
+		             // the level the PROCESS is logging at, which is not the
+		             // configured one once ubus set_log_level has been used —
+		             // and a control that sets it has to be able to read it
+		             log_level: logmod.level(),
 		             // Datapaths selectable via `option mux` on THIS box: the
 		             // pseudo-modes and built-ins netlink knows, plus every
 		             // installed add-on package — so a UI offers what is
