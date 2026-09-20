@@ -37,6 +37,11 @@ const OPEN_TIMEOUT = 10000;
 // 0x0300 = MBIMEx 3.0. libmbim refuses to ask for v2 and v3 at once and so do
 // we — v3 is what the schemas in codec/mbim_schema/ are written against.
 const EXT_SERVICE_UUID   = '3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf';
+// MBIM_CID_DEVICE_SERVICE_SUBSCRIBE_LIST lives in Basic Connect, so the client
+// addresses it by uuid rather than importing a schema it otherwise does not
+// need (the schemas import nothing from here; the dependency runs one way).
+const BC_SERVICE_UUID    = 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df';
+const CID_SUBSCRIBE_LIST = 19;
 const EXT_CID_VERSION    = 15;
 const MBIM_VERSION_1_0   = 0x0100;
 const MBIMEX_VERSION_3_0 = 0x0300;
@@ -374,6 +379,77 @@ export function create(hub, hooks)
 			fields: cmd.notification ?? cmd.response ?? {} });
 	};
 
+	// What this client is actually listening for, as
+	// [ { service, cids } ] — DERIVED FROM THE REGISTERED HANDLERS, not a
+	// second list beside them. A hardcoded copy is a list that goes stale the
+	// first time somebody adds an `on()` and forgets it, and the failure mode
+	// is silence: the modem simply never sends what nobody asked for, and the
+	// handler looks like it works because nothing errors.
+	self.subscribed_events = function() {
+		let by_service = {};
+
+		for (let key in keys(self.handlers)) {
+			if (!length(self.handlers[key]))
+				continue;
+
+			// key is '<uuid>:<cid>' and a uuid carries no colon
+			let sep = -1;
+
+			for (let i = length(key) - 1; i >= 0; i--)
+				if (substr(key, i, 1) == ':') { sep = i; break; }
+
+			if (sep < 0)
+				continue;
+
+			let svc = substr(key, 0, sep);
+
+			by_service[svc] = by_service[svc] ?? [];
+			push(by_service[svc], +substr(key, sep + 1));
+		}
+
+		let out = [];
+
+		for (let svc, cids in by_service)
+			push(out, { service: svc, cids: sort(cids, (a, b) => a - b) });
+
+		return out;
+	};
+
+	// Tell the modem which unsolicited events we want. Without it the modem
+	// uses its own default set, which can be very nearly empty — measured on an
+	// RM520N-GL (GL-X3000, 2026-09-20): over four minutes of a live connection
+	// the only indications that arrived were CONNECT and LTE_ATTACH_INFO, while
+	// the daemon had handlers registered for five more.
+	//
+	// Best-effort by design. A modem that does not implement CID 19 answers an
+	// error, and the correct response to that is to carry on with whatever it
+	// sends by default — the polling paths are all still there. It is never a
+	// reason to fail a bring-up.
+	self.subscribe_events = function(cb) {
+		let events = self.subscribed_events();
+
+		self.command_raw(BC_SERVICE_UUID, CID_SUBSCRIBE_LIST,
+			mbim.encode_subscribe_list(events),
+			(err, info) => {
+				if (hooks?.log) {
+					if (err)
+						hooks.log('info', sprintf('event subscription not accepted (%s) — taking what the modem sends by default',
+							err.error ?? 'error'));
+					else {
+						let back = mbim.decode_subscribe_list(info);
+
+						hooks.log('debug', sprintf('subscribed to %d service%s, modem confirms %s',
+							length(events), (length(events) == 1) ? '' : 's',
+							(back != null) ? sprintf('%d', length(back)) : 'an answer it could not read'));
+					}
+				}
+
+				if (cb)
+					cb(null);
+			},
+			{ cmd_type: mbim.CMD_SET, name: 'DEVICE_SERVICE_SUBSCRIBE_LIST', no_recovery: true });
+	};
+
 	// called by the hub for every decoded MBIM frame on this device
 	// REASSEMBLE A FRAGMENTED RESPONSE before anyone tries to decode it.
 	//
@@ -536,8 +612,20 @@ export function create(hub, hooks)
 
 		if (msg.type == mbim.MSG_INDICATE_STATUS) {
 			let key = sprintf('%s:%d', msg.service, msg.cid);
+			let hs = self.handlers[key] ?? [];
 
-			for (let h in (self.handlers[key] ?? []))
+			// EVERY indication, handled or not. An unsubscribed one used to
+			// vanish without trace, so "does this modem send X?" could only be
+			// answered by adding a handler and seeing whether it fired — and a
+			// firmware that sends nothing looked exactly like one this client
+			// forgot to listen for. The QMI side has had its equivalent for a
+			// long time; this is the MBIM one, at the same level.
+			if (hooks?.log)
+				hooks.log('debug', sprintf('indication %s/cid %d, %d bytes%s',
+					mbim.service_name(msg.service), msg.cid,
+					length(msg.info ?? ''), length(hs) ? '' : ' (no handler)'));
+
+			for (let h in hs)
 				h.cb((type(h.decode) == 'function')
 					? h.decode(msg.info, self)
 					: mbim.decode_info(h.fields, msg.info), msg);

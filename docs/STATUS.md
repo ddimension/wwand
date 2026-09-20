@@ -499,6 +499,60 @@ tell the two apart. It is a `warn` with the reason in it — `query failed
 (function_error)`, `answer too short (N bytes)`, or the versions the modem
 offered.
 
+## The modem was never told what to tell us (2026-09-20)
+
+wwand registered indication handlers and never sent
+`MBIM_CID_DEVICE_SERVICE_SUBSCRIBE_LIST` (basic_connect cid 19), so what
+arrived was whatever each firmware volunteers. That is not nothing — an
+RM520N-GL volunteers SIGNAL_STATE, REGISTER_STATE, PACKET_SERVICE,
+LTE_ATTACH_INFO and MODEM_CONFIGURATION at init (GL-X3000, 2026-09-20) — but it
+is the MODEM's choice, and a firmware with a thinner default leaves every
+handler listening to silence with nothing in the log to say so.
+
+The list is **derived from the registered handlers**, never a second table
+beside them: a hardcoded copy goes stale the first time an `on()` is added
+without it, and the failure mode is silence. That also means a vendor service
+(the QMI-over-MBIM passthrough) is carried without anyone remembering it.
+
+    subscribed to 3 services, modem confirms 3
+
+Best-effort throughout: a modem that answers an error keeps whatever it sent
+before, and it is never a reason to fail a bring-up.
+
+**CID 19 REPLACES the default set, and that is measurable.** The first
+subscription omitted LTE_ATTACH_INFO — wwand queried that CID on demand and had
+no handler for it — and the modem stopped volunteering it within the minute. So
+it has a handler now, which is worth having on its own: the attach state and its
+3GPP cause arrive about once a minute unasked, where before they were read only
+when a registration timed out. The state is kept every time, logged only when it
+moves.
+
+Two more indications that had no handler:
+
+- **RADIO_STATE** (cid 3) — the hardware kill switch, which nothing else in this
+  daemon could see. A physical RF switch or a host airplane-mode toggle turns
+  the radio off under a running modem: registration drops, every reconnect
+  fails, and the recovery ladder climbs through opmode cycles and resets against
+  a modem doing exactly what it was told. Hardware-off and software-off are kept
+  apart, because the software one is wwand's to undo and the hardware one is a
+  switch somebody moved. Surfaced as a `control_note`, in `status.radio`, and as
+  a row on the LuCI status page that appears only when something is off. The
+  state read at init is kept too — otherwise "not asked yet" and "both on" look
+  the same.
+- **SLOT_INFO_STATUS** (ext cid 8) — per-slot UICC state, until now polled at
+  init and after a slot switch, so a card pulled while the modem ran was noticed
+  only by the failures that followed.
+
+And every indication is now logged at `debug`, handled or not:
+
+    indication ms_basic_connect_ext/cid 4, 88 bytes (no handler)
+
+An unsubscribed one used to vanish without trace, so "does this modem send X?"
+could only be answered by adding a handler and seeing whether it fired — and a
+firmware that sends nothing looked exactly like one this client forgot to listen
+for. It is the QMI side's equivalent, at the same level, and it is what made the
+measurements above possible.
+
 ## Known open
 
 - **TODO — `pdp_type` cannot be configured per SIM, and two people expected it

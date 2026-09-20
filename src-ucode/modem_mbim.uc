@@ -805,6 +805,93 @@ export function create(opts)
 		// session down (cdc_mbim carrier doesn't follow the session, so nothing
 		// else notices). See context_mbim connect_indication.
 		self.mbim.on(bc, 'CONNECT', (data) => self._on_connect_ind(data));
+
+		// THE HARDWARE KILL SWITCH, which nothing else in this daemon can see.
+		// A physical RF switch or a host airplane-mode toggle turns the radio
+		// off under a running modem: registration drops, every reconnect fails,
+		// and the recovery ladder climbs through opmode cycles and resets
+		// trying to fix a modem that is doing exactly what it was told. The two
+		// states are separate for a reason — a SOFTWARE off is ours to undo
+		// (init already switches it back on), a HARDWARE off is a switch
+		// somebody moved and wwand must not fight it.
+		self.mbim.on(bc, 'RADIO_STATE', (data) => {
+			let hw_off = (data.hw_radio_state == bc.RADIO_STATE_OFF);
+			let sw_off = (data.sw_radio_state == bc.RADIO_STATE_OFF);
+
+			self.radio = { hw: data.hw_radio_state, sw: data.sw_radio_state };
+
+			if (hw_off) {
+				self.control_note = 'radio disabled by the hardware switch';
+				log('warn', 'radio switched off in hardware — the modem will not register until the switch is moved back');
+			}
+			else if (sw_off) {
+				self.control_note = 'radio disabled in software';
+				log('notice', 'radio switched off in software');
+			}
+			else if (self.control_note != null &&
+			         index(self.control_note, 'radio disabled') == 0) {
+				self.control_note = null;
+				log('notice', 'radio switched back on');
+			}
+		});
+
+		// LTE ATTACH INFO, unasked. The RM520N-GL sends this one on its own
+		// roughly once a minute (measured on the GL-X3000, 2026-09-20) —
+		// before this handler existed it was the one indication arriving with
+		// nobody listening, and wwand queried the same CID on demand instead.
+		//
+		// It also has to be here for a second reason: CID 19 REPLACES the
+		// modem's default event set with exactly what was asked for, so an
+		// indication the modem used to volunteer stops arriving the moment a
+		// subscription that omits it goes out. Measured, not assumed — it
+		// stopped, and this is what brings it back.
+		//
+		// Only the state is taken here. The cause top-up (AT+CEER) belongs to
+		// the failure path, which is where somebody is waiting for an answer;
+		// running an AT round trip on every unsolicited update would be a
+		// minute-ly cost for a line nobody reads.
+		self.mbim.on(ext, 'LTE_ATTACH_INFO', (data) => {
+			let state = data.lte_attach_state;
+			let was = self.attach_info?.state;
+
+			self.attach_info = {
+				state: state,
+				state_text: ext.LTE_ATTACH_STATE[sprintf('%d', state ?? -1)],
+				ip_type: data.ip_type,
+				apn: length(data.access_string ?? '') ? data.access_string : null,
+			};
+
+			if (data.nw_error != null && data.nw_error != 0) {
+				self.attach_info.nw_error = data.nw_error;
+				self.attach_info.nw_error_text =
+					nasmod.REJECT_CAUSE[sprintf('%d', data.nw_error)] ??
+					sprintf('cause %d', data.nw_error);
+			}
+
+			// only when it MOVED: this arrives on a timer whether anything
+			// changed or not, and a log line per minute saying "still attached"
+			// is noise that hides the one that matters.
+			if (state != was)
+				log('notice', sprintf('lte attach: %s (apn %s)%s',
+					self.attach_info.state_text ?? sprintf('state %d', state ?? -1),
+					self.attach_info.apn ?? '-',
+					self.attach_info.nw_error_text
+						? sprintf(' — %s', self.attach_info.nw_error_text) : ''));
+		});
+
+		// SIM SLOT STATE, per slot. Today this is polled at init and after a
+		// slot switch; a card pulled or pushed while the modem runs is
+		// otherwise noticed only by the failures that follow it. `ext` is
+		// duck-typed the way the rest of the extensions are — a modem without
+		// the extensions service simply never sends it.
+		self.mbim.on(ext, 'SLOT_INFO_STATUS', (data) => {
+			self.slot_state = self.slot_state ?? {};
+			self.slot_state[sprintf('%d', data.slot_index ?? 0)] = data.state;
+
+			log('notice', sprintf('sim slot %d: state %d (%s)',
+				data.slot_index ?? 0, data.state,
+				ext.UICC_SLOT_STATE_NAMES?.[sprintf('%d', data.state)] ?? 'unknown'));
+		});
 	};
 
 	self._on_connect_ind = function(data) {
@@ -1034,9 +1121,18 @@ export function create(opts)
 		// is reported too but deliberately not acted on — no software write can
 		// clear a physical kill switch, and saying so beats a silent retry.
 		self.mbim.command(bc, 'RADIO_STATE', 'query', {}, (err, data) => {
+			// keep what it answered, not only what it makes us do here. The
+			// indication only fires on a CHANGE, so without this `status` shows
+			// nothing about the radio until somebody flips a switch — and
+			// "no answer yet" and "both switches on" would look the same.
+			if (!err && data != null)
+				self.radio = { hw: data.hw_radio_state, sw: data.sw_radio_state };
+
 			if (err || data?.sw_radio_state != bc.RADIO_STATE_OFF) {
-				if (!err && data?.hw_radio_state == bc.RADIO_STATE_OFF)
+				if (!err && data?.hw_radio_state == bc.RADIO_STATE_OFF) {
 					log('warn', 'hardware radio switch is off — registration will not start');
+					self.control_note = 'radio disabled by the hardware switch';
+				}
 
 				return do_register();
 			}
@@ -1060,6 +1156,16 @@ export function create(opts)
 		sim.log_preradio(self, log, () => sim.restore_preferred_plmn(self, log, () => {
 			self.set_state('REGISTERING');
 			self._install_indications();
+
+			// ...and TELL THE MODEM, which is the half that was missing. The
+			// handlers above are only half a subscription: without CID 19 the
+			// modem sends its own default set, and on the RM520N-GL that set
+			// turned out to be CONNECT and LTE_ATTACH_INFO and nothing else
+			// (measured over four minutes of a live connection, GL-X3000,
+			// 2026-09-20). Best-effort and never blocking: the list is derived
+			// from the handlers just installed, and a modem that refuses it is
+			// no worse off than before.
+			self.mbim.subscribe_events();
 
 			reg_timer = uloop.timer(self.timing.reg_timeout, () => {
 				if (self.state != 'REGISTERING')
@@ -1698,6 +1804,22 @@ export function create(opts)
 		self.uim = null;
 		self.wms = null;
 		self._pt_failed = false;
+
+		// WHAT THE OLD MODEM SAID IS NOT WHAT THE NEW ONE SAYS. Both of these
+		// are published in `status`, and both are filled by indications that
+		// only fire on a CHANGE — so a value left here describes a modem
+		// incarnation that is gone and nothing will correct it until the next
+		// change happens to arrive. A radio switch reported off, or a slot
+		// reported empty, would then outlive the reason for it. `radio` is
+		// re-read at init; `slot_state` is only ever event-driven, which is
+		// exactly why it must not persist. Raised by Codex review, 2026-09-20.
+		self.radio = null;
+		self.slot_state = null;
+
+		// ...and the note that went with them. A backend note is cleared by the
+		// backend; a teardown means there is no longer anything to clear it.
+		if (self.control_note != null && index(self.control_note, 'radio disabled') == 0)
+			self.control_note = null;
 		backend.reset(self, '_sig_be', '_cells_be', '_ca_be', '_dsd_be', '_regd_be', '_apdu_be', '_esim_be');
 
 		if (self.mbim) {

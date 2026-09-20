@@ -2718,7 +2718,23 @@ export function create(opts)
 				netdev: entry.netdev,
 				protocol: entry.protocol,
 				state: entry.modem?.state ?? 'UNRESOLVED',
-				control_note: entry.control_note,
+				// The daemon's own note first — "package not installed", "device
+				// owned by interface X" — because those describe a modem that
+				// is not running at all and there is then no backend to ask.
+				// Otherwise whatever the BACKEND has to say, which is how a
+				// hardware radio switch reaches status and LuCI: modem_mbim
+				// sets it on the modem object, and that object is not this
+				// entry. The two were never joined, so the note existed and
+				// nobody could see it. Raised by Codex review, 2026-09-20.
+				control_note: entry.control_note ?? entry.modem?.control_note,
+				// The radio's two switches, as the modem last reported them
+				// (MBIM RADIO_STATE — hardware and software are separate, and
+				// only the software one is ours to change). Absent on a backend
+				// that does not report it, which is every non-MBIM one today.
+				radio: entry.modem?.radio,
+				// per-slot UICC state, keyed by slot index, as the modem last
+				// said. Event-driven on MBIM; absent elsewhere.
+				slot_state: entry.modem?.slot_state,
 				apdu_backend: entry.modem?._apdu_be,   // mbim | qmi | at (once probed)
 				pin1: entry.modem?.pin1,
 				sim_block: entry.modem?.sim_block,  // { reason, retries } when SIM_BLOCKED

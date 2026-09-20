@@ -282,6 +282,155 @@ function assert_version_function_error() {
 	mv.start();
 }
 
+// WHAT THE MODEM IS TOLD TO TELL US (basic_connect cid 19), and the three
+// indications that only earn their keep once it is.
+//
+// Without CID 19 a modem uses its own default event set. That set is not
+// nothing — an RM520N-GL volunteers SIGNAL_STATE, REGISTER_STATE,
+// PACKET_SERVICE, LTE_ATTACH_INFO and MODEM_CONFIGURATION at init (GL-X3000,
+// 2026-09-20) — but it is the MODEM's choice, and a firmware with a thinner
+// default leaves handlers listening to silence with nothing to say so.
+//
+// The list is DERIVED from the registered handlers, which is the property
+// worth pinning: a hardcoded copy goes stale the first time an `on()` is added
+// without it, and the failure is silence.
+function assert_subscribe_list() {
+	let mocks = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: handlers() });
+	let ms = null, ms_done = false;
+
+	ms = modem_mbim.create({
+		id: 'm_sub', device: '/dev/mock5',
+		config: { apn: 'internet' },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: {
+			transport_open: mocks.transport_open,
+			log: () => null,
+			on_event: (m, event) => {
+				if (event != 'registered' || ms_done)
+					return;
+
+				ms_done = true;
+
+				let sub = mocks.subscribed;
+
+				ok(sub != null, 'subscribe: the modem was told what to send');
+
+				let by = {};
+				for (let e in (sub ?? []))
+					by[e.service] = e.cids;
+
+				// exactly the CIDs this modem has handlers for, and no others
+				eq(by[bc.service], [ 2, 3, 9, 10, 11, 12 ],
+					'subscribe: the basic-connect cids wwand listens for, sorted');
+				eq(by[ext.service], [ 4, 8 ],
+					'subscribe: LTE attach info and per-slot UICC state');
+
+				// ...INCLUDING the QMI-over-MBIM passthrough, which is where
+				// deriving the list from the handlers pays for itself: nobody
+				// writing a vendor service has to remember a second table, and
+				// the QMI indications tunnelled over it keep arriving.
+				eq(by['d1a30bc2-f97a-6e43-bf65-c7e24fb0f0d3'], [ 1 ],
+					'subscribe: a vendor service is carried without a second list');
+
+				// derived, not copied: the client is the one authority
+				eq(length(m.mbim.subscribed_events()), length(sub),
+					'subscribe: the list is built from the registered handlers');
+
+				// THE RADIO KILL SWITCH. A hardware off is a switch somebody
+				// moved, and wwand must say so rather than climb its recovery
+				// ladder against a modem doing what it was told.
+				m.mbim.handlers[sprintf('%s:%d', bc.service, 3)][0].cb(
+					{ hw_radio_state: bc.RADIO_STATE_OFF, sw_radio_state: bc.RADIO_STATE_ON });
+				eq(m.control_note, 'radio disabled by the hardware switch',
+					'radio ind: a hardware off is reported as one');
+
+
+
+				m.mbim.handlers[sprintf('%s:%d', bc.service, 3)][0].cb(
+					{ hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_ON });
+				eq(m.control_note, null, 'radio ind: ...and cleared when it comes back');
+
+				// a note some OTHER part of the daemon set is not ours to clear
+				m.control_note = 'wwand-mbim package not installed';
+				m.mbim.handlers[sprintf('%s:%d', bc.service, 3)][0].cb(
+					{ hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_ON });
+				eq(m.control_note, 'wwand-mbim package not installed',
+					'radio ind: a foreign control note is left alone');
+
+				// PER-SLOT UICC STATE: polled until now, so a card pulled while
+				// the modem runs was noticed only by the failures after it.
+				m.mbim.handlers[sprintf('%s:%d', ext.service, 8)][0].cb(
+					{ slot_index: 1, state: ext.UICC_SLOT_STATE_EMPTY });
+				eq(m.slot_state?.['1'], ext.UICC_SLOT_STATE_EMPTY,
+					'slot ind: the new state is recorded against its slot');
+
+				// LTE ATTACH INFO, unasked. It arrives about once a minute on
+				// this hardware whether anything changed or not, so the state is
+				// kept every time and only a CHANGE is logged.
+				m.mbim.handlers[sprintf('%s:%d', ext.service, 4)][0].cb(
+					{ lte_attach_state: ext.LTE_ATTACH_STATE_ATTACHED,
+					  ip_type: 3, access_string: 'internet', nw_error: 0 });
+				eq(m.attach_info?.state, ext.LTE_ATTACH_STATE_ATTACHED,
+					'attach ind: the state is taken from the indication');
+				eq(m.attach_info?.apn, 'internet', 'attach ind: ...and the apn with it');
+
+				m.mbim.handlers[sprintf('%s:%d', ext.service, 4)][0].cb(
+					{ lte_attach_state: 0, ip_type: 3, access_string: '', nw_error: 27 });
+				eq(m.attach_info?.nw_error, 27, 'attach ind: a cause is carried');
+				ok(length(m.attach_info?.nw_error_text ?? '') > 0,
+					'attach ind: ...and named, not left as a number');
+				eq(m.attach_info?.apn, null, 'attach ind: an empty apn reads as none, not ""');
+
+				ms.stop();
+
+				// AND A MODEM THAT REFUSES CID 19 STILL COMES UP. The default
+				// event set is what it had before; refusing the subscription is
+				// never a reason to fail a bring-up.
+				let hr = handlers();
+				hr.DEVICE_SERVICE_SUBSCRIBE_LIST = { __error: 9 };
+
+				let mockr = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: hr });
+				let mr = null, mr_done = false;
+
+				mr = modem_mbim.create({
+					id: 'm_sub2', device: '/dev/mock6',
+					config: { apn: 'internet' },
+					timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+					at: { fx: { read: () => null, glob: () => [] } },
+					datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+					deps: {
+						transport_open: mockr.transport_open,
+						log: () => null,
+						on_event: (m2, ev2) => {
+							if (ev2 != 'registered' || mr_done)
+								return;
+
+							mr_done = true;
+							eq(m2.state, 'READY',
+								'subscribe: a modem that refuses the list still reaches READY');
+
+							// and the radio the init READ is kept, not only the
+							// one an indication later reports — otherwise
+							// `status` says nothing about the radio until
+							// somebody flips a switch, and "not asked yet" and
+							// "both on" look the same.
+							eq(m2.radio, { hw: bc.RADIO_STATE_ON, sw: bc.RADIO_STATE_ON },
+								'radio: the queried state is kept for status');
+							mr.stop();
+						},
+					},
+				});
+
+				mr.start();
+			},
+		},
+	});
+
+	ms.start();
+}
+
 // at all, so a future "just always write it" cannot pass both halves.
 function assert_radio_off() {
 	let h3 = handlers();
@@ -466,6 +615,7 @@ function assert_puk_block() {
 					m2.stop();
 					assert_radio_off();
 					assert_version_function_error();
+					assert_subscribe_list();
 				}
 			},
 		},

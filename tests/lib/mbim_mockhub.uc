@@ -72,6 +72,8 @@ export function create(opts)
 		// which is a device declining the handshake with a proper answer: the
 		// first is recoverable by closing and reopening, the second is not.
 		mbimex_function_errors: opts?.mbimex_function_errors ?? 0,
+		// the last event subscription the client sent, decoded
+		subscribed: null,
 		// set only once a VERSION query has actually been answered
 		mbimex_agreed: 0,
 		device: null,
@@ -172,6 +174,16 @@ export function create(opts)
 
 		let meta = { name: entry.name, cid: cid, kind: kind, count: self.counts[entry.name] };
 		let handler = self.handlers[entry.name];
+
+		// BUILT-IN: the event subscription (basic_connect cid 19). A modem
+		// echoes back what it accepted, so that is what the mock does — and it
+		// keeps the decoded list, which is how a test can see what the daemon
+		// actually asked to be told about. Override the handler with
+		// `{ __error: N }` to play a modem that does not implement it.
+		if (handler == null && entry.name == 'DEVICE_SERVICE_SUBSCRIBE_LIST') {
+			self.subscribed = mbim.decode_subscribe_list(info);
+			handler = { __raw: info };
+		}
 
 		// BUILT-IN: the MBIMEx version handshake (mbim_client.uc open() sends
 		// it; MBIMEX_REQUEST is 3.0). Echo the requested MBIM version and agree

@@ -1668,6 +1668,40 @@ am3.apply_config(config.parse({ network: {
 eq(am3.modems.m0?.l3_name, false,
 	'automux-name: a pinned channel leaves the parent on its kernel name');
 
+// A CONTROL NOTE THE BACKEND SET HAS TO REACH STATUS.
+//
+// `control_note` exists on two objects: the daemon's modem entry (package not
+// installed, device owned by another interface) and the modem the backend
+// built. Only the first was ever published, so modem_mbim's "radio disabled by
+// the hardware switch" existed and nobody could see it — and status/LuCI is the
+// only place that note matters. Raised by Codex review, 2026-09-20.
+(function() {
+	let made = null;
+	let fake = {
+		modem: { create: (o) => { made = { id: o.id, state: 'READY', config: o.config,
+		                                   start: () => null, stop: () => null }; return made; } },
+		context: { create: (o) => ({ state: 'IDLE', down: (cb) => cb ? cb() : null }) },
+	};
+	let d = daemon_mod.create({ timing: TIMING, deps: { log: () => null, load_qmi: () => fake } });
+
+	d.apply_config(config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a' },
+	} }));
+
+	eq(d.status().modems.m0.control_note, null, 'control note: none to start with');
+
+	made.control_note = 'radio disabled by the hardware switch';
+	eq(d.status().modems.m0.control_note, 'radio disabled by the hardware switch',
+		'control note: a backend note reaches status');
+
+	// ...and a daemon-level note still wins, because it describes a modem that
+	// is not running at all — there is then no backend worth quoting.
+	d.modems.m0.control_note = 'wwand-qmi package not installed';
+	eq(d.status().modems.m0.control_note, 'wwand-qmi package not installed',
+		'control note: the daemon-level note takes precedence');
+})();
+
 // A DEMOTABLE MODEM WHOSE NAME IS ALREADY TAKEN IS NOT AN ERROR.
 //
 // The stable name is asked for up front because the auto channel may turn out

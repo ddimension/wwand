@@ -314,6 +314,81 @@ export function encode_connect_v3(a)
 		tlv_wchar(a.password ?? '');
 };
 
+// MBIM_CID_DEVICE_SERVICE_SUBSCRIBE_LIST (basic_connect cid 19) — the one
+// command whose payload is an array of variable-length structs, so it gets a
+// hand-built encoder rather than a field spec.
+//
+// Layout (libmbim 1.32.0, mbim-service-basic-connect.json:699-724, checked
+// 2026-09-20): EventsCount u32, then a ref-struct-array — one (offset, size)
+// pair per entry, offsets relative to the START OF THE INFORMATION BUFFER —
+// then the entries. Each entry is MbimEventEntry: DeviceServiceId (16-byte
+// uuid), CidsCount u32, Cids u32[CidsCount].
+//
+// `events` is [ { service: '<uuid string>', cids: [ n, ... ] }, ... ].
+export function encode_subscribe_list(events)
+{
+	let list = events ?? [];
+	let n = length(list);
+
+	// count + the pair table; the entries start after both
+	let head = 4 + n * 8;
+	let pairs = '';
+	let blobs = '';
+
+	for (let e in list) {
+		let body = uuid_bytes(e.service) + struct.pack('<I', length(e.cids ?? []));
+
+		for (let cid in (e.cids ?? []))
+			body += struct.pack('<I', cid);
+
+		pairs += struct.pack('<II', head + length(blobs), length(body));
+		blobs += body;
+	}
+
+	return struct.pack('<I', n) + pairs + blobs;
+};
+
+// The same layout coming back, so a test can read what was written and a caller
+// can see what the modem actually agreed to subscribe. Returns null rather than
+// guessing on a buffer that does not hold what it claims.
+export function decode_subscribe_list(buf)
+{
+	if (length(buf ?? '') < 4)
+		return null;
+
+	let n = struct.unpack('<I', substr(buf, 0, 4))[0];
+
+	if (length(buf) < 4 + n * 8)
+		return null;
+
+	let out = [];
+
+	for (let i = 0; i < n; i++) {
+		let off = struct.unpack('<I', substr(buf, 4 + i * 8, 4))[0];
+		let len = struct.unpack('<I', substr(buf, 8 + i * 8, 4))[0];
+
+		// ...and it must point PAST the count and the pair table. Without that
+		// a malformed answer can have an entry decode the header bytes as a
+		// service uuid — a wrong answer where the contract promises null.
+		if (off < 4 + n * 8 || off + len > length(buf) || len < 20)
+			return null;
+
+		let body = substr(buf, off, len);
+		let cids = [];
+		let cn = struct.unpack('<I', substr(body, 16, 4))[0];
+
+		if (20 + cn * 4 > len)
+			return null;
+
+		for (let c = 0; c < cn; c++)
+			push(cids, struct.unpack('<I', substr(body, 20 + c * 4, 4))[0]);
+
+		push(out, { service: uuid_str(substr(body, 0, 16)), cids: cids });
+	}
+
+	return out;
+};
+
 export function encode_info(fields, args)
 {
 	let fixed = '';

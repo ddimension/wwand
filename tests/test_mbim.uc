@@ -875,4 +875,76 @@ eq(mbim.service_name('00000000-0000-0000-0000-0000000000ff'),
 eq(length(mbim.decode_tlvs('\x0a\x00\x00\xff\x00\x00\x00\x00', 0)), 0,
 	'tlv: a header claiming absent padding is a truncated record');
 
+// --- DEVICE_SERVICE_SUBSCRIBE_LIST (basic_connect cid 19) --------------------
+//
+// The one command whose payload is an array of variable-length structs:
+// EventsCount u32, then one (offset, size) pair per entry with offsets relative
+// to the START of the information buffer, then the entries — each a 16-byte
+// service uuid, a CidsCount and that many u32 CIDs (libmbim 1.32.0,
+// mbim-service-basic-connect.json:699-724, checked 2026-09-20).
+//
+// Built by hand here rather than round-tripped through our own encoder alone: a
+// round trip proves the two halves agree with each other, which is exactly what
+// a wrong layout also does.
+(() => {
+	let BC = '\xa2\x89\xcc\x33\xbc\xbb\x8b\x4f\xb6\xb0\x13\x3e\xc2\xaa\xe6\xdf';
+	let EXT = '\x3d\x01\xdc\xc5\xfe\xf5\x4d\x05\x0d\x3a\xbe\xf7\x05\x8e\x9a\xaf';
+
+	// two entries: basic_connect with cids 9, 11 and the extensions with cid 4
+	let e1 = BC + struct.pack('<III', 2, 9, 11);          // 16 + 4 + 8 = 28
+	let e2 = EXT + struct.pack('<II', 1, 4);              // 16 + 4 + 4 = 24
+	let head = 4 + 2 * 8;                                 // count + two pairs
+
+	let want = struct.pack('<I', 2) +
+		struct.pack('<II', head, length(e1)) +
+		struct.pack('<II', head + length(e1), length(e2)) +
+		e1 + e2;
+
+	let got = mbim.encode_subscribe_list([
+		{ service: 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df', cids: [ 9, 11 ] },
+		{ service: '3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf', cids: [ 4 ] },
+	]);
+
+	eq(length(got), length(want), 'subscribe list: buffer length matches the hand-built one');
+	eq(got, want, 'subscribe list: ...and so does every byte');
+
+	// the offsets are from the start of the buffer, which is the half a
+	// round trip cannot catch
+	eq(struct.unpack('<I', substr(got, 4, 4))[0], 20,
+		'subscribe list: the first entry starts after the count and the pair table');
+
+	let back = mbim.decode_subscribe_list(want);
+
+	eq(length(back), 2, 'subscribe list: decodes two entries');
+	eq(back[0].service, 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df', 'subscribe list: first service');
+	eq(back[0].cids, [ 9, 11 ], 'subscribe list: ...and its cids');
+	eq(back[1].cids, [ 4 ], 'subscribe list: second entry cids');
+
+	// a buffer that lies about its own size is refused, not guessed at
+	eq(mbim.decode_subscribe_list(struct.pack('<I', 9)), null,
+		'subscribe list: a count with no pair table is refused');
+	eq(mbim.decode_subscribe_list(struct.pack('<I', 1) + struct.pack('<II', 12, 400)), null,
+		'subscribe list: an entry running past the buffer is refused');
+	// AN OFFSET INSIDE THE COUNT/PAIR TABLE, and otherwise perfectly
+	// self-consistent: the length fits, the CidsCount read out of it fits, and
+	// the entry decodes — with sixteen bytes of our own header as its service
+	// uuid. A bounds check that only asks "does it fit in the buffer" says yes
+	// to this, which is why the entry must also start PAST the table.
+	//
+	// body = bytes 4..28: the 8 pair bytes then the first 16 of the filler, so
+	// filler[8..12] is where the decoder reads CidsCount.
+	let filler = struct.pack('<II', 0, 0) + struct.pack('<I', 1) + struct.pack('<I', 42) +
+		struct.pack('<I', 0);
+	let sneaky = struct.pack('<I', 1) + struct.pack('<II', 4, 24) + filler;
+
+	eq(length(sneaky), 32, 'subscribe list: the malformed case is built as intended');
+	eq(mbim.decode_subscribe_list(sneaky), null,
+		'subscribe list: an entry pointing into the pair table is refused');
+	eq(mbim.decode_subscribe_list(''), null, 'subscribe list: an empty buffer is refused');
+
+	// and an empty list is a legal thing to send: "tell me nothing"
+	eq(mbim.encode_subscribe_list([]), struct.pack('<I', 0),
+		'subscribe list: an empty list is just a zero count');
+})();
+
 done('test_mbim');

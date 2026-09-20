@@ -307,6 +307,23 @@ export const commands = {
 			decode: decode_signal_state_v2,
 		},
 
+		// WHAT THE MODEM MAY TELL US UNASKED. Without this the modem uses its
+		// own default set, and on the RM520N-GL that set is nearly empty:
+		// measured over four minutes of a live connection (GL-X3000,
+		// 2026-09-20), the ONLY indications that arrived were CONNECT and
+		// LTE_ATTACH_INFO — no SIGNAL_STATE, no REGISTER_STATE, no
+		// PACKET_SERVICE, no SUBSCRIBER_READY_STATUS. Every `on()` this daemon
+		// registers for those was listening to silence, and the telemetry that
+		// should have been event-driven was carried entirely by polling.
+		//
+		// Encoded by hand: the payload is a ref-struct-array of
+		// variable-length entries, which the field-spec codec does not express
+		// (mbimmod.encode_subscribe_list / decode_subscribe_list, layout from
+		// libmbim 1.32.0 mbim-service-basic-connect.json:699-724).
+		DEVICE_SERVICE_SUBSCRIBE_LIST: {
+			cid: 19,
+		},
+
 		CONNECT: {
 			cid: 12,
 			set: {

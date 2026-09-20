@@ -227,6 +227,15 @@ export const UICC_SLOT_STATE_ERROR                   = 6;
 export const UICC_SLOT_STATE_ACTIVE_ESIM             = 7;
 export const UICC_SLOT_STATE_ACTIVE_ESIM_NO_PROFILES = 8;
 
+// ...and their names, for the log. A slot indication that reads "state 3" makes
+// the reader look the number up; "empty" does not. Numeric keys are quoted
+// because a bare one is a ucode parse error, and looked up with sprintf('%d').
+export const UICC_SLOT_STATE_NAMES = {
+	'0': 'unknown', '1': 'off, empty', '2': 'off', '3': 'empty',
+	'4': 'not ready', '5': 'active', '6': 'error',
+	'7': 'active eSIM', '8': 'active eSIM, no profiles',
+};
+
 // Device Slot Mappings response: MapCount, then a ref-struct-array of MbimSlot —
 // MapCount × [offset(u32), size(u32)] pairs (offsets relative to the
 // InformationBuffer start) with each 4-byte struct in the data region. Returns
