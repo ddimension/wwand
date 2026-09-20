@@ -167,6 +167,21 @@ def cmake_listed(root, tarball=None):
     return _cmake_lists(open(path).read())
 
 
+def read_source_file(rel, root=None, tarball=None):
+    """The text of one package-relative file, from the tree or the tarball."""
+    if tarball:
+        with tarfile.open(tarball) as tf:
+            member = next((n for n in tf.getnames()
+                           if n.split('/', 1)[-1] == rel), None)
+            if not member:
+                return None
+            return tf.extractfile(member).read().decode('utf-8', 'replace')
+
+    path = os.path.join(root, rel)
+
+    return open(path).read() if os.path.exists(path) else None
+
+
 def _cmake_lists(raw):
     # Strip comments FIRST. These lists carry explanatory comments between the
     # entries, and a `)` inside one (`require()d`, say) ends a non-greedy match
@@ -182,6 +197,55 @@ def _cmake_lists(raw):
         listed.update(t for t in m.group(1).split() if t.endswith('.uc'))
 
     return listed
+
+
+def check_init(root=None, tarball=None):
+    """Invariants of files/wwand.init that fail SILENTLY when they are undone.
+
+    STOP < 85: odhcpd carries STOP=85 (measured on three boards, 2026-09-20),
+    and procd runs the rc.d K-links in plain lexical order — so at 85
+    `K85odhcpd` goes first and wwand withdraws its prefix into a LAN that has
+    nobody left to tell. odhcpd deprecates a vanished prefix only while it runs
+    (RFC 9096 §3.5, odhcpd router.c:840-855); it emits nothing on SIGTERM. The
+    consequence is a stale /64 living on every LAN client until its lifetime
+    expires (ddimension/wwand#36).
+
+    `shutdown()` and not `stop_service()`: rc.common calls `shutdown` from the
+    K-link only, so a plain restart keeps the daemon's non-destructive path
+    where the WAN survives. Hanging the teardown on stop_service would drop the
+    connection on every restart and failed reload instead.
+
+    NOT GATED ON --makefile. These say nothing about packaging; running the
+    checker over a working tree is the documented default, and an assertion
+    that only fires in the fuller invocation is one that will not fire.
+    """
+    msgs = []
+    src = read_source_file('files/wwand.init', root, tarball)
+
+    if src is None:
+        return [ 'files/wwand.init is missing' ]
+
+    m = re.search(r'^STOP=(\d+)\s*$', src, re.M)
+
+    if not m:
+        msgs.append('files/wwand.init has no STOP= line')
+    elif int(m.group(1)) >= 85:
+        msgs.append("files/wwand.init STOP=%s — must be below odhcpd's 85, or "
+                    'the shutdown teardown happens after odhcpd is gone and the '
+                    'LAN is never told the prefix died (ddimension/wwand#36)'
+                    % m.group(1))
+
+    # tolerate the shell's optional space: `shutdown ()` is the same function
+    if not re.search(r'^\s*shutdown\s*\(\s*\)\s*\{', src, re.M):
+        msgs.append('files/wwand.init has no shutdown() hook — the IPv6 prefix '
+                    'is then never withdrawn while odhcpd can still deprecate it')
+
+    if re.search(r'^\s*stop_service\s*\(\s*\)\s*\{', src, re.M):
+        msgs.append('files/wwand.init defines stop_service() — that runs on a '
+                    'plain restart too and would end the connection the '
+                    'non-destructive restart exists to preserve; use shutdown()')
+
+    return msgs
 
 
 def main():
@@ -215,6 +279,9 @@ def main():
             fail('CMakeLists.txt lists %s, which does not exist' % f)
         if not bad:
             print('ok: CMakeLists.txt covers all %d .uc files exactly' % len(uc))
+
+    for msg in check_init(args.root, args.tarball):
+        fail(msg)
 
     if not args.makefile:
         return 1 if bad else 0

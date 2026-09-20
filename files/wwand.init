@@ -12,11 +12,41 @@
 # (ddimension/wwand#6). ubusd does not come from rc.d at all — procd starts it
 # in preinit — so nothing wwand needs is later than this slot.
 #
-# STOP stays at 85, i.e. wwand still stops BEFORE network: teardown at shutdown
-# does not need the daemon, and moving it would change behaviour no report asks
-# about.
+# STOP=84, ONE AHEAD OF odhcpd, and that single digit is the whole point.
+#
+# An IPv6 prefix that disappears without being withdrawn keeps living on the LAN
+# clients until its valid lifetime runs out. odhcpd knows how to prevent that —
+# it remembers the prefixes it has advertised and re-advertises a stale one with
+# Valid and Preferred Lifetime 0 (RFC 9096 §3.5, odhcpd router.c:840-855, version
+# 2026.06.28~68f38269). But it can only do that WHILE IT RUNS: there is no
+# SIGTERM handler that emits a farewell RA (uloop_init handles the signal,
+# uloop_run returns, and the atexit hooks only close file handles —
+# config.c:2246-2250, router.c:49-53).
+#
+# And at 85 wwand lost that race. Both init scripts carried STOP=85, and within
+# one number the K-links are run in plain lexical order: K85odhcpd, then
+# K85wwand, then K90network. So odhcpd was already gone before anything withdrew
+# the prefix, and nothing ever told the LAN. (Measured on three boards —
+# GL-X3000, MikroTik Chateau, Zyxel NR7101 — all odhcpd STOP=85, 2026-09-20.)
+#
+# This bites wwand harder than a wired WAN because of what the mobile model is:
+# the network hands out a fresh /64 per session and delegates nothing, so every
+# reboot adds a prefix to the LAN while the old ones stay valid on the clients.
+# After a few reboots a client holds several, picks a stale source address, and
+# IPv6 is simply broken (ddimension/wwand#36).
+#
+# On an EXISTING install the old K85wwand link stays behind: rc.common's
+# enable() creates `K${STOP}wwand` with `ln -sf` and never removes the previous
+# one (disable() is what removes them, and an upgrade does not call it). The
+# result is both links, so the hook runs at 84 — which is the point — and again
+# at 85, where every interface is already down and the second pass is a no-op.
+# Untidy, not harmful, and preferable to having the init script delete entries
+# from /etc/rc.d behind the user's back.
+#
+# START stays at 19, before S20network, because netifd is a CONSUMER of this
+# daemon (see above).
 START=19
-STOP=85
+STOP=84
 
 USE_PROCD=1
 
@@ -72,4 +102,86 @@ service_triggers() {
 reload_service() {
 	# daemon dead/hung -> the edit would silently never apply; restart instead
 	ubus -t 10 call wwand reload || restart
+}
+
+# SYSTEM SHUTDOWN ONLY — and that is why this is `shutdown()` rather than the
+# `stop_service()` one reaches for first. rc.common calls `shutdown` from the
+# K-link at reboot/poweroff and leaves it out of a plain `stop`, so a
+# `/etc/init.d/wwand restart` still goes through the daemon's non-destructive
+# path, where the WAN and its traffic survive by design. A teardown hung on
+# stop_service would tear the connection down on every restart, package upgrade
+# and failed reload — a cure considerably worse than the disease.
+#
+# `ifdown`, not `wwandctl down`: the goal is to take the ADDRESS off the
+# interface so odhcpd sees the prefix go and deprecates it (see the STOP note
+# above). `wwandctl down` asks the daemon to drop the data session and leaves
+# netifd holding the interface — the session ends, the address stays, and the
+# LAN is none the wiser. This is the same idiom /etc/init.d/network uses in its
+# own shutdown hook (`ifdown -a`), one interface narrower.
+#
+# Reported by liaohongxing (ddimension/wwand#36), whose diagnosis was right;
+# the two corrections above are to the proposed remedy, not to the finding.
+shutdown() {
+	local iface ifaces devs dev n still
+
+	# `[a-zA-Z0-9_]`, not `[^.]`: an ANONYMOUS `config interface` prints as
+	# `network.@interface[1].proto='wwand'`, and `ifdown '@interface[1]'` looks
+	# for a ubus object of that name and finds nothing. uci refuses a dash in a
+	# section name outright ("invalid character in name field"), so this class
+	# is the whole of what can legally appear (measured, 2026-09-20).
+	#
+	# The L3 DEVICE IS READ FIRST, while the interface is still up — see the
+	# wait below for why nothing about it can be learned afterwards.
+	ifaces= devs=
+	for iface in $(uci -q show network 2>/dev/null | \
+	    sed -n "s/^network\.\([a-zA-Z0-9_]*\)\.proto='wwand'\$/\1/p"); do
+		dev=$(ubus -t 2 call "network.interface.$iface" status 2>/dev/null | \
+			sed -n 's/.*"l3_device": *"\([^"]*\)".*/\1/p' | head -1)
+		[ -n "$dev" ] && devs="$devs $dev"
+
+		ifdown "$iface"
+		ifaces="$ifaces $iface"
+	done
+
+	[ -n "$ifaces" ] || return 0
+
+	# WAIT ON THE KERNEL, because netifd will not tell us. The obvious probe —
+	# poll the interface status until the addresses are gone — cannot work:
+	# netifd emits the address and prefix-assignment arrays ONLY while the
+	# state is exactly IFS_UP (netifd 2026.07.08~6088f7b3, ubus.c:835,858),
+	# and `up` itself goes false the moment teardown STARTS. So an empty list
+	# means "torn down" and "still tearing down" alike, and no other status
+	# field separates IFS_TEARDOWN from IFS_DOWN (ubus.c:829-833: `pending` is
+	# IFS_SETUP only). Polling netifd here would look like a wait and be none.
+	#
+	# The device's addresses are not filtered that way. When the teardown
+	# really completes, netifd flushes them — and on a mux/vlan datapath the
+	# device goes away outright, which reads the same to `ip`. Either is the
+	# signal, and both mean the prefix this hook is about has been withdrawn.
+	#
+	# Bounded at 10 s: procd allows each shutdown script 15 s before killing it
+	# (procd 2026.06.17~60fdbf00, rcS.c:164 — `run_timeout = 15000` for `stop`
+	# and `shutdown`). Proceeding beats being killed halfway through the sweep.
+	# proto_wwand_teardown can sit in `ubus -t 30 call wwand context_down` for
+	# far longer than that (files/wwand-proto.sh), so this is a bound, not a
+	# guarantee — and a bounded wait is still the difference between odhcpd
+	# usually hearing about the withdrawal and never hearing about it.
+	n=0
+	while [ $n -lt 10 ]; do
+		still=
+		for dev in $devs; do
+			ip -6 addr show dev "$dev" scope global 2>/dev/null | \
+				grep -q inet6 && still=1
+		done
+
+		[ -n "$still" ] || break
+
+		n=$((n + 1))
+		sleep 1
+	done
+
+	# ...and one second for odhcpd to notice and put the zero-lifetime RA on
+	# the wire before the next K-link stops it. /etc/init.d/network waits the
+	# same second after its own `ifdown -a`.
+	sleep 1
 }
