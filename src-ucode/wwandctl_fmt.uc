@@ -89,6 +89,128 @@ export function fmt_sig(sig)
 	return length(parts) ? join(', ', parts) : '-';
 };
 
+// MbimDataSubclass -> words (libmbim 1.32.0 mbim-enums.h:1867-1872). A bitmask:
+// the modem's own statement of how 5G is attached, where `m.rat` is derived
+// from the shape of the cell environment.
+//
+// DUPLICATED ON PURPOSE, and the duplicate is named so it can be kept in step:
+// luci-app-wwand `htdocs/luci-static/resources/wwand/format.js` carries the
+// same two tables (DATA_SUBCLASS, FREQUENCY_RANGE) because a browser module and
+// a ucode module cannot share one. The words must MATCH — a CLI and a page that
+// disagree about the same value are worse than either alone, and they already
+// drifted once (the CLI said "FR2 (mmWave)" where the page said "FR2 (mmWave,
+// 24 GHz and above)"). Change one, change both.
+const DATA_SUBCLASS = [
+	[ 1, 'ENDC' ],      // 5G on an LTE anchor — non-standalone
+	[ 2, '5G NR' ],     // standalone
+	[ 4, 'NEDC' ],
+	[ 8, 'ELTE' ],
+	[ 16, 'NGENDC' ],
+];
+
+export function data_subclass(v)
+{
+	if (v == null || v == 0)
+		return null;
+
+	let out = [];
+	let rest = v;
+
+	for (let p in DATA_SUBCLASS)
+		if (v & p[0]) {
+			push(out, p[1]);
+			rest &= ~p[0];
+		}
+
+	// AN UNKNOWN BIT IS REPORTED, INCLUDING BESIDE KNOWN ONES. The first
+	// version only fell back to hex when NOTHING was recognised, so 0x21 came
+	// back as a bare "ENDC" and the bit this table does not know was dropped
+	// silently — which is the one case where saying nothing is worst, because a
+	// modem setting it is telling us something new. Found by review, 2026-09-20.
+	if (rest)
+		push(out, sprintf('0x%x', rest));
+
+	return length(out) ? join(' + ', out) : null;
+};
+
+// FR1 is sub-6 GHz, FR2 is mmWave (3GPP TS 38.104 §5.2). Bitmask again —
+// aggregation can span both.
+export function frequency_range(v)
+{
+	if (v == null || v == 0)
+		return null;
+
+	let out = [];
+
+	if (v & 1) push(out, 'FR1 (sub-6 GHz)');
+	if (v & 2) push(out, 'FR2 (mmWave, 24 GHz and above)');
+
+	// same rule as the subclass above: a bit outside FR1/FR2 is carried, not
+	// swallowed by the two that were recognised
+	let rest = v & ~3;
+
+	if (rest)
+		push(out, sprintf('0x%x', rest));
+
+	return length(out) ? join(' + ', out) : null;
+};
+
+// The attach-time tracking area. MbimTai gives PlmnMcc and PlmnMnc as bare
+// guint16 and NO digit count — so the MNC's width is not recoverable from it,
+// and this is exactly where zero-padding to two would invent an operator:
+// 310/030 and 310/30 are different networks. The registration's PLMN does carry
+// `mnc_digits`, so when it names the same network its width is borrowed; when
+// it does not, the number is printed as the modem gave it rather than padded on
+// a guess.
+export function tai_text(tai, plmn)
+{
+	// EVERY PART OR NONE. A half-filled TAI rendered as `310/0 tac 0`, which
+	// looks like a tracking area and is not one — zero is not an honest stand-in
+	// for a field the modem did not send. Found by review, 2026-09-20.
+	if (tai?.mcc == null || tai?.mnc == null || tai?.tac == null)
+		return null;
+
+	let mnc = tai.mnc;
+	let digits = (plmn?.mcc == tai.mcc && plmn?.mnc == mnc) ? plmn?.mnc_digits : null;
+	let txt = sprintf('%d', mnc);
+
+	while (digits != null && length(txt) < digits)
+		txt = '0' + txt;
+
+	return sprintf('%d/%s tac %d', tai.mcc, txt, tai.tac);
+};
+
+// The MBIMEx extras as one line, or null when there is nothing to say — which
+// is every non-MBIMEx backend, so the caller prints no row at all rather than a
+// placeholder.
+//
+// THE DECISION LIVES HERE, not in the printf. wwandctl.uc is a script with a
+// top-level dispatch and no seam a test can reach; everything in it that judges
+// rather than prints belongs in this module, which is where reg_text and
+// fmt_sig already are. A row whose logic sits in the unreachable half is a row
+// nothing can hold shut — reverting it would have left every test green.
+// Found by review, 2026-09-20.
+export function packet_service_text(ps, plmn)
+{
+	// a scalar here is not a packet-service object, and reading a property off
+	// one THROWS in ucode — which would abort the CLI mid-status
+	if (type(ps) != 'object')
+		return null;
+
+	let bits = [];
+	let fr = frequency_range(ps.frequency_range);
+
+	if (fr)
+		push(bits, fr);
+
+	let tai = tai_text(ps.tai, plmn);
+
+	if (tai)
+		push(bits, sprintf('attach TAI %s', tai));
+
+	return length(bits) ? join(' · ', bits) : null;
+};
+
 export function reg_text(m)
 {
 	let r = m.registration;
@@ -97,12 +219,35 @@ export function reg_text(m)
 		return sprintf('SIM blocked: %s%s', m.sim_block?.reason ?? '?',
 			m.sim_block?.retries != null ? sprintf(' (%d retries left)', m.sim_block.retries) : '');
 
-	if (r?.registration == 1 || (type(r?.radio_ifs) == 'array' && length(r.radio_ifs)))
-		return sprintf('%s%s%s', fmt_plmn(r), r.roaming ? ', roaming' : '',
-			m.rat ? sprintf(', %s', m.rat) : '');
+	if (r?.registration == 1 || (type(r?.radio_ifs) == 'array' && length(r.radio_ifs))) {
+		// the modem's own word for how 5G is attached, beside the derived one
+		let sub = data_subclass(m.packet_service?.data_subclass);
 
-	return m.registration_detail?.reject_text
-		? sprintf('not registered: %s', m.registration_detail.reject_text)
+		return sprintf('%s%s%s%s', fmt_plmn(r), r.roaming ? ', roaming' : '',
+			m.rat ? sprintf(', %s', m.rat) : '',
+			sub ? sprintf(' · %s', sub) : '');
+	}
+
+	// WHY IT IS NOT REGISTERED, and the attach is a second, independent answer
+	// to that: a wrong attach APN registers the radio and never attaches, so the
+	// reject cause is empty and only the attach carries the reason. The CLI said
+	// a bare "not registered" in exactly the case somebody runs it to find out.
+	let why = [];
+
+	if (m.registration_detail?.reject_text)
+		push(why, m.registration_detail.reject_text);
+
+	let ai = m.attach_info;
+
+	if (ai?.nw_error_text)
+		push(why, sprintf('attach: %s', ai.nw_error_text));
+	else if (ai?.ceer_text)
+		push(why, sprintf('attach: %s', ai.ceer_text));
+	else if (ai?.state_text)
+		push(why, sprintf('attach: %s', ai.state_text));
+
+	return length(why)
+		? sprintf('not registered: %s', join(' · ', why))
 		: 'not registered';
 };
 

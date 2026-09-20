@@ -8,7 +8,8 @@
 
 'use strict';
 
-import { fmt_plmn, fmt_sig, fmt_locks, reg_text, collectd_lines, collectd_interval } from 'wwand.wwandctl_fmt';
+import { fmt_plmn, fmt_sig, fmt_locks, reg_text, packet_service_text,
+	collectd_lines, collectd_interval } from 'wwand.wwandctl_fmt';
 
 import * as libubus from 'ubus';
 import * as fs from 'fs';
@@ -87,6 +88,15 @@ function cmd_status(args)
 			if (sig && sig.ok !== false)
 				printf('  signal      %s\n', fmt_sig(sig));
 		}
+
+		// MBIMEx only, and absent on every other backend — so the row simply is
+		// not there rather than printing a placeholder. The tracking area comes
+		// from the ATTACH, which is not always the cell's: a modem that moved
+		// without re-attaching shows the difference.
+		let ps_line = packet_service_text(m.packet_service, m.registration?.plmn);
+
+		if (ps_line)
+			printf('  5g          %s\n', ps_line);
 
 		if (m.temperature?.celsius != null)
 			printf('  temp        %d °C\n', m.temperature.celsius);

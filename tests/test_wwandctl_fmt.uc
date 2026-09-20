@@ -311,4 +311,120 @@ eq(fmt.fmt_locks({ lte: '1850:100' }), 'LTE 1850:100',
 eq(fmt.fmt_locks('nonsense'), null, 'locks: a scalar container is refused, not dereferenced');
 eq(fmt.fmt_locks(true), null, 'locks: ...including a bare true');
 
+// --- the MBIMEx extras, in the CLI -------------------------------------------
+//
+// The page renders these; the CLI did not, and this tree has been caught by
+// exactly that asymmetry before — max_sessions and the temperature row both sat
+// parsed and unprintable for as long as they existed.
+
+// data subclass: the modem's own statement of how 5G is attached, as against
+// `rat`, which is derived from the shape of the cell environment
+eq(fmt.data_subclass(1), 'ENDC', 'subclass: bit 0 is ENDC — 5G on an LTE anchor');
+eq(fmt.data_subclass(2), '5G NR', 'subclass: bit 1 is standalone');
+eq(fmt.data_subclass(1 | 8), 'ENDC + ELTE', 'subclass: it is a mask');
+eq(fmt.data_subclass(1 << 20), '0x100000', 'subclass: an unknown bit is reported, not dropped');
+// ...INCLUDING BESIDE A KNOWN ONE. The first version fell back to hex only when
+// nothing was recognised, so 0x21 came back as a bare "ENDC" and the bit this
+// table does not know vanished — the one case where silence is worst.
+eq(fmt.data_subclass(0x21), 'ENDC + 0x20',
+   'subclass: an unknown bit survives next to a known one');
+eq(fmt.frequency_range(5), 'FR1 (sub-6 GHz) + 0x4',
+   'range: ...and the same on the frequency range');
+eq(fmt.data_subclass(0), null, 'subclass: zero means the modem said nothing');
+eq(fmt.data_subclass(null), null, 'subclass: ...and so does an absent field');
+
+eq(fmt.frequency_range(1), 'FR1 (sub-6 GHz)', 'range: resolved, not left as a code');
+// the wording is IDENTICAL to luci-app-wwand's format.js on purpose: a CLI and
+// a page that disagree about the same value are worse than either alone
+eq(fmt.frequency_range(3), 'FR1 (sub-6 GHz) + FR2 (mmWave, 24 GHz and above)',
+   'range: aggregation spans both, worded as the page words it');
+eq(fmt.frequency_range(0), null, 'range: zero is absent');
+
+// THE ATTACH TAI AND THE WIDTH TRAP. MbimTai carries the MNC as a bare u16 with
+// no digit count, so padding it to two would invent an operator: 310/030 and
+// 310/30 are different networks. The registration's PLMN knows the width; it is
+// borrowed only when it names the same network.
+eq(fmt.tai_text({ mcc: 310, mnc: 30, tac: 4030 },
+                { mcc: 310, mnc: 30, mnc_digits: 3 }),
+   '310/030 tac 4030', 'tai: the width is borrowed from the registration');
+eq(fmt.tai_text({ mcc: 262, mnc: 1, tac: 4030 },
+                { mcc: 262, mnc: 1, mnc_digits: 2 }),
+   '262/01 tac 4030', 'tai: ...and a two-digit MNC still pads');
+// a DIFFERENT network in the registration says nothing about this one's width,
+// so the number is printed as the modem gave it rather than padded on a guess
+eq(fmt.tai_text({ mcc: 310, mnc: 30, tac: 4030 },
+                { mcc: 262, mnc: 1, mnc_digits: 2 }),
+   '310/30 tac 4030', 'tai: a mismatched PLMN lends no width');
+eq(fmt.tai_text(null, null), null, 'tai: no TAI, no row');
+// EVERY PART OR NONE: a half-filled TAI rendered as `310/0 tac 0`, which looks
+// like a tracking area and is not one
+eq(fmt.tai_text({ mcc: 310 }, null), null, 'tai: a missing MNC is not a zero');
+eq(fmt.tai_text({ mcc: 310, mnc: 30 }, null), null, 'tai: ...nor is a missing TAC');
+
+// --- the CLI's 5g row, where its decision now lives --------------------------
+//
+// It used to be built inline in wwandctl.uc, which has no seam a test can
+// reach — so reverting the whole row left every test green.
+eq(fmt.packet_service_text({ frequency_range: 1, data_subclass: 1 }, null),
+   'FR1 (sub-6 GHz)', 'ps row: the frequency range alone');
+eq(fmt.packet_service_text({ frequency_range: 1,
+                             tai: { mcc: 262, mnc: 1, tac: 4030 } },
+                           { mcc: 262, mnc: 1, mnc_digits: 2 }),
+   'FR1 (sub-6 GHz) · attach TAI 262/01 tac 4030',
+   'ps row: ...and the attach TAI beside it');
+// every non-MBIMEx backend: no row rather than an empty one
+eq(fmt.packet_service_text(null, null), null, 'ps row: nothing to say, no row');
+eq(fmt.packet_service_text({ data_subclass: 1 }, null), null,
+   'ps row: the subclass belongs on the network line, not here');
+eq(fmt.packet_service_text({ frequency_range: 0, tai: {} }, null), null,
+   'ps row: zeroes and an empty TAI are absence, not content');
+// a scalar would THROW on a property read in ucode, which aborts the CLI
+eq(fmt.packet_service_text(true, null), null, 'ps row: a scalar is refused, not dereferenced');
+
+// --- reg_text: the attach is a SECOND answer to "why not registered" ---------
+//
+// A wrong attach APN registers the radio and never attaches, so the reject
+// cause is empty and only the attach carries the reason. The CLI said a bare
+// "not registered" in precisely the case somebody runs it to find out
+// (reproduced on a GL-X3000, 2026-09-20).
+eq(fmt.reg_text({ state: 'REGISTERING', registration: { registration: 0 },
+	attach_info: { state_text: 'detached',
+	               ceer_text: 'Requested service option not subscribed' } }),
+   'not registered: attach: Requested service option not subscribed',
+   'reg_text: the extended error report explains a stuck registration');
+
+// a mapped 3GPP cause wins over the raw report
+eq(fmt.reg_text({ state: 'REGISTERING', registration: { registration: 0 },
+	attach_info: { state_text: 'detached', ceer_text: 'EMM cause 33',
+	               nw_error_text: 'requested service option not subscribed' } }),
+   'not registered: attach: requested service option not subscribed',
+   'reg_text: ...and a mapped cause is preferred over the raw text');
+
+// both halves when both have something to say
+eq(fmt.reg_text({ state: 'REGISTERING', registration: { registration: 0 },
+	registration_detail: { reject_text: 'PLMN not allowed' },
+	attach_info: { state_text: 'detached' } }),
+   'not registered: PLMN not allowed · attach: detached',
+   'reg_text: registration and attach are reported side by side');
+
+// ...and nothing invented when there is nothing. This one passed BEFORE the
+// change too — it is a guard rail against the addition inventing text, not
+// evidence for it, and saying so is cheaper than someone later mistaking it for
+// coverage.
+eq(fmt.reg_text({ state: 'REGISTERING', registration: { registration: 0 } }),
+   'not registered', 'reg_text: no detail, no invention');
+
+// the discriminating shape of the same idea: an attach_info whose every field
+// is null must not produce "not registered: attach: " with nothing after it
+eq(fmt.reg_text({ state: 'REGISTERING', registration: { registration: 0 },
+	attach_info: { state: 0, nw_error_text: null, ceer_text: null, state_text: null } }),
+   'not registered', 'reg_text: an empty attach_info adds no dangling label');
+
+// a registered modem carries the subclass beside the derived RAT
+eq(fmt.reg_text({ state: 'READY', rat: 'LTE',
+	registration: { registration: 1, plmn: { mcc: 262, mnc: 1, description: 'Telekom.de' } },
+	packet_service: { data_subclass: 1 } }),
+   'Telekom.de (262/01), LTE · ENDC',
+   'reg_text: the modem says ENDC where the cell environment says LTE');
+
 done('test_wwandctl_fmt');

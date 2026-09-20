@@ -238,6 +238,92 @@ HW: GL-X3000 / RM520N-GL — `MBIMEx 3.0 agreed`, imsi/iccid populated, IPv4
 `10.24.245.13` + IPv6, ping 3/3 and 2/2, and an `ifdown`/`ifup` cycle back to
 CONNECTED (2026-09-19). Not exercised on a v3 modem other than this one.
 
+## What MBIMEx v3 actually buys (2026-09-20)
+
+Speaking v3 was the price of keeping an RM520N-GL connected (above). This is
+what it makes reachable, which is a different question and was worth asking.
+
+**Fields that ride on messages already being polled.** Packet Service gains
+FrequencyRange, DataSubclass and the attach TAI; Register State gains
+PreferredDataClasses. All APPENDED after the v1 fields, so one layout reads
+every generation and a v1 modem stops early — the decoder answers null, which is
+what absent means.
+
+`data_subclass` is the one that earns its keep. MbimDataSubclass names
+ENDC / 5G NR / NEDC / ELTE / NGENDC, so the modem STATES whether 5G sits on an
+LTE anchor or stands alone. Everywhere else that distinction is inferred from
+the shape of the cell environment — a good guess, still a guess. On the test box
+the two disagree: the cells say LTE, the modem says ENDC. Both are shown.
+
+**Layouts that are selected, not appended.** LTE Attach Info INSERTS NwError
+after LteAttachState, so the two versions differ from the second field on and
+every string offset after it moves. Extended Device Caps (CID 6) is worse — it
+reorders AND changes kind partway through: eleven inline fields, DataSubclass a
+guint64 there and a guint32 in Packet Service, and everything from LteBandClass
+on a TLV. Both carried the wrong layout unconditionally since `b2d8176` and were
+harmless only because nothing called them. Same commit also had
+`LTE_ATTACH_STATE_ATTACHING = 1 / ATTACHED = 2`; MbimLteAttachState has two
+values, not three (mbim-enums.h:1424-1425).
+
+**Two commands that exist only in v3**: Modem Configuration (CID 16), the
+carrier profile over MBIM rather than QMI PDC and so readable on firmware with
+no PDC at all, and Wake Reason (CID 19). Both need TLV DEcoding, which the codec
+did not have — it could only write them. Asked once, and only when v3 was
+actually negotiated. The RM520N-GL refuses both (NotInitialized,
+NoDeviceSupport), which is visible at debug rather than silent.
+
+That refusal is why `no_recovery` had to start working on `command` and not only
+`command_raw`: an optional CID a firmware has not implemented was counting
+against the control channel and driving the hardware ladder toward a repower.
+
+**The attach diagnostic needed AT.** MBIM reports the attach STATE reliably and
+leaves NwError empty on most firmware — "detached" and nothing else. So when
+MBIM gives no cause and an AT channel exists, `AT+CEER` is asked; `regdetail.uc`
+has relied on exactly that complementarity for the registration cause since it
+was written. With a deliberately wrong attach APN the LuCI page now reads
+"detached · Requested service option not subscribed" where it read "searching",
+and `wwandctl status` reads "not registered: attach: Requested service option
+not subscribed" where it read a bare "not registered" — the CLI names one
+reason, by precedence (mapped 3GPP cause, else the raw CEER text, else the
+state), because a status line has no room to list them all.
+
+Three things review caught that were wrong on the first pass, all now tested:
+
+- The diagnostic runs on the registration TIMEOUT and asking costs seconds. The
+  state test guarding the timer says when it FIRED, not how things stand now —
+  so a registration landing inside the query was reported as a timeout and the
+  working session torn down. Re-checked in the callback; both queries bounded
+  explicitly (the defaults are 15 s and 5 s, no bound worth having on a failure
+  path).
+- `decode_tlvs` ignored the claimed padding. libmbim sizes a record as header +
+  data_length + padding_length (mbim-tlv.c:150-160); a header claiming padding
+  that is not there is truncated, and it was being accepted as whole.
+- `attach_info` was written at the moment of failure and destroyed by the
+  teardown that follows, so status and LuCI read null every time. Carried on the
+  recovery record now, as `last_reg_detail` already was.
+
+**Published, decided on nowhere.** Everything harvested goes out through
+`status()` and nothing branches on it. What is RENDERED is narrower, and worth
+stating rather than glossing:
+
+| | LuCI page | `wwandctl status` |
+|---|---|---|
+| `data_subclass` | yes, beside the derived RAT | yes, same place |
+| `frequency_range` | yes | yes |
+| attach TAI | yes | yes |
+| `attach_info` | yes, its own row | folded into the not-registered line |
+| `preferred_data_class` | no | no |
+| `modem_config`, `wake_reason` | no | no |
+
+The last two rows are ubus-only for now: this modem refuses both v3 commands, so
+there has never been a value to render, and a row that has never once been seen
+is a row written blind. Closing the CLI/GUI split for the rest was deliberate —
+`max_sessions` and the temperature row each sat parsed-and-unprintable for as
+long as they existed.
+
+HW: GL-X3000 / RM520N-GL — FR1 and DataSubclass ENDC read off the wire, the CEER
+cause confirmed with a bogus APN, the box restored afterwards.
+
 ## MBIM failures say what failed (2026-09-19)
 
 The QMI client reports the failing message to the recovery hook and `modem.uc`
