@@ -354,6 +354,13 @@ export function create(opts)
 		if (!err)
 			return cb(err, rdp);
 
+		// THE ENGINE, not just its presence. The NCM modem has no generation
+		// counter — modem_common.make_fail says so in as many words — so the
+		// only handle on "is this still the same incarnation" is the AT engine
+		// object itself, which a restart replaces. Same discriminator the QMI
+		// side uses for a client it re-allocates (modem.uc: `self.uim != uim`).
+		let eng = self.modem.at;
+
 		ip_config_retry_timer = uloop.timer(opts.timing?.ip_config_retry ?? IP_CONFIG_RETRY_MS, () => {
 			ip_config_retry_timer = null;
 
@@ -369,7 +376,12 @@ export function create(opts)
 			// engine to ask — and the retry walked into a null one. ANSWER
 			// here rather than returning: the caller is still waiting, and a
 			// silent return hangs the activation instead of failing it.
-			if (!self.modem.at)
+			// ...and a modem that came BACK is not the one we asked. A stop
+			// followed by a start inside the retry window leaves the context
+			// in ACTIVATING with a non-null engine, so both guards above pass
+			// and the old activation would read CGCONTRDP on the new session
+			// and answer its caller with it.
+			if (!self.modem.at || self.modem.at != eng)
 				return cb(err);
 
 			read_rdp_once(cb);

@@ -2409,4 +2409,153 @@ eq(reattach_err?.error, 'cancelled',
 		'throwing-cb: the depth is back to zero, so future retries still work');
 }
 
+// --- ...and it must not strand the continuations queued behind it ------------
+//
+// The guard above was one `try` around the WHOLE walk, which fixed the depth
+// and left the rest of the queue unpaid: the first thrower unwound out of the
+// loop, and every continuation after it had its timer cancelled and its caller
+// never answered — the exact hang the walk exists to prevent, now for everyone
+// but the first. The guard belongs inside the loop. Found by review,
+// 2026-09-20.
+{
+	uloop.init();
+
+	let mock = mockhub.create({ handlers: base_handlers() });
+	let issued = false;
+	let second = null;
+	let m;
+
+	m = modem_mod.create({
+		id: 'reattach-throwing-first', device: '/dev/mock0', config: {},
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		at: { fx: fakefx.create() },
+		timing: { ...TIMING, settle: 500 },
+		deps: {
+			transport_open: mock.transport_open,
+			log: (level, msg) => null,
+			on_event: (mm, event, data) => {
+				if (event != 'registered' || issued)
+					return;
+
+				issued = true;
+
+				// TWO waits, and the FIRST one throws. Order matters: the
+				// second is the one that used to be lost.
+				m.reattach((err) => { die('a caller callback that throws'); });
+				m.reattach((err) => { second = err?.error ?? 'answered'; });
+
+				uloop.timer(30, () => {
+					m.stop();
+					uloop.timer(20, () => uloop.end());
+				});
+			},
+		},
+	});
+
+	m.start();
+	uloop.timer(3000, () => uloop.end());
+	uloop.run();
+
+	ok(issued, 'throwing-first: two reattach waits were issued');
+	eq(second, 'cancelled',
+		'throwing-first: the second caller is still answered after the first threw');
+	eq(m._teardown_depth, 0,
+		'throwing-first: ...and the depth still came back down');
+}
+
+// --- the depth has to cover the callbacks teardown itself runs ---------------
+//
+// `_teardown_depth` is what stops make_fail from arming a retry, or re-entering
+// teardown, while a teardown is in progress. It was decremented up beside the
+// client destruction — and BELOW that line teardown still calls callers' code:
+// the PDC waiters and the long-APDU reassembly, each of which can reach the
+// shared failure ladder. Those callbacks therefore ran with the guard already
+// lowered, which is precisely when it was supposed to be up. Found by review,
+// 2026-09-20.
+{
+	uloop.init();
+
+	let mock = mockhub.create({ handlers: base_handlers() });
+	let seen = null;
+	let m;
+
+	m = modem_mod.create({
+		id: 'pdc-depth', device: '/dev/mock0', config: {},
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		at: { fx: fakefx.create() },
+		timing: { ...TIMING },
+		deps: {
+			transport_open: mock.transport_open,
+			log: () => null,
+			on_event: (mm, event) => {
+				if (event != 'registered' || seen != null)
+					return;
+
+				// a PDC waiter that records what the guard said when teardown
+				// cancelled it
+				m._pdc_waits = m._pdc_waits ?? {};
+				m._pdc_waits['probe'] = {
+					timer: { cancel: () => null },
+					cb: () => { seen = m._teardown_depth; },
+				};
+
+				uloop.timer(20, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+			},
+		},
+	});
+
+	m.start();
+	uloop.timer(3000, () => uloop.end());
+	uloop.run();
+
+	ok(seen != null, 'pdc-depth: the waiter was cancelled by the teardown');
+	ok(seen >= 1, 'pdc-depth: ...and saw the teardown guard still raised');
+	eq(m._teardown_depth, 0, 'pdc-depth: the guard comes back down afterwards');
+}
+
+// --- ...and a throw anywhere in the teardown must still balance it -----------
+//
+// The per-callback guards keep one caller's throw from stranding the next. They
+// do NOT balance `_teardown_depth`: the work BETWEEN them can throw too, and a
+// throw that escapes the function skips the decrement, leaving the guard raised
+// for the life of the object — which disables every future retry. ucode has no
+// `finally`, so the body is wrapped. Here the waiter table holds a SCALAR,
+// which makes `w.timer?.cancel()` read a property off a number and throw
+// exactly where no per-callback guard sits. Found by review, 2026-09-20.
+{
+	uloop.init();
+
+	let mock = mockhub.create({ handlers: base_handlers() });
+	let armed = false;
+	let m;
+
+	m = modem_mod.create({
+		id: 'teardown-throws-outside', device: '/dev/mock0', config: {},
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		at: { fx: fakefx.create() },
+		timing: { ...TIMING },
+		deps: {
+			transport_open: mock.transport_open,
+			log: () => null,
+			on_event: (mm, event) => {
+				if (event != 'registered' || armed)
+					return;
+
+				armed = true;
+				m._pdc_waits = { hostile: 7 };   // not an object with .timer/.cb
+
+				uloop.timer(20, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+			},
+		},
+	});
+
+	m.start();
+	uloop.timer(3000, () => uloop.end());
+	uloop.run();
+
+	ok(armed, 'teardown-throws: the hostile waiter table was installed');
+	eq(m._teardown_depth, 0,
+		'teardown-throws: the depth came back down even so, so retries still work');
+}
+
 done('test_modem');

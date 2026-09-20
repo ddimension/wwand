@@ -30,7 +30,23 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # `??` is ucode's null-coalescing operator and appears on hundreds of lines; the
 # first version of this checker produced 53 false positives and not one true
 # one. A checker that cries wolf is worse than no checker.
-BANNED = re.compile(r'\(\?')
+# A BACKREFERENCE IS THE OTHER HALF, and it fails differently: `(a)\1` does not
+# throw, it simply never matches. Measured on both the glibc host build and the
+# musl target (OpenWrt aarch64, ucode on 192.168.3.93, 2026-09-20) — 'aa' does
+# not match /(a)\1/ on either. A construct that silently never matches is worth
+# refusing precisely because nothing reports it.
+#
+# NOT BANNED, and both by measurement rather than belief:
+#   \d \w \s  — these WORK. The same probe matched '123' against /\d+/ and did
+#               NOT match 'ddd', on glibc and on musl alike (2026-09-20). They
+#               look like GNU extensions one would expect POSIX ERE to lack,
+#               which is exactly why the measurement is recorded here: the next
+#               reader would otherwise "fix" a checker that is already right.
+#   *? +? ??  — lazy quantifiers compile and match. `??` is ucode's
+#               null-coalescing operator on hundreds of lines; the first version
+#               of this checker flagged it and produced 53 false positives and
+#               not one true one. A checker that cries wolf is worse than none.
+BANNED = re.compile(r'\(\?|\\[1-9]')
 
 # STRINGS ARE SCANNED, comments are not. Four call sites build a regex from a
 # TABLE ENTRY at runtime — netlink.uc:621, atcmd.uc:89, protocol_switch.uc:71,
@@ -104,14 +120,29 @@ def main():
         for n, line in enumerate(f.read_text().splitlines(), 1):
             code, in_block = scannable(line, in_block)
 
-            if not BANNED.search(code):
+            m = BANNED.search(code)
+
+            if not m:
                 continue
 
-            print(f'{f.relative_to(ROOT)}:{n}: `(?` — ucode uses POSIX ERE, which has no')
-            print( '    non-capturing group, lookaround, atomic group or inline flags.')
-            print( '    The literal THROWS when it is evaluated; inside a callback that')
-            print( '    means inside uloop, which kills the daemon. Use a plain group and')
-            print( '    shift the capture indices, or restructure the match.')
+            # NAME WHAT MATCHED. The two constructs fail in opposite ways, and
+            # a message that always described the group syntax sent the reader
+            # looking for a `(?` that was not there.
+            if m.group(0).startswith('('):
+                print(f'{f.relative_to(ROOT)}:{n}: `(?` — ucode uses POSIX ERE, which has no')
+                print( '    non-capturing group, lookaround, atomic group or inline flags.')
+                print( '    The literal THROWS when it is evaluated; inside a callback that')
+                print( '    means inside uloop, which kills the daemon. Use a plain group and')
+                print( '    shift the capture indices, or restructure the match.')
+            else:
+                print(f'{f.relative_to(ROOT)}:{n}: `{m.group(0)}` — a backreference. POSIX ERE has')
+                print( '    none, and this one does NOT throw: it simply never matches, so the')
+                print( '    branch it guards is silently dead (measured on the glibc host and')
+                print( '    the musl target alike, 2026-09-20). Match the repeat explicitly.')
+                print( '    IF THIS IS NOT A REGEX: strings are scanned too, deliberately (see')
+                print( '    the note on scannable), so an octal or control escape in an')
+                print( '    ordinary string lands here. Spell it with \\x01 instead.')
+
             print(f'    {line.strip()}')
             bad += 1
 

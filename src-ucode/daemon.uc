@@ -279,10 +279,18 @@ export function create(opts)
 	// BOUNDED, because an unbounded marker shadows the next genuine `ifdown`:
 	// wwand downs an interface (a SIM block, a stuck-pending reset), the
 	// operator later runs `ifdown` deliberately, and the modem's next
-	// `registered` would read that as our own down and undo it. The window a
-	// legitimate marker needs is the one between our down and the kick that
-	// answers it — seconds. Anything older is not evidence about the current
-	// state any more (found by audit, 2026-09-07).
+	// `registered` would read that as our own down and undo it.
+	//
+	// THE TTL IS THE WHOLE OF THE GUARANTEE, and it is worth being plain about
+	// what that buys and what it costs. netifd records no author for a `down`,
+	// so inside the window an operator's ifdown and ours are the same event and
+	// wwand will undo the operator's — once; the kick that follows clears the
+	// marker on evidence, so a repeated ifdown sticks. An earlier version of
+	// this comment called the window "seconds", which reads like a bound and is
+	// not one: the constant is 180 s, and the ddimension/wwand#35 case below
+	// needed 115 s of it. The window has to outlive the modem outage that
+	// prompted our down, and that is not a quantity this code gets to choose.
+	// (found by audit, 2026-09-07; the cost stated 2026-09-20)
 	//
 	// Cleared on EVIDENCE, never on intent: kick_interface is fire-and-forget
 	// (main.uc hands netifd's `up` to conn.defer and only logs the reply), so
@@ -936,6 +944,7 @@ export function create(opts)
 				let want = ctx.config?.pdp_type;
 				let mine = ctx;
 				let tries = 0;
+				let confirmed = false;
 				let arm;
 
 				// ONE CHAIN PER ENTRY. Repeated `up` events would otherwise
@@ -960,11 +969,35 @@ export function create(opts)
 					}
 
 					if (!has_lla(dev)) {
+						// back to square one: the two readings have to be
+						// CONSECUTIVE, or a flap between them proves nothing
+						confirmed = false;
+
 						if (++tries <= LLA_WAIT_TRIES)
 							return uloop.timer(LLA_WAIT_MS, arm);
 
+						// the budget is spent: start anyway, which is what the
+						// warning says. STRAIGHT THROUGH, not via the
+						// confirmation below — that branch asks for a second
+						// sighting of an address that is demonstrably not
+						// coming, and an earlier version of this fell into it
+						// and rescheduled forever, warning every tick and never
+						// clearing `_wan6_arming`. The confirmation is only
+						// about an address that IS there.
 						log('warn', sprintf('interface %s: no link-local on %s after %d ms — starting the v6 subinterface anyway',
 							iface, dev ?? '?', LLA_WAIT_TRIES * LLA_WAIT_MS));
+					}
+					// CONFIRM, do not trust one reading. The address this waits
+					// for is taken away for a fraction of a second by the very
+					// renew_iface() below — so "present" sampled once, before
+					// that renew has even been issued, is the original bug with
+					// a narrower window rather than a fix. Require it on two
+					// readings a tick apart, which brackets the gap the renew
+					// opens. Found by review, 2026-09-20.
+					else if (!confirmed) {
+						confirmed = true;
+
+						return uloop.timer(LLA_WAIT_MS, arm);
 					}
 
 					entry._wan6_arming = false;
@@ -974,7 +1007,11 @@ export function create(opts)
 					deps.ensure_wan6(iface, want);
 				};
 
-				arm();
+				// DEFERRED, never synchronous. renew_iface() runs further down
+				// in this same turn and is what disturbs the parent's
+				// link-local; arming inline meant the LLA check ran BEFORE the
+				// disturbance it exists to avoid.
+				uloop.timer(LLA_WAIT_MS, arm);
 			}
 
 			// detect an address change vs the last applied settings. When the IP

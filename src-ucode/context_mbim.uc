@@ -241,6 +241,14 @@ export function create(opts)
 		if (!mbimmod.mbimex_v3(self.modem.mbim))
 			return self.modem.command('CONNECT', 'set', args, cb, opts);
 
+		// The v1 RESPONSE spec, on purpose. v3's Connect response is
+		// SessionId, ActivationState, VoiceCallState, IpType, ContextType,
+		// NwError + MediaPreference, AccessString, UnnamedIes — so the v1 six
+		// are an exact byte prefix of it (libmbim 1.32.0,
+		// mbim-service-ms-basic-connect-v3.json vs -basic-connect.json,
+		// checked 2026-09-20). The tail is the modem echoing back what it chose;
+		// nothing here reads it, and decoding it would only be a second thing to
+		// keep in step. The REQUEST is the half that genuinely differs.
 		return self.modem.mbim.command_raw(bc.service, bc.commands.CONNECT.cid,
 			mbimmod.encode_connect_v3(args),
 			(err, info) => cb(err, err ? null

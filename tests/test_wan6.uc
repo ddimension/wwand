@@ -94,60 +94,74 @@ function mk(pdp, ensures, fx, netdev)
 	return { d: d, ctx: () => ctx_on_event, modem: () => modem_on_event };
 }
 
-// --- scenario 1: v6-capable pdp on rndis -> ensure on connect ---------------
-let ensures = [];
-let s1 = mk('ipv6', ensures);
+// --- scenarios 1-4: the v6 gate, driven through a real uloop ----------------
+//
+// THE LOOP IS PART OF THE TEST NOW. ensure_wan6 is no longer called inline: the
+// daemon defers the link-local check by a tick and requires it on two
+// consecutive readings, because the renew that follows in the same turn is what
+// takes the address away (daemon.uc). Asserting synchronously would therefore
+// see nothing — and, worse, the three NEGATIVE scenarios below would pass for
+// the wrong reason: "not called yet" is not "never called". Each scenario fires
+// its event, the loop runs past the confirmation window, and only then is the
+// recorded list read. Found by review, 2026-09-20.
+(function () {
+	uloop.init();
 
-s1.ctx()('up');
+	let ensures = [];
+	let s1 = mk('ipv6', ensures);
+	s1.ctx()('up');
 
-eq(ensures, [ 'wan/ipv6' ],
-	'wan6: context up on rndis + ipv6 pdp -> ensure_wan6(wan) with the pdp type');
+	let ensures_b = [];
+	let s1b = mk('ipv4v6', ensures_b);
+	s1b.ctx()('up');
 
-// The pdp type has to REACH ensure_wan6: it is what decides whether the
-// subinterface gets extendprefix=1 (RFC 7278). A mobile network hands out a
-// single /64 and delegates no prefix, so without it odhcp6c has nothing to
-// give the LAN and clients get no address at all.
-ensures = [];
-let s1b = mk('ipv4v6', ensures);
-s1b.ctx()('up');
-eq(ensures, [ 'wan/ipv4v6' ],
-	'wan6: an ipv4v6 context passes its own pdp type (no extendprefix default there)');
+	let ensures_2 = [];
+	let s2 = mk('ipv4', ensures_2);
+	s2.ctx()('up');
 
-// extendprefix is set for EVERY v6-capable PDP, ipv4v6 included, and the
-// subinterface only exists for those — so the pdp type that arrives here is
-// diagnostic, not a decision. What RFC 7278 answers is IPv6 with no delegated
-// prefix; the presence of IPv4 is irrelevant to it (that is RFC 6877's
-// problem). A dual-stack PDP gets the same undelegated /64, so its LAN is
-// equally without IPv6 — working IPv4 just hides it. And keying on ipv6-only
-// missed almost everything anyway, since pdp_type defaults to ipv4v6.
+	let ensures_3 = [];
+	let s3 = mk('ipv4v6', ensures_3);
+	s3.modem()('removed');
 
-// --- scenario 2: pdp ipv4 -> no v6 subinterface ------------------------------
-ensures = [];
-let s2 = mk('ipv4', ensures);
+	let ensures_4 = [];
+	let s4 = mk('ipv6', ensures_4);
+	s4.d.modems.m0.modem.datapath = { backend: 'qmi_wwan' };
+	s4.ctx()('up');
 
-s2.ctx()('up');
+	// well past LLA_WAIT_MS * 2 (the deferral plus the confirming read)
+	uloop.timer(900, () => {
+		eq(ensures, [ 'wan/ipv6' ],
+			'wan6: context up on rndis + ipv6 pdp -> ensure_wan6(wan) with the pdp type');
 
-eq(ensures, [], 'wan6: pdp ipv4 -> no dhcpv6 subinterface');
+		// The pdp type has to REACH ensure_wan6: it is what decides whether the
+		// subinterface gets extendprefix=1 (RFC 7278). A mobile network hands out
+		// a single /64 and delegates no prefix, so without it odhcp6c has nothing
+		// to give the LAN and clients get no address at all.
+		eq(ensures_b, [ 'wan/ipv4v6' ],
+			'wan6: an ipv4v6 context passes its own pdp type (no extendprefix default there)');
 
-// --- scenario 3: modem gone -> no daemon action ------------------------------
-// the dynamic subinterface is netifd's: auto:1 + the @device alias let it go
-// down with the vanished parent and come back up on its own when the device
-// re-appears (reconnect / re-enumeration). wwand never removes it.
-ensures = [];
-let s3 = mk('ipv4v6', ensures);
+		// extendprefix is set for EVERY v6-capable PDP, ipv4v6 included, and the
+		// subinterface only exists for those — so the pdp type that arrives here
+		// is diagnostic, not a decision. What RFC 7278 answers is IPv6 with no
+		// delegated prefix; the presence of IPv4 is irrelevant to it (that is RFC
+		// 6877's problem). A dual-stack PDP gets the same undelegated /64, so its
+		// LAN is equally without IPv6 — working IPv4 just hides it. And keying on
+		// ipv6-only missed almost everything anyway, since pdp_type defaults to
+		// ipv4v6.
+		eq(ensures_2, [], 'wan6: pdp ipv4 -> no dhcpv6 subinterface');
 
-s3.modem()('removed');
+		// the dynamic subinterface is netifd's: auto:1 + the @device alias let it
+		// go down with the vanished parent and come back up on its own when the
+		// device re-appears (reconnect / re-enumeration). wwand never removes it.
+		eq(ensures_3, [], 'wan6: modem removed -> no daemon action (netifd auto-manages)');
 
-eq(ensures, [], 'wan6: modem removed -> no daemon action (netifd auto-manages)');
+		eq(ensures_4, [], 'wan6: qmi_wwan datapath -> no dhcpv6 subinterface');
 
-// --- scenario 4: non-rndis datapath -> never touched -------------------------
-ensures = [];
-let s4 = mk('ipv6', ensures);
+		uloop.end();
+	});
 
-s4.d.modems.m0.modem.datapath = { backend: 'qmi_wwan' };
-s4.ctx()('up');
-
-eq(ensures, [], 'wan6: qmi_wwan datapath -> no dhcpv6 subinterface');
+	uloop.run();
+})();
 
 // --- device blocklist: a modem on a foreign-owned device is not started ------
 //
@@ -743,6 +757,90 @@ ok(dgive.d.contexts.wan.wanted == true, 'giveup: and the context is wanted again
 
 	eq(many, [ 'wan/ipv6' ],
 		'lla/once: three ups produce ONE subinterface start, not three');
+}
+
+// ...and ONE sighting of the address is not enough --------------------------
+//
+// The address this waits for is taken away for a fraction of a second by the
+// renew that runs in the same turn, so a single reading taken BEFORE that renew
+// has even been issued is the original bug with a narrower window rather than a
+// fix. The check is therefore deferred a tick and the address must be there on
+// two CONSECUTIVE readings.
+//
+// The discriminator is HOW MANY readings happened before the start: an
+// implementation that trusts the first sighting starts after one, this one
+// needs the address present twice running. Found by review, 2026-09-20.
+{
+	uloop.init();
+
+	let base = "fe80000000000000ccdb20fffe616bae 03 40 20 80     eth0\n";
+	let lla  = "fe80000000000000020011fffe121314 04 40 20 80   wwand0\n";
+	let reads = 0;
+
+	// present, gone, then present for good — the shape of the renew's gap
+	let fx = { read: (path) => {
+		if (path != '/proc/net/if_inet6')
+			return null;
+
+		reads++;
+
+		return (reads == 2) ? base : (base + lla);
+	} };
+
+	let started = [], at_read = null;
+	let w3 = mk('ipv6', started, fx, 'wwand0');
+
+	// record the reading count at the moment the subinterface is started
+	let ens = w3.d.deps_ensure_wan6;
+
+	w3.ctx()('up');
+
+	eq(started, [], 'lla/confirm: nothing is started synchronously with the event');
+
+	uloop.timer(1800, () => {
+		at_read = reads;
+		uloop.end();
+	});
+	uloop.run();
+
+	eq(started, [ 'wan/ipv6' ], 'lla/confirm: the subinterface does start');
+	ok(reads >= 3,
+		sprintf('lla/confirm: it took more than one sighting (%d readings)', reads));
+}
+
+// ...and an address that never arrives must still let go ---------------------
+//
+// The confirmation above is only about an address that IS there. An earlier
+// version let the exhausted-budget path fall into it, so a parent that never
+// gained a link-local rescheduled forever: a warning every tick, `_wan6_arming`
+// never cleared, and the subinterface never started at all — which is the
+// opposite of what that warning promises. Found by review, 2026-09-20.
+{
+	uloop.init();
+
+	let base = "fe80000000000000ccdb20fffe616bae 03 40 20 80     eth0\n";
+	let reads = 0;
+	let fx = { read: (path) => {
+		if (path != '/proc/net/if_inet6')
+			return null;
+
+		reads++;
+
+		return base;    // wwand0 never gets one
+	} };
+
+	let never = [];
+	let w4 = mk('ipv6', never, fx, 'wwand0');
+
+	w4.ctx()('up');
+
+	// LLA_WAIT_TRIES (12) * LLA_WAIT_MS (250) is ~3 s; give it comfortably more
+	uloop.timer(4500, () => uloop.end());
+	uloop.run();
+
+	eq(never, [ 'wan/ipv6' ],
+		'lla/budget: the subinterface is started anyway once the wait is spent');
+	ok(reads < 40, sprintf('lla/budget: ...and the polling stopped (%d readings)', reads));
 }
 
 done('test_wan6');

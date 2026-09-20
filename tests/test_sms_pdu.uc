@@ -370,4 +370,37 @@ eq(sms.decode_deliver('0001'), null, '6: MTI!=DELIVER -> null (SUBMIT first octe
 	eq(by['+49111'].indexes, [ 1, 2 ], 'concat: delete indexes do not span senders');
 })();
 
+// --- a PDU that does not carry what it declares is not a message ------------
+//
+// `b()` answers 0 past the end of the buffer, which is what keeps the decoder
+// from throwing on junk — and it made a TRUNCATED PDU indistinguishable from a
+// short one. In GSM-7 the invented zeros decode to '@' (0x00 in the default
+// alphabet), so a body that was never transmitted came back as a run of '@'
+// characters; UCS-2 and 8-bit clamped to whatever bytes happened to be there.
+// Either way the caller got something shaped like a message. Found by review,
+// 2026-09-20.
+(function () {
+	let scts = [ bcd2(2), bcd2(8), bcd2(26), bcd2(19), bcd2(37), bcd2(41), 0x80 ];
+	let head = (dcs, udl, ud) => [ 0x00, 0x04, ...addr_intl('491701234567'),
+		0x00, dcs, ...scts, udl, ...(ud ?? []) ];
+
+	// GSM-7 claiming 8 septets (7 octets) with none present
+	eq(sms.decode_deliver(hex(head(0x00, 8, []))), null,
+		'truncated: a gsm7 body that is not there is refused, not invented');
+
+	// ...and the same PDU with the octets present decodes, so the check is
+	// about the MISSING bytes and not about rejecting short messages
+	let sp = septets('hallo');
+	let ok_pdu = sms.decode_deliver(hex(head(0x00, length(sp), pack7(sp))));
+	eq(ok_pdu?.text, 'hallo', 'truncated: a complete short body still decodes');
+
+	// UCS-2 claiming 10 octets with 4 present: the clamp used to return 'AB'
+	eq(sms.decode_deliver(hex(head(0x08, 10, [ 0x00, 0x41, 0x00, 0x42 ]))), null,
+		'truncated: a short ucs2 body is refused rather than clamped');
+
+	// 8-bit, same shape
+	eq(sms.decode_deliver(hex(head(0x04, 6, [ 0x01, 0x02 ]))), null,
+		'truncated: a short 8-bit body is refused too');
+})();
+
 done('test_sms_pdu');

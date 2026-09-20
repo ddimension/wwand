@@ -213,9 +213,19 @@ export function create(opts)
 
 		settles = [];
 
+		// EACH continuation on its own. These are callers' callbacks, and a
+		// single try around the walk let the first one that threw strand every
+		// continuation behind it — the waiter's timer already cancelled, its
+		// caller never answered. One hostile caller must not take the others
+		// down with it. Found by review, 2026-09-20.
 		for (let r in pend) {
 			r.timer.cancel();
-			r.gone();
+
+			try {
+				r.gone();
+			} catch (e) {
+				log('err', sprintf('teardown: a settle continuation threw: %s', e));
+			}
 		}
 	};
 
@@ -1404,6 +1414,18 @@ export function create(opts)
 		// 2026-09-19.
 		self._teardown_depth = (self._teardown_depth ?? 0) + 1;
 
+		// EVERYTHING BELOW IS GUARDED, because the decrement at the end is the
+		// only thing that re-enables retries and ucode has no `finally`. The
+		// per-callback guards further down keep one caller's throw from
+		// stranding the next; they do NOT balance this counter, because the
+		// work between them can throw too — a waiter table holding a scalar
+		// (so `w.timer?.cancel()` reads a property off it), a cancel() that
+		// throws, hub.close() on a half-open transport. Any of those used to
+		// unwind past the decrement and leave the guard raised for the life of
+		// the object, which disables every future retry — a far worse failure
+		// than the one that caused it. Found by review, 2026-09-20.
+		try {
+
 		for (let t in values(tm))
 			if (t)
 				t.cancel();
@@ -1419,12 +1441,9 @@ export function create(opts)
 		// decrement below would never run and _teardown_depth would stay raised
 		// for the life of the object — which disables every future retry, a
 		// worse failure than the one this pays off. Raised by review,
-		// 2026-09-19.
-		try {
-			settle_retire();
-		} catch (e) {
-			log('err', sprintf('teardown: a settle continuation threw: %s', e));
-		}
+		// 2026-09-19. The guard sits INSIDE the walk (settle_retire), so a
+		// thrower does not strand the continuations queued behind it either.
+		settle_retire();
 
 		telem.stop();
 
@@ -1467,14 +1486,18 @@ export function create(opts)
 
 		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = null;
 
-		self._teardown_depth--;
 		self.dsd = self.tmd = self.cat = self.wms = self.pdc = null;
 
 		// fail any PDC operation still waiting on an indication that will now
 		// never come, and clear the table so a rebuild can install again
 		for (let key, w in (self._pdc_waits ?? {})) {
 			w.timer?.cancel();
-			w.cb({ error: 'cancelled', detail: 'modem torn down' }, null);
+
+			try {
+				w.cb({ error: 'cancelled', detail: 'modem torn down' }, null);
+			} catch (e) {
+				log('err', sprintf('teardown: a pdc waiter threw: %s', e));
+			}
 		}
 
 		self._pdc_waits = null;
@@ -1517,7 +1540,12 @@ export function create(opts)
 		// the map is also what lets install_apdu_reassembly() run again.
 		for (let key, w in (self._apdu_long ?? {})) {
 			w.timer?.cancel();
-			w.cb({ error: 'cancelled', detail: 'modem torn down' }, null);
+
+			try {
+				w.cb({ error: 'cancelled', detail: 'modem torn down' }, null);
+			} catch (e) {
+				log('err', sprintf('teardown: an apdu waiter threw: %s', e));
+			}
 		}
 
 		self._apdu_long = null;
@@ -1526,6 +1554,22 @@ export function create(opts)
 			self.hub.close();
 			self.hub = null;
 		}
+
+		} catch (e) {
+			log('err', sprintf('teardown: %s', e));
+		}
+
+		// LAST, and deliberately so. Everything above this line still runs
+		// callers' callbacks — the settle continuations, the PDC waiters, the
+		// long-APDU reassembly — and each of those can reach the shared failure
+		// ladder. The decrement used to sit up beside the client teardown, so
+		// those callbacks saw depth 0 and make_fail was free to arm a retry, or
+		// re-enter teardown, while this one was still walking its waiter tables.
+		// It has to be raised for the whole of the teardown it guards, and it
+		// has to come back down before the function returns — a depth left
+		// raised disables every future retry for the life of the object.
+		// Found by review, 2026-09-20.
+		self._teardown_depth--;
 	};
 
 	// stop() + _device_gone() installed by modem_common.scaffolding

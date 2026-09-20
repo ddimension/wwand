@@ -478,4 +478,64 @@ eq(pf.token, 9, 'pdc: with the token that identifies whose it was');
 eq(P.LOAD_CONFIG, null, 'pdc: wwand never writes a carrier config');
 eq(P.DELETE_CONFIG, null, 'pdc: nor deletes one');
 
+// --- the MNC-width TLVs, off the wire -----------------------------------------
+//
+// A leading zero in an MNC names a DIFFERENT operator: 310/030 is not 310/30.
+// QMI carries that as a separate indicator, and the shape of the indicator is
+// NOT the same in every message — which is the whole reason to assert it in
+// bytes. Network Scan's 0x12 is a u16-prefixed array; Set/Get Preferred
+// Networks' 0x11 is u8-prefixed; (Get) Serving System carries a single
+// sequence, at 0x27 in the response and 0x29 in the indication. The
+// higher-level tests feed decoded objects through a structured mock, so they
+// would not notice any of those widths or ids changing. libqmi 1.38
+// qmi-service-nas.json. Found by review, 2026-09-20.
+let N = nasmod.default.messages;
+
+// Network Scan output 0x12: COUNT IS u16. One entry, 310/30 with the third
+// digit flag set -> the operator that writes itself 310/030.
+let ns = tlvmod.unpack(N.NETWORK_SCAN.resp,
+	tlv(0x12, u16(1) + u16(310) + u16(30) + u8(1)));
+
+eq(length(ns.mnc_pcs_digit ?? []), 1, 'scan pcs: the u16-prefixed array decodes one entry');
+eq(ns.mnc_pcs_digit?.[0]?.mcc, 310, 'scan pcs: mcc');
+eq(ns.mnc_pcs_digit?.[0]?.mnc, 30, 'scan pcs: mnc as the bare number');
+eq(ns.mnc_pcs_digit?.[0]?.includes_pcs_digit, 1, 'scan pcs: ...and the third-digit flag beside it');
+
+// the discriminating half: with a u8 count the same bytes decode as garbage,
+// which is what makes the width worth pinning rather than assuming
+let ns_u8 = tlvmod.unpack({ mnc_pcs_digit: { t: 0x12, f: { n: 'u8', of: {
+		mcc: 'u16', mnc: 'u16', includes_pcs_digit: 'u8' } } } },
+	tlv(0x12, u16(1) + u16(310) + u16(30) + u8(1)));
+
+ok(ns_u8.mnc_pcs_digit?.[0]?.mcc != 310,
+	'scan pcs: a u8 count would misread these very bytes');
+
+// Set Preferred Networks 0x11: COUNT IS u8, same element shape
+let pn = tlvmod.unpack(N.SET_PREFERRED_NETWORKS.req,
+	tlv(0x11, u8(1) + u16(262) + u16(1) + u8(0)));
+
+eq(length(pn.mnc_pcs_digit ?? []), 1, 'preferred pcs: the u8-prefixed array decodes one entry');
+eq(pn.mnc_pcs_digit?.[0]?.mcc, 262, 'preferred pcs: mcc');
+eq(pn.mnc_pcs_digit?.[0]?.includes_pcs_digit, 0, 'preferred pcs: two-digit MNC says so');
+
+// (Get) Serving System: a SINGLE sequence, and the id differs between the
+// response (0x27) and the indication (0x29)
+let ss = tlvmod.unpack(N.GET_SERVING_SYSTEM.resp,
+	tlv(0x27, u16(310) + u16(30) + u8(1)));
+
+eq(ss.mnc_pcs_digit?.mcc, 310, 'serving pcs: response id 0x27 carries one sequence');
+eq(ss.mnc_pcs_digit?.includes_pcs_digit, 1, 'serving pcs: ...with the flag');
+
+let ssi = tlvmod.unpack(N.SERVING_SYSTEM_IND.ind,
+	tlv(0x29, u16(310) + u16(30) + u8(1)));
+
+eq(ssi.mnc_pcs_digit?.mcc, 310, 'serving pcs: the indication uses 0x29, not 0x27');
+
+// ...and each id really is specific to its direction: the indication's bytes
+// under the response id decode nothing, which is the error the split invites
+let cross = tlvmod.unpack(N.GET_SERVING_SYSTEM.resp,
+	tlv(0x29, u16(310) + u16(30) + u8(1)));
+
+eq(cross.mnc_pcs_digit, null, 'serving pcs: 0x29 is not read by the response schema');
+
 done('test_qmi_backend');

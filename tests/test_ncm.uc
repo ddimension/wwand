@@ -352,6 +352,56 @@ push(scenarios, {
 	},
 });
 
+// ...and a modem that came BACK is not the one we asked ----------------------
+//
+// The sibling above nulls the engine, which is what an administrative stop
+// leaves behind. A RESTART is the harder case: stop and start inside the retry
+// window puts a NEW engine in place, the context is still ACTIVATING (a modem
+// stop does not notify its contexts), and both guards the retry had would pass.
+// The old activation then read CGCONTRDP over the new session and answered its
+// caller with it. NCM has no generation counter — modem_common.make_fail says
+// so — so the engine object itself is the discriminator. Found by review,
+// 2026-09-20.
+push(scenarios, {
+	name: 's9r_vendor_ip_config_does_not_borrow_a_new_engine',
+	script: script([
+		{ re: /^AT\+CGMI$/, lines: [ 'Fibocom Wireless Inc.' ] },
+		{ re: /^AT\+CGMM$/, lines: [ 'FM350-GL' ] },
+		{ re: /^AT\+CGCONTRDP=/, term: 'ERROR', lines: [] },
+	]),
+	mtiming: { ip_config_retry: 20 },
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6' },
+	run: (env) => {
+		let asked = [];
+
+		env.ctx.up((err) => {
+			ok(err != null, 'new-engine: the old activation fails rather than borrowing');
+			// narrowly the address read: the teardown path legitimately puts
+			// other commands (CEREG?, GTRNDIS=0,1) down whatever engine is
+			// current, and asserting on the whole stream would fail for a
+			// reason that has nothing to do with this guard
+			eq(length(filter(asked, (c) => index(c, 'CGCONTRDP') >= 0)), 0,
+				'new-engine: ...and no address read went down the replacement engine');
+			ok(env.ctx.state != 'CONNECTED',
+				'new-engine: no bearer is reported that was never got');
+			env.finish();
+		});
+
+		// a restart inside the retry window: a DIFFERENT engine, not a null one
+		uloop.timer(5, () => {
+			env.modem.at = {
+				send: (cmd, cb) => {
+					push(asked, cmd);
+
+					return cb(null, { lines: [
+						'+CGCONTRDP: 1,5,internet,9.9.9.9.255.255.255.0,9.9.9.1,8.8.8.8,8.8.4.4' ] });
+				},
+				close: () => null,
+			};
+		});
+	},
+});
+
 // REAPPLY_SIM NEVER PRODUCED AN ICCID FROM THE CRSM PATH. It decoded the EF with
 // hex('0x' + payload), which parses the whole 20-digit field as ONE integer and
 // SATURATES to INT64_MAX; bytes_to_iccid then iterates a scalar zero times and

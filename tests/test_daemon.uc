@@ -996,17 +996,26 @@ w6.apply_config(config.parse({ network: {
 
 ok(w6_on_event != null && w6.contexts.wan.ctx != null, 'wan6 gate: context wired');
 
+// AFTER THE LOOP TURNS, both of them. ensure_wan6 is deferred by a tick and
+// confirmed on a second reading (daemon.uc), so the positive case has nothing
+// to see yet at this point — and the negative case would report "not called"
+// before anything had a chance to call it, which is not the same statement.
 w6_on_event(w6.contexts.wan.ctx, 'up', {});
-ok(index(wan6_calls, 'wan:ipv4v6') >= 0,
-	'wan6 gate: huawei_cdc_ncm context up -> dhcpv6 subinterface ensured');
 
-// v4-only PDP: the same datapath must NOT trigger ensure_wan6
-wan6_calls = [];
-w6.contexts.wan.ctx.config.pdp_type = 'ipv4';
-w6_on_event(w6.contexts.wan.ctx, 'up', {});
-eq(length(wan6_calls), 0, 'wan6 gate: a v4-only PDP never qualifies');
+uloop.timer(900, () => {
+	ok(index(wan6_calls, 'wan:ipv4v6') >= 0,
+		'wan6 gate: huawei_cdc_ncm context up -> dhcpv6 subinterface ensured');
 
-w6.shutdown();
+	// v4-only PDP: the same datapath must NOT trigger ensure_wan6
+	wan6_calls = [];
+	w6.contexts.wan.ctx.config.pdp_type = 'ipv4';
+	w6_on_event(w6.contexts.wan.ctx, 'up', {});
+
+	uloop.timer(900, () => {
+		eq(length(wan6_calls), 0, 'wan6 gate: a v4-only PDP never qualifies');
+		w6.shutdown();
+	});
+});
 
 uloop.run();
 // --- option lowpower: park the radio when nothing on this modem is up --------

@@ -262,6 +262,57 @@ function make_mc(schema, handlers, hooks, opts) {
 	});
 })();
 
+// --- half-assembled fragments are not kept forever --------------------------
+//
+// An incomplete set is only ever cleaned up by the request timeout, and that
+// reaches exactly one key: the COMMAND_DONE of a transaction we are waiting on.
+// An INDICATION that starts fragmented and never finishes (transaction 0, or
+// any id the modem invents) simply stayed — one entry per id, each holding its
+// bytes. Neither the count nor the size had a ceiling. Not a large number in
+// practice; unbounded is the part that matters in a daemon meant to run for
+// months. Found by review, 2026-09-20.
+(function() {
+	let mc = make_mc([], {}, {});
+
+	// a fragment 0 of a set that never completes, under many transaction ids
+	let start = (txn) => mc.on_message({
+		type: mbim.MSG_INDICATE_STATUS, txn: txn, service: bc.service, cid: 1,
+		frag_total: 4, frag_index: 0, info: 'AAAA',
+	});
+
+	for (let i = 1; i <= 40; i++)
+		start(i);
+
+	let n = 0;
+	for (let k, v in mc.frags) n++;
+
+	ok(n <= 8, sprintf('frags: the table is capped (%d sets held, not 40)', n));
+
+	// destroy takes the rest with it — the buffers belong to a channel that is
+	// going away, and nothing was clearing them
+	mc.destroy();
+
+	let after = 0;
+	for (let k, v in mc.frags) after++;
+
+	eq(after, 0, 'frags: destroy() drops the half-assembled buffers');
+
+	// ...and one set cannot grow without limit either
+	let mc2 = make_mc([], {}, {});
+	let big = '';
+	for (let i = 0; i < 4096; i++) big += 'xxxxxxxxxxxxxxxx';   // 64 KiB
+
+	mc2.on_message({ type: mbim.MSG_INDICATE_STATUS, txn: 7, service: bc.service,
+		cid: 1, frag_total: 4, frag_index: 0, info: big });
+	mc2.on_message({ type: mbim.MSG_INDICATE_STATUS, txn: 7, service: bc.service,
+		cid: 1, frag_total: 4, frag_index: 1, info: big });
+
+	let held = 0;
+	for (let k, v in mc2.frags) held++;
+
+	eq(held, 0, 'frags: a set past the byte ceiling is dropped, not grown');
+})();
+
 // --- scenarios ---------------------------------------------------------------
 
 // get_signal: RSSI index + per-RAT coded RSRP/SNR (LTE + 5G-SA)

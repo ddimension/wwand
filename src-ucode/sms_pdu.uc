@@ -296,6 +296,21 @@ export function decode_deliver(pdu_hex)
 		skip_septets = int(((udhl + 1) * 8 + 6) / 7);
 	}
 
+	// THE DECLARED BODY HAS TO BE THERE. `b()` answers 0 past the end of the
+	// buffer, which is right for a decoder that must not throw — and wrong as
+	// the last word on a truncated PDU: a GSM-7 body whose octets are missing
+	// came back as a run of '@' (0x00 is '@' in the default alphabet), and the
+	// UCS-2 and 8-bit paths clamped to whatever was present. Both produced a
+	// message that looks like a message. A PDU that does not carry what it
+	// declares is malformed, and saying so is the only honest answer.
+	// Found by review, 2026-09-20.
+	let need = (encoding == 'gsm7')
+		? int((udl * 7 + 7) / 8)      // udl counts SEPTETS here
+		: udl;                        // ...and OCTETS for ucs2/8-bit
+
+	if (ud_off + need > length(a))
+		return null;
+
 	let text;
 
 	if (encoding == 'gsm7')
@@ -309,6 +324,8 @@ export function decode_deliver(pdu_hex)
 		let ud_start = ud_off + skip_octets;
 		let ud_end = ud_off + udl;
 
+		// unreachable after the length check above; kept so a future caller
+		// that skips it cannot read past the buffer
 		if (ud_end > length(a))
 			ud_end = length(a);
 

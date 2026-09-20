@@ -321,11 +321,33 @@ export function create(hub, hooks)
 	// 2026-09-19.
 	self.frags = {};
 
+	// BOUNDED, both ways. An incomplete set is only ever cleaned up by the
+	// request timeout, and that only reaches the COMMAND_DONE key of a
+	// transaction we are waiting on — an INDICATION set (transaction 0, or any
+	// id the modem invents) whose last fragment never arrives just stays. A
+	// firmware that starts fragmented messages it never finishes therefore
+	// grows this table without limit, and a large frag_total lets one set grow
+	// without limit too. Neither is a big number in practice; both are
+	// unbounded, which is the part that matters in a daemon meant to run for
+	// months. Found by review, 2026-09-20.
+	//
+	// 64 KiB is far above any MBIM message this tree decodes (the largest,
+	// BASE_STATIONS_INFO with a full neighbour list, is a few KiB), and MBIM
+	// does not interleave fragmented messages on the control channel — so more
+	// than a couple of live sets is already abnormal.
+	const FRAG_MAX_BYTES = 65536;
+	const FRAG_MAX_SETS = 8;
+
 	// keyed by TYPE and transaction id, not the id alone: unsolicited
 	// indications commonly carry transaction 0, so a COMMAND_DONE set and an
 	// indication set would otherwise share one slot. Raised by Codex review,
 	// 2026-09-19.
 	let frag_key = (msg) => sprintf('%d:%d', msg.type, msg.txn);
+
+	let log_frag = (f, ...a) => {
+		if (hooks?.log)
+			hooks.log('debug', sprintf('mbim: ' + f, ...a));
+	};
 
 	let reassemble = (msg) => {
 		let total = msg.frag_total ?? 1;
@@ -342,7 +364,40 @@ export function create(hub, hooks)
 			// a fresh fragment 0 replaces whatever sat here: MBIM does not
 			// interleave fragmented messages on the control channel, so an
 			// unfinished set at this key is one that will never finish
-			self.frags[key] = { msg: msg, next: 1, total: total, info: msg.info ?? '' };
+			if (!exists(self.frags, key)) {
+				// ...and sets at OTHER keys that will never finish are exactly
+				// what accumulates. Drop the stalest rather than refuse the new
+				// one: the message arriving now is the one with a reader.
+				let n = 0, oldest = null, oldest_at = null;
+
+				for (let k, a in self.frags) {
+					n++;
+
+					if (oldest_at == null || a.at < oldest_at) {
+						oldest_at = a.at;
+						oldest = k;
+					}
+				}
+
+				if (n >= FRAG_MAX_SETS && oldest != null) {
+					log_frag('dropping an unfinished fragment set (%s) — %d sets open', oldest, n);
+					delete self.frags[oldest];
+				}
+			}
+
+			// ...and fragment ZERO is itself a buffer. The ceiling below used
+			// to be checked only when appending a continuation, so a first
+			// fragment larger than the limit was stored whole and, if nothing
+			// followed it, sat there. Found by review, 2026-09-20.
+			if (length(msg.info ?? '') > FRAG_MAX_BYTES) {
+				log_frag('fragment 0 of %s is over %d bytes — dropping', key, FRAG_MAX_BYTES);
+				delete self.frags[key];
+
+				return null;
+			}
+
+			self.frags[key] = { msg: msg, next: 1, total: total,
+				info: msg.info ?? '', at: time() };
 
 			return null;
 		}
@@ -362,6 +417,13 @@ export function create(hub, hooks)
 
 		acc.info += (msg.info ?? '');
 		acc.next++;
+
+		if (length(acc.info) > FRAG_MAX_BYTES) {
+			log_frag('fragment set %s exceeded %d bytes — dropping', key, FRAG_MAX_BYTES);
+			delete self.frags[key];
+
+			return null;
+		}
 
 		if (acc.next < total)
 			return null;
@@ -451,6 +513,9 @@ export function create(hub, hooks)
 	};
 
 	self.destroy = function() {
+		// the half-assembled buffers belong to the channel that is going away
+		self.frags = {};
+
 		for (let key, p in self.pending) {
 			p.timer.cancel();
 
