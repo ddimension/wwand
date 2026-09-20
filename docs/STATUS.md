@@ -609,6 +609,59 @@ it. The wire formats are host-tested against hand-built buffers matching libmbim
 carrier configuration read, and a manual network selection onto the serving PLMN
 and back to automatic with the connection intact throughout.
 
+## GPS: the three pieces were all there (2026-09-20)
+
+wwand FINDS the modem's NMEA port during enumeration (`gps_port`). `option gnss`
+STARTS the receiver with the vendor AT command — QMI's LOC service is documented
+as broken on Quectel and AT is what works, and only wwand has the port. ugps, in
+OpenWrt base, READS NMEA and publishes a `gps` ubus object, and knows nothing
+about modems.
+
+Nothing joined them, because ugps takes a **static** tty out of
+`/etc/config/gps` (`uci get gps.@gps[-1].tty`, its init) while wwand's is
+discovered and can move between boots or when a modem is replaced. `wwand-gps`
+is that write, plus a `modem_gps` ubus method answering with both halves at
+once, plus a LuCI panel.
+
+**Good citizen, here too.** wwand manages exactly one `config gps` section and
+only one it created itself, marked `option wwand '1'`. ugps reads the LAST
+section, so an operator's own receiver would be silently taken over by a section
+appended beside it — wwand refuses and says so instead. Idempotent by
+read-before-write for a sharper reason than usual: a commit fires procd's reload
+trigger, a reload restarts ugps, and a restarted ugps loses its fix.
+
+The map on the status page is a **link, not a tile**. Embedding one would have
+the router's own web interface fetch from a third party the moment anyone opened
+the page, and send them this router's position to do it.
+
+Two bugs the hardware found, neither of them in the new code:
+
+- **`option gnss` reported a failure when the receiver was already running.**
+  `+CME ERROR: 504` is "session is ongoing" and the recipe table lists it as
+  benign — but atcmd parses it into `{ error: 'cme', code: '504' }` and leaves
+  the response lines EMPTY, and the check matched only the lines. So the
+  receiver was on, the start was logged as a warning, and `gnss_started` never
+  latched: status said the receiver was not running while it was.
+- **A `require()`d module logging through its own `wwand.log`.** require() gives
+  the loaded script its own copies of its imports (docs/gotchas.md), so that log
+  is a second instance with no output target set — every line went to stderr and
+  procd tagged the lot `daemon.err`, reading `daemon.err … notice: gps: …`.
+  `gps.uc` returns what it did and the caller, which is a real module, says so.
+
+And one thing measurement settled that guessing would have got wrong: **ugps
+answers in STRINGS and uses an EMPTY one for a field it has no value for** —
+`"elevation": ""`, `"satellites": ""`. A fix keyed off `latitude != null` would
+have called an empty string a position, and `+""` renders as `0.0 m`, which
+reads as a measurement rather than the absence of one.
+
+Verified on hardware (GL-X3000 / RM520N, 2026-09-20), end to end: wwand wrote
+the section, procd reloaded ugps onto `/dev/ttyUSB3`, and the panel showed a
+real fix — 52.03582, 8.54918, elevation 69.1 m, HDOP 3.4, fix age 1 s.
+
+The mislabelled flag is fixed with it. `option location` had the label "Enable
+GPS/location" and writes the QMI LOC path — the one that does not work on
+Quectel — while `option gnss`, the one that does, had no UI at all.
+
 ## Known open
 
 - **TODO — `pdp_type` cannot be configured per SIM, and two people expected it

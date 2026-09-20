@@ -563,6 +563,57 @@ export function create(o)
 			conn.defer('network.interface', 'down', { interface: interface }, netifd_cb('down ' + interface)),
 		// async status probe (adopt-in-place vs kick): cb(status|null). Must
 		// not block — see netifd_cb above.
+		// what ugps reports, or null when it is not running. Never an error:
+		// ugps is optional, another process, and "not there" is an ordinary
+		// answer rather than a failure of this one.
+		gps_info: (cb) =>
+			conn.defer('gps', 'info', {}, (ret, reply) => cb(ret == 0 ? reply : null)),
+
+		// Point ugps at a tty, or (null) stop it pointing anywhere. Only ever a
+		// section wwand created — see wwand.gps, which holds that rule — and it
+		// nudges procd's reload trigger rather than restarting the service,
+		// because ugps loses its fix on a restart.
+		gps_configure: (port, opts) => {
+			let gps;
+
+			try {
+				gps = require('wwand.gps');
+			}
+			catch (e) {
+				// NOT SILENT. A missing package and a BROKEN one look identical
+				// from here, and the broken case is the one worth a line: it
+				// disables the feature for the life of the daemon while
+				// `modem_gps` reports "package not installed", which sends the
+				// reader looking in the wrong place. The message only appears
+				// where wwand-gps is genuinely expected — nothing calls this
+				// unless a modem has `option gnss`. Raised by Codex review,
+				// 2026-09-20.
+				logmod.log('info', 'gps: wwand.gps could not be loaded (%s) — is wwand-gps installed?',
+					replace(sprintf('%s', e), /\n.*$/, ''));
+				return null;
+			}
+
+			let r = gps.sync(o.cursor(), port, opts);
+
+			// said HERE, not in gps.uc: that module is require()d and its own
+			// `wwand.log` would be a second instance with no output target set
+			if (r.changed) {
+				logmod.log('notice', 'gps: ugps %s (section %s)',
+					(port == null) ? 'stopped — no NMEA port'
+					               : sprintf('pointed at %s', port), r.section);
+
+				// procd's reload trigger, not a restart: ugps loses its fix on
+				// a restart, and its init subscribes to `gps` config changes
+				// (ugps.init: procd_add_reload_trigger gps).
+				conn.defer('service', 'event',
+					{ type: 'config.change', data: { package: 'gps' } }, () => null);
+			}
+			else if (r.skipped == 'foreign_config')
+				logmod.log('info', 'gps: /etc/config/gps has a section wwand did not create — leaving it alone (ugps reads the last one, so adding ours would take it over)');
+
+			return r;
+		},
+
 		iface_status: (interface, cb) =>
 			conn.defer('network.interface', 'status', { interface: interface },
 				(ret, reply) => cb(ret == 0 ? reply : null)),

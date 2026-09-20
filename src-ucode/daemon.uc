@@ -91,6 +91,8 @@ let load_mbim = lazy_backend('wwand.mbim_lazy', loaded_note('mbim'));
 let load_ncm = lazy_backend('wwand.ncm_lazy', loaded_note('ncm'));
 // optional eSIM module (wwand-esim); absent => feature reports esim_not_installed
 let load_esim = lazy_backend('wwand.esim', loaded_note('esim'));
+// optional GPS glue (wwand-gps); absent => modem_gps reports package_not_installed
+let load_gps = lazy_backend('wwand.gps', loaded_note('gps'));
 
 // "registered" across backends: QMI stores the numeric NAS value, MBIM/NCM
 // store 1/0 — never compare against a string. Radio list is the strongest
@@ -390,6 +392,42 @@ export function create(opts)
 	// modem reached service: write back l3 device names, run autosetup APN
 	// fill, (re)establish this modem's IDLE interface-bound contexts.
 	let modem_registered = (modem, data) => {
+		// POINT ugps AT THE NMEA PORT. ugps reads a STATIC tty out of
+		// /etc/config/gps (its init: `uci get gps.@gps[-1].tty`) while wwand's
+		// is discovered and can move between boots or when a modem is
+		// replaced — so the config has to be written, and rewritten when the
+		// port changes.
+		//
+		// Here, not at enumeration: `option gnss` starts the receiver on the
+		// way to registration, and pointing a reader at a port before anything
+		// is sending on it only makes ugps respawn against silence.
+		//
+		// Only for a modem that asked (`option gnss`), only when wwand-gps is
+		// installed, and only into a section wwand created — the rules live in
+		// wwand.gps, which is the one place they can be read.
+		// ONE ugps, ONE MODEM. There is a single `config gps` section and a
+		// single `gps` ubus object, so on a two-modem box the position can only
+		// ever be ONE modem's — and without recording which, the last modem to
+		// register silently took the section over while `modem_gps` went on
+		// serving that position to whichever modem was asked about. The first
+		// GNSS modem to register claims it; another one is told so rather than
+		// being answered with its neighbour's coordinates. Raised by Codex
+		// review, 2026-09-20.
+		if (deps.gps_configure && (modem.config?.gnss ?? false) && modem.gps_tty &&
+		    (self._gps_owner == null || self._gps_owner == modem.id)) {
+			let r = deps.gps_configure(modem.gps_tty, {
+				adjust_time: modem.config?.gnss_set_time ?? false,
+			});
+
+			// ONLY ON A CONFIG THAT EXISTS. `foreign_config` means ugps is
+			// reading somebody else's receiver; `add_failed` and
+			// `commit_failed` mean nothing was written at all — and a claim
+			// taken on one of those blocks every other GNSS modem while
+			// pointing at nothing. Raised by Codex review, 2026-09-20.
+			if (r != null && (r.changed || r.skipped == 'unchanged'))
+				self._gps_owner = modem.id;
+		}
+
 		// write the resolved l3 device name onto each interface as `option device`
 		// (one explicit handle for VRF/firewall/LuCI). Idempotent; never clobbers a
 		// user value. Gated by wwand_globals.write_device.
@@ -557,6 +595,24 @@ export function create(opts)
 
 	};
 
+	// LET GO OF ugps when the modem feeding it goes. Otherwise the section keeps
+	// naming a tty that is gone — ugps respawns against a device that is not
+	// there, or against whatever the kernel hands that name to next — and no
+	// other GNSS modem can ever claim it, because the owner never changes.
+	//
+	// BOTH ways a modem goes, which is why this is a function: a config reload
+	// (stop_modem) and the hardware vanishing (modem_removed) are different
+	// paths, and only the first had it. Raised by Codex review, 2026-09-20.
+	let release_gps = (name) => {
+		if (self._gps_owner != name)
+			return;
+
+		self._gps_owner = null;
+
+		if (deps.gps_configure)
+			deps.gps_configure(null, {});
+	};
+
 	// modem 'removed' (transport-level device gone): detach and enter the
 	// boot-style waiting state. Presence is re-checked by the periodic tick —
 	// NOT only by hotplug — because the 'add' may never fire.
@@ -567,6 +623,7 @@ export function create(opts)
 			return;
 
 		detach_modem(modem.id, entry);
+		release_gps(modem.id);
 		entry.control_note = 'waiting for modem (device vanished)';
 		entry.waiting_since = time();
 		entry._waiting_logged = time();
@@ -1534,6 +1591,15 @@ export function create(opts)
 		for (let cname in keys(self.contexts))
 			if (self.contexts[cname].cfg.modem == name)
 				stop_context(cname);
+
+		// ...and let go of ugps if this was the modem feeding it. Otherwise the
+		// section keeps naming a tty that is gone — ugps respawns against a
+		// device that is not there, or worse, against whatever the kernel hands
+		// that name to next — and no other GNSS modem can ever claim it, because
+		// the owner never changes. Raised by Codex review, 2026-09-20.
+
+
+		release_gps(name);
 
 		if (entry.modeswitch_liveness)
 			entry.modeswitch_liveness.cancel();
@@ -3181,6 +3247,40 @@ export function create(opts)
 		}
 
 		return entry.modem.location ?? { error: 'no_fix' };
+	};
+
+	// GNSS as this daemon sees it, merged with what ugps reports — the two
+	// halves of one answer that used to live in different processes with nothing
+	// between them. Asynchronous because the ugps half is a ubus call; a box
+	// without wwand-gps installed, or without ugps running, still gets wwand's
+	// half rather than an error.
+	self.modem_gps = function(ref, cb) {
+		let entry = self.modems[ref];
+
+		if (!entry?.modem)
+			return cb({ error: 'no_such_modem', ref: ref });
+
+		let gps = load_gps();
+
+		if (!gps)
+			return cb({ error: 'package_not_installed',
+			            detail: 'wwand-gps is not installed' });
+
+		// ugps' half belongs to THE MODEM THAT IS FEEDING IT, and to no other.
+		// Not "unless somebody else owns it": with a foreign section nobody
+		// owns it, and that reading attributed an operator's own receiver —
+		// a hat GPS on a serial port — to whichever modem happened to be
+		// asked about. The other modem still gets its own half (the port it
+		// has, the receiver it started) plus the reason there is no position
+		// for it, which is a truer answer than somebody else's coordinates.
+		// Raised by Codex review, 2026-09-20.
+		if (!deps.gps_info || self._gps_owner != ref)
+			return cb(null, {
+				...gps.status(entry.modem, null),
+				...((self._gps_owner != null) ? { reader_owner: self._gps_owner } : {}),
+			});
+
+		deps.gps_info((info) => cb(null, gps.status(entry.modem, info)));
 	};
 
 	self.modem_at = function(ref, command, cb, timeout) {

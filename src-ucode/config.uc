@@ -306,7 +306,7 @@ function apply_globals(s, result)
 // required but none configured" and safety-blocked the SIM).
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
 	'imei', 'repower_time', 'reset_gpio', 'pincode', 'modes', 'mcc', 'mnc',
-	'mux', 'dl_datagram_max_size', 'tty', 'at2_external', 'gnss', 'fcc_auth',
+	'mux', 'dl_datagram_max_size', 'tty', 'at2_external', 'gnss', 'gnss_set_time', 'fcc_auth',
 	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'zero_rx_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
@@ -431,6 +431,11 @@ function modem_from_section(s, warnings)
 		// never opens it and runs telemetry over the control channel instead
 		at2_external: bool_opt(s.at2_external, false),
 		gnss: bool_opt(s.gnss, false),
+		// let ugps step the system clock from NMEA. OFF by default: this box
+		// already has sysntpd, and two things setting the clock is one more
+		// than any box needs. For the RTC-less installs where the modem is the
+		// only time source there is.
+		gnss_set_time: bool_opt(s.gnss_set_time, false),
 		// '' / unset = automatic (a tty when there is one, else the MBIM pipe);
 		// 'fibocom' | 'compal' | '1' forces the pipe and picks the vendor CID
 		at_over_mbim: s.at_over_mbim,

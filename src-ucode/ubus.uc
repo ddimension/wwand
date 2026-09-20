@@ -353,6 +353,15 @@ export function publish(conn, daemon, log)
 			call: (req) => ok_sync(daemon.modem_datapath(req.args.modem)),
 		},
 
+		// GNSS: what wwand knows (NMEA port, receiver state) merged with what
+		// ugps reports (position, satellites). Asynchronous because the second
+		// half is a ubus call to another daemon.
+		modem_gps: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_gps(req.args.modem, ok_reply(reply))),
+		},
+
 		modem_at: {
 			args: { modem: '', command: '', timeout: 0, ubus_rpc_session: '' },
 			call: (req) => {

@@ -1668,6 +1668,143 @@ am3.apply_config(config.parse({ network: {
 eq(am3.modems.m0?.l3_name, false,
 	'automux-name: a pinned channel leaves the parent on its kernel name');
 
+// ONE ugps, ONE MODEM.
+//
+// There is a single `config gps` section and a single `gps` ubus object, so on
+// a two-modem box the position can only ever be ONE modem's. Without recording
+// which, the last modem to register took the section over silently, and
+// modem_gps served that one position to whichever modem was asked about — modem
+// A reporting modem B's coordinates beside A's own port. Raised by Codex
+// review, 2026-09-20.
+(function() {
+	let pointed = [];
+	let hooks = {};
+	let fake = {
+		modem: { create: (o) => {
+			hooks[o.id] = o.deps.on_event;
+			return { id: o.id, state: 'READY', config: { gnss: true },
+			         gps_tty: sprintf('/dev/ttyUSB%s', substr(o.id, 1)),
+			         start: () => null, stop: () => null,
+			         note_connect_success: () => null };
+		} },
+		context: { create: (o) => ({ state: 'IDLE', down: (cb) => cb ? cb() : null,
+		                             modem_event: () => null }) },
+	};
+
+	let d = daemon_mod.create({ timing: TIMING, deps: {
+		log: () => null,
+		load_qmi: () => fake,
+		gps_configure: (port, opts) => { push(pointed, port); return { changed: true, section: 'cfg1' }; },
+		gps_info: (cb) => cb({ latitude: '52.0', longitude: '8.5' }),
+	} });
+
+	d.apply_config(config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi', gnss: '1' },
+		m1: { '.type': 'wwand_modem', device: '/dev/mock1', protocol: 'qmi', gnss: '1' },
+		a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a' },
+		b:  { '.type': 'interface', proto: 'wwand', modem: 'm1', device: 'l3b', apn: 'b' },
+	} }));
+
+	// BOTH register, m0 first — the daemon's own handler does the claiming
+	hooks.m0(d.modems.m0.modem, 'registered', {});
+	hooks.m1(d.modems.m1.modem, 'registered', {});
+
+	eq(pointed, [ '/dev/ttyUSB0' ],
+		'gps owner: the first GNSS modem to register points ugps, the second does not');
+	eq(d._gps_owner, 'm0', 'gps owner: ...and the claim is recorded');
+
+	let got0 = null, got1 = null;
+	d.modem_gps('m0', (e, r) => { got0 = r; });
+	d.modem_gps('m1', (e, r) => { got1 = r; });
+
+	eq(got0?.latitude, '52.0', 'gps owner: the owning modem gets the position');
+	eq(got1?.latitude, null, 'gps owner: the other modem does NOT get it');
+	eq(got1?.reader_owner, 'm0', 'gps owner: ...and is told which modem is feeding ugps');
+	eq(got1?.port, '/dev/ttyUSB1', 'gps owner: it still gets its own half');
+
+	// THE OWNER GOES AWAY. ugps is let go, so the section stops naming a tty
+	// that is gone — and another modem can claim it, which it never could while
+	// the owner was recorded forever.
+	pointed = [];
+	d.apply_config(config.parse({ network: {
+		m1: { '.type': 'wwand_modem', device: '/dev/mock1', protocol: 'qmi', gnss: '1' },
+		b:  { '.type': 'interface', proto: 'wwand', modem: 'm1', device: 'l3b', apn: 'b' },
+	} }));
+
+	eq(pointed, [ null ], 'gps owner: the owner leaving points ugps at nothing');
+	eq(d._gps_owner, null, 'gps owner: ...and releases the claim');
+
+	// ...and the remaining modem can now take it
+	pointed = [];
+	hooks.m1(d.modems.m1.modem, 'registered', {});
+	eq(pointed, [ '/dev/ttyUSB1' ], 'gps owner: the next modem claims the free section');
+
+	// THE HARDWARE VANISHING IS THE OTHER WAY A MODEM GOES, and it is a
+	// different code path from a config reload — only the second had the
+	// release. A device that disappears would otherwise leave ugps named at
+	// its tty for the life of the daemon, with no other modem able to claim it.
+	pointed = [];
+	hooks.m1(d.modems.m1.modem, 'removed', {});
+	eq(pointed, [ null ], 'gps owner: a vanished device points ugps at nothing too');
+	eq(d._gps_owner, null, 'gps owner: ...and releases the claim');
+})();
+
+// A FOREIGN ugps IS NOBODY'S TO REPORT.
+//
+// With an operator's own section last, wwand refuses to drive it and no modem
+// owns ugps — and the read used to suppress the position only when somebody
+// ELSE owned it, so "nobody owns it" fell through and an operator's hat GPS was
+// reported as the modem's own position. Raised by Codex review, 2026-09-20.
+(function() {
+	let hooks = {};
+	let fake = {
+		modem: { create: (o) => {
+			hooks[o.id] = o.deps.on_event;
+			return { id: o.id, state: 'READY', config: { gnss: true }, gps_tty: '/dev/ttyUSB3',
+			         start: () => null, stop: () => null, note_connect_success: () => null };
+		} },
+		context: { create: (o) => ({ state: 'IDLE', down: (cb) => cb ? cb() : null }) },
+	};
+
+	let d = daemon_mod.create({ timing: TIMING, deps: {
+		log: () => null,
+		load_qmi: () => fake,
+		// the operator's own section is last: nothing written, nothing claimed
+		gps_configure: () => ({ changed: false, section: null, skipped: 'foreign_config' }),
+		gps_info: (cb) => cb({ latitude: '48.1', longitude: '11.5' }),
+	} });
+
+	d.apply_config(config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi', gnss: '1' },
+		a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a' },
+	} }));
+
+	hooks.m0(d.modems.m0.modem, 'registered', {});
+	eq(d._gps_owner, null, 'foreign ugps: a refused config claims nothing');
+
+	let got = null;
+	d.modem_gps('m0', (e, r) => { got = r; });
+
+	eq(got?.latitude, null, 'foreign ugps: its position is not reported as the modem\'s');
+	eq(got?.port, '/dev/ttyUSB3', 'foreign ugps: the modem\'s own half still answers');
+
+	// ...and a write that FAILED claims nothing either, or it would block every
+	// other GNSS modem while pointing at nothing
+	let d2 = daemon_mod.create({ timing: TIMING, deps: {
+		log: () => null,
+		load_qmi: () => fake,
+		gps_configure: () => ({ changed: false, section: null, skipped: 'commit_failed' }),
+	} });
+
+	d2.apply_config(config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi', gnss: '1' },
+		a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a' },
+	} }));
+
+	hooks.m0(d2.modems.m0.modem, 'registered', {});
+	eq(d2._gps_owner, null, 'failed write: claims nothing');
+})();
+
 // A CONTROL NOTE THE BACKEND SET HAS TO REACH STATUS.
 //
 // `control_note` exists on two objects: the daemon's modem entry (package not

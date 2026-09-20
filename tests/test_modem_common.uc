@@ -1100,6 +1100,31 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 	mc.start_gnss(m, () => null);
 	eq(length(sent), 1, 'gnss: an already-started receiver is left alone');
 
+	// ALREADY RUNNING IS SUCCESS, and the code that says so is in the ERROR,
+	// not in the response lines. atcmd parses `+CME ERROR: 504` into
+	// { error: 'cme', code: '504' } and leaves the lines empty, so a match
+	// against the lines alone never saw it — the receiver was on, the start
+	// was reported as a failure, and `gnss_started` never latched. HW-seen on
+	// the GL-X3000 / RM520N (2026-09-20) on the second start after a reload.
+	sent = [];
+	let busy = mk('Quectel', { gnss: true }, [ { error: 'cme', code: '504' }, null ]);
+	let busy_err = 'unset';
+
+	mc.start_gnss(busy, () => null, (e) => { busy_err = e; });
+	eq(sent, [ 'AT+QGPS=1' ], 'gnss: a busy receiver is still asked once');
+	eq(busy_err, null, 'gnss: "session is ongoing" is success, not a failure');
+	eq(busy.gnss_started, true, 'gnss: ...and it latches as started');
+
+	// a REAL failure still fails, and is not latched — so the next bring-up
+	// tries again rather than remembering a start that never happened
+	sent = [];
+	let dead = mk('Quectel', { gnss: true }, [ { error: 'cme', code: '3' }, null ]);
+	let dead_err = null;
+
+	mc.start_gnss(dead, () => null, (e) => { dead_err = e; });
+	eq(dead_err?.code, '3', 'gnss: another CME code is still an error');
+	eq(dead.gnss_started, null, 'gnss: ...and is not remembered as started');
+
 	sent = [];
 	mc.start_gnss(mk('Fibocom', { gnss: true }), () => null);
 	eq(sent, [ ], 'gnss: an unknown vendor gets NO invented command');

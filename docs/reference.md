@@ -420,9 +420,11 @@ config wwand_modem 'm0'
 	list at_init 'ATE0'              # extra AT commands, sent once before registration
 	option at2_external '0'          # 1: reserve the secondary AT port for external tools
 	option gnss '0'                  # 1: start the modem's GNSS receiver, so its NMEA port
-	                                 #    streams. The port itself is REPORTED, never opened
-	                                 #    and never linked — read `gps_port` from
-	                                 #    `ubus call wwand status` and point gpsd at it
+	                                 #    streams. wwand never OPENS that port — it reports
+	                                 #    it as `gps_port`, and with wwand-gps installed it
+	                                 #    also points ugps at it (see below)
+	option gnss_set_time '0'         # 1: let ugps step the system clock from NMEA. Off by
+	                                 #    default — the router has NTP; for RTC-less installs
 	option at_mbim '0'               # 0: disable the automatic AT-over-MBIM fallback
 	option at_over_mbim ''           # force AT over the vendor MBIM CID instead of a
 	                                 #   tty: fibocom|compal|1 (unset = automatic:
@@ -609,6 +611,34 @@ normally nothing to set here.
 
 The no-mux datapath was called `none` until 1.6 and that spelling still works
 (as does `raw-ip`); both mean `raw_ip`, which is what `status` reports.
+
+**GNSS (`wwand-gps`).** Three pieces that already existed with nothing between
+them: wwand FINDS the modem's NMEA port during enumeration (reported as
+`gps_port`), `option gnss` STARTS the receiver with the vendor AT command — QMI's
+LOC service is broken on Quectel and AT is what works, and only wwand has the
+port — and ugps (OpenWrt base) READS the NMEA and publishes a `gps` ubus object.
+What was missing is the config write between them: ugps takes a STATIC tty out of
+`/etc/config/gps` (`uci get gps.@gps[-1].tty`, its init) while wwand's is
+discovered and can move between boots or when a modem is replaced.
+
+Installing `wwand-gps` adds that write, plus `ubus call wwand modem_gps` which
+answers with both halves at once — the port and receiver state wwand knows,
+merged with whatever ugps reports (its keys are passed through as they come;
+they are another daemon's schema). The LuCI status page shows the same as a GNSS
+panel, with a map link rather than an embedded tile layer: a tile would have the
+router's own web interface fetch from a third party, and send it this router's
+position to do so, the moment anyone opened the page.
+
+**Good citizen, here too.** wwand manages exactly one `config gps` section and
+only one it created itself, marked `option wwand '1'`. ugps reads the LAST
+section, so an operator's own — a hat GPS on a serial port, a second receiver —
+is never touched, never reordered and never repointed; wwand logs that it is
+staying out of the way instead. Nothing is written for a modem without `option
+gnss`.
+
+Note `option location` is a DIFFERENT path: the QMI LOC service, QMI-only and
+documented as broken on Quectel. On those modems `option gnss` is the one that
+works.
 
 **Datapath plugins.** `option mux` also accepts the name of an add-on datapath
 package: `option mux 'vendorx'` makes the daemon load `wwand.datapath_vendorx`

@@ -210,7 +210,15 @@ export function start_gnss(self, log, cb)
 	}
 
 	self.at.send(recipe.cmd, (err, res) => {
-		let line = join(' ', res?.lines ?? []);
+		// THE CODE IS IN THE ERROR, not in the lines. `+CME ERROR: 504` is
+		// parsed by atcmd into { error: 'cme', code: '504' } and the response
+		// lines are then empty — so matching only `res.lines` never saw it, and
+		// "session is ongoing" (the receiver is ALREADY RUNNING, which is
+		// success for us) was reported as a failure and never latched
+		// `gnss_started`. HW-seen on the GL-X3000 / RM520N, 2026-09-20: the
+		// second start after a reload logged a warning and left the status
+		// saying the receiver was not started while it was.
+		let line = trim(sprintf('%s %s', join(' ', res?.lines ?? []), err?.code ?? ''));
 		let already = err && recipe.ok_errors && match(line, recipe.ok_errors);
 
 		if (err && !already) {
