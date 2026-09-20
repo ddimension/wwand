@@ -51,8 +51,46 @@ function last_section(cursor)
 {
 	let found = null;
 
+	// ugps' UNTOUCHED SHIPPED DEFAULT, and nothing else. `files/gps.config` in
+	// the ugps package is exactly these three options with these three values:
+	//
+	//     config gps
+	//         option tty 'ttyACM0'
+	//         option adjust_time '1'
+	//         option disabled '1'
+	//
+	// Anything else — a different tty, adjust_time cleared, a baudrate added —
+	// is an operator who has been here, and is not ours whatever its `disabled`
+	// says. "Disabled" on its own is NOT evidence of ownership: somebody may
+	// have switched their own receiver off on purpose, and adopting that would
+	// overwrite their tty and mark their section as ours. Raised by Codex
+	// review, 2026-09-20.
+	//
+	// If ugps ever changes its default, this stops matching and wwand refuses
+	// with a line in the log — a visible failure, not a silent takeover.
+	let pristine = (s) => {
+		// nothing but the three it ships with...
+		for (let k in keys(s))
+			if (substr(k, 0, 1) != '.' &&
+			    k != 'tty' && k != 'adjust_time' && k != 'disabled')
+				return false;
+
+		// ...and each of them still saying what it shipped saying. A missing
+		// one fails this too, so there is no separate "all three present"
+		// check: an absent option cannot equal the value it must carry.
+		return s.tty == 'ttyACM0' &&
+			sprintf('%s', s.adjust_time) == '1' && sprintf('%s', s.disabled) == '1';
+	};
+
 	cursor.foreach(PKG, 'gps', (s) => {
-		found = { name: s['.name'], mine: (s.wwand == '1' || s.wwand == 1) };
+		found = {
+			name: s['.name'],
+			mine: (s.wwand == '1' || s.wwand == 1),
+			// ugps' init reads a MISSING `disabled` as '0' — `uci get … ||
+			// echo 0` (ugps.init:17-19) — so absent means enabled here too.
+			enabled: (sprintf('%s', s.disabled ?? '0') == '0'),
+			pristine: pristine(s),
+		};
 	});
 
 	return found;
@@ -75,9 +113,22 @@ function sync(cursor, port, opts)
 	// THEIRS, which the first version of this treated as ours to update while
 	// ugps went on reading theirs — a change reported as successful that could
 	// not take effect. Raised by Codex review, 2026-09-20.
-	if (last != null && !last.mine)
+	//
+	// EXCEPT ugps' OWN UNTOUCHED DEFAULT, and that exception is what makes the
+	// package work at all. ugps SHIPS a section — `tty 'ttyACM0'`,
+	// `adjust_time '1'`, `disabled '1'` — so on a fresh install the last
+	// section is always foreign, and a rule that stopped there would refuse
+	// every box it was installed on. Found by installing it properly on a
+	// second router rather than on one where the section had been cleared by
+	// hand (2026-09-20).
+	//
+	// The test is the CONTENT, not the `disabled` flag: an operator may have
+	// switched their own receiver off on purpose, and adopting that would
+	// overwrite their tty and stamp their section as ours (see `pristine`).
+	if (last != null && !last.mine && !last.pristine)
 		return { changed: false, section: null, skipped: 'foreign_config' };
 
+	let adopting = (last != null && !last.mine);
 	let mine = last?.name;
 
 	if (mine == null) {
@@ -88,6 +139,12 @@ function sync(cursor, port, opts)
 
 		if (mine == null)
 			return { changed: false, section: null, skipped: 'add_failed' };
+
+		cursor.set(PKG, mine, 'wwand', '1');
+	}
+	else if (adopting) {
+		if (port == null)
+			return { changed: false, section: mine, skipped: 'nothing_to_do' };
 
 		cursor.set(PKG, mine, 'wwand', '1');
 	}
@@ -126,7 +183,7 @@ function sync(cursor, port, opts)
 	if (!cursor.commit(PKG))
 		return { changed: false, section: mine, skipped: 'commit_failed' };
 
-	return { changed: true, section: mine, port: port };
+	return { changed: true, section: mine, port: port, adopted: adopting };
 };
 
 // What wwand knows about this modem's GNSS, merged with what ugps reports.

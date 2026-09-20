@@ -598,9 +598,13 @@ export function create(o)
 			// said HERE, not in gps.uc: that module is require()d and its own
 			// `wwand.log` would be a second instance with no output target set
 			if (r.changed) {
-				logmod.log('notice', 'gps: ugps %s (section %s)',
+				logmod.log('notice', 'gps: ugps %s (section %s%s)',
 					(port == null) ? 'stopped — no NMEA port'
-					               : sprintf('pointed at %s', port), r.section);
+					               : sprintf('pointed at %s', port), r.section,
+					// adopting ugps' own shipped default is not the same as
+					// writing a section of our own, and the operator should be
+					// able to see which happened
+					r.adopted ? ', adopted from the ugps default' : '');
 
 				// procd's reload trigger, not a restart: ugps loses its fix on
 				// a restart, and its init subscribes to `gps` config changes
@@ -608,8 +612,30 @@ export function create(o)
 				conn.defer('service', 'event',
 					{ type: 'config.change', data: { package: 'gps' } }, () => null);
 			}
+			// NOT "enabled": the rule stopped being about the disabled flag
+			// when it was narrowed to ugps' untouched default, so a modified
+			// section that happens to be switched off is protected too — and
+			// calling it enabled in the log would misdescribe exactly the
+			// operator configuration this is protecting. Raised by Codex
+			// review, 2026-09-20.
 			else if (r.skipped == 'foreign_config')
-				logmod.log('info', 'gps: /etc/config/gps has a section wwand did not create — leaving it alone (ugps reads the last one, so adding ours would take it over)');
+				logmod.log('info', 'gps: the last section in /etc/config/gps is not ugps\' shipped default and was not created by wwand — leaving it alone (ugps reads the last one, so driving it would take that receiver over)');
+			// A SKIP THAT IS NOT ORDINARY SAYS SO. `unchanged` and
+			// `nothing_to_do` are the quiet, correct outcomes; the rest mean the
+			// write did not happen and nobody was told — which on a box with no
+			// /etc/config/gps at all (ugps not installed, its conffile removed)
+			// is a feature that silently does nothing. Found while installing
+			// this on a second router, 2026-09-20.
+			//
+			// The ugps hint belongs to `add_failed` and to nothing else: a
+			// commit can fail with ugps installed and its file present, and
+			// sending that reader to check the package is sending them away
+			// from the problem.
+			else if (r.skipped != 'unchanged' && r.skipped != 'nothing_to_do')
+				logmod.log('warn', 'gps: could not point ugps at %s (%s)%s',
+					port ?? 'nothing', r.skipped ?? 'unknown',
+					(r.skipped == 'add_failed')
+						? ' — /etc/config/gps does not exist; is ugps installed?' : '');
 
 			return r;
 		},

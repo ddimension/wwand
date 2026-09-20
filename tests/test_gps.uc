@@ -97,6 +97,98 @@ function cursor(sections) {
 	eq(c.get('gps', s, 'disabled'), '1', 'sync: ugps is disabled rather than left respawning');
 }
 
+// --- ugps SHIPS ITS OWN SECTION, and it is always the last one ---------------
+//
+// `files/gps.config` in the ugps package: tty 'ttyACM0', adjust_time '1',
+// disabled '1'. So on a FRESH INSTALL the last section is always foreign, and a
+// rule that stopped at "not ours" would refuse every box the package was ever
+// installed on. Found by installing it properly on a second router rather than
+// on one where the section had been cleared by hand (2026-09-20).
+//
+// A DISABLED section is not a receiver in service — ugps' own init returns early
+// unless `disabled` is exactly '0' — so that one is adopted, marked, and the
+// adoption is reported.
+{
+	let c = cursor([ { '.name': 'cfg01', '.type': 'gps',
+	                   tty: 'ttyACM0', adjust_time: '1', disabled: '1' } ]);
+	let r = gps.sync(c, '/dev/ttyUSB1', {});
+
+	eq(r.changed, true, 'shipped default: the ugps default is adopted, not refused');
+	eq(r.adopted, true, 'shipped default: ...and the adoption is reported');
+	eq(r.section, 'cfg01', 'shipped default: the same section, not a second one');
+	eq(length(c._pkg), 1, 'shipped default: nothing is appended beside it');
+	eq(c.get('gps', 'cfg01', 'wwand'), '1', 'shipped default: it is marked as ours now');
+	eq(c.get('gps', 'cfg01', 'tty'), '/dev/ttyUSB1', 'shipped default: pointed at the modem');
+	eq(c.get('gps', 'cfg01', 'disabled'), '0', 'shipped default: ...and enabled');
+	eq(c.get('gps', 'cfg01', 'adjust_time'), '0',
+		'shipped default: the clock is handed back to sysntpd unless asked');
+}
+
+// ...and once adopted it is simply ours: the second pass changes nothing.
+{
+	let c = cursor([ { '.name': 'cfg01', '.type': 'gps',
+	                   tty: 'ttyACM0', adjust_time: '1', disabled: '1' } ]);
+	gps.sync(c, '/dev/ttyUSB1', {});
+	let r = gps.sync(c, '/dev/ttyUSB1', {});
+
+	eq(r.changed, false, 'shipped default: the next pass is a no-op');
+	eq(r.skipped, 'unchanged', 'shipped default: ...and says so');
+}
+
+// An adoption with NO port is not an adoption: there is nothing to point at, so
+// the shipped default is left exactly as it was found.
+{
+	let c = cursor([ { '.name': 'cfg01', '.type': 'gps',
+	                   tty: 'ttyACM0', adjust_time: '1', disabled: '1' } ]);
+	let r = gps.sync(c, null, {});
+
+	eq(r.changed, false, 'shipped default: no port, no adoption');
+	eq(c.get('gps', 'cfg01', 'wwand'), null, 'shipped default: ...and no marker left behind');
+
+	// ...and the section is still adoptable afterwards. That is the sequence a
+	// real box walks: the modem comes up without `option gnss`, it is switched
+	// on later, and the default must still be recognisable as untouched.
+	let r2 = gps.sync(c, '/dev/ttyUSB1', {});
+
+	eq(r2.adopted, true, 'shipped default: still adoptable after a no-port pass');
+	eq(c.get('gps', 'cfg01', 'tty'), '/dev/ttyUSB1', 'shipped default: ...and then pointed');
+}
+
+// A SECTION THAT IS MERELY DISABLED IS NOT THE SHIPPED DEFAULT.
+//
+// "Disabled" is not evidence of ownership: an operator may have switched their
+// own receiver off on purpose, and adopting that would overwrite their tty and
+// stamp their section as ours. Only the package's UNTOUCHED default is adopted
+// — the content is the test, not the flag. Raised by Codex review, 2026-09-20.
+{
+	let their = (extra) => {
+		let sec = { '.name': 'theirs', '.type': 'gps',
+		            tty: 'ttyACM0', adjust_time: '1', disabled: '1', ...(extra ?? {}) };
+		let c = cursor([ sec ]);
+		return { r: gps.sync(c, '/dev/ttyUSB1', {}), c: c };
+	};
+
+	// their own receiver, switched off
+	let a = their({ tty: '/dev/ttyS1' });
+	eq(a.r.skipped, 'foreign_config', 'not-default: another tty is theirs, disabled or not');
+	eq(a.c.get('gps', 'theirs', 'tty'), '/dev/ttyS1', 'not-default: ...and is not touched');
+
+	// the default with one option changed
+	eq(their({ adjust_time: '0' }).r.skipped, 'foreign_config',
+		'not-default: a cleared adjust_time means somebody has been here');
+
+	// the default with an option ADDED
+	eq(their({ baudrate: '9600' }).r.skipped, 'foreign_config',
+		'not-default: an added option means the same');
+
+	// ...and a section carrying only some of the three is not it either
+	{
+		let c = cursor([ { '.name': 'part', '.type': 'gps', tty: 'ttyACM0', disabled: '1' } ]);
+		eq(gps.sync(c, '/dev/ttyUSB1', {}).skipped, 'foreign_config',
+			'not-default: two of the three options is not the shipped default');
+	}
+}
+
 // --- AN OPERATOR'S OWN SECTION IS NOT OURS -----------------------------------
 //
 // ugps reads the LAST section, so adding one would take over their receiver.
