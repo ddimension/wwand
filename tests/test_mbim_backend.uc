@@ -863,4 +863,128 @@ eq(fe_answers, 1, 'on_answer: an UNMATCHED function error arms nothing');
 fec.on_message({ type: mbim.MSG_INDICATE_STATUS, service: 'x', cid: 1, info: '' });
 eq(fe_answers, 1, 'on_answer: an indication is not an answer to anything we asked');
 
+// --- VISIBLE_PROVIDERS (basic_connect cid 8) --------------------------------
+//
+// TWO OFFSET BASES, and swapping them decodes into garbage that still looks
+// like data. The array's (offset, size) pairs are relative to the information
+// buffer; the two string pairs INSIDE a provider are relative to THAT
+// PROVIDER's start — libmbim reads the pair at `information_buffer_offset +
+// relative_offset` and the data at `information_buffer_offset +
+// struct_start_offset + offset` (mbim-message.c:553-565, 1.32.0).
+//
+// Built by hand for exactly that reason: a round trip through our own encoder
+// would agree with itself whichever base it used.
+(() => {
+	let w = (s) => {
+		let out = '';
+		for (let i = 0; i < length(s); i++)
+			out += struct.pack('<H', ord(s, i));
+		return out;
+	};
+
+	// one provider: fixed 32 bytes, then the two strings inside its own region
+	let mk = (id, name, state, cls, rssi) => {
+		let sid = w(id), snm = w(name);
+		// strings start after the fixed part, offsets from the struct start
+		let fixed = struct.pack('<II', 32, length(sid)) +
+			struct.pack('<I', state) +
+			struct.pack('<II', 32 + length(sid), length(snm)) +
+			struct.pack('<III', cls, rssi, 0);
+
+		return fixed + sid + snm;
+	};
+
+	let p1 = mk('26201', 'Telekom.de', 1 /* HOME */ | 16 /* REGISTERED */, 8, 20);
+	let p2 = mk('262023', 'Vodafone', 2 /* FORBIDDEN */, 8, 15);
+	let head = 4 + 2 * 8;
+
+	let buf = struct.pack('<I', 2) +
+		struct.pack('<II', head, length(p1)) +
+		struct.pack('<II', head + length(p1), length(p2)) +
+		p1 + p2;
+
+	let r = bc.commands.VISIBLE_PROVIDERS.decode(buf);
+
+	eq(length(r.operators), 2, 'providers: both entries decoded');
+	eq(r.operators[0].mcc, 262, 'providers: mcc split off the concatenated plmn');
+	eq(r.operators[0].mnc, 1, 'providers: ...and the mnc');
+	eq(r.operators[0].mnc_digits, 2, 'providers: a 5-digit id is a 2-digit mnc');
+	eq(r.operators[0].description, 'Telekom.de', 'providers: the name, read at the struct-relative offset');
+	eq(r.operators[0].home, true, 'providers: the home bit');
+	eq(r.operators[0].registered, true, 'providers: ...and the registered bit');
+	eq(r.operators[0].forbidden, false, 'providers: ...and one that is not set');
+
+	eq(r.operators[1].mnc, 23, 'providers: a 6-digit id is a 3-digit mnc');
+	eq(r.operators[1].mnc_digits, 3, 'providers: ...and says so');
+	eq(r.operators[1].description, 'Vodafone', 'providers: second name');
+	eq(r.operators[1].forbidden, true, 'providers: the forbidden bit');
+
+	// a truncated buffer stops the list rather than inventing entries
+	eq(length(bc.commands.VISIBLE_PROVIDERS.decode(substr(buf, 0, head + 10)).operators), 0,
+		'providers: an entry running past the buffer ends the list');
+	eq(length(bc.commands.VISIBLE_PROVIDERS.decode(struct.pack('<I', 3)).operators), 0,
+		'providers: a count with no pair table decodes to nothing');
+	eq(length(bc.commands.VISIBLE_PROVIDERS.decode('').operators), 0,
+		'providers: an empty buffer decodes to nothing');
+
+	// and a provider with no name is not a provider with an empty one
+	let anon = mk('26203', '', 8, 8, 10);
+	let abuf = struct.pack('<I', 1) + struct.pack('<II', 12, length(anon)) + anon;
+
+	eq(bc.commands.VISIBLE_PROVIDERS.decode(abuf).operators[0].description, null,
+		'providers: a zero-size name reads as none, not as an empty string');
+
+	// A STRING BELONGS TO ITS OWN PROVIDER. Bounding it against the whole
+	// buffer only stops a read off the end; it lets a record point at the
+	// fixed fields or at the NEXT provider's name, and the answer then looks
+	// exactly like a right one.
+	let one = mk('26201', 'Telekom.de', 1, 8, 20);
+
+	// name offset 0 = inside this record's own fixed part
+	let inside = struct.pack('<II', 32, 10) + struct.pack('<I', 1) +
+		struct.pack('<II', 0, 10) + struct.pack('<III', 8, 20, 0) + w('26201');
+	let ibuf = struct.pack('<I', 1) + struct.pack('<II', 12, length(inside)) + inside;
+
+	eq(bc.commands.VISIBLE_PROVIDERS.decode(ibuf).operators[0].description, null,
+		'providers: a name pointing into the fixed part is refused, not read');
+
+	// a name running past the END of its own record — still inside the buffer,
+	// because a second provider follows it
+	let over = struct.pack('<II', 32, 10) + struct.pack('<I', 1) +
+		struct.pack('<II', 32, 200) + struct.pack('<III', 8, 20, 0) + w('26201');
+	let obuf = struct.pack('<I', 2) +
+		struct.pack('<II', 20, length(over)) +
+		struct.pack('<II', 20 + length(over), length(one)) +
+		over + one;
+
+	eq(bc.commands.VISIBLE_PROVIDERS.decode(obuf).operators[0].description, null,
+		'providers: a name running into the next provider is refused');
+	eq(bc.commands.VISIBLE_PROVIDERS.decode(obuf).operators[1].description, 'Telekom.de',
+		'providers: ...and the next provider still decodes');
+
+	// an odd byte count is not UTF-16
+	let odd = struct.pack('<II', 32, 10) + struct.pack('<I', 1) +
+		struct.pack('<II', 42, 5) + struct.pack('<III', 8, 20, 0) + w('26201') + w('Telekom');
+	let dbuf = struct.pack('<I', 1) + struct.pack('<II', 12, length(odd)) + odd;
+
+	eq(bc.commands.VISIBLE_PROVIDERS.decode(dbuf).operators[0].description, null,
+		'providers: an odd byte count is not a UTF-16 string');
+
+	// AND AN ID THAT IS NOT A PLMN IS NOT SPLIT INTO ONE. "at least five
+	// characters" made a seven-digit id an mnc_digits of 4, and a non-numeric
+	// one was coerced to a number — both then travelled as usable results.
+	let bad = (id) => {
+		let pr = mk(id, 'X', 1, 8, 20);
+		let b = struct.pack('<I', 1) + struct.pack('<II', 12, length(pr)) + pr;
+		return bc.commands.VISIBLE_PROVIDERS.decode(b).operators[0];
+	};
+
+	eq(bad('2620111').mcc, null, 'providers: a seven-digit id is not a plmn');
+	eq(bad('2620111').mnc_digits, null, 'providers: ...and claims no mnc width');
+	eq(bad('26x01').mcc, null, 'providers: a non-numeric id is not a plmn');
+	eq(bad('2620').mcc, null, 'providers: a four-digit id is not a plmn');
+	eq(bad('26x01').description, 'X', 'providers: ...but the name still comes through');
+	eq(bad('26x01').provider_id, '26x01', 'providers: ...and the raw id is kept');
+})();
+
 done('test_mbim_backend');

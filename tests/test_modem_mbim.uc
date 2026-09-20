@@ -135,6 +135,10 @@ function handlers() {
 		// `no_recovery`, so this must not count against the control channel —
 		// asserted in its own scenario below.
 		MODEM_CONFIGURATION: { __error: 9 },
+		// the native operator scan (basic_connect cid 8) — a raw buffer,
+		// because the response is a ref-struct-array the field codec cannot
+		// build. Two providers, decoded by the schema's own decode().
+		VISIBLE_PROVIDERS: { __raw: struct.pack('<I', 0) },
 		WAKE_REASON: { __error: 9 },
 		// the default modem boots with its radio already on, so init must not
 		// write RADIO_STATE at all — the off case is its own scenario below
@@ -324,8 +328,8 @@ function assert_subscribe_list() {
 				// exactly the CIDs this modem has handlers for, and no others
 				eq(by[bc.service], [ 2, 3, 9, 10, 11, 12 ],
 					'subscribe: the basic-connect cids wwand listens for, sorted');
-				eq(by[ext.service], [ 4, 8 ],
-					'subscribe: LTE attach info and per-slot UICC state');
+				eq(by[ext.service], [ 4, 8, 16 ],
+					'subscribe: LTE attach info, per-slot UICC state, carrier configuration');
 
 				// ...INCLUDING the QMI-over-MBIM passthrough, which is where
 				// deriving the list from the handlers pays for itself: nobody
@@ -382,6 +386,64 @@ function assert_subscribe_list() {
 				ok(length(m.attach_info?.nw_error_text ?? '') > 0,
 					'attach ind: ...and named, not left as a number');
 				eq(m.attach_info?.apn, null, 'attach ind: an empty apn reads as none, not ""');
+
+				// NATIVE NETWORK SELECTION: the provider id is mcc + mnc with
+				// the requested WIDTH, and the width is the statement — 310/030
+				// and 310/30 are different operators and the id carries no flag
+				// to say which was meant. ucode's sprintf has no `%0*d`, which
+				// is exactly how a 3-digit MNC gets silently truncated.
+				m.native_register({ mcc: 310, mnc: 30, width: 3 }, () => null);
+				m.native_register({ mcc: 262, mnc: 1, width: 2 }, () => null);
+				m.native_register(null, () => null);
+
+				let regs = filter(mocks.calls, (c) => c.name == 'REGISTER_STATE' && c.kind == 'set');
+
+				eq(length(regs), 3, 'register: three sets reached the modem');
+				eq(regs[0].args.provider_id, '310030',
+					'register: a 3-digit mnc keeps its leading zero');
+				eq(regs[0].args.register_action, bc.REGISTER_ACTION_MANUAL,
+					'register: ...as a manual selection');
+				eq(regs[1].args.provider_id, '26201',
+					'register: a 2-digit mnc is padded to two');
+				// a zero-size MBIM string reads back as absent, which is the
+				// same statement: automatic names no provider
+				eq(regs[2].args.provider_id, null,
+					'register: automatic names no provider');
+				eq(regs[2].args.register_action, bc.REGISTER_ACTION_AUTOMATIC,
+					'register: ...and says automatic');
+
+				// THE CARRIER CONFIGURATION RETRY: once per incarnation.
+				//
+				// The init query runs before the radio is up and a modem may
+				// answer "not yet" (status 14 on the RM520N); by the time
+				// registration completes it has had every chance. This mock
+				// refuses it outright, so the count is what the code decided to
+				// send — twice, and never again however often registration
+				// comes and goes. Without the flag every re-registration asks.
+				let cfg_n = () => length(filter(mocks.calls,
+					(c) => c.name == 'MODEM_CONFIGURATION' && c.kind == 'query'));
+
+				eq(cfg_n(), 2, 'carrier retry: asked at init and once more after registering');
+
+				// a second attach cycle must not add a third. The register
+				// handler only runs step_attach from REGISTERING, so the state
+				// has to be put back — otherwise this drives nothing and the
+				// assertion below is free.
+				m.state = 'REGISTERING';
+				m.mbim.handlers[sprintf('%s:%d', bc.service, 9)][0].cb({
+					nw_error: 0, register_state: bc.REGISTER_STATE_HOME, register_mode: 1,
+					available_data_classes: 0, current_cellular_class: 0,
+					provider_id: '26201', provider_name: 'Testnet', roaming_text: '',
+					registration_flags: 0,
+				});
+				eq(cfg_n(), 2, 'carrier retry: a later registration does not ask again');
+
+				// NATIVE SCAN: full scan, not the cached list
+				m.native_scan(() => null, 1000);
+
+				let scans = filter(mocks.calls, (c) => c.name == 'VISIBLE_PROVIDERS');
+				eq(length(scans), 1, 'scan: the native scan reached the modem');
+				eq(scans[0].args.action, 0, 'scan: ...asking for a full scan, not the cache');
 
 				ms.stop();
 

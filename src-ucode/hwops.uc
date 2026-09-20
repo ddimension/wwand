@@ -59,9 +59,33 @@ export function install(self, o)
 		if (!entry)
 			return;
 
-		if (!entry.modem?.pdc)
+		// NO PDC IS NOT THE SAME AS NO ANSWER. MBIMEx v3 has a carrier
+		// configuration of its own (MODEM_CONFIGURATION, ext cid 16), which
+		// modem_mbim reads at init and keeps — reachable on a modem with no QMI
+		// PDC service at all, which is exactly the case this branch used to
+		// refuse outright.
+		//
+		// READ ONLY, and it says so: MBIM has a status and a name and no way to
+		// SELECT a configuration. A `set` here is genuinely unavailable, and
+		// answering it with the read would be worse than refusing.
+		if (!entry.modem?.pdc) {
+			let mc = entry.modem?.modem_config;
+
+			if (mc != null && (op == 'get' || op == 'list')) {
+				let one = { id: mc.name ?? '(unnamed)', description: mc.name ?? null,
+				            status: mc.status, status_text: mc.status_text };
+
+				return cb(null, (op == 'list')
+					? { configs: [ one ], source: 'mbim', read_only: true }
+					: { active: mc.name ?? null, status: mc.status,
+					    status_text: mc.status_text, source: 'mbim', read_only: true });
+			}
+
 			return cb({ error: 'no_pdc',
-			            detail: 'this modem has no QMI PDC service (carrier config unavailable)' });
+			            detail: (mc != null && op == 'set')
+			                ? 'this modem reports its carrier configuration over MBIM, which can read it but not select one — selecting needs the QMI PDC service'
+			                : 'this modem has no QMI PDC service (carrier config unavailable)' });
+		}
 
 		if (op == 'list')
 			return carrier.list(entry.modem, (err, l) =>

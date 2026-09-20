@@ -879,6 +879,24 @@ export function create(opts)
 						? sprintf(' — %s', self.attach_info.nw_error_text) : ''));
 		});
 
+		// CARRIER CONFIGURATION, unasked. The query is issued at init and this
+		// hardware answers it with status 14 (NotInitialized) — too early — and
+		// then sends the same CID as an indication a moment later (GL-X3000 /
+		// RM520N, 2026-09-20). So the indication is not a nicety here, it is
+		// the only way the value arrives at all on that modem; on one that
+		// answers the query it is how a configuration SWITCH announces itself
+		// instead of being polled for.
+		self.mbim.on(ext, 'MODEM_CONFIGURATION', (data) => {
+			self.modem_config = {
+				status: data.configuration_status,
+				status_text: ext.MODEM_CONFIG_STATUS[sprintf('%d', data.configuration_status ?? -1)],
+				name: length(data.configuration_name ?? '') ? data.configuration_name : null,
+			};
+
+			log('info', sprintf('carrier configuration: %s (%s)',
+				self.modem_config.name ?? '-', self.modem_config.status_text ?? '?'));
+		});
+
 		// SIM SLOT STATE, per slot. Today this is polled at init and after a
 		// slot switch; a card pulled or pushed while the modem runs is
 		// otherwise noticed only by the failures that follow it. `ext` is
@@ -892,6 +910,59 @@ export function create(opts)
 				data.slot_index ?? 0, data.state,
 				ext.UICC_SLOT_STATE_NAMES?.[sprintf('%d', data.state)] ?? 'unknown'));
 		});
+	};
+
+	// NATIVE OPERATOR SCAN. MBIM has had one all along (VISIBLE_PROVIDERS,
+	// cid 8) and wwand never called it, so an MBIM modem whose QMI passthrough
+	// refuses a NAS scan and has no AT port answered `unsupported_on_backend`
+	// for an operation its own protocol implements. netsel_ops reaches this by
+	// duck-typing (the schemas ship in wwand-mbim; that file is in the base
+	// package), and puts it BELOW the other two on purpose: the QMI scan
+	// carries band and RAT per operator, and AT+COPS=? is the one every modem
+	// answers.
+	self.native_scan = function(cb, timeout) {
+		if (!self.mbim)
+			return cb({ error: 'no_channel' }, null);
+
+		// FULL scan, not the cached list: a caller asking to scan wants the
+		// radio to go and look (MbimVisibleProvidersAction, libmbim 1.32.0 —
+		// 0 = full scan, 1 = restricted).
+		self.mbim.command(bc, 'VISIBLE_PROVIDERS', 'query', { action: 0 },
+			(err, data) => cb(err, err ? null : (data?.operators ?? [])),
+			{ timeout: timeout });
+	};
+
+	// NATIVE NETWORK SELECTION. MBIM's REGISTER_STATE set takes a provider id
+	// and an action; `plmn` null means automatic. Reached by duck-typing from
+	// netsel_ops, below the QMI and AT rungs — those carry the RAT preference
+	// and the 3-digit-MNC flag, which this does not.
+	//
+	// The width IS the statement: a 3-digit MNC written two digits wide names a
+	// different operator, and a provider id carries no flag to say which was
+	// meant — the digit count is all there is. Same rule AT+COPS follows.
+	self.native_register = function(plmn, cb) {
+		if (!self.mbim)
+			return cb({ error: 'no_channel' });
+
+		// zero-padded by hand: ucode's sprintf has no `%0*d`, and a `%02d` that
+		// silently truncated a 3-digit MNC would name a different operator
+		let id = '';
+
+		if (plmn) {
+			let mnc = sprintf('%d', +plmn.mnc);
+			let want = (plmn.width == 3) ? 3 : 2;
+
+			while (length(mnc) < want)
+				mnc = '0' + mnc;
+
+			id = sprintf('%d%s', +plmn.mcc, mnc);
+		}
+
+		self.mbim.command(bc, 'REGISTER_STATE', 'set', {
+			provider_id: id,
+			register_action: plmn ? bc.REGISTER_ACTION_MANUAL : bc.REGISTER_ACTION_AUTOMATIC,
+			data_class: 0,
+		}, (err) => cb(err), { timeout: 60000 });
 	};
 
 	self._on_connect_ind = function(data) {
@@ -1216,6 +1287,38 @@ export function create(opts)
 	};
 
 	step_attach = () => {
+		// ASK AGAIN, once, for what the modem said it was not ready for. The
+		// init query runs before the radio is up and this hardware answers it
+		// with status 14 (NotInitialized) — the modem saying "not yet" rather
+		// than "never" (GL-X3000 / RM520N, 2026-09-20). By the time
+		// registration has completed it has had every chance. One retry, not a
+		// loop: if it still will not answer, it does not have it.
+		// ONCE per modem incarnation, and only for this one. Without the flag
+		// every registration-loss/re-registration cycle asks again; without the
+		// generation check a teardown mid-flight lets the answer land on the
+		// next session, and an indication that arrived while it was out would
+		// be overwritten by the older reading. Raised by Codex review,
+		// 2026-09-20.
+		if (self.modem_config == null && !self._modem_config_asked) {
+			let cfg_gen = self._gen;
+
+			self._modem_config_asked = true;
+
+			self.mbim.command(ext, 'MODEM_CONFIGURATION', 'query', {}, (err, data) => {
+				if (err || data == null || self._gen != cfg_gen || self.modem_config != null)
+					return;
+
+				self.modem_config = {
+					status: data.configuration_status,
+					status_text: ext.MODEM_CONFIG_STATUS[sprintf('%d', data.configuration_status ?? -1)],
+					name: length(data.configuration_name ?? '') ? data.configuration_name : null,
+				};
+
+				log('info', sprintf('carrier configuration: %s (%s)',
+					self.modem_config.name ?? '-', self.modem_config.status_text ?? '?'));
+			}, { no_recovery: true });
+		}
+
 		// attach to the packet service before contexts can connect
 		self.mbim.command(bc, 'PACKET_SERVICE', 'set',
 			{ packet_service_action: bc.PACKET_SERVICE_ATTACH }, (err, data) => {
@@ -1281,6 +1384,12 @@ export function create(opts)
 			// that on_error writes — so without this line an unimplemented CID
 			// is indistinguishable from one that was never asked, which for a
 			// diagnostic is the one thing it must not be.
+			// STATUS 14 IS `NotInitialized`, which is the modem saying "not
+			// yet" rather than "never" — this one answers it that way at init
+			// and then volunteers the value as an indication (GL-X3000 /
+			// RM520N, 2026-09-20). The indication handler catches that; there
+			// is deliberately no retry loop here, because one observation is
+			// not a schedule.
 			if (err || data == null)
 				return log('debug', sprintf('carrier configuration unavailable: %J', err));
 
@@ -1815,6 +1924,12 @@ export function create(opts)
 		// exactly why it must not persist. Raised by Codex review, 2026-09-20.
 		self.radio = null;
 		self.slot_state = null;
+		// ...and the carrier configuration, for the same reason plus one more:
+		// the attach-time retry below skips itself when this is already set, so
+		// a value left here would also stop the NEW modem from ever being
+		// asked. Raised by Codex review, 2026-09-20.
+		self.modem_config = null;
+		self._modem_config_asked = false;
 
 		// ...and the note that went with them. A backend note is cleared by the
 		// backend; a teardown means there is no longer anything to clear it.

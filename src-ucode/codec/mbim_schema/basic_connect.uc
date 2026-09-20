@@ -160,6 +160,117 @@ function rdy_fields(mc)
 	return mbimcodec.mbimex_v3(mc) ? RDY_V3 : RDY_V1;
 }
 
+// MbimProviderState, the bits that say what a scanned operator IS to this SIM
+// (mbim-enums.h, libmbim 1.32.0).
+export const REGISTER_ACTION_AUTOMATIC = 0;
+export const REGISTER_ACTION_MANUAL    = 1;
+
+export const PROVIDER_STATE_HOME       = 1 << 0;
+export const PROVIDER_STATE_FORBIDDEN  = 1 << 1;
+export const PROVIDER_STATE_PREFERRED  = 1 << 2;
+export const PROVIDER_STATE_VISIBLE    = 1 << 3;
+export const PROVIDER_STATE_REGISTERED = 1 << 4;
+export const PROVIDER_STATE_PREFERRED_MULTICARRIER = 1 << 5;
+
+// VISIBLE_PROVIDERS (cid 8) — a scanned operator list, which the field-spec
+// codec cannot express: ProvidersCount then a ref-struct-array of MbimProvider,
+// each of which carries two STRINGS of its own.
+//
+// Two offset bases, and getting them the wrong way round is the classic way to
+// decode this into garbage that still looks like data:
+//   - the (offset, size) pairs of the ARRAY are relative to the information
+//     buffer, like every other ref-struct-array here;
+//   - the (offset, size) pairs of the two strings INSIDE a provider are
+//     relative to THAT PROVIDER's start. libmbim reads the pair at
+//     `information_buffer_offset + relative_offset` and the data at
+//     `information_buffer_offset + struct_start_offset + offset`
+//     (mbim-message.c:553-565, 1.32.0, checked 2026-09-20).
+//
+// MbimProvider fixed part (mbim-service-basic-connect.json:189-205): ProviderId
+// (string pair), ProviderState u32, ProviderName (string pair), CellularClass
+// u32, Rssi u32, ErrorRate u32 — 32 bytes, then the string data.
+//
+// Returns { operators: [...] } in the same shape the QMI NAS scan produces, so
+// the ubus API and LuCI need no second vocabulary.
+export function decode_visible_providers(info)
+{
+	let buf = info ?? '';
+
+	if (length(buf) < 4)
+		return { operators: [] };
+
+	let n = struct.unpack('<I', substr(buf, 0, 4))[0];
+
+	if (length(buf) < 4 + n * 8)
+		return { operators: [] };
+
+	// A STRING BELONGS TO ITS OWN PROVIDER. Bounding it against the whole
+	// information buffer only stops a read off the end — it lets a malformed
+	// record point at the fixed fields, the pair table, or the NEXT provider's
+	// name, and the result is a wrong operator that looks exactly like a right
+	// one. So it must start past this record's 32-byte fixed part, end inside
+	// this record, and carry an even number of bytes, because UTF-16LE does.
+	// Raised by Codex review, 2026-09-20.
+	let str_at = (base, len, rel) => {
+		if (base + rel + 8 > length(buf))
+			return null;
+
+		let off = struct.unpack('<I', substr(buf, base + rel, 4))[0];
+		let size = struct.unpack('<I', substr(buf, base + rel + 4, 4))[0];
+
+		if (size == 0)
+			return null;
+
+		if (off < 32 || size % 2 != 0 || off + size > len)
+			return null;
+
+		return mbimcodec.utf16le_decode(substr(buf, base + off, size));
+	};
+
+	let out = [];
+
+	for (let i = 0; i < n; i++) {
+		let off = struct.unpack('<I', substr(buf, 4 + i * 8, 4))[0];
+		let len = struct.unpack('<I', substr(buf, 8 + i * 8, 4))[0];
+
+		// an entry that does not fit, or is shorter than its own fixed part,
+		// ends the list rather than being guessed at
+		if (off < 4 + n * 8 || len < 32 || off + len > length(buf))
+			break;
+
+		let state = struct.unpack('<I', substr(buf, off + 8, 4))[0];
+		let id = str_at(off, len, 0);
+
+		// The PLMN comes as the concatenated digits ('26201' / '262011'), which
+		// is what the QMI side reports as mcc/mnc — split it the same way so one
+		// renderer serves both. A 6-digit id is a 3-digit MNC.
+		//
+		// EXACTLY five or six DIGITS, not "at least five": a longer id would
+		// produce an mnc_digits of 4 and a non-numeric one would be coerced to
+		// a number, and both would then travel as a usable scan result. An id
+		// that is not a PLMN leaves the three fields absent and keeps the name
+		// — which is still the useful half. Raised by Codex review, 2026-09-20.
+		let plmn = match(id ?? '', /^([0-9][0-9][0-9])([0-9][0-9][0-9]?)$/);
+
+		push(out, {
+			mcc: plmn ? +plmn[1] : null,
+			mnc: plmn ? +plmn[2] : null,
+			mnc_digits: plmn ? length(plmn[2]) : null,
+			provider_id: id,
+			description: str_at(off, len, 12),
+			// the QMI scan's status bits, filled from what MBIM actually says
+			// rather than invented: anything it does not report stays absent.
+			home: !!(state & PROVIDER_STATE_HOME),
+			forbidden: !!(state & PROVIDER_STATE_FORBIDDEN),
+			preferred: !!(state & PROVIDER_STATE_PREFERRED),
+			registered: !!(state & PROVIDER_STATE_REGISTERED),
+			cellular_class: struct.unpack('<I', substr(buf, off + 20, 4))[0],
+		});
+	}
+
+	return { operators: out };
+};
+
 export const service = SERVICE_UUID;
 
 export const commands = {
@@ -204,8 +315,13 @@ export const commands = {
 			response: { pin_type: 'u32', pin_state: 'u32', remaining_attempts: 'u32' },
 		},
 
+		// MbimRegisterAction (mbim-enums.h, libmbim 1.32.0)
 		REGISTER_STATE: {
 			cid: 9,
+			// ProviderId (string), RegisterAction, DataClass
+			// (mbim-service-basic-connect.json:260-270). DataClass 0 = "any",
+			// which is what a selection that says nothing about RAT means.
+			set: { provider_id: 'string', register_action: 'u32', data_class: 'u32' },
 			// preferred_data_classes is the MBIMEx v2 addition, APPENDED after
 			// the v1 nine (libmbim 1.32.0, mbim-service-ms-basic-connect-v2.json,
 			// checked 2026-09-20) — so the same layout reads both and a v1 modem
@@ -282,7 +398,7 @@ export const commands = {
 		VISIBLE_PROVIDERS: {
 			cid: 8,
 			query: { action: 'u32' },   // MbimVisibleProvidersAction
-			response: { providers_count: 'u32' },
+			decode: decode_visible_providers,
 		},
 
 		SIGNAL_STATE: {

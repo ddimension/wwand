@@ -210,11 +210,33 @@ export function install(self, o)
 		// scan itself fails — some modems refuse a NAS network scan (HW-seen: the
 		// EG06 rejects it over the QMI-over-MBIM passthrough with result 1), so AT
 		// keeps MBIM/NCM at parity with QMI where the passthrough scan works.
+		// NATIVE MBIM, below AT. MBIM has had a scan of its own all along
+		// (VISIBLE_PROVIDERS, cid 8) and wwand never called it, so an MBIM
+		// modem whose QMI passthrough refuses a NAS scan AND has no AT port
+		// answered `unsupported_on_backend` for an operation its own protocol
+		// implements. Last rung on purpose: the QMI scan carries more (band and
+		// RAT per operator), and AT+COPS=? is the one every modem answers.
+		// DUCK-TYPED, like sim.uc's `mbim_uicc`: the MBIM schemas ship in
+		// wwand-mbim and this file is in the base package, so an import here
+		// would make a QMI-only install depend on a module it does not have.
+		// The MBIM modem offers the method; nobody else does.
+		let mbim_scan = (extra) => {
+			if (type(entry.modem.native_scan) != 'function')
+				return cb({ error: 'unsupported_on_backend', ...(extra ?? {}) });
+
+			entry.modem.native_scan((err, ops) => {
+				if (err)
+					return cb({ error: 'mbim', detail: err, ...(extra ?? {}) });
+
+				cb(null, { operators: ops ?? [], ...(extra ?? {}) });
+			}, SCAN_TIMEOUT_MS);
+		};
+
 		let at_scan = (extra) => {
 			let at = entry.modem.at;
 
 			if (!at)
-				return cb({ error: 'unsupported_on_backend', ...(extra ?? {}) });
+				return mbim_scan(extra);
 
 			at.send('AT+COPS=?', (err, res) => {
 				if (err)
@@ -435,8 +457,29 @@ export function install(self, o)
 			// AT fallback (NCM): COPS. Manual uses numeric format (COPS mode 2).
 			let at = entry.modem.at;
 
-			if (!at)
+			if (!at) {
+				// NATIVE MBIM, below AT for the same reason the scan is: MBIM's
+				// REGISTER_STATE set takes a provider id and an action and
+				// nothing else, where QMI carries the RAT preference and the
+				// 3-digit-MNC flag with it. Duck-typed — the schemas ship in
+				// wwand-mbim and this file is in the base package.
+				//
+				// No idempotency read here on purpose. MBIM's register mode is
+				// in the same response as the registration state, so "already
+				// manual on this PLMN" cannot be told apart from "manual, and
+				// currently searching" without also trusting the serving cell —
+				// and a redundant register is a re-register, not a radio bounce.
+				if (type(entry.modem.native_register) == 'function')
+					return entry.modem.native_register(manual
+						? { mcc: +mcc, mnc: +mnc, width: width } : null, (err) => {
+						if (err)
+							return cb({ error: 'mbim', detail: err });
+
+						done_set(' (MBIM)');
+					});
+
 				return cb({ error: 'unsupported_on_backend' });
+			}
 
 			// idempotency: numeric read-back (COPS=3,2 sets the read format only)
 			at.send('AT+COPS=3,2', () => {

@@ -519,4 +519,188 @@ wait_ready();
 uloop.run();
 daemon.shutdown();
 
+// --- the scan ladder's bottom rung: native MBIM ------------------------------
+//
+// MBIM has had a scan of its own all along (VISIBLE_PROVIDERS) and wwand never
+// called it, so an MBIM modem whose QMI passthrough refuses a NAS scan and has
+// no AT port answered `unsupported_on_backend` for an operation its own
+// protocol implements.
+//
+// Duck-typed on purpose: the MBIM schemas ship in wwand-mbim and netsel_ops is
+// in the base package, so the modem offers the method and nobody else does.
+(function() {
+	let asked = 0;
+	let mk = (native) => {
+		let fake = {
+			modem: { create: (o) => {
+				let m = { id: o.id, state: 'READY', config: o.config, protocol: 'mbim',
+				          at: null, with_nas: (cb) => cb(null),
+				          start: () => null, stop: () => null };
+
+				if (native)
+					m.native_scan = (cb, timeout) => { asked++; return native(cb, timeout); };
+
+				return m;
+			} },
+			context: { create: (o) => ({ state: 'IDLE', down: (cb) => cb ? cb() : null }) },
+		};
+		let d = daemon_mod.create({ timing: { hold_max_ms: 1000, failed_min_gap: 1 },
+			deps: { log: () => null, load_qmi: () => fake, load_mbim: () => fake } });
+
+		d.apply_config(config.parse({ network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'mbim' },
+			a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a' },
+		} }));
+
+		return d;
+	};
+
+	// no NAS, no AT, no native scan -> the honest error, as before
+	mk(null).modem_scan('m0', (err, res) => {
+		eq(err?.error, 'unsupported_on_backend',
+			'scan ladder: nothing to ask with is still reported as such');
+	});
+
+	// ...and with the native one, the operators come back through it
+	let ops = [ { mcc: 262, mnc: 1, mnc_digits: 2, description: 'Telekom.de',
+	              home: true, registered: true, forbidden: false } ];
+
+	mk((cb, timeout) => {
+		ok(timeout > 0, 'scan ladder: the native scan is given the scan timeout');
+		cb(null, ops);
+	}).modem_scan('m0', (err, res) => {
+		eq(err, null, 'scan ladder: the native MBIM scan answers');
+		eq(res.operators, ops, 'scan ladder: ...and its operators are what comes back');
+	});
+
+	eq(asked, 1, 'scan ladder: the native scan was reached exactly once');
+
+	// a native scan that FAILS is reported as a scan failure, not as
+	// "unsupported" — the modem was asked and said no
+	mk((cb) => cb({ error: 'mbim', status: 9 }, null)).modem_scan('m0', (err) => {
+		eq(err?.error, 'mbim', 'scan ladder: a refused native scan reports the refusal');
+	});
+})();
+
+// --- and the same bottom rung for network SELECTION --------------------------
+//
+// MBIM's REGISTER_STATE set takes a provider id and an action. The WIDTH is the
+// statement: a 3-digit MNC written two digits wide names a different operator,
+// and a provider id carries no flag to say which was meant.
+(function() {
+	let asked = [];
+	let mk = (native) => {
+		let fake = {
+			modem: { create: (o) => {
+				let m = { id: o.id, state: 'READY', config: o.config, protocol: 'mbim',
+				          at: null, with_nas: (cb) => cb(null), info: {},
+				          start: () => null, stop: () => null };
+
+				if (native)
+					m.native_register = (plmn, cb) => { push(asked, plmn); return native(plmn, cb); };
+
+				return m;
+			} },
+			context: { create: (o) => ({ state: 'IDLE', down: (cb) => cb ? cb() : null }) },
+		};
+		let d = daemon_mod.create({ timing: { hold_max_ms: 1000, failed_min_gap: 1 },
+			deps: { log: () => null, load_qmi: () => fake, load_mbim: () => fake } });
+
+		d.apply_config(config.parse({ network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'mbim' },
+			a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a' },
+		} }));
+
+		return d;
+	};
+
+	let ok_native = (plmn, cb) => cb(null);
+
+	mk(ok_native).modem_set_network_selection('m0', 'manual', 262, 3, (err, res) => {
+		eq(err, null, 'netsel ladder: the native MBIM register answers');
+		eq(res.mode, 'manual', 'netsel ladder: ...with the mode it was asked for');
+	});
+	eq(asked[0], { mcc: 262, mnc: 3, width: 2 },
+		'netsel ladder: the plmn reaches the backend with its width');
+
+	asked = [];
+	mk(ok_native).modem_set_network_selection('m0', 'auto', null, null, (err, res) => {
+		eq(err, null, 'netsel ladder: automatic too');
+		eq(res.mode, 'auto', 'netsel ladder: ...and says so');
+	});
+	eq(asked[0], null, 'netsel ladder: automatic passes no plmn at all');
+
+	// a refusal is reported as one, not as "unsupported"
+	asked = [];
+	mk((plmn, cb) => cb({ error: 'mbim', status: 9 }))
+		.modem_set_network_selection('m0', 'auto', null, null, (err) => {
+			eq(err?.error, 'mbim', 'netsel ladder: a refused register reports the refusal');
+		});
+
+	// and with no native path at all the honest error survives
+	mk(null).modem_set_network_selection('m0', 'auto', null, null, (err) => {
+		eq(err?.error, 'unsupported_on_backend',
+			'netsel ladder: nothing to ask with is still reported as such');
+	});
+})();
+
+// --- carrier configuration: no PDC is not the same as no answer -------------
+//
+// MBIMEx v3 has a carrier configuration of its own (MODEM_CONFIGURATION), which
+// modem_mbim reads at init and keeps — reachable on a modem with no QMI PDC
+// service at all, which is exactly the case this used to refuse outright.
+//
+// READ ONLY, and it has to say so: MBIM has a status and a name and no way to
+// SELECT a configuration, so answering a `set` with the read would be worse
+// than refusing it.
+(function() {
+	let mk = (mc, pdc) => {
+		let fake = {
+			modem: { create: (o) => ({ id: o.id, state: 'READY', config: o.config,
+			                           protocol: 'mbim', modem_config: mc, pdc: pdc,
+			                           start: () => null, stop: () => null }) },
+			context: { create: (o) => ({ state: 'IDLE', down: (cb) => cb ? cb() : null }) },
+		};
+		let d = daemon_mod.create({ timing: { hold_max_ms: 1000, failed_min_gap: 1 },
+			deps: { log: () => null, load_qmi: () => fake, load_mbim: () => fake } });
+
+		d.apply_config(config.parse({ network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'mbim' },
+			a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a' },
+		} }));
+
+		return d;
+	};
+
+	let mc = { status: 1, status_text: 'activated', name: 'ROW_Generic_3GPP' };
+
+	mk(mc, null).modem_carrier_config('m0', 'get', '', (err, res) => {
+		eq(err, null, 'carrier: an MBIM modem with no PDC still answers a get');
+		eq(res.active, 'ROW_Generic_3GPP', 'carrier: ...with the configuration name');
+		eq(res.status_text, 'activated', 'carrier: ...and its status');
+		eq(res.source, 'mbim', 'carrier: the answer names where it came from');
+		eq(res.read_only, true, 'carrier: ...and that it cannot be changed here');
+	});
+
+	mk(mc, null).modem_carrier_config('m0', 'list', '', (err, res) => {
+		eq(err, null, 'carrier: list answers too');
+		eq(length(res.configs), 1, 'carrier: MBIM knows of exactly the active one');
+	});
+
+	// a SET is genuinely unavailable, and the refusal says why rather than
+	// repeating the generic "no PDC"
+	mk(mc, null).modem_carrier_config('m0', 'set', 'x', (err) => {
+		eq(err?.error, 'no_pdc', 'carrier: selecting still needs PDC');
+		ok(index(err?.detail ?? '', 'can read it but not select') > 0,
+			'carrier: ...and the refusal says why, not just that');
+	});
+
+	// and a modem with neither is refused as before
+	mk(null, null).modem_carrier_config('m0', 'get', '', (err) => {
+		eq(err?.error, 'no_pdc', 'carrier: no PDC and no MBIM configuration -> refused');
+		ok(index(err?.detail ?? '', 'no QMI PDC service') >= 0,
+			'carrier: ...with the original reason');
+	});
+})();
+
 done('test_netsel');

@@ -553,6 +553,62 @@ firmware that sends nothing looked exactly like one this client forgot to listen
 for. It is the QMI side's equivalent, at the same level, and it is what made the
 measurements above possible.
 
+## Three things MBIM could always do and wwand never asked (2026-09-20)
+
+Each is the LOWEST rung of a ladder that already had two. That order is not
+modesty: the QMI scan carries band and RAT per operator, AT+COPS is the one
+every modem answers, and MBIM's own versions carry less. The point is what
+happens when neither of the first two exists — an MBIM modem whose QMI
+passthrough refuses a NAS scan and has no AT port used to answer
+`unsupported_on_backend` for operations its own protocol implements.
+
+**Operator scan** — `VISIBLE_PROVIDERS` (cid 8) was declared in the schema and
+called from nowhere. The response is a ref-struct-array of `MbimProvider`, each
+carrying two strings, and **two offset bases meet in it**: the array's
+(offset, size) pairs are relative to the information buffer, the string pairs
+inside a provider are relative to THAT PROVIDER's start. libmbim reads the pair
+at `information_buffer_offset + relative_offset` and the data at
+`information_buffer_offset + struct_start_offset + offset`
+(`mbim-message.c:553-565`, 1.32.0). Swapping them decodes into garbage that
+still looks like data, which is why the test builds the buffer by hand rather
+than round-tripping our own encoder.
+
+**Network selection** — `REGISTER_STATE`'s set takes a provider id and an
+action. The width is the statement: `310/030` and `310/30` are different
+operators and a provider id carries no flag to say which was meant, so the MNC
+is zero-padded to the requested width. (ucode's `sprintf` has no `%0*d`, which
+is exactly how a 3-digit MNC gets silently truncated — padded by hand.)
+
+**Carrier configuration** — `no_pdc` was a hard refusal, and MBIMEx v3 has a
+configuration of its own. It is READ ONLY and says so: MBIM has a status and a
+name and no way to select one, so a `set` is still refused — with a reason that
+names the difference rather than repeating the generic message.
+
+That one also found a real bug of its own. The init query runs before the radio
+is up, and the RM520N answers it with **status 14, `NotInitialized`** — the
+modem saying "not yet", not "never" — after which wwand never asked again and
+reported the configuration as unavailable for the life of the process. It is
+asked once more when registration completes, and then it answers:
+
+    carrier configuration unavailable: { "error": "mbim", "status": 14 }
+    carrier configuration: Commercial-DT-VOLTE (completed)
+
+The same CID also arrives as an indication (during `INIT_SERVICES`, before the
+handlers are installed, so it is not what fixes this) and now has a handler, for
+the modem where a configuration switch announces itself.
+
+Reached by DUCK-TYPING, not by importing: the MBIM schemas ship in `wwand-mbim`
+and `netsel_ops` / `hwops` are in the base package, so the MBIM modem offers
+`native_scan` / `native_register` and nobody else does — the same pattern
+`sim.uc` uses for `mbim_uicc`.
+
+**Not hardware-validated end to end**, and deliberately not claimed to be: the
+MBIM modem here has both higher rungs, so the ladder never reaches the bottom on
+it. The wire formats are host-tested against hand-built buffers matching libmbim
+1.32.0. What WAS verified on hardware (GL-X3000 / RM520N, 2026-09-20): the
+carrier configuration read, and a manual network selection onto the serving PLMN
+and back to automatic with the connection intact throughout.
+
 ## Known open
 
 - **TODO — `pdp_type` cannot be configured per SIM, and two people expected it
