@@ -353,9 +353,10 @@ export function publish(conn, daemon, log)
 			call: (req) => ok_sync(daemon.modem_datapath(req.args.modem)),
 		},
 
-		// GNSS: what wwand knows (NMEA port, receiver state) merged with what
-		// ugps reports (position, satellites). Asynchronous because the second
-		// half is a ubus call to another daemon.
+		// GNSS: what wwand knows (NMEA port, receiver state) together with the
+		// fix its own reader has off that port. Still deferred, though nothing
+		// waits on another process any more — the reply shape is a caller's
+		// contract and narrowing it to sync would be a separate change.
 		modem_gps: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

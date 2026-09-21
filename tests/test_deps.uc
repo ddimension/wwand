@@ -282,4 +282,117 @@ function mkdeps(u, extra) {
 	eq(u2.commits, 0, 'learn_path: a non cdc-wdm control node is left alone');
 }
 
+// --- one port, one reader ----------------------------------------------------
+//
+// Two `wwand_modem` sections can name the same tty: a stale `option tty`, a
+// device that rebound, a copy-pasted section. Opening it twice does not give
+// two streams — the kernel hands each read to whichever fd asks first, so BOTH
+// readers get torn sentences and each modem is answered with a shredded
+// version of the same receiver. Raised by Codex review, 2026-09-21.
+
+(function() {
+	let made = [], stopped = [];
+
+	// a gps module stand-in: create() hands back something that remembers its
+	// port and reports a start, which is all the rules below look at
+	let fake_gps = {
+		create: (o) => {
+			let r = { path: o.path, running: false, opts: o,
+			          start: function() { this.running = true; push(made, this.path); return true; },
+			          stop: function() { this.running = false; push(stopped, this.path); },
+			          snapshot: () => ({ running: true }) };
+			return r;
+		},
+		status: (modem, snap) => ({ port: modem?.gps_tty, reading: snap != null }),
+	};
+
+	let d = depsmod.create({ conn: { defer: () => null }, gps: fake_gps, log: () => null });
+
+	// two modems, DIFFERENT ports: both read
+	eq(d.gps_start('m0', '/dev/ttyUSB1', {})?.started, true, 'gps port: the first modem reads');
+	eq(d.gps_start('m1', '/dev/ttyUSB2', {})?.started, true, 'gps port: a second modem on its own port reads too');
+	eq(made, [ '/dev/ttyUSB1', '/dev/ttyUSB2' ], 'gps port: two readers, two ports');
+
+	// a THIRD modem naming a port that is already being read is refused, and
+	// told whose it is
+	let clash = d.gps_start('m2', '/dev/ttyUSB1', {});
+
+	eq(clash?.started, false, 'gps port: the same tty is not opened twice');
+	eq(clash?.error, 'port_in_use', 'gps port: ...and says why');
+	eq(clash?.owner, 'm0', 'gps port: ...and whose it is');
+	eq(length(made), 2, 'gps port: nothing was opened for it');
+
+	// the SAME modem registering again on the SAME port changes nothing: a
+	// re-open would drop a fix the receiver took minutes to acquire
+	let again = d.gps_start('m0', '/dev/ttyUSB1', {});
+
+	eq(again?.unchanged, true, 'gps port: a re-registering modem is left reading');
+	eq(length(made), 2, 'gps port: ...and its port is not reopened');
+
+	// the same modem on a DIFFERENT port: the old reader goes first
+	stopped = [];
+	eq(d.gps_start('m0', '/dev/ttyUSB9', {})?.started, true, 'gps port: a changed port starts a new reader');
+	eq(stopped, [ '/dev/ttyUSB1' ], 'gps port: ...and the old one is stopped, not leaked');
+
+	// ...which frees the old tty for the modem that was refused it
+	eq(d.gps_start('m2', '/dev/ttyUSB1', {})?.started, true,
+		'gps port: the freed tty can now be taken');
+
+	// stopping releases the port for good
+	stopped = [];
+	eq(d.gps_stop('m2'), true, 'gps stop: a reader can be stopped');
+	eq(stopped, [ '/dev/ttyUSB1' ], 'gps stop: ...and it really stops');
+	eq(d.gps_snapshot('m2'), null, 'gps stop: ...and answers nothing afterwards');
+})();
+
+// THE RECEIVER'S CLOCK REACHES THE REAL set_clock, AND ITS REAL POLICY.
+//
+// This block used to inject `set_clock` as a property of the deps INPUT and
+// assert the epoch arrived there. It did — and production never passed that
+// property (main.uc builds deps without it), so `option gnss_set_time` was a
+// silent no-op while the test was green. The injection proved the test's own
+// wiring and nothing else. Now nothing is injected but the SYSTEM CALL and the
+// CLOCK, so the path under test is the shipped one. Raised by Codex review,
+// 2026-09-21.
+
+(function() {
+	let created = {}, ran = [], fake_now = 1789980000;   // 2026: a sane clock
+	let fake_gps = {
+		create: (o) => { created[o.path] = o;
+		                 return { path: o.path, running: false, opts: o,
+		                          start: () => true, stop: () => null, snapshot: () => ({}) }; },
+		status: () => ({}),
+	};
+
+	let mk = () => depsmod.create({ conn: { defer: () => null }, gps: fake_gps, log: () => null,
+	                                run: (cmd) => push(ran, cmd), now: () => fake_now });
+
+	let d = mk();
+
+	d.gps_start('m0', '/dev/ttyUSB1', { adjust_time: false });
+	d.gps_start('m1', '/dev/ttyUSB2', { adjust_time: true });
+
+	eq(created['/dev/ttyUSB1'].on_epoch, null,
+		'gps clock: a modem that did not ask gets no epoch sink at all');
+	eq(type(created['/dev/ttyUSB2'].on_epoch), 'function', 'gps clock: one that did gets one');
+
+	// THE POLICY. The clock is already sane, so the receiver's time is ignored
+	// — this is the whole difference from ugps' -a, which steps whenever it
+	// differs by five seconds and so fights sysntpd on any NTP-synced box.
+	created['/dev/ttyUSB2'].on_epoch(1789978872);
+	eq(ran, [], 'gps clock: a clock that is already set is NOT stepped');
+
+	// ...and on an RTC-less box that booted into 1970 it is
+	fake_now = 100;
+	created['/dev/ttyUSB2'].on_epoch(1789978872);
+	eq(length(ran), 1, 'gps clock: a plainly unset clock IS stepped');
+	ok(index(ran[0], 'date -u -s @1789978872') == 0,
+		'gps clock: ...with the receiver\'s own epoch, in UTC');
+
+	// the same function the daemon uses for NITZ, so both obey one policy
+	ran = [];
+	d.set_clock(1789978872, null);
+	eq(length(ran), 1, 'gps clock: NITZ goes through the very same set_clock');
+})();
+
 done('test_deps');

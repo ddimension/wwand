@@ -42,6 +42,75 @@ import * as transport from 'wwand.transport';
 export function create(o)
 {
 	let conn = o.conn;
+
+	// One NMEA reader per modem id. wwand.gps ships in the OPTIONAL wwand-gps
+	// package, so it is require()d lazily and remembered — including the
+	// failure, so a missing package is reported once rather than once a second.
+	let gps_readers = {}, gps_mod, gps_tried = false;
+
+	// Injected the way the cursor is, and for the same reason: the RULE below
+	// is the part worth pinning and it cannot be reached through a real
+	// `system()` and a real clock.
+	let run = o.run ?? ((cmd) => system(cmd));
+	let now_s = o.now ?? (() => time());
+
+	// Apply a network- or GNSS-supplied time ONLY when the clock is clearly
+	// unset (an RTC-less router before NTP), so we never fight sysntpd.
+	// Threshold: any clock before 2021 is unset. busybox date sets UTC; the RTC
+	// is left to the OS.
+	//
+	// A LOCAL, not just a property of the returned object. It is called from
+	// two places — NITZ, and the GNSS reader's epoch callback — and the second
+	// one used to reach for `o.set_clock`, which nothing ever sets: main.uc
+	// builds deps without it (main.uc:293), so `option gnss_set_time` was a
+	// silent no-op and the test that "proved" it passed only because it
+	// injected the property the production path does not have. Raised by Codex
+	// review, 2026-09-21.
+	let set_clock = (epoch, tz_min, source) => {
+		if (!epoch || now_s() >= 1609459200)   // 2021-01-01: clock already sane
+			return false;
+
+		run(sprintf('date -u -s @%d >/dev/null 2>&1', epoch));
+		logmod.log('notice', 'set system clock from %s: %d utc', source ?? 'NITZ', epoch);
+
+		return true;
+	};
+
+	let load_gps = () => {
+		if (gps_tried)
+			return gps_mod;
+
+		gps_tried = true;
+
+		// injected by the tests, the same way the uci cursor is: the rules
+		// below (one port one reader, a changed port, a re-registering modem)
+		// are the part worth pinning, and they cannot be reached through a
+		// module that insists on a real tty
+		if (o.gps != null) {
+			gps_mod = o.gps;
+
+			return gps_mod;
+		}
+
+		try {
+			gps_mod = require('wwand.gps');
+		}
+		catch (e) {
+			// NOT SILENT. A missing package and a BROKEN one look identical
+			// from here, and the broken case is the one worth a line: it
+			// disables the feature for the life of the daemon while
+			// `modem_gps` reports "package not installed", which sends the
+			// reader looking in the wrong place. The message only appears
+			// where wwand-gps is genuinely expected — nothing calls this
+			// unless a modem has `option gnss`. Raised by Codex review,
+			// 2026-09-20.
+			logmod.log('info', 'gps: wwand.gps could not be loaded (%s) — is wwand-gps installed?',
+				replace(sprintf('%s', e), /\n.*$/, ''));
+			gps_mod = null;
+		}
+
+		return gps_mod;
+	};
 	let datapath_fx = o.datapath_fx;
 	let netifd_cb = o.netifd_cb;
 	let autosetup_mux_id = o.autosetup_mux_id;
@@ -511,15 +580,7 @@ export function create(o)
 		},
 
 		network_reload: () => conn.defer('network', 'reload', {}, netifd_cb('reload')),
-		// apply operator-pushed NITZ time ONLY when the clock is clearly unset
-		// (RTC-less router before NTP), so we never fight sysntpd. Threshold: any
-		// clock before 2021 is unset. busybox date sets UTC; RTC left to the OS.
-		set_clock: (epoch, tz_min) => {
-			if (!epoch || time() >= 1609459200)   // 2021-01-01: clock already sane
-				return;
-			system(sprintf('date -u -s @%d >/dev/null 2>&1', epoch));
-			logmod.log('notice', 'set system clock from NITZ: %d utc', epoch);
-		},
+		set_clock: set_clock,
 		resolve_netdev: discovery.resolve_netdev,
 		resolve_protocol: discovery.protocol_of,
 		// how this modem is controlled (qmi/mbim/ncm/ppp), incl. NCM (no cdc-wdm)
@@ -563,81 +624,105 @@ export function create(o)
 			conn.defer('network.interface', 'down', { interface: interface }, netifd_cb('down ' + interface)),
 		// async status probe (adopt-in-place vs kick): cb(status|null). Must
 		// not block — see netifd_cb above.
-		// what ugps reports, or null when it is not running. Never an error:
-		// ugps is optional, another process, and "not there" is an ordinary
-		// answer rather than a failure of this one.
-		gps_info: (cb) =>
-			conn.defer('gps', 'info', {}, (ret, reply) => cb(ret == 0 ? reply : null)),
 
-		// Point ugps at a tty, or (null) stop it pointing anywhere. Only ever a
-		// section wwand created — see wwand.gps, which holds that rule — and it
-		// nudges procd's reload trigger rather than restarting the service,
-		// because ugps loses its fix on a restart.
-		gps_configure: (port, opts) => {
-			let gps;
+		// --- GNSS ------------------------------------------------------------
+		//
+		// ONE READER PER MODEM, which is the point of owning this. The ugps
+		// arrangement this replaces had a single `config gps` section and a
+		// single `gps` ubus object, so on a two-modem box only one modem could
+		// ever have a position and the daemon had to arbitrate which. Nothing in
+		// the hardware said so.
+		//
+		// wwand.gps is loaded lazily and ONCE: it ships in the optional
+		// wwand-gps package, and nothing reaches here unless a modem carries
+		// `option gnss`.
+		gps_start: (ref, port, opts) => {
+			let gps = load_gps();
 
-			try {
-				gps = require('wwand.gps');
-			}
-			catch (e) {
-				// NOT SILENT. A missing package and a BROKEN one look identical
-				// from here, and the broken case is the one worth a line: it
-				// disables the feature for the life of the daemon while
-				// `modem_gps` reports "package not installed", which sends the
-				// reader looking in the wrong place. The message only appears
-				// where wwand-gps is genuinely expected — nothing calls this
-				// unless a modem has `option gnss`. Raised by Codex review,
-				// 2026-09-20.
-				logmod.log('info', 'gps: wwand.gps could not be loaded (%s) — is wwand-gps installed?',
-					replace(sprintf('%s', e), /\n.*$/, ''));
+			if (!gps || port == null)
 				return null;
+
+			let cur = gps_readers[ref];
+
+			// already reading THAT port: leave it alone. Re-opening would drop a
+			// fix the receiver took minutes to acquire.
+			if (cur && cur.running && cur.path == port)
+				return { started: false, unchanged: true, port: port };
+
+			// ONE PORT, ONE READER. Two modem sections can name the same tty —
+			// a stale `option tty`, a rebound device, a copy-pasted section —
+			// and opening it twice does not give two streams: the kernel hands
+			// each read to whichever fd asks first, so BOTH readers get torn
+			// sentences and each modem is answered with a shredded version of
+			// the same receiver. The second one is refused and told why, which
+			// is a truer answer than half a fix. Raised by Codex review,
+			// 2026-09-21.
+			for (let other, r in gps_readers)
+				if (other != ref && r && r.path == port) {
+					logmod.log('warn', 'gps: %s: %s is already being read for %s — refusing to open it twice',
+						ref, port, other);
+
+					return { started: false, error: 'port_in_use', owner: other };
+				}
+
+			if (cur)
+				cur.stop();
+
+			let r = gps.create({
+				path: port,
+				baud: opts?.baud,
+				// The receiver's clock, subject to OUR policy: set_clock only ever
+				// steps a clock that is plainly unset (pre-2021), so it cannot
+				// fight sysntpd. ugps' -a steps whenever it differs by 5 s, which
+				// on an NTP-synced box is a tug of war.
+				on_epoch: (opts?.adjust_time ?? false)
+					? (epoch) => set_clock(epoch, null, 'GNSS') : null,
+				on_gone: (why) => {
+					gps_readers[ref] = null;
+					logmod.log('info', 'gps: %s: NMEA port %s ended (%s) — waiting for it to come back',
+						ref, port, why);
+				},
+			});
+
+			gps_readers[ref] = r;
+
+			if (!r.start()) {
+				// said HERE, not in gps.uc: that module is require()d and its own
+				// `wwand.log` would be a second instance with no output target set
+				logmod.log('warn', 'gps: %s: cannot open %s (%s)', ref, port, r.error ?? 'unknown');
+				gps_readers[ref] = null;
+
+				return { started: false, error: r.error };
 			}
 
-			let r = gps.sync(o.cursor(), port, opts);
+			logmod.log('notice', 'gps: %s: reading NMEA from %s', ref, port);
 
-			// said HERE, not in gps.uc: that module is require()d and its own
-			// `wwand.log` would be a second instance with no output target set
-			if (r.changed) {
-				logmod.log('notice', 'gps: ugps %s (section %s%s)',
-					(port == null) ? 'stopped — no NMEA port'
-					               : sprintf('pointed at %s', port), r.section,
-					// adopting ugps' own shipped default is not the same as
-					// writing a section of our own, and the operator should be
-					// able to see which happened
-					r.adopted ? ', adopted from the ugps default' : '');
+			return { started: true, port: port };
+		},
 
-				// procd's reload trigger, not a restart: ugps loses its fix on
-				// a restart, and its init subscribes to `gps` config changes
-				// (ugps.init: procd_add_reload_trigger gps).
-				conn.defer('service', 'event',
-					{ type: 'config.change', data: { package: 'gps' } }, () => null);
-			}
-			// NOT "enabled": the rule stopped being about the disabled flag
-			// when it was narrowed to ugps' untouched default, so a modified
-			// section that happens to be switched off is protected too — and
-			// calling it enabled in the log would misdescribe exactly the
-			// operator configuration this is protecting. Raised by Codex
-			// review, 2026-09-20.
-			else if (r.skipped == 'foreign_config')
-				logmod.log('info', 'gps: the last section in /etc/config/gps is not ugps\' shipped default and was not created by wwand — leaving it alone (ugps reads the last one, so driving it would take that receiver over)');
-			// A SKIP THAT IS NOT ORDINARY SAYS SO. `unchanged` and
-			// `nothing_to_do` are the quiet, correct outcomes; the rest mean the
-			// write did not happen and nobody was told — which on a box with no
-			// /etc/config/gps at all (ugps not installed, its conffile removed)
-			// is a feature that silently does nothing. Found while installing
-			// this on a second router, 2026-09-20.
-			//
-			// The ugps hint belongs to `add_failed` and to nothing else: a
-			// commit can fail with ugps installed and its file present, and
-			// sending that reader to check the package is sending them away
-			// from the problem.
-			else if (r.skipped != 'unchanged' && r.skipped != 'nothing_to_do')
-				logmod.log('warn', 'gps: could not point ugps at %s (%s)%s',
-					port ?? 'nothing', r.skipped ?? 'unknown',
-					(r.skipped == 'add_failed')
-						? ' — /etc/config/gps does not exist; is ugps installed?' : '');
+		gps_stop: (ref) => {
+			let r = gps_readers[ref];
 
-			return r;
+			if (!r)
+				return false;
+
+			r.stop();
+			gps_readers[ref] = null;
+			logmod.log('info', 'gps: %s: stopped reading', ref);
+
+			return true;
+		},
+
+		// the reader's own view, or null when there is none for this modem
+		// no clock argument: the reader stamps monotonically, and handing it a
+		// wall-clock `now` here would defeat that
+		gps_snapshot: (ref) => gps_readers[ref] ? gps_readers[ref].snapshot() : null,
+
+		// the shape of a modem_gps reply, which lives with the reader
+		gps_status: (modem, snap) => {
+			let gps = load_gps();
+
+			return gps ? gps.status(modem, snap) : null;
 		},
 
 		iface_status: (interface, cb) =>

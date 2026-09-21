@@ -431,8 +431,10 @@ function modem_from_section(s, warnings)
 		// never opens it and runs telemetry over the control channel instead
 		at2_external: bool_opt(s.at2_external, false),
 		gnss: bool_opt(s.gnss, false),
-		// let ugps step the system clock from NMEA. OFF by default: this box
-		// already has sysntpd, and two things setting the clock is one more
+		// step the system clock from the receiver's own time — through
+		// deps.set_clock, which only ever touches a clock that is plainly
+		// unset (pre-2021) and so cannot fight sysntpd. OFF by default: this
+		// box already has NTP, and two things setting the clock is one more
 		// than any box needs. For the RTC-less installs where the modem is the
 		// only time source there is.
 		gnss_set_time: bool_opt(s.gnss_set_time, false),

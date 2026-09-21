@@ -1,231 +1,276 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// wwand — GPS glue: point ugps at the modem's NMEA port.
+// wwand — the GNSS reader: NMEA off the modem's own port, into wwand's ubus.
 //
 // An exportless plain script loaded with require(), like esim.uc: require()
 // cannot compile ES modules (`export` is a syntax error there), and this ships
 // in its own optional package. It returns its API object at the end.
 //
-// The three pieces this joins already existed and had nothing between them:
+// WHY THIS IS OURS NOW. It used to point ugps (OpenWrt base) at the port and
+// read its `gps` ubus object back. That worked, and it cost more than it saved:
 //
-//   - wwand FINDS the NMEA port. `atport.uc`'s role table identifies it during
-//     enumeration and it lands on the modem as `gps_tty` (also reported as
-//     `gps_port` in `wwand status`).
-//   - wwand STARTS the receiver. `option gnss` runs the vendor AT command
-//     (`modem_common.start_gnss`) — QMI's LOC service is documented as broken
-//     on Quectel (docs/backend-interface.md), and the thing that works is AT,
-//     which only wwand has the port for.
-//   - ugps READS the port: it parses NMEA, optionally sets the clock, and
-//     publishes a `gps` ubus object. It is in OpenWrt base and needs no
-//     modem knowledge at all.
+//   - ugps takes a STATIC tty out of /etc/config/gps (ugps.init: `uci get
+//     gps.@gps[-1].tty`) while wwand's is discovered and can move between
+//     boots. Two hundred lines here did nothing but write that file without
+//     treading on an operator's own receiver.
+//   - There is ONE `config gps` section and ONE `gps` ubus object, so on a
+//     two-modem box only one modem could ever have a position — a limit with
+//     no cause in the hardware.
+//   - `exit(-1)` on tty EOF (nmea.c nmea_notify_cb): when the modem resets,
+//     ugps dies and procd respawns it against a device that is not back yet.
+//     wwand already waits for hotplug and knows when the port returns.
+//   - It reports `$GP`/`$GN` only, has no GSV and no GSA, and hands every
+//     field over as a string with the absent ones empty.
 //
-// What was missing is that ugps takes a STATIC tty out of /etc/config/gps
-// (`ugps.init`: `uci get gps.@gps[-1].tty`) while wwand's is discovered, and
-// can move between boots or when a modem is replaced. So this writes it.
+// The parts that were hard are already here: `wwand_io.open_tty` (the same
+// call atcmd uses for an AT port), the line framing pattern, the port
+// discovery in atport.uc, the lifecycle, and `deps.set_clock` — which has the
+// better clock policy of the two, since it only ever steps a clock that is
+// plainly unset and so never fights sysntpd.
 //
-// GOOD CITIZEN, the same rule the rest of the tree follows. wwand manages
-// exactly one `config gps` section and only one it created itself, marked with
-// `option wwand '1'`. An operator's own section — a hat GPS on a serial port,
-// a second receiver — is never touched, never reordered, and never disabled.
-// Without that marker this would be a config writer with an opinion about
-// somebody else's hardware.
-
 // NO LOGGING FROM HERE, and that is not an oversight. require() gives the
 // loaded script its OWN copies of its imports (docs/gotchas.md), so a
 // `wwand.log` imported here is a second instance whose output target was never
 // set — every line would go to stderr and procd would tag the lot as
 // `daemon.err`, which is exactly what happened the first time this did log.
-// `sync()` returns what it did; the caller, which is a real module, says so.
+// Every entry point returns what it did; the caller, which is a real module,
+// says so.
 
 'use strict';
 
-const PKG = 'gps';
+import * as uloop from 'uloop';
+import * as nmea from 'wwand.nmea';
 
-// THE LAST SECTION IS THE ONLY ONE THAT MATTERS. ugps reads
-// `uci get gps.@gps[-1].tty` (its init), so a section that is not last is one
-// ugps never looks at — writing it and reporting success would be a change
-// that cannot take effect.
+// A GNSS port is a plain serial line. 9600 is the NMEA 0183 rate every modem
+// in this tree presents; ugps defaults to 4800, which is the 1983 one and
+// wrong for all of them. On a USB CDC-ACM port the rate is ignored anyway.
+const DEFAULT_BAUD = 9600;
+
+// Longest line we will hold while waiting for its newline. A GSV sentence is
+// ~100 bytes and the standard caps a sentence at 82, so anything past this is
+// a port that is not speaking NMEA — binary from a modem left in a diagnostic
+// mode, most often. Dropping the buffer beats growing it without bound.
+const MAX_LINE = 1024;
+
+// create(o) -> reader
 //
-// Returns { name, mine } for the last `config gps`, or null when there is none.
-function last_section(cursor)
-{
-	let found = null;
-
-	// ugps' UNTOUCHED SHIPPED DEFAULT, and nothing else. `files/gps.config` in
-	// the ugps package is exactly these three options with these three values:
-	//
-	//     config gps
-	//         option tty 'ttyACM0'
-	//         option adjust_time '1'
-	//         option disabled '1'
-	//
-	// Anything else — a different tty, adjust_time cleared, a baudrate added —
-	// is an operator who has been here, and is not ours whatever its `disabled`
-	// says. "Disabled" on its own is NOT evidence of ownership: somebody may
-	// have switched their own receiver off on purpose, and adopting that would
-	// overwrite their tty and mark their section as ours. Raised by Codex
-	// review, 2026-09-20.
-	//
-	// If ugps ever changes its default, this stops matching and wwand refuses
-	// with a line in the log — a visible failure, not a silent takeover.
-	let pristine = (s) => {
-		// nothing but the three it ships with...
-		for (let k in keys(s))
-			if (substr(k, 0, 1) != '.' &&
-			    k != 'tty' && k != 'adjust_time' && k != 'disabled')
-				return false;
-
-		// ...and each of them still saying what it shipped saying. A missing
-		// one fails this too, so there is no separate "all three present"
-		// check: an absent option cannot equal the value it must carry.
-		return s.tty == 'ttyACM0' &&
-			sprintf('%s', s.adjust_time) == '1' && sprintf('%s', s.disabled) == '1';
+//   o.path       the tty (required)
+//   o.baud       default 9600
+//   o.open       injectable opener for tests; must return { fileno, read, close }
+//   o.watch      injectable fd watcher; must return { delete }
+//   o.now        injectable clock (seconds); defaults to CLOCK_MONOTONIC
+//   o.on_epoch   called with a unix epoch whenever the receiver reports one
+//   o.on_gone    called with a reason string when the port ends (EOF/error)
+//
+// `open` and `watch` are injected together by the tests: the EOF path is the
+// one worth pinning and it lives inside the watcher's callback, so a test that
+// cannot drive that callback cannot reach it.
+//
+// The reader NEVER exits the process and never restarts itself: the port going
+// away is the modem's lifecycle, which the daemon owns.
+function create(o) {
+	let self = {
+		path: o.path,
+		running: false,
+		error: null,
+		// counters, because "no position" has several causes and they are
+		// worth telling apart in a status page
+		lines: 0, sentences: 0, unparsed: 0,
 	};
 
-	cursor.foreach(PKG, 'gps', (s) => {
-		found = {
-			name: s['.name'],
-			mine: (s.wwand == '1' || s.wwand == 1),
-			// ugps' init reads a MISSING `disabled` as '0' — `uci get … ||
-			// echo 0` (ugps.init:17-19) — so absent means enabled here too.
-			enabled: (sprintf('%s', s.disabled ?? '0') == '0'),
-			pristine: pristine(s),
-		};
+	let parser = nmea.create();
+	let handle = null, uhandle = null, buffer = '', generation = 0;
+
+	// MONOTONIC, and that is not a detail. Every stamp the parser keeps is used
+	// for a DIFFERENCE — how old the fix is, how long since a GSV cycle — and
+	// the wall clock can jump underneath them. It can jump because of THIS
+	// FEATURE: `option gnss_set_time` hands the receiver's own time to
+	// deps.set_clock, and a router with no RTC steps from 1970 to now the
+	// moment the first RMC lands. On the wall clock that would report an age
+	// of fifty-six years and expire every satellite in view at the same
+	// instant. context_common.uc:86 does the same for the same reason.
+	let mono = o.now ?? (() => clock(true)[0]);
+
+	let feed_line = (line, now) => {
+		if (length(line) == 0)
+			return;
+
+		self.lines++;
+
+		let t = parser.feed(line, now);
+
+		if (t == null) {
+			self.unparsed++;
+			return;
+		}
+
+		self.sentences++;
+
+		// the receiver's own clock, handed up for whoever is allowed to use it
+		if (o.on_epoch && parser.epoch != null && parser.epoch != self._said_epoch) {
+			self._said_epoch = parser.epoch;
+			o.on_epoch(parser.epoch);
+		}
+	};
+
+	// ONE buffer for the whole byte stream, for the reason atcmd.uc gives at
+	// its own: a sentence that straddles two reads arrives as a head with no
+	// newline and a tail that starts mid-word, and treating each read as a unit
+	// silently drops both halves.
+	let consume = (chunk, now) => {
+		buffer += chunk;
+
+		if (length(buffer) > MAX_LINE) {
+			// keep the tail: whatever follows the next newline is still usable
+			let nl = index(buffer, '\n');
+
+			buffer = (nl >= 0) ? substr(buffer, nl + 1) : '';
+			self.unparsed++;
+		}
+
+		let idx;
+
+		while ((idx = index(buffer, '\n')) >= 0) {
+			feed_line(trim(substr(buffer, 0, idx)), now);
+			buffer = substr(buffer, idx + 1);
+		}
+	};
+
+	self.start = function() {
+		if (self.running)
+			return true;
+
+		let open = o.open;
+
+		if (!open) {
+			// deferred: wwand_io is a native module and the host tests do not
+			// load it — they inject `o.open` instead
+			let qmit = require('wwand_io');
+
+			open = (path, baud) => qmit.open_tty(path, baud);
+			self._last_error = () => qmit.last_error();
+		}
+
+		handle = open(self.path, o.baud ?? DEFAULT_BAUD);
+
+		if (!handle) {
+			self.error = self._last_error ? self._last_error() : 'open failed';
+
+			return false;
+		}
+
+		self.error = null;
+		self.running = true;
+		buffer = '';
+
+		let watch = o.watch ?? ((fd, cb) => uloop.handle(fd, cb, uloop.ULOOP_READ));
+
+		// THE CALLBACK OWNS ITS OWN HANDLE AND ITS OWN GENERATION. stop()
+		// defers deleting the uloop handle (deleting it from inside its own
+		// callback frees something uloop still holds — harmless on 64-bit,
+		// SIGSEGV on MIPS32, see atcmd.uc), so between a stop() and that timer
+		// a start() can already have opened a NEW port. A callback that read
+		// the outer `handle` would then be the OLD watcher reading the NEW
+		// device, with `self.running` true again to wave it through. Raised by
+		// Codex review, 2026-09-21.
+		let h = handle, gen = ++generation;
+
+		uhandle = watch(h.fileno(), () => {
+			if (!self.running || gen != generation)
+				return;
+
+			while (true) {
+				let chunk = h.read();
+
+				// null = nothing more to read right now
+				if (chunk === null)
+					break;
+
+				// false = EOF or a hard error: the port is GONE. ugps calls
+				// exit(-1) here and lets procd respawn it against a device
+				// that may not be back; the daemon owns that decision, so this
+				// only says so and stops.
+				if (chunk === false) {
+					let why = self._last_error ? self._last_error() : 'eof';
+
+					self.stop();
+					self.error = why;
+
+					if (o.on_gone)
+						o.on_gone(why);
+
+					return;
+				}
+
+				consume(chunk, mono());
+			}
+		});
+
+		return true;
+	};
+
+	self.stop = function() {
+		if (!self.running)
+			return;
+
+		self.running = false;
+		generation++;   // retire this watcher: a pending callback is not ours
+
+		// Deferred for the reason atcmd.uc gives: stop() is reachable from
+		// inside this handle's own uloop callback, and deleting the handle
+		// there frees something uloop is still using. Harmless on 64-bit,
+		// SIGSEGV on MIPS32.
+		let uh = uhandle, h = handle;
+
+		uhandle = null;
+		handle = null;
+
+		uloop.timer(0, () => {
+			if (uh) uh.delete();
+			if (h) h.close();
+		});
+	};
+
+	// for tests and for a caller that has bytes from somewhere else
+	// same stamping as the read path: a caller that does not supply a clock
+	// gets the monotonic one, not a null stamp
+	self.push = (chunk, now) => consume(chunk, now ?? mono());
+
+	self.snapshot = (now) => ({
+		...parser.snapshot(now ?? mono()),
+		port: self.path,
+		running: self.running,
+		error: self.error,
+		lines: self.lines,
+		sentences: self.sentences,
+		unparsed: self.unparsed,
 	});
 
-	return found;
+	return self;
 };
 
-// Point ugps at `port`, or (port == null) stop it pointing anywhere.
+// The `modem_gps` reply. Built here so the shape is in one place and the
+// daemon does not have to know what a fix looks like.
 //
-// Idempotent by read-before-write, like every other setter in this tree: an
-// unchanged config writes nothing and triggers no reload, because a reload
-// restarts ugps and a restarted ugps loses its fix.
-//
-// Returns { changed, section, skipped } — `skipped` names why nothing was done.
-function sync(cursor, port, opts)
-{
-	let last = last_section(cursor);
-
-	// Somebody else's section is what ugps reads. Leave it entirely alone —
-	// appending ours would take their receiver over, and editing theirs is not
-	// ours to do. That covers both shapes: only theirs, and OURS FOLLOWED BY
-	// THEIRS, which the first version of this treated as ours to update while
-	// ugps went on reading theirs — a change reported as successful that could
-	// not take effect. Raised by Codex review, 2026-09-20.
-	//
-	// EXCEPT ugps' OWN UNTOUCHED DEFAULT, and that exception is what makes the
-	// package work at all. ugps SHIPS a section — `tty 'ttyACM0'`,
-	// `adjust_time '1'`, `disabled '1'` — so on a fresh install the last
-	// section is always foreign, and a rule that stopped there would refuse
-	// every box it was installed on. Found by installing it properly on a
-	// second router rather than on one where the section had been cleared by
-	// hand (2026-09-20).
-	//
-	// The test is the CONTENT, not the `disabled` flag: an operator may have
-	// switched their own receiver off on purpose, and adopting that would
-	// overwrite their tty and stamp their section as ours (see `pristine`).
-	if (last != null && !last.mine && !last.pristine)
-		return { changed: false, section: null, skipped: 'foreign_config' };
-
-	let adopting = (last != null && !last.mine);
-	let mine = last?.name;
-
-	if (mine == null) {
-		if (port == null)
-			return { changed: false, section: null, skipped: 'nothing_to_do' };
-
-		mine = cursor.add(PKG, 'gps');
-
-		if (mine == null)
-			return { changed: false, section: null, skipped: 'add_failed' };
-
-		cursor.set(PKG, mine, 'wwand', '1');
-	}
-	else if (adopting) {
-		if (port == null)
-			return { changed: false, section: mine, skipped: 'nothing_to_do' };
-
-		cursor.set(PKG, mine, 'wwand', '1');
-	}
-
-	let want = {
-		tty: port,
-		disabled: (port == null) ? '1' : '0',
-		// ugps can step the clock from NMEA. OFF by default and deliberately:
-		// this box already has sysntpd, and two things setting the clock is one
-		// more than any box needs. `adjust_time` turns it on for the RTC-less
-		// installs where the modem is the only time source there is.
-		adjust_time: (opts?.adjust_time ?? false) ? '1' : '0',
-	};
-
-	if (opts?.baudrate != null)
-		want.baudrate = sprintf('%d', opts.baudrate);
-
-	let changed = false;
-
-	for (let k, v in want) {
-		if (v == null)
-			continue;
-
-		let cur = cursor.get(PKG, mine, k);
-
-		if (sprintf('%s', cur ?? '') == sprintf('%s', v))
-			continue;
-
-		cursor.set(PKG, mine, k, v);
-		changed = true;
-	}
-
-	if (!changed)
-		return { changed: false, section: mine, skipped: 'unchanged' };
-
-	if (!cursor.commit(PKG))
-		return { changed: false, section: mine, skipped: 'commit_failed' };
-
-	return { changed: true, section: mine, port: port, adopted: adopting };
-};
-
-// What wwand knows about this modem's GNSS, merged with what ugps reports.
-//
-// ugps' answer is passed through AS IT COMES rather than being re-keyed into a
-// vocabulary of our own: it is another daemon's schema, this side has no
-// business freezing it, and a key it gains is then simply there. `fix` is the
-// one thing added, because "is there a position" is the question every caller
-// starts with and `signal` alone does not answer it on an empty reply.
-function status(modem, ugps_info)
-{
-	let info = (type(ugps_info) == 'object') ? ugps_info : null;
-
-	// ugps ANSWERS IN STRINGS, and uses an EMPTY one for a field it has no
-	// value for — `"elevation": ""`, `"satellites": ""` (measured on the
-	// GL-X3000, 2026-09-20). So "present" is not "not null": a fix keyed off
-	// `latitude != null` would call an empty string a position.
-	let val = (k) => {
-		let v = info?.[k];
-
-		return (v == null || sprintf('%s', v) == '') ? null : v;
-	};
-
-	let has_fix = (val('latitude') != null) && (val('longitude') != null);
-
-	return {
+// `snap` is null when there is no reader for this modem — the modem has no
+// GNSS port, `option gnss` is off, or the port could not be opened. Those are
+// different answers and each says which.
+function status(modem, snap) {
+	let out = {
+		modem: modem?.id,
 		port: modem?.gps_tty ?? null,
-		// the receiver, as against the reader: `option gnss` is what turns the
-		// modem's GNSS on, and a port with nothing sending on it looks exactly
-		// like a port nobody is reading.
-		receiver: (modem?.config?.gnss ?? false),
-		receiver_started: (modem?.gnss_started ?? false),
-		// ugps is a separate process; absent means it is not running or has
-		// never answered, which is a different thing from "no fix".
-		reader: (info != null),
-		fix: has_fix,
-		...(info ?? {}),
+		// wwand started the receiver itself (AT+QGPS=1 and friends); without
+		// that a port can be open and silent forever
+		receiver_started: modem?.gnss_started ?? null,
+		configured: modem?.config?.gnss ?? false,
 	};
+
+	if (!snap)
+		return { ...out, reading: false,
+		         reason: (out.port == null) ? 'no_gps_port'
+		                 : (!out.configured ? 'gnss_not_enabled' : 'reader_not_running') };
+
+	return { ...out, reading: snap.running, ...snap };
 };
 
-return {
-	sync: sync,
-	status: status,
-	last_section: last_section,
-};
+return { create, status, DEFAULT_BAUD };

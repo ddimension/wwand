@@ -97,7 +97,7 @@ set(WWAND_UCODE_MODULES
   discovery.uc hwops.uc log.uc mbim_backend.uc mbim_client.uc
   modem_datapath_qmi.uc
   modem_common.uc modem_init_qmi.uc modem_mbim.uc modem_ncm.uc modem_quirks.uc
-  modem.uc modeswitch.uc ncm_vendors.uc netlink.uc netsel_ops.uc
+  modem.uc modeswitch.uc ncm_vendors.uc netlink.uc netsel_ops.uc nmea.uc
   protocol_switch.uc qmi_backend.uc qmi_over_mbim.uc reconnect.uc recovery.uc
   regdetail.uc simops.uc sim_plmn.uc sim.uc sms_pdu.uc sms.uc
   telemetry_mbim.uc telemetry_ncm.uc telemetry_qmi.uc transport.uc ubus.uc

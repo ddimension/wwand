@@ -1,10 +1,16 @@
-// wwand — GPS glue (wwand-gps): the ugps config wwand writes, and the one it
-// must never touch.
+// wwand — the GNSS reader (wwand-gps).
 //
-// The rule this pins is not the config format, it is OWNERSHIP. ugps reads the
-// LAST `config gps` section (`uci get gps.@gps[-1].tty`, ugps.init), so writing
-// one on a box that already has an operator's receiver would take it over
-// silently. wwand manages exactly one section and only one it created itself.
+// nmea.uc is pinned separately against recorded sentences; this is about
+// everything AROUND the parser: framing a byte stream into lines, what happens
+// when the port goes away, and what `modem_gps` answers when there is no fix
+// to report. Those are the parts that used to be ugps's problem, and the two
+// that ugps gets wrong:
+//
+//   - it calls exit(-1) on tty EOF (nmea.c nmea_notify_cb, 9a351d41), so a
+//     modem reset kills it and procd respawns it against a device that is not
+//     back yet;
+//   - it has no idea which port belongs to which modem, because it takes one
+//     static tty out of /etc/config/gps.
 
 'use strict';
 
@@ -14,281 +20,246 @@ let gps = require('wwand.gps');
 
 ok(type(gps) == 'object', 'gps: module loads via require()');
 
-// a minimal uci cursor over an in-memory package
-function cursor(sections) {
-	let pkg = sections ?? [];
-	let n = 0;
+// A fake port. `chunks` are handed out one read() at a time; `false` is EOF,
+// which is what wwand_io.read() returns when the device is gone.
+function fake_port(chunks) {
+	let q = [ ...chunks ];
 
 	return {
-		_pkg: pkg,
-		commits: 0,
-		foreach: (p, t, fn) => {
-			for (let s in pkg)
-				if (s['.type'] == t)
-					fn(s);
-		},
-		add: (p, t) => {
-			let name = sprintf('cfg%d', ++n);
-			push(pkg, { '.name': name, '.type': t });
-			return name;
-		},
-		get: (p, sec, key) => {
-			for (let s in pkg)
-				if (s['.name'] == sec)
-					return s[key];
-			return null;
-		},
-		set: function(p, sec, key, val) {
-			for (let s in pkg)
-				if (s['.name'] == sec)
-					s[key] = val;
-		},
-		commit: function(p) { this.commits++; return true; },
+		closed: false,
+		fileno: () => 7,
+		read: () => length(q) ? shift(q) : null,
+		close: function() { this.closed = true; },
 	};
 }
 
-// --- an empty box: wwand writes its own section and marks it ----------------
-{
-	let c = cursor([]);
-	let r = gps.sync(c, '/dev/ttyUSB3', {});
+// A fake watcher that hands the callback back so a test can drive it.
+function fake_watch(box) {
+	return (fd, cb) => {
+		box.fd = fd;
+		box.cb = cb;
+		box.deleted = false;
 
-	eq(r.changed, true, 'sync: an empty config is written');
-	eq(c.get('gps', r.section, 'tty'), '/dev/ttyUSB3', 'sync: the tty is the discovered port');
-	eq(c.get('gps', r.section, 'disabled'), '0', 'sync: ...and ugps is enabled');
-	eq(c.get('gps', r.section, 'wwand'), '1', 'sync: the section is marked as ours');
-	eq(c.get('gps', r.section, 'adjust_time'), '0',
-		'sync: the clock is left to sysntpd unless asked');
-	eq(c.commits, 1, 'sync: committed once');
-}
-
-// --- idempotent: an unchanged config writes nothing --------------------------
-//
-// Not a nicety. A commit fires procd's reload trigger, a reload restarts ugps,
-// and a restarted ugps loses its fix — so an unchanged write costs a position.
-{
-	let c = cursor([]);
-	gps.sync(c, '/dev/ttyUSB3', {});
-	let after = c.commits;
-
-	let r = gps.sync(c, '/dev/ttyUSB3', {});
-
-	eq(r.changed, false, 'sync: the same port again changes nothing');
-	eq(r.skipped, 'unchanged', 'sync: ...and says why');
-	eq(c.commits, after, 'sync: no commit, so no reload, so no lost fix');
-}
-
-// --- the port moved: rewritten ----------------------------------------------
-{
-	let c = cursor([]);
-	gps.sync(c, '/dev/ttyUSB3', {});
-	let r = gps.sync(c, '/dev/ttyUSB1', {});
-
-	eq(r.changed, true, 'sync: a moved port is written');
-	eq(c.get('gps', r.section, 'tty'), '/dev/ttyUSB1', 'sync: ...to the new tty');
-}
-
-// --- no port: ugps is stopped, not left pointing at a device that is gone ----
-{
-	let c = cursor([]);
-	let s = gps.sync(c, '/dev/ttyUSB3', {}).section;
-	let r = gps.sync(c, null, {});
-
-	eq(r.changed, true, 'sync: a vanished port is acted on');
-	eq(c.get('gps', s, 'disabled'), '1', 'sync: ugps is disabled rather than left respawning');
-}
-
-// --- ugps SHIPS ITS OWN SECTION, and it is always the last one ---------------
-//
-// `files/gps.config` in the ugps package: tty 'ttyACM0', adjust_time '1',
-// disabled '1'. So on a FRESH INSTALL the last section is always foreign, and a
-// rule that stopped at "not ours" would refuse every box the package was ever
-// installed on. Found by installing it properly on a second router rather than
-// on one where the section had been cleared by hand (2026-09-20).
-//
-// A DISABLED section is not a receiver in service — ugps' own init returns early
-// unless `disabled` is exactly '0' — so that one is adopted, marked, and the
-// adoption is reported.
-{
-	let c = cursor([ { '.name': 'cfg01', '.type': 'gps',
-	                   tty: 'ttyACM0', adjust_time: '1', disabled: '1' } ]);
-	let r = gps.sync(c, '/dev/ttyUSB1', {});
-
-	eq(r.changed, true, 'shipped default: the ugps default is adopted, not refused');
-	eq(r.adopted, true, 'shipped default: ...and the adoption is reported');
-	eq(r.section, 'cfg01', 'shipped default: the same section, not a second one');
-	eq(length(c._pkg), 1, 'shipped default: nothing is appended beside it');
-	eq(c.get('gps', 'cfg01', 'wwand'), '1', 'shipped default: it is marked as ours now');
-	eq(c.get('gps', 'cfg01', 'tty'), '/dev/ttyUSB1', 'shipped default: pointed at the modem');
-	eq(c.get('gps', 'cfg01', 'disabled'), '0', 'shipped default: ...and enabled');
-	eq(c.get('gps', 'cfg01', 'adjust_time'), '0',
-		'shipped default: the clock is handed back to sysntpd unless asked');
-}
-
-// ...and once adopted it is simply ours: the second pass changes nothing.
-{
-	let c = cursor([ { '.name': 'cfg01', '.type': 'gps',
-	                   tty: 'ttyACM0', adjust_time: '1', disabled: '1' } ]);
-	gps.sync(c, '/dev/ttyUSB1', {});
-	let r = gps.sync(c, '/dev/ttyUSB1', {});
-
-	eq(r.changed, false, 'shipped default: the next pass is a no-op');
-	eq(r.skipped, 'unchanged', 'shipped default: ...and says so');
-}
-
-// An adoption with NO port is not an adoption: there is nothing to point at, so
-// the shipped default is left exactly as it was found.
-{
-	let c = cursor([ { '.name': 'cfg01', '.type': 'gps',
-	                   tty: 'ttyACM0', adjust_time: '1', disabled: '1' } ]);
-	let r = gps.sync(c, null, {});
-
-	eq(r.changed, false, 'shipped default: no port, no adoption');
-	eq(c.get('gps', 'cfg01', 'wwand'), null, 'shipped default: ...and no marker left behind');
-
-	// ...and the section is still adoptable afterwards. That is the sequence a
-	// real box walks: the modem comes up without `option gnss`, it is switched
-	// on later, and the default must still be recognisable as untouched.
-	let r2 = gps.sync(c, '/dev/ttyUSB1', {});
-
-	eq(r2.adopted, true, 'shipped default: still adoptable after a no-port pass');
-	eq(c.get('gps', 'cfg01', 'tty'), '/dev/ttyUSB1', 'shipped default: ...and then pointed');
-}
-
-// A SECTION THAT IS MERELY DISABLED IS NOT THE SHIPPED DEFAULT.
-//
-// "Disabled" is not evidence of ownership: an operator may have switched their
-// own receiver off on purpose, and adopting that would overwrite their tty and
-// stamp their section as ours. Only the package's UNTOUCHED default is adopted
-// — the content is the test, not the flag. Raised by Codex review, 2026-09-20.
-{
-	let their = (extra) => {
-		let sec = { '.name': 'theirs', '.type': 'gps',
-		            tty: 'ttyACM0', adjust_time: '1', disabled: '1', ...(extra ?? {}) };
-		let c = cursor([ sec ]);
-		return { r: gps.sync(c, '/dev/ttyUSB1', {}), c: c };
+		return { delete: () => { box.deleted = true; } };
 	};
-
-	// their own receiver, switched off
-	let a = their({ tty: '/dev/ttyS1' });
-	eq(a.r.skipped, 'foreign_config', 'not-default: another tty is theirs, disabled or not');
-	eq(a.c.get('gps', 'theirs', 'tty'), '/dev/ttyS1', 'not-default: ...and is not touched');
-
-	// the default with one option changed
-	eq(their({ adjust_time: '0' }).r.skipped, 'foreign_config',
-		'not-default: a cleared adjust_time means somebody has been here');
-
-	// the default with an option ADDED
-	eq(their({ baudrate: '9600' }).r.skipped, 'foreign_config',
-		'not-default: an added option means the same');
-
-	// ...and a section carrying only some of the three is not it either
-	{
-		let c = cursor([ { '.name': 'part', '.type': 'gps', tty: 'ttyACM0', disabled: '1' } ]);
-		eq(gps.sync(c, '/dev/ttyUSB1', {}).skipped, 'foreign_config',
-			'not-default: two of the three options is not the shipped default');
-	}
 }
 
-// --- AN OPERATOR'S OWN SECTION IS NOT OURS -----------------------------------
+// --- framing ----------------------------------------------------------------
 //
-// ugps reads the LAST section, so adding one would take over their receiver.
-// Nothing is written, and the refusal names itself.
-{
-	let c = cursor([ { '.name': 'theirs', '.type': 'gps', tty: '/dev/ttyS1', disabled: '0' } ]);
-	let r = gps.sync(c, '/dev/ttyUSB3', {});
+// A sentence that straddles two reads arrives as a head with no newline and a
+// tail that starts mid-word. Treating each read as a unit drops both halves,
+// and on a 1 Hz receiver that is most of them.
 
-	eq(r.changed, false, 'foreign: an operator section is left alone');
-	eq(r.skipped, 'foreign_config', 'foreign: ...and the refusal says why');
-	eq(length(c._pkg), 1, 'foreign: no section was added beside it');
-	eq(c.get('gps', 'theirs', 'tty'), '/dev/ttyS1', 'foreign: their tty is untouched');
-}
+let framed = gps.create({ path: '/dev/null' });
 
-// OURS FOLLOWED BY THEIRS IS ALSO THEIRS. The operator added a section after
-// wwand had written one — and ugps reads the LAST, so updating ours would be a
-// change reported as successful that ugps never looks at. Refused, like any
-// other config that is not ours to drive. (This case read the other way round
-// until a review asked what ugps actually reads.)
-{
-	let c = cursor([
-		{ '.name': 'mine', '.type': 'gps', tty: '/dev/ttyUSB3', disabled: '0', wwand: '1' },
-		{ '.name': 'theirs', '.type': 'gps', tty: '/dev/ttyS1', disabled: '0' },
-	]);
-	let r = gps.sync(c, '/dev/ttyUSB1', {});
+framed.push('$GPGGA,082112.00,5208.613543,N,00857.', 100);
+eq(framed.snapshot(100).latitude, null, 'framing: half a sentence is not a position');
 
-	eq(r.changed, false, 'mixed: a foreign LAST section wins, even past one of ours');
-	eq(r.skipped, 'foreign_config', 'mixed: ...and the refusal says why');
-	eq(c.get('gps', 'mine', 'tty'), '/dev/ttyUSB3', 'mixed: ours is left as it was');
-	eq(c.get('gps', 'theirs', 'tty'), '/dev/ttyS1', 'mixed: theirs is untouched');
-}
+framed.push('854813,E,1,08,0.5,102.9,M,47.0,M,,*60\r\n', 100);
 
-// ...and THEIRS FOLLOWED BY OURS is ours: ugps reads the last one, which is the
-// section wwand created, so driving it changes what ugps does.
-{
-	let c = cursor([
-		{ '.name': 'theirs', '.type': 'gps', tty: '/dev/ttyS1', disabled: '0' },
-		{ '.name': 'mine', '.type': 'gps', tty: '/dev/ttyUSB3', disabled: '0', wwand: '1' },
-	]);
-	let r = gps.sync(c, '/dev/ttyUSB1', {});
+let fr = framed.snapshot(100);
 
-	eq(r.changed, true, 'mixed: our own LAST section is ours to update');
-	eq(r.section, 'mine', 'mixed: ...and it is the one we marked');
-	eq(c.get('gps', 'theirs', 'tty'), '/dev/ttyS1', 'mixed: theirs is still untouched');
-}
+ok(fr.latitude > 52.14355 && fr.latitude < 52.14356,
+   'framing: ...and the other half completes it');
+eq(fr.sentences, 1, 'framing: counted once, not twice');
 
-// --- the clock option --------------------------------------------------------
-{
-	let c = cursor([]);
-	let r = gps.sync(c, '/dev/ttyUSB3', { adjust_time: true, baudrate: 115200 });
+// several sentences in one read, and a CR that must not reach the parser
+framed.push('$GPGSA,A,3,03,04,06,07,09,11,19,31,,,,,0.8,0.5,0.6,1*21\r\n' +
+            '$GPRMC,082112.00,A,5208.613543,N,00857.854813,E,0.021,,210926,,,A,V*0F\r\n', 101);
 
-	eq(c.get('gps', r.section, 'adjust_time'), '1', 'sync: adjust_time when asked');
-	eq(c.get('gps', r.section, 'baudrate'), '115200', 'sync: and a baudrate when given');
-}
+let fr2 = framed.snapshot(101);
 
-// --- status: two halves of one answer ----------------------------------------
+eq(fr2.sentences, 3, 'framing: two more sentences out of one read');
+eq(fr2.fix, '3d', 'framing: ...and they were parsed, not just counted');
+eq(fr2.unparsed, 0, 'framing: a trailing CR is trimmed, not fed to the checksum');
+
+// blank lines between sentences are ordinary on these ports
+framed.push('\r\n\r\n', 102);
+eq(framed.snapshot(102).unparsed, 0, 'framing: an empty line is not an unparsed sentence');
+
+// A port that is not speaking NMEA must not grow the buffer without bound —
+// a modem left in a diagnostic mode sends binary with no newline in it.
+let flood = gps.create({ path: '/dev/null' });
+
+for (let i = 0; i < 40; i++)
+	flood.push('0123456789012345678901234567890123456789012345678901234567890123', 200);
+
+ok(flood.snapshot(200).unparsed > 0, 'framing: a line with no end is dropped, not accumulated');
+
+// ...and the reader recovers on the next newline rather than staying wedged
+flood.push('\n$GPGGA,082112.00,5208.613543,N,00857.854813,E,1,08,0.5,102.9,M,47.0,M,,*60\n', 201);
+ok(flood.snapshot(201).latitude != null, 'framing: ...and the next whole sentence still lands');
+
+// --- the port going away -----------------------------------------------------
+
+(function() {
+	let box = {}, gone = [];
+	let port = fake_port([ '$GPGGA,082112.00,5208.613543,N,00857.854813,E,1,08,0.5,102.9,M,47.0,M,,*60\n',
+	                       false ]);
+
+	let r = gps.create({
+		path: '/dev/ttyUSB1',
+		open: () => port,
+		watch: fake_watch(box),
+		on_gone: (why) => push(gone, why),
+	});
+
+	eq(r.start(), true, 'eof: the reader starts');
+	eq(r.running, true, 'eof: ...and says so');
+	eq(box.fd, 7, 'eof: watching the port\'s own fd');
+
+	box.cb();   // drains the sentence, then hits EOF
+
+	eq(length(gone), 1, 'eof: the caller is TOLD the port ended — ugps calls exit(-1) here');
+	eq(r.running, false, 'eof: the reader stopped itself');
+
+	// the position read before the EOF is still there: the daemon decides what
+	// to do about a vanished modem, and blanking the panel is not this one's call
+	ok(r.snapshot(300).latitude != null, 'eof: what was read before it stays readable');
+	eq(r.snapshot(300).reading ?? r.running, false, 'eof: but it is no longer reading');
+})();
+
+// a port that will not open is a reported failure, not a throw
+(function() {
+	let r = gps.create({ path: '/dev/nope', open: () => null, watch: fake_watch({}) });
+
+	eq(r.start(), false, 'open: a port that will not open returns false');
+	eq(r.running, false, 'open: ...and does not pretend to run');
+	ok(r.error != null, 'open: with a reason');
+})();
+
+// starting twice is not two readers on one port
+(function() {
+	let opens = 0, box = {};
+	let r = gps.create({ path: '/dev/ttyUSB1', watch: fake_watch(box),
+	                     open: () => { opens++; return fake_port([]); } });
+
+	r.start();
+	r.start();
+	eq(opens, 1, 'start: starting an already-running reader opens nothing twice');
+})();
+
+// A RESTART MUST NOT LEAVE THE OLD WATCHER READING THE NEW PORT.
 //
-// ugps' reply is passed through as it comes — it is another daemon's schema and
-// this side has no business freezing it. `fix` is the one thing added, because
-// "is there a position" is the question every caller starts with.
-{
-	let m = { gps_tty: '/dev/ttyUSB3', gnss_started: true, config: { gnss: true } };
+// stop() defers deleting the uloop handle, because deleting it from inside its
+// own callback frees something uloop still holds (harmless on 64-bit, SIGSEGV
+// on MIPS32 — atcmd.uc says the same). So between a stop() and that timer, a
+// start() can already have opened a NEW port, and a callback that read the
+// reader's current handle would be the OLD watcher reading the NEW device with
+// `running` true again to wave it through. Raised by Codex review, 2026-09-21.
+(function() {
+	let box1 = {}, box2 = {}, which = 0;
+	let old_port = fake_port([ '$GPGGA,082112.00,5208.613543,N,00857.854813,E,1,08,0.5,102.9,M,47.0,M,,*60\n' ]);
+	let new_port = fake_port([ '$GPGGA,082112.00,4812.000000,N,01133.000000,E,1,04,0.9,520.0,M,47.0,M,,*62' + '\n' ]);
 
-	let s = gps.status(m, { latitude: 52.5, longitude: 13.4, satellites: 9, signal: true });
+	let r = gps.create({
+		path: '/dev/ttyUSB1',
+		open: () => (++which == 1) ? old_port : new_port,
+		watch: (fd, cb) => {
+			let box = (which == 1) ? box1 : box2;
+			box.cb = cb;
+			return { delete: () => { box.deleted = true; } };
+		},
+	});
 
-	eq(s.port, '/dev/ttyUSB3', 'status: the port wwand found');
-	eq(s.receiver, true, 'status: the receiver was asked for');
-	eq(s.receiver_started, true, 'status: ...and started');
-	eq(s.reader, true, 'status: ugps answered');
-	eq(s.fix, true, 'status: and there is a position');
-	eq(s.satellites, 9, 'status: ugps keys are passed through, not re-keyed');
+	r.start();
+	r.stop();
+	r.start();            // the deferred delete of watcher 1 has NOT run yet
 
-	// no ugps at all is a different thing from no fix, and must read that way
-	let n = gps.status(m, null);
-	eq(n.reader, false, 'status: ugps not running is reported as such');
-	eq(n.fix, false, 'status: ...and that is not a fix');
-	eq(n.port, '/dev/ttyUSB3', 'status: wwand\'s own half still answers');
+	eq(which, 2, 'restart: the second start opened a second port');
 
-	// ugps running with no fix: signal false, no coordinates
-	let f = gps.status(m, { signal: false });
-	eq(f.reader, true, 'status: ugps running with no fix is still running');
-	eq(f.fix, false, 'status: ...and has no position');
+	// watcher ONE fires now. It must do nothing at all — not read, not parse,
+	// and above all not read the port that belongs to watcher two.
+	box1.cb();
 
-	// UGPS ANSWERS IN STRINGS, and uses an EMPTY one for a field it has no
-	// value for — `"elevation": ""`, `"satellites": ""` (measured on a
-	// GL-X3000, 2026-09-20). A fix keyed off `latitude != null` would call an
-	// empty string a position, and every consumer downstream would agree.
-	let blank = gps.status(m, { latitude: '', longitude: '', elevation: '', signal: true });
-	eq(blank.fix, false, 'status: an empty latitude is not a position');
+	eq(r.snapshot(100).sentences, 0,
+		'restart: the retired watcher reads nothing — not even the new port');
 
-	// ...and the strings that ARE there are a fix
-	let str = gps.status(m, { latitude: '52.035816', longitude: '8.549176',
-	                          elevation: '', satellites: '', age: 6 });
-	eq(str.fix, true, 'status: coordinates as strings are still coordinates');
-	eq(str.latitude, '52.035816',
-		'status: ...and are passed through as ugps sent them, not re-typed');
+	// watcher TWO is the live one
+	box2.cb();
+	eq(r.snapshot(100).sentences, 1, 'restart: ...and the live watcher does read');
+	ok(r.snapshot(100).latitude > 48 && r.snapshot(100).latitude < 49,
+		'restart: the position is the NEW port\'s, which is the point');
+})();
 
-	// a receiver nobody asked for
-	let off = gps.status({ gps_tty: '/dev/ttyUSB3', config: {} }, null);
-	eq(off.receiver, false, 'status: `option gnss` unset reads as no receiver');
-}
+// --- the clock ---------------------------------------------------------------
+//
+// The receiver's time is HANDED UP, never applied here: deps.set_clock only
+// steps a clock that is plainly unset, so it cannot fight sysntpd. ugps' -a
+// steps whenever it differs by five seconds, which on an NTP-synced box is a
+// tug of war.
+
+(function() {
+	let epochs = [];
+	let r = gps.create({ path: '/dev/null', on_epoch: (e) => push(epochs, e) });
+
+	r.push('$GPRMC,082112.00,A,5208.613543,N,00857.854813,E,0.021,,210926,,,A,V*0F\n', 400);
+	r.push('$GPRMC,082112.00,A,5208.613543,N,00857.854813,E,0.021,,210926,,,A,V*0F\n', 401);
+
+	eq(epochs, [ 1789978872 ], 'clock: the epoch is handed up ONCE, not once per sentence');
+})();
+
+// --- the stamps must survive the clock this feature itself moves --------------
+//
+// `option gnss_set_time` hands the receiver's time to deps.set_clock, and a
+// router with no RTC steps from 1970 to now the moment the first RMC lands.
+// Every stamp the parser keeps is used for a DIFFERENCE, so on the wall clock
+// that step would have reported an age of fifty-six years and expired every
+// satellite in view at the same instant. Found while reviewing the clock path,
+// 2026-09-21.
+//
+// WHAT THIS PINS, exactly: that the reader ages on the clock IT was given and
+// on no other. A wall-clock jump cannot be staged here — the point is that the
+// reader never reads the wall clock, which the absence of `time()` in gps.uc
+// is the rest of the evidence for.
+(function() {
+	let t = 5000;
+	let r = gps.create({ path: '/dev/null', now: () => t });
+
+	r.push('$GPGGA,082112.00,5208.613543,N,00857.854813,E,1,08,0.5,102.9,M,47.0,M,,*60\n');
+	r.push('$GPGSV,1,1,02,01,10,100,40,02,20,110,41,1*66\n');
+
+	eq(r.snapshot().age, 0, 'clock step: fresh fix, no age');
+	eq(r.snapshot().satellites_in_view, 2, 'clock step: two satellites in view');
+
+	// three seconds pass on the MONOTONIC clock — which is what the reader
+	// uses, so a wall-clock jump of any size in between changes nothing here
+	t += 3;
+
+	eq(r.snapshot().age, 3, 'clock step: the age counts monotonic seconds');
+	eq(r.snapshot().satellites_in_view, 2, 'clock step: ...and the satellites stay');
+
+	// ...and the TTL still works on that clock
+	t += 40;
+	eq(r.snapshot().satellites_in_view, null, 'clock step: a stale GSV cycle still expires');
+})();
+
+// --- what modem_gps answers --------------------------------------------------
+
+let m = { id: 'wwmodem0', gps_tty: '/dev/ttyUSB1', gnss_started: true, config: { gnss: true } };
+
+// no reader: the three ways that happens are different answers
+eq(gps.status(m, null).reason, 'reader_not_running',
+   'status: configured, has a port, nothing reading — say which');
+eq(gps.status({ ...m, gps_tty: null }, null).reason, 'no_gps_port',
+   'status: no NMEA port at all is a different answer');
+eq(gps.status({ ...m, config: { gnss: false } }, null).reason, 'gnss_not_enabled',
+   'status: ...and so is a receiver nobody asked for');
+eq(gps.status(m, null).reading, false, 'status: and none of them is "reading"');
+
+// with a reader, the modem's own half travels with the fix
+(function() {
+	let r = gps.create({ path: '/dev/ttyUSB1' });
+
+	r.push('$GPGGA,082112.00,5208.613543,N,00857.854813,E,1,08,0.5,102.9,M,47.0,M,,*60\n', 500);
+
+	let st = gps.status(m, r.snapshot(500));
+
+	eq(st.modem, 'wwmodem0', 'status: the answer names the modem it is about');
+	eq(st.port, '/dev/ttyUSB1', 'status: and the port it came off');
+	eq(st.receiver_started, true, 'status: and whether wwand started the receiver at all');
+	ok(st.latitude != null, 'status: the fix travels with it');
+	eq(st.satellites_used, 8, 'status: ...including what ugps reported as a string');
+})();
 
 done('test_gps');

@@ -420,10 +420,12 @@ config wwand_modem 'm0'
 	list at_init 'ATE0'              # extra AT commands, sent once before registration
 	option at2_external '0'          # 1: reserve the secondary AT port for external tools
 	option gnss '0'                  # 1: start the modem's GNSS receiver, so its NMEA port
-	                                 #    streams. wwand never OPENS that port — it reports
-	                                 #    it as `gps_port`, and with wwand-gps installed it
-	                                 #    also points ugps at it (see below)
-	option gnss_set_time '0'         # 1: let ugps step the system clock from NMEA. Off by
+	                                 #    streams. The port is reported as `gps_port`; with
+	                                 #    wwand-gps installed, wwand also READS it and
+	                                 #    answers `modem_gps` with the fix (see below)
+	option gnss_set_time '0'         # 1: step the system clock from the receiver's own
+	                                 #    time — but only when the clock is plainly unset
+	                                 #    (pre-2021), so it never fights sysntpd. Off by
 	                                 #    default — the router has NTP; for RTC-less installs
 	option at_mbim '0'               # 0: disable the automatic AT-over-MBIM fallback
 	option at_over_mbim ''           # force AT over the vendor MBIM CID instead of a
@@ -612,28 +614,30 @@ normally nothing to set here.
 The no-mux datapath was called `none` until 1.6 and that spelling still works
 (as does `raw-ip`); both mean `raw_ip`, which is what `status` reports.
 
-**GNSS (`wwand-gps`).** Three pieces that already existed with nothing between
-them: wwand FINDS the modem's NMEA port during enumeration (reported as
-`gps_port`), `option gnss` STARTS the receiver with the vendor AT command — QMI's
-LOC service is broken on Quectel and AT is what works, and only wwand has the
-port — and ugps (OpenWrt base) READS the NMEA and publishes a `gps` ubus object.
-What was missing is the config write between them: ugps takes a STATIC tty out of
-`/etc/config/gps` (`uci get gps.@gps[-1].tty`, its init) while wwand's is
-discovered and can move between boots or when a modem is replaced.
+**GNSS (`wwand-gps`).** wwand FINDS the modem's NMEA port during enumeration
+(reported as `gps_port`), `option gnss` STARTS the receiver with the vendor AT
+command — QMI's LOC service is broken on Quectel and AT is what works, and only
+wwand has the port — and with `wwand-gps` installed wwand also READS that port
+itself: NMEA 0183 framing and checksums, RMC/GGA/GSA/GSV/GLL/VTG/ZDA from any
+talker, reported through `ubus call wwand modem_gps` as numbers, with the
+satellites in view and their SNR, the fix type and the DOP values.
 
-Installing `wwand-gps` adds that write, plus `ubus call wwand modem_gps` which
-answers with both halves at once — the port and receiver state wwand knows,
-merged with whatever ugps reports (its keys are passed through as they come;
-they are another daemon's schema). The LuCI status page shows the same as a GNSS
-panel, with a map link rather than an embedded tile layer: a tile would have the
-router's own web interface fetch from a third party, and send it this router's
-position to do so, the moment anyone opened the page.
+**One reader per modem**, so a two-modem router has two positions — and one
+port is only ever read once: a second modem naming a tty that is already being
+read is refused and told whose it is, because opening the same tty twice gives
+both readers a torn stream rather than two of them. `option gnss_set_time`
+hands the receiver's own time to the same `set_clock` NITZ uses, which steps
+the clock only when it is plainly unset (pre-2021) and so never fights
+sysntpd. The LuCI status page shows the same as a GNSS panel, with a map link
+rather than an embedded tile layer: a tile would have the router's own web
+interface fetch from a third party, and send it this router's position to do
+so, the moment anyone opened the page.
 
-**Good citizen, here too.** wwand manages exactly one `config gps` section and
-only one it created itself, marked `option wwand '1'`. ugps reads the LAST
-section, so an operator's own — a hat GPS on a serial port, a second receiver —
-is never touched, never reordered and never repointed; wwand logs that it is
-staying out of the way instead. Nothing is written for a modem without `option
+**Good citizen, here too.** Until 1.6.7 this package drove **ugps** (OpenWrt
+base) by writing `/etc/config/gps`; it no longer does, and no longer depends on
+it. wwand writes no GPS config at all and does not claim the `gps` ubus name,
+so ugps and an operator's own receiver — a hat GPS on a serial port — are
+unaffected by installing it. Nothing is opened for a modem without `option
 gnss`.
 
 Note `option location` is a DIFFERENT path: the QMI LOC service, QMI-only and
@@ -1350,7 +1354,7 @@ when called from LuCI).
 
 | Method | Arguments | Description |
 |---|---|---|
-| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `gps_port` — the modem's NMEA tty when its port table names one (wwand never opens it; see `option gnss`), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran) + contexts + `board` (detected profile, power/reset capability) |
+| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `gps_port` — the modem's NMEA tty when its port table names one (read by wwand-gps when `option gnss` is set; see `modem_gps`), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran) + contexts + `board` (detected profile, power/reset capability) |
 | `reload` | — | re-read UCI and apply the **diff** — only changed/added/removed modems and contexts are touched (idempotent; see *Idempotent reload*) |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
