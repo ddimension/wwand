@@ -836,12 +836,21 @@ Quectel — while `option gnss`, the one that does, had no UI at all.
    green.
 3. `tools/check-packaging.py --makefile ../repository/wwand/Makefile` — and again
    with `--makefile <pkgs>/net/wwand/Makefile --tarball <release>.tar.gz`.
-4. Tag, pinning the **commit** (`git rev-parse vX.Y.Z^{commit}`), never the tag
+4. The LuCI repos, which have no runner of their own — in `luci-app-wwand`:
+   `node tools/test-format.js`, `node tools/check-detached-methods.js`
+   (and `--self-test`, which proves that checker still recognises the shapes it
+   claims), `tools/check-xss.py`, and `node --check` over every shipped `.js`; in
+   `luci-proto-wwand` the `node --check`. Step 4 exists because the frontend
+   checks were written, then run by hand, then not run: `fmtRegistration`
+   aliased without its receiver threw on every draw of the Registration column
+   and shipped with a green suite, because the suite called it WITH a receiver
+   and the view did not (openwrt/packages#37, 2026-09-21).
+5. Tag, pinning the **commit** (`git rev-parse vX.Y.Z^{commit}`), never the tag
    object.
-5. Feed, on its main branch: `scripts/bump-source.sh wwand vX.Y.Z` (and the two
+6. Feed, on its main branch: `scripts/bump-source.sh wwand vX.Y.Z` (and the two
    LuCI packages, tagged `vX.Y.Z` alongside) — version, release and SDK hash in
    one go; verify the Makefile actually changed. Rules: the feed's CLAUDE.md.
-6. One feed push, then wait: the feed CI is `cancel-in-progress` per branch.
+7. One feed push, then wait: the feed CI is `cancel-in-progress` per branch.
    Devices get it when the feed's stable is released (`scripts/release-stable.sh`).
 
-The traps in steps 2 and 4-6 have each fired at least once; `gotchas.md` says how.
+The traps in steps 2 and 5-7 have each fired at least once; `gotchas.md` says how.
