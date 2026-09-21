@@ -600,6 +600,43 @@ push(scenarios, {
 	},
 });
 
+// --- s2b: the CARD's pdp_type reaches the wire ------------------------------
+//
+// The point of ddimension/wwand#35 is two cards through one interface: one
+// subscription answers IPv4 only, the other wants dual stack, and the
+// interface has a single value. This is the test that says the override
+// arrives where it matters — at the AT command, not merely in a helper.
+//
+// It is also the test that was missing: `eff_config()` overlaid exactly
+// `apn, auth, username, password`, so pdp_type stayed the interface's and NCM
+// went on dialling IPV4V6 for a card that had said IP. The unit tests for the
+// parser and the resolver both passed while it did.
+push(scenarios, {
+	name: 's2b_sim_pdp_override',
+	script: script(),
+	cconfig: { apn: 'iface.apn', pdp_type: 'ipv4v6', mux_id: 0 },
+	// the REAL mechanism, not a hand-set field: the modem reads the card's
+	// ICCID (the mock answers +QCCID with this one), match_sim_override picks
+	// the wwand_sim entry, and init puts it on modem.active_sim — which is
+	// where conn_cfg looks. Setting active_sim by hand would prove the helper
+	// and skip the half that actually has to work.
+	mconfig: { sims: [ { iccid: '89490200001022832490',
+	                     pdp_type: 'ipv4', apn: 'card.apn' } ] },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'sim-pdp: context up succeeds');
+			warn(sprintf('DIAG active_sim=%J  CGDCONT-Zeilen: %J
+', env.modem.active_sim,
+				filter(env.tr.history ?? [], (l) => index(l, "CGDCONT") >= 0)));
+			ok(env.tr.saw(/^AT\+CGDCONT=1,"IP","card\.apn"$/) != null,
+				'sim-pdp: the CARD\'s ipv4 and apn are what CGDCONT carries');
+			ok(env.tr.saw(/CGDCONT=1,"IPV4V6"/) == null,
+				'sim-pdp: ...and the interface\'s dual stack never reached the modem');
+			env.finish();
+		});
+	},
+});
+
 // --- s3: zero-rx watchdog ---------------------------------------------------
 
 push(scenarios, {

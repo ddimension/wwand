@@ -363,7 +363,7 @@ function iface_id(name, s, result)
 };
 
 const SIM_KNOWN_OPTS = [ 'modem', 'iccid', 'imsi', 'pincode', 'apn', 'auth',
-	'username', 'password', 'plmn_list' ];
+	'username', 'password', 'plmn_list', 'pdp_type' ];
 
 // flag section options the parser does not consume; suggest the known option
 // the unknown one is a prefix of (or vice versa) — catches pin/pincode-style
@@ -535,10 +535,30 @@ function plmnlist_from_section(s)
 // build a per-SIM override from a `config wwand_sim` section. Matched at runtime
 // to the active card by (modem, iccid); overrides the modem's pincode and,
 // optionally, the carrier apn/auth/pdp for that card.
-function sim_from_section(s)
+function sim_from_section(s, warnings, label)
 {
-	// the per-SIM carrier bundle: PIN + credentials. pdp_type / IP family is a
-	// connection concern and stays on the interface, not the SIM.
+	// THE IP FAMILY IS A PROPERTY OF THE SUBSCRIPTION, not only of the
+	// connection. This used to say the opposite — "pdp_type stays on the
+	// interface" — and that held right up to the first box with two cards in
+	// it: one subscription that answers on IPv4 only and one that wants dual
+	// stack, through the SAME interface. The interface cannot carry both, so
+	// the stopgap was a global `pdp_type 'ipv4'`, which costs the other card
+	// its IPv6 (ddimension/wwand#35).
+	//
+	// Same validation as the interface, and for the same reason: the stock
+	// qmi/mbim protos write IPV4V6 / IPV4, the lookup is case-sensitive, and an
+	// unrecognised value silently became dual stack — which for IPV4 turns an
+	// IPv4-only subscription into one the network may reject.
+	let pdp_raw = s.pdp_type;
+	let pdp_in = (pdp_raw != null && pdp_raw != '') ? lc(sprintf('%s', pdp_raw)) : null;
+
+	if (pdp_in != null && !PDP_TYPES[pdp_in]) {
+		if (warnings)
+			push(warnings, sprintf("%s: invalid pdp_type '%s', ignoring", label ?? 'wwand_sim', pdp_raw));
+
+		pdp_in = null;
+	}
+
 	return {
 		modem: s.modem,
 		iccid: s.iccid,
@@ -548,6 +568,9 @@ function sim_from_section(s)
 		auth: s.auth,
 		username: s.username,
 		password: s.password,
+		// null when unset: conn_cfg treats null as "not overridden" and falls
+		// through to the interface, which is what an absent option must do
+		pdp_type: pdp_in,
 		// optional per-SIM user-PLMN list (wwand_plmnlist), wins over the modem's
 		plmn_list: (s.plmn_list != null && s.plmn_list != '') ? s.plmn_list : null,
 		plmn_restore: null,   // resolved at the end of parse()
@@ -639,7 +662,8 @@ function parse_network_sections(raw, result)
 				break;
 			}
 
-			result.sims[name] = sim_from_section(s);
+			result.sims[name] = sim_from_section(s, result.warnings,
+				sprintf('wwand_sim %s', name));
 			unknown_opts(s, SIM_KNOWN_OPTS, result.warnings, sprintf('wwand_sim %s', name));
 			break;
 

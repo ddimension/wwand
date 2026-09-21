@@ -30,6 +30,32 @@ export function conn_cfg(ctx, field)
 	return (v != null && v != '') ? v : null;
 };
 
+// Every connection field a `config wwand_sim` may override, in ONE list.
+//
+// context_ncm's eff_config() copies them onto a flat object for the AT dial,
+// and it carried four of them — so when pdp_type became overridable, NCM went
+// on using the interface's value and nothing said so. That is the failure mode
+// the comment on effective_pdp() below describes, caught one file later.
+// Adding a field to sim_from_section means adding it here, and nowhere else.
+export const SIM_OVERRIDABLE = [ 'apn', 'auth', 'username', 'password', 'pdp_type' ];
+
+// The IP family this connection should ask for, resolved and defaulted.
+//
+// ONE place, because there were eight readers and every one of them spelled
+// `self.config.pdp_type ?? 'ipv4v6'` by hand — so a per-SIM override would have
+// had to be added to eight sites and would have been missed at the ninth. The
+// default belongs here too: 'ipv4v6' is what an interface that never said gets,
+// and repeating it at each site is how two of them come to disagree.
+//
+// Precedence is conn_cfg's: the active card's own value wins over the
+// interface's, because the SIM is the more specific statement — a subscription
+// that only answers on IPv4 says so about itself, not about the interface it
+// happens to be dialled through (ddimension/wwand#35).
+export function effective_pdp(ctx)
+{
+	return conn_cfg(ctx, 'pdp_type') ?? 'ipv4v6';
+};
+
 // the complete context state machine: IDLE -> PREPARING (QMI) | ACTIVATING
 // (MBIM/NCM dial directly) -> CONNECTED -> IDLE; every activation stage may
 // fall back to IDLE on failure/teardown. Used by ctx_scaffolding's warn-only

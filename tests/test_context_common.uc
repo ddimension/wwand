@@ -299,4 +299,45 @@ eq(cc.v6_prefix('2001:db8::1', 64.5), null,
 	'v6_prefix: a fraction is refused rather than truncating');
 eq(cc.v6_prefix('2001:db8::1', null), null, 'v6_prefix: a missing length is refused');
 
+// --- the IP family the connection asks for ----------------------------------
+//
+// THE SIM IS THE MORE SPECIFIC STATEMENT. A subscription that only answers on
+// IPv4 says that about itself, not about the interface it happens to be
+// dialled through — and on a box with two cards and one interface there is no
+// interface value that can be right for both. The stopgap was a global
+// `pdp_type 'ipv4'`, which costs the other card its IPv6
+// (ddimension/wwand#35).
+//
+// The default lives here too. Eight readers each spelled
+// `config.pdp_type ?? 'ipv4v6'` by hand, which is how two of them come to
+// disagree and how a ninth comes to be written without the override at all.
+
+eq(cc.effective_pdp({ config: { pdp_type: 'ipv4' } }), 'ipv4',
+	'pdp: the interface value, when the card says nothing');
+eq(cc.effective_pdp({ config: {} }), 'ipv4v6',
+	'pdp: ...and dual stack when nobody said');
+eq(cc.effective_pdp({}), 'ipv4v6', 'pdp: no config at all is still a default');
+
+eq(cc.effective_pdp({ config: { pdp_type: 'ipv4v6' },
+	modem: { active_sim: { pdp_type: 'ipv4' } } }), 'ipv4',
+	'pdp: THE CARD WINS — that is the whole point of the per-SIM override');
+eq(cc.effective_pdp({ config: { pdp_type: 'ipv4' },
+	modem: { active_sim: { pdp_type: 'ipv4v6' } } }), 'ipv4v6',
+	'pdp: ...in both directions, so one card keeps its IPv6 while the other does not');
+
+// an override that is absent, empty or null must fall THROUGH, not win as a
+// blank: conn_cfg treats both as "not overridden"
+eq(cc.effective_pdp({ config: { pdp_type: 'ipv6' },
+	modem: { active_sim: { pdp_type: null } } }), 'ipv6',
+	'pdp: a null override falls through to the interface');
+eq(cc.effective_pdp({ config: { pdp_type: 'ipv6' },
+	modem: { active_sim: { pdp_type: '' } } }), 'ipv6',
+	'pdp: an empty one likewise');
+eq(cc.effective_pdp({ config: { pdp_type: 'ipv6' }, modem: { active_sim: {} } }), 'ipv6',
+	'pdp: and a card with no opinion at all');
+
+// a card with an override and an interface that never spelled one out
+eq(cc.effective_pdp({ config: {}, modem: { active_sim: { pdp_type: 'ipv4' } } }), 'ipv4',
+	'pdp: the card can also be the ONLY statement there is');
+
 done('test_context_common');

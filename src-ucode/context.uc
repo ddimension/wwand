@@ -149,7 +149,7 @@ export function create(opts)
 	});
 
 	let wanted_families = () => {
-		let pdp = self.config.pdp_type ?? 'ipv4v6';
+		let pdp = context_common.effective_pdp(self);
 		let fams = [];
 
 		if (pdp == 'ipv4' || pdp == 'ipv4v6')
@@ -312,7 +312,7 @@ export function create(opts)
 		if (!profile.write_refused || !self.modem?.at || apn == null || apn == '')
 			return done();
 
-		let pdp = AT_PDP_STR[self.config.pdp_type ?? 'ipv4v6'] ?? 'IP';
+		let pdp = AT_PDP_STR[context_common.effective_pdp(self)] ?? 'IP';
 		let cmd = sprintf('AT+CGDCONT=%d,"%s","%s"', profile.index, pdp, apn);
 
 		log('notice', sprintf('qmi profile write refused — defining context %d over AT instead: %s %s',
@@ -330,7 +330,7 @@ export function create(opts)
 
 	check_pdp_type = (profile, done, pre) => {
 		let wds = self.modem.wds_cfg;
-		let want = PDP_MAP[self.config.pdp_type ?? 'ipv4v6'];
+		let want = PDP_MAP[context_common.effective_pdp(self)];
 
 		let evaluate = (err, data) => {
 			if (torn_down(err, wds))
@@ -415,7 +415,7 @@ export function create(opts)
 		if (!wds || !index || (apn != null && substr(apn, 0, 1) == '#'))
 			return done(false);
 
-		let want_pdp = PDP_MAP[self.config.pdp_type ?? 'ipv4v6'];
+		let want_pdp = PDP_MAP[context_common.effective_pdp(self)];
 		let prof = { type: wdsmod.PROFILE_TYPE_3GPP, index: index };
 
 		wds.request('GET_PROFILE_SETTINGS', { profile: prof }, (err, data) => {

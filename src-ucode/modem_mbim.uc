@@ -1117,7 +1117,7 @@ export function create(opts)
 				step_register();
 			});
 
-		let want_ip = bc.IP_TYPE_FROM_PDP[ctx.config.pdp_type ?? 'ipv4v6'] ?? bc.IP_TYPE_IPV4V6;
+		let want_ip = bc.IP_TYPE_FROM_PDP[context_common.effective_pdp(ctx)] ?? bc.IP_TYPE_IPV4V6;
 		let user = context_common.conn_cfg(ctx, 'username') ?? '';
 		let pass = context_common.conn_cfg(ctx, 'password') ?? '';
 		let auth = bc.AUTH_FROM_CFG[context_common.conn_cfg(ctx, 'auth')] ?? bc.AUTH_NONE;

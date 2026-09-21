@@ -78,8 +78,14 @@ wwand section types plus the netifd interface — no separate config file:
   de-powered during a recovery power-cycle, or held in reset when `reset_gpio` is used.
 - **`config wwand_sim '<name>'`** *(optional)* — a per-SIM override, matched at
   runtime to the inserted card by `option modem` + `option iccid`: overrides the
-  modem's `pincode` and, optionally, `apn`/`auth`/`username`/`password` for that
-  card (e.g. different eUICC profiles / dual-SIM with different PINs).
+  modem's `pincode` and, optionally, `apn`/`auth`/`username`/`password` and
+  `pdp_type` for that card (e.g. different eUICC profiles / dual-SIM with
+  different PINs). **`pdp_type` belongs here when the IP family is a property of
+  the SUBSCRIPTION** — two cards through one interface, one answering IPv4 only
+  and one wanting dual stack, cannot both be served by the interface's single
+  value; before this the only way out was a global `pdp_type 'ipv4'`, which cost
+  the other card its IPv6 (ddimension/wwand#35). An unrecognised value is
+  reported and ignored rather than silently becoming dual stack.
   Alternatively `option imsi` matches by the card's IMSI (an IMSI accidentally
   put into `option iccid` is accepted too) — but the IMSI is only readable
   *after* PIN unlock, so a `pincode` override needs the real ICCID; the
@@ -148,7 +154,9 @@ config interface 'wan'
 
 **Precedence:** PIN = matching `wwand_sim.pincode` → `wwand_modem.pincode`;
 APN/auth/username/password = active `wwand_sim` → `interface` →
-card-provisioned. The SIM-specific entry is more specific than the
+card-provisioned; `pdp_type` = active `wwand_sim` → `interface` → `ipv4v6`
+(there is no card-provisioned IP family to fall back to — the default is the
+dual stack an interface that never said gets). The SIM-specific entry is more specific than the
 SIM-agnostic dial profile, so it wins (same rule as the PIN) — swap SIMs and
 the matching `wwand_sim` carries its carrier's credentials without touching
 the interface; the interface value is the generic default.

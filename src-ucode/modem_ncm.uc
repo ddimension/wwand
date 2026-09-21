@@ -18,6 +18,7 @@
 
 import * as uloop from 'uloop';
 import * as modem_common from 'wwand.modem_common';
+import * as context_common from 'wwand.context_common';
 import * as telemetry_ncm from 'wwand.telemetry_ncm';
 import * as netlink from 'wwand.netlink';
 import * as sim from 'wwand.sim';
@@ -407,17 +408,43 @@ export function create(opts)
 	// preferred) drives the modem's autonomous LTE attach, so its APN/auth is
 	// what CGDCONT/QICSGP programs at bring-up. Contexts re-apply idempotently at
 	// dial time (context_ncm.up).
+	//
+	// THE EFFECTIVE config, not the raw one: a `config wwand_sim` may override
+	// apn/auth/credentials and the IP family for the card that is actually in
+	// the slot, and this used to hand the interface's values straight to
+	// CGDCONT — so a card whose subscription attaches on IPv4 only was attached
+	// as dual stack, and failed before the data session's own (correct)
+	// resolution could matter (ddimension/wwand#35).
 	let attach_cfg = () => {
+		// overlay the active card onto a base config. `base` is a context's
+		// config when there is one and the modem's own when there is not —
+		// which is the ordinary case here, because the autonomous attach is
+		// programmed during init, BEFORE any interface has bound a context.
+		// The card is known by then (the SIM step runs first), so it is the
+		// only specific thing there is to go on.
+		let eff = (base) => {
+			let e = { ...(base ?? {}) };
+
+			for (let f in context_common.SIM_OVERRIDABLE) {
+				let v = self.active_sim?.[f];
+
+				if (v != null && v != '')
+					e[f] = v;
+			}
+
+			return e;
+		};
+
 		let bound = null;
 
 		for (let ctx in self.contexts) {
 			if (ctx.config?.interface)
-				return ctx.config;
+				return eff(ctx.config);
 
-			bound = bound ?? ctx.config;
+			bound = bound ?? eff(ctx.config);
 		}
 
-		return bound ?? self.config;
+		return bound ?? eff(self.config);
 	};
 
 	// --- recovery / failure ------------------------------------------------

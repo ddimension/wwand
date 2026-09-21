@@ -1726,4 +1726,35 @@ eq(pbad.contexts.w?.pdp_type, 'ipv4v6', 'pdp-case: an unknown value still falls 
 ok(length(filter(pbad.warnings, (w) => index(w, 'nonsense') >= 0)) > 0,
 	'pdp-case: ...and is reported with the spelling the user wrote');
 
+// --- per-SIM pdp_type (ddimension/wwand#35) ---------------------------------
+//
+// It was not in SIM_KNOWN_OPTS, so a `config wwand_sim` that carried it got an
+// "unknown option 'pdp_type' (ignored)" warning and did nothing — observed in
+// the field on 192.168.203.242, 2026-09-21, where somebody had already tried.
+
+let psim = config.parse({ network: {
+	m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+	s4: { '.type': 'wwand_sim', iccid: '8949020000012345678', pdp_type: 'ipv4' },
+	s6: { '.type': 'wwand_sim', iccid: '8988280000019215530', pdp_type: 'IPV4V6' },
+	sx: { '.type': 'wwand_sim', iccid: '8912345678901234567', pdp_type: 'nonsense' },
+	sn: { '.type': 'wwand_sim', iccid: '8900000000000000000' },
+} });
+
+eq(psim.sims.s4.pdp_type, 'ipv4', 'sim pdp: carried off the section');
+eq(psim.sims.s6.pdp_type, 'ipv4v6',
+	'sim pdp: ...case-folded, because the stock protos write IPV4V6');
+eq(psim.sims.sn.pdp_type, null,
+	'sim pdp: absent stays null, so conn_cfg falls through to the interface');
+
+// an unrecognised value must NOT become a silent dual stack: for IPV4 that
+// would turn an IPv4-only subscription into one the network may reject
+eq(psim.sims.sx.pdp_type, null, 'sim pdp: a nonsense value is dropped, not guessed');
+ok(length(filter(psim.warnings, (w) => index(w, 'nonsense') >= 0)) > 0,
+	'sim pdp: ...and is reported, with the spelling the user wrote');
+
+// and the option is KNOWN now — the "unknown option" warning is what made the
+// field attempt silently do nothing
+eq(length(filter(psim.warnings, (w) => index(w, "unknown option 'pdp_type'") >= 0)), 0,
+	'sim pdp: no longer reported as an unknown option');
+
 done('test_config');

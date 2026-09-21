@@ -1134,15 +1134,19 @@ export function create(opts)
 			// the E3372H on huawei_cdc_ncm shows the same kernel_ra addresses on
 			// the parent netdev (HW-observed 2026-08-30). is_at_driver() is the
 			// same table the AT-channel detection uses.
+			// the EFFECTIVE family, not the interface's: a card that says
+			// ipv4 about itself must not get a dhcpv6 subinterface built for
+			// it, and one that says ipv4v6 must get one even where the
+			// interface never spelled a family out (ddimension/wwand#35).
 			if (deps.ensure_wan6 && discovery.is_at_driver(ctx.modem?.datapath?.backend) &&
-			    entry?.cfg?.interface && ctx.config?.pdp_type != 'ipv4') {
+			    entry?.cfg?.interface && context_common.effective_pdp(ctx) != 'ipv4') {
 				log('info', sprintf('interface %s: ensuring the dynamic dhcpv6 subinterface (RNDIS v6 model)',
 					entry.cfg.interface));
 
 				// ...but wait for the parent's link-local first (see has_lla).
 				let dev = ctx.modem?.datapath?.netdev;
 				let iface = entry.cfg.interface;
-				let want = ctx.config?.pdp_type;
+				let want = context_common.effective_pdp(ctx);
 				let mine = ctx;
 				let tries = 0;
 				let confirmed = false;

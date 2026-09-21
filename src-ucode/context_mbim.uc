@@ -303,7 +303,7 @@ export function create(opts)
 		// The carrier bundle resolves through the per-SIM override (wwand_sim
 		// wins over the interface — context_common.conn_cfg).
 		let profile = context_common.conn_cfg(self, 'apn') ?? '';
-		let ip_type = bc.IP_TYPE_FROM_PDP[self.config.pdp_type ?? 'ipv4v6'];
+		let ip_type = bc.IP_TYPE_FROM_PDP[context_common.effective_pdp(self)];
 
 		let args = {
 			session_id: wire_session(),

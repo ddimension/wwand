@@ -132,7 +132,9 @@ export function create(opts)
 	let eff_config = () => {
 		let e = { ...self.config };
 
-		for (let f in ['apn', 'auth', 'username', 'password']) {
+		// the shared list, not a copy of it: this one silently lost pdp_type
+		// when that became overridable (ddimension/wwand#35)
+		for (let f in context_common.SIM_OVERRIDABLE) {
 			let v = context_common.conn_cfg(self, f);
 
 			if (v != null)
