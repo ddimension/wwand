@@ -1144,7 +1144,13 @@ export function create(opts)
 			// carries the same raw WCDMA Ec/Io and needs the same conversion —
 			// an indication landing between refreshes would otherwise flip the
 			// unit back under a consumer that just read the polled value
-			self.signal = modem_common.normalise_qmi_signal(data);
+			// same precedence as the poll path: a latched rssi/rsrq in the
+			// indication is no fresher than one in the response. The stash is
+			// age-capped, dropped on any serving-system indication and on
+			// teardown, so an indication arriving after the cell changed or
+			// after the modem stopped measuring gets the plain TLV back.
+			self.signal = modem_common.overlay_serving_signal(
+				modem_common.normalise_qmi_signal(data), self._serving_meas);
 		});
 		// Network Time / NITZ (operator-pushed UTC clock): store for status and
 		// hand epoch+tz to the daemon, which decides whether to apply it (only
@@ -1222,6 +1228,17 @@ export function create(opts)
 
 		if (!ss)
 			return;
+
+		// A cell measurement is about the cell it was measured on, and THIS
+		// indication is the event that says something about the serving cell
+		// changed — deregistration, but also a plain reselection that never
+		// leaves the registered state. Neither carries a PCI we could compare,
+		// so the stash the signal overlay reads is dropped unconditionally and
+		// the next cell poll re-takes it (immediately on the fast loop). The
+		// only thing given up is overlaying a signal indication that arrives in
+		// between, which is the conservative direction. Raised in review,
+		// 2026-09-21.
+		self._serving_meas = null;
 
 		if (data.current_plmn?.description != null)
 			data.current_plmn.description = decode_operator_name(data.current_plmn.description);
@@ -1413,6 +1430,11 @@ export function create(opts)
 		// make_fail reads it before arming (modem_common.uc). Raised by review,
 		// 2026-09-19.
 		self._teardown_depth = (self._teardown_depth ?? 0) + 1;
+
+		// the modem object outlives a teardown/reopen, so a serving-cell
+		// measurement from the session just ended must not reach a signal
+		// indication on the new client
+		self._serving_meas = null;
 
 		// EVERYTHING BELOW IS GUARDED, because the decrement at the end is the
 		// only thing that re-enables retries and ucode has no `finally`. The

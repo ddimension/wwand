@@ -147,7 +147,9 @@ function run_next()
 		},
 	});
 
-	guard = uloop.timer(3000, () => {
+	// 3 s covers a bring-up; a scenario that has to watch several fast-telemetry
+	// cycles go by (min_interval is a fixed 1000 ms) says so with guard_ms
+	guard = uloop.timer(s.cfg.guard_ms ?? 3000, () => {
 		ok(false, sprintf('%s: timed out waiting for %s', s.name, s.until));
 		finish(modem);
 	});
@@ -368,6 +370,97 @@ scenario('dms-fallback', {
 		// DMS UIM Get ICCID, message 0x003C, value in TLV 0x01 (libqmi 1.38,
 		// "since 1.0") — what identifies the card on a modem too old for UIM
 		eq(modem.info.iccid, '8949020000012345678', 'dms: iccid via legacy path');
+	});
+
+// --- 5a2: the serving-cell overlay, where the unit tests cannot reach --------
+//
+// modem_common.overlay_serving_signal is pinned field by field in
+// test_modem_common. What that cannot pin is WHICH measurement reaches it and
+// WHEN, and both of those were wrong in review before they were right:
+//
+//   1. store_cells holds the last neighbour list for NEIGH_HOLD seconds so the
+//      UI list does not flicker. Reading the serving row out of self.cells
+//      therefore served a measurement up to 30 s old as if it were current.
+//      The stash is taken off the WIRE, before that substitution.
+//   2. When GET_SIGNAL_INFO fails, the GET_SIGNAL_STRENGTH fallback may answer
+//      with GSM or WCDMA alone. The shallow merge then carries the PREVIOUS
+//      cycle's lte block through untouched, and overlaying it would pair a
+//      current rsrp with an old snr.
+//
+// Three phases, counted by the mock:
+//   cycle 1  signal ok          cells: TWO rows, serving -90.2  -> _neigh stored
+//   cycle 2  signal ok          cells: ONE row,  serving -70.0  -> carry-over fires
+//   cycle 3+ signal REJECTED    cells: ONE row,  serving -50.0  -> GSM-only fallback
+const OVERLAY_HANDLERS = {
+	GET_SIGNAL_INFO: (args, m) => (m.count <= 2)
+		? { lte: { rssi: -35, rsrq: -14, rsrp: -95, snr: 98 } }
+		: { __error: 71 },
+	// LTE is absent on purpose: a GSM row must not authorise an LTE overlay
+	GET_SIGNAL_STRENGTH: { rssi_list: [ { rssi: 85, radio_if: 4 } ] },
+	// the watched fast loop walks on to carrier aggregation; refuse it so the
+	// ladder settles on AT and the scenario stays about the signal
+	GET_LTE_CPHY_CA_INFO: { __error: 71 },
+	GET_CELL_LOCATION_INFO: (args, m) => ({ lte_intra: {
+		serving_cell_id: 100, earfcn: 1850, ue_idle: 0,
+		plmn: { mcc: 262, mnc: 1 }, tac: 1, global_cell_id: 1,
+		cells: (m.count <= 1)
+			? [ { pci: 100, rsrq: -110, rsrp: -902, rssi: -700, srxlev: 0 },
+			    { pci: 200, rsrq: -180, rsrp: -1100, rssi: -900, srxlev: 0 } ]
+			: [ { pci: 100,
+			      rsrq: (m.count == 2) ? -120 : -130,
+			      rsrp: (m.count == 2) ? -700 : -500,
+			      rssi: (m.count == 2) ? -600 : -400, srxlev: 0 } ],
+	} }),
+};
+
+// answers the open_at probe and anything the telemetry ladder tries with a
+// bare OK — a silent command would hang the atcmd engine
+let ov_at_tr;
+ov_at_tr = {
+	write: (d) => { if (ov_at_tr.data_cb) ov_at_tr.data_cb('\r\nOK\r\n'); },
+	on_data: (cb) => { ov_at_tr.data_cb = cb; },
+	close: () => null,
+	drain: () => null,
+};
+
+scenario('signal-overlay', {
+	handlers: base_handlers(OVERLAY_HANDLERS),
+	at: { fx: fakefx.create(), open_transport: () => ov_at_tr },
+	until_nth: 4,
+	guard_ms: 9000,   // four fast-telemetry cycles at 1000 ms, plus the bring-up
+	setup: (mock, modem) => {
+		let poll = null;
+		poll = uloop.timer(10, () => {
+			if (modem.state == 'READY')
+				modem.watch();   // the fast loop only runs while watched
+			poll.set(10);
+		});
+	},
+}, 'telemetry',
+	(modem, mock, events) => {
+		// (1) the overlay reached the signal at all, in 0.1 dB
+		ok(modem.signal?.lte?.rsrp != -95,
+			'overlay: the latched signal TLV did not survive a cell measurement');
+
+		// (2) THE CARRY-OVER TEST. Cycle 2's wire row says -70.0 while
+		// store_cells has put cycle 1's two-row list back for the UI, whose
+		// serving row still says -90.2. The signal must show the wire.
+		eq(modem.signal?.lte?.rsrp, -70.0,
+			'overlay: the measurement comes off the wire, not from the held neighbour list');
+
+		// ...and the hold itself still works, which is what it is there for
+		eq(length(modem.cells?.lte_intra?.cells ?? []), 2,
+			'overlay: NEIGH_HOLD still keeps the UI neighbour list from flickering');
+
+		// (3) THE GSM-ONLY TEST. Cycles 3+ reject GET_SIGNAL_INFO and the
+		// fallback answers with a GSM row only, so the lte block is last
+		// cycle's — it must NOT pick up cycle 3's -50.0.
+		eq(modem.signal?.gsm_rssi, -85,
+			'overlay: the GET_SIGNAL_STRENGTH fallback did land');
+		eq(modem.signal?.lte?.rsrp, -70.0,
+			'overlay: a GSM-only fallback does not authorise an LTE overlay');
+		eq(modem.signal?.lte?.snr, 98,
+			'overlay: ...so the lte block is still whole — no current rsrp beside a stale snr');
 	});
 
 // --- 5b: minimal-service QMI stack (2011-era, the Huawei E182E class) --------

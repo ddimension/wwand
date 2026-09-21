@@ -1271,4 +1271,73 @@ eq(ns.wcdma, null, 'signal: an all-sentinel wcdma block is dropped before scalin
 
 eq(mc.normalise_qmi_signal(null), null, 'signal: null in, null out');
 
+// --- the serving cell's measurement outranks a latched signal TLV -----------
+//
+// GET_SIGNAL_INFO's LTE rssi/rsrq stand still on some firmware. The numbers
+// below are not invented: they are one paired sample off the RG502Q-EA in a
+// NR7101 (192.168.203.242, firmware RG502QEAACR13A04M4G_ZYXEL, 2026-09-21),
+// where the 0x14 TLV held rssi -35 / rsrq -14 / rsrp -61 for ten minutes while
+// the cell measurement from the SAME poll cycle moved and AT+QENG agreed with
+// the cell measurement, not with the TLV.
+
+let latched = { lte: { rssi: -35, rsrq: -14, rsrp: -61, snr: 98 } };
+let live = { lte_intra: { serving_cell_id: 334, cells: [
+	{ pci: 409, rsrq: -104, rsrp: -599, rssi: -400 },
+	{ pci: 334, rsrq: -114, rsrp: -609, rssi: -333 },
+] } };
+
+eq(mc.serving_lte_cell(live).pci, 334,
+   'serving cell: picked by PCI, not by position in the neighbour list');
+
+// the stash carries the moment it was read; `now` is injected so the age rules
+// below are asserted rather than raced against the wall clock
+let meas = mc.serving_meas(live, 1000);
+
+eq(meas.cell.pci, 334, 'serving_meas: stamps the serving row');
+eq(meas.ts, 1000, 'serving_meas: ...with the time it was read off the wire');
+eq(mc.serving_meas({ lte_intra: { serving_cell_id: 77, cells: [] } }, 1000), null,
+   'serving_meas: nothing measured, nothing stashed');
+
+eq(mc.overlay_serving_signal(latched, meas, 1000).lte,
+   { rssi: -33.3, rsrq: -11.4, rsrp: -60.9, snr: 98 },
+   'overlay: the serving cell supplies rssi/rsrq/rsrp in 0.1 dB, snr is left alone');
+
+// AGE. The stash is evidence about now only for so long: the slow telemetry
+// tick is 60 s by default, and a measurement that has outlived several of those
+// means the cell query stopped answering.
+eq(mc.overlay_serving_signal(latched, meas, 1000 + 150).lte.rssi, -33.3,
+   'overlay: a measurement right on the TTL is still used');
+eq(mc.overlay_serving_signal(latched, meas, 1000 + 151), latched,
+   'overlay: one second past it, the signal TLV stands — stale is not better than latched');
+
+// an unstamped row is refused: the age cap is stated as a guarantee, so it has
+// to hold for a caller that hands the helper a bare row rather than a stash
+eq(mc.overlay_serving_signal(latched, { cell: { pci: 334, rsrq: -114,
+	rsrp: -609, rssi: -333 } }, 1000), latched,
+   'overlay: no timestamp, no overlay — an unaged measurement is not trusted');
+
+// the ways there is nothing to take
+eq(mc.overlay_serving_signal(latched, null, 1000), latched,
+   'overlay: no cell environment at all, the signal TLV stands');
+eq(mc.overlay_serving_signal(latched, mc.serving_meas({ lte_intra: { serving_cell_id: 77,
+	cells: [ { pci: 334, rsrq: -114, rsrp: -609, rssi: -333 } ] } }, 1000), 1000), latched,
+   'overlay: the serving PCI is not in the list, nothing is taken from a neighbour');
+eq(mc.overlay_serving_signal({ nr5g: { rsrp: -80 } }, meas, 1000), { nr5g: { rsrp: -80 } },
+   'overlay: an LTE cell list NEVER fabricates an lte block that the modem did not report');
+
+// a field outside its sanity window is refused ON ITS OWN, not as a whole row
+let bad = mc.overlay_serving_signal(latched, mc.serving_meas({ lte_intra: {
+	serving_cell_id: 334,
+	cells: [ { pci: 334, rsrq: -114, rsrp: 4200, rssi: null } ] } }, 1000), 1000);
+eq(bad.lte, { rssi: -35, rsrq: -11.4, rsrp: -61, snr: 98 },
+   'overlay: an impossible rsrp and an absent rssi are skipped, the good rsrq still lands');
+
+// the log prints what the value actually is, rather than truncating it
+let line = mc.format_telemetry({ signal: mc.overlay_serving_signal(latched, meas, 1000),
+	cells: null, reg: null });
+ok(index(line, 'rssi -33.3') >= 0 && index(line, 'rsrp -60.9') >= 0,
+   'telemetry line: an overlaid dBm keeps its decimal instead of being cut by %d');
+ok(index(line, 'snr 9.8') >= 0,
+   'telemetry line: snr is still the 0.1 dB field it always was');
+
 done('test_modem_common');

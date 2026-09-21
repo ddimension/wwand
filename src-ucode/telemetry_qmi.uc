@@ -50,6 +50,12 @@ export function install(self, o)
 	let store_cells = (data) => {
 		modem_common.clean_cell_metrics(data);   // -32768 sentinels -> null before anyone reads them
 
+		// The serving row AS IT CAME OFF THE WIRE, stamped now — captured
+		// BEFORE the carry-over below, which may replace li.cells with a set up
+		// to NEIGH_HOLD seconds old. That hold keeps the UI neighbour list from
+		// flickering; a signal reading must not inherit its age.
+		self._serving_meas = modem_common.serving_meas(data);
+
 		let li = data?.lte_intra;
 
 		if (li) {
@@ -74,10 +80,17 @@ export function install(self, o)
 	// done() to schedule the next cycle non-overlapping. The adaptive cadence /
 	// decay / teardown all live in modem_common.watch_driver now.
 	let refresh_fast = (done) => {
+		// did THIS cycle actually read the signal? On a failure self.signal
+		// keeps its last-known value, and overlaying a fresh cell measurement
+		// onto that would pair a current rsrp with an old snr.
+		let sig_fresh = false;
+
 		self.nas.request('GET_SIGNAL_INFO', {}, (serr, sdata) => {
 			// keep last-known on an empty/invalid answer instead of blanking it
-			if (!serr && tlv.has_payload(sdata))
+			if (!serr && tlv.has_payload(sdata)) {
 				self.signal = modem_common.normalise_qmi_signal(sdata);
+				sig_fresh = true;
+			}
 			// A cancellation is the client being destroyed, not a modem that
 			// rejects the message. Falling through would submit the fallback on
 			// the client mid-destruction — and that one's failure submits an AT
@@ -96,8 +109,27 @@ export function install(self, o)
 					if (!s2err && tlv.has_payload(s2data)) {
 						let s = strength_signal(s2data);
 
-						if (s)
-							self.signal = { ...(self.signal ?? {}), ...s };
+						if (s) {
+							let merged = { ...(self.signal ?? {}), ...s };
+
+							// ONLY an LTE-bearing answer may authorise an LTE
+							// overlay. strength_signal can return gsm_rssi or
+							// wcdma alone (see it below), and the shallow merge
+							// then carries the PREVIOUS cycle's lte block
+							// through untouched — overlaying that would pair a
+							// current rsrp with an old snr, the exact mixture
+							// sig_fresh exists to prevent. Raised in review,
+							// 2026-09-21.
+							if (s.lte != null) {
+								// this branch and the cell callback race; both
+								// overlay, so either order ends the same way
+								merged = modem_common.overlay_serving_signal(
+									merged, self._serving_meas);
+								sig_fresh = true;
+							}
+
+							self.signal = merged;
+						}
 						else
 							// answered, but no entry we can map (e.g. a
 							// GSM-only stack whose rssi row is not LTE) —
@@ -116,8 +148,16 @@ export function install(self, o)
 				return done();
 
 			self.nas.request('GET_CELL_LOCATION_INFO', {}, (cerr, cdata) => {
-				if (!cerr && tlv.has_payload(cdata))
+				if (!cerr && tlv.has_payload(cdata)) {
 					store_cells(cdata);
+
+					// the serving cell's own measurement outranks the signal
+					// TLV, which is latched on some firmware — see
+					// modem_common.overlay_serving_signal
+					if (sig_fresh)
+						self.signal = modem_common.overlay_serving_signal(
+							self.signal, self._serving_meas);
+				}
 
 				let after = () => {
 					// emit with cells when there are any, or with a per-RAT

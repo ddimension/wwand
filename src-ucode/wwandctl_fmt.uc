@@ -68,14 +68,19 @@ export function fmt_sig(sig)
 	let parts = [];
 	// -32768 & friends are "not measured" sentinels, never real dBm
 	let ok = (v) => v != null && v > -140;
+	// whole dBm off the signal TLV, one decimal once the serving cell's own
+	// measurement has been overlaid (modem_common.overlay_serving_signal) —
+	// %d would print -60.9 as -60
+	let dec = (v) => (v == int(v)) ? sprintf('%d', v) : sprintf('%.1f', v);
 
 	if (ok(sig?.nr5g?.rsrp))
 		push(parts, sprintf('NR rsrp %d dBm snr %.1f dB', sig.nr5g.rsrp, (sig.nr5g.snr ?? 0) / 10.0));
 
 	if (ok(sig?.lte?.rsrp))
-		push(parts, sprintf('LTE rsrp %d dBm rsrq %d dB', sig.lte.rsrp, sig.lte.rsrq ?? 0));
+		push(parts, sprintf('LTE rsrp %s dBm rsrq %s dB',
+			dec(sig.lte.rsrp), dec(sig.lte.rsrq ?? 0)));
 	else if (ok(sig?.lte?.rssi))
-		push(parts, sprintf('LTE rssi %d dBm', sig.lte.rssi));
+		push(parts, sprintf('LTE rssi %s dBm', dec(sig.lte.rssi)));
 
 	if (ok(sig?.wcdma?.rssi))
 		push(parts, sprintf('WCDMA rssi %d dBm', sig.wcdma.rssi));

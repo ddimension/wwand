@@ -1786,6 +1786,102 @@ export function normalise_qmi_signal(sdata) {
 
 	return out;
 };
+// Sanity window per field, in the cell list's 0.1 dB units. A value outside it
+// is REFUSED BY POLICY -- it is implausible for a serving LTE cell, so the
+// latched number it would replace is at least of the right order. It is not a
+// claim that such a value proves a bad decode.
+const SERVING_WINDOW = {
+	rsrp: [ -1400, -300 ],   // -140 .. -30 dBm
+	rsrq: [  -400,    0 ],   //  -40 ..   0 dB
+	rssi: [ -1300, -100 ],   // -130 .. -10 dBm
+};
+
+// How long a serving-cell measurement is still evidence about NOW. A FIXED
+// ceiling, deliberately: it answers "how long is this reading still about the
+// radio" and not "how often do we poll", so raising stats_interval past it does
+// not let stale numbers live longer. Past it the signal TLV, latched or not, is
+// the only thing left to show. The poll path is unaffected either way -- it
+// overlays in the same breath as it takes the measurement.
+const SERVING_MEAS_TTL = 150;
+
+// The serving cell's entry in the NAS intra-frequency neighbour list, or null.
+// `serving_cell_id` is the PCI the modem is camped on, and the list carries one
+// row per PCI it can hear -- including that one. (Get Cell Location Info,
+// Intrafrequency LTE Info v2, TLV 0x13; libqmi 1.38 qmi-service-nas.json.)
+export function serving_lte_cell(cells) {
+	let li = cells?.lte_intra;
+	let pci = li?.serving_cell_id;
+
+	if (pci == null || !length(li?.cells))
+		return null;
+
+	for (let c in li.cells)
+		if (c?.pci == pci)
+			return c;
+
+	return null;
+};
+
+// Stamp a serving-cell row with the moment it was read. MUST be called on the
+// result as it came OFF THE WIRE: telemetry_qmi's store_cells may afterwards
+// replace the row list with a held one up to NEIGH_HOLD (30 s) old, which
+// exists to stop the UI neighbour list flickering and must not reach a signal
+// reading.
+export function serving_meas(cells, now) {
+	let cell = serving_lte_cell(cells);
+
+	return cell ? { cell, ts: now ?? time() } : null;
+};
+
+// GET_SIGNAL_INFO's LTE rssi/rsrq are LATCHED on some firmware -- they stand
+// still for hours while the radio moves. Measured on the RG502Q-EA (NR7101,
+// firmware RG502QEAACR13A04M4G_ZYXEL, 2026-09-21): across ~10 minutes the
+// 0x14 TLV held rssi -35 and rsrq -14 unchanged while the cell measurement
+// fetched in the same poll cycle moved -33.3..-31.1 and -11.6..-10.2, and
+// AT+QENG agreed with the cell measurement. The latched pair sits OUTSIDE the
+// live range, so it is an old sample and not a filtered one. `snr` in that
+// same TLV updates normally, which is what made the latch visible -- firmware
+// can cache fields individually even though they share one wire TLV.
+//
+// So the serving cell's own measurement wins where we have a recent one. It
+// costs no extra request: refresh_fast already issues GET_CELL_LOCATION_INFO
+// right after GET_SIGNAL_INFO, and it carries 0.1 dB instead of whole dB.
+//
+// WHAT THIS DOES NOT PROMISE. There is no timestamp on the signal TLV, so
+// "fresher than what it replaces" is not checkable and is not claimed. What is
+// guaranteed: the measurement was read off the wire (never the held neighbour
+// set), it is at most SERVING_MEAS_TTL old, and the caller only pairs it with a
+// signal object it actually refreshed. `snr` is never touched -- it is the one
+// field of the four that was moving.
+//
+// It NEVER fabricates an `lte` block: a modem that reports no LTE signal is
+// reporting something, and a cell list is not a substitute for it.
+export function overlay_serving_signal(sig, meas, now) {
+	if (sig?.lte == null || meas?.cell == null)
+		return sig;
+
+	// an unstamped row is refused rather than trusted forever — the age cap
+	// below is stated as a guarantee, so it has to hold for every input
+	if (meas.ts == null || ((now ?? time()) - meas.ts) > SERVING_MEAS_TTL)
+		return sig;
+
+	let lte = { ...sig.lte }, touched = false;
+
+	for (let f, win in SERVING_WINDOW) {
+		let v = meas.cell[f];
+
+		// clean_cell_metrics has already turned the -32768 sentinel into null
+		// for everything stored by telemetry_qmi; the width check keeps this
+		// helper safe for a caller that hands it an uncleaned row.
+		if (v == null || tlv.is_unavailable(v, 'i16') || v < win[0] || v > win[1])
+			continue;
+
+		lte[f] = v / 10.0;
+		touched = true;
+	}
+
+	return touched ? { ...sig, lte } : sig;
+};
 
 // format_telemetry(o): the single telemetry log line for EVERY backend, defensive
 // about per-backend shape differences so all produce the same style of line:
@@ -1888,14 +1984,19 @@ export function format_telemetry(o)
 	}
 
 	// signal: i16 metrics report -32768 when absent (filter per field). rsrp/rssi
-	// are dBm (%d); snr is 0.1 dB (%.1f).
+	// are dBm; snr is 0.1 dB (spec[1] -> scale by ten). A dBm field is whole as
+	// it comes off the signal TLV but carries one decimal once
+	// overlay_serving_signal has put the serving cell's own measurement there,
+	// so it is printed to whatever precision it actually has rather than
+	// truncated by %d.
+	let dec = (v) => (v == int(v)) ? sprintf('%d', v) : sprintf('%.1f', v);
 	let sig_part = (label, fields) => {
 		let out = [];
 
 		for (let name, spec in fields)
 			if (spec[0] != null && !tlv.is_unavailable(spec[0], 'i16'))
 				push(out, sprintf('%s %s', name,
-					spec[1] ? sprintf('%.1f', spec[0] / 10.0) : sprintf('%d', spec[0])));
+					spec[1] ? sprintf('%.1f', spec[0] / 10.0) : dec(spec[0])));
 
 		if (length(out))
 			push(parts, sprintf('%s=[%s]', label, join(' ', out)));
