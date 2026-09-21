@@ -58,9 +58,14 @@ const MAX_LINE = 1024;
 //   o.baud       default 9600
 //   o.open       injectable opener for tests; must return { fileno, read, close }
 //   o.watch      injectable fd watcher; must return { delete }
+//   o.last_error injectable errno source; taken from wwand_io only when the
+//                real opener is used, since an injected `o.open` deliberately
+//                keeps the native module out of the host tests
 //   o.now        injectable clock (seconds); defaults to CLOCK_MONOTONIC
 //   o.on_epoch   called with a unix epoch whenever the receiver reports one
-//   o.on_gone    called with a reason string when the port ends (EOF/error)
+//   o.on_gone    called with the errno string when a read FAILS. Not on a
+//                zero-byte read: with VMIN=0 that is an idle port, and the two
+//                are indistinguishable at this level (see the read loop)
 //
 // `open` and `watch` are injected together by the tests: the EOF path is the
 // one worth pinning and it lives inside the watcher's callback, so a test that
@@ -140,7 +145,7 @@ function create(o) {
 		if (self.running)
 			return true;
 
-		let open = o.open;
+		let open = o.open, last_error = o.last_error;
 
 		if (!open) {
 			// deferred: wwand_io is a native module and the host tests do not
@@ -148,8 +153,10 @@ function create(o) {
 			let qmit = require('wwand_io');
 
 			open = (path, baud) => qmit.open_tty(path, baud);
-			self._last_error = () => qmit.last_error();
+			last_error = last_error ?? (() => qmit.last_error());
 		}
+
+		self._last_error = last_error;
 
 		handle = open(self.path, o.baud ?? DEFAULT_BAUD);
 
@@ -186,12 +193,32 @@ function create(o) {
 				if (chunk === null)
 					break;
 
-				// false = EOF or a hard error: the port is GONE. ugps calls
-				// exit(-1) here and lets procd respawn it against a device
-				// that may not be back; the daemon owns that decision, so this
-				// only says so and stops.
+				// false = read() returned 0 OR failed. Those are NOT the same
+				// thing on this kind of port, and treating them alike tore the
+				// reader down within milliseconds of starting it:
+				//
+				// wwand_io.open_tty sets VMIN=0 VTIME=0 (io/src/wwand-io.c:30),
+				// so a tty with nothing to say returns 0 bytes IMMEDIATELY —
+				// that is the configuration, not an end of file. qmit_read maps
+				// both 0 and a hard error to `false` (wwand-io.c:370), and only
+				// the error path sets errno, which it clears before every read.
+				// So the errno is what tells them apart: none means idle, and a
+				// real one means the device is gone. atcmd never had to make
+				// the distinction because it treats null and false alike.
+				//
+				// Found on hardware (NR7101/RG502Q, 2026-09-21): the host tests
+				// could not, because their fake port only ever returned `false`
+				// to mean EOF — which encoded the wrong assumption.
+				//
+				// A port that vanishes without an errno is still noticed: the
+				// daemon owns the modem's lifecycle and releases the reader on
+				// hotplug removal. ugps calls exit(-1) here instead and lets
+				// procd respawn it against a device that may not be back.
 				if (chunk === false) {
-					let why = self._last_error ? self._last_error() : 'eof';
+					let why = self._last_error ? self._last_error() : null;
+
+					if (why == null || length(why) == 0)
+						break;   // nothing to read right now
 
 					self.stop();
 					self.error = why;

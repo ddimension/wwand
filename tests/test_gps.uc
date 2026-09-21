@@ -20,8 +20,20 @@ let gps = require('wwand.gps');
 
 ok(type(gps) == 'object', 'gps: module loads via require()');
 
-// A fake port. `chunks` are handed out one read() at a time; `false` is EOF,
-// which is what wwand_io.read() returns when the device is gone.
+// A fake port, modelling what wwand_io actually returns.
+//
+//   a string  bytes
+//   null      EAGAIN — nothing right now
+//   false     read() returned 0 OR failed, and THOSE ARE NOT THE SAME THING:
+//             open_tty sets VMIN=0 VTIME=0 (io/src/wwand-io.c:30), so an idle
+//             tty returns 0 bytes immediately. Only the failure sets errno.
+//
+// The first version of this helper returned `false` to mean "gone" and nothing
+// else, which is how the reader came to tear itself down on the first idle
+// read of a real port. Fixed after hardware said so, 2026-09-21.
+// The errno does NOT live here: the reader asks `last_error` for it, which the
+// tests inject separately, so putting a field on the port would only look like
+// a correlation this helper does not implement.
 function fake_port(chunks) {
 	let q = [ ...chunks ];
 
@@ -92,6 +104,27 @@ ok(flood.snapshot(201).latitude != null, 'framing: ...and the next whole sentenc
 
 // --- the port going away -----------------------------------------------------
 
+// AN IDLE PORT IS NOT A GONE PORT. This is the one the host could not have
+// told me: a real tty with nothing to say returns 0 bytes, which wwand_io
+// reports as `false` with no errno, and the reader treated it as the end of
+// the device — it started and stopped again inside the same millisecond on the
+// NR7101, 2026-09-21.
+(function() {
+	let box = {}, gone = [];
+	let port = fake_port([ '$GPGGA,082112.00,5208.613543,N,00857.854813,E,1,08,0.5,102.9,M,47.0,M,,*60\n',
+	                       false ]);   // no errno: simply nothing to read
+
+	let r = gps.create({ path: '/dev/ttyUSB1', open: () => port, watch: fake_watch(box),
+	                     last_error: () => null, on_gone: (why) => push(gone, why) });
+
+	r.start();
+	box.cb();
+
+	eq(gone, [], 'idle: an empty read is NOT the port ending');
+	eq(r.running, true, 'idle: ...and the reader keeps reading');
+	ok(r.snapshot(50).latitude != null, 'idle: the sentence before it still landed');
+})();
+
 (function() {
 	let box = {}, gone = [];
 	let port = fake_port([ '$GPGGA,082112.00,5208.613543,N,00857.854813,E,1,08,0.5,102.9,M,47.0,M,,*60\n',
@@ -101,6 +134,8 @@ ok(flood.snapshot(201).latitude != null, 'framing: ...and the next whole sentenc
 		path: '/dev/ttyUSB1',
 		open: () => port,
 		watch: fake_watch(box),
+		// an errno IS set: the read failed, the device is gone
+		last_error: () => 'No such device',
 		on_gone: (why) => push(gone, why),
 	});
 
@@ -110,7 +145,8 @@ ok(flood.snapshot(201).latitude != null, 'framing: ...and the next whole sentenc
 
 	box.cb();   // drains the sentence, then hits EOF
 
-	eq(length(gone), 1, 'eof: the caller is TOLD the port ended — ugps calls exit(-1) here');
+	eq(gone, [ 'No such device' ],
+		'eof: an errno IS the port ending, and the caller is told — ugps calls exit(-1) here');
 	eq(r.running, false, 'eof: the reader stopped itself');
 
 	// the position read before the EOF is still there: the daemon decides what
