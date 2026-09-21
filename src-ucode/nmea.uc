@@ -43,6 +43,20 @@ function num(s) {
 	return (v != v) ? null : v;
 };
 
+// Round to a stated number of decimals, half away from zero. `f` MUST be a
+// double or ucode does integer division and returns the whole part.
+//
+// This is about NOT CLAIMING PRECISION THAT IS NOT THERE, and nothing else. It
+// does not tidy the JSON: libubox prints every double with %.17g
+// (blobmsg_json.c:275, libubox 2026.07.08~7677b7a4), so 0.8 comes out as
+// 0.80000000000000004 whatever we do — 0.8 has no exact binary form and
+// rounding returns the same double. Consumers that parse the JSON (LuCI, jq,
+// python) read it back as 0.8 and print 0.8; only a human reading raw `ubus
+// call` output sees the tail.
+function round_to(v, f) {
+	return (v == null) ? null : int(v * f + ((v < 0) ? -0.5 : 0.5)) / f;
+};
+
 // ddmm.mmmm (or dddmm.mmmm) plus a hemisphere -> signed degrees. The degrees
 // are the whole hundreds, the rest is minutes; that is the format, not a
 // rounding choice.
@@ -64,8 +78,26 @@ function coord(v, hem) {
 	let out = deg + min / 60.0;
 	let lat = (hem == 'N' || hem == 'S');
 
+	// RANGE FIRST, THEN ROUND — the right order, though at eight decimals it
+	// is belt and braces rather than load-bearing, and saying so is the point.
+	// Rounding first can pull a coordinate just outside the world back in:
+	// 9000.000001 is 90.0000000167 degrees, which at SEVEN decimals rounds to
+	// exactly 90 and passes a check it should have failed. At eight it rounds
+	// to 90.00000002 and is still refused, and the wire cannot express a
+	// smaller excess — six decimal minutes are 1.67e-8 degrees. So no sentence
+	// this parser can receive reaches the hazard, which is why the test below
+	// pins the refusal and not the ordering. Raised by Codex review,
+	// 2026-09-21.
 	if (out < 0 || out > (lat ? 90 : 180))
 		return null;
+
+	// EIGHT decimals, which is about 1.1 mm — just finer than the wire. These
+	// receivers send six decimal MINUTES, and a minute is 1/60 of a degree, so
+	// the last digit on the wire is 1.67e-8 degrees, roughly 1.9 mm. Seven
+	// decimals would have thrown some of that away; the division's own
+	// fourteen would be a claim about nanometres. (It does not tidy the JSON
+	// either way — see round_to.)
+	out = round_to(out, 100000000.0);
 
 	return (hem == 'S' || hem == 'W') ? -out : out;
 };
@@ -213,7 +245,7 @@ export function create() {
 			self.speed_knots = num(f[6]);
 
 			if (self.speed_knots != null)
-				self.speed_kmh = self.speed_knots * 1.852;
+				self.speed_kmh = round_to(self.speed_knots * 1.852, 10.0);
 
 			let c = num(f[7]);
 
@@ -310,7 +342,7 @@ export function create() {
 			if (kmh != null)
 				self.speed_kmh = kmh;
 			else if (kn != null)
-				self.speed_kmh = kn * 1.852;
+				self.speed_kmh = round_to(kn * 1.852, 10.0);
 		},
 
 		ZDA: (f) => {

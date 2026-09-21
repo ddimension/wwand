@@ -35,6 +35,22 @@ eq(nmea.parse_sentence(''), null, 'sentence: empty line');
 // proprietary sentences carry no 2+3 talker/type and must not be forced into one
 eq(nmea.parse_sentence('$PQXFI,1,2*3C'), null, 'sentence: a proprietary sentence is skipped');
 
+// A COORDINATE PAST THE POLE IS REFUSED. The checksum is correct, so this
+// pins the RANGE guard and not the framing — the first version of this check
+// had a wrong checksum and passed for that reason instead.
+//
+// It does NOT pin that the range is tested before the rounding, and the
+// comment at coord() says why: at eight decimals no sentence the wire can
+// express rounds its way back inside. The order is still right, and cheap.
+(function() {
+	let p = nmea.create();
+
+	ok(nmea.parse_sentence('$GPGLL,9000.000001,N,00857.854813,E,082112.00,A,A*60') != null,
+	   'range: (the sentence itself is well-formed — the checksum is not what refuses it)');
+	p.feed('$GPGLL,9000.000001,N,00857.854813,E,082112.00,A,A*60', 1);
+	eq(p.snapshot(1).latitude, null, 'range: a latitude past the pole is refused');
+})();
+
 // --- a real fix (192.168.203.242) -------------------------------------------
 
 let p = nmea.create();
@@ -48,6 +64,15 @@ let f = p.snapshot(100);
 // ddmm.mmmmmm -> degrees: 52 + 08.613543/60, not 52.08...
 ok(f.latitude > 52.14355 && f.latitude < 52.14356, 'fix: latitude is degrees, not degrees-and-minutes');
 ok(f.longitude > 8.96424 && f.longitude < 8.96425, 'fix: longitude likewise');
+// EIGHT DECIMALS, not fourteen. `deg + minutes/60` produces as many digits as
+// a double has. The wire carries six decimal MINUTES, and a minute is 1/60 of
+// a degree, so its last digit is 1.67e-8 degrees — about 1.9 mm. Eight
+// decimals (1.1 mm) is just finer than that; seven would have thrown some of
+// the receiver's own resolution away. (It does not tidy the JSON either way:
+// libubox prints doubles with %.17g — blobmsg_json.c:275.)
+eq(sprintf('%.10f', f.latitude), '52.1435590500', 'fix: latitude keeps eight decimals, not fourteen');
+eq(sprintf('%.10f', f.longitude), '8.9642468800', 'fix: longitude likewise');
+
 eq(f.elevation, 102.9, 'fix: altitude above the geoid');
 eq(f.geoid_separation, 47.0, 'fix: ...and the separation, which is a different number');
 eq(f.fix, '3d', 'fix: GSA mode 3 is a 3D fix');
@@ -204,6 +229,14 @@ eq(b.age, 2, 'blink: and the age keeps counting from the last real fix');
 
 	eq(before.satellites_used, 8, 'lose: eight satellites while there is a fix');
 	eq(before.speed_kmh, 10.2, 'lose: ...and a speed');
+	// km/h is COMPUTED from knots, so it is the other value that would carry
+	// more digits than the wire justifies: 5.5 x 1.852 is 10.186
+	let moving = nmea.create();
+
+	moving.feed('$GPRMC,082112.00,A,5208.613543,N,00857.854813,E,5.5,,210926,,,A,V*0C', 1);
+	eq(moving.snapshot(1).speed_knots, 5.5, 'lose: knots come off the wire as they are');
+	eq(sprintf('%.6f', moving.snapshot(1).speed_kmh), '10.200000',
+	   'lose: ...and km/h is rounded to the tenth, not to 10.186000000000001');
 
 	// the RECEIVER says the solution is gone
 	p.feed('$GPRMC,082113.00,V,,,,,,,210926,,,N,V*00', 110);
