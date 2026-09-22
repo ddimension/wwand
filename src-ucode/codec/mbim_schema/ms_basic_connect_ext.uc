@@ -166,15 +166,20 @@ const F_NEIGH_LTE = [
 	[ 'provider_id', 'str' ], [ 'cell_id', 'u32' ], [ 'earfcn', 'u32' ],
 	[ 'pci', 'u32' ], [ 'tac', 'u32' ], [ 'rsrp', 'i32' ], [ 'rsrq', 'i32' ],
 ];
+// NR metrics are UNSIGNED here, and that is not a detail: they are coded
+// indices, not dB (see nr_metric in mbim_backend.uc). Reading them signed also
+// destroys the unknown marker, which is 0xFFFFFFFF (libmbim 1.32.0,
+// mbimcli-ms-basic-connect-extensions.c:1214-1219,1410-1412). LTE's stay signed
+// — those really are dBm/dB, with the marker cast to -1 (:1207-1212,1346-1347).
 const F_SERVING_NR = [
 	[ 'provider_id', 'str' ], [ 'nci', 'u64' ], [ 'pci', 'u32' ],
-	[ 'nrarfcn', 'u32' ], [ 'tac', 'u32' ], [ 'rsrp', 'i32' ], [ 'rsrq', 'i32' ],
-	[ 'sinr', 'i32' ], [ 'timing_advance', 'u64' ],
+	[ 'nrarfcn', 'u32' ], [ 'tac', 'u32' ], [ 'rsrp', 'u32' ], [ 'rsrq', 'u32' ],
+	[ 'sinr', 'u32' ], [ 'timing_advance', 'u64' ],
 ];
 const F_NEIGH_NR = [
 	[ 'system_sub_type', 'u32' ], [ 'provider_id', 'str' ], [ 'cell_id', 'str' ],
-	[ 'pci', 'u32' ], [ 'tac', 'u32' ], [ 'rsrp', 'i32' ], [ 'rsrq', 'i32' ],
-	[ 'sinr', 'i32' ],
+	[ 'pci', 'u32' ], [ 'tac', 'u32' ], [ 'rsrp', 'u32' ], [ 'rsrq', 'u32' ],
+	[ 'sinr', 'u32' ],
 ];
 
 // Base Stations Info (v3) response fixed part — 2 scalars then a run of 8-byte

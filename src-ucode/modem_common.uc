@@ -1951,6 +1951,13 @@ export function format_telemetry(o)
 	if (reg.roaming != null)
 		push(parts, sprintf('roaming=%s', reg.roaming ? 'yes' : 'no'));
 
+	// A missing metric is OMITTED, not printed as 0.0. `null / 10.0` is 0 in
+	// ucode, so an unavailable reading used to be published as a perfect one —
+	// which is how a decoder that correctly refuses a value (the MBIM unknown
+	// markers, ddimension/wwand#30) would surface as "rsrp 0.0" rather than as
+	// silence. Raised by Codex review, 2026-09-22.
+	let m = (label, v) => (v != null) ? sprintf(' %s %.1f', label, v / 10.0) : '';
+
 	let lte = cells?.lte_intra;
 
 	if (lte) {
@@ -1968,7 +1975,7 @@ export function format_telemetry(o)
 
 		push(parts, sprintf('lte=[plmn %s tac %d gci %d earfcn %d pci %d%s%s%s neigh %d]',
 			lte.plmn, lte.tac, lte.global_cell_id, lte.earfcn, lte.serving_cell_id, band, bw,
-			serving ? sprintf(' rsrp %.1f rsrq %.1f', serving.rsrp / 10.0, serving.rsrq / 10.0) : '',
+			serving ? (m('rsrp', serving.rsrp) + m('rsrq', serving.rsrq)) : '',
 			length(lte.cells ?? [])));
 	}
 
@@ -1978,9 +1985,9 @@ export function format_telemetry(o)
 		let sn = cells?.serving?.nr;
 		let band = (sn?.band != null) ? sprintf(' band %s', sn.band) : '';
 
-		push(parts, sprintf('nr5g=[plmn %s tac %d pci %d arfcn %d%s rsrp %.1f rsrq %.1f snr %.1f]',
+		push(parts, sprintf('nr5g=[plmn %s tac %d pci %d arfcn %d%s%s%s%s]',
 			nr.plmn, nr.tac, nr.pci, cells?.nr5g_arfcn ?? 0, band,
-			nr.rsrp / 10.0, nr.rsrq / 10.0, nr.snr / 10.0));
+			m('rsrp', nr.rsrp), m('rsrq', nr.rsrq), m('snr', nr.snr)));
 	}
 
 	// signal: i16 metrics report -32768 when absent (filter per field). rsrp/rssi

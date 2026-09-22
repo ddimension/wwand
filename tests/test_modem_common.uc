@@ -740,6 +740,44 @@ ok(index(l, 'plmn=262/02 (vodafone)') >= 0, 'ft-qmi: plmn mcc/mnc');
 ok(index(l, 'lte=[plmn 26202 tac 45195') >= 0, 'ft-qmi: cell block');
 ok(index(l, 'sig_lte=[rssi -42 rsrp -71 snr 7.2]') >= 0, 'ft-qmi: per-tech signal');
 
+// A METRIC THAT IS NOT AVAILABLE MUST NOT BE PRINTED AS ZERO. `null / 10.0` is
+// 0 in ucode, so before this the refused MBIM readings of ddimension/wwand#30
+// came out as a flawless -0.0 dBm. Both blocks, because both divide.
+let nr_full = mc.format_telemetry({
+	reg: { radio_ifs: [] },
+	cells: { nr5g_arfcn: 632448, nr5g_cell: { plmn: '26201', tac: 9, pci: 7,
+	         rsrp: -900, rsrq: -110, snr: 200 } }, config: {},
+});
+ok(index(nr_full, 'nr5g=[plmn 26201 tac 9 pci 7 arfcn 632448 rsrp -90.0 rsrq -11.0 snr 20.0]') >= 0,
+	'ft-nr: all three metrics present');
+
+let nr_partial = mc.format_telemetry({
+	reg: { radio_ifs: [] },
+	cells: { nr5g_arfcn: 632448, nr5g_cell: { plmn: '26201', tac: 9, pci: 7,
+	         rsrp: -900, rsrq: null, snr: null } }, config: {},
+});
+ok(index(nr_partial, 'nr5g=[plmn 26201 tac 9 pci 7 arfcn 632448 rsrp -90.0]') >= 0,
+	'ft-nr: a null metric is omitted, not rendered 0.0');
+ok(index(nr_partial, 'rsrq') < 0, 'ft-nr: ...and its label goes with it');
+
+let nr_none = mc.format_telemetry({
+	reg: { radio_ifs: [] },
+	cells: { nr5g_arfcn: 632448, nr5g_cell: { plmn: '26201', tac: 9, pci: 7,
+	         rsrp: null, rsrq: null, snr: null } }, config: {},
+});
+ok(index(nr_none, 'nr5g=[plmn 26201 tac 9 pci 7 arfcn 632448]') >= 0,
+	'ft-nr: identity still published when no metric is readable');
+
+// the LTE block divides the same way and was exposed the same way
+let lte_none = mc.format_telemetry({
+	reg: { radio_ifs: [] },
+	cells: { lte_intra: { plmn: '26202', tac: 45195, global_cell_id: 13102082,
+	         earfcn: 6300, serving_cell_id: 334,
+	         cells: [ { pci: 334, rsrp: null, rsrq: null } ] } }, config: {},
+});
+ok(index(lte_none, 'rsrp 0.0') < 0, 'ft-lte: an unreadable serving cell prints no metrics');
+ok(index(lte_none, 'neigh 1]') >= 0, 'ft-lte: ...and the block still closes correctly');
+
 // MBIM: no radio_ifs, plmn id, tech from dsd_status, flat signal
 let mbim = {
 	reg: { roaming: true, plmn: { id: '26201', description: 'Telekom' } },

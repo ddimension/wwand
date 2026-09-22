@@ -78,10 +78,19 @@ function nr_serving_struct(provider, nci, pci, nrarfcn, tac, rsrp, rsrq, sinr) {
 
 // Base Stations Info (v3): 96-byte fixed part (SystemType, SystemSubType, then
 // 11 ms-struct/array pointers) + appended data regions.
-function build_base_stations() {
-	let lte_serv = cell_struct('26201', [ 12345678, 1300, 42, 0x1234, -95, -10, 0 ]);
+// m: optional metric overrides. The NR triple on the wire is CODED INDICES,
+// not dB — rsrp 66 means -156+66 = -90 dBm, rsrq 32 means -43+32 = -11 dB,
+// sinr 43 means -23+43 = 20 dB (libmbim 1.32.0, mbimcli-ms-basic-connect-
+// extensions.c:1410-1412). The LTE pair in the same message is signed dBm
+// (:1346-1347). Two conventions in one message is the whole trap, so the
+// fixture spells both out rather than echoing whatever the decoder does.
+function build_base_stations(m) {
+	m ??= {};
+	let lte_serv = cell_struct('26201', [ 12345678, 1300, 42, 0x1234,
+		m.lte_rsrp ?? -95, m.lte_rsrq ?? -10, 0 ]);
 	let lte_neigh = cell_struct('', [ 0, 1300, 99, 0, -105, -14 ]);
-	let nr_serv = nr_serving_struct('26201', 0x0000000100000002, 7, 632448, 0x5678, -80, -11, 25);
+	let nr_serv = nr_serving_struct('26201', 0x0000000100000002, 7, 632448, 0x5678,
+		m.nr_rsrp ?? 66, m.nr_rsrq ?? 32, m.nr_sinr ?? 43);
 
 	let base = 96;
 	let lte_serv_off = base;
@@ -346,19 +355,21 @@ function s_signal(next) {
 	let sig_schema = { service: bc.service,
 		commands: { SIGNAL_STATE_V2: bc.commands.SIGNAL_STATE_V2 } };
 	let raw = build_signal(20, [   // rssi 20 -> -73 dBm
-		{ rsrp: 100, snr: 60, system_type: ext.DATA_CLASS_LTE },     // -56 dBm, 7.0 dB
-		{ rsrp: 90,  snr: 80, system_type: ext.DATA_CLASS_5G_SA },   // -66 dBm, 17.0 dB
+		// index 1 is the FLOOR, not one step above it: dBm = coded-157 and
+		// dB = -23.5 + coded/2 (libmbim 1.32.0, mbimcli-basic-connect.c:1882,1887)
+		{ rsrp: 100, snr: 60, system_type: ext.DATA_CLASS_LTE },     // -57 dBm, 6.5 dB
+		{ rsrp: 90,  snr: 80, system_type: ext.DATA_CLASS_5G_SA },   // -67 dBm, 16.5 dB
 	]);
 	let mc = make_mc(sig_schema, { SIGNAL_STATE_V2: { __raw: raw } });
 
 	mc.open(() => backend.get_signal(mc, (sig) => {
 		ok(sig != null, 'signal: decoded');
 		eq(sig.lte.rssi, -73, 'signal: lte rssi dBm (index 20)');
-		eq(sig.lte.rsrp, -56, 'signal: lte rsrp dBm (coded 100)');
-		eq(sig.lte.snr, 70, 'signal: lte snr 0.1 dB (coded 60)');
+		eq(sig.lte.rsrp, -57, 'signal: lte rsrp dBm (coded 100)');
+		eq(sig.lte.snr, 65, 'signal: lte snr 0.1 dB (coded 60)');
 		eq(sig.lte.rsrq, null, 'signal: lte rsrq absent in MBIM v2');
-		eq(sig.nr5g.rsrp, -66, 'signal: nr5g rsrp dBm (coded 90)');
-		eq(sig.nr5g.snr, 170, 'signal: nr5g snr 0.1 dB (coded 80)');
+		eq(sig.nr5g.rsrp, -67, 'signal: nr5g rsrp dBm (coded 90)');
+		eq(sig.nr5g.snr, 165, 'signal: nr5g snr 0.1 dB (coded 80)');
 		next();
 	}));
 }
@@ -452,6 +463,62 @@ function s_cells_v1(next) {
 	});
 }
 
+// The top bucket is a READING — "at or above the ceiling" — and the formula
+// covers it: -157+127 = -30 dBm, 127*0.5-23.5 = 40.0 dB. libmbim's CLI prints
+// 'unknown' for RSRP 127 (mbimcli-basic-connect.c:1879), which on a router
+// would blank the bars exactly when the signal is strongest. Out of the index
+// space, and the sentinel, are the only things that are not readings.
+function s_signal_saturated(next) {
+	let sig_schema = { service: bc.service,
+		commands: { SIGNAL_STATE_V2: bc.commands.SIGNAL_STATE_V2 } };
+	let raw = build_signal(20, [
+		{ rsrp: 127, snr: 127, system_type: ext.DATA_CLASS_5G_SA },
+	]);
+	let mc = make_mc(sig_schema, { SIGNAL_STATE_V2: { __raw: raw } });
+
+	mc.open(() => backend.get_signal(mc, (sig) => {
+		ok(sig != null, 'signal saturated: still answers');
+		eq(sig.nr5g?.rsrp, -30, 'signal saturated: rsrp 127 is -30 dBm, not unknown');
+		eq(sig.nr5g?.snr, 400, 'signal saturated: snr 127 is 40.0 dB, not unknown');
+		next();
+	}));
+}
+
+// ...whereas these are not readings at all
+function s_signal_unusable(next) {
+	let sig_schema = { service: bc.service,
+		commands: { SIGNAL_STATE_V2: bc.commands.SIGNAL_STATE_V2 } };
+	let raw = build_signal(20, [
+		{ rsrp: 0xFFFFFFFF, snr: 128, system_type: ext.DATA_CLASS_5G_SA },
+	]);
+	let mc = make_mc(sig_schema, { SIGNAL_STATE_V2: { __raw: raw } });
+
+	mc.open(() => backend.get_signal(mc, (sig) => {
+		eq(sig.nr5g?.rsrp, null, 'signal unusable: 0xFFFFFFFF is the unknown marker');
+		eq(sig.nr5g?.snr, null, 'signal unusable: 128 is outside the 7-bit index space');
+		next();
+	}));
+}
+
+// A coded index is seven bits wide. The H5000M of ddimension/wwand#30 puts
+// signed physical values in these fields, which arrive as words near 2^32 —
+// those must not become astronomic signal levels just because they are not the
+// 0xFFFFFFFF sentinel.
+function s_cells_out_of_range(next) {
+	let raw = build_base_stations({
+		nr_rsrp: 0xFFFFFFF5, nr_rsrq: 0xFFFFFFB6, nr_sinr: 128,
+	});
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: raw } });
+
+	mc.open(() => backend.get_cells(mc, (cells) => {
+		eq(cells.nr5g_cell?.pci, 7, 'cells out of range: identity still decodes');
+		eq(cells.nr5g_cell?.rsrp, null, 'cells out of range: 0xFFFFFFF5 is not a reading');
+		eq(cells.nr5g_cell?.rsrq, null, 'cells out of range: 0xFFFFFFB6 is not a reading');
+		eq(cells.nr5g_cell?.snr, null, 'cells out of range: coded 128 exceeds the index space');
+		next();
+	}));
+}
+
 // get_cells: LTE serving + 1 neighbour + NR serving
 function s_cells(next) {
 	// THE DEFAULT IS v1, because wwand asks for no MBIMEx version — see the
@@ -477,6 +544,34 @@ function s_cells(next) {
 		eq(li.cells[1].rsrp, -1050, 'cells: neighbour rsrp 0.1 dB');
 		eq(cells.nr5g_arfcn, 632448, 'cells: nr arfcn');
 		eq(cells.nr5g_cell?.pci, 7, 'cells: nr pci');
+		// the point of this suite: NR is the coded-index convention, LTE is not
+		eq(cells.nr5g_cell?.rsrp, -900, 'cells: nr rsrp coded 66 -> -90 dBm (x10)');
+		eq(cells.nr5g_cell?.rsrq, -110, 'cells: nr rsrq coded 32 -> -11 dB (x10)');
+		eq(cells.nr5g_cell?.snr, 200, 'cells: nr sinr coded 43 -> 20 dB (x10)');
+		next();
+	}));
+}
+
+// The unknown marker is a different bit pattern per convention, and both were
+// being published as readings: NR carries 0xFFFFFFFF unsigned, LTE the same
+// word read signed, i.e. -1 (libmbim 1.32.0, mbimcli-ms-basic-connect-
+// extensions.c:1214-1219 vs :1207-1212).
+function s_cells_unknown(next) {
+	let raw = build_base_stations({
+		lte_rsrp: -1, lte_rsrq: -1,
+		nr_rsrp: 0xFFFFFFFF, nr_rsrq: 0xFFFFFFFF, nr_sinr: 0xFFFFFFFF,
+	});
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: raw } });
+
+	mc.open(() => backend.get_cells(mc, (cells) => {
+		ok(cells != null, 'cells unknown: still decodes the cell identity');
+		eq(cells.lte_intra?.cells[0].pci, 42, 'cells unknown: lte pci survives');
+		eq(cells.lte_intra?.cells[0].rsrp, null, 'cells unknown: lte rsrp -1 is not a reading');
+		eq(cells.lte_intra?.cells[0].rsrq, null, 'cells unknown: lte rsrq -1 is not a reading');
+		eq(cells.nr5g_cell?.pci, 7, 'cells unknown: nr pci survives');
+		eq(cells.nr5g_cell?.rsrp, null, 'cells unknown: nr rsrp 0xFFFFFFFF is not a reading');
+		eq(cells.nr5g_cell?.rsrq, null, 'cells unknown: nr rsrq 0xFFFFFFFF is not a reading');
+		eq(cells.nr5g_cell?.snr, null, 'cells unknown: nr sinr 0xFFFFFFFF is not a reading');
 		next();
 	}));
 }
@@ -661,7 +756,8 @@ function s_at_over_mbim_compal(next) {
 
 // --- runner ------------------------------------------------------------------
 
-let scenarios = [ s_signal, s_cells, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
+let scenarios = [ s_signal, s_signal_saturated, s_signal_unusable, s_cells, s_cells_unknown,
+		  s_cells_out_of_range, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
 	s_at_over_mbim, s_at_over_mbim_compal ];
 let i = 0;
 

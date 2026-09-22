@@ -15,7 +15,10 @@
 //   - self.signal  (QMI GET_SIGNAL_INFO): RSRP/RSSI in whole dBm, SNR in 0.1 dB.
 //     MBIM v2 Signal State reports CODED indices -> converted here.
 //   - self.cells   (QMI GET_CELL_LOCATION_INFO): every metric in 0.1 dB units.
-//     MBIM Base Stations Info reports actual dBm/dB (signed) -> scaled x10 here.
+//     MBIM Base Stations Info uses TWO conventions in one message: LTE metrics
+//     are signed dBm/dB, NR metrics are unsigned coded indices. Both are
+//     converted to 0.1 dB units here. Reading NR with LTE's rule is what
+//     ddimension/wwand#30 turned up.
 //
 // There is no native MBIM carrier-aggregation CID, so there is no get_ca here —
 // CA stays passthrough/AT in the core.
@@ -409,24 +412,69 @@ const MAX_CELLS = 16;
 
 // MBIM coded-value conversions (MS-MBIM signal coding):
 //   RSSI  index 0..31 -> dBm = -113 + 2*index   (99 = unknown)
-//   RSRP  index 0..126 -> dBm = index - 156      (0xFFFFFFFF = unknown)
-//   SNR   index 0..127 -> dB  = index/2 - 23     (0xFFFFFFFF = unknown)
+//   RSRP  index 0..127 -> dBm = index - 157      (0xFFFFFFFF = unknown)
+//   SNR   index 0..127 -> dB  = index/2 - 23.5   (0xFFFFFFFF = unknown)
+// Both are 3GPP report buckets, so index 0 is "below the floor" and the top
+// index is "at or above the ceiling" — a saturated reading, NOT a missing one.
 const UNKNOWN_U32 = 0xFFFFFFFF;
+
+// Base Stations Info NR offsets — WHOLE dB steps (libmbim 1.32.0,
+// mbimcli-ms-basic-connect-extensions.c:1410-1412). Do NOT share these with
+// the Signal State helpers below: that message codes SNR in HALF-dB steps and
+// has no RSRQ at all, so the only thing genuinely common between the two is
+// the index space itself. Raised by Codex review, 2026-09-22.
+const NR_RSRP_OFFSET = -156;
+const NR_RSRQ_OFFSET = -43;
+const NR_SINR_OFFSET = -23;
+
+// Ceiling on the index itself, not a plausibility bound on the dB it maps to.
+// These are 7-bit report indices — libmbim bounds the Signal State ones at
+// exactly that width (mbimcli-basic-connect.c:1879,1884) though it leaves the
+// cell ones unbounded — so a word above 127 is not a reading in any of the
+// three mappings, whatever the sentinel says. (The cell offsets below are NOT
+// the Signal State encoding, so this is the width they share and not much
+// else.) The H5000M in ddimension/wwand#30 sends signed physical values in
+// these fields, which as unsigned words land near 2^32 and would otherwise be
+// published as astronomic signal levels. Raised by Codex review, 2026-09-22.
+const NR_CODED_MAX = 127;
+
+// LTE cell metrics are read signed, so the 0xFFFFFFFF unknown arrives as -1
+const LTE_METRIC_UNKNOWN = -1;
 
 function rssi_dbm(idx)
 {
 	return (idx != null && idx != bc.RSSI_UNKNOWN) ? (-113 + 2 * idx) : null;
 }
 
+// Signal State RSRP. The index is OFF BY ONE from the obvious reading: 3GPP's
+// report mapping spends index 0 on "below the floor", so index 1 IS the floor
+// (-156 dBm) and the dBm is coded-157, not coded-156. That convention is why
+// the two encodings in this file disagree by one step and must stay apart.
+// libmbim spells the offset out — `-157 + rsrp` (1.32.0,
+// mbimcli-basic-connect.c:1882) — and wwand had -156, so every MBIM RSRP read
+// one dB optimistic. Found while checking the cell decoders for
+// ddimension/wwand#30, 2026-09-22.
+//
+// What is NOT copied from there is the guard beside it, `if (rsrp >= 127)
+// unknown` (:1879). 127 is the top bucket, "at or above -30 dBm" — and -157+127
+// is exactly -30, so libmbim's own formula covers it. Collapsing it to unknown
+// is a display choice in a CLI; on a router it would blank the signal bars at
+// the moment the signal is best. The domain check below rejects the sentinel
+// and anything outside the 7-bit index space, and nothing else. Raised by Codex
+// review, which was right to push back on my first attempt.
 function rsrp_dbm(coded)
 {
-	return (coded != null && coded != UNKNOWN_U32) ? (coded - 156) : null;
+	return (coded != null && coded <= NR_CODED_MAX) ? (coded - 157) : null;
 }
 
-// SNR in 0.1 dB units to match QMI self.signal snr (rendered /10 by the daemon)
+// Signal State SNR in 0.1 dB units to match QMI self.signal snr (rendered /10
+// by the daemon). Same off-by-one, in half-dB steps: `-23.5 + snr * 0.5`
+// (mbimcli-basic-connect.c:1887), top bucket 127 = 40.0 dB. Note this is NOT
+// the Base Stations Info SINR encoding, which steps in whole dB — see
+// NR_SINR_OFFSET.
 function snr_tenths(coded)
 {
-	return (coded != null && coded != UNKNOWN_U32) ? (coded * 5 - 230) : null;
+	return (coded != null && coded <= NR_CODED_MAX) ? (coded * 5 - 235) : null;
 }
 
 // "26201" / "262001" -> "262/01" (matching the QMI 'plmn' decode: "mcc/mnc")
@@ -479,14 +527,42 @@ export function get_signal(mc, cb)
 	});
 };
 
-// map one MBIM LTE cell (serving or neighbour, metrics in actual dBm/dB) into a
-// QMI lte_intra.cells[] entry (metrics in 0.1 dB units; rssi/srxlev unavailable)
+// LTE cell metrics: signed, already in dBm/dB, unknown = 0xFFFFFFFF read
+// signed, i.e. -1 (libmbim 1.32.0, mbimcli-ms-basic-connect-extensions.c:
+// 1207-1212 PRINT_VALIDATED_INT compares against (gint32)invalid, applied to
+// rsrp/rsrq at :1346-1347). -1 is not a reading a cell can produce anyway —
+// RSRQ tops out near -3 dB — but it was being published as one.
+function lte_metric(v)
+{
+	return (v != null && v != LTE_METRIC_UNKNOWN) ? v * 10 : null;
+}
+
+// NR cell metrics are NOT dBm. They are coded indices with a fixed offset —
+// RSRP = v-156 dBm, RSRQ = v-43 dB, SINR = v-23 dB, unknown = 0xFFFFFFFF
+// (libmbim 1.32.0, mbimcli-ms-basic-connect-extensions.c:1410-1412 via
+// PRINT_VALIDATED_SCALED_UINT at :1214-1219). LTE in the same message is the
+// other convention (:1346), which is how this came to be read as dBm for both.
+//
+// The signal path in this very file already had it right (rsrp_dbm/snr_tenths
+// above decode SIGNAL_STATE's NR indices) — so wwand was publishing the same
+// modem's NR RSRP two different ways depending on which message it came from.
+// Reported in ddimension/wwand#30 by miku2365 (H5000M), 2026-09-22.
+function nr_metric(v, offset)
+{
+	if (v == null || v == UNKNOWN_U32 || v > NR_CODED_MAX)
+		return null;
+
+	return (v + offset) * 10;
+}
+
+// map one MBIM LTE cell (serving or neighbour) into a QMI lte_intra.cells[]
+// entry (metrics in 0.1 dB units; rssi/srxlev unavailable)
 function lte_cell(c)
 {
 	return {
 		pci:    c.pci,
-		rsrq:   (c.rsrq != null) ? c.rsrq * 10 : null,
-		rsrp:   (c.rsrp != null) ? c.rsrp * 10 : null,
+		rsrq:   lte_metric(c.rsrq),
+		rsrp:   lte_metric(c.rsrp),
 		rssi:   null,
 		srxlev: null,
 	};
@@ -532,9 +608,9 @@ export function get_cells(mc, cb)
 				tac:            nr.tac,
 				global_cell_id: nr.nci,
 				pci:            nr.pci,
-				rsrq:           (nr.rsrq != null) ? nr.rsrq * 10 : null,
-				rsrp:           (nr.rsrp != null) ? nr.rsrp * 10 : null,
-				snr:            (nr.sinr != null) ? nr.sinr * 10 : null,
+				rsrq:           nr_metric(nr.rsrq, NR_RSRQ_OFFSET),
+				rsrp:           nr_metric(nr.rsrp, NR_RSRP_OFFSET),
+				snr:            nr_metric(nr.sinr, NR_SINR_OFFSET),
 			};
 		}
 

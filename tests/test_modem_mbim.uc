@@ -89,7 +89,9 @@ function nr_serving_struct(provider, nci, pci, nrarfcn, tac, rsrp, rsrq, sinr) {
 function build_base_stations() {
 	let lte_serv = cell_struct('26201', [ 12345678, 1300, 42, 0x1234, -95, -10, 0 ]);
 	let lte_neigh = cell_struct('', [ 0, 1300, 99, 0, -105, -14 ]);
-	let nr_serv = nr_serving_struct('26201', 0x0000000100000002, 7, 632448, 0x5678, -80, -11, 25);
+	// coded indices, not dB: 66 -> -90 dBm, 32 -> -11 dB, 43 -> 20 dB (libmbim
+	// 1.32.0, mbimcli-ms-basic-connect-extensions.c:1410-1412)
+	let nr_serv = nr_serving_struct('26201', 0x0000000100000002, 7, 632448, 0x5678, 66, 32, 43);
 
 	let base = 96;
 	let lte_serv_off = base;
@@ -160,8 +162,8 @@ function handlers() {
 		// BASE_STATIONS_INFO is CID 11 in the ext service — the mock routes by
 		// (service, cid) so both coexist)
 		SIGNAL_STATE_V2: { __raw: build_signal(20, [
-			{ rsrp: 100, snr: 60, system_type: ext.DATA_CLASS_LTE },    // -56 dBm, 7.0 dB
-			{ rsrp: 90,  snr: 80, system_type: ext.DATA_CLASS_5G_SA },  // -66 dBm, 17.0 dB
+			{ rsrp: 100, snr: 60, system_type: ext.DATA_CLASS_LTE },    // -57 dBm, 6.5 dB
+			{ rsrp: 90,  snr: 80, system_type: ext.DATA_CLASS_5G_SA },  // -67 dBm, 16.5 dB
 		]) },
 		BASE_STATIONS_INFO: { __raw: build_base_stations() },
 	};
@@ -733,9 +735,9 @@ function assert_telemetry() {
 	// signal (fast watch loop; native SIGNAL_STATE_V2) — QMI GET_SIGNAL_INFO shape
 	ok(modem.signal?.lte != null, 'signal: lte block populated via native backend');
 	eq(modem.signal.lte.rssi, -73, 'signal: lte rssi dBm (index 20)');
-	eq(modem.signal.lte.rsrp, -56, 'signal: lte rsrp dBm (coded 100)');
-	eq(modem.signal.lte.snr, 70, 'signal: lte snr 0.1 dB (coded 60)');
-	eq(modem.signal.nr5g?.rsrp, -66, 'signal: nr5g rsrp dBm (coded 90)');
+	eq(modem.signal.lte.rsrp, -57, 'signal: lte rsrp dBm (coded 100)');
+	eq(modem.signal.lte.snr, 65, 'signal: lte snr 0.1 dB (coded 60)');
+	eq(modem.signal.nr5g?.rsrp, -67, 'signal: nr5g rsrp dBm (coded 90)');
 
 	// cells (fast watch loop; native BASE_STATIONS_INFO) — QMI cell-location
 	// shape, read with the v3 offsets this session negotiates.
@@ -746,6 +748,8 @@ function assert_telemetry() {
 	eq(length(modem.cells.lte_intra.cells), 2, 'cells: serving + 1 neighbour');
 	eq(modem.cells.nr5g_arfcn, 632448, 'cells: nr arfcn');
 	eq(modem.cells.nr5g_cell?.pci, 7, 'cells: nr pci');
+	eq(modem.cells.nr5g_cell?.rsrp, -900, 'cells: nr rsrp coded 66 -> -90 dBm (x10)');
+	eq(modem.cells.nr5g_cell?.snr, 200, 'cells: nr sinr coded 43 -> 20 dB (x10)');
 
 	// data-system mode (slow tick; native register-state class mask)
 	ok(modem.dsd_status != null, 'dsd_status: populated via native backend');
