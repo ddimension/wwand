@@ -837,7 +837,8 @@ Quectel — while `option gnss`, the one that does, had no UI at all.
 3. `tools/check-packaging.py --makefile ../repository/wwand/Makefile` — and again
    with `--makefile <pkgs>/net/wwand/Makefile --tarball <release>.tar.gz`.
 4. The LuCI repos, which have no runner of their own — in `luci-app-wwand`:
-   `node tools/test-format.js`, `node tools/check-detached-methods.js`
+   `node tools/test-format.js`, `node tools/test-modemsid.js`,
+   `node tools/check-detached-methods.js`
    (and `--self-test`, which proves that checker still recognises the shapes it
    claims), `tools/check-xss.py`, and `node --check` over every shipped `.js`; in
    `luci-proto-wwand` the `node --check`. Step 4 exists because the frontend

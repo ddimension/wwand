@@ -184,6 +184,51 @@ export function create(opts)
 	};
 
 
+	// WHAT THE MODEM SAYS ABOUT ITS TWO RADIO SWITCHES, from every message that
+	// carries them. The SET response is the same HwRadioState/SwRadioState pair
+	// as the query and the notification (libmbim 1.32.0,
+	// mbim-service-basic-connect.json "Radio State": the set carries RadioState
+	// alone, its response carries both) — and all four writers here threw it
+	// away, keeping only `serr`.
+	//
+	// So a modem that ships with its software radio off, which step_register
+	// then switches on, went on reporting the reading from BEFORE the switch:
+	// `radio: { hw: 1, sw: 0 }` and "Radio off (software)" in LuCI on a modem
+	// that was registered and carrying traffic. Reported by obsy on an MBIM
+	// modem, ddimension/wwand#38, 2026-09-22. The indication cannot repair it —
+	// it fires on a change the modem chooses to report, and a change we
+	// commanded ourselves is exactly the one that may not come.
+	//
+	// Storage only, plus the one note that must not outlive its cause. Setting
+	// a "radio disabled" note is left to the sites that can tell a switch
+	// somebody moved from a cycle we are running ourselves.
+	//
+	// NOT CALLED FOR THE OFF HALF of the three off->on cycles below, though
+	// that answer is just as valid. LuCI renders `radio` directly and paints
+	// an amber "off (software)" the moment either switch reads 0
+	// (luci-app-wwand status.js:538) — so publishing a state we are, by
+	// construction, about to leave within `settle` turns an accurate instant
+	// into the very message #38 was about. Nothing is lost by skipping it: if
+	// the ON half never runs, it is because the modem was torn down, and
+	// teardown nulls `radio` outright. Raised by Codex review, 2026-09-22.
+	//
+	// Returns whether the answer was usable, so a caller can tell "the radio
+	// is on" from "that message told us nothing".
+	let note_radio = (data) => {
+		if (data?.hw_radio_state == null || data?.sw_radio_state == null)
+			return false;
+
+		self.radio = { hw: data.hw_radio_state, sw: data.sw_radio_state };
+
+		if (data.hw_radio_state != bc.RADIO_STATE_OFF &&
+		    data.sw_radio_state != bc.RADIO_STATE_OFF &&
+		    self.control_note != null &&
+		    index(self.control_note, 'radio disabled') == 0)
+			self.control_note = null;
+
+		return true;
+	};
+
 	let fail = modem_common.make_fail(self, {
 		log: log, timing: self.timing, emit: emit,
 		set_retry_timer: (t) => retry_timer = t,
@@ -203,7 +248,8 @@ export function create(opts)
 				{ radio_state: bc.RADIO_STATE_OFF }, () => {
 					settle_timer = uloop.timer(self.timing.settle, () => {
 						self.mbim.command(bc, 'RADIO_STATE', 'set',
-							{ radio_state: bc.RADIO_STATE_ON }, () => {
+							{ radio_state: bc.RADIO_STATE_ON }, (e2, d2) => {
+								note_radio(d2);
 								settle_timer = uloop.timer(self.timing.settle, done);
 							});
 					});
@@ -822,10 +868,15 @@ export function create(opts)
 		// (init already switches it back on), a HARDWARE off is a switch
 		// somebody moved and wwand must not fight it.
 		self.mbim.on(bc, 'RADIO_STATE', (data) => {
+			let had_note = self.control_note;
+
+			// an indication missing either state says nothing about either
+			// switch — it must not clear a note or announce a switch-on
+			if (!note_radio(data))
+				return;
+
 			let hw_off = (data.hw_radio_state == bc.RADIO_STATE_OFF);
 			let sw_off = (data.sw_radio_state == bc.RADIO_STATE_OFF);
-
-			self.radio = { hw: data.hw_radio_state, sw: data.sw_radio_state };
 
 			if (hw_off) {
 				self.control_note = 'radio disabled by the hardware switch';
@@ -835,9 +886,8 @@ export function create(opts)
 				self.control_note = 'radio disabled in software';
 				log('notice', 'radio switched off in software');
 			}
-			else if (self.control_note != null &&
-			         index(self.control_note, 'radio disabled') == 0) {
-				self.control_note = null;
+			else if (had_note != null && index(had_note, 'radio disabled') == 0) {
+				// note_radio already cleared it; this is the line that says so
 				log('notice', 'radio switched back on');
 			}
 		});
@@ -1175,7 +1225,8 @@ export function create(opts)
 					{ radio_state: bc.RADIO_STATE_OFF }, () => {
 					settle_timer = uloop.timer(self.timing.settle, () => {
 						self.mbim.command(bc, 'RADIO_STATE', 'set',
-							{ radio_state: bc.RADIO_STATE_ON }, () => {
+							{ radio_state: bc.RADIO_STATE_ON }, (e2, d2) => {
+							note_radio(d2);
 							settle_timer = uloop.timer(self.timing.settle, step_register);
 						});
 					});
@@ -1203,8 +1254,7 @@ export function create(opts)
 			// indication only fires on a CHANGE, so without this `status` shows
 			// nothing about the radio until somebody flips a switch — and
 			// "no answer yet" and "both switches on" would look the same.
-			if (!err && data != null)
-				self.radio = { hw: data.hw_radio_state, sw: data.sw_radio_state };
+			note_radio(data);
 
 			if (err || data?.sw_radio_state != bc.RADIO_STATE_OFF) {
 				if (!err && data?.hw_radio_state == bc.RADIO_STATE_OFF) {
@@ -1218,10 +1268,12 @@ export function create(opts)
 			log('notice', 'software radio is off, switching it on');
 
 			self.mbim.command(bc, 'RADIO_STATE', 'set',
-				{ radio_state: bc.RADIO_STATE_ON }, (serr) => {
+				{ radio_state: bc.RADIO_STATE_ON }, (serr, sdata) => {
 				if (serr)
 					log('warn', sprintf('could not switch the radio on: %J', serr));
 
+				// the answer to OUR OWN switch is the authoritative reading
+				note_radio(sdata);
 				settle_timer = uloop.timer(self.timing.settle, do_register);
 			});
 		});
@@ -1745,7 +1797,8 @@ export function create(opts)
 							return cb({ error: 'cancelled' });
 
 						self.mbim.command(bc, 'RADIO_STATE', 'set',
-							{ radio_state: bc.RADIO_STATE_ON }, (err) => {
+							{ radio_state: bc.RADIO_STATE_ON }, (err, rdata) => {
+								note_radio(rdata);
 								cb(err ? { error: 'mbim', detail: err } : null,
 									{ ok: true, action: 'reattach', via: 'mbim_radio' });
 							});

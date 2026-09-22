@@ -7,6 +7,7 @@
 
 'use strict';
 
+import * as uloop from 'uloop';
 import * as sim from 'wwand.sim';
 import * as sms from 'wwand.sms';
 
@@ -15,6 +16,12 @@ export function install(self, o)
 	let log = o.log;
 	let check_modem = o.check_modem;
 	let load_esim = o.load_esim;
+
+	// injectable so the deferred card re-read can be driven from a test: this
+	// module's only timer is armed after a slot switch, long after the suite's
+	// uloop has stopped (tests/test_sim.uc runs it at :1548 and the simops
+	// block sits below that), so a real uloop.timer there is unobservable.
+	let defer = o.defer ?? ((ms, fn) => uloop.timer(ms, fn));
 
 	// physical SIM slots: list (status page) and switch (guarded; the modem
 	// re-initializes the SIM stack after a switch, recovery handles the rest)
@@ -87,6 +94,70 @@ export function install(self, o)
 			delete entry.modem._apdu_be;
 			delete entry.modem._esim_refreshed;
 			delete entry.modem.esim_info;
+
+			// AND THE CARD ITSELF, which that list forgot. Everything cleared
+			// below describes the card that just left: its identity, the slot
+			// it sat in, and the card-side events the UIM indications reported
+			// about it. None of it is re-read on its own — a slot switch does
+			// not restart the init chain — so the status page went on showing
+			// the previous SIM's ICCID and its parting "session closed: card
+			// removed" indefinitely, through a switch BACK as well, because
+			// nothing on either path ever clears them. Reported by MassiPi on
+			// an NR7101 (ddimension/wwand#39, 2026-09-22).
+			//
+			// modem.uc:1538-1543 already states the rule — card-side
+			// diagnostics belong to the card we were talking to — and acts on
+			// it during teardown. This path is the other place a card changes
+			// underneath us, and it did not.
+			let m = entry.modem;
+
+			m.sim_note = null;
+			m.sim_busy = false;
+			m.active_slot = null;
+
+			// AND THE MATCHED PER-SIM OVERRIDE, which is the one that can do
+			// damage rather than merely mislead. `active_sim` is the wwand_sim
+			// entry resolved for the card that just left, and effective_pincode
+			// prefers its `pincode` over the modem's own (sim.uc:57-70) — so
+			// the unlock scheduled below would have offered the OLD card's PIN
+			// to the new one and spent one of three attempts on it. Its APN and
+			// credentials would have applied too, until a reapply replaced it.
+			// Raised by Codex review, 2026-09-22.
+			m.active_sim = null;
+
+			if (m.info) {
+				m.info.iccid = null;
+				m.info.imsi = null;
+				m.info.msisdn = null;
+			}
+
+			// ...then read the card that arrived, the way an eSIM profile
+			// switch does (esim_bridge apply_sim_reset): give the firmware a
+			// moment, unlock — a PIN can re-arm with a different card — and
+			// run the full per-SIM reapply, which re-matches the wwand_sim
+			// override and the attach profile.
+			//
+			// RE-CHECKED WHEN THE TIMER FIRES, not when it is armed, and on TWO
+			// counts. On the AT backends the switch ends in a CFUN reset that
+			// re-enumerates the modem, so `entry.modem` can by then be a
+			// different object or gone — identity covers that. But ordinary
+			// backend recovery tears the SAME object down and starts it again
+			// (modem_common make_fail), which identity does not see: the timer
+			// belongs to this module, not to the modem, so it outlives the
+			// teardown and would talk to a client that is mid-initialisation.
+			// `_gen` is the counter both backends already bump on teardown
+			// (modem.uc:1482, modem_mbim.uc:1897); NCM has none and degrades to
+			// the identity check, which is the case its reset already answers.
+			// Raised by Codex review, 2026-09-22.
+			let gen = m._gen;
+
+			if (m.reapply_sim)
+				defer(2000, () => {
+					if (self.modems?.[ref]?.modem !== m || m._gen !== gen)
+						return;
+
+					sim.unlock(m, () => m.reapply_sim());
+				});
 
 			log('notice', sprintf('modem %s: switched to SIM slot %d', ref, physical));
 			cb(null, { slot: physical });

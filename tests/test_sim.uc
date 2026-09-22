@@ -1603,17 +1603,27 @@ sim.apdu_open(mk_modem([ '1' ]), 1, sim.ISDR_AID, (err, ch) => {
 // eUICC); an unchanged switch must keep them.
 import * as simops from 'wwand/simops.uc';
 
+let sw_reapplied = 0;
 let sw_modem = {
 	switch_slot: (p, cb) => cb(null, {}),   // pretend the switch succeeded
 	_esim_be: 'at', _apdu_be: 'at',
 	_esim_refreshed: true, esim_info: { eid: 'x' },
+	// ...and the card that is about to leave
+	sim_note: 'session closed: card removed', sim_busy: true, active_slot: 1,
+	active_sim: { iccid: '8949000000000000001', pincode: '1234' }, _gen: 0,
+	info: { iccid: '8949000000000000001', imsi: '262011111111111', msisdn: '+49' },
+	reapply_sim: () => { sw_reapplied++; },
 };
 let sw_self = { modems: { m0: { modem: sw_modem } } };
+let sw_deferred = null;
 
 simops.install(sw_self, {
 	log: () => null,
 	check_modem: (ref, cb) => sw_self.modems[ref] ?? null,
 	load_esim: () => null,
+	// captured instead of armed: this file's uloop has already stopped by the
+	// time these run, so the deferred re-read would otherwise be untestable
+	defer: (ms, fn) => { sw_deferred = fn; },
 });
 
 sw_self.modem_sim_switch_slot('m0', 1, (err) => {
@@ -1623,12 +1633,60 @@ sw_self.modem_sim_switch_slot('m0', 1, (err) => {
 	ok(sw_modem._esim_refreshed == null && sw_modem.esim_info == null,
 		'slot-clear: refresh gate + surface dropped');
 
+	// THE CARD ITSELF, which that list used to forget. Nothing re-reads these
+	// on its own after a switch, so the status page kept showing the previous
+	// SIM's identity and its parting "session closed" note — through a switch
+	// back as well (ddimension/wwand#39, MassiPi on an NR7101, 2026-09-22).
+	eq(sw_modem.sim_note, null, 'slot-clear: the old card\'s session note is dropped');
+	eq(sw_modem.sim_busy, false, 'slot-clear: ...and its busy state');
+	eq(sw_modem.active_slot, null, 'slot-clear: ...and the slot it sat in');
+	eq(sw_modem.info.iccid, null, 'slot-clear: ...and its ICCID');
+	eq(sw_modem.info.imsi, null, 'slot-clear: ...and its IMSI');
+
+	// THE MATCHED OVERRIDE GOES WITH THE CARD, and this is the one that can do
+	// harm rather than merely mislead: effective_pincode prefers
+	// active_sim.pincode over the modem's own (sim.uc:57-70), so a stale entry
+	// would offer the OLD card's PIN to the new one and spend one of three
+	// attempts on it.
+	eq(sw_modem.active_sim, null, 'slot-clear: the old card\'s wwand_sim override is dropped');
+
+	// the re-read is DEFERRED, never synchronous: on the AT backends the
+	// switch ends in a reset that re-enumerates the modem
+	eq(sw_reapplied, 0, 'slot-clear: the new card is not read inside the switch callback');
+	ok(sw_deferred != null, 'slot-clear: ...it is armed for later');
+
+	// a modem REPLACED underneath us (AT/CFUN re-enumeration) — the new object
+	// runs its own init chain, and this timer must not talk to the old one
+	let sw_other = { reapply_sim: () => { sw_reapplied += 100; } };
+	sw_self.modems.m0.modem = sw_other;
+	sw_deferred();
+	eq(sw_reapplied, 0, 'slot-clear: a replaced modem suppresses the deferred read');
+
+	// ...and the same object torn down and restarted by ordinary recovery,
+	// which identity alone cannot see (modem_common make_fail); `_gen` is the
+	// counter both backends bump on teardown
+	sw_self.modems.m0.modem = sw_modem;
+	sw_modem._gen = 1;
+	sw_deferred();
+	eq(sw_reapplied, 0, 'slot-clear: a torn-down-and-restarted modem suppresses it too');
+
+	// the ordinary case: same object, same generation
+	sw_modem._gen = 0;
+	sw_deferred();
+	eq(sw_reapplied, 1, 'slot-clear: an untouched modem reads the new card');
+
 	// idempotent switch keeps the caches
 	sw_modem._esim_refreshed = true;
+	sw_modem.sim_note = 'session closed: card removed';
+	sw_modem.info.iccid = '8949000000000000002';
 	sw_modem.switch_slot = (p, cb) => cb(null, { unchanged: true });
 	sw_self.modem_sim_switch_slot('m0', 1, (e2, r2) => {
 		eq(r2?.unchanged, true, 'slot-clear: unchanged switch short-circuits');
 		eq(sw_modem._esim_refreshed, true, 'slot-clear: caches kept on an unchanged switch');
+		eq(sw_modem.sim_note, 'session closed: card removed',
+			'slot-clear: ...and so is the card state, because no card changed');
+		eq(sw_modem.info.iccid, '8949000000000000002',
+			'slot-clear: ...including its identity');
 		// --- multi-SIM shape, read-only ---------------------------------------------
 // The vocabulary is MBIM's because MBIM is the protocol that names it. QMI has
 // no message meaning "concurrency" at all — Qualcomm's own MBIM stack writes

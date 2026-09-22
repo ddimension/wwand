@@ -365,6 +365,24 @@ function assert_subscribe_list() {
 				eq(m.control_note, 'wwand-mbim package not installed',
 					'radio ind: a foreign control note is left alone');
 
+				// the pair itself is what `status` publishes and LuCI paints
+				eq(m.radio, { hw: bc.RADIO_STATE_ON, sw: bc.RADIO_STATE_ON },
+					'radio ind: the state pair is recorded, not only the note');
+
+				// AN INDICATION MISSING EITHER STATE SAYS NOTHING ABOUT EITHER
+				// SWITCH. It must not overwrite the pair, and it must not be
+				// read as "both on" — which is what a bare field comparison
+				// does, since an absent field is not RADIO_STATE_OFF. Raised
+				// by Codex review of the note_radio refactor, 2026-09-22.
+				m.control_note = 'radio disabled by the hardware switch';
+				m.mbim.handlers[sprintf('%s:%d', bc.service, 3)][0].cb(
+					{ hw_radio_state: bc.RADIO_STATE_ON });
+				eq(m.control_note, 'radio disabled by the hardware switch',
+					'radio ind: a partial indication does not announce a switch-on');
+				eq(m.radio, { hw: bc.RADIO_STATE_ON, sw: bc.RADIO_STATE_ON },
+					'radio ind: ...nor replace the last usable reading');
+				m.control_note = null;
+
 				// PER-SLOT UICC STATE: polled until now, so a card pulled while
 				// the modem runs was noticed only by the failures after it.
 				m.mbim.handlers[sprintf('%s:%d', ext.service, 8)][0].cb(
@@ -498,8 +516,17 @@ function assert_subscribe_list() {
 // at all, so a future "just always write it" cannot pass both halves.
 function assert_radio_off() {
 	let h3 = handlers();
-	h3.RADIO_STATE = { hw_radio_state: bc.RADIO_STATE_ON,
-	                   sw_radio_state: bc.RADIO_STATE_OFF };
+
+	// A REAL MODEM ANSWERS THE SET WITH THE STATE AFTER IT. The query reports
+	// the software radio off; the set that switches it on answers with both
+	// switches on — that response is the authoritative reading and wwand threw
+	// it away, so `status` kept reporting the radio off on a modem that was
+	// registered and carrying traffic (obsy, ddimension/wwand#38, 2026-09-22).
+	// A constant handler cannot express this, which is why the old one could
+	// not catch it.
+	h3.RADIO_STATE = (args, meta) => (meta.kind == 'set')
+		? { hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_ON }
+		: { hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_OFF };
 
 	let mock3 = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h3 });
 	let m3 = null, m3_done = false;
@@ -531,6 +558,12 @@ function assert_radio_off() {
 
 				// the modem still got all the way to registration afterwards
 				eq(m3.state, 'READY', 'radio: init continues to READY after the switch');
+
+				// ...and reports the radio it now HAS, not the one it had
+				eq(m3.radio, { hw: bc.RADIO_STATE_ON, sw: bc.RADIO_STATE_ON },
+					'radio: the set response updates the reported state');
+				eq(m3.control_note, null,
+					'radio: ...and leaves no "radio disabled" note behind');
 
 				// and the default (radio already on) instance wrote nothing
 				eq(length(filter(mock.calls,
