@@ -625,13 +625,35 @@ push(scenarios, {
 	run: (env) => {
 		env.ctx.up((err) => {
 			eq(err, null, 'sim-pdp: context up succeeds');
-			warn(sprintf('DIAG active_sim=%J  CGDCONT-Zeilen: %J
-', env.modem.active_sim,
-				filter(env.tr.history ?? [], (l) => index(l, "CGDCONT") >= 0)));
 			ok(env.tr.saw(/^AT\+CGDCONT=1,"IP","card\.apn"$/) != null,
 				'sim-pdp: the CARD\'s ipv4 and apn are what CGDCONT carries');
 			ok(env.tr.saw(/CGDCONT=1,"IPV4V6"/) == null,
 				'sim-pdp: ...and the interface\'s dual stack never reached the modem');
+			env.finish();
+		});
+	},
+});
+
+// --- s2c: an ipv4 PDP must not publish the v6 DNS the context still holds ----
+//
+// The scripted CGCONTRDP always answers with BOTH families, which is exactly
+// what a modem does after the context carried IPV4V6 a moment earlier — the
+// firmware keeps answering with the v6 DNS it was given. wwand passed that
+// through to netifd, which wrote it into resolv.conf.auto, and on a carrier
+// with no v6 route the stub resolver tried it first and stalled until timeout.
+// Field-reported by xsetiadi on an FM350-GL (ddimension/wwand#35, 2026-09-22),
+// where it was invisible on one SIM and fatal on the other.
+push(scenarios, {
+	name: 's2c_ipv4_pdp_no_v6_dns',
+	script: script(),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4', mux_id: 0 },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'ipv4-pdp: context up succeeds');
+			eq(env.ctx.settings?.ipv4?.addr, '10.20.30.40',
+				'ipv4-pdp: the v4 half is published as usual');
+			eq(env.ctx.settings?.ipv6, null,
+				'ipv4-pdp: ...and the v6 half the modem still reports is not');
 			env.finish();
 		});
 	},

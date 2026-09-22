@@ -1138,6 +1138,13 @@ export function create(opts)
 			// ipv4 about itself must not get a dhcpv6 subinterface built for
 			// it, and one that says ipv4v6 must get one even where the
 			// interface never spelled a family out (ddimension/wwand#35).
+			// ...and the other way round: an IPv4-only context must also RETIRE
+			// a subinterface an earlier dual-stack connect left behind, or
+			// netifd keeps starting it from uci (ddimension/wwand#35).
+			if (deps.retire_wan6 && discovery.is_at_driver(ctx.modem?.datapath?.backend) &&
+			    entry?.cfg?.interface && context_common.effective_pdp(ctx) == 'ipv4')
+				deps.retire_wan6(entry.cfg.interface);
+
 			if (deps.ensure_wan6 && discovery.is_at_driver(ctx.modem?.datapath?.backend) &&
 			    entry?.cfg?.interface && context_common.effective_pdp(ctx) != 'ipv4') {
 				log('info', sprintf('interface %s: ensuring the dynamic dhcpv6 subinterface (RNDIS v6 model)',
@@ -1169,6 +1176,19 @@ export function create(opts)
 					// `entry.ctx == mine` and bounce a freshly created
 					// subinterface. Raised by review, 2026-09-19.
 					if (self.contexts[name] != entry || entry.ctx != mine) {
+						entry._wan6_arming = false;
+						return;
+					}
+
+					// AND THE FAMILY MUST STILL BE THE ONE THAT ARMED THIS.
+					// The checks above ask whether the CONTEXT is still the
+					// same one; they say nothing about what it is now carrying.
+					// An interface switched to ipv4 between the arming and the
+					// fire has already been retired by the branch above, and
+					// this closure would put the subinterface straight back —
+					// the same object, so nothing above notices. Raised by
+					// Codex review on ddimension/wwand#35, 2026-09-22.
+					if (context_common.effective_pdp(mine) == 'ipv4') {
 						entry._wan6_arming = false;
 						return;
 					}

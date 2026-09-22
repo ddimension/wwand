@@ -196,7 +196,25 @@ export function create(opts)
 
 		let v6_addr = (rdp.ipv6?.addr && valid_host_v6(rdp.ipv6.addr)) ? rdp.ipv6.addr : null;
 
-		if (rdp.ipv6 && (v6_addr || length(rdp.ipv6.dns ?? []))) {
+		// AN IPv4 PDP HAS NO v6 HALF, whatever CGCONTRDP still remembers. This
+		// is the one backend where that has to be said. QMI builds only the
+		// requested family's clients (context.uc:151 wanted_families), so a
+		// v4-only context has no v6 client to report anything at all. MBIM
+		// sends the effective type as CONNECT's ip_type (context_mbim.uc:306)
+		// and a conforming modem answers in kind — though its builder would
+		// take a v6 half if one came back anyway (context_mbim.uc:141), so that
+		// is protocol trust rather than a structural guarantee. Codex review
+		// was right to narrow that claim, 2026-09-22.
+		// The AT path reads the context back instead, and a modem that carried
+		// IPV4V6 a minute ago keeps answering with the v6 DNS it was given —
+		// so wwand handed netifd a v6 resolver on a link with no v6 route, the
+		// stub resolver tried it first, and name resolution stalled until it
+		// timed out. Reported by xsetiadi on an FM350-GL after switching the
+		// interface to ipv4 (ddimension/wwand#35, 2026-09-22); invisible on a
+		// carrier whose v6 happens to work.
+		let v4_only = (context_common.effective_pdp(self) == 'ipv4');
+
+		if (!v4_only && rdp.ipv6 && (v6_addr || length(rdp.ipv6.dns ?? []))) {
 			out.ipv6 = {
 				addr: context_common.apply_iface_id(v6_addr,
 					context_common.conn_cfg(self, 'ip6ifaceid')),

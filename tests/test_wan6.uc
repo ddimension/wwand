@@ -31,8 +31,10 @@ const TIMING = { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
 let kicks = [];
 let autostart = true;
 
-function mk(pdp, ensures, fx, netdev)
+function mk(pdp, ensures, fx, netdev, retires)
 {
+	retires ??= [];
+
 	let ctx_on_event = null;
 	let modem_on_event = null;
 
@@ -83,6 +85,7 @@ function mk(pdp, ensures, fx, netdev)
 			learn_device: () => null,
 			learn_modem_path: () => null,
 			ensure_wan6: (p, pdp) => push(ensures, sprintf('%s/%s', p, pdp ?? '-')),
+			retire_wan6: (p) => push(retires, sprintf('retire:%s', p)),
 		},
 	});
 
@@ -107,24 +110,24 @@ function mk(pdp, ensures, fx, netdev)
 (function () {
 	uloop.init();
 
-	let ensures = [];
-	let s1 = mk('ipv6', ensures);
+	let ensures = [], retires = [];
+	let s1 = mk('ipv6', ensures, null, null, retires);
 	s1.ctx()('up');
 
 	let ensures_b = [];
 	let s1b = mk('ipv4v6', ensures_b);
 	s1b.ctx()('up');
 
-	let ensures_2 = [];
-	let s2 = mk('ipv4', ensures_2);
+	let ensures_2 = [], retires_2 = [];
+	let s2 = mk('ipv4', ensures_2, null, null, retires_2);
 	s2.ctx()('up');
 
 	let ensures_3 = [];
 	let s3 = mk('ipv4v6', ensures_3);
 	s3.modem()('removed');
 
-	let ensures_4 = [];
-	let s4 = mk('ipv6', ensures_4);
+	let ensures_4 = [], retires_4 = [];
+	let s4 = mk('ipv6', ensures_4, null, null, retires_4);
 	s4.d.modems.m0.modem.datapath = { backend: 'qmi_wwan' };
 	s4.ctx()('up');
 
@@ -149,6 +152,18 @@ function mk(pdp, ensures, fx, netdev)
 		// ipv6-only missed almost everything anyway, since pdp_type defaults to
 		// ipv4v6.
 		eq(ensures_2, [], 'wan6: pdp ipv4 -> no dhcpv6 subinterface');
+
+		// NOT CALLING ensure_wan6 IS ONLY HALF THE JOB. The section ensure_wan6
+		// writes is persisted with `auto 1`, so a context that later turns
+		// v4-only leaves netifd starting a dhcpv6 client on a link with no v6 —
+		// which puts the v6 resolver back that the v4-only path just suppressed
+		// (ddimension/wwand#35, xsetiadi, 2026-09-22).
+		eq(retires_2, [ 'retire:wan' ],
+			'wan6: pdp ipv4 -> the leftover subinterface is retired, not merely not ensured');
+		eq(retires, [],
+			'wan6: ...and a v6-capable context never retires one');
+		eq(retires_4, [],
+			'wan6: ...nor does a non-rndis datapath, whatever its pdp type');
 
 		// the dynamic subinterface is netifd's: auto:1 + the @device alias let it
 		// go down with the vanished parent and come back up on its own when the

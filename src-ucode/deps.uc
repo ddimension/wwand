@@ -539,6 +539,22 @@ export function create(o)
 					return true;
 				};
 
+				// UN-PARK, and only what we parked. `fill` cannot do this job:
+				// it skips any option that is already present, and after
+				// retire_wan6 `auto` is present and reads '0' — so without this
+				// the subinterface would come back for a v6-capable PDP in
+				// every respect except the one that starts it, permanently.
+				// Keyed on our own marker rather than on `auto` itself, so an
+				// operator who switched the section off by hand keeps it off.
+				if (sprintf('%s', cursor.get('network', have_name, 'wwand_parked') ?? '') == '1') {
+					logmod.log('notice',
+						'dhcpv6 subinterface %s: un-parking it (auto 1) — the PDP is v6-capable again',
+						have_name);
+					cursor.set('network', have_name, 'auto', '1');
+					cursor.delete('network', have_name, 'wwand_parked');
+					cursor.commit('network');
+				}
+
 				let touched = fill('extendprefix', want_extend ? '1' : null,
 					'interface %s: IPv6 without a delegated prefix — defaulting extendprefix=1 (RFC 7278)');
 
@@ -577,6 +593,82 @@ export function create(o)
 						netifd_cb('up ' + target))));
 
 			return true;
+		},
+
+		// THE COUNTERPART TO ensure_wan6, and the reason it needs one: that
+		// function persists the section deliberately ("never deleted", so the
+		// operator can see and edit it in LuCI), with `auto 1`. Switching the
+		// interface to an IPv4-only PDP stops wwand from ensuring it — and
+		// stops there. netifd, which does not know why, goes on starting the
+		// section it still finds on disk at every reload, odhcp6c comes back
+		// up on a link with no v6, and the DHCPv6 resolver it installs undoes
+		// the v6 DNS suppression that was the whole point. Reported by
+		// xsetiadi with `Interface 'fm350_6' is now up` at 15:17:31, six and a
+		// half minutes after the 15:10:55 connect wwand had already decided was
+		// v4-only (ddimension/wwand#35, 2026-09-22).
+		//
+		// `auto 0` rather than a delete, for the same reason ensure_wan6 does
+		// not delete: the section is the operator's record of what wwand set
+		// up, and it is turned back on below if the PDP regains its v6 half.
+		//
+		// OWNERSHIP IS BY NAME, and that is worth stating plainly rather than
+		// claiming more. `<parent>_6` with proto dhcpv6 on `@<parent>` is an
+		// ordinary OpenWrt shape a user could have written themselves, and
+		// nothing on disk distinguishes the two. This makes the SAME assumption
+		// ensure_wan6 already makes when it fills options into an existing
+		// section of that name (:523) — one rule, not a new one. A section
+		// under a DIFFERENT name is never looked up here, so the "user-defined
+		// section wins" case in ensure_wan6 keeps its own lifecycle untouched,
+		// which is right: a section wwand did not start is not wwand's to stop.
+		// Raised by Codex review, 2026-09-22.
+		retire_wan6: (parent) => {
+			let name = parent + '_6';
+			let want = '@' + parent;
+			let cursor = o.cursor();
+
+			if (cursor.get('network', name) == null)
+				return false;
+
+			let proto = cursor.get('network', name, 'proto');
+			let dev = cursor.get('network', name, 'device') ??
+				cursor.get('network', name, 'ifname');
+
+			// not ours to touch if it is not the shape we write
+			if ((proto != 'dhcpv6' && proto != 'dhcpv6c') || dev != want)
+				return false;
+
+			// `auto` is boot/reload POLICY, not runtime state: a section that
+			// already reads 0 can still be running, because somebody ran
+			// `ifup <parent>_6` by hand or an earlier down never landed. So the
+			// write and the log are skipped on a second pass — a v4-only
+			// context must not log once per connect forever — but the down is
+			// issued either way. netifd takes a down on an interface that is
+			// already down without complaint, and that is the only way this
+			// stays idempotent in policy AND in fact. Raised by Codex review,
+			// 2026-09-22.
+			let already = (sprintf('%s', cursor.get('network', name, 'auto') ?? '') == '0');
+
+			if (!already) {
+				logmod.log('notice',
+					'dhcpv6 subinterface %s: parking it (auto 0) — the PDP is IPv4-only',
+					name);
+
+				cursor.set('network', name, 'auto', '0');
+
+				// marked only where WE are the one switching it off, so an
+				// operator's own `auto 0` never acquires the marker and is
+				// never undone by the un-park below
+				cursor.set('network', name, 'wwand_parked', '1');
+				cursor.commit('network');
+			}
+
+			// reload so netifd re-reads the section, then take it down: a
+			// reload alone leaves a running instance running.
+			conn.defer('network', 'reload', {}, () =>
+				conn.defer('network.interface', 'down', { interface: name },
+					netifd_cb('down ' + name)));
+
+			return !already;
 		},
 
 		network_reload: () => conn.defer('network', 'reload', {}, netifd_cb('reload')),

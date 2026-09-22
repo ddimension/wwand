@@ -188,6 +188,80 @@ function mkdeps(u, extra) {
 	}
 }
 
+// --- retire_wan6: the counterpart, and the three ways it must not fire -------
+//
+// ensure_wan6 persists `<parent>_6` with `auto 1` and never deletes it, so an
+// interface that later turns IPv4-only leaves netifd starting a DHCPv6 client
+// on a link with no v6 — which reinstates the v6 resolver the v4-only path had
+// just suppressed (ddimension/wwand#35, xsetiadi on an FM350-GL, 2026-09-22).
+{
+	let calls = [];
+	let conn = { defer: (o, m, a, cb) => { push(calls, m + ':' + (a?.interface ?? '')); return cb ? cb() : null; } };
+	// no array destructuring in ucode ("Expecting variable name") — the pair
+	// comes back as an object
+	let mk = (st) => {
+		calls = [];
+		let u = fake_uci(st);
+		return { u: u, d: mkdeps(u, { conn: conn, netifd_cb: () => (() => null) }) };
+	};
+	let ours = () => ({
+		wan: { '.type': 'interface', proto: 'wwand' },
+		wan_6: { '.type': 'interface', proto: 'dhcpv6', device: '@wan', auto: '1' },
+	});
+
+	// the plain case
+	let s1 = mk(ours());
+	eq(s1.d.retire_wan6('wan'), true, 'retire: a running subinterface is parked');
+	eq(s1.u.state.wan_6.auto, '0', 'retire: ...by policy');
+	eq(s1.u.state.wan_6.wwand_parked, '1', 'retire: ...marked as ours to un-park');
+	eq(s1.u.commits, 1, 'retire: one commit');
+	ok(index(calls, 'down:wan_6') >= 0, 'retire: ...and taken down, not merely reconfigured');
+
+	// AND AGAIN. `auto` is boot policy, not runtime state: a second pass must
+	// stop writing and logging, but must still issue the down, because someone
+	// may have run `ifup wan_6` by hand since.
+	let commits_before = s1.u.commits;
+	eq(s1.d.retire_wan6('wan'), false, 'retire: a second pass reports nothing new');
+	eq(s1.u.commits, commits_before, 'retire: ...and writes nothing');
+	ok(index(calls, 'down:wan_6') >= 0, 'retire: ...but still asks for the down');
+
+	// the round trip — the bug that made the first version of this one-way
+	let s2 = mk(ours());
+	s2.d.retire_wan6('wan');
+	s2.d.ensure_wan6('wan', 'ipv4v6');
+	eq(s2.u.state.wan_6.auto, '1', 'retire: a v6-capable PDP un-parks the subinterface');
+	eq(s2.u.state.wan_6.wwand_parked, null, 'retire: ...and drops the marker with it');
+
+	// AN OPERATOR'S OWN `auto 0` IS NOT OURS TO UNDO. It never acquires the
+	// marker, because retire_wan6 only marks what it switches off itself.
+	let s3 = mk({
+		wan: { '.type': 'interface', proto: 'wwand' },
+		wan_6: { '.type': 'interface', proto: 'dhcpv6', device: '@wan', auto: '0' },
+	});
+	s3.d.retire_wan6('wan');
+	eq(s3.u.state.wan_6.wwand_parked, null, 'retire: an operator-disabled section is not marked');
+	s3.d.ensure_wan6('wan', 'ipv4v6');
+	eq(s3.u.state.wan_6.auto, '0', 'retire: ...and a later v6 PDP leaves their decision alone');
+
+	// shapes that are not ours
+	let s4 = mk({
+		wan: { '.type': 'interface', proto: 'wwand' },
+		wan_6: { '.type': 'interface', proto: 'static', device: '@wan', auto: '1' },
+	});
+	eq(s4.d.retire_wan6('wan'), false, 'retire: a section that is not a dhcpv6 client is untouched');
+	eq(s4.u.state.wan_6.auto, '1', 'retire: ...really untouched');
+
+	let s5 = mk({
+		wan: { '.type': 'interface', proto: 'wwand' },
+		wan_6: { '.type': 'interface', proto: 'dhcpv6', device: 'eth9', auto: '1' },
+	});
+	eq(s5.d.retire_wan6('wan'), false, 'retire: a dhcpv6 client on someone else\'s device is untouched');
+
+	let s6 = mk({ wan: { '.type': 'interface', proto: 'wwand' } });
+	eq(s6.d.retire_wan6('wan'), false, 'retire: no subinterface, nothing to do');
+	eq(s6.u.commits, 0, 'retire: ...and nothing written');
+}
+
 // --- learn_identity: record what the modem told us, once --------------------
 {
 	let u = fake_uci({ m0: {} });
