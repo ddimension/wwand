@@ -1313,6 +1313,109 @@ scenario('slots: UIM refusal (err 71) flips to native MBIM permanently', (next) 
 	});
 });
 
+// A modem that cannot ENUMERATE slots is not a modem with no slots. Every
+// caller turned the old 'unsupported' refusal into an empty list, and an empty
+// list is a claim — it says there is no eUICC here. That hid a completely
+// readable eSIM behind the LuCI panel's slot gate on a MeiG SLM770A, whose
+// vendor has no dual-SIM recipe (ncm_vendors.uc: Fibocom is the only `slots:`
+// entry). Same hole on a QMI firmware that answers 71/94. 2026-09-22.
+scenario('slots: a firmware that cannot enumerate reports its one slot', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {}, info: { iccid: '89000123456789012341' },
+		uim: mkclient({ GET_SLOT_STATUS: { __err: { code: 94 } } }, calls) };
+
+	sim.slot_status(m, (err, slots) => {
+		eq(err, null, 'slots-one: a refusal to enumerate is not an error to pass on');
+		eq(length(slots), 1, 'slots-one: ...it is one slot');
+		eq(slots[0].physical, 1, 'slots-one: numbered 1, as every caller assumes');
+		eq(slots[0].active, true, 'slots-one: and active — there is nothing else to be');
+		eq(slots[0].iccid, '89000123456789012341', 'slots-one: carrying the card we did read');
+		eq(slots[0].card, 'present', 'slots-one: ...which is what makes it present');
+
+		// THE LOAD-BEARING FIELD. false would mean "asked, no eUICC" and would
+		// leave the panel hidden for the same reason as before; null means the
+		// question is still open, which is what licenses a probe.
+		eq(slots[0].is_euicc, null, 'slots-one: eUICC-ness is unknown, not denied');
+		eq(slots[0].inferred, true, 'slots-one: marked as inference, not as a reading');
+
+		// and the cached path answers the same way without re-asking
+		sim.slot_status(m, (err2, slots2) => {
+			eq(calls, [ 'GET_SLOT_STATUS' ], 'slots-one: the modem is not asked twice');
+			eq(length(slots2), 1, 'slots-one: the cached refusal answers alike');
+			next();
+		});
+	});
+});
+
+scenario('slots: no card read yet -> present is not asserted', (next) => {
+	let m = { timing: T, config: {}, info: {},
+		uim: mkclient({ GET_SLOT_STATUS: { __err: { code: 71 } } }, []) };
+
+	sim.slot_status(m, (err, slots) => {
+		eq(slots[0].card, 'unknown', 'slots-one: without an ICCID, presence is not claimed');
+		eq(slots[0].iccid, null, 'slots-one: ...and no identity is invented for it');
+		next();
+	});
+});
+
+scenario('slots: an AT vendor with no dual-sim recipe', (next) => {
+	let m = { timing: T, config: {}, info: { iccid: '8988' },
+		slot_status: (cb) => cb({ error: 'unsupported' }, null) };
+
+	sim.slot_status(m, (err, slots) => {
+		eq(err, null, 'slots-at: the NCM refusal is translated, not forwarded');
+		eq(length(slots), 1, 'slots-at: one slot');
+		eq(slots[0].inferred, true, 'slots-at: marked as inference');
+		next();
+	});
+});
+
+// ...but only that one refusal. A modem that vanished mid-call has not told us
+// it has one slot; dressing that up as a slot would report a card that may not
+// be there at all.
+scenario('slots: a real AT failure stays a failure', (next) => {
+	let m = { timing: T, config: {}, info: {},
+		slot_status: (cb) => cb({ error: 'modem_gone' }, null) };
+
+	sim.slot_status(m, (err, slots) => {
+		eq(err?.error, 'modem_gone', 'slots-at: a transient failure is passed on');
+		eq(slots, null, 'slots-at: ...and no slot is invented for it');
+		next();
+	});
+});
+
+scenario('slots: an MBIM device with no client of any kind', (next) => {
+	let m = { timing: T, config: {}, info: { iccid: '8944' } };
+
+	sim.slot_status(m, (err, slots) => {
+		eq(err, null, 'slots-mbim: no uim and no mbim_slots is an inability, not a failure');
+		eq(length(slots), 1, 'slots-mbim: one addressable card');
+		eq(slots[0].inferred, true, 'slots-mbim: marked as inference');
+		next();
+	});
+});
+
+// A CAPABILITY STATEMENT NEEDS EVIDENCE. `multisim` answers what the hardware
+// IS; an inferred row says only that one card is reachable, and a modem that
+// refuses to enumerate may well have two slots. It used to publish `slots: 1`
+// with `source: 'qmi-logical-slots'` on an NCM modem — a fallback dressed up as
+// discovered topology (seen on the Cudy LT300, 2026-09-22).
+scenario('slots: an inference is not a capability claim', (next) => {
+	let m = { timing: T, config: {}, info: { iccid: '8944' } };
+
+	sim.slot_status(m, (err, slots) => {
+		eq(sim.enumerated(slots), false, 'multisim: an inferred list is not enumerated');
+		eq(sim.multisim(slots, null), null, 'multisim: ...so no slot count is claimed for it');
+
+		// and a real list still answers
+		let real = [ { physical: 1, active: true, card: 'present', logical_slot: 0, is_euicc: false },
+		             { physical: 2, active: false, card: 'absent', logical_slot: null, is_euicc: false } ];
+		eq(sim.enumerated(real), true, 'multisim: a reported list is enumerated');
+		eq(sim.multisim(real, null)?.slots, 2, 'multisim: ...and is counted as before');
+		next();
+	});
+});
+
 // unlock on a modem with neither uim nor dms (native-MBIM-UICC / NCM) must not
 // crash (used to null-deref modem.dms via unlock_dms — eSIM apply path)
 scenario('unlock: no uim/dms -> clean no_unlock_backend', (next) => {

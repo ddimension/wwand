@@ -347,6 +347,28 @@ scenario('sim-slot', {
 		eq(modem.state, 'READY', 'slot: init continues to READY');
 	});
 
+// ...AND A FIRMWARE THAT CANNOT ENUMERATE MUST NOT BE SWITCHED. sim.slot_status
+// answers a firmware refusing GET_SLOT_STATUS (71/94) with ONE inferred row so
+// the status page and the eSIM panel have something to work with. That row says
+// a card is reachable; it does not say where. Acting on it here would send
+// SWITCH_SLOT to a modem whose slot support has just declined to answer — and
+// because the row reads "slot 1 active", a `sim_slot 2` would do exactly that,
+// where the old unsupported-error branch had correctly walked away. Raised by
+// Codex review of the single-slot fallback, 2026-09-22.
+
+scenario('sim-slot-unenumerable', {
+	handlers: base_handlers({
+		GET_SLOT_STATUS: { __err: { code: 94 } },
+		SWITCH_SLOT: {},
+	}),
+	config: { sim_slot: 2 },
+}, 'registered',
+	(modem, mock, events) => {
+		eq(length(mock.calls_for('SWITCH_SLOT')), 0,
+			'slot-unenum: no switch is sent on an inferred slot list');
+		eq(modem.state, 'READY', 'slot-unenum: ...and init continues regardless');
+	});
+
 // --- 5: no UIM service, DMS legacy fallback ----------------------------------
 
 scenario('dms-fallback', {

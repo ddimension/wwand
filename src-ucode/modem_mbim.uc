@@ -517,7 +517,14 @@ export function create(opts)
 			return step_sim();
 
 		sim.slot_status(self, (err, slots) => {
-			if (err) {
+			// AND AN INFERRED ROW IS NOT A SLOT MAP. sim.slot_status answers
+			// with one addressable card when the modem cannot enumerate, which
+			// is right for the status page and wrong here: acting on it would
+			// send a slot switch to a modem whose slot support we have just
+			// established does not answer. Same outcome as the error branch
+			// above, which is what this used to take. Raised by Codex review on
+			// the single-slot fallback, 2026-09-22.
+			if (err || !sim.enumerated(slots)) {
 				log('info', sprintf('sim_slot %d configured but slot status unsupported, continuing', want));
 				return step_sim();
 			}

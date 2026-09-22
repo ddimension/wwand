@@ -694,8 +694,57 @@ const CARD_STATES = { '0': 'unknown', '1': 'absent', '2': 'present' };
 const decode_iccid = hexmod.decode_iccid;
 const decode_eid = hexmod.decode_eid;
 
-// slot list with card/activity state and identifying ICCID; err when the
-// modem has no slot-status support (single-slot firmwares often lack it)
+// slot list with card/activity state and identifying ICCID. A firmware with no
+// slot-status support does NOT error here — it gets the one inferred row below,
+// marked so that callers which act on topology can refuse it (enumerated()).
+// A MODEM THAT CANNOT ENUMERATE ITS SLOTS STILL HAS A CARD, and saying so is
+// not the same as inventing it. Three firmwares end up here: a QMI UIM refusing
+// GET_SLOT_STATUS as 71/94, an MBIM device with no UIM client at all, and every
+// AT/NCM modem whose vendor has no dual-SIM recipe — which today is all of them
+// but Fibocom (ncm_vendors.uc:1259 is the only `slots:` entry). What they have
+// in common is that they cannot enumerate, not that they have nothing.
+//
+// Refusing instead left an "unsupported" error that every caller absorbed into
+// an empty list, and an empty list is a statement: it says there is no eUICC
+// here. So LuCI hid the eSIM panel on a Cudy LT300 / MeiG SLM770A whose eUICC
+// was completely readable — `wwandctl esim eid` returned it while the web
+// interface showed nothing (2026-09-22). One slot, active, is what we can
+// honestly assert; `is_euicc` stays NULL, which is "not known" and is what
+// distinguishes this record from one a modem actually reported.
+function single_slot(modem)
+{
+	return [ {
+		physical: 1,
+		logical_slot: null,
+		card: (modem.info?.iccid != null) ? 'present' : 'unknown',
+		active: true,
+		iccid: modem.info?.iccid ?? null,
+		is_euicc: null,
+		eid: null,
+		// so a consumer can tell an inference from a reading — enumerated()
+		// below is the check, and every caller that would DRIVE hardware on
+		// this row has to make it
+		inferred: true,
+	} ];
+}
+
+// Did this list come from the modem, or from us? A caller that merely DISPLAYS
+// slots can take the inferred row at face value; one that acts on slot topology
+// — enforcing `option sim_slot`, counting slots as a capability — cannot, and
+// must fall back to what it did when the read failed outright. Nothing else in
+// the row distinguishes the two, which is why the flag exists.
+export function enumerated(slots)
+{
+	if (!length(slots ?? []))
+		return false;
+
+	for (let s in slots)
+		if (s.inferred)
+			return false;
+
+	return true;
+};
+
 export function slot_status(modem, cb)
 {
 	// single-slot firmwares (e.g. old Huawei sticks) don't implement the
@@ -703,19 +752,29 @@ export function slot_status(modem, cb)
 	// the deterministic refusal instead of hammering the modem and flooding
 	// the log on every poll.
 	if (modem._slot_status_unsupported)
-		return cb({ error: 'unsupported' }, null);
+		return cb(null, single_slot(modem));
 
 	// NCM/AT modems: dual-slot management via the vendor AT recipe
-	// (modem_ncm.slot_status — Fibocom GTDUALSIM etc.)
+	// (modem_ncm.slot_status — Fibocom GTDUALSIM etc.). A vendor without one
+	// answers 'unsupported', which is the enumerate-vs-read distinction above
+	// and not an error to pass on. Anything else is a real failure and stays
+	// one, so a transient refusal is never dressed up as a slot.
 	if (modem.slot_status)
-		return modem.slot_status(cb);
+		return modem.slot_status((err, slots) => {
+			if (err?.error == 'unsupported')
+				return cb(null, single_slot(modem));
+
+			cb(err, slots);
+		});
 
 	// native MBIM slot CIDs (MS BCE SysCaps/SlotInfoStatus/DeviceSlotMappings)
 	// — the pure-MBIM fallback. They carry no per-slot ICCID/EID, so fill the
 	// active slot's identity from what the modem itself reported.
 	let via_mbim = () => {
+		// no client of any kind left to ask — not a failure to read, an
+		// inability to enumerate (see single_slot)
 		if (!modem.mbim_slots)
-			return cb({ error: 'no_uim_client' }, null);
+			return cb(null, single_slot(modem));
 
 		modem.mbim_slots.status((err, slots) => {
 			if (err)
@@ -753,6 +812,7 @@ export function slot_status(modem, cb)
 					return via_mbim();
 				}
 				modem._slot_status_unsupported = true;
+				return cb(null, single_slot(modem));
 			}
 			return cb(err, null);
 		}
@@ -817,6 +877,15 @@ export function multisim(slots, caps)
 	let n_slots = length(slots ?? []);
 
 	if (!n_slots)
+		return null;
+
+	// A CAPABILITY STATEMENT NEEDS EVIDENCE. An inferred row says one card is
+	// reachable, which is not a slot count: a modem that refuses to enumerate
+	// may well have two. Publishing `slots: 1` there dressed a fallback up as
+	// discovered hardware — and labelled it `source: 'qmi-logical-slots'` on an
+	// NCM modem into the bargain (seen on the Cudy LT300, 2026-09-22). Saying
+	// nothing is the honest answer. Raised by Codex review.
+	if (!enumerated(slots))
 		return null;
 
 	// Distinct logical slots actually IN USE. This can UNDER-count a genuine
