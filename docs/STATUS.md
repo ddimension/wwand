@@ -28,7 +28,7 @@ is always user-triggered.
 | Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed |
 | Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
-| Feed | ddimension/openwrt-repo — stable (releases): `wwand`, `luci-app-wwand`, `luci-proto-wwand` 1.6.6; main: development pins as `1.6.6_pN` |
+| Feed | ddimension/openwrt-repo — stable (releases): `wwand`, `luci-app-wwand`, `luci-proto-wwand` 1.6.8; main: development pins as `1.6.8_pN` |
 | Upstream | openwrt/packages#30185 (pins v1.6.3), openwrt/luci#8917 |
 
 ## Hardware verified (2026-08-30, on r49 + the same day's device-support HEAD)
