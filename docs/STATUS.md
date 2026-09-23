@@ -704,6 +704,18 @@ Quectel — while `option gnss`, the one that does, had no UI at all.
   modems too, so it cannot prove an NCM pin). `option protocol` itself is parsed
   now — it was documented, advised by the daemon's own error message, and
   silently dropped by `config.uc`.
+  **One exception was cut into it on 2026-09-23** (`ddimension/wwand#40`): on a
+  board that exports the modem's own named RESET line, the ladder may pulse that
+  line once per outage at the repower threshold even unarmed — nothing else, no
+  power cycle, no reboot, and never when the pin is known to contradict the
+  driver. The gate's own origin commit had already named the case it could not
+  serve ("an NR7101 can wedge so that only a power cycle clears it"), and that is
+  the board the reporter runs: the arming evidence lives in tmpfs, so every
+  reboot turns a modem that has worked for months into one that has never
+  answered, and the rung written for that hardware could never fire. It is the
+  same pulse `modem_repower` already performs unguarded when a human asks for it.
+  The bound is persisted like `rung`, or a procd respawn loop would have pulsed
+  once per restart.
 - **TODO — the QMI surface survey is a map, not a plan.**
   `docs/design/qmi-surface-survey.md` records what the vendor QMI/RIL surface
   has that wwand does not model, ranked by value per line, with each item's

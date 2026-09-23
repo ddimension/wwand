@@ -1591,11 +1591,37 @@ export function create(opts)
 	// slot — so it fails at CALL time with "access to undeclared variable", not
 	// at parse time. Found on hardware, because the host suite runs this path
 	// with no board dep at all (NR7101, 2026-09-07).
+	// WHICH named RESET line applies to this modem, or null when the hardware
+	// action would be a power cycle (or nothing). Extracted rather than spelled
+	// out twice because the recovery ladder now ASKS this question before it
+	// takes its one unarmed action, and board_repower() then has to answer it
+	// the same way — two copies of this precedence is two answers that drift,
+	// and here the drift would be the ladder authorising a reset and the board
+	// cutting power instead. hwops.repower_plan() states the same rule for the
+	// operator-facing plan.
+	let board_reset_line = (cfg) => {
+		if (!deps.board)
+			return null;
+
+		let rg = cfg?.reset_gpio ?? (board_gpio_ok() ? deps.board.profile?.reset_gpio : null);
+
+		// AN OPTION THAT IS PRESENT BUT EMPTY IS NOT A LINE. uci keeps
+		// `option reset_gpio ''` as an empty string, which `??` passes straight
+		// through while every consumer that ACTS on the value tests it for
+		// truthiness — so the answer here would have been "there is a reset
+		// line" and the action taken would have been a power cycle. That is the
+		// precise divergence this function exists to make impossible, and it is
+		// worst in the new caller: the ladder would have authorised its one
+		// narrow exception on an unarmed modem and the board would have cut
+		// power instead. Raised by Codex review, 2026-09-23.
+		return rg ? rg : null;
+	};
+
 	let board_repower = (cfg) => {
 		if (!deps.board)
 			return false;
 
-		let rg = cfg?.reset_gpio ?? (board_gpio_ok() ? deps.board.profile?.reset_gpio : null);
+		let rg = board_reset_line(cfg);
 		let off = cfg?.repower_time ? +cfg.repower_time * 1000 : null;
 
 		if (rg)
@@ -2126,6 +2152,11 @@ export function create(opts)
 				// power GPIO. Board fallbacks gated by board_gpio_ok (multi-modem would
 				// hit the wrong hardware). No-op when nothing safe is available.
 				repower: deps.board ? (() => board_repower(cfg)) : null,
+				// the modem's own RESET line, when one applies — the ladder's
+				// one permitted action on a modem that has never answered
+				// (recovery.uc, unarmed_reset_line). Null on every box where
+				// the hardware action would be a power cycle or nothing.
+				reset_line: deps.board ? (() => board_reset_line(cfg)) : null,
 			},
 			at: {
 				fx: deps.datapath_fx,
@@ -2921,6 +2952,15 @@ export function create(opts)
 				// gated off until one exchange has succeeded in the selected
 				// protocol — a misdetected modem must never be repowered
 				armed: !!c.proto_ok,
+				// ...with ONE exception, so "not armed" stops being the whole
+				// truth on a board that exports the modem's own RESET line: the
+				// ladder may pulse it once per outage (recovery.uc,
+				// unarmed_reset_line). Reported as spent/available rather than
+				// as a capability, because what an operator asks at this point
+				// is whether anything is still going to happen by itself.
+				unarmed_reset: c.proto_ok ? null
+					: (self.repower_plan?.(name)?.action == 'reset_gpio'
+					   ? (c.unarmed_reset ? 'spent' : 'available') : null),
 				rungs: map(table, (r, i) => ({ at: r.at, action: r.action,
 				                               fired: i < fired })),
 				next: next,

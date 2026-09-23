@@ -1740,6 +1740,22 @@ survives a daemon restart, and it is **withdrawn again whenever the selected
 protocol changes**, because "it answered once" was proved with the previous
 choice. On an existing install whose persisted state predates this, the first
 answer after the upgrade re-arms it.
+
+  **One exception, and only one:** on a board that exports the modem's own named
+  RESET line (`reset_gpio`, per modem or from the board profile), the ladder may
+  pulse that line **once per outage** at the repower threshold — nothing else.
+  No op-mode cycle, no modem reset, no power cycle, no reboot. It exists because
+  the arming evidence lives in tmpfs and therefore does not survive a reboot, so
+  a modem that has worked for months is, every morning, a modem that has never
+  answered — and the rung written for precisely that hardware could never fire
+  (`ddimension/wwand#40`, an NR7101 whose control channel wedges across reboots,
+  2026-09-23). It is the same pulse the `modem_repower` button already performs
+  on an unarmed modem on request; this only stops requiring a human at 3 a.m.
+  It is **not** taken when the configured protocol is known to contradict the
+  bound driver, and it is never a power cycle — which is the action the 2026-08-30
+  field report was about. `status()` reports it per modem as
+  `recovery.unarmed_reset: 'available' | 'spent'` (absent once the modem is
+  armed, and on any box where no reset line applies).
 - **Status LEDs** — driven from the modem's registration + signal: a **5-bar
   signal graph** (e.g. MikroTik Chateau `green:mobile-1..5`) or a **mobile / LTE**
   set (e.g. Zyxel `…:red/green:mobile`, `…:lte`).
@@ -1752,8 +1768,9 @@ answer after the upgrade re-arms it.
 Built-in profiles: MikroTik Chateau 5G (`modem-power` + `modem-reset` + 5 signal
 LEDs), Zyxel LTE3301-plus / -m209 / -q222 (`power_modem`/`usbpower` + mobile/LTE
 LEDs), Zyxel LTE5398-M904 (`lte_power` + red/green/orange mobile LEDs), Cudy
-LT300 (MeiG SLM770A, reset GPIO `4g`; the autosetup HW-verify platform), NR7101
-(no dedicated GPIO/LED), Huasifei WH3000 Pro (INVERTED `modem_power` GPIO — 1 =
+LT300 (MeiG SLM770A, reset GPIO `4g`; the autosetup HW-verify platform), Zyxel
+NR7101 (no switchable power rail, but the RG502Q's RESET line as `gpio515`; no
+LEDs — they are OS-owned), Huasifei WH3000 Pro (INVERTED `modem_power` GPIO — 1 =
 off, no reset line, no modem LEDs). An **unknown board** yields a no-op
 profile — wwand runs unchanged, and any GPIO/LED can still be named per modem
 (`reset_gpio`). LuCI's reset-GPIO picker lists every named GPIO line the kernel

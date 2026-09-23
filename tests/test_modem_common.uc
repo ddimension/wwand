@@ -9,6 +9,7 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as uloop from 'uloop';
 import * as mc from 'wwand/modem_common.uc';
+import * as fakefx from './lib/fakefx.uc';
 
 uloop.init();
 
@@ -1377,5 +1378,35 @@ ok(index(line, 'rssi -33.3') >= 0 && index(line, 'rsrp -60.9') >= 0,
    'telemetry line: an overlaid dBm keeps its decimal instead of being cut by %d');
 ok(index(line, 'snr 9.8') >= 0,
    'telemetry line: snr is still the 0.1 dB field it always was');
+
+// --- make_recovery: the hand-off the daemon relies on ------------------------
+// Every backend builds its ladder through here, so a field the daemon sets and
+// this function forgets to copy is dropped in silence. `reset_line` is the
+// newest of them and the one with teeth: it is what lets the ladder pulse a
+// named RESET line on a modem that has never answered (ddimension/wwand#40),
+// and dropping it would not fail anything — it would just quietly restore the
+// old behaviour on the one board the exception was written for.
+let hand_fx = fakefx.create();
+let hand_self = {};
+let hand_pulses = [];
+let hand_rec = mc.make_recovery(hand_self, {
+	id: 'handoff',
+	protocol: 'qmi',
+	config: { failreboot: 30 },
+	recovery: {
+		fx: hand_fx,
+		state_dir: '/state',
+		repower: () => { push(hand_pulses, 'board'); return true; },
+		reset_line: () => 'gpio515',
+	},
+}, (l, m) => null, 'qmi');
+
+let hand_acts = [];
+for (let i = 1; i <= 24; i++) push(hand_acts, hand_rec.on_attempt());
+
+eq(hand_acts[23], 'usb_repower',
+   'make_recovery: reset_line survives the hand-off — the unarmed pulse is offered');
+eq(hand_rec.usb_repower(), true, 'make_recovery: and the primitive honours it');
+eq(hand_pulses, [ 'board' ], 'make_recovery: the board action ran');
 
 done('test_modem_common');

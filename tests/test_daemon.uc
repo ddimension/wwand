@@ -633,6 +633,18 @@ rd.modems = { m0: mk_entry({ reset_gpio: 'gpio7' }, false) };
 eq(rd.repower_plan('m0').gpio, 'gpio7', 'plan: a per-modem gpio wins');
 eq(rd.repower_plan('m0').source, 'modem', 'plan: named as the modem\'s own');
 
+// a per-modem reset_gpio that is PRESENT BUT EMPTY is not a line. uci keeps
+// `option reset_gpio ''` as an empty string — what a LuCI picker set to "none"
+// writes — and the plan and the action must agree about it, because the recovery
+// ladder now ASKS this question before taking its one action on a modem that has
+// never answered (recovery.unarmed_reset_line). Raised by Codex review,
+// 2026-09-23.
+rd.modems = { m0: mk_entry({ reset_gpio: '' }, false) };
+eq(rd.repower_plan('m0').action, 'power_cycle',
+	'plan: an empty per-modem gpio is not a reset line (and does not fall back to the board line either)');
+eq(rd.repower_modem('m0').action, 'power_cycle',
+	'plan: the action agrees — so the ladder can never authorise a pulse and get a power cut');
+
 // two modems and no per-modem gpio: the board lines would hit the wrong modem,
 // so the hardware rung has nothing to fire — and now says so instead of being
 // a silent no-op at the moment it matters

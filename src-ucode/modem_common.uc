@@ -655,6 +655,8 @@ export function make_recovery(self, opts, log, proto)
 		reboot_delay: opts.recovery?.reboot_delay,
 		// board-provided modem repower (power-cycle or reset-gpio pulse)
 		repower: opts.recovery?.repower,
+		// ...and which of the two it would be: a named RESET line, or null
+		reset_line: opts.recovery?.reset_line,
 		log: (l, m) => log(l, m),
 	});
 

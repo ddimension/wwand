@@ -98,8 +98,14 @@ export function create(opts)
 		// `proto_hw_base` is the error count when the hardware rung fired: the
 		// reboot gate measures its window from THERE, not from zero (see the
 		// rungs below). Found by a full review, 2026-09-19.
+		// `unarmed_reset` is the fired-once flag for the ONE hardware action an
+		// unarmed modem may receive — see unarmed_reset_line() below. Separate
+		// from `rung` on purpose: sharing that index would mark the two cheaper
+		// rungs fired as well, and a modem that armed afterwards would never get
+		// its opmode cycle or its modem reset again.
 		counters: { attempts: 0, proto_errors: 0, rung: 0, proto_hw: 0,
-		            proto_hw_base: 0, proto_ok: 0, proto_name: null },
+		            proto_hw_base: 0, proto_ok: 0, proto_name: null,
+		            unarmed_reset: 0 },
 		// set by revoke_arming(): no path may grant the permission any more.
 		// Not persisted — it is re-derived from the config on every build.
 		arm_blocked: false,
@@ -147,6 +153,18 @@ export function create(opts)
 
 			self.counters.proto_ok = pok ? +pok[1] : 0;
 			self.counters.proto_name = pnm ? pnm[1] : null;
+
+			// RESTORED FOR THE SAME REASON `rung` IS: the unarmed exception is
+			// bounded to once per outage, and an outage outlives a daemon
+			// restart. Left unread it would have reset to 0 on every start, so
+			// a procd respawn loop on a modem already past the threshold would
+			// have pulsed the reset line once per restart — the repetition the
+			// guard above exists to prevent, reintroduced through the door the
+			// exception opened. Absent in a state file that predates this, which
+			// is correct: such a file never fired it.
+			let ur = match(data, /"unarmed_reset": *([0-9]+)/);
+
+			self.counters.unarmed_reset = ur ? +ur[1] : 0;
 			self.counters.rung = rung ? +rung[1] : rungs_reached(self.counters.attempts);
 			log('notice', sprintf('restored recovery state: attempts %d, proto_errors %d, rung %d',
 				self.counters.attempts, self.counters.proto_errors, self.counters.rung));
@@ -162,12 +180,76 @@ export function create(opts)
 				fx.last_error ? sprintf(': %s', fx.last_error) : ''));
 	};
 
+	// Authorised for the NEXT usb_repower() call only, set when the ladder takes
+	// the unarmed exception below. Deliberately not a counter field: it must not
+	// survive a restart, and it must not be readable by any other caller.
+	let unarmed_reset_pending = false;
+
+	// THE ONE HARDWARE ACTION a modem that has never answered may receive: a
+	// pulse of its own named RESET line, at the repower rung's threshold, once
+	// per outage. Everything else stays refused — opmode cycle, modem reset,
+	// board power cycle, reboot.
+	//
+	// Why this one is different. The guard above exists because a MISDETECTED
+	// control device fails exactly like a wedged one, and the field report that
+	// produced it (2026-08-30) was about repeated power cycling of healthy
+	// hardware. But the commit that added the guard already named the case it
+	// could not serve: "an NR7101 can wedge so that only a power cycle clears
+	// it, and without the rung the router reboot-loops" — and that is a board
+	// whose profile exports the modem's RESET line for exactly this failure.
+	// Its owner reported it (ddimension/wwand#40, 2026-09-23): the mechanism
+	// written for his hardware is gated behind a condition his failure prevents
+	// from ever being met, because the arming evidence lives in tmpfs and every
+	// reboot makes a modem that has worked for months one that never answered.
+	//
+	// Three things keep this narrow:
+	//  - A NAMED RESET LINE ONLY. Not a power cycle (the action complained
+	//    about), not the `usb-repower` fallback, and nothing at all on a box
+	//    with no profile — which is most boxes, and was the reporting one.
+	//    hwops.repower_plan() calls the same precedence `reset_gpio`, and it is
+	//    what the modem-reset BUTTON already does on an unarmed modem: a human
+	//    may pulse this line today, unguarded, and the comment there says why —
+	//    "a modem that never answered is exactly the one they are most likely
+	//    to be trying to revive". This does automatically, once, what the
+	//    operator is otherwise woken up to do by hand.
+	//  - ONCE PER OUTAGE, cleared on a successful connection like `rung`. A
+	//    misdetected modem on such a board gets one pulse, re-enumerates
+	//    unchanged, and is left alone.
+	//  - NEVER WHEN WE ALREADY KNOW THE PIN IS WRONG. `arm_blocked` means the
+	//    configured protocol is contradicted by the bound driver — the active
+	//    form of the 2026-08-30 case. No pulse can fix a language mismatch.
+	let unarmed_reset_line = (n) => {
+		if (self.counters.unarmed_reset || self.arm_blocked || !opts.reset_line)
+			return null;
+
+		let at = null;
+
+		for (let r in RUNGS)
+			if (r.action == 'usb_repower')
+				at = r.at;
+
+		if (at == null || n < at)
+			return null;
+
+		// ...and an empty answer is not a line either: the caller normalises it
+		// (daemon.board_reset_line), and this repeats the test rather than
+		// trusting it, because what follows is the one hardware action a modem
+		// that never answered may receive.
+		let g = opts.reset_line();
+
+		return (g != null && g != '') ? g : null;
+	};
+
 	// record a failed connection cycle, return the ladder action:
 	// 'retry' | 'opmode_cycle' | 'modem_reset' | 'usb_repower' | 'reboot'
 	self.on_attempt = function() {
 		self.counters.attempts++;
 
 		let n = self.counters.attempts;
+
+		// an authorisation the dispatcher did not act on must not sit here
+		// waiting for an unrelated caller to pick it up
+		unarmed_reset_pending = false;
 
 		log('info', sprintf('connection attempt %d failed', n));
 
@@ -189,6 +271,19 @@ export function create(opts)
 		// branch is skipped for being exhausted, not for being unarmed, and
 		// execution fell through to the reboot.
 		if (!self.counters.proto_ok) {
+			let rl = unarmed_reset_line(n);
+
+			if (rl != null) {
+				self.counters.unarmed_reset = 1;
+				unarmed_reset_pending = true;
+				self.persist();
+
+				log('warn', sprintf('%d failed attempts and the %s control channel has never answered — pulsing the modem\'s reset line (%s) once; nothing further will be touched',
+					n, self.counters.proto_name ?? 'modem', rl));
+
+				return 'usb_repower';
+			}
+
 			// Once per threshold we would have acted on, so the operator sees it
 			// at the same points the ladder would have escalated. Compared
 			// against EVERY rung, not against the current one: `rung` cannot
@@ -330,9 +425,12 @@ export function create(opts)
 
 		// the counters reset either way: a connection that came up IS progress,
 		// whether or not it is allowed to prove the protocol
-		if (armed || self.counters.attempts != 0 || self.counters.rung != 0) {
+		if (armed || self.counters.attempts != 0 || self.counters.rung != 0 ||
+		    self.counters.unarmed_reset != 0) {
 			self.counters.attempts = 0;
 			self.counters.rung = 0;
+			// the unarmed exception is per outage, exactly like `rung`
+			self.counters.unarmed_reset = 0;
 			self.persist();
 		}
 	};
@@ -452,9 +550,18 @@ export function create(opts)
 		// hardware we have no evidence is broken. Anything that grows a new
 		// caller inherits the rule instead of having to remember it.
 		if (!self.counters.proto_ok) {
-			log('warn', sprintf('refusing to repower: the %s control channel has never answered, so nothing here is evidence about the hardware',
-				self.counters.proto_name ?? 'modem'));
-			return false;
+			// The ladder's one narrow exception (see unarmed_reset_line), granted
+			// for THIS call and consumed here. Every other caller keeps the rule:
+			// the zero-rx watchdog reaches this primitive directly on a modem
+			// whose data path may well be working, which is why the token is not
+			// a counter anyone can read.
+			if (!unarmed_reset_pending) {
+				log('warn', sprintf('refusing to repower: the %s control channel has never answered, so nothing here is evidence about the hardware',
+					self.counters.proto_name ?? 'modem'));
+				return false;
+			}
+
+			unarmed_reset_pending = false;
 		}
 
 		if (opts.repower) {

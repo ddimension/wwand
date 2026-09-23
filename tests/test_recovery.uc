@@ -234,6 +234,140 @@ eq(rg.on_attempt(), 'opmode_cycle', 'gate: an answer arms the ladder again');
 rg.note_protocol('mbim');
 eq(rg.counters.proto_ok, 0, 'gate: switching protocol withdraws the arming');
 
+// --- the one exception: a named RESET line on an unarmed modem ---------------
+// The gate above is right about power: the 2026-08-30 report was repeated
+// power-cycling of a healthy misdetected modem, and the box in that case has no
+// reset line at all (see `unarmed pulse: power-cycle box` below, which is the
+// same construction WITHOUT reset_line and must stay fully blocked).
+//
+// It is wrong about one board: an NR7101 whose profile exports the modem's own
+// RESET line for exactly the wedge it suffers (ddimension/wwand#40, reported
+// 2026-09-23). The arming evidence lives in tmpfs, so every reboot turns a
+// modem that has worked for months into one that never answered, and the rung
+// written for that hardware can never fire. One pulse of that named line, once
+// per outage, is what the modem-reset BUTTON already does on the same modem
+// unguarded (hwops.repower_modem) — this just stops waking the operator up.
+let pulses = [];
+fx = fakefx.create();
+let ru = recovery.create({ id: 'unarmed_reset', failreboot: 30, fx: fx,
+	state_dir: '/state', log: silent,
+	repower: () => { push(pulses, 'board'); return true; },
+	reset_line: () => 'gpio515' });
+
+let ua = [];
+for (let i = 1; i <= 23; i++) push(ua, ru.on_attempt());
+
+eq(length(filter(ua, (a) => a != 'retry')), 0,
+	'unarmed pulse: the cheaper rungs stay blocked — no opmode cycle at 8, no modem reset at 16');
+
+eq(ru.on_attempt(), 'usb_repower', 'unarmed pulse: fires at the repower threshold (24)');
+eq(ru.usb_repower(), true, 'unarmed pulse: the primitive lets THIS one through');
+eq(pulses, [ 'board' ], 'unarmed pulse: the board action actually ran');
+
+// ...and never again this outage: the token was consumed, the flag is set
+eq(ru.usb_repower(), false,
+	'unarmed pulse: a second call is refused — the grant was for one call, so the zero-rx watchdog cannot inherit it');
+
+let ua_rest = [];
+for (let i = 25; i <= 40; i++) push(ua_rest, ru.on_attempt());
+eq(length(filter(ua_rest, (a) => a != 'retry')), 0,
+	'unarmed pulse: once per outage, and the reboot past failreboot 30 stays refused');
+eq(length(pulses), 1, 'unarmed pulse: exactly one pulse');
+eq(ru.counters.rung, 0,
+	'unarmed pulse: the armed ladder index is untouched — sharing it would mark opmode and modem-reset fired');
+
+// ...and the bound survives a daemon restart, because an outage does. The state
+// file is the only thing that carries it: without the restore, a procd respawn
+// loop on a modem already past the threshold would pulse the reset line once
+// per start — the exact repetition the guard exists to prevent.
+let ru2 = recovery.create({ id: 'unarmed_reset', failreboot: 30, fx: fx,
+	state_dir: '/state', log: silent,
+	repower: () => { push(pulses, 'restarted'); return true; },
+	reset_line: () => 'gpio515' });
+ru2.load();
+
+eq(ru2.counters.unarmed_reset, 1,
+	'unarmed pulse: a restart mid-outage remembers the pulse already spent');
+eq(ru2.on_attempt(), 'retry',
+	'unarmed pulse: and does not fire a second one');
+eq(length(pulses), 1, 'unarmed pulse: still exactly one');
+
+// the armed ladder is therefore still complete for this modem
+ru.on_proto_success();
+eq(ru.on_attempt(), 'opmode_cycle',
+	'unarmed pulse: after arming, the ladder starts at its first rung as if nothing had fired');
+
+// the exception is per outage, exactly like `rung`
+ru.on_connect_success();
+eq(ru.counters.unarmed_reset, 0, 'unarmed pulse: a successful connection clears the allowance');
+
+// a state file written before this key existed simply has not fired it
+fx.files['/state/legacy_ur.json'] =
+	'{ "attempts": 30, "proto_errors": 0, "rung": 0, "proto_hw": 0, "proto_ok": 0, "proto_name": "qmi" }';
+let rlg = recovery.create({ id: 'legacy_ur', failreboot: 30, fx: fx,
+	state_dir: '/state', log: silent,
+	repower: () => { push(pulses, 'legacy'); return true; },
+	reset_line: () => 'gpio515' });
+rlg.load();
+eq(rlg.counters.unarmed_reset, 0, 'unarmed pulse: a pre-upgrade state file has not spent it');
+eq(rlg.on_attempt(), 'usb_repower', 'unarmed pulse: so it is still available after an upgrade');
+
+// --- ...and the three ways it must NOT fire ---------------------------------
+// 1. a box whose hardware action is a power cycle: the 2026-08-30 case itself
+fx = fakefx.create();
+let rpc = recovery.create({ id: 'unarmed_pc', failreboot: 30, fx: fx,
+	state_dir: '/state', log: silent,
+	repower: () => { push(pulses, 'power'); return true; },
+	reset_line: () => null });
+
+let pc = [];
+for (let i = 1; i <= 40; i++) push(pc, rpc.on_attempt());
+eq(length(filter(pc, (a) => a != 'retry')), 0,
+	'unarmed pulse: power-cycle box — nothing physical, the original rule intact');
+eq(rpc.usb_repower(), false, 'unarmed pulse: power-cycle box — the primitive refuses too');
+
+// 2. no board profile at all (most boxes): no reset_line callback is passed
+fx = fakefx.create();
+let rnb = recovery.create({ id: 'unarmed_nb', failreboot: 30, fx: fx,
+	state_dir: '/state', log: silent });
+
+let nb = [];
+for (let i = 1; i <= 40; i++) push(nb, rnb.on_attempt());
+eq(length(filter(nb, (a) => a != 'retry')), 0,
+	'unarmed pulse: no board profile — nothing physical');
+
+// 2b. a reset_gpio option that is PRESENT BUT EMPTY. uci keeps `option
+// reset_gpio ''` as an empty string; `??` passes it through while every consumer
+// that acts on it tests truthiness, so the ladder would have authorised a reset
+// and the board would have cut power instead — the one action the guard exists
+// to prevent, on an unarmed modem. Raised by Codex review, 2026-09-23.
+fx = fakefx.create();
+let rem = recovery.create({ id: 'unarmed_empty', failreboot: 30, fx: fx,
+	state_dir: '/state', log: silent,
+	repower: () => { push(pulses, 'empty'); return true; },
+	reset_line: () => '' });
+
+let em = [];
+for (let i = 1; i <= 40; i++) push(em, rem.on_attempt());
+eq(length(filter(em, (a) => a != 'retry')), 0,
+	'unarmed pulse: an empty reset_gpio is not a reset line');
+eq(rem.usb_repower(), false, 'unarmed pulse: and the primitive refuses it too');
+
+// 3. the pin is KNOWN wrong: arm_blocked is the active form of a misdetection,
+// and no pulse of any line fixes a language mismatch
+fx = fakefx.create();
+let rab = recovery.create({ id: 'unarmed_blocked', failreboot: 30, fx: fx,
+	state_dir: '/state', log: silent,
+	repower: () => { push(pulses, 'blocked'); return true; },
+	reset_line: () => 'gpio515' });
+rab.revoke_arming('driver contradicts the configured protocol');
+
+let ab = [];
+for (let i = 1; i <= 40; i++) push(ab, rab.on_attempt());
+eq(length(filter(ab, (a) => a != 'retry')), 0,
+	'unarmed pulse: a contradicted protocol pin gets no pulse');
+eq(length(pulses), 1, 'unarmed pulse: still exactly the one from the NR7101 case');
+
 // --- the two ways an unarmed modem could still reach the reboot -------------
 // The gate above used to wrap only the RUNG branch, so it stopped applying the
 // moment the ladder ran out of rungs — and execution fell straight through to
