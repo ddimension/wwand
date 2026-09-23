@@ -1033,6 +1033,114 @@ rld.shutdown();
 	});
 })();
 
+// --- a re-enumerating modem is not a PPP-only device ------------------------
+//
+// A device coming back from a reset passes through a state where only its
+// serial port has appeared. Reading that as a diagnosis told an NR7101 owner
+// his QMI modem "looks like a PPP-only device, which wwand does not support"
+// thirty-one seconds after wwand pulsed its reset GPIO — and seventeen seconds
+// later the QMI channel answered and it came up normally (MassiPi,
+// ddimension/wwand#40, 2026-09-23). `_had_modem` is the distinction: this
+// control device was once ours.
+(function() {
+	let pd_logs = [];
+	// m1 answers QMI to begin with, so its `_had_modem` is set the way the
+	// daemon sets it — by actually building a modem — rather than by the test
+	// reaching in. m0 is serial-only throughout: a genuine PPP stick.
+	let m1_proto = 'qmi';
+
+	let pd = daemon_mod.create({
+		timing: TIMING,
+		deps: {
+			transport_open: () => null,
+			load_qmi: () => ({
+				modem: { create: () => ({ start: () => null, stop: () => null }) },
+				context: { create: () => ({ state: 'IDLE', up: (cb) => cb?.(null, {}),
+				                            down: (cb) => cb?.(), attach: () => null,
+				                            detach: () => null }) },
+			}),
+			log: (l, m) => push(pd_logs, m),
+			emit_event: () => null,
+			kick_interface: () => null, renew_interface: () => null,
+			down_interface: () => null,
+			iface_status: (iface, cb) => cb({ up: false }),
+			datapath_fx: dpfx,
+			read_config: () => ({}),
+			resolve_control: (cfg) => (cfg.device == '/dev/mock1')
+				? (m1_proto == 'qmi'
+					? { protocol: 'qmi', device: '/dev/mock1', tty: null, netdev: null }
+					: m1_proto == 'gone'
+					? { protocol: 'ppp', device: null, tty: null, netdev: null }
+					: { protocol: 'ppp', device: null, tty: '/dev/ttyUSB2', netdev: null })
+				: { protocol: 'ppp', device: null, tty: '/dev/ttyUSB9', netdev: null },
+			resolve_modem_device: (cfg) => cfg.device,
+			resolve_netdev: () => 'wwan0',
+			learn_device: () => null, learn_modem_path: () => null,
+		},
+	});
+
+	pd.apply_config(config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0' },
+		m1: { '.type': 'wwand_modem', device: '/dev/mock1' },
+		wan0: { '.type': 'interface', proto: 'wwand', modem: 'm0' },
+		wan1: { '.type': 'interface', proto: 'wwand', modem: 'm1' },
+	} }));
+
+	// THE LOG, not the note: apply_config runs start_modem twice and the second
+	// pass rebuilds the entry, so the note is a poor witness here.
+	let said = (who, what) => length(filter(pd_logs,
+		(l) => index(l, sprintf('modem %s:', who)) == 0 && index(l, what) >= 0)) > 0;
+
+	ok(said('m0', 'PPP-only device'),
+		'ppp: a modem that never spoke anything else is diagnosed as PPP-only');
+	ok(pd.modems.m1._had_modem == true,
+		'ppp: ...while driving m1 once is what sets _had_modem');
+
+	// m1's modem is now gone and it comes back showing only its serial port —
+	// the half-enumerated state after a reset pulse. hotplug is the real
+	// rebuild path for that; a config reload would run stop_modem first and
+	// delete the entry, which is not what a re-enumerating device does.
+	pd_logs = [];
+	m1_proto = 'ppp';
+	pd.modems.m1.modem = null;
+	pd.hotplug('add', 'cdc-wdm0');
+
+	ok(said('m1', 'has been driven before'),
+		'ppp: a modem we have driven is re-enumerating, not a PPP stick');
+	ok(!said('m1', '(ppp), no rich control interface'),
+		'ppp: ...and is not announced as one');
+	ok(said('m0', '(ppp), no rich control interface'),
+		'ppp: while the one we never drove is still read as what it presents');
+
+	// ...AND THE WAIT IS BOUNDED. `_had_modem` is about the config entry, not
+	// the hardware on the port: swap the QMI stick for a serial one and it
+	// still says yes. A device that is STILL serial-only long after the
+	// enumeration window is what it presents.
+	pd_logs = [];
+	pd.modems.m1._ppp_since = time() - 600;
+	pd.modems.m1.modem = null;
+	pd.hotplug('add', 'cdc-wdm0');
+
+	ok(said('m1', '(ppp), no rich control interface'),
+		'ppp: past the settle window it is read as what it presents after all');
+	ok(!said('m1', 'has been driven before'),
+		'ppp: ...and stops being called a re-enumeration');
+
+	// ...and a spell ENDS when the device leaves, so the next one gets its own
+	// window rather than inheriting an expired timestamp.
+	pd_logs = [];
+	m1_proto = 'gone';
+	pd.hotplug('add', 'cdc-wdm0');
+	eq(pd.modems.m1._ppp_since, null, 'ppp: a device that leaves ends the serial-only spell');
+
+	m1_proto = 'ppp';
+	pd.hotplug('add', 'cdc-wdm0');
+	ok(said('m1', 'has been driven before'),
+		'ppp: ...so the next re-enumeration is waited on again');
+
+	pd.shutdown();
+})();
+
 // --- esim_ready bring-up refresh ---------------------------------------------
 // A second, fully stubbed daemon: the modem stub's create() captures the
 // on_event binding (the esim_ready handler), and the ubus-facing modem_esim is

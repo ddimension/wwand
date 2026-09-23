@@ -660,6 +660,9 @@ export function create(opts)
 			// vendor recipe when it refuses to identify itself (wwand#32).
 			// Raised by review, 2026-09-19.
 			_ident: prev?._ident,
+			// when the serial-only reading started, so the settle window in
+			// start_modem is a window and not a fresh countdown per rebuild
+			_ppp_since: prev?._ppp_since,
 		};
 	};
 
@@ -1479,6 +1482,14 @@ export function create(opts)
 		}
 	};
 
+	// How long a device we have already driven may present only a serial port
+	// before that stops being "still enumerating" and becomes what it is. The
+	// NR7101 that prompted this took seventeen seconds from reset pulse to an
+	// answering QMI channel (ddimension/wwand#40, 2026-09-23); ninety is room
+	// for a slower one without leaving a genuinely swapped serial stick
+	// unserved for long.
+	const PPP_SETTLE = 90;
+
 	// a PPP-only modem (serial port only) is mode-switched ONCE to a richer
 	// usbnet mode, then left for hotplug to rebuild on re-enumeration (no modem
 	// object built — no PPP dialer). Per-modem guard so it never loops.
@@ -1504,6 +1515,13 @@ export function create(opts)
 
 		if (modeswitch_tried[name]) {
 			log('info', sprintf('modem %s: usbnet mode switch already attempted, waiting for re-enumeration', name));
+			// WITH A NOTE, because the periodic re-check only looks at entries
+			// that have one (the waiting-modems loop in the tick). Returning
+			// bare left a rebuilt entry with control_note null, which quietly
+			// dropped the device out of the retry it is waiting for. Raised by
+			// Codex review, 2026-09-23.
+			if (entry)
+				entry.control_note = 'waiting for modem (mode switch attempted, re-enumeration pending)';
 			return;
 		}
 
@@ -1967,6 +1985,15 @@ export function create(opts)
 				entry.waiting_since = entry.waiting_since ?? time();
 			}
 
+			// the serial-only spell ended by the device leaving. NOT cleared
+			// when it keeps presenting a serial port past the window — that
+			// timestamp is what the window is made of, and resetting it on
+			// every tick would mean waiting forever, which is the bound it
+			// exists to provide. A spell ends when the device goes away or
+			// comes back rich, and both clear it. Raised by Codex review,
+			// 2026-09-23.
+			delete entry._ppp_since;
+
 			log('warn', sprintf('modem %s: control interface not present yet, waiting for hotplug', name));
 			// surface the wait to status()/netifd; the periodic tick re-logs it every 30s.
 			entry.control_note = entry.vanished
@@ -1977,8 +2004,48 @@ export function create(opts)
 		}
 
 		// PPP-only: mode-switch and wait for re-enumeration; do not build a modem.
+		//
+		// BUT NOT FOR A MODEM WE HAVE ALREADY DRIVEN. A device re-enumerating
+		// after a reset passes through a state where only its serial port has
+		// appeared, and reading that as a diagnosis produces a confident, wrong
+		// one: wwand told an NR7101 owner his QMI modem "looks like a PPP-only
+		// device, which wwand does not support" thirty-one seconds after
+		// pulsing its reset GPIO, then found the QMI channel and came up
+		// normally seventeen seconds later. It even tried to mode-switch on a
+		// tty that did not exist yet — "cannot open /dev/ttyUSB2: No such file
+		// or directory" — which is the same fact stated twice. Reported by
+		// MassiPi (ddimension/wwand#40, 2026-09-23).
+		//
+		// `_had_modem` is exactly the distinction needed and is already kept
+		// for the vanish escalation below: this control device was once ours,
+		// so a serial-only reading is the device coming back, not what it is.
+		// Waiting is what the next tick does anyway.
+		// BOUNDED, because "we have driven this before" is about the config
+		// entry and not about the hardware on the port: swap a QMI stick for a
+		// serial-only one and the flag still says yes. Waiting forever would
+		// then suppress the one-time mode switch that device needs. A device
+		// that is still serial-only after PPP_SETTLE seconds is not
+		// mid-enumeration — the NR7101 took seventeen — so the diagnosis is
+		// allowed through. Raised by Codex review, 2026-09-23.
+		if (control.protocol == 'ppp' && entry._had_modem &&
+		    (time() - (entry._ppp_since ?? time())) < PPP_SETTLE) {
+			entry._ppp_since ??= time();
+			// protocol-NEUTRAL: `entry.protocol` is this discovery's answer,
+			// which is 'ppp' right now, and `_had_modem` carries no memory of
+			// what it was. Saying "has spoken ppp before" would be the same
+			// mistake one layer down.
+			log('info', sprintf('modem %s: serial port only so far, but this one has been driven before — waiting for it to finish enumerating',
+				name));
+			entry.control_note = 'waiting for modem (still enumerating)';
+			return;
+		}
+
 		if (control.protocol == 'ppp')
 			return try_modeswitch(name, entry, control.tty);
+
+		// the serial-only spell is over — start the settle window afresh if it
+		// ever comes back
+		delete entry._ppp_since;
 
 		// a rich control interface means any prior mode switch re-enumerated —
 		// cancel its liveness watchdog and clear the note.
