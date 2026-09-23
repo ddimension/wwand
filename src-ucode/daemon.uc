@@ -680,6 +680,96 @@ export function create(opts)
 				data?.expected ?? '?', data?.found ?? '?');
 	};
 
+	// THE SUBSCRIPTION CHANGED UNDER A RUNNING CONNECTION. An eSIM profile
+	// switch or a card swap leaves any established session on this modem
+	// belonging to the PREVIOUS subscription — one the new card has no claim
+	// to. (Not every wanted context holds one; asking each to drop what it has
+	// is the point, see below.)
+	// wwand knew it had happened and did nothing with the knowledge:
+	// `sim_refresh` carries the new identity and nothing in the daemon
+	// listened, so the data path stayed up carrying nothing until somebody
+	// pressed Reconnect. Reported on a Fibocom after an eSIM enable (patrakov,
+	// OpenWrt forum, 2026-09-22); the same shape is the tail of
+	// ddimension/wwand#35.
+	//
+	// EVERY WANTED CONTEXT, WHATEVER STATE IT LOOKS LIKE. Two attempts at a
+	// cleverer predicate were wrong, and both in the same way — the public
+	// `state` does not answer "does this hold a bearer":
+	//
+	//   - CONNECTED is sufficient but not necessary. An MBIM attempt aborted
+	//     while the modem was still answering sets `activated` from the late
+	//     reply (context_mbim.uc:344-348), so an IDLE context can be holding a
+	//     session that only down() will tear down.
+	//   - ACTIVATING is not "no session yet" either: MBIM sets `activated`
+	//     before it queries the IP configuration (context_mbim.uc:359-360), NCM
+	//     before it reads its own (context_ncm.uc:702), and QMI can have
+	//     activated families while settings are still being fetched.
+	//
+	// Each backend's down() already knows exactly what it holds. Asking it is
+	// right; second-guessing it from outside is how both earlier versions
+	// leaked the session they existed to drop. Raised by Codex review over two
+	// rounds, 2026-09-23.
+	//
+	// AND THE RECONNECT IS STARTED HERE, not inferred from the `down` event.
+	// context_ncm.down() returns WITHOUT emitting it when the activation has
+	// not set `activated` yet (context_ncm.uc:823-826) — so a mid-dial NCM
+	// context would have gone IDLE with `wanted` still true and nothing
+	// scheduled, wedged by the very handler meant to restart it. enter_
+	// reconnecting returns on an armed hold timer, and every emitting backend
+	// fires its event and this callback as consecutive synchronous statements
+	// — no uloop timer can run between them — so the second call is a no-op
+	// for them. (It is not idempotent in general: a retry scheduled with no
+	// hold behind it would start a second chain. That is why schedule() now
+	// cancels before it replaces — reconnect.uc.)
+	//
+	// What that path then does: holds the interface up, retries with a backoff
+	// from the moment it starts, and bounds the wait at hold_max. Past that
+	// bound it hands over to the registration path rather than retrying
+	// forever — which recovers a modem that took a long time to come back, and
+	// is NOT a guarantee that every outcome ends connected: an activation that
+	// keeps failing after the modem has already registered can run the hold out
+	// with no further `registered` to trigger on. Pre-existing shape of the
+	// hold path, stated because this routes a new case into it. Dialling from here would be a second, unbounded copy of
+	// a path that exists and is tested — and it is why the old comment in
+	// esim_bridge (apply_sim_reset: "the data session comes back via the normal
+	// transient-loss path") was right about the mechanism and wrong about
+	// whether anything started it.
+	//
+	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
+	// own emit on a change (modem_mbim.uc:840-849) while the shared reapply
+	// tail emits on every re-read (modem_common.uc:553-559); one comparison, in
+	// the place that acts on it, cannot disagree with itself.
+	let modem_sim_refresh = (modem, data) => {
+		let entry = self.modems[modem.id];
+
+		if (!entry)
+			return;
+
+		let now = sprintf('%s/%s', data?.iccid ?? '', data?.imsi ?? '');
+		let prev = entry._sim_identity;
+
+		entry._sim_identity = now;
+
+		// nothing to compare against yet — the first read of this modem, or a
+		// rebuilt entry after a reload — and a re-read of the same card is not
+		// a change. Both must stay silent: dropping a healthy session because
+		// the identity was merely READ AGAIN is worse than the bug.
+		if (prev == null || prev == now)
+			return;
+
+		for (let name, centry in self.contexts) {
+			// `wanted` is the one thing worth filtering on: a context nobody
+			// asked for has nothing to re-establish, and enter_reconnecting
+			// would refuse it anyway.
+			if (centry.cfg?.modem != modem.id || !centry.ctx || !centry.wanted)
+				continue;
+
+			log('notice', sprintf('interface %s: the SIM changed under it — dropping the session so it re-dials on the new subscription',
+				name));
+			centry.ctx.down(() => enter_reconnecting(name));
+		}
+	};
+
 	let on_modem_event = (modem, event, data) => {
 		// clear the one-shot manual-PIN-release flags so a later cycle never reuses them
 		if (event == 'registered' || event == 'sim_blocked') {
@@ -707,6 +797,10 @@ export function create(opts)
 		case 'deregistered':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
 			return;
+
+		case 'sim_refresh':
+			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
+			return modem_sim_refresh(modem, data);
 
 		// eSIM surface known (the modem finished its eSIM probes): with the
 		// eUICC active, the APDU window right after bring-up is the natural

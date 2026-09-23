@@ -139,6 +139,20 @@ export function install(self, o)
 			return;   // permanent; handled by the sim_blocked path (down)
 
 		let schedule = () => {
+			// CANCEL BEFORE REPLACING. A dropped uloop handle still fires, so
+			// assigning over a pending retry leaves TWO chains walking the same
+			// entry: both increment retry_n, both eventually call ctx.up(), and
+			// the backoff they were meant to space out collapses. Reachable
+			// whenever something reaches retry_activate while a retry is
+			// already scheduled: the modem-ready and adoption paths call it
+			// directly (daemon.uc:484,:556), and the sim_refresh handler gets
+			// there through enter_reconnecting. Raised by Codex
+			// review, 2026-09-23.
+			if (entry.retry_timer) {
+				entry.retry_timer.cancel();
+				entry.retry_timer = null;
+			}
+
 			entry.retry_n = (entry.retry_n ?? 0) + 1;
 			let delay = min(entry.retry_n * (timing?.backoff_min ?? 2000),
 			                timing?.backoff_max ?? 30000);

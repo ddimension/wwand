@@ -389,8 +389,21 @@ return {
 		// this the RG650E keeps running the stale identity into limited
 		// service. Then re-unlock (PIN may re-arm with the card) and re-read
 		// identity so status/LuCI show the new profile. cb fires immediately;
-		// the re-read finishes in the background and the data session comes
-		// back via the normal transient-loss path.
+		// the re-read finishes in the background.
+		//
+		// THE DATA SESSION is put back on the normal transient-loss path — a
+		// sentence that stood here for months claiming it came back, while
+		// nothing started it. The running context kept a PDP session belonging
+		// to the profile just switched away from, so it never went down and
+		// never re-dialled; the connection returned when somebody pressed
+		// Reconnect (patrakov on a Fibocom, OpenWrt forum 2026-09-22).
+		//
+		// The re-read below emits `sim_refresh`, and daemon.modem_sim_refresh
+		// drops the stale session and enters the reconnect when the identity
+		// actually changed. Put ON the path, not guaranteed to arrive: that
+		// path retries with a backoff and gives up at hold_max, handing over to
+		// the registration path — see the comment there for what that does and
+		// does not promise.
 		let apply_sim_reset = (ref, entry, slot, res, cb) => {
 			sim.power_cycle(entry.modem, slot, (perr) => {
 				if (perr) {

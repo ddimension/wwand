@@ -886,6 +886,153 @@ ok(rld.contexts.wanC.ctx == ctxC_obj, 'reload mux: wanC ctx preserved');
 
 rld.shutdown();
 
+// --- sim_refresh: a changed subscription drops the stale session --------------
+//
+// An eSIM profile switch or a card swap leaves the running context dialled with
+// the PREVIOUS subscription's PDP session. The daemon knew — `sim_refresh`
+// carries the new identity — and nothing listened, so the data path stayed up
+// carrying nothing until somebody pressed Reconnect (patrakov on a Fibocom,
+// OpenWrt forum 2026-09-22; the tail of ddimension/wwand#35).
+//
+// What must NOT happen is equally load-bearing: a re-read of the SAME card, or
+// the first read of a modem, must leave a healthy session alone. And the
+// mid-dial context must be dropped AND restarted — not skipped, because it may
+// already hold a bearer, and not left to the `down` event, because one backend
+// does not send one.
+(function() {
+	let sr_on_event = null;
+	let sr_downs = [];
+
+	let sd = daemon_mod.create({
+		timing: TIMING,
+		deps: {
+			transport_open: () => null,
+			load_qmi: () => ({
+				modem: { create: (o) => {
+					sr_on_event = o.deps.on_event;
+					return { start: () => null, stop: () => null };
+				} },
+				context: { create: (o) => ({ state: 'IDLE', up: (cb) => cb?.(null, {}),
+				                             down: (cb) => cb?.(), attach: () => null,
+				                             detach: () => null }) },
+			}),
+			log: () => null,
+			emit_event: () => null,
+			kick_interface: () => null,
+			renew_interface: () => null,
+			down_interface: () => null,
+			iface_status: (iface, cb) => cb({ up: false }),
+			datapath_fx: dpfx,
+			read_config: () => ({}),
+			resolve_modem_device: (cfg) => cfg.device,
+			resolve_netdev: () => 'wwan0',
+			learn_device: () => null,
+			learn_modem_path: () => null,
+		},
+	});
+
+	sd.apply_config(config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0' },
+		m1: { '.type': 'wwand_modem', device: '/dev/mock1' },
+		wanA: { '.type': 'interface', proto: 'wwand', modem: 'm0' },
+		wanB: { '.type': 'interface', proto: 'wwand', modem: 'm0' },
+		wanC: { '.type': 'interface', proto: 'wwand', modem: 'm1' },
+	} }));
+
+	// down() goes IDLE, as every real context does — without that the stub
+	// would take a second drop for the same session
+	let arm = (name, state, wanted) => {
+		let c = sd.contexts[name].ctx;
+		c.state = state;
+		// the retry path reads the modem through the context; REGISTERING is
+		// what a modem looks like just after its card was power-cycled, which
+		// is exactly when this fires
+		c.modem = { state: 'REGISTERING', id: 'm0' };
+		c.down = (cb) => { push(sr_downs, name); c.state = 'IDLE'; cb?.(); };
+		sd.contexts[name].wanted = wanted ?? true;
+	};
+
+	// wanA is carrying traffic; wanB is MID-DIAL, which is not the same as
+	// "holds nothing" — MBIM sets its activated flag before it queries the IP
+	// configuration (context_mbim.uc:359-360) and NCM before it reads its own
+	// (context_ncm.uc:702). wanC belongs to the other modem.
+	arm('wanA', 'CONNECTED');
+	arm('wanB', 'ACTIVATING');
+	arm('wanC', 'CONNECTED');
+
+	let m0 = { id: 'm0' };
+
+	// the FIRST identity this modem ever reported: there is nothing to compare
+	// it against, and a modem coming up must not tear down what it just built
+	sr_on_event(m0, 'sim_refresh', { iccid: '8949000000000000001', imsi: '262011111111111' });
+	eq(sr_downs, [], 'sim_refresh: the first identity of a modem is not a change');
+
+	// ...and the same card answering again is a re-read, not a swap. Without
+	// this the shared reapply tail — which emits on EVERY re-read, unlike the
+	// MBIM path that filters — would drop a healthy session on a UIM refresh.
+	sr_on_event(m0, 'sim_refresh', { iccid: '8949000000000000001', imsi: '262011111111111' });
+	eq(sr_downs, [], 'sim_refresh: a re-read of the same card changes nothing');
+
+	// a different card: every session on that modem belongs to a subscription
+	// that is gone, whatever state the context reports
+	sr_on_event(m0, 'sim_refresh', { iccid: '8949000000000000002', imsi: '262012222222222' });
+	eq(sr_downs, [ 'wanA', 'wanB' ], 'sim_refresh: a changed card drops every wanted session');
+	eq(index(sr_downs, 'wanC'), -1, 'sim_refresh: another modem is not touched');
+
+	// AND THE RECONNECT IS ACTUALLY ENTERED. This is the half the earlier
+	// version left to an event that one backend does not send:
+	// context_ncm.down() emits nothing when the activation had not set
+	// `activated` yet (context_ncm.uc:823-826), so a mid-dial NCM context
+	// would have been left IDLE and wanted with nothing scheduled.
+	ok(sd.contexts.wanA.hold_timer != null, 'sim_refresh: the dropped session enters reconnect');
+	ok(sd.contexts.wanB.hold_timer != null, 'sim_refresh: ...including the one that emitted no down event');
+	eq(sd.contexts.wanC.hold_timer, null, 'sim_refresh: and the untouched modem is left alone');
+
+	// a context nobody asked for has nothing to re-establish
+	sd.contexts.wanA.wanted = false;
+	sd.contexts.wanA.ctx.state = 'CONNECTED';
+	let n = length(sr_downs);
+	sr_on_event(m0, 'sim_refresh', { iccid: '8949000000000000003', imsi: '262013333333333' });
+	eq(index(slice(sr_downs, n), 'wanA'), -1, 'sim_refresh: an unwanted context is not dropped');
+
+	// the newest identity is the baseline, so a re-read of IT is quiet again
+	let m = length(sr_downs);
+	sr_on_event(m0, 'sim_refresh', { iccid: '8949000000000000003', imsi: '262013333333333' });
+	eq(length(sr_downs), m, 'sim_refresh: the new card becomes the baseline');
+
+	// A SECOND RETRY CHAIN IS A REAL STATE, not a hypothetical. schedule()
+	// assigned over entry.retry_timer, and a dropped uloop handle still fires —
+	// so anything calling retry_activate while a retry was already pending left
+	// two chains walking one entry, both incrementing retry_n and both calling
+	// ctx.up(). The modem-ready and adoption paths call it directly
+	// (daemon.uc:484,:556) and this handler is a third.
+	let ups = 0;
+	let rc = sd.contexts.wanC.ctx;
+
+	rc.state = 'IDLE';
+	rc.modem = { state: 'READY', id: 'm1' };
+	rc.up = (cb) => { ups++; cb?.({ error: 'no-service' }); };
+	sd.contexts.wanC.wanted = true;
+
+	sd._retry_activate('wanC');          // one chain, retry scheduled, no hold
+	sd._retry_activate('wanC');          // ...and a second caller lands on it
+
+	uloop.timer(300, () => {
+		// The separation is structural, not a lucky measurement: with
+		// backoff_min 40 the shortest possible spacing is 40 ms, so ONE chain
+		// cannot exceed 300/40 = 8 attempts in the window however fast the
+		// host is, while two chains share one entry and roughly double it.
+		// Measured here: 7 with the fix, 11-12 without. The bound sits at 9 —
+		// above the ceiling for one chain, below the floor for two. Setting it
+		// on the measured 7 would pass here and flake on a slower machine,
+		// which is a worse test than none.
+		ok(ups > 0, 'retry: the chain is running at all');
+		ok(ups <= 9, sprintf('retry: one chain, not two (%d attempts in 300 ms)', ups));
+
+		sd.shutdown();
+	});
+})();
+
 // --- esim_ready bring-up refresh ---------------------------------------------
 // A second, fully stubbed daemon: the modem stub's create() captures the
 // on_event binding (the esim_ready handler), and the ubus-facing modem_esim is
