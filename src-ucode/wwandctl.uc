@@ -75,8 +75,13 @@ function cmd_status(args)
 	let st = status();
 
 	for (let name, m in st.modems) {
-		printf('MODEM %s  (%s %s, %s, %s)\n', name,
-			m.manufacturer ?? '?', m.model ?? '?', m.protocol ?? '?', m.device ?? '?');
+		// the MS extension version rides with the protocol because it changes
+		// what "mbim" means on the wire: the v1 Base Stations Info carries no
+		// NR arrays at all. Someone pasting this into an issue should not have
+		// to be asked for it separately (ddimension/wwand#30, 2026-09-23).
+		printf('MODEM %s  (%s %s, %s%s, %s)\n', name,
+			m.manufacturer ?? '?', m.model ?? '?', m.protocol ?? '?',
+			m.mbimex ? sprintf(' MBIMEx %s', m.mbimex) : '', m.device ?? '?');
 		printf('  state       %s%s\n', m.state,
 			m.control_note ? sprintf('  [%s]', m.control_note) : '');
 		printf('  SIM         imsi %s  iccid %s\n', m.imsi ?? '-', m.iccid ?? '-');

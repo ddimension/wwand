@@ -670,6 +670,32 @@ rd.shutdown();
 	// page say "nothing comes next" while a reboot was still pending — at 25
 	// attempts with the default failreboot of 100 there are 76 failures to go.
 	eq(length(r.rungs), 4, 'recovery view: the whole ladder is listed, reboot included');
+
+	// WHICH MBIM MESSAGE LAYOUT THIS MODEM'S DECODERS ARE USING. The agreed MS
+	// extension version decides it — v1 Base Stations Info has no NR arrays and
+	// every pointer after SystemType sits four bytes earlier — and it lived in
+	// one log line at open. A reporter comparing wwand's reading against
+	// mbimcli's could not see that mbimcli opens v1 unless told otherwise, so
+	// the two were reading different structures of the same CID and neither
+	// output said so (ddimension/wwand#30, 2026-09-23).
+	eq(st.modems.m0.mbimex, null, 'mbimex: a modem with no MBIM client claims no version');
+
+	sd.modems.m0.modem.mbim = { mbimex_version: 0x0300 };
+	eq(sd.status().modems.m0.mbimex, '3.0', 'mbimex: the agreed version is reported');
+
+	// 0 is "the handshake was refused", which is NOT the same as 1.0 and must
+	// not be printed as a version the modem agreed to
+	sd.modems.m0.modem.mbim = { mbimex_version: 0 };
+	eq(sd.status().modems.m0.mbimex, null, 'mbimex: a refused handshake is not a version');
+
+	// DELIBERATELY SYNTHETIC: libmbim 1.32.0 defines 1.0, 2.0 and 3.0 and
+	// nothing with a non-zero minor. The point here is the extraction, which a
+	// 0x0200 case could not distinguish from one that only reads the high
+	// byte. Raised by Codex review, 2026-09-23 — worth saying so, because a
+	// reader could otherwise take this for evidence that 2.1 exists.
+	sd.modems.m0.modem.mbim = { mbimex_version: 0x0201 };
+	eq(sd.status().modems.m0.mbimex, '2.1', 'mbimex: both halves of the number survive');
+	delete sd.modems.m0.modem.mbim;
 	eq(r.rungs[3].action, 'reboot', 'recovery view: and the reboot is last');
 	eq(r.rungs[0].fired, true, 'recovery view: opmode cycle already fired');
 	eq(r.rungs[2].fired, false, 'recovery view: the hardware rung has not');

@@ -22,6 +22,15 @@ import * as context_common from 'wwand.context_common';
 // use its injected `log` dep and go to the shared sink directly
 import * as logmod from 'wwand.log';
 
+// The agreed MS extension version as text. Both halves of the u16, the way
+// mbim_client's own open-time log line writes it (mbim_client.uc:205-207) —
+// only x.0 generations are defined today, but reading the number the way its
+// owner does is cheaper than being right about that forever.
+function mbimex_text(v)
+{
+	return v ? sprintf('%d.%d', (v >> 8) & 0xff, v & 0xff) : null;
+}
+
 // backends load lazily; a missing package returns null (cached failure) so
 // start_modem reports it clearly instead of crashing. Lazy also so a QMI-only
 // install never loads MBIM's ~1.4k lines/schema. require() cannot load ES
@@ -2852,6 +2861,30 @@ export function create(opts)
 				// while debugging a refused CONNECT on an RM520N-GL (which
 				// declares 15, so session 1 was never the problem), 2026-09-19.
 				max_sessions: entry.modem?.info?.max_sessions,
+				// WHICH MESSAGE LAYOUT EVERY MBIM DECODER IS USING, which is
+				// what the negotiated MS extension version decides — the v1
+				// Base Stations Info has no NR arrays at all and every pointer
+				// after SystemType sits four bytes earlier, so the same CID
+				// answers a different structure depending on this one number
+				// (codec/mbim_schema/ms_basic_connect_ext.uc, decode_base_
+				// stations_info). It was agreed once at open and written to a
+				// single log line (mbim_client.uc:205-207), which is nowhere
+				// when you are comparing wwand's reading against mbimcli's an
+				// hour later — and mbimcli opens v1 unless it is given
+				// --device-open-ms-mbimex-v3, so the two talk about different
+				// messages and neither side can see that from the output.
+				// Cost a round of ddimension/wwand#30 exactly that way,
+				// 2026-09-23.
+				//
+				// NULL MEANS THE DECODERS ARE ON THE v1 LAYOUTS, and it covers
+				// three cases the client cannot tell apart anyway: not an MBIM
+				// modem, the handshake refused, and the handshake not answered
+				// yet — mbim_client keeps 0 for all of the latter
+				// (mbim_client.uc:230). `protocol` separates the first from
+				// the other two, and the open-time log line says which of
+				// those two it was. What null must NOT become is "1.0", which
+				// would claim an extension version the modem agreed to.
+				mbimex: mbimex_text(entry.modem?.mbim?.mbimex_version),
 				imsi: entry.modem?.info?.imsi,
 				iccid: entry.modem?.info?.iccid,
 				msisdn: entry.modem?.info?.msisdn,
