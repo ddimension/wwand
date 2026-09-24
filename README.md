@@ -98,7 +98,9 @@ channels).
 | `wwand-mbim` | MBIM backend (`DEPENDS wwand-qmi` — the passthrough reuses QMI) |
 | `wwand-ncm` | NCM/ECM backend (`DEPENDS wwand`) |
 | `wwand-mhi` | PCIe/MHI transport + MHI drivers (`DEPENDS wwand`; backend-neutral, add wwand-qmi or wwand-mbim) |
-| `wwand-esim` | eSIM management + SM-DP+ download (`DEPENDS wwand-qmi + lpac`) |
+| `wwand-esim` | eSIM management + SM-DP+ download (`DEPENDS wwand + lpac` — no backend: the APDU transport chain MBIM UICC → QMI UIM → AT lives in the base `sim.uc`, so eSIM works on an NCM- or MBIM-only box too) |
+| `wwand-gps` | reads the modem's NMEA port wwand found during enumeration and reports the fix through `modem_gps` (`DEPENDS wwand`) |
+| `wwand-apntest` | runs configured APN tests in sequence on a dedicated test box — SIM or eUICC profile, dial, checks, one verdict per test (`DEPENDS wwand`) |
 | `wwand-datapath-rmnet_nss` | optional datapath add-on: adopts the vendor `qmi_wwan_q` QMAP children (USB) so they keep their Qualcomm NSS offload (`DEPENDS wwand-qmi`) |
 | `wwand-datapath-rmnet_nss_mhi` | the same for Quectel's vendor `pcie_mhi` driver (PCIe/MHI, QMI *and* MBIM) (`DEPENDS wwand`) |
 

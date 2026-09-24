@@ -196,6 +196,14 @@ be decided by load order; `_wwand_apply_settings` builds the netifd update).
 
       tools/check-anchors.py --extern <kernel>/net/ipv6 --extern <netifd> --extern <luci>
 
+  An anchor can also go wrong without breaking: an edit ABOVE its target moves
+  the line and the old number still exists. `--since REV` diffs each target
+  file against REV and reports such an anchor as SHIFTED (and `--fix` rewrites
+  it), or as STALE when the cited line itself changed. `run_tests.sh` runs it
+  with `--since HEAD`, so an uncommitted shift fails the suite before the commit.
+  Any pass that removes comment lines needs it: the why-principle pass on
+  2026-09-24 moved 39 anchors across the tree without breaking a single one.
+
 - **Comments explain WHY — the why principle.** The code already says what it
   does; a comment earns its place by saying what the code cannot:
   - the **reason**: the constraint, the firmware or protocol fact, and — most

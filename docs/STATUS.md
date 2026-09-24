@@ -1,6 +1,6 @@
 # wwand — current state
 
-_State of 2026-09-10, after v1.6.4. 53 host suites, all green (`cd tests && sh
+_State of 2026-09-24, after v1.6.8. 58 host suites, all green (`cd tests && sh
 run_tests.sh` — it prints the count, which moves too often to be worth repeating
 here)._
 
@@ -858,10 +858,13 @@ Quectel — while `option gnss`, the one that does, had no UI at all.
    aliased without its receiver threw on every draw of the Registration column
    and shipped with a green suite, because the suite called it WITH a receiver
    and the view did not (openwrt/packages#37, 2026-09-21).
-4a. `tools/check-anchors.py` and `tools/check-map.py` — the first fails on a
-   `file:line` citation that no longer points anywhere, the second on a
-   `docs/map.md` row whose module or symbol was renamed. Both are cheap; the
-   second exists because the map is only worth having while it is true.
+4a. Nothing to run by hand for the doc checkers: step 1 already runs
+   `check-map.py`, `check-anchors.py --since HEAD` and
+   `check-export-terminators.py` after the suites and fails on any of them.
+   Step 2 stays listed because of the defect it names, and running it again
+   costs nothing. What `--since HEAD` cannot see is a shift that is already
+   COMMITTED: after a pass that removes or adds comment lines, run
+   `tools/check-anchors.py --since <the commit before it> --fix` once.
 5. Tag, pinning the **commit** (`git rev-parse vX.Y.Z^{commit}`), never the tag
    object.
 6. Feed, on its main branch: `scripts/bump-source.sh wwand vX.Y.Z` (and the two
