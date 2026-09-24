@@ -231,7 +231,7 @@ export function create(opts)
 			// interface — every 60 s by default, long enough to break anything
 			// holding a v6 connection. The QMI monitor has guarded this since
 			// its keep_stable_v6; the comment at :193 claimed parity with it
-			// and there was none. Found by a full review, 2026-09-19.
+			// and there was none.
 			if (next.ipv6 && self.settings?.ipv6)
 				next.ipv6 = context_common.keep_stable_v6(self.settings.ipv6, next.ipv6);
 
@@ -439,8 +439,7 @@ export function create(opts)
 		// OUTER object, which has neither — so text and code were null for
 		// every MBIM-status and every timeout, which is precisely the reason
 		// this field exists to show. One site (:320) puts a bare string in
-		// `err`, so that shape is handled too. Found by a full review,
-		// 2026-09-19.
+		// `err`, so that shape is handled too.
 		let inner = err?.err;
 		let inner_text = (type(inner) == 'string') ? inner : inner?.error;
 
@@ -568,7 +567,7 @@ export function create(opts)
 			// this since MBIM got QMI parity, and status() never carried it —
 			// so the field was built, twice over (see _fail), and nothing
 			// could ever read it. context.uc:1115 has surfaced the QMI twin
-			// all along. Found by a full review, 2026-09-19.
+			// all along.
 			last_error: self.last_error,
 			stats: (self.state == 'CONNECTED') ? self.stats : null,
 			uptime: (self.state == 'CONNECTED' && self.connected_since)

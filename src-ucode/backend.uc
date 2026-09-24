@@ -67,7 +67,7 @@
 // decline for a reason of its own that outlives the re-probe. The MBIM
 // passthrough rungs all go through `modem_mbim._ensure_pt`, which latches
 // `_pt_failed` when the SHIM SETUP fails and then declines without trying again
-// until the modem is torn down (modem_mbim.uc:1019,1025,1295). That latch is
+// until the modem is torn down (modem_mbim.uc:1016,1025,1295). That latch is
 // deliberate — it is what keeps a modem with no passthrough at all (RG650E)
 // from rebuilding a shim on every capability — so re-probing walks the ladder
 // and the top rung still says no. The field case this was written for is the

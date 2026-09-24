@@ -198,7 +198,6 @@ const F_NEIGH_NR = [
 // v3 offsets does not fail — the bounds checks absorb it — it publishes
 // FABRICATED serving-cell PCI/TAC/RSRP. Which layout applies is settled by the
 // version handshake at mbim_client.uc open(); a modem that refused it is v1.
-// Found by a full review, 2026-09-19.
 export function decode_base_stations_info(info, mc)
 {
 	if (!mbimex_v3(mc))
@@ -438,8 +437,7 @@ function decode_caps_v3(info)
 	// quietly on a firmware that omits one: every later field shifts up by one
 	// and `device_id` comes back holding the firmware string. A decode that
 	// lies is worse than one that stops, so a position whose type does not
-	// match ends the walk and leaves the rest null. Raised by review,
-	// 2026-09-20.
+	// match ends the walk and leaves the rest null.
 	const ORDER = [
 		[ 'lte_band_class',    mbimcodec.TLV_UINT16_TBL ],
 		[ 'nr_band_class',     mbimcodec.TLV_UINT16_TBL ],

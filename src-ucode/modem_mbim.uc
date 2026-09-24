@@ -191,11 +191,11 @@ export function create(opts)
 	// alone, its response carries both) — and all four writers here threw it
 	// away, keeping only `serr`.
 	//
-	// So a modem that ships with its software radio off, which step_register
-	// then switches on, went on reporting the reading from BEFORE the switch:
-	// `radio: { hw: 1, sw: 0 }` and "Radio off (software)" in LuCI on a modem
-	// that was registered and carrying traffic. Reported by obsy on an MBIM
-	// modem, ddimension/wwand#38, 2026-09-22. The indication cannot repair it —
+	// Otherwise a modem that ships with its software radio off, which
+	// step_register then switches on, keeps reporting the reading from BEFORE
+	// the switch: `radio: { hw: 1, sw: 0 }` and "Radio off (software)" in LuCI on
+	// a modem that is registered and carrying traffic (evidence:
+	// ddimension/wwand#38). The indication cannot repair it —
 	// it fires on a change the modem chooses to report, and a change we
 	// commanded ourselves is exactly the one that may not come.
 	//
@@ -210,7 +210,7 @@ export function create(opts)
 	// construction, about to leave within `settle` turns an accurate instant
 	// into the very message #38 was about. Nothing is lost by skipping it: if
 	// the ON half never runs, it is because the modem was torn down, and
-	// teardown nulls `radio` outright. Raised by Codex review, 2026-09-22.
+	// teardown nulls `radio` outright.
 	//
 	// Returns whether the answer was usable, so a caller can tell "the radio
 	// is on" from "that message told us nothing".
@@ -423,8 +423,7 @@ export function create(opts)
 	// telemetry fallbacks use it unchanged (telemetry_at returns
 	// self.at_telemetry). NOT HW-validated.
 	//
-	// It is not the only way in, and the comment used to claim otherwise:
-	// modem_common.open_at() falls back to the same pipe on its own whenever
+	// It is not the only way in: modem_common.open_at() falls back to the same pipe on its own whenever
 	// there is no tty or the tty will not open. What this option adds is
 	// FORCING it past a working tty, and choosing the vendor CID flavour — the
 	// automatic path cannot pick 'compal'. `option at_mbim '0'` turns the
@@ -477,9 +476,9 @@ export function create(opts)
 	// Session datapath. It goes through the SAME netlink.setup() as QMI — the
 	// cdc_mbim session mux is the built-in `vlan` backend there (one VLAN
 	// sub-device per session id > 0, named after the context's mux_link so
-	// netifd's device binding matches). It used to be a netlink.setup_mbim() of
-	// its own, and the copy drifted: the stale-child prune was fixed in setup()
-	// and missed here, leaving this path with the very defect it was fixed for.
+	// netifd's device binding matches). It goes through netlink.setup() rather
+	// than a private copy, because a copy drifts: a fix to the stale-child prune
+	// in one would leave the other with the very defect it was fixed for.
 	// Skipped gracefully when no datapath info is wired (host tests).
 	step_datapath = () => {
 		let dp = opts.datapath;
@@ -568,8 +567,7 @@ export function create(opts)
 			// is right for the status page and wrong here: acting on it would
 			// send a slot switch to a modem whose slot support we have just
 			// established does not answer. Same outcome as the error branch
-			// above, which is what this used to take. Raised by Codex review on
-			// the single-slot fallback, 2026-09-22.
+			// above.
 			if (err || !sim.enumerated(slots)) {
 				log('info', sprintf('sim_slot %d configured but slot status unsupported, continuing', want));
 				return step_sim();
@@ -597,13 +595,13 @@ export function create(opts)
 	step_sim = (tries) => {
 		// THE POLL MUST NOT OUTLIVE THE SESSION. Teardown cancels
 		// sim_poll_timer and then destroys the MBIM client, which completes the
-		// in-flight query with `cancelled` — and the callback below used to walk
-		// on regardless and re-arm the timer AFTER that cancel pass. When the
-		// new timer fired, self.mbim was null and `self.mbim.command` threw:
+		// in-flight query with `cancelled` — and a callback that walked on
+		// regardless would re-arm the timer AFTER that cancel pass. When that
+		// timer fires, self.mbim is null and `self.mbim.command` throws:
 		// a throw inside a uloop callback ends the program (measured
 		// 2026-09-19), so the daemon dies and procd respawns it. Reachable on
 		// any unplug or config reload inside the up-to-10 s cold-boot wait —
-		// the GL-X3000/RM520N case. Found by a full review, 2026-09-19.
+		// the GL-X3000/RM520N case.
 		let gen = self._gen;
 
 		self.set_state('SIM_UNLOCK');
@@ -759,10 +757,9 @@ export function create(opts)
 					// ...but a CANCELLATION is the session ending, not the
 					// firmware refusing. destroy() pays its pending callbacks
 					// synchronously and only then clears them
-					// (mbim_client.uc:267,275), so re-querying here enqueued a
+					// (mbim_client.uc:265,275), so re-querying here enqueued a
 					// command into the client being torn down. Same shape as
-					// the ready-state poll above. Raised by review,
-					// 2026-09-19.
+					// the ready-state poll above.
 					if (verr.error == 'cancelled' || self._gen != gen || !self.mbim)
 						return;
 
@@ -1117,7 +1114,7 @@ export function create(opts)
 		if (registered && self.state == 'REGISTERING') {
 			if (reg_timer) { reg_timer.cancel(); reg_timer = null; }
 			// ATTACHING guards against REGISTER_STATE indications piling up
-			// while the attach is in flight — each one used to re-run
+			// while the attach is in flight — without it each one would re-run
 			// step_attach and re-emit 'registered' (kick spam in the daemon)
 			self.set_state('ATTACHING');
 			step_attach();
@@ -1325,8 +1322,7 @@ export function create(opts)
 					// worse bug than the missing diagnostic this adds. The
 					// generation guard covers the other end: a teardown during
 					// the query answers `gone`, and that must not be reported
-					// as a registration timeout either. Raised by review,
-					// 2026-09-20.
+					// as a registration timeout either.
 					if (self._gen != tgen || self.state != 'REGISTERING')
 						return;
 
@@ -1356,8 +1352,7 @@ export function create(opts)
 		// every registration-loss/re-registration cycle asks again; without the
 		// generation check a teardown mid-flight lets the answer land on the
 		// next session, and an indication that arrived while it was out would
-		// be overwritten by the older reading. Raised by Codex review,
-		// 2026-09-20.
+		// be overwritten by the older reading.
 		if (self.modem_config == null && !self._modem_config_asked) {
 			let cfg_gen = self._gen;
 
@@ -1688,7 +1683,6 @@ export function create(opts)
 	// with the session; these two allocate PER CALL, so a scripted reattach
 	// loop walked the table down on its own. An E182E-class stack has room for
 	// a handful. Nothing in the passthrough released anything before this.
-	// Found by a full review, 2026-09-19.
 	let pt_release = (client) => {
 		if (!client)
 			return;
@@ -1746,7 +1740,7 @@ export function create(opts)
 						// `resetting: true` unconditionally, so a refusal read
 						// to LuCI and to the caller exactly like a reset under
 						// way — and they then waited for a modem that was never
-						// going anywhere. Raised by Codex review, 2026-09-19.
+						// going anywhere.
 						if (rerr)
 							return cb({ error: 'qmi', detail: rerr });
 
@@ -1763,7 +1757,7 @@ export function create(opts)
 	// off -> on. Implemented here because netsel_ops' AT+COPS fallback rides a
 	// port that is frequently dead in MBIM mode (EG06: AT times out).
 	// A reattach is radio OFF, wait, radio ON — so it is half-finished at every
-	// await, and a teardown landing in the middle used to be read as a reason to
+	// await, and a teardown landing in the middle must not be read as a reason to
 	// carry on. The generation captured here is what tells the two apart: a
 	// cancellation is the session ending, not a transport declining.
 	self.reattach = function(cb) {
@@ -1856,7 +1850,7 @@ export function create(opts)
 	};
 
 	// telemetry (signal/cells/CA/data-mode/reg-detail + slow log loop + fast
-	// watch loop) — extracted to telemetry_mbim.uc; attaches the _refresh_*
+	// watch loop) — lives in telemetry_mbim.uc; attaches the _refresh_*
 	// methods, watch and _start_telemetry, returns { stop } for teardown.
 	let telem = telemetry_mbim.install(self, { log: log, emit: emit });
 
@@ -1906,7 +1900,7 @@ export function create(opts)
 		modem_common.close_at(self);
 
 		// GUARDED, because destroying a client pays its pending callbacks
-		// SYNCHRONOUSLY (client.uc:217, mbim_client.uc:267) and those callbacks
+		// SYNCHRONOUSLY (client.uc:217, mbim_client.uc:265) and those callbacks
 		// are not ours. One that throws would skip the depth decrement at the
 		// end, leaving it raised for the life of the object — and make_fail then
 		// refuses every future retry, which is worse than whatever the callback
@@ -1917,7 +1911,7 @@ export function create(opts)
 		// whole block means the first throwing destroy skips the clients after it
 		// AND the shim close — and `self.pt = null` below then drops the only
 		// handle to a shim that is still open with clients registered on it
-		// (qmi_over_mbim.uc:110). Raised by review, 2026-09-19.
+		// (qmi_over_mbim.uc:110).
 		if (self.pt) {
 			// GIVE THE SESSION-LONG CIDs BACK FIRST, while ctl and the shim are
 			// still up. These were allocated out of the MODEM's client table
@@ -1926,8 +1920,7 @@ export function create(opts)
 			// modem's embedded QMI client table, so every daemon reload leaked
 			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
 			// table has room for a handful. Same burst modem.uc:1409 does for
-			// the native side, which the passthrough never had. Raised by
-			// Codex review, 2026-09-19. ctl is NOT in this list: it is the
+			// the native side, which the passthrough never had. ctl is NOT in this list: it is the
 			// implicit client (cid 0) and it is what carries RELEASE_CID for
 			// all the others, so it has to outlive them.
 			for (let c in [ self.pt.nas, self.pt.dsd, self.uim, self.wms ]) {
@@ -1969,7 +1962,6 @@ export function create(opts)
 		// teardown+retry on the same object and every later SMS op used a
 		// client bound to a shim that is gone — failing forever and feeding the
 		// proto-error counter, which eventually power-cycles a healthy modem.
-		// Found by a full review, 2026-09-19.
 		self.uim = null;
 		self.wms = null;
 		self._pt_failed = false;
@@ -1981,13 +1973,13 @@ export function create(opts)
 		// change happens to arrive. A radio switch reported off, or a slot
 		// reported empty, would then outlive the reason for it. `radio` is
 		// re-read at init; `slot_state` is only ever event-driven, which is
-		// exactly why it must not persist. Raised by Codex review, 2026-09-20.
+		// exactly why it must not persist.
 		self.radio = null;
 		self.slot_state = null;
 		// ...and the carrier configuration, for the same reason plus one more:
 		// the attach-time retry below skips itself when this is already set, so
 		// a value left here would also stop the NEW modem from ever being
-		// asked. Raised by Codex review, 2026-09-20.
+		// asked.
 		self.modem_config = null;
 		self._modem_config_asked = false;
 

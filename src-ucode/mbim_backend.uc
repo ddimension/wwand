@@ -422,7 +422,7 @@ const UNKNOWN_U32 = 0xFFFFFFFF;
 // mbimcli-ms-basic-connect-extensions.c:1410-1412). Do NOT share these with
 // the Signal State helpers below: that message codes SNR in HALF-dB steps and
 // has no RSRQ at all, so the only thing genuinely common between the two is
-// the index space itself. Raised by Codex review, 2026-09-22.
+// the index space itself.
 const NR_RSRP_OFFSET = -156;
 const NR_RSRQ_OFFSET = -43;
 const NR_SINR_OFFSET = -23;
@@ -435,7 +435,7 @@ const NR_SINR_OFFSET = -23;
 // the Signal State encoding, so this is the width they share and not much
 // else.) The H5000M in ddimension/wwand#30 sends signed physical values in
 // these fields, which as unsigned words land near 2^32 and would otherwise be
-// published as astronomic signal levels. Raised by Codex review, 2026-09-22.
+// published as astronomic signal levels.
 const NR_CODED_MAX = 127;
 
 // LTE cell metrics are read signed, so the 0xFFFFFFFF unknown arrives as -1
@@ -460,8 +460,7 @@ function rssi_dbm(idx)
 // is exactly -30, so libmbim's own formula covers it. Collapsing it to unknown
 // is a display choice in a CLI; on a router it would blank the signal bars at
 // the moment the signal is best. The domain check below rejects the sentinel
-// and anything outside the 7-bit index space, and nothing else. Raised by Codex
-// review, which was right to push back on my first attempt.
+// and anything outside the 7-bit index space, and nothing else.
 function rsrp_dbm(coded)
 {
 	return (coded != null && coded <= NR_CODED_MAX) ? (coded - 157) : null;
@@ -496,8 +495,7 @@ function plmn_str(provider_id)
 // in both, with no RsrpSnr tail. The query is empty either way, and the loop
 // below simply finds nothing, leaving the RSSI-only line at the end. A device
 // that volunteers the v2 tail is read in full. So this degrades rather than
-// misparses; what it does NOT do is prove the device speaks v2. Raised by
-// Codex review, 2026-09-19.
+// misparses; what it does NOT do is prove the device speaks v2.
 export function get_signal(mc, cb)
 {
 	mc.command(bc, 'SIGNAL_STATE_V2', 'query', {}, (err, data) => {
@@ -595,8 +593,7 @@ function nr_convention(rsrp)
 	// and only a negative RSRP argues against it. A modem that cannot measure
 	// RSRP this instant (the 0xFFFFFFFF sentinel, a measurement gap) may still
 	// report valid RSRQ and SINR indices, and refusing them here discarded two
-	// good readings for the absence of a third. Codex review, 2026-09-24, against
-	// a first version that returned null and dropped them. The hole this leaves
+	// good readings for the absence of a third. The hole this leaves
 	// is narrow by construction: a firmware using the direct convention sends
 	// RSRP as its primary measurement, so the sentinel and that convention
 	// practically do not co-occur.
@@ -633,8 +630,7 @@ function nr_metric(v, offset)
 	//
 	// `s < 0` IS REDUNDANT TODAY AND STAYS. With these three offsets the widest
 	// domain ends at +104, and we only get here when the word is already above
-	// 127, so a non-negative reading fails the upper bound on its own (Codex
-	// review, 2026-09-23, which was right about the redundancy). It is kept
+	// 127, so a non-negative reading fails the upper bound on its own. It is kept
 	// because it encodes the actual rule rather than an arithmetic accident of
 	// the current constants: only a negative word can be one of these direct
 	// values, and a fourth metric with a larger offset would silently start

@@ -210,7 +210,6 @@ export function decode_visible_providers(info)
 	// name, and the result is a wrong operator that looks exactly like a right
 	// one. So it must start past this record's 32-byte fixed part, end inside
 	// this record, and carry an even number of bytes, because UTF-16LE does.
-	// Raised by Codex review, 2026-09-20.
 	let str_at = (base, len, rel) => {
 		if (base + rel + 8 > length(buf))
 			return null;
@@ -249,7 +248,7 @@ export function decode_visible_providers(info)
 		// produce an mnc_digits of 4 and a non-numeric one would be coerced to
 		// a number, and both would then travel as a usable scan result. An id
 		// that is not a PLMN leaves the three fields absent and keeps the name
-		// — which is still the useful half. Raised by Codex review, 2026-09-20.
+		// — which is still the useful half.
 		let plmn = match(id ?? '', /^([0-9][0-9][0-9])([0-9][0-9][0-9]?)$/);
 
 		push(out, {

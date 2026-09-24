@@ -23,7 +23,7 @@ import * as context_common from 'wwand.context_common';
 import * as logmod from 'wwand.log';
 
 // The agreed MS extension version as text. Both halves of the u16, the way
-// mbim_client's own open-time log line writes it (mbim_client.uc:205-207) —
+// mbim_client's own open-time log line writes it (mbim_client.uc:203-205) —
 // only x.0 generations are defined today, but reading the number the way its
 // owner does is cheaper than being right about that forever.
 function mbimex_text(v)
@@ -739,7 +739,7 @@ export function create(opts)
 	// whether anything started it.
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
-	// own emit on a change (modem_mbim.uc:840-849) while the shared reapply
+	// own emit on a change (modem_mbim.uc:837-846) while the shared reapply
 	// tail emits on every re-read (modem_common.uc:553-559); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {
@@ -3069,7 +3069,7 @@ export function create(opts)
 				// answers a different structure depending on this one number
 				// (codec/mbim_schema/ms_basic_connect_ext.uc, decode_base_
 				// stations_info). It was agreed once at open and written to a
-				// single log line (mbim_client.uc:205-207), which is nowhere
+				// single log line (mbim_client.uc:203-205), which is nowhere
 				// when you are comparing wwand's reading against mbimcli's an
 				// hour later — and mbimcli opens v1 unless it is given
 				// --device-open-ms-mbimex-v3, so the two talk about different
@@ -3081,7 +3081,7 @@ export function create(opts)
 				// three cases the client cannot tell apart anyway: not an MBIM
 				// modem, the handshake refused, and the handshake not answered
 				// yet — mbim_client keeps 0 for all of the latter
-				// (mbim_client.uc:230). `protocol` separates the first from
+				// (mbim_client.uc:228). `protocol` separates the first from
 				// the other two, and the open-time log line says which of
 				// those two it was. What null must NOT become is "1.0", which
 				// would claim an extension version the modem agreed to.

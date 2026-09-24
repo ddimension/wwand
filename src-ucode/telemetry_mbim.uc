@@ -3,8 +3,8 @@
 // wwand — MBIM telemetry (signal / cells / CA / data-mode / registration
 // detail + the slow log loop and the fast watch loop).
 //
-// Extracted from the modem_mbim.uc mega-closure (maintainability audit),
-// mirroring telemetry_qmi.uc: install(self, { log, emit }) attaches the
+// Kept out of the modem_mbim.uc closure so the polling surface reads and tests
+// on its own, mirroring telemetry_qmi.uc: install(self, { log, emit }) attaches the
 // _refresh_* methods, watch and _start_telemetry to the modem object and
 // returns { stop } for teardown.
 //

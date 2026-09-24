@@ -273,7 +273,7 @@ export function decode_tlvs(buf, pos)
 		// a header claiming padding that is not there is a truncated record,
 		// not a complete one. Checking only data_length accepted
 		// `0a0000ff00000000` as a whole zero-length TLV while it claims 255
-		// bytes of absent padding. Raised by review, 2026-09-20.
+		// bytes of absent padding.
 		if (pos + 8 + dlen + pad > len)
 			break;
 
@@ -600,7 +600,6 @@ export function decode(buf)
 		// error; the data was simply short. It bites SMS read-all once a SIM
 		// holds enough PDUs. Reassembly is the client's job (it owns the
 		// pending-by-transaction map); the codec's job is to stop hiding this.
-		// Found by a full review, 2026-09-19.
 		if (length(buf) >= 12 + 8) {
 			msg.frag_total = struct.unpack('<I', substr(buf, 12, 4))[0];
 			msg.frag_index = struct.unpack('<I', substr(buf, 16, 4))[0];

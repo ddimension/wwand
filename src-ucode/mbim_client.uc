@@ -84,7 +84,7 @@ export function create(hub, hooks)
 			// and any half-collected fragment set for this transaction: its
 			// continuations are not coming, and leaving it there both grows the
 			// table forever and lets a reused transaction id append to stale
-			// bytes. Raised by Codex review, 2026-09-19.
+			// bytes.
 			delete self.frags[sprintf('%d:%d', mbim.MSG_COMMAND_DONE, txn)];
 
 			if (hooks?.on_error)
@@ -153,16 +153,14 @@ export function create(hub, hooks)
 			//
 			// The handshake and the version-aware layouts stay in the tree because
 			// they are what such a port would build on; setting MBIMEX_REQUEST to
-			// 0x0300 turns it back on. Found by a full review, 2026-09-19; the
-			// regression caught on hardware the same day.
+			// 0x0300 turns it back on.
 			self.command_raw(EXT_SERVICE_UUID, EXT_CID_VERSION,
 				struct.pack('<HH', MBIM_VERSION_1_0, MBIMEX_REQUEST),
 				(verr, info) => {
 					// VALIDATE BOTH HALVES before letting the answer pick a
 					// layout: an unexpected value here would select a decode
 					// this client does not implement, which is the very thing
-					// the request is withheld to avoid. Raised by Codex review,
-					// 2026-09-19.
+					// the request is withheld to avoid.
 					let why = null;
 
 					if (verr)
@@ -290,7 +288,7 @@ export function create(hub, hooks)
 				// toward a repower for a command nothing depends on. Same
 				// argument as the QMI-over-MBIM tunnel (ddimension/wwand#30);
 				// mandatory commands keep reporting, so a wedged channel is
-				// still caught. Found by review, 2026-09-20.
+				// still caught.
 				if (hooks?.on_error && !opts?.no_recovery)
 					hooks.on_error(self, 'mbim', what, msg.status);
 
@@ -456,13 +454,12 @@ export function create(hub, hooks)
 	// A COMMAND_DONE or INDICATE_STATUS larger than the negotiated
 	// MaxControlTransfer (4096, sent in OPEN) arrives split: fragment 0 carries
 	// the full header, the rest carry only the message+fragment headers and more
-	// InformationBuffer. The codec used to skip the fragment header entirely, so
-	// fragment 0 was handed up as the whole answer and the continuations were
-	// parsed as bogus standalone messages. Everything downstream saw a short but
-	// well-formed buffer and decoded what it could — an SMS read-all on a SIM
+	// InformationBuffer. Skip the fragment header and fragment 0 is handed up as
+	// the whole answer while the continuations parse as bogus standalone
+	// messages. Everything downstream then sees a short but well-formed buffer
+	// and decodes what it can — an SMS read-all on a SIM
 	// with enough stored PDUs simply lost the tail. Keyed by transaction id,
-	// which is what identifies a fragment set. Found by a full review,
-	// 2026-09-19.
+	// which is what identifies a fragment set.
 	self.frags = {};
 
 	// BOUNDED, both ways. An incomplete set is only ever cleaned up by the
@@ -473,7 +470,7 @@ export function create(hub, hooks)
 	// grows this table without limit, and a large frag_total lets one set grow
 	// without limit too. Neither is a big number in practice; both are
 	// unbounded, which is the part that matters in a daemon meant to run for
-	// months. Found by review, 2026-09-20.
+	// months.
 	//
 	// 64 KiB is far above any MBIM message this tree decodes (the largest,
 	// BASE_STATIONS_INFO with a full neighbour list, is a few KiB), and MBIM
@@ -484,8 +481,7 @@ export function create(hub, hooks)
 
 	// keyed by TYPE and transaction id, not the id alone: unsolicited
 	// indications commonly carry transaction 0, so a COMMAND_DONE set and an
-	// indication set would otherwise share one slot. Raised by Codex review,
-	// 2026-09-19.
+	// indication set would otherwise share one slot.
 	let frag_key = (msg) => sprintf('%d:%d', msg.type, msg.txn);
 
 	let log_frag = (f, ...a) => {
@@ -532,7 +528,7 @@ export function create(hub, hooks)
 			// ...and fragment ZERO is itself a buffer. The ceiling below used
 			// to be checked only when appending a continuation, so a first
 			// fragment larger than the limit was stored whole and, if nothing
-			// followed it, sat there. Found by review, 2026-09-20.
+			// followed it, sat there.
 			if (length(msg.info ?? '') > FRAG_MAX_BYTES) {
 				log_frag('fragment 0 of %s is over %d bytes — dropping', key, FRAG_MAX_BYTES);
 				delete self.frags[key];
@@ -551,8 +547,7 @@ export function create(hub, hooks)
 		// STRICTLY SEQUENTIAL, and only within one declared set. A continuation
 		// with no fragment 0 is not something to guess at — and neither is a
 		// repeated or out-of-order index, which counted toward completion all
-		// the same and yielded a buffer assembled in arrival order. Raised by
-		// Codex review, 2026-09-19.
+		// the same and yielded a buffer assembled in arrival order.
 		if (!acc || idx != acc.next || idx >= total || total != acc.total) {
 			delete self.frags[key];
 
@@ -614,9 +609,9 @@ export function create(hub, hooks)
 			let key = sprintf('%s:%d', msg.service, msg.cid);
 			let hs = self.handlers[key] ?? [];
 
-			// EVERY indication, handled or not. An unsubscribed one used to
-			// vanish without trace, so "does this modem send X?" could only be
-			// answered by adding a handler and seeing whether it fired — and a
+			// EVERY indication, handled or not. An unsubscribed one that vanished
+			// without trace would leave "does this modem send X?" answerable only
+			// by adding a handler and seeing whether it fired — and a
 			// firmware that sends nothing looked exactly like one this client
 			// forgot to listen for. The QMI side has had its equivalent for a
 			// long time; this is the MBIM one, at the same level.
