@@ -1475,7 +1475,7 @@ uloop.run();
 			switch_protocol: (t, cb) => { push(switched, t); cb(fail ? { error: 'x' } : null, {}); },
 		}) },
 		context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
-					// part of the context contract (context.uc:1040); the
+					// part of the context contract (context.uc:1037); the
 					// daemon tells a bound context when its modem is removed
 					modem_event: () => null }) },
 	};
@@ -1538,7 +1538,7 @@ uloop.run();
 
 			c = { state: 'CONNECTED', name: o.name, modem: o.modem,
 			      config: o.config,
-			      /* Faithful to every real context (context.uc:757,
+			      /* Faithful to every real context (context.uc:755,
 			         context_mbim.uc, context_ncm.uc): the 'down' EVENT is emitted
 			         BEFORE the callback runs. A fake that only flips state and
 			         calls back cannot see an ordering bug, and this one did not —
@@ -1774,7 +1774,7 @@ uloop.run();
 				stop: () => null, note_connect_success: () => null,
 				note_connect_failure: () => null, datapath: {} }) },
 				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
-					// part of the context contract (context.uc:1040); the
+					// part of the context contract (context.uc:1037); the
 					// daemon tells a bound context when its modem is removed
 					modem_event: () => null }) } }),
 			emit_event: () => null, kick_interface: () => null,

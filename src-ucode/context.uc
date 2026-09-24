@@ -625,7 +625,6 @@ export function create(opts)
 
 				// apn/auth also passed here (old behavior): several contexts
 				// may share a profile index, the request TLVs take precedence.
-				//
 				let start_args = {};
 
 				// SET_IP_FAMILY (WDS 0x004D) is a separate command an old stack
@@ -699,8 +698,7 @@ export function create(opts)
 					// climb). That is deliberate and harmless: the very next
 					// successful request zeroes it (recovery.uc:369-370), and
 					// the same is already true of the NO_EFFECT that
-					// qmi_backend.set_opmode normalises. Raised by review,
-					// 2026-09-18.
+					// qmi_backend.set_opmode normalises.
 					if (e3?.error == 'qmi' && e3.code == QMI_ERR_NO_EFFECT) {
 						fam.pdh = null;
 						// a family is registered with pdh null BEFORE the dial,
@@ -914,10 +912,9 @@ export function create(opts)
 							// 'ipv6'` context whose settings read failed
 							// reached CONNECTED with no families, no settings
 							// and a monitor that never re-arms
-							// (its settings refresh returns at context_monitor_qmi.uc:317 on an
+							// (its settings refresh returns at context_monitor_qmi.uc:299-300 on an
 							// empty family set), and sat there until
-							// an operator ifdown. Found by a full review,
-							// 2026-09-19.
+							// an operator ifdown.
 							if (family == 4 ||
 							    (!length(keys(self.families)) && idx >= length(fams)))
 								return self._fail(serr);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — while-CONNECTED monitoring for the QMI context (extracted from
-// the context.uc closure).
+// wwand — while-CONNECTED monitoring for the QMI context, kept out of the
+// context.uc closure so the sampling loops can be read on their own.
 //
 // install(self, o) owns the packet-statistics sampler (data-usage counters,
 // channel rates with sentinel scrub, kernel-netdev fallback for
@@ -175,10 +175,10 @@ export function install(self, o)
 				// netdev's kernel statistics so usage display and the zero-rx
 				// watchdog see real numbers.
 				//
-				// The gate is on RX ALONE, deliberately. It required rx AND tx to
-				// both be zero until 2026-09-12, which ties the RX watchdog's
-				// eyesight to the TX counter: one WDS-accounted transmit is enough
-				// to hold the fallback off, and the watchdog then reads a
+				// The gate is on RX ALONE, deliberately. Requiring rx AND tx both
+				// to be zero would tie the RX watchdog's eyesight to the TX
+				// counter: one WDS-accounted transmit is enough to hold the
+				// fallback off, and the watchdog then reads a
 				// permanently frozen rx of 0 and tears down a link that is
 				// receiving. That is the shape of the trip measured on an NR7101
 				// (RG502QEA) — 600 s of "no rx packets" while the firewall was

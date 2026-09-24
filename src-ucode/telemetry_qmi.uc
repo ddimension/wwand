@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — QMI telemetry subsystem (extracted from the modem.uc mega-closure).
+// wwand — QMI telemetry subsystem, kept out of the modem.uc closure so the
+// polling surface can be read and tested on its own.
 //
 // install(self, o) attaches the telemetry surface to a QMI modem object:
 //   self.watch()                 fast-loop trigger (daemon calls it on every
@@ -118,8 +119,7 @@ export function install(self, o)
 							// then carries the PREVIOUS cycle's lte block
 							// through untouched — overlaying that would pair a
 							// current rsrp with an old snr, the exact mixture
-							// sig_fresh exists to prevent. Raised in review,
-							// 2026-09-21.
+							// sig_fresh exists to prevent.
 							if (s.lte != null) {
 								// this branch and the cell callback race; both
 								// overlay, so either order ends the same way

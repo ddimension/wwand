@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — QMI modem bring-up chain (extracted from modem.uc).
+// wwand — QMI modem bring-up chain, kept apart from modem.uc so the linear
+// init flow reads top to bottom without the lifecycle around it.
 //
 // install(self, o) wires the linear init flow
 //   sync -> services/clients -> AT port -> esim quirk -> batched init reset
@@ -242,7 +243,7 @@ export function install(self, o)
 	// never issued — on a MeiG SLM7xx the configured modes/PLMN were accepted
 	// and silently never applied, and the NV-vs-live idempotency guard at :574
 	// then reported them as already set on every later boot, so it stayed
-	// invisible. Found by a full review, 2026-09-19.
+	// invisible.
 	//
 	// Firing as EARLY as the pushed reasons allow is deliberate: the reset
 	// re-enumerates the modem and discovery re-inits it, so every step after
@@ -297,7 +298,7 @@ export function install(self, o)
 			// a re-init of THIS instance means it did not, so the debt still
 			// holds. Deduplicated because a re-init re-derives the same reason
 			// and the list would otherwise grow one entry per pass, with the
-			// warning repeated as often. Raised by Codex review, 2026-09-19.
+			// warning repeated as often.
 			self._reset_unapplied ??= [];
 
 			for (let r in reasons)
@@ -312,7 +313,7 @@ export function install(self, o)
 		// instance is being torn down. But an ACK is not a reboot: a modem that
 		// answers OK and stays put leaves init parked in INIT_SERVICES with
 		// nothing pending, and because fail() never ran the recovery ladder
-		// never engages either. Raised by Codex review, 2026-09-19.
+		// never engages either.
 		tm.init_reset = uloop.timer(self.timing.init_reset ?? 30000,
 			() => resume('was acknowledged but the modem stayed on the bus'));
 
@@ -434,8 +435,7 @@ export function install(self, o)
 			// is right for the status page and wrong here: acting on it would
 			// send a slot switch to a modem whose slot support we have just
 			// established does not answer. Same outcome as the error branch
-			// above, which is what this used to take. Raised by Codex review on
-			// the single-slot fallback, 2026-09-22.
+			// above.
 			if (err || !sim.enumerated(slots)) {
 				log('info', sprintf('sim_slot %d configured but slot status unsupported, continuing', want));
 				return step_sim();
@@ -594,8 +594,7 @@ export function install(self, o)
 		// both become the integer 30 — so the width the config string carries
 		// has to travel with it (libqmi 1.38, Set System Selection Preference
 		// input 0x1A). Without it a configured 3-digit MNC was ambiguous on
-		// every single init, not just on a manual ubus call. Raised by Codex
-		// review, 2026-09-19.
+		// every single init, not just on a manual ubus call.
 		let sel_width = 2;
 
 		if (self.config.mcc && self.config.mnc) {

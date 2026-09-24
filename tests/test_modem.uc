@@ -1624,7 +1624,7 @@ scenario('init-reset-no-reenum', {
 // (daemon.uc:1671), so a modem that really did reset comes back as a NEW
 // instance with no debt, and a re-init of THIS one means it did not. But
 // re-init on the same instance is exactly what the failure path does —
-// make_fail arms `uloop.timer(backoff, () => self.start())` (modem.uc:1367) —
+// make_fail arms `uloop.timer(backoff, () => self.start())` (modem.uc:1362) —
 // so an un-deduplicated push grows one entry per pass and repeats the warning
 // as often. Raised by Codex review, 2026-09-19.
 //
@@ -2299,8 +2299,8 @@ scenario('cat-release-teardown', {
 // did park theirs in tm but re-armed AFTER the cancel pass, because destroying
 // the clients delivers a synchronous `cancelled` that their set_opmode callback
 // ignored. Either way the timer fires with self.dms already null
-// (modem.uc:1329) and qmi_backend.set_opmode dereferences it unguarded
-// (qmi_backend.uc:62) — a throw inside a uloop callback, which kills the daemon
+// (modem.uc:1331) and qmi_backend.set_opmode dereferences it unguarded
+// (qmi_backend.uc:66) — a throw inside a uloop callback, which kills the daemon
 // and has procd respawn it. Found by a full review, 2026-09-19.
 //
 // The proof is the run itself: with the guard removed this scenario does not
@@ -2433,7 +2433,7 @@ eq(reattach_err?.error, 'cancelled',
 // --- two waits in flight at once ---------------------------------------------
 //
 // `tm.settle` is a SHARED one-shot slot, written by the init chain too
-// (modem_init_qmi.uc:322, :383, :604). Parking radio-bounce waits there let a
+// (modem_init_qmi.uc:323, :383, :604). Parking radio-bounce waits there let a
 // second overwrite the first: teardown cancelled only the newest, the older
 // timer survived unreachable, and whichever body ran first cleared the other's
 // debt — so one of the two callers hung. Nothing serialises reattach, so two

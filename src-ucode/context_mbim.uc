@@ -567,7 +567,7 @@ export function create(opts)
 			// AND THE REASON THE LAST BRING-UP FAILED. _fail has maintained
 			// this since MBIM got QMI parity, and status() never carried it —
 			// so the field was built, twice over (see _fail), and nothing
-			// could ever read it. context.uc:1118 has surfaced the QMI twin
+			// could ever read it. context.uc:1115 has surfaced the QMI twin
 			// all along. Found by a full review, 2026-09-19.
 			last_error: self.last_error,
 			stats: (self.state == 'CONNECTED') ? self.stats : null,

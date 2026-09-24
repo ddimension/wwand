@@ -591,7 +591,7 @@ scenario('start-network-no-effect', {
 // are read — so a v6 settings failure released the family, left got_any true,
 // and finish() took the interface to CONNECTED with no families, no settings and
 // a settings refresh that returns on an empty family set
-// (context_monitor_qmi.uc:317). It sat there until
+// (context_monitor_qmi.uc:299-300). It sat there until
 // an operator ifdown. The activation-failure branch immediately above had the
 // right rule all along. Found by a full review, 2026-09-19.
 scenario('v6-only-settings-fail', {

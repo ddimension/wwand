@@ -61,7 +61,7 @@ function mk(pdp, ensures, fx, netdev, retires)
 				context: {
 					create: (o) => {
 						// modem_event is part of the context contract
-						// (context.uc:1040): the daemon tells a bound context
+						// (context.uc:1037): the daemon tells a bound context
 						// when its modem is removed
 						let ctx = { state: 'IDLE', config: o.config, modem: o.modem,
 						            modem_event: () => null };
@@ -201,7 +201,7 @@ function mkblk(raw)
 					         note_connect_success: () => null, note_connect_failure: () => null,
 					         datapath: {} }; } },
 				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
-					// part of the context contract (context.uc:1040); the
+					// part of the context contract (context.uc:1037); the
 					// daemon tells a bound context when its modem is removed
 					modem_event: () => null }) },
 			}),
@@ -267,7 +267,7 @@ function mkdp(mux, impl, real, scandir)
 					         note_connect_success: () => null, note_connect_failure: () => null,
 					         datapath: {} }; } },
 				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
-					// part of the context contract (context.uc:1040); the
+					// part of the context contract (context.uc:1037); the
 					// daemon tells a bound context when its modem is removed
 					modem_event: () => null }) },
 			}),
@@ -366,7 +366,7 @@ dpath = daemon_mod.create({
 				         note_connect_success: () => null, note_connect_failure: () => null,
 				         datapath: {} }; } },
 			context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
-					// part of the context contract (context.uc:1040); the
+					// part of the context contract (context.uc:1037); the
 					// daemon tells a bound context when its modem is removed
 					modem_event: () => null }) },
 		}),

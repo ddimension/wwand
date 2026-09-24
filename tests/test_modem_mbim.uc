@@ -1105,7 +1105,7 @@ uloop.run();
 // (client.uc:201). Closing the HOST's MBIM session is not shown to reset the
 // modem's embedded QMI client table, so every daemon reload leaked up to four
 // CIDs out of a table that has room for a handful on the E182E class. The
-// native side has done this burst since modem.uc:1414. Raised by Codex review,
+// native side has done this burst since modem.uc:1409. Raised by Codex review,
 // 2026-09-19.
 
 function assert_teardown_releases_pt_cids() {

@@ -105,7 +105,7 @@ export function install(self, o)
 			// nothing on either path ever clears them. Reported by MassiPi on
 			// an NR7101 (ddimension/wwand#39, 2026-09-22).
 			//
-			// modem.uc:1538-1543 already states the rule — card-side
+			// modem.uc:1531-1536 already states the rule — card-side
 			// diagnostics belong to the card we were talking to — and acts on
 			// it during teardown. This path is the other place a card changes
 			// underneath us, and it did not.
@@ -146,7 +146,7 @@ export function install(self, o)
 			// belongs to this module, not to the modem, so it outlives the
 			// teardown and would talk to a client that is mid-initialisation.
 			// `_gen` is the counter both backends already bump on teardown
-			// (modem.uc:1482, modem_mbim.uc:1897); NCM has none and degrades to
+			// (modem.uc:1475, modem_mbim.uc:1897); NCM has none and degrades to
 			// the identity check, which is the case its reset already answers.
 			// Raised by Codex review, 2026-09-22.
 			let gen = m._gen;

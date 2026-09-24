@@ -117,7 +117,7 @@ scenario('uim: pin verify ok (indication)', (next) => {
 });
 
 // A CARD POLL MUST NOT OUTLIVE ITS SESSION. The retry re-enters unlock_uim,
-// which re-reads modem.uim at entry — and teardown nulls it (modem.uc:1329). An
+// which re-reads modem.uim at entry — and teardown nulls it (modem.uc:1331). An
 // unplug or a config reload inside the up-to-10 s poll window therefore
 // dereferenced null, and a throw inside a uloop callback ends the program: the
 // next timer never runs and uloop.run() does not return (measured 2026-09-19).

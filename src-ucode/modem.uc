@@ -187,21 +187,19 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1329) and set_opmode dereferences it unguarded (qmi_backend.uc:62),
+	// (modem.uc:1331) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
-	// respawns it. The MBIM twin has carried this guard since modem_mbim.uc:1164;
-	// the QMI side had three sites and none of them. Found by a full review,
-	// 2026-09-19.
+	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:1164), and
+	// every QMI site that re-arms tm.settle needs it too.
 	//
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
 	// callback arrives the generation has already moved.
 	// EACH WAIT OWNS ITS OWN TIMER AND ITS OWN DEBT. `tm.settle` is a shared
-	// one-shot slot, also written by the init chain (modem_init_qmi.uc:322,
+	// one-shot slot, also written by the init chain (modem_init_qmi.uc:323,
 	// :383, :604), so parking radio-bounce waits there let a second one
 	// overwrite the first: teardown then cancelled only the newest, the older
 	// timer survived unreachable, and whichever fired first cleared the other's
 	// debt. Two reattach calls reach that directly — nothing serialises them.
-	// Raised by review, 2026-09-19.
 	let settles = [];
 
 	// pay every outstanding continuation. Teardown cancels the timers, so their
@@ -217,7 +215,7 @@ export function create(opts)
 		// single try around the walk let the first one that threw strand every
 		// continuation behind it — the waiter's timer already cancelled, its
 		// caller never answered. One hostile caller must not take the others
-		// down with it. Found by review, 2026-09-20.
+		// down with it.
 		for (let r in pend) {
 			r.timer.cancel();
 
@@ -415,7 +413,7 @@ export function create(opts)
 				// (daemon.uc:2199), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
-				// (modem_common.uc). Raised by review, 2026-09-19.
+				// (modem_common.uc).
 				settle_after(cyc_gen, () => {
 					qmi_backend.set_opmode(self.dms, 'online', () => {
 						settle_after(cyc_gen, () => done(action), () => done(action));
@@ -450,13 +448,12 @@ export function create(opts)
 		log('warn', 'admin modem reset (DMS offline -> reset)');
 		qmi_backend.set_opmode(self.dms, 'offline', () => {
 			qmi_backend.set_opmode(self.dms, 'reset', (err) => {
-				// A REFUSED RESET IS NOT A RESET. The error was dropped on
-				// the floor here and `resetting: true` reported either way,
-				// so LuCI and the ubus caller waited for a modem that was
-				// never going anywhere — and, since NO_EFFECT used to be
-				// normalized to success for every mode (qmi_backend.uc:63),
-				// a modem answering "that changed nothing" looked identical
-				// to one rebooting. Raised by Codex review, 2026-09-19.
+				// A REFUSED RESET IS NOT A RESET. Dropping the error here would
+				// report `resetting: true` either way, and LuCI and the ubus
+				// caller would wait for a modem that is not going anywhere.
+				// That includes NO_EFFECT ("that changed nothing"), which
+				// set_opmode deliberately does NOT fold into success for
+				// 'reset' (qmi_backend.uc:67) so that it arrives here.
 				if (err)
 					return cb({ error: 'qmi', detail: err });
 
@@ -1236,8 +1233,7 @@ export function create(opts)
 		// so the stash the signal overlay reads is dropped unconditionally and
 		// the next cell poll re-takes it (immediately on the fast loop). The
 		// only thing given up is overlaying a signal indication that arrives in
-		// between, which is the conservative direction. Raised in review,
-		// 2026-09-21.
+		// between, which is the conservative direction.
 		self._serving_meas = null;
 
 		if (data.current_plmn?.description != null)
@@ -1252,8 +1248,7 @@ export function create(opts)
 		// 310/030 and 310/30 — different operators — are the same number here,
 		// and the operator line rendered whichever a fixed %02d produced. The
 		// modem says which in its own TLV (libqmi 1.38: (Get) Serving System,
-		// 0x27 in the response and 0x29 in the indication). Found by a full
-		// review, 2026-09-19.
+		// 0x27 in the response and 0x29 in the indication).
 		let plmn = data.current_plmn ?? prev.plmn;
 		let pcs = data.mnc_pcs_digit;
 
@@ -1266,7 +1261,7 @@ export function create(opts)
 			// constantly; taking the new object wholesale dropped a width the
 			// GET had already established, and the operator line flipped back
 			// to 310/30 on the next indication. Same PLMN, no new claim: keep
-			// what we knew. Raised by Codex review, 2026-09-19.
+			// what we knew.
 			plmn = { ...plmn, mnc_digits: prev.plmn.mnc_digits };
 
 		self.reg = {
@@ -1427,8 +1422,7 @@ export function create(opts)
 		// and restarts a modem the operator just stopped. A boolean would be
 		// cleared by the nested call; the depth is what tells "make_fail tore
 		// down on its own" apart from "make_fail ran INSIDE a teardown".
-		// make_fail reads it before arming (modem_common.uc). Raised by review,
-		// 2026-09-19.
+		// make_fail reads it before arming (modem_common.uc).
 		self._teardown_depth = (self._teardown_depth ?? 0) + 1;
 
 		// the modem object outlives a teardown/reopen, so a serving-cell
@@ -1445,7 +1439,7 @@ export function create(opts)
 		// throws, hub.close() on a half-open transport. Any of those used to
 		// unwind past the decrement and leave the guard raised for the life of
 		// the object, which disables every future retry — a far worse failure
-		// than the one that caused it. Found by review, 2026-09-20.
+		// than the one that caused it.
 		try {
 
 		for (let t in values(tm))
@@ -1462,8 +1456,7 @@ export function create(opts)
 		// own: a continuation is a caller's callback. If one throws, the
 		// decrement below would never run and _teardown_depth would stay raised
 		// for the life of the object — which disables every future retry, a
-		// worse failure than the one this pays off. Raised by review,
-		// 2026-09-19. The guard sits INSIDE the walk (settle_retire), so a
+		// worse failure than the one this pays off. The guard sits INSIDE the walk (settle_retire), so a
 		// thrower does not strand the continuations queued behind it either.
 		settle_retire();
 
@@ -1478,7 +1471,7 @@ export function create(opts)
 		// pending callbacks silently (atcmd.uc:1017-1024 — it clears `current`
 		// and the queue without calling anything), so nothing exploited the gap;
 		// but that is a property of the AT engine, not a guarantee this function
-		// should lean on. Raised by Codex review, 2026-09-19.
+		// should lean on.
 		self._gen++;
 
 		modem_common.close_at(self);
@@ -1590,7 +1583,6 @@ export function create(opts)
 		// It has to be raised for the whole of the teardown it guards, and it
 		// has to come back down before the function returns — a depth left
 		// raised disables every future retry for the life of the object.
-		// Found by review, 2026-09-20.
 		self._teardown_depth--;
 	};
 
