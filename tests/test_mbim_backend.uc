@@ -551,6 +551,53 @@ function s_cells_signed_physical(next) {
 	}));
 }
 
+// ...and the SECOND sample, which broke the first version of that rule. On
+// 2026-09-24 the same modem reported RSRP -120 (direct, so the struct is direct)
+// alongside SINR **60** — a value that lands INSIDE the 7-bit index space. A
+// per-field rule therefore read it as an index and published 37.0 dB, which is
+// exactly what mbimcli printed, while the QMI-over-MBIM passthrough and
+// SIGNAL_STATE both reported 13-14 dB at that same moment. The convention is now
+// decided ONCE per cell from RSRP's sign, so a direct struct cannot have one of
+// its fields read as an index (ddimension/wwand#30, 2026-09-24).
+function s_cells_signed_sinr_in_index_range(next) {
+	let raw = build_base_stations({
+		nr_rsrp: 0xFFFFFF88,    // -120
+		nr_rsrq: 0xFFFFFC5E,    // -930
+		nr_sinr: 60,            // inside 0..127 — and NOT an index on this firmware
+	});
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: raw } });
+
+	mc.open(() => backend.get_cells(mc, (cells) => {
+		eq(cells.nr5g_cell?.rsrp, -1200,
+		   'cells direct-sinr: -120 on the wire is -120.0 dBm');
+		eq(cells.nr5g_cell?.rsrq, null,
+		   'cells direct-sinr: -930 gets no reading');
+		eq(cells.nr5g_cell?.snr, null,
+		   'cells direct-sinr: 60 is NOT read as index 60 (37 dB) — the struct is direct, and no direct reading of it is corroborated');
+		next();
+	}));
+}
+
+// ...and a conformant modem that cannot measure RSRP right now keeps the two it
+// CAN. Deciding the convention from RSRP made its absence look like a verdict,
+// and the first version of that rule dropped valid RSRQ and SINR indices for the
+// want of a third field. A missing RSRP is not evidence against the spec.
+// Codex review, 2026-09-24.
+function s_cells_unknown_rsrp_keeps_the_rest(next) {
+	let raw = build_base_stations({
+		nr_rsrp: 0xFFFFFFFF,    // the unknown sentinel
+		nr_rsrq: 32, nr_sinr: 43,
+	});
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: raw } });
+
+	mc.open(() => backend.get_cells(mc, (cells) => {
+		eq(cells.nr5g_cell?.rsrp, null, 'cells unknown-rsrp: the sentinel is not a reading');
+		eq(cells.nr5g_cell?.rsrq, -110, 'cells unknown-rsrp: ...but index 32 still is');
+		eq(cells.nr5g_cell?.snr, 200, 'cells unknown-rsrp: ...and so is index 43');
+		next();
+	}));
+}
+
 // ...while a conformant modem is untouched: its indices are still indices.
 function s_cells_coded_still_coded(next) {
 	let raw = build_base_stations({ nr_rsrp: 66, nr_rsrq: 32, nr_sinr: 43 });
@@ -803,7 +850,7 @@ function s_at_over_mbim_compal(next) {
 // --- runner ------------------------------------------------------------------
 
 let scenarios = [ s_signal, s_signal_saturated, s_signal_unusable, s_cells, s_cells_unknown,
-		  s_cells_out_of_range, s_cells_signed_physical, s_cells_coded_still_coded, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
+		  s_cells_out_of_range, s_cells_signed_physical, s_cells_signed_sinr_in_index_range, s_cells_unknown_rsrp_keeps_the_rest, s_cells_coded_still_coded, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
 	s_at_over_mbim, s_at_over_mbim_compal ];
 let i = 0;
 

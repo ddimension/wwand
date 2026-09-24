@@ -581,6 +581,41 @@ function as_i32(v)
 	return (v >= 0x80000000) ? (v - 0x100000000) : v;
 }
 
+// WHICH CONVENTION THIS CELL USES, decided ONCE from RSRP and applied to all
+// three fields. Deciding per field was wrong and the second hardware sample
+// proved it: on 2026-09-24 the same H5000M reported RSRP -120 (direct) alongside
+// SINR 60, and 60 lands INSIDE the 7-bit index space — so a per-field rule read
+// it as an index and published 37.0 dB while the QMI-over-MBIM passthrough and
+// SIGNAL_STATE both said 13-14 dB at that moment. A firmware does not mix the two
+// conventions inside one struct; RSRP is the field whose SIGN settles which one
+// it is, so it decides for the struct.
+function nr_convention(rsrp)
+{
+	// NO RSRP IS NOT EVIDENCE OF THE ODD CONVENTION — the spec is the default,
+	// and only a negative RSRP argues against it. A modem that cannot measure
+	// RSRP this instant (the 0xFFFFFFFF sentinel, a measurement gap) may still
+	// report valid RSRQ and SINR indices, and refusing them here discarded two
+	// good readings for the absence of a third. Codex review, 2026-09-24, against
+	// a first version that returned null and dropped them. The hole this leaves
+	// is narrow by construction: a firmware using the direct convention sends
+	// RSRP as its primary measurement, so the sentinel and that convention
+	// practically do not co-occur.
+	if (rsrp == null || rsrp == UNKNOWN_U32)
+		return 'coded';
+
+	if (rsrp <= NR_CODED_MAX)
+		return 'coded';
+
+	let s = as_i32(rsrp);
+
+	// negative and inside the domain: the direct convention. Anything else is a
+	// word neither reading explains, which IS evidence the struct is not to be
+	// trusted — so the dependent fields get nothing (null, distinct from both
+	// conventions above).
+	return (s < 0 && s >= NR_RSRP_OFFSET && s <= NR_RSRP_OFFSET + NR_CODED_MAX)
+		? 'direct' : null;
+}
+
 function nr_metric(v, offset)
 {
 	if (v == null || v == UNKNOWN_U32)
@@ -657,15 +692,27 @@ export function get_cells(mc, cb)
 		let nr = (data.nr_serving ?? [])[0];
 
 		if (nr) {
+			let nr_conv = nr_convention(nr.rsrp);
+
 			cells.nr5g_arfcn = nr.nrarfcn;
 			cells.nr5g_cell = {
 				plmn:           plmn_str(nr.provider_id),
 				tac:            nr.tac,
 				global_cell_id: nr.nci,
 				pci:            nr.pci,
-				rsrq:           nr_metric(nr.rsrq, NR_RSRQ_OFFSET),
+				// ONE decision for the struct (nr_convention). In `direct`
+				// mode only RSRP is published: it is corroborated (-110 and
+				// -120 dBm on a weak 5G cell, two samples) and its sign is what
+				// identified the convention in the first place. RSRQ and SINR
+				// get no reading under that convention because none has ever
+				// been corroborated — -740 and -930 are outside every scale that
+				// would make them a dB figure, and 60 would read as 37 dB where
+				// two independent sources said 13. Refused for want of evidence,
+				// not for want of a rule; the measurement that would settle them
+				// has been asked for (ddimension/wwand#30).
+				rsrq:           (nr_conv == 'coded') ? nr_metric(nr.rsrq, NR_RSRQ_OFFSET) : null,
 				rsrp:           nr_metric(nr.rsrp, NR_RSRP_OFFSET),
-				snr:            nr_metric(nr.sinr, NR_SINR_OFFSET),
+				snr:            (nr_conv == 'coded') ? nr_metric(nr.sinr, NR_SINR_OFFSET) : null,
 			};
 		}
 
