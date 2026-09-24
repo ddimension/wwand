@@ -519,6 +519,52 @@ function s_cells_out_of_range(next) {
 	}));
 }
 
+// ...and then the same modem told us what those words ARE. miku2365 ran
+// `mbimcli --device-open-ms-mbimex-v3 --ms-query-base-stations-info` on the
+// H5000M (ddimension/wwand#30, 2026-09-23) and it printed RSRP -266 dBm,
+// RSRQ -783 dB, SINR 212 dB. libmbim's transform is `((gint32)number) + scale`
+// (1.32.0, mbimcli-ms-basic-connect-extensions.c:1214-1219), so the words on the
+// wire were -110, -740 and 235 — the firmware fills the NR block the way the
+// spec defines the LTE one, which libmbim itself prints signed and unscaled
+// forty lines earlier (:1346-1347).
+//
+// -110 dBm is a real RSRP and lands inside the domain the coded mapping spans,
+// so it is published. The other two are not readable under any scale that makes
+// them a dB figure, so they stay refused — a wrong number on a signal page is
+// worse than a missing one.
+function s_cells_signed_physical(next) {
+	let raw = build_base_stations({
+		nr_rsrp: 0xFFFFFF92,    // -110
+		nr_rsrq: 0xFFFFFD1C,    // -740
+		nr_sinr: 235,
+	});
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: raw } });
+
+	mc.open(() => backend.get_cells(mc, (cells) => {
+		eq(cells.nr5g_cell?.rsrp, -1100,
+		   'cells signed: -110 on the wire is -110.0 dBm, not silence (H5000M, #30)');
+		eq(cells.nr5g_cell?.rsrq, null,
+		   'cells signed: -740 is outside the domain under every scale — refused');
+		eq(cells.nr5g_cell?.snr, null,
+		   'cells signed: 235 is positive and past the index space — refused');
+		next();
+	}));
+}
+
+// ...while a conformant modem is untouched: its indices are still indices.
+function s_cells_coded_still_coded(next) {
+	let raw = build_base_stations({ nr_rsrp: 66, nr_rsrq: 32, nr_sinr: 43 });
+	let mc = make_mc(ext, { BASE_STATIONS_INFO: { __raw: raw } });
+
+	mc.open(() => backend.get_cells(mc, (cells) => {
+		eq(cells.nr5g_cell?.rsrp, -900,
+		   'cells coded: index 66 is still 66-156 = -90 dBm');
+		eq(cells.nr5g_cell?.rsrq, -110, 'cells coded: index 32 is still -11 dB');
+		eq(cells.nr5g_cell?.snr, 200, 'cells coded: index 43 is still 20 dB');
+		next();
+	}));
+}
+
 // get_cells: LTE serving + 1 neighbour + NR serving
 function s_cells(next) {
 	// THE DEFAULT IS v1, because wwand asks for no MBIMEx version — see the
@@ -757,7 +803,7 @@ function s_at_over_mbim_compal(next) {
 // --- runner ------------------------------------------------------------------
 
 let scenarios = [ s_signal, s_signal_saturated, s_signal_unusable, s_cells, s_cells_unknown,
-		  s_cells_out_of_range, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
+		  s_cells_out_of_range, s_cells_signed_physical, s_cells_coded_still_coded, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
 	s_at_over_mbim, s_at_over_mbim_compal ];
 let i = 0;
 

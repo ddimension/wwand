@@ -547,12 +547,67 @@ function lte_metric(v)
 // above decode SIGNAL_STATE's NR indices) — so wwand was publishing the same
 // modem's NR RSRP two different ways depending on which message it came from.
 // Reported in ddimension/wwand#30 by miku2365 (H5000M), 2026-09-22.
+// ...and then the hardware answered the question this refusal was standing in
+// for. miku2365 ran mbimcli with --device-open-ms-mbimex-v3 (ddimension/wwand#30,
+// 2026-09-23) and it printed RSRP -266 dBm, RSRQ -783 dB, SINR 212 dB. Inverting
+// libmbim's own transform — `((gint32)number) + scale`, 1.32.0
+// mbimcli-ms-basic-connect-extensions.c:1214-1219 — gives the words actually on
+// the wire: -110, -740, 235. None of them is a 7-bit index, and -110 dBm is
+// exactly what an RSRP reads on a weak 5G cell.
+//
+// So the firmware fills the NR block the way the spec defines the LTE one. That
+// is not a wild guess about this vendor: libmbim prints LTE rsrp/rsrq with
+// PRINT_VALIDATED_INT (signed, no offset, :1346-1347) three dozen lines above
+// printing the NR ones with PRINT_VALIDATED_SCALED_UINT (:1410-1412). Two
+// conventions in one message is the trap this whole decoder was rewritten for;
+// this modem simply fell into the other half of it.
+//
+// Refusing the word outright was right while its meaning was unknown and is
+// wrong now — for RSRP. Before 2026-09-22 wwand published `raw * 10` here and
+// was accidentally CORRECT on this hardware; f51beb2 replaced that with silence.
+// So: a word that reads as a NEGATIVE i32 is taken as a direct value, and only
+// when it lands in the very dB domain the coded mapping can produce — the two
+// encodings have to describe the same physical range, so the offset defines the
+// bound and no separate plausibility table is needed.
+//
+// RSRQ AND SINR STAY REFUSED, deliberately. -740 is outside the coded domain
+// under every scale that would make it a dB figure (-74, -7.4, -740), and 235 is
+// positive, so neither can be read without inventing a unit for it. A wrong
+// number on a signal page is worse than a missing one, and the measurement that
+// would settle them — the same cell's SIGNAL_STATE decode at the same moment —
+// has been asked for.
+function as_i32(v)
+{
+	return (v >= 0x80000000) ? (v - 0x100000000) : v;
+}
+
 function nr_metric(v, offset)
 {
-	if (v == null || v == UNKNOWN_U32 || v > NR_CODED_MAX)
+	if (v == null || v == UNKNOWN_U32)
 		return null;
 
-	return (v + offset) * 10;
+	// the spec path: a 7-bit report index
+	if (v <= NR_CODED_MAX)
+		return (v + offset) * 10;
+
+	let s = as_i32(v);
+
+	// a direct physical value, accepted only inside the domain the index
+	// mapping spans (offset .. offset + 127) and only where the sign settles
+	// that it cannot be an index at all.
+	//
+	// `s < 0` IS REDUNDANT TODAY AND STAYS. With these three offsets the widest
+	// domain ends at +104, and we only get here when the word is already above
+	// 127, so a non-negative reading fails the upper bound on its own (Codex
+	// review, 2026-09-23, which was right about the redundancy). It is kept
+	// because it encodes the actual rule rather than an arithmetic accident of
+	// the current constants: only a negative word can be one of these direct
+	// values, and a fourth metric with a larger offset would silently start
+	// admitting positive words the moment this line went away.
+	if (s < 0 && s >= offset && s <= offset + NR_CODED_MAX)
+		return s * 10;
+
+	return null;
 }
 
 // map one MBIM LTE cell (serving or neighbour) into a QMI lte_intra.cells[]
