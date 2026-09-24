@@ -659,6 +659,36 @@ push(scenarios, {
 	},
 });
 
+// --- s2d: ...and the same when the ipv4 comes from the CARD, not the interface -
+//
+// The combination xsetiadi actually runs (ddimension/wwand#35, 2026-09-24): the
+// interface is dual-stack and each eSIM profile carries `pdp_type 'ipv4'` in its
+// own `wwand_sim` section. s2c above proves the suppression for an interface-level
+// ipv4 and s2b proves the per-SIM override reaches CGDCONT — neither proves the
+// two TOGETHER, which is the path a per-subscription pdp_type actually takes.
+//
+// Built like s2b, on the real mechanism: the mock answers +QCCID, match_sim_override
+// picks the entry, init puts it on modem.active_sim, and conn_cfg resolves through
+// it. A hand-set field would prove the helper and skip the half that has to work.
+push(scenarios, {
+	name: 's2d_sim_pdp_ipv4_no_v6_dns',
+	script: script(),
+	cconfig: { apn: 'internet', pdp_type: 'ipv4v6', mux_id: 0 },
+	mconfig: { sims: [ { iccid: '89490200001022832490', pdp_type: 'ipv4' } ] },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'sim-ipv4-pdp: context up succeeds');
+			ok(env.tr.saw(/^AT\+CGDCONT=1,"IP","internet"$/) != null,
+				'sim-ipv4-pdp: the card\'s ipv4 is what CGDCONT carries');
+			eq(env.ctx.settings?.ipv4?.addr, '10.20.30.40',
+				'sim-ipv4-pdp: the v4 half is published as usual');
+			eq(env.ctx.settings?.ipv6, null,
+				'sim-ipv4-pdp: ...and the v6 half the modem still reports is NOT, even though the ipv4 came from the card rather than the interface');
+			env.finish();
+		});
+	},
+});
+
 // --- s3: zero-rx watchdog ---------------------------------------------------
 
 push(scenarios, {

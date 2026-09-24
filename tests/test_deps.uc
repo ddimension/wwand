@@ -260,6 +260,47 @@ function mkdeps(u, extra) {
 	let s6 = mk({ wan: { '.type': 'interface', proto: 'wwand' } });
 	eq(s6.d.retire_wan6('wan'), false, 'retire: no subinterface, nothing to do');
 	eq(s6.u.commits, 0, 'retire: ...and nothing written');
+
+	// A foreign section is declined on EVERY connect, so the explanation for it
+	// is stated once per observed shape — this runs in a reconnect loop, and the
+	// default log threshold is `info` (log.uc:19), so an unguarded line would
+	// flood a box that is already having a bad day. Raised by Codex review,
+	// 2026-09-24.
+	//
+	// WHAT THIS ASSERTS IS NOT THE MEMO. There is no log-capture seam in
+	// deps/log, so whether the line is emitted once or three times is not
+	// observable from here — and pretending otherwise would be the shape this
+	// tree explicitly rejects (tools/check-exports.py: a green test on something
+	// it cannot reach). Removing the memo's reset leaves every check below
+	// passing, which was verified rather than assumed.
+	//
+	// What it DOES assert is the property that matters for a memo introduced to
+	// gate a log line: that it changed no behaviour. Declines stay declines
+	// across repeats, the section stays untouched, a corrected section is still
+	// parked by the same deps object, and one that stops being ours is declined
+	// again. A memo that broke any of those would be a bug regardless of what it
+	// printed.
+	let s7 = mk({
+		wan: { '.type': 'interface', proto: 'wwand' },
+		wan_6: { '.type': 'interface', proto: 'dhcpv6', device: 'eth9', auto: '1' },
+	});
+	eq(s7.d.retire_wan6('wan'), false, 'retire-memo: a foreign section is declined');
+	eq(s7.d.retire_wan6('wan'), false, 'retire-memo: ...and again, unchanged');
+	eq(s7.d.retire_wan6('wan'), false, 'retire-memo: ...and again');
+	eq(s7.u.state.wan_6.auto, '1', 'retire-memo: still untouched after three passes');
+	eq(s7.u.commits, 0, 'retire-memo: and nothing written');
+
+	// ...now the operator corrects the device to ours: the same deps object must
+	// park it, not sit on a remembered refusal
+	s7.u.state.wan_6.device = '@wan';
+	eq(s7.d.retire_wan6('wan'), true,
+		'retire-memo: a corrected section is still parked by the same deps object');
+	eq(s7.u.state.wan_6.auto, '0', 'retire-memo: ...by policy');
+	eq(s7.u.state.wan_6.wwand_parked, '1', 'retire-memo: ...and marked as ours');
+
+	// and back the other way: it is ours no longer, so the refusal is fresh again
+	s7.u.state.wan_6.device = 'eth9';
+	eq(s7.d.retire_wan6('wan'), false, 'retire-memo: a section that stops being ours is declined again');
 }
 
 // --- learn_identity: record what the modem told us, once --------------------

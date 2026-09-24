@@ -214,6 +214,20 @@ export function create(opts)
 		// carrier whose v6 happens to work.
 		let v4_only = (context_common.effective_pdp(self) == 'ipv4');
 
+		// SAY SO WHEN IT HAPPENS. The suppression above was silent, and a
+		// suppression that logs nothing is indistinguishable from a build that
+		// does not have it — which is exactly where the reporter ended up, unable
+		// to tell a working fix from a missing one and with no string to grep for
+		// either, because the change was a condition and carried no new text
+		// (ddimension/wwand#35, 2026-09-24). One line per connect, beside the
+		// `ipv4 config:` line it belongs with.
+		if (v4_only && rdp.ipv6 && (v6_addr || length(rdp.ipv6.dns ?? [])))
+			log('notice', sprintf('ipv6 half suppressed: the PDP is ipv4, but the modem still reports %s%s from an earlier context',
+				v6_addr ? sprintf('address %s', v6_addr) : '',
+				length(rdp.ipv6.dns ?? [])
+					? sprintf('%sdns [%s]', v6_addr ? ' and ' : '', join(' ', rdp.ipv6.dns))
+					: ''));
+
 		if (!v4_only && rdp.ipv6 && (v6_addr || length(rdp.ipv6.dns ?? []))) {
 			out.ipv6 = {
 				addr: context_common.apply_iface_id(v6_addr,

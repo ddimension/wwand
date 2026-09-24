@@ -48,6 +48,11 @@ export function create(o)
 	// failure, so a missing package is reported once rather than once a second.
 	let gps_readers = {}, gps_mod, gps_tried = false;
 
+	// retire_wan6: the last shape of a `<parent>_6` section we declined to
+	// park, per section name — so the reason is stated once and again only when
+	// it changes. See the comment at the refusal.
+	let retire_declined = {};
+
 	// Injected the way the cursor is, and for the same reason: the RULE below
 	// is the part worth pinning and it cannot be reached through a real
 	// `system()` and a real clock.
@@ -634,8 +639,35 @@ export function create(o)
 				cursor.get('network', name, 'ifname');
 
 			// not ours to touch if it is not the shape we write
-			if ((proto != 'dhcpv6' && proto != 'dhcpv6c') || dev != want)
+			if ((proto != 'dhcpv6' && proto != 'dhcpv6c') || dev != want) {
+				// ...and SAY so. This refusal was silent, which made it
+				// indistinguishable from "the fix is not in this build" — the
+				// position the reporter of ddimension/wwand#35 was left in on
+				// 2026-09-24, holding an `ifstatus` that cannot show a uci
+				// `device` and a log that said nothing.
+				//
+				// ONCE PER OBSERVED SHAPE, which is the same discipline the
+				// `already` branch below keeps and for the same reason: this
+				// runs on every connect, so a reconnect loop on an ipv4 PDP
+				// would otherwise repeat it forever — and `info` is the DEFAULT
+				// threshold (log.uc:19), not something one has to turn on. A
+				// changed shape logs again, because that is new information.
+				// Raised by Codex review, 2026-09-24, against a first version
+				// of this line that flooded and a comment that had the
+				// threshold wrong.
+				let seen = sprintf('%s|%s|%s', name, proto ?? '-', dev ?? '-');
+
+				if (retire_declined[name] != seen) {
+					retire_declined[name] = seen;
+					logmod.log('info',
+						'dhcpv6 subinterface %s: not parking it — this is not the section wwand writes (proto %s, device %s; expected dhcpv6 on %s). An IPv4-only PDP will leave it running.',
+						name, proto ?? '-', dev ?? '-', want);
+				}
+
 				return false;
+			}
+
+			delete retire_declined[name];
 
 			// `auto` is boot/reload POLICY, not runtime state: a section that
 			// already reads 0 can still be running, because somebody ran
