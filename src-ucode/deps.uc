@@ -462,13 +462,12 @@ export function create(o)
 				}
 			});
 
-			// ONE description of the subinterface. There used to be a
-			// second one — the add_dynamic payload — assembled separately
-			// from the same intent, and that is exactly how they came
-			// apart: extendprefix reached the saved section and never the
-			// running instance, so the config on disk and the interface
-			// actually doing the work disagreed. There is now only the
-			// section, and netifd builds the interface from it.
+			// ONE description of the subinterface: the section, from which
+			// netifd builds the interface. A second one assembled separately
+			// from the same intent — an add_dynamic payload, say — comes
+			// apart from it: extendprefix reaches the saved section and never
+			// the running instance, so the config on disk and the interface
+			// actually doing the work disagree.
 			let opts = { proto: 'dhcpv6', device: want, auto: '1' };
 
 			if (zone)

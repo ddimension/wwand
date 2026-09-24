@@ -1102,11 +1102,10 @@ export function select_backend(fx, netdev, cfg_mux, want_mux, plugins, info)
 
 	// Explicitly switched off: nothing to probe.
 	//
-	// `want_mux` deliberately does NOT short-circuit here any more. It used to,
-	// and that meant a box with no channels configured never ran a single
-	// probe — so an accelerated datapath could not introduce itself on exactly
-	// the installs that never write `option mux`. The probes run now whatever
-	// the channel count; want_mux only decides what an UNCLAIMED box is: an
+	// `want_mux` deliberately does NOT short-circuit here. If it did, a box with
+	// no channels configured would never run a single probe — so an accelerated
+	// datapath could not introduce itself on exactly the installs that never
+	// write `option mux`. The probes run whatever the channel count; want_mux only decides what an UNCLAIMED box is: an
 	// error when a mux was required, the plain raw-IP parent otherwise.
 	if (mux == 'raw_ip')
 		return 'raw_ip';
@@ -1205,11 +1204,11 @@ export function select_backend(fx, netdev, cfg_mux, want_mux, plugins, info)
 };
 
 
-// What a datapath can do, by name — for the callers that used to test the name
-// itself. Those tests were the same mistake in three places: `backend ==
-// 'rmnet'` decided QMAPv5 and uplink coalescing, and `!= 'rmnet' && != 'qmimux'`
-// decided whether the aggregation ratio means anything, so every datapath added
-// later silently fell outside all three.
+// What a datapath can do, by name — so callers ask for a capability instead of
+// testing the name. A name test is the same mistake wherever it sits: `backend
+// == 'rmnet'` deciding QMAPv5 and uplink coalescing, or `!= 'rmnet' && !=
+// 'qmimux'` deciding whether the aggregation ratio means anything, leaves every
+// datapath added later silently outside the rule.
 export function datapath_caps(backend, plugins, fx, netdev)
 {
 	let n = canon_mux(backend) ?? '';

@@ -6,8 +6,8 @@
 // cannot compile ES modules (`export` is a syntax error there), and this ships
 // in its own optional package. It returns its API object at the end.
 //
-// WHY THIS IS OURS NOW. It used to point ugps (OpenWrt base) at the port and
-// read its `gps` ubus object back. That worked, and it cost more than it saved:
+// WHY THIS IS OURS AND NOT ugps. Pointing ugps (OpenWrt base) at the port and
+// reading its `gps` ubus object back works, and it costs more than it saves:
 //
 //   - ugps takes a STATIC tty out of /etc/config/gps (ugps.init: `uci get
 //     gps.@gps[-1].tty`) while wwand's is discovered and can move between

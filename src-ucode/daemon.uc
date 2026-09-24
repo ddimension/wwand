@@ -180,10 +180,10 @@ export function create(opts)
 		let names = [];
 
 		// `datapath_<name>.uc` is the ADD-ON namespace and nothing else may live
-		// in it: our own QMI datapath bring-up used to be `datapath_qmi.uc` and
-		// this glob dutifully offered it as a plugin, logging "plugin qmi: not
-		// usable" on every start. It is `modem_datapath_qmi.uc` now — an
-		// internal module gets an internal name.
+		// in it: this glob offers every `datapath_*.uc` as a plugin, so an
+		// internal module named that way is tried as one and logs "plugin …: not
+		// usable" on every start. An internal module gets an internal name
+		// (`modem_datapath_qmi.uc`).
 		for (let path in found) {
 			let m = match(path, /datapath_([a-z][a-z0-9_]*)\.uc$/);
 
@@ -347,15 +347,15 @@ export function create(opts)
 	};
 
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
-	// about an interface, and it used to live on the context entry — whose
-	// lifetime is SHORTER than the interface's. A config reload that cannot
-	// resolve an interface's modem produces no entry for it at all
-	// (config.uc:865-868 warns "references unknown modem" and skips it), so
-	// the carry-over that used to sit in build_context had nothing to carry
-	// from and the evidence was gone. Re-adding the modem then built a fresh
-	// entry with no marker, the status poll saw netifd's cleared autostart,
-	// and wwand parked an interface IT had taken down — "administratively
-	// down (ifdown), leaving it alone", until someone ran ifup.
+	// about an interface, and the context entry lives SHORTER than the
+	// interface. A config reload that cannot resolve an interface's modem
+	// produces no entry for it at all (config.uc:864-867 warns "references
+	// unknown modem" and skips it), so a marker on the entry would have nothing
+	// to be carried over from. Re-adding the modem would then build a fresh
+	// entry with no marker, the status poll would see netifd's cleared
+	// autostart, and wwand would park an interface IT had taken down —
+	// "administratively down (ifdown), leaving it alone", until someone runs
+	// ifup.
 	//
 	// That is the tail of ddimension/wwand#35: the down was ours (13 failed
 	// attempts, hold expiry) at 18:48:02, the "unknown modem" warning landed
@@ -2298,8 +2298,8 @@ export function create(opts)
 		             // next probe, so a looping prober climbs the ladder as fast
 		             // as it can call.
 		             //
-		             // (`_our_down` used to be carried here too. It is keyed by
-		             // INTERFACE now — see mark_our_down — precisely because an
+		             // (`_our_down` is NOT carried here: it is keyed by
+		             // INTERFACE — see mark_our_down — precisely because an
 		             // entry can fail to exist across a reload, and then there
 		             // is nothing to carry it from.)
 		             _failed_at: prev?._failed_at,
@@ -3491,7 +3491,7 @@ export function create(opts)
 
 	// GNSS as this daemon sees it: the port and receiver state wwand knows,
 	// and the fix its own reader has off that port. One process, one answer —
-	// it used to be two, joined over a ubus call. A box without wwand-gps
+	// not two joined over a ubus call. A box without wwand-gps
 	// installed still gets wwand's half plus the reason for the rest.
 	self.modem_gps = function(ref, cb) {
 		let entry = self.modems[ref];

@@ -160,7 +160,7 @@ export function open(path, cbs)
 
 		// WHAT IS STILL QUEUED IS WRITTEN BEFORE THE FD GOES, not discarded.
 		//
-		// This used to be `txq = []` above, on the stated grounds that teardown
+		// Discarding it (`txq = []`) would rest on the belief that teardown
 		// writes its frames synchronously. It does not. cdc-wdm serves ONE
 		// control message at a time: with O_NONBLOCK a write issued while the
 		// previous URB is still in flight returns -EAGAIN (cdc-wdm.c:419-424,

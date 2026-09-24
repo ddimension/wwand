@@ -2,7 +2,7 @@
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — board abstraction: modem power / reset GPIOs, status LEDs.
 //
-// Absorbs the board-specific bits that used to live in vendor helper scripts
+// Replaces the board-specific vendor helper scripts
 // (e.g. Zyxel's /usr/sbin/lte3301): powering the modem, power-cycling a hung or
 // vanished modem for the recovery ladder, and driving the mobile/LTE/signal LEDs
 // from the modem's registration + signal.

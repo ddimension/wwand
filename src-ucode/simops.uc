@@ -243,10 +243,10 @@ export function install(self, o)
 		// actually sent. On a card whose slot 0 is occupied, that message
 		// would simply be gone (2026-09-12).
 		//
-		// This used to say ubus DEFAULT-FILLS a declared argument. It does not:
-		// the policy in ubus.uc is validation only, and req.args carries what
-		// the caller sent and nothing else. The symptom was identical, which is
-		// why the wrong mechanism went unnoticed — and believing it invites
+		// ubus does NOT default-fill a declared argument: the policy in ubus.uc
+		// is validation only, and req.args carries what the caller sent and
+		// nothing else. Either mechanism produces the same symptom, which makes
+		// the wrong one easy to believe — and believing it invites
 		// "fixing" the `?? default` patterns elsewhere in this tree that work
 		// precisely because the key is absent.
 		//

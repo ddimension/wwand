@@ -62,8 +62,8 @@ export function install(self, o)
 		// NO PDC IS NOT THE SAME AS NO ANSWER. MBIMEx v3 has a carrier
 		// configuration of its own (MODEM_CONFIGURATION, ext cid 16), which
 		// modem_mbim reads at init and keeps — reachable on a modem with no QMI
-		// PDC service at all, which is exactly the case this branch used to
-		// refuse outright.
+		// PDC service at all, which is exactly the case a PDC-only check
+		// refuses outright.
 		//
 		// READ ONLY, and it says so: MBIM has a status and a name and no way to
 		// SELECT a configuration. A `set` here is genuinely unavailable, and

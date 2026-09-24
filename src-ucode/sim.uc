@@ -605,11 +605,11 @@ export function set_pin_lock(modem, enable, pin, cb)
 			// transport rejected the op (PIN untouched) -> try the next; a real
 			// PIN error stops here so another transport can't burn a retry.
 			//
-			// ONLY A QMI REJECT CODE CARRIES THAT GUARANTEE. This used to read
-			// `(err.error != 'qmi') || …`, which made every NON-QMI error a
-			// transport rejection — and a timeout is the one error that proves
-			// nothing at all: the request may well have reached the card and
-			// the answer merely failed to come back. The chain then replayed
+			// ONLY A QMI REJECT CODE CARRIES THAT GUARANTEE. Reading every
+			// NON-QMI error as a transport rejection (`err.error != 'qmi' || …`)
+			// is wrong for a timeout, the one error that proves nothing at all:
+			// the request may well have reached the card and the answer merely
+			// failed to come back. The chain would then replay
 			// the same PIN over DMS and AT+CLCK, so one LuCI click on a slow
 			// stack could burn all three verify attempts and PUK-lock the card
 			// the user was only trying to unlock. unblock_puk (:423) has had

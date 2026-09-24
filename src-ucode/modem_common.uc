@@ -1587,13 +1587,13 @@ open_at_tty = function(self, o, fxi, log, ch, tried)
 		// EAGERLY, together with the control channel, because the port is a URC
 		// source first and a poll channel second.
 		//
-		// It used to open lazily on the first telemetry poll, to save an fd on
+		// Opening it lazily on the first telemetry poll would save an fd on
 		// QMI/MBIM that rarely touch AT. But an unopened port does not merely go
 		// unparsed: nothing holds the fd, so whatever the modem pushes there is
-		// gone. On NCM the first poll only runs at state READY, which left the
-		// entire SIM and registration phase unwatched on the very port some modems
-		// report it on (MeiG SLM770A: ^SIMST, ^SRVST, ^MODE). A second AT port is
-		// now read for URCs exactly like the primary one.
+		// gone. On NCM the first poll only runs at state READY, which would leave
+		// the entire SIM and registration phase unwatched on the very port some
+		// modems report it on (MeiG SLM770A: ^SIMST, ^SRVST, ^MODE). So a second
+		// AT port is read for URCs exactly like the primary one.
 		//
 		// Falls back to the control channel when there is no distinct second port,
 		// or when opening it fails — telemetry then shares the control engine as

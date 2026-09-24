@@ -537,12 +537,11 @@ function plmnlist_from_section(s)
 function sim_from_section(s, warnings, label)
 {
 	// THE IP FAMILY IS A PROPERTY OF THE SUBSCRIPTION, not only of the
-	// connection. This used to say the opposite — "pdp_type stays on the
-	// interface" — and that held right up to the first box with two cards in
-	// it: one subscription that answers on IPv4 only and one that wants dual
-	// stack, through the SAME interface. The interface cannot carry both, so
-	// the stopgap was a global `pdp_type 'ipv4'`, which costs the other card
-	// its IPv6 (ddimension/wwand#35).
+	// connection. Keeping it on the interface alone fails the first box with
+	// two cards in it: one subscription that answers on IPv4 only and one that
+	// wants dual stack, through the SAME interface. The interface cannot carry
+	// both, and the only interface-level answer — a global `pdp_type 'ipv4'` —
+	// costs the other card its IPv6 (evidence: ddimension/wwand#35).
 	//
 	// Same validation as the interface, and for the same reason: the stock
 	// qmi/mbim protos write IPV4V6 / IPV4, the lookup is case-sensitive, and an
@@ -937,12 +936,11 @@ function compat_translate(raw, result)
 				// autosetup. A path (/dev/...) is the one exception: that is a
 				// control device and was never a name for the L3 interface.
 				//
-				// It used to be discarded on every muxed context, on the
-				// reasoning that a mux child must never shadow its parent. The
-				// reasoning is sound; the test was not. parse_netdev() answers
-				// `{ muxed: false }` for ANY name that is not <netdev>m<N>, so
-				// `option device lte0` was dropped exactly like the parent's own
-				// name would be, though it can shadow nothing at all.
+				// It is NOT discarded on every muxed context, although a mux
+				// child must never shadow its parent. parse_netdev() answers
+				// `{ muxed: false }` for ANY name that is not <netdev>m<N>, so a
+				// blanket discard would drop `option device lte0` exactly like the
+				// parent's own name, though it can shadow nothing at all.
 				//
 				// One case is kept, and only one: the name IS this modem's own
 				// parent netdev. There the string has two readings — "call the

@@ -512,9 +512,9 @@ export function open_transport(path, baud, log)
 // --- engine ------------------------------------------------------------------
 
 // GENERIC (3GPP / V.250) unsolicited result codes. Kept HERE as the single
-// source of truth: the same list used to live (in two slightly different
-// spellings) in modem_ncm's identify filter and its URC handler, so a prefix
-// added to one was silently missing from the other.
+// source of truth for modem_ncm's identify filter and its URC handler alike:
+// two copies of it drift, and a prefix added to one is then silently missing
+// from the other.
 //
 // Vendor-specific codes do NOT belong here — a prefix in this list is filtered
 // out of the responses of EVERY modem, so a wrong entry breaks parsing on

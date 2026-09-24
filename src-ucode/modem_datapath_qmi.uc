@@ -249,8 +249,8 @@ export function setup(self, dp, o, next)
 					{ size: wdata.ul_max_size, count: wdata.ul_max_datagrams } : null,
 			};
 
-			// always name the version — it used to appear only for v5,
-			// so "datapath: rmnet" left you guessing between v1 and v4
+			// always name the version: "datapath: rmnet" alone leaves you
+			// guessing between v1, v4 and v5
 			// the EFFECTIVE backend, for the reason given in modem_mbim.uc:
 			// setup() drops to raw_ip when the selected one has no channels to
 			// build, and naming the selection here contradicted status()

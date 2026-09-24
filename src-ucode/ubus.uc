@@ -107,10 +107,10 @@ export function publish(conn, daemon, log)
 					};
 				}
 
-				// collectd also graphs whether each configured connection is up, and
-				// the feed used to get that from status() before this method existed —
-				// so dropping it here silently stopped `gauge-connected` from ever
-				// being emitted, against what reference.md promises. ONLY the state:
+				// collectd also graphs whether each configured connection is up
+				// (`gauge-connected`, which reference.md promises), and the collectd
+				// feed reads it from this method (wwandctl.uc) — dropping it here
+				// stops that gauge silently. ONLY the state:
 				// the status context also carries addresses and the interface name,
 				// which this deliberately narrow endpoint has no business handing to
 				// an unprivileged reader.
