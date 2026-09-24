@@ -3165,6 +3165,38 @@ export function create(opts)
 				l3_device: derive_netdev(entry),
 				state: entry.ctx?.state ?? 'UNBOUND',
 				last_error: entry.ctx?.last_error,
+				// WHAT THE MODEM HANDED US, which until now existed only in the
+				// `ipv4 config:` line logged once at connect time. That line
+				// rotates away, and two users then had no way to answer the
+				// obvious question about their own box: the interface shows no
+				// gateway — did the modem not give one, or did wwand decide not
+				// to install it? (ddimension/wwand#41, leideno and liaohongxing,
+				// 2026-09-24. I could not answer it from `status` either, on my
+				// own test router, which is what settled that this belongs here.)
+				//
+				// Deliberately the ASSIGNED configuration and not the routes:
+				// what netifd did with it is netifd's to report (`ifstatus`),
+				// and duplicating that here would be a second answer that
+				// drifts. This is the input to that decision.
+				// type(), not truthiness: a member access on a SCALAR throws in
+				// ucode ("left-hand side expression is not an array or object"),
+				// and this runs inside a ubus method LuCI polls — a throw here
+				// blanks the status page rather than one field. No writer puts a
+				// scalar there today; the guard is one word and closes the class.
+				// Raised by Codex review, 2026-09-24.
+				ipv4: type(entry.ctx?.settings?.ipv4) == 'object' ? {
+					addr:    entry.ctx.settings.ipv4.addr,
+					prefix:  entry.ctx.settings.ipv4.prefix,
+					gateway: entry.ctx.settings.ipv4.gateway,
+					dns:     entry.ctx.settings.ipv4.dns,
+					mtu:     entry.ctx.settings.ipv4.mtu,
+				} : null,
+				ipv6: type(entry.ctx?.settings?.ipv6) == 'object' ? {
+					addr:    entry.ctx.settings.ipv6.addr,
+					plen:    entry.ctx.settings.ipv6.plen,
+					gateway: entry.ctx.settings.ipv6.gateway,
+					dns:     entry.ctx.settings.ipv6.dns,
+				} : null,
 			};
 		}
 

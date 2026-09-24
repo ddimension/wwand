@@ -683,6 +683,49 @@ rd.shutdown();
 	// attempts with the default failreboot of 100 there are 76 failures to go.
 	eq(length(r.rungs), 4, 'recovery view: the whole ladder is listed, reboot included');
 
+	// THE ASSIGNED IP CONFIGURATION, which lived only in a log line printed once
+	// at connect and then rotated away. Two users on ddimension/wwand#41 could
+	// not tell whether their interface showed no gateway because the modem gave
+	// none or because wwand chose not to install one — and neither could I, from
+	// `ubus call wwand status` on my own test router, which is what put this
+	// here rather than in a reply (2026-09-24).
+	sd.contexts = {
+		c0: { cfg: { interface: 'wan', modem: 'm0' },
+		      ctx: { state: 'CONNECTED', down: (cb) => (cb ? cb() : null), settings: {
+			      ipv4: { addr: '100.70.230.10', prefix: 32, gateway: '100.70.230.9',
+			              dns: [ '8.8.8.8' ], mtu: 1500 },
+			      ipv6: null } } },
+		c1: { cfg: { interface: 'wan2', modem: 'm0' },
+		      ctx: { state: 'CONNECTED', down: (cb) => (cb ? cb() : null), settings: {
+			      ipv4: { addr: '10.0.0.2', prefix: 32, gateway: null,
+			              dns: [], mtu: null },
+			      ipv6: null } } },
+		c2: { cfg: { interface: 'wan3', modem: 'm0' }, ctx: null },
+		// a scalar where an object belongs: no writer produces this, but a
+		// member access on one THROWS in ucode, and status() is a ubus method
+		// LuCI polls — the throw would blank the whole page, not one field
+		c3: { cfg: { interface: 'wan4', modem: 'm0' },
+		      ctx: { state: 'CONNECTED', down: (cb) => (cb ? cb() : null),
+		             settings: { ipv4: 'nonsense', ipv6: 7 } } },
+	};
+
+	let cst = sd.status().contexts;
+
+	eq(cst.c0.ipv4.gateway, '100.70.230.9',
+	   'context view: the gateway the modem handed us is reported');
+	eq(cst.c0.ipv4.addr, '100.70.230.10', 'context view: ...with the address it belongs to');
+	eq(cst.c0.ipv4.mtu, 1500, 'context view: and the MTU');
+	// the DISCRIMINATOR the issue turned on: "no gateway" as a fact about the
+	// modem, told apart from "a gateway wwand did not install as a nexthop"
+	eq(cst.c1.ipv4.gateway, null,
+	   'context view: a modem that gave no gateway reports none, which is the other answer');
+	eq(cst.c1.ipv4.addr, '10.0.0.2', 'context view: ...and still reports its address');
+	eq(cst.c2.ipv4, null, 'context view: an unbound context has no assigned config at all');
+	eq(cst.c0.ipv6, null, 'context view: a v4-only context reports no v6 half');
+	eq(cst.c3.ipv4, null, 'context view: a scalar where an object belongs is refused, not dereferenced');
+	eq(cst.c3.ipv6, null, 'context view: ...both families');
+	eq(cst.c3.state, 'CONNECTED', 'context view: and the rest of the row survives it');
+
 	// WHICH MBIM MESSAGE LAYOUT THIS MODEM'S DECODERS ARE USING. The agreed MS
 	// extension version decides it — v1 Base Stations Info has no NR arrays and
 	// every pointer after SystemType sits four bytes earlier — and it lived in
