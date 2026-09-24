@@ -253,7 +253,7 @@ export function create(opts)
 	// --- modem/context wiring ----------------------------------------------
 
 	// reconnect engine (activate/pending-up queue, capped-backoff retry, the
-	// transient-loss hold timer) — extracted to reconnect.uc; bound as locals
+	// transient-loss hold timer) — lives in reconnect.uc; bound as locals
 	// so the call sites below read unchanged. Also installs set_hold_max_ms.
 	// forward-declared: reconnect.install() below is handed a reference to it
 	// and the definition sits further down, where the rest of the marker lives.
@@ -350,7 +350,7 @@ export function create(opts)
 	// about an interface, and it used to live on the context entry — whose
 	// lifetime is SHORTER than the interface's. A config reload that cannot
 	// resolve an interface's modem produces no entry for it at all
-	// (config.uc:866-869 warns "references unknown modem" and skips it), so
+	// (config.uc:865-868 warns "references unknown modem" and skips it), so
 	// the carry-over that used to sit in build_context had nothing to carry
 	// from and the evidence was gone. Re-adding the modem then built a fresh
 	// entry with no marker, the status poll saw netifd's cleared autostart,
@@ -360,8 +360,7 @@ export function create(opts)
 	// That is the tail of ddimension/wwand#35: the down was ours (13 failed
 	// attempts, hold expiry) at 18:48:02, the "unknown modem" warning landed
 	// at 18:47:49 between the two, and the first refusal at 18:49:57 is 115 s
-	// later — well inside OUR_DOWN_TTL, so the TTL is not what lost it. Found
-	// by a full review, 2026-09-19.
+	// later — well inside OUR_DOWN_TTL, so the TTL is not what lost it.
 	self._our_downs = {};
 
 	mark_our_down = (entry) => {
@@ -658,7 +657,6 @@ export function create(opts)
 			// replaces the whole entry, so anything not listed here is
 			// forgotten — and forgetting this one costs an NCM modem its
 			// vendor recipe when it refuses to identify itself (wwand#32).
-			// Raised by review, 2026-09-19.
 			_ident: prev?._ident,
 			// when the serial-only reading started, so the settle window in
 			// start_modem is a window and not a fresh countdown per rebuild
@@ -709,9 +707,9 @@ export function create(opts)
 	//     activated families while settings are still being fetched.
 	//
 	// Each backend's down() already knows exactly what it holds. Asking it is
-	// right; second-guessing it from outside is how both earlier versions
-	// leaked the session they existed to drop. Raised by Codex review over two
-	// rounds, 2026-09-23.
+	// right; second-guessing it from outside leaks the very session this exists
+	// to drop, because the public `state` does not answer "does this hold a
+	// bearer".
 	//
 	// AND THE RECONNECT IS STARTED HERE, not inferred from the `down` event.
 	// context_ncm.down() returns WITHOUT emitting it when the activation has
@@ -1267,7 +1265,7 @@ export function create(opts)
 
 				// ONE CHAIN PER ENTRY. Repeated `up` events would otherwise
 				// stack parallel waits, each eventually calling ensure_wan6 and
-				// bouncing the subinterface again. Raised by review, 2026-09-19.
+				// bouncing the subinterface again.
 				if (entry._wan6_arming)
 					return;
 
@@ -1280,7 +1278,7 @@ export function create(opts)
 					// ctx (:1238) and shutdown replaces the whole map (:2894),
 					// so a closure holding `entry` would still see
 					// `entry.ctx == mine` and bounce a freshly created
-					// subinterface. Raised by review, 2026-09-19.
+					// subinterface.
 					if (self.contexts[name] != entry || entry.ctx != mine) {
 						entry._wan6_arming = false;
 						return;
@@ -1292,8 +1290,7 @@ export function create(opts)
 					// An interface switched to ipv4 between the arming and the
 					// fire has already been retired by the branch above, and
 					// this closure would put the subinterface straight back —
-					// the same object, so nothing above notices. Raised by
-					// Codex review on ddimension/wwand#35, 2026-09-22.
+					// the same object, so nothing above notices.
 					if (context_common.effective_pdp(mine) == 'ipv4') {
 						entry._wan6_arming = false;
 						return;
@@ -1324,7 +1321,7 @@ export function create(opts)
 					// that renew has even been issued, is the original bug with
 					// a narrower window rather than a fix. Require it on two
 					// readings a tick apart, which brackets the gap the renew
-					// opens. Found by review, 2026-09-20.
+					// opens.
 					else if (!confirmed) {
 						confirmed = true;
 
@@ -1518,8 +1515,7 @@ export function create(opts)
 			// WITH A NOTE, because the periodic re-check only looks at entries
 			// that have one (the waiting-modems loop in the tick). Returning
 			// bare left a rebuilt entry with control_note null, which quietly
-			// dropped the device out of the retry it is waiting for. Raised by
-			// Codex review, 2026-09-23.
+			// dropped the device out of the retry it is waiting for.
 			if (entry)
 				entry.control_note = 'waiting for modem (mode switch attempted, re-enumeration pending)';
 			return;
@@ -1613,7 +1609,7 @@ export function create(opts)
 		// precise divergence this function exists to make impossible, and it is
 		// worst in the new caller: the ladder would have authorised its one
 		// narrow exception on an unarmed modem and the board would have cut
-		// power instead. Raised by Codex review, 2026-09-23.
+		// power instead.
 		return rg ? rg : null;
 	};
 
@@ -1645,7 +1641,7 @@ export function create(opts)
 		// ddimension/wwand#32). Only a complete answer is worth remembering.
 		// ...and only what THIS modem said. A carried-over identity written back
 		// here would attach the old manufacturer to the new IMEI and outlive the
-		// mistake (raised by review, 2026-09-19).
+		// mistake.
 		if ((entry.modem?.info?.manufacturer ?? '') != '' &&
 		    !entry.modem.info.ident_carried)
 			entry._ident = {
@@ -1662,7 +1658,6 @@ export function create(opts)
 		// late events can arm a spurious reconnect-hold on the rebuilt entry.
 		// `lost` is built for exactly this — it stops the monitor and destroys
 		// the family clients without attempting QMI cleanup (context.uc:1049).
-		// Found by a full review, 2026-09-19.
 		for (let cname, centry in self.contexts) {
 			if (centry.cfg.modem == name && centry.ctx)
 				centry.ctx.modem_event('lost');
@@ -1727,8 +1722,7 @@ export function create(opts)
 		// ...and close its NMEA port. Otherwise the reader holds an fd on a
 		// device that is gone — or worse, on whatever the kernel hands that
 		// name to next — and no other modem can be given that tty, because one
-		// port is only ever read once. Raised by Codex review, 2026-09-20 (as
-		// an ugps section that was never released) and 2026-09-21.
+		// port is only ever read once.
 		release_gps(name);
 
 		if (entry.modeswitch_liveness)
@@ -1785,8 +1779,7 @@ export function create(opts)
 			//     for, which is what the vlan datapath would have built.
 			//
 			// Together that is the device WE created and nothing else. Layout
-			// verified on the GL-X3000/RM520N, 2026-09-20; ownership gap raised
-			// by Codex review the same day.
+			// verified on the GL-X3000/RM520N, 2026-09-20.
 			let ours = () => {
 				if (!fx.exists(sprintf('/sys/class/net/%s/lower_%s', want, entry.netdev)))
 					return false;
@@ -2016,8 +2009,7 @@ export function create(opts)
 			// timestamp is what the window is made of, and resetting it on
 			// every tick would mean waiting forever, which is the bound it
 			// exists to provide. A spell ends when the device goes away or
-			// comes back rich, and both clear it. Raised by Codex review,
-			// 2026-09-23.
+			// comes back rich, and both clear it.
 			delete entry._ppp_since;
 
 			log('warn', sprintf('modem %s: control interface not present yet, waiting for hotplug', name));
@@ -2039,8 +2031,8 @@ export function create(opts)
 		// pulsing its reset GPIO, then found the QMI channel and came up
 		// normally seventeen seconds later. It even tried to mode-switch on a
 		// tty that did not exist yet — "cannot open /dev/ttyUSB2: No such file
-		// or directory" — which is the same fact stated twice. Reported by
-		// MassiPi (ddimension/wwand#40, 2026-09-23).
+		// or directory" — which is the same fact stated twice (evidence:
+		// ddimension/wwand#40).
 		//
 		// `_had_modem` is exactly the distinction needed and is already kept
 		// for the vanish escalation below: this control device was once ours,
@@ -2052,7 +2044,7 @@ export function create(opts)
 		// then suppress the one-time mode switch that device needs. A device
 		// that is still serial-only after PPP_SETTLE seconds is not
 		// mid-enumeration — the NR7101 took seventeen — so the diagnosis is
-		// allowed through. Raised by Codex review, 2026-09-23.
+		// allowed through.
 		if (control.protocol == 'ppp' && entry._had_modem &&
 		    (time() - (entry._ppp_since ?? time())) < PPP_SETTLE) {
 			entry._ppp_since ??= time();
@@ -2352,7 +2344,7 @@ export function create(opts)
 		// that is exactly the case the map exists for (an interface whose modem
 		// stopped resolving loses its entry and must still be recognised when
 		// it comes back). The clock is the right arbiter, and a reload is the
-		// natural moment to apply it. Raised by Codex review, 2026-09-19.
+		// natural moment to apply it.
 		let now = time();
 
 		for (let iface, at in self._our_downs)
@@ -2629,7 +2621,7 @@ export function create(opts)
 	};
 
 	// context settings assembly (live config re-read, MTU/IPv6 link side effects,
-	// the proto-shim settings payload) — extracted to ctx_settings.uc; bound as
+	// the proto-shim settings payload) — lives in ctx_settings.uc; bound as
 	// locals so the call sites below read unchanged.
 	ctx_settings.install(self, {
 		log: log,
@@ -2984,7 +2976,7 @@ export function create(opts)
 				// hardware radio switch reaches status and LuCI: modem_mbim
 				// sets it on the modem object, and that object is not this
 				// entry. The two were never joined, so the note existed and
-				// nobody could see it. Raised by Codex review, 2026-09-20.
+				// nobody could see it.
 				control_note: entry.control_note ?? entry.modem?.control_note,
 				// The radio's two switches, as the modem last reported them
 				// (MBIM RADIO_STATE — hardware and software are separate, and
@@ -3183,7 +3175,6 @@ export function create(opts)
 				// and this runs inside a ubus method LuCI polls — a throw here
 				// blanks the status page rather than one field. No writer puts a
 				// scalar there today; the guard is one word and closes the class.
-				// Raised by Codex review, 2026-09-24.
 				ipv4: type(entry.ctx?.settings?.ipv4) == 'object' ? {
 					addr:    entry.ctx.settings.ipv4.addr,
 					prefix:  entry.ctx.settings.ipv4.prefix,
@@ -3272,7 +3263,7 @@ export function create(opts)
 		return { mcc: p.mcc ?? null, mnc: p.mnc ?? null, name: p.description ?? null };
 	};
 
-	// settings / network-selection / operator-scan ubus ops — extracted to netsel_ops.uc
+	// settings / network-selection / operator-scan ubus ops — in netsel_ops.uc
 	netsel_ops.install(self, { log: log, check_modem: check_modem, reg_plmn: reg_plmn });
 
 	// SIM/SMS/eSIM/APDU + hardware reset/repower ops live in their own modules
@@ -3632,8 +3623,7 @@ export function create(opts)
 				// so the tick's re-check and the vanish escalation stay
 				// disarmed and the modem is waited on passively forever. On
 				// NCM this is the ONLY removal path (no on_gone is wired), so
-				// there the recovery never fired at all. Found by a full
-				// review, 2026-09-19.
+				// there the recovery never fired at all.
 				if (hit && entry.modem)
 					modem_removed(entry.modem);
 			}

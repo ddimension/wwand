@@ -40,8 +40,7 @@ const TX_RETRY_MS = 5;
 // are then read by the new one. The old hub reads nothing any more (its uloop
 // registration is deleted on the first hop below), so it cannot mis-dispatch;
 // the new CTL client drops a response whose transaction id it has no request
-// for. A collision needs the same id within 100 ms of a teardown. Raised by
-// Codex review, 2026-09-19.
+// for. A collision needs the same id within 100 ms of a teardown.
 const CLOSE_DRAIN_TRIES = 20;
 
 export function open(path, cbs)
@@ -175,8 +174,7 @@ export function open(path, cbs)
 		// eleven releases were dropped before the 5 ms retry could run. The CIDs
 		// stayed allocated in the MODEM's table — exactly the leak that release
 		// burst exists to prevent, and on an E182E-class stack with a tiny table
-		// a few `/etc/init.d/wwand restart` cycles exhaust it. Found by a full
-		// review, 2026-09-19.
+		// a few `/etc/init.d/wwand restart` cycles exhaust it.
 		let drain_tries = 0;
 		let drain;
 
@@ -188,8 +186,7 @@ export function open(path, cbs)
 			// HUP) fd in a hot loop for up to 100 ms. Deleting it here still
 			// happens from a timer callback rather than inline, which is the
 			// whole point of deferring it (see above); the native fd stays open
-			// because the drain below still WRITES to it. Raised by Codex
-			// review, 2026-09-19.
+			// because the drain below still WRITES to it.
 			if (uh) {
 				uh.delete();
 				uh = null;

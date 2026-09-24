@@ -534,8 +534,7 @@ return {
 					// this run reads its verdict from. Reserving here closes
 					// it, and the callback below refines the record rather
 					// than creating it. Placed after every validation return,
-					// so nothing can leave with the claim raised. Raised by
-					// Codex review, 2026-09-19.
+					// so nothing can leave with the claim raised.
 					dl = { state: 'running', via: 'starting' };
 
 					// AT modems download internally (AT+QESIM, no host data), QMI
@@ -595,8 +594,7 @@ return {
 					// that installed correctly was reported 'failed' and never
 					// auto-notified — while a second host session talked to the
 					// eUICC at the same time. Every sibling op refuses instead
-					// (:427, :471, 'notify' below). Found by a full review,
-					// 2026-09-19.
+					// (:427, :471, 'notify' below).
 					if (dl?.state == 'running' || mgmt_busy)
 						return done({ error: 'busy' });
 
@@ -610,7 +608,6 @@ return {
 					// lpac_run returns false for "no binary" and null for a
 					// failed spawn; reporting both as esim_not_installed sent
 					// an operator looking for a package that is already there.
-					// Raised by Codex review, 2026-09-19.
 					if (np === false) {
 						mgmt_busy = false;
 

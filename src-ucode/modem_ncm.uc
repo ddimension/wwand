@@ -1728,7 +1728,7 @@ export function create(opts)
 				// produced an ICCID at all, and after an eSIM switch on a
 				// generic-recipe modem the OLD card's iccid and its wwand_sim
 				// override survived — the exact wrong state this function exists
-				// to prevent. :762 and sim.uc:1495 have had it right all along.
+				// to prevent. :762 and sim.uc:1492 have had it right all along.
 				// Found by a full review, 2026-09-19.
 				if (h)
 					return hexmod.bytes_to_iccid(hexmod.hex_to_arr(h[1]));

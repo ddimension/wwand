@@ -265,15 +265,13 @@ export function decode_deliver(pdu_hex)
 	// anyway turned an ordinary carrier voicemail notification — DCS 0xC8, the
 	// commonest MWI value there is — into 'ucs2', and it rendered as CJK
 	// garbage. Group 1111 puts the alphabet in bit 2 alone and happened to come
-	// out right, which is why this survived. Found by a full review,
-	// 2026-09-19.
+	// out right, which is why this survived.
 	let group = (dcs >> 4) & 0x0f;
 	let encoding;
 
 	// 0100-0111 is the "message marked for automatic deletion" group and TS
 	// 23.038 §4 says its bits 5-0 are coded exactly as the general group's, so
-	// it reads the alphabet the same way — DCS 0x48 is UCS2, not GSM7. Raised
-	// by Codex review, 2026-09-19.
+	// it reads the alphabet the same way — DCS 0x48 is UCS2, not GSM7.
 	if (group <= 0x07) {
 		let alpha = (dcs & 0x0c) >> 2;
 
@@ -303,7 +301,6 @@ export function decode_deliver(pdu_hex)
 	// UCS-2 and 8-bit paths clamped to whatever was present. Both produced a
 	// message that looks like a message. A PDU that does not carry what it
 	// declares is malformed, and saying so is the only honest answer.
-	// Found by review, 2026-09-20.
 	let need = (encoding == 'gsm7')
 		? int((udl * 7 + 7) / 8)      // udl counts SEPTETS here
 		: udl;                        // ...and OCTETS for ucs2/8-bit
@@ -552,7 +549,6 @@ export function encode_submit(number, text, opts)
 			// receiver "shall display it as a space character" — the " e" seen
 			// at the boundary. A fixed 153 stride did exactly that; cut one
 			// septet earlier instead, and the orphan leads the next segment.
-			// Found by a full review, 2026-09-19.
 			let i = 0;
 
 			while (i < length(sep)) {
@@ -583,7 +579,7 @@ export function encode_submit(number, text, opts)
 		//
 		// The length half needs no interpretation: 70 is a count of 16-bit
 		// units, and counting code points let a segment exceed 140 octets of
-		// TP-UD. Found by a full review, 2026-09-19.
+		// TP-UD.
 		let units = [];
 
 		for (let cp in cps) {

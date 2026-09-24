@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — context reconnect engine (extracted from the daemon.uc factory).
+// wwand — context reconnect engine, kept out of the daemon.uc factory so the
+// hold/backoff logic can be read on its own.
 //
 // The daemon (no per-interface monitor) keeps each context up. A TRANSIENT
 // loss keeps the netifd interface up and reconnects the session in place
@@ -33,8 +34,7 @@ export function install(self, o)
 	// NOT defaulted to a no-op. It is needed on exactly one path — the
 	// hold-expiry give-up — and a silent default there loses the marker that
 	// keeps netifd's cleared autostart from reading as an operator ifdown,
-	// which is a correctness invariant and not a nicety. Raised by Codex
-	// review, 2026-09-19.
+	// which is a correctness invariant and not a nicety.
 	let mark_our_down = o.mark_our_down;
 
 	if (type(mark_our_down) != 'function')
@@ -145,9 +145,8 @@ export function install(self, o)
 			// the backoff they were meant to space out collapses. Reachable
 			// whenever something reaches retry_activate while a retry is
 			// already scheduled: the modem-ready and adoption paths call it
-			// directly (daemon.uc:484,:556), and the sim_refresh handler gets
-			// there through enter_reconnecting. Raised by Codex
-			// review, 2026-09-23.
+			// directly (daemon.uc:483,:556), and the sim_refresh handler gets
+			// there through enter_reconnecting.
 			if (entry.retry_timer) {
 				entry.retry_timer.cancel();
 				entry.retry_timer = null;
@@ -206,7 +205,7 @@ export function install(self, o)
 				// there and no longer lives on this entry — writing the old fields
 				// here left the hold-expiry give-up, the very path that reaches
 				// this line and the one ddimension/wwand#35 took, unmarked for
-				// every reader. Raised by Codex review, 2026-09-19.
+				// every reader.
 				mark_our_down(entry);
 
 				if (down_interface && entry.cfg.interface)

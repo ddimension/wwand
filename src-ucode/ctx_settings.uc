@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — context settings assembly (extracted from the daemon.uc factory):
+// wwand — context settings assembly, kept apart from the daemon.uc factory:
 // the live config re-read plus the netifd-facing settings/link-side-effect
 // helpers consumed by _up_result / context_settings / context_up.
 //

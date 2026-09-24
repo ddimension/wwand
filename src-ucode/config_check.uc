@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — live-config validation (extracted from the modem.uc mega-closure).
+// wwand — live-config validation, kept out of the modem.uc closure.
 //
 // validate(self, log, cb): compare the live modem against self.config +
 // modem_quirks and populate self.config_warnings = [ { check,
@@ -87,8 +87,7 @@ export function validate(self, log, cb)
 
 		// with the MNC's width alongside it: `option mnc '030'` and '30' are
 		// different operators and both become the integer 30 (libqmi 1.38, Set
-		// System Selection Preference input 0x1A). Raised by Codex review,
-		// 2026-09-19.
+		// System Selection Preference input 0x1A).
 		if (self.config.mcc && self.config.mnc) {
 			args.network_selection = {
 				mode: nasmod.NETWORK_SELECTION_MANUAL,

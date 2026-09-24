@@ -97,7 +97,7 @@ export function create(opts)
 		// it again when the selected protocol changes.
 		// `proto_hw_base` is the error count when the hardware rung fired: the
 		// reboot gate measures its window from THERE, not from zero (see the
-		// rungs below). Found by a full review, 2026-09-19.
+		// rungs below).
 		// `unarmed_reset` is the fired-once flag for the ONE hardware action an
 		// unarmed modem may receive — see unarmed_reset_line() below. Separate
 		// from `rung` on purpose: sharing that index would mark the two cheaper
@@ -142,7 +142,7 @@ export function create(opts)
 			// gate below read the absolute count again — rebooting SOONER than
 			// either version intended. Start the window at the restored count
 			// instead: conservative, and it costs at most one extra window
-			// once, after an upgrade. Found by a full review, 2026-09-19.
+			// once, after an upgrade.
 			let phwb = match(data, /"proto_hw_base": *([0-9]+)/);
 
 			self.counters.proto_hw_base = phwb ? +phwb[1]
@@ -337,8 +337,7 @@ export function create(opts)
 	// them: it skipped its own hardware reset (proto_hw was already 1) and then
 	// rebooted the router on a window measured partly under the protocol it had
 	// just stopped speaking. The attempt ladder is separate and still climbs,
-	// so a modem that fails under every protocol is still caught. Raised by
-	// Codex review, 2026-09-19.
+	// so a modem that fails under every protocol is still caught.
 	let clear_proto_ladder = () => {
 		if (!self.counters.proto_errors && !self.counters.proto_hw &&
 		    !self.counters.proto_hw_base && !self.counters.proto_ok)
@@ -386,8 +385,7 @@ export function create(opts)
 		// arm_blocked is deliberately NOT persisted — so after a restart with a
 		// corrected configuration the modem could arm afresh while still
 		// carrying a hardware rung it never fired in this incarnation, skip its
-		// own reset, and reboot on the old window. Raised by Codex review,
-		// 2026-09-19.
+		// own reset, and reboot on the old window.
 		let had = self.counters.proto_ok;
 
 		if (!clear_proto_ladder())
@@ -480,7 +478,7 @@ export function create(opts)
 			// router rebooted while the modem was still inside its reset hold —
 			// the exact reboot-loop this rung exists to prevent (NR7101). The
 			// comment below has always claimed "a further full window"; this is
-			// what makes it true. Found by a full review, 2026-09-19.
+			// what makes it true.
 			self.counters.proto_hw_base = n;
 			self.persist();
 			return 'usb_repower';

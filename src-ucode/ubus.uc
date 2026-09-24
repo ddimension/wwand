@@ -323,7 +323,7 @@ export function publish(conn, daemon, log)
 		// this boundary on its own. `mnc_digits` carries the width (2 or 3);
 		// omitting it keeps today's behaviour, and an MNC of 100 or more
 		// settles itself. Added rather than switching `mnc` to a string so
-		// existing callers keep working. Found by a full review, 2026-09-19.
+		// existing callers keep working.
 		modem_set_network_selection: {
 			args: { modem: '', mode: '', mcc: 0, mnc: 0, mnc_digits: 0,
 				ubus_rpc_session: '' },

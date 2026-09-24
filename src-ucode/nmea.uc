@@ -86,8 +86,7 @@ function coord(v, hem) {
 	// to 90.00000002 and is still refused, and the wire cannot express a
 	// smaller excess — six decimal minutes are 1.67e-8 degrees. So no sentence
 	// this parser can receive reaches the hazard, which is why the test below
-	// pins the refusal and not the ordering. Raised by Codex review,
-	// 2026-09-21.
+	// pins the refusal and not the ordering.
 	if (out < 0 || out > (lat ? 90 : 180))
 		return null;
 
@@ -124,7 +123,7 @@ function hms(s) {
 // A calendar day that timegm would otherwise roll over into the next month.
 // Checking `d <= 31` is not enough: 31 April and 29 February in a common year
 // both pass it and both become the first of the following month, silently and
-// with a plausible-looking epoch. Raised by Codex review, 2026-09-21.
+// with a plausible-looking epoch.
 const MONTH_DAYS = [ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 ];
 
 function ymd_ok(y, mo, d) {
@@ -210,7 +209,7 @@ export function create() {
 	// moved, so the last position plus an age is still the best answer there
 	// is — but "eight satellites, HDOP 0.5" alongside "no fix" describes a
 	// state that never existed, and it was reachable because each sentence
-	// only ever updated its own fields. Raised by Codex review, 2026-09-21.
+	// only ever updated its own fields.
 	let lose_fix = () => {
 		self.valid = false;
 		self.satellites_used = null;
@@ -314,8 +313,7 @@ export function create() {
 		// way it went depended on the order the sentences happened to arrive.
 		// So each talker's mode is kept on its own and the reported fix is the
 		// best of them; whether there is a fix AT ALL stays RMC/GLL/GGA's word,
-		// which is where the receiver says it. Raised by Codex review,
-		// 2026-09-21.
+		// which is where the receiver says it.
 		GSA: (f, now, talker) => {
 			self._gsa[talker] = { mode: num(f[1]), at: now,
 			                      pdop: num(f[14]), hdop: num(f[15]), vdop: num(f[16]) };
@@ -325,7 +323,7 @@ export function create() {
 			// NMEA 2.3 added an FAA mode as the last field; 'N' is "not valid"
 			// and the numbers beside it are meaningless. Ignoring it let an
 			// invalid VTG repopulate speed and course right after a lost fix
-			// had cleared them. Raised by Codex review, 2026-09-21.
+			// had cleared them.
 			if (f[8] == 'N')
 				return;
 
@@ -405,7 +403,7 @@ export function create() {
 				// reported — the receiver reconfigured, the band lost — would
 				// otherwise stay in the count and in the SNR list for the life
 				// of the daemon, while the comment beside the count claims it
-				// is what is in the sky. Raised by Codex review, 2026-09-21.
+				// is what is in the sky.
 				self.sats[key] = { at: now, list: acc };
 				self._gsv[key] = null;
 			}
@@ -439,7 +437,7 @@ export function create() {
 	// its verdict standing for ever, GSA_TTL or no GSA_TTL; and a GSA mode 3
 	// landing AFTER the receiver has said the solution is gone reasserts a 3D
 	// fix beside valid:false, which is the opposite of the rule this file
-	// states. Raised by Codex review, 2026-09-21.
+	// states.
 	let verdict = (now) => {
 		let best = null;
 

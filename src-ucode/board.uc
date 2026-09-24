@@ -434,8 +434,7 @@ export function create(opts)
 		// one line to another inverts it when they disagree, so the "release"
 		// at the end of the pulse drove the modem into permanent reset, and
 		// the pin-sampling fallback that would have got it right was skipped
-		// precisely because the board HAD a measurement. Found by a full
-		// review, 2026-09-19.
+		// precisely because the board HAD a measurement.
 		let own = (sprintf('%s', g) == sprintf('%s', profile?.reset_gpio ?? ''));
 		let run = own ? profile?.reset_run : null;
 

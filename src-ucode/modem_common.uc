@@ -684,7 +684,7 @@ export function make_recovery(self, opts, log, proto)
 //
 // `digits` wins when given; otherwise a string that still HAS three digits
 // settles it, and so does any value of 100 or more. Everything else stays two,
-// which is what shipped. Found by a full review, 2026-09-19.
+// which is what shipped.
 export function mnc_width(mnc, digits)
 {
 	if (+digits == 3 || +digits == 2)
@@ -726,7 +726,7 @@ export function make_fail(self, o)
 		// the bring-up started with, and reading self._gen when the callback
 		// arrives compares a value with itself. NCM has no generation counter
 		// at all, and this helper is shared with it. The cancellation is the
-		// signal. ddimension/wwand review, 2026-09-19.
+		// signal.
 		if (err?.error == 'cancelled')
 			return o.log('debug', sprintf('%s: cancelled with the session, not a failure', stage));
 
@@ -760,7 +760,7 @@ export function make_fail(self, o)
 			// survives and restarts a modem the operator just stopped. The
 			// backend raises a depth counter around its teardown for exactly
 			// this question (modem.uc); a backend that does not set one reads 0
-			// and behaves as before. Raised by review, 2026-09-19.
+			// and behaves as before.
 			if ((self._teardown_depth ?? 0) > 0)
 				return o.log('debug', sprintf('%s: failed during teardown — no retry armed', stage));
 
@@ -1957,7 +1957,7 @@ export function format_telemetry(o)
 	// ucode, so an unavailable reading used to be published as a perfect one —
 	// which is how a decoder that correctly refuses a value (the MBIM unknown
 	// markers, ddimension/wwand#30) would surface as "rsrp 0.0" rather than as
-	// silence. Raised by Codex review, 2026-09-22.
+	// silence.
 	let m = (label, v) => (v != null) ? sprintf(' %s %.1f', label, v / 10.0) : '';
 
 	let lte = cells?.lte_intra;

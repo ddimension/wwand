@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — QMI datapath bring-up (extracted from the modem.uc mega-closure).
+// wwand — QMI datapath bring-up, kept out of the modem.uc closure.
 //
 // setup(self, dp, { log, fail }, next): negotiate the WDA data format
 // (QMAP/QMAPv5 with rmnet-first checksum-offload and plain-QMAP fallback,
@@ -168,7 +168,7 @@ export function setup(self, dp, o, next)
 				// (datapath_rmnet_nss.uc:323) — the adoption the feature exists
 				// for could never fire on the AW1000/NSS case it was written
 				// for. The probe passed, then setup returned "mux channel not
-				// created". Found by a full review, 2026-09-19.
+				// created".
 				netdev_kernel: dp.netdev_kernel,
 				backend: backend,
 				// the add-on datapaths the daemon loaded (the named one,

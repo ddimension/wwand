@@ -410,7 +410,7 @@ export function create(opts)
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:2199), and dropping it strands a ubus request.
+				// (daemon.uc:2191), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
@@ -1137,7 +1137,7 @@ export function create(opts)
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
-			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:419-422), so it
+			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:418-421), so it
 			// carries the same raw WCDMA Ec/Io and needs the same conversion —
 			// an indication landing between refreshes would otherwise flip the
 			// unit back under a consumer that just read the polled value

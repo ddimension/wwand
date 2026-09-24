@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — SIM / SMS / eSIM / APDU daemon ops, extracted from daemon.uc.
+// wwand — SIM / SMS / eSIM / APDU daemon ops, kept apart from daemon.uc.
 // install() attaches the ubus-facing methods onto the daemon `self` (same
 // pattern as netsel_ops.uc); modem/context state stays on self, the lazy
 // esim loader is injected so the daemon keeps owning package presence.
@@ -102,8 +102,8 @@ export function install(self, o)
 			// not restart the init chain — so the status page went on showing
 			// the previous SIM's ICCID and its parting "session closed: card
 			// removed" indefinitely, through a switch BACK as well, because
-			// nothing on either path ever clears them. Reported by MassiPi on
-			// an NR7101 (ddimension/wwand#39, 2026-09-22).
+			// nothing on either path ever clears them (evidence:
+			// ddimension/wwand#39, NR7101).
 			//
 			// modem.uc:1531-1536 already states the rule — card-side
 			// diagnostics belong to the card we were talking to — and acts on
@@ -122,7 +122,6 @@ export function install(self, o)
 			// the unlock scheduled below would have offered the OLD card's PIN
 			// to the new one and spent one of three attempts on it. Its APN and
 			// credentials would have applied too, until a reapply replaced it.
-			// Raised by Codex review, 2026-09-22.
 			m.active_sim = null;
 
 			if (m.info) {
@@ -148,7 +147,6 @@ export function install(self, o)
 			// `_gen` is the counter both backends already bump on teardown
 			// (modem.uc:1475, modem_mbim.uc:1891); NCM has none and degrades to
 			// the identity check, which is the case its reset already answers.
-			// Raised by Codex review, 2026-09-22.
 			let gen = m._gen;
 
 			if (m.reapply_sim)
@@ -250,8 +248,7 @@ export function install(self, o)
 		// the caller sent and nothing else. The symptom was identical, which is
 		// why the wrong mechanism went unnoticed — and believing it invites
 		// "fixing" the `?? default` patterns elsewhere in this tree that work
-		// precisely because the key is absent. Found by a full review,
-		// 2026-09-19.
+		// precisely because the key is absent.
 		//
 		// So a positive index is required. SMS storage records are numbered from
 		// 1 (3GPP TS 51.011 EF_SMS is a linear fixed file, record 1 upwards), so

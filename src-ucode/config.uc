@@ -40,8 +40,7 @@ function num_opt(value, dflt, what, warnings)
 	// the only value that is not equal to itself
 	if (n != n) {
 		// %J, not %d: a null default (repower_time) printed as "using 0",
-		// which names a value the option never takes. Raised by review,
-		// 2026-09-19.
+		// which names a value the option never takes.
 		push(warnings ?? [], sprintf('%s: %J is not a number, using %J', what, value, dflt));
 		return dflt;
 	}
@@ -415,7 +414,7 @@ function modem_from_section(s, warnings)
 		// port changes — see discovery.resolve_modem_device / daemon identity check.
 		serial: s.serial,
 		imei: s.imei,
-		// the one numeric the native reader also took bare (review, 2026-09-19)
+		// the one numeric the native reader also takes bare
 		repower_time: num_opt(s.repower_time, null, 'repower_time', warnings),
 		// optional named GPIO wired to the modem RESET line; when set, recovery
 		// pulses it instead of power-cycling (see board.uc / daemon repower).
@@ -774,7 +773,7 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 	if (s.sim_slot != null) {
 		// through num_opt like every other numeric on this path: a typo'd slot
 		// was NaN, and `!NaN` is false, so it neither took effect nor warned —
-		// it simply vanished. Raised by review, 2026-09-19.
+		// it simply vanished.
 		let want = num_opt(s.sim_slot, 0, sprintf('interface %s: sim_slot', name), warnings);
 
 		if (!modem.sim_slot)
@@ -792,7 +791,7 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 		// that bypassed it: `option failreboot '100s'` silently turned the
 		// reboot rung off (recovery.uc reads it as a number), and a typo'd
 		// zero_rx_timeout silently turned the watchdog off. Warning-free, on
-		// this path only. Found by a full review, 2026-09-19. The defaults match
+		// this path only. The defaults match
 		// the native reader at :456-466 so the two cannot drift apart.
 		modem.location = num_opt(s.location, 0, 'location', warnings) > 1;   // old gate: location > 1
 
@@ -1171,7 +1170,7 @@ function validate(result)
 		// effective_mux_id — so the context would dial session 1 against an
 		// untagged parent. Session up, address assigned, not one frame through:
 		// the exact failure the auto path was fixed for, reached by another
-		// door. Raised by Codex review, 2026-09-20.
+		// door.
 		let mmux = result.modems[ctx.modem].mux;
 
 		if (ctx.mux_id > 0 && (mmux == 'raw_ip' || mmux == 'ethernet' || mmux == 'untagged')) {
@@ -1498,8 +1497,7 @@ export function migrate_plan(raw, opts)
 		// anywhere, and the next PIN-required boot safety-blocked the SIM with
 		// no warning to say why. The runtime merge this migration replaces
 		// (merge_iface_modem_opts) read them all, first-wins — so this is a
-		// fidelity regression, not a design choice. Found by a full review,
-		// 2026-09-19.
+		// fidelity regression, not a design choice.
 		if (modem_by_ident[ident]) {
 			let have = modem_by_ident[ident];
 
@@ -1521,7 +1519,6 @@ export function migrate_plan(raw, opts)
 				// section to the wrong hardware. Everything else in
 				// MIGRATE_MODEM_OPTS is modem POLICY (pincode, modes, mux,
 				// tty, the numerics) and is exactly what needs collecting.
-				// Raised by review, 2026-09-19.
 				if (k == 'device' || k == 'netdev' || v == null || v == '')
 					continue;
 

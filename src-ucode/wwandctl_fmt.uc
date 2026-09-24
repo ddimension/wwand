@@ -2,7 +2,7 @@
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — wwandctl's value formatters.
 //
-// Extracted from wwandctl.uc so they can be tested. The CLI itself cannot be:
+// Kept apart from wwandctl.uc so they can be tested. The CLI itself cannot be:
 // it ends in a top-level command dispatch, so importing it RUNS it, which is
 // why no suite ever touched a line of it. These three are pure — a status
 // object in, a string out — and they are the part users actually read, so they
@@ -131,7 +131,7 @@ export function data_subclass(v)
 	// version only fell back to hex when NOTHING was recognised, so 0x21 came
 	// back as a bare "ENDC" and the bit this table does not know was dropped
 	// silently — which is the one case where saying nothing is worst, because a
-	// modem setting it is telling us something new. Found by review, 2026-09-20.
+	// modem setting it is telling us something new.
 	if (rest)
 		push(out, sprintf('0x%x', rest));
 
@@ -171,7 +171,7 @@ export function tai_text(tai, plmn)
 {
 	// EVERY PART OR NONE. A half-filled TAI rendered as `310/0 tac 0`, which
 	// looks like a tracking area and is not one — zero is not an honest stand-in
-	// for a field the modem did not send. Found by review, 2026-09-20.
+	// for a field the modem did not send.
 	if (tai?.mcc == null || tai?.mnc == null || tai?.tac == null)
 		return null;
 
@@ -194,7 +194,6 @@ export function tai_text(tai, plmn)
 // rather than prints belongs in this module, which is where reg_text and
 // fmt_sig already are. A row whose logic sits in the unreachable half is a row
 // nothing can hold shut — reverting it would have left every test green.
-// Found by review, 2026-09-20.
 export function packet_service_text(ps, plmn)
 {
 	// a scalar here is not a packet-service object, and reading a property off

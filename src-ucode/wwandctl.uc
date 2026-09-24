@@ -820,7 +820,7 @@ case 'select': {
 		// `select 310 030` and `select 310 30` are different operators, and the
 		// ubus policy takes mnc as an INTEGER — so the leading zero cannot cross
 		// that boundary on its own, and the CLI is the last place that still has
-		// the string the user typed. Raised by Codex review, 2026-09-19.
+		// the string the user typed.
 		call_ok('modem_set_network_selection',
 			{ modem: r.modem, mode: 'manual', mcc: rest[0], mnc: rest[1],
 			  mnc_digits: length(replace(rest[1], /[^0-9]/g, '')) });

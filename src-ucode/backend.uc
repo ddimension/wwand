@@ -72,8 +72,7 @@
 // from rebuilding a shim on every capability — so re-probing walks the ladder
 // and the top rung still says no. The field case this was written for is the
 // other one: a passthrough that WAS built and later stopped answering, where
-// `self.pt` exists and the probe is a real request. Raised by review,
-// 2026-09-19.
+// `self.pt` exists and the probe is a real request.
 const REPROBE_DEFAULT = 30;
 
 // obj: the modem (state carrier); key: the cache slot, e.g. '_apdu_be'.
@@ -97,8 +96,7 @@ export function choose(obj, key, candidates, cb, opts)
 	// (telemetry_mbim.uc refresh_fast / tick), so a second caller can arrive
 	// mid-walk. Dropping the cache under it starts a competing walk whose
 	// callbacks both write obj[key] — last one home wins, regardless of which
-	// is newer — and whose outcomes share one _fails counter. Raised by review,
-	// 2026-09-19. This guard removes the re-probe's contribution to that; a
+	// is newer — and whose outcomes share one _fails counter. This guard removes the re-probe's contribution to that; a
 	// walk begun because the CURRENT choice failed can still overlap, which is
 	// older behaviour and self-correcting (the next outcome settles it).
 	if (cached != null && opts?.reprobe && !obj[busy] &&
@@ -115,8 +113,7 @@ export function choose(obj, key, candidates, cb, opts)
 			delete obj[key];
 			// AND the streak: a half-finished run of failures belongs to the
 			// rung that earned it. Carried over, it would demote whatever wins
-			// the ladder next after two failures instead of three. Raised by
-			// review, 2026-09-19.
+			// the ladder next after two failures instead of three.
 			delete obj[key + '_fails'];
 			cached = null;
 		}
@@ -131,7 +128,7 @@ export function choose(obj, key, candidates, cb, opts)
 	// _fails counter. The probes are asynchronous and the fast telemetry loop
 	// calls the same key as the slow one, independently, so this is reachable —
 	// it merely became easier to reach when the re-probe gave the cache a second
-	// way to disappear. Raised by review, 2026-09-19.
+	// way to disappear.
 	let waiters = key + '_waiters';
 
 	if (obj[busy]) {
@@ -148,7 +145,7 @@ export function choose(obj, key, candidates, cb, opts)
 	// OLD walk's callback would still write obj[key], clear the new walk's
 	// marker and drain ITS waiters with a stale answer — resurrecting a cache
 	// that was deliberately dropped, for a modem that may be gone. The token
-	// makes a superseded walk a no-op. Raised by review, 2026-09-19.
+	// makes a superseded walk a no-op.
 	let gen = key + '_gen';
 	let token = (obj[gen] ?? 0) + 1;
 

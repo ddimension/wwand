@@ -424,8 +424,7 @@ function valid_iface_id(g)
 // Lived in context_monitor_qmi.uc as a local closure. The MBIM refresh compared
 // its whole settings object with a flat %J and had no equivalent, while its own
 // comment claimed "QMI parity via context_monitor_qmi" — so on MBIM the same
-// firmware renumbered on every tick. Shared rather than copied. Found by a full
-// review, 2026-09-19.
+// firmware renumbered on every tick. Shared rather than copied.
 export function keep_stable_v6(before, after)
 {
 	if (!before?.addr || !after?.addr || after.addr == before.addr ||
@@ -447,8 +446,7 @@ export function keep_stable_v6(before, after)
 	// a /65 was judged on its first 64 bits, so two addresses in DIFFERENT
 	// /65 networks read as an interface-identifier change and the old address
 	// was kept — the one case where keeping it is exactly wrong. /64 is the
-	// common case and unaffected (plen % 8 == 0). Raised by Codex review,
-	// 2026-09-19.
+	// common case and unaffected (plen % 8 == 0).
 	let rest = plen % 8;
 
 	if (rest) {

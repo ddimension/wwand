@@ -69,8 +69,7 @@ export function create(o)
 	// one used to reach for `o.set_clock`, which nothing ever sets: main.uc
 	// builds deps without it (main.uc:293), so `option gnss_set_time` was a
 	// silent no-op and the test that "proved" it passed only because it
-	// injected the property the production path does not have. Raised by Codex
-	// review, 2026-09-21.
+	// injected the property the production path does not have.
 	let set_clock = (epoch, tz_min, source) => {
 		if (!epoch || now_s() >= 1609459200)   // 2021-01-01: clock already sane
 			return false;
@@ -107,8 +106,7 @@ export function create(o)
 			// `modem_gps` reports "package not installed", which sends the
 			// reader looking in the wrong place. The message only appears
 			// where wwand-gps is genuinely expected — nothing calls this
-			// unless a modem has `option gnss`. Raised by Codex review,
-			// 2026-09-20.
+			// unless a modem has `option gnss`.
 			logmod.log('info', 'gps: wwand.gps could not be loaded (%s) — is wwand-gps installed?',
 				replace(sprintf('%s', e), /\n.*$/, ''));
 			gps_mod = null;
@@ -607,10 +605,9 @@ export function create(o)
 		// stops there. netifd, which does not know why, goes on starting the
 		// section it still finds on disk at every reload, odhcp6c comes back
 		// up on a link with no v6, and the DHCPv6 resolver it installs undoes
-		// the v6 DNS suppression that was the whole point. Reported by
-		// xsetiadi with `Interface 'fm350_6' is now up` at 15:17:31, six and a
-		// half minutes after the 15:10:55 connect wwand had already decided was
-		// v4-only (ddimension/wwand#35, 2026-09-22).
+		// the v6 DNS suppression that was the whole point. (Evidence:
+		// ddimension/wwand#35 — `Interface 'fm350_6' is now up` six and a half
+		// minutes after a connect wwand had already decided was v4-only.)
 		//
 		// `auto 0` rather than a delete, for the same reason ensure_wan6 does
 		// not delete: the section is the operator's record of what wwand set
@@ -625,7 +622,6 @@ export function create(o)
 		// under a DIFFERENT name is never looked up here, so the "user-defined
 		// section wins" case in ensure_wan6 keeps its own lifecycle untouched,
 		// which is right: a section wwand did not start is not wwand's to stop.
-		// Raised by Codex review, 2026-09-22.
 		retire_wan6: (parent) => {
 			let name = parent + '_6';
 			let want = '@' + parent;
@@ -652,9 +648,6 @@ export function create(o)
 				// would otherwise repeat it forever — and `info` is the DEFAULT
 				// threshold (log.uc:19), not something one has to turn on. A
 				// changed shape logs again, because that is new information.
-				// Raised by Codex review, 2026-09-24, against a first version
-				// of this line that flooded and a comment that had the
-				// threshold wrong.
 				let seen = sprintf('%s|%s|%s', name, proto ?? '-', dev ?? '-');
 
 				if (retire_declined[name] != seen) {
@@ -676,8 +669,7 @@ export function create(o)
 			// context must not log once per connect forever — but the down is
 			// issued either way. netifd takes a down on an interface that is
 			// already down without complaint, and that is the only way this
-			// stays idempotent in policy AND in fact. Raised by Codex review,
-			// 2026-09-22.
+			// stays idempotent in policy AND in fact.
 			let already = (sprintf('%s', cursor.get('network', name, 'auto') ?? '') == '0');
 
 			if (!already) {
@@ -779,8 +771,7 @@ export function create(o)
 			// each read to whichever fd asks first, so BOTH readers get torn
 			// sentences and each modem is answered with a shredded version of
 			// the same receiver. The second one is refused and told why, which
-			// is a truer answer than half a fix. Raised by Codex review,
-			// 2026-09-21.
+			// is a truer answer than half a fix.
 			for (let other, r in gps_readers)
 				if (other != ref && r && r.path == port) {
 					logmod.log('warn', 'gps: %s: %s is already being read for %s — refusing to open it twice',

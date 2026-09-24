@@ -98,7 +98,7 @@ export function pin_block_reason(retries, force)
 // dereferenced null, and a throw inside a uloop callback ends the program: the
 // next timer never runs and uloop.run() does not return (measured 2026-09-19).
 // The generation says whether the wait still belongs to anyone.
-// Found by a full review, 2026-09-19.
+//
 // A CANCELLED REQUEST IS NOT AN ANSWER ABOUT THE CARD. Teardown destroys the
 // clients, which completes everything in flight with `cancelled` — and every
 // callback below used to translate that into a statement it had no basis for:
@@ -106,7 +106,7 @@ export function pin_block_reason(retries, force)
 // not confirmed". The last two are the dangerous ones. A refused PIN enters the
 // TERMINAL sim-blocked path, where make_fail's cancellation exemption never
 // applies, and "no PIN needed" advances the init chain for a modem that is
-// gone. Raised by review, 2026-09-19.
+// gone.
 function cancelled(err)
 {
 	return err?.error == 'cancelled';
@@ -127,7 +127,7 @@ function poll_again(modem, gen, fn)
 // PIN verify accumulated a closure for every re-unlock over the life of one
 // client — an eSIM or slot switch re-verifies, and every old handler then ran on
 // every indication. Keyed on the CLIENT, not the modem: a new incarnation gets a
-// new client and must hook it again. Found by a full review, 2026-09-19.
+// new client and must hook it again.
 function watch_card_ready(modem, uim, on_ready)
 {
 	// THE WAITER LIVES ON THE CLIENT, and carries an owner token. A single
@@ -135,7 +135,6 @@ function watch_card_ready(modem, uim, on_ready)
 	// sim.unlock (modem_init_qmi.uc:414) while the eSIM path schedules its own
 	// (esim_bridge.uc:406), and nothing serialises them — the second overwrote
 	// the first, and whichever finished first cleared the OTHER's waiter.
-	// Raised by review, 2026-09-19.
 	let mine = {};
 
 	uim._card_ready_cb = on_ready;
@@ -310,8 +309,7 @@ function unlock_uim(modem, cb, tries)
 					// one — which answers `cancelled` and would be reported as
 					// unlock_not_confirmed, i.e. a failure the init ladder acts
 					// on. Say what actually happened instead; make_fail ignores
-					// a cancellation (modem_common.uc). Raised by review,
-					// 2026-09-19.
+					// a cancellation (modem_common.uc).
 					if ((modem._gen ?? 0) != gen || modem.uim != uim) {
 						done = true;
 						retire();
@@ -463,8 +461,7 @@ function unlock_dms(modem, cb, tries)
 
 				// settle before using the card (old: sleep 5) — but do not
 				// report a ready card into a session that ended meanwhile; the
-				// init chain would carry on with a modem that is gone. Raised
-				// by review, 2026-09-19.
+				// init chain would carry on with a modem that is gone.
 				let dms_gen = modem._gen ?? 0;
 
 				uloop.timer(settle, () => {
@@ -618,7 +615,7 @@ export function set_pin_lock(modem, enable, pin, cb)
 			// the user was only trying to unlock. unblock_puk (:423) has had
 			// the right rule all along, and the PINLOCK_FALLBACK comment states
 			// it: these are the codes where the transport rejected the op
-			// WITHOUT touching the PIN. Found by a full review, 2026-09-19.
+			// WITHOUT touching the PIN.
 			let transport_reject = (err.error == 'qmi') && PINLOCK_FALLBACK[sprintf('%d', err.code)];
 
 			if (transport_reject && i < length(chain))
@@ -884,7 +881,7 @@ export function multisim(slots, caps)
 	// may well have two. Publishing `slots: 1` there dressed a fallback up as
 	// discovered hardware — and labelled it `source: 'qmi-logical-slots'` on an
 	// NCM modem into the bargain (seen on the Cudy LT300, 2026-09-22). Saying
-	// nothing is the honest answer. Raised by Codex review.
+	// nothing is the honest answer.
 	if (!enumerated(slots))
 		return null;
 
@@ -1499,8 +1496,8 @@ export function apdu_close(modem, slot, channel, cb)
 };
 
 // --- PLMN selector lists (settings editor) -----------------------------------
-// Implementation extracted to sim_plmn.uc (PLMN/FPLMN codec + EF read/write);
-// re-exported here so consumers keep the stable sim.<name> API.
+// Implemented in sim_plmn.uc (PLMN/FPLMN codec + EF read/write); re-exported
+// here so consumers keep the stable sim.<name> API.
 
 export const decode_plmn_act = sim_plmn.decode_plmn_act;
 export const decode_fplmn = sim_plmn.decode_fplmn;

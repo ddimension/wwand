@@ -399,7 +399,7 @@ function run_daemon()
 		// handler for every migrated interface while the daemon could neither
 		// answer nor had yet re-read the config those interfaces refer to.
 		// Deferring it also puts daemon.reload() first, which is the order the
-		// comment always claimed. Found by a full review, 2026-09-19.
+		// comment always claimed.
 		daemon.reload();
 		conn.defer('network', 'reload', {}, netifd_cb('reload'));
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — hardware reset/repower daemon ops, extracted from daemon.uc.
+// wwand — hardware reset/repower daemon ops, kept apart from daemon.uc.
 // install() attaches the ubus-facing methods onto the daemon `self` (same
 // pattern as netsel_ops.uc); modem/context state stays on self.
 

@@ -178,8 +178,7 @@ function create(o) {
 		// SIGSEGV on MIPS32, see atcmd.uc), so between a stop() and that timer
 		// a start() can already have opened a NEW port. A callback that read
 		// the outer `handle` would then be the OLD watcher reading the NEW
-		// device, with `self.running` true again to wave it through. Raised by
-		// Codex review, 2026-09-21.
+		// device, with `self.running` true again to wave it through.
 		let h = handle, gen = ++generation;
 
 		uhandle = watch(h.fileno(), () => {

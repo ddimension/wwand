@@ -133,7 +133,7 @@ export default {
 		// the one PLMN in 0x12. Without it the serving MNC is a bare integer
 		// and 310/030 is indistinguishable from 310/30 — two operators — which
 		// is what the operator line rendered. libqmi 1.38 qmi-service-nas.json,
-		// (Get) Serving System output. Found by a full review, 2026-09-19.
+		// (Get) Serving System output.
 		GET_SERVING_SYSTEM: {
 			id: 0x0024,
 			req: {},
@@ -248,7 +248,7 @@ export default {
 				// UI choosing from this list could not round-trip the one with
 				// the leading zero. NOTE the size prefix is u16 here, unlike Set
 				// Preferred Networks' 0x11 which is u8 (libqmi 1.38, Network
-				// Scan output 0x12). Found by a full review, 2026-09-19.
+				// Scan output 0x12).
 				mnc_pcs_digit: { t: 0x12, f: { n: 'u16', of: {
 					mcc: 'u16', mnc: 'u16', includes_pcs_digit: 'u8' } } },
 				scan_result: { t: 0x13, f: 'u32' },
@@ -271,8 +271,7 @@ export default {
 				// write, and without this it cannot tell 310/030 from 310/30
 				// any better than the write could. Same common-ref as Set's
 				// 0x11, so the same u8-prefixed array (libqmi 1.38, Get
-				// Preferred Networks output 0x12). Found by a full review,
-				// 2026-09-19.
+				// Preferred Networks output 0x12).
 				mnc_pcs_digit: { t: 0x12, f: { n: 'u8', of: {
 					mcc: 'u16', mnc: 'u16', includes_pcs_digit: 'u8' } } },
 			},
@@ -290,7 +289,7 @@ export default {
 				// nothing downstream can tell either. Per-entry here (MCC, MNC,
 				// includes-PCS-digit), unlike SSP's plain flag: libqmi 1.38
 				// common-ref "NAS MNC PCS Digit Include Status", size prefix
-				// u8. Found by a full review, 2026-09-19.
+				// u8.
 				mnc_pcs_digit: { t: 0x11, f: { n: 'u8', of: {
 					mcc: 'u16', mnc: 'u16', includes_pcs_digit: 'u8' } } },
 				clear_previous: { t: 0x12, f: 'u8' },
@@ -313,7 +312,7 @@ export default {
 				// not the per-entry array Set Preferred Networks takes — libqmi 1.38
 				// qmi-service-nas.json, Set System Selection Preference input 0x1A,
 				// format guint8. Without it a manual selection of 310/030 goes out
-				// as 310/30, a different operator. Found by a full review, 2026-09-19.
+				// as 310/30, a different operator.
 				mnc_pcs_digit: { t: 0x1a, f: 'u8' },
 				// QmiNasChangeDuration: 0 = until power cycle, 1 = permanent
 				change_duration:   { t: 0x17, f: 'u8' },

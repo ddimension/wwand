@@ -2,7 +2,7 @@
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — registration-detail collector (QMI backend).
 //
-// Extracted from the modem.uc mega-closure (maintainability audit): gathers
+// Kept out of the modem.uc closure: gathers
 // WHY the modem is (not) registered by combining QMI GET_SYSTEM_INFO, AT+CEER
 // and the LTE attach profile. Pure function of the modem object: reads
 // self.nas / self.wds_cfg / self.at, writes self.reg_detail, calls cb(detail).

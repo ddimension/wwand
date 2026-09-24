@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — settings / network-selection / operator-scan ubus operations
-// (extracted from the daemon.uc factory).
+// wwand — settings / network-selection / operator-scan ubus operations,
+// kept apart from the daemon.uc factory.
 //
 // install(self, o) attaches to the daemon object:
 //   modem_get_settings / modem_set_settings   NAS system-selection prefs with
@@ -120,7 +120,7 @@ export function install(self, o)
 
 		// which of these MNCs carry a third digit (TLV 0x12). Without it
 		// 310/030 and 310/30 render identically and a UI choosing an entry
-		// cannot say which it meant. Raised by Codex review, 2026-09-19.
+		// cannot say which it meant.
 		let pcs = {};
 
 		for (let e in (data?.mnc_pcs_digit ?? []))
@@ -136,11 +136,10 @@ export function install(self, o)
 				plmn: sprintf('%d/%s', e.mcc, modem_common.mnc_text(e.mnc, w)),
 				name: e.description ?? '',
 				status: scan_status(bits),
-				// extra scan flags carried in the status bitmask. `preferred`
-				// read 0x04 until 2026-09-12, which is HOME — so every scan
-				// reported the home network as "preferred" and the real
-				// PREFERRED bit (0x40) was never read at all. Nothing rendered
-				// it, which is why it survived; the bus was wrong regardless.
+				// extra scan flags carried in the status bitmask. PREFERRED is
+				// 0x40; 0x04 is HOME, and reading that instead would report the
+				// home network as "preferred" on every scan while the real bit
+				// is never seen.
 				roaming: (bits & NET_ROAMING) ? true : false,
 				home: (bits & NET_HOME) ? true : false,
 				preferred: (bits & NET_PREFERRED) ? true : false,
@@ -359,8 +358,7 @@ export function install(self, o)
 	// 310/30 — two different operators that both become 30. So the width comes
 	// either from the string form, when the caller had one, or from an explicit
 	// digit count; a value of 100 or more settles itself. Everything below that
-	// with no width given stays 2 digits, which is what shipped. Found by a full
-	// review, 2026-09-19.
+	// with no width given stays 2 digits, which is what shipped.
 	// shared with the init writer and the config autocorrect — the width is a
 	// property of the PLMN, not of this entry point (modem_common.uc).
 	let mnc_text = modem_common.mnc_text;
@@ -418,7 +416,7 @@ export function install(self, o)
 					// guard skipped the very write that would have corrected
 					// it and reported `unchanged`. The serving cell carries no
 					// width of its own, so a 3-digit request is never treated
-					// as already-applied. Raised by Codex review, 2026-09-19.
+					// as already-applied.
 					let same = (cur_manual != null) && (cur_manual == manual) &&
 						(!manual || (width == 2 && sv?.mcc != null &&
 							+sv.mcc == +mcc && +sv.mnc == +mnc));
@@ -438,8 +436,7 @@ export function install(self, o)
 					// array Set Preferred Networks takes.
 					// only for a MANUAL selection: on auto there is no MNC for
 					// the flag to qualify, and an unnecessary TLV is one more
-					// thing a firmware can refuse. Raised by Codex review,
-					// 2026-09-19.
+					// thing a firmware can refuse.
 					let ssp = { network_selection: sel, change_duration: 1 };
 
 					if (manual)

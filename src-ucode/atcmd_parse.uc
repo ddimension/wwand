@@ -123,7 +123,7 @@ export function parse_qcainfo(lines)
 // 20, and everything from 6 up (40-400 MHz, the usual 5G values) as null. The
 // numbers looked plausible and were wrong, which is the failure parse_qcainfo
 // refuses twenty lines up. Both tables per the Quectel RG50xQ & RM5xxQ AT
-// Commands Manual V1.2, pp. 104-105. Found by a full review, 2026-09-19.
+// Commands Manual V1.2, pp. 104-105.
 const BW_IDX_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
 const NR_BW_IDX_MHZ = {
 	'0': 5,   '1': 10,  '2': 15,  '3': 20,  '4': 25,
@@ -707,8 +707,7 @@ export function parse_cops_scan(lines)
 			// the only thing that does: 310030 and 31030 name different
 			// operators and both become the integer 30. Reformatting with a
 			// fixed %02d below threw that away, so an entry picked from this
-			// list could not be selected again as what it was. Found by a full
-			// review, 2026-09-19.
+			// list could not be selected again as what it was.
 			let mnc_digits = length(mnc_s);
 
 			// optional 5th field = the access technology (3GPP 27.007 <AcT>);

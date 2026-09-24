@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
-// wwand — SIM PLMN selector/forbidden-list codec + UIM EF read/write
-// (extracted from sim.uc).
+// wwand — SIM PLMN selector/forbidden-list codec + UIM EF read/write,
+// kept apart from sim.uc.
 //
 // Covers the TS 31.102 PLMN files: the PLMNwAcT selector lists (EF 6F60 user /
 // 6F61 operator / 6F62 home), the forbidden list (EF_FPLMN 6F7B), the QMI NAS
@@ -309,7 +309,7 @@ function read_plmn_lists_inner(modem, cb)
 	// comes from the companion TLV 0x12 where the modem sent one, because
 	// `mnc >= 100` cannot see a leading zero: 310/030 read back as 310/30, so
 	// the cross-verification this list exists for confirmed a PLMN that was not
-	// the one written. Raised by Codex review, 2026-09-19.
+	// the one written.
 	let map_nas = (arr, pcs_arr) => {
 		let pcs = {};
 
@@ -612,8 +612,7 @@ export function write_nas_plmn(modem, entries, cb)
 		// — the list looked correct on both sides while naming the wrong
 		// network. The width is right there in the string this loop is about to
 		// discard (valid_plmn:77 already counts it), and libqmi 1.38 carries it
-		// per entry in Set Preferred Networks TLV 0x11. Found by a full review,
-		// 2026-09-19.
+		// per entry in Set Preferred Networks TLV 0x11.
 		let pcs = [];
 
 		for (let e in list) {
@@ -624,7 +623,7 @@ export function write_nas_plmn(modem, entries, cb)
 			// digits and 2 or 3 MNC digits (valid_plmn:77). The range check
 			// alone accepted a 1-digit MNC and an overlong zero-prefixed one,
 			// and includes_pcs_digit below would then have described malformed
-			// input as a 3-digit MNC. Raised by Codex review, 2026-09-19.
+			// input as a 3-digit MNC.
 			if (!valid_plmn(mcc_s, mnc_s))
 				return cb({ error: 'invalid_plmn', plmn: mcc_s + mnc_s });
 
