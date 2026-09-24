@@ -9,3 +9,4 @@ docs/devicedoc/
 
 # local capture/scratch, never committed
 do-not-commit/
+__pycache__/

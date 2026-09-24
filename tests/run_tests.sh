@@ -75,7 +75,11 @@ done
 # deterministic ones; they need nothing but python3.
 if command -v python3 >/dev/null 2>&1; then
 	for chk in check-map check-anchors check-export-terminators; do
-		out=$(python3 "$TESTDIR/../tools/$chk.py" 2>&1)
+		# --since HEAD: an uncommitted edit that MOVES an anchored line fails the
+		# run before the commit, when fixing it is one `--fix` away
+		args=""
+		[ "$chk" = check-anchors ] && git -C "$TESTDIR" rev-parse HEAD >/dev/null 2>&1 && args="--since HEAD"
+		out=$(python3 "$TESTDIR/../tools/$chk.py" $args 2>&1)
 		code=$?
 		printf '%s\n' "$out" | tail -1
 		[ "$code" -ne 0 ] && { printf '%s\n' "$out"; echo "FAIL: $chk"; rc=1; }

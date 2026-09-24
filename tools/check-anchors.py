@@ -12,7 +12,7 @@ described, cutting off the two fields the sentence went on to list.
 
 What this can and cannot do:
 
-  * IN-TREE anchors (`context.uc:714`, `view/wwand/status.js:543`, checked 2026-09-10) are resolved against the
+  * IN-TREE anchors (`context.uc:712`, `view/wwand/status.js:543`, checked 2026-09-10) are resolved against the
     file and the cited line is printed, so a reviewer sees at a glance whether it
     still says what the comment claims. A line number past the end of the file is
     an error — that one is unambiguous.
@@ -30,11 +30,28 @@ Usage:
     tools/check-anchors.py
     tools/check-anchors.py --extern /vol/release/.../linux-6.18.41 --extern ~/projects/upstream/netifd
     tools/check-anchors.py --show          # print the cited line for every in-tree anchor
+    tools/check-anchors.py --since HEAD    # also catch anchors a local edit has MOVED
+    tools/check-anchors.py --since HEAD --fix
+
+--since REV closes the gap the plain check leaves open. An anchor pointing at
+a line that still exists passes it, even when an edit above that line has
+moved its target somewhere else. Removing comment lines is the usual cause: a
+mechanical pass over the QMI modules on 2026-09-24 would have left 21 anchors
+across the tree pointing next to their target, and only a content comparison
+by hand caught it. So: for every in-tree anchor that already existed at REV,
+the target file at REV is diffed against the working tree. If the line the
+anchor named then now sits at another number, it is reported as SHIFTED (and
+rewritten with --fix). If that line was itself changed or deleted, the anchor
+is reported as STALE, because no tool can tell what it should point at now.
+An anchor that did not exist at REV was written against the current file and
+is left alone.
 """
 
 import argparse
+import difflib
 import os
 import re
+import subprocess
 import sys
 
 # `name.ext:123` or `name.ext:123-456`, as they appear inside comments
@@ -79,13 +96,60 @@ def comment_lines(path):
     return out
 
 
+def git_show(root, rev, rel):
+    """File content at REV, or None when it did not exist there / no git."""
+    try:
+        r = subprocess.run(['git', '-C', root, 'show', '%s:%s' % (rev, rel)],
+                           capture_output=True, text=True, errors='replace')
+    except OSError:
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def line_map(old, new):
+    """old 1-based line number -> new line number, or None for a changed/deleted
+    line. Only EQUAL blocks map: a line inside a replaced block has no successor
+    anyone can name with confidence, and guessing one is how an anchor rots."""
+    m = {}
+    sm = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == 'equal':
+            for k in range(i2 - i1):
+                m[i1 + k + 1] = j1 + k + 1
+    return m
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     ap.add_argument('--extern', action='append', default=[],
                     help='a tree to resolve out-of-tree anchors in (repeatable)')
     ap.add_argument('--show', action='store_true', help='print the cited line for in-tree anchors')
+    ap.add_argument('--since', metavar='REV',
+                    help='also report anchors whose target line moved since REV (git)')
+    ap.add_argument('--fix', action='store_true',
+                    help='with --since: rewrite SHIFTED anchors to the new line number')
     args = ap.parse_args()
+
+    maps, olds = {}, {}      # per target / citing file, computed once
+
+    def target_map(path):
+        rel = os.path.relpath(path, args.root)
+        if rel not in maps:
+            old = git_show(args.root, args.since, rel)
+            if old is None:
+                maps[rel] = None
+            else:
+                with open(path, encoding='utf-8', errors='replace') as fh:
+                    maps[rel] = line_map(old.split('\n'), fh.read().split('\n'))
+        return maps[rel]
+
+    def existed_at_rev(rel, anchor):
+        if rel not in olds:
+            olds[rel] = git_show(args.root, args.since, rel) or ''
+        return anchor in olds[rel]
+
+    shifted, stale, fixes = [], [], {}
 
     # ALL candidates per basename, never just the first. Resolving `status.js`
     # to whichever copy the walk happened to reach first produced a confident
@@ -163,6 +227,18 @@ def main():
 
                         src, body = fits[0]
 
+                        if args.since and where == 'in-tree' and existed_at_rev(rel, m.group(0)):
+                            mp = target_map(src)
+                            if mp is not None:
+                                ns = mp.get(start)
+                                if ns is None:
+                                    stale.append((rel, lineno, m.group(0)))
+                                elif ns != start:
+                                    ne = (mp.get(int(end)) or int(end) + ns - start) if end else None
+                                    new = '%s:%d%s' % (name, ns, ('-%d' % ne) if ne else '')
+                                    shifted.append((rel, lineno, m.group(0), new))
+                                    fixes.setdefault(path, []).append((m.group(0), new))
+
                         if where == 'extern' and not VERSION_RE.search(block):
                             undated.append((rel, lineno, m.group(0)))
 
@@ -192,10 +268,33 @@ def main():
         for rel, lineno, anchor in unresolved:
             print('  %s:%d  %s' % (rel, lineno, anchor))
 
-    print('\nchecked %d anchors: %d broken, %d ambiguous, %d undated, %d unresolved'
-          % (checked, len(bad), len(ambiguous), len(undated), len(unresolved)))
+    if shifted:
+        print('\nSHIFTED since %s — the target line moved; the anchor still names its old number%s:'
+              % (args.since, ' (rewritten)' if args.fix else ''))
+        for rel, lineno, anchor, new in shifted:
+            print('  %s:%d  %s -> %s' % (rel, lineno, anchor, new))
 
-    return 1 if bad else 0
+    if stale:
+        print('\nSTALE since %s — the cited line itself was changed or removed; re-read '
+              'the comment and point it at what it means:' % args.since)
+        for rel, lineno, anchor in stale:
+            print('  %s:%d  %s' % (rel, lineno, anchor))
+
+    if args.fix:
+        for path, subs in fixes.items():
+            with open(path, encoding='utf-8') as fh:
+                text = fh.read()
+            for old, new in subs:
+                text = re.sub(re.escape(old) + r'(?![0-9-])', new, text, count=1)
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write(text)
+
+    print('\nchecked %d anchors: %d broken, %d ambiguous, %d undated, %d unresolved%s'
+          % (checked, len(bad), len(ambiguous), len(undated), len(unresolved),
+             (', %d shifted, %d stale since %s' % (len(shifted), len(stale), args.since))
+             if args.since else ''))
+
+    return 1 if (bad or stale or (shifted and not args.fix)) else 0
 
 
 if __name__ == '__main__':
