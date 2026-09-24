@@ -17,6 +17,7 @@
 
 import * as netlink from 'wwand.netlink';
 import * as context_common from 'wwand.context_common';
+import * as modem_common from 'wwand.modem_common';
 
 // The shim's IPv6 settings, plus the masked `prefix`. THE SOURCE OF A
 // SOURCE-RESTRICTED ROUTE IS A PREFIX: netifd passes that field through to
@@ -66,6 +67,44 @@ export function install(self, o)
 				entry.cfg[f] = fresh[f];
 				push(changed, f);
 			}
+
+		// THE CARD'S OVERRIDES TOO, and for the same reason. A per-SIM
+		// `wwand_sim` entry overrides these very fields (context_common
+		// SIM_OVERRIDABLE is a subset of CTX_LIVE_FIELDS) and WINS over the
+		// interface (context_common.conn_cfg). It lives on the modem, though,
+		// where only a reload replaced it — so an up refreshed the interface
+		// half and then dialled with the card's stale value on top: a
+		// `pdp_type` edited on a wwand_sim did nothing until the daemon
+		// restarted (evidence: ddimension/wwand#35).
+		//
+		// WHICH card is in the slot is NOT decided here. The entry already
+		// matched is swapped for its fresh version, found by the entry's OWN
+		// iccid/imsi — never by modem.info, which the QMI init keeps from the
+		// previous card when a raw re-read fails, while it deliberately leaves
+		// active_sim empty (modem_init_qmi.uc resolve_active_sim). Matching on
+		// info.* would re-attach a departed card's override, and during
+		// SIM_UNLOCK it would race the init's own match. No match yet → none
+		// here either; an entry removed on disk → no override any more.
+		//
+		// And nothing at all when the modem section is gone from disk or the
+		// interface now names another modem: that is structural, and structure
+		// is the reload's job.
+		let mname = entry.cfg?.modem;
+		let modem = self.modems?.[mname]?.modem;
+		let fresh_modem = parsed?.modems?.[mname];
+
+		if (modem?.config && fresh_modem && fresh.modem == mname &&
+		    sprintf('%J', modem.config.sims) != sprintf('%J', fresh_modem.sims)) {
+			let cur = modem.active_sim;
+
+			modem.config.sims = fresh_modem.sims;
+
+			if (cur)
+				modem.active_sim = modem_common.match_sim_override(fresh_modem.sims,
+					cur.iccid, cur.imsi);
+
+			push(changed, 'wwand_sim');
+		}
 
 		if (length(changed))
 			log('info', sprintf('interface %s: refreshed config from disk (%s)',

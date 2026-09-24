@@ -10,6 +10,8 @@
 
 import { eq, ok, done } from './lib/check.uc';
 import * as ctx_settings from 'wwand/ctx_settings.uc';
+import * as config from 'wwand/config.uc';
+import * as context_common from 'wwand/context_common.uc';
 
 let calls, logs;
 
@@ -123,6 +125,95 @@ eq(length(calls), 0, 'wiring: no netdev -> nothing attempted');
 	tt.entry.ctx.settings.ipv6 = null;
 	eq(tt.self._settings_result('wwan0', tt.entry, 'wwand0').ipv6, null,
 		'settings: an ipv4-only context is untouched');
+}
+
+// --- an up re-reads the card's wwand_sim overrides, not only the interface ---
+{
+	const ICCID = '8962112181029221344';
+
+	// the config on disk, with the per-SIM pdp_type as the caller wants it
+	let disk = (sim_pdp, iface_pdp) => config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0' },
+		card: { '.type': 'wwand_sim', iccid: ICCID, pdp_type: sim_pdp },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet',
+		       pdp_type: iface_pdp },
+	} });
+
+	// a daemon `self` as the daemon builds it: the modem object carries the
+	// modem's config BY REFERENCE (config: opts.config) and the active_sim it
+	// matched at init; the context entry carries the interface config
+	let boot = disk('ipv4', 'ipv4v6');
+	let modem = { config: boot.modems.m0, info: { iccid: ICCID, imsi: '510118102922134' } };
+	modem.active_sim = boot.modems.m0.sims[0];
+
+	let sself = {
+		modems: { m0: { cfg: boot.modems.m0, modem: modem } },
+		contexts: { wan: { cfg: { ...boot.contexts.wan } } },
+	};
+
+	let now = null;
+	let sim_logs = [];
+	ctx_settings.install(sself, { log: (l, m) => push(sim_logs, m), read_config: () => now });
+
+	eq(modem.active_sim.pdp_type, 'ipv4', 'boot: the card says ipv4');
+
+	// 1. the card's pdp_type is edited on disk (uci commit, no reload), then the
+	//    interface is brought up — the up must dial with the card's NEW value
+	now = disk('ipv4v6', 'ipv4v6');
+	sself._refresh_context_cfg('wan', sself.contexts.wan);
+
+	eq(modem.active_sim?.pdp_type, 'ipv4v6',
+	   'up: a wwand_sim edited on disk is re-matched, so the card\'s NEW pdp_type is in force');
+	ok(length(filter(sim_logs, (m) => index(m, 'wwand_sim') >= 0)),
+	   'up: and the refresh log names it');
+
+	// ...and that is what the dial resolves through (context_common.conn_cfg):
+	// card first, interface second
+	eq(context_common.effective_pdp({ modem: modem, config: sself.contexts.wan.cfg }), 'ipv4v6',
+	   'up: effective_pdp resolves the refreshed card value');
+
+	// 2. an unchanged disk is one comparison and nothing else
+	sim_logs = [];
+	let before = modem.active_sim;
+	sself._refresh_context_cfg('wan', sself.contexts.wan);
+	ok(modem.active_sim === before, 'unchanged: the matched entry object is left as it was');
+	eq(sim_logs, [], 'unchanged: nothing is logged');
+
+	// 3. the card's entry is removed on disk: the interface value applies again
+	now = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/mock0' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet', pdp_type: 'ipv4' },
+	} });
+	sself._refresh_context_cfg('wan', sself.contexts.wan);
+	eq(modem.active_sim, null, 'removed: no override matches any more');
+	eq(context_common.effective_pdp({ modem: modem, config: sself.contexts.wan.cfg }), 'ipv4',
+	   'removed: the interface pdp_type is in force again');
+
+	// 4. NO MATCH YET, NO MATCH HERE. The QMI init clears active_sim and keeps
+	//    the previous card's info.iccid when a raw re-read fails — so a stale
+	//    identity sits in info.* with nothing matched. An up must not use it to
+	//    re-attach the departed card's override (Codex review).
+	modem.active_sim = null;
+	modem.info = { iccid: ICCID, imsi: null };   // the card that is gone
+	now = disk('ipv4v6', 'ipv4');
+	sself._refresh_context_cfg('wan', sself.contexts.wan);
+	eq(modem.active_sim, null,
+	   'no match yet: a stale info.iccid does not re-attach an override');
+	eq(modem.config.sims?.[0]?.pdp_type, 'ipv4v6',
+	   'no match yet: the fresh entries are still in place for the init to match against');
+
+	// 5. STRUCTURE IS THE RELOAD'S. The interface now names another modem and
+	//    this modem's section is gone from disk: the running modem keeps what
+	//    it has until a reload rebuilds it.
+	let keep_sims = modem.config.sims;
+	modem.active_sim = keep_sims[0];
+	now = config.parse({ network: {
+		m1: { '.type': 'wwand_modem', device: '/dev/mock1' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm1', apn: 'internet' },
+	} });
+	sself._refresh_context_cfg('wan', sself.contexts.wan);
+	ok(modem.config.sims === keep_sims, 'moved: the old modem\'s entries are left alone');
+	ok(modem.active_sim === keep_sims[0], 'moved: and so is its match');
 }
 
 done('test_ctx_settings');
