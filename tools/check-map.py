@@ -90,12 +90,20 @@ def defines(path, sym):
         return None                      # file itself missing — reported separately
     pats = [
         rf'^\s*(?:export\s+)?function\s+{re.escape(sym)}\s*\(',
-        rf'^\s*let\s+{re.escape(sym)}\s*=',
+        # a `let` counts only when it binds a function — not an alias, and not a
+        # parenthesised expression (`let locked = (mode == …)`); `[^)]*` spans
+        # lines, so multi-line arrow parameters still match. An alias: `let
+        # retry_activate = self._retry_activate;` in daemon.uc let a row naming
+        # the wrong owner pass (Codex review, 2026-09-24)
+        rf'^\s*let\s+{re.escape(sym)}\s*=\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_][A-Za-z_0-9]*\s*=>)',
         rf'^\s*(?:export\s+)?const\s+{re.escape(sym)}\s*=',
         rf'^\s*{re.escape(sym)}\s*:\s*(?:function|\()',
         rf'^\s*self\.{re.escape(sym)}\s*=',
+        # the forward-declared form CLAUDE.md prescribes for self-referencing
+        # arrows (`let f; f = (...) => {`) — a function on the right, never a
+        # bare `x = y` or a `x == y` comparison
+        rf'^\s*{re.escape(sym)}\s*=\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_][A-Za-z_0-9]*\s*=>)',
         rf'^\s*{re.escape(sym)}\s*\(\s*\)\s*\{{',        # shell function
-        rf'^\s*{re.escape(sym)}\s*=\s*',
     ]
     return any(re.search(p, s, re.M) for p in pats)
 

@@ -69,4 +69,20 @@ for t in "$TESTDIR"/test_*.uc; do
 	fi
 done
 
+# THE DOC CHECKERS RUN HERE, not only from the release checklist. A checker that
+# is run by hand is a checker that stops being run — check-export-terminators
+# existed and v1.6.4 shipped the defect it catches anyway. These are the cheap,
+# deterministic ones; they need nothing but python3.
+if command -v python3 >/dev/null 2>&1; then
+	for chk in check-map check-anchors check-export-terminators; do
+		out=$(python3 "$TESTDIR/../tools/$chk.py" 2>&1)
+		code=$?
+		printf '%s\n' "$out" | tail -1
+		[ "$code" -ne 0 ] && { printf '%s\n' "$out"; echo "FAIL: $chk"; rc=1; }
+	done
+else
+	# said out loud: a silent skip here reads as "all checkers passed"
+	echo "WARNING: python3 not found — check-map, check-anchors and check-export-terminators DID NOT RUN"
+fi
+
 exit $rc
