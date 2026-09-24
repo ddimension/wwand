@@ -7,11 +7,8 @@
 // context.uc) delegates the wire work here so the QMI specifics — service ids,
 // CID management, TLV shapes, error codes, codec/schema imports — stay out of
 // the lifecycle/policy logic. Each op takes the QMI client(s) it needs plus a
-// callback and returns normalized data; it never touches modem `self` state.
-//
-// Extracted incrementally from modem.uc/context.uc (see the migration plan in
-// docs/backend-interface.md). This is one of the two backends behind the same
-// operation surface; MBIM is the other.
+// callback and returns normalized data; it never touches modem `self` state —
+// that is what lets MBIM implement the same surface without sharing any of it.
 
 'use strict';
 
@@ -28,8 +25,8 @@ const OPMODE = {
 };
 
 // parse a config `modes` string ('lte,nr5g' / 'all') into the NAS
-// mode-preference mask; null for empty/unknown input. Moved from modem.uc —
-// shared with config_check.uc.
+// mode-preference mask; null for empty/unknown input. Exported because
+// config_check.uc must judge a configured value by the same parse.
 export function parse_modes(str)
 {
 	if (str == null || str == '')
@@ -59,12 +56,11 @@ export function parse_modes(str)
 // QMI error 26 ("no effect" — already in that mode) is normalized to success.
 //
 // EXCEPT FOR 'reset', where there is no such thing as "already in that mode":
-// NO_EFFECT there says the request changed nothing, i.e. the modem did NOT
-// reset. Folding that into success told every caller a reset was under way
-// while the modem sat unchanged — the admin reset reported `resetting: true`,
-// the recovery ladder counted a rung it never climbed, and the MBIM
-// passthrough skipped releasing the CID it had allocated for it because the
-// table it expected to be wiped never was. Raised by Codex review, 2026-09-19.
+// NO_EFFECT there means the modem did NOT reset. Reported as success, every
+// caller would believe a reset is under way while the modem sits unchanged —
+// the admin reset would claim `resetting: true`, the recovery ladder would count
+// a rung it never climbed, and the MBIM passthrough would skip releasing a CID
+// it only drops because it expects the reset to wipe the table.
 export function set_opmode(dms, mode, cb)
 {
 	dms.request('SET_OPERATING_MODE', { mode: OPMODE[mode] }, (err) => {
@@ -106,12 +102,11 @@ const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
 // derived from earfcn in the UI. QmiNasScellState: 0 deconfigured,
 // 1 deactivated, 2 activated.
 //
-// AN EMPTY LIST AND A NULL MEAN DIFFERENT THINGS, and collapsing them cost a
-// real bug: [] is a modem that ANSWERED and is not aggregating right now, null
-// is a request that failed. Callers that only render the list cannot tell the
-// difference, but callers that judge the transport by its answer can — and one
-// of those would have retired a perfectly healthy QMI CA read after three
-// ordinary non-aggregated polls (ddimension/wwand#30 review).
+// AN EMPTY LIST AND A NULL MEAN DIFFERENT THINGS: [] is a modem that ANSWERED
+// and is not aggregating right now, null is a request that failed. A renderer
+// need not tell them apart, but the backend ladder judges the transport by its
+// answer — collapsed, it would retire a healthy QMI CA read after a few
+// ordinary non-aggregated polls (evidence: ddimension/wwand#30).
 export function get_ca(nas, cb)
 {
 	// an optional read — modems that reject it (old stacks: Invalid QMI
@@ -132,8 +127,8 @@ export function get_ca(nas, cb)
 		// LuCI derives the band from the (disjoint) EARFCN anyway, so it is not
 		// surfaced here to avoid a misleading value.
 		// `rat` is stated rather than left out: this message is LTE-only, but the
-		// AT list beside it now carries both legs, and a consumer that has to
-		// tell them apart should not have to know which producer it is reading.
+		// AT producer of the same list carries both legs, and a consumer should
+		// not have to know which producer it is reading to tell them apart.
 		if (d.pcell)
 			push(out, { rat: 'lte', role: 'PCC', earfcn: d.pcell.earfcn, pci: d.pcell.pci,
 			            bandwidth_mhz: CA_BW_MHZ[sprintf('%d', d.pcell.dl_bandwidth)] ?? null });
@@ -268,9 +263,9 @@ export function read_info(dms, cb)
 {
 	let info = {};
 
-	// the five DMS getters, strictly sequential on the shared control channel
-	// (backend.run_seq — was a five-level callback pyramid); individual
-	// failures leave their field unset, the rest still populate
+	// strictly sequential, because the five getters share one control channel;
+	// a failed getter leaves its field unset and must not stop the rest — a
+	// modem that refuses GET_REVISION (asked earlier) is no reason to lose its IMEI
 	backend.run_seq([
 		(next) => dms.request('GET_MANUFACTURER', {}, (e, d) => {
 			if (!e) info.manufacturer = d.manufacturer;

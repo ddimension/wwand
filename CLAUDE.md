@@ -196,6 +196,26 @@ be decided by load order; `_wwand_apply_settings` builds the netifd update).
 
       tools/check-anchors.py --extern <kernel>/net/ipv6 --extern <netifd> --extern <luci>
 
+- **Comments explain WHY — the why principle.** The code already says what it
+  does; a comment earns its place by saying what the code cannot:
+  - the **reason**: the constraint, the firmware or protocol fact, and — most
+    useful of all — what breaks if someone "simplifies" it the obvious way;
+  - the **contract** a signature cannot express: return shape, `null` vs `[]`,
+    who owns a resource, what a caller may assume;
+  - the **evidence** for an external claim, anchored and dated (see "Anchor every external claim" above).
+  What does NOT belong in a comment is how the code came to be. "Raised by Codex
+  review, 2026-09-19", "moved from modem.uc", "was a five-level callback pyramid",
+  the story of how a bug was found — that is history, and history lives in the
+  commit message, where `git log -S` / `git blame` find it next to the diff that
+  made it. An issue number may stay as a terse pointer to where the evidence is
+  (`evidence: ddimension/wwand#30`), never as a narrative.
+  Two tests before writing one: would the comment still be true if the code were
+  rewritten more cleverly? (then it is a reason — keep it) and does it name who
+  or when rather than why? (then it is history — put it in the commit). And a
+  why must be CORRECT: check the example you give against the code, because a
+  wrong reason is worse than none — it defends the code against the right fix.
+  `src-ucode/qmi_backend.uc` is the reference file for this style.
+
 - **Before grepping for where something lives, read `docs/map.md`.** It is a
   REVERSE index — keyed by the question ("which module prints this log line",
   "which config value wins", "which source produced that telemetry number"), not
