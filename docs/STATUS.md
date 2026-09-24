@@ -858,6 +858,10 @@ Quectel — while `option gnss`, the one that does, had no UI at all.
    aliased without its receiver threw on every draw of the Registration column
    and shipped with a green suite, because the suite called it WITH a receiver
    and the view did not (openwrt/packages#37, 2026-09-21).
+4a. `tools/check-anchors.py` and `tools/check-map.py` — the first fails on a
+   `file:line` citation that no longer points anywhere, the second on a
+   `docs/map.md` row whose module or symbol was renamed. Both are cheap; the
+   second exists because the map is only worth having while it is true.
 5. Tag, pinning the **commit** (`git rev-parse vX.Y.Z^{commit}`), never the tag
    object.
 6. Feed, on its main branch: `scripts/bump-source.sh wwand vX.Y.Z` (and the two

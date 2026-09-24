@@ -376,6 +376,40 @@ the `modem_repower` ubus method pick this up automatically; the config
 
 ---
 
+## 8a. When `status` cannot answer it, that IS the bug
+
+A rule that has paid for itself twice, so it is written down rather than
+rediscovered: **if you cannot answer a reporter's question from `ubus call wwand
+status`, the missing field is the defect** — not the thing they reported.
+
+Two cases, both 2026-09:
+
+- `ddimension/wwand#30` stalled for three weeks on "is wwand decoding this
+  message the same way mbimcli does?" The two disagreed because mbimcli
+  negotiates MS extensions v1 unless told otherwise and the v1 layout puts every
+  pointer four bytes earlier. Nobody could see which layout was in force, because
+  it lived in one line logged at open. One field — `mbimex` — ended it.
+- `ddimension/wwand#41` had two reporters asking the same thing: the interface
+  shows no gateway, so did the modem not give one, or did wwand decide not to
+  install it? Both are real behaviour and they render identically. The answer
+  existed only in an `ipv4 config:` line that rotates away. Two fields ended it.
+
+The tell in both: **the maintainer could not answer it from the box either.** If
+you find yourself reading source to work out what a running daemon was told,
+that is the signal — a reporter has no source, no test router and no context, so
+what is merely slow for you is impossible for them.
+
+What to add, and what not to:
+
+- Report the **input** — what the modem said, what the config resolved to, which
+  backend won the ladder. Those are decisions wwand made and only wwand knows.
+- Do **not** mirror what another daemon already reports. netifd owns the
+  resulting routes and addresses (`ifstatus`); a second copy here is a second
+  answer that drifts from the first.
+- Guard the copy with `type(x) == 'object'`, not truthiness. `status` is a ubus
+  method LuCI polls, and a member access on a scalar throws in ucode — which
+  blanks the whole page rather than one field.
+
 ## 9. Testing
 
 ```

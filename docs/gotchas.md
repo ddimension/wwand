@@ -667,3 +667,65 @@ around:
   `head -c 20 /usr/share/ucode/wwand/<any>.uc`. `// SPDX` = source, safe to
   patch file-by-file. `#!/usr/bin/env ucode` = bytecode: test the change there
   through a package build, not a file drop.
+
+## One MBIM message, two encodings — and a firmware may pick the wrong one
+
+`BASE_STATIONS_INFO` carries LTE and NR cells in the same reply and encodes them
+**differently**. libmbim 1.32.0 prints the LTE `rsrp`/`rsrq` with
+`PRINT_VALIDATED_INT` — signed, no offset, plain dBm
+(`mbimcli-ms-basic-connect-extensions.c:1346-1347`) — and forty lines later
+prints the NR ones with `PRINT_VALIDATED_SCALED_UINT`, an unsigned 7-bit report
+index plus an offset (`:1410-1412`). Both are correct; they are simply two
+conventions in one message, and a decoder that assumes one of them is wrong half
+the time.
+
+A Quectel-based H5000M fills the NR block the way the spec defines the **LTE**
+one (`ddimension/wwand#30`, 2026-09-23/24). You can prove that from a user's
+paste without any access to the box, by inverting libmbim's own transform —
+`((gint32)number) + scale`, the macro at `:1214-1219`:
+
+| `mbimcli --device-open-ms-mbimex-v3` printed | scale | word on the wire |
+|---|---|---|
+| RSRP −266 dBm | −156 | **−110** |
+| RSRQ −783 dB  | −43  | **−740** |
+| SINR 212 dB   | −23  | **235**  |
+
+−110 dBm is what an RSRP reads on a weak 5G cell. The other two fit no scale
+that makes them a dB figure, and wwand publishes nothing for them rather than a
+number nobody can check.
+
+**The trap that cost the most here was deciding per FIELD.** A second sample had
+`SINR 60`, which lands *inside* the index range, so a per-field rule read it as
+index 60 and published 37.0 dB while two independent sources said 13–14 dB at
+that same moment. A firmware does not mix the two conventions inside one struct;
+RSRP is the field whose SIGN settles which one it is, so it decides for the whole
+cell (`mbim_backend.uc nr_convention`). Note also the asymmetry that makes the
+sign usable: an index is unsigned 0…127, and a dBm reading is negative. Nothing
+else in the struct separates them.
+
+## The ladder means a decoder can be dead code on the box you are debugging
+
+Telemetry metrics are fetched down a ladder — for cells it is QMI-over-MBIM
+passthrough → native MBIM `BASE_STATIONS_INFO` → `AT+QENG` — and the winner is
+per modem, chosen by `backend.uc choose`. So a modem that speaks the passthrough
+never runs the native MBIM cell decoder at all.
+
+Two days of argument in `ddimension/wwand#30` were spent reasoning about that
+decoder for a reporter whose own `status` output said:
+
+```
+cells: answered by qmi
+```
+
+Every cell figure he had ever posted came from QMI. The decoder under discussion
+had never produced a number on his box — which is also why his values looked
+plausible and internally consistent while the raw MBIM words did not.
+
+**Ask which rung won before reasoning about a decoder.** `backend.uc choose`
+announces the winner once, when it changes, at notice level — `cells: answered by
+qmi`. It is a LOG line and **not** a `status` field, so on a box whose log has
+rotated the question needs a restart or an inference from the telemetry line.
+That is itself a status gap by the rule in `extending.md` § 8a, and a candidate
+for a field; until then, ask for the log line explicitly rather than assuming.
+A claim about a user's numbers that skips this question is a claim about the
+wrong code.

@@ -196,6 +196,16 @@ be decided by load order; `_wwand_apply_settings` builds the netifd update).
 
       tools/check-anchors.py --extern <kernel>/net/ipv6 --extern <netifd> --extern <luci>
 
+- **Before grepping for where something lives, read `docs/map.md`.** It is a
+  REVERSE index — keyed by the question ("which module prints this log line",
+  "which config value wins", "which source produced that telemetry number"), not
+  by subsystem the way the other eight files are. It exists because the 8700
+  lines of docs here answer "what is X" well and "where is X" not at all, and
+  the second question is the one that burns an afternoon. `tools/check-map.py`
+  resolves every `file symbol` it cites, so a rename breaks the check rather
+  than the reader. **If you had to grep for something the map did not send you
+  to, add the row** — that is its whole maintenance rule.
+
 ## ucode gotchas (hit repeatedly)
 - **Imports MUST be namespaced** (`import … from 'wwand.codec.tlv'`), never
   relative (`'./codec/tlv.uc'`) — the bytecode precompile resolves modules only
