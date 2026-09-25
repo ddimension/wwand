@@ -59,6 +59,36 @@ def strip_noise(s):
                 out[k] = ' '
             i = j + 1
             continue
+        # A regex literal is code-adjacent noise too, and it has to be
+        # consumed WHOLE: `/"message": *"([^"]*)"/` carries three quote
+        # characters, and taking the first as a string opening blanked the
+        # rest of esim_bridge.uc, so every symbol after it read as missing.
+        # A `/` opens a regex where an operand is expected — after `(`, `,`,
+        # `=`, `:`, `[`, `!`, `&`, `|`, `?`, `{`, `}`, `;` or `return` —
+        # never after a value, where it divides.
+        if c == '/' and i + 1 < n and s[i + 1] not in '/*':
+            k = i - 1
+            while k >= 0 and s[k] in ' \t':
+                k -= 1
+            prev = s[k] if k >= 0 else '\n'
+            if prev in '(,=:[!&|?{};\n' or s[max(0, k - 5):k + 1] == 'return':
+                j, in_class = i + 1, False
+                while j < n and s[j] != '\n':
+                    if s[j] == '\\':
+                        j += 2
+                        continue
+                    if s[j] == '[':
+                        in_class = True
+                    elif s[j] == ']':
+                        in_class = False
+                    elif s[j] == '/' and not in_class:
+                        break
+                    j += 1
+                if j < n and s[j] == '/':
+                    for k2 in range(i, j + 1):
+                        out[k2] = ' '
+                    i = j + 1
+                    continue
         if c == '/' and i + 1 < n and s[i + 1] == '/':
             j = s.find('\n', i)
             j = n if j < 0 else j
