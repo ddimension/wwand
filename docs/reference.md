@@ -1769,8 +1769,9 @@ Built-in profiles: MikroTik Chateau 5G (`modem-power` + `modem-reset` + 5 signal
 LEDs), Zyxel LTE3301-plus / -m209 / -q222 (`power_modem`/`usbpower` + mobile/LTE
 LEDs), Zyxel LTE5398-M904 (`lte_power` + red/green/orange mobile LEDs), Cudy
 LT300 (MeiG SLM770A, reset GPIO `4g`; the autosetup HW-verify platform), Zyxel
-NR7101 (no switchable power rail, but the RG502Q's RESET line as `gpio515`; no
-LEDs — they are OS-owned), Huasifei WH3000 Pro (INVERTED `modem_power` GPIO — 1 =
+NR7101 (the RG502Q's RESET line as `gpio515`; its supply is switchable only on
+images that export GPIO 18 as `lte_power` — stock OpenWrt holds it as a gpio-hog —
+and wwand detects which it is running on; no LEDs — they are OS-owned), Huasifei WH3000 Pro (INVERTED `modem_power` GPIO — 1 =
 off, no reset line, no modem LEDs). An **unknown board** yields a no-op
 profile — wwand runs unchanged, and any GPIO/LED can still be named per modem
 (`reset_gpio`). LuCI's reset-GPIO picker lists every named GPIO line the kernel

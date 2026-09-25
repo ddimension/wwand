@@ -2559,6 +2559,29 @@ export function create(opts)
 
 					if (act == 'reset') {
 						entry._vanish_rung = 1;
+
+						// A MODEM THAT LEFT THE BUS NEEDS ITS POWER, NOT ITS RESET
+						// LINE, where the board can switch the power. Measured on
+						// an NR7101 (2026-09-25): neither a reset pulse, nor a warm
+						// reboot, nor a USB port or xHCI reset brought a vanished
+						// modem back; removing its supply did. So when the board
+						// has a usable power line for THIS modem, the vanish step
+						// cycles it. A per-modem `reset_gpio` is an explicit choice
+						// and is honoured, and a multi-modem box never gets the
+						// board's shared lines (board_gpio_ok). The recovery ladder
+						// for a modem that is PRESENT but silent keeps the reset
+						// pulse — there the pulse is what works (ddimension/wwand#40).
+						let use_power = deps.board?.has_power && board_gpio_ok() && !entry.cfg?.reset_gpio;
+
+						if (use_power) {
+							log('warn', sprintf('modem %s: gone for %ds — power-cycling it through the board', name, gone));
+
+							if (deps.board.power_cycle(entry.cfg?.repower_time ? +entry.cfg.repower_time * 1000 : null))
+								continue;
+
+							log('warn', sprintf('modem %s: the power cycle did not start — falling back to the reset line', name));
+						}
+
 						log('warn', sprintf('modem %s: gone for %ds — pulsing the board reset', name, gone));
 
 						// Say WHICH of the two reasons it was. On a box with more
@@ -2582,11 +2605,11 @@ export function create(opts)
 						entry._vanish_rung = 2;
 
 						if (act == 'reboot') {
-							log('err', sprintf('modem %s: gone for %ds and the reset did not bring it back — rebooting', name, gone));
+							log('err', sprintf('modem %s: gone for %ds and neither the reset nor the power cycle brought it back — rebooting', name, gone));
 							reboot_router(sprintf('modem %s vanished', name));
 						}
 						else {
-							log('warn', sprintf('modem %s: gone for %ds and the reset did not bring it back; `option failreboot 0` keeps the router up', name, gone));
+							log('warn', sprintf('modem %s: gone for %ds and neither the reset nor the power cycle brought it back; `option failreboot 0` keeps the router up', name, gone));
 						}
 					}
 				}
@@ -2617,6 +2640,10 @@ export function create(opts)
 
 				self._tick_timer = uloop.timer(10000, tick);
 			};
+			// a test seam: the tick is otherwise reachable only through a 10 s
+			// timer, and a decision reachable only through a timer is one the
+			// suite cannot check (see vanish_action above)
+			self._tick = () => tick();
 
 			tick();
 		}

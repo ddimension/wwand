@@ -123,6 +123,7 @@ ok(!b.has_power, 'nr7101: no modem-power rail');
 eq(b.power_cycle(), false, 'nr7101: power_cycle no-op (no power gpio)');
 ok(b.reset_pulse(), 'nr7101: reset_pulse uses the board default reset gpio (gpio515)');
 ok(fx.has(`${G}/gpio515/value=1`), 'nr7101: reset asserted (0 -> 1) on gpio515');
+
 uloop.timer(20, () => uloop.end());
 uloop.run();
 ok(fx.has(`${G}/gpio515/value=0`), 'nr7101: reset released back to rest level (0)');
@@ -144,6 +145,34 @@ uloop.timer(20, () => uloop.end());
 uloop.run();
 ok(fx.has(`${G}/othergpio/value=1`),
 	'nr7101: released back to 1 — not left holding the modem in reset');
+
+// --- 4d. NR7101 built with the supply exported (`gpio-export` named lte_power) --
+// Stock OpenWrt hogs GPIO 18 (4c above: no power rail). An image that exports it
+// as `lte_power` makes it switchable, and the SAME profile must then power-cycle
+// through it — detected by whether the line reads. Measured on 192.168.203.242
+// (2026-09-25): only removing the supply revived a modem that had left the bus.
+fx = mkfx({ [`${G}/gpio515/value`]: '0', [`${G}/lte_power/value`]: '1' });
+b = board.create({ id: 'zyxel,nr7101', fx: fx, reset_ms: 5, power_off_ms: 5, log: () => {} });
+ok(b.has_power, 'nr7101+lte_power: the exported supply is detected');
+eq(b.profile.power_gpio, 'lte_power', 'nr7101+lte_power: ...by its name');
+ok(b.power_cycle(), 'nr7101+lte_power: power_cycle starts');
+ok(fx.has(`${G}/lte_power/value=0`), 'nr7101+lte_power: the supply is switched OFF');
+uloop.timer(30, () => uloop.end()); uloop.run();
+ok(fx.has(`${G}/lte_power/value=1`), 'nr7101+lte_power: ...and back ON');
+
+// and the stock image again, after a patched one was seen: the shared profile
+// table must not have been mutated by the detection
+fx = mkfx({ [`${G}/gpio515/value`]: '0' });
+b = board.create({ id: 'zyxel,nr7101', fx: fx, reset_ms: 5, log: () => {} });
+ok(!b.has_power, 'nr7101 stock again: still no power rail (PROFILES not mutated)');
+
+// detected by the sysfs DIRECTORY where the fx can tell, not by one read of
+// the value: a transient read error at create must not cost the daemon its
+// power control for its whole lifetime (Codex review)
+fx = mkfx({ [`${G}/gpio515/value`]: '0' });
+fx.exists = (p) => (p == `${G}/lte_power`);
+b = board.create({ id: 'zyxel,nr7101', fx: fx, reset_ms: 5, log: () => {} });
+ok(b.has_power, 'nr7101+lte_power: present by its directory even when its value did not read');
 
 // --- 4d. Cudy LT300 (MeiG SLM770A): serial ports are vendor-class (0xff) and the
 // stock `option` driver has no id for them, so init() must bind them via new_id —

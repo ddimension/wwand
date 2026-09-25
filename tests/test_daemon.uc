@@ -2562,4 +2562,59 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	d1.shutdown?.(); d2.shutdown?.();
 }
 
+
+// --- a vanished modem: power where the board can switch it, else the reset ------
+// Measured on an NR7101 (2026-09-25): a modem gone from the USB bus came back from
+// neither a reset pulse nor a warm reboot, only from removing its supply.
+{
+	let run = (has_power, cfg_extra) => {
+		let calls = [];
+		let ctl = { device: '/dev/cdc-wdm0', protocol: 'qmi', driver: 'qmi_wwan', netdev: 'wwan0' };
+		let parsed3 = config.parse({ network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', ...(cfg_extra ?? {}) },
+			wwan0: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'web' },
+		} });
+		let d3 = daemon_mod.create({
+			timing: { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
+			          reg_timeout: 500, backoff_min: 40, backoff_max: 60 },
+			deps: {
+				log: () => null,
+				board: { id: 'zyxel,nr7101', has_power: has_power,
+				         profile: { reset_gpio: 'gpio515', power_gpio: has_power ? 'lte_power' : null },
+				         init: () => null, leds: () => null, bars: () => 0,
+				         reset_pulse: (g) => { push(calls, 'reset ' + g); return true; },
+				         power_cycle: () => { push(calls, 'power'); return true; } },
+				load_qmi: () => ({
+					modem: { create: () => ({ id: 'm0', start: () => null, stop: () => null,
+						note_connect_success: () => null, note_connect_failure: () => null,
+						datapath: {} }) },
+					context: { create: (o) => ({ state: 'CONNECTED', config: o.config,
+						modem: o.modem, modem_event: () => null }) },
+				}),
+				emit_event: () => null, kick_interface: () => null,
+				renew_interface: () => null, down_interface: () => null,
+				iface_status: (i, cb) => cb({ up: false }),
+				datapath_fx: null, read_config: () => parsed3,
+				resolve_control: () => ctl, resolve_netdev: () => null,
+				learn_device: () => null, learn_modem_path: () => null,
+			},
+		});
+		d3.apply_config(parsed3);
+		d3.modems.m0._had_modem = true;
+		ctl = null;
+		d3.hotplug('remove', 'cdc-wdm0');
+		d3.modems.m0.waiting_since = time() - 300;   // past the 120 s reset rung
+		d3._tick();
+		d3.shutdown?.();
+		return calls;
+	};
+
+	eq(run(true), [ 'power' ],
+	   'vanish: a board that can switch the supply power-cycles the vanished modem');
+	eq(run(false), [ 'reset gpio515' ],
+	   'vanish: stock NR7101 (no exported supply) keeps the reset pulse');
+	eq(run(true, { reset_gpio: 'gpio7' }), [ 'reset gpio7' ],
+	   'vanish: an explicit per-modem reset_gpio is honoured over the board supply');
+}
+
 done('test_daemon');
