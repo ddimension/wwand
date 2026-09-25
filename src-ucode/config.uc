@@ -235,6 +235,7 @@ export function modem_defaults(over)
 		sim_slot: 0,
 		stats_interval: 60,
 		auto_correct_config: false,   // gated runtime auto-correction (default off)
+		ipa: false,            // poll an SGP.32 eIM for this modem's eSIM (ipa.uc)
 		...(over ?? {}),
 	};
 };
@@ -330,7 +331,11 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	// cap the QMAP header version the datapath may negotiate (1 | 4 | 5;
 	// unset/0 = whatever the datapath can drive). Mostly a bring-up handle:
 	// pinning it is how a specific version gets exercised on real hardware.
-	'qmap_version' ];
+	'qmap_version',
+	// eSIM fleet management (wwand-ipa, ipa.uc): poll an SGP.32 eIM for this
+	// modem's card. ipa_eim_config is the eIM configuration (a BER
+	// AddInitialEimRequest) stored for a card the first time it is seen.
+	'ipa', 'ipa_interval', 'ipa_eim_config', 'ipa_eim_id', 'ipa_insecure' ];
 // option ip6ifaceid / ifaceid — resolve the alias and say so when the value is
 // one apply_iface_id() will refuse. Without the warning a typo'd identifier is
 // perfectly silent: the address simply stays what the network assigned, which
@@ -448,6 +453,13 @@ function modem_from_section(s, warnings)
 		// modem in low power has no radio, so an incoming-reachable install
 		// must not get this by accident.
 		lowpower: bool_opt(s.lowpower, false),
+		// eSIM fleet management (ipa.uc). Read on every reload without a
+		// modem restart: nothing in the modem's own state depends on them.
+		ipa: bool_opt(s.ipa, false),
+		ipa_interval: num_opt(s.ipa_interval, null, 'ipa_interval', warnings),
+		ipa_eim_config: (s.ipa_eim_config != null && s.ipa_eim_config != '') ? s.ipa_eim_config : null,
+		ipa_eim_id: (s.ipa_eim_id != null && s.ipa_eim_id != '') ? s.ipa_eim_id : null,
+		ipa_insecure: bool_opt(s.ipa_insecure, false),
 		// Initial-attach bearer. The attach happens BEFORE wwand activates a
 		// data session, and on some networks it needs its own APN and
 		// credentials — an IMS or admin bearer — while the data connection uses

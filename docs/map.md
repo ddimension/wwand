@@ -59,6 +59,8 @@ row. That is the whole maintenance rule.
 |---|---|
 | How many slots are there, and is that the modem's answer or ours? | `sim.uc slot_status` builds the rows; `sim.uc enumerated` says whether any row is a placeholder. A caller that ACTS on slot topology must ask the second. |
 | Which transport carries APDUs on this modem? | `sim.uc apdu_backend` — MBIM UICC, then QMI UIM, then AT. `sim.power_cycle` deliberately uses the opposite order; the comments at both sites say why. |
+| Who runs lpac, and who runs the eIM assistant? | Both through `esim_bridge.uc stdio_run`, which relays their stdio APDU protocol to the modem. lpac comes in through `lpac_run`, the SGP.32 assistant (wwand-ipa) through `ipa_run`. Both hold the same claim, so the card only ever sees one host session. |
+| When does the eIM get polled, and why was a manual eSIM change refused (`ipa_managed`)? | `ipa.uc due` is the schedule and the daemon status tick drives it (`simops.uc ipa_tick`). The refusal is `simops.uc IPA_LOCKED`. |
 
 ## Status and ubus
 

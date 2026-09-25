@@ -349,7 +349,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:864-867 warns "references
+	// produces no entry for it at all (config.uc:876-879 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -2457,8 +2457,19 @@ export function create(opts)
 		// signature is just its cfg. Unchanged modems and unchanged contexts keep
 		// running untouched — the whole point (no WAN bounce on an unrelated edit,
 		// and a single modem's edit never disturbs the others or their siblings).
-		let modem_sig = (mn) => sprintf('%J',
-			{ cfg: parsed.modems[mn], mux: mux_by_modem[mn], l3: l3_by_modem[mn] });
+		// The eIM options (ipa*) are left out: the assistant reads them from
+		// entry.ipa on every tick (step 4 refreshes it), and nothing in the
+		// modem's own state depends on them — turning fleet management on must
+		// not bounce the connection it is going to run over.
+		let modem_sig = (mn) => {
+			let cfg = { ...(parsed.modems[mn] ?? {}) };
+
+			for (let k in keys(cfg))
+				if (substr(k, 0, 3) == 'ipa')
+					delete cfg[k];
+
+			return sprintf('%J', { cfg: cfg, mux: mux_by_modem[mn], l3: l3_by_modem[mn] });
+		};
 		let ctx_sig = (cn) => sprintf('%J', parsed.contexts[cn]);
 
 		// 1) stop modems that are gone or changed (cascades to their contexts). A
@@ -2486,8 +2497,10 @@ export function create(opts)
 
 		// 4) stamp the applied signatures for the next reload's diff (idempotent for
 		//    the ones that kept running: same config -> same signature).
-		for (let mn in keys(self.modems))
+		for (let mn in keys(self.modems)) {
 			self.modems[mn]._sig = modem_sig(mn);
+			self.modems[mn].ipa = parsed.modems[mn];
+		}
 
 		for (let cn in keys(self.contexts))
 			self.contexts[cn]._sig = ctx_sig(cn);
@@ -2631,6 +2644,9 @@ export function create(opts)
 								if (!centry.ctx)
 									start_context(cname, centry.cfg);
 					}
+
+				// eSIM fleet management: a no-op unless a modem has `option ipa`
+				self.ipa_tick?.();
 
 				if (deps.board) {
 					let first = null;

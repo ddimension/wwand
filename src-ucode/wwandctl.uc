@@ -9,10 +9,12 @@
 'use strict';
 
 import { fmt_plmn, fmt_sig, fmt_locks, reg_text, packet_service_text,
-	collectd_lines, collectd_interval, recovery_text } from 'wwand.wwandctl_fmt';
+	collectd_lines, collectd_interval, recovery_text, ipa_lines,
+	eim_config_kind } from 'wwand.wwandctl_fmt';
 
 import * as libubus from 'ubus';
 import * as fs from 'fs';
+import * as libuci from 'uci';
 
 let conn = null;
 
@@ -404,6 +406,8 @@ eSIM (needs the wwand-esim package)
   esim [modem] download <activation_code> [confirmation_code] [--no-notify]
   esim [modem] download-status          poll a running download
   esim [modem] notifications | notify   pending eUICC notifications (ES9+)
+  ipa [modem] [status|poll]             eIM fleet management: state, or poll now
+  ipa [modem] eim <file>                set the eIM (BER AddInitialEimRequest) and enable it
 
 Maintenance
   reset [modem]          modem reset (GPIO if configured, else backend soft reset)
@@ -771,6 +775,97 @@ case 'probe': {
 case 'esim':
 	cmd_esim(status(), args);
 	break;
+
+case 'ipa': {
+	let r = resolve_modem(status(), args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+	let op = rest[0] ?? 'status';
+
+	if (op != 'status' && op != 'poll' && op != 'eim')
+		die('usage: wwandctl ipa [modem] [status|poll|eim <file>]');
+
+	// Point the modem at an eIM: the file goes to /etc/wwand/ipa (kept across
+	// sysupgrade), the options into /etc/config/network, and the daemon
+	// reloads — without a modem restart, the ipa options are outside the
+	// modem's reload signature.
+	if (op == 'eim') {
+		let src = rest[1];
+
+		if (!length(src ?? ''))
+			die('usage: wwandctl ipa [modem] eim <file>   (a BER AddInitialEimRequest from the eIM operator)');
+
+		// the options live on the modem's wwand_modem section; a modem from an
+		// old-style configuration (the compat layer) has none, and a set on a
+		// missing section silently does nothing — say so instead
+		let cur = libuci.cursor();
+
+		if (cur.get('network', r.modem) != 'wwand_modem')
+			die(sprintf('modem %s has no `config wwand_modem` section in /etc/config/network — migrate the configuration first (/usr/libexec/wwand/migrate)', r.modem));
+
+		let data = fs.readfile(src);
+
+		if (data == null)
+			die(sprintf('cannot read %s', src));
+
+		let kind = eim_config_kind(data);
+
+		if (!kind)
+			die(sprintf('%s is not an eIM configuration: expected BER starting BF57 (AddInitialEimRequest) or BF55 (GetEimConfigurationDataResponse)', src));
+
+		let dst = sprintf('/etc/wwand/ipa/%s-eim.ber', r.modem);
+
+		fs.mkdir('/etc/wwand');
+		fs.mkdir('/etc/wwand/ipa');
+
+		if (src != dst) {
+			let f = fs.open(dst, 'w');
+
+			if (!f || f.write(data) == null)
+				die(sprintf('cannot write %s', dst));
+
+			f.close();
+		}
+
+		fs.chmod(dst, 0o600);
+
+		cur.set('network', r.modem, 'ipa', '1');
+		cur.set('network', r.modem, 'ipa_eim_config', dst);
+
+		if (!cur.commit('network'))
+			die('could not commit /etc/config/network');
+
+		call_ok('reload', {});
+		printf('modem %s: eIM configuration %s (%s), fleet management on\n', r.modem, dst, kind);
+
+		// The file only reaches a card with no stored state yet; say so now,
+		// not on the first poll that quietly keeps the old eIM. The EID from
+		// the eIM runs if there were any, else from the status page's eSIM
+		// read — on a first setup there have been no runs to know it from.
+		let ist = call('modem_ipa', { modem: r.modem, op: 'status' });
+		let eid = ist?.eid ?? status().modems[r.modem]?.esim?.eid;
+		let nv = eid ? sprintf('/etc/wwand/ipa/%s.nvstate', uc(eid)) : null;
+
+		if (nv && fs.access(nv))
+			printf('note: card %s already has an eIM configuration stored (%s); it keeps that one\n', eid, nv);
+		else if (!eid)
+			printf('note: the card\'s EID is not known yet; if it was provisioned before, it keeps its stored eIM\n');
+
+		break;
+	}
+
+	if (op == 'poll') {
+		call_ok('modem_ipa', { modem: r.modem, op: 'poll' });
+		printf('eIM poll started — `wwandctl ipa` shows how it went\n');
+		break;
+	}
+
+	let st = call_ok('modem_ipa', { modem: r.modem, op: 'status' });
+
+	for (let l in ipa_lines(st, st.now ?? time()))
+		printf('%-13s%s\n', l[0], l[1]);
+
+	break;
+}
 
 case 'reload':
 	call_ok('reload', {});

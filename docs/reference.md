@@ -431,6 +431,12 @@ config wwand_modem 'm0'
 	                                 #    streams. The port is reported as `gps_port`; with
 	                                 #    wwand-gps installed, wwand also READS it and
 	                                 #    answers `modem_gps` with the fix (see below)
+	option ipa '0'                   # 1: let an eIM manage this modem's eSIM (wwand-ipa,
+	                                 #    see "eSIM fleet management" below)
+	option ipa_eim_config ''         # the eIM configuration file (BER AddInitialEimRequest)
+	option ipa_interval '3600'       # seconds between eIM polls (minimum 300)
+	option ipa_eim_id ''             # preferred eIM when the configuration names several
+	option ipa_insecure '0'          # 1: skip the eIM's certificate check (lab only)
 	option gnss_set_time '0'         # 1: step the system clock from the receiver's own
 	                                 #    time — but only when the clock is plainly unset
 	                                 #    (pre-2021), so it never fights sysntpd. Off by
@@ -1386,6 +1392,8 @@ when called from LuCI).
 | `modem_sim_pin_verify` | `modem`, `pin?` | manual PIN release past the low-retry safety block (the daemon refuses to auto-enter with ≤1 attempt left, to avoid a PUK lock); `pin` overrides the configured one for this attempt (write ACL) |
 | `modem_sim_puk` | `modem`, `puk`, `new_pin` | **PUK entry**: unblock a PUK-locked SIM and set a NEW PIN in one operation (UIM Unblock PIN → native MBIM PIN/PUK1 → `AT+CPIN="puk","pin"`; the chain never re-tries a PUK on a second transport — wrong PUKs brick the SIM). PUK = 8 digits, new PIN 4–8 digits. On success the modem restarts its bring-up with the new PIN as one-shot override; **update the configured `pincode` afterwards** (write ACL) |
 | `modem_esim` | `modem`, `op`, … | eSIM (list/enable/disable/eid/download/…); needs the optional `wwand-esim` package |
+| `modem_ipa` | `modem`, `op` (`status`/`poll`) | eSIM fleet management: the eIM poll state, or poll now; needs the optional `wwand-ipa` package |
+| `modem_ipa_status` | `modem` | the read-only twin of `modem_ipa`'s `status` (LuCI read ACL) |
 | `modem_euicc_profiles` | `modem`, `slot` | the MODEM's own eUICC profile read (QMI UIM), no lpac. For a card lpac structurally cannot enumerate: an SGP.02 **M2M eUICC** has no local ES10 — it is managed over the air by its SM-SR and refuses STORE DATA — so host-driven enumeration is impossible by design there, while the modem's own interface does not go through ES10 at all. Read-only. Not every firmware implements it (both modems here answer *not supported*), and a failure on the FIRST index is reported as `no_native_euicc` so a caller falls back to lpac rather than believing in an empty card. Note the eUICC is not necessarily in the ACTIVE slot — pass the slot that holds it |
 | `modem_apdu` | `modem`, `op`, … | raw ISO-7816 APDU channel (advanced) |
 | `modem_sms_list` | `modem`, `storage?` | list stored SMS (decoded: sender, timestamp, text, multipart merged); `storage` `SM` (SIM, default) or `ME` (modem) |
@@ -1553,6 +1561,103 @@ before reaching lpac.
 The LuCI **Network → Modems** page (Tools view of the selected modem) surfaces the profile list,
 enable/disable, the download form with live progress, and notification handling;
 the eSIM sections hide themselves when `wwand-esim` is not installed.
+
+### eSIM fleet management (SGP.32 eIM) — `wwand-ipa`
+
+An **eIM** is the fleet side of GSMA SGP.32: the operator queues eUICC packages
+(download a profile, enable, disable, delete) and an **IoT Profile Assistant**
+on the device fetches and runs them. `wwand-ipa` provides that assistant:
+[onomondo-ipa](https://github.com/onomondo/onomondo-ipa) (AGPL, packaged as
+`wwand-ipad`, `/usr/lib/wwand/ipad`), built with a card backend that speaks
+lpac's stdio protocol, so its APDUs go over the modem's own channel through the
+same bridge lpac uses. It needs `wwand-esim`.
+
+What to know before using it:
+
+- **It drives an SGP.22 consumer eUICC**, the cards `wwand-esim` already
+  manages, through the assistant's *IoT eUICC emulation*. onomondo-ipa
+  implements SGP.32 **v1.0** (onomondo-ipa README, commit 6aaeb38, 2026-09-01);
+  in emulation it signs its results with a placeholder, so **the eIM must
+  accept emulation-mode results**. A production eIM for accredited SGP.32 v1.2
+  IoT eUICCs does not.
+- **The eIM trust lives on the router, not on the card.** In emulation the eIM
+  configuration and its replay counter are kept in the assistant's state file,
+  `/etc/wwand/ipa/<EID>.nvstate` — one per card. The directory is kept across
+  a sysupgrade (`/lib/upgrade/keep.d/wwand-ipa`), so it is the natural place
+  for the eIM configuration file too. TLS to
+  the eIM is the only authentication of the commands; `ipa_insecure` removes
+  even that and is for lab eIMs only.
+- **Manual profile changes are locked on a managed card.** With `option ipa`
+  set, `modem_esim` refuses `download`, `enable`, `disable`, `delete` and
+  `notify` with `ipa_managed`: the assistant keeps the card's state (the profile
+  to roll back to, pending results) in its state file, and a change made past it
+  puts the two out of step. Pending notifications belong to the eIM too. Pass
+  `"force": true` to override.
+
+**Setup.** Put the eIM configuration (a BER-encoded `AddInitialEimRequest`, as
+the eIM operator provides it) on the router and point the modem at it:
+
+```
+config wwand_modem 'm0'
+	...
+	option ipa '1'
+	option ipa_eim_config '/etc/wwand/ipa/eim.ber'
+```
+
+Or in one step, which copies the file to `/etc/wwand/ipa/<modem>-eim.ber`,
+sets both options and reloads (after checking the file is a BER
+`AddInitialEimRequest`, tag `BF57`, or `GetEimConfigurationDataResponse`,
+`BF55`):
+
+```
+wwandctl ipa [modem] eim /tmp/eim.ber
+```
+
+Changing these options does not restart the modem. The configuration reaches
+a card only the first time it is seen, when it has no state file yet. A card
+that already has one keeps its eIM, and `wwandctl` says so; the eIM itself
+can move a card to another eIM (SGP.32 `addEim` / `updateEim`).
+
+**What happens.** Once the modem's connection has been up for a minute plus up
+to five more, and every `ipa_interval` seconds (default 3600) plus up to a
+tenth more after that, wwand reads the card's EID and runs the assistant. The
+extra is fixed per router (derived from its IMEI), so a fleet that comes back
+from one power cut does not reach the eIM in the same second, and stays spread
+out afterwards. After a failed run the retry comes after 600 s, doubling with
+every further failure up to the interval.
+
+1. A card seen for the first time (no state file) is **provisioned**: the eIM
+   configuration from `ipa_eim_config` is stored for it. Without that option the
+   run stops with `no_eim_config`. Nothing is guessed.
+2. The eIM is **polled** and every queued package is run.
+3. When a package **changes the active profile**, the assistant hands it to
+   wwand: the SIM is reset so the modem takes the new profile (the same apply as
+   a manual `enable`; where the SIM cannot be power-cycled, wwand resets the
+   modem instead), and wwand waits up to 5 minutes for a *new* data session
+   before it lets the assistant report the result. If the eIM cannot be reached
+   over the new profile, the assistant rolls back to the previous one (when the
+   eIM allowed that), and wwand applies that change the same way.
+
+The card managed is the modem's active eUICC (on a dual-SIM module that can be
+the second physical slot); a modem that cannot list its slots uses
+`sim_slot`, or 1.
+
+After every run that reached the card, the card's profile list in `status`
+(`esim`) is read again. The assistant may have installed, switched or deleted
+profiles.
+
+The assistant's log goes to the syslog with wwand's own lines (`logread -e
+esim\[ipa\]`), at wwand's log level: its errors as warnings, the APDU traffic
+only at `debug` (`wwandctl` / ubus `set_log_level`). The run is exclusive with the
+lpac operations on the same card; one waits for the other (`busy`).
+
+**ubus:** `modem_ipa { modem, op }`, with op `status` (default) or `poll`
+(run now; returns when the run started, and the outcome shows up in `status`).
+`status` returns `enabled`, `state` (`idle` / `running` / `waiting_online`),
+`eid`, `runs`, `profile_changes`, `last_start` / `last_end`, `last_ok`,
+`last_error` (`no_eim_config`, `eim_config_missing`, `no_eid`, `busy`,
+`exit <n>`, …), `fails` (consecutive failed runs), `next_due`, `interval` and `nvstate` (whether the card has
+state).
 
 ## SMS
 

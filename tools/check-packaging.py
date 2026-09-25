@@ -416,6 +416,10 @@ def main():
         # MBIM tunnels the whole QMI stack over the passthrough, reaching
         # qmi_backend through the lazy require() shim rather than an import
         ('wwand-mbim', 'wwand-qmi'),
+        # ipa.uc runs the assistant through the eSIM bridge that simops
+        # require()s, and spawns the binary wwand-ipad installs
+        ('wwand-ipa', 'wwand-esim'),
+        ('wwand-ipa', 'wwand-ipad'),
     }
     for p, ds in sorted(deps.items()):
         for d in ds:

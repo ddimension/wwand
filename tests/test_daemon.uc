@@ -893,6 +893,20 @@ ok(rld.contexts.wanA.ctx != ctxA_obj, 'reload apn: wanA ctx rebuilt with new con
 eq(rld.contexts.wanA.cfg.apn, 'a2', 'reload apn: wanA carries the new APN');
 ctxA_obj = rld.contexts.wanA.ctx;
 
+// (2b) eSIM fleet management switched on for m0: the assistant reads its
+//      options from entry.ipa, so the modem keeps running and only that
+//      record moves — turning it on must not bounce the connection it runs over
+rl_events = [];
+rld.apply_config(netcfg((n) => { n.wanA.apn = 'a2'; n.m0.ipa = '1'; n.m0.ipa_interval = '900'; }));
+eq(rl_events, [], 'reload ipa: nothing stopped or started');
+ok(rld.modems.m0.modem == m0_obj, 'reload ipa: m0 modem object preserved');
+eq([ rld.modems.m0.ipa?.ipa, rld.modems.m0.ipa?.ipa_interval ], [ true, 900 ],
+	'reload ipa: the new options reach the entry');
+rl_events = [];
+rld.apply_config(netcfg((n) => { n.wanA.apn = 'a2'; }));
+eq(rl_events, [], 'reload ipa off: nothing stopped or started either');
+eq(rld.modems.m0.ipa?.ipa, false, 'reload ipa off: and the entry says so');
+
 // (3) add a new modem + interface -> only the new one starts; existing untouched
 rl_events = [];
 rld.apply_config(netcfg((n) => {

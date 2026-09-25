@@ -43,6 +43,8 @@ const ESIM_IDLE_MS = 300000;
 //   { kind: 'apdu', func, param }        an APDU request to answer
 //   { kind: 'progress', message }        ES9+/ES10 progress step
 //   { kind: 'lpa', code, message, data } final result (code '0' = success)
+//   { kind: 'ipa', event }               the IPA daemon hands a step to the host
+//                                        (wwand-ipa; the answer is one line back)
 //   { kind: 'log', text }                anything that is not protocol JSON
 //   null                                 empty line
 function parse_lpac_line(s)
@@ -74,6 +76,9 @@ function parse_lpac_line(s)
 			message: field(s, /"message": *"([^"]*)"/) ?? '',
 			data: field(s, /"data": *"([^"]*)"/),
 		};
+
+	if (mtype == 'ipa')
+		return { kind: 'ipa', event: field(s, /"event": *"([a-z_]+)"/) };
 
 	// unknown JSON object: keep it visible in the log rather than dropping it
 	return { kind: 'log', text: s };
@@ -123,54 +128,52 @@ return {
 			};
 		};
 
-		// spawn lpac for a host-side op (download / chip / notif-list /
-		// notif-process) and bridge its stdio APDU protocol; on_done(err, log)
-		let lpac_run = (ref, slot, op, code, conf, on_done) => {
+		// Spawn a host-side process that speaks lpac's stdio APDU protocol and
+		// bridge it to the modem's APDU channel; on_done(err, log).
+		//   cmd        the shell command (stderr redirected by the caller)
+		//   opts.logf  its log file, truncated at start (ESIM_LOGF by default);
+		//              false = none, the process's output goes to the syslog only
+		//   opts.on_ipa(rec, reply)  handles { kind: 'ipa' } lines; reply(obj)
+		//              writes the answer. Without it the answer is a refusal,
+		//              so a process waiting on one never hangs.
+		//   opts.log_level(line)  the syslog level for one of its non-protocol
+		//              lines ('notice' when absent)
+		// Returns the process handle, or null when the spawn failed.
+		let stdio_run = (ref, slot, op, cmd, opts, on_done) => {
 			let entry = modem_of(ref);
+			let logfile = (opts?.logf === false) ? null : (opts?.logf ?? ESIM_LOGF);
+			let level_of = (type(opts?.log_level) == 'function') ? opts.log_level : () => 'notice';
+			let logf = null;
 
-			if (fs.access(lpac) != true)
-				return false;   // no lpac package installed — caller reports it
-
-			let cmd;
-			switch (op) {
-			case 'download':      cmd = sprintf("profile download -a '%s'%s", code ?? '',
-			                                    length(conf ?? '') ? sprintf(" -c '%s'", conf) : ''); break;
-			case 'notif-list':    cmd = 'notification list'; break;
-			case 'notif-process': cmd = 'notification process -a'; break;
-			// management writes: the ICCID rides in the code arg (validated
-			// digits-only by the caller, so the quoting is shell-safe)
-			case 'enable':        cmd = sprintf("profile enable '%s'",  code); break;
-			case 'disable':       cmd = sprintf("profile disable '%s'", code); break;
-			case 'delete':        cmd = sprintf("profile delete '%s'",  code); break;
-			default:              cmd = 'chip info';
+			if (logfile) {
+				let tr = fs.open(logfile, 'w'); if (tr) tr.close();   // truncate the log
+				logf = fs.open(logfile, 'a');
 			}
 
-			let tr = fs.open(ESIM_LOGF, 'w'); if (tr) tr.close();   // truncate the log
-			let logf = fs.open(ESIM_LOGF, 'a');
-
 			// native spawn gives a non-blocking stdout + writable stdin; the
-			// shell sets the env and appends lpac's stderr to the log. The
-			// __EXIT marker carries the exit status IN-BAND: uloop's SIGCHLD
-			// handler reaps all children, so h.close()'s waitpid can lose the
-			// race and not know the status (returns null) — the marker line is
-			// then the only reliable source. (No exec: the shell must survive
-			// lpac to echo the marker.) The marker's own stderr is dropped: an
-			// aborted run (inactivity timeout) closes the pipe under the shell,
-			// and its "echo: I/O error" would reach the log as a wwand error.
+			// shell appends the process's stderr to the log. The __EXIT marker
+			// carries the exit status IN-BAND: uloop's SIGCHLD handler reaps all
+			// children, so h.close()'s waitpid can lose the race and not know
+			// the status (returns null) — the marker line is then the only
+			// reliable source. (No exec: the shell must survive the process to
+			// echo the marker.) The marker's own stderr is dropped: an aborted
+			// run (inactivity timeout) closes the pipe under the shell, and its
+			// "echo: I/O error" would reach the log as a wwand error.
 			let qmit = require('wwand_io');
 			let h = qmit.spawn([ '/bin/sh', '-c',
-				sprintf("mkdir -p /tmp/wwand; env LPAC_APDU=stdio LPAC_HTTP=curl %s %s 2>>%s; echo \"__EXIT:$?\" 2>/dev/null",
-					lpac, cmd, ESIM_LOGF) ]);
+				sprintf("mkdir -p /tmp/wwand; %s; echo \"__EXIT:$?\" 2>/dev/null", cmd) ]);
 
 			if (!h) { if (logf) logf.close(); return null; }
 
-			log('notice', sprintf('modem %s: esim[%s]: lpac stdio (inline bridge)', ref, op));
+			log('notice', sprintf('modem %s: esim[%s]: stdio bridge', ref, op));
 
 			let chan = 0, uh = null, buf = '';
 
-			let logline = (s) => {
+			// protocol-level lines (results, progress, bridge errors) always
+			// reach the syslog; the process's own chatter at opts.log_level
+			let logline = (s, level) => {
 				if (logf) { logf.write(s + '\n'); logf.flush(); }
-				log('notice', sprintf('modem %s: esim[%s]: %s', ref, op, s));
+				log(level ?? 'notice', sprintf('modem %s: esim[%s]: %s', ref, op, s));
 			};
 			// h.write() may write only PART of the string (it returns the byte
 			// count) or nothing at all (null = EAGAIN, lpac's stdin pipe full);
@@ -205,15 +208,18 @@ return {
 				}
 			};
 
-			let send = (ecode, data) => {
+			let wq_write = (line) => {
 				if (wdead)
 					return;
 
-				wq += sprintf('{"type":"apdu","payload":{"ecode":%d,"data":"%s"}}\n', ecode, data ?? '');
+				wq += line;
 
 				if (!wtimer)
 					pump();
 			};
+
+			let send = (ecode, data) =>
+				wq_write(sprintf('{"type":"apdu","payload":{"ecode":%d,"data":"%s"}}\n', ecode, data ?? ''));
 			let field = (s, re) => { let m = match(s, re); return m ? m[1] : null; };
 
 			let inband_ec = null;   // exit status from the __EXIT stdout marker
@@ -240,16 +246,20 @@ return {
 				// such method (then it stays as before: orphaned, not fatal).
 				if (err && type(h.kill) == 'function')
 					h.kill();
-				// close() returns null when uloop already reaped the child
-				// (status unknown) — the in-band marker fills the gap; with
-				// neither (shell killed) the missing result line is the
-				// caller-visible failure, so don't fabricate an error here
-				let ec = h.close();
-				if (ec === null)
-					ec = inband_ec ?? 0;
+				// THE MARKER FIRST. close() reports the SHELL's status, and the
+				// shell's last command is the marker's echo, so a clean run of
+				// the shell reads 0 whatever the child exited with; the child's
+				// own status exists only in-band. (close() also returns null
+				// when uloop reaped the shell first.) lpac never showed this —
+				// its verdict is its result line — but for the IPA the exit
+				// status IS the verdict. With neither (shell killed) the
+				// missing result is the caller-visible failure, so don't
+				// fabricate an error here.
+				let closed = h.close();
+				let ec = inband_ec ?? closed ?? 0;
 				if (logf) { logf.close(); logf = null; }
 				on_done(err ?? (ec == 0 ? null : { error: 'lpac', code: ec }),
-					trim(fs.readfile(ESIM_LOGF) ?? ''));
+					logfile ? trim(fs.readfile(logfile) ?? '') : '');
 			};
 
 			// dispatch a classified lpac line (parse_lpac_line above). APDU ops
@@ -261,7 +271,29 @@ return {
 					return;
 
 				if (rec.kind == 'log')
-					return logline(rec.text);
+					return logline(rec.text, level_of(rec.text));
+
+				if (rec.kind == 'ipa') {
+					// The process now waits on the HOST, possibly for minutes
+					// (a SIM reset and a reconnect), and says nothing meanwhile.
+					// That silence is not a hang, so the inactivity watchdog is
+					// off until the answer is written.
+					idle?.cancel();
+
+					let reply = (obj) => {
+						if (done)
+							return;
+
+						idle?.set(idle_ms);
+						wq_write(sprintf('{"type":"ipa","payload":%J}\n', obj ?? {}));
+					};
+
+					if (type(opts?.on_ipa) == 'function')
+						return opts.on_ipa(rec, reply);
+
+					logline(sprintf('ipa event %s with nobody to handle it', rec.event ?? '?'));
+					return reply({ online: false });
+				}
 
 				if (rec.kind == 'progress')
 					return logline('progress: ' + rec.message);
@@ -332,12 +364,38 @@ return {
 
 			idle = uloop.timer(idle_ms, () => {
 				idle = null;
-				logline(sprintf('timeout: no output from lpac for %d s - aborting',
-					idle_ms / 1000));
+				logline(sprintf('timeout: no output from %s for %d s - aborting',
+					op, idle_ms / 1000));
 				finish({ error: 'timeout', code: -1 });
 			});
 
 			return h;
+		};
+
+		// spawn lpac for a host-side op (download / chip / notif-list /
+		// notif-process / enable / disable / delete); on_done(err, log).
+		// Returns false when no lpac is installed, null when the spawn failed.
+		let lpac_run = (ref, slot, op, code, conf, on_done) => {
+			if (fs.access(lpac) != true)
+				return false;   // no lpac package installed — caller reports it
+
+			let cmd;
+			switch (op) {
+			case 'download':      cmd = sprintf("profile download -a '%s'%s", code ?? '',
+			                                    length(conf ?? '') ? sprintf(" -c '%s'", conf) : ''); break;
+			case 'notif-list':    cmd = 'notification list'; break;
+			case 'notif-process': cmd = 'notification process -a'; break;
+			// management writes: the ICCID rides in the code arg (validated
+			// digits-only by the caller, so the quoting is shell-safe)
+			case 'enable':        cmd = sprintf("profile enable '%s'",  code); break;
+			case 'disable':       cmd = sprintf("profile disable '%s'", code); break;
+			case 'delete':        cmd = sprintf("profile delete '%s'",  code); break;
+			default:              cmd = 'chip info';
+			}
+
+			return stdio_run(ref, slot, op,
+				sprintf('env LPAC_APDU=stdio LPAC_HTTP=curl %s %s 2>>%s', lpac, cmd, ESIM_LOGF),
+				null, on_done);
 		};
 
 		// host-side download via lpac; on success chain the install-ack
@@ -458,7 +516,71 @@ return {
 			if (!p) { mgmt_busy = false; return cb({ error: 'esim', detail: { error: 'spawn' } }); }
 		};
 
+		// One IPA run (wwand-ipa, ipa.uc): the IoT Profile Assistant speaks the
+		// same stdio protocol, and it is one more session on the card's ISD-R,
+		// so it takes the same exclusive claim as an lpac profile operation —
+		// never two host sessions on one eUICC at once. Quiet mode is held for
+		// the run and DROPPED while the host restores the connection after a
+		// profile change: the reconnect is exactly what the background polls
+		// quiet mode holds back are for. on_done(err, log); returns
+		// { error: 'busy' } or { error: 'spawn' } when it did not start.
+		let ipa_run = (ref, slot, cmd, log_level, on_ipa, on_done) => {
+			let entry = modem_of(ref);
+
+			if (dl?.state == 'running' || mgmt_busy)
+				return { error: 'busy' };
+
+			mgmt_busy = true;
+
+			let release = quiet_claim(entry?.modem);
+			let finished = false;
+
+			let p = stdio_run(ref, slot, 'ipa', cmd, {
+				logf: false,
+				log_level: log_level,
+				on_ipa: (rec, reply) => {
+					release();
+
+					// an answer that arrives after the process died must not
+					// raise a claim nothing will ever drop
+					on_ipa(rec, (obj) => {
+						if (finished)
+							return;
+
+						release = quiet_claim(entry?.modem);
+						reply(obj);
+					});
+				},
+			}, (err, out) => {
+				finished = true;
+				mgmt_busy = false;
+				release();
+				on_done(err, out);
+			});
+
+			if (!p) {
+				mgmt_busy = false;
+				release();
+				return { error: 'spawn' };
+			}
+
+			return null;
+		};
+
 		return {
+			ipa_run: ipa_run,
+
+			// after a profile change the modem has to re-read the card; the
+			// same apply as an lpac enable (see apply_sim_reset above)
+			apply_sim_reset: (ref, slot, cb) => {
+				let entry = modem_of(ref);
+
+				if (!entry?.modem)
+					return cb({ error: 'no_such_modem' });
+
+				apply_sim_reset(ref, entry, slot, {}, cb);
+			},
+
 			modem_esim: function(ref, op, params, cb) {
 				let entry = modem_of(ref);
 
@@ -587,14 +709,15 @@ return {
 				case 'notifications': {
 					// THE ONLY lpac OP WITHOUT A CLAIM, and it is not harmless
 					// for being read-only: lpac_run TRUNCATES the shared
-					// ESIM_LOGF on every start (:148) and opens its own APDU
+					// ESIM_LOGF on every start (stdio_run) and opens its own APDU
 					// stream to the ISD-R. Listing notifications during a
 					// download therefore destroyed the log the download's own
 					// completion handler reads its verdict from — a profile
 					// that installed correctly was reported 'failed' and never
 					// auto-notified — while a second host session talked to the
 					// eUICC at the same time. Every sibling op refuses instead
-					// (:427, :471, 'notify' below).
+					// (profile_op_lpac, ipa_run, the download case, 'notify'
+					// below).
 					if (dl?.state == 'running' || mgmt_busy)
 						return done({ error: 'busy' });
 

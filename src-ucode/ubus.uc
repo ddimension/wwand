@@ -228,9 +228,26 @@ export function publish(conn, daemon, log)
 		modem_esim: {
 			args: { modem: '', op: '', slot: 0, iccid: '',
 			        activation_code: '', confirmation_code: '',
-			        auto_notify: true, ubus_rpc_session: '' },
+			        auto_notify: true, force: false, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
 				daemon.modem_esim(req.args.modem, req.args.op, req.args, ok_reply(reply))),
+		},
+
+		// READ-ONLY twin of modem_ipa's `status` op, for the same reason as
+		// modem_esim_profiles above: rpcd grants methods, not arguments, and a
+		// poll can change the active profile, so modem_ipa is in the write set.
+		modem_ipa_status: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_ipa(req.args.modem, 'status', req.args, ok_reply(reply))),
+		},
+
+		// eSIM fleet management (wwand-ipa): op 'status' (default) or 'poll'
+		// (ask the eIM now). Write ACL: a poll can change the active profile.
+		modem_ipa: {
+			args: { modem: '', op: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_ipa(req.args.modem, req.args.op || 'status', req.args, ok_reply(reply))),
 		},
 
 		// raw APDU access (write ACL — security relevant)
