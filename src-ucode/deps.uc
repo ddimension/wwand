@@ -126,6 +126,18 @@ export function create(o)
 		read_config: load_config,
 		emit_event: (type, data) => conn.event(type, data),
 		datapath_fx: datapath_fx,
+		// THE COMMAND EXECUTOR for the router-level actions (a reboot). It was
+		// never passed on: the modem ladder did not notice, because
+		// modem_common.make_recovery falls back to netlink.default_fx on its
+		// own, but the vanished-modem escalation in daemon.uc called
+		// `deps.recovery_fx?.run?.(['reboot'])` with no fallback — so its
+		// reboot rung logged "rebooting" and did nothing, on every install.
+		// Measured on the NR7101 (192.168.203.242, 2026-09-25): the modem left
+		// the USB bus, the reset pulse did not revive it (as its own comment
+		// says it does not on that board), and the router sat without WAN
+		// for 37 hours. datapath_fx IS a netlink.default_fx, whose run() is
+		// the same system() the modem ladder uses.
+		recovery_fx: datapath_fx,
 		// board profile: modem power/reset GPIOs + status LEDs (no-op on an
 		// unknown board). Recovery power-cycles/resets the modem through it.
 		board: board.create({ log: (level, msg) => logmod.log(level, '%s', msg) }),

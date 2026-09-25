@@ -2511,6 +2511,24 @@ export function create(opts)
 				};
 			};
 
+			// The one way the daemon itself restarts the router. Loud when it
+			// cannot: the previous inline `deps.recovery_fx?.run?.(['reboot'])`
+			// turned a missing executor into silence right after a log line
+			// that said "rebooting", which is how a vanished modem kept a router
+			// offline for 37 hours (see deps.uc, recovery_fx).
+			let reboot_router = (why) => {
+				let run = deps.recovery_fx?.run;
+
+				if (type(run) != 'function') {
+					log('err', sprintf('cannot reboot (%s): no command executor is wired (deps.recovery_fx)', why));
+					return false;
+				}
+
+				uloop.timer(self.timing?.reboot_delay ?? 5000, () => run([ 'reboot' ]));
+				return true;
+			};
+			self._reboot_router = reboot_router;
+
 			let tick;
 			tick = () => {
 				let now = time();
@@ -2565,8 +2583,7 @@ export function create(opts)
 
 						if (act == 'reboot') {
 							log('err', sprintf('modem %s: gone for %ds and the reset did not bring it back — rebooting', name, gone));
-							uloop.timer(self.timing?.reboot_delay ?? 5000,
-								() => deps.recovery_fx?.run?.([ 'reboot' ]));
+							reboot_router(sprintf('modem %s vanished', name));
 						}
 						else {
 							log('warn', sprintf('modem %s: gone for %ds and the reset did not bring it back; `option failreboot 0` keeps the router up', name, gone));

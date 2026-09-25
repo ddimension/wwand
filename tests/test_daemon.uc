@@ -2537,4 +2537,29 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 		'the current answer still acts, exactly once');
 })();
 
+
+// --- reboot_router: the executor runs, and its absence is loud, not silent ------
+{
+	let ran = [], errs = [];
+	let mk = (fx) => daemon_mod.create({
+		timing: { reboot_delay: 5 },
+		deps: { log: (l, m) => { if (l == 'err') push(errs, m); }, recovery_fx: fx,
+		        read_config: () => ({}), resolve_netdev: () => null,
+		        learn_device: () => null, learn_modem_path: () => null },
+	});
+
+	let d1 = mk({ run: (argv) => push(ran, argv) });
+	d1.apply_config(config.parse({ network: {} }));
+	eq(d1._reboot_router('test'), true, 'reboot_router: with an executor it schedules the reboot');
+	uloop.timer(30, () => uloop.end()); uloop.run();
+	eq(ran, [ [ 'reboot' ] ], 'reboot_router: ...and the executor is actually called');
+
+	let d2 = mk(null);
+	d2.apply_config(config.parse({ network: {} }));
+	eq(d2._reboot_router('test'), false, 'reboot_router: without an executor it reports failure');
+	ok(length(filter(errs, (m) => index(m, 'cannot reboot') >= 0)),
+	   'reboot_router: ...loudly, instead of the old silent no-op after "rebooting"');
+	d1.shutdown?.(); d2.shutdown?.();
+}
+
 done('test_daemon');

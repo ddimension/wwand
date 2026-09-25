@@ -510,4 +510,16 @@ function mkdeps(u, extra) {
 	eq(length(ran), 1, 'gps clock: NITZ goes through the very same set_clock');
 })();
 
+
+// --- recovery_fx: the router-level executor must actually be wired -----------
+// The vanished-modem escalation reboots through deps.recovery_fx, and deps never
+// passed it on: the reboot rung logged "rebooting" and did nothing on every
+// install, which kept an NR7101 without WAN for 37 hours (2026-09-25).
+{
+	let fx = { run: (argv) => argv };
+	let d = mkdeps(fake_uci({}), { datapath_fx: fx });
+	ok(d.recovery_fx === fx, 'recovery_fx: deps hands the daemon a command executor');
+	eq(type(d.recovery_fx?.run), 'function', 'recovery_fx: ...one that can run a command');
+}
+
 done('test_deps');
