@@ -427,4 +427,31 @@ eq(fmt.reg_text({ state: 'READY', rat: 'LTE',
    'Telekom.de (262/01), LTE · ENDC',
    'reg_text: the modem says ENDC where the cell environment says LTE');
 
+
+// --- recovery_text: the ladder in the CLI (evidence: ddimension/wwand#40) -----
+{
+	let rungs = [ { at: 8, action: 'opmode_cycle' }, { at: 16, action: 'modem_reset' },
+	              { at: 24, action: 'usb_repower' }, { at: 101, action: 'reboot' } ];
+
+	eq(fmt.recovery_text({ armed: true, attempts: 0, rungs: rungs }), null,
+	   'recovery: armed with no failures says nothing');
+	eq(fmt.recovery_text({ armed: true, attempts: 3, rungs: rungs,
+	                       next: { at: 8, action: 'opmode_cycle', in: 5 } }),
+	   'armed · 3 failed attempts · next: opmode_cycle at 8 (in 5)',
+	   'recovery: armed names the next rung and the distance to it');
+	eq(fmt.recovery_text({ armed: false, attempts: 4, rungs: rungs, unarmed_reset: 'available' }),
+	   'NOT armed (never answered in this protocol) · 4 failed attempts · reset-line pulse at attempt 24 (in 20)',
+	   'recovery: unarmed with a reset line says WHEN the one pulse comes');
+	eq(fmt.recovery_text({ armed: false, attempts: 30, rungs: rungs, unarmed_reset: 'spent' }),
+	   'NOT armed (never answered in this protocol) · 30 failed attempts · reset-line pulse already used this outage',
+	   'recovery: and that it has been used');
+	eq(fmt.recovery_text({ armed: false, attempts: 1, rungs: rungs, unarmed_reset: null }),
+	   'NOT armed (never answered in this protocol) · 1 failed attempt · nothing physical until the control channel answers',
+	   'recovery: without a reset line, that nothing will happen on its own');
+	eq(fmt.recovery_text({ armed: false, attempts: 30, rungs: rungs, unarmed_reset: 'available' }),
+	   'NOT armed (never answered in this protocol) · 30 failed attempts · reset-line pulse on the next failed attempt',
+	   'recovery: past the threshold and unused, it is the NEXT failure (Codex review)');
+	eq(fmt.recovery_text(null), null, 'recovery: a modem with no recovery view prints no line');
+}
+
 done('test_wwandctl_fmt');

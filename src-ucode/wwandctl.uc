@@ -9,7 +9,7 @@
 'use strict';
 
 import { fmt_plmn, fmt_sig, fmt_locks, reg_text, packet_service_text,
-	collectd_lines, collectd_interval } from 'wwand.wwandctl_fmt';
+	collectd_lines, collectd_interval, recovery_text } from 'wwand.wwandctl_fmt';
 
 import * as libubus from 'ubus';
 import * as fs from 'fs';
@@ -86,6 +86,11 @@ function cmd_status(args)
 			m.control_note ? sprintf('  [%s]', m.control_note) : '');
 		printf('  SIM         imsi %s  iccid %s\n', m.imsi ?? '-', m.iccid ?? '-');
 		printf('  network     %s\n', reg_text(m));
+
+		let rec = recovery_text(m.recovery);
+
+		if (rec)
+			printf('  recovery    %s\n', rec);
 
 		if (m.state == 'READY') {
 			let sig = call('modem_signal', { modem: name });

@@ -267,6 +267,54 @@ export function reg_text(m)
 // that without anyone noticing, so it is raised rather than obeyed.
 export const COLLECTD_MIN_INTERVAL = 30;
 
+// The recovery ladder in one line, or null when there is nothing to say (armed
+// and no failed attempts). `ubus call wwand status` has carried this since the
+// arming gate existed, but the CLI people paste into issues never printed it —
+// so a reporter told to "look at wwandctl status" for `unarmed_reset` found no
+// such line (evidence: ddimension/wwand#40). The unarmed case names the ONE
+// thing that can still happen on its own and when, because "not armed" alone
+// reads as "nothing will ever happen", which on a board with a reset line is
+// no longer true.
+export function recovery_text(r)
+{
+	if (type(r) != 'object')
+		return null;
+
+	let n = +(r.attempts ?? 0);
+
+	if (r.armed) {
+		if (!n)
+			return null;
+
+		let nx = r.next;
+
+		return sprintf('armed · %d failed attempt%s%s', n, (n == 1) ? '' : 's',
+			nx ? sprintf(' · next: %s at %d%s', nx.action, nx.at,
+			             nx.in ? sprintf(' (in %d)', nx.in) : '') : '');
+	}
+
+	let at = null;
+
+	for (let rg in (r.rungs ?? []))
+		if (rg.action == 'usb_repower')
+			at = rg.at;
+
+	let tail = (r.unarmed_reset == 'available')
+		? ((at != null && n < at)
+			? sprintf(' · reset-line pulse at attempt %d (in %d)', at, at - n)
+			: (at != null)
+				// past the threshold and not yet used — a restored counter can
+				// land here — so it fires on the NEXT failure, not "at 24"
+				? ' · reset-line pulse on the next failed attempt'
+				: ' · reset-line pulse available')
+		: (r.unarmed_reset == 'spent')
+			? ' · reset-line pulse already used this outage'
+			: ' · nothing physical until the control channel answers';
+
+	return sprintf('NOT armed (never answered in this protocol) · %d failed attempt%s%s',
+		n, (n == 1) ? '' : 's', tail);
+};
+
 export function collectd_interval(want)
 {
 	let n = +(want ?? 0);
