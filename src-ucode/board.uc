@@ -48,7 +48,6 @@ export function default_fx()
 		// directory rather than by one read of its value, which a single
 		// transient read error would turn into "no such line" for the whole
 		// daemon lifetime (Codex review, 2026-09-25)
-		exists: (p) => fs.stat(p) != null,
 	};
 };
 
@@ -223,28 +222,24 @@ const PROFILES = {
 			red: 'red:lte', green: 'green:lte', orange: 'orange:lte',
 		}, s),
 	},
-	// nr7101: no switchable modem-power rail, but the board exposes the RG502Q's
-	// RESET line as the named gpio_switch `lte_reset` (board.d: gpio 515, exported
-	// at /sys/class/gpio/gpio515). Wire it as reset_gpio so the recovery ladder
-	// can pulse the modem's reset to recover a hung control channel instead of
-	// falling through to a full router reboot. Status LEDs are OS-owned -> none.
+	// nr7101: the RG502Q's RESET line is the named gpio_switch `lte_reset`
+	// (board.d: gpio 515, exported at /sys/class/gpio/gpio515). Recovery holds it
+	// asserted for RESET_ASSERT_MS (30 s), then releases it: the recovery this
+	// board has had in the field since 2022, `/sbin/usb-repower` in the
+	// vpn-to-go tree (Release_2024.10, commit b89acd795f), which held the same
+	// line (then numbered gpio483) at 1 for 30 s behind netifd-qmi.
+	//
+	// NO POWER LINE, EVEN WHERE ONE IS EXPORTED. An image can export GPIO 18 as
+	// `lte_power` (the ddimension NR7101 image does), and switching it off is
+	// not a way back for a modem that has left the bus: on 192.168.203.242
+	// (image r0-3ab5204, 2026-09-26) GPIO 18 low for 5 s and for 30 s left the
+	// bus empty, and a PoE power cycle brought the modem straight back. With
+	// the line in the profile, the vanish step would take it (has_power) instead
+	// of the reset. Whether the 30 s reset hold revives a vanished modem is not
+	// measured either — a hold on 2026-09-25 did not — which leaves PoE as the
+	// only proven remedy. Status LEDs are OS-owned -> none.
 	'zyxel,nr7101': {
 		reset_gpio: 'gpio515',
-		// THE MODEM'S SUPPLY, when the image exposes it. Stock OpenWrt holds GPIO
-		// 18 as a gpio-hog (`lte-power`, output-high), which no userspace can
-		// touch — and then this board has no power control, exactly as before.
-		// An image built with the line as a `gpio-export` named `lte_power`
-		// (the LTE5398's name for the same thing) makes it switchable. Which of
-		// the two is running is decided at create() by whether the line's sysfs
-		// directory exists, so one profile serves both (`power_optional`).
-		//
-		// Why it matters, measured on 192.168.203.242 (2026-09-25): a modem that
-		// has dropped off the USB bus is NOT revived by a pulse of gpio515, by
-		// holding it either way, by a USB port disable or an xHCI rebind, nor by
-		// a warm reboot of the router. Removing its power (a PoE power cycle)
-		// brought it straight back.
-		power_gpio: 'lte_power',
-		power_optional: true,
 		// The level at which the modem RUNS. Measured on the device
 		// (2026-09-07): driving gpio515 to 1 disconnects the modem from USB in
 		// under 5 s, driving it back to 0 re-enumerates it in about 10 — over
@@ -349,19 +344,6 @@ export function create(opts)
 		log('err', sprintf('board %s: gpio %s: could not write value', id ?? '?', name));
 		return false;
 	};
-
-	// An OPTIONAL power line whose sysfs directory is absent is not there (see
-	// the NR7101 profile): drop it, so has_power, init() and power_cycle()
-	// behave exactly as on a board without one. The directory, not a read of
-	// the value: one transient read error would otherwise remove power control
-	// for the daemon's lifetime. Reading is only the fallback for an fx without
-	// exists(). A copy, because PROFILES is shared.
-	let line_present = (name) => (type(fx.exists) == 'function')
-		? (safe_gpio(name) && fx.exists(sprintf('%s/%s', GPIO_DIR, name)))
-		: (gpio_read(name) != null);
-
-	if (profile?.power_optional && profile.power_gpio && !line_present(profile.power_gpio))
-		profile = { ...profile, power_gpio: null };
 
 	let self = {
 		id: id,

@@ -146,33 +146,18 @@ uloop.run();
 ok(fx.has(`${G}/othergpio/value=1`),
 	'nr7101: released back to 1 — not left holding the modem in reset');
 
-// --- 4d. NR7101 built with the supply exported (`gpio-export` named lte_power) --
-// Stock OpenWrt hogs GPIO 18 (4c above: no power rail). An image that exports it
-// as `lte_power` makes it switchable, and the SAME profile must then power-cycle
-// through it — detected by whether the line reads. Measured on 192.168.203.242
-// (2026-09-25): only removing the supply revived a modem that had left the bus.
+// --- 4d. NR7101 with GPIO 18 exported as `lte_power` ---------------------------
+// The line is not a way back for a modem that left the bus (switched off 5 s and
+// 30 s on 192.168.203.242, 2026-09-26: bus stayed empty; PoE revived it), so the
+// profile does not use it even where the image exports it: recovery must reach
+// the 30 s reset hold, which it would not with has_power set.
 fx = mkfx({ [`${G}/gpio515/value`]: '0', [`${G}/lte_power/value`]: '1' });
-b = board.create({ id: 'zyxel,nr7101', fx: fx, reset_ms: 5, power_off_ms: 5, log: () => {} });
-ok(b.has_power, 'nr7101+lte_power: the exported supply is detected');
-eq(b.profile.power_gpio, 'lte_power', 'nr7101+lte_power: ...by its name');
-ok(b.power_cycle(), 'nr7101+lte_power: power_cycle starts');
-ok(fx.has(`${G}/lte_power/value=0`), 'nr7101+lte_power: the supply is switched OFF');
-uloop.timer(30, () => uloop.end()); uloop.run();
-ok(fx.has(`${G}/lte_power/value=1`), 'nr7101+lte_power: ...and back ON');
-
-// and the stock image again, after a patched one was seen: the shared profile
-// table must not have been mutated by the detection
-fx = mkfx({ [`${G}/gpio515/value`]: '0' });
 b = board.create({ id: 'zyxel,nr7101', fx: fx, reset_ms: 5, log: () => {} });
-ok(!b.has_power, 'nr7101 stock again: still no power rail (PROFILES not mutated)');
-
-// detected by the sysfs DIRECTORY where the fx can tell, not by one read of
-// the value: a transient read error at create must not cost the daemon its
-// power control for its whole lifetime (Codex review)
-fx = mkfx({ [`${G}/gpio515/value`]: '0' });
-fx.exists = (p) => (p == `${G}/lte_power`);
-b = board.create({ id: 'zyxel,nr7101', fx: fx, reset_ms: 5, log: () => {} });
-ok(b.has_power, 'nr7101+lte_power: present by its directory even when its value did not read');
+ok(!b.has_power, 'nr7101+lte_power: the exported line is not taken as power control');
+eq(b.power_cycle(), false, 'nr7101+lte_power: power_cycle stays a no-op');
+ok(!fx.has(`${G}/lte_power/value=0`), 'nr7101+lte_power: the line is never switched off');
+ok(b.reset_pulse(), 'nr7101+lte_power: recovery is the reset hold');
+ok(fx.has(`${G}/gpio515/value=1`), 'nr7101+lte_power: ...asserting gpio515');
 
 // --- 4d. Cudy LT300 (MeiG SLM770A): serial ports are vendor-class (0xff) and the
 // stock `option` driver has no id for them, so init() must bind them via new_id —
