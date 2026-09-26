@@ -483,6 +483,18 @@ function modem_from_section(s, warnings)
 		         (s.lock_4g != null ? [ s.lock_4g ] : []),
 		lock_5g: s.lock_5g,
 		lock_persist: bool_opt(s.lock_persist, false),
+		// Band allow-lists. A LIST, never a mask string: the vendor codec
+		// owns the encoding (u64 words on QMI/MBIM, +GTACT tokens on
+		// Fibocom AT), and one option per RAT is all any of them need.
+		// An empty/unset list means "leave this RAT's bands alone" — the
+		// codec keeps whatever the modem runs, so a partial edit never
+		// drops the other RATs' bands.
+		band_lte: (type(s.band_lte) == 'array') ? s.band_lte :
+		          (s.band_lte != null ? [ s.band_lte ] : []),
+		band_nr: (type(s.band_nr) == 'array') ? s.band_nr :
+		         (s.band_nr != null ? [ s.band_nr ] : []),
+		band_umts: (type(s.band_umts) == 'array') ? s.band_umts :
+		           (s.band_umts != null ? [ s.band_umts ] : []),
 		sim_slot: num_opt(s.sim_slot, 0, 'sim_slot', warnings),
 		stats_interval: num_opt(s.stats_interval, 60, 'stats_interval', warnings),
 		auto_correct_config: bool_opt(s.auto_correct_config, false),
@@ -728,7 +740,11 @@ export function parse_netdev(device)
 // by seven keys when a review checked it, which is precisely how a warning like
 // this decays into a half-truth.
 export const IFACE_MODEM_ONLY_OPTS = [ 'pincode', 'modes', 'mcc', 'mnc',
-	'at_init', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot', 'location',
+	'at_init', 'lock_4g', 'lock_5g', 'lock_persist',
+	// band allow-lists, applied through the vendor's own radio command
+	// (Fibocom +GTACT on the AT/NCM modems that have one). Lists, because
+	// a band mask is a SET and the order carries no meaning.
+	'band_lte', 'band_nr', 'band_umts', 'sim_slot', 'location',
 	'delay', 'failreboot', 'serial', 'imei', 'repower_time',
 	'proto_error_limit', 'zero_rx_timeout', 'bearer_poll_count',
 	'stats_interval' ];
