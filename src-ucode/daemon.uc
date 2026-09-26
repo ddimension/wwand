@@ -3386,6 +3386,19 @@ export function create(opts)
 			// cb(err, { lines }). The same path `ubus call wwand modem_at` takes.
 			modem_at: (ref, command, cb, timeout) =>
 				self.modem_at(ref, command, (e, r) => cb(e, r), timeout),
+			// the modem's radio off (low power) or back on, the way `option
+			// lowpower` parks it: the modem then treats the lost registration
+			// as intended, not as a fault to recover from (modem.uc
+			// set_opmode / lowpower_parked). For a modem that must not
+			// register while another one uses its card. cb(err).
+			modem_radio: (ref, on, cb) => {
+				let m = self.modems[ref]?.modem;
+
+				if (!m?.set_opmode)
+					return cb ? cb({ error: 'unsupported' }) : null;
+
+				m.set_opmode(on ? 'online' : 'low_power', (e) => cb ? cb(e) : null);
+			},
 			// the card behind the modem changed: the same forget-and-re-read
 			// a slot switch runs (simops.uc card_changed)
 			sim_changed: (ref, why) => self.card_changed ? self.card_changed(ref, why) : false,

@@ -2107,6 +2107,9 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   `modem_at(ref, command, cb, timeout)` sends one AT command over the
   modem's AT channel — a tty, or AT inside MBIM where there is none —
   `cb(err, { lines })`, the same path as the `modem_at` ubus method.
+  `modem_radio(ref, on, cb)` parks the modem's radio (low power) or wakes
+  it, as `option lowpower` does — the modem then takes the lost
+  registration as intended; `unsupported` on a backend without it.
   `sim_changed(ref, why)` is for a plugin that swaps the card behind a
   running modem: the process a slot switch runs — forget the old card
   (identity, notes, per-SIM override, eSIM/APDU caches), then unlock and

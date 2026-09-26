@@ -177,6 +177,19 @@ eq(self.connection_token('m1'), null, 'token: null for a modem with nothing conn
 	captured.modem_at('m0', 'AT+CSIM=10,"00B0000002"', (e, r) => { at_got = r?.lines; });
 	eq(at_got, [ '+CSIM: 4,"9000"' ], 'modem_at: a plugin reaches the modem\'s AT channel');
 	delete m.at;
+
+	let modes = [];
+
+	m.set_opmode = (mode, cb) => { push(modes, mode); cb(null); };
+	captured.modem_radio('m0', false, () => null);
+	captured.modem_radio('m0', true, () => null);
+	eq(modes, [ 'low_power', 'online' ], 'modem_radio: parks and wakes the radio through set_opmode');
+	delete m.set_opmode;
+
+	let rerr = null;
+
+	captured.modem_radio('m0', false, (e) => { rerr = e; });
+	eq(rerr?.error, 'unsupported', 'modem_radio: a backend without set_opmode says so');
 	eq(captured.sim_changed('m0', 'remote SIM'), true, 'sim_changed: a running modem is told');
 	eq([ m.info.iccid, m.info.imsi, m.info.msisdn ], [ null, null, null ],
 	   'sim_changed: the old card\'s identity is forgotten, not shown for the new one');
