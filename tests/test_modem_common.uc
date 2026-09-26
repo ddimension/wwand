@@ -1389,23 +1389,29 @@ ok(index(line, 'snr 9.8') >= 0,
 let hand_fx = fakefx.create();
 let hand_self = {};
 let hand_pulses = [];
+// `unarmed_reset_after` and the clock travel the same way, and are checked the
+// same way: a configured 60 s must be what the ladder waits.
+let hand_clk = 5000;
 let hand_rec = mc.make_recovery(hand_self, {
 	id: 'handoff',
 	protocol: 'qmi',
-	config: { failreboot: 30 },
+	config: { failreboot: 30, unarmed_reset_after: 60 },
 	recovery: {
 		fx: hand_fx,
 		state_dir: '/state',
+		now: () => hand_clk,
 		repower: () => { push(hand_pulses, 'board'); return true; },
 		reset_line: () => 'gpio515',
 	},
 }, (l, m) => null, 'qmi');
 
 let hand_acts = [];
-for (let i = 1; i <= 24; i++) push(hand_acts, hand_rec.on_attempt());
+for (let i = 1; i <= 6; i++) { push(hand_acts, hand_rec.on_attempt()); hand_clk += 10; }
 
-eq(hand_acts[23], 'usb_repower',
-   'make_recovery: reset_line survives the hand-off — the unarmed pulse is offered');
+eq(hand_acts, [ 'retry', 'retry', 'retry', 'retry', 'retry', 'retry' ],
+   'make_recovery: nothing before the configured 60 s');
+eq(hand_rec.on_attempt(), 'usb_repower',
+   'make_recovery: reset_line and unarmed_reset_after survive the hand-off — the unarmed pulse is offered at 60 s');
 eq(hand_rec.usb_repower(), true, 'make_recovery: and the primitive honours it');
 eq(hand_pulses, [ 'board' ], 'make_recovery: the board action ran');
 // --- diag port resolution (resolve_diag_port) --------------------------------

@@ -260,7 +260,7 @@ export function reg_text(m)
 // The cadence floor, and the reason for it. `modem_signal` keeps wwand's
 // adaptive fast-telemetry loop warm (daemon.uc calls modem.watch()); that loop
 // polls the modem at 1 Hz and decays 6 s after the last request
-// (modem_common.uc:702-703). One sample therefore costs ~6 s of 1 Hz modem
+// (modem_common.uc:704-705). One sample therefore costs ~6 s of 1 Hz modem
 // traffic, so the duty cycle is 6/interval: 10 % at 60 s, 20 % at 30 s, 60 % at
 // 10 s — and at 6 s or below the loop NEVER decays and the modem is polled
 // around the clock. A global `Interval 10` in collectd.conf would do exactly
@@ -274,7 +274,8 @@ export const COLLECTD_MIN_INTERVAL = 30;
 // such line (evidence: ddimension/wwand#40). The unarmed case names the ONE
 // thing that can still happen on its own and when, because "not armed" alone
 // reads as "nothing will ever happen", which on a board with a reset line is
-// no longer true.
+// no longer true. The pulse is due by time since the outage began
+// (`unarmed_reset_after`), so it is stated in seconds, not attempts.
 export function recovery_text(r)
 {
 	if (type(r) != 'object')
@@ -293,23 +294,19 @@ export function recovery_text(r)
 			             nx.in ? sprintf(' (in %d)', nx.in) : '') : '');
 	}
 
-	let at = null;
-
-	for (let rg in (r.rungs ?? []))
-		if (rg.action == 'usb_repower')
-			at = rg.at;
-
 	let tail = (r.unarmed_reset == 'available')
-		? ((at != null && n < at)
-			? sprintf(' · reset-line pulse at attempt %d (in %d)', at, at - n)
-			: (at != null)
-				// past the threshold and not yet used — a restored counter can
-				// land here — so it fires on the NEXT failure, not "at 24"
+		? ((r.unarmed_reset_in != null && r.unarmed_reset_in > 0)
+			? sprintf(' · reset-line pulse in %d s', r.unarmed_reset_in)
+			: (r.unarmed_reset_in != null)
 				? ' · reset-line pulse on the next failed attempt'
 				: ' · reset-line pulse available')
 		: (r.unarmed_reset == 'spent')
 			? ' · reset-line pulse already used this outage'
-			: ' · nothing physical until the control channel answers';
+			: (r.unarmed_reset_off == 'disabled')
+				? ' · nothing physical until the control channel answers (unarmed_reset_after 0)'
+				: (r.unarmed_reset_off == 'no_reset_gpio')
+					? ' · nothing physical until the control channel answers (no reset_gpio assigned to this modem)'
+					: ' · nothing physical until the control channel answers';
 
 	return sprintf('NOT armed (never answered in this protocol) · %d failed attempt%s%s',
 		n, (n == 1) ? '' : 's', tail);

@@ -777,6 +777,35 @@ rd.shutdown();
 	eq(sd.status().modems.m0.recovery.armed, false,
 		'recovery view: not armed while the protocol is unproven');
 
+	// the unarmed pulse is promised only for a modem with its OWN reset_gpio:
+	// the board line above (gpio900) is never taken for it, so reporting it
+	// "available" there would promise an action that does not come
+	eq(sd.status().modems.m0.recovery.unarmed_reset, null,
+		'recovery view: the board default line does not make the unarmed pulse available');
+	eq(sd.status().modems.m0.recovery.unarmed_reset_off, 'no_reset_gpio',
+		'recovery view: ...and names the missing per-modem line as the reason');
+	sd.modems.m0.cfg = { reset_gpio: 'gpio515', unarmed_reset_after: 300 };
+	sd.modems.m0.modem.counters.outage_since = clock(true)[0] - 100;
+	let ur = sd.status().modems.m0.recovery;
+	eq(ur.unarmed_reset, 'available', 'recovery view: with its own line the pulse is pending');
+	ok(ur.unarmed_reset_in >= 199 && ur.unarmed_reset_in <= 200,
+		'recovery view: ...and due by time since the outage began (~200 s left)');
+	sd.modems.m0.modem.counters.outage_since = clock(true)[0] - 1000;
+	eq(sd.status().modems.m0.recovery.unarmed_reset_in, 0,
+		'recovery view: past the delay it is due on the next failure, never negative');
+	sd.modems.m0.cfg.unarmed_reset_after = 0;
+	eq(sd.status().modems.m0.recovery.unarmed_reset, null,
+		'recovery view: unarmed_reset_after 0 is no pulse at all, not a pending one');
+	eq(sd.status().modems.m0.recovery.unarmed_reset_off, 'disabled',
+		'recovery view: ...and says it was switched off');
+	eq(sd.status().modems.m0.recovery.unarmed_reset_in, null,
+		'recovery view: ...and promises no time');
+	sd.modems.m0.cfg = { reset_gpio: 'gpio515' };
+	sd.modems.m0.modem.counters.unarmed_reset = 1;
+	eq(sd.status().modems.m0.recovery.unarmed_reset, 'spent', 'recovery view: once used, spent');
+	eq(sd.status().modems.m0.recovery.unarmed_reset_in, null, 'recovery view: ...and no longer counted down');
+	sd.modems.m0.cfg = {};
+
 	sd.shutdown();
 })();
 
@@ -2644,5 +2673,60 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	eq(run(true, { reset_gpio: 'gpio7' }), [ 'reset gpio7' ],
 	   'vanish: an explicit per-modem reset_gpio is honoured over the board supply');
 }
+
+// --- the automatic unarmed pulse needs the modem's OWN line -----------------
+//
+// The recovery ladder may pulse a reset line on a modem that never answered
+// (recovery.unarmed_reset_line). It must only ever be the line assigned to that
+// modem in its own section: with a single configured modem the board default
+// would otherwise be used, and that one modem can be a USB backup stick while
+// the built-in modem (whose line the board names) is switched off — the pulse
+// would reset the wrong modem.
+(function() {
+	let lines = {};
+	let mk = () => daemon_mod.create({
+		timing: TIMING,
+		deps: {
+			transport_open: () => null,
+			load_qmi: () => ({
+				modem: { create: (o) => {
+					lines[o.id] = o.recovery?.reset_line;
+					return { start: () => null, stop: () => null };
+				} },
+				context: { create: (o) => ({ state: 'IDLE', up: (cb) => cb?.(null, {}),
+				                             down: (cb) => cb?.(), attach: () => null,
+				                             detach: () => null }) },
+			}),
+			board: { profile: { reset_gpio: 'gpio515' }, has_power: false,
+			         reset_pulse: () => true, power_cycle: () => false, leds: () => null,
+			         init: () => null, bars: () => 0 },
+			log: () => null, emit_event: () => null, kick_interface: () => null,
+			renew_interface: () => null, down_interface: () => null,
+			iface_status: (iface, cb) => cb({ up: false }), datapath_fx: dpfx,
+			read_config: () => ({}), resolve_modem_device: (cfg) => cfg.device,
+			resolve_netdev: () => 'wwan0', learn_device: () => null, learn_modem_path: () => null,
+		},
+	});
+
+	let d1 = mk();
+
+	d1.apply_config(config.parse({ network: {
+		backup: { '.type': 'wwand_modem', device: '/dev/mock0' },
+		wanA: { '.type': 'interface', proto: 'wwand', modem: 'backup' },
+	} }));
+	ok(type(lines.backup) == 'function', 'own line: the ladder is handed the question');
+	eq(lines.backup?.(), null,
+		'own line: a single modem without reset_gpio gets no automatic pulse, not the board\'s line');
+	d1.shutdown();
+
+	let d2 = mk();
+
+	d2.apply_config(config.parse({ network: {
+		builtin: { '.type': 'wwand_modem', device: '/dev/mock0', reset_gpio: 'gpio515' },
+		wanA: { '.type': 'interface', proto: 'wwand', modem: 'builtin' },
+	} }));
+	eq(lines.builtin?.(), 'gpio515', 'own line: the modem\'s assigned reset_gpio is the one pulsed');
+	d2.shutdown();
+})();
 
 done('test_daemon');

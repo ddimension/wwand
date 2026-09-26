@@ -696,7 +696,7 @@ export function create(opts)
 					// here (client.uc:176 — no `no_recovery` on the dial, and
 					// there must not be: a dial that genuinely fails has to
 					// climb). That is deliberate and harmless: the very next
-					// successful request zeroes it (recovery.uc:368-369), and
+					// successful request zeroes it (recovery.uc:388-389), and
 					// the same is already true of the NO_EFFECT that
 					// qmi_backend.set_opmode normalises.
 					if (e3?.error == 'qmi' && e3.code == QMI_ERR_NO_EFFECT) {

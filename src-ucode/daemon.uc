@@ -350,7 +350,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:878-881 warns "references
+	// produces no entry for it at all (config.uc:881-884 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -2145,11 +2145,16 @@ export function create(opts)
 				// power GPIO. Board fallbacks gated by board_gpio_ok (multi-modem would
 				// hit the wrong hardware). No-op when nothing safe is available.
 				repower: deps.board ? (() => board_repower(cfg)) : null,
-				// the modem's own RESET line, when one applies — the ladder's
-				// one permitted action on a modem that has never answered
-				// (recovery.uc, unarmed_reset_line). Null on every box where
-				// the hardware action would be a power cycle or nothing.
-				reset_line: deps.board ? (() => board_reset_line(cfg)) : null,
+				// the RESET line ASSIGNED TO THIS MODEM in its own section — the
+				// ladder's one permitted action on a modem that has never
+				// answered (recovery.uc, unarmed_reset_line). Not the board
+				// default, even on a box with one modem: that one modem may be a
+				// USB backup stick while the built-in modem is switched off, and
+				// the board's line belongs to the built-in one. An automatic pulse
+				// on a modem that never answered needs the operator to have said
+				// which line is its own.
+				reset_line: deps.board
+					? (() => (cfg?.reset_gpio ? cfg.reset_gpio : null)) : null,
 			},
 			at: {
 				fx: deps.datapath_fx,
@@ -2979,6 +2984,9 @@ export function create(opts)
 		// which is what makes "next" meaningful — the ladder fires each rung
 		// once per outage on a threshold crossing, so attempts alone cannot say
 		// whether one is still pending.
+		// monotonic, like the clock recovery.uc stamps outage_since with
+		let due_in = (at) => { let d = at - clock(true)[0]; return (d > 0) ? d : 0; };
+
 		let recovery_view = (name, entry) => {
 			let c = entry.modem?.counters;
 
@@ -3009,9 +3017,25 @@ export function create(opts)
 				// unarmed_reset_line). Reported as spent/available rather than
 				// as a capability, because what an operator asks at this point
 				// is whether anything is still going to happen by itself.
-				unarmed_reset: c.proto_ok ? null
-					: (self.repower_plan?.(name)?.action == 'reset_gpio'
-					   ? (c.unarmed_reset ? 'spent' : 'available') : null),
+				// Only a modem with its OWN `reset_gpio` has it: the pulse never
+				// takes the board default (see reset_line where the modem is
+				// built), so reporting "available" from the board's line would
+				// promise an action that is not going to happen. The same holds
+				// for `unarmed_reset_after 0`, which switches it off.
+				unarmed_reset: (c.proto_ok || !entry.cfg?.reset_gpio ||
+				                +(entry.cfg?.unarmed_reset_after ?? 300) <= 0) ? null
+					: (c.unarmed_reset ? 'spent' : 'available'),
+				// why there is none on an unarmed modem, so the page does not
+				// blame a missing GPIO for a pulse the operator switched off
+				unarmed_reset_off: c.proto_ok ? null
+					: !entry.cfg?.reset_gpio ? 'no_reset_gpio'
+					: (+(entry.cfg?.unarmed_reset_after ?? 300) <= 0) ? 'disabled' : null,
+				// seconds until that pulse is due (0 = on the next failed
+				// attempt), null when it is not pending — the ladder counts time
+				// since the outage began, so attempts cannot answer "when"
+				unarmed_reset_in: (c.proto_ok || !entry.cfg?.reset_gpio || c.unarmed_reset ||
+				                   !c.outage_since || +(entry.cfg?.unarmed_reset_after ?? 300) <= 0) ? null
+					: due_in(c.outage_since + +(entry.cfg?.unarmed_reset_after ?? 300)),
 				rungs: map(table, (r, i) => ({ at: r.at, action: r.action,
 				                               fired: i < fired })),
 				next: next,

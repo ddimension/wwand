@@ -28,6 +28,9 @@
 import * as uloop from 'uloop';
 
 const PROTO_ERROR_LIMIT = 25;
+// s the first failed attempt of an outage must lie back before a modem that has
+// never answered gets its reset-line pulse (config `unarmed_reset_after`)
+const UNARMED_RESET_AFTER = 300;
 const DEFAULT_STATE_DIR = '/tmp/wwand/state';
 const REBOOT_DELAY_MS = 10000;
 
@@ -85,11 +88,18 @@ export function create(opts)
 {
 	let fx = opts.fx;
 	let log = opts.log ?? ((level, msg) => warn(sprintf('%s: %s\n', level, msg)));
+	// MONOTONIC, not time(): an RTC-less board starts its outage before NTP
+	// sets the clock, and a wall-clock step of years between the capture and
+	// the read would pulse the line on the very next failure (a step back
+	// would postpone it indefinitely). The state file lives in tmpfs, so its
+	// lifetime is exactly one boot — the lifetime of CLOCK_MONOTONIC.
+	let now = opts.now ?? (() => clock(true)[0]);
 
 	let self = {
 		id: opts.id,
 		failreboot: +(opts.failreboot ?? 100),
 		proto_error_limit: +(opts.proto_error_limit ?? PROTO_ERROR_LIMIT),
+		unarmed_reset_after: +(opts.unarmed_reset_after ?? UNARMED_RESET_AFTER),
 		// `proto_ok` is STICKY, unlike proto_errors: it records that at least one
 		// request has ever completed on this control channel with the protocol
 		// currently selected. Everything physical is gated on it — see the
@@ -103,9 +113,12 @@ export function create(opts)
 		// from `rung` on purpose: sharing that index would mark the two cheaper
 		// rungs fired as well, and a modem that armed afterwards would never get
 		// its opmode cycle or its modem reset again.
+		// `outage_since` is when the first failure of this outage was counted
+		// (monotonic seconds, 0 when none): the unarmed pulse is due by elapsed
+		// time, and a restart mid-outage must not start that clock again.
 		counters: { attempts: 0, proto_errors: 0, rung: 0, proto_hw: 0,
 		            proto_hw_base: 0, proto_ok: 0, proto_name: null,
-		            unarmed_reset: 0 },
+		            unarmed_reset: 0, outage_since: 0 },
 		// set by revoke_arming(): no path may grant the permission any more.
 		// Not persisted — it is re-derived from the config on every build.
 		arm_blocked: false,
@@ -165,6 +178,19 @@ export function create(opts)
 			let ur = match(data, /"unarmed_reset": *([0-9]+)/);
 
 			self.counters.unarmed_reset = ur ? +ur[1] : 0;
+
+			let os = match(data, /"outage_since": *([0-9]+)/);
+
+			self.counters.outage_since = os ? +os[1] : 0;
+
+			// a start in the future is not a start: another clock wrote it, and
+			// read as-is it would hold the pulse back until that time comes
+			// ...persisted, or a restart loop re-clamps the same future value
+			// to "now" on every start and postpones the pulse indefinitely
+			if (self.counters.outage_since > now()) {
+				self.counters.outage_since = now();
+				self.persist();
+			}
 			self.counters.rung = rung ? +rung[1] : rungs_reached(self.counters.attempts);
 			log('notice', sprintf('restored recovery state: attempts %d, proto_errors %d, rung %d',
 				self.counters.attempts, self.counters.proto_errors, self.counters.rung));
@@ -186,9 +212,9 @@ export function create(opts)
 	let unarmed_reset_pending = false;
 
 	// THE ONE HARDWARE ACTION a modem that has never answered may receive: a
-	// pulse of its own named RESET line, at the repower rung's threshold, once
-	// per outage. Everything else stays refused — opmode cycle, modem reset,
-	// board power cycle, reboot.
+	// pulse of its own named RESET line, once per outage, when the outage is
+	// `unarmed_reset_after` seconds old (default 300; 0 = never). Everything
+	// else stays refused — opmode cycle, modem reset, board power cycle, reboot.
 	//
 	// Why this one is different. The guard above exists because a MISDETECTED
 	// control device fails exactly like a wedged one, and the field report that
@@ -203,11 +229,13 @@ export function create(opts)
 	// reboot makes a modem that has worked for months one that never answered.
 	//
 	// Three things keep this narrow:
-	//  - A NAMED RESET LINE ONLY. Not a power cycle (the action complained
-	//    about), not the `usb-repower` fallback, and nothing at all on a box
-	//    with no profile — which is most boxes, and was the reporting one.
-	//    hwops.repower_plan() calls the same precedence `reset_gpio`, and it is
-	//    what the modem-reset BUTTON already does on an unarmed modem: a human
+	//  - A RESET LINE ASSIGNED TO THIS MODEM ONLY (`option reset_gpio` in its
+	//    own section; opts.reset_line answers nothing else). Not a power cycle
+	//    (the action complained about), not the `usb-repower` fallback, and not
+	//    the board's default line either: on a box with one configured modem
+	//    that modem may be a USB backup stick, and the board's line would reset
+	//    the built-in modem instead. It is what the modem-reset BUTTON already
+	//    does on an unarmed modem: a human
 	//    may pulse this line today, unguarded, and the comment there says why —
 	//    "a modem that never answered is exactly the one they are most likely
 	//    to be trying to revive". This does automatically, once, what the
@@ -218,17 +246,20 @@ export function create(opts)
 	//  - NEVER WHEN WE ALREADY KNOW THE PIN IS WRONG. `arm_blocked` means the
 	//    configured protocol is contradicted by the bound driver — the active
 	//    form of the 2026-08-30 case. No pulse can fix a language mismatch.
+	//
+	// WHEN: by time, not by attempt count. It used to wait for the repower
+	// rung's 24 attempts, which with the backoff and the time each attempt
+	// spends on SYNC and the version query came to about 32 minutes — half an
+	// hour offline after every router reboot on a board whose modem needs the
+	// pulse to come up at all (NR7101, ddimension/wwand#40). The attempt count
+	// is the wrong measure for "has this been going on long enough", because
+	// its pace depends on how each attempt fails.
 	let unarmed_reset_line = (n) => {
 		if (self.counters.unarmed_reset || self.arm_blocked || !opts.reset_line)
 			return null;
 
-		let at = null;
-
-		for (let r in RUNGS)
-			if (r.action == 'usb_repower')
-				at = r.at;
-
-		if (at == null || n < at)
+		if (self.unarmed_reset_after <= 0 || !self.counters.outage_since ||
+		    now() - self.counters.outage_since < self.unarmed_reset_after)
 			return null;
 
 		// ...and an empty answer is not a line either: the caller normalises it
@@ -240,12 +271,39 @@ export function create(opts)
 		return (g != null && g != '') ? g : null;
 	};
 
+	let note_outage = () => {
+		if (!self.counters.outage_since) {
+			self.counters.outage_since = now();
+			self.persist();
+		}
+	};
+
+	// the unarmed pulse, authorised for the next usb_repower() call, or null
+	let take_unarmed_reset = (n, what) => {
+		let rl = unarmed_reset_line(n);
+
+		if (rl == null)
+			return null;
+
+		self.counters.unarmed_reset = 1;
+		unarmed_reset_pending = true;
+		self.persist();
+
+		log('warn', sprintf('%d s since the outage began (%d %s) and the %s control channel has never answered — pulsing the modem\'s reset line (%s) once; nothing further will be touched',
+			now() - self.counters.outage_since, n, what,
+			self.counters.proto_name ?? 'modem', rl));
+
+		return 'usb_repower';
+	};
+
 	// record a failed connection cycle, return the ladder action:
 	// 'retry' | 'opmode_cycle' | 'modem_reset' | 'usb_repower' | 'reboot'
 	self.on_attempt = function() {
 		self.counters.attempts++;
 
 		let n = self.counters.attempts;
+
+		note_outage();
 
 		// an authorisation the dispatcher did not act on must not sit here
 		// waiting for an unrelated caller to pick it up
@@ -271,18 +329,10 @@ export function create(opts)
 		// branch is skipped for being exhausted, not for being unarmed, and
 		// execution fell through to the reboot.
 		if (!self.counters.proto_ok) {
-			let rl = unarmed_reset_line(n);
+			let act = take_unarmed_reset(n, 'failed attempts');
 
-			if (rl != null) {
-				self.counters.unarmed_reset = 1;
-				unarmed_reset_pending = true;
-				self.persist();
-
-				log('warn', sprintf('%d failed attempts and the %s control channel has never answered — pulsing the modem\'s reset line (%s) once; nothing further will be touched',
-					n, self.counters.proto_name ?? 'modem', rl));
-
-				return 'usb_repower';
-			}
+			if (act)
+				return act;
 
 			// Once per threshold we would have acted on, so the operator sees it
 			// at the same points the ladder would have escalated. Compared
@@ -424,11 +474,12 @@ export function create(opts)
 		// the counters reset either way: a connection that came up IS progress,
 		// whether or not it is allowed to prove the protocol
 		if (armed || self.counters.attempts != 0 || self.counters.rung != 0 ||
-		    self.counters.unarmed_reset != 0) {
+		    self.counters.unarmed_reset != 0 || self.counters.outage_since != 0) {
 			self.counters.attempts = 0;
 			self.counters.rung = 0;
 			// the unarmed exception is per outage, exactly like `rung`
 			self.counters.unarmed_reset = 0;
+			self.counters.outage_since = 0;
 			self.persist();
 		}
 	};
@@ -457,6 +508,19 @@ export function create(opts)
 		// Same gate as the attempt ladder, and this is the path the field report
 		// actually took: a control channel that never answered produces nothing
 		// BUT protocol errors, so this counter is the only one that climbs.
+		// The unarmed pulse is due by time, and a control channel that never
+		// answers reaches it HERE: it produces protocol errors and may never
+		// complete an attempt at all, so a clock started and read only in
+		// on_attempt would never run for exactly the modem it is meant for.
+		if (!self.counters.proto_ok) {
+			note_outage();
+
+			let act = take_unarmed_reset(n, 'protocol errors');
+
+			if (act)
+				return act;
+		}
+
 		if (n > self.proto_error_limit && !self.counters.proto_ok) {
 			if (n == self.proto_error_limit + 1)
 				log('warn', sprintf('%d protocol errors and the %s control channel has never answered — refusing the hardware reset; this looks like the wrong protocol, not broken hardware',

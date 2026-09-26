@@ -231,6 +231,7 @@ export function modem_defaults(over)
 		gnss: false,           // switch the modem's GNSS receiver on (NMEA port)
 		fcc_auth: null,        // RF unlock for laptop-SKU modems (see reference.md)
 		failreboot: 100, proto_error_limit: 25, zero_rx_timeout: 21600,
+		unarmed_reset_after: 300,   // s: first reset-line pulse of a never-answering modem
 		bearer_poll_count: 3,  // empty dial-status polls before the bearer is gone (NCM)
 		lock_4g: [], lock_5g: null, lock_persist: false,
 		sim_slot: 0,
@@ -308,6 +309,7 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	'imei', 'repower_time', 'reset_gpio', 'pincode', 'modes', 'mcc', 'mnc',
 	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'fcc_auth',
 	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
+	'unarmed_reset_after',
 	'zero_rx_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
 	// the AT-over-MBIM pipe: `at_over_mbim` forces it and picks the vendor CID
@@ -477,6 +479,7 @@ function modem_from_section(s, warnings)
 		delay: num_opt(s.delay, 0, 'delay', warnings),
 		failreboot: num_opt(s.failreboot, 100, 'failreboot', warnings),
 		proto_error_limit: num_opt(s.proto_error_limit, 25, 'proto_error_limit', warnings),
+		unarmed_reset_after: num_opt(s.unarmed_reset_after, 300, 'unarmed_reset_after', warnings),
 		zero_rx_timeout: num_opt(s.zero_rx_timeout, 21600, 'zero_rx_timeout', warnings),
 		bearer_poll_count: num_opt(s.bearer_poll_count, 3, 'bearer_poll_count', warnings),
 		lock_4g: (type(s.lock_4g) == 'array') ? s.lock_4g :

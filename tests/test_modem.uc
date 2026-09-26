@@ -1395,7 +1395,7 @@ scenario('ladder', {
 		GET_CARD_STATUS: (args, meta) =>
 			(meta.count == 1) ? { __error: 3 } : { card_status: card_status() },
 	}),
-	recovery: { fx: ladder_fx, state_dir: '/state' },
+	recovery: { fx: ladder_fx, state_dir: '/state', now: () => 5000 },
 }, 'registered',
 	(modem, mock, events) => {
 		eq(modem.state, 'READY', 'ladder: recovered to READY');
@@ -1413,7 +1413,7 @@ scenario('ladder', {
 		// escalate. A modem that never answered gets 0 here and nothing physical
 		// happens — see the gate tests in test_recovery.
 		eq(ladder_fx.files['/state/ladder.json'],
-			'{ "attempts": 8, "proto_errors": 0, "rung": 1, "proto_hw": 0, "proto_hw_base": 0, "proto_ok": 1, "proto_name": "qmi", "unarmed_reset": 0 }',
+			'{ "attempts": 8, "proto_errors": 0, "rung": 1, "proto_hw": 0, "proto_hw_base": 0, "proto_ok": 1, "proto_name": "qmi", "unarmed_reset": 0, "outage_since": 5000 }',
 			'ladder: state persisted (rung 1 = opmode_cycle fired, arming recorded)');
 	});
 

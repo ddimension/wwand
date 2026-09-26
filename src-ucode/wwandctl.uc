@@ -514,7 +514,7 @@ if (json_mode) {
 //
 // WHY THE FLOOR. `modem_signal` keeps wwand's adaptive fast-telemetry loop warm
 // (daemon.uc calls modem.watch()); that loop polls the modem at 1 Hz and decays
-// 6 s after the last request (modem_common.uc:702-703). One sample therefore
+// 6 s after the last request (modem_common.uc:704-705). One sample therefore
 // costs ~6 s of 1 Hz modem traffic, so the duty cycle is 6/interval: 10 % at
 // 60 s, 20 % at 30 s, 60 % at 10 s — and at 6 s or below the loop NEVER decays
 // and the modem is polled around the clock. A global `Interval 10` in

@@ -247,20 +247,27 @@ eq(rg.counters.proto_ok, 0, 'gate: switching protocol withdraws the arming');
 // written for that hardware can never fire. One pulse of that named line, once
 // per outage, is what the modem-reset BUTTON already does on the same modem
 // unguarded (hwops.repower_modem) — this just stops waking the operator up.
+//
+// WHEN is by time since the outage began (`unarmed_reset_after`, default
+// 300 s), not by the 24 attempts of the repower rung, which took about 32
+// minutes after every reboot (#40). The clock is injected.
 let pulses = [];
+let clk = 1000;
 fx = fakefx.create();
 let ru = recovery.create({ id: 'unarmed_reset', failreboot: 30, fx: fx,
-	state_dir: '/state', log: silent,
+	state_dir: '/state', log: silent, now: () => clk,
 	repower: () => { push(pulses, 'board'); return true; },
 	reset_line: () => 'gpio515' });
 
 let ua = [];
-for (let i = 1; i <= 23; i++) push(ua, ru.on_attempt());
+for (let i = 1; i <= 23; i++) { push(ua, ru.on_attempt()); clk += 12; }   // 23 attempts in 276 s
 
 eq(length(filter(ua, (a) => a != 'retry')), 0,
-	'unarmed pulse: the cheaper rungs stay blocked — no opmode cycle at 8, no modem reset at 16');
+	'unarmed pulse: nothing before the outage is 300 s old — and no opmode cycle at 8, no modem reset at 16');
+eq(ru.counters.outage_since, 1000, 'unarmed pulse: the outage began at the first failed attempt');
 
-eq(ru.on_attempt(), 'usb_repower', 'unarmed pulse: fires at the repower threshold (24)');
+clk = 1300;
+eq(ru.on_attempt(), 'usb_repower', 'unarmed pulse: fires once the outage is 300 s old');
 eq(ru.usb_repower(), true, 'unarmed pulse: the primitive lets THIS one through');
 eq(pulses, [ 'board' ], 'unarmed pulse: the board action actually ran');
 
@@ -281,13 +288,15 @@ eq(ru.counters.rung, 0,
 // loop on a modem already past the threshold would pulse the reset line once
 // per start — the exact repetition the guard exists to prevent.
 let ru2 = recovery.create({ id: 'unarmed_reset', failreboot: 30, fx: fx,
-	state_dir: '/state', log: silent,
+	state_dir: '/state', log: silent, now: () => clk,
 	repower: () => { push(pulses, 'restarted'); return true; },
 	reset_line: () => 'gpio515' });
 ru2.load();
 
 eq(ru2.counters.unarmed_reset, 1,
 	'unarmed pulse: a restart mid-outage remembers the pulse already spent');
+eq(ru2.counters.outage_since, 1000,
+	'unarmed pulse: ...and when the outage began, so a restart does not start the clock again');
 eq(ru2.on_attempt(), 'retry',
 	'unarmed pulse: and does not fire a second one');
 eq(length(pulses), 1, 'unarmed pulse: still exactly one');
@@ -300,17 +309,74 @@ eq(ru.on_attempt(), 'opmode_cycle',
 // the exception is per outage, exactly like `rung`
 ru.on_connect_success();
 eq(ru.counters.unarmed_reset, 0, 'unarmed pulse: a successful connection clears the allowance');
+eq(ru.counters.outage_since, 0, 'unarmed pulse: ...and the outage clock');
 
 // a state file written before this key existed simply has not fired it
 fx.files['/state/legacy_ur.json'] =
 	'{ "attempts": 30, "proto_errors": 0, "rung": 0, "proto_hw": 0, "proto_ok": 0, "proto_name": "qmi" }';
 let rlg = recovery.create({ id: 'legacy_ur', failreboot: 30, fx: fx,
-	state_dir: '/state', log: silent,
+	state_dir: '/state', log: silent, now: () => clk,
 	repower: () => { push(pulses, 'legacy'); return true; },
 	reset_line: () => 'gpio515' });
 rlg.load();
 eq(rlg.counters.unarmed_reset, 0, 'unarmed pulse: a pre-upgrade state file has not spent it');
-eq(rlg.on_attempt(), 'usb_repower', 'unarmed pulse: so it is still available after an upgrade');
+eq(rlg.on_attempt(), 'retry', 'unarmed pulse: ...and has no outage start, so its clock starts now');
+clk += 300;
+eq(rlg.on_attempt(), 'usb_repower', 'unarmed pulse: so it is still available after an upgrade, 300 s on');
+
+// the delay is the operator's: another value is honoured, and 0 turns it off
+fx = fakefx.create();
+let rcf = recovery.create({ id: 'unarmed_cfg', failreboot: 0, fx: fx,
+	state_dir: '/state', log: silent, now: () => clk, unarmed_reset_after: 60,
+	repower: () => true, reset_line: () => 'gpio515' });
+rcf.on_attempt();
+clk += 59;
+eq(rcf.on_attempt(), 'retry', 'unarmed pulse: a configured 60 s is not yet reached at 59');
+clk += 1;
+eq(rcf.on_attempt(), 'usb_repower', 'unarmed pulse: ...and fires at 60');
+
+fx = fakefx.create();
+let rof = recovery.create({ id: 'unarmed_off', failreboot: 0, fx: fx,
+	state_dir: '/state', log: silent, now: () => clk, unarmed_reset_after: 0,
+	repower: () => true, reset_line: () => 'gpio515' });
+let off = [];
+for (let i = 1; i <= 40; i++) { push(off, rof.on_attempt()); clk += 100; }
+eq(length(filter(off, (a) => a != 'retry')), 0, 'unarmed pulse: unarmed_reset_after 0 never pulses');
+
+// a control channel that never answers produces protocol errors and may never
+// complete an attempt at all — the modem the pulse exists for. Its clock has to
+// start and be read on that path too.
+fx = fakefx.create();
+let rpe_pulses = [];
+let rpe = recovery.create({ id: 'unarmed_pe', failreboot: 30, fx: fx,
+	state_dir: '/state', log: silent, now: () => clk, proto_error_limit: 25,
+	repower: () => { push(rpe_pulses, 'pe'); return true; },
+	reset_line: () => 'gpio515' });
+let pe = [];
+for (let i = 1; i <= 29; i++) { push(pe, rpe.on_proto_error()); clk += 10; }
+eq(length(filter(pe, (a) => a != 'retry')), 0,
+	'unarmed pulse: protocol errors alone for 290 s do nothing yet');
+eq(rpe.counters.attempts, 0, 'unarmed pulse: ...on a modem that never completed an attempt');
+clk += 10;
+eq(rpe.on_proto_error(), 'usb_repower', 'unarmed pulse: ...and pulse once the outage is 300 s old');
+eq(rpe.usb_repower(), true, 'unarmed pulse: the proto-error path is granted the one call too');
+clk += 1000;
+eq(rpe.on_proto_error(), 'retry', 'unarmed pulse: once per outage on this path as well');
+
+// the persisted start was taken with another clock (it lies in the future):
+// read as-is it would hold the pulse back until then
+fx = fakefx.create();
+fx.files['/state/future_ur.json'] =
+	sprintf('{ "attempts": 3, "proto_ok": 0, "proto_name": "qmi", "outage_since": %d }', clk + 1000000);
+let rfu = recovery.create({ id: 'future_ur', failreboot: 30, fx: fx,
+	state_dir: '/state', log: silent, now: () => clk,
+	repower: () => true, reset_line: () => 'gpio515' });
+rfu.load();
+eq(rfu.counters.outage_since, clk, 'unarmed pulse: a start in the future is clamped to now');
+ok(index(fx.files['/state/future_ur.json'], sprintf('"outage_since": %d', clk)) >= 0,
+	'unarmed pulse: ...and the clamp is persisted, so a restart loop cannot re-clamp forever');
+clk += 300;
+eq(rfu.on_attempt(), 'usb_repower', 'unarmed pulse: ...so it still fires 300 s later');
 
 // --- ...and the three ways it must NOT fire ---------------------------------
 // 1. a box whose hardware action is a power cycle: the 2026-08-30 case itself

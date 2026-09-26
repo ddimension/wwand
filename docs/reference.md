@@ -70,7 +70,7 @@ wwand section types plus the netifd interface — no separate config file:
   *optional* stable USB topology anchor (like a wifi-device `path`, e.g. `1-1.2`,
   stable across renumbering on multi-modem setups). Plus tty, mux, sim_slot,
   pincode, modes, mcc, mnc, lock_4g/5g/persist, at_init, location, delay,
-  failreboot, zero_rx_timeout, bearer_poll_count, stats_interval,
+  failreboot, unarmed_reset_after, zero_rx_timeout, bearer_poll_count, stats_interval,
   dl_datagram_max_size, and
   **`reset_gpio`** — a named GPIO wired to the modem RESET line, pulsed by the
   recovery ladder instead of a USB power-cycle (see [Board integration](#board-integration)) —
@@ -480,6 +480,7 @@ config wwand_modem 'm0'
 	option stats_interval '60'       # telemetry period in seconds (0 = off)
 	option delay '0'                 # seconds to wait before the first init
 	option failreboot '100'          # attempts before the final reboot rung (0 = never reboot)
+	option unarmed_reset_after '300' # s: pulse THIS modem's reset_gpio once if it never answered (0 = never)
 	option proto_error_limit '25'    # protocol-error ceiling before a reboot (gated by failreboot)
 	option zero_rx_timeout '21600'   # no-rx watchdog in seconds (0 = off)
 	option bearer_poll_count '3'     # NCM only: consecutive dial-status answers that
@@ -1777,9 +1778,13 @@ protocol changes**, because "it answered once" was proved with the previous
 choice. On an existing install whose persisted state predates this, the first
 answer after the upgrade re-arms it.
 
-  **One exception, and only one:** on a board that exports the modem's own named
-  RESET line (`reset_gpio`, per modem or from the board profile), the ladder may
-  pulse that line **once per outage** at the repower threshold — nothing else.
+  **One exception, and only one:** on a modem with its **own** reset line
+  (`option reset_gpio` on that `wwand_modem` section — the board profile's
+  default line does NOT count, so a second modem, e.g. a backup stick, is never
+  pulsed by it), the ladder may pulse that line **once per outage**,
+  `unarmed_reset_after` seconds (default **300**, `0` = never; LuCI: modem
+  settings) after the outage began — nothing else. The outage start is persisted
+  with the counters, so a daemon restart does not restart the clock.
   No op-mode cycle, no modem reset, no power cycle, no reboot. It exists because
   the arming evidence lives in tmpfs and therefore does not survive a reboot, so
   a modem that has worked for months is, every morning, a modem that has never
@@ -1791,7 +1796,12 @@ answer after the upgrade re-arms it.
   bound driver, and it is never a power cycle — which is the action the 2026-08-30
   field report was about. `status()` reports it per modem as
   `recovery.unarmed_reset: 'available' | 'spent'` (absent once the modem is
-  armed, and on any box where no reset line applies).
+  armed, and on a modem without its own `reset_gpio`), plus
+  `recovery.unarmed_reset_in` — seconds until the pulse is due while it is
+  still pending — and `recovery.unarmed_reset_off: 'no_reset_gpio' | 'disabled'`
+  saying why there is none. The clock is monotonic (an NTP step after boot
+  neither fires nor postpones it), and it also runs on a control channel that
+  produces only protocol errors and never completes an attempt.
 - **Status LEDs** — driven from the modem's registration + signal: a **5-bar
   signal graph** (e.g. MikroTik Chateau `green:mobile-1..5`) or a **mobile / LTE**
   set (e.g. Zyxel `…:red/green:mobile`, `…:lte`).
