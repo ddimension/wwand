@@ -187,7 +187,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1592) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1616) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:1161), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -857,16 +857,37 @@ export function create(opts)
 	// DMS event report: observe + log an EXTERNAL operating-mode / PIN change
 	// (airplane toggled via AT / another tool / a hardware switch) wwand did not
 	// initiate. The state machine still reacts via its own serving-system path.
+	// The log line for an operating-mode report, or null for the baseline.
+	// A change set_opmode asked for within the last 30 s is ours (a park, a
+	// wake); only anything else is external — calling our own wake external
+	// sends whoever reads the log looking for a tool that is not there.
+	const OPMODE_CODE = { online: 0, low_power: 1 };
+
+	self._opmode_note = function(code) {
+		let prev = self._dms_opmode;
+		let name = dmsmod.OPMODE_NAMES[sprintf('%d', code)] ?? sprintf('mode %d', code);
+		let asked = self._opmode_asked;
+
+		self._dms_opmode = code;
+
+		if (prev == null)
+			return null;
+
+		if (asked && OPMODE_CODE[asked.mode] == code && time() - asked.at <= 30) {
+			self._opmode_asked = null;
+			return [ 'info', sprintf('operating mode now %s (as set by wwand)', name) ];
+		}
+
+		return [ 'notice', sprintf('operating mode changed externally: %s', name) ];
+	};
+
 	self._install_dms_handlers = function() {
 		self.dms.on('EVENT_REPORT_IND', (data) => {
 			if (data?.operating_mode != null && data.operating_mode != self._dms_opmode) {
-				let prev = self._dms_opmode;
-				self._dms_opmode = data.operating_mode;
-				// skip the very first report (baseline, not a change)
-				if (prev != null)
-					log('notice', sprintf('operating mode changed externally: %s',
-						dmsmod.OPMODE_NAMES[sprintf('%d', data.operating_mode)] ??
-						sprintf('mode %d', data.operating_mode)));
+				let n = self._opmode_note(data.operating_mode);
+
+				if (n)
+					log(n[0], n[1]);
 			}
 			if (data?.pin1_status?.current_status != null)
 				self._dms_pin1 = data.pin1_status;
@@ -1280,6 +1301,9 @@ export function create(opts)
 			return cb({ error: 'unsupported', detail: 'no dms client' });
 
 		let was_parked = self.lowpower_parked;
+
+		// the DMS indication that follows is ours, not an external change
+		self._opmode_asked = { mode: mode, at: time() };
 
 		qmi_backend.set_opmode(self.dms, mode, (err) => {
 			// remember that WE parked it: the registration that follows is a

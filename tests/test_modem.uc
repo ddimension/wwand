@@ -262,6 +262,14 @@ scenario('late-reg', {
 		modem.lowpower_parked = false;
 		modem._update_serving({ serving_system: { registration: 0, radio_ifs: [] } });
 		eq(modem.state, 'REGISTERING', 'unparked: a real registration loss is chased');
+
+		// the operating-mode report that follows a park or a wake is ours
+		modem._dms_opmode = 1;
+		modem._opmode_asked = { mode: 'online', at: time() };
+		eq(modem._opmode_note(0)?.[1], 'operating mode now online (as set by wwand)',
+		   'opmode: the change wwand asked for is not reported as external');
+		eq(modem._opmode_note(1)?.[1], 'operating mode changed externally: low power',
+		   'opmode: ...one it did not ask for is');
 	});
 
 // --- 3: PIN required, verified via UIM ---------------------------------------
@@ -2686,6 +2694,26 @@ eq(reattach_err?.error, 'cancelled',
 		'teardown-throws: the depth came back down even so, so retries still work');
 }
 
+// The blocks below end their loop from inside an event (a timer that stops
+// the modem, then one that ends the loop). An event that fires twice arms
+// that chain twice, and the second uloop.end() then fires inside the NEXT
+// block's loop and ends it before its modem has done anything — seen under
+// the parallel suite (done_once still false, no RELEASE on the wire). So each
+// such timer is recorded and cancelled once its block's loop is over.
+// ...and a uloop.end() left armed by an EARLIER part of this file (the
+// scenario harness, the teardown blocks) must not end a block early either:
+// each block runs its loop until its own finish_block, so a stray end only
+// costs one more pass.
+let block_done = false;
+let finish_block = () => { block_done = true; uloop.end(); };
+let run_block = () => { block_done = false; while (!block_done) uloop.run(); };
+let block_timers = [];
+let later = (ms, fn) => { let t = uloop.timer(ms, fn); push(block_timers, t); return t; };
+// fn once cond() holds, checked every 10 ms, or after max_ms regardless
+let when;
+when = (cond, fn, max_ms) => (cond() || max_ms <= 0) ? fn() : later(10, () => when(cond, fn, max_ms - 10));
+let drain_later = () => { for (let t in block_timers) t.cancel(); block_timers = []; };
+
 // --- a plugin's own service client (modem.extra_client) ---------------------
 //
 // A plugin brings a schema the core does not know and gets a client on the
@@ -2733,8 +2761,9 @@ eq(reattach_err?.error, 'cancelled',
 		m.start();
 		// cancelled after the run: a guard timer left armed would end the NEXT
 		// block's loop early, before its modem has registered
-		let guard = uloop.timer(15000, () => uloop.end());
-		uloop.run();
+		let guard = uloop.timer(15000, finish_block);
+		run_block();
+		drain_later();
 		guard.cancel();
 		m.stop();   // nor may a modem the guard cut short keep running
 		return done_once;
@@ -2747,15 +2776,17 @@ eq(reattach_err?.error, 'cancelled',
 			got.err = err;
 			got.c = c;
 			if (!c)
-				return uloop.end();
+				return finish_block();
 			c.on('EVT_IND', (d) => { got.ind = d.slot; });
 			c.request('PING', {}, (e) => {
 				got.ping = e;
 				mock.indicate(0x32, c.cid, 'EVT_IND', { slot: 1 });
-				uloop.timer(20, () => {
+				// until the indication is in, not a fixed 20 ms: a loaded
+				// host delivers it later
+				when(() => got.ind != null, () => {
 					m.stop();
-					uloop.timer(20, () => uloop.end());
-				});
+					later(20, finish_block);
+				}, 3000);
 			});
 		});
 	});
@@ -2772,7 +2803,7 @@ eq(reattach_err?.error, 'cancelled',
 			got2.err = err;
 			got2.c = c;
 			m.stop();
-			uloop.timer(20, () => uloop.end());
+			later(20, finish_block);
 		});
 	});
 
@@ -2807,7 +2838,7 @@ eq(reattach_err?.error, 'cancelled',
 				m.extra_client(XSVC, (err, c) => {
 					cid = c?.cid;
 					m.stop();
-					uloop.timer(20, () => uloop.end());
+					later(20, finish_block);
 				});
 			},
 		},
@@ -2815,8 +2846,9 @@ eq(reattach_err?.error, 'cancelled',
 	m.start();
 	// generous: the suite runs its files in parallel, and a block whose guard
 	// fires first leaves callbacks behind that end the NEXT block's loop
-	let guard = uloop.timer(15000, () => uloop.end());
-	uloop.run();
+	let guard = uloop.timer(15000, finish_block);
+	run_block();
+	drain_later();
 	guard.cancel();
 	m.stop();   // idempotent; a block ended by its guard must not leak timers
 
@@ -2864,21 +2896,22 @@ eq(reattach_err?.error, 'cancelled',
 					m.sim_block = data;   // what the daemon records
 
 					// the card arrives
-					uloop.timer(50, () => {
+					later(50, () => {
 						card_in = true;
 						ok(m.state == 'SIM_BLOCKED', 'no card: the modem stopped in SIM_BLOCKED');
 						eq(m.retry_sim(), true, 'card arrived: retry_sim resumes from the SIM step');
 					});
 				}
 				if (event == 'registered')
-					uloop.timer(20, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+					later(20, () => { m.stop(); later(20, finish_block); });
 			},
 		},
 	});
 	m.start();
 
-	let guard = uloop.timer(15000, () => uloop.end());
-	uloop.run();
+	let guard = uloop.timer(15000, finish_block);
+	run_block();
+	drain_later();
 	guard.cancel();
 	m.stop();
 
@@ -2919,7 +2952,7 @@ eq(reattach_err?.error, 'cancelled',
 				m.extra_client(XSVC, (err, c) => {
 					m.extra_release(c);
 					m.extra_release(c);
-					uloop.timer(30, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+					later(30, () => { m.stop(); later(20, finish_block); });
 				});
 			},
 		},
@@ -2927,8 +2960,9 @@ eq(reattach_err?.error, 'cancelled',
 	m.start();
 	// generous: the suite runs its files in parallel, and a block whose guard
 	// fires first leaves callbacks behind that end the NEXT block's loop
-	let guard = uloop.timer(15000, () => uloop.end());
-	uloop.run();
+	let guard = uloop.timer(15000, finish_block);
+	run_block();
+	drain_later();
 	guard.cancel();
 	m.stop();   // idempotent; a block ended by its guard must not leak timers
 
