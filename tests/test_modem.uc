@@ -2673,4 +2673,142 @@ eq(reattach_err?.error, 'cancelled',
 		'teardown-throws: the depth came back down even so, so retries still work');
 }
 
+// --- a plugin's own service client (modem.extra_client) ---------------------
+//
+// A plugin brings a schema the core does not know and gets a client on the
+// modem's channel. The modem owns it: teardown must RELEASE its CID like the
+// core's own clients, because the plugin cannot see the teardown coming and a
+// CID left allocated sits in the modem's client table until the stack resets.
+{
+	uloop.init();
+
+	const XSVC = {
+		service: 0x32,
+		messages: {
+			PING:    { id: 0x0020, req: {}, resp: {} },
+			EVT_IND: { id: 0x0023, ind: { slot: { t: 0x01, f: 'u32' } } },
+		},
+	};
+	let vi = { services: [
+		{ service: 1, major: 1, minor: 60 }, { service: 2, major: 1, minor: 14 },
+		{ service: 3, major: 1, minor: 25 }, { service: 11, major: 1, minor: 22 },
+		{ service: 26, major: 1, minor: 16 },
+	] };
+	let run = (with_svc, body) => {
+		let vi2 = { services: [ ...vi.services, ...(with_svc ? [ { service: 0x32, major: 1, minor: 5 } ] : []) ] };
+		let mock = mockhub.create({ handlers: base_handlers({ GET_VERSION_INFO: vi2, PING: {} }),
+		                            schemas: [ XSVC ] });
+		let m;
+		let done_once = false;
+
+		m = modem_mod.create({
+			id: 'extra', device: '/dev/mock0', config: {},
+			recovery: { fx: fakefx.create(), state_dir: '/state' },
+			at: { fx: fakefx.create() },
+			timing: TIMING,
+			deps: {
+				transport_open: mock.transport_open,
+				log: (level, msg) => null,
+				on_event: (mm, event) => {
+					if (event != 'registered' || done_once)
+						return;
+					done_once = true;
+					body(m, mock);
+				},
+			},
+		});
+		m.start();
+		// cancelled after the run: a guard timer left armed would end the NEXT
+		// block's loop early, before its modem has registered
+		let guard = uloop.timer(3000, () => uloop.end());
+		uloop.run();
+		guard.cancel();
+		return done_once;
+	};
+
+	let got = {};
+
+	run(true, (m, mock) => {
+		m.extra_client(XSVC, (err, c) => {
+			got.err = err;
+			got.c = c;
+			if (!c)
+				return uloop.end();
+			c.on('EVT_IND', (d) => { got.ind = d.slot; });
+			c.request('PING', {}, (e) => {
+				got.ping = e;
+				mock.indicate(0x32, c.cid, 'EVT_IND', { slot: 1 });
+				uloop.timer(20, () => {
+					m.stop();
+					uloop.timer(20, () => uloop.end());
+				});
+			});
+		});
+	});
+
+	eq(got.err, null, 'extra client: allocated for a service the modem lists');
+	eq(got.ping, null, 'extra client: its requests reach the modem');
+	eq(got.ind, 1, 'extra client: and its indications reach the plugin');
+	eq(got.c?.destroyed, true, 'extra client: teardown destroys it, so the plugin knows to allocate again');
+
+	let got2 = {};
+
+	run(false, (m, mock) => {
+		m.extra_client(XSVC, (err, c) => {
+			got2.err = err;
+			got2.c = c;
+			m.stop();
+			uloop.timer(20, () => uloop.end());
+		});
+	});
+
+	eq(got2.err?.error, 'service_unavailable',
+		'extra client: a service missing from GET_VERSION_INFO is refused with the reason, not asked for');
+	eq(got2.c, null, 'extra client: ...and no client');
+}
+
+// the RELEASE on teardown, checked on the wire
+{
+	uloop.init();
+
+	const XSVC = { service: 0x32, messages: { PING: { id: 0x0020, req: {}, resp: {} } } };
+	let mock = mockhub.create({ handlers: base_handlers({ GET_VERSION_INFO: { services: [
+		{ service: 1, major: 1, minor: 60 }, { service: 2, major: 1, minor: 14 },
+		{ service: 3, major: 1, minor: 25 }, { service: 11, major: 1, minor: 22 },
+		{ service: 26, major: 1, minor: 16 }, { service: 0x32, major: 1, minor: 5 } ] } }),
+		schemas: [ XSVC ] });
+	let m, cid = null, released = null;
+
+	m = modem_mod.create({
+		id: 'extra-rel', device: '/dev/mock0', config: {},
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		at: { fx: fakefx.create() },
+		timing: TIMING,
+		deps: {
+			transport_open: mock.transport_open,
+			log: (level, msg) => null,
+			on_event: (mm, event) => {
+				if (event != 'registered' || cid != null)
+					return;
+				m.extra_client(XSVC, (err, c) => {
+					cid = c?.cid;
+					m.stop();
+					uloop.timer(20, () => uloop.end());
+				});
+			},
+		},
+	});
+	m.start();
+	let guard = uloop.timer(3000, () => uloop.end());
+	uloop.run();
+	guard.cancel();
+
+	for (let c in mock.calls)
+		if (c.name == 'RELEASE_CID' && c.args?.release?.service == 0x32)
+			released = c.args.release.cid;
+
+	ok(cid != null, 'extra client release: a client was allocated');
+	eq(released, cid, 'extra client release: teardown sent RELEASE_CID for the plugin\'s CID');
+}
+
 done('test_modem');

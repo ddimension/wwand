@@ -3378,6 +3378,29 @@ export function create(opts)
 			esim: () => load_esim(),
 			esim_bridge: () => self.esim_bridge(),
 			esim_refresh: (ref, eid, slot, cb) => self.esim_refresh(ref, eid, slot, cb),
+			// a QMI client of a schema the plugin brings, on the modem's own
+			// channel and owned by the modem (modem.uc extra_client). Only a
+			// QMI-controlled modem has one: MBIM and NCM answer `unsupported`.
+			qmi_client: (ref, schema, cb) => {
+				let m = self.modems[ref]?.modem;
+
+				if (!m)
+					return cb({ error: 'no_modem' }, null);
+				if (!m.extra_client)
+					return cb({ error: 'unsupported' }, null);
+
+				m.extra_client(schema, cb);
+			},
+			qmi_release: (ref, client, cb) => {
+				let m = self.modems[ref]?.modem;
+
+				if (m?.extra_release)
+					return m.extra_release(client, cb);
+
+				client?.destroy();
+				if (cb)
+					cb(null);
+			},
 			// a per-SIM section for the plugin (deps.uc sim_upsert); a write
 			// is re-read at once, so the next dial of that card uses it
 			sim_upsert: (iccid, fields, origin, opts) => {

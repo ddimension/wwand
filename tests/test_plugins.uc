@@ -120,6 +120,38 @@ eq(self.connection_token('m1'), null, 'token: null for a modem with nothing conn
 	eq(reloads, 1, 'deps: nothing written, nothing reloaded');
 }
 
+// --- qmi_client: a client on the modem's channel, or the reason there is none ---
+
+{
+	let captured = null;
+	let d = daemon_mod.create({ deps: {
+		log: () => null,
+		plugins: [ { name: 'cap', options: [], mod: { create: (dd) => { captured = dd; return {}; } } } ],
+	} });
+
+	d.esim_guard('m0', 'enable');   // loads the plugins
+	ok(type(captured?.qmi_client) == 'function', 'deps: a plugin gets qmi_client');
+
+	let res = {};
+	let schema = { service: 0x32, messages: {} };
+
+	d.modems = { gone: { modem: null }, mbim: { modem: {} },
+	             qmi: { modem: { extra_client: (s, cb) => cb(null, { service: s.service, cid: 7 }),
+	                             extra_release: (c, cb) => { res.released = c.cid; cb?.(null); } } } };
+
+	captured.qmi_client('nope', schema, (e) => { res.nope = e?.error; });
+	captured.qmi_client('gone', schema, (e) => { res.gone = e?.error; });
+	captured.qmi_client('mbim', schema, (e) => { res.mbim = e?.error; });
+	captured.qmi_client('qmi', schema, (e, c) => { res.qmi = c?.cid; });
+	captured.qmi_release('qmi', { cid: 7 });
+
+	eq(res.nope, 'no_modem', 'qmi_client: an unknown modem says so');
+	eq(res.gone, 'no_modem', 'qmi_client: ...as does a modem that is not running');
+	eq(res.mbim, 'unsupported', 'qmi_client: a modem without a QMI channel of its own is unsupported, not a crash');
+	eq(res.qmi, 7, 'qmi_client: a QMI modem hands out the client');
+	eq(res.released, 7, 'qmi_release: and takes it back through the modem, which owns it');
+}
+
 for (let f in fs.lsdir(tmp) ?? [])
 	fs.unlink(sprintf('%s/%s', tmp, f));
 fs.rmdir(tmp);

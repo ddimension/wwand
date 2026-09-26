@@ -2097,15 +2097,22 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   `sim_upsert(iccid, fields, origin, opts)`. That last one writes the plugin's
   own `wwsim_<iccid>` section and never touches a user's. `opts.create_only`
   writes only when there is no section yet. Written values are re-read at
-  once.
+  once. `qmi_client(ref, schema, cb)` gives the plugin a QMI client of a
+  service the core does not know, described in wwand's own schema format, on
+  the modem's QMI channel: `cb(err, client)` with `no_modem`,
+  `service_unavailable` (not in the modem's GET_VERSION_INFO list) or
+  `unsupported` (not a QMI-controlled modem). The modem owns the client and
+  releases it on teardown; `client.destroyed` then tells the plugin to ask
+  again. `qmi_release(ref, client)` gives it back earlier.
 - **ubus:** `modem_plugin` reaches `ops`; `modem_plugin_status` reaches only
   `read_ops`.
 - **CLI:** A command a package adds to `wwandctl` is
   `/usr/share/ucode/wwand/ctl/<cmd>.uc`, returning
   `{ run(ctx, args), help: [ lines ] }`.
 
-Known plugin: `wwand-ipa` (SGP.32 eIM fleet management), in its own
-repository, github.com/ddimension/wwand-ipa.
+Known plugins: `wwand-ipa` (SGP.32 eIM fleet management) and `wwand-rsim`
+(a SIM in a reader on the router, through QMI UIM Remote), each in its own
+repository under github.com/ddimension.
 
 ## Development
 

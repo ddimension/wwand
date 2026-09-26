@@ -50,8 +50,28 @@ for (let schema in SCHEMAS) {
 	}
 }
 
+// a schema a test brings (a plugin's service): indexed like the built-in ones
+function index_schema(schema)
+{
+	let svc = sprintf('%d', schema.service);
+
+	req_index[svc] = req_index[svc] ?? {};
+	ind_index[svc] = ind_index[svc] ?? {};
+
+	for (let name, msg in schema.messages) {
+		if (msg.req != null || msg.resp != null)
+			req_index[svc][sprintf('%d', msg.id)] = { name: name, msg: msg };
+
+		if (msg.ind != null)
+			ind_index[svc][name] = msg;
+	}
+}
+
 export function create(opts)
 {
+	for (let s in (opts?.schemas ?? []))
+		index_schema(s);
+
 	let self = {
 		device: null,
 		clients: {},

@@ -187,7 +187,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1331) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1373) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:1161), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -313,6 +313,48 @@ export function create(opts)
 		self.ctl.request('RELEASE_CID',
 			{ release: { service: client.service, cid: client.cid } },
 			(err) => cb ? cb(err) : null, { timeout: 3000 });
+	};
+
+	// A client of a service the core does not know, for a plugin (daemon dep
+	// `qmi_client`). cb(err, client). The MODEM owns it: teardown releases it
+	// with its own clients, because a CID left allocated on the modem stays in
+	// its client table until the stack resets, and a plugin cannot see the
+	// teardown coming. After that `client.destroyed` is true and the plugin
+	// allocates again on the next modem. A service the modem did not list in
+	// GET_VERSION_INFO is refused before asking, so a plugin can say WHY
+	// (UIM Remote is compiled in but switched off on most Quectel firmware).
+	self.extra_clients = [];
+
+	self.extra_client = function(schema, cb) {
+		if (!self.ctl || !self.hub || self.hub.closed)
+			return cb({ error: 'not_ready' }, null);
+
+		if (!self.services[sprintf('%d', schema.service)])
+			return cb({ error: 'service_unavailable' }, null);
+
+		let gen = self._gen;
+
+		self.alloc(schema, (err, c) => {
+			if (err)
+				return cb(err, null);
+
+			// torn down while the allocation was in flight: the CID belongs to
+			// a stack that is gone, and handing it out would give the plugin a
+			// client nothing releases
+			if (self._gen != gen) {
+				c.destroy();
+				return cb({ error: 'cancelled' }, null);
+			}
+
+			push(self.extra_clients, c);
+			cb(null, c);
+		});
+	};
+
+	// a plugin giving its client back before teardown
+	self.extra_release = function(client, cb) {
+		self.extra_clients = filter(self.extra_clients, (c) => c != client);
+		self.release(client, cb);
 	};
 
 	// backend-neutral NAS accessor. cb(nas|null).
@@ -1487,7 +1529,8 @@ export function create(opts)
 		// not need. ctl goes LAST, and is only destroyed — it is the implicit
 		// client (cid 0) and it is what carries RELEASE_CID for all the others.
 		for (let c in [ self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg,
-		               self.dsd, self.tmd, self.cat, self.wms, self.pdc ]) {
+		               self.dsd, self.tmd, self.cat, self.wms, self.pdc,
+		               ...(self.extra_clients ?? []) ]) {
 			if (!c)
 				continue;
 
@@ -1502,6 +1545,7 @@ export function create(opts)
 		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = null;
 
 		self.dsd = self.tmd = self.cat = self.wms = self.pdc = null;
+		self.extra_clients = [];
 
 		// fail any PDC operation still waiting on an indication that will now
 		// never come, and clear the table so a rebuild can install again
