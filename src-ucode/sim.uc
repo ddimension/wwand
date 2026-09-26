@@ -133,7 +133,7 @@ function watch_card_ready(modem, uim, on_ready)
 	// THE WAITER LIVES ON THE CLIENT, and carries an owner token. A single
 	// modem-wide slot let two unlocks steal from each other: init calls
 	// sim.unlock (modem_init_qmi.uc:414) while the eSIM path schedules its own
-	// (esim_bridge.uc:470), and nothing serialises them — the second overwrote
+	// (esim_bridge.uc:551), and nothing serialises them — the second overwrote
 	// the first, and whichever finished first cleared the OTHER's waiter.
 	let mine = {};
 

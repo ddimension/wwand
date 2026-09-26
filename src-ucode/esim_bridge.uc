@@ -37,15 +37,87 @@ const ESIM_LPAC = '/usr/bin/lpac';
 // POST and is slow over a bad link.
 const ESIM_IDLE_MS = 300000;
 
+// An activation code (and confirmation code) that may go into the lpac shell
+// command. The byte-wise check comes FIRST because the regex cannot do it:
+// ucode regexes run on a C string and stop at a NUL, so "LPA:1$h$t\0anything"
+// matches this anchored allowlist on its prefix alone. Nothing is injected —
+// sprintf truncates at the same NUL, so the shell only ever sees the prefix
+// (measured, 2026-08-31) — but then the string we VALIDATED and the string we
+// ACT on are different, and the profile downloaded is not the one the caller
+// named. A boundary should refuse what it cannot carry faithfully. Same
+// reasoning as atcmd's ctrl_at.
+function codes_ok(code, conf)
+{
+	let ctrl = (v) => {
+		for (let i = 0; i < length(v ?? ''); i++) {
+			let c = ord(v, i);
+
+			if (c < 0x20 || c == 0x7f)
+				return true;
+		}
+
+		return false;
+	};
+
+	if (ctrl(code) || ctrl(conf))
+		return false;
+
+	return !!match(code, /^[A-Za-z0-9$:._+-]+$/) &&
+		(conf == null || !!match(conf, /^[A-Za-z0-9._-]*$/));
+}
+
+// JSON string escapes back to text (RFC 8259 section 7)
+function json_unescape(v)
+{
+	return replace(v, /\\(["\\\/bfnrt]|u[0-9a-fA-F]{4})/g, (m, c) => {
+		switch (substr(c, 0, 1)) {
+		case 'n': return '\n';
+		case 't': return '\t';
+		case 'r': return '\r';
+		case 'b': return '\b';
+		case 'f': return '\f';
+		case 'u': return uchr(hex(substr(c, 1)));
+		default:  return c;
+		}
+	});
+}
+
+// The flat fields of an event's payload: strings (unescaped), booleans and
+// integers. Pulled with match() for the reason the header gives, which is why
+// nested objects and arrays are not supported — no event carries one.
+function event_payload(s)
+{
+	let out = {};
+	let at = index(s, '"payload"');
+
+	if (at < 0)
+		return out;
+
+	let body = substr(s, at + 9);
+
+	for (let m in (match(body, /"([a-z_]+)": *"(([^"\\]|\\.)*)"/g) ?? []))
+		out[m[1]] = json_unescape(m[2]);
+
+	for (let m in (match(body, /"([a-z_]+)": *(true|false)/g) ?? []))
+		out[m[1]] = (m[2] == 'true');
+
+	for (let m in (match(body, /"([a-z_]+)": *(-?[0-9]+) *[,}]/g) ?? []))
+		out[m[1]] = +m[2];
+
+	return out;
+}
+
 // classify one lpac stdout line — the testable core of the stdio bridge.
 // Protocol fields are pulled with match() because ucode's json() throws
 // uncatchably on malformed input (and lpac interleaves non-JSON noise).
 //   { kind: 'apdu', func, param }        an APDU request to answer
 //   { kind: 'progress', message }        ES9+/ES10 progress step
 //   { kind: 'lpa', code, message, data } final result (code '0' = success)
-//   { kind: 'event', event }             the process hands a step to the host
+//   { kind: 'event', event, payload }    the process hands a step to the host
 //                                        and waits: the answer is one line back
-//                                        (session_run's on_event)
+//                                        (session_run's on_event); payload holds
+//                                        the event's string, boolean and integer
+//                                        fields (event_payload)
 //   { kind: 'log', text }                anything that is not protocol JSON
 //   null                                 empty line
 function parse_lpac_line(s)
@@ -79,7 +151,7 @@ function parse_lpac_line(s)
 		};
 
 	if (mtype == 'event')
-		return { kind: 'event', event: field(s, /"event": *"([a-z_]+)"/) };
+		return { kind: 'event', event: field(s, /"event": *"([a-z_]+)"/), payload: event_payload(s) };
 
 	// unknown JSON object: keep it visible in the log rather than dropping it
 	return { kind: 'log', text: s };
@@ -96,6 +168,7 @@ return {
 		let idle_ms = deps.idle_ms ?? ESIM_IDLE_MS;   // test seam for the watchdog
 		let dl = { state: 'idle' };   // one host download at a time
 		let mgmt_busy = false;        // one lpac profile-management op at a time
+		let parked = null;            // { ref, slot } of a session_run waiting on its host
 
 		// --- quiet mode (modem._esim_op) ------------------------------------
 		// While an eSIM op runs, URC-driven background actions (the NCM
@@ -543,6 +616,7 @@ return {
 				log_level: log_level,
 				on_event: (rec, reply) => {
 					release();
+					parked = { ref: ref, slot: slot };
 
 					// an answer that arrives after the process died must not
 					// raise a claim nothing will ever drop
@@ -550,12 +624,14 @@ return {
 						if (finished)
 							return;
 
+						parked = null;
 						release = quiet_claim(entry?.modem);
 						reply(obj);
 					});
 				},
 			}, (err, out) => {
 				finished = true;
+				parked = null;
 				mgmt_busy = false;
 				release();
 				on_done(err, out);
@@ -570,8 +646,47 @@ return {
 			return null;
 		};
 
+		// A download on behalf of the session that is waiting in an event: an
+		// SGP.32 assistant's direct download (SGP.32 v1.3 3.2.3.1), which only
+		// the host's ES9+ client can do. That session holds the card
+		// (mgmt_busy) and is parked with its own channel closed, so the
+		// download runs under its claim instead of being refused as busy —
+		// and only then: outside such a wait it is refused. The install
+		// notification stays on the card (no auto notify), because the
+		// assistant reports the PIR to its eIM itself. cb(err, dl) when the
+		// run has ENDED, not when it starts.
+		let session_download = (ref, code, conf, cb) => {
+			if (parked?.ref != ref)
+				return cb({ error: 'no_session' });
+
+			if (dl?.state == 'running')
+				return cb({ error: 'busy' });
+
+			if (!length(code ?? '') || !codes_ok(code, conf))
+				return cb({ error: 'invalid_argument' });
+
+			let answered = false;
+			let answer = (err, res) => {
+				if (answered)
+					return;
+
+				answered = true;
+				cb(err, res);
+			};
+			let q = quiet_claim(modem_of(ref)?.modem);
+
+			download_lpac(ref, parked.slot, code, conf,
+				(err) => { if (err) answer(err); },
+				false,
+				() => {
+					q();
+					answer((dl?.state == 'done') ? null : { error: 'download_failed', code: dl?.code }, dl);
+				});
+		};
+
 		return {
 			session_run: session_run,
+			session_download: session_download,
 
 			// after a profile change the modem has to re-read the card; the
 			// same apply as an lpac enable (see apply_sim_reset above)
@@ -614,34 +729,8 @@ return {
 					if (!length(code))
 						return done({ error: 'missing_argument' });
 
-					// shell-safe: activation codes are LPA:1$host$token style.
-					//
-					// The byte-wise check comes FIRST because the regex cannot do
-					// it: ucode regexes run on a C string and stop at a NUL, so
-					// "LPA:1$h$t\0anything" matches this anchored allowlist on its
-					// prefix alone. Nothing is injected — sprintf truncates at the
-					// same NUL, so the shell only ever sees the prefix (measured,
-					// 2026-08-31) — but then the string we VALIDATED and the string
-					// we ACT on are different, and the profile downloaded is not
-					// the one the caller named. A boundary should refuse what it
-					// cannot carry faithfully. Same reasoning as atcmd's ctrl_at.
-					let ctrl = (v) => {
-						for (let i = 0; i < length(v ?? ''); i++) {
-							let c = ord(v, i);
-
-							if (c < 0x20 || c == 0x7f)
-								return true;
-						}
-
-						return false;
-					};
-
-					if (ctrl(code) || ctrl(params?.confirmation_code))
-						return done({ error: 'invalid_argument' });
-
-					if (!match(code, /^[A-Za-z0-9$:._+-]+$/) ||
-					    (params?.confirmation_code != null &&
-					     !match(params.confirmation_code, /^[A-Za-z0-9._-]*$/)))
+					// shell-safe: activation codes are LPA:1$host$token style
+					if (!codes_ok(code, params?.confirmation_code))
 						return done({ error: 'invalid_argument' });
 
 					// standard: acknowledge the install to the operator afterwards;

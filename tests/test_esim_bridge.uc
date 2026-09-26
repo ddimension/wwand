@@ -71,6 +71,32 @@ eq(r.kind, 'log', 'unknown JSON object: kept visible as log');
 r = P('{broken json');
 eq(r.kind, 'log', 'malformed JSON: logged, never thrown');
 
+// --- host events and their payload (an SGP.32 assistant, ipad host.h) --------
+
+r = P('{"type":"event","payload":{"event":"profile_changed","iccid":"89000123456789012342"}}');
+eq(r.kind, 'event', 'event: kind');
+eq(r.event, 'profile_changed', 'event: name');
+eq(r.payload.iccid, '89000123456789012342', 'event: string field');
+
+r = P('{"type":"event","payload":{"event":"connectivity","iccid":"8949","emulated":false,"source":"card",' +
+	'"apn":"iot.example","username":"u\\\\\\"x","password":"p\\u0001w","pdp_type":"ipv4v6"}}');
+eq(r.payload.apn, 'iot.example', 'event payload: apn');
+eq(r.payload.emulated, false, 'event payload: boolean false');
+eq(r.payload.username, 'u\\"x', 'event payload: escaped backslash and quote come back');
+eq(r.payload.password, 'p\u0001w', 'event payload: \\u escape comes back');
+eq(r.payload.pdp_type, 'ipv4v6', 'event payload: the field after escapes still found');
+
+// a quote inside a string value cannot forge a field: it arrives escaped
+r = P('{"type":"event","payload":{"event":"connectivity","apn":"a\\",\\"emulated\\":true"}}');
+eq(r.payload.emulated, null, 'event payload: an escaped quote in a value forges no field');
+eq(r.payload.apn, 'a","emulated":true', 'event payload: ...and stays part of the value');
+
+r = P('{"type":"event","payload":{"event":"x","n":42,"m":-3}}');
+eq(r.payload.n, 42, 'event payload: integer');
+eq(r.payload.m, -3, 'event payload: negative integer');
+
+eq(length(keys(P('{"type":"event"}').payload)), 0, 'event without payload: empty object');
+
 // --- modem_esim op router (the done-routing surface LuCI calls) --------------
 //
 // No lpac on the host (lpac_path points at nothing) -> every lpac path takes

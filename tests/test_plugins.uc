@@ -6,6 +6,7 @@
 import * as fs from 'fs';
 import * as plugins from 'wwand/plugins.uc';
 import * as simops from 'wwand/simops.uc';
+import * as daemon_mod from 'wwand/daemon.uc';
 import { eq, ok, done } from './lib/check.uc';
 
 // --- discovery -------------------------------------------------------------------
@@ -93,6 +94,31 @@ ok(got?.error != 'esim_managed', 'lock: a card no plugin manages is not locked')
 
 eq(self.connection_token('m0'), 'wan_b:4', 'token: the connected context and its generation');
 eq(self.connection_token('m1'), null, 'token: null for a modem with nothing connected');
+
+// --- the daemon's deps: sim_upsert re-reads the config after a write --------------
+
+{
+	let captured = null, upserts = [], reloads = 0;
+	let answer = { written: true, section: 'wwsim_1' };
+	let d = daemon_mod.create({ deps: {
+		log: () => null,
+		plugins: [ { name: 'cap', options: [], mod: { create: (dd) => { captured = dd; return {}; } } } ],
+		sim_upsert: (iccid, fields, origin, opts) => { push(upserts, [ iccid, fields, origin, opts ]); return answer; },
+	} });
+
+	d.reload = () => reloads++;
+	d.esim_guard('m0', 'enable');   // loads the plugins
+	ok(type(captured?.sim_upsert) == 'function', 'deps: a plugin gets sim_upsert');
+
+	let r = captured.sim_upsert('8949', { apn: 'a' }, 'cap', { create_only: true });
+	eq(r, answer, 'deps: sim_upsert answers what the writer said');
+	eq(upserts, [ [ '8949', { apn: 'a' }, 'cap', { create_only: true } ] ], 'deps: ...having passed everything on');
+	eq(reloads, 1, 'deps: a write is re-read at once');
+
+	answer = { written: false, reason: 'foreign' };
+	captured.sim_upsert('8949', { apn: 'a' }, 'cap');
+	eq(reloads, 1, 'deps: nothing written, nothing reloaded');
+}
 
 for (let f in fs.lsdir(tmp) ?? [])
 	fs.unlink(sprintf('%s/%s', tmp, f));

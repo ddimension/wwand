@@ -522,4 +522,73 @@ function mkdeps(u, extra) {
 	eq(type(d.recovery_fx?.run), 'function', 'recovery_fx: ...one that can run a command');
 }
 
+// --- sim_upsert: a module's per-SIM section, never the user's ---------------
+//
+// The rule that matters is the one autosetup_fill keeps for the interface: a
+// value the user wrote wins over anything reported. Here a card or an eIM does
+// the reporting (an SGP.32 assistant, SGP.32 v1.3 5.9.24).
+{
+	let u = fake_uci({});
+	let d = mkdeps(u);
+	let ICC = '89000123456789012342';
+	let r = d.sim_upsert(ICC, { apn: 'iot.example', pdp_type: 'ipv4v6', username: 'u', password: 'p', auth: 'both' }, 'ipa');
+
+	eq(r, { written: true, section: 'wwsim_' + ICC }, 'sim_upsert: a new section, named after the ICCID');
+	eq(u.state['wwsim_' + ICC]['.type'], 'wwand_sim', 'sim_upsert: of type wwand_sim');
+	eq(u.state['wwsim_' + ICC].iccid, ICC, 'sim_upsert: matched by ICCID');
+	eq(u.state['wwsim_' + ICC].origin, 'ipa', 'sim_upsert: marked with its origin');
+	eq(u.state['wwsim_' + ICC].apn, 'iot.example', 'sim_upsert: apn written');
+	eq(u.commits, 1, 'sim_upsert: committed once');
+
+	r = d.sim_upsert(ICC, { apn: 'iot.example', pdp_type: 'ipv4v6', username: 'u', password: 'p', auth: 'both' }, 'ipa');
+	eq(r.reason, 'unchanged', 'sim_upsert: the same values again write nothing');
+	eq(u.commits, 1, 'sim_upsert: ...and commit nothing');
+
+	r = d.sim_upsert(ICC, { apn: 'other.example' }, 'ipa');
+	eq(r.written, true, 'sim_upsert: its own section is updated');
+	eq(u.state['wwsim_' + ICC].apn, 'other.example', 'sim_upsert: new apn');
+	eq(u.state['wwsim_' + ICC].username, null, 'sim_upsert: a field no longer reported is removed');
+
+	r = d.sim_upsert(ICC, { apn: '' }, 'ipa', { create_only: true });
+	eq(r.reason, 'exists', 'sim_upsert: create_only leaves an existing section alone');
+	eq(u.state['wwsim_' + ICC].apn, 'other.example', 'sim_upsert: ...with what is in it');
+
+	// the user's section for the same card: never touched
+	u = fake_uci({ mysim: { '.type': 'wwand_sim', iccid: ICC, apn: 'hand.made' } });
+	d = mkdeps(u);
+	r = d.sim_upsert(ICC, { apn: 'iot.example' }, 'ipa');
+	eq(r, { written: false, section: 'mysim', reason: 'foreign' }, 'sim_upsert: a hand-written section for the card wins');
+	eq(u.state.mysim.apn, 'hand.made', 'sim_upsert: ...and keeps its value');
+	eq(u.commits, 0, 'sim_upsert: ...nothing committed');
+
+	// a section with our name that is something else
+	u = fake_uci({ ['wwsim_' + ICC]: { '.type': 'interface', proto: 'wwand' } });
+	d = mkdeps(u);
+	eq(d.sim_upsert(ICC, { apn: 'x' }, 'ipa').reason, 'foreign', 'sim_upsert: a name taken by another section is not reused');
+	eq(u.state['wwsim_' + ICC].apn, null, 'sim_upsert: ...and not written into');
+
+	// another module's section for the card is not ours either
+	u = fake_uci({ s1: { '.type': 'wwand_sim', iccid: ICC, origin: 'other', apn: 'o' } });
+	d = mkdeps(u);
+	eq(d.sim_upsert(ICC, { apn: 'x' }, 'ipa').reason, 'foreign', 'sim_upsert: another origin is foreign too');
+
+	// an emulated card reports nothing: a section with just the ICCID
+	u = fake_uci({});
+	d = mkdeps(u);
+	r = d.sim_upsert(ICC, {}, 'ipa', { create_only: true });
+	eq(r.written, true, 'sim_upsert: an empty report still creates the section');
+	eq(u.state['wwsim_' + ICC].apn, null, 'sim_upsert: ...without an apn (overrides nothing)');
+
+	// what the parser would only warn about is not written
+	u = fake_uci({});
+	d = mkdeps(u);
+	d.sim_upsert(ICC, { apn: 'a', pdp_type: 'non-ip', auth: 'eap', mtu: '1400' }, 'ipa');
+	eq(u.state['wwsim_' + ICC].pdp_type, null, 'sim_upsert: an unknown pdp_type is dropped');
+	eq(u.state['wwsim_' + ICC].auth, null, 'sim_upsert: an unknown auth is dropped');
+	eq(u.state['wwsim_' + ICC].mtu, null, 'sim_upsert: only per-SIM options are written');
+
+	eq(d.sim_upsert('8900xyz', {}, 'ipa').reason, 'invalid', 'sim_upsert: an ICCID that is not one is refused');
+	eq(d.sim_upsert(ICC, {}, 'Bad Origin').reason, 'invalid', 'sim_upsert: an origin that is not a name is refused');
+}
+
 done('test_deps');

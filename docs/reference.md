@@ -90,6 +90,11 @@ wwand section types plus the netifd interface — no separate config file:
   put into `option iccid` is accepted too) — but the IMSI is only readable
   *after* PIN unlock, so a `pincode` override needs the real ICCID; the
   apn/auth/credential overrides (incl. the LTE attach APN) work with either.
+  A section named `wwsim_<iccid>` with **`option origin`** was written by a
+  plugin (an SGP.32 assistant reports the enabled profile's connectivity
+  parameters this way). The plugin keeps it current and never touches any other
+  section: a hand-written `wwand_sim` for the same card wins over it, and
+  deleting the `origin` line takes the section over for good.
 - **`config interface '<name>'`** with `option proto 'wwand'` — the connection:
   `option modem <name>` + `apn`, `pdp_type`, `auth`, `username`, `password`,
   `profile`, `mux_id` (0 = no mux, N = channel N), `mtu`, `use_pushed_mtu`,
@@ -2075,7 +2080,13 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
 - **deps:** `modem_of`, `connection_token` (changes with every new data
   session, null while none is up), `modem_reset`, `esim`, `esim_bridge`
   (whose `session_run` runs another stdio-APDU process on the card under
-  the same claim as lpac) and `esim_refresh`.
+  the same claim as lpac; its events carry their flat payload fields, and
+  `session_download(ref, code, cc, cb)` runs an lpac download for the session
+  while that session waits in an event), `esim_refresh` and
+  `sim_upsert(iccid, fields, origin, opts)`. That last one writes the plugin's
+  own `wwsim_<iccid>` section and never touches a user's. `opts.create_only`
+  writes only when there is no section yet. Written values are re-read at
+  once.
 - **ubus:** `modem_plugin` reaches `ops`; `modem_plugin_status` reaches only
   `read_ops`.
 - **CLI:** A command a package adds to `wwandctl` is

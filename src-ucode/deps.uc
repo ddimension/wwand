@@ -33,6 +33,7 @@
 
 import * as board from 'wwand.board';
 import * as config from 'wwand.config';
+import { SIM_OVERRIDABLE } from 'wwand.context_common';
 import * as discovery from 'wwand.discovery';
 import * as logmod from 'wwand.log';
 import * as modeswitch from 'wwand.modeswitch';
@@ -388,6 +389,101 @@ export function create(o)
 			cursor.delete('network', iface_section, 'autosetup');
 			cursor.commit('network');
 			return true;
+		},
+		// A per-SIM section written for a module, not by the user: an SGP.32
+		// assistant reporting the connectivity parameters of the profile it
+		// just enabled (SGP.32 v1.3 5.9.24) is the case it exists for. One
+		// section per ICCID, `wwsim_<iccid>`, marked `option origin <origin>`.
+		//
+		// IT NEVER TOUCHES A SECTION IT DID NOT WRITE. Any other wwand_sim
+		// for the same ICCID (no origin, or another one) is the user's, and a
+		// hand-written override must beat whatever a card or an eIM reports —
+		// the same rule autosetup_fill keeps for the interface. Removing the
+		// `origin` line is how a user takes a written section over.
+		//
+		// fields: the SIM_OVERRIDABLE options; null or '' removes one. An
+		// unknown pdp_type or auth is dropped rather than written, because the
+		// parser would only warn about it and fall back anyway.
+		// opts.create_only: write only when there is no section yet. For a
+		// card that reports nothing (an emulated consumer eUICC): the section
+		// is left for the user to fill in, and the next report must not empty
+		// what they put there.
+		// -> { written, section?, reason? } with reason 'invalid' | 'foreign'
+		//    | 'exists' | 'unchanged'
+		sim_upsert: (iccid, fields, origin, opts) => {
+			if (type(iccid) != 'string' || !match(iccid, /^[0-9]{18,20}[Ff]?$/) ||
+			    type(origin) != 'string' || !match(origin, /^[a-z0-9_]+$/))
+				return { written: false, reason: 'invalid' };
+
+			let cursor = o.cursor();
+			let name = 'wwsim_' + lc(iccid);
+			let mine = null, foreign = null;
+
+			cursor.foreach('network', 'wwand_sim', (s) => {
+				if (lc(s.iccid ?? '') != lc(iccid))
+					return;
+
+				if (s.origin == origin)
+					mine = s['.name'];
+				else
+					foreign = s['.name'];
+			});
+
+			if (foreign)
+				return { written: false, section: foreign, reason: 'foreign' };
+
+			// the name is taken by something that is not our section for
+			// this card (another type, another ICCID): not ours either
+			if (!mine && cursor.get('network', name) != null)
+				return { written: false, section: name, reason: 'foreign' };
+
+			if (mine && opts?.create_only)
+				return { written: false, section: mine, reason: 'exists' };
+
+			name = mine ?? name;
+
+			let allowed = {
+				pdp_type: [ 'ipv4', 'ipv6', 'ipv4v6' ],
+				auth: [ 'none', 'pap', 'chap', 'both' ],
+			};
+			let want = {};
+
+			for (let k in SIM_OVERRIDABLE) {
+				let v = fields?.[k];
+
+				v = (v != null && v != '') ? sprintf('%s', v) : null;
+
+				if (v != null && allowed[k] && !(v in allowed[k]))
+					v = null;
+
+				want[k] = v;
+			}
+
+			if (mine) {
+				let same = true;
+
+				for (let k, v in want)
+					if ((cursor.get('network', name, k) ?? null) != v)
+						same = false;
+
+				if (same)
+					return { written: false, section: name, reason: 'unchanged' };
+			} else {
+				cursor.set('network', name, 'wwand_sim');
+				cursor.set('network', name, 'iccid', iccid);
+				cursor.set('network', name, 'origin', origin);
+			}
+
+			for (let k, v in want)
+				if (v == null)
+					cursor.delete('network', name, k);
+				else
+					cursor.set('network', name, k, v);
+
+			cursor.commit('network');
+			logmod.log('notice', 'sim_upsert: %s %s for ICCID %s (origin %s)',
+				mine ? 'updated' : 'created', name, iccid, origin);
+			return { written: true, section: name };
 		},
 		// RNDIS v6 model (see docs/reference.md "RNDIS IPv6"): the modem's
 		// v6 arrives via RA on the parent netdev; a dhcpv6 subinterface

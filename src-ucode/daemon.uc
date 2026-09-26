@@ -350,7 +350,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:876-879 warns "references
+	// produces no entry for it at all (config.uc:878-881 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -3354,6 +3354,18 @@ export function create(opts)
 			esim: () => load_esim(),
 			esim_bridge: () => self.esim_bridge(),
 			esim_refresh: (ref, eid, slot, cb) => self.esim_refresh(ref, eid, slot, cb),
+			// a per-SIM section for the plugin (deps.uc sim_upsert); a write
+			// is re-read at once, so the next dial of that card uses it
+			sim_upsert: (iccid, fields, origin, opts) => {
+				let r = deps.sim_upsert
+					? deps.sim_upsert(iccid, fields, origin, opts)
+					: { written: false, reason: 'unsupported' };
+
+				if (r?.written && self.reload)
+					self.reload();
+
+				return r;
+			},
 		},
 	});
 

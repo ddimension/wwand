@@ -362,8 +362,10 @@ function iface_id(name, s, result)
 	return v;
 };
 
+// `origin` marks a section a module wrote (deps.uc sim_upsert) and is read
+// by nothing else: it only has to not be warned about
 const SIM_KNOWN_OPTS = [ 'modem', 'iccid', 'imsi', 'pincode', 'apn', 'auth',
-	'username', 'password', 'plmn_list', 'pdp_type' ];
+	'username', 'password', 'plmn_list', 'pdp_type', 'origin' ];
 
 // flag section options the parser does not consume; suggest the known option
 // the unknown one is a prefix of (or vice versa) — catches pin/pincode-style
