@@ -72,7 +72,24 @@ export function install(self, o)
 				: ok(false) },
 		], (be) => {
 			if (be == 'mbim')
-				return mbim_backend.get_signal(self.mbim, (s) => {
+				return mbim_backend.get_signal(self.mbim, (s, blank) => {
+					// once per change, not per tick: which RATs Signal State
+					// answers with placeholders. Shown as "no reading" rather
+					// than -157 dBm, and the log is what tells a reader that
+					// the modem, not wwand, left the value out (#30).
+					// A query that failed has no `blank` and says nothing about
+					// the readings: counting it as "measurements again" would
+					// log a flap on every intermittent failure.
+					if (blank != null) {
+						let bl = join(',', blank);
+
+						if (bl != (self._sig_blank ?? ''))
+							log('notice', (bl != '')
+								? sprintf('signal: MBIM Signal State reports no measurement for %s (all-zero indexes) — shown as no reading', bl)
+								: 'signal: MBIM Signal State reports measurements again');
+						self._sig_blank = bl;
+					}
+
 					outcome('_sig_be', s != null);
 					if (s) self.signal = s;
 					cb();

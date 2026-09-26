@@ -1605,8 +1605,8 @@ export function create(opts)
 		// over the same channel, exactly the first bring-up; never a SYNC (see
 		// below).
 		if (self.pt && pt_stale()) {
-			log('notice', sprintf('qmi-over-mbim: %d passthrough requests failed in a row — rebuilding its QMI clients',
-				self.pt.shim.failures));
+			log('notice', sprintf('qmi-over-mbim: %d passthrough requests failed in a row over %d s — rebuilding its QMI clients',
+				self.pt.shim.failures, time() - (self.pt.shim.failing_since || time())));
 			drop_pt();
 		}
 
@@ -1694,6 +1694,13 @@ export function create(opts)
 					}
 
 					self.pt = { shim: shim, ctl: ctl, nas: nas, dsd: dsd };
+
+					// the counterpart of the "rebuilding" line: without it a
+					// log shows the attempt and never whether it took
+					if (self._pt_built)
+						log('notice', sprintf('qmi-over-mbim: passthrough rebuilt — QMI answering again (NAS cid %d%s)',
+							nas.cid, dsd ? sprintf(', DSD cid %d', dsd.cid) : ''));
+
 					self._pt_built = true;
 					complete(true);
 				};
@@ -1993,7 +2000,7 @@ export function create(opts)
 		// whole block means the first throwing destroy skips the clients after it
 		// AND the shim close — and with the stack already detached above, that
 		// strands a shim that is still open with clients registered on it
-		// (qmi_over_mbim.uc:114).
+		// (qmi_over_mbim.uc:135).
 		if (pt) {
 			// GIVE THE SESSION-LONG CIDs BACK FIRST, while ctl and the shim are
 			// still up. These were allocated out of the MODEM's client table

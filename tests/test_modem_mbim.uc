@@ -1279,6 +1279,16 @@ function assert_stale_passthrough_is_rebuilt() {
 				ok(!m._pt_failed, 'pt-stale: and the passthrough is not written off');
 				ok(length(filter(logs, (l) => index(l, 'rebuilding its QMI clients') >= 0)) == 1,
 					'pt-stale: the rebuild is logged');
+				// the default log keeps notices: when QMI went away and what the
+				// modem answered, once per run rather than per request
+				let runs = length(filter(logs, (l) => index(l, 'passthrough request failed (svc 3 msg 0x004f') >= 0));
+				let errs = length(filter(logs, (l) => index(l, 'passthrough error ') >= 0));
+				ok(runs >= 1 && runs * 4 < errs,
+					'pt-stale: the first failure of a run is a notice naming the request — once per run, not per request');
+				eq(length(filter(logs, (l) => index(l, 'passthrough rebuilt — QMI answering again') >= 0)), 1,
+					'pt-stale: ...and the rebuild that took is logged, not only the attempt');
+				ok(length(filter(logs, (l) => index(l, 'rebuilding the passthrough failed') >= 0)) == 1,
+					'pt-stale: as is the one that did not');
 				next();
 			});
 			});

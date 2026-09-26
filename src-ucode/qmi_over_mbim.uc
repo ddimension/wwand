@@ -26,8 +26,10 @@ import * as qmi_pt from 'wwand.codec.mbim_schema.qmi_passthrough';
 export function create(mc, opts)
 {
 	// failures: passthrough requests that failed IN A ROW, reset by the next
-	// one that is answered; modem_mbim rebuilds the stack when it runs up
-	let self = { clients: {}, closed: false, failures: 0 };
+	// one that is answered; modem_mbim rebuilds the stack when it runs up.
+	// failing_since: time() of the first failure of that run (0 = none) — the
+	// log states how long QMI was gone, which the count alone cannot say.
+	let self = { clients: {}, closed: false, failures: 0, failing_since: 0 };
 	let log = opts?.log ?? ((level, msg) => null);
 
 	// route a decoded QMUX frame (response or indication) to its client
@@ -88,7 +90,21 @@ export function create(mc, opts)
 		mc.command_raw(qmi_pt.service, qmi_pt.CID_QMI_MSG, frame, (err, info) => {
 			if (err) {
 				self.failures++;
-				log('debug', sprintf('qmi-over-mbim: passthrough error %J', err));
+
+				// THE FIRST FAILURE OF A RUN IS A NOTICE, the rest stay debug:
+				// the one line an operator's default log keeps has to say when
+				// QMI went away and what the modem answered, because by the time
+				// the rebuild line appears the cause has scrolled off
+				// (ddimension/wwand#30, where it took a debug log to see it).
+				if (self.failures == 1) {
+					self.failing_since = time();
+					log('notice', sprintf('qmi-over-mbim: passthrough request failed (svc %d msg 0x%04x: %s) — QMI over MBIM may be gone; counting',
+						req?.service ?? -1, req?.msg_id ?? 0,
+						(err.error == 'mbim') ? (mbim.status_name(err.status) ?? sprintf('status %d', err.status))
+						                      : (err.error ?? '?')));
+				}
+
+				log('debug', sprintf('qmi-over-mbim: passthrough error %J (%d in a row)', err, self.failures));
 
 				// The modem has no QMI passthrough service (or rejected it). There
 				// is no QMUX reply to dispatch, so synthesize a QMI error response
@@ -102,7 +118,12 @@ export function create(mc, opts)
 				return;
 			}
 
+			if (self.failures > 0)
+				log('notice', sprintf('qmi-over-mbim: passthrough answering again after %d failed request%s over %d s',
+					self.failures, (self.failures == 1) ? '' : 's', time() - self.failing_since));
+
 			self.failures = 0;
+			self.failing_since = 0;
 			deliver(info);
 		}, { no_recovery: true });   // a vendor CID's refusal is not a channel fault
 

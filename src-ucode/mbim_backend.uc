@@ -461,9 +461,16 @@ function rssi_dbm(idx)
 // is a display choice in a CLI; on a router it would blank the signal bars at
 // the moment the signal is best. The domain check below rejects the sentinel
 // and anything outside the 7-bit index space, and nothing else.
+//
+// Index 0 IS read as no reading, though, and that is not a display choice:
+// "below -156 dBm" is under the floor at which a UE can camp on a cell at all,
+// so a serving cell reported there is a cell the modem did not measure. An
+// RM520N showed exactly that: sig_lte=[rsrp -157 snr -23.5] for hours on an
+// NR SA registration with no LTE carrier in use, the indexes behind both 0
+// (evidence: ddimension/wwand#30, 2026-09-24).
 function rsrp_dbm(coded)
 {
-	return (coded != null && coded <= NR_CODED_MAX) ? (coded - 157) : null;
+	return (coded != null && coded > 0 && coded <= NR_CODED_MAX) ? (coded - 157) : null;
 }
 
 // Signal State SNR in 0.1 dB units to match QMI self.signal snr (rendered /10
@@ -471,9 +478,13 @@ function rsrp_dbm(coded)
 // (mbimcli-basic-connect.c:1887), top bucket 127 = 40.0 dB. Note this is NOT
 // the Base Stations Info SINR encoding, which steps in whole dB — see
 // NR_SINR_OFFSET.
+//
+// Index 0 ("below -23 dB") is no reading for the same reason as RSRP's: no
+// serving cell is decoded there, and the same #30 log showed it beside a live
+// NR RSRP of -74 dBm — a placeholder, not a measurement.
 function snr_tenths(coded)
 {
-	return (coded != null && coded <= NR_CODED_MAX) ? (coded * 5 - 235) : null;
+	return (coded != null && coded > 0 && coded <= NR_CODED_MAX) ? (coded * 5 - 235) : null;
 }
 
 // "26201" / "262001" -> "262/01" (matching the QMI 'plmn' decode: "mcc/mnc")
@@ -496,6 +507,10 @@ function plmn_str(provider_id)
 // below simply finds nothing, leaving the RSSI-only line at the end. A device
 // that volunteers the v2 tail is read in full. So this degrades rather than
 // misparses; what it does NOT do is prove the device speaks v2.
+//
+// cb(signal, blank): `blank` lists the RATs whose RsrpSnr entry carried no
+// reading at all (both indexes 0, see rsrp_dbm) and was therefore left out —
+// so the caller can log the placeholder instead of a -157 dBm cell.
 export function get_signal(mc, cb)
 {
 	mc.command(bc, 'SIGNAL_STATE_V2', 'query', {}, (err, data) => {
@@ -503,12 +518,26 @@ export function get_signal(mc, cb)
 			return cb(null);
 
 		let out = {};
+		let blank = [];
 		let rssi = rssi_dbm(data.rssi);
 
 		for (let e in (data.rsrp_snr ?? [])) {
 			let st = +(e.system_type ?? 0);
 			let rsrp = rsrp_dbm(e.rsrp);
 			let snr = snr_tenths(e.snr);
+
+			// an entry with no reading is left out either way; only the
+			// all-zero placeholder is NAMED, because that is what the log
+			// line says it saw (the unknown marker is not a placeholder)
+			if (rsrp == null && snr == null) {
+				if (e.rsrp == 0 && e.snr == 0) {
+					if (st & ext.DATA_CLASS_LTE)
+						push(blank, 'lte');
+					if (st & (ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA))
+						push(blank, 'nr5g');
+				}
+				continue;
+			}
 
 			if (st & ext.DATA_CLASS_LTE)
 				out.lte = { rssi: rssi, rsrq: null, rsrp: rsrp, snr: snr };
@@ -521,7 +550,7 @@ export function get_signal(mc, cb)
 		if (!out.lte && rssi != null)
 			out.lte = { rssi: rssi, rsrq: null, rsrp: null, snr: null };
 
-		return cb(length(out) ? out : null);
+		return cb(length(out) ? out : null, blank);
 	});
 };
 

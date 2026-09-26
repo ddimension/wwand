@@ -493,9 +493,49 @@ function s_signal_unusable(next) {
 	]);
 	let mc = make_mc(sig_schema, { SIGNAL_STATE_V2: { __raw: raw } });
 
-	mc.open(() => backend.get_signal(mc, (sig) => {
+	mc.open(() => backend.get_signal(mc, (sig, blank) => {
+		eq(blank, [], 'signal unusable: the unknown marker is not reported as an all-zero placeholder');
 		eq(sig.nr5g?.rsrp, null, 'signal unusable: 0xFFFFFFFF is the unknown marker');
 		eq(sig.nr5g?.snr, null, 'signal unusable: 128 is outside the 7-bit index space');
+		next();
+	}));
+}
+
+// INDEX 0 IS A PLACEHOLDER, NOT A CELL AT -157 dBm. The RM520N of
+// ddimension/wwand#30 reported this exact pair for hours on an NR SA
+// registration: an LTE entry with both indexes 0 (no LTE carrier in use), and
+// an NR entry with a live RSRP beside an SNR index of 0.
+function s_signal_placeholder(next) {
+	let sig_schema = { service: bc.service,
+		commands: { SIGNAL_STATE_V2: bc.commands.SIGNAL_STATE_V2 } };
+	let raw = build_signal(99, [
+		{ rsrp: 0,  snr: 0, system_type: ext.DATA_CLASS_LTE },
+		{ rsrp: 83, snr: 0, system_type: ext.DATA_CLASS_5G_SA },   // -74 dBm
+		{ rsrp: 1,  snr: 1, system_type: ext.DATA_CLASS_5G_NSA },  // the floor, a reading
+	]);
+	let mc = make_mc(sig_schema, { SIGNAL_STATE_V2: { __raw: raw } });
+
+	mc.open(() => backend.get_signal(mc, (sig, blank) => {
+		eq(sig.lte, null, 'signal placeholder: an all-zero LTE entry is no LTE reading, not -157 dBm');
+		eq(blank, [ 'lte' ], 'signal placeholder: ...and is named, so the caller can log it');
+		eq(sig.nr5g?.rsrp, -156, 'signal placeholder: index 1 stays the floor, a reading');
+		eq(sig.nr5g?.snr, -230, 'signal placeholder: ...as does SNR index 1');
+		next();
+	}));
+}
+
+function s_signal_placeholder_snr(next) {
+	let sig_schema = { service: bc.service,
+		commands: { SIGNAL_STATE_V2: bc.commands.SIGNAL_STATE_V2 } };
+	let raw = build_signal(99, [
+		{ rsrp: 83, snr: 0, system_type: ext.DATA_CLASS_5G_SA },
+	]);
+	let mc = make_mc(sig_schema, { SIGNAL_STATE_V2: { __raw: raw } });
+
+	mc.open(() => backend.get_signal(mc, (sig, blank) => {
+		eq(sig.nr5g?.rsrp, -74, 'signal placeholder: a live NR RSRP is kept');
+		eq(sig.nr5g?.snr, null, 'signal placeholder: ...and the SNR index 0 beside it is no reading, not -23.5 dB');
+		eq(blank, [], 'signal placeholder: an entry with one reading is not blank');
 		next();
 	}));
 }
@@ -849,7 +889,7 @@ function s_at_over_mbim_compal(next) {
 
 // --- runner ------------------------------------------------------------------
 
-let scenarios = [ s_signal, s_signal_saturated, s_signal_unusable, s_cells, s_cells_unknown,
+let scenarios = [ s_signal, s_signal_saturated, s_signal_unusable, s_signal_placeholder, s_signal_placeholder_snr, s_cells, s_cells_unknown,
 		  s_cells_out_of_range, s_cells_signed_physical, s_cells_signed_sinr_in_index_range, s_cells_unknown_rsrp_keeps_the_rest, s_cells_coded_still_coded, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
 	s_at_over_mbim, s_at_over_mbim_compal ];
 let i = 0;
