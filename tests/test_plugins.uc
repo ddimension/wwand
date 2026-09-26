@@ -152,6 +152,32 @@ eq(self.connection_token('m1'), null, 'token: null for a modem with nothing conn
 	eq(res.released, 7, 'qmi_release: and takes it back through the modem, which owns it');
 }
 
+// --- sim_changed: a plugin that swaps the card gets the slot switch's process ---
+
+{
+	let captured = null;
+	let d = daemon_mod.create({ deps: {
+		log: () => null,
+		plugins: [ { name: 'cap', options: [], mod: { create: (dd) => { captured = dd; return {}; } } } ],
+	} });
+
+	d.esim_guard('m0', 'enable');   // loads the plugins
+	ok(type(captured?.sim_changed) == 'function', 'deps: a plugin gets sim_changed');
+
+	let m = { info: { iccid: '8949', imsi: '26201', msisdn: '49' }, sim_note: 'session closed: card removed',
+	          active_sim: { pincode: '1234' }, _esim_be: 'at', _apdu_be: 'at', esim_info: {}, _gen: 1 };
+
+	d.modems = { m0: { modem: m } };
+
+	eq(captured.sim_changed('nope', 'x'), false, 'sim_changed: an unknown modem is a no-op');
+	eq(captured.sim_changed('m0', 'remote SIM'), true, 'sim_changed: a running modem is told');
+	eq([ m.info.iccid, m.info.imsi, m.info.msisdn ], [ null, null, null ],
+	   'sim_changed: the old card\'s identity is forgotten, not shown for the new one');
+	eq(m.active_sim, null, 'sim_changed: ...and its per-SIM override, whose PIN must not reach the new card');
+	eq(m.sim_note, null, 'sim_changed: ...and its parting note');
+	eq([ m._esim_be, m._apdu_be, m.esim_info ], [ null, null, null ], 'sim_changed: ...and the eSIM/APDU caches');
+}
+
 for (let f in fs.lsdir(tmp) ?? [])
 	fs.unlink(sprintf('%s/%s', tmp, f));
 fs.rmdir(tmp);
