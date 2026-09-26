@@ -2809,6 +2809,50 @@ eq(reattach_err?.error, 'cancelled',
 
 	ok(cid != null, 'extra client release: a client was allocated');
 	eq(released, cid, 'extra client release: teardown sent RELEASE_CID for the plugin\'s CID');
+
+}
+
+// a client given back twice while the modem runs is released ONCE: the
+// second number may already belong to someone else (teardown released it, or
+// the modem was replaced and numbers its CIDs afresh)
+{
+	uloop.init();
+
+	const XSVC = { service: 0x32, messages: { PING: { id: 0x0020, req: {}, resp: {} } } };
+	let mock = mockhub.create({ handlers: base_handlers({ GET_VERSION_INFO: { services: [
+		{ service: 1, major: 1, minor: 60 }, { service: 2, major: 1, minor: 14 },
+		{ service: 3, major: 1, minor: 25 }, { service: 11, major: 1, minor: 22 },
+		{ service: 26, major: 1, minor: 16 }, { service: 0x32, major: 1, minor: 5 } ] } }),
+		schemas: [ XSVC ] });
+	let m, done_once = false;
+
+	m = modem_mod.create({
+		id: 'extra-twice', device: '/dev/mock0', config: {},
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		at: { fx: fakefx.create() },
+		timing: TIMING,
+		deps: {
+			transport_open: mock.transport_open,
+			log: (level, msg) => null,
+			on_event: (mm, event) => {
+				if (event != 'registered' || done_once)
+					return;
+				done_once = true;
+				m.extra_client(XSVC, (err, c) => {
+					m.extra_release(c);
+					m.extra_release(c);
+					uloop.timer(30, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+				});
+			},
+		},
+	});
+	m.start();
+	let guard = uloop.timer(3000, () => uloop.end());
+	uloop.run();
+	guard.cancel();
+
+	eq(length(filter(mock.calls, (c) => c.name == 'RELEASE_CID' && c.args?.release?.service == 0x32)), 1,
+	   'extra client: given back twice, released once');
 }
 
 done('test_modem');

@@ -187,7 +187,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1373) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1568) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:1161), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -342,7 +342,9 @@ export function create(opts)
 			// a stack that is gone, and handing it out would give the plugin a
 			// client nothing releases
 			if (self._gen != gen) {
-				c.destroy();
+				// released, not only destroyed: the transport may still be
+				// up, and a CID left on the modem stays in its table
+				self.release(c);
 				return cb({ error: 'cancelled' }, null);
 			}
 
@@ -352,8 +354,28 @@ export function create(opts)
 	};
 
 	// a plugin giving its client back before teardown
+	// Only a client this modem still owns is released on the wire: teardown
+	// may have released it already, and after a restart `ref` names a NEW
+	// modem, whose CIDs are numbered afresh — releasing the old client's
+	// number there would take away an unrelated client of its own.
 	self.extra_release = function(client, cb) {
-		self.extra_clients = filter(self.extra_clients, (c) => c != client);
+		// ownership and removal in one pass, by identity
+		let owned = false;
+
+		self.extra_clients = filter(self.extra_clients, (c) => {
+			if (c === client) {
+				owned = true;
+				return false;
+			}
+
+			return true;
+		});
+
+		if (!owned) {
+			client?.destroy();
+			return cb ? cb(null) : null;
+		}
+
 		self.release(client, cb);
 	};
 

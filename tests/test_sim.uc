@@ -1675,6 +1675,18 @@ sw_self.modem_sim_switch_slot('m0', 1, (err) => {
 	sw_deferred();
 	eq(sw_reapplied, 1, 'slot-clear: an untouched modem reads the new card');
 
+	// TWO card changes inside the two seconds (a remote SIM that comes and
+	// goes, via the plugin dep sim_changed): no teardown in between, so only
+	// the card-change generation tells the first re-read it is stale
+	sw_self.card_changed('m0', 'first');
+	let first = sw_deferred;
+	sw_self.card_changed('m0', 'second');
+	let second = sw_deferred;
+	first();
+	eq(sw_reapplied, 1, 'card change: the re-read for a card that has already left again is dropped');
+	second();
+	eq(sw_reapplied, 2, 'card change: ...and the one for the card now in place runs');
+
 	// idempotent switch keeps the caches
 	sw_modem._esim_refreshed = true;
 	sw_modem.sim_note = 'session closed: card removed';

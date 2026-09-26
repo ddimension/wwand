@@ -93,7 +93,7 @@ export function pin_block_reason(retries, force)
 
 // A CARD POLL MUST NOT OUTLIVE ITS SESSION. The retries below re-enter
 // unlock_uim/unlock_dms, which re-read modem.uim / modem.dms at entry — and
-// teardown nulls those (modem.uc:1373). An anonymous timer firing after an
+// teardown nulls those (modem.uc:1568). An anonymous timer firing after an
 // unplug or a config reload inside the up-to-10 s poll window therefore
 // dereferenced null, and a throw inside a uloop callback ends the program: the
 // next timer never runs and uloop.run() does not return (measured 2026-09-19).
