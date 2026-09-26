@@ -1560,6 +1560,32 @@ export function create(opts)
 	// via backend.choose in the order native-MBIM -> QMI-passthrough -> AT, the
 	// choice cached per modem (_sig_be/_cells_be/_ca_be/_dsd_be/_regd_be).
 
+	let drop_pt;   // defined beside teardown; forward-declared for _ensure_pt
+
+	// ONE BRING-UP AT A TIME. GET_VERSION_INFO and the CID allocations are
+	// asynchronous, and until they finish self.pt is still null: every probe
+	// arriving meanwhile would start a bring-up of its own, each allocating
+	// modem-side CIDs, and only the last to finish would stay reachable in
+	// self.pt — the others' CIDs could never be released. Callers arriving
+	// while one runs wait for it (pt_waiters).
+	let pt_opening = false, pt_waiters = [];
+
+	// A passthrough whose requests have failed this many times IN A ROW is
+	// rebuilt rather than trusted. The count (qmi_over_mbim.uc `failures`) is of
+	// MBIM-level failures only — a status or a timeout, the channel not carrying
+	// the request. A QMI error reply (a message the firmware lacks, a value it
+	// cannot give) is an answer and resets it, so the per-tick probes of
+	// optional messages can never drive a rebuild.
+	//
+	// What notices: every _ensure_pt caller, which includes the telemetry
+	// dispatch (telemetry_mbim.uc with_pt) and _ensure_uim/_ensure_wms. Code that
+	// holds self.uim / self.wms directly (sim.uc, sms.uc) keeps failing on a dead
+	// stack until one of those runs; with telemetry off that is the next SIM/SMS
+	// op through the ensure functions or a reset.
+	const PT_STALE_AFTER = 5;
+
+	let pt_stale = () => ((self.pt?.shim?.failures ?? 0) >= PT_STALE_AFTER);
+
 	// Lazy, idempotent bring-up of the QMI-over-MBIM passthrough service stack.
 	// The whole QMI client stack runs over the open MBIM channel (qom shim), so
 	// qmi_backend.* works unchanged. Non-fatal: cb(false) simply drops the
@@ -1569,6 +1595,21 @@ export function create(opts)
 	// and tears down the live MBIM data session. GET_VERSION_INFO is issued
 	// directly, then a CID is allocated per needed service.
 	self._ensure_pt = function(cb) {
+		// A STACK THAT STOPPED ANSWERING IS REBUILT, NOT KEPT. The modem can drop
+		// the QMI clients it handed out over the passthrough while the MBIM
+		// session stays up — an RM520N answered every passthrough request with
+		// MBIM_STATUS_FAILURE after the network ended its session and it
+		// re-applied its carrier configuration (evidence: ddimension/wwand#30).
+		// A cached stack that is never re-validated keeps QMI away until the
+		// modem restarts. A rebuild is GET_VERSION_INFO and fresh ALLOCATE_CIDs
+		// over the same channel, exactly the first bring-up; never a SYNC (see
+		// below).
+		if (self.pt && pt_stale()) {
+			log('notice', sprintf('qmi-over-mbim: %d passthrough requests failed in a row — rebuilding its QMI clients',
+				self.pt.shim.failures));
+			drop_pt();
+		}
+
 		if (self.pt)
 			return cb(true);
 
@@ -1577,10 +1618,44 @@ export function create(opts)
 		if (self._pt_failed || !self.mbim)
 			return cb(false);
 
+		push(pt_waiters, cb);
+
+		if (pt_opening)
+			return;
+
+		pt_opening = true;
+
+		let gen = self._gen;
+
 		let shim = qom.create(self.mbim, { log: log });
 		let ctl = client_mod.create(shim, ctlmod.default, 0, hooks);
 
-		let bail = () => { self._pt_failed = true; shim.close(); return cb(false); };
+		let complete = (up) => {
+			let waiters = pt_waiters;
+
+			pt_waiters = [];
+			pt_opening = false;
+
+			for (let w in waiters)
+				w(up);
+		};
+
+		// A bring-up that fails on a modem whose passthrough never worked this
+		// session means it has none, and that is remembered. Once one has worked
+		// (_pt_built), a failure is a stack caught mid-reset: remembering it
+		// would turn one bad moment into no QMI until the next teardown, so it is
+		// simply tried again at the next re-probe — however many times it fails.
+		// A failure caused by a teardown (its destroy() pays the pending request
+		// with an error) says nothing about the modem and remembers nothing.
+		let bail = () => {
+			if (self._gen == gen)
+				self._pt_failed = !self._pt_built;
+			if (self._pt_built && self._gen == gen)
+				log('notice', 'qmi-over-mbim: rebuilding the passthrough failed — trying again at the next re-probe');
+			ctl.destroy();
+			shim.close();
+			complete(false);
+		};
 
 		ctl.request('GET_VERSION_INFO', {}, (verr, vdata) => {
 			if (verr)
@@ -1606,8 +1681,21 @@ export function create(opts)
 					return bail();
 
 				let finish = (dsd) => {
+					// a teardown that ran meanwhile ended the session this stack
+					// was built for; publishing it would hand the next session a
+					// stack on a channel that is gone
+					if (self._gen != gen) {
+						for (let c in [ ctl, nas, dsd ])
+							if (c)
+								c.destroy();
+
+						shim.close();
+						return complete(false);
+					}
+
 					self.pt = { shim: shim, ctl: ctl, nas: nas, dsd: dsd };
-					cb(true);
+					self._pt_built = true;
+					complete(true);
 				};
 
 				if (have[sprintf('%d', dsdmod.default.service)])
@@ -1647,7 +1735,9 @@ export function create(opts)
 	// one factory for the identical _ensure_uim/_ensure_wms bodies. cb() either
 	// way — the caller's probe verifies the service actually answers.
 	let ensure_pt_client = (field, schema) => (cb) => {
-		if (self[field])
+		// a client on a stack that stopped answering goes with the rebuild in
+		// _ensure_pt (drop_pt clears it), so do not hand it out meanwhile
+		if (self[field] && !pt_stale())
 			return cb(self[field]);
 
 		self._ensure_pt((up) => {
@@ -1877,13 +1967,83 @@ export function create(opts)
 		step_open();
 	};
 
+	// Drop the whole passthrough stack: give its session-long CIDs back, destroy
+	// its clients and close the shim. Called by teardown, and by _ensure_pt when
+	// the passthrough has stopped answering and is rebuilt.
+	drop_pt = () => {
+		// DETACH FIRST, clean up after. destroy() pays a client's pending
+		// callbacks synchronously (client.uc:217), and one of those may be a
+		// probe that calls _ensure_pt or _ensure_uim again. Still seeing the
+		// stack being dropped, it would drop it a second time and start a
+		// bring-up in the middle of this one.
+		//
+		// uim and wms go with it: they rode on the same shim, and
+		// ensure_pt_client caches into self[field] and short-circuits when it is
+		// set — a wms left behind survived a teardown+retry on the same object,
+		// and every later SMS op used a client bound to a shim that is gone,
+		// failing forever and feeding the proto-error counter, which eventually
+		// power-cycles a healthy modem.
+		let pt = self.pt, uim = self.uim, wms = self.wms;
+
+		self.pt = null;
+		self.uim = null;
+		self.wms = null;
+
+		// EACH CLEANUP GUARDED ON ITS OWN, not the sequence. One catch around the
+		// whole block means the first throwing destroy skips the clients after it
+		// AND the shim close — and with the stack already detached above, that
+		// strands a shim that is still open with clients registered on it
+		// (qmi_over_mbim.uc:114).
+		if (pt) {
+			// GIVE THE SESSION-LONG CIDs BACK FIRST, while ctl and the shim are
+			// still up. These were allocated out of the MODEM's client table
+			// and destroy() deliberately does not release them (client.uc:201)
+			// — closing the HOST's MBIM session is not shown to reset the
+			// modem's embedded QMI client table, so every daemon reload leaked
+			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
+			// table has room for a handful. Same burst modem.uc:1479 does for
+			// the native side, which the passthrough never had. ctl is NOT in this list: it is the
+			// implicit client (cid 0) and it is what carries RELEASE_CID for
+			// all the others, so it has to outlive them.
+			for (let c in [ pt.nas, pt.dsd, uim, wms ]) {
+				if (!c || !pt.ctl)
+					continue;
+
+				try {
+					pt.ctl.request('RELEASE_CID',
+						{ release: { service: c.service, cid: c.cid } },
+						() => null, { timeout: 3000, no_recovery: true });
+				} catch (e) {
+					log('err', sprintf('passthrough drop: releasing a CID threw: %s', e));
+				}
+			}
+
+			for (let c in [ pt.ctl, pt.nas, pt.dsd, uim, wms ]) {
+				if (!c)
+					continue;
+
+				try {
+					c.destroy();
+				} catch (e) {
+					log('err', sprintf('passthrough drop: a client callback threw: %s', e));
+				}
+			}
+
+			try {
+				pt.shim.close();
+			} catch (e) {
+				log('err', sprintf('passthrough drop: closing the shim threw: %s', e));
+			}
+		}
+	};
+
 	self.teardown = function() {
 		// see modem.uc: make_fail refuses to arm a retry while this is raised,
 		// because a failure reported from INSIDE a teardown would arm it after
 		// the cancel pass below and restart a modem that is being stopped. The
 		// QMI backend grew this first; MBIM reaches the same re-arm by its own
 		// route (a synchronous cancellation from the recovery cycle re-arming
-		// settle_timer at :188/:191). Review follow-up, 2026-09-19.
+		// settle_timer at :249/:253). Review follow-up, 2026-09-19.
 		self._teardown_depth = (self._teardown_depth ?? 0) + 1;
 
 		// first, so anything the destroys below call back into can tell that its
@@ -1907,64 +2067,9 @@ export function create(opts)
 		// was complaining about. The QMI teardown wraps its equivalent call for
 		// the same reason; NCM needs none, close_at() discards its queue without
 		// paying it (atcmd.uc:1017). Review follow-up, 2026-09-19.
-		// EACH CLEANUP GUARDED ON ITS OWN, not the sequence. One catch around the
-		// whole block means the first throwing destroy skips the clients after it
-		// AND the shim close — and `self.pt = null` below then drops the only
-		// handle to a shim that is still open with clients registered on it
-		// (qmi_over_mbim.uc:110).
-		if (self.pt) {
-			// GIVE THE SESSION-LONG CIDs BACK FIRST, while ctl and the shim are
-			// still up. These were allocated out of the MODEM's client table
-			// and destroy() deliberately does not release them (client.uc:201)
-			// — closing the HOST's MBIM session is not shown to reset the
-			// modem's embedded QMI client table, so every daemon reload leaked
-			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
-			// table has room for a handful. Same burst modem.uc:1409 does for
-			// the native side, which the passthrough never had. ctl is NOT in this list: it is the
-			// implicit client (cid 0) and it is what carries RELEASE_CID for
-			// all the others, so it has to outlive them.
-			for (let c in [ self.pt.nas, self.pt.dsd, self.uim, self.wms ]) {
-				if (!c || !self.pt.ctl)
-					continue;
-
-				try {
-					self.pt.ctl.request('RELEASE_CID',
-						{ release: { service: c.service, cid: c.cid } },
-						() => null, { timeout: 3000, no_recovery: true });
-				} catch (e) {
-					log('err', sprintf('teardown: releasing a passthrough CID threw: %s', e));
-				}
-			}
-
-			for (let c in [ self.pt.ctl, self.pt.nas, self.pt.dsd, self.uim, self.wms ]) {
-				if (!c)
-					continue;
-
-				try {
-					c.destroy();
-				} catch (e) {
-					log('err', sprintf('teardown: a passthrough client callback threw: %s', e));
-				}
-			}
-
-			try {
-				self.pt.shim.close();
-			} catch (e) {
-				log('err', sprintf('teardown: closing the passthrough shim threw: %s', e));
-			}
-
-			self.pt = null;
-		}
-
-		// the passthrough-allocated clients (if any) rode on the shim just closed.
-		// BOTH of them: ensure_pt_client caches into self[field] and short-
-		// circuits when it is set, so a wms left behind here survived a
-		// teardown+retry on the same object and every later SMS op used a
-		// client bound to a shim that is gone — failing forever and feeding the
-		// proto-error counter, which eventually power-cycles a healthy modem.
-		self.uim = null;
-		self.wms = null;
+		drop_pt();
 		self._pt_failed = false;
+		self._pt_built = false;
 
 		// WHAT THE OLD MODEM SAID IS NOT WHAT THE NEW ONE SAYS. Both of these
 		// are published in `status`, and both are filled by indications that

@@ -1135,6 +1135,361 @@ function assert_teardown_releases_pt_cids() {
 
 assert_teardown_releases_pt_cids();
 
+// --- a passthrough that stopped answering is rebuilt, not trusted -----------
+//
+// The modem can drop the QMI clients it handed out over the passthrough while
+// the MBIM session stays up: an RM520N answered every passthrough request with
+// MBIM_STATUS_FAILURE (2) for ten hours after the network ended its session and
+// it re-applied its carrier configuration, and _ensure_pt kept handing the
+// ladder the same dead stack (evidence: ddimension/wwand#30). A fake modem side
+// that knows which CIDs it has handed out, and can forget them all.
+import * as qmux_c from 'wwand/codec/qmux.uc';
+import * as tlv_c from 'wwand/codec/tlv.uc';
+
+function passthrough_modem() {
+	let pm = { valid: {}, next: 20, sync: 0, calls: [] };
+	let ok_result = struct.pack('<BHHH', 0x02, 4, 0, 0);
+
+	pm.command_raw = function(su, cid, frame, cb, opts) {
+		let d = qmux_c.decode(frame);
+
+		push(pm.calls, [ d.service, d.msg_id, d.cid ]);
+
+		let answer = (msg, obj) => uloop.timer(0, () => cb(null,
+			qmux_c.encode(d.service, d.cid, d.txn, msg.id, ok_result + tlv_c.pack(msg.resp ?? {}, obj ?? {}), 'response')));
+
+		if (d.service == 0) {
+			let ctl = ctlmod.default.messages;
+
+			if (d.msg_id == 0x0027) { pm.sync++; return; }
+			if (d.msg_id == ctl.GET_VERSION_INFO.id && pm.hold) {
+				push(pm.held, () => pm.refuse
+					? cb({ error: 'mbim', status: 2 })
+					: answer(ctl.GET_VERSION_INFO, { services: [ { service: 3, major: 1, minor: 25 } ] }));
+				return;
+			}
+			if (d.msg_id == ctl.GET_VERSION_INFO.id && pm.refuse)
+				return uloop.timer(0, () => cb({ error: 'mbim', status: 2 }));
+			if (d.msg_id == ctl.GET_VERSION_INFO.id)
+				return answer(ctl.GET_VERSION_INFO, { services: [ { service: 3, major: 1, minor: 25 } ] });
+			if (d.msg_id == ctl.ALLOCATE_CID.id) {
+				let a = tlv_c.unpack(ctl.ALLOCATE_CID.req, d.tlvs);
+				let c = pm.next++;
+
+				pm.valid[sprintf('%d:%d', a.service, c)] = true;
+				return answer(ctl.ALLOCATE_CID, { allocation: { service: a.service, cid: c } });
+			}
+			if (d.msg_id == ctl.RELEASE_CID.id)
+				return uloop.timer(0, () => cb({ error: 'mbim', status: 2 }));
+		}
+
+		// a client the modem does not know: MBIM_STATUS_FAILURE, as on the RM520N
+		if (!pm.valid[sprintf('%d:%d', d.service, d.cid)])
+			return uloop.timer(0, () => cb({ error: 'mbim', status: 2 }));
+
+		if (pm.swallow)
+			return;   // a request the modem never answers: it stays pending
+
+		answer(nasmod.default.messages.GET_SIGNAL_INFO,
+			{ lte_signal: { rssi: -60, rsrq: -10, rsrp: -90, snr: 100 } });
+	};
+	pm.ons = 0;
+	pm.on = function() { pm.ons++; };
+	pm.destroy = function() {};
+	pm.forget = () => { pm.valid = {}; };
+	pm.refuse = false;   // GET_VERSION_INFO refused: a stack caught mid-reset
+	pm.hold = false;     // GET_VERSION_INFO answered only when released
+	pm.held = [];
+	pm.swallow = false;  // NAS requests never answered
+	pm.count = (svc, id) => length(filter(pm.calls, (c) => c[0] == svc && c[1] == id));
+
+	return pm;
+}
+
+function assert_stale_passthrough_is_rebuilt() {
+	let logs = [];
+	let m = modem_mbim.create({
+		id: 'pt-stale', device: '/dev/mock-pt', config: {},
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		deps: { log: (lvl, msg) => push(logs, msg), on_event: () => null },
+	});
+	let pm = passthrough_modem();
+
+	m.mbim = pm;
+
+	let first_cid = null, sig = [];
+	let step;
+
+	let ask;
+	ask = (n, done) => {
+		if (n == 0)
+			return done();
+
+		m.pt.nas.request('GET_SIGNAL_INFO', {}, (e) => { push(sig, e == null); ask(n - 1, done); },
+			{ no_recovery: true });
+	};
+
+	step = [
+		// the first bring-up
+		(next) => m._ensure_pt((up) => {
+			eq(up, true, 'pt-stale: the passthrough comes up');
+			first_cid = m.pt?.nas?.cid;
+			next();
+		}),
+		// the modem forgets its clients; one failure alone changes nothing
+		(next) => {
+			pm.forget();
+			ask(1, () => m._ensure_pt((up) => {
+				eq(m.pt?.nas?.cid, first_cid, 'pt-stale: a single failure keeps the stack');
+				next();
+			}));
+		},
+		// failures that an answer interrupts are not a dead stack: an answered
+		// request resets the count, and four failures after it keep the stack
+		(next) => {
+
+			pm.valid[sprintf('%d:%d', 3, first_cid)] = true;
+			sig = [];
+			ask(1, () => {
+				pm.forget();
+				ask(4, () => m._ensure_pt(() => {
+					eq(m.pt?.nas?.cid, first_cid, 'pt-stale: an answer in between resets the count');
+					sig = [];
+					next();
+				}));
+			});
+		},
+		// nothing gets through any more: the next ensure rebuilds
+		(next) => ask(4, () => {
+			eq(sig, [ false, false, false, false ], 'pt-stale: every request fails against forgotten clients');
+			m.uim = { cid: 99, service: 11, destroy: () => null };
+			// a rebuild caught mid-reset fails, and must not write the
+			// passthrough off for good
+			pm.refuse = true;
+			m._ensure_pt((up0) => {
+			eq(up0, false, 'pt-stale: a rebuild the modem refuses fails');
+			ok(!m._pt_failed, 'pt-stale: ...without writing the passthrough off');
+			pm.refuse = false;
+			m._ensure_pt((up) => {
+				eq(up, true, 'pt-stale: the rebuilt passthrough is up');
+				ok(m.pt?.nas?.cid != null && m.pt.nas.cid != first_cid, 'pt-stale: with a freshly allocated NAS client');
+				eq(m.uim, null, 'pt-stale: a client of the dead stack goes with it');
+				ok(!m._pt_failed, 'pt-stale: and the passthrough is not written off');
+				ok(length(filter(logs, (l) => index(l, 'rebuilding its QMI clients') >= 0)) == 1,
+					'pt-stale: the rebuild is logged');
+				next();
+			});
+			});
+		}),
+		// a cached client on a stack that stopped answering is not handed out:
+		// _ensure_uim goes through the rebuild and allocates a new one
+		(next) => {
+			let cid_before = m.pt.nas.cid;
+
+			pm.forget();
+			ask(5, () => {
+				m.uim = { cid: 98, service: 11, destroy: () => null };
+				m._ensure_uim((u) => {
+					ok(u != null && u.cid != 98, 'pt-stale: _ensure_uim does not hand out the dead stack\'s client');
+					ok(m.pt?.nas?.cid != cid_before, 'pt-stale: ...it went through the rebuild');
+					next();
+				});
+			});
+		},
+		(next) => {
+			sig = [];
+			ask(1, () => {
+				eq(sig, [ true ], 'pt-stale: requests are answered again');
+				eq(pm.sync, 0, 'pt-stale: no CTL SYNC ever reached the modem');
+				next();
+			});
+		},
+	];
+
+	let run_step;
+	run_step = (i) => (i < length(step)) ? step[i](() => run_step(i + 1)) : uloop.end();
+	run_step(0);
+	uloop.run();
+}
+
+assert_stale_passthrough_is_rebuilt();
+
+// ...and the bring-up is one, however many callers arrive while it runs: every
+// probe of a telemetry tick can reach _ensure_pt before the first finishes, and
+// each running its own would allocate CIDs of which only the last stay
+// reachable. A callback of the stack being dropped that asks again (destroy()
+// pays pending callbacks synchronously) must not start a second one either.
+function assert_passthrough_bringup_is_single() {
+	let plogs = [];
+	let m = modem_mbim.create({
+		id: 'pt-single', device: '/dev/mock-pt2', config: {},
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		deps: { log: (lvl, msg) => push(plogs, msg), on_event: () => null },
+	});
+	let pm = passthrough_modem();
+	let ctl = ctlmod.default.messages;
+	let answers = [];
+
+	m.mbim = pm;
+	pm.hold = true;
+	m._ensure_pt((up) => push(answers, up));
+	m._ensure_pt((up) => push(answers, up));
+	pm.hold = false;
+
+	uloop.timer(5, () => {
+		eq(pm.count(0, ctl.GET_VERSION_INFO.id), 1, 'pt-single: two callers, one GET_VERSION_INFO');
+		for (let f in pm.held) f();
+
+		uloop.timer(20, () => {
+			eq(answers, [ true, true ], 'pt-single: both callers get the one stack');
+			eq(pm.count(0, ctl.ALLOCATE_CID.id), 1, 'pt-single: one NAS client allocated, not two');
+
+			// a pending request of the stack being dropped asks again from its
+			// cancellation callback
+			let reentered = null;
+
+			pm.swallow = true;
+			m.pt.nas.request('GET_SIGNAL_INFO', {}, () => {
+				m._ensure_pt((up) => { reentered = up; });
+			}, { no_recovery: true, timeout: 60000 });
+			pm.swallow = false;
+			m.pt.shim.failures = 5;
+
+			let versions = pm.count(0, ctl.GET_VERSION_INFO.id);
+			let releases = pm.count(0, ctl.RELEASE_CID.id);
+			let rebuilt = null;
+
+			m._ensure_pt((up) => { rebuilt = up; });
+
+			uloop.timer(20, () => {
+				eq(rebuilt, true, 'pt-single: the rebuild succeeds');
+				eq(reentered, true, 'pt-single: the re-entering callback waits for it instead of dropping again');
+				eq(pm.count(0, ctl.GET_VERSION_INFO.id) - versions, 1, 'pt-single: one rebuild, not two');
+				eq(pm.count(0, ctl.RELEASE_CID.id) - releases, 1,
+					'pt-single: the dropped NAS client is released once, not again from the re-entering callback');
+				eq(length(filter(plogs, (l) => index(l, 'rebuilding its QMI clients') >= 0)), 1,
+					'pt-single: the re-entering callback does not drop the stack a second time');
+				uloop.end();
+			});
+		});
+	});
+	uloop.run();
+}
+
+assert_passthrough_bringup_is_single();
+
+// A modem whose passthrough worked once keeps trying: however many rebuilds a
+// stack caught mid-reset refuses, none of them writes the passthrough off
+// (a second refusal used to latch it for the session). A teardown during a
+// bring-up remembers nothing about the modem either. And a rebuild must not
+// leave an indication handler behind: mc.on has no off.
+function assert_passthrough_rebuild_edges() {
+	let mk = (id) => {
+		let m = modem_mbim.create({
+			id: id, device: '/dev/' + id, config: {},
+			timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+			at: { fx: { read: () => null, glob: () => [] } },
+			recovery: { fx: fakefx.create(), state_dir: '/state' },
+			deps: { log: () => null, on_event: () => null },
+		});
+		let pm = passthrough_modem();
+
+		m.mbim = pm;
+		return [ m, pm ];
+	};
+	let seq = [];
+
+	// two refused rebuilds in a row
+	let m1_p1 = mk('pt-edge1'), m1 = m1_p1[0], p1 = m1_p1[1];
+
+	push(seq, (next) => m1._ensure_pt(() => {
+		p1.forget();
+		p1.refuse = true;
+		m1.pt.shim.failures = 5;
+		m1._ensure_pt((a) => m1._ensure_pt((b) => {
+			eq([ a, b ], [ false, false ], 'pt-edge: two rebuilds refused in a row fail');
+			ok(!m1._pt_failed, 'pt-edge: ...and the second does not write the passthrough off either');
+			p1.refuse = false;
+			m1._ensure_pt((c) => {
+				eq(c, true, 'pt-edge: the next one, once the modem answers, succeeds');
+				eq(p1.ons, 1, 'pt-edge: three bring-ups, one indication handler');
+				next();
+			});
+		}));
+	}));
+
+	// a first bring-up that a teardown overtakes: answered after it, and refused after it
+	let m2_p2 = mk('pt-edge2'), m2 = m2_p2[0], p2 = m2_p2[1];
+
+	push(seq, (next) => {
+		let got = null;
+
+		p2.hold = true;
+		m2._ensure_pt((up) => { got = up; });
+		p2.hold = false;
+		m2.teardown();
+		for (let f in p2.held) f();
+		p2.held = [];
+
+		uloop.timer(20, () => {
+			eq(got, false, 'pt-edge: a bring-up finished after a teardown reports no stack');
+			eq(m2.pt, null, 'pt-edge: ...and publishes none into the new session');
+
+			let m3_p3 = mk('pt-edge3'), m3 = m3_p3[0], p3 = m3_p3[1];
+
+			p3.hold = true;
+			m3._ensure_pt(() => null);
+			p3.hold = false;
+			m3.teardown();
+			p3.refuse = true;
+			for (let f in p3.held) f();
+
+			uloop.timer(20, () => {
+				ok(!m3._pt_failed, 'pt-edge: a failure caused by a teardown does not write the passthrough off');
+				next();
+			});
+		});
+	});
+
+	// telemetry on a cached 'qmi' rung across a dropped stack: no throw
+	let m4_p4 = mk('pt-edge4'), m4 = m4_p4[0], p4 = m4_p4[1];
+
+	push(seq, (next) => m4._ensure_pt(() => {
+		m4._dsd_be = 'qmi';
+		m4._sig_be = 'qmi';
+		p4.forget();
+		p4.refuse = true;
+		m4.pt.shim.failures = 5;
+
+		let threw = null;
+
+		try {
+			m4._refresh_signal(() => {
+				ok(true, 'pt-edge: signal on a cached qmi rung completes while the stack is being rebuilt');
+				try {
+					m4._refresh_data_mode(() => {
+						ok(true, 'pt-edge: data mode likewise');
+						next();
+					});
+				} catch (e) { threw = e; next(); }
+			});
+		} catch (e) { threw = e; next(); }
+
+		uloop.timer(30, () => eq(threw, null, 'pt-edge: telemetry never dereferences a dropped stack'));
+	}));
+
+	let run;
+	run = (i) => (i < length(seq)) ? seq[i](() => run(i + 1)) : uloop.timer(50, () => uloop.end());
+	run(0);
+	uloop.run();
+}
+
+assert_passthrough_rebuild_edges();
+
 // --- the failure line a human actually reads ---------------------------------
 //
 // mbim_client hands the command name and the MBIM_STATUS_ERROR to on_error

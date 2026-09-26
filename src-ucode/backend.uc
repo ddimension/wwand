@@ -66,13 +66,13 @@
 // WHAT THIS DOES NOT REACH, so nobody has to rediscover it: a candidate can
 // decline for a reason of its own that outlives the re-probe. The MBIM
 // passthrough rungs all go through `modem_mbim._ensure_pt`, which latches
-// `_pt_failed` when the SHIM SETUP fails and then declines without trying again
-// until the modem is torn down (modem_mbim.uc:1016,1025,1295). That latch is
-// deliberate — it is what keeps a modem with no passthrough at all (RG650E)
-// from rebuilding a shim on every capability — so re-probing walks the ladder
-// and the top rung still says no. The field case this was written for is the
-// other one: a passthrough that WAS built and later stopped answering, where
-// `self.pt` exists and the probe is a real request.
+// `_pt_failed` when the FIRST bring-up of a session fails and then declines
+// without trying again until the modem is torn down. That latch is deliberate
+// — it is what keeps a modem with no passthrough at all (RG650E) from
+// rebuilding a shim on every capability — so re-probing walks the ladder and
+// the top rung still says no. A passthrough that WAS built and later stopped
+// answering is not latched: `_ensure_pt` drops and rebuilds it (see there), and
+// a re-probe is one of the calls that reaches it.
 const REPROBE_DEFAULT = 30;
 
 // obj: the modem (state carrier); key: the cache slot, e.g. '_apdu_be'.

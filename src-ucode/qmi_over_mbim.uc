@@ -25,7 +25,9 @@ import * as qmi_pt from 'wwand.codec.mbim_schema.qmi_passthrough';
 // create(mc, opts): mc is an opened mbim_client. Returns a hub-shaped object.
 export function create(mc, opts)
 {
-	let self = { clients: {}, closed: false };
+	// failures: passthrough requests that failed IN A ROW, reset by the next
+	// one that is answered; modem_mbim rebuilds the stack when it runs up
+	let self = { clients: {}, closed: false, failures: 0 };
 	let log = opts?.log ?? ((level, msg) => null);
 
 	// route a decoded QMUX frame (response or indication) to its client
@@ -85,6 +87,7 @@ export function create(mc, opts)
 
 		mc.command_raw(qmi_pt.service, qmi_pt.CID_QMI_MSG, frame, (err, info) => {
 			if (err) {
+				self.failures++;
 				log('debug', sprintf('qmi-over-mbim: passthrough error %J', err));
 
 				// The modem has no QMI passthrough service (or rejected it). There
@@ -99,6 +102,7 @@ export function create(mc, opts)
 				return;
 			}
 
+			self.failures = 0;
 			deliver(info);
 		}, { no_recovery: true });   // a vendor CID's refusal is not a channel fault
 
@@ -110,6 +114,9 @@ export function create(mc, opts)
 	self.close = function() {
 		self.closed = true;
 		self.clients = {};
+
+		if (mc._qom_route?.shim == self)
+			mc._qom_route.shim = null;
 	};
 
 	// unsolicited QMI indications arrive as MBIM INDICATE_STATUS on the QMI CID;
@@ -119,7 +126,21 @@ export function create(mc, opts)
 	// passthrough is request/response only, so MBIM telemetry stays poll-based.
 	// This path is kept correct (0xff broadcast fan-out in deliver) for any
 	// firmware that does forward them.
-	mc.on(qmi_pt, 'QMI_MSG', (data, msg) => deliver(msg.info));
+	//
+	// ONE handler per MBIM client, routed to its current shim. mc.on only
+	// appends (mbim_client.uc:369) and has no counterpart, while a shim is made
+	// per bring-up: every rebuild of a passthrough that stopped answering would
+	// leave a handler behind, and every indication would run through all of
+	// them. The route lives on the client because the client outlives shims.
+	if (!mc._qom_route) {
+		let route = { shim: null };
+
+		mc._qom_route = route;
+		mc.on(qmi_pt, 'QMI_MSG', (data, msg) => route.shim?._deliver(msg.info));
+	}
+
+	self._deliver = deliver;
+	mc._qom_route.shim = self;
 
 	return self;
 };

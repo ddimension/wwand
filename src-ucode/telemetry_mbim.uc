@@ -45,6 +45,14 @@ export function install(self, o)
 			log('notice', sprintf('%s: transport stopped answering — re-probing the ladder', key));
 	};
 
+	// The passthrough stack for a rung already chosen as 'qmi'. Not self.pt
+	// directly: modem_mbim drops a stack that stopped answering and rebuilds it
+	// (_ensure_pt), so between two ticks it can be gone, or on its way back — and
+	// a cached rung dereferencing a null self.pt throws inside uloop, which ends
+	// the daemon. Asking _ensure_pt costs nothing while the stack is there and is
+	// what starts the rebuild when it is not; `fail` is the rung's own "no answer".
+	let with_pt = (fail, use) => self._ensure_pt((up) => up ? use(self.pt) : fail());
+
 	// signal: prefer the QMI passthrough (GET_SIGNAL_INFO — reuses the battle-
 	// tested QMI decode), then native MBIMEx v2 Signal State as a fallback for
 	// modems without the passthrough. (The native MS-ext buffer decode is not yet
@@ -71,7 +79,7 @@ export function install(self, o)
 				});
 
 			if (be == 'qmi')
-				return self.pt.nas.request('GET_SIGNAL_INFO', {}, (e, d) => {
+				return with_pt(() => { outcome('_sig_be', false); cb(); }, (pt) => pt.nas.request('GET_SIGNAL_INFO', {}, (e, d) => {
 					// the passthrough is the same QMI reply over another
 					// transport — it needs the same unit conversion
 					let got = (!e && tlv.has_payload(d));
@@ -80,7 +88,7 @@ export function install(self, o)
 					if (got)
 						self.signal = modem_common.normalise_qmi_signal(d);
 					cb();
-				}, { no_recovery: true });
+				}, { no_recovery: true }));
 
 			cb();
 		}, { reprobe: true, log: log, what: 'signal' });
@@ -128,9 +136,9 @@ export function install(self, o)
 				return mbim_backend.get_cells(self.mbim, (c) => store(c));
 
 			if (be == 'qmi')
-				return self.pt.nas.request('GET_CELL_LOCATION_INFO', {}, (e, d) =>
+				return with_pt(() => store(null), (pt) => pt.nas.request('GET_CELL_LOCATION_INFO', {}, (e, d) =>
 					store((!e && tlv.has_payload(d)) ? modem_common.clean_cell_metrics(d) : null),
-					{ no_recovery: true });
+					{ no_recovery: true }));
 
 			if (be == 'at')
 				return modem_common.telemetry_at(self).send('AT+QENG="servingcell"', (e, r) => {
@@ -162,10 +170,10 @@ export function install(self, o)
 			// an EMPTY list is a real answer here (no aggregation right now);
 			// only a null/error says the transport did not answer at all.
 			if (be == 'qmi')
-				return qmi_backend.get_ca(self.pt.nas, (ca) => {
+				return with_pt(() => { outcome('_ca_be', false); store([]); }, (pt) => qmi_backend.get_ca(pt.nas, (ca) => {
 					outcome('_ca_be', ca != null);
 					store(ca ?? []);
-				});
+				}));
 
 			if (be == 'at')
 				return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) => {
@@ -206,11 +214,13 @@ export function install(self, o)
 				});
 
 			if (be == 'qmi')
-				return qmi_backend.get_data_mode(self.pt.dsd, (m) => {
-					outcome('_dsd_be', m != null);
-					if (m) self.dsd_status = tag(m);
-					cb();
-				});
+				return with_pt(() => { outcome('_dsd_be', false); cb(); }, (pt) => pt.dsd
+					? qmi_backend.get_data_mode(pt.dsd, (m) => {
+						outcome('_dsd_be', m != null);
+						if (m) self.dsd_status = tag(m);
+						cb();
+					})
+					: (outcome('_dsd_be', false), cb()));
 
 			if (be == 'at')
 				self.dsd_status = tag(modem_common.dsd_from_serving(self.cells?.serving));
@@ -240,11 +250,11 @@ export function install(self, o)
 				});
 
 			if (be == 'qmi')
-				return qmi_backend.get_reg_detail(self.pt.nas, (d) => {
+				return with_pt(() => { outcome('_regd_be', false); cb(); }, (pt) => qmi_backend.get_reg_detail(pt.nas, (d) => {
 					outcome('_regd_be', d != null);
 					if (d) self.reg_detail = d;
 					cb();
-				});
+				}));
 
 			cb();
 		}, { reprobe: true, log: log, what: 'registration detail' });
