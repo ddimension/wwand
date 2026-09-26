@@ -2110,6 +2110,11 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   re-apply the per-SIM settings for the new one.
 - **ubus:** `modem_plugin` reaches `ops`; `modem_plugin_status` reaches only
   `read_ops`.
+- **Status rows:** an optional `status(ref, ext)` returns `{ label, text,
+  level }` (`ok`/`warn`/`error`), an array of them, or null. They appear per
+  modem in `status()` as `plugins` and on the LuCI status page and in
+  `wwandctl status` under the SIM. It must be synchronous and cheap — LuCI
+  polls status every second.
 - **CLI:** A command a package adds to `wwandctl` is
   `/usr/share/ucode/wwand/ctl/<cmd>.uc`, returning
   `{ run(ctx, args), help: [ lines ] }`.

@@ -178,6 +178,34 @@ eq(self.connection_token('m1'), null, 'token: null for a modem with nothing conn
 	eq([ m._esim_be, m._apdu_be, m.esim_info ], [ null, null, null ], 'sim_changed: ...and the eSIM/APDU caches');
 }
 
+// --- status rows: what optional packages report about a modem ----------------
+
+{
+	let logs = [];
+	let d = daemon_mod.create({ deps: {
+		log: (l, m) => push(logs, m),
+		plugins: [
+			{ name: 'a', options: [ 'a_x' ], mod: { create: () => ({
+				status: (ref, ext) => (ext.a_x ? { label: 'remote SIM', text: 'in use', level: 'ok' } : null) }) } },
+			{ name: 'b', options: [], mod: { create: () => ({
+				status: () => [ { label: 'x', text: 1, level: 'bogus' }, { label: 'no text' } ] }) } },
+			{ name: 'c', options: [], mod: { create: () => ({ status: () => die('boom') }) } },
+		],
+	} });
+
+	d.modems = { m0: { ext: { a_x: '1' } }, m1: { ext: {} } };
+
+	eq(d.plugins_status('m0'), [
+		{ plugin: 'a', label: 'remote SIM', text: 'in use', level: 'ok' },
+		{ plugin: 'b', label: 'x', text: '1', level: 'ok' },
+	], 'status rows: one per report, text made a string, an unknown level is ok, a row without text dropped');
+	eq(length(d.plugins_status('m1')), 1, 'status rows: a plugin with nothing to say adds nothing');
+
+	d.plugins_status('m0');
+	eq(length(filter(logs, (l) => index(l, 'status failed') >= 0)), 1,
+	   'status rows: a plugin that throws costs its row, logged once — not every second of LuCI polling');
+}
+
 for (let f in fs.lsdir(tmp) ?? [])
 	fs.unlink(sprintf('%s/%s', tmp, f));
 fs.rmdir(tmp);

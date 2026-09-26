@@ -3233,6 +3233,9 @@ export function create(opts)
 				// power-cycle at all (hwops.board_gpio_ok), and nothing said so
 				// anywhere.
 				recovery: recovery_view(name, entry),
+				// rows optional packages report about this modem (plugins.uc
+				// plugins_status); rendered generically by LuCI and wwandctl
+				plugins: self.plugins_status ? self.plugins_status(name) : [],
 			};
 		}
 

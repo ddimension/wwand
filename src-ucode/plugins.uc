@@ -114,6 +114,40 @@ export function install(self, o)
 					p.inst.tick(name, entry?.ext ?? {});
 	};
 
+	// Rows plugins add to a modem's status: [ { plugin, label, text, level } ],
+	// level 'ok' | 'warn' | 'error'. A plugin's optional `status(ref, ext)`
+	// returns one row, an array of them, or null. SYNCHRONOUS AND CHEAP:
+	// status() is what LuCI polls every second. A plugin that throws costs its
+	// own row, not the status answer — and is logged once, not every second.
+	let status_failed = {};
+
+	self.plugins_status = function(ref) {
+		let out = [];
+
+		for (let p in active()) {
+			if (type(p.inst.status) != 'function')
+				continue;
+
+			let r = null;
+
+			try { r = p.inst.status(ref, ext_of(ref)); }
+			catch (e) {
+				if (!status_failed[p.name])
+					log('warn', sprintf('plugin %s: status failed (%s)', p.name, e));
+				status_failed[p.name] = true;
+				continue;
+			}
+
+			for (let row in ((type(r) == 'array') ? r : (r ? [ r ] : [])))
+				if (type(row) == 'object' && row.label != null && row.text != null)
+					push(out, { plugin: p.name, label: sprintf('%s', row.label),
+					            text: sprintf('%s', row.text),
+					            level: (index([ 'ok', 'warn', 'error' ], row.level) >= 0) ? row.level : 'ok' });
+		}
+
+		return out;
+	};
+
 	// The first plugin that manages this card for this operation, or null.
 	// Loading the plugins here is deliberate: a guard that answers "free"
 	// because nothing happened to load them yet would let a change through.
