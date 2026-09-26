@@ -476,6 +476,9 @@ config wwand_modem 'm0'
 	option lock_4g '1300:246'        # earfcn:pci — LTE cell lock (repeatable / list)
 	option lock_5g '242:431070:15:1' # pci:arfcn:scs:band — NR SA cell lock
 	option lock_persist '0'          # store the cell lock in modem NV
+	list band_lte '1' '3' '7'        # LTE band allow-list (repeatable / list)
+	list band_nr '28' '78'           # NR band allow-list (5G)
+	list band_umts '1' '2'           # UMTS band allow-list (see the note below)
 	option location '0'              # start the QMI LOC positioning session
 	option stats_interval '60'       # telemetry period in seconds (0 = off)
 	option delay '0'                 # seconds to wait before the first init
@@ -490,6 +493,55 @@ config wwand_modem 'm0'
 	option auto_correct_config '0'   # learn + write back a missing imei anchor so a
 	                                 #   loose config self-stabilises (default off)
 ```
+
+**Band allow-lists (`band_lte` / `band_nr` / `band_umts`).** A **list** of 3GPP
+band numbers, not a mask: the encoding belongs to the modem's own radio command,
+and one option per RAT is all any backend needs (u64 band words on QMI/MBIM,
+`+GTACT` tokens on Fibocom AT). Values are 3GPP numbers (`3`, `28`, `78`), not
+vendor tokens. An **unset or empty list leaves that RAT's bands alone** — a
+partial edit never drops the other RATs' bands, and never widens a mask you did
+not ask about. A modem with no such command reports
+`unsupported_on_backend` and keeps the NAS path.
+
+The list is **re-applied at every bring-up**, because a band mask usually does
+not survive in the modem: Fibocom `+GTACT` is documented `Persistent: No`, and
+was field-observed to lose its mask across a power cycle even when the write
+returned OK — so wwand re-asserts it instead of trusting modem NV. A successful
+write is **verified with a read-back** before it is reported as applied, and a
+mask the modem already runs is left alone: applying one costs a re-registration
+(~20 s measured), which must never be paid for a no-op.
+
+```sh
+# Orange Romania: LTE B1/B3/B7/B20/B28 + NR n3/n7/n20/n28/n78
+uci add_list network.wwmodem_wan.band_lte='1'
+uci add_list network.wwmodem_wan.band_lte='3'
+uci add_list network.wwmodem_wan.band_lte='7'
+uci add_list network.wwmodem_wan.band_lte='20'
+uci add_list network.wwmodem_wan.band_lte='28'
+uci add_list network.wwmodem_wan.band_nr='3'
+uci add_list network.wwmodem_wan.band_nr='7'
+uci add_list network.wwmodem_wan.band_nr='20'
+uci add_list network.wwmodem_wan.band_nr='28'
+uci add_list network.wwmodem_wan.band_nr='78'
+uci commit network && wwandctl reload
+wwandctl settings          # read back what the modem actually runs
+```
+
+These options do **not** choose the RAT. The band write preserves whatever
+RAT/preferred-RAT tuple the modem is running — a `+GTACT` write that contradicts
+the tuple is refused by the firmware, so the codec preserves it rather than
+synthesising one. `modes` and the modem's own RAT setting stay the way to pick
+LTE-only vs 5G-preferred; on Fibocom AT that is a tuple the operator sets, e.g.
+`AT+GTACT=20,6,3,…` (NR/WCDMA/LTE, NR preferred, LTE preferred), which wwand
+reads back and reports as `mode_preference` in the settings editor.
+
+> **`band_umts` is rarely what you want, and exists for a parser reason.** The
+> `+GTACT` band list is positional per RAT group: a write whose tuple contains
+> UMTS must carry a UMTS group or the whole command is rejected, because the
+> parser reads the first token as a UMTS band (verified on an FM350-GL —
+> `AT+GTACT=17,3,6,101,…` answers ERROR for exactly this reason). Leave it unset
+> and the modem's current UMTS bands are preserved, which is what a band edit
+> wants; set it only to pin 3G deliberately.
 
 **Dead-bearer detection on NCM (`bearer_poll_count`).** An AT dial-status query
 that succeeds and lists no context for the connection's cid means "no contexts" —

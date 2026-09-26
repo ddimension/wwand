@@ -404,6 +404,26 @@ export function create(opts)
 		cb(null);
 	};
 
+	// Radio SETTINGS through the vendor's own command, for the AT families
+	// that have one (Fibocom +GTACT). Deliberately thin: the codec in
+	// ncm_vendors owns the command, its parser's rules and the read-back
+	// verify, and reports `unsupported_on_backend` when the modem has no
+	// such command — which is what netsel_ops checks before falling back
+	// to the NAS path. A backend without either answers unsupported.
+	self.settings_get = function(cb) {
+		if (!self.vendor?.settings_get)
+			return cb({ error: 'unsupported_on_backend' });
+
+		self.vendor.settings_get(self, cb);
+	};
+
+	self.settings_set = function(settings, cb) {
+		if (!self.vendor?.settings_set)
+			return cb({ error: 'unsupported_on_backend' });
+
+		self.vendor.settings_set(self, settings, cb);
+	};
+
 	// attach PDP context config: the first attached context (interface-bound
 	// preferred) drives the modem's autonomous LTE attach, so its APN/auth is
 	// what CGDCONT/QICSGP programs at bring-up. Contexts re-apply idempotently at
@@ -871,6 +891,39 @@ export function create(opts)
 
 									ep_next();
 								}
+
+								// Re-assert a configured band mask, once per bring-up.
+								// Fibocom +GTACT is documented Persistent: No and
+								// was field-observed to lose its mask across a power
+								// cycle even when the write returned OK, so the
+								// modem NV is not a place to trust here: wwand
+								// re-applies the configured lists itself. Fire and
+								// forget, like the fcc/eSIM probes above, and a
+								// no-op for a vendor with no settings_set or a
+								// modem with no band list configured.
+								//
+								// Placed BEFORE registration on purpose: the write
+								// costs one re-registration, and doing it first
+								// means that cost is paid once, on the way up,
+								// rather than on a live bearer.
+								if (self.vendor?.settings_set &&
+								    (length(self.config?.band_lte ?? []) ||
+								     length(self.config?.band_nr ?? []) ||
+								     length(self.config?.band_umts ?? []))) {
+								self.settings_set({
+									lte_bands: self.config.band_lte ?? [],
+									nr5g_sa_bands: self.config.band_nr ?? [],
+									nr5g_nsa_bands: self.config.band_nr ?? [],
+									umts_bands: self.config.band_umts ?? [],
+								}, (serr, sres) => {
+									if (serr)
+										log('warn', sprintf('modem %s: configured band mask not applied (%J)',
+											self.info.model ?? '?', serr));
+									else if (!sres?.unchanged)
+										log('notice', sprintf('modem %s: configured band mask applied (%s)',
+											self.info.model ?? '?', join(', ', sres.applied ?? [])));
+								});
+							}
 
 								// per-SIM override (config wwand_sim) — parity
 								// with the QMI backend; consumed via conn_cfg

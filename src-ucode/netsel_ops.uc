@@ -157,6 +157,20 @@ export function install(self, o)
 		if (!entry)
 			return;
 
+		// A vendor radio codec comes FIRST: on an AT family the settings the
+		// user edits ARE that vendor's own band lists (+GTACT on Fibocom), and
+		// the NAS path below would either refuse them as unsupported or hand
+		// them to a client the backend does not have. The answer is already in
+		// the protocol-neutral band-list shape, so it needs no conversion.
+		if (entry.modem.settings_get)
+			return entry.modem.settings_get((err, data) => {
+				if (err)
+					return cb(err);
+
+				data.registered_plmn = reg_plmn(entry.modem);
+				cb(null, data);
+			});
+
 		// protocol-neutral: QMI hands out its NAS client, MBIM the QMI-over-MBIM
 		// passthrough NAS; NCM has none (null) → gracefully unsupported.
 		entry.modem.with_nas((nas) => {
@@ -620,11 +634,25 @@ export function install(self, o)
 		if (!entry)
 			return;
 
+		settings = { ...(settings ?? {}) };
+
+		// A vendor radio codec comes FIRST, before any mask conversion: the
+		// conversion below DELETES the band lists it consumes (they become u64
+		// words), so a codec reached after it would find its input already
+		// gone and answer "nothing to do" for a real edit. The codec takes
+		// the lists as given — they are already in the neutral shape.
+		if (entry.modem.settings_set)
+			return entry.modem.settings_set(settings, (err, res) => {
+				if (!err)
+					return cb(null, res);
+
+				cb(err);
+			});
+
 		// band-number lists (LuCI-safe) are converted to masks here. Both LTE
 		// band TLVs are filled so the idempotency guard below can compare
 		// against whichever one the modem reports — only ONE of them is
 		// actually sent (see the firmware shaping there).
-		settings = { ...(settings ?? {}) };
 
 		if (type(settings.lte_bands) == 'array') {
 			let m = bands_to_masks(settings.lte_bands, 4);
