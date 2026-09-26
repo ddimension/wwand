@@ -662,88 +662,34 @@ The mislabelled flag is fixed with it. `option location` had the label "Enable
 GPS/location" and writes the QMI LOC path — the one that does not work on
 Quectel — while `option gnss`, the one that does, had no UI at all.
 
-## eSIM fleet management through an eIM: wwand-ipa (2026-09-25)
+## Optional plugins, and the eSIM bridge's exit status (2026-09-26)
 
-An eIM is the fleet side of SGP.32: the operator queues profile operations and
-an IoT Profile Assistant on the device runs them. `wwand-ipa` makes the router
-that assistant, with onomondo-ipa (AGPL, commit 6aaeb38) as a separate program
-packaged by the feed as `wwand-ipad`. Deliberately a first step: it drives an
-SGP.22 consumer eUICC through the assistant's IoT eUICC emulation, and the eIM
-accepts that mode. A standard SGP.32 v1.2 assistant is planned separately.
+SGP.32 eIM fleet management was first built into the core. On 2026-09-26 it
+was moved out into its own repository, github.com/ddimension/wwand-ipa,
+because it is not meant for upstream. What stays in the core is the
+interface it needed, kept neutral enough for any optional package
+(`plugins.uc`, reference.md "Plugins"):
+- **Hooks:** a registry for plugins under `/usr/share/ucode/wwand/plugins/`
+  with tick, eSIM guard and ubus ops (`modem_plugin` and a read-only twin).
+- **Config:** a plugin's `wwand_modem` options arrive as `entry.ext`. They are
+  not reported as unknown, and they sit outside the modem's reload signature,
+  so switching a plugin feature on does not bounce the connection (test_daemon,
+  reload 2b).
+- **Card lock:** status names the plugin that manages a card
+  (`esim_managed_by`), and `modem_esim` refuses card-changing ops there
+  (`esim_managed`, `force` overrides).
+- **CLI:** `wwandctl` commands come from `/usr/share/ucode/wwand/ctl/<cmd>.uc`.
+- **Bridge:** `esim_bridge` got `session_run`, another stdio-APDU process on
+  the card under lpac's claim, with `{"type":"event"}` lines the host
+  answers. Its generic `stdio_run` can log to the syslog instead of a file.
 
-**The card is reached the way lpac reaches it.** onomondo-ipa knows only PC/SC.
-Patch 100 (feed, `wwand-ipad/patches/`) gives it a card backend that speaks
-lpac's stdio APDU protocol byte for byte, so `esim_bridge` relays it over the
-modem's own channel (MBIM UICC / QMI UIM / AT) with no new transport. The two
-sides do not speak the same card dialect, and the backend reconciles them:
-
-- libipa talks raw T=0: TERMINAL CAPABILITY, MANAGE CHANNEL, SELECT ISD-R
-  expecting 61xx, and GET RESPONSE with a length it checks exactly.
-- A modem opens channels by AID and completes GET RESPONSE itself.
-
-So MANAGE CHANNEL is answered locally, and the channel is really opened at the
-SELECT. CLA carries the modem's channel, not libipa's. An answer that arrives
-whole is handed out again in 61xx/GET RESPONSE portions of exactly the
-announced size. The patch has its own ctest (`tests/scard_stdio`), and each of
-its checks was confirmed to fail with the code it guards removed.
-
-**A profile change needs the host, and the assistant has to wait for it.**
-Without a REFRESH the modem keeps the old profile until the SIM is reset. The
-result of the package can only reach the eIM over the new session, and the
-state needed to report it, or to roll back, lives in the assistant's MEMORY,
-not in its state file. So the assistant must stay alive through the change.
-Its new `-H` option emits `profile_changed` and blocks. wwand resets the SIM,
-waits for a NEW connection generation (the old session still reads CONNECTED
-for a while), and answers. The assistant then re-opens the card channel, which
-the reset closed. If the eIM stays unreachable, it rolls back on its next poll,
-and hands that change back the same way.
-
-**SIGTERM saves the state.** The bridge ends a hung run with a kill. In
-emulation, the state file IS the eIM trust: the configuration and the replay
-counter. So SIGTERM interrupts the blocking read, and every later exchange
-fails at once, which lets main() reach the save. Tested on the host by leaving
-an exchange unanswered and killing the process. Before the fix, the shutdown
-path blocked on a second read and never saved.
-
-**Refused where guessing would be wrong.**
-- A card without a state file and no `ipa_eim_config` is not polled.
-- Manual profile changes and notification delivery on a managed card are
-  refused (`ipa_managed`, override with `force`), because the assistant's
-  record of the card would go out of step.
-- The ipa options are outside the modem's reload signature, so switching fleet
-  management on does not bounce the session it runs over (test_daemon, reload
-  2b).
-
-Found on the way: `tools/check-map.py` read a regex literal with an odd number
-of quote characters as the start of a string and blanked the rest of the file,
-so any symbol cited after one (`esim_bridge.uc stdio_run`) looked missing. It
-skips regex literals now.
-
-**Operating a fleet.**
-- The assistant logs to the syslog, not to a file. Its stderr joins the
-  protocol pipe and is mapped onto wwand's levels: ERROR → warn, and the APDU
-  hexdumps only at debug.
-- Polls are spread per router, by a fixed fraction derived from its IMEI, over
-  the first-run wait and the interval, and failures back off by doubling. That
-  way a fleet that comes back from one power cut does not hit the eIM at the
-  same moment.
-- `/etc/wwand/ipa` survives a sysupgrade through keep.d. Package conffiles are
-  file+checksum pairs of what the package shipped (base-files sysupgrade,
-  bacda03b76), and the nvstate is created at runtime, so they would not keep it.
-- The card's profile list in status is re-read after every run that reached
-  the card.
-
-Found on the way: **the eSIM bridge never saw a child's exit status.** close()
-returns the shell's, and the shell's last command is the `echo __EXIT` marker,
-so it read 0 unless uloop had reaped the shell first. lpac hid it, because its
-verdict is its result line. For the assistant the exit status is the whole
-verdict. The marker now wins.
-
-**Not yet verified:** hardware, or a real eIM. Host-tested: the C backend
-against a scripted host and against a fake card with the upstream binary
-(provisioning run and eIM poll), and the scheduler with a fake bridge (test_ipa,
-with counterproofs for the new-generation wait, the shell-safety refusal, the
-no-config refusal and the lock). No LuCI yet.
+Found on the way, and fixed in the core: **the eSIM bridge never saw a child's
+exit status.** close() returns the shell's status, and the shell's last
+command is the `echo __EXIT` marker, so it read 0 unless uloop had reaped the
+shell first. lpac hid this, because its verdict is its result line. The marker
+now wins, and that makes lpac's download ack (`notified`) truthful too. Also
+fixed: `tools/check-map.py` read a regex literal with an odd number of quote
+characters as the start of a string, and blanked the rest of the file.
 
 ## Known open
 

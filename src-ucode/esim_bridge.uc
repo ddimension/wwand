@@ -43,8 +43,9 @@ const ESIM_IDLE_MS = 300000;
 //   { kind: 'apdu', func, param }        an APDU request to answer
 //   { kind: 'progress', message }        ES9+/ES10 progress step
 //   { kind: 'lpa', code, message, data } final result (code '0' = success)
-//   { kind: 'ipa', event }               the IPA daemon hands a step to the host
-//                                        (wwand-ipa; the answer is one line back)
+//   { kind: 'event', event }             the process hands a step to the host
+//                                        and waits: the answer is one line back
+//                                        (session_run's on_event)
 //   { kind: 'log', text }                anything that is not protocol JSON
 //   null                                 empty line
 function parse_lpac_line(s)
@@ -77,8 +78,8 @@ function parse_lpac_line(s)
 			data: field(s, /"data": *"([^"]*)"/),
 		};
 
-	if (mtype == 'ipa')
-		return { kind: 'ipa', event: field(s, /"event": *"([a-z_]+)"/) };
+	if (mtype == 'event')
+		return { kind: 'event', event: field(s, /"event": *"([a-z_]+)"/) };
 
 	// unknown JSON object: keep it visible in the log rather than dropping it
 	return { kind: 'log', text: s };
@@ -133,7 +134,7 @@ return {
 		//   cmd        the shell command (stderr redirected by the caller)
 		//   opts.logf  its log file, truncated at start (ESIM_LOGF by default);
 		//              false = none, the process's output goes to the syslog only
-		//   opts.on_ipa(rec, reply)  handles { kind: 'ipa' } lines; reply(obj)
+		//   opts.on_event(rec, reply)  handles { kind: 'event' } lines; reply(obj)
 		//              writes the answer. Without it the answer is a refusal,
 		//              so a process waiting on one never hangs.
 		//   opts.log_level(line)  the syslog level for one of its non-protocol
@@ -251,7 +252,7 @@ return {
 				// the shell reads 0 whatever the child exited with; the child's
 				// own status exists only in-band. (close() also returns null
 				// when uloop reaped the shell first.) lpac never showed this —
-				// its verdict is its result line — but for the IPA the exit
+				// its verdict is its result line — but for a session_run process the exit
 				// status IS the verdict. With neither (shell killed) the
 				// missing result is the caller-visible failure, so don't
 				// fabricate an error here.
@@ -273,7 +274,7 @@ return {
 				if (rec.kind == 'log')
 					return logline(rec.text, level_of(rec.text));
 
-				if (rec.kind == 'ipa') {
+				if (rec.kind == 'event') {
 					// The process now waits on the HOST, possibly for minutes
 					// (a SIM reset and a reconnect), and says nothing meanwhile.
 					// That silence is not a hang, so the inactivity watchdog is
@@ -285,13 +286,13 @@ return {
 							return;
 
 						idle?.set(idle_ms);
-						wq_write(sprintf('{"type":"ipa","payload":%J}\n', obj ?? {}));
+						wq_write(sprintf('{"type":"event","payload":%J}\n', obj ?? {}));
 					};
 
-					if (type(opts?.on_ipa) == 'function')
-						return opts.on_ipa(rec, reply);
+					if (type(opts?.on_event) == 'function')
+						return opts.on_event(rec, reply);
 
-					logline(sprintf('ipa event %s with nobody to handle it', rec.event ?? '?'));
+					logline(sprintf('event %s with nobody to handle it', rec.event ?? '?'));
 					return reply({ online: false });
 				}
 
@@ -516,15 +517,17 @@ return {
 			if (!p) { mgmt_busy = false; return cb({ error: 'esim', detail: { error: 'spawn' } }); }
 		};
 
-		// One IPA run (wwand-ipa, ipa.uc): the IoT Profile Assistant speaks the
-		// same stdio protocol, and it is one more session on the card's ISD-R,
-		// so it takes the same exclusive claim as an lpac profile operation —
-		// never two host sessions on one eUICC at once. Quiet mode is held for
-		// the run and DROPPED while the host restores the connection after a
-		// profile change: the reconnect is exactly what the background polls
-		// quiet mode holds back are for. on_done(err, log); returns
-		// { error: 'busy' } or { error: 'spawn' } when it did not start.
-		let ipa_run = (ref, slot, cmd, log_level, on_ipa, on_done) => {
+		// A host session of some other process on the card, for a plugin (an
+		// SGP.32 IoT Profile Assistant is the one there is). It speaks the same
+		// stdio protocol and is one more session on the card's ISD-R, so it
+		// takes the same exclusive claim as an lpac profile operation — never
+		// two host sessions on one eUICC at once. Quiet mode is held for the
+		// run and DROPPED while the host handles an event (an assistant waits
+		// there for the connection to come back after a profile change, and
+		// the reconnect is exactly what the background polls quiet mode holds
+		// back are for). on_done(err, log); returns { error: 'busy' } or
+		// { error: 'spawn' } when it did not start.
+		let session_run = (ref, slot, label, cmd, log_level, on_event, on_done) => {
 			let entry = modem_of(ref);
 
 			if (dl?.state == 'running' || mgmt_busy)
@@ -535,15 +538,15 @@ return {
 			let release = quiet_claim(entry?.modem);
 			let finished = false;
 
-			let p = stdio_run(ref, slot, 'ipa', cmd, {
+			let p = stdio_run(ref, slot, label, cmd, {
 				logf: false,
 				log_level: log_level,
-				on_ipa: (rec, reply) => {
+				on_event: (rec, reply) => {
 					release();
 
 					// an answer that arrives after the process died must not
 					// raise a claim nothing will ever drop
-					on_ipa(rec, (obj) => {
+					on_event(rec, (obj) => {
 						if (finished)
 							return;
 
@@ -568,7 +571,7 @@ return {
 		};
 
 		return {
-			ipa_run: ipa_run,
+			session_run: session_run,
 
 			// after a profile change the modem has to re-read the card; the
 			// same apply as an lpac enable (see apply_sim_reset above)
@@ -716,7 +719,7 @@ return {
 					// that installed correctly was reported 'failed' and never
 					// auto-notified — while a second host session talked to the
 					// eUICC at the same time. Every sibling op refuses instead
-					// (profile_op_lpac, ipa_run, the download case, 'notify'
+					// (profile_op_lpac, session_run, the download case, 'notify'
 					// below).
 					if (dl?.state == 'running' || mgmt_busy)
 						return done({ error: 'busy' });

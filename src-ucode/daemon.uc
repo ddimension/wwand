@@ -12,6 +12,7 @@ import * as discovery from 'wwand.discovery';
 import * as netsel_ops from 'wwand.netsel_ops';
 import * as simops from 'wwand.simops';
 import * as hwops from 'wwand.hwops';
+import * as plugins from 'wwand.plugins';
 import * as cfgmod from 'wwand.config';
 import * as nlmod from 'wwand.netlink';
 import * as reconnect from 'wwand.reconnect';
@@ -2457,16 +2458,14 @@ export function create(opts)
 		// signature is just its cfg. Unchanged modems and unchanged contexts keep
 		// running untouched — the whole point (no WAN bounce on an unrelated edit,
 		// and a single modem's edit never disturbs the others or their siblings).
-		// The eIM options (ipa*) are left out: the assistant reads them from
-		// entry.ipa on every tick (step 4 refreshes it), and nothing in the
-		// modem's own state depends on them — turning fleet management on must
-		// not bounce the connection it is going to run over.
+		// A plugin's options (`ext`, plugins.uc) are left out: the plugin reads
+		// them from entry.ext on every tick (step 4 refreshes it), and nothing
+		// in the modem's own state depends on them — switching a plugin feature
+		// on must not bounce the connection it may be going to run over.
 		let modem_sig = (mn) => {
 			let cfg = { ...(parsed.modems[mn] ?? {}) };
 
-			for (let k in keys(cfg))
-				if (substr(k, 0, 3) == 'ipa')
-					delete cfg[k];
+			delete cfg.ext;
 
 			return sprintf('%J', { cfg: cfg, mux: mux_by_modem[mn], l3: l3_by_modem[mn] });
 		};
@@ -2499,7 +2498,7 @@ export function create(opts)
 		//    the ones that kept running: same config -> same signature).
 		for (let mn in keys(self.modems)) {
 			self.modems[mn]._sig = modem_sig(mn);
-			self.modems[mn].ipa = parsed.modems[mn];
+			self.modems[mn].ext = parsed.modems[mn]?.ext ?? {};
 		}
 
 		for (let cn in keys(self.contexts))
@@ -2645,8 +2644,8 @@ export function create(opts)
 									start_context(cname, centry.cfg);
 					}
 
-				// eSIM fleet management: a no-op unless a modem has `option ipa`
-				self.ipa_tick?.();
+				// optional plugins (plugins.uc): a no-op when none is installed
+				self.plugins_tick?.();
 
 				if (deps.board) {
 					let first = null;
@@ -3170,6 +3169,9 @@ export function create(opts)
 				fcc_lock: entry.modem?.fcc_lock,
 				// eSIM surface from the bring-up refresh (eUICC active only)
 				esim: entry.modem?.esim_info ?? null,
+				// a plugin that manages this card (plugins.uc esim_guard):
+				// the eSIM UI offers no profile changes while it does
+				esim_managed_by: self.esim_guard?.(name, 'enable')?.by,
 				// the datapath that actually came up (rmnet/qmimux/vlan/raw_ip
 				// or a plugin name) — with 'auto' able to land on a plugin,
 				// "which one won" must be visible without reading the log
@@ -3331,6 +3333,22 @@ export function create(opts)
 	simops.install(self, { log: log, check_modem: check_modem, load_esim: load_esim });
 	hwops.install(self, { log: log, check_modem: check_modem, board: deps.board,
 	                      board_gpio_ok: board_gpio_ok });
+
+	// Optional plugins (plugins.uc). What they may use of the daemon is this
+	// list and nothing else; resolved at call time, so the order of the
+	// installs above does not matter.
+	plugins.install(self, {
+		log: log,
+		plugins: deps.plugins,
+		deps: {
+			modem_of: (ref) => self.modems[ref],
+			connection_token: (ref) => self.connection_token(ref),
+			modem_reset: (ref, cb) => self.modem_reset(ref, cb),
+			esim: () => load_esim(),
+			esim_bridge: () => self.esim_bridge(),
+			esim_refresh: (ref, eid, slot, cb) => self.esim_refresh(ref, eid, slot, cb),
+		},
+	});
 
 	// enumerate modems for the LuCI stable-binding picker: managed modems (live
 	// IMEI/model) + every control device present in sysfs (iSerial read pre-open).

@@ -67,7 +67,7 @@ export function create(o)
 	// A LOCAL, not just a property of the returned object. It is called from
 	// two places — NITZ, and the GNSS reader's epoch callback — and the second
 	// one used to reach for `o.set_clock`, which nothing ever sets: main.uc
-	// builds deps without it (main.uc:293), so `option gnss_set_time` was a
+	// builds deps without it (main.uc:294), so `option gnss_set_time` was a
 	// silent no-op and the test that "proved" it passed only because it
 	// injected the property the production path does not have.
 	let set_clock = (epoch, tz_min, source) => {

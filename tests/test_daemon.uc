@@ -893,19 +893,33 @@ ok(rld.contexts.wanA.ctx != ctxA_obj, 'reload apn: wanA ctx rebuilt with new con
 eq(rld.contexts.wanA.cfg.apn, 'a2', 'reload apn: wanA carries the new APN');
 ctxA_obj = rld.contexts.wanA.ctx;
 
-// (2b) eSIM fleet management switched on for m0: the assistant reads its
-//      options from entry.ipa, so the modem keeps running and only that
-//      record moves — turning it on must not bounce the connection it runs over
+// (2b) a plugin's options (plugins.uc) changed for m0: the plugin reads them
+//      from entry.ext, so the modem keeps running and only that record moves
+//      — switching a plugin feature on must not bounce the connection
+let netcfg_ext = (mut) => {
+	let net = {
+		g:    { '.type': 'wwand_globals' },
+		m0:   { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		m1:   { '.type': 'wwand_modem', device: '/dev/mock1' },
+		wanA: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a2', pdp_type: 'ipv4' },
+		wanB: { '.type': 'interface', proto: 'wwand', modem: 'm1', device: 'l3b', apn: 'b', pdp_type: 'ipv4' },
+	};
+	if (mut) mut(net);
+	return config.parse({ network: net }, { ext_options: [ 'feat', 'feat_interval' ] });
+};
 rl_events = [];
-rld.apply_config(netcfg((n) => { n.wanA.apn = 'a2'; n.m0.ipa = '1'; n.m0.ipa_interval = '900'; }));
-eq(rl_events, [], 'reload ipa: nothing stopped or started');
-ok(rld.modems.m0.modem == m0_obj, 'reload ipa: m0 modem object preserved');
-eq([ rld.modems.m0.ipa?.ipa, rld.modems.m0.ipa?.ipa_interval ], [ true, 900 ],
-	'reload ipa: the new options reach the entry');
+rld.apply_config(netcfg_ext((n) => { n.m0.feat = '1'; n.m0.feat_interval = '900'; }));
+eq(rl_events, [], 'reload ext: nothing stopped or started');
+ok(rld.modems.m0.modem == m0_obj, 'reload ext: m0 modem object preserved');
+eq(rld.modems.m0.ext, { feat: '1', feat_interval: '900' }, 'reload ext: the options reach the entry, raw');
+eq(netcfg_ext((n) => { n.m0.feat = '1'; }).modems.m0.config_notes, [],
+	'reload ext: a plugin\'s option is not an unknown option');
+eq(length(netcfg((n) => { n.m0.feat = '1'; }).modems.m0.config_notes), 1,
+	'reload ext: ...and without the plugin installed, it is one');
 rl_events = [];
-rld.apply_config(netcfg((n) => { n.wanA.apn = 'a2'; }));
-eq(rl_events, [], 'reload ipa off: nothing stopped or started either');
-eq(rld.modems.m0.ipa?.ipa, false, 'reload ipa off: and the entry says so');
+rld.apply_config(netcfg_ext());
+eq(rl_events, [], 'reload ext off: nothing stopped or started either');
+eq(rld.modems.m0.ext, {}, 'reload ext off: and the entry says so');
 
 // (3) add a new modem + interface -> only the new one starts; existing untouched
 rl_events = [];

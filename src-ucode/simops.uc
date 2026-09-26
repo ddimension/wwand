@@ -299,18 +299,11 @@ export function install(self, o)
 	};
 
 	// Operations that change what is on the card or tell the SM-DP+ about it.
-	// Refused on a card the eIM manages (`option ipa`): in IoT eUICC emulation
-	// the assistant keeps the card's state in its own nvstate (the profile to
-	// roll back to, the pending results), and a change made past it leaves
-	// that out of step with the card — the next eIM package then acts on a
-	// profile that is not there. Pending notifications belong to the eIM too:
-	// sent by lpac they are removed from the card before the eIM sees them.
-	// `force: true` is the way past it, for a technician who knows.
-	// forward-declared: modem_esim below uses it, and a `let` declared further
-	// down is an undeclared variable to a closure created above it
-	let load_ipa;
-
-	const IPA_LOCKED = { download: true, enable: true, disable: true, delete: true, notify: true };
+	// Refused while a plugin manages the card (plugins.uc esim_guard): such a
+	// plugin keeps its own record of the card, and a change made past it puts
+	// the two out of step. `force: true` is the way past it, for someone who
+	// knows.
+	const ESIM_CHANGING = { download: true, enable: true, disable: true, delete: true, notify: true };
 
 	self.modem_esim = function(ref, op, params, cb) {
 		let br = load_esim_bridge();
@@ -318,22 +311,25 @@ export function install(self, o)
 		if (!br)
 			return cb({ error: 'esim_not_installed' });
 
-		// and only while something actually manages it: with option ipa set
-		// but wwand-ipa missing, nothing keeps a record to protect, and a lock
-		// then only blocks the one way left to change the card
-		if (IPA_LOCKED[op] && self.modems[ref]?.ipa?.ipa && !params?.force && load_ipa())
-			return cb({ error: 'ipa_managed',
-			            detail: 'this card is managed by an eIM (option ipa); pass force to override' });
+		let g = (ESIM_CHANGING[op] && !params?.force) ? self.esim_guard?.(ref, op) : null;
+
+		if (g)
+			return cb({ error: 'esim_managed', by: g.by,
+			            detail: sprintf('%s; pass force to override', g.reason ?? sprintf('this card is managed by %s', g.by)) });
 
 		return br.modem_esim(ref, op, params, cb);
 	};
 
+	// The eSIM bridge for a plugin that runs its own host session on the card
+	// (esim_bridge session_run), or null without wwand-esim.
+	self.esim_bridge = () => load_esim_bridge();
+
 	// The connection generation of a modem: a token that changes with every new
-	// data session and is null while none is up. The IPA waits on it after a
-	// profile change — "connected" alone is true again before the old session
-	// has even been dropped. Contexts in name order, so a modem with two
-	// interfaces answers the same one each time.
-	let online_token = (ref) => {
+	// data session and is null while none is up. For a plugin that has to wait
+	// for a NEW session — "connected" alone is true again before the old
+	// session has even been dropped. Contexts in name order, so a modem with
+	// two interfaces answers the same one each time.
+	self.connection_token = function(ref) {
 		for (let name in sort(keys(self.contexts))) {
 			let c = self.contexts[name];
 
@@ -343,87 +339,19 @@ export function install(self, o)
 
 		return null;
 	};
-	self._online_token = online_token;   // test seam (test_ipa)
 
-	// eSIM fleet management (optional wwand-ipa, ipa.uc); lazy, and loaded
-	// only once a modem carries `option ipa`. It runs through the eSIM bridge,
-	// so without wwand-esim there is nothing to load.
-	let ipa = null;
-	load_ipa = () => {
-		if (ipa === false)
-			return null;
+	// Re-read the card's profile list into the record status `esim` shows —
+	// the one the esim_ready bring-up read fills — and hand it to cb.
+	self.esim_refresh = function(ref, eid, slot, cb) {
+		self.modem_esim(ref, 'profiles', { slot: slot }, (e, r) => {
+			let m = self.modems[ref]?.modem;
 
-		if (!ipa) {
-			let br = load_esim_bridge();
-			let mod = null;
+			if (e || !m)
+				return;
 
-			if (br) {
-				try { mod = (o.require_ipa ?? (() => require('wwand.ipa')))(); }
-				catch (e) { mod = null; }
-			}
-
-			if (!mod) {
-				ipa = false;
-				log('warn', 'ipa: a modem has option ipa, but wwand-ipa is not installed');
-				return null;
-			}
-
-			ipa = mod.create({
-				bridge: br,
-				esim: load_esim(),
-				log: log,
-				modem_of: (ref) => self.modems[ref],
-				online: online_token,
-				// installed on self by hwops.install, which runs after this
-				// module's install: resolved at call time, not now
-				modem_reset: (ref, cb) => self.modem_reset(ref, cb),
-				// the same record the esim_ready bring-up read fills (status
-				// `esim`), so what the eIM changed shows up there
-				refresh: (ref, eid, slot, cb) => self.modem_esim(ref, 'profiles', { slot: slot }, (e, r) => {
-					let m = self.modems[ref]?.modem;
-
-					if (e || !m)
-						return;
-
-					m.esim_info = { eid: eid, profiles: r?.profiles ?? [] };
-					cb?.(m.esim_info.profiles);
-				}),
-			});
-		}
-
-		return ipa;
-	};
-
-	self.ipa_tick = function() {
-		for (let name, entry in self.modems)
-			if (entry?.ipa?.ipa)
-				load_ipa()?.tick(name, entry.ipa);
-	};
-
-	self.modem_ipa = function(ref, op, params, cb) {
-		let entry = check_modem(ref, cb);
-
-		if (!entry)
-			return;
-
-		let m = load_ipa();
-
-		if (!m)
-			return cb({ error: 'ipa_not_installed' });
-
-		switch (op ?? 'status') {
-		case 'status':
-			return cb(null, m.status(ref, entry.ipa));
-
-		case 'poll':
-			if (!entry.ipa?.ipa)
-				return cb({ error: 'ipa_disabled', detail: 'set option ipa on this modem' });
-
-			return m.poll(ref, entry.ipa, cb);
-
-		default:
-			return cb({ error: 'invalid_op', op: op });
-		}
+			m.esim_info = { eid: eid, profiles: r?.profiles ?? [] };
+			cb?.(m.esim_info.profiles);
+		});
 	};
 
 	// SIM PLMN selector lists (settings editor; user list is editable on SIMs

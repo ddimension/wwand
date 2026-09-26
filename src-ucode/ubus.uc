@@ -233,21 +233,24 @@ export function publish(conn, daemon, log)
 				daemon.modem_esim(req.args.modem, req.args.op, req.args, ok_reply(reply))),
 		},
 
-		// READ-ONLY twin of modem_ipa's `status` op, for the same reason as
-		// modem_esim_profiles above: rpcd grants methods, not arguments, and a
-		// poll can change the active profile, so modem_ipa is in the write set.
-		modem_ipa_status: {
-			args: { modem: '', ubus_rpc_session: '' },
+		// Optional plugins (plugins.uc): `op` on plugin `plugin` for a modem,
+		// `args` passed through. Write ACL: what an op does is the plugin's
+		// business, and some change the card.
+		modem_plugin: {
+			args: { modem: '', plugin: '', op: '', args: {}, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_ipa(req.args.modem, 'status', req.args, ok_reply(reply))),
+				daemon.modem_plugin(req.args.modem, req.args.plugin, req.args.op || 'status',
+					req.args.args, ok_reply(reply), false)),
 		},
 
-		// eSIM fleet management (wwand-ipa): op 'status' (default) or 'poll'
-		// (ask the eIM now). Write ACL: a poll can change the active profile.
-		modem_ipa: {
-			args: { modem: '', op: '', ubus_rpc_session: '' },
+		// its READ-ONLY twin, for the reason given at modem_esim_profiles above
+		// (rpcd grants methods, not arguments): it reaches only the ops a plugin
+		// lists as read_ops
+		modem_plugin_status: {
+			args: { modem: '', plugin: '', op: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_ipa(req.args.modem, req.args.op || 'status', req.args, ok_reply(reply))),
+				daemon.modem_plugin(req.args.modem, req.args.plugin, req.args.op || 'status',
+					{}, ok_reply(reply), true)),
 		},
 
 		// raw APDU access (write ACL — security relevant)

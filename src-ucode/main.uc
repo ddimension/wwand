@@ -33,6 +33,7 @@ import * as versionmod from 'wwand.version';
 import * as modeswitch from 'wwand.modeswitch';
 import * as netlink from 'wwand.netlink';
 import * as board from 'wwand.board';
+import * as plugins from 'wwand.plugins';
 import ctl_schema from 'wwand.codec.schema.ctl';
 import dms_schema from 'wwand.codec.schema.dms';
 
@@ -189,7 +190,7 @@ function load_config()
 	return config.parse({
 		wwand: cursor.get_all('wwand'),
 		network: cursor.get_all('network'),
-	});
+	}, { ext_options: plugins.option_names() });
 }
 
 function run_daemon()
