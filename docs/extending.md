@@ -270,6 +270,27 @@ Their head comments cite the driver lines each decision comes from, and
 `tests/test_datapath_nss.uc` / `test_datapath_nss_mhi.uc` pin them. Neither has
 run on hardware — read the caveat in each file before trusting a number.
 
+### A feature in its own package: plugins
+
+A capability that is not meant for upstream, or that a typical install does not
+need, lives in its OWN repository and hooks in through neutral interfaces. The
+core never names it. Two shapes, both in docs/reference.md, "Plugins":
+
+- **Daemon plugin** (`plugins.uc`): a plain script in
+  `/usr/share/ucode/wwand/plugins/` with a tick, an eSIM guard and ubus ops
+  (`modem_plugin`). Its `wwand_modem` options arrive raw as `ext`, outside the
+  modem's reload signature. Example: ddimension/wwand-ipa (SGP.32 eIM).
+- **wwandctl command**: `/usr/share/ucode/wwand/ctl/<cmd>.uc`, returning
+  `{ run(ctx, args), help }`. The right shape when the work is really "run an
+  external tool against the modem, on demand". Example: ddimension/wwand-qlog
+  (Quectel QLog).
+
+What the core contributes for such a tool is to RESOLVE and REPORT what it
+needs (`status.diag_port`, exactly like `gps_port`), never to open or drive it.
+The plugin keeps every effect behind an injectable `fx`, so it is host-tested
+against a wwand checkout. It passes the external tool's own options through
+verbatim, so it does not need a release each time the tool grows a flag.
+
 ## 5. Adding telemetry
 
 Telemetry decoders live in the per-transport backends and are chosen per

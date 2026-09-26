@@ -25,7 +25,7 @@ is always user-triggered.
 
 | | |
 |---|---|
-| Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed |
+| Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed. Plugins in their own repositories: `wwand-ipa` (SGP.32 eIM), `wwand-qlog` (Quectel QLog diag capture) |
 | Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
 | Feed | ddimension/openwrt-repo — stable (releases): `wwand`, `luci-app-wwand`, `luci-proto-wwand` 1.6.8; main: development pins as `1.6.8_pN` |
@@ -690,6 +690,23 @@ shell first. lpac hid this, because its verdict is its result line. The marker
 now wins, and that makes lpac's download ack (`notified`) truthful too. Also
 fixed: `tools/check-map.py` read a regex literal with an odd number of quote
 characters as the start of a string, and blanked the rest of the file.
+
+## The diag port on main; QLog capture as a plugin (2026-09-26)
+
+The `wwand-qlog` branch (b3272e5, 528db7d, based on 55d1cf6) was split the
+same way as the eIM work.
+
+**Into the core, because it is neutral:** the modem's DM/DIAG node is
+resolved and never opened, like `gps_port`. This covers:
+- the `qcdm` role in the generated port table, regenerated from ModemManager
+  e1f8061 and identical to the committed one;
+- `discovery.wwan_port_by_type`, `atcmd.find_mhi_diag` and
+  `modem_common.resolve_diag_port`;
+- `option diag_port` and `status.diag_port`.
+
+**Into github.com/ddimension/wwand-qlog, as a wwandctl command plugin:**
+the QLog logic (`qlog.uc`) and `wwandctl qlog`. It is still not verified on
+hardware.
 
 ## Known open
 

@@ -225,6 +225,7 @@ export function modem_defaults(over)
 		repower_time: null,         // recovery power-cycle off / reset hold seconds
 		pincode: null, modes: null, mcc: null, mnc: null,
 		mux: 'auto', dl_datagram_max_size: 0, tty: null,
+		diag_port: null,       // explicit DM/DIAG node for wwand-qlog (never opened)
 		at_init: [], location: false, delay: 0,
 		at2_external: false,   // release the secondary AT port for external tools
 		gnss: false,           // switch the modem's GNSS receiver on (NMEA port)
@@ -305,7 +306,7 @@ function apply_globals(s, result)
 // required but none configured" and safety-blocked the SIM).
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
 	'imei', 'repower_time', 'reset_gpio', 'pincode', 'modes', 'mcc', 'mnc',
-	'mux', 'dl_datagram_max_size', 'tty', 'at2_external', 'gnss', 'gnss_set_time', 'fcc_auth',
+	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'fcc_auth',
 	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'zero_rx_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
@@ -426,6 +427,10 @@ function modem_from_section(s, warnings)
 		mux: s.mux ?? 'auto',
 		dl_datagram_max_size: num_opt(s.dl_datagram_max_size, 0, 'dl_datagram_max_size', warnings),
 		tty: s.tty,
+		// explicit DM/DIAG node, the override for the generated 'qcdm' role
+		// table. wwand NEVER opens it — it is published as status.diag_port for
+		// the wwand-qlog add-on. No table is ever complete, hence this.
+		diag_port: s.diag_port,
 		// release the secondary AT port ('at2') for external tools: wwand then
 		// never opens it and runs telemetry over the control channel instead
 		at2_external: bool_opt(s.at2_external, false),

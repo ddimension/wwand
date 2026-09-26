@@ -537,6 +537,46 @@ export function wwan_sibling_port(name, protocol, fx)
 	return null;
 };
 
+// A sibling port of the same kernel-`wwan` device by its raw `type` file, for
+// the port kinds wwan_port_protocol() deliberately does not report. The only
+// caller today is diag resolution ('QCDM'): wwan_control_ports() filters to
+// QMI/MBIM on purpose (a qcdm node must never be picked as a CONTROL port —
+// the comment on preferred_wwan_port() below says why), so a second, narrower
+// lookup is cheaper than loosening that filter and re-filtering everywhere.
+//
+// `type` values come from the kernel's wwan_port_types[].name —
+// "AT", "MBIM", "QMI", "QCDM", "FIREHOSE", "XMMRPC", "FASTBOOT", "ADB", "MIPC"
+// (drivers/net/wwan/wwan_core.c:305-344, 6.18.41), and the node name carries
+// the matching .devsuf (wwan0qcdm0). mhi_wwan_ctrl maps the MHI "DIAG" channel
+// to WWAN_PORT_QCDM (mhi_wwan_ctrl.c:264, 6.18.41).
+// Matched case-insensitively.
+// Returns '/dev/<node>' or null.
+export function wwan_port_by_type(name, wanted, fx)
+{
+	fx = fx ?? default_fx();
+
+	let m = match(basename(name ?? ''), /^(wwan[0-9]+)/);
+
+	if (!m)
+		return null;
+
+	let want = uc(wanted ?? '');
+
+	for (let path in sort(fx.glob('/sys/class/wwan/*') ?? [])) {
+		let node = basename(path);
+
+		if (substr(node, 0, length(m[1])) != m[1])
+			continue;
+
+		let t = uc(trim(sprintf('%s', fx.read(sprintf('/sys/class/wwan/%s/type', node)) ?? '')));
+
+		if (t == want)
+			return sprintf('/dev/%s', node);
+	}
+
+	return null;
+};
+
 export function preferred_wwan_port(name, fx)
 {
 	fx = fx ?? default_fx();

@@ -1408,5 +1408,47 @@ eq(hand_acts[23], 'usb_repower',
    'make_recovery: reset_line survives the hand-off — the unarmed pulse is offered');
 eq(hand_rec.usb_repower(), true, 'make_recovery: and the primitive honours it');
 eq(hand_pulses, [ 'board' ], 'make_recovery: the board action ran');
+// --- diag port resolution (resolve_diag_port) --------------------------------
+// The Qualcomm DM/DIAG node, resolved and NEVER opened — exactly like the NMEA
+// port beside it. It is published as status.diag_port for the optional
+// wwand-qlog add-on. Four sources, in a fixed order of specificity.
+
+function diag_fx(o) {
+	return {
+		glob: (pat) => o?.glob?.[pat] ?? [],
+		read: (p) => o?.read?.[p] ?? null,
+	};
+}
+
+// 1. the explicit config override beats everything: no table is ever complete
+eq(mc.resolve_diag_port({ config: { diag_port: '/dev/ttyUSB7' }, device: '/dev/cdc-wdm0' },
+		diag_fx(), { qcdm: '/dev/ttyUSB0' }),
+	'/dev/ttyUSB7', 'diag: option diag_port wins over the port table');
+
+// 2. the generated USB role table ('qcdm'), as resolved by find_at_channels
+eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), { qcdm: '/dev/ttyUSB0' }),
+	'/dev/ttyUSB0', 'diag: the qcdm role from the port table');
+
+// 3. Quectel's out-of-tree pcie_mhi driver names it /dev/mhi_DIAG — and that is
+// the ONLY PCIe node QLog 1.5.8 routes (main.c:1180)
+eq(mc.resolve_diag_port({ config: {}, device: '/dev/wwan0qmi0' },
+		diag_fx({ glob: { '/dev/mhi_DIAG*': [ '/dev/mhi_DIAG' ] } }), { qcdm: null }),
+	'/dev/mhi_DIAG', 'diag: the vendor pcie_mhi node');
+
+// 4. mainline mhi_wwan_ctrl publishes it on the wwan device instead. Reported
+// even though QLog refuses the name (qlog.uc port_supported) — knowing the port
+// exists and why it cannot be used beats reporting nothing.
+eq(mc.resolve_diag_port({ config: {}, device: '/dev/wwan0qmi0' },
+		diag_fx({ glob: { '/sys/class/wwan/*': [ '/sys/class/wwan/wwan0qmi0',
+		                                         '/sys/class/wwan/wwan0qcdm0' ] },
+		          read: { '/sys/class/wwan/wwan0qcdm0/type': 'QCDM\n',
+		                  '/sys/class/wwan/wwan0qmi0/type': 'QMI\n' } }), { qcdm: null }),
+	'/dev/wwan0qcdm0', 'diag: the mainline kernel-wwan node');
+
+// nothing anywhere -> null, never a guessed tty
+eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), { qcdm: null }),
+	null, 'diag: no source knows one -> null');
+eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null),
+	null, 'diag: a modem with no AT channels at all does not throw');
 
 done('test_modem_common');

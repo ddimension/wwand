@@ -54,6 +54,12 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   (`wwand.codec.tlv`), NEVER relative; no hyphens in module paths (hence
   `codec/mbim_schema/`).** require()-CommonJS shims (top-level `return`,
   `WWAND_UCODE_PLAIN`) stay source; they may import bytecode modules freely.
+- **Plugins live in their own repos and are not meant for upstream**:
+  ddimension/wwand-ipa (SGP.32 eIM fleet management) and ddimension/wwand-qlog
+  (Quectel QLog diag capture). They hook in through `plugins.uc` (daemon) and
+  `/usr/share/ucode/wwand/ctl/<cmd>.uc` (wwandctl); keep feature code for them
+  OUT of this tree — the core only offers neutral interfaces (see
+  docs/reference.md, "Plugins").
 - LuCI packages moved to their own repos: ddimension/luci-proto-wwand,
   luci-app-wwand (sources only; package defs + wwand-lpac entirely in the
   feed repo).

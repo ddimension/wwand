@@ -435,6 +435,12 @@ config wwand_modem 'm0'
 	                                 #    time — but only when the clock is plainly unset
 	                                 #    (pre-2021), so it never fights sysntpd. Off by
 	                                 #    default — the router has NTP; for RTC-less installs
+	option diag_port '/dev/ttyUSB0'  # explicit DM/DIAG node for the wwand-qlog add-on.
+	                                 #    wwand NEVER opens it; it is REPORTED as
+	                                 #    `diag_port` in `ubus call wwand status`.
+	                                 #    Unset = resolved from the generated port-role
+	                                 #    table / the vendor /dev/mhi_DIAG / the
+	                                 #    kernel-wwan qcdm node. See "The diag port"
 	option at_mbim '0'               # 0: disable the automatic AT-over-MBIM fallback
 	option at_over_mbim ''           # force AT over the vendor MBIM CID instead of a
 	                                 #   tty: fibocom|compal|1 (unset = automatic:
@@ -1282,6 +1288,20 @@ unblock the daemon restarts the modem bring-up with the new PIN; update
 `option pincode` (or the per-SIM `wwand_sim` override) to the new PIN so the
 next boot unlocks cleanly.
 
+### The diag port (`diag_port`)
+
+The modem's Qualcomm DM/DIAG node is **resolved and never opened**, like the
+NMEA port. wwand has no DM decoder. Resolution order: `option diag_port` on
+the `wwand_modem` section → the `qcdm` role in wwand's generated port table
+(from ModemManager's udev rules) → the vendor `pcie_mhi` node `/dev/mhi_DIAG`
+→ the mainline kernel-wwan node `/dev/wwanNqcdmM`. The result is published as
+`diag_port` in `ubus call wwand status`, for a capture tool to be pointed at.
+No table is ever complete, hence the option.
+
+Capturing from it (QMDL, through Quectel QLog) is the optional plugin
+**`wwand-qlog`** (github.com/ddimension/wwand-qlog), which adds
+`wwandctl qlog`.
+
 ### Feeding collectd (`wwandctl collectd`)
 
 Long-lived RRD history for signal, temperature and connection state, using
@@ -1362,7 +1382,7 @@ when called from LuCI).
 
 | Method | Arguments | Description |
 |---|---|---|
-| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `gps_port` — the modem's NMEA tty when its port table names one (read by wwand-gps when `option gnss` is set; see `modem_gps`), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran) + contexts + `board` (detected profile, power/reset capability) |
+| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `gps_port` — the modem's NMEA tty when its port table names one (read by wwand-gps when `option gnss` is set; see `modem_gps`), `diag_port` — the modem's DM/DIAG node, likewise resolved and never opened (see "The diag port"), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran) + contexts + `board` (detected profile, power/reset capability) |
 | `reload` | — | re-read UCI and apply the **diff** — only changed/added/removed modems and contexts are touched (idempotent; see *Idempotent reload*) |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |

@@ -306,6 +306,28 @@ r = padopt({
 });
 eq(r.modems.m0.protocol, 'mbim', 'protocol: accepted case-insensitively');
 
+// `option diag_port` — the explicit DM/DIAG node for the wwand-qlog add-on.
+// wwand never opens it; it is the escape hatch for a modem whose USB id has no
+// 'qcdm' row in the generated port table, and no table is ever complete.
+// It hit the same trap `protocol` did: an option in the defaults but missing
+// from MODEM_KNOWN_OPTS and the parser warns "unknown option" AND does nothing.
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', diag_port: '/dev/ttyUSB0' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.diag_port, '/dev/ttyUSB0', 'diag_port: the pin reaches the modem config');
+eq(length(filter(r.warnings, (w) => match(w, /unknown option 'diag_port'/))), 0,
+	'diag_port: and is not reported as dead config');
+
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.diag_port, null, 'diag_port: unset stays null (discovery decides)');
 
 // SIM toolkit routing. Unset must mean "leave the modem alone" — this changes
 // how the card and the network talk to each other, and a default would break a
