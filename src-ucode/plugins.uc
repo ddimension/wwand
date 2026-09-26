@@ -148,6 +148,25 @@ export function install(self, o)
 		return out;
 	};
 
+	// Where the modem's active card really is, when a plugin put it there:
+	// `card_source(ref, ext)` -> a place name (a reader), or null. The SIM
+	// inventory files a remote card under it instead of the modem's slot.
+	self.plugins_card_source = function(ref) {
+		for (let p in active()) {
+			if (type(p.inst.card_source) != 'function')
+				continue;
+
+			let r = null;
+
+			try { r = p.inst.card_source(ref, ext_of(ref)); } catch (e) { r = null; }
+
+			if (type(r) == 'string' && length(r))
+				return r;
+		}
+
+		return null;
+	};
+
 	// The first plugin that manages this card for this operation, or null.
 	// Loading the plugins here is deliberate: a guard that answers "free"
 	// because nothing happened to load them yet would let a change through.

@@ -145,7 +145,7 @@ export function install(self, o)
 			// the backoff they were meant to space out collapses. Reachable
 			// whenever something reaches retry_activate while a retry is
 			// already scheduled: the modem-ready and adoption paths call it
-			// directly (daemon.uc:484,:556), and the sim_refresh handler gets
+			// directly (daemon.uc:522,:556), and the sim_refresh handler gets
 			// there through enter_reconnecting.
 			if (entry.retry_timer) {
 				entry.retry_timer.cancel();

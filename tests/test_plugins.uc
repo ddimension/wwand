@@ -226,6 +226,36 @@ eq(self.connection_token('m1'), null, 'token: null for a modem with nothing conn
 	   'status rows: a plugin that throws costs its row, logged once — not every second of LuCI polling');
 }
 
+// --- the SIM inventory: remote cards filed under their reader ------------------------
+{
+	let d = daemon_mod.create({ deps: {
+		log: () => null,
+		plugins: [ { name: 'r', options: [], mod: { create: () => ({
+			card_source: (ref) => (ref == 'm0') ? 'smartmouse' : null }) } } ],
+	} });
+
+	d.esim_guard('m0', 'enable');   // loads the plugins
+	d.modems = {
+		m0: { modem: { info: { iccid: '89882390000056293510', imsi: '901280001078482' }, active_slot: 1 } },
+		m1: { modem: { info: { iccid: '8949020000184496711F', imsi: '262014943410220' }, active_slot: 1 } },
+	};
+
+	let inv = d.sim_inventory().cards;
+	let by = {};
+
+	for (let c in inv)
+		by[c.iccid] = c;
+
+	eq([ by['89882390000056293510']?.reader, by['89882390000056293510']?.modem ], [ 'smartmouse', null ],
+	   'inventory: a remote card is filed under its reader (plugin card_source)');
+	eq([ by['8949020000184496711']?.modem, by['8949020000184496711']?.slot ], [ 'm1', 1 ],
+	   'inventory: a local card under its modem and slot, ICCID normalised');
+
+	d.modems = { m1: d.modems.m1 };
+	ok(filter(d.sim_inventory().cards, (c) => c.iccid == '89882390000056293510')[0]?.present === false,
+	   'inventory: a modem that is gone takes its cards along (absent, kept)');
+}
+
 for (let f in fs.lsdir(tmp) ?? [])
 	fs.unlink(sprintf('%s/%s', tmp, f));
 fs.rmdir(tmp);

@@ -440,6 +440,7 @@ eSIM (needs the wwand-esim package)
   esim [modem] notifications | notify   pending eUICC notifications (ES9+)
 
 Maintenance
+  sims                   every SIM card seen: ICCID, where it is (modem/slot, eUICC profile, reader)
   reset [modem]          modem reset (GPIO if configured, else backend soft reset)
   repower [modem]        hardware repower (reset-GPIO pulse / board power-cycle)
   protocol [modem] qmi|mbim   switch the control protocol (the modem resets)
@@ -936,6 +937,26 @@ case 'sms-delete': {
 
 	call_ok('modem_sms_delete', { modem: r.modem, index: +rest[0] });
 	printf('message %d deleted\n', +rest[0]);
+	break;
+}
+
+// every SIM card wwand has seen, by ICCID, and where it is (siminventory.uc)
+case 'sims': {
+	let inv = call_ok('sim_inventory', {});
+
+	if (!length(inv?.cards ?? []))
+		printf('no SIM card seen yet\n');
+
+	for (let c in (inv?.cards ?? [])) {
+		let where = c.reader ? sprintf('reader %s', c.reader)
+			: c.modem ? sprintf('%s%s', c.modem, (c.slot != null) ? sprintf(' slot %d', c.slot) : '') : '?';
+		let esim = c.eid ? sprintf(' · eUICC %s%s', c.eid,
+			c.profile ? sprintf(' profile %s%s', c.profile.state ?? '?', c.profile.name ? sprintf(' "%s"', c.profile.name) : '') : '') : '';
+
+		printf('%-21s %-22s %s%s%s\n', c.iccid, where,
+			!c.present ? 'not present' : c.active ? 'active' : 'present',
+			c.imsi ? sprintf(' · imsi %s', c.imsi) : '', esim);
+	}
 	break;
 }
 

@@ -35,6 +35,10 @@ export function install(self, o)
 			if (err)
 				return cb({ error: 'sim_transport', detail: err });
 
+			// the last reading, for the SIM inventory: the cards in the
+			// slots that are not active are known from here only
+			entry.modem.slots = slots;
+
 			// alongside the slots, what SHAPE of multi-SIM this modem is. Purely
 			// descriptive — see sim.multisim. It is the one thing we cannot
 			// determine for hardware we do not own, so it is worth reporting

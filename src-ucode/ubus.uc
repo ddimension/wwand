@@ -161,6 +161,13 @@ export function publish(conn, daemon, log)
 				daemon.modem_get_settings(req.args.modem, ok_reply(reply))),
 		},
 
+		// every SIM card wwand has seen, by ICCID, and where it is
+		// (siminventory.uc)
+		sim_inventory: {
+			args: { ubus_rpc_session: '' },
+			call: (req) => daemon.sim_inventory(),
+		},
+
 		modem_sim_slots: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

@@ -13,6 +13,7 @@ import * as netsel_ops from 'wwand.netsel_ops';
 import * as simops from 'wwand.simops';
 import * as hwops from 'wwand.hwops';
 import * as plugins from 'wwand.plugins';
+import * as siminventory from 'wwand.siminventory';
 import * as cfgmod from 'wwand.config';
 import * as nlmod from 'wwand.netlink';
 import * as reconnect from 'wwand.reconnect';
@@ -398,7 +399,44 @@ export function create(opts)
 
 	// modem reached service: write back l3 device names, run autosetup APN
 	// fill, (re)establish this modem's IDLE interface-bound contexts.
+	// The SIM inventory (siminventory.uc): every card seen, by ICCID, and
+	// where it is. Refreshed from the modems' state on every status() and
+	// every tick — in memory, no I/O — so it follows identity re-reads, slot
+	// switches, eSIM changes and remote cards without hooks in each of them.
+	let inventory = siminventory.create({});
+
+	let inventory_refresh = () => {
+		let keep = [];
+
+		for (let name, entry in self.modems) {
+			// a modem mid-restart has no reading: its cards stay as they were
+			let srcs = siminventory.from_modem(name, entry?.modem,
+				entry?.modem ? (self.plugins_card_source?.(name) ?? null) : null);
+
+			for (let k, l in srcs) {
+				push(keep, k);
+				inventory.observe(k, entry?.modem ? l : null);
+			}
+		}
+
+		// a modem that is no longer configured takes its cards along
+		inventory.forget_except('modem:', keep);
+	};
+
+	self.sim_inventory = function() {
+		inventory_refresh();
+		return { cards: inventory.list() };
+	};
+
 	let modem_registered = (modem, data) => {
+		// the slot list once per modem object, so the inventory knows the
+		// cards in the slots that are not active before anyone opens the
+		// status page (which reads it on its own after that)
+		if (!modem._inventory_slots && self.modem_sim_slots) {
+			modem._inventory_slots = true;
+			self.modem_sim_slots(modem.id, () => null);
+		}
+
 		// OPEN THE NMEA PORT. wwand found it during enumeration (`gps_tty`)
 		// and `option gnss` started the receiver; reading it is the last of
 		// the three and the only one that used to be somebody else's job.
@@ -2651,6 +2689,7 @@ export function create(opts)
 
 				// optional plugins (plugins.uc): a no-op when none is installed
 				self.plugins_tick?.();
+				inventory_refresh();
 
 				if (deps.board) {
 					let first = null;

@@ -2071,6 +2071,30 @@ modem NV. The LuCI Modem page has a one-click "Lock this cell".
 **Where are the recovery counters?** `/tmp/wwand/state/` — they survive a daemon
 restart and clear on reboot (the recovery ladder's last rung).
 
+## SIM inventory
+
+wwand keeps a table of every SIM card it has seen, by ICCID, and where it is:
+modem and slot, eUICC (EID) and profile, or a reader (remote SIM through
+wwand-rsim). `ubus call wwand sim_inventory` returns it as `cards[]`
+(`iccid`, `present`, `active`, `imsi`, `modem`, `slot`, `reader`, `eid`,
+`profile {state,name}`, `first_seen`, `last_seen`, `sources`);
+`wwandctl sims` prints it; LuCI shows it under Status → SIM cards.
+
+It is rebuilt from the modems' state on every status call and every tick, in
+memory (siminventory.uc), so it follows identity re-reads, slot switches,
+eSIM changes and remote cards. Rules it follows:
+- an eUICC has no ICCID of its own — its active card IS the enabled
+  profile, one entry; profiles are grouped under the EID;
+- a card a modem uses remotely is filed under the reader;
+- ICCIDs are normalised (a trailing `F`, spaces, case) before comparing;
+- a card nothing reports any more stays listed as not present, with when it
+  was last seen; a modem that is removed takes its cards along the same way;
+- a modem with no reading yet (mid-restart, identity being re-read) changes
+  nothing.
+
+The cards in inactive slots come from the slot list, read once when a modem
+registers and whenever the status page reads it.
+
 ## Plugins
 
 Features that ship in their own packages hook into the daemon without the
@@ -2116,6 +2140,10 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   re-apply the per-SIM settings for the new one.
 - **ubus:** `modem_plugin` reaches `ops`; `modem_plugin_status` reaches only
   `read_ops`.
+- **Card source:** an optional `card_source(ref, ext)` returns where the
+  modem's active card really is when the plugin put it there (a reader name),
+  or null; the SIM inventory files that card under it instead of the modem's
+  slot.
 - **Status rows:** an optional `status(ref, ext)` returns `{ label, text,
   level }` (`ok`/`warn`/`error`), an array of them, or null. They appear per
   modem in `status()` as `plugins` and on the LuCI status page and in
