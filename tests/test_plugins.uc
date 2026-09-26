@@ -170,6 +170,13 @@ eq(self.connection_token('m1'), null, 'token: null for a modem with nothing conn
 	d.modems = { m0: { modem: m } };
 
 	eq(captured.sim_changed('nope', 'x'), false, 'sim_changed: an unknown modem is a no-op');
+
+	let at_got = null;
+
+	m.at = { send: (cmd, cb) => cb(null, { lines: [ '+CSIM: 4,"9000"' ] }) };
+	captured.modem_at('m0', 'AT+CSIM=10,"00B0000002"', (e, r) => { at_got = r?.lines; });
+	eq(at_got, [ '+CSIM: 4,"9000"' ], 'modem_at: a plugin reaches the modem\'s AT channel');
+	delete m.at;
 	eq(captured.sim_changed('m0', 'remote SIM'), true, 'sim_changed: a running modem is told');
 	eq([ m.info.iccid, m.info.imsi, m.info.msisdn ], [ null, null, null ],
 	   'sim_changed: the old card\'s identity is forgotten, not shown for the new one');

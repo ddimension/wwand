@@ -3381,6 +3381,11 @@ export function create(opts)
 			esim: () => load_esim(),
 			esim_bridge: () => self.esim_bridge(),
 			esim_refresh: (ref, eid, slot, cb) => self.esim_refresh(ref, eid, slot, cb),
+			// an AT command on the modem's AT channel, whichever it is — a tty,
+			// or AT carried inside MBIM where there is none (atcmd_mbim.uc);
+			// cb(err, { lines }). The same path `ubus call wwand modem_at` takes.
+			modem_at: (ref, command, cb, timeout) =>
+				self.modem_at(ref, command, (e, r) => cb(e, r), timeout),
 			// the card behind the modem changed: the same forget-and-re-read
 			// a slot switch runs (simops.uc card_changed)
 			sim_changed: (ref, why) => self.card_changed ? self.card_changed(ref, why) : false,

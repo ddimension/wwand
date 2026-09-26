@@ -2104,6 +2104,9 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   `unsupported` (not a QMI-controlled modem). The modem owns the client and
   releases it on teardown; `client.destroyed` then tells the plugin to ask
   again. `qmi_release(ref, client)` gives it back earlier.
+  `modem_at(ref, command, cb, timeout)` sends one AT command over the
+  modem's AT channel — a tty, or AT inside MBIM where there is none —
+  `cb(err, { lines })`, the same path as the `modem_at` ubus method.
   `sim_changed(ref, why)` is for a plugin that swaps the card behind a
   running modem: the process a slot switch runs — forget the old card
   (identity, notes, per-SIM override, eSIM/APDU caches), then unlock and
