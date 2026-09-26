@@ -244,6 +244,19 @@ scenario('late-reg', {
 		modem._update_serving({ serving_system: { registration: 0, radio_ifs: [] } });
 		eq(modem.state, 'READY', 'parked: losing registration does not re-enter the register chain');
 
+		// woken again (set_opmode 'online' from a park marks it): the next
+		// registration is reported as one — the modem never left READY, and
+		// without the event the daemon would not re-arm what it gave up
+		// while the radio was off
+		let before = length(filter(events, (e) => e.event == 'registered'));
+
+		modem._wake_pending = true;
+		modem._update_serving({ serving_system: { registration: 1, radio_ifs: [ 8 ] } });
+		eq(length(filter(events, (e) => e.event == 'registered')) - before, 1,
+		   'woken from a park: the registration that follows is reported');
+		eq(modem._wake_pending, false, 'woken from a park: ...once');
+		modem._update_serving({ serving_system: { registration: 0, radio_ifs: [] } });
+
 		// ...and unparked, the same loss DOES chase it — otherwise the guard
 		// above would be indistinguishable from never supervising at all
 		modem.lowpower_parked = false;
@@ -2720,9 +2733,10 @@ eq(reattach_err?.error, 'cancelled',
 		m.start();
 		// cancelled after the run: a guard timer left armed would end the NEXT
 		// block's loop early, before its modem has registered
-		let guard = uloop.timer(3000, () => uloop.end());
+		let guard = uloop.timer(15000, () => uloop.end());
 		uloop.run();
 		guard.cancel();
+		m.stop();   // nor may a modem the guard cut short keep running
 		return done_once;
 	};
 
@@ -2799,9 +2813,12 @@ eq(reattach_err?.error, 'cancelled',
 		},
 	});
 	m.start();
-	let guard = uloop.timer(3000, () => uloop.end());
+	// generous: the suite runs its files in parallel, and a block whose guard
+	// fires first leaves callbacks behind that end the NEXT block's loop
+	let guard = uloop.timer(15000, () => uloop.end());
 	uloop.run();
 	guard.cancel();
+	m.stop();   // idempotent; a block ended by its guard must not leak timers
 
 	for (let c in mock.calls)
 		if (c.name == 'RELEASE_CID' && c.args?.release?.service == 0x32)
@@ -2810,6 +2827,67 @@ eq(reattach_err?.error, 'cancelled',
 	ok(cid != null, 'extra client release: a client was allocated');
 	eq(released, cid, 'extra client release: teardown sent RELEASE_CID for the plugin\'s CID');
 
+}
+
+// A modem with no card stops in SIM_BLOCKED; when a card arrives later (a
+// remote SIM offered after the init ran, wwand-rsim) retry_sim resumes from
+// the SIM step and the modem registers — without it, it stayed blocked until
+// a reload.
+{
+	uloop.init();
+
+	let card_in = false;
+	let events = [];
+	let mock = mockhub.create({ handlers: base_handlers({
+		GET_CARD_STATUS: () => {
+			let cs = card_status();
+
+			if (!card_in)
+				cs.cards[0].card_state = 0;   // absent
+			return { card_status: cs };
+		},
+	}) });
+	let m;
+
+	m = modem_mod.create({
+		id: 'nocard', device: '/dev/mock0', config: {},
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		at: { fx: fakefx.create() },
+		timing: TIMING,
+		deps: {
+			transport_open: mock.transport_open,
+			log: (level, msg) => null,
+			on_event: (mm, event, data) => {
+				push(events, event);
+
+				if (event == 'sim_blocked' && !card_in) {
+					m.sim_block = data;   // what the daemon records
+
+					// the card arrives
+					uloop.timer(50, () => {
+						card_in = true;
+						ok(m.state == 'SIM_BLOCKED', 'no card: the modem stopped in SIM_BLOCKED');
+						eq(m.retry_sim(), true, 'card arrived: retry_sim resumes from the SIM step');
+					});
+				}
+				if (event == 'registered')
+					uloop.timer(20, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+			},
+		},
+	});
+	m.start();
+
+	let guard = uloop.timer(15000, () => uloop.end());
+	uloop.run();
+	guard.cancel();
+	m.stop();
+
+	ok(index(events, 'registered') >= 0, 'card arrived: the modem registers on it');
+
+	// a PIN block is not what a new card cures
+	m.sim_block = { reason: 'pin_blocked' };
+	m.state = 'SIM_BLOCKED';
+	eq(m.retry_sim(), false, 'a PIN/PUK block stays terminal');
 }
 
 // a client given back twice while the modem runs is released ONCE: the
@@ -2847,9 +2925,12 @@ eq(reattach_err?.error, 'cancelled',
 		},
 	});
 	m.start();
-	let guard = uloop.timer(3000, () => uloop.end());
+	// generous: the suite runs its files in parallel, and a block whose guard
+	// fires first leaves callbacks behind that end the NEXT block's loop
+	let guard = uloop.timer(15000, () => uloop.end());
 	uloop.run();
 	guard.cancel();
+	m.stop();   // idempotent; a block ended by its guard must not leak timers
 
 	eq(length(filter(mock.calls, (c) => c.name == 'RELEASE_CID' && c.args?.release?.service == 0x32)), 1,
 	   'extra client: given back twice, released once');

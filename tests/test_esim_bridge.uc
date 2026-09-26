@@ -126,8 +126,12 @@ let esim_fake = {
 // _esim_op is a REFCOUNT (0 = idle, n>0 = quiet); readers only test
 // truthiness, so the assertions below pin exactly that contract
 let entry = { modem: { id: 'm0', _esim_op: 0 } };
+// `changed`: everything that may alter the profile list reports it, so the
+// host's copy (status esim, SIM inventory) is read again
+let changed = [];
 let br = bridge.create({ esim: esim_fake, log: () => null,
 	modem_of: (r) => (r == 'm0') ? entry : null,
+	changed: (ref, slot) => push(changed, ref),
 	lpac_path: '/nonexistent-lpac' });
 
 let chain = [];
@@ -152,7 +156,10 @@ run_chain = (idx) => {
 				eq(!!entry.modem._esim_op, true,
 					'router: a parallel op completing leaves the running download quiet');
 
+				let before = length(changed);
+
 				dl_completion(null, { ret: 0 });   // simulate the modem finishing
+				eq(length(changed), before + 1, 'changed: a finished in-modem download reports a list change');
 				eq(!!entry.modem._esim_op, false, 'router: quiet cleared at download completion');
 				lpac_stdio_tests();
 			});
@@ -195,6 +202,7 @@ expect('enable', { iccid: 'x' }, 'invalid_argument');
 expect('enable', {}, 'missing_argument');
 expect('enable', { iccid: '89358152000000075749' }, null, (res) => {
 	eq(res, { ok: true, via: 'esim' }, 'router enable: no lpac -> esim.enable fallback');
+	eq(changed, [ 'm0' ], 'changed: a successful enable reports a list change, the failed ops before it none');
 });
 expect('profiles', {}, null, (res) => {
 	eq(res, { profiles: [] }, 'router profiles: passthrough');
@@ -253,8 +261,10 @@ let mute_pidf = sprintf('%s/wwand-test-lpac-mute.pid', tmp);
 write_stub(fake_mute, sprintf("#!/bin/sh\necho $$ > %s\nsleep 3\nexit 0\n", mute_pidf));
 
 let entry2 = { modem: { id: 'm0', _esim_op: 0 } };
+let changed2 = 0;
 let mk = (path, idle) => bridge.create({ esim: esim_fake, log: () => null,
 	modem_of: (r) => (r == 'm0') ? entry2 : null,
+	changed: () => changed2++,
 	lpac_path: path, idle_ms: idle });
 
 // poll download_status until the run leaves 'running' (bounded, so a
@@ -282,6 +292,7 @@ lpac_stdio_tests = () => {
 			eq(st?.state, 'done',
 				'lpac stdio: result line arriving with EOF is still parsed');
 			eq(!!entry2.modem._esim_op, false, 'lpac stdio: quiet claim released');
+			eq(changed2, 1, 'changed: a finished lpac download reports a list change');
 
 			// the watchdog: a child that says nothing must not wedge the
 			// bridge at 'running' forever (every later op would answer 'busy')

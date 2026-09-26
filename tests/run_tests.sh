@@ -79,6 +79,9 @@ if command -v python3 >/dev/null 2>&1; then
 		# run before the commit, when fixing it is one `--fix` away
 		args=""
 		[ "$chk" = check-anchors ] && git -C "$TESTDIR" rev-parse HEAD >/dev/null 2>&1 && args="--since HEAD"
+		# its default root is relative (src-ucode) and this runs from tests/,
+		# where it found nothing and reported "checked 0" as a pass
+		[ "$chk" = check-export-terminators ] && args="$TESTDIR/../src-ucode"
 		out=$(python3 "$TESTDIR/../tools/$chk.py" $args 2>&1)
 		code=$?
 		printf '%s\n' "$out" | tail -1

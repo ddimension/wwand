@@ -12,6 +12,15 @@
 //                            // unknown, and never restart the modem on reload.
 //     create(deps) -> {      // all hooks optional
 //       tick(ref, ext),                 // every 10 s, per modem
+//       radio_hold(ref, ext),           // -> null, or a reason the modem's
+//                                       //    radio must stay off (its card
+//                                       //    is in use elsewhere)
+//       stop(),                         // the daemon exits -> true when it
+//                                       //    started work that needs the loop
+//       busy(),                         // -> true while that work runs
+//       card_source(ref, ext),          // -> the reader the active card is
+//                                       //    really in, or null
+//       status(ref, ext),               // -> status row(s), or null
 //       esim_guard(ref, op, ext),       // -> null, or { reason } to refuse a
 //                                       //    card-changing modem_esim op
 //       ops: { <op>: (ref, ext, args, cb) },   // ubus modem_plugin
@@ -107,11 +116,104 @@ export function install(self, o)
 
 	let ext_of = (ref) => self.modems[ref]?.ext ?? {};
 
+	// One plugin that throws must not cost the others their tick, nor the
+	// daemon the rest of its own (the tick runs inside a uloop timer, where an
+	// exception ends the process). Logged once per plugin until it recovers.
+	// Keyed by plugin and modem: a plugin that fails for one modem and not
+	// another is logged once, not every tick.
+	let tick_failed = {};
+	let stopped = false;
+
 	self.plugins_tick = function() {
+		// stopped for the daemon's exit: a tick now would undo the stop
+		if (stopped)
+			return;
+
 		for (let name, entry in self.modems)
-			for (let p in active())
-				if (type(p.inst.tick) == 'function')
+			for (let p in active()) {
+				if (type(p.inst.tick) != 'function')
+					continue;
+
+				let k = p.name + '/' + name;
+
+				try {
 					p.inst.tick(name, entry?.ext ?? {});
+					delete tick_failed[k];
+				}
+				catch (e) {
+					if (!tick_failed[k])
+						log('warn', sprintf('plugin %s: tick for %s failed (%s)', p.name, name, e));
+					tick_failed[k] = true;
+				}
+			}
+	};
+
+	// Why this modem's radio must stay off, or null: a plugin that lent its
+	// card to another modem says so, and a bring-up of one of its interfaces
+	// must not switch the radio back on — two modems would register with one
+	// IMSI. Only plugins that already run are asked: one that never started
+	// has lent nothing.
+	self.plugins_radio_hold = function(ref) {
+		for (let p in (instances ?? [])) {
+			if (type(p.inst.radio_hold) != 'function')
+				continue;
+
+			let r = null;
+
+			try { r = p.inst.radio_hold(ref, ext_of(ref)); } catch (e) { r = null; }
+
+			if (type(r) == 'string' && length(r))
+				return sprintf('%s: %s', p.name, r);
+		}
+
+		return null;
+	};
+
+	// Whether a stopped plugin still has requests on their way (its busy()).
+	// A plugin without busy() that said it had work is given the benefit of
+	// the doubt until the caller's deadline.
+	self.plugins_busy = function() {
+		for (let p in (instances ?? [])) {
+			if (!p.stopping)
+				continue;
+
+			let b = true;
+
+			if (type(p.inst.busy) == 'function')
+				try { b = !!p.inst.busy(); } catch (e) { b = false; }
+			else if (!p.waited) {
+				p.waited = true;
+				log('info', sprintf('plugin %s: stopping, has no busy() — waiting the full grace time', p.name));
+			}
+
+			if (b)
+				return true;
+		}
+
+		return false;
+	};
+
+	// The daemon is exiting: each running plugin winds down (a lent card goes
+	// back, a remote one is withdrawn so the modem returns to its own).
+	// Returns true when one of them started work that needs the event loop
+	// for a moment longer — main.uc then runs it briefly before exiting.
+	self.plugins_stop = function() {
+		let pending = false;
+
+		stopped = true;
+
+		for (let p in (instances ?? [])) {
+			if (type(p.inst.stop) != 'function')
+				continue;
+
+			try {
+				p.stopping = !!p.inst.stop();
+				pending = p.stopping || pending;
+			}
+			catch (e) { log('warn', sprintf('plugin %s: stop failed (%s)', p.name, e)); }
+		}
+
+		return pending;
 	};
 
 	// Rows plugins add to a modem's status: [ { plugin, label, text, level } ],

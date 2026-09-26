@@ -1775,7 +1775,7 @@ export function create(opts)
 	// GIVE THE CID BACK. Every passthrough client is allocated out of the
 	// MODEM's client table, and a destroyed-but-not-released one stays in it
 	// until the modem's stack resets — the same finite resource modem.uc's
-	// teardown release burst exists to protect (modem.uc:304,:1416). The
+	// teardown release burst exists to protect (modem.uc:313,:1416). The
 	// session-long clients (pt.nas/dsd, uim, wms) are allocated once and go
 	// with the session; these two allocate PER CALL, so a scripted reattach
 	// loop walked the table down on its own. An E182E-class stack has room for
@@ -2008,7 +2008,7 @@ export function create(opts)
 			// — closing the HOST's MBIM session is not shown to reset the
 			// modem's embedded QMI client table, so every daemon reload leaked
 			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
-			// table has room for a handful. Same burst modem.uc:1544 does for
+			// table has room for a handful. Same burst modem.uc:1568 does for
 			// the native side, which the passthrough never had. ctl is NOT in this list: it is the
 			// implicit client (cid 0) and it is what carries RELEASE_CID for
 			// all the others, so it has to outlive them.

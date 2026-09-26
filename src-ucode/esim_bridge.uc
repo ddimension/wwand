@@ -161,9 +161,20 @@ return {
 	// exposed for tests (test_esim_bridge): the pure lpac line classifier
 	parse_lpac_line: parse_lpac_line,
 
-	// deps: { esim (the wwand.esim module), log(level,msg), modem_of(ref) }
+	// deps: { esim (the wwand.esim module), log(level,msg), modem_of(ref),
+	//         changed?(ref, slot) }
+	// `changed` fires after anything that may have altered the card's profile
+	// list (a finished download, an enable/disable/delete that succeeded): the
+	// host's copy of that list — status `esim`, the SIM inventory — is read
+	// only at bring-up and goes stale otherwise.
 	create: function(deps) {
 		let esim = deps.esim, log = deps.log, modem_of = deps.modem_of;
+		// the host's refresh must not take the operation that triggered it
+		// down with it — but a failure is said, not swallowed
+		let changed = (ref, slot) => {
+			try { deps.changed?.(ref, slot); }
+			catch (e) { log('warn', sprintf('modem %s: eSIM profile list refresh failed (%s)', ref, e)); }
+		};
 		let lpac = deps.lpac_path ?? ESIM_LPAC;   // test seam for the lpac binary
 		let idle_ms = deps.idle_ms ?? ESIM_IDLE_MS;   // test seam for the watchdog
 		let dl = { state: 'idle' };   // one host download at a time
@@ -483,6 +494,9 @@ return {
 			let finish = (state, extra) => {
 				dl = { state, via: 'lpac', ...extra };
 				release?.();   // run finished — this op's quiet claim is dropped
+				// a failed run can have installed the profile before failing
+				// (the ack is a separate step) — re-read either way
+				changed(ref, slot);
 				log('notice', sprintf('modem %s: eSIM download %s%s', ref, state,
 					extra?.notified != null ? sprintf(' (ack %s)', extra.notified ? 'sent' : 'skipped') : ''));
 			};
@@ -688,6 +702,11 @@ return {
 			session_run: session_run,
 			session_download: session_download,
 
+			// a host session is on the card (a download, a profile change,
+			// a plugin's run, one parked in an event): another one beside it
+			// would corrupt it — a caller that can wait, waits
+			busy: () => (dl?.state == 'running' || mgmt_busy || parked != null),
+
 			// after a profile change the modem has to re-read the card; the
 			// same apply as an lpac enable (see apply_sim_reset above)
 			apply_sim_reset: (ref, slot, cb) => {
@@ -769,6 +788,7 @@ return {
 									: { state: 'done', via: 'modem', ret: res?.ret };
 								at_quiet();   // run finished — URCs may resume
 								log('notice', sprintf('modem %s: eSIM AT download %s', ref, dl.state));
+								changed(ref, slot);
 							});
 
 							done(null, { started: true, via: 'modem' });
@@ -874,6 +894,9 @@ return {
 					if (!length(iccid)) return done({ error: 'missing_argument' });
 					if (!match(iccid, /^[0-9]+$/)) return done({ error: 'invalid_argument' });
 					return profile_op_lpac(ref, slot, op, iccid, (err, res) => {
+						if (!err)
+							changed(ref, slot);
+
 						// enable/disable change the active profile — the modem
 						// must re-read the card; delete only removes a disabled
 						// profile, nothing to apply
@@ -881,15 +904,21 @@ return {
 							return done(err, res);
 						apply_sim_reset(ref, entry, slot, res, done);
 					}, () => {
+						let after = (err, res) => {
+							if (!err)
+								changed(ref, slot);
+							done(err, res);
+						};
+
 						if (op == 'enable')
 							return esim.enable(entry.modem, slot, iccid, (err, res) => {
 								if (!err)
 									log('notice', sprintf('modem %s: eSIM profile %s enabled', ref, iccid));
-								done(err, res);
+								after(err, res);
 							});
 						if (op == 'disable')
-							return esim.disable(entry.modem, slot, iccid, done);
-						return esim.del(entry.modem, slot, iccid, done);
+							return esim.disable(entry.modem, slot, iccid, after);
+						return esim.del(entry.modem, slot, iccid, after);
 					});
 				}
 				default:

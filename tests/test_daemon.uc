@@ -1428,9 +1428,10 @@ uloop.run();
 // two interfaces commonly share one modem.
 (() => {
 	let ops = [];
-	let mk = (lp) => {
+	let lp_events = {};
+	let mk = (lp, plugins) => {
 		let fake = {
-			modem: { create: (o) => ({
+			modem: { create: (o) => (lp_events[o.id] = o.deps?.on_event, {
 				id: o.id, state: 'READY', config: o.config,
 				start: () => null, stop: () => null,
 				// mirrors the real set_opmode: it is the SUCCESSFUL write that
@@ -1450,7 +1451,7 @@ uloop.run();
 			}) },
 		};
 		let d = daemon_mod.create({ timing: TIMING,
-			deps: { log: () => null, load_qmi: () => fake } });
+			deps: { log: () => null, load_qmi: () => fake, plugins: plugins ?? [] } });
 		d.apply_config(config.parse({ network: {
 			m0:   { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi',
 			        lowpower: lp },
@@ -1482,6 +1483,123 @@ uloop.run();
 	ops = [];
 	d.context_up('wanA', () => null);
 	eq(ops[0], 'm0:online', 'lowpower: an ifup on a parked modem wakes the radio first');
+
+	// ...unless a plugin lent the modem's card to another modem: then the
+	// radio is off on purpose, and waking it registers one IMSI twice
+	{
+		let held = true;
+		let dh = mk('1', [ { name: 'rsim', options: [], mod: { create: () => ({
+			radio_hold: (ref) => (held && ref == 'm0') ? 'lends its card to m1' : null }) } } ]);
+
+		dh.esim_guard('m0', 'enable');   // loads the plugins
+		for (let n, e in dh.contexts)
+			e.wanted = true;
+		dh.context_down('wanA', () => null);
+		dh.context_down('wanB', () => null);
+
+		let herr = null;
+
+		ops = [];
+		dh.context_up('wanA', (e) => { herr = e; });
+		eq([ ops, herr?.error, herr?.detail ], [ [], 'radio_held', 'rsim: lends its card to m1' ],
+		   'radio hold: an ifup does not wake a radio parked for a lent card, and says why');
+
+		// a modem re-initialised while its card is lent comes up online and
+		// unparked: the bring-up is refused all the same, and a registration
+		// switches the radio off again
+		held = true;
+		dh.modems.m0.modem.lowpower_parked = false;
+		ops = [];
+		herr = null;
+		dh.context_up('wanA', (e) => { herr = e; });
+		eq([ ops, herr?.error ], [ [], 'radio_held' ], 'radio hold: an unparked modem is not brought up either');
+
+		lp_events.m0(dh.modems.m0.modem, 'registered', {});
+		eq(ops, [ 'm0:low_power' ], 'radio hold: a registration while the card is lent parks the radio again');
+
+		held = false;
+		ops = [];
+		dh.modems.m0.modem.lowpower_parked = true;
+		dh.context_up('wanA', () => null);
+		eq(ops[0], 'm0:online', 'radio hold: once the card is back, the ifup wakes it as before');
+	}
+
+	// a plugin handing the radio back does not override `option lowpower`:
+	// with no interface of the modem wanted up it stays parked
+	{
+		let pdeps = null;
+		let dk = mk('1', [ { name: 'p', options: [], mod: { create: (d) => { pdeps = d; return {}; } } } ]);
+
+		dk.esim_guard('m0', 'enable');   // loads the plugins
+		for (let n, e in dk.contexts)
+			e.wanted = false;
+		dk.modems.m0.modem.lowpower_parked = true;
+
+		let res = null;
+
+		ops = [];
+		pdeps.modem_radio('m0', true, (e, r) => { res = r; });
+		eq([ ops, res?.kept_off ], [ [], 'lowpower' ], 'plugin wake: `option lowpower` with nothing up keeps the radio off');
+
+		dk.contexts.wanA.wanted = true;
+		ops = [];
+		pdeps.modem_radio('m0', true, () => null);
+		eq(ops, [ 'm0:online' ], 'plugin wake: ...with an interface wanted up it is woken');
+
+		// ...and so it is for one the daemon gave up on while the card was
+		// lent, which a registration re-arms (reconnect_on_register)
+		dk.contexts.wanA.wanted = false;
+		dk.contexts.wanA.reconnect_on_register = true;
+		dk.modems.m0.modem.lowpower_parked = true;
+		ops = [];
+		pdeps.modem_radio('m0', true, () => null);
+		eq(ops, [ 'm0:online' ], 'plugin wake: ...an interface waiting to be re-armed counts as wanted');
+
+		// a plugin park no plugin holds any more is handed back by the tick
+		dk.contexts.wanA.wanted = true;
+		dk.modems.m0.modem.lowpower_parked = true;
+		dk.modems.m0.modem._plugin_held = true;
+		ops = [];
+		dk._tick();
+		eq([ ops, dk.modems.m0.modem._plugin_held ], [ [ 'm0:online' ], false ],
+		   'plugin wake: a park nothing holds any more is released on the tick');
+
+		// a wake that fails stays the daemon's, and the next tick tries again
+		let real = dk.modems.m0.modem.set_opmode;
+
+		dk.modems.m0.modem.set_opmode = (mode, cb) => { push(ops, 'fail:' + mode); cb({ error: 'qmi' }); };
+		dk.modems.m0.modem.lowpower_parked = true;
+		dk.modems.m0.modem._plugin_held = true;
+		ops = [];
+		dk._tick();
+		eq([ ops, dk.modems.m0.modem._plugin_held ], [ [ 'fail:online' ], true ],
+		   'plugin wake: a failed wake keeps the park the daemon\'s');
+		dk.modems.m0.modem.set_opmode = real;
+		ops = [];
+		dk._tick();
+		eq([ ops, dk.modems.m0.modem._plugin_held ], [ [ 'm0:online' ], false ],
+		   'plugin wake: ...and the next tick wakes it');
+
+		// the reconnect path does not dial a parked radio: it cannot
+		// register, and every failed dial climbs the recovery ladder whose
+		// cycles and resets end the park
+		let ups = 0;
+		let c = dk.contexts.wanA;
+
+		c.wanted = true;
+		c.ctx.state = 'IDLE';
+		c.ctx.up = (cb) => { ups++; };
+		dk.modems.m0.modem.lowpower_parked = true;
+		dk._retry_activate('wanA');
+		eq(ups, 0, 'reconnect: a parked radio is not dialled');
+		ok(c.retry_timer != null, 'reconnect: ...it waits instead');
+		c.retry_timer.cancel();
+		c.retry_timer = null;
+
+		dk.modems.m0.modem.lowpower_parked = false;
+		dk._retry_activate('wanA');
+		eq(ups, 1, 'reconnect: once it is on, it dials again');
+	}
 
 	// a modem still coming up must not be parked: its init chain sets the mode
 	// online itself, and two writers on one setting is decided by timing

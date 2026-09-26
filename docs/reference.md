@@ -2077,10 +2077,15 @@ wwand keeps a table of every SIM card it has seen, by ICCID, and where it is:
 modem and slot, eUICC (EID) and profile, or a reader (remote SIM through
 wwand-rsim). `ubus call wwand sim_inventory` returns it as `cards[]`
 (`iccid`, `present`, `active`, `imsi`, `modem`, `slot`, `reader`, `eid`,
-`profile {state,name}`, `first_seen`, `last_seen`, `sources`);
+`profile {state,name}`, `first_seen`, `last_seen`, `sources`) with `now`,
+the router's time on the same clock as the two timestamps. `active` means the
+modem runs on that card, matched by ICCID; the card in the active slot of a
+modem using a remote SIM is present but not active. An eSIM download, enable,
+disable or delete through wwand-esim re-reads the eUICC's profile list, and so
+does every run of the IoT Profile Assistant (wwand-ipa);
 `wwandctl sims` prints it; LuCI shows it under Status → SIM cards.
 
-It is rebuilt from the modems' state on every status call and every tick, in
+It is rebuilt from the modems' state on every `sim_inventory` call and every tick, in
 memory (siminventory.uc), so it follows identity re-reads, slot switches,
 eSIM changes and remote cards. Rules it follows:
 - an eUICC has no ICCID of its own — its active card IS the enabled
@@ -2104,6 +2109,11 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
 ```
 { name, options: [ 'foo', 'foo_interval' ], create: (deps) => ({
 	tick: (ref, ext) => …,               // every 10 s, per modem
+	radio_hold: (ref, ext) => …,         // null, or why the radio stays off
+	stop: () => …,                       // the daemon exits
+	busy: () => …,                       // its stop is still under way
+	card_source: (ref, ext) => …,        // where the active card really is
+	status: (ref, ext) => …,             // status rows
 	esim_guard: (ref, op, ext) => …,     // null, or { reason } to lock the card
 	ops: { status: (ref, ext, args, cb) => …, … },
 	read_ops: [ 'status' ],
@@ -2133,7 +2143,16 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   `cb(err, { lines })`, the same path as the `modem_at` ubus method.
   `modem_radio(ref, on, cb)` parks the modem's radio (low power) or wakes
   it, as `option lowpower` does — the modem then takes the lost
-  registration as intended; `unsupported` on a backend without it.
+  registration as intended; `unsupported` on a backend without it. The
+  daemon records a plugin's park: a radio already off is left off, and a
+  wake is not carried out when the modem has `option lowpower` and none of
+  its interfaces is wanted up (`cb(null, { kept_off: 'lowpower' })`). A park
+  no plugin holds any more (`radio_hold`) is handed back on the next tick. A
+  parked radio is not dialled by the reconnect path, and recovery cycles,
+  reattach and attach-profile changes leave it off; woken again, the modem
+  reports `registered`, which re-arms the interfaces given up meanwhile.
+  `sim_slots(ref, cb)` reads the modem's physical SIM slots now, `cb(err,
+  { slots, multisim })`, the answer of the `modem_sim_slots` ubus method.
   `sim_changed(ref, why)` is for a plugin that swaps the card behind a
   running modem: the process a slot switch runs — forget the old card
   (identity, notes, per-SIM override, eSIM/APDU caches), then unlock and
@@ -2144,6 +2163,18 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   modem's active card really is when the plugin put it there (a reader name),
   or null; the SIM inventory files that card under it instead of the modem's
   slot.
+- **Radio hold:** an optional `radio_hold(ref, ext)` returns why the modem's
+  radio must stay off (its card is in use by another modem), or null. While
+  it answers, `context_up` fails with `radio_held` and that reason (the shim
+  reports RADIO_HELD and retries every 60 s), and a registration of the
+  modem parks its radio again.
+- **Stop:** an optional `stop()` runs when the daemon exits. Returning true
+  says it sent requests that need the event loop; the daemon then keeps
+  running it until the plugin's optional `busy()` answers false, at most 8 s
+  (procd's term timeout for wwand is 10 s). A config reload does not call
+  it.
+- **Failures:** a hook that throws is logged and skipped; the other plugins
+  and the daemon go on.
 - **Status rows:** an optional `status(ref, ext)` returns `{ label, text,
   level }` (`ok`/`warn`/`error`), an array of them, or null. They appear per
   modem in `status()` as `plugins` and on the LuCI status page and in

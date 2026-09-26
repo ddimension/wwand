@@ -425,6 +425,27 @@ function run_daemon()
 	// (no-proto-task → WAN stays up; the fresh daemon adopts the live session).
 	// A config reload uses the destructive shutdown() via apply_config instead.
 	daemon.stop_local();
+
+	// Plugins wind down with a few requests to the modems (a lent card goes
+	// back to its modem, a remote one is withdrawn): the loop runs until they
+	// are done, at most 8 s — their longest chain is two 3 s requests, and
+	// the init script gives procd a term timeout of 10 s to allow for it. A
+	// second run after uloop.end() is allowed: uloop_run_timeout() clears
+	// uloop_cancelled on entry (libubox uloop.c:731, 2026.07.08).
+	if (daemon.plugins_stop?.()) {
+		let left = 80;
+		let wait;
+
+		wait = () => {
+			if (--left <= 0 || !daemon.plugins_busy())
+				return uloop.end();
+
+			uloop.timer(100, wait);
+		};
+		uloop.timer(100, wait);
+		uloop.run();
+	}
+
 	uloop.done();
 }
 

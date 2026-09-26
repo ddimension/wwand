@@ -89,6 +89,11 @@ start_service() {
 	procd_set_param command /usr/sbin/wwand
 	procd_set_param respawn 3600 5 0
 	procd_set_param stderr 1
+	# on exit, plugins hand back what they hold (a lent SIM card, a remote
+	# one) with a few modem requests; main.uc waits for them up to 8 s, and
+	# procd's default of 5 s (instance.c:1631, procd 2026.06.17) would kill
+	# the daemon half way
+	procd_set_param term_timeout 10
 	procd_close_instance
 }
 

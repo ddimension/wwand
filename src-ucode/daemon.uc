@@ -397,11 +397,9 @@ export function create(opts)
 		return true;
 	};
 
-	// modem reached service: write back l3 device names, run autosetup APN
-	// fill, (re)establish this modem's IDLE interface-bound contexts.
 	// The SIM inventory (siminventory.uc): every card seen, by ICCID, and
-	// where it is. Refreshed from the modems' state on every status() and
-	// every tick — in memory, no I/O — so it follows identity re-reads, slot
+	// where it is. Refreshed from the modems' state on every sim_inventory
+	// call and every tick — in memory, no I/O — so it follows identity re-reads, slot
 	// switches, eSIM changes and remote cards without hooks in each of them.
 	let inventory = siminventory.create({});
 
@@ -424,10 +422,16 @@ export function create(opts)
 	};
 
 	self.sim_inventory = function() {
-		inventory_refresh();
-		return { cards: inventory.list() };
+		// an exception in a ubus handler ends the loop, as in the tick
+		try { inventory_refresh(); }
+		catch (e) { log('warn', sprintf('SIM inventory refresh failed (%s)', e)); }
+
+		// `now` on the same clock as last_seen: a viewer's own clock may differ
+		return { cards: inventory.list(), now: time() };
 	};
 
+	// modem reached service: write back l3 device names, run autosetup APN
+	// fill, (re)establish this modem's IDLE interface-bound contexts.
 	let modem_registered = (modem, data) => {
 		// the slot list once per modem object, so the inventory knows the
 		// cards in the slots that are not active before anyone opens the
@@ -826,9 +830,24 @@ export function create(opts)
 
 		// mirror lifecycle events onto the bus for listeners
 		switch (event) {
-		case 'registered':
+		case 'registered': {
+			// Registered while its card is lent to another modem: a modem
+			// re-initialised meanwhile (a reset, a re-enumeration) comes up
+			// online. Parked at once — one card, one registration — and held
+			// as a plugin park, so the end of the lending wakes it (tick).
+			let hold = self.plugins_radio_hold?.(modem.id);
+
+			if (hold && modem.set_opmode) {
+				log('warn', sprintf('modem %s: registered although %s — switching its radio off again', modem.id, hold));
+				modem._plugin_held = true;
+				modem.set_opmode('low_power', (e) => e
+					? log('warn', sprintf('modem %s: switching the radio off failed: %J', modem.id, e)) : null);
+				return;
+			}
+
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
 			return modem_registered(modem, data);
+		}
 
 		case 'sim_blocked':
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
@@ -2689,7 +2708,19 @@ export function create(opts)
 
 				// optional plugins (plugins.uc): a no-op when none is installed
 				self.plugins_tick?.();
-				inventory_refresh();
+
+				// a radio a plugin parked, which no plugin holds any more (it
+				// stopped, failed, forgot): handed back as the plugin would
+				for (let name, entry in self.modems)
+					if (entry?.modem?._plugin_held && !self.plugins_radio_hold?.(name)) {
+						log('notice', sprintf('modem %s: nothing holds its radio off any more — handing it back', name));
+						self._plugin_radio(name, true, null);
+					}
+
+				// in memory only, but a surprise in a modem's state must not
+				// end the daemon from inside its tick
+				try { inventory_refresh(); }
+				catch (e) { log('warn', sprintf('SIM inventory refresh failed (%s)', e)); }
 
 				if (deps.board) {
 					let first = null;
@@ -2761,6 +2792,22 @@ export function create(opts)
 		// first. Parking without this is worse than never parking — the interface
 		// would stay down until something else happened to power the radio.
 		let m = self.modems[entry.cfg?.modem];
+
+		// ...and none at all while the modem's card is in use by another
+		// modem (a plugin lent it): its radio must stay off, parked or not —
+		// a modem re-initialised meanwhile comes up online and unparked, and
+		// a dial then registers one IMSI twice. Refused with the reason; the
+		// shim retries slowly (radio_held). Said once per lending, not per try.
+		let hold = self.plugins_radio_hold?.(entry.cfg.modem);
+
+		if (hold) {
+			if (entry._held_logged != hold)
+				log('notice', sprintf('modem %s: not bringing %s up — %s', entry.cfg.modem, name, hold));
+			entry._held_logged = hold;
+			return cb({ error: 'radio_held', detail: hold });
+		}
+
+		entry._held_logged = null;
 
 		if (m?.modem?.lowpower_parked && m.modem.set_opmode) {
 			log('notice', sprintf('modem %s: waking the parked radio for %s',
@@ -3407,6 +3454,65 @@ export function create(opts)
 	hwops.install(self, { log: log, check_modem: check_modem, board: deps.board,
 	                      board_gpio_ok: board_gpio_ok });
 
+	// A plugin parking a modem's radio (a card lent to another modem) or
+	// handing it back. The DAEMON records the park, so the hand-back follows
+	// the operator's policy and not the plugin's guess: with `option
+	// lowpower` and no interface of the modem wanted up (one taken down while
+	// the card was lent), the radio stays off as maybe_lowpower would leave
+	// it. A radio already parked by the operator is simply left off.
+	let radio_wanted = (ref) => {
+		let e = self.modems[ref];
+
+		if (!e?.cfg?.lowpower)
+			return true;
+
+		for (let n, c in self.contexts)
+			if (c.cfg?.modem == ref && (c.wanted || c.reconnect_on_register))
+				return true;
+
+		return false;
+	};
+
+	let plugin_radio = (ref, on, cb) => {
+		let e = self.modems[ref];
+		let m = e?.modem;
+
+		cb = cb ?? (() => null);
+
+		if (!m?.set_opmode)
+			return cb({ error: 'unsupported' });
+
+		if (!on) {
+			m._plugin_held = true;
+
+			if (m.lowpower_parked)
+				return cb(null);
+
+			return m.set_opmode('low_power', (err) => cb(err));
+		}
+
+		if (!m.lowpower_parked) {
+			m._plugin_held = false;
+			return cb(null);
+		}
+
+		// the operator's park from here on: `option lowpower` owns it
+		if (!radio_wanted(ref)) {
+			m._plugin_held = false;
+			log('info', sprintf('modem %s: radio stays off — `option lowpower` and no interface wants it', ref));
+			return cb(null, { kept_off: 'lowpower' });
+		}
+
+		// held until the wake has worked: a failed one stays ours, and the
+		// tick tries again
+		m.set_opmode('online', (err) => {
+			if (!err)
+				m._plugin_held = false;
+			cb(err);
+		});
+	};
+	self._plugin_radio = plugin_radio;
+
 	// Optional plugins (plugins.uc). What they may use of the daemon is this
 	// list and nothing else; resolved at call time, so the order of the
 	// installs above does not matter.
@@ -3430,14 +3536,10 @@ export function create(opts)
 			// as intended, not as a fault to recover from (modem.uc
 			// set_opmode / lowpower_parked). For a modem that must not
 			// register while another one uses its card. cb(err).
-			modem_radio: (ref, on, cb) => {
-				let m = self.modems[ref]?.modem;
-
-				if (!m?.set_opmode)
-					return cb ? cb({ error: 'unsupported' }) : null;
-
-				m.set_opmode(on ? 'online' : 'low_power', (e) => cb ? cb(e) : null);
-			},
+			modem_radio: (ref, on, cb) => plugin_radio(ref, on, cb),
+			// the modem's physical SIM slots, read now (simops.uc
+			// modem_sim_slots): cb(err, { slots, multisim })
+			sim_slots: (ref, cb) => self.modem_sim_slots(ref, cb),
 			// the card behind the modem changed: the same forget-and-re-read
 			// a slot switch runs (simops.uc card_changed)
 			sim_changed: (ref, why) => self.card_changed ? self.card_changed(ref, why) : false,
@@ -3888,6 +3990,13 @@ export function create(opts)
 	self.stop_local = function() {
 		for (let name in keys(self.contexts))
 			clear_reconnect(name);
+
+		// the loop runs on for the plugins' hand-back (main.uc): nothing of
+		// the daemon's own may act in it — a tick would run the plugins
+		// again (re-lending what they just gave back), the vanish ladder,
+		// modem starts
+		self._tick_timer?.cancel();
+		self._tick_timer = null;
 	};
 
 	return self;

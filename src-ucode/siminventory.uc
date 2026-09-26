@@ -46,11 +46,59 @@ export function create(o)
 {
 	let now = o?.now ?? (() => time());
 	let cards = {};      // iccid -> entry
-	let sources = {};    // key -> [ iccid ... ] the source reported last
+	let sources = {};    // key -> { iccid -> what that source reported }
 
 	let self = {};
 
-	// One source's complete view. cards: [ { iccid, imsi?, modem?, slot?,
+	// An entry is DERIVED from the sources that report it now, every time
+	// one of them changes. Merging reports into the entry instead left a
+	// source's contribution behind after the source stopped reporting: a card
+	// back from the reader kept `reader` and was still shown there. A card no
+	// source reports keeps its last place — "not present, last seen in X".
+	let rebuild = (id) => {
+		let e = cards[id];
+		let from = [];
+
+		for (let k in sort(keys(sources)))
+			if (sources[k][id])
+				push(from, [ k, sources[k][id] ]);
+
+		let pick = (f) => {
+			for (let kc in from)
+				if (kc[1][f] != null)
+					return kc[1][f];
+
+			return null;
+		};
+
+		e.sources = {};
+		for (let kc in from)
+			e.sources[kc[0]] = true;
+
+		e.present = length(from) > 0;
+		e.active = e.present && length(filter(from, (kc) => kc[1].active)) > 0;
+
+		if (!e.present)
+			return;
+
+		// one place: a remote card is in its reader, not in a modem slot
+		e.reader = pick('reader');
+		e.modem = e.reader ? null : pick('modem');
+		e.slot = e.reader ? null : pick('slot');
+		e.eid = pick('eid');
+
+		let p = pick('profile');
+
+		e.profile = p ? { state: p.state ?? null, name: p.name ?? null } : null;
+
+		// the IMSI is only known while the card is read; keep the last one
+		let imsi = pick('imsi');
+
+		if (imsi != null)
+			e.imsi = imsi;
+	};
+
+	// One source's complete view. list: [ { iccid, imsi?, modem?, slot?,
 	// active?, reader?, eid?, profile? { state, name } } ], or null for "no
 	// reading" (nothing changes).
 	self.observe = function(key, list) {
@@ -58,7 +106,7 @@ export function create(o)
 			return;
 
 		let t = now();
-		let seen = [];
+		let snap = {};
 
 		for (let c in list) {
 			let id = norm_iccid(c?.iccid);
@@ -66,48 +114,28 @@ export function create(o)
 			if (!id)
 				continue;
 
-			push(seen, id);
-
-			let e = cards[id] ??= { iccid: id, first_seen: t, sources: {} };
-
-			e.present = true;
-			e.last_seen = t;
-			e.sources[key] = true;
-
-			// what this source knows; a later report of the same card from a
-			// source that knows less does not erase what another one said
-			for (let f in [ 'imsi', 'modem', 'slot', 'reader', 'eid' ])
-				if (c[f] != null)
-					e[f] = c[f];
-
-			if (c.active != null)
-				e.active = !!c.active;
-
-			if (c.profile != null)
-				e.profile = { state: c.profile.state ?? null, name: c.profile.name ?? null };
+			snap[id] = c;
+			cards[id] ??= { iccid: id, first_seen: t, sources: {} };
+			cards[id].last_seen = t;
 		}
 
-		// what this source reported before and does not any more
-		for (let id in (sources[key] ?? [])) {
-			if (index(seen, id) >= 0 || !cards[id])
-				continue;
+		let affected = { ...(sources[key] ?? {}), ...snap };
 
-			delete cards[id].sources[key];
+		sources[key] = snap;
 
-			// gone only when NO source still has it
-			if (!length(keys(cards[id].sources))) {
-				cards[id].present = false;
-				cards[id].active = false;
-			}
-		}
-
-		sources[key] = seen;
+		for (let id in keys(affected))
+			rebuild(id);
 	};
 
 	// a source that went away altogether (a modem removed, a reader deleted)
 	self.forget = function(key) {
-		self.observe(key, []);
+		let had = sources[key] ?? {};
+
 		delete sources[key];
+
+		for (let id in keys(had))
+			if (cards[id])
+				rebuild(id);
 	};
 
 	// every source whose key starts with `prefix` and is not in `keep`
@@ -144,27 +172,54 @@ export function create(o)
 // Null for a source with no reading.
 export function from_modem(name, m, remote)
 {
-	let out = {};
+	// every source key is always there, null when it has no reading: a
+	// modem mid-restart must not look like one whose slots and profiles
+	// were emptied (the caller forgets keys it no longer sees)
+	let out = {
+		[sprintf('modem:%s:active', name)]: null,
+		[sprintf('modem:%s:slots', name)]: null,
+		[sprintf('modem:%s:esim', name)]: null,
+	};
 	let active_id = norm_iccid(m?.info?.iccid);
+
+	// A missing ICCID is normally a reading still to come (the identity is
+	// re-read after a card change). Not when the modem stopped because it
+	// FOUND no card: that is a reading, and it says the card is gone. QMI
+	// names it no_sim (sim.uc), MBIM and NCM sim_absent.
+	let nocard = (m?.state == 'SIM_BLOCKED' && index([ 'no_sim', 'sim_absent' ], m?.sim_block?.reason) >= 0);
 
 	// the active card — unless it is an eUICC profile, which the profile
 	// list below reports with more detail (same ICCID, same entry anyway)
-	out[sprintf('modem:%s:active', name)] = (m?.info?.iccid == null) ? null : [ {
+	out[sprintf('modem:%s:active', name)] = nocard ? [] : (m?.info?.iccid == null) ? null : [ {
 		iccid: m.info.iccid, imsi: m.info.imsi ?? null, active: true,
 		modem: remote ? null : name, slot: remote ? null : (m.active_slot ?? null),
 		reader: remote ?? null,
 	} ];
 
+	// "in use" is the card the modem runs on, matched by ICCID: the ACTIVE
+	// slot's card is not in use while the modem works on a remote one, and
+	// the slot list can be older than the last card change.
+	// The slot list is read once per registration, so without a card the
+	// active slot's entry is the card that left.
 	if (type(m?.slots) == 'array')
-		out[sprintf('modem:%s:slots', name)] = map(filter(m.slots, (s) => !s.inferred && s.iccid != null), (s) => ({
+		out[sprintf('modem:%s:slots', name)] = map(filter(m.slots, (s) => !s.inferred && s.iccid != null && !(nocard && s.active)), (s) => ({
 			iccid: s.iccid, modem: name, slot: s.physical ?? null,
-			active: !!s.active, eid: s.is_euicc ? (s.eid ?? null) : null,
+			active: !!s.active && active_id != null && norm_iccid(s.iccid) == active_id,
+			eid: s.is_euicc ? (s.eid ?? null) : null,
 		}));
+
+	// the profiles sit in the eUICC's slot, which is not the active one when
+	// the modem runs on another card (a second slot, a remote SIM)
+	let euicc_slot = m?.active_slot ?? null;
+
+	for (let s in ((type(m?.slots) == 'array') ? m.slots : []))
+		if (s.is_euicc && s.eid != null && s.eid == m?.esim_info?.eid)
+			euicc_slot = s.physical ?? euicc_slot;
 
 	if (type(m?.esim_info?.profiles) == 'array')
 		out[sprintf('modem:%s:esim', name)] = map(m.esim_info.profiles, (p) => ({
 			iccid: p.iccid, modem: name, eid: m.esim_info.eid ?? null,
-			slot: m.active_slot ?? null,
+			slot: euicc_slot,
 			active: (p.state == 'enabled' || p.state == 1) && (norm_iccid(p.iccid) == active_id),
 			profile: { state: (p.state == 1) ? 'enabled' : (p.state == 0) ? 'disabled' : p.state,
 			           name: p.nickname ?? p.name ?? null },

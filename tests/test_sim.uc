@@ -1687,6 +1687,24 @@ sw_self.modem_sim_switch_slot('m0', 1, (err) => {
 	second();
 	eq(sw_reapplied, 2, 'card change: ...and the one for the card now in place runs');
 
+	// a modem that stopped for lack of a card resumes its init instead of
+	// only re-reading an identity it never got (wwand-rsim on an empty slot)
+	let resumed = 0;
+
+	sw_modem.retry_sim = () => { resumed++; return true; };
+	sw_self.card_changed('m0', 'remote SIM in use');
+	sw_deferred();
+	eq([ resumed, sw_reapplied ], [ 1, 2 ], 'card change: a blocked modem resumes from the SIM step, no bare re-read');
+	delete sw_modem.retry_sim;
+
+	// a modem still in its init chain reads the card there: no second
+	// unlock and re-read beside it
+	sw_modem.state = 'SIM_UNLOCK';
+	sw_self.card_changed('m0', 'remote SIM off');
+	sw_deferred();
+	eq(sw_reapplied, 2, 'card change: a modem in its SIM step is left to it — no parallel re-read');
+	delete sw_modem.state;
+
 	// idempotent switch keeps the caches
 	sw_modem._esim_refreshed = true;
 	sw_modem.sim_note = 'session closed: card removed';
@@ -1766,6 +1784,45 @@ eq(ms_part.mode, null, 'multisim: executors without concurrency is not classifie
 eq(ms_part.mode_min, 'dsds', 'multisim: two executors still floor at dual standby');
 
 eq(sim.multisim([], null), null, 'multisim: no slots, nothing to say');
+
+// --- the eSIM profile list re-read after a change (esim_bridge `changed`) ------
+// A change reported while a re-read is armed is not dropped: that read may
+// already have the old list, so one more follows it.
+{
+	let defers = [];
+	let lists = [ [ { iccid: '1' } ], [ { iccid: '1' }, { iccid: '2' } ] ];
+	let reads = 0;
+	let em = { id: 'e0', _esim_op: 0 };
+	let es = {
+		backend: (m, sl, cb) => cb('qmi'),
+		get_eid: (m, sl, cb) => cb(null, { eid: 'E' }),
+		profiles: (m, sl, cb) => cb(null, { profiles: lists[reads++ > 0 ? 1 : 0] }),
+		enable: (m, sl, i, cb) => cb(null, { ok: true }),
+		disable: (m, sl, i, cb) => cb(null, { ok: true }),
+		del: (m, sl, i, cb) => cb(null, { ok: true }),
+	};
+	let es_self = { modems: { e0: { modem: em } } };
+
+	simops.install(es_self, {
+		log: () => null,
+		check_modem: (ref, cb) => es_self.modems[ref] ?? null,
+		load_esim: () => es,
+		defer: (ms, fn) => push(defers, fn),
+	});
+
+	// no lpac on the host: the bridge falls back to the esim module
+	es_self.modem_esim('e0', 'delete', { iccid: '89000000000000000001', slot: 1 }, () => null);
+	es_self.modem_esim('e0', 'delete', { iccid: '89000000000000000002', slot: 1 }, () => null);
+	eq(length(defers), 1, 'eSIM re-read: two quick changes arm one read, not two');
+
+	shift(defers)();
+	eq(length(em.esim_info?.profiles ?? []), 1, 'eSIM re-read: the first read ran');
+	eq(length(defers), 1, 'eSIM re-read: ...and the change that came in meanwhile armed one more');
+
+	shift(defers)();
+	eq(length(em.esim_info.profiles), 2, 'eSIM re-read: the second read has the list after both changes');
+	eq(length(defers), 0, 'eSIM re-read: then nothing more is pending');
+}
 
 done('test_sim');
 	});

@@ -293,7 +293,7 @@ export function install(self, o)
 				why, join('; ', reasons)));
 
 			// Deliberately NOT cleared on a later init pass. The object is
-			// created once per device attach (daemon.uc:1705), so a modem that
+			// created once per device attach (daemon.uc:2327), so a modem that
 			// really did reset comes back as a NEW instance with no debt — and
 			// a re-init of THIS instance means it did not, so the debt still
 			// holds. Deduplicated because a re-init re-derives the same reason
@@ -482,6 +482,26 @@ export function install(self, o)
 
 			next();
 		});
+	};
+
+	// Resume the init chain at the SIM step, for a modem that stopped in
+	// SIM_BLOCKED because there was no card, or none that answered — and now
+	// there is one: a remote SIM offered after the init ran (wwand-rsim, a
+	// modem with an empty local slot), a card inserted later. The clients are
+	// still there, so this is the SIM step and what follows, not a restart.
+	// A PIN/PUK block stays terminal: a new card is not what it waits for.
+	self.retry_sim = function() {
+		let why = self.sim_block?.reason;
+
+		if (self.state != 'SIM_BLOCKED' || (why != 'no_sim' && why != 'card_error'))
+			return false;
+
+		log('notice', sprintf('a card arrived after the SIM step stopped (%s) — resuming from there', why));
+		// the "no usable card" marker suppresses EF reads (sim.uc unlock_uim);
+		// it described the card that was not there
+		self._no_card = false;
+		step_sim();
+		return true;
 	};
 
 	step_sim = () => {

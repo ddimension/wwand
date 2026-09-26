@@ -308,6 +308,15 @@ proto_wwand_setup() {
 				proto_notify_error "$interface" NO_CONTEXT
 				sleep 5
 				;;
+			radio_held)
+				# the modem's card is lent to another modem (a plugin such as
+				# wwand-rsim), and its radio stays off until it comes back:
+				# not a failure to retry every few seconds, nor one to block
+				# for good — checked again at a slow pace
+				echo "radio off: the modem's SIM card is in use by another modem"
+				proto_notify_error "$interface" RADIO_HELD
+				sleep 60
+				;;
 			modem_absent)
 				# the modem's control device is not present yet (after boot, a
 				# modem reboot or a power-cycle). Surface it distinctly so the

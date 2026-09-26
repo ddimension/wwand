@@ -298,9 +298,16 @@ export function create(opts)
 		if (!cmd)
 			return cb({ error: 'unsupported', mode: mode });
 
+		let was_parked = self.lowpower_parked;
+
 		self.at.send(cmd, (e) => {
 			if (!e)
 				self.lowpower_parked = (mode == 'low_power');
+
+			// woken from a park: the next registration is reported as one
+			// (modem.uc set_opmode has the reason)
+			if (!e && was_parked && mode == 'online')
+				self._wake_pending = true;
 
 			cb(e ?? null);
 		}, { timeout: 15000 });
@@ -309,9 +316,16 @@ export function create(opts)
 	// shared radio cycle: CFUN 0 -> settle -> CFUN 1 -> settle -> then()
 	// (the recovery ladder's opmode_cycle and step_attach's re-attach both
 	// use exactly this dance)
+	// A parked radio (`option lowpower`, a lent card) stays off: see
+	// modem.uc online_unless_parked.
 	let cfun_cycle = (then) => {
 		self.at.send('AT+CFUN=0', () => {
 			settle_timer = uloop.timer(self.timing.settle, () => {
+				if (self.lowpower_parked) {
+					settle_timer = uloop.timer(0, then);
+					return;
+				}
+
 				self.at.send('AT+CFUN=1', () => {
 					settle_timer = uloop.timer(self.timing.settle, then);
 				}, { timeout: 15000 });
@@ -958,7 +972,7 @@ export function create(opts)
 		// down and re-enumerates it, so `self.at` can be null by the time the
 		// call lands. Reading `.send` off it throws inside a uloop callback,
 		// which does not fail the call: it takes the daemon with it. Field-seen
-		// at modem_ncm.uc:833, and only with `sim_slot` configured — that is
+		// at modem_ncm.uc:847, and only with `sim_slot` configured — that is
 		// what makes step_simslot walk the second pass at all
 		// (ddimension/wwand#32).
 		if (!self.at)
@@ -1651,6 +1665,12 @@ export function create(opts)
 					notify_contexts('suspend', self.reg);
 					step_register();
 					return;
+				}
+
+				if (r?.registered && self._wake_pending) {
+					self._wake_pending = false;
+					log('notice', 'registered again after the radio was parked');
+					emit('registered', r);
 				}
 
 				refresh_signal(() => refresh_cells(() => refresh_reg_detail(() =>

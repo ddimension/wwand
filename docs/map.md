@@ -63,6 +63,9 @@ row. That is the whole maintenance rule.
 | Who runs lpac, and who runs another host session on the card (a plugin's)? | Both through `esim_bridge.uc stdio_run`, which relays their stdio APDU protocol to the modem. lpac comes in through `lpac_run`, a plugin's process (e.g. an SGP.32 assistant) through `session_run`. Both hold the same claim, so the card only ever sees one host session. |
 | Why was a manual eSIM change refused (`esim_managed`)? | A plugin manages the card: `plugins.uc install` (its `esim_guard`), checked in `simops.uc ESIM_CHANGING`. `force` overrides. |
 | How does an optional package hook into the daemon, the config and wwandctl? | `plugins.uc list` / `install` (tick, eSIM guard, ubus `modem_plugin`); its options arrive as `entry.ext` (`config.uc parse_network_sections`), outside the reload signature; its CLI command is `wwandctl.uc ctl_plugin`. |
+| Which card is where, and why is one listed as not present? | `siminventory.uc from_modem` turns a modem's state into sources, `siminventory.uc create` derives each card from them; the daemon feeds it in `daemon.uc inventory_refresh`. A remote card is filed under its reader via `plugins.uc install` (`card_source`). |
+| Why does this modem's radio stay off, and why is its ifup refused (`radio_held`)? | A plugin lent its card: `plugins.uc install` (`radio_hold`), consulted in `daemon.uc context_up` and on `registered`; the park itself is `daemon.uc plugin_radio`, released on the tick when nothing holds it. |
+| Why was the eSIM profile list in status re-read? | `simops.uc profiles_changed`, fired by `esim_bridge.uc create` (`changed`) after a download or a profile change. |
 
 ## Status and ubus
 

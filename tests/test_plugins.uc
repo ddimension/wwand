@@ -180,10 +180,23 @@ eq(self.connection_token('m1'), null, 'token: null for a modem with nothing conn
 
 	let modes = [];
 
-	m.set_opmode = (mode, cb) => { push(modes, mode); cb(null); };
+	// like the real one: a successful write records the park
+	m.set_opmode = function(mode, cb) { push(modes, mode); this.lowpower_parked = (mode == 'low_power'); cb(null); };
 	captured.modem_radio('m0', false, () => null);
+	eq([ modes, m._plugin_held ], [ [ 'low_power' ], true ], 'modem_radio: parks the radio, and the daemon records that a plugin did');
 	captured.modem_radio('m0', true, () => null);
-	eq(modes, [ 'low_power', 'online' ], 'modem_radio: parks and wakes the radio through set_opmode');
+	eq([ modes, m._plugin_held ], [ [ 'low_power', 'online' ], false ], 'modem_radio: ...and wakes it, handed back');
+
+	// a radio the operator parked is left off, and not woken by a plugin
+	// that did not park it... unless the policy says it is wanted
+	modes = [];
+	m.lowpower_parked = true;
+	captured.modem_radio('m0', false, () => null);
+	eq(modes, [], 'modem_radio: a radio already off is not written again');
+	m.lowpower_parked = false;
+	captured.modem_radio('m0', true, () => null);
+	eq(modes, [], 'modem_radio: a radio that is on is not written again either');
+	delete m._plugin_held;
 	delete m.set_opmode;
 
 	let rerr = null;
@@ -224,6 +237,44 @@ eq(self.connection_token('m1'), null, 'token: null for a modem with nothing conn
 	d.plugins_status('m0');
 	eq(length(filter(logs, (l) => index(l, 'status failed') >= 0)), 1,
 	   'status rows: a plugin that throws costs its row, logged once — not every second of LuCI polling');
+}
+
+// --- a plugin that throws in its tick; stopping on exit -----------------------------
+{
+	let logs = [], ticked = [], stopped = [], good_busy = true;
+	let d = daemon_mod.create({ deps: {
+		log: (l, m) => push(logs, m),
+		plugins: [
+			{ name: 'bad', options: [], mod: { create: () => ({
+				tick: () => die('boom'), stop: () => { push(stopped, 'bad'); die('boom'); } }) } },
+			{ name: 'good', options: [], mod: { create: () => ({
+				tick: (ref) => push(ticked, ref), stop: () => { push(stopped, 'good'); return true; },
+				busy: () => good_busy }) } },
+			{ name: 'idle', options: [], mod: { create: () => ({ stop: () => false }) } },
+		],
+	} });
+
+	{
+		let created = 0;
+		let d0 = daemon_mod.create({ deps: { log: () => null, plugins: [
+			{ name: 'n', options: [], mod: { create: () => { created++; return { stop: () => true }; } } } ] } });
+
+		eq([ d0.plugins_stop(), created ], [ false, 0 ], 'stop: plugins that never ran are not created just to be stopped');
+	}
+
+	d.modems = { m0: { ext: {} } };
+	d.plugins_tick();
+	d.plugins_tick();
+	eq(ticked, [ 'm0', 'm0' ], 'tick: a plugin that throws does not cost the next one its tick');
+	eq(length(filter(logs, (l) => index(l, 'tick for m0 failed') >= 0)), 1, 'tick: ...and is logged once, not every 10 s');
+
+	eq(d.plugins_stop(), true, 'stop: one plugin with work in flight keeps the loop for it');
+	eq(stopped, [ 'bad', 'good' ], 'stop: every plugin is stopped, one that throws included');
+	eq(d.plugins_busy(), true, 'stop: the daemon waits while a stopped plugin is still busy');
+	good_busy = false;
+	eq(d.plugins_busy(), false, 'stop: ...and exits once it is done, not after a fixed pause');
+	d.plugins_tick();
+	eq(ticked, [ 'm0', 'm0' ], 'stop: no tick after the stop — it would undo what the stop gave back');
 }
 
 // --- the SIM inventory: remote cards filed under their reader ------------------------

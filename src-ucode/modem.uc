@@ -187,7 +187,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1568) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1592) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:1161), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -247,6 +247,15 @@ export function create(opts)
 
 		push(settles, rec);
 	};
+
+	// The end of a radio cycle (recovery, reattach, an attach-profile
+	// change): back online — unless the radio is parked (`option lowpower`,
+	// or a plugin lent the modem's card). A cycle that ends online un-parks
+	// it behind the park's back, and lowpower_parked then claims a state the
+	// radio is no longer in.
+	let online_unless_parked = (cb) => self.lowpower_parked
+		? cb(null)
+		: qmi_backend.set_opmode(self.dms, 'online', cb);
 
 	// protocol-neutral scaffolding (sets set_state/attach_context/… on self)
 	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
@@ -474,12 +483,12 @@ export function create(opts)
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:2235), and dropping it strands a ubus request.
+				// (daemon.uc:3043), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
 				settle_after(cyc_gen, () => {
-					qmi_backend.set_opmode(self.dms, 'online', () => {
+					online_unless_parked(() => {
 						settle_after(cyc_gen, () => done(action), () => done(action));
 					});
 				}, () => done(action));
@@ -546,7 +555,7 @@ export function create(opts)
 		log('notice', 'network reattach (DMS low_power -> online)');
 		qmi_backend.set_opmode(self.dms, 'low_power', () => {
 			settle_after(gen, () => {
-				qmi_backend.set_opmode(self.dms, 'online', (err) => {
+				online_unless_parked((err) => {
 					cb(err ? { error: 'qmi', detail: err } : null,
 						{ ok: true, action: 'reattach', via: 'qmi' });
 				});
@@ -669,7 +678,7 @@ export function create(opts)
 				log('notice', 'attach profile changed after sim reapply, cycling radio to re-attach');
 				qmi_backend.set_opmode(self.dms, 'low_power', () => {
 					settle_after(sim_gen, () => {
-						qmi_backend.set_opmode(self.dms, 'online', finish);
+						online_unless_parked(finish);
 					}, finish);
 				});
 			});
@@ -1270,11 +1279,20 @@ export function create(opts)
 		if (!self.dms)
 			return cb({ error: 'unsupported', detail: 'no dms client' });
 
+		let was_parked = self.lowpower_parked;
+
 		qmi_backend.set_opmode(self.dms, mode, (err) => {
 			// remember that WE parked it: the registration that follows is a
 			// consequence, and the supervisor above must not treat it as a fault
 			if (!err)
 				self.lowpower_parked = (mode == 'low_power');
+
+			// Woken from a park, the modem registers again while it stays
+			// READY — no REGISTERING -> READY step, so no `registered` event,
+			// and the daemon never re-arms the interfaces it gave up while the
+			// radio was off. The next registration reports it (_update_serving).
+			if (!err && was_parked && mode == 'online')
+				self._wake_pending = true;
 
 			cb(err ?? null);
 		});
@@ -1342,6 +1360,12 @@ export function create(opts)
 		// rate-limit; no-op if unchanged).
 		if (ss.registration == nasmod.REG_REGISTERED && self.state == 'READY')
 			notify_contexts('serving_change');
+
+		if (ss.registration == nasmod.REG_REGISTERED && self.state == 'READY' && self._wake_pending) {
+			self._wake_pending = false;
+			log('notice', 'registered again after the radio was parked');
+			emit('registered', self.reg);
+		}
 
 		if (ss.registration == nasmod.REG_REGISTERED) {
 			if (self.state == 'REGISTERING') {

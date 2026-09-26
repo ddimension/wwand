@@ -81,6 +81,14 @@ cannot produce. Reported rather than implemented, which is why the summary exist
 at all: someone holding a dual-executor modem can answer in one command what we
 cannot answer for ourselves.
 
+**The inactive slot is not reachable** on either QMI box (HW-read on 242 and
+245, 2026-09-26): both physical slots map to logical slot 1, and the one not in
+use is switched off. SEND_APDU on logical slot 2 is refused NOT_SUPPORTED (94),
+and a logical channel opened "on slot 2" lands on the active card (both read
+the same EF_ICCID). `AT+QUIMSLOT` only switches between the slots, and
+`AT+QCFG` offers no dual-standby option. So a modem cannot use one card and
+lend the other (wwand-rsim refuses that with this reason).
+
 Two things worth knowing if that ever changes. The subscription encoding is **not
 uniform**: NAS and WMS use one byte, 0-based; WDS, DMS, QOS and DSD four bytes,
 1-based with 0 meaning "default" — a shared codec silently binds the wrong stack.
@@ -707,6 +715,36 @@ resolved and never opened, like `gps_port`. This covers:
 **Into github.com/ddimension/wwand-qlog, as a wwandctl command plugin:**
 the QLog logic (`qlog.uc`) and `wwandctl qlog`. It is still not verified on
 hardware.
+
+## SIM inventory, a card lent to another modem, the radio hold (2026-09-26)
+
+**SIM inventory** (`siminventory.uc`, ubus `sim_inventory`, `wwandctl sims`,
+LuCI Status → SIM cards): every card seen, by ICCID, and where it is — modem
+and slot, eUICC and profile, or a reader (wwand-rsim). It is derived from the
+modems' state on every tick and every call, so identity re-reads, slot
+switches, remote cards and eSIM changes show up without hooks of their own. An
+eSIM download, enable, disable or delete through wwand-esim re-reads the
+profile list (`esim_bridge` `changed` → `simops` `profiles_changed`; coalesced
+per modem, waits while another host session is on the card). A card a modem
+reports missing (`no_sim` / `sim_absent`) is marked not present.
+
+**Plugin interface, grown for wwand-rsim:** `qmi_client` / `qmi_release`,
+`modem_at`, `modem_radio`, `sim_slots`, `sim_changed`; hooks `card_source`,
+`status` rows, `radio_hold`, `stop` / `busy`. A plugin whose tick throws is
+logged and skipped. On exit the daemon stops the plugins and runs its loop
+until they are done, at most 8 s (procd `term_timeout` 10). A modem that
+stopped for lack of a card resumes its init when a card arrives
+(`retry_sim`, via `sim_changed`).
+
+**The radio hold is the daemon's.** A plugin parks a modem's radio through
+`modem_radio`; the daemon records it, wakes it on the hand-back only as
+`option lowpower` allows, and releases a park no plugin holds any more.
+While a plugin's `radio_hold` answers, `context_up` fails with `radio_held`
+(shim: RADIO_HELD, retried every 60 s) and a registration parks the radio
+again. A parked radio is not dialled by the reconnect path, and recovery
+cycles, reattach and attach-profile changes leave it off. Woken, a modem
+reports `registered` again, which re-arms the interfaces given up while it
+was parked. Host-tested; the HW round on 245/242 follows the push.
 
 ## Known open
 

@@ -79,6 +79,84 @@ eq([ gone.present, gone.active, gone.last_seen ], [ false, false, 1000 ],
    'a card no source reports any more is kept, absent, with when it was last seen');
 eq(inv.list()[0].iccid, '89882280000192155295', 'present cards are listed first');
 
+// a remote card coming back into a modem is NOT still in the reader
+{
+	let iv = siminv.create({ now: () => t });
+
+	iv.observe('modem:m0:active', [ { iccid: '89882390000056293510', active: true, reader: 'sm' } ]);
+	eq(iv.find('89882390000056293510').reader, 'sm', 'move: first in the reader');
+	iv.observe('modem:m0:active', [ { iccid: '89882390000056293510', active: true, modem: 'm0', slot: 1 } ]);
+
+	let e = iv.find('89882390000056293510');
+
+	eq([ e.reader, e.modem, e.slot ], [ null, 'm0', 1 ], 'move: then in the modem — the reader does not linger');
+
+	// an eUICC profile that is no longer reported loses its profile data
+	iv.observe('modem:m0:esim', [ { iccid: '89882390000056293510', eid: 'E', profile: { state: 'enabled' } } ]);
+	iv.observe('modem:m0:esim', []);
+	eq([ iv.find('89882390000056293510').eid, iv.find('89882390000056293510').profile ], [ null, null ],
+	   'move: profile data goes with the source that reported it');
+}
+
+// a modem mid-restart (no modem object): its slot and eSIM cards stay
+{
+	let keys_of = siminv.from_modem('mx', null, null);
+
+	eq(sort(keys(keys_of)), [ 'modem:mx:active', 'modem:mx:esim', 'modem:mx:slots' ],
+	   'restart: every source key is reported, null without a reading, so none is forgotten');
+}
+
+// a modem on a remote card: its slot card is present but not in use, and
+// the eUICC's profiles stay filed under the eUICC's own slot
+{
+	let iv = siminv.create({ now: () => t });
+	let mr = {
+		info: { iccid: '89882390000056293510' }, active_slot: 1,
+		slots: [ { physical: 1, active: true, iccid: '8949020000184496711' },
+		         { physical: 2, active: false, iccid: '89882280000192155295', is_euicc: true, eid: 'E2' } ],
+		esim_info: { eid: 'E2', profiles: [ { iccid: '89882280000192155295', state: 'disabled' } ] },
+	};
+
+	for (let k, l in siminv.from_modem('m0', mr, 'sm'))
+		iv.observe(k, l);
+
+	eq([ iv.find('8949020000184496711').present, iv.find('8949020000184496711').active ], [ true, false ],
+	   'remote: the active slot\'s own card is there, not in use');
+	eq(iv.find('89882390000056293510').active, true, 'remote: the remote card is');
+	eq(iv.find('89882280000192155295').slot, 2, 'eUICC: its profiles sit in its own slot, not the active one');
+}
+
+// a card pulled out: the modem stops for lack of a card — a reading that
+// says the card is gone, not one still to come
+{
+	let iv = siminv.create({ now: () => t });
+	let mm = { info: { iccid: '8949020000184496711' }, active_slot: 1, state: 'READY',
+	           slots: [ { physical: 1, active: true, iccid: '8949020000184496711' },
+	                    { physical: 2, active: false, iccid: '89882280000192155295' } ] };
+	let feed = () => { for (let k, l in siminv.from_modem('m0', mm, null)) iv.observe(k, l); };
+
+	feed();
+	mm.info.iccid = null;
+	mm.state = 'SIM_BLOCKED';
+	mm.sim_block = { reason: 'no_sim' };
+	feed();
+	eq([ iv.find('8949020000184496711').present, iv.find('8949020000184496711').active ], [ false, false ],
+	   'no card: the card taken out is no longer present, nor in use');
+	eq(iv.find('89882280000192155295').present, true, 'no card: ...the other slot\'s card still is');
+
+	// MBIM and NCM name the same finding sim_absent
+	let iv2 = siminv.create({ now: () => t });
+
+	mm.state = 'READY';
+	mm.info.iccid = '8949020000184496711';
+	for (let k, l in siminv.from_modem('m1', mm, null)) iv2.observe(k, l);
+	mm.info.iccid = null;
+	mm.state = 'SIM_BLOCKED';
+	mm.sim_block = { reason: 'sim_absent' };
+	for (let k, l in siminv.from_modem('m1', mm, null)) iv2.observe(k, l);
+	eq(iv2.find('8949020000184496711').present, false, 'no card: ...on MBIM and NCM too (sim_absent)');
+}
+
 // a modem that went away takes its sources along
 inv.forget_except('modem:', []);
 eq(inv.find('89882280000192155295').present, false, 'forget: a removed modem\'s cards are absent');

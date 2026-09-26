@@ -11,6 +11,10 @@ import * as uloop from 'uloop';
 import * as sim from 'wwand.sim';
 import * as sms from 'wwand.sms';
 
+// The states of a modem's init chain up to and including the SIM step: a
+// modem in one of them reads its card as part of that chain.
+const INIT_STATES = [ 'INIT_TRANSPORT', 'INIT_SERVICES', 'SIM_UNLOCK' ];
+
 export function install(self, o)
 {
 	let log = o.log;
@@ -31,13 +35,18 @@ export function install(self, o)
 		if (!entry)
 			return;
 
-		sim.slot_status(entry.modem, (err, slots) => {
+		let m = entry.modem;
+
+		sim.slot_status(m, (err, slots) => {
 			if (err)
 				return cb({ error: 'sim_transport', detail: err });
 
 			// the last reading, for the SIM inventory: the cards in the
-			// slots that are not active are known from here only
-			entry.modem.slots = slots;
+			// slots that are not active are known from here only. Kept on
+			// the modem it was read from — a modem gone or replaced
+			// meanwhile must not get it (or throw on a null)
+			if (self.modems?.[ref]?.modem === m)
+				m.slots = slots;
 
 			// alongside the slots, what SHAPE of multi-SIM this modem is. Purely
 			// descriptive — see sim.multisim. It is the one thing we cannot
@@ -104,7 +113,7 @@ export function install(self, o)
 		// nothing on either path ever clears them (evidence:
 		// ddimension/wwand#39, NR7101).
 		//
-		// modem.uc:1598-1603 already states the rule — card-side
+		// modem.uc:1622-1627 already states the rule — card-side
 		// diagnostics belong to the card we were talking to — and acts on
 		// it during teardown. This path is the other place a card changes
 		// underneath us, and it did not.
@@ -142,7 +151,7 @@ export function install(self, o)
 		// belongs to this module, not to the modem, so it outlives the
 		// teardown and would talk to a client that is mid-initialisation.
 		// `_gen` is the counter both backends already bump on teardown
-		// (modem.uc:1540, modem_mbim.uc:2058); NCM has none and degrades to
+		// (modem.uc:1564, modem_mbim.uc:2058); NCM has none and degrades to
 		// the identity check, which is the case its reset already answers.
 		let gen = m._gen;
 		// ...and a card change of its own: a remote SIM that comes and goes
@@ -153,6 +162,18 @@ export function install(self, o)
 		if (m.reapply_sim)
 			defer(2000, () => {
 				if (self.modems?.[ref]?.modem !== m || m._gen !== gen || m._card_change_gen !== cgen)
+					return;
+
+				// a modem that stopped for lack of a card resumes its init
+				// from the SIM step instead: re-reading the identity alone
+				// would leave it SIM_BLOCKED on a card that is now there
+				if (m.retry_sim?.())
+					return;
+
+				// still in its init chain (resumed by an earlier change, or
+				// starting): that chain reads the card itself, and a second
+				// unlock + re-read beside it is two writers on one SIM
+				if (index(INIT_STATES, m.state) >= 0)
 					return;
 
 				sim.unlock(m, () => m.reapply_sim());
@@ -295,7 +316,82 @@ export function install(self, o)
 	};
 
 	// eSIM download/notification bridge (optional wwand-esim, esim_bridge.uc); lazy.
+	// The card's profile list changed (bridge `changed`): read it again into
+	// modem.esim_info, which status `esim` and the SIM inventory derive from.
+	// Delayed, because an enable is followed by the SIM power-cycle and the
+	// card answers nothing while it is down; one retry for the same reason.
+	// The EID is read again too: card_changed drops esim_info along with it.
+	// the bridge instance (load_esim_bridge below); declared ahead of the
+	// re-read, which asks it whether a host session is running
 	let esim_bridge = null;
+
+	// One re-read per modem at a time: several quick operations (enable,
+	// then notify) coalesce into the one already armed.
+	let profiles_pending = {};
+	// a change reported while a re-read is armed or running: that read may
+	// already have the old list, so one more follows it
+	let profiles_dirty = {};
+	let profiles_changed;   // forward-declared: it re-arms itself (ucode TDZ)
+
+	// the read ended (read, given up, modem gone): a change that came in
+	// meanwhile gets its own
+	let profiles_done = (ref, slot) => {
+		delete profiles_pending[ref];
+
+		if (profiles_dirty[ref]) {
+			delete profiles_dirty[ref];
+			profiles_changed(ref, slot);
+		}
+	};
+	profiles_changed = (ref, slot, retry, waited) => {
+		if (!retry && !waited && profiles_pending[ref]) {
+			profiles_dirty[ref] = true;
+			return;
+		}
+
+		profiles_pending[ref] = true;
+
+		defer(retry ? 15000 : 5000, () => {
+			let m = self.modems?.[ref]?.modem;
+
+			if (!m) {
+				profiles_done(ref, slot);
+				return;
+			}
+
+			// another host session on the ISD-R (a download, a plugin's
+			// session) is running: a read beside it corrupts that session
+			// (esim_bridge busy) — wait for it, up to a minute
+			if (esim_bridge?.busy?.()) {
+				if (+(waited ?? 0) < 12)
+					return profiles_changed(ref, slot, retry, +(waited ?? 0) + 1);
+
+				profiles_done(ref, slot);
+				return;
+			}
+
+			let again = () => {
+				if (!retry)
+					return profiles_changed(ref, slot, true);
+				profiles_done(ref, slot);
+			};
+
+			self.modem_esim(ref, 'eid', { slot: slot }, (e1, r1) => {
+				if (e1)
+					return again();
+
+				self.modem_esim(ref, 'profiles', { slot: slot }, (e2, r2) => {
+					if (e2 || self.modems?.[ref]?.modem !== m)
+						return again();
+
+					profiles_done(ref, slot);
+					m.esim_info = { eid: r1?.eid ?? m.esim_info?.eid ?? null, profiles: r2?.profiles ?? [] };
+					log('info', sprintf('modem %s: eSIM profile list re-read (%d profiles)', ref, length(m.esim_info.profiles)));
+				});
+			});
+		});
+	};
+
 	let load_esim_bridge = () => {
 		if (esim_bridge === false)
 			return null;
@@ -318,6 +414,7 @@ export function install(self, o)
 				esim: esim,
 				log: log,
 				modem_of: (ref) => self.modems[ref],
+				changed: (ref, slot) => profiles_changed(ref, slot),
 			});
 		}
 
