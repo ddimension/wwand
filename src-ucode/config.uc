@@ -337,7 +337,12 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	// cap the QMAP header version the datapath may negotiate (1 | 4 | 5;
 	// unset/0 = whatever the datapath can drive). Mostly a bring-up handle:
 	// pinning it is how a specific version gets exercised on real hardware.
-	'qmap_version' ];
+	'qmap_version',
+	// WDA data endpoint (type: 2 HSUSB / 3 PCIE / 4 EMBEDDED; iface id). Normally
+	// auto-derived from the control device's sysfs bus, but a QRTR/MHI modem has no
+	// such sysfs path to read the iface id from, so it is configurable there (a
+	// Quectel RG520N on MHI is accepted with ep_type 3 + ep_id 4).
+	'ep_type', 'ep_id' ];
 // option ip6ifaceid / ifaceid — resolve the alias and say so when the value is
 // one apply_iface_id() will refuse. Without the warning a typo'd identifier is
 // perfectly silent: the address simply stays what the network assigned, which
@@ -434,6 +439,12 @@ function modem_from_section(s, warnings)
 		mnc: s.mnc,
 		mux: s.mux ?? 'auto',
 		dl_datagram_max_size: num_opt(s.dl_datagram_max_size, 0, 'dl_datagram_max_size', warnings),
+		// WDA data endpoint, usually auto-derived from the control device's sysfs bus
+		// (daemon resolve_ep_id/resolve_ep_type). A QRTR/MHI modem has no such sysfs
+		// path for the iface id, so it is set here instead; null (unset) keeps the
+		// auto-derivation for USB modems. Coerced to a number (uci gives strings).
+		ep_type: (s.ep_type != null && s.ep_type != '') ? +s.ep_type : null,
+		ep_id:   (s.ep_id   != null && s.ep_id   != '') ? +s.ep_id   : null,
 		tty: s.tty,
 		// explicit DM/DIAG node, the override for the generated 'qcdm' role
 		// table. wwand NEVER opens it — it is published as status.diag_port for

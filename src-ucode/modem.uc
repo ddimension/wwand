@@ -15,6 +15,7 @@
 import * as uloop from 'uloop';
 import * as fs from 'fs';
 import * as transport_mod from 'wwand.transport';
+import * as qmi_over_qrtr from 'wwand.qmi_over_qrtr';
 import * as client_mod from 'wwand.client';
 import * as sim from 'wwand.sim';
 import * as netlink from 'wwand.netlink';
@@ -1530,14 +1531,28 @@ export function create(opts)
 		if (self.hub)
 			return;
 
-		self.hub = transport_open(self.device, {
-			on_gone: () => self._device_gone(),
-			on_unhandled: (hub, dec) => {
-				if (dec.msg_id != null)
-					log('debug', sprintf('unhandled message svc %d cid %d msg 0x%04x %s',
-						dec.service, dec.cid, dec.msg_id, dec.kind));
-			},
-		});
+		// A QRTR modem (a Qualcomm SDX on PCIe/MHI: its QMI lives on the QRTR bus
+		// via qcom_mhi_qrtr, there is no cdc-wdm QMUX device) uses the QMI-over-QRTR
+		// hub instead of a cdc-wdm transport. The whole QMI stack above the hub is
+		// identical either way; only the wire underneath differs. Selected by the
+		// sentinel control device "qrtr" (the data netdev is the interface's own
+		// `device`, e.g. the mhi_net IP_HW0 link, exactly as for a cdc-wdm modem).
+		if (self.device == 'qrtr') {
+			self.hub = qmi_over_qrtr.create({
+				log: log,
+				on_gone: () => self._device_gone(),
+			});
+		}
+		else {
+			self.hub = transport_open(self.device, {
+				on_gone: () => self._device_gone(),
+				on_unhandled: (hub, dec) => {
+					if (dec.msg_id != null)
+						log('debug', sprintf('unhandled message svc %d cid %d msg 0x%04x %s',
+							dec.service, dec.cid, dec.msg_id, dec.kind));
+				},
+			});
+		}
 
 		if (!self.hub)
 			return fail('open', { error: 'open', device: self.device });

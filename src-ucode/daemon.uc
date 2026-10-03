@@ -2636,6 +2636,16 @@ export function create(opts)
 		// classifies EVERY modem, incl. NCM modems with no cdc-wdm.
 		let control = deps.resolve_control ? deps.resolve_control(cfg) : null;
 
+		// A QRTR modem (a Qualcomm SDX on PCIe/MHI, whose QMI lives on the QRTR bus
+		// via qcom_mhi_qrtr — there is no cdc-wdm control node) is selected by the
+		// sentinel control device "qrtr". Its control channel is an AF_QIPCRTR
+		// socket that is always present, so synthesize a ready QMI control record
+		// rather than resolving/awaiting a sysfs node — modem.uc opens the
+		// QMI-over-QRTR hub for device "qrtr". The data netdev still comes from the
+		// interface (option device), exactly as for a cdc-wdm modem.
+		if (cfg.device == 'qrtr')
+			control = { protocol: 'qmi', device: 'qrtr', netdev: cfg.netdev, tty: null };
+
 		// legacy dep path (resolve_modem_device/resolve_protocol instead of
 		// resolve_control): synthesize a control record. ONLY when resolve_control
 		// isn't injected — otherwise its null is authoritative ("device not present
@@ -2858,6 +2868,16 @@ export function create(opts)
 
 		if (ep_type == null && deps.resolve_ep_type)
 			ep_type = deps.resolve_ep_type(cfg, device, entry.netdev);
+
+		// A QRTR/MHI modem exposes no sysfs path for the WDA data endpoint, so
+		// resolve_ep_* can't derive it. Default the Quectel-on-MHI endpoint
+		// (PCIE type 3, iface 4 — HW-accepted on the RG520N); a config ep_type/
+		// ep_id still wins when set. Without an endpoint the modem answers WDA
+		// SET_DATA_FORMAT with InvalidOperation (QMI err 70).
+		if (cfg.device == 'qrtr') {
+			if (ep_type == null) ep_type = 3;
+			if (ep_id == null) ep_id = 4;
+		}
 
 		let common = {
 			id: name,

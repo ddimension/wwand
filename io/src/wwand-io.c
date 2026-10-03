@@ -24,6 +24,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <signal.h>
@@ -44,8 +45,14 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/genetlink.h>
+#include <linux/qrtr.h>
 
 #include <ucode/module.h>
+
+/* AF_QIPCRTR (the QRTR address family) predates some libc headers */
+#ifndef AF_QIPCRTR
+#define AF_QIPCRTR 42
+#endif
 
 /* larger than max supported QMAP aggregation size (31 KiB) + QMUX header */
 #define QMIT_READ_BUFSIZE (32 * 1024)
@@ -591,6 +598,271 @@ qmit_kill(uc_vm_t *vm, size_t nargs)
 	return ucv_boolean_new(true);
 }
 
+/* ---- QRTR (AF_QIPCRTR) transport for QMI-over-QRTR (MHI/PCIe modems) --------
+ *
+ * A QMI-over-QRTR modem exposes each QMI service as its own QRTR endpoint
+ * (node,port), reached with sendto()/recvfrom() carrying a struct sockaddr_qrtr:
+ * there is no QMUX header and no CTL service (the socket itself is the client).
+ * This C side is deliberately THIN — it opens the datagram socket and moves bytes
+ * with explicit (node,port) addressing. Discovery (NEW_LOOKUP on QRTR_PORT_CTRL),
+ * the CTL emulation and the QMUX<->SDU framing all live in ucode
+ * (qmi_over_qrtr.uc), so the protocol iterates without rebuilding this .so.
+ *
+ *   let h = qmit.qrtr_open();
+ *   h.qnode();                  // local node id (ctrl address is {this node, CTRL})
+ *   h.qsend(node, port, sdu);   // sendto -> true | null(EAGAIN) | false(err)
+ *   let m = h.qread();          // recvfrom -> { data, node, port } | null | false
+ *
+ * The handle reuses the wwand.io resource type (fd-based fileno/close work as-is).
+ */
+static uc_value_t *
+qmit_qrtr_open(uc_vm_t *vm, size_t nargs)
+{
+	wwand_io_t *t;
+	int fd;
+
+	last_errno = 0;
+
+	fd = socket(AF_QIPCRTR, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+
+	if (fd < 0) {
+		last_errno = errno;
+
+		return NULL;
+	}
+
+	t = calloc(1, sizeof(*t));
+
+	if (!t) {
+		last_errno = ENOMEM;
+		close(fd);
+
+		return NULL;
+	}
+
+	t->fd = fd;
+	t->wfd = -1;
+	t->pid = -1;
+	t->is_tty = false;
+
+	return uc_resource_new(transport_type, t);
+}
+
+/* local node id from getsockname — the control address is {this node, CTRL} */
+static uc_value_t *
+qmit_qnode(uc_vm_t *vm, size_t nargs)
+{
+	wwand_io_t *t = qmit_this(vm);
+	struct sockaddr_qrtr sq;
+	socklen_t sl = sizeof(sq);
+
+	last_errno = 0;
+
+	if (!t || t->fd < 0) {
+		last_errno = EBADF;
+
+		return NULL;
+	}
+
+	/* the socket auto-binds on first tx; force a bind now so qnode() is valid
+	 * before any send (bind with node 0/port 0 lets the kernel assign) */
+	if (getsockname(t->fd, (struct sockaddr *)&sq, &sl) < 0 || sq.sq_node == 0) {
+		struct sockaddr_qrtr ba = { .sq_family = AF_QIPCRTR };
+
+		(void)bind(t->fd, (struct sockaddr *)&ba, sizeof(ba));
+		sl = sizeof(sq);
+
+		if (getsockname(t->fd, (struct sockaddr *)&sq, &sl) < 0) {
+			last_errno = errno;
+
+			return NULL;
+		}
+	}
+
+	return ucv_int64_new((int64_t)sq.sq_node);
+}
+
+static uc_value_t *
+qmit_qsend(uc_vm_t *vm, size_t nargs)
+{
+	wwand_io_t *t = qmit_this(vm);
+	uc_value_t *node = uc_fn_arg(0);
+	uc_value_t *port = uc_fn_arg(1);
+	uc_value_t *data = uc_fn_arg(2);
+	struct sockaddr_qrtr sq = { .sq_family = AF_QIPCRTR };
+	const char *p;
+	size_t len;
+	ssize_t w;
+
+	last_errno = 0;
+
+	if (!t || t->fd < 0 || ucv_type(node) != UC_INTEGER ||
+	    ucv_type(port) != UC_INTEGER || ucv_type(data) != UC_STRING) {
+		last_errno = EINVAL;
+
+		return ucv_boolean_new(false);
+	}
+
+	sq.sq_node = (uint32_t)ucv_int64_get(node);
+	sq.sq_port = (uint32_t)ucv_int64_get(port);
+	p = ucv_string_get(data);
+	len = ucv_string_length(data);
+
+	do {
+		w = sendto(t->fd, p, len, 0, (struct sockaddr *)&sq, sizeof(sq));
+	} while (w < 0 && errno == EINTR);
+
+	if (w == (ssize_t)len)
+		return ucv_boolean_new(true);
+
+	if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+		return NULL;
+
+	if (w < 0)
+		last_errno = errno;
+
+	return ucv_boolean_new(false);
+}
+
+static uc_value_t *
+qmit_qread(uc_vm_t *vm, size_t nargs)
+{
+	wwand_io_t *t = qmit_this(vm);
+	char buf[QMIT_READ_BUFSIZE];
+	struct sockaddr_qrtr sq;
+	socklen_t sl = sizeof(sq);
+	ssize_t r;
+	uc_value_t *o;
+
+	last_errno = 0;
+
+	if (!t || t->fd < 0) {
+		last_errno = EBADF;
+
+		return ucv_boolean_new(false);
+	}
+
+	do {
+		r = recvfrom(t->fd, buf, sizeof(buf), 0, (struct sockaddr *)&sq, &sl);
+	} while (r < 0 && errno == EINTR);
+
+	if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+		return NULL;
+
+	if (r < 0) {
+		last_errno = errno;
+
+		return ucv_boolean_new(false);
+	}
+
+	/* r == 0 is a valid empty QRTR datagram (e.g. a bare control ack), NOT EOF —
+	 * return it as empty data with its address, never as false (device-gone) */
+	o = ucv_object_new(vm);
+	ucv_object_add(o, "data", ucv_string_new_length(buf, (size_t)r));
+	ucv_object_add(o, "node", ucv_int64_new((int64_t)sq.sq_node));
+	ucv_object_add(o, "port", ucv_int64_new((int64_t)sq.sq_port));
+
+	return o;
+}
+
+/*
+ * h.qdiscover([timeout_ms]) -> [ { service, instance, node, port }, ... ]
+ *
+ * One-shot QRTR service discovery, done synchronously (blocking, bounded) so the
+ * hub has the full service->address map before it returns from create() — the QMI
+ * backend issues ALLOCATE_CID for a service the instant the channel is up, and
+ * that needs the service's (node,port). Sends a NEW_LOOKUP for all services to the
+ * control port and collects NEW_SERVER replies until the empty end-of-list
+ * sentinel or the deadline (the kernel name server answers, net/qrtr/ns.c, so no
+ * userspace qrtr-ns is required). Fast in practice — the sentinel arrives in tens
+ * of ms — with the timeout only a cap.
+ */
+static uc_value_t *
+qmit_qdiscover(uc_vm_t *vm, size_t nargs)
+{
+	wwand_io_t *t = qmit_this(vm);
+	uc_value_t *to = uc_fn_arg(0);
+	int timeout_ms = (ucv_type(to) == UC_INTEGER) ? (int)ucv_int64_get(to) : 2000;
+	struct sockaddr_qrtr me = { 0 }, ctrl = { .sq_family = AF_QIPCRTR };
+	socklen_t sl = sizeof(me);
+	struct qrtr_ctrl_pkt lk = { 0 };
+	struct timeval start, now;
+	uc_value_t *arr;
+
+	last_errno = 0;
+
+	if (!t || t->fd < 0) {
+		last_errno = EBADF;
+
+		return NULL;
+	}
+
+	if (getsockname(t->fd, (struct sockaddr *)&me, &sl) < 0 || me.sq_node == 0) {
+		struct sockaddr_qrtr ba = { .sq_family = AF_QIPCRTR };
+
+		(void)bind(t->fd, (struct sockaddr *)&ba, sizeof(ba));
+		sl = sizeof(me);
+		getsockname(t->fd, (struct sockaddr *)&me, &sl);
+	}
+
+	lk.cmd = QRTR_TYPE_NEW_LOOKUP;   /* service 0 / instance 0 = every server */
+	ctrl.sq_node = me.sq_node;
+	ctrl.sq_port = QRTR_PORT_CTRL;
+
+	if (sendto(t->fd, &lk, sizeof(lk), 0, (struct sockaddr *)&ctrl, sizeof(ctrl)) < 0) {
+		last_errno = errno;
+
+		return NULL;
+	}
+
+	arr = ucv_array_new(vm);
+	gettimeofday(&start, NULL);
+
+	for (;;) {
+		int elapsed, left, pr;
+		struct pollfd p = { .fd = t->fd, .events = POLLIN };
+		struct qrtr_ctrl_pkt pkt;
+		struct sockaddr_qrtr from;
+		socklen_t fl = sizeof(from);
+		ssize_t r;
+		uc_value_t *o;
+
+		gettimeofday(&now, NULL);
+		elapsed = (int)((now.tv_sec - start.tv_sec) * 1000 +
+		                (now.tv_usec - start.tv_usec) / 1000);
+		left = timeout_ms - elapsed;
+
+		if (left <= 0)
+			break;
+
+		pr = poll(&p, 1, left);
+
+		if (pr <= 0)
+			break;
+
+		r = recvfrom(t->fd, &pkt, sizeof(pkt), 0, (struct sockaddr *)&from, &fl);
+
+		if (r < 4)
+			continue;
+
+		if (pkt.cmd != QRTR_TYPE_NEW_SERVER)
+			continue;
+
+		/* empty NEW_SERVER = end of the lookup list */
+		if (!pkt.server.service && !pkt.server.node && !pkt.server.port)
+			break;
+
+		o = ucv_object_new(vm);
+		ucv_object_add(o, "service",  ucv_int64_new(pkt.server.service));
+		ucv_object_add(o, "instance", ucv_int64_new(pkt.server.instance));
+		ucv_object_add(o, "node",     ucv_int64_new(pkt.server.node));
+		ucv_object_add(o, "port",     ucv_int64_new(pkt.server.port));
+		ucv_array_push(arr, o);
+	}
+
+	return arr;
+}
+
 static const uc_function_list_t transport_fns[] = {
 	{ "read",   qmit_read },
 	{ "write",  qmit_write },
@@ -598,6 +870,10 @@ static const uc_function_list_t transport_fns[] = {
 	{ "flush",  qmit_flush },
 	{ "close",  qmit_close },
 	{ "kill",   qmit_kill },
+	{ "qsend",     qmit_qsend },
+	{ "qread",     qmit_qread },
+	{ "qnode",     qmit_qnode },
+	{ "qdiscover", qmit_qdiscover },
 };
 
 /*
@@ -1737,6 +2013,7 @@ qmit_rmnet_info(uc_vm_t *vm, size_t nargs)
 static const uc_function_list_t global_fns[] = {
 	{ "open",          qmit_open },
 	{ "open_tty",      qmit_open_tty },
+	{ "qrtr_open",     qmit_qrtr_open },
 	{ "spawn",         qmit_spawn },
 	{ "rmnet_add",     qmit_rmnet_add },
 	{ "rmnet_mux_id",  qmit_rmnet_mux_id },
