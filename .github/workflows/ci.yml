@@ -8,7 +8,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, stable]
     paths-ignore: ['**.md']
   pull_request:
   workflow_dispatch:
