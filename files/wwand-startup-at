@@ -1,0 +1,34 @@
+#!/usr/bin/ucode
+// SPDX-License-Identifier: GPL-2.0-only
+// One startup AT request through the same transport and engine as the manager.
+'use strict';
+
+import * as uloop from 'uloop';
+import * as atcmd from 'wwand.atcmd';
+
+if (length(ARGV) != 2) {
+	warn('usage: startup-at <tty> <command>\n');
+	exit(2);
+}
+
+uloop.init();
+let transport = atcmd.open_transport(ARGV[0], 115200);
+if (!transport)
+	exit(1);
+
+let result = 1;
+let engine = atcmd.create(transport);
+engine.send(ARGV[1], (err, lines) => {
+	if (!err) {
+		for (let line in lines)
+			print(line + '\n');
+		print('OK\n');
+		result = 0;
+	}
+	engine.close();
+}, { timeout: 5000 });
+
+// close() defers handle deletion; let the loop finish that before exiting.
+uloop.run();
+uloop.done();
+exit(result);

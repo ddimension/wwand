@@ -214,7 +214,7 @@ export function install(self, o)
 
 		// board defaults only when they unambiguously target this modem (see
 		// board_gpio_ok): per-modem reset_gpio is the multi-modem path.
-		let rg = cfg?.reset_gpio ?? (board_gpio_ok() ? board.profile?.reset_gpio : null);
+		let rg = cfg?.reset_gpio ?? (board_gpio_ok() && !board.profile?.repower_uses_power ? board.profile?.reset_gpio : null);
 
 		if (rg)
 			return { action: 'reset_gpio', gpio: rg,

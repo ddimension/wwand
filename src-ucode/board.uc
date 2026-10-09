@@ -44,6 +44,7 @@ export function default_fx()
 		},
 		// list entries of a directory (for the named-GPIO enumeration)
 		list: (p) => fs.lsdir(p),
+		run: (argv) => system(argv),
 		// does a path exist — used to detect an OPTIONAL gpio by its sysfs
 		// directory rather than by one read of its value, which a single
 		// transient read error would turn into "no such line" for the whole
@@ -306,13 +307,14 @@ export function create(opts)
 	let fx = opts?.fx ?? default_fx();
 	let log = opts?.log ?? ((level, msg) => warn(sprintf('%s: %s\n', level, msg)));
 	let id = opts?.id ?? detect_id(fx);
-	let profile = (id != null) ? PROFILES[id] : null;
+	let profile = opts?.profile ?? ((id != null) ? PROFILES[id] : null);
 	// in-flight reset pulse (see reset_pulse): one at a time, and the guard is
 	// what keeps a concurrent caller from sampling a driven line
 	let pulse_timer = null;
+	let power_timer = null;
 	// timings are injectable so tests can drive the deferred halves quickly
 	let power_off_ms = opts?.power_off_ms ?? POWER_OFF_MS;
-	let reset_ms = opts?.reset_ms ?? RESET_ASSERT_MS;
+	let reset_ms = opts?.reset_ms ?? profile?.reset_assert_ms ?? RESET_ASSERT_MS;
 	// polarity of the modem power line (inverted boards power with 0)
 	let power_on = profile?.power_gpio_active_low ? '0' : '1';
 	let power_off = profile?.power_gpio_active_low ? '1' : '0';
@@ -358,7 +360,27 @@ export function create(opts)
 	let self = {
 		id: id,
 		profile: profile,
-		has_power: profile?.power_gpio != null,
+		has_power: profile?.power_gpio != null || profile?.power_driver != null,
+		// Candidates are not assignments: a name does not identify the modem
+		// or prove that driving the line is safe. Never feed this list into recovery.
+		gpio_candidates: () => map(list_named_gpios(fx), (name) => {
+			if (length(name) > 64 || !match(name, /^[A-Za-z0-9._:-]+$/) || index(name, '..') >= 0)
+				return null;
+
+			let base = sprintf('%s/%s', GPIO_DIR, name);
+			let value = fx.read(sprintf('%s/value', base));
+			let direction = fx.read(sprintf('%s/direction', base));
+			let active_low = fx.read(sprintf('%s/active_low', base));
+
+			return {
+				name: name,
+				source: 'sysfs',
+				value: (value == '0' || value == '1') ? +value : null,
+				direction: (direction == 'in' || direction == 'out') ? direction : null,
+				active_low: (active_low == '0' || active_low == '1') ? !!+active_low : null,
+				assignment_required: true,
+			};
+		}),
 		// expose the signal->bars mapping so callers building an LED state don't
 		// need to import the module function separately
 		bars: bars_from_signal,
@@ -388,10 +410,78 @@ export function create(opts)
 	// a power GPIO exists (i.e. the cycle was initiated).
 	// `off_ms` optionally overrides the off duration (config `repower_time`).
 	self.power_cycle = function(off_ms) {
-		if (!profile?.power_gpio)
+		if (pulse_timer)
 			return false;
+		if (!profile?.power_gpio && !profile?.power_driver)
+			return false;
+		if (power_timer)
+			return true;
 
-		let off = (off_ms > 0) ? off_ms : power_off_ms;
+		let off = (off_ms > 0) ? off_ms : (profile?.power_off_ms ?? power_off_ms);
+		if (profile.power_driver) {
+			let driver = profile.power_driver;
+			let device = profile.power_device;
+			let module = profile.power_module;
+			let prepare = profile.power_prepare_ms ?? 0;
+
+			log('err', sprintf('board %s: scheduling PCIe modem power cycle through %s (off %ds)',
+				id, driver, off / 1000));
+
+			// Recovery calls this hook before its failure callback tears down the
+			// open control transport. Defer the destructive half so teardown can
+			// close MHI first; otherwise rmmod sees a busy character device.
+			power_timer = uloop.timer(prepare, () => {
+				let modules = fx.read('/proc/modules') ?? '';
+				let loaded = false;
+
+				for (let line in split(modules, '\n'))
+					if (split(line, /[ \t]+/)[0] == module) {
+						loaded = true;
+						break;
+					}
+
+				if (loaded && (!fx.run || fx.run([ 'rmmod', module ]) != 0)) {
+					power_timer = null;
+					log('err', sprintf('board %s: could not unload %s; modem power left unchanged', id, module));
+					return;
+				}
+
+				// Drop a dead config-space image before the slot is powered again.
+				for (let dev in (fx.list('/sys/bus/pci/devices') ?? [])) {
+					let base = sprintf('/sys/bus/pci/devices/%s', dev);
+					let key = sprintf('%s:%s', fx.read(base + '/vendor') ?? '',
+						fx.read(base + '/device') ?? '');
+
+					if (index(profile.power_pci_ids ?? [], key) >= 0)
+						fx.write(base + '/remove', '1');
+				}
+
+				if (!fx.write(sprintf('%s/unbind', driver), device)) {
+					power_timer = null;
+					log('err', sprintf('board %s: could not unbind PCI slot power controller', id));
+					return;
+				}
+
+				power_timer = uloop.timer(off, () => {
+					power_timer = null;
+
+					if (!fx.write(sprintf('%s/bind', driver), device)) {
+						log('err', sprintf('board %s: PCI slot power controller did not rebind — modem remains off', id));
+						return;
+					}
+
+					fx.write('/sys/bus/pci/rescan', '1');
+
+					if (!fx.run || fx.run([ 'modprobe', module ]) != 0)
+						log('err', sprintf('board %s: could not reload %s after modem power cycle', id, module));
+					else
+						log('notice', sprintf('board %s: PCIe modem power restored and %s reloaded', id, module));
+				});
+			});
+
+			return true;
+		}
+
 
 		log('err', sprintf('board %s: power-cycling modem (gpio %s, off %ds)',
 			id, profile.power_gpio, off / 1000));
@@ -438,6 +528,8 @@ export function create(opts)
 	//    modem runs — and the pin is not consulted at all. Sampling stays the
 	//    fallback for boards whose polarity nobody has measured.
 	self.reset_pulse = function(name, hold_ms) {
+		if (power_timer)
+			return false;
 		let g = name ?? profile?.reset_gpio;
 
 		// reject an invalid (config-supplied) name up front so the caller sees

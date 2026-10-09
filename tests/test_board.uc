@@ -47,6 +47,26 @@ fx = mkfx({}, { [G]: [ 'export', 'unexport', 'gpiochip512', 'gpio577',
 let gpios = board.list_named_gpios(fx);
 eq(join(',', gpios), 'modem-power,modem-reset', 'gpios: only named lines, sorted');
 
+// Discovery must not make an unknown board eligible for hardware recovery.
+let candidate_fx = mkfx({
+	[`${G}/modem-reset/value`]: '0',
+	[`${G}/modem-reset/direction`]: 'out',
+	[`${G}/modem-reset/active_low`]: '1',
+}, { [G]: ['modem-reset', 'modem-power'] });
+let candidate_board = board.create({ id: 'unknown,board', fx: candidate_fx, log: () => {} });
+let candidates = candidate_board.gpio_candidates();
+eq(length(candidates), 2, 'discovery: unknown board exposes named candidates');
+eq(candidates[1], { name: 'modem-reset', source: 'sysfs', value: 0,
+	direction: 'out', active_low: true, assignment_required: true },
+	'discovery: metadata does not assume modem ownership');
+eq(candidates[0].value, null, 'discovery: missing value remains unknown');
+eq(candidate_board.has_power, false, 'discovery: does not grant recovery capability');
+eq(length(candidate_fx.writes), 0, 'discovery: no sysfs writes');
+candidate_fx.list = () => ['modem-reset'];
+eq(length(candidate_board.gpio_candidates()), 1, 'discovery: refreshes after hotplug');
+candidate_fx.list = () => ['../escape'];
+eq(candidate_board.gpio_candidates(), [null], 'discovery: unsafe names are not read');
+
 // --- 3. Chateau profile: power + reset + signal-bar LEDs ----------------------
 fx = mkfx({ [`${G}/modem-power/value`]: '1', [`${G}/modem-reset/value`]: '1' });
 let b = board.create({ id: 'mikrotik,chateau-5g-r17-ax', fx: fx,
@@ -355,5 +375,22 @@ let okfx = mkfx({ [`${G}/modem-reset/value`]: '1' });
 let okb = board.create({ id: 'mikrotik,chateau-5g-r17-ax', fx: okfx,
                          power_off_ms: 5, reset_ms: 5, log: () => {} });
 eq(okb.reset_pulse('modem-reset', 5), true, 'gpio-fail: a working line still pulses');
+
+let actions = [];
+let slotfx = mkfx({ '/proc/modules': 'pcie_mhi 123 0' });
+slotfx.run = (args) => { push(actions, join(' ', args)); return 0; };
+let slotboard = board.create({ fx: slotfx, profile: {
+	power_driver: '/sys/bus/platform/drivers/pci-pwrctrl-slot',
+	power_device: 'test-slot', power_module: 'pcie_mhi',
+	power_off_ms: 3, power_prepare_ms: 1,
+}, log: () => {} });
+ok(slotboard.power_cycle(), 'slot: configured provider schedules recovery');
+ok(slotboard.power_cycle(), 'slot: overlapping request does not duplicate recovery');
+uloop.timer(10, () => uloop.end());
+uloop.run();
+eq(actions, ['rmmod pcie_mhi', 'modprobe pcie_mhi'], 'slot: unload then reload once');
+ok(slotfx.has('/sys/bus/platform/drivers/pci-pwrctrl-slot/unbind=test-slot'), 'slot: disables power provider');
+ok(slotfx.has('/sys/bus/platform/drivers/pci-pwrctrl-slot/bind=test-slot'), 'slot: restores power provider');
+ok(slotfx.has('/sys/bus/pci/rescan=1'), 'slot: rescans after power returns');
 
 done('test_board');

@@ -197,7 +197,8 @@ export function create(o)
 		recovery_fx: datapath_fx,
 		// board profile: modem power/reset GPIOs + status LEDs (no-op on an
 		// unknown board). Recovery power-cycles/resets the modem through it.
-		board: board.create({ log: (level, msg) => logmod.log(level, '%s', msg) }),
+		board: board.create({ profile: load_config()?.globals?.hardware_profile,
+			log: (level, msg) => logmod.log(level, '%s', msg) }),
 		resolve_modem_device: discovery.resolve_modem_device,
 		// enumerate physically-present control devices for the LuCI picker
 		list_present: () => discovery.list_present(),

@@ -81,6 +81,7 @@ done
 # existed and v1.6.4 shipped the defect it catches anyway. These are the cheap,
 # deterministic ones; they need nothing but python3.
 if command -v python3 >/dev/null 2>&1; then
+	python3 "$TESTDIR/test_startup.py" || rc=1
 	for chk in check-map check-anchors check-export-terminators check-ucode-pitfalls standards; do
 		# --since HEAD: an uncommitted edit that MOVES an anchored line fails the
 		# run before the commit, when fixing it is one `--fix` away

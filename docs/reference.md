@@ -2156,6 +2156,47 @@ protocol error; empty poll replies keep the last-known data; the per-type
 signal and on every serving/neighbour cell at ingestion, so the UI shows "—"
 rather than e.g. `-3276.8 dBm`.
 
+## Configured PCIe startup (experimental)
+
+The wwand service can prepare one configured PCIe modem before the daemon starts.
+This mode replaces a separate startup service. It does not add a second background recovery loop.
+
+In a `wwand_globals` section, `startup_pcie '1'` enables preparation and disables automatic switching back to USB.
+Without this option, the service starts the daemon directly.
+
+| Option | Meaning |
+| --- | --- |
+| `startup_module` | Vendor MHI module name |
+| `startup_dependency` | Module to load before MHI, or empty |
+| `startup_control` | Expected control device path |
+| `startup_at_ports` | Space-separated USB AT device paths |
+| `startup_wait_phys` | Optional Wi-Fi PHY names that must appear first |
+| `startup_reset_gpio` | Exported reset line name |
+| `startup_pci_vendor`, `startup_pci_device` | Exact PCI vendor and device IDs |
+| `startup_settle_seconds` | Delay after reset, default 25 seconds, maximum 120 |
+| `startup_power_driver` | Optional `/sys/bus/platform/drivers/pci-pwrctrl-slot` provider |
+| `startup_power_device` | Explicit slot controller device name |
+
+Preparation first tries an existing PCIe endpoint, then one rescan without reset.
+If MHI becomes ready, it skips USB AT checks and reset.
+If preparation fails, it queries the Quectel manufacturer and data mode before a persistent write.
+Startup logs include `uptime=...s` markers to identify delays.
+USB AT requests reuse the native `wwand_io` transport and `atcmd` engine through `startup-at`.
+Each request has a five-second response timeout and closes its port before the manager starts.
+It verifies PCIe data mode after a change. Unsupported or rejected commands do not cause a reset.
+The operator enables automatic correction with `startup_pcie`. A future manual setup action will separate checking from correction.
+
+Reset writes use sysfs logical levels. The kernel applies the DTS polarity.
+Failed reset recovery can use the configured slot power provider. A missing control device does not prove PBL.
+After preparation, the existing daemon recovery ladder owns recovery through the configured provider.
+Provider changes need a service restart. The provider is read when the daemon starts, not on configuration reload.
+
+`status.board.gpio_candidates` reports exported names, readable values, direction, and `active_low`.
+Discovery does not export or write GPIOs. Candidates require explicit assignment before use.
+
+TODO: associate controls with individual modems on multi-modem routers and add the LuCI transport action.
+This version is for single-modem integration tests. Multi-modem association is not hardware-tested.
+
 ## Troubleshooting
 
 - **What is running.** The first three lines of every start say it, so a posted

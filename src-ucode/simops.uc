@@ -156,7 +156,7 @@ export function install(self, o)
 		// belongs to this module, not to the modem, so it outlives the
 		// teardown and would talk to a client that is mid-initialisation.
 		// `_gen` is the counter both backends already bump on teardown
-		// (modem.uc:1568, modem_mbim.uc:2592); NCM has none and degrades to
+		// (modem.uc:1568, modem_mbim.uc:2596); NCM has none and degrades to
 		// the identity check, which is the case its reset already answers.
 		let gen = m._gen;
 		// ...and a card change of its own: a remote SIM that comes and goes

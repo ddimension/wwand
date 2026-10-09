@@ -1804,4 +1804,17 @@ ok(length(filter(psim.warnings, (w) => index(w, 'nonsense') >= 0)) > 0,
 eq(length(filter(psim.warnings, (w) => index(w, "unknown option 'pdp_type'") >= 0)), 0,
 	'sim pdp: no longer reported as an unknown option');
 
+let setup = config.parse({ network: { setup: { '.type': 'wwand_globals',
+	startup_pcie: '1', startup_power_driver: '/sys/bus/platform/drivers/pci-pwrctrl-slot',
+	startup_power_device: '80000000.pcie:pcie@0', startup_module: 'pcie_mhi',
+	startup_reset_gpio: 'modem-reset', startup_pci_vendor: '0x17cb', startup_pci_device: '0x0309',
+} } });
+ok(setup.globals.startup_pcie, 'setup: explicit PCIe policy is retained');
+eq(setup.globals.hardware_profile.reset_run, 0, 'setup: reset releases to logical inactive');
+ok(setup.globals.hardware_profile.repower_uses_power, 'setup: repower uses configured provider');
+let rejected = config.parse({ network: { setup: { '.type': 'wwand_globals',
+	startup_pcie: '1', startup_power_driver: '/tmp/unsafe', startup_power_device: '../escape',
+} } });
+eq(rejected.globals.hardware_profile, null, 'setup: unsupported power provider is rejected');
+
 done('test_config');

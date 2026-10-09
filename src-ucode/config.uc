@@ -289,6 +289,29 @@ export function context_defaults(over)
 function apply_globals(s, result)
 {
 	result.globals.log_level = s.log_level ?? result.globals.log_level;
+	// Explicit PCIe preparation disables the automatic USB composition recipe.
+	result.globals.startup_pcie = bool_opt(s.startup_pcie, false);
+	if (result.globals.startup_pcie &&
+	    s.startup_power_driver == '/sys/bus/platform/drivers/pci-pwrctrl-slot' &&
+	    type(s.startup_power_device) == 'string' &&
+	    match(s.startup_power_device, /^[A-Za-z0-9._:@-]+$/) &&
+	    index(s.startup_power_device, '..') < 0 &&
+	    match(s.startup_module ?? '', /^[A-Za-z0-9_]+$/) &&
+	    match(s.startup_pci_vendor ?? '', /^0x[0-9a-f]{4}$/) &&
+	    match(s.startup_pci_device ?? '', /^0x[0-9a-f]{4}$/)) {
+		result.globals.hardware_profile = {
+			reset_gpio: s.startup_reset_gpio,
+			reset_run: 0,
+			reset_assert_ms: 1000,
+			repower_uses_power: true,
+			power_driver: s.startup_power_driver,
+			power_device: s.startup_power_device,
+			power_module: s.startup_module,
+			power_off_ms: 3000,
+			power_prepare_ms: 1000,
+			power_pci_ids: [s.startup_pci_vendor + ':' + s.startup_pci_device],
+		};
+	}
 
 	// off-switch for the daemon writing the resolved l3 device name back onto the
 	// interface section as `option device` (default on).

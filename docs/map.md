@@ -61,6 +61,8 @@ row. That is the whole maintenance rule.
 | ...and the one exception to that gate? | `recovery.uc unarmed_reset_line` — a pulse of the modem's own named RESET line, once per outage, nothing else. |
 | What would a repower do on THIS box for THIS modem? | `hwops.uc repower_plan` — the same precedence the action takes, so asking equals doing minus the doing. |
 | Which GPIOs and LEDs does this board have? | `board.uc` profile table, keyed by `/etc/board.json` model id. |
+| Which exported GPIOs need manual assignment? | `board.uc create` exposes read-only `gpio_candidates` through `daemon.uc status`. Names do not grant recovery permission. |
+| Who prepares the configured PCIe modem before the daemon starts? | `files/wwand-startup start_pcie_modem`, launched by the wwand procd instance. The `startup_pcie` configuration disables the USB composition recipe. |
 
 ## SIM, slots and eSIM
 

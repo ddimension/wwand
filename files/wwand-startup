@@ -1,0 +1,279 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Optional, single-slot transport preparation owned by the wwand procd instance.
+# config_get assigns these names indirectly through OpenWrt functions.sh.
+# shellcheck disable=SC2154
+
+startup_log() {
+	local uptime rest
+	read -r uptime rest < /proc/uptime
+	logger -t wwand-startup "uptime=${uptime}s $*"
+}
+
+pcie_at_request() {
+	local response
+
+	startup_log "USB AT request on $1: $2"
+	response=$(ucode /usr/libexec/wwand/startup-at "$1" "$2" 2>/dev/null) || return 1
+	response=$(printf '%s\n' "$response" | tr -d '\r ')
+	printf '%s\n' "$response"
+}
+
+set_pcie_mode() {
+	local response port="$1"
+	# A successful QCFG response is not proof of manufacturer identity.
+	response=$(pcie_at_request "$port" 'AT+CGMI') || return 2
+	printf '%s\n' "$response" | grep -qi 'quectel' || return 2
+
+	response=$(pcie_at_request "$port" 'AT+QCFG="data_interface"') || return 2
+	printf '%s\n' "$response" | grep -Eq '^\+QCFG:"data_interface",[0-9]+,[0-9]+$' || return 2
+	if printf '%s\n' "$response" | grep -q '^+QCFG:"data_interface",1,0$'; then
+		startup_log "modem already uses PCIe data mode on $port"
+		return 0
+	fi
+
+	startup_log "setting PCIe data mode on $port"
+	pcie_at_request "$port" 'AT+QCFG="data_interface",1,0' >/dev/null || {
+		startup_log "modem rejected PCIe data mode; stopping startup"
+		return 1
+	}
+	response=$(pcie_at_request "$port" 'AT+QCFG="data_interface"')
+	if ! printf '%s\n' "$response" | grep -q '^+QCFG:"data_interface",1,0$'; then
+		startup_log "PCIe data mode readback failed; stopping startup"
+		return 1
+	fi
+	pcie_mode_changed=1
+	startup_log "PCIe data mode verified; modem reset will apply the change"
+	return 0
+}
+
+configure_pcie_usb_mode() {
+	local port result retries=3
+
+	[ -c "$control_node" ] && return 0
+	[ -r /usr/libexec/wwand/startup-at ] || {
+		startup_log "native AT helper is missing; cannot configure PCIe data mode"
+		return 1
+	}
+	while [ "$retries" -gt 0 ]; do
+		for port in $at_ports; do
+			[ -c "$port" ] || continue
+			set_pcie_mode "$port"
+			result=$?
+			[ "$result" -eq 0 ] && return 0
+			[ "$result" -eq 1 ] && return 1
+		done
+		retries=$((retries - 1))
+		[ "$retries" -gt 0 ] && sleep 1
+		done
+	startup_log "no USB AT response; continuing PCIe discovery and reset recovery"
+	return 0
+}
+
+find_pcie_pci_modem() {
+	local device device_id vendor
+
+	for device in /sys/bus/pci/devices/*; do
+		[ -r "$device/vendor" ] || continue
+		[ -r "$device/device" ] || continue
+		vendor=$(cat "$device/vendor")
+		device_id=$(cat "$device/device")
+		[ "$vendor" = "$pci_vendor" ] || continue
+		case "$device_id" in
+			"$pci_device_id")
+				echo "$device"
+				return 0
+				;;
+		esac
+	done
+
+	return 1
+}
+
+wait_for_pcie_modem() {
+	local pci_device retries="$1"
+
+	while [ "$retries" -gt 0 ]; do
+		pci_device=$(find_pcie_pci_modem)
+		[ -n "$pci_device" ] && [ -c "$control_node" ] && return 0
+		sleep 1
+		retries=$((retries - 1))
+	done
+
+	return 1
+}
+
+wait_for_pcie_wifi() {
+	local retries=120 phy ready
+
+	while [ "$retries" -gt 0 ]; do
+		ready=1
+		for phy in $wait_phys; do
+			[ -d "/sys/class/ieee80211/$phy" ] || ready=0
+		done
+		[ "$ready" -eq 1 ] && return 0
+		sleep 1
+		retries=$((retries - 1))
+	done
+
+	startup_log "Wi-Fi PHYs did not become ready; refusing to load MHI"
+	return 1
+}
+
+rescan_pcie_modem() {
+	echo 1 > /sys/bus/pci/rescan
+}
+
+discover_pcie_modem() {
+	local pci_device
+
+	startup_log "rescanning PCIe before modem reset"
+	rescan_pcie_modem || return 1
+	pci_device=$(find_pcie_pci_modem)
+	[ -n "$pci_device" ]
+}
+
+start_pcie_modem() {
+	local pci_device
+	local pcie_mode_changed=0
+	local reset_gpio="/sys/class/gpio/$reset_line/value"
+
+	pci_device=$(find_pcie_pci_modem)
+	if [ -n "$pci_device" ]; then
+		startup_log "PCIe modem found at ${pci_device##*/}; trying MHI without restarting the modem"
+		if load_mhi && wait_for_pcie_modem 20; then
+			startup_log "PCIe modem became ready without recovery"
+			return 0
+		fi
+		startup_log "PCIe endpoint is present but MHI did not become ready"
+	else
+		startup_log "PCIe modem endpoint is missing"
+	fi
+
+	if discover_pcie_modem; then
+		startup_log "PCIe modem found after rescan; trying MHI without reset"
+		if load_mhi && wait_for_pcie_modem 20; then
+			startup_log "PCIe modem became ready after rescan without reset"
+			return 0
+		fi
+		startup_log "PCIe rescan found the endpoint but MHI did not become ready"
+	else
+		startup_log "PCIe discovery failed before reset recovery"
+	fi
+	startup_log "checking USB AT mode after PCIe preparation failed"
+	configure_pcie_usb_mode || return 1
+	startup_log "USB AT checks finished; mode_changed=$pcie_mode_changed"
+	startup_log "starting modem reset recovery after PCIe rescan"
+
+	unload_mhi || return 1
+	remove_pcie_modem || return 1
+
+	if [ ! -w "$reset_gpio" ]; then
+		startup_log "cannot attempt normal recovery because configured reset GPIO is unavailable"
+		return 1
+	fi
+
+	startup_log "resetting modem because its PCIe data path is not ready"
+	echo "$reset_assert" > "$reset_gpio" || return 1
+	trap 'echo "$reset_release" > "$reset_gpio"; exit 1' HUP INT TERM
+	sleep 1
+	echo "$reset_release" > "$reset_gpio" || return 1
+	trap - HUP INT TERM
+	startup_log "modem reset released; waiting $settle_seconds seconds for modem stabilization"
+	sleep "$settle_seconds"
+	startup_log "rescanning PCIe after modem reset"
+	rescan_pcie_modem || return 1
+
+	startup_log "loading MHI after modem stabilization"
+	if load_mhi && wait_for_pcie_modem 40; then
+		pci_device=$(find_pcie_pci_modem)
+		startup_log "configured reset line recovery succeeded; PCIe modem is ready at ${pci_device##*/}"
+		return 0
+	fi
+
+	startup_log "reset recovery failed; trying configured slot power provider"
+	[ -n "$power_driver" ] && [ -n "$power_device" ] || return 1
+	[ -w "$power_driver/unbind" ] && [ -w "$power_driver/bind" ] || return 1
+	unload_mhi || return 1
+	remove_pcie_modem || return 1
+	startup_log "power-cycling configured slot $power_device; control did not become ready (PBL not confirmed)"
+	echo "$power_device" > "$power_driver/unbind" || return 1
+	# If procd stops preparation, restore slot power before exiting.
+	trap 'echo "$power_device" > "$power_driver/bind"; exit 1' HUP INT TERM
+	sleep 3
+	echo "$power_device" > "$power_driver/bind" || return 1
+	trap - HUP INT TERM
+	rescan_pcie_modem || return 1
+	load_mhi && wait_for_pcie_modem 40
+}
+
+unload_mhi() {
+	grep -q "^$mhi_module " /proc/modules || return 0
+	startup_log "unloading MHI before modem recovery"
+	rmmod "$mhi_module"
+}
+
+remove_pcie_modem() {
+	local pci_device
+	pci_device=$(find_pcie_pci_modem)
+	[ -n "$pci_device" ] || return 0
+	startup_log "removing stale PCIe modem at ${pci_device##*/}"
+	echo 1 > "$pci_device/remove"
+}
+
+load_mhi() {
+	grep -q "^$mhi_module " /proc/modules && return 0
+	[ -z "$mhi_dependency" ] || modprobe "$mhi_dependency" || return 1
+	modprobe "$mhi_module"
+}
+
+# Configured explicitly: names and polarity are not inferred from candidates.
+. /lib/functions.sh
+load_startup() {
+	config_get enabled "$1" startup_pcie 0
+	config_get mhi_module "$1" startup_module pcie_mhi
+	config_get mhi_dependency "$1" startup_dependency ""
+	config_get control_node "$1" startup_control /dev/mhi_QMI0
+	config_get at_ports "$1" startup_at_ports ""
+	config_get wait_phys "$1" startup_wait_phys ""
+	config_get reset_line "$1" startup_reset_gpio ""
+	config_get pci_vendor "$1" startup_pci_vendor ""
+	config_get pci_device_id "$1" startup_pci_device ""
+	config_get settle_seconds "$1" startup_settle_seconds 25
+	config_get power_driver "$1" startup_power_driver ""
+	config_get power_device "$1" startup_power_device ""
+}
+config_load network
+config_foreach load_startup wwand_globals
+if [ "${enabled:-0}" != 1 ]; then
+	exec /usr/sbin/wwand
+fi
+case "$mhi_module:$mhi_dependency:$reset_line" in
+	*[!a-zA-Z0-9_:-]*) startup_log "invalid module or GPIO configuration"; exit 1 ;;
+esac
+case "$settle_seconds" in
+	""|*[!0-9]*) exit 1 ;;
+esac
+[ "$settle_seconds" -le 120 ] || exit 1
+[ -n "$pci_vendor" ] && [ -n "$pci_device_id" ] || exit 1
+case "$pci_vendor:$pci_device_id" in
+	*[!0-9a-fx:]*) exit 1 ;;
+esac
+case "$power_device" in
+	*/*|*..*) exit 1 ;;
+esac
+case "$power_driver" in
+	""|/sys/bus/platform/drivers/pci-pwrctrl-slot) ;;
+	*) startup_log "unsupported slot power provider"; exit 1 ;;
+esac
+# Sysfs applies active_low itself: 1 asserts, 0 releases the declared signal.
+reset_assert=1
+reset_release=0
+startup_log "transport preparation started; waiting for Wi-Fi PHYs"
+wait_for_pcie_wifi && {
+	startup_log "Wi-Fi PHYs ready; checking PCIe"
+	start_pcie_modem
+}
+result=$?
+startup_log "transport preparation finished (result $result); starting manager"
+exec /usr/sbin/wwand
