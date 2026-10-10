@@ -314,6 +314,15 @@ eq(tlvmod.unpack(W.GET_DELEGATED_PREFIX.resp,
 	tlv(0x10, v6b([ 0x2001, 0xdb8, 0x100, 0, 0, 0, 0, 0 ]) + u8(56))).prefix,
 	{ addr: '2001:db8:100:0:0:0:0:0', plen: 56 }, 'wds: delegated prefix decodes from TLV 0x10');
 
+// NAS Attach Detach 0x0023 (nas.uc ATTACH_DETACH, libqmi 1.38): one
+// mandatory TLV 0x10, u8 QmiNasPsAttachAction — 1 attach, 2 detach.
+let NA = nasmod.default.messages.ATTACH_DETACH;
+eq(NA.id, 0x0023, 'nas: attach/detach is msg 0x0023');
+eq(tlvmod.pack(NA.req, { action: nasmod.PS_DETACH }), tlv(0x10, u8(2)),
+	'nas: detach is TLV 0x10 = 2');
+eq(tlvmod.pack(NA.req, { action: nasmod.PS_ATTACH }), tlv(0x10, u8(1)),
+	'nas: attach is TLV 0x10 = 1');
+
 let U = uimmod.default.messages;
 
 // SESSION_CLOSED (0x0043). `cause` is FOUR bytes in the IDL even though every

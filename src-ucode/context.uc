@@ -1189,7 +1189,9 @@ export function create(opts)
 		});
 	};
 
-	self.down = function(cb) {
+	// `reason` lands in the 'down' event ('admin' when not given): 'reattach'
+	// is a stop the modem's detach follows (netsel_ops release_sessions)
+	self.down = function(cb, reason) {
 		let was = self.state;
 
 		mon.stop();
@@ -1199,7 +1201,7 @@ export function create(opts)
 		release_family(4, () => {
 			release_family(6, () => {
 				if (was != 'IDLE')
-					emit('down', { reason: 'admin' });
+					emit('down', { reason: reason ?? 'admin' });
 
 				if (cb)
 					cb(null);

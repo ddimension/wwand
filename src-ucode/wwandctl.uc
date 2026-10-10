@@ -125,7 +125,8 @@ function cmd_status(args)
 		for (let r in (m.plugins ?? []))
 			printf('  %-11s %s%s\n', r.label, r.text,
 				(r.level == 'error') ? '  [error]' : (r.level == 'warn') ? '  [!]' : '');
-		printf('  network     %s\n', reg_text(m));
+		printf('  network     %s%s\n', reg_text(m),
+			m.detached ? '  [detached by the operator — wwandctl attach]' : '');
 
 		let rec = recovery_text(m.recovery);
 
@@ -425,6 +426,9 @@ Connection
   up <interface>         connect (like ifup, via the daemon)
   down <interface>       disconnect
   reattach [modem]       network detach/re-attach (no full reset)
+  detach [modem]         stop the sessions and detach from the network;
+                         stays detached until attach (or a modem reset)
+  attach [modem]         attach to the network again; interfaces reconnect
   scan [modem]           visible-operator scan (takes up to ~90 s)
   select [modem] auto    automatic network selection
   select [modem] <mcc> <mnc>   manual PLMN selection
@@ -490,7 +494,10 @@ if (cmd == null || cmd == 'help' || cmd == '-h' || cmd == '--help') {
 	exit(0);
 }
 
-conn = libubus.connect();
+// 180 s, not ubus' 30 s default: a reattach or attach over AT waits up to
+// 60 s for the registration to return before it answers (netsel_ops
+// wait_registered), and the redial follows
+conn = libubus.connect(null, 180);
 
 if (!conn)
 	die('cannot connect to ubus');
@@ -531,7 +538,7 @@ if (json_mode) {
 //
 // WHY THE FLOOR. `modem_signal` keeps wwand's adaptive fast-telemetry loop warm
 // (daemon.uc calls modem.watch()); that loop polls the modem at 1 Hz and decays
-// 6 s after the last request (modem_common.uc:794-795). One sample therefore
+// 6 s after the last request (modem_common.uc:853-854). One sample therefore
 // costs ~6 s of 1 Hz modem traffic, so the duty cycle is 6/interval: 10 % at
 // 60 s, 20 % at 30 s, 60 % at 10 s — and at 6 s or below the loop NEVER decays
 // and the modem is polled around the clock. A global `Interval 10` in
@@ -850,6 +857,20 @@ case 'reattach': {
 	let r = resolve_modem(status(), args[0]);
 	let res = call_ok('modem_reattach', { modem: r.modem });
 	printf('reattach done (via %s)\n', res.via ?? '?');
+	break;
+}
+
+case 'detach':
+case 'attach': {
+	let r = resolve_modem(status(), args[0]);
+	let res = call_ok('modem_' + cmd, { modem: r.modem });
+
+	if (cmd == 'detach')
+		printf('detached (via %s, %d session(s) stopped)\n', res.via ?? '?',
+			res.contexts_released ?? 0);
+	else
+		printf('attached (via %s)%s\n', res.via ?? '?',
+			res.unchanged ? ' — it already was' : '');
 	break;
 }
 

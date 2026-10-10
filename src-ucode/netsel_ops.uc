@@ -13,15 +13,20 @@
 //                                             sync scan + the async job the
 //                                             LuCI UI polls (a scan outlives
 //                                             the XHR/rpcd timeout chain)
+//   modem_reattach / modem_detach / modem_attach
+//                                             network-level detach/attach,
+//                                             the PDN sessions stopped first
 // o = { log, check_modem, reg_plmn } — the daemon's modem-ref resolver and
 // protocol-neutral registered-PLMN helper stay owned by daemon.uc.
 
 'use strict';
 
+import * as uloop from 'uloop';
 import * as quirks from 'wwand.modem_quirks';
 import * as atcmd from 'wwand.atcmd';
 import * as nasmod from 'wwand.codec.schema.nas';
 import * as modem_common from 'wwand.modem_common';
+import * as context_common from 'wwand.context_common';
 
 // AT+COPS timeouts (netsel AT fallback): the format-set is instant, the read
 // can stall on a busy modem, and a manual COPS SET legitimately runs a full
@@ -30,6 +35,9 @@ import * as modem_common from 'wwand.modem_common';
 const COPS_FORMAT_TIMEOUT_MS = 5000;
 const COPS_READ_TIMEOUT_MS = 10000;
 const COPS_SET_TIMEOUT_MS = 30000;
+// how long a reattach/attach over AT waits for the registration to return
+// before it re-dials anyway (wait_registered)
+const REGISTER_WAIT_MS = 60000;
 
 export function install(self, o)
 {
@@ -522,13 +530,73 @@ export function install(self, o)
 		});
 	};
 
+	// REGISTERED AGAIN, NOT "COMMAND ACCEPTED". AT+COPS=0 and AT+CGATT=1 answer
+	// OK as soon as the modem has taken the request, before the network
+	// procedure is done (MeiG SLM770A: the dial right after COPS=0 failed in
+	// the search and the one after CGATT=1 with ERROR, HW-observed
+	// 2026-10-10). So the AT paths poll the registration — CEREG (LTE), then
+	// CGREG (2G/3G); stat 1 home, 5 roaming (TS 27.007 §10.1.22) — every
+	// 2 s for up to `ms`. cb(true) registered, cb(false) not within the
+	// time: the caller goes on either way and the daemon's retries cover it.
+	let arm_timer = o.timer ?? uloop.timer;
+	let now_ms = o.now_ms ?? (() => context_common.mono() * 1000);
+	let reg_ok = (res) => {
+		for (let l in (res?.lines ?? [])) {
+			let m = match(l, /\+C(E|G)REG:\s*[0-9]+,\s*([0-9]+)/);
+
+			if (m && (m[2] == '1' || m[2] == '5'))
+				return true;
+		}
+
+		return false;
+	};
+	let wait_registered = (at, ms, cb) => {
+		// an ABSOLUTE deadline: each round also waits up to 5 s per query, so
+		// counting only the 2 s pauses let "60 s" run to six minutes
+		let deadline = now_ms() + ms;
+		let poll;   // forward-declared (self-referencing arrow)
+
+		poll = () => at.send('AT+CEREG?', (e1, r1) => {
+			if (!e1 && reg_ok(r1))
+				return cb(true);
+
+			at.send('AT+CGREG?', (e2, r2) => {
+				if (!e2 && reg_ok(r2))
+					return cb(true);
+
+				let rest = deadline - now_ms();
+
+				if (rest <= 0)
+					return cb(false);
+
+				arm_timer(min(2000, rest), poll);
+			}, { timeout: 5000 });
+		}, { timeout: 5000 });
+
+		poll();
+	};
+
+	// the backend's own detach/attach (QMI DMS low_power -> online, MBIM radio
+	// off -> on), with the PDN sessions stopped first and handed back to the
+	// daemon afterwards (modem_common with_sessions_released says why). Shared
+	// with the daemon's radio cycle after an unanswered dial (daemon.uc, case
+	// 'error').
+	self.reattach_released = function(m, cb) {
+		m.with_sessions_released('reattach', (done) => m.reattach(done),
+			(err, res, released, failed) => cb(err, err ? null : {
+				...(res ?? {}),
+				contexts_released: length(released),
+				contexts_failed: failed,
+			}));
+	};
+
 	// force a network re-registration (deregister + re-attach) so automatic
 	// selection re-scans — the fix for a modem camped on a previously-selected
 	// PLMN (automatic only re-scans on a reselection trigger; this is it). NOT a
-	// modem reset and NOT a PDP-config teardown: the daemon re-activates the same
-	// context once the modem re-registers (data blips meanwhile).
-	//   - QMI: the backend's native reattach (DMS opmode low_power -> online, a
-	//     brief RF bounce — QMI has no pure COPS-2 detach).
+	// modem reset and NOT a PDP-config teardown: the connected sessions are
+	// stopped first (release_sessions above) and re-established afterwards.
+	//   - QMI/MBIM: the backend's native reattach (DMS opmode low_power ->
+	//     online / MBIM radio off -> on — QMI has no pure COPS-2 detach).
 	//   - else (NCM / AT modems): AT+COPS=2 (deregister) -> AT+COPS=0 (automatic),
 	//     which keeps the RF on (pure registration level).
 	self.modem_reattach = function(ref, cb) {
@@ -537,88 +605,229 @@ export function install(self, o)
 		if (!entry)
 			return;
 
-		if (entry.modem.reattach) {
-			log('notice', sprintf('modem %s: network reattach (backend)', ref));
-			return entry.modem.reattach(cb);
-		}
-
-		let at = entry.modem.at;
-
-		if (!at)
-			return cb({ error: 'unsupported_on_backend' });
+		let m = entry.modem;
 
 		// a bounce is already running — don't stack a second one (it would
 		// snapshot zero contexts, clear the flag mid-bounce and race the
 		// daemon's reconnect)
-		if (entry.modem._reattaching)
-			return cb(null, { ok: true, action: 'reattach', via: 'at',
+		if (m._reattaching)
+			return cb(null, { ok: true, action: 'reattach', via: m.reattach ? 'backend' : 'at',
 			                  contexts_bounced: 0, contexts_failed: [], busy: true });
 
-		// arm the guard NOW, before the two AT round trips: the daemon's
-		// 'down' handler must stay calm during the whole deregister window
-		// (the flag also blocks a second reattach invocation)
-		entry.modem._reattaching = true;
+		if (m.reattach) {
+			log('notice', sprintf('modem %s: network reattach (backend)', ref));
+			return self.reattach_released(m, cb);
+		}
+
+		let at = m.at;
+
+		if (!at)
+			return cb({ error: 'unsupported_on_backend' });
 
 		log('notice', sprintf('modem %s: network reattach (AT COPS deregister -> automatic)', ref));
 
-		// tolerate a deregister error (already deregistered) — always re-attach
-		at.send('AT+COPS=2', () => {
-			at.send('AT+COPS=0', (aerr) => {
-				if (aerr) {
-					entry.modem._reattaching = false;
-					return cb({ error: 'at', detail: aerr });
-				}
+		// sessions stopped first, NOT handed back to the daemon: they are
+		// re-dialled right here once the modem has registered again
+		// (wait_registered — COPS=0 itself answers before that). The T700
+		// needs the re-dial in any case — its data path does not survive the
+		// deregister/attach cycle (CGACT stays 1 while the network bearer is
+		// gone, field-verified).
+		m.with_sessions_released('reattach', (done) => {
+			// tolerate a deregister error (already deregistered) — always re-attach
+			at.send('AT+COPS=2', () => {
+				at.send('AT+COPS=0', (aerr) => {
+					if (aerr)
+						return done({ error: 'at', detail: aerr });
 
-				// the T700's data path does NOT survive the deregister/attach
-				// cycle (CGACT stays 1 while the network bearer is gone —
-				// field-verified): bounce every connected context so the PDP
-				// re-establishes; the re-registration + settings refresh run
-				// on their own. QMI/MBIM keep their native reattach.
-				// The modem-level flag stops the daemon's own 'down' handler
-				// from racing the bounce with enter_reconnecting.
-				// snapshot once: a bounced context is CONNECTED again when its
-				// up() returns — rescanning would loop it forever
-				let todo = [];
-
-				for (let c in (entry.modem.contexts ?? []))
-					if (c.state == 'CONNECTED')
-						push(todo, c);
-
-				let bounced = 0;
-				let failed = [];
-				let next_ctx;   // forward-declared (self-referencing arrow)
-
-				next_ctx = () => {
-					if (!length(todo)) {
-						entry.modem._reattaching = false;
-
-						return cb(null, { ok: true, action: 'reattach', via: 'at',
-						                  contexts_bounced: bounced,
-						                  contexts_failed: failed });
-					}
-
-					let c = shift(todo);
-
-					c.down((de) => {
-						if (de) {
-							push(failed, { context: c.name ?? '?', step: 'down' });
-
-							return next_ctx();
-						}
-
-						bounced++;   // count only successful downs
-						c.up((ue) => {
-							if (ue)
-								push(failed, { context: c.name ?? '?', step: 'up' });
-
-							next_ctx();
-						});
+					wait_registered(at, REGISTER_WAIT_MS, (reg) => {
+						if (!reg)
+							log('warn', sprintf('modem %s: not registered %d s after the reattach — re-dialling anyway',
+								ref, REGISTER_WAIT_MS / 1000));
+						done(null);
 					});
-				};
-
-				next_ctx();
+				}, { timeout: COPS_SET_TIMEOUT_MS });
 			}, { timeout: COPS_SET_TIMEOUT_MS });
+		}, (err, res, released, failed) => {
+			if (err) {
+				// not registered: the daemon's reconnect waits for it
+				for (let name, e in (self.contexts ?? {}))
+					if (e?.wanted && index(released, e.ctx) >= 0)
+						self._enter_reconnecting?.(name);
+
+				return cb(err);
+			}
+
+			let todo = [ ...released ];
+			let next_ctx;   // forward-declared (self-referencing arrow)
+
+			next_ctx = () => {
+				if (!length(todo))
+					return cb(null, { ok: true, action: 'reattach', via: 'at',
+					                  contexts_bounced: length(released),
+					                  contexts_failed: failed });
+
+				let c = shift(todo);
+
+				c.up((ue) => {
+					if (ue)
+						push(failed, { context: c.name ?? '?', step: 'up' });
+
+					next_ctx();
+				});
+			};
+
+			next_ctx();
+		}, false);
+	};
+
+	// the PS attach/detach a modem offers: its backend's own (QMI NAS Attach
+	// Detach, MBIM PACKET_SERVICE), else AT+CGATT on its AT channel (NCM).
+	// null when it has neither.
+	let ps_attach_of = (m) => {
+		if (type(m.ps_attach) == 'function')
+			return m.ps_attach;
+
+		if (!m.at)
+			return null;
+
+		// an attach is answered once the modem is registered again
+		// (wait_registered), a detach at once
+		return (on, cb) => m.at.send(on ? 'AT+CGATT=1' : 'AT+CGATT=0', (err) => {
+			if (err)
+				return cb({ error: 'at', detail: err });
+
+			if (!on)
+				return cb(null, { ok: true, via: 'at' });
+
+			wait_registered(m.at, REGISTER_WAIT_MS, (reg) =>
+				cb(null, { ok: true, via: 'at', registered: reg }));
 		}, { timeout: COPS_SET_TIMEOUT_MS });
+	};
+
+	// hand a modem's wanted, idle contexts to the daemon's reconnect, which
+	// waits for READY and gives up after the hold
+	let reconnect_modem = (m) => {
+		for (let name, e in (self.contexts ?? {}))
+			if (e?.wanted && e.ctx?.modem == m && e.ctx.state == 'IDLE')
+				self._enter_reconnecting?.(name);
+	};
+
+	// Operator detach (ubus modem_detach): the PDN sessions end first (down
+	// reason 'admin' — the operator ended them), then the PS detach, radio on.
+	// The modem STAYS detached until modem_attach: `detached` makes the lost
+	// registration the expected consequence, as a parked radio's is (modem.uc
+	// _update_serving and its MBIM/NCM twins), and keeps the daemon from
+	// redialling (reconnect.uc retry_activate, daemon context_up). It lives on
+	// the modem object. A modem reset or re-enumeration ends it together with
+	// the PS detach — the modem attaches on its own, as after any start. A
+	// daemon restart forgets only the MARK: the modem stays PS-detached (the
+	// QMI init sends no attach; MBIM's step_attach does), so attach before
+	// restarting wwand.
+	self.modem_detach = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		let m = entry.modem;
+		let ps = ps_attach_of(m);
+
+		if (!ps)
+			return cb({ error: 'unsupported_on_backend' });
+
+		if (m._reattaching)
+			return cb({ error: 'busy', detail: 'a radio cycle, reattach, detach or attach is running' });
+
+		log('notice', sprintf('modem %s: network detach (operator)', ref));
+
+		m.with_sessions_released('admin', (done) => {
+			// set BEFORE the detach: the registration loss it causes must
+			// already read as intended
+			m.detached = true;
+			ps(false, done);
+		}, (err, res, released, failed) => {
+			if (err) {
+				m.detached = false;
+				log('warn', sprintf('modem %s: detach failed: %J', ref, err));
+				reconnect_modem(m);
+				return cb(err);
+			}
+
+			// the interfaces go down in netifd — a detached modem carries no
+			// session, and an interface left up would hold stale addresses —
+			// as our own re-armable give-up, which modem_attach re-arms
+			for (let name, e in (self.contexts ?? {}))
+				if (e?.wanted && e.ctx?.modem == m)
+					self._give_up?.(name, 'modem detached by the operator');
+
+			cb(null, { ...(res ?? {}), action: 'detach',
+			           contexts_released: length(released), contexts_failed: failed });
+		}, false);
+	};
+
+	// Operator attach (ubus modem_attach): PS attach, then the interfaces the
+	// detach took down come back up. Not restricted to a modem wwand
+	// detached — attaching an attached modem is the modem's no-op.
+	self.modem_attach = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		let m = entry.modem;
+		let ps = ps_attach_of(m);
+
+		if (!ps)
+			return cb({ error: 'unsupported_on_backend' });
+
+		// one operation on the network state at a time: an attach overlapping a
+		// detach (still stopping its sessions) or a reattach would leave the
+		// network in whichever state the LAST modem command set
+		if (m._reattaching)
+			return cb({ error: 'busy', detail: 'a reattach, detach or attach is running' });
+
+		log('notice', sprintf('modem %s: network attach (operator)', ref));
+
+		// NOT detached from here on, before the command is answered: the
+		// registration can return before the answer does (separate messages on
+		// QMI and MBIM), and while `detached` stood the backend took it for
+		// the intended loss and announced nothing — the interfaces would then
+		// wait for an event that had already gone by
+		let was = !!m.detached;
+
+		m._reattaching = true;
+		m.detached = false;
+
+		ps(true, (err, res) => {
+			m._reattaching = false;
+
+			if (err) {
+				m.detached = was;
+				log('warn', sprintf('modem %s: attach failed: %J', ref, err));
+				return cb(err);
+			}
+
+			// the interfaces the detach gave up come back (daemon.uc
+			// rearm_giveups), the others still wanted reconnect — at once when
+			// the modem is registered (again, or all along: a BG96 on GSM keeps
+			// its CS registration through a PS detach and sends no event).
+			// NOT while the registration is still gone (`_reg_released`, set by
+			// the backends' registration-loss branch, cleared by the next
+			// registration): the attach answers before the modem has registered
+			// again, and a kick then dials into the search and is aborted
+			// (HW-observed on the RG650E, 2026-10-10). That registration is
+			// announced instead — through REGISTERING -> READY, or, with the
+			// modem still READY, by `_wake_pending` as for a woken parked radio
+			// — and `registered` re-arms them (daemon.uc modem_registered).
+			if (!m._reg_released) {
+				self.rearm_giveups?.(m);
+				reconnect_modem(m);
+			}
+			else
+				m._wake_pending = true;
+
+			cb(null, { ...(res ?? {}), action: 'attach' });
+		});
 	};
 
 	const SETTABLE_PREFS = {

@@ -401,7 +401,9 @@ export function create(opts)
 
 	};
 
-	self.down = function(cb) {
+	// `reason` lands in the 'down' event ('admin' when not given): 'reattach'
+	// is a stop the modem's detach follows (netsel_ops release_sessions)
+	self.down = function(cb, reason) {
 		let was = self.state;
 		let held = activated;
 
@@ -420,7 +422,7 @@ export function create(opts)
 
 		deactivate((err) => {
 			log('notice', sprintf('session %d deactivated', self.session_id));
-			emit('down', { reason: 'admin' });
+			emit('down', { reason: reason ?? 'admin' });
 
 			if (cb)
 				cb(null);

@@ -1335,6 +1335,48 @@ both directions); 0x00AC answers "nothing delegated" (INTERNAL) on the RG650E
 beta). **A prefix actually delegated end to end has not been seen yet** — open
 whether that APN delegates, or the modem asks only in router mode.
 
+## A reattach stops the PDNs before it detaches; operator detach/attach (2026-10-10)
+
+`modem_reattach` (ubus) and the recovery ladder's opmode-cycle rung took the
+radio off — QMI DMS low_power, MBIM radio off, NCM CFUN=0, or `AT+COPS=2` — with
+the data sessions still up. The network then tears the bearers down implicitly
+with the detach and the modem learns of it from the call-end that follows,
+while the daemon is already redialling into the radio-off window. Now
+`modem_common.scaffolding` `with_sessions_released` stops every CONNECTED
+context first (`ctx.down(cb, reason)`: STOP_NETWORK / MBIM deactivate /
+CGACT=0), holds the daemon's reconnect off (`_reattaching`, also honoured by
+`reconnect.uc retry_activate`), runs the cycle, and hands the stopped contexts
+back (`sessions_released` → daemon reconnect, which waits for READY). Used by
+`modem_reattach`, the daemon's radio cycle after an unanswered dial, and the
+ladder rung on all three backends. Suspected link to the "Insufficient
+resources" rejects after a reattach — not proven; re-check on HW.
+
+New: **`modem_detach` / `modem_attach`** (ubus, `wwandctl detach|attach`, LuCI
+modem list → Detach/Attach, status row "detached by the operator"). Detach =
+sessions end (reason `admin`), then PS detach with the radio on: QMI NAS Attach
+Detach 0x0023 (libqmi 1.38, action 2/1), MBIM PACKET_SERVICE set, AT+CGATT.
+The modem stays detached (`detached`, park semantics: no re-registration, no
+ladder, no redial, ifup refused `detached` → netifd DETACHED) until attach or
+a modem reset (a daemon restart forgets only the mark; a QMI modem stays
+PS-detached — attach first). AT attach/reattach wait for the registration
+(CEREG/CGREG poll, 60 s) before re-dialling: COPS=0 and CGATT=1 answer
+before it (MeiG SLM770A). HW-tested 2026-10-10: 245 (RG650E, QMI), 242
+(QMI), 192.168.1.1 (Zyxel LTE3301, BG96 QMI on GSM — registration kept, the
+attach re-arms at once), 3.113 (Cudy LT300, MeiG, AT/NCM). Not tested: MBIM
+(246 offline), 3.93 (modem not registering — reattach/detach/attach ran with
+no session).
+
+Seen on the Cudy LT300 (MeiG SLM770A, AT/NCM) and NOT new — the previous
+main does the same, 3 of 3 runs: after an AT reattach (COPS=2/0) the dial
+`AT+ECMDUP=1,1,1` answers ERROR although CEREG says registered, until the
+network has re-established the default bearer by itself (then "cid 1 already
+connected, adopting"), sometimes only after the ladder's radio cycle at attempt
+8 (2026-10-10). Open: whether ECMDUP needs the bearer the MeiG brings up on
+its own, i.e. adopt-first after a reattach on this modem.
+
+Still the old order: the init attach-profile radio cycle (no live session
+normally at that point).
+
 ## Known open
 
 - **DONE (2026-09-21) — `pdp_type` is configurable per SIM.** `wwand_sim` now

@@ -336,6 +336,14 @@ proto_wwand_setup() {
 				proto_notify_error "$interface" RADIO_HELD
 				sleep 60
 				;;
+			detached)
+				# the operator detached the modem from the network (ubus
+				# modem_detach / wwandctl detach). Not blocked: the interface
+				# waits in setup and the daemon brings it up after the attach
+				echo "detached from the network by the operator (wwandctl attach ends it)"
+				proto_notify_error "$interface" DETACHED
+				sleep 60
+				;;
 			modem_absent)
 				# the modem's control device is not present yet (after boot, a
 				# modem reboot or a power-cycle). Surface it distinctly so the

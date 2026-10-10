@@ -1257,6 +1257,9 @@ export function create(opts)
 
 		emit('serving_system', self.reg);
 
+		if (registered)
+			self._reg_released = false;
+
 		if (registered && self.state == 'REGISTERING') {
 			if (reg_timer) { reg_timer.cancel(); reg_timer = null; }
 			// woken from a park at init: this READY entry emits `registered`
@@ -1285,8 +1288,17 @@ export function create(opts)
 			// registration is the consequence, not a fault — step_register
 			// would fight the park (it switches the software radio on) and
 			// its timeout walk the recovery ladder. Same as modem.uc.
-			if (self.lowpower_parked) {
-				log('info', 'registration released (radio parked)');
+			if (self.lowpower_parked || self.detached) {
+				// ONCE per loss: a modem that is detached but keeps camping
+				// reports its serving system every few seconds, and each
+				// report re-logged this and re-suspended the contexts
+				// (HW-observed over QMI on the RG650E, 2026-10-10)
+				if (self._reg_released)
+					return;
+
+				self._reg_released = true;
+				log('info', self.detached ? 'registration released (detached by the operator)'
+				                          : 'registration released (radio parked)');
 				emit('deregistered', self.reg);
 				notify_contexts('suspend', self.reg);
 				return;
@@ -2300,6 +2312,25 @@ export function create(opts)
 		});
 	};
 
+	// PS attach (on) or detach over MBIM PACKET_SERVICE set, radio on — the
+	// same raw network action as modem.uc ps_attach; the session and
+	// registration handling around it is netsel_ops (modem_detach /
+	// modem_attach). The answer carries the resulting packet-service state.
+	self.ps_attach = function(on, cb) {
+		if (!self.mbim)
+			return cb({ error: 'unsupported_on_backend' });
+
+		self.mbim.command(bc, 'PACKET_SERVICE', 'set', {
+			packet_service_action: on ? bc.PACKET_SERVICE_ATTACH : bc.PACKET_SERVICE_DETACH,
+		}, (err, data) => {
+			if (err)
+				return cb({ error: 'mbim', detail: err });
+
+			self._update_packet_service(data);
+			cb(null, { ok: true, via: 'mbim', packet_service_state: data?.packet_service_state });
+		}, { no_recovery: true, timeout: 60000 });
+	};
+
 	// network reattach (ubus modem_reattach): detach/attach at registration
 	// level WITHOUT a full reset. Preference: passthrough DMS low_power ->
 	// online (identical to the HW-proven QMI path), else native RADIO_STATE
@@ -2636,7 +2667,7 @@ export function create(opts)
 			// — closing the HOST's MBIM session is not shown to reset the
 			// modem's embedded QMI client table, so every daemon reload leaked
 			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
-			// table has room for a handful. Same burst modem.uc:1562 does for
+			// table has room for a handful. Same burst modem.uc:1563 does for
 			// the native side, which the passthrough never had. ctl is NOT in this list: it is the
 			// implicit client (cid 0) and it is what carries RELEASE_CID for
 			// all the others, so it has to outlive them.

@@ -1580,6 +1580,16 @@ export function create(opts)
 
 		// mirror lifecycle events onto the bus for listeners
 		switch (event) {
+		case 'sessions_released':
+			// a radio cycle stopped these sessions before it detached and held
+			// our reconnect off meanwhile (modem_common with_sessions_released):
+			// hand them to the reconnect now, which waits for READY
+			for (let name, e in self.contexts)
+				if (e?.wanted && index(data?.contexts ?? [], e.ctx) >= 0 &&
+				    e.ctx.state == 'IDLE')
+					enter_reconnecting(name);
+			break;
+
 		case 'registered': {
 			// Registered while its card is lent to another modem: a modem
 			// re-initialised meanwhile (a reset, a re-enumeration) comes up
@@ -2257,8 +2267,12 @@ export function create(opts)
 
 		case 'error':
 			// failed activation climbs the recovery ladder — but not when the modem
-			// lost registration mid-attempt: no service isn't a fault the ladder fixes
-			if (ctx.modem.state == 'READY')
+			// lost registration mid-attempt: no service isn't a fault the ladder fixes.
+			// Nor a dial that failed because the operator is detaching the modem
+			// or a radio cycle runs (with_sessions_released): the modem still
+			// reads READY then, and the failure is the one asked for
+			// (HW-observed on the MeiG SLM770A, 2026-10-10).
+			if (ctx.modem.state == 'READY' && !ctx.modem.detached && !ctx.modem._reattaching)
 				ctx.modem.note_connect_failure();
 
 			// A START_NETWORK the modem never ANSWERS (a timeout, not a refusal)
@@ -2317,7 +2331,9 @@ export function create(opts)
 					m._reattaching = true;
 					cycling = true;
 					guard = uloop.timer(REATTACH_GUARD_MS, () => finish({ error: 'no answer from the radio cycle' }));
-					m.reattach((err) => finish(err));
+					// through netsel_ops: any other PDN this modem carries is
+					// stopped before the radio goes off, not cut by the detach
+					self.reattach_released(m, (err) => finish(err));
 				}
 			}
 			emit('wwand.context', { context: name, interface: entry?.cfg?.interface, event: event });
@@ -2343,8 +2359,9 @@ export function create(opts)
 			// Hold the interface up and reconnect in place. 'down/admin' from our
 			// own context_down already cleared `wanted` (no-op here); all other
 			// drops are transient → reconnect, bounded by the hold timer.
-			// A modem-level AT reattach (netsel_ops) bounces the contexts itself
-			// — don't race its bounce with enter_reconnecting.
+			// A modem-level reattach (netsel_ops) stops the sessions before
+			// it detaches and hands them back afterwards — a reconnect started
+			// here would dial into the detach.
 			if (entry?.wanted && !ctx?.modem?._reattaching)
 				enter_reconnecting(name);
 			break;
@@ -4019,6 +4036,13 @@ export function create(opts)
 
 		entry._held_logged = null;
 
+		// detached by the operator (netsel_ops modem_detach): an ifup does not
+		// attach — unlike a parked radio, which it wakes — because the detach
+		// was the operator's word on the whole modem and `modem_attach` is
+		// theirs to give. Refused with the reason; the shim retries slowly.
+		if (m?.modem?.detached)
+			return cb({ error: 'detached', detail: sprintf('modem %s is detached from the network (wwandctl attach)', entry.cfg.modem) });
+
 		if (m?.modem?.lowpower_parked && m.modem.set_opmode) {
 			log('notice', sprintf('modem %s: waking the parked radio for %s',
 				entry.cfg.modem, name));
@@ -4605,6 +4629,9 @@ export function create(opts)
 				// yet. Its interfaces fail with RADIO_HELD meanwhile, and the
 				// status pages say why in one place, whichever plugin it is.
 				radio_held: self.plugins_radio_hold?.(name) ?? null,
+				// detached from the network by the operator (modem_detach),
+				// until modem_attach; its interfaces fail with DETACHED
+				detached: !!entry.modem?.detached,
 				remote_sim: remote_sim_support(entry.protocol, entry.modem),
 				// ...and when that hold cannot be honoured: the radio is on
 				// although the line above says it is held (note_unholdable)
@@ -4780,6 +4807,27 @@ export function create(opts)
 	};
 
 	// settings / network-selection / operator-scan ubus ops — in netsel_ops.uc
+	// The interfaces of modem `m` that wwand gave up on (reconnect_on_register:
+	// an operator detach, reconnect.uc give_up) come back: re-armed and kicked
+	// in netifd, whose setup then dials through context_up. Called by
+	// netsel_ops modem_attach — an attach does not always cost a registration
+	// (a modem still registered on a CS domain stays registered), so waiting
+	// for the `registered` that re-arms them otherwise could wait forever.
+	self.rearm_giveups = function(m) {
+		for (let name, entry in self.contexts) {
+			if (entry.ctx?.modem != m || entry.wanted || !entry.reconnect_on_register ||
+			    entry.ctx.state != 'IDLE' || !entry.cfg.interface)
+				continue;
+
+			set_giveup(entry, false);
+			entry.wanted = true;
+			// the cleared autostart is our own down, not an operator's ifdown
+			mark_our_down(entry);
+			log('notice', sprintf('interface %s: modem attached, bringing it up', entry.cfg.interface));
+			deps.kick_interface?.(entry.cfg.interface);
+		}
+	};
+
 	netsel_ops.install(self, { log: log, check_modem: check_modem, reg_plmn: reg_plmn,
 	                           persist_bands: persist_bands });
 

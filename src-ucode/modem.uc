@@ -189,7 +189,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1586) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1587) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:671, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -543,20 +543,21 @@ export function create(opts)
 			let cyc_gen = self._gen;
 
 			log('warn', 'recovery: cycling operating mode');
-			opmode_ours('low_power', () => {
+			// the sessions end first (modem_common with_sessions_released)
+			self.with_sessions_released('reattach', (cycled) => opmode_ours('low_power', () => {
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:4118), and dropping it strands a ubus request.
+				// (daemon.uc:4120), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
 				settle_after(cyc_gen, () => {
 					online_unless_parked(() => {
-						settle_after(cyc_gen, () => done(action), () => done(action));
+						settle_after(cyc_gen, () => cycled(), () => cycled());
 					});
-				}, () => done(action));
-			});
+				}, () => cycled());
+			}), () => done(action));
 			return;
 
 		case 'modem_reset': {
@@ -650,6 +651,24 @@ export function create(opts)
 				});
 			}, cancelled);
 		});
+	};
+
+	// PS-domain attach (on) or detach, radio on (nas.uc ATTACH_DETACH). The
+	// raw network action only: stopping the sessions first and keeping the
+	// modem from undoing a detach on its own is netsel_ops (modem_detach /
+	// modem_attach). NO_EFFECT (26) is the
+	// modem already being in the asked state — a success, not a fault.
+	// Bounded at 60 s: the answer comes once the network procedure is done.
+	self.ps_attach = function(on, cb) {
+		if (!self.nas)
+			return cb({ error: 'unsupported_on_backend' });
+
+		self.nas.request('ATTACH_DETACH', { action: on ? nasmod.PS_ATTACH : nasmod.PS_DETACH }, (err) => {
+			if (err && !(err.error == 'qmi' && err.code == 26))
+				return cb({ error: 'qmi', detail: err });
+
+			cb(null, { ok: true, via: 'qmi', unchanged: !!err });
+		}, { no_recovery: true, timeout: 60000 });
 	};
 
 	// switch_protocol / protocol_switch_supported come from
@@ -1291,7 +1310,7 @@ export function create(opts)
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
-			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:418-421), so it
+			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:434-437), so it
 			// carries the same raw WCDMA Ec/Io and needs the same conversion —
 			// an indication landing between refreshes would otherwise flip the
 			// unit back under a consumer that just read the polled value
@@ -1458,6 +1477,8 @@ export function create(opts)
 		}
 
 		if (ss.registration == nasmod.REG_REGISTERED) {
+			self._reg_released = false;
+
 			if (self.state == 'REGISTERING') {
 				if (tm.reg) {
 					tm.reg.cancel();
@@ -1485,8 +1506,17 @@ export function create(opts)
 			// registration chain here would fight the parking, fail, and walk
 			// the recovery ladder into an op-mode cycle and a power-cycle — for
 			// a modem doing exactly what it was told.
-			if (self.lowpower_parked) {
-				log('info', 'registration released (radio parked)');
+			if (self.lowpower_parked || self.detached) {
+				// ONCE per loss: a modem that is detached but keeps camping
+				// reports its serving system every few seconds, and each
+				// report re-logged this and re-suspended the contexts
+				// (HW-observed on the RG650E, 2026-10-10)
+				if (self._reg_released)
+					return;
+
+				self._reg_released = true;
+				log('info', self.detached ? 'registration released (detached by the operator)'
+				                          : 'registration released (radio parked)');
 				emit('deregistered', self.reg);
 				notify_contexts('suspend', self.reg);
 				return;

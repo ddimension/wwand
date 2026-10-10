@@ -1971,8 +1971,14 @@ export function create(opts)
 					// ourselves, so losing registration is the consequence, not a
 					// fault — re-registering here would fight the parking and walk
 					// the recovery ladder. Same reasoning as modem.uc.
-					if (self.lowpower_parked) {
-						log('info', 'registration released (radio parked)');
+					if (self.lowpower_parked || self.detached) {
+						// once per loss — this poll repeats (modem.uc says why)
+						if (self._reg_released)
+							return;
+
+						self._reg_released = true;
+						log('info', self.detached ? 'registration released (detached by the operator)'
+						                          : 'registration released (radio parked)');
 						emit('deregistered', self.reg);
 						self.reg = { registration: 0 };
 						notify_contexts('suspend', self.reg);
@@ -1986,6 +1992,9 @@ export function create(opts)
 					step_register();
 					return;
 				}
+
+				if (r?.registered)
+					self._reg_released = false;
 
 				if (r?.registered && self._wake_pending) {
 					self._wake_pending = false;

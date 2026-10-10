@@ -89,6 +89,7 @@ export const REGISTER_STATE_DENIED = 6;
 
 // MbimPacketServiceAction / State
 export const PACKET_SERVICE_ATTACH = 0;
+export const PACKET_SERVICE_DETACH = 1;   // mbim-enums.h:691, libmbim 1.32
 export const PACKET_SERVICE_STATE_ATTACHED = 2;
 
 // MbimRadioSwitchState

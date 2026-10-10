@@ -4523,9 +4523,19 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	let ctx_ev = null, downs = 0, reattaches = 0, reattach_cb = null;
 	let the_ctx = null;
 	let fake = {
-		modem: { create: (o) => ({ id: o.id, state: 'READY', config: o.config,
-			start: () => null, stop: () => null, note_connect_failure: () => null,
-			reattach: (cb) => { reattaches++; reattach_cb = cb; } }) },
+		modem: { create: (o) => {
+			let m = { id: o.id, state: 'READY', config: o.config,
+				start: () => null, stop: () => null, note_connect_failure: () => null,
+				reattach: (cb) => { reattaches++; reattach_cb = cb; } };
+
+			// the flag handling of modem_common with_sessions_released, no
+			// sessions to stop (the one context failed its dial)
+			m.with_sessions_released = (reason, fn, cb) => {
+				m._reattaching = true;
+				fn((e, r) => { m._reattaching = false; cb(e, r, [], []); });
+			};
+			return m;
+		} },
 		context: { create: (o) => (ctx_ev = o.deps.on_event,
 			the_ctx = { state: 'CONNECTED', name: o.name, modem: o.modem,
 			            down: (cb) => { downs++; cb ? cb() : null; },

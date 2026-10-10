@@ -372,6 +372,18 @@ export function publish(conn, daemon, log)
 				daemon.modem_reattach(req.args.modem, ok_reply(reply))),
 		},
 
+		modem_detach: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_detach(req.args.modem, ok_reply(reply))),
+		},
+
+		modem_attach: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_attach(req.args.modem, ok_reply(reply))),
+		},
+
 		modem_cells: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => ok_sync(daemon.modem_cells(req.args.modem)),

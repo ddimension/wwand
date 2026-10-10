@@ -509,6 +509,34 @@ ncf_rc.action = 'retry';
 ncf_self.note_connect_failure();
 ok(true, 'ncf-light: tolerates a missing done callback');
 
+// the ladder's radio cycle (MBIM/NCM opmode_cycle handler) runs with the
+// sessions stopped first: a CONNECTED context goes down (reason 'reattach')
+// BEFORE the radio goes off, the daemon's reconnect is held off while it
+// runs, and the stopped context is handed back afterwards
+{
+	let seq = [];
+	let mk = (state, name) => {
+		let c = { state: state, name: name };
+		c.down = (cb, reason) => { push(seq, name + ':down:' + reason); c.state = 'IDLE'; cb(); };
+		return c;
+	};
+	let lm = { config: {}, contexts: [ mk('CONNECTED', 'a'), mk('IDLE', 'b') ] };
+
+	mc.scaffolding(lm, { deps: { on_event: (m, ev, d) =>
+		push(seq, ev + ':' + join(',', map(d?.contexts ?? [], (c) => c.name))) },
+		log: () => null, rec: null });
+	mc.note_connect_failure_light(lm, { on_attempt: () => 'opmode_cycle' }, {
+		opmode_cycle: (d) => { push(seq, sprintf('radio_cycle:held=%J', lm._reattaching)); d(); },
+	});
+
+	let act = null;
+	lm.note_connect_failure((a) => { act = a; });
+	eq(seq, [ 'a:down:reattach', 'radio_cycle:held=true', 'sessions_released:a' ],
+		'ncf-light: opmode_cycle stops the PDN first, cycles held, hands it back');
+	eq([ act, lm._reattaching ], [ 'opmode_cycle', false ],
+		'ncf-light: opmode_cycle answers with its action and clears the hold');
+}
+
 // --- make_fail: shared bring-up failure handler ------------------------------
 
 let mf_events = [];

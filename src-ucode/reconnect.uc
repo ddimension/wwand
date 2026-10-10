@@ -14,6 +14,7 @@
 //   _clear_reconnect     cancel retry/hold timers, reset the backoff counter
 //   _retry_activate      capped-backoff supervisor retry loop
 //   _enter_reconnecting  transient-loss reconnect bounded by the hold timer
+//   _give_up             our own re-armable down (hold expiry, operator detach)
 //   set_hold_max_ms / _hold_max_ms   live reconnect-hold ceiling (reload/status)
 // o = { log, timing, down_interface, mark_our_down } — modem/context state
 // stays on self. `mark_our_down` is the daemon's interface-keyed our-down
@@ -57,7 +58,7 @@ export function install(self, o)
 
 	// forward-declared: ucode closures capture only already-declared vars, and
 	// these self/mutually reference (the TDZ trap — see CLAUDE.md ucode gotchas)
-	let activate, clear_reconnect, retry_activate, enter_reconnecting;
+	let activate, clear_reconnect, retry_activate, enter_reconnecting, give_up;
 
 	// bring context `name` up; queues on pending_up until the modem is READY.
 	activate = (name, cb) => {
@@ -164,12 +165,25 @@ export function install(self, o)
 		if (modem.state != 'READY' || entry.ctx.state != 'IDLE')
 			return schedule();   // wait for recovery / an in-flight attempt
 
+		// a radio cycle or detach is running (modem_common
+		// with_sessions_released): the modem still reads READY until the
+		// registration goes, and a dial now lands in the radio-off window
+		if (modem._reattaching)
+			return schedule();
+
 		// Parked radio (`option lowpower`, a card lent to another modem): a
 		// dial cannot register, and every failed one counts toward the
 		// recovery ladder, whose cycles and resets end the park. Wait
 		// instead; the hold timer gives up cleanly, and the `registered` a
 		// woken modem reports re-arms the interface (modem_registered).
 		if (modem.lowpower_parked)
+			return schedule();
+
+		// detached by the operator (netsel_ops modem_detach): the same wait —
+		// a dial would fail on a detached modem and count toward the ladder,
+		// whose radio cycle would then undo the detach. modem_attach hands
+		// the interface back.
+		if (modem.detached)
 			return schedule();
 
 		// ...and a radio a plugin holds, parked or not. Not every held modem
@@ -196,6 +210,45 @@ export function install(self, o)
 		});
 	};
 
+	// Our own INVOLUNTARY give-up on an interface: down in netifd, but
+	// re-armable — the modem's next `registered` reconnects it
+	// (daemon.uc modem_registered), unlike an operator ifdown. Taken when the
+	// reconnect hold expires and when the operator detaches the modem
+	// (netsel_ops modem_detach), whose attach then registers again.
+	give_up = (name, why) => {
+		let entry = self.contexts[name];
+
+		if (!entry)
+			return;
+
+		log('warn', sprintf('interface %s: %s, downing %s', name, why, entry.cfg.interface));
+		clear_reconnect(name);
+
+		// clear `wanted` now (not only when context_down later fires) so a
+		// `registered` in the gap can't re-kick the interface we're tearing
+		// down. `_holdexpiry` marks this as an INVOLUNTARY give-up, not operator
+		// intent: context_down re-arms it so a later `registered` (service
+		// returned) reconnects — see modem_registered.
+		entry.wanted = false;
+		entry._holdexpiry = true;
+
+		// netifd's ubus `down` clears autostart, which the ready path
+		// reads as operator intent — mark it so our own down is not
+		// mistaken for an ifdown (see daemon.uc, modem_registered).
+		// STAMPED, because that marker is bounded: an unstamped one reads
+		// as infinitely old and would be ignored outright.
+		//
+		// Through the DAEMON, because the marker is keyed by interface
+		// there and no longer lives on this entry — writing the old fields
+		// here left the hold-expiry give-up, the very path that reaches
+		// this line and the one ddimension/wwand#35 took, unmarked for
+		// every reader.
+		mark_our_down(entry);
+
+		if (down_interface && entry.cfg.interface)
+			down_interface(entry.cfg.interface);
+	};
+
 	// transient loss: keep the interface up and reconnect in place; a hold timer
 	// bounds the blackhole and downs the interface if we never recover.
 	enter_reconnecting = (name) => {
@@ -207,35 +260,8 @@ export function install(self, o)
 		entry.hold_timer = uloop.timer(hold_max_ms, () => {
 			entry.hold_timer = null;
 
-			if (entry.ctx?.state != 'CONNECTED') {
-				log('warn', sprintf('interface %s: reconnect hold expired, downing %s',
-					name, entry.cfg.interface));
-				clear_reconnect(name);
-
-				// clear `wanted` now (not only when context_down later fires) so a
-				// `registered` in the gap can't re-kick the interface we're tearing
-				// down. `_holdexpiry` marks this as an INVOLUNTARY give-up (blackhole
-				// too long), not operator intent: context_down re-arms it so a later
-				// `registered` (service returned) reconnects — see modem_registered.
-				entry.wanted = false;
-				entry._holdexpiry = true;
-
-				// netifd's ubus `down` clears autostart, which the ready path
-				// reads as operator intent — mark it so our own down is not
-				// mistaken for an ifdown (see daemon.uc, modem_registered).
-				// STAMPED, because that marker is bounded: an unstamped one reads
-				// as infinitely old and would be ignored outright.
-				//
-				// Through the DAEMON, because the marker is keyed by interface
-				// there and no longer lives on this entry — writing the old fields
-				// here left the hold-expiry give-up, the very path that reaches
-				// this line and the one ddimension/wwand#35 took, unmarked for
-				// every reader.
-				mark_our_down(entry);
-
-				if (down_interface && entry.cfg.interface)
-					down_interface(entry.cfg.interface);
-			}
+			if (entry.ctx?.state != 'CONNECTED')
+				give_up(name, 'reconnect hold expired');
 		});
 
 		retry_activate(name);
@@ -245,4 +271,5 @@ export function install(self, o)
 	self._clear_reconnect = clear_reconnect;
 	self._retry_activate = retry_activate;
 	self._enter_reconnecting = enter_reconnecting;
+	self._give_up = give_up;
 };

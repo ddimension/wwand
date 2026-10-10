@@ -707,6 +707,62 @@ export function scaffolding(self, o)
 		emit('removed', {});
 	};
 
+	// THE PDNS END BEFORE THE ATTACH DOES. Anything that takes this modem off
+	// the network — a reattach's radio cycle, the ladder's opmode cycle, a
+	// detach — stops every CONNECTED session first (WDS STOP_NETWORK, MBIM
+	// deactivate, CGACT=0) and only then runs `fn(done)`. The other order
+	// leaves the network to drop the bearers implicitly with the detach, the
+	// modem to learn of it from the call-end that follows, and the daemon to
+	// redial into the radio-off window — each such dial fails, counts toward
+	// the recovery ladder and is one more call allocation on the modem.
+	//
+	// `_reattaching` holds the daemon's own reconnect off while it runs
+	// (daemon.uc on_context_event, case 'down'). `reason` is the stopped
+	// contexts' down reason ('reattach', or 'admin' for an operator's detach).
+	// With `handback` the stopped contexts are announced afterwards
+	// ('sessions_released' → the daemon's reconnect, which waits for READY);
+	// a detach passes false and leaves them to the attach's re-registration.
+	//
+	// cb(err, res, released, failed): fn's own result; `released` the contexts
+	// stopped, `failed` [{ context, step: 'down' }]. A snapshot taken once — a
+	// context back up meanwhile is not stopped again.
+	self.with_sessions_released = function(reason, fn, cb, handback) {
+		let todo = filter(self.contexts ?? [], (c) => c.state == 'CONNECTED');
+		let released = [], failed = [];
+		let next;   // forward-declared (self-referencing arrow)
+
+		self._reattaching = true;
+
+		next = () => {
+			if (length(todo)) {
+				let c = shift(todo);
+
+				return c.down((err) => {
+					if (err)
+						push(failed, { context: c.name ?? '?', step: 'down' });
+					else
+						push(released, c);
+
+					next();
+				}, reason);
+			}
+
+			if (length(released))
+				log('notice', sprintf('%d PDN session(s) stopped before the detach', length(released)));
+
+			fn((err, res) => {
+				self._reattaching = false;
+
+				if (handback !== false && length(released))
+					emit('sessions_released', { contexts: released });
+
+				cb?.(err, res, released, failed);
+			});
+		};
+
+		next();
+	};
+
 	return { emit: emit, notify_contexts: notify_contexts, sim_block: sim_block,
 	         enter_ready: enter_ready, resolve_active_sim: resolve_active_sim };
 };
@@ -730,7 +786,10 @@ export function note_connect_failure_light(self, rec, handlers)
 		else if (action == 'usb_repower')
 			rec.usb_repower();
 		else if (action == 'opmode_cycle' && handlers?.opmode_cycle)
-			return handlers.opmode_cycle(() => done(action));
+			// the sessions end before the radio goes off (with_sessions_released)
+			return self.with_sessions_released('reattach',
+				(cycled) => handlers.opmode_cycle(() => cycled()),
+				() => done(action));
 		else if (action == 'modem_reset' && handlers?.modem_reset)
 			return handlers.modem_reset(() => done(action));
 

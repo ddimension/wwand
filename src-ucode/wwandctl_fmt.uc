@@ -260,7 +260,7 @@ export function reg_text(m)
 // The cadence floor, and the reason for it. `modem_signal` keeps wwand's
 // adaptive fast-telemetry loop warm (daemon.uc calls modem.watch()); that loop
 // polls the modem at 1 Hz and decays 6 s after the last request
-// (modem_common.uc:794-795). One sample therefore costs ~6 s of 1 Hz modem
+// (modem_common.uc:853-854). One sample therefore costs ~6 s of 1 Hz modem
 // traffic, so the duty cycle is 6/interval: 10 % at 60 s, 20 % at 30 s, 60 % at
 // 10 s — and at 6 s or below the loop NEVER decays and the modem is polled
 // around the clock. A global `Interval 10` in collectd.conf would do exactly
@@ -449,7 +449,7 @@ export function collectd_lines(host, modem, sig, m, interval, cells)
 
 	// THE SENTINEL TYPE IS PER FIELD, not per struct. QMI decodes the LTE/WCDMA/
 	// GSM RSSI and the LTE RSRQ as i8 (sentinel -128) and rsrp/snr/ecio/
-	// nr5g_rsrq as i16 (sentinel -32768) — see codec/schema/nas.uc:108-112. A
+	// nr5g_rsrq as i16 (sentinel -32768) — see codec/schema/nas.uc:112-116. A
 	// blanket i16 test therefore lets an unavailable -128 through as a genuine
 	// -128 dBm reading, which is the exact failure this filter exists to
 	// prevent. (-128 is below any real RSSI floor, so the i8 test costs nothing

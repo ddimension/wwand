@@ -15,6 +15,7 @@ import * as fakefx from './lib/fakefx.uc';
 import * as config from 'wwand/config.uc';
 import * as daemon_mod from 'wwand/daemon.uc';
 import * as netsel_ops from 'wwand/netsel_ops.uc';
+import * as modem_common from 'wwand/modem_common.uc';
 
 uloop.init();
 
@@ -452,14 +453,25 @@ wait_ready = () => {
 	uloop.timer(5, wait_ready);
 };
 
+// a fake modem with the real modem_common.with_sessions_released on it;
+// `on_event` sees what the daemon would
+let with_release = (m, on_event) => {
+	m.config = m.config ?? {};
+	m.contexts = m.contexts ?? [];
+	modem_common.scaffolding(m, { deps: { on_event: (mm, ev, d) => on_event?.(ev, d) },
+	                              log: () => null, rec: null });
+	return m;
+};
+
 // --- AT-path reattach bounces connected contexts (T700 field finding) -------
 // A standalone netsel_ops install with a fake AT engine + fake contexts:
 // COPS deregister -> automatic, then every CONNECTED context is bounced
 // (down+up); IDLE contexts are left alone.
 {
 	let sent = [];
-	let at = { send: (cmd, cb) => { push(sent, cmd); cb(null); } };
 	let events = [];
+	let at = { send: (cmd, cb) => { push(sent, cmd); push(events, cmd);
+		cb(null, { lines: (cmd == 'AT+CEREG?') ? [ '+CEREG: 0,1' ] : [] }); } };
 	let mkctx = (state) => {
 		let c = { state: state };
 
@@ -467,7 +479,7 @@ wait_ready = () => {
 		c.up = (cb) => { push(events, c.state + ':up'); c.state = 'CONNECTED'; cb(); };
 		return c;
 	};
-	let entry = { modem: { at: at, contexts: [ mkctx('CONNECTED'), mkctx('IDLE') ], reattach: null } };
+	let entry = { modem: with_release({ at: at, contexts: [ mkctx('CONNECTED'), mkctx('IDLE') ], reattach: null }) };
 	let fake = {};
 
 	netsel_ops.install(fake, {
@@ -480,8 +492,8 @@ wait_ready = () => {
 		eq(err, null, 'at-reattach: no error');
 		ok(sent[0] == 'AT+COPS=2' && sent[1] == 'AT+COPS=0',
 			'at-reattach: COPS deregister -> automatic');
-		eq(events, [ 'CONNECTED:down', 'IDLE:up' ],
-			'at-reattach: only the connected context bounced');
+		eq(events, [ 'CONNECTED:down', 'AT+COPS=2', 'AT+COPS=0', 'AT+CEREG?', 'IDLE:up' ],
+			'at-reattach: stopped BEFORE the deregister, re-dialled only once registered again');
 		eq(res.contexts_bounced, 1, 'at-reattach: bounce count');
 		eq(length(res.contexts_failed ?? []), 0, 'at-reattach: no failed contexts');
 		eq(entry.modem._reattaching, false, 'at-reattach: reattaching flag cleared');
@@ -489,7 +501,8 @@ wait_ready = () => {
 		// error path: a failing up() is reported, not swallowed (the daemon's
 		// error machinery must not be the only place that notices)
 		let sent2 = [];
-		let at2 = { send: (cmd, cb) => { push(sent2, cmd); cb(null); } };
+		let at2 = { send: (cmd, cb) => { push(sent2, cmd);
+			cb(null, { lines: (cmd == 'AT+CEREG?') ? [ '+CEREG: 2,5' ] : [] }); } };
 		let mkctx2 = (state) => {
 			let c = { state: state, name: 'sim' };
 
@@ -497,7 +510,7 @@ wait_ready = () => {
 			c.up = (cb) => { c.state = 'CONNECTED'; cb({ error: 'at' }); };
 			return c;
 		};
-		let entry2 = { modem: { at: at2, contexts: [ mkctx2('CONNECTED') ], reattach: null } };
+		let entry2 = { modem: with_release({ at: at2, contexts: [ mkctx2('CONNECTED') ], reattach: null }) };
 		let fake2 = {};
 
 		netsel_ops.install(fake2, {
@@ -513,6 +526,181 @@ wait_ready = () => {
 			eq(entry2.modem._reattaching, false, 'at-reattach: flag cleared on failure too');
 		});
 	});
+}
+
+// --- backend reattach: PDNs stopped first, radio cycled, daemon reconnects --
+// The QMI/MBIM reattach takes the radio off. A live session under it is cut
+// by the detach instead of ended by its own stop, so the sessions go first;
+// the daemon's reconnect is held off for the whole cycle and gets the stopped
+// contexts back at the end (a direct up() would dial before re-registration).
+{
+	let events = [];
+	let mkctx = (state, name) => {
+		let c = { state: state, name: name };
+
+		c.down = (cb, reason) => { push(events, name + ':down:' + reason); c.state = 'IDLE'; cb(); };
+		c.up = (cb) => { push(events, name + ':up'); cb(); };
+		return c;
+	};
+	let live = mkctx('CONNECTED', 'a'), idle = mkctx('IDLE', 'b');
+	let m = with_release({ contexts: [ live, idle ] }, (ev, d) => push(events, ev + ':' + length(d.contexts)));
+	m.reattach = (cb) => {
+		push(events, sprintf('radio_cycle:flag=%J', m._reattaching));
+		cb(null, { ok: true, action: 'reattach', via: 'qmi' });
+	};
+	let entry = { modem: m };
+	let fake = {
+	};
+
+	netsel_ops.install(fake, {
+		log: () => null,
+		check_modem: (ref, cb) => (ref == 'm1') ? entry : (cb({ error: 'no_such_modem' }), null),
+		reg_plmn: () => null,
+	});
+
+	fake.modem_reattach('m1', (err, res) => {
+		eq(err, null, 'backend-reattach: no error');
+		eq(events, [ 'a:down:reattach', 'radio_cycle:flag=true', 'sessions_released:1' ],
+			'backend-reattach: stop the PDN, cycle the radio with the daemon held off, then hand it back');
+		eq(res.contexts_released, 1, 'backend-reattach: released count');
+		eq(res.via, 'qmi', 'backend-reattach: backend result passed through');
+		eq(m._reattaching, false, 'backend-reattach: flag cleared');
+	});
+
+	// a second request while one runs is answered busy, not stacked
+	m._reattaching = true;
+	fake.modem_reattach('m1', (err, res) =>
+		eq(res?.busy, true, 'backend-reattach: busy while one runs'));
+	m._reattaching = false;
+}
+
+// --- operator detach / attach ----------------------------------------------
+// detach: the PDN goes down with reason 'admin' BEFORE the PS detach, the
+// modem is marked detached first (the registration loss it causes must
+// already read as intended), and nothing is handed back. attach: PS attach,
+// the mark cleared, a lost registration re-announced, interfaces reconnect.
+{
+	let events = [];
+	let live = { state: 'CONNECTED', name: 'a' };
+	live.down = (cb, reason) => { push(events, 'a:down:' + reason); live.state = 'IDLE'; cb(); };
+	let m = with_release({ contexts: [ live ] }, (ev, d) => push(events, ev));
+	m.ps_attach = (on, cb) => {
+		push(events, sprintf('ps:%s:detached=%J', on ? 'attach' : 'detach', m.detached));
+		cb(null, { ok: true, via: 'qmi' });
+	};
+	live.modem = m;
+	let ctxs = { wan: { ctx: live, wanted: true } };
+	let fake = {
+		contexts: ctxs,
+		_enter_reconnecting: (name) => push(events, 'reconnect:' + name),
+		_give_up: (name, why) => { push(events, 'give_up:' + name); ctxs[name].wanted = false; },
+		rearm_giveups: (mm) => push(events, 'rearm'),
+	};
+
+	netsel_ops.install(fake, {
+		log: () => null,
+		check_modem: (ref, cb) => (ref == 'm1') ? { modem: m } : (cb({ error: 'no_such_modem' }), null),
+		reg_plmn: () => null,
+	});
+
+	fake.modem_detach('m1', (err, res) => {
+		eq(err, null, 'detach: no error');
+		eq(events, [ 'a:down:admin', 'ps:detach:detached=true', 'give_up:wan' ],
+			'detach: session ended (admin) first, then the PS detach, then the interface goes down');
+		eq([ m.detached, m._reattaching, res.contexts_released ], [ true, false, 1 ],
+			'detach: modem stays detached, hold cleared, one session stopped');
+	});
+
+	events = [];
+	fake.contexts.wan.wanted = false;   // as the detach's give-up left it
+	fake.modem_attach('m1', (err, res) => {
+		eq(err, null, 'attach: no error');
+		eq(events, [ 'ps:attach:detached=false', 'rearm' ],
+			'attach: PS attach, then the given-up interfaces are re-armed');
+		eq([ m.detached, res.action ], [ false, 'attach' ], 'attach: mark cleared');
+	});
+
+	// ...but not while the detach cost the registration: the attach answers
+	// before the modem registers again, and the `registered` re-arms instead
+	events = [];
+	m._reg_released = true;
+	m.detached = true;
+	fake.modem_attach('m1', (err) => {
+		eq(events, [ 'ps:attach:detached=false' ], 'attach after a lost registration: no kick into the search');
+		eq(m._wake_pending, true, 'attach after a lost registration: the return gets announced');
+	});
+	m._reg_released = false;
+	m._wake_pending = false;
+
+	// a failing detach leaves the modem attached and its interfaces reconnecting
+	events = [];
+	live.state = 'CONNECTED';
+	fake.contexts.wan.wanted = true;
+	m.ps_attach = (on, cb) => cb({ error: 'qmi', detail: { code: 3 } });
+	fake.modem_detach('m1', (err) => {
+		eq(err?.error, 'qmi', 'detach failure: reported');
+		eq([ m.detached, index(events, 'reconnect:wan') >= 0 ], [ false, true ],
+			'detach failure: not marked detached, the session is redialled');
+	});
+
+	// the attach clears `detached` BEFORE its answer (a registration that
+	// returns first must not read as the intended loss) and holds the modem
+	// busy meanwhile; a second operation is refused, not interleaved
+	let held = null;
+	m.ps_attach = (on, cb) => { held = cb; };
+	m.detached = true;
+	m._reg_released = false;
+	fake.modem_attach('m1', () => null);
+	eq([ m.detached, m._reattaching ], [ false, true ],
+		'attach: not detached while the answer is pending, and busy');
+	let busy = [];
+	fake.modem_attach('m1', (e) => push(busy, e?.error));
+	fake.modem_detach('m1', (e) => push(busy, e?.error));
+	fake.modem_reattach('m1', (e, r) => push(busy, r?.busy ? 'busy' : e?.error));
+	eq(busy, [ 'busy', 'busy', 'busy' ], 'attach: concurrent attach/detach/reattach refused');
+	held({ error: 'qmi', detail: { code: 3 } });
+	eq([ m.detached, m._reattaching ], [ true, false ],
+		'attach failure: the modem is detached again and no longer busy');
+
+	// NCM: no backend detach — AT+CGATT on the AT channel
+	let sent = [];
+	let nm = with_release({ contexts: [], at: { send: (c, cb) => { push(sent, c);
+		cb(null, { lines: (c == 'AT+CEREG?') ? [ '+CEREG: 0,1' ] : [] }); } } });
+	let fake2 = {};
+	netsel_ops.install(fake2, {
+		log: () => null,
+		check_modem: (ref, cb) => { return { modem: nm }; },
+		reg_plmn: () => null,
+	});
+	fake2.modem_detach('n', () => null);
+	fake2.modem_attach('n', () => null);
+	eq(sent, [ 'AT+CGATT=0', 'AT+CGATT=1', 'AT+CEREG?' ],
+		'detach/attach: AT fallback is CGATT, the attach answered once registered');
+}
+
+// --- wait_registered: an ABSOLUTE deadline --------------------------------
+// every poll round costs its query timeouts too; counting only the 2 s pauses
+// let the "60 s" wait run for minutes. A clock and timer the test drives: each
+// query "takes" 5 s, the modem never registers, the attach answers within the
+// bound with registered=false.
+{
+	let now = 0, queries = 0;
+	let nm = with_release({ contexts: [], at: { send: (c, cb) => {
+		if (c != 'AT+CGATT=1') { queries++; now += 5000; }
+		cb(null, { lines: [ '+CEREG: 0,2' ] });
+	} } });
+	let fake3 = {};
+	netsel_ops.install(fake3, {
+		log: () => null,
+		check_modem: (ref, cb) => { return { modem: nm }; },
+		reg_plmn: () => null,
+		timer: (ms, fn) => { now += ms; fn(); },
+		now_ms: () => now,
+	});
+	let got = null;
+	fake3.modem_attach('n', (e, r) => { got = r; });
+	ok(got != null && got.registered === false && now <= 60000 + 12000,
+		sprintf('wait_registered: gives up at the deadline (%d ms, %d queries)', now, queries));
 }
 
 wait_ready();

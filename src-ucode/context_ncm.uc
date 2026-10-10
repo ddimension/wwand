@@ -889,7 +889,9 @@ export function create(opts)
 		}, { timeout: 30000 });
 	};
 
-	self.down = function(cb) {
+	// `reason` lands in the 'down' event ('admin' when not given): 'reattach'
+	// is a stop the modem's detach follows (netsel_ops release_sessions)
+	self.down = function(cb, reason) {
 		let was = self.state;
 
 		stop_stats();
@@ -905,7 +907,7 @@ export function create(opts)
 
 		disconnect(() => {
 			log('notice', sprintf('cid %d disconnected', self.cid));
-			emit('down', { reason: 'admin' });
+			emit('down', { reason: reason ?? 'admin' });
 
 			if (cb)
 				cb(null);
