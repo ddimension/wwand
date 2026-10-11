@@ -111,6 +111,10 @@ export function create(opts)
 
 
 	let deps = opts.deps ?? {};
+	// IPv6-unavailable state lives on the daemon's per-interface entry
+	// (opts.v6state, carried via prev), NOT in `self`, so it SURVIVES the
+	// context rebuild a modem crash triggers. { refused?: bool, fails?: int }
+	let v6state = opts.v6state ?? {};
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: interface %s: %s\n', level, self.name, msg)));
 
 	// log an assigned family IP config at 'notice' only the FIRST time (at
@@ -176,7 +180,7 @@ export function create(opts)
 		if (pdp == 'ipv4' || pdp == 'ipv4v6')
 			push(fams, 4);
 
-		if (pdp == 'ipv6' || pdp == 'ipv4v6')
+		if ((pdp == 'ipv6' || pdp == 'ipv4v6') && !v6state.refused)
 			push(fams, 6);
 
 		return fams;
@@ -1115,6 +1119,20 @@ export function create(opts)
 						if (family == 4 || !got_any && idx >= length(fams))
 							return self._fail(err);
 
+						// Stop re-attempting IPv6 once it is clearly unavailable here. Some
+						// modem+carrier combos crash the modem's own data stack on EVERY
+						// refused-v6 teardown (qrtr node gone / device disappeared, HW-seen
+						// on Quectel RG520N-EB + Smartfren 510/09); the crash rebuilds this
+						// context, so ipv4v6 re-requesting v6 is an endless crash loop. Pin
+						// on the explicit "PDN IPv6 call disallowed" (reason 210) at once, or
+						// after a couple of failures of ANY reason (carriers differ). The
+						// state lives on the daemon entry (v6state), so it outlives the
+						// rebuild; a dual-stack carrier's v6 succeeds and resets it below, so
+						// it never pins; a SIM swap / reboot / ifdown-ifup re-probes v6.
+						if (family == 6 && (err?.verbose?.reason == 210 ||
+						    (v6state.fails = (v6state.fails ?? 0) + 1) >= 2))
+							v6state.refused = true;
+
 						let cdesc = callend.describe(err?.call_end_reason, err?.verbose, err?.ext_error);
 						log('warn', sprintf('ipv%d activation failed, continuing: %s%J', family,
 							cdesc?.text ? sprintf('%s (%s%s) ', cdesc.text,
@@ -1150,6 +1168,9 @@ export function create(opts)
 
 							return next();
 						}
+
+						if (family == 6)
+							v6state.fails = 0;   // a v6 that came up clears the strikes
 
 						next();
 					});

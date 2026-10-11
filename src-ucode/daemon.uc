@@ -3398,6 +3398,9 @@ export function create(opts)
 		             // entry can fail to exist across a reload, and then there
 		             // is nothing to carry it from.)
 		             _failed_at: prev?._failed_at,
+		             // IPv6-unavailable state (context.uc v6state) — carried so
+		             // it survives the modem-crash-driven context rebuild.
+		             v6state: prev?.v6state ?? {},
 		             // ...or, after a daemon restart, from the file
 		             reconnect_on_register: prev?.reconnect_on_register ?? restored };
 
@@ -3416,6 +3419,7 @@ export function create(opts)
 			name: name,
 			modem: mentry.modem,
 			config: cfg,
+			v6state: entry.v6state,
 			timing: opts?.ctx_timing,
 			deps: {
 				log: (level, msg) => log(level, sprintf('interface %s: %s', name, msg)),
