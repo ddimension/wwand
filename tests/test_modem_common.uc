@@ -1312,6 +1312,51 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 	ok(m.at != null, 'mute walk: a control engine is left behind');
 })();
 
+// --- a port that will not OPEN does not end the search either --------------
+// T99W175 in USB mode (ddimension/wwand#52): ttyUSB0 mute, ttyUSB1 listed in
+// sysfs but "No such file or directory" on open, AT on ttyUSB2. The open
+// failure used to jump straight to the MBIM pipe.
+(function () {
+	let opened = [];
+	let mk = (tty) => {
+		let t = { close: () => null, drain: () => null };
+
+		t.write = (d) => {
+			if (t.data_cb && match(d ?? '', /^AT\r?$/) && tty == '/dev/ttyUSB2')
+				t.data_cb("\r\nOK\r\n");
+
+			return true;
+		};
+
+		t.on_data = (cb) => { t.data_cb = cb; };
+		return t;
+	};
+	let fx = fake_fx('dead:beef', [ { ifn: 2, tty: 'ttyUSB0' },
+	                                { ifn: 3, tty: 'ttyUSB1' },
+	                                { ifn: 4, tty: 'ttyUSB2' } ]);
+	let m = { device: 'usb0', config: {}, info: {} };
+	let reached = false;
+
+	mc.open_at(m, {
+		at_opts: {
+			fx: fx,
+			open_transport: (tty) => { push(opened, tty); return (tty == '/dev/ttyUSB1') ? null : mk(tty); },
+			probe_timeout: 20,
+		},
+		log: (level, msg) => null,
+		set_drain_timer: () => null,
+		next: () => { reached = true; uloop.end(); },
+	});
+
+	uloop.timer(3000, () => uloop.end());
+	uloop.run();
+
+	ok(reached, 'unopenable walk: open_at completes');
+	eq(opened, [ '/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2' ],
+		'unopenable walk: the port that will not open is skipped, not the end');
+	eq(m.at_tty, '/dev/ttyUSB2', 'unopenable walk: settles on the port that answers');
+})();
+
 // --- normalise_qmi_signal: the not-available sentinels never reach the bus ----
 //
 // A modem fills every metric it is not measuring with the sentinel for that

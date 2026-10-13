@@ -1807,10 +1807,21 @@ open_at_tty = function(self, o, fxi, log, ch, tried)
 
 	if (!tr) {
 		// A port that will not open is as good as absent — another process may
-		// hold it, or it may have vanished between discovery and here. Try the
-		// MBIM pipe rather than giving up on AT entirely.
-		log('warn', sprintf('cannot open AT port %s', tty));
-		return open_at_over_mbim(self, o, fxi, log);
+		// hold it, or it may have vanished between discovery and here. It is
+		// skipped like a mute one and the search goes on: going straight to the
+		// MBIM pipe left a working tty further down untried — a T99W175 in USB
+		// mode offered ttyUSB0 (mute) and ttyUSB1 (would not open) and answered
+		// on ttyUSB2 (evidence: ddimension/wwand#52, 2026-10-11).
+		log('warn', sprintf('cannot open AT port %s — trying the next channel', tty));
+		push(tried, tty);
+
+		let nch = atcmd.find_at_channels(fxi, self.device, self.config.tty,
+		                                 o.base_override, tried);
+
+		if (nch.primary)
+			return open_at_tty(self, o, fxi, log, nch, tried);
+
+		return open_at_over_wdm(self, o, fxi, log, () => open_at_over_mbim(self, o, fxi, log));
 	}
 
 	// on_urc is LATE-BOUND on purpose: a backend may install or wrap its handler
