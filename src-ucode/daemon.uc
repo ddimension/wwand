@@ -1420,10 +1420,10 @@ export function create(opts)
 	//
 	//   - CONNECTED is sufficient but not necessary. An MBIM attempt aborted
 	//     while the modem was still answering sets `activated` from the late
-	//     reply (context_mbim.uc:344-348), so an IDLE context can be holding a
+	//     reply (context_mbim.uc:367-371), so an IDLE context can be holding a
 	//     session that only down() will tear down.
 	//   - ACTIVATING is not "no session yet" either: MBIM sets `activated`
-	//     before it queries the IP configuration (context_mbim.uc:359-360), NCM
+	//     before it queries the IP configuration (context_mbim.uc:382-383), NCM
 	//     before it reads its own (context_ncm.uc:742), and QMI can have
 	//     activated families while settings are still being fetched.
 	//

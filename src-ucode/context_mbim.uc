@@ -114,6 +114,7 @@ export function create(opts)
 	// captures stop_stats (ucode resolves lexical refs only for bindings
 	// already declared at definition time)
 	let start_stats, stop_stats, sample_stats, refresh_settings;
+	let refresh_refused = false;   // the modem refused the last settings refresh
 
 	// shared emit/set_state/fail_finish (context_common.ctx_scaffolding)
 	let sc = context_common.ctx_scaffolding(self, {
@@ -158,6 +159,8 @@ export function create(opts)
 
 
 	start_stats = () => {
+		// a new session starts a new run of refusals (apply_refresh)
+		refresh_refused = false;
 		rx_watch.reset();
 		self.connected_since = context_common.mono();
 		stats_timer = uloop.timer(0, sample_stats);   // first sample immediately
@@ -199,50 +202,81 @@ export function create(opts)
 				}
 			}
 
-			if (stats_timer)
-				stats_timer.set(stats_interval);
+			// after the statistics answer, not beside it, and the next tick
+			// only after the refresh answer: one request at a time on the
+			// control channel. Whether two in flight are what an RM520N
+			// refuses the refresh for is unproven (ddimension/wwand#51); in
+			// sequence the question does not arise.
+			refresh_settings(() => {
+				if (stats_timer)
+					stats_timer.set(stats_interval);
+			});
 		});
-
-		refresh_settings();
 	};
 
 	// live IP-settings refresh (QMI parity via context_monitor_qmi): re-query
 	// the assigned IP config on the stats tick and, if the network pushed a
 	// changed address/prefix/DNS/MTU, emit 'settings' so the daemon renews the
 	// interface in place. Cheap (one query per stats interval, default 60 s).
-	refresh_settings = () => {
-		if (self.state != 'CONNECTED' || !self.modem.mbim)
+	// what a refresh answer does to the settings; refresh_settings below
+	let apply_refresh = (err, cfg) => {
+		if (self.state != 'CONNECTED')
 			return;
+
+		// A REFRESH THE MODEM REFUSES IS NOT A BROKEN SESSION. An RM520N
+		// (MBIMEx 3.0) answered the query at connect and Failure (status 2)
+		// to every refresh after it, with traffic flowing throughout; fed to
+		// the recovery counter, each refusal and the next success drew a
+		// sawtooth in proto_errors (evidence: ddimension/wwand#51). The
+		// settings stay as they are; said once per run of refusals.
+		if (err) {
+			if (!refresh_refused)
+				log('info', sprintf('the modem refuses the IP settings refresh (%J) — keeping the current settings',
+					err));
+			refresh_refused = true;
+			return;
+		}
+
+		if (refresh_refused)
+			log('info', 'the modem answers the IP settings refresh again');
+		refresh_refused = false;
+
+		let next = build_settings(cfg);
+
+		if (!next.ipv4 && !next.ipv6)
+			return;   // transient empty read — keep the current settings
+
+		// A RE-RANDOMIZED IPv6 INTERFACE IDENTIFIER IS NOT A NEW ADDRESS.
+		// Some firmware hands back a different low 64 bits on every query
+		// while prefix/gateway/DNS stay put (RG502Q). The flat %J compare
+		// below read every one of those as a change and renewed the
+		// interface — every 60 s by default, long enough to break anything
+		// holding a v6 connection. The QMI monitor has guarded this since
+		// its keep_stable_v6; the comment at :193 claimed parity with it
+		// and there was none.
+		if (next.ipv6 && self.settings?.ipv6)
+			next.ipv6 = context_common.keep_stable_v6(self.settings.ipv6, next.ipv6);
+
+		if (sprintf('%J', next) == sprintf('%J', self.settings))
+			return;
+
+		log('debug', sprintf('session %d: network pushed new IP settings, renewing',
+			self.session_id));
+		self.settings = next;
+		emit('settings', self.settings);
+	};
+
+	refresh_settings = (done) => {
+		done ??= () => null;
+
+		if (self.state != 'CONNECTED' || !self.modem.mbim)
+			return done();
 
 		self.modem.command('IP_CONFIGURATION', 'query',
 			{ session_id: wire_session() }, (err, cfg) => {
-			if (err || self.state != 'CONNECTED')
-				return;
-
-			let next = build_settings(cfg);
-
-			if (!next.ipv4 && !next.ipv6)
-				return;   // transient empty read — keep the current settings
-
-			// A RE-RANDOMIZED IPv6 INTERFACE IDENTIFIER IS NOT A NEW ADDRESS.
-			// Some firmware hands back a different low 64 bits on every query
-			// while prefix/gateway/DNS stay put (RG502Q). The flat %J compare
-			// below read every one of those as a change and renewed the
-			// interface — every 60 s by default, long enough to break anything
-			// holding a v6 connection. The QMI monitor has guarded this since
-			// its keep_stable_v6; the comment at :193 claimed parity with it
-			// and there was none.
-			if (next.ipv6 && self.settings?.ipv6)
-				next.ipv6 = context_common.keep_stable_v6(self.settings.ipv6, next.ipv6);
-
-			if (sprintf('%J', next) == sprintf('%J', self.settings))
-				return;
-
-			log('debug', sprintf('session %d: network pushed new IP settings, renewing',
-				self.session_id));
-			self.settings = next;
-			emit('settings', self.settings);
-		});
+			apply_refresh(err, cfg);
+			done();
+		}, { no_recovery: true });
 	};
 
 	// EVERY CONNECT goes through here, in the form the modem agreed to speak.

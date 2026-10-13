@@ -200,9 +200,9 @@ export function create(opts)
 		// is the one backend where that has to be said. QMI builds only the
 		// requested family's clients (context.uc:172 wanted_families), so a
 		// v4-only context has no v6 client to report anything at all. MBIM
-		// sends the effective type as CONNECT's ip_type (context_mbim.uc:306)
+		// sends the effective type as CONNECT's ip_type (context_mbim.uc:329)
 		// and a conforming modem answers in kind — though its builder would
-		// take a v6 half if one came back anyway (context_mbim.uc:141), so that
+		// take a v6 half if one came back anyway (context_mbim.uc:142), so that
 		// is protocol trust rather than a structural guarantee. Codex review
 		// was right to narrow that claim, 2026-09-22.
 		// The AT path reads the context back instead, and a modem that carried

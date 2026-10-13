@@ -1377,6 +1377,22 @@ its own, i.e. adopt-first after a reattach on this modem.
 Still the old order: the init attach-profile radio cycle (no live session
 normally at that point).
 
+## Issue round 2026-10-13: AT port walk past an unopenable tty; MBIM settings refresh
+
+- **#52 (T99W175, USB mode):** the AT search ended at a tty that would not
+  open (`ttyUSB1`, "No such file or directory") and went straight to the
+  MBIM pipe, never trying `ttyUSB2`, where the modem answers. An unopenable
+  port is now skipped like a mute one (`modem_common.uc open_at_tty`); the
+  wdm/MBIM fallbacks follow only when no tty is left. Workaround on older
+  builds: `option tty '/dev/ttyUSB2'`.
+- **#51 (RM520N, MBIMEx 3.0):** `IP_CONFIGURATION` answered at connect,
+  Failure (status 2) to every periodic refresh, traffic fine — each refusal
+  counted as a protocol error and the next success reset it: a sawtooth in
+  collectd's proto_errors. The refresh is now `no_recovery`, logged once per
+  run of refusals, the settings kept, and sent after the statistics answer
+  instead of beside it (whether the overlap is what the modem refuses is
+  unproven — the order costs nothing).
+
 ## Known open
 
 - **DONE (2026-09-21) — `pdp_type` is configurable per SIM.** `wwand_sim` now
