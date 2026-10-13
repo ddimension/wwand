@@ -198,7 +198,7 @@ export function create(opts)
 
 		// AN IPv4 PDP HAS NO v6 HALF, whatever CGCONTRDP still remembers. This
 		// is the one backend where that has to be said. QMI builds only the
-		// requested family's clients (context.uc:172 wanted_families), so a
+		// requested family's clients (context.uc:173 wanted_families), so a
 		// v4-only context has no v6 client to report anything at all. MBIM
 		// sends the effective type as CONNECT's ip_type (context_mbim.uc:329)
 		// and a conforming modem answers in kind — though its builder would

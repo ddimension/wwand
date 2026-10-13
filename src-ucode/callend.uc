@@ -366,6 +366,18 @@ export const VERBOSE_TYPE_INTERNAL = 2;
 export const VERBOSE_TYPE_CM = 3;
 export const INTERNAL_PDP_IN_USE = 241;
 
+// The network's own "no IPv6 here" (libqmi 1.38, qmi-enums-wds.h): internal
+// 210 PDN_IPV6_CALL_DISALLOWED (:471) and 3GPP SM cause 50 IPV4_ONLY_ALLOWED
+// (:995). Typed on purpose — verbose reasons are scoped by type, and the
+// same number under another type means something else. A refusal, not a
+// fault: the operator's answer is `pdp_type ipv4`, which the context
+// suggests (context.uc) and never applies by itself — the config is theirs.
+export function ipv6_refused(verbose)
+{
+	return (verbose?.type == VERBOSE_TYPE_INTERNAL && verbose?.reason == 210) ||
+	       (verbose?.type == 6 && verbose?.reason == 50);
+};
+
 export function describe(reason, verbose, ext_error) {
 	if (verbose != null && verbose.type != null) {
 		let tname = TYPE_NAMES[sprintf('%d', verbose.type)] ?? sprintf('type %d', verbose.type);

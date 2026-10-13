@@ -187,6 +187,16 @@ an `apn` of its own (a PIN only, say) dials the interface's APN with the
 interface's login. Without `init_apn`, the same APN and login also go into the
 modem's LTE attach profile.
 
+**A network that refuses IPv6** on an `ipv4v6` connection — internal call-end
+210 "PDN IPv6 call disallowed" or 3GPP cause 50 "PDP type IPv4 only allowed"
+(QMI) — leaves the session on IPv4, and wwand logs once per context which
+option ends the request: `pdp_type 'ipv4'` on the interface, or in the
+`wwand_sim` section when only that card is affected. It does not change the
+setting by itself: the IP family is the operator's choice, and a SIM swap or a
+carrier that adds IPv6 later would otherwise inherit a decision made for this
+one. Set it when a modem misbehaves on the refusal (an RG520N-EB resets itself
+on the teardown of the refused IPv6 client, ddimension/wwand#53).
+
 How the sections relate (all in `/etc/config/network`):
 
 ```

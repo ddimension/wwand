@@ -176,7 +176,8 @@ function run_next()
 						config: s.cfg.config ?? {},
 						timing: s.cfg.ctx_timing,
 						deps: {
-							log: (level, msg) => null,
+							// `logs` in the scenario cfg collects the context's lines
+							log: (level, msg) => s.cfg.logs ? push(s.cfg.logs, sprintf('%s: %s', level, msg)) : null,
 							on_event: (c, ev, d) => push(ctx_events, { event: ev, data: d }),
 						},
 					});
@@ -670,6 +671,70 @@ scenario('v6-degrade', {
 		eq(settings.ipv4.addr, '10.11.12.13', 'v6d: v4 present');
 		eq(settings.ipv6, null, 'v6d: no v6 settings');
 		eq(ctx.state, 'CONNECTED', 'v6d: connected');
+		next();
+	});
+});
+
+// The network's typed "no IPv6" names the option that stops asking — once per
+// context, and never applied by itself: pdp_type is the operator's word
+// (ddimension/wwand#53). 3GPP 50 (type 6) is such a refusal; the same number
+// under another type (CM, type 3) is not.
+let hint_logs = [], cm_logs = [];
+let hints = (l) => length(filter(l, (x) =>
+	substr(x, 0, 8) == 'notice: ' && index(x, "set option pdp_type 'ipv4'") >= 0));
+
+scenario('v6-refused-hint', {
+	config: { apn: 'web', pdp_type: 'ipv4v6' },
+	logs: hint_logs,
+	handlers: {
+		START_NETWORK: (args, meta) => (meta.count % 2 == 0)
+			? { __error: 14, call_end_reason: 3, verbose_call_end: { type: 6, reason: 50 } }
+			: { pdh: 1111 },
+		GET_CURRENT_SETTINGS: V4_SETTINGS,
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'v6-hint: up on v4');
+		ctx.down(() => ctx.up((e2) => {
+			eq(e2, null, 'v6-hint: the reconnect comes up too');
+			eq(hints(hint_logs), 1, 'v6-hint: 3GPP 50 names pdp_type ipv4, once over two connects');
+			eq(ctx.config?.pdp_type ?? 'ipv4v6', 'ipv4v6', 'v6-hint: the config is not touched');
+			next();
+		}));
+	});
+});
+
+let int_logs = [];
+
+scenario('v6-refused-hint-internal', {
+	config: { apn: 'web', pdp_type: 'ipv4v6' },
+	logs: int_logs,
+	handlers: {
+		START_NETWORK: (args, meta) => (meta.count == 2)
+			? { __error: 14, call_end_reason: 3, verbose_call_end: { type: 2, reason: 210 } }
+			: { pdh: 1111 },
+		GET_CURRENT_SETTINGS: V4_SETTINGS,
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'v6-hint: up on v4 after internal 210');
+		eq(hints(int_logs), 1, 'v6-hint: internal 210 (PDN IPv6 call disallowed) names pdp_type ipv4');
+		next();
+	});
+});
+
+scenario('v6-refused-hint-typed', {
+	config: { apn: 'web', pdp_type: 'ipv4v6' },
+	logs: cm_logs,
+	handlers: {
+		START_NETWORK: (args, meta) => (meta.count == 2)
+			? { __error: 14, call_end_reason: 3, verbose_call_end: { type: 3, reason: 50 } }
+			: { pdh: 1111 },
+		GET_CURRENT_SETTINGS: V4_SETTINGS,
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up(() => {
+		eq(hints(cm_logs), 0, 'v6-hint: reason 50 of another type is not a refusal');
 		next();
 	});
 });

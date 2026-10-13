@@ -1392,6 +1392,10 @@ normally at that point).
   run of refusals, the settings kept, and sent after the statistics answer
   instead of beside it (whether the overlap is what the modem refuses is
   unproven — the order costs nothing).
+- **PR #53 (closed):** automatic IPv6 suppression after refusals declined —
+  `pdp_type` is the operator's; instead a typed refusal (internal 210, 3GPP
+  50; `callend.uc ipv6_refused`) logs once per context which option ends it
+  (`context.uc`, the v6 degrade branch).
 
 ## Known open
 
