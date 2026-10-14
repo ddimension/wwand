@@ -1864,6 +1864,33 @@ let mk_modem = (lines) => ({
 		'apdu_open: the probe note comes from the discovery only, not from a plain open');
 }
 
+// A discovery open is not a channel fault: on a plain SIM every backend
+// refuses the ISD-R, and those refusals must not reach the recovery ladder's
+// protocol-error counter (ddimension/wwand#51, RM520N: MBIM UICC SelectFailed
+// and QMI OPEN_LOGICAL_CHANNEL counted at every start). The backend choice
+// probes MBIM and QMI with no_recovery; the eUICC discovery's own open does
+// too, a real open does not.
+{
+	let mopts = [], qopts = [];
+	let m = {
+		mbim_uicc: { open: (aid, cb, o) => { push(mopts, o?.no_recovery ?? false); cb({ error: 'mbim', status: 2269315074 }, null); },
+		             close: (c, cb) => cb() },
+		uim: { request: (name, args, cb, o) => { push(qopts, o?.no_recovery ?? false); cb({ error: 'qmi', code: 1 }, null); } },
+		at: null,
+	};
+
+	sim.apdu_open(m, 1, sim.ISDR_AID, () => null);
+	eq([ mopts, qopts ], [ [ true ], [ true ] ],
+		'apdu backend choice: the MBIM and QMI ISD-R probes do not vote on the channel');
+
+	let m2 = { mbim_uicc: { open: (aid, cb, o) => { push(mopts, o?.no_recovery ?? false); cb({ error: 'mbim', status: 2 }, null); } },
+	           _apdu_be: 'mbim' };
+	mopts = [];
+	sim.card_euicc_info(m2, () => null);
+	sim.apdu_open(m2, 1, sim.ISDR_AID, () => null);
+	eq(mopts, [ true, false ], 'apdu_open: the eUICC discovery open is no_recovery, a real open is not');
+}
+
 sim.apdu_open(mk_modem([ '1' ]), 1, sim.ISDR_AID, (err, ch) => {
 	eq(err, null, 'apdu_open: bare session id accepted');
 	eq(ch?.channel, 1, 'apdu_open: channel parsed from the bare form');

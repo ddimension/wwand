@@ -1447,6 +1447,13 @@ function at_apdu_close(modem, channel, cb)
 // passthrough) -> AT CCHO/CGLA/CCHC. cb('mbim' | 'qmi' | 'at' | null)
 export const ISDR_AID = 'a0000005591010ffffffff8900000100';
 
+// A DISCOVERY OPEN IS NOT A CHANNEL FAULT. Opening the ISD-R is how the
+// transport and the eUICC are found, and on a plain SIM every backend refuses
+// it (MBIM UICC SelectFailed, QMI OPEN_LOGICAL_CHANNEL error). Counted toward
+// the recovery ladder's protocol-error ceiling, a card without an eUICC drew
+// errors at every start (evidence: ddimension/wwand#51, RM520N, 2026-10-14).
+const NOT_A_FAULT = { no_recovery: true };
+
 function apdu_backend(modem, slot, cb)
 {
 	backend.choose(modem, '_apdu_be', [
@@ -1462,7 +1469,7 @@ function apdu_backend(modem, slot, cb)
 					return ok(true);
 				}
 				ok(false);
-			});
+			}, NOT_A_FAULT);
 		} },
 		// QMI logical channel: probe with the ISD-R AID; NOT_SUPPORTED -> next.
 		// On an MBIM modem modem.uim is null until a UIM client is allocated over
@@ -1482,7 +1489,7 @@ function apdu_backend(modem, slot, cb)
 						return ok(true);
 					}
 					ok(false);
-				});
+				}, NOT_A_FAULT);
 			};
 
 			if (!modem.uim && modem._ensure_uim)
@@ -1612,7 +1619,8 @@ export function apdu_open(modem, slot, aid_hex, cb, opts)
 
 		if (be == 'mbim')
 			return modem.mbim_uicc.open(aid_hex, (err, d) =>
-				cb(err, d ? { channel: d.channel, select_response: d.select_response } : null));
+				cb(err, d ? { channel: d.channel, select_response: d.select_response } : null),
+				opts?.probe ? NOT_A_FAULT : null);
 
 		if (be == 'at')
 			return at_apdu_open(modem, aid_hex, cb, opts);
@@ -1628,7 +1636,7 @@ export function apdu_open(modem, slot, aid_hex, cb, opts)
 
 			cb(null, { channel: data.channel_id,
 			           select_response: arr_to_hex(data.select_response) });
-		});
+		}, opts?.probe ? NOT_A_FAULT : null);
 	});
 };
 

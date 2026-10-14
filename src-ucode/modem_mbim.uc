@@ -291,10 +291,10 @@ export function create(opts)
 		// native MS UICC Low Level Access transport for eSIM/APDU. sim.uc picks
 		// this duck-typed handle first (before the QMI passthrough and AT).
 		self.mbim_uicc = {
-			open:  (aid_hex, cb)           => mbim_backend.uicc_open_channel(self.mbim, aid_hex, (err, r) => {
+			open:  (aid_hex, cb, o)        => mbim_backend.uicc_open_channel(self.mbim, aid_hex, (err, r) => {
 				log('info', sprintf('native MBIM UICC open: %s', err ? sprintf('%J', err) : sprintf('channel %d', r?.channel)));
 				cb(err, r);
-			}),
+			}, o),
 			apdu:  (channel, apdu_hex, cb) => mbim_backend.uicc_apdu(self.mbim, channel, apdu_hex, cb),
 			close: (channel, cb)           => mbim_backend.uicc_close_channel(self.mbim, channel, cb),
 			reset: (cb)                    => mbim_backend.uicc_reset(self.mbim, cb),
@@ -2737,7 +2737,7 @@ export function create(opts)
 		// refuses every future retry, which is worse than whatever the callback
 		// was complaining about. The QMI teardown wraps its equivalent call for
 		// the same reason; NCM needs none, close_at() discards its queue without
-		// paying it (atcmd.uc:1073). Review follow-up, 2026-09-19.
+		// paying it (atcmd.uc:1080). Review follow-up, 2026-09-19.
 		drop_pt();
 		self._pt_failed = false;
 		self._pt_built = false;

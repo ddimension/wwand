@@ -149,7 +149,9 @@ export function make_at_engine(mc, vendor)
 
 // open a logical channel to `aid_hex` (ISD-R for eSIM). cb(err, { channel,
 // select_response }). `mc` is the MBIM session client (mbim_client.uc).
-export function uicc_open_channel(mc, aid_hex, cb)
+// `opts` goes to command_raw: `no_recovery` for a discovery open (sim.uc),
+// whose refusal is an answer about the card, not about the channel.
+export function uicc_open_channel(mc, aid_hex, cb, opts)
 {
 	let aid = hexmod.hex_to_bin(aid_hex);
 	// [ AppIdLength, AppIdOffset(=16), SelectP2Arg(0), ChannelGroup(1) ] + AppId
@@ -169,7 +171,7 @@ export function uicc_open_channel(mc, aid_hex, cb)
 		let sel = (roff && rlen && roff + rlen <= length(resp)) ? substr(resp, roff, rlen) : '';
 
 		cb(null, { channel: channel, select_response: hexmod.bin_to_hex(sel), status: status });
-	});
+	}, opts);
 };
 
 // transmit `apdu_hex` on `channel`. cb(err, response_hex) where the response
