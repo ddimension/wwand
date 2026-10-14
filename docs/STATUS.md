@@ -1392,6 +1392,11 @@ normally at that point).
   run of refusals, the settings kept, and sent after the statistics answer
   instead of beside it (whether the overlap is what the modem refuses is
   unproven — the order costs nothing).
+- **#51 follow-up:** the eUICC discovery on a plain SIM (MBIM UICC SelectFailed,
+  QMI OPEN_LOGICAL_CHANNEL) counted toward the protocol-error ceiling at every
+  start; the ISD-R discovery opens are `no_recovery` now (`sim.uc` NOT_A_FAULT).
+- **#52 follow-up:** T99W175 in USB mode (05c6:90d5) pinned in `atcmd.uc`
+  LOCAL_PORTS: if5 = AT (if0 DIAG, if4 has no bulk endpoints).
 - **PR #53 (closed):** automatic IPv6 suppression after refusals declined —
   `pdp_type` is the operator's; instead a typed refusal (internal 210, 3GPP
   50; `callend.uc ipv6_refused`) logs once per context which option ends it

@@ -1632,7 +1632,7 @@ export function create(opts)
 		//
 		// This sat one line BELOW close_at() while saying the same thing, which
 		// was only true of the client destroys. atcmd.close() happens to drop
-		// pending callbacks silently (atcmd.uc:1073-1080 — it clears `current`
+		// pending callbacks silently (atcmd.uc:1080-1087 — it clears `current`
 		// and the queue without calling anything), so nothing exploited the gap;
 		// but that is a property of the AT engine, not a guarantee this function
 		// should lean on.

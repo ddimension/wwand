@@ -1061,7 +1061,7 @@ export function at_retired(self, ...cmds)
 // condition (SIM not ready, no network) that says nothing about whether the
 // firmware knows the command, and a timeout means the port is wedged, not that
 // the command is unknown — retiring on either would silence telemetry that
-// works. atcmd already separates the three (atcmd.uc:823 vs :801 vs :749).
+// works. atcmd already separates the three (atcmd.uc:830 vs :801 vs :749).
 //
 // The memory is cleared with the AT channel (close_at), so a re-open after a
 // protocol switch or a re-enumeration asks again from scratch.

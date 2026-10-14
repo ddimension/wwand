@@ -79,6 +79,13 @@ const LOCAL_PORTS = {
 	// first-tty heuristic used to settle on. Only the role that was actually
 	// observed is pinned: if2/if3 are left untagged rather than guessed.
 	'2c7c:6005': { '4': 'at' },
+	// Foxconn T99W175 in USB mode (MBIM composition under Qualcomm's generic
+	// 05c6:90d5, bound to `option` by hand via new_id): if0 is DIAG (protocol
+	// 0x30) and mute on AT, if4 has no bulk endpoints so its ttyUSB never
+	// opens, if5 answers AT (lsusb -v and log from ddimension/wwand#52,
+	// 2026-10-13). Only the observed role is pinned; a device sharing the
+	// generic id with another layout still gets the probing walk.
+	'05c6:90d5': { '5': 'at' },
 };
 
 // model-specific init sequences (old proto_qmi_serial_init)
