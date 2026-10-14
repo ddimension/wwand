@@ -12,6 +12,7 @@ A **check** means the standard's text was read next to the code. *Basis* is what
 | <a id="r1"></a>R1 | 2026-09-29 | reference read next to the code (libqmi 1.38.0 WDA json/enums, linux 6.18.41 rmnet) | Claude (audit agent), findings verified and fixed by Claude | `wwand c5ea7d0` | `wwand de04662` |
 | <a id="r2"></a>R2 | 2026-09-29 | reference read next to the code (uhttpd 2026.06.16~7b1bec45, rpcd 2026.07.19~e37ed9d8, ucode 2026.07.09~b885dd0f, luci-base rpc.js 4b6dda1a); every LuCI call site and ACL | Claude (audit agent), findings verified and fixed by Claude | `wwand c5ea7d0, luci-app-wwand 5064320` | `wwand de04662, luci-app-wwand ff40b7c` |
 | <a id="r3"></a>R3 | 2026-10-01 | reference read next to the code (libqmi 1.38.0 data/qmi-service-loc.json) | Claude | `wwand fcab7f9` | `wwand v1.6.9` |
+| <a id="r4"></a>R4 | 2026-10-14 | standard read next to the code (Microsoft Learn "MB low level UICC access", MBIM_MS_UICC_OPEN_CHANNEL / CLOSE_CHANNEL / APDU _INFO; libmbim 1.32.0 data/mbim-service-ms-uicc-low-level-access.json; lpac 2.3.0 driver/apdu/mbim.c) | Claude, prompted by a Codex finding | `wwand f2bba19` | `wwand, commit "mbim: an MBIM success is not yet an open channel"` |
 
 ## Components
 
@@ -26,7 +27,7 @@ A **check** means the standard's text was read next to the code. *Basis* is what
 </tbody>
 <tbody>
 <tr><td rowspan="2"><b>MBIM codec and backend</b><br><code>src-ucode/codec/mbim.uc, codec/mbim_schema/*.uc, {mbim_backend,mbim_client,modem_mbim,context_mbim,telemetry_mbim}.uc</code></td><td rowspan="1">USB-IF MBIM 1.0</td><td rowspan="1">libmbim 1.32</td><td rowspan="1">message framing, OPEN/CLOSE, fragments, Basic Connect CIDs, status codes</td><td>tbd</td><td></td><td></td></tr>
-<tr><td rowspan="1">Microsoft MBIM extensions (MBIMEx v2/v3, MS Basic Connect Extensions, MS UICC Low Level Access, MS Voice Extensions NITZ)</td><td rowspan="1">libmbim 1.32</td><td rowspan="1">version exchange, registration/packet service v2/v3, base stations info, UICC APDU/open channel/reset, NITZ (voice extensions CID 10)</td><td>tbd</td><td></td><td></td></tr>
+<tr><td rowspan="1">Microsoft MBIM extensions (MBIMEx v2/v3, MS Basic Connect Extensions, MS UICC Low Level Access, MS Voice Extensions NITZ)</td><td rowspan="1">libmbim 1.32</td><td rowspan="1">version exchange, registration/packet service v2/v3, base stations info, UICC APDU/open channel/reset, NITZ (voice extensions CID 10)</td><td><a href="#r4">R4</a> 2026-10-14</td><td>MS UICC Low Level Access only: request layouts and the APDU status (SW1 low byte) match; OPEN_CHANNEL's in-band Status (SELECT SW1 SW2) and Channel 0 = failed were not evaluated, so a refused select under an MBIM success read as a channel (fixed; Status 0 with a channel tolerated, lpac never reads it)</td><td>MBIMEx v2/v3, base stations info and NITZ not checked against the Microsoft text yet; UICC open not HW-verified (no eUICC-capable MBIM modem)</td></tr>
 </tbody>
 <tbody>
 <tr><td rowspan="1"><b>QMI-over-MBIM passthrough</b><br><code>src-ucode/{qmi_over_mbim,atcmd_mbim}.uc, codec/mbim_schema/qmi_passthrough.uc</code></td><td rowspan="1">Qualcomm QMI service over MBIM (QMI passthrough UUID)</td><td rowspan="1">libmbim 1.32, libqmi 1.38.0 (qmi-device over MBIM)</td><td rowspan="1">QMI message CID, indications per service, no CTL SYNC</td><td>tbd</td><td></td><td></td></tr>

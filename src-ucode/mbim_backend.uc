@@ -170,6 +170,24 @@ export function uicc_open_channel(mc, aid_hex, cb, opts)
 		let roff    = struct.unpack('<I', substr(resp, 12, 4))[0];
 		let sel = (roff && rlen && roff + rlen <= length(resp)) ? substr(resp, roff, rlen) : '';
 
+		// AN MBIM SUCCESS IS NOT YET AN OPEN CHANNEL. Status is the SELECT's
+		// SW1 SW2 "in that byte order" (BYTE[2] — SW1 the low byte of the
+		// u32, as in the APDU answer), success being 90 00 or 91 XX, and
+		// "if Channel is 0, then the operation failed" (Microsoft, MB low
+		// level UICC access, MBIM_MS_UICC_OPEN_CHANNEL_INFO, checked
+		// 2026-10-14). A failed select was taken for a channel, and the eSIM
+		// layer then talked to channel 0 — the basic channel.
+		//
+		// Status 0 with a channel is let through: lpac 2.3.0 never reads this
+		// field (driver/apdu/mbim.c, the open path), so a firmware that leaves
+		// it empty has worked with the reference client and is not known to
+		// mean anything else.
+		let sw1 = status & 0xff, sw2 = (status >> 8) & 0xff;
+
+		if (!channel || (status != 0 && sw1 != 0x90 && sw1 != 0x91))
+			return cb({ error: 'uicc_select', channel: channel,
+			            sw: sprintf('%02X%02X', sw1, sw2) }, null);
+
 		cb(null, { channel: channel, select_response: hexmod.bin_to_hex(sel), status: status });
 	}, opts);
 };

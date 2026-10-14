@@ -919,8 +919,8 @@ function mkuicc(resp_for) {
 
 // OPEN_CHANNEL: request layout [len, offset=16, p2=0, group=1] + AppId
 let aid = 'a0000005591010ffffffff8900000100';   // ISD-R (16 bytes)
-// response [status=0, channel=3, respLen=3, respOff=16] + 3 select bytes
-let openc = mkuicc((cid, info) => p32(0) + p32(3) + p32(3) + p32(16) + h2b('6f5aa5'));
+// response [status=SW 90 00 (0x0090), channel=3, respLen=3, respOff=16] + 3 select bytes
+let openc = mkuicc((cid, info) => p32(0x0090) + p32(3) + p32(3) + p32(16) + h2b('6f5aa5'));
 backend.uicc_open_channel(openc, aid, (err, r) => {
 	ok(!err, 'uicc-open: no error');
 	eq(openc.last.cid, 2, 'uicc-open: CID 2');
@@ -928,6 +928,25 @@ backend.uicc_open_channel(openc, aid, (err, r) => {
 	eq(r.channel, 3, 'uicc-open: channel from response');
 	eq(r.select_response, '6f5aa5', 'uicc-open: select response bytes');
 });
+
+// The open's in-band status: SW1 SW2 of the SELECT (SW1 the low byte), success
+// 90 00 / 91 XX, and Channel 0 means failed (Microsoft MBIM_MS_UICC_OPEN_
+// CHANNEL_INFO). A select the card refused, under an MBIM success, must not
+// come back as a channel; status 0 with a channel (lpac never reads the field)
+// is let through.
+{
+	let res = [];
+	let try_open = (st, ch) => backend.uicc_open_channel(
+		mkuicc(() => p32(st) + p32(ch) + p32(0) + p32(16)), aid,
+		(err, r) => push(res, err ? sprintf('err %s', err.sw) : sprintf('ch %d', r.channel)));
+
+	try_open(0x826a, 2);   // SW 6A 82: application not found
+	try_open(0x0090, 0);   // 90 00 but channel 0
+	try_open(0x1091, 4);   // SW 91 10: proactive command pending, a success
+	try_open(0, 5);        // status not filled in
+	eq(res, [ 'err 6A82', 'err 9000', 'ch 4', 'ch 5' ],
+		'uicc-open: a refused select or channel 0 is an error, 90xx/91xx and an empty status are not');
+}
 
 // APDU: request [channel, secure=0, class=1, len, offset=20] + command; the
 // response status is the SW word (0x0090 == SW 90 00), appended as SW1 SW2.

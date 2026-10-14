@@ -42,6 +42,14 @@ by = "Claude"
 reviewed = "wwand fcab7f9"
 fixed = "wwand v1.6.9"
 
+[[reviews]]
+id = "R4"
+date = "2026-10-14"
+kind = "standard read next to the code (Microsoft Learn \"MB low level UICC access\", MBIM_MS_UICC_OPEN_CHANNEL / CLOSE_CHANNEL / APDU _INFO; libmbim 1.32.0 data/mbim-service-ms-uicc-low-level-access.json; lpac 2.3.0 driver/apdu/mbim.c)"
+by = "Claude, prompted by a Codex finding"
+reviewed = "wwand f2bba19"
+fixed = "wwand, commit \"mbim: an MBIM success is not yet an open channel\""
+
 [[component]]
 name = "QMI codec and service schemas"
 code = "src-ucode/codec/{qmux,tlv,hex}.uc, codec/schema/*.uc"
@@ -82,7 +90,9 @@ code = "src-ucode/codec/mbim.uc, codec/mbim_schema/*.uc, {mbim_backend,mbim_clie
   basis = "libmbim 1.32"
   sections = "version exchange, registration/packet service v2/v3, base stations info, UICC APDU/open channel/reset, NITZ (voice extensions CID 10)"
     [[component.standard.review]]
-    review = "tbd"
+    review = "R4"
+    result = "MS UICC Low Level Access only: request layouts and the APDU status (SW1 low byte) match; OPEN_CHANNEL's in-band Status (SELECT SW1 SW2) and Channel 0 = failed were not evaluated, so a refused select under an MBIM success read as a channel (fixed; Status 0 with a channel tolerated, lpac never reads it)"
+    open = "MBIMEx v2/v3, base stations info and NITZ not checked against the Microsoft text yet; UICC open not HW-verified (no eUICC-capable MBIM modem)"
 
 [[component]]
 name = "QMI-over-MBIM passthrough"
