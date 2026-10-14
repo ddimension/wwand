@@ -347,7 +347,16 @@ export function create(hub, hooks)
 				if (hooks?.on_error && !opts?.no_recovery)
 					hooks.on_error(self, 'mbim', what, msg.status);
 
-				return cb ? cb({ error: 'mbim', status: msg.status }, null) : null;
+				// `keep_info`: some failures still carry an answer — an MS UICC
+				// open that failed reports the card's SW1 SW2 in it (Microsoft,
+				// MBIM_MS_UICC_OPEN_CHANNEL_INFO). Opt-in, so the binary buffer
+				// never reaches an error object that is logged with %J.
+				let e = { error: 'mbim', status: msg.status };
+
+				if (opts?.keep_info)
+					e.info = msg.info;
+
+				return cb ? cb(e, null) : null;
 			}
 
 			if (hooks?.on_success)

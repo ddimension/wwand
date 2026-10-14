@@ -155,6 +155,20 @@ eq(inv.list()[0].iccid, '89882280000192155295', 'present cards are listed first'
 	mm.sim_block = { reason: 'sim_absent' };
 	for (let k, l in siminv.from_modem('m1', mm, null)) iv2.observe(k, l);
 	eq(iv2.find('8949020000184496711').present, false, 'no card: ...on MBIM and NCM too (sim_absent)');
+
+	// an eUICC whose profile was disabled (MBIM ready state 7): the modem
+	// still holds the old ICCID, but nothing on the card is in use any more
+	let iv3 = siminv.create({ now: () => t });
+
+	mm.state = 'READY';
+	mm.sim_block = null;
+	mm.info.iccid = '8949020000184496711';
+	for (let k, l in siminv.from_modem('m2', mm, null)) iv3.observe(k, l);
+	mm.state = 'SIM_BLOCKED';
+	mm.sim_block = { reason: 'no_esim_profile' };
+	for (let k, l in siminv.from_modem('m2', mm, null)) iv3.observe(k, l);
+	eq(iv3.find('8949020000184496711').active, false,
+		'no profile: the ICCID the modem still holds is not reported in use');
 }
 
 // a modem that went away takes its sources along

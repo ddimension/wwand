@@ -1775,13 +1775,28 @@ APN** — while the ES10 APDUs travel over wwand's channel (the daemon bridges
 lpac's stdio APDU protocol inline). AT-only modems download internally instead
 (Quectel `AT+QESIM`).
 
-The **APDU channel** is chosen per modem by `backend.choose`, in order:
-**QMI UIM logical channel** (native, or tunnelled over the QMI-over-MBIM
-passthrough) → **native MBIM MS UICC Low Level Access** (`OPEN_CHANNEL` /
-`APDU` / `CLOSE_CHANNEL`, so eSIM works on an MBIM modem even without an AT port)
-→ **AT** (`CCHO`/`CGLA`/`CCHC`, for firmwares that report the QMI channel as
-`NOT_SUPPORTED`). The same `_apdu_be` choice serves both the raw `modem_apdu`
-channel and the ES10c eSIM path.
+The **APDU channel** is chosen per modem by `backend.choose`, in order
+(`sim.uc apdu_backend`): **native MBIM MS UICC Low Level Access**
+(`OPEN_CHANNEL` / `APDU` / `CLOSE_CHANNEL`, so eSIM works on an MBIM modem even
+without an AT port) → **QMI UIM logical channel** (native, or tunnelled over the
+QMI-over-MBIM passthrough) → **AT** (`CCHO`/`CGLA`/`CCHC`, for firmwares that
+report the QMI channel as `NOT_SUPPORTED`). The same `_apdu_be` choice serves
+both the raw `modem_apdu` channel and the ES10c eSIM path. Discovering it opens
+the ISD-R; on a plain SIM every backend refuses that, which is an answer and not
+counted as a protocol error.
+
+On MBIM, an `OPEN_CHANNEL` is checked against what the Microsoft extension
+defines: `Channel 0` or a SELECT status other than `90 00` / `91 XX` is a
+failure, and a failed open names its cause (`select_failed`,
+`no_logical_channels`) with the card's SW1 SW2. wwand opens its channels in a
+channel group of its own (`0x7777`; lpac uses 1) and, before the first open of
+a modem run, closes everything left in that group — channels a crashed run
+left open would otherwise stay taken until the card resets. An eUICC that
+reports **no profile enabled** (MBIM ready state 7) stops the modem at the SIM
+step (`sim_block` reason `no_esim_profile`) instead of letting the recovery
+ladder reset it; once a profile is enabled the chain resumes on its own (the
+state is polled every 10 s, since that indication is not installed before
+registration).
 
 All operations go through `modem_esim { modem, op, slot?, … }` (`slot` defaults
 to 1):

@@ -291,10 +291,51 @@ export function create(opts)
 		// native MS UICC Low Level Access transport for eSIM/APDU. sim.uc picks
 		// this duck-typed handle first (before the QMI passthrough and AT).
 		self.mbim_uicc = {
-			open:  (aid_hex, cb, o)        => mbim_backend.uicc_open_channel(self.mbim, aid_hex, (err, r) => {
-				log('info', sprintf('native MBIM UICC open: %s', err ? sprintf('%J', err) : sprintf('channel %d', r?.channel)));
-				cb(err, r);
-			}, o),
+			open:  (aid_hex, cb, o)        => {
+				// `gone`: the session ended while this open waited for the sweep
+				let go = (gone) => (gone || !self.mbim) ? cb({ error: 'cancelled' }, null)
+					: mbim_backend.uicc_open_channel(self.mbim, aid_hex, (err, r) => {
+						log('info', sprintf('native MBIM UICC open: %s', err ? sprintf('%J', err) : sprintf('channel %d', r?.channel)));
+						cb(err, r);
+					}, o);
+
+				// once per modem object, before its first open: free what an
+				// earlier run left open in our channel group (mbim_backend.uc
+				// UICC_CHANNEL_GROUP says why the group is ours alone).
+				// Best-effort — a modem without the service refuses, and that
+				// refusal says nothing about the channel. Opens that arrive
+				// WHILE it runs wait for it: started beside it, their channel
+				// would be one of those it closes.
+				if (self._uicc_sweep == 'done')
+					return go();
+
+				push(self._uicc_waiting ??= [], go);
+
+				if (self._uicc_sweep == 'running')
+					return;
+
+				self._uicc_sweep = 'running';
+
+				let sgen = self._gen;
+
+				mbim_backend.uicc_close_group(self.mbim, (err) => {
+					// a teardown since: it already answered the waiters
+					if (self._gen != sgen)
+						return;
+
+					if (err)
+						log('debug', sprintf('MBIM UICC: closing leftover channels: %J', err));
+
+					self._uicc_sweep = 'done';
+
+					let waiting = self._uicc_waiting;
+
+					self._uicc_waiting = [];
+
+					for (let w in waiting)
+						w();
+				}, { no_recovery: true });
+			},
 			apdu:  (channel, apdu_hex, cb) => mbim_backend.uicc_apdu(self.mbim, channel, apdu_hex, cb),
 			close: (channel, cb)           => mbim_backend.uicc_close_channel(self.mbim, channel, cb),
 			reset: (cb)                    => mbim_backend.uicc_reset(self.mbim, cb),
@@ -710,7 +751,23 @@ export function create(opts)
 		// (HW-hit on a SIM-less RM520N-GL: the PIN query answers MBIM status
 		// 3 and the old path counted connection attempts.)
 		if (self._ready_state == bc.READY_STATE_SIM_NOT_INSERTED) {
+			self._card_wait = 'sim_absent';
 			sim_block({ reason: 'sim_absent' });
+			self._wait_for_card();
+			return;
+		}
+
+		// AN eUICC WITH NO PROFILE ENABLED cannot register on anything: the
+		// card answers, the PIN query says unlocked, and the chain went on to
+		// a registration that times out and climbs the recovery ladder —
+		// radio cycles and modem resets that cannot enable a profile. Stopped
+		// here like a missing card; enabling a profile (lpac, LuCI eSIM) makes
+		// the modem report `initialized`, and retry_sim resumes from this step.
+		if (self._ready_state == bc.READY_STATE_NO_ESIM_PROFILE) {
+			log('warn', 'the eUICC has no profile enabled — enable one (eSIM) to register');
+			self._card_wait = 'no_esim_profile';
+			sim_block({ reason: 'no_esim_profile' });
+			self._wait_for_card();
 			return;
 		}
 
@@ -769,7 +826,9 @@ export function create(opts)
 				// same terminal mapping when only the PIN query reveals it
 				if (self._ready_state == bc.READY_STATE_SIM_NOT_INSERTED ||
 				    err.status == bc.STATUS_SIM_NOT_INSERTED) {
+					self._card_wait = 'sim_absent';
 					sim_block({ reason: 'sim_absent' });
+					self._wait_for_card();
 					return;
 				}
 
@@ -995,6 +1054,21 @@ export function create(opts)
 				log('warn', 'sim removed');
 				emit('sim_removed', {});
 			}
+			// the profile was disabled under a running modem: stop here rather
+			// than let the lost registration walk the recovery ladder
+			else if (data.ready_state == bc.READY_STATE_NO_ESIM_PROFILE &&
+			         self.state != 'SIM_BLOCKED' && prev != null) {
+				log('warn', 'the eUICC has no profile enabled any more');
+				self._card_wait = 'no_esim_profile';
+				sim_block({ reason: 'no_esim_profile' });
+				self._wait_for_card();
+			}
+
+			// a card that stopped the chain is usable now (locked included:
+			// its PIN is the SIM step's to enter)
+			if (data.ready_state == bc.READY_STATE_INITIALIZED ||
+			    data.ready_state == bc.READY_STATE_DEVICE_LOCKED)
+				self.retry_sim?.();
 		});
 		// unsolicited per-session (de)activation — the network dropping a data
 		// context. Routed to the owning context by session id so it can tear the
@@ -2033,6 +2107,80 @@ export function create(opts)
 	// override — the old card's wwand_sim must not stick. Contexts pick the
 	// corrected override up on their next (re)dial via conn_cfg. (The LTE attach
 	// APN is programmed separately in step_attach_profile before registration.)
+	// Resume the init chain at the SIM step for a modem that stopped because
+	// there was no usable card — none inserted, or an eUICC with no profile
+	// enabled — and now the card reports `initialized` (or `device locked`,
+	// whose PIN the SIM step enters). The QMI twin is
+	// modem_init_qmi.uc retry_sim; same contract: true when it resumed. A
+	// PIN/PUK block stays terminal — a card turning up is not what it waits
+	// for. Called from the SUBSCRIBER_READY_STATUS indication and by
+	// simops card_changed.
+	// WAITING FOR THE CARD IS POLLED, not left to an indication. The
+	// SUBSCRIBER_READY_STATUS handler is installed only when the chain reaches
+	// registration (_install_indications), which a chain stopped at the SIM
+	// step never does, and an RM520N-GL's default indication set holds
+	// CONNECT and LTE_ATTACH_INFO only (see do_register) — so the "card is
+	// usable now" would go unheard and the modem stay stopped until a restart.
+	// One query per `card_wait` ms (default 10 s) while SIM_BLOCKED for want
+	// of a card, ending with this modem object.
+	let card_timer = null;
+
+	self._wait_for_card = function() {
+		if (card_timer)
+			return;
+
+		let gen = self._gen;
+		let tick;   // forward-declared (self-referencing arrow)
+
+		tick = () => {
+			card_timer = null;
+
+			if (self._gen != gen || !self.mbim || self.state != 'SIM_BLOCKED' || !self._card_wait)
+				return;
+
+			self.mbim.command(bc, 'SUBSCRIBER_READY_STATUS', 'query', {}, (err, d) => {
+				if (self._gen != gen || self.state != 'SIM_BLOCKED')
+					return;
+
+				// usable = unlocked, or locked and waiting for its PIN — the
+				// PIN handling is the SIM step's, so a card that needs one
+				// resumes into it rather than waiting here forever
+				if (!err && (d?.ready_state == bc.READY_STATE_INITIALIZED ||
+				             d?.ready_state == bc.READY_STATE_DEVICE_LOCKED)) {
+					self._ready_state = d.ready_state;
+
+					// the identity read at open belongs to the card as it was
+					// (no profile: no IMSI); take the one it reports now
+					if (d.subscriber_id != null && d.subscriber_id != '')
+						self.info.imsi = d.subscriber_id;
+					if (d.sim_iccid != null && d.sim_iccid != '')
+						self.info.iccid = d.sim_iccid;
+					self.active_sim = modem_common.match_sim_override(
+						self.config?.sims, self.info.iccid, self.info.imsi);
+
+					if (self.retry_sim())
+						return;
+				}
+
+				card_timer = uloop.timer(self.timing.card_wait ?? 10000, tick);
+			}, { no_recovery: true });
+		};
+
+		card_timer = uloop.timer(self.timing.card_wait ?? 10000, tick);
+	};
+
+	self.retry_sim = function() {
+		let why = self._card_wait;
+
+		if (self.state != 'SIM_BLOCKED' || (why != 'sim_absent' && why != 'no_esim_profile'))
+			return false;
+
+		log('notice', sprintf('the card is usable now (was: %s) — resuming from the SIM step', why));
+		self._card_wait = null;
+		step_sim();
+		return true;
+	};
+
 	self.reapply_sim = function(cb) {
 		let done = () => {
 			scaffold.resolve_active_sim(self.info.iccid, self.info.imsi);
@@ -2726,6 +2874,26 @@ export function create(opts)
 				t.cancel();
 
 		retry_timer = reg_timer = settle_timer = at_drain_timer = sim_poll_timer = null;
+
+		// the card-wait poll belongs to this session: left armed, the next
+		// session's _wait_for_card saw it "running" and started none of its
+		// own, and the stale tick then ended on the generation check — a
+		// modem stopped for good
+		if (card_timer)
+			card_timer.cancel();
+		card_timer = null;
+		self._card_wait = null;
+
+		// ...and so does the UICC sweep: a new client is a new chance to find
+		// leftovers, and opens still waiting on this client's sweep are over
+		let uw = self._uicc_waiting ?? [];
+
+		self._uicc_sweep = null;
+		self._uicc_waiting = [];
+
+		for (let w in uw)
+			w(true);
+
 		telem.stop();
 
 		modem_common.close_at(self);

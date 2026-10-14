@@ -1403,6 +1403,15 @@ normally at that point).
   first ones replacing the defaults). `recovery.uc steps_from` / per-instance
   RUNGS, `config.uc steps_opt` (refused with a warning, never half-applied),
   status ladder (`recovery.rungs(failreboot, steps)`), LuCI modem option.
+- **MS UICC text pass (2026-10-14):** MBIM ready state 7 "no eSIM profile
+  enabled" stops at the SIM step (`no_esim_profile`, no ladder) and resumes by a
+  10 s ready-state poll (the indication handler only exists after
+  registration — so `sim_absent` on MBIM now resumes on card insertion too);
+  OPEN_CHANNEL failures named with SW1 SW2 (`mbim_client` `keep_info`); own
+  channel group 0x7777, swept once per modem run before the first open.
+  Not HW-verified (no eUICC-capable MBIM modem). Noted, not changed: lpac
+  sends APDUs as class type Inter-Industry, wwand as Extended (ETSI 102 221,
+  which GP STORE DATA CLA 80 belongs to); TERMINAL_CAPABILITY unused.
 - **PR #53 (closed):** automatic IPv6 suppression after refusals declined —
   `pdp_type` is the operator's; instead a typed refusal (internal 210, 3GPP
   50; `callend.uc ipv6_refused`) logs once per context which option ends it

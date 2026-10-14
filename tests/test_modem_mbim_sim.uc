@@ -17,6 +17,8 @@
 //   C  genuinely wrong PIN (re-query shows a burned retry) -> terminal
 //      SIM_BLOCKED/verify_failed with the remaining count, exactly ONE ENTER.
 //   D  verify reply lost but effective (re-query says unlocked) -> proceeds.
+//   E  eUICC with no profile enabled (ready state 7) -> stops at the SIM step,
+//      resumes when the card reports initialized.
 
 'use strict';
 
@@ -34,7 +36,7 @@ const IMSI = '262011234567890';
 
 // scenarios chain via `next` callbacks — forward-declare (ucode: no access to
 // a lexical declaration before its statement ran)
-let scenario_a, scenario_b, scenario_c, scenario_d;
+let scenario_a, scenario_b, scenario_c, scenario_d, scenario_e, scenario_f;
 
 function base_handlers() {
 	return {
@@ -95,13 +97,14 @@ function scenario(name, o, next) {
 		id: name, device: '/dev/mock0',
 		config: o.config ?? {},
 		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5,
-		          at_drain: 1, card_poll: 1 },
+		          at_drain: 1, card_poll: 1, card_wait: 5 },
 		at: { fx: { read: () => null, glob: () => [] } },   // no AT tty in tests
 		deps: {
 			transport_open: mock.transport_open,
 			log: () => null,
 			on_event: (m, event, data) => {
 				push(events, { event: event, data: data });
+				o.on_event?.(m, mock, event, data);
 				if (event == o.until)
 					finish();
 			},
@@ -269,6 +272,82 @@ scenario_d = function() {
 			eq(count_events(events, 'registered'), 1, 'D: lost verify reply -> re-query sees unlocked, proceeds');
 			eq(count_events(events, 'sim_blocked'), 0, 'D: no sim_blocked');
 			eq(count_events(events, 'error'), 0, 'D: no retriable error needed');
+		},
+	}, scenario_e);
+};
+
+// --- E: an eUICC with no profile enabled (ready state 7) --------------------
+// It cannot register, so the chain must stop at the SIM step instead of
+// timing out into the recovery ladder; enabling a profile makes the card
+// report `initialized`, and the chain resumes from there to registered.
+scenario_e = function() {
+	let h = base_handlers();
+
+	let profile_on = false;
+
+	h.SUBSCRIBER_READY_STATUS = () => ({
+		ready_state: profile_on ? bc.READY_STATE_INITIALIZED : bc.READY_STATE_NO_ESIM_PROFILE,
+		subscriber_id: profile_on ? IMSI : '', sim_iccid: ICCID,
+		ready_info: 0, telephone_numbers_count: 0,
+	});
+
+	let pin_before = null;
+
+	scenario('m_noprofile', {
+		handlers: h,
+		until: 'registered',
+		on_event: (m, mock, event, data) => {
+			if (event != 'sim_blocked')
+				return;
+
+			pin_before = length(mock.calls_for('PIN'));
+			// a profile is enabled: from now on the card answers initialized —
+			// no indication, the waiting modem has to ask (see _wait_for_card)
+			profile_on = true;
+		},
+		done: (modem, mock, events) => {
+			let blocked = filter(events, (e) => e.event == 'sim_blocked')[0];
+			eq(blocked?.data?.reason, 'no_esim_profile', 'E: no profile enabled -> stopped as no_esim_profile');
+			eq(pin_before, 0, 'E: stopped before the PIN query and the registration');
+			eq(count_events(events, 'error'), 0, 'E: nothing reached the recovery ladder');
+			eq(count_events(events, 'registered'), 1, 'E: an enabled profile resumes the chain to registered');
+			eq(modem.info.imsi, IMSI, 'E: the IMSI the enabled profile brings is taken');
+		},
+	}, scenario_f);
+};
+
+// --- F: the profile enabled needs a PIN --------------------------------------
+// it reports DEVICE_LOCKED, not INITIALIZED; waiting only for the latter left
+// the modem stopped for good. It resumes into the SIM step, which enters the
+// configured PIN and goes on to registered.
+scenario_f = function() {
+	let h = base_handlers();
+	let profile_on = false, unlocked = false;
+
+	h.SUBSCRIBER_READY_STATUS = () => ({
+		ready_state: !profile_on ? bc.READY_STATE_NO_ESIM_PROFILE
+			: unlocked ? bc.READY_STATE_INITIALIZED : bc.READY_STATE_DEVICE_LOCKED,
+		subscriber_id: profile_on ? IMSI : '', sim_iccid: ICCID,
+		ready_info: 0, telephone_numbers_count: 0,
+	});
+	h.PIN = (args, meta) => {
+		if (meta.kind == 'set') {
+			unlocked = true;
+			return { pin_type: bc.PIN_TYPE_PIN1, pin_state: bc.PIN_STATE_UNLOCKED, remaining_attempts: 3 };
+		}
+		return { pin_type: bc.PIN_TYPE_PIN1,
+		         pin_state: unlocked ? bc.PIN_STATE_UNLOCKED : bc.PIN_STATE_LOCKED,
+		         remaining_attempts: 3 };
+	};
+
+	scenario('m_noprofile_pin', {
+		handlers: h,
+		until: 'registered',
+		config: { pincode: '1234' },
+		on_event: (m, mock, event) => { if (event == 'sim_blocked') profile_on = true; },
+		done: (modem, mock, events) => {
+			eq(count_events(events, 'registered'), 1, 'F: a locked profile resumes into the PIN step and registers');
+			eq(length(filter(mock.calls_for('PIN'), (c) => c.kind == 'set')), 1, 'F: the configured PIN entered once');
 		},
 	}, () => uloop.end());
 };
