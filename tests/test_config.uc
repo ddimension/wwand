@@ -44,6 +44,29 @@ eq(r.modems.m0.at_init, [ 'ATI' ], 'native: at_init list');
 eq(r.modems.m0.location, true, 'native: location bool');
 eq(r.modems.m0.gnss, true, 'native: location is an alias of gnss — GNSS has one switch');
 eq(r.modems.m0.failreboot, 100, 'native: failreboot default');
+
+// recovery_steps (ddimension/wwand#52): unset = the defaults (null), a partial
+// list replaces the first rungs, a list that does not rise is refused with a
+// warning instead of being half-applied
+{
+	let st = (v) => {
+		let c = config.parse({ network: {
+			m9: { '.type': 'wwand_modem', device: '/dev/cdc-wdm9', recovery_steps: v },
+		} });
+
+		return [ c.modems.m9.recovery_steps,
+		         length(filter(c.warnings ?? [], (w) => index(w, 'recovery_steps') >= 0)) ];
+	};
+
+	eq(r.modems.m0.recovery_steps, null, 'recovery_steps: unset = the defaults');
+	eq(st('2 6 12'), [ [ 2, 6, 12 ], 0 ], 'recovery_steps: three rising numbers');
+	eq(st('2'), [ [ 2, 16, 24 ], 0 ], 'recovery_steps: one number moves only the radio cycle');
+	eq(st('4,10'), [ [ 4, 10, 24 ], 0 ], 'recovery_steps: commas work as well');
+	eq(st('20'), [ null, 1 ], 'recovery_steps: past the next default rung is refused, said once');
+	eq(st('2 2 5'), [ null, 1 ], 'recovery_steps: not rising is refused');
+	eq(st('0'), [ null, 1 ], 'recovery_steps: 0 is not an attempt count');
+	eq(st('two'), [ null, 1 ], 'recovery_steps: a typo is refused');
+}
 eq(r.modems.m0.serial, '99efe861', 'native: modem serial anchor');
 eq(r.modems.m0.imei, '350000000000000', 'native: modem imei anchor');
 eq(r.modems.m0.repower_time, 10, 'native: repower_time parsed (seconds)');

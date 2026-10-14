@@ -549,6 +549,10 @@ config wwand_modem 'm0'
 	option stats_interval '60'       # telemetry period in seconds (0 = off)
 	option delay '0'                 # seconds to wait before the first init
 	option failreboot '100'          # attempts before the final reboot rung (0 = never reboot)
+	option recovery_steps '8 16 24'  # attempts at which the ladder cycles the radio, resets the
+	                                 #   modem, pulses the reset line / repowers. 1-3 rising
+	                                 #   whole numbers; the first ones replace the defaults in
+	                                 #   order ('2' = radio cycle at 2, the rest unchanged)
 	option unarmed_reset_after '300' # s: pulse THIS modem's reset_gpio once if it never answered (0 = never)
 	option card_hold '2100'          # s: after the card's own IPA (SGP.32 IPAe) changed the
 	                                 #    subscription, no modem reset / power-cycle / reboot
@@ -1905,8 +1909,15 @@ built-in profile.
 
 The recovery ladder escalates on consecutive failed connection attempts:
 op-mode cycle (8) → modem reset (16) → board repower / reset-GPIO pulse (24) →
-system reboot (> `failreboot`, default 100). The three **hardware** rungs fire
-on their thresholds **independent of `failreboot`**; `failreboot 0` disables
+system reboot (> `failreboot`, default 100). The three hardware thresholds are
+per modem: `option recovery_steps '2 6 12'` (a value that does not rise is
+reported and the defaults kept). An earlier radio cycle is the useful one after
+a registration reject such as EMM #7: the spec lets the modem attach again only
+after a switch-off (TS 24.301 §5.5.1.2.6), and with the 240 s registration
+timeout the default 8 is half an hour (ddimension/wwand#52). The three **hardware** rungs fire
+on their thresholds **independent of `failreboot`** — but a `failreboot` below a
+threshold reboots before that rung is reached (when both fall due on the same
+attempt, the hardware rung goes first); `failreboot 0` disables
 **only** the final reboot — the hardware recovery still runs and the ladder then
 keeps retrying forever, so a headless box stays up for logging/debugging.
 `proto_error_limit` (default 25) is a separate ceiling on protocol-level errors,

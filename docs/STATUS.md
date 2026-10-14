@@ -1397,6 +1397,12 @@ normally at that point).
   start; the ISD-R discovery opens are `no_recovery` now (`sim.uc` NOT_A_FAULT).
 - **#52 follow-up:** T99W175 in USB mode (05c6:90d5) pinned in `atcmd.uc`
   LOCAL_PORTS: if5 = AT (if0 DIAG, if4 has no bulk endpoints).
+- **#52 feature (asked for by the reporter, approved 2026-10-14):** `option
+  recovery_steps` on `wwand_modem` — the attempt counts of the radio cycle,
+  modem reset and hardware rung (default 8 16 24; 1-3 rising numbers, the
+  first ones replacing the defaults). `recovery.uc steps_from` / per-instance
+  RUNGS, `config.uc steps_opt` (refused with a warning, never half-applied),
+  status ladder (`recovery.rungs(failreboot, steps)`), LuCI modem option.
 - **PR #53 (closed):** automatic IPv6 suppression after refusals declined —
   `pdp_type` is the operator's; instead a typed refusal (internal 210, 3GPP
   50; `callend.uc ipv6_refused`) logs once per context which option ends it

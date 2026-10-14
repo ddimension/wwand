@@ -480,7 +480,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:939-942 warns "references
+	// produces no entry for it at all (config.uc:961-964 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -4362,15 +4362,22 @@ export function create(opts)
 
 			let fired = +(c.rung ?? 0);
 			let attempts = +(c.attempts ?? 0);
-			let table = recoverymod.rungs(entry.cfg?.failreboot ?? 100);
+			let table = recoverymod.rungs(entry.cfg?.failreboot ?? 100, entry.cfg?.recovery_steps);
 			let next = null;
 
-			for (let i = 0; i < length(table); i++)
-				if (i >= fired) {
-					next = { at: table[i].at, action: table[i].action,
-					         in: (table[i].at > attempts) ? (table[i].at - attempts) : 0 };
-					break;
-				}
+			// `fired` counts HARDWARE rungs only; the table is in firing order
+			// (recovery.rungs sorts the reboot in), so the next step is the
+			// first entry that is not a hardware rung already fired
+			let hw = 0;
+
+			for (let i = 0; i < length(table); i++) {
+				if (table[i].action != 'reboot' && hw++ < fired)
+					continue;
+
+				next = { at: table[i].at, action: table[i].action,
+				         in: (table[i].at > attempts) ? (table[i].at - attempts) : 0 };
+				break;
+			}
 
 			return {
 				attempts: attempts,

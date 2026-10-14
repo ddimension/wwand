@@ -18,6 +18,7 @@
 import * as context_common from 'wwand.context_common';
 import * as netlink from 'wwand.netlink';
 import * as catmod from 'wwand.codec.schema.cat';
+import * as recovery from 'wwand.recovery';
 
 const OLD_DEPRECATED = [ 'dhcp', 'autocreateif', 'customroutes', 'strongestnetwork' ];
 
@@ -30,6 +31,26 @@ const PDP_TYPES = { ipv4: true, ipv6: true, ipv4v6: true };
 // reaches uloop, where a NaN delay fires immediately, over and over. Verified
 // on the host interpreter (2026-08-31): a timer re-armed with NaN spins.
 // So: parse here, and hand on a number or the default, never NaN.
+// `option recovery_steps '2 6 12'`: the attempt counts of the ladder's radio
+// cycle, modem reset and hardware reset (recovery.steps_from has the rules).
+// null = the defaults, also for a value that makes no ladder — said, not
+// guessed at: a half-applied list would move one rung past the next.
+function steps_opt(value, warnings)
+{
+	if (value == null || value == '')
+		return null;
+
+	let list = (type(value) == 'array') ? value
+		: filter(split(trim(sprintf('%s', value)), /[ ,]+/), (x) => x != '');
+	let steps = recovery.steps_from(list);
+
+	if (!steps)
+		push(warnings, sprintf('recovery_steps: %J is not 1-3 rising positive whole numbers, using %s',
+			value, join(' ', recovery.DEFAULT_STEPS)));
+
+	return steps;
+}
+
 function num_opt(value, dflt, what, warnings)
 {
 	if (value == null || value == '')
@@ -256,7 +277,7 @@ export function modem_defaults(over)
 		gnss: false,           // switch the modem's GNSS receiver on (NMEA port)
 		nitz_time: true,       // step the system clock from NITZ (see deps set_clock)
 		fcc_auth: null,        // RF unlock for laptop-SKU modems (see reference.md)
-		failreboot: 100, proto_error_limit: 25, zero_rx_timeout: 21600,
+		failreboot: 100, recovery_steps: null, proto_error_limit: 25, zero_rx_timeout: 21600,
 		unarmed_reset_after: 300,   // s: first reset-line pulse of a never-answering modem
 		card_hold: 2100,       // s: no card-resetting recovery after a subscription change
 		bearer_poll_count: 3,  // empty dial-status polls before the bearer is gone (NCM)
@@ -334,7 +355,7 @@ function apply_globals(s, result)
 // instead of 'pincode' cost a HW debugging session — the daemon saw "PIN
 // required but none configured" and safety-blocked the SIM).
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
-	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'pincode', 'modes', 'mcc', 'mnc',
+	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'recovery_steps', 'pincode', 'modes', 'mcc', 'mnc',
 	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'nitz_time', 'fcc_auth',
 	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'unarmed_reset_after', 'card_hold',
@@ -540,6 +561,7 @@ function modem_from_section(s, warnings)
 		location: bool_opt(s.location, false),
 		delay: num_opt(s.delay, 0, 'delay', warnings),
 		failreboot: num_opt(s.failreboot, 100, 'failreboot', warnings),
+		recovery_steps: steps_opt(s.recovery_steps, warnings),
 		proto_error_limit: num_opt(s.proto_error_limit, 25, 'proto_error_limit', warnings),
 		unarmed_reset_after: num_opt(s.unarmed_reset_after, 300, 'unarmed_reset_after', warnings),
 		card_hold: num_opt(s.card_hold, 2100, 'card_hold', warnings),

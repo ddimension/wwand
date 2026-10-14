@@ -814,6 +814,7 @@ export function make_recovery(self, opts, log, proto)
 		// persisted with the counters: a protocol change invalidates `proven`
 		protocol: opts.protocol,
 		failreboot: (opts.config ?? {}).failreboot,
+		recovery_steps: (opts.config ?? {}).recovery_steps,
 		proto_error_limit: (opts.config ?? {}).proto_error_limit,
 		unarmed_reset_after: (opts.config ?? {}).unarmed_reset_after,
 		now: opts.recovery?.now,

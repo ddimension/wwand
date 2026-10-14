@@ -59,7 +59,7 @@ row. That is the whole maintenance rule.
 
 | Question | Answer |
 |---|---|
-| What escalates, at which failure count? | `recovery.uc RUNGS` and `recovery.uc on_attempt` |
+| What escalates, at which failure count? | `recovery.uc DEFAULT_STEPS` (8/16/24), per modem `option recovery_steps` (`config.uc steps_opt` → `recovery.uc steps_from`), fired in `recovery.uc on_attempt` |
 | Why did nothing happen although the count is past the threshold? | The arming gate in `recovery.uc on_attempt`: nothing physical until one request has completed in the selected protocol. `status` reports it as `recovery.armed`. |
 | ...and the one exception to that gate? | `recovery.uc unarmed_reset_line` — a pulse of the modem's own named RESET line, once per outage, nothing else. |
 | What would a repower do on THIS box for THIS modem? | `hwops.uc repower_plan` — the same precedence the action takes, so asking equals doing minus the doing. |
