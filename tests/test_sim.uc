@@ -1917,6 +1917,40 @@ let mk_modem = (lines) => ({
 	eq(qgot, [ true, false, false ], 'euicc info: QMI not-found is final, INTERNAL / not-ready are not');
 }
 
+// QMI logical channels address the LOGICAL slot: the eUICC in physical slot
+// 2, active, is logical slot 1 — an RG650E answered NOT_SUPPORTED (94) to
+// slot 2 and opened the ISD-R on slot 1 (HW-observed on 245, 2026-10-15).
+{
+	let asked = [];
+	let mk = (extra) => ({
+		uim: { request: (name, args, cb) => { push(asked, [ name, args.slot ]);
+		                                      cb(null, { channel_id: 3, select_response: [] }); } },
+		_apdu_be: 'qmi', ...extra,
+	});
+	let slots = [ { physical: 1, active: false, logical_slot: 1 },
+	              { physical: 2, active: true,  logical_slot: 1 } ];
+
+	sim.apdu_open(mk({ slots: slots }), 2, sim.ISDR_AID, () => null);
+	sim.apdu_send(mk({ slots: slots }), 2, 3, '00A4040000', () => null);
+	sim.apdu_close(mk({ slots: slots }), 2, 3, () => null);
+	sim.apdu_open(mk({ active_slot: 2 }), 2, sim.ISDR_AID, () => null);   // no slot status: active = logical 1
+	sim.apdu_open(mk({ slots: slots }), 1, sim.ISDR_AID, () => null);     // inactive: passed through, the modem refuses
+	// a STALE slot list (read before the switch to slot 2) loses to the slot
+	// the switch set — the case HW-hit on 245
+	let stale = [ { physical: 1, active: true, logical_slot: 1 },
+	              { physical: 2, active: false, logical_slot: 1 } ];
+	sim.apdu_open(mk({ slots: stale, active_slot: 2 }), 2, sim.ISDR_AID, () => null);
+	// two executors: physical 1 active as logical 2 — the list wins over
+	// "the switched slot is logical 1"
+	let dual = [ { physical: 1, active: true, logical_slot: 2 },
+	             { physical: 2, active: true, logical_slot: 1 } ];
+	sim.apdu_open(mk({ slots: dual, active_slot: 2 }), 1, sim.ISDR_AID, () => null);
+	eq(asked, [ [ 'OPEN_LOGICAL_CHANNEL', 1 ], [ 'SEND_APDU', 1 ], [ 'LOGICAL_CHANNEL', 1 ],
+	            [ 'OPEN_LOGICAL_CHANNEL', 1 ], [ 'OPEN_LOGICAL_CHANNEL', 1 ], [ 'OPEN_LOGICAL_CHANNEL', 1 ],
+	            [ 'OPEN_LOGICAL_CHANNEL', 2 ] ],
+		'uim slot: active physical 2 is logical 1 (stale list notwithstanding); a listed second executor keeps its logical 2');
+}
+
 sim.apdu_open(mk_modem([ '1' ]), 1, sim.ISDR_AID, (err, ch) => {
 	eq(err, null, 'apdu_open: bare session id accepted');
 	eq(ch?.channel, 1, 'apdu_open: channel parsed from the bare form');
@@ -1975,7 +2009,10 @@ sw_self.modem_sim_switch_slot('m0', 1, (err) => {
 	// back as well (ddimension/wwand#39, MassiPi on an NR7101, 2026-09-22).
 	eq(sw_modem.sim_note, null, 'slot-clear: the old card\'s session note is dropped');
 	eq(sw_modem.sim_busy, false, 'slot-clear: ...and its busy state');
-	eq(sw_modem.active_slot, null, 'slot-clear: ...and the slot it sat in');
+	// ...and the slot it sat in gives way to the one switched TO: the switch
+	// knows it, and the APDU layer maps physical to QMI-logical slots by it
+	// (sim.uc uim_slot; the eSIM page found nothing on 245 without it)
+	eq(sw_modem.active_slot, 1, 'slot-clear: the active slot is the one switched to');
 	eq(sw_modem.info.iccid, null, 'slot-clear: ...and its ICCID');
 	eq(sw_modem.info.imsi, null, 'slot-clear: ...and its IMSI');
 

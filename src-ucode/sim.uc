@@ -1472,6 +1472,36 @@ function at_apdu_close(modem, channel, cb)
 // passthrough) -> AT CCHO/CGLA/CCHC. cb('mbim' | 'qmi' | 'at' | null)
 export const ISDR_AID = 'a0000005591010ffffffff8900000100';
 
+// QMI UIM LOGICAL CHANNELS ADDRESS THE LOGICAL SLOT, the APDU API a PHYSICAL
+// one. On a single-executor modem the active card is logical slot 1 whatever
+// physical slot holds it: with the eUICC in physical slot 2 active, an RG650E
+// opens the ISD-R on slot 1 and answers NOT_SUPPORTED (94) on slot 2
+// (HW-observed on 245, 2026-10-15) — the eSIM page asked for "slot 2" and got
+// nothing. The slot status list (modem.slots, simops modem_sim_slots) gives
+// the logical number of a slot it says is ACTIVE — on a multi-executor modem
+// that can be 2 for another active slot. Without such a row, the active slot
+// as last switched (modem.active_slot) is logical 1: the list is read once per
+// registration, and before the switch updated it (simops modem_sim_switch_slot)
+// it still showed slot 2 inactive after the switch to it. Any other slot passes
+// through unchanged: a card that is not active is not reachable, and the
+// modem says so.
+function uim_slot(modem, slot)
+{
+	let n = +slot;
+	let listed = null;
+
+	for (let s in (modem?.slots ?? []))
+		if (+s.physical == n && s.active && s.logical_slot != null)
+			listed = +s.logical_slot;
+
+	// a mapping the list states for an ACTIVE slot wins — on a modem with
+	// several executors another active physical slot is not logical 1
+	if (listed != null)
+		return listed;
+
+	return (modem?.active_slot != null && n == +modem.active_slot) ? 1 : n;
+}
+
 // A DISCOVERY OPEN IS NOT A CHANNEL FAULT. Opening the ISD-R is how the
 // transport and the eUICC are found, and on a plain SIM every backend refuses
 // it (MBIM UICC SelectFailed, QMI OPEN_LOGICAL_CHANNEL error). Counted toward
@@ -1506,11 +1536,11 @@ function apdu_backend(modem, slot, cb)
 					return ok(false);
 
 				modem.uim.request('OPEN_LOGICAL_CHANNEL', {
-					slot: slot, aid: hex_to_arr(ISDR_AID),
+					slot: uim_slot(modem, slot), aid: hex_to_arr(ISDR_AID),
 				}, (err, data) => {
 					if (!err && data.channel_id != null) {
 						modem.uim.request('LOGICAL_CHANNEL',
-							{ slot: slot, channel_id: data.channel_id, terminate: 1 }, () => {});
+							{ slot: uim_slot(modem, slot), channel_id: data.channel_id, terminate: 1 }, () => {});
 						return ok(true);
 					}
 					ok(false);
@@ -1654,7 +1684,7 @@ export function apdu_open(modem, slot, aid_hex, cb, opts)
 			return cb({ error: 'no_apdu_channel' }, null);
 
 		modem.uim.request('OPEN_LOGICAL_CHANNEL', {
-			slot: slot, aid: hex_to_arr(aid_hex),
+			slot: uim_slot(modem, slot), aid: hex_to_arr(aid_hex),
 		}, (err, data) => {
 			if (err || data.channel_id == null)
 				return cb(err ?? { error: 'no_channel' }, null);
@@ -1765,7 +1795,7 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 		return cb({ error: 'no_uim_client' }, null);
 
 	modem.uim.request('SEND_APDU', {
-		slot: slot, channel_id: channel, apdu: hex_to_arr(apdu_hex),
+		slot: uim_slot(modem, slot), channel_id: channel, apdu: hex_to_arr(apdu_hex),
 	}, (err, data) => {
 		if (err)
 			return cb(err, null);
@@ -1844,7 +1874,7 @@ export function apdu_close(modem, slot, channel, cb)
 		return cb({ error: 'no_uim_client' });
 
 	modem.uim.request('LOGICAL_CHANNEL', {
-		slot: slot, channel_id: channel, terminate: 1,
+		slot: uim_slot(modem, slot), channel_id: channel, terminate: 1,
 	}, (err) => cb(err ?? null));
 };
 
