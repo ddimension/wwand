@@ -93,7 +93,7 @@ export function pin_block_reason(retries, force)
 
 // A CARD POLL MUST NOT OUTLIVE ITS SESSION. The retries below re-enter
 // unlock_uim/unlock_dms, which re-read modem.uim / modem.dms at entry — and
-// teardown nulls those (modem.uc:1587). An anonymous timer firing after an
+// teardown nulls those (modem.uc:1596). An anonymous timer firing after an
 // unplug or a config reload inside the up-to-10 s poll window therefore
 // dereferenced null, and a throw inside a uloop callback ends the program: the
 // next timer never runs and uloop.run() does not return (measured 2026-09-19).
@@ -1415,6 +1415,31 @@ function at_apdu_open(modem, aid_hex, cb, opts)
 	}, { timeout: 15000, probe: opts?.probe });
 }
 
+// The card (or the modem on its behalf) ANSWERED the open with a no: the AT
+// command came back ERROR / +CME ERROR, QMI sent an error response, MBIM
+// named a refused SELECT. As against a timeout, a closed port or no APDU
+// transport at all, which say nothing about the card. A plain SIM refuses the
+// ISD-R the same way on every try, so this is a final answer
+// (ddimension/wwand#57: an EG12-EA logged the refusal at each retry).
+//
+// A QMI error is an answer EXCEPT the ones that describe the moment, not the
+// card: NO_MEMORY 2, INTERNAL 3, ABORTED 4, DEVICE_NOT_READY 52,
+// NETWORK_NOT_READY 53, INSUFFICIENT_RESOURCES 68, INCOMPATIBLE_STATE 90
+// (libqmi 1.38 qmi-errors.h:232-317) — asked again later, those can come out
+// differently.
+const QMI_TRANSIENT = [ 2, 3, 4, 52, 53, 68, 90 ];
+
+function refused_answer(err)
+{
+	let e = err?.error;
+
+	if (e == 'qmi')
+		return index(QMI_TRANSIENT, +(err?.code ?? -1)) < 0;
+
+	return e == 'ERROR' || e == 'cme' || e == 'cms' ||
+	       e == 'uicc_select' || (e == 'mbim' && err?.reason != null);
+}
+
 function at_apdu_send(modem, channel, apdu_hex, cb)
 {
 	let h = uc(apdu_hex);
@@ -1824,8 +1849,12 @@ export function apdu_close(modem, slot, channel, cb)
 };
 
 // card_euicc_info(modem, cb): what the card's ISD-R says about it, and which
-// IPA is in charge. cb(info | null), null = no ISD-R reached (a plain SIM, no
-// APDU channel, an AT transport without the FCI) — unknown, not "no".
+// IPA is in charge. cb(info | null, final), null = no ISD-R reached (a plain
+// SIM, no APDU channel, an AT transport without the FCI). `final` says whether
+// asking again can change the answer: true when the card ANSWERED — it refused
+// the SELECT (refused_answer), or the channel opened — false when the
+// transport could not ask (a timeout, no channel yet). The daemon retries
+// only the second kind (probe_euicc).
 // info: { sgp32: bool, ipae_supported: bool, svn: '2.5.0' | null,
 //         ipa: 'ipae' | 'ipad' | null } — ipa only for an SGP.32 card.
 //
@@ -1842,11 +1871,11 @@ export function card_euicc_info(modem, cb)
 
 	apdu_open(modem, slot, ISDR_AID, (err, ch) => {
 		if (err || ch?.channel == null)
-			return cb(null);
+			return cb(null, refused_answer(err));
 
 		let fin = (v) => {
 			apdu_close(modem, slot, ch.channel, () => null);
-			cb(v);
+			cb(v, true);
 		};
 
 		let f = length(ch.select_response ?? '') ? fci_iot_info(ch.select_response) : null;

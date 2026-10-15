@@ -266,7 +266,7 @@ export function vanish_action(entry, now, timing)
 // two statements now; the helper stays, as it costs nothing.
 function euicc_answer(fn, entry, m, st)
 {
-	return (info) => fn(entry, m, st, info);
+	return (info, final) => fn(entry, m, st, info, final);
 }
 
 export function create(opts)
@@ -1339,19 +1339,22 @@ export function create(opts)
 	// mid-read go without its recovery hold. And an empty answer is not
 	// final — a plain SIM gives one, but so does a transport being rebuilt —
 	// so it is asked again, a minute apart, up to three times per modem
-	// object; a plain SIM then stops being asked.
+	// object — but only when the transport could not ask: a card that
+	// refused the ISD-R has answered, and is not asked again.
 	let EUICC_TRIES = 3, EUICC_RETRY_S = 60;
 
 	// What a finished read does. Reached through euicc_answer (module level,
 	// below the imports): see the note there.
-	let euicc_read = (entry, m, st, info) => {
+	let euicc_read = (entry, m, st, info, final) => {
 		st.busy = false;
 
 		if (entry.modem !== m || entry._euicc_st !== st)
 			return;
 
 		entry.euicc = info;
-		st.done = (info != null);
+		// a card that ANSWERED is not asked again, whatever it said — a plain
+		// SIM refuses the ISD-R the same way each time (sim.uc refused_answer)
+		st.done = (info != null) || !!final;
 		st.next_at = time() + EUICC_RETRY_S;
 
 		if (info?.sgp32)
@@ -1458,7 +1461,7 @@ export function create(opts)
 	// whether anything started it.
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
-	// own emit on a change (modem_mbim.uc:989-998) while the shared reapply
+	// own emit on a change (modem_mbim.uc:1010-1019) while the shared reapply
 	// tail emits on every re-read (modem_common.uc:643-649); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {

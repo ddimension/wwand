@@ -1891,6 +1891,32 @@ let mk_modem = (lines) => ({
 	eq(mopts, [ true, false ], 'apdu_open: the eUICC discovery open is no_recovery, a real open is not');
 }
 
+// A card that ANSWERED the ISD-R open — with a no — is a final answer; a
+// transport that could not ask is not (ddimension/wwand#57: an EG12-EA with a
+// plain SIM logged the refusal at every retry). The daemon retries only the
+// second kind.
+{
+	let got = [];
+	let ask = (err) => sim.card_euicc_info({ at: { send: (cmd, cb) => cb(err, null) }, _apdu_be: 'at' },
+		(info, final) => push(got, [ info, final ]));
+
+	ask({ error: 'ERROR' });
+	ask({ error: 'cme', code: '3' });
+	ask({ error: 'timeout' });
+	eq(got, [ [ null, true ], [ null, true ], [ null, false ] ],
+		'euicc info: a refused open is final, a timeout is not');
+
+	// over QMI: an error answer is final unless it describes the moment
+	let qgot = [];
+	let qask = (code) => sim.card_euicc_info({ uim: { request: (n, a, cb) => cb({ error: 'qmi', code: code }, null) },
+	                                           _apdu_be: 'qmi' }, (info, final) => push(qgot, final));
+
+	qask(80);   // SIM_FILE_NOT_FOUND: no such application
+	qask(3);    // INTERNAL
+	qask(52);   // DEVICE_NOT_READY
+	eq(qgot, [ true, false, false ], 'euicc info: QMI not-found is final, INTERNAL / not-ready are not');
+}
+
 sim.apdu_open(mk_modem([ '1' ]), 1, sim.ISDR_AID, (err, ch) => {
 	eq(err, null, 'apdu_open: bare session id accepted');
 	eq(ch?.channel, 1, 'apdu_open: channel parsed from the bare form');
