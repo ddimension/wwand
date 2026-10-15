@@ -31,9 +31,16 @@ joins `wwan0` to the default `wan` firewall zone and brings it up. Once the
 SIM is read, the ICCID/IMSI is matched against a small internal APN table
 (`apndb.uc`: prefix → apn/pdp type/auth/credentials); on a match the values
 are **copied into `/etc/config/network` once** and the `autosetup` marker
-is removed — afterwards the config is an ordinary hand-editable config. No
-table match keeps the APN empty, which attaches with the SIM/modem-
-provisioned APN.
+is removed — afterwards the config is an ordinary hand-editable config. That
+happens in the autosetup run only: the marker is removed on the first card
+read with or without a match, so no later boot fills anything. Whatever the
+modem's attach profile held is not consulted. No table match keeps the APN
+empty — the network's default (see the precedence below); a card that needs
+its own APN (an operator's special APN such as a Telekom hybrid card's) gets
+it configured.
+A modem that cannot do IPv6 (`ipv4_only` in `modem_quirks.uc` — the Sierra
+MC7710) is filled with the carrier's IPv4 APN where the table has one
+(`apn_ipv4`, e.g. `internet.telekom`) and `pdp_type 'ipv4'`.
 
 On **QMI** the created interface also gets `mux_id 'auto'` — but only when this
 modem can actually carry a channel: the question is asked per modem, against the
@@ -75,7 +82,13 @@ wwand section types plus the netifd interface — no separate config file:
   **`reset_gpio`** — a named GPIO wired to the modem RESET line, pulsed by the
   recovery ladder instead of a USB power-cycle (see [Board integration](#board-integration)) —
   and **`repower_time`** (seconds, default 30) — how long the modem is held
-  de-powered during a recovery power-cycle, or held in reset when `reset_gpio` is used.
+  de-powered during a recovery power-cycle, or held in reset when `reset_gpio` is used —
+  and **`reset_fallback`** (seconds, default 30) — how long an admin `modem_reset` waits
+  for the modem's own reset to take it off the bus before the reset line is pulsed —
+  and **`sim_detect`** (`high`\|`low`\|`off`, Quectel only) — SIM hot-plug detection
+  (`AT+QSIMDET`): on with the tray's detect pin high / low meaning "card inserted", or
+  off. The level is the board's wiring, so unset leaves the modem's value alone; with
+  the wrong level the modem takes an inserted card for removed.
 - **`config wwand_sim '<name>'`** *(optional)* — a per-SIM override, matched at
   runtime to the inserted card by `option modem` + `option iccid`: overrides the
   modem's `pincode` and, optionally, `apn`/`auth`/`username`/`password` and
@@ -102,7 +115,7 @@ wwand section types plus the netifd interface — no separate config file:
   off; on a reconnect that changes the IP, do a netifd link down→up instead of an
   in-place renew so dependent tunnels/xfrm/IPsec re-follow the new local address —
   costs the WAN's own IPv6-PD/VRF a rebuild + a brief blip; WireGuard doesn't need
-  it) + the usual netifd knobs. Several interfaces referencing one `wwand_modem` =
+  it), `ipv6_pd`, `clat`, `address_allocation` (see below) + the usual netifd knobs. Several interfaces referencing one `wwand_modem` =
   multiple mux contexts on one modem.
 - **`config wwand_globals 'globals'`** — `log_level`, `hold_max`, `write_device`
   (write the resolved L3 name back onto interfaces, default on), `autosetup`
@@ -159,8 +172,8 @@ config interface 'wan'
 ```
 
 **Precedence:** PIN = matching `wwand_sim.pincode` → `wwand_modem.pincode`;
-APN/auth/username/password = active `wwand_sim` → `interface` →
-card-provisioned; `pdp_type` = active `wwand_sim` → `interface` → `ipv4v6`
+APN/auth/username/password = active `wwand_sim` → `interface` → **empty**
+(the network's default APN, no login); `pdp_type` = active `wwand_sim` → `interface` → `ipv4v6` — and `ipv4` on a modem whose firmware cannot take IPv6 at all (`ipv4_only` quirk, the Sierra MC7710: an IPv6 request crashes it), whatever was configured
 (there is no card-provisioned IP family to fall back to — the default is the
 dual stack an interface that never said gets). The SIM-specific entry is more specific than the
 SIM-agnostic dial profile, so it wins (same rule as the PIN) — swap SIMs and
@@ -173,6 +186,16 @@ never takes the interface's, which were written for the interface's APN
 an `apn` of its own (a PIN only, say) dials the interface's APN with the
 interface's login. Without `init_apn`, the same APN and login also go into the
 modem's LTE attach profile.
+
+**A network that refuses IPv6** on an `ipv4v6` connection — internal call-end
+210 "PDN IPv6 call disallowed" or 3GPP cause 50 "PDP type IPv4 only allowed"
+(QMI) — leaves the session on IPv4, and wwand logs once per context which
+option ends the request: `pdp_type 'ipv4'` on the interface, or in the
+`wwand_sim` section when only that card is affected. It does not change the
+setting by itself: the IP family is the operator's choice, and a SIM swap or a
+carrier that adds IPv6 later would otherwise inherit a decision made for this
+one. Set it when a modem misbehaves on the refusal (an RG520N-EB resets itself
+on the teardown of the refused IPv6 client, ddimension/wwand#53).
 
 How the sections relate (all in `/etc/config/network`):
 
@@ -234,7 +257,7 @@ flowchart LR
   end
   subgraph APN["APN / auth / credentials"]
     A1["active wwand_sim"] -->|else| A2["the interface"]
-    A2 -->|else| A3["card-provisioned<br/><small>MBN / attach profile</small>"]
+    A2 -->|else| A3["empty APN<br/><small>the network's default</small>"]
   end
 ```
 
@@ -403,6 +426,20 @@ config wwand_globals 'globals'
 
 config wwand_modem 'm0'
 	option device '/dev/cdc-wdm0'    # control port, or a netdev name (`wwan0`)
+	                                 # or 'qrtr': QMI over the Qualcomm IPC router,
+	                                 #   for an SDX modem on PCIe/MHI whose QMI
+	                                 #   lives only on the QRTR bus (no cdc-wdm,
+	                                 #   e.g. an RG520N on an IPQ5018). QMI backend
+	                                 #   only. The modem counts as present once a
+	                                 #   node on the bus serves QMI DMS and WDS;
+	                                 #   until then
+	                                 #   it waits (status: "no QMI service on the
+	                                 #   QRTR bus"), retried every 30 s. The data
+	                                 #   netdev comes from the interface's
+	                                 #   `option device` (the mhi_net link).
+	option qrtr_node ''              # device 'qrtr' only: the QRTR node to use when
+	                                 #   more than one serves DMS + WDS (default:
+	                                 #   the first that does)
 	                                 # or `option path` — PREFERRED for multi-modem
 	                                 #   setups: netdev/cdc-wdm names follow USB
 	                                 #   enumeration order and can swap on reboot.
@@ -438,6 +475,16 @@ config wwand_modem 'm0'
 	                                 #   the modem accepts the new format but
 	                                 #   latches the old one while a session is
 	                                 #   up, and the downlink goes silent.
+	                                 #   A version the modem refuses — by echoing
+	                                 #   another one or with InvalidOperation
+	                                 #   (QMI error 70) — makes the ladder try the
+	                                 #   next lower one; any other error fails.
+	option ep_type ''                # WDA/WDS data endpoint override: type
+	option ep_id ''                  #   (2 HSUSB, 3 PCIE, 4 EMBEDDED) and
+	                                 #   interface. Normally derived from the data
+	                                 #   netdev (USB: the QMI interface; PCIe: 4).
+	                                 #   Set them only for a modem that refuses the
+	                                 #   derived endpoint.
 	list at_init 'ATE0'              # extra AT commands, sent once before registration
 	option at2_external '0'          # 1: reserve the secondary AT port for external tools
 	option gnss '0'                  # 1: start the modem's GNSS receiver, so its NMEA port
@@ -448,6 +495,16 @@ config wwand_modem 'm0'
 	                                 #    time — but only when the clock is plainly unset
 	                                 #    (pre-2021), so it never fights sysntpd. Off by
 	                                 #    default — the router has NTP; for RTC-less installs
+	option nitz_time '1'             # the network's time (NITZ) steps the system clock
+	                                 #    when it is more than 120 s off; smaller
+	                                 #    differences stay NTP's. ON by default: an
+	                                 #    RTC-less box boots with its image's build date,
+	                                 #    which the gnss rule above takes for a set clock.
+	                                 #    The time zone is not touched. '0' = record only
+	                                 #    (status `network_time`), never set the clock.
+	                                 #    Sources: QMI NAS network time, MBIM MS Voice
+	                                 #    Extensions NITZ (only when the firmware answers
+	                                 #    the query), and +CTZV on any modem's AT port
 	option diag_port '/dev/ttyUSB0'  # explicit DM/DIAG node for the wwand-qlog add-on.
 	                                 #    wwand NEVER opens it; it is REPORTED as
 	                                 #    `diag_port` in `ubus call wwand status`.
@@ -488,10 +545,14 @@ config wwand_modem 'm0'
 	list band_lte '20'
 	list band_nr '78'                # NR bands, one list for SA and NSA alike
 	# list band_umts '1'             # UMTS bands (rarely wanted, see below)
-	option location '0'              # start the QMI LOC positioning session
+	option location '0'              # old name of `gnss` (alias): GNSS has one switch
 	option stats_interval '60'       # telemetry period in seconds (0 = off)
 	option delay '0'                 # seconds to wait before the first init
 	option failreboot '100'          # attempts before the final reboot rung (0 = never reboot)
+	option recovery_steps '8 16 24'  # attempts at which the ladder cycles the radio, resets the
+	                                 #   modem, pulses the reset line / repowers. 1-3 rising
+	                                 #   whole numbers; the first ones replace the defaults in
+	                                 #   order ('2' = radio cycle at 2, the rest unchanged)
 	option unarmed_reset_after '300' # s: pulse THIS modem's reset_gpio once if it never answered (0 = never)
 	option card_hold '2100'          # s: after the card's own IPA (SGP.32 IPAe) changed the
 	                                 #    subscription, no modem reset / power-cycle / reboot
@@ -624,7 +685,8 @@ config interface 'wan'
 	option mux_id '1'                # QMAP channel: 1-254, or 'auto'
 	option profile '1'               # 3GPP profile (CID) for the attach + bearer
 	                                 #   (default: mux_id, else 1)
-	option apn 'internet'            # or '#2' = use modem profile 2 untouched
+	option apn 'internet'            # or '#2' = keep profile 2's APN/login; pdp_type
+	                                 #   and the profile flags below still apply
 	option pdp_type 'ipv4v6'         # ipv4|ipv6|ipv4v6
 	option auth 'none'               # none|pap|chap|both
 	option username ''
@@ -633,9 +695,66 @@ config interface 'wan'
 	option use_pushed_mtu '1'        # apply the network-advertised MTU
 	option use_pushed_prefix '0'     # keep the pushed IPv4 prefix (default: /32 p-t-p)
 	option settings_poll '300'       # re-check pushed IP/DNS/MTU every N s (0 = off)
+	option ipv6_pd ''                # QMI + NCM/Quectel: profile flag "IPv6 prefix
+	                                 #   delegation", 1 = allow, 0 = clear, unset = leave it
+	option clat ''                   # QMI: profile flag "CLAT Enabled" (464XLAT in
+	                                 #   the modem), same tri-state, IPv6 bearers only
+	option address_allocation ''     # QMI + NCM: profile preference nas|dhcp, unset = leave it
 	option metric '10'               # metric / peerdns / defaultroute / ip4table /
 	                                 #   ip6table / VRF are handled by netifd as usual
 ```
+
+**IPv6 prefix delegation (`ipv6_pd`; QMI, and NCM on Quectel).** Two halves, both on the
+modem side; the router runs no DHCPv6 client of its own on the bearer, because
+on these modems the bearer's DHCPv6 is the modem's business (a host Solicit
+with IA_PD on the rmnet link went unanswered: RM520N-GL, 2026-10-09).
+
+- **The request** is a flag in the 3GPP profile the modem dials (WDS Modify /
+  Get Profile Settings TLV 0xDF, libqmi 1.38 `qmi-service-wds.json:424-428`;
+  Quectel shows the same flag as `AT+QIP6CFG="PD_enable",<cid>`). With
+  `ipv6_pd '1'` wwand writes it on the dialled profile and on the attach
+  profile (when that is also the data profile, its bearer comes up at attach,
+  before any dial), read first and only when it differs; `'0'` clears it;
+  unset leaves whatever the profile holds. An `ipv4` connection does not touch
+  it. A modem that rejects the TLV gets a warning and the dial goes on.
+- **The prefix** is read back from the modem with Qualcomm's vendor message
+  WDS `0x00AC` ("get delegated IPv6 prefix" — not in libqmi; layout from the
+  RG650E firmware, see `codec/schema/wds.uc` GET_DELEGATED_PREFIX), on every
+  settings fetch, so a prefix delegated later — or withdrawn — reaches netifd
+  through the ordinary renew. The shim then hands netifd the delegated prefix
+  instead of the RFC 7278 /64 extension, and, with source routing on, a
+  default route sourced from it. A PDN with nothing delegated answers
+  `INTERNAL` (logged at debug, not an error); a modem without the message is
+  remembered and not asked again. `AT+QIP6CFG="PD_addr",<cid>` reports the
+  same state (`::/0` = none).
+
+The flag is necessary, not sufficient: the subscription has to delegate.
+
+**On NCM** (AT-driven) the same two halves exist only where the vendor has
+them: on Quectel, `AT+QIP6CFG="PD_enable",<cid>` is the flag (written read-first
+on the attach context and on the dialled cid, before the dial) and
+`AT+QIP6CFG="PD_addr",<cid>` the delegated prefix (`::/0` = none), read after
+connecting and on every settings refresh. Other NCM vendors have no AT command
+for it, and the option does nothing there. **MBIM** has no such field at all —
+neither its provisioned contexts nor the LTE attach configuration carry one
+(libmbim 1.32) — so the option has no effect on an MBIM modem.
+
+**CLAT and address allocation (`clat`, `address_allocation`).** The
+same kind of stored profile setting as the PD flag, through the same code
+(`context.uc PROFILE_FLAGS`): read first, written only when they differ, on the
+dialled profile and on the attach profile, unset = left alone. `clat` is the
+profile's "CLAT Enabled" (TLV 0xDE, libqmi 1.38 `qmi-service-wds.json:417-422`):
+464XLAT done by the modem on an IPv6-only bearer, so it is not touched for an
+`ipv4` connection. `address_allocation` is "Address Allocation Preference"
+(TLV 0x2D, json:372-377): `nas` = the IPv4 address comes with the PDN setup,
+`dhcp` = by DHCP over the bearer afterwards. Whether a modem and network honour
+either is theirs to decide; wwand only puts the setting into the profile.
+
+On **NCM**, `address_allocation` is the standard `<IPv4AddrAlloc>` of
+`AT+CGDCONT` (the 7th parameter, 3GPP TS 27.007), so it works for every vendor;
+it is compared on the `AT+CGDCONT?` read-back like the APN. `clat` has no AT
+equivalent and is QMI only. **MBIM** carries neither (libmbim 1.32: no field in
+the provisioned contexts or the LTE attach configuration).
 
 **Attach profile.** Before registration, wwand programs the LTE **attach
 profile** (CID `profile`, normally 1) from the primary context's `apn` +
@@ -731,9 +850,10 @@ satellites in view and their SNR, the fix type and the DOP values.
 port is only ever read once: a second modem naming a tty that is already being
 read is refused and told whose it is, because opening the same tty twice gives
 both readers a torn stream rather than two of them. `option gnss_set_time`
-hands the receiver's own time to the same `set_clock` NITZ uses, which steps
-the clock only when it is plainly unset (pre-2021) and so never fights
-sysntpd. The LuCI status page shows the same as a GNSS panel, with a map link
+hands the receiver's own time to the same `set_clock` NITZ uses; for the
+receiver it steps the clock only when it is plainly unset (pre-2021) and so
+never fights sysntpd. NITZ (`option nitz_time`, default on) uses a tolerance
+instead: more than 120 s off and the clock is stepped, either direction. The LuCI status page shows the same as a GNSS panel, with a map link
 rather than an embedded tile layer: a tile would have the router's own web
 interface fetch from a third party, and send it this router's position to do
 so, the moment anyone opened the page.
@@ -745,12 +865,30 @@ so ugps and an operator's own receiver — a hat GPS on a serial port — are
 unaffected by installing it. Nothing is opened for a modem without `option
 gnss`.
 
-Note `option location` is a DIFFERENT path: the QMI LOC service, QMI-only and
-documented as broken on Quectel. On those modems `option gnss` is the one that
-works. The LOC session is ended (LOC Stop) before its client is released on
-every teardown: releasing the client alone left the modem's location engine
-reporting every second, and an EG25-G with `option location` set hung its
-QMI side after such teardowns (2026-10-01).
+**A modem without an NMEA port** gets the same NMEA over QMI LOC instead:
+wwand-gps opens a LOC client through the modem's `extra_client` (natively on a
+QMI modem, over the QMI-over-MBIM passthrough on an MBIM one), registers for
+LOC's NMEA indications (`EVENT_NMEA`, 1 << 2; `NMEA` indication 0x0026; libqmi
+1.38) and starts a position session. The sentences go into the same reader, so
+`modem_gps` and the LuCI panel look the same — `source` says `qmi_loc` instead
+of `nmea_port`, and `loc` carries the session's state. The port wins where
+there is one: it needs no QMI session, and LOC is documented as broken on
+Quectel. The LOC session is ended (LOC Stop) before its client is released —
+the client's `before_release`, which the modem runs ahead of the RELEASE_CID:
+releasing the client alone left the modem's location engine reporting every
+second, and an EG25-G hung its QMI side after such teardowns (2026-10-01). Over
+the MBIM passthrough, whether LOC indications are forwarded is the firmware's
+choice; a session that runs and delivers nothing shows `sentences: 0`.
+The session asks for periodic fixes (START `Fix Recurrence Type` 1 — left
+out, an RG502Q gave one fix and fell silent) and for ALL NMEA sentence types
+(`QMI_LOC_NMEA_TYPE_ALL`; the five named types are GPS-only, ALL brought
+GLONASS and Galileo on the same modem). That setting is the ENGINE's, not the
+session's: on the RG502Q the NMEA port emitted the other constellations too
+afterwards. Valid NMEA the reader does not interpret (proprietary `$P…`, GNS)
+is counted as `ignored`; `unparsed` stays what says the stream is not NMEA.
+`option location`, the former QMI LOC switch, is now an alias of `option gnss`.
+All of this is in the `wwand-gps` package (`gps.uc`, `nmea.uc`, the LOC schema);
+the core has no GNSS. Cell location (LAC/TAC/cell id) is telemetry, not this.
 
 **Datapath plugins.** `option mux` also accepts the name of an add-on datapath
 package: `option mux 'vendorx'` makes the daemon load `wwand.datapath_vendorx`
@@ -789,15 +927,29 @@ session 1 and keeps it. `wwandctl status` and the LuCI status page both print
 this as `auto → untagged`, so what `auto` settled on is visible without
 guessing.
 
-> **Changing a modem's mux configuration on a running system needs
-> `/etc/init.d/network restart`, not a reload.** Switching between a tagged
-> session and the untagged parent moves the stable L3 name from the mux child to
-> the parent device, and netifd still holds a device record for that name in its
-> old shape — claiming it re-runs that record's setup against a parent that is
-> gone, so `interface_set_up()` reports `DEVICE_CLAIM_FAILED` and the interface
-> stays down behind a perfectly good session (netifd `interface.c:1349-1353`,
-> 2026.07.08~6088f7b3). A `reload` does not clear the record; a restart does.
-> wwand logs a notice naming the interface and this remedy when it happens. A
+> **Changing a modem's mux configuration on a running system** moves the stable
+> L3 name between the mux child and the parent device, and netifd still holds a
+> device record for that name in its old shape: it claims the device through a
+> parent that is gone, `interface_set_up()` reports `DEVICE_CLAIM_FAILED` and the
+> interface stays down behind a perfectly good session (netifd
+> `interface.c:1349-1353`, 2026.07.08~6088f7b3). A `reload` does not clear the
+> record; netifd frees it only with the device object (`device.c:238-240`), and
+> only once nothing uses it. **wwand heals this itself** when netifd reports
+> exactly that error for one of its interfaces: it points the interface at a
+> placeholder device and reloads (the old record loses its last user and is
+> freed), then points it back and reloads again (a fresh record reads its
+> parent from sysfs) — the *netifd device detour*, at most once per 5 min per
+> interface, through its own uci delta directory so an operator's staged
+> changes are not committed with it. A detour cut short by a daemon restart is
+> undone at the next start (`option wwand_detour` keeps the original device
+> meanwhile). HW: NR7101, mux_id 1 → 0, up again one second after the error.
+> A QMI config that drops its last mux channel also has the old QMAP child
+> removed before the parent is renamed (it held the stable name, and the rename
+> was not retried), and the modem is **reset once** early in its next init: an
+> RG650E kept enough of its muxed data-session state to never answer a raw-IP
+> dial — sessions stopped cleanly, aggregation explicitly disabled and
+> confirmed, pass-through off, the data port bound to mux 0, a radio cycle —
+> until it was reset (245, 2026-10-05). The way back (raw → mux) needs no reset. `/etc/init.d/network restart` remains the manual remedy. A
 > fresh boot is unaffected. A plugin that ships no probe is
 never self-selected. `ubus call wwand status` reports the datapath each modem
 actually came up on (`modems.<name>.datapath`), and the choice is logged. The
@@ -849,7 +1001,13 @@ config interface 'wan'
 ```
 
 `modem_probe` lists detected control devices with their stable `path`; leave
-`apn` empty to attach with the SIM/modem-provisioned APN. The L3 device gets
+`apn` empty to attach with the network's default APN — wwand writes the
+configured APN into the modem's attach profile, an unset one as empty, so a
+stale APN in profile 1 (from the modem's previous life, say) never stays. A
+`#N` APN leaves profile N's APN and login as the modem has them (the
+configured PDP type and explicit profile flags still apply). A changed APN, PDP type
+or login takes effect on the running modem at once (the attach profile is
+re-programmed on reload). The L3 device gets
 the next free `wwandN` name and is written back as `option device`.
 
 ### A second APN / PDN on the same modem (mux)
@@ -1252,9 +1410,19 @@ so the DMZ's `ip6assign '64'` takes addresses from that same `/64`. One shared
 `/64` is enough for a single downstream network.
 
 For a **separately delegated** prefix (a real IA_PD — e.g. a `/56` the carrier
-delegates so the DMZ gets its own `/64`), run a DHCPv6-PD client **on top of** the
-wwand interface. wwand keeps managing the WAN GUA; a stacked `dhcpv6` logical
-interface requests only the prefix:
+delegates so the DMZ gets its own `/64`) on a **QMI** modem, set
+`option ipv6_pd '1'` on the wwand interface. wwand puts the request into the
+modem profile and reads the prefix back from the modem (vendor WDS `0x00AC`, see
+"IPv6 prefix delegation" above); netifd then has it as the interface's prefix,
+and the DMZ draws its `/64` from it exactly as above (`option ip6assign '64'`),
+advertised by odhcpd. No stacked DHCPv6 client is needed — and on these modems
+one does not help: a Solicit with IA_PD sent by the router on the rmnet link was
+never answered (RM520N-GL on a PD APN, 31 sent / 0 back, 2026-10-09), because
+the bearer's DHCPv6 is the modem's business. Where the network delegates
+nothing, you keep the shared `/64` above — nothing breaks.
+
+On **MBIM and NCM** there is no such readback. The one thing to try there is a
+stacked `dhcpv6` interface on the wwand device:
 
 ```
 config interface 'wan6'
@@ -1264,22 +1432,10 @@ config interface 'wan6'
 	option reqprefix 'auto'
 ```
 
-The DMZ then draws its `/64` from the delegated prefix exactly as above
-(`option ip6assign '64'`), advertised by odhcpd.
-
-**Two hard constraints:**
-
-- **The carrier must actually delegate.** 3GPP prefix delegation is a DHCPv6
-  IA_PD exchange with the network (P-GW); there is no QMI/MBIM path to a shorter
-  prefix. Where the network delegates nothing, you fall back to the shared `/64`
-  above — nothing breaks.
-- **The DHCPv6 client needs a global source address.** The stacked interface
-  **must** ride on `@wan` so it inherits the wwand-configured GUA: over the
-  cellular bearer a link-local source usually does not carry, and odhcp6c has no
-  option to force the source — the kernel selects it (RFC 6724) and prefers a
-  link-local when one exists. If your bearer drops link-local DHCPv6, IA_PD needs
-  an odhcp6c that pins the global source; verify with
-  `tcpdump -i <wan-l3dev> udp port 547` which source the SOLICIT uses.
+It needs a global source address (riding on `@wan` gives it the GUA; the kernel
+prefers a link-local, RFC 6724, and over a cellular bearer that often does not
+carry) — check with `tcpdump -i <wan-l3dev> udp port 547` which source the
+SOLICIT uses — and it only works where the modem passes the exchange through.
 
 **How prefix delegation works on mobile (background).** In 3GPP every IPv6 /
 IPv4v6 PDN connection is assigned its own `/64` by the network via SLAAC — the
@@ -1288,13 +1444,12 @@ single `/64` is exactly what wwand configures and (RFC 7278) shares. Delegating 
 *separate*, shorter prefix is an **optional DHCPv6-PD feature** (RFC 8415; 3GPP
 TS 29.061, overview in RFC 6459) that the operator must provision **per APN**: the
 router is the requesting router, the P-GW the delegating server (often backed by
-RADIUS, RFC 4818). Most consumer APNs do not enable it — a PD `SOLICIT` then goes
-unanswered and you are left with the shared `/64`; the standard-compliant
-link-local source is fine there, the network simply offers no PD. Verified on this
-project's test SIMs — a consumer web/dial-up APN and a hybrid-stack APN both
-return no delegation on either a link-local or a global
-source. Business / M2M APNs with explicit PD provisioning are where a delegated
-prefix actually appears.
+RADIUS, RFC 4818). Most consumer APNs do not enable it, and you are left with the shared `/64`:
+on this project's test SIMs a consumer web/dial-up APN and a hybrid-stack APN
+return no delegation. Business / M2M APNs with explicit PD provisioning are
+where a delegated prefix is expected; whether the modem then fetches it on its
+own, or only when asked, is not settled by anything here yet (STATUS.md,
+"Profile flags").
 
 ## Performance & tuning
 
@@ -1312,8 +1467,11 @@ full throughput — this is why the examples above set `option mux_id '1'`.
 - Aggregation is **bidirectional**: downlink (the modem batches packets into the
   host's rx URB) *and* uplink (the host batches IP packets into QMAP frames —
   WDA-negotiated `ul_max_datagrams`/`ul_max_size` plus the rmnet egress coalesce).
-  The **endpoint type** (USB vs PCIe) is auto-detected from the netdev's bus, so
-  PCIe/MHI modems negotiate the data format correctly. It is capability-gated —
+  The **endpoint** (type and interface) is derived from the netdev's bus, so
+  PCIe/MHI modems negotiate the data format correctly: USB gives HSUSB and the
+  QMI function's interface, PCIe gives PCIE and interface 4, the fixed number
+  Qualcomm firmware expects there (ModemManager uses the same). Without an
+  endpoint an MHI modem refuses the data format with QMI error 70. It is capability-gated —
   a modem that does not confirm QMAP simply runs plain framing.
 - Tune the aggregation buffer per modem with `option dl_datagram_max_size` on the
   `wwand_modem` section (default from a per-model table, ~31 KB): larger buffers
@@ -1359,6 +1517,8 @@ wwandctl modems                      # one-line modem list
 wwandctl signal / cells / datapath   # diagnostics (optional [modem] first arg)
 wwandctl up wan / down wan           # connect / disconnect an interface
 wwandctl reattach                    # network re-attach without a modem reset
+wwandctl detach                      # stop the sessions, detach (radio on); stays detached
+wwandctl attach                      # attach again; the interfaces reconnect
 wwandctl scan                        # operator scan (up to ~90 s)
 wwandctl select auto                 # automatic network selection
 wwandctl select 262 01               # manual PLMN selection
@@ -1499,12 +1659,12 @@ every method to it.
 | `modem_signal` | `modem` | last raw signal info (LTE/NR5G/WCDMA/GSM metrics) |
 | `modem_telemetry` | `modem` (optional) | per-modem state, temperature, attempts and protocol errors, plus each context's state — **no subscriber identifiers**, so it can be granted to an unprivileged reader (see [Feeding collectd](#feeding-collectd-wwandctl-collectd)) |
 | `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` + `temperature` (also on `status`, which is the canonical place — same field, kept here for compatibility) |
-| `modem_location` | `modem` | last QMI LOC fix (when `location` is enabled) |
+| `modem_location` | `modem` | last GNSS fix, short form — a view over the `modem_gps` reader, whichever source feeds it (needs `option gnss` and `wwand-gps`) |
 | `modem_at` | `modem`, `command`, `timeout?` | run an AT command on the modem's AT port |
-| `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor. Sets are **idempotent**: values the modem already carries are dropped; nothing left → `unchanged: true`, no NV write, no radio disturbance. On a Fibocom FM350/FM150 (NCM) the same calls speak `+GTACT` instead: the get adds `settable` (the keys a set may carry — band lists only, none on a tuple bands cannot be written for), `supported` (the module's own band catalogue), `nr_bands_shared: true` and `persistent: false`; a set refuses any other key, and an accepted band edit is also written to the modem's `band_*` options (see *Band allow-lists*) |
+| `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor. Sets are **idempotent**: values the modem already carries are dropped; nothing left → `unchanged: true`, no NV write, no radio disturbance. On QMI and MBIM (passthrough) the get adds `band_caps: { lte, nr5g }`, the bands the modem supports (DMS Get Band Capabilities) — what LuCI's *Reset to defaults* sends instead of a blanket 1–63 / 1–79. A set the firmware refuses because of its band keys is sent once more without them: the result then carries `partial: true` and `refused` (`lte_bands`, `nr5g_sa_bands`, …) next to `applied`. On a Fibocom FM350/FM150 (NCM) the same calls speak `+GTACT` instead: the get adds `settable` (the keys a set may carry — band lists only, none on a tuple bands cannot be written for), `supported` (the module's own band catalogue), `nr_bands_shared: true` and `persistent: false`; a set refuses any other key, and an accepted band edit is also written to the modem's `band_*` options (see *Band allow-lists*) |
 | `modem_scan` / `modem_scan_start` / `modem_scan_status` | `modem` | visible-operator scan (sync, or async start+poll — a scan takes up to ~90 s) |
 | `modem_set_network_selection` | `modem`, `mode`, `mcc?`, `mnc?` | `auto` or `manual` PLMN selection (QMI NAS / MBIM passthrough / AT+COPS). Idempotent (`unchanged: true` when the modem already runs the requested selection); on deferred-apply models the result carries `deferred: true` + `apply: 'modem_reset'` |
-| `modem_reset` | `modem` | generic admin modem reset — the apply step for `deferred` results (write ACL). Priority: dedicated reset GPIO (per-modem `reset_gpio`, or the board default when only one modem is managed), then the backend soft reset (QMI: DMS offline→reset, MBIM: passthrough-DMS or `AT+CFUN=1,1`, NCM: `AT+CFUN=1,1`). When the QMI side or the MBIM passthrough is what hangs — no DMS client, or the request times out — QMI and MBIM reset over AT instead (`AT+CFUN=1,1`, opening the AT port for the one write if it is not open yet); the result then carries `via: 'at'`. The recovery ladder's modem-reset rung takes the same way. Result reports `action: 'gpio'\|'backend'`. The modem re-enumerates and every `auto` interface comes back up on its own |
+| `modem_reset` | `modem` | generic admin modem reset — the apply step for `deferred` results (write ACL). Order: the backend soft reset FIRST (QMI: DMS offline→reset, MBIM: passthrough-DMS or `AT+CFUN=1,1`, NCM: `AT+CFUN=1,1`) — it lets the modem shut down cleanly, where a pulse of the reset line cuts it mid-write and can corrupt its file system. The dedicated reset GPIO (per-modem `reset_gpio`, or the board default when only one modem is managed) is the fallback: pulsed at once when the soft reset is refused or there is none, and after `reset_fallback` seconds (default 30) when the modem acknowledged but never dropped off the bus. The result then carries `fallback_gpio` and `fallback_in`. When the QMI side or the MBIM passthrough is what hangs — no DMS client, or the request times out — QMI and MBIM reset over AT instead (`AT+CFUN=1,1`, opening the AT port for the one write if it is not open yet); the result then carries `via: 'at'`. The recovery ladder's modem-reset rung takes the same way. Result reports `action: 'gpio'\|'backend'`. The recovery ladder's own hardware rung (`modem_repower` below) is unchanged: it is reached because the soft path already failed. The modem re-enumerates and every `auto` interface comes back up on its own |
 | `modem_plmn_lists` | `modem` | read the PLMN selector lists: `user` (EF 6F60), `nas` (QMI preferred networks), `operator`/`home` (read-only) and `fplmn` (EF 6F7B forbidden) |
 | `modem_plmn_set` | `modem`, `list_type`, `entries` | write a PLMN list to the SIM/modem; `list_type` = `user`\|`nas`\|`fplmn`; `entries` = `[{mcc,mnc[,gsm,utran,eutran,ngran]}]` (fplmn carries no AcT). Reads back for cross-verification (write ACL) |
 | `modem_plmn_restore` | `modem` | re-apply the modem's effective configured list (per-SIM `plmn_list` wins over the modem's) — the same list restored before every radio-on (write ACL) |
@@ -1512,6 +1672,7 @@ every method to it.
 | `modem_carrier_config` | `modem`, `op`, `id` | carrier configuration (MBN) over QMI PDC. `op` = `list` (every config with its description and version) \| `get` (the active one, plus `pending` when a switch is waiting for a reset) \| `set` (select `id`). A selection takes effect only after a **modem reset** and is reported as `pending` until then. The protocol-native form of what `AT+QMBNCFG` does on Quectel alone; wwand selects among the blobs the vendor shipped and never writes or deletes one |
 | `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
 | `modem_sim_switch_slot` | `modem`, `slot` | switch the active physical SIM slot (drops the connection) |
+| `modem_sim_reinit` | `modem` | re-initialise the card in the active slot without a modem reset: power it off and on (QMI UIM, MBIM UICC reset, or an AT CFUN cycle), then re-read it as after a slot switch — for a card swapped in a slot the modem does not watch. The connection drops and comes back. Result `{ slot }` |
 | `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
 | `modem_sim_pin_verify` | `modem`, `pin?` | manual PIN release past the low-retry safety block (the daemon refuses to auto-enter with ≤1 attempt left, to avoid a PUK lock); `pin` overrides the configured one for this attempt (write ACL) |
 | `modem_sim_puk` | `modem`, `puk`, `new_pin` | **PUK entry**: unblock a PUK-locked SIM and set a NEW PIN in one operation (UIM Unblock PIN → native MBIM PIN/PUK1 → `AT+CPIN="puk","pin"`; the chain never re-tries a PUK on a second transport — wrong PUKs brick the SIM). PUK = 8 digits, new PIN 4–8 digits. On success the modem restarts its bring-up with the new PIN as one-shot override; **update the configured `pincode` afterwards** (write ACL) |
@@ -1526,7 +1687,9 @@ every method to it.
 | `modem_sms_send` | `modem`, `number`, `text` | send an SMS (SMS-SUBMIT, GSM7/UCS2, auto-segmented): QMI WMS RAW_SEND (native/passthrough) else AT+CMGS PDU mode (write ACL) |
 | `modem_repower` | `modem?` | hardware repower: pulse the modem `reset_gpio` (or, single-modem only, the board default), else power-cycle the modem USB power (also single-modem only — on a multi-modem box the board lines would hit the wrong hardware: error `multi_modem_needs_reset_gpio`). Same path as the recovery ladder; recovers a hung / vanished modem |
 | `modem_set_protocol` | `modem`, `protocol` | switch the control protocol (`qmi` ⇄ `mbim`); the modem resets |
-| `modem_reattach` | `modem` | detach/re-attach at the registration level (QMI DMS low-power→online bounce natively, `AT+COPS=2`→`0` fallback; on NCM the COPS bounce also down→up's every CONNECTED context — the T700's data path does not survive the deregister/attach cycle) without a full modem reset (write ACL) |
+| `modem_reattach` | `modem` | detach/re-attach at the registration level (QMI DMS low-power→online, MBIM radio off→on, `AT+COPS=2`→`0` fallback) without a full modem reset (write ACL). **The connected PDN sessions are stopped first** (WDS STOP_NETWORK / MBIM deactivate / CGACT=0) and only then is the modem detached — not cut by the detach underneath them; the daemon holds its own reconnect off for the whole cycle. Afterwards the AT path re-dials them directly (COPS=0 answers once registered; the T700's data path does not survive the cycle anyway), the QMI/MBIM path hands them to the daemon's reconnect, which waits for the re-registration. Result adds `contexts_released` (backend) / `contexts_bounced` (AT) and `contexts_failed`. The daemon's own radio cycle after an unanswered dial, and the recovery ladder's opmode-cycle rung (all backends), take the same way |
+| `modem_detach` | `modem` | operator detach, radio on (write ACL): the connected PDN sessions end first (down reason `admin`), then the PS detach — QMI NAS Attach Detach (0x0023, action 2), MBIM `PACKET_SERVICE` set detach, `AT+CGATT=0` on an AT-only modem. The modem **stays detached** until `modem_attach`: the registration loss reads as intended (like a parked radio, no re-registration, no recovery ladder), the daemon does not redial, and an `ifup` is refused with `detached` (netifd shows `DETACHED`; the shim retries every 60 s). The mark lives on the modem object: a modem reset or re-enumeration ends it together with the detach (the modem attaches on its own, as after any start). A daemon restart forgets only the mark — the modem itself stays PS-detached (the QMI init sends no attach; MBIM's bring-up attaches), so attach before restarting wwand. Status: `detached: true`. Result: `via`, `contexts_released`, `contexts_failed` |
+| `modem_attach` | `modem` | PS attach (QMI action 1, MBIM attach, `AT+CGATT=1`), clears `detached` and hands the interfaces that still want a connection to the reconnect. Attaching an attached modem is the modem's no-op (`unchanged: true` on QMI NO_EFFECT) |
 | `modem_datapath` | `modem` | datapath diagnostics: driver/protocol, mux channels, aggregation state, netdev counters |
 | `migrate` | `interfaces?`, `apply?` | plan (default) or apply the config migration of the named (or all) stock `proto qmi`/`mbim`/`ncm` interfaces to the network-native `proto wwand` model (same engine as the `/usr/libexec/wwand/migrate` CLI and the LuCI *Migrate selected* button) |
 | `context_up` / `context_down` | `context` or `interface` | connect / disconnect (deferred reply with the IP config) |
@@ -1612,13 +1775,28 @@ APN** — while the ES10 APDUs travel over wwand's channel (the daemon bridges
 lpac's stdio APDU protocol inline). AT-only modems download internally instead
 (Quectel `AT+QESIM`).
 
-The **APDU channel** is chosen per modem by `backend.choose`, in order:
-**QMI UIM logical channel** (native, or tunnelled over the QMI-over-MBIM
-passthrough) → **native MBIM MS UICC Low Level Access** (`OPEN_CHANNEL` /
-`APDU` / `CLOSE_CHANNEL`, so eSIM works on an MBIM modem even without an AT port)
-→ **AT** (`CCHO`/`CGLA`/`CCHC`, for firmwares that report the QMI channel as
-`NOT_SUPPORTED`). The same `_apdu_be` choice serves both the raw `modem_apdu`
-channel and the ES10c eSIM path.
+The **APDU channel** is chosen per modem by `backend.choose`, in order
+(`sim.uc apdu_backend`): **native MBIM MS UICC Low Level Access**
+(`OPEN_CHANNEL` / `APDU` / `CLOSE_CHANNEL`, so eSIM works on an MBIM modem even
+without an AT port) → **QMI UIM logical channel** (native, or tunnelled over the
+QMI-over-MBIM passthrough) → **AT** (`CCHO`/`CGLA`/`CCHC`, for firmwares that
+report the QMI channel as `NOT_SUPPORTED`). The same `_apdu_be` choice serves
+both the raw `modem_apdu` channel and the ES10c eSIM path. Discovering it opens
+the ISD-R; on a plain SIM every backend refuses that, which is an answer and not
+counted as a protocol error.
+
+On MBIM, an `OPEN_CHANNEL` is checked against what the Microsoft extension
+defines: `Channel 0` or a SELECT status other than `90 00` / `91 XX` is a
+failure, and a failed open names its cause (`select_failed`,
+`no_logical_channels`) with the card's SW1 SW2. wwand opens its channels in a
+channel group of its own (`0x7777`; lpac uses 1) and, before the first open of
+a modem run, closes everything left in that group — channels a crashed run
+left open would otherwise stay taken until the card resets. An eUICC that
+reports **no profile enabled** (MBIM ready state 7) stops the modem at the SIM
+step (`sim_block` reason `no_esim_profile`) instead of letting the recovery
+ladder reset it; once a profile is enabled the chain resumes on its own (the
+state is polled every 10 s, since that indication is not installed before
+registration).
 
 All operations go through `modem_esim { modem, op, slot?, … }` (`slot` defaults
 to 1):
@@ -1746,8 +1924,15 @@ built-in profile.
 
 The recovery ladder escalates on consecutive failed connection attempts:
 op-mode cycle (8) → modem reset (16) → board repower / reset-GPIO pulse (24) →
-system reboot (> `failreboot`, default 100). The three **hardware** rungs fire
-on their thresholds **independent of `failreboot`**; `failreboot 0` disables
+system reboot (> `failreboot`, default 100). The three hardware thresholds are
+per modem: `option recovery_steps '2 6 12'` (a value that does not rise is
+reported and the defaults kept). An earlier radio cycle is the useful one after
+a registration reject such as EMM #7: the spec lets the modem attach again only
+after a switch-off (TS 24.301 §5.5.1.2.6), and with the 240 s registration
+timeout the default 8 is half an hour (ddimension/wwand#52). The three **hardware** rungs fire
+on their thresholds **independent of `failreboot`** — but a `failreboot` below a
+threshold reboots before that rung is reached (when both fall due on the same
+attempt, the hardware rung goes first); `failreboot 0` disables
 **only** the final reboot — the hardware recovery still runs and the ladder then
 keeps retrying forever, so a headless box stays up for logging/debugging.
 `proto_error_limit` (default 25) is a separate ceiling on protocol-level errors,
@@ -1959,7 +2144,10 @@ answer after the upgrade re-arms it.
 
 Built-in profiles: MikroTik Chateau 5G (`modem-power` + `modem-reset` + 5 signal
 LEDs), Zyxel LTE3301-plus / -m209 / -q222 (`power_modem`/`usbpower` + mobile/LTE
-LEDs), Zyxel LTE5398-M904 (`lte_power` + red/green/orange mobile LEDs), Cudy
+LEDs — the mobile LED green when registered, red blinking while searching; the
+LTE LED only on LTE, dark on a 2G/3G fallback; -m209/-q222 bind both shipped
+modem ids `1435:d181` and `2020:2033` to `option`, as Zyxel's `lte3301` helper
+did, which wwand replaces), Zyxel LTE5398-M904 (`lte_power` + red/green/orange mobile LEDs), Cudy
 LT300 (MeiG SLM770A, reset GPIO `4g`; the autosetup HW-verify platform), Zyxel
 NR7101 (the RG502Q's RESET line as `gpio515`, held for 30 s on recovery; GPIO 18
 is not used even where an image exports it as `lte_power`, because switching it
@@ -2251,6 +2439,76 @@ eSIM changes and remote cards. Rules it follows:
 The cards in inactive slots come from the slot list, read once when a modem
 registers and whenever the status page reads it.
 
+## APN test box (`wwand-apntest`)
+
+A dedicated test box runs scheduled end-to-end tests of APNs: per test it
+dials the APN through wwand, checks the address pool and resolvers, pings, and
+reports one verdict per check to an NSCA monitor. The plan is
+`/etc/config/apntest` (example and every option in the shipped file;
+`wwand-apntest check` validates it and REFUSES unknown options — the tool this
+replaces silently ignored a mistyped `ip_regext` for years).
+
+    wwand-apntest check | list | run [test] | last | cron-sync [off] | recover
+
+- **Schedule:** `globals.schedule`, exactly five cron fields; the init script
+  keeps one managed line in `/etc/crontabs/root` (boot, `reload_config`,
+  stop). A plan with errors or a malformed schedule leaves the existing line
+  as it was (the box keeps testing on the last good plan).
+- **One sweep at a time** (lock in `/tmp/wwand-apntest/`), bounded by
+  `run_budget` — registration and slot waits and the checks included; a test
+  it no longer reaches reports UNKNOWN. Restoring the starting SIM slot runs
+  even past the budget.
+- **Nothing outlives a test:** the interface is brought down and the test's
+  uci change reverted whatever happened in between (an exception is the
+  test's UNKNOWN). A run that was killed leaves a marker
+  (`/tmp/wwand-apntest/dirty`); the next run and the init script
+  (`wwand-apntest recover`) bring that interface down and drop its pending
+  changes. If netifd does not finish the teardown within 30 s the sweep stops
+  — later tests report UNKNOWN rather than dial into it.
+- **Exit status of `run`:** the worst verdict (0 OK … 3 UNKNOWN), and 3 when
+  any verdict could not be delivered to the monitor. `check` also refuses a
+  `monitor` without `/usr/bin/send_nsca` installed. That is the NSCA-ng client
+  (TLS with a per-client pre-shared key, `identity`/`password` in `nsca_cfg`),
+  package `nsca-ng` from the ddimension feed; classic NSCA's `send_nsca`
+  speaks another protocol and config format.
+- **Per test:** wait for registration (120 s; WARNING otherwise) -> write the
+  test's apn/auth/username/password/pdp_type to the test interface as an
+  UNCOMMITTED uci change (never flash; wwand re-reads it on the up) -> `ifup`
+  via netifd -> wait for an IPv4 address (the test's `budget`) -> `ip_regex`,
+  DNS present, `dns_regex` -> the checks -> `ifdown`, revert the change ->
+  `detach_after` = `modem_reattach` (IMSI off the network and back).
+- **The interface:** `globals.interface`, else the only `proto wwand`
+  interface of `globals.modem`; keep it `option auto '0'` so only the tests
+  bring it up.
+- **SIM groups:** tests are grouped by `apntest_sim`; a physical `slot` is
+  switched once per group and, with `restore_sim`, back afterwards. A
+  `wwand_sim` entry that overrides the card's APN makes its tests UNKNOWN
+  (the test APN would not be dialled).
+- **Checks:** the first check reports under the test's `service`, the others
+  as `<service>_<label|plugin>`. `ping:<host>` — 5 priming pings, then 10;
+  loss > 50 % CRITICAL, > 20 % WARNING (the old tool's thresholds), perfdata
+  `percent_packet_loss`, `rta`, `duration`.
+  `accounting[:<url>]` — compares what the operator billed for THIS session
+  with what the interface carried: during the session it downloads `<url>`
+  (default `http://217.14.168.5/mccp-accounting`) through the test interface
+  and counts rx+tx of its netdev from up to down; after the down it waits
+  180 s for the operator to account the session, then reads the card's status
+  from the test's `account` (`<base_url>/<sim_type>/<sim_id>/status`, basic
+  auth from a 0600 curl config, never in a command line; up to two more tries
+  a minute apart) and takes the session record of THIS dial: the test's APN,
+  ended after the dial started, the interface's address when the operator
+  names one, the start nearest the dial. Operator in+out within
+  90–110 % of the interface is OK, up to 2x a WARNING, beyond that or below
+  90 % CRITICAL; no record of the session is CRITICAL, an unreachable API
+  UNKNOWN. Perfdata `bytes_interface`, `bytes_mccp`, `bytes_mccp_billed`.
+  Needs curl. Account type `mccp` only — `iec` reports UNKNOWN for now, as
+  do eUICC `profile` SIMs. A
+  `wwand_sim` that overrides any connection field of the card (apn, auth,
+  username, password, pdp_type) makes the test UNKNOWN.
+- **Reporting:** `send_nsca -H <monitor> [-p <nsca_port>] -c <nsca_cfg>` (NSCA-ng, default port 5668), host
+  `nsca_host`; the last verdict per service is kept in
+  `/tmp/wwand-apntest/last.json` (`wwand-apntest last`).
+
 ## Plugins
 
 Features that ship in their own packages hook into the daemon without the
@@ -2294,7 +2552,11 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   without the passthrough). Which indications reach it over the passthrough
   depends on the service: NAS pushes none on the EG06 and the RM520N, UIM
   Remote pushes all of its own on the RM520N (a remote SIM works over MBIM
-  there; qmi_over_mbim.uc). The modem owns the client and
+  there; qmi_over_mbim.uc). A plugin may set `client.before_release` to a
+  function: the modem calls it (once, with the client) right before the
+  client's RELEASE_CID — on teardown and on `qmi_release` alike — which is the
+  place to end a session the client opened (wwand-gps sends LOC STOP there).
+  The modem owns the client and
   releases it on teardown; `client.destroyed` then tells the plugin to ask
   again. `qmi_release(ref, client)` gives it back earlier.
   `modem_at(ref, command, cb, timeout)` sends one AT command over the

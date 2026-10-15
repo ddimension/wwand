@@ -74,11 +74,21 @@ export function unsendable_conn(cfg)
 	return null;
 };
 
-// standard 3GPP context definition — the default `define` for most vendors
-function cgdcont(cid, pdp, apn)
+// standard 3GPP context definition — the default `define` for most vendors.
+// `alloc` is <IPv4AddrAlloc>, the 7th parameter (3GPP TS 27.007 +CGDCONT:
+// 0 = NAS signalling, 1 = DHCP), sent only when the interface asked for one:
+// the parameters between are left at their defaults ("" address, 0, 0), and a
+// modem that never saw the field keeps its own default.
+function cgdcont(cid, pdp, apn, alloc)
 {
+	if (alloc != null)
+		return sprintf('AT+CGDCONT=%d,"%s","%s","",0,0,%d', cid, pdp, apn, alloc);
+
 	return sprintf('AT+CGDCONT=%d,"%s","%s"', cid, pdp, apn);
 }
+
+// `address_allocation` (config.uc) as the <IPv4AddrAlloc> number
+const ADDR_ALLOC = { nas: 0, dhcp: 1 };
 
 // --- CGCONTRDP / CGPADDR parsers (shared with the per-vendor ip_config hooks) -
 
@@ -1145,6 +1155,34 @@ export const VENDORS = {
 			'AT+QICSGP=%d,%d,"%s","%s","%s",%d', cid, ctxtype, apn,
 			cfg.username ?? '', cfg.password ?? '', auth_value(cfg)),
 		dials: [ DIAL_QNETDEVCTL, DIAL_CGACT ],
+		// AT+QIP6CFG: the same profile flag as QMI WDS TLV 0xDF (both
+		// directions HW-verified on the RG650E, 2026-10-08), and the prefix
+		// the modem holds for <cid>. "::/0" is its untouched default buffer,
+		// i.e. none (format strings from the RG650E firmware, read 2026-10-09;
+		// answers seen on the RG650E and RM520N-GL).
+		pd: {
+			read: (cid) => sprintf('AT+QIP6CFG="PD_enable",%d', cid),
+			parse: (lines, cid) => {
+				for (let l in (lines ?? [])) {
+					let m = match(l, /\+QIP6CFG:\s*([0-9]+)\s*,\s*([01])/);
+
+					if (m && +m[1] == cid)
+						return +m[2];
+				}
+				return null;
+			},
+			write: (cid, v) => sprintf('AT+QIP6CFG="PD_enable",%d,%d', cid, v),
+			addr: (cid) => sprintf('AT+QIP6CFG="PD_addr",%d', cid),
+			parse_addr: (lines) => {
+				for (let l in (lines ?? [])) {
+					let m = match(l, /"PD_addr"\s*,\s*[0-9]+\s*,\s*([0-9A-Fa-f:]+)\/([0-9]+)/);
+
+					if (m && +m[2] > 0 && m[1] != '::')
+						return sprintf('%s/%d', m[1], +m[2]);
+				}
+				return null;
+			},
+		},
 		stats: 'AT+QGDCNT?',
 		parse_stats: (lines) => {
 			for (let l in (lines ?? [])) {
@@ -1483,7 +1521,9 @@ export const VENDORS = {
 	mediatek: {
 		match: /mediatek|mtk/,
 		modem_init: [ 'AT+CFUN=1' ],
-		define: (cid, pdp, apn) => sprintf('AT+CGDCONT=%d,"%s","%s",0,0', cid, pdp, apn),
+		define: (cid, pdp, apn, alloc) => (alloc != null)
+			? sprintf('AT+CGDCONT=%d,"%s","%s",0,0,0,%d', cid, pdp, apn, alloc)
+			: sprintf('AT+CGDCONT=%d,"%s","%s",0,0', cid, pdp, apn),
 		auth_cmd: AUTH_CGAUTH,
 		dials: [ DIAL_CGACT ],
 		stats: null,
@@ -1933,10 +1973,13 @@ export function build_pdp_setup(vendor, cid, cfg)
 	// context to activate even on modems whose vendor define uses a proprietary
 	// table (ZTE/MikroTik AT+ZGDCONT). A vendor `define` is then layered ON TOP as
 	// an extension (extra columns / vendor NV), not as a replacement.
-	let cmds = [ cgdcont(cid, pdp, target_apn) ];
+	let alloc = ADDR_ALLOC[cfg.address_allocation];
+	let cmds = [ cgdcont(cid, pdp, target_apn, alloc) ];
 
+	// `alloc` goes to the vendor define as well: one that rewrites the same
+	// CGDCONT (MediaTek) would otherwise reset the preference just written
 	if (vendor.define)
-		push(cmds, vendor.define(cid, pdp, target_apn));
+		push(cmds, vendor.define(cid, pdp, target_apn, alloc));
 
 	let acs = vendor.auth_cmds
 		? vendor.auth_cmds(cid, ctxtype, target_apn, cfg)
@@ -1956,7 +1999,9 @@ export function build_pdp_setup(vendor, cid, cfg)
 	return cmds;
 };
 
-// AT+CGDCONT? read-back: '+CGDCONT: <cid>,"<type>","<apn>",...' per line.
+// AT+CGDCONT? read-back: '+CGDCONT: <cid>,"<type>","<apn>",<addr>,<d_comp>,
+// <h_comp>,<IPv4AddrAlloc>,...' per line. `alloc` is null where the line
+// stops before the 7th field (older firmware) — unknown, not 0.
 export function parse_cgdcont(lines)
 {
 	let out = [];
@@ -1964,8 +2009,14 @@ export function parse_cgdcont(lines)
 	for (let l in (lines ?? [])) {
 		let m = match(l, /\+CGDCONT:\s*([0-9]+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"/);
 
-		if (m)
-			push(out, { cid: +m[1], pdp_type: m[2], apn: m[3] });
+		if (!m)
+			continue;
+
+		// the address may be quoted (and contain dots) or empty; the next
+		// three fields are plain numbers
+		let t = match(l, /\+CGDCONT:[^,]*,[^,]*,"[^"]*"\s*,\s*("[^"]*"|[^,]*)\s*,\s*[0-9]*\s*,\s*[0-9]*\s*,\s*([0-9]+)/);
+
+		push(out, { cid: +m[1], pdp_type: m[2], apn: m[3], alloc: t ? +t[2] : null });
 	}
 
 	return out;
@@ -1983,10 +2034,64 @@ export function pdp_setup_matches(cid, cfg, lines)
 		if (e.cid != cid)
 			continue;
 
-		return uc(e.pdp_type) == want_pdp && lc(e.apn) == want_apn;
+		// an allocation preference that was asked for must be held too; an
+		// unreadable one counts as "differs", like an absent QMI TLV
+		let want_alloc = ADDR_ALLOC[cfg.address_allocation];
+
+		return uc(e.pdp_type) == want_pdp && lc(e.apn) == want_apn &&
+			(want_alloc == null || e.alloc === want_alloc);
 	}
 
 	return false;
+};
+
+// --- IPv6 prefix delegation on an AT modem ------------------------------------
+//
+// Only a vendor with a `pd` recipe has it (Quectel: AT+QIP6CFG); there is no
+// 3GPP AT command for it. `send(cmd, cb(err, lines))` is the caller's AT send.
+
+// sync_pd: read the flag of <cid>, write it only when it differs from `want`
+// (0/1; null = leave it). cb(changed).
+export function sync_pd(vendor, send, cid, want, log, cb)
+{
+	let pd = vendor?.pd;
+
+	if (!pd || want == null)
+		return cb(false);
+
+	send(pd.read(cid), (err, lines) => {
+		// an unread flag is not "differs": read-before-write means no write
+		// on a failed read (QMI writes on an ABSENT TLV, where the read itself
+		// succeeded — a different case)
+		if (err)
+			return cb(false);
+
+		let cur = pd.parse(lines, cid);
+
+		if (cur === want)
+			return cb(false);
+
+		log('notice', sprintf('profile %d: IPv6 prefix delegation %J -> %d', cid, cur, want));
+
+		send(pd.write(cid, want), (e2) => {
+			if (e2)
+				log('warn', sprintf('profile %d: IPv6 prefix delegation not accepted: %J', cid, e2));
+
+			cb(!e2);
+		});
+	});
+};
+
+// read_pd_prefix: the prefix delegated to <cid>, "addr/len", or null for none,
+// no recipe or an error. cb(prefix).
+export function read_pd_prefix(vendor, send, cid, cb)
+{
+	let pd = vendor?.pd;
+
+	if (!pd?.addr)
+		return cb(null);
+
+	send(pd.addr(cid), (err, lines) => cb(err ? null : pd.parse_addr(lines)));
 };
 
 // per-vendor telemetry blocks (telemetry_ncm.uc) wired onto the VENDORS recipes;

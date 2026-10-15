@@ -40,6 +40,7 @@
 
 import * as uloop from 'uloop';
 import * as nmea from 'wwand.nmea';
+import * as locmod from 'wwand.codec.schema.loc';
 
 // A GNSS port is a plain serial line. 9600 is the NMEA 0183 rate every modem
 // in this tree presents; ugps defaults to 4800, which is the 1983 one and
@@ -54,7 +55,10 @@ const MAX_LINE = 1024;
 
 // create(o) -> reader
 //
-//   o.path       the tty (required)
+//   o.path       the tty — or, with o.feed, only the name the reader reports
+//   o.feed       true: no port at all; the lines arrive through push() (QMI
+//                LOC's NMEA indications, loc_session below). start() and
+//                stop() then only switch the reader on and off
 //   o.baud       default 9600
 //   o.open       injectable opener for tests; must return { fileno, read, close }
 //   o.watch      injectable fd watcher; must return { delete }
@@ -80,7 +84,7 @@ function create(o) {
 		error: null,
 		// counters, because "no position" has several causes and they are
 		// worth telling apart in a status page
-		lines: 0, sentences: 0, unparsed: 0,
+		lines: 0, sentences: 0, unparsed: 0, ignored: 0,
 	};
 
 	let parser = nmea.create();
@@ -93,7 +97,7 @@ function create(o) {
 	// deps.set_clock, and a router with no RTC steps from 1970 to now the
 	// moment the first RMC lands. On the wall clock that would report an age
 	// of fifty-six years and expire every satellite in view at the same
-	// instant. context_common.uc:98 does the same for the same reason.
+	// instant. context_common.uc:122 does the same for the same reason.
 	let mono = o.now ?? (() => clock(true)[0]);
 
 	let feed_line = (line, now) => {
@@ -103,6 +107,14 @@ function create(o) {
 		self.lines++;
 
 		let t = parser.feed(line, now);
+
+		// valid NMEA this does not read (a proprietary $PQXFI/$PSTIS, a GNS
+		// from a multi-constellation engine) is counted apart: `unparsed` is
+		// what tells a port carrying something that is not NMEA at all
+		if (t === false) {
+			self.ignored++;
+			return;
+		}
 
 		if (t == null) {
 			self.unparsed++;
@@ -122,16 +134,14 @@ function create(o) {
 	// its own: a sentence that straddles two reads arrives as a head with no
 	// newline and a tail that starts mid-word, and treating each read as a unit
 	// silently drops both halves.
+	//
+	// THE LIMIT IS ON THE UNFINISHED TAIL, not on the buffer: one read can
+	// carry a whole second of sentences, and a multi-constellation receiver
+	// sends more than MAX_LINE of them at once. Checked before the split, such
+	// a read lost its first sentence every second as "unparsed" — an RG502Q
+	// sending GPS + GLONASS + Galileo, 2026-10-04.
 	let consume = (chunk, now) => {
 		buffer += chunk;
-
-		if (length(buffer) > MAX_LINE) {
-			// keep the tail: whatever follows the next newline is still usable
-			let nl = index(buffer, '\n');
-
-			buffer = (nl >= 0) ? substr(buffer, nl + 1) : '';
-			self.unparsed++;
-		}
 
 		let idx;
 
@@ -139,11 +149,24 @@ function create(o) {
 			feed_line(trim(substr(buffer, 0, idx)), now);
 			buffer = substr(buffer, idx + 1);
 		}
+
+		// no newline in MAX_LINE bytes: not a sentence, whatever it is
+		if (length(buffer) > MAX_LINE) {
+			buffer = '';
+			self.unparsed++;
+		}
 	};
 
 	self.start = function() {
 		if (self.running)
 			return true;
+
+		if (o.feed) {
+			self.error = null;
+			self.running = true;
+			buffer = '';
+			return true;
+		}
 
 		let open = o.open, last_error = o.last_error;
 
@@ -196,10 +219,10 @@ function create(o) {
 				// thing on this kind of port, and treating them alike tore the
 				// reader down within milliseconds of starting it:
 				//
-				// wwand_io.open_tty sets VMIN=0 VTIME=0 (io/src/wwand-io.c:30),
+				// wwand_io.open_tty sets VMIN=0 VTIME=0 (io/src/wwand-io.c:31),
 				// so a tty with nothing to say returns 0 bytes IMMEDIATELY —
 				// that is the configuration, not an end of file. qmit_read maps
-				// both 0 and a hard error to `false` (wwand-io.c:370), and only
+				// both 0 and a hard error to `false` (wwand-io.c:371), and only
 				// the error path sets errno, which it clears before every read.
 				// So the errno is what tells them apart: none means idle, and a
 				// real one means the device is gone. atcmd never had to make
@@ -242,6 +265,9 @@ function create(o) {
 		self.running = false;
 		generation++;   // retire this watcher: a pending callback is not ours
 
+		if (o.feed)
+			return;
+
 		// Deferred for the reason atcmd.uc gives: stop() is reachable from
 		// inside this handle's own uloop callback, and deleting the handle
 		// there frees something uloop is still using. Harmless on 64-bit,
@@ -265,12 +291,159 @@ function create(o) {
 	self.snapshot = (now) => ({
 		...parser.snapshot(now ?? mono()),
 		port: self.path,
+		source: o.feed ? 'qmi_loc' : 'nmea_port',
 		running: self.running,
 		error: self.error,
 		lines: self.lines,
 		sentences: self.sentences,
 		unparsed: self.unparsed,
+		ignored: self.ignored,
 	});
+
+	return self;
+};
+
+// loc_session(o) -> session: NMEA over QMI LOC, for a modem without an NMEA
+// port of its own.
+//
+//   o.modem    the modem object; only its extra_client/extra_release are used
+//              — the plugin contract both backends carry (modem.uc, natively;
+//              modem_mbim.uc, over the QMI-over-MBIM passthrough)
+//   o.on_line  called with each NMEA sentence, CR/LF stripped
+//   o.on_state called with (event, detail) for the caller to log: 'started',
+//              or 'failed' with { stage, err } — this script does not log
+//              (see the top of the file)
+//
+// THE SESSION IS ENDED BEFORE ITS CLIENT GOES, by the modem: the client's
+// `before_release` sends LOC STOP ahead of the RELEASE_CID, on teardown and on
+// stop() alike. RELEASE_CID only drops the client; the engine kept reporting
+// every second, and an EG25-G's QMI side hung three times in one afternoon
+// right after such teardowns (EG25GGBR07A08M2G, 2026-10-01).
+//
+// Over the MBIM passthrough, whether the modem forwards LOC indications at all
+// is the firmware's choice (NAS sends none there on the EG06, qmi_over_mbim.uc
+// :143-151). A session that starts and never delivers a line shows up as
+// `sentences: 0` in the status, which is the honest answer.
+const LOC_SESSION_ID = 1;
+
+function loc_session(o) {
+	let self = { state: 'idle', error: null, client: null, indications: 0 };
+	let gen = 0;
+
+	let fail = (g, stage, err) => {
+		if (g != gen)
+			return;
+
+		self.state = 'failed';
+		self.error = { stage: stage, err: err };
+
+		let c = self.client;
+
+		self.client = null;
+
+		if (c && !c.destroyed)
+			o.modem.extra_release(c);
+
+		if (o.on_state)
+			o.on_state('failed', self.error);
+	};
+
+	self.start = function() {
+		if (self.state == 'starting' || self.alive())
+			return false;
+
+		if (type(o.modem?.extra_client) != 'function') {
+			fail(++gen, 'client', { error: 'unsupported', detail: 'no QMI on this modem' });
+			return false;
+		}
+
+		let g = ++gen;
+
+		self.state = 'starting';
+		self.error = null;
+
+		o.modem.extra_client(locmod.default, (err, c) => {
+			// stopped (or restarted) while the allocation was out: the client
+			// is nobody's, give it back
+			if (g != gen) {
+				if (c)
+					o.modem.extra_release(c);
+
+				return;
+			}
+
+			if (err)
+				return fail(g, 'client', err);
+
+			self.client = c;
+
+			c.before_release = (cl) =>
+				cl.request('STOP', { session_id: LOC_SESSION_ID }, () => null, { no_recovery: true });
+
+			c.on('NMEA_IND', (d) => {
+				if (g != gen)
+					return;
+
+				self.indications++;
+
+				for (let line in split(d?.nmea ?? '', /\r?\n/)) {
+					line = trim(line);
+
+					if (length(line))
+						o.on_line(line);
+				}
+			});
+
+			c.request('REGISTER_EVENTS', { mask: locmod.EVENT_NMEA }, (e2) => {
+				if (e2)
+					return fail(g, 'register_events', e2);
+
+				// every sentence type, so GSV comes for each constellation the
+				// engine tracks (loc.uc NMEA_TYPES_ALL). Best effort: a firmware
+				// that does not know the message keeps its own default set
+				c.request('SET_NMEA_TYPES', { types: locmod.NMEA_TYPES_ALL },
+					() => null, { no_recovery: true });
+
+				c.request('START', {
+					session_id: LOC_SESSION_ID,
+					// periodic, not the single fix an absent TLV means
+					fix_recurrence: locmod.FIX_RECURRENCE_PERIODIC,
+					intermediate_reports: 1,
+					min_interval_ms: 1000,
+				}, (e3) => {
+					if (e3)
+						return fail(g, 'start', e3);
+
+					if (g != gen)
+						return;
+
+					self.state = 'running';
+
+					if (o.on_state)
+						o.on_state('started', null);
+				}, { no_recovery: true });
+			}, { no_recovery: true });
+		});
+
+		return true;
+	};
+
+	// the modem's teardown takes the client with it (and says goodbye through
+	// before_release); a destroyed client means the next modem needs a new one
+	self.alive = () => self.state == 'starting' ||
+	                   (self.state == 'running' && self.client != null && !self.client.destroyed);
+
+	self.stop = function() {
+		gen++;
+
+		let c = self.client;
+
+		self.client = null;
+		self.state = 'idle';
+
+		if (c && !c.destroyed)
+			o.modem.extra_release(c);
+	};
 
 	return self;
 };
@@ -299,4 +472,4 @@ function status(modem, snap) {
 	return { ...out, reading: snap.running, ...snap };
 };
 
-return { create, status, DEFAULT_BAUD };
+return { create, loc_session, status, DEFAULT_BAUD };

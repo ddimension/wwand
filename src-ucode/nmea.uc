@@ -143,6 +143,28 @@ function ymd_ok(y, mo, d) {
 // or the checksum does not match. The checksum is the XOR of everything
 // between '$' and '*'; a sentence without one is refused rather than trusted,
 // because a truncated line is exactly what a half-read buffer produces.
+// A checksum-valid proprietary sentence ($P + maker, NMEA 0183 §5.3) — NMEA,
+// just not one with a talker, so parse_sentence skips it.
+function is_proprietary(line)
+{
+	let l = trim(line ?? '');
+
+	if (substr(l, 0, 2) != '$P')
+		return false;
+
+	let star = index(l, '*');
+
+	if (star < 0)
+		return false;
+
+	let body = substr(l, 1, star - 1), have = 0;
+
+	for (let i = 0; i < length(body); i++)
+		have ^= ord(body, i);
+
+	return hex(substr(l, star + 1, 2)) === have;
+};
+
 export function parse_sentence(line) {
 	let s = trim(line ?? '');
 
@@ -410,17 +432,21 @@ export function create() {
 		},
 	};
 
-	// One line in. Returns the sentence type it acted on, or null.
+	// One line in. Returns the sentence type it acted on; false for a sentence
+	// that is valid NMEA but not one this reads (a proprietary $P…, a GNS);
+	// null for a line that is not a valid sentence at all. The two are kept
+	// apart because only the second says the port carries something that is
+	// not NMEA — a multi-constellation engine sends GNS and $PSTIS all day.
 	self.feed = function(line, now) {
 		let s = parse_sentence(line);
 
 		if (!s)
-			return null;
+			return is_proprietary(line) ? false : null;
 
 		let h = handlers[s.type];
 
 		if (!h)
-			return null;
+			return false;
 
 		h(s.f, now, s.talker);
 

@@ -32,12 +32,9 @@
 //
 // Under QMI the driver uses the same base as its USB sibling: 0x81 + offset.
 //
-// NOT HARDWARE-VERIFIED. Every number above is read out of the driver source
-// and none of it has run on a board here. The MBIM mapping reaches into
-// context_mbim (the session id, and the CONNECT-indication match), so on
-// unexpected hardware the failure mode is "the session never comes up" rather
-// than something subtle — compare `wire_session_id` in the context status with
-// what the modem was asked for.
+// The session mapping follows the vendor driver. The MBIM path still needs
+// hardware validation. Compare wire_session_id with the requested session
+// when a connection fails.
 
 'use strict';
 
@@ -52,10 +49,9 @@ function vendor_attr(netdev, name)
 // offset_id + 1). The 12-character truncation is the driver's own.
 //
 // It is derived from the parent's name AT CREATION TIME. If the parent was
-// renamed afterwards, the children keep names built from the old one and this
-// no longer finds them — the probe then declines and the built-ins get their
-// turn, which is the safe direction. Recovering such children would take a
-// pcie_mhi reload; wwand does not rename an MHI parent itself.
+// renamed afterwards, the children keep names built from the old one.
+// Renamed children are matched by their device link or MAC prefix below.
+// wwand does not rename the MHI parent.
 function vendor_child(netdev, id)
 {
 	return sprintf('%.12s.%d', netdev, id);
@@ -114,6 +110,51 @@ function mac(fx, netdev)
 	return trim(fx.read(sprintf('/sys/class/net/%s/address', netdev)) ?? '');
 }
 
+// A QMAP child's device link names its PARENT NETDEV: the driver registers
+// it with SET_NETDEV_DEV(qmap_net, &real_dev->dev), real_dev being the
+// parent's struct net_device (mhi_netdev_quectel.c:1608,1619 in 1.3.8,
+// :1615 in 1.6.0; checked 2026-10-05), so /sys/class/net/<child>/device
+// resolves to .../net/<parent>. true/false when the link exists, null when
+// there is none to ask (then the MAC prefix decides).
+function child_of(fx, child, parent)
+{
+	let target = fx.readlink
+		? fx.readlink(sprintf('/sys/class/net/%s/device', child)) : null;
+
+	if (!target)
+		return null;
+
+	return target == parent ||
+		(length(target) > length(parent) &&
+		 substr(target, length(target) - length(parent) - 1) == '/' + parent);
+}
+
+function qmap_versions(fx, netdev)
+{
+	let info = (type(fx?.rmnet_info) == 'function') ? fx.rmnet_info(netdev) : null;
+
+	if (info?.qmap_version == 9)
+		return [ 5 ];
+
+	if (info?.qmap_version == 5)
+		return [ 1 ];
+
+	// Without the ioctl, the PCI ids for which the vendor driver sets
+	// qmap_version = 9 (QMAP v5) — mhi_netdev_quectel.c:3283-3294 in 1.6.0,
+	// which adds the four SDX35 ids (0x1eac:0x1012-0x1015) to the six of
+	// 1.3.8 (checked 2026-10-05). Every other id is driven at QMAP v1.
+	let id = pci_id(fx, netdev);
+	let key = sprintf('%s:%s', id?.vendor ?? '', id?.device ?? '');
+
+	if (index([ '0x17cb:0x0306', '0x17cb:0x0308', '0x17cb:0x011a',
+	            '0x17cb:0x0309', '0x1eac:0x1004', '0x1eac:0x100b',
+	            '0x1eac:0x1012', '0x1eac:0x1013', '0x1eac:0x1014',
+	            '0x1eac:0x1015' ], key) >= 0)
+		return [ 5 ];
+
+	return [ 1 ];
+}
+
 return {
 	// the driver serves both control protocols; which one is running decides
 	// the wire id, not which datapath is chosen
@@ -121,10 +162,9 @@ return {
 
 	description: 'QMAP over the vendor PCIe/MHI driver with Qualcomm NSS offload',
 
-	// Specific: the vendor MHI module, its knobs on THIS parent, and a child it
-	// actually registered. The child check is what separates this from its USB
-	// sibling (dot vs underscore) and from a plain 802.1q VLAN on a netdev that
-	// happens to carry those knobs.
+	// Specific: the vendor MHI module, its driver on THIS parent, and its QMAP
+	// mode. Do not require the original dot-child name here: wwand renames that
+	// child, and the datapath must remain selectable after a daemon restart.
 	probe: (fx, netdev) => {
 		if (!fx.exists('/sys/module/pcie_mhi'))
 			return false;
@@ -139,9 +179,6 @@ return {
 			return false;
 
 		if (qmap_mode(fx, netdev) < 1)
-			return false;
-
-		if (!fx.exists(sprintf('/sys/class/net/%s', vendor_child(netdev, 1))))
 			return false;
 
 		// Claimed either way — the children need adopting regardless — but a
@@ -171,6 +208,7 @@ return {
 	programs_parent: false,
 	aggregate: false,
 	qmap: true,
+	qmap_versions: qmap_versions,
 
 	// the children are the kernel's; only a pcie_mhi reload creates or removes
 	// them, and the shared prune matches on iflink, which they do not report
@@ -199,20 +237,20 @@ return {
 			let child = ctx.child_name(entry);
 
 			if (!fx.exists(sprintf('/sys/class/net/%s', from))) {
-				// Already renamed by an earlier run. The driver copies the
-				// parent's MAC and then overwrites the LAST octet with the
-				// channel number, so — unlike the USB sibling — identity here is
-				// the first five octets, not the whole address.
+				// Already renamed. Match the parent device link, or use the
+				// first five MAC octets when no usable link exists.
 				if (fx.exists(sprintf('/sys/class/net/%s', child))) {
-					// first five octets: the driver copies the parent's address
-					// and overwrites the LAST one with the channel number. An
-					// all-zero address is the raw-IP default and identifies
-					// nothing, so it is refused rather than matched — otherwise
-					// every 00:00:00:00:00:* device on the box qualifies.
+					// The driver copies the parent's address and overwrites the
+					// LAST octet with offset_id + 1 (mhi_netdev_quectel.c:
+					// 1627-1636 in 1.6.0; checked 2026-10-05), so the first five
+					// octets identify the parent. An all-zero prefix (the raw-IP
+					// default) identifies nothing and is refused.
 					let pmac = mac(fx, ctx.netdev);
+					let parent_match = child_of(fx, child, ctx.netdev);
 
-					if (length(pmac) >= 14 && substr(pmac, 0, 14) != '00:00:00:00:00' &&
-					    substr(mac(fx, child), 0, 14) == substr(pmac, 0, 14)) {
+					if (parent_match == true ||
+					    (parent_match == null && length(pmac) >= 14 && substr(pmac, 0, 14) != '00:00:00:00:00' &&
+					     substr(mac(fx, child), 0, 14) == substr(pmac, 0, 14))) {
 						ctx.mux_mtus[child] = entry.mtu;
 						push(out, child);
 					}

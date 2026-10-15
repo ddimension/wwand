@@ -88,6 +88,30 @@ ok(fx.has(`${L}/lte3301-plus:green:mobile/brightness=255`), 'lte3301: green mobi
 ok(fx.has(`${L}/lte3301-plus:red:mobile/brightness=0`), 'lte3301: red mobile off when registered');
 ok(fx.has(`${L}/lte3301-plus:white:lte/brightness=255`), 'lte3301: LTE led on when attached');
 
+// ...but only on LTE: a box that fell back to 3G keeps the LTE led dark, as
+// the vendor helper's `grep lte` did
+fx = mkfx({});
+b = board.create({ id: 'zyxel,lte3301-plus', fx: fx, log: () => {} });
+b.leds({ present: true, registered: true, radio: 5, lte: false });
+ok(fx.has(`${L}/lte3301-plus:white:lte/brightness=0`), 'lte3301: LTE led off on 3G');
+ok(fx.has(`${L}/lte3301-plus:green:mobile/brightness=255`), 'lte3301: ...while green still says registered');
+
+// both LTE3301 variants: usbpower switched on when off, both modem ids bound,
+// the OpenWrt port's LED names: color:function, no board prefix
+for (let v in [ 'zyxel,lte3301-m209', 'zyxel,lte3301-q222' ]) {
+	fx = mkfx({ [`${G}/usbpower/value`]: '0' });
+	b = board.create({ id: v, fx: fx, log: () => {} });
+	b.init();
+	ok(fx.has(`${G}/usbpower/value=1`), sprintf('%s: usbpower switched on', v));
+	ok(fx.has('/sys/module/option/drivers/usb-serial:option1/new_id=1435 d181') &&
+	   fx.has('/sys/module/option/drivers/usb-serial:option1/new_id=2020 2033'),
+		sprintf('%s: both modem ids bound to option', v));
+	b.leds({ present: true, registered: true, radio: 8, lte: true });
+	ok(fx.has(`${L}/green:mobile/brightness=255`) && fx.has(`${L}/green:lte/brightness=255`) &&
+	   fx.has(`${L}/red:mobile/brightness=0`),
+		sprintf('%s: green mobile + LTE led on LTE', v));
+}
+
 // searching (present, not registered) -> red blinks via the timer trigger
 fx = mkfx({});
 b = board.create({ id: 'zyxel,lte3301-plus', fx: fx, log: () => {} });

@@ -152,7 +152,7 @@ export function create(mc, opts)
 	// (0xff broadcast fan-out in deliver) for every service.
 	//
 	// ONE handler per MBIM client, routed to its current shim. mc.on only
-	// appends (mbim_client.uc:369) and has no counterpart, while a shim is made
+	// appends (mbim_client.uc:378) and has no counterpart, while a shim is made
 	// per bring-up: every rebuild of a passthrough that stopped answering would
 	// leave a handler behind, and every indication would run through all of
 	// them. The route lives on the client because the client outlives shims.

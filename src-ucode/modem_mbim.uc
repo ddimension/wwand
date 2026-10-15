@@ -26,6 +26,7 @@ import * as bc from 'wwand.codec.mbim_schema.basic_connect';
 import * as ext from 'wwand.codec.mbim_schema.ms_basic_connect_ext';
 import * as context_common from 'wwand.context_common';
 import * as quectel_svc from 'wwand.codec.mbim_schema.quectel';
+import * as voice_svc from 'wwand.codec.mbim_schema.ms_voice_ext';
 // rich telemetry: native-MBIM backend + the QMI-over-MBIM passthrough (the whole
 // QMI client stack tunnelled over the open MBIM channel) + AT, chosen per
 // capability like modem.uc does over qmux.
@@ -113,6 +114,9 @@ export function create(opts)
 	// protocol-neutral scaffolding (set_state / attach_context /
 	// note_connect_success / trip_zero_rx on self; emit + notify_contexts here)
 	let scaffold = modem_common.scaffolding(self, { deps: deps, log: log, rec: rec });
+	// the LTE attach configuration is not a numbered profile (modem_common
+	// attach_owner): the scaffolding's owner check follows the same rule
+	self.attach_numbered = false;
 	let emit = scaffold.emit;
 	let notify_contexts = scaffold.notify_contexts;
 	let sim_block = scaffold.sim_block;
@@ -287,10 +291,51 @@ export function create(opts)
 		// native MS UICC Low Level Access transport for eSIM/APDU. sim.uc picks
 		// this duck-typed handle first (before the QMI passthrough and AT).
 		self.mbim_uicc = {
-			open:  (aid_hex, cb)           => mbim_backend.uicc_open_channel(self.mbim, aid_hex, (err, r) => {
-				log('info', sprintf('native MBIM UICC open: %s', err ? sprintf('%J', err) : sprintf('channel %d', r?.channel)));
-				cb(err, r);
-			}),
+			open:  (aid_hex, cb, o)        => {
+				// `gone`: the session ended while this open waited for the sweep
+				let go = (gone) => (gone || !self.mbim) ? cb({ error: 'cancelled' }, null)
+					: mbim_backend.uicc_open_channel(self.mbim, aid_hex, (err, r) => {
+						log('info', sprintf('native MBIM UICC open: %s', err ? sprintf('%J', err) : sprintf('channel %d', r?.channel)));
+						cb(err, r);
+					}, o);
+
+				// once per modem object, before its first open: free what an
+				// earlier run left open in our channel group (mbim_backend.uc
+				// UICC_CHANNEL_GROUP says why the group is ours alone).
+				// Best-effort — a modem without the service refuses, and that
+				// refusal says nothing about the channel. Opens that arrive
+				// WHILE it runs wait for it: started beside it, their channel
+				// would be one of those it closes.
+				if (self._uicc_sweep == 'done')
+					return go();
+
+				push(self._uicc_waiting ??= [], go);
+
+				if (self._uicc_sweep == 'running')
+					return;
+
+				self._uicc_sweep = 'running';
+
+				let sgen = self._gen;
+
+				mbim_backend.uicc_close_group(self.mbim, (err) => {
+					// a teardown since: it already answered the waiters
+					if (self._gen != sgen)
+						return;
+
+					if (err)
+						log('debug', sprintf('MBIM UICC: closing leftover channels: %J', err));
+
+					self._uicc_sweep = 'done';
+
+					let waiting = self._uicc_waiting;
+
+					self._uicc_waiting = [];
+
+					for (let w in waiting)
+						w();
+				}, { no_recovery: true });
+			},
 			apdu:  (channel, apdu_hex, cb) => mbim_backend.uicc_apdu(self.mbim, channel, apdu_hex, cb),
 			close: (channel, cb)           => mbim_backend.uicc_close_channel(self.mbim, channel, cb),
 			reset: (cb)                    => mbim_backend.uicc_reset(self.mbim, cb),
@@ -525,22 +570,45 @@ export function create(opts)
 	// side channel (AT+CGMI), for parity with the QMI DMS / NCM CGMI identity.
 	// Fully non-blocking: no AT, an error or a timeout just leaves it null and
 	// proceeds (some MBIM firmwares answer AT slowly or not at all).
+	//
+	// AT+GMI (V.250) FIRST, AT+CGMI (27.007) only if that is refused: a
+	// Foxconn T99W175 answers AT+CGMI with the name and no final OK, so the
+	// request ran into its timeout at every start, while AT+GMI ends in OK
+	// (terminal capture in ddimension/wwand#52, 2026-10-14). And a name that
+	// arrived before a timeout is taken: the answer is there, only its end
+	// is missing.
 	step_at_ident = () => {
 		if (self.info.manufacturer || !self.at)
 			return step_datapath();
 
-		self.at.send('AT+CGMI', (err, res) => {
-			if (!err)
-				for (let l in (res?.lines ?? [])) {
-					let t = trim(replace(l, /^\+CGMI:\s*/, ''));
+		let take = (res) => {
+			for (let l in (res?.lines ?? [])) {
+				let t = trim(replace(l, /^\+C?GMI:\s*/, ''));
 
-					if (t != '' && t != 'OK' && !match(t, /^[+^]/)) {
-						self.info.manufacturer = t;
-						break;
-					}
+				if (t != '' && t != 'OK' && !match(t, /^[+^]/) && !match(t, /^AT/i)) {
+					self.info.manufacturer = t;
+					return true;
 				}
+			}
 
-			step_datapath();
+			return false;
+		};
+
+		self.at.send('AT+GMI', (err, res) => {
+			if ((!err || err.error == 'timeout') && take(res))
+				return step_datapath();
+
+			// CGMI only when GMI was REFUSED; a timeout, a closed port or a
+			// cancelled request says nothing a second command would change
+			if (err?.error != 'ERROR' && err?.error != 'cme' && err?.error != 'cms')
+				return step_datapath();
+
+			self.at.send('AT+CGMI', (e2, r2) => {
+				if (!e2 || e2.error == 'timeout')
+					take(r2);
+
+				step_datapath();
+			}, { timeout: 3000 });
 		}, { timeout: 3000 });
 	};
 
@@ -706,7 +774,23 @@ export function create(opts)
 		// (HW-hit on a SIM-less RM520N-GL: the PIN query answers MBIM status
 		// 3 and the old path counted connection attempts.)
 		if (self._ready_state == bc.READY_STATE_SIM_NOT_INSERTED) {
+			self._card_wait = 'sim_absent';
 			sim_block({ reason: 'sim_absent' });
+			self._wait_for_card();
+			return;
+		}
+
+		// AN eUICC WITH NO PROFILE ENABLED cannot register on anything: the
+		// card answers, the PIN query says unlocked, and the chain went on to
+		// a registration that times out and climbs the recovery ladder —
+		// radio cycles and modem resets that cannot enable a profile. Stopped
+		// here like a missing card; enabling a profile (lpac, LuCI eSIM) makes
+		// the modem report `initialized`, and retry_sim resumes from this step.
+		if (self._ready_state == bc.READY_STATE_NO_ESIM_PROFILE) {
+			log('warn', 'the eUICC has no profile enabled — enable one (eSIM) to register');
+			self._card_wait = 'no_esim_profile';
+			sim_block({ reason: 'no_esim_profile' });
+			self._wait_for_card();
 			return;
 		}
 
@@ -765,7 +849,9 @@ export function create(opts)
 				// same terminal mapping when only the PIN query reveals it
 				if (self._ready_state == bc.READY_STATE_SIM_NOT_INSERTED ||
 				    err.status == bc.STATUS_SIM_NOT_INSERTED) {
+					self._card_wait = 'sim_absent';
 					sim_block({ reason: 'sim_absent' });
+					self._wait_for_card();
 					return;
 				}
 
@@ -870,6 +956,50 @@ export function create(opts)
 		});
 	};
 
+	// Network time (NITZ) over the MS Voice Extensions service — the native
+	// path, so an MBIM modem without a usable AT port gets it too.
+	self._on_nitz = function(d) {
+		// all-zero until the network has sent one; nitz_epoch refuses it
+		let epoch = modem_common.nitz_epoch(d);
+
+		if (epoch == null)
+			return;
+
+		let tz_min = voice_svc.tz_minutes(d.tz_offset_min);
+
+		self.network_time = { epoch: epoch, tz_offset_min: tz_min,
+			dst: voice_svc.tz_minutes(d.dst_offset_min) };
+		log('info', sprintf('network time (NITZ): %d utc, tz %s',
+			epoch, tz_min != null ? sprintf('%+d min', tz_min) : '?'));
+		modem_common.nitz_apply(self, deps, epoch, tz_min);
+	};
+
+	// QUERY FIRST, SUBSCRIBE ONLY ON AN ANSWER. The subscribe list is one SET
+	// carrying every service; putting a service in it that the firmware does
+	// not implement risks the whole list being refused, and with it the
+	// subscriptions that are not optional (REGISTER_STATE, CONNECT, ...). A
+	// successful query is the proof that the service exists. no_recovery: a
+	// firmware without it answers a refusal, which says nothing about the
+	// channel.
+	self._query_nitz = function() {
+		let mc = self.mbim;
+
+		mc.command(voice_svc, 'NITZ', 'query', {}, (err, d) => {
+			if (err || self.mbim != mc)
+				return;
+
+			// once per client: on() appends, and a re-registration would
+			// otherwise stack a second handler for the same indication
+			if (!mc._nitz_on) {
+				mc._nitz_on = true;
+				mc.on(voice_svc, 'NITZ', self._on_nitz);
+				mc.subscribe_events();
+			}
+
+			self._on_nitz(d);
+		}, { no_recovery: true });
+	};
+
 	self._install_indications = function() {
 		self.mbim.on(bc, 'REGISTER_STATE', (data) => self._update_register(data));
 		// v1 RSSI floor: only fill in when no richer per-RAT signal is in place
@@ -947,6 +1077,21 @@ export function create(opts)
 				log('warn', 'sim removed');
 				emit('sim_removed', {});
 			}
+			// the profile was disabled under a running modem: stop here rather
+			// than let the lost registration walk the recovery ladder
+			else if (data.ready_state == bc.READY_STATE_NO_ESIM_PROFILE &&
+			         self.state != 'SIM_BLOCKED' && prev != null) {
+				log('warn', 'the eUICC has no profile enabled any more');
+				self._card_wait = 'no_esim_profile';
+				sim_block({ reason: 'no_esim_profile' });
+				self._wait_for_card();
+			}
+
+			// a card that stopped the chain is usable now (locked included:
+			// its PIN is the SIM step's to enter)
+			if (data.ready_state == bc.READY_STATE_INITIALIZED ||
+			    data.ready_state == bc.READY_STATE_DEVICE_LOCKED)
+				self.retry_sim?.();
 		});
 		// unsolicited per-session (de)activation — the network dropping a data
 		// context. Routed to the owning context by session id so it can tear the
@@ -1209,6 +1354,9 @@ export function create(opts)
 
 		emit('serving_system', self.reg);
 
+		if (registered)
+			self._reg_released = false;
+
 		if (registered && self.state == 'REGISTERING') {
 			if (reg_timer) { reg_timer.cancel(); reg_timer = null; }
 			// woken from a park at init: this READY entry emits `registered`
@@ -1237,8 +1385,17 @@ export function create(opts)
 			// registration is the consequence, not a fault — step_register
 			// would fight the park (it switches the software radio on) and
 			// its timeout walk the recovery ladder. Same as modem.uc.
-			if (self.lowpower_parked) {
-				log('info', 'registration released (radio parked)');
+			if (self.lowpower_parked || self.detached) {
+				// ONCE per loss: a modem that is detached but keeps camping
+				// reports its serving system every few seconds, and each
+				// report re-logged this and re-suspended the contexts
+				// (HW-observed over QMI on the RG650E, 2026-10-10)
+				if (self._reg_released)
+					return;
+
+				self._reg_released = true;
+				log('info', self.detached ? 'registration released (detached by the operator)'
+				                          : 'registration released (radio parked)');
 				emit('deregistered', self.reg);
 				notify_contexts('suspend', self.reg);
 				return;
@@ -1260,40 +1417,34 @@ export function create(opts)
 	// context.uc ensure_attach_profile. On a change, cycle the radio so an
 	// already-completed attach with the stale profile re-runs. Best-effort:
 	// firmware without the CID (or any error) just proceeds to step_register.
-	step_attach_profile = () => {
-		let ctx = self.contexts[0];
+	self._apply_attach = function(next) {
+		// the LTE attach configuration is not a numbered profile: session 1
+		// owns nothing here
+		let ctx = modem_common.attach_owner(self.contexts, self.attach_numbered);
+
+		// no interface bound yet: the first one to bind programs it
+		// (modem_common attach_context, via reapply_sim)
+		if (!ctx && self.mbim) {
+			log('notice', 'attach profile: no interface bound yet — programmed when the first one binds');
+			self._attach_pending = true;
+			return next();
+		}
 
 		if (!ctx || !self.mbim)
-			return step_register();
+			return next();
 
 		let apn = context_common.conn_cfg(ctx, 'apn');
 
-		// no configured APN, or '#N' (use the modem-provisioned context as-is) —
-		// never overwrite the SIM/modem-provisioned attach context (QMI parity).
-		//
-		// READ IT ANYWAY BEFORE LEAVING. Nothing is written on this path, but
-		// what the card provisions is exactly what zero-config autosetup needs
-		// to know before deciding whether an operator-table APN would be an
-		// improvement (daemon.uc maybe_autosetup_fill) — and an autosetup
-		// interface has no configured APN, so this early return was the only
-		// path it ever took. Returning here without looking left the daemon
-		// unable to tell "the card provides nothing" from "nobody asked", and
-		// it guessed. Best-effort: an error leaves card_apn unset, which the
-		// caller reads as unknown and declines to act on.
-		if (apn == null || apn == '' || substr(apn, 0, 1) == '#')
-			return mbim_backend.get_lte_attach_config(self.mbim, (gerr, cur) => {
-				if (!gerr) {
-					let home = null;
+		// '#N' means "use the modem-provisioned context as-is" — never rewrite
+		// it. Every other config, an UNSET APN included, is written: unset is
+		// the empty APN (the network's default), never "whatever the context
+		// happened to hold" — see context.uc ensure_attach_profile for the
+		// MC7710 whose stale attach APN out of another box flapped a Telekom
+		// card (deborah-3, 2026-10-04). NCM writes it at every dial too.
+		if (apn != null && substr(apn, 0, 1) == '#')
+			return next();
 
-					for (let c in (cur?.contexts ?? []))
-						if (c.roaming == ext.ROAMING_HOME) { home = c; break; }
-
-					home ??= (cur?.contexts ?? [])[0];
-					self.card_apn = home?.access_string ?? '';
-				}
-
-				step_register();
-			});
+		apn = apn ?? '';
 
 		let want_ip = bc.IP_TYPE_FROM_PDP[context_common.effective_pdp(ctx)] ?? bc.IP_TYPE_IPV4V6;
 		let user = context_common.conn_cfg(ctx, 'username') ?? '';
@@ -1315,7 +1466,7 @@ export function create(opts)
 			// up to date: same APN and (unknown or matching) IP family — leave it
 			if (!gerr && cur_apn == apn && (cur_ip == null || cur_ip == want_ip)) {
 				log('debug', sprintf('attach profile up to date (apn %J, ip %J)', cur_apn, cur_ip));
-				return step_register();
+				return next();
 			}
 
 			// overwrite all three roaming contexts with the same config (a Set
@@ -1334,7 +1485,7 @@ export function create(opts)
 				(serr) => {
 				if (serr) {
 					log('warn', sprintf('attach profile set failed: %J — continuing', serr));
-					return step_register();
+					return next();
 				}
 
 				self.effective_apn = apn;
@@ -1343,7 +1494,7 @@ export function create(opts)
 				// the radio is woken — a cycle ending online here would
 				// register behind the park's back
 				if (self.lowpower_parked || self._plugin_held)
-					return step_register();
+					return next();
 
 				// force the (possibly already-completed) autonomous attach to
 				// re-run with the new profile: radio off -> settle -> on -> settle
@@ -1354,13 +1505,15 @@ export function create(opts)
 						self.mbim.command(bc, 'RADIO_STATE', 'set',
 							{ radio_state: bc.RADIO_STATE_ON }, (e2, d2) => {
 							note_radio(d2);
-							settle_timer = uloop.timer(self.timing.settle, step_register);
+							settle_timer = uloop.timer(self.timing.settle, next);
 						});
 					});
 				});
 			});
 		});
 	};
+
+	step_attach_profile = () => self._apply_attach(step_register);
 
 	step_register = () => {
 		// HELD: the radio stays off (hold_at_open has the reason), and this is
@@ -1526,6 +1679,7 @@ export function create(opts)
 			// from the handlers just installed, and a modem that refuses it is
 			// no worse off than before.
 			self.mbim.subscribe_events();
+			self._query_nitz();
 
 			let reg_timeout;
 
@@ -1976,9 +2130,89 @@ export function create(opts)
 	// override — the old card's wwand_sim must not stick. Contexts pick the
 	// corrected override up on their next (re)dial via conn_cfg. (The LTE attach
 	// APN is programmed separately in step_attach_profile before registration.)
+	// Resume the init chain at the SIM step for a modem that stopped because
+	// there was no usable card — none inserted, or an eUICC with no profile
+	// enabled — and now the card reports `initialized` (or `device locked`,
+	// whose PIN the SIM step enters). The QMI twin is
+	// modem_init_qmi.uc retry_sim; same contract: true when it resumed. A
+	// PIN/PUK block stays terminal — a card turning up is not what it waits
+	// for. Called from the SUBSCRIBER_READY_STATUS indication and by
+	// simops card_changed.
+	// WAITING FOR THE CARD IS POLLED, not left to an indication. The
+	// SUBSCRIBER_READY_STATUS handler is installed only when the chain reaches
+	// registration (_install_indications), which a chain stopped at the SIM
+	// step never does, and an RM520N-GL's default indication set holds
+	// CONNECT and LTE_ATTACH_INFO only (see do_register) — so the "card is
+	// usable now" would go unheard and the modem stay stopped until a restart.
+	// One query per `card_wait` ms (default 10 s) while SIM_BLOCKED for want
+	// of a card, ending with this modem object.
+	let card_timer = null;
+
+	self._wait_for_card = function() {
+		if (card_timer)
+			return;
+
+		let gen = self._gen;
+		let tick;   // forward-declared (self-referencing arrow)
+
+		tick = () => {
+			card_timer = null;
+
+			if (self._gen != gen || !self.mbim || self.state != 'SIM_BLOCKED' || !self._card_wait)
+				return;
+
+			self.mbim.command(bc, 'SUBSCRIBER_READY_STATUS', 'query', {}, (err, d) => {
+				if (self._gen != gen || self.state != 'SIM_BLOCKED')
+					return;
+
+				// usable = unlocked, or locked and waiting for its PIN — the
+				// PIN handling is the SIM step's, so a card that needs one
+				// resumes into it rather than waiting here forever
+				if (!err && (d?.ready_state == bc.READY_STATE_INITIALIZED ||
+				             d?.ready_state == bc.READY_STATE_DEVICE_LOCKED)) {
+					self._ready_state = d.ready_state;
+
+					// the identity read at open belongs to the card as it was
+					// (no profile: no IMSI); take the one it reports now
+					if (d.subscriber_id != null && d.subscriber_id != '')
+						self.info.imsi = d.subscriber_id;
+					if (d.sim_iccid != null && d.sim_iccid != '')
+						self.info.iccid = d.sim_iccid;
+					self.active_sim = modem_common.match_sim_override(
+						self.config?.sims, self.info.iccid, self.info.imsi);
+
+					if (self.retry_sim())
+						return;
+				}
+
+				card_timer = uloop.timer(self.timing.card_wait ?? 10000, tick);
+			}, { no_recovery: true });
+		};
+
+		card_timer = uloop.timer(self.timing.card_wait ?? 10000, tick);
+	};
+
+	self.retry_sim = function() {
+		let why = self._card_wait;
+
+		if (self.state != 'SIM_BLOCKED' || (why != 'sim_absent' && why != 'no_esim_profile'))
+			return false;
+
+		log('notice', sprintf('the card is usable now (was: %s) — resuming from the SIM step', why));
+		self._card_wait = null;
+		step_sim();
+		return true;
+	};
+
 	self.reapply_sim = function(cb) {
 		let done = () => {
 			scaffold.resolve_active_sim(self.info.iccid, self.info.imsi);
+
+			// re-program the attach profile from the (possibly new) override
+			// and config — QMI parity (modem.uc reapply_sim); only once the
+			// init chain has passed its own attach step
+			if (index([ 'REGISTERING', 'READY' ], self.state) >= 0 && self.mbim)
+				return self._apply_attach(() => cb ? cb(null) : null);
 
 			if (cb)
 				cb(null);
@@ -2045,7 +2279,7 @@ export function create(opts)
 	// GIVE THE CID BACK. Every passthrough client is allocated out of the
 	// MODEM's client table, and a destroyed-but-not-released one stays in it
 	// until the modem's stack resets — the same finite resource modem.uc's
-	// teardown release burst exists to protect (modem.uc:333,:1416). The
+	// teardown release burst exists to protect (modem.uc:359,:1416). The
 	// session-long clients (pt.nas/dsd, uim, wms) are allocated once and go
 	// with the session; these two allocate PER CALL, so a scripted reattach
 	// loop walked the table down on its own. An E182E-class stack has room for
@@ -2111,7 +2345,7 @@ export function create(opts)
 
 	// A plugin's client of a QMI service the core does not know, over the
 	// QMI-over-MBIM passthrough — the QMI modem's extra_client, same contract
-	// (modem.uc): the modem owns it, releases its CID on teardown and when the
+	// (modem.uc), `before_release` included: the modem owns it, releases its CID on teardown and when the
 	// passthrough is rebuilt, and `destroyed` tells the plugin to ask again.
 	// Which indications the passthrough carries depends on the service
 	// (qmi_over_mbim.uc:143-151): NAS pushes none on the EG06 and the RM520N,
@@ -2180,8 +2414,12 @@ export function create(opts)
 			return true;
 		});
 
-		if (owned)
+		if (owned) {
+			if (self._gen == client._pt_gen && self.pt?.ctl)
+				modem_common.before_release([ client ], log);
+
 			pt_release(client);
+		}
 		else
 			client?.destroy();
 
@@ -2243,6 +2481,25 @@ export function create(opts)
 					}));
 			}, { no_recovery: true });
 		});
+	};
+
+	// PS attach (on) or detach over MBIM PACKET_SERVICE set, radio on — the
+	// same raw network action as modem.uc ps_attach; the session and
+	// registration handling around it is netsel_ops (modem_detach /
+	// modem_attach). The answer carries the resulting packet-service state.
+	self.ps_attach = function(on, cb) {
+		if (!self.mbim)
+			return cb({ error: 'unsupported_on_backend' });
+
+		self.mbim.command(bc, 'PACKET_SERVICE', 'set', {
+			packet_service_action: on ? bc.PACKET_SERVICE_ATTACH : bc.PACKET_SERVICE_DETACH,
+		}, (err, data) => {
+			if (err)
+				return cb({ error: 'mbim', detail: err });
+
+			self._update_packet_service(data);
+			cb(null, { ok: true, via: 'mbim', packet_service_state: data?.packet_service_state });
+		}, { no_recovery: true, timeout: 60000 });
 	};
 
 	// network reattach (ubus modem_reattach): detach/attach at registration
@@ -2382,6 +2639,14 @@ export function create(opts)
 				});
 			}, { no_recovery: true });
 		});
+	};
+
+	// the bands the modem supports, over the passthrough's DMS (dms.uc
+	// GET_BAND_CAPABILITIES); cb(err, raw response) — the QMI twin is
+	// modem.uc band_caps
+	self.band_caps = function(cb) {
+		pt_dms((dms, done) => dms.request('GET_BAND_CAPABILITIES', {}, (err, d) => done(err, d),
+			{ no_recovery: true }), cb);
 	};
 
 	// SET_OPERATING_MODE over the passthrough; cb(err). Methods, both, so a
@@ -2581,10 +2846,15 @@ export function create(opts)
 			// — closing the HOST's MBIM session is not shown to reset the
 			// modem's embedded QMI client table, so every daemon reload leaked
 			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
-			// table has room for a handful. Same burst modem.uc:1583 does for
+			// table has room for a handful. Same burst modem.uc:1572 does for
 			// the native side, which the passthrough never had. ctl is NOT in this list: it is the
 			// implicit client (cid 0) and it is what carries RELEASE_CID for
 			// all the others, so it has to outlive them.
+			// a plugin client's goodbye first (modem_common.before_release):
+			// written ahead of the RELEASE_CID burst on the same shim
+			if (pt.ctl)
+				modem_common.before_release(extra, log);
+
 			for (let c in [ pt.nas, pt.dsd, uim, wms, ...extra, ...owed ]) {
 				if (!c || !pt.ctl)
 					continue;
@@ -2635,6 +2905,26 @@ export function create(opts)
 				t.cancel();
 
 		retry_timer = reg_timer = settle_timer = at_drain_timer = sim_poll_timer = null;
+
+		// the card-wait poll belongs to this session: left armed, the next
+		// session's _wait_for_card saw it "running" and started none of its
+		// own, and the stale tick then ended on the generation check — a
+		// modem stopped for good
+		if (card_timer)
+			card_timer.cancel();
+		card_timer = null;
+		self._card_wait = null;
+
+		// ...and so does the UICC sweep: a new client is a new chance to find
+		// leftovers, and opens still waiting on this client's sweep are over
+		let uw = self._uicc_waiting ?? [];
+
+		self._uicc_sweep = null;
+		self._uicc_waiting = [];
+
+		for (let w in uw)
+			w(true);
+
 		telem.stop();
 
 		modem_common.close_at(self);
@@ -2646,7 +2936,7 @@ export function create(opts)
 		// refuses every future retry, which is worse than whatever the callback
 		// was complaining about. The QMI teardown wraps its equivalent call for
 		// the same reason; NCM needs none, close_at() discards its queue without
-		// paying it (atcmd.uc:1029). Review follow-up, 2026-09-19.
+		// paying it (atcmd.uc:1080). Review follow-up, 2026-09-19.
 		drop_pt();
 		self._pt_failed = false;
 		self._pt_built = false;

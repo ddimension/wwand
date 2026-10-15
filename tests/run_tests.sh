@@ -81,7 +81,7 @@ done
 # existed and v1.6.4 shipped the defect it catches anyway. These are the cheap,
 # deterministic ones; they need nothing but python3.
 if command -v python3 >/dev/null 2>&1; then
-	for chk in check-map check-anchors check-export-terminators standards; do
+	for chk in check-map check-anchors check-export-terminators check-ucode-pitfalls standards; do
 		# --since HEAD: an uncommitted edit that MOVES an anchored line fails the
 		# run before the commit, when fixing it is one `--fix` away
 		args=""
@@ -89,6 +89,7 @@ if command -v python3 >/dev/null 2>&1; then
 		# its default root is relative (src-ucode) and this runs from tests/,
 		# where it found nothing and reported "checked 0" as a pass
 		[ "$chk" = check-export-terminators ] && args="$TESTDIR/../src-ucode"
+		[ "$chk" = check-ucode-pitfalls ] && args="$TESTDIR/../src-ucode"
 		# the standards page is generated; this only says whether it is current
 		[ "$chk" = standards ] && args="--check"
 		out=$(python3 "$TESTDIR/../tools/$chk.py" $args 2>&1)
@@ -98,7 +99,7 @@ if command -v python3 >/dev/null 2>&1; then
 	done
 else
 	# said out loud: a silent skip here reads as "all checkers passed"
-	echo "WARNING: python3 not found — check-map, check-anchors, check-export-terminators and standards DID NOT RUN"
+	echo "WARNING: python3 not found — check-map, check-anchors, check-export-terminators, check-ucode-pitfalls and standards DID NOT RUN"
 fi
 
 exit $rc

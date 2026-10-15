@@ -49,7 +49,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 BANNED = re.compile(r'\(\?|\\[1-9]')
 
 # STRINGS ARE SCANNED, comments are not. Four call sites build a regex from a
-# TABLE ENTRY at runtime — netlink.uc:674, atcmd.uc:89, protocol_switch.uc:71,
+# TABLE ENTRY at runtime — netlink.uc:674, atcmd.uc:96, protocol_switch.uc:71,
 # modeswitch.uc:71 all do `regexp(<entry>.pattern)` over vendor-matching tables
 # whose patterns are string literals in the source. A banned construct there
 # compiles at first use and throws exactly like a literal would, so skipping

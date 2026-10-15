@@ -22,11 +22,13 @@ let r = padopt({
 		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', pincode: '1234',
 		      modes: 'lte,nr5g', mux: 'auto', at_init: [ 'ATI' ], location: '1',
 		      serial: '99efe861', imei: '350000000000000', repower_time: '10' },
+		m1: { '.type': 'wwand_modem', device: '/dev/cdc-wdm1', sim_detect: 'HIGH', reset_fallback: '45' },
 		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet',
 		       pdp_type: 'ipv4v6', mux_id: '0' },
 		wan2: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: '#2',
 		        pdp_type: 'ipv4', mux_id: '2', auto: '0',
-		        hard_reconnect_on_ip_change: '1' },
+		        hard_reconnect_on_ip_change: '1', ipv6_pd: '0',
+		        clat: '1', address_allocation: 'DHCP' },
 	},
 });
 
@@ -40,7 +42,31 @@ eq(r.globals.failed_min_gap, 30, 'native: failed_min_gap defaults to 30s');
 eq(r.modems.m0.device, '/dev/cdc-wdm0', 'native: modem device');
 eq(r.modems.m0.at_init, [ 'ATI' ], 'native: at_init list');
 eq(r.modems.m0.location, true, 'native: location bool');
+eq(r.modems.m0.gnss, true, 'native: location is an alias of gnss — GNSS has one switch');
 eq(r.modems.m0.failreboot, 100, 'native: failreboot default');
+
+// recovery_steps (ddimension/wwand#52): unset = the defaults (null), a partial
+// list replaces the first rungs, a list that does not rise is refused with a
+// warning instead of being half-applied
+{
+	let st = (v) => {
+		let c = config.parse({ network: {
+			m9: { '.type': 'wwand_modem', device: '/dev/cdc-wdm9', recovery_steps: v },
+		} });
+
+		return [ c.modems.m9.recovery_steps,
+		         length(filter(c.warnings ?? [], (w) => index(w, 'recovery_steps') >= 0)) ];
+	};
+
+	eq(r.modems.m0.recovery_steps, null, 'recovery_steps: unset = the defaults');
+	eq(st('2 6 12'), [ [ 2, 6, 12 ], 0 ], 'recovery_steps: three rising numbers');
+	eq(st('2'), [ [ 2, 16, 24 ], 0 ], 'recovery_steps: one number moves only the radio cycle');
+	eq(st('4,10'), [ [ 4, 10, 24 ], 0 ], 'recovery_steps: commas work as well');
+	eq(st('20'), [ null, 1 ], 'recovery_steps: past the next default rung is refused, said once');
+	eq(st('2 2 5'), [ null, 1 ], 'recovery_steps: not rising is refused');
+	eq(st('0'), [ null, 1 ], 'recovery_steps: 0 is not an attempt count');
+	eq(st('two'), [ null, 1 ], 'recovery_steps: a typo is refused');
+}
 eq(r.modems.m0.serial, '99efe861', 'native: modem serial anchor');
 eq(r.modems.m0.imei, '350000000000000', 'native: modem imei anchor');
 eq(r.modems.m0.repower_time, 10, 'native: repower_time parsed (seconds)');
@@ -49,6 +75,16 @@ eq(r.contexts.wan.interface, 'wan', 'native: interface attached');
 eq(r.contexts.wan2.mux_id, 2, 'native: mux id');
 eq(r.contexts.wan2.hard_reconnect_on_ip_change, true, 'native: hard_reconnect_on_ip_change parsed (bool)');
 eq(r.contexts.wan.hard_reconnect_on_ip_change, false, 'native: hard_reconnect defaults off');
+// tri-state: '0' is an instruction (clear the profile flag), unset is none
+eq(r.contexts.wan2.ipv6_pd, false, 'native: ipv6_pd 0 parsed as false');
+eq(r.contexts.wan.ipv6_pd, null, 'native: ipv6_pd unset stays null (profile left alone)');
+eq(r.contexts.wan2.clat, true, 'native: clat 1 parsed as true');
+eq(r.contexts.wan.clat, null, 'native: clat unset stays null');
+eq(r.contexts.wan2.address_allocation, 'dhcp', 'native: address_allocation parsed, case-insensitive');
+eq(r.contexts.wan.address_allocation, null, 'native: address_allocation unset stays null');
+eq(r.modems.m0.sim_detect, null, 'native: sim_detect unset stays null');
+eq(r.modems.m1.sim_detect, 'high', 'native: sim_detect parsed, case-insensitive');
+eq(r.modems.m1.reset_fallback, 45, 'native: reset_fallback parsed as seconds');
 eq(r.contexts.wan2.apn, '#2', 'native: profile passthrough apn');
 eq(r.contexts.wan.auto, true, 'native: interface auto defaults true');
 eq(r.contexts.wan2.auto, false, 'native: auto 0 -> not proactively brought up');
@@ -328,6 +364,17 @@ r = padopt({
 	},
 });
 eq(r.modems.m0.diag_port, null, 'diag_port: unset stays null (discovery decides)');
+eq(r.modems.m0.nitz_time, true, 'nitz_time: unset means ON (the network sets the clock)');
+
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', nitz_time: '0' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.nitz_time, false, "nitz_time: '0' switches it off");
+eq(length(filter(r.warnings, (w) => match(w, /unknown option 'nitz_time'/))), 0,
+	'nitz_time: and is not reported as dead config');
 
 // SIM toolkit routing. Unset must mean "leave the modem alone" — this changes
 // how the card and the network talk to each other, and a default would break a
@@ -504,6 +551,7 @@ eq(m.zero_rx_timeout, 3600, 'compat: zero rx timeout');
 eq(m.failreboot, 50, 'compat: failreboot');
 eq(m.delay, 5, 'compat: delay');
 eq(m.location, true, 'compat: location>1 becomes true');
+eq(m.gnss, true, 'compat: ...and switches gnss on');
 // cell lock lives on the interface sections in old configs (LuCI writes it
 // there) — it must end up on the synthesized modem
 eq(m.lock_4g, [ '1300:246' ], 'compat: lock_4g moved to modem');

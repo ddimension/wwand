@@ -57,6 +57,27 @@ const PDP_MAP = {
 	ipv4v6: wdsmod.PDP_TYPE_IPV4V6,
 };
 
+// The optional settings an interface may put into the modem profile it dials.
+// Each is a stored 3GPP profile setting — WDS Modify Profile input and Get
+// Profile Settings output, both since libqmi 1.36 (qmi-service-wds.json:
+// 372-377 Address Allocation Preference, 417-422 CLAT Enabled, 424-428 IPv6
+// Prefix Delegation; libqmi 1.38). All TRI-STATE in the config: an option
+// left unset leaves whatever the profile holds, because the write goes to
+// modem NV and a user who never asked should not get one. `key` is the schema
+// field (wds.uc), `opt` the interface option (config.uc), `v6` limits a flag to
+// a connection that carries IPv6, `map` turns a word option into the enum.
+const PROFILE_FLAGS = [
+	{ key: 'prefix_delegation', opt: 'ipv6_pd', label: 'IPv6 prefix delegation', v6: true },
+	// 464XLAT in the modem (RFC 6877) — only an IPv6 bearer has something to
+	// translate onto
+	{ key: 'clat', opt: 'clat', label: 'CLAT', v6: true },
+	// QmiWdsAddressAllocationPreference (qmi-enums-wds.h:2107-2110, 1.38):
+	// how the IPv4 address reaches the UE — in the PDN setup (NAS) or by DHCP
+	// over the bearer afterwards
+	{ key: 'address_allocation', opt: 'address_allocation', label: 'address allocation',
+	  map: { nas: 0, dhcp: 1 } },
+];
+
 // The same three PDP types as PDP_MAP, spelled the way 3GPP TS 27.007 AT+CGDCONT
 // wants them. Used only by the AT fallback below. (Deliberately a local copy and
 // not an import of ncm_vendors' PDP_STR: that module ships in wwand-ncm, this
@@ -90,6 +111,7 @@ export function create(opts)
 
 
 	let deps = opts.deps ?? {};
+	let v6_hint_given = false;   // pdp_type hint on an IPv6 refusal, once (activate)
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: interface %s: %s\n', level, self.name, msg)));
 
 	// log an assigned family IP config at 'notice' only the FIRST time (at
@@ -328,6 +350,37 @@ export function create(opts)
 		}, { timeout: AT_DEFINE_TIMEOUT_MS });
 	};
 
+	// The profile flag wanted for IPv6 prefix delegation: 1/0, or null for
+	// "leave it". An IPv4-only connection has no prefix to delegate, so the
+	// flag is not touched there either way.
+	// The optional profile flags this connection asks for (PROFILE_FLAGS),
+	// as [ { key, label, want } ] — only the ones set, and only those that
+	// apply to the connection's IP family.
+	let flags_wanted = () => {
+		let v6 = (context_common.effective_pdp(self) != 'ipv4');
+		let out = [];
+
+		for (let f in PROFILE_FLAGS) {
+			let v = self.config?.[f.opt];
+
+			if (v == null || (f.v6 && !v6))
+				continue;
+
+			push(out, { key: f.key, label: f.label, want: f.map ? f.map[v] : (v ? 1 : 0) });
+		}
+
+		return filter(out, (f) => f.want != null);
+	};
+
+	// The prefix-delegation flag alone: 1/0, or null when not asked for.
+	let pd_wanted = () => {
+		for (let f in flags_wanted())
+			if (f.key == 'prefix_delegation')
+				return f.want;
+
+		return null;
+	};
+
 	check_pdp_type = (profile, done, pre) => {
 		let wds = self.modem.wds_cfg;
 		let want = PDP_MAP[context_common.effective_pdp(self)];
@@ -354,26 +407,61 @@ export function create(opts)
 					profile.index));
 			}
 
-			if (data.pdp_type == want) {
+			let req = { profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: profile.index } };
+
+			if (data.pdp_type == want)
 				log('debug', sprintf('profile pdp type %d unchanged', want));
-				return done();
+			else {
+				log('notice', sprintf('changing profile %d pdp type %J -> %d',
+					profile.index, data.pdp_type, want));
+				req.pdp_type = want;
 			}
 
-			log('notice', sprintf('changing profile %d pdp type %J -> %d',
-				profile.index, data.pdp_type, want));
+			// An absent TLV in the read is compared as "differs": a stack that
+			// does not report the flag cannot be shown to hold it already.
+			let flags = flags_wanted();
 
-			wds.request('MODIFY_PROFILE', {
-				profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: profile.index },
-				pdp_type: want,
-			}, (e2) => {
+			for (let f in flags) {
+				if (data[f.key] !== f.want) {
+					log('notice', sprintf('changing profile %d %s %J -> %d',
+						profile.index, f.label, data[f.key], f.want));
+					req[f.key] = f.want;
+				}
+				else
+					log('debug', sprintf('profile %s %d unchanged', f.label, f.want));
+			}
+
+			let sent = filter(flags, (f) => req[f.key] != null);
+
+			if (req.pdp_type == null && !length(sent))
+				return done();
+
+			let write;
+			write = (r) => wds.request('MODIFY_PROFILE', r, (e2) => {
 				if (torn_down(e2, wds))
 					return;
+
+				// A stack that predates a TLV may refuse the whole message for
+				// it. The pdp type is what the dial depends on, so it gets a
+				// second write of its own; the flags are reported, not retried
+				// one by one — which of them it was, the answer does not say.
+				if (e2 && length(filter(sent, (f) => r[f.key] != null))) {
+					log('warn', sprintf('profile %d: %s not accepted: %J', profile.index,
+						join(', ', map(sent, (f) => f.label)), e2));
+
+					if (r.pdp_type == null)
+						return done();
+
+					return write({ profile: r.profile, pdp_type: r.pdp_type });
+				}
 
 				if (e2)
 					log('warn', sprintf('pdp type change failed: %J', e2));
 
 				done();
 			});
+
+			write(req);
 		};
 
 		// reuse the profile data the guard in prepare() already fetched
@@ -428,32 +516,24 @@ export function create(opts)
 				return done(false);
 			}
 
-			// Unset/empty config APN = use the SIM/modem-provisioned one (carrier
-			// pre-provisions the attach profile via MBN). So READ + LOG it and let
-			// the modem attach with it, rather than writing a blank APN (too blunt).
-			// ('#N' handled above; IP family still enforced below.)
+			// The attach profile carries what the CONFIG says, always: an unset
+			// APN is written as an empty one (the network's default), never left
+			// as whatever profile 1 happened to hold. Keeping a "provisioned" APN
+			// sounds careful and is not: profile 1 survives a modem's previous
+			// life, and an MC7710 out of another box attached a Telekom card
+			// with its old APN, got limited service and flapped, while an APN
+			// set afterwards changed nothing (deborah-3, 2026-10-04). NCM
+			// already writes the configured APN, empty included, at every dial
+			// (context_ncm.uc). ('#N' handled above; IP family enforced below.)
 			let card_apn = data.apn ?? '';
-			let configured = (apn != null && apn != '');
+			let want_apn = apn ?? '';
+			let configured = (want_apn != '');
 
-			self.effective_apn = configured ? apn : card_apn;
+			self.effective_apn = want_apn;
 
-			// Publish it on the MODEM, not just here: the attach profile is a
-			// property of the card, and zero-config autosetup needs it before it
-			// decides whether an operator-table APN is an improvement (see
-			// daemon.uc maybe_autosetup_fill). Recorded on every read so a SIM
-			// swap cannot leave a stale one behind.
-			if (self.modem)
-				self.modem.card_apn = card_apn;
-
-			if (!configured)
-				log('notice', sprintf('attach profile %d: no config APN — using SIM/modem-provisioned APN %s (pdp %J, auth %J%s)',
-					index, card_apn == '' ? '(network default)' : sprintf('%J', card_apn),
-					data.pdp_type, data.auth,
-					data.username ? sprintf(', user %J', data.username) : ''));
-
-			// only rewrite the APN when the config sets one that differs; an empty
-			// config never touches the provisioned APN
-			let need_apn = configured && (card_apn != apn);
+			// rewrite whenever the profile differs from the config — an empty
+			// config clears a stale APN just as a set one replaces it
+			let need_apn = (card_apn != want_apn);
 			let need_pdp = (want_pdp != null && data.pdp_type != want_pdp);
 
 			// The attach bearer's credentials come from wherever its APN does:
@@ -489,7 +569,14 @@ export function create(opts)
 			                          (c_user != null && data.username != c_user) ||
 			                          pass_pending);
 
-			if (!need_apn && !need_pdp && !need_auth) {
+			// When the attach profile is the data profile (no init_apn), the
+			// data bearer IS the one brought up at attach, before wwand dials:
+			// a profile flag (PROFILE_FLAGS) written only at dial time reaches
+			// the network at the NEXT attach. Written here it rides the
+			// re-attach this function already triggers.
+			let flags = init ? [] : filter(flags_wanted(), (f) => data[f.key] !== f.want);
+
+			if (!need_apn && !need_pdp && !need_auth && !length(flags)) {
 				log('debug', sprintf('attach profile %d up to date (apn %J pdp %J)',
 					index, data.apn, data.pdp_type));
 				return done(false);
@@ -498,7 +585,7 @@ export function create(opts)
 			let mod = { profile: prof };
 
 			if (need_apn) {
-				mod.apn = apn;
+				mod.apn = want_apn;
 				mod.apn_disabled = 0;
 			}
 
@@ -516,37 +603,76 @@ export function create(opts)
 			if (want_pdp != null)
 				mod.pdp_type = want_pdp;
 
-			log('notice', sprintf('attach profile %d: apn %J%s, pdp %J->%J%s',
-				index, need_apn ? apn : card_apn,
+			for (let f in flags)
+				mod[f.key] = f.want;
+
+			log('notice', sprintf('attach profile %d: apn %s%s, pdp %J->%J%s%s',
+				index, need_apn
+					? sprintf('%s (was %s)', want_apn == '' ? '(network default)' : sprintf('%J', want_apn),
+						card_apn == '' ? '(network default)' : sprintf('%J', card_apn))
+					: sprintf('%J', card_apn),
 				init ? ' (init_apn — distinct from the data APN)' : '',
 				data.pdp_type, want_pdp,
-				need_auth ? sprintf(', auth %J%s', c_auth ?? '(kept)', c_user != null ? sprintf(' user %J', c_user) : '') : ''));
+				need_auth ? sprintf(', auth %J%s', c_auth ?? '(kept)', c_user != null ? sprintf(' user %J', c_user) : '') : '',
+				join('', map(flags, (f) => sprintf(', %s %J->%d', f.label, data[f.key], f.want)))));
 
-			wds.request('MODIFY_PROFILE', mod, (e2) => {
+			let write;
+			write = (m) => wds.request('MODIFY_PROFILE', m, (e2) => {
 				if (torn_down(e2, wds))
 					return;
 
+				// the flags must not cost the attach its APN: a stack that
+				// refuses one of the TLVs gets the same write again without them
+				if (e2 && length(filter(flags, (f) => m[f.key] != null))) {
+					log('warn', sprintf('attach profile %d: %s not accepted: %J', index,
+						join(', ', map(flags, (f) => f.label)), e2));
+					let rest = { ...m };
+
+					for (let f in flags)
+						delete rest[f.key];
+
+					if (length(rest) == 1)
+						return done(false);
+
+					return write(rest);
+				}
+
 				if (e2)
 					log('warn', sprintf('attach profile %d modify failed: %J', index, e2));
-				else if (mod.password != null)
+				else if (m.password != null)
 					// Latch only on SUCCESS. Set before the answer, a rejected
 					// or cancelled write suppressed the password on every later
 					// retry with this modem object — the credential would then
 					// never reach the profile at all.
-					self.modem._attach_pass = mod.password;
+					self.modem._attach_pass = m.password;
 
 				done(!e2);
 			});
+
+			write(mod);
 		});
 	};
 
 	// --- ACTIVATING --------------------------------------------------------
 
-	activate_family = (family, profile, done) => {
+	// `live()` says whether the attempt that asked is still the current one.
+	// The CID allocation is the one step whose answer can land AFTER a
+	// suspend abort has already emptied self.families: the client it hands
+	// back then belongs to nobody, and the next attempt overwrites
+	// families['4'] with its own — one WDS CID lost per abort, until the
+	// modem runs out (HW-observed on an MC7710, SWI9200X_03.05.29,
+	// 2026-10-04: held 1:[8,17,21,25,27] after five aborted dials).
+	activate_family = (family, profile, done, live) => {
 		// fresh WDS CID per attempt (preserved)
 		self.modem.alloc(wds_schema, (err, client) => {
 			if (err)
 				return done({ stage: 'alloc', err: err });
+
+			if (live && !live()) {
+				log('info', sprintf('ipv%d attempt aborted while allocating, releasing wds client %d',
+					family, client.cid));
+				return self.modem.release(client);
+			}
 
 			let fam = { client: client, pdh: null, settings: null };
 			self.families[sprintf('%d', family)] = fam;
@@ -681,68 +807,155 @@ export function create(opts)
 					}
 				}
 
-				log('notice', sprintf('starting ipv%d: apn \'%s\', %s',
-					family, cfg('apn') ?? '(profile default)',
-					(start_args.profile_3gpp != null)
-						? sprintf('profile %d', profile.index)
-						: 'no profile (the modem rejected the index — inline apn)'));
-
-				client.request('START_NETWORK', start_args, (e3, d3) => {
-					// NO_EFFECT: the session is ALREADY up. A modem with
-					// autoconnect dials before anyone asks it to, so the first
-					// START_NETWORK of a fresh bring-up can land on a call that
-					// exists (ddimension/wwand#18, reported on a RUT956/EC25).
-					//
-					// THE HANDLE IS NOT OURS AND MUST NOT BE FAKED. Measured on
-					// an RG650E: the NO_EFFECT reply carries a pdh TLV of 0, and
-					// 0 is not null — so clearing the error and falling through
-					// to the `d3?.pdh == null` guard below stores 0 as the
-					// handle. wwand then believes it owns a session it never
-					// started, logs "pdh 0", and on teardown sends STOP_NETWORK
-					// with handle 0, which the modem refuses.
-					//
-					// A null handle is the truth and the code already knows what
-					// to do with it: _close_family releases the client and skips
-					// the stop. The settings come from GET_CURRENT_SETTINGS,
-					// which asks the client, not the handle.
-					//
-					// The error still ticks the proto-error counter on its way
-					// here (client.uc:176 — no `no_recovery` on the dial, and
-					// there must not be: a dial that genuinely fails has to
-					// climb). That is deliberate and harmless: the very next
-					// successful request zeroes it (recovery.uc:462-463), and
-					// the same is already true of the NO_EFFECT that
-					// qmi_backend.set_opmode normalises.
-					if (e3?.error == 'qmi' && e3.code == QMI_ERR_NO_EFFECT) {
-						fam.pdh = null;
-						// a family is registered with pdh null BEFORE the dial,
-						// so null alone cannot tell "adopted" from "still
-						// dialling" — the monitor needs that distinction.
-						fam.adopted = true;
-						log('notice', sprintf('ipv%d already connected — adopting the running session (no handle of our own to stop later)',
-							family));
-						return done(null);
-					}
-
-					if (e3 || d3?.pdh == null) {
-						return done({
-							stage: 'start_network',
-							err: e3,
-							call_end_reason: d3?.call_end_reason,
-							verbose: d3?.verbose_call_end,
-							ext_error: d3?.ext_error,
-						});
-					}
-
-					fam.pdh = d3.pdh;
-					log('notice', sprintf('ipv%d up, pdh %d (cid %d)', family, fam.pdh, client.cid));
+				// adopt a session the modem already runs — the same path a
+				// NO_EFFECT answer takes (below), for a modem that never sends
+				// one: an MC7710 (SWI9200X_03.05.29) acknowledges STOP_NETWORK
+				// but keeps the LTE default bearer up (the same pdh, the same
+				// address, packet status `connected` after the stop), and then
+				// answers no START_NETWORK at all until a radio cycle
+				// (deborah-3, 2026-10-04). Asked first, the next dial adopts it
+				// in a second. Only alone on the modem and unmuxed: with more
+				// than one session the status could be another context's.
+				let adopt_running = () => {
+					fam.pdh = null;
+					fam.adopted = true;
+					log('notice', sprintf('ipv%d already connected — adopting the running session (no handle of our own to stop later)',
+						family));
 					done(null);
-				}, { timeout: START_NETWORK_TIMEOUT_MS });
+				};
+
+				let dial = () => {
+					log('notice', sprintf('starting ipv%d: apn \'%s\', %s',
+						family, cfg('apn') ?? '(profile default)',
+						(start_args.profile_3gpp != null)
+							? sprintf('profile %d', profile.index)
+							: 'no profile (the modem rejected the index — inline apn)'));
+
+					client.request('START_NETWORK', start_args, (e3, d3) => {
+						// NO_EFFECT: the session is ALREADY up. A modem with
+						// autoconnect dials before anyone asks it to, so the first
+						// START_NETWORK of a fresh bring-up can land on a call that
+						// exists (ddimension/wwand#18, reported on a RUT956/EC25).
+						//
+						// THE HANDLE IS NOT OURS AND MUST NOT BE FAKED. Measured on
+						// an RG650E: the NO_EFFECT reply carries a pdh TLV of 0, and
+						// 0 is not null — so clearing the error and falling through
+						// to the `d3?.pdh == null` guard below stores 0 as the
+						// handle. wwand then believes it owns a session it never
+						// started, logs "pdh 0", and on teardown sends STOP_NETWORK
+						// with handle 0, which the modem refuses.
+						//
+						// A null handle is the truth and the code already knows what
+						// to do with it: _close_family releases the client and skips
+						// the stop. The settings come from GET_CURRENT_SETTINGS,
+						// which asks the client, not the handle.
+						//
+						// The error still ticks the proto-error counter on its way
+						// here (client.uc:176 — no `no_recovery` on the dial, and
+						// there must not be: a dial that genuinely fails has to
+						// climb). That is deliberate and harmless: the very next
+						// successful request zeroes it (recovery.uc:505-506), and
+						// the same is already true of the NO_EFFECT that
+						// qmi_backend.set_opmode normalises.
+						// (a family is registered with pdh null BEFORE the dial,
+						// so null alone cannot tell "adopted" from "still
+						// dialling" — adopt_running sets `adopted` for the monitor)
+						if (e3?.error == 'qmi' && e3.code == QMI_ERR_NO_EFFECT)
+							return adopt_running();
+
+						if (e3 || d3?.pdh == null) {
+							return done({
+								stage: 'start_network',
+								err: e3,
+								call_end_reason: d3?.call_end_reason,
+								verbose: d3?.verbose_call_end,
+								ext_error: d3?.ext_error,
+							});
+						}
+
+						fam.pdh = d3.pdh;
+						log('notice', sprintf('ipv%d up, pdh %d (cid %d)', family, fam.pdh, client.cid));
+						done(null);
+					}, { timeout: START_NETWORK_TIMEOUT_MS });
+				};
+
+				let alone = (mux_id == 0) && !length(filter(self.modem.contexts ?? [],
+					(c) => c !== self && c.state == 'CONNECTED'));
+
+				if (!alone)
+					return dial();
+
+				client.request('GET_PACKET_SERVICE_STATUS', {}, (es, ds) => {
+					if (es?.error == 'cancelled')
+						return done({ stage: 'cancelled', err: es });
+
+					if (!es && ds?.status == wdsmod.CONN_CONNECTED)
+						return adopt_running();
+
+					dial();
+				}, { timeout: 5000, no_recovery: true });
 			});
 
 			if (mux_id == 0)
 				start_activation();
 		});
+	};
+
+	// The prefix the network DELEGATED to this PDN, as the modem holds it
+	// (wds.uc GET_DELEGATED_PREFIX, vendor message 0x00AC). Not a DHCPv6
+	// exchange of the router's own: on these modems the bearer's DHCPv6 is the
+	// modem's business, and a Solicit with IA_PD from the host on the rmnet
+	// link went unanswered for as long as anyone watched (31 sent, 0 back,
+	// RM520N-GL on a PD APN, 2026-10-09). Read on every settings fetch, so a
+	// prefix the network hands out later — or takes back — reaches netifd
+	// through the ordinary settings-change renew.
+	//
+	// ONLY when the interface asked for PD (`ipv6_pd '1'`). INTERNAL (3) is
+	// the modem's "no prefix on this PDN", not a fault; INVALID_QMI_COMMAND
+	// (71) means the modem has no such message, remembered per modem object
+	// so it is asked once. Neither feeds the recovery ladder. `bearer` is the
+	// modem's own address for the PDN (TLV 0x25), which is what its apps side
+	// passes. cb(err) with err only for a cancelled read, which the settings
+	// poll must see (context_monitor_qmi.uc refresh_settings).
+	let read_delegated = (fam, bearer, cb) => {
+		if (pd_wanted() != 1 || !bearer || self.modem._pd_unsupported)
+			return cb(null);
+
+		fam.client.request('GET_DELEGATED_PREFIX', { requestor: bearer }, (err, data) => {
+			if (err?.error == 'cancelled')
+				return cb(err);
+
+			let p = (!err && data?.prefix?.addr && data.prefix.plen)
+				? sprintf('%s/%d', data.prefix.addr, data.prefix.plen) : null;
+
+			if (err?.error == 'qmi' && err.code == 71) {
+				self.modem._pd_unsupported = true;
+				log('info', 'IPv6 prefix delegation: this modem cannot report a delegated prefix (no QMI WDS 0x00AC) — only the profile flag is set');
+			}
+			else if (err && !(err.error == 'qmi' && err.code == 3))
+				log('debug', sprintf('delegated prefix read failed: %J', err));
+
+			if (p != fam._pd_last) {
+				if (p)
+					log('notice', sprintf('ipv6 delegated prefix %s', p));
+				else if (fam._pd_last)
+					log('notice', sprintf('ipv6 delegated prefix %s withdrawn', fam._pd_last));
+
+				fam._pd_last = p;
+			}
+			// the first answer of a call is logged even when it is "none" —
+			// otherwise a working read and a read that never happened look
+			// the same on the device
+			else if (!fam._pd_read && !p && !self.modem._pd_unsupported)
+				log('debug', 'ipv6 delegated prefix: none on this PDN (the network delegated nothing)');
+
+			fam._pd_read = true;
+
+			if (p)
+				fam.settings.delegated = p;
+
+			cb(null);
+		}, { no_recovery: true, timeout: 10000 });
 	};
 
 	fetch_settings = (family, done) => {
@@ -788,6 +1001,9 @@ export function create(opts)
 				log_family_config(fam, sprintf('ipv6 config: %s/%d gw %s dns [%s] mtu %J',
 					fam.settings.addr, fam.settings.plen, fam.settings.gateway,
 					join(' ', fam.settings.dns), fam.settings.mtu));
+
+				return read_delegated(fam, data.ipv6?.addr,
+					(cerr) => done(cerr ? { stage: 'settings', err: cerr } : null));
 			}
 
 			done(null);
@@ -905,6 +1121,19 @@ export function create(opts)
 							cdesc?.text ? sprintf('%s (%s%s) ', cdesc.text,
 								cdesc.type_name ? cdesc.type_name + ' ' : '', cdesc.code) : '',
 							err));
+
+						// the network said "no IPv6" outright: name the option
+						// that stops asking. Once per context — the warning
+						// above repeats on every connect anyway. NOT applied
+						// automatically: pdp_type is the operator's word, and a
+						// SIM swap or a carrier that adds IPv6 later would
+						// inherit a decision made for this one (ddimension/wwand#53).
+						if (family == 6 && !v6_hint_given && callend.ipv6_refused(err?.verbose)) {
+							v6_hint_given = true;
+							log('notice', sprintf('the network refuses IPv6 here (%s) — if that is permanent, set option pdp_type \'ipv4\' on this interface, or in the SIM\'s wwand_sim section if only this card is affected',
+								cdesc?.text ?? 'refused'));
+						}
+
 						return next();
 					}
 
@@ -938,7 +1167,7 @@ export function create(opts)
 
 						next();
 					});
-				});
+				}, () => gen == up_gen && self.state == 'ACTIVATING');
 			};
 
 			finish = () => {
@@ -974,7 +1203,9 @@ export function create(opts)
 		});
 	};
 
-	self.down = function(cb) {
+	// `reason` lands in the 'down' event ('admin' when not given): 'reattach'
+	// is a stop the modem's detach follows (netsel_ops release_sessions)
+	self.down = function(cb, reason) {
 		let was = self.state;
 
 		mon.stop();
@@ -984,7 +1215,7 @@ export function create(opts)
 		release_family(4, () => {
 			release_family(6, () => {
 				if (was != 'IDLE')
-					emit('down', { reason: 'admin' });
+					emit('down', { reason: reason ?? 'admin' });
 
 				if (cb)
 					cb(null);

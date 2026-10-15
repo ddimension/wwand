@@ -16,7 +16,9 @@
 // conservative: only add prefixes whose mapping is certain, and prefer the
 // carrier's dual-stack default APN.
 //
-// Entry: '<prefix>': { match?, apn, pdp_type, auth, username?, password?, note }
+// Entry: '<prefix>': { match?, apn, pdp_type, auth, username?, password?, apn_ipv4?, note }
+//   apn_ipv4: the carrier's IPv4 APN, where it differs from the dual-stack
+//   one — written instead of `apn` for a modem that cannot do IPv6.
 //   match: 'iccid' | 'imsi' — which identity the prefix may bind to. As the
 //   table grows, an IMSI digit run could collide with an ICCID issuer prefix;
 //   tagging prevents that. Absent = both (legacy).
@@ -24,9 +26,10 @@
 'use strict';
 
 const APNDB = {
-	// Deutsche Telekom (DE, 262/01): dual-stack default APN
+	// Deutsche Telekom (DE, 262/01): dual-stack default APN; internet.telekom
+	// is its IPv4 APN, for a modem that cannot do IPv6 (modem_quirks ipv4_only)
 	'894902': { match: 'iccid', apn: 'internet.v6.telekom', pdp_type: 'ipv4v6', auth: 'none',
-	            note: 'Deutsche Telekom DE' },
+	            apn_ipv4: 'internet.telekom', note: 'Deutsche Telekom DE' },
 
 	// Vodafone (DE, 262/02)
 	'894920': { match: 'iccid', apn: 'web.vodafone.de', pdp_type: 'ipv4v6', auth: 'none',

@@ -1,0 +1,31 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 André Valentin <avalentin@marcant.net>
+# wwand-apntest — keeps root's crontab in step with /etc/config/apntest.
+#
+# There is no daemon: a sweep is a cron job (`wwand-apntest run`), one per
+# `globals.schedule`. This script only writes or removes that line — on boot,
+# on `reload_config` after an edit of the plan, and on stop.
+
+START=99
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	# a run killed by the reboot may have left test parameters pending
+	/usr/sbin/wwand-apntest recover >/dev/null
+	/usr/sbin/wwand-apntest cron-sync
+}
+
+stop_service() {
+	/usr/sbin/wwand-apntest cron-sync off
+	/usr/sbin/wwand-apntest recover >/dev/null
+}
+
+reload_service() {
+	/usr/sbin/wwand-apntest cron-sync
+}
+
+service_triggers() {
+	procd_add_reload_trigger "apntest"
+}

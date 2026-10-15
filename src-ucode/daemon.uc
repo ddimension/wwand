@@ -8,6 +8,7 @@
 
 import * as uloop from 'uloop';
 import * as apndb from 'wwand.apndb';
+import * as modem_quirks from 'wwand.modem_quirks';
 import * as discovery from 'wwand.discovery';
 import * as netsel_ops from 'wwand.netsel_ops';
 import * as simops from 'wwand.simops';
@@ -256,15 +257,16 @@ export function vanish_action(entry, now, timing)
 };
 
 // The callback for one eUICC read (daemon probe_euicc), built out here so it
-// closes over nothing but these four parameters. Built inline in create(), a
-// closure over the read's state object found it null when the callback ran
-// after another call had reused the stack, while other captured values
-// looked intact (host ucode, test_daemon, 2026-10-01). A small closure did
-// not reproduce it; create() is very large. Kept out here so the fix does
-// not depend on understanding that.
+// closes over nothing but these four parameters. Built inline, the closure
+// found the read's state object null when it ran (test_daemon, 2026-10-01).
+// The cause was the call that issued the read, `(deps.card_euicc_info ??
+// simmod.card_euicc_info)(…)`: a called parenthesized `??` with a member
+// expression on the right misplaces the interpreter's stack and overwrites a
+// neighbouring local (docs/gotchas.md, reproduced 2026-10-10). That call is
+// two statements now; the helper stays, as it costs nothing.
 function euicc_answer(fn, entry, m, st)
 {
-	return (info) => fn(entry, m, st, info);
+	return (info, final) => fn(entry, m, st, info, final);
 }
 
 export function create(opts)
@@ -398,6 +400,7 @@ export function create(opts)
 	// forward-declared: ucode closures capture only already-declared vars, and
 	// these self-reference (the TDZ trap — see CLAUDE.md ucode gotchas)
 	let derive_netdev;
+	let start_modem, start_context;   // forward-declared: stop_modem restarts a retired modem
 	let detach_modem;   // forward-declared: used by modem_removed above its definition
 	let maybe_autosetup_fill;
 	let note_unholdable;   // defined beside plugin_radio; the registered handler uses it
@@ -451,6 +454,11 @@ export function create(opts)
 	// that never came stops blocking the interface's renews.
 	const PROBE_STALE_S = 30;
 
+	// Upper bound on the radio cycle a dial timeout starts: low_power, the
+	// settle wait, online — seconds normally. Only a backstop for a callback
+	// that never comes; the reconnect it releases is idempotent.
+	const REATTACH_GUARD_MS = 60000;
+
 	const LLA_WAIT_MS = 250;
 	const LLA_WAIT_TRIES = 12;      // ~3 s, then start anyway
 
@@ -472,7 +480,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:886-889 warns "references
+	// produces no entry for it at all (config.uc:961-964 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -485,6 +493,14 @@ export function create(opts)
 	// at 18:47:49 between the two, and the first refusal at 18:49:57 is 115 s
 	// later — well inside OUR_DOWN_TTL, so the TTL is not what lost it.
 	self._our_downs = {};
+
+	// modems whose sessions are being stopped before their backend goes
+	// (stop_modem): name -> { start: the restart apply_config asked for }
+	self._retiring = {};
+
+	// modems that left QMAP and still owe the reset that clears it (rename_l3,
+	// start_modem): name -> true until an init has taken the reset
+	self._left_qmap = {};
 
 	// THE INTERFACES WE GAVE UP ON, and reconnect when the modem registers
 	// again (reconnect_on_register: a reconnect-hold give-up, a SIM block).
@@ -717,6 +733,54 @@ export function create(opts)
 	// caller leaves the interface down on true, so a true that only the
 	// first-start guess gave is recorded here — the next start trusts the
 	// record and has no guess left to make.
+	// NETIFD CLAIMS THE DEVICE THROUGH A PARENT THAT IS GONE. A name that was a
+	// mux child and is now the renamed parent itself (a datapath that went
+	// from QMAP to raw-IP, a config that dropped its mux) keeps netifd's old
+	// parent record, and every claim then fails: the interface sits down with
+	// DEVICE_CLAIM_FAILED in its errors while the session behind it is fine
+	// (LTE3301 apntest box, 2026-10-03; GL-X3000/RM520N, 2026-09-20). Only a
+	// netifd restart or the device detour (deps.uc netifd_device_detour)
+	// clears the record. The detour is taken on that evidence and nothing
+	// else, at most once per DETOUR_MIN_S per interface — a claim that still
+	// fails after it has another cause, and repeating it would only reload
+	// netifd in a loop.
+	const DETOUR_MIN_S = 300;
+
+	let claim_failed = (st) =>
+		length(filter(st?.errors ?? [], (e) => e?.code == 'DEVICE_CLAIM_FAILED')) > 0;
+
+	// true when the detour was started (`then` runs once it is through)
+	let heal_device_claim = (entry, then) => {
+		let iface = entry?.cfg?.interface;
+
+		if (!deps.netifd_device_detour || !iface)
+			return false;
+
+		let now = time();
+
+		if (entry._detour_at != null && (now - entry._detour_at) < DETOUR_MIN_S)
+			return false;
+
+		entry._detour_at = now;
+		log('notice', sprintf('interface %s: netifd cannot claim its device (DEVICE_CLAIM_FAILED — it still holds the parent of an earlier mux child) — re-creating netifd\'s record of it',
+			iface));
+
+		deps.netifd_device_detour(iface, (err) => {
+			if (err) {
+				log('warn', sprintf('interface %s: the netifd device detour failed (%J) — `/etc/init.d/network restart` clears the record',
+					iface, err));
+				return;
+			}
+
+			log('info', sprintf('interface %s: netifd re-created its device record', iface));
+
+			if (then)
+				then();
+		});
+
+		return true;
+	};
+
 	let operator_down = (entry, st) => {
 		if (st?.autostart !== false || our_down(entry))
 			return false;
@@ -924,10 +988,19 @@ export function create(opts)
 		// OPEN THE NMEA PORT. wwand found it during enumeration (`gps_tty`)
 		// and `option gnss` started the receiver; reading it is the last of
 		// the three and the only one that used to be somebody else's job.
-		if (deps.gps_start && (modem.config?.gnss ?? false) && modem.gps_tty)
-			deps.gps_start(modem.id, modem.gps_tty, {
-				adjust_time: modem.config?.gnss_set_time ?? false,
-			});
+		// No port: the same NMEA over QMI LOC (wwand-gps, natively or over the
+		// MBIM passthrough). The port wins where there is one — it needs no
+		// QMI session, and LOC is the path that is broken on Quectel.
+		if (modem.config?.gnss ?? false) {
+			let gopts = { adjust_time: modem.config?.gnss_set_time ?? false };
+
+			if (modem.gps_tty) {
+				if (deps.gps_start)
+					deps.gps_start(modem.id, modem.gps_tty, gopts);
+			}
+			else if (deps.gps_start_loc)
+				deps.gps_start_loc(modem.id, modem, gopts);
+		}
 
 		// write the resolved l3 device name onto each interface as `option device`
 		// (one explicit handle for VRF/firewall/LuCI). Idempotent; never clobbers a
@@ -1065,6 +1138,24 @@ export function create(opts)
 					confirm_then(centry, () => self.contexts[cname] === centry && centry.ctx === cctx,
 						(st2) => decide(st2, true));
 				}
+				else if (st?.pending && centry.ctx && centry.ctx.state != 'IDLE') {
+					// netifd's setup is waiting on an activation that is already
+					// running — the queued up that READY just released. Its
+					// answer completes that setup; a reset here (down, kick)
+					// only interrupted it and made netifd set up again, on every
+					// plain bring-up after a modem reset (HW-seen on deborah-3,
+					// MC7710, 2026-10-04). The loop above only takes IDLE
+					// contexts, so a state other than IDLE here means the
+					// activation started (or even finished) during this status
+					// probe: nothing is orphaned, there is nothing to reset.
+					log('debug', sprintf('interface %s: setup pending on a running activation (%s), not kicking',
+						centry.cfg.interface, centry.ctx.state));
+				}
+				else if (claim_failed(st) && heal_device_claim(centry,
+				         () => deps.kick_interface?.(centry.cfg.interface))) {
+					// a kick would only fail the same claim again; the detour
+					// kicks once netifd has a fresh device record
+				}
 				else if (deps.kick_interface) {
 					// our own down is being undone here; the kick re-arms
 					// netifd's autostart, so the marker has served its purpose
@@ -1075,6 +1166,7 @@ export function create(opts)
 					// IDLE context while netifd holds the interface 'pending' = an
 					// ORPHANED setup (e.g. a wwand restart mid-setup). 'up' no-ops on a
 					// pending interface, so 'down' first, then the kick re-runs setup.
+					// (A busy context never gets here: the branch above.)
 					if (st?.pending && deps.down_interface) {
 						log('info', sprintf('interface %s stuck pending, resetting before setup', centry.cfg.interface));
 						// Two markers, because two different readers ask two different
@@ -1247,19 +1339,22 @@ export function create(opts)
 	// mid-read go without its recovery hold. And an empty answer is not
 	// final — a plain SIM gives one, but so does a transport being rebuilt —
 	// so it is asked again, a minute apart, up to three times per modem
-	// object; a plain SIM then stops being asked.
+	// object — but only when the transport could not ask: a card that
+	// refused the ISD-R has answered, and is not asked again.
 	let EUICC_TRIES = 3, EUICC_RETRY_S = 60;
 
 	// What a finished read does. Reached through euicc_answer (module level,
 	// below the imports): see the note there.
-	let euicc_read = (entry, m, st, info) => {
+	let euicc_read = (entry, m, st, info, final) => {
 		st.busy = false;
 
 		if (entry.modem !== m || entry._euicc_st !== st)
 			return;
 
 		entry.euicc = info;
-		st.done = (info != null);
+		// a card that ANSWERED is not asked again, whatever it said — a plain
+		// SIM refuses the ISD-R the same way each time (sim.uc refused_answer)
+		st.done = (info != null) || !!final;
 		st.next_at = time() + EUICC_RETRY_S;
 
 		if (info?.sgp32)
@@ -1303,7 +1398,11 @@ export function create(opts)
 		if (done)
 			push(st.waiters, done);
 
-		(deps.card_euicc_info ?? simmod.card_euicc_info)(m, euicc_answer(euicc_read, entry, m, st));
+		// two statements: a called `(a ?? b.c)(…)` misplaces the stack
+		// (docs/gotchas.md) — this very call once nulled `st` (see euicc_answer)
+		let read = deps.card_euicc_info ?? simmod.card_euicc_info;
+
+		read(m, euicc_answer(euicc_read, entry, m, st));
 	};
 
 	// THE SUBSCRIPTION CHANGED UNDER A RUNNING CONNECTION. An eSIM profile
@@ -1324,11 +1423,11 @@ export function create(opts)
 	//
 	//   - CONNECTED is sufficient but not necessary. An MBIM attempt aborted
 	//     while the modem was still answering sets `activated` from the late
-	//     reply (context_mbim.uc:344-348), so an IDLE context can be holding a
+	//     reply (context_mbim.uc:367-371), so an IDLE context can be holding a
 	//     session that only down() will tear down.
 	//   - ACTIVATING is not "no session yet" either: MBIM sets `activated`
-	//     before it queries the IP configuration (context_mbim.uc:359-360), NCM
-	//     before it reads its own (context_ncm.uc:702), and QMI can have
+	//     before it queries the IP configuration (context_mbim.uc:382-383), NCM
+	//     before it reads its own (context_ncm.uc:742), and QMI can have
 	//     activated families while settings are still being fetched.
 	//
 	// Each backend's down() already knows exactly what it holds. Asking it is
@@ -1338,7 +1437,7 @@ export function create(opts)
 	//
 	// AND THE RECONNECT IS STARTED HERE, not inferred from the `down` event.
 	// context_ncm.down() returns WITHOUT emitting it when the activation has
-	// not set `activated` yet (context_ncm.uc:823-826) — so a mid-dial NCM
+	// not set `activated` yet (context_ncm.uc:879-882) — so a mid-dial NCM
 	// context would have gone IDLE with `wanted` still true and nothing
 	// scheduled, wedged by the very handler meant to restart it. enter_
 	// reconnecting returns on an armed hold timer, and every emitting backend
@@ -1362,8 +1461,8 @@ export function create(opts)
 	// whether anything started it.
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
-	// own emit on a change (modem_mbim.uc:923-932) while the shared reapply
-	// tail emits on every re-read (modem_common.uc:556-562); one comparison, in
+	// own emit on a change (modem_mbim.uc:1010-1019) while the shared reapply
+	// tail emits on every re-read (modem_common.uc:643-649); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {
 		let entry = self.modems[modem.id];
@@ -1463,6 +1562,12 @@ export function create(opts)
 	};
 
 	let on_modem_event = (modem, event, data) => {
+		// How often this modem object has gone ABSENT: a modem that really
+		// reboots drops off the bus on the way (hwops.modem_reset asks this to
+		// tell a reset that happened from one that was only acknowledged).
+		if (event == 'state' && data?.state == 'ABSENT')
+			modem._absent_count = (modem._absent_count ?? 0) + 1;
+
 		// clear the one-shot manual-PIN-release flags so a later cycle never reuses them
 		if (event == 'registered' || event == 'sim_blocked') {
 			modem.pin_force = false;
@@ -1478,6 +1583,16 @@ export function create(opts)
 
 		// mirror lifecycle events onto the bus for listeners
 		switch (event) {
+		case 'sessions_released':
+			// a radio cycle stopped these sessions before it detached and held
+			// our reconnect off meanwhile (modem_common with_sessions_released):
+			// hand them to the reconnect now, which waits for READY
+			for (let name, e in self.contexts)
+				if (e?.wanted && index(data?.contexts ?? [], e.ctx) >= 0 &&
+				    e.ctx.state == 'IDLE')
+					enter_reconnecting(name);
+			break;
+
 		case 'registered': {
 			// Registered while its card is lent to another modem: a modem
 			// re-initialised meanwhile (a reset, a re-enumeration) comes up
@@ -1626,57 +1741,32 @@ export function create(opts)
 
 			let info = self.modems[modem.id]?.modem?.info ?? {};
 
-			// A card that provisions its own attach APN has already answered the
-			// question this table exists to guess at, and it answered for THIS
-			// subscription rather than for the operator in general. Overriding it
-			// is how a working modem stops working: HW-measured on a Chateau
-			// (RG650E, 2026-09-12) whose card provisioned "nonbonding.hybrid" and
-			// whose IMSI matched the Telekom DE consumer default — autosetup wrote
-			// "internet.v6.telekom" over it and the network answered "Requested
-			// service option not subscribed", then throttled the PDN. M2M and
-			// business SIMs are exactly the ones an IMSI prefix cannot tell apart
-			// from a consumer card, and exactly the ones this breaks.
-			//
-			// The table stays for its real case: a card that provisions NOTHING,
-			// where an empty APN attaches to whatever the network defaults to.
-			let card_apn = self.modems[modem.id]?.modem?.card_apn;
-
-			if (card_apn != null && card_apn != '') {
-				log('notice', sprintf('autosetup: %s attaches with the card-provisioned APN %J — not overriding it from the APN table',
-					name, card_apn));
-				continue;
-			}
-
-			// UNKNOWN IS NOT "NONE", and treating it as none is how the guard
-			// above became decorative on most hardware: only a backend that has
-			// actually READ the attach profile can report one, and an autosetup
-			// interface has no configured APN — which is exactly the condition
-			// under which MBIM used to skip that read entirely and NCM never
-			// published what it read. So the card-wins rule protected the QMI
-			// happy path and nothing else, which is not where the outage was
-			// found.
-			//
-			// Doing nothing here is not "no APN": an empty APN attaches with the
-			// card-provisioned one, which is the value we are declining to
-			// overwrite. The table still does its job for a card that reports an
-			// EMPTY attach APN — a card that provisions nothing — which is the
-			// case it was written for.
-			if (card_apn == null) {
-				log('info', sprintf('autosetup: %s — the backend has not reported the card-provisioned APN, so the APN table is not applied (the empty APN attaches with whatever the card provides)',
-					name));
-				continue;
-			}
-
+			// ONE ATTEMPT, IN THE AUTOSETUP RUN ONLY. The table fills the APN of
+			// the interface autosetup just created — whatever profile 1 held is
+			// not consulted: the backends write the CONFIGURED APN into the
+			// attach profile, an unset one as empty (context.uc
+			// ensure_attach_profile), so a stale APN from the modem's previous
+			// life is cleared either way (deborah-3, 2026-10-04). The marker is
+			// cleared on the first card read with or without a match: after
+			// that run the config alone decides, and a card that needs its own
+			// APN (a Telekom hybrid card's nonbonding.hybrid, which the table's
+			// consumer default breaks — Chateau, 2026-09-12) gets it configured.
 			let vals = apndb.lookup(info.iccid, info.imsi);
 
-			if (!vals) {
-				log('info', sprintf('autosetup: no APN-table match for %s (iccid %s, imsi %s) — keeping the SIM-provisioned attach',
-					name, info.iccid ?? '?', info.imsi ?? '?'));
-				continue;
-			}
+			// a modem that cannot do IPv6 gets the carrier's IPv4 APN and says
+			// so in the config, rather than a dual-stack entry it never dials
+			if (vals && modem_quirks.for_model(info.model).ipv4_only)
+				vals = { ...vals, apn: vals.apn_ipv4 ?? vals.apn, pdp_type: 'ipv4' };
 
 			if (!deps.autosetup_fill)
 				continue;
+
+			if (!vals) {
+				log('info', sprintf('autosetup: no APN-table match for %s (iccid %s, imsi %s) — the empty APN (network default) stays',
+					name, info.iccid ?? '?', info.imsi ?? '?'));
+				deps.autosetup_fill(entry.cfg.interface, null);   // the run is over: marker off
+				continue;
+			}
 
 			if (deps.autosetup_fill(entry.cfg.interface, vals)) {
 				log('notice', sprintf('autosetup: %s defaults written to %s (apn %s) — reloading',
@@ -1883,6 +1973,12 @@ export function create(opts)
 					}
 
 					if (!deps.kick_interface)
+						return;
+
+					// the claim itself fails: kicking repeats it, the detour
+					// clears what makes it fail and kicks afterwards
+					if (claim_failed(st) &&
+					    heal_device_claim(entry, () => deps.kick_interface(entry.cfg.interface)))
 						return;
 
 					let kick = () => {
@@ -2174,11 +2270,77 @@ export function create(opts)
 
 		case 'error':
 			// failed activation climbs the recovery ladder — but not when the modem
-			// lost registration mid-attempt: no service isn't a fault the ladder fixes
-			if (ctx.modem.state == 'READY')
+			// lost registration mid-attempt: no service isn't a fault the ladder fixes.
+			// Nor a dial that failed because the operator is detaching the modem
+			// or a radio cycle runs (with_sessions_released): the modem still
+			// reads READY then, and the failure is the one asked for
+			// (HW-observed on the MeiG SLM770A, 2026-10-10).
+			if (ctx.modem.state == 'READY' && !ctx.modem.detached && !ctx.modem._reattaching)
 				ctx.modem.note_connect_failure();
+
+			// A START_NETWORK the modem never ANSWERS (a timeout, not a refusal)
+			// on a registered modem means its WDS side hangs. An MC7710
+			// (SWI9200X_03.05.29) does exactly that after a STOP_NETWORK: every
+			// later dial times out, not even a new WDS client is handed out, and
+			// the ladder's radio cycle comes only at attempt 8 — ~16 min of
+			// 120 s timeouts. One radio cycle (DMS low_power -> online) frees it
+			// and the next dial connects in seconds (deborah-3, 2026-10-04). So
+			// cycle at once, at most every 10 min per modem; a QMI error or a
+			// network rejection keeps going the ladder's way.
+			//
+			// The reconnect waits for the cycle. Started beside it, the next
+			// dial lands in the radio-off window, registration loss aborts it,
+			// and every such abort is one more CID allocation in flight
+			// (HW-observed, deborah-3 2026-10-04). `_reattaching` is the flag
+			// the down/suspend handler already honours for netsel's AT reattach.
+			let cycling = false;
+
+			if (data?.stage == 'start_network' && data?.err?.error == 'timeout' &&
+			    ctx.modem.state == 'READY' && !ctx.modem._reattaching &&
+			    type(ctx.modem.reattach) == 'function') {
+				let mentry = self.modems[entry?.cfg?.modem];
+				let now = context_common.mono();
+
+				if (mentry && (mentry._wds_bounce_at == null || now - mentry._wds_bounce_at >= 600)) {
+					mentry._wds_bounce_at = now;
+					log('notice', sprintf('interface %s: the modem did not answer the dial at all — cycling its radio once to free its data service',
+						entry?.cfg?.interface ?? name));
+
+					let m = ctx.modem;
+					let settled = false;
+					let guard;
+
+					// One exit for the callback and the guard: a reattach whose
+					// callback never comes (a teardown between its steps) must
+					// not leave the flag set, or no down would reconnect again.
+					let finish = (err) => {
+						if (settled)
+							return;
+
+						settled = true;
+						m._reattaching = false;
+						guard?.cancel();
+
+						if (err)
+							log('warn', sprintf('interface %s: radio cycle failed: %J',
+								entry?.cfg?.interface ?? name, err));
+
+						let e = self.contexts[name];
+
+						if (e?.wanted && e.ctx?.state == 'IDLE')
+							enter_reconnecting(name);
+					};
+
+					m._reattaching = true;
+					cycling = true;
+					guard = uloop.timer(REATTACH_GUARD_MS, () => finish({ error: 'no answer from the radio cycle' }));
+					// through netsel_ops: any other PDN this modem carries is
+					// stopped before the radio goes off, not cut by the detach
+					self.reattach_released(m, (err) => finish(err));
+				}
+			}
 			emit('wwand.context', { context: name, interface: entry?.cfg?.interface, event: event });
-			if (entry?.wanted)
+			if (entry?.wanted && !cycling)
 				enter_reconnecting(name);
 			break;
 
@@ -2200,8 +2362,9 @@ export function create(opts)
 			// Hold the interface up and reconnect in place. 'down/admin' from our
 			// own context_down already cleared `wanted` (no-op here); all other
 			// drops are transient → reconnect, bounded by the hold timer.
-			// A modem-level AT reattach (netsel_ops) bounces the contexts itself
-			// — don't race its bounce with enter_reconnecting.
+			// A modem-level reattach (netsel_ops) stops the sessions before
+			// it detaches and hands them back afterwards — a reconnect started
+			// here would dial into the detach.
 			if (entry?.wanted && !ctx?.modem?._reattaching)
 				enter_reconnecting(name);
 			break;
@@ -2398,13 +2561,13 @@ export function create(opts)
 			};
 
 		// TELL THE CONTEXTS FIRST, then stop the modem — the order _device_gone
-		// uses (modem_common.uc:583). Dropping `centry.ctx` below only releases
+		// uses (modem_common.uc:670). Dropping `centry.ctx` below only releases
 		// the daemon's HANDLE: the context object itself lives on with its
 		// monitor timers armed and its WDS clients alive, polling a hub that
 		// entry.modem.stop() has just closed. One orphan per removal, and its
 		// late events can arm a spurious reconnect-hold on the rebuilt entry.
 		// `lost` is built for exactly this — it stops the monitor and destroys
-		// the family clients without attempting QMI cleanup (context.uc:1063).
+		// the family clients without attempting QMI cleanup (context.uc:1196).
 		for (let cname, centry in self.contexts) {
 			if (centry.cfg.modem == name && centry.ctx)
 				centry.ctx.modem_event('lost');
@@ -2432,11 +2595,14 @@ export function create(opts)
 	// Idempotent-reload teardown of a SINGLE context: cancel its reconnect, fail
 	// pending waiters, down it if up, and drop it from the map. (detach_modem
 	// above keeps the entry as a "modem gone" placeholder; this removes it fully.)
-	let stop_context = (name) => {
+	// `done` (optional) is called once the context's own teardown is through —
+	// STOP_NETWORK answered and its clients released — or at once when it had
+	// nothing to tear down.
+	let stop_context = (name, done) => {
 		let entry = self.contexts[name];
 
 		if (!entry)
-			return;
+			return done ? done() : null;
 
 		clear_reconnect(name);
 		cancel_confirm(entry);
@@ -2445,7 +2611,9 @@ export function create(opts)
 			p({ error: 'reload' });
 
 		if (entry.ctx && entry.ctx.state != 'IDLE')
-			entry.ctx.down(() => null);
+			entry.ctx.down(() => done ? done() : null);
+		else if (done)
+			done();
 
 		// unhook from the modem's context list — else the dead ctx is retained
 		// and keeps receiving notify_contexts events (leak + latent misbehavior)
@@ -2457,15 +2625,76 @@ export function create(opts)
 
 	// Idempotent-reload teardown of a SINGLE modem: stop its contexts, cancel a
 	// pending mode-switch watchdog, stop the backend, and drop it from the map.
+	//
+	// THE BACKEND GOES AFTER ITS SESSIONS, not beside them. A context's down
+	// sends STOP_NETWORK and then releases its WDS clients; the modem's stop
+	// closes the control channel those travel on. Done in one breath, the
+	// STOP was never answered (a timeout, then "send" on the closed hub) and
+	// the session stayed in the modem: after a reload from a muxed to an
+	// unmuxed datapath the new dial got no answer at all, radio cycle or not
+	// (RG650E on 245, 2026-10-05). So the backend stops once every active
+	// context reports its teardown done, or after RETIRE_MAX_MS whatever
+	// happened — a modem that does not answer STOP must not hold the reload.
+	// Meanwhile the modem is RETIRING: apply_config's restart of the same
+	// modem waits for it (self._retiring), because the new backend would open
+	// the device the old one still holds.
+	const RETIRE_MAX_MS = 5000;
+
 	let stop_modem = (name) => {
 		let entry = self.modems[name];
 
 		if (!entry)
 			return;
 
-		for (let cname in keys(self.contexts))
-			if (self.contexts[cname].cfg.modem == name)
+		let ret = { start: null };
+		let pending = 0, finished = false, timer = null;
+
+		let finish = () => {
+			if (finished)
+				return;
+
+			finished = true;
+
+			if (timer)
+				timer.cancel();
+
+			if (entry.modem)
+				entry.modem.stop();
+
+			if (self._retiring[name] === ret)
+				delete self._retiring[name];
+
+			// the restart apply_config asked for while this one was retiring
+			if (ret.start && !self.modems[name]) {
+				start_modem(name, ...ret.start);
+
+				// its contexts were built while it was absent: bind them now,
+				// as the waiting-modem tick and hotplug add do
+				if (self.modems[name]?.modem)
+					for (let cname, centry in self.contexts)
+						if (centry.cfg.modem == name && !centry.ctx)
+							start_context(cname, centry.cfg);
+			}
+		};
+
+		self._retiring[name] = ret;
+
+		for (let cname in keys(self.contexts)) {
+			let ce = self.contexts[cname];
+
+			if (ce.cfg.modem != name)
+				continue;
+
+			if (ce.ctx && ce.ctx.state != 'IDLE') {
+				pending++;
+				stop_context(cname, () => {
+					if (--pending <= 0)
+						finish();
+				});
+			}
+			else
 				stop_context(cname);
+		}
 
 		// ...and close its NMEA port. Otherwise the reader holds an fd on a
 		// device that is gone — or worse, on whatever the kernel hands that
@@ -2476,10 +2705,12 @@ export function create(opts)
 		if (entry.modeswitch_liveness)
 			entry.modeswitch_liveness.cancel();
 
-		if (entry.modem)
-			entry.modem.stop();
-
 		delete self.modems[name];
+
+		if (pending <= 0)
+			finish();
+		else if (!finished)
+			timer = uloop.timer(RETIRE_MAX_MS, finish);
 	};
 
 	// stable L3 names (non-mux datapath): rename the kernel netdev to the
@@ -2554,11 +2785,38 @@ export function create(opts)
 				// DEVICE_CLAIM_FAILED and the interface sits down with a
 				// perfectly good session behind it (netifd interface.c:1349-1353,
 				// 2026.07.08~6088f7b3). A `reload` does not clear the record; a
-				// restart does. Nothing wwand can do from here, so say it
-				// rather than leave it to be found — HW-confirmed on the
-				// GL-X3000/RM520N, 2026-09-20.
-				log('notice', sprintf('modem %s: netifd still holds a device record for %s from when it was a mux child — if %s stays down, restart the network (`/etc/init.d/network restart`); a reload does not clear it',
-					name, want, entry.l3_name ?? want));
+				// restart does, and so does the device detour the status paths
+				// take when netifd reports exactly that (heal_device_claim) —
+				// HW-confirmed on the GL-X3000/RM520N, 2026-09-20.
+				log('notice', sprintf('modem %s: netifd still holds a device record for %s from when it was a mux child — should the claim fail, wwand re-creates that record (netifd device detour)',
+					name, want));
+			}
+		}
+
+		// THE SAME FOR A QMI MODEM WHOSE CONFIG NOW HAS NO CHANNEL AT ALL (a
+		// mux_id that went from 1 to 0, a muxed sibling deleted): the old QMAP
+		// child still holds the stable name, the datapath prunes it a second
+		// later (netlink.uc prune_mux_children), and this rename has already
+		// given up by then and is not retried — the parent kept its kernel
+		// name and netifd reported NO_DEVICE for good (HW-seen on the NR7101,
+		// 2026-10-04: mux_id 1 -> 0). Taken now, on the prune's own proof: a
+		// device whose iflink is this parent's ifindex is its mux child
+		// (rmnet_vnd_get_iflink returns real_dev's, rmnet_vnd.c:97-102, Linux
+		// 6.18.41). Never with a channel configured — that child is wanted.
+		if (entry.protocol == 'qmi' && !length(entry.muxinfo?.list ?? []) &&
+		    !(entry.muxinfo?.demotable ?? false) && fx.link_del && fx.read &&
+		    fx.exists(sprintf('/sys/class/net/%s', want))) {
+			let idx = trim(fx.read(sprintf('/sys/class/net/%s/ifindex', entry.netdev)) ?? '');
+			let link = trim(fx.read(sprintf('/sys/class/net/%s/iflink', want)) ?? '');
+
+			if (length(idx) && link == idx) {
+				log('notice', sprintf('modem %s: %s is a leftover mux child of %s and this modem runs without mux — removing it to take the name',
+					name, want, entry.netdev));
+				fx.link_del(want);
+
+				// ...and the MODEM still carries the QMAP session it had: see
+				// _left_qmap at the modem's creation below
+				self._left_qmap[name] = true;
 			}
 		}
 
@@ -2631,17 +2889,35 @@ export function create(opts)
 		return null;
 	};
 
-	let start_modem = (name, cfg, muxinfo, l3name) => {
+	start_modem = (name, cfg, muxinfo, l3name) => {
 		// decide how this modem is controlled (qmi/mbim/ncm/ppp). resolve_control
 		// classifies EVERY modem, incl. NCM modems with no cdc-wdm.
 		let control = deps.resolve_control ? deps.resolve_control(cfg) : null;
+
+		// A QRTR modem (a Qualcomm SDX on PCIe/MHI, whose QMI lives on the QRTR bus
+		// via qcom_mhi_qrtr — there is no cdc-wdm control node) is selected by the
+		// sentinel control device "qrtr"; modem.uc opens the QMI-over-QRTR hub for
+		// it. The socket can always be opened, so it says nothing about the modem:
+		// PRESENT means its node serves DMS (discovery.qrtr_probe). Until then the
+		// control record stays null and the modem takes the same waiting path as
+		// a missing cdc-wdm, retried by the tick — there is no hotplug for QRTR.
+		// The data netdev still comes from the interface (option device).
+		if (cfg.device == 'qrtr') {
+			let node = deps.qrtr_probe ? deps.qrtr_probe(cfg) : null;
+
+			control = (node != null)
+				? { protocol: 'qmi', device: 'qrtr', netdev: cfg.netdev, tty: null, qrtr_node: node }
+				: null;
+		}
 
 		// legacy dep path (resolve_modem_device/resolve_protocol instead of
 		// resolve_control): synthesize a control record. ONLY when resolve_control
 		// isn't injected — otherwise its null is authoritative ("device not present
 		// yet") and we must NOT fall back to raw cfg.device (a netdev name isn't an
 		// openable control node); the modem must WAIT for hotplug.
-		if (!control && !deps.resolve_control) {
+		// (never for qrtr: its presence is the probe's answer above, and a
+		// control record made up from the config would bypass it)
+		if (!control && !deps.resolve_control && cfg.device != 'qrtr') {
 			let device = cfg.device;
 
 			if (!device && deps.resolve_modem_device)
@@ -2764,7 +3040,9 @@ export function create(opts)
 			// surface the wait to status()/netifd; the periodic tick re-logs it every 30s.
 			entry.control_note = entry.vanished
 				? 'waiting for modem (device vanished)'
-				: 'waiting for modem (control device not present)';
+				: (cfg.device == 'qrtr')
+					? 'waiting for modem (no QMI service on the QRTR bus)'
+					: 'waiting for modem (control device not present)';
 			entry.waiting_since = entry.waiting_since ?? time();
 			return;
 		}
@@ -2858,6 +3136,17 @@ export function create(opts)
 
 		if (ep_type == null && deps.resolve_ep_type)
 			ep_type = deps.resolve_ep_type(cfg, device, entry.netdev);
+
+		// A QRTR modem has no control node, so its endpoint can only come from
+		// the data netdev (netlink.ep_iface_number: PCIe -> 4). When that does
+		// not resolve either — no netdev configured yet — fall back to the
+		// same PCIE/4 instead of sending no endpoint, which the modem refuses
+		// with InvalidOperation (QMI error 70, RG520N, ddimension/wwand#46). A
+		// config ep_type/ep_id still wins.
+		if (cfg.device == 'qrtr') {
+			if (ep_type == null) ep_type = 3;
+			if (ep_id == null) ep_id = 4;
+		}
 
 		let common = {
 			id: name,
@@ -3016,6 +3305,25 @@ export function create(opts)
 
 		entry.modem = be.modem.create({ ...common, datapath: datapath,
 		                                known_ident: entry._ident ?? null });
+
+		// A MODEM THAT LEAVES QMAP AT RUNTIME IS RESET ONCE, early in its init.
+		// Coming from a muxed config, an RG650E answered no raw-IP dial at all
+		// — sessions stopped cleanly, aggregation explicitly DISABLED and
+		// confirmed, pass_through off, the data port bound to mux 0, a radio
+		// cycle: START_NETWORK still timed out every time. The same config
+		// dialled at once after a reset (245, 2026-10-05). What survives in
+		// the modem is not visible over QMI, so the reset is taken whenever
+		// the leftover QMAP child proves the modem was muxed a moment ago.
+		// Kept on the DAEMON, not on this entry, until an init has actually
+		// taken it: the modem object built right after the rename can go
+		// ABSENT before its init runs, and the next one is a new entry (HW:
+		// 245, the first attempt never reached SYNC). One-shot from there:
+		// after the reset the kernel name comes back without a child, and
+		// nothing sets this again.
+		if (self._left_qmap[name]) {
+			entry.modem._pending_init_reset = 'the datapath left QMAP — a modem keeps its muxed data session state until it is reset';
+			entry.modem.on_init_reset_taken = () => delete self._left_qmap[name];
+		}
 		// what optional packages add to the AT init sequence (plugins.uc
 		// at_init), with the control protocol: a plugin can tell a Qualcomm
 		// modem (QMI) from others without an identity of its own
@@ -3053,7 +3361,7 @@ export function create(opts)
 		entry.modem.start();
 	};
 
-	let start_context = (name, cfg) => {
+	start_context = (name, cfg) => {
 		let mentry = self.modems[cfg.modem];
 
 		// interface-bound contexts default wanted=true so the daemon (re)establishes
@@ -3290,19 +3598,56 @@ export function create(opts)
 		// 2) stop contexts that are gone or changed on a still-running modem (their
 		//    modem stays up; only this one context re-applies — APN/auth/mtu/etc.).
 		//    Contexts of the modems stopped above are already gone.
+		// The attach profile is the MODEM's, programmed at its init — a changed
+		// APN, PDP type or login on a running modem's interface would only
+		// take effect at the modem's next init, while the context dials with
+		// the new values at once. So the modems whose interface changed one of
+		// those re-program it (reapply_sim) once the context is back: a test
+		// APN set in the config otherwise changed nothing until a restart
+		// (deborah-3, 2026-10-04).
+		const ATTACH_OPTS = [ 'apn', 'pdp_type', 'auth', 'username', 'password' ];
+		let attach_touched = {};
+
+		for (let cn in keys(self.contexts)) {
+			let old = self.contexts[cn].cfg, nw = parsed.contexts[cn];
+
+			if (nw && old && old.modem == nw.modem && self.modems[nw.modem]?.modem &&
+			    length(filter(ATTACH_OPTS, (k) => (old[k] ?? '') != (nw[k] ?? ''))))
+				attach_touched[nw.modem] = cn;
+		}
+
 		for (let cn in keys(self.contexts))
 			if (!parsed.contexts[cn] || self.contexts[cn]._sig != ctx_sig(cn))
 				stop_context(cn);
 
 		// 3) (re)start whatever is now missing — new sections and the ones just
 		//    stopped. Untouched modems/contexts are already present and skipped.
+		// a modem still retiring (its sessions being stopped) restarts when it
+		// is through — stop_modem's finish runs the latest request; one that
+		// is gone from the config now is not restarted at all
+		for (let name, ret in self._retiring)
+			ret.start = parsed.modems[name]
+				? [ parsed.modems[name], mux_by_modem[name], l3_by_modem[name] ] : null;
+
 		for (let name, cfg in parsed.modems)
-			if (!self.modems[name])
+			if (!self.modems[name] && !self._retiring[name])
 				start_modem(name, cfg, mux_by_modem[name], l3_by_modem[name]);
 
 		for (let name, cfg in parsed.contexts)
 			if (!self.contexts[name])
 				start_context(name, cfg);
+
+		for (let mn, cn in attach_touched) {
+			let m = self.modems[mn]?.modem;
+
+			// a modem still in its init chain programs it there anyway
+			if (!m || type(m.reapply_sim) != 'function' ||
+			    index([ 'REGISTERING', 'READY' ], m.state) < 0)
+				continue;
+
+			log('notice', sprintf('interface %s: APN, PDP type or login changed — re-programming the attach profile of modem %s', cn, mn));
+			m.reapply_sim();
+		}
 
 		// 4) stamp the applied signatures for the next reload's diff (idempotent for
 		//    the ones that kept running: same config -> same signature).
@@ -3395,10 +3740,17 @@ export function create(opts)
 				let m = entry?.modem, reg = m?.reg;
 				let radio_ifs = reg?.radio_ifs;
 				let on_rat = (type(radio_ifs) == 'array' && length(radio_ifs) > 0);
+				// on LTE right now, for an LTE-labelled panel LED: NAS radio
+				// interface 8 where the backend has radio_ifs (QMI, MBIM over
+				// the passthrough), else the RAT it named (rat_label, NCM's
+				// reg.mode/tech). 5G NSA keeps its LTE anchor in radio_ifs.
+				let rat_txt = lc(sprintf('%s', m?.rat_label ?? reg?.mode ?? reg?.tech ?? ''));
+				let lte = (on_rat && index(radio_ifs, 8) >= 0) || (index(rat_txt, 'lte') >= 0);
 				return {
 					present: !!m && m.state != 'ABSENT',
 					registered: is_registered(reg),
 					radio: on_rat ? radio_ifs[0] : null,
+					lte: lte,
 					roaming: reg?.roaming ?? false,
 					bars: deps.board ? deps.board.bars(m?.signal) : 0,
 				};
@@ -3687,6 +4039,13 @@ export function create(opts)
 
 		entry._held_logged = null;
 
+		// detached by the operator (netsel_ops modem_detach): an ifup does not
+		// attach — unlike a parked radio, which it wakes — because the detach
+		// was the operator's word on the whole modem and `modem_attach` is
+		// theirs to give. Refused with the reason; the shim retries slowly.
+		if (m?.modem?.detached)
+			return cb({ error: 'detached', detail: sprintf('modem %s is detached from the network (wwandctl attach)', entry.cfg.modem) });
+
 		if (m?.modem?.lowpower_parked && m.modem.set_opmode) {
 			log('notice', sprintf('modem %s: waking the parked radio for %s',
 				entry.cfg.modem, name));
@@ -3844,6 +4203,21 @@ export function create(opts)
 		if (entry._reset_pending) {
 			entry._reset_pending = false;
 
+			// Our own reset of a setup netifd holds 'pending'. Meant for an
+			// IDLE context (an orphaned setup); but the status answer that
+			// decides it arrives asynchronously, and by then the queued
+			// activation may already be dialling or connected. Stopping THAT
+			// session throws away a working connection — and on some firmware
+			// is not survivable: an MC7710 (SWI9200X_03.05.29) answered no
+			// START_NETWORK after a stop followed at once by a new dial, until
+			// the modem was reset (deborah-3, 2026-10-04). So a live session
+			// stays; the `up` that follows takes it over through setup.
+			if (entry.ctx.state != 'IDLE') {
+				log('info', sprintf('interface %s: reset of a pending setup — keeping the %s session for the setup that follows',
+					entry.cfg.interface, lc(entry.ctx.state)));
+				return cb(null, {});
+			}
+
 			return entry.ctx.down(() => {
 				cb(null, {});
 				retry_activate(name);
@@ -3991,15 +4365,22 @@ export function create(opts)
 
 			let fired = +(c.rung ?? 0);
 			let attempts = +(c.attempts ?? 0);
-			let table = recoverymod.rungs(entry.cfg?.failreboot ?? 100);
+			let table = recoverymod.rungs(entry.cfg?.failreboot ?? 100, entry.cfg?.recovery_steps);
 			let next = null;
 
-			for (let i = 0; i < length(table); i++)
-				if (i >= fired) {
-					next = { at: table[i].at, action: table[i].action,
-					         in: (table[i].at > attempts) ? (table[i].at - attempts) : 0 };
-					break;
-				}
+			// `fired` counts HARDWARE rungs only; the table is in firing order
+			// (recovery.rungs sorts the reboot in), so the next step is the
+			// first entry that is not a hardware rung already fired
+			let hw = 0;
+
+			for (let i = 0; i < length(table); i++) {
+				if (table[i].action != 'reboot' && hw++ < fired)
+					continue;
+
+				next = { at: table[i].at, action: table[i].action,
+				         in: (table[i].at > attempts) ? (table[i].at - attempts) : 0 };
+				break;
+			}
 
 			return {
 				attempts: attempts,
@@ -4222,6 +4603,10 @@ export function create(opts)
 				datapath: entry.modem?.datapath?.backend,
 				proto_errors: entry.modem?.counters?.proto_errors,
 				qmi_errors: entry.modem?.counters?.proto_errors,   // deprecated alias
+				// QMI client IDs wwand holds on the modem, per service
+				// (modem.uc alloc/release) — the evidence when a small
+				// client table runs full
+				qmi_clients: entry.modem?.qmi_clients,
 
 				attempts: entry.modem?.counters?.attempts,
 				// false while the recovery hardware ladder (opmode/reset/repower/
@@ -4254,6 +4639,9 @@ export function create(opts)
 				// yet. Its interfaces fail with RADIO_HELD meanwhile, and the
 				// status pages say why in one place, whichever plugin it is.
 				radio_held: self.plugins_radio_hold?.(name) ?? null,
+				// detached from the network by the operator (modem_detach),
+				// until modem_attach; its interfaces fail with DETACHED
+				detached: !!entry.modem?.detached,
 				remote_sim: remote_sim_support(entry.protocol, entry.modem),
 				// ...and when that hold cannot be honoured: the radio is on
 				// although the line above says it is held (note_unholdable)
@@ -4429,6 +4817,27 @@ export function create(opts)
 	};
 
 	// settings / network-selection / operator-scan ubus ops — in netsel_ops.uc
+	// The interfaces of modem `m` that wwand gave up on (reconnect_on_register:
+	// an operator detach, reconnect.uc give_up) come back: re-armed and kicked
+	// in netifd, whose setup then dials through context_up. Called by
+	// netsel_ops modem_attach — an attach does not always cost a registration
+	// (a modem still registered on a CS domain stays registered), so waiting
+	// for the `registered` that re-arms them otherwise could wait forever.
+	self.rearm_giveups = function(m) {
+		for (let name, entry in self.contexts) {
+			if (entry.ctx?.modem != m || entry.wanted || !entry.reconnect_on_register ||
+			    entry.ctx.state != 'IDLE' || !entry.cfg.interface)
+				continue;
+
+			set_giveup(entry, false);
+			entry.wanted = true;
+			// the cleared autostart is our own down, not an operator's ifdown
+			mark_our_down(entry);
+			log('notice', sprintf('interface %s: modem attached, bringing it up', entry.cfg.interface));
+			deps.kick_interface?.(entry.cfg.interface);
+		}
+	};
+
 	netsel_ops.install(self, { log: log, check_modem: check_modem, reg_plmn: reg_plmn,
 	                           persist_bands: persist_bands });
 
@@ -4436,7 +4845,9 @@ export function create(opts)
 	// (same install pattern); the daemon keeps lifecycle, config and status.
 	simops.install(self, { log: log, check_modem: check_modem, load_esim: load_esim });
 	hwops.install(self, { log: log, check_modem: check_modem, board: deps.board,
-	                      board_gpio_ok: board_gpio_ok });
+	                      board_gpio_ok: board_gpio_ok,
+	                      reset_fallback_ms: self.timing?.reset_fallback_ms,
+	                      timer: deps.hw_timer });
 
 	// A plugin parking a modem's radio (a card lent to another modem) or
 	// handing it back. The DAEMON records the park, so the hand-back follows
@@ -4807,23 +5218,37 @@ export function create(opts)
 		return out;
 	};
 
+	// The last GNSS fix, short form (`wwandctl location`). A view over the
+	// wwand-gps reader — the same one modem_gps reports in full — whichever
+	// source feeds it, NMEA port or QMI LOC. Cell location is not this: that
+	// is telemetry (`cells`).
 	self.modem_location = function(ref) {
 		let entry = self.modems[ref];
 
 		if (!entry?.modem)
 			return { error: 'no_such_modem', ref: ref };
 
-		if (!entry.modem.loc) {
-			// distinguish "not configured" from "configured but the backend
-			// cannot do it" — 'location_disabled' on an MBIM/NCM modem WITH
-			// `option location` set was misleading
-			if (entry.cfg?.location && entry.modem.protocol != 'qmi')
-				return { error: 'unsupported_on_backend' };
-
+		if (!(entry.modem.config?.gnss ?? false))
 			return { error: 'location_disabled' };
-		}
 
-		return entry.modem.location ?? { error: 'no_fix' };
+		if (!deps.gps_status || deps.gps_status(entry.modem, null) == null)
+			return { error: 'package_not_installed', detail: 'wwand-gps is not installed' };
+
+		let snap = deps.gps_snapshot ? deps.gps_snapshot(ref) : null;
+
+		if (!snap?.valid || snap.latitude == null)
+			return { error: 'no_fix' };
+
+		return {
+			latitude: snap.latitude,
+			longitude: snap.longitude,
+			altitude: snap.elevation,
+			speed_kmh: snap.speed_kmh,
+			course: snap.course,
+			hdop: snap.hdop,
+			satellites_used: snap.satellites_used,
+			source: snap.source,
+		};
 	};
 
 	// GNSS as this daemon sees it: the port and receiver state wwand knows,
@@ -4993,6 +5418,8 @@ export function create(opts)
 	// Destructive teardown for config reload/removal: bring every context down
 	// (STOP_NETWORK) and stop the modems, then drop all state.
 	self.shutdown = function() {
+		self.cancel_reset_fallbacks?.();
+
 		for (let name, entry in self.contexts) {
 			clear_reconnect(name);
 			cancel_confirm(entry);
@@ -5017,6 +5444,8 @@ export function create(opts)
 	// interfaces. With no-proto-task the WAN stays up across the restart and the
 	// fresh daemon adopts the live session on modem-ready. Just cancel our timers.
 	self.stop_local = function() {
+		self.cancel_reset_fallbacks?.();
+
 		// ...and no second look at an unrecorded down either: it ends in a
 		// kick, and the next daemon makes its own
 		for (let name, entry in self.contexts) {

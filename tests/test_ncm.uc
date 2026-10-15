@@ -280,6 +280,66 @@ push(scenarios, {
 	},
 });
 
+// --- IPv6 prefix delegation on a Quectel NCM modem ---------------------------
+//
+// The flag goes in BEFORE the dial (it acts at PDN setup), read first; the
+// delegated prefix is read after connecting and reaches the settings, from
+// which the shim builds the netifd prefix (QMI parity).
+push(scenarios, {
+	name: 's_quectel_pd',
+	script: script([
+		// the attach profile (cid 1) already holds the flag; the dialled cid 2
+		// does not — so a write for 2 can only come from the dial path
+		{ re: /^AT\+QIP6CFG="PD_enable",1$/, lines: [ '+QIP6CFG: 1,1' ] },
+		{ re: /^AT\+QIP6CFG="PD_enable",2$/, lines: [ '+QIP6CFG: 2,0' ] },
+		{ re: /^AT\+QIP6CFG="PD_enable",2,1$/, lines: [] },
+		{ re: /^AT\+QIP6CFG="PD_addr",2$/, lines: [ '+QIP6CFG: "PD_addr",2,2001:db8:100::/56' ] },
+		{ re: /^AT\+CGCONTRDP/, lines: [
+			'+CGCONTRDP: 2,5,internet,10.20.30.40.255.255.255.0,10.20.30.1,8.8.8.8,8.8.4.4',
+			'+CGCONTRDP: 2,5,internet,32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136,32.1.72.96.0.0.0.0.0.0.0.0.0.0.0.1,32.1.72.96.72.96.0.0.0.0.0.0.0.0.136.136',
+		] },
+	]),
+	cconfig: { apn: 'internet', ipv6_pd: true, profile: 2 },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'pd/ncm: connects');
+
+			wait_for(() => env.ctx.settings?.ipv6?.delegated != null, () => {
+				eq(env.ctx.settings?.ipv6?.delegated, '2001:db8:100::/56',
+					'pd/ncm: the delegated prefix is in the settings');
+				ok(any_event(env.cevents, 'settings'), 'pd/ncm: ...and announced for a renew');
+
+				let w = env.tr.written;
+				let wr = -1, dial = -1;
+
+				for (let i = 0; i < length(w); i++) {
+					if (w[i] == 'AT+QIP6CFG="PD_enable",2,1' && wr < 0) wr = i;
+					if (match(w[i], /^AT\+QNETDEVCTL=1,/) && dial < 0) dial = i;
+				}
+
+				ok(wr >= 0 && dial > wr, 'pd/ncm: the flag is written before the dial');
+				eq(env.tr.count(/^AT\+QIP6CFG="PD_enable",1,/), 0,
+					'pd/ncm: the attach profile that already holds it is not rewritten');
+				env.finish();
+			});
+		});
+	},
+});
+
+// without ipv6_pd: no QIP6CFG traffic at all
+push(scenarios, {
+	name: 's_quectel_nopd',
+	script: script([]),
+	cconfig: { apn: 'internet' },
+	run: (env) => {
+		env.ctx.up((err) => {
+			eq(err, null, 'nopd/ncm: connects');
+			eq(env.tr.count(/QIP6CFG/), 0, 'nopd/ncm: no prefix-delegation commands');
+			env.finish();
+		});
+	},
+});
+
 // --- a modem that vanishes between two hops of the activation chain ----------
 //
 // Every AT call in context_ncm runs from the callback of the one before it, and
@@ -3463,5 +3523,65 @@ ok(current == length(scenarios),
 		});
 	});
 })();
+
+// --- profile settings over AT: address allocation (CGDCONT field 7) and
+// the Quectel IPv6 prefix-delegation recipe (AT+QIP6CFG) -------------------
+{
+	let Q = ncm_vendors.VENDORS.quectel;
+
+	// <IPv4AddrAlloc> is the 7th +CGDCONT parameter (3GPP TS 27.007); the ones
+	// between keep their defaults, and an unset preference sends none of them
+	eq(ncm_vendors.build_pdp_setup(Q, 1, { apn: 'web', pdp_type: 'ipv4v6', address_allocation: 'dhcp' })[0],
+		'AT+CGDCONT=1,"IPV4V6","web","",0,0,1', 'alloc: dhcp is <IPv4AddrAlloc> 1');
+	eq(ncm_vendors.build_pdp_setup(Q, 1, { apn: 'web', pdp_type: 'ipv4v6' })[0],
+		'AT+CGDCONT=1,"IPV4V6","web"', 'alloc: unset sends the three-parameter form');
+	// a vendor define that rewrites the same CGDCONT keeps the preference
+	let mt = ncm_vendors.build_pdp_setup(ncm_vendors.VENDORS.mediatek, 1,
+		{ apn: 'web', pdp_type: 'ipv4v6', address_allocation: 'dhcp' });
+	eq(mt[1], 'AT+CGDCONT=1,"IPV4V6","web",0,0,0,1', 'alloc: the MediaTek define carries field 7 too');
+
+	// the read-back as an RM520N-GL prints it (dotted v6 address, many fields)
+	let line = '+CGDCONT: 1,"IPV6","v6.global-m2m.net","0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0",0,0,0,0,,,,,,,,,"",,,,0';
+	eq(ncm_vendors.parse_cgdcont([ line ])[0].alloc, 0, 'alloc: field 7 read from a real line');
+	eq(ncm_vendors.parse_cgdcont([ '+CGDCONT: 1,"IP","web"' ])[0].alloc, null,
+		'alloc: a short line leaves it unknown, not 0');
+	ok(!ncm_vendors.pdp_setup_matches(1, { apn: 'v6.global-m2m.net', pdp_type: 'ipv6', address_allocation: 'dhcp' }, [ line ]),
+		'alloc: a different preference is a change');
+	ok(ncm_vendors.pdp_setup_matches(1, { apn: 'v6.global-m2m.net', pdp_type: 'ipv6', address_allocation: 'nas' }, [ line ]),
+		'alloc: the held one is not');
+
+	// AT+QIP6CFG answers, as the RG650E/RM520N-GL give them (2026-10-08/09)
+	eq(Q.pd.parse([ '+QIP6CFG: 1,0' ], 1), 0, 'pd: flag read');
+	eq(Q.pd.parse([ '+QIP6CFG: 6,1' ], 1), null, 'pd: another cid is not ours');
+	eq(Q.pd.parse_addr([ '+QIP6CFG: "PD_addr",1,::/0' ]), null, 'pd: ::/0 is "none"');
+	eq(Q.pd.parse_addr([ '+QIP6CFG: "PD_addr",6,2001:db8:100::/56' ]), '2001:db8:100::/56',
+		'pd: a delegated prefix with its length');
+
+	// sync_pd: read first, write only a difference; no recipe, no traffic
+	let sent = [];
+	let fake = (ans) => (c, cb) => { push(sent, c); cb(null, ans[c] ?? []); };
+	let silent = () => null;
+	let changed = null;
+
+	ncm_vendors.sync_pd(Q, fake({ 'AT+QIP6CFG="PD_enable",1': [ '+QIP6CFG: 1,0' ] }), 1, 1, silent,
+		(c) => { changed = c; });
+	eq([ changed, sent ], [ true, [ 'AT+QIP6CFG="PD_enable",1', 'AT+QIP6CFG="PD_enable",1,1' ] ],
+		'pd: 0 -> 1 is read, then written');
+
+	sent = [];
+	ncm_vendors.sync_pd(Q, fake({ 'AT+QIP6CFG="PD_enable",1': [ '+QIP6CFG: 1,1' ] }), 1, 1, silent,
+		(c) => { changed = c; });
+	eq([ changed, length(sent) ], [ false, 1 ], 'pd: already held — read only');
+
+	// a failed read is not "differs": no write
+	sent = [];
+	ncm_vendors.sync_pd(Q, (c, cb) => { push(sent, c); cb({ error: 'ERROR' }, null); }, 1, 1, silent,
+		(c) => { changed = c; });
+	eq([ changed, length(sent) ], [ false, 1 ], 'pd: an unreadable flag is not rewritten');
+
+	sent = [];
+	ncm_vendors.sync_pd(ncm_vendors.VENDORS.fibocom, fake({}), 1, 1, silent, (c) => { changed = c; });
+	eq([ changed, sent ], [ false, [] ], 'pd: a vendor without the recipe sends nothing');
+}
 
 done('test_ncm');

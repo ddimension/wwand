@@ -107,7 +107,9 @@ export default {
 			resp: {},
 		},
 
-	// unused in production — kept as a stable codec fixture for test_qmux
+	// asked before a dial whether a session already runs (context.uc
+	// start_activation); libqmi 1.38 qmi-service-wds.json "Get Packet Service
+	// Status": output 0x01 guint8 QmiWdsConnectionStatus
 		GET_PACKET_SERVICE_STATUS: {
 			id: 0x0022,
 			req:  {},
@@ -183,6 +185,14 @@ export default {
 				auth:                { t: 0x1D, f: 'u8' },
 				apn_disabled:        { t: 0x2F, f: 'u8' },
 				roaming_disallowed:  { t: 0x3E, f: 'u8' },
+				// stored profile settings, libqmi 1.38 (since 1.36):
+				// "Address Allocation Preference" enum (json:372-377)
+				address_allocation:  { t: 0x2D, f: 'u8' },
+				// "CLAT Enabled", guint8 boolean (json:417-422)
+				clat:                { t: 0xDE, f: 'u8' },
+				// "IPv6 Prefix Delegation", guint8 boolean (json:424-428).
+				// Quectel's AT+QIP6CFG="PD_enable",<cid> is the same flag.
+				prefix_delegation:   { t: 0xDF, f: 'u8' },
 			},
 			resp: {
 				// extended error code on failure
@@ -200,7 +210,30 @@ export default {
 				username:     { t: 0x1B, f: 'string' },
 				auth:         { t: 0x1D, f: 'u8' },
 				apn_disabled: { t: 0x2F, f: 'u8' },
+				// absent on a stack older than the TLV — read as "unknown", not 0
+				address_allocation: { t: 0x2D, f: 'u8' },
+				clat:              { t: 0xDE, f: 'u8' },
+				prefix_delegation: { t: 0xDF, f: 'u8' },
 			},
+		},
+
+		// VENDOR, NOT IN libqmi (checked against 1.38: no message reports a
+		// delegated prefix at runtime). Qualcomm's "get delegated IPv6
+		// prefix", as the RG650E's own apps side calls it
+		// (libdsi_netctrl.so dsi_qmi_wds_get_delegated_ipv6_prefix, md5
+		// eadbe82fe0c1885270d02c7ed4505934; layout from libqmiservices.so WDS
+		// IDL 1.250, type_idx 231/232; RE notes chateau_5g/notes/34, rounds
+		// 3-13, 2026-10-09). Sent on the WDS client that carries the call.
+		// Request: ONE mandatory TLV 0x01, a 16-byte address — 4 or 17 bytes
+		// are MALFORMED, a missing one is MISSING_ARGUMENT (HW-measured on the
+		// RG650E). Answer: TLV 0x10, the prefix and its length. A PDN with no
+		// delegated prefix answers INTERNAL (3) whatever the address
+		// (RG650E and RM520N-GL, 2026-10-09); a modem without the message
+		// answers INVALID_QMI_COMMAND (71).
+		GET_DELEGATED_PREFIX: {
+			id: 0x00AC,
+			req: { requestor: { t: 0x01, f: 'ipv6' } },
+			resp: { prefix: { t: 0x10, f: { addr: 'ipv6', plen: 'u8' } } },
 		},
 
 		GET_CURRENT_SETTINGS: {

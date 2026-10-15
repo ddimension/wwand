@@ -119,6 +119,25 @@ export default {
 			        hw_restricted: { t: 0x11, f: 'u8' } },
 		},
 
+		// The bands the modem CAN use, as against the preference it runs
+		// (NAS system selection): libqmi 1.38 qmi-service-dms.json "Get Band
+		// Capabilities" 0x0045 — 0x01 band mask u64 (QmiDmsBandCapability),
+		// 0x10 LTE band mask u64 (bit n-1 = band n), 0x12 extended LTE bands
+		// as a u16-counted list of band numbers (since 1.20), 0x13 NR5G bands
+		// likewise (since 1.32). A reset to "all bands" sends exactly these:
+		// a blanket 1..63 / 1..79 names bands a firmware may refuse outright
+		// (ddimension/wwand#55).
+		GET_BAND_CAPABILITIES: {
+			id: 0x0045,
+			req:  {},
+			resp: {
+				band_capability:         { t: 0x01, f: 'u64' },
+				lte_band_capability:     { t: 0x10, f: 'u64' },
+				ext_lte_band_capability: { t: 0x12, f: { n: 'u16', of: 'u16' } },
+				nr5g_band_capability:    { t: 0x13, f: { n: 'u16', of: 'u16' } },
+			},
+		},
+
 		// FCC authentication (RF unlock for laptop-SKU modems). Verified vs
 		// libqmi qmi-service-dms.json:
 		//   Set FCC Authentication 0x555F — no input (Quectel EM05/EM120/EM160

@@ -165,9 +165,13 @@ function render_mobile(fx, m, s)
 	set_led(fx, m.red, s.registered ? 0 : (s.present ? 'timer' : 255));
 	if (m.orange != null)
 		set_led(fx, m.orange, s.roaming ? 255 : 0);
-	// the tech LED lights once attached (any RAT)
+	// The tech LED is labelled LTE on these panels and lights only on LTE,
+	// as the vendor helper did (`grep lte` over the serving-system state,
+	// /usr/sbin/lte3301 in the vpn2go tree, Release_2024.10): a box that fell
+	// back to 2G/3G shows it. `s.lte` says so (daemon led_state); a caller
+	// that does not know it keeps the old meaning, attached on any RAT.
 	if (m.tech != null)
-		set_led(fx, m.tech, (s.registered && s.radio != null) ? 255 : 0);
+		set_led(fx, m.tech, (s.registered && (s.lte ?? (s.radio != null))) ? 255 : 0);
 }
 
 // --- board profiles ----------------------------------------------------------
@@ -182,6 +186,14 @@ function render_mobile(fx, m, s)
 const SIGNAL5 = [ 'green:mobile-1', 'green:mobile-2', 'green:mobile-3',
                   'green:mobile-4', 'green:mobile-5' ];
 
+// The OpenWrt port of the LTE3301-M209/Q222 (one shared dtsi) names its
+// gpio-leds by color + function only, so the kernel calls them
+// `green:mobile`, `red:mobile`, `green:lte` — the vendor image's `lte3301:`
+// prefix is gone (mt7620n_zyxel_lte3301.dtsi, lte3301 fork afab7c890b;
+// /sys/class/leds HW-observed on an M209, 2026-10-03). An old name would make
+// every write here land in a path that does not exist, silently.
+const LTE3301_LEDS = { red: 'red:mobile', green: 'green:mobile', tech: 'green:lte' };
+
 const PROFILES = {
 	'mikrotik,chateau-5g-r17-ax': {
 		power_gpio: 'modem-power',
@@ -195,21 +207,19 @@ const PROFILES = {
 			orange: 'lte3301-plus:orange:mobile', tech: 'lte3301-plus:white:lte',
 		}, s),
 	},
+	// The LTE3301 variants bind BOTH serial ids, as the vendor helper did on
+	// either board (/usr/sbin/lte3301, vpn2go, Release_2024.10): 1435:d181 and
+	// 2020:2033 are the two LTE modules these boards shipped with, and the
+	// model id does not say which one a given unit carries.
 	'zyxel,lte3301-m209': {
 		power_gpio: 'usbpower',
-		option_ids: [ '2020 2033' ],
-		leds: (fx, s) => render_mobile(fx, {
-			red: 'lte3301:red:mobile', green: 'lte3301:green:mobile',
-			tech: 'lte3301:green:lte',
-		}, s),
+		option_ids: [ '1435 d181', '2020 2033' ],
+		leds: (fx, s) => render_mobile(fx, LTE3301_LEDS, s),
 	},
 	'zyxel,lte3301-q222': {
 		power_gpio: 'usbpower',
-		option_ids: [ '1435 d181' ],
-		leds: (fx, s) => render_mobile(fx, {
-			red: 'lte3301:red:mobile', green: 'lte3301:green:mobile',
-			tech: 'lte3301:green:lte',
-		}, s),
+		option_ids: [ '1435 d181', '2020 2033' ],
+		leds: (fx, s) => render_mobile(fx, LTE3301_LEDS, s),
 	},
 	// Zyxel LTE5398-M904: `lte_power` gates the modem's USB power (wired active-low
 	// at HW, but the sysfs gpio applies the inversion, so value 1 = on, default 1).

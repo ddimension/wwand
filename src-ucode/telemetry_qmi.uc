@@ -331,7 +331,16 @@ export function install(self, o)
 		if (!self.at || !self.cells || !modem_common.qeng_ok(self))
 			return set_mode();
 
-		self.at.send('AT+QENG="servingcell"', (e, r) => {
+		// Route through telemetry_at (not raw self.at.send) so a modem whose AT
+		// channel never answers QENG retires it — after repeated ERRORs, or
+		// after repeated timeouts while the port answers the other commands
+		// (modem_common.uc telemetry_at says when a timeout counts) — instead
+		// of being re-asked on every tick forever. Every other telemetry
+		// command here (AT+CSQ, AT+QCAINFO) already does. On a modem that
+		// answers, nothing changes; on one that does not, the serving cell
+		// keeps whatever the QMI GET_CELL_LOCATION_INFO read put there (only the
+		// AT-only band field goes stale, as it does on any band-less transport).
+		modem_common.telemetry_at(self).send('AT+QENG="servingcell"', (e, r) => {
 			if (!e && self.cells)
 				self.cells.serving = atcmd.parse_qeng_servingcell(r?.lines);
 			set_mode();

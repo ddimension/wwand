@@ -74,6 +74,19 @@ const QUIRKS = [
 			'NAS 1.0: signal is GET_SIGNAL_STRENGTH/AT+CSQ floor — no GET_SIGNAL_INFO, no cell environment',
 		],
 	},
+
+	// Sierra MC7710 (SWI9200X_03.05.29): an IPv6 PDP request takes the modem
+	// down — an IPv4v6 attach profile leaves it in limited service, and a dial
+	// with IPv6 in it answers internal 204 (INTERNAL_UNKNOWN_CAUSE) until a
+	// reset (HW-observed on deborah-3, 2026-10-04). `ipv4_only` makes
+	// context_common.effective_pdp() resolve every pdp_type to ipv4 for this
+	// model, which is the one place the attach profile, the data profile and
+	// the dialled families all read it from.
+	{
+		match: /^MC7710$/,
+		ipv4_only: true,
+		warn: [ 'firmware crashes on an IPv6 PDP request: attach and dial run IPv4 only, whatever pdp_type says' ],
+	},
 ];
 
 // resolve every matching entry for a model into one merged descriptor.

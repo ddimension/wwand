@@ -47,7 +47,9 @@ One process. Zero per-context spawns. ~3 MB resident. The measured baseline:
                config), tmd (thermal mitigation), cat (SIM toolkit)
                mbim.uc, mbim_schema/*.uc             — MBIM, declarative
  session:      transport.uc (hub/routing), client.uc (QMI correlation),
-               mbim_client.uc, qmi_over_mbim.uc (QMI-over-MBIM passthrough hub)
+               mbim_client.uc, qmi_over_mbim.uc (QMI-over-MBIM passthrough hub),
+               qmi_over_qrtr.uc (QMI over the QRTR bus: CTL emulated, one
+               socket per client)
  backends:     QMI  — modem.uc/context.uc + extracted helpers modem_init_qmi.uc,
                       telemetry_qmi.uc, datapath_qmi.uc, context_monitor_qmi.uc,
                       regdetail.uc, config_check.uc
@@ -98,6 +100,7 @@ flowchart TD
     CL["client.uc<br/><small>QMI correlation</small>"]
     MC["mbim_client.uc"]
     PT["qmi_over_mbim.uc<br/><small>passthrough</small>"]
+    QR["qmi_over_qrtr.uc<br/><small>QRTR (PCIe/MHI)</small>"]
   end
   subgraph COD["codec — declarative"]
     QX["qmux · tlv · schema/*"]
@@ -451,10 +454,11 @@ persist in tmpfs across daemon restarts and are intentionally cleared by
 reboot. A zero-rx watchdog (packet stats delta) triggers the same repower.
 
 Alongside the automatic ladder, the `modem_reset` ubus method
-(`hwops.uc`, installed into the daemon) offers an admin-driven reset with the
-same GPIO-first priority: it
-pulses the modem/board `reset_gpio` when one is configured, else falls back to
-the backend soft reset (QMI DMS offline→reset, NCM `CFUN=1,1`). Board-default
+(`hwops.uc`, installed into the daemon) offers an admin-driven reset, soft
+first: the backend reset (QMI DMS offline→reset, NCM `CFUN=1,1`) lets the
+modem shut down cleanly, and the modem/board `reset_gpio` is only the fallback
+— pulsed when the soft reset is refused, or when the modem has not dropped off
+the bus within `reset_fallback` (ddimension/openwrt-repo#4). Board-default
 GPIOs are gated by `board_gpio_ok` (a shared board power/reset rail is only
 touched on a single-modem box); a per-modem `reset_gpio` is the multi-modem path.
 
@@ -525,6 +529,13 @@ above cares which one is in use.
   send CTL SYNC over the passthrough** — it resets the modem's embedded QMI state
   and kills the live MBIM data session (HW-proven on EG06); the shim blocks it
   structurally.
+- **QMI over QRTR** (`option device 'qrtr'`, ddimension/wwand#46) — for an
+  SDX modem on PCIe/MHI whose QMI lives only on the Qualcomm IPC router (no
+  cdc-wdm). `qmi_over_qrtr.uc` is a third hub under the same contract, so the
+  QMI backend runs unchanged: CTL is emulated (QRTR has none), every QMI client
+  is its own AF_QIPCRTR socket (a service tells clients apart by source port;
+  there is no client id on the wire), and the kernel name server's
+  NEW/DEL_SERVER reports are the modem's presence and loss.
 - **NCM** — AT-controlled (`ncm_vendors.uc` `VENDORS` recipes, driven by
   `modem_ncm.uc`) over a plain `cdc_ncm`/`cdc_ether`/`rndis_host` netdev, for
   modems with no cdc-wdm control device. RNDIS modems (Fibocom FM350-GL) are

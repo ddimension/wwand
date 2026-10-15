@@ -187,10 +187,14 @@ export function from_modem(name, m, remote)
 	// FOUND no card: that is a reading, and it says the card is gone. QMI
 	// names it no_sim (sim.uc), MBIM and NCM sim_absent.
 	let nocard = (m?.state == 'SIM_BLOCKED' && index([ 'no_sim', 'sim_absent' ], m?.sim_block?.reason) >= 0);
+	// ...and an eUICC with no profile enabled (MBIM ready state 7): the card
+	// is there, but nothing on it is active — the ICCID still held, by the
+	// modem and by the active slot's entry, is the profile that was disabled.
+	let noprofile = (m?.state == 'SIM_BLOCKED' && m?.sim_block?.reason == 'no_esim_profile');
 
 	// the active card — unless it is an eUICC profile, which the profile
 	// list below reports with more detail (same ICCID, same entry anyway)
-	out[sprintf('modem:%s:active', name)] = nocard ? [] : (m?.info?.iccid == null) ? null : [ {
+	out[sprintf('modem:%s:active', name)] = (nocard || noprofile) ? [] : (m?.info?.iccid == null) ? null : [ {
 		iccid: m.info.iccid, imsi: m.info.imsi ?? null, active: true,
 		modem: remote ? null : name, slot: remote ? null : (m.active_slot ?? null),
 		reader: remote ?? null,
@@ -202,7 +206,7 @@ export function from_modem(name, m, remote)
 	// The slot list is read once per registration, so without a card the
 	// active slot's entry is the card that left.
 	if (type(m?.slots) == 'array')
-		out[sprintf('modem:%s:slots', name)] = map(filter(m.slots, (s) => !s.inferred && s.iccid != null && !(nocard && s.active)), (s) => ({
+		out[sprintf('modem:%s:slots', name)] = map(filter(m.slots, (s) => !s.inferred && s.iccid != null && !((nocard || noprofile) && s.active)), (s) => ({
 			iccid: s.iccid, modem: name, slot: s.physical ?? null,
 			active: !!s.active && active_id != null && norm_iccid(s.iccid) == active_id,
 			eid: s.is_euicc ? (s.eid ?? null) : null,
@@ -220,7 +224,9 @@ export function from_modem(name, m, remote)
 		out[sprintf('modem:%s:esim', name)] = map(m.esim_info.profiles, (p) => ({
 			iccid: p.iccid, modem: name, eid: m.esim_info.eid ?? null,
 			slot: euicc_slot,
-			active: (p.state == 'enabled' || p.state == 1) && (norm_iccid(p.iccid) == active_id),
+			// a cached list still says `enabled` for the profile that was
+			// disabled under a running modem (no_esim_profile)
+			active: !noprofile && (p.state == 'enabled' || p.state == 1) && (norm_iccid(p.iccid) == active_id),
 			profile: { state: (p.state == 1) ? 'enabled' : (p.state == 0) ? 'disabled' : p.state,
 			           name: p.nickname ?? p.name ?? null },
 		}));

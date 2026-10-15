@@ -80,6 +80,15 @@ export function install(self, o)
 		// applied at the end of the AT config phase (not mid-init several times)
 		self._init_resets = [];
 
+		// a reset the daemon asked for before this init (daemon.uc
+		// _left_qmap): taken at the first collection point, before the
+		// datapath, once
+		if (self._pending_init_reset) {
+			push(self._init_resets, self._pending_init_reset);
+			self._pending_init_reset = null;
+			self._owes_init_reset = true;
+		}
+
 		self.ctl.request('SYNC', {}, (err) => {
 			if (err) {
 				if (tries < SYNC_TRIES) {
@@ -272,6 +281,17 @@ export function install(self, o)
 		log('notice', sprintf('applying deferred init reset (%s)',
 			join('; ', reasons)));
 
+		// the daemon's debt (on_init_reset_taken) is settled only HERE, when
+		// the reset is actually issued — an instance that goes ABSENT between
+		// taking the reason and this point leaves it for the next one (HW:
+		// the first instance after a datapath rename never reached SYNC)
+		if (self._owes_init_reset) {
+			self._owes_init_reset = false;
+
+			if (self.on_init_reset_taken)
+				self.on_init_reset_taken();
+		}
+
 		// THE RESET DID NOT TAKE — say so, and keep going.
 		//
 		// Reaching here means the settings this reset existed to apply are
@@ -303,7 +323,7 @@ export function install(self, o)
 				why, join('; ', reasons)));
 
 			// Deliberately NOT cleared on a later init pass. The object is
-			// created once per device attach (daemon.uc:2928), so a modem that
+			// created once per device attach (daemon.uc:3143), so a modem that
 			// really did reset comes back as a NEW instance with no debt — and
 			// a re-init of THIS instance means it did not, so the debt still
 			// holds. Deduplicated because a re-init re-derives the same reason
@@ -760,9 +780,18 @@ export function install(self, o)
 	// in-flight attach with the stale profile re-runs. See context.uc
 	// ensure_attach_profile / the EMM #33 IPv4-only-attach finding.
 	step_attach_profile = () => {
-		let ctx = self.contexts[0];
+		let ctx = modem_common.attach_owner(self.contexts);
 
-		if (!ctx || !ctx.ensure_attach_profile || !self.dms)
+		// no interface bound yet: the first one to bind programs it
+		// (modem_common attach_context) — said, because a skipped attach is
+		// otherwise invisible in the log
+		if (!ctx) {
+			log('notice', 'attach profile: no interface bound yet — programmed when the first one binds');
+			self._attach_pending = true;
+			return step_register();
+		}
+
+		if (!ctx.ensure_attach_profile || !self.dms)
 			return step_register();
 
 		ctx.ensure_attach_profile(1, (changed) => {

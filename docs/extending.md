@@ -189,6 +189,14 @@ MBIM is the reference example of reuse: it has no native NAS, so it brings up a
 (`qmi_backend`, schemas) over the open MBIM channel — which is why `wwand-mbim`
 depends on `wwand-qmi`.
 
+A new TRANSPORT for an existing backend needs no backend at all, only a hub:
+`qmi_over_qrtr.uc` is the example — the QMI stack talks to `register` /
+`unregister` / `send` / `close` and to `client.dispatch`, and nothing above it
+knows the wire is QRTR. What such a hub has to answer for itself is what the
+wire does not carry: who the client is (QRTR: one socket each), whether the
+modem is there (QRTR: the name server; presence in `discovery.uc`, gated in
+`daemon.uc start_modem`), and when it is gone (`on_gone`).
+
 ---
 
 ## 4. Adding a datapath backend

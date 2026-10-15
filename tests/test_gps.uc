@@ -102,6 +102,23 @@ ok(flood.snapshot(200).unparsed > 0, 'framing: a line with no end is dropped, no
 flood.push('\n$GPGGA,082112.00,5208.613543,N,00857.854813,E,1,08,0.5,102.9,M,47.0,M,,*60\n', 201);
 ok(flood.snapshot(201).latitude != null, 'framing: ...and the next whole sentence still lands');
 
+// ONE READ, A WHOLE SECOND OF SENTENCES: more than MAX_LINE bytes at once from
+// a multi-constellation receiver is not an overlong line — every sentence in
+// it lands, none is counted unparsed
+(function() {
+	let r = gps.create({ path: '/dev/null' });
+	let gga = '$GPGGA,082112.00,5208.613543,N,00857.854813,E,1,08,0.5,102.9,M,47.0,M,,*60\r\n';
+	let burst = '';
+
+	for (let i = 0; i < 20; i++)
+		burst += gga;
+
+	ok(length(burst) > 1024, 'burst: the read is longer than MAX_LINE');
+	r.push(burst, 300);
+	eq([ r.snapshot(300).sentences, r.snapshot(300).unparsed ], [ 20, 0 ],
+	   'burst: all twenty sentences parse, none is dropped as an overlong line');
+})();
+
 // --- the port going away -----------------------------------------------------
 
 // AN IDLE PORT IS NOT A GONE PORT. This is the one the host could not have
@@ -268,6 +285,64 @@ ok(flood.snapshot(201).latitude != null, 'framing: ...and the next whole sentenc
 	// ...and the TTL still works on that clock
 	t += 40;
 	eq(r.snapshot().satellites_in_view, null, 'clock step: a stale GSV cycle still expires');
+})();
+
+// --- a reader without a port: fed by QMI LOC's NMEA indications ------------
+
+(function() {
+	let opened = false;
+	let r = gps.create({ path: 'qmi-loc', feed: true, open: () => { opened = true; return null; } });
+
+	eq(r.start(), true, 'feed: starts without a port');
+	eq(opened, false, 'feed: ...and opens nothing');
+
+	r.push('$GPGGA,082112.00,5208.613543,N,00857.854813,E,1,08,0.5,102.9,M,47.0,M,,*60\n', 500);
+	let snap = r.snapshot(500);
+
+	eq([ snap.source, snap.port, snap.running, snap.sentences ], [ 'qmi_loc', 'qmi-loc', true, 1 ],
+	   'feed: pushed lines parse like a port\'s, and the source says where they came from');
+	ok(snap.latitude > 52.14 && snap.latitude < 52.15, 'feed: the fix is the GGA\'s');
+
+	r.stop();
+	eq(r.snapshot(500).running, false, 'feed: stop switches it off');
+	eq(gps.create({ path: '/dev/ttyUSB1', open: () => null }).snapshot(0).source, 'nmea_port',
+	   'feed: a port reader says so too');
+})();
+
+// a proprietary sentence is NMEA, just not ours: ignored, not unparsed
+(function() {
+	let r = gps.create({ path: 'qmi-loc', feed: true });
+
+	r.start();
+	r.push('$PQXFI,082112.0,5208.613543,N,00857.854813,E,102.9,3.2,4.1,0.4*5D\n', 100);
+	r.push('$GNGNS,082112.00,5208.613543,N,00857.854813,E,AAN,08,0.5,102.9,47.0,,,V*60\n', 100);
+	r.push('garbage that is not nmea\n', 100);
+	let sn = r.snapshot(100);
+
+	eq([ sn.ignored, sn.unparsed ], [ 2, 1 ],
+	   'ignored: $PQXFI and a GNS are NMEA this does not read; only real garbage is unparsed');
+})();
+
+// --- loc_session against a modem that cannot give a client -----------------
+
+(function() {
+	let states = [];
+	let sess = gps.loc_session({ modem: {}, on_line: () => null, on_state: (ev, d) => push(states, [ ev, d?.stage ]) });
+
+	eq(sess.start(), false, 'loc: a modem without extra_client (NCM) cannot start one');
+	eq([ states, sess.state, sess.alive() ], [ [ [ 'failed', 'client' ] ], 'failed', false ],
+	   'loc: ...and says so once, as a failure at the client stage');
+
+	// a client handed back after stop(): released, not adopted
+	let released = [], pend = null;
+	let m = { extra_client: (s, cb) => { pend = cb; }, extra_release: (c) => push(released, c.cid) };
+
+	sess = gps.loc_session({ modem: m, on_line: () => null });
+	sess.start();
+	eq(sess.alive(), true, 'loc: starting counts as alive (no second start)');
+	sess.stop();
+	pend(null, { cid: 9, on: () => null, request: () => null });
+	eq([ released, sess.client ], [ [ 9 ], null ], 'loc: a client that arrives after stop() is given back');
 })();
 
 // --- what modem_gps answers --------------------------------------------------

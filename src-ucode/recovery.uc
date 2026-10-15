@@ -3,11 +3,12 @@
 // wwand — recovery ladder with persisted counters.
 //
 // Two inputs, thresholds preserved from the old proto handler:
-// - connection attempts (old 'connecttries'):
+// - connection attempts (old 'connecttries'), default thresholds — per modem
+//   `option recovery_steps` moves them (steps_from below):
 //     < 8              plain retry (backoff handled by the caller)
-//     == 8             DMS operating-mode low_power -> online cycle
-//     == 16            DMS offline -> reset (modem reboot)
-//     == 24            board repower / reset-GPIO pulse (skipped if absent)
+//     >= 8             DMS operating-mode low_power -> online cycle
+//     >= 16            DMS offline -> reset (modem reboot)
+//     >= 24            board repower / reset-GPIO pulse (skipped if absent)
 //     > failreboot     system reboot (default 100)
 //   The hardware rungs (opmode cycle / modem reset / repower) fire on their
 //   thresholds INDEPENDENT of failreboot. `failreboot == 0` disables ONLY the
@@ -34,28 +35,59 @@ const UNARMED_RESET_AFTER = 300;
 const DEFAULT_STATE_DIR = '/tmp/wwand/state';
 const REBOOT_DELAY_MS = 10000;
 
-// escalation rungs, in ascending order of attempt count. Each fires exactly
-// once per outage (tracked by the persisted `rung` index) the first time the
-// attempt counter reaches its threshold — a THRESHOLD CROSSING, not an exact
-// `== n` match. Exact matches were fragile: two callers can increment the
-// shared counter in one failed cycle (the modem step-chain fail() and the
-// daemon on a context-activation error), so a jump from 7 to 9 would sail past
-// `== 8` and silently skip opmode_cycle; likewise a daemon restart mid-outage
-// that restored e.g. attempts=9 would never re-hit `== 8`. Crossing + a
-// persisted fired-index is robust to both.
-const RUNGS = [
-	{ at: 8,  action: 'opmode_cycle' },
-	{ at: 16, action: 'modem_reset' },
-	{ at: 24, action: 'usb_repower' },  // board repower / reset-GPIO pulse
-];
+// the three hardware rungs in order; their thresholds are per modem (create)
+const RUNG_ACTIONS = [ 'opmode_cycle', 'modem_reset', 'usb_repower' ];   // usb_repower: board repower / reset-GPIO pulse
+export const DEFAULT_STEPS = [ 8, 16, 24 ];
+
+// The attempt counts the three hardware rungs fire at, as given by
+// `option recovery_steps` (config.uc): 1-3 positive integers, the first ones
+// replacing the defaults in order ('2' = radio cycle at 2, the rest as
+// before). The result must rise strictly — each rung is a crossing ABOVE the
+// previous one (see the rung table in create). null when the
+// input does not make such a ladder; the caller reports it and keeps the
+// defaults. Why configurable: after a reject the spec answers with a
+// switch-off (TS 24.301 §5.5.1.2.6, reject #7), and 8 attempts at the
+// 240 s registration timeout is half an hour before the first radio cycle
+// (ddimension/wwand#52).
+export function steps_from(list)
+{
+	if (type(list) != 'array' || !length(list) || length(list) > length(DEFAULT_STEPS))
+		return null;
+
+	let out = [ ...DEFAULT_STEPS ];
+
+	for (let i = 0; i < length(list); i++) {
+		let n = +list[i];
+
+		if (n != n || n < 1 || n != int(n))
+			return null;
+
+		out[i] = n;
+	}
+
+	for (let i = 1; i < length(out); i++)
+		if (out[i] <= out[i - 1])
+			return null;
+
+	return out;
+};
+
+// the rung table for a set of steps (DEFAULT_STEPS when none)
+function ladder_of(steps)
+{
+	let st = steps ?? DEFAULT_STEPS;
+
+	return map(RUNG_ACTIONS, (a, i) => ({ at: st[i], action: a }));
+}
 
 // The ladder, for anyone who has to explain a box's behaviour rather than
 // produce it — the status page shows which rungs have fired and what comes
 // next. Exported from here so there is one table, not a copy in the UI that
-// says 8/16/24 long after these numbers moved.
-export function rungs(failreboot)
+// says 8/16/24 long after these numbers moved. `steps` is the modem's
+// configured recovery_steps (null = defaults).
+export function rungs(failreboot, steps)
 {
-	let out = map(RUNGS, (r) => ({ at: r.at, action: r.action }));
+	let out = ladder_of(steps);
 
 	// THE REBOOT IS PART OF THE LADDER and was missing from this list, which
 	// made the status page show "nothing comes next" while a reboot was still
@@ -68,12 +100,17 @@ export function rungs(failreboot)
 	if (fr > 0)
 		push(out, { at: fr + 1, action: 'reboot' });
 
-	return out;
+	// IN FIRING ORDER, not "reboot last": a failreboot below a step reboots
+	// before that step is reached (on_attempt checks the reboot whenever no
+	// hardware rung is due), and a table that put it last told the status
+	// page the wrong next step. A tie goes to the hardware rung, as there.
+	return sort(out, (a, b) => (a.at != b.at) ? (a.at - b.at)
+		: ((a.action == 'reboot') ? 1 : (b.action == 'reboot') ? -1 : 0));
 };
 
 // how many rungs a given attempt count has already passed (used only to default
 // the fired-rung index when restoring a legacy state file that predates `rung`).
-function rungs_reached(n)
+function rungs_reached(n, RUNGS)
 {
 	let k = 0;
 
@@ -94,6 +131,17 @@ export function create(opts)
 	// would postpone it indefinitely). The state file lives in tmpfs, so its
 	// lifetime is exactly one boot — the lifetime of CLOCK_MONOTONIC.
 	let now = opts.now ?? (() => clock(true)[0]);
+
+	// escalation rungs, in ascending order of attempt count. Each fires exactly
+	// once per outage (tracked by the persisted `rung` index) the first time the
+	// attempt counter reaches its threshold — a THRESHOLD CROSSING, not an exact
+	// `== n` match. Exact matches were fragile: two callers can increment the
+	// shared counter in one failed cycle (the modem step-chain fail() and the
+	// daemon on a context-activation error), so a jump from 7 to 9 would sail past
+	// `== 8` and silently skip opmode_cycle; likewise a daemon restart mid-outage
+	// that restored e.g. attempts=9 would never re-hit `== 8`. Crossing + a
+	// persisted fired-index is robust to both. Per modem: `recovery_steps`.
+	let RUNGS = ladder_of(opts.recovery_steps);
 
 	let self = {
 		id: opts.id,
@@ -199,7 +247,7 @@ export function create(opts)
 				self.counters.outage_since = now();
 				self.persist();
 			}
-			self.counters.rung = rung ? +rung[1] : rungs_reached(self.counters.attempts);
+			self.counters.rung = rung ? +rung[1] : rungs_reached(self.counters.attempts, RUNGS);
 			log('notice', sprintf('restored recovery state: attempts %d, proto_errors %d, rung %d',
 				self.counters.attempts, self.counters.proto_errors, self.counters.rung));
 		}

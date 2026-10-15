@@ -16,6 +16,7 @@ import * as ratmod from 'wwand.codec.schema.rat';
 import * as merge from 'wwand.codec.schema.merge';
 import * as arfcn_bands from 'wwand.codec.arfcn_bands';
 import * as discovery from 'wwand.discovery';
+import * as context_common from 'wwand.context_common';
 
 // scrub NAS cell-info sentinel metrics (-32768 = "not measured") to null so
 // consumers never render the sentinel as a real dBm value.
@@ -184,6 +185,77 @@ const GNSS_START = [
 	{ vendors: /quectel|asr/, cmd: 'AT+QGPS=1', ok_errors: /504/ },
 ];
 
+// The extra_client contract's goodbye: run each plugin client's
+// `before_release(client)` once, right before the modem releases its CID —
+// the place to end a session the client opened, which RELEASE_CID alone does
+// not (QMI LOC: modem.uc teardown). Cleared before the call, so a teardown
+// that reaches the same client twice says goodbye once; guarded per client,
+// because a plugin's goodbye that throws must not cost the release burst it
+// precedes the CIDs of every client after it.
+// The profile index a context dials, the way the QMI and NCM contexts
+// resolve it (context.uc resolve_profile, context_ncm.uc resolve_cid): an
+// `apn '#N'` names profile N, else `option profile`, else the mux channel,
+// else 1. The APN is the EFFECTIVE one — a matching wwand_sim overrides the
+// interface's (context_common.conn_cfg), and its `#N` is what gets dialled.
+function dialled_profile(ctx)
+{
+	let cfg = ctx?.config;
+	let apn = context_common.conn_cfg(ctx ?? {}, 'apn');
+
+	if (type(apn) == 'string' && substr(apn, 0, 1) == '#')
+		return +substr(apn, 1);
+
+	return +(cfg?.profile ?? 0) || +(cfg?.mux_id ?? 0) || 1;
+}
+
+// The interface whose settings the modem's ATTACH profile follows. The attach
+// bearer the modem brings up on its own is profile 1 (QMI ensure_attach_profile
+// (1), NCM step_attach cid 1), and it IS the data connection of the interface
+// that dials profile 1 — so that interface's APN, IP family and profile flags
+// have to win. Bind order did not: after a modem reset on an NR7101 the
+// `auto 0`, administratively-down `wwand1`, which dials profile 2, bound first
+// and put its APN into the attach profile (2026-10-10). In order:
+//   1. an interface that dials profile 1 — only where the attach IS a
+//      numbered profile (QMI, NCM); MBIM's LTE attach configuration is not,
+//      and a session/mux 1 means nothing for it (`numbered` false);
+//   2. one that is brought up automatically (`auto` not 0);
+//   3. the first one bound, as before.
+// null when nothing is bound.
+export function attach_owner(contexts, numbered)
+{
+	let list = contexts ?? [];
+
+	if (numbered !== false)
+		for (let c in list)
+			if (dialled_profile(c) == 1)
+				return c;
+
+	for (let c in list)
+		if (c?.config?.auto !== false)
+			return c;
+
+	return list[0] ?? null;
+};
+
+export function before_release(clients, log)
+{
+	for (let c in clients) {
+		let f = c?.before_release;
+
+		if (type(f) != 'function')
+			continue;
+
+		c.before_release = null;
+
+		try {
+			f(c);
+		}
+		catch (e) {
+			log('warn', sprintf('a plugin client\'s before_release threw: %s', e));
+		}
+	}
+};
+
 export function start_gnss(self, log, cb)
 {
 	cb = cb ?? (() => null);
@@ -233,7 +305,7 @@ export function start_gnss(self, log, cb)
 			already ? ' — was already running' : '',
 			self.gps_tty ? sprintf(', NMEA on %s', self.gps_tty) : ''));
 		cb(null);
-	}, { timeout: 10000 });
+	}, { timeout: 10000, expect_errors: recipe.ok_errors });
 };
 
 export function dsd_from_serving(serving)
@@ -243,6 +315,20 @@ export function dsd_from_serving(serving)
 	let mode = nr ? (serving.nr.mode ?? (lte ? 'NSA' : 'SA')) : (lte ? 'LTE' : null);
 
 	return mode ? { mode: mode, lte: lte, nr: nr } : null;
+};
+
+// how far the system clock may be from the network's time before NITZ steps
+// it (modem option nitz_time; deps.uc set_clock). Generous on purpose: NITZ
+// is second-granular at best and some networks send it late, while a clock
+// that is minutes off is wrong rather than drifting.
+export const NITZ_TOLERANCE_S = 120;
+
+// hand a network time to the daemon's clock policy, unless this modem's
+// config switched it off (`option nitz_time '0'`)
+export function nitz_apply(self, deps, epoch, tz_min)
+{
+	if (deps?.set_clock && self.config?.nitz_time !== false)
+		deps.set_clock(epoch, tz_min, 'NITZ', { tolerance: NITZ_TOLERANCE_S });
 };
 
 // convert a QMI NAS Network-Time "Universal Time" struct (already UTC) to a Unix
@@ -311,17 +397,14 @@ export function urc_common(self, o)
 			}
 		}
 
-		// NITZ (network identity/time, pushed at attach). The daemon applies it
-		// only when the system clock is clearly unset (RTC-less router before
-		// NTP), so recording it is always safe.
+		// NITZ (network identity/time, pushed at attach): recorded always,
+		// applied to the clock per nitz_apply
 		let tz = nitz_ctzv(line);
 
 		if (tz) {
 			self.network_time = { epoch: tz.epoch, tz_offset_min: tz.tz_offset_min };
 			log('info', sprintf('network time (NITZ): %d utc, tz %+d min', tz.epoch, tz.tz_offset_min));
-
-			if (deps.set_clock)
-				deps.set_clock(tz.epoch, tz.tz_offset_min);
+			nitz_apply(self, deps, tz.epoch, tz.tz_offset_min);
 		}
 
 		// +CGEV PDN events are the modem's own session notifications: DEACT pokes
@@ -508,7 +591,27 @@ export function scaffolding(self, o)
 	};
 
 	self.attach_context = function(ctx) {
+		let before = attach_owner(self.contexts, self.attach_numbered);
+
 		push(self.contexts, ctx);
+
+		// The init chain reached its attach step before any interface was
+		// bound (no context to take the APN from), so the attach profile was
+		// left as it was. Program it now, from the first context to bind —
+		// otherwise the modem stays attached with whatever profile 1 held
+		// until its next init, and an APN set in the config does nothing.
+		if (self._attach_pending && type(self.reapply_sim) == 'function') {
+			self._attach_pending = false;
+			self.reapply_sim();
+		}
+		// ...and AGAIN when a later interface takes the attach profile over
+		// (attach_owner): the first to bind is only provisional — an `auto 0`
+		// interface on profile 2 binding before the one on profile 1 would
+		// otherwise keep the attach APN for good. reapply_sim writes only what
+		// differs.
+		else if (before && before !== attach_owner(self.contexts, self.attach_numbered) &&
+		         type(self.reapply_sim) == 'function')
+			self.reapply_sim();
 
 		if (self.state == 'READY')
 			ctx.modem_event('ready');
@@ -604,6 +707,62 @@ export function scaffolding(self, o)
 		emit('removed', {});
 	};
 
+	// THE PDNS END BEFORE THE ATTACH DOES. Anything that takes this modem off
+	// the network — a reattach's radio cycle, the ladder's opmode cycle, a
+	// detach — stops every CONNECTED session first (WDS STOP_NETWORK, MBIM
+	// deactivate, CGACT=0) and only then runs `fn(done)`. The other order
+	// leaves the network to drop the bearers implicitly with the detach, the
+	// modem to learn of it from the call-end that follows, and the daemon to
+	// redial into the radio-off window — each such dial fails, counts toward
+	// the recovery ladder and is one more call allocation on the modem.
+	//
+	// `_reattaching` holds the daemon's own reconnect off while it runs
+	// (daemon.uc on_context_event, case 'down'). `reason` is the stopped
+	// contexts' down reason ('reattach', or 'admin' for an operator's detach).
+	// With `handback` the stopped contexts are announced afterwards
+	// ('sessions_released' → the daemon's reconnect, which waits for READY);
+	// a detach passes false and leaves them to the attach's re-registration.
+	//
+	// cb(err, res, released, failed): fn's own result; `released` the contexts
+	// stopped, `failed` [{ context, step: 'down' }]. A snapshot taken once — a
+	// context back up meanwhile is not stopped again.
+	self.with_sessions_released = function(reason, fn, cb, handback) {
+		let todo = filter(self.contexts ?? [], (c) => c.state == 'CONNECTED');
+		let released = [], failed = [];
+		let next;   // forward-declared (self-referencing arrow)
+
+		self._reattaching = true;
+
+		next = () => {
+			if (length(todo)) {
+				let c = shift(todo);
+
+				return c.down((err) => {
+					if (err)
+						push(failed, { context: c.name ?? '?', step: 'down' });
+					else
+						push(released, c);
+
+					next();
+				}, reason);
+			}
+
+			if (length(released))
+				log('notice', sprintf('%d PDN session(s) stopped before the detach', length(released)));
+
+			fn((err, res) => {
+				self._reattaching = false;
+
+				if (handback !== false && length(released))
+					emit('sessions_released', { contexts: released });
+
+				cb?.(err, res, released, failed);
+			});
+		};
+
+		next();
+	};
+
 	return { emit: emit, notify_contexts: notify_contexts, sim_block: sim_block,
 	         enter_ready: enter_ready, resolve_active_sim: resolve_active_sim };
 };
@@ -627,7 +786,10 @@ export function note_connect_failure_light(self, rec, handlers)
 		else if (action == 'usb_repower')
 			rec.usb_repower();
 		else if (action == 'opmode_cycle' && handlers?.opmode_cycle)
-			return handlers.opmode_cycle(() => done(action));
+			// the sessions end before the radio goes off (with_sessions_released)
+			return self.with_sessions_released('reattach',
+				(cycled) => handlers.opmode_cycle(() => cycled()),
+				() => done(action));
 		else if (action == 'modem_reset' && handlers?.modem_reset)
 			return handlers.modem_reset(() => done(action));
 
@@ -652,6 +814,7 @@ export function make_recovery(self, opts, log, proto)
 		// persisted with the counters: a protocol change invalidates `proven`
 		protocol: opts.protocol,
 		failreboot: (opts.config ?? {}).failreboot,
+		recovery_steps: (opts.config ?? {}).recovery_steps,
 		proto_error_limit: (opts.config ?? {}).proto_error_limit,
 		unarmed_reset_after: (opts.config ?? {}).unarmed_reset_after,
 		now: opts.recovery?.now,
@@ -866,6 +1029,12 @@ export function watch_driver(o)
 // success in between is firmware, not weather.
 const AT_RETIRE_AFTER = 3;
 
+// How many timeouts of ONE command retire it — counted only while the port
+// answers other commands in between (telemetry_at). More than the ERROR count:
+// a timeout costs a whole probe wait each time, but it is also the weaker
+// evidence, so it takes longer to convince.
+const AT_RETIRE_SILENT_AFTER = 5;
+
 // Has this AT channel given up on every one of these commands? The question a
 // telemetry family asks about its OWN signal source before deciding whether the
 // serving-cell read is authoritative: a modem that refuses AT+QSINR? has no
@@ -895,11 +1064,22 @@ export function at_retired(self, ...cmds)
 // module, and a model table would never be finished. So ask the modem, once,
 // and believe its answer.
 //
-// Only a BARE `ERROR` retires a command. `+CME ERROR: <n>` is a runtime
-// condition (SIM not ready, no network) that says nothing about whether the
-// firmware knows the command, and a timeout means the port is wedged, not that
-// the command is unknown — retiring on either would silence telemetry that
-// works. atcmd already separates the three (atcmd.uc:796 vs :801 vs :749).
+// A BARE `ERROR` retires a command. `+CME ERROR: <n>` never does: it is a
+// runtime condition (SIM not ready, no network) that says nothing about whether
+// the firmware knows the command. atcmd already separates the three
+// (atcmd.uc:830 vs :801 vs :749).
+//
+// A TIMEOUT retires one only when the PORT IS PROVABLY ALIVE. On its own a
+// timeout means the port is wedged or the modem busy — then every command goes
+// silent, and retiring on that would silence telemetry that works. But a
+// command that times out while the same port answers the others is a command
+// this firmware path never answers: an RG520N-EB behind an MHI DUN bridge
+// echoed AT+QENG="servingcell" and never replied, 0 of 40+ per boot, while
+// AT+CSQ and AT+QCAINFO answered on the same port (ddimension/wwand#56). So
+// a timeout counts only if some OTHER command got an answer since this one
+// last timed out (`_at_alive`, bumped on every answer), and
+// AT_RETIRE_SILENT_AFTER of those retire it. A port that answers nothing
+// counts nothing.
 //
 // The memory is cleared with the AT channel (close_at), so a re-open after a
 // protocol switch or a re-enumeration asks again from scratch.
@@ -918,9 +1098,41 @@ export function telemetry_at(self)
 		// o: passed through to atcmd.send (timeout, probe)
 		send: (cmd, cb, o) => {
 			if (self._at_retired?.[cmd])
-				return cb ? cb({ error: 'unsupported', detail: 'retired after repeated ERROR' }, null) : null;
+				return cb ? cb({ error: 'unsupported',
+				                 detail: sprintf('retired after %s', self._at_retired[cmd] === true ? 'repeated ERROR' : self._at_retired[cmd]) }, null) : null;
 
 			at.send(cmd, (err, res) => {
+				let silent = (err?.error == 'timeout');
+
+				// the port answered (anything but silence or a closed port)
+				if (!silent && err?.error != 'closed')
+					self._at_alive = (self._at_alive ?? 0) + 1;
+
+				if (silent) {
+					let seen = self._at_silent?.[cmd];
+
+					self._at_silent ??= {};
+
+					// counted only when the port answered something else
+					// since this command last went silent
+					if (seen == null || seen.alive != (self._at_alive ?? 0)) {
+						let n = (seen?.n ?? 0) + 1;
+
+						self._at_silent[cmd] = { n: n, alive: self._at_alive ?? 0 };
+
+						if (n >= AT_RETIRE_SILENT_AFTER) {
+							self._at_retired ??= {};
+							// the cause, for the error a caller gets from now on
+							self._at_retired[cmd] = 'repeated timeouts on a port that answers';
+							self._at_log?.('notice', sprintf('%s went unanswered %d times while the port answered everything else — not asking again (re-probed on the next modem init)',
+								cmd, AT_RETIRE_SILENT_AFTER));
+						}
+					}
+				}
+				else if (self._at_silent)
+					// an answer of any kind ends the streak, as for ERROR
+					delete self._at_silent[cmd];
+
 				if (err?.error == 'ERROR') {
 					self._at_errors ??= {};
 					self._at_errors[cmd] = (self._at_errors[cmd] ?? 0) + 1;
@@ -1311,6 +1523,8 @@ export function close_at(self)
 	// command does not exist" would silence telemetry that now works.
 	self._at_retired = null;
 	self._at_errors = null;
+	self._at_silent = null;
+	self._at_alive = 0;
 };
 
 // The init commands every AT channel runs once it answers: model quirks,
@@ -1329,6 +1543,7 @@ export function init_commands(self)
 		...(self.config.at_init ?? []),
 		...extra,
 		...atcmd.cell_lock_commands(self.config),
+		...atcmd.sim_detect_commands(self.info, self.config),
 	];
 };
 
@@ -1644,10 +1859,21 @@ open_at_tty = function(self, o, fxi, log, ch, tried)
 
 	if (!tr) {
 		// A port that will not open is as good as absent — another process may
-		// hold it, or it may have vanished between discovery and here. Try the
-		// MBIM pipe rather than giving up on AT entirely.
-		log('warn', sprintf('cannot open AT port %s', tty));
-		return open_at_over_mbim(self, o, fxi, log);
+		// hold it, or it may have vanished between discovery and here. It is
+		// skipped like a mute one and the search goes on: going straight to the
+		// MBIM pipe left a working tty further down untried — a T99W175 in USB
+		// mode offered ttyUSB0 (mute) and ttyUSB1 (would not open) and answered
+		// on ttyUSB2 (evidence: ddimension/wwand#52, 2026-10-11).
+		log('warn', sprintf('cannot open AT port %s — trying the next channel', tty));
+		push(tried, tty);
+
+		let nch = atcmd.find_at_channels(fxi, self.device, self.config.tty,
+		                                 o.base_override, tried);
+
+		if (nch.primary)
+			return open_at_tty(self, o, fxi, log, nch, tried);
+
+		return open_at_over_wdm(self, o, fxi, log, () => open_at_over_mbim(self, o, fxi, log));
 	}
 
 	// on_urc is LATE-BOUND on purpose: a backend may install or wrap its handler

@@ -21,7 +21,7 @@
 'use strict';
 
 const GLOBAL_KEYS = {
-	modem: true, schedule: true, run_budget: true, restore_sim: true,
+	modem: true, interface: true, schedule: true, run_budget: true, restore_sim: true,
 	monitor: true, nsca_cfg: true, nsca_host: true, keep_records: true,
 };
 
@@ -369,6 +369,9 @@ export function parse(raw)
 			check_keys(s, GLOBAL_KEYS, 'globals', errors);
 			globals = {
 				modem: (s.modem != null && s.modem !== '') ? '' + s.modem : null,
+				// the netifd interface a test dials; null = the only `proto
+				// wwand` interface of `modem` (the runner resolves it)
+				interface: (s.interface != null && s.interface !== '') ? '' + s.interface : null,
 				schedule: (s.schedule != null && s.schedule !== '') ? '' + s.schedule : null,
 				run_budget: num_opt(s.run_budget, 1800, 'globals: run_budget', errors),
 				restore_sim: bool_opt(s.restore_sim, true),

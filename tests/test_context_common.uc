@@ -318,12 +318,28 @@ eq(cc.effective_pdp({ config: {} }), 'ipv4v6',
 	'pdp: ...and dual stack when nobody said');
 eq(cc.effective_pdp({}), 'ipv4v6', 'pdp: no config at all is still a default');
 
+// the PD flag an AT path asks for: tri-state, and nothing on an IPv4 connection
+eq(cc.pd_want({ ipv6_pd: true }, 'ipv4v6'), 1, 'pd_want: on');
+eq(cc.pd_want({ ipv6_pd: false }, 'ipv6'), 0, 'pd_want: off is an instruction too');
+eq(cc.pd_want({}, 'ipv4v6'), null, 'pd_want: unset leaves the profile alone');
+eq(cc.pd_want({ ipv6_pd: true }, 'ipv4'), null, 'pd_want: no IPv6, nothing to delegate');
+
 eq(cc.effective_pdp({ config: { pdp_type: 'ipv4v6' },
 	modem: { active_sim: { pdp_type: 'ipv4' } } }), 'ipv4',
 	'pdp: THE CARD WINS — that is the whole point of the per-SIM override');
 eq(cc.effective_pdp({ config: { pdp_type: 'ipv4' },
 	modem: { active_sim: { pdp_type: 'ipv4v6' } } }), 'ipv4v6',
 	'pdp: ...in both directions, so one card keeps its IPv6 while the other does not');
+
+// a modem whose firmware crashes on IPv6 (modem_quirks ipv4_only) gets ipv4
+// whatever the interface or the card says
+eq(cc.effective_pdp({ config: { pdp_type: 'ipv4v6' }, modem: { info: { model: 'MC7710' } } }), 'ipv4',
+	'pdp: an ipv4-only modem resolves dual stack to ipv4');
+eq(cc.effective_pdp({ config: { pdp_type: 'ipv4' },
+	modem: { info: { model: 'MC7710' }, active_sim: { pdp_type: 'ipv6' } } }), 'ipv4',
+	'pdp: ...and a card asking IPv6 alone too');
+eq(cc.effective_pdp({ config: { pdp_type: 'ipv4v6' }, modem: { info: { model: 'EM7455' } } }), 'ipv4v6',
+	'pdp: another Sierra keeps what was configured');
 
 // an override that is absent, empty or null must fall THROUGH, not win as a
 // blank: conn_cfg treats both as "not overridden"

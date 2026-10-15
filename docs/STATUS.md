@@ -28,7 +28,7 @@ is always user-triggered.
 | Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed. Plugins in their own repositories: `wwand-ipa` (SGP.32 eIM), `wwand-qlog` (Quectel QLog diag capture), `wwand-rsim` (remote SIM: readers, phones over Bluetooth SAP, other modems' cards) |
 | Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
-| Feed | ddimension/openwrt-repo — stable (releases): `wwand`, `luci-app-wwand`, `luci-proto-wwand` 1.6.8; main: development pins as `1.6.8_pN` |
+| Feed | ddimension/openwrt-repo, two independent lines — stable (releases, published only by a date tag): `wwand`, `luci-app-wwand`, `luci-proto-wwand` 1.6.9; main (development): `1.7.0_preN` from the `v1.7.0-dev` marker. The source repos have the same two lines (`stable` from v1.6.9) |
 | Upstream | openwrt/packages#30185 (pins v1.6.3), openwrt/luci#8917 |
 
 ## Hardware verified (2026-08-30, on r49 + the same day's device-support HEAD)
@@ -1051,9 +1051,385 @@ power-cycles the card after lpac's enable rather than trusting the refresh.
   (`atcmd.send` option `probe`: QCFG autoconnect/iotopmode, QNWLOCK reads)
   logs at info as "not implemented by this firmware" instead of a warning on
   every start.
+- **Zyxel LTE3301-M209/-Q222** (`board.uc`): the rest of the vendor helper
+  `/usr/sbin/lte3301` taken over — both boards bind both modem ids
+  (`1435 d181`, `2020 2033`), and the LTE LED lights only on LTE (daemon
+  `led_state.lte`). The OpenWrt port (lte3301 fork, one dtsi for both) names
+  the LEDs `green:mobile` / `red:mobile` / `green:lte` — no `lte3301:`
+  prefix any more; HW-verified on an M209 with a BG96 (2026-10-03: EDGE ->
+  green mobile on, red off, LTE off). The port's board.d hangs `green:wan` on
+  netdev `wwan0`, which wwand renames to `wwand0`: set
+  `system.led_wan.dev='wwand0'` (done on that unit by hand).
+- **wwand-apntest phase 1** (`apntest/runner.uc`, `apntest_cli.uc` ->
+  `/usr/sbin/wwand-apntest`, `files/wwand-apntest.init`, `files/apntest.config`):
+  sweep, slot groups, dial via netifd with uncommitted uci, pool/DNS regex,
+  ping, NSCA, cron. First target: apntester-gdsp-lte-m (LTE3301-M209, BG96
+  Cat-M); its plan is in /vol/release/lte3301/wwand-apntester. Accounting and
+  eUICC profiles report UNKNOWN until phases 2/3. Not HW-run yet.
+- **wwand-apntest accounting (m-ccp)**: per-session comparison of the
+  operator's record (bytesIn+bytesOut of the session that started after the
+  dial, same APN) with the netdev's rx+tx; 90–110 % OK. Verified against a
+  real api-ng.m-ccp.de answer (globalsim, 2026-10-03). `iec` accounts:
+  UNKNOWN until their answer has been looked at.
 - **Open:** NCM (AT-only) has no card-reinitialisation signal wired; a
   `+QSIMSTAT`/`+CPIN` URC would be the hook. Not HW-verified yet (the
   QMI path is the case seen on 3.123).
+
+## The network sets the clock (2026-10-03)
+
+`option nitz_time` on the `wwand_modem`, **default on**, LuCI flag *Set the
+clock from the network* in the modem settings. A NITZ time (QMI NAS network
+time indication, or `+CTZV` on any modem's AT port) steps the system clock when
+it is more than 120 s off (`modem_common.NITZ_TOLERANCE_S`), in either
+direction; within that NTP's finer time stands. Before, NITZ stepped the clock
+only when it was "plainly unset" (pre-2021) — the GNSS rule, which it still
+shares. An RTC-less box boots with its image's build date, which that rule
+takes for a set clock, so a router without reachable NTP kept it: a Raspberry
+Pi 4 ran on 2026-06-29 a week later (2026-10-01). The time zone is not touched.
+`'0'` records the time (`network_time` in status) and leaves the clock alone.
+Native MBIM reads it too, over the MS Voice Extensions service (NITZ, CID 10;
+`codec/mbim_schema/ms_voice_ext.uc`, layout from libmbim 1.32.0): queried once
+per registration, and its indication subscribed only after the query was
+answered, because the subscribe list is one SET for every service and a
+service the firmware lacks must not put the mandatory ones at risk. The
+zone is a guint32 on the wire, read as signed; `0xFFFFFFFF` means no zone.
+Host-tested against hand-built buffers; not yet seen on hardware.
+
+## QMI over QRTR, and what it showed about PCIe (2026-10-04)
+
+ddimension/wwand#46 (xhudan) is merged: `option device 'qrtr'` runs the QMI
+stack over AF_QIPCRTR for an SDX modem whose QMI lives only on the QRTR bus
+(`qmi_over_qrtr.uc`, `wwand_io` qrtr_open/qsend/qread/qdiscover; HW-tested by
+the author on an RG520N-EB on an IPQ5018). Fixed alongside, both generic:
+- **The PCIe endpoint.** `netlink.ep_iface_number` returned nothing for a PCI
+  path, so an MHI modem got no endpoint at all and refused WDA with error 70.
+  PCIe now gives interface 4 (ModemManager's constant), and both endpoint
+  helpers read the RESOLVED sysfs path: the kernel's link from an mhi_net
+  netdev is `../../../mhi0_IP_HW0`, with the PCI address only above it. This
+  reaches the existing MHI path (`/dev/wwan0qmi0`) as well — not yet seen on
+  hardware.
+- **The QMAP ladder** steps down on InvalidOperation (error 70) for a
+  version, not only on an echoed other version; only the last rung's error
+  fails, and any other error fails at once (a transient Internal must not
+  leave the modem on a lower QMAP until its next init).
+The hub itself, rewritten on top of #46:
+- **One socket per QMI client.** On QRTR a service tells clients apart by
+  their source port; there is no client id on the wire. #46 gave every client
+  of a service the same cid on one socket, and wwand runs several WDS clients
+  at once (the modem's own plus one per IP family and attempt), so they were
+  one client on the modem. Each emulated ALLOCATE_CID now opens a socket,
+  RELEASE_CID closes it, and a reply belongs to the socket it arrived on.
+- **The modem's lifecycle.** The name server keeps reporting to the lookup
+  socket; DMS leaving the modem's node, or showing up there on another port
+  (a restart, whichever report comes first), is "device gone" (rebuild,
+  vanish escalation as for a cdc-wdm); a NEW_SERVER moves any other
+  service's port, and a DEL_SERVER for a port already superseded is ignored.
+- **Presence.** `device 'qrtr'` is present once a node serves DMS and WDS
+  (`discovery.qrtr_probe`, at most 300 ms) — WDS too, because the QMI init
+  reads the service list once and a booting SDX registers its services one by
+  one; a WDA registering later than WDS is still missed until the next init.
+  Before that it waits like a missing cdc-wdm, retried by the tick.
+  `option qrtr_node` picks among several.
+- **Existing MHI users:** the PCIe endpoint (PCIE/4) now goes out on the
+  `/dev/wwan0qmi0` + mhi_net path and with the vendor pcie_mhi /
+  rmnet_nss_mhi add-on too, where before no endpoint was sent and a muxed
+  context stopped at `endpoint_unknown`. ModemManager and quectel-CM do the
+  same; not yet seen on hardware here — `ep_type`/`ep_id` override it.
+- Unknown CTL requests are NotSupported instead of a fake success; a client
+  whose socket cannot be opened gets ClientIdsExhausted.
+- A DEL_SERVER for an endpoint its service has already left (a restart's
+  re-registration arriving first) is ignored; `qdiscover` reads and writes
+  the control packets little-endian, as the name server does (it was host
+  order: on a big-endian target such as mips_24kc no QRTR modem would ever
+  have been found).
+Host-tested (`test_qmi_over_qrtr`, the presence gate in `test_daemon`); NOT
+yet on hardware — nobody here has a QRTR modem, xhudan is asked to verify on
+the RG520N (dual-stack, a modem reset). The feed installs
+`qmi_over_qrtr.uc` in `wwand-qmi` (modem.uc imports it).
+
+## The attach profile carries the config, always (2026-10-04)
+
+Field case deborah-3 (LTE3301-Q222 with a Sierra MC7710 out of another box,
+a fresh Telekom card): autosetup created `wwan0` without an APN; the QMI
+attach step then deliberately left profile 1 as it was ("SIM-provisioned"),
+autosetup saw an APN there and declined its table, and the modem attached
+with a stale APN out of its previous life — limited service, registration
+lost every second, every dial "no service". An APN set by hand afterwards
+changed nothing until a restart. Now, decided with the user:
+- QMI (`context.uc ensure_attach_profile`) and MBIM (`modem_mbim.uc
+  _apply_attach`) write the CONFIGURED APN, an unset one as EMPTY (network
+  default), as NCM already did at dial; `#N` alone stays untouched.
+  Credentials still only with a configured APN.
+- An init that reaches the attach step with no interface bound says so and
+  programs it when the first one binds (`modem_common attach_context`
+  -> `reapply_sim`; MBIM's `reapply_sim` now re-applies the attach too).
+- A live change of APN, PDP type or login on a running modem's interface
+  re-programs the attach profile (`daemon.uc apply_config` -> `reapply_sim`).
+- Autosetup fills from `apndb.uc` in its own run only, whatever profile 1
+  held; the marker goes on the first card read, match or not. A card that
+  needs its own APN (the Telekom hybrid `nonbonding.hybrid` the table broke on
+  a Chateau, 2026-09-12) gets it configured — the APN table no longer guards it.
+Tests: test_context, test_modem_mbim, test_autosetup, test_deps, test_daemon
+(each new check fails without its change). Not yet on hardware.
+
+## A dial the modem never answers frees itself; our reset keeps a live session (2026-10-04)
+
+deborah-3 again (Sierra MC7710, SWI9200X_03.05.29): after a STOP_NETWORK
+the modem's WDS side hangs — every later START_NETWORK times out (120 s), not
+even a new WDS client is handed out (uqmi: "Failed to connect to service"),
+the modem keeps reporting the session `connected`, and only a modem reset or
+a radio cycle frees it. Two ways into that, both fixed and HW-verified there:
+- **wwand's own reset hit a live session.** A setup netifd held 'pending'
+  (an early `busy` before the modem was ready) is reset with down+up; the
+  status answer that triggers it arrives after the queued activation has
+  dialled, and the down stopped that fresh session. `context_down` now keeps
+  a session that is not IDLE on our own reset; the `up` takes it over.
+  After a modem reset the interface comes up on the first dial.
+- **ifdown -> ifup.** The stop is the operator's, so it stays; the dial that
+  follows times out. A START_NETWORK that is not answered at all on a
+  registered modem now cycles the radio once at once (`modem.reattach`, at
+  most every 10 min per modem) instead of waiting for the ladder's cycle at
+  attempt 8 (~16 min). ifdown, 10 s, ifup: connected after 126 s, by itself.
+**Root cause, proven the same day (debug, with the client bookkeeping below):**
+not client-ID exhaustion — wwand holds at most two WDS clients (the config
+client and the dial's), every RELEASE_CID is acknowledged, and the modem kept
+handing out new CIDs during the hang. The MC7710 acknowledges STOP_NETWORK
+and keeps the LTE default bearer up: with wwand stopped and uqmi the only
+reader, packet status read `connected` after the stop, with the very address
+"stopped" (the pdh is the same 41124240 in every session). A new
+START_NETWORK for it then gets no answer at all, where newer firmware says
+NO_EFFECT. So the dial now asks first (GET_PACKET_SERVICE_STATUS, unmuxed and
+alone on the modem only) and adopts a running session — the NO_EFFECT path.
+HW: ifdown, 10 s, ifup -> up in 1 s, traffic flows. The radio cycle on an
+unanswered dial stays as the safety net.
+- **Client bookkeeping:** every ALLOCATE_CID/RELEASE_CID is logged with its
+  result (a refused or unanswered release is a warn: the slot stays taken)
+  and `status.qmi_clients` lists the CIDs wwand holds per service. Note for
+  any uqmi check alongside a running wwand: both read the same cdc-wdm, and
+  wwand swallows the other's CTL answers — "Failed to connect to service"
+  there is the test, not the modem.
+- **A CID leak did exist, on a different path:** the same bookkeeping, under
+  a flapping registration (the box's `wwand_sim` set `pdp_type ipv4v6`, which
+  this card only gets limited service for), showed `1:[8,17,21,25,27]` — one
+  WDS CID more with every dial that registration loss aborted. The suspend
+  abort empties `self.families`, but an ALLOCATE_CID still in flight answers
+  afterwards; that client belonged to no attempt and the next one overwrote
+  `families['4']`. `activate_family` now asks whether its attempt is still
+  live and releases a late client instead (`test_context` suspend-abort-alloc,
+  failing without the fix). So exhaustion WAS reachable on a long flap — just
+  not the cause of the ifdown/ifup hang above.
+- **The radio cycle on an unanswered dial now owns the reconnect:** the
+  daemon sets `modem._reattaching` around it (released by its callback, or a
+  60 s guard) and starts the reconnect when it ends — before, the next dial
+  ran into the radio-off window and was aborted by the deregistration. And
+  `qmi_clients` is cleared on teardown: the in-flight releases' answers die
+  with CTL, so a rebuilt modem listed the old session's CIDs beside its own.
+- **Left as is, by decision (Codex review 2026-10-04):** the pre-dial adoption
+  trusts any CONNECTED an unmuxed WDS client reports while no other context is
+  up — a bearer someone else started (modem autoconnect, a uqmi beside wwand)
+  would be adopted; and the QMI attach profile writes credentials only when
+  configured, so clearing or changing the APN keeps an old login there (MBIM
+  writes them in full).
+
+- **The MC7710 crashes on IPv6** (deborah-3, 2026-10-04): an ipv4v6 attach
+  profile leaves it in limited service, a dial with IPv6 in it answers
+  internal 204 until a reset. Quirk `ipv4_only` (modem_quirks.uc):
+  `context_common.effective_pdp()` resolves every pdp_type to ipv4 for that
+  model — attach profile, data profile and dialled families all read it there
+  — and autosetup writes the carrier's IPv4 APN (`apn_ipv4`) with pdp ipv4.
+  HW: config `ipv4v6`, attach stays pdp 0, ifdown/ifup up in 3 s.
+- **No netifd reset while an activation runs:** the registered handler reset
+  a `pending` interface (down + kick) even when the queued up was already
+  dialling — on every plain bring-up after a modem reset. Only an IDLE context
+  behind a pending setup is an orphan now.
+
+- **GNSS over QMI LOC, in wwand-gps** (2026-10-04): a modem with `option gnss`
+  and no NMEA port gets the same NMEA over QMI LOC — natively, or over the
+  MBIM passthrough — into the same reader (`gps.uc loc_session`, feed-only
+  reader; `modem_gps` says `source: qmi_loc`). The core's own LOC
+  (`_start_loc`, `self.location`) is gone; `option location` is an alias of
+  `gnss`, `modem_location` a short view over the reader, and the LOC schema
+  ships in wwand-gps. New neutral hook for plugin clients:
+  `client.before_release`, run by the modem ahead of the RELEASE_CID on
+  teardown and extra_release (QMI and MBIM) — the LOC STOP rides it.
+  HW (NR7101 / RG502Q, 2026-10-04): port and LOC both 3D; LOC needed
+  periodic fixes (an absent Fix Recurrence TLV is a single fix — ~60
+  sentences, then silence) and NMEA types ALL (0x1F is GPS-only; ALL gave
+  GPS + GLONASS + Galileo, 33 in view instead of 14 — and the port emits them
+  too afterwards, the setting is the engine's). Two reader fixes it exposed:
+  a read longer than MAX_LINE (a second of multi-constellation sentences)
+  dropped its first sentence as `unparsed` — the limit is on the unfinished
+  tail now; and valid NMEA not interpreted (GNS, $PSTIS) counts as `ignored`.
+  Teardown STOP/RELEASE twice, QMI healthy. MBIM passthrough not HW-tested.
+
+- **netifd device detour** (2026-10-04): on `DEVICE_CLAIM_FAILED` for a wwand
+  interface (netifd's stale parent record after a mux child became the
+  renamed parent) the daemon points the interface at a placeholder, reloads,
+  points it back, reloads — netifd frees the old record with its last user
+  (`deps.uc netifd_device_detour`, `daemon.uc heal_device_claim`, at most once
+  per 5 min per interface; isolated uci delta dir; an unfinished one is undone
+  at start, `detour_restore`). Also: a QMI config without any mux channel
+  removes the old QMAP child holding the stable name before renaming the
+  parent (it was pruned only after the rename had given up — NO_DEVICE).
+  HW (NR7101, mux_id 1 → 0): DEVICE_CLAIM_FAILED, detour, up 1 s later.
+  Seen on the way back (mux 0 → 1 + a second interface, two rebuilds within a
+  minute): the RG502Q's QMI stopped answering ALLOCATE_CID (CTL still
+  answered) for 9 init attempts until a modem reset — not caused by this
+  change, not yet explained; the "AT reset for a hung QMI side" did not fire.
+  New checker `tools/check-ucode-pitfalls.py` (see docs/gotchas.md).
+
+- **A QMI modem leaving QMAP at runtime** (245 / RG650E, 2026-10-05;
+  mux_id auto -> 0 on a running modem). Four fixes on the way, then the one
+  that made it dial:
+  - a reload stopped a modem's backend in the same breath as its contexts:
+    STOP_NETWORK went unanswered and the session stayed in the modem.
+    stop_modem now waits for the active contexts' teardown (at most 5 s) and
+    restarts the modem after it (`_retiring`);
+  - WDA without QMAP left the aggregation TLVs out, so the modem kept QMAP;
+    raw-IP now asks for DISABLED explicitly (as qmicli does, qmicli-wda.c:561);
+  - qmi_wwan's pass_through stayed Y from rmnet on a parent with no child;
+    raw-IP/ethernet clear it first (the driver refuses raw_ip=N while it is set);
+  - the "QMAP v1 … requested proto 5" log line for a no-QMAP request;
+  - none of that made the RG650E answer the dial (a BIND_MUX_DATA_PORT to mux
+    0 did not either) — only a modem reset did. So the daemon resets a QMI
+    modem once, at its next init, when rename_l3 finds its own leftover QMAP
+    child (`_left_qmap`, kept until an init actually issues the reset). HW:
+    up with v4 + v6 85 s after the config change; E392 (raw-IP only)
+    unaffected by all of it (rebuild, ifdown/ifup, revert).
+
+- **PR #49 merged (MayorBug): vendor Quectel MHI** (`pcie_mhi`, Cudy P5 /
+  RM551E-GL / MHI 1.6.0): control ports under /sys/class/mhi_uci_q,
+  rmnet_nss_mhi selectable after a restart (renamed children matched by
+  their device link, which names the parent netdev), QMAP version from the
+  driver ioctl or its PCI-ID list. Review fixes on top (checked against the
+  driver source, 1.3.8 and 1.6.0): the port name is "mhi_" + channel
+  ("QMI0"/"MBIM") + the controller index from the second controller on, so
+  mhi_QMI01 -> rmnet_mhi1 and mhi_MBIM -> rmnet_mhi0 (the PR mapped
+  QMI only, and QMI01 to rmnet_mhi01); one name grammar for discovery and
+  autosetup (`discovery.mhi_uci_control`); the four SDX35 ids of 1.6.0 in
+  the QMAP-v5 list; dated driver anchors. A Codex finding that the child's
+  device link names the MHI device rather than the parent netdev was wrong:
+  SET_NETDEV_DEV(qmap_net, &real_dev->dev) with real_dev the parent
+  net_device (mhi_netdev_quectel.c:1608,1619).
+
+## Profile flags: IPv6 prefix delegation, CLAT, address allocation (2026-10-09)
+
+Three interface options, all tri-state (unset = the modem profile is left as it
+is): `ipv6_pd`, `clat`, `address_allocation` (`nas`|`dhcp`). QMI has all three;
+NCM has `address_allocation` (CGDCONT field 7, every vendor) and `ipv6_pd`
+(Quectel `AT+QIP6CFG`, flag and prefix read); MBIM has no field for any of them
+(libmbim 1.32). They are
+stored WDS profile settings (TLV 0xDF / 0xDE / 0x2D, libqmi 1.38), written
+read-before-write on the dialled profile and on the attach profile through one
+table, `context.uc PROFILE_FLAGS`.
+
+The delegated prefix itself is read back with Qualcomm's vendor WDS message
+0x00AC (not in libqmi; layout from the RG650E firmware) on every IPv6 settings
+fetch, and handed to netifd as the LAN prefix with a sourced default route. A
+host DHCPv6 client on the rmnet link gets no answer on these modems — the
+bearer's DHCPv6 is the modem's.
+
+HW: the flag round-trips on the RG650E (QMI 0xDF == `AT+QIP6CFG="PD_enable"`,
+both directions); 0x00AC answers "nothing delegated" (INTERNAL) on the RG650E
+(nonbonding.hybrid, /64) and on the RM520N-GL (v6.global-m2m.net, a PD APN in
+beta). **A prefix actually delegated end to end has not been seen yet** — open
+whether that APN delegates, or the modem asks only in router mode.
+
+## A reattach stops the PDNs before it detaches; operator detach/attach (2026-10-10)
+
+`modem_reattach` (ubus) and the recovery ladder's opmode-cycle rung took the
+radio off — QMI DMS low_power, MBIM radio off, NCM CFUN=0, or `AT+COPS=2` — with
+the data sessions still up. The network then tears the bearers down implicitly
+with the detach and the modem learns of it from the call-end that follows,
+while the daemon is already redialling into the radio-off window. Now
+`modem_common.scaffolding` `with_sessions_released` stops every CONNECTED
+context first (`ctx.down(cb, reason)`: STOP_NETWORK / MBIM deactivate /
+CGACT=0), holds the daemon's reconnect off (`_reattaching`, also honoured by
+`reconnect.uc retry_activate`), runs the cycle, and hands the stopped contexts
+back (`sessions_released` → daemon reconnect, which waits for READY). Used by
+`modem_reattach`, the daemon's radio cycle after an unanswered dial, and the
+ladder rung on all three backends. Suspected link to the "Insufficient
+resources" rejects after a reattach — not proven; re-check on HW.
+
+New: **`modem_detach` / `modem_attach`** (ubus, `wwandctl detach|attach`, LuCI
+modem list → Detach/Attach, status row "detached by the operator"). Detach =
+sessions end (reason `admin`), then PS detach with the radio on: QMI NAS Attach
+Detach 0x0023 (libqmi 1.38, action 2/1), MBIM PACKET_SERVICE set, AT+CGATT.
+The modem stays detached (`detached`, park semantics: no re-registration, no
+ladder, no redial, ifup refused `detached` → netifd DETACHED) until attach or
+a modem reset (a daemon restart forgets only the mark; a QMI modem stays
+PS-detached — attach first). AT attach/reattach wait for the registration
+(CEREG/CGREG poll, 60 s) before re-dialling: COPS=0 and CGATT=1 answer
+before it (MeiG SLM770A). HW-tested 2026-10-10: 245 (RG650E, QMI), 242
+(QMI), 192.168.1.1 (Zyxel LTE3301, BG96 QMI on GSM — registration kept, the
+attach re-arms at once), 3.113 (Cudy LT300, MeiG, AT/NCM). Not tested: MBIM
+(246 offline), 3.93 (modem not registering — reattach/detach/attach ran with
+no session).
+
+Seen on the Cudy LT300 (MeiG SLM770A, AT/NCM) and NOT new — the previous
+main does the same, 3 of 3 runs: after an AT reattach (COPS=2/0) the dial
+`AT+ECMDUP=1,1,1` answers ERROR although CEREG says registered, until the
+network has re-established the default bearer by itself (then "cid 1 already
+connected, adopting"), sometimes only after the ladder's radio cycle at attempt
+8 (2026-10-10). Open: whether ECMDUP needs the bearer the MeiG brings up on
+its own, i.e. adopt-first after a reattach on this modem.
+
+Still the old order: the init attach-profile radio cycle (no live session
+normally at that point).
+
+## Issue round 2026-10-13: AT port walk past an unopenable tty; MBIM settings refresh
+
+- **#52 (T99W175, USB mode):** the AT search ended at a tty that would not
+  open (`ttyUSB1`, "No such file or directory") and went straight to the
+  MBIM pipe, never trying `ttyUSB2`, where the modem answers. An unopenable
+  port is now skipped like a mute one (`modem_common.uc open_at_tty`); the
+  wdm/MBIM fallbacks follow only when no tty is left. Workaround on older
+  builds: `option tty '/dev/ttyUSB2'`.
+- **#51 (RM520N, MBIMEx 3.0):** `IP_CONFIGURATION` answered at connect,
+  Failure (status 2) to every periodic refresh, traffic fine — each refusal
+  counted as a protocol error and the next success reset it: a sawtooth in
+  collectd's proto_errors. The refresh is now `no_recovery`, logged once per
+  run of refusals, the settings kept, and sent after the statistics answer
+  instead of beside it (whether the overlap is what the modem refuses is
+  unproven — the order costs nothing).
+- **#51 follow-up:** the eUICC discovery on a plain SIM (MBIM UICC SelectFailed,
+  QMI OPEN_LOGICAL_CHANNEL) counted toward the protocol-error ceiling at every
+  start; the ISD-R discovery opens are `no_recovery` now (`sim.uc` NOT_A_FAULT).
+- **#52 follow-up:** T99W175 in USB mode (05c6:90d5) pinned in `atcmd.uc`
+  LOCAL_PORTS: if5 = AT (if0 DIAG, if4 has no bulk endpoints).
+- **#52 feature (asked for by the reporter, approved 2026-10-14):** `option
+  recovery_steps` on `wwand_modem` — the attempt counts of the radio cycle,
+  modem reset and hardware rung (default 8 16 24; 1-3 rising numbers, the
+  first ones replacing the defaults). `recovery.uc steps_from` / per-instance
+  RUNGS, `config.uc steps_opt` (refused with a warning, never half-applied),
+  status ladder (`recovery.rungs(failreboot, steps)`), LuCI modem option.
+- **PR #56 (xhudan) taken with a follow-up:** QMI-context AT+QENG goes through
+  telemetry_at (his commit). telemetry_at retired on ERROR only, and the case
+  was timeouts — so a timeout now counts when the port answered another
+  command since this one last went silent; 5 retire it (`modem_common.uc`
+  AT_RETIRE_SILENT_AFTER). A port that answers nothing retires nothing.
+- **Issue round 2026-10-15:** #55 (SG500M2-X, MBIM) — *Reset to defaults*
+  sent bands 1–63/1–79 with the RAT reset in one SET; the firmware refused the
+  bands (qmi 3) and with them the RAT reset, silently. Now DMS Get Band
+  Capabilities (`dms.uc`, `band_caps`) gives the real band list, and a refused
+  band set is re-sent without bands (`partial`, `refused`). #57 (EG12-EA) —
+  the eUICC probe stops at the first ANSWERED refusal (`sim.uc
+  refused_answer`; QMI transient codes excluded), retries only when the
+  transport could not ask; a card change re-asks. #52 — MBIM identity asks
+  AT+GMI first (T99W175 answers AT+CGMI without OK).
+- **MS UICC text pass (2026-10-14):** MBIM ready state 7 "no eSIM profile
+  enabled" stops at the SIM step (`no_esim_profile`, no ladder) and resumes by a
+  10 s ready-state poll (the indication handler only exists after
+  registration — so `sim_absent` on MBIM now resumes on card insertion too);
+  OPEN_CHANNEL failures named with SW1 SW2 (`mbim_client` `keep_info`); own
+  channel group 0x7777, swept once per modem run before the first open.
+  Not HW-verified (no eUICC-capable MBIM modem). Noted, not changed: lpac
+  sends APDUs as class type Inter-Industry, wwand as Extended (ETSI 102 221,
+  which GP STORE DATA CLA 80 belongs to); TERMINAL_CAPABILITY unused.
+- **PR #53 (closed):** automatic IPv6 suppression after refusals declined —
+  `pdp_type` is the operator's; instead a typed refusal (internal 210, 3GPP
+  50; `callend.uc ipv6_refused`) logs once per context which option ends it
+  (`context.uc`, the v6 degrade branch).
 
 ## Known open
 
@@ -1258,12 +1634,21 @@ power-cycles the card after lpac's enable rather than trusting the refresh.
    costs nothing. What `--since HEAD` cannot see is a shift that is already
    COMMITTED: after a pass that removes or adds comment lines, run
    `tools/check-anchors.py --since <the commit before it> --fix` once.
-5. Tag, pinning the **commit** (`git rev-parse vX.Y.Z^{commit}`), never the tag
-   object.
-6. Feed, on its main branch: `scripts/bump-source.sh wwand vX.Y.Z` (and the two
-   LuCI packages, tagged `vX.Y.Z` alongside) — version, release and SDK hash in
-   one go; verify the Makefile actually changed. Rules: the feed's CLAUDE.md.
-7. One feed push, then wait: the feed CI is `cancel-in-progress` per branch.
-   Devices get it when the feed's stable is released (`scripts/release-stable.sh`).
+5. **Two lines (since 2026-10-04):** releases are tagged on the `stable` branch,
+   never on main; main carries the `vX.Y.0-dev` marker of the minor it develops
+   (currently `v1.7.0-dev`) and ships as `X.Y.Z_preN` on feed main. A patch
+   release: get the fix onto `stable` (cherry-pick `-x` from main, or fix on
+   stable and merge stable into main), run 1-4 there, tag `vX.Y.Z` on stable —
+   in luci-app-wwand / luci-proto-wwand only where they changed. Opening a new
+   minor: merge main into stable, tag `vX.Y.0` there, tag `vX.(Y+1).0-dev` on main.
+   Pin the **commit** (`git rev-parse vX.Y.Z^{commit}`), never the tag object.
+6. Feed, on its **stable** branch for a release (its **main** for a development
+   pin): `scripts/bump-source.sh wwand vX.Y.Z` (and the LuCI packages that were
+   tagged) — the channel comes from the feed branch, the commit must be on the
+   source branch of the same name; version, release and SDK hash in one go;
+   verify the Makefile actually changed. Rules: the feed's CLAUDE.md.
+7. One feed push, then wait: a push to feed stable only BUILDS. Devices get it
+   with the release tag (`scripts/release-stable.sh`, only when asked), which
+   is what publishes stable and starts the images.
 
 The traps in steps 2 and 5-7 have each fired at least once; `gotchas.md` says how.

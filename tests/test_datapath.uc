@@ -207,6 +207,28 @@ ok(fx.action_index('link_add_rmnet wwand0 link wwan0 mux_id 1 flags 0x1') >= 0,
 	'collision: child created on the moved parent');
 eq(res.mux_devs, [ 'wwand0' ], 'collision: child owns the stable L3 name');
 
+// A RAW-IP PARENT LEFT WITH pass_through=Y by an earlier rmnet config: cleared,
+// and BEFORE raw_ip is written — qmi_wwan refuses raw_ip=N while pass_through is
+// set, and changes pass_through only on a raw-IP device (qmi_wwan.c:340, :488,
+// Linux 6.18.41). Seen on 245 after mux_id auto -> 0 (2026-10-05).
+fx = fakefx.create({
+	present: { '/sys/class/net/wwand0/qmi/pass_through': true, '/sys/class/net/wwand0/qmi/raw_ip': true },
+	files: { '/sys/class/net/wwand0/qmi/pass_through': 'Y\n' },
+});
+res = netlink.setup(fx, { netdev: 'wwand0', backend: 'raw_ip', mux: [], dgram_size: 0 });
+eq(res.ok, true, 'stale pass_through: raw_ip setup ok');
+let i_ptoff = fx.action_index('write /sys/class/net/wwand0/qmi/pass_through N');
+let i_raw = fx.action_index('write /sys/class/net/wwand0/qmi/raw_ip Y');
+ok(i_ptoff >= 0 && i_raw > i_ptoff, 'stale pass_through: cleared, before raw_ip is written');
+
+// ...and a parent that never had it is not written at all
+fx = fakefx.create({
+	present: { '/sys/class/net/wwand0/qmi/pass_through': true, '/sys/class/net/wwand0/qmi/raw_ip': true },
+	files: { '/sys/class/net/wwand0/qmi/pass_through': 'N\n' },
+});
+netlink.setup(fx, { netdev: 'wwand0', backend: 'raw_ip', mux: [], dgram_size: 0 });
+eq(fx.action_index('write /sys/class/net/wwand0/qmi/pass_through N'), -1, 'stale pass_through: an N stays untouched');
+
 // rmnet with negotiated MAPv5: checksum offload flags on the links
 fx = fakefx.create({ present: caps_rmnet });
 res = netlink.setup(fx, {
@@ -688,8 +710,41 @@ eq(netlink.ep_type_number('wwan0m1', epfx), 2, 'ep: lower_0 bus type');
 // PCIe/MHI modem: PCI BDF, no usb component -> PCIE (3), no iface number
 eplinks = { '/sys/class/net/mhi0/device':
 	'../../../devices/pci0001:00/0001:00:00.0/0001:01:00.0' };
-eq(netlink.ep_iface_number('mhi0', epfx), null, 'ep: PCIe device has no usb iface number');
+eq(netlink.ep_iface_number('mhi0', epfx), 4, 'ep: PCIe -> interface 4, the fixed Qualcomm number (as ModemManager)');
 eq(netlink.ep_type_number('mhi0', epfx), 3, 'ep: PCI BDF -> PCIE (3)');
+
+// the form an mhi_net netdev really has: a short link to the MHI client
+// device, the PCI address only in the resolved path (mhi_net.c:363,
+// bus/mhi/host/init.c:1254-1260, linux 6.18.41)
+let epreal = {};
+let epfx2 = { readlink: (p) => eplinks[p] ?? null, realpath: (p) => epreal[p] ?? null };
+eplinks = { '/sys/class/net/mhi_hwip0/device': '../../../mhi0_IP_HW0' };
+eq(netlink.ep_type_number('mhi_hwip0', epfx), null, 'ep: the link text alone cannot tell an MHI netdev\'s bus');
+epreal = { '/sys/class/net/mhi_hwip0/device':
+	'/sys/devices/platform/soc/80000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/mhi0/mhi0_IP_HW0' };
+eq([ netlink.ep_type_number('mhi_hwip0', epfx2), netlink.ep_iface_number('mhi_hwip0', epfx2) ], [ 3, 4 ],
+	'ep: ...the resolved path does: PCIE, interface 4');
+
+// USB through realpath: the resolved path carries /usbN and the interface
+eplinks = { '/sys/class/net/wwan0/device': '../../../3-1:1.4' };
+epreal = { '/sys/class/net/wwan0/device': '/sys/devices/platform/soc/8af8800.usb/usb3/3-1/3-1:1.4' };
+eq([ netlink.ep_type_number('wwan0', epfx2), netlink.ep_iface_number('wwan0', epfx2) ], [ 2, 4 ],
+	'ep: a usbnet netdev resolves to HSUSB and its own interface');
+epreal = {};
+
+// a netdev whose own /device exists but names no bus falls through to lower_0
+eplinks = { '/sys/class/net/odd0/device': '../../../virtual-endpoint',
+            '/sys/class/net/odd0/lower_0/device': '../../../3-1:1.4' };
+eq(netlink.ep_iface_number('odd0', epfx), 4, 'ep: a /device that names no bus does not hide lower_0');
+// Quectel's vendor MHI netdev points at an MHI channel, not the PCI BDF.
+// Resolve its device path to recover the PCIe bus and endpoint interface.
+let mhi_epfx = { readlink: (p) => ({
+	'/sys/class/net/rmnet_mhi0/device': '../../../0309_01.01.00_IP_HW0',
+})[p], realpath: (p) => ({
+	'/sys/class/net/rmnet_mhi0/device': '/sys/devices/pci0001:00/0001:00:00.0/0001:01:00.0/0309_01.01.00_IP_HW0',
+})[p] };
+eq(netlink.ep_iface_number('rmnet_mhi0', mhi_epfx), 4, 'ep: vendor MHI data interface -> 4');
+eq(netlink.ep_type_number('rmnet_mhi0', mhi_epfx), 3, 'ep: vendor MHI driver -> PCIE (3)');
 
 // xHCI-on-PCI: the sysfs path contains BOTH a PCI BDF (the xHCI parent) and a
 // /usbN component — usb must win (the regression the code comment warns about)

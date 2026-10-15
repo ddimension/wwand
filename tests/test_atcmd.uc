@@ -313,6 +313,24 @@ eq(atcmd.cell_lock_commands({ lock_4g: [ '1300:246', '1444:100' ] }),
 eq(atcmd.cell_lock_commands({ lock_5g: '242:431070:15:1' }),
 	[ 'AT+QNWLOCK="common/5g",242,431070,15,1' ], 'lock: 5g sa');
 eq(atcmd.cell_lock_commands({}), [], 'lock: nothing configured');
+
+// SIM hot-plug detection (openwrt-repo#3): a read-first setting step on a
+// Quectel, nothing anywhere else and nothing when unset
+{
+	let q = { manufacturer: 'Quectel' };
+	let st = atcmd.sim_detect_commands(q, { sim_detect: 'low' });
+	eq([ st[0]?.check, st[0]?.set ], [ 'AT+QSIMDET?', 'AT+QSIMDET=1,0' ], 'simdet: low = on, level 0');
+	ok(match('+QSIMDET: 1,0', regexp(st[0].want)) && !match('+QSIMDET: 1,1', regexp(st[0].want)),
+		'simdet: the held value is recognised, the other level is not');
+	ok(match('+QSIMDET: 0,1', regexp(atcmd.sim_detect_commands(q, { sim_detect: 'off' })[0].want)),
+		'simdet: off matches whatever level is stored');
+	eq(atcmd.sim_detect_commands(q, {}), [], 'simdet: unset leaves the modem alone');
+	eq(atcmd.sim_detect_commands({ manufacturer: 'Fibocom' }, { sim_detect: 'high' }), [],
+		'simdet: a vendor known to be another gets nothing sent');
+	// MBIM/NCM run the AT init before AT+CGMI identified the modem
+	eq(length(atcmd.sim_detect_commands({}, { sim_detect: 'high' })), 1,
+		'simdet: a manufacturer not known yet is no reason to skip');
+}
 eq(atcmd.cell_lock_commands({ lock_4g: 'garbage' }), [], 'lock: malformed ignored');
 eq(atcmd.cell_lock_commands({ lock_persist: true }), [], 'lock: persist alone is no-op');
 
@@ -1233,6 +1251,31 @@ eq(urcs9, [ '^NDISSTAT: 1,,,,IPV4' ], 'urc-merge: the ^-sigil URC is dispatched'
 	eq(map(lv, (x) => x[0]), [ 'info', 'warn', 'warn' ],
 		'probe: bare ERROR to a probe is info; +CME and a plain ERROR stay warnings');
 	ok(index(lv[0][1], 'declined by the modem') >= 0, 'probe: and says only what was seen');
+}
+
+// A probe can say what its bare ERROR means (the eUICC probe: "no ISD-R"),
+// and an error the caller handles itself (expect_errors) is info, not a
+// warning — AT+QGPS=1's 504 "session is ongoing" is success for gnss
+// (ddimension/wwand#51). A DIFFERENT code still warns, and every error line
+// now carries its code: "error: cme" alone said nothing.
+{
+	let lv = [];
+	let tre = fake_transport();
+	let ate = atcmd.create(tre, { log: (level, msg) => push(lv, [ level, msg ]) });
+
+	ate.send('AT+CCHO="A0000005591010FFFFFFFF8900000100"', () => null,
+		{ probe: 'no eUICC answered on this card' });
+	tre.reply('\r\nERROR\r\n');
+	ate.send('AT+QGPS=1', () => null, { expect_errors: /504/ });
+	tre.reply('\r\n+CME ERROR: 504\r\n');
+	ate.send('AT+QGPS=1', () => null, { expect_errors: /504/ });
+	tre.reply('\r\n+CME ERROR: 505\r\n');
+
+	eq(map(lv, (x) => x[0]), [ 'info', 'info', 'warn' ],
+		'expect: named probe and expected CME are info; an unexpected code warns');
+	ok(index(lv[0][1], 'no eUICC answered on this card') >= 0, 'expect: the probe names its own meaning');
+	ok(index(lv[1][1], 'error: cme 504') >= 0, 'expect: the error line carries the code');
+	ok(index(lv[2][1], 'error: cme 505') >= 0, 'expect: ...on the warning too');
 }
 
 // auth commands never log credentials

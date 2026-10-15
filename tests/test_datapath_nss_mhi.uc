@@ -77,12 +77,13 @@ eq(plug.probe(fakefx.create({
 eq(plug.probe(mhi_fx({ driver: '../../../../bus/usb/drivers/qmi_wwan_q' }), 'rmnet_mhi0'), false,
 	'probe: a netdev owned by another driver is not claimed');
 
-// knobs but no registered child (a plain VLAN on some other netdev, or
-// qmap_mode set with nothing built): not ours
-eq(plug.probe(fakefx.create({
-	present: { '/sys/module/pcie_mhi': true, '/sys/module/rmnet_nss': true },
-	files: { '/sys/class/net/rmnet_mhi0/qmap_mode': "2\n" },
-}), 'rmnet_mhi0'), false, 'probe: no registered child -> not claimed');
+// The original dot-child is absent after wwand renames it. The driver and its
+// parent QMAP knob still identify the datapath, so a daemon restart claims it.
+{
+	let fx = mhi_fx();
+	delete fx.present['/sys/class/net/rmnet_mhi0.1'];
+	ok(plug.probe(fx, 'rmnet_mhi0'), 'probe: already-renamed child remains claimed');
+}
 
 // no NSS shim: still claimed (the children need adopting either way), but said
 {
@@ -99,6 +100,19 @@ eq(plug.probe(fakefx.create({
 // QMAP framing: the USB sibling's base, 0x81 + offset
 eq(plug.map_id({ id: 1 }, 'rmnet_mhi0', mhi_fx({ mbim: false })), 0x81, 'qmap: channel 1 -> 0x81');
 eq(plug.map_id({ id: 2 }, 'rmnet_mhi0', mhi_fx({ mbim: false })), 0x82, 'qmap: channel 2 -> 0x82');
+
+eq(netlink.datapath_caps('rmnet_nss_mhi', plugins, mhi_fx({ sdx7x: true }), 'rmnet_mhi0').qmap_versions,
+	[ 5 ], 'qmap: SDX7x driver is fixed to QMAP v5');
+eq(netlink.datapath_caps('rmnet_nss_mhi', plugins, mhi_fx({ sdx7x: false }), 'rmnet_mhi0').qmap_versions,
+	[ 5 ], 'qmap: listed legacy PCI ids are also fixed to QMAP v5');
+
+{
+	let fx = mhi_fx({ sdx7x: true });
+	fx.rmnet_info = () => ({ qmap_version: 5 });
+	eq(plug.qmap_versions(fx, 'rmnet_mhi0'), [ 1 ], 'qmap: driver ioctl overrides PCI fallback');
+	fx.rmnet_info = () => ({ qmap_version: 9 });
+	eq(plug.qmap_versions(fx, 'rmnet_mhi0'), [ 5 ], 'qmap: driver version 9 means QMAP v5');
+}
 
 // MBIM on ordinary hardware: mbim_mux_id is 0 and the driver adds 1, so the
 // session id EQUALS wwand's channel number — nothing is remapped
@@ -154,8 +168,8 @@ eq(res.map_ids, { '1': 0x81 }, 'setup: map_ids carries the QMAP wire id');
 // every real child
 // built explicitly rather than through the fixture: the point is that
 // rmnet_mhi0.1 is GONE (renamed by an earlier run) and wwand0 is what is left.
-function renamed_fx(child_mac) {
-	return fakefx.create({
+function renamed_fx(child_mac, device_link) {
+	let fx = fakefx.create({
 		present: { '/sys/module/pcie_mhi': true, '/sys/module/rmnet_nss': true,
 		           '/sys/class/net/wwand0': true },
 		files: { '/sys/class/net/rmnet_mhi0/qmap_mode': "2\n",
@@ -163,16 +177,35 @@ function renamed_fx(child_mac) {
 		         '/sys/module/pcie_mhi/parameters/mhi_mbim_enabled': "0\n",
 		         '/sys/class/net/wwand0/address': child_mac },
 	});
+	let orig = fx.readlink;
+
+	fx.readlink = (path) => (path == '/sys/class/net/wwand0/device')
+		? device_link : (orig ? orig(path) : null);
+
+	return fx;
 }
 
-res = netlink.setup(renamed_fx("02:11:22:33:44:01\n"), {
+res = netlink.setup(renamed_fx("02:50:f4:00:00:01\n", '../../../rmnet_mhi0'), {
 	netdev: 'rmnet_mhi0', backend: 'rmnet_nss_mhi', plugins: plugins,
 	mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
 });
-eq(res.mux_devs, [ 'wwand0' ], 'restart: an already-renamed child is adopted on the first five octets');
+eq(res.mux_devs, [ 'wwand0' ], 'restart: the child device symlink identifies its parent');
+
+// Older variants may lack that device link. Keep the MAC-prefix fallback.
+res = netlink.setup(renamed_fx("02:11:22:33:44:01\n", null), {
+	netdev: 'rmnet_mhi0', backend: 'rmnet_nss_mhi', plugins: plugins,
+	mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
+});
+eq(res.mux_devs, [ 'wwand0' ], 'restart: matching MAC prefix remains a fallback');
 
 // ...and a stranger under that name is not
-res = netlink.setup(renamed_fx("de:ad:be:ef:00:01\n"), {
+res = netlink.setup(renamed_fx("02:11:22:33:44:01\n", '../../../some_other_parent'), {
+	netdev: 'rmnet_mhi0', backend: 'rmnet_nss_mhi', plugins: plugins,
+	mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
+});
+eq(res.mux_devs, [], 'restart: a different parent overrides a matching MAC prefix');
+
+res = netlink.setup(renamed_fx("de:ad:be:ef:00:01\n", '../../../some_other_parent'), {
 	netdev: 'rmnet_mhi0', backend: 'rmnet_nss_mhi', plugins: plugins,
 	mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
 });
@@ -186,6 +219,6 @@ eq(netlink.select_backend(mhi_fx(), 'rmnet_mhi0', 'auto', true, plugins, { proto
 	'rmnet_nss_mhi', 'select: ...and a QMI one, the driver serves both');
 eq(netlink.datapath_caps('rmnet_nss_mhi', plugins),
 	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], adopts: true, tx_aggr: false, llp_802_3: false },
-	'caps: driver owns the buffers, QMAP on the wire, plain QMAP only');
+	'caps: without hardware facts the safe fallback is plain QMAP');
 
 done('test_datapath_nss_mhi');

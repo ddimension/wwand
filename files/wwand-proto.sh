@@ -30,6 +30,9 @@ proto_wwand_init_config() {
 	proto_config_add_string use_pushed_prefix
 	proto_config_add_string settings_poll
 	proto_config_add_string hard_reconnect_on_ip_change
+	proto_config_add_string ipv6_pd
+	proto_config_add_string clat
+	proto_config_add_string address_allocation
 
 	# The IPv6 default route is installed SOURCE-SPECIFIC by default. The route
 	# line is uqmi's, character for character (qmi.sh:458) — with a delegated
@@ -137,7 +140,7 @@ _wwand_apply_settings() {
 		json_select ..
 	fi
 
-	local v6_addr v6_plen v6_prefix v6_gateway v6_dns
+	local v6_addr v6_plen v6_prefix v6_gateway v6_dns v6_delegated
 	json_load "$resp"
 	json_get_type _t ipv6
 	if [ "$_t" = object ]; then
@@ -146,6 +149,8 @@ _wwand_apply_settings() {
 		json_get_var v6_plen plen
 		# the daemon's masked network part of v6_addr — see the route below
 		json_get_var v6_prefix prefix
+		# "<prefix>/<len>" the network delegated (QMI only, `ipv6_pd '1'`)
+		json_get_var v6_delegated delegated
 		json_get_var v6_gateway gateway
 		json_get_type _t dns
 		if [ "$_t" = array ]; then
@@ -233,9 +238,16 @@ _wwand_apply_settings() {
 
 	[ -n "$v6_addr" ] && {
 		proto_add_ipv6_address "$v6_addr" "128"
-		# RFC 7278: extend the delegated /64 towards LAN (pointless for /128)
-		[ "${v6_plen:-64}" -lt 128 ] 2>/dev/null && \
+		# A DELEGATED prefix is what the LAN gets when there is one; only
+		# without it does RFC 7278 extend the bearer's own /64 towards the
+		# LAN (pointless for /128). Never both: the /64 is the link to the
+		# network, and handing it out next to a real delegation would put
+		# LAN hosts on an address range the network routes to this link.
+		if [ -n "$v6_delegated" ]; then
+			proto_add_ipv6_prefix "$v6_delegated"
+		elif [ "${v6_plen:-64}" -lt 128 ] 2>/dev/null; then
 			proto_add_ipv6_prefix "${v6_addr}/${v6_plen:-64}"
+		fi
 		[ -n "$v6_gateway" ] && proto_add_ipv6_route "$v6_gateway" 128
 		[ "$defaultroute" = 0 ] || {
 			if [ "$sourcefilter" = 0 ]; then
@@ -254,6 +266,12 @@ _wwand_apply_settings() {
 				# daemon too old to send `prefix`, i.e. a mismatched deploy.
 				proto_add_ipv6_route "::0" 0 "$v6_gateway" "" "" \
 					"${v6_prefix:-$v6_addr}/${v6_plen:-64}"
+				# ...and one per delegated prefix, or the LAN hosts numbered
+				# from it match no default route at all. Same as odhcp6c's
+				# dhcpv6.script does for each of its PREFIXES
+				# (dhcpv6.script:141-143, openwrt bacda03b76, 2026-07-19).
+				[ -n "$v6_delegated" ] && \
+					proto_add_ipv6_route "::0" 0 "$v6_gateway" "" "" "$v6_delegated"
 			fi
 		}
 	}
@@ -316,6 +334,14 @@ proto_wwand_setup() {
 				# woken modem registers
 				echo "radio off: held by a plugin (the modem's status says why)"
 				proto_notify_error "$interface" RADIO_HELD
+				sleep 60
+				;;
+			detached)
+				# the operator detached the modem from the network (ubus
+				# modem_detach / wwandctl detach). Not blocked: the interface
+				# waits in setup and the daemon brings it up after the attach
+				echo "detached from the network by the operator (wwandctl attach ends it)"
+				proto_notify_error "$interface" DETACHED
 				sleep 60
 				;;
 			modem_absent)

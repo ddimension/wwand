@@ -46,7 +46,9 @@ The plugins bring their own pages — remote SIM ([wwand-rsim](https://github.co
 - **Three backends, one contract** — QMI, MBIM and NCM sit behind a single
   daemon-neutral interface, so netifd, the ubus API and the UI never care which
   a modem speaks. MBIM even tunnels the whole QMI stack over an
-  [MBIM passthrough](docs/architecture.md#5-control-backends-qmi-mbim-ncm).
+  [MBIM passthrough](docs/architecture.md#5-control-backends-qmi-mbim-ncm),
+  and the same stack runs over the Qualcomm IPC router (QRTR) for PCIe modems
+  with no cdc-wdm.
 - **Multi-modem, multi-context** — several modems, and several parallel PDP
   contexts per modem via QMAP multiplexing (rmnet / qmimux on QMI, 802.1q
   sessions on MBIM, auto-selected; channels auto-assigned once a modem is
@@ -69,7 +71,7 @@ The plugins bring their own pages — remote SIM ([wwand-rsim](https://github.co
 
 | Area | What |
 |---|---|
-| **Connectivity** | QMI / MBIM / NCM behind one `proto wwand` · IPv4/IPv6/dual-stack · IPv4 /32 p-t-p or pushed prefix · IPv6 RFC-7278 PD · QMAP mux (multiple contexts/modem) with full **bidirectional aggregation** — downlink (modem→host) *and* uplink (host→modem, WDA-negotiated + rmnet egress coalesce), capability-gated so a non-QMAP modem falls back to plain framing |
+| **Connectivity** | QMI / MBIM / NCM behind one `proto wwand` · QMI also over the **QRTR bus** for PCIe/MHI modems with no cdc-wdm (`option device 'qrtr'`) · IPv4/IPv6/dual-stack · IPv4 /32 p-t-p or pushed prefix · IPv6 RFC-7278 PD · QMAP mux (multiple contexts/modem) with full **bidirectional aggregation** — downlink (modem→host) *and* uplink (host→modem, WDA-negotiated + rmnet egress coalesce), capability-gated so a non-QMAP modem falls back to plain framing |
 | **Attach** | Attach profile programmed from config **before** registration → correct APN/IP family, avoids the EMM-33 IPv4-only reject |
 | **SIM** | PIN unlock (UIM → DMS fallback, retry-guarded) · multi-slot switching · PIN enable/disable · per-SIM overrides by ICCID (`wwand_sim`) · **SIM inventory**: every card seen, by ICCID, and where it is — modem and slot, eUICC and profile, or a remote reader (`wwandctl sims`, LuCI Status → SIM cards) |
 | **Remote SIM** | With the [wwand-rsim](https://github.com/ddimension/wwand-rsim) plugin a modem runs on a card that is not in its slot (QMI UIM Remote, also over the MBIM passthrough; HW-verified clients are **Quectel**, whose firmware switch for the service `wwandctl rsim enable` sets — on other Qualcomm modems UIM Remote has to be on in the firmware already, untested, tbd, see its [modem support](https://github.com/ddimension/wwand-rsim/blob/main/docs/modems.md)): a reader on the router or on another machine over SSH (Smartmouse USB, Phoenix, PC/SC), a phone's SIM over Bluetooth SAP, the card of another modem on the router (a *SIM sponsor*, whose radio wwand keeps off meanwhile) or of a modem on another wwand router. `wwandctl rsim scan` finds the sources, LuCI Network → Remote SIM sets them up |
@@ -77,11 +79,11 @@ The plugins bring their own pages — remote SIM ([wwand-rsim](https://github.co
 | **eSIM fleet** | With the [wwand-ipa](https://github.com/ddimension/wwand-ipa) plugin the router is the GSMA **SGP.32 IoT Profile Assistant** for an eIM, run by [ipad](https://github.com/ddimension/ipad) (`wwand-ipad`, C, SGP.32 v1.3): the eIM queues profile downloads (direct through lpac, or indirect through the eIM), enable/disable/delete and eIM configuration changes; wwand applies a profile switch to the modem, waits for a new data session and rolls the change back when none comes (SGP.32 3.3.2), and writes the enabled profile's APN into a `wwand_sim` for its ICCID. Works with IoT eUICCs and — by emulating the SGP.32 functions, results signed with a device key — with ordinary SGP.22 consumer eUICCs. `wwandctl ipa`, LuCI Network → eSIM Fleet |
 | **Binding** | Pin a modem by USB **serial**, **IMEI**, or a stable **device path** (sysfs topology, PCIe/MHI-ready) so the right SIM/APN follows the right modem across re-enumeration; **stable L3 names** `wwand0…wwand100` (auto-assigned, kernel netdev renamed, written back) survive USB renumbering on multi-modem boxes |
 | **RF unlock** | `option fcc_auth` unlocks laptop-SKU modems that boot radio-locked (Lenovo/Dell/HP Quectel EM1xx, Foxconn SDX55/SDX62, DW5821e) — QMI DMS/Foxconn auto-chain, MBIM Quectel radio-state |
-| **Setup** | **Zero-config autosetup** (default on): a modem on an unconfigured box creates `wwmodem_auto` + interface `wwan0` (L3 device `wwand0`) in the default wan firewall zone, then a one-shot internal **ICCID/IMSI → APN table** copies the carrier defaults (APN, PDP type, auth, credentials) into the config |
+| **Setup** | **Zero-config autosetup** (default on): a modem on an unconfigured box creates `wwmodem_auto` + interface `wwan0` (L3 device `wwand0`) in the default wan firewall zone, then, in that same run only, a one-shot internal **ICCID/IMSI → APN table** copies the carrier defaults (APN, PDP type, auth, credentials) into the config. wwand writes the configured APN into the modem's attach profile — an unset one as empty (network default), never a stale APN from the modem's previous life |
 | **Radio** | Mode/band restriction · manual PLMN · network scan & selection · Quectel cell-lock (4G anchor / 5G SA) · QMI LOC positioning · **idempotent, radio-safe sets** (skipped when the modem already runs the value; `unchanged`/`deferred` results) with a LuCI-offered modem reset for deferred-apply firmwares |
 | **SMS** | Receive/list · read · delete stored messages (SIM or modem store) with a full GSM 03.40 PDU decoder (7-bit incl. umlauts, UCS2, alphanumeric sender, multipart merge) · transport auto-chosen QMI WMS (native / passthrough) → native MBIM SMS → AT · LuCI inbox on the Modem Tools page |
-| **Board** | Auto-detected board profiles (MikroTik Chateau 5G, Zyxel LTE33xx / LTE5398-M904 / NR7101, Cudy LT300) drive modem **power/reset GPIOs** and **status LEDs** (5-bar signal graph or mobile/LTE) — absorbing the vendor helper scripts. Manual `modem_reset` / `modem_repower` (LuCI button); GPIO picker in the UI |
-| **Ops** | Recovery ladder (opmode → modem reset → **board power-cycle / reset-GPIO** → reboot) + zero-rx watchdog · non-destructive restart + session adoption · **"waiting for modem"** surfaced to netifd/LuCI + logged · uniform rich telemetry line across all backends · per-model quirk tables · AT side channel · **`at2_external`** reserves the secondary AT port for external tools (gpsd, scripts) |
+| **Board** | Auto-detected board profiles (MikroTik Chateau 5G, Zyxel LTE3301-PLUS / -M209 / -Q222, LTE5398-M904, NR7101, Cudy LT300) drive modem **power/reset GPIOs** and **status LEDs** (5-bar signal graph or mobile/LTE) — absorbing the vendor helper scripts. Manual `modem_reset` / `modem_repower` (LuCI button); GPIO picker in the UI |
+| **Ops** | Recovery ladder (opmode → modem reset → **board power-cycle / reset-GPIO** → reboot) + zero-rx watchdog · non-destructive restart + session adoption · **"waiting for modem"** surfaced to netifd/LuCI + logged · uniform rich telemetry line across all backends · the network's time (NITZ) sets the system clock when it is more than two minutes off — for routers without an RTC (`option nitz_time`, default on) · per-model quirk tables · AT side channel · **`at2_external`** reserves the secondary AT port for external tools (gpsd, scripts) |
 
 ## Packages
 
@@ -100,13 +102,13 @@ channels).
 | Package | Role |
 |---|---|
 | `wwand` | daemon + framework + codec + shared core + the native `wwand_io.so` I/O module (no backend on its own) |
-| `wwand-qmi` | QMI backend — the common case (`DEPENDS wwand`) |
+| `wwand-qmi` | QMI backend — the common case; over cdc-wdm, or over the QRTR bus for PCIe/MHI modems that have none (`DEPENDS wwand`) |
 | `wwand-mbim` | MBIM backend (`DEPENDS wwand-qmi` — the passthrough reuses QMI) |
 | `wwand-ncm` | NCM/ECM backend (`DEPENDS wwand`) |
 | `wwand-mhi` | PCIe/MHI transport + MHI drivers (`DEPENDS wwand`; backend-neutral, add wwand-qmi or wwand-mbim) |
 | `wwand-esim` | eSIM management + SM-DP+ download (`DEPENDS wwand + lpac` — no backend: the APDU transport chain MBIM UICC → QMI UIM → AT lives in the base `sim.uc`, so eSIM works on an NCM- or MBIM-only box too) |
 | `wwand-gps` | reads the modem's NMEA port wwand found during enumeration and reports the fix through `modem_gps` (`DEPENDS wwand`) |
-| `wwand-apntest` | runs configured APN tests in sequence on a dedicated test box — SIM or eUICC profile, dial, checks, one verdict per test (`DEPENDS wwand`) |
+| `wwand-apntest` | runs configured APN tests in sequence on a dedicated test box — SIM or eUICC profile, dial, checks, one verdict per test, reported to Nagios/Icinga through NSCA-ng (`send_nsca`, package `nsca-ng` in the ddimension feed) (`DEPENDS wwand`) |
 | `wwand-datapath-rmnet_nss` | optional datapath add-on: adopts the vendor `qmi_wwan_q` QMAP children (USB) so they keep their Qualcomm NSS offload (`DEPENDS wwand-qmi`) |
 | `wwand-datapath-rmnet_nss_mhi` | the same for Quectel's vendor `pcie_mhi` driver (PCIe/MHI, QMI *and* MBIM) (`DEPENDS wwand`) |
 
@@ -190,8 +192,10 @@ The full map, including the design notes and the running log, is
 ## Status
 
 Production-tested across MikroTik Chateau 5G (Quectel RG650E-EU + Huawei E392),
-Zyxel NR7101, Cudy LT300 (MeiG SLM770A) and GL.iNet X3000 (RM520N), plus further
-Quectel modems (RG502Q, EG06). Remote SIM (wwand-rsim) ran on the RG650E (QMI)
+Zyxel NR7101, Zyxel LTE3301-M209 (Quectel BG96, LTE Cat-M), Cudy LT300 (MeiG
+SLM770A) and GL.iNet X3000 (RM520N), plus further Quectel modems (RG502Q, EG06).
+QMI over QRTR was contributed with a hardware test on a Quectel RG520N-EB
+(IPQ5018, PCIe/MHI); the hub as it is now is host-tested only so far. Remote SIM (wwand-rsim) ran on the RG650E (QMI)
 and the RM520N (MBIM) with cards from a Smartmouse reader, phones over
 Bluetooth, sponsors on the same router and modems on other wwand routers — the
 details and workarounds are in its

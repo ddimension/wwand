@@ -316,9 +316,24 @@ production box — but nothing is built for that case now.
 1. **Sweep skeleton.** Package, config model, the group-by-SIM plan, slot
    switching, `context_up`/`down` per test, the ping check, the NSCA sink. This
    already replaces the current tool for the non-accounting cases.
+   **Built (2026-10-03):** `apntest/runner.uc` + `wwand-apntest` CLI + the
+   cron-keeping init script — see reference.md "APN test box". The dial goes
+   through netifd (`ifup` of the test interface with the test's APN as an
+   uncommitted uci change) rather than `context_up` directly, so addressing and
+   routes come from the production path; ubus methods are not built yet (the
+   CLI and `/tmp/wwand-apntest/last.json` are the interface for now).
 2. **eSIM groups.** Profile enable as a selection step, with the `wwand-esim`
    dependency surfaced as a plan error rather than a silent skip.
 3. **Accounting.** The plugin contract, modem-side counters, credentials out of
    the package and into configuration.
+   **Built for m-ccp (2026-10-03),** inside the runner rather than as an
+   external plugin: the m-ccp answer for a globalsim card has no traffic
+   counter, only the card's last sessions (XML, `application/vnd.mccp.api-v2
+   +xml`), so the check compares THE TEST'S SESSION — found by start time and
+   APN after it ended — with the netdev's rx+tx from up to down. The old
+   `grep bytesTotal | tail -n1` read the oldest listed session and measured
+   nothing; on the gdsp box curl also failed TLS verification (exit 60)
+   without anybody noticing. `iec` still open: its answer has not been looked
+   at yet.
 4. **LuCI.** Last verdicts, a manual run button. Only once 1-3 are stable —
    a test box that reports correctly matters more than one that looks good.

@@ -7,6 +7,8 @@
 
 'use strict';
 
+import * as modem_quirks from 'wwand.modem_quirks';
+
 // zero_rx_limit_ms(modem_config, timing): the zero-rx stall threshold in ms.
 //   timing.zero_rx_ms — explicit override (tests) when not null.
 //   else the modem's `zero_rx_timeout` in seconds (default 21600 = 6 h).
@@ -63,9 +65,31 @@ export const SIM_OVERRIDABLE = [ 'apn', 'auth', 'username', 'password', 'pdp_typ
 // interface's, because the SIM is the more specific statement — a subscription
 // that only answers on IPv4 says so about itself, not about the interface it
 // happens to be dialled through (ddimension/wwand#35).
+//
+// A modem whose firmware cannot take IPv6 at all (modem_quirks `ipv4_only`)
+// gets ipv4 whatever was configured: asking it for IPv6 is not a degraded
+// connection there, it is a crashed modem.
 export function effective_pdp(ctx)
 {
-	return conn_cfg(ctx, 'pdp_type') ?? 'ipv4v6';
+	let pdp = conn_cfg(ctx, 'pdp_type') ?? 'ipv4v6';
+
+	if (pdp != 'ipv4' && modem_quirks.for_model(ctx?.modem?.info?.model).ipv4_only)
+		return 'ipv4';
+
+	return pdp;
+};
+
+// The prefix-delegation flag an AT-driven connection asks for: 1/0, or null
+// when `ipv6_pd` is unset or the connection carries no IPv6 (nothing to
+// delegate). The QMI side has the same rule in its PROFILE_FLAGS table
+// (context.uc); this is the copy for the AT paths, which have no table because
+// only this one flag reaches them (ncm_vendors.uc `pd` recipes).
+export function pd_want(cfg, pdp)
+{
+	if (cfg?.ipv6_pd == null || pdp == 'ipv4')
+		return null;
+
+	return cfg.ipv6_pd ? 1 : 0;
 };
 
 // the complete context state machine: IDLE -> PREPARING (QMI) | ACTIVATING

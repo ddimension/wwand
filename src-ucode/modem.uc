@@ -15,6 +15,7 @@
 import * as uloop from 'uloop';
 import * as fs from 'fs';
 import * as transport_mod from 'wwand.transport';
+import * as qmi_over_qrtr from 'wwand.qmi_over_qrtr';
 import * as client_mod from 'wwand.client';
 import * as sim from 'wwand.sim';
 import * as netlink from 'wwand.netlink';
@@ -32,8 +33,10 @@ import * as tmdmod from 'wwand.codec.schema.tmd';
 import * as catmod from 'wwand.codec.schema.cat';
 import * as pdcmod from 'wwand.codec.schema.pdc';
 import * as carrier from 'wwand.carrier_config';
-// loc.uc + wms.uc are lazy-loaded (require of a *_lazy shim) only when GPS /
-// SMS is actually used, keeping those schemas off the heap on the common path.
+// wms.uc is lazy-loaded (require of a *_lazy shim) only when SMS is actually
+// used, keeping that schema off the heap on the common path. GNSS over QMI LOC
+// is not here at all: it lives in the optional wwand-gps package, which asks
+// for its client through extra_client like any plugin.
 
 const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
@@ -134,8 +137,6 @@ export function create(opts)
 		datapath: null,    // { backend, urb_size, mux_devs, ep_id } after INIT_DATAPATH
 		at: null,          // AT engine, best-effort
 		at_tty: null,
-		loc: null,         // LOC client when config.location is set
-		location: null,    // last position report
 		cells: null,       // last cell location info (telemetry collector)
 		active_sim: null,  // matched per-SIM override (config wwand_sim) for the
 		                   // inserted card: overrides pincode + apn/auth/pdp
@@ -188,15 +189,15 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1607) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1596) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
-	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:1276), and
+	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:709, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
 	//
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
 	// callback arrives the generation has already moved.
 	// EACH WAIT OWNS ITS OWN TIMER AND ITS OWN DEBT. `tm.settle` is a shared
-	// one-shot slot, also written by the init chain (modem_init_qmi.uc:333,
+	// one-shot slot, also written by the init chain (modem_init_qmi.uc:341,
 	// :383, :604), so parking radio-bounce waits there let a second one
 	// overwrite the first: teardown then cancelled only the newest, the older
 	// timer survived unreachable, and whichever fired first cleared the other's
@@ -308,9 +309,34 @@ export function create(opts)
 		on_answer: (client) => rec.note_answer(),
 	};
 
+	// The CIDs this modem object holds on the modem, per service — what its
+	// client table carries for us. Old stacks keep very few slots, and a CID
+	// that is never released stays until the stack resets; the table is the
+	// evidence when ALLOCATE_CID starts failing (status `qmi_clients`).
+	self.qmi_clients = {};
+
+	let cid_held = (service, cid, on) => {
+		let k = sprintf('%d', service);
+		let list = filter(self.qmi_clients[k] ?? [], (c) => c != cid);
+
+		if (on)
+			push(list, cid);
+
+		if (length(list))
+			self.qmi_clients[k] = list;
+		else
+			delete self.qmi_clients[k];
+	};
+
+	let held_summary = () => join(' ', map(sort(keys(self.qmi_clients)), (k) =>
+		sprintf('%s:[%s]', k, join(',', self.qmi_clients[k]))));
+
 	self.alloc = function(schema, cb) {
 		self.ctl.request('ALLOCATE_CID', { service: schema.service }, (err, data) => {
 			if (err || !data?.allocation) {
+				log((err?.code == 5) ? 'warn' : 'debug', sprintf('allocating a client of service %d failed: %J — held: %s',
+					schema.service, err ?? 'no allocation tlv', held_summary() || 'none'));
+
 				// ClientIdsExhausted (CTL error 5): the modem's client table
 				// is full. Old stacks keep a tiny table (~5 slots) and a failed
 				// attempt can leak a slot, so plain retries only burn attempts
@@ -324,8 +350,9 @@ export function create(opts)
 				return cb(err ?? { error: 'proto', detail: 'no allocation tlv' }, null);
 			}
 
-			log('debug', sprintf('allocated cid %d for service %d',
-				data.allocation.cid, schema.service));
+			cid_held(schema.service, data.allocation.cid, true);
+			log('debug', sprintf('allocated cid %d for service %d — held: %s',
+				data.allocation.cid, schema.service, held_summary()));
 			cb(null, client_mod.create(self.hub, schema, data.allocation.cid, client_hooks));
 		});
 	};
@@ -341,11 +368,25 @@ export function create(opts)
 
 		self.ctl.request('RELEASE_CID',
 			{ release: { service: client.service, cid: client.cid } },
-			(err) => cb ? cb(err) : null, { timeout: 3000 });
+			(err) => {
+				// a refused or unanswered release leaves the CID in the
+				// modem's table — exactly what fills it up on a small stack
+				if (!err)
+					cid_held(client.service, client.cid, false);
+
+				log(err ? 'warn' : 'debug', sprintf('release of cid %d (service %d): %s — held: %s',
+					client.cid, client.service, err ? sprintf('%J', err) : 'ok', held_summary() || 'none'));
+
+				if (cb)
+					cb(err);
+			}, { timeout: 3000 });
 	};
 
 	// A client of a service the core does not know, for a plugin (daemon dep
-	// `qmi_client`). cb(err, client). The MODEM owns it: teardown releases it
+	// `qmi_client`). cb(err, client). A plugin may set `client.before_release`
+	// (a function): it runs right before the client's RELEASE_CID, on teardown
+	// and on extra_release alike — the place to end a session the client
+	// opened. The MODEM owns it: teardown releases it
 	// with its own clients, because a CID left allocated on the modem stays in
 	// its client table until the stack resets, and a plugin cannot see the
 	// teardown coming. After that `client.destroyed` is true and the plugin
@@ -405,12 +446,24 @@ export function create(opts)
 			return cb ? cb(null) : null;
 		}
 
+		if (self.hub && !self.hub.closed)
+			modem_common.before_release([ client ], log);
+
 		self.release(client, cb);
 	};
 
 	// backend-neutral NAS accessor. cb(nas|null).
 	self.with_nas = function(cb) {
 		cb(self.nas ?? null);
+	};
+
+	// the bands the modem supports (DMS Get Band Capabilities, dms.uc);
+	// cb(err, raw response). netsel_ops turns it into band lists.
+	self.band_caps = function(cb) {
+		if (!self.dms)
+			return cb({ error: 'unsupported_on_backend' });
+
+		self.dms.request('GET_BAND_CAPABILITIES', {}, cb, { no_recovery: true });
 	};
 
 	// backend-neutral WMS (SMS) accessor. cb(wms|null).
@@ -499,20 +552,21 @@ export function create(opts)
 			let cyc_gen = self._gen;
 
 			log('warn', 'recovery: cycling operating mode');
-			opmode_ours('low_power', () => {
+			// the sessions end first (modem_common with_sessions_released)
+			self.with_sessions_released('reattach', (cycled) => opmode_ours('low_power', () => {
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:3864), and dropping it strands a ubus request.
+				// (daemon.uc:4123), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
 				settle_after(cyc_gen, () => {
 					online_unless_parked(() => {
-						settle_after(cyc_gen, () => done(action), () => done(action));
+						settle_after(cyc_gen, () => cycled(), () => cycled());
 					});
-				}, () => done(action));
-			});
+				}, () => cycled());
+			}), () => done(action));
 			return;
 
 		case 'modem_reset': {
@@ -606,6 +660,24 @@ export function create(opts)
 				});
 			}, cancelled);
 		});
+	};
+
+	// PS-domain attach (on) or detach, radio on (nas.uc ATTACH_DETACH). The
+	// raw network action only: stopping the sessions first and keeping the
+	// modem from undoing a detach on its own is netsel_ops (modem_detach /
+	// modem_attach). NO_EFFECT (26) is the
+	// modem already being in the asked state — a success, not a fault.
+	// Bounded at 60 s: the answer comes once the network procedure is done.
+	self.ps_attach = function(on, cb) {
+		if (!self.nas)
+			return cb({ error: 'unsupported_on_backend' });
+
+		self.nas.request('ATTACH_DETACH', { action: on ? nasmod.PS_ATTACH : nasmod.PS_DETACH }, (err) => {
+			if (err && !(err.error == 'qmi' && err.code == 26))
+				return cb({ error: 'qmi', detail: err });
+
+			cb(null, { ok: true, via: 'qmi', unchanged: !!err });
+		}, { no_recovery: true, timeout: 60000 });
 	};
 
 	// switch_protocol / protocol_switch_supported come from
@@ -713,7 +785,7 @@ export function create(opts)
 
 			scaffold.resolve_active_sim(id.iccid, id.imsi);
 
-			let ctx = self.contexts[0];
+			let ctx = modem_common.attach_owner(self.contexts);
 
 			if (!ctx?.ensure_attach_profile || !self.dms)
 				return cb ? cb(changed) : null;
@@ -1247,7 +1319,7 @@ export function create(opts)
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
-			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:418-421), so it
+			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:434-437), so it
 			// carries the same raw WCDMA Ec/Io and needs the same conversion —
 			// an indication landing between refreshes would otherwise flip the
 			// unit back under a consumer that just read the polled value
@@ -1260,8 +1332,8 @@ export function create(opts)
 				modem_common.normalise_qmi_signal(data), self._serving_meas);
 		});
 		// Network Time / NITZ (operator-pushed UTC clock): store for status and
-		// hand epoch+tz to the daemon, which decides whether to apply it (only
-		// when the system clock is clearly unset). tz offset is signed 15-min units.
+		// hand epoch+tz to the daemon's clock policy (modem_common.nitz_apply).
+		// tz offset is signed 15-min units.
 		self.nas.on('NETWORK_TIME_IND', (data) => {
 			let epoch = modem_common.nitz_epoch(data?.universal_time);
 			if (epoch == null)
@@ -1270,8 +1342,7 @@ export function create(opts)
 			self.network_time = { epoch: epoch, tz_offset_min: tz_min, dst: data.dst_adjustment };
 			log('info', sprintf('network time (NITZ): %d utc, tz %s',
 				epoch, tz_min != null ? sprintf('%+d min', tz_min) : '?'));
-			if (deps.set_clock)
-				deps.set_clock(epoch, tz_min);
+			modem_common.nitz_apply(self, deps, epoch, tz_min);
 		});
 		// NAS event report — live RF band changes (band-steer / CA reshuffle)
 		// pushed instead of waiting for the next cell poll. Stored on self.rf_bands.
@@ -1415,6 +1486,8 @@ export function create(opts)
 		}
 
 		if (ss.registration == nasmod.REG_REGISTERED) {
+			self._reg_released = false;
+
 			if (self.state == 'REGISTERING') {
 				if (tm.reg) {
 					tm.reg.cancel();
@@ -1432,7 +1505,6 @@ export function create(opts)
 						trim(self.reg.plmn.description ?? '')) : null,
 					self.reg.roaming, join(' ', self.reg.radio_ifs ?? [])));
 				enter_ready(() => {
-					self._start_loc();
 					self._start_telemetry();
 				});
 			}
@@ -1443,8 +1515,17 @@ export function create(opts)
 			// registration chain here would fight the parking, fail, and walk
 			// the recovery ladder into an op-mode cycle and a power-cycle — for
 			// a modem doing exactly what it was told.
-			if (self.lowpower_parked) {
-				log('info', 'registration released (radio parked)');
+			if (self.lowpower_parked || self.detached) {
+				// ONCE per loss: a modem that is detached but keeps camping
+				// reports its serving system every few seconds, and each
+				// report re-logged this and re-suspended the contexts
+				// (HW-observed on the RG650E, 2026-10-10)
+				if (self._reg_released)
+					return;
+
+				self._reg_released = true;
+				log('info', self.detached ? 'registration released (detached by the operator)'
+				                          : 'registration released (radio parked)');
 				emit('deregistered', self.reg);
 				notify_contexts('suspend', self.reg);
 				return;
@@ -1457,69 +1538,6 @@ export function create(opts)
 		}
 	};
 
-	// start the LOC positioning session once (best-effort)
-	self._start_loc = function() {
-		if (self.loc || !self.config.location)
-			return;
-
-		// lazy-load the LOC schema only now (GPS enabled) — see the top-of-file note
-		let locmod = require('wwand.codec.schema.loc_lazy').s;
-
-		if (!self.services[sprintf('%d', locmod.default.service)]) {
-			log('info', 'location requested but loc service unavailable');
-			return;
-		}
-
-		self.alloc(locmod.default, (err, loc) => {
-			if (err) {
-				log('warn', sprintf('loc allocation failed: %J', err));
-				return;
-			}
-
-			self.loc = loc;
-
-			loc.on('POSITION_REPORT_IND', (data) => {
-				if (data.status != locmod.SESSION_STATUS_SUCCESS &&
-				    data.status != locmod.SESSION_STATUS_IN_PROGRESS)
-					return;
-
-				if (data.latitude == null)
-					return;
-
-				self.location = {
-					latitude: data.latitude,
-					longitude: data.longitude,
-					altitude: data.altitude,
-					speed: data.h_speed,
-					heading: data.heading,
-					uncertainty: data.h_uncertainty,
-					hdop: data.dop?.hdop,
-					technology: data.technology,
-					utc_ms: data.utc_ms,
-				};
-
-				emit('location', self.location);
-			});
-
-			loc.request('REGISTER_EVENTS', { mask: locmod.EVENT_POSITION_REPORT }, (e2) => {
-				if (e2)
-					return log('warn', sprintf('loc register events failed: %J', e2));
-
-				self._loc_session = true;
-				loc.request('START', {
-					session_id: 1,
-					intermediate_reports: 1,
-					min_interval_ms: 1000,
-				}, (e3) => {
-					if (e3)
-						log('warn', sprintf('loc start failed: %J', e3));
-					else
-						log('notice', 'location session started');
-				});
-			});
-		});
-	};
-
 	// telemetry subsystem (fast watch loop, CA, data-mode, slow log tick) —
 	// telemetry_qmi.uc attaches watch/_start_telemetry/… methods
 	let telem = telemetry_qmi.install(self, { log: log, emit: emit });
@@ -1530,14 +1548,29 @@ export function create(opts)
 		if (self.hub)
 			return;
 
-		self.hub = transport_open(self.device, {
-			on_gone: () => self._device_gone(),
-			on_unhandled: (hub, dec) => {
-				if (dec.msg_id != null)
-					log('debug', sprintf('unhandled message svc %d cid %d msg 0x%04x %s',
-						dec.service, dec.cid, dec.msg_id, dec.kind));
-			},
-		});
+		// A QRTR modem (a Qualcomm SDX on PCIe/MHI: its QMI lives on the QRTR bus
+		// via qcom_mhi_qrtr, there is no cdc-wdm QMUX device) uses the QMI-over-QRTR
+		// hub instead of a cdc-wdm transport. The whole QMI stack above the hub is
+		// identical either way; only the wire underneath differs. Selected by the
+		// sentinel control device "qrtr" (the data netdev is the interface's own
+		// `device`, e.g. the mhi_net IP_HW0 link, exactly as for a cdc-wdm modem).
+		if (self.device == 'qrtr') {
+			self.hub = qmi_over_qrtr.create({
+				log: log,
+				node: self.config?.qrtr_node,
+				on_gone: () => self._device_gone(),
+			});
+		}
+		else {
+			self.hub = transport_open(self.device, {
+				on_gone: () => self._device_gone(),
+				on_unhandled: (hub, dec) => {
+					if (dec.msg_id != null)
+						log('debug', sprintf('unhandled message svc %d cid %d msg 0x%04x %s',
+							dec.service, dec.cid, dec.msg_id, dec.kind));
+				},
+			});
+		}
 
 		if (!self.hub)
 			return fail('open', { error: 'open', device: self.device });
@@ -1608,7 +1641,7 @@ export function create(opts)
 		//
 		// This sat one line BELOW close_at() while saying the same thing, which
 		// was only true of the client destroys. atcmd.close() happens to drop
-		// pending callbacks silently (atcmd.uc:1029-1036 — it clears `current`
+		// pending callbacks silently (atcmd.uc:1080-1087 — it clears `current`
 		// and the queue without calling anything), so nothing exploited the gap;
 		// but that is a property of the AT engine, not a guarantee this function
 		// should lean on.
@@ -1626,20 +1659,18 @@ export function create(opts)
 		// synchronously, and destroying ctl just below cancels the answers we do
 		// not need. ctl goes LAST, and is only destroyed — it is the implicit
 		// client (cid 0) and it is what carries RELEASE_CID for all the others.
-		// END THE POSITION SESSION before its client goes. START opens a
-		// session on the modem that reports every second, and RELEASE_CID only
-		// drops the client — nothing told the location engine to stop. On an
-		// EG25-G with `option location` the QMI side stopped answering three
-		// times in one afternoon, each time right after such a teardown and the
-		// CTL SYNC of the rebuild (EG25GGBR07A08M2G, 2026-10-01: CTL SYNC and
-		// GET_VERSION_INFO time out, AT answers); none before the option was
-		// set. Written before the release below, so it reaches the modem first.
-		if (self.loc && self._loc_session && self.hub && !self.hub.closed)
-			self.loc.request('STOP', { session_id: 1 }, (e) => null, { no_recovery: true });
+		// A PLUGIN'S CLIENT MAY OWE THE MODEM A GOODBYE before its CID goes:
+		// `before_release` (the extra_client contract) is written first, so it
+		// reaches the modem ahead of the RELEASE_CID below. RELEASE_CID only
+		// drops the client — a session the client opened (a QMI LOC position
+		// session reports every second) outlives it, and on an EG25-G the QMI
+		// side stopped answering three times in one afternoon right after such
+		// teardowns (EG25GGBR07A08M2G, 2026-10-01: CTL SYNC and
+		// GET_VERSION_INFO time out, AT answers).
+		if (self.hub && !self.hub.closed)
+			modem_common.before_release(self.extra_clients ?? [], log);
 
-		self._loc_session = false;
-
-		for (let c in [ self.dms, self.nas, self.uim, self.wda, self.loc, self.wds_cfg,
+		for (let c in [ self.dms, self.nas, self.uim, self.wda, self.wds_cfg,
 		               self.dsd, self.tmd, self.cat, self.wms, self.pdc,
 		               ...(self.extra_clients ?? []) ]) {
 			if (!c)
@@ -1653,7 +1684,13 @@ export function create(opts)
 
 		self.ctl?.destroy();
 
-		self.ctl = self.dms = self.nas = self.uim = self.wda = self.loc = self.wds_cfg = null;
+		self.ctl = self.dms = self.nas = self.uim = self.wda = self.wds_cfg = null;
+
+		// The releases above are still in flight and destroying CTL cancels
+		// their answers, so their cid_held(…, false) never runs. The CIDs die
+		// with this QMI session anyway; kept, a rebuilt modem would report
+		// them beside its new ones.
+		self.qmi_clients = {};
 
 		self.dsd = self.tmd = self.cat = self.wms = self.pdc = null;
 		self.extra_clients = [];

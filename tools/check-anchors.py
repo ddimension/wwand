@@ -12,7 +12,7 @@ described, cutting off the two fields the sentence went on to list.
 
 What this can and cannot do:
 
-  * IN-TREE anchors (`context.uc:726`, `view/wwand/status.js:543`, checked 2026-09-10) are resolved against the
+  * IN-TREE anchors (`context.uc:836`, `view/wwand/status.js:543`, checked 2026-09-10) are resolved against the
     file and the cited line is printed, so a reviewer sees at a glance whether it
     still says what the comment claims. A line number past the end of the file is
     an error — that one is unambiguous.

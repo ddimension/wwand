@@ -42,6 +42,14 @@ by = "Claude"
 reviewed = "wwand fcab7f9"
 fixed = "wwand v1.6.9"
 
+[[reviews]]
+id = "R4"
+date = "2026-10-14"
+kind = "standard read next to the code (Microsoft Learn \"MB low level UICC access\", MBIM_MS_UICC_OPEN_CHANNEL / CLOSE_CHANNEL / APDU _INFO; libmbim 1.32.0 data/mbim-service-ms-uicc-low-level-access.json; lpac 2.3.0 driver/apdu/mbim.c)"
+by = "Claude, prompted by a Codex finding"
+reviewed = "wwand f2bba19"
+fixed = "wwand, commit \"mbim: an MBIM success is not yet an open channel\""
+
 [[component]]
 name = "QMI codec and service schemas"
 code = "src-ucode/codec/{qmux,tlv,hex}.uc, codec/schema/*.uc"
@@ -78,11 +86,13 @@ code = "src-ucode/codec/mbim.uc, codec/mbim_schema/*.uc, {mbim_backend,mbim_clie
     [[component.standard.review]]
     review = "tbd"
   [[component.standard]]
-  name = "Microsoft MBIM extensions (MBIMEx v2/v3, MS Basic Connect Extensions, MS UICC Low Level Access)"
+  name = "Microsoft MBIM extensions (MBIMEx v2/v3, MS Basic Connect Extensions, MS UICC Low Level Access, MS Voice Extensions NITZ)"
   basis = "libmbim 1.32"
-  sections = "version exchange, registration/packet service v2/v3, base stations info, UICC APDU/open channel/reset"
+  sections = "version exchange, registration/packet service v2/v3, base stations info, UICC APDU/open channel/reset, NITZ (voice extensions CID 10)"
     [[component.standard.review]]
-    review = "tbd"
+    review = "R4"
+    result = "MS UICC Low Level Access only: request layouts and the APDU status (SW1 low byte) match; OPEN_CHANNEL's in-band Status (SELECT SW1 SW2) and Channel 0 = failed were not evaluated, so a refused select under an MBIM success read as a channel (fixed; Status 0 with a channel tolerated, lpac never reads it)"
+    open = "MBIMEx v2/v3, base stations info and NITZ not checked against the Microsoft text yet; UICC open not HW-verified (no eUICC-capable MBIM modem)"
 
 [[component]]
 name = "QMI-over-MBIM passthrough"
@@ -91,6 +101,16 @@ code = "src-ucode/{qmi_over_mbim,atcmd_mbim}.uc, codec/mbim_schema/qmi_passthrou
   name = "Qualcomm QMI service over MBIM (QMI passthrough UUID)"
   basis = "libmbim 1.32, libqmi 1.38.0 (qmi-device over MBIM)"
   sections = "QMI message CID, indications per service, no CTL SYNC"
+    [[component.standard.review]]
+    review = "tbd"
+
+[[component]]
+name = "QMI over QRTR"
+code = "src-ucode/qmi_over_qrtr.uc, io/src/wwand-io.c (qrtr_*), discovery.uc (qrtr_*)"
+  [[component.standard]]
+  name = "Qualcomm IPC router (QRTR) and its name server"
+  basis = "linux 6.18.41 net/qrtr (ns.c, qmi_interface.c), include/uapi/linux/qrtr.h"
+  sections = "control packets (NEW/DEL_SERVER, NEW_LOOKUP), one socket per QMI client, SDU without QMUX header"
     [[component.standard.review]]
     review = "tbd"
 

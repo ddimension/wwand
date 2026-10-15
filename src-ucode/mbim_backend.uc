@@ -45,8 +45,24 @@ const UICC_CID_CLOSE_CHANNEL = 3;
 const UICC_CID_APDU = 4;
 const UICC_CID_RESET = 6;
 const UICC_PASS_THROUGH_DISABLE = 0;   // modem resumes normal UICC use after reset
-// lpac's proven parameters
-const UICC_CHANNEL_GROUP = 1;
+// OUR OWN CHANNEL GROUP, not lpac's. The group is a tag the modem keeps per
+// logical channel, and CLOSE_CHANNEL with Channel 0 closes every channel of
+// one group (Microsoft, "MB low level UICC access", MBIM_MS_SET_UICC_CLOSE_
+// CHANNEL) — the way to free channels a crashed run left open, which
+// otherwise stay taken until the card resets and end in
+// NO_LOGICAL_CHANNELS. lpac 2.3.0 opens with group 1 (driver/apdu/mbim.c,
+// open_channel_set_new(..., 0, 1)); sharing it, our clean-up would close a
+// channel lpac is in the middle of using. Any other value will do; 0x7777
+// ("ww") is ours.
+const UICC_CHANNEL_GROUP = 0x7777;
+
+// the MS UICC failure statuses (Microsoft, "MB low level UICC access", Status
+// codes; 0x8743000N), by decimal value as the client reports them
+const UICC_STATUS = {
+	'2269315073': 'no_logical_channels',      // 0x87430001: MANAGE CHANNEL refused
+	'2269315074': 'select_failed',            // 0x87430002: the application is not there
+	'2269315075': 'invalid_logical_channel',  // 0x87430003: not opened by OPEN_CHANNEL
+};
 const UICC_SECURE_MESSAGING_NONE = 0;
 const UICC_CLASS_BYTE_INTER_INDUSTRY = 1;
 
@@ -149,15 +165,34 @@ export function make_at_engine(mc, vendor)
 
 // open a logical channel to `aid_hex` (ISD-R for eSIM). cb(err, { channel,
 // select_response }). `mc` is the MBIM session client (mbim_client.uc).
-export function uicc_open_channel(mc, aid_hex, cb)
+// `opts` goes to command_raw: `no_recovery` for a discovery open (sim.uc),
+// whose refusal is an answer about the card, not about the channel.
+export function uicc_open_channel(mc, aid_hex, cb, opts)
 {
 	let aid = hexmod.hex_to_bin(aid_hex);
 	// [ AppIdLength, AppIdOffset(=16), SelectP2Arg(0), ChannelGroup(1) ] + AppId
 	let info = struct.pack('<IIII', length(aid), 16, 0, UICC_CHANNEL_GROUP) + pad4(aid);
 
 	mc.command_raw(UICC_SERVICE, UICC_CID_OPEN_CHANNEL, info, (err, resp) => {
-		if (err)
-			return cb(err, null);
+		// NAMED, with the card's answer: the two MS failure statuses say WHERE
+		// the open failed, and the info buffer still carries the SW1 SW2 of
+		// the MANAGE CHANNEL or SELECT (Microsoft, MBIM_MS_UICC_OPEN_CHANNEL_
+		// INFO, checked 2026-10-14). A log of "status 2269315074" said neither.
+		if (err) {
+			let raw = err.info;
+			let out = { error: err.error, status: err.status };
+
+			if (err.status != null && UICC_STATUS[sprintf('%d', err.status)])
+				out.reason = UICC_STATUS[sprintf('%d', err.status)];
+
+			if (raw != null && length(raw) >= 4) {
+				let st = struct.unpack('<I', substr(raw, 0, 4))[0];
+
+				out.sw = sprintf('%02X%02X', st & 0xff, (st >> 8) & 0xff);
+			}
+
+			return cb(out, null);
+		}
 
 		if (length(resp) < 16)
 			return cb({ error: 'uicc_short' }, null);
@@ -168,8 +203,26 @@ export function uicc_open_channel(mc, aid_hex, cb)
 		let roff    = struct.unpack('<I', substr(resp, 12, 4))[0];
 		let sel = (roff && rlen && roff + rlen <= length(resp)) ? substr(resp, roff, rlen) : '';
 
+		// AN MBIM SUCCESS IS NOT YET AN OPEN CHANNEL. Status is the SELECT's
+		// SW1 SW2 "in that byte order" (BYTE[2] — SW1 the low byte of the
+		// u32, as in the APDU answer), success being 90 00 or 91 XX, and
+		// "if Channel is 0, then the operation failed" (Microsoft, MB low
+		// level UICC access, MBIM_MS_UICC_OPEN_CHANNEL_INFO, checked
+		// 2026-10-14). A failed select was taken for a channel, and the eSIM
+		// layer then talked to channel 0 — the basic channel.
+		//
+		// Status 0 with a channel is let through: lpac 2.3.0 never reads this
+		// field (driver/apdu/mbim.c, the open path), so a firmware that leaves
+		// it empty has worked with the reference client and is not known to
+		// mean anything else.
+		let sw1 = status & 0xff, sw2 = (status >> 8) & 0xff;
+
+		if (!channel || (status != 0 && sw1 != 0x90 && sw1 != 0x91))
+			return cb({ error: 'uicc_select', channel: channel,
+			            sw: sprintf('%02X%02X', sw1, sw2) }, null);
+
 		cb(null, { channel: channel, select_response: hexmod.bin_to_hex(sel), status: status });
-	});
+	}, { ...(opts ?? {}), keep_info: true });
 };
 
 // transmit `apdu_hex` on `channel`. cb(err, response_hex) where the response
@@ -207,6 +260,15 @@ export function uicc_close_channel(mc, channel, cb)
 	let info = struct.pack('<II', channel, UICC_CHANNEL_GROUP);
 
 	mc.command_raw(UICC_SERVICE, UICC_CID_CLOSE_CHANNEL, info, (err) => cb(err ?? null));
+};
+
+// close every channel of OUR group (Channel 0 = by group): what an earlier
+// run left open. Nothing open answers success with 90 00. cb(err)
+export function uicc_close_group(mc, cb, opts)
+{
+	let info = struct.pack('<II', 0, UICC_CHANNEL_GROUP);
+
+	mc.command_raw(UICC_SERVICE, UICC_CID_CLOSE_CHANNEL, info, (err) => cb(err ?? null), opts);
 };
 
 // UICC reset — power-cycle the card at MBIM level (the "apply" after an eSIM

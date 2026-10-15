@@ -86,7 +86,12 @@ function make_handlers(over, started)
 
 		MODIFY_PROFILE: {},
 		GET_PROFILE_SETTINGS: { pdp_type: 3, apn: 'web' },
+		// what a PDN without a delegated prefix answers (RG650E, 2026-10-09)
+		GET_DELEGATED_PREFIX: { __error: 3 },
 		SET_IP_FAMILY: {},
+		// asked before every dial (context.uc start_activation): nothing
+		// running, so the scenario dials as it always has
+		GET_PACKET_SERVICE_STATUS: { status: 1 },
 		START_NETWORK: (args, meta) => {
 			started[sprintf('%d', meta.cid)] = (meta.count == 1) ? 4 : 6;
 			return { pdh: (meta.count == 1) ? 1111 : 2222 };
@@ -171,7 +176,8 @@ function run_next()
 						config: s.cfg.config ?? {},
 						timing: s.cfg.ctx_timing,
 						deps: {
-							log: (level, msg) => null,
+							// `logs` in the scenario cfg collects the context's lines
+							log: (level, msg) => s.cfg.logs ? push(s.cfg.logs, sprintf('%s: %s', level, msg)) : null,
 							on_event: (c, ev, d) => push(ctx_events, { event: ev, data: d }),
 						},
 					});
@@ -328,8 +334,10 @@ scenario('write_only_reject', {
 }, (ctx, mock, events, next) => {
 	ctx.up((err) => {
 		eq(err, null, 'write_only: the modem connects');
-		eq(length(mock.calls_for('MODIFY_PROFILE')), 2,
-			'write_only: both writes were attempted and both refused');
+		// 3: the attach profile on binding (context binds after the modem's
+		// init), then the data path's two attempts
+		eq(length(mock.calls_for('MODIFY_PROFILE')), 3,
+			'write_only: the attach write and both data writes were attempted and all refused');
 
 		let sn = mock.calls_for('START_NETWORK');
 		eq(length(sn), 1, 'write_only: one start-network');
@@ -467,6 +475,183 @@ scenario('dual', { config: { apn: 'web', pdp_type: 'ipv4v6' } }, (ctx, mock, eve
 	});
 });
 
+// --- IPv6 prefix delegation: the profile flag (TLV 0xDF) -------------------
+
+// asked for and not held: ONE write carrying only the flag, the pdp type
+// already matches
+scenario('pd-on', { config: { apn: 'web', pdp_type: 'ipv4v6', ipv6_pd: true } }, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'pd-on: connects');
+		// the mock profile never reports the flag, so the attach write and the
+		// dial-time check both carry it — every write is the flag alone
+		let w = filter(mock.calls_for('MODIFY_PROFILE'), (c) => c.args.prefix_delegation != null);
+		ok(length(w) >= 1, 'pd-on: the flag is written');
+		eq(uniq(map(w, (c) => c.args.prefix_delegation)), [ 1 ], 'pd-on: flag set');
+		// the attach-profile write (it always restates the pdp type) carries it:
+		// that bearer comes up at attach, before any dial-time write could act
+		ok(length(filter(w, (c) => c.args.pdp_type != null)) > 0, 'pd-on: attach profile write carries the flag');
+		ok(length(filter(w, (c) => c.args.pdp_type == null)) > 0, 'pd-on: dial-time write carries it alone');
+		eq(w[0].args.profile.index, 1, 'pd-on: on profile 1');
+		next();
+	});
+});
+
+// already held: no write at all (the idempotency rule covers the flag too)
+scenario('pd-same', {
+	config: { apn: 'web', pdp_type: 'ipv4v6', ipv6_pd: true },
+	handlers: { GET_PROFILE_SETTINGS: { pdp_type: 3, apn: 'web', prefix_delegation: 1 } },
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'pd-same: connects');
+		eq(length(mock.calls_for('MODIFY_PROFILE')), 0, 'pd-same: no NV write');
+		next();
+	});
+});
+
+// '0' is an instruction too: a profile holding the flag gets it cleared
+scenario('pd-off', {
+	config: { apn: 'web', pdp_type: 'ipv4v6', ipv6_pd: false },
+	handlers: { GET_PROFILE_SETTINGS: { pdp_type: 3, apn: 'web', prefix_delegation: 1 } },
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'pd-off: connects');
+		let w = filter(mock.calls_for('MODIFY_PROFILE'), (c) => c.args.prefix_delegation != null);
+		ok(length(w) >= 1, 'pd-off: the flag is written');
+		eq(uniq(map(w, (c) => c.args.prefix_delegation)), [ 0 ], 'pd-off: flag cleared');
+		next();
+	});
+});
+
+// an IPv4-only connection has no prefix to delegate: the flag is left alone
+scenario('pd-ipv4', {
+	config: { apn: 'web', pdp_type: 'ipv4', ipv6_pd: true },
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'pd-ipv4: connects');
+		let w = mock.calls_for('MODIFY_PROFILE');
+		ok(length(filter(w, (c) => c.args.pdp_type == 0)) > 0, 'pd-ipv4: pdp type ipv4 written');
+		eq(filter(w, (c) => c.args.prefix_delegation != null), [], 'pd-ipv4: no PD TLV');
+		next();
+	});
+});
+
+// a stack that refuses the message for the TLV: the pdp type still lands in a
+// write of its own and the dial goes on. (The attach profile is written from
+// the same config with pdp type only, so the PD write is picked out by flag.)
+scenario('pd-refused', {
+	config: { apn: 'web', pdp_type: 'ipv6', ipv6_pd: true },
+	handlers: {
+		MODIFY_PROFILE: (args) => (args.prefix_delegation != null) ? { __error: 48 } : {},
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'pd-refused: connects anyway');
+		let w = mock.calls_for('MODIFY_PROFILE');
+		let i = 0;
+		while (i < length(w) && w[i].args.prefix_delegation == null)
+			i++;
+		ok(i < length(w), 'pd-refused: a write carried the flag');
+		eq(w[i].args.pdp_type, 2, 'pd-refused: together with the pdp type');
+		eq([ w[i + 1]?.args.pdp_type, w[i + 1]?.args.prefix_delegation ], [ 2, null ],
+			'pd-refused: next write carries the pdp type alone');
+		next();
+	});
+});
+
+// --- CLAT and address allocation: the same profile-flag table ---------------
+
+// both written in ONE profile write, read first like the PD flag
+scenario('flags-clat-alloc', {
+	config: { apn: 'web', pdp_type: 'ipv4v6', clat: true, address_allocation: 'dhcp' },
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'flags: connects');
+		let w = filter(mock.calls_for('MODIFY_PROFILE'), (c) => c.args.pdp_type == null);
+		eq(length(w), 1, 'flags: one dial-time write');
+		eq([ w[0]?.args?.clat, w[0]?.args?.address_allocation ], [ 1, 1 ],
+			'flags: CLAT on and DHCP allocation in the same write');
+		next();
+	});
+});
+
+// CLAT needs an IPv6 bearer; the address-allocation preference does not
+scenario('flags-ipv4', {
+	config: { apn: 'web', pdp_type: 'ipv4', clat: true, address_allocation: 'nas' },
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'flags-ipv4: connects');
+		let w = mock.calls_for('MODIFY_PROFILE');
+		eq(filter(w, (c) => c.args.clat != null), [], 'flags-ipv4: no CLAT on an IPv4 connection');
+		ok(length(filter(w, (c) => c.args.address_allocation === 0)) > 0,
+			'flags-ipv4: NAS allocation still written');
+		next();
+	});
+});
+
+// already held: nothing written
+scenario('flags-same', {
+	config: { apn: 'web', pdp_type: 'ipv4v6', clat: false, address_allocation: 'nas' },
+	handlers: { GET_PROFILE_SETTINGS: { pdp_type: 3, apn: 'web', clat: 0, address_allocation: 0 } },
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'flags-same: connects');
+		eq(length(mock.calls_for('MODIFY_PROFILE')), 0, 'flags-same: no NV write');
+		next();
+	});
+});
+
+// --- the delegated prefix (vendor WDS 0x00AC) -----------------------------
+
+// delegated: read on the IPv6 family's client with the modem's own bearer
+// address (ipv4v6: the mock hands family 6 its settings on the SECOND start), and carried into the settings the shim hands netifd
+scenario('pd-delegated', {
+	config: { apn: 'web', pdp_type: 'ipv4v6', ipv6_pd: true },
+	handlers: {
+		GET_DELEGATED_PREFIX: { prefix: { addr: '2001:db8:100:0:0:0:0:0', plen: 56 } },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'pd-delegated: connects');
+		eq(settings?.ipv6?.delegated, '2001:db8:100:0:0:0:0:0/56', 'pd-delegated: prefix in the settings');
+		let q = mock.calls_for('GET_DELEGATED_PREFIX');
+		eq(length(q), 1, 'pd-delegated: asked once');
+		eq(q[0]?.args?.requestor, '2001:db8:0:0:0:0:0:2', 'pd-delegated: with the bearer address');
+		next();
+	});
+});
+
+// none delegated (INTERNAL): connected without one, and nothing is wrong
+scenario('pd-none', { config: { apn: 'web', pdp_type: 'ipv4v6', ipv6_pd: true } }, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'pd-none: connects');
+		eq(settings?.ipv6?.delegated, null, 'pd-none: no prefix reported');
+		eq(ctx.modem._pd_unsupported, null, 'pd-none: INTERNAL is not "unsupported"');
+		next();
+	});
+});
+
+// a modem without the message (INVALID_QMI_COMMAND): remembered, so the
+// settings poll does not ask again every five minutes
+scenario('pd-unsupported', {
+	config: { apn: 'web', pdp_type: 'ipv4v6', ipv6_pd: true },
+	handlers: { GET_DELEGATED_PREFIX: { __error: 71 } },
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'pd-unsupported: connects');
+		eq(ctx.modem._pd_unsupported, true, 'pd-unsupported: remembered per modem');
+		next();
+	});
+});
+
+// not asked for: the vendor message is never sent
+scenario('pd-off-noread', { config: { apn: 'web', pdp_type: 'ipv4v6' } }, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'pd-off-noread: connects');
+		eq(length(mock.calls_for('GET_DELEGATED_PREFIX')), 0, 'pd-off-noread: no 0x00AC without ipv6_pd');
+		next();
+	});
+});
+
 // --- B: v6 fails, v4 survives ------------------------------------------------
 
 scenario('v6-degrade', {
@@ -486,6 +671,70 @@ scenario('v6-degrade', {
 		eq(settings.ipv4.addr, '10.11.12.13', 'v6d: v4 present');
 		eq(settings.ipv6, null, 'v6d: no v6 settings');
 		eq(ctx.state, 'CONNECTED', 'v6d: connected');
+		next();
+	});
+});
+
+// The network's typed "no IPv6" names the option that stops asking — once per
+// context, and never applied by itself: pdp_type is the operator's word
+// (ddimension/wwand#53). 3GPP 50 (type 6) is such a refusal; the same number
+// under another type (CM, type 3) is not.
+let hint_logs = [], cm_logs = [];
+let hints = (l) => length(filter(l, (x) =>
+	substr(x, 0, 8) == 'notice: ' && index(x, "set option pdp_type 'ipv4'") >= 0));
+
+scenario('v6-refused-hint', {
+	config: { apn: 'web', pdp_type: 'ipv4v6' },
+	logs: hint_logs,
+	handlers: {
+		START_NETWORK: (args, meta) => (meta.count % 2 == 0)
+			? { __error: 14, call_end_reason: 3, verbose_call_end: { type: 6, reason: 50 } }
+			: { pdh: 1111 },
+		GET_CURRENT_SETTINGS: V4_SETTINGS,
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'v6-hint: up on v4');
+		ctx.down(() => ctx.up((e2) => {
+			eq(e2, null, 'v6-hint: the reconnect comes up too');
+			eq(hints(hint_logs), 1, 'v6-hint: 3GPP 50 names pdp_type ipv4, once over two connects');
+			eq(ctx.config?.pdp_type ?? 'ipv4v6', 'ipv4v6', 'v6-hint: the config is not touched');
+			next();
+		}));
+	});
+});
+
+let int_logs = [];
+
+scenario('v6-refused-hint-internal', {
+	config: { apn: 'web', pdp_type: 'ipv4v6' },
+	logs: int_logs,
+	handlers: {
+		START_NETWORK: (args, meta) => (meta.count == 2)
+			? { __error: 14, call_end_reason: 3, verbose_call_end: { type: 2, reason: 210 } }
+			: { pdh: 1111 },
+		GET_CURRENT_SETTINGS: V4_SETTINGS,
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'v6-hint: up on v4 after internal 210');
+		eq(hints(int_logs), 1, 'v6-hint: internal 210 (PDN IPv6 call disallowed) names pdp_type ipv4');
+		next();
+	});
+});
+
+scenario('v6-refused-hint-typed', {
+	config: { apn: 'web', pdp_type: 'ipv4v6' },
+	logs: cm_logs,
+	handlers: {
+		START_NETWORK: (args, meta) => (meta.count == 2)
+			? { __error: 14, call_end_reason: 3, verbose_call_end: { type: 3, reason: 50 } }
+			: { pdh: 1111 },
+		GET_CURRENT_SETTINGS: V4_SETTINGS,
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up(() => {
+		eq(hints(cm_logs), 0, 'v6-hint: reason 50 of another type is not a refusal');
 		next();
 	});
 });
@@ -663,6 +912,41 @@ scenario('profile-passthrough', { config: { apn: '#3', pdp_type: 'ipv4v6' } }, (
 	});
 });
 
+// --- a session the modem still runs is adopted, not dialled into -------------
+//
+// An MC7710 (SWI9200X_03.05.29) acknowledges STOP_NETWORK but keeps the LTE
+// default bearer up, and then answers no START_NETWORK until a radio cycle
+// (deborah-3, 2026-10-04). Asked first, the dial adopts what runs.
+scenario('adopt-running', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	handlers: {
+		GET_PACKET_SERVICE_STATUS: { status: 2 },   // connected
+		START_NETWORK: () => null,                  // would never answer
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'adopt: up ok without a dial');
+		eq(length(mock.calls_for('START_NETWORK')), 0, 'adopt: no START_NETWORK sent');
+		ok(length(mock.calls_for('GET_CURRENT_SETTINGS')) > 0,
+			'adopt: the settings are read from the running session');
+		eq([ ctx.families['4']?.adopted, ctx.families['4']?.pdh ], [ true, null ],
+			'adopt: marked adopted, with no handle of our own to stop');
+		next();
+	});
+});
+
+scenario('dial-when-idle', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	handlers: { GET_PACKET_SERVICE_STATUS: { status: 1 } },   // disconnected
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'idle: up ok');
+		eq([ length(mock.calls_for('GET_PACKET_SERVICE_STATUS')), length(mock.calls_for('START_NETWORK')) ], [ 1, 1 ],
+			'idle: asked once, then dialled');
+		next();
+	});
+});
+
 // --- G: pdp type mismatch triggers profile update -----------------------------
 
 scenario('pdp-update', {
@@ -675,10 +959,15 @@ scenario('pdp-update', {
 		eq(err, null, 'pdp: up ok');
 
 		// guard skips the (matching) base writes; only the differing pdp type
-		// is modified — one targeted NV write instead of three
+		// is modified. Two writes here, both of the pdp type alone: the
+		// context binds after the modem's init (as in this harness), so the
+		// ATTACH profile is programmed on binding (modem_common attach_context)
+		// — and the mock answers the same unchanged profile to the data
+		// path's read, which a real modem would not
 		let mods = mock.calls_for('MODIFY_PROFILE');
-		eq(length(mods), 1, 'pdp: single modify (only the pdp type differed)');
-		eq(mods[0].args.pdp_type, 0, 'pdp: changed to ipv4');
+		eq(length(mods), 2, 'pdp: the attach write on binding + the data profile write');
+		eq([ mods[0].args.pdp_type, mods[1].args.pdp_type, mods[0].args.apn, mods[1].args.apn ], [ 0, 0, null, null ],
+		   'pdp: both change only the pdp type to ipv4, never the matching apn');
 		next();
 	});
 });
@@ -722,6 +1011,46 @@ scenario('suspend-abort', {
 
 	// let the attempt reach START_NETWORK, then drop registration
 	uloop.timer(50, () => ctx.modem_event('suspend', {}));
+});
+
+// --- C3: a CID whose allocation lands after the abort is released, not lost --
+// The suspend abort empties self.families; the WDS client the in-flight
+// ALLOCATE_CID hands back afterwards belongs to no attempt. Kept, the next
+// attempt overwrote families['4'] and the CID leaked — one per abort.
+
+scenario('suspend-abort-alloc', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+}, (ctx, mock, events, next) => {
+	let wds_before = length(ctx.modem.qmi_clients['1'] ?? []);
+	let real_alloc = ctx.modem.alloc;
+	let parked = null;
+
+	// hold the WDS allocation answer back until the attempt was aborted
+	ctx.modem.alloc = (schema, cb) => real_alloc(schema, (err, c) => {
+		if (schema.service == 1 && !parked)
+			parked = () => cb(err, c);
+		else
+			cb(err, c);
+	});
+
+	ctx.up((err, settings) => {
+		eq(err?.error, 'suspended', 'salloc: aborted with suspended');
+
+		parked();   // the late answer for the aborted attempt
+
+		uloop.timer(30, () => {
+			ctx.modem.alloc = real_alloc;
+			eq(length(mock.calls_for('START_NETWORK')), 0, 'salloc: the orphaned client never dials');
+			eq(keys(ctx.families), [], 'salloc: no family adopted the late client');
+			eq(length(ctx.modem.qmi_clients['1'] ?? []), wds_before, 'salloc: the late WDS cid was released');
+			next();
+		});
+	});
+
+	uloop.timer(50, () => {
+		eq(parked != null, true, 'salloc: allocation answer parked');
+		ctx.modem_event('suspend', {});
+	});
 });
 
 // --- G1b: internal 241 (profile in use) is reclaimed over AT and retried -----
@@ -1391,7 +1720,10 @@ ok(_all_done, sprintf('every scenario ran (%d of %d) — the pump did not run ou
 	mods = [];
 	mkctx_data({ apn: '', auth: 'chap', username: 'x', password: 'y' }, m5).ensure_attach_profile(1, () => null);
 	eq(filter(mods, (m) => m.username != null || m.password != null || m.auth != null), [],
-	   'attach: no configured APN — the provisioned one is left with its own login');
+	   'attach: no configured APN — no login is written either');
+	// ...but the APN itself IS written: unset is the empty APN, not whatever
+	// profile 1 held (a stale APN from the modem's previous life, deborah-3)
+	eq([ length(mods), mods[0]?.apn ], [ 1, '' ], 'attach: no configured APN clears a stale one to the network default');
 })();
 
 done('test_context');

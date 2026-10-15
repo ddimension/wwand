@@ -83,10 +83,11 @@ endif()
 
 # ES modules (top-level `export`) -> compiled with -cmodule
 set(WWAND_UCODE_MODULES
-  apndb.uc apntest/plan.uc atcmd_mbim.uc atcmd_parse.uc atcmd.uc backend.uc board.uc callend.uc client.uc
+  apndb.uc apntest/plan.uc apntest/runner.uc atcmd_mbim.uc atcmd_parse.uc atcmd.uc backend.uc board.uc callend.uc client.uc
   codec/arfcn_bands.uc codec/hex.uc codec/mbim.uc codec/qmux.uc codec/tlv.uc
   codec/mbim_schema/basic_connect.uc codec/mbim_schema/compal.uc
   codec/mbim_schema/fibocom.uc codec/mbim_schema/ms_basic_connect_ext.uc
+  codec/mbim_schema/ms_voice_ext.uc
   codec/mbim_schema/qmi_passthrough.uc codec/mbim_schema/quectel.uc
   codec/schema/cat.uc codec/schema/ctl.uc codec/schema/dms.uc codec/schema/dsd.uc
   codec/schema/loc.uc codec/schema/merge.uc codec/schema/nas.uc codec/schema/pdc.uc
@@ -98,7 +99,7 @@ set(WWAND_UCODE_MODULES
   modem_datapath_qmi.uc
   modem_common.uc modem_init_qmi.uc modem_mbim.uc modem_ncm.uc modem_quirks.uc
   modem.uc modeswitch.uc ncm_vendors.uc netlink.uc netsel_ops.uc nmea.uc
-  protocol_switch.uc qmi_backend.uc qmi_over_mbim.uc reconnect.uc recovery.uc
+  protocol_switch.uc qmi_backend.uc qmi_over_mbim.uc qmi_over_qrtr.uc reconnect.uc recovery.uc
   regdetail.uc simops.uc siminventory.uc sim_plmn.uc sim.uc sms_pdu.uc sms.uc
   telemetry_mbim.uc telemetry_ncm.uc telemetry_qmi.uc transport.uc ubus.uc
   version.uc
@@ -109,7 +110,7 @@ set(WWAND_UCODE_MODULES
 
 # executable scripts (shebang) -> compiled with -c, interpreter line preserved
 set(WWAND_UCODE_PROGRAMS
-  main.uc wwandctl.uc
+  main.uc wwandctl.uc apntest_cli.uc
 )
 
 # require()-loaded CommonJS shims (top-level `return`, no export): shipped as
@@ -117,7 +118,7 @@ set(WWAND_UCODE_PROGRAMS
 # may freely import the bytecode modules above.
 set(WWAND_UCODE_PLAIN
   atcmd_mbim_lazy.uc atport.uc esim.uc esim_bridge.uc gps.uc mbim_lazy.uc ncm_lazy.uc qmi_lazy.uc
-  codec/schema/loc_lazy.uc codec/schema/wms_lazy.uc
+  codec/schema/wms_lazy.uc
   # datapath add-ons: require()d plain scripts that RETURN their implementation
   datapath_rmnet_nss.uc datapath_rmnet_nss_mhi.uc
 )

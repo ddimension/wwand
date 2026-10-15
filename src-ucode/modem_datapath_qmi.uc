@@ -322,6 +322,18 @@ export function setup(self, dp, o, next)
 				let args = { qos: 0,
 					llp: caps.llp_802_3 ? wdamod.LLP_802_3 : wdamod.LLP_RAW_IP };
 
+				// NO QMAP: SAID, not left out. Without the two aggregation TLVs
+				// the modem keeps the format it had — after a QMAP config that
+				// is QMAP — and a raw-IP dial then got no answer at all until
+				// the modem was reset (RG650E on 245, 2026-10-05: mux_id auto
+				// -> 0 on a running modem; the same config dialled at once
+				// after a reset). qmicli sends both, DISABLED by default
+				// (qmicli-wda.c:561-562, libqmi 1.38).
+				if (!caps.qmap) {
+					args.ul_protocol = wdamod.DAP_DISABLED;
+					args.dl_protocol = wdamod.DAP_DISABLED;
+				}
+
 				if (caps.qmap) {
 					args.ul_protocol = dap;
 					args.dl_protocol = dap;
@@ -337,16 +349,40 @@ export function setup(self, dp, o, next)
 					args.endpoint = { type: dp.ep_type ?? wdamod.ENDPOINT_TYPE_HSUSB, iface: dp.ep_id };
 
 				wda.request('SET_DATA_FORMAT', args, (werr, wdata) => {
+					// InvalidOperation (QMI error 70) for one QMAP version is a
+					// refusal of that version, the same as echoing another one:
+					// the RG520N on MHI answers v5 with it and takes v1
+					// (ddimension/wwand#46). So step down while there is a rung
+					// below; only the last rung's error fails. ONLY that error:
+					// Internal, NoMemory, a bad client say nothing about the
+					// version, and stepping down on a transient one would leave
+					// the modem on a lower QMAP until its next init — every
+					// other error, and every transport error, fails at once.
+					if (werr && werr.error == 'qmi' && werr.code == 70 && caps.qmap && length(rungs)) {
+						let next_v = shift(rungs);
+
+						log('notice', sprintf('modem refused qmap v%d with qmi error %d, trying qmap v%d',
+							ver, werr.code ?? -1, next_v));
+						return negotiate(DAP_FOR[sprintf('%d', next_v)], next_v);
+					}
+
 					if (werr)
 						return fail('wda_format', werr);
 
 					// name the version, do not make the reader decode the enum:
 					// "aggregation 9/9" is only meaningful if you know 9 is v5.
-					log('info', sprintf('wda format negotiated: QMAP v%d (proto %d) ul/dl, llp %d, dl max %d x %d bytes, ul max %d x %d bytes (requested v%d / proto %d, %d bytes)',
-						ver, wdata.dl_protocol ?? 0, wdata.llp,
-						wdata.dl_max_datagrams ?? 0, wdata.dl_max_size ?? 0,
-						wdata.ul_max_datagrams ?? 0, wdata.ul_max_size ?? 0,
-						ver, dap, dgram));
+					// without QMAP there is no version or size to name — the
+					// QMAP line printed "QMAP v1 … requested proto 5" for a
+					// request that asked for no aggregation at all
+					if (!caps.qmap)
+						log('info', sprintf('wda format: aggregation off (answered dl %d / ul %d), llp %d',
+							wdata.dl_protocol ?? -1, wdata.ul_protocol ?? -1, wdata.llp ?? -1));
+					else
+						log('info', sprintf('wda format negotiated: QMAP v%d (proto %d) ul/dl, llp %d, dl max %d x %d bytes, ul max %d x %d bytes (requested v%d / proto %d, %d bytes)',
+							ver, wdata.dl_protocol ?? 0, wdata.llp,
+							wdata.dl_max_datagrams ?? 0, wdata.dl_max_size ?? 0,
+							wdata.ul_max_datagrams ?? 0, wdata.ul_max_size ?? 0,
+							ver, dap, dgram));
 
 					// THE LINK-LAYER ECHO, which used to be logged and never
 					// read. wwand asks for raw-IP framing everywhere except the

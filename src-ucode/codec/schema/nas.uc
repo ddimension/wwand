@@ -34,6 +34,10 @@ export const REJECT_CAUSE = {
 	'42': 'severe network failure',
 };
 
+// QmiNasPsAttachAction (qmi-enums-nas.h:570-571, libqmi 1.38)
+export const PS_ATTACH = 1;
+export const PS_DETACH = 2;
+
 // QmiNasRegistrationState
 export const REG_NOT_REGISTERED = 0;
 export const REG_REGISTERED = 1;
@@ -233,6 +237,18 @@ export default {
 		//            operators, no error. The same modem listed three operators
 		//            over NAS ten minutes later. Which of the two happened is
 		//            only knowable from this TLV, and we were discarding it.
+		// PS-domain attach or detach while the radio stays on (libqmi 1.38
+		// qmi-service-nas.json "Attach Detach" 0x0023, since 1.20): input TLV
+		// 0x10 Action, guint8 QmiNasPsAttachAction — 1 attach, 2 detach
+		// (qmi-enums-nas.h:570-571); output only the operation result.
+		ATTACH_DETACH: {
+			id: 0x0023,
+			req: {
+				action: { t: 0x10, f: 'u8' },
+			},
+			resp: {},
+		},
+
 		NETWORK_SCAN: {
 			id: 0x0021,
 			req: {

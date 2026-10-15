@@ -117,7 +117,7 @@ export function create(opts)
 	// stats controls forward-declared BEFORE the scaffolding arrow that
 	// captures stop_stats (ucode resolves lexical refs only for bindings
 	// already declared at definition time)
-	let start_stats, stop_stats, sample_stats, refresh_settings;
+	let start_stats, stop_stats, sample_stats, refresh_settings, with_delegated;
 	let clear_session_confirm, confirm_session_gone;
 
 	// shared emit/set_state/fail_finish (context_common.ctx_scaffolding)
@@ -198,11 +198,11 @@ export function create(opts)
 
 		// AN IPv4 PDP HAS NO v6 HALF, whatever CGCONTRDP still remembers. This
 		// is the one backend where that has to be said. QMI builds only the
-		// requested family's clients (context.uc:151 wanted_families), so a
+		// requested family's clients (context.uc:173 wanted_families), so a
 		// v4-only context has no v6 client to report anything at all. MBIM
-		// sends the effective type as CONNECT's ip_type (context_mbim.uc:306)
+		// sends the effective type as CONNECT's ip_type (context_mbim.uc:329)
 		// and a conforming modem answers in kind — though its builder would
-		// take a v6 half if one came back anyway (context_mbim.uc:141), so that
+		// take a v6 half if one came back anyway (context_mbim.uc:142), so that
 		// is protocol trust rather than a structural guarantee. Codex review
 		// was right to narrow that claim, 2026-09-22.
 		// The AT path reads the context back instead, and a modem that carried
@@ -359,7 +359,7 @@ export function create(opts)
 	// than asking the question again.
 	let read_rdp_once = (cb) => {
 		// THE VENDOR BRANCH NEEDS THE SAME GUARD. It dereferences modem.at
-		// itself (ncm_vendors.uc:1384, :1626 and friends) instead of going
+		// itself (ncm_vendors.uc:1422, :1626 and friends) instead of going
 		// through at_send, and the NCM teardown nulls modem.at without
 		// notifying the contexts — so an ACTIVATING context whose retry fires a
 		// second later used to call `.send` on null. A throw inside a uloop
@@ -438,13 +438,53 @@ export function create(opts)
 			if (!next.ipv4 && !next.ipv6)
 				return;   // transient/empty read — keep current settings
 
-			if (sprintf('%J', next) == sprintf('%J', self.settings))
-				return;
+			with_delegated(next, () => {
+				if (self.state != 'CONNECTED')
+					return;
 
-			log('debug', sprintf('cid %d: network pushed new IP settings, renewing', self.cid));
-			self.settings = next;
-			emit('settings', self.settings);
+				if (sprintf('%J', next) == sprintf('%J', self.settings))
+					return;
+
+				log('debug', sprintf('cid %d: network pushed new IP settings, renewing', self.cid));
+				self.settings = next;
+				emit('settings', self.settings);
+			});
 		});
+	};
+
+	// The prefix delegated to this connection's cid, from a vendor `pd`
+	// recipe (ncm_vendors.uc; Quectel AT+QIP6CFG="PD_addr"), into
+	// settings.ipv6.delegated — the field the shim turns into the netifd
+	// prefix (QMI parity: context.uc read_delegated). Only when the interface
+	// asked for PD and the settings carry IPv6. Read on every settings refresh,
+	// so a prefix delegated later, or withdrawn, reaches netifd by the
+	// ordinary renew. cb() always.
+	with_delegated = (st, cb) => {
+		let want = context_common.pd_want(self.config, context_common.effective_pdp(self));
+
+		if (want != 1 || !st?.ipv6 || !self.modem.vendor?.pd)
+			return cb();
+
+		ncm.read_pd_prefix(self.modem.vendor, (c, k) => at_send(c, (e, r) => k(e, r?.lines)),
+			self.cid, (p) => {
+				if (p != self._pd_last) {
+					if (p)
+						log('notice', sprintf('cid %d: ipv6 delegated prefix %s', self.cid, p));
+					else if (self._pd_last)
+						log('notice', sprintf('cid %d: ipv6 delegated prefix %s withdrawn', self.cid, self._pd_last));
+
+					self._pd_last = p;
+				}
+				else if (!self._pd_read && !p)
+					log('debug', sprintf('cid %d: ipv6 delegated prefix: none (the network delegated nothing)', self.cid));
+
+				self._pd_read = true;
+
+				if (p)
+					st.ipv6.delegated = p;
+
+				cb();
+			});
 	};
 
 	sample_stats = () => {
@@ -761,6 +801,11 @@ export function create(opts)
 						start_stats();
 						emit('up', self.settings);
 
+						// a delegated prefix is read on the settings refresh;
+						// ask once now rather than a stats interval later
+						if (context_common.pd_want(ccfg, context_common.effective_pdp(self)) == 1)
+							refresh_settings();
+
 						let cb2 = up_cb;
 						up_cb = null;
 
@@ -769,7 +814,23 @@ export function create(opts)
 					}, { timeout: 15000 });
 				};
 
-				// 2. dial: bind the cdc_ncm netdev to the bearer
+				// 2. the PD flag on the dialled cid (vendor `pd` recipe only),
+				//    then dial: bind the cdc_ncm netdev to the bearer. The flag
+				//    acts at PDN setup, so it goes in before the dial.
+				let want_pd = prof.pass_through ? null
+					: context_common.pd_want(ccfg, context_common.effective_pdp(self));
+
+				// a cancelled activation must not still write the flag between
+				// sync_pd's read and its write
+				let pd_send = (c, k) => (self.state != 'ACTIVATING')
+					? k({ error: 'activation_cancelled' })
+					: at_send(c, (e, r) => (self.state != 'ACTIVATING')
+						? k({ error: 'activation_cancelled' }) : k(e, r?.lines));
+
+				ncm.sync_pd(vendor, pd_send, self.cid, want_pd, log, () => {
+				if (self.state != 'ACTIVATING')
+					return;
+
 				at_send(dial.connect(self.cid, ccfg), (err) => {
 					if (self.state != 'ACTIVATING')
 						return;
@@ -797,6 +858,7 @@ export function create(opts)
 
 					self._fail({ stage: 'connect', err: err });
 				}, { timeout: 60000 });
+				});
 			});
 		};
 
@@ -827,7 +889,9 @@ export function create(opts)
 		}, { timeout: 30000 });
 	};
 
-	self.down = function(cb) {
+	// `reason` lands in the 'down' event ('admin' when not given): 'reattach'
+	// is a stop the modem's detach follows (netsel_ops release_sessions)
+	self.down = function(cb, reason) {
 		let was = self.state;
 
 		stop_stats();
@@ -843,7 +907,7 @@ export function create(opts)
 
 		disconnect(() => {
 			log('notice', sprintf('cid %d disconnected', self.cid));
-			emit('down', { reason: 'admin' });
+			emit('down', { reason: reason ?? 'admin' });
 
 			if (cb)
 				cb(null);

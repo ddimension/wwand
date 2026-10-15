@@ -198,6 +198,13 @@ export function publish(conn, daemon, log)
 				daemon.modem_probe(ok_reply(reply))),
 		},
 
+		// power-cycle the card in the active slot and re-read it
+		modem_sim_reinit: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_sim_reinit(req.args.modem, ok_reply(reply))),
+		},
+
 		modem_sim_switch_slot: {
 			args: { modem: '', slot: 0, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
@@ -363,6 +370,18 @@ export function publish(conn, daemon, log)
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
 				daemon.modem_reattach(req.args.modem, ok_reply(reply))),
+		},
+
+		modem_detach: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_detach(req.args.modem, ok_reply(reply))),
+		},
+
+		modem_attach: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_attach(req.args.modem, ok_reply(reply))),
 		},
 
 		modem_cells: {

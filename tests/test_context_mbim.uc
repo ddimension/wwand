@@ -318,7 +318,50 @@ let scenario_fail_reason = {
 
 // --- runner -----------------------------------------------------------------
 
-let scenarios = [ scenario_flow, scenario_zero_rx, scenario_v6_iid, scenario_fail_reason ];
+// --- scenario 5: a refused settings refresh is not a protocol error ---------
+//
+// An RM520N (MBIMEx 3.0) answered IP_CONFIGURATION at connect and Failure to
+// every periodic refresh after it, traffic flowing throughout. Each refusal
+// was counted toward the recovery ladder's protocol-error ceiling and reset by
+// the next success: a sawtooth in proto_errors (ddimension/wwand#51). The
+// counter is sampled when the NEXT statistics query arrives, i.e. after the
+// previous refusal was handled and before any success could reset it.
+let s5_modem = null, s5_seen = [];
+let scenario_refresh_refused = {
+	name: 's5_refresh_refused',
+	ctx_timing: { stats_interval: 5 },
+	handlers: () => base_handlers({
+		IP_CONFIGURATION: (args, meta) =>
+			(meta.count <= 1) ? { __raw: build_ipcfg() } : { __error: 2 },
+		PACKET_STATISTICS: (args, meta) => {
+			if (s5_modem)
+				push(s5_seen, s5_modem.counters?.proto_errors ?? 0);
+
+			return {
+				in_octets: 1000 * meta.count, out_octets: 500 * meta.count,
+				in_packets: 100 * meta.count, out_packets: 50 * meta.count,
+				in_errors: 0, out_errors: 0, in_discards: 0, out_discards: 0,
+			};
+		},
+	}),
+	run: (env) => {
+		s5_modem = env.modem;
+		env.ctx.up((err, settings) => {
+			eq(err, null, 'refresh-refused: context connected');
+
+			uloop.timer(80, () => {
+				ok(env.mock.counts.IP_CONFIGURATION > 2, 'refresh-refused: the refresh really was refused repeatedly');
+				// the first sample predates the first refresh (bring-up's own refusals)
+				eq(max(...slice(s5_seen, 1)), 0, 'refresh-refused: no refusal reached the protocol-error counter');
+				eq([ env.ctx.state, env.ctx.status()?.settings?.ipv4?.addr ], [ 'CONNECTED', settings?.ipv4?.addr ],
+					'refresh-refused: the session and its settings stand');
+				env.finish();
+			});
+		});
+	},
+};
+
+let scenarios = [ scenario_flow, scenario_zero_rx, scenario_v6_iid, scenario_fail_reason, scenario_refresh_refused ];
 let current = 0;
 
 function run_next() {

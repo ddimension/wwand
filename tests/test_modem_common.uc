@@ -73,6 +73,69 @@ ret_sent = [];
 mc.telemetry_at(ret_modem).send('AT+CSQ', () => null);
 eq(ret_sent, [ 'AT+CSQ' ], 'retire: other commands keep being sent');
 
+// --- a command that never answers, on a port that does (ddimension/wwand#56) --
+// An RG520N-EB behind an MHI DUN bridge echoed AT+QENG="servingcell" and never
+// replied, while AT+CSQ answered on the same port: a timeout, every tick,
+// forever. A timeout counts only when the port answered something else since
+// the command last went silent; five of those retire it.
+{
+	let sent = [];
+	let m = {
+		_at_log: (l, msg) => null,
+		at_telemetry: { send: (cmd, cb) => {
+			push(sent, cmd);
+			(cmd == 'AT+QENG="servingcell"') ? cb({ error: 'timeout' }, { lines: [] })
+				: cb(null, { lines: [ '+CSQ: 20,99', 'OK' ] });
+		} },
+	};
+
+	for (let i = 0; i < 8; i++) {
+		mc.telemetry_at(m).send('AT+CSQ', () => null);
+		mc.telemetry_at(m).send('AT+QENG="servingcell"', () => null);
+	}
+
+	eq(length(filter(sent, (c) => c == 'AT+QENG="servingcell"')), 5,
+		'silent: a command that never answers while the port does is asked five times, then not again');
+	eq(length(filter(sent, (c) => c == 'AT+CSQ')), 8, 'silent: the answering command keeps going');
+	let why = null;
+	mc.telemetry_at(m).send('AT+QENG="servingcell"', (e) => { why = e?.detail; });
+	eq(why, 'retired after repeated timeouts on a port that answers', 'silent: the retired command says why');
+
+	// COUNTERPROOF: a port that answers NOTHING retires nothing — that is the
+	// port, not the command
+	let dead_sent = [];
+	let dead = {
+		_at_log: (l, msg) => null,
+		at_telemetry: { send: (cmd, cb) => { push(dead_sent, cmd); cb({ error: 'timeout' }, { lines: [] }); } },
+	};
+
+	for (let i = 0; i < 8; i++) {
+		mc.telemetry_at(dead).send('AT+CSQ', () => null);
+		mc.telemetry_at(dead).send('AT+QENG="servingcell"', () => null);
+	}
+
+	eq(length(dead_sent), 16, 'silent: a port that answers nothing retires nothing');
+
+	// ...and a slow command that answers now and then is never retired
+	let slow_sent = [], k = 0;
+	let slow = {
+		_at_log: (l, msg) => null,
+		at_telemetry: { send: (cmd, cb) => {
+			push(slow_sent, cmd);
+			(cmd == 'AT+QCAINFO' && (k++ % 3) != 2) ? cb({ error: 'timeout' }, { lines: [] })
+				: cb(null, { lines: [ 'OK' ] });
+		} },
+	};
+
+	for (let i = 0; i < 12; i++) {
+		mc.telemetry_at(slow).send('AT+CSQ', () => null);
+		mc.telemetry_at(slow).send('AT+QCAINFO', () => null);
+	}
+
+	eq(length(filter(slow_sent, (c) => c == 'AT+QCAINFO')), 12,
+		'silent: an answer now and then resets the count — never retired');
+}
+
 // COUNTERPROOF 1: a bare ERROR that is not consecutive never retires anything.
 // This is the ddimension/wwand#12 shape — AT^CHIPTEMP was latched off on its
 // first error and the modem reported no temperature again for the whole
@@ -508,6 +571,34 @@ eq(ncf_rc.reboots, 1, 'ncf-light: reboot action triggers rec.reboot');
 ncf_rc.action = 'retry';
 ncf_self.note_connect_failure();
 ok(true, 'ncf-light: tolerates a missing done callback');
+
+// the ladder's radio cycle (MBIM/NCM opmode_cycle handler) runs with the
+// sessions stopped first: a CONNECTED context goes down (reason 'reattach')
+// BEFORE the radio goes off, the daemon's reconnect is held off while it
+// runs, and the stopped context is handed back afterwards
+{
+	let seq = [];
+	let mk = (state, name) => {
+		let c = { state: state, name: name };
+		c.down = (cb, reason) => { push(seq, name + ':down:' + reason); c.state = 'IDLE'; cb(); };
+		return c;
+	};
+	let lm = { config: {}, contexts: [ mk('CONNECTED', 'a'), mk('IDLE', 'b') ] };
+
+	mc.scaffolding(lm, { deps: { on_event: (m, ev, d) =>
+		push(seq, ev + ':' + join(',', map(d?.contexts ?? [], (c) => c.name))) },
+		log: () => null, rec: null });
+	mc.note_connect_failure_light(lm, { on_attempt: () => 'opmode_cycle' }, {
+		opmode_cycle: (d) => { push(seq, sprintf('radio_cycle:held=%J', lm._reattaching)); d(); },
+	});
+
+	let act = null;
+	lm.note_connect_failure((a) => { act = a; });
+	eq(seq, [ 'a:down:reattach', 'radio_cycle:held=true', 'sessions_released:a' ],
+		'ncf-light: opmode_cycle stops the PDN first, cycles held, hands it back');
+	eq([ act, lm._reattaching ], [ 'opmode_cycle', false ],
+		'ncf-light: opmode_cycle answers with its action and clears the hold');
+}
 
 // --- make_fail: shared bring-up failure handler ------------------------------
 
@@ -1069,6 +1160,18 @@ uc_h('+CTZV: "26/08/22,10:15:00+08"');
 eq(length(uc_clock), 1, 'urc_common: NITZ reaches set_clock');
 eq(uc_self.network_time?.tz_offset_min, 120, 'urc_common: NITZ tz offset decoded (8 quarters)');
 
+// nitz_apply: the NITZ rule's tolerance goes along, and `option nitz_time '0'`
+// keeps the clock out of it (the time is still recorded for status)
+let na_calls = [];
+let na_deps = { set_clock: (e, tz, src, opts) => push(na_calls, [ e, src, opts?.tolerance ]) };
+mc.nitz_apply({ config: {} }, na_deps, 1789978872, 0);
+eq(na_calls, [ [ 1789978872, 'NITZ', mc.NITZ_TOLERANCE_S ] ],
+	'nitz_apply: on by default, with the NITZ tolerance');
+mc.nitz_apply({ config: { nitz_time: false } }, na_deps, 1789978872, 0);
+eq(length(na_calls), 1, 'nitz_apply: nitz_time false leaves the clock alone');
+mc.nitz_apply({ config: {} }, {}, 1789978872, 0);
+eq(length(na_calls), 1, 'nitz_apply: no set_clock dep is not an error');
+
 uc_h('+CGEV: ME PDN DEACT 1');
 eq(uc_liveness, 1, 'urc_common: PDN DEACT pokes only the matching cid');
 eq(uc_settings, 0, 'urc_common: PDN DEACT does not poke settings');
@@ -1270,6 +1373,51 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 		'mute walk: every port is probed once, in order');
 	eq(m.at_tty, '/dev/ttyUSB2', 'mute walk: settles on the port that answers');
 	ok(m.at != null, 'mute walk: a control engine is left behind');
+})();
+
+// --- a port that will not OPEN does not end the search either --------------
+// T99W175 in USB mode (ddimension/wwand#52): ttyUSB0 mute, ttyUSB1 listed in
+// sysfs but "No such file or directory" on open, AT on ttyUSB2. The open
+// failure used to jump straight to the MBIM pipe.
+(function () {
+	let opened = [];
+	let mk = (tty) => {
+		let t = { close: () => null, drain: () => null };
+
+		t.write = (d) => {
+			if (t.data_cb && match(d ?? '', /^AT\r?$/) && tty == '/dev/ttyUSB2')
+				t.data_cb("\r\nOK\r\n");
+
+			return true;
+		};
+
+		t.on_data = (cb) => { t.data_cb = cb; };
+		return t;
+	};
+	let fx = fake_fx('dead:beef', [ { ifn: 2, tty: 'ttyUSB0' },
+	                                { ifn: 3, tty: 'ttyUSB1' },
+	                                { ifn: 4, tty: 'ttyUSB2' } ]);
+	let m = { device: 'usb0', config: {}, info: {} };
+	let reached = false;
+
+	mc.open_at(m, {
+		at_opts: {
+			fx: fx,
+			open_transport: (tty) => { push(opened, tty); return (tty == '/dev/ttyUSB1') ? null : mk(tty); },
+			probe_timeout: 20,
+		},
+		log: (level, msg) => null,
+		set_drain_timer: () => null,
+		next: () => { reached = true; uloop.end(); },
+	});
+
+	uloop.timer(3000, () => uloop.end());
+	uloop.run();
+
+	ok(reached, 'unopenable walk: open_at completes');
+	eq(opened, [ '/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2' ],
+		'unopenable walk: the port that will not open is skipped, not the end');
+	eq(m.at_tty, '/dev/ttyUSB2', 'unopenable walk: settles on the port that answers');
 })();
 
 // --- normalise_qmi_signal: the not-available sentinels never reach the bus ----
@@ -1556,6 +1704,58 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 		});
 	});
 	uloop.run();
+}
+
+// --- attach_owner: whose settings the attach profile (profile 1) follows ----
+{
+	let wwand0 = { config: { interface: 'wwand0', mux_id: 1 } };
+	let wwand1 = { config: { interface: 'wwand1', mux_id: 2, profile: 2, auto: false } };
+
+	// the NR7101 case: the auto-0 interface on profile 2 bound first
+	eq(mc.attach_owner([ wwand1, wwand0 ]), wwand0,
+		'attach_owner: the interface dialling profile 1 wins over bind order');
+	// both automatic: only the profile decides
+	let p2 = { config: { interface: 'p2', profile: 2 } };
+	let p1 = { config: { interface: 'p1', mux_id: 1 } };
+	eq(mc.attach_owner([ p2, p1 ]), p1, 'attach_owner: profile 1 decides when both come up automatically');
+	eq(mc.attach_owner([ { config: { apn: '#1', mux_id: 3 } } ])?.config?.apn, '#1',
+		'attach_owner: an apn #1 names profile 1');
+	eq(mc.attach_owner([ { config: { profile: 1, mux_id: 4 } } ])?.config?.profile, 1,
+		'attach_owner: an explicit profile 1 does too');
+
+	// nobody dials profile 1: an automatic interface before an auto-0 one
+	let a = { config: { interface: 'a', profile: 3, auto: false } };
+	let b = { config: { interface: 'b', profile: 4 } };
+	eq(mc.attach_owner([ a, b ]), b, 'attach_owner: then an interface brought up automatically');
+	eq(mc.attach_owner([ a ]), a, 'attach_owner: then the first bound');
+	eq(mc.attach_owner([]), null, 'attach_owner: nothing bound');
+
+	// the EFFECTIVE apn: a wwand_sim `#N` decides which profile is dialled
+	let card = { active_sim: { apn: '#1' } };
+	let sim_p1 = { config: { interface: 's1', apn: '#2' }, modem: card };
+	let raw_p1 = { config: { interface: 's2', apn: '#1' }, modem: { active_sim: { apn: '#2' } } };
+	eq(mc.attach_owner([ raw_p1, sim_p1 ]), sim_p1, 'attach_owner: the per-SIM #N decides, not the interface\'s');
+
+	// MBIM: the attach configuration is no numbered profile — session 1 owns nothing
+	let m_down = { config: { mux_id: 1, auto: false } };
+	let m_auto = { config: { mux_id: 2 } };
+	eq(mc.attach_owner([ m_down, m_auto ], false), m_auto, 'attach_owner: unnumbered (MBIM) skips the profile rule');
+	eq(mc.attach_owner([ m_down, m_auto ]), m_down, 'attach_owner: ...which numbered backends apply');
+}
+
+// a later interface that takes the attach profile over reprograms it: the
+// first one to bind is only provisional
+{
+	let reapplied = 0;
+	let m = { state: 'REGISTERING', contexts: [], reapply_sim: () => reapplied++ };
+	mc.scaffolding(m, { deps: {}, log: () => null, rec: {} });
+
+	m.attach_context({ config: { interface: 'w1', profile: 2, auto: false }, modem_event: () => null });
+	eq(reapplied, 0, 'attach owner: the first bind needs no reapply (nothing pending)');
+	m.attach_context({ config: { interface: 'w0', mux_id: 1 }, modem_event: () => null });
+	eq(reapplied, 1, 'attach owner: a later profile-1 interface reprograms the attach profile');
+	m.attach_context({ config: { interface: 'w2', profile: 3 }, modem_event: () => null });
+	eq(reapplied, 1, 'attach owner: a bind that does not change the owner does not');
 }
 
 done('test_modem_common');

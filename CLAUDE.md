@@ -14,10 +14,12 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
 `docs/reference.md` (config + ubus API reference).
 - **Package definitions live in ddimension/openwrt-repo** (the feed):
   `wwand/Makefile` there builds, from this repo (git source, pinned via
-  PKG_SOURCE_VERSION — after pushing here, pin it on the feed's `main` with
-  `scripts/bump-source.sh wwand <tag|commit>`, which also derives the version:
-  `X.Y.Z` at tag `vX.Y.Z`, `X.Y.Z_pN` after it; the feed's CLAUDE.md has the
-  rules, releases go to its `stable` branch only when asked), a **backend-neutral
+  PKG_SOURCE_VERSION — `scripts/bump-source.sh wwand <tag|commit>` on the
+  matching feed branch: this repo has TWO LINES, `main` (development, marker
+  `vX.Y.0-dev`, ships as `X.Y.Z_preN` on feed main) and `stable` (releases
+  tagged `vX.Y.Z` there only, pinned on feed stable; fixes reach it by
+  cherry-pick -x or are made there and merged up). The feed's CLAUDE.md has the
+  rules; a feed release is a tag on its stable, only when asked), a **backend-neutral
   base + per-backend split**: `wwand` (daemon/framework/codec/shared core +
   the native `wwand_io.so`, which since 2026-08 ships inside the base package —
   the separate `ucode-mod-wwand-io` package is gone, `PROVIDES` covers old
@@ -76,9 +78,16 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
 - **Zero-config autosetup** (default ON, opt-out `wwand_globals option
   autosetup '0'`): modem appears on an unconfigured box → daemon hotplug
   creates `wwmodem_auto` + `interface wwan0` (default wan firewall zone),
-  then ONE-SHOT ICCID/IMSI→APN fill from `apndb.uc` is COPIED into uci
-  (marker `option autosetup 1` cleared; uci writers live in main.uc deps
-  `autosetup_create`/`autosetup_fill`). HW-verified on the Cudy LT300.
+  then ONE-SHOT ICCID/IMSI→APN fill from `apndb.uc` is COPIED into uci in
+  the autosetup run only (marker `option autosetup 1` cleared on the first
+  card read, match or not; uci writers live in deps `autosetup_create`/
+  `autosetup_fill`). HW-verified on the Cudy LT300.
+- **The attach profile carries the config, always** (since 2026-10-04): the
+  configured APN, an UNSET one written as empty (network default) — never
+  "whatever profile 1 held" (QMI context.uc ensure_attach_profile, MBIM
+  `_apply_attach`, NCM step_attach). An init that sees no bound interface
+  programs it when the first binds (modem_common attach_context); a live
+  APN/PDP/login change re-programs it (daemon apply_config → reapply_sim).
 - **Idempotent sets + deferred apply**: netsel/settings/WDS-profile/NCM
   CGDCONT/slot-switch all read-before-write (`unchanged: true`, no radio
   bounce). Quirk `netsel_deferred`/`settings_deferred` (MeiG SLM7xx) →
@@ -101,7 +110,8 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
 ## Core layering (src-ucode)
 native `wwand_io.so` → codec (`qmux.uc`, `tlv.uc`, `hex.uc`, `schema/*.uc`
 incl. `schema/rat.uc` = canonical RAT/IoT vocabulary, `mbim*.uc`) → session
-(`transport.uc`, `client.uc`) → state machines
+(`transport.uc`, `client.uc`; further hubs under the same contract:
+`qmi_over_mbim.uc`, `qmi_over_qrtr.uc`) → state machines
 (`modem.uc` + its extracted QMI helpers `modem_init_qmi.uc` / `telemetry_qmi.uc`
 / `regdetail.uc` / `config_check.uc` / `datapath_qmi.uc`; the datapath
 interface lives in `netlink.uc` with `datapath_*.uc` add-ons beside it
@@ -266,6 +276,11 @@ be decided by load order; `_wwand_apply_settings` builds the netifd update).
 - `Date.now()`/`new Date()`/`Math.random()` unavailable; `time()` is a builtin
   (works in the daemon; not in Workflow scripts).
 - `replace(s, /-/g, '')` for global replace (string arg replaces first only).
+- **A called `(a ?? b.c)(…)` misplaces the stack when `a` is set** (no error):
+  assigned, the value is null; as a bare statement, a NEIGHBOURING local gets
+  overwritten. Split it: `let mk = a ?? b.c; mk(…);`. Only `return (a ?? b)()`
+  is safe. Enforced by `tools/check-ucode-pitfalls.py` in run_tests.sh;
+  details and the evidence in docs/gotchas.md.
 - **`require()` gives the loaded script its OWN copies of imported modules.** A
   plain script pulled in with `require()` does NOT share module instances with
   the importing side, so module-level mutable state (a registry, a cache) is

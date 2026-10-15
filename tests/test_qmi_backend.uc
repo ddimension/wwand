@@ -280,6 +280,49 @@ eq(nasmod.active_band_name(9999), 'band 9999', 'active band: unknown value passt
 // stop answering and the recovery ladder would count protocol errors at a modem
 // that was telling us what was wrong.
 
+// WDS profile flag "IPv6 Prefix Delegation" (TLV 0xDF, guint8; libqmi 1.38
+// qmi-service-wds.json:424-428). Byte-exact both ways: the write carries the
+// flag after the profile id, the read hands it back, and a profile from a
+// stack without the TLV leaves it absent rather than 0.
+let W = wdsmod.default.messages;
+eq(tlvmod.pack(W.MODIFY_PROFILE.req,
+	{ profile: { type: 0, index: 1 }, prefix_delegation: 1 }),
+	tlv(0x01, u8(0) + u8(1)) + tlv(0xDF, u8(1)), 'wds: modify profile carries PD as TLV 0xDF');
+eq(tlvmod.unpack(W.GET_PROFILE_SETTINGS.resp, tlv(0x11, u8(2)) + tlv(0xDF, u8(1))).prefix_delegation,
+	1, 'wds: profile settings decode PD from TLV 0xDF');
+eq(tlvmod.unpack(W.GET_PROFILE_SETTINGS.resp, tlv(0x11, u8(2))).prefix_delegation,
+	null, 'wds: PD absent stays absent (not 0)');
+
+// CLAT (0xDE) and address allocation (0x2D) sit beside the PD flag in the
+// same two messages (json:417-422, 372-377)
+eq(tlvmod.pack(W.MODIFY_PROFILE.req, { profile: { type: 0, index: 1 }, address_allocation: 1, clat: 1 }),
+	tlv(0x01, u8(0) + u8(1)) + tlv(0x2D, u8(1)) + tlv(0xDE, u8(1)),
+	'wds: modify profile carries address allocation 0x2D and CLAT 0xDE');
+eq(tlvmod.unpack(W.GET_PROFILE_SETTINGS.resp, tlv(0x2D, u8(0)) + tlv(0xDE, u8(1))),
+	{ address_allocation: 0, clat: 1 }, 'wds: profile settings decode 0x2D and 0xDE');
+
+// Vendor "get delegated IPv6 prefix" 0x00AC (wds.uc GET_DELEGATED_PREFIX): the
+// request is exactly ONE TLV 0x01 of 16 bytes — the modem answers MALFORMED to
+// 4 or 17 (RG650E, 2026-10-09), so the length is the contract; the answer is
+// TLV 0x10, address + length, 17 bytes.
+let v6b = (g) => join('', map(g, (x) => struct.pack('>H', x)));
+eq(W.GET_DELEGATED_PREFIX.id, 0x00AC, 'wds: delegated prefix is vendor msg 0x00AC');
+eq(tlvmod.pack(W.GET_DELEGATED_PREFIX.req, { requestor: '2a00:f88:edfe:10:0:20:b4e3:8801' }),
+	tlv(0x01, v6b([ 0x2a00, 0xf88, 0xedfe, 0x10, 0, 0x20, 0xb4e3, 0x8801 ])),
+	'wds: delegated prefix request is one 16-byte TLV 0x01');
+eq(tlvmod.unpack(W.GET_DELEGATED_PREFIX.resp,
+	tlv(0x10, v6b([ 0x2001, 0xdb8, 0x100, 0, 0, 0, 0, 0 ]) + u8(56))).prefix,
+	{ addr: '2001:db8:100:0:0:0:0:0', plen: 56 }, 'wds: delegated prefix decodes from TLV 0x10');
+
+// NAS Attach Detach 0x0023 (nas.uc ATTACH_DETACH, libqmi 1.38): one
+// mandatory TLV 0x10, u8 QmiNasPsAttachAction — 1 attach, 2 detach.
+let NA = nasmod.default.messages.ATTACH_DETACH;
+eq(NA.id, 0x0023, 'nas: attach/detach is msg 0x0023');
+eq(tlvmod.pack(NA.req, { action: nasmod.PS_DETACH }), tlv(0x10, u8(2)),
+	'nas: detach is TLV 0x10 = 2');
+eq(tlvmod.pack(NA.req, { action: nasmod.PS_ATTACH }), tlv(0x10, u8(1)),
+	'nas: attach is TLV 0x10 = 1');
+
 let U = uimmod.default.messages;
 
 // SESSION_CLOSED (0x0043). `cause` is FOUR bytes in the IDL even though every

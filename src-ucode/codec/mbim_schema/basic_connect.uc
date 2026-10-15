@@ -48,10 +48,15 @@ export const READY_STATE_BAD_SIM         = 3;
 export const READY_STATE_FAILURE         = 4;
 export const READY_STATE_NOT_ACTIVATED   = 5;
 export const READY_STATE_DEVICE_LOCKED   = 6;
+// an eUICC that is ready but has no profile enabled (MS MBIMEx; libmbim 1.32
+// mbim-enums.h:225 MBIM_SUBSCRIBER_READY_STATE_NO_ESIM_PROFILE, since 1.28;
+// Microsoft "MB low level UICC access", MBIMSubscriberReadyStateNoEsimProfile)
+export const READY_STATE_NO_ESIM_PROFILE = 7;
 
 export const READY_STATE_NAMES = {
 	'0': 'not initialized', '1': 'initialized', '2': 'SIM not inserted',
 	'3': 'bad SIM', '4': 'failure', '5': 'not activated', '6': 'device locked',
+	'7': 'no eSIM profile enabled',
 };
 
 // MbimPinType / MbimPinState (values verified against libmbim mbim-enums.h)
@@ -89,6 +94,7 @@ export const REGISTER_STATE_DENIED = 6;
 
 // MbimPacketServiceAction / State
 export const PACKET_SERVICE_ATTACH = 0;
+export const PACKET_SERVICE_DETACH = 1;   // mbim-enums.h:691, libmbim 1.32
 export const PACKET_SERVICE_STATE_ATTACHED = 2;
 
 // MbimRadioSwitchState

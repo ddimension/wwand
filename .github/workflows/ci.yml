@@ -103,7 +103,8 @@ jobs:
         # are sourced by the hotplug framework. So it is everything tracked
         # under files/ minus the two things that are not shell:
         #   files/wwand-migrate  is ucode (#!/usr/bin/env ucode)
-        #   files/wwand.config   is a UCI config sample, not a script
+        #   files/*.config       UCI config samples, not scripts (wwand.config,
+        #                        apntest.config)
         #   files/*.json         data, and CHECKED AS JSON in the next step
         # Adding a new shell file needs no change here; adding a new NON-shell
         # one fails loudly, which is the right way round — files/wwand-acl.json
@@ -112,7 +113,7 @@ jobs:
         run: |
           set -eu
           list=$(git ls-files 'files/*' 'tests/*.sh' \
-                 | grep -vE '^files/(wwand-migrate|wwand\.config)$|\.json$')
+                 | grep -vE '^files/wwand-migrate$|\.config$|\.json$')
           echo "linting:"; echo "$list" | sed 's/^/  /'
           # shellcheck disable=SC2086  # word splitting is intended
           shellcheck -S error -s sh $list

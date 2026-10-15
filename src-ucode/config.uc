@@ -18,6 +18,7 @@
 import * as context_common from 'wwand.context_common';
 import * as netlink from 'wwand.netlink';
 import * as catmod from 'wwand.codec.schema.cat';
+import * as recovery from 'wwand.recovery';
 
 const OLD_DEPRECATED = [ 'dhcp', 'autocreateif', 'customroutes', 'strongestnetwork' ];
 
@@ -30,6 +31,26 @@ const PDP_TYPES = { ipv4: true, ipv6: true, ipv4v6: true };
 // reaches uloop, where a NaN delay fires immediately, over and over. Verified
 // on the host interpreter (2026-08-31): a timer re-armed with NaN spins.
 // So: parse here, and hand on a number or the default, never NaN.
+// `option recovery_steps '2 6 12'`: the attempt counts of the ladder's radio
+// cycle, modem reset and hardware reset (recovery.steps_from has the rules).
+// null = the defaults, also for a value that makes no ladder — said, not
+// guessed at: a half-applied list would move one rung past the next.
+function steps_opt(value, warnings)
+{
+	if (value == null || value == '')
+		return null;
+
+	let list = (type(value) == 'array') ? value
+		: filter(split(trim(sprintf('%s', value)), /[ ,]+/), (x) => x != '');
+	let steps = recovery.steps_from(list);
+
+	if (!steps)
+		push(warnings, sprintf('recovery_steps: %J is not 1-3 rising positive whole numbers, using %s',
+			value, join(' ', recovery.DEFAULT_STEPS)));
+
+	return steps;
+}
+
 function num_opt(value, dflt, what, warnings)
 {
 	if (value == null || value == '')
@@ -56,6 +77,21 @@ function bool_opt(v, dflt)
 	return !(v == '0' || v == 'false' || v == 'off' || v == 'no');
 }
 
+function addr_alloc_opt(v, warnings)
+{
+	if (v == null || v == '')
+		return null;
+
+	let w = lc(sprintf('%s', v));
+
+	if (w == 'nas' || w == 'dhcp')
+		return w;
+
+	push(warnings, sprintf("invalid address_allocation '%s' (nas|dhcp), ignoring", v));
+
+	return null;
+}
+
 // the connection option bundle every context flavor shares (apn/auth/creds/mtu/
 // cadence); flavor-specific fields stay at the call sites.
 function conn_fields(s, warnings)
@@ -67,6 +103,15 @@ function conn_fields(s, warnings)
 		password: s.password,
 		mtu: (s.mtu != null) ? num_opt(s.mtu, null, 'mtu', warnings) : null,
 		use_pushed_prefix: bool_opt(s.use_pushed_prefix, false),
+		// IPv6 prefix delegation on the bearer, a flag in the modem's profile
+		// (QMI; NCM where the vendor has an AT command for it). TRI-STATE: unset leaves the profile as it is, because the
+		// write is to modem NV and nobody who never asked should get one.
+		ipv6_pd: (s.ipv6_pd != null && s.ipv6_pd != '') ? bool_opt(s.ipv6_pd, null) : null,
+		// the same tri-state, for 464XLAT in the modem (profile "CLAT Enabled")
+		clat: (s.clat != null && s.clat != '') ? bool_opt(s.clat, null) : null,
+		// profile "Address Allocation Preference": 'nas' | 'dhcp', unset =
+		// leave it; anything else is warned about and ignored, never guessed
+		address_allocation: addr_alloc_opt(s.address_allocation, warnings),
 		settings_poll: num_opt(s.settings_poll, 300, 'settings_poll', warnings),
 		// on a reconnect that changes the IP, do a netifd link down->up instead of
 		// an in-place renew, so dependent tunnels/xfrm re-follow the new local
@@ -220,7 +265,8 @@ function derive_mux_link(nd, device, mux_id, muxed, fallback_netdev)
 export function modem_defaults(over)
 {
 	return {
-		device: null, netdev: null, usb_path: null, reset_gpio: null,
+		device: null, netdev: null, usb_path: null, reset_gpio: null, reset_fallback: null,
+		sim_detect: null,
 		serial: null, imei: null,   // stable identity anchors (USB iSerial / IMEI)
 		repower_time: null,         // recovery power-cycle off / reset hold seconds
 		pincode: null, modes: null, mcc: null, mnc: null,
@@ -229,8 +275,9 @@ export function modem_defaults(over)
 		at_init: [], location: false, delay: 0,
 		at2_external: false,   // release the secondary AT port for external tools
 		gnss: false,           // switch the modem's GNSS receiver on (NMEA port)
+		nitz_time: true,       // step the system clock from NITZ (see deps set_clock)
 		fcc_auth: null,        // RF unlock for laptop-SKU modems (see reference.md)
-		failreboot: 100, proto_error_limit: 25, zero_rx_timeout: 21600,
+		failreboot: 100, recovery_steps: null, proto_error_limit: 25, zero_rx_timeout: 21600,
 		unarmed_reset_after: 300,   // s: first reset-line pulse of a never-answering modem
 		card_hold: 2100,       // s: no card-resetting recovery after a subscription change
 		bearer_poll_count: 3,  // empty dial-status polls before the bearer is gone (NCM)
@@ -252,6 +299,7 @@ export function context_defaults(over)
 		username: null, password: null, profile: null,
 		mtu: null, use_pushed_mtu: true,
 		use_pushed_prefix: false,
+		ipv6_pd: null, clat: null, address_allocation: null,
 		settings_poll: 300,
 		auto: true,   // netifd 'auto 0' => daemon won't proactively bring it up
 		...(over ?? {}),
@@ -307,8 +355,8 @@ function apply_globals(s, result)
 // instead of 'pincode' cost a HW debugging session — the daemon saw "PIN
 // required but none configured" and safety-blocked the SIM).
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
-	'imei', 'repower_time', 'reset_gpio', 'pincode', 'modes', 'mcc', 'mnc',
-	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'fcc_auth',
+	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'recovery_steps', 'pincode', 'modes', 'mcc', 'mnc',
+	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'nitz_time', 'fcc_auth',
 	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'unarmed_reset_after', 'card_hold',
 	'zero_rx_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
@@ -337,7 +385,15 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	// cap the QMAP header version the datapath may negotiate (1 | 4 | 5;
 	// unset/0 = whatever the datapath can drive). Mostly a bring-up handle:
 	// pinning it is how a specific version gets exercised on real hardware.
-	'qmap_version' ];
+	'qmap_version',
+	// WDA data endpoint override (type: 2 HSUSB / 3 PCIE / 4 EMBEDDED; iface id).
+	// Derived from the data netdev's bus otherwise (netlink.ep_type_number /
+	// ep_iface_number: USB -> the QMI interface, PCIe -> 4); set only for a modem
+	// that refuses the derived endpoint.
+	'ep_type', 'ep_id',
+	// the QRTR node of a `device 'qrtr'` modem, for a box with more than one
+	// (default: the node that serves QMI DMS)
+	'qrtr_node' ];
 // option ip6ifaceid / ifaceid — resolve the alias and say so when the value is
 // one apply_iface_id() will refuse. Without the warning a typo'd identifier is
 // perfectly silent: the address simply stays what the network assigned, which
@@ -428,12 +484,25 @@ function modem_from_section(s, warnings)
 		// optional named GPIO wired to the modem RESET line; when set, recovery
 		// pulses it instead of power-cycling (see board.uc / daemon repower).
 		reset_gpio: s.reset_gpio,
+		// seconds a soft reset may take before the reset line is pulsed
+		// (hwops.modem_reset); unset = 30
+		reset_fallback: (s.reset_fallback != null && s.reset_fallback != '') ? +s.reset_fallback : null,
+		// Quectel SIM hot-plug detection: 'high' | 'low' | 'off' (atcmd.uc
+		// sim_detect_commands); anything else is dropped, never guessed
+		sim_detect: (index([ 'high', 'low', 'off' ], lc(sprintf('%s', s.sim_detect ?? ''))) >= 0)
+			? lc(s.sim_detect) : null,
 		pincode: s.pincode,
 		modes: s.modes,
 		mcc: s.mcc,
 		mnc: s.mnc,
 		mux: s.mux ?? 'auto',
 		dl_datagram_max_size: num_opt(s.dl_datagram_max_size, 0, 'dl_datagram_max_size', warnings),
+		// WDA data endpoint override; null (unset) keeps the derivation from the
+		// data netdev (deps resolve_ep_id/resolve_ep_type). Coerced to a number
+		// (uci gives strings).
+		ep_type: (s.ep_type != null && s.ep_type != '') ? +s.ep_type : null,
+		ep_id:   (s.ep_id   != null && s.ep_id   != '') ? +s.ep_id   : null,
+		qrtr_node: (s.qrtr_node != null && s.qrtr_node != '') ? +s.qrtr_node : null,
 		tty: s.tty,
 		// explicit DM/DIAG node, the override for the generated 'qcdm' role
 		// table. wwand NEVER opens it — it is published as status.diag_port for
@@ -442,7 +511,10 @@ function modem_from_section(s, warnings)
 		// release the secondary AT port ('at2') for external tools: wwand then
 		// never opens it and runs telemetry over the control channel instead
 		at2_external: bool_opt(s.at2_external, false),
-		gnss: bool_opt(s.gnss, false),
+		// `option location` (the former QMI LOC switch) is an alias: GNSS has
+		// one switch, and wwand-gps picks the source — the modem's NMEA port,
+		// else QMI LOC (natively or over the MBIM passthrough)
+		gnss: bool_opt(s.gnss, false) || bool_opt(s.location, false),
 		// step the system clock from the receiver's own time — through
 		// deps.set_clock, which only ever touches a clock that is plainly
 		// unset (pre-2021) and so cannot fight sysntpd. OFF by default: this
@@ -450,6 +522,13 @@ function modem_from_section(s, warnings)
 		// than any box needs. For the RTC-less installs where the modem is the
 		// only time source there is.
 		gnss_set_time: bool_opt(s.gnss_set_time, false),
+		// the network's time (NITZ) steps the system clock when it is more
+		// than a couple of minutes off — ON by default. An RTC-less box boots
+		// with the image's build date, which the gnss rule above ("plainly
+		// unset, pre-2021") reads as a sane clock, so without this a router
+		// with no NTP reachable keeps that date for good (seen on a Raspberry
+		// Pi 4 booting into 2026-06-29, 2026-10-01). '0' leaves the clock alone.
+		nitz_time: bool_opt(s.nitz_time, true),
 		// '' / unset = automatic (a tty when there is one, else the MBIM pipe);
 		// 'fibocom' | 'compal' | '1' forces the pipe and picks the vendor CID
 		at_over_mbim: s.at_over_mbim,
@@ -482,6 +561,7 @@ function modem_from_section(s, warnings)
 		location: bool_opt(s.location, false),
 		delay: num_opt(s.delay, 0, 'delay', warnings),
 		failreboot: num_opt(s.failreboot, 100, 'failreboot', warnings),
+		recovery_steps: steps_opt(s.recovery_steps, warnings),
 		proto_error_limit: num_opt(s.proto_error_limit, 25, 'proto_error_limit', warnings),
 		unarmed_reset_after: num_opt(s.unarmed_reset_after, 300, 'unarmed_reset_after', warnings),
 		card_hold: num_opt(s.card_hold, 2100, 'card_hold', warnings),
@@ -835,7 +915,13 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 		// zero_rx_timeout silently turned the watchdog off. Warning-free, on
 		// this path only. The defaults match
 		// the native reader at :456-466 so the two cannot drift apart.
+	{
 		modem.location = num_opt(s.location, 0, 'location', warnings) > 1;   // old gate: location > 1
+
+		// the same alias as the native reader: location means gnss
+		if (modem.location)
+			modem.gnss = true;
+	}
 
 	if (s.delay != null)
 		modem.delay = num_opt(s.delay, 0, 'delay', warnings);
@@ -1557,7 +1643,7 @@ export function migrate_plan(raw, opts)
 				// THE ANCHORS BELONG TO THE INTERFACE THE MODEM WAS CREATED
 				// FROM. `device` is the obvious one; `netdev` is the same
 				// thing by another name — discovery resolves the modem and
-				// picks its datapath from it (discovery.uc:943,952), so a
+				// picks its datapath from it (discovery.uc:1041,1027), so a
 				// second interface supplying a different one would bind the
 				// section to the wrong hardware. Everything else in
 				// MIGRATE_MODEM_OPTS is modem POLICY (pincode, modes, mux,

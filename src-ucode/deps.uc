@@ -40,14 +40,50 @@ import * as modeswitch from 'wwand.modeswitch';
 import * as netlink from 'wwand.netlink';
 import * as transport from 'wwand.transport';
 
+// netifd device detour placeholder (netifd_device_detour): a name no device
+// ever carries — netifd keeps an interface on it waiting, harmlessly
+const DETOUR_DEVICE = 'wwand-detour';
+
+// A netifd device detour the daemon did not finish (it died between the two
+// reloads, netifd_device_detour): put every interface's device back. Run by
+// main.uc BEFORE the first config read, so the daemon never parses the
+// placeholder as a device. Returns the section names restored; commits only
+// when there is one.
+export function detour_restore(c)
+{
+	let done = [];
+
+	c.foreach('network', 'interface', (sec) => {
+		if (sec.wwand_detour == null)
+			return;
+
+		c.set('network', sec['.name'], 'device', sec.wwand_detour);
+		c.delete('network', sec['.name'], 'wwand_detour');
+		push(done, sec['.name']);
+	});
+
+	if (length(done))
+		c.commit('network');
+
+	return done;
+};
+
 export function create(o)
 {
+	// a cursor whose commits carry only its own changes (main.uc gives it a
+	// private delta directory); the shared one where none was handed in
+	let isolated_cursor = () => {
+		let mk = o.cursor_isolated ?? o.cursor;
+
+		return mk();
+	};
+
 	let conn = o.conn;
 
 	// One NMEA reader per modem id. wwand.gps ships in the OPTIONAL wwand-gps
 	// package, so it is require()d lazily and remembered — including the
 	// failure, so a missing package is reported once rather than once a second.
-	let gps_readers = {}, gps_mod, gps_tried = false;
+	let gps_readers = {}, gps_loc_said = {}, gps_mod, gps_tried = false;
 
 	// retire_wan6: the last shape of a `<parent>_6` section we declined to
 	// park, per section name — so the reason is stated once and again only when
@@ -68,15 +104,35 @@ export function create(o)
 	// A LOCAL, not just a property of the returned object. It is called from
 	// two places — NITZ, and the GNSS reader's epoch callback — and the second
 	// one used to reach for `o.set_clock`, which nothing ever sets: main.uc
-	// builds deps without it (main.uc:294), so `option gnss_set_time` was a
+	// builds deps without it (main.uc:308), so `option gnss_set_time` was a
 	// silent no-op and the test that "proved" it passed only because it
 	// injected the property the production path does not have.
-	let set_clock = (epoch, tz_min, source) => {
-		if (!epoch || now_s() >= 1609459200)   // 2021-01-01: clock already sane
+	//
+	// opts.tolerance (seconds) is the NITZ rule instead (modem option
+	// nitz_time): step whenever the clock is further off than that. A box
+	// without an RTC boots with its image's BUILD DATE, which the "plainly
+	// unset" rule takes for a sane clock — so a router whose NTP servers are
+	// out of reach kept that date (a Raspberry Pi 4 on 2026-06-29 a week after
+	// the fact, 2026-10-01). The tolerance is what keeps NITZ from fighting
+	// sysntpd: within it NTP's finer time stands, beyond it the clock is not
+	// merely drifting but wrong.
+	let set_clock = (epoch, tz_min, source, opts) => {
+		if (!epoch)
+			return false;
+
+		let now = now_s();
+
+		if (opts?.tolerance != null) {
+			let off = (epoch > now) ? epoch - now : now - epoch;
+
+			if (off <= opts.tolerance)
+				return false;
+		}
+		else if (now >= 1609459200)   // 2021-01-01: clock already sane
 			return false;
 
 		run(sprintf('date -u -s @%d >/dev/null 2>&1', epoch));
-		logmod.log('notice', 'set system clock from %s: %d utc', source ?? 'NITZ', epoch);
+		logmod.log('notice', 'set system clock from %s: %d utc (was %d)', source ?? 'NITZ', epoch, now);
 
 		return true;
 	};
@@ -282,13 +338,11 @@ export function create(o)
 			// (qmi over mbim) instead of taking what arrived.
 			devname = discovery.preferred_wwan_port(devname);
 
-			// Both families are bare kernel names in the hotplug event and
-			// both live under /dev. Only cdc-wdm used to be prefixed, so a
-			// wwan port was written to uci as `wwan0mbim0` and the daemon
-			// then reported "control device not present" for a node that
-			// was sitting right there (BPi-R4, MHI).
+			// USB, kernel WWAN, and vendor MHI hotplug events use bare control
+			// names. Store their character-device paths under /dev.
 			let dev = (substr(devname ?? '', 0, 1) == '/') ? devname
-				: (match(devname ?? '', /^(cdc-wdm|wwan[0-9]+(qmi|mbim))/)
+				: ((match(devname ?? '', /^(cdc-wdm|wwan[0-9]+(qmi|mbim))/) ||
+				    discovery.mhi_uci_control(devname))
 					? '/dev/' + devname : devname);
 
 			// device blocklist: even on an otherwise unconfigured box, a
@@ -320,7 +374,9 @@ export function create(o)
 			// name is only the fallback when the path can't be resolved
 			let clink = (substr(devname ?? '', 0, 7) == 'cdc-wdm')
 				? '/sys/class/usbmisc/' + devname + '/device'
-				: '/sys/class/net/' + devname + '/device';
+				: (discovery.mhi_uci_control(devname)
+					? '/sys/class/mhi_uci_q/' + devname
+					: '/sys/class/net/' + devname + '/device');
 			let spath = discovery.sysfs_path_of(clink);
 
 			cursor.set('network', 'wwmodem_auto', 'wwand_modem');
@@ -393,8 +449,14 @@ export function create(o)
 
 			let cur_apn = cursor.get('network', iface_section, 'apn');
 
-			if (cur_apn != null && cur_apn != '')
-				return false;   // operator set an APN — leave everything alone
+			// nothing to fill (vals null: no table match) or the operator set an
+			// APN meanwhile: write nothing, but end the one-shot all the same —
+			// the autosetup run is over either way
+			if (vals == null || (cur_apn != null && cur_apn != '')) {
+				cursor.delete('network', iface_section, 'autosetup');
+				cursor.commit('network');
+				return false;
+			}
 
 			cursor.set('network', iface_section, 'apn', vals.apn);
 
@@ -827,6 +889,49 @@ export function create(o)
 		},
 
 		network_reload: () => conn.defer('network', 'reload', {}, netifd_cb('reload')),
+
+		// THE NETIFD DEVICE DETOUR. netifd records a simple device's parent
+		// once (device.c:197-201) and drops it only when the device object is
+		// freed (device.c:238-240, simple_device_free) — never while an
+		// interface's `option device` names it, down or not. A name that was a
+		// mux child and is now a renamed parent (a datapath that went from QMAP
+		// to raw-IP) is therefore claimed through a parent that is gone, and
+		// every claim fails with DEVICE_CLAIM_FAILED (interface.c:1349-1353;
+		// netifd 2026.07.08~6088f7b3). Releasing or downing it does not help;
+		// only freeing does, and netifd frees a device once nothing uses it.
+		//
+		// So: point the interface at a placeholder and reload — the old object
+		// loses its last user and goes, stale parent and all — then point it
+		// back and reload again, which builds a fresh object that reads its
+		// parent from sysfs. Only this interface's section changes, through a
+		// cursor with its OWN delta directory, so an operator's staged but
+		// uncommitted network changes stay theirs. The original device is kept
+		// in `option wwand_detour` while the placeholder is in; a daemon that
+		// dies between the two reloads is undone at the next start
+		// (detour_restore).
+		netifd_device_detour: (iface, cb) => {
+			let c = isolated_cursor();
+			let dev = c.get('network', iface, 'device');
+
+			if (dev == null || dev == DETOUR_DEVICE)
+				return cb({ error: 'no_device', interface: iface });
+
+			c.set('network', iface, 'wwand_detour', dev);
+			c.set('network', iface, 'device', DETOUR_DEVICE);
+			c.commit('network');
+
+			conn.defer('network', 'reload', {}, (r1) => {
+				let c2 = isolated_cursor();
+
+				c2.set('network', iface, 'device', dev);
+				c2.delete('network', iface, 'wwand_detour');
+				c2.commit('network');
+
+				conn.defer('network', 'reload', {}, (r2) =>
+					cb((r1 == 0 && r2 == 0) ? null : { error: 'reload_failed', first: r1, second: r2 }));
+			});
+		},
+
 		set_clock: set_clock,
 		resolve_netdev: discovery.resolve_netdev,
 		resolve_protocol: discovery.protocol_of,
@@ -859,6 +964,8 @@ export function create(o)
 		},
 		// one-time usbnet mode switch for a PPP-only modem (serial port only)
 		modeswitch: (o, cb) => modeswitch.attempt(o, cb),
+		// the presence gate of a QRTR modem (discovery.qrtr_probe)
+		qrtr_probe: (cfg) => discovery.qrtr_probe(cfg.qrtr_node),
 		resolve_ep_id: (cfg, device, netdev) =>
 			netdev ? netlink.ep_iface_number(netdev) : null,
 		resolve_ep_type: (cfg, device, netdev) =>
@@ -911,8 +1018,13 @@ export function create(o)
 					return { started: false, error: 'port_in_use', owner: other };
 				}
 
-			if (cur)
+			// a LOC reader before it (the port was not there yet) goes whole:
+			// its session too, or the engine keeps reporting to a client
+			// nobody reads
+			if (cur) {
+				cur.loc?.stop();
 				cur.stop();
+			}
 
 			let r = gps.create({
 				path: port,
@@ -946,12 +1058,73 @@ export function create(o)
 			return { started: true, port: port };
 		},
 
+		// NO NMEA PORT, BUT QMI: the same reader, fed by LOC's NMEA
+		// indications instead of a tty (gps.uc loc_session) — natively on a
+		// QMI modem, over the passthrough on an MBIM one. The daemon asks for
+		// this only when the modem has no port; a port wins, because it needs
+		// no QMI session and is the path that works on Quectel.
+		gps_start_loc: (ref, modem, opts) => {
+			let gps = load_gps();
+
+			if (!gps)
+				return null;
+
+			let cur = gps_readers[ref];
+
+			// a live session survives a re-registration; a destroyed client (the
+			// modem was torn down) does not, and starts again here
+			if (cur?.loc?.alive())
+				return { started: false, unchanged: true, source: 'qmi_loc' };
+
+			if (cur) {
+				cur.loc?.stop();
+				cur.stop();
+			}
+
+			let r = gps.create({
+				path: 'qmi-loc',
+				feed: true,
+				on_epoch: (opts?.adjust_time ?? false)
+					? (epoch) => set_clock(epoch, null, 'GNSS') : null,
+			});
+
+			r.start();
+
+			r.loc = gps.loc_session({
+				modem: modem,
+				on_line: (line) => r.push(line + '\n'),
+				on_state: (ev, detail) => {
+					if (ev == 'started') {
+						gps_loc_said[ref] = null;
+						logmod.log('notice', 'gps: %s: no NMEA port — reading NMEA over QMI LOC', ref);
+						return;
+					}
+
+					// said once per distinct reason: a modem without LOC answers
+					// the same on every registration
+					let why = sprintf('%J', detail);
+
+					if (gps_loc_said[ref] != why) {
+						gps_loc_said[ref] = why;
+						logmod.log('info', 'gps: %s: no NMEA port and no QMI LOC session (%s: %J)',
+							ref, detail?.stage, detail?.err);
+					}
+				},
+			});
+
+			gps_readers[ref] = r;
+			r.loc.start();
+
+			return { started: true, source: 'qmi_loc' };
+		},
+
 		gps_stop: (ref) => {
 			let r = gps_readers[ref];
 
 			if (!r)
 				return false;
 
+			r.loc?.stop();
 			r.stop();
 			gps_readers[ref] = null;
 			logmod.log('info', 'gps: %s: stopped reading', ref);
@@ -962,7 +1135,19 @@ export function create(o)
 		// the reader's own view, or null when there is none for this modem
 		// no clock argument: the reader stamps monotonically, and handing it a
 		// wall-clock `now` here would defeat that
-		gps_snapshot: (ref) => gps_readers[ref] ? gps_readers[ref].snapshot() : null,
+		gps_snapshot: (ref) => {
+			let r = gps_readers[ref];
+
+			if (!r)
+				return null;
+
+			let snap = r.snapshot();
+
+			if (r.loc)
+				snap.loc = { state: r.loc.state, error: r.loc.error, indications: r.loc.indications };
+
+			return snap;
+		},
 
 		// the shape of a modem_gps reply, which lives with the reader
 		gps_status: (modem, snap) => {

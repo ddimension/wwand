@@ -21,6 +21,7 @@
 
 import { glob, readlink, lsdir, access, open, realpath } from 'fs';
 import * as atcmd from 'wwand.atcmd';
+import * as qmit from 'wwand_io';
 
 // datapath drivers that mean "no rich control protocol — driven over AT"
 // Drivers whose control is AT rather than a rich protocol. `huawei_cdc_ncm` is
@@ -49,6 +50,20 @@ export function default_fx()
 		realpath: (p) => realpath(p),
 		lsdir:    (p) => lsdir(p),
 		access:   (p) => access(p) == true,
+		// one QRTR name-server lookup: [ { service, instance, node, port } ],
+		// or null when the address family is missing (no qrtr in the kernel)
+		qrtr_servers: (ms) => {
+			let h = qmit.qrtr_open?.();
+
+			if (!h)
+				return null;
+
+			let list = h.qdiscover(ms);
+
+			h.close();
+
+			return list;
+		},
 		read:     (p) => {
 			let f = open(p, 'r');
 
@@ -88,6 +103,34 @@ function wwan_port_protocol(name, fx)
 	return (type == 'QMI') ? 'qmi' : (type == 'MBIM') ? 'mbim' : null;
 }
 
+// Quectel's vendor pcie_mhi driver predates the kernel wwan class. It exposes
+// its control character devices through /sys/class/mhi_uci_q instead, named
+// "mhi_" + the channel name + the controller index — the index only from the
+// SECOND controller on (mhi_uci.c:752-761 in 1.3.8, :766-774 in 1.6.0). The
+// channel names are fixed in its table: "QMI0" and "MBIM" (mhi_init.c:
+// 1790-1794, both versions; checked 2026-10-05). So controller 0 gives
+// mhi_QMI0 / mhi_MBIM, controller 1 gives mhi_QMI01 / mhi_MBIM1 — the digits
+// after the channel name are the controller, and a trailing "0" of "QMI0" is
+// not one.
+const MHI_UCI_CONTROL = /^mhi_(QMI0|MBIM)([0-9]*)$/;
+
+// { protocol, controller } for a vendor MHI control-port name, else null
+export function mhi_uci_control(name)
+{
+	let m = match(name ?? '', MHI_UCI_CONTROL);
+
+	if (!m)
+		return null;
+
+	return { protocol: (m[1] == 'MBIM') ? 'mbim' : 'qmi',
+	         controller: length(m[2]) ? +m[2] : 0 };
+};
+
+function legacy_mhi_protocol(name)
+{
+	return mhi_uci_control(name)?.protocol;
+}
+
 // A vendor fork of qmi_wwan speaks QMI just the same: Quectel ships qmi_wwan_q
 // (the driver our wwand-datapath-rmnet_nss add-on exists for), and the family
 // keeps growing. Matching the prefix rather than a fixed list matters now that
@@ -109,6 +152,10 @@ export function protocol_of(device, fx)
 	// like the RM520N on PCIe wrongly falls through to the qmi default and the
 	// daemon runs QMI CTL SYNC against an MBIM port -> sync timeout.)
 	let base = basename(sprintf('%s', device ?? ''));
+	let legacy = legacy_mhi_protocol(base);
+
+	if (legacy)
+		return legacy;
 
 	if (substr(base, 0, 4) == 'wwan') {
 		let p = wwan_port_protocol(base, fx);
@@ -171,6 +218,18 @@ export function netdev_for_device(device, fx)
 	fx = fx ?? default_fx();
 
 	let name = basename(device);
+
+	// the vendor MHI data netdev is "rmnet_mhi" + the CONTROLLER index
+	// (mhi_netdev_quectel.c:2669-2670 in 1.3.8, :2667 in 1.6.0) — the same
+	// index the control port carries, for QMI and MBIM alike
+	let mhi = mhi_uci_control(name);
+
+	if (mhi) {
+		let netdev = sprintf('rmnet_mhi%d', mhi.controller);
+
+		if (fx.access(sprintf('/sys/class/net/%s', netdev)))
+			return netdev;
+	}
 
 	// USB cdc-wdm: the datapath netdev is a sibling under the same USB interface
 	let nets = fx.lsdir(sprintf('/sys/class/usbmisc/%s/device/net', name));
@@ -645,6 +704,26 @@ export function list_present(fx)
 		});
 	}
 
+	// Legacy Quectel PCIe/MHI control ports. These are not members of the
+	// kernel wwan class, but they carry the same QMI/MBIM protocols.
+	for (let path in (fx.glob('/sys/class/mhi_uci_q/mhi_QMI*',
+	                         '/sys/class/mhi_uci_q/mhi_MBIM*') ?? [])) {
+		let name = basename(path);
+		let proto = legacy_mhi_protocol(name);
+
+		if (!proto)
+			continue;
+
+		push(out, {
+			kind: 'mhi-uci',
+			device: sprintf('/dev/%s', name),
+			protocol: proto,
+			path: sysfs_path_of(path, fx),
+			serial: null,
+			vendor_id: null, product_id: null, manufacturer: null,
+		});
+	}
+
 	for (let path in (fx.glob('/sys/class/net/*') ?? [])) {
 		let netdev = basename(path);
 
@@ -794,6 +873,16 @@ export function device_for_usb_path(usb_path, fx)
 			return sprintf('/dev/%s', p.name);
 	}
 
+	// Quectel's vendor MHI stack uses the older mhi_uci_q class instead of the
+	// kernel wwan class. Match its stable full sysfs path the same way.
+	for (let path in (fx.glob('/sys/class/mhi_uci_q/mhi_QMI*',
+	                         '/sys/class/mhi_uci_q/mhi_MBIM*') ?? [])) {
+		let name = basename(path);
+
+		if (full && full_path_matches(usb_path, sysfs_path_of(path, fx)))
+			return sprintf('/dev/%s', name);
+	}
+
 	return null;
 };
 
@@ -913,6 +1002,15 @@ export function list_devices(fx)
 	for (let path in (fx.glob('/sys/class/usbmisc/cdc-wdm*') ?? [])) {
 		let name = basename(path);
 		let proto = protocol_of(name, fx);
+
+		if (proto)
+			push(found, { device: sprintf('/dev/%s', name), protocol: proto });
+	}
+
+	for (let path in (fx.glob('/sys/class/mhi_uci_q/mhi_QMI*',
+	                         '/sys/class/mhi_uci_q/mhi_MBIM*') ?? [])) {
+		let name = basename(path);
+		let proto = legacy_mhi_protocol(name);
 
 		if (proto)
 			push(found, { device: sprintf('/dev/%s', name), protocol: proto });
@@ -1140,4 +1238,55 @@ export function resolve_control(cfg, fx)
 
 	// 5. nothing present yet
 	return null;
+};
+
+// --- QRTR (QMI over the Qualcomm IPC router, ddimension/wwand#46) -----------
+
+// QMI DMS: every modem's QMI stack hosts it, so the node that serves it IS the
+// modem. Other nodes on the same bus are the SoC's own (IPA, DPM, ...) and
+// serve low-numbered services too; mapping theirs would shadow the modem's.
+export const QRTR_SVC_DMS = 2;
+export const QRTR_SVC_WDS = 1;
+
+// The modem's node among the servers a lookup returned: `want` if it hosts
+// DMS AND WDS, else the first node that does. null = no modem on the bus
+// (yet) — NOT "any node", because a node without DMS answers no QMI wwand
+// needs. WDS too, because a booting modem registers its services one by one
+// and the QMI init reads the service list ONCE (GET_VERSION_INFO,
+// modem_init_qmi.uc): a node caught with DMS but before WDS would be brought
+// up without a data service. WDA is not required — not every modem has it —
+// so a WDA that registers after WDS is still missed until the next init.
+export function qrtr_pick_node(servers, want)
+{
+	let has = {};
+
+	for (let s in (servers ?? []))
+		if (s.service == QRTR_SVC_DMS || s.service == QRTR_SVC_WDS)
+			(has[sprintf('%d', s.node)] ??= {})[sprintf('%d', s.service)] = true;
+
+	let nodes = [];
+
+	for (let s in (servers ?? []))
+		if (has[sprintf('%d', s.node)]?.['2'] && has[sprintf('%d', s.node)]?.['1'] &&
+		    index(nodes, s.node) < 0)
+			push(nodes, s.node);
+
+	if (want != null)
+		return (index(nodes, want) >= 0) ? want : null;
+
+	return length(nodes) ? nodes[0] : null;
+};
+
+// Is a QRTR modem there? The node, or null. The presence gate for
+// `option device 'qrtr'`: QRTR has no hotplug event and no device node, so a
+// modem still booting (services not registered yet) must read as ABSENT and
+// be retried by the waiting tick, the way a missing cdc-wdm is — opening a hub
+// then would fail every request, and those failures would climb the recovery
+// ladder for a modem that is merely late. Blocks for at most `ms`; the name
+// server answers in tens of milliseconds (its end-of-list marker ends it).
+export function qrtr_probe(want, fx, ms)
+{
+	fx = fx ?? default_fx();
+
+	return qrtr_pick_node(fx.qrtr_servers?.(ms ?? 300), want);
 };

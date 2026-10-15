@@ -30,6 +30,8 @@ import * as wmsmod from 'wwand/codec/schema/wms.uc';
 import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
 import * as ext from 'wwand/codec/mbim_schema/ms_basic_connect_ext.uc';
 import * as quectel from 'wwand/codec/mbim_schema/quectel.uc';
+import * as voice from 'wwand/codec/mbim_schema/ms_voice_ext.uc';
+import * as mbimcodec from 'wwand/codec/mbim.uc';
 
 uloop.init();
 
@@ -1081,15 +1083,24 @@ assert_sim_poll_teardown();
 	m8.extra_client({ service: 0x99, messages: {} }, (e, c) => { err = e; });
 	eq(err?.error, 'service_unavailable', 'extra client (MBIM): a service the passthrough does not list is refused');
 
+	// the goodbye (before_release) runs ahead of the RELEASE_CID, once
+	let order = [];
+
+	xc.before_release = (c) => push(order, 'goodbye:' + c.cid);
+	let rel0 = length(released);
 	m8.extra_release(xc);
 	eq([ length(m8.extra_clients), released[0]?.cid ], [ 0, 7 ],
 	   'extra client (MBIM): given back, its CID released on the wire');
+	eq([ order, length(released) - rel0 ], [ [ 'goodbye:7' ], 1 ],
+	   'extra client (MBIM): before_release ran, then the release');
 
 	m8.extra_client({ service: 0x32, messages: {} }, (e, c) => { xc = c; });
+	xc.before_release = (c) => push(order, 'teardown-goodbye:' + length(filter(released, (r) => r.service == 0x32)));
 	released = [];
 	m8.teardown();
 	eq([ xc?.destroyed, length(filter(released, (r) => r.service == 0x32)) ], [ true, 1 ],
 	   'extra client (MBIM): teardown destroys it and releases its CID with the passthrough');
+	eq(order[1], 'teardown-goodbye:0', 'extra client (MBIM): ...saying goodbye before the burst');
 })();
 
 // --- the slow tick must read the serving cell BEFORE choosing a data mode ----
@@ -2455,6 +2466,102 @@ assert_ready_state_reinit(false, 'ready-state reinit/stuck');
 
 	eq(res, { resetting: true, via: 'at' }, 'hung mbim: the reset goes out over AT');
 	ok(length(writes) == 1 && index(writes[0], 'AT+CFUN=1,1') == 0, 'hung mbim: AT+CFUN=1,1 written');
+}
+
+// NITZ over the MS Voice Extensions service (libmbim 1.32.0
+// data/mbim-service-ms-voice-extensions.json): nine guint32, the zone signed
+// in practice although declared unsigned
+{
+	let wire = p32(2026) + p32(10) + p32(3) + p32(11) + p32(56) + p32(7) +
+		p32(0xFFFFFF88) + p32(0) + p32(0x20);
+	let d = mbimcodec.decode_info(voice.commands.NITZ.notification, wire);
+
+	eq([ d.year, d.month, d.day, d.hour, d.minute, d.second ], [ 2026, 10, 3, 11, 56, 7 ],
+		'mbim nitz: the date and time decode from a hand-built buffer');
+	eq(voice.tz_minutes(d.tz_offset_min), -120, 'mbim nitz: a zone west of UTC is negative');
+	eq(voice.tz_minutes(0xFFFFFFFF), null, 'mbim nitz: 0xFFFFFFFF is no zone, not -1 minute');
+
+	let clocks = [], ons = [], subs = 0, answer = null;
+	let m = modem_mbim.create({
+		id: 'm_nitz', device: '/dev/mocknitz', config: {},
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		deps: { log: () => null, on_event: () => null,
+		        set_clock: (e, tz, src, o) => push(clocks, [ e, tz, src, o?.tolerance ]) },
+	});
+	let opts_seen = null;
+
+	m.mbim = { destroy: () => null,
+		command: (svc, name, kind, args, cb, o) => { opts_seen = o; cb(answer?.err, answer?.data); },
+		on: (svc, name, cb) => push(ons, [ svc.service, name ]),
+		subscribe_events: () => subs++ };
+
+	// a firmware without the service: no subscription, and no recovery vote
+	answer = { err: { error: 'mbim', status: 9 } };
+	m._query_nitz();
+	eq([ ons, subs, clocks ], [ [], 0, [] ], 'mbim nitz: a refused query subscribes nothing');
+	eq(opts_seen?.no_recovery, true, 'mbim nitz: ...and its refusal does not vote on the channel');
+
+	// not yet attached: the modem answers zeros — subscribed, clock untouched
+	answer = { data: mbimcodec.decode_info(voice.commands.NITZ.response, p32(0) + p32(0) + p32(0) +
+		p32(0) + p32(0) + p32(0) + p32(0xFFFFFFFF) + p32(0) + p32(0)) };
+	m._query_nitz();
+	eq([ ons, subs, clocks ], [ [ [ voice.service, 'NITZ' ] ], 1, [] ],
+		'mbim nitz: an answered query subscribes the indication; zeros set no clock');
+
+	answer = { data: d };
+	m._query_nitz();
+	eq(length(ons), 1, 'mbim nitz: a second query does not stack a second handler');
+	eq(clocks, [ [ 1791028567, -120, 'NITZ', 120 ] ],
+		'mbim nitz: a real time reaches set_clock as UTC, with the NITZ tolerance');
+	eq(m.network_time?.epoch, 1791028567, 'mbim nitz: ...and is recorded for status');
+
+	m.config = { nitz_time: false };
+	m._on_nitz(d);
+	eq(length(clocks), 1, 'mbim nitz: nitz_time off leaves the clock alone');
+}
+
+// AN UNSET APN IS WRITTEN AS EMPTY, a stale one in the attach contexts is not
+// kept (deborah-3, 2026-10-04: an attach APN out of a modem's previous life
+// flapped a card) — and an init that saw no interface programs it when the
+// first one binds
+{
+	uloop.init();
+	let m = modem_mbim.create({
+		id: 'm_attach', device: '/dev/mockat', config: {},
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		deps: { log: () => null, on_event: () => null },
+	});
+	let sets = [], radio = [];
+	m.mbim = { destroy: () => null,
+		command: (svc, name, kind, args, cb) => {
+			if (name == 'LTE_ATTACH_CONFIG')
+				return cb(null, { contexts: [ { roaming: ext.ROAMING_HOME, access_string: 'stale', ip_type: 3 } ] });
+			if (name == 'RADIO_STATE')
+				push(radio, args.radio_state);
+			cb(null, { hw_radio_state: 1, sw_radio_state: args?.radio_state ?? 1 });
+		},
+		command_raw: (svc, cid, info, cb) => { push(sets, info); cb(null); },
+	};
+	m.state = 'READY';
+
+	let done_at = 0;
+	m.contexts = [];
+	m._apply_attach(() => done_at++);
+	eq([ done_at, m._attach_pending, length(sets) ], [ 1, true, 0 ],
+		'mbim attach: no interface bound yet -> pending, nothing written');
+
+	let ctx = { config: {}, modem: m, modem_event: () => null };
+	m.attach_context(ctx);
+	uloop.timer(30, () => uloop.end());
+	uloop.run();
+	eq(length(sets), 1, 'mbim attach: the first interface to bind programs it');
+	ok(length(sets) && index(sets[0], "s\x00t\x00a\x00l\x00e\x00") < 0,
+		'mbim attach: ...with the empty APN, the stale one is gone');
+	eq(m._attach_pending, false, 'mbim attach: ...and only once');
 }
 
 done('test_modem_mbim');

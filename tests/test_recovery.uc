@@ -34,6 +34,29 @@ r.on_connect_success();
 eq(r.counters.attempts, 0, 'ladder: success resets attempts');
 eq(r.counters.rung, 0, 'ladder: success resets the fired-rung index');
 
+// --- recovery_steps: the thresholds are per modem (ddimension/wwand#52) ------
+{
+	let rs = recovery.create({ id: 'steps', failreboot: 0, recovery_steps: [ 2, 4, 6 ],
+	                           fx: fakefx.create(), state_dir: '/state', log: silent });
+	rs.on_proto_success();
+
+	let acts = [];
+
+	for (let i = 1; i <= 7; i++)
+		push(acts, rs.on_attempt());
+
+	eq(acts, [ 'retry', 'opmode_cycle', 'retry', 'modem_reset', 'retry', 'usb_repower', 'retry' ],
+		'steps: radio cycle at 2, modem reset at 4, hardware at 6');
+	eq(map(recovery.rungs(0, [ 2, 4, 6 ]), (x) => x.at), [ 2, 4, 6 ],
+		'steps: the status table shows the configured thresholds');
+	eq(map(recovery.rungs(100), (x) => x.at), [ 8, 16, 24, 101 ],
+		'steps: unset keeps 8/16/24 and the reboot after failreboot');
+	eq(map(recovery.rungs(5), (x) => x.action), [ 'reboot', 'opmode_cycle', 'modem_reset', 'usb_repower' ],
+		'steps: a failreboot below the first step is listed where it fires, first');
+	eq([ recovery.steps_from([ 3 ]), recovery.steps_from([ 9, 8 ]), recovery.steps_from([]) ],
+		[ [ 3, 16, 24 ], null, null ], 'steps: steps_from merges and refuses');
+}
+
 // --- rung crossing: a counter jump must NOT skip a rung ----------------------
 // Two callers can increment the shared counter in one failed cycle, so the
 // count can leap past a threshold. The rung is a crossing, fired once, in order.

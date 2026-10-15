@@ -79,6 +79,13 @@ const LOCAL_PORTS = {
 	// first-tty heuristic used to settle on. Only the role that was actually
 	// observed is pinned: if2/if3 are left untagged rather than guessed.
 	'2c7c:6005': { '4': 'at' },
+	// Foxconn T99W175 in USB mode (MBIM composition under Qualcomm's generic
+	// 05c6:90d5, bound to `option` by hand via new_id): if0 is DIAG (protocol
+	// 0x30) and mute on AT, if4 has no bulk endpoints so its ttyUSB never
+	// opens, if5 answers AT (lsusb -v and log from ddimension/wwand#52,
+	// 2026-10-13). Only the observed role is pinned; a device sharing the
+	// generic id with another layout still gets the probing walk.
+	'05c6:90d5': { '5': 'at' },
 };
 
 // model-specific init sequences (old proto_qmi_serial_init)
@@ -126,6 +133,37 @@ export function modes_fallback_command(model)
 //   lock_5g:  'pci:arfcn:scs:band' (SA only; NSA follows the locked LTE
 //             anchor, the modem answers +CME 902 there — treated as benign)
 //   lock_persist: also store the lock in modem NV (save_ctrl)
+// Quectel SIM hot-plug detection, `option sim_detect` on the modem
+// (ddimension/openwrt-repo#3): AT+QSIMDET=<enable>,<insert_level>, both 0/1
+// (`AT+QSIMDET=?` -> (0,1),(0,1) on the RG650E and RM520N-GL, 2026-10-10;
+// both ship with 1,1). 'high' / 'low' = detection on, a card counting as
+// inserted when the tray's detect pin is high / low; 'off' = detection off.
+// THE LEVEL IS THE BOARD'S, not a preference: with the wrong one the modem
+// takes an inserted card for removed, so it is never guessed — unset leaves
+// the modem's value alone. A setting step (read first, written only when it
+// differs), so it can run on every start. Quectel only — but skipped only for
+// a manufacturer KNOWN to be another one: MBIM and NCM learn it (AT+CGMI) only
+// after this init list has run, and gating on it there would make the option
+// do nothing on exactly those backends. Whoever sets it knows the modem; a
+// non-Quectel answers ERROR and the step logs one warning.
+const SIM_DETECT = {
+	high: { set: 'AT+QSIMDET=1,1', want: '\\+QSIMDET: *1, *1' },
+	low:  { set: 'AT+QSIMDET=1,0', want: '\\+QSIMDET: *1, *0' },
+	off:  { set: 'AT+QSIMDET=0,1', want: '\\+QSIMDET: *0,' },
+};
+
+export function sim_detect_commands(info, cfg)
+{
+	let d = SIM_DETECT[cfg?.sim_detect];
+	let mfr = lc(sprintf('%s', info?.manufacturer ?? ''));
+
+	if (!d || (mfr != '' && !match(mfr, /quectel/)))
+		return [];
+
+	return [ { check: 'AT+QSIMDET?', want: d.want, set: d.set,
+	           note: sprintf('SIM detection %s', cfg.sim_detect) } ];
+};
+
 export function cell_lock_commands(cfg)
 {
 	let cmds = [];
@@ -832,12 +870,27 @@ export function create(transport, opts)
 		// RG502Q-EA, AT+QNWLOCK="common/5g" on an EG25-G, which has no 5G
 		// (ddimension/wwand#47). But a busy modem answers a bare ERROR too, so
 		// the line says only what was seen, not that the command is absent.
-		// A timeout or a +CME ERROR to a probe still warns.
+		// A timeout or a +CME ERROR to a probe still warns. A probe may name
+		// what its bare ERROR means instead (a string): the setting wording is
+		// wrong for an eUICC probe, where it means "no ISD-R on this card".
+		//
+		// AND an error the CALLER HANDLES ITSELF (send option `expect_errors`,
+		// a regex over "<error> <code>"): a +CME ERROR the caller reads as
+		// success, like Quectel's 504 "session is ongoing" to AT+QGPS=1 — the
+		// receiver is already running. Logged as a warning, it contradicted
+		// the very next line ("receiver on — was already running") on every
+		// reload (ddimension/wwand#51).
 		let declined = (cur.probe && err?.error == 'ERROR');
+		let expected = (err && cur.expect_errors &&
+			match(sprintf('%s %s', err.error ?? '', err.code ?? ''), cur.expect_errors));
+		let note = declined
+			? sprintf(' (%s)', type(cur.probe) == 'string' ? cur.probe : 'optional setting, declined by the modem')
+			: expected ? ' (an answer the caller expects)' : '';
 
-		log(!err ? 'debug' : declined ? 'info' : 'warn', sprintf('%s -> %s%s', redact(cur.cmd),
-			err ? sprintf('error: %s', err.error ?? '?') : join(' | ', lines ?? []),
-			declined ? ' (optional setting, declined by the modem)' : ''));
+		log(!err ? 'debug' : (declined || expected) ? 'info' : 'warn', sprintf('%s -> %s%s', redact(cur.cmd),
+			err ? sprintf('error: %s%s', err.error ?? '?', err.code != null ? sprintf(' %s', err.code) : '')
+			    : join(' | ', lines ?? []),
+			note));
 
 		if (cur.cb)
 			cur.cb(err, { lines: lines });
@@ -1013,7 +1066,9 @@ export function create(transport, opts)
 			cmd: cmd,
 			cb: cb,
 			timeout: o?.timeout ?? DEFAULT_TIMEOUT,
-			probe: !!o?.probe,
+			// true, or a string naming what a bare ERROR means (see finish)
+			probe: (type(o?.probe) == 'string') ? o.probe : !!o?.probe,
+			expect_errors: o?.expect_errors,
 		});
 
 		next();

@@ -6,6 +6,7 @@
 
 'use strict';
 
+import * as uloop from 'uloop';
 import * as carrier from 'wwand.carrier_config';
 
 export function install(self, o)
@@ -15,10 +16,49 @@ export function install(self, o)
 	let board = o.board;
 	let board_gpio_ok = o.board_gpio_ok;
 
-	// generic modem reset: dedicated reset GPIO first (per-modem `reset_gpio` or the
-	// board default), then backend soft reset (QMI DMS offline->reset, MBIM
-	// passthrough-DMS/AT, NCM AT+CFUN=1,1).
+	// pending reset-line fallbacks, by modem: a daemon that stops (also the
+	// non-destructive stop_local, which leaves the modem objects running)
+	// must not pulse hardware a second later, and a newer modem_reset
+	// replaces an older request's fallback rather than adding a second one
+	let fallback_timers = {};
+
+	self.cancel_reset_fallbacks = function() {
+		for (let ref, t in fallback_timers)
+			t?.cancel?.();
+
+		fallback_timers = {};
+	};
+
+	// How long a soft reset gets to take the modem off the bus before the line
+	// is pulsed: per modem `reset_fallback` (seconds), else 30 s. A rebooting
+	// USB modem leaves the bus within seconds; the one measured here came
+	// back after ~10 s (MikroTik board, reset line; daemon.uc, the comment
+	// on the usb_repower rung). Defined BEFORE modem_reset: ucode resolves a
+	// closure's lexical references at definition time.
+	let fallback_ms = (entry) => {
+		let s = +(entry.cfg?.reset_fallback ?? 0);
+
+		return ((s > 0) ? s * 1000 : (o.reset_fallback_ms ?? 30000));
+	};
+
+	// Generic modem reset: the modem's OWN reset first (QMI DMS offline->reset,
+	// MBIM passthrough-DMS/AT, NCM AT+CFUN=1,1), and the reset line (per-modem
+	// `reset_gpio` or the board default) only as the fallback.
+	//
+	// WHY THAT ORDER. A pulse of the reset line cuts the modem off mid-write:
+	// it gets no chance to flush its file system, and a modem's EFS/NV is
+	// exactly what such a cut can corrupt (ddimension/openwrt-repo#4). Its own
+	// reset is the graceful one. The line stays as the fallback for the case it
+	// exists for — a modem whose control channel no longer acts on a reset:
+	// pulsed at once when the soft reset is refused, and after `reset_fallback`
+	// (default 30 s) when the modem acknowledged it but never dropped off the
+	// bus, which a real reboot does. The recovery ladder's own hardware rung is
+	// separate and unchanged (daemon usb_repower): it is reached because the
+	// soft path has already failed.
 	self.modem_reset = function(ref, cb) {
+		fallback_timers[ref]?.cancel?.();
+		delete fallback_timers[ref];
+
 		let entry = check_modem(ref, cb);
 
 		if (!entry)
@@ -26,26 +66,65 @@ export function install(self, o)
 
 		let rg = entry.cfg?.reset_gpio ??
 			(board_gpio_ok() ? board?.profile?.reset_gpio : null);
+		let off = entry.cfg?.repower_time ? +entry.cfg.repower_time * 1000 : null;
+		let line = (rg && board) ? rg : null;
 
-		if (rg && board) {
-			let off = entry.cfg?.repower_time ? +entry.cfg.repower_time * 1000 : null;
+		let pulse = (why) => {
+			log('warn', sprintf('modem %s: modem reset by GPIO %s pulse (%s)', ref, line, why));
+			return board.reset_pulse(line, off);
+		};
 
-			log('warn', sprintf('modem %s: admin-requested modem reset (GPIO %s pulse)', ref, rg));
+		let m = entry.modem;
 
-			if (board.reset_pulse(rg, off))
-				return cb(null, { ok: true, resetting: true, action: 'gpio', gpio: rg });
+		if (type(m?.reset) != 'function') {
+			if (line && pulse('no soft reset on this backend'))
+				return cb(null, { ok: true, resetting: true, action: 'gpio', gpio: line });
 
-			// GPIO configured but unusable -> fall through to the backend reset
-			log('warn', sprintf('modem %s: reset GPIO %s unavailable, trying backend reset', ref, rg));
+			return cb({ error: 'unsupported_on_backend' });
 		}
 
-		if (type(entry.modem.reset) != 'function')
-			return cb({ error: 'unsupported_on_backend' });
+		let absent0 = m._absent_count ?? 0;
 
 		log('warn', sprintf('modem %s: admin-requested modem reset (backend)', ref));
-		entry.modem.reset((err, res) =>
-			cb(err, err ? null : { ...res, action: 'backend' }));
+
+		m.reset((err, res) => {
+			if (err) {
+				// refused or unanswered: the line is what is left
+				if (line && pulse(sprintf('soft reset failed: %J', err)))
+					return cb(null, { ok: true, resetting: true, action: 'gpio', gpio: line });
+
+				return cb(err);
+			}
+
+			if (line) {
+				let wait = fallback_ms(entry);
+				// two statements, never `(o.timer ?? uloop.timer)(…)`: a called
+				// parenthesized `??` with a member expression on the right
+				// overwrites a neighbouring local — `wait` read back as NaN
+				// below (docs/gotchas.md)
+				let arm = o.timer ?? uloop.timer;
+
+				fallback_timers[ref] = arm(wait, () => {
+					delete fallback_timers[ref];
+
+					let now = self.modems?.[ref];
+
+					// rebooted: the modem object was replaced (hotplug), or it
+					// went ABSENT since the reset was asked for
+					if (now?.modem !== m || (m._absent_count ?? 0) > absent0)
+						return;
+
+					pulse(sprintf('no reboot within %d s of the soft reset', wait / 1000));
+				});
+
+				return cb(null, { ...res, action: 'backend', fallback_gpio: line,
+					fallback_in: wait / 1000 });
+			}
+
+			cb(null, { ...res, action: 'backend' });
+		});
 	};
+
 
 	// Carrier configuration (MBN) over QMI PDC: what the modem runs, what else
 	// it has, and selecting one. `op` = 'list' | 'get' | 'set'.

@@ -508,6 +508,25 @@ function mkdeps(u, extra) {
 	ran = [];
 	d.set_clock(1789978872, null);
 	eq(length(ran), 1, 'gps clock: NITZ goes through the very same set_clock');
+
+	// THE NITZ RULE (opts.tolerance): an RTC-less box boots with its image's
+	// build date, which the "plainly unset" rule takes for sane — so NITZ
+	// steps whenever the clock is further off than the tolerance, either way
+	fake_now = 1782691200;   // 2026-06-29: a build date, a week stale
+	ran = [];
+	eq(d.set_clock(1789978872, 0, 'NITZ', { tolerance: 120 }), true,
+		'nitz clock: a clock days off is stepped although it looks sane');
+	eq(length(ran), 1, 'nitz clock: ...by one date call');
+
+	fake_now = 1789978872 + 60;
+	ran = [];
+	eq(d.set_clock(1789978872, 0, 'NITZ', { tolerance: 120 }), false,
+		'nitz clock: within the tolerance NTP\'s time stands');
+	eq(ran, [], 'nitz clock: ...and nothing runs');
+
+	fake_now = 1789978872 + 600;
+	eq(d.set_clock(1789978872, 0, 'NITZ', { tolerance: 120 }), true,
+		'nitz clock: a clock AHEAD by more than the tolerance is stepped back');
 })();
 
 
@@ -629,6 +648,84 @@ function mkdeps(u, extra) {
 	fs.unlink(dir + '/network');
 	fs.rmdir(dir + '/.save');
 	fs.rmdir(dir);
+}
+
+// --- autosetup_fill: one attempt per autosetup run --------------------------
+//
+// The table APN is written only into an interface autosetup created and only
+// while its marker is on; the run ends with the first card read whether or
+// not the table matched, so a later boot never fills anything.
+{
+	let u = fake_uci({ wwan0: { '.type': 'interface', autosetup: '1' } });
+	let d = mkdeps(u);
+
+	eq(d.autosetup_fill('wwan0', { apn: 'internet.telekom', pdp_type: 'ipv4' }), true, 'autosetup_fill: a match is written');
+	eq([ u.state.wwan0.apn, u.state.wwan0.pdp_type, u.state.wwan0.autosetup ], [ 'internet.telekom', 'ipv4', null ],
+	   'autosetup_fill: ...with its PDP type, and the marker is gone');
+	eq(d.autosetup_fill('wwan0', { apn: 'other' }), false, 'autosetup_fill: never a second time');
+
+	u = fake_uci({ wwan0: { '.type': 'interface', autosetup: '1' } });
+	d = mkdeps(u);
+	eq(d.autosetup_fill('wwan0', null), false, 'autosetup_fill: no match writes nothing');
+	eq([ u.state.wwan0.apn, u.state.wwan0.autosetup, u.commits ], [ null, null, 1 ],
+	   'autosetup_fill: ...but ends the run (marker off, committed)');
+
+	u = fake_uci({ wwan0: { '.type': 'interface', autosetup: '1', apn: 'mine' } });
+	d = mkdeps(u);
+	eq(d.autosetup_fill('wwan0', { apn: 'internet.telekom' }), false, 'autosetup_fill: an APN the operator set meanwhile wins');
+	eq([ u.state.wwan0.apn, u.state.wwan0.autosetup ], [ 'mine', null ], 'autosetup_fill: ...and the run is over');
+}
+
+// --- the netifd device detour ----------------------------------------------
+//
+// netifd frees a device object only once nothing uses it, and that is the one
+// way its stale parent record goes: point the interface elsewhere, reload,
+// point it back, reload. The device seen by netifd at each reload is recorded
+// here, and so is what a half-done detour leaves for the next start.
+{
+	let u = fake_uci({ wan: { '.type': 'interface', proto: 'wwand', device: 'wwand0' } });
+	let seen = [];
+	let conn = { defer: (o, m, a, cb) => { push(seen, [ m, u.state.wan.device, u.state.wan.wwand_detour ]); cb(0); } };
+	let iso = 0;
+	let d = mkdeps(u, { conn: conn, cursor_isolated: () => { iso++; return u.cursor(); } });
+	let res = 'pending';
+
+	d.netifd_device_detour('wan', (err) => { res = err; });
+	eq(seen, [ [ 'reload', 'wwand-detour', 'wwand0' ], [ 'reload', 'wwand0', null ] ],
+	   'detour: reload with the placeholder (original kept aside), then with the device back');
+	eq([ res, u.state.wan.device, u.state.wan.wwand_detour, u.commits ], [ null, 'wwand0', null, 2 ],
+	   'detour: done — the device is back, the marker gone, two commits');
+	ok(iso >= 2, 'detour: through the isolated cursor, never the shared one');
+
+	// a daemon that died between the reloads: the next start puts it back
+	u = fake_uci({ wan: { '.type': 'interface', device: 'wwand-detour', wwand_detour: 'wwand0' },
+	               lan: { '.type': 'interface', device: 'br-lan' } });
+	eq(depsmod.detour_restore(u.cursor()), [ 'wan' ], 'detour_restore: the half-done interface is named');
+	eq([ u.state.wan.device, u.state.wan.wwand_detour, u.state.lan.device, u.commits ], [ 'wwand0', null, 'br-lan', 1 ],
+	   'detour_restore: its device is back, nothing else touched');
+	eq(depsmod.detour_restore(u.cursor()), [], 'detour_restore: nothing to do is nothing done');
+	eq(u.commits, 1, 'detour_restore: ...and no commit for it');
+
+	// no device to detour around
+	u = fake_uci({ wan: { '.type': 'interface', proto: 'wwand' } });
+	d = mkdeps(u, { conn: conn });
+	d.netifd_device_detour('wan', (err) => { res = err; });
+	eq([ res?.error, u.commits ], [ 'no_device', 0 ], 'detour: an interface without a device is refused, untouched');
+}
+
+// Vendor MHI control names are persisted as /dev paths without a board profile.
+{
+	let u = fake_uci({});
+	let d = mkdeps(u);
+	ok(d.autosetup_create('mhi_QMI01', {}), 'autosetup: vendor MHI control accepted');
+	eq(u.state.wwmodem_auto?.device, '/dev/mhi_QMI01', 'autosetup: vendor MHI /dev path');
+
+	// a name the driver does not give a control port is not turned into one
+	u = fake_uci({});
+	d = mkdeps(u);
+	d.autosetup_create('mhi_QMI_debug', {});
+	ok(u.state.wwmodem_auto?.device != '/dev/mhi_QMI_debug',
+		'autosetup: a non-control vendor MHI node is not stored as a /dev control device');
 }
 
 done('test_deps');

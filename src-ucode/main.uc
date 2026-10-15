@@ -208,6 +208,20 @@ function run_daemon()
 		exit(1);
 	}
 
+	// a netifd device detour a previous daemon left half-done (deps.uc
+	// netifd_device_detour): the placeholder must not reach the config parse
+	{
+		fs.mkdir('/tmp/wwand');
+		fs.mkdir('/tmp/wwand/uci');
+
+		let restored = depsmod.detour_restore(libuci.cursor(null, '/tmp/wwand/uci'));
+
+		if (length(restored)) {
+			logmod.log('notice', 'restored the device of %s after an unfinished netifd device detour', join(', ', restored));
+			conn.defer('network', 'reload', {}, () => null);
+		}
+	}
+
 	let parsed = load_config();
 
 	// logging: primary sink is /dev/log with real syslog priorities (native seam
@@ -297,6 +311,13 @@ function run_daemon()
 			read_config: load_config,
 			// a fresh cursor per call, as the inline libuci.cursor() sites were
 			cursor: () => libuci.cursor(),
+			// a cursor with its own delta directory: what it commits is only
+			// what it changed, never an operator's staged edits
+			cursor_isolated: () => {
+				fs.mkdir('/tmp/wwand');
+				fs.mkdir('/tmp/wwand/uci');
+				return libuci.cursor(null, '/tmp/wwand/uci');
+			},
 		}),
 	});
 

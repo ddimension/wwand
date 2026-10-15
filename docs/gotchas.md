@@ -77,6 +77,63 @@ HW-proven on the EG06. Structurally blocked in `qmi_over_mbim.send`.
 
 ---
 
+### A STOP_NETWORK that answered success has ended the session
+**Not on every firmware.** A Sierra MC7710 (SWI9200X_03.05.29) acknowledges
+the stop and keeps the LTE default bearer up: packet status still reads
+`connected`, with the same address, and every later START_NETWORK goes
+unanswered (newer firmware says NO_EFFECT) until a radio cycle. So a dial
+asks GET_PACKET_SERVICE_STATUS first and adopts a running session (unmuxed,
+alone on the modem), an unanswered dial still cycles the radio as the safety
+net, and wwand never stops a live session for its own bookkeeping.
+
+It is NOT client-ID exhaustion, though it looks like it: uqmi run beside wwand
+reports "Failed to connect to service" because wwand reads the same cdc-wdm
+and swallows uqmi's CTL answer — the modem had in fact allocated the CID.
+
+*Evidence:* deborah-3, 2026-10-04 — with wwand stopped and uqmi alone, status
+`connected` and the "stopped" address after the acknowledged stop; wwand's
+CID log showed every release acknowledged and at most two WDS clients. Guarded
+in `tests/test_context` ("adopt-running", "dial-when-idle") and
+`tests/test_daemon` ("unanswered dial", "reset of a pending setup").
+
+---
+
+### A netdev's `device` link shows which bus the modem is on
+**Only after resolving it.** The link the kernel writes is short and relative:
+`../../../3-1:1.4` for a usbnet netdev, `../../../mhi0_IP_HW0` for an mhi_net
+one. The USB interface token happens to be in the first; for MHI the link names
+the MHI client device and nothing above it, so a `readlink` never shows the
+PCI address — the netdev hangs off the MHI client, whose parent is the
+controller, whose parent is the PCI function. `netlink.ep_type_number` read the
+link text and so could not have recognised a real MHI modem as PCIe; its test
+used a full path no kernel writes. Resolve the link (`realpath`) and match
+that; keep the link text as a second candidate.
+
+*Evidence:* `drivers/net/mhi_net.c:363` (SET_NETDEV_DEV on the MHI client),
+`drivers/bus/mhi/host/init.c:1254-1260` (the parent chain), linux 6.18.41;
+the usbnet short form HW-seen on the RG650E. Guarded in `tests/test_datapath`
+("the link text alone cannot tell an MHI netdev's bus") (2026-10-04).
+
+---
+
+### A client id is enough to tell QMI clients apart
+**Not on QRTR.** Over QMUX the client id is in every frame. Over QRTR there is
+no QMUX header: a service tells its clients apart by the SOURCE (node, port) of
+their datagrams, so one socket is one client whatever cid the hub hands out.
+The first QRTR hub (#46) gave every client of a service one cid on one socket,
+and passed its hardware test, because that test had one IPv4 session — wwand
+runs several WDS clients at once (the modem's own, one per IP family and
+attempt), and on one socket they share the modem-side session, IP family and
+mux binding. One socket per emulated ALLOCATE_CID, as the kernel's own QMI
+clients do (`net/qrtr/qmi_interface.c`, a socket per `qmi_handle`).
+
+*Evidence:* `include/uapi/linux/qrtr.h` (no client field anywhere), linux
+6.18.41; `context.uc` activate_family (a fresh WDS client per family and
+attempt). Guarded in `tests/test_qmi_over_qrtr` ("...and a socket each")
+(2026-10-04).
+
+---
+
 ### `/sys/bus/usb/devices/$DEVPATH` addresses a USB interface
 **Neither half of that is true, and both were believed at once** in the E182E
 hotplug binder.
@@ -819,3 +876,30 @@ as no model.
 *Evidence:* ddimension/wwand#45, reporter logs 2026-09-29/30 (`vendor recipe:
 generic — no manufacturer and model ?`, `cgmi -, cgmm FM350-GL`, `cgmm Fibocom
 Wireless Inc.`); #32 for the same refusal after a slot switch.
+
+## A called `(a ?? b.c)(…)` misplaces the stack
+
+Calling a parenthesized `??` whose right operand is a member expression
+(`b.c`, a module or an object property), while the left operand is SET,
+leaves the interpreter's stack one slot off. No error; a neighbouring value
+is simply wrong:
+
+| form | result |
+|---|---|
+| `let r = (a ?? b.c)(w);` | `r` is **null**, the call's value lands in another local |
+| bare statement `(a ?? b.c)(w);` | the next local is **overwritten** (null, or NaN after arithmetic) |
+| `return (a ?? b.c)(w)` / arrow body | correct |
+| identifier on the right (`(a ?? print)`) or left operand null | correct |
+
+Identical on the host ucode and on ucode-2026.07.09~b885dd0f (RG650E/245,
+2026-10-10; the table is that run). Because the fallback path works, a test
+that only exercises the fallback passes. Found three times:
+- the netifd device detour in deps.uc got a null cursor (assignment form, 2026-10-04);
+- daemon probe_euicc's state object was null in its callback (bare form, 2026-10-01 —
+  worked around then without the cause);
+- hwops.modem_reset read its `wait` back as NaN (bare form, 2026-10-10).
+
+Write it as two statements (`let mk = a ?? b.c; mk(w);`), as transport.uc
+already did. `tools/check-ucode-pitfalls.py` fails on every called
+parenthesized `??` that is not a `return` / arrow body, and runs in
+`run_tests.sh`.

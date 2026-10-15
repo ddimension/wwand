@@ -100,6 +100,15 @@ export function install(self, o)
 		if (!m)
 			return false;
 
+		// another CARD, not another profile on the same one: what its ISD-R
+		// says has to be asked again (daemon.uc probe_euicc keeps the answer
+		// per modem, since a profile switch does not change the chip)
+		let ent = self.modems[ref];
+
+		ent._euicc_st = null;
+		ent._euicc_for = null;
+		ent.euicc = null;
+
 		// a different slot may hold a different eUICC — drop the cached
 		// eSIM/APDU backends so they are re-probed, and clear the
 		// once-per-object refresh guard + the stale surface data
@@ -118,7 +127,7 @@ export function install(self, o)
 		// nothing on either path ever clears them (evidence:
 		// ddimension/wwand#39, NR7101).
 		//
-		// modem.uc:1637-1642 already states the rule — card-side
+		// modem.uc:1626-1631 already states the rule — card-side
 		// diagnostics belong to the card we were talking to — and acts on
 		// it during teardown. This path is the other place a card changes
 		// underneath us, and it did not.
@@ -156,7 +165,7 @@ export function install(self, o)
 		// belongs to this module, not to the modem, so it outlives the
 		// teardown and would talk to a client that is mid-initialisation.
 		// `_gen` is the counter both backends already bump on teardown
-		// (modem.uc:1589, modem_mbim.uc:2592); NCM has none and degrades to
+		// (modem.uc:1578, modem_mbim.uc:2592); NCM has none and degrades to
 		// the identity check, which is the case its reset already answers.
 		let gen = m._gen;
 		// ...and a card change of its own: a remote SIM that comes and goes
@@ -231,6 +240,32 @@ export function install(self, o)
 
 			log('notice', sprintf('modem %s: switched to SIM slot %d', ref, physical));
 			cb(null, { slot: physical });
+		});
+	};
+
+	// Re-initialise the SIM in the active slot without resetting the modem:
+	// power the card off and on (sim.power_cycle — QMI UIM, MBIM UICC reset,
+	// or an AT CFUN cycle), then re-read it as after a slot switch. For a card
+	// swapped in a slot the modem does not watch (ddimension/openwrt-repo#3);
+	// far lighter than a modem reset. A data session drops and comes back by
+	// the normal transient-loss path.
+	self.modem_sim_reinit = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		let m = entry.modem;
+		let slot = +(m.active_slot ?? m.config?.sim_slot ?? 1) || 1;
+
+		log('notice', sprintf('modem %s: re-initialising the SIM in slot %d', ref, slot));
+
+		sim.power_cycle(m, slot, (err) => {
+			if (err)
+				return cb({ error: 'sim_transport', detail: err });
+
+			self.card_changed(ref, sprintf('SIM slot %d re-initialised', slot));
+			cb(null, { slot: slot });
 		});
 	};
 

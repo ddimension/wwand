@@ -34,6 +34,9 @@ eq(nmea.parse_sentence('garbage'), null, 'sentence: not NMEA at all');
 eq(nmea.parse_sentence(''), null, 'sentence: empty line');
 // proprietary sentences carry no 2+3 talker/type and must not be forced into one
 eq(nmea.parse_sentence('$PQXFI,1,2*3C'), null, 'sentence: a proprietary sentence is skipped');
+eq(nmea.create().feed('$PQXFI,082112.0,5208.613543,N,00857.854813,E,102.9,3.2,4.1,0.4*5D', 1), false, 'feed: a valid proprietary sentence is false (NMEA, not ours), not null');
+eq(nmea.create().feed('$PQXFI,082112.0,5208.613543,N,00857.854813,E,102.9,3.2,4.1,0.4*00', 1), null, 'feed: ...one with a bad checksum is null');
+eq(nmea.create().feed('$GNGNS,082112.00,5208.613543,N,00857.854813,E,AAN,08,0.5,102.9,47.0,,,V*60', 1), false, 'feed: a valid GNS (not read here) is false too');
 
 // A COORDINATE PAST THE POLE IS REFUSED. The checksum is correct, so this
 // pins the RANGE guard and not the framing — the first version of this check
