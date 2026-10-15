@@ -1403,6 +1403,12 @@ normally at that point).
   first ones replacing the defaults). `recovery.uc steps_from` / per-instance
   RUNGS, `config.uc steps_opt` (refused with a warning, never half-applied),
   status ladder (`recovery.rungs(failreboot, steps)`), LuCI modem option.
+- **HW 2026-10-15, eSIM:** 245 (RG650E, QMI): with the eUICC in physical slot 2
+  active, QMI logical channels need logical slot 1 — fixed (`sim.uc
+  uim_slot`, switch records the active slot). 3.93 (RM520N-GL): eSIM over QMI
+  and over **native MBIM UICC** (first HW proof: open/APDU/close, EID +
+  profiles), named open failure `select_failed`/SW 6A82 on a plain SIM; the
+  MBIM group close is refused (INVALID_LOGICAL_CHANNEL) by that firmware.
 - **PR #56 (xhudan) taken with a follow-up:** QMI-context AT+QENG goes through
   telemetry_at (his commit). telemetry_at retired on ERROR only, and the case
   was timeouts — so a timeout now counts when the port answered another

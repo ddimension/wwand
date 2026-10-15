@@ -1477,13 +1477,14 @@ export const ISDR_AID = 'a0000005591010ffffffff8900000100';
 // physical slot holds it: with the eUICC in physical slot 2 active, an RG650E
 // opens the ISD-R on slot 1 and answers NOT_SUPPORTED (94) on slot 2
 // (HW-observed on 245, 2026-10-15) — the eSIM page asked for "slot 2" and got
-// nothing. The ACTIVE SLOT AS LAST SWITCHED (modem.active_slot, set by
-// switch_slot) decides first: the slot status list (modem.slots, simops
-// modem_sim_slots) is read once per registration and still showed slot 2
-// inactive after the switch to it — trusting it sent "2" again. The list gives
-// the logical number only for a slot it agrees is active; otherwise the active
-// physical slot is logical 1 (one executor). Any other slot passes through
-// unchanged: a card that is not active is not reachable, and the modem says so.
+// nothing. The slot status list (modem.slots, simops modem_sim_slots) gives
+// the logical number of a slot it says is ACTIVE — on a multi-executor modem
+// that can be 2 for another active slot. Without such a row, the active slot
+// as last switched (modem.active_slot) is logical 1: the list is read once per
+// registration, and before the switch updated it (simops modem_sim_switch_slot)
+// it still showed slot 2 inactive after the switch to it. Any other slot passes
+// through unchanged: a card that is not active is not reachable, and the
+// modem says so.
 function uim_slot(modem, slot)
 {
 	let n = +slot;
@@ -1493,10 +1494,12 @@ function uim_slot(modem, slot)
 		if (+s.physical == n && s.active && s.logical_slot != null)
 			listed = +s.logical_slot;
 
-	if (modem?.active_slot != null)
-		return (n == +modem.active_slot) ? (listed ?? 1) : n;
+	// a mapping the list states for an ACTIVE slot wins — on a modem with
+	// several executors another active physical slot is not logical 1
+	if (listed != null)
+		return listed;
 
-	return listed ?? n;
+	return (modem?.active_slot != null && n == +modem.active_slot) ? 1 : n;
 }
 
 // A DISCOVERY OPEN IS NOT A CHANNEL FAULT. Opening the ISD-R is how the

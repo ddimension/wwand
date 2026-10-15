@@ -303,7 +303,11 @@ export function create(opts)
 				// earlier run left open in our channel group (mbim_backend.uc
 				// UICC_CHANNEL_GROUP says why the group is ours alone).
 				// Best-effort — a modem without the service refuses, and that
-				// refusal says nothing about the channel. Opens that arrive
+				// refusal says nothing about the channel. Not every firmware
+				// takes the group form either: an RM520N-GL (MBIMEx 3.0)
+				// answers it INVALID_LOGICAL_CHANNEL (0x87430003) instead of
+				// the 90 00 the text asks for, so on that firmware leftovers stay until
+				// the card resets (HW-observed on 3.93, 2026-10-15). Opens that arrive
 				// WHILE it runs wait for it: started beside it, their channel
 				// would be one of those it closes.
 				if (self._uicc_sweep == 'done')

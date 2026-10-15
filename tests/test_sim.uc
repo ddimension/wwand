@@ -1940,9 +1940,15 @@ let mk_modem = (lines) => ({
 	let stale = [ { physical: 1, active: true, logical_slot: 1 },
 	              { physical: 2, active: false, logical_slot: 1 } ];
 	sim.apdu_open(mk({ slots: stale, active_slot: 2 }), 2, sim.ISDR_AID, () => null);
+	// two executors: physical 1 active as logical 2 — the list wins over
+	// "the switched slot is logical 1"
+	let dual = [ { physical: 1, active: true, logical_slot: 2 },
+	             { physical: 2, active: true, logical_slot: 1 } ];
+	sim.apdu_open(mk({ slots: dual, active_slot: 2 }), 1, sim.ISDR_AID, () => null);
 	eq(asked, [ [ 'OPEN_LOGICAL_CHANNEL', 1 ], [ 'SEND_APDU', 1 ], [ 'LOGICAL_CHANNEL', 1 ],
-	            [ 'OPEN_LOGICAL_CHANNEL', 1 ], [ 'OPEN_LOGICAL_CHANNEL', 1 ], [ 'OPEN_LOGICAL_CHANNEL', 1 ] ],
-		'uim slot: the active physical slot 2 is logical 1 for open/send/close, a stale list notwithstanding');
+	            [ 'OPEN_LOGICAL_CHANNEL', 1 ], [ 'OPEN_LOGICAL_CHANNEL', 1 ], [ 'OPEN_LOGICAL_CHANNEL', 1 ],
+	            [ 'OPEN_LOGICAL_CHANNEL', 2 ] ],
+		'uim slot: active physical 2 is logical 1 (stale list notwithstanding); a listed second executor keeps its logical 2');
 }
 
 sim.apdu_open(mk_modem([ '1' ]), 1, sim.ISDR_AID, (err, ch) => {
