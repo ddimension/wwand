@@ -238,6 +238,29 @@ export function install(self, o)
 
 			self.card_changed(ref, sprintf('SIM slot %d', physical));
 
+			// THE SWITCH KNOWS WHICH SLOT IS ACTIVE NOW, so say it. card_changed
+			// forgets the old one (it serves re-inits and plugin swaps too,
+			// where the slot is not known), and the slot status list is read
+			// once per registration — left as it was, it still showed the slot
+			// switched away from as active. The APDU layer maps the physical
+			// slot to QMI's logical one by exactly these two (sim.uc uim_slot):
+			// with the eUICC switched in, the eSIM page addressed "slot 2" and
+			// QMI refused it (NOT_SUPPORTED) until a restart re-read the list
+			// (HW-seen on 245, 2026-10-15).
+			let m = entry.modem;
+
+			m.active_slot = +physical;
+
+			// the target is now logical slot 1 — what switch_slot asked for
+			// (SWITCH_SLOT { logical: 1 }); the logical number the list held
+			// for it while inactive is not to be trusted
+			for (let sl in (m.slots ?? [])) {
+				sl.active = (+sl.physical == +physical);
+
+				if (sl.active)
+					sl.logical_slot = 1;
+			}
+
 			log('notice', sprintf('modem %s: switched to SIM slot %d', ref, physical));
 			cb(null, { slot: physical });
 		});
