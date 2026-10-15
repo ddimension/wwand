@@ -1403,6 +1403,11 @@ normally at that point).
   first ones replacing the defaults). `recovery.uc steps_from` / per-instance
   RUNGS, `config.uc steps_opt` (refused with a warning, never half-applied),
   status ladder (`recovery.rungs(failreboot, steps)`), LuCI modem option.
+- **PR #56 (xhudan) taken with a follow-up:** QMI-context AT+QENG goes through
+  telemetry_at (his commit). telemetry_at retired on ERROR only, and the case
+  was timeouts — so a timeout now counts when the port answered another
+  command since this one last went silent; 5 retire it (`modem_common.uc`
+  AT_RETIRE_SILENT_AFTER). A port that answers nothing retires nothing.
 - **Issue round 2026-10-15:** #55 (SG500M2-X, MBIM) — *Reset to defaults*
   sent bands 1–63/1–79 with the RAT reset in one SET; the firmware refused the
   bands (qmi 3) and with them the RAT reset, silently. Now DMS Get Band
