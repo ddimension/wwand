@@ -111,6 +111,9 @@ function handlers()
 		GET_CURRENT_DATA_BEARER_TECHNOLOGY: {
 			current: { network_type: 8, rat_mask: (1 << 5), so_mask: 0 },
 		},
+		// DMS Get Band Capabilities (dms.uc): LTE 3/8/20 and n78, as a list
+		GET_BAND_CAPABILITIES: { lte_band_capability: 0x80084,
+			ext_lte_band_capability: [ 20, 3, 8 ], nr5g_band_capability: [ 78 ] },
 		GET_SYSTEM_SELECTION_PREFERENCE: {
 			mode_preference: 0x18, roaming_preference: 0xFF,
 			lte_band_preference: 524420, usage_preference: 1,

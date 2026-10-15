@@ -211,7 +211,27 @@ export function install(self, o)
 
 				data.registered_plmn = reg_plmn(entry.modem);
 
-				cb(null, data);
+				// what the modem SUPPORTS, for "Reset to defaults": the
+				// extended LTE list when there is one (it reaches past band
+				// 64), else the 64-bit LTE mask; NR5G only as a list. Absent
+				// when the modem cannot say — the caller then keeps its own
+				// default. Best-effort: never fails the read it rides on.
+				if (type(entry.modem.band_caps) != 'function')
+					return cb(null, data);
+
+				entry.modem.band_caps((cerr, c) => {
+					if (!cerr && c) {
+						let lte = length(c.ext_lte_band_capability ?? [])
+							? sort([ ...c.ext_lte_band_capability ], (a, b) => a - b)
+							: (c.lte_band_capability != null) ? mask_to_bands([ c.lte_band_capability ]) : [];
+						let nr = sort([ ...(c.nr5g_band_capability ?? []) ], (a, b) => a - b);
+
+						if (length(lte) || length(nr))
+							data.band_caps = { lte: lte, nr5g: nr };
+					}
+
+					cb(null, data);
+				});
 			});
 		});
 	};
@@ -974,11 +994,45 @@ export function install(self, o)
 				// firmware accepts is not something we can probe up front.
 				let send;   // forward-declared (self-referencing arrow)
 
-				send = (payload, applied, alt) => {
+				// the keys that are not band lists — the RAT, usage and roaming
+				// preferences
+				let band_key = (k) => (k == 'lte_band_preference' || k == 'ext_lte_band' ||
+				                       k == 'nr5g_sa_band' || k == 'nr5g_nsa_band');
+
+				send = (payload, applied, alt, split) => {
 					nas.request('SET_SYSTEM_SELECTION_PREFERENCE', payload, (err) => {
 						if (err) {
-							if (!alt)
+							// A REFUSED BAND SET MUST NOT TAKE THE REST WITH IT.
+							// One request carries everything, so a firmware that
+							// refuses the band masks (qmi code 3 on an SG500M2-X,
+							// ddimension/wwand#55) also dropped the RAT reset
+							// beside them — and said nothing. The non-band keys go
+							// once more on their own; the result names what was
+							// refused. Only on a REFUSAL (a QMI error answer): after
+							// a timeout or a cancellation nothing is known about
+							// what the modem took, and calling the bands refused
+							// would be a guess.
+							if (!alt && !split && err?.error == 'qmi') {
+								let rest = filter(applied, (k) => !band_key(k));
+								let bands = filter(applied, band_key);
+
+								if (length(rest) && length(bands)) {
+									log('warn', sprintf('modem %s: firmware refused the band settings (qmi code %s) — applying %s on their own',
+										ref, err.code ?? '?', join(' ', rest)));
+
+									let only = { change_duration: payload.change_duration };
+
+									for (let k in rest)
+										only[k] = payload[k];
+
+									return send(only, rest, null, bands);
+								}
+							}
+
+							if (!alt) {
+								log('warn', sprintf('modem %s: system selection preference refused: %J', ref, err));
 								return cb({ error: 'qmi', detail: err });
+							}
 
 							log('notice', sprintf('modem %s: firmware rejected %s (qmi code %s) — retrying with %s',
 								ref, alt.sent, err.code ?? '?', alt.spare));
@@ -997,6 +1051,16 @@ export function install(self, o)
 							q.settings_deferred ? ' (deferred until modem reset)' : ''));
 
 						let res = { applied: applied };
+
+						// named as the caller sent them (band lists), not by
+						// the TLV that happened to carry them last
+						if (split) {
+							res.refused = uniq(map(split, (k) =>
+								(k == 'lte_band_preference' || k == 'ext_lte_band') ? 'lte_bands'
+								: (k == 'nr5g_sa_band') ? 'nr5g_sa_bands'
+								: (k == 'nr5g_nsa_band') ? 'nr5g_nsa_bands' : k));
+							res.partial = true;
+						}
 
 						if (q.settings_deferred) {
 							res.deferred = true;

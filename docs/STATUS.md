@@ -1403,6 +1403,15 @@ normally at that point).
   first ones replacing the defaults). `recovery.uc steps_from` / per-instance
   RUNGS, `config.uc steps_opt` (refused with a warning, never half-applied),
   status ladder (`recovery.rungs(failreboot, steps)`), LuCI modem option.
+- **Issue round 2026-10-15:** #55 (SG500M2-X, MBIM) — *Reset to defaults*
+  sent bands 1–63/1–79 with the RAT reset in one SET; the firmware refused the
+  bands (qmi 3) and with them the RAT reset, silently. Now DMS Get Band
+  Capabilities (`dms.uc`, `band_caps`) gives the real band list, and a refused
+  band set is re-sent without bands (`partial`, `refused`). #57 (EG12-EA) —
+  the eUICC probe stops at the first ANSWERED refusal (`sim.uc
+  refused_answer`; QMI transient codes excluded), retries only when the
+  transport could not ask; a card change re-asks. #52 — MBIM identity asks
+  AT+GMI first (T99W175 answers AT+CGMI without OK).
 - **MS UICC text pass (2026-10-14):** MBIM ready state 7 "no eSIM profile
   enabled" stops at the SIM step (`no_esim_profile`, no ladder) and resumes by a
   10 s ready-state poll (the indication handler only exists after

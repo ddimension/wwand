@@ -55,6 +55,9 @@ function handlers()
 			current_plmn: { mcc: 262, mnc: 1, description: 'Testnet' },
 		},
 		// network_selection present (0 = automatic) so selection_mode is derived
+		// DMS Get Band Capabilities (dms.uc): LTE 3/8/20 and n78, as a list
+		GET_BAND_CAPABILITIES: { lte_band_capability: 0x80084,
+			ext_lte_band_capability: [ 20, 3, 8 ], nr5g_band_capability: [ 78 ] },
 		GET_SYSTEM_SELECTION_PREFERENCE: {
 			mode_preference: 0x18, roaming_preference: 0xFF,
 			lte_band_preference: 524420, usage_preference: 1,
@@ -145,6 +148,8 @@ run = () => {
 		eq(s.mode_preference, 0x18, 'get_settings: mode pref via with_nas');
 		eq(s.lte_bands, [ 3, 8, 20 ], 'get_settings: band list decoded');
 		eq(s.selection_mode, 'auto', 'get_settings: selection mode derived');
+		eq(s.band_caps, { lte: [ 3, 8, 20 ], nr5g: [ 78 ] },
+			'get_settings: the supported bands (DMS band capabilities), sorted');
 		eq(s.registered_plmn, { mcc: 262, mnc: 1, name: 'Testnet' },
 			'get_settings: registered plmn (protocol-neutral)');
 
@@ -701,6 +706,46 @@ let with_release = (m, on_event) => {
 	fake3.modem_attach('n', (e, r) => { got = r; });
 	ok(got != null && got.registered === false && now <= 60000 + 12000,
 		sprintf('wait_registered: gives up at the deadline (%d ms, %d queries)', now, queries));
+}
+
+// --- a refused band set does not take the RAT reset with it (#55) ----------
+// One SET carries everything; a firmware that refuses the band masks (qmi code
+// 3 on an SG500M2-X) used to drop mode/usage/roaming beside them, silently.
+// The non-band keys go once more on their own, and the answer says so.
+{
+	let sets = [];
+	let nas = { request: (name, args, cb) => {
+		if (name == 'GET_SYSTEM_SELECTION_PREFERENCE')
+			return cb(null, { mode_preference: 0x10, usage_preference: 1, roaming_preference: 1,
+			                  lte_band_preference: 4 });
+
+		push(sets, sort(filter(keys(args), (k) => k != 'change_duration')));
+
+		// any band key: refused
+		if (args.lte_band_preference != null || args.ext_lte_band != null ||
+		    args.nr5g_sa_band != null || args.nr5g_nsa_band != null)
+			return cb({ error: 'qmi', code: 3 });
+
+		cb(null, {});
+	} };
+	let fake = {};
+
+	netsel_ops.install(fake, {
+		log: () => null,
+		check_modem: (ref, cb) => { return { modem: { info: {}, with_nas: (f) => f(nas) } }; },
+		reg_plmn: () => null,
+	});
+
+	let res = null;
+
+	fake.modem_set_settings('m', { mode_preference: 0x18, usage_preference: 2,
+	                               roaming_preference: 255, lte_bands: [ 1, 3 ] }, (e, r) => { res = [ e, r ]; });
+	eq(res?.[0], null, 'band refusal: not an error when the rest was applied');
+	eq([ res?.[1]?.partial, res?.[1]?.refused, sort(res?.[1]?.applied ?? []) ],
+		[ true, [ 'lte_bands' ], [ 'mode_preference', 'roaming_preference', 'usage_preference' ] ],
+		'band refusal: mode/usage/roaming applied on their own, the bands named as refused');
+	eq(sets[length(sets) - 1], [ 'mode_preference', 'roaming_preference', 'usage_preference' ],
+		'band refusal: the last SET carries no band key');
 }
 
 wait_ready();

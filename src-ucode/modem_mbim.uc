@@ -570,22 +570,45 @@ export function create(opts)
 	// side channel (AT+CGMI), for parity with the QMI DMS / NCM CGMI identity.
 	// Fully non-blocking: no AT, an error or a timeout just leaves it null and
 	// proceeds (some MBIM firmwares answer AT slowly or not at all).
+	//
+	// AT+GMI (V.250) FIRST, AT+CGMI (27.007) only if that is refused: a
+	// Foxconn T99W175 answers AT+CGMI with the name and no final OK, so the
+	// request ran into its timeout at every start, while AT+GMI ends in OK
+	// (terminal capture in ddimension/wwand#52, 2026-10-14). And a name that
+	// arrived before a timeout is taken: the answer is there, only its end
+	// is missing.
 	step_at_ident = () => {
 		if (self.info.manufacturer || !self.at)
 			return step_datapath();
 
-		self.at.send('AT+CGMI', (err, res) => {
-			if (!err)
-				for (let l in (res?.lines ?? [])) {
-					let t = trim(replace(l, /^\+CGMI:\s*/, ''));
+		let take = (res) => {
+			for (let l in (res?.lines ?? [])) {
+				let t = trim(replace(l, /^\+C?GMI:\s*/, ''));
 
-					if (t != '' && t != 'OK' && !match(t, /^[+^]/)) {
-						self.info.manufacturer = t;
-						break;
-					}
+				if (t != '' && t != 'OK' && !match(t, /^[+^]/) && !match(t, /^AT/i)) {
+					self.info.manufacturer = t;
+					return true;
 				}
+			}
 
-			step_datapath();
+			return false;
+		};
+
+		self.at.send('AT+GMI', (err, res) => {
+			if ((!err || err.error == 'timeout') && take(res))
+				return step_datapath();
+
+			// CGMI only when GMI was REFUSED; a timeout, a closed port or a
+			// cancelled request says nothing a second command would change
+			if (err?.error != 'ERROR' && err?.error != 'cme' && err?.error != 'cms')
+				return step_datapath();
+
+			self.at.send('AT+CGMI', (e2, r2) => {
+				if (!e2 || e2.error == 'timeout')
+					take(r2);
+
+				step_datapath();
+			}, { timeout: 3000 });
 		}, { timeout: 3000 });
 	};
 
@@ -2618,6 +2641,14 @@ export function create(opts)
 		});
 	};
 
+	// the bands the modem supports, over the passthrough's DMS (dms.uc
+	// GET_BAND_CAPABILITIES); cb(err, raw response) — the QMI twin is
+	// modem.uc band_caps
+	self.band_caps = function(cb) {
+		pt_dms((dms, done) => dms.request('GET_BAND_CAPABILITIES', {}, (err, d) => done(err, d),
+			{ no_recovery: true }), cb);
+	};
+
 	// SET_OPERATING_MODE over the passthrough; cb(err). Methods, both, so a
 	// test can stand in for a passthrough the MBIM mock does not have.
 	self._pt_opmode = function(mode, cb) {
@@ -2815,7 +2846,7 @@ export function create(opts)
 			// — closing the HOST's MBIM session is not shown to reset the
 			// modem's embedded QMI client table, so every daemon reload leaked
 			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
-			// table has room for a handful. Same burst modem.uc:1563 does for
+			// table has room for a handful. Same burst modem.uc:1572 does for
 			// the native side, which the passthrough never had. ctl is NOT in this list: it is the
 			// implicit client (cid 0) and it is what carries RELEASE_CID for
 			// all the others, so it has to outlive them.

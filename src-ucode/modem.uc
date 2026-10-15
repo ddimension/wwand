@@ -189,9 +189,9 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1587) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1596) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
-	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:688, step_sim), and
+	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:709, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
 	//
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
@@ -457,6 +457,15 @@ export function create(opts)
 		cb(self.nas ?? null);
 	};
 
+	// the bands the modem supports (DMS Get Band Capabilities, dms.uc);
+	// cb(err, raw response). netsel_ops turns it into band lists.
+	self.band_caps = function(cb) {
+		if (!self.dms)
+			return cb({ error: 'unsupported_on_backend' });
+
+		self.dms.request('GET_BAND_CAPABILITIES', {}, cb, { no_recovery: true });
+	};
+
 	// backend-neutral WMS (SMS) accessor. cb(wms|null).
 	self.with_wms = function(cb) {
 		cb(self.wms ?? null);
@@ -548,7 +557,7 @@ export function create(opts)
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:4120), and dropping it strands a ubus request.
+				// (daemon.uc:4123), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
