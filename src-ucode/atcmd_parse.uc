@@ -9,8 +9,9 @@
 import * as ratmod from 'wwand.codec.schema.rat';
 
 // parse an AT+QNWLOCK read response into the lock state. Quectel formats:
-//   +QNWLOCK: "common/4g",<enable>[,<earfcn>,<pci>[,...]]
-//   +QNWLOCK: "common/4g_ext",<enable>,<count>,<earfcn>,<pci>,...
+//   +QNWLOCK: "common/4g",<num_of_cells>[,<earfcn>,<pci>[,...]]
+//   +QNWLOCK: "common/4g_ext",<num_of_cells>[,<cell_list>]
+//   (the count reads as `enabled` here: 0 cells = no lock)
 //   +QNWLOCK: "common/5g",<enable>[,<pci>,<arfcn>,<scs>,<band>]
 // returns { scope, enabled, values:[...] } for the first matching line, or null
 // when the modem answered with no lock line (unsupported / empty).

@@ -55,7 +55,7 @@ BANNED = re.compile(r'\(\?|\\[1-9]')
 # compiles at first use and throws exactly like a literal would, so skipping
 # string contents would blind this checker to the likeliest place for the next
 # one to be added. Comments, by contrast, must be skipped: this tree DESCRIBES
-# the construct in prose on purpose (atcmd_parse.uc:642, :787).
+# the construct in prose on purpose (atcmd_parse.uc:643, :787).
 def scannable(line, in_block):
     """Return (text to search, new in_block) — the parts of `line` a banned
     construct could really live in.

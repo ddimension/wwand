@@ -189,7 +189,7 @@ two things depending on which path answered:
 
 - **WCDMA Ec/Io** arrives over QMI as a raw gint16 in -0.5 dB units
   (`qmicli-nas.c:460-462`, libqmi 1.38.0) but over AT already in dB
-  (`atcmd_parse.uc:356`). `modem_common.normalise_qmi_signal()` converts at the
+  (`atcmd_parse.uc:357`). `modem_common.normalise_qmi_signal()` converts at the
   edge — at **all three** doors that store a raw QMI signal reply: the polled
   `GET_SIGNAL_INFO`, the `SIGNAL_INFO_IND` indication and the same request over
   the QMI-over-MBIM passthrough. Converting only the first was worse than
@@ -1423,6 +1423,12 @@ normally at that point).
   refused_answer`; QMI transient codes excluded), retries only when the
   transport could not ask; a card change re-asks. #52 — MBIM identity asks
   AT+GMI first (T99W175 answers AT+CGMI without OK).
+- **Issue round 2026-10-17:** #58 (EG12-EA) — a multi-cell `lock_4g` went
+  out as `AT+QNWLOCK="common/4g_ext"`, which that firmware refuses. The second
+  field of `"common/4g"` is the cell COUNT (RG650E `=?`: `(0-10),<freq>,<pci>`),
+  so every lock now uses `common/4g` (`atcmd.uc cell_lock_commands`) — which is
+  also the only form the lock check and telemetry read; a 4g_ext lock read
+  "not applied" there even on the RG650E. Not HW-verified on an EG12.
 - **MS UICC text pass (2026-10-14):** MBIM ready state 7 "no eSIM profile
   enabled" stops at the SIM step (`no_esim_profile`, no ladder) and resumes by a
   10 s ready-state poll (the indication handler only exists after
