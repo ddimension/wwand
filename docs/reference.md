@@ -538,7 +538,7 @@ config wwand_modem 'm0'
 	                                 #    foxconn2:<string>:<number> (0x5571 v2, SDX62).
 	                                 #    MBIM modems: 'quectel' (vendor Radio State = on,
 	                                 #    EM120R-GL/EM160R-GL in MBIM mode) — explicit only.
-	option lock_4g '1300:246'        # earfcn:pci — LTE cell lock (repeatable / list)
+	option lock_4g '1300:246'        # earfcn:pci — LTE cell lock (list: up to 10 cells, AT+QNWLOCK="common/4g",<n>,…)
 	option lock_5g '242:431070:15:1' # pci:arfcn:scs:band — NR SA cell lock
 	option lock_persist '0'          # store the cell lock in modem NV
 	list band_lte '3'                # LTE bands, one per line — Fibocom FM350/FM150 only (see below)

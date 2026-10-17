@@ -309,7 +309,8 @@ eq(atcmd.cell_lock_commands({ lock_4g: [ '1300:246' ], lock_persist: true }),
 	[ 'AT+QNWLOCK="common/4g",1,1300,246', 'AT+QNWLOCK="save_ctrl",1,1' ],
 	'lock: 4g + persist');
 eq(atcmd.cell_lock_commands({ lock_4g: [ '1300:246', '1444:100' ] }),
-	[ 'AT+QNWLOCK="common/4g_ext",2,1300,246,1444,100' ], 'lock: 4g cell list');
+	[ 'AT+QNWLOCK="common/4g",2,1300,246,1444,100' ],
+	'lock: 4g cell list goes through common/4g with a count (#58: EG12 refuses 4g_ext)');
 eq(atcmd.cell_lock_commands({ lock_5g: '242:431070:15:1' }),
 	[ 'AT+QNWLOCK="common/5g",242,431070,15,1' ], 'lock: 5g sa');
 eq(atcmd.cell_lock_commands({}), [], 'lock: nothing configured');
@@ -419,6 +420,9 @@ eq(lk4.scope, 'common/4g', 'qnwlock: scope parsed');
 eq(lk4.enabled, true, 'qnwlock: enabled flag');
 eq(lk4.values, [ 1300, 246 ], 'qnwlock: earfcn/pci values');
 eq(atcmd.parse_qnwlock([ '+QNWLOCK: "common/5g",0' ]).enabled, false, 'qnwlock: disabled');
+let lk4n = atcmd.parse_qnwlock([ '+QNWLOCK: "common/4g",3,1725,59,75,59,6200,102' ]);
+eq([ lk4n.enabled, lk4n.values ], [ true, [ 1725, 59, 75, 59, 6200, 102 ] ],
+	'qnwlock: a cell list reads as locked, values are the pairs');
 eq(atcmd.parse_qnwlock([ 'OK' ]), null, 'qnwlock: no lock line -> null');
 
 // --- AT+QENG servingcell parsing (LTE + NR5G-NSA) ----------------------------
