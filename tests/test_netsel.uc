@@ -936,4 +936,96 @@ daemon.shutdown();
 	});
 })();
 
+// --- a band/RAT change ends in a reattach (ddimension/wwand#62) ---------------
+// Written alone, a band change left an EG12-EA detached in limited service with
+// no registration to re-arm the interface. The order must be: the sessions stop,
+// the preference is written while the daemon is held off, the radio cycles, and
+// the sessions go back to the daemon.
+(function() {
+	let mk = (o) => {
+		let ev = [];
+		let cur = { mode_preference: 0x18, roaming_preference: 0xFF, usage_preference: 1,
+		            lte_band_preference: 133, network_selection: 0 };
+		let mkctx = (st) => {
+			let c = { state: st, name: 'c' + st };
+			c.down = (cb, reason) => { push(ev, 'down:' + reason); c.state = 'IDLE'; cb(); };
+			return c;
+		};
+		let m = with_release({ contexts: [ mkctx('CONNECTED'), mkctx('IDLE') ],
+			info: { model: o?.model ?? 'EG12-EA' } }, (e, d) => push(ev, 'event:' + e));
+
+		m.with_nas = (fn) => fn({ request: (name, args, cb) => {
+			if (name == 'GET_SYSTEM_SELECTION_PREFERENCE')
+				return cb(null, cur);
+			push(ev, sprintf('set:%s:%s', join(',', sort(filter(keys(args), (k) => k != 'change_duration'))),
+				m._reattaching ? 'held' : 'free'));
+			cb(o?.set_err ?? null, {});
+		} });
+		m.reattach = (cb) => { push(ev, 'reattach'); cb(o?.reattach_err ?? null, { ok: true }); };
+
+		let ops = {};
+		netsel_ops.install(ops, { log: () => null,
+			check_modem: (ref, cb) => ({ modem: m }), reg_plmn: () => null });
+		return { ops: ops, m: m, ev: ev };
+	};
+
+	let t = mk();
+	t.ops.modem_set_settings('m0', { lte_bands: [ 1, 3 ] }, (err, res) => {
+		eq(err, null, 'band change: no error');
+		eq(t.ev, [ 'down:reattach', 'set:lte_band_preference:held', 'reattach', 'event:sessions_released' ],
+			'band change: sessions stop, the band is written with the daemon held off, the radio cycles, the sessions go back');
+		eq([ res.reattached, res.contexts_released, res.applied ], [ true, 1, [ 'lte_band_preference' ] ],
+			'band change: the result says it re-attached, and how many sessions it handed back');
+		eq(t.m._reattaching, false, 'band change: the hold is lifted');
+	});
+
+	t = mk();
+	t.ops.modem_set_settings('m0', { usage_preference: 2 }, (err, res) => {
+		eq(t.ev, [ 'set:usage_preference:free' ], 'usage only: no session stopped, no radio cycle — it moves no cell');
+		eq(res.reattached, null, 'usage only: ...and none claimed');
+	});
+
+	t = mk();
+	t.ops.modem_set_settings('m0', { mode_preference: 0x18 }, (err, res) => {
+		eq([ err, res ], [ null, { applied: [], unchanged: true } ], 'unchanged RAT: nothing written');
+		eq(t.ev, [], 'unchanged RAT: ...and nothing stopped or cycled');
+	});
+
+	t = mk({ set_err: { error: 'qmi', code: 48 } });
+	t.ops.modem_set_settings('m0', { mode_preference: 0x08 }, (err) => {
+		eq(err?.error, 'qmi', 'refused: the error reaches the caller');
+		eq(t.ev, [ 'down:reattach', 'set:mode_preference:held', 'event:sessions_released' ],
+			'refused: no radio cycle for nothing changed, the sessions still go back');
+		eq(t.m._reattaching, false, 'refused: the hold is lifted');
+	});
+
+	t = mk({ reattach_err: { error: 'qmi' } });
+	t.ops.modem_set_settings('m0', { lte_bands: [ 3 ] }, (err, res) => {
+		eq([ err, res?.reattached ], [ null, false ], 'reattach failed: the band change itself stands, the result says the cycle did not');
+		ok(index(t.ev, 'event:sessions_released') >= 0, 'reattach failed: the sessions still go back');
+	});
+
+	t = mk();
+	t.m.detached = true;
+	t.ops.modem_set_settings('m0', { lte_bands: [ 3 ] }, () => {
+		eq(t.ev, [ 'set:lte_band_preference:free' ], 'detached: written only — a radio cycle would undo the operator\'s detach');
+	});
+
+	t = mk();
+	t.m._reattaching = true;
+	t.ops.modem_set_settings('m0', { lte_bands: [ 3 ] }, (err) => {
+		eq([ err?.error, t.ev, t.m._reattaching ], [ 'busy', [], true ],
+			'busy: a band change inside a running radio cycle is refused, nothing written, the hold left alone');
+	});
+	t.ops.modem_set_settings('m0', { usage_preference: 2 }, (err) => {
+		eq([ err, t.ev ], [ null, [ 'set:usage_preference:held' ] ], 'busy: a usage-only change still goes through');
+	});
+
+	t = mk({ model: 'SLM770A' });
+	t.ops.modem_set_settings('m0', { lte_bands: [ 3 ] }, (err, res) => {
+		eq([ t.ev, res.apply ], [ [ 'set:lte_band_preference:free' ], 'modem_reset' ],
+			'deferred firmware: no reattach — it applies at the reset it asks for');
+	});
+})();
+
 done('test_netsel');

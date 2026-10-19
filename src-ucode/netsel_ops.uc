@@ -993,6 +993,7 @@ export function install(self, o)
 				// bubbling a bare "qmi" up to the UI — which of the two a
 				// firmware accepts is not something we can probe up front.
 				let send;   // forward-declared (self-referencing arrow)
+				let finish = cb;   // where send's outcome goes (the reattach below wraps it)
 
 				// the keys that are not band lists — the RAT, usage and roaming
 				// preferences
@@ -1031,7 +1032,7 @@ export function install(self, o)
 
 							if (!alt) {
 								log('warn', sprintf('modem %s: system selection preference refused: %J', ref, err));
-								return cb({ error: 'qmi', detail: err });
+								return finish({ error: 'qmi', detail: err });
 							}
 
 							log('notice', sprintf('modem %s: firmware rejected %s (qmi code %s) — retrying with %s',
@@ -1067,9 +1068,58 @@ export function install(self, o)
 							res.apply = 'modem_reset';
 						}
 
-						cb(null, res);
+						finish(null, res);
 					});
 				};
+
+				// A BAND OR RAT CHANGE ENDS IN A REATTACH. Written alone, it
+				// leaves the modem to find out on its own that the band it
+				// camps on is gone: the bearer drops, and an EG12-EA then sat
+				// in "EMM detached [limited service]" — no registration, so
+				// nothing re-armed the interface, and only the ladder's opmode
+				// cycle at the 8th failure (half an hour on) would have moved
+				// it (ddimension/wwand#62). So the sessions stop first, the
+				// preference is written, and the radio cycles low_power ->
+				// online like the Reattach button (reattach_released); the
+				// sessions go back to the daemon's reconnect. Not for a
+				// deferred firmware (it applies at the reset it asks for),
+				// not under a running reattach or an operator detach, and not
+				// for usage/roaming keys alone, which move no cell.
+				let m = entry.modem;
+				let radio_key = (k) => band_key(k) || k == 'mode_preference';
+				let moves_radio = length(filter(changed, radio_key)) > 0;
+
+				// inside a running radio cycle (a reattach, detach, attach or
+				// another band change) a band/RAT write would miss its own
+				// reattach — the very state this guards against — so it is
+				// refused like a second reattach is
+				if (moves_radio && m._reattaching)
+					return cb({ error: 'busy', detail: 'a reattach, detach, attach or band change is running' });
+
+				if (moves_radio && !q.settings_deferred &&
+				    type(m.reattach) == 'function' && !m.detached) {
+					log('notice', sprintf('modem %s: band/RAT change — stopping the sessions, applying it, re-attaching', ref));
+
+					return m.with_sessions_released('reattach', (done) => {
+						finish = (err, res) => {
+							// refused: nothing changed on the radio, nothing to cycle
+							if (err || !length(filter(res?.applied ?? [], radio_key)))
+								return done(err, res);
+
+							m.reattach((rerr) => {
+								if (rerr)
+									log('warn', sprintf('modem %s: re-attach after the band/RAT change failed: %J', ref, rerr));
+								done(null, { ...res, reattached: !rerr });
+							});
+						};
+
+						send(args, changed, lte_alt);
+					}, (err, res, released, failed) => cb(err, err ? null : {
+						...(res ?? {}),
+						contexts_released: length(released),
+						contexts_failed: failed,
+					}));
+				}
 
 				send(args, changed, lte_alt);
 			});
