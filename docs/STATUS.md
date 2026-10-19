@@ -1423,6 +1423,16 @@ normally at that point).
   refused_answer`; QMI transient codes excluded), retries only when the
   transport could not ask; a card change re-asks. #52 — MBIM identity asks
   AT+GMI first (T99W175 answers AT+CGMI without OK).
+- **Issue round 2026-10-19:** #61 (RG520N-EB, QMI over QRTR) — the daemon froze
+  inside `sendto()`: QRTR's tx flow control sleeps a sender at 10 unconfirmed
+  packets per destination whatever SOCK_NONBLOCK says, and our EINTR retry kept
+  it there through SIGTERM. `qmit_qsend` bounds the wait (SIGALRM, 500 ms) and
+  answers `'blocked'`; the hub fails that service's requests and probes it every
+  30 s until it answers (`docs/gotchas.md`). Not HW-verified (no QRTR modem
+  here). Open: a flow the modem never confirms needs a modem/MHI reset. The
+  failed sends count as protocol errors and reach the `usb_repower` rung at 25,
+  which does nothing on a board without a repower path — the same gap #59
+  closes for the zero-rx trip.
 - **Issue round 2026-10-17:** #58 (EG12-EA) — a multi-cell `lock_4g` went
   out as `AT+QNWLOCK="common/4g_ext"`, which that firmware refuses. The second
   field of `"common/4g"` is the cell COUNT (RG650E `=?`: `(0-10),<freq>,<pci>`),

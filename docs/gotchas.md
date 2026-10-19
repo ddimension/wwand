@@ -877,6 +877,25 @@ as no model.
 generic — no manufacturer and model ?`, `cgmi -, cgmm FM350-GL`, `cgmm Fibocom
 Wireless Inc.`); #32 for the same refusal after a slot switch.
 
+## `SOCK_NONBLOCK` makes a QRTR send non-blocking
+
+**Wrong.** The kernel counts DATA packets per destination (node, port) and, once
+ten are unconfirmed, puts the sender to sleep until the remote answers with
+RESUME_TX — `wait_event_interruptible`, which never looks at `O_NONBLOCK` or
+`MSG_DONTWAIT` (`net/qrtr/af_qrtr.c` `qrtr_tx_wait` :288-291, `qrtr_sendmsg`
+:961, linux 6.18.41). A modem service that stops answering therefore freezes
+the sender inside `sendto()`: in wwand that was the whole event loop — no ubus,
+no timers, no request timeout. The counter belongs to the kernel's node, not to
+the socket, so it outlives the process; only a modem or MHI reset clears it.
+And a `while (errno == EINTR)` retry around such a send is what made the daemon
+"ignore" SIGTERM: the signal woke the wait, the loop went straight back in, and
+uloop never got to act on it. `wwand-io.c qmit_qsend` now bounds the wait with
+a one-shot SIGALRM and answers `'blocked'`; the hub (`qmi_over_qrtr.uc`) stops
+sending to that service until it answers again.
+
+*Evidence:* ddimension/wwand#61 (RG520N-EB on an IPQ5018, frozen after 7–8 h,
+SIGTERM ignored, a restarted daemon stuck in INIT_SERVICES until a modem reset).
+
 ## A called `(a ?? b.c)(…)` misplaces the stack
 
 Calling a parenthesized `??` whose right operand is a member expression
