@@ -1440,7 +1440,8 @@ normally at that point).
   `with_sessions_released` and ends in the backend's reattach (`netsel_ops.uc
   modem_set_settings`, result `reattached`). Asked the reporter whether the
   Reattach button alone recovers the stuck state (else a SIM power cycle is
-  the step). Not HW-verified.
+  the step). HW 2026-10-19 on 3.93 (RM520N-GL, QMI, not connected): band
+  write -> DMS low_power -> online in 2 s, `reattached: true`; list restored.
 - **Issue round 2026-10-17:** #58 (EG12-EA) — a multi-cell `lock_4g` went
   out as `AT+QNWLOCK="common/4g_ext"`, which that firmware refuses. The second
   field of `"common/4g"` is the cell COUNT (RG650E `=?`: `(0-10),<freq>,<pci>`),
