@@ -1433,6 +1433,14 @@ normally at that point).
   failed sends count as protocol errors and reach the `usb_repower` rung at 25,
   which does nothing on a board without a repower path — the same gap #59
   closes for the zero-rx trip.
+- **#62 (EG12-EA):** a band change was written alone; the modem lost its
+  serving band, dropped the bearer and sat in "EMM detached [limited service]"
+  — no registration, so nothing re-armed the interface, and the ladder's opmode
+  cycle would have come ~30 min later. A band/RAT change now runs inside
+  `with_sessions_released` and ends in the backend's reattach (`netsel_ops.uc
+  modem_set_settings`, result `reattached`). Asked the reporter whether the
+  Reattach button alone recovers the stuck state (else a SIM power cycle is
+  the step). Not HW-verified.
 - **Issue round 2026-10-17:** #58 (EG12-EA) — a multi-cell `lock_4g` went
   out as `AT+QNWLOCK="common/4g_ext"`, which that firmware refuses. The second
   field of `"common/4g"` is the cell COUNT (RG650E `=?`: `(0-10),<freq>,<pci>`),
