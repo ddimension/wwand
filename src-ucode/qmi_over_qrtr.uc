@@ -66,6 +66,10 @@ const QRTR_TYPE_NEW_SERVER = 4;
 const QRTR_TYPE_DEL_SERVER = 5;
 const QRTR_PORT_CTRL = 0xfffffffe;
 
+// how long a service whose send came back 'blocked' is left alone before one
+// probe tries again (see self.send)
+const BLOCKED_PROBE_S = 30;
+
 // result TLV (type 0x02, len 4, result u16, error u16) — every QMI response
 // carries it, and client.uc keys success/failure off _result (tlv.uc)
 function result_tlv(err)
@@ -97,12 +101,14 @@ export function parse_ctrl(data)
 
 // create(opts): opts.log(level,msg), opts.on_gone(hub), opts.node (the QRTR
 // node to use; default: the one serving DMS), opts.io (inject for tests),
-// opts.discover_ms (the bound on the synchronous lookup, default 1000).
+// opts.discover_ms (the bound on the synchronous lookup, default 1000),
+// opts.now (seconds clock, inject for tests; default time()).
 // null when no socket can be opened or no node on the bus serves DMS.
 export function create(opts)
 {
 	let io = opts?.io ?? qmit;
 	let log = opts?.log ?? ((l, m) => null);
+	let now = opts?.now ?? time;
 
 	let lookup = io.qrtr_open();
 
@@ -134,6 +140,7 @@ export function create(opts)
 		clients: {},     // service*256+cid -> client (client.uc)
 		socks: {},       // service*256+cid -> { h, uh }
 		svc_addr: {},    // 'service' -> port on `node`
+		blocked: {},     // 'service' -> { since, next } while its flow is stuck
 		closed: false,
 	};
 
@@ -191,6 +198,12 @@ export function create(opts)
 			// (a late reply from a previous incarnation's port) is dropped
 			if (m.node != node || m.port != self.svc_addr[sprintf('%d', service)])
 				continue;
+
+			// the service answers again: its flow is no longer ours to doubt
+			if (self.blocked[sprintf('%d', service)]) {
+				log('notice', sprintf('qrtr: service %d answers again', service));
+				delete self.blocked[sprintf('%d', service)];
+			}
 
 			deliver(struct.pack('<BHBBB', 0x01, 5 + length(m.data), 0x80, service, cid) + m.data);
 		}
@@ -302,11 +315,34 @@ export function create(opts)
 			return false;
 		}
 
+		// A BLOCKED SERVICE IS NOT ASKED AGAIN AT ONCE. qsend bounds the
+		// kernel's flow-control wait (wwand-io.c qmit_qsend: the modem stopped
+		// confirming, and a QRTR send sleeps until it does — SOCK_NONBLOCK
+		// notwithstanding); every further send to that service would sit out
+		// the same bound inside the event loop. So the requests fail at once
+		// ('send', which the recovery counter sees) and one probe goes out
+		// every BLOCKED_PROBE_S; any datagram from the service clears it.
+		let skey = sprintf('%d', dec.service);
+		let b = self.blocked[skey];
+
+		if (b && now() < b.next)
+			return false;
+
 		// the QRTR SDU is the QMUX frame minus its 6-byte header
 		let r = s.h.qsend(node, port, substr(frame, 6));
 
-		// false = hard error; null = EAGAIN (rare for small datagrams — the QMI
-		// request then times out and retries, which is correct)
+		if (r === 'blocked') {
+			if (!b)
+				log('warn', sprintf('qrtr: service %d on node %d stopped taking messages (kernel flow control: the modem confirms none) — its requests fail until it answers again; only a modem reset clears it if it never does',
+					dec.service, node));
+			self.blocked[skey] = { since: b?.since ?? now(), next: now() + BLOCKED_PROBE_S };
+
+			return false;
+		}
+
+		// false = hard error; null = EAGAIN, or a signal (SIGTERM) cut the
+		// send short: nothing went out and the QMI request times out, which
+		// is correct for both
 		return (r !== false);
 	};
 
@@ -380,6 +416,12 @@ export function create(opts)
 			if (c.cmd == 'new' && c.service == discovery.QRTR_SVC_DMS &&
 			    self.svc_addr[skey] != null && self.svc_addr[skey] != c.port)
 				return gone('DMS re-registered on another port');
+
+			// the kernel's flow is per (node, port): a service on another
+			// port is a fresh destination, and a mark from the old one
+			// would hold back a service that never blocked
+			if (c.cmd == 'del' || self.svc_addr[skey] != c.port)
+				delete self.blocked[skey];
 
 			if (c.cmd == 'del')
 				delete self.svc_addr[skey];

@@ -611,7 +611,8 @@ qmit_kill(uc_vm_t *vm, size_t nargs)
  *
  *   let h = qmit.qrtr_open();
  *   h.qnode();                  // local node id (ctrl address is {this node, CTRL})
- *   h.qsend(node, port, sdu);   // sendto -> true | null(EAGAIN) | false(err)
+ *   h.qsend(node, port, sdu[, ms]);  // sendto -> true | null(EAGAIN, EINTR)
+ *                                    //  | 'blocked' (ms elapsed) | false(err)
  *   let m = h.qread();          // recvfrom -> { data, node, port } | null | false
  *
  * The handle reuses the wwand.io resource type (fd-based fileno/close work as-is).
@@ -683,6 +684,79 @@ qmit_qnode(uc_vm_t *vm, size_t nargs)
 	return ucv_int64_new((int64_t)sq.sq_node);
 }
 
+/* A QRTR send CAN BLOCK, and SOCK_NONBLOCK does not stop it. The kernel
+ * counts DATA packets per destination (node, port) and, at QRTR_TX_FLOW_HIGH
+ * (10) unconfirmed, sleeps the sender until the remote answers with
+ * RESUME_TX — wait_event_interruptible, which never looks at O_NONBLOCK or
+ * MSG_DONTWAIT (net/qrtr/af_qrtr.c qrtr_tx_wait :288-291, qrtr_sendmsg :961,
+ * linux 6.18.41). A modem service that stops answering therefore froze the
+ * whole daemon inside sendto(): no uloop, no timers, no request timeout
+ * (evidence: ddimension/wwand#61). And the counter belongs to the kernel's
+ * node, not to the socket, so it outlives the daemon — only a modem or MHI
+ * reset (endpoint gone, node freed) clears it.
+ *
+ * So the wait is bounded with a one-shot ITIMER_REAL: its SIGALRM, handled
+ * without SA_RESTART, interrupts the wait, which drops the packet without
+ * counting it (confirm_rx < 0 -> kfree_skb, qrtr_node_enqueue :344-348), and
+ * the caller gets 'blocked'. EINTR is NOT retried: a SIGTERM that lands here
+ * must reach uloop, whose handler (sa_flags 0, libubox uloop.c, 2026.07.08)
+ * only sets a flag the loop acts on once we return — the retry this replaced
+ * is why such a daemon ignored SIGTERM.
+ *
+ * The handler is installed ONCE and stays. Swapping it in and out per call
+ * loses a race: an alarm that expires as sendto() returns is still pending
+ * when the old action — SIG_DFL, which terminates — comes back. A no-op that
+ * stays makes a late alarm harmless. That claims SIGALRM and ITIMER_REAL for
+ * this module; nothing else in wwand, ucode or uloop uses either, and a timer
+ * found armed is refused rather than stolen. */
+#define QSEND_TIMEOUT_MS 500
+#define QSEND_TIMEOUT_MAX_MS 60000
+
+static volatile sig_atomic_t qsend_alarm;
+static bool qsend_alarm_installed;
+
+static void
+qsend_alarm_handler(int sig)
+{
+	(void)sig;
+	qsend_alarm = 1;
+}
+
+/* the bound for one send: false (errno set) when it cannot be had — and then
+ * the send must not happen, or it is unbounded again */
+static bool
+qsend_arm(long ms)
+{
+	struct itimerval it = { 0 }, cur;
+
+	if (!qsend_alarm_installed) {
+		struct sigaction sa = { .sa_handler = qsend_alarm_handler };
+
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = 0;
+
+		if (sigaction(SIGALRM, &sa, NULL) < 0)
+			return false;
+
+		qsend_alarm_installed = true;
+	}
+
+	if (getitimer(ITIMER_REAL, &cur) < 0)
+		return false;
+
+	if (cur.it_value.tv_sec || cur.it_value.tv_usec) {
+		errno = EBUSY;
+
+		return false;
+	}
+
+	it.it_value.tv_sec = ms / 1000;
+	it.it_value.tv_usec = (ms % 1000) * 1000;
+	qsend_alarm = 0;
+
+	return setitimer(ITIMER_REAL, &it, NULL) == 0;
+}
+
 static uc_value_t *
 qmit_qsend(uc_vm_t *vm, size_t nargs)
 {
@@ -690,10 +764,14 @@ qmit_qsend(uc_vm_t *vm, size_t nargs)
 	uc_value_t *node = uc_fn_arg(0);
 	uc_value_t *port = uc_fn_arg(1);
 	uc_value_t *data = uc_fn_arg(2);
+	uc_value_t *tmo = uc_fn_arg(3);
 	struct sockaddr_qrtr sq = { .sq_family = AF_QIPCRTR };
+	struct itimerval off = { 0 };
+	long ms = QSEND_TIMEOUT_MS;
 	const char *p;
 	size_t len;
 	ssize_t w;
+	int e;
 
 	last_errno = 0;
 
@@ -704,23 +782,55 @@ qmit_qsend(uc_vm_t *vm, size_t nargs)
 		return ucv_boolean_new(false);
 	}
 
+	if (ucv_type(tmo) == UC_INTEGER) {
+		int64_t want = ucv_int64_get(tmo);
+
+		if (want <= 0 || want > QSEND_TIMEOUT_MAX_MS) {
+			last_errno = EINVAL;
+
+			return ucv_boolean_new(false);
+		}
+
+		ms = (long)want;
+	}
+
 	sq.sq_node = (uint32_t)ucv_int64_get(node);
 	sq.sq_port = (uint32_t)ucv_int64_get(port);
 	p = ucv_string_get(data);
 	len = ucv_string_length(data);
 
-	do {
-		w = sendto(t->fd, p, len, 0, (struct sockaddr *)&sq, sizeof(sq));
-	} while (w < 0 && errno == EINTR);
+	if (!qsend_arm(ms)) {
+		last_errno = errno;
+
+		return ucv_boolean_new(false);
+	}
+
+	w = sendto(t->fd, p, len, 0, (struct sockaddr *)&sq, sizeof(sq));
+	e = errno;
+
+	setitimer(ITIMER_REAL, &off, NULL);
 
 	if (w == (ssize_t)len)
 		return ucv_boolean_new(true);
 
-	if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+	if (w < 0 && e == EINTR) {
+		if (qsend_alarm) {
+			last_errno = ETIMEDOUT;
+
+			return ucv_string_new("blocked");
+		}
+
+		/* another signal (SIGTERM): not sent; let uloop see it */
+		last_errno = EINTR;
+
+		return NULL;
+	}
+
+	if (w < 0 && (e == EAGAIN || e == EWOULDBLOCK))
 		return NULL;
 
 	if (w < 0)
-		last_errno = errno;
+		last_errno = e;
 
 	return ucv_boolean_new(false);
 }

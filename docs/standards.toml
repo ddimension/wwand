@@ -50,6 +50,14 @@ by = "Claude, prompted by a Codex finding"
 reviewed = "wwand f2bba19"
 fixed = "wwand, commit \"mbim: an MBIM success is not yet an open channel\""
 
+[[reviews]]
+id = "R5"
+date = "2026-10-19"
+kind = "kernel source read next to the code (linux 6.18.41 net/qrtr/af_qrtr.c qrtr_tx_wait, qrtr_node_enqueue, qrtr_sendmsg; libubox 2026.07.08 uloop.c signal setup)"
+by = "Claude, for ddimension/wwand#61"
+reviewed = "wwand 8a170a1"
+fixed = "wwand, commit \"qrtr: a send the modem never confirms no longer freezes the daemon (#61)\""
+
 [[component]]
 name = "QMI codec and service schemas"
 code = "src-ucode/codec/{qmux,tlv,hex}.uc, codec/schema/*.uc"
@@ -110,9 +118,11 @@ code = "src-ucode/qmi_over_qrtr.uc, io/src/wwand-io.c (qrtr_*), discovery.uc (qr
   [[component.standard]]
   name = "Qualcomm IPC router (QRTR) and its name server"
   basis = "linux 6.18.41 net/qrtr (ns.c, qmi_interface.c), include/uapi/linux/qrtr.h"
-  sections = "control packets (NEW/DEL_SERVER, NEW_LOOKUP), one socket per QMI client, SDU without QMUX header"
+  sections = "control packets (NEW/DEL_SERVER, NEW_LOOKUP), one socket per QMI client, SDU without QMUX header, tx flow control (qrtr_tx_wait)"
     [[component.standard.review]]
-    review = "tbd"
+    review = "R5"
+    result = "tx flow control read next to qmit_qsend: a send sleeps at 10 unconfirmed packets per destination regardless of SOCK_NONBLOCK, and the EINTR retry kept it there through SIGTERM; bounded with SIGALRM, the hub backs off a blocked service"
+    open = "control packets, socket-per-client and the SDU framing not yet read against af_qrtr.c/ns.c; no recovery beyond the ladder for a flow the modem never confirms (an MHI soc_reset would free it)"
 
 [[component]]
 name = "NCM / ECM backend"

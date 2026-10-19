@@ -217,6 +217,54 @@ inject(lookup2, ctrl(4, 2, 1, 50));
 spin();
 eq(gone2, 1, 'ctrl: ...reported once, the hub is closed after it');
 
+// --- a service whose kernel flow is stuck (ddimension/wwand#61) ----------------
+// qsend answers 'blocked' when the bounded flow-control wait ran out. The hub
+// must fail that request, not hit the service again on every request (each
+// would sit out the bound inside the event loop), probe again after 30 s, and
+// clear the mark as soon as the service answers.
+
+let clock = 1000, logs3 = [];
+let hub3 = qrtr.create({ io: fake_io, now: () => clock, log: (l, m) => push(logs3, m) });
+let ctl3 = { service: 0, cid: 0, dispatch: (d) => null };
+hub3.register(ctl3);
+let first3 = length(socks);
+hub3.send(qmux.encode(0, 0, 1, M.ALLOCATE_CID.id, tlv.pack(M.ALLOCATE_CID.req, { service: 3 }), 'request'));
+spin();
+let n3 = socks[first3];
+let nas3 = { service: 3, cid: 1, dispatch: (d) => null };
+hub3.register(nas3);
+
+let answer = 'blocked';
+n3.qsend = (n, p, d) => (push(n3.sent, [ n, p, d ]), answer);
+let nreq = (txn) => hub3.send(qmux.encode(3, 1, txn, 0x0043, '', 'request'));
+
+eq(nreq(1), false, 'blocked: the request fails (a send error the recovery counter sees)');
+eq(length(filter(logs3, (m) => index(m, 'stopped taking messages') >= 0)), 1, 'blocked: said once, naming the cause');
+eq([ nreq(2), length(n3.sent) ], [ false, 1 ], 'blocked: the next request fails at once, without another send');
+
+clock += 31;
+eq([ nreq(3), length(n3.sent) ], [ false, 2 ], 'blocked: one probe after 30 s');
+eq(length(filter(logs3, (m) => index(m, 'stopped taking messages') >= 0)), 1, 'blocked: a failed probe is not logged again');
+
+inject(n3, { node: 1, port: 12, data: sdu });
+spin();
+answer = true;
+eq([ nreq(4), length(n3.sent) ], [ true, 3 ], 'blocked: a datagram from the service clears it — sent again at once');
+ok(length(filter(logs3, (m) => index(m, "service 3 answers again") >= 0)) == 1, 'blocked: the recovery is logged');
+
+answer = null;
+eq(nreq(5), true, 'send: null (EAGAIN, or SIGTERM cut it short) is no hard error — the request times out');
+
+// the flow is the kernel's per (node, port): the service on a new port starts clean
+answer = 'blocked';
+nreq(6);
+let lookup3 = socks[first3 - 1];
+inject(lookup3, { node: 1, port: CTRL_PORT, data: struct.pack('<IIIII', 4, 3, 0, 1, 77) });
+spin();
+answer = true;
+let before3 = length(n3.sent);
+eq([ nreq(7), n3.sent[before3]?.[1] ], [ true, 77 ], 'blocked: a service re-registered on another port is sent to at once');
+
 // presence wants WDS beside DMS: a node caught mid-boot is not a modem yet
 eq(discovery.qrtr_pick_node([ { service: 2, node: 1, port: 10 } ]), null,
 	'pick: DMS without WDS yet -> not present (the init reads the service list once)');
