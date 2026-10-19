@@ -78,6 +78,18 @@ function result_tlv(err)
 // truth when the socket for a new client cannot be opened
 const QMI_ERR_CLIENT_IDS_EXHAUSTED = 0x05;
 
+// Max datagrams one socket reader drains per uloop wakeup. The handles are
+// level-triggered (ULOOP_READ, no ULOOP_EDGE_TRIGGER), so a reader that returns
+// with more still queued is simply re-dispatched on the next loop iteration —
+// nothing is lost — but only AFTER uloop has run expired timers, serviced ubus
+// and checked the SIGTERM flag. Without a cap, a sustained modem-side datagram
+// stream (a degraded-NAS indication storm / post-SSR stragglers from a stale
+// port) pins one reader callback forever: the whole daemon's event loop starves
+// — every ubus call times out, the status/LED poller stops, SIGTERM is ignored
+// (SIGKILL needed) — while the kernel data path keeps running. That is the
+// 8-hour freeze in ddimension/wwand#61. 64 is well above any normal burst.
+const QRTR_DRAIN_BUDGET = 64;
+
 // qrtr_ctrl_pkt: le32 cmd, then { le32 service, instance, node, port } for
 // NEW_SERVER / DEL_SERVER (include/uapi/linux/qrtr.h, linux 6.18.41). null
 // for anything shorter or of another type.
@@ -171,9 +183,24 @@ export function create(opts)
 		s.h.close();
 	};
 
+	// a reader hit its per-wakeup drain budget with datagrams still queued — the
+	// backpressure that pre-#61 would have wedged the loop. Logged rate-limited so
+	// a recurring flood is visible instead of silent; the loop stays healthy.
+	let last_overflow = 0;
+	let note_overflow = (who) => {
+		let now = time();
+
+		if (now - last_overflow < 10)
+			return;
+
+		last_overflow = now;
+		log('warn', sprintf('qrtr: %s drained %d datagrams with more queued — a sustained modem stream; yielding to the loop (would have wedged pre-#61)',
+			who, QRTR_DRAIN_BUDGET));
+	};
+
 	// one reader per client socket: whatever arrives on it is that client's
 	let watch = (service, cid, h) => uloop.handle(h.fileno(), (ev) => {
-		for (;;) {
+		for (let n = 0; n < QRTR_DRAIN_BUDGET; n++) {
 			if (self.closed)
 				return;
 
@@ -194,6 +221,9 @@ export function create(opts)
 
 			deliver(struct.pack('<BHBBB', 0x01, 5 + length(m.data), 0x80, service, cid) + m.data);
 		}
+
+		// budget reached with more queued: yield; uloop re-dispatches this fd
+		note_overflow(sprintf('client for service %d', service));
 	}, uloop.ULOOP_READ);
 
 	// synthesize a CTL response and deliver it on the NEXT loop iteration — never
@@ -340,7 +370,7 @@ export function create(opts)
 
 	// the name server's reports on the lookup socket (4. above)
 	self._uh = uloop.handle(lookup.fileno(), (ev) => {
-		for (;;) {
+		for (let n = 0; n < QRTR_DRAIN_BUDGET; n++) {
 			if (self.closed)
 				return;
 
@@ -386,6 +416,9 @@ export function create(opts)
 			else
 				self.svc_addr[skey] = c.port;
 		}
+
+		// budget reached with more queued: yield; uloop re-dispatches this fd
+		note_overflow('name server');
 	}, uloop.ULOOP_READ);
 
 	if (!self._uh) {
