@@ -189,7 +189,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1596) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1601) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:713, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -557,7 +557,7 @@ export function create(opts)
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:4123), and dropping it strands a ubus request.
+				// (daemon.uc:4139), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
@@ -1355,7 +1355,12 @@ export function create(opts)
 				self._rf_band_key = key;
 				// decode the QmiNasActiveBand values ("LTE B20" instead of 145)
 				let names = join(', ', map(bands, nasmod.active_band_name));
-				log('info', sprintf('rf band change: %s', length(names) ? names : 'none'));
+				// debug, like the data-system change (telemetry_qmi.uc): a modem
+				// reselecting between its carriers reports one every minute or
+				// so, which is the radio working, and nothing to act on — the
+				// current band is in status and the telemetry line anyway
+				// (ddimension/wwand#68)
+				log('debug', sprintf('rf band change: %s', length(names) ? names : 'none'));
 			}
 			self.rf_bands = map(data.rf_band_info, (b) =>
 				({ ...b, name: nasmod.active_band_name(b.band) }));
