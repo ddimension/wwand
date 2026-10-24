@@ -189,7 +189,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1601) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1604) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:713, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -827,6 +827,21 @@ export function create(opts)
 		// Diagnostics. Each of these was previously invisible: the card would
 		// simply stop answering, and the ladder would count protocol errors at a
 		// modem that was telling us exactly what was wrong.
+		// The card-side note belongs to the card in use (status shows it,
+		// daemon.uc). A slot switch makes the LEAVING card report its exit —
+		// "session closed: card removed" — after simops card_changed cleared
+		// the note, and that line then stood for the new card through the
+		// switch and a switch back (ddimension/wwand#39). So an indication
+		// naming another slot than the active one is logged, not noted; and
+		// the note carries the ICCID known when it was set, for the cases
+		// where no slot is known to compare with.
+		let note = (text, slot) => {
+			if (slot != null && self.active_slot != null && +slot != +self.active_slot)
+				return;
+			self.sim_note = text;
+			self.sim_note_for = self.info?.iccid ?? null;
+		};
+
 		self.uim.on('SESSION_CLOSED_IND', (data) => {
 			let cause = data?.cause;
 			let name = uimmod.SESSION_CLOSE_CAUSES[sprintf('%d', cause ?? 0)]
@@ -835,7 +850,7 @@ export function create(opts)
 				? sprintf(' (file %04X)', data.file_id) : '';
 
 			log('warn', sprintf('uim session closed: %s%s', name, file));
-			self.sim_note = sprintf('session closed: %s', name);
+			note(sprintf('session closed: %s', name), data?.slot);
 			emit('sim_session_closed', { cause: cause, cause_text: name,
 			                             file_id: data?.file_id ?? null });
 		});
@@ -876,7 +891,7 @@ export function create(opts)
 			// anything read from it are stale. Re-read rather than trust.
 			log('warn', sprintf('sim card recovered internally (slot %d) — re-reading identity',
 				data?.slot ?? -1));
-			self.sim_note = 'card recovered';
+			note('card recovered', data?.slot);
 			emit('sim_recovery', { slot: data?.slot ?? null });
 			self.reapply_sim();
 		});
@@ -890,8 +905,8 @@ export function create(opts)
 			// otherwise reads as a broken SIM
 			log(st == uimmod.CARD_ACTIVATION_END_FAILURE ? 'warn' : 'info',
 				sprintf('card activation %s (slot %d)', name, data?.slot ?? -1));
-			self.sim_note = (st == uimmod.CARD_ACTIVATION_END_SUCCESS)
-				? null : sprintf('card activation %s', name);
+			note((st == uimmod.CARD_ACTIVATION_END_SUCCESS)
+				? null : sprintf('card activation %s', name), data?.slot);
 			emit('sim_activation', { slot: data?.slot ?? null,
 			                         status: st, status_text: name });
 		});
@@ -1732,6 +1747,7 @@ export function create(opts)
 		// keep claiming the reads are failing long after they stopped.
 		self.sim_busy = false;
 		self.sim_note = null;
+		self.sim_note_for = null;
 		self.active_slot = null;
 
 		// The same class of bug, and older than the UIM work: both of these

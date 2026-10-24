@@ -1423,6 +1423,14 @@ normally at that point).
   refused_answer`; QMI transient codes excluded), retries only when the
   transport could not ask; a card change re-asks. #52 — MBIM identity asks
   AT+GMI first (T99W175 answers AT+CGMI without OK).
+- **Issue round 2026-10-24:** #39 regression (MassiPi) — "session closed: card
+  removed" stood on the status after a slot switch and a switch back: the
+  leaving card's SESSION_CLOSED_IND arrives after card_changed cleared the
+  note. A UIM card note now ignores an indication naming another slot than
+  the active one and carries the ICCID it was set under; status shows it only
+  for that card. #68 rf band change → debug. #71 interface refs accept
+  `@iface` and an unambiguous L3 device (watchcat passes those). #61
+  follow-up: held-back QRTR requests are not counted as protocol errors.
 - **Issue round 2026-10-19:** #61 (RG520N-EB, QMI over QRTR) — the daemon froze
   inside `sendto()`: QRTR's tx flow control sleeps a sender at 10 unconfirmed
   packets per destination whatever SOCK_NONBLOCK says, and our EINTR retry kept

@@ -2553,6 +2553,27 @@ scenario('indications', {
 		busy_ind([ 1, 0 ]);
 		eq(modem.sim_busy, false, 'ind: ...not slot 1\'s');
 
+		// a card-side note is the active slot's: the card a slot switch left
+		// reports its exit after the switch, and that note stood for the new
+		// card for good (ddimension/wwand#39). SESSION_CLOSED_IND 0x0043:
+		// slot 0x01 (u8), cause 0x13 (u32).
+		let closed_ind = (slot) => modem.uim.dispatch({
+			kind: 'indication', msg_id: 0x0043,
+			tlvs: chr(0x01) + chr(1) + chr(0) + chr(slot) +
+			      chr(0x13) + chr(4) + chr(0) + chr(2) + chr(0) + chr(0) + chr(0),
+		});
+		let saved_iccid = modem.info.iccid;
+		modem.sim_note = null;
+		modem.info.iccid = '8949B';
+		closed_ind(1);
+		eq(modem.sim_note, null, 'ind: a session close on a slot not in use is not this card\'s note');
+		closed_ind(2);
+		ok(index(modem.sim_note ?? '', 'session closed:') == 0, 'ind: ...one on the active slot is');
+		eq(modem.sim_note_for, '8949B', 'ind: ...tagged with the card it was reported for');
+		modem.sim_note = null;
+		modem.sim_note_for = null;
+		modem.info.iccid = saved_iccid;
+
 		ok(length(mock.calls_for('REFRESH_REGISTER_ALL')) >= 1, 'ind: uim refresh registered');
 		ok(modem._uim_refresh_armed === true, 'ind: uim refresh handler armed');
 
