@@ -1,13 +1,52 @@
 # wwand — current state
 
-_State of 2026-10-01, v1.6.9. 61 host suites, all green (`cd tests && sh
-run_tests.sh` — it prints the count, which moves too often to be worth repeating
-here)._
+_State of 2026-10-24: stable **v1.7.2**, main **v1.8.0-dev** (HEAD f90e7fc).
+63 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
+which moves too often to be worth repeating here)._
 
 This file describes **what is true now**. The dated log of how it got here is
 `status-archive.md`; beliefs that looked right and were not are in
 `gotchas.md`. Keeping them apart is deliberate: a running log with the current
 state buried at the top invites reading a months-old entry as present tense.
+
+## Open threads (2026-10-24) — where the next session picks up
+
+- **Feed builds running** (ddimension/openwrt-repo): main `1.8.0_pre14`
+  (= 7c6f90d) and stable `1.7.2` (d5fae48) were queued at 06:35 UTC. **Do not
+  push to the feed while a build of the same branch runs** — a push cancels it
+  (pre10 and pre11 were lost that way). When both have published:
+  - check that the published `wwand` package carries `ucode>=…` (the #67 floor);
+  - bump feed main to current main (#65, #60 + follow-ups, credits — all after
+    pre14) in ONE commit;
+  - feed stable release tag (`scripts/release-stable.sh`) — only when asked.
+- **Fork branches for the device images** (ddimension/openwrt): `chateau-ci`,
+  `lte3301`, `nbg7815-update` are rebased onto openwrt main locally
+  (`/home/avalentin/projects/openwrt-rebase/openwrt`, branches `*-new`), checked
+  with feeds + `make defconfig` (the libffi break is gone), backups pushed as
+  `*-pre-rebase-2026-10-24`. The **force-push is still to do** (it was blocked by
+  the permission check; the user may run it). `nbg7815-update` is the head of
+  openwrt/openwrt#24881 — pushing it rebases that PR to its two remaining commits.
+  Cause of the image failures: libffi moved from openwrt/packages into the core
+  on 2026-10-19 (openwrt/openwrt@9b835ec626), the forks predated it.
+- **Issues waiting on reporters:** #39 (MassiPi — slot-switch note fix),
+  #66 (4IceG — diagnostics asked), #67 (xsetiadi — asked for openwrt_release /
+  ucode versions), #68/#71 (fixed, confirmation), #69 (marcinnet-25 — fewer NMEA
+  sentences?), #70 (mrhaav — raw `AT^TEMP?` asked), #48. Two-week rule: a
+  delivered issue with no answer for 14 days is closed.
+- **PRs:** #50 (MayorBug, draft, conflicts) waiting on a rework. #60 and #65
+  (xhudan) merged with follow-ups.
+- **Upstream:** openwrt/packages#30185 (pins 1.6.9; maintainer review
+  CHANGES_REQUESTED since 08-07; the bot's oldest open point — unversioned
+  `+ucode` — is answered by the #67 floor once the PR is updated, which is done
+  only on request), openwrt/luci#8917 (no maintainer review yet).
+- **Not built, documented:** a modem with ONE dead QMI service is never reset —
+  `docs/design/dead-service-recovery.md` (decision pending: auto-recover vs.
+  report only). Bands > 64 on a legacy-only LTE modem still go out as the
+  extended TLV alone.
+- **Test devices:** only those in `../test-devices.txt` (workspace); HW tests run
+  through `../hwtest/run.sh` (procedure and pitfalls in `../hwtest/README.md`).
+  The LTE3301-PLUS (EG06-E, now in MBIM mode) does not register with its current
+  SIM, so its `connect` check fails for that reason alone.
 
 ## What it is
 
@@ -28,24 +67,25 @@ is always user-triggered.
 | Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed. Plugins in their own repositories: `wwand-ipa` (SGP.32 eIM), `wwand-qlog` (Quectel QLog diag capture), `wwand-rsim` (remote SIM: readers, phones over Bluetooth SAP, other modems' cards) |
 | Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
-| Feed | ddimension/openwrt-repo, two independent lines — stable (releases, published only by a date tag): `wwand`, `luci-app-wwand`, `luci-proto-wwand` 1.6.9; main (development): `1.7.0_preN` from the `v1.7.0-dev` marker. The source repos have the same two lines (`stable` from v1.6.9) |
-| Upstream | openwrt/packages#30185 (pins v1.6.3), openwrt/luci#8917 |
+| Feed | ddimension/openwrt-repo, two independent lines — stable (releases, published only by a date tag; last: 2026.10.20 with wwand 1.7.1, 1.7.2 built but not yet released) and main (development, `1.8.0_preN` from the `v1.8.0-dev` marker). The source repos have the same two lines (`stable` at v1.7.2). `wwand` requires `ucode (>=` the SDK's ucode `)` since #67 |
+| Upstream | openwrt/packages#30185 (pins v1.6.9), openwrt/luci#8917 |
 
-## Hardware verified (2026-08-30, on r49 + the same day's device-support HEAD)
+## Hardware verified (2026-10-24, main 3a12e9e, `hwtest/run.sh`)
 
-| Box | Modem / backend | Datapath | Result |
-|---|---|---|---|
-| MikroTik Chateau 5G R17 (`245`) | RG650E, QMI | `rmnet · QMAP v5` | connected, traffic |
-| Zyxel NR7101 (`242`) | RG502Q, QMI | `rmnet · QMAP v5` | connected, 5G-NSA |
-| GL.iNet GL-X3000 (`3.93`) | RM520N-GL, MBIM | `vlan` | connected, traffic |
-| Cudy LT300 v3 (`3.97`) | SLM770A, NCM | `cdc_ether` | connected, traffic |
-| Huasifei WH3000 Pro (sponsor) | FM350-GL, NCM | `rndis_host` | connected, traffic |
-| Huasifei WH3000 Pro (sponsor) | E3372H, NCM | `huawei_cdc_ncm` | connected, traffic — AT on the cdc-wdm control channel, IP via CGPADDR (CGCONTRDP/GTDNS absent on stick firmware 21.200), v6 via RA + dhcpv6 subinterface |
-| Huasifei WH3000 Pro (sponsor) | E182E, QMI (minimal 2011 stack) | `ethernet` | **E2E verified: CONNECTED + traffic on 2G** (sponsor SIM). No UIM/DSD/WDA; DMS fallback, GET_SIGNAL_STRENGTH signal, 802.3 kept with ARP on (the function is an L2 bridge into the GGSN segment — NOARP broke the traffic path, HW-proven) |
+The test devices are those in the workspace's `test-devices.txt`, nothing else.
 
-Neither QMI modem accepts QMAP v4 (HW-observed, same runs as the table); both take v5 and fall back to v1 when asked
-for something they decline. The MBIM and NCM paths report no QMAP version at
-all, which is correct — QMAP is not on the wire there.
+| Box | Modem / backend | Result |
+|---|---|---|
+| MikroTik Chateau 5G R17 AX (203.245) | RG650E-EU, QMI + Huawei E392, QMI | connected, traffic; eUICC in slot 2 (4 profiles) read via slot switch and back; internet fallback — keeps the new version when it works |
+| ZyXEL NR7101 (5.202) | RG502Q-EA, QMI | connected; reattach; band change re-attaches with the session handed back (#62); UIM Remote switched on 2026-10-24 |
+| ZyXEL LTE3301 (5.201) | BG96, QMI | connected; reattach; legacy-only LTE mask (the band fix 674908a); accepts a band change without applying it |
+| ZyXEL LTE3301-PLUS (5.200) | EG06-E, **MBIM** (switched from QMI 2026-10-24) | daemon clean, but no registration with its SIM (`+EMM ERROR 1,15`); UIM Remote switched on |
+| Cudy LT300 v3 (3.113) | SLM770A-R, NCM | connected; reattach |
+| GL.iNet GL-X3000 (3.93) | RM520N-GL, QMI + E392 | blocked by other tests; UIM Remote already on |
+
+Snapshot devices run ucode 2026.07.09 (libucode ABI 20230711), so the feed's
+current snapshot packages do not install there (the #67 floor); hwtest deploys
+the ucode tree as source over each device's own `wwand_io.so`.
 
 ## Multi-SIM: what the hardware here actually is
 
