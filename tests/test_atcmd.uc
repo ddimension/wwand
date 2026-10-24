@@ -1390,7 +1390,34 @@ uloop.timer(600, () => {
 	ok(!match(join(' ', tlogs), /secret123/), 'auth: timeout log redacted');
 	eq(anst, 0, 'on_answer: a timeout is silence, and silence is not an answer');
 	eq(ierr, { error: 'invalid_command' }, 'injection: caller gets an error back');
-	done('test_atcmd');
+	// --- close() drops, abort() completes (#60) ----------------------------------
+// close() discards what was queued WITHOUT its callback, and every teardown is
+// written against that. abort() is for the one owner that drops a port while
+// the modem lives on: what was in flight completes with `closed`, after the
+// engine is closed.
+{
+	let t = fake_transport();
+	let e = atcmd.create(t, { log: silent });
+	let got = [];
+
+	e.send('AT+CSQ', (err) => push(got, err?.error));
+	e.send('AT+COPS?', (err) => push(got, err?.error));
+	e.close();
+	eq([ got, t.closed ], [ [], true ], 'close: queued callbacks are dropped silently, as every teardown expects');
+
+	let t2 = fake_transport();
+	let e2 = atcmd.create(t2, { log: silent });
+	let seen = [];
+
+	e2.send('AT+CSQ', (err) => push(seen, [ 'csq', err?.error, e2.closed ]));
+	e2.send('AT+QENG="servingcell"', (err) => push(seen, [ 'qeng', err?.error, e2.closed ]));
+	e2.abort();
+	eq(seen, [ [ 'csq', 'closed', true ], [ 'qeng', 'closed', true ] ],
+		'abort: the command in flight and the queued one complete with closed — on an engine already closed');
+	ok(t2.closed, 'abort: the transport is closed');
+}
+
+done('test_atcmd');
 });
 
 uloop.run();

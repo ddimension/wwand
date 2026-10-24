@@ -1085,7 +1085,7 @@ const AT_RETIRE_SILENT_AFTER = 5;
 // a SEPARATE telemetry side channel (at2) up altogether. The per-command retire
 // above cannot fire when the channel answers nothing at all — its guard needs
 // some OTHER command to answer in between — so an at2 whose read path has wedged
-// (HW-seen on an RG520N-EB over an MHI DUN AT port: every AT times out while the
+// (HW-seen on an RG520N-EB over an MHI DUN AT port, ddimension/wwand#60, 2026-10-18: every AT times out while the
 // QMI data path stays fine) is polled forever, every command timing out on every
 // tick. When at2 proves wholly dead we close JUST it and fall telemetry back to
 // the control channel; a modem whose telemetry already shares the control engine
@@ -1183,9 +1183,18 @@ export function telemetry_at(self)
 					    self.at_telemetry && self.at_telemetry != self.at) {
 						self._at_log?.('notice', sprintf('at2 answered nothing in %d consecutive telemetry commands — closing it; telemetry falls back to the control path, re-probed on the next modem init',
 							AT_PORT_DEAD_AFTER));
-						self.at_telemetry.close();
+						// switch over FIRST: abort() completes what was queued
+						// on at2, and a callback that sends its next telemetry
+						// command must already reach the control engine
+						let dead = self.at_telemetry;
+
 						self.at_telemetry = self.at;
 						self._at_dead = 0;
+
+						if (dead.abort)
+							dead.abort();
+						else
+							dead.close();
 						return cb ? cb({ error: 'closed' }, null) : null;
 					}
 

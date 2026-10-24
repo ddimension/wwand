@@ -1182,29 +1182,44 @@ export function create(transport, opts)
 			transport.drain();
 	};
 
+	// close(): stop and drop. Whatever was queued is discarded WITHOUT its
+	// callback — every teardown is written against that: a callback that ran
+	// here would re-arm timers, advance an init chain or count a failure
+	// after the modem object has started to go (modem.uc teardown, NCM's
+	// cfun_cycle, make_fail). Use abort() where a caller must hear back.
 	self.close = function() {
 		if (self.current?.timer)
 			self.current.timer.cancel();
 
-		// Collect everything in flight, then fail it. Clearing the queue used
-		// to drop these callbacks silently: a command queued on an engine that
-		// is then closed (e.g. telemetry giving up a wedged at2) never called
-		// its cb, so a telemetry refresh waiting on it never called done() and
-		// its driver stayed 'running' for good. Signal 'closed' instead so every
-		// caller completes. (ddimension/wwand#60)
-		let pending = [];
-		if (self.current)
-			push(pending, self.current);
-		for (let e in self.queue)
-			push(pending, e);
-
+		self.closed = true;
 		self.current = null;
 		self.queue = [];
 		transport.close();
+	};
+
+	// abort(): close, and complete what was in flight with { error: why }
+	// (default 'closed') — for the one owner that stops using a port while
+	// the modem lives on and somebody is waiting: telemetry giving up a dead
+	// at2, whose refresh would otherwise never call done() and leave its
+	// driver 'running' for good (ddimension/wwand#60). The callbacks run
+	// after the close; one that sends again must not do so on THIS engine
+	// (send() does not refuse a closed one — teardown relies on close()
+	// staying silent) — the at2 give-up switches telemetry to the control
+	// engine before it aborts, and telemetry_at() resolves it per send.
+	self.abort = function(why) {
+		let pending = [];
+
+		if (self.current)
+			push(pending, self.current);
+
+		for (let e in self.queue)
+			push(pending, e);
+
+		self.close();
 
 		for (let e in pending)
 			if (e.cb)
-				e.cb({ error: 'closed' }, null);
+				e.cb({ error: why ?? 'closed' }, null);
 	};
 
 	return self;

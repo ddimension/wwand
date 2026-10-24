@@ -44,6 +44,7 @@ row. That is the whole maintenance rule.
 | What exactly is netifd told — addresses, routes, DNS, MTU? | `files/wwand-proto.sh _wwand_apply_settings` |
 | Why does my interface have a default route with no gateway? | `files/wwand-proto.sh _wwand_apply_settings` — it branches on `IFF_NOARP`: a point-to-point link gets a device route, an ARP-resolving one a host route plus a via-default. Setup and renew both go through it. |
 | Where does the dhcpv6 `<parent>_6` subinterface come from, and who switches it off? | `deps.uc ensure_wan6` / `deps.uc retire_wan6` — both dispatched from the connected handler in `daemon.uc`, on complementary `effective_pdp` conditions. |
+| Why did a telemetry AT command stop being sent, or the at2 port get closed ("at2 answered nothing …")? | `modem_common.uc telemetry_at`: a command answering ERROR 3× or timing out 5× while the port answers others is retired; a SEPARATE at2 answering nothing for 20 telemetry commands is closed and telemetry falls back to the control engine (`AT_PORT_DEAD_AFTER`). The control engine is never closed by this. |
 | Which code writes `/etc/config/network` on its own, and what does it leave alone? | `deps.uc autosetup_create` / `deps.uc autosetup_fill` (the first modem on an empty box), `deps.uc ensure_wan6`, `deps.uc sim_upsert` (a plugin's `wwsim_<iccid>` section, never a user's `wwand_sim`), and `deps.uc record_bands` (a settings-editor band edit on a modem that does not keep it, `daemon.uc persist_bands`). |
 
 ## Telemetry, signal and cells

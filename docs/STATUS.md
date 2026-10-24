@@ -1442,6 +1442,17 @@ normally at that point).
   refused_answer`; QMI transient codes excluded), retries only when the
   transport could not ask; a card change re-asks. #52 — MBIM identity asks
   AT+GMI first (T99W175 answers AT+CGMI without OK).
+- **PR #60 (xhudan) merged with a follow-up:** a SEPARATE at2 telemetry
+  channel that answers nothing for 20 telemetry commands is closed and
+  telemetry falls back to the control engine (never the control engine
+  itself — that would strand an NCM modem). So "a port that answers nothing
+  retires nothing" (#56) now holds per command only. The PR made
+  atcmd.close() complete queued callbacks for EVERY caller; Codex found that
+  re-arms NCM's cfun timers, advances init chains and counts failures during
+  teardown — so close() drops silently again (what every teardown is written
+  against) and the give-up uses the new atcmd.abort(), after switching
+  telemetry to the control engine. PR #65 (xhudan) merged: zero-rx resets a
+  modem the board cannot repower (#59); a failed reset is logged.
 - **Remote SIM status (2026-10-24):** a Quectel lists QMI UIM Remote only with
   its EFS switch on (read at boot) — the RG502Q-EA and EG06-E listed it after
   00 -> 01 + reset. `remote_sim` therefore said "the modem offers no UIM

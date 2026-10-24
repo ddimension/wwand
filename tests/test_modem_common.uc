@@ -165,6 +165,22 @@ eq(ret_sent, [ 'AT+CSQ' ], 'retire: other commands keep being sent');
 	eq(at2_sent, 20, 'at2-dead: the dead side channel is not polled again');
 }
 
+// the give-up ABORTS at2 (its waiting callbacks complete) rather than closing
+// it silently, and has switched telemetry over before they run
+{
+	let order = [];
+	let m = { _at_log: (l, msg) => null };
+	m.at = { tag: 'ctrl', send: (cmd, cb) => cb(null, { lines: [ 'OK' ] }) };
+	m.at_telemetry = { tag: 'at2', send: (cmd, cb) => cb({ error: 'timeout' }, { lines: [] }),
+	                   close: () => push(order, 'close'),
+	                   abort: () => push(order, m.at_telemetry === m.at ? 'abort-after-switch' : 'abort-before-switch') };
+
+	for (let i = 0; i < 20; i++)
+		mc.telemetry_at(m).send('AT+QCAINFO', () => null);
+
+	eq(order, [ 'abort-after-switch' ], 'at2-dead: aborted, not closed silently — and only after telemetry switched to the control engine');
+}
+
 // shared engine (no separate at2): a wholly-dead telemetry channel that IS the
 // control channel is NEVER closed — doing so would strand the modem on NCM.
 {
