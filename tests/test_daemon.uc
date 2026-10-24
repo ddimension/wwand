@@ -2170,6 +2170,25 @@ uloop.run();
     let bad = null;
 	d.context_failed('nosuch', 'probe', (err, res) => { bad = err ?? res; });
 	eq(bad.error, 'no_such_context', 'failed: an unknown context is refused by name');
+
+	// watchcat hands its script the interface as configured there: `@wan`
+	// (netifd's alias form) or the L3 device — it refuses a bare logical
+	// name (ddimension/wwand#71)
+	d.modems.m0.netdev = 'wwand0';
+	eq([ d.resolve_context('@wan'), d.resolve_context('wwand0') ], [ 'wan', 'wan' ],
+		'resolve: the alias form and the L3 device name the same context');
+	eq([ d.resolve_context('@'), d.resolve_context('@nosuch'), d.resolve_context('wwand9') ],
+		[ null, null, null ], 'resolve: an empty or unknown alias and an unknown device are no context');
+
+	// `@name` is an interface alias only, never a section; a section wins
+	// over a device of its own name; a device two contexts share names none
+	d.contexts.sec = { cfg: { interface: 'logical', modem: 'm0' } };
+	eq([ d.resolve_context('@logical'), d.resolve_context('@sec') ], [ 'sec', null ],
+		'resolve: the alias form resolves the interface, not a section of that name');
+	eq(d.resolve_context('sec'), 'sec', 'resolve: a section name still wins');
+	eq(d.resolve_context('wwand0'), null,
+		'resolve: a device two contexts share is ambiguous — refused, not the first one');
+	delete d.contexts.sec;
 })();
 
 // --- the outage state must survive EVERY rebuild, not just the normal one -----

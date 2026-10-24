@@ -3923,6 +3923,23 @@ export function create(opts)
 		if (type(ref) != 'string' || length(ref) == 0 || length(ref) > 64)
 			return null;
 
+		// The two other spellings OpenWrt itself uses for an interface:
+		// netifd's alias form `@wwan0`, and the L3 device. watchcat hands its
+		// `option script` the configured `interface` verbatim — which is
+		// `@wwan0` or `wwand0` there, because it watches a device and refuses
+		// a bare logical name (ddimension/wwand#71).
+		//
+		// `@name` is an interface alias and nothing else, as in netifd.
+		if (substr(ref, 0, 1) == '@') {
+			let iface = substr(ref, 1);
+
+			for (let name, entry in self.contexts)
+				if (length(iface) && entry.cfg.interface == iface)
+					return name;
+
+			return null;
+		}
+
 		if (self.contexts[ref])
 			return ref;
 
@@ -3930,7 +3947,24 @@ export function create(opts)
 			if (entry.cfg.interface == ref)
 				return name;
 
-		return null;
+		// A device matches last, through the same resolution status reports
+		// as `l3_device` — and ONLY when it names one context. A parent can
+		// carry several (MBIM session 0 beside a demoted `mux auto`), and
+		// these refs drive down/redial/recovery: the first one iterated is
+		// not good enough.
+		let found = null;
+
+		for (let name, entry in self.contexts) {
+			if (derive_netdev(entry) != ref)
+				continue;
+
+			if (found != null)
+				return null;
+
+			found = name;
+		}
+
+		return found;
 	};
 
 	// context settings assembly (live config re-read, MTU/IPv6 link side effects,
