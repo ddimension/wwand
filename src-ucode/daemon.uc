@@ -4499,7 +4499,17 @@ export function create(opts)
 				// (reads fail until it clears) and the last named card event
 				// (session closed and why / internal recovery / activation)
 				sim_busy: entry.modem?.sim_busy ?? false,
-				sim_note: entry.modem?.sim_note ?? null,
+				// ...shown only while the card it was reported for is still
+				// the one in use. The indication for a card that LEAVES — a
+				// slot switch's "session closed: card removed" — arrives
+				// after simops card_changed has cleared the note, and set it
+				// again for good: the status kept naming the old card's exit
+				// through the switch and a switch back (ddimension/wwand#39).
+				// Recorded with the ICCID known then (modem.uc), so a note
+				// from the gap, ICCID unknown, goes once the new card is read.
+				sim_note: (entry.modem?.sim_note != null &&
+				           (entry.modem.sim_note_for ?? null) == (entry.modem.info?.iccid ?? null))
+					? entry.modem.sim_note : null,
 				// Die/board temperature, read over the AT side channel. It lived
 				// only on the `modem_cells` reply, and BOTH consumers reached for
 				// it on the status object instead — so `wwandctl status` and the

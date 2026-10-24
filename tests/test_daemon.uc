@@ -841,6 +841,26 @@ rd.shutdown();
 	sd.modems.m0.modem.mbim = { mbimex_version: 0x0201 };
 	eq(sd.status().modems.m0.mbimex, '2.1', 'mbimex: both halves of the number survive');
 	delete sd.modems.m0.modem.mbim;
+
+	// a card event names the card it was reported for (ddimension/wwand#39):
+	// the leaving card's "card removed" arrives after a slot switch cleared
+	// the note, and must not stay on the status for the card that replaced it
+	let sm = sd.modems.m0.modem;
+	let saved_info = sm.info;
+	sm.info = { iccid: '8949A' };
+	sm.sim_note = 'session closed: card removed';
+	sm.sim_note_for = '8949A';
+	eq(sd.status().modems.m0.sim_note, 'session closed: card removed', 'sim note: shown for the card it was reported for');
+	sm.info = { iccid: '8949B' };
+	eq(sd.status().modems.m0.sim_note, null, 'sim note: not for the card that replaced it');
+	sm.sim_note_for = null;
+	sm.info = { iccid: null };
+	eq(sd.status().modems.m0.sim_note, 'session closed: card removed', 'sim note: one from the gap shows while no card is read...');
+	sm.info = { iccid: '8949A' };
+	eq(sd.status().modems.m0.sim_note, null, '...and goes once a card is (a switch back included)');
+	sm.info = saved_info;
+	delete sm.sim_note;
+	delete sm.sim_note_for;
 	eq(r.rungs[3].action, 'reboot', 'recovery view: and the reboot is last');
 	eq(r.rungs[0].fired, true, 'recovery view: opmode cycle already fired');
 	eq(r.rungs[2].fired, false, 'recovery view: the hardware rung has not');
