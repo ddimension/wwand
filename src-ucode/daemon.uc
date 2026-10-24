@@ -183,6 +183,34 @@ const QMI_SERVICE_UIM_REMOTE = sprintf('%d', 0x32);
 //   { supported: null, reason }    not known yet (services not read, the
 //                                  passthrough not set up)
 //   null                           no modem object
+// THE SWITCH DECIDES WHETHER IT IS LISTED AT ALL, on Quectel. The service is
+// registered only when an EFS item enables it, and that item is read at boot:
+// an RG502Q-EA and an EG06-E listed no UIM Remote with it at 00 and did after
+// 00 -> 01 and a modem reset (HW-observed, ZyXEL NR7101 / LTE3301-PLUS,
+// 2026-10-24). So "not listed" on a Quectel usually means "switched off", and
+// reporting it as "the modem offers no UIM Remote" sent people away from a
+// modem that only needed the switch. The daemon reads the item once per modem
+// object (uim_remote_switch_probe, from the status tick) and the reason below
+// names what it found. ERROR means the item does not exist — the firmware
+// default, off (the same answer an RG650E gave before it was first written).
+const UIMRMT_EFS = '/nv/item_files/modem/uim/remote/uim_remote_service_enable';
+
+function uim_remote_not_listed(m, what)
+{
+	let sw = m.uim_remote_switch;
+
+	if (sw == 'off' || sw == 'unset')
+		return { supported: false, switch: sw,
+		         reason: sprintf('UIM Remote is switched off in the modem firmware (%s %s); it is read at boot — switch it on (the remote-SIM tooling does) and reset the modem',
+		                         UIMRMT_EFS, (sw == 'off') ? '= 00' : 'not set') };
+
+	if (sw == 'on')
+		return { supported: false, switch: sw,
+		         reason: 'UIM Remote is switched on in the modem firmware but not listed yet — the switch is read at boot, so the modem needs a reset' };
+
+	return { supported: false, reason: what };
+}
+
 function remote_sim_support(protocol, m)
 {
 	if (!m)
@@ -194,14 +222,14 @@ function remote_sim_support(protocol, m)
 
 		return m.services[QMI_SERVICE_UIM_REMOTE]
 			? { supported: true, via: 'qmi' }
-			: { supported: false, reason: 'the modem offers no QMI UIM Remote service' };
+			: uim_remote_not_listed(m, 'the modem offers no QMI UIM Remote service');
 	}
 
 	if (protocol == 'mbim') {
 		if (type(m.pt?.services) == 'object')
 			return m.pt.services[QMI_SERVICE_UIM_REMOTE]
 				? { supported: true, via: 'mbim-passthrough' }
-				: { supported: false, reason: 'the QMI passthrough offers no UIM Remote service' };
+				: uim_remote_not_listed(m, 'the QMI passthrough offers no UIM Remote service');
 
 		if (m._pt_failed)
 			return { supported: false, reason: 'the modem has no QMI passthrough over MBIM' };
@@ -3774,6 +3802,56 @@ export function create(opts)
 			};
 			self._reboot_router = reboot_router;
 
+			// one read of the Quectel UIM Remote switch per modem object, only
+			// for a modem that does not list the service (see UIMRMT_EFS); the
+			// answer is what status reports. A port that does not answer is
+			// tried again on a later tick, three times in all.
+			let uim_remote_switch_probe = (name, entry) => {
+				let m = entry?.modem;
+
+				if (!m?.at || m.uim_remote_switch != null || (m._uimrmt_tries ?? 0) >= 3 || m._uimrmt_busy)
+					return;
+
+				if (!match(lc(sprintf('%s', m.info?.manufacturer ?? '')), /quectel/))
+					return;
+
+				// only after the service list the modem gave positively left
+				// UIM Remote out: NCM has none, and a failed MBIM passthrough
+				// could not use the service whatever the switch says
+				let services = (entry.protocol == 'qmi') ? m.services
+				             : (entry.protocol == 'mbim') ? m.pt?.services : null;
+
+				if (type(services) != 'object' || services[QMI_SERVICE_UIM_REMOTE])
+					return;
+
+				m._uimrmt_busy = true;
+				m._uimrmt_tries = (m._uimrmt_tries ?? 0) + 1;
+				m.at.send(sprintf('AT+QNVFR="%s"', UIMRMT_EFS), (err, res) => {
+					m._uimrmt_busy = false;
+
+					// a bare ERROR is the item not existing (HW-observed, above);
+					// a +CME is not — 14/515 are a busy SIM or port, tried
+					// again, anything else is no answer about the switch
+					if (err?.error == 'ERROR')
+						return (m.uim_remote_switch = 'unset');
+
+					if (err?.error == 'cme' && +err.code != 14 && +err.code != 515)
+						m._uimrmt_tries = 3;
+
+					if (err)
+						return;
+
+					// 00 and 01 are the values this switch has; anything else
+					// is not evidence either way
+					for (let l in (res?.lines ?? [])) {
+						let v = match(l, /^\+QNVFR:\s*"?(00|01)"?\s*$/);
+
+						if (v)
+							return (m.uim_remote_switch = (v[1] == '00') ? 'off' : 'on');
+					}
+				}, { timeout: 5000 });
+			};
+
 			let tick;
 			tick = () => {
 				let now = time();
@@ -3887,6 +3965,9 @@ export function create(opts)
 
 				// optional plugins (plugins.uc): a no-op when none is installed
 				self.plugins_tick?.();
+
+				for (let name, entry in self.modems)
+					uim_remote_switch_probe(name, entry);
 
 				// a radio a plugin parked, which no plugin holds any more (it
 				// stopped, failed, forgot): handed back as the plugin would

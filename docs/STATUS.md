@@ -1423,6 +1423,11 @@ normally at that point).
   refused_answer`; QMI transient codes excluded), retries only when the
   transport could not ask; a card change re-asks. #52 — MBIM identity asks
   AT+GMI first (T99W175 answers AT+CGMI without OK).
+- **Remote SIM status (2026-10-24):** a Quectel lists QMI UIM Remote only with
+  its EFS switch on (read at boot) — the RG502Q-EA and EG06-E listed it after
+  00 -> 01 + reset. `remote_sim` therefore said "the modem offers no UIM
+  Remote" for a modem that was merely switched off; the daemon now reads the
+  switch once per modem from the tick and reports `switch` + the remedy.
 - **HW run 2026-10-24 (hwtest/, 5 devices on main):** a legacy-only LTE modem
   (BG96: GET reports no ext_lte_band) got the extended TLV ALONE for an
   unchanged band list and refused it (MISSING_ARGUMENT 17) — the guard now

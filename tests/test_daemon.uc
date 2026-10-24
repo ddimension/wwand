@@ -4488,6 +4488,76 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	mods.mb.pt = null;
 	mods.mb._pt_failed = true;
 	eq(rs('mb')?.supported, false, 'remote SIM: no passthrough on this MBIM modem — no');
+
+	// ...but on a Quectel "not listed" is usually "switched off": the service
+	// is registered only when an EFS item enables it, read at boot (RG502Q-EA,
+	// EG06-E: listed only after 00 -> 01 and a reset, 2026-10-24). The tick asks
+	// once; the reason then says which it is.
+	let sent = [], answer = null;
+	mods.q.services = { '1': {}, '26': {} };
+	mods.q.info = { manufacturer: 'Quectel' };
+	mods.q.at = { send: (cmd, cb) => { push(sent, cmd); cb(answer.err, answer.res); } };
+	mods.mb.info = { manufacturer: 'Quectel' };
+	mods.mb.at = mods.q.at;
+	mods.q.services = null;
+	d._tick();
+	eq(length(sent), 0, 'remote SIM switch: no service list (QMI not read, MBIM passthrough failed) — not asked');
+	mods.q.services = { '1': {}, '26': {} };
+
+	answer = { err: null, res: { lines: [ '+QNVFR: 00' ] } };
+	d._tick();
+	eq(length(sent), 1, 'remote SIM switch: a Quectel that does not list UIM Remote is asked once');
+	ok(index(sent[0], 'uim_remote_service_enable') > 0, 'remote SIM switch: ...for the EFS enable item');
+	eq([ rs('q')?.supported, rs('q')?.switch ], [ false, 'off' ], 'remote SIM switch: 00 — off');
+	ok(index(rs('q')?.reason ?? '', 'switched off in the modem firmware') >= 0, 'remote SIM switch: ...and the reason says so, with the remedy');
+	d._tick();
+	eq(length(sent), 1, 'remote SIM switch: ...and not again');
+
+	delete mods.q.uim_remote_switch;
+	answer = { err: { error: 'ERROR' }, res: null };
+	d._tick();
+	eq(rs('q')?.switch, 'unset', 'remote SIM switch: ERROR — the item does not exist, the firmware default (off)');
+
+	delete mods.q.uim_remote_switch;
+	delete mods.q._uimrmt_tries;
+	answer = { err: { error: 'cme', code: '14' }, res: null };
+	d._tick();
+	eq(rs('q')?.switch, null, 'remote SIM switch: SIM busy (CME 14) is not an unset item');
+	answer = { err: { error: 'cme', code: '4' }, res: null };
+	d._tick(); d._tick();
+	eq([ rs('q')?.switch, mods.q._uimrmt_tries ], [ null, 3 ], 'remote SIM switch: another CME says nothing about it — not asked again');
+
+	delete mods.q._uimrmt_tries;
+	answer = { err: null, res: { lines: [ '+QNVFR:' ] } };
+	d._tick();
+	answer = { err: null, res: { lines: [ '+QNVFR: FF' ] } };
+	d._tick();
+	eq(rs('q')?.switch, null, 'remote SIM switch: an empty or unknown value is neither off nor on');
+
+	delete mods.q.uim_remote_switch;
+	delete mods.q._uimrmt_tries;
+	answer = { err: null, res: { lines: [ '+QNVFR: 01' ] } };
+	d._tick();
+	ok(rs('q')?.switch == 'on' && index(rs('q').reason, 'needs a reset') > 0,
+		'remote SIM switch: 01 but not listed — on, and read at boot: needs a reset');
+
+	delete mods.q.uim_remote_switch;
+	delete mods.q._uimrmt_tries;
+	answer = { err: { error: 'timeout' }, res: null };
+	d._tick(); d._tick(); d._tick(); d._tick();
+	eq([ mods.q.uim_remote_switch, length(sent) ], [ null, 10 ],
+		'remote SIM switch: a port that does not answer is tried three times, then left alone');
+
+	sent = [];
+	delete mods.q._uimrmt_tries;
+	mods.q.services = { '1': {}, '50': {} };
+	d._tick();
+	eq(length(sent), 0, 'remote SIM switch: a modem that lists UIM Remote is not asked');
+	mods.q.services = { '1': {} };
+	mods.q.info = { manufacturer: 'Sierra Wireless' };
+	d._tick();
+	eq([ length(sent), rs('q')?.reason ], [ 0, 'the modem offers no QMI UIM Remote service' ],
+		'remote SIM switch: another vendor is not asked, and keeps the plain reason');
 	d.shutdown();
 }
 

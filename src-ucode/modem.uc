@@ -557,7 +557,7 @@ export function create(opts)
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:4369), and dropping it strands a ubus request.
+				// (daemon.uc:4436), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
