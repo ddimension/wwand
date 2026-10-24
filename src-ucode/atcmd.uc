@@ -1186,9 +1186,25 @@ export function create(transport, opts)
 		if (self.current?.timer)
 			self.current.timer.cancel();
 
+		// Collect everything in flight, then fail it. Clearing the queue used
+		// to drop these callbacks silently: a command queued on an engine that
+		// is then closed (e.g. telemetry giving up a wedged at2) never called
+		// its cb, so a telemetry refresh waiting on it never called done() and
+		// its driver stayed 'running' for good. Signal 'closed' instead so every
+		// caller completes. (ddimension/wwand#60)
+		let pending = [];
+		if (self.current)
+			push(pending, self.current);
+		for (let e in self.queue)
+			push(pending, e);
+
 		self.current = null;
 		self.queue = [];
 		transport.close();
+
+		for (let e in pending)
+			if (e.cb)
+				e.cb({ error: 'closed' }, null);
 	};
 
 	return self;
