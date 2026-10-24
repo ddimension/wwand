@@ -1081,6 +1081,18 @@ const AT_RETIRE_AFTER = 3;
 // evidence, so it takes longer to convince.
 const AT_RETIRE_SILENT_AFTER = 5;
 
+// How many timed-out telemetry COMMANDS with nothing answering in between give
+// a SEPARATE telemetry side channel (at2) up altogether. The per-command retire
+// above cannot fire when the channel answers nothing at all — its guard needs
+// some OTHER command to answer in between — so an at2 whose read path has wedged
+// (HW-seen on an RG520N-EB over an MHI DUN AT port: every AT times out while the
+// QMI data path stays fine) is polled forever, every command timing out on every
+// tick. When at2 proves wholly dead we close JUST it and fall telemetry back to
+// the control channel; a modem whose telemetry already shares the control engine
+// has nothing to give up (closing it would strand the modem on NCM). ~5 poll
+// cycles; larger than the per-command count because closing a port is heavier.
+const AT_PORT_DEAD_AFTER = 20;
+
 // Has this AT channel given up on every one of these commands? The question a
 // telemetry family asks about its OWN signal source before deciding whether the
 // serving-cell read is authoritative: a modem that refuses AT+QSINR? has no
@@ -1151,10 +1163,32 @@ export function telemetry_at(self)
 				let silent = (err?.error == 'timeout');
 
 				// the port answered (anything but silence or a closed port)
-				if (!silent && err?.error != 'closed')
+				if (!silent && err?.error != 'closed') {
 					self._at_alive = (self._at_alive ?? 0) + 1;
+					// the side channel answered -> it is not wholly dead
+					self._at_dead = 0;
+				}
 
 				if (silent) {
+					// PORT-LEVEL give-up, of a SEPARATE telemetry side channel
+					// (at2) only. Count consecutive timed-out telemetry COMMANDS
+					// (any answer above clears _at_dead); once at2 is wholly dead
+					// close JUST it and fall telemetry back to the control engine.
+					// Where telemetry already runs on the control engine
+					// (at_telemetry == at) there is nothing to give up — closing
+					// it would strand the modem on NCM — so the count does
+					// nothing there. (ddimension/wwand#60)
+					self._at_dead = (self._at_dead ?? 0) + 1;
+					if (self._at_dead >= AT_PORT_DEAD_AFTER &&
+					    self.at_telemetry && self.at_telemetry != self.at) {
+						self._at_log?.('notice', sprintf('at2 answered nothing in %d consecutive telemetry commands — closing it; telemetry falls back to the control path, re-probed on the next modem init',
+							AT_PORT_DEAD_AFTER));
+						self.at_telemetry.close();
+						self.at_telemetry = self.at;
+						self._at_dead = 0;
+						return cb ? cb({ error: 'closed' }, null) : null;
+					}
+
 					let seen = self._at_silent?.[cmd];
 
 					self._at_silent ??= {};
@@ -1571,6 +1605,7 @@ export function close_at(self)
 	self._at_errors = null;
 	self._at_silent = null;
 	self._at_alive = 0;
+	self._at_dead = 0;
 };
 
 // The init commands every AT channel runs once it answers: model quirks,

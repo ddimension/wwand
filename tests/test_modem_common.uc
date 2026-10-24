@@ -136,6 +136,52 @@ eq(ret_sent, [ 'AT+CSQ' ], 'retire: other commands keep being sent');
 		'silent: an answer now and then resets the count — never retired');
 }
 
+// --- a wholly-dead SEPARATE at2 is given up; the control channel survives (#60) ---
+// A side channel that answers NOTHING never trips the per-command retire above
+// (its guard needs some other command to answer). After AT_PORT_DEAD_AFTER (20)
+// timed-out telemetry commands the whole at2 is closed and telemetry falls back
+// to the control engine — which is left untouched.
+{
+	let closed = 0, at2_sent = 0, ctrl_sent = 0;
+	let m = { _at_log: (l, msg) => null };
+	m.at = { tag: 'ctrl', send: (cmd, cb) => { ctrl_sent++; cb(null, { lines: [ 'OK' ] }); } };
+	let at2 = { tag: 'at2', send: (cmd, cb) => { at2_sent++; cb({ error: 'timeout' }, { lines: [] }); },
+	            close: () => { closed++; } };
+	m.at_telemetry = at2;
+
+	let trip_err = null;
+	for (let i = 0; i < 20; i++)
+		mc.telemetry_at(m).send('AT+QCAINFO', (e) => { trip_err = e; });
+
+	eq(closed, 1, 'at2-dead: the side channel is closed exactly once');
+	eq(at2_sent, 20, 'at2-dead: at2 given up after AT_PORT_DEAD_AFTER commands');
+	eq(m.at_telemetry, m.at, 'at2-dead: telemetry falls back to the control engine');
+	eq(trip_err?.error, 'closed', 'at2-dead: the command that tripped it answers closed');
+
+	// later telemetry rides the control engine; the dead at2 is not polled again
+	let cs = ctrl_sent;
+	mc.telemetry_at(m).send('AT+CSQ', () => null);
+	eq(ctrl_sent, cs + 1, 'at2-dead: later telemetry goes to the control channel');
+	eq(at2_sent, 20, 'at2-dead: the dead side channel is not polled again');
+}
+
+// shared engine (no separate at2): a wholly-dead telemetry channel that IS the
+// control channel is NEVER closed — doing so would strand the modem on NCM.
+{
+	let closed = 0, sent = 0;
+	let m = { _at_log: (l, msg) => null };
+	m.at = { tag: 'ctrl', send: (cmd, cb) => { sent++; cb({ error: 'timeout' }, { lines: [] }); },
+	         close: () => { closed++; } };
+	m.at_telemetry = m.at;
+
+	for (let i = 0; i < 30; i++)
+		mc.telemetry_at(m).send('AT+QCAINFO', () => null);
+
+	eq(closed, 0, 'shared-engine: the control channel is never closed by the port give-up');
+	eq(m.at_telemetry, m.at, 'shared-engine: telemetry stays on the control engine');
+	eq(sent, 30, 'shared-engine: it keeps being polled — nothing to give up');
+}
+
 // COUNTERPROOF 1: a bare ERROR that is not consecutive never retires anything.
 // This is the ddimension/wwand#12 shape — AT^CHIPTEMP was latched off on its
 // first error and the modem reported no temperature again for the whole
