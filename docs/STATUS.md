@@ -189,7 +189,7 @@ two things depending on which path answered:
 
 - **WCDMA Ec/Io** arrives over QMI as a raw gint16 in -0.5 dB units
   (`qmicli-nas.c:460-462`, libqmi 1.38.0) but over AT already in dB
-  (`atcmd_parse.uc:357`). `modem_common.normalise_qmi_signal()` converts at the
+  (`atcmd_parse.uc:424`). `modem_common.normalise_qmi_signal()` converts at the
   edge — at **all three** doors that store a raw QMI signal reply: the polled
   `GET_SIGNAL_INFO`, the `SIGNAL_INFO_IND` indication and the same request over
   the QMI-over-MBIM passthrough. Converting only the first was worse than
@@ -1423,6 +1423,12 @@ normally at that point).
   refused_answer`; QMI transient codes excluded), retries only when the
   transport could not ask; a card change re-asks. #52 — MBIM identity asks
   AT+GMI first (T99W175 answers AT+CGMI without OK).
+- **Anchors (2026-10-24):** ~100 in-tree `file:line` anchors had drifted onto
+  lines that still exist (check-anchors cannot see that) — repointed after
+  reading each against the code it describes. **Open, documented:** a modem
+  with ONE dead QMI service is never recovered (proto counter per modem, any
+  answer resets it) — analysis and options in `docs/design/dead-service-recovery.md`,
+  decision (auto-recover vs. report only) pending.
 - **#67 (FM350-GL, snapshot):** a feed build from after OpenWrt master moved
   libucode 20230711 -> 20261009 (2026-10-19) was installed onto an older
   snapshot and died on the missing `libucode.so.20261009`. Feed: `wwand` gets

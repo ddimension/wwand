@@ -811,7 +811,7 @@ export function create(o)
 		// ordinary OpenWrt shape a user could have written themselves, and
 		// nothing on disk distinguishes the two. This makes the SAME assumption
 		// ensure_wan6 already makes when it fills options into an existing
-		// section of that name (:523) — one rule, not a new one. A section
+		// section of that name (:719) — one rule, not a new one. A section
 		// under a DIFFERENT name is never looked up here, so the "user-defined
 		// section wins" case in ensure_wan6 keeps its own lifecycle untouched,
 		// which is right: a section wwand did not start is not wwand's to stop.

@@ -854,7 +854,7 @@ export function create(opts)
 						// here (client.uc:184 — no `no_recovery` on the dial, and
 						// there must not be: a dial that genuinely fails has to
 						// climb). That is deliberate and harmless: the very next
-						// successful request zeroes it (recovery.uc:505-506), and
+						// successful request zeroes it (recovery.uc:718-719), and
 						// the same is already true of the NO_EFFECT that
 						// qmi_backend.set_opmode normalises.
 						// (a family is registered with pdh null BEFORE the dial,

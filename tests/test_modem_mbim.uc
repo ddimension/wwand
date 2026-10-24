@@ -969,7 +969,7 @@ assert_sim_poll_teardown();
 
 	// ...and it stays balanced when a client destroy pays a callback that
 	// throws. Destroying a client runs its pending callbacks synchronously
-	// (client.uc:217, mbim_client.uc:267) and those are not ours; an unguarded
+	// (client.uc:225, mbim_client.uc:679) and those are not ours; an unguarded
 	// throw would skip the decrement and leave the depth raised for the life of
 	// the object, after which make_fail refuses every retry. Review follow-up,
 	// 2026-09-19.
@@ -992,7 +992,7 @@ assert_sim_poll_teardown();
 	// catch around the whole passthrough block let the first bad destroy strand
 	// the remaining clients and the shim, after which `self.pt = null` dropped
 	// the only handle to a shim still open with clients on it
-	// (qmi_over_mbim.uc:110). Raised by review, 2026-09-19.
+	// (qmi_over_mbim.uc:135). Raised by review, 2026-09-19.
 	let m5 = modem_mbim.create({
 		id: 'teardown-partial', device: '/dev/mock4', config: {},
 		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
@@ -1138,7 +1138,7 @@ assert_sim_poll_teardown();
 // anything — not on success, not on error, not on cancellation. The table is
 // finite and small on some stacks (the E182E class has room for a handful), so
 // a scripted reattach loop walked it down and then took passthrough UIM and WMS
-// with it. modem.uc has released its clients since :296; the MBIM passthrough
+// with it. modem.uc has released its clients since :360; the MBIM passthrough
 // never did. Found by a full review, 2026-09-19.
 
 function assert_passthrough_releases_cid(after) {
@@ -1174,10 +1174,10 @@ uloop.run();
 //
 // pt.nas / pt.dsd were destroyed and uim / wms were not even that, and none of
 // the four was ever RELEASED — client.destroy() deliberately does not
-// (client.uc:201). Closing the HOST's MBIM session is not shown to reset the
+// (client.uc:209). Closing the HOST's MBIM session is not shown to reset the
 // modem's embedded QMI client table, so every daemon reload leaked up to four
 // CIDs out of a table that has room for a handful on the E182E class. The
-// native side has done this burst since modem.uc:1409. Raised by Codex review,
+// native side has done this burst since modem.uc:1693. Raised by Codex review,
 // 2026-09-19.
 
 function assert_teardown_releases_pt_cids() {

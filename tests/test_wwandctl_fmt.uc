@@ -151,7 +151,7 @@ ok(index(untagged, 'signal_power-rssi" interval=30 N:-70.000') >= 0,
 
 // THE SENTINEL TYPE IS PER FIELD. QMI decodes the LTE/WCDMA/GSM RSSI and the
 // LTE RSRQ as i8 (sentinel -128) and rsrp/snr/ecio as i16 (sentinel -32768)
-// (codec/schema/nas.uc:108-112). A blanket i16 test lets an unavailable -128
+// (codec/schema/nas.uc:112-116). A blanket i16 test lets an unavailable -128
 // through as a genuine -128 dBm — precisely the silent wrong value this filter
 // exists to stop.
 let i8s = join('\n', fmt.collectd_lines('h', 'm',

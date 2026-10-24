@@ -414,7 +414,7 @@ function run_daemon()
 		// interfaces (now proto wwand) and brings them up against a daemon that
 		// already knows them.
 		//
-		// This was a blocking conn.call, against this file's own rule at :241 —
+		// This was a blocking conn.call, against this file's own rule at :256 —
 		// ucode's conn.call() parks the single uloop until netifd answers (up
 		// to its 30 s timeout), and a parked daemon cannot serve its own ubus.
 		// So the reload it just triggered had netifd calling the wwand proto

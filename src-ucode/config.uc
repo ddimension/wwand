@@ -909,12 +909,12 @@ function merge_iface_modem_opts(modem, s, name, mkey, warnings)
 		// THROUGH num_opt, LIKE THE NATIVE PATH. A bare `+` turns a typo into
 		// NaN, and NaN fails every comparison — `interval <= 0` is false for it
 		// — so it slips past the guards the consumers do have. That is the whole
-		// reason num_opt exists (:33), and this legacy path was the one place
+		// reason num_opt exists (:54), and this legacy path was the one place
 		// that bypassed it: `option failreboot '100s'` silently turned the
 		// reboot rung off (recovery.uc reads it as a number), and a typo'd
 		// zero_rx_timeout silently turned the watchdog off. Warning-free, on
 		// this path only. The defaults match
-		// the native reader at :456-466 so the two cannot drift apart.
+		// the native reader at :558-571 so the two cannot drift apart.
 	{
 		modem.location = num_opt(s.location, 0, 'location', warnings) > 1;   // old gate: location > 1
 
@@ -1643,7 +1643,7 @@ export function migrate_plan(raw, opts)
 				// THE ANCHORS BELONG TO THE INTERFACE THE MODEM WAS CREATED
 				// FROM. `device` is the obvious one; `netdev` is the same
 				// thing by another name — discovery resolves the modem and
-				// picks its datapath from it (discovery.uc:1041,1027), so a
+				// picks its datapath from it (discovery.uc:1081,1090), so a
 				// second interface supplying a different one would bind the
 				// section to the wrong hardware. Everything else in
 				// MIGRATE_MODEM_OPTS is modem POLICY (pincode, modes, mux,

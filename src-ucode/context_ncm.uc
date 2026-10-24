@@ -200,7 +200,7 @@ export function create(opts)
 		// is the one backend where that has to be said. QMI builds only the
 		// requested family's clients (context.uc:173 wanted_families), so a
 		// v4-only context has no v6 client to report anything at all. MBIM
-		// sends the effective type as CONNECT's ip_type (context_mbim.uc:329)
+		// sends the effective type as CONNECT's ip_type (context_mbim.uc:340)
 		// and a conforming modem answers in kind — though its builder would
 		// take a v6 half if one came back anyway (context_mbim.uc:142), so that
 		// is protocol trust rather than a structural guarantee. Codex review
@@ -359,7 +359,7 @@ export function create(opts)
 	// than asking the question again.
 	let read_rdp_once = (cb) => {
 		// THE VENDOR BRANCH NEEDS THE SAME GUARD. It dereferences modem.at
-		// itself (ncm_vendors.uc:1422, :1626 and friends) instead of going
+		// itself (ncm_vendors.uc:1422, :1666 and friends) instead of going
 		// through at_send, and the NCM teardown nulls modem.at without
 		// notifying the contexts — so an ACTIVATING context whose retry fires a
 		// second later used to call `.send` on null. A throw inside a uloop

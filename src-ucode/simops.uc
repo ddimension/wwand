@@ -23,7 +23,7 @@ export function install(self, o)
 
 	// injectable so the deferred card re-read can be driven from a test: this
 	// module's only timer is armed after a slot switch, long after the suite's
-	// uloop has stopped (tests/test_sim.uc runs it at :1548 and the simops
+	// uloop has stopped (tests/test_sim.uc runs it at :1814 and the simops
 	// block sits below that), so a real uloop.timer there is unobservable.
 	let defer = o.defer ?? ((ms, fn) => uloop.timer(ms, fn));
 
@@ -127,7 +127,7 @@ export function install(self, o)
 		// nothing on either path ever clears them (evidence:
 		// ddimension/wwand#39, NR7101).
 		//
-		// modem.uc:1634-1639 already states the rule — card-side
+		// modem.uc:1745-1750 already states the rule — card-side
 		// diagnostics belong to the card we were talking to — and acts on
 		// it during teardown. This path is the other place a card changes
 		// underneath us, and it did not.
@@ -166,7 +166,7 @@ export function install(self, o)
 		// belongs to this module, not to the modem, so it outlives the
 		// teardown and would talk to a client that is mid-initialisation.
 		// `_gen` is the counter both backends already bump on teardown
-		// (modem.uc:1586, modem_mbim.uc:2592); NCM has none and degrades to
+		// (modem.uc:1668, modem_mbim.uc:2905); NCM has none and degrades to
 		// the identity check, which is the case its reset already answers.
 		let gen = m._gen;
 		// ...and a card change of its own: a remote SIM that comes and goes

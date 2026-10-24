@@ -1280,7 +1280,7 @@ export function create(opts)
 		// down and re-enumerates it, so `self.at` can be null by the time the
 		// call lands. Reading `.send` off it throws inside a uloop callback,
 		// which does not fail the call: it takes the daemon with it. Field-seen
-		// at modem_ncm.uc:1134, and only with `sim_slot` configured — that is
+		// at modem_ncm.uc:1289, and only with `sim_slot` configured — that is
 		// what makes step_simslot walk the second pass at all
 		// (ddimension/wwand#32).
 		if (!self.at)
@@ -2077,7 +2077,7 @@ export function create(opts)
 				// produced an ICCID at all, and after an eSIM switch on a
 				// generic-recipe modem the OLD card's iccid and its wwand_sim
 				// override survived — the exact wrong state this function exists
-				// to prevent. :762 and sim.uc:1753 have had it right all along.
+				// to prevent. :1095 and sim.uc:2006 have had it right all along.
 				// Found by a full review, 2026-09-19.
 				if (h)
 					return hexmod.bytes_to_iccid(hexmod.hex_to_arr(h[1]));
@@ -2127,7 +2127,7 @@ export function create(opts)
 		// the cancel pass below and restart a modem that is being stopped. NCM
 		// reaches that re-arm through close_at() further down, which can pay
 		// cfun_cycle's callbacks synchronously and let them arm a timer
-		// (:313/:315). Review follow-up, 2026-09-19.
+		// (:358/:365). Review follow-up, 2026-09-19.
 		self._teardown_depth = (self._teardown_depth ?? 0) + 1;
 
 		for (let t in [ retry_timer, reg_timer, reg_poll_timer, settle_timer, at_drain_timer,

@@ -480,7 +480,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:961-964 warns "references
+	// produces no entry for it at all (config.uc:1028-1031 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -1423,11 +1423,11 @@ export function create(opts)
 	//
 	//   - CONNECTED is sufficient but not necessary. An MBIM attempt aborted
 	//     while the modem was still answering sets `activated` from the late
-	//     reply (context_mbim.uc:367-371), so an IDLE context can be holding a
+	//     reply (context_mbim.uc:378-382), so an IDLE context can be holding a
 	//     session that only down() will tear down.
 	//   - ACTIVATING is not "no session yet" either: MBIM sets `activated`
-	//     before it queries the IP configuration (context_mbim.uc:382-383), NCM
-	//     before it reads its own (context_ncm.uc:742), and QMI can have
+	//     before it queries the IP configuration (context_mbim.uc:393-394), NCM
+	//     before it reads its own (context_ncm.uc:756), and QMI can have
 	//     activated families while settings are still being fetched.
 	//
 	// Each backend's down() already knows exactly what it holds. Asking it is
@@ -1437,7 +1437,7 @@ export function create(opts)
 	//
 	// AND THE RECONNECT IS STARTED HERE, not inferred from the `down` event.
 	// context_ncm.down() returns WITHOUT emitting it when the activation has
-	// not set `activated` yet (context_ncm.uc:879-882) — so a mid-dial NCM
+	// not set `activated` yet (context_ncm.uc:901-904) — so a mid-dial NCM
 	// context would have gone IDLE with `wanted` still true and nothing
 	// scheduled, wedged by the very handler meant to restart it. enter_
 	// reconnecting returns on an armed hold timer, and every emitting backend
@@ -1461,8 +1461,8 @@ export function create(opts)
 	// whether anything started it.
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
-	// own emit on a change (modem_mbim.uc:1014-1023) while the shared reapply
-	// tail emits on every re-read (modem_common.uc:643-649); one comparison, in
+	// own emit on a change (modem_mbim.uc:1069-1078) while the shared reapply
+	// tail emits on every re-read (modem_common.uc:659-665); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {
 		let entry = self.modems[modem.id];
@@ -1820,7 +1820,7 @@ export function create(opts)
 			// Picking fields by hand would leave a DNS- or MTU-only refresh
 			// looking identical here while netifd keeps the stale values, and
 			// context_monitor_qmi already decides "did the settings change" the
-			// same way (settings_sig, :226).
+			// same way (settings_sig, :282).
 			let cur_sig = sprintf('%J', ctx.settings);
 
 			let do_renew = () => {
@@ -2102,7 +2102,7 @@ export function create(opts)
 					// The context this belongs to is gone, or was replaced —
 					// and the ENTRY check is the load-bearing half: stop_context
 					// deletes the entry from self.contexts without clearing its
-					// ctx (:1238) and shutdown replaces the whole map (:2894),
+					// ctx (:2602) and shutdown replaces the whole map (:5462),
 					// so a closure holding `entry` would still see
 					// `entry.ctx == mine` and bounce a freshly created
 					// subinterface.
@@ -2561,13 +2561,13 @@ export function create(opts)
 			};
 
 		// TELL THE CONTEXTS FIRST, then stop the modem — the order _device_gone
-		// uses (modem_common.uc:670). Dropping `centry.ctx` below only releases
+		// uses (modem_common.uc:704). Dropping `centry.ctx` below only releases
 		// the daemon's HANDLE: the context object itself lives on with its
 		// monitor timers armed and its WDS clients alive, polling a hub that
 		// entry.modem.stop() has just closed. One orphan per removal, and its
 		// late events can arm a spurious reconnect-hold on the rebuilt entry.
 		// `lost` is built for exactly this — it stops the monitor and destroys
-		// the family clients without attempting QMI cleanup (context.uc:1196).
+		// the family clients without attempting QMI cleanup (context.uc:1294).
 		for (let cname, centry in self.contexts) {
 			if (centry.cfg.modem == name && centry.ctx)
 				centry.ctx.modem_event('lost');

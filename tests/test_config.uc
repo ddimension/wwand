@@ -484,7 +484,7 @@ r = padopt({
 
 // A TYPO IN A NUMERIC MUST NOT SILENTLY TURN A GUARD OFF. A bare `+` makes NaN,
 // and NaN fails every comparison — `interval <= 0` is false for it — so it slips
-// past the guards the consumers have. num_opt (config.uc:33) exists for exactly
+// past the guards the consumers have. num_opt (config.uc:54) exists for exactly
 // that, and the legacy inline reader was the one path that bypassed it: a
 // misspelled failreboot silently disabled the reboot rung, a misspelled
 // zero_rx_timeout silently disabled the watchdog, and neither warned. Found by a

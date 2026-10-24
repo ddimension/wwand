@@ -25,7 +25,7 @@ ok(type(gps) == 'object', 'gps: module loads via require()');
 //   a string  bytes
 //   null      EAGAIN — nothing right now
 //   false     read() returned 0 OR failed, and THOSE ARE NOT THE SAME THING:
-//             open_tty sets VMIN=0 VTIME=0 (io/src/wwand-io.c:30), so an idle
+//             open_tty sets VMIN=0 VTIME=0 (io/src/wwand-io.c:118), so an idle
 //             tty returns 0 bytes immediately. Only the failure sets errno.
 //
 // The first version of this helper returned `false` to mean "gone" and nothing

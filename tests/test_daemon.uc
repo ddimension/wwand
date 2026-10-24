@@ -1289,8 +1289,8 @@ rld.shutdown();
 
 	// wanA is carrying traffic; wanB is MID-DIAL, which is not the same as
 	// "holds nothing" — MBIM sets its activated flag before it queries the IP
-	// configuration (context_mbim.uc:359-360) and NCM before it reads its own
-	// (context_ncm.uc:702). wanC belongs to the other modem.
+	// configuration (context_mbim.uc:393-394) and NCM before it reads its own
+	// (context_ncm.uc:756). wanC belongs to the other modem.
 	arm('wanA', 'CONNECTED');
 	arm('wanB', 'ACTIVATING');
 	arm('wanC', 'CONNECTED');
@@ -1317,7 +1317,7 @@ rld.shutdown();
 	// AND THE RECONNECT IS ACTUALLY ENTERED. This is the half the earlier
 	// version left to an event that one backend does not send:
 	// context_ncm.down() emits nothing when the activation had not set
-	// `activated` yet (context_ncm.uc:823-826), so a mid-dial NCM context
+	// `activated` yet (context_ncm.uc:901-904), so a mid-dial NCM context
 	// would have been left IDLE and wanted with nothing scheduled.
 	ok(sd.contexts.wanA.hold_timer != null, 'sim_refresh: the dropped session enters reconnect');
 	ok(sd.contexts.wanB.hold_timer != null, 'sim_refresh: ...including the one that emitted no down event');
@@ -1340,7 +1340,7 @@ rld.shutdown();
 	// so anything calling retry_activate while a retry was already pending left
 	// two chains walking one entry, both incrementing retry_n and both calling
 	// ctx.up(). The modem-ready and adoption paths call it directly
-	// (daemon.uc:484,:556) and this handler is a third.
+	// (daemon.uc:1090,:1200) and this handler is a third.
 	let ups = 0;
 	let rc = sd.contexts.wanC.ctx;
 
@@ -1992,7 +1992,7 @@ uloop.run();
 			switch_protocol: (t, cb) => { push(switched, t); cb(fail ? { error: 'x' } : null, {}); },
 		}) },
 		context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
-					// part of the context contract (context.uc:1037); the
+					// part of the context contract (context.uc:1282); the
 					// daemon tells a bound context when its modem is removed
 					modem_event: () => null }) },
 	};
@@ -2055,7 +2055,7 @@ uloop.run();
 
 			c = { state: 'CONNECTED', name: o.name, modem: o.modem,
 			      config: o.config,
-			      /* Faithful to every real context (context.uc:755,
+			      /* Faithful to every real context (context.uc:1218,
 			         context_mbim.uc, context_ncm.uc): the 'down' EVENT is emitted
 			         BEFORE the callback runs. A fake that only flips state and
 			         calls back cannot see an ordering bug, and this one did not —
@@ -2352,7 +2352,7 @@ uloop.run();
 				stop: () => null, note_connect_success: () => null,
 				note_connect_failure: () => null, datapath: {} }) },
 				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
-					// part of the context contract (context.uc:1037); the
+					// part of the context contract (context.uc:1282); the
 					// daemon tells a bound context when its modem is removed
 					modem_event: () => null }) } }),
 			emit_event: () => null, kick_interface: () => null,

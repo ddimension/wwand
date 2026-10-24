@@ -260,7 +260,7 @@ export function install(self, o)
 	// system-selection pushes from step_confnet_apply. Called once, after the
 	// quirk, the second push had no consumer left and the reset it asked for was
 	// never issued — on a MeiG SLM7xx the configured modes/PLMN were accepted
-	// and silently never applied, and the NV-vs-live idempotency guard at :574
+	// and silently never applied, and the NV-vs-live idempotency guard at :747
 	// then reported them as already set on every later boot, so it stayed
 	// invisible.
 	//
@@ -297,7 +297,7 @@ export function install(self, o)
 		// Reaching here means the settings this reset existed to apply are
 		// still not applied, and NOTHING WILL ASK AGAIN: the NV values were
 		// written, so next boot the eSIM quirk reads lpa_enable already 0 and
-		// the idempotency guard at :574 reads the modes back as already set.
+		// the idempotency guard at :747 reads the modes back as already set.
 		// Neither enqueues a reset, and the modem keeps running on the old
 		// live values indefinitely. So the debt is carried on `self` (past
 		// validate_config, which clears config_warnings) and surfaced as a
@@ -307,7 +307,7 @@ export function install(self, o)
 		// and then destroys the clients, which delivers `cancelled` to the AT
 		// command in flight — so this callback can arrive AFTER the modem is
 		// gone, and next() would drive the init chain over a dead instance.
-		// Same trap as modem.uc:184.
+		// Same trap as modem.uc:185.
 		let resume = (why) => {
 			if (resumed || self._gen != gen)
 				return;
@@ -323,7 +323,7 @@ export function install(self, o)
 				why, join('; ', reasons)));
 
 			// Deliberately NOT cleared on a later init pass. The object is
-			// created once per device attach (daemon.uc:3143), so a modem that
+			// created once per device attach (daemon.uc:3306), so a modem that
 			// really did reset comes back as a NEW instance with no debt — and
 			// a re-init of THIS instance means it did not, so the debt still
 			// holds. Deduplicated because a re-init re-derives the same reason

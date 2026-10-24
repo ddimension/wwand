@@ -377,7 +377,7 @@ push(scenarios, {
 });
 
 // THE VENDOR IP-CONFIG BRANCH NEEDS THE SAME GUARD as at_send. It dereferences
-// modem.at itself (ncm_vendors.uc:879, :1116) instead of going through at_send,
+// modem.at itself (ncm_vendors.uc:1422, :1666) instead of going through at_send,
 // and the NCM teardown nulls modem.at WITHOUT notifying the contexts — so an
 // ACTIVATING context whose address-read retry fires a second later called
 // `.send` on null. A throw inside a uloop callback ends the program (measured
@@ -468,7 +468,7 @@ push(scenarios, {
 // SATURATES to INT64_MAX; bytes_to_iccid then iterates a scalar zero times and
 // hands back "". So after an eSIM switch on a generic-recipe modem the OLD
 // card's iccid and its wwand_sim override survived — the exact wrong state this
-// function exists to prevent. The init step at :762 and sim.uc:1495 have had the
+// function exists to prevent. The init step at :1095 and sim.uc:2006 have had the
 // right decode all along. Found by a full review, 2026-09-19.
 push(scenarios, {
 	name: 's9s_reapply_sim_decodes_the_iccid',
@@ -2407,7 +2407,7 @@ push(scenarios, {
 	mconfig: { pincode: '1234' },
 	run_at_start: true,
 	run: (env) => {
-		// `modem.sim_block` is set by the DAEMON (daemon.uc:573), which this
+		// `modem.sim_block` is set by the DAEMON (daemon.uc:1580), which this
 		// harness does not run — the modem's own contract is the event.
 		let blocked = () => filter(env.mevents, (e) => e.event == 'sim_blocked')[0];
 
@@ -2481,7 +2481,7 @@ push(scenarios, {
 // step_simslot's second pass — and a slot switch is exactly the path that tears
 // the modem down and re-enumerates it. Reading `.send` off a null `self.at`
 // throws inside a uloop callback, where it does not fail the call: it takes the
-// daemon with it. Field-seen at modem_ncm.uc:833, and ONLY with `sim_slot`
+// daemon with it. Field-seen at modem_ncm.uc:1289, and ONLY with `sim_slot`
 // configured, which is what makes step_simslot walk the second pass at all
 // (ddimension/wwand#32 — the reporter isolated that himself by leaving the
 // option at 0 and watching the crash stop).
