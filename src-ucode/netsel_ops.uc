@@ -942,6 +942,22 @@ export function install(self, o)
 						if (cur[k] != null && sprintf('%J', cur[k]) == sprintf('%J', args[k]))
 							delete args[k];
 					}
+
+					// A MODEM THAT REPORTS NO EXTENDED LTE MASK compares the
+					// extended TLV against its legacy one. The loop above can
+					// only drop a key the modem reports, so with the legacy
+					// mask unchanged the extended TLV survived alone and went
+					// out by itself — a BG96 answers that MISSING_ARGUMENT (17)
+					// instead of the set being `unchanged` (HW-observed on the
+					// ZyXEL LTE3301, BG96MAR02A07M1G, 2026-10-24). Equal means
+					// the low word is the legacy mask and nothing lies above
+					// band 64, which the legacy TLV could not carry anyway.
+					let x = args.ext_lte_band;
+
+					if (x != null && cur.ext_lte_band == null && cur.lte_band_preference != null &&
+					    x.mask_low == cur.lte_band_preference &&
+					    !x.mask_mid_low && !x.mask_mid_high && !x.mask_high)
+						delete args.ext_lte_band;
 				}
 
 				let changed = filter(keys(args), (k) => k != 'change_duration');
