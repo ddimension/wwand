@@ -482,12 +482,13 @@ eq(opened_ttys[0], '/dev/ttyUSB2', 'huawei-wdm: option tty overrides the wdm pre
 // byte-identical in all three modem state machines.
 
 let events = [];
-let repowered = 0, success = 0;
+let repowered = 0, success = 0, rec_can = true;
 let self_m = { state: 'ABSENT', contexts: [] };
 let sc = mc.scaffolding(self_m, {
 	deps: { on_event: (m, ev, d) => push(events, { m: m, ev: ev, d: d }) },
 	log: (l, msg) => null,
-	rec: { on_connect_success: () => success++, usb_repower: () => repowered++ },
+	rec: { on_connect_success: () => success++, usb_repower: () => repowered++,
+	       can_repower: () => rec_can },
 });
 
 // set_state emits 'state' with the merged data, and no-ops on an unchanged state
@@ -524,7 +525,51 @@ eq(ctx2_events, [], 'scaffolding: attach_context does not replay ready when not 
 self_m.note_connect_success();
 eq(success, 1, 'scaffolding: note_connect_success -> rec.on_connect_success');
 self_m.trip_zero_rx();
-eq(repowered, 1, 'scaffolding: trip_zero_rx -> rec.usb_repower');
+eq(repowered, 1, 'scaffolding: trip_zero_rx -> rec.usb_repower when the board CAN repower');
+
+// zero-rx with NO repower mechanism -> a single, guarded modem reset (#59).
+// Give the modem a reset hook (holding the callback = reset in flight) and the
+// proto_ok evidence the reset is gated on.
+let reset_calls = 0, reset_cb = null;
+self_m.reset = (cb) => { reset_calls++; reset_cb = cb; };
+self_m.counters = { proto_ok: 1 };
+self_m._reattaching = false; self_m.lowpower_parked = false; self_m.detached = false;
+
+rec_can = false;
+let rp_before = repowered;
+self_m.trip_zero_rx();
+eq(reset_calls, 1, 'zero-rx: no repower mechanism -> modem reset');
+eq(repowered, rp_before, 'zero-rx: no repower mechanism -> does NOT usb_repower');
+
+// a second context tripping while that reset is still in flight is latched
+self_m.trip_zero_rx();
+eq(reset_calls, 1, 'zero-rx: a second trip while resetting is latched to one reset');
+
+// once the reset completes the latch clears and a later stall can reset again
+reset_cb(null);
+self_m.trip_zero_rx();
+eq(reset_calls, 2, 'zero-rx: a trip after the reset completes resets again');
+reset_cb(null);
+
+// a modem that has never answered (no proto_ok) is never reset
+self_m.counters = { proto_ok: 0 };
+self_m.trip_zero_rx();
+eq(reset_calls, 2, 'zero-rx: a modem that never answered is not reset');
+self_m.counters = { proto_ok: 1 };
+
+// nor across an in-flight reattach, a parked radio, or a detached modem
+self_m._reattaching = true;  self_m.trip_zero_rx();
+self_m._reattaching = false; self_m.lowpower_parked = true;  self_m.trip_zero_rx();
+self_m.lowpower_parked = false; self_m.detached = true;      self_m.trip_zero_rx();
+self_m.detached = false;
+eq(reset_calls, 2, 'zero-rx: no reset across reattach / park / detach');
+
+// and when the board CAN repower again it repowers, never resets
+rec_can = true;
+self_m.trip_zero_rx();
+eq(repowered, rp_before + 1, 'zero-rx: board can repower -> usb_repower');
+eq(reset_calls, 2, 'zero-rx: board can repower -> no modem reset');
+rec_can = false;
 
 // stop(): teardown + ABSENT
 let torn_m = 0;

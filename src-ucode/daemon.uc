@@ -2564,6 +2564,23 @@ export function create(opts)
 		return board_gpio_ok() ? deps.board.power_cycle(off) : false;
 	};
 
+	// Would board_repower() actually act on this modem? Mirrors the decision
+	// board_repower() makes above (a reset line to pulse, else a power cycle on
+	// a single-modem box that has a power GPIO) WITHOUT performing it. The
+	// zero-rx watchdog asks this before it falls through to a modem reset: a
+	// board that can repower should, and only one that cannot gets the reset,
+	// so it must not be fooled by the no-op repower closure the recovery is
+	// always handed (ddimension/wwand#59).
+	let board_can_repower = (cfg) => {
+		if (!deps.board)
+			return false;
+
+		if (board_reset_line(cfg) != null)
+			return true;
+
+		return board_gpio_ok() && deps.board.profile?.power_gpio != null;
+	};
+
 
 	// detach a dead modem: drop the modem object, reset device/netdev to their
 	// configured values, unbind this modem's contexts (their ctx is bound to the
@@ -3209,6 +3226,11 @@ export function create(opts)
 				// power GPIO. Board fallbacks gated by board_gpio_ok (multi-modem would
 				// hit the wrong hardware). No-op when nothing safe is available.
 				repower: deps.board ? (() => board_repower(cfg)) : null,
+				// ...and whether that repower would ACTUALLY act, so the zero-rx
+				// watchdog can tell "no mechanism here" (reset the modem) from
+				// "refused" (do nothing) — board_repower above is a closure the
+				// recovery always receives even when it would no-op.
+				can_repower: deps.board ? (() => board_can_repower(cfg)) : null,
 				// the RESET line ASSIGNED TO THIS MODEM in its own section — the
 				// ladder's one permitted action on a modem that has never
 				// answered (recovery.uc, unarmed_reset_line). Not the board

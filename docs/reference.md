@@ -558,7 +558,9 @@ config wwand_modem 'm0'
 	                                 #    subscription, no modem reset / power-cycle / reboot
 	                                 #    for this long (0 = off); see "Recovery and IPAe cards"
 	option proto_error_limit '25'    # protocol-error ceiling before a reboot (gated by failreboot)
-	option zero_rx_timeout '21600'   # no-rx watchdog in seconds (0 = off)
+	option zero_rx_timeout '21600'   # no-rx watchdog in seconds (0 = off); on a
+	                                 #   board that can repower it repowers, else
+	                                 #   it falls through to a modem reset
 	option bearer_poll_count '3'     # NCM only: consecutive dial-status answers that
 	                                 # list no context, with the rx counter standing
 	                                 # still, before the bearer counts as gone.

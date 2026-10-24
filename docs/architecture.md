@@ -451,7 +451,13 @@ cycle, 16 → modem offline/reset, 24 → **hardware repower** — a modem/board
 (replacing the old external `usb-repower` tool) — > `failreboot` → system
 reboot. QMI request errors have a separate ceiling (25 → reboot). Counters
 persist in tmpfs across daemon restarts and are intentionally cleared by
-reboot. A zero-rx watchdog (packet stats delta) triggers the same repower.
+reboot. A zero-rx watchdog (packet stats delta) triggers the hardware repower
+where the board **can** repower; on a self-powered PCIe/MHI modem with no
+repower mechanism it falls through to a **modem reset** instead (the repower
+would be a no-op, and the reset is what clears a bearer stalled with QMI still
+reporting it CONNECTED). The watchdog asks `recovery.can_repower()` to tell the
+two apart, and the reset keeps the ladder's evidence rule (never a modem that
+has not answered) plus a per-modem latch so two stalled contexts reset once.
 
 Alongside the automatic ladder, the `modem_reset` ubus method
 (`hwops.uc`, installed into the daemon) offers an admin-driven reset, soft

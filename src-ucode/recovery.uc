@@ -722,6 +722,20 @@ export function create(opts)
 		}
 	};
 
+	// Would usb_repower() actually act on this modem? The zero-rx watchdog asks
+	// before it falls through to a modem reset (modem_common.trip_zero_rx): a
+	// board that CAN repower should, and only a board that cannot gets the
+	// reset. Prefer the assembler's mechanism-aware answer (opts.can_repower,
+	// which the daemon computes from the real reset_gpio / power_gpio); without
+	// one, mirror usb_repower()'s own reach below — a board repower callback
+	// exists (opts.repower) or nothing here does. NOT a bare usb_repower()==false:
+	// the daemon always hands a repower closure, even where it no-ops, so the
+	// closure's mere presence cannot distinguish "no mechanism" from "refused"
+	// (ddimension/wwand#59).
+	self.can_repower = function() {
+		return opts.can_repower ? opts.can_repower() : (opts.repower != null);
+	};
+
 	// hardware repower rung. Preferred: a board-provided callback (opts.repower)
 	// that power-cycles the modem's USB power GPIO — or, if the modem has a
 	// `reset_gpio`, pulses that instead (decided by the caller). It fully

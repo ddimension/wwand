@@ -1172,6 +1172,25 @@ changed nothing until a restart. Now, decided with the user:
 Tests: test_context, test_modem_mbim, test_autosetup, test_deps, test_daemon
 (each new check fails without its change). Not yet on hardware.
 
+## The zero-rx watchdog resets a modem the board cannot repower (2026-10-24)
+
+The zero-rx watchdog (inbound bytes frozen while QMI still reports the bearer
+CONNECTED) used to call `usb_repower()` and stop there. On a self-powered
+PCIe/MHI modem with no board profile that is a no-op — no USB power GPIO, no
+`reset_gpio` — so a bearer that stalled with the session still reported
+CONNECTED was never cleared and the link sat dead until a human intervened.
+`trip_zero_rx` now asks `recovery.can_repower()` first: where the board **can**
+repower it still does, and only where it cannot does it fall through to a
+**modem reset** — the rung that actually clears such a stall (the gentler retry
+/ opmode-cycle rungs do nothing for it). `can_repower()` prefers the daemon's
+mechanism-aware answer (`board_can_repower`, built from the real `reset_gpio` /
+`power_gpio`) over the mere presence of the repower closure: the daemon hands
+that closure to the recovery even where it no-ops, so its presence alone cannot
+tell "no mechanism here" from "refused". The reset keeps `usb_repower()`'s
+evidence rule (never a modem that has never answered us) and does not cut across
+an in-flight reattach, a low-power park, or a detach; a per-modem latch keeps two
+contexts that trip on the same tick to a single reset. (ddimension/wwand#59.)
+
 ## A dial the modem never answers frees itself; our reset keeps a live session (2026-10-04)
 
 deborah-3 again (Sierra MC7710, SWI9200X_03.05.29): after a STOP_NETWORK
