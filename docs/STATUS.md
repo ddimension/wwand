@@ -20,14 +20,11 @@ state buried at the top invites reading a months-old entry as present tense.
     pre14) in ONE commit;
   - feed stable release tag (`scripts/release-stable.sh`) — only when asked.
 - **Fork branches for the device images** (ddimension/openwrt): `chateau-ci`,
-  `lte3301`, `nbg7815-update` are rebased onto openwrt main locally
-  (`/home/avalentin/projects/openwrt-rebase/openwrt`, branches `*-new`), checked
-  with feeds + `make defconfig` (the libffi break is gone), backups pushed as
-  `*-pre-rebase-2026-10-24`. The **force-push is still to do** (it was blocked by
-  the permission check; the user may run it). `nbg7815-update` is the head of
-  openwrt/openwrt#24881 — pushing it rebases that PR to its two remaining commits.
-  Cause of the image failures: libffi moved from openwrt/packages into the core
-  on 2026-10-19 (openwrt/openwrt@9b835ec626), the forks predated it.
+  `lte3301`, `nbg7815-update` rebased onto openwrt main and **pushed 2026-10-24**
+  (backups `*-pre-rebase-2026-10-24`); openwrt/openwrt#24881 is now its two
+  remaining commits. Cause of the image failures: libffi moved into the OpenWrt
+  core on 2026-10-19 (openwrt/openwrt@9b835ec626) and the old forks lacked it.
+  The images rebuild with the next stable release tag — check that run.
 - **Issues waiting on reporters:** #39 (MassiPi — slot-switch note fix),
   #66 (4IceG — diagnostics asked), #67 (xsetiadi — asked for openwrt_release /
   ucode versions), #68/#71 (fixed, confirmation), #69 (marcinnet-25 — fewer NMEA
