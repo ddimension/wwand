@@ -8,7 +8,7 @@
 //     on_unhandled: (hub, dec) => { ... },   // no client matched
 // });
 // hub.register(client);   // client provides .service, .cid, .dispatch(dec)
-// hub.send(frame);
+// hub.send(frame);       // true | false; a hub may also answer 'held' (client.uc)
 // hub.close();
 //
 // Note: QMI control messages are tiny, but cdc-wdm accepts only one

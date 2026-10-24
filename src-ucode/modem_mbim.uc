@@ -918,7 +918,7 @@ export function create(opts)
 					// ...but a CANCELLATION is the session ending, not the
 					// firmware refusing. destroy() pays its pending callbacks
 					// synchronously and only then clears them
-					// (mbim_client.uc:265,275), so re-querying here enqueued a
+					// (mbim_client.uc:269,275), so re-querying here enqueued a
 					// command into the client being torn down. Same shape as
 					// the ready-state poll above.
 					if (verr.error == 'cancelled' || self._gen != gen || !self.mbim)
@@ -2813,7 +2813,7 @@ export function create(opts)
 	// the passthrough has stopped answering and is rebuilt.
 	drop_pt = () => {
 		// DETACH FIRST, clean up after. destroy() pays a client's pending
-		// callbacks synchronously (client.uc:217), and one of those may be a
+		// callbacks synchronously (client.uc:225), and one of those may be a
 		// probe that calls _ensure_pt or _ensure_uim again. Still seeing the
 		// stack being dropped, it would drop it a second time and start a
 		// bring-up in the middle of this one.
@@ -2846,7 +2846,7 @@ export function create(opts)
 		if (pt) {
 			// GIVE THE SESSION-LONG CIDs BACK FIRST, while ctl and the shim are
 			// still up. These were allocated out of the MODEM's client table
-			// and destroy() deliberately does not release them (client.uc:201)
+			// and destroy() deliberately does not release them (client.uc:209)
 			// — closing the HOST's MBIM session is not shown to reset the
 			// modem's embedded QMI client table, so every daemon reload leaked
 			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
@@ -2934,7 +2934,7 @@ export function create(opts)
 		modem_common.close_at(self);
 
 		// GUARDED, because destroying a client pays its pending callbacks
-		// SYNCHRONOUSLY (client.uc:217, mbim_client.uc:265) and those callbacks
+		// SYNCHRONOUSLY (client.uc:225, mbim_client.uc:269) and those callbacks
 		// are not ours. One that throws would skip the depth decrement at the
 		// end, leaving it raised for the life of the object — and make_fail then
 		// refuses every future retry, which is worse than whatever the callback

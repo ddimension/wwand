@@ -240,7 +240,7 @@ let nreq = (txn) => hub3.send(qmux.encode(3, 1, txn, 0x0043, '', 'request'));
 
 eq(nreq(1), false, 'blocked: the request fails (a send error the recovery counter sees)');
 eq(length(filter(logs3, (m) => index(m, 'stopped taking messages') >= 0)), 1, 'blocked: said once, naming the cause');
-eq([ nreq(2), length(n3.sent) ], [ false, 1 ], 'blocked: the next request fails at once, without another send');
+eq([ nreq(2), length(n3.sent) ], [ 'held', 1 ], 'blocked: the next request is held back (not a counted error), without another send');
 
 clock += 31;
 eq([ nreq(3), length(n3.sent) ], [ false, 2 ], 'blocked: one probe after 30 s');

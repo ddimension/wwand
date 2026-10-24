@@ -66,8 +66,12 @@ export function create(hub, hooks)
 
 	// `what` names the command for the log — see the on_error contract above.
 	self.raw_send = function(frame, txn, cb, timeout, what) {
-		if (!hub.send_raw(frame)) {
-			if (hooks?.on_error)
+		// 'held' as in client.uc: not tried, the hub already counted the
+		// attempt that found its destination stuck
+		let sent = hub.send_raw(frame);
+
+		if (!sent || sent === 'held') {
+			if (hooks?.on_error && sent !== 'held')
 				hooks.on_error(self, 'send', what);
 
 			if (cb)

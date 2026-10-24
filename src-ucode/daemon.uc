@@ -28,7 +28,7 @@ import * as modem_common from 'wwand.modem_common';
 import * as logmod from 'wwand.log';
 
 // The agreed MS extension version as text. Both halves of the u16, the way
-// mbim_client's own open-time log line writes it (mbim_client.uc:203-205) —
+// mbim_client's own open-time log line writes it (mbim_client.uc:207-209) —
 // only x.0 generations are defined today, but reading the number the way its
 // owner does is cheaper than being right about that forever.
 function mbimex_text(v)
@@ -4533,7 +4533,7 @@ export function create(opts)
 				// answers a different structure depending on this one number
 				// (codec/mbim_schema/ms_basic_connect_ext.uc, decode_base_
 				// stations_info). It was agreed once at open and written to a
-				// single log line (mbim_client.uc:203-205), which is nowhere
+				// single log line (mbim_client.uc:207-209), which is nowhere
 				// when you are comparing wwand's reading against mbimcli's an
 				// hour later — and mbimcli opens v1 unless it is given
 				// --device-open-ms-mbimex-v3, so the two talk about different
@@ -4545,7 +4545,7 @@ export function create(opts)
 				// three cases the client cannot tell apart anyway: not an MBIM
 				// modem, the handshake refused, and the handshake not answered
 				// yet — mbim_client keeps 0 for all of the latter
-				// (mbim_client.uc:228). `protocol` separates the first from
+				// (mbim_client.uc:232). `protocol` separates the first from
 				// the other two, and the open-time log line says which of
 				// those two it was. What null must NOT become is "1.0", which
 				// would claim an extension version the modem agreed to.
