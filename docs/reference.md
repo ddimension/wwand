@@ -1737,6 +1737,13 @@ Example, as a watchcat recovery script:
     # /usr/libexec/wwand-monitor — watchcat `option script`
     ubus call wwand context_failed "{\"interface\":\"$1\",\"reason\":\"watchcat\"}"
 
+watchcat passes its `option interface` as `$1`, which there is the alias form
+`@wwan0` or the L3 device `wwand0` — it refuses a bare logical name. Every
+wwand method taking an interface accepts all three: the section or interface
+name, `@<interface>`, and the L3 device (`l3_device` in `status`) — the device
+only while it belongs to one context: a parent shared by several (MBIM session
+0, a demoted `mux auto`) is refused, use `@<interface>` there.
+
 ### Idempotent sets & deferred apply
 
 Radio-sensitive writes are guarded end to end: network selection, the
