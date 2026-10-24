@@ -31,7 +31,7 @@ const TX_RETRY_MS = 5;
 // how many retries close() spends draining what is still queued. cdc-wdm takes
 // ONE message at a time, so a burst drains at roughly one frame per round trip:
 // the eleven clients modem.uc releases need eleven, and 20 x 5 ms bounds the
-// teardown at ~100 ms. The ordinary reconnect is 5 s away (modem_common.uc:457),
+// teardown at ~100 ms. The ordinary reconnect is 5 s away (modem_common.uc:471),
 // so nothing normally overlaps.
 //
 // RESIDUAL, named rather than hidden: a hotplug add for the same device inside
@@ -167,7 +167,7 @@ export function open(path, cbs)
 		// Linux 6.18.41), and WDM_IN_USE clears only in the completion callback
 		// (:161, :1334). So the first frame goes out and the SECOND almost
 		// always queues — and send() then queues every frame after it without
-		// even trying (:99-102).
+		// even trying (:113-116).
 		//
 		// modem.uc teardown issues RELEASE_CID for up to eleven clients back to
 		// back and closes the hub in the same synchronous block, so ten of
@@ -180,7 +180,7 @@ export function open(path, cbs)
 
 		drain = () => {
 			// THE READ REGISTRATION GOES ON THE FIRST HOP, not at the end.
-			// The callback at :221 returns without reading once `closed` is set,
+			// The callback at :238 returns without reading once `closed` is set,
 			// and the fd is level-triggered — so leaving it registered for the
 			// length of the drain lets uloop re-dispatch a still-readable (or
 			// HUP) fd in a hot loop for up to 100 ms. Deleting it here still

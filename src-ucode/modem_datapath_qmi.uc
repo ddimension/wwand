@@ -165,7 +165,7 @@ export function setup(self, dp, o, next)
 			let r = netlink.setup(fxi, {
 				netdev: dp.netdev,
 				// THE PRE-RENAME NAME, which the vendor add-ons need and the
-				// probe was already given (:87). It was missing from THIS
+				// probe was already given (:90). It was missing from THIS
 				// literal, so datapath_rmnet_nss's parent-rename recovery read
 				// `ctx.opts?.netdev_kernel` as undefined every time
 				// (datapath_rmnet_nss.uc:323) — the adoption the feature exists

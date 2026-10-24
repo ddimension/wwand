@@ -189,16 +189,16 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1604) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1707) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
-	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:713, step_sim), and
+	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:739, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
 	//
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
 	// callback arrives the generation has already moved.
 	// EACH WAIT OWNS ITS OWN TIMER AND ITS OWN DEBT. `tm.settle` is a shared
-	// one-shot slot, also written by the init chain (modem_init_qmi.uc:341,
-	// :383, :604), so parking radio-bounce waits there let a second one
+	// one-shot slot, also written by the init chain (modem_init_qmi.uc:468,
+	// :543, :809), so parking radio-bounce waits there let a second one
 	// overwrite the first: teardown then cancelled only the newest, the older
 	// timer survived unreachable, and whichever fired first cleared the other's
 	// debt. Two reattach calls reach that directly — nothing serialises them.
@@ -557,7 +557,7 @@ export function create(opts)
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:4139), and dropping it strands a ubus request.
+				// (daemon.uc:4369), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
@@ -1334,7 +1334,7 @@ export function create(opts)
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
-			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:434-437), so it
+			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:488-491), so it
 			// carries the same raw WCDMA Ec/Io and needs the same conversion —
 			// an indication landing between refreshes would otherwise flip the
 			// unit back under a consumer that just read the polled value
@@ -1661,7 +1661,7 @@ export function create(opts)
 		//
 		// This sat one line BELOW close_at() while saying the same thing, which
 		// was only true of the client destroys. atcmd.close() happens to drop
-		// pending callbacks silently (atcmd.uc:1079-1086 — it clears `current`
+		// pending callbacks silently (atcmd.uc:1185-1192 — it clears `current`
 		// and the queue without calling anything), so nothing exploited the gap;
 		// but that is a property of the AT engine, not a guarantee this function
 		// should lean on.

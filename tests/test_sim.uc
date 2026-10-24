@@ -117,7 +117,7 @@ scenario('uim: pin verify ok (indication)', (next) => {
 });
 
 // A CARD POLL MUST NOT OUTLIVE ITS SESSION. The retry re-enters unlock_uim,
-// which re-reads modem.uim at entry — and teardown nulls it (modem.uc:1331). An
+// which re-reads modem.uim at entry — and teardown nulls it (modem.uc:1707). An
 // unplug or a config reload inside the up-to-10 s poll window therefore
 // dereferenced null, and a throw inside a uloop callback ends the program: the
 // next timer never runs and uloop.run() does not return (measured 2026-09-19).
@@ -538,7 +538,7 @@ scenario('pinlock: blocked pin refuses up front', (next) => {
 // which turned every non-QMI error into "the PIN was never touched" — so one
 // LuCI click on a slow stack replayed the same PIN over UIM, DMS and AT+CLCK
 // and could burn all three verify attempts, PUK-locking the card the user was
-// trying to unlock. unblock_puk (sim.uc:423) has had the right rule all along.
+// trying to unlock. unblock_puk (sim.uc:548) has had the right rule all along.
 // Found by a full review, 2026-09-19.
 scenario('pinlock: a timeout is terminal, not a fall-through', (next) => {
 	let calls = [];

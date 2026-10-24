@@ -252,7 +252,7 @@ export function create(opts)
 		// below read every one of those as a change and renewed the
 		// interface — every 60 s by default, long enough to break anything
 		// holding a v6 connection. The QMI monitor has guarded this since
-		// its keep_stable_v6; the comment at :193 claimed parity with it
+		// its keep_stable_v6; the comment at :217 claimed parity with it
 		// and there was none.
 		if (next.ipv6 && self.settings?.ipv6)
 			next.ipv6 = context_common.keep_stable_v6(self.settings.ipv6, next.ipv6);
@@ -471,10 +471,10 @@ export function create(opts)
 		// network refused the attach/activation.
 		//
 		// LOOK INSIDE THE WRAPPER. Every caller here passes { stage, err: <the
-		// real error> } (:298, :315, :320), and this read error/status off the
+		// real error> } (:386, :403, :408), and this read error/status off the
 		// OUTER object, which has neither — so text and code were null for
 		// every MBIM-status and every timeout, which is precisely the reason
-		// this field exists to show. One site (:320) puts a bare string in
+		// this field exists to show. One site (:408) puts a bare string in
 		// `err`, so that shape is handled too.
 		let inner = err?.err;
 		let inner_text = (type(inner) == 'string') ? inner : inner?.error;
@@ -602,7 +602,7 @@ export function create(opts)
 			// AND THE REASON THE LAST BRING-UP FAILED. _fail has maintained
 			// this since MBIM got QMI parity, and status() never carried it —
 			// so the field was built, twice over (see _fail), and nothing
-			// could ever read it. context.uc:1154 has surfaced the QMI twin
+			// could ever read it. context.uc:1360 has surfaced the QMI twin
 			// all along.
 			last_error: self.last_error,
 			stats: (self.state == 'CONNECTED') ? self.stats : null,

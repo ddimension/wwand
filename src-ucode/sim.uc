@@ -93,7 +93,7 @@ export function pin_block_reason(retries, force)
 
 // A CARD POLL MUST NOT OUTLIVE ITS SESSION. The retries below re-enter
 // unlock_uim/unlock_dms, which re-read modem.uim / modem.dms at entry — and
-// teardown nulls those (modem.uc:1604). An anonymous timer firing after an
+// teardown nulls those (modem.uc:1707). An anonymous timer firing after an
 // unplug or a config reload inside the up-to-10 s poll window therefore
 // dereferenced null, and a throw inside a uloop callback ends the program: the
 // next timer never runs and uloop.run() does not return (measured 2026-09-19).
@@ -132,8 +132,8 @@ function watch_card_ready(modem, uim, on_ready)
 {
 	// THE WAITER LIVES ON THE CLIENT, and carries an owner token. A single
 	// modem-wide slot let two unlocks steal from each other: init calls
-	// sim.unlock (modem_init_qmi.uc:581) while the eSIM path schedules its own
-	// (esim_bridge.uc:646), and nothing serialises them — the second overwrote
+	// sim.unlock (modem_init_qmi.uc:593) while the eSIM path schedules its own
+	// (esim_bridge.uc:651), and nothing serialises them — the second overwrote
 	// the first, and whichever finished first cleared the OTHER's waiter.
 	let mine = {};
 
@@ -612,7 +612,7 @@ export function set_pin_lock(modem, enable, pin, cb)
 			// failed to come back. The chain would then replay
 			// the same PIN over DMS and AT+CLCK, so one LuCI click on a slow
 			// stack could burn all three verify attempts and PUK-lock the card
-			// the user was only trying to unlock. unblock_puk (:423) has had
+			// the user was only trying to unlock. unblock_puk (:548) has had
 			// the right rule all along, and the PINLOCK_FALLBACK comment states
 			// it: these are the codes where the transport rejected the op
 			// WITHOUT touching the PIN.
@@ -698,7 +698,7 @@ const decode_eid = hexmod.decode_eid;
 // not the same as inventing it. Three firmwares end up here: a QMI UIM refusing
 // GET_SLOT_STATUS as 71/94, an MBIM device with no UIM client at all, and every
 // AT/NCM modem whose vendor has no dual-SIM recipe — which today is all of them
-// but Fibocom (ncm_vendors.uc:1769 is the only `slots:` entry). What they have
+// but Fibocom (ncm_vendors.uc:1809 is the only `slots:` entry). What they have
 // in common is that they cannot enumerate, not that they have nothing.
 //
 // Refusing instead left an "unsupported" error that every caller absorbed into

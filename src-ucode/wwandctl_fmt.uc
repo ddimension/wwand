@@ -260,7 +260,7 @@ export function reg_text(m)
 // The cadence floor, and the reason for it. `modem_signal` keeps wwand's
 // adaptive fast-telemetry loop warm (daemon.uc calls modem.watch()); that loop
 // polls the modem at 1 Hz and decays 6 s after the last request
-// (modem_common.uc:854-855). One sample therefore costs ~6 s of 1 Hz modem
+// (modem_common.uc:961, :995). One sample therefore costs ~6 s of 1 Hz modem
 // traffic, so the duty cycle is 6/interval: 10 % at 60 s, 20 % at 30 s, 60 % at
 // 10 s — and at 6 s or below the loop NEVER decays and the modem is polled
 // around the clock. A global `Interval 10` in collectd.conf would do exactly
@@ -456,9 +456,9 @@ export function collectd_lines(host, modem, sig, m, interval, cells)
 	// on the AT/MBIM paths where the value was parsed from text rather than
 	// decoded from a TLV.)
 	// The widths, straight from codec/schema/nas.uc: GET_SIGNAL_INFO decodes the
-	// LTE block as { rssi i8, rsrq i8, rsrp i16, snr i16 } (:110), WCDMA as
-	// { rssi i8, ecio i16 } (:109), gsm_rssi as i8 (:108), and everything 5G as
-	// i16 (:112 and the NR cell blocks). Guessing with a fallback does not work
+	// LTE block as { rssi i8, rsrq i8, rsrp i16, snr i16 } (:114), WCDMA as
+	// { rssi i8, ecio i16 } (:113), gsm_rssi as i8 (:112), and everything 5G as
+	// i16 (:116 and the NR cell blocks). Guessing with a fallback does not work
 	// — an i8 sentinel of -128 passes the i16 test and comes out as a reading.
 	const WIDTH = {
 		lte:   { rssi: 'i8',  rsrq: 'i8',  rsrp: 'i16', snr: 'i16', ecio: 'i16' },

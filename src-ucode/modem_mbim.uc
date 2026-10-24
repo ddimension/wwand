@@ -918,7 +918,7 @@ export function create(opts)
 					// ...but a CANCELLATION is the session ending, not the
 					// firmware refusing. destroy() pays its pending callbacks
 					// synchronously and only then clears them
-					// (mbim_client.uc:269,275), so re-querying here enqueued a
+					// (mbim_client.uc:679,690), so re-querying here enqueued a
 					// command into the client being torn down. Same shape as
 					// the ready-state poll above.
 					if (verr.error == 'cancelled' || self._gen != gen || !self.mbim)
@@ -2283,7 +2283,7 @@ export function create(opts)
 	// GIVE THE CID BACK. Every passthrough client is allocated out of the
 	// MODEM's client table, and a destroyed-but-not-released one stays in it
 	// until the modem's stack resets — the same finite resource modem.uc's
-	// teardown release burst exists to protect (modem.uc:359,:1416). The
+	// teardown release burst exists to protect (modem.uc:360,:1693). The
 	// session-long clients (pt.nas/dsd, uim, wms) are allocated once and go
 	// with the session; these two allocate PER CALL, so a scripted reattach
 	// loop walked the table down on its own. An E182E-class stack has room for
@@ -2850,7 +2850,7 @@ export function create(opts)
 			// — closing the HOST's MBIM session is not shown to reset the
 			// modem's embedded QMI client table, so every daemon reload leaked
 			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
-			// table has room for a handful. Same burst modem.uc:1580 does for
+			// table has room for a handful. Same burst modem.uc:1693 does for
 			// the native side, which the passthrough never had. ctl is NOT in this list: it is the
 			// implicit client (cid 0) and it is what carries RELEASE_CID for
 			// all the others, so it has to outlive them.
@@ -2897,7 +2897,7 @@ export function create(opts)
 		// the cancel pass below and restart a modem that is being stopped. The
 		// QMI backend grew this first; MBIM reaches the same re-arm by its own
 		// route (a synchronous cancellation from the recovery cycle re-arming
-		// settle_timer at :249/:253). Review follow-up, 2026-09-19.
+		// settle_timer at :265/:275). Review follow-up, 2026-09-19.
 		self._teardown_depth = (self._teardown_depth ?? 0) + 1;
 
 		// first, so anything the destroys below call back into can tell that its
@@ -2934,13 +2934,13 @@ export function create(opts)
 		modem_common.close_at(self);
 
 		// GUARDED, because destroying a client pays its pending callbacks
-		// SYNCHRONOUSLY (client.uc:225, mbim_client.uc:269) and those callbacks
+		// SYNCHRONOUSLY (client.uc:225, mbim_client.uc:679) and those callbacks
 		// are not ours. One that throws would skip the depth decrement at the
 		// end, leaving it raised for the life of the object — and make_fail then
 		// refuses every future retry, which is worse than whatever the callback
 		// was complaining about. The QMI teardown wraps its equivalent call for
 		// the same reason; NCM needs none, close_at() discards its queue without
-		// paying it (atcmd.uc:1079). Review follow-up, 2026-09-19.
+		// paying it (atcmd.uc:1185). Review follow-up, 2026-09-19.
 		drop_pt();
 		self._pt_failed = false;
 		self._pt_built = false;

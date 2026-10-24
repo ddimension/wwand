@@ -614,7 +614,7 @@ status page drew signal only from `lte.rsrp` / `nr5g.rsrp` and otherwise printed
 at once (sponsor box, 2026-09-10).
 
 The generic `rssi` is the common floor and for some modems it is all there is:
-the FM350-GL on NCM, the EG06 on native MBIM (`telemetry_mbim.uc:42`) and any
+the FM350-GL on NCM, the EG06 on native MBIM (`telemetry_mbim.uc:59`) and any
 QMI modem camped on 2G/3G report it alone. Two of the three modems on that one
 box hit the dead end, on two different backends. Registration is what the
 registration block says (`fmt.regShort`); the absence of a measurement is not

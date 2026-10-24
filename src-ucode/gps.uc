@@ -97,7 +97,7 @@ function create(o) {
 	// deps.set_clock, and a router with no RTC steps from 1970 to now the
 	// moment the first RMC lands. On the wall clock that would report an age
 	// of fifty-six years and expire every satellite in view at the same
-	// instant. context_common.uc:122 does the same for the same reason.
+	// instant. context_common.uc:148 does the same for the same reason.
 	let mono = o.now ?? (() => clock(true)[0]);
 
 	let feed_line = (line, now) => {
@@ -219,10 +219,10 @@ function create(o) {
 				// thing on this kind of port, and treating them alike tore the
 				// reader down within milliseconds of starting it:
 				//
-				// wwand_io.open_tty sets VMIN=0 VTIME=0 (io/src/wwand-io.c:31),
+				// wwand_io.open_tty sets VMIN=0 VTIME=0 (io/src/wwand-io.c:118),
 				// so a tty with nothing to say returns 0 bytes IMMEDIATELY —
 				// that is the configuration, not an end of file. qmit_read maps
-				// both 0 and a hard error to `false` (wwand-io.c:371), and only
+				// both 0 and a hard error to `false` (wwand-io.c:378), and only
 				// the error path sets errno, which it clears before every read.
 				// So the errno is what tells them apart: none means idle, and a
 				// real one means the device is gone. atcmd never had to make

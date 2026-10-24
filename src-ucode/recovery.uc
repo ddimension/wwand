@@ -659,7 +659,7 @@ export function create(opts)
 			// WHERE THE REBOOT WINDOW STARTS. Without this the gate below reads
 			// the ABSOLUTE count, and the count does not start climbing when the
 			// hardware rung fires — it climbs from the very first error. A
-			// channel that never answers sits at :319 returning 'retry' while n
+			// channel that never answers sits at :651 returning 'retry' while n
 			// runs far past limit*2; the first decoded reply (an error reply
 			// counts) arms proto_ok, the next error fires this repower, and the
 			// error AFTER that satisfies `n > limit*2` on the strength of
