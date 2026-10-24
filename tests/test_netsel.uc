@@ -1011,6 +1011,15 @@ daemon.shutdown();
 		eq(t.ev, [ 'set:lte_band_preference:free' ], 'detached: written only — a radio cycle would undo the operator\'s detach');
 	});
 
+	// a modem that reports only the legacy LTE mask (BG96): the same band list
+	// is `unchanged` — the extended TLV must not go out on its own
+	t = mk();
+	t.ops.modem_set_settings('m0', { lte_bands: [ 1, 3, 8 ] }, (err, res) => {
+		eq([ err, res ], [ null, { applied: [], unchanged: true } ],
+			'legacy-only modem: an unchanged band list is unchanged, not a lone extended TLV');
+		eq(t.ev, [], 'legacy-only modem: ...nothing written, nothing cycled');
+	});
+
 	t = mk();
 	t.m._reattaching = true;
 	t.ops.modem_set_settings('m0', { lte_bands: [ 3 ] }, (err) => {

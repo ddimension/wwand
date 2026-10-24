@@ -1423,6 +1423,12 @@ normally at that point).
   refused_answer`; QMI transient codes excluded), retries only when the
   transport could not ask; a card change re-asks. #52 — MBIM identity asks
   AT+GMI first (T99W175 answers AT+CGMI without OK).
+- **HW run 2026-10-24 (hwtest/, 5 devices on main):** a legacy-only LTE modem
+  (BG96: GET reports no ext_lte_band) got the extended TLV ALONE for an
+  unchanged band list and refused it (MISSING_ARGUMENT 17) — the guard now
+  compares it against the legacy mask (`netsel_ops.uc` modem_set_settings).
+  Open: bands > 64 on such a modem still go out as the extended TLV alone.
+  The BG96 also accepts a legacy band change without applying it.
 - **Anchors (2026-10-24):** ~100 in-tree `file:line` anchors had drifted onto
   lines that still exist (check-anchors cannot see that) — repointed after
   reading each against the code it describes. **Open, documented:** a modem
