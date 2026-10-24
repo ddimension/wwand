@@ -203,6 +203,11 @@ details and workarounds are in its
 host suite runs on every change — current suite/check counts live in
 [docs/STATUS.md](docs/STATUS.md).
 
+## Credits
+
+wwand is shaped by the people who report, test and contribute — see
+[CREDITS.md](CREDITS.md). Thank you.
+
 ## License
 
 GPL-2.0-only. The AT port table is generated from ModemManager's udev rules

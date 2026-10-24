@@ -1442,6 +1442,9 @@ normally at that point).
   refused_answer`; QMI transient codes excluded), retries only when the
   transport could not ask; a card change re-asks. #52 — MBIM identity asks
   AT+GMI first (T99W175 answers AT+CGMI without OK).
+- **CREDITS.md (2026-10-24):** everyone who contributed through PRs, issues or
+  review, across the wwand repos and the two upstream submissions (by GitHub
+  account, generated from the history). Add a name when a new one turns up.
 - **PR #60 (xhudan) merged with a follow-up:** a SEPARATE at2 telemetry
   channel that answers nothing for 20 telemetry commands is closed and
   telemetry falls back to the control engine (never the control engine
