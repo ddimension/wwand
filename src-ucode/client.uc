@@ -109,8 +109,16 @@ export function create(hub, schema, cid, hooks)
 		// modems must not climb the reboot ladder)
 		let no_rec = opts?.no_recovery;
 
-		if (!hub.send(frame)) {
-			if (hooks?.on_error && !no_rec)
+		// hub.send: true = sent, false = failed, 'held' = not even tried —
+		// the hub knows the destination is stuck and has already counted the
+		// attempt that found out (qmi_over_qrtr.uc self.send). A held request
+		// fails like a failed one, but is not one more protocol error: a
+		// service that sits out one long command would otherwise collect a
+		// counter's worth of them from the telemetry it skipped meanwhile.
+		let sent = hub.send(frame);
+
+		if (!sent || sent === 'held') {
+			if (hooks?.on_error && !no_rec && sent !== 'held')
 				hooks.on_error(self, 'send', name);
 
 			if (cb)

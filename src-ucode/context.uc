@@ -851,7 +851,7 @@ export function create(opts)
 						// which asks the client, not the handle.
 						//
 						// The error still ticks the proto-error counter on its way
-						// here (client.uc:176 — no `no_recovery` on the dial, and
+						// here (client.uc:184 — no `no_recovery` on the dial, and
 						// there must not be: a dial that genuinely fails has to
 						// climb). That is deliberate and harmless: the very next
 						// successful request zeroes it (recovery.uc:505-506), and

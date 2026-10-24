@@ -1429,10 +1429,12 @@ normally at that point).
   it there through SIGTERM. `qmit_qsend` bounds the wait (SIGALRM, 500 ms) and
   answers `'blocked'`; the hub fails that service's requests and probes it every
   30 s until it answers (`docs/gotchas.md`). Not HW-verified (no QRTR modem
-  here). Open: a flow the modem never confirms needs a modem/MHI reset. The
-  failed sends count as protocol errors and reach the `usb_repower` rung at 25,
-  which does nothing on a board without a repower path — the same gap #59
-  closes for the zero-rx trip.
+  here). HW-confirmed by the reporter (2026-10-21: 22 h, no freeze). Requests
+  the hub holds back during the 30 s pause fail as `'held'` and are not counted
+  as protocol errors (only the attempts are), so one long command cannot climb
+  the ladder. Open: a modem with ONE dead service is never reset — the proto
+  counter is per modem and any answered request resets it; that needs a
+  per-service streak or a hub-level "stuck" signal (not built).
 - **#62 (EG12-EA):** a band change was written alone; the modem lost its
   serving band, dropped the bearer and sat in "EMM detached [limited service]"
   — no registration, so nothing re-armed the interface, and the ladder's opmode

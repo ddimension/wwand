@@ -319,14 +319,25 @@ export function create(opts)
 		// kernel's flow-control wait (wwand-io.c qmit_qsend: the modem stopped
 		// confirming, and a QRTR send sleeps until it does — SOCK_NONBLOCK
 		// notwithstanding); every further send to that service would sit out
-		// the same bound inside the event loop. So the requests fail at once
-		// ('send', which the recovery counter sees) and one probe goes out
-		// every BLOCKED_PROBE_S; any datagram from the service clears it.
+		// the same bound inside the event loop. So one probe goes out every
+		// BLOCKED_PROBE_S, and any datagram from the service clears the mark.
+		//
+		// Only the ATTEMPTS count as protocol errors (false); a request held
+		// back in between fails as 'held', which client.uc does not count.
+		// One stuck service is one condition, not one error per skipped
+		// telemetry poll: counting those, a service that merely sat out a long
+		// command (a network scan, if a firmware stops reading meanwhile —
+		// RESUME_TX is sent on READ, af_qrtr.c qrtr_recvmsg :1073, linux
+		// 6.18.41) would have driven the counter to the repower rung.
+		// Neither does a service that NEVER answers reach that rung while the
+		// others do: the counter is per modem and any answered request resets
+		// it (recovery.uc on_proto_success). Recovering a modem with one dead
+		// service is not something this counter can do.
 		let skey = sprintf('%d', dec.service);
 		let b = self.blocked[skey];
 
 		if (b && now() < b.next)
-			return false;
+			return 'held';
 
 		// the QRTR SDU is the QMUX frame minus its 6-byte header
 		let r = s.h.qsend(node, port, substr(frame, 6));

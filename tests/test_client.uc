@@ -55,6 +55,26 @@ eq(got_data.model, 'RG502Q-EA', 'success: model decoded');
 c.dispatch({ kind: 'response', txn: 99, msg_id: 0x0022, tlvs: resp_tlvs });
 ok(true, 'unknown txn ignored');
 
+// --- a send the hub failed vs one it held back (ddimension/wwand#61) ---------
+// A failed send is a protocol error; a request the hub did not even try (its
+// destination known to be stuck, the attempt that found out already counted)
+// fails the same way but is not counted again.
+
+{
+	let answer = false;
+	let fhub = { send: (f) => answer, register: () => null, unregister: () => null };
+	let ferrs = [];
+	let fc = client.create(fhub, dms, 7, { on_error: (c, kind) => push(ferrs, kind) });
+	let e1, e2;
+
+	fc.request('GET_MODEL', {}, (err) => { e1 = err; });
+	answer = 'held';
+	fc.request('GET_MODEL', {}, (err) => { e2 = err; });
+
+	eq([ e1?.error, e2?.error ], [ 'send', 'send' ], 'send: failed and held both fail the request as a send error');
+	eq(ferrs, [ 'send' ], 'send: ...but only the failed one counts toward recovery');
+}
+
 // --- QMI error result -------------------------------------------------------
 
 c.request('GET_REVISION', {}, (err, data) => { got_err = err; });

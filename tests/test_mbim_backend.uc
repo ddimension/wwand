@@ -1260,4 +1260,16 @@ eq(fe_answers, 1, 'on_answer: an indication is not an answer to anything we aske
 	eq(bad('26x01').provider_id, '26x01', 'providers: ...and the raw id is kept');
 })();
 
+// a hub that holds a frame back ('held', see client.uc) fails the request at
+// once, without counting it and without leaving a pending transaction
+{
+	let herrs = [], hcb = 'unset';
+	let hc = mbim_client.create({ send_raw: () => 'held', register: () => null,
+		unregister: () => null }, { on_error: (c, k) => push(herrs, k) });
+
+	eq(hc.raw_send('', 9, (err) => { hcb = err; }), false, 'held: raw_send refuses');
+	eq([ hcb?.error, herrs, length(keys(hc.pending)) ], [ 'send', [], 0 ],
+		'held: a send error for the caller, no counted error, nothing pending');
+}
+
 done('test_mbim_backend');
