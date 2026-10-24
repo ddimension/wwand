@@ -580,6 +580,7 @@ let hw_timers = [];
 let rdeps = {
 	log: (level, msg) => null,
 	board: {
+		has_power: true,
 		profile: { reset_gpio: 'gpio900' },
 		reset_pulse: (rg, off) => { push(pulses, rg); return true; },
 		power_cycle: (off) => { cycles++; return true; },

@@ -2578,7 +2578,7 @@ export function create(opts)
 		if (board_reset_line(cfg) != null)
 			return true;
 
-		return board_gpio_ok() && deps.board.profile?.power_gpio != null;
+		return board_gpio_ok() && !!deps.board.has_power;
 	};
 
 

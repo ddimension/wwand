@@ -484,9 +484,10 @@ eq(opened_ttys[0], '/dev/ttyUSB2', 'huawei-wdm: option tty overrides the wdm pre
 let events = [];
 let repowered = 0, success = 0, rec_can = true;
 let self_m = { state: 'ABSENT', contexts: [] };
+let sc_logs = [];
 let sc = mc.scaffolding(self_m, {
 	deps: { on_event: (m, ev, d) => push(events, { m: m, ev: ev, d: d }) },
-	log: (l, msg) => null,
+	log: (l, msg) => push(sc_logs, msg),
 	rec: { on_connect_success: () => success++, usb_repower: () => repowered++,
 	       can_repower: () => rec_can },
 });
@@ -549,12 +550,17 @@ eq(reset_calls, 1, 'zero-rx: a second trip while resetting is latched to one res
 reset_cb(null);
 self_m.trip_zero_rx();
 eq(reset_calls, 2, 'zero-rx: a trip after the reset completes resets again');
+reset_cb({ error: 'unsupported_on_backend' });
+ok(length(filter(sc_logs, (m) => index(m, 'zero-rx: modem reset failed') == 0)) == 1,
+	'zero-rx: a reset that fails says so — the stall stays and the log is where it shows');
+self_m.trip_zero_rx();
+eq(reset_calls, 3, 'zero-rx: a failed reset also clears the latch');
 reset_cb(null);
 
 // a modem that has never answered (no proto_ok) is never reset
 self_m.counters = { proto_ok: 0 };
 self_m.trip_zero_rx();
-eq(reset_calls, 2, 'zero-rx: a modem that never answered is not reset');
+eq(reset_calls, 3, 'zero-rx: a modem that never answered is not reset');
 self_m.counters = { proto_ok: 1 };
 
 // nor across an in-flight reattach, a parked radio, or a detached modem
@@ -562,13 +568,13 @@ self_m._reattaching = true;  self_m.trip_zero_rx();
 self_m._reattaching = false; self_m.lowpower_parked = true;  self_m.trip_zero_rx();
 self_m.lowpower_parked = false; self_m.detached = true;      self_m.trip_zero_rx();
 self_m.detached = false;
-eq(reset_calls, 2, 'zero-rx: no reset across reattach / park / detach');
+eq(reset_calls, 3, 'zero-rx: no reset across reattach / park / detach');
 
 // and when the board CAN repower again it repowers, never resets
 rec_can = true;
 self_m.trip_zero_rx();
 eq(repowered, rp_before + 1, 'zero-rx: board can repower -> usb_repower');
-eq(reset_calls, 2, 'zero-rx: board can repower -> no modem reset');
+eq(reset_calls, 3, 'zero-rx: board can repower -> no modem reset');
 rec_can = false;
 
 // stop(): teardown + ABSENT

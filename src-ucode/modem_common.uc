@@ -722,7 +722,15 @@ export function scaffolding(self, o)
 		self._zero_rx_resetting = true;
 
 		log('err', 'zero-rx: no repower path, resetting the modem');
-		self.reset((err) => { self._zero_rx_resetting = false; });
+		self.reset((err) => {
+			self._zero_rx_resetting = false;
+
+			// unsupported_on_backend (NCM without AT, MBIM without passthrough
+			// or AT) or a refused reset: the stall stays, and the log is the
+			// only place that says why
+			if (err)
+				log('warn', sprintf('zero-rx: modem reset failed: %J', err));
+		});
 	};
 
 	// administrative teardown (daemon shutdown / reload / modem removed)
