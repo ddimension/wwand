@@ -685,9 +685,44 @@ export function scaffolding(self, o)
 		rec.on_connect_success();
 	};
 
-	// zero-rx watchdog tripped on a context of this modem
+	// zero-rx watchdog tripped on a context of this modem: inbound bytes have
+	// not moved for the configured window while QMI still reports the bearer
+	// CONNECTED. A board repower (power-cycle / reset-GPIO pulse) is the
+	// watchdog's recovery WHERE THE BOARD CAN DO IT; on a self-powered PCIe/MHI
+	// modem with no such mechanism repower is UNAVAILABLE — not merely refused —
+	// and the modem reset is the rung that actually clears the stall (the
+	// gentler retry / opmode-cycle rungs do nothing for it). Branch on
+	// can_repower(), not on usb_repower()'s bare bool, which cannot tell
+	// "no mechanism" from "refused" apart (ddimension/wwand#59).
 	self.trip_zero_rx = function() {
-		rec.usb_repower();
+		if (rec.can_repower()) {
+			rec.usb_repower();
+			return;
+		}
+
+		// Repower UNAVAILABLE -> modem reset. Keep usb_repower()'s own evidence
+		// rule (never a modem that has never answered us) and never cut across
+		// an in-flight reattach, a parked (low-power) radio, or a modem being
+		// torn down. Log each skip so a field capture shows why a stall did or
+		// did not reset.
+		if (!self.counters.proto_ok) {
+			log('warn', 'zero-rx: no repower mechanism, but this control channel has never answered — not resetting');
+			return;
+		}
+		if (self._reattaching || self.lowpower_parked || self.detached) {
+			log('info', 'zero-rx: no repower mechanism, but a reattach / low-power park / detach is in flight — not resetting');
+			return;
+		}
+
+		// A modem carries more than one context and two can trip on the same
+		// tick; a per-modem latch keeps that to a single reset (cleared when the
+		// reset completes), so the modem is not reset twice.
+		if (self._zero_rx_resetting)
+			return;
+		self._zero_rx_resetting = true;
+
+		log('err', 'zero-rx: no repower path, resetting the modem');
+		self.reset((err) => { self._zero_rx_resetting = false; });
 	};
 
 	// administrative teardown (daemon shutdown / reload / modem removed)
@@ -823,6 +858,9 @@ export function make_recovery(self, opts, log, proto)
 		reboot_delay: opts.recovery?.reboot_delay,
 		// board-provided modem repower (power-cycle or reset-gpio pulse)
 		repower: opts.recovery?.repower,
+		// ...and whether that repower would actually act (the daemon knows the
+		// real GPIOs; the repower closure above is handed over even when it no-ops)
+		can_repower: opts.recovery?.can_repower,
 		// ...and which of the two it would be: a named RESET line, or null
 		reset_line: opts.recovery?.reset_line,
 		log: (l, m) => log(l, m),
