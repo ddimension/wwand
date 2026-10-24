@@ -1423,6 +1423,13 @@ normally at that point).
   refused_answer`; QMI transient codes excluded), retries only when the
   transport could not ask; a card change re-asks. #52 — MBIM identity asks
   AT+GMI first (T99W175 answers AT+CGMI without OK).
+- **#67 (FM350-GL, snapshot):** a feed build from after OpenWrt master moved
+  libucode 20230711 -> 20261009 (2026-10-19) was installed onto an older
+  snapshot and died on the missing `libucode.so.20261009`. Feed: `wwand` gets
+  `EXTRA_DEPENDS ucode (>=<the SDK's ucode date>)`, so apk refuses instead
+  (deliberately not `+libucode`: it would keep the old library on a later
+  upgrade and load two ABIs into one process). `files/wwand.init` now also
+  probes `wwand_io` and says what to do on that dlopen error.
 - **Issue round 2026-10-24:** #39 regression (MassiPi) — "session closed: card
   removed" stood on the status after a slot switch and a switch back: the
   leaving card's SESSION_CLOSED_IND arrives after card_changed cleared the
