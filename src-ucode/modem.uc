@@ -189,7 +189,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1707) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1716) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:739, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -374,7 +374,17 @@ export function create(opts)
 				if (!err)
 					cid_held(client.service, client.cid, false);
 
-				log(err ? 'warn' : 'debug', sprintf('release of cid %d (service %d): %s — held: %s',
+				// ...but `cancelled` is not the modem refusing: our own hub
+				// closed under the request during teardown. On QMUX the next
+				// init starts with a CTL SYNC, which resets the modem's client
+				// table where the stack implements it (best-effort: modem_init_qmi
+				// step_sync); over QRTR a client IS a socket, which the hub's
+				// close shuts (qmi_over_qrtr self.close). A warning cannot make
+				// the cancelled release happen, and it added one line per CID
+				// to every failed attempt.
+				let quiet = !err || err.error == 'cancelled';
+
+				log(quiet ? 'debug' : 'warn', sprintf('release of cid %d (service %d): %s — held: %s',
 					client.cid, client.service, err ? sprintf('%J', err) : 'ok', held_summary() || 'none'));
 
 				if (cb)

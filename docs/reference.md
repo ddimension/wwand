@@ -1949,6 +1949,13 @@ applied in two stages: when errors first cross the limit the modem gets one
 hardware repower/reset; only when they reach **2× the limit** does it reboot (and
 that reboot is gated by `failreboot` — with `failreboot 0` it keeps retrying
 instead). A success resets the counter.
+A **configuration error** is not an attempt: a step that can name a combination
+no retry changes — today the vendor-driver datapaths (`rmnet_nss`,
+`rmnet_nss_mhi`) on an interface without `option mux_id`, whose driver already
+runs the modem in QMAP — stops the modem in `ABSENT` with no retry and no
+rung, and says why in its `control_note` (`configuration error in datapath:
+…`). The config edit that cures it restarts the modem; so does a hotplug or
+`/etc/init.d/wwand restart` (ddimension/wwand#66).
 
 **`option init_apn` / `init_auth` / `init_user` / `init_pass`** — the
 **initial-attach bearer**, when the network wants a different one from the data

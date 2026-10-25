@@ -784,6 +784,25 @@ fail('register', { error: 'real' });
 ok(mf_retry != null, 'make_fail: outside a teardown the retry is armed as before');
 mf_retry.cancel();
 
+// A CONFIGURATION ERROR IS NOT A FLAKY MODEM: no attempt counted (the ladder
+// would reset, power-cycle and finally reboot over a missing `mux_id`, #66), no
+// retry armed, and the reason surfaced as the control note until a new
+// bring-up re-decides it
+mf_events = []; torn = 0; mf_retry = null; mf_action = 'retry';
+let ncf_calls = 0;
+let ncf_orig = fm.note_connect_failure;
+fm.note_connect_failure = (done) => { ncf_calls++; done(mf_action); };
+fm.state = 'INIT_DATAPATH';
+fail('datapath', { ok: false, config: true, error: 'add `option mux_id`' });
+eq(ncf_calls, 0, 'make_fail: a config error never reaches the recovery ladder');
+eq(mf_retry, null, 'make_fail: ...arms no retry');
+eq(torn, 1, 'make_fail: ...but tears the modem down');
+eq(fm.state, 'ABSENT', 'make_fail: ...and parks it ABSENT');
+eq(mf_events[0]?.d?.action, 'config', 'make_fail: ...reporting action config');
+ok(index(fm.control_note ?? '', 'mux_id') > 0, 'make_fail: ...with the reason as the control note');
+fm.note_connect_failure = ncf_orig;
+fm.control_note = null; fm.config_error = null;
+
 // a 'reboot' action: tears down but schedules NO retry (reboot pending)
 mf_events = []; torn = 0; mf_retry = null;
 mf_action = 'reboot';
@@ -1869,6 +1888,25 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	eq(reapplied, 1, 'attach owner: a later profile-1 interface reprograms the attach profile');
 	m.attach_context({ config: { interface: 'w2', profile: 3 }, modem_event: () => null });
 	eq(reapplied, 1, 'attach owner: a bind that does not change the owner does not');
+}
+
+// a config error's note lasts until a new bring-up starts: that attempt
+// re-decides it, and a note left behind would report a failure it may cure.
+// Another component's note (the MBIM radio switch) is not ours to clear.
+{
+	let m = { state: 'ABSENT', contexts: [] };
+	mc.scaffolding(m, { deps: {}, log: () => null, rec: {} });
+
+	m.config_error = m.control_note = 'configuration error in datapath: x';
+	m.set_state('INIT_TRANSPORT');
+	eq(m.control_note, null, 'config note: a new bring-up clears it');
+	eq(m.config_error, null, 'config note: ...and the error with it');
+
+	m.state = 'ABSENT';
+	m.config_error = 'configuration error in datapath: x';
+	m.control_note = 'radio disabled by the hardware switch';
+	m.set_state('INIT_TRANSPORT');
+	eq(m.control_note, 'radio disabled by the hardware switch', 'config note: a foreign note is kept');
 }
 
 done('test_modem_common');

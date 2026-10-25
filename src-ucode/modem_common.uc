@@ -587,6 +587,15 @@ export function scaffolding(self, o)
 
 		log('info', sprintf('state %s -> %s', self.state, state));
 		self.state = state;
+
+		// a new bring-up (hotplug, a manual restart) re-decides the config
+		// error; leaving the note would report a failure the attempt may cure
+		if (state != 'ABSENT' && self.config_error) {
+			if (self.control_note == self.config_error)
+				self.control_note = null;
+
+			self.config_error = null;
+		}
 		emit('state', { state: state, ...(data ?? {}) });
 	};
 
@@ -943,6 +952,31 @@ export function make_fail(self, o)
 		// signal.
 		if (err?.error == 'cancelled')
 			return o.log('debug', sprintf('%s: cancelled with the session, not a failure', stage));
+
+		// NOR IS A CONFIGURATION ERROR. A step that marks its error `config`
+		// has refused a combination no retry can change (a vendor driver
+		// already in QMAP and an interface with no `mux_id`): counting it as an
+		// attempt walked the recovery ladder through a modem reset and a board
+		// power-cycle to a reboot of the router, none of which touches the
+		// config (evidence: ddimension/wwand#66). Stop, say why, and wait: an
+		// edit that cures it changes the modem's signature, and apply_config
+		// then restarts the modem (daemon.uc modem_sig).
+		if (err?.config) {
+			o.log('err', sprintf('failed in %s: %J — a configuration error: no retry and no recovery until the configuration changes',
+				stage, err));
+
+			self.config_error = sprintf('configuration error in %s: %s', stage, err.error);
+			self.control_note = self.config_error;
+
+			o.emit('error', {
+				stage: stage, err: err,
+				attempts: self.counters.attempts, action: 'config',
+			});
+
+			self.teardown();
+			self.set_state('ABSENT', { config_error: err.error });
+			return;
+		}
 
 		o.log('err', sprintf('failed in %s: %J', stage, err));
 

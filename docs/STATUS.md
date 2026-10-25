@@ -26,10 +26,14 @@ state buried at the top invites reading a months-old entry as present tense.
   core on 2026-10-19 (openwrt/openwrt@9b835ec626) and the old forks lacked it.
   The images rebuild with the next stable release tag — check that run.
 - **Issues waiting on reporters:** #39 (MassiPi — slot-switch note fix),
-  #66 (4IceG — diagnostics asked), #67 (xsetiadi — asked for openwrt_release /
-  ucode versions), #68/#71 (fixed, confirmation), #69 (marcinnet-25 — fewer NMEA
-  sentences?), #70 (mrhaav — raw `AT^TEMP?` asked), #48. Two-week rule: a
-  delivered issue with no answer for 14 days is closed.
+  #66 (4IceG — `option mux_id '1'` + reboot suggested; the config error no
+  longer walks the recovery ladder, fixed 2026-10-25; asked for `qmap_mode` to
+  explain why the first boot ran unmuxed), #72 (marcinnet-25, EG12 cell-location
+  timeouts after a WAN restart — debug log asked), #68/#71 (fixed,
+  confirmation), #69 (marcinnet-25 agreed to `AT+QGPSCFG="gpsnmeatype"`; no EG12
+  here to check on), #70 (mrhaav — raw `AT^TEMP?` asked), #48. #67 closed
+  (confirmed). Two-week rule: a delivered issue with no answer for 14 days is
+  closed.
 - **PRs:** #50 (MayorBug, draft, conflicts) waiting on a rework. #60 and #65
   (xhudan) merged with follow-ups.
 - **Upstream:** openwrt/packages#30185 (pins 1.6.9; maintainer review

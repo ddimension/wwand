@@ -4692,4 +4692,24 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	d.shutdown();
 }
 
+// --- a modem parked on a configuration error stays parked on hotplug --------
+// make_fail parks it in ABSENT with `config_error` set (#66). The hotplug
+// add path restarts AT-less ABSENT modems (the NCM tty-arrival cue); an
+// unrelated device arriving must not un-park this one, while an ordinary
+// backoff-waiting modem is still restarted.
+{
+	let hp = daemon_mod.create({ timing: TIMING, deps: { log: (l, m) => null } });
+	let starts = { parked: 0, waiting: 0 };
+	hp.autosetup = false;
+	hp.modems = {
+		parked: { cfg: {}, modem: { state: 'ABSENT', config_error: 'configuration error in datapath: x',
+		                            start: () => starts.parked++ } },
+		waiting: { cfg: {}, modem: { state: 'ABSENT', start: () => starts.waiting++ } },
+	};
+	hp.contexts = {};
+	hp.hotplug('add', 'ttyUSB9');
+	eq(starts.parked, 0, 'hotplug: a modem parked on a config error is not restarted');
+	eq(starts.waiting, 1, 'hotplug: ...an ordinary ABSENT modem still is');
+}
+
 done('test_daemon');
