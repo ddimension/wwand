@@ -409,6 +409,27 @@ ok(length(filter(r.warnings, (w) => match(w, /cat_mode 'off' is not one of/))) =
 	'cat_mode: an undefined mode is reported');
 eq(r.modems.m0.cat_mode, null, 'cat_mode: ...and dropped, so the modem keeps its own');
 
+// gnss_nmea (#69): unset leaves the receiver's NMEA alone, a known profile is
+// taken case-insensitively, anything else is reported and dropped
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', gnss: '1', gnss_nmea: 'Fix' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.gnss_nmea, 'fix', 'gnss_nmea: accepted, case-insensitively');
+eq(length(filter(r.warnings, (w) => match(w, /gnss_nmea/))), 0, 'gnss_nmea: a known option, no warning');
+
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', gnss_nmea: 'gga' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+ok(length(filter(r.warnings, (w) => match(w, /gnss_nmea 'gga' is not one of/))) == 1,
+	'gnss_nmea: an unknown profile is reported');
+eq(r.modems.m0.gnss_nmea, null, 'gnss_nmea: ...and dropped, the receiver keeps its own output');
+
 // The initial-attach bearer, when the network wants a different one from the
 // data connection. Unset = same as the interface, which is what every
 // deployment did before these options existed.

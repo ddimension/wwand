@@ -182,8 +182,142 @@ export function qeng_ok(self)
 const GNSS_START = [
 	// Quectel (and the ASR-based modems that copy its AT set). "+CME ERROR: 504"
 	// is "session is ongoing" — already running, which is success for us.
-	{ vendors: /quectel|asr/, cmd: 'AT+QGPS=1', ok_errors: /504/ },
+	{ vendors: /quectel|asr/, cmd: 'AT+QGPS=1', ok_errors: /504/, nmea: 'quectel' },
 ];
+
+// `option gnss_nmea`: which sentences the receiver streams. A multi-GNSS
+// Quectel sends most of its NMEA as GSV (satellites in view) and one GSA per
+// constellation, and wwand-gps parses every line (ddimension/wwand#69). The
+// mask per constellation is AT+QGPSCFG "<x>nmeatype"; the GPS bits, measured
+// one at a time on the RG502Q (RG502QEAACR13A04M4G, 2026-10-25): 1 GGA,
+// 2 RMC, 4 GSV, 8 GSA, 16 VTG.
+//   fix   GPS GGA+RMC+GSA, every other constellation 0. Measured there: 28
+//         parsed sentences/s down to 3, fix type and DOPs unchanged; the
+//         satellites-in-view list goes, and satellites_used drops to the GPS
+//         satellites (9 -> 7) because the other constellations' GSA is gone.
+//         The OTHER masks are written only as 0: their bits are not one
+//         layout (beidounmeatype is 1 GBGSA, 2 GBGSV on the RG502Q, while
+//         galileonmeatype there has the five GPS bits), and 0 is off in each.
+//   full  every bit the firmware lists for each mask (`AT+QGPSCFG=?`, "(0-N)"),
+//         so no bit meaning has to be known: it undoes `fix`.
+// Applied at every receiver start. Unset leaves the modem's own setting
+// alone — including one an earlier `fix` left behind; set `full` to undo it.
+const NMEA_MASKS = [ 'gpsnmeatype', 'glonassnmeatype', 'galileonmeatype', 'beidounmeatype' ];
+const NMEA_FIX_GPS = 1 | 2 | 8;
+
+// { mask: max } for every mask the firmware lists in its AT+QGPSCFG=? answer
+function nmea_ranges(lines)
+{
+	let out = {};
+
+	for (let l in lines ?? []) {
+		let m = match(l, /^\+QGPSCFG: *"([a-z]+nmeatype)", *\(0-([0-9]+)\)/);
+
+		if (m)
+			out[m[1]] = +m[2];
+	}
+
+	return out;
+}
+
+// { mask: value } to have, for the masks this firmware lists; null = nothing
+function nmea_plan(profile, ranges)
+{
+	let plan = {};
+
+	for (let k in NMEA_MASKS) {
+		let max = ranges?.[k];
+
+		if (max == null)
+			continue;
+
+		if (profile == 'full')
+			plan[k] = max;
+		else if (profile == 'fix')
+			plan[k] = (k == 'gpsnmeatype') ? (NMEA_FIX_GPS & max) : 0;
+	}
+
+	return length(keys(plan)) ? plan : null;
+}
+
+// Apply the plan read-before-write (a write the modem already holds is not
+// sent), then cb(). Best-effort: a firmware without the command, or a refused
+// write, is logged and the receiver starts anyway — fewer sentences is an
+// optimisation, the fix is the feature. A mask that cannot be READ is not
+// written: not knowing what the modem holds is no evidence it differs.
+// `at` is the engine the chain started on; a teardown that closes it (or a
+// restart that opens a new one) ends the chain rather than continuing on
+// whatever self.at is by then.
+function apply_gnss_nmea(self, log, recipe, at, cb)
+{
+	let profile = self.config?.gnss_nmea;
+
+	if (!profile || recipe.nmea != 'quectel')
+		return cb();
+
+	at.send('AT+QGPSCFG=?', (err, res) => {
+		let plan = err ? null : nmea_plan(profile, nmea_ranges(res?.lines));
+
+		if (!plan) {
+			log('info', sprintf('gnss: gnss_nmea %s — this firmware lists no NMEA type masks, its output is left as it is', profile));
+			return cb();
+		}
+
+		let todo = sort(keys(plan));
+		let changed = [];
+		let step;
+
+		step = (i) => {
+			if (i >= length(todo)) {
+				if (length(changed))
+					log('notice', sprintf('gnss: NMEA output set to %s (%s)', profile, join(', ', changed)));
+
+				return cb();
+			}
+
+			if (self.at !== at)
+				return cb();
+
+			let k = todo[i];
+			let want = plan[k];
+
+			at.send(sprintf('AT+QGPSCFG="%s"', k), (rerr, rres) => {
+				let held = null;
+
+				for (let l in (rerr ? null : rres?.lines) ?? []) {
+					let m = match(l, /^\+QGPSCFG: *"([a-z]+nmeatype)", *([0-9]+)/);
+
+					if (m && m[1] == k) {
+						held = +m[2];
+						break;
+					}
+				}
+
+				if (held == null) {
+					log('warn', sprintf('gnss: AT+QGPSCFG="%s" could not be read — left unchanged', k));
+					return step(i + 1);
+				}
+
+				if (held == want)
+					return step(i + 1);
+
+				if (self.at !== at)
+					return cb();
+
+				at.send(sprintf('AT+QGPSCFG="%s",%d', k, want), (werr) => {
+					if (werr)
+						log('warn', sprintf('gnss: AT+QGPSCFG="%s",%d refused: %J', k, want, werr));
+					else
+						push(changed, sprintf('%s %d', k, want));
+
+					step(i + 1);
+				}, { timeout: 5000 });
+			}, { timeout: 5000 });
+		};
+
+		step(0);
+	}, { timeout: 5000 });
+}
 
 // The extra_client contract's goodbye: run each plugin client's
 // `before_release(client)` once, right before the modem releases its CID —
@@ -281,7 +415,9 @@ export function start_gnss(self, log, cb)
 		return cb({ error: 'unsupported', detail: 'unknown vendor' });
 	}
 
-	self.at.send(recipe.cmd, (err, res) => {
+	let at = self.at;
+
+	apply_gnss_nmea(self, log, recipe, at, () => (self.at !== at) ? cb({ error: 'unsupported', detail: 'no at channel' }) : at.send(recipe.cmd, (err, res) => {
 		// THE CODE IS IN THE ERROR, not in the lines. `+CME ERROR: 504` is
 		// parsed by atcmd into { error: 'cme', code: '504' } and the response
 		// lines are then empty — so matching only `res.lines` never saw it, and
@@ -305,7 +441,7 @@ export function start_gnss(self, log, cb)
 			already ? ' — was already running' : '',
 			self.gps_tty ? sprintf(', NMEA on %s', self.gps_tty) : ''));
 		cb(null);
-	}, { timeout: 10000, expect_errors: recipe.ok_errors });
+	}, { timeout: 10000, expect_errors: recipe.ok_errors }));
 };
 
 export function dsd_from_serving(serving)

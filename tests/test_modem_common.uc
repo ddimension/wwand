@@ -1422,6 +1422,124 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 	eq(m3.gnss_started, null, 'gnss: a failed start is not latched away');
 })();
 
+// `option gnss_nmea` (#69): the NMEA masks are set read-before-write ahead of
+// the start. `fix` writes GPS GGA+RMC+GSA (11) and ONLY zeros elsewhere — the
+// non-GPS bit layouts differ between Quectel families, 0 is off in all of them;
+// `full` takes each mask's maximum from the firmware's own `=?` ranges.
+(() => {
+	// the RG502Q's answer to AT+QGPSCFG=? (HW, 2026-10-25), trimmed
+	const RANGES = [
+		'+QGPSCFG: "outport",("none","usbnmea","uartdebug")',
+		'+QGPSCFG: "gpsnmeatype",(0-31)',
+		'+QGPSCFG: "glonassnmeatype",(0-7)',
+		'+QGPSCFG: "galileonmeatype",(0-31)',
+		'+QGPSCFG: "beidounmeatype",(0-3)',
+	];
+	let mk = (cfg, held, ranges) => {
+		let m = { info: { manufacturer: 'Quectel' }, config: cfg, sent: [] };
+
+		m.at = { send: (cmd, cb) => {
+			push(m.sent, cmd);
+
+			if (cmd == 'AT+QGPSCFG=?')
+				return ranges ? cb(null, { lines: ranges }) : cb({ error: 'cme', code: '4' }, null);
+
+			let rd = match(cmd, /^AT\+QGPSCFG="([a-z]+)"$/);
+
+			if (rd)
+				return cb(null, { lines: [ sprintf('+QGPSCFG: "%s",%d', rd[1], held[rd[1]]) ] });
+
+			let wr = match(cmd, /^AT\+QGPSCFG="([a-z]+)",([0-9]+)$/);
+
+			if (wr)
+				held[wr[1]] = +wr[2];
+
+			cb(null, { lines: [] });
+		} };
+
+		return m;
+	};
+	let writes = (m) => filter(m.sent, (c) => match(c, /",[0-9]+$/));
+
+	let held = { gpsnmeatype: 31, glonassnmeatype: 7, galileonmeatype: 31, beidounmeatype: 1 };
+	let m = mk({ gnss: true, gnss_nmea: 'fix' }, held, RANGES);
+	mc.start_gnss(m, () => null);
+	eq(held, { gpsnmeatype: 11, glonassnmeatype: 0, galileonmeatype: 0, beidounmeatype: 0 },
+		'gnss_nmea fix: GPS GGA+RMC+GSA, every other constellation off');
+	eq(m.sent[length(m.sent) - 1], 'AT+QGPS=1', 'gnss_nmea: ...set BEFORE the receiver starts');
+	eq(m.gnss_started, true, 'gnss_nmea: ...and the start still latches');
+
+	// already as wanted: read, nothing written
+	let m2 = mk({ gnss: true, gnss_nmea: 'fix' }, held, RANGES);
+	mc.start_gnss(m2, () => null);
+	eq(writes(m2), [ ], 'gnss_nmea: a mask the modem already holds is not rewritten');
+
+	// full: each maximum the firmware lists, whatever the bits mean
+	let m3 = mk({ gnss: true, gnss_nmea: 'full' }, held, RANGES);
+	mc.start_gnss(m3, () => null);
+	eq(held, { gpsnmeatype: 31, glonassnmeatype: 7, galileonmeatype: 31, beidounmeatype: 3 },
+		'gnss_nmea full: every listed bit on, from the firmware\'s own ranges');
+
+	// a mask the firmware does not list is never sent
+	let h4 = { gpsnmeatype: 31 };
+	let m4 = mk({ gnss: true, gnss_nmea: 'fix' }, h4, [ '+QGPSCFG: "gpsnmeatype",(0-31)' ]);
+	mc.start_gnss(m4, () => null);
+	eq(writes(m4), [ 'AT+QGPSCFG="gpsnmeatype",11' ], 'gnss_nmea: only the masks the firmware lists');
+
+	// a firmware without the command: the receiver starts anyway
+	let m5 = mk({ gnss: true, gnss_nmea: 'fix' }, {}, null);
+	mc.start_gnss(m5, () => null);
+	eq(m5.sent, [ 'AT+QGPSCFG=?', 'AT+QGPS=1' ], 'gnss_nmea: no NMEA masks -> started unchanged');
+
+	// unset: not a single QGPSCFG — the modem's setting is left alone
+	let m6 = mk({ gnss: true }, held, RANGES);
+	mc.start_gnss(m6, () => null);
+	eq(m6.sent, [ 'AT+QGPS=1' ], 'gnss_nmea unset: the NMEA output is not touched');
+
+	// an unreadable mask is not written blind, and the receiver still starts
+	let m7 = mk({ gnss: true, gnss_nmea: 'fix' }, { gpsnmeatype: 31 },
+		[ '+QGPSCFG: "gpsnmeatype",(0-31)' ]);
+	let send7 = m7.at.send;
+	m7.at.send = (cmd, cb) => {
+		if (cmd == 'AT+QGPSCFG="gpsnmeatype"') {
+			push(m7.sent, cmd);
+			return cb({ error: 'timeout' }, null);
+		}
+
+		send7(cmd, cb);
+	};
+	mc.start_gnss(m7, () => null);
+	eq(writes(m7), [ ], 'gnss_nmea: a mask that cannot be read is left unchanged');
+	eq(m7.sent[length(m7.sent) - 1], 'AT+QGPS=1', 'gnss_nmea: ...and the receiver starts anyway');
+
+	// an answer for another mask is not this mask's value
+	let m8 = mk({ gnss: true, gnss_nmea: 'fix' }, { gpsnmeatype: 31 },
+		[ '+QGPSCFG: "gpsnmeatype",(0-31)' ]);
+	let send8 = m8.at.send;
+	m8.at.send = (cmd, cb) => (cmd == 'AT+QGPSCFG="gpsnmeatype"')
+		? cb(null, { lines: [ '+QGPSCFG: "glonassnmeatype",11' ] })
+		: send8(cmd, cb);
+	mc.start_gnss(m8, () => null);
+	eq(writes(m8), [ ], 'gnss_nmea: another mask\'s line is not read as this one');
+
+	// a teardown mid-chain (the AT engine closed or replaced) ends it: no
+	// write and no start on the engine that came after
+	let m9 = mk({ gnss: true, gnss_nmea: 'fix' }, { gpsnmeatype: 31 },
+		[ '+QGPSCFG: "gpsnmeatype",(0-31)' ]);
+	let send9 = m9.at.send;
+	let other = { send: (cmd, cb) => die('the replaced engine must not be used') };
+	m9.at.send = (cmd, cb) => {
+		if (cmd == 'AT+QGPSCFG=?')
+			m9.at = other;   // the teardown lands while the ranges are answered
+
+		send9(cmd, cb);
+	};
+	let e9 = 'unset';
+	mc.start_gnss(m9, () => null, (e) => { e9 = e; });
+	eq(e9?.detail, 'no at channel', 'gnss_nmea: a chain whose AT engine went away ends there');
+	eq(m9.gnss_started, null, 'gnss_nmea: ...and latches nothing');
+})();
+
 
 // --- a temperature that arrives after its own OK ------------------------------
 //

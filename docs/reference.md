@@ -491,6 +491,8 @@ config wwand_modem 'm0'
 	                                 #    streams. The port is reported as `gps_port`; with
 	                                 #    wwand-gps installed, wwand also READS it and
 	                                 #    answers `modem_gps` with the fix (see below)
+	option gnss_nmea ''              # fix | full: which NMEA the receiver streams (Quectel);
+	                                 #    unset leaves the modem's setting alone — see below
 	option gnss_set_time '0'         # 1: step the system clock from the receiver's own
 	                                 #    time — but only when the clock is plainly unset
 	                                 #    (pre-2021), so it never fights sysntpd. Off by
@@ -859,6 +861,21 @@ instead: more than 120 s off and the clock is stepped, either direction. The LuC
 rather than an embedded tile layer: a tile would have the router's own web
 interface fetch from a third party, and send it this router's position to do
 so, the moment anyone opened the page.
+
+**Fewer sentences: `option gnss_nmea`.** A multi-GNSS receiver streams most
+of its NMEA as satellites-in-view (GSV) and one GSA per constellation, and
+wwand-gps parses every line — that, not polling, is the CPU it costs
+(ddimension/wwand#69). On a Quectel (or an ASR modem that copies its AT set),
+`gnss_nmea 'fix'` sets the AT+QGPSCFG
+NMEA masks to GPS GGA+RMC+GSA and every other constellation off, before the
+receiver starts. Measured on an RG502Q (2026-10-25): 28 parsed sentences a
+second down to 3, with the same 3D fix and DOPs; the satellites-in-view list
+(and the LuCI satellite table) is empty then, and `satellites_used` counts the
+GPS satellites only. `'full'` turns on every bit the firmware lists for each
+mask, which undoes `fix`. The modem keeps what was last written, so unsetting
+the option does not restore anything — set `full` for that. A firmware that lists
+no NMEA masks, and every other vendor, leaves the output as it is (logged). A
+mask that cannot be read is left unchanged rather than written blind.
 
 **Good citizen, here too.** Until 1.6.7 this package drove **ugps** (OpenWrt
 base) by writing `/etc/config/gps`; it no longer does, and no longer depends on

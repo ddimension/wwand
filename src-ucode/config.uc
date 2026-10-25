@@ -275,6 +275,7 @@ export function modem_defaults(over)
 		at_init: [], location: false, delay: 0,
 		at2_external: false,   // release the secondary AT port for external tools
 		gnss: false,           // switch the modem's GNSS receiver on (NMEA port)
+		gnss_nmea: null,       // 'fix' | 'full': the NMEA the receiver emits (null = untouched)
 		nitz_time: true,       // step the system clock from NITZ (see deps set_clock)
 		fcc_auth: null,        // RF unlock for laptop-SKU modems (see reference.md)
 		failreboot: 100, recovery_steps: null, proto_error_limit: 25, zero_rx_timeout: 21600,
@@ -357,7 +358,7 @@ function apply_globals(s, result)
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
 	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'recovery_steps', 'pincode', 'modes', 'mcc', 'mnc',
 	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'nitz_time', 'fcc_auth',
-	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
+	'gnss_nmea', 'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'unarmed_reset_after', 'card_hold',
 	'zero_rx_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
@@ -515,6 +516,9 @@ function modem_from_section(s, warnings)
 		// one switch, and wwand-gps picks the source — the modem's NMEA port,
 		// else QMI LOC (natively or over the MBIM passthrough)
 		gnss: bool_opt(s.gnss, false) || bool_opt(s.location, false),
+		// which NMEA sentences the receiver puts on its port (modem_common
+		// GNSS_NMEA); unset leaves the modem's own setting alone
+		gnss_nmea: (s.gnss_nmea != null && s.gnss_nmea != '') ? lc(s.gnss_nmea) : null,
 		// step the system clock from the receiver's own time — through
 		// deps.set_clock, which only ever touches a clock that is plainly
 		// unset (pre-2021) and so cannot fight sysntpd. OFF by default: this
@@ -750,6 +754,16 @@ function parse_network_sections(raw, result, ext_options)
 				push(result.warnings, m);
 				push(result.modems[name].config_notes, m);
 				result.modems[name].cat_mode = null;
+			}
+
+			if (s.gnss_nmea != null && s.gnss_nmea != '' &&
+			    index([ 'fix', 'full' ], lc(s.gnss_nmea)) < 0) {
+				let m = sprintf("wwand_modem %s: gnss_nmea '%s' is not one of fix, full — ignored, the receiver keeps its own NMEA output",
+					name, s.gnss_nmea);
+
+				push(result.warnings, m);
+				push(result.modems[name].config_notes, m);
+				result.modems[name].gnss_nmea = null;
 			}
 
 			// a protocol wwand has no backend for is a typo, and a silent one:

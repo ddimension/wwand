@@ -31,7 +31,7 @@ const TX_RETRY_MS = 5;
 // how many retries close() spends draining what is still queued. cdc-wdm takes
 // ONE message at a time, so a burst drains at roughly one frame per round trip:
 // the eleven clients modem.uc releases need eleven, and 20 x 5 ms bounds the
-// teardown at ~100 ms. The ordinary reconnect is 5 s away (modem_common.uc:471),
+// teardown at ~100 ms. The ordinary reconnect is 5 s away (modem_common.uc:588),
 // so nothing normally overlaps.
 //
 // RESIDUAL, named rather than hidden: a hotplug add for the same device inside
