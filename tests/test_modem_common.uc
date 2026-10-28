@@ -2036,4 +2036,17 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	eq(m.control_note, 'radio disabled by the hardware switch', 'config note: a foreign note is kept');
 }
 
+// fill_serving_band stores the bare band number, the shape every vendor source
+// uses; LuCI adds the B / n itself (luci-app-wwand#16 showed 'BB3' / 'nn48')
+{
+	let m = { cells: { lte_intra: { earfcn: 1750 }, nr5g_arfcn: 642000 } };
+	mc.fill_serving_band(m);
+	eq(m.cells.serving.lte.band, 3, 'serving band: EARFCN 1750 -> 3, not "B3"');
+	eq(m.cells.serving.nr.band, 48, 'serving band: NR-ARFCN 642000 -> 48, not "n48"');
+
+	let v = { cells: { serving: { lte: { earfcn: 1750, band: 7 } } } };
+	mc.fill_serving_band(v);
+	eq(v.cells.serving.lte.band, 7, 'serving band: a vendor band is kept');
+}
+
 done('test_modem_common');

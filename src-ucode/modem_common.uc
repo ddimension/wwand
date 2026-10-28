@@ -124,6 +124,17 @@ export function serving_from_ca(self)
 // The serving EARFCN comes from cells.serving.lte.earfcn (seeded by
 // serving_from_ca / AT) or, failing that, the serving cell-info earfcn
 // (cells.lte_intra.earfcn); NR from cells.nr5g_arfcn.
+// The band is stored as the bare NUMBER, like every vendor source (AT+QENG,
+// telemetry_ncm): arfcn_bands names it 'B3' / 'n48', and a consumer that adds
+// its own prefix (LuCI status) then showed 'BB3' / 'nn48'
+// (evidence: ddimension/luci-app-wwand#16).
+function band_number(name)
+{
+	let m = match(name ?? '', /^[Bn]([0-9]+)$/);
+
+	return m ? +m[1] : null;
+}
+
 export function fill_serving_band(self)
 {
 	let cells = self.cells;
@@ -140,7 +151,7 @@ export function fill_serving_band(self)
 			cells.serving = cells.serving ?? {};
 			cells.serving.lte = cells.serving.lte ?? {};
 			cells.serving.lte.earfcn ??= earfcn;
-			cells.serving.lte.band ??= d.band;
+			cells.serving.lte.band ??= band_number(d.band);
 			cells.serving.lte.dl_freq_mhz ??= d.mhz;
 		}
 	}
@@ -152,7 +163,7 @@ export function fill_serving_band(self)
 			cells.serving.nr = cells.serving.nr ?? {};
 			cells.serving.nr.arfcn ??= arfcn;
 			if (d.band != null)
-				cells.serving.nr.band ??= d.band;
+				cells.serving.nr.band ??= band_number(d.band);
 			cells.serving.nr.dl_freq_mhz ??= d.mhz;
 		}
 	}
