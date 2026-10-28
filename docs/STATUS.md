@@ -33,7 +33,8 @@ state buried at the top invites reading a months-old entry as present tense.
   row since 2026-10-28; the connection drops with a NETDEV WATCHDOG are the
   open part, data asked), #68/#71 (fixed,
   confirmation), #69 (`option gnss_nmea 'fix'` built 2026-10-25, measured on the
-  NR7101's RG502Q: 28 → 3 sentences/s; EG12 untested — reporter to confirm), #70 (mrhaav — raw `AT^TEMP?` asked), #48. #67 closed
+  NR7101's RG502Q: 28 → 3 sentences/s; EG12 untested — reporter to confirm), #70 (mrhaav — T99W175 `AT^TEMP?` → TSENS built 2026-10-28, keyed on the
+  `QUALCOMM` manufacturer name; reporter to confirm), #48. #67 closed
   (confirmed). Two-week rule: a delivered issue with no answer for 14 days is
   closed.
 - **PRs:** #50 (MayorBug, draft, conflicts) waiting on a rework. #60 and #65

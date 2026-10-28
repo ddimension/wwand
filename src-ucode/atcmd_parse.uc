@@ -1010,6 +1010,35 @@ export function parse_ethermal(lines)
 	return null;
 };
 
+// Foxconn T99W175 AT^TEMP?: one bare "<sensor>: <n>C" line per sensor, no
+// response prefix (terminal capture in ddimension/wwand#70, 2026-10-24):
+//
+//   PA: 32C
+//   Skin Sensor: 32C
+//   TSENS: 34C
+//   OK
+//
+// TSENS (the SoC sensor) is the reading, the same die temperature the other
+// vendors' commands report. Only that line is read: PA and skin are other
+// places on the board, and falling back to one of them would put a different
+// quantity under the same name. Anchored at the line start, because nothing
+// else marks these lines as the answer.
+export function parse_tsens(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(l, /^\s*TSENS:\s*(-?[0-9]+)\s*C\s*$/);
+
+		if (!m)
+			continue;
+
+		let v = +m[1];
+
+		return (v > 10 && v < 120) ? v : null;
+	}
+
+	return null;
+};
+
 // MeiG AT+TEMP: '+TEMP: "sensor","value"'. The value is milli-Celsius on some
 // platforms (Unisoc soc-thmzone) — divide by 1000 when it is clearly milli
 // (magnitude > 200). Prefers an soc/cpu sensor, else the first plausible reading.

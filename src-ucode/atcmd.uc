@@ -239,6 +239,7 @@ export const parse_cpmutemp = parse.parse_cpmutemp;
 export const parse_meig_temp = parse.parse_meig_temp;
 export const parse_mtsm = parse.parse_mtsm;
 export const parse_ethermal = parse.parse_ethermal;
+export const parse_tsens = parse.parse_tsens;
 
 // --- AT port discovery -------------------------------------------------------
 

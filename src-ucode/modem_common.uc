@@ -1295,7 +1295,7 @@ export function at_retired(self, ...cmds)
 // A BARE `ERROR` retires a command. `+CME ERROR: <n>` never does: it is a
 // runtime condition (SIM not ready, no network) that says nothing about whether
 // the firmware knows the command. atcmd already separates the three
-// (atcmd.uc:968 vs :973 vs :914).
+// (atcmd.uc:969 vs :973 vs :914).
 //
 // A TIMEOUT retires one only when the PORT IS PROVABLY ALIVE. On its own a
 // timeout means the port is wedged or the modem busy — then every command goes
@@ -1735,6 +1735,11 @@ export function collect_temperature(self, cb)
 	// FM350/T700 (MediaTek): AT+ETHERMAL? (field-verified — the FM350 REJECTS
 	// the 3ginfo-lite NL952 command AT+MTSM=1)
 	else if (index(mfr, 'fibocom') >= 0) { cmd = 'AT+ETHERMAL?'; parse = atcmd.parse_ethermal; }
+	// Foxconn T99W175: it names itself after the chipset — "QUALCOMM" over
+	// AT+GMI (MBIM, PCIe) and "QUALCOMM INCORPORATED" in QMI DMS (USB), so the
+	// match is on Qualcomm (ddimension/wwand#70, #52). Another Qualcomm-named
+	// modem that has no AT^TEMP? rejects it once and the latch below stops it.
+	else if (index(mfr, 'qualcomm') >= 0) { cmd = 'AT^TEMP?'; parse = atcmd.parse_tsens; }
 	else {
 		self._temp_unavail = true;   // no known temperature command for this vendor
 		return cb();

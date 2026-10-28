@@ -2301,7 +2301,8 @@ on teardown: they belong to the card we were talking to.
 
 **Thermal.** `status` → `temperature` (`{ celsius, source }`, read over AT:
 Quectel `QTEMP` / MeiG `TEMP` / Huawei `CHIPTEMP` / SIMCom `CPMUTEMP` / Fibocom
-`ETHERMAL`) says how warm the modem is; `status` → `thermal` says what the modem
+`ETHERMAL` / Foxconn T99W175 `^TEMP`, its `TSENS` line — chosen by the
+manufacturer name, which on the T99W175 is `QUALCOMM`) says how warm the modem is; `status` → `thermal` says what the modem
 decided to do about it, from QMI TMD:
 
 ```json

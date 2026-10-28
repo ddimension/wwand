@@ -302,6 +302,15 @@ mc.collect_temperature(ts, () => null);
 eq(ts._sent, 'AT+CPMUTEMP', 'temp: simcom sends AT+CPMUTEMP');
 eq(ts.temperature.celsius, 47, 'temp: simcom parsed 47 C');
 
+// Foxconn T99W175 under both of its names: "QUALCOMM" from AT+GMI (MBIM,
+// PCIe) and "QUALCOMM INCORPORATED" from QMI DMS (USB) — ddimension/wwand#70
+for (let mfr in [ 'QUALCOMM', 'QUALCOMM INCORPORATED' ]) {
+	let tx = temp_modem(mfr, [ 'PA: 32C', 'Skin Sensor: 32C', 'TSENS: 34C', 'OK' ]);
+	mc.collect_temperature(tx, () => null);
+	eq([ tx._sent, tx.temperature?.celsius ], [ 'AT^TEMP?', 34 ],
+		sprintf('temp: "%s" sends AT^TEMP? and reads TSENS', mfr));
+}
+
 // unreadable value -> temperature cleared to null (not left stale-as-object)
 let tn = temp_modem('Quectel', [ '+QTEMP: "x","5"', 'OK' ]);
 mc.collect_temperature(tn, () => null);

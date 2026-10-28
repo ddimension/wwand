@@ -774,6 +774,27 @@ eq(atcmd.parse_ethermal([ '+ETHERMAL: 3, 120, 0' ]), null, 'ethermal: ...and at 
 eq(atcmd.parse_ethermal([ '+ETHERMAL: 3, 32767, 0' ]), null, 'ethermal: the 32767 filler is not a reading');
 eq(atcmd.parse_ethermal([ 'OK' ]), null, 'ethermal: no line -> null');
 
+// Foxconn T99W175 AT^TEMP?: the TSENS line, never PA or skin. The first is
+// the reporter's capture (ddimension/wwand#70), the rest test our contract.
+eq(atcmd.parse_tsens([ 'PA: 32C', 'Skin Sensor: 32C', 'TSENS: 34C', 'OK' ]), 34,
+	'tsens: the SoC sensor out of the three');
+eq(atcmd.parse_tsens([ 'PA: 32C', 'Skin Sensor: 32C', 'OK' ]), null,
+	'tsens: no TSENS line, no reading — PA is not a stand-in');
+eq(atcmd.parse_tsens([ 'TSENS: 5C' ]), null, 'tsens: below the window');
+eq(atcmd.parse_tsens([ 'XTSENS: 40C' ]), null, 'tsens: anchored at the line start');
+// ...and the engine hands those prefix-less rows over as the answer: nothing
+// marks them, so a URC filter that took them would leave the parser empty
+{
+	let t = fake_transport();
+	let e = atcmd.create(t, { log: silent });
+	let lines = null;
+
+	e.send('AT^TEMP?', (err, res) => { lines = res?.lines; });
+	t.reply("AT^TEMP?\r\nPA: 32C\r\nSkin Sensor: 32C\r\nTSENS: 34C\r\n\r\nOK\r\n");
+
+	eq(lines, [ 'PA: 32C', 'Skin Sensor: 32C', 'TSENS: 34C' ], 'tsens: the engine keeps the bare rows');
+}
+
 // Huawei ^CHIPTEMP: first plausible sensor across the CSV
 eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 0,38,41,45' ]), 38, 'chiptemp: first in-range (0 skipped)');
 // The five-field layout, explained by the reporter (ddimension/wwand#12):
