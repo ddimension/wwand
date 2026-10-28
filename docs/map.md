@@ -52,6 +52,7 @@ row. That is the whole maintenance rule.
 
 | Question | Answer |
 |---|---|
+| Why did "cell location query failed" stop, or turn into "timed out N times in a row"? | `telemetry_qmi.uc cell_query_backoff`: after 3 timeouts in a row the slow tick sits out 1, 2, 4, 8, then 15 rounds before asking again (debug-level lines meanwhile); the first answer logs "answers again" and resets it. A QMI rejection is warned every round, never backed off, and ends the streak. |
 | What is in the one-line telemetry log, and what do the fields mean? | `modem_common.uc format_telemetry` |
 | **Which source produced those numbers?** | The per-metric ladder, chosen by `backend.uc choose`, which LOGS the winner once when it changes (`cells: answered by qmi\|mbim\|at`). It is **not** in `status` — see the note under § 8a in `extending.md`. Ask this BEFORE reasoning about a decoder: on a modem with QMI-over-MBIM passthrough the native MBIM cell decoder may never run. |
 | How are MBIM cell metrics decoded? | `mbim_backend.uc get_cells`, with `mbim_backend.uc nr_convention` deciding per cell whether the NR block carries 7-bit report indices or direct physical values. |

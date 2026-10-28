@@ -29,7 +29,9 @@ state buried at the top invites reading a months-old entry as present tense.
   #66 (4IceG — `option mux_id '1'` + reboot suggested; the config error no
   longer walks the recovery ladder, fixed 2026-10-25; asked for `qmap_mode` to
   explain why the first boot ran unmuxed), #72 (marcinnet-25, EG12 cell-location
-  timeouts after a WAN restart — debug log asked), #68/#71 (fixed,
+  timeouts after a WAN restart — the slow tick backs off after 3 timeouts in a
+  row since 2026-10-28; the connection drops with a NETDEV WATCHDOG are the
+  open part, data asked), #68/#71 (fixed,
   confirmation), #69 (`option gnss_nmea 'fix'` built 2026-10-25, measured on the
   NR7101's RG502Q: 28 → 3 sentences/s; EG12 untested — reporter to confirm), #70 (mrhaav — raw `AT^TEMP?` asked), #48. #67 closed
   (confirmed). Two-week rule: a delivered issue with no answer for 14 days is
