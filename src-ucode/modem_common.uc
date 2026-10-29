@@ -850,7 +850,13 @@ export function scaffolding(self, o)
 	// gentler retry / opmode-cycle rungs do nothing for it). Branch on
 	// can_repower(), not on usb_repower()'s bare bool, which cannot tell
 	// "no mechanism" from "refused" apart (ddimension/wwand#59).
-	self.trip_zero_rx = function() {
+	// `why` names the watchdog in the log: 'zero-rx' (the default, a context's
+	// rx counter) or 'tx stall' (the daemon's transmit-queue watch). Both are the
+	// same verdict — the data path is dead while the modem claims it is not —
+	// and get the same recovery.
+	self.trip_zero_rx = function(why) {
+		why ??= 'zero-rx';
+
 		if (rec.can_repower()) {
 			rec.usb_repower();
 			return;
@@ -862,11 +868,11 @@ export function scaffolding(self, o)
 		// torn down. Log each skip so a field capture shows why a stall did or
 		// did not reset.
 		if (!self.counters.proto_ok) {
-			log('warn', 'zero-rx: no repower mechanism, but this control channel has never answered — not resetting');
+			log('warn', sprintf('%s: no repower mechanism, but this control channel has never answered — not resetting', why));
 			return;
 		}
 		if (self._reattaching || self.lowpower_parked || self.detached) {
-			log('info', 'zero-rx: no repower mechanism, but a reattach / low-power park / detach is in flight — not resetting');
+			log('info', sprintf('%s: no repower mechanism, but a reattach / low-power park / detach is in flight — not resetting', why));
 			return;
 		}
 
@@ -877,7 +883,7 @@ export function scaffolding(self, o)
 			return;
 		self._zero_rx_resetting = true;
 
-		log('err', 'zero-rx: no repower path, resetting the modem');
+		log('err', sprintf('%s: no repower path, resetting the modem', why));
 		self.reset((err) => {
 			self._zero_rx_resetting = false;
 
@@ -885,7 +891,7 @@ export function scaffolding(self, o)
 			// or AT) or a refused reset: the stall stays, and the log is the
 			// only place that says why
 			if (err)
-				log('warn', sprintf('zero-rx: modem reset failed: %J', err));
+				log('warn', sprintf('%s: modem reset failed: %J', why, err));
 		});
 	};
 

@@ -7,6 +7,7 @@
 
 'use strict';
 
+import * as fs from 'fs';
 import * as modem_quirks from 'wwand.modem_quirks';
 
 // zero_rx_limit_ms(modem_config, timing): the zero-rx stall threshold in ms.
@@ -239,6 +240,179 @@ export function rx_stall_watch(o)
 			stalled += o.interval_ms;
 
 			return (stalled >= o.limit_ms()) ? stalled : null;
+		},
+	};
+};
+
+// tx_queue_stats(dev, root): the transmit side of a data netdev as the
+// kernel counts it — { timeouts, tx_packets } — or null when the device has no
+// transmit queue to read.
+//
+// `timeouts` is the netdev watchdog's count, summed over the transmit queues:
+// it adds one to /sys/class/net/<dev>/queues/tx-<n>/tx_timeout each time a
+// queue has been stopped longer than the driver's watchdog_timeo, the same
+// moment it logs "NETDEV WATCHDOG: … transmit queue N timed out"
+// (sch_generic.c:530/539, net-sysfs.c:1419-1424, Linux 6.18.41). usbnet's
+// timeout is 5 s (usbnet.c:52, :1778), and usbnet stops the queue when its USB
+// transmit queue is full (usbnet.c:1504-1505): the modem has stopped taking
+// packets.
+//
+// `tx_packets` is the proof of the opposite. usbnet counts a packet only when
+// its URB completed successfully; an unlinked or failed one goes to tx_errors
+// (usbnet.c tx_complete, 6.18.41). So it rises only while the modem accepts
+// data, which is what tells a recovered queue from a stuck one.
+//
+// Read the device that OWNS the queue — the qmi_wwan / cdc / mhi parent — not
+// a QMAP child.
+export function tx_queue_stats(dev, root)
+{
+	if (!dev || match(dev, /[\/]|^\.\.?$/))
+		return null;
+
+	let base = sprintf('%s/%s', root ?? '/sys/class/net', dev);
+	let total = null;
+
+	for (let q in (fs.lsdir(base + '/queues') ?? [])) {
+		if (!match(q, /^tx-[0-9]+$/))
+			continue;
+
+		let v = trim(fs.readfile(sprintf('%s/queues/%s/tx_timeout', base, q)) ?? '');
+
+		if (match(v, /^[0-9]+$/))
+			total = (total ?? 0) + +v;
+	}
+
+	if (total == null)
+		return null;
+
+	let p = trim(fs.readfile(base + '/statistics/tx_packets') ?? '');
+
+	return { timeouts: total, tx_packets: match(p, /^[0-9]+$/) ? +p : null };
+};
+
+// How long the timeout count may stay still before a stall counts as over.
+// The watchdog re-fires every watchdog_timeo (5 s on usbnet) while the queue
+// stays stopped, but usbnet's timeout handler unlinks the queued URBs, which
+// can wake the queue for a moment before it fills again — so a hang that never
+// lets up does not raise the count on every 10 s sample. Three samples of
+// silence separate "over" from "between two firings". A queue that recovered
+// in between ends the stall sooner, through tx_packets.
+export const TX_STALL_QUIET_S = 30;
+
+// tx_stall_watch(o): a modem's transmit stalls, from tx_queue_stats.
+//
+//   o.read(dev)  -> { timeouts, tx_packets } or null   (default tx_queue_stats)
+//   o.limit_s()  -> how long a stall may last before it trips (0 = never)
+//   o.log(level, msg)
+//
+// Returns { sample(dev, now_s, proto_errors, armed) -> 'trip' | null,
+// view(now_s) }. sample() is called on a steady tick (the daemon's 10 s one)
+// with the modem's data netdev, its protocol error counter, and whether a data
+// session is up on it; it returns 'trip' ONCE per stall, when one has lasted
+// limit_s while armed. view() is what status() reports:
+// { netdev, timeouts, stalled_s } — timeouts counted since this watch began,
+// stalled_s null when the queue is moving.
+//
+// A STALL IS A QUEUE THAT TIMED OUT AND HAS NOT MOVED SINCE. It ends when
+// tx_packets rises (the modem took data again) or the timeouts stop for
+// TX_STALL_QUIET_S. Without the first condition, separate incidents that each
+// recovered — a timeout every 20 s on a link that carries traffic in between —
+// would add up to one long stall and reset a working modem.
+//
+// NOT ARMED, NOT TRIPPED. With no session up there is no data path to rescue,
+// and the recovery behind a trip may power-cycle the modem; the stall is still
+// counted and reported, just never acted on.
+//
+// The counter outlives the modem object (it belongs to the netdev), so the
+// first reading is a BASELINE, never an event: a stall from before this watch
+// began is not this modem's to act on. A counter that goes backwards is a new
+// netdev under the same name and is rebased the same way.
+//
+// The protocol error counter is sampled at the start of a stall so the log can
+// say whether the control channel failed with it. Both together is a modem
+// that stopped answering altogether; a TX stall with the control channel still
+// answering points at the data path or the radio instead.
+export function tx_stall_watch(o)
+{
+	let read = o.read ?? tx_queue_stats;
+	let dev = null, last = null, last_pkts = null, count = 0;
+	let since = null, last_rise = null, pe_start = 0, tripped = false;
+
+	let control = (pe) => (pe > pe_start)
+		? sprintf('the control channel failed too (%d protocol errors)', pe - pe_start)
+		: 'the control channel kept answering';
+
+	let end = (why, pe) => {
+		o.log('info', sprintf('tx stall on %s: %s after %ds; %s',
+			dev, why, last_rise - since, control(pe)));
+		since = null;
+		tripped = false;
+	};
+
+	return {
+		sample: function(netdev, now, proto_errors, armed) {
+			let st = netdev ? read(netdev) : null;
+			let total = st?.timeouts;
+			let pkts = st?.tx_packets;
+			let pe = +(proto_errors ?? 0);
+
+			if (total == null || netdev != dev || last == null || total < last) {
+				if (since != null && netdev != dev)
+					o.log('info', sprintf('tx stall on %s: watch moved to %s', dev, netdev ?? 'no netdev'));
+
+				dev = netdev;
+				last = total;
+				last_pkts = pkts;
+				since = null;
+				tripped = false;
+				return null;
+			}
+
+			let delta = total - last;
+			let moved = (pkts != null && last_pkts != null && pkts > last_pkts);
+
+			last = total;
+			last_pkts = pkts;
+
+			if (since != null && moved)
+				end('moving again', pe);
+			else if (since != null && delta == 0 && now - last_rise >= TX_STALL_QUIET_S)
+				end('no more timeouts', pe);
+
+			if (delta > 0) {
+				count += delta;
+				last_rise = now;
+
+				if (since == null) {
+					since = now;
+					pe_start = pe;
+					tripped = false;
+					o.log('warn', sprintf('tx stall on %s: the kernel watchdog timed out its transmit queue (%d so far) — the modem is not taking packets',
+						dev, count));
+				}
+			}
+
+			if (since == null || tripped || !armed)
+				return null;
+
+			let limit = +(o.limit_s() ?? 0);
+
+			if (limit > 0 && now - since >= limit) {
+				tripped = true;
+				o.log('err', sprintf('tx stall on %s: %ds with the transmit queue stuck, %s — resetting the modem',
+					dev, now - since, control(pe)));
+				return 'trip';
+			}
+
+			return null;
+		},
+
+		view: function(now) {
+			return dev ? {
+				netdev: dev,
+				timeouts: count,
+				stalled_s: (since != null) ? now - since : null,
+			} : null;
 		},
 	};
 };

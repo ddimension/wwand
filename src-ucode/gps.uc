@@ -97,7 +97,7 @@ function create(o) {
 	// deps.set_clock, and a router with no RTC steps from 1970 to now the
 	// moment the first RMC lands. On the wall clock that would report an age
 	// of fifty-six years and expire every satellite in view at the same
-	// instant. context_common.uc:148 does the same for the same reason.
+	// instant. context_common.uc:149 does the same for the same reason.
 	let mono = o.now ?? (() => clock(true)[0]);
 
 	let feed_line = (line, now) => {

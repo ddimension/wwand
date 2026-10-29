@@ -1,6 +1,6 @@
 # wwand — current state
 
-_State of 2026-10-24: stable **v1.7.2**, main **v1.8.0-dev** (HEAD f90e7fc).
+_State of 2026-10-29: stable **v1.7.2**, main **v1.8.0-dev**.
 63 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
 which moves too often to be worth repeating here)._
 
@@ -9,33 +9,35 @@ This file describes **what is true now**. The dated log of how it got here is
 `gotchas.md`. Keeping them apart is deliberate: a running log with the current
 state buried at the top invites reading a months-old entry as present tense.
 
-## Open threads (2026-10-24) — where the next session picks up
+## Open threads (2026-10-29) — where the next session picks up
 
-- **Feed builds running** (ddimension/openwrt-repo): main `1.8.0_pre14`
-  (= 7c6f90d) and stable `1.7.2` (d5fae48) were queued at 06:35 UTC. **Do not
-  push to the feed while a build of the same branch runs** — a push cancels it
-  (pre10 and pre11 were lost that way). When both have published:
-  - check that the published `wwand` package carries `ucode>=…` (the #67 floor);
-  - bump feed main to current main (#65, #60 + follow-ups, credits — all after
-    pre14) in ONE commit;
-  - feed stable release tag (`scripts/release-stable.sh`) — only when asked.
+- **Feed main** is at wwand `1.8.0_pre30` / luci-app-wwand `1.8.0_pre2`
+  (pushed 2026-10-29, run 40798329984). **Do not push to the feed while a build
+  of the same branch runs** — a push cancels it. Feed stable release tag
+  (`scripts/release-stable.sh`) — only when asked.
+- **TX-stall watch (built 2026-10-29, after pre30):** the daemon tick reads the
+  kernel's `tx_timeout` count of each modem's data netdev, reports `tx_stall`
+  in status (LuCI "TX stalls"), and a stall lasting `tx_stall_timeout`
+  (default 120 s, 0 = watch only) takes the zero-rx recovery, only while a session of that modem is up. Not yet seen on
+  hardware: the first real NETDEV WATCHDOG on a test box is the check that the
+  counter moves the way `context_common.tx_stall_watch` assumes (re-firing
+  every ~5 s while the queue stays stopped).
 - **Fork branches for the device images** (ddimension/openwrt): `chateau-ci`,
   `lte3301`, `nbg7815-update` rebased onto openwrt main and **pushed 2026-10-24**
   (backups `*-pre-rebase-2026-10-24`); openwrt/openwrt#24881 is now its two
   remaining commits. Cause of the image failures: libffi moved into the OpenWrt
   core on 2026-10-19 (openwrt/openwrt@9b835ec626) and the old forks lacked it.
   The images rebuild with the next stable release tag — check that run.
-- **Issues waiting on reporters:** #39 (MassiPi — slot-switch note fix),
+- **Issues waiting on reporters:** luci-app-wwand#16 (mrhaav — `BB3` band fixed
+  in pre30; the eNodeB/sector split is a feature request, not built), #73 (i18n
+  packages; `pl` goes into `LUCI_WWAND_LANGS` once its po lands), #39 (MassiPi — slot-switch note fix),
   #66 (4IceG — `option mux_id '1'` + reboot suggested; the config error no
   longer walks the recovery ladder, fixed 2026-10-25; asked for `qmap_mode` to
-  explain why the first boot ran unmuxed), #72 (marcinnet-25, EG12 cell-location
-  timeouts after a WAN restart — the slow tick backs off after 3 timeouts in a
-  row since 2026-10-28; the connection drops with a NETDEV WATCHDOG are the
-  open part, data asked), #68/#71 (fixed,
+  explain why the first boot ran unmuxed), #68/#71 (fixed,
   confirmation), #69 (`option gnss_nmea 'fix'` built 2026-10-25, measured on the
   NR7101's RG502Q: 28 → 3 sentences/s; EG12 untested — reporter to confirm), #70 (mrhaav — T99W175 `AT^TEMP?` → TSENS built 2026-10-28, keyed on the
-  `QUALCOMM` manufacturer name; reporter to confirm), #48. #67 closed
-  (confirmed). Two-week rule: a delivered issue with no answer for 14 days is
+  `QUALCOMM` manufacturer name; reporter to confirm), #48. #67 and #72 closed
+  (#72: the freezes were the EG12 hanging on a weak signal). Two-week rule: a delivered issue with no answer for 14 days is
   closed.
 - **PRs:** #50 (MayorBug, draft, conflicts) waiting on a rework. #60 and #65
   (xhudan) merged with follow-ups.

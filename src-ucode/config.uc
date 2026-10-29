@@ -279,6 +279,7 @@ export function modem_defaults(over)
 		nitz_time: true,       // step the system clock from NITZ (see deps set_clock)
 		fcc_auth: null,        // RF unlock for laptop-SKU modems (see reference.md)
 		failreboot: 100, recovery_steps: null, proto_error_limit: 25, zero_rx_timeout: 21600,
+		tx_stall_timeout: 120, // s: a stuck transmit queue resets the modem (0 = watch only)
 		unarmed_reset_after: 300,   // s: first reset-line pulse of a never-answering modem
 		card_hold: 2100,       // s: no card-resetting recovery after a subscription change
 		bearer_poll_count: 3,  // empty dial-status polls before the bearer is gone (NCM)
@@ -360,7 +361,7 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'nitz_time', 'fcc_auth',
 	'gnss_nmea', 'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'unarmed_reset_after', 'card_hold',
-	'zero_rx_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
+	'zero_rx_timeout', 'tx_stall_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
 	// the AT-over-MBIM pipe: `at_over_mbim` forces it and picks the vendor CID
 	// flavour, `at_mbim '0'` disables the automatic fallback. Both are read by
@@ -570,6 +571,7 @@ function modem_from_section(s, warnings)
 		unarmed_reset_after: num_opt(s.unarmed_reset_after, 300, 'unarmed_reset_after', warnings),
 		card_hold: num_opt(s.card_hold, 2100, 'card_hold', warnings),
 		zero_rx_timeout: num_opt(s.zero_rx_timeout, 21600, 'zero_rx_timeout', warnings),
+		tx_stall_timeout: num_opt(s.tx_stall_timeout, 120, 'tx_stall_timeout', warnings),
 		bearer_poll_count: num_opt(s.bearer_poll_count, 3, 'bearer_poll_count', warnings),
 		lock_4g: (type(s.lock_4g) == 'array') ? s.lock_4g :
 		         (s.lock_4g != null ? [ s.lock_4g ] : []),

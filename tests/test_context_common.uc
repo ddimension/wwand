@@ -7,6 +7,7 @@
 
 import { eq, ok, done } from './lib/check.uc';
 import * as cc from 'wwand/context_common.uc';
+import { writefile } from 'fs';
 
 // --- zero_rx_limit_ms --------------------------------------------------------
 
@@ -376,6 +377,95 @@ eq(cc.effective_pdp({ config: {}, modem: { active_sim: { pdp_type: 'ipv4' } } })
 
 	eq([ cc.conn_cfg(pin_only, 'apn'), cc.conn_cfg(pin_only, 'username') ], [ 'm2m', 'gdsp' ],
 	   'login: a card without an APN of its own dials the interface\'s APN with its login');
+}
+
+// --- tx_queue_stats / tx_stall_watch -----------------------------------------
+{
+	let root = '/tmp/wwand-test-txq';
+	system(sprintf('rm -rf %s; mkdir -p %s/wq0/queues/tx-0 %s/wq0/queues/tx-1 %s/wq0/queues/rx-0 %s/wq0/statistics %s/nq0/queues/rx-0',
+		root, root, root, root, root, root));
+	writefile(root + '/wq0/queues/tx-0/tx_timeout', '3\n');
+	writefile(root + '/wq0/queues/tx-1/tx_timeout', '2\n');
+	writefile(root + '/wq0/statistics/tx_packets', '1234\n');
+
+	eq(cc.tx_queue_stats('wq0', root), { timeouts: 5, tx_packets: 1234 },
+	   'tx_queue_stats: timeouts summed over the tx queues, with tx_packets');
+	eq(cc.tx_queue_stats('nq0', root), null, 'tx_queue_stats: no tx queue is null, not 0');
+	eq(cc.tx_queue_stats('gone', root), null, 'tx_queue_stats: a missing netdev is null');
+	eq(cc.tx_queue_stats('../x', root), null, 'tx_queue_stats: a path in the name is refused');
+	system('rm -rf ' + root);
+}
+
+{
+	let n = 0, p = 100, logs = [], limit = 60;
+	let w = cc.tx_stall_watch({
+		read: (d) => (d == 'wq0') ? { timeouts: n, tx_packets: p } : null,
+		limit_s: () => limit,
+		log: (lvl, msg) => push(logs, lvl),
+	});
+
+	n = 7;
+	eq(w.sample('wq0', 0, 0, true), null, 'tx stall: the first reading is a baseline');
+	eq(w.view(0), { netdev: 'wq0', timeouts: 0, stalled_s: null }, 'tx stall: ...older timeouts are not counted');
+
+	n = 8;
+	eq(w.sample('wq0', 10, 0, true), null, 'tx stall: a timeout starts a stall');
+	eq(logs, [ 'warn' ], 'tx stall: ...logged once');
+	n = 9;
+	w.sample('wq0', 20, 3, true);
+	eq(w.sample('wq0', 30, 3, true), null, 'tx stall: one quiet sample does not end it');
+	eq(w.view(30), { netdev: 'wq0', timeouts: 2, stalled_s: 20 }, 'tx stall: status shows count and duration');
+	n = 10;
+	w.sample('wq0', 40, 3, true);
+	n = 11;
+	w.sample('wq0', 60, 5, true);
+	n = 12;
+	eq(w.sample('wq0', 70, 5, true), 'trip', 'tx stall: lasting limit_s trips');
+	n = 13;
+	eq(w.sample('wq0', 80, 5, true), null, 'tx stall: ...once per stall');
+	eq(logs, [ 'warn', 'err' ], 'tx stall: the trip is logged');
+
+	for (let t = 90; t <= 110; t += 10)
+		w.sample('wq0', t, 5, true);
+	eq(w.view(110).stalled_s, null, 'tx stall: 30 s without a timeout ends it');
+	eq(logs[2], 'info', 'tx stall: ...and says so');
+
+	// separate incidents that each recovered are not one long stall: the
+	// packets moving in between end each one (a timeout every 20 s)
+	logs = [];
+	let tripped = 0;
+	for (let t = 120; t <= 400; t += 10) {
+		if (t % 20 == 0) n++;
+		else p += 50;
+		if (w.sample('wq0', t, 5, true) == 'trip')
+			tripped++;
+	}
+	eq(tripped, 0, 'tx stall: recovered timeouts with traffic between them never trip');
+	ok(length(filter(logs, (l) => l == 'warn')) > 1, 'tx stall: ...each one is its own stall');
+
+	// no session up: counted and reported, never tripped
+	let w2 = cc.tx_stall_watch({ read: (d) => ({ timeouts: n, tx_packets: p }), limit_s: () => 30, log: () => null });
+	w2.sample('wq0', 0, 0, false);
+	tripped = 0;
+	for (let t = 10; t <= 100; t += 10) {
+		n++;
+		if (w2.sample('wq0', t, 0, false) == 'trip')
+			tripped++;
+	}
+	eq([ tripped, w2.view(100).stalled_s ], [ 0, 90 ], 'tx stall: not armed, a stall is reported and never tripped');
+	eq(w2.sample('wq0', 110, 0, true), 'trip', 'tx stall: ...and trips once a session is up');
+
+	limit = 0;
+	n += 10;
+	w.sample('wq0', 410, 5, true);
+	n += 10;
+	eq(w.sample('wq0', 600, 5, true), null, 'tx stall: limit 0 watches and never trips');
+
+	n = 2;
+	eq(w.sample('wq0', 610, 5, true), null, 'tx stall: a counter going backwards is a new netdev, rebased');
+	eq(w.view(610).stalled_s, null, 'tx stall: ...with no stall carried over');
+	eq(w.sample(null, 620, 5, true), null, 'tx stall: no netdev, nothing to read');
+	eq(w.view(620), null, 'tx stall: ...and nothing to report');
 }
 
 done('test_context_common');

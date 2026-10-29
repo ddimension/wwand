@@ -508,7 +508,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:1042-1045 warns "references
+	// produces no entry for it at all (config.uc:1044-1047 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -3874,6 +3874,52 @@ export function create(opts)
 				}, { timeout: 5000 });
 			};
 
+			// The kernel's transmit watchdog, per modem, on the netdev that owns
+			// the queue (context_common.tx_stall_watch). One watch per modem
+			// OBJECT: a new object is a new modem as far as the stall goes, and
+			// its first reading is a baseline. Observing costs one sysfs read
+			// per tick; acting is `tx_stall_timeout` (0 = observe only).
+			// monotonic seconds; `timing.mono` is the test seam, as the 10 s
+			// timer is for the tick itself
+			let tx_clock = () => {
+				let f = self.timing?.mono ?? context_common.mono;
+
+				return f();
+			};
+			self._tx_clock = tx_clock;
+
+			let tx_stall_tick = (name, entry) => {
+				let m = entry?.modem;
+
+				if (!m) {
+					entry._txs = entry._txs_for = null;
+					return;
+				}
+
+				if (entry._txs_for !== m) {
+					entry._txs_for = m;
+					entry._txs = context_common.tx_stall_watch({
+						read: self.timing?.tx_queue_stats,
+						limit_s: () => +(m.config?.tx_stall_timeout ?? 120),
+						log: (lvl, msg) => log(lvl, sprintf('modem %s: %s', name, msg)),
+					});
+				}
+
+				let dev = m.datapath?.parent ?? m.datapath?.netdev;
+				// armed only while a session of this modem is up: with none
+				// there is no data path to rescue (tx_stall_watch)
+				let armed = false;
+
+				for (let cname, ce in self.contexts)
+					if (ce.ctx?.modem === m && ce.ctx.state == 'CONNECTED') {
+						armed = true;
+						break;
+					}
+
+				if (entry._txs.sample(dev, tx_clock(), m.counters?.proto_errors, armed) == 'trip')
+					m.trip_zero_rx?.('tx stall');
+			};
+
 			let tick;
 			tick = () => {
 				let now = time();
@@ -3990,6 +4036,9 @@ export function create(opts)
 
 				for (let name, entry in self.modems)
 					uim_remote_switch_probe(name, entry);
+
+				for (let name, entry in self.modems)
+					tx_stall_tick(name, entry);
 
 				// a radio a plugin parked, which no plugin holds any more (it
 				// stopped, failed, forgot): handed back as the plugin would
@@ -4710,6 +4759,11 @@ export function create(opts)
 				at_tty: entry.modem?.at_tty,
 				// at2 released for external tools
 				at2_released: entry.modem?.at2_released,
+				// the kernel transmit watchdog on the data netdev, as the
+				// daemon tick last read it: { netdev, timeouts, stalled_s }
+				// (context_common.tx_stall_watch); null before the first read
+				tx_stall: (entry._txs_for === entry.modem && entry._txs)
+					? entry._txs.view(self._tx_clock?.() ?? context_common.mono()) : null,
 				// the modem's NMEA port, reported for gpsd to be pointed at.
 				// wwand never opens it and never links it — asking the daemon is
 				// the interface, so a re-enumerated modem answers with its new tty
