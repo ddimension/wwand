@@ -1675,7 +1675,7 @@ every method to it.
 
 | Method | Arguments | Description |
 |---|---|---|
-| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `tx_stall` — `{ netdev, timeouts, stalled_s }`: the kernel's transmit watchdog on the data netdev (`/sys/class/net/<dev>/queues/tx-*/tx_timeout`, read on the daemon's 10 s tick; a stall ends when `tx_packets` moves again), `timeouts` counted since wwand began watching this modem, `stalled_s` how long the queue has been stuck or null while it moves (see `option tx_stall_timeout`), `gps_port` — the modem's NMEA tty when its port table names one (read by wwand-gps when `option gnss` is set; see `modem_gps`), `diag_port` — the modem's DM/DIAG node, likewise resolved and never opened (see "The diag port"), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran, `remote_sim` — `{ supported, via \| reason }`: whether the modem can run on a remote SIM, from the services it lists itself (QMI UIM Remote, service 0x32, natively or over the QMI-over-MBIM passthrough); `supported: null` while not known yet — listed is not switched on, see `wwandctl rsim MODEM switch`; on a Quectel that does NOT list it, the daemon reads the firmware switch once (EFS `uim_remote_service_enable`, read by the modem at boot) and adds `switch: 'off' | 'unset' | 'on'` with a reason naming the remedy (switch on + modem reset), since there "not listed" usually means "switched off", `radio_held` — why a plugin holds the radio off (`<plugin>: <reason>`, null when nothing does; see "Radio hold" under Plugins), `radio_hold_error` — `cannot hold this modem (<why>)` when that hold cannot be honoured and the radio is in fact on, null otherwise) + contexts + `board` (detected profile, power/reset capability) |
+| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `tx_stall` — `{ netdev, timeouts, stalled_s }`: the kernel's transmit watchdog on the data netdev (`/sys/class/net/<dev>/queues/tx-*/tx_timeout`, read on the daemon's 10 s tick; a stall ends when `tx_packets` moves again), `timeouts` counted since wwand began watching this modem, `stalled_s` how long the queue has been stuck or null while it moves (see `option tx_stall_timeout`), `gps_port` — the modem's NMEA tty when its port table names one (read by wwand-gps when `option gnss` is set; see `modem_gps`), `diag_port` — the modem's DM/DIAG node, likewise resolved and never opened (see "The diag port"), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran, `remote_sim` — `{ supported, via \| reason }`: whether the modem can run on a remote SIM, from the services it lists itself (QMI UIM Remote, service 0x32, natively or over the QMI-over-MBIM passthrough); `supported: null` while not known yet — listed is not switched on, see `wwandctl rsim MODEM switch`; on a Quectel that does NOT list it, the daemon reads the firmware switch once (EFS `uim_remote_service_enable`, read by the modem at boot) and adds `switch: 'off' | 'unset' | 'on'` with a reason naming the remedy (switch on + modem reset), since there "not listed" usually means "switched off", `radio_held` — why a plugin holds the radio off (`<plugin>: <reason>`, null when nothing does; see "Radio hold" under Plugins), `radio_hold_error` — `cannot hold this modem (<why>)` when that hold cannot be honoured and the radio is in fact on, null otherwise) + contexts + `board` (detected profile, `profile_source` — the board file's path or `builtin`, power/reset capability) |
 | `reload` | — | re-read UCI and apply the **diff** — only changed/added/removed modems and contexts are touched (idempotent; see *Idempotent reload*) |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
@@ -1941,7 +1941,23 @@ native MBIM).
 Cellular routers wire the modem's **USB power** and **RESET** lines, and its
 **status LEDs**, to board GPIOs — historically driven by a vendor helper script.
 wwand absorbs that: it detects the board from `/etc/board.json` and applies a
-built-in profile.
+profile: a **board file** `<model id>.json` if one exists, else the built-in
+table.
+
+- **Board files** — `/usr/share/wwand/boards.d/<model id>.json` (shipped by a
+  device's package or its target's base-files, so device support needs no
+  wwand change) and `/etc/wwand/boards.d/<model id>.json` (the admin's, kept
+  across sysupgrade). `/etc` wins over `/usr/share`, and either replaces a
+  built-in profile of the same id whole. Keys: `power_gpio`,
+  `power_gpio_active_low`, `reset_gpio`, `reset_run`, `option_ids`, `leds`,
+  `note`; `leds` names a style and its LEDs, `{ "style": "signal_bars",
+  "names": [ … ] }` or `{ "style": "mobile", "red", "green", "orange", "tech" }`.
+  A file with an unknown key or a wrong value is **ignored whole** and logged
+  (`board <id>: ignoring <path>: <why>`), because a half-read profile could
+  reverse the power polarity; the built-in profile (or none) then applies.
+  `ubus call wwand status` shows which one won in `board.profile_source`. The
+  daemon reads the file at start, so restart wwand after editing it. Format
+  and an example: [extending.md](extending.md#8-adding-a-board-profile).
 
 - **Power / reset** — a profile may expose a modem power GPIO and/or a reset
   GPIO. The recovery ladder's hardware rung uses them (a modem `reset_gpio` in

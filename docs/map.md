@@ -68,7 +68,7 @@ row. That is the whole maintenance rule.
 | Why did nothing happen although the count is past the threshold? | The arming gate in `recovery.uc on_attempt`: nothing physical until one request has completed in the selected protocol. `status` reports it as `recovery.armed`. |
 | ...and the one exception to that gate? | `recovery.uc unarmed_reset_line` — a pulse of the modem's own named RESET line, once per outage, nothing else. |
 | What would a repower do on THIS box for THIS modem? | `hwops.uc repower_plan` — the same precedence the action takes, so asking equals doing minus the doing. |
-| Which GPIOs and LEDs does this board have? | `board.uc` profile table, keyed by `/etc/board.json` model id. |
+| Which GPIOs and LEDs does this board have? | `board.uc` `load_profile`: a board file `<model id>.json` in `BOARD_DIRS` (`/etc/wwand/boards.d` wins over `/usr/share/wwand/boards.d`), else the built-in profile table; `status` `board.profile_source` says which. |
 
 ## SIM, slots and eSIM
 

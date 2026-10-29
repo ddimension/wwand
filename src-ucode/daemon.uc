@@ -4914,6 +4914,8 @@ export function create(opts)
 		let board = deps.board ? {
 			id: deps.board.id,
 			profile: deps.board.profile != null,
+			// a board file's path, or 'builtin': which of the two to edit
+			profile_source: deps.board.profile_source,
 			has_power: deps.board.has_power,
 			reset_gpio: deps.board.profile?.reset_gpio,
 		} : null;

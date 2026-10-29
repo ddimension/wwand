@@ -28,8 +28,16 @@ state buried at the top invites reading a months-old entry as present tense.
   remaining commits. Cause of the image failures: libffi moved into the OpenWrt
   core on 2026-10-19 (openwrt/openwrt@9b835ec626) and the old forks lacked it.
   The images rebuild with the next stable release tag — check that run.
+- **Board files (#48, built 2026-10-29):** `board.uc` profiles are data now
+  (`leds: { style, … }` over `LED_STYLES`), and a `<model id>.json` in
+  `/usr/share/wwand/boards.d` or `/etc/wwand/boards.d` (that one wins) replaces
+  the built-in entry; an invalid file is ignored whole and logged, status
+  `board.profile_source` names the winner. hwtest `boardfile` (func.sh) passed on
+  the Cudy, NR7101, LTE3301, LTE3301-PLUS and -M209. micw's 2G/3G/4G sweep panel
+  would be a third LED style — build it with his board PR. MayorBug told on #50.
 - **Issues waiting on reporters:** luci-app-wwand#16 (mrhaav — `BB3` band fixed
-  in pre30; the eNodeB/sector split is a feature request, not built), #73 (i18n
+  in pre30; the eNodeB/sector row built 2026-10-29, luci-app-wwand 6d1abbc,
+  checked on the Chateau), #73 (i18n
   packages; `pl` goes into `LUCI_WWAND_LANGS` once its po lands), #39 (MassiPi — slot-switch note fix),
   #66 (4IceG — `option mux_id '1'` + reboot suggested; the config error no
   longer walks the recovery ladder, fixed 2026-10-25; asked for `qmap_mode` to
