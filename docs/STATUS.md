@@ -25,7 +25,7 @@ state buried at the top invites reading a months-old entry as present tense.
   `modem_common.at_reset` threw `access to undeclared variable guard` (in every
   release since 3a1fcc4, 2026-10-01, stable included). Fixed on main and
   HW-checked on the NR7101 (real engine, real CFUN=1,1, one callback);
-  **stable needs the cherry-pick**. The trip line no longer claims "the control
+  on stable as f25bcdc (cherry-pick, not yet in a release). The trip line no longer claims "the control
   channel kept answering" — `proto_errors` is a streak reset by any answer.
 - **Fork branches for the device images** (ddimension/openwrt): `chateau-ci`,
   `lte3301`, `nbg7815-update` rebased onto openwrt main and **pushed 2026-10-24**
