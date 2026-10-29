@@ -2049,4 +2049,23 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	eq(v.cells.serving.lte.band, 7, 'serving band: a vendor band is kept');
 }
 
+// at_reset through the open AT engine: the answer reaches cb exactly once, and
+// the guard timer it cancels is in scope (wwand#72: the EG12's tx-stall reset
+// threw "access to undeclared variable guard" on the modem's answer)
+{
+	let run = (err) => {
+		let sent = [], got = [];
+		let self = { at: { send: (cmd, cb, o) => { push(sent, cmd); cb(err, err ? null : { lines: [ 'OK' ] }); } } };
+
+		mc.at_reset(self, null, () => null, 'test', (v) => push(got, v));
+		return { sent, got };
+	};
+	let r = run(null);
+
+	eq(r.sent, [ 'AT+CFUN=1,1' ], 'at_reset: AT+CFUN=1,1 goes through the open engine');
+	eq(r.got, [ true ], 'at_reset: an answered reset reports sent, once');
+	eq(run({ error: 'timeout' }).got, [ true ], 'at_reset: a timeout after the write counts as sent');
+	eq(run({ error: 'ERROR' }).got, [ false ], 'at_reset: a refused reset reports not sent');
+}
+
 done('test_modem_common');

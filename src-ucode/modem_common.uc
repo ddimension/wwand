@@ -1504,7 +1504,10 @@ export function at_reset(self, at_opts, log, why, cb)
 	cb ??= (sent) => null;
 
 	if (self.at && !self.at_over_mbim) {
-		let answered = false;
+		// guard forward-declared: `once` names it, and ucode resolves a name
+		// declared after the closure as an undeclared global, which throws
+		// under 'use strict' on the first answer
+		let answered = false, guard;
 		let once = (v) => {
 			if (answered)
 				return;
@@ -1513,7 +1516,7 @@ export function at_reset(self, at_opts, log, why, cb)
 			guard?.cancel();
 			cb(v);
 		};
-		let guard = uloop.timer(10000, () => once(false));
+		guard = uloop.timer(10000, () => once(false));
 
 		log('warn', sprintf('modem reset over AT (AT+CFUN=1,1) — %s', why));
 		self.at.send('AT+CFUN=1,1', (err) => once(!err || err.error == 'timeout'), { timeout: 8000 });
