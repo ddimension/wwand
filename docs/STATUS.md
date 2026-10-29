@@ -18,10 +18,15 @@ state buried at the top invites reading a months-old entry as present tense.
 - **TX-stall watch (built 2026-10-29, after pre30):** the daemon tick reads the
   kernel's `tx_timeout` count of each modem's data netdev, reports `tx_stall`
   in status (LuCI "TX stalls"), and a stall lasting `tx_stall_timeout`
-  (default 120 s, 0 = watch only) takes the zero-rx recovery, only while a session of that modem is up. Not yet seen on
-  hardware: the first real NETDEV WATCHDOG on a test box is the check that the
-  counter moves the way `context_common.tx_stall_watch` assumes (re-firing
-  every ~5 s while the queue stays stopped).
+  (default 120 s, 0 = watch only) takes the zero-rx recovery, only while a session of that modem is up. First seen on
+  hardware by marcinnet-25 (#72, Quectel EG12, pre31, 2026-10-29): the stall
+  was detected and tripped at his 60 s, but the counter re-fired every ~30-35 s,
+  not every ~5 s, and the reset went over AT (QMI no longer answered), where
+  `modem_common.at_reset` threw `access to undeclared variable guard` (in every
+  release since 3a1fcc4, 2026-10-01, stable included). Fixed on main and
+  HW-checked on the NR7101 (real engine, real CFUN=1,1, one callback);
+  **stable needs the cherry-pick**. The trip line no longer claims "the control
+  channel kept answering" — `proto_errors` is a streak reset by any answer.
 - **Fork branches for the device images** (ddimension/openwrt): `chateau-ci`,
   `lte3301`, `nbg7815-update` rebased onto openwrt main and **pushed 2026-10-24**
   (backups `*-pre-rebase-2026-10-24`); openwrt/openwrt#24881 is now its two

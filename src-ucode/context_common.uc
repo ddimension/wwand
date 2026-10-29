@@ -330,8 +330,13 @@ export const TX_STALL_QUIET_S = 30;
 //
 // The protocol error counter is sampled at the start of a stall so the log can
 // say whether the control channel failed with it. Both together is a modem
-// that stopped answering altogether; a TX stall with the control channel still
-// answering points at the data path or the radio instead.
+// that stopped answering altogether. A streak that did NOT grow is weaker
+// evidence than it looks: the counter is consecutive failures, reset by any
+// answer (recovery.uc on_proto_success), and telemetry backs off a query that
+// keeps timing out, so a hung modem may simply not have been asked (evidence:
+// ddimension/wwand#72, the streak flat for a minute, then QMI failed the
+// reset). So the log says what the counter showed, never that the channel
+// answered.
 export function tx_stall_watch(o)
 {
 	let read = o.read ?? tx_queue_stats;
@@ -340,7 +345,7 @@ export function tx_stall_watch(o)
 
 	let control = (pe) => (pe > pe_start)
 		? sprintf('the control channel failed too (%d protocol errors)', pe - pe_start)
-		: 'the control channel kept answering';
+		: 'the control-channel error streak did not grow';
 
 	let end = (why, pe) => {
 		o.log('info', sprintf('tx stall on %s: %s after %ds; %s',
