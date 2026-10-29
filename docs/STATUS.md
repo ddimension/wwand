@@ -11,8 +11,8 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
-- **Feed main** is at wwand `1.8.0_pre30` / luci-app-wwand `1.8.0_pre2`
-  (pushed 2026-10-29, run 40798329984). **Do not push to the feed while a build
+- **Feed main** is at wwand `1.8.0_pre32` (4ea1d11) / luci-app-wwand
+  `1.8.0_pre4` (6d1abbc), pushed 2026-10-29, run 40889726859. **Do not push to the feed while a build
   of the same branch runs** — a push cancels it. Feed stable release tag
   (`scripts/release-stable.sh`) — only when asked.
 - **TX-stall watch (built 2026-10-29, after pre30):** the daemon tick reads the
