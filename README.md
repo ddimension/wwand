@@ -197,6 +197,9 @@ SLM770A) and GL.iNet X3000 (RM520N), plus further Quectel modems (RG502Q, EG06).
 PCIe/MHI runs on a Dell DW5932e (Foxconn T99W373, Snapdragon X62) in an x86_64
 HP EliteBook 850 G7: `mhi-pci-generic` + `mhi_wwan_mbim` from `wwand-mhi`, MBIM
 with the QMI passthrough, 5G NSA (ENDC), and the remote SIM of another router.
+Native MBIM without a QMI passthrough runs on a Dell DW5931e (Fibocom FM350-GL,
+MediaTek T7xx, kernel `mtk_t7xx`) in the same notebook: the GTFCCLOCK FCC unlock
+at every bring-up, 5G SA, and its eUICC over MBIM.
 QMI over QRTR was contributed with a hardware test on a Quectel RG520N-EB
 (IPQ5018, PCIe/MHI); the hub as it is now is host-tested only so far. Remote SIM (wwand-rsim) ran on the RG650E (QMI)
 and the RM520N (MBIM) with cards from a Smartmouse reader, phones over

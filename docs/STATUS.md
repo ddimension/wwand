@@ -117,6 +117,7 @@ The test devices are those in the workspace's `test-devices.txt`, nothing else.
 | Cudy LT300 v3 (3.113) | SLM770A-R, NCM | connected; reattach |
 | GL.iNet GL-X3000 (3.93) | RM520N-GL, QMI + E392 | blocked by other tests; UIM Remote already on |
 | HP EliteBook 850 G7 (5.204, x86_64) | Dell DW5932e / Foxconn T99W373, **PCIe/MHI** (`mhi-pci-generic`, `wwand-mhi`), MBIM + QMI passthrough | connected 5G NSA (ENDC); RAT priority read and in LuCI (2026-10-30, main f3f3a6a); eUICC in slot 2 listed; UIM Remote on via `AT^EFS`; borrows the NR7101's card over SSH (`donor_cond none`, the RG502Q refuses the condition TLV); the slot needs `kmod-hp-elitebook-850-g7-wwan-unlock` |
+| HP EliteBook 850 G7 (5.204, x86_64) | Dell DW5931e / Fibocom FM350-GL (MediaTek T7xx, PCI `14c3:4d75`, `kmod-mtk-t7xx`), firmware 81600.0000.00.29.23.06_GC, **native MBIM** (MBIMEx 3.0, no QMI passthrough: `NoDeviceSupport`) | 2026-10-31, main f2c804f: FCC lock released by GTFCCLOCK (06f51e0); connected, ping 3/3, 5G SA on o2-de; IP config needs the full 60-byte query (7e4e5d8); CA over `AT+GTCAINFO?` (4e1d62d); eUICC (SGP.22 2.2.2) and APDU over MBIM; no RAT priority or NAS settings, which need the passthrough (`unsupported_on_backend`) |
 
 Snapshot devices run ucode 2026.07.09 (libucode ABI 20230711), so the feed's
 current snapshot packages do not install there (the #67 floor); hwtest deploys
