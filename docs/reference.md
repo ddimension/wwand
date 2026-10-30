@@ -544,6 +544,11 @@ config wwand_modem 'm0'
 	                                 #    foxconn2:<string>:<number> (0x5571 v2, SDX62).
 	                                 #    MBIM modems: 'quectel' (vendor Radio State = on,
 	                                 #    EM120R-GL/EM160R-GL in MBIM mode) — explicit only.
+	                                 #    Fibocom FM350 (MediaTek T7xx) is unlocked
+	                                 #    automatically when it comes up radio-locked
+	                                 #    (GTFCCLOCK over AT); 'fibocom' forces it, and
+	                                 #    'fibocom:<model_id>' pins the OEM id. See
+	                                 #    "FCC-locked laptop modem".
 	option lock_4g '1300:246'        # earfcn:pci — LTE cell lock (list: up to 10 cells, AT+QNWLOCK="common/4g",<n>,…)
 	option lock_5g '242:431070:15:1' # pci:arfcn:scs:band — NR SA cell lock
 	option lock_persist '0'          # store the cell lock in modem NV
@@ -1135,6 +1140,24 @@ If a Lenovo/Dell/HP-SKU modem stays in low power (no RF), set
 `option fcc_auth` — or leave the default `auto`, which tries the known QMI
 unlock messages by itself; MBIM-mode Quectel needs the explicit `quectel`
 value. See the option in [Configuration](#configuration).
+
+**Fibocom FM350-GL (MediaTek T7xx, PCI `14c3:4d75`; Dell DW5931e and alike).**
+This modem has no QMI (so the QMI unlock above cannot run); it is FCC-locked a
+different way. `AT+GTFCCEFFSTATUS?` reads `2,0` — mode 2, *unlock every time
+after power on* — so MBIM reports `HwRadioState` **off**, `AT+CFUN` is 1 yet the
+modem never searches, and it re-locks on **every power cycle**. wwand clears it
+automatically: when an MBIM modem that identifies as Fibocom comes up with the
+hardware radio off, the daemon runs the vendor **GTFCCLOCK** challenge/response
+on the AT port (`AT+GTFCCLOCKGEN` → `sha256(challenge ‖ sha256(model_id)[:4])[:4]`
+→ `AT+GTFCCLOCKVER=`), re-reads the radio, and registers — on each bring-up,
+because the lock re-arms on power-up. The `model_id` the card's firmware expects
+is tried from SMBIOS type 133 (if the host has it) then the known OEM ids (Dell
+`DW5931EFCCLOCK`, Lenovo `KHOIHGIUCCHHII`); the card keys the id to itself, so a
+Dell card unlocks in any laptop. `option fcc_auth 'fibocom'` forces the attempt
+on a modem that does not advertise as Fibocom, and `'fibocom:<model_id>'` pins a
+specific OEM id. Needs `wwand-mbim` (which pulls `ucode-mod-digest`).
+(HW-verified on a Dell DW5931e in an HP EliteBook 850 G7 — which ships no SMBIOS
+type 133, so the Dell id released it — 2026-10-30, now registering 5G-SA.)
 
 ### Migrating from stock qmi/mbim/ncm/modemmanager
 

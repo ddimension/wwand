@@ -95,7 +95,7 @@ set(WWAND_UCODE_MODULES
   codec/schema/wds.uc codec/schema/wms.uc
   carrier_config.uc config_check.uc config.uc context_common.uc context_mbim.uc
   context_monitor_qmi.uc context_ncm.uc context.uc ctx_settings.uc daemon.uc
-  discovery.uc hwops.uc log.uc mbim_backend.uc mbim_client.uc
+  discovery.uc fcc_fibocom.uc hwops.uc log.uc mbim_backend.uc mbim_client.uc
   modem_datapath_qmi.uc
   modem_common.uc modem_init_qmi.uc modem_mbim.uc modem_ncm.uc modem_quirks.uc
   modem.uc modeswitch.uc ncm_vendors.uc netlink.uc netsel_ops.uc nmea.uc

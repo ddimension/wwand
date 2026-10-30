@@ -38,6 +38,7 @@ import * as client_mod from 'wwand.client';
 import * as ctlmod from 'wwand.codec.schema.ctl';
 import * as nasmod from 'wwand.codec.schema.nas';
 import * as atparse from 'wwand.atcmd_parse';
+import * as fcc_fibocom from 'wwand.fcc_fibocom';
 import * as dsdmod from 'wwand.codec.schema.dsd';
 import * as uimmod from 'wwand.codec.schema.uim';
 import * as wmsmod from 'wwand.codec.schema.wms';
@@ -172,7 +173,7 @@ export function create(opts)
 
 	// --- step chain --------------------------------------------------------
 
-	let hold_at_open, fcc_unlock, step_open, step_fcc, step_caps, step_at, step_at_ident, step_datapath, step_simslot, step_sim, step_attach_profile, step_register, do_register, step_attach;
+	let hold_at_open, fcc_unlock, step_open, step_fcc, step_caps, step_at, step_at_ident, step_datapath, step_simslot, step_sim, step_attach_profile, step_register, do_register, step_attach, radio_off;
 
 	// MBIM reports the operator as one concatenated MCC+MNC string
 	// (MbimRegisterState ProviderId, "26006"), while QMI reports the pair
@@ -1523,6 +1524,56 @@ export function create(opts)
 	step_attach_profile = () => config_check.sync_rat_order(self, log,
 		() => self._apply_attach(step_register));
 
+	// HwRadioState reads OFF. On a Fibocom FM350 (MediaTek T7xx) that is an FCC
+	// lock, not the physical W_DISABLE kill: GTFCCEFFSTATUS mode 2 means the
+	// modem re-locks on every power-up, CFUN is 1 yet it never searches, and no
+	// MBIM/ucode write can clear it — only the vendor GTFCCLOCK challenge/
+	// response over AT does (fcc_fibocom). Gated so it is never sent to a non-
+	// Fibocom modem unless `option fcc_auth` names 'fibocom'. Once per init
+	// (_fcc_tried): a success flips the switch on, so step_register is re-entered
+	// to re-read (and handle the software radio) — a persisting OFF is then the
+	// real hardware kill, reported as before.
+	radio_off = (next) => {
+		let fa = self.config.fcc_auth;
+		let explicit = (type(fa) == 'string' && index(fa, 'fibocom') == 0);
+		let is_fibocom = (match(self.info?.manufacturer ?? '', /fibocom/i) ||
+		                  match(self.info?.model ?? '', /FM3[0-9]0|FM1[0-9]0/i));
+		let auto = (fa == null || fa == '' || fa == 'auto');
+
+		if (self._fcc_tried || !(explicit || (auto && is_fibocom))) {
+			log('warn', 'hardware radio switch is off — registration will not start');
+			self.control_note = 'radio disabled by the hardware switch';
+			return next();
+		}
+
+		self._fcc_tried = true;
+
+		// sha256 comes from ucode-mod-digest (a wwand-mbim DEPENDS), loaded
+		// lazily: require() is a catchable runtime call, so a build that somehow
+		// lacks the module degrades to the hardware-kill message instead of
+		// failing to load the whole backend (a static import cannot be caught).
+		let sha;
+		try { sha = require('digest').sha256; } catch (e) { sha = null; }
+
+		if (!sha) {
+			log('warn', 'hardware radio switch is off — FCC unlock needs ucode-mod-digest (not installed)');
+			self.control_note = 'radio disabled by the hardware switch';
+			return next();
+		}
+
+		log('notice', 'radio off — trying Fibocom FCC unlock (GTFCCLOCK)');
+
+		fcc_fibocom.unlock(modem_common.telemetry_at(self), log, fa, sha, (ok) => {
+			if (!ok) {
+				log('warn', 'hardware radio switch is off — Fibocom FCC unlock did not release it');
+				self.control_note = 'radio disabled (FCC lock not released)';
+				return next();
+			}
+
+			settle_timer = uloop.timer(self.timing.settle, step_register);
+		});
+	};
+
 	step_register = () => {
 		// HELD: the radio stays off (hold_at_open has the reason), and this is
 		// the second place to ask — a hold that began after OPEN, or a
@@ -1627,34 +1678,39 @@ export function create(opts)
 			});
 		}
 
-		// The SOFTWARE radio can be off, and stay off across reboots: some modems
-		// ship that way. Nothing else in this backend ever turns it on — the two
-		// existing RADIO_STATE writers both cycle off->on inside a flow that only
-		// runs on an attach-profile change or a low-power wake — so registration
-		// simply never started. Field-reported on an EG18 in MBIM mode
-		// (ddimension/wwand#3): `umbim radio` showed hwradiostate on,
-		// swradiostate off, and stopping wwand to run `umbim radio on` by hand
-		// was the workaround.
+		// Read-before-write, like every setting the daemon applies: a radio
+		// already on sees no command. Two switches are reported.
 		//
-		// Read before write, like every other setting the daemon applies: a modem
-		// whose radio is already on sees no command at all. The hardware switch
-		// is reported too but deliberately not acted on — no software write can
-		// clear a physical kill switch, and saying so beats a silent retry.
+		// The SOFTWARE radio can ship off and stay off across reboots; nothing
+		// else in this backend turns it on — the two other RADIO_STATE writers
+		// only cycle off->on inside an attach-profile change or a low-power wake
+		// — so registration simply never started (ddimension/wwand#3, EG18:
+		// `umbim radio` showed hwradiostate on, swradiostate off; `umbim radio
+		// on` by hand was the workaround).
+		//
+		// The HARDWARE switch is decided from the AUTHORITATIVE reading — the set
+		// response when we just switched the software radio, else the initial
+		// query — never a fresh query: a modem whose software radio we turned on
+		// keeps reporting it OFF on the next query (ddimension/wwand#38), and the
+		// FM350 reports the software radio off TRANSIENTLY at init (HW-observed,
+		// 2026-10-30), so a re-query would read the FCC lock back as a stale off
+		// and mask it. hw OFF is a physical kill on most modems but the FCC lock
+		// on an FM350, which radio_off clears over AT.
+		let decide = (rs) => {
+			if (rs?.hw_radio_state == bc.RADIO_STATE_OFF)
+				return radio_off(do_register);
+
+			do_register();
+		};
+
 		self.mbim.command(bc, 'RADIO_STATE', 'query', {}, (err, data) => {
-			// keep what it answered, not only what it makes us do here. The
-			// indication only fires on a CHANGE, so without this `status` shows
-			// nothing about the radio until somebody flips a switch — and
-			// "no answer yet" and "both switches on" would look the same.
+			// keep what it answered: the indication only fires on a CHANGE, so
+			// without this `status` shows nothing until a switch moves, and "no
+			// answer yet" and "both on" would look the same.
 			note_radio(data);
 
-			if (err || data?.sw_radio_state != bc.RADIO_STATE_OFF) {
-				if (!err && data?.hw_radio_state == bc.RADIO_STATE_OFF) {
-					log('warn', 'hardware radio switch is off — registration will not start');
-					self.control_note = 'radio disabled by the hardware switch';
-				}
-
-				return do_register();
-			}
+			if (err || data?.sw_radio_state != bc.RADIO_STATE_OFF)
+				return decide(err ? null : data);
 
 			log('notice', 'software radio is off, switching it on');
 
@@ -1665,7 +1721,8 @@ export function create(opts)
 
 				// the answer to OUR OWN switch is the authoritative reading
 				note_radio(sdata);
-				settle_timer = uloop.timer(self.timing.settle, do_register);
+				settle_timer = uloop.timer(self.timing.settle,
+					() => decide(serr ? null : sdata));
 			});
 		});
 	};
