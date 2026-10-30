@@ -1489,7 +1489,7 @@ export function create(opts)
 	// whether anything started it.
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
-	// own emit on a change (modem_mbim.uc:1070-1079) while the shared reapply
+	// own emit on a change (modem_mbim.uc:1071-1080) while the shared reapply
 	// tail emits on every re-read (modem_common.uc:796-802); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {
