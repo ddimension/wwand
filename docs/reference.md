@@ -1915,6 +1915,38 @@ with `esim_managed`: the plugin keeps its own record of the card, and a
 change made past it puts the two out of step. `"force": true` overrides.
 LuCI does not offer those controls on such a card.
 
+## Remote SIM (rsim)
+
+Remote SIM enables a connection using a SIM card provisioned on an external
+**Smart Card Platform** (SCP) rather than an embedded physical SIM. The modem
+communicates with the SCP over a secondary cellular connection; wwand exposes
+this via `status() → remote_sim: { supported, via | reason }`.
+
+**Quectel modems** (RG65xx, RM520N, RG502Q, EG06) natively list **QMI service
+0x32** (UIM Remote) when enabled; support is firmware-dependent. Check via
+`wwandctl status <modem>` — if `remote_sim: { supported: true, via: 'qmi' }`
+or similar appears, rsim is available.
+
+**Foxconn modems** (Dell DW5932e, Snapdragon X62, T99W373 firmware) keep the
+switch off by default behind a **firmware vendor lock** — the modem has the
+hardware capability but the maker does not register the service. The switch is
+the same EFS item, reached through the Foxconn vendor command `AT^EFS` instead
+of Quectel's `AT+QNVFR`/`AT+QNVFW`. `wwandctl rsim` knows both dialects, so the
+same command enables it on either maker (needs the `wwand-rsim` package):
+
+```
+wwandctl rsim <modem> enable --reset
+```
+
+Foxconn's `AT^EFS` read does not reflect the write until the modem restarts, so
+`enable` reports the write as accepted and `--reset` applies it; service 0x32
+then appears in the QMI listing. The underlying command is
+`AT^EFS="/nv/item_files/modem/uim/remote/uim_remote_service_enable",1,"01"`.
+(Source: verified on Dell DW5932e FDE.F0.3.0.1.1.DF.006, 2026-10-30.)
+
+For all other modems, check with the vendor if rsim is available in your
+firmware revision or if an AT/Diag command can unlock it.
+
 ## SMS
 
 Receive-only (list / read / delete stored messages — no send). `modem_sms_list`
