@@ -37,7 +37,7 @@ What it does not do is **get the service back**.
 
 Every QMI request that fails is one protocol error for the whole modem
 (`modem.uc` client hook `on_error`, `src-ucode/recovery.uc:612` `on_proto_error`). Past
-`proto_error_limit` (default 25, `src-ucode/config.uc:281`) the hardware rung fires — a
+`proto_error_limit` (default 25, `src-ucode/config.uc:282`) the hardware rung fires — a
 board repower, or with ddimension/wwand#65 a modem reset where no repower
 exists (`src-ucode/recovery.uc:654-673`).
 

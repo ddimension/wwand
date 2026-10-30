@@ -9,6 +9,7 @@ import * as tlv from 'wwand/codec/tlv.uc';
 import * as struct from 'struct';
 import ctl from 'wwand/codec/schema/ctl.uc';
 import nas from 'wwand/codec/schema/nas.uc';
+import * as nasmod from 'wwand/codec/schema/nas.uc';
 import uim from 'wwand/codec/schema/uim.uc';
 
 // --- CTL request (1-byte txn), hand-computed reference frame ----------------
@@ -133,6 +134,31 @@ let getrt = tlv.unpack(nas.messages.GET_PREFERRED_NETWORKS.resp,
 		preferred_networks: [ { mcc: 310, mnc: 260, rat: 0x4000 } ],
 	}));
 eq(getrt.preferred_networks[0], { mcc: 310, mnc: 260, rat: 0x4000 }, 'nas get-pref: 3-digit mnc + E-UTRAN round-trip');
+
+// --- NAS system selection: the acquisition order (#75) ----------------------
+// libqmi 1.38: Set input 0x1E, Get output 0x1C, a guint8-counted array of
+// gint8 QmiNasRadioInterface. Hand-built Get bytes: NR5G (12), LTE (8).
+eq(tlv.unpack(nas.messages.GET_SYSTEM_SELECTION_PREFERENCE.resp, '\x1c\x03\x00\x02\x0c\x08').acquisition_order,
+	[ 12, 8 ], 'nas ssp get: acquisition order from TLV 0x1C');
+eq(tlv.pack(nas.messages.SET_SYSTEM_SELECTION_PREFERENCE.req, { acquisition_order: [ 12, 8, 5 ] }),
+	'\x1e\x04\x00\x03\x0c\x08\x05', 'nas ssp set: acquisition order as TLV 0x1E');
+eq(nasmod.rat_order_ids('nr5g, LTE umts'), [ 12, 8, 5 ], 'rat order: names -> radio interfaces, case and separators free');
+eq(nasmod.rat_order_ids([ 'lte', 'gsm' ]), [ 8, 4 ], 'rat order: a list is taken as well (the ubus shape)');
+eq(tlv.unpack(nas.messages.GET_SYSTEM_SELECTION_PREFERENCE.resp, '\x1c\x02\x00\x01\xff').acquisition_order,
+	[ -1 ], 'nas ssp get: the elements are signed (gint8), unknown is -1');
+eq(nasmod.rat_order_ids([ 99, 'nr5g', -1 ]), [ 99, 12, -1 ],
+	'rat order: an unnamed value read back goes out again as it came');
+eq(nasmod.rat_order_ids([ 0, 0, 'gsm', 'lte' ]), [ 0, 0, 4, 8 ],
+	'rat order: the BG96\'s own order, NONE slots and all, goes back as read (0 is not an empty name)');
+eq(nasmod.rat_order_ids([ -1, 'lte', -1 ]), [ -1, 8, -1 ], 'rat order: unknown slots may repeat too');
+eq([ nasmod.rat_order_writable([ 12, 8 ]), nasmod.rat_order_writable([ 0, 0, 4, 8 ]), nasmod.rat_order_writable([ 8, -1 ]) ],
+	[ true, false, false ], 'rat order: an order with slots QMI cannot name is not wwand\'s to rewrite');
+eq([ nasmod.rat_order_ids([ 'lte', 8 ]), nasmod.rat_order_ids([ 300 ]), nasmod.rat_order_ids('99') ],
+	[ null, null, null ], 'rat order: a value twice, one past gint8, or a number in the config string is refused');
+eq([ nasmod.rat_order_ids('lte,5g'), nasmod.rat_order_ids('lte,lte'), nasmod.rat_order_ids('') ],
+	[ null, null, null ], 'rat order: unknown, repeated or empty -> null, nothing guessed');
+eq(nasmod.rat_order_names([ 12, 8, 1, 2, 99 ]), [ 'nr5g', 'lte', 'cdma1x', 'evdo', 99 ],
+	'rat order: radio interfaces -> names; an unnamed value stays visible');
 
 // --- UIM Write Transparent (0x0022) — EF_FPLMN update ------------------------
 // libqmi 1.38 has no binding for this message; the schema is spec-derived and

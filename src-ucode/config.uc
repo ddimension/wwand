@@ -18,6 +18,7 @@
 import * as context_common from 'wwand.context_common';
 import * as netlink from 'wwand.netlink';
 import * as catmod from 'wwand.codec.schema.cat';
+import * as nasmod from 'wwand.codec.schema.nas';
 import * as recovery from 'wwand.recovery';
 
 const OLD_DEPRECATED = [ 'dhcp', 'autocreateif', 'customroutes', 'strongestnetwork' ];
@@ -269,7 +270,7 @@ export function modem_defaults(over)
 		sim_detect: null,
 		serial: null, imei: null,   // stable identity anchors (USB iSerial / IMEI)
 		repower_time: null,         // recovery power-cycle off / reset hold seconds
-		pincode: null, modes: null, mcc: null, mnc: null,
+		pincode: null, modes: null, rat_order: null, mcc: null, mnc: null,
 		mux: 'auto', dl_datagram_max_size: 0, tty: null,
 		diag_port: null,       // explicit DM/DIAG node for wwand-qlog (never opened)
 		at_init: [], location: false, delay: 0,
@@ -357,7 +358,7 @@ function apply_globals(s, result)
 // instead of 'pincode' cost a HW debugging session — the daemon saw "PIN
 // required but none configured" and safety-blocked the SIM).
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
-	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'recovery_steps', 'pincode', 'modes', 'mcc', 'mnc',
+	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'recovery_steps', 'pincode', 'modes', 'rat_order', 'mcc', 'mnc',
 	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'nitz_time', 'fcc_auth',
 	'gnss_nmea', 'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'unarmed_reset_after', 'card_hold',
@@ -495,6 +496,8 @@ function modem_from_section(s, warnings)
 			? lc(s.sim_detect) : null,
 		pincode: s.pincode,
 		modes: s.modes,
+		// acquisition order, most preferred first (validated below)
+		rat_order: (s.rat_order != null && s.rat_order != '') ? lc(s.rat_order) : null,
 		mcc: s.mcc,
 		mnc: s.mnc,
 		mux: s.mux ?? 'auto',
@@ -756,6 +759,15 @@ function parse_network_sections(raw, result, ext_options)
 				push(result.warnings, m);
 				push(result.modems[name].config_notes, m);
 				result.modems[name].cat_mode = null;
+			}
+
+			if (s.rat_order != null && s.rat_order != '' && !nasmod.rat_order_ids(s.rat_order)) {
+				let m = sprintf("wwand_modem %s: rat_order '%s' names an unknown or repeated technology (one of %s) — ignored, the modem keeps its own acquisition order",
+					name, s.rat_order, join(', ', sort(keys(nasmod.RAT_ORDER_IDS))));
+
+				push(result.warnings, m);
+				push(result.modems[name].config_notes, m);
+				result.modems[name].rat_order = null;
 			}
 
 			if (s.gnss_nmea != null && s.gnss_nmea != '' &&

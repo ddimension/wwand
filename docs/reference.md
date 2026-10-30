@@ -461,6 +461,10 @@ config wwand_modem 'm0'
 	option pincode '1234'            # SIM PIN; entered on each start
 	option sim_slot '0'              # physical slot to activate (0 = leave as-is)
 	option modes 'lte,nr5g'          # lte umts gsm nr5g td-scdma cdma / all / unset
+	option rat_order 'nr5g,lte'      # RAT acquisition order, most preferred first
+	                                 #   (gsm umts lte nr5g td-scdma cdma1x evdo);
+	                                 #   unset = the modem keeps its own. See
+	                                 #   "RAT priority" below
 	option mcc '262'                 # manual PLMN selection (optional, needs mnc)
 	option mnc '01'
 	option mux 'auto'                # auto|raw_ip|ethernet|untagged|rmnet|qmimux|vlan — the kernel
@@ -1080,6 +1084,51 @@ button), `lock_4g`/`lock_5g` for hard cell locks with live candidates from
 the cell scan ([Configuration](#configuration), Troubleshooting for the
 scan).
 
+### RAT priority: the modem never tries 5G SA
+
+`modes` says which technologies the modem MAY use; the **acquisition order**
+says which it searches, and in what order. They are two NV settings, and a
+modem can allow NR5G while its order lists only `lte, umts` — it then may never
+search for 5G SA (a T99W175, ddimension/wwand#75). wwand reports that gap as a
+`rat_order` config warning (Status page, `wwandctl status`), on QMI and MBIM
+alike.
+
+- **Live:** LuCI Modem Tools → *RAT priority* (tick what is searched, order
+  with ↑/↓), or `ubus call wwand modem_set_settings '{"modem":"m0","settings":{"rat_order":["nr5g","lte"]}}'`.
+  Written to the modem's NV (QMI NAS Set System Selection Preference, TLV
+  0x1E, libqmi 1.38); a change re-attaches like a band change.
+- **Every start:** `option rat_order 'nr5g,lte'` on the modem — written when
+  the modem holds a different order, left alone otherwise. Unset, the modem
+  keeps its own.
+
+Two firmware behaviours wwand handles rather than papers over:
+
+- **Slots QMI cannot name.** A BG96 lists its IoT technologies as NONE: its
+  order reads `[0, 0, gsm, lte]` with `AT+QCFG="nwscanseq"` at `020301`
+  (eMTC, NB-IoT, GSM). It refuses a set carrying those slots
+  (DEVICE_UNSUPPORTED), and one without them re-sorts its IoT scan sequence.
+  Such an order is reported with `rat_order_writable: false`; wwand does not
+  write over it (live: `unsupported_setting`; `option rat_order`: a config
+  warning), and LuCI shows it read-only. Change it with the vendor command.
+- **Accepted, not applied.** An EG06-E over the MBIM passthrough
+  acknowledges the order and keeps its own. Every write is read back; a
+  result with `not_applied: ["rat_order"]` says the modem did not take it.
+
+(Both HW-read on 2026-10-30: ZyXEL LTE3301 / BG96MAR02A07M1G and ZyXEL
+LTE3301-PLUS / EG06ELAR04A04M4G.) `option rat_order` is written at the same
+bring-up step as `option modes`, after the SIM: a modem without a usable SIM
+never reaches it.
+
+Backends: QMI natively; MBIM through the QMI-over-MBIM passthrough, because
+MBIM itself has no acquisition order — Register State carries only the
+*set* of enabled data classes (`DataClass` on set, `PreferredDataClasses` in
+the MBIMEx 2.0 reply, both bitmasks; libmbim 1.32
+`mbim-service-basic-connect.json` / `-ms-basic-connect-v2.json`, Microsoft
+"MBIMEx 2.0 – 5G NSA support", checked 2026-10-30), the AT&T ATDS RAT command
+only a coarse 2G/3G/4G-only mode, and MBIMEx 3.0 Registration Parameters
+only MICO/DRX/LADN. An MBIM modem without the passthrough, and NCM, keep
+their order; a configured `rat_order` is then reported as not applied.
+
 ### FCC-locked laptop modem
 
 If a Lenovo/Dell/HP-SKU modem stays in low power (no RF), set
@@ -1684,7 +1733,7 @@ every method to it.
 | `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` + `temperature` (also on `status`, which is the canonical place — same field, kept here for compatibility) |
 | `modem_location` | `modem` | last GNSS fix, short form — a view over the `modem_gps` reader, whichever source feeds it (needs `option gnss` and `wwand-gps`) |
 | `modem_at` | `modem`, `command`, `timeout?` | run an AT command on the modem's AT port |
-| `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor. Sets are **idempotent**: values the modem already carries are dropped; nothing left → `unchanged: true`, no NV write, no radio disturbance. On QMI and MBIM (passthrough) the get adds `band_caps: { lte, nr5g }`, the bands the modem supports (DMS Get Band Capabilities) — what LuCI's *Reset to defaults* sends instead of a blanket 1–63 / 1–79. A set the firmware refuses because of its band keys is sent once more without them: the result then carries `partial: true` and `refused` (`lte_bands`, `nr5g_sa_bands`, …) next to `applied`. A set that changes bands or the RAT mode (QMI, MBIM) **re-attaches**: the PDN sessions stop first, the preference is written, the radio cycles low power → online like `modem_reattach`, and the sessions go back to the reconnect — the result adds `reattached` (false: the cycle failed, the setting stands) and `contexts_released`/`contexts_failed`; a modem left on a band it no longer has otherwise may stay detached. Not on a `settings_deferred` firmware, under an operator detach, or for usage/roaming keys alone; a band/RAT set while a reattach, detach or attach runs answers `busy`. On a Fibocom FM350/FM150 (NCM) the same calls speak `+GTACT` instead: the get adds `settable` (the keys a set may carry — band lists only, none on a tuple bands cannot be written for), `supported` (the module's own band catalogue), `nr_bands_shared: true` and `persistent: false`; a set refuses any other key, and an accepted band edit is also written to the modem's `band_*` options (see *Band allow-lists*) |
+| `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor. The get adds `rat_order` (the acquisition order by name, most preferred first, a number where a value has no name; absent when the modem reports none) and `rat_order_writable` (false when that order has slots QMI cannot name); a set takes `rat_order` as a list of names, or the number a get returned for an unnamed value (see *RAT priority*), refuses an unknown or repeated one with `invalid_setting` and any change of a non-writable order with `unsupported_setting`, treats a change like a RAT change (re-attach), and reads the order back: `not_applied: ["rat_order"]` when the firmware kept its own. Sets are **idempotent**: values the modem already carries are dropped; nothing left → `unchanged: true`, no NV write, no radio disturbance. On QMI and MBIM (passthrough) the get adds `band_caps: { lte, nr5g }`, the bands the modem supports (DMS Get Band Capabilities) — what LuCI's *Reset to defaults* sends instead of a blanket 1–63 / 1–79. A set the firmware refuses because of its band keys is sent once more without them: the result then carries `partial: true` and `refused` (`lte_bands`, `nr5g_sa_bands`, …) next to `applied`. A set that changes bands or the RAT mode (QMI, MBIM) **re-attaches**: the PDN sessions stop first, the preference is written, the radio cycles low power → online like `modem_reattach`, and the sessions go back to the reconnect — the result adds `reattached` (false: the cycle failed, the setting stands) and `contexts_released`/`contexts_failed`; a modem left on a band it no longer has otherwise may stay detached. Not on a `settings_deferred` firmware, under an operator detach, or for usage/roaming keys alone; a band/RAT set while a reattach, detach or attach runs answers `busy`. On a Fibocom FM350/FM150 (NCM) the same calls speak `+GTACT` instead: the get adds `settable` (the keys a set may carry — band lists only, none on a tuple bands cannot be written for), `supported` (the module's own band catalogue), `nr_bands_shared: true` and `persistent: false`; a set refuses any other key, and an accepted band edit is also written to the modem's `band_*` options (see *Band allow-lists*) |
 | `modem_scan` / `modem_scan_start` / `modem_scan_status` | `modem` | visible-operator scan (sync, or async start+poll — a scan takes up to ~90 s) |
 | `modem_set_network_selection` | `modem`, `mode`, `mcc?`, `mnc?` | `auto` or `manual` PLMN selection (QMI NAS / MBIM passthrough / AT+COPS). Idempotent (`unchanged: true` when the modem already runs the requested selection); on deferred-apply models the result carries `deferred: true` + `apply: 'modem_reset'` |
 | `modem_reset` | `modem` | generic admin modem reset — the apply step for `deferred` results (write ACL). Order: the backend soft reset FIRST (QMI: DMS offline→reset, MBIM: passthrough-DMS or `AT+CFUN=1,1`, NCM: `AT+CFUN=1,1`) — it lets the modem shut down cleanly, where a pulse of the reset line cuts it mid-write and can corrupt its file system. The dedicated reset GPIO (per-modem `reset_gpio`, or the board default when only one modem is managed) is the fallback: pulsed at once when the soft reset is refused or there is none, and after `reset_fallback` seconds (default 30) when the modem acknowledged but never dropped off the bus. The result then carries `fallback_gpio` and `fallback_in`. When the QMI side or the MBIM passthrough is what hangs — no DMS client, or the request times out — QMI and MBIM reset over AT instead (`AT+CFUN=1,1`, opening the AT port for the one write if it is not open yet); the result then carries `via: 'at'`. The recovery ladder's modem-reset rung takes the same way. Result reports `action: 'gpio'\|'backend'`. The recovery ladder's own hardware rung (`modem_repower` below) is unchanged: it is reached because the soft path already failed. The modem re-enumerates and every `auto` interface comes back up on its own |

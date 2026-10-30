@@ -70,6 +70,71 @@ export function radio_if_name(r)
 	return null;
 };
 
+// `option rat_order` / the settings editor's `rat_order` name <-> the
+// QmiNasRadioInterface values of the acquisition order TLVs (Set 0x1E, Get
+// 0x1C). The names are the `modes` vocabulary, except that CDMA has to be
+// split: the order lists 1x and EVDO apart, the mode mask covers both with one
+// name.
+export const RAT_ORDER_IDS = {
+	cdma1x: RADIO_IF_CDMA_1X, evdo: RADIO_IF_CDMA_1XEVDO, gsm: RADIO_IF_GSM,
+	umts: RADIO_IF_UMTS, lte: RADIO_IF_LTE, 'td-scdma': RADIO_IF_TD_SCDMA,
+	nr5g: RADIO_IF_5GNR,
+};
+
+// 'nr5g,lte' or [ 'nr5g', 'lte' ] -> [ 12, 8 ]; null for an empty, unknown
+// or repeated name — a guessed order would be written to NV. A list may also
+// carry an integer: the value rat_order_names left unnamed, handed back as it
+// came so an edit of the other entries does not drop it from the modem's order.
+// NONE (0) and unknown (-1) may repeat: they are slots, not RATs — a BG96
+// reports [0,0,4,8] (HW-read on the ZyXEL LTE3301, BG96MAR02A07M1G,
+// 2026-10-30), and refusing it would make its own order unwritable.
+export function rat_order_ids(v)
+{
+	let names = (type(v) == 'array') ? v : split(v ?? '', /[, ]+/);
+	let ids = [];
+
+	for (let n in names) {
+		// a string test, not `n == ''`: ucode compares loosely, and 0 == ''
+		// is true — the BG96's NONE entries were dropped as empty names
+		if (type(n) == 'string' && n == '')
+			continue;
+
+		let id = (type(n) == 'int')
+			? ((n >= -128 && n <= 127) ? n : null)
+			: RAT_ORDER_IDS[lc(n)];
+
+		if (id == null || (id > 0 && index(ids, id) >= 0))
+			return null;
+
+		push(ids, id);
+	}
+
+	return length(ids) ? ids : null;
+};
+
+// Whether wwand may write over the order `ids` the modem holds: not when it
+// has a slot QMI cannot name (NONE 0, unknown -1). A BG96 lists eMTC and
+// NB-IoT that way ([0,0,4,8] with nwscanseq 020301), refuses a set carrying
+// them (DEVICE_UNSUPPORTED), and a set without them re-sorts its IoT scan
+// sequence (HW-read on the ZyXEL LTE3301, BG96MAR02A07M1G, 2026-10-30) —
+// there the vendor command (AT+QCFG="nwscanseq") is the only lossless way.
+export function rat_order_writable(ids)
+{
+	return length(filter(ids ?? [], (id) => type(id) != 'int' || id <= 0)) == 0;
+};
+
+// [ 12, 8 ] -> [ 'nr5g', 'lte' ]; a value without a name stays a number, so a
+// read-back shows what the modem holds instead of dropping it
+export function rat_order_names(ids)
+{
+	let byid = {};
+
+	for (let n, id in RAT_ORDER_IDS)
+		byid[id] = n;
+
+	return map(ids ?? [], (id) => byid[id] ?? id);
+};
+
 // QmiNasRatModePreference bits — config 'modes' string maps onto these
 export const MODE_BITS = {
 	cdma:       (1 << 0) | (1 << 1),
@@ -332,6 +397,11 @@ export default {
 				mnc_pcs_digit: { t: 0x1a, f: 'u8' },
 				// QmiNasChangeDuration: 0 = until power cycle, 1 = permanent
 				change_duration:   { t: 0x17, f: 'u8' },
+				// QmiNasRadioInterface per entry (gint8 in libqmi 1.38 —
+				// signed: its "unknown" is -1), most preferred first — the RATs the
+				// modem scans; one enabled in mode_preference but missing
+				// here may never be acquired (ddimension/wwand#75)
+				acquisition_order: { t: 0x1E, f: { n: 'u8', of: 'i8' } },
 				usage_preference:  { t: 0x21, f: 'u32' },
 				ext_lte_band: { t: 0x24, f: {
 					mask_low: 'u64', mask_mid_low: 'u64',
@@ -355,6 +425,7 @@ export default {
 				roaming_preference:{ t: 0x14, f: 'u16' },
 				lte_band_preference:{ t: 0x15, f: 'u64' },
 				network_selection: { t: 0x16, f: 'u8' },
+				acquisition_order: { t: 0x1C, f: { n: 'u8', of: 'i8' } },
 				usage_preference:  { t: 0x1F, f: 'u32' },
 				disabled_modes:    { t: 0x22, f: 'u16' },
 				ext_lte_band: { t: 0x23, f: {

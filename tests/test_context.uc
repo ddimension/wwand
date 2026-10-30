@@ -77,6 +77,8 @@ function make_handlers(over, started)
 				: [ 0x98, 0x94, 0x20, 0x00, 0x00, 0x01, 0x22, 0x38, 0x42, 0x09 ] }),
 		REGISTER_EVENTS: { mask: 1 },
 		REGISTER_INDICATIONS: {},
+		// the validate pass reads it on every init (the RAT-order check, #75)
+		GET_SYSTEM_SELECTION_PREFERENCE: {},
 		SET_EVENT_REPORT: {},
 		REFRESH_REGISTER_ALL: {},
 		GET_SERVING_SYSTEM: {

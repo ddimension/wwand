@@ -1036,7 +1036,7 @@ scenario('signal_units', {
 		eq(modem.signal?.lte?.snr, 138, 'signal: lte snr stays in tenths of a dB');
 
 		// THE INDICATION IS THE SECOND DOOR. NAS SIGNAL_INFO_IND carries the
-		// same TLV layout (schema/nas.uc:488-491) and arrives BETWEEN refreshes,
+		// same TLV layout (schema/nas.uc:539-542) and arrives BETWEEN refreshes,
 		// so a conversion applied only to the polled reply would let the raw
 		// value straight back in — the same key alternating between -10 dB and
 		// 20 for one measurement. Found by review, not by the first test.
@@ -1119,6 +1119,56 @@ scenario('validate-match', {
 }, 'registered',
 	(modem, mock, events) => {
 		eq(length(modem.config_warnings), 0, 'validate: no warnings when modem matches');
+	});
+
+// --- 6d: the RAT acquisition order (ddimension/wwand#75) ---------------------
+// A configured order is written beside the mode mask when the modem holds a
+// different one, and the validate pass then finds it in place.
+
+let ssp = { mode_preference: (1 << 4) | (1 << 6), network_selection: 0, acquisition_order: [ 8, 5 ] };
+
+scenario('rat_order', {
+	handlers: base_handlers({
+		GET_SYSTEM_SELECTION_PREFERENCE: () => ssp,
+		SET_SYSTEM_SELECTION_PREFERENCE: (args) => {
+			if (args.acquisition_order != null)
+				ssp = { ...ssp, acquisition_order: args.acquisition_order };
+			return {};
+		},
+	}),
+	config: { rat_order: 'nr5g,lte' },
+}, 'registered',
+	(modem, mock, events) => {
+		let calls = mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE');
+		eq(length(calls), 1, 'rat_order: written once');
+		eq(calls[0].args.acquisition_order, [ 12, 8 ], 'rat_order: NR5G then LTE, as radio interfaces over the wire');
+		eq(calls[0].args.mode_preference, null, 'rat_order: no mode mask configured, none sent');
+		eq(filter(modem.config_warnings, (e) => e.check == 'rat_order'), [],
+			'rat_order: validate finds the order in place, NR5G is in it');
+	});
+
+// the mask also allows GSM, which this modem has no radio for (DMS radio_ifs
+// UMTS, LTE, 5GNR=10): not a gap, so not reported
+scenario('rat_order-left-out', {
+	handlers: base_handlers({
+		GET_CAPABILITIES: { capabilities: { max_tx_rate: 262144, max_rx_rate: 4194304,
+			data_service_cap: 1, sim_cap: 2, radio_ifs: [ 5, 8, 10 ] } },
+		SET_SYSTEM_SELECTION_PREFERENCE: {},
+		GET_SYSTEM_SELECTION_PREFERENCE: {
+			mode_preference: (1 << 2) | (1 << 4) | (1 << 6), network_selection: 0,
+			acquisition_order: [ 8, 5 ],
+		},
+	}),
+	config: {},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(length(mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE')), 0,
+			'rat_order unset: the modem keeps its own order');
+
+		let w = filter(modem.config_warnings, (e) => e.check == 'rat_order');
+		eq(length(w), 1, 'rat_order unset: NR5G allowed but missing from the order is flagged');
+		eq([ w[0].expected, w[0].actual ], [ 'nr5g', 'lte,umts' ],
+			'rat_order unset: ...naming the left-out RAT and the order the modem holds, not the GSM it has no radio for');
 	});
 
 // --- 7: QMAP datapath setup (rmnet backend) ----------------------------------

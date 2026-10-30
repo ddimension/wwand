@@ -309,6 +309,13 @@ plug-ins RETURN their implementation instead of registering it.
 ucode is lenient, so `run_tests.sh` does NOT catch this. Sanity-import changed
 modules on the target after deploying.
 
+### `n == ''` tells an empty string from everything else
+**Not for `0`.** ucode compares loosely, as JS does: `0 == ''` is true, so a
+loop that skips empty names with `if (n == '') continue;` also skips the
+integer 0. It dropped a BG96's NONE slots from its RAT acquisition order
+(`[0,0,4,8]` went out as `[4,8]`, nas.uc `rat_order_ids`, HW-seen 2026-10-30).
+Test the type when a value may be a number: `type(n) == 'string' && n == ''`.
+
 ### Self-referencing arrow functions work like in JS
 **Wrong.** No hoisting: a `let` arrow that references itself (recursion,
 reschedule) throws "Can't access lexical declaration before initialization" at
@@ -453,8 +460,15 @@ to traverse `/`: ubus clients cannot reach the socket, rpcd and the web interfac
 die, and `ubus list` answers "Failed to connect to ubus" while `pgrep ubusd`
 shows it alive and sleeping with 30 open fds. Done on the Chateau, 2026-08-31.
 
-Name the subtrees instead of `.` (`tar cf - -C $ST ./usr ./etc ./www`), or pass
-`--owner=root --group=root`, or extract somewhere that is not `/`. Afterwards,
+**Naming the subtrees instead of `.` is NOT enough.** The entries `usr`, `etc`,
+`lib`, `etc/init.d` carry their staging owner and mode the same way, and busybox
+`tar` run as root applies them to the device's own directories: hwtest's
+`stage.sh` did exactly that, and every test device ended up with `/usr`, `/etc`
+and `/lib` owned by the developer's uid and mode 0775 (found 2026-10-30; a LuCI
+deploy of `-C root usr` did the same that day). Pass `--owner=0 --group=0
+--numeric-owner` AND strip group/other write from the staging tree (`chmod -R
+go-w`), or extract somewhere that is not `/`; hwtest's `stage.sh` now checks its
+own archive for both. Afterwards,
 `find / -xdev \( -uid <yours> -o -gid <yours> \)` finds what was mis-owned; the
 same trap applies to every earlier `-C <dir>` deploy in this repo's instructions,
 which is why `/usr/share/ucode/wwand` had been owned by a foreign uid for weeks

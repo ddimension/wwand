@@ -449,7 +449,7 @@ export function collectd_lines(host, modem, sig, m, interval, cells)
 
 	// THE SENTINEL TYPE IS PER FIELD, not per struct. QMI decodes the LTE/WCDMA/
 	// GSM RSSI and the LTE RSRQ as i8 (sentinel -128) and rsrp/snr/ecio/
-	// nr5g_rsrq as i16 (sentinel -32768) — see codec/schema/nas.uc:112-116. A
+	// nr5g_rsrq as i16 (sentinel -32768) — see codec/schema/nas.uc:157-161. A
 	// blanket i16 test therefore lets an unavailable -128 through as a genuine
 	// -128 dBm reading, which is the exact failure this filter exists to
 	// prevent. (-128 is below any real RSSI floor, so the i8 test costs nothing

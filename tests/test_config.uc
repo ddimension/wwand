@@ -430,6 +430,29 @@ ok(length(filter(r.warnings, (w) => match(w, /gnss_nmea 'gga' is not one of/))) 
 	'gnss_nmea: an unknown profile is reported');
 eq(r.modems.m0.gnss_nmea, null, 'gnss_nmea: ...and dropped, the receiver keeps its own output');
 
+// rat_order (#75): the acquisition order by RAT name; an unknown or repeated
+// one is reported and dropped — a guessed order would go to NV
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', rat_order: 'NR5G,lte umts' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq(r.modems.m0.rat_order, 'nr5g,lte umts', 'rat_order: accepted, lower-cased');
+eq(length(filter(r.warnings, (w) => match(w, /rat_order/))), 0, 'rat_order: a known option, no warning');
+
+for (let bad in [ 'nr5g,5g', 'lte,lte' ]) {
+	r = padopt({
+		network: {
+			m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', rat_order: bad },
+			wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+		},
+	});
+	ok(length(filter(r.warnings, (w) => match(w, /rat_order '.*' names an unknown or repeated/))) == 1,
+		sprintf('rat_order: %s is reported', bad));
+	eq(r.modems.m0.rat_order, null, sprintf('rat_order: %s is dropped, the modem keeps its own order', bad));
+}
+
 // The initial-attach bearer, when the network wants a different one from the
 // data connection. Unset = same as the interface, which is what every
 // deployment did before these options existed.

@@ -43,6 +43,7 @@ import * as uimmod from 'wwand.codec.schema.uim';
 import * as wmsmod from 'wwand.codec.schema.wms';
 import * as dmsmod from 'wwand.codec.schema.dms';
 import * as sim from 'wwand.sim';
+import * as config_check from 'wwand.config_check';
 
 const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
@@ -1517,7 +1518,10 @@ export function create(opts)
 		});
 	};
 
-	step_attach_profile = () => self._apply_attach(step_register);
+	// the RAT acquisition order goes first, over the passthrough NAS, like the
+	// QMI init writes it before its attach profile (config_check.sync_rat_order)
+	step_attach_profile = () => config_check.sync_rat_order(self, log,
+		() => self._apply_attach(step_register));
 
 	step_register = () => {
 		// HELD: the radio stays off (hold_at_open has the reason), and this is

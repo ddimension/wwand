@@ -1597,6 +1597,34 @@ const QNWINFO_VENDORS = /quectel/;
 // collect_caps(self, cb): build self.caps — a best-effort summary of which RATs
 // the modem supports, for status display. The Quectel AT+QCFG="iotopmode" query
 // (which cellular-IoT modes it searches) runs ONCE and is cached; the summary
+// The RAT slugs (codec/schema/rat.uc) the modem says it supports, or null
+// when it has said nothing: the native MBIM DEVICE_CAPS data-class bitmask
+// first (no passthrough/AT needed), else the QMI DMS device-capabilities
+// radio_ifs list (DMS 5GNR=10, not the NAS 12). Read at init, so usable
+// before registration — unlike caps.rats, which also folds in observed RATs.
+export function mode_rats(self)
+{
+	if (self.info?.mbim_data_class != null)
+		return ratmod.families_from_mbim(self.info.mbim_data_class,
+			self.info.mbim_custom_data_class);
+
+	let cap_ifs = self.info?.capabilities?.radio_ifs;
+
+	if (type(cap_ifs) != 'array')
+		return null;
+
+	let out = [];
+
+	for (let r in cap_ifs) {
+		let o = ratmod.from_dms_radio_if(r);
+
+		if (o && index(out, o.rat) < 0)
+			push(out, o.rat);
+	}
+
+	return out;
+};
+
 // is then rebuilt each call so newly-observed RATs fold in. Combined with a
 // model-string hint (RedCap/NTN). Stores self.caps = { rats, iot_modes, ntn }.
 // Defined before probe_iot_rat, which calls it (ucode does not hoist exports).
@@ -1605,27 +1633,8 @@ export function collect_caps(self, cb)
 	cb = cb ?? (() => null);
 
 	// authoritative supported-RAT families for caps.rats on a 5G modem currently
-	// camped on LTE. Source order native -> passthrough/QMI: the native MBIM
-	// DEVICE_CAPS data_class bitmask first (no passthrough/AT needed), else the
-	// QMI DMS device-capabilities radio_ifs list. DMS 5GNR=10 (not the NAS 12).
-	let mode_caps = null;
-
-	if (self.info?.mbim_data_class != null) {
-		mode_caps = ratmod.families_from_mbim(self.info.mbim_data_class,
-			self.info.mbim_custom_data_class);
-	}
-	else {
-		let cap_ifs = self.info?.capabilities?.radio_ifs;
-
-		if (type(cap_ifs) == 'array') {
-			mode_caps = [];
-			for (let r in cap_ifs) {
-				let o = ratmod.from_dms_radio_if(r);
-				if (o && index(mode_caps, o.rat) < 0)
-					push(mode_caps, o.rat);
-			}
-		}
-	}
+	// camped on LTE (mode_rats above)
+	let mode_caps = mode_rats(self);
 
 	let build = () => {
 		self.caps = ratmod.caps_from({

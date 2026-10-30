@@ -16,6 +16,20 @@ state buried at the top invites reading a months-old entry as present tense.
   built and published before it). **Do not push to the feed while a build
   of the same branch runs** — a push cancels it. Feed stable release tag
   (`scripts/release-stable.sh`) — only when asked.
+- **RAT priority (#75, built and HW-tested 2026-10-30):** `option rat_order`
+  + `modem_get/set_settings` `rat_order` (+ `rat_order_writable`,
+  `not_applied`) + LuCI Modem Tools *RAT priority* editor and the modem-page
+  option; the `rat_order` config warning flags a supported RAT missing from
+  the acquisition order (QMI validate pass and MBIM init alike). MBIM has no
+  native order, so MBIM goes through the passthrough (reference.md "RAT
+  priority"). hwtest `ratorder` checks + func and a CDP GUI test passed on
+  every listed device but the blocked X3000 (Chateau read-only); every
+  order was put back and compared. Firmware findings, all handled: the BG96
+  lists eMTC/NB-IoT as NONE slots and refuses them (order then read-only);
+  the EG06 over MBIM accepts an order and drops it at the next radio cycle
+  (`not_applied`). Same run: hwtest `stage.sh` had been making `/usr`,
+  `/etc`, `/lib` on every device non-root and 0775 — fixed, devices
+  repaired (gotchas.md, tar entry).
 - **TX-stall watch (built 2026-10-29, after pre30):** the daemon tick reads the
   kernel's `tx_timeout` count of each modem's data netdev, reports `tx_stall`
   in status (LuCI "TX stalls"), and a stall lasting `tx_stall_timeout`
