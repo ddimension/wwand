@@ -1105,6 +1105,9 @@ alike.
 - **Every start:** `option rat_order 'nr5g,lte'` on the modem — written when
   the modem holds a different order, left alone otherwise. Unset, the modem
   keeps its own.
+- **Names:** `nr5g lte umts gsm td-scdma cdma1x evdo`, any case, separated by
+  commas or spaces. libqmi's `5gnr` (the qmicli spelling) is taken for `nr5g`;
+  wwand answers with `nr5g`.
 
 Two firmware behaviours wwand handles rather than papers over:
 

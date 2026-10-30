@@ -81,6 +81,12 @@ export const RAT_ORDER_IDS = {
 	nr5g: RADIO_IF_5GNR,
 };
 
+// Accepted on input, never emitted: libqmi names radio interface 12 '5gnr'
+// (QMI_NAS_RADIO_INTERFACE_5GNR nick, generated qmi-enum-types.c, libqmi
+// 1.38), so a qmicli user types that. rat_order_names keeps answering 'nr5g',
+// the name status and bands use; both spellings in one order are a repeat.
+const RAT_ORDER_ALIASES = { '5gnr': 'nr5g' };
+
 // 'nr5g,lte' or [ 'nr5g', 'lte' ] -> [ 12, 8 ]; null for an empty, unknown
 // or repeated name — a guessed order would be written to NV. A list may also
 // carry an integer: the value rat_order_names left unnamed, handed back as it
@@ -101,7 +107,7 @@ export function rat_order_ids(v)
 
 		let id = (type(n) == 'int')
 			? ((n >= -128 && n <= 127) ? n : null)
-			: RAT_ORDER_IDS[lc(n)];
+			: RAT_ORDER_IDS[RAT_ORDER_ALIASES[lc(n)] ?? lc(n)];
 
 		if (id == null || (id > 0 && index(ids, id) >= 0))
 			return null;

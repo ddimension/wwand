@@ -144,6 +144,10 @@ eq(tlv.pack(nas.messages.SET_SYSTEM_SELECTION_PREFERENCE.req, { acquisition_orde
 	'\x1e\x04\x00\x03\x0c\x08\x05', 'nas ssp set: acquisition order as TLV 0x1E');
 eq(nasmod.rat_order_ids('nr5g, LTE umts'), [ 12, 8, 5 ], 'rat order: names -> radio interfaces, case and separators free');
 eq(nasmod.rat_order_ids([ 'lte', 'gsm' ]), [ 8, 4 ], 'rat order: a list is taken as well (the ubus shape)');
+eq([ nasmod.rat_order_ids('5GNR|lte'), nasmod.rat_order_ids([ '5gnr', 'lte' ]), nasmod.rat_order_names([ 12 ]) ],
+   [ null, [ 12, 8 ], [ 'nr5g' ] ], 'rat order: libqmi\'s 5gnr is taken as nr5g and answered as nr5g; | is no separator');
+eq(nasmod.rat_order_ids('nr5g,5gnr'), null, 'rat order: both spellings of NR5G are a repeat');
+eq(nasmod.rat_order_ids('5GNR, lte'), [ 12, 8 ], 'rat order: the alias is case-free like the names');
 eq(tlv.unpack(nas.messages.GET_SYSTEM_SELECTION_PREFERENCE.resp, '\x1c\x02\x00\x01\xff').acquisition_order,
 	[ -1 ], 'nas ssp get: the elements are signed (gint8), unknown is -1');
 eq(nasmod.rat_order_ids([ 99, 'nr5g', -1 ]), [ 99, 12, -1 ],
