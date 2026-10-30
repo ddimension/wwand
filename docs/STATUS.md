@@ -116,6 +116,7 @@ The test devices are those in the workspace's `test-devices.txt`, nothing else.
 | ZyXEL LTE3301-PLUS (5.200) | EG06-E, **MBIM** (switched from QMI 2026-10-24) | daemon clean, but no registration with its SIM (`+EMM ERROR 1,15`); UIM Remote switched on |
 | Cudy LT300 v3 (3.113) | SLM770A-R, NCM | connected; reattach |
 | GL.iNet GL-X3000 (3.93) | RM520N-GL, QMI + E392 | blocked by other tests; UIM Remote already on |
+| HP EliteBook 850 G7 (5.204, x86_64) | Dell DW5932e / Foxconn T99W373, **PCIe/MHI** (`mhi-pci-generic`, `wwand-mhi`), MBIM + QMI passthrough | connected 5G NSA (ENDC); RAT priority read and in LuCI (2026-10-30, main f3f3a6a); eUICC in slot 2 listed; UIM Remote on via `AT^EFS`; borrows the NR7101's card over SSH (`donor_cond none`, the RG502Q refuses the condition TLV); the slot needs `kmod-hp-elitebook-850-g7-wwan-unlock` |
 
 Snapshot devices run ucode 2026.07.09 (libucode ABI 20230711), so the feed's
 current snapshot packages do not install there (the #67 floor); hwtest deploys
