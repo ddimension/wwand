@@ -1004,6 +1004,18 @@ backend.uicc_reset(resetc, (err) => {
 	eq(resetc.last.info, p32(0), 'uicc-reset: [passthrough=disable]');
 });
 
+// --- IP_CONFIGURATION query is the FULL info buffer, not session_id alone ----
+// The MediaTek T7xx (FM350) rejects a 4-byte query with InvalidParameters (21);
+// libmbim sends the whole 15-u32 MBIM_IP_CONFIGURATION_INFO structure, zero
+// except the session id (mbimcli-basic-connect.c:912, libmbim 1.32.0).
+(function () {
+	let info = mbim.encode_info(bc.commands.IP_CONFIGURATION.query, { session_id: 7 });
+	eq(length(info), 60, 'ip-config query: 15 u32 fields (60 bytes), not 4');
+	eq(info, p32(7) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0) +
+		p32(0) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0) + p32(0),
+		'ip-config query: session id then 14 zero fields');
+})();
+
 // --- native MBIM SMS Read parsing (layout confirmed on the EG06) ------------
 // Response: Format(u32) MessagesCount(u32), then N [offset,size] ref pairs, each
 // to a record { index, status, pduOffset, pduSize }; PDU bytes at pduOffset.
