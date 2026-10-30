@@ -25,6 +25,9 @@ import * as backend from 'wwand.backend';
 import * as qmi_backend from 'wwand.qmi_backend';
 import * as modem_common from 'wwand.modem_common';
 import * as atcmd from 'wwand.atcmd';
+// read_ca_at: vendor-aware AT carrier-aggregation read (QCAINFO / Fibocom
+// GTCAINFO), shared with telemetry_mbim — all telemetry_*.uc ship in base wwand.
+import * as tel_vendor from 'wwand.telemetry_ncm';
 
 
 // The slow tick's cell-location query, when the modem stops answering it.
@@ -307,13 +310,20 @@ export function install(self, o)
 			{ name: 'qmi', probe: (ok) => self.nas
 				? qmi_backend.get_ca(self.nas, (ca) => ok(ca != null))
 				: ok(false) },
-			{ name: 'at', probe: (ok) => ok(!!self.at) },
+			// Probe the actual CA read, vendor-aware: QCAINFO is Quectel-specific,
+			// and a Fibocom in QMI mode (whose QMI CPHY CA is unavailable) answers
+			// it with ERROR. read_ca_at asks such a modem the Fibocom way
+			// (AT+GTCAINFO?), so the probe reflects what the transport can really
+			// serve rather than just the port's existence (shared with
+			// telemetry_mbim; 2026-10-30).
+			{ name: 'at', probe: (ok) => self.at
+				? tel_vendor.read_ca_at(self, (e) => ok(!e))
+				: ok(false) },
 		], (be) => {
 			if (be == 'qmi')
 				return qmi_backend.get_ca(self.nas, (ca) => store(ca ?? []));
 			if (be == 'at')
-				return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) =>
-					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
+				return tel_vendor.read_ca_at(self, (e, ca) => store(ca ?? []));
 			store([]);
 		}, { reprobe: true, log: log, what: 'carrier aggregation' });
 	};

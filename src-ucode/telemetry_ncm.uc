@@ -959,6 +959,30 @@ export function ca_entries(serving, sccs)
 	return ca;
 };
 
+// Read the active carrier-aggregation set over AT, vendor-aware. QCAINFO is a
+// Quectel command; a Fibocom (FM350 / MediaTek T7xx) answers it with a bare
+// ERROR, so the MBIM and QMI telemetry AT fallbacks — which have no native CA
+// source on such a modem — must ask the Fibocom way (AT+GTCAINFO?, the same
+// read-back the NCM Fibocom path uses) instead of thrashing on QCAINFO. Returns
+// (err, ca_list): ca_list in the shared CA shape (ca_entries / parse_qcainfo),
+// null meaning "no reading". Lives here beside the Fibocom parsers; imported by
+// telemetry_mbim and telemetry_qmi (all three telemetry modules ship in the
+// base wwand package, so this is not a cross-backend package dependency).
+export function read_ca_at(self, cb)
+{
+	let fibocom = match(self.info?.manufacturer ?? '', /fibocom/i) ||
+	              match(self.info?.model ?? '', /FM[0-9]/i);
+
+	if (fibocom)
+		return modem_common.telemetry_at(self).send('AT+GTCAINFO?', (e, r) => {
+			let g = e ? null : parse_gtcainfo(r?.lines);
+			cb(e, g ? ca_entries(g, g.sccs) : null);
+		});
+
+	return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) =>
+		cb(e, e ? null : atcmd.parse_qcainfo(r?.lines)));
+};
+
 function tel_fibocom_cells(self, cb)
 {
 	// shared assembly: fill the standard cells shape from a parsed serving

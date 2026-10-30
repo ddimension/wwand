@@ -573,4 +573,43 @@ fm.at.send = ((send) => (cmd, cb) => {
 fset(fm, { lte_bands: [ 3 ] }, (err, res) => { e = err; });
 eq(e?.error, 'modem_gone', 'gtact set: a teardown between read and write is not a crash');
 
+// --- read_ca_at: vendor-aware AT CA read (shared by telemetry_mbim/qmi) ------
+// A Fibocom gets AT+GTCAINFO? (QCAINFO is Quectel-only and ERRORs on an FM350);
+// anyone else gets AT+QCAINFO. Build a `self` whose telemetry_at side channel
+// records the command and answers canned lines.
+(function () {
+	let asked, sender = (lines) => ({ send: (cmd, cb) => { asked = cmd; cb(null, { lines: lines }); } });
+
+	// Fibocom by manufacturer -> GTCAINFO?, carriers from ca_entries
+	let fib = { info: { manufacturer: 'Fibocom Wireless Inc.', model: 'V1.0.6' },
+		at_telemetry: sender([ 'LTE PCC: 103,120,1279,75,2,1,1,1,71', 'LTE SCC1: 1,0,108,383,3700,50,0,1,1,6,6,56' ]) };
+	let ca_fib;
+	telemetry_ncm.read_ca_at(fib, (e, ca) => { ca_fib = ca; });
+	eq(asked, 'AT+GTCAINFO?', 'read_ca_at: Fibocom asks GTCAINFO?, not QCAINFO');
+	ok(length(ca_fib) >= 2, 'read_ca_at: Fibocom returns PCC + SCC carriers');
+	eq(ca_fib[0].role, 'PCC LTE', 'read_ca_at: first carrier is the LTE anchor');
+
+	// Fibocom by model (manufacturer blank) still routes to GTCAINFO?
+	let fib2 = { info: { manufacturer: '', model: 'FM350-GL' }, at_telemetry: sender([ 'OK' ]) };
+	telemetry_ncm.read_ca_at(fib2, () => null);
+	eq(asked, 'AT+GTCAINFO?', 'read_ca_at: Fibocom matched on FM<n> model');
+
+	// a non-Fibocom modem keeps the Quectel QCAINFO path
+	let quec = { info: { manufacturer: 'Quectel', model: 'RM520N-GL' },
+		at_telemetry: sender([ '+QCAINFO: "PCC",1300,100,"LTE BAND 3",0,42' ]) };
+	let ca_q;
+	telemetry_ncm.read_ca_at(quec, (e, ca) => { ca_q = ca; });
+	eq(asked, 'AT+QCAINFO', 'read_ca_at: non-Fibocom asks QCAINFO');
+	ok(length(ca_q) >= 1, 'read_ca_at: QCAINFO carriers parsed');
+
+	// a modem-level ERROR surfaces as (err, null) — the caller stores [] and the
+	// probe reports unavailable, so the ladder does not demote-thrash
+	let errmdm = { info: { manufacturer: 'Fibocom', model: 'x' },
+		at_telemetry: { send: (cmd, cb) => cb('ERROR', null) } };
+	let saw_err, saw_ca = 'unset';
+	telemetry_ncm.read_ca_at(errmdm, (e, ca) => { saw_err = e; saw_ca = ca; });
+	ok(saw_err, 'read_ca_at: a modem ERROR is reported as an error');
+	eq(saw_ca, null, 'read_ca_at: ...and the carrier list is null, not a stale value');
+})();
+
 done('test_ncm_fibocom');
