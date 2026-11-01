@@ -14,6 +14,7 @@ A **check** means the standard's text was read next to the code. *Basis* is what
 | <a id="r3"></a>R3 | 2026-10-01 | reference read next to the code (libqmi 1.38.0 data/qmi-service-loc.json) | Claude | `wwand fcab7f9` | `wwand v1.6.9` |
 | <a id="r4"></a>R4 | 2026-10-14 | standard read next to the code (Microsoft Learn "MB low level UICC access", MBIM_MS_UICC_OPEN_CHANNEL / CLOSE_CHANNEL / APDU _INFO; libmbim 1.32.0 data/mbim-service-ms-uicc-low-level-access.json; lpac 2.3.0 driver/apdu/mbim.c) | Claude, prompted by a Codex finding | `wwand f2bba19` | `wwand, commit "mbim: an MBIM success is not yet an open channel"` |
 | <a id="r5"></a>R5 | 2026-10-19 | kernel source read next to the code (linux 6.18.41 net/qrtr/af_qrtr.c qrtr_tx_wait, qrtr_node_enqueue, qrtr_sendmsg; libubox 2026.07.08 uloop.c signal setup) | Claude, for ddimension/wwand#61 | `wwand 8a170a1` | `wwand, commit "qrtr: a send the modem never confirms no longer freezes the daemon (#61)"` |
+| <a id="r6"></a>R6 | 2026-10-30 | reference implementation + vendor manual read next to the code, then HW-verified (ModemManager data/dispatcher-fcc-unlock/14c3 and twh/wwan-unlock modules/14c3:4d75 — GTFCCLOCK formula, big-endian challenge, model-id from SMBIOS type 133; Fibocom FM350 AT Commands Manual V2.10 §17 GTFCCLOCKMODE/STATE/EFFSTATUS/GEN/VER) | Claude | `wwand f3f3a6a` | `wwand, commit "mbim: unlock the Fibocom FM350 FCC lock (GTFCCLOCK) so it registers"` |
 
 ## Components
 
@@ -44,6 +45,9 @@ A **check** means the standard's text was read next to the code. *Basis* is what
 <tbody>
 <tr><td rowspan="2"><b>AT command layer</b><br><code>src-ucode/{atcmd,atcmd_parse,atport}.uc</code></td><td rowspan="1">ITU-T V.250</td><td rowspan="1"></td><td rowspan="1">command line, final result codes, echo, S3/S4</td><td>tbd</td><td></td><td></td></tr>
 <tr><td rowspan="1">3GPP TS 27.007</td><td rowspan="1"></td><td rowspan="1">+CME ERROR / +CMS ERROR codes, unsolicited result codes</td><td>tbd</td><td></td><td></td></tr>
+</tbody>
+<tbody>
+<tr><td rowspan="1"><b>Fibocom FM350 FCC unlock (GTFCCLOCK)</b><br><code>src-ucode/fcc_fibocom.uc, modem_mbim.uc</code></td><td rowspan="1">Fibocom FM350 AT Commands Manual V2.10 §17 (GTFCCLOCKMODE/STATE/EFFSTATUS/GEN/VER)</td><td rowspan="1">ModemManager data/dispatcher-fcc-unlock/14c3 and twh/wwan-unlock (14c3:4d75)</td><td rowspan="1">GTFCCLOCKGEN challenge, sha256(challenge_BE32 ‖ sha256(model_id)[0:4])[0:4] response, GTFCCLOCKVER verify, model-id from SMBIOS type 133 with known OEM fallbacks</td><td><a href="#r6">R6</a> 2026-10-30</td><td>HW-verified on the Dell DW5931e (FM350-GL): challenge 0x40799ebd -&gt; GTFCCLOCKVER=3436456810 -&gt; +GTFCCLOCKVER: 1, radio unlocked, modem registered; model-id "DW5931EFCCLOCK" (key 4909b5a4), Lenovo "KHOIHGIUCCHHII" (key 3df8c719) the other known id; byte assembly and the two keys regression-tested against sha256sum in test_fcc_fibocom</td><td>SMBIOS type 133 absent on the test host, so model-id discovery from firmware is not HW-exercised (both known ids are tried when it is absent)</td></tr>
 </tbody>
 <tbody>
 <tr><td rowspan="4"><b>SIM, PIN, identity, PLMN lists</b><br><code>src-ucode/{sim,sim_plmn,simops,siminventory}.uc</code></td><td rowspan="1">ETSI TS 102 221 (UICC)</td><td rowspan="1"></td><td rowspan="1">file ids (EF ICCID 2FE2), logical channels, status words</td><td>tbd</td><td></td><td></td></tr>

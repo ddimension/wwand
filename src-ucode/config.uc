@@ -18,6 +18,7 @@
 import * as context_common from 'wwand.context_common';
 import * as netlink from 'wwand.netlink';
 import * as catmod from 'wwand.codec.schema.cat';
+import * as nasmod from 'wwand.codec.schema.nas';
 import * as recovery from 'wwand.recovery';
 
 const OLD_DEPRECATED = [ 'dhcp', 'autocreateif', 'customroutes', 'strongestnetwork' ];
@@ -269,15 +270,17 @@ export function modem_defaults(over)
 		sim_detect: null,
 		serial: null, imei: null,   // stable identity anchors (USB iSerial / IMEI)
 		repower_time: null,         // recovery power-cycle off / reset hold seconds
-		pincode: null, modes: null, mcc: null, mnc: null,
+		pincode: null, modes: null, rat_order: null, mcc: null, mnc: null,
 		mux: 'auto', dl_datagram_max_size: 0, tty: null,
 		diag_port: null,       // explicit DM/DIAG node for wwand-qlog (never opened)
 		at_init: [], location: false, delay: 0,
 		at2_external: false,   // release the secondary AT port for external tools
 		gnss: false,           // switch the modem's GNSS receiver on (NMEA port)
+		gnss_nmea: null,       // 'fix' | 'full': the NMEA the receiver emits (null = untouched)
 		nitz_time: true,       // step the system clock from NITZ (see deps set_clock)
 		fcc_auth: null,        // RF unlock for laptop-SKU modems (see reference.md)
 		failreboot: 100, recovery_steps: null, proto_error_limit: 25, zero_rx_timeout: 21600,
+		tx_stall_timeout: 120, // s: a stuck transmit queue resets the modem (0 = watch only)
 		unarmed_reset_after: 300,   // s: first reset-line pulse of a never-answering modem
 		card_hold: 2100,       // s: no card-resetting recovery after a subscription change
 		bearer_poll_count: 3,  // empty dial-status polls before the bearer is gone (NCM)
@@ -355,11 +358,11 @@ function apply_globals(s, result)
 // instead of 'pincode' cost a HW debugging session — the daemon saw "PIN
 // required but none configured" and safety-blocked the SIM).
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
-	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'recovery_steps', 'pincode', 'modes', 'mcc', 'mnc',
+	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'recovery_steps', 'pincode', 'modes', 'rat_order', 'mcc', 'mnc',
 	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'nitz_time', 'fcc_auth',
-	'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
+	'gnss_nmea', 'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'unarmed_reset_after', 'card_hold',
-	'zero_rx_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
+	'zero_rx_timeout', 'tx_stall_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
 	// the AT-over-MBIM pipe: `at_over_mbim` forces it and picks the vendor CID
 	// flavour, `at_mbim '0'` disables the automatic fallback. Both are read by
@@ -493,6 +496,8 @@ function modem_from_section(s, warnings)
 			? lc(s.sim_detect) : null,
 		pincode: s.pincode,
 		modes: s.modes,
+		// acquisition order, most preferred first (validated below)
+		rat_order: (s.rat_order != null && s.rat_order != '') ? lc(s.rat_order) : null,
 		mcc: s.mcc,
 		mnc: s.mnc,
 		mux: s.mux ?? 'auto',
@@ -515,6 +520,9 @@ function modem_from_section(s, warnings)
 		// one switch, and wwand-gps picks the source — the modem's NMEA port,
 		// else QMI LOC (natively or over the MBIM passthrough)
 		gnss: bool_opt(s.gnss, false) || bool_opt(s.location, false),
+		// which NMEA sentences the receiver puts on its port (modem_common
+		// GNSS_NMEA); unset leaves the modem's own setting alone
+		gnss_nmea: (s.gnss_nmea != null && s.gnss_nmea != '') ? lc(s.gnss_nmea) : null,
 		// step the system clock from the receiver's own time — through
 		// deps.set_clock, which only ever touches a clock that is plainly
 		// unset (pre-2021) and so cannot fight sysntpd. OFF by default: this
@@ -566,6 +574,7 @@ function modem_from_section(s, warnings)
 		unarmed_reset_after: num_opt(s.unarmed_reset_after, 300, 'unarmed_reset_after', warnings),
 		card_hold: num_opt(s.card_hold, 2100, 'card_hold', warnings),
 		zero_rx_timeout: num_opt(s.zero_rx_timeout, 21600, 'zero_rx_timeout', warnings),
+		tx_stall_timeout: num_opt(s.tx_stall_timeout, 120, 'tx_stall_timeout', warnings),
 		bearer_poll_count: num_opt(s.bearer_poll_count, 3, 'bearer_poll_count', warnings),
 		lock_4g: (type(s.lock_4g) == 'array') ? s.lock_4g :
 		         (s.lock_4g != null ? [ s.lock_4g ] : []),
@@ -750,6 +759,25 @@ function parse_network_sections(raw, result, ext_options)
 				push(result.warnings, m);
 				push(result.modems[name].config_notes, m);
 				result.modems[name].cat_mode = null;
+			}
+
+			if (s.rat_order != null && s.rat_order != '' && !nasmod.rat_order_ids(s.rat_order)) {
+				let m = sprintf("wwand_modem %s: rat_order '%s' names an unknown or repeated technology (one of %s) — ignored, the modem keeps its own acquisition order",
+					name, s.rat_order, join(', ', sort(keys(nasmod.RAT_ORDER_IDS))));
+
+				push(result.warnings, m);
+				push(result.modems[name].config_notes, m);
+				result.modems[name].rat_order = null;
+			}
+
+			if (s.gnss_nmea != null && s.gnss_nmea != '' &&
+			    index([ 'fix', 'full' ], lc(s.gnss_nmea)) < 0) {
+				let m = sprintf("wwand_modem %s: gnss_nmea '%s' is not one of fix, full — ignored, the receiver keeps its own NMEA output",
+					name, s.gnss_nmea);
+
+				push(result.warnings, m);
+				push(result.modems[name].config_notes, m);
+				result.modems[name].gnss_nmea = null;
 			}
 
 			// a protocol wwand has no backend for is a typo, and a silent one:

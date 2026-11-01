@@ -576,6 +576,9 @@ eq(netlink.mux_available(fx, 'wwan0', 'qmi', plugins), true,
 	eq(r.ok, false, 'no-mux: a negotiated QMAP format refuses rather than degrades');
 	ok(index(r.error ?? '', 'mux_id') > 0,
 		'no-mux: ...and the error names the option that fixes it');
+	// no retry cures it, so make_fail must not count it as an attempt — it
+	// walked the recovery ladder toward a router reboot (#66)
+	eq(r.config, true, 'no-mux: ...marked a configuration error, not a modem failure');
 
 	// without a negotiated format the fallback is still right: a config that
 	// names no channel simply IS raw_ip

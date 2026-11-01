@@ -7,10 +7,12 @@
 // vanished modem for the recovery ladder, and driving the mobile/LTE/signal LEDs
 // from the modem's registration + signal.
 //
-// A profile is selected from /etc/board.json's model id. An unknown board yields
-// a null profile — every operation is then a safe no-op, so the daemon runs
-// unchanged on hardware we don't have a profile for. All sysfs access goes
-// through an injectable fx (read/write/list) so the whole module is host-testable.
+// A profile is selected from /etc/board.json's model id: a board file
+// `<model id>.json` under BOARD_DIRS if there is one, else the built-in table
+// below. An unknown board yields a null profile — every operation is then a safe
+// no-op, so the daemon runs unchanged on hardware we don't have a profile for.
+// All sysfs access goes through an injectable fx (read/write/list) so the whole
+// module is host-testable.
 
 'use strict';
 
@@ -22,6 +24,12 @@ const LED_DIR = '/sys/class/leds';
 // how long a power-cycle keeps the modem powered off / a reset GPIO stays asserted
 const POWER_OFF_MS = 30000;      // default de-power duration (config repower_time)
 const RESET_ASSERT_MS = 30000;   // per spec: invert, wait 30 s, restore
+
+// Board files, searched in this order; a later directory wins. The first is for
+// a device's own package or its target's base-files, which then carry the
+// modem wiring along with the device itself instead of a PR to this table
+// (ddimension/wwand#48). The second is the admin's, and survives a sysupgrade.
+export const BOARD_DIRS = [ '/usr/share/wwand/boards.d', '/etc/wwand/boards.d' ];
 
 export function default_fx()
 {
@@ -174,15 +182,38 @@ function render_mobile(fx, m, s)
 		set_led(fx, m.tech, (s.registered && (s.lte ?? (s.radio != null))) ? 255 : 0);
 }
 
+// The LED styles a profile can name. A style is code, a profile only names one
+// and its LEDs, which is what lets a board file be plain data. A panel that
+// needs another behaviour needs a new style here.
+const LED_STYLES = {
+	// one LED per signal bar, `names` from the weakest bar up; dark while
+	// not registered
+	signal_bars: {
+		keys: { names: 'list' },
+		required: [ 'names' ],
+		render: (fx, l, s) => render_bars(fx, l.names, s.registered ? s.bars : 0),
+	},
+	// red/green(+orange) mobile LED and a tech LED, see render_mobile
+	mobile: {
+		keys: { red: 'name', green: 'name', orange: 'name', tech: 'name' },
+		required: [ 'red', 'green' ],
+		render: (fx, l, s) => render_mobile(fx, l, s),
+	},
+};
+
 // --- board profiles ----------------------------------------------------------
+// The same shape in this table and in a board file:
 // power_gpio           — named GPIO that gates modem USB power (power-cycle
 //                        target). value 1 = powered by default.
 // power_gpio_active_low— the power line is INVERTED: value 0 = powered, 1 = off.
 // reset_gpio           — named GPIO wired to the modem RESET line (board
 //                        default; a modem config `reset_gpio` overrides)
+// reset_run            — the level (0/1) at which that reset line lets the
+//                        modem RUN; see reset_pulse for why it is worth stating
 // option_ids           — vendor/product pairs to bind to the usb-serial `option`
 //                        driver
-// leds(fx, s)          — render the panel from the modem state s
+// leds                 — { style: <LED_STYLES key>, ...that style's LED names }
+// note                 — free text, ignored; a board file has no comments
 const SIGNAL5 = [ 'green:mobile-1', 'green:mobile-2', 'green:mobile-3',
                   'green:mobile-4', 'green:mobile-5' ];
 
@@ -192,20 +223,21 @@ const SIGNAL5 = [ 'green:mobile-1', 'green:mobile-2', 'green:mobile-3',
 // prefix is gone (mt7620n_zyxel_lte3301.dtsi, lte3301 fork afab7c890b;
 // /sys/class/leds HW-observed on an M209, 2026-10-03). An old name would make
 // every write here land in a path that does not exist, silently.
-const LTE3301_LEDS = { red: 'red:mobile', green: 'green:mobile', tech: 'green:lte' };
+const LTE3301_LEDS = { style: 'mobile', red: 'red:mobile', green: 'green:mobile', tech: 'green:lte' };
 
 const PROFILES = {
 	'mikrotik,chateau-5g-r17-ax': {
 		power_gpio: 'modem-power',
 		reset_gpio: 'modem-reset',
-		leds: (fx, s) => render_bars(fx, SIGNAL5, s.registered ? s.bars : 0),
+		leds: { style: 'signal_bars', names: SIGNAL5 },
 	},
 	'zyxel,lte3301-plus': {
 		power_gpio: 'power_modem',
-		leds: (fx, s) => render_mobile(fx, {
+		leds: {
+			style: 'mobile',
 			red: 'lte3301-plus:red:mobile', green: 'lte3301-plus:green:mobile',
 			orange: 'lte3301-plus:orange:mobile', tech: 'lte3301-plus:white:lte',
-		}, s),
+		},
 	},
 	// The LTE3301 variants bind BOTH serial ids, as the vendor helper did on
 	// either board (/usr/sbin/lte3301, vpn2go, Release_2024.10): 1435:d181 and
@@ -214,12 +246,12 @@ const PROFILES = {
 	'zyxel,lte3301-m209': {
 		power_gpio: 'usbpower',
 		option_ids: [ '1435 d181', '2020 2033' ],
-		leds: (fx, s) => render_mobile(fx, LTE3301_LEDS, s),
+		leds: LTE3301_LEDS,
 	},
 	'zyxel,lte3301-q222': {
 		power_gpio: 'usbpower',
 		option_ids: [ '1435 d181', '2020 2033' ],
-		leds: (fx, s) => render_mobile(fx, LTE3301_LEDS, s),
+		leds: LTE3301_LEDS,
 	},
 	// Zyxel LTE5398-M904: `lte_power` gates the modem's USB power (wired active-low
 	// at HW, but the sysfs gpio applies the inversion, so value 1 = on, default 1).
@@ -228,9 +260,7 @@ const PROFILES = {
 	// `reset_gpio` at an exported reset line. Three gpio-LED status lights.
 	'zyxel,lte5398-m904': {
 		power_gpio: 'lte_power',
-		leds: (fx, s) => render_mobile(fx, {
-			red: 'red:lte', green: 'green:lte', orange: 'orange:lte',
-		}, s),
+		leds: { style: 'mobile', red: 'red:lte', green: 'green:lte', orange: 'orange:lte' },
 	},
 	// nr7101: the RG502Q's RESET line is the named gpio_switch `lte_reset`
 	// (board.d: gpio 515, exported at /sys/class/gpio/gpio515). Recovery holds it
@@ -299,6 +329,150 @@ const PROFILES = {
 	},
 };
 
+// --- board files ---------------------------------------------------------------
+
+// A name that goes into a sysfs path: no slash, no '..'. GPIO and LED names
+// share it; LED names carry colons (`green:mobile-1`). The instance's
+// safe_gpio uses it too: a name the validator passed and the GPIO code then
+// refused would give a profile that claims a power line it can never switch.
+function safe_name(v)
+{
+	return type(v) == 'string' && length(v) > 0 && length(v) <= 64 &&
+		!!match(v, /^[A-Za-z0-9._:-]+$/) && index(v, '..') < 0;
+}
+
+const PROFILE_KEYS = {
+	power_gpio: true, power_gpio_active_low: true, reset_gpio: true,
+	reset_run: true, option_ids: true, leds: true, note: true,
+};
+
+// Check a profile from a board file. Returns null when it is usable, else the
+// first thing wrong with it, as text for the log.
+//
+// ALL OR NOTHING, and an unknown key is an error. A board file is read by a
+// daemon that switches the modem's power: a misspelt `power_gpio_active_low`
+// that was skipped would leave a correct-looking profile with the polarity
+// reversed, and the first recovery would switch the modem off for good. So a
+// file is taken whole or not at all, and the log says why.
+export function validate_profile(p)
+{
+	if (type(p) != 'object')
+		return 'not a JSON object';
+
+	for (let k in keys(p))
+		if (!PROFILE_KEYS[k])
+			return sprintf('unknown key %J', k);
+
+	for (let k in [ 'power_gpio', 'reset_gpio' ])
+		if (p[k] != null && !safe_name(p[k]))
+			return sprintf('%s: not a GPIO name: %J', k, p[k]);
+
+	if (p.power_gpio_active_low != null && type(p.power_gpio_active_low) != 'bool')
+		return 'power_gpio_active_low: must be true or false';
+
+	if (p.reset_run != null && p.reset_run !== 0 && p.reset_run !== 1)
+		return 'reset_run: must be 0 or 1';
+
+	if (p.option_ids != null) {
+		if (type(p.option_ids) != 'array')
+			return 'option_ids: must be a list';
+
+		for (let i in p.option_ids)
+			if (type(i) != 'string' || !match(i, /^[0-9A-Fa-f]{4} [0-9A-Fa-f]{4}$/))
+				return sprintf('option_ids: not "vvvv pppp": %J', i);
+	}
+
+	if (p.note != null && type(p.note) != 'string')
+		return 'note: must be text';
+
+	if (p.leds != null) {
+		let l = p.leds;
+		let st = (type(l) == 'object') ? LED_STYLES[l.style] : null;
+
+		if (!st)
+			return sprintf('leds: unknown style %J (known: %s)', l?.style,
+				join(', ', sort(keys(LED_STYLES))));
+
+		for (let k in keys(l)) {
+			if (k == 'style')
+				continue;
+
+			if (!st.keys[k])
+				return sprintf('leds: style %s has no %J', l.style, k);
+
+			// a list where the style takes one LED would become a path
+			// built from the stringified array, and the other way round
+			let is_list = (type(l[k]) == 'array');
+
+			if (is_list != (st.keys[k] == 'list'))
+				return sprintf('leds.%s: must be %s', k,
+					(st.keys[k] == 'list') ? 'a list' : 'one LED name');
+
+			let names = is_list ? l[k] : [ l[k] ];
+
+			if (!length(names))
+				return sprintf('leds.%s: empty', k);
+
+			for (let n in names)
+				if (!safe_name(n))
+					return sprintf('leds.%s: not an LED name: %J', k, n);
+		}
+
+		// a style without the LEDs it drives would validate and then light
+		// nothing, which looks exactly like a board with dead LEDs
+		for (let k in st.required)
+			if (l[k] == null)
+				return sprintf('leds.%s: missing for style %s', k, l.style);
+	}
+
+	return null;
+};
+
+// The profile for a board id: a board file if one exists (the last directory
+// in BOARD_DIRS wins), else the built-in entry. Returns { profile, source },
+// source being the file's path or 'builtin', or null for neither.
+//
+// The winning file decides alone. One that does not validate is logged and
+// the built-in entry (or none) applies; a file in an earlier directory is NOT
+// consulted then. An admin's /etc file exists to replace the packaged one, so
+// a typo in it must not quietly bring back exactly what it was there to
+// replace.
+export function load_profile(fx, id, log, dirs)
+{
+	if (id == null)
+		return null;
+
+	// the id names the file, so it must not be able to name anything else
+	if (type(id) == 'string' && match(id, /^[A-Za-z0-9,._+-]+$/) && index(id, '..') < 0) {
+		for (let d in reverse([ ...(dirs ?? BOARD_DIRS) ])) {
+			let path = sprintf('%s/%s.json', d, id);
+			let raw = fx.read(path);
+
+			if (raw == null)
+				continue;
+
+			let p = null, why = null;
+
+			try {
+				p = json(raw);
+			}
+			catch (e) {
+				why = 'not valid JSON';
+			}
+
+			why ??= validate_profile(p);
+
+			if (why == null)
+				return { profile: p, source: path };
+
+			log?.('err', sprintf('board %s: ignoring %s: %s', id, path, why));
+			break;
+		}
+	}
+
+	return PROFILES[id] ? { profile: PROFILES[id], source: 'builtin' } : null;
+};
+
 // --- instance ----------------------------------------------------------------
 
 export function create(opts)
@@ -306,7 +480,11 @@ export function create(opts)
 	let fx = opts?.fx ?? default_fx();
 	let log = opts?.log ?? ((level, msg) => warn(sprintf('%s: %s\n', level, msg)));
 	let id = opts?.id ?? detect_id(fx);
-	let profile = (id != null) ? PROFILES[id] : null;
+	let found = load_profile(fx, id, log, opts?.dirs);
+	let profile = found?.profile;
+
+	if (found && found.source != 'builtin')
+		log('notice', sprintf('board %s: profile from %s', id, found.source));
 	// in-flight reset pulse (see reset_pulse): one at a time, and the guard is
 	// what keeps a concurrent caller from sampling a driven line
 	let pulse_timer = null;
@@ -321,8 +499,7 @@ export function create(opts)
 	// `reset_gpio` comes from uci — restrict to a safe token (no slash, no
 	// '..') so a hostile config value can never escape /sys/class/gpio.
 	let safe_gpio = (name) => {
-		if (type(name) == 'string' && length(name) <= 64 &&
-		    match(name, /^[A-Za-z0-9._:-]+$/) && index(name, '..') < 0)
+		if (safe_name(name))
 			return true;
 
 		log('err', sprintf('board: rejecting invalid gpio name %J', name));
@@ -358,6 +535,8 @@ export function create(opts)
 	let self = {
 		id: id,
 		profile: profile,
+		// where the profile came from: a board file's path, 'builtin', or null
+		profile_source: found?.source,
 		has_power: profile?.power_gpio != null,
 		// expose the signal->bars mapping so callers building an LED state don't
 		// need to import the module function separately
@@ -498,8 +677,10 @@ export function create(opts)
 	// render the status LEDs from a normalized modem state:
 	//   { present, registered, radio, roaming, bars }
 	self.leds = function(state) {
-		if (profile?.leds)
-			profile.leds(fx, state ?? {});
+		let style = LED_STYLES[profile?.leds?.style];
+
+		if (style)
+			style.render(fx, profile.leds, state ?? {});
 	};
 
 	return self;

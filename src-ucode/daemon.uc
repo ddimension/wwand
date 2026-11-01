@@ -508,7 +508,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:1028-1031 warns "references
+	// produces no entry for it at all (config.uc:1056-1059 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -1489,8 +1489,8 @@ export function create(opts)
 	// whether anything started it.
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
-	// own emit on a change (modem_mbim.uc:1069-1078) while the shared reapply
-	// tail emits on every re-read (modem_common.uc:659-665); one comparison, in
+	// own emit on a change (modem_mbim.uc:1071-1080) while the shared reapply
+	// tail emits on every re-read (modem_common.uc:796-802); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {
 		let entry = self.modems[modem.id];
@@ -2564,6 +2564,23 @@ export function create(opts)
 		return board_gpio_ok() ? deps.board.power_cycle(off) : false;
 	};
 
+	// Would board_repower() actually act on this modem? Mirrors the decision
+	// board_repower() makes above (a reset line to pulse, else a power cycle on
+	// a single-modem box that has a power GPIO) WITHOUT performing it. The
+	// zero-rx watchdog asks this before it falls through to a modem reset: a
+	// board that can repower should, and only one that cannot gets the reset,
+	// so it must not be fooled by the no-op repower closure the recovery is
+	// always handed (ddimension/wwand#59).
+	let board_can_repower = (cfg) => {
+		if (!deps.board)
+			return false;
+
+		if (board_reset_line(cfg) != null)
+			return true;
+
+		return board_gpio_ok() && !!deps.board.has_power;
+	};
+
 
 	// detach a dead modem: drop the modem object, reset device/netdev to their
 	// configured values, unbind this modem's contexts (their ctx is bound to the
@@ -2589,7 +2606,7 @@ export function create(opts)
 			};
 
 		// TELL THE CONTEXTS FIRST, then stop the modem — the order _device_gone
-		// uses (modem_common.uc:704). Dropping `centry.ctx` below only releases
+		// uses (modem_common.uc:841). Dropping `centry.ctx` below only releases
 		// the daemon's HANDLE: the context object itself lives on with its
 		// monitor timers armed and its WDS clients alive, polling a hub that
 		// entry.modem.stop() has just closed. One orphan per removal, and its
@@ -3209,6 +3226,11 @@ export function create(opts)
 				// power GPIO. Board fallbacks gated by board_gpio_ok (multi-modem would
 				// hit the wrong hardware). No-op when nothing safe is available.
 				repower: deps.board ? (() => board_repower(cfg)) : null,
+				// ...and whether that repower would ACTUALLY act, so the zero-rx
+				// watchdog can tell "no mechanism here" (reset the modem) from
+				// "refused" (do nothing) — board_repower above is a closure the
+				// recovery always receives even when it would no-op.
+				can_repower: deps.board ? (() => board_can_repower(cfg)) : null,
 				// the RESET line ASSIGNED TO THIS MODEM in its own section — the
 				// ladder's one permitted action on a modem that has never
 				// answered (recovery.uc, unarmed_reset_line). Not the board
@@ -3852,6 +3874,52 @@ export function create(opts)
 				}, { timeout: 5000 });
 			};
 
+			// The kernel's transmit watchdog, per modem, on the netdev that owns
+			// the queue (context_common.tx_stall_watch). One watch per modem
+			// OBJECT: a new object is a new modem as far as the stall goes, and
+			// its first reading is a baseline. Observing costs one sysfs read
+			// per tick; acting is `tx_stall_timeout` (0 = observe only).
+			// monotonic seconds; `timing.mono` is the test seam, as the 10 s
+			// timer is for the tick itself
+			let tx_clock = () => {
+				let f = self.timing?.mono ?? context_common.mono;
+
+				return f();
+			};
+			self._tx_clock = tx_clock;
+
+			let tx_stall_tick = (name, entry) => {
+				let m = entry?.modem;
+
+				if (!m) {
+					entry._txs = entry._txs_for = null;
+					return;
+				}
+
+				if (entry._txs_for !== m) {
+					entry._txs_for = m;
+					entry._txs = context_common.tx_stall_watch({
+						read: self.timing?.tx_queue_stats,
+						limit_s: () => +(m.config?.tx_stall_timeout ?? 120),
+						log: (lvl, msg) => log(lvl, sprintf('modem %s: %s', name, msg)),
+					});
+				}
+
+				let dev = m.datapath?.parent ?? m.datapath?.netdev;
+				// armed only while a session of this modem is up: with none
+				// there is no data path to rescue (tx_stall_watch)
+				let armed = false;
+
+				for (let cname, ce in self.contexts)
+					if (ce.ctx?.modem === m && ce.ctx.state == 'CONNECTED') {
+						armed = true;
+						break;
+					}
+
+				if (entry._txs.sample(dev, tx_clock(), m.counters?.proto_errors, armed) == 'trip')
+					m.trip_zero_rx?.('tx stall');
+			};
+
 			let tick;
 			tick = () => {
 				let now = time();
@@ -3968,6 +4036,9 @@ export function create(opts)
 
 				for (let name, entry in self.modems)
 					uim_remote_switch_probe(name, entry);
+
+				for (let name, entry in self.modems)
+					tx_stall_tick(name, entry);
 
 				// a radio a plugin parked, which no plugin holds any more (it
 				// stopped, failed, forgot): handed back as the plugin would
@@ -4688,6 +4759,11 @@ export function create(opts)
 				at_tty: entry.modem?.at_tty,
 				// at2 released for external tools
 				at2_released: entry.modem?.at2_released,
+				// the kernel transmit watchdog on the data netdev, as the
+				// daemon tick last read it: { netdev, timeouts, stalled_s }
+				// (context_common.tx_stall_watch); null before the first read
+				tx_stall: (entry._txs_for === entry.modem && entry._txs)
+					? entry._txs.view(self._tx_clock?.() ?? context_common.mono()) : null,
 				// the modem's NMEA port, reported for gpsd to be pointed at.
 				// wwand never opens it and never links it — asking the daemon is
 				// the interface, so a re-enumerated modem answers with its new tty
@@ -4838,6 +4914,8 @@ export function create(opts)
 		let board = deps.board ? {
 			id: deps.board.id,
 			profile: deps.board.profile != null,
+			// a board file's path, or 'builtin': which of the two to edit
+			profile_source: deps.board.profile_source,
 			has_power: deps.board.has_power,
 			reset_gpio: deps.board.profile?.reset_gpio,
 		} : null;
@@ -5490,8 +5568,12 @@ export function create(opts)
 			// a modem with datapath but no AT port yet (NCM: serial ports can appear
 			// long after the netdev) sits in ABSENT backoff — a tty arrival is the cue
 			// to retry now. start() is state-guarded, so this no-ops elsewhere.
+			// Not a modem parked on a configuration error (modem_common
+			// make_fail): an unrelated device arriving cannot cure it, and a
+			// real replug rebuilds the modem object anyway.
 			for (let name, entry in self.modems) {
-				if (entry.modem && !entry.modem.at && entry.modem.state == 'ABSENT')
+				if (entry.modem && !entry.modem.at && entry.modem.state == 'ABSENT' &&
+				    !entry.modem.config_error)
 					entry.modem.start();
 			}
 		}

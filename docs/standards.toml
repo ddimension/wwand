@@ -58,6 +58,14 @@ by = "Claude, for ddimension/wwand#61"
 reviewed = "wwand 8a170a1"
 fixed = "wwand, commit \"qrtr: a send the modem never confirms no longer freezes the daemon (#61)\""
 
+[[reviews]]
+id = "R6"
+date = "2026-10-30"
+kind = "reference implementation + vendor manual read next to the code, then HW-verified (ModemManager data/dispatcher-fcc-unlock/14c3 and twh/wwan-unlock modules/14c3:4d75 — GTFCCLOCK formula, big-endian challenge, model-id from SMBIOS type 133; Fibocom FM350 AT Commands Manual V2.10 §17 GTFCCLOCKMODE/STATE/EFFSTATUS/GEN/VER)"
+by = "Claude"
+reviewed = "wwand f3f3a6a"
+fixed = "wwand, commit \"mbim: unlock the Fibocom FM350 FCC lock (GTFCCLOCK) so it registers\""
+
 [[component]]
 name = "QMI codec and service schemas"
 code = "src-ucode/codec/{qmux,tlv,hex}.uc, codec/schema/*.uc"
@@ -161,6 +169,18 @@ code = "src-ucode/{atcmd,atcmd_parse,atport}.uc"
   sections = "+CME ERROR / +CMS ERROR codes, unsolicited result codes"
     [[component.standard.review]]
     review = "tbd"
+
+[[component]]
+name = "Fibocom FM350 FCC unlock (GTFCCLOCK)"
+code = "src-ucode/fcc_fibocom.uc, modem_mbim.uc"
+  [[component.standard]]
+  name = "Fibocom FM350 AT Commands Manual V2.10 §17 (GTFCCLOCKMODE/STATE/EFFSTATUS/GEN/VER)"
+  basis = "ModemManager data/dispatcher-fcc-unlock/14c3 and twh/wwan-unlock (14c3:4d75)"
+  sections = "GTFCCLOCKGEN challenge, sha256(challenge_BE32 ‖ sha256(model_id)[0:4])[0:4] response, GTFCCLOCKVER verify, model-id from SMBIOS type 133 with known OEM fallbacks"
+    [[component.standard.review]]
+    review = "R6"
+    result = "HW-verified on the Dell DW5931e (FM350-GL): challenge 0x40799ebd -> GTFCCLOCKVER=3436456810 -> +GTFCCLOCKVER: 1, radio unlocked, modem registered; model-id \"DW5931EFCCLOCK\" (key 4909b5a4), Lenovo \"KHOIHGIUCCHHII\" (key 3df8c719) the other known id; byte assembly and the two keys regression-tested against sha256sum in test_fcc_fibocom"
+    open = "SMBIOS type 133 absent on the test host, so model-id discovery from firmware is not HW-exercised (both known ids are tried when it is absent)"
 
 [[component]]
 name = "SIM, PIN, identity, PLMN lists"

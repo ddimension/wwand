@@ -774,6 +774,27 @@ eq(atcmd.parse_ethermal([ '+ETHERMAL: 3, 120, 0' ]), null, 'ethermal: ...and at 
 eq(atcmd.parse_ethermal([ '+ETHERMAL: 3, 32767, 0' ]), null, 'ethermal: the 32767 filler is not a reading');
 eq(atcmd.parse_ethermal([ 'OK' ]), null, 'ethermal: no line -> null');
 
+// Foxconn T99W175 AT^TEMP?: the TSENS line, never PA or skin. The first is
+// the reporter's capture (ddimension/wwand#70), the rest test our contract.
+eq(atcmd.parse_tsens([ 'PA: 32C', 'Skin Sensor: 32C', 'TSENS: 34C', 'OK' ]), 34,
+	'tsens: the SoC sensor out of the three');
+eq(atcmd.parse_tsens([ 'PA: 32C', 'Skin Sensor: 32C', 'OK' ]), null,
+	'tsens: no TSENS line, no reading — PA is not a stand-in');
+eq(atcmd.parse_tsens([ 'TSENS: 5C' ]), null, 'tsens: below the window');
+eq(atcmd.parse_tsens([ 'XTSENS: 40C' ]), null, 'tsens: anchored at the line start');
+// ...and the engine hands those prefix-less rows over as the answer: nothing
+// marks them, so a URC filter that took them would leave the parser empty
+{
+	let t = fake_transport();
+	let e = atcmd.create(t, { log: silent });
+	let lines = null;
+
+	e.send('AT^TEMP?', (err, res) => { lines = res?.lines; });
+	t.reply("AT^TEMP?\r\nPA: 32C\r\nSkin Sensor: 32C\r\nTSENS: 34C\r\n\r\nOK\r\n");
+
+	eq(lines, [ 'PA: 32C', 'Skin Sensor: 32C', 'TSENS: 34C' ], 'tsens: the engine keeps the bare rows');
+}
+
 // Huawei ^CHIPTEMP: first plausible sensor across the CSV
 eq(atcmd.parse_chiptemp([ '^CHIPTEMP: 0,38,41,45' ]), 38, 'chiptemp: first in-range (0 skipped)');
 // The five-field layout, explained by the reporter (ddimension/wwand#12):
@@ -1390,7 +1411,34 @@ uloop.timer(600, () => {
 	ok(!match(join(' ', tlogs), /secret123/), 'auth: timeout log redacted');
 	eq(anst, 0, 'on_answer: a timeout is silence, and silence is not an answer');
 	eq(ierr, { error: 'invalid_command' }, 'injection: caller gets an error back');
-	done('test_atcmd');
+	// --- close() drops, abort() completes (#60) ----------------------------------
+// close() discards what was queued WITHOUT its callback, and every teardown is
+// written against that. abort() is for the one owner that drops a port while
+// the modem lives on: what was in flight completes with `closed`, after the
+// engine is closed.
+{
+	let t = fake_transport();
+	let e = atcmd.create(t, { log: silent });
+	let got = [];
+
+	e.send('AT+CSQ', (err) => push(got, err?.error));
+	e.send('AT+COPS?', (err) => push(got, err?.error));
+	e.close();
+	eq([ got, t.closed ], [ [], true ], 'close: queued callbacks are dropped silently, as every teardown expects');
+
+	let t2 = fake_transport();
+	let e2 = atcmd.create(t2, { log: silent });
+	let seen = [];
+
+	e2.send('AT+CSQ', (err) => push(seen, [ 'csq', err?.error, e2.closed ]));
+	e2.send('AT+QENG="servingcell"', (err) => push(seen, [ 'qeng', err?.error, e2.closed ]));
+	e2.abort();
+	eq(seen, [ [ 'csq', 'closed', true ], [ 'qeng', 'closed', true ] ],
+		'abort: the command in flight and the queued one complete with closed — on an engine already closed');
+	ok(t2.closed, 'abort: the transport is closed');
+}
+
+done('test_atcmd');
 });
 
 uloop.run();

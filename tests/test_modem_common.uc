@@ -136,6 +136,68 @@ eq(ret_sent, [ 'AT+CSQ' ], 'retire: other commands keep being sent');
 		'silent: an answer now and then resets the count — never retired');
 }
 
+// --- a wholly-dead SEPARATE at2 is given up; the control channel survives (#60) ---
+// A side channel that answers NOTHING never trips the per-command retire above
+// (its guard needs some other command to answer). After AT_PORT_DEAD_AFTER (20)
+// timed-out telemetry commands the whole at2 is closed and telemetry falls back
+// to the control engine — which is left untouched.
+{
+	let closed = 0, at2_sent = 0, ctrl_sent = 0;
+	let m = { _at_log: (l, msg) => null };
+	m.at = { tag: 'ctrl', send: (cmd, cb) => { ctrl_sent++; cb(null, { lines: [ 'OK' ] }); } };
+	let at2 = { tag: 'at2', send: (cmd, cb) => { at2_sent++; cb({ error: 'timeout' }, { lines: [] }); },
+	            close: () => { closed++; } };
+	m.at_telemetry = at2;
+
+	let trip_err = null;
+	for (let i = 0; i < 20; i++)
+		mc.telemetry_at(m).send('AT+QCAINFO', (e) => { trip_err = e; });
+
+	eq(closed, 1, 'at2-dead: the side channel is closed exactly once');
+	eq(at2_sent, 20, 'at2-dead: at2 given up after AT_PORT_DEAD_AFTER commands');
+	eq(m.at_telemetry, m.at, 'at2-dead: telemetry falls back to the control engine');
+	eq(trip_err?.error, 'closed', 'at2-dead: the command that tripped it answers closed');
+
+	// later telemetry rides the control engine; the dead at2 is not polled again
+	let cs = ctrl_sent;
+	mc.telemetry_at(m).send('AT+CSQ', () => null);
+	eq(ctrl_sent, cs + 1, 'at2-dead: later telemetry goes to the control channel');
+	eq(at2_sent, 20, 'at2-dead: the dead side channel is not polled again');
+}
+
+// the give-up ABORTS at2 (its waiting callbacks complete) rather than closing
+// it silently, and has switched telemetry over before they run
+{
+	let order = [];
+	let m = { _at_log: (l, msg) => null };
+	m.at = { tag: 'ctrl', send: (cmd, cb) => cb(null, { lines: [ 'OK' ] }) };
+	m.at_telemetry = { tag: 'at2', send: (cmd, cb) => cb({ error: 'timeout' }, { lines: [] }),
+	                   close: () => push(order, 'close'),
+	                   abort: () => push(order, m.at_telemetry === m.at ? 'abort-after-switch' : 'abort-before-switch') };
+
+	for (let i = 0; i < 20; i++)
+		mc.telemetry_at(m).send('AT+QCAINFO', () => null);
+
+	eq(order, [ 'abort-after-switch' ], 'at2-dead: aborted, not closed silently — and only after telemetry switched to the control engine');
+}
+
+// shared engine (no separate at2): a wholly-dead telemetry channel that IS the
+// control channel is NEVER closed — doing so would strand the modem on NCM.
+{
+	let closed = 0, sent = 0;
+	let m = { _at_log: (l, msg) => null };
+	m.at = { tag: 'ctrl', send: (cmd, cb) => { sent++; cb({ error: 'timeout' }, { lines: [] }); },
+	         close: () => { closed++; } };
+	m.at_telemetry = m.at;
+
+	for (let i = 0; i < 30; i++)
+		mc.telemetry_at(m).send('AT+QCAINFO', () => null);
+
+	eq(closed, 0, 'shared-engine: the control channel is never closed by the port give-up');
+	eq(m.at_telemetry, m.at, 'shared-engine: telemetry stays on the control engine');
+	eq(sent, 30, 'shared-engine: it keeps being polled — nothing to give up');
+}
+
 // COUNTERPROOF 1: a bare ERROR that is not consecutive never retires anything.
 // This is the ddimension/wwand#12 shape — AT^CHIPTEMP was latched off on its
 // first error and the modem reported no temperature again for the whole
@@ -239,6 +301,15 @@ let ts = temp_modem('SIMCOM INCORPORATED', [ '+CPMUTEMP: 47' ]);
 mc.collect_temperature(ts, () => null);
 eq(ts._sent, 'AT+CPMUTEMP', 'temp: simcom sends AT+CPMUTEMP');
 eq(ts.temperature.celsius, 47, 'temp: simcom parsed 47 C');
+
+// Foxconn T99W175 under both of its names: "QUALCOMM" from AT+GMI (MBIM,
+// PCIe) and "QUALCOMM INCORPORATED" from QMI DMS (USB) — ddimension/wwand#70
+for (let mfr in [ 'QUALCOMM', 'QUALCOMM INCORPORATED' ]) {
+	let tx = temp_modem(mfr, [ 'PA: 32C', 'Skin Sensor: 32C', 'TSENS: 34C', 'OK' ]);
+	mc.collect_temperature(tx, () => null);
+	eq([ tx._sent, tx.temperature?.celsius ], [ 'AT^TEMP?', 34 ],
+		sprintf('temp: "%s" sends AT^TEMP? and reads TSENS', mfr));
+}
 
 // unreadable value -> temperature cleared to null (not left stale-as-object)
 let tn = temp_modem('Quectel', [ '+QTEMP: "x","5"', 'OK' ]);
@@ -482,12 +553,14 @@ eq(opened_ttys[0], '/dev/ttyUSB2', 'huawei-wdm: option tty overrides the wdm pre
 // byte-identical in all three modem state machines.
 
 let events = [];
-let repowered = 0, success = 0;
+let repowered = 0, success = 0, rec_can = true;
 let self_m = { state: 'ABSENT', contexts: [] };
+let sc_logs = [];
 let sc = mc.scaffolding(self_m, {
 	deps: { on_event: (m, ev, d) => push(events, { m: m, ev: ev, d: d }) },
-	log: (l, msg) => null,
-	rec: { on_connect_success: () => success++, usb_repower: () => repowered++ },
+	log: (l, msg) => push(sc_logs, msg),
+	rec: { on_connect_success: () => success++, usb_repower: () => repowered++,
+	       can_repower: () => rec_can },
 });
 
 // set_state emits 'state' with the merged data, and no-ops on an unchanged state
@@ -524,7 +597,56 @@ eq(ctx2_events, [], 'scaffolding: attach_context does not replay ready when not 
 self_m.note_connect_success();
 eq(success, 1, 'scaffolding: note_connect_success -> rec.on_connect_success');
 self_m.trip_zero_rx();
-eq(repowered, 1, 'scaffolding: trip_zero_rx -> rec.usb_repower');
+eq(repowered, 1, 'scaffolding: trip_zero_rx -> rec.usb_repower when the board CAN repower');
+
+// zero-rx with NO repower mechanism -> a single, guarded modem reset (#59).
+// Give the modem a reset hook (holding the callback = reset in flight) and the
+// proto_ok evidence the reset is gated on.
+let reset_calls = 0, reset_cb = null;
+self_m.reset = (cb) => { reset_calls++; reset_cb = cb; };
+self_m.counters = { proto_ok: 1 };
+self_m._reattaching = false; self_m.lowpower_parked = false; self_m.detached = false;
+
+rec_can = false;
+let rp_before = repowered;
+self_m.trip_zero_rx();
+eq(reset_calls, 1, 'zero-rx: no repower mechanism -> modem reset');
+eq(repowered, rp_before, 'zero-rx: no repower mechanism -> does NOT usb_repower');
+
+// a second context tripping while that reset is still in flight is latched
+self_m.trip_zero_rx();
+eq(reset_calls, 1, 'zero-rx: a second trip while resetting is latched to one reset');
+
+// once the reset completes the latch clears and a later stall can reset again
+reset_cb(null);
+self_m.trip_zero_rx();
+eq(reset_calls, 2, 'zero-rx: a trip after the reset completes resets again');
+reset_cb({ error: 'unsupported_on_backend' });
+ok(length(filter(sc_logs, (m) => index(m, 'zero-rx: modem reset failed') == 0)) == 1,
+	'zero-rx: a reset that fails says so — the stall stays and the log is where it shows');
+self_m.trip_zero_rx();
+eq(reset_calls, 3, 'zero-rx: a failed reset also clears the latch');
+reset_cb(null);
+
+// a modem that has never answered (no proto_ok) is never reset
+self_m.counters = { proto_ok: 0 };
+self_m.trip_zero_rx();
+eq(reset_calls, 3, 'zero-rx: a modem that never answered is not reset');
+self_m.counters = { proto_ok: 1 };
+
+// nor across an in-flight reattach, a parked radio, or a detached modem
+self_m._reattaching = true;  self_m.trip_zero_rx();
+self_m._reattaching = false; self_m.lowpower_parked = true;  self_m.trip_zero_rx();
+self_m.lowpower_parked = false; self_m.detached = true;      self_m.trip_zero_rx();
+self_m.detached = false;
+eq(reset_calls, 3, 'zero-rx: no reset across reattach / park / detach');
+
+// and when the board CAN repower again it repowers, never resets
+rec_can = true;
+self_m.trip_zero_rx();
+eq(repowered, rp_before + 1, 'zero-rx: board can repower -> usb_repower');
+eq(reset_calls, 3, 'zero-rx: board can repower -> no modem reset');
+rec_can = false;
 
 // stop(): teardown + ABSENT
 let torn_m = 0;
@@ -670,6 +792,25 @@ mf_events = []; torn = 0; mf_retry = null;
 fail('register', { error: 'real' });
 ok(mf_retry != null, 'make_fail: outside a teardown the retry is armed as before');
 mf_retry.cancel();
+
+// A CONFIGURATION ERROR IS NOT A FLAKY MODEM: no attempt counted (the ladder
+// would reset, power-cycle and finally reboot over a missing `mux_id`, #66), no
+// retry armed, and the reason surfaced as the control note until a new
+// bring-up re-decides it
+mf_events = []; torn = 0; mf_retry = null; mf_action = 'retry';
+let ncf_calls = 0;
+let ncf_orig = fm.note_connect_failure;
+fm.note_connect_failure = (done) => { ncf_calls++; done(mf_action); };
+fm.state = 'INIT_DATAPATH';
+fail('datapath', { ok: false, config: true, error: 'add `option mux_id`' });
+eq(ncf_calls, 0, 'make_fail: a config error never reaches the recovery ladder');
+eq(mf_retry, null, 'make_fail: ...arms no retry');
+eq(torn, 1, 'make_fail: ...but tears the modem down');
+eq(fm.state, 'ABSENT', 'make_fail: ...and parks it ABSENT');
+eq(mf_events[0]?.d?.action, 'config', 'make_fail: ...reporting action config');
+ok(index(fm.control_note ?? '', 'mux_id') > 0, 'make_fail: ...with the reason as the control note');
+fm.note_connect_failure = ncf_orig;
+fm.control_note = null; fm.config_error = null;
 
 // a 'reboot' action: tears down but schedules NO retry (reboot pending)
 mf_events = []; torn = 0; mf_retry = null;
@@ -1290,6 +1431,124 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 	eq(m3.gnss_started, null, 'gnss: a failed start is not latched away');
 })();
 
+// `option gnss_nmea` (#69): the NMEA masks are set read-before-write ahead of
+// the start. `fix` writes GPS GGA+RMC+GSA (11) and ONLY zeros elsewhere — the
+// non-GPS bit layouts differ between Quectel families, 0 is off in all of them;
+// `full` takes each mask's maximum from the firmware's own `=?` ranges.
+(() => {
+	// the RG502Q's answer to AT+QGPSCFG=? (HW, 2026-10-25), trimmed
+	const RANGES = [
+		'+QGPSCFG: "outport",("none","usbnmea","uartdebug")',
+		'+QGPSCFG: "gpsnmeatype",(0-31)',
+		'+QGPSCFG: "glonassnmeatype",(0-7)',
+		'+QGPSCFG: "galileonmeatype",(0-31)',
+		'+QGPSCFG: "beidounmeatype",(0-3)',
+	];
+	let mk = (cfg, held, ranges) => {
+		let m = { info: { manufacturer: 'Quectel' }, config: cfg, sent: [] };
+
+		m.at = { send: (cmd, cb) => {
+			push(m.sent, cmd);
+
+			if (cmd == 'AT+QGPSCFG=?')
+				return ranges ? cb(null, { lines: ranges }) : cb({ error: 'cme', code: '4' }, null);
+
+			let rd = match(cmd, /^AT\+QGPSCFG="([a-z]+)"$/);
+
+			if (rd)
+				return cb(null, { lines: [ sprintf('+QGPSCFG: "%s",%d', rd[1], held[rd[1]]) ] });
+
+			let wr = match(cmd, /^AT\+QGPSCFG="([a-z]+)",([0-9]+)$/);
+
+			if (wr)
+				held[wr[1]] = +wr[2];
+
+			cb(null, { lines: [] });
+		} };
+
+		return m;
+	};
+	let writes = (m) => filter(m.sent, (c) => match(c, /",[0-9]+$/));
+
+	let held = { gpsnmeatype: 31, glonassnmeatype: 7, galileonmeatype: 31, beidounmeatype: 1 };
+	let m = mk({ gnss: true, gnss_nmea: 'fix' }, held, RANGES);
+	mc.start_gnss(m, () => null);
+	eq(held, { gpsnmeatype: 11, glonassnmeatype: 0, galileonmeatype: 0, beidounmeatype: 0 },
+		'gnss_nmea fix: GPS GGA+RMC+GSA, every other constellation off');
+	eq(m.sent[length(m.sent) - 1], 'AT+QGPS=1', 'gnss_nmea: ...set BEFORE the receiver starts');
+	eq(m.gnss_started, true, 'gnss_nmea: ...and the start still latches');
+
+	// already as wanted: read, nothing written
+	let m2 = mk({ gnss: true, gnss_nmea: 'fix' }, held, RANGES);
+	mc.start_gnss(m2, () => null);
+	eq(writes(m2), [ ], 'gnss_nmea: a mask the modem already holds is not rewritten');
+
+	// full: each maximum the firmware lists, whatever the bits mean
+	let m3 = mk({ gnss: true, gnss_nmea: 'full' }, held, RANGES);
+	mc.start_gnss(m3, () => null);
+	eq(held, { gpsnmeatype: 31, glonassnmeatype: 7, galileonmeatype: 31, beidounmeatype: 3 },
+		'gnss_nmea full: every listed bit on, from the firmware\'s own ranges');
+
+	// a mask the firmware does not list is never sent
+	let h4 = { gpsnmeatype: 31 };
+	let m4 = mk({ gnss: true, gnss_nmea: 'fix' }, h4, [ '+QGPSCFG: "gpsnmeatype",(0-31)' ]);
+	mc.start_gnss(m4, () => null);
+	eq(writes(m4), [ 'AT+QGPSCFG="gpsnmeatype",11' ], 'gnss_nmea: only the masks the firmware lists');
+
+	// a firmware without the command: the receiver starts anyway
+	let m5 = mk({ gnss: true, gnss_nmea: 'fix' }, {}, null);
+	mc.start_gnss(m5, () => null);
+	eq(m5.sent, [ 'AT+QGPSCFG=?', 'AT+QGPS=1' ], 'gnss_nmea: no NMEA masks -> started unchanged');
+
+	// unset: not a single QGPSCFG — the modem's setting is left alone
+	let m6 = mk({ gnss: true }, held, RANGES);
+	mc.start_gnss(m6, () => null);
+	eq(m6.sent, [ 'AT+QGPS=1' ], 'gnss_nmea unset: the NMEA output is not touched');
+
+	// an unreadable mask is not written blind, and the receiver still starts
+	let m7 = mk({ gnss: true, gnss_nmea: 'fix' }, { gpsnmeatype: 31 },
+		[ '+QGPSCFG: "gpsnmeatype",(0-31)' ]);
+	let send7 = m7.at.send;
+	m7.at.send = (cmd, cb) => {
+		if (cmd == 'AT+QGPSCFG="gpsnmeatype"') {
+			push(m7.sent, cmd);
+			return cb({ error: 'timeout' }, null);
+		}
+
+		send7(cmd, cb);
+	};
+	mc.start_gnss(m7, () => null);
+	eq(writes(m7), [ ], 'gnss_nmea: a mask that cannot be read is left unchanged');
+	eq(m7.sent[length(m7.sent) - 1], 'AT+QGPS=1', 'gnss_nmea: ...and the receiver starts anyway');
+
+	// an answer for another mask is not this mask's value
+	let m8 = mk({ gnss: true, gnss_nmea: 'fix' }, { gpsnmeatype: 31 },
+		[ '+QGPSCFG: "gpsnmeatype",(0-31)' ]);
+	let send8 = m8.at.send;
+	m8.at.send = (cmd, cb) => (cmd == 'AT+QGPSCFG="gpsnmeatype"')
+		? cb(null, { lines: [ '+QGPSCFG: "glonassnmeatype",11' ] })
+		: send8(cmd, cb);
+	mc.start_gnss(m8, () => null);
+	eq(writes(m8), [ ], 'gnss_nmea: another mask\'s line is not read as this one');
+
+	// a teardown mid-chain (the AT engine closed or replaced) ends it: no
+	// write and no start on the engine that came after
+	let m9 = mk({ gnss: true, gnss_nmea: 'fix' }, { gpsnmeatype: 31 },
+		[ '+QGPSCFG: "gpsnmeatype",(0-31)' ]);
+	let send9 = m9.at.send;
+	let other = { send: (cmd, cb) => die('the replaced engine must not be used') };
+	m9.at.send = (cmd, cb) => {
+		if (cmd == 'AT+QGPSCFG=?')
+			m9.at = other;   // the teardown lands while the ranges are answered
+
+		send9(cmd, cb);
+	};
+	let e9 = 'unset';
+	mc.start_gnss(m9, () => null, (e) => { e9 = e; });
+	eq(e9?.detail, 'no at channel', 'gnss_nmea: a chain whose AT engine went away ends there');
+	eq(m9.gnss_started, null, 'gnss_nmea: ...and latches nothing');
+})();
+
 
 // --- a temperature that arrives after its own OK ------------------------------
 //
@@ -1756,6 +2015,38 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	eq(reapplied, 1, 'attach owner: a later profile-1 interface reprograms the attach profile');
 	m.attach_context({ config: { interface: 'w2', profile: 3 }, modem_event: () => null });
 	eq(reapplied, 1, 'attach owner: a bind that does not change the owner does not');
+}
+
+// a config error's note lasts until a new bring-up starts: that attempt
+// re-decides it, and a note left behind would report a failure it may cure.
+// Another component's note (the MBIM radio switch) is not ours to clear.
+{
+	let m = { state: 'ABSENT', contexts: [] };
+	mc.scaffolding(m, { deps: {}, log: () => null, rec: {} });
+
+	m.config_error = m.control_note = 'configuration error in datapath: x';
+	m.set_state('INIT_TRANSPORT');
+	eq(m.control_note, null, 'config note: a new bring-up clears it');
+	eq(m.config_error, null, 'config note: ...and the error with it');
+
+	m.state = 'ABSENT';
+	m.config_error = 'configuration error in datapath: x';
+	m.control_note = 'radio disabled by the hardware switch';
+	m.set_state('INIT_TRANSPORT');
+	eq(m.control_note, 'radio disabled by the hardware switch', 'config note: a foreign note is kept');
+}
+
+// fill_serving_band stores the bare band number, the shape every vendor source
+// uses; LuCI adds the B / n itself (luci-app-wwand#16 showed 'BB3' / 'nn48')
+{
+	let m = { cells: { lte_intra: { earfcn: 1750 }, nr5g_arfcn: 642000 } };
+	mc.fill_serving_band(m);
+	eq(m.cells.serving.lte.band, 3, 'serving band: EARFCN 1750 -> 3, not "B3"');
+	eq(m.cells.serving.nr.band, 48, 'serving band: NR-ARFCN 642000 -> 48, not "n48"');
+
+	let v = { cells: { serving: { lte: { earfcn: 1750, band: 7 } } } };
+	mc.fill_serving_band(v);
+	eq(v.cells.serving.lte.band, 7, 'serving band: a vendor band is kept');
 }
 
 // at_reset through the open AT engine: the answer reaches cb exactly once, and

@@ -28,6 +28,10 @@ import * as qmi_backend from 'wwand.qmi_backend';
 import * as mbim_backend from 'wwand.mbim_backend';
 import * as modem_common from 'wwand.modem_common';
 import * as atcmd from 'wwand.atcmd';
+// read_ca_at (vendor-aware AT carrier-aggregation read) + the Fibocom parsers
+// live beside the NCM telemetry; all three telemetry_*.uc ship in base wwand,
+// so this is not a cross-backend package dependency.
+import * as tel_vendor from 'wwand.telemetry_ncm';
 import * as bc from 'wwand.codec.mbim_schema.basic_connect';
 
 export function install(self, o)
@@ -182,7 +186,19 @@ export function install(self, o)
 			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => up
 				? qmi_backend.get_ca(self.pt.nas, (ca) => ok(ca != null))
 				: ok(false)) },
-			{ name: 'at', probe: (ok) => ok(!!self.at) },
+			// Probe the actual CA read, not just the port's existence: there is
+			// no native MBIM CA CID, so the AT command IS the backend — and it
+			// is vendor-specific (QCAINFO is Quectel; a Fibocom FM350 answers
+			// that with a bare ERROR, QCAINFO's modem-level "unsupported"). A
+			// port-only probe (`!!self.at`) would pick 'at', the dispatch would
+			// ERROR, outcome() would read that as a transport stall, and the
+			// ladder would demote and re-pick 'at' every tick — endless CA log
+			// spam on the FM350 (2026-10-30). read_ca_at asks the Fibocom way
+			// (AT+GTCAINFO?), so the probe succeeds and the dispatch returns
+			// real aggregation rows — the same reader the NCM Fibocom path uses.
+			{ name: 'at', probe: (ok) => self.at
+				? tel_vendor.read_ca_at(self, (e) => ok(!e))
+				: ok(false) },
 		], (be) => {
 			// an EMPTY list is a real answer here (no aggregation right now);
 			// only a null/error says the transport did not answer at all.
@@ -193,9 +209,9 @@ export function install(self, o)
 				}));
 
 			if (be == 'at')
-				return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) => {
+				return tel_vendor.read_ca_at(self, (e, ca) => {
 					outcome('_ca_be', !e);
-					store(e ? [] : atcmd.parse_qcainfo(r?.lines));
+					store(ca ?? []);
 				});
 
 			store([]);

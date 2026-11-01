@@ -124,6 +124,17 @@ export function serving_from_ca(self)
 // The serving EARFCN comes from cells.serving.lte.earfcn (seeded by
 // serving_from_ca / AT) or, failing that, the serving cell-info earfcn
 // (cells.lte_intra.earfcn); NR from cells.nr5g_arfcn.
+// The band is stored as the bare NUMBER, like every vendor source (AT+QENG,
+// telemetry_ncm): arfcn_bands names it 'B3' / 'n48', and a consumer that adds
+// its own prefix (LuCI status) then showed 'BB3' / 'nn48'
+// (evidence: ddimension/luci-app-wwand#16).
+function band_number(name)
+{
+	let m = match(name ?? '', /^[Bn]([0-9]+)$/);
+
+	return m ? +m[1] : null;
+}
+
 export function fill_serving_band(self)
 {
 	let cells = self.cells;
@@ -140,7 +151,7 @@ export function fill_serving_band(self)
 			cells.serving = cells.serving ?? {};
 			cells.serving.lte = cells.serving.lte ?? {};
 			cells.serving.lte.earfcn ??= earfcn;
-			cells.serving.lte.band ??= d.band;
+			cells.serving.lte.band ??= band_number(d.band);
 			cells.serving.lte.dl_freq_mhz ??= d.mhz;
 		}
 	}
@@ -152,7 +163,7 @@ export function fill_serving_band(self)
 			cells.serving.nr = cells.serving.nr ?? {};
 			cells.serving.nr.arfcn ??= arfcn;
 			if (d.band != null)
-				cells.serving.nr.band ??= d.band;
+				cells.serving.nr.band ??= band_number(d.band);
 			cells.serving.nr.dl_freq_mhz ??= d.mhz;
 		}
 	}
@@ -182,8 +193,142 @@ export function qeng_ok(self)
 const GNSS_START = [
 	// Quectel (and the ASR-based modems that copy its AT set). "+CME ERROR: 504"
 	// is "session is ongoing" — already running, which is success for us.
-	{ vendors: /quectel|asr/, cmd: 'AT+QGPS=1', ok_errors: /504/ },
+	{ vendors: /quectel|asr/, cmd: 'AT+QGPS=1', ok_errors: /504/, nmea: 'quectel' },
 ];
+
+// `option gnss_nmea`: which sentences the receiver streams. A multi-GNSS
+// Quectel sends most of its NMEA as GSV (satellites in view) and one GSA per
+// constellation, and wwand-gps parses every line (ddimension/wwand#69). The
+// mask per constellation is AT+QGPSCFG "<x>nmeatype"; the GPS bits, measured
+// one at a time on the RG502Q (RG502QEAACR13A04M4G, 2026-10-25): 1 GGA,
+// 2 RMC, 4 GSV, 8 GSA, 16 VTG.
+//   fix   GPS GGA+RMC+GSA, every other constellation 0. Measured there: 28
+//         parsed sentences/s down to 3, fix type and DOPs unchanged; the
+//         satellites-in-view list goes, and satellites_used drops to the GPS
+//         satellites (9 -> 7) because the other constellations' GSA is gone.
+//         The OTHER masks are written only as 0: their bits are not one
+//         layout (beidounmeatype is 1 GBGSA, 2 GBGSV on the RG502Q, while
+//         galileonmeatype there has the five GPS bits), and 0 is off in each.
+//   full  every bit the firmware lists for each mask (`AT+QGPSCFG=?`, "(0-N)"),
+//         so no bit meaning has to be known: it undoes `fix`.
+// Applied at every receiver start. Unset leaves the modem's own setting
+// alone — including one an earlier `fix` left behind; set `full` to undo it.
+const NMEA_MASKS = [ 'gpsnmeatype', 'glonassnmeatype', 'galileonmeatype', 'beidounmeatype' ];
+const NMEA_FIX_GPS = 1 | 2 | 8;
+
+// { mask: max } for every mask the firmware lists in its AT+QGPSCFG=? answer
+function nmea_ranges(lines)
+{
+	let out = {};
+
+	for (let l in lines ?? []) {
+		let m = match(l, /^\+QGPSCFG: *"([a-z]+nmeatype)", *\(0-([0-9]+)\)/);
+
+		if (m)
+			out[m[1]] = +m[2];
+	}
+
+	return out;
+}
+
+// { mask: value } to have, for the masks this firmware lists; null = nothing
+function nmea_plan(profile, ranges)
+{
+	let plan = {};
+
+	for (let k in NMEA_MASKS) {
+		let max = ranges?.[k];
+
+		if (max == null)
+			continue;
+
+		if (profile == 'full')
+			plan[k] = max;
+		else if (profile == 'fix')
+			plan[k] = (k == 'gpsnmeatype') ? (NMEA_FIX_GPS & max) : 0;
+	}
+
+	return length(keys(plan)) ? plan : null;
+}
+
+// Apply the plan read-before-write (a write the modem already holds is not
+// sent), then cb(). Best-effort: a firmware without the command, or a refused
+// write, is logged and the receiver starts anyway — fewer sentences is an
+// optimisation, the fix is the feature. A mask that cannot be READ is not
+// written: not knowing what the modem holds is no evidence it differs.
+// `at` is the engine the chain started on; a teardown that closes it (or a
+// restart that opens a new one) ends the chain rather than continuing on
+// whatever self.at is by then.
+function apply_gnss_nmea(self, log, recipe, at, cb)
+{
+	let profile = self.config?.gnss_nmea;
+
+	if (!profile || recipe.nmea != 'quectel')
+		return cb();
+
+	at.send('AT+QGPSCFG=?', (err, res) => {
+		let plan = err ? null : nmea_plan(profile, nmea_ranges(res?.lines));
+
+		if (!plan) {
+			log('info', sprintf('gnss: gnss_nmea %s — this firmware lists no NMEA type masks, its output is left as it is', profile));
+			return cb();
+		}
+
+		let todo = sort(keys(plan));
+		let changed = [];
+		let step;
+
+		step = (i) => {
+			if (i >= length(todo)) {
+				if (length(changed))
+					log('notice', sprintf('gnss: NMEA output set to %s (%s)', profile, join(', ', changed)));
+
+				return cb();
+			}
+
+			if (self.at !== at)
+				return cb();
+
+			let k = todo[i];
+			let want = plan[k];
+
+			at.send(sprintf('AT+QGPSCFG="%s"', k), (rerr, rres) => {
+				let held = null;
+
+				for (let l in (rerr ? null : rres?.lines) ?? []) {
+					let m = match(l, /^\+QGPSCFG: *"([a-z]+nmeatype)", *([0-9]+)/);
+
+					if (m && m[1] == k) {
+						held = +m[2];
+						break;
+					}
+				}
+
+				if (held == null) {
+					log('warn', sprintf('gnss: AT+QGPSCFG="%s" could not be read — left unchanged', k));
+					return step(i + 1);
+				}
+
+				if (held == want)
+					return step(i + 1);
+
+				if (self.at !== at)
+					return cb();
+
+				at.send(sprintf('AT+QGPSCFG="%s",%d', k, want), (werr) => {
+					if (werr)
+						log('warn', sprintf('gnss: AT+QGPSCFG="%s",%d refused: %J', k, want, werr));
+					else
+						push(changed, sprintf('%s %d', k, want));
+
+					step(i + 1);
+				}, { timeout: 5000 });
+			}, { timeout: 5000 });
+		};
+
+		step(0);
+	}, { timeout: 5000 });
+}
 
 // The extra_client contract's goodbye: run each plugin client's
 // `before_release(client)` once, right before the modem releases its CID —
@@ -281,7 +426,9 @@ export function start_gnss(self, log, cb)
 		return cb({ error: 'unsupported', detail: 'unknown vendor' });
 	}
 
-	self.at.send(recipe.cmd, (err, res) => {
+	let at = self.at;
+
+	apply_gnss_nmea(self, log, recipe, at, () => (self.at !== at) ? cb({ error: 'unsupported', detail: 'no at channel' }) : at.send(recipe.cmd, (err, res) => {
 		// THE CODE IS IN THE ERROR, not in the lines. `+CME ERROR: 504` is
 		// parsed by atcmd into { error: 'cme', code: '504' } and the response
 		// lines are then empty — so matching only `res.lines` never saw it, and
@@ -305,7 +452,7 @@ export function start_gnss(self, log, cb)
 			already ? ' — was already running' : '',
 			self.gps_tty ? sprintf(', NMEA on %s', self.gps_tty) : ''));
 		cb(null);
-	}, { timeout: 10000, expect_errors: recipe.ok_errors });
+	}, { timeout: 10000, expect_errors: recipe.ok_errors }));
 };
 
 export function dsd_from_serving(serving)
@@ -587,6 +734,15 @@ export function scaffolding(self, o)
 
 		log('info', sprintf('state %s -> %s', self.state, state));
 		self.state = state;
+
+		// a new bring-up (hotplug, a manual restart) re-decides the config
+		// error; leaving the note would report a failure the attempt may cure
+		if (state != 'ABSENT' && self.config_error) {
+			if (self.control_note == self.config_error)
+				self.control_note = null;
+
+			self.config_error = null;
+		}
 		emit('state', { state: state, ...(data ?? {}) });
 	};
 
@@ -685,9 +841,58 @@ export function scaffolding(self, o)
 		rec.on_connect_success();
 	};
 
-	// zero-rx watchdog tripped on a context of this modem
-	self.trip_zero_rx = function() {
-		rec.usb_repower();
+	// zero-rx watchdog tripped on a context of this modem: inbound bytes have
+	// not moved for the configured window while QMI still reports the bearer
+	// CONNECTED. A board repower (power-cycle / reset-GPIO pulse) is the
+	// watchdog's recovery WHERE THE BOARD CAN DO IT; on a self-powered PCIe/MHI
+	// modem with no such mechanism repower is UNAVAILABLE — not merely refused —
+	// and the modem reset is the rung that actually clears the stall (the
+	// gentler retry / opmode-cycle rungs do nothing for it). Branch on
+	// can_repower(), not on usb_repower()'s bare bool, which cannot tell
+	// "no mechanism" from "refused" apart (ddimension/wwand#59).
+	// `why` names the watchdog in the log: 'zero-rx' (the default, a context's
+	// rx counter) or 'tx stall' (the daemon's transmit-queue watch). Both are the
+	// same verdict — the data path is dead while the modem claims it is not —
+	// and get the same recovery.
+	self.trip_zero_rx = function(why) {
+		why ??= 'zero-rx';
+
+		if (rec.can_repower()) {
+			rec.usb_repower();
+			return;
+		}
+
+		// Repower UNAVAILABLE -> modem reset. Keep usb_repower()'s own evidence
+		// rule (never a modem that has never answered us) and never cut across
+		// an in-flight reattach, a parked (low-power) radio, or a modem being
+		// torn down. Log each skip so a field capture shows why a stall did or
+		// did not reset.
+		if (!self.counters.proto_ok) {
+			log('warn', sprintf('%s: no repower mechanism, but this control channel has never answered — not resetting', why));
+			return;
+		}
+		if (self._reattaching || self.lowpower_parked || self.detached) {
+			log('info', sprintf('%s: no repower mechanism, but a reattach / low-power park / detach is in flight — not resetting', why));
+			return;
+		}
+
+		// A modem carries more than one context and two can trip on the same
+		// tick; a per-modem latch keeps that to a single reset (cleared when the
+		// reset completes), so the modem is not reset twice.
+		if (self._zero_rx_resetting)
+			return;
+		self._zero_rx_resetting = true;
+
+		log('err', sprintf('%s: no repower path, resetting the modem', why));
+		self.reset((err) => {
+			self._zero_rx_resetting = false;
+
+			// unsupported_on_backend (NCM without AT, MBIM without passthrough
+			// or AT) or a refused reset: the stall stays, and the log is the
+			// only place that says why
+			if (err)
+				log('warn', sprintf('%s: modem reset failed: %J', why, err));
+		});
 	};
 
 	// administrative teardown (daemon shutdown / reload / modem removed)
@@ -823,6 +1028,9 @@ export function make_recovery(self, opts, log, proto)
 		reboot_delay: opts.recovery?.reboot_delay,
 		// board-provided modem repower (power-cycle or reset-gpio pulse)
 		repower: opts.recovery?.repower,
+		// ...and whether that repower would actually act (the daemon knows the
+		// real GPIOs; the repower closure above is handed over even when it no-ops)
+		can_repower: opts.recovery?.can_repower,
 		// ...and which of the two it would be: a named RESET line, or null
 		reset_line: opts.recovery?.reset_line,
 		log: (l, m) => log(l, m),
@@ -897,6 +1105,31 @@ export function make_fail(self, o)
 		// signal.
 		if (err?.error == 'cancelled')
 			return o.log('debug', sprintf('%s: cancelled with the session, not a failure', stage));
+
+		// NOR IS A CONFIGURATION ERROR. A step that marks its error `config`
+		// has refused a combination no retry can change (a vendor driver
+		// already in QMAP and an interface with no `mux_id`): counting it as an
+		// attempt walked the recovery ladder through a modem reset and a board
+		// power-cycle to a reboot of the router, none of which touches the
+		// config (evidence: ddimension/wwand#66). Stop, say why, and wait: an
+		// edit that cures it changes the modem's signature, and apply_config
+		// then restarts the modem (daemon.uc modem_sig).
+		if (err?.config) {
+			o.log('err', sprintf('failed in %s: %J — a configuration error: no retry and no recovery until the configuration changes',
+				stage, err));
+
+			self.config_error = sprintf('configuration error in %s: %s', stage, err.error);
+			self.control_note = self.config_error;
+
+			o.emit('error', {
+				stage: stage, err: err,
+				attempts: self.counters.attempts, action: 'config',
+			});
+
+			self.teardown();
+			self.set_state('ABSENT', { config_error: err.error });
+			return;
+		}
 
 		o.log('err', sprintf('failed in %s: %J', stage, err));
 
@@ -1035,6 +1268,18 @@ const AT_RETIRE_AFTER = 3;
 // evidence, so it takes longer to convince.
 const AT_RETIRE_SILENT_AFTER = 5;
 
+// How many timed-out telemetry COMMANDS with nothing answering in between give
+// a SEPARATE telemetry side channel (at2) up altogether. The per-command retire
+// above cannot fire when the channel answers nothing at all — its guard needs
+// some OTHER command to answer in between — so an at2 whose read path has wedged
+// (HW-seen on an RG520N-EB over an MHI DUN AT port, ddimension/wwand#60, 2026-10-18: every AT times out while the
+// QMI data path stays fine) is polled forever, every command timing out on every
+// tick. When at2 proves wholly dead we close JUST it and fall telemetry back to
+// the control channel; a modem whose telemetry already shares the control engine
+// has nothing to give up (closing it would strand the modem on NCM). ~5 poll
+// cycles; larger than the per-command count because closing a port is heavier.
+const AT_PORT_DEAD_AFTER = 20;
+
 // Has this AT channel given up on every one of these commands? The question a
 // telemetry family asks about its OWN signal source before deciding whether the
 // serving-cell read is authoritative: a modem that refuses AT+QSINR? has no
@@ -1067,7 +1312,7 @@ export function at_retired(self, ...cmds)
 // A BARE `ERROR` retires a command. `+CME ERROR: <n>` never does: it is a
 // runtime condition (SIM not ready, no network) that says nothing about whether
 // the firmware knows the command. atcmd already separates the three
-// (atcmd.uc:968 vs :973 vs :914).
+// (atcmd.uc:969 vs :973 vs :914).
 //
 // A TIMEOUT retires one only when the PORT IS PROVABLY ALIVE. On its own a
 // timeout means the port is wedged or the modem busy — then every command goes
@@ -1105,10 +1350,41 @@ export function telemetry_at(self)
 				let silent = (err?.error == 'timeout');
 
 				// the port answered (anything but silence or a closed port)
-				if (!silent && err?.error != 'closed')
+				if (!silent && err?.error != 'closed') {
 					self._at_alive = (self._at_alive ?? 0) + 1;
+					// the side channel answered -> it is not wholly dead
+					self._at_dead = 0;
+				}
 
 				if (silent) {
+					// PORT-LEVEL give-up, of a SEPARATE telemetry side channel
+					// (at2) only. Count consecutive timed-out telemetry COMMANDS
+					// (any answer above clears _at_dead); once at2 is wholly dead
+					// close JUST it and fall telemetry back to the control engine.
+					// Where telemetry already runs on the control engine
+					// (at_telemetry == at) there is nothing to give up — closing
+					// it would strand the modem on NCM — so the count does
+					// nothing there. (ddimension/wwand#60)
+					self._at_dead = (self._at_dead ?? 0) + 1;
+					if (self._at_dead >= AT_PORT_DEAD_AFTER &&
+					    self.at_telemetry && self.at_telemetry != self.at) {
+						self._at_log?.('notice', sprintf('at2 answered nothing in %d consecutive telemetry commands — closing it; telemetry falls back to the control path, re-probed on the next modem init',
+							AT_PORT_DEAD_AFTER));
+						// switch over FIRST: abort() completes what was queued
+						// on at2, and a callback that sends its next telemetry
+						// command must already reach the control engine
+						let dead = self.at_telemetry;
+
+						self.at_telemetry = self.at;
+						self._at_dead = 0;
+
+						if (dead.abort)
+							dead.abort();
+						else
+							dead.close();
+						return cb ? cb({ error: 'closed' }, null) : null;
+					}
+
 					let seen = self._at_silent?.[cmd];
 
 					self._at_silent ??= {};
@@ -1321,6 +1597,34 @@ const QNWINFO_VENDORS = /quectel/;
 // collect_caps(self, cb): build self.caps — a best-effort summary of which RATs
 // the modem supports, for status display. The Quectel AT+QCFG="iotopmode" query
 // (which cellular-IoT modes it searches) runs ONCE and is cached; the summary
+// The RAT slugs (codec/schema/rat.uc) the modem says it supports, or null
+// when it has said nothing: the native MBIM DEVICE_CAPS data-class bitmask
+// first (no passthrough/AT needed), else the QMI DMS device-capabilities
+// radio_ifs list (DMS 5GNR=10, not the NAS 12). Read at init, so usable
+// before registration — unlike caps.rats, which also folds in observed RATs.
+export function mode_rats(self)
+{
+	if (self.info?.mbim_data_class != null)
+		return ratmod.families_from_mbim(self.info.mbim_data_class,
+			self.info.mbim_custom_data_class);
+
+	let cap_ifs = self.info?.capabilities?.radio_ifs;
+
+	if (type(cap_ifs) != 'array')
+		return null;
+
+	let out = [];
+
+	for (let r in cap_ifs) {
+		let o = ratmod.from_dms_radio_if(r);
+
+		if (o && index(out, o.rat) < 0)
+			push(out, o.rat);
+	}
+
+	return out;
+};
+
 // is then rebuilt each call so newly-observed RATs fold in. Combined with a
 // model-string hint (RedCap/NTN). Stores self.caps = { rats, iot_modes, ntn }.
 // Defined before probe_iot_rat, which calls it (ucode does not hoist exports).
@@ -1329,27 +1633,8 @@ export function collect_caps(self, cb)
 	cb = cb ?? (() => null);
 
 	// authoritative supported-RAT families for caps.rats on a 5G modem currently
-	// camped on LTE. Source order native -> passthrough/QMI: the native MBIM
-	// DEVICE_CAPS data_class bitmask first (no passthrough/AT needed), else the
-	// QMI DMS device-capabilities radio_ifs list. DMS 5GNR=10 (not the NAS 12).
-	let mode_caps = null;
-
-	if (self.info?.mbim_data_class != null) {
-		mode_caps = ratmod.families_from_mbim(self.info.mbim_data_class,
-			self.info.mbim_custom_data_class);
-	}
-	else {
-		let cap_ifs = self.info?.capabilities?.radio_ifs;
-
-		if (type(cap_ifs) == 'array') {
-			mode_caps = [];
-			for (let r in cap_ifs) {
-				let o = ratmod.from_dms_radio_if(r);
-				if (o && index(mode_caps, o.rat) < 0)
-					push(mode_caps, o.rat);
-			}
-		}
-	}
+	// camped on LTE (mode_rats above)
+	let mode_caps = mode_rats(self);
 
 	let build = () => {
 		self.caps = ratmod.caps_from({
@@ -1479,6 +1764,11 @@ export function collect_temperature(self, cb)
 	// FM350/T700 (MediaTek): AT+ETHERMAL? (field-verified — the FM350 REJECTS
 	// the 3ginfo-lite NL952 command AT+MTSM=1)
 	else if (index(mfr, 'fibocom') >= 0) { cmd = 'AT+ETHERMAL?'; parse = atcmd.parse_ethermal; }
+	// Foxconn T99W175: it names itself after the chipset — "QUALCOMM" over
+	// AT+GMI (MBIM, PCIe) and "QUALCOMM INCORPORATED" in QMI DMS (USB), so the
+	// match is on Qualcomm (ddimension/wwand#70, #52). Another Qualcomm-named
+	// modem that has no AT^TEMP? rejects it once and the latch below stops it.
+	else if (index(mfr, 'qualcomm') >= 0) { cmd = 'AT^TEMP?'; parse = atcmd.parse_tsens; }
 	else {
 		self._temp_unavail = true;   // no known temperature command for this vendor
 		return cb();
@@ -1528,6 +1818,7 @@ export function close_at(self)
 	self._at_errors = null;
 	self._at_silent = null;
 	self._at_alive = 0;
+	self._at_dead = 0;
 };
 
 // The init commands every AT channel runs once it answers: model quirks,

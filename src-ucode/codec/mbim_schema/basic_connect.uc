@@ -465,7 +465,28 @@ export const commands = {
 
 		IP_CONFIGURATION: {
 			cid: 15,
-			query: { session_id: 'u32' },
+			// The QUERY info buffer is the WHOLE MBIM_IP_CONFIGURATION_INFO
+			// structure, not just the session id: session id, the two
+			// availability flags, every count/offset pair and both MTUs, all
+			// zero on a query. libmbim builds exactly this — a 60-byte buffer —
+			// (mbim_message_ip_configuration_query_new, mbimcli-basic-connect.c
+			// :912, libmbim 1.32.0). A 4-byte query (session id alone) is
+			// tolerated by lenient firmware (EG06) but REJECTED with
+			// MBIM_STATUS_ERROR_INVALID_PARAMETERS (21) by the strict MediaTek
+			// T7xx — the FM350, same firmware family that forces the v3 CONNECT
+			// split (HW-observed on the DW5931e/FM350, 2026-10-30). The offset
+			// and gateway fields are plain zero u32 here (no ref/array encode);
+			// decode of the RESPONSE keeps its richer types below.
+			query: {
+				session_id: 'u32',
+				ipv4_available: 'u32', ipv6_available: 'u32',
+				ipv4_count: 'u32', ipv4_offset: 'u32',
+				ipv6_count: 'u32', ipv6_offset: 'u32',
+				ipv4_gateway_offset: 'u32', ipv6_gateway_offset: 'u32',
+				ipv4_dns_count: 'u32', ipv4_dns_offset: 'u32',
+				ipv6_dns_count: 'u32', ipv6_dns_offset: 'u32',
+				ipv4_mtu: 'u32', ipv6_mtu: 'u32',
+			},
 			response: {
 				session_id: 'u32',
 				ipv4_available: 'u32', ipv6_available: 'u32',

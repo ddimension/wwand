@@ -692,6 +692,7 @@ export function install(self, o)
 
 	step_confnet_apply = () => {
 		let mask = qmi_backend.parse_modes(self.config.modes);
+		let order = nasmod.rat_order_ids(self.config.rat_order);
 		let sel = null;
 
 		// `option mnc '030'` and `option mnc '30'` are different operators and
@@ -711,13 +712,16 @@ export function install(self, o)
 		}
 
 		// preserved: never reset modes/PLMN to defaults when unset
-		if (mask == null && !sel)
+		if (mask == null && order == null && !sel)
 			return step_apply_init_reset(step_validate);
 
 		let args = {};
 
 		if (mask != null)
 			args.mode_preference = mask;
+
+		if (order != null)
+			args.acquisition_order = order;
 
 		if (sel) {
 			args.network_selection = sel;
@@ -755,6 +759,19 @@ export function install(self, o)
 					log('info', sprintf('network modes "%s" already set — skipping', self.config.modes));
 					delete args.mode_preference;
 				}
+
+				if (args.acquisition_order != null &&
+				    sprintf('%J', cur.acquisition_order) == sprintf('%J', args.acquisition_order)) {
+					log('info', sprintf('RAT order "%s" already set — skipping', self.config.rat_order));
+					delete args.acquisition_order;
+				}
+				else if (args.acquisition_order != null && type(cur.acquisition_order) == 'array' &&
+				         !nasmod.rat_order_writable(cur.acquisition_order)) {
+					// reported by validate (config_check rat_order_warnings)
+					log('warn', sprintf('RAT order "%s" not written: the modem\'s order %J has slots QMI cannot name',
+						self.config.rat_order, nasmod.rat_order_names(cur.acquisition_order)));
+					delete args.acquisition_order;
+				}
 			}
 
 			if (!length(keys(args)))
@@ -762,6 +779,10 @@ export function install(self, o)
 
 			if (args.mode_preference != null)
 				log('notice', sprintf('setting network modes "%s" (mask 0x%02x)', self.config.modes, args.mode_preference));
+
+			if (args.acquisition_order != null)
+				log('notice', sprintf('setting RAT order "%s" (modem had %s)', self.config.rat_order,
+					join(',', nasmod.rat_order_names(cur?.acquisition_order)) || '?'));
 
 			if (args.network_selection)
 				log('notice', sprintf('setting manual PLMN %d/%02d', sel.mcc, sel.mnc));

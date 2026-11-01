@@ -204,6 +204,14 @@ export function install(self, o)
 					                                      s.m4, s.m5, s.m6, s.m7 ]) : [];
 				}
 
+				// the acquisition order by name, most preferred first; absent
+				// when the modem does not report it (no TLV 0x1C) — the
+				// editor then has nothing to show or set
+				if (type(data.acquisition_order) == 'array') {
+					data.rat_order = nasmod.rat_order_names(data.acquisition_order);
+					data.rat_order_writable = nasmod.rat_order_writable(data.acquisition_order);
+				}
+
 				// current network selection mode + registered operator (both
 				// protocol-neutral, so the settings editor shows them for any HW)
 				if (data.network_selection != null)
@@ -853,7 +861,7 @@ export function install(self, o)
 	const SETTABLE_PREFS = {
 		mode_preference: 'int', band_preference: 'int',
 		roaming_preference: 'int', lte_band_preference: 'int',
-		usage_preference: 'int',
+		usage_preference: 'int', acquisition_order: 'array',
 		ext_lte_band: 'object', nr5g_sa_band: 'object', nr5g_nsa_band: 'object',
 	};
 
@@ -911,6 +919,49 @@ export function install(self, o)
 			delete settings[key];
 		}
 
+		// the acquisition order by name (`rat_order`, the shape the get
+		// returns) -> the radio-interface list the TLV carries
+		if (settings.rat_order != null) {
+			let ids = nasmod.rat_order_ids(settings.rat_order);
+
+			if (!ids)
+				return cb({ error: 'invalid_setting', key: 'rat_order' });
+
+			settings.acquisition_order = ids;
+			delete settings.rat_order;
+
+			// AN ACCEPTED ORDER IS NOT AN APPLIED ONE. An EG06-E
+			// (EG06ELAR04A04M4G, over the QMI-over-MBIM passthrough)
+			// acknowledges TLV 0x1E, reads the new order back — and is on
+			// its old one again once the re-attach has cycled the radio
+			// (HW-seen on the ZyXEL LTE3301-PLUS, 2026-10-30). So the read-back
+			// comes LAST, after the cycle, and the result says when the
+			// modem kept its own. Not on a deferred firmware: it applies at
+			// the reset it asks for.
+			let done = cb;
+
+			cb = (err, res) => {
+				if (err || res?.deferred || index(res?.applied ?? [], 'acquisition_order') < 0)
+					return done(err, res);
+
+				entry.modem.with_nas((nas) => {
+					if (!nas)
+						return done(err, res);
+
+					nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (rerr, now) => {
+						if (!rerr && type(now?.acquisition_order) == 'array' &&
+						    sprintf('%J', now.acquisition_order) != sprintf('%J', ids)) {
+							log('warn', sprintf('modem %s: firmware accepted RAT order %J and kept %J',
+								ref, nasmod.rat_order_names(ids), nasmod.rat_order_names(now.acquisition_order)));
+							res.not_applied = [ 'rat_order' ];
+						}
+
+						done(err, res);
+					}, { no_recovery: true });   // a check, not the operation
+				});
+			};
+		}
+
 		let args = {};
 
 		for (let key, val in settings) {
@@ -937,6 +988,16 @@ export function install(self, o)
 			// some firmwares answer them with) only happen for real changes. On a
 			// read error fall through and set everything as requested.
 			nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
+				// an order holding slots QMI cannot name is not wwand's to
+				// rewrite (nas.uc rat_order_writable)
+				if (args.acquisition_order != null && !gerr &&
+				    type(cur?.acquisition_order) == 'array' &&
+				    sprintf('%J', cur.acquisition_order) != sprintf('%J', args.acquisition_order) &&
+				    !nasmod.rat_order_writable(cur.acquisition_order))
+					return cb({ error: 'unsupported_setting', key: 'rat_order',
+						detail: sprintf('the modem\'s order %J has slots QMI cannot name (IoT technologies); change it with the vendor command',
+							nasmod.rat_order_names(cur.acquisition_order)) });
+
 				if (!gerr && cur) {
 					for (let k in filter(keys(args), (k) => k != 'change_duration')) {
 						if (cur[k] != null && sprintf('%J', cur[k]) == sprintf('%J', args[k]))
@@ -1102,7 +1163,10 @@ export function install(self, o)
 				// not under a running reattach or an operator detach, and not
 				// for usage/roaming keys alone, which move no cell.
 				let m = entry.modem;
-				let radio_key = (k) => band_key(k) || k == 'mode_preference';
+				// the acquisition order too: it is read when the modem
+				// searches, so without the cycle a new order waits for the
+				// next search, which a registered modem may not start
+				let radio_key = (k) => band_key(k) || k == 'mode_preference' || k == 'acquisition_order';
 				let moves_radio = length(filter(changed, radio_key)) > 0;
 
 				// inside a running radio cycle (a reattach, detach, attach or

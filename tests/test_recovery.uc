@@ -686,6 +686,29 @@ r = recovery.create({ id: 'm4', failreboot: 100, fx: fx, state_dir: '/state', lo
 r.on_proto_success();   /* control channel answered */
 eq(r.usb_repower(), false, 'repower: missing tool tolerated');
 
+// --- can_repower(): does usb_repower() have anything to act on? (#59) --------
+// The zero-rx watchdog asks this to tell "no mechanism -> reset the modem" from
+// "refused". The daemon's answer (opts.can_repower) wins; without one it mirrors
+// usb_repower()'s reach -- a board repower callback is present (opts.repower).
+let cr = recovery.create({ id: 'cr-cb', failreboot: 0, repower: () => true,
+                           fx: fakefx.create(), state_dir: '/state', log: silent });
+eq(cr.can_repower(), true, 'can_repower: a board repower callback -> true');
+
+cr = recovery.create({ id: 'cr-none', failreboot: 0,
+                       fx: fakefx.create(), state_dir: '/state', log: silent });
+eq(cr.can_repower(), false, 'can_repower: no repower callback -> false');
+
+// opts.can_repower overrides the bare-closure test both ways: the daemon always
+// hands a repower closure (even where it no-ops), so its explicit answer wins.
+cr = recovery.create({ id: 'cr-ovr-f', failreboot: 0, repower: () => true,
+                       can_repower: () => false,
+                       fx: fakefx.create(), state_dir: '/state', log: silent });
+eq(cr.can_repower(), false, 'can_repower: override false wins over a present (no-op) closure');
+
+cr = recovery.create({ id: 'cr-ovr-t', failreboot: 0, can_repower: () => true,
+                       fx: fakefx.create(), state_dir: '/state', log: silent });
+eq(cr.can_repower(), true, 'can_repower: override true wins with no closure present');
+
 // --- an IPAe card sorting out its own profile change ------------------------
 // After the card's own IPA switched profile it rolls back by itself; the
 // rungs that reset the card wait, the opmode cycle and the counting do not.

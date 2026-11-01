@@ -239,6 +239,7 @@ export const parse_cpmutemp = parse.parse_cpmutemp;
 export const parse_meig_temp = parse.parse_meig_temp;
 export const parse_mtsm = parse.parse_mtsm;
 export const parse_ethermal = parse.parse_ethermal;
+export const parse_tsens = parse.parse_tsens;
 
 // --- AT port discovery -------------------------------------------------------
 
@@ -1182,13 +1183,44 @@ export function create(transport, opts)
 			transport.drain();
 	};
 
+	// close(): stop and drop. Whatever was queued is discarded WITHOUT its
+	// callback — every teardown is written against that: a callback that ran
+	// here would re-arm timers, advance an init chain or count a failure
+	// after the modem object has started to go (modem.uc teardown, NCM's
+	// cfun_cycle, make_fail). Use abort() where a caller must hear back.
 	self.close = function() {
 		if (self.current?.timer)
 			self.current.timer.cancel();
 
+		self.closed = true;
 		self.current = null;
 		self.queue = [];
 		transport.close();
+	};
+
+	// abort(): close, and complete what was in flight with { error: why }
+	// (default 'closed') — for the one owner that stops using a port while
+	// the modem lives on and somebody is waiting: telemetry giving up a dead
+	// at2, whose refresh would otherwise never call done() and leave its
+	// driver 'running' for good (ddimension/wwand#60). The callbacks run
+	// after the close; one that sends again must not do so on THIS engine
+	// (send() does not refuse a closed one — teardown relies on close()
+	// staying silent) — the at2 give-up switches telemetry to the control
+	// engine before it aborts, and telemetry_at() resolves it per send.
+	self.abort = function(why) {
+		let pending = [];
+
+		if (self.current)
+			push(pending, self.current);
+
+		for (let e in self.queue)
+			push(pending, e);
+
+		self.close();
+
+		for (let e in pending)
+			if (e.cb)
+				e.cb({ error: why ?? 'closed' }, null);
 	};
 
 	return self;

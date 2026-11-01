@@ -580,6 +580,7 @@ let hw_timers = [];
 let rdeps = {
 	log: (level, msg) => null,
 	board: {
+		has_power: true,
 		profile: { reset_gpio: 'gpio900' },
 		reset_pulse: (rg, off) => { push(pulses, rg); return true; },
 		power_cycle: (off) => { cycles++; return true; },
@@ -4689,6 +4690,84 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	fail({ error: 'qmi', code: 14 });
 	eq(reattaches, 1, 'a dial the modem REFUSED does not cycle the radio');
 	d.shutdown();
+}
+
+// --- a modem parked on a configuration error stays parked on hotplug --------
+// make_fail parks it in ABSENT with `config_error` set (#66). The hotplug
+// add path restarts AT-less ABSENT modems (the NCM tty-arrival cue); an
+// unrelated device arriving must not un-park this one, while an ordinary
+// backoff-waiting modem is still restarted.
+{
+	let hp = daemon_mod.create({ timing: TIMING, deps: { log: (l, m) => null } });
+	let starts = { parked: 0, waiting: 0 };
+	hp.autosetup = false;
+	hp.modems = {
+		parked: { cfg: {}, modem: { state: 'ABSENT', config_error: 'configuration error in datapath: x',
+		                            start: () => starts.parked++ } },
+		waiting: { cfg: {}, modem: { state: 'ABSENT', start: () => starts.waiting++ } },
+	};
+	hp.contexts = {};
+	hp.hotplug('add', 'ttyUSB9');
+	eq(starts.parked, 0, 'hotplug: a modem parked on a config error is not restarted');
+	eq(starts.waiting, 1, 'hotplug: ...an ordinary ABSENT modem still is');
+}
+
+// THE TRANSMIT WATCHDOG, READ ON THE TICK. The daemon samples the kernel's
+// tx_timeout count of each modem's data netdev, reports it in status(), and
+// hands a stall that lasts tx_stall_timeout to the modem's zero-rx recovery
+// (ddimension/wwand#72: the modem stopped taking packets and the link froze
+// until a manual restart).
+{
+	let fx = fakefx.create({ files: {} });
+	let now = 0, n = 4, trips = [];
+	let fake = {
+		modem: { create: (o) => ({
+			id: o.id, state: 'READY', config: o.config, start: () => null, stop: () => null,
+			datapath: { parent: 'wwq0' }, counters: { proto_errors: 0 },
+			trip_zero_rx: (why) => push(trips, why),
+		}) },
+		context: { create: (o) => ({ state: 'CONNECTED', name: o.name, modem: o.modem, config: o.config,
+			down: (cb) => cb ? cb() : null, up: (cb) => null, modem_event: () => null }) },
+	};
+	let mkd = (opts) => {
+		let d = daemon_mod.create({ timing: { ...TIMING, mono: () => now, tx_queue_stats: (dev) => (dev == 'wwq0') ? { timeouts: n, tx_packets: 500 } : null },
+			deps: { log: () => null, load_qmi: () => fake, datapath_fx: fx,
+				giveups_file: '/tmp/test-giveups-txs.json', admin_downs_file: '/tmp/test-admin-txs.json',
+				kick_interface: () => null, renew_interface: () => null, down_interface: () => null,
+				iface_status: (i, cb) => cb({ up: false, pending: false, autostart: false, errors: [] }) } });
+
+		d.apply_config(config.parse({ network: {
+			m0:  { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi', ...opts },
+			wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3', apn: 'a', pdp_type: 'ipv4' },
+		} }));
+		return d;
+	};
+
+	let d = mkd({});
+	d._tick();
+	eq(d.status().modems.m0.tx_stall, { netdev: 'wwq0', timeouts: 0, stalled_s: null },
+	   'tx stall: status reports the watched netdev, timeouts before the watch not counted');
+
+	for (now = 10; now <= 130; now += 10) {
+		n++;
+		d._tick();
+	}
+	now = 130;
+	eq(d.status().modems.m0.tx_stall?.stalled_s, 120, 'tx stall: status shows how long the queue has been stuck');
+	eq(trips, [ 'tx stall' ], 'tx stall: 120 s (the default) hands it to the modem recovery, once');
+	d.shutdown();
+
+	trips = []; now = 0; n = 0;
+	d = mkd({ tx_stall_timeout: '0' });
+	for (now = 10; now <= 300; now += 10) {
+		n++;
+		d._tick();
+	}
+	eq(trips, [], 'tx stall: tx_stall_timeout 0 only watches');
+	eq(d.status().modems.m0.tx_stall?.timeouts, 30, 'tx stall: ...and still counts');
+	d.shutdown();
+	unlink('/tmp/test-giveups-txs.json');
+	unlink('/tmp/test-admin-txs.json');
 }
 
 done('test_daemon');

@@ -356,4 +356,95 @@ let okb = board.create({ id: 'mikrotik,chateau-5g-r17-ax', fx: okfx,
                          power_off_ms: 5, reset_ms: 5, log: () => {} });
 eq(okb.reset_pulse('modem-reset', 5), true, 'gpio-fail: a working line still pulses');
 
+// --- board files (ddimension/wwand#48) ---------------------------------------
+const USR = '/usr/share/wwand/boards.d', ETC = '/etc/wwand/boards.d';
+
+// every built-in profile passes the validator a board file has to pass, so
+// the table and the files cannot drift into two dialects
+for (let bid in [ 'mikrotik,chateau-5g-r17-ax', 'zyxel,lte3301-plus', 'zyxel,lte3301-m209',
+                  'zyxel,lte3301-q222', 'zyxel,lte5398-m904', 'zyxel,nr7101',
+                  'cudy,lt300-v3', 'huasifei,wh3000-pro-emmc', 'huasifei,wh3000-pro-nand' ]) {
+	let pb = board.create({ id: bid, fx: mkfx({}), log: () => {} });
+	eq(pb.profile_source, 'builtin', `builtin ${bid}: found in the table`);
+	eq(board.validate_profile(pb.profile), null, `builtin ${bid}: passes the board-file validator`);
+}
+
+// a board wwand does not know, described by a file: power, reset, LEDs
+let logs = [];
+let blog = (lv, m) => push(logs, `${lv}: ${m}`);
+let bfx = mkfx({
+	[`${USR}/tuoshi,t22m.json`]: '{ "power_gpio": "modem_pwr", "power_gpio_active_low": true,'
+		+ ' "reset_gpio": "modem_rst", "reset_run": 1, "option_ids": [ "1e0e 9001" ],'
+		+ ' "leds": { "style": "mobile", "green": "green:4g", "red": "red:sig" },'
+		+ ' "note": "measured on a T22M" }',
+	[`${G}/modem_pwr/value`]: '1',
+});
+let fb1 = board.create({ id: 'tuoshi,t22m', fx: bfx, log: blog });
+eq(fb1.profile_source, `${USR}/tuoshi,t22m.json`, 'file: an unknown board gets its profile from the file');
+ok(fb1.has_power, 'file: its power line counts');
+ok(length(filter(logs, (l) => index(l, 'profile from') >= 0)) == 1, 'file: the log names the file');
+fb1.init();
+ok(bfx.has(`${G}/modem_pwr/value=0`), 'file: active_low applies (1 read as off, powered with 0)');
+ok(bfx.has('/sys/module/option/drivers/usb-serial:option1/new_id=1e0e 9001'), 'file: option_ids are bound');
+fb1.leds({ present: true, registered: true, radio: 'lte' });
+ok(bfx.has(`${L}/green:4g/brightness=255`), 'file: a named LED style renders');
+ok(bfx.has(`${L}/red:sig/brightness=0`), 'file: ...on the names the file gave');
+
+// a file overrides the built-in entry, and /etc wins over /usr/share
+let ofx = mkfx({
+	[`${USR}/mikrotik,chateau-5g-r17-ax.json`]: '{ "power_gpio": "from-usr" }',
+	[`${ETC}/mikrotik,chateau-5g-r17-ax.json`]: '{ "power_gpio": "from-etc", "reset_run": 0 }',
+});
+let ob = board.create({ id: 'mikrotik,chateau-5g-r17-ax', fx: ofx, log: () => {} });
+eq(ob.profile.power_gpio, 'from-etc', 'override: /etc beats /usr/share beats the table');
+eq(ob.profile.leds, null, 'override: a file replaces the entry whole, nothing is merged in');
+
+// a broken file is ignored whole and logged; the table still applies
+let bad = (body, why) => {
+	let l2 = [];
+	let x = board.create({ id: 'mikrotik,chateau-5g-r17-ax', log: (lv, m) => push(l2, m),
+		fx: mkfx({ [`${ETC}/mikrotik,chateau-5g-r17-ax.json`]: body }) });
+	eq(x.profile_source, 'builtin', `invalid (${why}): falls back to the table`);
+	ok(length(filter(l2, (m) => index(m, why) >= 0)) == 1, `invalid (${why}): the log says ${why}`);
+};
+bad('{ "power_gpio": "x", "power_gpio_activ_low": true }', 'unknown key');
+bad('{ "power_gpio": "x", ', 'not valid JSON');
+bad('[ 1 ]', 'not a JSON object');
+bad('{ "power_gpio": "../../x" }', 'not a GPIO name');
+bad('{ "power_gpio_active_low": 1 }', 'must be true or false');
+bad('{ "reset_run": 2 }', 'reset_run');
+bad('{ "option_ids": [ "2dee:4d57" ] }', 'option_ids');
+bad('{ "leds": { "style": "sweep" } }', 'unknown style');
+bad('{ "leds": { "style": "mobile", "blue": "b" } }', 'has no');
+bad('{ "leds": { "style": "signal_bars", "names": [ "a/b" ] } }', 'not an LED name');
+bad('{ "leds": { "style": "signal_bars", "names": "one" } }', 'must be a list');
+bad('{ "leds": { "style": "mobile", "green": [ "green:a", "green:b" ] } }', 'must be one LED name');
+bad('{ "power_gpio": "modem+power" }', 'not a GPIO name');
+bad('{ "leds": { "style": "signal_bars" } }', 'leds.names: missing');
+bad('{ "leds": { "style": "mobile", "green": "g" } }', 'leds.red: missing');
+bad('{ "reset_run": 0.0 }', 'reset_run');
+bad('{ "leds": { "style": "signal_bars", "names": [] } }', 'empty');
+
+// a broken /etc file does not fall back to the packaged one it was there to
+// replace: the built-in entry applies
+let pfx = mkfx({
+	[`${USR}/mikrotik,chateau-5g-r17-ax.json`]: '{ "power_gpio": "from-usr" }',
+	[`${ETC}/mikrotik,chateau-5g-r17-ax.json`]: '{ "power_gpio": "from-etc", "typo": 1 }',
+});
+let pb2 = board.create({ id: 'mikrotik,chateau-5g-r17-ax', fx: pfx, log: () => {} });
+eq(pb2.profile_source, 'builtin', 'precedence: a broken /etc file falls back to the table, not to /usr/share');
+eq(pb2.profile.power_gpio, 'modem-power', 'precedence: ...the built-in power line');
+
+// a broken file for an unknown board leaves it unknown, i.e. all no-ops
+let ub = board.create({ id: 'tuoshi,t22m', log: () => {},
+	fx: mkfx({ [`${USR}/tuoshi,t22m.json`]: '{ "power_gpio": 5 }' }) });
+eq(ub.profile, null, 'invalid, no built-in: no profile at all');
+
+// the model id names the file and must not be able to name anything else
+let rfx = mkfx({});
+let reads = [];
+rfx.read = (p) => { push(reads, p); return null; };
+board.create({ id: '../../etc/passwd', fx: rfx, log: () => {} });
+eq(length(reads), 0, 'id: a model id with a path in it reads no file');
+
 done('test_board');

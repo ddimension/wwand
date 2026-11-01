@@ -16,6 +16,7 @@ import * as config from 'wwand/config.uc';
 import * as daemon_mod from 'wwand/daemon.uc';
 import * as netsel_ops from 'wwand/netsel_ops.uc';
 import * as modem_common from 'wwand/modem_common.uc';
+import * as config_check from 'wwand/config_check.uc';
 
 uloop.init();
 
@@ -61,7 +62,7 @@ function handlers()
 		GET_SYSTEM_SELECTION_PREFERENCE: {
 			mode_preference: 0x18, roaming_preference: 0xFF,
 			lte_band_preference: 524420, usage_preference: 1,
-			network_selection: 0,
+			network_selection: 0, acquisition_order: [ 8, 5 ],
 		},
 		SET_SYSTEM_SELECTION_PREFERENCE: {},
 		// visible operators: home (current serving), a plain available one, and a
@@ -148,6 +149,7 @@ run = () => {
 		eq(s.mode_preference, 0x18, 'get_settings: mode pref via with_nas');
 		eq(s.lte_bands, [ 3, 8, 20 ], 'get_settings: band list decoded');
 		eq(s.selection_mode, 'auto', 'get_settings: selection mode derived');
+		eq(s.rat_order, [ 'lte', 'umts' ], 'get_settings: acquisition order by name, over the wire');
 		eq(s.band_caps, { lte: [ 3, 8, 20 ], nr5g: [ 78 ] },
 			'get_settings: the supported bands (DMS band capabilities), sorted');
 		eq(s.registered_plmn, { mcc: 262, mnc: 1, name: 'Testnet' },
@@ -945,7 +947,7 @@ daemon.shutdown();
 	let mk = (o) => {
 		let ev = [];
 		let cur = { mode_preference: 0x18, roaming_preference: 0xFF, usage_preference: 1,
-		            lte_band_preference: 133, network_selection: 0 };
+		            lte_band_preference: 133, network_selection: 0, acquisition_order: [ 8, 5 ] };
 		let mkctx = (st) => {
 			let c = { state: st, name: 'c' + st };
 			c.down = (cb, reason) => { push(ev, 'down:' + reason); c.state = 'IDLE'; cb(); };
@@ -1030,11 +1032,124 @@ daemon.shutdown();
 		eq([ err, t.ev ], [ null, [ 'set:usage_preference:held' ] ], 'busy: a usage-only change still goes through');
 	});
 
+	// the acquisition order (#75): by name in, radio interfaces out, and a
+	// change re-attaches like a RAT change — the order is read at a search
+	t = mk();
+	t.ops.modem_set_settings('m0', { rat_order: [ 'nr5g', 'lte' ] }, (err, res) => {
+		eq([ err, res.applied, res.reattached ], [ null, [ 'acquisition_order' ], true ],
+			'rat order: written and re-attached');
+		eq(t.ev, [ 'down:reattach', 'set:acquisition_order:held', 'reattach', 'event:sessions_released' ],
+			'rat order: the same sequence as a band change');
+	});
+
+	// a firmware that acknowledges the order and keeps its own (EG06-E over
+	// MBIM): the result says so instead of claiming the change
+	t = mk({ set_err: null });
+	t.m.with_nas = ((orig) => (fn) => orig((n) => fn({ request: (name, args, cb) =>
+		(name == 'GET_SYSTEM_SELECTION_PREFERENCE')
+			? cb(null, { mode_preference: 0x18, acquisition_order: [ 8, 5 ] })
+			: n.request(name, args, cb) })))(t.m.with_nas);
+	t.ops.modem_set_settings('m0', { rat_order: [ 'umts', 'lte' ] }, (err, res) => {
+		eq([ err, res.applied, res.not_applied ], [ null, [ 'acquisition_order' ], [ 'rat_order' ] ],
+			'rat order: accepted and not applied is reported as such');
+	});
+
+	t = mk();
+	t.ops.modem_set_settings('m0', { rat_order: 'lte,5g' }, (err) => {
+		eq([ err, t.ev ], [ { error: 'invalid_setting', key: 'rat_order' }, [] ],
+			'rat order: an unknown RAT is refused before anything is touched');
+	});
+
+	t = mk();
+	t.ops.modem_set_settings('m0', { acquisition_order: 'lte' }, (err) => {
+		eq(err, { error: 'invalid_setting', key: 'acquisition_order' },
+			'rat order: the raw key must be a list');
+	});
+
+	// a BG96's own order carries its IoT slots as NONE (0): rewriting it would
+	// be refused or re-sort them, so it is refused up front, nothing touched
+	t = mk();
+	t.m.with_nas = ((orig) => (fn) => orig((n) => fn({ request: (name, args, cb) =>
+		(name == 'GET_SYSTEM_SELECTION_PREFERENCE')
+			? cb(null, { mode_preference: 0x14, acquisition_order: [ 0, 0, 4, 8 ] })
+			: n.request(name, args, cb) })))(t.m.with_nas);
+	t.ops.modem_set_settings('m0', { rat_order: [ 'lte', 'gsm' ] }, (err) => {
+		eq([ err?.error, err?.key, t.ev ], [ 'unsupported_setting', 'rat_order', [] ],
+			'rat order: an order with IoT slots is refused, nothing written or cycled');
+	});
+	t.ops.modem_set_settings('m0', { rat_order: [ 0, 0, 'gsm', 'lte' ] }, (err, res) => {
+		eq([ err, res ], [ null, { applied: [], unchanged: true } ],
+			'rat order: ...while its own order read back is still unchanged, not refused');
+	});
+
 	t = mk({ model: 'SLM770A' });
 	t.ops.modem_set_settings('m0', { lte_bands: [ 3 ] }, (err, res) => {
 		eq([ t.ev, res.apply ], [ [ 'set:lte_band_preference:free' ], 'modem_reset' ],
 			'deferred firmware: no reattach — it applies at the reset it asks for');
 	});
+})();
+
+// --- the MBIM init's RAT order (config_check.sync_rat_order, #75) -----------
+// MBIM has no validate pass and no NAS of its own: the order goes through the
+// passthrough NAS, is written only when it differs, and is checked the same
+// way the QMI validate pass checks it.
+(function() {
+	let mk = (o) => {
+		let cur = { mode_preference: 0x50, acquisition_order: [ 8, 5 ] };
+		let sets = [];
+		let m = { config: { rat_order: o?.rat_order }, config_warnings: o?.warnings ?? null };
+
+		m.with_nas = (fn) => fn(o?.no_nas ? null : { request: (name, args, cb) => {
+			if (name == 'GET_SYSTEM_SELECTION_PREFERENCE')
+				return cb(o?.get_err ?? null, o?.get_err ? null : cur);
+			push(sets, args);
+			if (!o?.set_err)
+				cur = { ...cur, ...args };
+			cb(o?.set_err ?? null, {});
+		} });
+		return { m: m, sets: sets };
+	};
+	let checks = (t) => map(filter(t.m.config_warnings ?? [], (w) => w.check == 'rat_order'), (w) => w.expected);
+
+	let t = mk({ rat_order: 'nr5g,lte' });
+	let called = 0;
+	config_check.sync_rat_order(t.m, () => null, () => called++);
+	eq([ called, t.sets ], [ 1, [ { acquisition_order: [ 12, 8 ] } ] ], 'mbim rat order: a different order is written, alone');
+	eq(checks(t), [], 'mbim rat order: ...and the check finds it in place');
+
+	t = mk({ rat_order: 'lte,umts', warnings: [ { check: 'config' }, { check: 'rat_order', expected: 'old' } ] });
+	config_check.sync_rat_order(t.m, () => null, () => null);
+	eq([ t.sets, map(t.m.config_warnings, (w) => w.check) ], [ [], [ 'config', 'rat_order' ] ],
+		'mbim rat order: the same order is not written; a re-init replaces its own warning, keeps the rest');
+	eq(checks(t), [ 'nr5g' ], 'mbim rat order: NR5G allowed and left out of the order is flagged');
+
+	t = mk({});
+	config_check.sync_rat_order(t.m, () => null, () => null);
+	eq([ t.sets, checks(t) ], [ [], [ 'nr5g' ] ], 'mbim rat order unset: nothing written, the gap still reported');
+
+	t = mk({ rat_order: 'nr5g,lte', no_nas: true });
+	config_check.sync_rat_order(t.m, () => null, () => null);
+	eq(checks(t), [ 'nr5g,lte' ], 'mbim rat order: no passthrough -> a configured order is reported, not dropped silently');
+
+	t = mk({ no_nas: true });
+	config_check.sync_rat_order(t.m, () => null, () => null);
+	eq(t.m.config_warnings, [], 'mbim rat order: no passthrough and nothing configured -> nothing to say');
+
+	t = mk({ rat_order: 'lte,gsm' });
+	t.m.with_nas = ((orig) => (fn) => orig((n) => fn({ request: (name, args, cb) =>
+		(name == 'GET_SYSTEM_SELECTION_PREFERENCE')
+			? cb(null, { mode_preference: 0x14, acquisition_order: [ 0, 0, 4, 8 ] })
+			: n.request(name, args, cb) })))(t.m.with_nas);
+	config_check.sync_rat_order(t.m, () => null, () => null);
+	eq(t.sets, [], 'mbim rat order: an order with IoT slots is not written over');
+	ok(match(t.m.config_warnings[0]?.message ?? '', /not applied: .* slots QMI cannot name/),
+		'mbim rat order: ...and the configured one is reported as not applied');
+
+	t = mk({ rat_order: 'nr5g,lte', set_err: { error: 'qmi', code: 48 } });
+	called = 0;
+	config_check.sync_rat_order(t.m, () => null, () => called++);
+	eq([ called, checks(t) ], [ 1, [ 'nr5g,lte', 'nr5g' ] ],
+		'mbim rat order: a refused write continues the init and reports what the modem still holds');
 })();
 
 done('test_netsel');

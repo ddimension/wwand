@@ -1424,8 +1424,11 @@ export function setup(fx, opts)
 		// 2026-09-07 — three WDA rungs, then a fatal datapath error on a config
 		// whose only sin was having no `mux_id`). That decision now lives in
 		// modem_datapath_qmi before the WDA gate.
+		// `config`: no retry changes the driver's QMAP or the config's missing
+		// channel, so the caller must not count it as a flaky modem
+		// (modem_common make_fail)
 		if (opts.qmap_version && type(impl?.prune) == 'function')
-			return { ok: false,
+			return { ok: false, config: true,
 				error: sprintf('datapath %s adopts the QMAP channels its driver created, but the interface configures no mux channel — add `option mux_id` (the driver has already put this modem into QMAP; a plain raw-IP parent cannot unwrap those frames)',
 					backend) };
 

@@ -385,27 +385,47 @@ like and where a new field lands), see [luci.md](luci.md).
 
 ## 8. Adding a board profile
 
-Board-specific modem power/reset GPIOs and status LEDs live in one table in
-`src-ucode/board.uc`, keyed by the `/etc/board.json` model id. To support a new
-router, add an entry:
+Board-specific modem power/reset GPIOs and status LEDs are data, keyed by the
+`/etc/board.json` model id. A new router needs **no change to wwand**: its
+device package (or the target's base-files) installs a board file
+`/usr/share/wwand/boards.d/<model id>.json`; for a local test, or to correct a
+profile, put it in `/etc/wwand/boards.d/` instead (that one wins):
 
-```
-'vendor,my-router': {
-    power_gpio: 'modem-power',      // named GPIO gating modem USB power (optional)
-    reset_gpio: 'modem-reset',      // named GPIO on the modem RESET line (optional)
-    option_ids: [ '2c7c 0800' ],    // usb-serial `option` new_id binds (optional)
-    // render the panel from { present, registered, radio, roaming, bars }:
-    leds: (fx, s) => render_bars(fx, [ 'green:sig-1', 'green:sig-2', 'green:sig-3' ],
-                                 s.registered ? s.bars : 0),
-},
+```json
+{
+	"power_gpio": "modem-power",
+	"power_gpio_active_low": false,
+	"reset_gpio": "modem-reset",
+	"reset_run": 0,
+	"option_ids": [ "2c7c 0800" ],
+	"leds": { "style": "signal_bars",
+	          "names": [ "green:sig-1", "green:sig-2", "green:sig-3" ] },
+	"note": "reset_run measured on the device, 2026-10-29"
+}
 ```
 
-The GPIO / LED names are the kernel's line/LED names (`ls /sys/class/gpio`,
-`ls /sys/class/leds`). `leds(fx, s)` may use the helpers `render_bars` (an
-N-LED signal graph) or `render_mobile` (red/green(+orange) mobile + a tech LED);
-`bars` is derived by `bars_from_signal`. Everything goes through the injectable
-`fx` (read/write/list), so add a case to `test_board.uc` with a recording fx and
-assert the GPIO/LED writes — **no hardware needed**. An unknown board keeps the
+Every key is optional. `power_gpio` gates the modem's USB power,
+`power_gpio_active_low` says it is inverted (0 = powered), `reset_gpio` is the
+modem RESET line and `reset_run` the level at which the modem RUNS on it —
+state it when you have measured it (see `reset_pulse` in `board.uc` for what
+guessing it from the live pin costs). `option_ids` are `vendor product` pairs
+bound to the usb-serial `option` driver. The GPIO / LED names are the kernel's
+(`ls /sys/class/gpio`, `ls /sys/class/leds`). `note` is free text — JSON has no
+comments, so put the evidence there or in the device's commit.
+
+`leds` names one of the styles in `board.uc` `LED_STYLES`: `signal_bars` (one
+LED per signal bar, `names` from the weakest up, dark while unregistered) or
+`mobile` (`red`/`green`/`orange` mobile LED and a `tech` LED that lights on
+LTE; `red` and `green` are required). A panel that behaves differently needs a new style there — that part is
+code and goes into wwand.
+
+The file is validated whole: an unknown key or a bad value gets it ignored
+with a log line naming the problem, and `board.profile_source` in
+`ubus call wwand status` shows which profile is in use. The built-in table in
+`board.uc` has the same shape and passes the same validator (`test_board.uc`
+checks it); entries stay there for boards wwand already supported. A new style
+or loader change gets a case in `test_board.uc` with a recording fx that
+asserts the GPIO/LED writes — **no hardware needed**. An unknown board keeps the
 null profile (all ops no-op), so nothing else changes. The recovery ladder and
 the `modem_repower` ubus method pick this up automatically; the config
 `reset_gpio` option overrides the board default per modem.

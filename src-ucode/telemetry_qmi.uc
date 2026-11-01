@@ -25,7 +25,64 @@ import * as backend from 'wwand.backend';
 import * as qmi_backend from 'wwand.qmi_backend';
 import * as modem_common from 'wwand.modem_common';
 import * as atcmd from 'wwand.atcmd';
+// read_ca_at: vendor-aware AT carrier-aggregation read (QCAINFO / Fibocom
+// GTCAINFO), shared with telemetry_mbim — all telemetry_*.uc ship in base wwand.
+import * as tel_vendor from 'wwand.telemetry_ncm';
 
+
+// The slow tick's cell-location query, when the modem stops answering it.
+// A modem can go quiet on this one request while the connection carries on —
+// an EG12-EA timed out on it every tick after a WAN restart, one warning a
+// minute (evidence: ddimension/wwand#72). The read is optional, so after
+// CELL_TIMEOUTS timeouts in a row the tick sits out a growing number of
+// rounds (1, 2, 4, 8, then CELL_SKIP_MAX — about 16 min at the 60 s default)
+// and only re-asks then; the first answer resets it. Not retired for good:
+// the cell list is what LuCI shows, and nothing says the quiet spell is
+// permanent.
+//
+// st = { timeouts, skip } (per modem, owned by the caller); err = the
+// request's error or null. Mutates st and returns the line to log as
+// [level, text], or null for none. A non-timeout error is warned every time
+// and ends the streak: a modem that rejects the message has answered, and
+// that is a different fault with its own warning.
+const CELL_TIMEOUTS = 3;
+const CELL_SKIP_MAX = 15;
+
+export function cell_query_backoff(st, err)
+{
+	if (!err) {
+		let was = st.timeouts;
+
+		st.timeouts = 0;
+		st.skip = 0;
+
+		return (was >= CELL_TIMEOUTS)
+			? [ 'info', 'telemetry: cell location query answers again' ]
+			: null;
+	}
+
+	if (err.error != 'timeout') {
+		st.timeouts = 0;
+		st.skip = 0;
+
+		return [ 'warn', sprintf('telemetry: cell location query failed: %J', err) ];
+	}
+
+	let n = ++st.timeouts;
+
+	if (n < CELL_TIMEOUTS)
+		return [ 'warn', sprintf('telemetry: cell location query failed: %J', err) ];
+
+	// bound the exponent before shifting: a modem that never answers again
+	// would push it past the integer width after some 17 hours
+	let e = n - CELL_TIMEOUTS;
+
+	st.skip = (e >= 4) ? CELL_SKIP_MAX : (1 << e);
+
+	return [ (n == CELL_TIMEOUTS) ? 'warn' : 'debug',
+		sprintf('telemetry: cell location query timed out %d times in a row, next try in %d rounds',
+			n, st.skip + 1) ];
+};
 
 export function install(self, o)
 {
@@ -253,13 +310,20 @@ export function install(self, o)
 			{ name: 'qmi', probe: (ok) => self.nas
 				? qmi_backend.get_ca(self.nas, (ca) => ok(ca != null))
 				: ok(false) },
-			{ name: 'at', probe: (ok) => ok(!!self.at) },
+			// Probe the actual CA read, vendor-aware: QCAINFO is Quectel-specific,
+			// and a Fibocom in QMI mode (whose QMI CPHY CA is unavailable) answers
+			// it with ERROR. read_ca_at asks such a modem the Fibocom way
+			// (AT+GTCAINFO?), so the probe reflects what the transport can really
+			// serve rather than just the port's existence (shared with
+			// telemetry_mbim; 2026-10-30).
+			{ name: 'at', probe: (ok) => self.at
+				? tel_vendor.read_ca_at(self, (e) => ok(!e))
+				: ok(false) },
 		], (be) => {
 			if (be == 'qmi')
 				return qmi_backend.get_ca(self.nas, (ca) => store(ca ?? []));
 			if (be == 'at')
-				return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) =>
-					store(e ? [] : atcmd.parse_qcainfo(r?.lines)));
+				return tel_vendor.read_ca_at(self, (e, ca) => store(ca ?? []));
 			store([]);
 		}, { reprobe: true, log: log, what: 'carrier aggregation' });
 	};
@@ -364,24 +428,16 @@ export function install(self, o)
 		let first = min(interval, 5000);
 
 		let tick;
+		let cell_st = { timeouts: 0, skip: 0 };
 
 		tick = () => {
 			// modem may have been torn down while a request was in flight
 			if (!self.nas)
 				return;
 
-			self.nas.request('GET_CELL_LOCATION_INFO', {}, (err, data) => {
-				// The client is being destroyed. Everything below submits more
-				// work — an AT CSQ floor read, a temperature read, an IoT-RAT
-				// probe — and then re-arms this timer, all on the way down.
-				// Nothing here is worth doing for a modem that is going away.
-				if (err?.error == 'cancelled')
-					return;
-
+			let rest = (err, data) => {
 				if (!err)
 					store_cells(data);
-				else
-					log('warn', sprintf('telemetry: cell location query failed: %J', err));
 
 				// a modem whose QMI signal message never answers (old stacks)
 				// still gets an rssi floor per tick — the slow loop is the one
@@ -402,6 +458,30 @@ export function install(self, o)
 					if (self.nas)
 						telemetry_timer = uloop.timer(interval, tick);
 				}));
+			};
+
+			// sitting out a round still reads the rest (signal floor,
+			// temperature, IoT RAT) — only the query that stopped answering
+			// is skipped; no telemetry line, as on any failed read
+			if (cell_st.skip > 0) {
+				cell_st.skip--;
+				return rest({ error: 'skipped' }, null);
+			}
+
+			self.nas.request('GET_CELL_LOCATION_INFO', {}, (err, data) => {
+				// The client is being destroyed. Everything below submits more
+				// work — an AT CSQ floor read, a temperature read, an IoT-RAT
+				// probe — and then re-arms this timer, all on the way down.
+				// Nothing here is worth doing for a modem that is going away.
+				if (err?.error == 'cancelled')
+					return;
+
+				let line = cell_query_backoff(cell_st, err);
+
+				if (line)
+					log(line[0], line[1]);
+
+				rest(err, data);
 			}, { no_recovery: true });
 		};
 

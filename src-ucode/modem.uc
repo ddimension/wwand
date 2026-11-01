@@ -189,9 +189,9 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1707) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1716) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
-	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:739, step_sim), and
+	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:741, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
 	//
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
@@ -374,7 +374,17 @@ export function create(opts)
 				if (!err)
 					cid_held(client.service, client.cid, false);
 
-				log(err ? 'warn' : 'debug', sprintf('release of cid %d (service %d): %s — held: %s',
+				// ...but `cancelled` is not the modem refusing: our own hub
+				// closed under the request during teardown. On QMUX the next
+				// init starts with a CTL SYNC, which resets the modem's client
+				// table where the stack implements it (best-effort: modem_init_qmi
+				// step_sync); over QRTR a client IS a socket, which the hub's
+				// close shuts (qmi_over_qrtr self.close). A warning cannot make
+				// the cancelled release happen, and it added one line per CID
+				// to every failed attempt.
+				let quiet = !err || err.error == 'cancelled';
+
+				log(quiet ? 'debug' : 'warn', sprintf('release of cid %d (service %d): %s — held: %s',
 					client.cid, client.service, err ? sprintf('%J', err) : 'ok', held_summary() || 'none'));
 
 				if (cb)
@@ -557,7 +567,7 @@ export function create(opts)
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:4436), and dropping it strands a ubus request.
+				// (daemon.uc:4476), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
@@ -1334,7 +1344,7 @@ export function create(opts)
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
-			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:488-491), so it
+			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:545-548), so it
 			// carries the same raw WCDMA Ec/Io and needs the same conversion —
 			// an indication landing between refreshes would otherwise flip the
 			// unit back under a consumer that just read the polled value
