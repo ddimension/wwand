@@ -1,7 +1,7 @@
 # wwand — current state
 
-_State of 2026-10-29: stable **v1.7.2**, main **v1.8.0-dev**.
-63 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
+_State of 2026-11-01: stable **v1.8.0**, main **v1.9.0-dev**.
+65 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
 which moves too often to be worth repeating here)._
 
 This file describes **what is true now**. The dated log of how it got here is
@@ -11,11 +11,17 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
-- **Feed main** is at wwand `1.8.0_pre36` (d13826e) / luci-app-wwand
-  `1.8.0_pre6` (e3de15a), pushed 2026-10-30, run 40974441328 (pre36 / pre5
-  built and published before it). **Do not push to the feed while a build
-  of the same branch runs** — a push cancels it. Feed stable release tag
-  (`scripts/release-stable.sh`) — only when asked.
+- **Release 1.8.0 (2026-11-01):** main merged into stable in wwand and
+  luci-app-wwand (stable's own commits were all cherry-picks, so the merged
+  tree is main's), tagged `v1.8.0` there, `v1.9.0-dev` on main.
+  luci-proto-wwand had nothing new and stays at v1.7.0; wwand-rsim got
+  `v0.1.1`. Feed stable took main (`Merge main into stable`) and pins
+  wwand 1.8.0 / luci-app-wwand 1.8.0 / wwand-rsim 0.1.1; its build was
+  started 2026-11-01 (run 41332388880). **The release tag
+  (`scripts/release-stable.sh`) waits for that build to be green.** Feed
+  main is still at wwand `1.8.0_pre48` / luci-app-wwand `1.8.0_pre8`; its
+  next bump counts `1.9.0_preN`. **Do not push to the feed while a build of
+  the same branch runs** — a push cancels it.
 - **RAT priority (#75, built and HW-tested 2026-10-30):** `option rat_order`
   + `modem_get/set_settings` `rat_order` (+ `rat_order_writable`,
   `not_applied`) + LuCI Modem Tools *RAT priority* editor and the modem-page
@@ -101,8 +107,8 @@ is always user-triggered.
 | Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed. Plugins in their own repositories: `wwand-ipa` (SGP.32 eIM), `wwand-qlog` (Quectel QLog diag capture), `wwand-rsim` (remote SIM: readers, phones over Bluetooth SAP, other modems' cards) |
 | Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
-| Feed | ddimension/openwrt-repo, two independent lines — stable (releases, published only by a date tag; last: 2026.10.20 with wwand 1.7.1, 1.7.2 built but not yet released) and main (development, `1.8.0_preN` from the `v1.8.0-dev` marker). The source repos have the same two lines (`stable` at v1.7.2). `wwand` requires `ucode (>=` the SDK's ucode `)` since #67 |
-| Upstream | openwrt/packages#30185 (pins v1.6.9), openwrt/luci#8917 |
+| Feed | ddimension/openwrt-repo, two independent lines — stable (releases, published only by a date tag; last: 2026.10.20 with wwand 1.7.1; 1.8.0 building) and main (development, `X.Y.Z_preN` from the `vX.Y.0-dev` marker, now `v1.9.0-dev`). The source repos have the same two lines (`stable` at v1.8.0). `wwand` requires `ucode (>=` the SDK's ucode `)` since #67 |
+| Upstream | openwrt/packages#30185 (pins v1.8.0), openwrt/luci#8917 (luci-app-wwand v1.8.0, luci-proto-wwand v1.7.0) |
 
 ## Hardware verified (2026-10-24, main 3a12e9e, `hwtest/run.sh`)
 
@@ -416,7 +422,7 @@ place to check. One line each, with its opening sentence:
    `tools/check-anchors.py --since <the commit before it> --fix` once.
 5. **Two lines (since 2026-10-04):** releases are tagged on the `stable` branch,
    never on main; main carries the `vX.Y.0-dev` marker of the minor it develops
-   (currently `v1.7.0-dev`) and ships as `X.Y.Z_preN` on feed main. A patch
+   (currently `v1.9.0-dev`) and ships as `X.Y.Z_preN` on feed main. A patch
    release: get the fix onto `stable` (cherry-pick `-x` from main, or fix on
    stable and merge stable into main), run 1-4 there, tag `vX.Y.Z` on stable —
    in luci-app-wwand / luci-proto-wwand only where they changed. Opening a new
