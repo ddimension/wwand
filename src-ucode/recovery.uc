@@ -744,7 +744,7 @@ export function create(opts)
 	self.usb_repower = function() {
 		// The gate lives HERE, at the primitive, not only in the ladder that
 		// usually calls it. The ladder is not the only caller: the zero-rx
-		// watchdog repowers directly (modem_common.trip_zero_rx), and it is
+		// watchdog falls back to it (modem_common.trip_zero_rx), and it is
 		// reachable on a modem that never proved its protocol — a contradicted
 		// NCM pin still lets AT replies drive the state machine far enough to
 		// bring a context up, and a stall on that context would then power-cycle

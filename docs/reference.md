@@ -84,7 +84,8 @@ wwand section types plus the netifd interface — no separate config file:
   and **`repower_time`** (seconds, default 30) — how long the modem is held
   de-powered during a recovery power-cycle, or held in reset when `reset_gpio` is used —
   and **`reset_fallback`** (seconds, default 30) — how long an admin `modem_reset` waits
-  for the modem's own reset to take it off the bus before the reset line is pulsed —
+  for the modem's own reset to take it off the bus before the reset line is pulsed, and
+  the zero-rx / TX-stall watchdog before the board repowers the modem —
   and **`sim_detect`** (`high`\|`low`\|`off`, Quectel only) — SIM hot-plug detection
   (`AT+QSIMDET`): on with the tray's detect pin high / low meaning "card inserted", or
   off. The level is the board's wiring, so unset leaves the modem's value alone; with
@@ -569,9 +570,10 @@ config wwand_modem 'm0'
 	                                 #    subscription, no modem reset / power-cycle / reboot
 	                                 #    for this long (0 = off); see "Recovery and IPAe cards"
 	option proto_error_limit '25'    # protocol-error ceiling before a reboot (gated by failreboot)
-	option zero_rx_timeout '21600'   # no-rx watchdog in seconds (0 = off); on a
-	                                 #   board that can repower it repowers, else
-	                                 #   it falls through to a modem reset
+	option zero_rx_timeout '21600'   # no-rx watchdog in seconds (0 = off): resets the
+	                                 #   modem; a board that can repower does so when
+	                                 #   the reset is refused or the modem is still on
+	                                 #   the bus after reset_fallback
 	option tx_stall_timeout '120'    # s: the kernel reports the data netdev's transmit
 	                                 #   queue stuck ("NETDEV WATCHDOG") for this long ->
 	                                 #   the same recovery as zero-rx; 0 = only watch and

@@ -594,7 +594,7 @@ rv3.revoke_arming('nothing to take');
 eq(rv3.counters.proto_ok, 0, 'revoke: harmless when nothing was armed');
 
 // The gate lives at the PRIMITIVE, because the ladder is not its only caller.
-// The zero-rx watchdog repowers directly (modem_common.trip_zero_rx), which is
+// The zero-rx watchdog falls back to it (modem_common.trip_zero_rx), which is
 // reachable on a modem that never proved its protocol: a contradicted NCM pin
 // still lets AT replies drive the state machine far enough to bring a context
 // up, and a stall on that context would then power-cycle healthy hardware.

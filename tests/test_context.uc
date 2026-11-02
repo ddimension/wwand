@@ -1284,9 +1284,9 @@ scenario('zero-rx', {
 // self.down() stops the monitor and only THEN releases the WDS clients, so a
 // GET_PACKET_STATISTICS already on the wire keeps its callback and lands on a
 // live client with the context IDLE. Tripping there is not a stray log line:
-// zero_rx reaches trip_zero_rx -> recovery.usb_repower(), a board power-cycle
-// or reset-GPIO pulse on a modem that no longer carries this context and may be
-// carrying another one.
+// zero_rx reaches trip_zero_rx -> a modem reset, and behind it a board
+// power-cycle or reset-GPIO pulse, on a modem that no longer carries this
+// context and may be carrying another one.
 //
 // The handler below takes the context down on the sample that would cross the
 // stall threshold, so the reply comes back to a monitor that has stopped.
