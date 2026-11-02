@@ -843,60 +843,130 @@ export function scaffolding(self, o)
 
 	// zero-rx watchdog tripped on a context of this modem: inbound bytes have
 	// not moved for the configured window while QMI still reports the bearer
-	// CONNECTED. A board repower (power-cycle / reset-GPIO pulse) is the
-	// watchdog's recovery WHERE THE BOARD CAN DO IT; on a self-powered PCIe/MHI
-	// modem with no such mechanism repower is UNAVAILABLE — not merely refused —
-	// and the modem reset is the rung that actually clears the stall (the
-	// gentler retry / opmode-cycle rungs do nothing for it). Branch on
-	// can_repower(), not on usb_repower()'s bare bool, which cannot tell
-	// "no mechanism" from "refused" apart (ddimension/wwand#59).
-	// `why` names the watchdog in the log: 'zero-rx' (the default, a context's
-	// rx counter) or 'tx stall' (the daemon's transmit-queue watch). Both are the
-	// same verdict — the data path is dead while the modem claims it is not —
-	// and get the same recovery.
+	// CONNECTED. `why` names the watchdog in the log: 'zero-rx' (the default, a
+	// context's rx counter) or 'tx stall' (the daemon's transmit-queue watch).
+	// Both are the same verdict — the data path is dead while the modem claims
+	// it is not — and get the same recovery.
+	//
+	// THE MODEM'S OWN RESET FIRST, the board's hardware only as the fallback —
+	// the order hwops.modem_reset keeps, for its reason: a reset-line pulse or
+	// a power cut stops the modem mid-write, and its EFS/NV is what such a cut
+	// can corrupt (ddimension/openwrt-repo#4). Going straight to the board
+	// skipped a reset that works: on a tx stall the control channel still
+	// answers (the trip itself checks that its error streak did not grow), so
+	// the modem can act on it (evidence: ddimension/wwand#76). The board steps
+	// in when the reset is refused, or when the modem acknowledged it and is
+	// still on the bus `reset_fallback` seconds later (default 30), which a real
+	// reboot is not. The gentler retry / opmode-cycle rungs do nothing for a
+	// dead data path, so neither is tried.
+	//
+	// Branch on can_repower(), not on usb_repower()'s bare bool, which cannot
+	// tell "no mechanism" from "refused" apart (ddimension/wwand#59).
 	self.trip_zero_rx = function(why) {
 		why ??= 'zero-rx';
 
-		if (rec.can_repower()) {
-			rec.usb_repower();
+		let can_repower = rec.can_repower();
+		let soft = type(self.reset) == 'function';
+
+		// No reset of its own on this backend: the board is all there is.
+		// usb_repower() keeps its own evidence rule for that call.
+		if (!soft) {
+			if (can_repower)
+				rec.usb_repower();
+			else
+				log('warn', sprintf('%s: no modem reset on this backend and no repower mechanism — not resetting', why));
+
 			return;
 		}
 
-		// Repower UNAVAILABLE -> modem reset. Keep usb_repower()'s own evidence
-		// rule (never a modem that has never answered us) and never cut across
-		// an in-flight reattach, a parked (low-power) radio, or a modem being
-		// torn down. Log each skip so a field capture shows why a stall did or
-		// did not reset.
+		// usb_repower()'s evidence rule holds for the reset too: never a modem
+		// that has never answered us. Log each skip so a field capture shows why
+		// a stall did or did not reset.
 		if (!self.counters.proto_ok) {
-			log('warn', sprintf('%s: no repower mechanism, but this control channel has never answered — not resetting', why));
+			log('warn', sprintf('%s: this control channel has never answered — not resetting', why));
 			return;
 		}
-		if (self._reattaching || self.lowpower_parked || self.detached) {
-			log('info', sprintf('%s: no repower mechanism, but a reattach / low-power park / detach is in flight — not resetting', why));
+
+		// Where the reset is all there is, it does not cut across an in-flight
+		// reattach, a parked (low-power) radio, or a modem being torn down. A
+		// board that can repower is not held back by them: the watch trips once
+		// per stall (context_common tx_stall_watch, `tripped`), so a skip here
+		// would leave that stall with no recovery at all.
+		if (!can_repower && (self._reattaching || self.lowpower_parked || self.detached)) {
+			log('info', sprintf('%s: a reattach / low-power park / detach is in flight — not resetting', why));
 			return;
 		}
 
 		// A modem carries more than one context and two can trip on the same
-		// tick; a per-modem latch keeps that to a single reset (cleared when the
-		// reset completes), so the modem is not reset twice.
+		// tick; a per-modem latch keeps that to a single reset, held until the
+		// reset is settled (failed, or the fallback window closed), so the
+		// modem is not reset twice.
 		if (self._zero_rx_resetting)
 			return;
 		self._zero_rx_resetting = true;
 
-		log('err', sprintf('%s: no repower path, resetting the modem', why));
-		self.reset((err) => {
-			self._zero_rx_resetting = false;
+		// cancel_zero_rx_fallback() moves this on, so a reset that answers
+		// after a stop() cannot arm a fallback for a modem the daemon dropped
+		let gen = self._zero_rx_gen = (self._zero_rx_gen ?? 0) + 1;
 
-			// unsupported_on_backend (NCM without AT, MBIM without passthrough
-			// or AT) or a refused reset: the stall stays, and the log is the
-			// only place that says why
-			if (err)
-				log('warn', sprintf('%s: modem reset failed: %J', why, err));
+		// the daemon counts the ABSENT transitions of this modem object
+		// (daemon.uc on_modem_event): one more than now = it left the bus
+		let absent0 = self._absent_count ?? 0;
+
+		log('err', sprintf('%s: resetting the modem', why));
+		self.reset((err) => {
+			if (self._zero_rx_gen != gen)
+				return;
+
+			if (err) {
+				self._zero_rx_resetting = false;
+
+				// unsupported_on_backend (NCM without AT, MBIM without
+				// passthrough or AT) or a refused reset
+				if (rec.can_repower()) {
+					log('warn', sprintf('%s: modem reset failed (%J) — repowering', why, err));
+					rec.usb_repower();
+				}
+				else
+					log('warn', sprintf('%s: modem reset failed: %J', why, err));
+
+				return;
+			}
+
+			if (!rec.can_repower()) {
+				self._zero_rx_resetting = false;
+				return;
+			}
+
+			let s = +(self.config?.reset_fallback ?? 0);
+			let wait = (s > 0) ? s * 1000 : (self.timing?.reset_fallback_ms ?? 30000);
+
+			self._zero_rx_fallback = uloop.timer(wait, () => {
+				self._zero_rx_fallback = null;
+				self._zero_rx_resetting = false;
+
+				if ((self._absent_count ?? 0) > absent0 || self.state == 'ABSENT')
+					return;
+
+				log('err', sprintf('%s: still on the bus %d s after the modem reset — repowering', why, wait / 1000));
+				rec.usb_repower();
+			});
 		});
+	};
+
+	// A pending fallback must not power-cycle hardware for a modem object the
+	// daemon has dropped, or from a daemon on its way out (daemon.uc
+	// stop_local, whose loop runs on for the plugins' hand-back).
+	self.cancel_zero_rx_fallback = function() {
+		self._zero_rx_gen = (self._zero_rx_gen ?? 0) + 1;
+		self._zero_rx_fallback?.cancel?.();
+		self._zero_rx_fallback = null;
+		self._zero_rx_resetting = false;
 	};
 
 	// administrative teardown (daemon shutdown / reload / modem removed)
 	self.stop = function() {
+		self.cancel_zero_rx_fallback();
 		self.teardown();
 		self.set_state('ABSENT');
 	};

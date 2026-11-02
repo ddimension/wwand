@@ -641,12 +641,37 @@ self_m.lowpower_parked = false; self_m.detached = true;      self_m.trip_zero_rx
 self_m.detached = false;
 eq(reset_calls, 3, 'zero-rx: no reset across reattach / park / detach');
 
-// and when the board CAN repower again it repowers, never resets
+// a board that CAN repower still gets the modem's own reset first: a pulse or
+// a power cut stops the modem mid-write (ddimension/wwand#76)
 rec_can = true;
 self_m.trip_zero_rx();
-eq(repowered, rp_before + 1, 'zero-rx: board can repower -> usb_repower');
-eq(reset_calls, 3, 'zero-rx: board can repower -> no modem reset');
+eq(reset_calls, 4, 'zero-rx: board can repower -> the modem reset comes first');
+eq(repowered, rp_before, 'zero-rx: board can repower -> no repower while the reset runs');
+
+// ...and the board steps in at once when that reset is refused
+reset_cb({ error: 'timeout' });
+eq(repowered, rp_before + 1, 'zero-rx: a refused reset falls back to the board repower');
+
+// the watch trips once per stall, so a board-capable modem is not held back
+// by a reattach in flight: it still gets its reset
+self_m._reattaching = true;
+self_m.trip_zero_rx();
+self_m._reattaching = false;
+eq(reset_calls, 5, 'zero-rx: board can repower -> reset even with a reattach in flight');
+reset_cb({ error: 'timeout' });
+eq(repowered, rp_before + 2, 'zero-rx: ...and its refusal still repowers');
+rp_before++;
+ok(!self_m._zero_rx_resetting, 'zero-rx: the refused reset clears the latch');
+
+// a backend with no reset of its own: the board is all there is
+let keep_reset = self_m.reset;
+self_m.reset = null;
+self_m.trip_zero_rx();
+eq(repowered, rp_before + 2, 'zero-rx: no modem reset on the backend -> board repower');
 rec_can = false;
+self_m.trip_zero_rx();
+eq(repowered, rp_before + 2, 'zero-rx: no modem reset and no board -> nothing');
+self_m.reset = keep_reset;
 
 // stop(): teardown + ABSENT
 let torn_m = 0;
@@ -867,7 +892,7 @@ d.stop();
 
 // --- reschedule while watched, then stop() halts it --------------------------
 // forward-declare the phase chain (ucode captures only already-declared names)
-let phase2, phase3, phase4, phase5;
+let phase2, phase3, phase4, phase5, phase6;
 
 let rescheduled = 0;
 phase2 = () => {
@@ -953,7 +978,72 @@ phase5 = () => {
 		eq(max_in_flight, 1, 'non-overlap: at most one refresh in flight at any time');
 		ok(cycles >= 3, sprintf('non-overlap: still made progress (%d cycles)', cycles));
 		ds.stop();
-		uloop.end();
+		phase6();
+	});
+};
+
+// --- zero-rx: an acknowledged reset, and the board as its fallback ----------
+// The modem said yes to its reset. A modem that really reboots leaves the bus
+// (the daemon counts that as _absent_count); one still there `reset_fallback`
+// seconds later did not, and only then the board repowers (#76).
+
+phase6 = () => {
+	let rcalls = 0, rcb = null;
+	self_m.reset = (cb) => { rcalls++; rcb = cb; };
+	self_m.counters = { proto_ok: 1 };
+	self_m.state = 'READY';
+	self_m._reattaching = false; self_m.lowpower_parked = false; self_m.detached = false;
+	self_m.timing = { reset_fallback_ms: 20 };
+	self_m.config = {};
+	rec_can = true;
+
+	let rp0 = repowered;
+
+	self_m.trip_zero_rx();
+	rcb(null);
+	self_m.trip_zero_rx();
+	eq(rcalls, 1, 'zero-rx fallback: a trip inside the fallback window is latched');
+
+	uloop.timer(50, () => {
+		eq(repowered, rp0 + 1, 'zero-rx fallback: still on the bus after reset_fallback -> board repower');
+		ok(length(filter(sc_logs, (m) => index(m, 'still on the bus') >= 0)) == 1,
+			'zero-rx fallback: the log says why the board stepped in');
+
+		// a modem that left the bus rebooted: no repower
+		self_m.trip_zero_rx();
+		rcb(null);
+		self_m._absent_count = (self_m._absent_count ?? 0) + 1;
+
+		uloop.timer(50, () => {
+			eq(repowered, rp0 + 1, 'zero-rx fallback: a modem that left the bus is not repowered');
+
+			// the modem's own reset_fallback wins over the default, and a
+			// cancelled fallback (daemon stop_local, modem stop) never fires
+			self_m.config = { reset_fallback: 0.2 };
+			self_m.trip_zero_rx();
+			rcb(null);
+
+			uloop.timer(50, () => {
+				eq(repowered, rp0 + 1, 'zero-rx fallback: reset_fallback (s) replaces the default window');
+				self_m.cancel_zero_rx_fallback();
+				ok(!self_m._zero_rx_resetting, 'zero-rx fallback: cancel clears the latch');
+
+				// a reset that answers only after the cancel arms nothing
+				self_m.config = {};
+				self_m.trip_zero_rx();
+				let late = rcb;
+				self_m.cancel_zero_rx_fallback();
+				late(null);
+				ok(self_m._zero_rx_fallback == null, 'zero-rx fallback: a reset answering after the cancel arms no fallback');
+
+				uloop.timer(200, () => {
+					eq(repowered, rp0 + 1, 'zero-rx fallback: a cancelled fallback never repowers');
+					eq(rcalls, 4, 'zero-rx fallback: one reset per trip');
+					rec_can = false;
+					uloop.end();
+				});
+			});
+		});
 	});
 };
 

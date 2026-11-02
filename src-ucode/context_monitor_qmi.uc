@@ -30,7 +30,7 @@ export function install(self, o)
 	// (refresh_settings / schedule_settings_poll declared in the moved block)
 
 	// zero-rx watchdog (preserved: packet statistics sampled every 60s; no
-	// received packets for zero_rx_timeout -> usb-repower via the modem). The
+	// received packets for zero_rx_timeout -> the modem's recovery). The
 	// stall accumulator + threshold live in context_common (shared with the
 	// MBIM/NCM contexts); this context only feeds it its rx-packet total.
 	let stats_timer = null;
@@ -40,8 +40,8 @@ export function install(self, o)
 	// self.down() stops the monitor and only THEN releases the WDS clients, so
 	// that callback lands on a live client with the context already IDLE. It
 	// would feed the zero-rx watchdog, and a trip there does not just log — it
-	// reaches trip_zero_rx -> recovery.usb_repower(), i.e. a board power-cycle
-	// or a reset-GPIO pulse on a modem that is no longer carrying this context
+	// reaches trip_zero_rx -> a modem reset, and behind it a board power-cycle
+	// or a reset-GPIO pulse, on a modem that is no longer carrying this context
 	// and may well be carrying another one.
 	let stats_gen = 0;
 	// which counter source this connection settled on — see the latch in

@@ -1,6 +1,6 @@
 # wwand — current state
 
-_State of 2026-11-01: stable **v1.8.0**, main **v1.9.0-dev**.
+_State of 2026-11-02: stable **v1.8.0** (feed release `2026.11.02`), main **v1.9.0-dev**.
 65 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
 which moves too often to be worth repeating here)._
 
@@ -11,17 +11,23 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
-- **Release 1.8.0 (2026-11-01):** main merged into stable in wwand and
-  luci-app-wwand (stable's own commits were all cherry-picks, so the merged
-  tree is main's), tagged `v1.8.0` there, `v1.9.0-dev` on main.
-  luci-proto-wwand had nothing new and stays at v1.7.0; wwand-rsim got
-  `v0.1.1`. Feed stable took main (`Merge main into stable`) and pins
-  wwand 1.8.0 / luci-app-wwand 1.8.0 / wwand-rsim 0.1.1; its build was
-  started 2026-11-01 (run 41332388880). **The release tag
-  (`scripts/release-stable.sh`) waits for that build to be green.** Feed
-  main is still at wwand `1.8.0_pre48` / luci-app-wwand `1.8.0_pre8`; its
-  next bump counts `1.9.0_preN`. **Do not push to the feed while a build of
-  the same branch runs** — a push cancels it.
+- **Release 1.8.0 (2026-11-01, released 2026-11-02):** main merged into
+  stable in wwand and luci-app-wwand (stable's own commits were all
+  cherry-picks, so the merged tree is main's), tagged `v1.8.0` there,
+  `v1.9.0-dev` on main. luci-proto-wwand had nothing new and stays at
+  v1.7.0; wwand-rsim got `v0.1.1`. Feed stable pins wwand 1.8.0 /
+  luci-app-wwand 1.8.0 / wwand-rsim 0.1.1; its build went green and the
+  release tag `2026.11.02` is pushed — the images build from it, check that
+  run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
+  translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
+  build of the same branch runs** — a push cancels it.
+- **Watchdog reset order (#76, 2026-11-02):** the zero-rx / TX-stall
+  watchdog (`modem_common.trip_zero_rx`) went straight to the board repower
+  where the board had one — a GPIO reset or power cut, skipping the modem's
+  own reset. It now resets the modem first, as `modem_reset` does, and the
+  board repowers only when that reset is refused or the modem is still on the
+  bus after `reset_fallback` (default 30 s). Reported by marcinnet-25 on a
+  Zyxel LTE7480-M804 (reset GPIO).
 - **RAT priority (#75, built and HW-tested 2026-10-30):** `option rat_order`
   + `modem_get/set_settings` `rat_order` (+ `rat_order_writable`,
   `not_applied`) + LuCI Modem Tools *RAT priority* editor and the modem-page

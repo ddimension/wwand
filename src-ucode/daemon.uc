@@ -5660,6 +5660,10 @@ export function create(opts)
 			cancel_confirm(entry);
 		}
 
+		// a watchdog's pending repower fallback is the daemon's own too
+		for (let name, entry in self.modems)
+			entry.modem?.cancel_zero_rx_fallback?.();
+
 		// the loop runs on for the plugins' hand-back (main.uc): nothing of
 		// the daemon's own may act in it — a tick would run the plugins
 		// again (re-lending what they just gave back), the vanish ladder,
