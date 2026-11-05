@@ -1563,10 +1563,10 @@ export function create(opts)
 	};
 
 	// A live edit of the override that matches the card in use: re-program
-	// the attach profile (reapply_sim, which cycles the radio only when the
-	// profile really changed), then re-dial the sessions still up, which were
-	// dialled with the old values. Only on a modem past its init chain: one
-	// that is still coming up reads the new list on its own.
+	// the attach profile (reapply_sim, which re-attaches only when the profile
+	// really changed), then re-dial the sessions still up, which were dialled
+	// with the old values. Only on a modem past its init chain: one that is
+	// still coming up reads the new list on its own.
 	let apply_sim_change = (mn, m) => {
 		log('notice', sprintf('modem %s: the SIM override of the card in use changed — applying it', mn));
 
