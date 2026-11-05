@@ -425,6 +425,204 @@ bad('{ "leds": { "style": "mobile", "green": "g" } }', 'leds.red: missing');
 bad('{ "reset_run": 0.0 }', 'reset_run');
 bad('{ "leds": { "style": "signal_bars", "names": [] } }', 'empty');
 
+bad('{ "leds": [] }', 'leds: empty');
+bad('{ "leds": [ { "style": "signal_bars", "names": [ "a" ] }, { "style": "nope" } ] }', 'leds[1]: unknown style');
+bad('{ "leds": { "style": "tech" } }', 'leds.leds: missing');
+bad('{ "leds": { "style": "tech", "leds": { "6g": "x" } } }', 'is not one of');
+bad('{ "leds": { "style": "tech", "leds": {} } }', 'must map');
+bad('{ "leds": { "style": "tech", "leds": { "4g": { "led": "g", "weak": "flash" } } } }', 'must be on, blink or off');
+bad('{ "leds": { "style": "tech", "leds": { "4g": { "led": "g", "blink": true } } } }', 'has no');
+bad('{ "leds": { "style": "tech", "leds": { "4g": { "led": "../x" } } } }', 'not an LED name');
+bad('{ "leds": { "style": "tech", "leds": { "4g": "g" }, "weak_bars": 6 } }', '0 to 5');
+bad('{ "leds": { "style": "tech", "leds": { "4g": "g" }, "cumulative": 1 } }', 'must be true or false');
+bad('{ "leds": { "style": "signal_color" } }', 'at least one of red, green, blue');
+bad('{ "leds": { "style": "signal_color", "red": "r", "green": "g", "colors": [ "red" ] } }', 'must list 5');
+bad('{ "leds": { "style": "signal_color", "red": "r", "green": "g", "colors": [ "red", "red", "pink", "green", "green" ] } }', 'not a colour');
+// a red/green LED cannot show blue: refused, not silently shown as something else
+bad('{ "leds": { "style": "signal_color", "red": "r", "green": "g", "colors": [ "red", "red", "yellow", "cyan", "green" ] } }', 'needs the blue channel');
+bad('{ "leds": { "style": "signal_color", "red": "r", "green": "g", "searching": { "color": "blue" } } }', 'needs the blue channel');
+bad('{ "leds": { "style": "signal_color", "red": "r", "searching": { "color": "red", "blink": "yes" } } }', 'blink: must be true or false');
+
+// --- 7. technology and colour panels (ddimension/wwand#77) -------------------
+//
+// The board files are the ones the reporters described: a Xunison Exigo Hub
+// D50 (4G + 5G LEDs, red 5G for searching) and an Arcadyan AW1000 (two RGB
+// lamps, each three on/off gpio-leds).
+function led_board(leds) {
+	let f = mkfx({ [`${ETC}/test,board.json`]: sprintf('%J', { leds: leds }) });
+	let b = board.create({ id: 'test,board', fx: f, dirs: [ ETC ], log: () => {} });
+
+	return { fx: f, b: b, state: (name) => {
+		// the last value written to an LED: 'timer', 255 or 0
+		let v = null;
+
+		for (let w in f.writes) {
+			if (w == `${L}/${name}/trigger=timer`)
+				v = 'timer';
+			else if (w == `${L}/${name}/brightness=255`)
+				v = 255;
+			else if (w == `${L}/${name}/brightness=0`)
+				v = 0;
+		}
+
+		return v;
+	} };
+}
+
+{
+	let xun = { style: 'tech', cumulative: true, weak_bars: 1, searching: 'red:5g',
+		leds: { '4g': { led: 'green:4g', weak: 'blink' }, '5g': { led: 'green:5g', weak: 'off' } } };
+	let t = led_board(xun);
+
+	ok(t.b.profile != null, 'tech: the Xunison board file validates');
+
+	t.b.leds({ present: true, registered: true, gen: '5g', bars: 4 });
+	eq([ t.state('green:4g'), t.state('green:5g'), t.state('red:5g') ], [ 255, 255, 0 ],
+		'tech: cumulative 5G lights 4G too, searching off');
+
+	t.b.leds({ present: true, registered: true, gen: '5g', bars: 1 });
+	eq([ t.state('green:4g'), t.state('green:5g') ], [ 'timer', 0 ],
+		'tech: weak 5G blinks 4G and turns 5G off, each by its own `weak`');
+
+	t.b.leds({ present: true, registered: true, gen: '4g', bars: 3 });
+	eq([ t.state('green:4g'), t.state('green:5g') ], [ 255, 0 ], 'tech: on LTE only the 4G LED');
+
+	t.b.leds({ present: true, registered: false, bars: 0 });
+	eq([ t.state('green:4g'), t.state('green:5g'), t.state('red:5g') ], [ 0, 0, 'timer' ],
+		'tech: searching blinks, technologies dark');
+
+	t.b.leds({ present: false, registered: false });
+	eq(t.state('red:5g'), 255, 'tech: no modem: searching LED steady');
+
+	// registered with no measurement is not "weak"
+	t.b.leds({ present: true, registered: true, gen: '4g', bars: 0 });
+	eq(t.state('green:4g'), 255, 'tech: 0 bars (no measurement) is not weak');
+
+	// unchanged LEDs are not rewritten: a re-written timer restarts the blink
+	t.b.leds({ present: true, registered: true, gen: '5g', bars: 1 });
+	let n = length(t.fx.writes);
+	t.b.leds({ present: true, registered: true, gen: '5g', bars: 1 });
+	eq(length(t.fx.writes), n, 'tech: a tick with nothing changed writes nothing');
+}
+
+{
+	// the AW1000's 5G lamp: one RGB LED, one technology at a time
+	let aw5g = { style: 'tech', cumulative: false, weak_bars: 1, searching: 'red:5g',
+		leds: { '4g': { led: 'green:5g', weak: 'on' }, '5g': { led: 'blue:5g', weak: 'blink' } } };
+	let awsig = { style: 'signal_color', red: 'red:signal', green: 'green:signal', blue: 'blue:signal',
+		colors: [ 'red', 'red', 'yellow', 'green', 'green' ],
+		searching: { color: 'red', blink: true } };
+	let t = led_board([ aw5g, awsig ]);
+
+	ok(t.b.profile != null, 'list: the AW1000 board file (two entries) validates');
+
+	t.b.leds({ present: true, registered: true, gen: '5g', bars: 5 });
+	eq([ t.state('red:5g'), t.state('green:5g'), t.state('blue:5g') ], [ 0, 0, 255 ],
+		'tech: not cumulative, 5G is blue alone — no mixed colour');
+	eq([ t.state('red:signal'), t.state('green:signal'), t.state('blue:signal') ], [ 0, 255, 0 ],
+		'signal_color: 5 bars green');
+
+	t.b.leds({ present: true, registered: true, gen: '5g', bars: 3 });
+	eq([ t.state('red:signal'), t.state('green:signal'), t.state('blue:signal') ], [ 255, 255, 0 ],
+		'signal_color: 3 bars yellow = red + green');
+
+	t.b.leds({ present: true, registered: true, gen: '5g', bars: 1 });
+	eq(t.state('blue:5g'), 'timer', 'tech: weak 5G blinks blue');
+	eq([ t.state('red:signal'), t.state('green:signal') ], [ 255, 0 ], 'signal_color: 1 bar red');
+
+	t.b.leds({ present: true, registered: true, gen: '4g', bars: 4 });
+	eq([ t.state('red:5g'), t.state('green:5g'), t.state('blue:5g') ], [ 0, 255, 0 ], 'tech: LTE is green alone');
+
+	t.b.leds({ present: true, registered: false, bars: 0 });
+	eq([ t.state('red:5g'), t.state('green:5g'), t.state('blue:5g') ], [ 'timer', 0, 0 ],
+		'tech: searching red alone — never mixed with a technology');
+	eq([ t.state('red:signal'), t.state('green:signal'), t.state('blue:signal') ], [ 'timer', 0, 0 ],
+		'signal_color: searching blinks red');
+
+	t.b.leds({ present: false, registered: false });
+	eq(t.state('red:signal'), 255, 'signal_color: no modem: the searching colour, steady');
+}
+
+{
+	// a red/green signal LED: no blue, default colours
+	let t = led_board({ style: 'signal_color', red: 'r:sig', green: 'g:sig' });
+
+	ok(t.b.profile != null, 'signal_color: a bi-colour LED validates with the default colours');
+	t.b.leds({ present: true, registered: true, bars: 3 });
+	eq([ t.state('r:sig'), t.state('g:sig') ], [ 255, 255 ], 'signal_color: default 3 bars = yellow');
+	t.b.leds({ present: true, registered: false });
+	eq([ t.state('r:sig'), t.state('g:sig') ], [ 0, 0 ], 'signal_color: no `searching`: dark while searching');
+	t.b.leds({ present: true, registered: true, bars: 0 });
+	eq([ t.state('r:sig'), t.state('g:sig') ], [ 255, 0 ], 'signal_color: registered, no measurement: weakest colour');
+}
+
+{
+	// a technology LED beside one signal LED (the Telstra panel), 2G..4G
+	// without cumulative; the signal LED blinks when weak
+	let t = led_board({ style: 'tech', weak_bars: 2,
+		leds: { '2g': 'g:2g', '3g': 'g:3g', '4g': 'g:4g' },
+		signal: { led: 'g:sig', weak: 'blink' } });
+
+	t.b.leds({ present: true, registered: true, gen: '3g', bars: 2 });
+	eq([ t.state('g:2g'), t.state('g:3g'), t.state('g:4g'), t.state('g:sig') ], [ 0, 255, 0, 'timer' ],
+		'tech: 3G alone; a plain-name LED stays on when weak, the signal LED blinks');
+	t.b.leds({ present: true, registered: true, gen: '5g', bars: 4 });
+	eq([ t.state('g:4g'), t.state('g:sig') ], [ 0, 255 ],
+		'tech: a generation the panel has no LED for lights none of them');
+}
+
+{
+	// two entries naming one LED: lit if either lights it
+	let t = led_board([ { style: 'signal_bars', names: [ 'x' ] },
+	                    { style: 'tech', leds: { '4g': 'x' } } ]);
+	t.b.leds({ present: true, registered: true, gen: '5g', bars: 1 });
+	eq(t.state('x'), 255, 'list: an LED two entries share is on when one lights it');
+}
+
+{
+	// a write that failed is tried again on the next tick, not remembered
+	let t = led_board({ style: 'tech', leds: { '4g': 'g:4g' } });
+	let fail = true;
+	let w = t.fx.write;
+	t.fx.write = (p, v) => (fail && p == `${L}/g:4g/brightness`) ? (push(t.fx.writes, p + '=x'), false) : w(p, v);
+	t.b.leds({ present: true, registered: true, gen: '4g', bars: 3 });
+	fail = false;
+	t.b.leds({ present: true, registered: true, gen: '4g', bars: 3 });
+	eq(t.state('g:4g'), 255, 'cache: a failed write is retried on the next tick');
+
+	// something else switched the LED: the next tick puts it back
+	let n = length(t.fx.writes);
+	t.b.leds({ present: true, registered: true, gen: '4g', bars: 3 });
+	eq(length(t.fx.writes), n, 'cache: ...and then left alone while sysfs still shows it');
+	t.fx.write(`${L}/g:4g/trigger`, 'heartbeat');
+	t.b.leds({ present: true, registered: true, gen: '4g', bars: 3 });
+	ok(t.fx.has(`${L}/g:4g/trigger=none`) && t.state('g:4g') == 255 &&
+	   length(t.fx.writes) > n + 1, 'cache: an LED someone else switched is restored');
+
+	// the kernel's trigger list shows the active one in brackets
+	let k = led_board({ style: 'tech', leds: { '4g': { led: 'k', weak: 'blink' } }, weak_bars: 1 });
+	k.b.leds({ present: true, registered: true, gen: '4g', bars: 1 });
+	k.fx.write(`${L}/k/trigger`, 'none [timer] heartbeat');
+	n = length(k.fx.writes);
+	k.b.leds({ present: true, registered: true, gen: '4g', bars: 1 });
+	eq(length(k.fx.writes), n, 'cache: "[timer]" in the kernel\'s list counts as blinking');
+}
+
+bad('{ "leds": { "style": "signal_color", "red": "x", "green": "x" } }', 'must name different LEDs');
+eq(board.generation({ rat: 'evdo' }), '3g', 'gen: EVDO is CDMA2000\'s 3G, not 2G like 1x');
+eq(board.generation({ rat: 'cdma' }), '2g', 'gen: CDMA 1x');
+
+// the generation the daemon hands the panel
+eq(board.generation({ rat: { rat: 'nr5g', mode: 'nsa' }, radio_ifs: [ 8 ] }), '5g',
+	'gen: 5G NSA from rat_fine though NAS lists only the LTE anchor');
+eq(board.generation({ rat: null, radio_ifs: [ 8, 12 ] }), '5g', 'gen: the highest NAS radio interface');
+eq(board.generation({ radio_ifs: [ 5 ] }), '3g', 'gen: UMTS');
+eq(board.generation({ rat: 'edge' }), '2g', 'gen: a fine slug maps by family');
+eq(board.generation({ text: 'wcdma' }), '3g', 'gen: NCM RAT text');
+eq(board.generation({ text: 'lte' }), '4g', 'gen: NCM LTE');
+eq(board.generation({ rat: 'ntn' }), null, 'gen: NTN has no panel generation');
+eq(board.generation({}), null, 'gen: nothing known');
+
 // a broken /etc file does not fall back to the packaged one it was there to
 // replace: the built-in entry applies
 let pfx = mkfx({

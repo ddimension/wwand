@@ -70,6 +70,7 @@ row. That is the whole maintenance rule.
 | Why did nothing happen although the count is past the threshold? | The arming gate in `recovery.uc on_attempt`: nothing physical until one request has completed in the selected protocol. `status` reports it as `recovery.armed`. |
 | ...and the one exception to that gate? | `recovery.uc unarmed_reset_line` — a pulse of the modem's own named RESET line, once per outage, nothing else. |
 | What would a repower do on THIS box for THIS modem? | `hwops.uc repower_plan` — the same precedence the action takes, so asking equals doing minus the doing. |
+| Why is an LED on, blinking or off, and which generation does a `tech` panel show? | `board.uc create` (`self.leds`: every entry of the profile's `leds` plans through its `LED_STYLES` style, one merged write per changed LED); the state comes from the daemon tick (`daemon.uc create`, `led_state`), the generation from `board.uc generation` (rat_fine, then NAS radio interfaces, then the RAT text). |
 | Which GPIOs and LEDs does this board have? | `board.uc` `load_profile`: a board file `<model id>.json` in `BOARD_DIRS` (`/etc/wwand/boards.d` wins over `/usr/share/wwand/boards.d`), else the built-in profile table; `status` `board.profile_source` says which. |
 
 ## SIM, slots and eSIM

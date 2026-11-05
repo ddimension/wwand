@@ -413,11 +413,56 @@ bound to the usb-serial `option` driver. The GPIO / LED names are the kernel's
 (`ls /sys/class/gpio`, `ls /sys/class/leds`). `note` is free text — JSON has no
 comments, so put the evidence there or in the device's commit.
 
-`leds` names one of the styles in `board.uc` `LED_STYLES`: `signal_bars` (one
-LED per signal bar, `names` from the weakest up, dark while unregistered) or
-`mobile` (`red`/`green`/`orange` mobile LED and a `tech` LED that lights on
-LTE; `red` and `green` are required). A panel that behaves differently needs a new style there — that part is
-code and goes into wwand.
+`leds` is one style entry or a **list** of them, for a panel with more than
+one kind of LED. Each entry names one of the styles in `board.uc`
+`LED_STYLES`:
+
+- `signal_bars` — one LED per signal bar, `names` from the weakest up, dark
+  while unregistered.
+- `mobile` — `red`/`green`/`orange` mobile LED and a `tech` LED that lights on
+  LTE; `red` and `green` are required.
+- `tech` — one LED per technology. `leds` maps any of `2g`, `3g`, `4g`, `5g`
+  (NSA or SA) to an LED; `signal` is an optional LED lit while registered;
+  `searching` an optional LED that blinks while the modem searches and is
+  steady without a modem. `cumulative: true` lights every configured
+  generation up to the current one (5G lights 4G as well); off, only the
+  current one — the setting for an RGB lamp whose channels stand for the
+  technologies, where two lit at once would mix. `weak_bars` (0–5, default 0)
+  marks a signal at or below that many bars as weak, and each LED says what it
+  does then: an entry is an LED name, or `{ "led": …, "weak": "on" | "blink" |
+  "off" }` (`on` is the default).
+- `signal_color` — one LED that shows the bars as a colour. `red`, `green`,
+  `blue` name its channels (at least one; a red/green LED leaves `blue` out);
+  `colors` lists the colour at 1…5 bars (default `red, red, yellow, green,
+  green`), from `off`, `red`, `green`, `blue`, `yellow`, `cyan`, `magenta`,
+  `white`; `searching` is the colour while not registered, or `{ "color": …,
+  "blink": true }`. A colour that needs a channel the entry does not name is
+  refused.
+
+Where two entries name the same LED it is lit if either lights it, and an LED
+that has not changed is not written again (a re-written `timer` trigger
+restarts the blink). Two panels from ddimension/wwand#77 as examples — a
+Xunison Exigo Hub D50 (4G and 5G LEDs, red 5G for searching) and an Arcadyan
+AW1000 (two RGB lamps):
+
+```json
+{ "leds": { "style": "tech", "cumulative": true, "weak_bars": 1,
+            "searching": "red:5g",
+            "leds": { "4g": { "led": "green:4g", "weak": "blink" },
+                      "5g": { "led": "green:5g", "weak": "off" } } } }
+```
+
+```json
+{ "leds": [
+	{ "style": "tech", "cumulative": false, "weak_bars": 1, "searching": "red:5g",
+	  "leds": { "4g": "green:5g", "5g": { "led": "blue:5g", "weak": "blink" } } },
+	{ "style": "signal_color", "red": "red:signal", "green": "green:signal",
+	  "blue": "blue:signal", "colors": [ "red", "red", "yellow", "green", "green" ],
+	  "searching": { "color": "red", "blink": true } } ] }
+```
+
+A panel that behaves differently needs a new style there — that part is code
+and goes into wwand.
 
 The file is validated whole: an unknown key or a bad value gets it ignored
 with a log line naming the problem, and `board.profile_source` in

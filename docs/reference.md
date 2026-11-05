@@ -2065,8 +2065,11 @@ table.
   across sysupgrade). `/etc` wins over `/usr/share`, and either replaces a
   built-in profile of the same id whole. Keys: `power_gpio`,
   `power_gpio_active_low`, `reset_gpio`, `reset_run`, `option_ids`, `leds`,
-  `note`; `leds` names a style and its LEDs, `{ "style": "signal_bars",
-  "names": [ … ] }` or `{ "style": "mobile", "red", "green", "orange", "tech" }`.
+  `note`; `leds` is one style entry or a list of them, each naming a style and
+  its LEDs: `signal_bars` (`names`), `mobile` (`red`, `green`, `orange`,
+  `tech`), `tech` (`leds` per 2g/3g/4g/5g, `signal`, `searching`,
+  `cumulative`, `weak_bars`) or `signal_color` (`red`/`green`/`blue` channels,
+  `colors` per bar, `searching`); keys and examples in extending.md.
   A file with an unknown key or a wrong value is **ignored whole** and logged
   (`board <id>: ignoring <path>: <why>`), because a half-read profile could
   reverse the power polarity; the built-in profile (or none) then applies.

@@ -21,6 +21,16 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
+- **LED styles `tech` and `signal_color` (#77, 2026-11-05):** a board
+  file's `leds` may be a list of entries. `tech` lights one LED per
+  generation (2G..5G, `cumulative` or one at a time for an RGB lamp,
+  per-LED `weak` = on/blink/off at or below `weak_bars`, optional `signal`
+  and `searching` LEDs); `signal_color` shows the bars as the colour of one
+  RGB or red/green LED. The daemon tick hands the generation over as `gen`
+  (`board.uc generation`: 5G NSA from rat_fine). LEDs are written only when
+  they change. Host-tested with the Xunison D50 and AW1000 files from the
+  issue; no test device has such a panel, so HW is the reporters' (4IceG,
+  kuncy7). Not built: the LuCI LED page and micw's sweep (#48).
 - **QMAP DL aggregation default 31 KB (#79, 2026-11-05):** the per-model and
   per-board size tables are gone; every modem is asked for 31744 bytes and
   may clamp it (its echo sizes the receive side). 31 KB, not ModemManager's 32 KB, because the receive skb

@@ -3801,6 +3801,10 @@ export function create(opts)
 					registered: is_registered(reg),
 					radio: on_rat ? radio_ifs[0] : null,
 					lte: lte,
+					// '2g'..'5g' for a `tech` panel (board.uc generation)
+					gen: deps.board?.generation
+						? deps.board.generation({ rat: m?.rat_fine, radio_ifs: radio_ifs, text: rat_txt })
+						: null,
 					roaming: reg?.roaming ?? false,
 					bars: deps.board ? deps.board.bars(m?.signal) : 0,
 				};

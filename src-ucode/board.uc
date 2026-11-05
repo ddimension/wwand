@@ -18,6 +18,7 @@
 
 import * as fs from 'fs';
 import * as uloop from 'uloop';
+import * as ratmod from 'wwand.codec.schema.rat';
 
 const GPIO_DIR = '/sys/class/gpio';
 const LED_DIR = '/sys/class/leds';
@@ -100,26 +101,63 @@ export function list_named_gpios(fx)
 	return sort(out);
 };
 
+// A name that goes into a sysfs path: no slash, no '..'. GPIO and LED names
+// share it; LED names carry colons (`green:mobile-1`). The instance's
+// safe_gpio uses it too: a name the validator passed and the GPIO code then
+// refused would give a profile that claims a power line it can never switch.
+function safe_name(v)
+{
+	return type(v) == 'string' && length(v) > 0 && length(v) <= 64 &&
+		!!match(v, /^[A-Za-z0-9._:-]+$/) && index(v, '..') < 0;
+}
+
 // --- LED rendering helpers (shared by the profiles) --------------------------
 
 // a status LED value is either an integer brightness (0 = off, else on) or a
-// trigger name string (e.g. 'timer' to blink). set_led applies whichever.
+// trigger name string (e.g. 'timer' to blink). set_led applies whichever and
+// returns whether every write landed.
 function set_led(fx, name, val)
 {
 	if (name == null)
-		return;
+		return false;
 
 	let base = sprintf('%s/%s', LED_DIR, name);
 
-	if (type(val) == 'string') {
-		fx.write(sprintf('%s/trigger', base), val);
-	}
-	else {
-		// take manual control, then set brightness (max_brightness would be more
-		// correct, but 255 is clamped by the LED core and every panel accepts it)
-		fx.write(sprintf('%s/trigger', base), 'none');
-		fx.write(sprintf('%s/brightness', base), val ? '255' : '0');
-	}
+	if (type(val) == 'string')
+		return !!fx.write(sprintf('%s/trigger', base), val);
+
+	// take manual control, then set brightness (max_brightness would be more
+	// correct, but 255 is clamped by the LED core and every panel accepts it)
+	return !!fx.write(sprintf('%s/trigger', base), 'none') &&
+		!!fx.write(sprintf('%s/brightness', base), val ? '255' : '0');
+}
+
+// whether an LED still shows `val`, read back from sysfs. The trigger file
+// lists every trigger with the active one in brackets ("none [timer] …",
+// led-triggers.c:95-132, 6.18.41); brightness reads the clamped value, 1 on a
+// gpio-led, so on means "not 0". Anything unreadable is a mismatch: then the
+// LED is written again, which is what an unchanged LED cost before it was
+// cached.
+function led_shows(fx, name, val)
+{
+	let base = sprintf('%s/%s', LED_DIR, name);
+	let trig = fx.read(sprintf('%s/trigger', base));
+	let want = (type(val) == 'string') ? val : 'none';
+
+	if (trig == null)
+		return false;
+
+	trig = trim(trig);
+
+	if (trig != want && index(trig, '[' + want + ']') < 0)
+		return false;
+
+	if (type(val) == 'string')
+		return true;
+
+	let br = fx.read(sprintf('%s/brightness', base));
+
+	return br != null && ((trim(br) == '0') == !val);
 }
 
 // map a normalized signal object to a 0..5 bar level. Prefers 5G NR, then LTE
@@ -157,49 +195,365 @@ export function bars_from_signal(sig)
 	return 0;
 };
 
+// The styles below do not write LEDs: each one PLANS, calling put(name, val)
+// for every LED it drives, and self.leds() writes the merged plan once. Two
+// reasons. A board can list several styles, and two of them may name the same
+// LED; writing in style order would let the last one win, which on an RGB LED
+// (three channels, one lamp) is a colour nobody chose. And a blink is the
+// `timer` trigger: writing it again restarts the cycle, so a tick that
+// re-wrote an unchanged LED every 10 s would put a visible stutter into it.
+
 // light `n` of the given LED list, rest off (bar-graph signal indicator)
-function render_bars(fx, leds, n)
+function plan_bars(put, leds, n)
 {
 	for (let i = 0; i < length(leds); i++)
-		set_led(fx, leds[i], (i < n) ? 255 : 0);
+		put(leds[i], (i < n) ? 255 : 0);
 }
 
 // the classic red/green(+orange) mobile + tech LED set (Zyxel LTE33xx)
-function render_mobile(fx, m, s)
+function plan_mobile(put, m, s)
 {
 	// green solid when registered; red blinks while searching, off once up;
 	// orange (if present) marks roaming
-	set_led(fx, m.green, s.registered ? 255 : 0);
-	set_led(fx, m.red, s.registered ? 0 : (s.present ? 'timer' : 255));
+	put(m.green, s.registered ? 255 : 0);
+	put(m.red, s.registered ? 0 : (s.present ? 'timer' : 255));
 	if (m.orange != null)
-		set_led(fx, m.orange, s.roaming ? 255 : 0);
+		put(m.orange, s.roaming ? 255 : 0);
 	// The tech LED is labelled LTE on these panels and lights only on LTE,
 	// as the vendor helper did (`grep lte` over the serving-system state,
 	// /usr/sbin/lte3301 in the vpn2go tree, Release_2024.10): a box that fell
 	// back to 2G/3G shows it. `s.lte` says so (daemon led_state); a caller
 	// that does not know it keeps the old meaning, attached on any RAT.
 	if (m.tech != null)
-		set_led(fx, m.tech, (s.registered && (s.lte ?? (s.radio != null))) ? 255 : 0);
+		put(m.tech, (s.registered && (s.lte ?? (s.radio != null))) ? 255 : 0);
 }
+
+// the generations a `tech` panel can label, oldest first
+const GENERATIONS = [ '2g', '3g', '4g', '5g' ];
+
+// rat.uc family -> generation; NTN has none a panel would label. EVDO shares
+// the cdma family with 1x but is CDMA2000's 3G, hence the slug override.
+const RAT_GEN = { cdma: '2g', evdo: '3g' };
+const FAMILY_GEN = { gsm: '2g', umts: '3g', lte: '4g', nr5g: '5g' };
+
+// QMI NAS radio interfaces (rat.uc from_qmi_radio_if) -> generation; 1x is
+// CDMA2000's 2G, EVDO its 3G
+const RADIO_IF_GEN = { '1': '2g', '4': '2g', '2': '3g', '5': '3g', '9': '3g', '8': '4g', '12': '5g' };
+
+// The generation a modem is on, for a `tech` panel: '2g'..'5g' or null.
+// `rat` is the modem's rat_fine (rat.uc object or slug), which knows 5G NSA
+// from the DSD mode while NAS still lists only the LTE anchor; then the
+// highest NAS radio interface; then the RAT text an NCM modem reports.
+export function generation(o)
+{
+	let rat = (type(o?.rat) == 'object') ? o.rat.rat : o?.rat;
+	let g = RAT_GEN[rat] ?? FAMILY_GEN[ratmod.RAT[rat]?.family];
+
+	if (g)
+		return g;
+
+	let best = -1;
+
+	for (let r in (type(o?.radio_ifs) == 'array' ? o.radio_ifs : []))
+		best = max(best, index(GENERATIONS, RADIO_IF_GEN[sprintf('%d', r)]));
+
+	if (best >= 0)
+		return GENERATIONS[best];
+
+	let t = lc(sprintf('%s', o?.text ?? ''));
+
+	return match(t, /5g|nr/) ? '5g' : match(t, /lte|4g/) ? '4g' :
+		match(t, /umts|wcdma|hspa|hsdpa|hsupa|3g|td-scdma|evdo/) ? '3g' :
+		match(t, /gsm|gprs|edge|2g|cdma|1x/) ? '2g' : null;
+};
+
+// an LED spec is a name, or { led, weak } with weak = on | blink | off
+function spec_led(v)
+{
+	return (type(v) == 'object') ? v.led : v;
+}
+
+function spec_weak(v)
+{
+	return ((type(v) == 'object') ? v.weak : null) ?? 'on';
+}
+
+// what a lit LED shows: steady, or what its `weak` says while the signal is
+// at or below the entry's weak_bars. bars 0 is "no measurement", not weak.
+function lit(v, s, weak_bars)
+{
+	let weak = s.bars >= 1 && s.bars <= (weak_bars ?? 0);
+
+	if (!weak)
+		return 255;
+
+	let w = spec_weak(v);
+
+	return (w == 'blink') ? 'timer' : (w == 'off') ? 0 : 255;
+}
+
+// One LED per technology (2G..5G), plus an optional `signal` LED lit while
+// registered and an optional `searching` LED. Covers technology panels
+// (Xunison Exigo Hub D50: 4G + 5G), a technology LED next to one signal LED,
+// and a single RGB lamp whose channels stand for the technologies (AW1000:
+// green = LTE, blue = 5G, red = no service; ddimension/wwand#77).
+//
+// `cumulative` lights every configured generation up to the current one, so
+// 5G lights the 4G LED too ("4G = LTE or NR"). Off, only the current
+// generation's LED is lit — required when the LEDs are channels of one lamp,
+// where two lit at once is a mixed colour. For the same reason `searching` is
+// never lit together with a technology LED: it is on while not registered, and
+// those are off then.
+function plan_tech(put, l, s)
+{
+	let cur = index(GENERATIONS, s.gen);
+	let reg = !!s.registered;
+
+	for (let i = 0; i < length(GENERATIONS); i++) {
+		let v = l.leds[GENERATIONS[i]];
+
+		if (v == null)
+			continue;
+
+		let on = reg && cur >= 0 && (l.cumulative ? (i <= cur) : (i == cur));
+
+		put(spec_led(v), on ? lit(v, s, l.weak_bars) : 0);
+	}
+
+	if (l.signal != null)
+		put(spec_led(l.signal), reg ? lit(l.signal, s, l.weak_bars) : 0);
+
+	// solid without a modem, blinking while it searches — the `mobile`
+	// style's red LED, whose behaviour the panels above share
+	if (l.searching != null)
+		put(l.searching, reg ? 0 : (s.present ? 'timer' : 255));
+}
+
+// The on/off channel combinations a colour LED shows; the channels of one
+// lamp are separate gpio-leds with max_brightness 1 (AW1000, #77), so there
+// is no intensity to mix with.
+const COLORS = {
+	off:     [ 0, 0, 0 ],
+	red:     [ 1, 0, 0 ],
+	green:   [ 0, 1, 0 ],
+	blue:    [ 0, 0, 1 ],
+	yellow:  [ 1, 1, 0 ],
+	cyan:    [ 0, 1, 1 ],
+	magenta: [ 1, 0, 1 ],
+	white:   [ 1, 1, 1 ],
+};
+
+const CHANNELS = [ 'red', 'green', 'blue' ];
+
+// `colors[i]` at i + 1 bars, from the weakest up
+const DEFAULT_COLORS = [ 'red', 'red', 'yellow', 'green', 'green' ];
+
+// One signal LED that shows the bars as a colour (AW1000's RGB signal lamp; a
+// red/green LED leaves `blue` out). Registered with no measurement (0 bars)
+// shows the weakest colour rather than dark, which on this lamp reads as
+// "off". Not registered shows `searching` — blinking while the modem
+// searches, steady without a modem, the way `tech` does it — or nothing.
+//
+// A blinking colour blinks every channel it uses with its own `timer`
+// trigger. They are written in the same tick with the trigger's same default
+// delays, so they start together; nothing re-syncs them later.
+function plan_signal_color(put, l, s)
+{
+	let color, blink = false;
+
+	if (s.registered) {
+		let cs = l.colors ?? DEFAULT_COLORS;
+
+		color = cs[((s.bars >= 1) ? s.bars : 1) - 1];
+	}
+	else {
+		let sr = l.searching;
+
+		color = (type(sr) == 'object') ? sr.color : (sr ?? 'off');
+		blink = s.present && type(sr) == 'object' && sr.blink == true;
+	}
+
+	let mix = COLORS[color] ?? COLORS.off;
+
+	for (let i = 0; i < length(CHANNELS); i++)
+		if (l[CHANNELS[i]] != null)
+			put(l[CHANNELS[i]], mix[i] ? (blink ? 'timer' : 255) : 0);
+}
+
+// --- what a board file may say about its LEDs --------------------------------
+// Each kind returns null when the value is usable, else what is wrong with it.
+
+function check_spec(v, what)
+{
+	if (type(v) == 'string')
+		return safe_name(v) ? null : sprintf('%s: not an LED name: %J', what, v);
+
+	if (type(v) != 'object')
+		return sprintf('%s: must be an LED name or { "led": ..., "weak": ... }', what);
+
+	for (let k in keys(v))
+		if (k != 'led' && k != 'weak')
+			return sprintf('%s: has no %J', what, k);
+
+	if (!safe_name(v.led))
+		return sprintf('%s.led: not an LED name: %J', what, v.led);
+
+	if (v.weak != null && !(v.weak in [ 'on', 'blink', 'off' ]))
+		return sprintf('%s.weak: must be on, blink or off, not %J', what, v.weak);
+
+	return null;
+}
+
+function color_name(v, what)
+{
+	return (type(v) == 'string' && COLORS[v] != null) ? null
+		: sprintf('%s: not a colour: %J (known: %s)', what, v, join(', ', keys(COLORS)));
+}
+
+const LED_KINDS = {
+	name: (v, what) => (type(v) == 'string' && safe_name(v)) ? null
+		: (type(v) == 'array') ? sprintf('%s: must be one LED name', what)
+		: sprintf('%s: not an LED name: %J', what, v),
+
+	// a list where the style takes one LED would become a path built from
+	// the stringified array, and the other way round
+	list: (v, what) => {
+		if (type(v) != 'array')
+			return sprintf('%s: must be a list', what);
+
+		if (!length(v))
+			return sprintf('%s: empty', what);
+
+		for (let n in v)
+			if (!safe_name(n))
+				return sprintf('%s: not an LED name: %J', what, n);
+
+		return null;
+	},
+
+	bool: (v, what) => (type(v) == 'bool') ? null : sprintf('%s: must be true or false', what),
+
+	bars: (v, what) => (type(v) == 'int' && v >= 0 && v <= 5) ? null
+		: sprintf('%s: must be a whole number of bars, 0 to 5', what),
+
+	spec: check_spec,
+
+	techs: (v, what) => {
+		if (type(v) != 'object' || !length(v))
+			return sprintf('%s: must map %s to LEDs', what, join('/', GENERATIONS));
+
+		for (let k, sv in v) {
+			if (!(k in GENERATIONS))
+				return sprintf('%s: %J is not one of %s', what, k, join(', ', GENERATIONS));
+
+			let e = check_spec(sv, sprintf('%s.%s', what, k));
+
+			if (e)
+				return e;
+		}
+
+		return null;
+	},
+
+	colors: (v, what) => {
+		if (type(v) != 'array' || length(v) != 5)
+			return sprintf('%s: must list 5 colours, one per bar', what);
+
+		for (let i = 0; i < 5; i++) {
+			let e = color_name(v[i], sprintf('%s[%d]', what, i));
+
+			if (e)
+				return e;
+		}
+
+		return null;
+	},
+
+	color_spec: (v, what) => {
+		if (type(v) == 'string')
+			return color_name(v, what);
+
+		if (type(v) != 'object')
+			return sprintf('%s: must be a colour or { "color": ..., "blink": ... }', what);
+
+		for (let k in keys(v))
+			if (k != 'color' && k != 'blink')
+				return sprintf('%s: has no %J', what, k);
+
+		if (v.blink != null && type(v.blink) != 'bool')
+			return sprintf('%s.blink: must be true or false', what);
+
+		return color_name(v.color, sprintf('%s.color', what));
+	},
+};
 
 // The LED styles a profile can name. A style is code, a profile only names one
 // and its LEDs, which is what lets a board file be plain data. A panel that
-// needs another behaviour needs a new style here.
+// needs another behaviour needs a new style here. `check` is what the key
+// types cannot say on their own.
 const LED_STYLES = {
 	// one LED per signal bar, `names` from the weakest bar up; dark while
 	// not registered
 	signal_bars: {
 		keys: { names: 'list' },
 		required: [ 'names' ],
-		render: (fx, l, s) => render_bars(fx, l.names, s.registered ? s.bars : 0),
+		plan: (put, l, s) => plan_bars(put, l.names, s.registered ? s.bars : 0),
 	},
-	// red/green(+orange) mobile LED and a tech LED, see render_mobile
+	// red/green(+orange) mobile LED and a tech LED, see plan_mobile
 	mobile: {
 		keys: { red: 'name', green: 'name', orange: 'name', tech: 'name' },
 		required: [ 'red', 'green' ],
-		render: (fx, l, s) => render_mobile(fx, l, s),
+		plan: (put, l, s) => plan_mobile(put, l, s),
+	},
+	// one LED per technology, see plan_tech
+	tech: {
+		keys: { leds: 'techs', signal: 'spec', searching: 'name',
+		        cumulative: 'bool', weak_bars: 'bars' },
+		required: [ 'leds' ],
+		plan: (put, l, s) => plan_tech(put, l, s),
+	},
+	// the bars as the colour of one LED, see plan_signal_color
+	signal_color: {
+		keys: { red: 'name', green: 'name', blue: 'name',
+		        colors: 'colors', searching: 'color_spec' },
+		required: [],
+		check: (l) => {
+			if (l.red == null && l.green == null && l.blue == null)
+				return 'needs at least one of red, green, blue';
+
+			// one LED on two channels cannot show the colours between them
+			let seen = {};
+
+			for (let ch in CHANNELS) {
+				if (l[ch] != null && seen[l[ch]] != null)
+					return sprintf('%s and %s must name different LEDs', seen[l[ch]], ch);
+
+				if (l[ch] != null)
+					seen[l[ch]] = ch;
+			}
+
+			// a colour this LED cannot show would quietly show another one
+			let used = [ ...(l.colors ?? DEFAULT_COLORS),
+			             (type(l.searching) == 'object') ? l.searching.color : l.searching ];
+
+			for (let c in used)
+				for (let i = 0; i < length(CHANNELS); i++)
+					if (c != null && COLORS[c]?.[i] && l[CHANNELS[i]] == null)
+						return sprintf('colour %s needs the %s channel, which this entry does not name',
+							c, CHANNELS[i]);
+
+			return null;
+		},
+		plan: (put, l, s) => plan_signal_color(put, l, s),
 	},
 };
+
+// `leds` is one style entry or a list of them (a panel with signal bars AND
+// technology LEDs is one board file); always a list from here on
+function led_entries(leds)
+{
+	return (leds == null) ? [] : (type(leds) == 'array') ? leds : [ leds ];
+}
 
 // --- board profiles ----------------------------------------------------------
 // The same shape in this table and in a board file:
@@ -212,7 +566,8 @@ const LED_STYLES = {
 //                        modem RUN; see reset_pulse for why it is worth stating
 // option_ids           — vendor/product pairs to bind to the usb-serial `option`
 //                        driver
-// leds                 — { style: <LED_STYLES key>, ...that style's LED names }
+// leds                 — { style: <LED_STYLES key>, ...that style's keys }, or a
+//                        list of such entries
 // note                 — free text, ignored; a board file has no comments
 const SIGNAL5 = [ 'green:mobile-1', 'green:mobile-2', 'green:mobile-3',
                   'green:mobile-4', 'green:mobile-5' ];
@@ -331,16 +686,6 @@ const PROFILES = {
 
 // --- board files ---------------------------------------------------------------
 
-// A name that goes into a sysfs path: no slash, no '..'. GPIO and LED names
-// share it; LED names carry colons (`green:mobile-1`). The instance's
-// safe_gpio uses it too: a name the validator passed and the GPIO code then
-// refused would give a profile that claims a power line it can never switch.
-function safe_name(v)
-{
-	return type(v) == 'string' && length(v) > 0 && length(v) <= 64 &&
-		!!match(v, /^[A-Za-z0-9._:-]+$/) && index(v, '..') < 0;
-}
-
 const PROFILE_KEYS = {
 	power_gpio: true, power_gpio_active_low: true, reset_gpio: true,
 	reset_run: true, option_ids: true, leds: true, note: true,
@@ -386,43 +731,44 @@ export function validate_profile(p)
 		return 'note: must be text';
 
 	if (p.leds != null) {
-		let l = p.leds;
-		let st = (type(l) == 'object') ? LED_STYLES[l.style] : null;
+		if (type(p.leds) == 'array' && !length(p.leds))
+			return 'leds: empty';
 
-		if (!st)
-			return sprintf('leds: unknown style %J (known: %s)', l?.style,
-				join(', ', sort(keys(LED_STYLES))));
+		let entries = led_entries(p.leds);
 
-		for (let k in keys(l)) {
-			if (k == 'style')
-				continue;
+		for (let n = 0; n < length(entries); n++) {
+			let l = entries[n];
+			let at = (type(p.leds) == 'array') ? sprintf('leds[%d]', n) : 'leds';
+			let st = (type(l) == 'object') ? LED_STYLES[l.style] : null;
 
-			if (!st.keys[k])
-				return sprintf('leds: style %s has no %J', l.style, k);
+			if (!st)
+				return sprintf('%s: unknown style %J (known: %s)', at, l?.style,
+					join(', ', sort(keys(LED_STYLES))));
 
-			// a list where the style takes one LED would become a path
-			// built from the stringified array, and the other way round
-			let is_list = (type(l[k]) == 'array');
+			for (let k in keys(l)) {
+				if (k == 'style')
+					continue;
 
-			if (is_list != (st.keys[k] == 'list'))
-				return sprintf('leds.%s: must be %s', k,
-					(st.keys[k] == 'list') ? 'a list' : 'one LED name');
+				if (!st.keys[k])
+					return sprintf('%s: style %s has no %J', at, l.style, k);
 
-			let names = is_list ? l[k] : [ l[k] ];
+				let e = LED_KINDS[st.keys[k]](l[k], sprintf('%s.%s', at, k));
 
-			if (!length(names))
-				return sprintf('leds.%s: empty', k);
+				if (e)
+					return e;
+			}
 
-			for (let n in names)
-				if (!safe_name(n))
-					return sprintf('leds.%s: not an LED name: %J', k, n);
+			// a style without the LEDs it drives would validate and then light
+			// nothing, which looks exactly like a board with dead LEDs
+			for (let k in st.required)
+				if (l[k] == null)
+					return sprintf('%s.%s: missing for style %s', at, k, l.style);
+
+			let e = st.check?.(l);
+
+			if (e)
+				return sprintf('%s: %s', at, e);
 		}
-
-		// a style without the LEDs it drives would validate and then light
-		// nothing, which looks exactly like a board with dead LEDs
-		for (let k in st.required)
-			if (l[k] == null)
-				return sprintf('leds.%s: missing for style %s', k, l.style);
 	}
 
 	return null;
@@ -541,6 +887,7 @@ export function create(opts)
 		// expose the signal->bars mapping so callers building an LED state don't
 		// need to import the module function separately
 		bars: bars_from_signal,
+		generation: generation,
 	};
 
 	// one-time bring-up: ensure the modem is powered and bind any board-specific
@@ -674,13 +1021,37 @@ export function create(opts)
 		return true;
 	};
 
-	// render the status LEDs from a normalized modem state:
-	//   { present, registered, radio, roaming, bars }
-	self.leds = function(state) {
-		let style = LED_STYLES[profile?.leds?.style];
+	// what each LED was last set to, so an unchanged one is not written again
+	// (a re-written `timer` restarts the blink; see the planning note above).
+	// Only a write that landed is remembered, and only while sysfs still shows
+	// it: something else switching the LED (an LED trigger in /etc/config/
+	// system, a user's echo) is undone on the next tick, as before the cache.
+	let led_last = {};
 
-		if (style)
-			style.render(fx, profile.leds, state ?? {});
+	// render the status LEDs from a normalized modem state:
+	//   { present, registered, radio, lte, gen, roaming, bars }
+	// Every entry plans; one LED that two entries name is lit if either
+	// lights it (steady over blinking over off), then each LED is written once.
+	self.leds = function(state) {
+		let want = {};
+		let rank = (v) => (v == 'timer') ? 1 : v ? 2 : 0;
+		let put = (name, val) => {
+			if (name != null && (want[name] == null || rank(val) > rank(want[name])))
+				want[name] = val;
+		};
+
+		for (let l in led_entries(profile?.leds))
+			LED_STYLES[l?.style]?.plan(put, l, state ?? {});
+
+		for (let name, val in want) {
+			if (led_last[name] === val && led_shows(fx, name, val))
+				continue;
+
+			if (set_led(fx, name, val))
+				led_last[name] = val;
+			else
+				delete led_last[name];
+		}
 	};
 
 	return self;

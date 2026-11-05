@@ -15,6 +15,7 @@ import * as config from 'wwand/config.uc';
 import * as daemon_mod from 'wwand/daemon.uc';
 import * as netlink_mod from 'wwand/netlink.uc';
 import * as ubus_api from 'wwand/ubus.uc';
+import * as board_mod from 'wwand/board.uc';
 
 let sock = getenv('WWAND_TEST_UBUS_SOCK');
 
@@ -3279,6 +3280,52 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	   'vanish: stock NR7101 (no exported supply) keeps the reset pulse');
 	eq(run(true, { reset_gpio: 'gpio7' }), [ 'reset gpio7' ],
 	   'vanish: an explicit per-modem reset_gpio is honoured over the board supply');
+}
+
+// --- the LED state carries the generation a `tech` panel lights --------------
+// 5G NSA is the case worth pinning: NAS lists only the LTE anchor, so the
+// generation has to come from the modem's rat_fine (DSD), which the tick reads
+// (board.uc generation; ddimension/wwand#77).
+{
+	let seen = [];
+	let ctl = { device: '/dev/cdc-wdm0', protocol: 'qmi', driver: 'qmi_wwan', netdev: 'wwan0' };
+	let parsed4 = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		wwan0: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'web' },
+	} });
+	let d4 = daemon_mod.create({
+		timing: { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
+		          reg_timeout: 500, backoff_min: 40, backoff_max: 60 },
+		deps: {
+			log: () => null,
+			board: { id: 'test,tech', has_power: false, profile: {},
+			         init: () => null, bars: () => 4, generation: board_mod.generation,
+			         leds: (st) => push(seen, st),
+			         reset_pulse: () => false, power_cycle: () => false },
+			load_qmi: () => ({
+				modem: { create: () => ({ id: 'm0', start: () => null, stop: () => null,
+					note_connect_success: () => null, note_connect_failure: () => null,
+					state: 'READY', datapath: {},
+					reg: { registration: 'registered', radio_ifs: [ 8 ] },
+					rat_fine: { rat: 'nr5g', mode: 'nsa' } }) },
+				context: { create: (o) => ({ state: 'CONNECTED', config: o.config,
+					modem: o.modem, modem_event: () => null, down: (cb) => cb?.() }) },
+			}),
+			emit_event: () => null, kick_interface: () => null,
+			renew_interface: () => null, down_interface: () => null,
+			iface_status: (i, cb) => cb({ up: false }),
+			datapath_fx: null, read_config: () => parsed4,
+			resolve_control: () => ctl, resolve_netdev: () => null,
+			learn_device: () => null, learn_modem_path: () => null,
+		},
+	});
+	d4.apply_config(parsed4);
+	d4._tick();
+	d4.shutdown?.();
+
+	let last = seen[length(seen) - 1];
+	eq(last?.gen, '5g', 'leds: 5G NSA reaches the panel as 5g, not as its LTE anchor');
+	eq(last?.lte, true, 'leds: ...while the LTE-labelled `mobile` LED still sees LTE');
 }
 
 // --- the automatic unarmed pulse needs the modem's OWN line -----------------
