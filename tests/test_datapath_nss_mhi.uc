@@ -106,6 +106,14 @@ eq(netlink.datapath_caps('rmnet_nss_mhi', plugins, mhi_fx({ sdx7x: true }), 'rmn
 eq(netlink.datapath_caps('rmnet_nss_mhi', plugins, mhi_fx({ sdx7x: false }), 'rmnet_mhi0').qmap_versions,
 	[ 5 ], 'qmap: listed legacy PCI ids are also fixed to QMAP v5');
 
+eq(netlink.datapath_caps('rmnet_nss_mhi', plugins, mhi_fx({ files: { '/sys/class/net/rmnet_mhi0/qmap_size': "15360\n" } }), 'rmnet_mhi0').dgram_max,
+	15356, 'dgram: the driver\'s mru (qmap_size) less 4 caps the WDA request');
+{
+	let fx = mhi_fx({});
+	fx.rmnet_info = () => ({ qmap_version: 9, rx_urb_size: 15360 });
+	eq(plug.dgram_max(fx, 'rmnet_mhi0'), 15356, 'dgram: the ioctl answer wins over the attribute');
+}
+
 {
 	let fx = mhi_fx({ sdx7x: true });
 	fx.rmnet_info = () => ({ qmap_version: 5 });
@@ -218,7 +226,7 @@ eq(netlink.select_backend(mhi_fx(), 'rmnet_mhi0', 'auto', true, plugins, { proto
 eq(netlink.select_backend(mhi_fx(), 'rmnet_mhi0', 'auto', true, plugins, { proto: 'qmi' }),
 	'rmnet_nss_mhi', 'select: ...and a QMI one, the driver serves both');
 eq(netlink.datapath_caps('rmnet_nss_mhi', plugins),
-	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], adopts: true, tx_aggr: false, llp_802_3: false },
+	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], adopts: true, tx_aggr: false, dgram_max: null, llp_802_3: false },
 	'caps: without hardware facts the safe fallback is plain QMAP');
 
 done('test_datapath_nss_mhi');

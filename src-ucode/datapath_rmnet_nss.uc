@@ -188,6 +188,23 @@ return {
 	// sizes the buffers, which here is the driver.
 	qmap: true,
 
+	// ...and because the driver sizes them, the WDA request must not exceed
+	// them: each aggregate lands in one URB of `rx_urb_size = qmap_size`, fixed
+	// at bind (the driver facts at the top of this file), while the modem would
+	// accept a larger request and fill it. Less the 4 bytes wwand reserves on
+	// every other datapath (urb = size + 4 in netlink.setup), so a full
+	// aggregate fits by the same arithmetic. The ioctl's answer first, the
+	// sysfs attribute without it; null (no cap) when neither reads.
+	dgram_max: (fx, netdev) => {
+		let info = (type(fx?.rmnet_info) == 'function') ? fx.rmnet_info(netdev) : null;
+		let buf = +info?.rx_urb_size;
+
+		if (!(buf > 4))
+			buf = +trim(fx.read(vendor_attr(netdev, 'qmap_size')) ?? '');
+
+		return (buf > 4) ? buf - 4 : null;
+	},
+
 	// The header version is the DRIVER's, not ours, and getting it wrong is
 	// silent: the netdev counts the frame as transmitted and the modem discards
 	// it without counting it against the bearer, so the link is CONNECTED,

@@ -405,7 +405,7 @@ eq(netlink.datapath_status(fakefx.create(), 'rmnet_nss', null, plugins), null,
 // property of the driver on a particular parent, and a caller that supplies
 // none gets the safe declaration.
 eq(netlink.datapath_caps('rmnet_nss', plugins),
-	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], adopts: true, tx_aggr: false, llp_802_3: false },
+	{ aggregate: false, qmap: true, qmap_versions: [ 1 ], adopts: true, tx_aggr: false, dgram_max: null, llp_802_3: false },
 	'caps: no device -> plain QMAP only');
 
 // Asked WITH one, the driver decides. qmi_wwan_q fixes the header version per
@@ -440,6 +440,22 @@ eq(netlink.datapath_caps('rmnet_nss', plugins, sized_fx(65536), 'wwan0').qmap_ve
 	[ 1 ], 'caps: an undocumented size stays on plain QMAP');
 eq(netlink.datapath_caps('rmnet_nss', plugins, sized_fx(null), 'wwan0').qmap_versions,
 	[ 1 ], 'caps: an unreadable qmap_size stays on plain QMAP');
+
+// the driver's fixed buffer caps the WDA request: ioctl first, sysfs without it
+eq(netlink.datapath_caps('rmnet_nss', plugins, sized_fx(16384), 'wwan0').dgram_max,
+	16380, 'caps: dgram_max is the driver\'s qmap_size less the 4-byte reserve');
+eq(netlink.datapath_caps('rmnet_nss', plugins, sized_fx(null), 'wwan0').dgram_max,
+	null, 'caps: no readable qmap_size, no cap');
+{
+	let fx = sized_fx(4096);
+	fx.rmnet_info = () => ({ qmap_version: 9, rx_urb_size: 31744 });
+	eq(netlink.datapath_caps('rmnet_nss', plugins, fx, 'wwan0').dgram_max,
+		31740, 'caps: the ioctl\'s rx_urb_size wins over the attribute');
+}
+eq(netlink.datapath_caps('rmnet_nss', plugins).dgram_max, null,
+	'caps: the static shape asks no device');
+eq(netlink.datapath_caps('rmnet', plugins, sized_fx(16384), 'wwan0').dgram_max, null,
+	'caps: a datapath that sizes its own buffers reports no cap');
 
 // --- selection ---------------------------------------------------------------
 

@@ -1197,7 +1197,7 @@ scenario('datapath', {
 	(modem, mock, events) => {
 		eq(modem.state, 'READY', 'dp: state READY');
 		eq(modem.datapath.backend, 'rmnet', 'dp: rmnet backend');
-		eq(modem.datapath.urb_size, 4100, 'dp: urb size');
+		eq(modem.datapath.urb_size, 31748, 'dp: urb size');
 		eq(modem.datapath.mux_devs, [ 'wwan0m1', 'wwan0m2' ], 'dp: mux devices');
 		eq(modem.datapath.ep_id, 4, 'dp: ep id kept');
 
@@ -1209,7 +1209,7 @@ scenario('datapath', {
 		// it v5, which the modem answered by renegotiating.
 		eq(sdf[0].args.ul_protocol, 9, 'dp: qmap v5 (0x09) requested for rmnet');
 		eq(modem.datapath.v5, true, 'dp: v5 negotiated');
-		eq(sdf[0].args.dl_max_size, 4096, 'dp: aggregation size');
+		eq(sdf[0].args.dl_max_size, 31744, 'dp: aggregation size');
 		eq(sdf[0].args.endpoint, { type: 2, iface: 4 }, 'dp: endpoint tlv');
 		eq(sdf[0].args.ul_max_datagrams, 11, 'dp: uplink aggregation requested');
 		ok((sdf[0].args.ul_max_size ?? 0) > 0, 'dp: uplink aggregation size set');
@@ -1256,6 +1256,34 @@ scenario('datapath-all-declined', {
 		eq(modem.datapath.qmap_version, 1, 'alld: bottomed out at plain QMAP');
 		ok(dpfx3.action_index('link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x1') >= 0,
 			'alld: links with deaggregation only');
+	});
+
+// an override above 32 KB goes to the modem as asked for the downlink, but the
+// uplink request stays at what the kernel's rmnet can coalesce
+let dpfx_big = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-override-above-rmnet-ul-limit', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => ({
+			qos: 0, llp: 2,
+			ul_protocol: args.ul_protocol, dl_protocol: args.dl_protocol,
+			dl_max_datagrams: 32, dl_max_size: args.dl_max_size,
+			ul_max_datagrams: 11, ul_max_size: args.ul_max_size,
+		}),
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [ { id: 1 } ], dgram_size: 65536, fx: dpfx_big,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		let sdf = mock.calls_for('SET_DATA_FORMAT');
+		eq(sdf[0].args.dl_max_size, 65536, 'big: the DL override is asked for unchanged');
+		eq(sdf[0].args.ul_max_size, 32768, 'big: the UL request is held at rmnet\'s 32768');
 	});
 
 // a QMI ERROR for a QMAP version is a refusal of that version too: the
@@ -1808,7 +1836,7 @@ scenario('datapath-v5-declined', {
 		eq(length(mock.calls_for('SET_DATA_FORMAT')), 2, 'v5d: renegotiated once');
 		eq(modem.datapath.qmap_version, 4, 'v5d: landed on v4');
 		eq(modem.datapath.v5, false, 'v5d: and the old boolean says not-v5');
-		eq(modem.datapath.urb_size, 4100, 'v5d: urb from requested size, not the zeroed echo');
+		eq(modem.datapath.urb_size, 31748, 'v5d: urb from requested size, not the zeroed echo');
 		ok(dpfx2.action_index('link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0xd') >= 0,
 			'v5d: links with deagg + the v4 checksum pair');
 	});

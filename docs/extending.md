@@ -48,7 +48,7 @@ table that matches the kind of quirk:
 |---|---|---|
 | **AT command at init** (carrier-config, mode, vendor tweak) | `src-ucode/atcmd.uc` → `MODEL_QUIRKS` | `{ match: /regex/, commands: [ 'AT+…' ] }` |
 | **Expectation / validation + operator warning** | `src-ucode/modem_quirks.uc` → `QUIRKS` | `{ match, expect:{…}, warn:[…], init_commands:[…] }` |
-| **QMAP aggregation datagram size** | `src-ucode/netlink.uc` (model/board table) | model → bytes; `option dl_datagram_max_size` overrides |
+| **QMAP aggregation datagram size** | nothing to add: one default (`netlink.uc` `DEFAULT_DGRAM_SIZE`, 31 KB), negotiated with the modem | `option dl_datagram_max_size` overrides; a vendor datapath caps it via `dgram_max` |
 | **Protocol-switch recipe** (QMI⇄MBIM `AT+QCFG="usbnet"`) | `src-ucode/protocol_switch.uc` | per-vendor set/reset/query commands |
 | **usbnet mode-switch** (PPP-only → rich mode) | `src-ucode/modeswitch.uc` | per-vendor `{ set, reset, query }` |
 | **AT port mapping** (which ttyUSB is AT/at2/gps) | `src-ucode/atport.uc` (generated) + `atcmd.uc` `LOCAL_PORTS` | `usbid → { ifnum: role }` |

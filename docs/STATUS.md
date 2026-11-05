@@ -21,6 +21,14 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
+- **QMAP DL aggregation default 31 KB (#79, 2026-11-05):** the per-model and
+  per-board size tables are gone; every modem is asked for 31744 bytes and
+  may clamp it (its echo sizes the receive side). 31 KB, not ModemManager's 32 KB, because the receive skb
+  of 32768 + overhead needs a 64 KB allocation (netlink.uc
+  `DEFAULT_DGRAM_SIZE`). New optional datapath entry `dgram_max`: the vendor
+  datapaths (rmnet_nss, rmnet_nss_mhi) cap the request at the driver's fixed
+  buffer. Measured by kuncy7 on an RG500Q-EA: CPU0 per 100 Mbit/s 10.9 % ->
+  7.6 %.
 - **Watchdog reset order (#76, 2026-11-02):** the zero-rx / TX-stall
   watchdog (`modem_common.trip_zero_rx`) went straight to the board repower
   where the board had one — a GPIO reset or power cut, skipping the modem's

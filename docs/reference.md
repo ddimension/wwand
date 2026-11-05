@@ -471,7 +471,7 @@ config wwand_modem 'm0'
 	option mux 'auto'                # auto|raw_ip|ethernet|untagged|rmnet|qmimux|vlan — the kernel
 	                                 #   datapath (or the name of a datapath
 	                                 #   plugin package, see below)
-	option dl_datagram_max_size '0'  # QMAP DL aggregation bytes; 0 = model/board table
+	option dl_datagram_max_size '0'  # QMAP DL aggregation bytes; 0 = 31744 (the modem clamps it)
 	option qmap_version '0'          # cap the QMAP header version the datapath
 	                                 #   negotiates: 5|4|1 (0 = whatever the
 	                                 #   datapath can drive, trying best first).
@@ -1574,8 +1574,14 @@ full throughput — this is why the examples above set `option mux_id '1'`.
   endpoint an MHI modem refuses the data format with QMI error 70. It is capability-gated —
   a modem that does not confirm QMAP simply runs plain framing.
 - Tune the aggregation buffer per modem with `option dl_datagram_max_size` on the
-  `wwand_modem` section (default from a per-model table, ~31 KB): larger buffers
-  aggregate more but cost latency/RAM. The daemon renegotiates plain QMAP if the
+  `wwand_modem` section. The default, 31744 bytes, is asked of every modem: the
+  modem may clamp the request, and its answer sizes the receive side. 31 KB
+  rather than 32 KB because each aggregate lands in one linear skb (a USB URB,
+  an MHI buffer), and 32768 + its overhead needs a 64 KB allocation per buffer
+  (netlink.uc, `DEFAULT_DGRAM_SIZE`). A vendor driver with a buffer fixed at load
+  (qmi_wwan_q, pcie_mhi) caps the request at that buffer, the override included,
+  and the log says so. Smaller values cost CPU per Mbit/s: on an RG500Q-EA,
+  4 KB took a third more CPU0 than 31 KB (ddimension/wwand#79). The daemon renegotiates plain QMAP if the
   modem rejects a datagram-aggregation size (e.g. the RG650E's DAP-8 edge case).
 - **MBIM** aggregates natively (NTB) — no extra config. **NCM** (`cdc_ncm`) cannot
   mux and runs the plain netdev, so expect a lower ceiling there.
@@ -2487,7 +2493,7 @@ extending a table, not branching the code — see
 |---|---|---|
 | AT port discovery | fallback: `option tty` → board table → the `atport.uc` udev table (generated from ModemManager) → first-ttyUSB heuristic → an AT-bearing cdc-wdm (huawei_cdc_ncm) → AT over the MBIM pipe (Quectel QDU CID 8) | — |
 | Init AT commands | `MODEL_QUIRKS` (atcmd.uc): model pattern → commands run once before registration | EG06/EM06/RG50xQ → `AT+QMBNCFG="AutoSel",1` (carrier-config auto-select) |
-| QMAP aggregation size | `board_dgram_size`: DL datagram size per model, then per board, overridable via `dl_datagram_max_size` | RG650E-EU → 31 KB (else 4 KB default) |
+| QMAP aggregation size | `netlink.dgram_size`: 31744 for every modem, overridable via `dl_datagram_max_size`, capped at a vendor driver's fixed buffer (`dgram_max`) | the modem's echo sizes the receive side |
 | QMAP version ladder | rmnet offers QMAP v5 (DAP 9), then v4 (DAP 8), then v1 (DAP 5) and takes the first the modem echoes exactly; `option qmap_version` caps the ladder | — |
 | eSIM host access | `esim_quirks`: some firmwares must have the internal LPA's `lpa_enable` disabled (one-time NV reset) so host-side ES10 APDUs work | RG65xx |
 | Identity read | UIM raw EF read → DMS getter fallback | EG06 rejects EF reads → IMSI/ICCID via DMS |

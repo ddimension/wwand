@@ -236,9 +236,10 @@ mux links → parent MTU = negotiated aggregation size + 4 → children up.
 rmnet links are created through the native helper including
 `IFLA_RMNET_FLAGS` (ingress deaggregation is mandatory; MAPv5 checksum
 offload flags are set only when the modem confirms v5 — the RG650E declines
-it on USB). Aggregation size comes from a model table (e.g. RG650E 31 KB),
-then a board table, config override wins; the modem clamps the request and
-the echoed value drives the driver side.
+it on USB). The aggregation size asked for is 31 KB on every modem (config
+override wins); the modem clamps the request and the echoed value drives the
+driver side. A vendor driver whose buffer is fixed at load reports it as
+`dgram_max`, and the request is capped there.
 
 **Bidirectional aggregation, endpoint typing & client type.** `SET_DATA_FORMAT`
 negotiates **uplink** QMAP aggregation as well as downlink — `ul_max_datagrams`

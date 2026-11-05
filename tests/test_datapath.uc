@@ -6,19 +6,17 @@ import { eq, ok, done } from './lib/check.uc';
 import * as fakefx from './lib/fakefx.uc';
 import * as netlink from 'wwand/netlink.uc';
 
-// --- board quirk table -------------------------------------------------------
+// --- DL aggregation size ----------------------------------------------------
 
-let fx = fakefx.create({ files: { '/tmp/sysinfo/board_name': "zyxel,nr7101\n" } });
-eq(netlink.board_dgram_size(fx, 0), 31744, 'quirk: nr7101 31K');
-eq(netlink.board_dgram_size(fx, 16384), 16384, 'quirk: explicit override wins');
+eq(netlink.DEFAULT_DGRAM_SIZE, 31744, 'dgram: default is 31 KB, the largest that keeps the urb skb in 32 KB');
+eq(netlink.dgram_size(0), { size: 31744, capped: false }, 'dgram: no override, no driver cap -> the default');
+eq(netlink.dgram_size(16384), { size: 16384, capped: false }, 'dgram: an override wins');
+eq(netlink.dgram_size(0, 15360), { size: 15360, capped: true }, 'dgram: a driver buffer caps the default');
+eq(netlink.dgram_size(31744, 16384), { size: 16384, capped: true }, 'dgram: ...and an override too');
+eq(netlink.dgram_size(8192, 16384), { size: 8192, capped: false }, 'dgram: an override below the buffer stays');
+eq(netlink.dgram_size(0, null), { size: 31744, capped: false }, 'dgram: an unknown driver buffer caps nothing');
 
-fx = fakefx.create({ files: { '/tmp/sysinfo/board_name': "generic,board\n" } });
-eq(netlink.board_dgram_size(fx, 0), 4096, 'quirk: default 4K');
-
-fx = fakefx.create();
-eq(netlink.board_dgram_size(fx, 0), 4096, 'quirk: missing board file -> default');
-eq(netlink.board_dgram_size(fx, 0, 'RG650E-EU'), 31744, 'quirk: model table wins');
-eq(netlink.board_dgram_size(fx, 8192, 'RG650E-EU'), 8192, 'quirk: override beats model');
+let fx;
 
 // --- backend selection -------------------------------------------------------
 
@@ -1085,13 +1083,13 @@ eq(netlink.mux_available(fakefx.create({ present: { '/sys/class/net/wwan0/vendor
 // aggregation ratio means anything. Every datapath added later fell outside all
 // three silently, which is what these capabilities exist to prevent.
 eq(netlink.datapath_caps('rmnet', null),
-	{ aggregate: true, qmap: true, qmap_versions: [ 5, 4, 1 ], adopts: false, tx_aggr: true, llp_802_3: false },
+	{ aggregate: true, qmap: true, qmap_versions: [ 5, 4, 1 ], adopts: false, tx_aggr: true, dgram_max: null, llp_802_3: false },
 	'caps: rmnet drives every QMAP version it has rmnet flags for');
 eq(netlink.datapath_caps('qmimux', null),
-	{ aggregate: true, qmap: true, qmap_versions: [ 1 ], adopts: false, tx_aggr: false, llp_802_3: false },
+	{ aggregate: true, qmap: true, qmap_versions: [ 1 ], adopts: false, tx_aggr: false, dgram_max: null, llp_802_3: false },
 	'caps: qmimux aggregates plain QMAP only, and has no coalesce knob');
 eq(netlink.datapath_caps('ethernet', null),
-	{ aggregate: false, qmap: false, qmap_versions: [ ], adopts: false, tx_aggr: false, llp_802_3: true },
+	{ aggregate: false, qmap: false, qmap_versions: [ ], adopts: false, tx_aggr: false, dgram_max: null, llp_802_3: true },
 	'caps: ethernet is the 802.3 link — no QMAP, no aggregation');
 eq(netlink.datapath_caps('raw_ip', null).llp_802_3, false,
 	'caps: raw_ip is raw framing, not 802.3');
@@ -1106,7 +1104,7 @@ eq(netlink.datapath_caps('vlan', null).qmap, false,
 eq(netlink.datapath_caps('raw_ip', null).qmap, false, 'caps: no mux, no QMAP');
 eq(netlink.datapath_caps('none', null).qmap, false, 'caps: ...under the old spelling too');
 eq(netlink.datapath_caps('nosuch', null),
-	{ aggregate: false, qmap: false, qmap_versions: [ ], adopts: false, tx_aggr: false, llp_802_3: false },
+	{ aggregate: false, qmap: false, qmap_versions: [ ], adopts: false, tx_aggr: false, dgram_max: null, llp_802_3: false },
 	'caps: an unknown datapath claims nothing');
 
 // `qmap` defaults to `aggregate` but is a DIFFERENT question: aggregate is who

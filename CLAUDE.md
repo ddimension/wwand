@@ -384,4 +384,4 @@ Modem is normally in **QMI mode**
   (libqmi QMI_WDA_DATA_AGGREGATION_PROTOCOL_QMAPV4 = 0x08; v5 is 0x09, and
   quectel-cm only ever sends 0x05 or 0x09). `DAP_QMAPV5` was 8 and is 9 now, so
   the renegotiation that used to fire here should stop. Re-verify on HW;
-  `dl_datagram_max_size` (default model table = 31 KB) is overridable per modem.
+  `dl_datagram_max_size` (default 31744 for every modem, negotiated) is overridable per modem.
