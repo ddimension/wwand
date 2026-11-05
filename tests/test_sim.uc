@@ -93,6 +93,47 @@ scenario('uim: ready card', (next) => {
 	});
 });
 
+// QMI's pin1 block is the LOCAL slot's card while a remote SIM is in use; the
+// AT card state is the remote card and only turns SIM PIN after the modem has
+// started its UIM session (~20 s). The watchdog must enter the configured PIN
+// (never a guess) and refresh the identity when the card answers.
+scenario('uim: remote card needs a late SIM PIN -> configured PIN + re-read', (next) => {
+	let calls = [];
+	let c = card(uimmod.APP_STATE_READY, 3);
+	c.cards[0].applications[0].pin1_state = 3;
+
+	let at = {
+		sent: [],
+		send: function(cmd, cb) {
+			push(this.sent, cmd);
+
+			if (cmd == 'AT+CPIN?')
+				return cb(null, { lines: [
+					length(this.sent) == 1 ? '+CPIN: SIM PIN' : '+CPIN: READY' ] });
+
+			cb(null, { lines: [ 'OK' ] });
+		},
+	};
+
+	let m = { timing: { ...T, pin_poll: 1 }, config: { pincode: '1234' }, _gen: 1,
+	          uim: mkclient({ GET_CARD_STATUS: { card_status: c } }, calls),
+	          at: at,
+	          reapply_sim: function() {
+		          eq(at.sent[0], 'AT+CPIN?', 'uim-remote-pin: AT state queried');
+		          eq(at.sent[1], 'AT+CPIN="1234"', 'uim-remote-pin: configured PIN sent');
+		          ok(length(at.sent) >= 3, 'uim-remote-pin: AT state re-checked');
+		          eq(m.sim_note, 'entered the configured SIM PIN (remote card)',
+		             'uim-remote-pin: note set');
+		          next();
+	          } };
+
+	sim.unlock(m, (err, st) => {
+		eq(err, null, 'uim-remote-pin: no error');
+		eq(st.status, 'ready', 'uim-remote-pin: unlock returns ready');
+		eq(st.pin1_retries, 3, 'uim-remote-pin: QMI retries passed through');
+	});
+});
+
 scenario('uim: pin verify ok (indication)', (next) => {
 	let calls = [];
 	let uim;
