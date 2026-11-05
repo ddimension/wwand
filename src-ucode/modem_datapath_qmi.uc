@@ -170,7 +170,7 @@ export function setup(self, dp, o, next)
 				// probe was already given (:90). It was missing from THIS
 				// literal, so datapath_rmnet_nss's parent-rename recovery read
 				// `ctx.opts?.netdev_kernel` as undefined every time
-				// (datapath_rmnet_nss.uc:339) — the adoption the feature exists
+				// (datapath_rmnet_nss.uc:401) — the adoption the feature exists
 				// for could never fire on the AW1000/NSS case it was written
 				// for. The probe passed, then setup returned "mux channel not
 				// created".

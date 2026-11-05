@@ -314,7 +314,7 @@ res = netlink.setup(fx, {
 	mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
 });
 eq(res.mux_devs, [ ], 'foreign: a same-named device with another MAC is refused');
-ok(length(filter(fx.actions, (a) => match(a, /not a child of wwan0 \(different MAC\)/) != null)) == 1,
+ok(length(filter(fx.actions, (a) => match(a, /wwand0 exists but is not a child of wwan0/) != null)) == 1,
 	'foreign: and the reason is the identity, not the name');
 
 // ...while the real child, which carries the parent's MAC, is adopted
@@ -359,10 +359,12 @@ eq(res.mux_devs, [ 'wwand0' ], 'rename: the child reports its stable name');
 ok(fx.action_index('link_set wwan0_1 name wwand0') >= 0, 'rename: driver name -> stable name');
 eq(res.map_ids, { '1': 0x81 }, 'rename: the wire id is unaffected by the name');
 
-// a restart finds it already renamed: adopt it as it is, do not error
+// a restart finds it already renamed: adopt it as it is, do not error. Its
+// device link still names the parent (the restart section below has why).
 fx = fakefx.create({
 	present: { '/sys/module/rmnet_nss': true, '/sys/class/net/wwand0': true },
 	files: { '/sys/class/net/wwan0/qmap_mode': "2\n" },
+	links: { '/sys/class/net/wwand0/device': '../../../wwan0' },
 });
 res = netlink.setup(fx, {
 	netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
@@ -575,6 +577,101 @@ eq(netlink.mux_available(fx, 'wwan0', 'qmi', plugins), true,
 
 }
 
+
+// --- a wwand RESTART: the child carries the stable name already --------------
+//
+// The first start renamed wwan0_1 to wwand0, so the second finds no `<parent>_1`
+// under either stem. The probe used to decline there, `auto` fell through to a
+// backend that cannot serve a qmi_wwan_q parent, and every retry ended in
+// mux_backend_unavailable (ddimension/wwand#78, AW1000 + RG500Q-EA, XT feed).
+// The driver registers each child with SET_NETDEV_DEV(qmap_net, &real_dev->dev)
+// (qmi_wwan_q.c:1361), so /sys/class/net/<child>/device names the parent —
+// after either rename, because kernfs resolves the link from current names.
+function restart_fx(o) {
+	let fx = fakefx.create({
+		present: { '/sys/module/rmnet_nss': true, '/sys/module/rmnet': true,
+		           '/sys/class/net/wwan0': true, '/sys/class/net/wwand0': true,
+		           '/sys/class/net/eth0': true },
+		files: { '/sys/class/net/wwan0/qmap_mode': "1\n",
+		         '/sys/class/net/wwan0/address': "02:50:f4:00:00:00\n",
+		         '/sys/class/net/wwand0/address': o?.child_mac ?? "02:50:f4:00:00:01\n" },
+		links: {
+			'/sys/class/net/wwan0/device/driver': o?.driver ?? '../../../../../../bus/usb/drivers/qmi_wwan_q',
+		},
+	});
+
+	if (o?.device_link !== false)
+		fx.links['/sys/class/net/wwand0/device'] = o?.device_link ?? '../../../wwan0';
+
+	return fx;
+}
+
+ok(plug.probe(restart_fx(), 'wwan0', { kernel_netdev: 'wwan0' }),
+	'restart: a qmi_wwan_q parent whose only child was renamed is still claimed');
+eq(netlink.select_backend(restart_fx(), 'wwan0', 'auto', true, plugins, { proto: 'qmi' }), 'rmnet_nss',
+	'restart: ...and auto selects the add-on, not mainline rmnet');
+eq(plug.probe(restart_fx({ driver: '../../../../../../bus/usb/drivers/qmi_wwan' }), 'wwan0'), false,
+	'restart: a child link alone is not the signature — the parent must be qmi_wwan_q');
+eq(plug.probe(restart_fx({ device_link: '../../../wwan1' }), 'wwan0'), false,
+	'restart: a child of ANOTHER parent does not count');
+eq(plug.probe(restart_fx({ device_link: false }), 'wwan0'), false,
+	'restart: without children nothing is claimed (qmap_mode 1, no use_rmnet_usb)');
+
+// adoption: XT's variant gives each child the parent MAC + channel
+// (qmi_wwan_q.c:1375-1378), which the old exact-MAC check refused
+{
+	let fx = restart_fx();
+	let res = netlink.setup(fx, {
+		netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
+		mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
+	});
+	eq(res.mux_devs, [ 'wwand0' ], 'restart: the renamed child with MAC + 1 is adopted by its parent link');
+	eq(length(fx.matching('name wwand0')), 0, 'restart: ...without a second rename');
+
+	// the parent link decides against a matching MAC too
+	fx = restart_fx({ device_link: '../../../eth0', child_mac: "02:50:f4:00:00:00\n" });
+	res = netlink.setup(fx, {
+		netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
+		mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
+	});
+	eq(res.mux_devs, [ ], 'restart: a same-MAC device with another parent is refused');
+
+	// no link to ask: the first five octets decide, so MAC + n still passes...
+	fx = restart_fx({ device_link: false });
+	res = netlink.setup(fx, {
+		netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
+		mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
+	});
+	eq(res.mux_devs, [ 'wwand0' ], 'restart: without a link, the MAC prefix adopts MAC + n');
+
+	// ...and an all-zero raw-IP address confirms nothing
+	fx = restart_fx({ device_link: false, child_mac: "00:00:00:00:00:00\n" });
+	fx.files['/sys/class/net/wwan0/address'] = "00:00:00:00:00:00\n";
+	res = netlink.setup(fx, {
+		netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
+		mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096,
+	});
+	eq(res.mux_devs, [ ], 'restart: all-zero addresses do not prove a parent');
+}
+
+// the whole cycle: start (rename) then restart, with the fake sysfs moving
+// the child link the way kernfs does
+{
+	let fx = fakefx.create({
+		present: { '/sys/module/rmnet_nss': true, '/sys/class/net/wwan0': true,
+		           '/sys/class/net/wwan0_1': true },
+		files: { '/sys/class/net/wwan0/qmap_mode': "1\n" },
+		links: { '/sys/class/net/wwan0/device/driver': '../../../../../../bus/usb/drivers/qmi_wwan_q',
+		         '/sys/class/net/wwan0_1/device': '../../../wwan0' },
+	});
+	let opts = { netdev: 'wwan0', backend: 'rmnet_nss', plugins: plugins,
+		mux: [ { id: 1, name: 'wwand0', mtu: 1500 } ], dgram_size: 4096 };
+
+	ok(plug.probe(fx, 'wwan0'), 'cycle: first start probes by the driver name');
+	eq(netlink.setup(fx, opts).mux_devs, [ 'wwand0' ], 'cycle: ...and renames the child');
+	ok(plug.probe(fx, 'wwan0'), 'cycle: the restart still probes true');
+	eq(netlink.setup(fx, opts).mux_devs, [ 'wwand0' ], 'cycle: ...and adopts the renamed child');
+}
 
 // --- a negotiated QMAP format with no channel is a REFUSAL, not a fallback ----
 //

@@ -184,6 +184,21 @@ export function create(opts)
 					delete self.files[k];
 				}
 
+			// symlinks move with their netdev, and one that POINTS at it
+			// reads the new name: kernfs builds the target from the current
+			// names on every read (fs/kernfs/symlink.c:56-125, 6.18.41)
+			for (let k in keys(self.links)) {
+				let t = self.links[k];
+
+				if (t == dev || substr(t, -(length(dev) + 1)) == '/' + dev)
+					self.links[k] = substr(t, 0, length(t) - length(dev)) + o.rename;
+
+				if (index(k, from + '/') == 0) {
+					self.links[to + substr(k, length(from))] = self.links[k];
+					delete self.links[k];
+				}
+			}
+
 			self.present[to] = true;
 		}
 

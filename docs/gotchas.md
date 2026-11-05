@@ -497,6 +497,26 @@ So "rmnet_nss is loaded, the children are adopted, the link is up" is not the
 same as "the datapath is offloaded", and the difference costs throughput
 silently. Check the NSS side before concluding wwand is the problem.
 
+### A vendor QMAP child is found by its name, or else by the parent's MAC
+**Neither survives a wwand restart.** `qmi_wwan_q` names its children
+`<parent>_<n>`, and wwand renames them to the context's `wwandN` on the first
+start, so the second start finds no `_1` under any stem. The probe declined
+there, `auto` fell through to a datapath that cannot serve that parent, and
+every retry ended in `mux_backend_unavailable` (ddimension/wwand#78, AW1000 +
+RG500Q-EA, 2026-11-04). The MAC was the fallback and is not an identity either:
+stock Quectel copies the parent's address onto each child, while the XT-Martinez
+variant adds the channel to the last octet (qmi_wwan_q.c:1375-1378), so an exact
+compare refused the real child.
+
+What does survive is the parent link. The driver registers each child with
+`SET_NETDEV_DEV(qmap_net, &real_dev->dev)` (qmi_wwan_q.c:1361; `pcie_mhi`
+does the same, mhi_netdev_quectel.c:1615), so `/sys/class/net/<child>/device`
+points at the parent netdev, and kernfs builds that link from the current names
+on every read (fs/kernfs/symlink.c:56-125, 6.18.41): it follows either rename.
+Mainline rmnet and qmimux children set no parent, so the link is also what tells
+the two apart. The MAC stays as the fallback when no link can be read, compared
+on its first five octets.
+
 ### Upgrading luci-app-wwand makes browsers fetch the new JS
 **No. The cache-busting token is luci-base's version, not the app's.** `luci.js`
 appends `?v=${env.resource_version}` to every resource it loads — app views

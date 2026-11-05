@@ -61,10 +61,63 @@ function vendor_attr(netdev, name)
 	return sprintf('/sys/class/net/%s/%s', netdev, name);
 }
 
-// a netdev's MAC, for the one identity check the driver makes available
+// a netdev's MAC, the identity check of last resort (child_of() below)
 function mac(fx, netdev)
 {
 	return trim(fx.read(sprintf('/sys/class/net/%s/address', netdev)) ?? '');
+}
+
+// Whether `child` is one of `parent`'s QMAP children, by the one link that
+// survives a rename on either side. The driver registers each child with
+// SET_NETDEV_DEV(qmap_net, &real_dev->dev), real_dev being the parent's
+// struct net_device (qmi_wwan_q.c:1361, Quectel V1.5.0 in XT-Martinez/
+// aw1000-feed a7e14ad, checked 2026-11-05), and the driver core links a
+// device with a parent as `device` (drivers/base/core.c:3507-3509, 6.18.41).
+// kernfs resolves that link from the nodes' CURRENT names on every read
+// (kernfs_getlink -> kernfs_get_target_path, fs/kernfs/symlink.c:56-125,
+// 6.18.41), so it reads ../../../<parent> after wwand renamed the child and
+// also after it renamed the parent. Neither the name (`<parent>_<n>` is gone once the child is
+// renamed) nor the MAC (stock Quectel copies the parent's, XT's variant adds
+// channel + 1 to the last octet, qmi_wwan_q.c:1375-1378) says the same.
+// true/false when the link exists, null when there is none to ask. Mainline
+// rmnet and qmimux children set no parent and therefore have no such link.
+function child_of(fx, child, parent)
+{
+	let target = fx.readlink
+		? fx.readlink(sprintf('/sys/class/net/%s/device', child)) : null;
+
+	if (!target)
+		return null;
+
+	return target == parent ||
+		(length(target) > length(parent) &&
+		 substr(target, length(target) - length(parent) - 1) == '/' + parent);
+}
+
+// the netdevs registered as children of `parent` (child_of above), [] when
+// none
+function children(fx, parent)
+{
+	let out = [];
+
+	for (let path in (fx.glob ? (fx.glob('/sys/class/net/*') ?? []) : [])) {
+		let name = replace(path, /^.*\//, '');
+
+		if (name != parent && child_of(fx, name, parent) == true)
+			push(out, name);
+	}
+
+	return out;
+}
+
+// whether qmi_wwan_q is the driver bound to `netdev`'s USB interface — the
+// `.name` of its usb_driver (qmi_wwan_q.c:2743, same source)
+function vendor_driver(fx, netdev)
+{
+	let drv = fx.readlink
+		? fx.readlink(sprintf('/sys/class/net/%s/device/driver', netdev)) : null;
+
+	return drv != null && match(drv, /(^|\/)qmi_wwan_q$/) != null;
 }
 
 // the name qmi_wwan_q gives channel `id`: sprintf("%s_%d", real_dev->name,
@@ -112,9 +165,18 @@ return {
 		// `info.kernel_netdev` is that pre-rename name, which the daemon keeps
 		// precisely because only it can answer this. No MAC guessing needed:
 		// wwand did the rename and therefore knows both names.
+		//
+		// The names alone do not survive a wwand RESTART: the first start
+		// renamed `<netdev>_1` to the context's wwandN, so a second probe finds
+		// no `_1` under either stem, declines, and `auto` falls through to a
+		// backend that cannot serve this parent — mux_backend_unavailable, once
+		// per retry (evidence: ddimension/wwand#78). The driver's own children
+		// are still recognisable by their sysfs parent link (child_of), so a
+		// qmi_wwan_q parent with any child is the same signature.
 		if (!fx.exists(sprintf('/sys/class/net/%s', vendor_child(netdev, 1))) &&
 		    !(info?.kernel_netdev &&
-		      fx.exists(sprintf('/sys/class/net/%s', vendor_child(info.kernel_netdev, 1)))))
+		      fx.exists(sprintf('/sys/class/net/%s', vendor_child(info.kernel_netdev, 1)))) &&
+		    !(vendor_driver(fx, netdev) && length(children(fx, netdev)) > 0))
 			return false;
 
 		// Claimed either way — these children need adopting, not creating. But a
@@ -346,20 +408,25 @@ return {
 			let child = ctx.child_name(entry);
 
 			if (!fx.exists(sprintf('/sys/class/net/%s', from))) {
-				// A restart that already renamed it. Adoption is by NAME here,
-				// which a name alone cannot justify, so take the one identity
-				// the driver gives us: it copies the parent's MAC onto every
-				// child (__dev_addr_set(qmap_net, real_dev->dev_addr)). That
-				// proves nothing about WHICH parent when both are raw-IP
-				// devices with an all-zero address, but it does reject an
-				// ordinary netdev that happens to carry this name.
+				// A restart that already renamed it. A name alone cannot
+				// justify adopting it, so ask the sysfs parent link (child_of).
+				// Without one, the MAC decides on its first five octets: stock
+				// Quectel copies the parent's address, XT's variant adds the
+				// channel to the last octet, and an all-zero raw-IP address
+				// proves nothing, so it never confirms.
 				if (fx.exists(sprintf('/sys/class/net/%s', child))) {
-					if (mac(fx, child) == mac(fx, ctx.netdev)) {
+					let parent_match = child_of(fx, child, ctx.netdev);
+					let pmac = mac(fx, ctx.netdev);
+
+					if (parent_match == true ||
+					    (parent_match == null && length(pmac) >= 14 &&
+					     substr(pmac, 0, 14) != '00:00:00:00:00' &&
+					     substr(mac(fx, child), 0, 14) == substr(pmac, 0, 14))) {
 						ctx.mux_mtus[child] = entry.mtu;
 						push(out, child);
 					}
 					else {
-						fx.log('err', sprintf('rmnet_nss: %s exists but is not a child of %s (different MAC) — channel %d left unclaimed rather than binding the wrong device',
+						fx.log('err', sprintf('rmnet_nss: %s exists but is not a child of %s — channel %d left unclaimed rather than binding the wrong device',
 							child, ctx.netdev, entry.id));
 					}
 

@@ -31,6 +31,22 @@ state buried at the top invites reading a months-old entry as present tense.
   they change. Host-tested with the Xunison D50 and AW1000 files from the
   issue; no test device has such a panel, so HW is the reporters' (4IceG,
   kuncy7). Not built: the LuCI LED page and micw's sweep (#48).
+- **rmnet_nss after a restart (#78, 2026-11-05):** the probe needed a
+  `<parent>_1`, which the first start had renamed to `wwandN`, so a restart
+  fell back to a datapath that cannot serve `qmi_wwan_q` and looped on
+  `mux_backend_unavailable`; the adoption's exact-MAC check refused the
+  XT-Martinez driver's MAC + n children. Both now ask the sysfs parent link
+  (`datapath_rmnet_nss.uc child_of`, see gotchas.md); a `qmi_wwan_q` parent
+  with any child is claimed. HW-verified on the NR7101 (RG502Q-EA,
+  2c7c:0800, which the driver gives `use_rmnet_usb`) with `qmi_wwan_q` 1.5.0
+  from the XT feed, built for its 6.18.55 kernel in
+  `/vol/release/nr7101/openwrt-ci` (upstream 116414a + the CI LTE-power
+  patch), `qmap_mode=2`: the old code fell back to `rmnet` on the restart and
+  looped, the fix adopted `wwand0`/`wwand1` (MAC + n, `device` -> `wwan0`) on
+  two restarts, the second taking over the live session. To set it up again:
+  stop wwand, unbind `2-1:1.4` from `qmi_wwan`, `insmod qmi_wwan_q.ko
+  qmap_mode=2`. Back to `qmi_wwan` (bind `2-1:1.4`) the modem needed a
+  `modem_reset` before usbnet sent again (tx_errors, rx 0; 2026-11-05).
 - **QMAP DL aggregation default 31 KB (#79, 2026-11-05):** the per-model and
   per-board size tables are gone; every modem is asked for 31744 bytes and
   may clamp it (its echo sizes the receive side). 31 KB, not ModemManager's 32 KB, because the receive skb
