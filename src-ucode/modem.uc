@@ -42,6 +42,7 @@ const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
 	sync_retry: 1000,      // delay between CTL sync attempts
 	sim_settle: 5000,      // settle after PIN verify without indication (old: sleep 5)
+	ps_settle: 3000,       // let ATTACH_DETACH's detach complete before attaching again
 	card_poll: 1000,       // card-status re-poll while initializing
 	init_reset: 30000,     // wait for a deferred init reset to take the modem off
 	                       // the bus; it acked but stayed -> the reset did not take
@@ -189,7 +190,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1716) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1800) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:741, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -229,7 +230,7 @@ export function create(opts)
 		}
 	};
 
-	let settle_after = (gen, fn, gone) => {
+	let settle_after = (gen, fn, gone, delay) => {
 		gone = gone ?? (() => null);
 
 		if (self._gen != gen || !self.dms)
@@ -238,7 +239,7 @@ export function create(opts)
 		let rec = {};
 
 		rec.gone = gone;
-		rec.timer = uloop.timer(self.timing.settle, () => {
+		rec.timer = uloop.timer(delay ?? self.timing.settle, () => {
 			settles = filter(settles, (x) => x != rec);
 
 			if (self._gen != gen || !self.dms)
@@ -807,11 +808,92 @@ export function create(opts)
 				let sim_gen = self._gen;
 				let finish = () => cb ? cb(changed) : null;
 
-				log('notice', 'attach profile changed after sim reapply, cycling radio to re-attach');
-				opmode_ours('low_power', () => {
-					settle_after(sim_gen, () => {
-						online_unless_parked(finish);
-					}, finish);
+				// The attach profile reaches the network only on a new attach.
+				// Re-run it with NAS ATTACH_DETACH (radio on), not a DMS
+				// low_power cycle: RF off re-runs PLMN selection and can land
+				// on another network (bench: 242/02 -> 242/01, 25 s). The
+				// cycle stays as the fallback for a modem that refuses it.
+				if (self.state != 'READY' || self.detached || self.lowpower_parked ||
+				    self._plugin_held || self._reattaching)
+					return finish();
+
+				let gone = () => self._gen != sim_gen || !self.dms;
+
+				let cycle = (done) => {
+					if (gone())
+						return done({ error: 'cancelled' });
+
+					log('notice', 'attach profile changed after sim reapply, cycling radio to re-attach');
+					opmode_ours('low_power', () => {
+						settle_after(sim_gen,
+							() => online_unless_parked(() => done(null, { via: 'opmode' })),
+							() => done({ error: 'cancelled' }));
+					});
+				};
+
+				self.with_sessions_released('reattach', (done) => {
+					if (type(self.ps_attach) != 'function')
+						return cycle(done);
+
+					self.ps_attach(false, (err, res) => {
+						if (gone())
+							return done({ error: 'cancelled' });
+
+						if (err) {
+							log('warn', sprintf('attach profile re-attach: PS detach failed (%J), falling back to the radio cycle', err));
+							return cycle(done);
+						}
+
+						// An already-detached modem has no transition to wait
+						// for; attach immediately. After an effective detach,
+						// give the modem time to finish it: a second
+						// ATTACH_DETACH sent into the transition is answered
+						// NO_EFFECT and leaves the modem PS-detached (observed
+						// on the RG502Q, 2026-11-05).
+						let effective = !res?.unchanged;
+
+						log('info', sprintf('attach profile re-attach: PS detach done%s',
+							effective ? '' : ' (NO_EFFECT: already detached)'));
+
+						let attach = () => {
+							if (gone())
+								return done({ error: 'cancelled' });
+
+							self.ps_attach(true, (err2, res2) => {
+								if (gone())
+									return done({ error: 'cancelled' });
+
+								if (err2) {
+									log('warn', sprintf('attach profile re-attach: PS attach failed (%J), falling back to the radio cycle', err2));
+									return cycle(done);
+								}
+
+								// NO_EFFECT still means no new attach. The
+								// modem may have re-attached by itself after
+								// the detach, but it may equally still be in
+								// the transition; do not risk a stale attach
+								// when the old code's radio cycle is reliable.
+								if (res2?.unchanged) {
+									log('warn', 'attach profile re-attach: PS attach reported NO_EFFECT, falling back to the radio cycle');
+									return cycle(done);
+								}
+
+								log('notice', 'attach profile changed after sim reapply, re-attached (PS attach/detach, radio on)');
+								done(null, { via: 'qmi' });
+							});
+						};
+
+						if (!effective)
+							return attach();
+
+						settle_after(sim_gen, attach,
+							() => done({ error: 'cancelled' }), self.timing.ps_settle);
+					});
+				}, (err) => {
+					if (err)
+						log('warn', sprintf('attach profile re-attach failed: %J', err));
+
+					finish();
 				});
 			});
 		}, { ...(opts ?? {}), fresh: true });
