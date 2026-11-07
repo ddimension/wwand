@@ -191,14 +191,14 @@ export function create(opts)
 	// AFTER the cancel pass. The new timer fires with self.dms already null
 	// (modem.uc:1760) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
-	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:741, step_sim), and
+	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:751, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
 	//
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
 	// callback arrives the generation has already moved.
 	// EACH WAIT OWNS ITS OWN TIMER AND ITS OWN DEBT. `tm.settle` is a shared
 	// one-shot slot, also written by the init chain (modem_init_qmi.uc:596,
-	// :671, :958), so parking radio-bounce waits there let a second one
+	// :681, :968), so parking radio-bounce waits there let a second one
 	// overwrite the first: teardown then cancelled only the newest, the older
 	// timer survived unreachable, and whichever fired first cleared the other's
 	// debt. Two reattach calls reach that directly — nothing serialises them.

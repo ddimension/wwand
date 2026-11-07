@@ -16,6 +16,7 @@ import * as daemon_mod from 'wwand/daemon.uc';
 import * as netlink_mod from 'wwand/netlink.uc';
 import * as ubus_api from 'wwand/ubus.uc';
 import * as board_mod from 'wwand/board.uc';
+import * as sim_inv from 'wwand/siminventory.uc';
 
 let sock = getenv('WWAND_TEST_UBUS_SOCK');
 
@@ -4816,5 +4817,126 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	unlink('/tmp/test-giveups-txs.json');
 	unlink('/tmp/test-admin-txs.json');
 }
+
+// --- ICCID-bound interfaces (option iccid) ----------------------------------
+// The card is the connection's: an ifup on a modem running another card
+// switches to it and dials once it is in use; another bound interface using
+// the modem keeps it (first come wins); a card change under a bound interface
+// takes it down rather than re-dialling it on the wrong subscription.
+(() => {
+	let A = '89490200001022832490', B = '89882390001598474352';
+	let ops = [], evs = {}, modem;
+	let fake = {
+		modem: { create: (o) => (evs[o.id] = o.deps?.on_event, modem = {
+			id: o.id, state: 'READY', config: o.config,
+			info: { iccid: A }, active_slot: 1,
+			slots: [ { physical: 1, iccid: A, active: true }, { physical: 2, iccid: B, active: false } ],
+			start: () => null, stop: () => null,
+			set_opmode: (mode, cb) => cb(null),
+		}) },
+		context: { create: (o) => ({
+			state: 'IDLE', name: o.name, modem: o.modem,
+			up: function(cb) { push(ops, 'dial:' + o.name); this.state = 'CONNECTED'; cb(null); },
+			down: function(cb) { this.state = 'IDLE'; cb ? cb() : null; },
+			status: function() { return { state: this.state }; },
+		}) },
+	};
+	let d = daemon_mod.create({ timing: TIMING, deps: { log: () => null, load_qmi: () => fake,
+		giveups_file: '/tmp/test-giveups-iccid.json', admin_downs_file: '/tmp/test-admin-iccid.json',
+		down_interface: (i) => push(ops, 'down:' + i) } });
+	let real_switch = d.modem_sim_switch_slot;
+
+	d.modem_sim_switch_slot = (mn, slot, cb, opts) => {
+		push(ops, sprintf('slot:%s:%d:%s', mn, slot, opts?.for_interface ?? '-'));
+		cb(null, { slot: slot });
+	};
+	d.apply_config(config.parse({ network: {
+		m0:   { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		home: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', iccid: A },
+		away: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3b', iccid: B + 'F', auto: '0' },
+		any:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3c' },
+	} }));
+
+	let up = (n) => { let r = {}; d.context_up(n, (e, res) => { r.err = e; r.res = res; }); return r; };
+	let siminv_holder = (dd) => sim_inv.bind_holder(dd.contexts, 'home', 'm0', A);
+
+	eq(d.contexts.away.cfg.iccid, B, 'iccid: normalised on parse (the trailing F a modem prints)');
+	eq(d.modems.m0.modem.bound_iccid(), { iccid: A, interface: 'home' },
+	   'iccid: the bring-up asserts the slot of the auto interface\'s card');
+	d._admin_downs.home = true;
+	eq(d.modems.m0.modem.bound_iccid(), null, 'iccid: ...not of one the operator took down');
+	delete d._admin_downs.home;
+
+	ops = [];
+	eq(up('home').err, null, 'iccid: the card in use — dialled as any interface');
+	eq(ops, [ 'dial:home' ], 'iccid: ...with no switch');
+	eq(d.status().contexts.home.sim, { want: A, state: 'ok', reason: null }, 'iccid: status says the card is in use');
+
+	ops = [];
+	let r = up('away');
+	eq([ r.err?.error, ops ], [ 'sim_in_use', [] ], 'iccid: another bound interface up on its card keeps the modem');
+	ok(index(r.err?.detail ?? '', 'interface home,') >= 0, 'iccid: ...and the refusal names it');
+	eq(d.contexts.away.wanted, false, 'iccid: the refused interface is not wanted (no kick on the next registration)');
+
+	// an unbound interface takes whatever card the modem runs
+	ops = [];
+	eq(up('any').err, null, 'iccid: an unbound interface is not held off');
+
+	// the operator's own slot switch would pull the card from under home
+	let sw = null;
+	real_switch('m0', 2, (e) => sw = e);
+	eq(sw?.error, 'sim_in_use', 'iccid: a manual slot switch under a bound interface is refused');
+	eq(d.sim_bound_user('m0', { force: true }), null, 'iccid: ...unless forced');
+
+	// home goes down: away may switch now
+	d.contexts.home.ctx.state = 'IDLE';
+	d.contexts.any.ctx.state = 'IDLE';
+	ops = [];
+	r = up('away');
+	eq([ r.err?.error, ops ], [ 'sim_switching', [ 'slot:m0:2:away' ] ],
+	   'iccid: an ifup switches to the slot that holds its card, and waits');
+	eq(d.status().contexts.away.sim.state, 'switching', 'iccid: status says the switch is under way');
+
+	ops = [];
+	r = up('home');
+	eq(r.err?.error, 'sim_in_use', 'iccid: a switch under way holds the modem as well');
+
+	// ...until its interface is taken down: the down ends the switch
+	d.context_down('away', () => null);
+	eq(d.contexts.away._sim_switch, null, 'iccid: an ifdown ends the switch it started');
+	eq(siminv_holder(d), null, 'iccid: ...and nothing holds the modem any more');
+	up('away');
+
+	// the card came up and the modem registered: the next setup dials
+	modem.info.iccid = B;
+	modem.active_slot = 2;
+	ops = [];
+	eq(up('away').err, null, 'iccid: once the modem runs the card, the ifup dials');
+	eq([ ops, d.contexts.away._sim_switch, d.status().contexts.away.sim.state ], [ [ 'dial:away' ], null, 'ok' ],
+	   'iccid: ...and the switch is over');
+
+	// the card changes under it (the operator, a card's own IPA): down, not re-dialled
+	d.contexts.away.wanted = true;
+	ops = [];
+	modem.info.iccid = A;
+	evs.m0(modem, 'sim_refresh', { iccid: B, imsi: '901' });
+	evs.m0(modem, 'sim_refresh', { iccid: A, imsi: '262' });
+	eq(filter(ops, (o) => index(o, 'down:') == 0 || o == 'dial:away'), [ 'down:away' ],
+	   'iccid: a card change under a bound interface takes it down (an unbound one re-dials)');
+	eq([ d.contexts.away.wanted, d.status().contexts.away.sim.state ], [ false, 'released' ],
+	   'iccid: ...and it stays down until the next ifup');
+
+	// a card nowhere to be found
+	d.apply_config(config.parse({ network: {
+		m0:   { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		home: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', iccid: '89000000000000000001' },
+	} }));
+	r = up('home');
+	eq(r.err?.error, 'sim_not_here', 'iccid: a card never seen is refused');
+
+	d.shutdown();
+	unlink('/tmp/test-giveups-iccid.json');
+	unlink('/tmp/test-admin-iccid.json');
+})();
 
 done('test_daemon');

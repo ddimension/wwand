@@ -335,7 +335,7 @@ export function install(self, o)
 				why, join('; ', reasons)));
 
 			// Deliberately NOT cleared on a later init pass. The object is
-			// created once per device attach (daemon.uc:3334), so a modem that
+			// created once per device attach (daemon.uc:3533), so a modem that
 			// really did reset comes back as a NEW instance with no debt — and
 			// a re-init of THIS instance means it did not, so the debt still
 			// holds. Deduplicated because a re-init re-derives the same reason
@@ -636,7 +636,8 @@ export function install(self, o)
 	// assert the configured physical SIM slot (option sim_slot, 0 = leave
 	// as-is) before touching the SIM — a switch re-initializes the SIM stack
 	step_simslot = () => {
-		let want = +(self.config.sim_slot ?? 0);
+		// -1: a bound card to look for, its slot known once the list is read
+		let want = sim.boot_slot(self, null).slot;
 
 		if (!want || !self.uim)
 			return step_sim();
@@ -649,17 +650,26 @@ export function install(self, o)
 			// established does not answer. Same outcome as the error branch
 			// above.
 			if (err || !sim.enumerated(slots)) {
-				log('info', sprintf('sim_slot %d configured but slot status unsupported, continuing', want));
+				log('info', (want > 0)
+					? sprintf('sim_slot %d configured but slot status unsupported, continuing', want)
+					: 'an interface is bound to a card, but slot status is unsupported — continuing on the active one');
 				return step_sim();
 			}
+
+			let pick = sim.boot_slot(self, slots);
+
+			want = pick.slot;
+
+			if (!(want > 0))
+				return step_sim();
 
 			let cur = filter(slots, (s) => s.active)[0];
 
 			if (cur?.physical == want)
 				return step_sim();
 
-			log('notice', sprintf('switching to SIM slot %d (active: slot %d)',
-				want, cur?.physical ?? 0));
+			log('notice', sprintf('switching to SIM slot %d (active: slot %d) — %s',
+				want, cur?.physical ?? 0, pick.why));
 
 			sim.switch_slot(self, want, (serr) => {
 				if (serr)

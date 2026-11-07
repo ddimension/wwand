@@ -139,7 +139,7 @@ export function install(self, o)
 		// AND THE MATCHED PER-SIM OVERRIDE, which is the one that can do
 		// damage rather than merely mislead. `active_sim` is the wwand_sim
 		// entry resolved for the card that just left, and effective_pincode
-		// prefers its `pincode` over the modem's own (sim.uc:57-70) — so
+		// prefers its `pincode` over the modem's own (sim.uc:58-71) — so
 		// the unlock scheduled below would have offered the OLD card's PIN
 		// to the new one and spent one of three attempts on it. Its APN and
 		// credentials would have applied too, until a reapply replaced it.
@@ -218,7 +218,9 @@ export function install(self, o)
 		return true;
 	};
 
-	self.modem_sim_switch_slot = function(ref, physical, cb) {
+	// opts: { force } past an ICCID-bound interface using the card, or
+	// { for_interface } from that interface's own switch (daemon sim_binding)
+	self.modem_sim_switch_slot = function(ref, physical, cb, opts) {
 		let entry = check_modem(ref, cb);
 
 		if (!entry)
@@ -226,6 +228,12 @@ export function install(self, o)
 
 		if (!(physical > 0))
 			return cb({ error: 'invalid_slot' });
+
+		let user = self.sim_bound_user?.(ref, opts);
+
+		if (user)
+			return cb({ error: 'sim_in_use', interface: user,
+			            detail: sprintf('interface %s is bound to the card in use; ifdown it first, or pass force', user) });
 
 		sim.switch_slot(entry.modem, physical, (err, res) => {
 			if (err)
@@ -532,6 +540,13 @@ export function install(self, o)
 		if (g)
 			return cb({ error: 'esim_managed', by: g.by,
 			            detail: sprintf('%s; pass force to override', g.reason ?? sprintf('this card is managed by %s', g.by)) });
+
+		// enable and disable change the card in use (see modem_sim_switch_slot)
+		let user = (op == 'enable' || op == 'disable') ? self.sim_bound_user?.(ref, params) : null;
+
+		if (user)
+			return cb({ error: 'sim_in_use', interface: user,
+			            detail: sprintf('interface %s is bound to the card in use; ifdown it first, or pass force', user) });
 
 		return br.modem_esim(ref, op, params, cb);
 	};

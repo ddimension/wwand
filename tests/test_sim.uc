@@ -2216,6 +2216,22 @@ eq(sim.multisim([], null), null, 'multisim: no slots, nothing to say');
 	eq(length(defers), 0, 'eSIM re-read: then nothing more is pending');
 }
 
+// boot_slot: the bound interface's card wins over sim_slot, so the init does
+// not switch to sim_slot only for the ifup to switch back
+{
+	let slots = [ { physical: 1, iccid: '89490200001022832490', active: true },
+	              { physical: 2, iccid: '89882390001598474352F', active: false } ];
+	let m = { config: { sim_slot: 1 }, bound_iccid: () => ({ iccid: '89882390001598474352', interface: 'away' }) };
+
+	eq(sim.boot_slot(m, slots).slot, 2, 'boot slot: the slot holding the bound card');
+	eq(sim.boot_slot(m, null).slot, -1, 'boot slot: before the list, "look for a card"');
+	m.bound_iccid = () => ({ iccid: '89000000000000000001', interface: 'x' });
+	eq(sim.boot_slot(m, slots), { slot: 1, why: 'option sim_slot' }, 'boot slot: a bound card in no slot leaves sim_slot');
+	m.bound_iccid = null;
+	m.config.sim_slot = 0;
+	eq(sim.boot_slot(m, slots).slot, 0, 'boot slot: neither — leave as is');
+}
+
 done('test_sim');
 	});
 });

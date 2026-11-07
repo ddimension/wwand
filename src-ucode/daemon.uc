@@ -412,6 +412,7 @@ export function create(opts)
 	// A `let` referenced before its initialisation throws in ucode even from
 	// inside a closure (see wwand/CLAUDE.md), so the binding has to exist here.
 	let mark_our_down;
+	let sim_release, sim_binding;
 
 	reconnect.install(self, {
 		log: log,
@@ -508,7 +509,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:1056-1059 warns "references
+	// produces no entry for it at all (config.uc:1101-1104 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -1065,6 +1066,13 @@ export function create(opts)
 			    !entry.ctx || entry.ctx.state != 'IDLE')
 				continue;
 
+			// a card switch of its own still on the way: the registration
+			// is the old card's, and a kick now would only ask again
+			let bound = siminventory.norm_iccid(entry.cfg.iccid);
+
+			if (bound && entry._sim_switch?.busy && bound != siminventory.norm_iccid(modem.info?.iccid))
+				continue;
+
 			// re-establish wanted contexts; ALSO re-arm one we involuntarily gave
 			// up on after a reconnect-hold blackhole (reconnect_on_register, set by
 			// context_down) now that the modem is registered again. An operator
@@ -1489,8 +1497,8 @@ export function create(opts)
 	// whether anything started it.
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
-	// own emit on a change (modem_mbim.uc:1071-1080) while the shared reapply
-	// tail emits on every re-read (modem_common.uc:796-802); one comparison, in
+	// own emit on a change (modem_mbim.uc:1081-1090) while the shared reapply
+	// tail emits on every re-read (modem_common.uc:806-812); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {
 		let entry = self.modems[modem.id];
@@ -1556,10 +1564,227 @@ export function create(opts)
 			if (centry.cfg?.modem != modem.id || !centry.ctx || !centry.wanted)
 				continue;
 
+			// AN ICCID-BOUND INTERFACE DOES NOT FOLLOW THE CARD. Re-dialled
+			// like the others, it would run on a subscription it was bound
+			// away from. No card read yet (the identity is cleared while a
+			// card changes) decides nothing; its own card is what a switch it
+			// asked for brings, and the `registered` kick takes it from there.
+			let bound = siminventory.norm_iccid(centry.cfg?.iccid);
+
+			if (bound) {
+				let fresh = siminventory.norm_iccid(data?.iccid);
+
+				if (!fresh || (bound == fresh && centry.ctx.state == 'IDLE'))
+					continue;
+
+				if (bound != fresh) {
+					sim_release(name, centry, sprintf('the modem now runs card %s', fresh));
+					continue;
+				}
+			}
+
 			log('notice', sprintf('interface %s: the SIM changed under it — dropping the session so it re-dials on the new subscription',
 				name));
 			centry.ctx.down(() => enter_reconnecting(name));
 		}
+	};
+
+	// ICCID-BOUND INTERFACES (`option iccid` on the interface). The card is
+	// the connection's, not the modem's: an ifup on a modem running another
+	// card switches to it — the slot that holds it, or its eUICC profile — and
+	// dials once the modem has registered on it. One step per ifup
+	// (siminventory bind_plan): the `registered` that follows a step kicks the
+	// interface, and its next setup takes the next step or dials. Bounded by
+	// SIM_SWITCH_STEPS and SIM_SWITCH_TIMEOUT: a card that never comes up is
+	// said, and the interface stays down until the next ifup — it is not a
+	// modem fault, so the recovery ladder does not count it.
+	const SIM_SWITCH_STEPS = 3;
+	const SIM_SWITCH_TIMEOUT = 120;
+
+	let sim_bind_note = (entry, state, reason) => {
+		entry.sim_bind = { want: siminventory.norm_iccid(entry.cfg?.iccid),
+		                   state: state, reason: reason ?? null };
+	};
+
+	// what status and context_status report for a bound interface. Before any
+	// ifup of this daemon — a restart adopts a live session, a reload re-dials
+	// through the reconnect path — nothing has been noted, but whether the
+	// modem runs the card is still a fact worth showing.
+	self._sim_view = function(entry) {
+		let want = siminventory.norm_iccid(entry?.cfg?.iccid);
+
+		if (!want)
+			return null;
+
+		if (entry.sim_bind)
+			return entry.sim_bind;
+
+		let on = siminventory.norm_iccid(self.modems[entry.cfg.modem]?.modem?.info?.iccid);
+
+		return { want: want, state: (on == want) ? 'ok' : null, reason: null };
+	};
+
+	let sim_switch_end = (entry) => {
+		entry._sim_switch?.timer?.cancel?.();
+		entry._sim_switch = null;
+	};
+
+	// The modem left the card a bound interface runs on (an operator's
+	// switch, a card's own IPA changing the profile): it goes down and stays
+	// down. Brought back by itself it would switch the card back, against
+	// whoever changed it. Downed through netifd without our marker, so the
+	// teardown is recorded as an ifdown and the next ifup — the one to switch
+	// back — is the operator's.
+	sim_release = (name, entry, why) => {
+		sim_switch_end(entry);
+		entry.wanted = false;
+		sim_bind_note(entry, 'released', why);
+		log('notice', sprintf('interface %s: bound to card %s, but %s — taking it down (an ifup switches back)',
+			entry.cfg.interface ?? name, entry.sim_bind.want, why));
+
+		if (deps.down_interface)
+			deps.down_interface(entry.cfg.interface);
+	};
+
+	// context_up's part: true when it answered `cb` itself (refused, or a
+	// switch under way), false when the modem runs the card and the dial goes
+	// on as for any interface.
+	sim_binding = (name, entry, cb) => {
+		let want = siminventory.norm_iccid(entry.cfg?.iccid);
+
+		if (!want) {
+			entry.sim_bind = null;
+			return false;
+		}
+
+		let mn = entry.cfg.modem, mentry = self.modems[mn], mo = mentry?.modem;
+		let iface = entry.cfg.interface ?? name;
+
+		let refuse = (error, detail) => {
+			sim_switch_end(entry);
+			entry.wanted = false;
+			sim_bind_note(entry, 'refused', detail);
+			log('warn', sprintf('interface %s: not bringing it up — %s', iface, detail));
+			cb({ error: error, detail: detail });
+			return true;
+		};
+
+		let switching = (what) => {
+			entry.wanted = true;
+			sim_bind_note(entry, 'switching', what);
+			cb({ error: 'sim_switching', detail: what });
+			return true;
+		};
+
+		try { inventory_refresh(); }
+		catch (e) { log('warn', sprintf('SIM inventory refresh failed (%s)', e)); }
+
+		let p = siminventory.bind_plan(want, inventory.find(want), {
+			modem: mn, active: siminventory.norm_iccid(mo?.info?.iccid),
+			active_slot: mo?.active_slot,
+		});
+
+		// first: a bound interface switching the modem away from this card
+		// pulls it from under a dial made now, even while it is still in use
+		let h = siminventory.bind_holder(self.contexts, name, mn, want);
+
+		if (h)
+			return refuse('sim_in_use', sprintf('modem %s is in use by interface %s, which is bound to another card (ifdown it first)',
+				mn, self.contexts[h].cfg.interface ?? h));
+
+		if (p.action == 'ok') {
+			if (entry._sim_switch)
+				log('notice', sprintf('interface %s: modem %s runs card %s now — dialling', iface, mn, want));
+
+			sim_switch_end(entry);
+			sim_bind_note(entry, 'ok');
+			return false;
+		}
+
+		if (p.action == 'refuse')
+			return refuse(p.error, p.detail);
+
+		let sw = entry._sim_switch;
+
+		if (p.action == 'wait')
+			return switching(sw?.what ?? p.why);
+
+		if (sw?.busy)
+			return switching(sw.what);
+
+		if (sw && sw.steps >= SIM_SWITCH_STEPS)
+			return refuse('sim_switch_failed', sprintf('card %s still not in use after %d switch steps', want, sw.steps));
+
+		if (!sw) {
+			sw = entry._sim_switch = { steps: 0 };
+			sw.timer = uloop.timer(SIM_SWITCH_TIMEOUT * 1000, () => {
+				if (entry._sim_switch !== sw)
+					return;
+
+				entry._sim_switch = null;
+				entry.wanted = false;
+
+				// the card can be in use and the network refuse it (a
+				// subscription that takes IPv6 only, say) — not the same
+				// fault, and the registration_detail names that one
+				let now_on = siminventory.norm_iccid(self.modems[mn]?.modem?.info?.iccid);
+
+				sim_bind_note(entry, 'failed', (now_on == want)
+					? sprintf('modem %s runs card %s, but did not register on it within %d s (see its registration detail)', mn, want, SIM_SWITCH_TIMEOUT)
+					: sprintf('card %s not in use %d s after the switch began', want, SIM_SWITCH_TIMEOUT));
+				log('err', sprintf('interface %s: %s — taking it down', iface, entry.sim_bind.reason));
+
+				if (deps.down_interface)
+					deps.down_interface(entry.cfg.interface);
+			});
+		}
+
+		sw.steps++;
+		sw.busy = true;
+		sw.what = (p.action == 'slot')
+			? sprintf('switching modem %s to SIM slot %d for card %s', mn, p.slot, want)
+			: sprintf('enabling eSIM profile %s on modem %s', want, mn);
+
+		log('notice', sprintf('interface %s: %s', iface, sw.what));
+
+		let done = (err) => {
+			if (entry._sim_switch !== sw)
+				return;
+
+			sw.busy = false;
+
+			if (err)
+				return refuse('sim_switch_failed', sprintf('%s failed: %J', sw.what, err));
+
+			switching(sw.what);
+		};
+
+		if (p.action == 'slot')
+			self.modem_sim_switch_slot(mn, p.slot, (err) => done(err), { for_interface: name });
+		else
+			self.modem_esim(mn, 'enable', { iccid: want, slot: p.slot, for_interface: name }, (err) => done(err));
+
+		return true;
+	};
+
+	// A manual card change (slot switch, eSIM enable/disable) on a modem whose
+	// card a bound interface is using pulls the card from under it: refused
+	// unless forced, naming the interface. Forced, the interface is released
+	// once the new card is read (modem_sim_refresh). The bound interface's own
+	// switch passes `for_interface`.
+	self.sim_bound_user = function(ref, opts) {
+		if (opts?.force || opts?.for_interface)
+			return null;
+
+		for (let n in sort(keys(self.contexts))) {
+			let c = self.contexts[n];
+
+			if (c?.cfg?.modem == ref && siminventory.norm_iccid(c.cfg.iccid) &&
+			    (c._sim_switch || (c.ctx && c.ctx.state != 'IDLE')))
+				return c.cfg.interface ?? n;
+		}
+
+		return null;
 	};
 
 	// A live edit of the override that matches the card in use: re-program
@@ -2393,7 +2618,11 @@ export function create(opts)
 			// A modem-level reattach (netsel_ops) stops the sessions before
 			// it detaches and hands them back afterwards — a reconnect started
 			// here would dial into the detach.
-			if (entry?.wanted && !ctx?.modem?._reattaching)
+			// An ICCID-bound interface whose card the modem is leaving or
+			// still reading is not held up and reconnected: that is its own
+			// switch, and the next `registered` brings it up (sim_binding).
+			if (entry?.wanted && !ctx?.modem?._reattaching &&
+			    !(entry.cfg?.iccid && siminventory.norm_iccid(entry.cfg.iccid) != siminventory.norm_iccid(ctx?.modem?.info?.iccid)))
 				enter_reconnecting(name);
 			break;
 
@@ -2606,7 +2835,7 @@ export function create(opts)
 			};
 
 		// TELL THE CONTEXTS FIRST, then stop the modem — the order _device_gone
-		// uses (modem_common.uc:841). Dropping `centry.ctx` below only releases
+		// uses (modem_common.uc:851). Dropping `centry.ctx` below only releases
 		// the daemon's HANDLE: the context object itself lives on with its
 		// monitor timers armed and its WDS clients alive, polling a hub that
 		// entry.modem.stop() has just closed. One orphan per removal, and its
@@ -3384,6 +3613,26 @@ export function create(opts)
 		// on LTE a registration is an attach, the network sees the IMSI. Parked
 		// at init as a plugin park, so the tick wakes it when the hold is gone.
 		entry.modem.radio_hold = () => self.plugins_radio_hold?.(name) ?? null;
+		// The card the bring-up asserts the slot for (sim.uc boot_slot): an
+		// ICCID-bound interface on this modem that is to come up — `auto`
+		// and not taken down by the operator, or in use already. First by name; config.uc
+		// warns when two auto interfaces want different cards.
+		entry.modem.bound_iccid = () => {
+			for (let cn in sort(keys(self.contexts))) {
+				let c = self.contexts[cn];
+				let id = siminventory.norm_iccid(c?.cfg?.iccid);
+
+				// `wanted` is true for every context at build, so the
+				// operator's ifdown is read from its persisted record
+				if (c?.cfg?.modem != name || !id || !c.wanted || self._admin_downs?.[c.cfg.interface])
+					continue;
+
+				if ((c.cfg.auto ?? true) || c._sim_switch || (c.ctx && c.ctx.state != 'IDLE'))
+					return { iccid: id, interface: c.cfg.interface ?? cn };
+			}
+
+			return null;
+		};
 		// A setting the init sequence changed that only a modem reset makes
 		// real (an EFS item is read at boot): reset once. Once per modem and
 		// setting for the daemon's life — should the reset not make it stick,
@@ -4236,6 +4485,10 @@ export function create(opts)
 		if (m?.modem?.detached)
 			return cb({ error: 'detached', detail: sprintf('modem %s is detached from the network (wwandctl attach)', entry.cfg.modem) });
 
+		// bound to a card the modem is not running: switch, or say why not
+		if (sim_binding(name, entry, answer))
+			return;
+
 		if (m?.modem?.lowpower_parked && m.modem.set_opmode) {
 			log('notice', sprintf('modem %s: waking the parked radio for %s',
 				entry.cfg.modem, name));
@@ -4364,6 +4617,14 @@ export function create(opts)
 	self.context_down = function(ref, cb) {
 		let name = self.resolve_context(ref);
 		let entry = name ? self.contexts[name] : null;
+
+		// a down ends the card switch an ifup started: left running, the
+		// switch kept holding the modem (siminventory bind_holder) and
+		// refused the other card's interface (HW, NR7101, 2026-11-07)
+		if (entry?._sim_switch) {
+			sim_switch_end(entry);
+			entry.sim_bind = null;
+		}
 
 		// No context to take down — the modem is absent, or the interface's
 		// modem is not configured — but this is still the operator's ifdown
@@ -4535,7 +4796,12 @@ export function create(opts)
 		if (!entry?.ctx)
 			return { error: 'no_such_context', ref: ref };
 
-		return entry.ctx.status();
+		let st = entry.ctx.status();
+
+		if (entry.cfg.iccid && type(st) == 'object')
+			st.sim = self._sim_view(entry);
+
+		return st;
 	};
 
 	self.status = function() {
@@ -4861,6 +5127,9 @@ export function create(opts)
 			contexts[name] = {
 				interface: entry.cfg.interface,
 				modem: entry.cfg.modem,
+				// `option iccid`: the card it needs and where its switch
+				// stands (sim_binding); null for an unbound interface
+				sim: self._sim_view(entry),
 				// what is in force, so it cannot disagree with l3_device on
 				// the next line (a demoted `auto` context reports 0 and the
 				// parent, not channel 1 and a device that does not exist)

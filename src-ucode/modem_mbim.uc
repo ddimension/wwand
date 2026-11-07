@@ -701,7 +701,8 @@ export function create(opts)
 	// switch_slot handle the MBIM transports themselves (passthrough UIM on
 	// demand, native MS-BCE fallback); unsupported -> log + continue.
 	step_simslot = () => {
-		let want = +(self.config.sim_slot ?? 0);
+		// -1: a bound card to look for, its slot known once the list is read
+		let want = sim.boot_slot(self, null).slot;
 
 		if (!want)
 			return step_sim();
@@ -714,17 +715,26 @@ export function create(opts)
 			// established does not answer. Same outcome as the error branch
 			// above.
 			if (err || !sim.enumerated(slots)) {
-				log('info', sprintf('sim_slot %d configured but slot status unsupported, continuing', want));
+				log('info', (want > 0)
+					? sprintf('sim_slot %d configured but slot status unsupported, continuing', want)
+					: 'an interface is bound to a card, but slot status is unsupported — continuing on the active one');
 				return step_sim();
 			}
+
+			let pick = sim.boot_slot(self, slots);
+
+			want = pick.slot;
+
+			if (!(want > 0))
+				return step_sim();
 
 			let cur = filter(slots, (s) => s.active)[0];
 
 			if (cur?.physical == want)
 				return step_sim();
 
-			log('notice', sprintf('switching to SIM slot %d (active: slot %d)',
-				want, cur?.physical ?? 0));
+			log('notice', sprintf('switching to SIM slot %d (active: slot %d) — %s',
+				want, cur?.physical ?? 0, pick.why));
 
 			sim.switch_slot(self, want, (serr) => {
 				if (serr)

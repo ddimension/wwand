@@ -344,6 +344,29 @@ proto_wwand_setup() {
 				proto_notify_error "$interface" DETACHED
 				sleep 60
 				;;
+			sim_switching)
+				# option iccid: the modem is switching to the card of this
+				# interface (a SIM slot, an eSIM profile), or reading it. Not
+				# blocked: the daemon brings the interface up once the modem
+				# has registered on that card
+				echo "switching to the interface's SIM card"
+				proto_notify_error "$interface" SWITCHING_SIM
+				sleep 5
+				;;
+			sim_in_use|sim_not_here|sim_switch_failed)
+				# option iccid, and the card cannot be had: another bound
+				# interface uses the modem, the card is not here, or the switch
+				# failed. Stays down until the next ifup; the reason is in
+				# `wwandctl status` and the log
+				local code
+				case "$error" in
+					sim_in_use)        code=SIM_IN_USE ;;
+					sim_not_here)      code=SIM_NOT_HERE ;;
+					*)                 code=SIM_SWITCH_FAILED ;;
+				esac
+				proto_notify_error "$interface" "$code"
+				sleep 5
+				;;
 			modem_absent)
 				# the modem's control device is not present yet (after boot, a
 				# modem reboot or a power-cycle). Surface it distinctly so the

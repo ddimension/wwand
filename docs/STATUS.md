@@ -21,6 +21,28 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
+- **SIM card per interface, `option iccid` (2026-11-07, from #39):** an
+  ifup on a modem running another card takes one step towards it — slot
+  switch or eSIM profile enable (`siminventory.uc bind_plan`) — and dials
+  once the modem registered on it; refused while another interface bound to
+  a different card uses the modem (first come wins, `bind_holder`); a card
+  change under a bound interface takes it down (`daemon.uc sim_release`);
+  manual slot switches / eSIM enable-disable answer `sim_in_use` unless
+  `force`; the bring-up asserts the bound card's slot instead of `sim_slot`
+  (`sim.uc boot_slot`). LuCI: "SIM card" on the interface form
+  (luci-proto-wwand, choices from sim_inventory), error codes, status-page
+  row, the slot buttons ask before forcing (luci-app-wwand), `sim_slot` help
+  amended. HW-verified on the NR7101 (RG502Q-EA, two cards, 2026-11-07):
+  refusal while the other card's interface is up; `ifup` switching slot 2 ->
+  1 and back, the way back registering and dialling 14 s after the ifup;
+  `wwandctl slot` refused under a bound interface, `--force` releasing it;
+  the boot slot following the bound card. Three faults found there and fixed
+  before this commit: the reconnect path dialled the new interface before
+  its card was read, the attach profile took the APN of the interface bound
+  to the other card, and an ifdown left the switch holding the modem. The
+  slot-1 card itself gets no service there (EMM detached / not subscribed),
+  so a dial on it could not be shown. LuCI form and status row checked on
+  the same box (luci-app/-proto from the working trees; the box keeps them).
 - **Stuck offline (2026-11-07):** the RPi4's EG25-G (192.168.3.123) was
   left offline by a recovery modem reset it acknowledged and never performed,
   and from offline refused every mode but reset (INVALID_TRANSITION) — the

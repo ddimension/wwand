@@ -17,6 +17,7 @@ import * as merge from 'wwand.codec.schema.merge';
 import * as arfcn_bands from 'wwand.codec.arfcn_bands';
 import * as discovery from 'wwand.discovery';
 import * as context_common from 'wwand.context_common';
+import * as siminventory from 'wwand.siminventory';
 
 // scrub NAS cell-info sentinel metrics (-32768 = "not measured") to null so
 // consumers never render the sentinel as a real dBm value.
@@ -365,10 +366,19 @@ function dialled_profile(ctx)
 //      and a session/mux 1 means nothing for it (`numbered` false);
 //   2. one that is brought up automatically (`auto` not 0);
 //   3. the first one bound, as before.
+// Never an interface bound to ANOTHER card (`option iccid`): the attach is the
+// card in use, and after a switch to the card of `wwand1` the attach was
+// programmed with `wwand0`'s APN for the card switched away from, which the
+// new card's network rejected (HW, NR7101, 2026-11-07). While the card is not
+// read yet nothing is excluded.
 // null when nothing is bound.
 export function attach_owner(contexts, numbered)
 {
 	let list = contexts ?? [];
+	let active = siminventory.norm_iccid(list[0]?.modem?.info?.iccid);
+
+	if (active)
+		list = filter(list, (c) => !c?.config?.iccid || siminventory.norm_iccid(c.config.iccid) == active);
 
 	if (numbered !== false)
 		for (let c in list)

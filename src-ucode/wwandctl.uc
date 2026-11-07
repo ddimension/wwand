@@ -217,6 +217,12 @@ function cmd_status(args)
 			c.last_error ? sprintf('  [last error: %s %s]',
 				c.last_error.stage ?? '', c.last_error.text ?? c.last_error.code ?? '') : '');
 
+		// option iccid: the card it needs, and where its switch stands
+		if (c.sim)
+			printf('  sim         card %s%s%s\n', c.sim.want ?? '?',
+				c.sim.state ? sprintf('  [%s]', c.sim.state) : '',
+				c.sim.reason ? sprintf('  %s', c.sim.reason) : '');
+
 		let s = (c.state == 'CONNECTED')
 			? call('context_settings', { context: name })?.settings : null;
 
@@ -438,7 +444,8 @@ SIM
   pin-lock [modem] <pin>     enable the SIM PIN query
   pin-unlock [modem] <pin>   disable the SIM PIN query
   puk [modem] <puk> <new-pin>  unblock a PUK-locked SIM and set a NEW PIN
-  slot [modem] <n>       switch the active physical SIM slot
+  slot [modem] <n> [--force]  switch the active physical SIM slot
+                         (--force: also under an interface bound to the card in use)
 
 SMS
   sms [modem] [SM|ME]    list stored messages
@@ -538,7 +545,7 @@ if (json_mode) {
 //
 // WHY THE FLOOR. `modem_signal` keeps wwand's adaptive fast-telemetry loop warm
 // (daemon.uc calls modem.watch()); that loop polls the modem at 1 Hz and decays
-// 6 s after the last request (modem_common.uc:1231, :1041). One sample therefore
+// 6 s after the last request (modem_common.uc:1241, :1041). One sample therefore
 // costs ~6 s of 1 Hz modem traffic, so the duty cycle is 6/interval: 10 % at
 // 60 s, 20 % at 30 s, 60 % at 10 s — and at 6 s or below the loop NEVER decays
 // and the modem is polled around the clock. A global `Interval 10` in
@@ -716,10 +723,14 @@ case 'slot': {
 	let r = resolve_modem(st, args[0]);
 	let rest = r.consumed ? slice(args, 1) : args;
 
-	if (!(+rest[0] > 0))
-		die('usage: wwandctl slot [modem] <n>');
+	let force = index(rest, '--force') >= 0;
 
-	let res = call_ok('modem_sim_switch_slot', { modem: r.modem, slot: +rest[0] });
+	rest = filter(rest, (a) => a != '--force');
+
+	if (!(+rest[0] > 0))
+		die('usage: wwandctl slot [modem] <n> [--force]');
+
+	let res = call_ok('modem_sim_switch_slot', { modem: r.modem, slot: +rest[0], force: force });
 	printf(res.unchanged ? 'slot %d already active\n' : 'switched to slot %d\n', +rest[0]);
 	break;
 }

@@ -206,9 +206,10 @@ export function publish(conn, daemon, log)
 		},
 
 		modem_sim_switch_slot: {
-			args: { modem: '', slot: 0, ubus_rpc_session: '' },
+			args: { modem: '', slot: 0, force: false, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_sim_switch_slot(req.args.modem, req.args.slot, ok_reply(reply))),
+				daemon.modem_sim_switch_slot(req.args.modem, req.args.slot, ok_reply(reply),
+					{ force: !!req.args.force })),
 		},
 
 		// enable/disable the SIM PIN query (PIN lock); needs the current PIN

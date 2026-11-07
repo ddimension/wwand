@@ -20,6 +20,7 @@ import * as netlink from 'wwand.netlink';
 import * as catmod from 'wwand.codec.schema.cat';
 import * as nasmod from 'wwand.codec.schema.nas';
 import * as recovery from 'wwand.recovery';
+import * as siminventory from 'wwand.siminventory';
 
 const OLD_DEPRECATED = [ 'dhcp', 'autocreateif', 'customroutes', 'strongestnetwork' ];
 
@@ -292,6 +293,49 @@ export function modem_defaults(over)
 	};
 };
 
+// `option iccid` of an interface: 18-22 digits (ITU-T E.118; a trailing F and
+// blanks as the modems and the card print it are tolerated), else a warning
+// and no binding — a typo bound to no card would hold the interface down for
+// good, where unbound it at least connects.
+function iccid_opt(v, name, warnings)
+{
+	if (v == null || v == '')
+		return null;
+
+	let id = siminventory.norm_iccid(sprintf('%s', v));
+
+	if (!id || !match(id, /^[0-9]{18,22}$/)) {
+		push(warnings, sprintf("interface %s: invalid iccid '%s', ignoring (18-22 digits)", name, v));
+		return null;
+	}
+
+	return id;
+}
+
+// Two interfaces brought up at boot on one modem, bound to different cards,
+// cannot both come up: the first takes the card and the second is refused
+// (sim_in_use). Which one is first is netifd's order, so it is said here
+// rather than left to be found at the next reboot.
+function check_iccid_bindings(result)
+{
+	let seen = {};
+
+	for (let name in sort(keys(result.contexts))) {
+		let c = result.contexts[name];
+
+		if (!c.iccid || !(c.auto ?? true))
+			continue;
+
+		let prev = seen[c.modem];
+
+		if (prev && prev.iccid != c.iccid)
+			push(result.warnings, sprintf("interfaces %s and %s: both auto on modem %s, bound to different cards — only one comes up; set `option auto '0'` on the other",
+				prev.name, name, c.modem));
+		else if (!prev)
+			seen[c.modem] = { name: name, iccid: c.iccid };
+	}
+}
+
 export function context_defaults(over)
 {
 	return {
@@ -305,6 +349,7 @@ export function context_defaults(over)
 		ipv6_pd: null, clat: null, address_allocation: null,
 		settings_poll: 300,
 		auto: true,   // netifd 'auto 0' => daemon won't proactively bring it up
+		iccid: null,  // option iccid: the card this connection needs
 		...(over ?? {}),
 	};
 };
@@ -1124,6 +1169,9 @@ function compat_translate(raw, result)
 				profile: (s.profile != null) ? +s.profile : null,
 				use_pushed_mtu: bool_opt(s.use_pushed_mtu, true),
 				auto: bool_opt(s.auto, true),
+				// the card this connection needs (daemon.uc sim_binding):
+				// normalised, so the spellings a modem reads back compare
+				iccid: iccid_opt(s.iccid, name, result.warnings),
 				// autosetup marker: this interface was created by the
 				// zero-config autosetup and still awaits its one-shot
 				// ICCID->APN fill-in (cleared by the daemon afterwards)
@@ -1465,6 +1513,7 @@ export function parse(raw, opts)
 	parse_network_sections(raw ?? {}, result, opts?.ext_options);
 	compat_translate(raw ?? {}, result);
 	assign_l3_names(result);
+	check_iccid_bindings(result);
 
 	// resolve each modem's optional plmn_list -> the entries to restore before
 	// radio-on; warn on a dangling reference.

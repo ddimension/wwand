@@ -2079,6 +2079,17 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	eq(mc.attach_owner([ a ]), a, 'attach_owner: then the first bound');
 	eq(mc.attach_owner([]), null, 'attach_owner: nothing bound');
 
+	// option iccid: an interface bound to another card is not this card's
+	// connection, whatever profile it dials (HW, NR7101, 2026-11-07)
+	let modem_b = { info: { iccid: '89882390001186977790' } };
+	let home = { config: { interface: 'wwand0', mux_id: 1, iccid: '89490200001022832490' }, modem: modem_b };
+	let away = { config: { interface: 'wwand1', mux_id: 2, profile: 2, auto: false, iccid: '89882390001186977790' }, modem: modem_b };
+	eq(mc.attach_owner([ home, away ]), away, 'attach_owner: never an interface bound to another card');
+	eq(mc.attach_owner([ home ]), null, 'attach_owner: ...not even as the only one');
+	let unread = { info: { iccid: null } };
+	eq(mc.attach_owner([ { ...home, modem: unread } ])?.config?.interface, 'wwand0',
+		'attach_owner: nothing is excluded while the card is not read yet');
+
 	// the EFFECTIVE apn: a wwand_sim `#N` decides which profile is dialled
 	let card = { active_sim: { apn: '#1' } };
 	let sim_p1 = { config: { interface: 's1', apn: '#2' }, modem: card };

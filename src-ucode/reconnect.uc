@@ -24,6 +24,7 @@
 'use strict';
 
 import * as uloop from 'uloop';
+import * as siminventory from 'wwand.siminventory';
 
 const UP_GUARD_MS = 150000;
 
@@ -146,7 +147,7 @@ export function install(self, o)
 			// the backoff they were meant to space out collapses. Reachable
 			// whenever something reaches retry_activate while a retry is
 			// already scheduled: the modem-ready and adoption paths call it
-			// directly (daemon.uc:1118,:1200), and the sim_refresh handler gets
+			// directly (daemon.uc:1126,:1200), and the sim_refresh handler gets
 			// there through enter_reconnecting.
 			if (entry.retry_timer) {
 				entry.retry_timer.cancel();
@@ -202,6 +203,18 @@ export function install(self, o)
 		}
 
 		entry._held_retry_logged = false;
+
+		// AN ICCID-BOUND INTERFACE DIALS ONLY ON ITS CARD. Right after its own
+		// slot switch the modem still reads READY for a moment, and this path
+		// dialled the new interface on whatever answered — profile 2 of a
+		// card not read yet (HW, NR7101, 2026-11-07: "invalid profile id").
+		// No retry is scheduled: the `registered` that follows the card's
+		// bring-up kicks the interface (daemon.uc modem_registered), and its
+		// setup takes the next step (sim_binding).
+		let bound = siminventory.norm_iccid(entry.cfg?.iccid);
+
+		if (bound && bound != siminventory.norm_iccid(modem.info?.iccid))
+			return;
 
 		entry.ctx.up((err) => {
 			if (err && entry.wanted && entry.ctx?.state != 'CONNECTED')

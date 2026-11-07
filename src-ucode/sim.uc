@@ -21,6 +21,7 @@ import * as hexmod from 'wwand.codec.hex';
 import * as backend from 'wwand.backend';
 import * as uimmod from 'wwand.codec.schema.uim';
 import * as sim_plmn from 'wwand.sim_plmn';
+import * as siminventory from 'wwand.siminventory';
 
 const QMI_ERR_NO_EFFECT = 26;
 
@@ -132,7 +133,7 @@ function watch_card_ready(modem, uim, on_ready)
 {
 	// THE WAITER LIVES ON THE CLIENT, and carries an owner token. A single
 	// modem-wide slot let two unlocks steal from each other: init calls
-	// sim.unlock (modem_init_qmi.uc:721) while the eSIM path schedules its own
+	// sim.unlock (modem_init_qmi.uc:731) while the eSIM path schedules its own
 	// (esim_bridge.uc:651), and nothing serialises them — the second overwrote
 	// the first, and whichever finished first cleared the OTHER's waiter.
 	let mine = {};
@@ -740,6 +741,27 @@ export function enumerated(slots)
 			return false;
 
 	return true;
+};
+
+// The slot a bring-up asserts, { slot, why }: the one holding the card an
+// ICCID-bound interface needs (`self.bound_iccid`, daemon.uc), else
+// `option sim_slot`; slot 0 = leave as is. The bound card wins because the
+// interface switches to it on its ifup anyway: asserting sim_slot first would
+// change the card twice on every boot. `slots` null asks only whether there
+// is anything to assert (no slot list read yet).
+export function boot_slot(self, slots)
+{
+	let b = self.bound_iccid?.();
+	let cfg = +(self.config?.sim_slot ?? 0);
+
+	if (slots == null)
+		return { slot: (b ? -1 : cfg), why: null };
+
+	for (let s in (b ? slots : []))
+		if (!s.inferred && +s.physical > 0 && siminventory.norm_iccid(s.iccid) == b.iccid)
+			return { slot: +s.physical, why: sprintf('it holds card %s, which interface %s is bound to', b.iccid, b.interface) };
+
+	return { slot: cfg, why: cfg ? 'option sim_slot' : null };
 };
 
 export function slot_status(modem, cb)

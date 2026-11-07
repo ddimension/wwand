@@ -116,7 +116,9 @@ wwand section types plus the netifd interface — no separate config file:
   off; on a reconnect that changes the IP, do a netifd link down→up instead of an
   in-place renew so dependent tunnels/xfrm/IPsec re-follow the new local address —
   costs the WAN's own IPv6-PD/VRF a rebuild + a brief blip; WireGuard doesn't need
-  it), `ipv6_pd`, `clat`, `address_allocation` (see below) + the usual netifd knobs. Several interfaces referencing one `wwand_modem` =
+  it), `ipv6_pd`, `clat`, `address_allocation` (see below), `iccid` — the SIM
+  card this connection needs (see [SIM card per interface](#sim-card-per-interface-option-iccid))
+  + the usual netifd knobs. Several interfaces referencing one `wwand_modem` =
   multiple mux contexts on one modem.
 - **`config wwand_globals 'globals'`** — `log_level`, `hold_max`, `write_device`
   (write the resolved L3 name back onto interfaces, default on), `autosetup`
@@ -460,7 +462,8 @@ config wwand_modem 'm0'
 	                                 #   pins the huawei_cdc_ncm-style AT channel
 	                                 #   explicitly (see the at_mbim note below)
 	option pincode '1234'            # SIM PIN; entered on each start
-	option sim_slot '0'              # physical slot to activate (0 = leave as-is)
+	option sim_slot '0'              # physical slot to activate (0 = leave as-is);
+	                                 #   an interface's `option iccid` overrides it
 	option modes 'lte,nr5g'          # lte umts gsm nr5g td-scdma cdma / all / unset
 	option rat_order 'nr5g,lte'      # RAT acquisition order, most preferred first
 	                                 #   (gsm umts lte nr5g td-scdma cdma1x evdo);
@@ -712,6 +715,8 @@ config interface 'wan'
 	option password ''
 	option mtu ''                    # fixed MTU (else the pushed MTU when enabled)
 	option use_pushed_mtu '1'        # apply the network-advertised MTU
+	option iccid ''                  # bind to one SIM card (18-22 digits); the ifup
+	                                 #   switches to its slot / eSIM profile
 	option use_pushed_prefix '0'     # keep the pushed IPv4 prefix (default: /32 p-t-p)
 	option settings_poll '300'       # re-check pushed IP/DNS/MTU every N s (0 = off)
 	option ipv6_pd ''                # QMI + NCM/Quectel: profile flag "IPv6 prefix
@@ -1073,6 +1078,75 @@ device and the hotplug restarts the bring-up on the new slot; if the firmware
 keeps the device across the reset a 60 s watchdog resumes the bring-up in place.
 Should the slot still not be the configured one on that second pass, wwand logs
 a warning and continues on the active slot rather than resetting again.
+
+### SIM card per interface (`option iccid`)
+
+A connection can be bound to one SIM card. The card is then the
+connection's, not the modem's: two interfaces on one dual-SIM modem — a data
+SIM at home, an IoT SIM away — each name their card, and the one brought up
+decides which card the modem runs.
+
+```
+config interface 'home'
+	option proto 'wwand'
+	option modem 'wwmodem0'
+	option iccid '89490200001022832490'
+
+config interface 'away'
+	option proto 'wwand'
+	option modem 'wwmodem0'
+	option iccid '89882390001598474352'
+	option auto '0'
+```
+
+- **On `ifup`**, when the modem runs another card, wwand looks the card up in
+  the [SIM inventory](#sim-inventory) and takes one step: a **slot switch** to
+  the slot that holds it, or **enabling its eSIM profile** on the eUICC in the
+  active slot (a profile on an eUICC in another slot takes the slot first,
+  then the profile). The interface waits meanwhile (netifd error
+  `SWITCHING_SIM`); when the modem has registered on the new card, the daemon
+  brings it up again and it dials — or takes the next step. At most three
+  steps and 120 s, after which the interface goes down with
+  `sim_switch_failed`. A switch is not a modem fault: the recovery ladder does
+  not count it.
+- **Refused** (the interface stays down until the next `ifup`, the reason in
+  the log, in `wwandctl status` and on the status page):
+  - `sim_in_use` (`SIM_IN_USE`) — another interface bound to a **different**
+    card uses the modem (up, connecting, or switching). First come wins; there
+    is no takeover, because two `auto` interfaces on one modem bound to
+    different cards would otherwise take it from each other at every boot.
+    Config validation warns about that combination; give the second one
+    `option auto '0'`. Interfaces bound to the **same** card share it (two
+    PDNs), and an interface **without** `iccid` holds nothing — it takes
+    whichever card the modem runs and re-dials after a switch.
+  - `sim_not_here` (`SIM_NOT_HERE`) — the card was never seen on this
+    router, is not present any more (the reason names where it was last
+    seen), sits in another modem, or is a remote SIM in a reader (wwand-rsim
+    lends those; the core does not switch to them).
+  - `sim_switch_failed` (`SIM_SWITCH_FAILED`) — the slot switch or the
+    profile enable was refused, e.g. `esim_managed` on a card whose own IPA or
+    a plugin manages its profiles.
+- **The card changed under it** — an operator's slot switch, a card's own IPA
+  enabling another profile: a bound interface goes **down** instead of
+  re-dialling on a subscription it is not bound to, and stays down; its next
+  `ifup` switches back.
+- **Manual changes ask first.** `modem_sim_switch_slot` and `modem_esim`
+  `enable`/`disable` on a modem whose card a bound interface is using answer
+  `sim_in_use` with the interface's name; `force` goes ahead (the bound
+  interface then goes down as above). LuCI asks before it forces.
+- **At boot** the bring-up asserts the slot that holds the card of a bound
+  interface that is to come up (`auto`, not taken down), instead of
+  `option sim_slot` — otherwise every boot would switch to `sim_slot` and the
+  `ifup` back. `sim_slot` stays the boot slot while no such interface needs
+  another card. An eSIM profile is not enabled at boot; the `ifup` does that.
+- The card's PIN and APN come from its `wwand_sim` override, matched by ICCID
+  as always — nothing to repeat on the interface.
+- Status: `status().contexts.<name>.sim` and `context_status` carry
+  `{ want, state, reason }` — `state` is `ok`, `switching`, `refused`,
+  `failed` or `released` (the card changed under it); before the first
+  `ifup` of this daemon (a restart adopts the session) `ok` when the modem
+  runs the card, else null; `sim` is null altogether for an unbound
+  interface.
 
 ### eSIM: download and switch profiles
 
@@ -1629,6 +1703,7 @@ wwandctl scan                        # operator scan (up to ~90 s)
 wwandctl select auto                 # automatic network selection
 wwandctl select 262 01               # manual PLMN selection
 wwandctl slots / slot 2              # SIM slot status / switch
+wwandctl slot 2 --force              # ...also under an interface bound to the card in use
 wwandctl pin [pin]                   # manual PIN release (low-retry guard)
 wwandctl pin-lock 1234 / pin-unlock 1234
 wwandctl puk 12345678 4321           # PUK entry: unblock + set NEW PIN 4321
@@ -1777,12 +1852,12 @@ every method to it.
 | `modem_sim_slots` | `modem` | `slots[]` — physical slots: card presence, active, ICCID, eUICC flag, EID, per-slot `cpin`/`atr` (Fibocom `AT+ESLOTSINFO` carries all six per slot; other vendors via their own slot recipes) — plus `multisim`, the read-only shape summary below |
 | `modem_carrier_config` | `modem`, `op`, `id` | carrier configuration (MBN) over QMI PDC. `op` = `list` (every config with its description and version) \| `get` (the active one, plus `pending` when a switch is waiting for a reset) \| `set` (select `id`). A selection takes effect only after a **modem reset** and is reported as `pending` until then. The protocol-native form of what `AT+QMBNCFG` does on Quectel alone; wwand selects among the blobs the vendor shipped and never writes or deletes one |
 | `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
-| `modem_sim_switch_slot` | `modem`, `slot` | switch the active physical SIM slot (drops the connection) |
+| `modem_sim_switch_slot` | `modem`, `slot`, `force?` | switch the active physical SIM slot (drops the connection). Refused with `sim_in_use` and the `interface` while an interface bound to the card in use (`option iccid`) is up or switching; `force: true` goes ahead and that interface goes down |
 | `modem_sim_reinit` | `modem` | re-initialise the card in the active slot without a modem reset: power it off and on (QMI UIM, MBIM UICC reset, or an AT CFUN cycle), then re-read it as after a slot switch — for a card swapped in a slot the modem does not watch. The connection drops and comes back. Result `{ slot }` |
 | `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
 | `modem_sim_pin_verify` | `modem`, `pin?` | manual PIN release past the low-retry safety block (the daemon refuses to auto-enter with ≤1 attempt left, to avoid a PUK lock); `pin` overrides the configured one for this attempt (write ACL) |
 | `modem_sim_puk` | `modem`, `puk`, `new_pin` | **PUK entry**: unblock a PUK-locked SIM and set a NEW PIN in one operation (UIM Unblock PIN → native MBIM PIN/PUK1 → `AT+CPIN="puk","pin"`; the chain never re-tries a PUK on a second transport — wrong PUKs brick the SIM). PUK = 8 digits, new PIN 4–8 digits. On success the modem restarts its bring-up with the new PIN as one-shot override; **update the configured `pincode` afterwards** (write ACL) |
-| `modem_esim` | `modem`, `op`, `slot?`, … | eSIM — `op`: `profiles`, `eid`, `enable`, `disable`, `delete`, `download`, `notify`, …; reaches only the card in the ACTIVE slot on a one-executor modem (an eUICC elsewhere needs a slot switch first, `modem_sim_slots` names it with its EID); needs the optional `wwand-esim` package |
+| `modem_esim` | `modem`, `op`, `slot?`, … | eSIM — `op`: `profiles`, `eid`, `enable`, `disable`, `delete`, `download`, `notify`, …; reaches only the card in the ACTIVE slot on a one-executor modem (an eUICC elsewhere needs a slot switch first, `modem_sim_slots` names it with its EID); needs the optional `wwand-esim` package. `enable`/`disable` are refused with `sim_in_use` like a slot switch while an interface bound to the card in use is up (`force` overrides both this and `esim_managed`) |
 | `modem_plugin` | `modem`, `plugin`, `op`, `args` | an operation of an installed plugin (see "Plugins") |
 | `modem_plugin_status` | `modem`, `plugin`, `op` | its read-only twin: only the ops the plugin declares read-only (LuCI read ACL) |
 | `modem_euicc_profiles` | `modem`, `slot` | the MODEM's own eUICC profile read (QMI UIM), no lpac. For a card lpac structurally cannot enumerate: an SGP.02 **M2M eUICC** has no local ES10 — it is managed over the air by its SM-SR and refuses STORE DATA — so host-driven enumeration is impossible by design there, while the modem's own interface does not go through ES10 at all. Read-only. Not every firmware implements it (both modems here answer *not supported*), and a failure on the FIRST index is reported as `no_native_euicc` so a caller falls back to lpac rather than believing in an empty card. Note the eUICC is not necessarily in the ACTIVE slot — pass the slot that holds it |
@@ -1799,7 +1874,7 @@ every method to it.
 | `modem_datapath` | `modem` | datapath diagnostics: driver/protocol, mux channels, aggregation state, netdev counters |
 | `migrate` | `interfaces?`, `apply?` | plan (default) or apply the config migration of the named (or all) stock `proto qmi`/`mbim`/`ncm` interfaces to the network-native `proto wwand` model (same engine as the `/usr/libexec/wwand/migrate` CLI and the LuCI *Migrate selected* button) |
 | `context_up` / `context_down` | `context` or `interface` | connect / disconnect (deferred reply with the IP config) |
-| `context_status` / `context_settings` | `context` or `interface` | state, per-family cid/pdh, IP settings |
+| `context_status` / `context_settings` | `context` or `interface` | state, per-family cid/pdh, IP settings; `sim` (`{ want, state, reason }`) on an interface with `option iccid` |
 | `context_failed` | `context` or `interface`, `reason?` | an external connection monitor declaring this connection dead: drop the session, redial, and **count it against the recovery ladder**. See below |
 
 ### Connection monitoring (`context_failed`)

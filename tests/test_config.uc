@@ -1871,4 +1871,26 @@ ok(length(filter(psim.warnings, (w) => index(w, 'nonsense') >= 0)) > 0,
 eq(length(filter(psim.warnings, (w) => index(w, "unknown option 'pdp_type'") >= 0)), 0,
 	'sim pdp: no longer reported as an unknown option');
 
+// option iccid on an interface
+{
+	let c = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', iccid: '8949 0200 0010 2283 2490' },
+		b:  { '.type': 'interface', proto: 'wwand', modem: 'm0', iccid: '89882390001598474352' },
+		c:  { '.type': 'interface', proto: 'wwand', modem: 'm0', iccid: '12345' },
+	} });
+
+	eq(c.contexts.a.iccid, '89490200001022832490', 'iccid: blanks removed');
+	eq(c.contexts.c.iccid, null, 'iccid: too short — no binding');
+	ok(length(filter(c.warnings, (w) => index(w, "invalid iccid '12345'") >= 0)) == 1, 'iccid: ...and a warning');
+	ok(length(filter(c.warnings, (w) => index(w, 'interfaces a and b: both auto') >= 0)) == 1,
+	   'iccid: two auto interfaces bound to different cards on one modem are warned about');
+	c = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', iccid: '89490200001022832490' },
+		b:  { '.type': 'interface', proto: 'wwand', modem: 'm0', iccid: '89882390001598474352', auto: '0' },
+	} });
+	eq(length(filter(c.warnings, (w) => index(w, 'both auto') >= 0)), 0, 'iccid: ...not when one is auto 0');
+}
+
 done('test_config');
