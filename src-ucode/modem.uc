@@ -1609,9 +1609,15 @@ export function create(opts)
 
 		let begin = chain.begin;
 
-		// old 'delay' option: wait before touching the modem
+		// old 'delay' option: wait before touching the modem.
+		// Stored in tm.delay, NOT tm.settle: the opmode cycle and the
+		// teardown's settle-retire both reuse tm.settle, and either one
+		// cancels a delay timer stored there — the modem then sits
+		// untouched until the recovery ladder restarts it (bench:
+		// tm.settle 63.6s ±5.1s vs tm.delay 53.3s ±1.0s to connected,
+		// warm reboot, 2026-11-07).
 		if (+(self.config.delay ?? 0) > 0)
-			tm.settle = uloop.timer(+self.config.delay * 1000, begin);
+			tm.delay = uloop.timer(+self.config.delay * 1000, begin);
 		else
 			begin();
 	};
@@ -1649,7 +1655,7 @@ export function create(opts)
 			if (t)
 				t.cancel();
 
-		tm.retry = tm.reg = tm.settle = tm.at_drain = tm.probe = tm.init_reset = null;
+		tm.retry = tm.reg = tm.settle = tm.at_drain = tm.probe = tm.init_reset = tm.delay = null;
 
 		// a settle wait cancelled just above never runs its body, so the
 		// continuation it owed is paid here instead — otherwise a ubus reattach
