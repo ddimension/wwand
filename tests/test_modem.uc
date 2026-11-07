@@ -388,6 +388,102 @@ scenario('plugin hold at init, FCC at the wake', {
 		eq(modem._fcc_due, false, 'fcc held: done once, not again at the next wake');
 	});
 
+// --- 1a5: online refused as an invalid transition ----------------------------
+// QMI DMS answers INVALID_TRANSITION (60) when the target cannot be reached
+// from the current mode. fail() walked the ladder, whose own writes are refused
+// the same way, up to a reboot. Offline leaves only by a reset; anything else
+// goes through low power. (HW: EG25-G stuck offline on the RPi4, 2026-11-07.)
+let stuck = { mode: 3 };
+
+scenario('offline, the reset is acknowledged and not performed', {
+	handlers: base_handlers({
+		GET_OPERATING_MODE: () => ({ mode: stuck.mode }),
+		SET_OPERATING_MODE: (args) => (args?.mode == 4) ? {} : { __error: 60 },
+	}),
+	timing: { init_reset: 50, stuck_offline_retry: 150 },
+	setup: (mock, modem, end) => uloop.timer(600, end),
+}, 'never',
+	(modem, mock, events) => {
+		let modes = map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args?.mode);
+
+		eq(modes[0], 0, 'stuck offline: online asked first');
+		ok(length(filter(modes, (m) => m == 4)) >= 2, 'stuck offline: the reset is retried');
+		eq(length(filter(modes, (m) => m != 0 && m != 4)), 0,
+		   'stuck offline: no other mode is tried from offline');
+		eq(length(filter(events, (e) => e.event == 'error')), 0,
+		   'stuck offline: no failure, so no ladder and no reboot');
+		eq(modem.state, 'SET_OPMODE', 'stuck offline: the init waits where it stands');
+		ok(index(modem.control_note ?? '', 'stuck offline') >= 0, 'stuck offline: said in control_note');
+	});
+
+let back = { mode: 3 };
+
+scenario('offline, the reset brings it back without re-enumerating', {
+	handlers: base_handlers({
+		GET_OPERATING_MODE: () => ({ mode: back.mode }),
+		SET_OPERATING_MODE: (args) => {
+			if (args?.mode == 4) { back.mode = 1; return {}; }
+			if (back.mode == 3) return { __error: 60 };
+			back.mode = args?.mode;
+			return {};
+		},
+	}),
+	timing: { init_reset: 50 },
+}, 'registered',
+	(modem, mock, events) => {
+		eq(map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args?.mode), [ 0, 4, 0 ],
+		   'offline: reset, then online');
+		eq(modem.state, 'READY', 'offline: registers after the reset');
+		eq(modem.control_note, null, 'offline: no stuck note');
+	});
+
+let ft = { mode: 2 };
+
+scenario('online refused from factory test', {
+	handlers: base_handlers({
+		GET_OPERATING_MODE: () => ({ mode: ft.mode }),
+		SET_OPERATING_MODE: (args) => {
+			if (ft.mode == 2 && args?.mode == 0) return { __error: 60 };
+			ft.mode = args?.mode;
+			return {};
+		},
+	}),
+}, 'registered',
+	(modem, mock, events) => {
+		eq(map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args?.mode), [ 0, 1, 0 ],
+		   'factory test: through low power to online');
+		eq(length(filter(events, (e) => e.event == 'error')), 0, 'factory test: no failure');
+		eq(modem.state, 'READY', 'factory test: registers');
+	});
+
+// the admin reset goes offline first; a modem that acknowledges the reset and
+// stays is left there, READY over a radio that is off — the bring-up restarts
+let areset = { mode: 0 };
+
+scenario('admin reset acknowledged and not performed', {
+	handlers: base_handlers({
+		GET_OPERATING_MODE: () => ({ mode: areset.mode }),
+		SET_OPERATING_MODE: (args) => {
+			if (args?.mode == 4) return {};
+			if (areset.mode == 3) return { __error: 60 };
+			areset.mode = args?.mode;
+			return {};
+		},
+	}),
+	timing: { init_reset: 50, stuck_offline_retry: 5000 },
+	setup: (mock, modem, end) => {
+		uloop.timer(300, () => modem.reset((err, res) => areset.answer = [ err, res ]));
+		uloop.timer(900, end);
+	},
+}, 'never',
+	(modem, mock, events) => {
+		eq(areset.answer, [ null, { resetting: true } ], 'admin reset: acknowledged');
+		eq(slice(map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args?.mode), 0, 5), [ 0, 3, 4, 0, 4 ],
+		   'admin reset: still offline afterwards, so the bring-up restarts and resets it out of offline');
+		ok(index(modem.control_note ?? '', 'stuck offline') >= 0, 'admin reset: said in control_note');
+		eq(length(filter(events, (e) => e.event == 'error')), 0, 'admin reset: no ladder');
+	});
+
 // --- 1b: GSM-7-bit packed operator name (issue #2) ---------------------------
 // EG06-class firmware GSM-7-bit packs the Current-PLMN name. "PLAY" packs to the
 // octets 50 66 30 0b, which as raw ASCII read "Pf0\x0b" (note the 0x0b control

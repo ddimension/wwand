@@ -930,6 +930,25 @@ sending to that service until it answers again.
 *Evidence:* ddimension/wwand#61 (RG520N-EB on an IPQ5018, frozen after 7–8 h,
 SIGTERM ignored, a restarted daemon stuck in INIT_SERVICES until a modem reset).
 
+## An acknowledged QMI reset is a reset
+
+**Wrong.** DMS resets only from offline, so every QMI reset in the tree is
+offline → reset — and an EG25-G (EG25GGBR07A08M2G) answered the reset with
+success and did not perform it, any number of times, over QMI and over AT
+(`AT+CFUN=1,1` OK, no re-enumeration). It was left offline, and from offline it
+refused every other mode with INVALID_TRANSITION (60): online, low power,
+persistent low power, factory test; `AT+CFUN=0/1/4` gave CME ERROR 4, CFUN read
+7. The ladder made it worse — its opmode cycle is refused the same way, its
+reset is the one that does not happen, and the reboot at its end did not cut
+the modem's USB power on that box. wwand now checks after a reset that the
+modem left the bus or is no longer offline, and a bring-up that finds it
+offline resets it and, if it stays, says *stuck offline* instead of climbing
+(`modem_init_qmi.uc reset_out_of_offline`, `modem.uc watch_reset`).
+
+*Evidence:* HW, RPi4 + EG25-G, 2026-11-07: DMS SET_OPERATING_MODE from 3 →
+0/1/2/6 answered `0x0001/0x003c`, → 4 answered success, mode read back 3, no
+USB disconnect within 60 s; a Pi reboot and a hub-port disable left it offline.
+
 ## A called `(a ?? b.c)(…)` misplaces the stack
 
 Calling a parenthesized `??` whose right operand is a member expression

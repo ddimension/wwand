@@ -189,7 +189,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1716) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1760) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:741, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -197,8 +197,8 @@ export function create(opts)
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
 	// callback arrives the generation has already moved.
 	// EACH WAIT OWNS ITS OWN TIMER AND ITS OWN DEBT. `tm.settle` is a shared
-	// one-shot slot, also written by the init chain (modem_init_qmi.uc:468,
-	// :543, :809), so parking radio-bounce waits there let a second one
+	// one-shot slot, also written by the init chain (modem_init_qmi.uc:596,
+	// :671, :958), so parking radio-bounce waits there let a second one
 	// overwrite the first: teardown then cancelled only the newest, the older
 	// timer survived unreachable, and whichever fired first cleared the other's
 	// debt. Two reattach calls reach that directly — nothing serialises them.
@@ -535,8 +535,43 @@ export function create(opts)
 	let chain = modem_init_qmi.install(self, {
 		log: log, emit: emit, notify_contexts: notify_contexts,
 		sim_block: scaffold.sim_block,
-		fail: fail, dp: dp, at_opts: at_opts, tm: tm,
+		fail: fail, dp: dp, at_opts: at_opts, tm: tm, rec: rec,
 	});
+
+	// AN ACKNOWLEDGED RESET IS NOT A RESET. Both resets below go offline
+	// first, because QMI DMS resets only from offline — and a modem that
+	// acknowledges the reset and does not perform it is left there: the
+	// EG25-G (EG25GGBR07A08M2G) did exactly that and then refused every mode
+	// but reset (HW-observed, RPi4, 2026-11-07). Nothing else notices: the
+	// object stays READY over a radio that is off, and the contexts fail into
+	// the ladder, whose opmode cycle the modem refuses as well. Still on the
+	// bus and offline once the reboot should be done: the bring-up starts
+	// again, and its online step knows the way out of offline (or says it is
+	// stuck — modem_init_qmi.uc reset_out_of_offline).
+	let watch_reset = (why) => {
+		let gen = self._gen;
+
+		tm.reset_watch?.cancel();
+		tm.reset_watch = uloop.timer(self.timing.init_reset ?? 30000, () => {
+			tm.reset_watch = null;
+
+			if (self._gen != gen || !self.dms)
+				return;
+
+			self.dms.request('GET_OPERATING_MODE', {}, (err, d) => {
+				if (self._gen != gen || err || d?.mode != dmsmod.OPMODE_OFFLINE)
+					return;
+
+				log('err', sprintf('%s: acknowledged, but the modem is still on the bus and offline — restarting the bring-up', why));
+				notify_contexts('lost');
+				self.teardown();
+				let wait = self.timing.backoff_min ?? 1000;
+
+				self.set_state('ABSENT', { retry_in: wait });
+				tm.retry = uloop.timer(wait, () => self.start());
+			}, { no_recovery: true });
+		});
+	};
 
 	// record a failed connection cycle and run the resulting ladder action; also
 	// called by the daemon on context-activation failure. QMI-side rungs run
@@ -594,7 +629,15 @@ export function create(opts)
 				if (hung(e1))
 					return via_at('QMI does not answer');
 
-				opmode_ours('reset', (e2) => hung(e2) ? via_at('QMI does not answer') : done(action));
+				opmode_ours('reset', (e2) => {
+					if (hung(e2))
+						return via_at('QMI does not answer');
+
+					if (!e2)
+						watch_reset('recovery modem reset');
+
+					done(action);
+				});
 			});
 			return;
 		}
@@ -639,6 +682,7 @@ export function create(opts)
 				if (err)
 					return cb({ error: 'qmi', detail: err });
 
+				watch_reset('admin modem reset');
 				notify_contexts('lost');
 				cb(null, { resetting: true });
 			});
@@ -1649,7 +1693,7 @@ export function create(opts)
 			if (t)
 				t.cancel();
 
-		tm.retry = tm.reg = tm.settle = tm.at_drain = tm.probe = tm.init_reset = null;
+		tm.retry = tm.reg = tm.settle = tm.at_drain = tm.probe = tm.init_reset = tm.reset_watch = null;
 
 		// a settle wait cancelled just above never runs its body, so the
 		// continuation it owed is paid here instead — otherwise a ubus reattach

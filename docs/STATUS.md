@@ -21,6 +21,25 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
+- **Stuck offline (2026-11-07):** the RPi4's EG25-G (192.168.3.123) was
+  left offline by a recovery modem reset it acknowledged and never performed,
+  and from offline refused every mode but reset (INVALID_TRANSITION) — the
+  ladder then climbed towards a reboot that does not cut its USB power. The
+  QMI bring-up now leaves a refused online through the mode's way out
+  (offline: reset; else low power first) and says *stuck offline* instead of
+  climbing; an acknowledged admin/ladder reset is watched for the modem
+  staying offline on the bus (`modem_init_qmi.uc reset_out_of_offline`,
+  `modem.uc watch_reset`, gotchas.md). HW-verified on the Pi (2026-11-07,
+  main + this change via hwtest): online refused → "resetting it" → 30 s
+  later "stuck offline … retrying the reset in 600 s", `control_note` set,
+  state SET_OPMODE, the attempt counter stays (9) — no ladder. wwand keeps
+  running there; the modem itself still needs a physical power cycle. Seen
+  on the way: after ~10 h offline its QMI stopped answering altogether (CTL
+  alloc and SYNC time out, AT still CFUN 7); a hub-port disable/enable
+  (`1-1-port1/disable`) brought QMI back after ~130 s, still offline. The MBIM passthrough reset (`modem_mbim.uc reset`) has the same
+  offline → reset shape and is not covered yet. The Pi's SIM (Vodafone IoT
+  profile) is rejected on LTE (CEER 6,259) and was roaming-blocked on 2G
+  (roaming_preference now 255) — separate thread.
 - **LED styles `tech` and `signal_color` (#77, 2026-11-05):** a board
   file's `leds` may be a list of entries. `tech` lights one LED per
   generation (2G..5G, `cumulative` or one at a time for an RGB lamp,

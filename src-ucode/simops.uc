@@ -127,7 +127,7 @@ export function install(self, o)
 		// nothing on either path ever clears them (evidence:
 		// ddimension/wwand#39, NR7101).
 		//
-		// modem.uc:1745-1750 already states the rule — card-side
+		// modem.uc:1799-1804 already states the rule — card-side
 		// diagnostics belong to the card we were talking to — and acts on
 		// it during teardown. This path is the other place a card changes
 		// underneath us, and it did not.
@@ -166,7 +166,7 @@ export function install(self, o)
 		// belongs to this module, not to the modem, so it outlives the
 		// teardown and would talk to a client that is mid-initialisation.
 		// `_gen` is the counter both backends already bump on teardown
-		// (modem.uc:1674, modem_mbim.uc:2905); NCM has none and degrades to
+		// (modem.uc:1718, modem_mbim.uc:2905); NCM has none and degrades to
 		// the identity check, which is the case its reset already answers.
 		let gen = m._gen;
 		// ...and a card change of its own: a remote SIM that comes and goes

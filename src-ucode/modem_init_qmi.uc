@@ -8,7 +8,7 @@
 //   -> datapath -> opmode -> sim slot -> sim unlock -> identity -> confnet
 //   -> validate -> attach profile -> register
 // and returns { begin } (the start() entry). o = { log, emit, notify_contexts,
-// fail, dp, at_opts, tm } — `tm` is modem.uc's shared one-shot timer holder,
+// fail, dp, at_opts, tm, rec } — `tm` is modem.uc's shared one-shot timer holder,
 // `fail` the recovery-aware failure path. All state stays on `self`; the
 // self-attached methods the chain calls are installed by modem.uc before start().
 
@@ -31,17 +31,29 @@ import * as dsdmod from 'wwand.codec.schema.dsd';
 const SYNC_TRIES = 10;
 const MODES_TRIES = 3;
 
+// QMI_PROTOCOL_ERROR_INVALID_TRANSITION (qmi-errors.h:287, libqmi 1.38.0)
+const QMI_ERR_INVALID_TRANSITION = 60;
+
+// the status line of a modem that cannot leave offline; cleared when it does
+const STUCK_OFFLINE_NOTE = 'modem stuck offline: its reset does not happen — it needs a power cycle';
+
+// A board repower that did not cure it would otherwise repeat with every
+// re-enumeration, which is a fresh modem object each time: the bound lives
+// per modem id, at one repower per this window.
+const STUCK_REPOWER_EVERY = 600;
+let stuck_repowered = {};
+
 export function install(self, o)
 {
 	let log = o.log, emit = o.emit, notify_contexts = o.notify_contexts;
 	let sim_block = o.sim_block;
-	let fail = o.fail, dp = o.dp, at_opts = o.at_opts, tm = o.tm;
+	let fail = o.fail, dp = o.dp, at_opts = o.at_opts, tm = o.tm, rec = o.rec;
 
 	// shared wwand_sim matcher (modem_common — parity across all backends)
 	let match_sim_override = (iccid, imsi) =>
 		modem_common.match_sim_override(self.config?.sims, iccid, imsi);
 
-	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, verify_online, step_simslot, step_sim, step_identity, step_confnet, step_confnet_apply, step_validate, step_attach_profile, step_register;
+	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, verify_online, online_reached, leave_refused_mode, reset_out_of_offline, step_simslot, step_sim, step_identity, step_confnet, step_confnet_apply, step_validate, step_attach_profile, step_register;
 
 	// DMS model was junk and the USB descriptor filled in (generic "HUAWEI Mobile"
 	// style): ATI usually knows the real model — upgrade identity off the critical
@@ -412,19 +424,135 @@ export function install(self, o)
 
 			self._opmode_set('online', (err) => {
 				// (set_opmode already treats "no effect / already online" as success)
+				if (err?.error == 'qmi' && err.code == QMI_ERR_INVALID_TRANSITION)
+					return leave_refused_mode(err);
+
 				if (err)
 					return fail('opmode', err);
 
-				// Online by the init's own hand, so no park is in force any
-				// more: this object outlives a failed init (make_fail
-				// restarts the same instance), and a flag left from a park
-				// at an earlier pass made REGISTERING wait forever and the
-				// next registration loss read as "radio parked" — swallowed.
-				self.lowpower_parked = false;
-				self._plugin_held = false;
-				self._fcc_due = false;
+				online_reached();
+			});
+		});
+	};
 
-				verify_online(0);
+	online_reached = () => {
+		// Online by the init's own hand, so no park is in force any more:
+		// this object outlives a failed init (make_fail restarts the same
+		// instance), and a flag left from a park at an earlier pass made
+		// REGISTERING wait forever and the next registration loss read as
+		// "radio parked" — swallowed.
+		self.lowpower_parked = false;
+		self._plugin_held = false;
+		self._fcc_due = false;
+
+		if (self.control_note == STUCK_OFFLINE_NOTE)
+			self.control_note = null;
+
+		verify_online(0);
+	};
+
+	// ONLINE REFUSED AS AN INVALID TRANSITION is a statement about the mode
+	// the modem is in, not a fault: QMI DMS allows only certain transitions,
+	// and the way online goes through another mode. fail() here walked the
+	// recovery ladder, whose opmode cycle and reset start with the same
+	// refused writes, up to a reboot of the router.
+	leave_refused_mode = (err) => {
+		let gen = self._gen;
+
+		self.dms.request('GET_OPERATING_MODE', {}, (gerr, d) => {
+			if (self._gen != gen)
+				return;
+
+			let mode = gerr ? null : d?.mode;
+
+			if (mode == dmsmod.OPMODE_OFFLINE)
+				return reset_out_of_offline(gen);
+
+			// low power IS the step before online; nothing to go through
+			if (mode == null || mode == dmsmod.OPMODE_LOW_POWER)
+				return fail('opmode', err);
+
+			log('notice', sprintf('modem refuses online from %s — going through low power',
+				dmsmod.OPMODE_NAMES[sprintf('%d', mode)] ?? sprintf('opmode %d', mode)));
+
+			self._opmode_set('low_power', (lerr) => {
+				if (self._gen != gen)
+					return;
+
+				if (lerr)
+					return fail('opmode', lerr);
+
+				self._opmode_set('online', (oerr) => {
+					if (self._gen != gen)
+						return;
+
+					oerr ? fail('opmode', oerr) : online_reached();
+				});
+			});
+		}, { no_recovery: true });
+	};
+
+	// Offline leaves only by a reset: an EG25-G (EG25GGBR07A08M2G) in offline
+	// answered INVALID_TRANSITION to online, low power, persistent low power
+	// and factory test alike, and AT+CFUN=0/1/4 with CME ERROR 4 (HW-observed,
+	// RPi4, 2026-11-07). The same modem ACKED the reset and did not perform
+	// it, any number of times, while a reboot of the Pi did not cut its USB
+	// power — so a modem that stays put after the reset is not retried up the
+	// ladder: without board power nothing there reaches it, and the reboot at
+	// its end restarts the router for nothing. It is said, and the reset is
+	// retried at a slow pace in case the firmware takes it later.
+	reset_out_of_offline = (gen) => {
+		let retry = self.timing.stuck_offline_retry ?? 600000;
+
+		let stuck = (why) => {
+			let now = time(), board = rec?.can_repower();
+
+			if (board && now - (stuck_repowered[self.id] ?? 0) >= STUCK_REPOWER_EVERY) {
+				stuck_repowered[self.id] = now;
+				log('err', sprintf('modem stuck offline: %s — repowering it', why));
+
+				if (rec.usb_repower())
+					return;
+			}
+
+			self.control_note = STUCK_OFFLINE_NOTE;
+			log('err', sprintf('modem stuck offline: %s, %s — it needs a power cycle; retrying the reset in %d s',
+				why, board ? sprintf('and the board repowers it at most every %d s', STUCK_REPOWER_EVERY)
+				           : 'and nothing here can cut its power', retry / 1000));
+
+			tm.retry = uloop.timer(retry, () => {
+				tm.retry = null;
+
+				if (self._gen == gen)
+					reset_out_of_offline(gen);
+			});
+		};
+
+		log('warn', 'modem is offline, which it leaves only by a reset — resetting it');
+
+		self._opmode_set('reset', (rerr) => {
+			if (self._gen != gen)
+				return;
+
+			if (rerr)
+				return stuck(sprintf('the reset was refused (%J)', rerr));
+
+			// A real reset takes the modem off the bus, and the teardown
+			// cancels this timer. Still here: read the mode before calling it
+			// stuck — a modem that came back online without re-enumerating
+			// simply continues.
+			tm.init_reset = uloop.timer(self.timing.init_reset ?? 30000, () => {
+				tm.init_reset = null;
+
+				self.dms.request('GET_OPERATING_MODE', {}, (gerr, d) => {
+					if (self._gen != gen)
+						return;
+
+					if (!gerr && d?.mode != null && d.mode != dmsmod.OPMODE_OFFLINE)
+						return step_opmode();
+
+					stuck('the reset was acknowledged and the modem stayed on the bus');
+				}, { no_recovery: true });
 			});
 		});
 	};
