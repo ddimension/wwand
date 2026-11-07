@@ -86,6 +86,15 @@ const LOCAL_PORTS = {
 	// 2026-10-13). Only the observed role is pinned; a device sharing the
 	// generic id with another layout still gets the probing walk.
 	'05c6:90d5': { '5': 'at' },
+	// ZTE MF286DMODULE (BD_TELIAMF286DV1.0.0B12, the internal modem of the
+	// ZTE MF286D router; 19d2:1485). if3 is the AT port, if4 a secondary AT
+	// port (AT+ICCID answers there). if2 opens but never answers AT, so the
+	// probing walk burns its full timeout on it at every boot before it
+	// reaches if3. HW-verified 2026-11-07 on an MF286D (OpenWrt 25.12.6):
+	// if3 is the port the walk itself settled on across three boots. Only
+	// the observed roles are pinned — if2 stays untagged (mute on AT, DIAG
+	// presumed but not proven).
+	'19d2:1485': { '3': 'at', '4': 'at2' },
 };
 
 // model-specific init sequences (old proto_qmi_serial_init)
