@@ -3000,14 +3000,25 @@ export function create(opts)
 			?? blocked_by_path(cfg, control);
 
 		if (claim) {
-			log('warn', sprintf('modem %s: device %s is owned by interface %s (proto %s) — ignoring this modem',
-				name, claim.device, claim.interface, claim.proto));
+			// A native-cellular proto claim is usually not a deliberate user
+			// setup but the `wwan` package's hotplug script (00_wwan.sh), which
+			// auto-provisions a qmi/mbim/ncm interface for the modem at every
+			// enumeration — silently parking this modem forever. (On 25.12 the
+			// package is pulled in by uqmi's dependency, so it reappears with
+			// the next apk add unless uqmi goes too.) Name the fix instead of
+			// making the user discover it.
+			let hint = (claim.proto == 'qmi' || claim.proto == 'mbim' || claim.proto == 'ncm')
+				? sprintf(' — likely the wwan package auto-provisioned this interface (00_wwan.sh, pulled in by uqmi); remove the wwan package or the interface, then restart wwand')
+				: '';
+
+			log('warn', sprintf('modem %s: device %s is owned by interface %s (proto %s)%s — ignoring this modem',
+				name, claim.device, claim.interface, claim.proto, hint));
 
 			self.modems[name] = {
 				cfg: cfg, device: null, netdev: null, muxinfo: muxinfo,
 				l3_name: l3name ?? null, modem: null, protocol: null,
-				control_note: sprintf('device %s is owned by interface %s (proto %s)',
-					claim.device, claim.interface, claim.proto),
+				control_note: sprintf('device %s is owned by interface %s (proto %s)%s',
+					claim.device, claim.interface, claim.proto, hint),
 				...carry_over(name),
 			};
 
