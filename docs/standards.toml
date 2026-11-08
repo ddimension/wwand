@@ -66,6 +66,14 @@ by = "Claude"
 reviewed = "wwand f3f3a6a"
 fixed = "wwand, commit \"mbim: unlock the Fibocom FM350 FCC lock (GTFCCLOCK) so it registers\""
 
+[[reviews]]
+id = "R7"
+date = "2026-11-08"
+kind = "reference implementation read next to the code, then HW-read (libmbim 1.32.0 mbim-enums.h MbimDataClass/MbimRegisterMode, mbim-service-basic-connect.json and -ms-basic-connect-v2.json Register State; ModemManager 1.24.0 mm-modem-helpers-mbim.c data-class mapping and custom classes, mm-broadband-modem-mbim.c modem_set_current_modes; Foxconn T99W175 under ModemManager)"
+by = "Claude, for ddimension/wwand#75"
+reviewed = "wwand 6cee8c4"
+fixed = "wwand, commit \"mbim: option modes natively through the Register State data class\""
+
 [[component]]
 name = "QMI codec and service schemas"
 code = "src-ucode/codec/{qmux,tlv,hex}.uc, codec/schema/*.uc"
@@ -100,7 +108,9 @@ code = "src-ucode/codec/mbim.uc, codec/mbim_schema/*.uc, {mbim_backend,mbim_clie
   basis = "libmbim 1.32"
   sections = "message framing, OPEN/CLOSE, fragments, Basic Connect CIDs, status codes"
     [[component.standard.review]]
-    review = "tbd"
+    review = "R7"
+    result = "Register State only: set layout (ProviderId, RegisterAction, DataClass) and the v2 PreferredDataClasses reply match; RegisterMode was not modelled (added, it is not the action numbering); `option modes` was never sent on MBIM (added: native DataClass with ModemManager's mapping and CUSTOM classes, MBIMEx 2.0+), and the network selection sent DataClass 0 (now the written mask)"
+    open = "the rest of Basic Connect, framing and status codes not checked yet; native modes HW-read on the T99W175 by hand, the wwand path not yet HW-run"
   [[component.standard]]
   name = "Microsoft MBIM extensions (MBIMEx v2/v3, MS Basic Connect Extensions, MS UICC Low Level Access, MS Voice Extensions NITZ)"
   basis = "libmbim 1.32"

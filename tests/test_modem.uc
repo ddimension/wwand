@@ -1164,6 +1164,7 @@ scenario('modes', {
 		// target is not readable pre-registration) is still applied
 		eq(calls[0].args.mode_preference, null, 'modes: live mode matches -> dropped by guard');
 		eq(calls[0].args.network_selection, { mode: 1, mcc: 262, mnc: 1 }, 'modes: manual plmn');
+		eq(calls[0].args.change_duration, 1, 'modes: written permanently, like the settings editor does');
 	});
 
 // --- 6b: runtime config validation — live modem MISMATCHES config ------------
@@ -1239,6 +1240,7 @@ scenario('rat_order', {
 		eq(length(calls), 1, 'rat_order: written once');
 		eq(calls[0].args.acquisition_order, [ 12, 8 ], 'rat_order: NR5G then LTE, as radio interfaces over the wire');
 		eq(calls[0].args.mode_preference, null, 'rat_order: no mode mask configured, none sent');
+		eq(calls[0].args.change_duration, 1, 'rat_order: written permanently');
 		eq(filter(modem.config_warnings, (e) => e.check == 'rat_order'), [],
 			'rat_order: validate finds the order in place, NR5G is in it');
 	});

@@ -109,7 +109,8 @@ export function sync_rat_order(self, log, cb)
 			log('notice', sprintf('setting RAT order "%s" (modem had %s)', self.config.rat_order,
 				join(',', nasmod.rat_order_names(d.acquisition_order)) || '?'));
 
-			nas.request('SET_SYSTEM_SELECTION_PREFERENCE', { acquisition_order: order }, (serr) => {
+			// permanent, like the QMI init write (modem_init_qmi step_confnet_apply)
+			nas.request('SET_SYSTEM_SELECTION_PREFERENCE', { acquisition_order: order, change_duration: 1 }, (serr) => {
 				if (serr) {
 					log('warn', sprintf('setting the RAT order failed: %J', serr));
 					return warn(rat_order_warnings(self.config, d, modem_common.mode_rats(self)));
@@ -203,6 +204,8 @@ export function validate(self, log, cb)
 
 		if (mask == null && args.network_selection == null)
 			return done();
+
+		args.change_duration = 1;   // permanent, like the init write (modem_init_qmi)
 
 		log('notice', 'auto_correct_config: re-applying NAS system selection preference');
 		self.nas.request('SET_SYSTEM_SELECTION_PREFERENCE', args, (err) => {

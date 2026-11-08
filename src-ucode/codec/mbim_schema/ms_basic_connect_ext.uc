@@ -28,10 +28,24 @@ export const SERVICE_UUID = '3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf';
 export const service = SERVICE_UUID;
 
 // MbimDataClass bits (mbim-enums.h MbimDataClass) — carried in the register
-// state / base-stations SystemType and the v2 signal SystemType.
+// state / base-stations SystemType and the v2 signal SystemType. Register
+// State SET takes this v1 enum in every MBIMEx version (libmbim 1.32.0,
+// mbim-service-ms-basic-connect-v2.json "set same as in v1"); v3's
+// MbimDataClassV3, with a single 5G bit at 1 << 6, belongs to other CIDs.
+export const DATA_CLASS_GPRS   = 1 << 0;
+export const DATA_CLASS_EDGE   = 1 << 1;
+export const DATA_CLASS_UMTS   = 1 << 2;
+export const DATA_CLASS_HSDPA  = 1 << 3;
+export const DATA_CLASS_HSUPA  = 1 << 4;
 export const DATA_CLASS_LTE    = 1 << 5;
 export const DATA_CLASS_5G_NSA = 1 << 6;
 export const DATA_CLASS_5G_SA  = 1 << 7;
+export const DATA_CLASS_1XRTT       = 1 << 16;
+export const DATA_CLASS_1XEVDO      = 1 << 17;
+export const DATA_CLASS_1XEVDO_REVA = 1 << 18;
+export const DATA_CLASS_1XEVDV      = 1 << 19;
+export const DATA_CLASS_3XRTT       = 1 << 20;
+export const DATA_CLASS_1XEVDO_REVB = 1 << 21;
 // ...and the one that means "I am not going to tell you": CUSTOM is libmbim's
 // spelling for a class that is proprietary or simply not in the enum, and a
 // modem that reports it ALONE has said nothing about its RAT. Field-seen on a

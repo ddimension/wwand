@@ -21,6 +21,20 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
+- **`option modes` on MBIM, natively (2026-11-08, from #75):** the MBIM
+  init writes the modes as the Register State `DataClass` from MBIMEx 2.0
+  on (`modem_mbim.uc sync_modes`, ModemManager's mapping, CUSTOM for the
+  class a modem names that way), over the passthrough NAS on MBIM 1.0, and
+  reports them otherwise; before, MBIM ignored `option modes` without a word.
+  The QMI and MBIM init writes of modes / PLMN / RAT order now carry a
+  permanent change duration, as the settings editor's always did. HW-read on
+  a T99W175 (HP notebook, Debian + ModemManager, 2026-11-08): CUSTOM is its
+  5G SA, the 5G_SA bit is dropped, the mask survives a modem reset, and no
+  RAT order with NR is accepted. HW-run through wwand on the same notebook
+  under OpenWrt (2026-11-08): `lte,nr5g` written as 0x80000060 and held,
+  skipped on restart and after a modem reset, `umts,lte,nr5g` restored as
+  0x8000007c. Open: the LuCI mode editor on an MBIM modem without a
+  passthrough (FM350) still has no native path.
 - **SIM card per interface, `option iccid` (2026-11-07, from #39):** an
   ifup on a modem running another card takes one step towards it — slot
   switch or eSIM profile enable (`siminventory.uc bind_plan`) — and dials

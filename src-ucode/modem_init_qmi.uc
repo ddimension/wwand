@@ -915,6 +915,13 @@ export function install(self, o)
 			if (!length(keys(args)))
 				return step_apply_init_reset(step_validate);
 
+			// permanent, as the settings editor writes the same values
+			// (netsel_ops): left out, the firmware picks the duration, and
+			// libqmi 1.38 documents no default — on one that keeps it only
+			// until the power cycle, the modem starts without wwand on
+			// whatever it held before (QmiNasChangeDuration, qmi-enums-nas.h)
+			args.change_duration = 1;
+
 			if (args.mode_preference != null)
 				log('notice', sprintf('setting network modes "%s" (mask 0x%02x)', self.config.modes, args.mode_preference));
 

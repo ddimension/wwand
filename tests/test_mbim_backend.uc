@@ -1284,4 +1284,42 @@ eq(fe_answers, 1, 'on_answer: an indication is not an answer to anything we aske
 		'held: a send error for the caller, no counted error, nothing pending');
 }
 
+// --- network modes <-> MBIM data class (option modes, natively) --------------
+{
+	let M = { gsm: 1 << 2, umts: 1 << 3, lte: 1 << 4, tds: 1 << 5, nr5g: 1 << 6 };
+	let NR = ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA;
+
+	// a modem with no custom class: 5G is both bits, the way ModemManager sends it
+	eq(backend.data_class_from_modes(M.lte | M.nr5g, 0x3f | NR, ''), ext.DATA_CLASS_LTE | NR,
+		'modes: lte,nr5g -> LTE | 5G_NSA | 5G_SA');
+	eq(backend.data_class_from_modes(M.umts, 0x3f, ''),
+		ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA, 'modes: umts is the whole 3G family');
+	eq(backend.data_class_from_modes(M.tds, 0x3f, ''), 0,
+		'modes: td-scdma alone names nothing MBIM can select (0 would read as "any")');
+
+	// the T99W175 (HW-read 2026-11-08): caps "umts, hsdpa, hsupa, lte,
+	// 5g-nsa, custom", custom name "5G UWB" — CUSTOM is its 5G SA
+	let x55 = ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA |
+		ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM;
+
+	eq(backend.custom_class(x55, '5G UWB'), ext.DATA_CLASS_5G_SA,
+		'custom: "5G" on caps that list 5G_NSA already stands for 5G SA');
+	eq(backend.data_class_from_modes(M.lte | M.nr5g, x55, '5G UWB'),
+		ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM,
+		'modes: on the T99W175 nr5g goes out as 5G_NSA | CUSTOM, not the 5G_SA bit it drops');
+	eq(backend.modes_from_data_class(x55, x55, '5G UWB'), M.umts | M.lte | M.nr5g,
+		'modes: its default preferred classes read back as umts,lte,nr5g');
+	eq(backend.modes_from_data_class(ext.DATA_CLASS_LTE | ext.DATA_CLASS_CUSTOM, x55, '5G UWB'), M.lte | M.nr5g,
+		'modes: CUSTOM alone beside LTE still reads as nr5g on that modem');
+
+	// "5GSA/TDS" (RM502Q) without 5G_SA in its caps: CUSTOM is the SA bit;
+	// "5G" without 5G_NSA: CUSTOM is NSA (mm-modem-helpers-mbim.c:34-66, 1.24.0)
+	eq(backend.custom_class(ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM, '5GSA/TDS'),
+		ext.DATA_CLASS_5G_SA, 'custom: "5GSA" is 5G SA');
+	eq(backend.custom_class(ext.DATA_CLASS_LTE | ext.DATA_CLASS_CUSTOM, '5G/TDS'),
+		ext.DATA_CLASS_5G_NSA, 'custom: "5G" on caps without 5G_NSA is NSA');
+	eq(backend.custom_class(ext.DATA_CLASS_LTE, '5G'), 0,
+		'custom: a name without the CUSTOM bit stands for nothing');
+}
+
 done('test_mbim_backend');

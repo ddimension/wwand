@@ -32,6 +32,7 @@ import * as bc from 'wwand.codec.mbim_schema.basic_connect';
 import * as ext from 'wwand.codec.mbim_schema.ms_basic_connect_ext';
 import * as fibocom from 'wwand.codec.mbim_schema.fibocom';
 import * as compal from 'wwand.codec.mbim_schema.compal';
+import * as nasmod from 'wwand.codec.schema.nas';
 
 // --- native MBIM MS UICC Low Level Access (eSIM/APDU) ------------------------
 // Service UUID + CIDs and buffer layouts verified against libmbim 1.32
@@ -860,4 +861,95 @@ export function get_reg_detail(mc, cb)
 
 		cb(d);
 	}, { no_recovery: true });
+};
+
+// --- network modes as an MBIM data-class mask ---------------------------------
+// MBIM selects the radio technologies through the DataClass of a Register
+// State set and, from MBIMEx 2.0 on, reports what it holds as
+// PreferredDataClasses. wwand's modes are the NAS mode bits (`option modes`,
+// nasmod.MODE_BITS), so these convert both ways. The per-RAT mapping is
+// ModemManager's (mm_mbim_data_class_from_modem_mode and
+// mm_modem_mode_from_mbim_data_class, mm-modem-helpers-mbim.c:212-283,
+// ModemManager 1.24.0). TD-SCDMA has no data class of its own: it is dropped
+// on the way out and never read back, so a caller compares only MODES_MBIM.
+export const MODES_MBIM = nasmod.MODE_ALL & ~nasmod.MODE_BITS['td-scdma'];
+
+const DC_GSM  = ext.DATA_CLASS_GPRS | ext.DATA_CLASS_EDGE;
+const DC_UMTS = ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA;
+const DC_NR   = ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA;
+const DC_CDMA = ext.DATA_CLASS_1XRTT | ext.DATA_CLASS_1XEVDO | ext.DATA_CLASS_1XEVDO_REVA |
+                ext.DATA_CLASS_1XEVDV | ext.DATA_CLASS_3XRTT | ext.DATA_CLASS_1XEVDO_REVB;
+
+// WHICH STANDARD BIT THE CUSTOM BIT STANDS FOR. Some firmware reports a class
+// it supports as CUSTOM plus a free-text name in DEVICE_CAPS, and expects
+// CUSTOM back in a set: a Foxconn T99W175 (Snapdragon X55) reports
+// "umts, hsdpa, hsupa, lte, 5g-nsa, custom" with the name "5G UWB", and its
+// CUSTOM is 5G SA. Sent the standard 5G_SA bit instead, it drops the bit and
+// holds "lte, 5g-nsa" afterwards (HW-observed, T99W175.F0.0.0.3.0.GC.003 over
+// MBIMEx 2.0, 2026-11-08). The table and the primary/secondary rule are
+// ModemManager's (custom_data_classes and mm_mbim_data_class_from_custom_caps,
+// mm-modem-helpers-mbim.c:34-66, 1.24.0): the same name means NSA on a modem
+// whose caps lack 5G_NSA and SA on one that already lists it. Returns the
+// standard bits CUSTOM stands for, 0 when it stands for none we know.
+const CUSTOM_CLASSES = [
+	[ '5GSA',  ext.DATA_CLASS_5G_SA,  0 ],
+	[ '5G',    ext.DATA_CLASS_5G_NSA, ext.DATA_CLASS_5G_SA ],
+	[ 'HSPA+', ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA, 0 ],
+];
+
+export function custom_class(caps_dc, custom)
+{
+	if (!((caps_dc ?? 0) & ext.DATA_CLASS_CUSTOM))
+		return 0;
+
+	let s = sprintf('%s', custom ?? '');
+
+	for (let c in CUSTOM_CLASSES)
+		if (index(s, c[0]) >= 0)
+			return (caps_dc & c[1]) ? c[2] : c[1];
+
+	return 0;
+};
+
+// modes (NAS mode bits) -> the DataClass to send, with the bits CUSTOM stands
+// for replaced by CUSTOM. A mask with no technology MBIM can name is 0, which
+// a Register State set reads as "any" — the caller must not send that for a
+// configured mode list.
+export function data_class_from_modes(modes, caps_dc, custom)
+{
+	let m = modes ?? 0;
+	let dc = 0;
+
+	if (m & nasmod.MODE_BITS.gsm)  dc |= DC_GSM;
+	if (m & nasmod.MODE_BITS.umts) dc |= DC_UMTS;
+	if (m & nasmod.MODE_BITS.lte)  dc |= ext.DATA_CLASS_LTE;
+	if (m & nasmod.MODE_BITS.nr5g) dc |= DC_NR;
+	if (m & nasmod.MODE_BITS.cdma) dc |= DC_CDMA;
+
+	let cc = custom_class(caps_dc, custom);
+
+	if (cc && (dc & cc))
+		dc = (dc & ~cc) | ext.DATA_CLASS_CUSTOM;
+
+	return dc;
+};
+
+// a reported DataClass (PreferredDataClasses) -> NAS mode bits, CUSTOM read as
+// the bits it stands for on this modem
+export function modes_from_data_class(dc, caps_dc, custom)
+{
+	let d = dc ?? 0;
+
+	if (d & ext.DATA_CLASS_CUSTOM)
+		d = (d & ~ext.DATA_CLASS_CUSTOM) | custom_class(caps_dc, custom);
+
+	let m = 0;
+
+	if (d & DC_GSM)              m |= nasmod.MODE_BITS.gsm;
+	if (d & DC_UMTS)             m |= nasmod.MODE_BITS.umts;
+	if (d & ext.DATA_CLASS_LTE)  m |= nasmod.MODE_BITS.lte;
+	if (d & DC_NR)               m |= nasmod.MODE_BITS.nr5g;
+	if (d & DC_CDMA)             m |= nasmod.MODE_BITS.cdma;
+
+	return m;
 };

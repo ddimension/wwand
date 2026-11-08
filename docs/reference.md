@@ -1165,6 +1165,27 @@ button), `lock_4g`/`lock_5g` for hard cell locks with live candidates from
 the cell scan ([Configuration](#configuration), Troubleshooting for the
 scan).
 
+`option modes` is written at bring-up, after the SIM, and only when the modem
+holds something else; every write is permanent:
+
+- **QMI:** NAS Set System Selection Preference, mode mask with a permanent
+  change duration (libqmi 1.38).
+- **MBIM, MBIMEx 2.0 and later:** natively, as the `DataClass` of a Register
+  State set, checked against the `PreferredDataClasses` of its reply. The
+  mapping is ModemManager's (1.24.0): `nr5g` sends both 5G NSA and 5G SA,
+  `umts` the whole 3G family. A modem that reports a class as CUSTOM gets
+  CUSTOM back for it: on a Foxconn T99W175 (`5G UWB`) CUSTOM is its 5G SA,
+  and the plain 5G SA bit is dropped by its firmware. A manually selected
+  network stays selected. The T99W175 keeps the mask across a modem reset
+  (HW-observed 2026-11-08). `td-scdma` has no MBIM data class and is reported,
+  not selected. A later manual network selection (`modem_netsel`) sends the
+  same mask.
+- **MBIM 1.0:** through the QMI-over-MBIM passthrough NAS, like QMI. Without
+  one, the modes are reported as a `mode_preference` config warning, not
+  applied.
+- A modem that keeps its own mask after the write is reported the same way,
+  with what it kept.
+
 ### RAT priority: the modem never tries 5G SA
 
 `modes` says which technologies the modem MAY use; the **acquisition order**
@@ -1212,6 +1233,12 @@ the MBIMEx 2.0 reply, both bitmasks; libmbim 1.32
 only a coarse 2G/3G/4G-only mode, and MBIMEx 3.0 Registration Parameters
 only MICO/DRX/LADN. An MBIM modem without the passthrough, and NCM, keep
 their order; a configured `rat_order` is then reported as not applied.
+
+**A T99W175 does not take NR into its order at all** (T99W175.F0.0.0.3.0.GC.003,
+HW-tested 2026-11-08): `umts,lte` is written and held, but every order naming
+`nr5g` reads back as `lte, umts` at once, with a permanent change duration.
+Its native Register State set does not change the order either; on that
+firmware the order is not wwand's to set.
 
 ### FCC-locked laptop modem
 

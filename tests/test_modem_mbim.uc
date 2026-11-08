@@ -2564,4 +2564,101 @@ assert_ready_state_reinit(false, 'ready-state reinit/stuck');
 	eq(m._attach_pending, false, 'mbim attach: ...and only once');
 }
 
+// --- option modes, natively (Register State DataClass, #75) ------------------
+// A T99W175 (HW-read 2026-11-08): its caps carry CUSTOM named "5G UWB", which
+// is its 5G SA, and a set takes the class it understands. The mock modem keeps
+// what a set sends unless told to ignore it, and answers the set with the state
+// after it, as a real one does.
+function run_modes(label, o) {
+	uloop.init();
+
+	let x55 = ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA |
+		ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM;
+	let st = { pref: o.pref ?? x55 };
+	let h = handlers();
+
+	h.DEVICE_CAPS = { ...h.DEVICE_CAPS, data_class: x55, custom_data_class: '5G UWB',
+		hardware_info: 'Qualcomm Snapdragon X55 5G' };
+
+	let reg = h.REGISTER_STATE;
+
+	h.REGISTER_STATE = (args, meta) => {
+		if (meta.kind == 'set' && !o.ignore_set)
+			st.pref = args.data_class;
+
+		let r = { ...reg, register_mode: o.manual ? bc.REGISTER_MODE_MANUAL : bc.REGISTER_MODE_AUTOMATIC };
+
+		if (o.manual)
+			r.provider_id = '24008';
+
+		r.preferred_data_classes = st.pref;
+
+		return r;
+	};
+
+	// a v1 modem: the handshake agreed no extensions, so the reply has no
+	// PreferredDataClasses (the mock would encode an absent field as 0)
+	let mock = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h,
+		mbimex_version: o.v1 ? 0 : 0x0300 });
+	let seen = null;
+	let m = modem_mbim.create({
+		id: 'm_modes_' + label, device: '/dev/mock_modes_' + label,
+		config: { apn: 'internet', modes: o.modes },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: {
+			transport_open: mock.transport_open,
+			log: () => null,
+			on_event: (mm, event) => {
+				if (event != 'registered' || seen)
+					return;
+
+				seen = {
+					sets: map(filter(mock.calls, (c) => c.name == 'REGISTER_STATE' && c.kind == 'set'),
+						(c) => c.args),
+					warnings: filter(mm.config_warnings ?? [], (w) => w.check == 'mode_preference'),
+					dc: mm._modes_data_class,
+				};
+			},
+		},
+	});
+
+	m.start();
+	uloop.timer(400, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+	uloop.run();
+
+	return seen ?? { sets: null, warnings: null };
+}
+
+{
+	let LTE_NR = ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM;
+
+	let r = run_modes('x55', { modes: 'lte,nr5g' });
+	// the empty provider id of an automatic set decodes as null in the mock
+	eq(r.sets, [ { provider_id: null, register_action: bc.REGISTER_ACTION_AUTOMATIC, data_class: LTE_NR } ],
+		'mbim modes: lte,nr5g written once, natively, with CUSTOM for the SA it stands for');
+	eq(r.warnings, [], 'mbim modes: ...and read back from the set reply as held');
+	eq(r.dc, LTE_NR, 'mbim modes: ...and kept for a later network selection');
+
+	r = run_modes('held', { modes: 'lte,nr5g', pref: LTE_NR });
+	eq(r.sets, [], 'mbim modes: a modem already on them is not re-registered');
+
+	r = run_modes('manual', { modes: 'lte', manual: true });
+	eq(r.sets, [ { provider_id: '24008', register_action: bc.REGISTER_ACTION_MANUAL, data_class: ext.DATA_CLASS_LTE } ],
+		'mbim modes: a manually selected network stays selected');
+
+	r = run_modes('ignored', { modes: 'lte', ignore_set: true });
+	eq(length(r.sets), 1, 'mbim modes: a firmware that keeps its own is written once');
+	eq(map(r.warnings, (w) => w.actual), [ 'umts,lte,nr5g' ],
+		'mbim modes: ...and reported with what it kept');
+
+	r = run_modes('v1', { modes: 'lte', v1: true });
+	eq(r.sets, [], 'mbim modes: without PreferredDataClasses nothing is sent blind');
+	eq(length(r.warnings), 1, 'mbim modes: ...and, with no passthrough either, reported as not applied');
+
+	r = run_modes('unset', { modes: null });
+	eq([ r.sets, r.warnings ], [ [], [] ], 'mbim modes: unset, the modem keeps its own');
+}
+
 done('test_modem_mbim');

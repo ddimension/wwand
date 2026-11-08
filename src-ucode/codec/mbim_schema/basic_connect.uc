@@ -171,6 +171,12 @@ function rdy_fields(mc)
 export const REGISTER_ACTION_AUTOMATIC = 0;
 export const REGISTER_ACTION_MANUAL    = 1;
 
+// MbimRegisterMode, what a Register State reply says the modem is in — NOT
+// the action numbering above, it starts at UNKNOWN (mbim-enums.h:638-640,
+// libmbim 1.32.0)
+export const REGISTER_MODE_AUTOMATIC = 1;
+export const REGISTER_MODE_MANUAL    = 2;
+
 export const PROVIDER_STATE_HOME       = 1 << 0;
 export const PROVIDER_STATE_FORBIDDEN  = 1 << 1;
 export const PROVIDER_STATE_PREFERRED  = 1 << 2;

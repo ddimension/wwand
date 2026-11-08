@@ -1274,8 +1274,128 @@ export function create(opts)
 		self.mbim.command(bc, 'REGISTER_STATE', 'set', {
 			provider_id: id,
 			register_action: plmn ? bc.REGISTER_ACTION_MANUAL : bc.REGISTER_ACTION_AUTOMATIC,
-			data_class: 0,
+			// the configured modes, as sync_modes wrote them: the DataClass
+			// is the RAT selection itself, not a hint for this one request
+			// (a T99W175 keeps it across a reset, HW-observed 2026-11-08).
+			// ModemManager sends its requested class here too
+			// (mm-broadband-modem-mbim.c:7279-7283, 1.24.0).
+			data_class: self._modes_data_class ?? 0,
 		}, (err) => cb(err), { timeout: 60000 });
+	};
+
+	// `option modes` NATIVELY: the configured technologies as the DataClass of
+	// a Register State set, read back from PreferredDataClasses. MBIMEx 2.0
+	// only, because v1 reports nothing to compare against — and a set that
+	// cannot be checked would be sent at every start, each one a
+	// re-registration. A v1 modem goes through the QMI-over-MBIM passthrough
+	// NAS instead, like the QMI init; with neither the modes are reported, not
+	// dropped silently. The registration stays what it is: a modem in manual
+	// selection gets its own provider id back, since an automatic set would
+	// undo the user's choice. Replaces this function's earlier warnings, so a
+	// re-init does not stack them. cb() always.
+	self.sync_modes = function(cb) {
+		let want = qmi_backend.parse_modes(self.config?.modes);
+		let warnings = [];
+		let finish = () => {
+			self.config_warnings = filter(self.config_warnings ?? [], (w) => w.check != 'mode_preference');
+
+			for (let w in warnings)
+				push(self.config_warnings, w);
+
+			cb();
+		};
+		let warn = (msg, actual) => push(warnings, { check: 'mode_preference', severity: 'warn',
+			message: msg, expected: self.config.modes, actual: actual });
+
+		self._modes_data_class = null;
+
+		if (want == null)
+			return finish();
+
+		let caps = self.info?.mbim_data_class;
+		let custom = self.info?.mbim_custom_data_class;
+		let dc = mbim_backend.data_class_from_modes(want, caps, custom);
+		let names = (m) => join(',', filter([ 'gsm', 'umts', 'lte', 'nr5g', 'cdma' ],
+			(n) => m & nasmod.MODE_BITS[n])) || 'none';
+
+		if (want & nasmod.MODE_BITS['td-scdma'])
+			push(warnings, { check: 'mode_preference', severity: 'info',
+				message: sprintf('modes "%s": td-scdma has no MBIM data class and is not selected natively', self.config.modes),
+				expected: self.config.modes, actual: null });
+
+		// a list naming nothing MBIM can express would go out as 0, which a
+		// Register State set reads as "any" — the opposite of a restriction
+		if (!dc) {
+			warn(sprintf('modes "%s" name no technology MBIM can select — not applied', self.config.modes), null);
+			return finish();
+		}
+
+		let via_nas = () => self.with_nas((nas) => {
+			if (!nas) {
+				warn(sprintf('modes "%s" are not applied: this modem reports no preferred data classes (MBIMEx %s) and offers no QMI passthrough',
+					self.config.modes, (self.mbim?.mbimex_version ?? 0) >= 0x0200 ? '2.0+' : '1.0'), null);
+				return finish();
+			}
+
+			nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
+				if (!gerr && cur?.mode_preference == want) {
+					log('info', sprintf('network modes "%s" already set — skipping', self.config.modes));
+					return finish();
+				}
+
+				log('notice', sprintf('setting network modes "%s" over the passthrough (mask 0x%02x)', self.config.modes, want));
+
+				// permanent, like the QMI init write (modem_init_qmi)
+				nas.request('SET_SYSTEM_SELECTION_PREFERENCE', { mode_preference: want, change_duration: 1 }, (serr) => {
+					if (serr)
+						warn(sprintf('setting modes "%s" failed: %J', self.config.modes, serr), null);
+
+					finish();
+				}, { no_recovery: true });
+			}, { no_recovery: true });
+		});
+
+		if (!self.mbim || (self.mbim.mbimex_version ?? 0) < 0x0200)
+			return via_nas();
+
+		let held = (d) => mbim_backend.modes_from_data_class(d, caps, custom) & mbim_backend.MODES_MBIM;
+		let wanted = want & mbim_backend.MODES_MBIM;
+
+		self.mbim.command(bc, 'REGISTER_STATE', 'query', {}, (qerr, cur) => {
+			if (qerr || cur?.preferred_data_classes == null)
+				return via_nas();
+
+			self._modes_data_class = dc;
+
+			if (held(cur.preferred_data_classes) == wanted) {
+				log('info', sprintf('network modes "%s" already set — skipping', self.config.modes));
+				return finish();
+			}
+
+			let manual = (cur.register_mode == bc.REGISTER_MODE_MANUAL && cur.provider_id);
+
+			log('notice', sprintf('setting network modes "%s" (data class 0x%08x, modem held %s)',
+				self.config.modes, dc, names(held(cur.preferred_data_classes))));
+
+			self.mbim.command(bc, 'REGISTER_STATE', 'set', {
+				provider_id: manual ? cur.provider_id : '',
+				register_action: manual ? bc.REGISTER_ACTION_MANUAL : bc.REGISTER_ACTION_AUTOMATIC,
+				data_class: dc,
+			}, (serr, now) => {
+				// THE SET'S OWN REPLY IS THE READ-BACK: Register State set
+				// answers with the full state, PreferredDataClasses included
+				// (libmbim 1.32.0, mbim-service-ms-basic-connect-v2.json). A
+				// modem that drops a bit it does not know answers with the
+				// mask it kept, which is how a 5G_SA sent to a T99W175 shows.
+				if (serr)
+					warn(sprintf('setting modes "%s" failed: %J', self.config.modes, serr), null);
+				else if (now?.preferred_data_classes != null && held(now.preferred_data_classes) != wanted)
+					warn(sprintf('modem kept %s for modes "%s"', names(held(now.preferred_data_classes)), self.config.modes),
+						names(held(now.preferred_data_classes)));
+
+				finish();
+			}, { timeout: 60000, no_recovery: true });
+		}, { no_recovery: true });
 	};
 
 	self._on_connect_ind = function(data) {
@@ -1529,10 +1649,12 @@ export function create(opts)
 		});
 	};
 
-	// the RAT acquisition order goes first, over the passthrough NAS, like the
-	// QMI init writes it before its attach profile (config_check.sync_rat_order)
-	step_attach_profile = () => config_check.sync_rat_order(self, log,
-		() => self._apply_attach(step_register));
+	// the modes and the RAT acquisition order go first, like the QMI init
+	// writes them before its attach profile: the modes natively
+	// (sync_modes), the order over the passthrough NAS
+	// (config_check.sync_rat_order)
+	step_attach_profile = () => self.sync_modes(() => config_check.sync_rat_order(self, log,
+		() => self._apply_attach(step_register)));
 
 	// HwRadioState reads OFF. On a Fibocom FM350 (MediaTek T7xx) that is an FCC
 	// lock, not the physical W_DISABLE kill: GTFCCEFFSTATUS mode 2 means the
