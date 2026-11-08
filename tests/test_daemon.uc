@@ -2293,6 +2293,94 @@ uloop.run();
 		'remove: ...and the daemon then drops its handle to it');
 }
 
+// --- a control device without its netdev yet waits for it --------------------
+//
+// A PCIe/MHI modem re-enumerating after a reset announces its control device
+// first and its netdev a moment later (T99W175, 2026-11-08). Started in
+// between, the modem got no datapath netdev, the netdev kept its kernel name,
+// and netifd's interface stayed down until wwand was restarted.
+{
+	let ctl = { device: '/dev/wwan0mbim0', protocol: 'qmi', driver: 'mhi_wwan_mbim', netdev: null };
+	let nd = null;
+	let created = [];
+	let parsed = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/wwan0mbim0' },
+		wwan0: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'web' },
+	} });
+
+	let d = daemon_mod.create({
+		timing: { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
+		          reg_timeout: 500, backoff_min: 40, backoff_max: 60 },
+		deps: {
+			log: () => null,
+			load_qmi: () => ({
+				modem: { create: (o) => {
+					push(created, o.datapath?.netdev);
+					return { id: 'm0', start: () => null, stop: () => null,
+						note_connect_success: () => null, note_connect_failure: () => null,
+						datapath: {} };
+				} },
+				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
+					modem_event: () => null }) },
+			}),
+			emit_event: () => null, kick_interface: () => null,
+			renew_interface: () => null, down_interface: () => null,
+			iface_status: (i, cb) => cb({ up: false }),
+			datapath_fx: null, read_config: () => parsed,
+			resolve_control: () => ({ ...ctl, netdev: nd }),
+			resolve_netdev: () => nd,
+			learn_device: () => null, learn_modem_path: () => null,
+		},
+	});
+
+	d.apply_config(parsed);
+
+	eq([ d.modems.m0.modem, created ], [ null, [] ],
+		'netdev race: a control device without its netdev does not start the modem');
+	ok(match(d.modems.m0.control_note ?? '', /network interface not present yet/),
+		'netdev race: ...and says what it waits for');
+
+	nd = 'wwan0';
+	d.hotplug('add', 'wwan0');
+
+	eq(created, [ 'wwan0' ], 'netdev race: the netdev\'s hotplug starts it, with the netdev');
+	eq(d.modems.m0.netdev, 'wwan0', 'netdev race: ...which the entry records for the rename');
+	eq(d.modems.m0._netdev_since, null, 'netdev race: ...and the wait is over');
+
+	// a modem that really has none is started after the window, as before
+	nd = null;
+	created = [];
+	d.hotplug('remove', 'wwan0mbim0');
+	d.hotplug('add', 'wwan0mbim0');
+	eq(created, [], 'netdev race: waiting again after a re-enumeration');
+	d.modems.m0._netdev_since = time() - 60;
+	d.hotplug('add', 'wwan0mbim0');
+	eq(created, [ null ], 'netdev race: past the window it starts without one');
+
+	// the tick retries a netdev wait at its own bound, with no hotplug owed
+	created = [];
+	d.hotplug('remove', 'wwan0mbim0');
+	d.hotplug('add', 'wwan0mbim0');
+	d.modems.m0._netdev_since = time() - 20;
+	d.modems.m0._waiting_logged = time() - 16;
+	d._tick();
+	eq(created, [ null ], 'netdev race: the waiting tick ends the wait after NETDEV_SETTLE, not after 30 s');
+
+	// a control device that left takes its window with it
+	created = [];
+	d.hotplug('remove', 'wwan0mbim0');
+	d.hotplug('add', 'wwan0mbim0');
+	d.modems.m0._netdev_since = time() - 60;
+	let saved = ctl;
+	ctl = { device: null, protocol: null, netdev: null };
+	d.hotplug('add', 'something');
+	eq(d.modems.m0._netdev_since, null, 'netdev race: the control device leaving ends the wait');
+	ctl = saved;
+	d.hotplug('add', 'wwan0mbim0');
+	eq(created, [], 'netdev race: ...so its return waits afresh');
+	d.shutdown?.();
+}
+
 // --- a rebuild keeps the plugin options ------------------------------------------
 //
 // `ext` (plugins.uc) is stamped by reload only. start_modem rebuilds the entry

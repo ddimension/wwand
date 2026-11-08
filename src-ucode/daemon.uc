@@ -1344,6 +1344,8 @@ export function create(opts)
 			// when the serial-only reading started, so the settle window in
 			// start_modem is a window and not a fresh countdown per rebuild
 			_ppp_since: prev?._ppp_since,
+			// ...and the same for the wait on a control device's netdev
+			_netdev_since: prev?._netdev_since,
 		};
 	};
 
@@ -2654,6 +2656,13 @@ export function create(opts)
 	// unserved for long.
 	const PPP_SETTLE = 90;
 
+	// How long a QMI/MBIM control device may stand without its network
+	// interface before the modem is started without one. On the T99W175 both
+	// appeared within the same second (mhi-pci-generic, 2026-11-08), so this
+	// is room, not a measurement; past it the waiting tick (waiting_retry,
+	// 30 s) starts the modem the way it always was.
+	const NETDEV_SETTLE = 15;
+
 	// a PPP-only modem (serial port only) is mode-switched ONCE to a richer
 	// usbnet mode, then left for hotplug to rebuild on re-enumeration (no modem
 	// object built — no PPP dialer). Per-modem guard so it never loops.
@@ -3310,6 +3319,11 @@ export function create(opts)
 			// comes back rich, and both clear it.
 			delete entry._ppp_since;
 
+			// ...and a control device that left ends its netdev wait: the
+			// next enumeration gets a window of its own, not one that ran out
+			// while nothing was there
+			delete entry._netdev_since;
+
 			log('warn', sprintf('modem %s: control interface not present yet, waiting for hotplug', name));
 			// surface the wait to status()/netifd; the periodic tick re-logs it every 30s.
 			entry.control_note = entry.vanished
@@ -3398,6 +3412,35 @@ export function create(opts)
 
 		if (!entry.netdev && deps.resolve_netdev)
 			entry.netdev = deps.resolve_netdev(cfg, device);
+
+		// THE CONTROL DEVICE CAN COME BEFORE ITS NETWORK INTERFACE. A
+		// PCIe/MHI modem re-enumerating after a reset announces wwan0mbim0
+		// first and its netdev a moment later; started in between, the modem
+		// ran with no datapath netdev, connected its session anyway, and the
+		// netdev that followed kept its kernel name — netifd waited for the
+		// stable one and the interface stayed down until wwand was restarted
+		// (HW-observed on a T99W175 over mhi-pci-generic, 2026-11-08). So a
+		// QMI/MBIM modem without one waits; the netdev's own hotplug add
+		// starts it. BOUNDED, because a modem may really have none (a config
+		// naming a wrong device): after NETDEV_SETTLE the waiting tick starts
+		// it as before. Not for QRTR, whose netdev only ever comes from the
+		// config.
+		if ((proto == 'qmi' || proto == 'mbim') && !entry.netdev && cfg.device != 'qrtr' &&
+		    deps.resolve_netdev) {
+			entry._netdev_since ??= time();
+
+			if ((time() - entry._netdev_since) < NETDEV_SETTLE) {
+				log('info', sprintf('modem %s: control device %s is here, its network interface not yet — waiting for it',
+					name, device));
+				entry.control_note = 'waiting for modem (network interface not present yet)';
+				return;
+			}
+
+			log('warn', sprintf('modem %s: no network interface for %s after %d s — starting without one',
+				name, device, NETDEV_SETTLE));
+		}
+
+		delete entry._netdev_since;
 
 		rename_l3(name, entry);
 
@@ -4269,9 +4312,14 @@ export function create(opts)
 				// waiting modems: periodically re-check presence and rebuild via
 				// start_modem — recovers modems whose hotplug 'add' never fired.
 				// While still absent, start_modem re-logs the wait.
+				// A netdev wait is retried at its own bound: no further hotplug
+				// is owed when the netdev never comes, and the window would
+				// otherwise last as long as the retry period
 				for (let name, entry in self.modems)
 					if (!entry.modem && entry.control_note &&
-					    (now - (entry._waiting_logged ?? 0)) >= (self.timing?.waiting_retry ?? 30)) {
+					    (now - (entry._waiting_logged ?? 0)) >= (entry._netdev_since != null
+					        ? min(self.timing?.waiting_retry ?? 30, NETDEV_SETTLE)
+					        : (self.timing?.waiting_retry ?? 30))) {
 						start_modem(name, entry.cfg, entry.muxinfo, entry.l3_name);
 
 						if (self.modems[name])

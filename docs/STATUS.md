@@ -35,6 +35,14 @@ state buried at the top invites reading a months-old entry as present tense.
   skipped on restart and after a modem reset, `umts,lte,nr5g` restored as
   0x8000007c. Open: the LuCI mode editor on an MBIM modem without a
   passthrough (FM350) still has no native path.
+- **A control device before its netdev (2026-11-08):** after a modem reset
+  the T99W175 (mhi-pci-generic) announces `wwan0mbim0` before its netdev;
+  the modem was started without one, the netdev kept its kernel name and
+  the interface stayed down until a wwand restart. `start_modem` now waits
+  for the netdev (`NETDEV_SETTLE`, 15 s; its hotplug add starts the modem,
+  the waiting tick retries at that bound) and only then starts without one;
+  a control device that leaves ends the wait. HW-verified: reset -> wait ->
+  rename to `wwand0` -> connected, no restart.
 - **SIM card per interface, `option iccid` (2026-11-07, from #39):** an
   ifup on a modem running another card takes one step towards it — slot
   switch or eSIM profile enable (`siminventory.uc bind_plan`) — and dials
