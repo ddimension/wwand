@@ -430,7 +430,12 @@ one kind of LED. Each entry names one of the styles in `board.uc`
   technologies, where two lit at once would mix. `weak_bars` (0–5, default 0)
   marks a signal at or below that many bars as weak, and each LED says what it
   does then: an entry is an LED name, or `{ "led": …, "weak": "on" | "blink" |
-  "off" }` (`on` is the default).
+  "off" }` (`on` is the default). `sweep: true` runs the technology LEDs as a
+  light while the modem searches, oldest generation first, one step every
+  300 ms; registered, they show the technology again, and with no modem they
+  are dark. It goes with or without a `searching` LED; a single technology
+  LED blinks instead, and an LED another entry lights or blinks is not part
+  of the light.
 - `signal_color` — one LED that shows the bars as a colour. `red`, `green`,
   `blue` name its channels (at least one; a red/green LED leaves `blue` out);
   `colors` lists the colour at 1…5 bars (default `red, red, yellow, green,
@@ -444,6 +449,13 @@ that has not changed is not written again (a re-written `timer` trigger
 restarts the blink). Two panels from ddimension/wwand#77 as examples — a
 Xunison Exigo Hub D50 (4G and 5G LEDs, red 5G for searching) and an Arcadyan
 AW1000 (two RGB lamps):
+
+A panel with 2G/3G/4G LEDs and a running light while it connects:
+
+```json
+{ "leds": { "style": "tech", "sweep": true,
+            "leds": { "2g": "green:2g", "3g": "green:3g", "4g": "green:4g" } } }
+```
 
 ```json
 { "leds": { "style": "tech", "cumulative": true, "weak_bars": 1,

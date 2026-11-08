@@ -448,9 +448,10 @@ bad('{ "leds": { "style": "signal_color", "red": "r", "searching": { "color": "r
 // The board files are the ones the reporters described: a Xunison Exigo Hub
 // D50 (4G + 5G LEDs, red 5G for searching) and an Arcadyan AW1000 (two RGB
 // lamps, each three on/off gpio-leds).
-function led_board(leds) {
+function led_board(leds, opts) {
 	let f = mkfx({ [`${ETC}/test,board.json`]: sprintf('%J', { leds: leds }) });
-	let b = board.create({ id: 'test,board', fx: f, dirs: [ ETC ], log: () => {} });
+	let b = board.create({ id: 'test,board', fx: f, dirs: [ ETC ], log: () => {},
+		sweep_ms: opts?.sweep_ms });
 
 	return { fx: f, b: b, state: (name) => {
 		// the last value written to an LED: 'timer', 255 or 0
@@ -644,5 +645,88 @@ let reads = [];
 rfx.read = (p) => { push(reads, p); return null; };
 board.create({ id: '../../etc/passwd', fx: rfx, log: () => {} });
 eq(length(reads), 0, 'id: a model id with a path in it reads no file');
+
+// --- 8. the running light while searching (`sweep`, ddimension/wwand#48) -----
+// A T22M-style panel: three technology LEDs that run while the modem connects
+// and then show the technology.
+{
+	let t22 = { style: 'tech', cumulative: false, sweep: true,
+		leds: { '2g': 'g:2g', '3g': 'g:3g', '4g': 'g:4g' } };
+	let t = led_board(t22, { sweep_ms: 5 });
+	let lit_order = () => {
+		let out = [];
+
+		for (let w in t.fx.writes) {
+			let m = match(w, /\/(g:[234]g)\/brightness=255$/);
+
+			if (m)
+				push(out, m[1]);
+		}
+
+		return out;
+	};
+
+	ok(t.b.profile != null, 'sweep: the board file validates');
+
+	t.b.leds({ present: true, registered: false });
+	uloop.timer(32, () => uloop.end());
+	uloop.run();
+
+	let order = lit_order();
+	ok(length(order) >= 5, 'sweep: the light steps on its own timer, not the status tick');
+	eq(slice(order, 0, 4), [ 'g:2g', 'g:3g', 'g:4g', 'g:2g' ], 'sweep: oldest generation first, round and round');
+
+	// a second tick while searching keeps the running light going, from where it is
+	let before = length(order);
+	t.b.leds({ present: true, registered: false });
+	eq(length(lit_order()), before, 'sweep: a tick does not restart it');
+
+	t.b.leds({ present: true, registered: true, gen: '4g', bars: 3 });
+	eq([ t.state('g:2g'), t.state('g:3g'), t.state('g:4g') ], [ 0, 0, 255 ],
+		'sweep: registered, it stops and the technology shows');
+
+	let n = length(t.fx.writes);
+	uloop.timer(20, () => uloop.end());
+	uloop.run();
+	eq(length(t.fx.writes), n, 'sweep: ...and its timer is gone');
+
+	t.b.leds({ present: false, registered: false });
+	eq([ t.state('g:2g'), t.state('g:3g'), t.state('g:4g') ], [ 0, 0, 0 ],
+		'sweep: no modem: dark, nothing runs');
+
+	bad('{ "leds": { "style": "tech", "leds": { "4g": "g" }, "sweep": "yes" } }', 'must be true or false');
+}
+
+{
+	// an LED another entry blinks or lights is not part of the running light,
+	// whichever entry comes first in the file
+	let sw = { style: 'tech', sweep: true, leds: { '2g': 'shared', '3g': 'g:3g', '4g': 'g:4g' } };
+	let blink = { style: 'signal_color', red: 'shared', colors: [ 'red', 'red', 'red', 'red', 'red' ],
+		searching: { color: 'red', blink: true } };
+
+	for (let order in [ [ sw, blink ], [ blink, sw ] ]) {
+		let t = led_board(order, { sweep_ms: 5 });
+
+		ok(t.b.profile != null, 'sweep: the shared-LED board file validates');
+		t.b.leds({ present: true, registered: false });
+		uloop.timer(25, () => uloop.end());
+		uloop.run();
+
+		eq(t.state('shared'), 'timer', 'sweep: a blink on the same LED wins, in either order');
+		ok(index(t.fx.writes, `${L}/shared/brightness=255`) < 0, 'sweep: ...and the light never takes it');
+		t.b.leds({ present: true, registered: true, gen: '4g', bars: 3 });
+	}
+
+	// one LED: it blinks, no timer of ours
+	let t = led_board({ style: 'tech', sweep: true, leds: { '4g': 'g:4g' } }, { sweep_ms: 5 });
+
+	t.b.leds({ present: true, registered: false });
+	let n = length(t.fx.writes);
+	uloop.timer(25, () => uloop.end());
+	uloop.run();
+	eq([ t.state('g:4g'), length(t.fx.writes) ], [ 'timer', n ], 'sweep: one LED blinks and is not stepped');
+	t.b.leds({ present: true, registered: true, gen: '4g', bars: 3 });
+	eq(t.state('g:4g'), 255, 'sweep: ...and shows the technology once registered');
+}
 
 done('test_board');

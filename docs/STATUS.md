@@ -21,6 +21,14 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
+- **LED running light (2026-11-08, from #48):** the `tech` style takes
+  `sweep: true` — the technology LEDs run oldest-first every 300 ms while
+  the modem searches, on a timer of the board instance (`board.uc`
+  `self.leds`; the status tick that plans it comes every 10 s). One LED
+  blinks instead; steady over blinking over the light when entries share an
+  LED. Host-tested (`test_board` section 8) and run against the real LEDs of
+  the LTE3301 (5.201) from a /tmp board file: `#.. .#. ..#` at 300 ms, `..#`
+  once on 4G.
 - **`option modes` on MBIM, natively (2026-11-08, from #75):** the MBIM
   init writes the modes as the Register State `DataClass` from MBIMEx 2.0
   on (`modem_mbim.uc sync_modes`, ModemManager's mapping, CUSTOM for the

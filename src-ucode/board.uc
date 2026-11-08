@@ -25,6 +25,12 @@ const LED_DIR = '/sys/class/leds';
 // how long a power-cycle keeps the modem powered off / a reset GPIO stays asserted
 const POWER_OFF_MS = 30000;      // default de-power duration (config repower_time)
 const RESET_ASSERT_MS = 30000;   // per spec: invert, wait 30 s, restore
+// one step of a `tech` panel's sweep: three LEDs round in under a second, the
+// pace of the running lights on the routers it imitates
+const SWEEP_MS = 300;
+// what a style plans for an LED that belongs to the running light; self.leds
+// drives those itself, in the order they were planned
+const SWEEP = 'sweep';
 
 // Board files, searched in this order; a later directory wins. The first is for
 // a device's own package or its target's base-files, which then carry the
@@ -304,10 +310,16 @@ function lit(v, s, weak_bars)
 // where two lit at once is a mixed colour. For the same reason `searching` is
 // never lit together with a technology LED: it is on while not registered, and
 // those are off then.
+//
+// `sweep` runs the technology LEDs as a light, oldest generation first, while
+// the modem searches — the connecting indication some routers give (a
+// Teltonika panel, the T22M in ddimension/wwand#48). With no modem they stay
+// dark, as without it: a light that runs says "working on it".
 function plan_tech(put, l, s)
 {
 	let cur = index(GENERATIONS, s.gen);
 	let reg = !!s.registered;
+	let sweep = l.sweep && s.present && !reg;
 
 	for (let i = 0; i < length(GENERATIONS); i++) {
 		let v = l.leds[GENERATIONS[i]];
@@ -317,7 +329,7 @@ function plan_tech(put, l, s)
 
 		let on = reg && cur >= 0 && (l.cumulative ? (i <= cur) : (i == cur));
 
-		put(spec_led(v), on ? lit(v, s, l.weak_bars) : 0);
+		put(spec_led(v), sweep ? SWEEP : on ? lit(v, s, l.weak_bars) : 0);
 	}
 
 	if (l.signal != null)
@@ -508,7 +520,7 @@ const LED_STYLES = {
 	// one LED per technology, see plan_tech
 	tech: {
 		keys: { leds: 'techs', signal: 'spec', searching: 'name',
-		        cumulative: 'bool', weak_bars: 'bars' },
+		        cumulative: 'bool', weak_bars: 'bars', sweep: 'bool' },
 		required: [ 'leds' ],
 		plan: (put, l, s) => plan_tech(put, l, s),
 	},
@@ -836,6 +848,7 @@ export function create(opts)
 	let pulse_timer = null;
 	// timings are injectable so tests can drive the deferred halves quickly
 	let power_off_ms = opts?.power_off_ms ?? POWER_OFF_MS;
+	let sweep_ms = opts?.sweep_ms ?? SWEEP_MS;
 	let reset_ms = opts?.reset_ms ?? RESET_ASSERT_MS;
 	// polarity of the modem power line (inverted boards power with 0)
 	let power_on = profile?.power_gpio_active_low ? '0' : '1';
@@ -1028,13 +1041,63 @@ export function create(opts)
 	// system, a user's echo) is undone on the next tick, as before the cache.
 	let led_last = {};
 
+	// The running light: its own timer, because the status tick that plans
+	// it comes every 10 s and a step is SWEEP_MS. `names` in planning order;
+	// each step writes only the LED going dark and the one lighting up.
+	let sweep = null;
+	let sweep_stop = () => {
+		if (!sweep)
+			return;
+
+		sweep.timer?.cancel();
+
+		// what they show now is the light's, not the cache's: the next
+		// plan writes them whatever it holds
+		for (let n in sweep.names)
+			delete led_last[n];
+
+		sweep = null;
+	};
+	let sweep_start = (names) => {
+		let st = { names: names, at: -1, timer: null };
+		let step;
+
+		sweep = st;
+
+		// one LED has nowhere to run to: stepping would switch it off and
+		// on again every SWEEP_MS. It blinks instead, the kernel's timer,
+		// so "searching" still does not read as the steady "connected".
+		if (length(names) == 1) {
+			set_led(fx, names[0], 'timer');
+			return;
+		}
+
+		step = () => {
+			let next = (st.at + 1) % length(st.names);
+
+			if (st.at < 0)
+				for (let n in st.names)
+					set_led(fx, n, 0);
+			else
+				set_led(fx, st.names[st.at], 0);
+
+			set_led(fx, st.names[next], 255);
+			st.at = next;
+			st.timer = uloop.timer(sweep_ms, step);
+		};
+
+		step();
+	};
+
 	// render the status LEDs from a normalized modem state:
 	//   { present, registered, radio, lte, gen, roaming, bars }
 	// Every entry plans; one LED that two entries name is lit if either
-	// lights it (steady over blinking over off), then each LED is written once.
+	// lights it (steady over blinking over the running light over off), then
+	// each LED is written once. Every value has a rank of its own: a tie
+	// would leave it to the order of the entries in the board file.
 	self.leds = function(state) {
 		let want = {};
-		let rank = (v) => (v == 'timer') ? 1 : v ? 2 : 0;
+		let rank = (v) => (v == SWEEP) ? 1 : (v == 'timer') ? 2 : v ? 3 : 0;
 		let put = (name, val) => {
 			if (name != null && (want[name] == null || rank(val) > rank(want[name])))
 				want[name] = val;
@@ -1043,7 +1106,20 @@ export function create(opts)
 		for (let l in led_entries(profile?.leds))
 			LED_STYLES[l?.style]?.plan(put, l, state ?? {});
 
+		let running = filter(keys(want), (n) => want[n] == SWEEP);
+
+		// a light already running over the same LEDs goes on undisturbed:
+		// restarting it every tick would put a jump into it
+		if (!length(running) || join(' ', running) != join(' ', sweep?.names ?? []))
+			sweep_stop();
+
+		if (length(running) && !sweep)
+			sweep_start(running);
+
 		for (let name, val in want) {
+			if (val == SWEEP)
+				continue;
+
 			if (led_last[name] === val && led_shows(fx, name, val))
 				continue;
 
