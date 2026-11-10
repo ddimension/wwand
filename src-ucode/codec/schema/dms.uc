@@ -167,6 +167,18 @@ export default {
 			resp: {},
 		},
 
+		// Foxconn Get Firmware Version 0x555E (libqmi 1.38.0
+		// qmi-service-dms.json, since 1.26): input Version Type 0x01 u8
+		// (QmiDmsFoxconnFirmwareVersionType: 0 firmware-mcfg, 1
+		// firmware-mcfg-apps, 2 apps), output Version 0x01 string. The two
+		// strings the v2 FCC magic above is hashed from (qmi_backend
+		// fcc_foxconn).
+		FOXCONN_GET_FIRMWARE_VERSION: {
+			id: 0x555E,
+			req:  { version_type: { t: 0x01, f: 'u8' } },
+			resp: { version: { t: 0x01, f: 'string' } },
+		},
+
 		// The legacy DMS card getters — `qmicli --dms-uim-get-iccid` /
 		// `--dms-uim-get-imsi`. They predate the UIM service, so they are what
 		// identifies the card on a modem too old to have one, and the fallback

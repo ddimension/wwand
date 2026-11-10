@@ -516,6 +516,90 @@ function assert_subscribe_list() {
 	ms.start();
 }
 
+// THE FOXCONN FCC LOCK OVER MBIM. A T99W175 that boots with Foxconn ids
+// (^CUSTOMER 6, 105b:e0ab) is FCC-locked: the switch to on leaves the software
+// radio off, which ModemManager answers with its 105b unlock over the QMI
+// passthrough (mrhaav, ddimension/wwand#75). The passthrough is stood in for:
+// the lock lifts once the unlock was accepted, and the radio is switched on
+// again. A modem of another vendor whose radio refuses gets no unlock.
+function assert_foxconn_fcc() {
+	let sw_off = (meta) => ({ hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_OFF });
+	// the three answers ModemManager reads as an FCC lock
+	// (mm-broadband-modem-mbim.c:2088-2129, 1.24.0): the set refused, the
+	// software radio still off after it, the hardware radio off
+	let refused = (meta) => (meta.kind == 'set') ? { __error: 2 } : sw_off(meta);
+	let hw_off = (meta) => ({ hw_radio_state: bc.RADIO_STATE_OFF, sw_radio_state: bc.RADIO_STATE_OFF });
+	let fw = { firmware_info: 'T99W175.F0.1.0.0.9.GC.004', hardware_info: 'QUALCOMM INCORPORATED' };
+
+	let run = (caps, locked, k) => {
+		let h = handlers();
+		let unlocked = false, asked = [];
+
+		h.DEVICE_CAPS = { ...h.DEVICE_CAPS, ...caps };
+		h.RADIO_STATE = (args, meta) => (meta.kind == 'set' && unlocked)
+			? { hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_ON }
+			: locked(meta);
+
+		let mk = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h });
+		let m = null, settled = false;
+		let end = () => {
+			if (settled)
+				return;
+
+			settled = true;
+			k(m, mk, asked);
+		};
+
+		m = modem_mbim.create({
+			id: 'm_fox', device: '/dev/mockfox',
+			config: { apn: 'internet' },
+			timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+			at: { fx: { read: () => null, glob: () => [] } },
+			datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+			deps: {
+				transport_open: mk.transport_open,
+				log: () => null,
+				on_event: (mm, event) => {
+					if (event == 'registered')
+						end();
+				},
+			},
+		});
+
+		m._pt_fcc_foxconn = (cfg, md5, cb) => {
+			push(asked, cfg);
+			unlocked = true;
+			cb(null, 'foxconn2');
+		};
+
+		m.start();
+
+		// a modem whose radio stays off never registers: give up after a while
+		uloop.timer(400, end);
+	};
+
+	let unlocks = (what, locked, k) => run(fw, locked, (m, mk, asked) => {
+		let sets = filter(mk.calls, (c) => c.name == 'RADIO_STATE' && c.kind == 'set');
+
+		eq(length(asked), 1, sprintf('foxconn fcc (%s): the unlock runs once', what));
+		eq(length(sets) >= 2, true, sprintf('foxconn fcc (%s): ...and the radio is switched on again after it', what));
+		eq(m.state, 'READY', sprintf('foxconn fcc (%s): the modem registers once unlocked', what));
+		eq(m.radio, { hw: bc.RADIO_STATE_ON, sw: bc.RADIO_STATE_ON },
+			sprintf('foxconn fcc (%s): the radio reads on afterwards', what));
+		m.stop();
+		k();
+	});
+
+	unlocks('sw left off', sw_off, () =>
+	unlocks('set refused', refused, () =>
+	unlocks('hw off', hw_off, () =>
+	run({}, sw_off, (m2, mk2, asked2) => {
+		eq(length(asked2), 0, 'foxconn fcc: a modem of another vendor gets no Foxconn unlock');
+		m2.stop();
+		finish();
+	}))));
+}
+
 // at all, so a future "just always write it" cannot pass both halves.
 function assert_radio_off() {
 	let h3 = handlers();
@@ -574,7 +658,7 @@ function assert_radio_off() {
 					'radio: a modem already on is left alone');
 
 				m3.stop();
-				finish();
+				assert_foxconn_fcc();
 			},
 		},
 	});

@@ -94,6 +94,67 @@ export function fcc_auth(dms, variant, magic, cb)
 	dms.request('SET_FCC_AUTHENTICATION', {}, (err) => cb(err), { no_recovery: true });
 };
 
+// THE FOXCONN SDX55 V2 MAGIC, as ModemManager computes it
+// (data/dispatcher-fcc-unlock/105b, 1.24.0): "salt" followed by the md5 hex of
+// mcfg version without its last two dot fields, apps version, IMEI, "salt",
+// "foxc". With "T99W175.F0.1.0.0.9.GC.004" the hashed part starts
+// "T99W175.F0.1.0.0.9". `md5`: (string)->32-hex-digest, injected like the
+// Fibocom sha256 (fcc_fibocom.uc) so the host suite can check it.
+export function foxconn_v2_magic(mcfg, apps, imei, md5)
+{
+	let fw = replace(sprintf('%s', mcfg), /\.[^.]*\.[^.]*$/, '');
+
+	return 'salt' + substr(md5(fw + apps + imei + 'salt' + 'foxc'), 0, 32);
+};
+
+// The Foxconn unlock the way ModemManager's 105b helper runs it over an MBIM
+// port: v2 with the magic above and magic number 48, then v1 with 0 when v2
+// cannot be built or is refused. `cfg` is `option fcc_auth`: 'foxconn:<n>'
+// sends only v1 with n, 'foxconn2:<string>:<number>' only that v2. `imei`
+// stands in when GET_IDS has none. cb(variant | null): the one accepted.
+export function fcc_foxconn(dms, cfg, imei, md5, log, cb)
+{
+	let p = split(sprintf('%s', cfg ?? ''), ':');
+	let v1 = (magic) => fcc_auth(dms, 'foxconn', magic, (err) => {
+		if (err)
+			log('info', sprintf('FCC(foxconn): v1 (magic %d) not accepted: %J', magic, err));
+
+		cb(err ? null : 'foxconn');
+	});
+
+	if (p[0] == 'foxconn' && p[1] != null && p[1] != '')
+		return v1(+p[1]);
+
+	if (p[0] == 'foxconn2')
+		return fcc_auth(dms, 'foxconn2', { string: p[1] ?? '', number: +(p[2] ?? 0) }, (err) => {
+			if (err)
+				log('info', sprintf('FCC(foxconn): v2 not accepted: %J', err));
+
+			cb(err ? null : 'foxconn2');
+		});
+
+	let ver = (t, k) => dms.request('FOXCONN_GET_FIRMWARE_VERSION', { version_type: t },
+		(err, d) => k(err ? null : d?.version), { no_recovery: true });
+
+	ver(0, (mcfg) => ver(2, (apps) => dms.request('GET_IDS', {}, (ierr, ids) => {
+		let id = (!ierr && ids?.imei) ? ids.imei : imei;
+
+		if (!mcfg || !apps || !id || !md5) {
+			log('info', sprintf('FCC(foxconn): no v2 magic (%s) — trying v1',
+				!md5 ? 'no md5' : !mcfg ? 'no mcfg version' : !apps ? 'no apps version' : 'no IMEI'));
+			return v1(0);
+		}
+
+		fcc_auth(dms, 'foxconn2', { string: foxconn_v2_magic(mcfg, apps, id, md5), number: 48 }, (err) => {
+			if (!err)
+				return cb('foxconn2');
+
+			log('info', sprintf('FCC(foxconn): v2 not accepted (%J) — trying v1', err));
+			v1(0);
+		});
+	}, { no_recovery: true })));
+};
+
 // QmiNasDLBandwidth enum -> MHz (LTE carrier bandwidth)
 const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
 

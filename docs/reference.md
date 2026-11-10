@@ -548,6 +548,11 @@ config wwand_modem 'm0'
 	                                 #    foxconn2:<string>:<number> (0x5571 v2, SDX62).
 	                                 #    MBIM modems: 'quectel' (vendor Radio State = on,
 	                                 #    EM120R-GL/EM160R-GL in MBIM mode) — explicit only.
+	                                 #    A Foxconn SDX55 (T99W175 with Foxconn ids) in MBIM
+	                                 #    mode is unlocked automatically over the QMI
+	                                 #    passthrough when its radio will not come on;
+	                                 #    'foxconn' forces it, 'foxconn:<n>' / 'foxconn2:…'
+	                                 #    pin one variant (see "FCC-locked laptop modem").
 	                                 #    Fibocom FM350 (MediaTek T7xx) is unlocked
 	                                 #    automatically when it comes up radio-locked
 	                                 #    (GTFCCLOCK over AT); 'fibocom' forces it, and
@@ -1246,6 +1251,23 @@ If a Lenovo/Dell/HP-SKU modem stays in low power (no RF), set
 `option fcc_auth` — or leave the default `auto`, which tries the known QMI
 unlock messages by itself; MBIM-mode Quectel needs the explicit `quectel`
 value. See the option in [Configuration](#configuration).
+
+**Foxconn SDX55 in MBIM mode (T99W175, PCI `105b:e0ab`).** A T99W175 that
+runs with Foxconn ids (Lenovo cards set to `^CUSTOMER: 6`; with `0` it shows
+Qualcomm's `17cb:0306` and is not locked, reported in ddimension/wwand#75)
+refuses to switch its radio on: the Radio State set fails or answers with the
+software radio still off. wwand then sends the Foxconn FCC authentication over
+the QMI-over-MBIM passthrough, the way ModemManager's `105b` unlock helper does
+(1.24.0): **v2** first, its magic `"salt"` + md5 of the mcfg firmware version
+without its last two fields, the apps version, the IMEI, `"salt"` and `"foxc"`,
+magic number 48; **v1** with magic 0 when v2 cannot be built or is refused. It
+then switches the radio on again, once per bring-up. It runs on its own for a
+modem whose firmware string starts `T99W`/`T77W` or whose manufacturer reads
+Foxconn; `option fcc_auth 'foxconn'` forces it, `'foxconn:<n>'` sends only v1
+with that magic and `'foxconn2:<string>:<number>'` only that v2 (on QMI those
+two values mean the same; plain `'foxconn'` there is v1 with 0). md5 comes from
+`ucode-mod-digest`; without it only v1 is tried. Host-tested only — the
+T99W175 here runs unlocked, so no locked card has been through it yet.
 
 **Fibocom FM350-GL (MediaTek T7xx, PCI `14c3:4d75`; Dell DW5931e and alike).**
 This modem has no QMI (so the QMI unlock above cannot run); it is FCC-locked a

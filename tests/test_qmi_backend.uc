@@ -13,6 +13,7 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as uloop from 'uloop';
 import * as struct from 'struct';
+import * as fs from 'fs';
 import * as mockhub from './lib/mockhub.uc';
 import * as client_mod from 'wwand/client.uc';
 import * as backend from 'wwand/qmi_backend.uc';
@@ -580,5 +581,74 @@ let cross = tlvmod.unpack(N.GET_SERVING_SYSTEM.resp,
 	tlv(0x29, u16(310) + u16(30) + u8(1)));
 
 eq(cross.mnc_pcs_digit, null, 'serving pcs: 0x29 is not read by the response schema');
+
+// --- Foxconn FCC unlock (ModemManager 1.24.0 dispatcher-fcc-unlock/105b) -----
+// md5 stands in for ucode-mod-digest, which the host ucode lacks; backed by
+// md5sum so the algorithm, not only the string assembly, is checked. The
+// expected magic is what the 105b script's own pipeline prints for these
+// inputs (sed, printf, md5sum, head -c 32), mrhaav's T99W175 values.
+let md5 = (s) => {
+	let tmp = '/tmp/wwand_fcc_foxconn_test.bin';
+	let f = fs.open(tmp, 'w');
+	f.write(s);
+	f.close();
+	let p = fs.popen('md5sum < ' + tmp, 'r');
+	let out = p.read('all');
+	p.close();
+	return substr(out, 0, 32);
+};
+
+eq(backend.foxconn_v2_magic('T99W175.F0.1.0.0.9.GC.004', '096', '866793040319116', md5),
+	'saltd429b08bc5dfc1a6493e5a5055e0016c', 'foxconn v2: the magic matches the 105b pipeline');
+
+// a fake DMS: records every request, answers from `ans` (a name -> [err, data])
+let fox_dms = (ans) => {
+	let d = { sent: [] };
+
+	d.request = (name, args, cb) => {
+		push(d.sent, { name: name, args: args });
+		let a = ans[name] ?? [ null, {} ];
+		let r = (type(a) == 'function') ? a(args) : a;
+		cb(r[0], r[1]);
+	};
+
+	return d;
+};
+let nolog = () => null;
+let fox_ver = (args) => [ null, { version: (args.version_type == 0) ? 'T99W175.F0.1.0.0.9.GC.004' : '096' } ];
+let got;
+
+let d1 = fox_dms({ FOXCONN_GET_FIRMWARE_VERSION: fox_ver, GET_IDS: [ null, { imei: '866793040319116' } ] });
+backend.fcc_foxconn(d1, 'auto', null, md5, nolog, (v) => got = v);
+eq(got, 'foxconn2', 'foxconn auto: v2 accepted');
+eq(d1.sent[3]?.args, { magic_string: 'saltd429b08bc5dfc1a6493e5a5055e0016c', magic_number: 48 },
+	'foxconn auto: v2 carries the computed magic and magic number 48');
+
+let d2 = fox_dms({ FOXCONN_GET_FIRMWARE_VERSION: fox_ver, GET_IDS: [ null, { imei: '866793040319116' } ],
+	FOXCONN_SET_FCC_AUTHENTICATION_V2: [ { error: 'qmi', code: 0x47 }, null ] });
+backend.fcc_foxconn(d2, null, null, md5, nolog, (v) => got = v);
+eq(got, 'foxconn', 'foxconn auto: a refused v2 falls back to v1');
+eq(d2.sent[4], { name: 'FOXCONN_SET_FCC_AUTHENTICATION', args: { value: 0 } },
+	'foxconn auto: ...with magic 0');
+
+let d3 = fox_dms({ FOXCONN_GET_FIRMWARE_VERSION: [ { error: 'qmi', code: 0x1e }, null ] });
+backend.fcc_foxconn(d3, 'foxconn', '866793040319116', md5, nolog, (v) => got = v);
+eq(map(d3.sent, (r) => r.name), [ 'FOXCONN_GET_FIRMWARE_VERSION', 'FOXCONN_GET_FIRMWARE_VERSION', 'GET_IDS',
+	'FOXCONN_SET_FCC_AUTHENTICATION' ], 'foxconn: no firmware version means no v2, straight to v1');
+
+let d4 = fox_dms({});
+backend.fcc_foxconn(d4, 'foxconn:5', null, md5, nolog, (v) => got = v);
+eq(d4.sent, [ { name: 'FOXCONN_SET_FCC_AUTHENTICATION', args: { value: 5 } } ],
+	'foxconn:<n>: only v1 with that magic');
+
+let d5 = fox_dms({ FOXCONN_SET_FCC_AUTHENTICATION_V2: [ { error: 'qmi', code: 0x47 }, null ] });
+backend.fcc_foxconn(d5, 'foxconn2:abc:7', null, md5, nolog, (v) => got = v);
+eq([ got, d5.sent ], [ null, [ { name: 'FOXCONN_SET_FCC_AUTHENTICATION_V2', args: { magic_string: 'abc', magic_number: 7 } } ] ],
+	'foxconn2:<s>:<n>: only that v2, a refusal is no unlock');
+
+let d6 = fox_dms({ FOXCONN_GET_FIRMWARE_VERSION: fox_ver, GET_IDS: [ null, {} ] });
+backend.fcc_foxconn(d6, 'auto', '866793040319116', md5, nolog, (v) => got = v);
+eq(d6.sent[3]?.args?.magic_string, 'saltd429b08bc5dfc1a6493e5a5055e0016c',
+	'foxconn: the MBIM IMEI stands in when GET_IDS has none');
 
 done('test_qmi_backend');

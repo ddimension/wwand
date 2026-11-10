@@ -193,6 +193,16 @@ code = "src-ucode/fcc_fibocom.uc, modem_mbim.uc"
     open = "SMBIOS type 133 absent on the test host, so model-id discovery from firmware is not HW-exercised (both known ids are tried when it is absent)"
 
 [[component]]
+name = "Foxconn SDX55 FCC unlock over MBIM (DMS Foxconn FCC authentication)"
+code = "src-ucode/qmi_backend.uc, modem_mbim.uc, codec/schema/dms.uc"
+  [[component.standard]]
+  name = "Foxconn DMS vendor messages, as documented by libqmi"
+  basis = "ModemManager 1.24.0 data/dispatcher-fcc-unlock/105b; libqmi 1.38.0 qmi-service-dms.json (0x555E, 0x5571); mm-broadband-modem-mbim.c power-up RETRY"
+  sections = "v2 magic (salt + md5 of mcfg-trimmed, apps, IMEI, salt, foxc), magic number 48, v1 fallback magic 0, trigger: Radio State set refused / software radio still off / hardware radio off"
+    [[component.standard.review]]
+    review = "tbd"
+
+[[component]]
 name = "SIM, PIN, identity, PLMN lists"
 code = "src-ucode/{sim,sim_plmn,simops,siminventory}.uc"
   [[component.standard]]

@@ -29,6 +29,16 @@ state buried at the top invites reading a months-old entry as present tense.
   LED. Host-tested (`test_board` section 8) and run against the real LEDs of
   the LTE3301 (5.201) from a /tmp board file: `#.. .#. ..#` at 300 ms, `..#`
   once on 4G.
+- **Foxconn FCC unlock over MBIM (2026-11-09, from #75):** a T99W175 with
+  Foxconn ids (`^CUSTOMER: 6`, `105b:e0ab`) is FCC-locked in MBIM mode, and
+  wwand unlocked a Foxconn only on the QMI path. Now `modem_mbim.uc
+  radio_off` also fires when our Radio State set is refused or leaves the
+  software radio off (ModemManager's trigger, 1.24.0), and for a Foxconn
+  modem sends the DMS Foxconn FCC authentication over the passthrough: v2
+  with ModemManager's 105b magic, then v1 with 0 (`qmi_backend.uc
+  fcc_foxconn`). Host-tested (the v2 magic against the 105b shell pipeline);
+  not HW-tested — our T99W175 is not locked; mrhaav's runs locked as
+  `^CUSTOMER: 6` and has been asked to test it (#75).
 - **`option modes` on MBIM, natively (2026-11-08, from #75):** the MBIM
   init writes the modes as the Register State `DataClass` from MBIMEx 2.0
   on (`modem_mbim.uc sync_modes`, ModemManager's mapping, CUSTOM for the
@@ -42,7 +52,12 @@ state buried at the top invites reading a months-old entry as present tense.
   under OpenWrt (2026-11-08): `lte,nr5g` written as 0x80000060 and held,
   skipped on restart and after a modem reset, `umts,lte,nr5g` restored as
   0x8000007c. Open: the LuCI mode editor on an MBIM modem without a
-  passthrough (FM350) still has no native path.
+  passthrough (FM350) still has no native path. Open: on mrhaav's
+  T99W175.F0.1.0.0.9 (caps `custom` named "5G", no 5g-nsa) CUSTOM turns on
+  TD-SCDMA plus NR in the NAS view, while the firmware reports the standard
+  5g-nsa bit for NR on its own (#75, 2026-11-09) — so the ModemManager rule
+  (CUSTOM = NSA) is wrong there; whether it accepts the standard bits in a
+  set is asked.
 - **A control device before its netdev (2026-11-08):** after a modem reset
   the T99W175 (mhi-pci-generic) announces `wwan0mbim0` before its netdev;
   the modem was started without one, the netdev kept its kernel name and

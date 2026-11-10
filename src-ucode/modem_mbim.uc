@@ -1656,38 +1656,86 @@ export function create(opts)
 	step_attach_profile = () => self.sync_modes(() => config_check.sync_rat_order(self, log,
 		() => self._apply_attach(step_register)));
 
-	// HwRadioState reads OFF. On a Fibocom FM350 (MediaTek T7xx) that is an FCC
-	// lock, not the physical W_DISABLE kill: GTFCCEFFSTATUS mode 2 means the
-	// modem re-locks on every power-up, CFUN is 1 yet it never searches, and no
-	// MBIM/ucode write can clear it — only the vendor GTFCCLOCK challenge/
-	// response over AT does (fcc_fibocom). Gated so it is never sent to a non-
-	// Fibocom modem unless `option fcc_auth` names 'fibocom'. Once per init
-	// (_fcc_tried): a success flips the switch on, so step_register is re-entered
-	// to re-read (and handle the software radio) — a persisting OFF is then the
-	// real hardware kill, reported as before.
-	radio_off = (next) => {
+	// THE RADIO WILL NOT COME ON: HwRadioState reads OFF, or our own switch to
+	// on was refused or left the software radio off. That is how a vendor FCC
+	// lock shows over MBIM, and ModemManager reads it the same way: any of the
+	// three makes its power-up return RETRY, which runs the FCC unlock helper
+	// and powers up again (mm-broadband-modem-mbim.c:2088-2129 — "The SDX55
+	// returns 'Operation not allowed'" — and mm-iface-modem.c:4475,
+	// ModemManager 1.24.0). Two unlocks, each gated so it never reaches a modem
+	// of another vendor unless `option fcc_auth` names it:
+	//   Fibocom FM350 (MediaTek T7xx), hw OFF only: GTFCCEFFSTATUS mode 2
+	//     re-locks it on every power-up, CFUN is 1 yet it never searches, and
+	//     only the GTFCCLOCK challenge/response over AT clears it (fcc_fibocom).
+	//   Foxconn SDX55 (T99W175 with Foxconn ids, 105b:e0ab): the DMS Foxconn
+	//     FCC authentication over the QMI passthrough, v2 then v1, as MM's
+	//     105b helper sends it (qmi_backend fcc_foxconn).
+	// Once per init (_fcc_tried): a success re-enters step_register to re-read
+	// the radio; a hw OFF that persists is then the real hardware kill.
+	radio_off = (next, hw) => {
 		let fa = self.config.fcc_auth;
-		let explicit = (type(fa) == 'string' && index(fa, 'fibocom') == 0);
+		let auto = (fa == null || fa == '' || fa == 'auto');
+		let named = (v) => (type(fa) == 'string' && index(fa, v) == 0);
 		let is_fibocom = (match(self.info?.manufacturer ?? '', /fibocom/i) ||
 		                  match(self.info?.model ?? '', /FM3[0-9]0|FM1[0-9]0/i));
-		let auto = (fa == null || fa == '' || fa == 'auto');
+		// the firmware string names the module (T99W175.F0..., T77W968...);
+		// the MBIM hardware info of a T99W175 is "QUALCOMM INCORPORATED"
+		let is_foxconn = (match(self.info?.manufacturer ?? '', /foxconn/i) ||
+		                  match(self.info?.firmware ?? '', /^T(99|77)W/));
+		let vendor = null;
 
-		if (self._fcc_tried || !(explicit || (auto && is_fibocom))) {
-			log('warn', 'hardware radio switch is off — registration will not start');
-			self.control_note = 'radio disabled by the hardware switch';
+		if (hw && (named('fibocom') || (auto && is_fibocom)))
+			vendor = 'fibocom';
+		else if (named('foxconn') || (auto && is_foxconn))
+			vendor = 'foxconn';
+
+		let stays = (note, msg) => {
+			log('warn', msg);
+			self.control_note = note;
+			next();
+		};
+		let not_released = (v) => hw
+			? stays('radio disabled (FCC lock not released)', sprintf('hardware radio switch is off — %s FCC unlock did not release it', v))
+			: stays('radio stays off (FCC lock not released)', sprintf('the radio refuses to switch on — %s FCC unlock did not release it', v));
+		let retry = () => settle_timer = uloop.timer(self.timing.settle, step_register);
+
+		if (self._fcc_tried || !vendor) {
+			if (hw)
+				return stays('radio disabled by the hardware switch', 'hardware radio switch is off — registration will not start');
+
 			return next();
 		}
 
 		self._fcc_tried = true;
 
-		// sha256 comes from ucode-mod-digest (a wwand-mbim DEPENDS), loaded
+		// the digests come from ucode-mod-digest (a wwand-mbim DEPENDS), loaded
 		// lazily: require() is a catchable runtime call, so a build that somehow
-		// lacks the module degrades to the hardware-kill message instead of
-		// failing to load the whole backend (a static import cannot be caught).
-		let sha;
-		try { sha = require('digest').sha256; } catch (e) { sha = null; }
+		// lacks the module degrades instead of failing to load the whole
+		// backend (a static import cannot be caught)
+		let digest;
+		try { digest = require('digest'); } catch (e) { digest = null; }
 
-		if (!sha) {
+		if (vendor == 'foxconn') {
+			log('notice', sprintf('%s — trying Foxconn FCC unlock over the passthrough',
+				hw ? 'hardware radio switch is off' : 'the radio refuses to switch on'));
+
+			return self._pt_fcc_foxconn(fa, digest?.md5, (err, variant) => {
+				if (err?.error == 'cancelled')
+					return;
+
+				if (err || !variant) {
+					if (err)
+						log('info', sprintf('FCC(foxconn): %J', err));
+
+					return not_released('Foxconn');
+				}
+
+				log('notice', sprintf('FCC(foxconn): accepted (%s) — switching the radio on again', variant));
+				retry();
+			});
+		}
+
+		if (!digest?.sha256) {
 			log('warn', 'hardware radio switch is off — FCC unlock needs ucode-mod-digest (not installed)');
 			self.control_note = 'radio disabled by the hardware switch';
 			return next();
@@ -1695,14 +1743,11 @@ export function create(opts)
 
 		log('notice', 'radio off — trying Fibocom FCC unlock (GTFCCLOCK)');
 
-		fcc_fibocom.unlock(modem_common.telemetry_at(self), log, fa, sha, (ok) => {
-			if (!ok) {
-				log('warn', 'hardware radio switch is off — Fibocom FCC unlock did not release it');
-				self.control_note = 'radio disabled (FCC lock not released)';
-				return next();
-			}
+		fcc_fibocom.unlock(modem_common.telemetry_at(self), log, fa, digest.sha256, (ok) => {
+			if (!ok)
+				return not_released('Fibocom');
 
-			settle_timer = uloop.timer(self.timing.settle, step_register);
+			retry();
 		});
 	};
 
@@ -1828,9 +1873,15 @@ export function create(opts)
 		// 2026-10-30), so a re-query would read the FCC lock back as a stale off
 		// and mask it. hw OFF is a physical kill on most modems but the FCC lock
 		// on an FM350, which radio_off clears over AT.
-		let decide = (rs) => {
+		//
+		// `refused`: our switch to on failed or left the software radio off —
+		// with hw OFF the other face of an FCC lock (radio_off).
+		let decide = (rs, refused) => {
 			if (rs?.hw_radio_state == bc.RADIO_STATE_OFF)
-				return radio_off(do_register);
+				return radio_off(do_register, true);
+
+			if (refused)
+				return radio_off(do_register, false);
 
 			do_register();
 		};
@@ -1854,7 +1905,8 @@ export function create(opts)
 				// the answer to OUR OWN switch is the authoritative reading
 				note_radio(sdata);
 				settle_timer = uloop.timer(self.timing.settle,
-					() => decide(serr ? null : sdata));
+					() => decide(serr ? null : sdata,
+						serr != null || sdata?.sw_radio_state == bc.RADIO_STATE_OFF));
 			});
 		});
 	};
@@ -2850,6 +2902,14 @@ export function create(opts)
 	// test can stand in for a passthrough the MBIM mock does not have.
 	self._pt_opmode = function(mode, cb) {
 		pt_dms((dms, done) => qmi_backend.set_opmode(dms, mode, (err) => done(err)), (err) => cb(err));
+	};
+
+	// The Foxconn FCC unlock over the passthrough's DMS (qmi_backend
+	// fcc_foxconn); cb(err, accepted variant | null). A method, so a test can
+	// stand in for a passthrough the MBIM mock does not have.
+	self._pt_fcc_foxconn = function(cfg, md5, cb) {
+		pt_dms((dms, done) => qmi_backend.fcc_foxconn(dms, cfg, self.info?.imei, md5, log,
+			(variant) => done(null, variant)), cb);
 	};
 
 	// GET_OPERATING_MODE over the passthrough (libqmi 1.38.0
