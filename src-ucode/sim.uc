@@ -1680,6 +1680,60 @@ function apdu_transport_gone(modem, be)
 	return there ? null : { error: 'no_apdu_channel', detail: sprintf('%s transport not available (modem re-initialising?)', be) };
 }
 
+// DECLARING AN IPAd. An SGP.32 card that also carries an IPAe picks the IPA it
+// serves from the TERMINAL CAPABILITY the device sends (ETSI TS 102 221, INS
+// AA): none, or one without tag 84, runs the card's own IPAe, and ES10 from
+// the device then gets 6985; tag 84 saying "IPAd supported" switches the IPAe
+// off and serves ES10 (IDEMIA DAKOTA IoT v1.2 Device Requirements, DEV_REQ_8
+// and §3, 2025-10-17). The modem does not send tag 84 by itself: an IDEMIA card
+// behind the RG502Q on 5.202 answered 6985 until `A9 03 84 01 01` went out on
+// the basic channel, then GetEID and GetEUICCInfo1 answered (HW-seen,
+// 2026-11-11). The declaration holds for one card session, so it goes out
+// before every ISD-R open rather than once — a card reset in between would
+// otherwise bring the IPAe back. Only on `option ipa_mode 'ipad'`: sent
+// unasked it would switch off the IPAe of every such card, and a fleet may
+// run on it.
+// Best-effort: a refusal is logged, and the open goes ahead either way.
+const TERMINAL_CAPABILITY_IPAD = '80AA000005A903840101';
+
+function declare_ipad(modem, slot, be, cb)
+{
+	if (modem.config?.ipa_mode != 'ipad' || index([ 'at', 'mbim', 'qmi' ], be) < 0)
+		return cb();
+
+	let done = (err, resp) => {
+		let sw = (!err && length(resp ?? '') >= 4) ? uc(substr(resp, -4)) : null;
+
+		// stderr, in the modem log's own format: procd hands it to syslog
+		// (files/wwand.init), and no logger reaches this far down
+		if (sw != '9000')
+			warn(sprintf('warn: modem %s: TERMINAL CAPABILITY (IPAd) not accepted: %s\n',
+				modem.id ?? '?', sw ?? sprintf('%J', err)));
+		cb();
+	};
+
+	// the basic channel: AT+CSIM, QMI SEND_APDU without a channel id, and
+	// channel 0 for MBIM UICC (not HW-tested there)
+	if (be == 'at')
+		return modem.at.send(sprintf('AT+CSIM=%d,"%s"', length(TERMINAL_CAPABILITY_IPAD), TERMINAL_CAPABILITY_IPAD), (err, res) => {
+			for (let l in (res?.lines ?? [])) {
+				let m = match(l, /\+CSIM: *[0-9]+,"?([0-9A-Fa-f]+)"?/);
+
+				if (m)
+					return done(null, m[1]);
+			}
+
+			done(err ?? { error: 'no_response' }, null);
+		}, { timeout: 15000 });
+
+	if (be == 'mbim')
+		return modem.mbim_uicc.apdu(0, TERMINAL_CAPABILITY_IPAD, done);
+
+	modem.uim.request('SEND_APDU', {
+		slot: uim_slot(modem, slot), apdu: hex_to_arr(TERMINAL_CAPABILITY_IPAD),
+	}, (err, data) => done(err, err ? null : arr_to_hex(data.response ?? [])), { timeout: 15000 });
+}
+
 // open a logical channel to `aid_hex` on physical slot `slot` (1-based);
 // cb(err, { channel, select_response })
 // `opts.probe` (a string) marks a DISCOVERY open: its bare AT ERROR is the
@@ -1693,6 +1747,10 @@ export function apdu_open(modem, slot, aid_hex, cb, opts)
 
 		if (gone)
 			return cb(gone, null);
+
+		if (lc(aid_hex ?? '') == ISDR_AID && !opts?._declared)
+			return declare_ipad(modem, slot, be, () =>
+				apdu_open(modem, slot, aid_hex, cb, { ...(opts ?? {}), _declared: true }));
 
 		if (be == 'mbim')
 			return modem.mbim_uicc.open(aid_hex, (err, d) =>
@@ -1910,13 +1968,14 @@ export function apdu_close(modem, slot, channel, cb)
 // info: { sgp32: bool, ipae_supported: bool, svn: '2.5.0' | null,
 //         ipa: 'ipae' | 'ipad' | null } — ipa only for an SGP.32 card.
 //
-// The FCI only says the card SUPPORTS an IPAe. Which IPA is active is decided
-// when the card starts, and a card running its IPAe refuses ES10 from the
-// device altogether, since ES10 is then internal to it: SGP.32 has the
-// device's IPA (IPAd) ask by sending ES10 at all. So GetEUICCInfo1 — which an
-// eUICC that serves a device IPA always answers — tells the two apart:
-// 6985 (conditions of use not satisfied) is IPAe, an answer is IPAd. HW-seen
-// on the card above: every ES10 command, GetEUICCInfo1 included, 6985.
+// The FCI only says the card SUPPORTS an IPAe. Which IPA is active follows the
+// device's TERMINAL CAPABILITY (declare_ipad, above apdu_open), and a card
+// running its IPAe refuses ES10 from the device altogether, since ES10 is then
+// internal to it. So GetEUICCInfo1 — which an eUICC that serves a device IPA
+// always answers — tells the two apart: 6985 (conditions of use not
+// satisfied) is IPAe, an answer is IPAd. HW-seen on the card above: every ES10
+// command, GetEUICCInfo1 included, 6985. With `option ipa_mode 'ipad'` the open
+// below declares the IPAd first, so the read reports what that achieved.
 export function card_euicc_info(modem, cb)
 {
 	let slot = +(modem.active_slot ?? modem.config?.sim_slot ?? 1) || 1;

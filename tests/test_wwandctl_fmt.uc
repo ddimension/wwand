@@ -430,7 +430,7 @@ eq(fmt.reg_text({ state: 'READY', rat: 'LTE',
 
 // --- euicc_text: what the card's ISD-R says ----------------------------------
 eq(fmt.euicc_text({ sgp32: true, ipae_supported: true, svn: '2.5.0', ipa: 'ipae' }),
-   'SGP.32 IoT (on SGP.22 2.5.0) · IPA in the card (IPAe) — no ES10 from the router',
+   'SGP.32 IoT (on SGP.22 2.5.0) · IPA in the card (IPAe) — no ES10 from the router (option ipa_mode \'ipad\')',
    'euicc: an IPAe card says why ES10 fails');
 eq(fmt.euicc_text({ sgp32: false, svn: '2.2.2' }), 'SGP.22 2.2.2', 'euicc: an SGP.22 card');
 eq(fmt.euicc_text(null), null, 'euicc: nothing read');

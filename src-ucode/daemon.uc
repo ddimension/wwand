@@ -509,7 +509,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:1101-1104 warns "references
+	// produces no entry for it at all (config.uc:1117-1120 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -1397,7 +1397,7 @@ export function create(opts)
 
 		if (info?.sgp32)
 			log('notice', sprintf('modem %s: SGP.32 IoT eUICC (SGP.22 %s), %s', m.id, info.svn ?? '?',
-				(info.ipa == 'ipae') ? 'its own IPA (IPAe) is in charge — ES10 from the router is refused by design'
+				(info.ipa == 'ipae') ? 'its own IPA (IPAe) is in charge — ES10 from the router is refused (option ipa_mode \'ipad\' declares the router\'s IPA)'
 				: (info.ipa == 'ipad') ? 'served by the device IPA (IPAd)' : 'IPA mode unknown'));
 
 		let waiters = st.waiters;

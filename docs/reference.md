@@ -558,6 +558,12 @@ config wwand_modem 'm0'
 	                                 #    (GTFCCLOCK over AT); 'fibocom' forces it, and
 	                                 #    'fibocom:<model_id>' pins the OEM id. See
 	                                 #    "FCC-locked laptop modem".
+	option ipa_mode 'ipad'           # SGP.32 IoT eUICC with its own IPA (IPAe): declare the
+	                                 #    router's IPA (IPAd) with TERMINAL CAPABILITY tag 84
+	                                 #    before every ISD-R open, so the card serves ES10
+	                                 #    (eSIM page, lpac, wwand-ipa). This SWITCHES THE
+	                                 #    CARD'S IPAe OFF — unset (default) sends nothing and
+	                                 #    leaves the card as it starts. See "SGP.32 IoT cards".
 	option lock_4g '1300:246'        # earfcn:pci — LTE cell lock (list: up to 10 cells, AT+QNWLOCK="common/4g",<n>,…)
 	option lock_5g '242:431070:15:1' # pci:arfcn:scs:band — NR SA cell lock
 	option lock_persist '0'          # store the cell lock in modem NV
@@ -1161,6 +1167,27 @@ through lpac, then wwand hot-resets the SIM and re-applies identity-matched
 config ([eSIM management & provisioning](#esim-management--provisioning)).
 M2M eUICCs (operator-managed, SGP.02) have no local management — wwand
 reports `m2m_or_locked_euicc` instead of failing cryptically.
+
+### SGP.32 IoT cards: IPAe or IPAd
+
+An SGP.32 IoT eUICC that carries its own IPA (IPAe) runs it unless the device
+says it has one: with no TERMINAL CAPABILITY, or one without tag 84, the card
+refuses ES10 from the router with 6985, and `wwandctl status` reports
+`IPA in the card (IPAe)` (IDEMIA DAKOTA IoT v1.2 Device Requirements,
+DEV_REQ_8). The modem does not send tag 84 itself. To manage such a card from
+the router:
+
+```
+config wwand_modem 'm0'
+	option ipa_mode 'ipad'
+```
+
+wwand then sends `80 AA 00 00 05 A9 03 84 01 01` on the basic channel before
+each ISD-R open, and the card serves ES10. This turns the card's own IPAe off,
+which is why it is opt-in: a fleet whose cards poll their eIM on their own
+keeps working only without it. A modem that runs the wwand-ipa plugin
+(`option ipa '1'`) on such a card needs it too. HW-seen on an IDEMIA card behind an RG502Q,
+2026-11-11.
 
 ### Pin the radio: modes, bands, cell lock
 

@@ -1277,6 +1277,19 @@ r = padopt({
 });
 eq(r.modems.m0.fcc_auth, 'foxconn:0', 'modem: fcc_auth passed through');
 
+// option ipa_mode switches a card's own IPA off, so only the one value counts
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', ipa_mode: 'IPAd' },
+		m1: { '.type': 'wwand_modem', device: '/dev/cdc-wdm1', ipa_mode: 'yes' },
+		m2: { '.type': 'wwand_modem', device: '/dev/cdc-wdm2' },
+	},
+});
+eq([ r.modems.m0.ipa_mode, r.modems.m1.ipa_mode, r.modems.m2.ipa_mode ], [ 'ipad', null, null ],
+	'modem: ipa_mode is ipad or unset, a typo is not read as yes');
+eq(length(filter(r.warnings, (w) => index(w, 'ipa_mode: unknown value') == 0)), 1,
+	'modem: an unknown ipa_mode value warns');
+
 // wwand_sim.modem is OPTIONAL: an unbound sim applies to every modem (matched
 // by ICCID), a bound one only to its modem
 r = padopt({

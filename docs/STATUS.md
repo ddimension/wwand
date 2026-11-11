@@ -21,6 +21,17 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
+- **`option ipa_mode 'ipad'` (2026-11-11, uncommitted):** an SGP.32 card
+  with its own IPA runs it until the device sends TERMINAL CAPABILITY tag 84
+  (IDEMIA DAKOTA IoT v1.2 DEV_REQ_8); the modem never does. With the option,
+  `sim.uc declare_ipad` sends `A9 03 84 01 01` on the basic channel before
+  every ISD-R open. It is opt-in because it switches the card's IPAe off. The
+  name is not `ipa` because wwand-ipa owns that one. HW-verified on 5.202
+  (IDEMIA card, RG502Q) with a card reset each time: without the option
+  IPAe, with it IPAd and an ES10 EID read. LuCI: modem option
+  "SGP.32 IPA", and the IPAe status line points to it. Deployed there as
+  source over 1.8.0; originals in `/root/wwand-1.8.0-orig/` and
+  `/root/luci-1.8.0-orig/`. AT and MBIM paths are host-tested only.
 - **LED running light (2026-11-08, from #48):** the `tech` style takes
   `sweep: true` — the technology LEDs run oldest-first every 300 ms while
   the modem searches, on a timer of the board instance (`board.uc`

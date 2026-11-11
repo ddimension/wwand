@@ -280,6 +280,7 @@ export function modem_defaults(over)
 		gnss_nmea: null,       // 'fix' | 'full': the NMEA the receiver emits (null = untouched)
 		nitz_time: true,       // step the system clock from NITZ (see deps set_clock)
 		fcc_auth: null,        // RF unlock for laptop-SKU modems (see reference.md)
+		ipa_mode: null,        // 'ipad': declare the router's IPA to an SGP.32 card (sim.uc declare_ipad)
 		failreboot: 100, recovery_steps: null, proto_error_limit: 25, zero_rx_timeout: 21600,
 		tx_stall_timeout: 120, // s: a stuck transmit queue resets the modem (0 = watch only)
 		unarmed_reset_after: 300,   // s: first reset-line pulse of a never-answering modem
@@ -292,6 +293,20 @@ export function modem_defaults(over)
 		...(over ?? {}),
 	};
 };
+
+// `option ipa_mode`: 'ipad' or unset. Anything else warns and stays unset — the
+// option switches a card's own IPA off, so a typo must not be read as yes.
+function ipa_mode_opt(v, warnings)
+{
+	if (v == null || v == '')
+		return null;
+
+	if (lc(v) == 'ipad')
+		return 'ipad';
+
+	push(warnings ?? [], sprintf('ipa_mode: unknown value %J (only \'ipad\') — ignored', v));
+	return null;
+}
 
 // `option iccid` of an interface: 18-22 digits (ITU-T E.118; a trailing F and
 // blanks as the modems and the card print it are tolerated), else a warning
@@ -406,7 +421,7 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'recovery_steps', 'pincode', 'modes', 'rat_order', 'mcc', 'mnc',
 	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'nitz_time', 'fcc_auth',
 	'gnss_nmea', 'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
-	'unarmed_reset_after', 'card_hold',
+	'unarmed_reset_after', 'card_hold', 'ipa_mode',
 	'zero_rx_timeout', 'tx_stall_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
 	// the AT-over-MBIM pipe: `at_over_mbim` forces it and picks the vendor CID
@@ -609,6 +624,7 @@ function modem_from_section(s, warnings)
 		// turn a stray 3 into v1 and a stray 99 into "automatic" without a word.
 		qmap_version: num_opt(s.qmap_version, 0, 'qmap_version', warnings),
 		fcc_auth: s.fcc_auth,
+		ipa_mode: ipa_mode_opt(s.ipa_mode, warnings),
 		at_init: (type(s.at_init) == 'array') ? s.at_init :
 		         (s.at_init != null ? [ s.at_init ] : []),
 		location: bool_opt(s.location, false),

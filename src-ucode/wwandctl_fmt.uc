@@ -270,7 +270,8 @@ export const COLLECTD_MIN_INTERVAL = 30;
 // The card's ISD-R about itself (status `euicc`, daemon probe_euicc) in one
 // line, or null when nothing was read. Which IPA runs an SGP.32 card is the
 // part worth a line: with its own (IPAe) in charge the router has no ES10
-// access, and `esim profiles` failing with 6985 is then expected, not a fault.
+// access, and `esim profiles` failing with 6985 is then expected, not a fault —
+// until `option ipa_mode 'ipad'` declares the router's IPA (sim.uc declare_ipad).
 export function euicc_text(e)
 {
 	if (type(e) != 'object' || (!e.sgp32 && !e.svn))
@@ -281,7 +282,7 @@ export function euicc_text(e)
 	if (!e.sgp32)
 		return base;
 
-	let ipa = (e.ipa == 'ipae') ? 'IPA in the card (IPAe) — no ES10 from the router'
+	let ipa = (e.ipa == 'ipae') ? 'IPA in the card (IPAe) — no ES10 from the router (option ipa_mode \'ipad\')'
 		: (e.ipa == 'ipad') ? 'IPA on the device (IPAd)'
 		: 'IPA unknown';
 
