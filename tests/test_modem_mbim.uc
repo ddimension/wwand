@@ -2649,26 +2649,31 @@ assert_ready_state_reinit(false, 'ready-state reinit/stuck');
 }
 
 // --- option modes, natively (Register State DataClass, #75) ------------------
-// A T99W175 (HW-read 2026-11-08): its caps carry CUSTOM named "5G UWB", which
-// is its 5G SA, and a set takes the class it understands. The mock modem keeps
-// what a set sends unless told to ignore it, and answers the set with the state
-// after it, as a real one does.
+// Two T99W175 firmwares. F0.0.0.3.0.GC.003 (HW-read 2026-11-08): caps carry
+// 5G_NSA and CUSTOM named "5G UWB", which is its 5G SA, and a set drops the
+// plain 5G_SA bit. F0.1.0.0.9.GC.004 (mbimcli output in wwand#75,
+// 2026-11-10): caps "umts, hsdpa, hsupa, lte, custom" named "5G", a set of
+// LTE | 5G_NSA | 5G_SA is held as "lte, 5g-nsa", and CUSTOM is TD-SCDMA plus
+// NR. The mock modem keeps what a set sends minus the bits it drops (or
+// nothing, told to ignore it), and answers the set with the state after it,
+// as a real one does.
 function run_modes(label, o) {
 	uloop.init();
 
 	let x55 = ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA |
 		ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM;
-	let st = { pref: o.pref ?? x55 };
+	let caps = o.caps ?? x55;
+	let st = { pref: o.pref ?? caps };
 	let h = handlers();
 
-	h.DEVICE_CAPS = { ...h.DEVICE_CAPS, data_class: x55, custom_data_class: '5G UWB',
+	h.DEVICE_CAPS = { ...h.DEVICE_CAPS, data_class: caps, custom_data_class: o.custom ?? '5G UWB',
 		hardware_info: 'Qualcomm Snapdragon X55 5G' };
 
 	let reg = h.REGISTER_STATE;
 
 	h.REGISTER_STATE = (args, meta) => {
 		if (meta.kind == 'set' && !o.ignore_set)
-			st.pref = args.data_class;
+			st.pref = args.data_class & ~(o.drop ?? ext.DATA_CLASS_5G_SA);
 
 		let r = { ...reg, register_mode: o.manual ? bc.REGISTER_MODE_MANUAL : bc.REGISTER_MODE_AUTOMATIC };
 
@@ -2718,15 +2723,45 @@ function run_modes(label, o) {
 {
 	let LTE_NR = ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM;
 
+	let LTE_STD = ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA;
+	let auto = (dc) => ({ provider_id: null, register_action: bc.REGISTER_ACTION_AUTOMATIC, data_class: dc });
+
 	let r = run_modes('x55', { modes: 'lte,nr5g' });
 	// the empty provider id of an automatic set decodes as null in the mock
-	eq(r.sets, [ { provider_id: null, register_action: bc.REGISTER_ACTION_AUTOMATIC, data_class: LTE_NR } ],
-		'mbim modes: lte,nr5g written once, natively, with CUSTOM for the SA it stands for');
+	eq(r.sets, [ auto(LTE_STD), auto(LTE_NR) ],
+		'mbim modes: lte,nr5g goes out as standard bits, then with CUSTOM for the 5G_SA the modem dropped');
 	eq(r.warnings, [], 'mbim modes: ...and read back from the set reply as held');
-	eq(r.dc, LTE_NR, 'mbim modes: ...and kept for a later network selection');
+	eq(r.dc, LTE_NR, 'mbim modes: ...and the mask it took is kept for a later network selection');
 
 	r = run_modes('held', { modes: 'lte,nr5g', pref: LTE_NR });
 	eq(r.sets, [], 'mbim modes: a modem already on them is not re-registered');
+	eq(r.dc, LTE_NR, 'mbim modes: ...and its CUSTOM mask is what a network selection sends');
+
+	// F0.1.0.0.9: CUSTOM stands for 5G NSA by ModemManager's rule, and the
+	// standard bits are taken, so CUSTOM is never sent
+	let f01 = { caps: ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA |
+		ext.DATA_CLASS_LTE | ext.DATA_CLASS_CUSTOM, custom: '5G' };
+
+	r = run_modes('f01', { ...f01, modes: 'lte,nr5g' });
+	eq(r.sets, [ auto(LTE_STD) ], 'mbim modes: a firmware that holds the standard bits gets no CUSTOM (td-scdma there)');
+	eq([ r.warnings, r.dc ], [ [], LTE_STD ], 'mbim modes: ...held as sent, minus the 5G_SA it folds into NSA');
+
+	r = run_modes('f01_nr', { ...f01, modes: 'nr5g' });
+	eq(r.sets, [ auto(ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA) ],
+		'mbim modes: nr5g alone is NR, not the CUSTOM | 5G_SA that read back as "td-scdma, 5gnr"');
+
+	// "HSPA+" stands for two bits; a firmware that drops only HSUPA still
+	// reads back as umts, and gets CUSTOM for the pair
+	let UMTS = ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA;
+
+	r = run_modes('hspa', { caps: ext.DATA_CLASS_UMTS | ext.DATA_CLASS_LTE | ext.DATA_CLASS_CUSTOM,
+		custom: 'HSPA+', modes: 'umts', drop: ext.DATA_CLASS_HSUPA });
+	eq(r.sets, [ auto(UMTS), auto(ext.DATA_CLASS_UMTS | ext.DATA_CLASS_CUSTOM) ],
+		'mbim modes: one bit of a two-bit CUSTOM class dropped is enough for the fallback');
+
+	r = run_modes('f01_left', { ...f01, modes: 'nr5g', pref: ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM });
+	eq(r.sets, [ auto(ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA) ],
+		'mbim modes: CUSTOM held beside the NSA it stands for is rewritten without it');
 
 	r = run_modes('manual', { modes: 'lte', manual: true });
 	eq(r.sets, [ { provider_id: '24008', register_action: bc.REGISTER_ACTION_MANUAL, data_class: ext.DATA_CLASS_LTE } ],

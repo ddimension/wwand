@@ -21,7 +21,7 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
-- **`option ipa_mode 'ipad'` (2026-11-11, uncommitted):** an SGP.32 card
+- **`option ipa_mode 'ipad'` (2026-11-11, 4d283f3):** an SGP.32 card
   with its own IPA runs it until the device sends TERMINAL CAPABILITY tag 84
   (IDEMIA DAKOTA IoT v1.2 DEV_REQ_8); the modem never does. With the option,
   `sim.uc declare_ipad` sends `A9 03 84 01 01` on the basic channel before
@@ -63,12 +63,15 @@ state buried at the top invites reading a months-old entry as present tense.
   under OpenWrt (2026-11-08): `lte,nr5g` written as 0x80000060 and held,
   skipped on restart and after a modem reset, `umts,lte,nr5g` restored as
   0x8000007c. Open: the LuCI mode editor on an MBIM modem without a
-  passthrough (FM350) still has no native path. Open: on mrhaav's
-  T99W175.F0.1.0.0.9 (caps `custom` named "5G", no 5g-nsa) CUSTOM turns on
-  TD-SCDMA plus NR in the NAS view, while the firmware reports the standard
-  5g-nsa bit for NR on its own (#75, 2026-11-09) — so the ModemManager rule
-  (CUSTOM = NSA) is wrong there; whether it accepts the standard bits in a
-  set is asked.
+  passthrough (FM350) still has no native path. **Standard bits first
+  (2026-11-11):** on mrhaav's T99W175.F0.1.0.0.9 (caps `custom` named "5G",
+  no 5g-nsa) CUSTOM alone reads back as `td-scdma, 5gnr` and gave no service
+  with `nr5g`, while a set of `lte|5g-nsa|5g-sa` is held as `lte, 5g-nsa`
+  (#75, 2026-11-10). So `sync_modes` sends the standard bits and falls back
+  to CUSTOM (`mbim_backend.uc data_class_custom`) only when the reply drops
+  the bit it stands for, which is what F0.0.0.3 does. A CUSTOM held next to
+  its own bits is rewritten. Host-tested with both firmwares modelled; not
+  HW-run, because our T99W175 is the blocked 192.168.1.1.
 - **A control device before its netdev (2026-11-08):** after a modem reset
   the T99W175 (mhi-pci-generic) announces `wwan0mbim0` before its netdev;
   the modem was started without one, the netdev kept its kernel name and

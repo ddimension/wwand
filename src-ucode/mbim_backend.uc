@@ -911,11 +911,10 @@ export function custom_class(caps_dc, custom)
 	return 0;
 };
 
-// modes (NAS mode bits) -> the DataClass to send, with the bits CUSTOM stands
-// for replaced by CUSTOM. A mask with no technology MBIM can name is 0, which
-// a Register State set reads as "any" — the caller must not send that for a
-// configured mode list.
-export function data_class_from_modes(modes, caps_dc, custom)
+// modes (NAS mode bits) -> the DataClass to send, standard bits only. A mask
+// with no technology MBIM can name is 0, which a Register State set reads as
+// "any" — the caller must not send that for a configured mode list.
+export function data_class_from_modes(modes)
 {
 	let m = modes ?? 0;
 	let dc = 0;
@@ -926,12 +925,16 @@ export function data_class_from_modes(modes, caps_dc, custom)
 	if (m & nasmod.MODE_BITS.nr5g) dc |= DC_NR;
 	if (m & nasmod.MODE_BITS.cdma) dc |= DC_CDMA;
 
+	return dc;
+};
+
+// the same DataClass with the bits CUSTOM stands for replaced by CUSTOM, for a
+// firmware that drops them — null when CUSTOM stands for nothing in dc
+export function data_class_custom(dc, caps_dc, custom)
+{
 	let cc = custom_class(caps_dc, custom);
 
-	if (cc && (dc & cc))
-		dc = (dc & ~cc) | ext.DATA_CLASS_CUSTOM;
-
-	return dc;
+	return (cc && (dc & cc)) ? ((dc & ~cc) | ext.DATA_CLASS_CUSTOM) : null;
 };
 
 // a reported DataClass (PreferredDataClasses) -> NAS mode bits, CUSTOM read as

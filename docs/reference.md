@@ -1205,9 +1205,12 @@ holds something else; every write is permanent:
 - **MBIM, MBIMEx 2.0 and later:** natively, as the `DataClass` of a Register
   State set, checked against the `PreferredDataClasses` of its reply. The
   mapping is ModemManager's (1.24.0): `nr5g` sends both 5G NSA and 5G SA,
-  `umts` the whole 3G family. A modem that reports a class as CUSTOM gets
-  CUSTOM back for it: on a Foxconn T99W175 (`5G UWB`) CUSTOM is its 5G SA,
-  and the plain 5G SA bit is dropped by its firmware. A manually selected
+  `umts` the whole 3G family. The standard bits go first. CUSTOM goes out
+  only when the modem drops the bit CUSTOM stands for: on a Foxconn T99W175
+  F0.0.0.3 (`5G UWB`) CUSTOM is its 5G SA, and the firmware drops the plain
+  5G SA bit. F0.1.0.0.9 holds the standard bits, and there CUSTOM alone means
+  TD-SCDMA plus NR, so it never gets CUSTOM. A CUSTOM bit held next to the
+  standard bits it stands for is rewritten without it. A manually selected
   network stays selected. The T99W175 keeps the mask across a modem reset
   (HW-observed 2026-11-08). `td-scdma` has no MBIM data class and is reported,
   not selected. A later manual network selection (`modem_netsel`) sends the

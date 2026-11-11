@@ -1314,7 +1314,19 @@ export function create(opts)
 
 		let caps = self.info?.mbim_data_class;
 		let custom = self.info?.mbim_custom_data_class;
-		let dc = mbim_backend.data_class_from_modes(want, caps, custom);
+		// STANDARD BITS FIRST, CUSTOM ONLY WHERE THEY ARE DROPPED. What CUSTOM
+		// stands for differs between firmware of the same modem: on a T99W175
+		// F0.0.0.3.0.GC.003 it is 5G SA and the plain 5G_SA bit is dropped
+		// (HW-observed 2026-11-08), on F0.1.0.0.9.GC.004 the standard bits
+		// are held as sent and CUSTOM alone becomes "td-scdma, 5gnr" in the
+		// NAS mode preference — TD-SCDMA nobody asked for, no LTE anchor
+		// (reported with mbimcli/qmicli output, ddimension/wwand#75,
+		// 2026-11-10). Sending CUSTOM up front, as ModemManager 1.24.0 does,
+		// is right for the first and wrong for the second; only the set's
+		// reply tells them apart.
+		let cc = mbim_backend.custom_class(caps, custom);
+		let dc = mbim_backend.data_class_from_modes(want);
+		let dc_custom = mbim_backend.data_class_custom(dc, caps, custom);
 		let names = (m) => join(',', filter([ 'gsm', 'umts', 'lte', 'nr5g', 'cdma' ],
 			(n) => m & nasmod.MODE_BITS[n])) || 'none';
 
@@ -1365,36 +1377,62 @@ export function create(opts)
 			if (qerr || cur?.preferred_data_classes == null)
 				return via_nas();
 
-			self._modes_data_class = dc;
+			let p = cur.preferred_data_classes;
 
-			if (held(cur.preferred_data_classes) == wanted) {
+			// CUSTOM held beside the very bits it stands for is not needed by
+			// this firmware, and on one that reads it as TD-SCDMA it is the
+			// state a CUSTOM-first set left behind — so it is rewritten
+			let redundant = (p & ext.DATA_CLASS_CUSTOM) && cc && (p & cc) == cc;
+
+			self._modes_data_class = (dc_custom != null && (p & ext.DATA_CLASS_CUSTOM) && !redundant) ? dc_custom : dc;
+
+			if (held(p) == wanted && !redundant) {
 				log('info', sprintf('network modes "%s" already set — skipping', self.config.modes));
 				return finish();
 			}
 
 			let manual = (cur.register_mode == bc.REGISTER_MODE_MANUAL && cur.provider_id);
 
-			log('notice', sprintf('setting network modes "%s" (data class 0x%08x, modem held %s)',
-				self.config.modes, dc, names(held(cur.preferred_data_classes))));
+			let send;
 
-			self.mbim.command(bc, 'REGISTER_STATE', 'set', {
-				provider_id: manual ? cur.provider_id : '',
-				register_action: manual ? bc.REGISTER_ACTION_MANUAL : bc.REGISTER_ACTION_AUTOMATIC,
-				data_class: dc,
-			}, (serr, now) => {
-				// THE SET'S OWN REPLY IS THE READ-BACK: Register State set
-				// answers with the full state, PreferredDataClasses included
-				// (libmbim 1.32.0, mbim-service-ms-basic-connect-v2.json). A
-				// modem that drops a bit it does not know answers with the
-				// mask it kept, which is how a 5G_SA sent to a T99W175 shows.
-				if (serr)
-					warn(sprintf('setting modes "%s" failed: %J', self.config.modes, serr), null);
-				else if (now?.preferred_data_classes != null && held(now.preferred_data_classes) != wanted)
-					warn(sprintf('modem kept %s for modes "%s"', names(held(now.preferred_data_classes)), self.config.modes),
-						names(held(now.preferred_data_classes)));
+			send = (mask, fallback) => {
+				log('notice', sprintf('setting network modes "%s" (data class 0x%08x, modem held %s)',
+					self.config.modes, mask, names(held(p))));
 
-				finish();
-			}, { timeout: 60000, no_recovery: true });
+				self.mbim.command(bc, 'REGISTER_STATE', 'set', {
+					provider_id: manual ? cur.provider_id : '',
+					register_action: manual ? bc.REGISTER_ACTION_MANUAL : bc.REGISTER_ACTION_AUTOMATIC,
+					data_class: mask,
+				}, (serr, now) => {
+					// THE SET'S OWN REPLY IS THE READ-BACK: Register State set
+					// answers with the full state, PreferredDataClasses
+					// included (libmbim 1.32.0,
+					// mbim-service-ms-basic-connect-v2.json). A modem that
+					// drops a bit it does not know answers with the mask it
+					// kept, which is how a 5G_SA sent to a T99W175 shows.
+					let kept = now?.preferred_data_classes;
+
+					// ANY bit of cc dropped counts: HSPA+ stands for two, and a
+					// modem keeping one of them still reads back as `umts`
+					if (!serr && kept != null && fallback != null &&
+					    (kept & mask & cc) != (mask & cc) && !(kept & ext.DATA_CLASS_CUSTOM)) {
+						log('notice', sprintf('the modem dropped data class 0x%08x — sending CUSTOM for it', cc));
+						self._modes_data_class = fallback;
+						return send(fallback, null);
+					}
+
+					if (serr)
+						warn(sprintf('setting modes "%s" failed: %J', self.config.modes, serr), null);
+					else if (kept != null && held(kept) != wanted)
+						warn(sprintf('modem kept %s for modes "%s"', names(held(kept)), self.config.modes),
+							names(held(kept)));
+
+					finish();
+				}, { timeout: 60000, no_recovery: true });
+			};
+
+			self._modes_data_class = dc;
+			send(dc, dc_custom);
 		}, { no_recovery: true });
 	};
 
