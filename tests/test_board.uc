@@ -221,6 +221,21 @@ uloop.timer(20, () => uloop.end());
 uloop.run();
 ok(fx.has(`${G}/modem_power/value=0`), 'wh3000-pro-nand: powered back on with value 0 (inverted)');
 
+// --- 4g. Arcadyan AW1000: lte_power, active high (1 = powered), no reset
+// line in the profile (its polarity was never measured, #86); both RGB lamps
+fx = mkfx({ [`${G}/lte_power/value`]: '1' });
+b = board.create({ id: 'arcadyan,aw1000', fx: fx, power_off_ms: 5, log: () => {} });
+ok(b.has_power, 'aw1000: has power gpio (lte_power)');
+eq(b.profile.reset_gpio, null, 'aw1000: no reset line guessed');
+eq(length(b.profile.leds), 2, 'aw1000: the technology lamp and the signal lamp');
+b.init();
+ok(!fx.has(`${G}/lte_power/direction`), 'aw1000: a powered line is left alone at init');
+ok(b.power_cycle(), 'aw1000: power_cycle returns true');
+ok(fx.has(`${G}/lte_power/value=0`), 'aw1000: powered off with value 0');
+uloop.timer(20, () => uloop.end());
+uloop.run();
+ok(fx.has(`${G}/lte_power/value=1`), 'aw1000: powered back on with value 1');
+
 // --- 4e. GPIO name sanitizer: a config-supplied reset_gpio is interpolated into
 // a sysfs path — hostile values (slash, '..', oversized) must be rejected, never
 // written. reset_pulse takes the per-modem uci value directly, so drive it there.
@@ -363,7 +378,8 @@ const USR = '/usr/share/wwand/boards.d', ETC = '/etc/wwand/boards.d';
 // the table and the files cannot drift into two dialects
 for (let bid in [ 'mikrotik,chateau-5g-r17-ax', 'zyxel,lte3301-plus', 'zyxel,lte3301-m209',
                   'zyxel,lte3301-q222', 'zyxel,lte5398-m904', 'zyxel,nr7101',
-                  'cudy,lt300-v3', 'huasifei,wh3000-pro-emmc', 'huasifei,wh3000-pro-nand' ]) {
+                  'cudy,lt300-v3', 'huasifei,wh3000-pro-emmc', 'huasifei,wh3000-pro-nand',
+                  'arcadyan,aw1000' ]) {
 	let pb = board.create({ id: bid, fx: mkfx({}), log: () => {} });
 	eq(pb.profile_source, 'builtin', `builtin ${bid}: found in the table`);
 	eq(board.validate_profile(pb.profile), null, `builtin ${bid}: passes the board-file validator`);
@@ -542,6 +558,47 @@ function led_board(leds, opts) {
 
 	t.b.leds({ present: false, registered: false });
 	eq(t.state('red:signal'), 255, 'signal_color: no modem: the searching colour, steady');
+}
+
+{
+	// the built-in AW1000 profile (#86) renders like the board file above:
+	// one technology per lamp, the bars as a colour, searching red
+	let f = mkfx({});
+	let b = board.create({ id: 'arcadyan,aw1000', fx: f, log: () => {} });
+	let st = (name) => {
+		let v = null;
+
+		for (let w in f.writes) {
+			if (w == `${L}/${name}/trigger=timer`)
+				v = 'timer';
+			else if (w == `${L}/${name}/brightness=255`)
+				v = 255;
+			else if (w == `${L}/${name}/brightness=0`)
+				v = 0;
+		}
+
+		return v;
+	};
+
+	eq(b.profile_source, 'builtin', 'aw1000 leds: the built-in profile, no board file');
+
+	b.leds({ present: true, registered: true, gen: '5g', bars: 5 });
+	eq([ st('red:5g'), st('green:5g'), st('blue:5g'), st('red:signal'), st('green:signal'), st('blue:signal') ],
+		[ 0, 0, 255, 0, 255, 0 ], 'aw1000 leds: 5G blue, 5 bars green');
+
+	b.leds({ present: true, registered: true, gen: '5g', bars: 1 });
+	eq([ st('blue:5g'), st('red:signal'), st('green:signal') ], [ 'timer', 255, 0 ],
+		'aw1000 leds: weak 5G blinks blue, 1 bar red');
+
+	b.leds({ present: true, registered: true, gen: '4g', bars: 1 });
+	eq([ st('green:5g'), st('blue:5g') ], [ 255, 0 ], 'aw1000 leds: weak LTE stays green (no `weak` given)');
+
+	b.leds({ present: true, registered: true, gen: '4g', bars: 3 });
+	eq([ st('red:signal'), st('green:signal'), st('blue:signal') ], [ 255, 255, 0 ], 'aw1000 leds: 3 bars yellow');
+
+	b.leds({ present: true, registered: false, bars: 0 });
+	eq([ st('red:5g'), st('green:5g'), st('blue:5g'), st('red:signal'), st('green:signal') ],
+		[ 'timer', 0, 0, 'timer', 0 ], 'aw1000 leds: searching blinks both lamps red, nothing else');
 }
 
 {

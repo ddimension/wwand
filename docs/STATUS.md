@@ -38,6 +38,11 @@ state buried at the top invites reading a months-old entry as present tense.
   EID and 4 profiles (ships in pre14; on the Pi deployed as source
   over pre13, the original in `/root/sim.uc.pre13`). The option was removed
   afterwards and the card is back on IPAe.
+- **Arcadyan AW1000 built-in profile (2026-11-12, #86):** `lte_power`
+  (tlmm 30, 1 = on) plus the two RGB lamps from #77. Reporter-tested with
+  `wwandctl repower` (WAN back after ~63 s, NSS offload intact); not tested
+  here, no AW1000 on hand. `lte_reset` stays out until its polarity is
+  measured.
 - **LED running light (2026-11-08, from #48):** the `tech` style takes
   `sweep: true` — the technology LEDs run oldest-first every 300 ms while
   the modem searches, on a timer of the board instance (`board.uc`

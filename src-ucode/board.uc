@@ -694,6 +694,27 @@ const PROFILES = {
 		power_gpio: 'modem_power',
 		power_gpio_active_low: true,
 	},
+	// Arcadyan AW1000 (IPQ8072, RG500Q-EA on USB). The DTS exports the modem
+	// lines through gpio-export, all driven to 1 at boot: `lte_power` (tlmm
+	// 30, 1 = powered), `lte_reset` (tlmm 63), `lte_pwrkey` (tlmm 54)
+	// (ipq8072-aw1000.dts, OpenWrt 9ed087e0dd). A power cycle on `lte_power`
+	// brings the modem back cold and the connection returns by itself
+	// (field-tested with wwandctl repower, ddimension/wwand#86, 2026-11-12).
+	// The power key stays at 1, so the modem starts on its own when power
+	// returns. `lte_reset` is left out: its polarity was never measured, and
+	// a guessed reset level can hold the modem in reset (see reset_pulse).
+	// LEDs: two RGB lamps, each channel its own gpio-led — `5g` shows the
+	// technology, `signal` the bars as a colour (#77).
+	'arcadyan,aw1000': {
+		power_gpio: 'lte_power',
+		leds: [
+			{ style: 'tech', cumulative: false, weak_bars: 1, searching: 'red:5g',
+			  leds: { '4g': 'green:5g', '5g': { led: 'blue:5g', weak: 'blink' } } },
+			{ style: 'signal_color', red: 'red:signal', green: 'green:signal', blue: 'blue:signal',
+			  colors: [ 'red', 'red', 'yellow', 'green', 'green' ],
+			  searching: { color: 'red', blink: true } },
+		],
+	},
 };
 
 // --- board files ---------------------------------------------------------------

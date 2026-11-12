@@ -2497,7 +2497,9 @@ NR7101 (the RG502Q's RESET line as `gpio515`, held for 30 s on recovery; GPIO 18
 is not used even where an image exports it as `lte_power`, because switching it
 off did not bring back a modem that had left the bus; no LEDs — they are
 OS-owned), Huasifei WH3000 Pro (INVERTED `modem_power` GPIO — 1 =
-off, no reset line, no modem LEDs). An **unknown board** yields a no-op
+off, no reset line, no modem LEDs), Arcadyan AW1000 (`lte_power` GPIO,
+1 = on; `lte_reset` left out because its polarity is unmeasured; the 5G
+RGB lamp shows the technology and the signal RGB lamp the bars as a colour). An **unknown board** yields a no-op
 profile — wwand runs unchanged, and any GPIO/LED can still be named per modem
 (`reset_gpio`). LuCI's reset-GPIO picker lists every named GPIO line the kernel
 exposes. Adding a profile: see [extending.md](extending.md#8-adding-a-board-profile).
