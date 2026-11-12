@@ -74,15 +74,25 @@ state buried at the top invites reading a months-old entry as present tense.
   under OpenWrt (2026-11-08): `lte,nr5g` written as 0x80000060 and held,
   skipped on restart and after a modem reset, `umts,lte,nr5g` restored as
   0x8000007c. Open: the LuCI mode editor on an MBIM modem without a
-  passthrough (FM350) still has no native path. **Standard bits first
-  (2026-11-11):** on mrhaav's T99W175.F0.1.0.0.9 (caps `custom` named "5G",
-  no 5g-nsa) CUSTOM alone reads back as `td-scdma, 5gnr` and gave no service
-  with `nr5g`, while a set of `lte|5g-nsa|5g-sa` is held as `lte, 5g-nsa`
-  (#75, 2026-11-10). So `sync_modes` sends the standard bits and falls back
-  to CUSTOM (`mbim_backend.uc data_class_custom`) only when the reply drops
-  the bit it stands for, which is what F0.0.0.3 does. A CUSTOM held next to
-  its own bits is rewritten. Host-tested with both firmwares modelled; not
-  HW-run, because our T99W175 is the blocked 192.168.1.1.
+  passthrough (FM350) still has no native path. **QMI first, NSA/SA apart
+  (2026-11-12):** what CUSTOM means on a T99W175 changes with firmware AND
+  carrier profile (F0.1.0.0.9: `td-scdma, 5gnr` with GC, `lte, 5gnr` with
+  SC), and SA was off on mrhaav's modem because of `^NR5G_MODE: 1`, not
+  because of any data class bit (#75). So `sync_modes` now does what
+  ModemManager 1.24.0 does: modes over the passthrough NAS when there is
+  one, the DataClass (CUSTOM in place of its class) only without it, no
+  fallback. NSA vs SA is `option nr5g_mode` (`atcmd.uc nr5g_mode_commands`:
+  Foxconn `AT^NR5G_MODE`, Quectel `nr5g_disable_mode`), the Android split.
+  HW-run on the NR7101 (RG502Q-EA, 5.202, 2026-11-12): `nsa` wrote 1 and
+  read it back, `both` wrote 0, a matching value was only read ("already
+  set"); option removed afterwards, modem back on 0. The T99W175 side and
+  the NAS-first modes path are host-tested only (no T99W175 available,
+  mrhaav to test). hwtest -F on all reachable devices: no import or
+  runtime errors. LuCI:
+  "5G NR mode" under the modem's radio settings (luci-app-wwand). Found on the way: the forced
+  `option at_over_mbim` tunnel ran no init list at all, and its engine sent
+  setting steps as JSON; it now runs `modem_common.init_commands` through the
+  runner the tty engine uses (`atcmd.uc run_sequence`).
 - **A control device before its netdev (2026-11-08):** after a modem reset
   the T99W175 (mhi-pci-generic) announces `wwan0mbim0` before its netdev;
   the modem was started without one, the netdev kept its kernel name and

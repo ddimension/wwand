@@ -1978,6 +1978,20 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	let bad = { info: {}, config: {}, at_init_extra: () => die('boom') };
 
 	eq(mc.init_commands(bad), [], 'init list: a failing extra adds nothing and breaks nothing');
+
+	// the 5G NR mode last; an option no known command can apply is a warning
+	let fox = { info: { firmware: 'T99W175.F0.0.0.3.0.GC.003' }, config: { nr5g_mode: 'sa' } };
+	let fc = mc.init_commands(fox);
+
+	eq(fc[length(fc) - 1]?.set, 'AT^NR5G_MODE=2', 'init list: the 5G NR mode step last');
+	eq(fox.config_warnings, [], 'init list: an applicable nr5g_mode warns nothing');
+
+	let other = { info: { manufacturer: 'Fibocom' }, config: { nr5g_mode: 'nsa' },
+	              config_warnings: [ { check: 'nr5g_mode' }, { check: 'quirk' } ] };
+
+	eq(mc.init_commands(other), [], 'init list: nothing for a modem of neither dialect');
+	eq(map(other.config_warnings, (w) => w.check), [ 'quirk', 'nr5g_mode' ],
+		'init list: ...reported once as not applied, other warnings kept');
 }
 
 // --- an AT port that was only not ready yet (ddimension/wwand#47) ----------

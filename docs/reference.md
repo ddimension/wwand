@@ -86,6 +86,8 @@ wwand section types plus the netifd interface — no separate config file:
   and **`reset_fallback`** (seconds, default 30) — how long an admin `modem_reset` waits
   for the modem's own reset to take it off the bus before the reset line is pulsed, and
   the zero-rx / TX-stall watchdog before the board repowers the modem —
+  and **`nr5g_mode`** (`nsa`\|`sa`\|`both`, Foxconn T99W175 and Quectel RG50xQ/RM5xxQ) — which 5G NR
+  flavours the modem may use, see [Pin the radio](#pin-the-radio-modes-bands-cell-lock) —
   and **`sim_detect`** (`high`\|`low`\|`off`, Quectel only) — SIM hot-plug detection
   (`AT+QSIMDET`): on with the tray's detect pin high / low meaning "card inserted", or
   off. The level is the board's wiring, so unset leaves the modem's value alone; with
@@ -1207,24 +1209,42 @@ holds something else; every write is permanent:
 
 - **QMI:** NAS Set System Selection Preference, mode mask with a permanent
   change duration (libqmi 1.38).
-- **MBIM, MBIMEx 2.0 and later:** natively, as the `DataClass` of a Register
-  State set, checked against the `PreferredDataClasses` of its reply. The
-  mapping is ModemManager's (1.24.0): `nr5g` sends both 5G NSA and 5G SA,
-  `umts` the whole 3G family. The standard bits go first. CUSTOM goes out
-  only when the modem drops the bit CUSTOM stands for: on a Foxconn T99W175
-  F0.0.0.3 (`5G UWB`) CUSTOM is its 5G SA, and the firmware drops the plain
-  5G SA bit. F0.1.0.0.9 holds the standard bits, and there CUSTOM alone means
-  TD-SCDMA plus NR, so it never gets CUSTOM. A CUSTOM bit held next to the
-  standard bits it stands for is rewritten without it. A manually selected
-  network stays selected. The T99W175 keeps the mask across a modem reset
-  (HW-observed 2026-11-08). `td-scdma` has no MBIM data class and is reported,
-  not selected. A later manual network selection (`modem_netsel`) sends the
-  same mask.
-- **MBIM 1.0:** through the QMI-over-MBIM passthrough NAS, like QMI. Without
-  one, the modes are reported as a `mode_preference` config warning, not
-  applied.
+- **MBIM with a QMI-over-MBIM passthrough** (a Foxconn T99W175, Quectel
+  RM5xx): through its NAS, exactly like QMI. ModemManager (1.24.0) does the
+  same and keeps the MBIM data class out of it, because what that class's
+  CUSTOM bit means differs by firmware and carrier profile: on one T99W175
+  firmware it is 5G SA, on another it switched TD-SCDMA on (#75).
+- **MBIM without a passthrough, MBIMEx 2.0 and later:** natively, as the
+  `DataClass` of a Register State set, checked against the
+  `PreferredDataClasses` of its reply. The mapping is ModemManager's: `nr5g`
+  sends both 5G NSA and 5G SA, `umts` the whole 3G family, and CUSTOM goes in
+  place of the class the modem names that way. A manually selected network
+  stays selected, and a later manual network selection (`modem_netsel`) sends
+  the same mask. `td-scdma` has no MBIM data class and is reported, not
+  selected.
+- **MBIM 1.0 without a passthrough:** the modes are reported as a
+  `mode_preference` config warning, not applied.
 - A modem that keeps its own mask after the write is reported the same way,
   with what it kept.
+
+`nr5g` in `modes` allows 5G NR; **whether NSA, SA or both** is a separate
+modem option, **`nr5g_mode`** (`nsa` \| `sa` \| `both`, unset = the modem's
+own). This is the Android split: one NR bit among the allowed technologies,
+and NSA (dual connectivity) and SA (N1 mode) switched apart from it. Neither
+QMI nor MBIM has a standard message for it, so it is a vendor AT setting,
+read first and written only when it differs:
+
+| Modem | Command | nsa | sa | both |
+|---|---|---|---|---|
+| Foxconn T99W175 (Cinterion MV31-W) | `AT^NR5G_MODE` | 1 | 2 | 0 |
+| Quectel RG500Q, RG501Q-EU, RG502Q-EA, RM500Q, RM502Q, RM505Q-AE, RM510Q-GL | `AT+QNWPREFCFG="nr5g_disable_mode"` | 1 | 2 | 0 |
+
+It needs the modem's AT port. The family is taken from the model, because
+each command is documented for those modules only; any other modem, other
+Quectels included, gets nothing sent and a `nr5g_mode` config warning. On a T99W175 that never reaches 5G SA,
+check this first: mrhaav's (F0.1.0.0.9) shipped with `^NR5G_MODE: 1` (NSA
+only), and SA came up once it was 0 (#75, 2026-11-12). With `modes 'nr5g'`
+alone, `nsa` gives no service at all: NSA needs an LTE anchor.
 
 ### RAT priority: the modem never tries 5G SA
 

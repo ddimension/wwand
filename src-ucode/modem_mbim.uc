@@ -547,12 +547,21 @@ export function create(opts)
 
 		if (aom) {
 			let vendor = (aom == 'compal') ? 'compal' : 'fibocom';
-			let eng = mbim_backend.make_at_engine(self.mbim, vendor);
+			let eng = mbim_backend.make_at_engine(self.mbim, vendor, (level, msg) => log(level, sprintf('at: %s', msg)));
 
 			log('notice', sprintf('AT side channel over MBIM (%s vendor CID)', vendor));
 			self.at = eng;
 			self.at_telemetry = eng;
-			return step_at_ident();
+
+			// the same init list every other AT channel runs (cell locks,
+			// SIM detection, the 5G NR mode): a forced tunnel is still the
+			// modem's only AT path, and skipping it here dropped them
+			let cmds = modem_common.init_commands(self);
+
+			if (!length(cmds))
+				return step_at_ident();
+
+			return eng.run_sequence(cmds, modem_common.init_done(self, { next: step_at_ident }));
 		}
 
 		return modem_common.open_at(self, {
@@ -1257,6 +1266,9 @@ export function create(opts)
 		if (!self.mbim)
 			return cb({ error: 'no_channel' });
 
+		if (self._modes_not_native)
+			return cb({ error: 'modes_not_mbim', detail: sprintf('modes "%s" have no MBIM data class', self.config?.modes) });
+
 		// zero-padded by hand: ucode's sprintf has no `%0*d`, and a `%02d` that
 		// silently truncated a 3-digit MNC would name a different operator
 		let id = '';
@@ -1283,16 +1295,31 @@ export function create(opts)
 		}, (err) => cb(err), { timeout: 60000 });
 	};
 
-	// `option modes` NATIVELY: the configured technologies as the DataClass of
-	// a Register State set, read back from PreferredDataClasses. MBIMEx 2.0
-	// only, because v1 reports nothing to compare against — and a set that
-	// cannot be checked would be sent at every start, each one a
-	// re-registration. A v1 modem goes through the QMI-over-MBIM passthrough
-	// NAS instead, like the QMI init; with neither the modes are reported, not
-	// dropped silently. The registration stays what it is: a modem in manual
-	// selection gets its own provider id back, since an automatic set would
-	// undo the user's choice. Replaces this function's earlier warnings, so a
-	// re-init does not stack them. cb() always.
+	// `option modes`: OVER THE QMI PASSTHROUGH WHEN THERE IS ONE, the MBIM
+	// DataClass only without it — ModemManager's split (1.24.0: a modem whose
+	// capabilities load over QMI-over-MBIM does all mode switching over QMI,
+	// mm-broadband-modem-mbim.c:491-501, 1452-1460, and registers over QMI too,
+	// because a Register State set "would overwrite whatever capabilities and
+	// modes we had set", :7258-7265). The DataClass is the weaker lever: what
+	// its CUSTOM bit stands for differs by firmware AND carrier profile on the
+	// same modem. On a T99W175 F0.0.0.3.0.GC.003 it is 5G SA (HW-observed
+	// 2026-11-08); on F0.1.0.0.9 CUSTOM alone turned the NAS mode preference
+	// into "td-scdma, 5gnr" with the GC profile, and "lte, 5g-nsa, custom"
+	// read as "lte, 5gnr" with the SC profile (mbimcli/qmicli output in
+	// ddimension/wwand#75, 2026-11-10 and 2026-11-12). The NAS mode
+	// preference says what it means. NSA vs SA is neither: that is
+	// `option nr5g_mode` (atcmd nr5g_mode_commands).
+	//
+	// Without a passthrough the DataClass goes out ModemManager's way, CUSTOM
+	// in place of the class it stands for (mbim_backend.data_class_custom),
+	// read back from PreferredDataClasses — MBIMEx 2.0 only, because v1
+	// reports nothing to compare against, and a set that cannot be checked
+	// would be sent at every start, each one a re-registration. With neither
+	// the modes are reported, not dropped silently. The registration stays
+	// what it is: a modem in manual selection gets its own provider id back,
+	// since an automatic set would undo the user's choice. Replaces this
+	// function's earlier warnings, so a re-init does not stack them. cb()
+	// always.
 	self.sync_modes = function(cb) {
 		let want = qmi_backend.parse_modes(self.config?.modes);
 		let warnings = [];
@@ -1308,94 +1335,84 @@ export function create(opts)
 			message: msg, expected: self.config.modes, actual: actual });
 
 		self._modes_data_class = null;
+		self._modes_not_native = false;
 
 		if (want == null)
 			return finish();
 
 		let caps = self.info?.mbim_data_class;
 		let custom = self.info?.mbim_custom_data_class;
-		// STANDARD BITS FIRST, CUSTOM ONLY WHERE THEY ARE DROPPED. What CUSTOM
-		// stands for differs between firmware of the same modem: on a T99W175
-		// F0.0.0.3.0.GC.003 it is 5G SA and the plain 5G_SA bit is dropped
-		// (HW-observed 2026-11-08), on F0.1.0.0.9.GC.004 the standard bits
-		// are held as sent and CUSTOM alone becomes "td-scdma, 5gnr" in the
-		// NAS mode preference — TD-SCDMA nobody asked for, no LTE anchor
-		// (reported with mbimcli/qmicli output, ddimension/wwand#75,
-		// 2026-11-10). Sending CUSTOM up front, as ModemManager 1.24.0 does,
-		// is right for the first and wrong for the second; only the set's
-		// reply tells them apart.
-		let cc = mbim_backend.custom_class(caps, custom);
 		let dc = mbim_backend.data_class_from_modes(want);
-		let dc_custom = mbim_backend.data_class_custom(dc, caps, custom);
-		let names = (m) => join(',', filter([ 'gsm', 'umts', 'lte', 'nr5g', 'cdma' ],
-			(n) => m & nasmod.MODE_BITS[n])) || 'none';
+		let mask = mbim_backend.data_class_custom(dc, caps, custom) ?? dc;
 
-		if (want & nasmod.MODE_BITS['td-scdma'])
-			push(warnings, { check: 'mode_preference', severity: 'info',
-				message: sprintf('modes "%s": td-scdma has no MBIM data class and is not selected natively', self.config.modes),
-				expected: self.config.modes, actual: null });
+		// the mask a native network selection sends with its Register State
+		// set (native_register) — also on the NAS path, which a later
+		// selection reaches only when the passthrough is gone: a set with 0
+		// there would read as "any" and undo these modes. Modes MBIM cannot
+		// express (td-scdma) make that set refuse instead of narrowing or
+		// widening them.
+		self._modes_data_class = dc ? mask : null;
+		self._modes_not_native = !dc || !!(want & ~mbim_backend.MODES_MBIM);
 
-		// a list naming nothing MBIM can express would go out as 0, which a
-		// Register State set reads as "any" — the opposite of a restriction
-		if (!dc) {
-			warn(sprintf('modes "%s" name no technology MBIM can select — not applied', self.config.modes), null);
-			return finish();
-		}
+		let via_mbim;
 
-		let via_nas = () => self.with_nas((nas) => {
-			if (!nas) {
-				warn(sprintf('modes "%s" are not applied: this modem reports no preferred data classes (MBIMEx %s) and offers no QMI passthrough',
-					self.config.modes, (self.mbim?.mbimex_version ?? 0) >= 0x0200 ? '2.0+' : '1.0'), null);
-				return finish();
-			}
-
-			nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
-				if (!gerr && cur?.mode_preference == want) {
-					log('info', sprintf('network modes "%s" already set — skipping', self.config.modes));
-					return finish();
-				}
-
-				log('notice', sprintf('setting network modes "%s" over the passthrough (mask 0x%02x)', self.config.modes, want));
-
-				// permanent, like the QMI init write (modem_init_qmi)
-				nas.request('SET_SYSTEM_SELECTION_PREFERENCE', { mode_preference: want, change_duration: 1 }, (serr) => {
-					if (serr)
-						warn(sprintf('setting modes "%s" failed: %J', self.config.modes, serr), null);
-
-					finish();
-				}, { no_recovery: true });
-			}, { no_recovery: true });
-		});
-
-		if (!self.mbim || (self.mbim.mbimex_version ?? 0) < 0x0200)
-			return via_nas();
-
-		let held = (d) => mbim_backend.modes_from_data_class(d, caps, custom) & mbim_backend.MODES_MBIM;
-		let wanted = want & mbim_backend.MODES_MBIM;
-
-		self.mbim.command(bc, 'REGISTER_STATE', 'query', {}, (qerr, cur) => {
-			if (qerr || cur?.preferred_data_classes == null)
-				return via_nas();
-
-			let p = cur.preferred_data_classes;
-
-			// CUSTOM held beside the very bits it stands for is not needed by
-			// this firmware, and on one that reads it as TD-SCDMA it is the
-			// state a CUSTOM-first set left behind — so it is rewritten
-			let redundant = (p & ext.DATA_CLASS_CUSTOM) && cc && (p & cc) == cc;
-
-			self._modes_data_class = (dc_custom != null && (p & ext.DATA_CLASS_CUSTOM) && !redundant) ? dc_custom : dc;
-
-			if (held(p) == wanted && !redundant) {
+		let via_nas = (nas) => nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
+			if (!gerr && cur?.mode_preference == want) {
 				log('info', sprintf('network modes "%s" already set — skipping', self.config.modes));
 				return finish();
 			}
 
-			let manual = (cur.register_mode == bc.REGISTER_MODE_MANUAL && cur.provider_id);
+			log('notice', sprintf('setting network modes "%s" over the passthrough (mask 0x%02x)', self.config.modes, want));
 
-			let send;
+			// permanent, like the QMI init write (modem_init_qmi)
+			nas.request('SET_SYSTEM_SELECTION_PREFERENCE', { mode_preference: want, change_duration: 1 }, (serr) => {
+				if (serr)
+					warn(sprintf('setting modes "%s" failed: %J', self.config.modes, serr), null);
 
-			send = (mask, fallback) => {
+				finish();
+			}, { no_recovery: true });
+		}, { no_recovery: true });
+
+		via_mbim = () => {
+			let names = (m) => join(',', filter([ 'gsm', 'umts', 'lte', 'nr5g', 'cdma' ],
+				(n) => m & nasmod.MODE_BITS[n])) || 'none';
+			let held = (d) => mbim_backend.modes_from_data_class(d, caps, custom) & mbim_backend.MODES_MBIM;
+			let wanted = want & mbim_backend.MODES_MBIM;
+
+			if (want & nasmod.MODE_BITS['td-scdma'])
+				push(warnings, { check: 'mode_preference', severity: 'info',
+					message: sprintf('modes "%s": td-scdma has no MBIM data class and is not selected natively', self.config.modes),
+					expected: self.config.modes, actual: null });
+
+			// a list naming nothing MBIM can express would go out as 0, which a
+			// Register State set reads as "any" — the opposite of a restriction
+			if (!dc) {
+				warn(sprintf('modes "%s" name no technology MBIM can select — not applied', self.config.modes), null);
+				return finish();
+			}
+
+			if ((self.mbim.mbimex_version ?? 0) < 0x0200) {
+				warn(sprintf('modes "%s" are not applied: this modem reports no preferred data classes (MBIMEx 1.0) and offers no QMI passthrough',
+					self.config.modes), null);
+				return finish();
+			}
+
+			self.mbim.command(bc, 'REGISTER_STATE', 'query', {}, (qerr, cur) => {
+				if (qerr || cur?.preferred_data_classes == null) {
+					warn(sprintf('modes "%s" are not applied: the modem reports no preferred data classes and offers no QMI passthrough',
+						self.config.modes), null);
+					return finish();
+				}
+
+				let p = cur.preferred_data_classes;
+
+				if (held(p) == wanted) {
+					log('info', sprintf('network modes "%s" already set — skipping', self.config.modes));
+					return finish();
+				}
+
+				let manual = (cur.register_mode == bc.REGISTER_MODE_MANUAL && cur.provider_id);
+
 				log('notice', sprintf('setting network modes "%s" (data class 0x%08x, modem held %s)',
 					self.config.modes, mask, names(held(p))));
 
@@ -1407,19 +1424,8 @@ export function create(opts)
 					// THE SET'S OWN REPLY IS THE READ-BACK: Register State set
 					// answers with the full state, PreferredDataClasses
 					// included (libmbim 1.32.0,
-					// mbim-service-ms-basic-connect-v2.json). A modem that
-					// drops a bit it does not know answers with the mask it
-					// kept, which is how a 5G_SA sent to a T99W175 shows.
+					// mbim-service-ms-basic-connect-v2.json)
 					let kept = now?.preferred_data_classes;
-
-					// ANY bit of cc dropped counts: HSPA+ stands for two, and a
-					// modem keeping one of them still reads back as `umts`
-					if (!serr && kept != null && fallback != null &&
-					    (kept & mask & cc) != (mask & cc) && !(kept & ext.DATA_CLASS_CUSTOM)) {
-						log('notice', sprintf('the modem dropped data class 0x%08x — sending CUSTOM for it', cc));
-						self._modes_data_class = fallback;
-						return send(fallback, null);
-					}
 
 					if (serr)
 						warn(sprintf('setting modes "%s" failed: %J', self.config.modes, serr), null);
@@ -1429,11 +1435,13 @@ export function create(opts)
 
 					finish();
 				}, { timeout: 60000, no_recovery: true });
-			};
+			}, { no_recovery: true });
+		};
 
-			self._modes_data_class = dc;
-			send(dc, dc_custom);
-		}, { no_recovery: true });
+		if (!self.mbim)
+			return finish();
+
+		self.with_nas((nas) => nas ? via_nas(nas) : via_mbim());
 	};
 
 	self._on_connect_ind = function(data) {

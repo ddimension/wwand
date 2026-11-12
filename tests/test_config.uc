@@ -22,7 +22,7 @@ let r = padopt({
 		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', pincode: '1234',
 		      modes: 'lte,nr5g', mux: 'auto', at_init: [ 'ATI' ], location: '1',
 		      serial: '99efe861', imei: '350000000000000', repower_time: '10' },
-		m1: { '.type': 'wwand_modem', device: '/dev/cdc-wdm1', sim_detect: 'HIGH', reset_fallback: '45' },
+		m1: { '.type': 'wwand_modem', device: '/dev/cdc-wdm1', sim_detect: 'HIGH', reset_fallback: '45', nr5g_mode: 'SA' },
 		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet',
 		       pdp_type: 'ipv4v6', mux_id: '0' },
 		wan2: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: '#2',
@@ -85,6 +85,7 @@ eq(r.contexts.wan.address_allocation, null, 'native: address_allocation unset st
 eq(r.modems.m0.sim_detect, null, 'native: sim_detect unset stays null');
 eq(r.modems.m1.sim_detect, 'high', 'native: sim_detect parsed, case-insensitive');
 eq(r.modems.m1.reset_fallback, 45, 'native: reset_fallback parsed as seconds');
+eq([ r.modems.m0.nr5g_mode, r.modems.m1.nr5g_mode ], [ null, 'sa' ], 'native: nr5g_mode unset stays null, set parsed case-insensitive');
 eq(r.contexts.wan2.apn, '#2', 'native: profile passthrough apn');
 eq(r.contexts.wan.auto, true, 'native: interface auto defaults true');
 eq(r.contexts.wan2.auto, false, 'native: auto 0 -> not proactively brought up');

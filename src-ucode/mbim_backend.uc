@@ -33,6 +33,7 @@ import * as ext from 'wwand.codec.mbim_schema.ms_basic_connect_ext';
 import * as fibocom from 'wwand.codec.mbim_schema.fibocom';
 import * as compal from 'wwand.codec.mbim_schema.compal';
 import * as nasmod from 'wwand.codec.schema.nas';
+import * as atcmd from 'wwand.atcmd';
 
 // --- native MBIM MS UICC Low Level Access (eSIM/APDU) ------------------------
 // Service UUID + CIDs and buffer layouts verified against libmbim 1.32
@@ -118,11 +119,11 @@ function at_parse_response(cmd, blob)
 	return { err: null, lines: lines };
 }
 
-// make_at_engine(mc, vendor): vendor is 'fibocom' (default) or 'compal'. Returns
-// a duck-typed AT engine. A modem that does not expose the vendor CID NAKs the
+// make_at_engine(mc, vendor, log): vendor is 'fibocom' (default) or 'compal'.
+// Returns a duck-typed AT engine; `log(level, msg)` hears its init steps. A modem that does not expose the vendor CID NAKs the
 // COMMAND -> command_raw yields an mbim error -> send() reports it, exactly like
 // a no-AT tty modem, so callers degrade gracefully.
-export function make_at_engine(mc, vendor)
+export function make_at_engine(mc, vendor, log)
 {
 	let schema = (vendor == 'compal') ? compal : fibocom;
 	let cmd_type = (schema.AT_CMD_KIND == 'query') ? mbim.CMD_QUERY : mbim.CMD_SET;
@@ -144,19 +145,10 @@ export function make_at_engine(mc, vendor)
 		}, { cmd_type: cmd_type, timeout: o?.timeout });
 	};
 
-	// best-effort sequential run (errors logged by the caller's cb), matching the
-	// tty engine's run_sequence contract.
+	// the tty engine's runner, setting steps included: sending a step object
+	// as if it were a command line put its JSON on the wire
 	self.run_sequence = function(cmds, done) {
-		let idx = 0, step;
-
-		step = () => {
-			if (idx >= length(cmds))
-				return done ? done() : null;
-
-			self.send(cmds[idx++], () => step());
-		};
-
-		step();
+		atcmd.run_sequence(self, log ?? (() => null), cmds, done);
 	};
 
 	self.close = () => null;
@@ -928,8 +920,10 @@ export function data_class_from_modes(modes)
 	return dc;
 };
 
-// the same DataClass with the bits CUSTOM stands for replaced by CUSTOM, for a
-// firmware that drops them — null when CUSTOM stands for nothing in dc
+// the same DataClass with the bits CUSTOM stands for replaced by CUSTOM, as
+// ModemManager sends it to a modem without a QMI passthrough
+// (mm_modem_mbim_denormalize_data_class_mask, mm-modem-helpers-mbim.c:83-91,
+// 1.24.0) — null when CUSTOM stands for nothing in dc
 export function data_class_custom(dc, caps_dc, custom)
 {
 	let cc = custom_class(caps_dc, custom);

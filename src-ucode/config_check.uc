@@ -130,7 +130,10 @@ export function sync_rat_order(self, log, cb)
 export function validate(self, log, cb)
 {
 	cb = cb ?? (() => null);
-	self.config_warnings = [];   // refreshed on every init
+	// refreshed on every init — except what the AT init owns (the 5G NR mode,
+	// modem_common.init_commands), which may have run first and does not run
+	// again before the next AT open
+	self.config_warnings = filter(self.config_warnings ?? [], (w) => w.check == 'nr5g_mode');
 
 	let quirks = modem_quirks.for_model(self.info?.model);
 

@@ -30,6 +30,7 @@ import * as wmsmod from 'wwand/codec/schema/wms.uc';
 import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
 import * as ext from 'wwand/codec/mbim_schema/ms_basic_connect_ext.uc';
 import * as quectel from 'wwand/codec/mbim_schema/quectel.uc';
+import * as fibocom from 'wwand/codec/mbim_schema/fibocom.uc';
 import * as voice from 'wwand/codec/mbim_schema/ms_voice_ext.uc';
 import * as mbimcodec from 'wwand/codec/mbim.uc';
 
@@ -2648,15 +2649,13 @@ assert_ready_state_reinit(false, 'ready-state reinit/stuck');
 	eq(m._attach_pending, false, 'mbim attach: ...and only once');
 }
 
-// --- option modes, natively (Register State DataClass, #75) ------------------
-// Two T99W175 firmwares. F0.0.0.3.0.GC.003 (HW-read 2026-11-08): caps carry
-// 5G_NSA and CUSTOM named "5G UWB", which is its 5G SA, and a set drops the
-// plain 5G_SA bit. F0.1.0.0.9.GC.004 (mbimcli output in wwand#75,
-// 2026-11-10): caps "umts, hsdpa, hsupa, lte, custom" named "5G", a set of
-// LTE | 5G_NSA | 5G_SA is held as "lte, 5g-nsa", and CUSTOM is TD-SCDMA plus
-// NR. The mock modem keeps what a set sends minus the bits it drops (or
-// nothing, told to ignore it), and answers the set with the state after it,
-// as a real one does.
+// --- option modes (#75) -------------------------------------------------------
+// Over the QMI passthrough's NAS when there is one, as ModemManager 1.24.0
+// does; the Register State DataClass only without it, CUSTOM in place of the
+// class it stands for (ModemManager's denormalize). The mock modem keeps
+// what a set sends minus the bits it drops (or nothing, told to ignore it),
+// and answers the set with the state after it, as a real one does. `o.nas`
+// gives the modem a passthrough NAS holding that mode preference.
 function run_modes(label, o) {
 	uloop.init();
 
@@ -2709,59 +2708,85 @@ function run_modes(label, o) {
 					warnings: filter(mm.config_warnings ?? [], (w) => w.check == 'mode_preference'),
 					dc: mm._modes_data_class,
 				};
+
+				if (o.netsel)
+					mm.native_register(null, (e) => { seen.netsel = e; });
 			},
 		},
 	});
 
+	let nas_sets = [];
+
+	if (o.nas)
+		m.with_nas = (cb) => cb({
+			request: (name, args, rcb) => {
+				if (name == 'GET_SYSTEM_SELECTION_PREFERENCE')
+					return rcb(null, { mode_preference: o.nas.mode_preference });
+
+				// the other NAS readers of the bring-up get an empty answer
+				if (name != 'SET_SYSTEM_SELECTION_PREFERENCE')
+					return rcb(null, {});
+
+				push(nas_sets, args);
+				o.nas.mode_preference = args.mode_preference;
+				rcb(o.nas.fail ? { error: 'qmi', code: 1 } : null, {});
+			},
+		});
+
 	m.start();
 	uloop.timer(400, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
 	uloop.run();
+
+	if (seen)
+		seen.nas_sets = nas_sets;
 
 	return seen ?? { sets: null, warnings: null };
 }
 
 {
 	let LTE_NR = ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM;
-
-	let LTE_STD = ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA;
 	let auto = (dc) => ({ provider_id: null, register_action: bc.REGISTER_ACTION_AUTOMATIC, data_class: dc });
+	let NAS_LTE_NR = nasmod.MODE_BITS.lte | nasmod.MODE_BITS.nr5g;
 
+	// without a passthrough: ModemManager's mask, CUSTOM for the 5G SA it
+	// stands for on an X55 whose caps list 5G_NSA ("5G UWB")
 	let r = run_modes('x55', { modes: 'lte,nr5g' });
 	// the empty provider id of an automatic set decodes as null in the mock
-	eq(r.sets, [ auto(LTE_STD), auto(LTE_NR) ],
-		'mbim modes: lte,nr5g goes out as standard bits, then with CUSTOM for the 5G_SA the modem dropped');
-	eq(r.warnings, [], 'mbim modes: ...and read back from the set reply as held');
-	eq(r.dc, LTE_NR, 'mbim modes: ...and the mask it took is kept for a later network selection');
+	eq(r.sets, [ auto(LTE_NR) ], 'mbim modes: no passthrough: lte,nr5g goes out with CUSTOM for the class it stands for');
+	eq([ r.warnings, r.dc ], [ [], LTE_NR ], 'mbim modes: ...read back as held, the mask kept for a network selection');
 
 	r = run_modes('held', { modes: 'lte,nr5g', pref: LTE_NR });
 	eq(r.sets, [], 'mbim modes: a modem already on them is not re-registered');
-	eq(r.dc, LTE_NR, 'mbim modes: ...and its CUSTOM mask is what a network selection sends');
 
-	// F0.1.0.0.9: CUSTOM stands for 5G NSA by ModemManager's rule, and the
-	// standard bits are taken, so CUSTOM is never sent
+	// F0.1.0.0.9 caps ("5G" without 5G_NSA in the caps: CUSTOM = NSA)
 	let f01 = { caps: ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA |
 		ext.DATA_CLASS_LTE | ext.DATA_CLASS_CUSTOM, custom: '5G' };
 
-	r = run_modes('f01', { ...f01, modes: 'lte,nr5g' });
-	eq(r.sets, [ auto(LTE_STD) ], 'mbim modes: a firmware that holds the standard bits gets no CUSTOM (td-scdma there)');
-	eq([ r.warnings, r.dc ], [ [], LTE_STD ], 'mbim modes: ...held as sent, minus the 5G_SA it folds into NSA');
+	r = run_modes('f01', { ...f01, modes: 'nr5g' });
+	eq(r.sets, [ auto(ext.DATA_CLASS_5G_SA | ext.DATA_CLASS_CUSTOM) ],
+		'mbim modes: no passthrough: nr5g is CUSTOM for NSA plus the SA bit, as ModemManager sends it');
 
-	r = run_modes('f01_nr', { ...f01, modes: 'nr5g' });
-	eq(r.sets, [ auto(ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA) ],
-		'mbim modes: nr5g alone is NR, not the CUSTOM | 5G_SA that read back as "td-scdma, 5gnr"');
+	// with a passthrough: the NAS mode preference, never the DataClass
+	r = run_modes('nas', { ...f01, modes: 'lte,nr5g', nas: { mode_preference: nasmod.MODE_BITS.lte |
+		nasmod.MODE_BITS['td-scdma'] | nasmod.MODE_BITS.nr5g } });
+	eq(r.sets, [], 'mbim modes: passthrough: no Register State set at all');
+	eq(r.nas_sets, [ { mode_preference: NAS_LTE_NR, change_duration: 1 } ],
+		'mbim modes: passthrough: lte,nr5g is the NAS mode preference lte|5gnr — the td-scdma CUSTOM had added goes');
+	eq([ r.warnings, r.dc ], [ [], ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_SA | ext.DATA_CLASS_CUSTOM ],
+		'mbim modes: passthrough: no warning; a native selection without the passthrough would still send the modes, not 0');
 
-	// "HSPA+" stands for two bits; a firmware that drops only HSUPA still
-	// reads back as umts, and gets CUSTOM for the pair
-	let UMTS = ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA;
+	// td-scdma has no MBIM class: a native selection would widen the modes
+	// to "any" or drop it, so it refuses
+	r = run_modes('nas_tds', { ...f01, modes: 'td-scdma', netsel: true, nas: { mode_preference: NAS_LTE_NR } });
+	eq(r.nas_sets, [ { mode_preference: nasmod.MODE_BITS['td-scdma'], change_duration: 1 } ],
+		'mbim modes: passthrough: td-scdma is written over NAS');
+	eq(r.netsel?.error, 'modes_not_mbim', 'mbim modes: ...and a native selection refuses rather than send 0');
 
-	r = run_modes('hspa', { caps: ext.DATA_CLASS_UMTS | ext.DATA_CLASS_LTE | ext.DATA_CLASS_CUSTOM,
-		custom: 'HSPA+', modes: 'umts', drop: ext.DATA_CLASS_HSUPA });
-	eq(r.sets, [ auto(UMTS), auto(ext.DATA_CLASS_UMTS | ext.DATA_CLASS_CUSTOM) ],
-		'mbim modes: one bit of a two-bit CUSTOM class dropped is enough for the fallback');
+	r = run_modes('nas_held', { ...f01, modes: 'lte,nr5g', pref: LTE_NR, nas: { mode_preference: NAS_LTE_NR } });
+	eq([ r.sets, r.nas_sets ], [ [], [] ], 'mbim modes: passthrough: already held, nothing written');
 
-	r = run_modes('f01_left', { ...f01, modes: 'nr5g', pref: ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM });
-	eq(r.sets, [ auto(ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA) ],
-		'mbim modes: CUSTOM held beside the NSA it stands for is rewritten without it');
+	r = run_modes('nas_fail', { ...f01, modes: 'lte', nas: { mode_preference: NAS_LTE_NR, fail: true } });
+	eq(length(r.warnings), 1, 'mbim modes: passthrough: a refused write is reported');
 
 	r = run_modes('manual', { modes: 'lte', manual: true });
 	eq(r.sets, [ { provider_id: '24008', register_action: bc.REGISTER_ACTION_MANUAL, data_class: ext.DATA_CLASS_LTE } ],
@@ -2778,6 +2803,48 @@ function run_modes(label, o) {
 
 	r = run_modes('unset', { modes: null });
 	eq([ r.sets, r.warnings ], [ [], [] ], 'mbim modes: unset, the modem keeps its own');
+}
+
+// --- a forced AT tunnel runs the init list too (#75) -------------------------
+// `option at_over_mbim` hands the modem its AT engine without a tty; the init
+// steps (here the 5G NR mode of a T99W175) must run there as on a tty.
+{
+	uloop.init();
+
+	let h = handlers();
+	let sent = [];
+
+	let mock;
+
+	h.DEVICE_CAPS = { ...h.DEVICE_CAPS, firmware_info: 'T99W175.F0.1.0.0.9.SC.005' };
+	h.AT_COMMAND = (args, meta) => {
+		// the raw request bytes, as the mock recorded them: the AT line
+		let line = trim(replace(sprintf('%s', mock.calls[length(mock.calls) - 1].info ?? ''), /\r/g, ''));
+
+		push(sent, line);
+
+		if (line == 'AT^NR5G_MODE?')
+			return { __raw: sprintf("\r\n^NR5G_MODE:%d\r\n\r\nOK\r\n", (index(sent, 'AT^NR5G_MODE=2') >= 0) ? 2 : 1) };
+
+		return { __raw: "\r\nOK\r\n" };
+	};
+
+	mock = mbim_mockhub.create({ schemas: [ bc, ext, fibocom ], handlers: h, mbimex_version: 0x0300 });
+	let m = modem_mbim.create({
+		id: 'm_aom', device: '/dev/mock_aom',
+		config: { apn: 'internet', at_over_mbim: 'fibocom', nr5g_mode: 'sa' },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: { transport_open: mock.transport_open, log: () => null, on_event: () => null },
+	});
+
+	m.start();
+	uloop.timer(400, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+	uloop.run();
+
+	ok(index(sent, 'AT^NR5G_MODE=2') >= 0, 'at_over_mbim: the forced tunnel runs the init list (nr5g_mode sa written)');
+	eq(filter(m.config_warnings ?? [], (w) => w.check == 'nr5g_mode'), [], 'at_over_mbim: ...and the T99W175 is recognised');
 }
 
 done('test_modem_mbim');

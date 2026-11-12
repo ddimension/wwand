@@ -332,6 +332,42 @@ eq(atcmd.cell_lock_commands({}), [], 'lock: nothing configured');
 	eq(length(atcmd.sim_detect_commands({}, { sim_detect: 'high' })), 1,
 		'simdet: a manufacturer not known yet is no reason to skip');
 }
+// 5G NR mode (#75): the Android NSA/SA split as a vendor AT setting. Both
+// dialects number it 0 both / 1 NSA only / 2 SA only
+{
+	let fox = { model: 'QUALCOMM INCORPORATED', firmware: 'T99W175.F0.1.0.0.9.SC.005' };
+	let st = atcmd.nr5g_mode_commands(fox, { nr5g_mode: 'both' });
+
+	eq(atcmd.nr5g_dialect(fox), 'foxconn', 'nr5g: a T99W175 is known by its MBIM firmware string');
+	eq([ st[0]?.check, st[0]?.set ], [ 'AT^NR5G_MODE?', 'AT^NR5G_MODE=0' ], 'nr5g: foxconn both = 0');
+	ok(match('^NR5G_MODE:0', regexp(st[0].want)) && !match('^NR5G_MODE:1', regexp(st[0].want)),
+		'nr5g: foxconn: the held value is recognised (no space after the colon), another is not');
+	eq(atcmd.nr5g_mode_commands(fox, { nr5g_mode: 'nsa' })[0].set, 'AT^NR5G_MODE=1', 'nr5g: foxconn nsa = 1');
+	eq(atcmd.nr5g_mode_commands(fox, { nr5g_mode: 'sa' })[0].set, 'AT^NR5G_MODE=2', 'nr5g: foxconn sa = 2');
+
+	let q = { manufacturer: 'Quectel', model: 'RG502Q-EA' };
+	st = atcmd.nr5g_mode_commands(q, { nr5g_mode: 'nsa' });
+	eq([ st[0]?.check, st[0]?.set ], [ 'AT+QNWPREFCFG="nr5g_disable_mode"', 'AT+QNWPREFCFG="nr5g_disable_mode",1' ],
+		'nr5g: quectel nsa = disable SA (1)');
+	ok(match('+QNWPREFCFG: "nr5g_disable_mode",1', regexp(st[0].want)) &&
+	   !match('+QNWPREFCFG: "nr5g_disable_mode",12', regexp(st[0].want)),
+		'nr5g: quectel: the held value is recognised, a longer number is not');
+	eq(atcmd.nr5g_mode_commands(q, { nr5g_mode: 'sa' })[0].set, 'AT+QNWPREFCFG="nr5g_disable_mode",2',
+		'nr5g: quectel sa = disable NSA (2)');
+	// an MBIM RM502Q: no manufacturer yet, only the firmware string
+	eq(atcmd.nr5g_dialect({ firmware: 'RM502QAEAAR13A04M4G' }), 'quectel', 'nr5g: a Quectel known by its firmware string');
+	// the command is documented for the RG50xQ/RM5xxQ only: another Quectel
+	// would get a persistent write on a bare ERROR
+	eq(atcmd.nr5g_mode_commands({ manufacturer: 'Quectel', model: 'RG650E-EU' }, { nr5g_mode: 'sa' }), [],
+		'nr5g: a Quectel outside the documented families gets nothing sent');
+	eq(atcmd.nr5g_dialect({ manufacturer: 'Foxconn', model: 'T77W968' }), null,
+		'nr5g: another Foxconn module is not taken for a T99W175');
+
+	eq(atcmd.nr5g_mode_commands(q, {}), [], 'nr5g: unset leaves the modem alone');
+	eq(atcmd.nr5g_mode_commands({ manufacturer: 'Fibocom', model: 'FM350-GL' }, { nr5g_mode: 'sa' }), [],
+		'nr5g: a modem of neither dialect gets nothing sent');
+	eq(atcmd.nr5g_mode_commands({}, { nr5g_mode: 'sa' }), [], 'nr5g: an unidentified modem is not guessed at');
+}
 eq(atcmd.cell_lock_commands({ lock_4g: 'garbage' }), [], 'lock: malformed ignored');
 eq(atcmd.cell_lock_commands({ lock_persist: true }), [], 'lock: persist alone is no-op');
 

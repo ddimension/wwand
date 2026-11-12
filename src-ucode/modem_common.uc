@@ -1392,7 +1392,7 @@ export function at_retired(self, ...cmds)
 // A BARE `ERROR` retires a command. `+CME ERROR: <n>` never does: it is a
 // runtime condition (SIM not ready, no network) that says nothing about whether
 // the firmware knows the command. atcmd already separates the three
-// (atcmd.uc:969 vs :973 vs :914).
+// (atcmd.uc:1029 vs :973 vs :914).
 //
 // A TIMEOUT retires one only when the PORT IS PROVABLY ALIVE. On its own a
 // timeout means the port is wedged or the modem busy — then every command goes
@@ -1904,7 +1904,9 @@ export function close_at(self)
 // The init commands every AT channel runs once it answers: model quirks,
 // the configured `at_init` list, the steps optional packages add
 // (`self.at_init_extra`, set by the daemon from plugins.uc at_init — e.g.
-// wwand-rsim allowing a modem to lend its card), then cell locks.
+// wwand-rsim allowing a modem to lend its card), then cell locks, SIM
+// detection and the 5G NR mode. An `nr5g_mode` this modem has no known
+// command for is a config warning, not a guess (atcmd nr5g_mode_commands).
 export function init_commands(self)
 {
 	let extra = [];
@@ -1912,12 +1914,23 @@ export function init_commands(self)
 	try { extra = self.at_init_extra?.(self.info) ?? []; }
 	catch (e) { extra = []; }
 
+	let nr5g = atcmd.nr5g_mode_commands(self.info, self.config);
+
+	self.config_warnings = filter(self.config_warnings ?? [], (w) => w.check != 'nr5g_mode');
+
+	if (self.config.nr5g_mode && !length(nr5g))
+		push(self.config_warnings, { check: 'nr5g_mode', severity: 'warn',
+			message: sprintf('nr5g_mode "%s" is not applied: no known command for this modem (Foxconn T99W175, Quectel RG50xQ/RM5xxQ)',
+				self.config.nr5g_mode),
+			expected: self.config.nr5g_mode, actual: null });
+
 	return [
 		...atcmd.model_init_commands(self.info?.model),
 		...(self.config.at_init ?? []),
 		...extra,
 		...atcmd.cell_lock_commands(self.config),
 		...atcmd.sim_detect_commands(self.info, self.config),
+		...nr5g,
 	];
 };
 

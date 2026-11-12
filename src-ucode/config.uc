@@ -268,7 +268,7 @@ export function modem_defaults(over)
 {
 	return {
 		device: null, netdev: null, usb_path: null, reset_gpio: null, reset_fallback: null,
-		sim_detect: null,
+		sim_detect: null, nr5g_mode: null,
 		serial: null, imei: null,   // stable identity anchors (USB iSerial / IMEI)
 		repower_time: null,         // recovery power-cycle off / reset hold seconds
 		pincode: null, modes: null, rat_order: null, mcc: null, mnc: null,
@@ -418,7 +418,7 @@ function apply_globals(s, result)
 // instead of 'pincode' cost a HW debugging session — the daemon saw "PIN
 // required but none configured" and safety-blocked the SIM).
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
-	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'recovery_steps', 'pincode', 'modes', 'rat_order', 'mcc', 'mnc',
+	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'nr5g_mode', 'recovery_steps', 'pincode', 'modes', 'rat_order', 'mcc', 'mnc',
 	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'nitz_time', 'fcc_auth',
 	'gnss_nmea', 'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
 	'unarmed_reset_after', 'card_hold', 'ipa_mode',
@@ -554,6 +554,10 @@ function modem_from_section(s, warnings)
 		// sim_detect_commands); anything else is dropped, never guessed
 		sim_detect: (index([ 'high', 'low', 'off' ], lc(sprintf('%s', s.sim_detect ?? ''))) >= 0)
 			? lc(s.sim_detect) : null,
+		// which 5G NR flavours the modem may use: 'nsa' | 'sa' | 'both'
+		// (atcmd.uc nr5g_mode_commands); anything else is dropped
+		nr5g_mode: (index([ 'nsa', 'sa', 'both' ], lc(sprintf('%s', s.nr5g_mode ?? ''))) >= 0)
+			? lc(s.nr5g_mode) : null,
 		pincode: s.pincode,
 		modes: s.modes,
 		// acquisition order, most preferred first (validated below)
