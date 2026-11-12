@@ -128,7 +128,13 @@ export function install(self, o)
 	step_services = () => {
 		self.set_state('INIT_SERVICES');
 		self.ctl.request('GET_VERSION_INFO', {}, (err, data) => {
-			if (err)
+			// the RG502Q-EA firmware never answers this; a timeout is
+			// best-effort like SYNC — client allocation below is the real gate
+			if (err?.error == 'timeout') {
+				log('warn', 'GET_VERSION_INFO unanswered (timeout) — continuing without service versions');
+				data = { services: [] };
+			}
+			else if (err)
 				return fail('version_info', err);
 
 			self.services = {};
