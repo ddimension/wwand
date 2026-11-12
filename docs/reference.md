@@ -1189,6 +1189,11 @@ keeps working only without it. A modem that runs the wwand-ipa plugin
 (`option ipa '1'`) on such a card needs it too. HW-seen on an IDEMIA card behind an RG502Q,
 2026-11-11.
 
+A modem can refuse the basic channel over QMI or MBIM even when the card
+would take the APDU. In that case wwand sends it over `AT+CSIM` on the modem's
+AT port. An EG25-G answers ACCESS_DENIED over QMI and passes the APDU through
+over AT (KeepGo eUICC, HW-seen 2026-11-11).
+
 ### Pin the radio: modes, bands, cell lock
 
 `option modes` (e.g. `lte`, `nr5g`), band preferences via LuCI Modem

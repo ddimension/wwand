@@ -1711,27 +1711,36 @@ function declare_ipad(modem, slot, be, cb)
 				modem.id ?? '?', sw ?? sprintf('%J', err)));
 		cb();
 	};
+	let via_at = () => modem.at.send(sprintf('AT+CSIM=%d,"%s"', length(TERMINAL_CAPABILITY_IPAD), TERMINAL_CAPABILITY_IPAD), (err, res) => {
+		for (let l in (res?.lines ?? [])) {
+			let m = match(l, /\+CSIM: *[0-9]+,"?([0-9A-Fa-f]+)"?/);
+
+			if (m)
+				return done(null, m[1]);
+		}
+
+		done(err ?? { error: 'no_response' }, null);
+	}, { timeout: 15000 });
+
+	// THE MODEM CAN REFUSE WHAT THE CARD WOULD TAKE. An EG25-G answers a QMI
+	// SEND_APDU without a channel id with ACCESS_DENIED (QMI error 82), while
+	// the same APDU over AT+CSIM gets 9000 from the card and ES10 is served
+	// after it (KeepGo eUICC, EG25GGBR07A08M2G, HW-seen 2026-11-11). So a
+	// transport error — not a card status word — goes on to AT when the modem
+	// has a port. A status word is the card's answer and is final.
+	let or_at = (err, resp) => (err && modem.at) ? via_at() : done(err, resp);
 
 	// the basic channel: AT+CSIM, QMI SEND_APDU without a channel id, and
 	// channel 0 for MBIM UICC (not HW-tested there)
 	if (be == 'at')
-		return modem.at.send(sprintf('AT+CSIM=%d,"%s"', length(TERMINAL_CAPABILITY_IPAD), TERMINAL_CAPABILITY_IPAD), (err, res) => {
-			for (let l in (res?.lines ?? [])) {
-				let m = match(l, /\+CSIM: *[0-9]+,"?([0-9A-Fa-f]+)"?/);
-
-				if (m)
-					return done(null, m[1]);
-			}
-
-			done(err ?? { error: 'no_response' }, null);
-		}, { timeout: 15000 });
+		return via_at();
 
 	if (be == 'mbim')
-		return modem.mbim_uicc.apdu(0, TERMINAL_CAPABILITY_IPAD, done);
+		return modem.mbim_uicc.apdu(0, TERMINAL_CAPABILITY_IPAD, or_at);
 
 	modem.uim.request('SEND_APDU', {
 		slot: uim_slot(modem, slot), apdu: hex_to_arr(TERMINAL_CAPABILITY_IPAD),
-	}, (err, data) => done(err, err ? null : arr_to_hex(data.response ?? [])), { timeout: 15000 });
+	}, (err, data) => or_at(err, err ? null : arr_to_hex(data.response ?? [])), { timeout: 15000 });
 }
 
 // open a logical channel to `aid_hex` on physical slot `slot` (1-based);

@@ -31,7 +31,13 @@ state buried at the top invites reading a months-old entry as present tense.
   IPAe, with it IPAd and an ES10 EID read. LuCI: modem option
   "SGP.32 IPA", and the IPAe status line points to it. Deployed there as
   source over 1.8.0; originals in `/root/wwand-1.8.0-orig/` and
-  `/root/luci-1.8.0-orig/`. AT and MBIM paths are host-tested only.
+  `/root/luci-1.8.0-orig/`. MBIM is host-tested only. **EG25-G (3.123,
+  2026-11-11):** QMI SEND_APDU without a channel id is refused with
+  ACCESS_DENIED (82), so pre13 left the card on IPAe. `declare_ipad` now
+  falls back to AT+CSIM on any transport error. On the Pi that gave IPAd,
+  EID and 4 profiles (ships in pre14; on the Pi deployed as source
+  over pre13, the original in `/root/sim.uc.pre13`). The option was removed
+  afterwards and the card is back on IPAe.
 - **LED running light (2026-11-08, from #48):** the `tech` style takes
   `sweep: true` — the technology LEDs run oldest-first every 300 ms while
   the modem searches, on a timer of the board instance (`board.uc`

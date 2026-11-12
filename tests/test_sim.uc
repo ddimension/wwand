@@ -1648,10 +1648,23 @@ scenario('ipae: ES10 refused on an IPAe-capable card -> its IPAe is in charge', 
 // An IDEMIA card serves ES10 only once the device declared an IPAd with
 // TERMINAL CAPABILITY tag 84 (HW-seen behind an RG502Q, 2026-11-11): the card
 // below answers 6985 until it has seen that declaration on the basic channel.
-function tc_modem(ipa, tc_sw)
+// `denied` models an EG25-G (HW-seen 2026-11-11): QMI refuses the basic
+// channel with ACCESS_DENIED, and its AT port carries the same APDU through.
+function tc_modem(ipa, tc_sw, denied)
 {
-	let m = { timing: T, config: { ipa_mode: ipa }, _gen: 1, apdus: [] };
+	let m = { timing: T, config: { ipa_mode: ipa }, _gen: 1, apdus: [], at_cmds: [] };
 	let declared = false;
+
+	if (denied)
+		m.at = { send: (cmd, cb) => {
+			push(m.at_cmds, cmd);
+
+			if (index(cmd, 'AT+CSIM=') != 0)
+				return cb({ error: 'ERROR' }, null);
+
+			declared = (tc_sw == '9000');
+			cb(null, { lines: [ sprintf('+CSIM: 4,"%s"', uc(tc_sw)) ] });
+		} };
 
 	m.uim = mkclient({
 		OPEN_LOGICAL_CHANNEL: { channel_id: 1, select_response: hex_to_bytes(FCI_IOT) },
@@ -1659,6 +1672,9 @@ function tc_modem(ipa, tc_sw)
 			let h = lc(join('', map(args.apdu, (b) => sprintf('%02x', b))));
 
 			push(m.apdus, { channel: args.channel_id, apdu: h });
+
+			if (substr(h, 0, 4) == '80aa' && denied)
+				return cb({ error: 'qmi', result: 1, code: 82 }, null);
 
 			if (substr(h, 0, 4) == '80aa') {
 				declared = (tc_sw == '9000');
@@ -1694,6 +1710,12 @@ scenario('ipad: option ipa_mode declares the IPAd before the ISD-R open, then ES
 	let refused = tc_modem('ipad', '6d00');
 	sim.card_euicc_info(refused, (v) => { got.refused = v?.ipa; });
 	eq(got.refused, 'ipae', 'ipad: a refused declaration still opens the ISD-R and reports what the card runs');
+
+	// QMI refusing the basic channel: the AT port takes the declaration
+	let eg25 = tc_modem('ipad', '9000', true);
+	sim.card_euicc_info(eg25, (v) => { got.eg25 = v?.ipa; });
+	eq([ got.eg25, eg25.at_cmds ], [ 'ipad', [ 'AT+CSIM=20,"80AA000005A903840101"' ] ],
+		'ipad: a modem that denies the QMI basic channel declares over AT+CSIM instead');
 
 	// AT: the declaration goes out as AT+CSIM, ahead of the CCHO
 	let cmds = [];
