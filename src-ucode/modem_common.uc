@@ -80,6 +80,20 @@ export function preserve_serving(newc, oldc)
 	});
 };
 
+// 'B3' / 'n78' / 78 -> 3 / 78; the bare number is how serving bands are
+// stored (see fill_serving_band). Quectel QCAINFO and arfcn_bands spell the
+// band with its prefix, the Fibocom rows (telemetry_ncm.uc ca_entries) carry
+// the number already.
+function band_number(name)
+{
+	if (type(name) == 'int')
+		return (name > 0) ? name : null;
+
+	let m = match(name ?? '', /^[Bn]([0-9]+)$/);
+
+	return m ? +m[1] : null;
+}
+
 // serving_from_ca(self): the QMI LTE-CPHY CA-info PCC (self.cells.ca[role=PCC])
 // IS the serving LTE cell and — unlike the cell-location decode — carries the
 // channel BANDWIDTH (dl_bandwidth). It reaches every QMI/MBIM modem over the
@@ -90,7 +104,12 @@ export function preserve_serving(newc, oldc)
 // derivation (LuCI, disjoint ranges) / AT-QENG — the QMI CA `band` TLV is the
 // non-3GPP ActiveBand enum.
 // The NR PCC (from QMI RF band info, qmi_backend.ca_with_rf) gap-fills
-// serving.nr the same way, NR-ARFCN-guarded — the vendor-neutral NR bandwidth.
+// serving.nr the same way, NR-ARFCN-guarded — the vendor-neutral NR bandwidth,
+// and its BAND: that row names the band the modem reports, and the NR-ARFCN
+// alone cannot. The NR bands overlap (n48 3550–3700 MHz lies inside n77 and
+// n78), so fill_serving_band, deriving from the channel, takes the first match:
+// a T99W175 on n78 in Sweden showed serving band 48 next to the modem's n78
+// (evidence: ddimension/wwand#75, 2026-11-13).
 // Before either, a carrier row without a PCI takes it from the cell-location
 // read when the channel matches: RF band info has no PCI, and the serving cell
 // of that channel is the carrier.
@@ -120,12 +139,16 @@ export function serving_from_ca(self)
 	for (let c in ca)
 		if (is_pcc(c) && c?.rat == 'nr') { nrp = c; break; }
 
-	if (nrp?.bandwidth_mhz != null) {
+	// gated on the row, not its bandwidth: a QCAINFO NR row names its band
+	// and channel but leaves the bandwidth unknown (atcmd_parse.uc), and
+	// merge.fill skips a null source field, so a missing one overwrites nothing
+	if (nrp) {
 		self.cells.serving = self.cells.serving ?? {};
 		self.cells.serving.nr = merge.fill(self.cells.serving.nr,
-			{ arfcn: nrp.earfcn, bandwidth_mhz: nrp.bandwidth_mhz, pci: nrp.pci }, {
+			{ arfcn: nrp.earfcn, bandwidth_mhz: nrp.bandwidth_mhz, pci: nrp.pci,
+			  band: band_number(nrp.band) }, {
 			src:   'qmi-rf',
-			gap:   [ 'bandwidth_mhz', 'arfcn', 'pci' ],
+			gap:   [ 'bandwidth_mhz', 'arfcn', 'pci', 'band' ],
 			guard: (dst, src) => dst.arfcn == null || src.arfcn == null || dst.arfcn == src.arfcn,
 		});
 	}
@@ -163,12 +186,6 @@ export function serving_from_ca(self)
 // telemetry_ncm): arfcn_bands names it 'B3' / 'n48', and a consumer that adds
 // its own prefix (LuCI status) then showed 'BB3' / 'nn48'
 // (evidence: ddimension/luci-app-wwand#16).
-function band_number(name)
-{
-	let m = match(name ?? '', /^[Bn]([0-9]+)$/);
-
-	return m ? +m[1] : null;
-}
 
 export function fill_serving_band(self)
 {

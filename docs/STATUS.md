@@ -111,7 +111,14 @@ state buried at the top invites reading a months-old entry as present tense.
   messages (InvalidQmiCommand). HW-run on the T99W175 (openwrt-elitebook,
   LTE only): no QCAINFO any more, `ca` = an LTE PCC with 10 MHz and PCI 409,
   `serving.lte` now with bandwidth. The NR row is host-tested only, since
-  neither modem has 5G coverage here.
+  neither modem has 5G coverage here. **Its band reaches `serving.nr` too
+  (2026-11-13, later):** the reporter's T99W175 on n78 in SA showed serving
+  band 48 next to the row's n78, because `fill_serving_band` derived the band
+  from NR-ARFCN 642048, which n48 shares with n77/n78. `serving_from_ca`
+  now copies the band the modem named. Host-tested; still no 5G here.
+  luci-app-wwand: Modem Tools says when `option modes` will undo a radio
+  technology change at the next modem start (the reporter's "LTE gone after
+  a power cycle" was `modes 'nr5g'` re-applied).
 - **`nr5g_mode` over QMI first (2026-11-13, #75):** Qualcomm firmware
   keeps the NSA/SA switch in the NAS system selection preference (SET TLV
   0x2E, GET TLV 0x2B, not in libqmi), and the vendor AT commands front it.

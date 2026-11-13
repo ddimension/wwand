@@ -1373,8 +1373,23 @@ sca = { cells: {
 mc.serving_from_ca(sca);
 eq([ sca.cells.ca[0].pci, sca.cells.ca[1].pci ], [ 409, 650 ],
 	'serving_from_ca: a PCI-less PCC takes the serving PCI of its channel');
-eq(sca.cells.serving.nr, { bandwidth_mhz: 100, arfcn: 642048, pci: 650 },
-	'serving_from_ca: the NR PCC seeds serving.nr with its bandwidth');
+eq(sca.cells.serving.nr, { bandwidth_mhz: 100, arfcn: 642048, pci: 650, band: 78 },
+	'serving_from_ca: the NR PCC seeds serving.nr with its bandwidth and the modem\'s band');
+// NR-ARFCN 642048 (3630.72 MHz) is in n48 as well as n77/n78: deriving the
+// band from the channel afterwards must not replace the one the modem named
+// (ddimension/wwand#75: serving band 48 next to the modem's n78)
+mc.fill_serving_band(sca);
+eq(sca.cells.serving.nr.band, 78, 'fill_serving_band: the modem\'s NR band stays, not the first overlapping one');
+
+// the Fibocom rows carry the band as a number, and a QCAINFO NR row leaves
+// its bandwidth unknown: the band is still the modem's and must win
+sca = { cells: { ca: [
+	{ rat: 'nr', role: 'PCC NR', earfcn: 642048, pci: 650, band: 78, bandwidth_mhz: null },
+] } };
+mc.serving_from_ca(sca);
+mc.fill_serving_band(sca);
+eq([ sca.cells.serving.nr.arfcn, sca.cells.serving.nr.pci, sca.cells.serving.nr.band ], [ 642048, 650, 78 ],
+	'serving_from_ca: a numeric band survives, and a row without bandwidth still seeds serving.nr');
 
 // ...but not across a channel mismatch (a handover between the two reads)
 sca = { cells: {
