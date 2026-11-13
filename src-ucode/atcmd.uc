@@ -1069,6 +1069,12 @@ export function create(transport, opts)
 		// on the way, or idle noise the line loop below skips.
 		cur.lines = [];
 		cur.prefix = cmd_prefix(cur.cmd);
+		// ATD, ATA and ATO end in a call-progress code, not in OK: V.250
+		// (07/2003) 6.3.1 lists NO CARRIER, BUSY, NO ANSWER and NO DIALTONE
+		// as the final results of a dial. Treated as URCs they were dropped
+		// and the dial ran into its timeout (HW-observed: a VoLTE ATD on the
+		// RG650E answered NO CARRIER at once, 2026-11-13).
+		cur.dial = match(cur.cmd ?? '', /^AT[DAO]/i) != null;
 
 		cur.timer = uloop.timer(cur.timeout, () => {
 			log('warn', sprintf('timeout waiting for reply to %s', redact(cur.cmd)));
@@ -1132,6 +1138,11 @@ export function create(transport, opts)
 
 			if (m)
 				return finish({ error: lc(m[1]), code: m[2] }, cur.lines);
+
+			// RING stays a URC even here: it announces a call, it does not
+			// answer the dial
+			if (cur.dial && uc(line) != 'RING' && is_bare_urc(line))
+				return finish({ error: lc(line) }, cur.lines);
 
 			// a URC that lands between the lines of a response is NOT part of
 			// the answer: route it to the state machine instead of letting it

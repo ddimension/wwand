@@ -1193,6 +1193,36 @@ tr8.reply('\r\nRING\r\nFibocom\r\nOK\r\n');
 eq(got6?.lines, [ 'Fibocom' ], 'engine: a bare RING never becomes the manufacturer');
 eq(urcs6, [ 'RING' ], 'engine: prefix-less URC dispatched');
 
+// ... but to a dial a call-progress code IS the final result (V.250 6.3.1):
+// the dial ends with it at once instead of waiting for an OK that never comes
+let urcs6d = [], got6d = null, err6d = null;
+let tr8d = fake_transport();
+let at8d = atcmd.create(tr8d, { log: silent, on_urc: (l) => push(urcs6d, l) });
+
+at8d.send('ATD+491701234567;', (e, r) => { err6d = e; got6d = r; });
+tr8d.reply('\r\nNO CARRIER\r\n');
+
+eq(err6d, { error: 'no carrier' }, 'engine: NO CARRIER ends a dial as its result');
+eq(urcs6d, [], 'engine: ... and is not dispatched as a URC');
+
+let err6b = null;
+let tr8b = fake_transport();
+let at8b = atcmd.create(tr8b, { log: silent });
+
+at8b.send('ATA', (e) => err6b = e);
+tr8b.reply('\r\nBUSY\r\n');
+eq(err6b, { error: 'busy' }, 'engine: BUSY ends an ATA');
+
+// a RING inside a dial window still announces a call, it does not answer it
+let urcs6r = [], err6r = 'unset';
+let tr8r = fake_transport();
+let at8r = atcmd.create(tr8r, { log: silent, on_urc: (l) => push(urcs6r, l) });
+
+at8r.send('ATD+491701234567;', (e) => err6r = e);
+tr8r.reply('\r\nRING\r\nOK\r\n');
+eq(err6r, null, 'engine: a dial still ends on OK');
+eq(urcs6r, [ 'RING' ], 'engine: RING during a dial stays a URC');
+
 // one buffer for the whole stream: a line split across a command boundary used
 // to be torn in half — its head dropped and its tail pushed into the NEXT
 // command's answer as if it were a reply
