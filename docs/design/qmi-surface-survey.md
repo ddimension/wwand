@@ -170,6 +170,22 @@ Two more dissolved on inspection rather than being declined:
    64-bit mask) and the signal-info hysteresis timer at `0x006C` TLV 0x42 —
    libqmi models 0x006C but stops at TLV 0x3B, so it can set thresholds and not
    hysteresis. Directly reduces wakeups on a battery-less-but-CPU-bound router.
+   **PARKED 2026-11-13 as a possible feature**, the threshold half included:
+   host-set signal thresholds (libqmi 1.38 "Config Signal Info" 0x0050 since
+   1.0, "v2" 0x006C since 1.32), so the modem pushes `SIGNAL_INFO_IND` when
+   RSRP/SINR crosses a level. It buys little as wwand stands. The indication
+   is already registered (`modem_init_qmi.uc` REGISTER_INDICATIONS
+   `signal_info`) and consumed (`modem.uc _install_nas_handlers`) on the
+   firmware's default thresholds. A watched modem is polled every second
+   anyway (`modem_common.uc watch_driver`). Recovery keys on the datapath and
+   registration, not on signal. Unwatched, only the signal LED and a `status`
+   reader would see a change sooner than `stats_interval` (60 s). Against
+   that, firmware support for the fields varies, a fluttering signal can
+   push an indication every second, and the poll stays for CA, cells and
+   statistics. Worth building when a user wants to act on a signal event
+   itself, such as mwan3 failing over at "RSRP below -115 dBm" before
+   packets drop: then it is a config option (thresholds per RAT) plus a ubus
+   event, not a change to the telemetry path.
 5. **TMD 0x18 / TS 0x17 thermal.** Both **OPEN**-specified end to end including
    the string encoding (nested string = 1-byte length, no NUL; a string that is
    the whole TLV payload carries no prefix). Both on the link. wwand currently
