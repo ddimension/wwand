@@ -2281,4 +2281,22 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 		'init_commands: a QMI/MBIM modem defers nr5g_mode to apply_nr5g_mode');
 }
 
+// --- nr5g_blocker: why an LTE link stays off 5G NSA ---------------------------
+{
+	let st = (o) => ({ nsa_available: true, dcnr_restricted: false, endc_enabled: true, disabled: 'none', ...o });
+	eq(mc.nr5g_blocker(st({}), { nr: false }, null), null, 'nr5g_blocker: nothing in the way -> null');
+	ok(index(mc.nr5g_blocker(st({ disabled: 'nsa' }), { nr: false }, null) ?? '', 'NSA is switched off') >= 0,
+		'nr5g_blocker: nr5g_disable_mode NSA named first');
+	ok(index(mc.nr5g_blocker(st({ endc_enabled: false }), null, null) ?? '', 'EN-DC is off') >= 0,
+		'nr5g_blocker: EN-DC off');
+	ok(index(mc.nr5g_blocker(st({ dcnr_restricted: true }), null, 'lte,nr5g') ?? '', 'DCNR') >= 0,
+		'nr5g_blocker: DCNR restriction');
+	eq(mc.nr5g_blocker(st({ endc_enabled: false }), { nr: true }, null), null, 'nr5g_blocker: 5G up -> null');
+	eq(mc.nr5g_blocker(st({ endc_enabled: false, nsa_available: false }), null, null), null,
+		'nr5g_blocker: no anchor in this cell -> nothing to explain');
+	eq(mc.nr5g_blocker(st({ endc_enabled: false }), null, 'lte'), null,
+		'nr5g_blocker: modes without nr5g are the operator\'s choice');
+	eq(mc.nr5g_blocker(null, null, null), null, 'nr5g_blocker: no state -> null');
+}
+
 done('test_modem_common');

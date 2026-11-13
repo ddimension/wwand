@@ -85,6 +85,10 @@ code = "src-ucode/codec/{qmux,tlv,hex}.uc, codec/schema/*.uc"
     review = "R9"
     result = "NAS Get RF Band Information (0x0031, new): List 0x01, Extended List 0x11 (u32 channel) and Bandwidth List 0x12 as libqmi models them, wire shape HW-read on the RG502Q-EA and the T99W175; Get LTE Cphy CA Info 0x13/0x15 match"
     open = "every other message of the twelve services not checked against libqmi in one pass yet"
+    [[component.standard.review]]
+    review = "R10"
+    result = "NAS Get System Info 0x4E (EUTRA with NR5G availability) and 0x4F (DCNR restriction) added as guint8, Get ENDC Config 0x00E8 (Enabled 0x10, Immediate SCG Release 0x11) added; all match libqmi 1.38"
+    open = "the rest of Get System Info is still modelled only up to the LTE reject cause"
 
 [[component]]
 name = "QMI backend (modem, context, telemetry)"
@@ -119,6 +123,14 @@ kind = "reference implementations read next to the code (libqmi 1.38.0 qmi-servi
 by = "Claude, for ddimension/wwand#75"
 reviewed = "wwand f2718c8"
 fixed = "wwand, commit \"telemetry: the NR leg in the carrier list from QMI RF band info\""
+
+[[reviews]]
+id = "R10"
+date = "2026-11-13"
+kind = "reference implementation read next to the code (libqmi 1.38.0 qmi-service-nas.json Get System Info 0x4E/0x4F, Get ENDC Config 0x00E8)"
+by = "Claude"
+reviewed = "wwand 9e61d17"
+fixed = "wwand, commit \"telemetry: why a 5G modem stays on LTE (status nr5g)\""
 
 [[component]]
 name = "MBIM codec and backend"

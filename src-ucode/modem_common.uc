@@ -2059,6 +2059,105 @@ export function apply_nr5g_mode(self, nas, log, cb)
 	}, { no_recovery: true });
 };
 
+// Why a 5G-capable modem sits on LTE, from what the modem itself reports:
+//   nsa_available    the LTE cell offers a 5G NSA anchor (System Info 0x4E)
+//   dcnr_restricted  the network restricts dual connectivity (0x4F)
+//   endc_enabled     EN-DC is on in the modem (GET_ENDC_CONFIG)
+//   disabled         'none' | 'sa' | 'nsa' — the SSP nr5g_disable_mode
+//                    (apply_nr5g_mode; `option nr5g_mode` or a factory value)
+// Each is null when the modem does not report it. All from libqmi 1.38
+// messages except `disabled` (codec/schema/nas.uc, HW-measured).
+const NR5G_DISABLED_NAMES = [ 'none', 'sa', 'nsa' ];
+
+// nr5g_blocker(st, dsd, modes): the one thing that keeps an LTE link off 5G
+// NSA although the cell offers it, as a sentence, or null. Null while 5G is
+// up, while the cell offers no anchor (nothing to explain), and when the
+// configured modes leave 5G out — that is the operator's choice. Pure.
+export function nr5g_blocker(st, dsd, modes)
+{
+	if (!st?.nsa_available || dsd?.nr)
+		return null;
+
+	if (modes && !match(modes, /nr5g/))
+		return null;
+
+	if (st.disabled == 'nsa')
+		return 'the cell offers 5G NSA, but NSA is switched off in the modem (nr5g_disable_mode, see option nr5g_mode)';
+
+	if (st.endc_enabled === false)
+		return 'the cell offers 5G NSA, but EN-DC is off in the modem';
+
+	if (st.dcnr_restricted)
+		return 'the cell offers 5G NSA, but the network restricts dual connectivity (DCNR) for this subscription';
+
+	return null;
+};
+
+// collect_nr5g(self, nas, log, cb): refresh self.nr5g_state (shape above) on
+// the slow tick. Three optional reads; a modem that reports none of the four
+// facts (an LTE-only stack) is not asked again for the life of the object.
+// The blocker is logged when it changes. cb() always, once.
+export function collect_nr5g(self, nas, log, cb)
+{
+	if (!nas || self._nr5g_state_none)
+		return cb();
+
+	let st = { nsa_available: null, dcnr_restricted: null, endc_enabled: null, disabled: null };
+	let gone = (e) => (e?.error == 'cancelled');
+	// a definitive "nothing here": answered, or refused as unknown (71
+	// InvalidQmiCommand, 94 NotSupported) — not a timeout, which may pass
+	let settled = (e) => !e || (e?.error == 'qmi' && (e.code == 71 || e.code == 94));
+
+	nas.request('GET_SYSTEM_INFO', {}, (e1, si) => {
+		if (gone(e1))
+			return cb();
+
+		if (!e1) {
+			if (si?.nr5g_available != null) st.nsa_available = !!si.nr5g_available;
+			if (si?.dcnr_restricted != null) st.dcnr_restricted = !!si.dcnr_restricted;
+		}
+
+		nas.request('GET_ENDC_CONFIG', {}, (e2, ec) => {
+			if (gone(e2))
+				return cb();
+
+			if (!e2 && ec?.enabled != null)
+				st.endc_enabled = !!ec.enabled;
+
+			nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (e3, ssp) => {
+				if (gone(e3))
+					return cb();
+
+				if (!e3 && ssp?.nr5g_disable_mode != null)
+					st.disabled = NR5G_DISABLED_NAMES[ssp.nr5g_disable_mode] ?? sprintf('%d', ssp.nr5g_disable_mode);
+
+				if (length(filter(values(st), (v) => v != null)) == 0) {
+					// only when all three settled: a timeout on one of them
+					// must not retire the others for the life of the modem
+					if (settled(e1) && settled(e2) && settled(e3))
+						self._nr5g_state_none = true;
+					self.nr5g_state = null;
+					return cb();
+				}
+
+				self.nr5g_state = st;
+
+				let why = nr5g_blocker(st, self.dsd_status, self.config?.modes);
+
+				if (why != self._nr5g_blocker) {
+					if (why)
+						log('notice', sprintf('5G: %s', why));
+					else if (self._nr5g_blocker)
+						log('info', '5G: no longer held off');
+					self._nr5g_blocker = why;
+				}
+
+				cb();
+			}, { no_recovery: true });
+		}, { no_recovery: true });
+	}, { no_recovery: true });
+};
+
 // best-effort AT side-channel bring-up: discover + open the AT tty, run
 // model-init + configured at_init + cell-lock commands, then o.next(). Always
 // non-fatal (no usable AT port -> next() with self.at unset).

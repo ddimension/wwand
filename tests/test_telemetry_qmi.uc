@@ -73,7 +73,10 @@ uloop.init();
 		nas: {
 			request: (name, args, cb) => {
 				let round = csq + 1;
-				push(asked, round);
+				// the cell query is what this test is about; the 5G state
+				// reads on the same tick (collect_nr5g) answer the same way
+				if (name == 'GET_CELL_LOCATION_INFO')
+					push(asked, round);
 				if (round >= 9)
 					cb(null, {});
 				else

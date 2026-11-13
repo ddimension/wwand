@@ -4987,6 +4987,11 @@ export function create(opts)
 				// it is a property of the modem, not of the serving cell, and it
 				// now sits next to the mitigation state it wants to be read with.
 				temperature: entry.modem?.temperature ?? null,
+				// what the modem says about 5G NSA in this cell, and the one
+				// thing holding the link off it, if any (modem_common
+				// collect_nr5g / nr5g_blocker); null on a modem that reports none
+				nr5g: entry.modem?.nr5g_state
+					? { ...entry.modem.nr5g_state, blocker: entry.modem._nr5g_blocker ?? null } : null,
 				// the modem's own thermal mitigation (QMI TMD): which parts of it
 				// are holding back and how far. `mitigated` is the one-bit answer
 				// to "is throughput down because the modem decided so".

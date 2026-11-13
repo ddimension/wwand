@@ -569,6 +569,18 @@ export default {
 		// (e.g. cause 33 on an IPv4-only attach). The reject cause lives inside
 		// the big "LTE System Info v2" sequence TLV; we model only the fixed
 		// leading fields up to reject_cause and ignore the trailing ones.
+		// EN-DC (5G NSA dual connectivity) on or off in the modem. libqmi 1.38
+		// qmi-service-nas.json "Get ENDC Config" 0x00E8: Enabled 0x10 and
+		// Immediate SCG Release 0x11, both guint8.
+		GET_ENDC_CONFIG: {
+			id: 0x00E8,
+			req: {},
+			resp: {
+				enabled:               { t: 0x10, f: 'u8' },
+				immediate_scg_release: { t: 0x11, f: 'u8' },
+			},
+		},
+
 		GET_SYSTEM_INFO: {
 			id: 0x004D,
 			req: {},
@@ -586,6 +598,12 @@ export default {
 					cid_valid: 'u8', cid: 'u32',
 					reject_valid: 'u8', reject_domain: 'u8', reject_cause: 'u8',
 				} },
+				// libqmi 1.30+ qmi-service-nas.json "Get System Info": the LTE cell
+				// offers 5G NSA (an EN-DC anchor; 0x4E "EUTRA with NR5G
+				// availability"), and the network restricts dual connectivity
+				// (0x4F "DCNR restriction Info"), both guint8 booleans
+				nr5g_available:  { t: 0x4E, f: 'u8' },
+				dcnr_restricted: { t: 0x4F, f: 'u8' },
 			},
 		},
 

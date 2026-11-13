@@ -2760,9 +2760,25 @@ not subscribed") means the *attach* was rejected, not that there is no coverage
 — usually the attach APN or PDP type is wrong for the subscription. Check `apn`
 and use `pdp_type ipv4v6` (some subscriptions reject IPv4-only).
 
-**5G modem on a 5G cell but only LTE.** `modem_cells` → `dsd` with `nr: false`
-means the network is not granting EN-DC for this SIM (the tariff is LTE-only /
-DCNR-restricted). Nothing wwand or the modem can change.
+**5G modem on a 5G cell but only LTE.** `status` → `nr5g` says what the modem
+reports, read on the slow telemetry tick of QMI modems and of MBIM modems with
+the QMI passthrough:
+
+| Field | Source | Meaning |
+|---|---|---|
+| `nsa_available` | NAS Get System Info 0x4E (libqmi 1.30) | the LTE cell offers a 5G NSA anchor |
+| `dcnr_restricted` | NAS Get System Info 0x4F (libqmi 1.30) | the network restricts dual connectivity for this subscription |
+| `endc_enabled` | NAS Get ENDC Config 0x00E8 (libqmi 1.38) | EN-DC is on in the modem |
+| `disabled` | NAS SSP nr5g_disable_mode (`none` / `sa` / `nsa`) | what `option nr5g_mode`, or the factory, switched off |
+| `blocker` | | the one of these that keeps an LTE link off NSA while the cell offers it, or null |
+
+A field the modem does not report is null, and a modem that reports none of
+them is not asked again. When a blocker appears, it is logged once at notice
+level (`5G: ...`), and `wwandctl status` prints it as `nr5g held`. If
+`dcnr_restricted` is the blocker, the tariff does not allow 5G, and neither
+wwand nor the modem can change that. A Telekom SIM in the Chateau's RG650E
+showed exactly that on 2026-11-13. `option modes` without `nr5g` is the
+operator's own choice and is not reported as a blocker.
 
 **Two connections over one modem?** Point two `interface` sections at the same
 `option modem`, each with a different `mux_id` (and `apn`); QMAP multiplexing

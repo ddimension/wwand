@@ -149,6 +149,18 @@ function cmd_status(args)
 		if (ps_line)
 			printf('  5g          %s\n', ps_line);
 
+		// the cell's 5G NSA offer and what the modem makes of it; the held line
+		// only when something keeps an LTE link off it
+		if (m.nr5g) {
+			let yn = (v) => (v == null) ? '?' : (v ? 'yes' : 'no');
+			printf('  nr5g        anchor %s · EN-DC %s · DCNR restricted %s · off: %s\n',
+				yn(m.nr5g.nsa_available), (m.nr5g.endc_enabled == null) ? '?' : (m.nr5g.endc_enabled ? 'on' : 'off'),
+				yn(m.nr5g.dcnr_restricted), m.nr5g.disabled ?? '?');
+
+			if (m.nr5g.blocker)
+				printf('  nr5g held   %s\n', m.nr5g.blocker);
+		}
+
 		if (m.temperature?.celsius != null)
 			printf('  temp        %d °C\n', m.temperature.celsius);
 

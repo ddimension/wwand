@@ -410,7 +410,10 @@ export function install(self, o)
 					// QMI/NCM parity; status `rat`/`caps` stayed null on MBIM
 					// without this). Where AT is dead (EG06) both latch off
 					// after the first timeout, so no per-tick re-tries.
-					modem_common.collect_temperature(self, () =>
+					// why 5G is held off, over a passthrough that is already up
+					// (opening one only for this is not worth it)
+					modem_common.collect_nr5g(self, self.pt?.nas, log, () =>
+					  modem_common.collect_temperature(self, () =>
 					    modem_common.probe_iot_rat(self, () => {
 						if (!self.mbim)
 							return;
@@ -418,7 +421,7 @@ export function install(self, o)
 						log_telemetry();
 						emit_telemetry();
 						telemetry_timer = uloop.timer(interval, tick);
-					})))))));
+					}))))))));
 			});
 		};
 

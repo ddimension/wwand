@@ -121,6 +121,14 @@ state buried at the top invites reading a months-old entry as present tense.
   `AT^NR5G_MODE?` with ERROR, so QMI is its only way. Options removed
   afterwards, both modems back on 0. Side finding: the Chateau's RG650E
   stands at 1 (SA off), not changed.
+- **Why 5G stays off (2026-11-13):** `status` → `nr5g`. It reports whether
+  the LTE cell offers an NSA anchor and whether the network restricts DCNR
+  (NAS System Info 0x4E/0x4F), whether EN-DC is on (NAS Get ENDC Config), and
+  the SSP nr5g_disable_mode, all read on the slow tick by `modem_common.uc
+  collect_nr5g`. The one blocker is logged once. HW-read: the RG502Q-EA and
+  the T99W175 have no anchor here. The Chateau's RG650E on Telekom has an
+  anchor, EN-DC on, but `DCNR restricted yes` (the tariff), and SA is off from
+  the factory.
 - **A control device before its netdev (2026-11-08):** after a modem reset
   the T99W175 (mhi-pci-generic) announces `wwan0mbim0` before its netdev;
   the modem was started without one, the netdev kept its kernel name and

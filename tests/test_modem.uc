@@ -194,6 +194,7 @@ scenario('plugin hold at init', {
 		// asked by a registration timeout (the reject detail) — which is
 		// what a hold at init must not run into
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 		GET_PROFILE_SETTINGS: { __error: 71 },
 		GET_SERVING_SYSTEM: (args, meta) => ({
 			serving_system: { registration: 0, cs_attach: 0, ps_attach: 0,
@@ -255,6 +256,7 @@ let reinit = { hold: 'rsim: its remote SIM x is not connected yet' };
 scenario('plugin hold at init, re-init without it', {
 	handlers: base_handlers({
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 		GET_PROFILE_SETTINGS: { __error: 71 },
 		// the parked radio does not register; online (second pass) it does
 		GET_SERVING_SYSTEM: () => reinit.hold ? {
@@ -300,6 +302,7 @@ scenario('plugin hold at init, low power refused', {
 	handlers: base_handlers({
 		SET_OPERATING_MODE: (args) => (args?.mode == 1) ? { __error: 0x0001 } : {},
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 		GET_PROFILE_SETTINGS: { __error: 71 },
 		GET_SERVING_SYSTEM: (args, meta) => refused.woke ? {
 			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
@@ -355,6 +358,7 @@ scenario('plugin hold at init, FCC at the wake', {
 		GET_OPERATING_MODE: () => ({ mode: fcc_held.unlocked ? 0 : 6 }),
 		SET_FCC_AUTHENTICATION: (args) => { fcc_held.unlocked = true; return {}; },
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 		GET_PROFILE_SETTINGS: { __error: 71 },
 		GET_SERVING_SYSTEM: (args, meta) => ({
 			serving_system: { registration: 0, cs_attach: 0, ps_attach: 0,
@@ -909,6 +913,7 @@ const E182E_HANDLERS = {
 		GET_LTE_CPHY_CA_INFO: { __error: 71 },
 		GET_RF_BAND_INFO: { __error: 71 },
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 		GET_SYSTEM_SELECTION_PREFERENCE: { __error: 71 },
 		// the 2011 stack does not answer CTL SYNC (field-observed; the
 		// host mock expresses it as a rejection — same error path, and
@@ -1114,6 +1119,7 @@ scenario('signal_units', {
 		GET_LTE_CPHY_CA_INFO: { __error: 71 },
 		GET_RF_BAND_INFO: { __error: 71 },
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 	}),
 	setup: (mock, modem) => {
 		let poll = null;
@@ -2554,6 +2560,10 @@ scenario('telemetry', {
 			nr5g_cell: { plmn: '262/01', tac: 54321, global_cell_id: 123456789,
 			             pci: 242, rsrq: -100, rsrp: -970, snr: 200 },
 		},
+		// the slow tick's 5G state reads (modem_common collect_nr5g): the
+		// cell offers an NSA anchor, the modem has EN-DC off
+		GET_SYSTEM_INFO: { nr5g_available: 1, dcnr_restricted: 0 },
+		GET_ENDC_CONFIG: { enabled: 0, immediate_scg_release: 0 },
 	}),
 	config: { stats_interval: 0.005, lock_4g: [ '1300:246' ] },
 }, 'telemetry',
@@ -2575,6 +2585,10 @@ scenario('telemetry', {
 		let tev = filter(events, (e) => e.event == 'telemetry');
 		ok(length(tev) >= 1, 'tele: telemetry event emitted');
 		eq(tev[0].data.cells.lte_intra.tac, 4321, 'tele: event carries cells');
+
+		eq([ modem.nr5g_state?.nsa_available, modem.nr5g_state?.dcnr_restricted, modem.nr5g_state?.endc_enabled ],
+			[ true, false, false ], 'tele: 5G state read on the slow tick');
+		ok(index(modem._nr5g_blocker ?? '', 'EN-DC is off') >= 0, 'tele: ...and the blocker named');
 	});
 
 // --- 13: device disappears ---------------------------------------------------

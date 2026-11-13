@@ -466,14 +466,16 @@ export function install(self, o)
 				// modem temperature + active access-tech (IoT/RedCap) over the AT
 				// side channel (best-effort, slow loop) — then log the full
 				// telemetry line and reschedule
-				modem_common.collect_temperature(self, () =>
+				// ...and why 5G is held off, if it is (modem_common collect_nr5g)
+				modem_common.collect_nr5g(self, self.nas, log, () =>
+				  modem_common.collect_temperature(self, () =>
 				    modem_common.probe_iot_rat(self, () => {
 					if (!err)
 						self._log_telemetry();
 
 					if (self.nas)
 						telemetry_timer = uloop.timer(interval, tick);
-				}));
+				})));
 			};
 
 			// sitting out a round still reads the rest (signal floor,
