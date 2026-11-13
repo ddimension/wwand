@@ -30,6 +30,7 @@ and superseded by the reference docs above wherever the two disagree.
 
 | Note | What |
 |---|---|
+| [stock-ril-observation.md](stock-ril-observation.md) | The method for public QMI-behaviour evidence: observing a stock rooted Qualcomm phone's RIL (logcat radio + qcril verbose) instead of vendor source trees — what it proves, what it does not, and the rules |
 | [design/interface-landscape.md](design/interface-landscape.md) | Which control/datapath/transport interfaces the modem market actually offers, and how wwand's split maps onto them |
 | [design/telemetry-survey.md](design/telemetry-survey.md) | Point-in-time catalogue of the QMI messages and Quectel AT commands that carry useful telemetry, with what has since shipped |
 | [design/apn-test.md](design/apn-test.md) | Proposal for `wwand-apntest`: scheduled end-to-end APN sweeps on dedicated test boxes, across SIM slots and eSIM profiles, with an accounting cross-check — and the three defects in the tool it would replace |
