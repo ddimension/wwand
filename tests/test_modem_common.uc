@@ -2213,4 +2213,72 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	eq(run({ error: 'ERROR' }).got, [ false ], 'at_reset: a refused reset reports not sent');
 }
 
+// --- apply_nr5g_mode: QMI SSP nr5g_disable_mode first, vendor AT otherwise ----
+{
+	// a NAS that answers synchronously; `ssp` is the GET reply (null = refused),
+	// `set_err` what the SET returns
+	let mknas = (ssp, set_err) => {
+		let n = { sets: [] };
+		n.request = (name, args, cb) => {
+			if (name == 'GET_SYSTEM_SELECTION_PREFERENCE')
+				return ssp ? cb(null, ssp) : cb({ error: 'qmi', code: 71 }, null);
+			push(n.sets, args);
+			cb(set_err, set_err ? null : {});
+		};
+		return n;
+	};
+	let mkself = (mode, model) => {
+		let s = { config: { nr5g_mode: mode }, info: { manufacturer: 'Quectel', model: model ?? 'RG502Q-EA' },
+			config_warnings: [], ran: null };
+		s.at = { run_sequence: (cmds, done) => { s.ran = cmds; done([]); } };
+		return s;
+	};
+	let quiet = () => null;
+	let n, s, called;
+
+	// differs -> one SET, permanent, with the mapped value (nsa = SA off = 1)
+	n = mknas({ nr5g_disable_mode: 0 }); s = mkself('nsa'); called = 0;
+	mc.apply_nr5g_mode(s, n, quiet, () => called++);
+	eq(n.sets, [ { nr5g_disable_mode: 1 } ], 'apply_nr5g_mode: nsa writes 1 over QMI, alone (no change_duration)');
+	ok(called == 1 && s.ran == null && s._nr5g_via == 'qmi', 'apply_nr5g_mode: ...no AT, cb once');
+
+	// already set -> read only
+	n = mknas({ nr5g_disable_mode: 2 }); s = mkself('sa');
+	mc.apply_nr5g_mode(s, n, quiet, () => null);
+	eq(n.sets, [], 'apply_nr5g_mode: a matching value is only read');
+
+	// no 0x2B in the reply -> the vendor AT command
+	n = mknas({ mode_preference: 0x10 }); s = mkself('both');
+	mc.apply_nr5g_mode(s, n, quiet, () => null);
+	ok(n.sets == null || length(n.sets) == 0, 'apply_nr5g_mode: no QMI write without 0x2B');
+	ok(length(s.ran ?? []) == 1 && s._nr5g_via == 'at', 'apply_nr5g_mode: ...falls back to the AT step');
+
+	// SET refused -> AT
+	n = mknas({ nr5g_disable_mode: 0 }, { error: 'qmi', code: 94 }); s = mkself('sa');
+	mc.apply_nr5g_mode(s, n, quiet, () => null);
+	ok(length(s.ran ?? []) == 1, 'apply_nr5g_mode: a refused QMI write falls back to AT');
+
+	// no NAS and no known AT command -> a config warning, cb still once
+	s = mkself('sa', 'EG06-E'); called = 0;
+	mc.apply_nr5g_mode(s, null, quiet, () => called++);
+	ok(called == 1 && s.ran == null && length(filter(s.config_warnings, (w) => w.check == 'nr5g_mode')) == 1,
+		'apply_nr5g_mode: nothing to send it with -> one warning, no command');
+
+	// a known AT command but no AT channel -> warned, not silently dropped
+	n = mknas({ mode_preference: 0x10 }); s = mkself('sa'); s.at = null; called = 0;
+	mc.apply_nr5g_mode(s, n, quiet, () => called++);
+	ok(called == 1 && length(filter(s.config_warnings, (w) => w.check == 'nr5g_mode')) == 1,
+		'apply_nr5g_mode: no AT channel for the fallback -> one warning');
+
+	// unset -> nothing at all, and an old warning goes
+	s = mkself(null); push(s.config_warnings, { check: 'nr5g_mode' }); called = 0;
+	mc.apply_nr5g_mode(s, mknas({ nr5g_disable_mode: 1 }), quiet, () => called++);
+	ok(called == 1 && !length(s.config_warnings), 'apply_nr5g_mode: unset touches nothing and clears the warning');
+
+	// a deferring backend leaves the vendor command out of its AT init list
+	s = mkself('sa'); s._nr5g_deferred = true; s.config.at_init = [];
+	ok(length(filter(mc.init_commands(s), (c) => index(c?.set ?? '', 'nr5g') >= 0)) == 0,
+		'init_commands: a QMI/MBIM modem defers nr5g_mode to apply_nr5g_mode');
+}
+
 done('test_modem_common');

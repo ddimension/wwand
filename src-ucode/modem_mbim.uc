@@ -65,6 +65,8 @@ const WAKE_TRIES = 3;
 export function create(opts)
 {
 	let self = {
+		// `option nr5g_mode` goes through sync_modes, not the AT init list
+		_nr5g_deferred: true,
 		id: opts.id,
 		device: opts.device,
 		protocol: 'mbim',
@@ -1329,7 +1331,14 @@ export function create(opts)
 			for (let w in warnings)
 				push(self.config_warnings, w);
 
-			cb();
+			// then `option nr5g_mode`, over the passthrough NAS when there is
+			// one (modem_common.apply_nr5g_mode: QMI first, AT otherwise). Unset,
+			// the passthrough is not opened just to find that out; the call
+			// still runs, because it clears a warning from an earlier config.
+			if (!self.config?.nr5g_mode || !self.mbim)
+				return modem_common.apply_nr5g_mode(self, null, log, cb);
+
+			self.with_nas((nas) => modem_common.apply_nr5g_mode(self, nas, log, cb));
 		};
 		let warn = (msg, actual) => push(warnings, { check: 'mode_preference', severity: 'warn',
 			message: msg, expected: self.config.modes, actual: actual });
@@ -2574,7 +2583,7 @@ export function create(opts)
 	// GIVE THE CID BACK. Every passthrough client is allocated out of the
 	// MODEM's client table, and a destroyed-but-not-released one stays in it
 	// until the modem's stack resets — the same finite resource modem.uc's
-	// teardown release burst exists to protect (modem.uc:360,:1693). The
+	// teardown release burst exists to protect (modem.uc:362,:1693). The
 	// session-long clients (pt.nas/dsd, uim, wms) are allocated once and go
 	// with the session; these two allocate PER CALL, so a scripted reattach
 	// loop walked the table down on its own. An E182E-class stack has room for
@@ -3149,7 +3158,7 @@ export function create(opts)
 			// — closing the HOST's MBIM session is not shown to reset the
 			// modem's embedded QMI client table, so every daemon reload leaked
 			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
-			// table has room for a handful. Same burst modem.uc:1743 does for
+			// table has room for a handful. Same burst modem.uc:1745 does for
 			// the native side, which the passthrough never had. ctl is NOT in this list: it is the
 			// implicit client (cid 0) and it is what carries RELEASE_CID for
 			// all the others, so it has to outlive them.

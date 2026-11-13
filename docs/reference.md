@@ -86,7 +86,7 @@ wwand section types plus the netifd interface — no separate config file:
   and **`reset_fallback`** (seconds, default 30) — how long an admin `modem_reset` waits
   for the modem's own reset to take it off the bus before the reset line is pulsed, and
   the zero-rx / TX-stall watchdog before the board repowers the modem —
-  and **`nr5g_mode`** (`nsa`\|`sa`\|`both`, Foxconn T99W175 and Quectel RG50xQ/RM5xxQ) — which 5G NR
+  and **`nr5g_mode`** (`nsa`\|`sa`\|`both`; QMI and MBIM-passthrough modems, else Foxconn T99W175 and Quectel RG50xQ/RM5xxQ over AT) — which 5G NR
   flavours the modem may use, see [Pin the radio](#pin-the-radio-modes-bands-cell-lock) —
   and **`sim_detect`** (`high`\|`low`\|`off`, Quectel only) — SIM hot-plug detection
   (`AT+QSIMDET`): on with the tray's detect pin high / low meaning "card inserted", or
@@ -1231,17 +1231,27 @@ holds something else; every write is permanent:
 modem option, **`nr5g_mode`** (`nsa` \| `sa` \| `both`, unset = the modem's
 own). This is the Android split: one NR bit among the allowed technologies,
 and NSA (dual connectivity) and SA (N1 mode) switched apart from it. Neither
-QMI nor MBIM has a standard message for it, so it is a vendor AT setting,
-read first and written only when it differs:
+libqmi nor MBIM documents a message for it. Qualcomm firmware carries it in
+the NAS system selection preference all the same: written as TLV 0x2E, read
+back as TLV 0x2B, 0 none off, 1 SA off, 2 NSA off. This was measured on
+2026-11-13 on the RG502Q-EA, the RG650E-EU and the T99W175 (over the MBIM
+passthrough): 0x2B follows Quectel's AT value, and a value written there
+survives a modem reset. So a QMI or MBIM-passthrough modem gets it over QMI,
+read first and written only when it differs, with no model list. When the
+reply has no 0x2B, or the write is refused, the vendor AT command is used
+instead:
 
 | Modem | Command | nsa | sa | both |
 |---|---|---|---|---|
 | Foxconn T99W175 (Cinterion MV31-W) | `AT^NR5G_MODE` | 1 | 2 | 0 |
 | Quectel RG500Q, RG501Q-EU, RG502Q-EA, RM500Q, RM502Q, RM505Q-AE, RM510Q-GL | `AT+QNWPREFCFG="nr5g_disable_mode"` | 1 | 2 | 0 |
 
-It needs the modem's AT port. The family is taken from the model, because
-each command is documented for those modules only; any other modem, other
-Quectels included, gets nothing sent and a `nr5g_mode` config warning. On a T99W175 that never reaches 5G SA,
+The AT route needs the modem's AT port, and the family is taken from the
+model, because each command is documented for those modules only. A modem
+with neither route, an NCM modem outside that list for instance, gets
+nothing sent and a `nr5g_mode` config warning. Not every T99W175 firmware
+has the AT command: F0.0.0.3.0.GC.003 answers `AT^NR5G_MODE?` with ERROR
+and takes the QMI setting. On a T99W175 that never reaches 5G SA,
 check this first: mrhaav's (F0.1.0.0.9) shipped with `^NR5G_MODE: 1` (NSA
 only), and SA came up once it was 0 (#75, 2026-11-12). With `modes 'nr5g'`
 alone, `nsa` gives no service at all: NSA needs an LTE anchor.

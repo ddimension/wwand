@@ -107,6 +107,20 @@ state buried at the top invites reading a months-old entry as present tense.
   LTE only): no QCAINFO any more, `ca` = an LTE PCC with 10 MHz and PCI 409,
   `serving.lte` now with bandwidth. The NR row is host-tested only, since
   neither modem has 5G coverage here.
+- **`nr5g_mode` over QMI first (2026-11-13, #75):** Qualcomm firmware
+  keeps the NSA/SA switch in the NAS system selection preference (SET TLV
+  0x2E, GET TLV 0x2B, not in libqmi), and the vendor AT commands front it.
+  `modem_common.uc apply_nr5g_mode` reads it and writes it only when it
+  differs, on QMI modems (`step_confnet_apply`) and over the MBIM passthrough
+  (`sync_modes`). AT is the fallback, and NCM keeps the AT init step. The
+  write goes WITHOUT change_duration: the RG502Q-EA refuses 0x2E next to one
+  with MissingArgument. HW-run 2026-11-13 on the RG502Q-EA (5.202) and the
+  T99W175 (openwrt-elitebook): `nsa` -> "set (QMI, was 0)", rerun -> "already
+  set", `both` -> "set (QMI, was 1)". On the RG502Q a value written over QMI
+  survived AT+CFUN=1,1. That T99W175 firmware (F0.0.0.3.0.GC.003) answers
+  `AT^NR5G_MODE?` with ERROR, so QMI is its only way. Options removed
+  afterwards, both modems back on 0. Side finding: the Chateau's RG650E
+  stands at 1 (SA off), not changed.
 - **A control device before its netdev (2026-11-08):** after a modem reset
   the T99W175 (mhi-pci-generic) announces `wwan0mbim0` before its netdev;
   the modem was started without one, the netdev kept its kernel name and

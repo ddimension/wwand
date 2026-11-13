@@ -53,7 +53,7 @@ export function install(self, o)
 	let match_sim_override = (iccid, imsi) =>
 		modem_common.match_sim_override(self.config?.sims, iccid, imsi);
 
-	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, verify_online, online_reached, leave_refused_mode, reset_out_of_offline, step_simslot, step_sim, step_identity, step_confnet, step_confnet_apply, step_validate, step_attach_profile, step_register;
+	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, verify_online, online_reached, leave_refused_mode, reset_out_of_offline, step_simslot, step_sim, step_identity, step_confnet, step_confnet_apply, step_confnet_modes, step_validate, step_attach_profile, step_register;
 
 	// DMS model was junk and the USB descriptor filled in (generic "HUAWEI Mobile"
 	// style): ATI usually knows the real model — upgrade identity off the critical
@@ -319,7 +319,7 @@ export function install(self, o)
 		// and then destroys the clients, which delivers `cancelled` to the AT
 		// command in flight — so this callback can arrive AFTER the modem is
 		// gone, and next() would drive the init chain over a dead instance.
-		// Same trap as modem.uc:185.
+		// Same trap as modem.uc:187.
 		let resume = (why) => {
 			if (resumed || self._gen != gen)
 				return;
@@ -828,7 +828,11 @@ export function install(self, o)
 		sim.log_preradio(self, log, () => sim.restore_preferred_plmn(self, log, () => step_confnet_apply()));
 	};
 
-	step_confnet_apply = () => {
+	// `option nr5g_mode` first (QMI, else AT — modem_common.apply_nr5g_mode),
+	// then the modes, RAT order and PLMN in one SSP write
+	step_confnet_apply = () => modem_common.apply_nr5g_mode(self, self.nas, log, step_confnet_modes);
+
+	step_confnet_modes = () => {
 		let mask = qmi_backend.parse_modes(self.config.modes);
 		let order = nasmod.rat_order_ids(self.config.rat_order);
 		let sel = null;

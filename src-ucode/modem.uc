@@ -120,6 +120,8 @@ function decode_operator_name(s)
 export function create(opts)
 {
 	let self = {
+		// `option nr5g_mode` goes through step_confnet_apply, not the AT init list
+		_nr5g_deferred: true,
 		id: opts.id,
 		device: opts.device,
 		config: opts.config ?? {},
@@ -191,7 +193,7 @@ export function create(opts)
 	// AFTER the cancel pass. The new timer fires with self.dms already null
 	// (modem.uc:1760) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
-	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:760, step_sim), and
+	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:762, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
 	//
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
@@ -1388,7 +1390,7 @@ export function create(opts)
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
-			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:567-570), so it
+			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:578-581), so it
 			// carries the same raw WCDMA Ec/Io and needs the same conversion —
 			// an indication landing between refreshes would otherwise flip the
 			// unit back under a consumer that just read the polled value

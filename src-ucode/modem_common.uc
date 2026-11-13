@@ -1935,6 +1935,23 @@ export function close_at(self)
 	self._at_dead = 0;
 };
 
+// The vendor AT command for `option nr5g_mode`, with the config warning when
+// there is none. Returns the run_sequence steps, [] when unset or unknown.
+function nr5g_at_commands(self)
+{
+	let nr5g = atcmd.nr5g_mode_commands(self.info, self.config);
+
+	self.config_warnings = filter(self.config_warnings ?? [], (w) => w.check != 'nr5g_mode');
+
+	if (self.config.nr5g_mode && !length(nr5g))
+		push(self.config_warnings, { check: 'nr5g_mode', severity: 'warn',
+			message: sprintf('nr5g_mode "%s" is not applied: no QMI setting and no known AT command for this modem (Foxconn T99W175, Quectel RG50xQ/RM5xxQ)',
+				self.config.nr5g_mode),
+			expected: self.config.nr5g_mode, actual: null });
+
+	return nr5g;
+}
+
 // The init commands every AT channel runs once it answers: model quirks,
 // the configured `at_init` list, the steps optional packages add
 // (`self.at_init_extra`, set by the daemon from plugins.uc at_init — e.g.
@@ -1948,15 +1965,9 @@ export function init_commands(self)
 	try { extra = self.at_init_extra?.(self.info) ?? []; }
 	catch (e) { extra = []; }
 
-	let nr5g = atcmd.nr5g_mode_commands(self.info, self.config);
-
-	self.config_warnings = filter(self.config_warnings ?? [], (w) => w.check != 'nr5g_mode');
-
-	if (self.config.nr5g_mode && !length(nr5g))
-		push(self.config_warnings, { check: 'nr5g_mode', severity: 'warn',
-			message: sprintf('nr5g_mode "%s" is not applied: no known command for this modem (Foxconn T99W175, Quectel RG50xQ/RM5xxQ)',
-				self.config.nr5g_mode),
-			expected: self.config.nr5g_mode, actual: null });
+	// a QMI or MBIM modem applies the mode itself, QMI first (apply_nr5g_mode),
+	// so its AT list leaves the vendor command out
+	let nr5g = self._nr5g_deferred ? [] : nr5g_at_commands(self);
 
 	return [
 		...atcmd.model_init_commands(self.info?.model),
@@ -1979,6 +1990,73 @@ export function init_done(self, o)
 
 		o.next();
 	};
+};
+
+// apply_nr5g_mode(self, nas, log, cb): `option nr5g_mode` on a modem with a
+// NAS client (QMI, or the MBIM passthrough; null without one). QMI FIRST: the
+// system selection preference carries nr5g_disable_mode (SET 0x2E / GET 0x2B,
+// codec/schema/nas.uc), which is the setting the vendor AT commands front —
+// Quectel's nr5g_disable_mode reads back through it on two modems — and it
+// needs no knowledge of the model. Read before write, and the write goes out
+// WITHOUT change_duration, unlike every other SSP write here: the RG502Q-EA
+// refuses 0x2E next to a duration TLV (either value) with MissingArgument,
+// and takes it alone — and the value written alone is still there after a
+// modem reset (AT+CFUN=1,1; HW-measured 2026-11-13). A modem whose reply has
+// no 0x2B, or that refuses the
+// write, gets the vendor AT command instead, when there is one and an AT
+// channel is open (the backends open AT before their modes step). cb() always
+// comes, once; nothing here fails the bring-up.
+export function apply_nr5g_mode(self, nas, log, cb)
+{
+	let want = nasmod.NR5G_DISABLE[self.config.nr5g_mode ?? ''];
+
+	self.config_warnings = filter(self.config_warnings ?? [], (w) => w.check != 'nr5g_mode');
+
+	if (want == null)
+		return cb();
+
+	let via_at = () => {
+		let cmds = nr5g_at_commands(self);
+
+		if (!length(cmds))
+			return cb();
+
+		if (!self.at?.run_sequence) {
+			push(self.config_warnings, { check: 'nr5g_mode', severity: 'warn',
+				message: sprintf('nr5g_mode "%s" is not applied: no QMI setting and no AT channel', self.config.nr5g_mode),
+				expected: self.config.nr5g_mode, actual: null });
+			log('warn', sprintf('nr5g_mode "%s" not applied: no QMI setting and no AT channel', self.config.nr5g_mode));
+			return cb();
+		}
+
+		self._nr5g_via = 'at';
+		self.at.run_sequence(cmds, init_done(self, { next: cb }));
+	};
+
+	if (!nas)
+		return via_at();
+
+	nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
+		if (gerr || cur?.nr5g_disable_mode == null)
+			return via_at();
+
+		self._nr5g_via = 'qmi';
+
+		if (cur.nr5g_disable_mode == want) {
+			log('info', sprintf('5G NR mode "%s" already set', self.config.nr5g_mode));
+			return cb();
+		}
+
+		nas.request('SET_SYSTEM_SELECTION_PREFERENCE', { nr5g_disable_mode: want }, (serr) => {
+			if (serr) {
+				log('warn', sprintf('5G NR mode "%s" refused over QMI (%J), trying AT', self.config.nr5g_mode, serr));
+				return via_at();
+			}
+
+			log('notice', sprintf('5G NR mode "%s" set (QMI, was %d)', self.config.nr5g_mode, cur.nr5g_disable_mode));
+			cb();
+		}, { no_recovery: true });
+	}, { no_recovery: true });
 };
 
 // best-effort AT side-channel bring-up: discover + open the AT tty, run

@@ -54,6 +54,10 @@ export const RADIO_IF_LTE = 8;
 export const RADIO_IF_TD_SCDMA = 9;
 export const RADIO_IF_5GNR = 12;
 
+// SSP nr5g_disable_mode values, keyed by `option nr5g_mode` — the same numbers
+// as Quectel's AT+QNWPREFCFG="nr5g_disable_mode" (atcmd.uc NR5G_MODE)
+export const NR5G_DISABLE = { both: 0, nsa: 1, sa: 2 };
+
 // QmiNasRadioInterface value -> a coarse RAT label (null when unknown/no service)
 export function radio_if_name(r)
 {
@@ -418,6 +422,11 @@ export default {
 				nr5g_nsa_band: { t: 0x30, f: {
 					m0: 'u64', m1: 'u64', m2: 'u64', m3: 'u64',
 					m4: 'u64', m5: 'u64', m6: 'u64', m7: 'u64' } },
+				// which 5G flavour is switched off: 0 none, 1 SA, 2 NSA (NR5G_DISABLE
+				// below). NOT IN libqmi 1.38. Read side is GET 0x2B; the pair was
+				// HW-measured on the RG502Q-EA and the RG650E-EU (2026-11-13): 0x2B
+				// follows AT+QNWPREFCFG="nr5g_disable_mode" on both, 0 -> 1 -> 0.
+				nr5g_disable_mode: { t: 0x2E, f: 'u32' },
 			},
 			resp: {},
 		},
@@ -443,6 +452,8 @@ export default {
 				nr5g_nsa_band: { t: 0x2D, f: {
 					m0: 'u64', m1: 'u64', m2: 'u64', m3: 'u64',
 					m4: 'u64', m5: 'u64', m6: 'u64', m7: 'u64' } },
+				// see SET 0x2E above; absent on a firmware without the setting
+				nr5g_disable_mode: { t: 0x2B, f: 'u32' },
 			},
 		},
 
