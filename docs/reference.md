@@ -2555,6 +2555,20 @@ the actual data system (`LTE` / `NSA` / `SA`) from the QMI DSD service, falling
 back to the QENG serving line (AT) and then the coarse NAS radio interfaces.
 `source` names which path answered.
 
+**Carrier list** — `modem_cells` → `cells.ca` lists the carriers in use, one
+row each: `{ rat: 'lte'|'nr', role: 'PCC'|'SCC', earfcn, pci, bandwidth_mhz,
+band?, state? }` (`earfcn` holds the NR-ARFCN on an NR row). The LTE rows come
+from QMI `GET_LTE_CPHY_CA_INFO`, or over AT where that is unavailable:
+`AT+QCAINFO` on a Quectel, `AT+GTCAINFO?` on a Fibocom, nothing on other
+vendors. QMI `GET_RF_BAND_INFO` then adds the primary carrier of a leg the
+list does not have yet, with band, channel and bandwidth: the NR row of an
+NSA or SA link (no QMI message lists NR carriers), and the LTE PCC of a modem
+whose CA info is unavailable (a T99W175 while idle). This follows Android's
+`PhysicalChannelConfig`, which is built from the same reads. The NR row also
+fills `serving.nr.bandwidth_mhz`. NR secondary carriers (NR-CA) are only
+listed where the AT read names them (Quectel); libqmi has no QMI read for
+them, and the RG502Q-EA refuses the newer NAS NR-CA messages (2026-11-13).
+
 **Invalid-response handling** — wwand recognises structurally-valid-but-unusable
 QMI answers instead of caching garbage: a truncated decode is treated as a
 protocol error; empty poll replies keep the last-known data; the per-type

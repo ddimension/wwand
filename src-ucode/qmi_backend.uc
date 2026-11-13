@@ -155,8 +155,77 @@ export function fcc_foxconn(dms, cfg, imei, md5, log, cb)
 	}, { no_recovery: true })));
 };
 
-// QmiNasDLBandwidth enum -> MHz (LTE carrier bandwidth)
-const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
+// QmiNasDLBandwidth enum -> MHz (libqmi 1.38 qmi-enums-nas.h). One enum for
+// every radio: 0-5 are LTE, 6-19 and 24 NR (since libqmi 1.36), 20-23 the
+// GSM/TD-SCDMA/WCDMA widths, which no carrier list here reports; 0xFF unknown.
+// The CPHY CA info only ever carries the LTE values.
+const CA_BW_MHZ = {
+	'0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20,
+	'6': 5, '7': 10, '8': 15, '9': 20, '10': 25, '11': 30, '12': 40, '13': 50,
+	'14': 60, '15': 80, '16': 90, '17': 100, '18': 200, '19': 400, '24': 70,
+};
+
+// get_rf_bands(nas, cb): the radio interfaces in use, as
+// [ { radio_if, band, channel, bandwidth_mhz }, ... ] (band = QmiNasActiveBand),
+// [] when the modem answered with none, null when the request failed. The
+// extended list wins over the legacy one: its channel is 32 bits wide, the
+// legacy u16 cannot hold an NR-ARFCN above 65535 (n77/n78 sit at 620000+).
+export function get_rf_bands(nas, cb)
+{
+	nas.request('GET_RF_BAND_INFO', {}, (e, d) => {
+		if (e)
+			return cb(null);
+
+		let bw = {};
+
+		for (let b in (d?.bandwidths ?? []))
+			bw[sprintf('%d', b.radio_if)] = CA_BW_MHZ[sprintf('%d', b.bandwidth)] ?? null;
+
+		cb(map(d?.bands_ext ?? d?.bands ?? [], (b) => ({
+			radio_if: b.radio_if, band: b.band, channel: b.channel,
+			bandwidth_mhz: bw[sprintf('%d', b.radio_if)] ?? null,
+		})));
+	}, { no_recovery: true });
+};
+
+// ca_with_rf(ca, rf): complete a carrier list (from get_ca or the vendor AT
+// read) with the primary carrier of each leg from get_rf_bands, the way
+// Android's PhysicalChannelConfig list is built from the same three NAS reads
+// (CPHY CA info, RF band info, cell location). Two gaps it closes:
+//   - the NR leg: no QMI message lists NR carriers (libqmi 1.38), but RF band
+//     info names its band, NR-ARFCN and bandwidth — the 5G row of an NSA
+//     link, the only row of an SA one;
+//   - an LTE PCC when the CA info is unavailable: the T99W175 answers it with
+//     InformationUnavailable while the UE is idle (HW-read 2026-11-13).
+// A leg the list already carries is left alone — the Quectel QCAINFO rows are
+// richer (SCCs, PCI) than what RF band info can say. PCI is not in RF band
+// info; modem_common.serving_from_ca fills it from the cell location read.
+// Pure; returns a new list (ca may be null).
+export function ca_with_rf(ca, rf)
+{
+	let out = [ ...(ca ?? []) ];
+	// 'PCC LTE' / 'PCC NR' too: the Fibocom AT rows name the leg in the role
+	// (telemetry_ncm.uc ca_entries), and missing them doubled both PCCs
+	let has = (rat) => length(filter(out, (c) => match(c?.role ?? '', /^PCC( LTE| NR)?$/) &&
+		(c?.rat ?? 'lte') == rat)) > 0;
+	let lte = filter(rf ?? [], (b) => b.radio_if == nasmod.RADIO_IF_LTE)[0];
+	let nr = filter(rf ?? [], (b) => b.radio_if == nasmod.RADIO_IF_5GNR)[0];
+
+	if (lte && !has('lte'))
+		push(out, { rat: 'lte', role: 'PCC', earfcn: lte.channel, pci: null,
+		            bandwidth_mhz: lte.bandwidth_mhz });
+
+	if (nr && !has('nr')) {
+		// the band token the way the AT producer spells it ('n78'), so the
+		// page shows the modem's band rather than re-deriving it
+		let m = match(nasmod.ACTIVE_BAND_NAMES[sprintf('%d', nr.band)] ?? '', /^NR (n[0-9]+)$/);
+
+		push(out, { rat: 'nr', role: 'PCC', earfcn: nr.channel, pci: null,
+		            band: m ? m[1] : null, bandwidth_mhz: nr.bandwidth_mhz });
+	}
+
+	return out;
+};
 
 // get_ca(nas, cb): active LTE carrier aggregation, normalized to
 // [ { role, earfcn, pci, bandwidth_mhz, state? }, ... ]. Band/frequency are

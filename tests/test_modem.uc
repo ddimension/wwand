@@ -777,6 +777,7 @@ const OVERLAY_HANDLERS = {
 	// the watched fast loop walks on to carrier aggregation; refuse it so the
 	// ladder settles on AT and the scenario stays about the signal
 	GET_LTE_CPHY_CA_INFO: { __error: 71 },
+	GET_RF_BAND_INFO: { __error: 71 },
 	GET_CELL_LOCATION_INFO: (args, m) => ({ lte_intra: {
 		serving_cell_id: 100, earfcn: 1850, ue_idle: 0,
 		plmn: { mcc: 262, mnc: 1 }, tac: 1, global_cell_id: 1,
@@ -906,6 +907,7 @@ const E182E_HANDLERS = {
 		GET_SIGNAL_INFO: { __error: 71 },
 		GET_CELL_LOCATION_INFO: { __error: 71 },
 		GET_LTE_CPHY_CA_INFO: { __error: 71 },
+		GET_RF_BAND_INFO: { __error: 71 },
 		GET_SYSTEM_INFO: { __error: 71 },
 		GET_SYSTEM_SELECTION_PREFERENCE: { __error: 71 },
 		// the 2011 stack does not answer CTL SYNC (field-observed; the
@@ -1110,6 +1112,7 @@ scenario('signal_units', {
 		// 'telemetry' on the signal read alone, which is what it is about
 		GET_CELL_LOCATION_INFO: { __error: 71 },
 		GET_LTE_CPHY_CA_INFO: { __error: 71 },
+		GET_RF_BAND_INFO: { __error: 71 },
 		GET_SYSTEM_INFO: { __error: 71 },
 	}),
 	setup: (mock, modem) => {

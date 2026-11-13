@@ -505,6 +505,28 @@ export default {
 			},
 		},
 
+		// RF band information: the band, channel and DL bandwidth of every
+		// radio interface in use — the one QMI read that names the NR leg's
+		// bandwidth (there is no NR CPHY CA info). Verified against libqmi 1.38
+		// qmi-service-nas.json (msg 0x0031): List 0x01 and Extended List 0x11
+		// (since 1.26; channel widened to guint32 for NR-ARFCN) are guint8-count
+		// arrays of { radio_interface gint8, active_band guint16 QmiNasActiveBand,
+		// active_channel }; Bandwidth List 0x12 (since 1.26) is a guint8-count
+		// array of { radio_interface gint8, bandwidth guint32 QmiNasDLBandwidth }.
+		// Wire shape HW-read on the RG502Q-EA and the T99W175 (LTE, 2026-11-13).
+		GET_RF_BAND_INFO: {
+			id: 0x0031,
+			req: {},
+			resp: {
+				bands: { t: 0x01, f: { n: 'u8', of: {
+					radio_if: 'i8', band: 'u16', channel: 'u16' } } },
+				bands_ext: { t: 0x11, f: { n: 'u8', of: {
+					radio_if: 'i8', band: 'u16', channel: 'u32' } } },
+				bandwidths: { t: 0x12, f: { n: 'u8', of: {
+					radio_if: 'i8', bandwidth: 'u32' } } },
+			},
+		},
+
 		// LTE carrier-aggregation info: serving PCell + active SCells with
 		// EARFCN, DL bandwidth (QmiNasDLBandwidth: 0=1.4 1=3 2=5 3=10 4=15
 		// 5=20 MHz) and band. Preferred bandwidth source; some modems answer

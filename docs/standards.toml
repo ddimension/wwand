@@ -82,7 +82,9 @@ code = "src-ucode/codec/{qmux,tlv,hex}.uc, codec/schema/*.uc"
   basis = "libqmi 1.38.0 data/qmi-service-*.json"
   sections = "CTL, DMS, NAS, WDS, WDA, UIM, WMS, LOC, PDC, DSD, TMD, CAT: message ids, TLV ids, enums"
     [[component.standard.review]]
-    review = "tbd"
+    review = "R9"
+    result = "NAS Get RF Band Information (0x0031, new): List 0x01, Extended List 0x11 (u32 channel) and Bandwidth List 0x12 as libqmi models them, wire shape HW-read on the RG502Q-EA and the T99W175; Get LTE Cphy CA Info 0x13/0x15 match"
+    open = "every other message of the twelve services not checked against libqmi in one pass yet"
 
 [[component]]
 name = "QMI backend (modem, context, telemetry)"
@@ -92,7 +94,9 @@ code = "src-ucode/{modem,modem_init_qmi,modem_datapath_qmi,context,context_monit
   basis = "libqmi 1.38.0 (qmi-enums-*.h, qmi-service-*.json)"
   sections = "call end reasons, operating modes, registration states, signal info"
     [[component.standard.review]]
-    review = "tbd"
+    review = "R9"
+    result = "carrier list only: QmiNasDLBandwidth was mapped for the six LTE values and nothing else, so an NR bandwidth could not be read (fixed: the whole enum, NR since libqmi 1.36); the NR leg was not in the list at all, as no QMI message lists NR carriers (fixed: RF band info supplies the primary carrier of each leg, the way Android's PhysicalChannelConfig is built)"
+    open = "call end reasons, operating modes, registration states and signal info still unchecked; the NR row not yet HW-seen (no 5G coverage at either test modem)"
   [[component.standard]]
   name = "3GPP TS 24.301 / TS 24.008 (NAS)"
   basis = ""
@@ -107,6 +111,14 @@ kind = "reference implementations and vendor manuals read next to the code (Mode
 by = "Claude, for ddimension/wwand#75"
 reviewed = "wwand 5b5ee0f"
 fixed = "wwand, commit \"mbim: option modes over the QMI passthrough first, 5G NSA/SA as option nr5g_mode\""
+
+[[reviews]]
+id = "R9"
+date = "2026-11-13"
+kind = "reference implementations read next to the code (libqmi 1.38.0 qmi-service-nas.json Get RF Band Information and Get LTE Cphy CA Info, qmi-enums-nas.h QmiNasDLBandwidth and QmiNasRadioInterface; AOSP radio HAL PhysicalChannelConfig.aidl and IRadioNetworkIndication.aidl, hardware/interfaces main 1a56e38)"
+by = "Claude, for ddimension/wwand#75"
+reviewed = "wwand f2718c8"
+fixed = "wwand, commit \"telemetry: the NR leg in the carrier list from QMI RF band info\""
 
 [[component]]
 name = "MBIM codec and backend"

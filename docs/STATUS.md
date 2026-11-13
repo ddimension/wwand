@@ -93,6 +93,20 @@ state buried at the top invites reading a months-old entry as present tense.
   `option at_over_mbim` tunnel ran no init list at all, and its engine sent
   setting steps as JSON; it now runs `modem_common.init_commands` through the
   runner the tty engine uses (`atcmd.uc run_sequence`).
+- **The NR leg in the carrier list (2026-11-13, #75):** the list had only
+  LTE rows on QMI and MBIM-passthrough modems, because `GET_LTE_CPHY_CA_INFO`
+  is LTE-only. Now `qmi_backend.uc ca_with_rf` adds the primary carrier of
+  each leg the list lacks from NAS `GET_RF_BAND_INFO` (band, channel,
+  bandwidth), the way Android's `PhysicalChannelConfig` is built. It runs
+  after the CA ladder, not as a rung of it, so the RG650E keeps its
+  `AT+QCAINFO` SCCs. `AT+QCAINFO` is sent to Quectel (or an unnamed
+  manufacturer) only. Read by hand on 2026-11-13: the T99W175 answers the CA
+  info with InformationUnavailable while idle, and that is why it fell
+  through to the QCAINFO ERROR; the RG502Q-EA refuses the newer NAS NR-CA
+  messages (InvalidQmiCommand). HW-run on the T99W175 (openwrt-elitebook,
+  LTE only): no QCAINFO any more, `ca` = an LTE PCC with 10 MHz and PCI 409,
+  `serving.lte` now with bandwidth. The NR row is host-tested only, since
+  neither modem has 5G coverage here.
 - **A control device before its netdev (2026-11-08):** after a modem reset
   the T99W175 (mhi-pci-generic) announces `wwan0mbim0` before its netdev;
   the modem was started without one, the netdev kept its kernel name and
@@ -283,8 +297,8 @@ The test devices are those in the workspace's `test-devices.txt`, nothing else.
 | ZyXEL LTE3301-PLUS (5.200) | EG06-E, **MBIM** (switched from QMI 2026-10-24) | daemon clean, but no registration with its SIM (`+EMM ERROR 1,15`); UIM Remote switched on |
 | Cudy LT300 v3 (3.113) | SLM770A-R, NCM | connected; reattach |
 | GL.iNet GL-X3000 (3.93) | RM520N-GL, QMI + E392 | blocked by other tests; UIM Remote already on |
-| HP EliteBook 850 G7 (5.204, x86_64) | Dell DW5932e / Foxconn T99W373, **PCIe/MHI** (`mhi-pci-generic`, `wwand-mhi`), MBIM + QMI passthrough | connected 5G NSA (ENDC); RAT priority read and in LuCI (2026-10-30, main f3f3a6a); eUICC in slot 2 listed; UIM Remote on via `AT^EFS`; borrows the NR7101's card over SSH (`donor_cond none`, the RG502Q refuses the condition TLV); the slot needs `kmod-hp-elitebook-850-g7-wwan-unlock` |
-| HP EliteBook 850 G7 (5.204, x86_64) | Dell DW5931e / Fibocom FM350-GL (MediaTek T7xx, PCI `14c3:4d75`, `kmod-mtk-t7xx`), firmware 81600.0000.00.29.23.06_GC, **native MBIM** (MBIMEx 3.0, no QMI passthrough: `NoDeviceSupport`) | 2026-10-31, main f2c804f: FCC lock released by GTFCCLOCK (06f51e0); connected, ping 3/3, 5G SA on o2-de; IP config needs the full 60-byte query (7e4e5d8); CA over `AT+GTCAINFO?` (4e1d62d); eUICC (SGP.22 2.2.2) and APDU over MBIM; no RAT priority or NAS settings, which need the passthrough (`unsupported_on_backend`) |
+| HP EliteBook 850 G7 (openwrt-elitebook, x86_64) | Dell DW5932e / Foxconn T99W373, **PCIe/MHI** (`mhi-pci-generic`, `wwand-mhi`), MBIM + QMI passthrough | connected 5G NSA (ENDC); RAT priority read and in LuCI (2026-10-30, main f3f3a6a); eUICC in slot 2 listed; UIM Remote on via `AT^EFS`; borrows the NR7101's card over SSH (`donor_cond none`, the RG502Q refuses the condition TLV); the slot needs `kmod-hp-elitebook-850-g7-wwan-unlock` |
+| HP EliteBook 850 G7 (openwrt-elitebook, x86_64) | Dell DW5931e / Fibocom FM350-GL (MediaTek T7xx, PCI `14c3:4d75`, `kmod-mtk-t7xx`), firmware 81600.0000.00.29.23.06_GC, **native MBIM** (MBIMEx 3.0, no QMI passthrough: `NoDeviceSupport`) | 2026-10-31, main f2c804f: FCC lock released by GTFCCLOCK (06f51e0); connected, ping 3/3, 5G SA on o2-de; IP config needs the full 60-byte query (7e4e5d8); CA over `AT+GTCAINFO?` (4e1d62d); eUICC (SGP.22 2.2.2) and APDU over MBIM; no RAT priority or NAS settings, which need the passthrough (`unsupported_on_backend`) |
 
 Snapshot devices run ucode 2026.07.09 (libucode ABI 20230711), so the feed's
 current snapshot packages do not install there (the #67 floor); hwtest deploys

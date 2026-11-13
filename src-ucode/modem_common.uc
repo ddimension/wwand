@@ -88,13 +88,47 @@ export function preserve_serving(newc, oldc)
 // from it (a Quectel AT-QENG value already there wins), EARFCN-guarded; seeds
 // serving.lte when the modem has no AT serving read. The BAND is left to EARFCN
 // derivation (LuCI, disjoint ranges) / AT-QENG — the QMI CA `band` TLV is the
-// non-3GPP ActiveBand enum. LTE only (there is no NR CPHY CA info).
+// non-3GPP ActiveBand enum.
+// The NR PCC (from QMI RF band info, qmi_backend.ca_with_rf) gap-fills
+// serving.nr the same way, NR-ARFCN-guarded — the vendor-neutral NR bandwidth.
+// Before either, a carrier row without a PCI takes it from the cell-location
+// read when the channel matches: RF band info has no PCI, and the serving cell
+// of that channel is the carrier.
 export function serving_from_ca(self)
 {
 	let ca = self.cells?.ca;
 
 	if (!self.cells || type(ca) != 'array')
 		return;
+
+	let lc = self.cells.lte_intra, nr_arfcn = self.cells.nr5g_arfcn;
+	// a primary row as every producer spells it: the Fibocom AT rows say
+	// 'PCC LTE' / 'PCC NR' (telemetry_ncm.uc ca_entries)
+	let is_pcc = (c) => match(c?.role ?? '', /^PCC( LTE| NR)?$/);
+
+	for (let c in ca) {
+		if (!is_pcc(c) || c.pci != null || c.earfcn == null)
+			continue;
+
+		if (c.rat == 'nr' && nr_arfcn == c.earfcn && self.cells.nr5g_cell?.pci != null)
+			c.pci = self.cells.nr5g_cell.pci;
+		else if ((c.rat ?? 'lte') == 'lte' && lc?.earfcn == c.earfcn && lc?.serving_cell_id != null)
+			c.pci = lc.serving_cell_id;
+	}
+
+	let nrp = null;
+	for (let c in ca)
+		if (is_pcc(c) && c?.rat == 'nr') { nrp = c; break; }
+
+	if (nrp?.bandwidth_mhz != null) {
+		self.cells.serving = self.cells.serving ?? {};
+		self.cells.serving.nr = merge.fill(self.cells.serving.nr,
+			{ arfcn: nrp.earfcn, bandwidth_mhz: nrp.bandwidth_mhz, pci: nrp.pci }, {
+			src:   'qmi-rf',
+			gap:   [ 'bandwidth_mhz', 'arfcn', 'pci' ],
+			guard: (dst, src) => dst.arfcn == null || src.arfcn == null || dst.arfcn == src.arfcn,
+		});
+	}
 
 	// THE LTE PCC, not the first PCC. Under EN-DC the AT carrier list carries a
 	// primary row for each leg — one "LTE BAND 3", one "NR5G BAND n78" — so
@@ -104,7 +138,7 @@ export function serving_from_ca(self)
 	// construction, so its absence means LTE rather than unknown.
 	let pcc = null;
 	for (let c in ca)
-		if (c?.role == 'PCC' && (c?.rat ?? 'lte') == 'lte') { pcc = c; break; }
+		if (is_pcc(c) && (c?.rat ?? 'lte') == 'lte') { pcc = c; break; }
 
 	if (!pcc || pcc.bandwidth_mhz == null)
 		return;

@@ -46,10 +46,11 @@ let raw_err = () => ({ __raw: RESULT_ERR });
 
 // --- mock wiring: each op reads a mutable response so scenarios can vary ------
 
-let r_ca, r_dsd, r_sysinfo, r_pkt, r_bearer, r_rates, r_opmode;
+let r_ca, r_rf, r_dsd, r_sysinfo, r_pkt, r_bearer, r_rates, r_opmode;
 
 let mock = mockhub.create({ handlers: {
 	GET_LTE_CPHY_CA_INFO:               () => r_ca,
+	GET_RF_BAND_INFO:                   () => r_rf,
 	GET_SYSTEM_STATUS:                  () => r_dsd,     // DSD service 0x2A
 	GET_SYSTEM_INFO:                    () => r_sysinfo, // NAS
 	GET_PACKET_STATISTICS:              () => r_pkt,     // WDS
@@ -104,6 +105,82 @@ push(steps, (next) => {
 push(steps, (next) => {
 	r_ca = raw_err();
 	backend.get_ca(nas, (ca) => { eq(ca, null, 'get_ca: a REFUSED request is null'); next(); });
+});
+
+// === get_rf_bands: GET_RF_BAND_INFO 0x01 / 0x11 / 0x12 ========================
+// The LTE half is the RG502Q-EA's reply byte for byte (B20, EARFCN 6300,
+// bandwidth enum 3 = 10 MHz; HW-read 2026-11-13); the NR entry is n78
+// (QmiNasActiveBand 269) at NR-ARFCN 642048 with enum 17 = 100 MHz, a value
+// the legacy u16 channel of TLV 0x01 cannot hold.
+push(steps, (next) => {
+	r_rf = raw(tlv(0x01, u8(2) + u8(8) + u16(145) + u16(6300) + u8(12) + u16(269) + u16(642048 & 0xffff)) +
+	           tlv(0x11, u8(2) + u8(8) + u16(145) + u32(6300) + u8(12) + u16(269) + u32(642048)) +
+	           tlv(0x12, u8(2) + u8(8) + u32(3) + u8(12) + u32(17)));
+	backend.get_rf_bands(nas, (rf) => {
+		eq(rf, [
+			{ radio_if: 8,  band: 145, channel: 6300,   bandwidth_mhz: 10 },
+			{ radio_if: 12, band: 269, channel: 642048, bandwidth_mhz: 100 },
+		], 'get_rf_bands: extended list wins (32-bit NR-ARFCN), bandwidth per radio');
+		next();
+	});
+});
+
+// a modem without the 1.26 TLVs: legacy list, no bandwidth
+push(steps, (next) => {
+	r_rf = raw(tlv(0x01, u8(1) + u8(8) + u16(145) + u16(6300)));
+	backend.get_rf_bands(nas, (rf) => {
+		eq(rf, [ { radio_if: 8, band: 145, channel: 6300, bandwidth_mhz: null } ],
+			'get_rf_bands: legacy list alone, bandwidth unknown');
+		next();
+	});
+});
+
+push(steps, (next) => {
+	r_rf = raw_err();
+	backend.get_rf_bands(nas, (rf) => { eq(rf, null, 'get_rf_bands: a refused request is null'); next(); });
+});
+
+// === ca_with_rf: the primary carrier of each leg the list lacks ===============
+push(steps, (next) => {
+	let rf = [
+		{ radio_if: 8,  band: 145, channel: 6300,   bandwidth_mhz: 10 },
+		{ radio_if: 12, band: 269, channel: 642048, bandwidth_mhz: 100 },
+	];
+	let lte_ca = [
+		{ rat: 'lte', role: 'PCC', earfcn: 6300, pci: 409, bandwidth_mhz: 10 },
+		{ rat: 'lte', role: 'SCC', earfcn: 1801, pci: 334, bandwidth_mhz: 20, state: 2 },
+	];
+
+	// NSA over QMI: the CPHY CA rows stay, the NR leg is added
+	eq(backend.ca_with_rf(lte_ca, rf), [ ...lte_ca,
+		{ rat: 'nr', role: 'PCC', earfcn: 642048, pci: null, band: 'n78', bandwidth_mhz: 100 } ],
+		'ca_with_rf: NSA — LTE CA rows kept, NR leg appended');
+
+	// CA info unavailable (T99W175 while idle): both legs from RF band info
+	eq(backend.ca_with_rf(null, rf), [
+		{ rat: 'lte', role: 'PCC', earfcn: 6300, pci: null, bandwidth_mhz: 10 },
+		{ rat: 'nr', role: 'PCC', earfcn: 642048, pci: null, band: 'n78', bandwidth_mhz: 100 } ],
+		'ca_with_rf: no CA list — a PCC per leg from RF band info');
+
+	// SA: NR only
+	eq(backend.ca_with_rf([], [ rf[1] ]), [
+		{ rat: 'nr', role: 'PCC', earfcn: 642048, pci: null, band: 'n78', bandwidth_mhz: 100 } ],
+		'ca_with_rf: SA — the NR row alone');
+
+	// a list that already has both legs (Quectel QCAINFO) is left as it was
+	let at_ca = [ { rat: 'lte', role: 'PCC', earfcn: 1300, pci: 42 },
+	              { rat: 'nr', role: 'PCC', earfcn: 632628, pci: 321, band: 'n78' } ];
+	eq(backend.ca_with_rf(at_ca, rf), at_ca, 'ca_with_rf: legs already listed are not duplicated');
+
+	// the Fibocom AT rows name the leg in the role (ca_entries): still a PCC
+	let fib_ca = [ { rat: 'lte', role: 'PCC LTE', earfcn: 1300, pci: 42 },
+	               { rat: 'nr', role: 'PCC NR', earfcn: 632628, pci: 321 } ];
+	eq(backend.ca_with_rf(fib_ca, rf), fib_ca, "ca_with_rf: 'PCC LTE' / 'PCC NR' count as listed legs");
+
+	// no RF answer: the list unchanged, a missing one an empty list
+	eq(backend.ca_with_rf(lte_ca, null), lte_ca, 'ca_with_rf: no RF band info -> list unchanged');
+	eq(backend.ca_with_rf(null, null), [], 'ca_with_rf: nothing at all -> []');
+	next();
 });
 
 // === get_data_mode: DSD available_systems (t=0x10) ============================

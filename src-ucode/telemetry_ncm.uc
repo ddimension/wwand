@@ -979,6 +979,17 @@ export function read_ca_at(self, cb)
 			cb(e, g ? ca_entries(g, g.sccs) : null);
 		});
 
+	// QCAINFO only where Quectel firmware answers it. Sent to anyone else it
+	// is an ERROR each time the ladder re-probes — on a Foxconn T99W175, whose
+	// MBIM caps name it "Qualcomm", that was a warning in the log for nothing
+	// (evidence: ddimension/wwand#75). An unnamed manufacturer still gets it,
+	// as sim_detect_commands does, since a blank says nothing either way. The
+	// carrier list then comes from QMI alone (qmi_backend.ca_with_rf).
+	let mfr = lc(sprintf('%s', self.info?.manufacturer ?? ''));
+
+	if (mfr != '' && !match(mfr, /quectel/))
+		return cb({ error: 'unsupported', detail: 'no AT carrier read for this vendor' }, null);
+
 	return modem_common.telemetry_at(self).send('AT+QCAINFO', (e, r) =>
 		cb(e, e ? null : atcmd.parse_qcainfo(r?.lines)));
 };

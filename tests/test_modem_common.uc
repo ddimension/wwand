@@ -1361,6 +1361,36 @@ mc.serving_from_ca(sca);
 eq(sca.cells.serving.lte, { bandwidth_mhz: 10, earfcn: 6300, pci: 334 },
 	'serving_from_ca: an untagged PCC is still the LTE one');
 
+// the RF-band rows (qmi_backend.ca_with_rf) carry no PCI: the cell-location
+// serving cell of the same channel supplies it, per leg
+sca = { cells: {
+	lte_intra: { earfcn: 6300, serving_cell_id: 409 },
+	nr5g_arfcn: 642048, nr5g_cell: { pci: 650 },
+	ca: [
+		{ rat: 'lte', role: 'PCC', earfcn: 6300, pci: null, bandwidth_mhz: 10 },
+		{ rat: 'nr', role: 'PCC', earfcn: 642048, pci: null, band: 'n78', bandwidth_mhz: 100 },
+	] } };
+mc.serving_from_ca(sca);
+eq([ sca.cells.ca[0].pci, sca.cells.ca[1].pci ], [ 409, 650 ],
+	'serving_from_ca: a PCI-less PCC takes the serving PCI of its channel');
+eq(sca.cells.serving.nr, { bandwidth_mhz: 100, arfcn: 642048, pci: 650 },
+	'serving_from_ca: the NR PCC seeds serving.nr with its bandwidth');
+
+// ...but not across a channel mismatch (a handover between the two reads)
+sca = { cells: {
+	lte_intra: { earfcn: 1300, serving_cell_id: 409 },
+	nr5g_arfcn: 643000, nr5g_cell: { pci: 650 },
+	serving: { nr: { arfcn: 643000 } },
+	ca: [
+		{ rat: 'lte', role: 'PCC', earfcn: 6300, pci: null, bandwidth_mhz: 10 },
+		{ rat: 'nr', role: 'PCC', earfcn: 642048, pci: null, bandwidth_mhz: 100 },
+	] } };
+mc.serving_from_ca(sca);
+eq([ sca.cells.ca[0].pci, sca.cells.ca[1].pci ], [ null, null ],
+	'serving_from_ca: no PCI from a serving cell on another channel');
+eq(sca.cells.serving.nr, { arfcn: 643000 },
+	'serving_from_ca: NR-ARFCN mismatch does not fill serving.nr');
+
 // --- qeng_ok: vendor gate for AT+QENG ----------------------------------------
 
 ok(mc.qeng_ok({ info: { manufacturer: 'Quectel' } }), 'qeng_ok: Quectel');

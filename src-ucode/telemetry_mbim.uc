@@ -171,8 +171,8 @@ export function install(self, o)
 		}, { reprobe: true, log: log, what: 'cells' });
 	};
 
-	// carrier aggregation: passthrough NAS GET_LTE_CPHY_CA_INFO, else AT+QCAINFO
-	// (no native MBIM CA CID). Stores self.cells.ca. Mirrors the CA fetch in
+	// carrier aggregation: passthrough NAS GET_LTE_CPHY_CA_INFO, else the vendor
+	// AT read (no native MBIM CA CID), then RF band info for the NR leg. Stores self.cells.ca. Mirrors the CA fetch in
 	// telemetry_qmi.uc.
 	self._refresh_ca = function(cb) {
 		cb = cb ?? (() => null);
@@ -180,7 +180,16 @@ export function install(self, o)
 		if (!self.cells)   // nowhere to hang CA yet
 			return cb();
 
-		let store = (ca) => { if (self.cells) self.cells.ca = ca ?? []; cb(); };
+		// then RF band info over the passthrough adds the primary carrier of a
+		// leg the list lacks — a step after the choice, not a rung of it (see
+		// telemetry_qmi.uc _fetch_ca_info for why)
+		let store = (ca) => with_pt(() => {
+			if (self.cells) self.cells.ca = ca ?? [];
+			cb();
+		}, (pt) => qmi_backend.get_rf_bands(pt.nas, (rf) => {
+			if (self.cells) self.cells.ca = qmi_backend.ca_with_rf(ca, rf);
+			cb();
+		}));
 
 		backend.choose(self, '_ca_be', [
 			{ name: 'qmi', probe: (ok) => self._ensure_pt((up) => up
