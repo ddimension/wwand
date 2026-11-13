@@ -377,6 +377,13 @@ proto_wwand_setup() {
 				proto_notify_error "$interface" WAITING_MODEM
 				sleep 8
 				;;
+			throttled)
+				# the modem holds the APN back after network rejections; the
+				# daemon dials again when the back-off is over (reconnect.uc)
+				echo "APN throttled by the modem, waiting for the back-off"
+				proto_notify_error "$interface" THROTTLED
+				sleep 10
+				;;
 			*)
 				proto_notify_error "$interface" CONNECT_FAILED
 				# the pause spaces out a netifd that DOES re-run setup (an ifup

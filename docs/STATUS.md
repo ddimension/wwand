@@ -129,6 +129,16 @@ state buried at the top invites reading a months-old entry as present tense.
   the T99W175 have no anchor here. The Chateau's RG650E on Telekom has an
   anchor, EN-DC on, but `DCNR restricted yes` (the tariff), and SA is off from
   the factory.
+- **Throttled APN off the recovery ladder (2026-11-13):** a dial the modem
+  ends with internal 209/211/258 ("PDN ... call throttled") no longer counts
+  toward the ladder. The retry waits for the time the modem reports (WDS Get
+  PDN Throttle Info, libqmi 1.38). Status `contexts.<n>.throttle`. QMI only.
+  Seen in the field on the BG96 (5.201) with an NB-IoT card: 8 throttled
+  dials walked the ladder toward a modem reset. Host-tested (test_daemon,
+  test_qmi_backend). Not HW-triggered with the new code, because the BG96
+  then lost LTE-M service and fell to GSM, where the card is refused with SM
+  cause 33 (counted, correctly). Its iotopmode is now 2 (LTE-M + NB-IoT,
+  was 0) and nwscanseq 030201.
 - **A control device before its netdev (2026-11-08):** after a modem reset
   the T99W175 (mhi-pci-generic) announces `wwan0mbim0` before its netdev;
   the modem was started without one, the netdev kept its kernel name and

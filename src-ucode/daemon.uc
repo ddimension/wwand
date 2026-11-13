@@ -424,6 +424,57 @@ export function create(opts)
 	let activate = self._activate;
 	let clear_reconnect = self._clear_reconnect;
 	let retry_activate = self._retry_activate;
+
+	// A dial the modem refused as throttled: record until when, so the retry
+	// waits instead of dialling into the back-off, and say so once per spell.
+	// Without a time from the modem (no QMI WDS client, an MBIM modem) the
+	// ordinary backoff stands and only the count is spared.
+	let note_throttle = (name, entry, ctx) => {
+		let apn = entry.cfg?.apn ?? '';
+		let was = entry.throttle;
+		let set = (secs) => {
+			entry.throttle = { apn: apn, seconds: secs,
+				until: (secs != null) ? context_common.mono() + secs : null };
+
+			if (!was || was.querying)
+				log('notice', sprintf('interface %s: the modem holds APN "%s" back after network rejections%s — waiting, not counting toward recovery',
+					name, apn, (secs != null) ? sprintf(' (%d s left)', secs) : ''));
+		};
+
+		if (type(ctx.modem.pdn_throttle) != 'function')
+			return set(null);
+
+		// the WDS answer is asynchronous, and the reconnect this same error
+		// starts would otherwise dial before it arrives (retry_activate
+		// waits while `querying`)
+		entry.throttle = { apn: apn, seconds: null, until: null, querying: true };
+
+		ctx.modem.pdn_throttle((list) => {
+			if (self.contexts[name] !== entry)
+				return;
+
+			// an APN set: its own entry only — a sole unrelated one must not
+			// hold this dial. Unset (the network's default APN): the modem
+			// names the APN the network chose, which the config cannot know,
+			// so the longest hold it reports stands for it.
+			let secs = null;
+
+			for (let t in (list ?? []))
+				if (apn == '' || lc(t.apn ?? '') == lc(apn))
+					secs = max(secs ?? 0, t.ipv4_s ?? 0, t.ipv6_s ?? 0);
+
+			set(secs);
+
+			// the retry chain may be parked on the query: start it now,
+			// deferred so a backend answering synchronously cannot re-enter
+			// the context error handler from here
+			uloop.timer(0, () => {
+				if (self.contexts[name] === entry && entry.wanted)
+					retry_activate(name);
+			});
+		});
+	};
+
 	let enter_reconnecting = self._enter_reconnecting;
 
 	// forward-declared: ucode closures capture only already-declared vars, and
@@ -2291,6 +2342,12 @@ export function create(opts)
 			if (entry) {
 				entry._conn_seq = (entry._conn_seq ?? 0) + 1;
 
+				// a session is up, so whatever throttle was noted is over
+				if (entry.throttle) {
+					log('info', sprintf('interface %s: connected, the APN is no longer held back', name));
+					entry.throttle = null;
+				}
+
 				// and drop the probe in flight, which is asking about the
 				// connection that just ended. Not merely stale — it is IN THE
 				// WAY: the renew further down is how the new session's
@@ -2530,8 +2587,20 @@ export function create(opts)
 			// or a radio cycle runs (with_sessions_released): the modem still
 			// reads READY then, and the failure is the one asked for
 			// (HW-observed on the MeiG SLM770A, 2026-10-10).
-			if (ctx.modem.state == 'READY' && !ctx.modem.detached && !ctx.modem._reattaching)
+			// Nor one the modem refused because it holds the APN back after
+			// network rejections (the context sets err.throttled, context.uc
+			// _fail / callend.throttled): every dial until the
+			// back-off runs out ends the same way, and the ladder's radio cycles
+			// and resets would only add to what the network sees. The time
+			// left comes from the modem where it can say (QMI Get PDN Throttle
+			// Info); the retry waits for it (reconnect.uc retry_activate).
+			let throttled = !!data?.throttled;
+
+			if (ctx.modem.state == 'READY' && !ctx.modem.detached && !ctx.modem._reattaching && !throttled)
 				ctx.modem.note_connect_failure();
+
+			if (throttled && entry)
+				note_throttle(name, entry, ctx);
 
 			// A START_NETWORK the modem never ANSWERS (a timeout, not a refusal)
 			// on a registered modem means its WDS side hangs. An MC7710
@@ -5191,6 +5260,13 @@ export function create(opts)
 				l3_device: derive_netdev(entry),
 				state: entry.ctx?.state ?? 'UNBOUND',
 				last_error: entry.ctx?.last_error,
+				// the modem holds this interface's APN back after network
+				// rejections (note_throttle): { apn, seconds_left } while it
+				// lasts, seconds_left null when the modem gave no time
+				throttle: (entry.throttle && (entry.throttle.until == null || entry.throttle.until > context_common.mono()))
+					? { apn: entry.throttle.apn,
+					    seconds_left: (entry.throttle.until != null) ? entry.throttle.until - context_common.mono() : null }
+					: null,
 				// WHAT THE MODEM HANDED US, which until now existed only in the
 				// `ipv4 config:` line logged once at connect time. That line
 				// rotates away, and two users then had no way to answer the

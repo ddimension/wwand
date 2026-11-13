@@ -2027,6 +2027,93 @@ uloop.run();
 	eq(cleared, [], 'setproto: a failed switch does not touch the pin');
 })();
 
+// --- a throttled dial: no ladder climb, and the retry waits it out -----------
+//
+// The modem refuses every dial on an APN it holds back after network
+// rejections until a back-off runs out (callend.throttled; context.uc sets
+// err.throttled). Counted as a failure it would walk the recovery ladder into
+// radio cycles and resets that cannot help (HW: the BG96 on 5.201 with an
+// NB-IoT card on LTE-M, "PDN IPv4 call throttled", 8 failed attempts).
+(() => {
+	let climbed = 0, ups = 0, c = null, pending_thr = null;
+	let LIST = [ { apn: 'Other', ipv4_s: 5, ipv6_s: null },
+	             { apn: 'IoT.Example', ipv4_s: 120, ipv6_s: null } ];
+
+	let fake = {
+		modem: { create: (o) => ({
+			id: o.id, state: 'READY', config: o.config,
+			start: () => null, stop: () => null,
+			note_connect_success: () => null,
+			note_connect_failure: () => { climbed++; },
+			// answered later, like the modem: held until the test releases it
+			pdn_throttle: (cb) => { pending_thr = cb; },
+		}) },
+		context: { create: (o) => {
+			c = { state: 'IDLE', name: o.name, modem: o.modem, config: o.config, deps: o.deps,
+			      modem_event: () => null,
+			      up: (cb) => { ups++; return cb({ error: 'x' }); },
+			      down: (cb) => cb ? cb() : null };
+			return c;
+		} },
+	};
+
+	let d = daemon_mod.create({ timing: TIMING, deps: { log: () => null, load_qmi: () => fake } });
+
+	d.apply_config(config.parse({ network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+		       device: 'l3a', apn: 'iot.example', pdp_type: 'ipv4' },
+	} }));
+	d.contexts.wan.wanted = true;
+
+	c.deps.on_event(c, 'error', { stage: 'start_network', throttled: true,
+		verbose: { type: 2, reason: 209 } });
+
+	eq(climbed, 0, 'throttle: a throttled dial does not climb the recovery ladder');
+	ok(d.contexts.wan.throttle?.querying, 'throttle: marked while the modem is asked, so no dial races the answer');
+	ups = 0;
+	d._retry_activate('wan');
+	eq(ups, 0, 'throttle: ...and the retry does not dial meanwhile');
+
+	pending_thr(LIST);
+	eq(d.contexts.wan.throttle?.seconds, 120, 'throttle: the time left for THIS APN, matched case-insensitively');
+
+	d._retry_activate('wan');
+	eq([ ups, d.contexts.wan.hold_timer ], [ 0, null ],
+		'throttle: a known hold is waited out, and the reconnect hold does not give the interface up meanwhile');
+	eq(d.status().contexts.wan.throttle?.apn, 'iot.example', 'throttle: published on the interface status');
+
+	let got = null;
+	ups = 0;
+	d.context_up('wan', (err) => { got = err; });
+	eq([ got?.error, ups ], [ 'throttled', 0 ], 'throttle: netifd setup is answered without a dial');
+
+	// an APN set that the modem does not list is not held by a stranger's entry
+	d.contexts.wan.throttle = null;
+	d.contexts.wan.cfg.apn = 'mine.example';
+	c.deps.on_event(c, 'error', { stage: 'start_network', throttled: true, verbose: { type: 2, reason: 209 } });
+	pending_thr(LIST);
+	eq(d.contexts.wan.throttle?.seconds, null, 'throttle: an unlisted APN gets no time from another one');
+
+	// no APN set (network default): the longest hold the modem reports
+	d.contexts.wan.throttle = null;
+	d.contexts.wan.cfg.apn = null;
+	c.deps.on_event(c, 'error', { stage: 'start_network', throttled: true, verbose: { type: 2, reason: 209 } });
+	pending_thr(LIST);
+	eq(d.contexts.wan.throttle?.seconds, 120, 'throttle: the default APN takes the longest reported hold');
+
+	// any other failure still counts
+	c.deps.on_event(c, 'error', { stage: 'start_network', verbose: { type: 6, reason: 33 } });
+	eq(climbed, 1, 'throttle: an ordinary rejection still climbs');
+
+	// a session coming up ends it
+	c.state = 'CONNECTED';
+	c.deps.on_event(c, 'up', {});
+	eq(d.contexts.wan.throttle, null, 'throttle: cleared once connected');
+	d.contexts.wan.wanted = false;
+	for (let n, e in d.contexts) { if (e.retry_timer) e.retry_timer.cancel(); if (e.hold_timer) e.hold_timer.cancel(); }
+})();
+
 // --- context_failed: an external prober drives the rungs it cannot reach -----
 //
 // L3 reachability is measured OUTSIDE (watchcat, mwan3, cron): with policy

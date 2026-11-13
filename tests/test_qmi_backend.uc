@@ -46,7 +46,7 @@ let raw_err = () => ({ __raw: RESULT_ERR });
 
 // --- mock wiring: each op reads a mutable response so scenarios can vary ------
 
-let r_ca, r_rf, r_dsd, r_sysinfo, r_pkt, r_bearer, r_rates, r_opmode;
+let r_ca, r_rf, r_thr, r_dsd, r_sysinfo, r_pkt, r_bearer, r_rates, r_opmode;
 
 let mock = mockhub.create({ handlers: {
 	GET_LTE_CPHY_CA_INFO:               () => r_ca,
@@ -54,6 +54,7 @@ let mock = mockhub.create({ handlers: {
 	GET_SYSTEM_STATUS:                  () => r_dsd,     // DSD service 0x2A
 	GET_SYSTEM_INFO:                    () => r_sysinfo, // NAS
 	GET_PACKET_STATISTICS:              () => r_pkt,     // WDS
+	GET_PDN_THROTTLE_INFO:              () => r_thr,     // WDS
 	GET_CURRENT_DATA_BEARER_TECHNOLOGY: () => r_bearer,  // WDS
 	GET_CHANNEL_RATES:                  () => r_rates,   // WDS
 	SET_OPERATING_MODE:                 () => r_opmode,  // DMS
@@ -138,6 +139,20 @@ push(steps, (next) => {
 push(steps, (next) => {
 	r_rf = raw_err();
 	backend.get_rf_bands(nas, (rf) => { eq(rf, null, 'get_rf_bands: a refused request is null'); next(); });
+});
+
+// === get_pdn_throttle: WDS 0x006C info array (libqmi 1.38 layout) ===========
+push(steps, (next) => {
+	let lstr = (x) => u8(length(x)) + x;
+	r_thr = raw(tlv(0x10, u8(2) +
+		u8(1) + u8(0) + u32(95500) + u32(0) + lstr('nbiot.example') +
+		u8(0) + u8(0) + u32(0) + u32(0) + lstr('free.example')));
+	backend.get_pdn_throttle(wds, (t) => {
+		eq(t, [ { apn: 'nbiot.example', ipv4_s: 96, ipv6_s: null } ],
+			'get_pdn_throttle: only held APNs, ms -> s rounded up, a family not held is null');
+		r_thr = raw_err();
+		backend.get_pdn_throttle(wds, (t2) => { eq(t2, null, 'get_pdn_throttle: a refused request is null'); next(); });
+	});
 });
 
 // === ca_with_rf: the primary carrier of each leg the list lacks ===============

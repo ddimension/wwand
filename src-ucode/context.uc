@@ -1234,6 +1234,11 @@ export function create(opts)
 		if (err != null && err.error == null)
 			err.error = desc?.text ?? sprintf('%s failed', err.stage ?? 'activation');
 
+		// a dial the modem refused as throttled: the daemon keeps it off the
+		// recovery ladder and waits out the back-off (daemon.uc note_throttle)
+		if (err != null && callend.throttled(err.verbose))
+			err.throttled = true;
+
 		self.last_error = {
 			stage: err?.stage,
 			text:  desc?.text,

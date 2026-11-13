@@ -64,4 +64,9 @@ eq(callend.describe(503, null).text, 'call ended (reason 503)', 'coarse reason f
 eq(callend.describe(null, null, 42).text, 'activation failed (ext error 42)', 'ext-error fallback');
 eq(callend.describe(null, null), null, 'nothing -> null');
 
+// the modem's PDN back-off: internal 209/211/258, typed
+ok(callend.throttled({ type: 2, reason: 209 }) && callend.throttled({ type: 2, reason: 211 }) &&
+   callend.throttled({ type: 2, reason: 258 }), 'throttled: internal 209/211/258');
+ok(!callend.throttled({ type: 6, reason: 209 }) && !callend.throttled(null), 'throttled: other types and none are not');
+
 done('test_callend');

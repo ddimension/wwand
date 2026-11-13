@@ -89,6 +89,10 @@ code = "src-ucode/codec/{qmux,tlv,hex}.uc, codec/schema/*.uc"
     review = "R10"
     result = "NAS Get System Info 0x4E (EUTRA with NR5G availability) and 0x4F (DCNR restriction) added as guint8, Get ENDC Config 0x00E8 (Enabled 0x10, Immediate SCG Release 0x11) added; all match libqmi 1.38"
     open = "the rest of Get System Info is still modelled only up to the LTE reject cause"
+    [[component.standard.review]]
+    review = "R11"
+    result = "WDS Get PDN Throttle Info 0x006C added (Network Type 0x01 guint8, Info 0x10 array with string APN), matches libqmi 1.38; call end reasons internal 209/211/258 classed as throttling per qmi-enums-wds.h"
+    open = "not HW-read in a throttled state"
 
 [[component]]
 name = "QMI backend (modem, context, telemetry)"
@@ -131,6 +135,14 @@ kind = "reference implementation read next to the code (libqmi 1.38.0 qmi-servic
 by = "Claude"
 reviewed = "wwand 9e61d17"
 fixed = "wwand, commit \"telemetry: why a 5G modem stays on LTE (status nr5g)\""
+
+[[reviews]]
+id = "R11"
+date = "2026-11-13"
+kind = "reference implementation read next to the code (libqmi 1.38.0 qmi-service-wds.json Get PDN Throttle Info 0x006C, qmi-enums-wds.h verbose call end reasons)"
+by = "Claude"
+reviewed = "wwand 5950083"
+fixed = "wwand, commit \"recovery: a throttled APN waits out the back-off instead of climbing the ladder\""
 
 [[component]]
 name = "MBIM codec and backend"

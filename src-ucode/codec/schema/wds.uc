@@ -236,6 +236,21 @@ export default {
 			resp: { prefix: { t: 0x10, f: { addr: 'ipv6', plen: 'u8' } } },
 		},
 
+		// The modem's back-off per APN after network rejections. libqmi 1.38
+		// qmi-service-wds.json "Get PDN Throttle Info" 0x006C (since 1.14):
+		// input Network Type 0x01 (guint8, 0 = 3GPP); output Info 0x10, a
+		// guint8-count array of { IPv4 Throttled gint8, IPv6 Throttled gint8,
+		// IPv4 / IPv6 Throttle Time Left MS guint32, APN string } — the
+		// string inside a struct is u8-length-prefixed, as everywhere.
+		GET_PDN_THROTTLE_INFO: {
+			id: 0x006C,
+			req: { network_type: { t: 0x01, f: 'u8' } },
+			resp: {
+				info: { t: 0x10, f: { n: 'u8', of: {
+					ipv4: 'i8', ipv6: 'i8', ipv4_left_ms: 'u32', ipv6_left_ms: 'u32', apn: 'lstring' } } },
+			},
+		},
+
 		GET_CURRENT_SETTINGS: {
 			id: 0x002D,
 			req: { requested: { t: 0x10, f: 'u32' } },

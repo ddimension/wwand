@@ -334,6 +334,27 @@ export function get_reg_detail(nas, cb)
 
 // --- context (WDS) operations ------------------------------------------------
 
+// get_pdn_throttle(wds, cb): the APNs the modem holds back right now, as
+// [ { apn, ipv4_s, ipv6_s } ] (seconds left, null for a family not held),
+// [] when none is, null when the request failed. 3GPP only.
+export function get_pdn_throttle(wds, cb)
+{
+	wds.request('GET_PDN_THROTTLE_INFO', { network_type: 0 }, (e, d) => {
+		if (e)
+			return cb(null);
+
+		// rounded UP: a hold of 400 ms is still a hold, and floored it read 0
+		let secs = (held, ms) => held ? int(((ms ?? 0) + 999) / 1000) : null;
+		let out = [];
+
+		for (let t in (d?.info ?? []))
+			if (t.ipv4 || t.ipv6)
+				push(out, { apn: t.apn ?? '', ipv4_s: secs(t.ipv4, t.ipv4_left_ms), ipv6_s: secs(t.ipv6, t.ipv6_left_ms) });
+
+		cb(out);
+	}, { no_recovery: true });
+};
+
 const RAT_LTE = (1 << 5), RAT_5GNR = (1 << 10);
 const STATS_MASK = 0x3FF;
 

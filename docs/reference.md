@@ -2501,6 +2501,22 @@ answer after the upgrade re-arms it.
   not fail), sets the modem `control_note` (shown in `status` and LuCI), reports a
   `WAITING_MODEM` interface error to netifd, and re-logs it every 30 s so the wait
   is visible.
+- **A throttled APN** (QMI) — after network rejections the modem itself holds
+  an APN back for a while (3GPP back-off, T3396 and the like) and ends every
+  dial on it with call end reason internal 209/211/258 ("PDN ... call
+  throttled"). Such a failure does **not** count toward the recovery ladder,
+  because a radio cycle or a reset cannot shorten the back-off. wwand asks
+  the modem how long it lasts (WDS Get PDN Throttle Info 0x006C, libqmi 1.38)
+  and waits that long before the next dial. For a configured APN only its own
+  entry counts; for an unset APN (the network's default) the longest hold the
+  modem reports counts. While a known hold runs, the reconnect hold
+  (`hold_max`) does not give the interface up: the outage has a known end,
+  and no `registered` event would bring the interface back after it. A
+  netifd setup in the meantime is answered without a dial, and netifd shows
+  `THROTTLED`. Without a time from the modem, the ordinary backoff applies.
+  The interface status shows `throttle: { apn, seconds_left }`, `wwandctl
+  status` shows `throttled`, and the log notes it once per spell. On MBIM
+  and NCM the call end reasons differ, so this does not apply there.
 - **Stuck offline** (QMI) — a modem that refuses `online` with
   `INVALID_TRANSITION` is in a mode online is not reached from. The bring-up
   reads the mode: from **offline** the only way out is a reset (an EG25-G

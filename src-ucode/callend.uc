@@ -378,6 +378,18 @@ export function ipv6_refused(verbose)
 	       (verbose?.type == 6 && verbose?.reason == 50);
 };
 
+// The modem's own back-off on the PDN (libqmi 1.38 qmi-enums-wds.h): internal
+// 209 PDN_IPV4_CALL_THROTTLED, 211 PDN_IPV6_CALL_THROTTLED and 258
+// PDN_NON_IP_CALL_THROTTLED. The network refused this APN before, and the
+// modem now refuses every dial on it until a back-off timer runs out (3GPP
+// TS 24.301 T3396 and the like) — a dial before then cannot succeed, so it
+// is no fault for the recovery ladder either. Typed, like ipv6_refused.
+export function throttled(verbose)
+{
+	return verbose?.type == VERBOSE_TYPE_INTERNAL &&
+	       (verbose?.reason == 209 || verbose?.reason == 211 || verbose?.reason == 258);
+};
+
 export function describe(reason, verbose, ext_error) {
 	if (verbose != null && verbose.type != null) {
 		let tname = TYPE_NAMES[sprintf('%d', verbose.type)] ?? sprintf('type %d', verbose.type);

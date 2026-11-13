@@ -1208,6 +1208,16 @@ export function create(opts)
 	// SET_MITIGATION_LEVEL is deliberately not modelled — the modem's thermal
 	// management is the authority, and a host that overrides it can cook the
 	// hardware). Entirely best-effort: cb() runs whatever happens.
+	// pdn_throttle(cb): the APNs the modem holds back after network rejections
+	// (qmi_backend.get_pdn_throttle), for the daemon when a dial comes back
+	// throttled; null without a config WDS client or on error
+	self.pdn_throttle = function(cb) {
+		if (!self.wds_cfg)
+			return cb(null);
+
+		qmi_backend.get_pdn_throttle(self.wds_cfg, cb);
+	};
+
 	self._install_thermal = function(cb) {
 		cb = cb ?? (() => null);
 

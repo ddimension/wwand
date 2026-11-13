@@ -229,6 +229,12 @@ function cmd_status(args)
 			c.last_error ? sprintf('  [last error: %s %s]',
 				c.last_error.stage ?? '', c.last_error.text ?? c.last_error.code ?? '') : '');
 
+		// the modem holds the APN back after network rejections: no dial
+		// until this runs out, and none of it counts toward recovery
+		if (c.throttle)
+			printf('  throttled   APN "%s" held back by the modem%s\n', c.throttle.apn ?? '',
+				(c.throttle.seconds_left != null) ? sprintf(', %d s left', c.throttle.seconds_left) : '');
+
 		// option iccid: the card it needs, and where its switch stands
 		if (c.sim)
 			printf('  sim         card %s%s%s\n', c.sim.want ?? '?',
