@@ -812,6 +812,17 @@ into `status` as `ipv4.pcscf` / `ipv6.pcscf`. QMI has only an IPv4 list. The
 flags never reach the attach profile, whichever interface owns it. Same
 tri-state as the other flags; QMI only.
 
+An `ims '1'` interface is defined by its own section: a matching `wwand_sim`
+does **not** override its APN, login or `pdp_type` (that entry is the card's
+data dial; the IMS PDN is a second one on the same card). IMS APNs are often
+IPv6-only (Vodafone DE): set `pdp_type 'ipv6'` there. A dual-stack dial still
+comes up when the network refuses only IPv4 (internal 208 / 3GPP 51): the v4
+half degrades and the log names `pdp_type 'ipv6'`, the mirror of the IPv6 hint.
+Pin the profile with `option profile`: without it the interface dials the
+profile of its mux channel, which on carrier configurations is the modem's own
+`ims` (2) or `sos` (3) profile, and wwand writes the APN and PDP type into it
+(see docs/design/dynamic-profiles.md).
+
 On **NCM**, `address_allocation` is the standard `<IPv4AddrAlloc>` of
 `AT+CGDCONT` (the 7th parameter, 3GPP TS 27.007), so it works for every vendor;
 it is compared on the `AT+CGDCONT?` read-back like the APN. `clat` has no AT

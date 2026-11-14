@@ -378,6 +378,16 @@ export function ipv6_refused(verbose)
 	       (verbose?.type == 6 && verbose?.reason == 50);
 };
 
+// Its mirror, the network's "no IPv4 here": internal 208
+// PDN_IPV4_CALL_DISALLOWED (:469) and 3GPP SM cause 51 IPV6_ONLY_ALLOWED
+// (:996). An IPv6-only APN answers a dual-stack dial this way: Vodafone DE's
+// `ims` (HW-seen on 245, 2026-11-14), and IMS profiles are commonly ipv4v6.
+export function ipv4_refused(verbose)
+{
+	return (verbose?.type == VERBOSE_TYPE_INTERNAL && verbose?.reason == 208) ||
+	       (verbose?.type == 6 && verbose?.reason == 51);
+};
+
 // The modem's own back-off on the PDN (libqmi 1.38 qmi-enums-wds.h): internal
 // 209 PDN_IPV4_CALL_THROTTLED, 211 PDN_IPV6_CALL_THROTTLED and 258
 // PDN_NON_IP_CALL_THROTTLED. The network refused this APN before, and the

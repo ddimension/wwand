@@ -862,6 +862,42 @@ scenario('v6-refused-hint-typed', {
 	});
 });
 
+// The mirror: an IPv6-only APN (Vodafone DE `ims`) answers the v4 half of a
+// dual-stack dial with internal 208. That degrades to v6 instead of failing
+// the context; any other v4 failure stays fatal (section C below).
+let v4_logs = [];
+
+scenario('v4-refused-degrades', {
+	config: { apn: 'ims', pdp_type: 'ipv4v6' },
+	logs: v4_logs,
+	handlers: {
+		START_NETWORK: (args, meta) => (meta.count == 1)
+			? { __error: 14, call_end_reason: 3, verbose_call_end: { type: 2, reason: 208 } }
+			: { pdh: 2222 },
+		GET_CURRENT_SETTINGS: V6_SETTINGS,
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'v4-refused: up on v6 after internal 208');
+		eq([ settings?.ipv4, settings?.ipv6 != null ], [ null, true ], 'v4-refused: v6 only');
+		eq(length(filter(v4_logs, (x) => index(x, "set option pdp_type 'ipv6'") >= 0)), 1,
+			'v4-refused: names pdp_type ipv6, once');
+		next();
+	});
+});
+
+scenario('v4-refused-v4-only', {
+	config: { apn: 'ims', pdp_type: 'ipv4' },
+	handlers: {
+		START_NETWORK: { __error: 14, call_end_reason: 3, verbose_call_end: { type: 2, reason: 208 } },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		ok(err != null, 'v4-refused: fatal when there is no v6 half to fall back to');
+		next();
+	});
+});
+
 // --- C: v4 failure is fatal --------------------------------------------------
 
 scenario('v4-fatal', {
@@ -1622,6 +1658,16 @@ ok(_all_done, sprintf('every scenario ran (%d of %d) — the pump did not run ou
 	eq(context_common.conn_cfg({ config: ctx.config, modem: { active_sim: { username: 'simuser' } } }, 'auth'),
 	   'pap', 'conn_cfg: interface fallback for a card without an APN of its own');
 	eq(context_common.conn_cfg(ctx, 'password'), null, 'conn_cfg: empty on both levels -> null');
+
+	// an IMS PDN keeps its own settings: the card's override is its data dial
+	let ims = { config: { apn: 'ims', pdp_type: 'ipv6', ims: true },
+	            modem: { active_sim: { apn: 'web.vodafone.de', pdp_type: 'ipv4v6', username: 'u' } } };
+	eq([ context_common.conn_cfg(ims, 'apn'), context_common.conn_cfg(ims, 'pdp_type'),
+	     context_common.conn_cfg(ims, 'username') ], [ 'ims', 'ipv6', null ],
+	   'conn_cfg: an ims interface ignores the wwand_sim override');
+	eq(context_common.effective_pdp(ims), 'ipv6', 'effective_pdp: the ims interface family');
+	ims.config.ims = false;
+	eq(context_common.conn_cfg(ims, 'apn'), 'web.vodafone.de', 'conn_cfg: ims 0 is an ordinary interface');
 
 	ctx.modem.active_sim = null;
 	eq(context_common.conn_cfg(ctx, 'apn'), 'iface-apn', 'conn_cfg: no active sim -> interface');

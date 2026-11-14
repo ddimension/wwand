@@ -117,6 +117,7 @@ export function create(opts)
 
 	let deps = opts.deps ?? {};
 	let v6_hint_given = false;   // pdp_type hint on an IPv6 refusal, once (activate)
+	let v4_hint_given = false;   // the same for an IPv4 refusal
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: interface %s: %s\n', level, self.name, msg)));
 
 	// log an assigned family IP config at 'notice' only the FIRST time (at
@@ -1154,8 +1155,14 @@ export function create(opts)
 
 						// preserved: v4 fatal (but the CLAT one, see clat_v4),
 						// v6 degrades while something is left to try — but not
-						// under the CLAT one, which is nothing without it
-						if ((family == 4 && !clat_v4()) || (family == 6 && clat_v4()) ||
+						// under the CLAT one, which is nothing without it. And
+						// the network's explicit "no IPv4 here"
+						// (callend.ipv4_refused) with v6 still to come degrades
+						// as well: an IPv6-only APN (an IMS PDN, typically)
+						// dialled ipv4v6 would otherwise never come up at all
+						let v4_degrades = (family == 4 && idx < length(fams) &&
+							callend.ipv4_refused(err?.verbose));
+						if ((family == 4 && !clat_v4() && !v4_degrades) || (family == 6 && clat_v4()) ||
 						    !got_any && idx >= length(fams))
 							return self._fail(err);
 
@@ -1174,6 +1181,11 @@ export function create(opts)
 						if (family == 6 && !v6_hint_given && callend.ipv6_refused(err?.verbose)) {
 							v6_hint_given = true;
 							log('notice', sprintf('the network refuses IPv6 here (%s) — if that is permanent, set option pdp_type \'ipv4\' on this interface, or in the SIM\'s wwand_sim section if only this card is affected',
+								cdesc?.text ?? 'refused'));
+						}
+						if (v4_degrades && !v4_hint_given) {
+							v4_hint_given = true;
+							log('notice', sprintf('the network refuses IPv4 here (%s) — continuing on IPv6; if that is permanent, set option pdp_type \'ipv6\' on this interface',
 								cdesc?.text ?? 'refused'));
 						}
 

@@ -69,4 +69,10 @@ ok(callend.throttled({ type: 2, reason: 209 }) && callend.throttled({ type: 2, r
    callend.throttled({ type: 2, reason: 258 }), 'throttled: internal 209/211/258');
 ok(!callend.throttled({ type: 6, reason: 209 }) && !callend.throttled(null), 'throttled: other types and none are not');
 
+// the mirror: the network's "no IPv4", internal 208 and 3GPP 51, typed
+ok(callend.ipv4_refused({ type: 2, reason: 208 }) && callend.ipv4_refused({ type: 6, reason: 51 }),
+   'ipv4_refused: internal 208, 3GPP 51');
+ok(!callend.ipv4_refused({ type: 3, reason: 51 }) && !callend.ipv4_refused({ type: 2, reason: 210 }) &&
+   !callend.ipv4_refused(null), 'ipv4_refused: other types, the v6 refusal and none are not');
+
 done('test_callend');
