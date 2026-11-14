@@ -557,6 +557,29 @@ export function create(opts)
 		return false;
 	};
 
+	// THE KERNEL FORGETS AN INTERFACE'S ADDRESSES WITH ITS DEVICE; netifd
+	// forgets them only when it sees the device go. An interface netifd holds
+	// without a bound device (`option device` learned after it was loaded,
+	// learn_device commits uci and does not reload) stays UP through a modem
+	// restart that took its mux child away, so the ready path adopts it — and
+	// the re-dial's update carries the same addresses, which netifd reads as
+	// unchanged and does not re-add to the new device. The interface shows up
+	// with an address the kernel no longer has (ddimension/wwand#90). The
+	// device's ifindex tells the rebuild apart from a session that survived
+	// (a wwand restart): the kernel hands them out cyclically, never reusing
+	// a freed one at once (dev_index_reserve -> xa_alloc_cyclic,
+	// net/core/dev.c:10707-10725, Linux 6.18.41). null = cannot tell.
+	let l3_ifindex = (entry) => {
+		let dev = derive_netdev(entry);
+
+		if (!dev || !deps.datapath_fx?.read)
+			return null;
+
+		let idx = trim(deps.datapath_fx.read(sprintf('/sys/class/net/%s/ifindex', dev)) ?? '');
+
+		return length(idx) ? idx : null;
+	};
+
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
@@ -1172,7 +1195,16 @@ export function create(opts)
 					clear_our_down(centry);
 				}
 
-				if (st?.up) {
+				// up on a device that is not the one its session came up on:
+				// netifd's addresses are gone from the kernel (see l3_ifindex),
+				// so it is reset like an orphaned setup below, not adopted. A
+				// device that cannot be read right now is no evidence: resetting
+				// on it would bounce a working session after a registration blip.
+				let cur_ifindex = st?.up ? l3_ifindex(centry) : null;
+				let rebuilt = centry._up_ifindex != null && cur_ifindex != null &&
+					cur_ifindex != centry._up_ifindex;
+
+				if (st?.up && !rebuilt) {
 					log('info', sprintf('adopting live interface %s after modem ready', centry.cfg.interface));
 					retry_activate(cname);
 				}
@@ -1206,7 +1238,7 @@ export function create(opts)
 							centry.cfg.interface));
 					}
 				}
-				else if (!(centry.cfg.auto ?? true) && !our_down(centry) && !centry.reconnect_on_register) {
+				else if (!rebuilt && !(centry.cfg.auto ?? true) && !our_down(centry) && !centry.reconnect_on_register) {
 					// 'auto 0' and not up: dormant until an explicit ifup — and
 					// not wanted meanwhile. A SIM change's down-and-reconnect
 					// (modem_sim_refresh) and the low-power decision read
@@ -1254,8 +1286,10 @@ export function create(opts)
 					// ORPHANED setup (e.g. a wwand restart mid-setup). 'up' no-ops on a
 					// pending interface, so 'down' first, then the kick re-runs setup.
 					// (A busy context never gets here: the branch above.)
-					if (st?.pending && deps.down_interface) {
-						log('info', sprintf('interface %s stuck pending, resetting before setup', centry.cfg.interface));
+					if ((st?.pending || rebuilt) && deps.down_interface) {
+						log('info', rebuilt
+							? sprintf('interface %s is up on a device that was rebuilt, resetting it so netifd applies its addresses again', centry.cfg.interface)
+							: sprintf('interface %s stuck pending, resetting before setup', centry.cfg.interface));
 						// Two markers, because two different readers ask two different
 						// questions about this down.
 						//
@@ -2341,6 +2375,9 @@ export function create(opts)
 			// again, so nothing else distinguishes the two.
 			if (entry) {
 				entry._conn_seq = (entry._conn_seq ?? 0) + 1;
+
+				// the device this session's addresses live on (l3_ifindex)
+				entry._up_ifindex = l3_ifindex(entry);
 
 				// a session is up, so whatever throttle was noted is over
 				if (entry.throttle) {

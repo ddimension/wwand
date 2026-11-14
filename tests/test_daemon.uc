@@ -5115,4 +5115,72 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	unlink('/tmp/test-admin-iccid.json');
 })();
 
+// --- an interface still up on a REBUILT device is reset, not adopted
+// netifd holds it without a bound device, so a modem restart that took the mux
+// child away leaves it up; adopting it re-sends the same addresses, which
+// netifd reads as unchanged and never puts back on the new device
+// (ddimension/wwand#90). A session that survived (same ifindex) is adopted.
+(() => {
+	let evs = [], ups = 0, hook = null, ctx_ev = null;
+	let fx = fakefx.create();
+	let fake = {
+		modem: { create: (o) => {
+			hook = o.deps.on_event;
+			return { id: o.id, state: 'READY', config: o.config, start: () => null, stop: () => null,
+			         note_connect_success: () => null };
+		} },
+		context: { create: (o) => {
+			ctx_ev = o.deps.on_event;
+			return { state: 'IDLE', name: o.name, modem: o.modem, config: o.config,
+			         down: (cb) => cb ? cb() : null, up: (cb) => { ups++; },
+			         modem_event: () => null };
+		} },
+	};
+	let d = daemon_mod.create({ timing: TIMING, deps: {
+		log: () => null, load_qmi: () => fake, datapath_fx: fx,
+		resolve_modem_device: (cfg) => cfg.device,
+		resolve_netdev: () => 'wwan0',
+		kick_interface: (i) => push(evs, 'kick ' + i),
+		down_interface: (i) => push(evs, 'down ' + i),
+		renew_interface: () => null,
+		iface_status: (i, cb) => cb({ up: true, pending: false, autostart: true }),
+	} });
+
+	d.apply_config(config.parse({ network: {
+		m0:   { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		wan6: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', pdp_type: 'ipv6' },
+	} }));
+	d.contexts.wan6.wanted = true;
+
+	fx.files['/sys/class/net/wwand0/ifindex'] = '7\n';
+	ctx_ev(d.contexts.wan6.ctx, 'up', {});
+	eq(d.contexts.wan6._up_ifindex, '7', 'rebuilt device: the up records the ifindex its addresses live on');
+
+	// same device (a wwand restart, a registration blip): adopted in place
+	ups = 0;
+	hook(d.modems.m0.modem, 'registered', {});
+	ok(ups >= 1 && length(evs) == 0, 'rebuilt device: an unchanged device is adopted, no down or kick');
+
+	// a device that cannot be read is no evidence either way: adopted
+	d.contexts.wan6.ctx.state = 'IDLE';
+	d.contexts.wan6.retry_timer?.cancel();
+	d.contexts.wan6.retry_timer = null;
+	fx.files['/sys/class/net/wwand0/ifindex'] = '';
+	evs = []; ups = 0;
+	hook(d.modems.m0.modem, 'registered', {});
+	ok(ups >= 1 && length(evs) == 0, 'rebuilt device: an unreadable ifindex is inconclusive, adopted, not reset');
+
+	// the modem restarted, its mux child is a new device
+	d.contexts.wan6.ctx.state = 'IDLE';
+	d.contexts.wan6.retry_timer?.cancel();
+	d.contexts.wan6.retry_timer = null;
+	fx.files['/sys/class/net/wwand0/ifindex'] = '9\n';
+	evs = []; ups = 0;
+	hook(d.modems.m0.modem, 'registered', {});
+	eq(evs, [ 'down wan6', 'kick wan6' ],
+		'rebuilt device: the still-up interface is reset (down, then setup) so netifd re-applies its addresses');
+	ok(d._our_downs.wan6 != null, 'rebuilt device: the reset is marked as ours, not read as an ifdown');
+	d.shutdown();
+})();
+
 done('test_daemon');

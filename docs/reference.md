@@ -1439,6 +1439,12 @@ and drives netifd over ubus:
 - **Permanent loss** (`sim_blocked`, admin/config down) → `down` immediately.
 - **wwand restart is non-destructive** (`stop_local`, not `shutdown`): WAN and
   live traffic survive; the daemon **adopts** the running session on `registered`.
+  Not when the interface is up on a device that was **rebuilt** since its
+  session came up (a modem restart replaced the mux child, and netifd, holding
+  the interface without a bound device, never saw it go): the kernel dropped
+  the addresses with the old device, and netifd would not re-add unchanged
+  ones. Such an interface is reset (`down`, then setup) instead. The daemon
+  tells the two apart by the device's ifindex.
 - **A config reload is idempotent** — it re-applies only what actually changed.
   Editing one interface's APN reconnects **only that context**; its modem and the
   other modems' sessions keep running untouched. See *Idempotent reload* below.
