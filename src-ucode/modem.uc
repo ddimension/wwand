@@ -200,7 +200,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1914) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:1917) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:762, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -366,10 +366,13 @@ export function create(opts)
 
 		self.ctl.request('ALLOCATE_CID', { service: schema.service }, (err, data) => {
 			if (err || !data?.allocation) {
-				// ...and only a QMI error ANSWER says the service is absent. A
-				// timeout or a cancel says nothing about it, and neither does
-				// a full client table (5).
-				if (probing && err?.error == 'qmi' && err.code != 5)
+				// ...and only INVALID_SERVICE_TYPE says the service is absent
+				// (QMI_PROTOCOL_ERROR_INVALID_SERVICE_TYPE = 31, qmi-errors.h:258,
+				// libqmi 1.38.0). Every other answer — a full client table (5),
+				// INTERNAL, NO_MEMORY, DEVICE_NOT_READY — and a timeout or cancel
+				// describe this attempt, not the modem, and must not turn into a
+				// decision that holds for the whole session.
+				if (probing && err?.error == 'qmi' && err.code == 31)
 					self._services_absent[sprintf('%d', schema.service)] = true;
 
 				log((err?.code == 5) ? 'warn' : 'debug', sprintf('allocating a client of service %d failed: %J — held: %s',

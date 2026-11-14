@@ -1025,7 +1025,9 @@ scenario('version-unanswered', {
 		ALLOCATE_CID: (a) => {
 			if (a.service > 3) {
 				unk_refused[sprintf('%d', a.service)] = true;
-				return { __error: 31 };   // CTL: invalid service type
+				// DSD fails for a reason of its own (INTERNAL): that says
+				// nothing about the service, the others are not offered
+				return { __error: (a.service == 42) ? 3 : 31 };
 			}
 
 			unk_refused.cid = (unk_refused.cid ?? 4) + 1;
@@ -1046,6 +1048,8 @@ scenario('version-unanswered', {
 		eq(modem.dsd, null, 'version-unanswered: a refused DSD leaves no client');
 		eq(modem.has_service(26), false, 'version-unanswered: a refused allocation marks the service absent');
 		eq(modem.has_service(2), true, 'version-unanswered: an allocated service counts as present');
+		eq(modem.has_service(42), true,
+			'version-unanswered: an allocation failing for another reason (INTERNAL) does not mark the service absent');
 		eq(modem.datapath?.backend, 'ethernet',
 			'version-unanswered: a refused WDA takes the WDA-less path, not a failed init');
 		eq(modem.counters?.proto_errors ?? 0, 0,
