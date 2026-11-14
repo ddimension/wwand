@@ -2293,7 +2293,11 @@ export function read_identity(modem, cb, opts)
 	// matches the old card's wwand_sim. opts.fresh leaves it out.
 	// ...unless there is no other way at all: a modem whose UIM cannot read
 	// EF_IMSI and that has no AT channel would otherwise have no IMSI.
-	if (modem.dms && (!opts?.fresh || !modem.at))
+	// bench fix 2026-11-15: a card served by a reader session NEVER leaves
+	// its IMSI in that cache — the cache describes the last LOCAL card
+	// (HW-seen on RG502QEA-AA: ICE card's IMSI served for the Pixel's card,
+	// a mismatched imsi/iccid pair). Never trust it for a reader card.
+	if (modem.dms && !modem.reader_card && (!opts?.fresh || !modem.at))
 		push(imsi_chain, (done) => modem.dms.request('GET_IMSI', {}, (e, d) =>
 			done((!e && length(d?.imsi ?? '')) ? d.imsi : null), { no_recovery: true }));
 	if (modem.at)
