@@ -302,6 +302,23 @@ function unlock_uim(modem, cb, tries)
 
 		let found = find_app(data.card_status);
 
+		// bench patch 2026-11-15 (reader-card PIN entry): a reader card never
+		// appears in the modem's UIM slots (HW-proven RG502QEA). With a
+		// configured pincode, synthesize the PIN-required application state
+		// HERE — before the not-found handling — so the guarded VERIFY_PIN
+		// flow below runs against the modem's active (remote) card session.
+		// HW-proven necessary: the modem's own blind VERIFYs never succeed
+		// and its AT layer cannot see the card (RG502QEA-AA).
+		if (!found && modem.reader_card && pincode != null && length(pincode)) {
+			modem._no_card = true;
+			found = { card: { upin_retries: null }, app: {
+				state: uimmod.APP_STATE_PIN1_OR_UPIN_PIN_REQUIRED,
+				pin1_state: 2,
+				pin1_retries: 3,
+				upin_replaces_pin1: false,
+			}};
+		}
+
 		if (!found) {
 			// bench patch (2026-11-14, router→router lending): a card served
 			// by a plugin reader session (wwand-rsim) never appears in the
@@ -315,20 +332,19 @@ function unlock_uim(modem, cb, tries)
 			if (modem.reader_card) {
 				modem._no_card = true;
 
-				// bench patch 2026-11-15 (PIN-aware): a reader card may carry a
-				// PIN (the phone SIM does). Reporting it disabled here would
-				// skip the PIN entry entirely — the modem then auths against a
-				// locked card and loops. Report the configured state instead so
-				// the normal entry path runs (the AT+CPIN watchdog on this
-				// fork reaches the remote card).
-				let pin = effective_pincode(modem);
-
+				// bench patch (2026-11-14→15, router→router lending): a card
+				// served by a plugin reader session never appears in the
+				// modem's own UIM slots — `wwandctl slots` shows the active
+				// remote slot as absent while its APDU session runs
+				// (HW-proven on RG502QEA). Polling the slots for it cannot
+				// succeed; the reader carries the identity instead
+				// (modem.reader_card, published by the plugin's info event or
+				// power-up marker). No pincode configured: the card is
+				// PIN-less or already verified — proceed unlocked.
 				return cb(null, {
-					status: (pin != null && length(pin))
-						? 'ok (remote reader card, PIN configured)'
-						: 'ok (remote reader card)',
-					pin1_state: (pin != null && length(pin)) ? 2 : 3,
-					pin1_retries: (pin != null && length(pin)) ? 3 : null,
+					status: 'ok (remote reader card)',
+					pin1_state: 3,
+					pin1_retries: null,
 				});
 			}
 
