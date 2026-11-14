@@ -315,11 +315,21 @@ function unlock_uim(modem, cb, tries)
 			if (modem.reader_card) {
 				modem._no_card = true;
 
+				// bench patch 2026-11-15 (PIN-aware): a reader card may carry a
+				// PIN (the phone SIM does). Reporting it disabled here would
+				// skip the PIN entry entirely — the modem then auths against a
+				// locked card and loops. Report the configured state instead so
+				// the normal entry path runs (the AT+CPIN watchdog on this
+				// fork reaches the remote card).
+				let pin = effective_pincode(modem);
+
 				return cb(null, {
-					status: 'ok (remote reader card)',
-					pin1_state: 3,          // disabled — the reader card's own
-					pin1_retries: null,     // PIN, if any, is the lender's to
-				});                        // configure there
+					status: (pin != null && length(pin))
+						? 'ok (remote reader card, PIN configured)'
+						: 'ok (remote reader card)',
+					pin1_state: (pin != null && length(pin)) ? 2 : 3,
+					pin1_retries: (pin != null && length(pin)) ? 3 : null,
+				});
 			}
 
 			if ((tries ?? 0) < CARD_POLL_TRIES) {
