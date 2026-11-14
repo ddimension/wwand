@@ -2346,4 +2346,30 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	eq(mc.nr5g_blocker(null, null, null), null, 'nr5g_blocker: no state -> null');
 }
 
+// collect_nr5g: an all-empty settled poll retires NR collection for the
+// current data-system mode only; a mode change (LTE -> NSA) re-polls, so a RAT
+// transition does not leave the modem's NR status stuck empty for its life.
+{
+	let calls = 0;
+	// every read answers OK but empty (settled, no NR fact)
+	let empty_nas = { request: (msg, req, cb) => { calls++; cb(null, {}); } };
+
+	let m = { dsd_status: { mode: 'LTE' }, config: {} };
+	mc.collect_nr5g(m, empty_nas, () => null, () => null);
+	eq(calls, 3, 'collect_nr5g: polls all three reads');
+	ok(m._nr5g_state_none, 'collect_nr5g: an all-empty settled poll retires NR collection');
+	eq(m._nr5g_none_mode, 'LTE', 'collect_nr5g: remembers the mode it retired on');
+
+	calls = 0;
+	mc.collect_nr5g(m, empty_nas, () => null, () => null);
+	eq(calls, 0, 'collect_nr5g: stays retired while the data-system mode is unchanged');
+
+	calls = 0;
+	let done_cb = false;
+	m.dsd_status = { mode: 'NSA' };
+	mc.collect_nr5g(m, empty_nas, () => null, () => { done_cb = true; });
+	eq(calls, 3, 'collect_nr5g: a data-system mode change (LTE -> NSA) lifts the retirement and re-polls');
+	ok(done_cb, 'collect_nr5g: cb still fires after a mode-change re-poll');
+}
+
 done('test_modem_common');

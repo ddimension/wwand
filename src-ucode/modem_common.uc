@@ -2132,12 +2132,24 @@ export function nr5g_blocker(st, dsd, modes)
 
 // collect_nr5g(self, nas, log, cb): refresh self.nr5g_state (shape above) on
 // the slow tick. Three optional reads; a modem that reports none of the four
-// facts (an LTE-only stack) is not asked again for the life of the object.
+// facts is not asked again WHILE IT STAYS ON THE SAME data-system mode (an
+// LTE-only stack never leaves LTE, so it is never re-polled), but a mode
+// change — LTE -> NSA/SA, or the RAT the modem camps on — can bring the facts
+// back, so the retirement is lifted on a mode change instead of lasting the
+// object's life.
 // The blocker is logged when it changes. cb() always, once.
 export function collect_nr5g(self, nas, log, cb)
 {
-	if (!nas || self._nr5g_state_none)
+	if (!nas)
 		return cb();
+
+	// retired on a mode where the modem reported no NR facts; re-poll once
+	// its data-system mode changes (telemetry keeps self.dsd_status.mode).
+	if (self._nr5g_state_none) {
+		if (self.dsd_status?.mode == self._nr5g_none_mode)
+			return cb();
+		self._nr5g_state_none = false;
+	}
 
 	let st = { nsa_available: null, dcnr_restricted: null, endc_enabled: null, disabled: null };
 	let gone = (e) => (e?.error == 'cancelled');
@@ -2170,9 +2182,13 @@ export function collect_nr5g(self, nas, log, cb)
 
 				if (length(filter(values(st), (v) => v != null)) == 0) {
 					// only when all three settled: a timeout on one of them
-					// must not retire the others for the life of the modem
-					if (settled(e1) && settled(e2) && settled(e3))
+					// must not retire the others. Remember the mode it was
+					// retired on so a later mode change re-polls (see the
+					// guard at the top).
+					if (settled(e1) && settled(e2) && settled(e3)) {
 						self._nr5g_state_none = true;
+						self._nr5g_none_mode = self.dsd_status?.mode;
+					}
 					self.nr5g_state = null;
 					return cb();
 				}
