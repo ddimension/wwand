@@ -394,6 +394,21 @@ eq(tlvmod.pack(W.MODIFY_PROFILE.req, { profile: { type: 0, index: 1 }, address_a
 eq(tlvmod.unpack(W.GET_PROFILE_SETTINGS.resp, tlv(0x2D, u8(0)) + tlv(0xDE, u8(1))),
 	{ address_allocation: 0, clat: 1 }, 'wds: profile settings decode 0x2D and 0xDE');
 
+// IMS PDN flags: "PCSCF Address Using PCO" 0x1F and "IMCN Flag" 0x22 in Modify
+// Profile and Get Profile Settings; in Get Current Settings "PCSCF Address Using
+// PCO" 0x22 and "PCSCF Server Address List" 0x23 = u8 count + LE u32 IPv4
+// (libqmi 1.38 qmi-service-wds.json)
+eq(tlvmod.pack(W.MODIFY_PROFILE.req, { profile: { type: 0, index: 2 }, pcscf_pco: 1, imcn: 1 }),
+	tlv(0x01, u8(0) + u8(2)) + tlv(0x1F, u8(1)) + tlv(0x22, u8(1)),
+	'wds: modify profile carries P-CSCF via PCO 0x1F and IMCN 0x22');
+eq(tlvmod.unpack(W.GET_PROFILE_SETTINGS.resp, tlv(0x1F, u8(1)) + tlv(0x22, u8(0))),
+	{ pcscf_pco: 1, imcn: 0 }, 'wds: profile settings decode 0x1F and 0x22');
+let cs = tlvmod.unpack(W.GET_CURRENT_SETTINGS.resp,
+	tlv(0x22, u8(1)) + tlv(0x23, u8(2) + u32(0x0A010203) + u32(0xC0A80001)));
+eq([ cs.pcscf_pco, cs.pcscf ], [ 1, [ '10.1.2.3', '192.168.0.1' ] ],
+	'wds: current settings decode the P-CSCF list (LE u32, first octet in the MSB)');
+eq(wdsmod.REQ_SETTINGS_PCSCF, 0xC00, 'wds: P-CSCF requested-settings bits 10 and 11');
+
 // Vendor "get delegated IPv6 prefix" 0x00AC (wds.uc GET_DELEGATED_PREFIX): the
 // request is exactly ONE TLV 0x01 of 16 bytes — the modem answers MALFORMED to
 // 4 or 17 (RG650E, 2026-10-09), so the length is the contract; the answer is

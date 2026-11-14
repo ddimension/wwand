@@ -602,6 +602,43 @@ scenario('flags-same', {
 	});
 });
 
+// --- an IMS PDN (`option ims`): P-CSCF via PCO + IM CN flag, P-CSCF read back ---
+
+scenario('flags-ims', {
+	config: { apn: 'ims', pdp_type: 'ipv4', ims: true },
+	handlers: {
+		GET_CURRENT_SETTINGS: { ...V4_SETTINGS, pcscf_pco: 1, pcscf: [ '10.1.2.3', '10.1.2.4' ] },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'ims: connects');
+		let w = filter(mock.calls_for('MODIFY_PROFILE'), (c) => c.args.pcscf_pco != null);
+		eq([ w[0]?.args?.pcscf_pco, w[0]?.args?.imcn ], [ 1, 1 ], 'ims: P-CSCF via PCO and IM CN flag written');
+		let g = mock.calls_for('GET_CURRENT_SETTINGS');
+		ok(length(g) && (g[0].args.requested & 0xC00) == 0xC00, 'ims: the P-CSCF settings are requested');
+		eq(settings.ipv4.pcscf, [ '10.1.2.3', '10.1.2.4' ], 'ims: P-CSCF addresses in the settings');
+		next();
+	});
+});
+
+// without `ims` nothing of it is asked for, and a stray list is not reported
+scenario('flags-no-ims', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	handlers: {
+		GET_CURRENT_SETTINGS: { ...V4_SETTINGS, pcscf: [ '10.1.2.3' ] },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'no-ims: connects');
+		eq(filter(mock.calls_for('MODIFY_PROFILE'), (c) => c.args.pcscf_pco != null || c.args.imcn != null), [],
+			'no-ims: no IMS profile flags');
+		eq((mock.calls_for('GET_CURRENT_SETTINGS')[0]?.args?.requested ?? 0) & 0xC00, 0,
+			'no-ims: no P-CSCF request');
+		eq(settings.ipv4.pcscf, null, 'no-ims: no P-CSCF in the settings');
+		next();
+	});
+});
+
 // --- the delegated prefix (vendor WDS 0x00AC) -----------------------------
 
 // delegated: read on the IPv6 family's client with the modem's own bearer
@@ -1630,6 +1667,19 @@ ok(_all_done, sprintf('every scenario ran (%d of %d) — the pump did not run ou
 		config: { apn: 'internet', pdp_type: 'ipv4v6' },
 		deps: { log: () => null, on_event: () => null },
 	});
+
+	// an `ims` interface that owns the attach never marks it as the IMS PDN
+	mods = [];
+	context_mod.create({
+		name: 'atp-ims',
+		modem: { wds_cfg: mkwds({ apn: 'internet', pdp_type: 3, auth: 0, username: '' }),
+		         config: {}, alloc: () => null, attach_context: () => null },
+		config: { apn: 'internet', pdp_type: 'ipv4v6', ims: true },
+		deps: { log: () => null, on_event: () => null },
+	}).ensure_attach_profile(1, () => null);
+	eq(filter(mods, (m) => m.pcscf_pco != null || m.imcn != null), [],
+		'attach: the IMS profile flags never reach the attach profile');
+	mods = [];
 
 	// no init_apn: the interface APN is already on the profile, nothing to write
 	mkctx({}).ensure_attach_profile(1, () => null);

@@ -560,7 +560,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:1121-1124 warns "references
+	// produces no entry for it at all (config.uc:1124-1127 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -2919,7 +2919,7 @@ export function create(opts)
 		// entry.modem.stop() has just closed. One orphan per removal, and its
 		// late events can arm a spurious reconnect-hold on the rebuilt entry.
 		// `lost` is built for exactly this — it stops the monitor and destroys
-		// the family clients without attempting QMI cleanup (context.uc:1294).
+		// the family clients without attempting QMI cleanup (context.uc:1313).
 		for (let cname, centry in self.contexts) {
 			if (centry.cfg.modem == name && centry.ctx)
 				centry.ctx.modem_event('lost');
@@ -5291,12 +5291,14 @@ export function create(opts)
 					gateway: entry.ctx.settings.ipv4.gateway,
 					dns:     entry.ctx.settings.ipv4.dns,
 					mtu:     entry.ctx.settings.ipv4.mtu,
+					pcscf:   entry.ctx.settings.ipv4.pcscf,
 				} : null,
 				ipv6: type(entry.ctx?.settings?.ipv6) == 'object' ? {
 					addr:    entry.ctx.settings.ipv6.addr,
 					plen:    entry.ctx.settings.ipv6.plen,
 					gateway: entry.ctx.settings.ipv6.gateway,
 					dns:     entry.ctx.settings.ipv6.dns,
+					pcscf:   entry.ctx.settings.ipv6.pcscf,
 				} : null,
 			};
 		}

@@ -41,6 +41,11 @@ export const REQ_SETTINGS_DEFAULT =
 	(1 << 13) |  // mtu
 	(1 << 15);   // ip family
 
+// added for an IMS PDN (interface option `ims`): QMI_WDS_REQUESTED_SETTINGS_
+// PCSCF_ADDRESS (1 << 10) and _PCSCF_SERVER_ADDRESS_LIST (1 << 11)
+// (qmi-enums-wds.h:1443-1444, libqmi 1.38)
+export const REQ_SETTINGS_PCSCF = (1 << 10) | (1 << 11);
+
 const PROFILE_ID = { t: 0x01, f: { type: 'u8', index: 'u8' } };
 
 export default {
@@ -193,6 +198,12 @@ export default {
 				// "IPv6 Prefix Delegation", guint8 boolean (json:424-428).
 				// Quectel's AT+QIP6CFG="PD_enable",<cid> is the same flag.
 				prefix_delegation:   { t: 0xDF, f: 'u8' },
+				// "PCSCF Address Using PCO" 0x1F and "IMCN Flag" 0x22, guint8
+				// booleans (qmi-service-wds.json Modify Profile, libqmi 1.38):
+				// the network is asked for the P-CSCF in the PCO and the PDN is
+				// marked as the IM CN subsystem one (TS 24.229 B.2.2.1)
+				pcscf_pco:           { t: 0x1F, f: 'u8' },
+				imcn:                { t: 0x22, f: 'u8' },
 			},
 			resp: {
 				// extended error code on failure
@@ -214,6 +225,9 @@ export default {
 				address_allocation: { t: 0x2D, f: 'u8' },
 				clat:              { t: 0xDE, f: 'u8' },
 				prefix_delegation: { t: 0xDF, f: 'u8' },
+				// Get Profile Settings output 0x1F / 0x22 (libqmi 1.38)
+				pcscf_pco:         { t: 0x1F, f: 'u8' },
+				imcn:              { t: 0x22, f: 'u8' },
 			},
 		},
 
@@ -268,6 +282,11 @@ export default {
 				ipv6_dns2:    { t: 0x28, f: 'ipv6' },
 				mtu:          { t: 0x29, f: 'u32' },
 				ip_family:    { t: 0x2B, f: 'u8' },
+				// "PCSCF Address Using PCO" 0x22 (guint8) and "PCSCF Server
+				// Address List" 0x23: a guint8-counted array of little-endian
+				// guint32 IPv4 addresses (libqmi 1.38). libqmi has no IPv6 list.
+				pcscf_pco:    { t: 0x22, f: 'u8' },
+				pcscf:        { t: 0x23, f: { n: 'u8', of: 'ipv4' } },
 			},
 		},
 

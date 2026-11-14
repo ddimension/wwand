@@ -739,6 +739,8 @@ config interface 'wan'
 	option clat ''                   # QMI: profile flag "CLAT Enabled" (464XLAT in
 	                                 #   the modem), same tri-state, IPv6 bearers only
 	option address_allocation ''     # QMI + NCM: profile preference nas|dhcp, unset = leave it
+	option ims ''                    # QMI: this PDN is the IMS one — profile flags "PCSCF
+	                                 #   Address Using PCO" + "IMCN Flag", P-CSCF in the status
 	option metric '10'               # metric / peerdns / defaultroute / ip4table /
 	                                 #   ip6table / VRF are handled by netifd as usual
 ```
@@ -788,6 +790,16 @@ profile's "CLAT Enabled" (TLV 0xDE, libqmi 1.38 `qmi-service-wds.json:417-422`):
 (TLV 0x2D, json:372-377): `nas` = the IPv4 address comes with the PDN setup,
 `dhcp` = by DHCP over the bearer afterwards. Whether a modem and network honour
 either is theirs to decide; wwand only puts the setting into the profile.
+
+**IMS PDN (`ims`).** For a client that speaks IMS itself on the router
+(wwand only carries the PDN, it has no voice code). `ims '1'` sets two stored
+profile flags of the dialled profile, "PCSCF Address Using PCO" (TLV 0x1F) and
+"IMCN Flag" (0x22, libqmi 1.38 Modify Profile), so the network returns the
+P-CSCF in the PCO and treats the PDN as the IM CN one; it also asks WDS Get
+Current Settings for the P-CSCF ("PCSCF Server Address List", 0x23) and puts it
+into `status` as `ipv4.pcscf` / `ipv6.pcscf`. QMI has only an IPv4 list. The
+flags never reach the attach profile, whichever interface owns it. Same
+tri-state as the other flags; QMI only.
 
 On **NCM**, `address_allocation` is the standard `<IPv4AddrAlloc>` of
 `AT+CGDCONT` (the 7th parameter, 3GPP TS 27.007), so it works for every vendor;

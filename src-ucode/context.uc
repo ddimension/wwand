@@ -76,6 +76,11 @@ const PROFILE_FLAGS = [
 	// over the bearer afterwards
 	{ key: 'address_allocation', opt: 'address_allocation', label: 'address allocation',
 	  map: { nas: 0, dhcp: 1 } },
+	// an IMS PDN (`option ims`): P-CSCF in the PCO and the IM CN flag, both
+	// stored profile settings (0x1F / 0x22, libqmi 1.38). wwand only carries
+	// the PDN; whoever speaks IMS on it reads the P-CSCF from the status.
+	{ key: 'pcscf_pco', opt: 'ims', label: 'P-CSCF via PCO' },
+	{ key: 'imcn', opt: 'ims', label: 'IM CN flag' },
 ];
 
 // The same three PDP types as PDP_MAP, spelled the way 3GPP TS 27.007 AT+CGDCONT
@@ -574,7 +579,11 @@ export function create(opts)
 			// a profile flag (PROFILE_FLAGS) written only at dial time reaches
 			// the network at the NEXT attach. Written here it rides the
 			// re-attach this function already triggers.
-			let flags = init ? [] : filter(flags_wanted(), (f) => data[f.key] !== f.want);
+			// never the IMS flags: the attach bearer is the data PDN, and an
+			// `ims` interface that ends up owning the attach must not mark it
+			// as the IM CN one
+			let flags = init ? [] : filter(flags_wanted(), (f) => data[f.key] !== f.want &&
+				f.key != 'pcscf_pco' && f.key != 'imcn');
 
 			if (!need_apn && !need_pdp && !need_auth && !length(flags)) {
 				log('debug', sprintf('attach profile %d up to date (apn %J pdp %J)',
@@ -962,10 +971,14 @@ export function create(opts)
 		let fam = self.families[sprintf('%d', family)];
 
 		fam.client.request('GET_CURRENT_SETTINGS', {
-			requested: wdsmod.REQ_SETTINGS_DEFAULT,
+			requested: wdsmod.REQ_SETTINGS_DEFAULT | (self.config.ims ? wdsmod.REQ_SETTINGS_PCSCF : 0),
 		}, (err, data) => {
 			if (err)
 				return done({ stage: 'settings', err: err });
+
+			// IMS PDN: the P-CSCF addresses from the PCO (IPv4 only in QMI)
+			let pcscf = (self.config.ims && type(data.pcscf) == 'array' && length(data.pcscf))
+				? data.pcscf : null;
 
 			if (family == 4) {
 				// always /32 point-to-point (old behavior) unless the pushed
@@ -984,6 +997,9 @@ export function create(opts)
 					mtu: data.mtu,
 				};
 
+				if (pcscf)
+					fam.settings.pcscf = pcscf;
+
 				log_family_config(fam, sprintf('ipv4 config: %s/%d gw %s dns [%s] mtu %J',
 					fam.settings.addr, fam.settings.prefix, fam.settings.gateway,
 					join(' ', fam.settings.dns), fam.settings.mtu));
@@ -997,6 +1013,9 @@ export function create(opts)
 					dns: filter([ data.ipv6_dns1, data.ipv6_dns2 ], (d) => d != null),
 					mtu: data.mtu,
 				};
+
+				if (pcscf)
+					fam.settings.pcscf = pcscf;
 
 				log_family_config(fam, sprintf('ipv6 config: %s/%d gw %s dns [%s] mtu %J',
 					fam.settings.addr, fam.settings.plen, fam.settings.gateway,

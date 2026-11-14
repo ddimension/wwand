@@ -114,6 +114,9 @@ function conn_fields(s, warnings)
 		// profile "Address Allocation Preference": 'nas' | 'dhcp', unset =
 		// leave it; anything else is warned about and ignored, never guessed
 		address_allocation: addr_alloc_opt(s.address_allocation, warnings),
+		// an IMS PDN: profile "PCSCF Address Using PCO" + "IMCN Flag", and the
+		// P-CSCF addresses read into the status. TRI-STATE like the flags above.
+		ims: (s.ims != null && s.ims != '') ? bool_opt(s.ims, null) : null,
 		settings_poll: num_opt(s.settings_poll, 300, 'settings_poll', warnings),
 		// on a reconnect that changes the IP, do a netifd link down->up instead of
 		// an in-place renew, so dependent tunnels/xfrm re-follow the new local
@@ -361,7 +364,7 @@ export function context_defaults(over)
 		username: null, password: null, profile: null,
 		mtu: null, use_pushed_mtu: true,
 		use_pushed_prefix: false,
-		ipv6_pd: null, clat: null, address_allocation: null,
+		ipv6_pd: null, clat: null, address_allocation: null, ims: null,
 		settings_poll: 300,
 		auto: true,   // netifd 'auto 0' => daemon won't proactively bring it up
 		iccid: null,  // option iccid: the card this connection needs

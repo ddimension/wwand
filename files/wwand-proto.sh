@@ -32,6 +32,7 @@ proto_wwand_init_config() {
 	proto_config_add_string hard_reconnect_on_ip_change
 	proto_config_add_string ipv6_pd
 	proto_config_add_string clat
+	proto_config_add_string ims
 	proto_config_add_string address_allocation
 
 	# The IPv6 default route is installed SOURCE-SPECIFIC by default. The route
