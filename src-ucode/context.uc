@@ -175,6 +175,15 @@ export function create(opts)
 		fetch: (family, done) => fetch_settings(family, done),
 	});
 
+	// IPv4 through the modem's CLAT on an IPv6-only connection (`option clat`
+	// on, `pdp_type ipv6`). The ONE IPv4 that is not fatal: the interface is
+	// the IPv6 one, and a modem or network that gives no translated address
+	// leaves it IPv6-only rather than down — which is what it was before
+	// this IPv4 was asked for at all. The other way round it is: the
+	// translated address rides the IPv6 PDN, so an IPv6 that fails fails the
+	// interface, and never leaves it up on the 192.0.0.x alone.
+	let clat_v4 = () => context_common.effective_pdp(self) == 'ipv6' && self.config?.clat === true;
+
 	let wanted_families = () => {
 		let pdp = context_common.effective_pdp(self);
 		let fams = [];
@@ -184,6 +193,15 @@ export function create(opts)
 
 		if (pdp == 'ipv6' || pdp == 'ipv4v6')
 			push(fams, 6);
+
+		// the modem's own CLAT is used only by an IPv4 start: on an
+		// IPv6-only bearer it answers one with an address of its own
+		// (192.0.0.x, RFC 7335) and translates (stock RIL:
+		// docs/design/stock-ril-observations.md §3; RG500Q-EA,
+		// ddimension/wwand#89). AFTER IPv6, and see clat_v4() for why its
+		// failure is not the interface's.
+		if (clat_v4())
+			push(fams, 4);
 
 		return fams;
 	};
@@ -1119,8 +1137,11 @@ export function create(opts)
 					if (err) {
 						release_family(family);
 
-						// stale-PDP reclaim (see is_stale_pdp above), once per family
-						if (is_stale_pdp(err) && !reclaimed[family]) {
+						// stale-PDP reclaim (see is_stale_pdp above), once per
+						// family — never for the CLAT IPv4: it starts on the
+						// profile the IPv6 it depends on is already up on, and
+						// CGACT=0 takes the whole PDP down, that IPv6 with it
+						if (is_stale_pdp(err) && !reclaimed[family] && !(family == 4 && clat_v4())) {
 							reclaimed[family] = true;
 							return reclaim_stale_pdp(profile, () => {
 								if (gen != up_gen || self.state != 'ACTIVATING')
@@ -1131,8 +1152,11 @@ export function create(opts)
 							});
 						}
 
-						// preserved: v4 fatal, v6 degrades
-						if (family == 4 || !got_any && idx >= length(fams))
+						// preserved: v4 fatal (but the CLAT one, see clat_v4),
+						// v6 degrades while something is left to try — but not
+						// under the CLAT one, which is nothing without it
+						if ((family == 4 && !clat_v4()) || (family == 6 && clat_v4()) ||
+						    !got_any && idx >= length(fams))
 							return self._fail(err);
 
 						let cdesc = callend.describe(err?.call_end_reason, err?.verbose, err?.ext_error);
@@ -1177,7 +1201,7 @@ export function create(opts)
 							// (its settings refresh returns at context_monitor_qmi.uc:299-300 on an
 							// empty family set), and sat there until
 							// an operator ifdown.
-							if (family == 4 ||
+							if ((family == 4 && !clat_v4()) || (family == 6 && clat_v4()) ||
 							    (!length(keys(self.families)) && idx >= length(fams)))
 								return self._fail(serr);
 

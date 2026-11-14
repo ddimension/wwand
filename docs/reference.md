@@ -737,7 +737,8 @@ config interface 'wan'
 	option ipv6_pd ''                # QMI + NCM/Quectel: profile flag "IPv6 prefix
 	                                 #   delegation", 1 = allow, 0 = clear, unset = leave it
 	option clat ''                   # QMI: profile flag "CLAT Enabled" (464XLAT in
-	                                 #   the modem), same tri-state, IPv6 bearers only
+	                                 #   the modem), same tri-state, IPv6 bearers only;
+	                                 #   on with pdp_type ipv6 it also starts IPv4
 	option address_allocation ''     # QMI + NCM: profile preference nas|dhcp, unset = leave it
 	option ims ''                    # QMI: this PDN is the IMS one — profile flags "PCSCF
 	                                 #   Address Using PCO" + "IMCN Flag", P-CSCF in the status
@@ -786,7 +787,17 @@ same kind of stored profile setting as the PD flag, through the same code
 dialled profile and on the attach profile, unset = left alone. `clat` is the
 profile's "CLAT Enabled" (TLV 0xDE, libqmi 1.38 `qmi-service-wds.json:417-422`):
 464XLAT done by the modem on an IPv6-only bearer, so it is not touched for an
-`ipv4` connection. `address_allocation` is "Address Allocation Preference"
+`ipv4` connection. The modem's translation is used only by an IPv4 start, so
+with `clat '1'` and `pdp_type 'ipv6'` wwand starts IPv4 too, after IPv6, on the
+same profile: the modem answers with an address of its own (192.0.0.x, RFC
+7335, MTU 28 below IPv6) and netifd gets both families — no `464xlat`
+interface on the router. Unlike every other IPv4 start this one is not fatal:
+if the modem or the network gives no address, the interface stays up
+IPv6-only, as it was without the option. IPv6 stays the mandatory one: the
+translated address rides that PDN, so an IPv6 that fails fails the interface,
+and a stale-PDP reclaim (`AT+CGACT=0`) is never run for the CLAT IPv4, since
+it would take the IPv6 down with it. With `pdp_type 'ipv4v6'` both
+families are started anyway. `address_allocation` is "Address Allocation Preference"
 (TLV 0x2D, json:372-377): `nas` = the IPv4 address comes with the PDN setup,
 `dhcp` = by DHCP over the bearer afterwards. Whether a modem and network honour
 either is theirs to decide; wwand only puts the setting into the profile.

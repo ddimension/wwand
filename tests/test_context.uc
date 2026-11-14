@@ -590,6 +590,90 @@ scenario('flags-ipv4', {
 	});
 });
 
+// `clat` on an IPv6-only connection also starts IPv4, AFTER IPv6, so the
+// modem translates (ddimension/wwand#89); the family rides SET_IP_FAMILY
+// per WDS client, which is how the mock tells the two starts apart
+// `fail`: the family whose start is refused, with `err` as the answer
+let clat_handlers = (fail, err) => {
+	let fam = {};
+	return {
+		SET_IP_FAMILY: (args, meta) => { fam[sprintf('%d', meta.cid)] = args.preference; return {}; },
+		START_NETWORK: (args, meta) => (fam[sprintf('%d', meta.cid)] == fail)
+			? (err ?? { __error: 14, call_end_reason: 3 })
+			: { pdh: (fam[sprintf('%d', meta.cid)] == 4) ? 1111 : 2222 },
+		GET_CURRENT_SETTINGS: (args, meta) =>
+			(fam[sprintf('%d', meta.cid)] == 4) ? V4_SETTINGS : V6_SETTINGS,
+	};
+};
+
+scenario('clat-v4', {
+	config: { apn: 'v6only', pdp_type: 'ipv6', clat: true },
+	handlers: clat_handlers(0),
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'clat-v4: connects');
+		eq(map(mock.calls_for('SET_IP_FAMILY'), (c) => c.args.preference), [ 6, 4 ],
+			'clat-v4: IPv6 first, then the IPv4 the modem translates');
+		ok(ctx.settings?.ipv4 != null && ctx.settings?.ipv6 != null,
+			'clat-v4: both families reach the settings netifd gets');
+		next();
+	});
+});
+
+scenario('clat-v4-refused', {
+	config: { apn: 'v6only', pdp_type: 'ipv6', clat: true },
+	handlers: clat_handlers(4),
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'clat-v4-refused: an IPv4 the modem does not give is not the interface\'s failure');
+		eq([ ctx.state, ctx.settings?.ipv4, ctx.settings?.ipv6 != null ], [ 'CONNECTED', null, true ],
+			'clat-v4-refused: connected IPv6-only, as without clat');
+		next();
+	});
+});
+
+// the translated IPv4 rides the IPv6 PDN: without IPv6 there is no interface
+scenario('clat-v6-refused', {
+	config: { apn: 'v6only', pdp_type: 'ipv6', clat: true },
+	handlers: clat_handlers(6),
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		ok(err != null, 'clat-v6-refused: an IPv6 that fails fails the interface');
+		eq(map(mock.calls_for('SET_IP_FAMILY'), (c) => c.args.preference), [ 6 ],
+			'clat-v6-refused: ...and no IPv4 is started on the 192.0.0.x alone');
+		next();
+	});
+});
+
+// "PDP in use" on the CLAT IPv4 is not reclaimed: CGACT=0 would take down
+// the IPv6 already up on that profile
+scenario('clat-v4-in-use', {
+	config: { apn: 'v6only', pdp_type: 'ipv6', clat: true },
+	at: { res: { lines: [] } },
+	handlers: clat_handlers(4, { __error: 14, call_end_reason: 3,
+		verbose_call_end: { type: 2, reason: 241 } }),
+}, (ctx, mock, events, next, at_cmds) => {
+	ctx.up((err) => {
+		eq(filter(at_cmds, (c) => index(c, 'CGACT=0') >= 0), [],
+			'clat-v4-in-use: no CGACT=0 under the IPv6 the CLAT IPv4 depends on');
+		eq([ err, ctx.state, ctx.settings?.ipv4 ], [ null, 'CONNECTED', null ],
+			'clat-v4-in-use: connected IPv6-only');
+		next();
+	});
+});
+
+// without clat an IPv6 connection asks for IPv6 only, as before
+scenario('clat-off-v6', {
+	config: { apn: 'v6only', pdp_type: 'ipv6' },
+	handlers: clat_handlers(0),
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(map(mock.calls_for('SET_IP_FAMILY'), (c) => c.args.preference), [ 6 ],
+			'clat-off-v6: no IPv4 start without clat');
+		next();
+	});
+});
+
 // already held: nothing written
 scenario('flags-same', {
 	config: { apn: 'web', pdp_type: 'ipv4v6', clat: false, address_allocation: 'nas' },
