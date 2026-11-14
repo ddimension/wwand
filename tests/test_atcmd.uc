@@ -1022,6 +1022,29 @@ let ec200a_known = fakefx.create({
 eq(atcmd.find_tty(ec200a_known, 'usb0', null), '/dev/ttyUSB2',
 	'EC200A: the port table takes it straight to if4, no probing');
 
+// ZTE MF286D (19d2:1485): if2 opens and stays mute, if3 answers, if4 is the
+// secondary port. Without the entry the first-tty guess lands on the mute if2.
+// Interface -> tty map as reported in ddimension/wwand#85 (AT on ttyUSB1).
+let mf286d = fakefx.create({
+	files: {
+		[sprintf('%s/idVendor', BASE)]: "19d2\n",
+		[sprintf('%s/idProduct', BASE)]: "1485\n",
+		[sprintf('%s/1-1:1.2/bInterfaceNumber', BASE)]: "02\n",
+		[sprintf('%s/1-1:1.3/bInterfaceNumber', BASE)]: "03\n",
+		[sprintf('%s/1-1:1.4/bInterfaceNumber', BASE)]: "04\n",
+	},
+	globs: {
+		[sprintf('%s/*/tty*', BASE)]: [
+			sprintf('%s/1-1:1.2/ttyUSB0', BASE),
+			sprintf('%s/1-1:1.3/ttyUSB1', BASE),
+			sprintf('%s/1-1:1.4/ttyUSB2', BASE),
+		],
+	},
+});
+let mf286d_ch = atcmd.find_at_channels(mf286d, '/dev/cdc-wdm0', null);
+eq(mf286d_ch.primary, '/dev/ttyUSB1', 'MF286D: the port table takes it straight to if3');
+eq(mf286d_ch.telemetry, '/dev/ttyUSB2', 'MF286D: if4 is the secondary AT port');
+
 // local override for devices missing in the generated table (RG650E)
 let rg650 = quectel_fx({ files: { [sprintf('%s/idProduct', BASE)]: "0122\n" } });
 eq(atcmd.find_tty(rg650, '/dev/cdc-wdm0', null), '/dev/ttyUSB2', 'find: RG650E local override');

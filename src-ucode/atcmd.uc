@@ -93,7 +93,8 @@ const LOCAL_PORTS = {
 	// reaches if3. HW-verified 2026-11-07 on an MF286D (OpenWrt 25.12.6):
 	// if3 is the port the walk itself settled on across three boots. Only
 	// the observed roles are pinned — if2 stays untagged (mute on AT, DIAG
-	// presumed but not proven).
+	// presumed but not proven). if5 is the QMI interface: qmi_wwan binds it
+	// and option reserves it (qmi_wwan.c:1329, option.c:1956, 6.18.41).
 	'19d2:1485': { '3': 'at', '4': 'at2' },
 };
 
