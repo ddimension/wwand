@@ -2300,7 +2300,7 @@ export function read_identity(modem, cb, opts)
 	if (modem.dms && !modem.reader_card && (!opts?.fresh || !modem.at))
 		push(imsi_chain, (done) => modem.dms.request('GET_IMSI', {}, (e, d) =>
 			done((!e && length(d?.imsi ?? '')) ? d.imsi : null), { no_recovery: true }));
-	if (modem.at)
+	if (modem.at && !modem.reader_card)
 		push(imsi_chain, (done) => modem.at.send('AT+CIMI', (e, r) =>
 			done(e ? null : at_digits(r?.lines, 14))));
 
