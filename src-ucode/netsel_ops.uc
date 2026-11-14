@@ -158,6 +158,21 @@ export function install(self, o)
 		return out;
 	};
 
+	// the modem's stored 3GPP profiles, its attach PDN list and default
+	// profile numbers (qmi_backend.read_profiles) — read-only, QMI only so
+	// far: an MBIM or NCM modem answers unsupported_on_backend
+	self.modem_profiles = function(ref, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		if (!entry.modem.profiles_read)
+			return cb({ error: 'unsupported_on_backend' });
+
+		entry.modem.profiles_read(cb);
+	};
+
 	// current NAS system-selection preferences (settings editor, read path)
 	self.modem_get_settings = function(ref, cb) {
 		let entry = check_modem(ref, cb);

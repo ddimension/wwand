@@ -47,6 +47,7 @@ let raw_err = () => ({ __raw: RESULT_ERR });
 // --- mock wiring: each op reads a mutable response so scenarios can vary ------
 
 let r_ca, r_rf, r_thr, r_dsd, r_sysinfo, r_pkt, r_bearer, r_rates, r_opmode;
+let r_plist, r_pset = {}, r_attach, r_defnum = [];
 
 let mock = mockhub.create({ handlers: {
 	GET_LTE_CPHY_CA_INFO:               () => r_ca,
@@ -55,6 +56,10 @@ let mock = mockhub.create({ handlers: {
 	GET_SYSTEM_INFO:                    () => r_sysinfo, // NAS
 	GET_PACKET_STATISTICS:              () => r_pkt,     // WDS
 	GET_PDN_THROTTLE_INFO:              () => r_thr,     // WDS
+	GET_PROFILE_LIST:                   () => r_plist,   // WDS
+	GET_PROFILE_SETTINGS:               (a) => r_pset[sprintf('%d', a.profile.index)],
+	GET_LTE_ATTACH_PDN_LIST:            () => r_attach,  // WDS
+	GET_DEFAULT_PROFILE_NUMBER:         (a) => r_defnum[a.profile.family],
 	GET_CURRENT_DATA_BEARER_TECHNOLOGY: () => r_bearer,  // WDS
 	GET_CHANNEL_RATES:                  () => r_rates,   // WDS
 	SET_OPERATING_MODE:                 () => r_opmode,  // DMS
@@ -152,6 +157,42 @@ push(steps, (next) => {
 			'get_pdn_throttle: only held APNs, ms -> s rounded up, a family not held is null');
 		r_thr = raw_err();
 		backend.get_pdn_throttle(wds, (t2) => { eq(t2, null, 'get_pdn_throttle: a refused request is null'); next(); });
+	});
+});
+
+// === read_profiles: WDS 0x002A / 0x002B / 0x0094 / 0x0049 (libqmi 1.38) =====
+push(steps, (next) => {
+	let lstr = (x) => u8(length(x)) + x;
+	// list: { type u8, index u8, name lstring } x2
+	r_plist = raw(tlv(0x01, u8(2) + u8(0) + u8(1) + lstr('') + u8(0) + u8(2) + lstr('ims')));
+	// settings: name 0x10 / pdp 0x11 / apn 0x14 (plain strings), imcn 0x22
+	r_pset['1'] = raw(tlv(0x11, u8(3)) + tlv(0x14, 'internet'));
+	r_pset['2'] = raw(tlv(0x10, 'ims') + tlv(0x11, u8(2)) + tlv(0x14, 'ims') + tlv(0x22, u8(1)));
+	// attach: current [2], pending [] — u8 count of u16 ids
+	r_attach = raw(tlv(0x10, u8(1) + u16(2)) + tlv(0x11, u8(0)));
+	r_defnum = [ raw(tlv(0x01, u8(1))), raw_err() ];
+
+	backend.read_profiles(wds, (e, p) => {
+		eq(e, null, 'read_profiles: answers');
+		eq(map(p.profiles, (x) => [ x.index, x.name, x.apn, x.pdp_type, x.imcn ]),
+			[ [ 1, null, 'internet', 3, null ], [ 2, 'ims', 'ims', 2, 1 ] ],
+			'read_profiles: every listed profile read, absent TLVs stay null');
+		eq(p.attach, { current: [ 2 ], pending: [] },
+			'read_profiles: the attach list decodes its u16 ids — here profile 2, not 1');
+		eq(p.default.embedded, 1, 'read_profiles: default embedded profile number');
+		eq(p.default.tethered?.error, 'qmi', 'read_profiles: a refused read answers alone, the rest stands');
+
+		r_attach = raw_err();
+		backend.read_profiles(wds, (e2, p2) => {
+			eq([ e2, p2.attach?.error, length(p2.profiles) ], [ null, 'qmi', 2 ],
+				'read_profiles: a firmware without the attach list still yields the profiles');
+
+			r_plist = raw_err();
+			backend.read_profiles(wds, (e3) => {
+				eq(e3?.error, 'qmi', 'read_profiles: no profile list is an error');
+				next();
+			});
+		});
 	});
 });
 

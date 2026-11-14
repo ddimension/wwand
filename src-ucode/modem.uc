@@ -1218,6 +1218,15 @@ export function create(opts)
 		qmi_backend.get_pdn_throttle(self.wds_cfg, cb);
 	};
 
+	// profiles_read(cb): qmi_backend.read_profiles on the config WDS client;
+	// cb({ error: 'not_ready' }) before the client exists
+	self.profiles_read = function(cb) {
+		if (!self.wds_cfg)
+			return cb({ error: 'not_ready' });
+
+		qmi_backend.read_profiles(self.wds_cfg, cb);
+	};
+
 	self._install_thermal = function(cb) {
 		cb = cb ?? (() => null);
 

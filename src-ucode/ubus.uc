@@ -155,6 +155,12 @@ export function publish(conn, daemon, log)
 				daemon.sim_pin_verify(req.args.modem, req.args.pin, ok_reply(reply))),
 		},
 
+		modem_profiles: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_profiles(req.args.modem, ok_reply(reply))),
+		},
+
 		modem_get_settings: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

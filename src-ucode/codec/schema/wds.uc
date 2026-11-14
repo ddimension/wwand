@@ -231,6 +231,39 @@ export default {
 			},
 		},
 
+		// The profiles the modem holds, and which of them it attaches with.
+		// libqmi 1.38 qmi-service-wds.json: "Get Profile List" 0x002A (input
+		// Profile Type 0x10; output 0x01, a guint8-count array of { type
+		// guint8, index guint8, name string } — a string inside a struct is
+		// u8-length-prefixed), "Get LTE Attach PDN List" 0x0094 (no input;
+		// output Current List 0x10 / Pending List 0x11, guint8-count arrays of
+		// guint16 profile ids), "Get Default Profile Number" 0x0049 (input
+		// 0x01 { type guint8, family guint8 }, output Index 0x01 guint8).
+		// The attach list says which profile the modem's own attach uses;
+		// nothing makes that profile 1.
+		GET_PROFILE_LIST: {
+			id: 0x002A,
+			req: { profile_type: { t: 0x10, f: 'u8' } },
+			resp: {
+				profiles: { t: 0x01, f: { n: 'u8', of: { type: 'u8', index: 'u8', name: 'lstring' } } },
+			},
+		},
+
+		GET_LTE_ATTACH_PDN_LIST: {
+			id: 0x0094,
+			req: {},
+			resp: {
+				current: { t: 0x10, f: { n: 'u8', of: 'u16' } },
+				pending: { t: 0x11, f: { n: 'u8', of: 'u16' } },
+			},
+		},
+
+		GET_DEFAULT_PROFILE_NUMBER: {
+			id: 0x0049,
+			req: { profile: { t: 0x01, f: { type: 'u8', family: 'u8' } } },
+			resp: { index: { t: 0x01, f: 'u8' } },
+		},
+
 		// VENDOR, NOT IN libqmi (checked against 1.38: no message reports a
 		// delegated prefix at runtime). Qualcomm's "get delegated IPv6
 		// prefix", as the RG650E's own apps side calls it

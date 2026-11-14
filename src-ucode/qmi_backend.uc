@@ -355,6 +355,67 @@ export function get_pdn_throttle(wds, cb)
 	}, { no_recovery: true });
 };
 
+// read_profiles(wds, cb): the modem's 3GPP profiles and which it attaches
+// with, READ-ONLY — the facts any choice of a dial profile has to start
+// from, since the attach profile is the modem's to name (wds.uc
+// GET_LTE_ATTACH_PDN_LIST), not necessarily 1. cb(null, {
+//   profiles: [ { index, name, apn, pdp_type, auth, apn_disabled, imcn, pcscf_pco } ],
+//   attach:   { current: [ids], pending: [ids] } | { error },
+//   default:  { embedded, tethered } (each an index or { error }) })
+// or cb({ error }) when the list itself cannot be read. Each later read
+// answers on its own: a firmware without the attach list or the default
+// number still yields the profiles. Strictly sequential — one request on
+// the config client at a time, like every other reader of it.
+export function read_profiles(wds, cb)
+{
+	let qerr = (e) => ({ error: 'qmi', code: e?.code ?? null });
+	let out = { profiles: [], attach: null, default: {} };
+
+	wds.request('GET_PROFILE_LIST', { profile_type: 0 }, (e, d) => {
+		if (e)
+			return cb(qerr(e));
+
+		let ids = map(d?.profiles ?? [], (p) => p.index);
+		let i = 0;
+		let next;
+
+		let tail = () => {
+			wds.request('GET_LTE_ATTACH_PDN_LIST', {}, (ae, ad) => {
+				out.attach = ae ? qerr(ae) : { current: ad?.current ?? [], pending: ad?.pending ?? [] };
+
+				// QmiWdsProfileFamily: 0 embedded (the router's own sessions),
+				// 1 tethered (libqmi 1.38 qmi-enums-wds.h)
+				wds.request('GET_DEFAULT_PROFILE_NUMBER', { profile: { type: 0, family: 0 } }, (de, dd) => {
+					out.default.embedded = de ? qerr(de) : dd?.index;
+
+					wds.request('GET_DEFAULT_PROFILE_NUMBER', { profile: { type: 0, family: 1 } }, (te, td) => {
+						out.default.tethered = te ? qerr(te) : td?.index;
+						cb(null, out);
+					}, { no_recovery: true });
+				}, { no_recovery: true });
+			}, { no_recovery: true });
+		};
+
+		next = () => {
+			if (i >= length(ids))
+				return tail();
+
+			let idx = ids[i++];
+
+			wds.request('GET_PROFILE_SETTINGS', { profile: { type: 0, index: idx } }, (se, s) => {
+				push(out.profiles, se ? { index: idx, ...qerr(se) } : {
+					index: idx, name: s?.profile_name, apn: s?.apn, pdp_type: s?.pdp_type,
+					auth: s?.auth, apn_disabled: s?.apn_disabled,
+					imcn: s?.imcn, pcscf_pco: s?.pcscf_pco,
+				});
+				next();
+			}, { no_recovery: true });
+		};
+
+		next();
+	}, { no_recovery: true });
+};
+
 const RAT_LTE = (1 << 5), RAT_5GNR = (1 << 10);
 const STATS_MASK = 0x3FF;
 
