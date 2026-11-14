@@ -303,6 +303,25 @@ function unlock_uim(modem, cb, tries)
 		let found = find_app(data.card_status);
 
 		if (!found) {
+			// bench patch (2026-11-14, router→router lending): a card served
+			// by a plugin reader session (wwand-rsim) never appears in the
+			// modem's own UIM slots — `wwandctl slots` shows the active
+			// remote slot as absent while its APDU session runs (HW-proven on
+			// RG502QEA, 2026-11-14). Polling the slots for it cannot succeed;
+			// the reader carries the identity instead (modem.reader_card,
+			// published by the plugin's info event). Synthesize an unlocked,
+			// PIN-less status so the init chain continues to identity read —
+			// read_identity's reader fallback supplies imsi/iccid.
+			if (modem.reader_card) {
+				modem._no_card = true;
+
+				return cb(null, {
+					status: 'ok (remote reader card)',
+					pin1_state: 3,          // disabled — the reader card's own
+					pin1_retries: null,     // PIN, if any, is the lender's to
+				});                        // configure there
+			}
+
 			if ((tries ?? 0) < CARD_POLL_TRIES) {
 				poll_again(modem, modem._gen ?? 0,
 					() => unlock_uim(modem, cb, (tries ?? 0) + 1));
@@ -2271,11 +2290,22 @@ export function read_identity(modem, cb, opts)
 		push(imsi_chain, (done) => modem.at.send('AT+CIMI', (e, r) =>
 			done(e ? null : at_digits(r?.lines, 14))));
 
+	// bench patch (2026-11-14, router→router lending): the last resort — a
+	// card served by a plugin reader session. Every modem-side read above
+	// looks at the modem's own slots (or their caches) and a reader card
+	// never shows up there; the reader's info event carries the identity
+	// (see the rsim plugin's info handler: modem.reader_card).
+	if (modem.reader_card?.imsi != null)
+		push(imsi_chain, (done) => done(modem.reader_card.imsi));
+
 	first_of(imsi_chain, (imsi) => {
 		out.imsi = imsi;
 
 		read_iccid(modem, (iccid) => {
 			out.iccid = iccid;
+
+			if (out.iccid == null && modem.reader_card?.iccid != null)
+				out.iccid = modem.reader_card.iccid;
 
 			if (!modem.dms)
 				return cb(out);

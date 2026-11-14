@@ -769,6 +769,15 @@ export function install(self, o)
 				// card present but unusable — name the modem's own reason
 				// rather than reading EFs off a card that answers nothing.
 				if (err.reason == 'card_error') {
+					// bench patch (2026-11-14, router→router lending): a
+					// plugin reader card can surface as card_error (the local
+					// slots' view of a card that is not there); the reader
+					// session is the card. Adopt its identity and continue.
+					if (self.reader_card) {
+						log('notice', 'sim: UIM reports card_error but a reader card is active — adopting reader identity');
+						return step_identity();
+					}
+
 					log('err', sprintf('SIM card not responding: %s%s',
 						err.card_error ?? 'unknown',
 						err.card_error_code == 3
