@@ -1674,9 +1674,12 @@ export function create(opts)
 
 		let begin = chain.begin;
 
-		// old 'delay' option: wait before touching the modem
+		// old 'delay' option: wait before touching the modem. Its own slot:
+		// tm.settle belongs to the init chain's settle waits (see "each wait
+		// owns its own timer" above), and the teardown cancel pass covers
+		// every slot in `tm`, this one included.
 		if (+(self.config.delay ?? 0) > 0)
-			tm.settle = uloop.timer(+self.config.delay * 1000, begin);
+			tm.delay = uloop.timer(+self.config.delay * 1000, begin);
 		else
 			begin();
 	};
@@ -1714,7 +1717,7 @@ export function create(opts)
 			if (t)
 				t.cancel();
 
-		tm.retry = tm.reg = tm.settle = tm.at_drain = tm.probe = tm.init_reset = tm.reset_watch = null;
+		tm.retry = tm.reg = tm.settle = tm.delay = tm.at_drain = tm.probe = tm.init_reset = tm.reset_watch = null;
 
 		// a settle wait cancelled just above never runs its body, so the
 		// continuation it owed is paid here instead — otherwise a ubus reattach

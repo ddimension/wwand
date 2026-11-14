@@ -181,6 +181,48 @@ scenario('happy', { handlers: base_handlers() }, 'registered',
 		eq(modem.counters.attempts, 0, 'happy: attempts reset');
 	});
 
+// --- 1-delay: `option delay` holds the first request back --------------------
+// Baseline lifecycle checks, no regression test: nothing could cancel the
+// delay before it had its own timer slot either. A second start() while the
+// hub is open is a no-op (the hub guard), so it cannot arm a second delay and
+// orphan the first one.
+let delay_seen = {};
+
+scenario('delay', {
+	handlers: base_handlers(),
+	config: { delay: '0.3' },
+	setup: (mock, modem, finish) => {
+		uloop.timer(50, () => modem.start());
+		uloop.timer(150, () => {
+			delay_seen.early = length(mock.calls_for('SYNC')) + length(mock.calls_for('GET_VERSION_INFO'));
+		});
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(delay_seen.early, 0, 'delay: nothing is sent while the delay runs');
+		eq(modem.state, 'READY', 'delay: the init runs once it expires');
+		eq(length(mock.calls_for('SYNC')), 1, 'delay: a repeated start runs no second init chain');
+	});
+
+// a stop inside the delay cancels it (teardown cancels every slot in `tm`)
+let delay_stop = {};
+
+scenario('delay-stop', {
+	handlers: base_handlers(),
+	config: { delay: '0.2' },
+	guard_ms: 1000,
+	setup: (mock, modem, finish) => {
+		uloop.timer(50, () => modem.stop());
+		uloop.timer(500, () => {
+			delay_stop.sent = length(mock.calls_for('SYNC')) + length(mock.calls_for('GET_VERSION_INFO'));
+			finish();
+		});
+	},
+}, '__never__',
+	(modem, mock, events) => {
+		eq(delay_stop.sent, 0, 'delay-stop: a stop during the delay cancels the init');
+	});
+
 // --- 1a: a plugin holds the radio off at init ----------------------------------
 // A modem waiting for a remote SIM (or lending its card) must not register even
 // once: switched online at SET_OPMODE, the RG650E on 245 registered with its own
