@@ -247,10 +247,9 @@ export function install(self, o)
 		// the modem holds this APN back (daemon.uc note_throttle): a dial
 		// before the back-off ends is refused the same way. While the time is
 		// being asked, the ordinary backoff stands; once known, the next try
-		// waits for its end — and the reconnect hold is let go, because it
-		// would give the interface up in the middle of an outage whose end is
-		// known, and nothing else (no `registered`) brings it back after a
-		// throttle.
+		// waits for its end — and the reconnect hold is deferred past the
+		// throttle's end (below), not fired in the middle of an outage whose
+		// end is known and that no `registered` would recover from.
 		if (entry.throttle?.querying)
 			return schedule();
 
@@ -260,10 +259,19 @@ export function install(self, o)
 			if (entry.retry_timer)
 				entry.retry_timer.cancel();
 
-			if (entry.hold_timer) {
+			// Defer the give-up hold past the throttle, don't drop it: giving
+			// the interface up mid-throttle is wrong (the outage end is known
+			// and no `registered` follows a throttle), but a hold that never
+			// fired again would turn the throttle into an UNBOUNDED retry loop
+			// once ordinary failures persist after it. Re-arm it to land a
+			// full hold_max_ms after the throttle clears; a dial that succeeds
+			// first cancels it (clear_reconnect on the 'up' event).
+			if (entry.hold_timer)
 				entry.hold_timer.cancel();
+			entry.hold_timer = uloop.timer(left * 1000 + 1000 + hold_max_ms, () => {
 				entry.hold_timer = null;
-			}
+				give_up(name, 'reconnect hold expired');
+			});
 
 			let thr = entry.throttle;
 

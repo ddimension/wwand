@@ -2079,8 +2079,9 @@ uloop.run();
 	eq(d.contexts.wan.throttle?.seconds, 120, 'throttle: the time left for THIS APN, matched case-insensitively');
 
 	d._retry_activate('wan');
-	eq([ ups, d.contexts.wan.hold_timer ], [ 0, null ],
-		'throttle: a known hold is waited out, and the reconnect hold does not give the interface up meanwhile');
+	eq(ups, 0, 'throttle: a known hold is waited out — the retry does not dial during the throttle');
+	ok(d.contexts.wan.hold_timer != null,
+		'throttle: the reconnect hold is DEFERRED past the throttle, not dropped — so a persistent failure after the throttle still gives the interface up (stays bounded)');
 	eq(d.status().contexts.wan.throttle?.apn, 'iot.example', 'throttle: published on the interface status');
 
 	let got = null;

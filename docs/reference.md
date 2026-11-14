@@ -2525,7 +2525,10 @@ answer after the upgrade re-arms it.
   entry counts; for an unset APN (the network's default) the longest hold the
   modem reports counts. While a known hold runs, the reconnect hold
   (`hold_max`) does not give the interface up: the outage has a known end,
-  and no `registered` event would bring the interface back after it. A
+  and no `registered` event would bring the interface back after it. The
+  hold is deferred, not dropped — it runs a full `hold_max` from the end of
+  the throttle, so dials that keep failing after it still give the
+  interface up instead of retrying forever. A
   netifd setup in the meantime is answered without a dial, and netifd shows
   `THROTTLED`. Without a time from the modem, the ordinary backoff applies.
   The interface status shows `throttle: { apn, seconds_left }`, `wwandctl
