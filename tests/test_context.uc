@@ -64,6 +64,9 @@ function make_handlers(over, started)
 		GET_REVISION: { revision: 'R11A06' },
 		GET_IDS: { imei: '860000000000001' },
 		SET_OPERATING_MODE: {},
+		// the PS re-attach a changed attach profile runs on a live modem
+		// (modem.uc reapply_sim)
+		ATTACH_DETACH: {},
 		GET_OPERATING_MODE: { mode: 0 },   // online (FCC verify pass-through)
 		GET_CARD_STATUS: { card_status: card_status() },
 		GET_MANUFACTURER: { manufacturer: 'Quectel' },

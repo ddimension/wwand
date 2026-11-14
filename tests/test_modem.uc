@@ -11,7 +11,7 @@ import * as modem_mod from 'wwand/modem.uc';
 uloop.init();
 
 const TIMING = {
-	sync_retry: 1, settle: 1, sim_settle: 5, card_poll: 1,
+	sync_retry: 1, settle: 1, sim_settle: 5, ps_settle: 1, card_poll: 1,
 	reg_timeout: 500, backoff_min: 1, backoff_max: 5,
 };
 
@@ -2952,6 +2952,208 @@ scenario('sim-refresh-no-end', {
 		eq(length(mock.calls_for('POWER_OFF_SIM')), 1, 'refresh-no-end: card powered off');
 		eq(length(mock.calls_for('POWER_ON_SIM')), 1, 'refresh-no-end: and on again');
 		eq(modem.info.iccid, '89490200001022832490', 'refresh-no-end: identity re-read');
+	});
+
+// --- 15c: a live attach-profile change re-attaches without a radio cycle ------
+// The attach profile is written for the *next* attach. On a registered modem
+// that must be a PS detach/attach (NAS ATTACH_DETACH, RF on), not a DMS
+// low_power cycle: the latter re-runs PLMN selection and can land elsewhere.
+let ps_reattach = { actions: [] };
+
+scenario('sim-reapply-ps-reattach', {
+	handlers: base_handlers({
+		ATTACH_DETACH: (args) => {
+			push(ps_reattach.actions, args.action);
+			return {};
+		},
+	}),
+	guard_ms: 4000,
+	setup: (mock, modem, finish) => {
+		let poll = null;
+
+		poll = uloop.timer(10, () => {
+			if (modem.state != 'READY') {
+				poll.set(10);
+				return;
+			}
+
+			let ctx;
+
+			ctx = {
+				name: 'wwan0', state: 'CONNECTED',
+				config: { auto: true, profile: 1 },
+				ensure_attach_profile: (index, cb) => {
+					ps_reattach.profile = index;
+					cb(true);
+				},
+				down: (cb, reason) => {
+					ps_reattach.down = reason;
+					ctx.state = 'IDLE';
+					cb(null);
+				},
+			};
+
+			modem.contexts = [ ctx ];
+			modem.reapply_sim(() => {
+				ps_reattach.done = true;
+				finish();
+			});
+		});
+	},
+}, '__never__',
+	(modem, mock, events) => {
+		eq(ps_reattach.profile, 1, 'ps-reattach: the attach profile is reprogrammed first');
+		eq(ps_reattach.down, 'reattach', 'ps-reattach: the live session is stopped before the detach');
+		eq(ps_reattach.actions, [ 2, 1 ], 'ps-reattach: PS detach then attach');
+		eq(ps_reattach.done, true, 'ps-reattach: reapply completes after the attach');
+		eq(length(mock.calls_for('SET_OPERATING_MODE')), 1,
+		   'ps-reattach: the radio was never cycled');
+	});
+
+// A second ATTACH_DETACH sent into the detach transition is answered NO_EFFECT
+// (26) even though the modem ends up PS-detached: observed on the RG502Q,
+// 2026-11-05, where accepting it left the interface IDLE with "EMM detached".
+// The PS path must wait `ps_settle` after an effective detach and treat a
+// NO_EFFECT attach as a failure, falling back to the radio cycle.
+let ps_auto = { actions: [] };
+
+scenario('sim-reapply-ps-reattach-noeffect', {
+	handlers: base_handlers({
+		ATTACH_DETACH: (args) => {
+			push(ps_auto.actions, args.action);
+			return args.action == 1 ? { __error: 26 } : {};
+		},
+	}),
+	guard_ms: 4000,
+	setup: (mock, modem, finish) => {
+		let poll = null;
+
+		poll = uloop.timer(10, () => {
+			if (modem.state != 'READY') {
+				poll.set(10);
+				return;
+			}
+
+			let ctx;
+
+			ctx = {
+				name: 'wwan0', state: 'CONNECTED',
+				config: { auto: true, profile: 1 },
+				ensure_attach_profile: (index, cb) => {
+					ps_auto.profile = index;
+					cb(true);
+				},
+				down: (cb, reason) => {
+					ps_auto.down = reason;
+					ctx.state = 'IDLE';
+					cb(null);
+				},
+			};
+
+			modem.contexts = [ ctx ];
+			modem.reapply_sim(() => {
+				ps_auto.done = true;
+				finish();
+			});
+		});
+	},
+}, '__never__',
+	(modem, mock, events) => {
+		eq(ps_auto.profile, 1, 'ps-noeffect: the attach profile is reprogrammed first');
+		eq(ps_auto.down, 'reattach', 'ps-noeffect: the live session is stopped before the detach');
+		eq(ps_auto.actions, [ 2, 1 ], 'ps-noeffect: PS detach then attach');
+		eq(ps_auto.done, true, 'ps-noeffect: reapply completes through the fallback');
+		let modes = map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args?.mode);
+		ok(index(modes, 1) >= 0,
+		   'ps-noeffect: NO_EFFECT falls back to the low-power radio cycle');
+	});
+
+// REGISTERING needs the re-attach as much as READY: the autonomous attach
+// already started with the old profile, and skipping it there lost the change
+// for good (a late first binding, a config reload while registering).
+let ps_reg = { actions: [] };
+
+scenario('sim-reapply-ps-registering', {
+	handlers: base_handlers({
+		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
+		GET_PROFILE_SETTINGS: { __error: 71 },
+		GET_SERVING_SYSTEM: (args, meta) => ({
+			serving_system: { registration: 2, cs_attach: 0, ps_attach: 0,
+			                  selected_network: 0, radio_ifs: [] },
+		}),
+		ATTACH_DETACH: (args) => {
+			push(ps_reg.actions, args.action);
+			return args.action == 2 ? { __error: 26 } : {};   // not attached yet
+		},
+	}),
+	guard_ms: 2000,
+	setup: (mock, modem, finish) => {
+		let poll = null;
+
+		poll = uloop.timer(10, () => {
+			if (modem.state != 'REGISTERING') {
+				poll.set(10);
+				return;
+			}
+
+			modem.contexts = [ {
+				name: 'wwan0', state: 'IDLE', config: { auto: true, profile: 1 },
+				ensure_attach_profile: (index, cb) => cb(true),
+			} ];
+			ps_reg.modes_before = length(mock.calls_for('SET_OPERATING_MODE'));
+			modem.reapply_sim(() => {
+				ps_reg.modes_after = length(mock.calls_for('SET_OPERATING_MODE'));
+				finish();
+			});
+		});
+	},
+}, '__never__',
+	(modem, mock, events) => {
+		eq(ps_reg.actions, [ 2, 1 ], 'ps-registering: PS detach then attach while registering');
+		eq(ps_reg.modes_after, ps_reg.modes_before, 'ps-registering: no radio cycle');
+	});
+
+// Under a plugin hold the session release is not this path's to run: the
+// change keeps the plain radio cycle, as before, instead of being dropped.
+let ps_held = { actions: [] };
+
+scenario('sim-reapply-plugin-held', {
+	handlers: base_handlers({
+		ATTACH_DETACH: (args) => {
+			push(ps_held.actions, args.action);
+			return {};
+		},
+	}),
+	guard_ms: 2000,
+	setup: (mock, modem, finish) => {
+		let poll = null;
+
+		poll = uloop.timer(10, () => {
+			if (modem.state != 'READY') {
+				poll.set(10);
+				return;
+			}
+
+			modem.contexts = [ {
+				name: 'wwan0', state: 'IDLE', config: { auto: true, profile: 1 },
+				ensure_attach_profile: (index, cb) => cb(true),
+			} ];
+			modem._plugin_held = true;
+			ps_held.before = length(mock.calls_for('SET_OPERATING_MODE'));
+			modem.reapply_sim(() => {
+				ps_held.modes = map(slice(mock.calls_for('SET_OPERATING_MODE'), ps_held.before),
+					(c) => c.args?.mode);
+				modem._plugin_held = false;
+				finish();
+			});
+		});
+	},
+}, '__never__',
+	(modem, mock, events) => {
+		eq(ps_held.actions, [], 'plugin-held: no PS detach/attach');
+		ok(length(ps_held.modes ?? []) >= 1 && ps_held.modes[0] == 1,
+			'plugin-held: the change still cycles the radio (low power first)');
 	});
 
 run_next();

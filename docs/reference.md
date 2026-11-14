@@ -836,6 +836,19 @@ attach profile (wrong APN, or IPv4-only where the subscription needs IPv4v6)
 otherwise gets the attach rejected with EMM cause 33 and registration wedges —
 see [Troubleshooting](#troubleshooting).
 
+The profile only reaches the network on a new attach, so a change on a
+registering or registered QMI modem re-attaches: the PDN sessions stop first,
+then a PS detach and attach with the radio on (NAS `ATTACH_DETACH`; after an
+effective detach, 3 s later so the detach can finish), and the sessions go back
+to the reconnect. The low-power
+radio cycle is only the fallback, for a modem that refuses `ATTACH_DETACH` or
+answers the attach with `NO_EFFECT`: switching RF off re-runs PLMN selection
+and can land on another network (seen on an RG502Q-EA, 2026-11-05: 242/02
+before, 242/01 roaming after, 25 s down). An operator-detached or
+low-power-parked modem is left alone, its later attach or wake reads the new
+profile. Under a plugin hold, during another reattach, or before registration
+the change still takes the plain radio cycle.
+
 **Muxing rules.**
 - When any context of a modem is muxed, **all** its contexts get a channel (the
   QMAP parent device carries no IP traffic itself). Missing channels are

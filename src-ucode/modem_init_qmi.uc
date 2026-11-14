@@ -337,7 +337,7 @@ export function install(self, o)
 		// and then destroys the clients, which delivers `cancelled` to the AT
 		// command in flight — so this callback can arrive AFTER the modem is
 		// gone, and next() would drive the init chain over a dead instance.
-		// Same trap as modem.uc:194.
+		// Same trap as modem.uc:195.
 		let resume = (why) => {
 			if (resumed || self._gen != gen)
 				return;
