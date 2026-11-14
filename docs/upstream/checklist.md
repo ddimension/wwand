@@ -21,7 +21,7 @@ Nothing below is pushed/posted. Order matters (the PR Makefile must point at a
      the same `WWAND_BASE_UC`/`_CODEC`/`_SCHEMA` split). Verify union == tree,
      disjoint (see the feed's ownership check).
    - **New `wwand-mhi` package** answering the bot's Makefile:120 (MHI drivers):
-     `+kmod-mhi-pci-generic +kmod-mhi-wwan-ctrl +kmod-mhi-wwan-mbim +kmod-mhi-net`,
+     `+kmod-mhi-pci-generic +kmod-mhi-wwan-ctrl +kmod-mhi-wwan-mbim +kmod-mhi-net +kmod-qrtr-mhi`,
      ships the `wwan`-subsystem hotplug (moved out of base).
    - `test-version.sh` covers all three executables (already in the PR head).
    - Keep the upstream PR **source-shipped** (no bytecode/CMakeLists precompile —

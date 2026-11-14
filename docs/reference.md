@@ -435,7 +435,9 @@ config wwand_modem 'm0'
 	                                 #   for an SDX modem on PCIe/MHI whose QMI
 	                                 #   lives only on the QRTR bus (no cdc-wdm,
 	                                 #   e.g. an RG520N on an IPQ5018). QMI backend
-	                                 #   only. The modem counts as present once a
+	                                 #   only; the QRTR channel driver
+	                                 #   (kmod-qrtr-mhi) comes with wwand-mhi.
+	                                 #   The modem counts as present once a
 	                                 #   node on the bus serves QMI DMS and WDS;
 	                                 #   until then
 	                                 #   it waits (status: "no QMI service on the
