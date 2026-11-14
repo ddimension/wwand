@@ -227,6 +227,8 @@ eq(started, [], 'blocklist: a modem on a foreign-owned device is never started')
 ok(dblk.modems.m0 != null, 'blocklist: the modem entry still exists (so status can explain it)');
 ok(match(dblk.modems.m0.control_note ?? '', /owned by interface wan \(proto qmi\)/),
 	'blocklist: control_note names the owning interface and proto');
+ok(match(dblk.modems.m0.control_note ?? '', /migrate it to proto wwand if the LuCI modem list offers it/),
+	'blocklist: a migratable owner gets the migration as the way out');
 ok(length(filter(blk_logs, (m) => match(m, /device blocklist:/))) == 1,
 	'blocklist: the claim set is logged once at start');
 
@@ -388,6 +390,9 @@ dpath.apply_config(parsed_p);
 eq(started, [], 'blocklist: a bus= claim blocks the modem it resolves to');
 ok(match(dpath.modems.m0.control_note ?? '', /bus=1-1 is owned by interface wan \(proto wwan\)/),
 	'blocklist: control_note names the option, value and owner');
+ok(match(dpath.modems.m0.control_note ?? '', /disable or remove it/) &&
+   !match(dpath.modems.m0.control_note ?? '', /migrate/),
+	'blocklist: an owner the migration cannot convert is not offered it');
 
 // --- operator ifdown: netifd's autostart is the durable record ---------------
 //

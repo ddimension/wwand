@@ -3344,14 +3344,31 @@ export function create(opts)
 			?? blocked_by_path(cfg, control);
 
 		if (claim) {
-			log('warn', sprintf('modem %s: device %s is owned by interface %s (proto %s) — ignoring this modem',
-				name, claim.device, claim.interface, claim.proto));
+			// Name the way out, not only the owner: a modem parked here looks
+			// idle for no reason unless the note says what would free it. For
+			// the protos the migration knows it is offered CONDITIONALLY:
+			// migrate_plan also needs an identity (no devpath/bus-only claim)
+			// and skips a non-qmi section that already names a modem, so the
+			// note points at the list that shows only what it can convert
+			// rather than repeating those rules here. The hint
+			// names no culprit for HOW the interface got there: the wwan
+			// package's hotplug scripts only mark existing sections available
+			// and never write one (wwan.usb / wwan.usbmisc, openwrt 2026-11), so
+			// it is a board default (board.d 02_network), LuCI or the user.
+			let migratable = (claim.proto == 'qmi' || claim.proto == 'mbim' ||
+			                  claim.proto == 'ncm' || claim.proto == 'modemmanager');
+			let hint = migratable
+				? 'migrate it to proto wwand if the LuCI modem list offers it (/usr/libexec/wwand/migrate shows the same plan), else disable it'
+				: 'disable or remove it to let wwand drive the modem';
+
+			log('warn', sprintf('modem %s: device %s is owned by interface %s (proto %s) — ignoring this modem; %s',
+				name, claim.device, claim.interface, claim.proto, hint));
 
 			self.modems[name] = {
 				cfg: cfg, device: null, netdev: null, muxinfo: muxinfo,
 				l3_name: l3name ?? null, modem: null, protocol: null,
-				control_note: sprintf('device %s is owned by interface %s (proto %s)',
-					claim.device, claim.interface, claim.proto),
+				control_note: sprintf('device %s is owned by interface %s (proto %s) — %s',
+					claim.device, claim.interface, claim.proto, hint),
 				...carry_over(name),
 			};
 

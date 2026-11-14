@@ -1402,7 +1402,12 @@ non-wwand interface, wwand will not touch it
 
 A `wwand_modem` pointing at a blocked device is **not started**; the reason
 appears on its `control_note` in `status()` and in LuCI, so it reads as
-"someone else owns this" rather than as a missing modem. Zero-config autosetup
+"someone else owns this" rather than as a missing modem. The note also names
+the way out: for a `qmi` / `mbim` / `ncm` / `modemmanager` owner, migrating it
+to `proto wwand` if the LuCI modem list offers it (`/usr/libexec/wwand/migrate`
+prints the same plan — a section that binds only by `devpath`/`bus` has no
+identity to migrate), else disabling it; for any other owner, disabling or
+removing it. Zero-config autosetup
 refuses such a device too, which is the case the proto check alone missed — a
 `proto dhcp` on `wwan0` left over from a comgt-ncm setup is not a cellular proto
 but still owns the netdev.
