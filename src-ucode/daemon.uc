@@ -220,6 +220,11 @@ function remote_sim_support(protocol, m)
 		if (type(m.services) != 'object')
 			return { supported: null, reason: 'the modem\'s QMI services are not read yet' };
 
+		// no version table: nothing to read it from, and only a session that
+		// allocates the service would tell (modem.uc has_service)
+		if (m.services_unknown && !m._services_absent?.[QMI_SERVICE_UIM_REMOTE])
+			return { supported: null, reason: 'the modem does not list its QMI services (GET_VERSION_INFO unanswered); UIM Remote is tried when a remote SIM is used' };
+
 		return m.services[QMI_SERVICE_UIM_REMOTE]
 			? { supported: true, via: 'qmi' }
 			: uim_remote_not_listed(m, 'the modem offers no QMI UIM Remote service');
@@ -4251,6 +4256,11 @@ export function create(opts)
 				let m = entry?.modem;
 
 				if (!m?.at || m.uim_remote_switch != null || (m._uimrmt_tries ?? 0) >= 3 || m._uimrmt_busy)
+					return;
+
+				// an unanswered version query omitted nothing: only an
+				// allocation could tell whether UIM Remote is there
+				if (entry.protocol == 'qmi' && m.services_unknown)
 					return;
 
 				if (!match(lc(sprintf('%s', m.info?.manufacturer ?? '')), /quectel/))

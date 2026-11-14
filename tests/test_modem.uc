@@ -1008,6 +1008,60 @@ scenario('e182e', {
 		eq(modem.qmi_clients, {}, 'e182e: no CID of the ended session stays listed');
 	});
 
+// --- 5b': the same stack, GET_VERSION_INFO unanswered -------------------------
+//
+// Some firmware never answers the version query while every service works
+// (RG502Q-EA A03, ddimension/wwand#82). The table is then unknown, not empty:
+// each optional service is tried, and the refused allocation is what says it
+// is missing. This modem refuses all of them, so the outcome must equal the
+// e182e one above — the WDA-less ethernet datapath included, reached through
+// the refused WDA allocation instead of the table.
+let unk_refused = {};
+
+scenario('version-unanswered', {
+	handlers: base_handlers({
+		...E182E_HANDLERS,
+		GET_VERSION_INFO: () => null,
+		ALLOCATE_CID: (a) => {
+			if (a.service > 3) {
+				unk_refused[sprintf('%d', a.service)] = true;
+				return { __error: 31 };   // CTL: invalid service type
+			}
+
+			unk_refused.cid = (unk_refused.cid ?? 4) + 1;
+			return { allocation: { service: a.service, cid: unk_refused.cid } };
+		},
+	}),
+	config: { tty: '/dev/ttyUSB3' },
+	timing: { version_info: 50 },
+	datapath: { netdev: 'wwan0', mux: 'auto', mux_links: [], dgram_size: 0, fx: e182e_dpfx },
+	at: { fx: fakefx.create(), open_transport: () => e182e_at_tr },
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.state, 'READY', 'version-unanswered: the init goes on without the table');
+		eq(modem.services_unknown, true, 'version-unanswered: the table is marked unknown');
+		ok(unk_refused['11'] && unk_refused['26'],
+			'version-unanswered: UIM and WDA were tried, not assumed absent');
+		eq(modem.uim, null, 'version-unanswered: a refused UIM leaves no client');
+		eq(modem.dsd, null, 'version-unanswered: a refused DSD leaves no client');
+		eq(modem.has_service(26), false, 'version-unanswered: a refused allocation marks the service absent');
+		eq(modem.has_service(2), true, 'version-unanswered: an allocated service counts as present');
+		eq(modem.datapath?.backend, 'ethernet',
+			'version-unanswered: a refused WDA takes the WDA-less path, not a failed init');
+		eq(modem.counters?.proto_errors ?? 0, 0,
+			'version-unanswered: the probing refusals and the silent query fed no recovery counter');
+	});
+
+// a refused version query (an error answer, not silence) still fails the init
+scenario('version-refused', {
+	handlers: base_handlers({ GET_VERSION_INFO: { __error: 1 } }),
+}, 'error',
+	(modem, mock, events) => {
+		eq(filter(events, (e) => e.event == 'error')[0]?.data?.stage, 'version_info',
+			'version-refused: the init fails at the version query');
+		eq(length(mock.calls_for('GET_MODEL')), 0, 'version-refused: nothing after it is asked');
+	});
+
 // --- 5c: exhausted client table (ClientIdsExhausted, CTL error 5) ------------
 //
 // The 2011-era stack keeps ~5 client slots; a failed attempt can leak one and

@@ -557,6 +557,7 @@ eq(netlink.mux_available(fx, 'wwan0', 'qmi', plugins), true,
 			{ info: { model: 'RG500Q-EA' }, config: {},
 			  set_state: () => null, wds_cfg: null,
 			  services: { '26': { major: 1, minor: 0 } },   // WDA
+			  has_service: (id) => id == 26,
 			  alloc: (schema, cb) => cb(null, fake_wda) },
 			{
 				netdev: 'wwand0',

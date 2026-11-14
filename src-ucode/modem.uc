@@ -28,6 +28,7 @@ import * as modem_init_qmi from 'wwand.modem_init_qmi';
 import * as ctlmod from 'wwand.codec.schema.ctl';
 import * as dmsmod from 'wwand.codec.schema.dms';
 import * as nasmod from 'wwand.codec.schema.nas';
+import * as wdsmod from 'wwand.codec.schema.wds';
 import * as uimmod from 'wwand.codec.schema.uim';
 import * as tmdmod from 'wwand.codec.schema.tmd';
 import * as catmod from 'wwand.codec.schema.cat';
@@ -43,6 +44,7 @@ const TIMING_DEFAULTS = {
 	sync_retry: 1000,      // delay between CTL sync attempts
 	sim_settle: 5000,      // settle after PIN verify without indication (old: sleep 5)
 	card_poll: 1000,       // card-status re-poll while initializing
+	version_info: 10000,   // CTL GET_VERSION_INFO; unanswered -> service table unknown
 	init_reset: 30000,     // wait for a deferred init reset to take the modem off
 	                       // the bus; it acked but stayed -> the reset did not take
 };
@@ -167,6 +169,12 @@ export function create(opts)
 		_gen: 0,
 
 		services: {},      // service id (string) -> { major, minor }
+		// true when GET_VERSION_INFO went unanswered: the table is then NOT
+		// KNOWN rather than empty, and has_service() lets each optional
+		// service be tried, the allocation deciding (modem_init_qmi
+		// step_services)
+		services_unknown: false,
+		_services_absent: {},   // service id (string) -> true, refused while unknown
 		info: {},          // model, revision, imei, ...
 		reg: {},           // registration snapshot
 		reg_detail: null,  // why (not) registered: reject cause, limited service
@@ -199,8 +207,8 @@ export function create(opts)
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
 	// callback arrives the generation has already moved.
 	// EACH WAIT OWNS ITS OWN TIMER AND ITS OWN DEBT. `tm.settle` is a shared
-	// one-shot slot, also written by the init chain (modem_init_qmi.uc:596,
-	// :681, :968), so parking radio-bounce waits there let a second one
+	// one-shot slot, also written by the init chain (modem_init_qmi.uc:611,
+	// :696, :994), so parking radio-bounce waits there let a second one
 	// overwrite the first: teardown then cancelled only the newest, the older
 	// timer survived unreachable, and whichever fired first cleared the other's
 	// debt. Two reattach calls reach that directly — nothing serialises them.
@@ -333,9 +341,36 @@ export function create(opts)
 	let held_summary = () => join(' ', map(sort(keys(self.qmi_clients)), (k) =>
 		sprintf('%s:[%s]', k, join(',', self.qmi_clients[k]))));
 
+	// Does the modem offer this service? From the version table when the modem
+	// answered it. When it did not, every service counts as offered until its
+	// allocation is refused: an EMPTY table would switch off WDA (and with it
+	// QMAP and the mux), UIM, DSD, TMD, PDC, CAT and UIM Remote without the
+	// modem ever being asked, which is far worse than one refused
+	// ALLOCATE_CID per missing service.
+	self.has_service = function(id) {
+		let k = sprintf('%d', id);
+
+		return self.services_unknown ? !self._services_absent[k] : !!self.services[k];
+	};
+
 	self.alloc = function(schema, cb) {
+		// With no version table an optional service is found missing by
+		// asking, so its refusal is an answer, not a fault: it must not feed
+		// the recovery counter, or a modem lacking a few services climbs the
+		// ladder for it. DMS/NAS/WDS stay counted — they are the bring-up gate.
+		let probing = self.services_unknown &&
+			schema.service != dmsmod.default.service &&
+			schema.service != nasmod.default.service &&
+			schema.service != wdsmod.default.service;
+
 		self.ctl.request('ALLOCATE_CID', { service: schema.service }, (err, data) => {
 			if (err || !data?.allocation) {
+				// ...and only a QMI error ANSWER says the service is absent. A
+				// timeout or a cancel says nothing about it, and neither does
+				// a full client table (5).
+				if (probing && err?.error == 'qmi' && err.code != 5)
+					self._services_absent[sprintf('%d', schema.service)] = true;
+
 				log((err?.code == 5) ? 'warn' : 'debug', sprintf('allocating a client of service %d failed: %J — held: %s',
 					schema.service, err ?? 'no allocation tlv', held_summary() || 'none'));
 
@@ -356,7 +391,7 @@ export function create(opts)
 			log('debug', sprintf('allocated cid %d for service %d — held: %s',
 				data.allocation.cid, schema.service, held_summary()));
 			cb(null, client_mod.create(self.hub, schema, data.allocation.cid, client_hooks));
-		});
+		}, probing ? { no_recovery: true } : null);
 	};
 
 	self.release = function(client, cb) {
@@ -411,7 +446,7 @@ export function create(opts)
 		if (!self.ctl || !self.hub || self.hub.closed)
 			return cb({ error: 'not_ready' }, null);
 
-		if (!self.services[sprintf('%d', schema.service)])
+		if (!self.has_service(schema.service))
 			return cb({ error: 'service_unavailable' }, null);
 
 		let gen = self._gen;
@@ -494,7 +529,7 @@ export function create(opts)
 
 		let wmsmod = require('wwand.codec.schema.wms_lazy').s;
 
-		if (!self.services[sprintf('%d', wmsmod.default.service)]) {
+		if (!self.has_service(wmsmod.default.service)) {
 			self.wms = null;
 			return cb();
 		}
@@ -1071,7 +1106,7 @@ export function create(opts)
 	self._install_pdc = function(cb) {
 		cb = cb ?? (() => null);
 
-		if (!self.services[sprintf('%d', pdcmod.default.service)])
+		if (!self.has_service(pdcmod.default.service))
 			return cb();
 
 		let gen = self._gen;
@@ -1112,7 +1147,7 @@ export function create(opts)
 
 		let want = catmod.MODES[self.config?.cat_mode ?? ''];
 
-		if (want == null || !self.services[sprintf('%d', catmod.default.service)])
+		if (want == null || !self.has_service(catmod.default.service))
 			return cb();
 
 		// This one IS on the critical path — it is one or two requests, and the
@@ -1230,7 +1265,7 @@ export function create(opts)
 	self._install_thermal = function(cb) {
 		cb = cb ?? (() => null);
 
-		if (!self.services[sprintf('%d', tmdmod.default.service)])
+		if (!self.has_service(tmdmod.default.service))
 			return cb();
 
 		// NOT on the critical path. A modem has ~30 mitigation devices (28 on

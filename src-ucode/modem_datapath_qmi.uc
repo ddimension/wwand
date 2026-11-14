@@ -277,7 +277,7 @@ export function setup(self, dp, o, next)
 		// modem keeps the historic behavior: no format setup at all, the
 		// link left entirely to the driver (old behavior: "no wda support,
 		// skipping data format switch").
-		if (!self.services[sprintf('%d', wdamod.default.service)]) {
+		let no_wda = () => {
 			// No WDA means no link-layer negotiation at all, so it also means
 			// no QMAP: the kernel keeps the driver's 802.3 framing and the
 			// honest datapath is `ethernet`. For an auto channel that is a
@@ -305,9 +305,18 @@ export function setup(self, dp, o, next)
 
 			log('info', 'no wda service, skipping data format setup');
 			return next();
-		}
+		};
+
+		if (!self.has_service(wdamod.default.service))
+			return no_wda();
 
 		self.alloc(wdamod.default, (err, wda) => {
+			// with no version table (modem.uc has_service) the refused
+			// allocation is how a missing WDA shows itself: the same case as
+			// a table without it, not a failed bring-up
+			if (err && self.services_unknown && !self.has_service(wdamod.default.service))
+				return no_wda();
+
 			if (err)
 				return fail('alloc_wda', err);
 

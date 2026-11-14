@@ -127,11 +127,29 @@ export function install(self, o)
 
 	step_services = () => {
 		self.set_state('INIT_SERVICES');
-		self.ctl.request('GET_VERSION_INFO', {}, (err, data) => {
-			if (err)
-				return fail('version_info', err);
+		// reset before asking: a re-init must not answer has_service from
+		// the previous session's table while this request is in flight
+		self.services = {};
+		self.services_unknown = false;
+		self._services_absent = {};
 
-			self.services = {};
+		self.ctl.request('GET_VERSION_INFO', {}, (err, data) => {
+
+			// A timeout is not a refusal. Some firmware never answers this
+			// request while every service works (RG502Q-EA
+			// RG502QEAACR13A03M4G_ZYXEL, ddimension/wwand#82; quectel-CM never
+			// sends it). Go on with the table marked unknown: the DMS/NAS/WDS
+			// allocations below remain the bring-up gate, so a dead modem
+			// still fails there, and each optional service is tried rather
+			// than assumed absent (modem.uc has_service). A refused request
+			// (an error answer) still fails the init.
+			if (err?.error == 'timeout') {
+				log('warn', 'GET_VERSION_INFO unanswered — continuing without the service list, optional services are probed by allocation');
+				self.services_unknown = true;
+				data = { services: [] };
+			}
+			else if (err)
+				return fail('version_info', err);
 
 			let names = [];
 
@@ -173,7 +191,7 @@ export function install(self, o)
 									() => self._apply_cat_mode(
 										() => self._read_info(step_at))));
 
-							if (self.services[sprintf('%d', dsdmod.default.service)]) {
+							if (self.has_service(dsdmod.default.service)) {
 								self.alloc(dsdmod.default, (e5, dsd) => {
 									self.dsd = e5 ? null : dsd;
 									if (self.dsd)
@@ -190,7 +208,7 @@ export function install(self, o)
 
 					// WMS (SMS) is NOT allocated here — brought up lazily on the
 					// first SMS op via _ensure_wms (wms schema off the heap until used).
-					if (self.services[sprintf('%d', uimmod.default.service)]) {
+					if (self.has_service(uimmod.default.service)) {
 						self.alloc(uimmod.default, (e3, uim) => {
 							if (e3) {
 								log('warn', 'uim allocation failed, using dms fallback');
@@ -209,7 +227,7 @@ export function install(self, o)
 					}
 				});
 			});
-		});
+		}, { timeout: self.timing.version_info, no_recovery: true });
 	};
 
 	// AT side channel: best-effort, failures never block bring-up
@@ -319,7 +337,7 @@ export function install(self, o)
 		// and then destroys the clients, which delivers `cancelled` to the AT
 		// command in flight — so this callback can arrive AFTER the modem is
 		// gone, and next() would drive the init chain over a dead instance.
-		// Same trap as modem.uc:187.
+		// Same trap as modem.uc:194.
 		let resume = (why) => {
 			if (resumed || self._gen != gen)
 				return;
@@ -335,7 +353,7 @@ export function install(self, o)
 				why, join('; ', reasons)));
 
 			// Deliberately NOT cleared on a later init pass. The object is
-			// created once per device attach (daemon.uc:3751), so a modem that
+			// created once per device attach (daemon.uc:3756), so a modem that
 			// really did reset comes back as a NEW instance with no debt — and
 			// a re-init of THIS instance means it did not, so the debt still
 			// holds. Deduplicated because a re-init re-derives the same reason

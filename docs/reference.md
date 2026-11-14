@@ -2785,6 +2785,7 @@ extending a table, not branching the code — see
 | QMAP aggregation size | `netlink.dgram_size`: 31744 for every modem, overridable via `dl_datagram_max_size`, capped at a vendor driver's fixed buffer (`dgram_max`) | the modem's echo sizes the receive side |
 | QMAP version ladder | rmnet offers QMAP v5 (DAP 9), then v4 (DAP 8), then v1 (DAP 5) and takes the first the modem echoes exactly; `option qmap_version` caps the ladder | — |
 | eSIM host access | `esim_quirks`: some firmwares must have the internal LPA's `lpa_enable` disabled (one-time NV reset) so host-side ES10 APDUs work | RG65xx |
+| QMI service list | CTL `GET_VERSION_INFO` unanswered (a timeout, not an error answer) → the list is unknown, not empty: each optional service (UIM, DSD, TMD, PDC, CAT, WMS, WDA, and a plugin's, such as UIM Remote) is tried, and a refused allocation — a QMI error answer, not a timeout — marks it absent without feeding the recovery counter; DMS/NAS/WDS stay the bring-up gate. Costs one refused `ALLOCATE_CID` per missing service | RG502Q-EA A03 (#82) |
 | Identity read | UIM raw EF read → DMS getter fallback | EG06 rejects EF reads → IMSI/ICCID via DMS |
 | PIN unlock | UIM `VERIFY_PIN` → DMS fallback, with retry guards | — |
 | Attach profile | CID1 programmed from config before the autonomous attach | avoids the EMM-33 IPv4-only / wrong-APN reject |
@@ -3022,7 +3023,9 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   service the core does not know, described in wwand's own schema format, on
   the modem's QMI channel — on an MBIM modem over its QMI-over-MBIM
   passthrough: `cb(err, client)` with `no_modem`, `service_unavailable` (not
-  in the modem's GET_VERSION_INFO list) or `unsupported` (NCM; an MBIM modem
+  in the modem's GET_VERSION_INFO list; a modem that left that list
+  unanswered is asked instead, and its refusal comes back as the allocation
+  error) or `unsupported` (NCM; an MBIM modem
   without the passthrough). Which indications reach it over the passthrough
   depends on the service: NAS pushes none on the EG06 and the RM520N, UIM
   Remote pushes all of its own on the RM520N (a remote SIM works over MBIM
