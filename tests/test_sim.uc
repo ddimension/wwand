@@ -93,6 +93,133 @@ scenario('uim: ready card', (next) => {
 	});
 });
 
+// QMI's pin1 block is the LOCAL slot's card while a remote SIM is in use; the
+// AT card state is the remote card and only turns SIM PIN after the modem has
+// started its UIM session (~20 s). The watchdog must enter the configured PIN
+// (never a guess) and refresh the identity when the card answers.
+scenario('uim: remote card needs a late SIM PIN -> configured PIN + re-read', (next) => {
+	let calls = [];
+	let c = card(uimmod.APP_STATE_READY, 3);
+	c.cards[0].applications[0].pin1_state = 3;
+
+	let at = {
+		sent: [],
+		send: function(cmd, cb) {
+			push(this.sent, cmd);
+
+			if (cmd == 'AT+CPIN?')
+				return cb(null, { lines: [
+					length(this.sent) == 1 ? '+CPIN: SIM PIN' : '+CPIN: READY' ] });
+
+			cb(null, { lines: [ 'OK' ] });
+		},
+	};
+
+	let m;
+	m = { timing: { ...T, pin_poll: 1 }, config: { pincode: '1234' }, _gen: 1,
+	          uim: mkclient({ GET_CARD_STATUS: { card_status: c } }, calls),
+	          at: at,
+	          reapply_sim: function() {
+		          eq(at.sent[0], 'AT+CPIN?', 'uim-remote-pin: AT state queried');
+		          eq(at.sent[1], 'AT+CPIN="1234"', 'uim-remote-pin: configured PIN sent');
+		          ok(length(at.sent) >= 3, 'uim-remote-pin: AT state re-checked');
+		          eq(m.sim_note, 'entered the configured SIM PIN (remote card)',
+		             'uim-remote-pin: note set');
+		          next();
+	          } };
+
+	sim.unlock(m, (err, st) => {
+		eq(err, null, 'uim-remote-pin: no error');
+		eq(st.status, 'ready', 'uim-remote-pin: unlock returns ready');
+		eq(st.pin1_retries, 3, 'uim-remote-pin: QMI retries passed through');
+	});
+});
+
+// Warm switch to a remote SIM (bench 2026-11-05): the reader session comes up
+// AFTER the modem did, so QMI unlock has already answered no_sim when the
+// remote card arrives. The AT watch armed on that answer must still enter the
+// configured PIN and re-read the identity — no cold boot required.
+scenario('uim: remote card arrives after unlock said no card -> AT watch still unlocks it', (next) => {
+	let calls = [];
+	let at = {
+		sent: [],
+		send: function(cmd, cb) {
+			push(this.sent, cmd);
+
+			if (cmd == 'AT+CPIN?')
+				return cb(null, { lines: [
+					length(this.sent) == 1 ? '+CPIN: SIM PIN' : '+CPIN: READY' ] });
+
+			cb(null, { lines: [ 'OK' ] });
+		},
+	};
+
+	let m;
+	m = { timing: { ...T, pin_poll: 1 },
+	          config: { pincode: '1234', ext: { rsim_reader: 'ssh:root@helper:bt:AA:BB:CC:DD:EE:FF' } },
+	          _gen: 1,
+	          uim: mkclient({ GET_CARD_STATUS: { card_status: { cards: [] } } }, calls),
+	          at: at,
+	          reapply_sim: function() {
+		          eq(at.sent[0], 'AT+CPIN?', 'uim-remote-nocard: AT state queried');
+		          eq(at.sent[1], 'AT+CPIN="1234"', 'uim-remote-nocard: configured PIN sent');
+		          ok(length(at.sent) >= 3, 'uim-remote-nocard: AT state re-checked');
+		          eq(m.sim_note, 'entered the configured SIM PIN (remote card)',
+		             'uim-remote-nocard: note set');
+		          next();
+	          } };
+
+	sim.unlock(m, (err, st) => {
+		ok(err, 'uim-remote-nocard: the empty slot still reports no_sim');
+		eq(err?.reason, 'no_sim', 'uim-remote-nocard: no_sim, not a silent ready');
+	});
+});
+
+// Same warm switch, second shape: QMI DOES see the remote app (PIN_REQUIRED)
+// but a QMI VERIFY races the remote session — an unlock_not_confirmed loop
+// that resets the modem forever. With a reader configured the PIN goes through
+// the AT watchdog and unlock returns ready without touching VERIFY_PIN.
+scenario('uim: remote card PIN_REQUIRED -> AT watch, never QMI VERIFY', (next) => {
+	let calls = [];
+	let c = card(uimmod.APP_STATE_PIN1_OR_UPIN_PIN_REQUIRED, 3);
+
+	let at = {
+		sent: [],
+		send: function(cmd, cb) {
+			push(this.sent, cmd);
+
+			if (cmd == 'AT+CPIN?')
+				return cb(null, { lines: [
+					length(this.sent) == 1 ? '+CPIN: SIM PIN' : '+CPIN: READY' ] });
+
+			cb(null, { lines: [ 'OK' ] });
+		},
+	};
+
+	let m;
+	m = { timing: { ...T, pin_poll: 1 },
+	          config: { pincode: '1234', ext: { rsim_reader: 'ssh:root@helper:bt:AA:BB:CC:DD:EE:FF' } },
+	          _gen: 1,
+	          uim: mkclient({ GET_CARD_STATUS: { card_status: c } }, calls),
+	          at: at,
+	          reapply_sim: function() {
+		          eq(length(filter(calls, (x) => x == 'VERIFY_PIN')), 0,
+		             'uim-remote-pinreq: QMI VERIFY_PIN never sent');
+		          eq(length(filter(calls, (x) => x == 'REGISTER_EVENTS')), 0,
+		             'uim-remote-pinreq: no QMI verify registration either');
+		          eq(at.sent[1], 'AT+CPIN="1234"', 'uim-remote-pinreq: PIN entered over AT');
+		          eq(m.sim_note, 'entered the configured SIM PIN (remote card)',
+		             'uim-remote-pinreq: note set');
+		          next();
+	          } };
+
+	sim.unlock(m, (err, st) => {
+		eq(err, null, 'uim-remote-pinreq: no error');
+		eq(st.status, 'ready', 'uim-remote-pinreq: unlock returns ready');
+		eq(st.pin1_retries, 3, 'uim-remote-pinreq: QMI retries passed through');
+	});
+});
+
 scenario('uim: pin verify ok (indication)', (next) => {
 	let calls = [];
 	let uim;
@@ -2168,6 +2295,36 @@ sw_self.modem_sim_switch_slot('m0', 1, (err) => {
 	sw_deferred();
 	eq(sw_reapplied, 2, 'card change: a modem in its SIM step is left to it — no parallel re-read');
 	delete sw_modem.state;
+
+	// ...but that init chain's own SIM step can FAIL after the skip (the
+	// card it read was the empty local slot; the remote card only answers
+	// over AT): the re-check keeps waiting and resumes the modem once it
+	// settles. A one-shot here parked a modem SIM_BLOCKED forever although
+	// the AT watchdog had already unlocked the card (bench 2026-11-06:
+	// remote card offered during SIM_UNLOCK on a two-hop helper chain).
+	{
+		let resumed2 = 0;
+
+		sw_modem.state = 'SIM_UNLOCK';
+		sw_modem.retry_sim = () => {
+			// mirror the real guard (modem_init_qmi): only a modem that
+			// STOPPED in SIM_BLOCKED can be resumed
+			if (sw_modem.state != 'SIM_BLOCKED')
+				return false;
+			resumed2++;
+			return true;
+		};
+		sw_self.card_changed('m0', 'remote SIM in use');
+		sw_deferred();   // still inside SIM_UNLOCK: re-armed, nothing resumed
+		eq([ resumed2, sw_reapplied ], [ 0, 2 ],
+		   'card change: in-init skip re-arms instead of vanishing');
+		sw_modem.state = 'SIM_BLOCKED';
+		sw_deferred();   // settled: resume from the SIM step
+		eq([ resumed2, sw_reapplied ], [ 1, 2 ],
+		   'card change: once settled, the stopped modem is resumed');
+		delete sw_modem.retry_sim;
+		delete sw_modem.state;
+	}
 
 	// a card that is slow to come up (a remote SIM): read FRESH — not the
 	// firmware's cached IMSI, which is the old card's — and again while the

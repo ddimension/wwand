@@ -174,8 +174,10 @@ export function install(self, o)
 		// between, and the first must not apply the card that has already left
 		let cgen = m._card_change_gen = +(m._card_change_gen ?? 0) + 1;
 
-		if (m.reapply_sim)
-			defer(2000, () => {
+		if (m.reapply_sim) {
+			let defers = 0;
+			let check;
+			check = () => {
 				if (self.modems?.[ref]?.modem !== m || m._gen !== gen || m._card_change_gen !== cgen)
 					return;
 
@@ -187,9 +189,19 @@ export function install(self, o)
 
 				// still in its init chain (resumed by an earlier change, or
 				// starting): that chain reads the card itself, and a second
-				// unlock + re-read beside it is two writers on one SIM
-				if (index(INIT_STATES, m.state) >= 0)
+				// unlock + re-read beside it is two writers on one SIM.
+				// BUT the chain's SIM step can still FAIL after us (its QMI
+				// read saw the empty local slot while the remote card was
+				// only visible over AT) — re-check until the state settles
+				// so the resume is not lost. One-shot here parked a modem
+				// SIM_BLOCKED forever although the AT watchdog had already
+				// unlocked the card (bench 2026-11-06, remote card offered
+				// during SIM_UNLOCK on the two-hop helper chain).
+				if (index(INIT_STATES, m.state) >= 0) {
+					if (++defers <= 15)
+						defer(2000, check);
 					return;
+				}
 
 				// fresh: no firmware-cached IMSI, which is the old card's
 				// for a while. A card that is slow to initialise (a remote
@@ -212,7 +224,9 @@ export function install(self, o)
 				}, { fresh: true });
 
 				sim.unlock(m, read);
-			});
+			};
+			defer(2000, check);
+		}
 
 		log('notice', sprintf('modem %s: card changed (%s) — re-reading the SIM', ref, why ?? '?'));
 		return true;

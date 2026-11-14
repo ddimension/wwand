@@ -162,6 +162,140 @@ function watch_card_ready(modem, uim, on_ready)
 	};
 };
 
+// The QMI card status is the LOCAL slot's card. When a remote SIM is presented
+// over UIM Remote, the modem's AT side is the only view of the card actually
+// used for registration: QMI keeps saying READY / PIN1-disabled (the local
+// card, down to its ICCID and IMSI) while AT says "SIM PIN" for the remote
+// card. Seen on an RG502Q + Pixel SAP, 2026-11-05. The phone's own unlock does
+// not transfer to the modem; the remote card's PIN is enabled and is the
+// configured PIN. The card verifies it — a wrong value is rejected with
+// CME 16 — so never guess: no configured PIN, no attempt.
+//
+// The AT card state only becomes SIM PIN after the remote card has been offered
+// and the modem has started its UIM session (~20 s), long after the QMI unlock
+// returned. Poll a bounded window and enter the configured PIN once. CME 16
+// stops the watch (the configured PIN is wrong); busy/failure errors are
+// retried — they mean the VERIFY never reached the card.
+function at_cpin_state(lines)
+{
+	for (let l in (lines ?? [])) {
+		let m = match(trim(l), /^\+CPIN:\s*(.+)$/);
+
+		if (m)
+			return m[1];
+	}
+
+	return null;
+}
+
+// A remote reader (wwand-rsim) is configured for this modem. Its card is
+// presented over UIM Remote, and QMI UIM is not that card's view: with a
+// remote session active QMI reports the LOCAL slot (its pin1/ICCID/IMSI are
+// the local card's) or a half-bound remote app, while the AT layer is the
+// remote card (the QMI-local / AT-remote split, bench 2026-11-05). The PIN
+// for such a card must go through the bounded AT watchdog, not QMI VERIFY —
+// which races the remote session and ends in an unlock_not_confirmed loop.
+function remote_reader(modem)
+{
+	let r = modem.config?.ext?.rsim_reader;
+
+	return (type(r) == 'string') && length(r);
+}
+
+function arm_pin_watch(modem)
+{
+	if (!modem.at)
+		return;
+
+	let pin = effective_pincode(modem);
+
+	// no configured PIN: never guess one. The card's retry counter is the
+	// one thing this path must not spend.
+	if (!pin)
+		return;
+
+	let gen = modem._gen ?? 0;
+	let token = {};
+	let delay = modem.timing?.pin_poll ?? 5000;
+	let left = modem.timing?.pin_tries ?? 24;
+
+	modem._pin_watch = token;
+
+	let step;
+
+	step = () => {
+		if (modem._pin_watch !== token || (modem._gen ?? 0) != gen || !modem.at)
+			return;
+
+		if (left-- <= 0)
+			return;
+
+		modem.at.send('AT+CPIN?', (err, r) => {
+			if (modem._pin_watch !== token || (modem._gen ?? 0) != gen)
+				return;
+
+			if (err || at_cpin_state(r?.lines) != 'SIM PIN') {
+				uloop.timer(delay, step);
+				return;
+			}
+
+			modem.at.send(sprintf('AT+CPIN="%s"', pin), (nerr) => {
+				if (modem._pin_watch !== token || (modem._gen ?? 0) != gen)
+					return;
+
+				if (nerr) {
+					if (nerr.code == 16 || nerr.detail?.code == 16) {
+						modem.sim_note = 'SIM PIN entry rejected — check the configured pincode';
+						modem.sim_note_for = modem.info?.iccid ?? null;
+						modem._pin_watch = null;
+						return;
+					}
+
+					uloop.timer(delay, step);
+					return;
+				}
+
+				// wait for the AT card state to leave SIM PIN, then refresh
+				// the identity: QMI's is the local card's and must not stay
+				// in status/profile matching once the remote card answers
+				let tries = 0;
+				let poll;
+
+				poll = () => {
+					if (modem._pin_watch !== token || (modem._gen ?? 0) != gen)
+						return;
+
+					modem.at.send('AT+CPIN?', (perr, pr) => {
+						if (modem._pin_watch !== token || (modem._gen ?? 0) != gen)
+							return;
+
+						if (!perr && at_cpin_state(pr?.lines) != 'SIM PIN') {
+							modem.sim_note = 'entered the configured SIM PIN (remote card)';
+							modem.sim_note_for = modem.info?.iccid ?? null;
+							modem._pin_watch = null;
+
+							if (type(modem.reapply_sim) == 'function')
+								modem.reapply_sim();
+							return;
+						}
+
+						if (++tries >= 12) {
+							uloop.timer(delay, step);
+							return;
+						}
+
+						uloop.timer(500, poll);
+					});
+				};
+
+				poll();
+			}, { timeout: 5000 });
+		}, { timeout: 3000 });
+	};
+
+	uloop.timer(delay, step);
+}
+
 function unlock_uim(modem, cb, tries)
 {
 	let uim = modem.uim;
@@ -195,6 +329,13 @@ function unlock_uim(modem, cb, tries)
 			// know we cannot read.
 			modem._no_card = true;
 
+			// A remote card can still arrive: the reader session comes up
+			// after the modem did (a warm switch to a remote SIM, bench
+			// 2026-11-05). QMI will never see it here — arm the AT watch so
+			// the PIN is entered once the card presents itself over AT.
+			if (remote_reader(modem))
+				arm_pin_watch(modem);
+
 			// "no application" is not the same as "no card". A card that is
 			// physically there but never answers sits in CARD_STATE_ERROR with
 			// an error code that says why — `no ATR received` is what a SIM
@@ -221,6 +362,8 @@ function unlock_uim(modem, cb, tries)
 
 		switch (app.state) {
 		case uimmod.APP_STATE_READY:
+			arm_pin_watch(modem);
+
 			return cb(null, {
 				status: 'ready',
 				pin1_state: app.pin1_state,
@@ -250,6 +393,22 @@ function unlock_uim(modem, cb, tries)
 
 			if (!pincode)
 				return cb({ blocked: true, reason: 'pin_required_no_pin' });
+
+			// A remote card's PIN is entered over AT, not QMI VERIFY: QMI
+			// races the remote session (unlock_not_confirmed, then a reset
+			// loop, bench 2026-11-05) while the cold-boot path proves the
+			// AT watchdog unlocks the card in place. Proceed exactly as the
+			// READY case does — reapply_sim() re-reads the identity once
+			// the PIN takes.
+			if (remote_reader(modem)) {
+				arm_pin_watch(modem);
+
+				return cb(null, {
+					status: 'ready',
+					pin1_state: app.pin1_state,
+					pin1_retries: app.pin1_retries,
+				});
+			}
 
 			// best-effort: get card status change indications for readiness.
 			// The FULL mask, not just card status — modem.uc arms the same set
@@ -365,6 +524,8 @@ function unlock_uim(modem, cb, tries)
 					() => unlock_uim(modem, cb, (tries ?? 0) + 1));
 				return;
 			}
+
+			arm_pin_watch(modem);
 
 			return cb(null, {
 				status: 'ready',
