@@ -42,42 +42,55 @@ export function clean_cell_metrics(cells)
 	return cells;
 };
 
-// serving_still_current(serving, cells): does a carried-over `serving` object
-// (from an AT +QENG read) still describe the serving cell that `cells` (from a
-// NAS/passthrough/native cell-location read) reports? Compares the LTE EARFCN,
-// then the NR ARFCN; if neither side carries a comparable identity, keep it
-// (conservative). A handover between the two reads makes them disagree.
-function serving_still_current(serving, cells)
-{
-	let le = serving.lte?.earfcn, nle = cells?.lte_intra?.earfcn;
-	if (le != null && nle != null)
-		return le == nle;
-
-	let ne = serving.nr?.arfcn, nne = cells?.nr5g_arfcn;
-	if (ne != null && nne != null)
-		return ne == nne;
-
-	return true;
-};
-
 // preserve_serving(newc, oldc): carry the AT-`+QENG`-derived `serving` (which
 // alone carries LTE/NR `band` + `bandwidth_mhz`) forward across a cells refresh
 // that came from a band-less transport (NAS / MBIM passthrough / native MBIM).
-// Only fills when the new object lacks `serving` (gap) AND the old serving still
-// describes the current serving cell (identity guard) — a handover drops the
-// stale band instead of mislabelling it. Without this, `serving.band` is only
-// re-read on the slow loop, so band flickers out during 1 s LuCI polling on
-// backends whose fast loop refreshes cells but not the serving detail (MBIM).
-// Returns newc. Mirrors the existing `cells.ca` carry-over.
+// Only when the new object lacks `serving` (gap). Without this, `serving.band`
+// is only re-read on the slow loop, so band flickers out during 1 s LuCI
+// polling on backends whose fast loop refreshes cells but not the serving
+// detail (MBIM). Returns newc. Mirrors the existing `cells.ca` carry-over.
+//
+// Each leg is checked on its own against the new read: serving.lte against
+// lte_intra.earfcn, serving.nr against nr5g_arfcn. A leg is carried only while
+// the new read still has that RAT on the same channel (a leg without a channel
+// of its own is kept while the RAT is there), so a handover drops the stale
+// band instead of mislabelling it, and a leg the modem left is dropped with it.
+// Checking the whole object against whichever channel matched first carried an
+// LTE cell into SA: after an NSA -> SA switch the NR channel was unchanged, the
+// new read had no LTE at all, and the LTE leg of the earlier read stayed
+// (evidence: ddimension/wwand#75, 2026-11-13). A read with neither identity
+// cannot judge either leg and keeps the object as it was (conservative).
 export function preserve_serving(newc, oldc)
 {
-	if (newc == null || oldc?.serving == null)
+	let os = oldc?.serving;
+
+	if (newc == null || os == null || newc.serving != null)
 		return newc;
 
-	return merge.fill(newc, oldc, {
-		gap:   [ 'serving' ],
-		guard: (dst, src) => serving_still_current(src.serving, dst),
-	});
+	let le = newc.lte_intra?.earfcn, ne = newc.nr5g_arfcn;
+
+	if (le == null && ne == null) {
+		newc.serving = os;
+		return newc;
+	}
+
+	let lte = (os.lte != null && le != null && (os.lte.earfcn == null || os.lte.earfcn == le));
+	let nr  = (os.nr != null && ne != null && (os.nr.arfcn == null || os.nr.arfcn == ne));
+
+	if (!lte && !nr)
+		return newc;
+
+	// the rest of a QENG serving (its connection `state`) belongs to the read
+	// and goes with whichever leg is carried
+	let s = {};
+
+	for (let k, v in os)
+		if ((k != 'lte' || lte) && (k != 'nr' || nr))
+			s[k] = v;
+
+	newc.serving = s;
+
+	return newc;
 };
 
 // 'B3' / 'n78' / 78 -> 3 / 78; the bare number is how serving bands are
@@ -148,7 +161,14 @@ export function serving_from_ca(self)
 			{ arfcn: nrp.earfcn, bandwidth_mhz: nrp.bandwidth_mhz, pci: nrp.pci,
 			  band: band_number(nrp.band) }, {
 			src:   'qmi-rf',
-			gap:   [ 'bandwidth_mhz', 'arfcn', 'pci', 'band' ],
+			gap:   [ 'bandwidth_mhz', 'arfcn', 'pci' ],
+			// the band the modem names outranks one already there, which is
+			// either derived from the channel (fill_serving_band) by an
+			// earlier read and carried forward (preserve_serving) — on an
+			// overlapping NR channel a guess, the 48 next to the modem's n78 —
+			// or an AT+QENG band, the modem's word as well but possibly
+			// carried from an earlier read too, where this row is this read's
+			prefer: [ 'band' ],
 			guard: (dst, src) => dst.arfcn == null || src.arfcn == null || dst.arfcn == src.arfcn,
 		});
 	}

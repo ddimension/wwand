@@ -1545,8 +1545,10 @@ export function create(opts)
 
 		emit('serving_system', self.reg);
 
-		if (registered)
+		if (registered) {
 			self._reg_released = false;
+			self._reg_lost = false;
+		}
 
 		if (registered && self.state == 'REGISTERING') {
 			if (reg_timer) { reg_timer.cancel(); reg_timer = null; }
@@ -1592,6 +1594,15 @@ export function create(opts)
 				return;
 			}
 
+			// ONCE per loss, too: the state turns REGISTERING only in
+			// do_register, after the preferred-list reads, and each register
+			// report until then landed here again. A band/RAT change sent
+			// about 120 of them, each logged and each starting another
+			// registration (evidence: ddimension/wwand#75, 2026-11-13).
+			if (self._reg_lost)
+				return;
+
+			self._reg_lost = true;
 			log('warn', 'registration lost');
 			emit('deregistered', self.reg);
 			notify_contexts('suspend', self.reg);
@@ -1972,6 +1983,7 @@ export function create(opts)
 		// QMI-over-MBIM passthrough NAS / AT+CPOL. Best-effort, never blocks.
 		sim.log_preradio(self, log, () => sim.restore_preferred_plmn(self, log, () => {
 			self.set_state('REGISTERING');
+			self._reg_lost = false;
 			self._install_indications();
 
 			// ...and TELL THE MODEM, which is the half that was missing. The

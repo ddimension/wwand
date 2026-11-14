@@ -116,6 +116,22 @@ state buried at the top invites reading a months-old entry as present tense.
   band 48 next to the row's n78, because `fill_serving_band` derived the band
   from NR-ARFCN 642048, which n48 shares with n77/n78. `serving_from_ca`
   now copies the band the modem named. Host-tested; still no 5G here.
+  **Two more from the reporter's NSA/SA data (2026-11-14):** after an
+  NSA -> SA switch `serving` still showed an LTE cell and band 48.
+  `preserve_serving` judged the carried object by whichever channel matched
+  first; the NR channel had not changed, so the LTE leg came along. It now
+  checks each leg against the new read and drops one the read lacks, and the
+  band the modem names replaces a carried-forward derived one. In NSA the
+  T99W175 lists only LTE in RF band info, so the NR band there is still
+  derived from the channel (48 for n78) and stays open. MBIM: one register
+  report while registration was lost logged "registration lost" and started
+  a registration each, until the state reached REGISTERING after the
+  preferred-list reads; a band/RAT change gave ~120. Now once per loss.
+  HW-run on the EG06 (MBIM, LTE3301-Plus): the tree before the fix logged
+  399 of them on the hwtest band change, its re-attach timed out, and the
+  MBIM error limit rebooted the box, twice; with the fix three changes and a
+  re-attach gave 4 lines and all checks passed. Stable v1.8.0 has the same
+  code. The serving fix is host-tested only (no 5G here).
   luci-app-wwand: Modem Tools says when `option modes` will undo a radio
   technology change at the next modem start (the reporter's "LTE gone after
   a power cycle" was `modes 'nr5g'` re-applied).

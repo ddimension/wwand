@@ -1306,6 +1306,28 @@ newc = { serving: { lte: { band: 3 } }, lte_intra: { earfcn: 6300 } };
 mc.preserve_serving(newc, oldc);
 eq(newc.serving.lte.band, 3, 'preserve_serving: existing serving not overwritten');
 
+// each leg on its own: NSA -> SA on an unchanged NR channel. The new read
+// has no LTE, so the LTE leg goes; the NR leg stays (ddimension/wwand#75)
+let old_nsa = { serving: { lte: { earfcn: 6400, band: 20 }, nr: { arfcn: 642048, band: 78 } } };
+newc = { nr5g_arfcn: 642048, nr5g_cell: { pci: 650 } };
+mc.preserve_serving(newc, old_nsa);
+eq(newc.serving, { nr: { arfcn: 642048, band: 78 } }, 'preserve_serving: an LTE leg the new read lacks is dropped');
+
+// SA -> NSA: the NR leg is still on its channel, the LTE leg is new
+newc = { lte_intra: { earfcn: 1750 }, nr5g_arfcn: 642048 };
+mc.preserve_serving(newc, old_nsa);
+eq(newc.serving, { nr: { arfcn: 642048, band: 78 } }, 'preserve_serving: an LTE leg on another channel is dropped, NR kept');
+
+// the NR leg left (EN-DC released): LTE kept, NR dropped
+newc = { lte_intra: { earfcn: 6400 } };
+mc.preserve_serving(newc, old_nsa);
+eq(newc.serving, { lte: { earfcn: 6400, band: 20 } }, 'preserve_serving: an NR leg the new read lacks is dropped');
+
+// QENG's connection state rides along with a carried leg
+newc = { lte_intra: { earfcn: 6300 } };
+mc.preserve_serving(newc, { serving: { state: 'NOCONN', lte: { earfcn: 6300, band: 20 } } });
+eq(newc.serving, { state: 'NOCONN', lte: { earfcn: 6300, band: 20 } }, 'preserve_serving: the read\'s state is carried with a leg');
+
 // null guards
 ok(mc.preserve_serving(null, oldc) == null, 'preserve_serving: null new cells -> null');
 newc = { lte_intra: { earfcn: 6300 } };
@@ -1390,6 +1412,16 @@ mc.serving_from_ca(sca);
 mc.fill_serving_band(sca);
 eq([ sca.cells.serving.nr.arfcn, sca.cells.serving.nr.pci, sca.cells.serving.nr.band ], [ 642048, 650, 78 ],
 	'serving_from_ca: a numeric band survives, and a row without bandwidth still seeds serving.nr');
+
+// a band derived by an earlier read and carried forward is a guess: the
+// band the modem names replaces it (ddimension/wwand#75, NSA -> SA)
+sca = { cells: {
+	nr5g_arfcn: 642048,
+	serving: { nr: { arfcn: 642048, band: 48, dl_freq_mhz: 3630.72 } },
+	ca: [ { rat: 'nr', role: 'PCC', earfcn: 642048, pci: 650, band: 'n78', bandwidth_mhz: 100 } ] } };
+mc.serving_from_ca(sca);
+eq([ sca.cells.serving.nr.band, sca.cells.serving.nr.bandwidth_mhz ], [ 78, 100 ],
+	'serving_from_ca: the modem\'s NR band replaces a carried-forward derived one');
 
 // ...but not across a channel mismatch (a handover between the two reads)
 sca = { cells: {

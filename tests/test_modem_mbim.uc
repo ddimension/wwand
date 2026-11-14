@@ -1892,6 +1892,57 @@ function assert_mbim_hold_at_init() {
 
 assert_mbim_hold_at_init();
 
+// a burst of register reports while registration is lost: one loss, one
+// registration. The state turns REGISTERING only once the radio-state query
+// and the preferred-list reads have answered, and a band/RAT change sends
+// many reports before that (ddimension/wwand#75).
+function assert_mbim_loss_burst() {
+	uloop.init();
+
+	let st = { on: true };
+	let mock = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: radio_modem_handlers(st) });
+	let events = [], seen = {};
+	let m = mk_radio_modem('m_burst', mock, events);
+
+	m.start();
+
+	uloop.timer(150, () => {
+		seen.ready = m.state;
+		seen.queries = length(filter(mock.calls, (c) => c.name == 'RADIO_STATE' && c.kind == 'query'));
+		st.on = false;
+		for (let i = 0; i < 5; i++)
+			reg_ind(mock, false);
+	});
+
+	uloop.timer(300, () => {
+		seen.lost = length(filter(events, (e) => e == 'deregistered'));
+		seen.requery = length(filter(mock.calls, (c) => c.name == 'RADIO_STATE' && c.kind == 'query')) - seen.queries;
+		st.on = true;
+		reg_ind(mock, true);
+	});
+
+	uloop.timer(450, () => {
+		seen.final = m.state;
+		st.on = false;
+		reg_ind(mock, false);
+	});
+
+	uloop.timer(600, () => {
+		seen.lost2 = length(filter(events, (e) => e == 'deregistered'));
+		m.stop();
+		uloop.timer(20, () => uloop.end());
+	});
+	uloop.run();
+
+	eq(seen.ready, 'READY', 'mbim loss burst: READY before the loss');
+	eq(seen.lost, 1, 'mbim loss burst: five reports are one loss');
+	eq(seen.requery, 1, 'mbim loss burst: ...and start one registration');
+	eq(seen.final, 'READY', 'mbim loss burst: READY again once registered');
+	eq(seen.lost2, 2, 'mbim loss burst: the next loss is reported again');
+}
+
+assert_mbim_loss_burst();
+
 // the park of a running modem: a lost registration is its consequence, the
 // wake's registration is reported
 function assert_mbim_park_while_ready() {
