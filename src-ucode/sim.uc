@@ -302,52 +302,32 @@ function unlock_uim(modem, cb, tries)
 
 		let found = find_app(data.card_status);
 
-		// bench patch 2026-11-15 (reader-card PIN entry): a reader card never
-		// appears in the modem's UIM slots (HW-proven RG502QEA). With a
-		// configured pincode, synthesize the PIN-required application state
-		// HERE — before the not-found handling — so the guarded VERIFY_PIN
-		// flow below runs against the modem's active (remote) card session.
-		// HW-proven necessary: the modem's own blind VERIFYs never succeed
-		// and its AT layer cannot see the card (RG502QEA-AA).
-		if (!found && modem.reader_card && pincode != null && length(pincode)) {
+		// bench patch 2026-11-15 (v2): a card served by a reader session never
+		// appears in the modem's own UIM slots (HW-proven RG502QEA). Two cases:
+		//
+		// NO pincode configured (PIN-less card, or already verified):
+		// synthesize the unlocked status so the init chain continues to the
+		// identity read — read_identity's reader fallback supplies imsi/iccid.
+		//
+		// A pincode IS configured (a PIN-carrying reader card): DO NOT synth
+		// anything — let the no_sim/card_error error flow through to the
+		// caller, where the #80 AT PIN watch (a25bb87) diverts PIN entry to
+		// AT+CPIN. The modem verifies the PIN through its own internal SIM
+		// manager path (NOT through the QMI APDU channel that the SAP server
+		// intercepts with synthetic 63C3 responses — HW-proven on both the
+		// AA/R11 and AC/R13 modems). After the AT verification, retry_sim()
+		// fires and the no-pincode synth path above takes over.
+		if (!found && modem.reader_card && (pincode == null || !length(pincode))) {
 			modem._no_card = true;
-			found = { card: { upin_retries: null }, app: {
-				state: uimmod.APP_STATE_PIN1_OR_UPIN_PIN_REQUIRED,
-				pin1_state: 2,
-				pin1_retries: 3,
-				upin_replaces_pin1: false,
-			}};
+
+			return cb(null, {
+				status: 'ok (remote reader card)',
+				pin1_state: 3,
+				pin1_retries: null,
+			});
 		}
 
 		if (!found) {
-			// bench patch (2026-11-14, router→router lending): a card served
-			// by a plugin reader session (wwand-rsim) never appears in the
-			// modem's own UIM slots — `wwandctl slots` shows the active
-			// remote slot as absent while its APDU session runs (HW-proven on
-			// RG502QEA, 2026-11-14). Polling the slots for it cannot succeed;
-			// the reader carries the identity instead (modem.reader_card,
-			// published by the plugin's info event). Synthesize an unlocked,
-			// PIN-less status so the init chain continues to identity read —
-			// read_identity's reader fallback supplies imsi/iccid.
-			if (modem.reader_card) {
-				modem._no_card = true;
-
-				// bench patch (2026-11-14→15, router→router lending): a card
-				// served by a plugin reader session never appears in the
-				// modem's own UIM slots — `wwandctl slots` shows the active
-				// remote slot as absent while its APDU session runs
-				// (HW-proven on RG502QEA). Polling the slots for it cannot
-				// succeed; the reader carries the identity instead
-				// (modem.reader_card, published by the plugin's info event or
-				// power-up marker). No pincode configured: the card is
-				// PIN-less or already verified — proceed unlocked.
-				return cb(null, {
-					status: 'ok (remote reader card)',
-					pin1_state: 3,
-					pin1_retries: null,
-				});
-			}
-
 			if ((tries ?? 0) < CARD_POLL_TRIES) {
 				poll_again(modem, modem._gen ?? 0,
 					() => unlock_uim(modem, cb, (tries ?? 0) + 1));
