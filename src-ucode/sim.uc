@@ -302,24 +302,16 @@ function unlock_uim(modem, cb, tries)
 
 		let found = find_app(data.card_status);
 
-		// bench patch 2026-11-15 (v2): a card served by a reader session never
-		// appears in the modem's own UIM slots (HW-proven RG502QEA). Two cases:
-		//
-		// NO pincode configured (PIN-less card, or already verified):
-		// synthesize the unlocked status so the init chain continues to the
-		// identity read — read_identity's reader fallback supplies imsi/iccid.
-		//
-		// A pincode IS configured (a PIN-carrying reader card): DO NOT synth
-		// anything — let the no_sim/card_error error flow through to the
-		// caller, where the #80 AT PIN watch (a25bb87) diverts PIN entry to
-		// AT+CPIN. The modem verifies the PIN through its own internal SIM
-		// manager path (NOT through the QMI APDU channel that the SAP server
-		// intercepts with synthetic 63C3 responses — HW-proven on both the
-		// AA/R11 and AC/R13 modems). After the AT verification, retry_sim()
-		// fires and the no-pincode synth path above takes over.
-		if (!found && modem.reader_card && (pincode == null || !length(pincode))) {
+		// bench patch 2026-11-15 (v0 restore): a card served by a reader
+		// session never appears in the modem's UIM slots. Synthesize the
+		// unlocked status unconditionally — the modem's own SIM manager
+		// handles the card (including any PIN through its internal path).
+		// This is the code that produced "+CPIN: READY" on the donor's
+		// AT layer (HW-proven earlier today). Configuring `pincode` at
+		// the daemon level (v1/v2 approaches) routed the PIN through
+		// QMI UIM VERIFY_PIN which the SAP server intercepts.
+		if (!found && modem.reader_card) {
 			modem._no_card = true;
-
 			return cb(null, {
 				status: 'ok (remote reader card)',
 				pin1_state: 3,
