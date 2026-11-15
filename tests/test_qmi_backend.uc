@@ -448,6 +448,14 @@ let cs = tlvmod.unpack(W.GET_CURRENT_SETTINGS.resp,
 	tlv(0x22, u8(1)) + tlv(0x23, u8(2) + u32(0x0A010203) + u32(0xC0A80001)));
 eq([ cs.pcscf_pco, cs.pcscf ], [ 1, [ '10.1.2.3', '192.168.0.1' ] ],
 	'wds: current settings decode the P-CSCF list (LE u32, first octet in the MSB)');
+// "PCSCF IPv6 Address List" 0x2E (Qualcomm IDL, not libqmi): u8 count +
+// 16-byte addresses in network order
+let cs6 = tlvmod.unpack(W.GET_CURRENT_SETTINGS.resp,
+	tlv(0x2E, u8(2) + '\x20\x01\x0d\xb8' + '\0\0\0\0\0\0\0\0\0\0\0\x05' +
+	          '\x20\x01\x0d\xb8\0\x01' + '\0\0\0\0\0\0\0\0\0\x06'));
+eq(length(cs6.pcscf6), 2, 'wds: current settings decode the IPv6 P-CSCF list 0x2E');
+eq(cs6.pcscf6, [ '2001:db8:0:0:0:0:0:5', '2001:db8:1:0:0:0:0:6' ],
+	'wds: IPv6 P-CSCF addresses in network order');
 eq(wdsmod.REQ_SETTINGS_PCSCF, 0xC00, 'wds: P-CSCF requested-settings bits 10 and 11');
 
 // Vendor "get delegated IPv6 prefix" 0x00AC (wds.uc GET_DELEGATED_PREFIX): the

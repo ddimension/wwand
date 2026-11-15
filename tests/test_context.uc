@@ -708,6 +708,22 @@ scenario('flags-ims', {
 	});
 });
 
+// an IPv6 IMS PDN: the IPv6 list 0x2E, together with an IPv4 list if any
+scenario('flags-ims-v6', {
+	config: { apn: 'ims', pdp_type: 'ipv6', ims: true },
+	handlers: {
+		GET_CURRENT_SETTINGS: { ...V6_SETTINGS, pcscf_pco: 1,
+			pcscf6: [ '2001:db8:0:0:0:0:0:5', '2001:db8:0:0:0:0:0:6' ] },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'ims-v6: connects');
+		eq(settings.ipv6.pcscf, [ '2001:db8:0:0:0:0:0:5', '2001:db8:0:0:0:0:0:6' ],
+			'ims-v6: IPv6 P-CSCF addresses in the settings');
+		next();
+	});
+});
+
 // without `ims` nothing of it is asked for, and a stray list is not reported
 scenario('flags-no-ims', {
 	config: { apn: 'web', pdp_type: 'ipv4' },

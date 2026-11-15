@@ -43,7 +43,9 @@ export const REQ_SETTINGS_DEFAULT =
 
 // added for an IMS PDN (interface option `ims`): QMI_WDS_REQUESTED_SETTINGS_
 // PCSCF_ADDRESS (1 << 10) and _PCSCF_SERVER_ADDRESS_LIST (1 << 11)
-// (qmi-enums-wds.h:1443-1444, libqmi 1.38)
+// (qmi-enums-wds.h:1443-1444, libqmi 1.38). Bit 11 brings both lists, IPv4
+// 0x23 and IPv6 0x2E; there is no separate IPv6 bit (Qualcomm's 1 << 17 is
+// Technology Name).
 export const REQ_SETTINGS_PCSCF = (1 << 10) | (1 << 11);
 
 const PROFILE_ID = { t: 0x01, f: { type: 'u8', index: 'u8' } };
@@ -317,9 +319,18 @@ export default {
 				ip_family:    { t: 0x2B, f: 'u8' },
 				// "PCSCF Address Using PCO" 0x22 (guint8) and "PCSCF Server
 				// Address List" 0x23: a guint8-counted array of little-endian
-				// guint32 IPv4 addresses (libqmi 1.38). libqmi has no IPv6 list.
+				// guint32 IPv4 addresses (libqmi 1.38).
 				pcscf_pco:    { t: 0x22, f: 'u8' },
 				pcscf:        { t: 0x23, f: { n: 'u8', of: 'ipv4' } },
+				// "PCSCF IPv6 Address List" 0x2E: a guint8-counted array of
+				// 16-byte IPv6 addresses in network order, sent for the same
+				// request bit 11. NOT in libqmi 1.38: from the Qualcomm IDL
+				// (wds_get_runtime_settings_resp_msg_v01,
+				// pcscf_ipv6_server_addr_list, max 20) as shipped in the
+				// OnePlus 8T's /vendor/lib64/libqmiservices.so (OOS 14,
+				// decoded 2026-11-15), and Qualcomm's dsi_netctrl reads its
+				// IPv6 P-CSCF from it with that bit.
+				pcscf6:       { t: 0x2E, f: { n: 'u8', of: 'ipv6' } },
 			},
 		},
 

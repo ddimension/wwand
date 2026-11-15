@@ -995,9 +995,17 @@ export function create(opts)
 			if (err)
 				return done({ stage: 'settings', err: err });
 
-			// IMS PDN: the P-CSCF addresses from the PCO (IPv4 only in QMI)
-			let pcscf = (self.config.ims && type(data.pcscf) == 'array' && length(data.pcscf))
-				? data.pcscf : null;
+			// IMS PDN: the P-CSCF addresses from the PCO, IPv4 (0x23) and
+			// IPv6 (0x2E) lists, whichever the network sent
+			let pcscf = null;
+			if (self.config.ims) {
+				pcscf = [];
+				for (let l in [ data.pcscf, data.pcscf6 ])
+					if (type(l) == 'array')
+						push(pcscf, ...l);
+				if (!length(pcscf))
+					pcscf = null;
+			}
 
 			if (family == 4) {
 				// always /32 point-to-point (old behavior) unless the pushed
