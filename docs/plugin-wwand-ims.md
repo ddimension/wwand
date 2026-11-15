@@ -47,14 +47,42 @@ Two ways to carry a call, chosen per modem by `wwand_ims.ims_modem.backend`:
     drops the AT value (HW-measured with a NAS/RRC trace, 2026-11-15). There,
     `ims check` can say "on" while the network still sees them off.
   - **A patched carrier MBN** (`wwandctl ims mbn patch --base FILE --upload`) —
-    the persistent way, and the only one where the AT knob is missing. Reading
-    the active MBN back from the modem does not work over USB at present, so
-    the base MBN has to be extracted from the modem's firmware package, patched
-    and uploaded.
+    the persistent way, and the only one where the AT knob is missing. The
+    base MBN comes from the modem's firmware image, see "Getting the base
+    MBN" below.
 
   The carrier config follows the SIM: another SIM (or a remote SIM over
   wwand-rsim) can make the modem select another MBN, without the FGIs. Run
   `wwandctl ims check` after every SIM change.
+
+  **Getting the base MBN.** Downloading a stored config from the modem (QMI
+  PDC "Get Config") is buggy on USB modems: the modem sends 4096-byte frames
+  in 4133-byte messages, and the kernel's `qmi_wwan` control channel
+  (cdc-wdm) takes 4096, so every frame arrives cut. `mbn patch` without
+  `--base` therefore fails there. The same request works where the control
+  channel is not USB (measured over QRTR on a phone and on the RG650E's own
+  Linux side). Take the base from the firmware instead:
+  - **From the firmware package.** The modem image (`NON-HLOS.bin`, a FAT
+    image) carries every carrier config as
+    `image/modem_pr/mcfg/configs/mcfg_sw/generic/<region>/<operator>/…/mcfg_sw.mbn`:
+    `7z x NON-HLOS.bin 'image/modem_pr/mcfg/configs/mcfg_sw/*'`.
+  - **From a module with adb** (Linux on the module, e.g. RG650E): the same
+    tree is mounted at `/firmware/image/modem_pr/mcfg/`; `adb pull` the file.
+    Configs that were uploaded later are kept zlib-compressed under
+    `/data/persist/rfs/mdm/mpss/mcfg_sw<hash>`. They are not in the modem EFS,
+    so the DIAG/EFS route does not reach them.
+  - **Which file is which:** `wwandctl ims mbn patch --base FILE` prints the
+    name and item count; `wwandctl ims mbn list` shows the names the modem
+    holds. Tools to look into an MBN, or to compare several:
+    [sbaresearch/mbn-mcfg-tools](https://github.com/sbaresearch/mbn-mcfg-tools)
+    (Python; its `FORMAT.md` documents the container),
+    [Biktorgj/mcfg_tools](https://github.com/Biktorgj/mcfg_tools) (C,
+    unpack/pack) and
+    [fenrir-naru/mbn_utils](https://github.com/fenrir-naru/mbn_utils) (Ruby,
+    items as text). For modem-side access:
+    [bkerler/edl](https://github.com/bkerler/edl) (DIAG and EDL; packaged in
+    the [ddimension feed](https://github.com/ddimension/openwrt-repo) as
+    `python3-edlclient`, next to `qfirehose`).
 - **wwand + a control backend** (`wwand-qmi`), with a `wwand_io.so` that has
   the `xfrm` sub-namespace (wwand ≥ the NETLINK_XFRM merge).
 - **Kernel IPsec** — for backend `ue` only. The SAs go in over NETLINK_XFRM, so
@@ -78,7 +106,7 @@ Two ways to carry a call, chosen per modem by `wwand_ims.ims_modem.backend`:
 # 1. the modem side (FGI on, modem's own IMS off; resets the modem if needed)
 wwandctl ims fix
 #    RG650E: the AT value never reaches the radio (see Prerequisites) —
-wwandctl ims mbn patch --base FILE --upload   # FILE: the MBN from the firmware package
+wwandctl ims mbn patch --base FILE --upload   # FILE: the MBN from the firmware image
 
 # 2. are we ready?  (modem + an IMS PDN interface)
 wwandctl ims check
