@@ -136,6 +136,7 @@ hook into the daemon through a neutral plugin interface (`plugins.uc`, see
 | `rsim-card` / `rsim-card-pcsc` | the card-side helper alone, for a **SIM host** — a PC or a second router holding the reader, reached over SSH (restricted to `rsim-card --serve`); `-pcsc` adds PC/SC readers through pcscd. Needs nothing of wwand |
 | [`wwand-ipa`](https://github.com/ddimension/wwand-ipa) + `wwand-ipad` | SGP.32 IoT Profile Assistant: eSIM fleet management through an eIM (`DEPENDS wwand-esim`) + `luci-app-wwand-ipa` |
 | [`wwand-qlog`](https://github.com/ddimension/wwand-qlog) | `wwandctl qlog`: Quectel QLog diagnostic capture on the port wwand found |
+| [`wwand-ims`](https://github.com/ddimension/wwand-ims) | VoLTE / IMS for a LAN SIP phone or a PBX trunk: the router is its own IMS UE over the modem's IMS PDN (IMS-AKA, sec-agree ESP via the `wwand_io` xfrm binding), or the modem's own IMS over QMI; `wwandctl ims` + sipd (`DEPENDS wwand-qmi kmod-ipsec…`, see [docs/plugin-wwand-ims.md](docs/plugin-wwand-ims.md)) |
 
 ## Quick start
 
