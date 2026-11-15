@@ -37,8 +37,24 @@ Two ways to carry a call, chosen per modem by `wwand_ims.ims_modem.backend`:
 - **Modem** with an IMS PDN and USIM APDU access (QMI UIM, MBIM UICC, or AT).
   On a Quectel data module VoLTE needs **LTE FGI bits 3 and 7** on and the
   **modem's own IMS off** — `wwandctl ims fix` does both (FGI via
-  `AT+QNWCFG="lte_fgi_fdd"`, or via a patched carrier MBN where the AT knob is
-  absent — the RG650E, see `wwandctl ims mbn`).
+  `AT+QNWCFG="lte_fgi_fdd"`, or via a patched carrier MBN, see below).
+  Two ways to set the FGIs, check with `wwandctl ims check` (it prints
+  `missing 3, 7` when they are off):
+  - **`wwandctl ims fix`** — on a Quectel module whose firmware answers
+    `AT+QNWCFG="lte_fgi_fdd"`. **Not on the RG650E:** the command is accepted
+    and reads back with 3 and 7, but the UE capability sent over the air keeps
+    the MBN's FGIs (airplane cycle), and a modem reset reloads the MBN and
+    drops the AT value (HW-measured with a NAS/RRC trace, 2026-11-15). There,
+    `ims check` can say "on" while the network still sees them off.
+  - **A patched carrier MBN** (`wwandctl ims mbn patch --base FILE --upload`) —
+    the persistent way, and the only one where the AT knob is missing. Reading
+    the active MBN back from the modem does not work over USB at present, so
+    the base MBN has to be extracted from the modem's firmware package, patched
+    and uploaded.
+
+  The carrier config follows the SIM: another SIM (or a remote SIM over
+  wwand-rsim) can make the modem select another MBN, without the FGIs. Run
+  `wwandctl ims check` after every SIM change.
 - **wwand + a control backend** (`wwand-qmi`), with a `wwand_io.so` that has
   the `xfrm` sub-namespace (wwand ≥ the NETLINK_XFRM merge).
 - **Kernel IPsec** — for backend `ue` only. The SAs go in over NETLINK_XFRM, so
@@ -61,8 +77,8 @@ Two ways to carry a call, chosen per modem by `wwand_ims.ims_modem.backend`:
 ```sh
 # 1. the modem side (FGI on, modem's own IMS off; resets the modem if needed)
 wwandctl ims fix
-#    RG650E only: the FGI knob is in the carrier MBN, not AT —
-wwandctl ims mbn patch --upload          # builds + loads a patched MBN
+#    RG650E: the AT value never reaches the radio (see Prerequisites) —
+wwandctl ims mbn patch --base FILE --upload   # FILE: the MBN from the firmware package
 
 # 2. are we ready?  (modem + an IMS PDN interface)
 wwandctl ims check
@@ -158,6 +174,8 @@ ubus call wwand modem_plugin '{"modem":"wwmodem0","plugin":"ims","op":"status"}'
 | IMS PDN won't come up: *interface in use, config matches an existing call (internal 241)* | the modem's own IMS holds the IMS profile — `wwandctl ims fix` (`QCFG ims` → 2 = off) + reset. |
 | `xfrm: spi missing or reserved, sa out spi 0` | the P-CSCF returned a degenerate Security-Server (`spi-c=1; spi-s=0`) after an unclean de-register — a `CFUN 0/1` re-attach clears it; next REGISTER gets real SPIs. Always de-REGISTER cleanly (stop sipd) so SAs/policies do not leak. |
 | `no SIP over TCP on port 5064: Address in use` | another UE (a leftover sipd, or `wwandctl ims call`) holds the protected ports — only one UE per IMS PDN. |
+| REGISTER times out (`state: unprotected`) on an **IPv4** IMS PDN, though tcpdump shows the 401 on the IMS interface and on the VRF device | netifd's `<addr> dev <iface> scope link` host route displaces the kernel's `local` route for the /32 in the VRF table, so the reply is not delivered locally (no UDP counter moves). The `25-wwand-ims-l3mdev` hotplug re-adds `local <addr>` on every ifup; check `ip route show table <vrf table>` for it. No `ip_nonlocal_bind` / `udp_l3mdev_accept` sysctl is needed. |
+| Call ends right after the 183 with `503`, `Reason: … ASR: BEARER_RELEASED` or `ASR: INSUFFICIENT_SERVER_RESOURCES` (which one depends on the P-CSCF site) | the voice bearer (QCI 1) could not be set up. Seen with LTE FGI 3 and 7 missing in the UE capability: no dedicated-bearer request reaches the modem at all. Set the FGIs (Prerequisites); typical after a SIM change that switched the carrier MBN. |
 | `IMS UE  down` though sipd runs | the IMS PDN (wwims) is down or re-attaching, so the UE de-registered — check `wwandctl status` for wwims `CONNECTED` and the P-CSCF in `status.contexts.wwims`. |
 
 ## How it works
