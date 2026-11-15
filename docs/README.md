@@ -17,6 +17,7 @@ whether you are a user, a developer, or an AI assistant working on the tree.
 | Add a quirk, option, backend, telemetry, ubus method, board | [extending.md](extending.md) — one checklist per extension type |
 | Write or port a control backend | [backend-interface.md](backend-interface.md) — the duck-typed modem/context contract |
 | Write or port a datapath (mux) backend | [datapath-interface.md](datapath-interface.md) — the datapath contract, how one is chosen, and what each produces on the kernel side |
+| Set up VoLTE / an IMS phone (the wwand-ims plugin) | [plugin-wwand-ims.md](plugin-wwand-ims.md) — prerequisites, setup (`wwandctl ims`), usage, debugging, Asterisk trunk |
 | See the current state, test counts, open items | [STATUS.md](STATUS.md) — what is true NOW |
 | See how it got here (dated log) | [status-archive.md](status-archive.md) — history, not present tense |
 | Avoid a trap that already cost someone a day | [gotchas.md](gotchas.md) — beliefs that look right and are wrong |
