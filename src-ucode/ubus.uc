@@ -432,6 +432,21 @@ export function publish(conn, daemon, log)
 			},
 		},
 
+		// one raw QMI request / MBIM command (daemon.uc modem_qmi_raw /
+		// modem_mbim_raw); the watchdog outlasts the op's own timeout, which
+		// the daemon caps at 120 s
+		modem_qmi_raw: {
+			args: { modem: '', service: 0, message: 0, payload: '', timeout: 0, ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_qmi_raw(req.args.modem, req.args, ok_reply(reply)), 150000),
+		},
+
+		modem_mbim_raw: {
+			args: { modem: '', service: '', cid: 0, type: '', info: '', timeout: 0, ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_mbim_raw(req.args.modem, req.args, ok_reply(reply)), 150000),
+		},
+
 		modem_set_protocol: {
 			args: { modem: '', protocol: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>

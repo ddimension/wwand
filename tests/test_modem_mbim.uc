@@ -1054,7 +1054,7 @@ assert_sim_poll_teardown();
 
 	// ...and it stays balanced when a client destroy pays a callback that
 	// throws. Destroying a client runs its pending callbacks synchronously
-	// (client.uc:225, mbim_client.uc:679) and those are not ours; an unguarded
+	// (client.uc:249, mbim_client.uc:679) and those are not ours; an unguarded
 	// throw would skip the decrement and leave the depth raised for the life of
 	// the object, after which make_fail refuses every retry. Review follow-up,
 	// 2026-09-19.
@@ -1077,7 +1077,7 @@ assert_sim_poll_teardown();
 	// catch around the whole passthrough block let the first bad destroy strand
 	// the remaining clients and the shim, after which `self.pt = null` dropped
 	// the only handle to a shim still open with clients on it
-	// (qmi_over_mbim.uc:135). Raised by review, 2026-09-19.
+	// (qmi_over_mbim.uc:137). Raised by review, 2026-09-19.
 	let m5 = modem_mbim.create({
 		id: 'teardown-partial', device: '/dev/mock4', config: {},
 		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
@@ -1259,7 +1259,7 @@ uloop.run();
 //
 // pt.nas / pt.dsd were destroyed and uim / wms were not even that, and none of
 // the four was ever RELEASED — client.destroy() deliberately does not
-// (client.uc:209). Closing the HOST's MBIM session is not shown to reset the
+// (client.uc:233). Closing the HOST's MBIM session is not shown to reset the
 // modem's embedded QMI client table, so every daemon reload leaked up to four
 // CIDs out of a table that has room for a handful on the E182E class. The
 // native side has done this burst since modem.uc:1693. Raised by Codex review,
@@ -2896,6 +2896,52 @@ function run_modes(label, o) {
 
 	ok(index(sent, 'AT^NR5G_MODE=2') >= 0, 'at_over_mbim: the forced tunnel runs the init list (nr5g_mode sa written)');
 	eq(filter(m.config_warnings ?? [], (w) => w.check == 'nr5g_mode'), [], 'at_over_mbim: ...and the T99W175 is recognised');
+}
+
+// RAW MBIM COMMAND (wwandctl mbim): a refusal is an answer, the QMI
+// passthrough cannot be reached from here (its never-SYNC block sits in
+// qmi_over_mbim.send, which this path would pass by)
+{
+	uloop.init();
+	let m = modem_mbim.create({
+		id: 'm_raw', device: '/dev/mockat', config: {},
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		deps: { log: () => null, on_event: () => null },
+	});
+	let got = [], calls = [];
+	let take = (e, r) => push(got, e ?? r);
+
+	m.mbim = null;
+	m.mbim_raw({ service: 'basic_connect', cid: 1, kind: 'query' }, take);
+
+	m.mbim = { opened: true, destroy: () => null,
+		command_raw: (svc, cid, info, cb, opts) => {
+			push(calls, [ svc, cid, info, opts.cmd_type, opts.no_recovery, opts.keep_info ]);
+			if (cid == 1)
+				return cb(null, "\xab");
+			if (cid == 2)
+				return cb({ error: 'mbim', status: 9, info: "\x6a\x82" }, null);
+			cb({ error: 'timeout' }, null);
+		},
+	};
+	m.mbim_raw({ service: 'nope', cid: 1 }, take);
+	m.mbim_raw({ service: 'qmi_passthrough', cid: 1 }, take);
+	m.mbim_raw({ service: 'basic_connect', cid: 1, kind: 'query', info: '' }, take);
+	m.mbim_raw({ service: 'ms_uicc_low_level', cid: 2, kind: 'set', info: "\x01" }, take);
+	m.mbim_raw({ service: 'basic_connect', cid: 3 }, take);
+
+	eq(map(slice(got, 0, 3), (g) => g.error), [ 'not_ready', 'invalid_service', 'refused' ],
+		'mbim raw: not open, an unknown service, and the QMI passthrough are refused before sending');
+	eq(got[3], { status: 0, status_name: mbimcodec.status_name(0), info: "\xab" }, 'mbim raw: a success with its buffer');
+	eq(got[4], { status: 9, status_name: mbimcodec.status_name(9), info: "\x6a\x82" },
+		'mbim raw: a failure status is an answer, with the buffer that came along');
+	eq(got[5]?.error, 'timeout', 'mbim raw: no answer is the error');
+	eq(map(calls, (c) => [ c[1], c[3], c[4], c[5] ]),
+		[ [ 1, mbimcodec.CMD_QUERY, true, true ], [ 2, mbimcodec.CMD_SET, true, true ], [ 3, mbimcodec.CMD_QUERY, true, true ] ],
+		'mbim raw: query or set as asked, outside recovery, the refusal buffer kept');
+	eq(calls[0][0], 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df', 'mbim raw: the service by its UUID');
 }
 
 done('test_modem_mbim');

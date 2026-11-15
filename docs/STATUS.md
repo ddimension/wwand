@@ -21,6 +21,12 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
+- **Raw QMI/MBIM from the CLI (2026-11-15):** `wwandctl qmi` and
+  `wwandctl mbim` (ubus `modem_qmi_raw` / `modem_mbim_raw`) send one request
+  and print the answer undecoded. CTL and the QMI passthrough UUID are
+  refused (never-SYNC). HW-checked 2026-11-15 on the NR7101 (RG502Q, QMI)
+  and the LTE3301-PLUS (EG06, MBIM: native commands and QMI over the
+  passthrough); the data session stayed up on both.
 - **`option ipa_mode 'ipad'` (2026-11-11, 4d283f3):** an SGP.32 card
   with its own IPA runs it until the device sends TERMINAL CAPABILITY tag 84
   (IDEMIA DAKOTA IoT v1.2 DEV_REQ_8); the modem never does. With the option,

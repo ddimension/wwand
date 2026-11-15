@@ -507,4 +507,35 @@ eq(type(fmt.select_args('m0', '262', '01')?.mcc), 'int', 'select: not the argv s
 eq(fmt.select_args('m0', '26x', '01'), null, 'select: a non-number is refused, not sent');
 eq(fmt.select_args('m0', '262', '1'), null, 'select: a one-digit MNC is no MNC');
 
+// --- raw QMI / MBIM command lines ------------------------------------------
+eq([ fmt.raw_num('0x24'), fmt.raw_num('36'), fmt.raw_num('0X1a'), fmt.raw_num('x'), fmt.raw_num('1e3'), fmt.raw_num(null) ],
+	[ 36, 36, 26, null, null, null ], 'raw_num: hex and decimal, nothing else');
+eq([ fmt.qmi_service_id('nas'), fmt.qmi_service_id('UIM'), fmt.qmi_service_id('0x2a'), fmt.qmi_service_id('nope') ],
+	[ 3, 11, 42, null ], 'qmi_service_id: libqmi names or numbers');
+
+// the length is little endian: 0x0102 bytes is "0201", not "0102"
+eq(fmt.qmi_raw_payload([ '0x01=00', '16=aa:bb cc' ]).payload, '01010000' + '100300aabbcc',
+	'qmi_raw_payload: type, u16 LE length, value; separators between bytes allowed');
+let big = '';
+for (let i = 0; i < 0x102; i++)
+	big += 'ab';
+eq(substr(fmt.qmi_raw_payload([ '1=' + big ]).payload, 0, 6), '010201',
+	'qmi_raw_payload: the length is little endian');
+eq(fmt.qmi_raw_payload([]).payload, '', 'qmi_raw_payload: no TLVs is an empty request');
+ok(fmt.qmi_raw_payload([ '1=abc' ]).error, 'qmi_raw_payload: half a byte is refused');
+ok(fmt.qmi_raw_payload([ '256=00' ]).error, 'qmi_raw_payload: a type past one byte is refused');
+ok(fmt.qmi_raw_payload([ 'abcd' ]).error, 'qmi_raw_payload: an argument that is no TYPE=HEX is refused');
+
+eq(fmt.qmi_raw_text({ result: 1, error_code: 26, tlvs: [ { type: 2, value: '01001a00' } ] }),
+	'result   failure, error 26 (0x001a) NoEffect\ntlv 0x02     4  01 00 1a 00',
+	'qmi_raw_text: a refusal by its libqmi name, then the TLVs');
+let seq = '';
+for (let i = 0; i < 17; i++)
+	seq += sprintf('%02x', i);
+eq(fmt.qmi_raw_text({ result: 0, tlvs: [ { type: 0x10, value: seq } ] }),
+	'result   success\ntlv 0x10    17  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f\n               10',
+	'qmi_raw_text: a long value wraps at 16 bytes, aligned');
+eq(fmt.mbim_raw_text({ status: 9, status_name: 'NoDeviceSupport', info: '' }),
+	'status   9 NoDeviceSupport\ninfo     0  (empty)', 'mbim_raw_text: status and an empty buffer');
+
 done('test_wwandctl_fmt');

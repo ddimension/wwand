@@ -23,6 +23,8 @@ import * as recoverymod from 'wwand.recovery';
 import * as ctx_settings from 'wwand.ctx_settings';
 import * as context_common from 'wwand.context_common';
 import * as modem_common from 'wwand.modem_common';
+import * as hexmod from 'wwand.codec.hex';
+import * as tlvmod from 'wwand.codec.tlv';
 // module scope: the lazy backend loaders live outside create(), so they cannot
 // use its injected `log` dep and go to the shared sink directly
 import * as logmod from 'wwand.log';
@@ -5959,6 +5961,121 @@ export function create(opts)
 			return cb({ error: 'invalid_command' });
 
 		entry.modem.at.send(command, cb, { timeout: timeout });
+	};
+
+	// RAW MESSAGES, for an operator (`wwandctl qmi` / `wwandctl mbim`): one
+	// request the daemon has no schema or op for, sent on the modem's own
+	// channel, its answer handed back undecoded. Hex in, hex out. Neither
+	// counts toward recovery — an experiment that fails says nothing about
+	// the modem — and neither touches state wwand keeps: what a SET changes
+	// on the modem, wwand learns the way it learns any outside change.
+	let raw_hex = (h) => (type(h ?? '') == 'string' && match(h ?? '', /^([0-9a-fA-F]{2})*$/))
+		? hexmod.hex_to_bin(h ?? '') : null;
+
+	// timeout in ms as given, else 10 s; capped, so a typo cannot leave a
+	// ubus request pending for an hour
+	let raw_timeout = (t) => (t > 0) ? ((t > 120000) ? 120000 : t) : 10000;
+
+	// a = { service: 1..255, message: 0..0xffff, payload: hex TLV bytes,
+	// timeout }. cb(err, { result, error_code, tlvs: [ { type, value } ],
+	// payload, truncated? }) — a QMI failure result is an ANSWER, returned with its
+	// code and TLVs; only no answer at all is an error. The client is a
+	// fresh one of the modem's extra_client, released after the answer, so a
+	// raw request never shares a transaction space with wwand's own clients.
+	// CTL (service 0) is the daemon's: ALLOCATE/RELEASE run there, and a CTL
+	// SYNC resets every client the modem has handed out — over the MBIM
+	// passthrough the live data session with them.
+	self.modem_qmi_raw = function(ref, a, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		let svc = a?.service, id = a?.message;
+		let payload = raw_hex(a?.payload);
+
+		if (type(svc) != 'int' || svc < 1 || svc > 255)
+			return cb({ error: 'invalid_service', detail: 'a QMI service id 1..255 (CTL, 0, is the daemon\'s own)' });
+
+		if (type(id) != 'int' || id < 0 || id > 0xffff)
+			return cb({ error: 'invalid_message', detail: 'a QMI message id 0..0xffff' });
+
+		if (payload == null)
+			return cb({ error: 'invalid_payload', detail: 'TLV bytes as hex' });
+
+		let m = entry.modem;
+
+		if (type(m.extra_client) != 'function')
+			return cb({ error: 'unsupported', detail: 'this modem has no QMI channel' });
+
+		m.extra_client({ service: svc, messages: {} }, (err, c) => {
+			if (err)
+				return cb(err);
+
+			c.request_raw(id, payload, (rerr, data, raw) => {
+				// a client the modem's teardown destroyed is released by that
+				// teardown, which pays this callback `cancelled` from inside
+				// its release loop while the client is still on the modem's
+				// list (modem.uc:1903-1913) — a release from here would send
+				// a second RELEASE_CID for the same CID
+				if (!c.destroyed)
+					m.extra_release(c);
+
+				// timeout, send failure, cancelled: nothing came back
+				if (rerr && raw == null)
+					return cb(rerr);
+
+				let tlvs = tlvmod.split(raw);
+				let out = {
+					result: data?._result?.result,
+					// not `error`: the ubus envelope uses that name for
+					// "no answer" (ubus.uc ok_reply)
+					error_code: data?._result?.error,
+					payload: hexmod.bin_to_hex(raw),
+					tlvs: map(tlvs, (t) => ({ type: t.type, value: hexmod.bin_to_hex(t.value) })),
+				};
+
+				if (length(tlvs) && tlvs[length(tlvs) - 1].truncated)
+					out.truncated = true;
+
+				cb(null, out);
+			}, { timeout: raw_timeout(a.timeout), no_recovery: true });
+		});
+	};
+
+	// a = { service: name|uuid, cid, type: 'query'|'set', info: hex,
+	// timeout }. cb(err, { status, status_name, info: hex }); the MBIM modem
+	// does the sending (modem_mbim.uc mbim_raw), because the codec it needs
+	// ships with the MBIM backend, not with this daemon.
+	self.modem_mbim_raw = function(ref, a, cb) {
+		let entry = check_modem(ref, cb);
+
+		if (!entry)
+			return;
+
+		let kind = a?.type ?? 'query';
+		let info = raw_hex(a?.info);
+
+		if (kind != 'query' && kind != 'set')
+			return cb({ error: 'invalid_type', detail: 'query or set' });
+
+		// the wire field is u32, but a ubus integer argument is int32
+		if (type(a?.cid) != 'int' || a.cid < 1 || a.cid > 0x7fffffff)
+			return cb({ error: 'invalid_cid', detail: 'an MBIM command id 1..0x7fffffff' });
+
+		if (info == null)
+			return cb({ error: 'invalid_info', detail: 'InformationBuffer bytes as hex' });
+
+		if (type(entry.modem.mbim_raw) != 'function')
+			return cb({ error: 'unsupported', detail: 'this modem has no MBIM channel' });
+
+		entry.modem.mbim_raw({ service: a.service, cid: a.cid, kind: kind, info: info,
+		                       timeout: raw_timeout(a.timeout) }, (err, res) => {
+			if (err)
+				return cb(err);
+
+			cb(null, { ...res, info: hexmod.bin_to_hex(res.info) });
+		});
 	};
 
 	self.modem_set_protocol = function(ref, target, cb) {

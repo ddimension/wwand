@@ -281,6 +281,36 @@ export function pack(fields, args)
 	return out;
 };
 
+// Concatenated TLV bytes as they came, in wire order: [ { type, value } ]
+// with `value` binary. For a message no schema describes (the raw request
+// path, client.uc request_raw); unpack() keys by type, and that loses both
+// the order and a type that repeats. A TLV claiming more bytes than are
+// left ends the list with `truncated: true` on the result's last entry
+// ({ type, truncated, value: what there was }).
+export function split(buf)
+{
+	let out = [];
+	let pos = 0;
+	let len = length(buf ?? '');
+
+	while (pos + 3 <= len) {
+		let t = ord(buf, pos);
+		let l = struct.unpack('<H', substr(buf, pos + 1, 2))[0];
+
+		pos += 3;
+
+		if (pos + l > len) {
+			push(out, { type: t, truncated: true, value: substr(buf, pos) });
+			break;
+		}
+
+		push(out, { type: t, value: substr(buf, pos, l) });
+		pos += l;
+	}
+
+	return out;
+};
+
 // Unpack concatenated TLV bytes into an object according to field spec.
 export function unpack(fields, buf)
 {

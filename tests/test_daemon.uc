@@ -5183,4 +5183,74 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	d.shutdown();
 })();
 
+// --- raw QMI / MBIM (wwandctl qmi / mbim): validated, sent, answered as hex ---
+(() => {
+	let d = daemon_mod.create({ deps: { log: () => null } });
+	let r = {};
+	let reqs = [], released = [];
+	let answer = null;
+	let qmi_m = {
+		extra_client: (s, cb) => cb(null, { service: s.service,
+			request_raw: (id, payload, cb2, opts) => { push(reqs, [ s.service, id, hexenc(payload), opts ]); answer(cb2); } }),
+		extra_release: (c) => push(released, c.service),
+	};
+	let mbim_args = null;
+	let mbim_m = { mbim_raw: (a, cb) => { mbim_args = a; cb(null, { status: 0, status_name: 'Success', info: "\x01\xff" }); } };
+
+	d.modems = { q: { modem: qmi_m }, n: { modem: {} }, b: { modem: mbim_m } };
+
+	let qraw = (ref, a) => { let o = null; d.modem_qmi_raw(ref, a, (e, res) => { o = e ?? res; }); return o; };
+
+	eq(map([ { service: 0, message: 1 }, { service: 256, message: 1 }, { service: '3', message: 1 } ],
+		(a) => qraw('q', a)?.error), [ 'invalid_service', 'invalid_service', 'invalid_service' ],
+		'qmi raw: CTL, a service past one byte, and a non-number are refused');
+	eq(qraw('q', { service: 3, message: 0x10000 })?.error, 'invalid_message', 'qmi raw: a message id past u16 is refused');
+	eq(map([ 'abc', 'zz' ], (p) => qraw('q', { service: 3, message: 1, payload: p })?.error),
+		[ 'invalid_payload', 'invalid_payload' ], 'qmi raw: a payload that is no whole bytes of hex is refused');
+	eq(qraw('n', { service: 3, message: 1 })?.error, 'unsupported', 'qmi raw: a modem with no QMI channel says so');
+	eq(length(reqs), 0, 'qmi raw: nothing invalid reached the modem');
+
+	answer = (cb) => cb({ error: 'qmi', result: 1, code: 26 }, { _result: { result: 1, error: 26 } },
+		hexdec('02040001001a00' + '1001007f'));
+	r = qraw('q', { service: 3, message: 0x24, payload: '010100ff', timeout: 999999 });
+	eq([ reqs[0][0], reqs[0][1], reqs[0][2] ], [ 3, 0x24, '010100ff' ], 'qmi raw: service, message and payload reach the client');
+	eq([ reqs[0][3].timeout, reqs[0][3].no_recovery ], [ 120000, true ], 'qmi raw: the timeout is capped, the request is outside recovery');
+	eq(r, { result: 1, error_code: 26, payload: '02040001001a001001007f',
+	        tlvs: [ { type: 2, value: '01001a00' }, { type: 0x10, value: '7f' } ] },
+		'qmi raw: a refusal is an answer, with its code and TLVs');
+	eq(released, [ 3 ], 'qmi raw: the client is given back after the answer');
+
+	answer = (cb) => cb({ error: 'timeout' }, null);
+	eq(qraw('q', { service: 11, message: 1 })?.error, 'timeout', 'qmi raw: no answer is the error');
+	eq([ reqs[1][3].timeout, released ], [ 10000, [ 3, 11 ] ], 'qmi raw: default 10 s, and released on a timeout too');
+
+	// the modem's teardown destroys the client and pays the pending request
+	// `cancelled` from inside its own release loop: releasing it again from
+	// the callback would send a second RELEASE_CID for the same CID
+	answer = (cb) => null;
+	let held = null;
+	qmi_m.extra_client = (s, cb) => {
+		held = { service: s.service, destroyed: false,
+			request_raw: (id, payload, cb2) => { held.cb = cb2; } };
+		cb(null, held);
+	};
+	qraw('q', { service: 3, message: 1 });
+	held.destroyed = true;
+	held.cb({ error: 'cancelled' }, null);
+	eq(released, [ 3, 11 ], 'qmi raw: a client the teardown destroyed is not released a second time');
+
+	let mraw = (ref, a) => { let o = null; d.modem_mbim_raw(ref, a, (e, res) => { o = e ?? res; }); return o; };
+
+	eq([ mraw('b', { type: 'get', cid: 1 })?.error, mraw('b', { cid: 0 })?.error, mraw('b', { cid: 1, info: 'x' })?.error ],
+		[ 'invalid_type', 'invalid_cid', 'invalid_info' ], 'mbim raw: type, cid and info are checked');
+	eq(mraw('b', { cid: 0x80000000 })?.error, 'invalid_cid', 'mbim raw: a cid past int32, which ubus cannot carry, is refused');
+	eq(mraw('q', { cid: 1 })?.error, 'unsupported', 'mbim raw: a modem with no MBIM channel says so');
+	eq(mraw('b', { service: 'basic_connect', cid: 2, info: '0aff' }), { status: 0, status_name: 'Success', info: '01ff' },
+		'mbim raw: the answer comes back as hex');
+	eq([ mbim_args.kind, hexenc(mbim_args.info), mbim_args.timeout ], [ 'query', '0aff', 10000 ],
+		'mbim raw: query by default, the buffer as bytes, the default timeout');
+	d.modems = {};
+	d.shutdown();
+})();
+
 done('test_daemon');

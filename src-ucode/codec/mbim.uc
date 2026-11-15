@@ -752,6 +752,24 @@ const SERVICE_NAMES = {
 	'3e1e92cf-c53d-4f14-85d0-a86ad9e12245': 'google',
 };
 
+// The reverse: a service as a user names it — one of the names above, or a
+// UUID in its string form — as the UUID, or null for neither. For the raw
+// command path (ubus modem_mbim_raw), where a typo must be refused rather
+// than sent as a UUID of garbage.
+export function service_uuid(s)
+{
+	s = lc(s ?? '');
+
+	if (match(s, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/))
+		return s;
+
+	for (let uuid, name in SERVICE_NAMES)
+		if (name == s)
+			return uuid;
+
+	return null;
+};
+
 // Short name for a service UUID, or the UUID itself when it is not one of ours
 // — an unknown service is exactly the case where the raw UUID is the useful
 // thing to print.

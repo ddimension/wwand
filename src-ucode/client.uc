@@ -64,6 +64,8 @@ export function create(hub, schema, cid, hooks)
 		return null;
 	};
 
+	let send_msg;
+
 	self.request = function(name, args, cb, opts) {
 		// A destroyed client takes no new requests, and this is where the
 		// "cancellation family" is closed once instead of at every caller.
@@ -92,6 +94,29 @@ export function create(hub, schema, cid, hooks)
 			return false;
 		}
 
+		return send_msg(name, msg, tlv.pack(msg.req, args), cb, opts);
+	};
+
+	// request_raw: a message this schema does not describe, its TLV bytes
+	// given as they go on the wire (`wwandctl qmi`, ubus modem_qmi_raw).
+	// cb(err, data, tlvs) as for request(); `tlvs` is the response's TLV
+	// bytes undecoded, and a response that fails the result check still
+	// carries them — the payload of a refusal is what such a caller is
+	// looking at.
+	self.request_raw = function(msg_id, payload, cb, opts) {
+		if (self.destroyed) {
+			if (cb)
+				cb({ error: 'cancelled' }, null);
+
+			return false;
+		}
+
+		return send_msg(sprintf('raw 0x%04x', msg_id), { id: msg_id, resp: {} }, payload ?? '', cb, opts);
+	};
+
+	// the half of a request after its payload is built; the destroyed check
+	// stays with each caller, BEFORE it builds anything
+	send_msg = (name, msg, payload, cb, opts) => {
 		let txn = alloc_txn();
 
 		if (txn == null) {
@@ -101,8 +126,7 @@ export function create(hub, schema, cid, hooks)
 			return false;
 		}
 
-		let frame = qmux.encode(schema.service, cid, txn, msg.id,
-		                        tlv.pack(msg.req, args));
+		let frame = qmux.encode(schema.service, cid, txn, msg.id, payload);
 
 		// opts.no_recovery: don't feed the recovery error counter for this
 		// request (optional reads / user ops that legitimately fail on some
@@ -187,7 +211,7 @@ export function create(hub, schema, cid, hooks)
 				hooks.on_success(self);
 
 			if (p.cb)
-				p.cb(err, data);
+				p.cb(err, data, dec.tlvs);
 
 			return;
 		}

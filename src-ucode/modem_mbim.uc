@@ -2664,7 +2664,7 @@ export function create(opts)
 	// (modem.uc), `before_release` included: the modem owns it, releases its CID on teardown and when the
 	// passthrough is rebuilt, and `destroyed` tells the plugin to ask again.
 	// Which indications the passthrough carries depends on the service
-	// (qmi_over_mbim.uc:143-151): NAS pushes none on the EG06 and the RM520N,
+	// (qmi_over_mbim.uc:145-153): NAS pushes none on the EG06 and the RM520N,
 	// UIM Remote pushes all of its own on the RM520N — a remote SIM works over
 	// MBIM there (HW-observed 2026-09-27). A plugin whose service stays silent
 	// finds that out from its own protocol.
@@ -2741,6 +2741,44 @@ export function create(opts)
 
 		if (cb)
 			cb(null);
+	};
+
+	// One MBIM command as an operator gives it (`wwandctl mbim`, ubus
+	// modem_mbim_raw): a = { service: name|uuid, cid, kind: 'query'|'set',
+	// info: binary, timeout }. cb(err, { status, status_name, info }). A
+	// status other than success is an ANSWER — the reply carries it with
+	// whatever InformationBuffer came along (MS UICC puts the card's SW1 SW2
+	// there) — so only a request that got none is an error. Outside the
+	// recovery count: what an operator tries says nothing about the channel.
+	//
+	// THE QMI PASSTHROUGH IS REFUSED. A frame sent to it from here passes by
+	// the never-SYNC block in qmi_over_mbim.send, and a CTL SYNC over it resets
+	// the modem's embedded QMI state and ends the live data session (the
+	// evidence is with the block, qmi_over_mbim.uc:77-81). modem_qmi_raw
+	// reaches the same services through the shim.
+	self.mbim_raw = function(a, cb) {
+		if (!self.mbim?.opened)
+			return cb({ error: 'not_ready' }, null);
+
+		let uuid = mbimmod.service_uuid(a.service);
+
+		if (!uuid)
+			return cb({ error: 'invalid_service', detail: 'a service name (basic_connect, sms, ...) or UUID' }, null);
+
+		if (uuid == mbimmod.service_uuid('qmi_passthrough'))
+			return cb({ error: 'refused', detail: 'QMI over MBIM goes through modem_qmi_raw (wwandctl qmi)' }, null);
+
+		self.mbim.command_raw(uuid, a.cid, a.info ?? '', (err, info) => {
+			if (err?.error == 'mbim')
+				return cb(null, { status: err.status, status_name: mbimmod.status_name(err.status),
+				                  info: err.info ?? '' });
+
+			if (err)
+				return cb(err, null);
+
+			cb(null, { status: 0, status_name: mbimmod.status_name(0), info: info ?? '' });
+		}, { cmd_type: (a.kind == 'set') ? mbimmod.CMD_SET : mbimmod.CMD_QUERY,
+		     timeout: a.timeout, no_recovery: true, keep_info: true });
 	};
 
 	self.reset = function(cb) {
@@ -3133,7 +3171,7 @@ export function create(opts)
 	// the passthrough has stopped answering and is rebuilt.
 	drop_pt = () => {
 		// DETACH FIRST, clean up after. destroy() pays a client's pending
-		// callbacks synchronously (client.uc:225), and one of those may be a
+		// callbacks synchronously (client.uc:249), and one of those may be a
 		// probe that calls _ensure_pt or _ensure_uim again. Still seeing the
 		// stack being dropped, it would drop it a second time and start a
 		// bring-up in the middle of this one.
@@ -3162,11 +3200,11 @@ export function create(opts)
 		// whole block means the first throwing destroy skips the clients after it
 		// AND the shim close — and with the stack already detached above, that
 		// strands a shim that is still open with clients registered on it
-		// (qmi_over_mbim.uc:135).
+		// (qmi_over_mbim.uc:137).
 		if (pt) {
 			// GIVE THE SESSION-LONG CIDs BACK FIRST, while ctl and the shim are
 			// still up. These were allocated out of the MODEM's client table
-			// and destroy() deliberately does not release them (client.uc:209)
+			// and destroy() deliberately does not release them (client.uc:233)
 			// — closing the HOST's MBIM session is not shown to reset the
 			// modem's embedded QMI client table, so every daemon reload leaked
 			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
@@ -3254,7 +3292,7 @@ export function create(opts)
 		modem_common.close_at(self);
 
 		// GUARDED, because destroying a client pays its pending callbacks
-		// SYNCHRONOUSLY (client.uc:225, mbim_client.uc:679) and those callbacks
+		// SYNCHRONOUSLY (client.uc:249, mbim_client.uc:679) and those callbacks
 		// are not ours. One that throws would skip the depth decrement at the
 		// end, leaving it raised for the life of the object — and make_fail then
 		// refuses every future retry, which is worse than whatever the callback

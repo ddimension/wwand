@@ -1887,6 +1887,8 @@ wwandctl sms-send +49170... "hi"     # send an SMS
 wwandctl sms-delete 3
 wwandctl reset / repower             # modem reset / hardware repower
 wwandctl at AT+CSQ                   # raw AT command
+wwandctl qmi nas 0x0024              # raw QMI request (here NAS Get Serving System)
+wwandctl mbim query basic_connect 2  # raw MBIM command (here Subscriber Ready Status)
 wwandctl migrate [apply]             # config migration plan/apply
 wwandctl log-level debug
 wwandctl collectd                    # collectd exec feed (runs until orphaned)
@@ -1908,6 +1910,46 @@ after an attempt reached the card, and never auto-retries. After a successful
 unblock the daemon restarts the modem bring-up with the new PIN; update
 `option pincode` (or the per-SIM `wwand_sim` override) to the new PIN so the
 next boot unlocks cleanly.
+
+### Raw QMI and MBIM (`wwandctl qmi`, `wwandctl mbim`)
+
+For a message wwand has no op for: a vendor service, a TLV a firmware is
+suspected of mishandling, a request to try before it gets a schema. Each
+command sends **one** request on the modem's own channel, next to wwand's
+clients, and prints the answer undecoded. Root only (the ubus ACL grants
+nothing beyond the three telemetry reads).
+
+```
+wwandctl qmi [modem] <service> <message> [TYPE=HEX ...] [--timeout s]
+wwandctl mbim [modem] query|set <service> <cid> [HEX] [--timeout s]
+```
+
+- **QMI:** the service by its libqmi name (`nas`, `dms`, `uim`, `dsd`, …) or
+  number, the message id in hex (`0x0024`) or decimal, and each request TLV
+  as `TYPE=HEX`: `wwandctl qmi dms 0x0020 0x01=00` sends TLV 0x01 holding
+  one byte 00. wwandctl writes the length (u16, little endian); bytes may be
+  separated by `:` or spaces. The output is the result (`success`, or the
+  error by number and libqmi name), then every response TLV in wire order,
+  result TLV 0x02 included. A failure result is an answer, not an error.
+  The request runs on a fresh client of that service, released afterwards;
+  on an MBIM modem it goes through the QMI-over-MBIM passthrough. A service
+  the modem does not list answers `service_unavailable`. **CTL (0) is
+  refused:** wwand allocates and releases its clients there, and a CTL SYNC
+  resets every client the modem has handed out, over the MBIM passthrough
+  the live data session with them.
+- **MBIM:** the service by name (`basic_connect`, `sms`, `ussd`, `stk`,
+  `auth`, `ms_basic_connect_ext`, `ms_uicc_low_level`, `qdu`, the vendor ones
+  wwand knows) or UUID, the CID, and the InformationBuffer as hex. The output
+  is the status (number and name) and the returned buffer. A failure status
+  comes with whatever buffer the modem sent (MS UICC puts SW1 SW2 there). The
+  `qmi_passthrough` service is refused; `wwandctl qmi` reaches the same
+  services through wwand's shim, which blocks the SYNC.
+
+Neither counts toward the recovery ladder. wwand does not track what a raw
+SET changes: it notices the change the way it notices any change made
+outside it, or it doesn't. A raw `set` can end the data session
+(basic_connect CONNECT, RADIO_STATE) as surely as an AT command can. Default
+timeout 10 s, at most 120 s.
 
 ### The diag port (`diag_port`)
 
@@ -2016,6 +2058,8 @@ every method to it.
 | `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` + `temperature` (also on `status`, which is the canonical place — same field, kept here for compatibility) |
 | `modem_location` | `modem` | last GNSS fix, short form — a view over the `modem_gps` reader, whichever source feeds it (needs `option gnss` and `wwand-gps`) |
 | `modem_at` | `modem`, `command`, `timeout?` | run an AT command on the modem's AT port |
+| `modem_qmi_raw` | `modem`, `service`, `message`, `payload?`, `timeout?` | one raw QMI request (see [Raw QMI and MBIM](#raw-qmi-and-mbim-wwandctl-qmi-wwandctl-mbim)): `service` 1–255, `message` 0–0xffff, `payload` the request TLVs as hex, `timeout` ms (default 10000, max 120000). Result: `result` (0 success, 1 failure, absent without a result TLV), `error_code`, `payload` (the response TLVs as hex), `tlvs` (`[{ type, value }]` in wire order), `truncated` when the last TLV claims more bytes than came. Errors: `invalid_service` (also for CTL), `invalid_message`, `invalid_payload`, `unsupported` (NCM), `service_unavailable`, `not_ready`, `timeout` |
+| `modem_mbim_raw` | `modem`, `service`, `cid`, `type?`, `info?`, `timeout?` | one raw MBIM command: `service` a name or UUID, `cid` 1–0x7fffffff (the wire field is u32, a ubus integer int32), `type` `query` (default) or `set`, `info` the InformationBuffer as hex. Result: `status`, `status_name`, `info` (hex), also for a failure status. Errors: `invalid_service`, `invalid_cid`, `invalid_type`, `invalid_info`, `refused` (the QMI passthrough), `unsupported` (not an MBIM modem), `not_ready`, `timeout` |
 | `modem_profiles` | `modem` | READ-ONLY (QMI): the modem's stored 3GPP profiles (`profiles`: index, name, apn, pdp_type, auth, apn_disabled, imcn, pcscf_pco), the profiles it attaches with (`attach`: `current`/`pending`, WDS Get LTE Attach PDN List — not necessarily profile 1) and its default profile numbers (`default`: `embedded`/`tethered`). A read the firmware refuses answers `{ error }` in its own field; the rest stands. MBIM/NCM: `unsupported_on_backend` |
 | `modem_get_settings` / `modem_set_settings` | `modem`, `settings?` | NAS system-selection prefs (modes/bands) — the settings editor. The get adds `rat_order` (the acquisition order by name, most preferred first, a number where a value has no name; absent when the modem reports none) and `rat_order_writable` (false when that order has slots QMI cannot name); a set takes `rat_order` as a list of names, or the number a get returned for an unnamed value (see *RAT priority*), refuses an unknown or repeated one with `invalid_setting` and any change of a non-writable order with `unsupported_setting`, treats a change like a RAT change (re-attach), and reads the order back: `not_applied: ["rat_order"]` when the firmware kept its own. Sets are **idempotent**: values the modem already carries are dropped; nothing left → `unchanged: true`, no NV write, no radio disturbance. On QMI and MBIM (passthrough) the get adds `band_caps: { lte, nr5g }`, the bands the modem supports (DMS Get Band Capabilities) — what LuCI's *Reset to defaults* sends instead of a blanket 1–63 / 1–79. A set the firmware refuses because of its band keys is sent once more without them: the result then carries `partial: true` and `refused` (`lte_bands`, `nr5g_sa_bands`, …) next to `applied`. A set that changes bands or the RAT mode (QMI, MBIM) **re-attaches**: the PDN sessions stop first, the preference is written, the radio cycles low power → online like `modem_reattach`, and the sessions go back to the reconnect — the result adds `reattached` (false: the cycle failed, the setting stands) and `contexts_released`/`contexts_failed`; a modem left on a band it no longer has otherwise may stay detached. Not on a `settings_deferred` firmware, under an operator detach, or for usage/roaming keys alone; a band/RAT set while a reattach, detach or attach runs answers `busy`. On a Fibocom FM350/FM150 (NCM) the same calls speak `+GTACT` instead: the get adds `settable` (the keys a set may carry — band lists only, none on a tuple bands cannot be written for), `supported` (the module's own band catalogue), `nr_bands_shared: true` and `persistent: false`; a set refuses any other key, and an accepted band edit is also written to the modem's `band_*` options (see *Band allow-lists*) |
 | `modem_scan` / `modem_scan_start` / `modem_scan_status` | `modem` | visible-operator scan (sync, or async start+poll — a scan takes up to ~90 s) |

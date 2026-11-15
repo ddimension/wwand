@@ -9,7 +9,8 @@
 'use strict';
 
 import { fmt_plmn, fmt_sig, fmt_locks, reg_text, packet_service_text,
-	collectd_lines, collectd_interval, recovery_text, radio_text, select_args, euicc_text } from 'wwand.wwandctl_fmt';
+	collectd_lines, collectd_interval, recovery_text, radio_text, select_args, euicc_text,
+	raw_num, qmi_service_id, qmi_raw_payload, qmi_raw_text, mbim_raw_text } from 'wwand.wwandctl_fmt';
 
 import * as libubus from 'ubus';
 import * as fs from 'fs';
@@ -487,6 +488,14 @@ Maintenance
   plmn-set [modem] <user|nas|fplmn> <mccmnc>[+gsm,+utran,...] ...
   plmn-restore [modem]   re-apply the configured PLMN list ("restore now")
   at [modem] <command>   raw AT command on the modem's AT port
+  qmi [modem] <service> <message> [TYPE=HEX ...]   one raw QMI request
+                         (service by name or number, message id in hex or
+                         decimal, each TLV as TYPE=HEX); prints the result
+                         and the response TLVs. CTL is refused
+  mbim [modem] query|set <service> <cid> [HEX]   one raw MBIM command
+                         (service by name, e.g. basic_connect, or UUID);
+                         prints the status and the InformationBuffer.
+                         Both take --timeout <s> (default 10, max 120)
   migrate [apply]        plan (default) or apply config migration to proto wwand
   reload                 re-read UCI and apply the diff
   log-level <level>      err|warn|notice|info|debug (until next reload)
@@ -637,6 +646,29 @@ function cmd_collectd(argv)
 
 		sleep(interval * 1000);
 	}
+}
+
+// `--timeout <s>` anywhere after the command, taken out of the list:
+// the remaining arguments are positional
+function raw_timeout_arg(list)
+{
+	let rest = [], ms = 0;
+
+	for (let i = 0; i < length(list); i++) {
+		if (list[i] != '--timeout') {
+			push(rest, list[i]);
+			continue;
+		}
+
+		let s = raw_num(list[++i]);
+
+		if (s == null || s < 1 || s > 120)
+			die('--timeout takes seconds, 1..120');
+
+		ms = s * 1000;
+	}
+
+	return { rest: rest, timeout: ms };
 }
 
 switch (cmd) {
@@ -1055,6 +1087,69 @@ case 'at': {
 
 	for (let l in (res.response ?? []))
 		printf('%s\n', l);
+	break;
+}
+
+case 'qmi': {
+	// a modem may share a name with a service: the first word is taken as
+	// the modem only when what follows still makes a request, and with a
+	// single modem a line that is a request as it stands is read as one
+	let st = status();
+	let o = raw_timeout_arg(args);
+	let bare = qmi_service_id(o.rest[0]) != null && raw_num(o.rest[1]) != null;
+	let prefixed = length(o.rest) >= 3 &&
+		qmi_service_id(o.rest[1]) != null && raw_num(o.rest[2]) != null;
+	let named = (length(keys(st.modems)) > 1) ? (prefixed ? o.rest[0] : null)
+		: ((prefixed && !bare) ? o.rest[0] : null);
+	let r = resolve_modem(st, named);
+	let a = r.consumed ? slice(o.rest, 1) : o.rest;
+
+	if (length(a) < 2)
+		die('usage: wwandctl qmi [modem] <service> <message> [TYPE=HEX ...] [--timeout s]');
+
+	let svc = qmi_service_id(a[0]);
+	let msg = raw_num(a[1]);
+	let p = qmi_raw_payload(slice(a, 2));
+
+	if (svc == null)
+		die(sprintf('unknown QMI service %J — a name (nas, dms, uim, ...) or a number', a[0]));
+	if (msg == null)
+		die(sprintf('%J is not a message id (0x0024, 36)', a[1]));
+	if (p.error)
+		die(p.error);
+
+	let res = call_ok('modem_qmi_raw', { modem: r.modem, service: svc, message: msg,
+		payload: p.payload, timeout: o.timeout });
+
+	printf('%s\n', qmi_raw_text(res));
+	break;
+}
+
+case 'mbim': {
+	// as for qmi: `query`/`set` decides whether a modem was named
+	let st = status();
+	let o = raw_timeout_arg(args);
+	let named = (o.rest[1] == 'query' || o.rest[1] == 'set');
+	let r = resolve_modem(st, named ? o.rest[0] : null);
+	let a = r.consumed ? slice(o.rest, 1) : o.rest;
+
+	if (length(a) < 3 || (a[0] != 'query' && a[0] != 'set'))
+		die('usage: wwandctl mbim [modem] query|set <service> <cid> [HEX] [--timeout s]');
+
+	let cid = raw_num(a[2]);
+	let info = lc(replace(join('', slice(a, 3)), /[: ]/g, ''));
+
+	// ubus carries an integer argument as int32 and refuses a larger one
+	// before the daemon sees it, with an error that reads like a dead daemon
+	if (cid == null || cid < 1 || cid > 0x7fffffff)
+		die(sprintf('%J is not a command id (1..0x7fffffff)', a[2]));
+	if (!match(info, /^([0-9a-f]{2})*$/))
+		die('the InformationBuffer is not whole bytes of hex');
+
+	let res = call_ok('modem_mbim_raw', { modem: r.modem, type: a[0], service: a[1], cid: cid,
+		info: info, timeout: o.timeout });
+
+	printf('%s\n', mbim_raw_text(res));
 	break;
 }
 

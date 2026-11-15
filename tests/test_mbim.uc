@@ -947,4 +947,13 @@ eq(length(mbim.decode_tlvs('\x0a\x00\x00\xff\x00\x00\x00\x00', 0)), 0,
 		'subscribe list: an empty list is just a zero count');
 })();
 
+// --- service_uuid: a service as a user names it (wwandctl mbim) -------------
+eq(mbim.service_uuid('basic_connect'), 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df', 'service_uuid: by name');
+eq(mbim.service_uuid('A289CC33-BCBB-8B4F-B6B0-133EC2AAE6DF'), 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df',
+	'service_uuid: a UUID, case folded');
+eq(mbim.service_uuid('11111111-2222-3333-4444-555555555555'), '11111111-2222-3333-4444-555555555555',
+	'service_uuid: a UUID this tree has no name for passes');
+eq([ mbim.service_uuid('basic-connect'), mbim.service_uuid('a289cc33'), mbim.service_uuid(null) ], [ null, null, null ],
+	'service_uuid: a typo or a partial UUID is refused, not sent');
+
 done('test_mbim');
