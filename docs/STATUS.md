@@ -1,6 +1,6 @@
 # wwand — current state
 
-_State of 2026-11-16: stable **v1.9.0** (feed stable building, release tag pending), main **v1.10.0-dev**.
+_State of 2026-11-16: stable **v1.9.0** (feed release 2026.11.16), main **v1.10.0-dev**.
 65 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
 which moves too often to be worth repeating here)._
 
@@ -17,11 +17,13 @@ state buried at the top invites reading a months-old entry as present tense.
   `v1.9.0`, luci-app-wwand `v1.9.0`, luci-proto-wwand `v1.8.0` (its own
   count; it had skipped 1.8.0 with nothing new). Markers on main:
   `v1.10.0-dev`, `v1.10.0-dev`, `v1.9.0-dev`. wwand-ims has its first
-  release: a `stable` branch, `v0.1.0` there, `v0.2.0-dev` on main. Feed
-  stable takes the package definitions from feed main (wwand-ims is new
-  there) and pins the tags; **a push to feed stable only builds — the date
-  tag (`scripts/release-stable.sh`) is still to be set once that build is
-  green.** For the release notes: the QMAP DL aggregation default of 31744
+  release: a `stable` branch, `v0.1.0` there and `v0.1.1` (the VRF local
+  route follows an in-place address change), `v0.2.0-dev` on main. Feed
+  stable took the package definitions from feed main (wwand-ims is new
+  there) and pins the tags; **released as feed tag `2026.11.16`**
+  (wwand 1.9.0, luci-app-wwand 1.9.0, luci-proto-wwand 1.8.0, wwand-ims
+  0.1.1). Feed main pins the review fixes as wwand `1.10.0_pre0`,
+  luci-app-wwand `1.10.0_pre1`, luci-proto-wwand `1.9.0_pre1`. For the release notes: the QMAP DL aggregation default of 31744
   bytes now applies to every modem and, through the modem's echo, to the
   host's uplink aggregation as well (`option dl_datagram_max_size`
   overrides it per modem). **Do not push to the feed while a build of the
@@ -398,8 +400,8 @@ is always user-triggered.
 | Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed. Plugins in their own repositories: `wwand-ipa` (SGP.32 eIM), `wwand-qlog` (Quectel QLog diag capture), `wwand-rsim` (remote SIM: readers, phones over Bluetooth SAP, other modems' cards) |
 | Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
-| Feed | ddimension/openwrt-repo, two independent lines — stable (releases, published only by a date tag; last: 2026.10.20 with wwand 1.7.1; 1.8.0 building) and main (development, `X.Y.Z_preN` from the `vX.Y.0-dev` marker, now `v1.9.0-dev`). The source repos have the same two lines (`stable` at v1.8.0). `wwand` requires `ucode (>=` the SDK's ucode `)` since #67 |
-| Upstream | openwrt/packages#30185 (pins v1.8.0), openwrt/luci#8917 (luci-app-wwand v1.8.0, luci-proto-wwand v1.7.0) |
+| Feed | ddimension/openwrt-repo, two independent lines — stable (releases, published only by a date tag; last: 2026.11.16 with wwand 1.9.0) and main (development, `X.Y.Z_preN` from the `vX.Y.0-dev` marker, now `v1.10.0-dev`). The source repos have the same two lines (`stable` at v1.9.0). `wwand` requires `ucode (>=` the SDK's ucode `)` since #67 |
+| Upstream | openwrt/packages#30185 (pins v1.9.0), openwrt/luci#8917 (luci-app-wwand v1.9.0, luci-proto-wwand v1.8.0, plus two later main commits) |
 
 ## Hardware verified (2026-10-24, main 3a12e9e, `hwtest/run.sh`)
 
