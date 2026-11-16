@@ -1671,6 +1671,14 @@ export function create(opts)
 				if (!fresh || (bound == fresh && centry.ctx.state == 'IDLE'))
 					continue;
 
+				// Its own switch passes through other cards: the slot comes
+				// up on whatever profile that eUICC had enabled before the
+				// wanted one can be (siminventory bind_plan, slot first).
+				// Released here, the second step never ran. The switch's
+				// step count and timer bound it instead.
+				if (bound != fresh && centry._sim_switch)
+					continue;
+
 				if (bound != fresh) {
 					sim_release(name, centry, sprintf('the modem now runs card %s', fresh));
 					continue;

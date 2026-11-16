@@ -354,7 +354,7 @@ export function install(self, o)
 				why, join('; ', reasons)));
 
 			// Deliberately NOT cleared on a later init pass. The object is
-			// created once per device attach (daemon.uc:3758), so a modem that
+			// created once per device attach (daemon.uc:3766), so a modem that
 			// really did reset comes back as a NEW instance with no debt — and
 			// a re-init of THIS instance means it did not, so the debt still
 			// holds. Deduplicated because a re-init re-derives the same reason
@@ -524,20 +524,26 @@ export function install(self, o)
 		let retry = self.timing.stuck_offline_retry ?? 600000;
 
 		let stuck = (why) => {
-			let now = time(), board = rec?.can_repower();
+			let now = time(), board = rec?.can_repower(), repowered = false;
 
 			if (board && now - (stuck_repowered[self.id] ?? 0) >= STUCK_REPOWER_EVERY) {
 				stuck_repowered[self.id] = now;
 				log('err', sprintf('modem stuck offline: %s — repowering it', why));
 
-				if (rec.usb_repower())
-					return;
+				repowered = rec.usb_repower();
 			}
 
-			self.control_note = STUCK_OFFLINE_NOTE;
-			log('err', sprintf('modem stuck offline: %s, %s — it needs a power cycle; retrying the reset in %d s',
-				why, board ? sprintf('and the board repowers it at most every %d s', STUCK_REPOWER_EVERY)
-				           : 'and nothing here can cut its power', retry / 1000));
+			// A repower that worked takes the modem off the bus and the
+			// teardown cancels the retry below. It is armed all the same: a
+			// board that reports success without cutting the modem's power (a
+			// wrong reset_gpio, a rail that feeds something else) would
+			// otherwise leave this init parked here with no timer at all.
+			if (!repowered) {
+				self.control_note = STUCK_OFFLINE_NOTE;
+				log('err', sprintf('modem stuck offline: %s, %s — it needs a power cycle; retrying the reset in %d s',
+					why, board ? sprintf('and the board repowers it at most every %d s', STUCK_REPOWER_EVERY)
+					           : 'and nothing here can cut its power', retry / 1000));
+			}
 
 			tm.retry = uloop.timer(retry, () => {
 				tm.retry = null;
@@ -1007,8 +1013,11 @@ export function install(self, o)
 	step_register = () => {
 		self.set_state('REGISTERING');
 		self.reg_detail = null;
-		self.last_reject = null;
 
+		// last_reject is NOT cleared here: a reject that costs a registered
+		// modem its registration arrives before the serving-system change
+		// that runs this step, and it is the cause to show while the modem
+		// searches. It ends with the next registration or the teardown.
 		self._arm_nas_event_report();
 		self._arm_nas_indications();
 		self._arm_wds_indications();

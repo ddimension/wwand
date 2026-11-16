@@ -21,6 +21,29 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
+- **Pre-release review of main since v1.8.0 (2026-11-16):** five readers
+  over the diff, nothing release-blocking; fixed from it: a two-step card
+  switch of an `option iccid` interface (slot, then eSIM profile) released
+  the interface on the card read between the steps (`daemon.uc`
+  modem_sim_refresh); a stuck-offline modem the board claimed to repower
+  was left without a retry timer (`modem_init_qmi.uc`); a pushed reject
+  that cost a registered modem its registration was cleared by the
+  re-register step; `modes 'all'` hid the 5G blocker; a cancelled read no
+  longer reads as "no QMI nr5g setting"; the Foxconn FCC unlock is tried
+  once per init again and no longer walks a torn-down instance on; `RING 1`
+  no longer ends a dial; `option iccid` is 18-20 digits everywhere.
+  **Left open, by reading only, none measured:** the CLAT IPv4 call ending
+  alone takes the IPv6 interface down with it (`context.uc`
+  _connection_lost); a throttle of unknown duration is given up after
+  `hold_max` and nothing re-arms it (MBIM/NCM); a bound interface on a modem
+  whose active slot is empty answers "switching" without a bound; a bound
+  interface between redials does not hold its card (`siminventory.uc`
+  bind_holder); `datapath_rmnet_nss` child_of matches by link basename and
+  could count a mainline WWAN netdev of the same name; native MBIM
+  `option modes` is compared unmasked by the device's classes, so a list
+  naming a RAT the modem lacks is rewritten on every init; `attach_info`
+  is not marked stale across a re-init; the board's running light keeps one
+  LED lit after exit.
 - **Pushed diagnostics on QMI (2026-11-16):** the modem now reports
   instead of being asked. NAS Network Reject (0x0068) puts the cause of a
   refused registration into `registration_detail` at once, with domain,

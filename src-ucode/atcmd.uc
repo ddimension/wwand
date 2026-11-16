@@ -1151,7 +1151,7 @@ export function create(transport, opts)
 
 			// RING stays a URC even here: it announces a call, it does not
 			// answer the dial
-			if (cur.dial && uc(line) != 'RING' && is_bare_urc(line))
+			if (cur.dial && !match(uc(line), /^RING( [0-9]+)?$/) && is_bare_urc(line))
 				return finish({ error: lc(line) }, cur.lines);
 
 			// a URC that lands between the lines of a response is NOT part of

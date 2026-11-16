@@ -730,7 +730,7 @@ config interface 'wan'
 	option password ''
 	option mtu ''                    # fixed MTU (else the pushed MTU when enabled)
 	option use_pushed_mtu '1'        # apply the network-advertised MTU
-	option iccid ''                  # bind to one SIM card (18-22 digits); the ifup
+	option iccid ''                  # bind to one SIM card (18-20 digits); the ifup
 	                                 #   switches to its slot / eSIM profile
 	option use_pushed_prefix '0'     # keep the pushed IPv4 prefix (default: /32 p-t-p)
 	option settings_poll '300'       # re-check pushed IP/DNS/MTU every N s (0 = off)

@@ -311,7 +311,7 @@ function ipa_mode_opt(v, warnings)
 	return null;
 }
 
-// `option iccid` of an interface: 18-22 digits (ITU-T E.118; a trailing F and
+// `option iccid` of an interface: 18-20 digits (ITU-T E.118; a trailing F and
 // blanks as the modems and the card print it are tolerated), else a warning
 // and no binding — a typo bound to no card would hold the interface down for
 // good, where unbound it at least connects.
@@ -322,8 +322,8 @@ function iccid_opt(v, name, warnings)
 
 	let id = siminventory.norm_iccid(sprintf('%s', v));
 
-	if (!id || !match(id, /^[0-9]{18,22}$/)) {
-		push(warnings, sprintf("interface %s: invalid iccid '%s', ignoring (18-22 digits)", name, v));
+	if (!id) {
+		push(warnings, sprintf("interface %s: invalid iccid '%s', ignoring (18-20 digits)", name, v));
 		return null;
 	}
 

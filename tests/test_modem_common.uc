@@ -2343,6 +2343,8 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 		'nr5g_blocker: no anchor in this cell -> nothing to explain');
 	eq(mc.nr5g_blocker(st({ endc_enabled: false }), null, 'lte'), null,
 		'nr5g_blocker: modes without nr5g are the operator\'s choice');
+	ok(index(mc.nr5g_blocker(st({ endc_enabled: false }), null, 'all') ?? '', 'EN-DC is off') >= 0,
+		'nr5g_blocker: modes all includes NR');
 	eq(mc.nr5g_blocker(null, null, null), null, 'nr5g_blocker: no state -> null');
 }
 

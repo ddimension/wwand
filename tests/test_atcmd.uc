@@ -1246,6 +1246,14 @@ tr8r.reply('\r\nRING\r\nOK\r\n');
 eq(err6r, null, 'engine: a dial still ends on OK');
 eq(urcs6r, [ 'RING' ], 'engine: RING during a dial stays a URC');
 
+let urcs6s = [], err6s = 'unset';
+let tr8s = fake_transport();
+let at8s = atcmd.create(tr8s, { log: silent, on_urc: (l) => push(urcs6s, l) });
+
+at8s.send('ATD+491701234567;', (e) => err6s = e);
+tr8s.reply('\r\nRING 1\r\nOK\r\n');
+eq([ err6s, urcs6s ], [ null, [ 'RING 1' ] ], 'engine: ...and so does the numbered form (RING 1)');
+
 // one buffer for the whole stream: a line split across a command boundary used
 // to be torn in half — its head dropped and its tail pushed into the NEXT
 // command's answer as if it were a reply

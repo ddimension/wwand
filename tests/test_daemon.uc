@@ -5083,6 +5083,16 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	eq(siminv_holder(d), null, 'iccid: ...and nothing holds the modem any more');
 	up('away');
 
+	// a two-step switch: the slot comes up on the profile that eUICC had
+	// enabled, not the wanted one — a step on the way, not a card change
+	evs.m0(modem, 'sim_refresh', { iccid: A, imsi: '262' });
+	ops = [];
+	evs.m0(modem, 'sim_refresh', { iccid: '89011111111111111111', imsi: '999' });
+	eq([ filter(ops, (o) => index(o, 'down:') == 0), d.contexts.away.wanted,
+	     d.contexts.away._sim_switch != null, d.status().contexts.away.sim.state ],
+	   [ [], true, true, 'switching' ],
+	   'iccid: another card read during its own switch does not take the interface down');
+
 	// the card came up and the modem registered: the next setup dials
 	modem.info.iccid = B;
 	modem.active_slot = 2;

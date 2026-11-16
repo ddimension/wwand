@@ -1785,8 +1785,14 @@ export function create(opts)
 			log('notice', sprintf('%s — trying Foxconn FCC unlock over the passthrough',
 				hw ? 'hardware radio switch is off' : 'the radio refuses to switch on'));
 
+			let gen = self._gen;
+
 			return self._pt_fcc_foxconn(fa, digest?.md5, (err, variant) => {
-				if (err?.error == 'cancelled')
+				// fcc_foxconn answers without an error whatever its requests
+				// returned, and its DMS client outlives the passthrough: after
+				// a teardown the pending one ends as a timeout, not as
+				// `cancelled`, and would walk a dead instance into do_register
+				if (err?.error == 'cancelled' || self._gen != gen || !self.mbim)
 					return;
 
 				if (err || !variant) {
@@ -3250,6 +3256,10 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
+		// the unlock is tried once per INIT: kept across a restart of this
+		// instance, a first attempt that failed for a passing reason (the
+		// passthrough not up yet) left every later init without one
+		self._fcc_tried = false;
 		// see modem.uc: make_fail refuses to arm a retry while this is raised,
 		// because a failure reported from INSIDE a teardown would arm it after
 		// the cancel pass below and restart a modem that is being stopped. The

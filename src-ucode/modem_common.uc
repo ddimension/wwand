@@ -2074,6 +2074,12 @@ export function apply_nr5g_mode(self, nas, log, cb)
 		return via_at();
 
 	nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
+		// the session went away under the read: not an answer about the
+		// modem, and its AT channel is closed too — via_at would warn that
+		// the setting cannot be applied on a modem that takes it
+		if (gerr?.error == 'cancelled')
+			return;
+
 		if (gerr || cur?.nr5g_disable_mode == null)
 			return via_at();
 
@@ -2115,7 +2121,8 @@ export function nr5g_blocker(st, dsd, modes)
 	if (!st?.nsa_available || dsd?.nr)
 		return null;
 
-	if (modes && !match(modes, /nr5g/))
+	// 'all' names no technology and includes NR (qmi_backend.parse_modes)
+	if (modes && modes != 'all' && !match(modes, /nr5g/))
 		return null;
 
 	if (st.disabled == 'nsa')
