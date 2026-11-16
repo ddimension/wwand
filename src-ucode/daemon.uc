@@ -6016,7 +6016,7 @@ export function create(opts)
 				// a client the modem's teardown destroyed is released by that
 				// teardown, which pays this callback `cancelled` from inside
 				// its release loop while the client is still on the modem's
-				// list (modem.uc:1903-1913) — a release from here would send
+				// list (modem.uc:2067-2077) — a release from here would send
 				// a second RELEASE_CID for the same CID
 				if (!c.destroyed)
 					m.extra_release(c);

@@ -288,6 +288,62 @@ scenario('plugin hold at init', {
 		eq(modem._wake_pending, false, 'hold at init: no second registered to come from the wake');
 	});
 
+// --- 1a1: what the network pushes while the modem tries to register -----------
+// A refused attach reaches reg_detail from the NAS reject indication, before
+// any registration probe ran; the attach parameters reach attach_info from the
+// WDS indication and, for an attach nobody saw, from the read after registering.
+let pushed = {};
+
+scenario('pushed reject and attach parameters', {
+	handlers: base_handlers({
+		GET_SERVING_SYSTEM: () => ({
+			serving_system: { registration: 0, cs_attach: 0, ps_attach: 0,
+			                  selected_network: 0, radio_ifs: [] },
+		}),
+		GET_LTE_ATTACH_PARAMS: { apn: 'internet', ip_type: 2, attached: 1 },
+	}),
+	guard_ms: 4000,
+	setup: (mock, modem) => {
+		uloop.timer(300, () => {
+			let rej = { radio_if: 8, service_domain: 2, reject_cause: 19,
+			            plmn: { mcc: 262, mnc: 2, mnc_pcs_digit: 0 }, ciot_mode: 2 };
+
+			mock.indicate(3, modem.nas.cid, 'NETWORK_REJECT_IND', rej);
+			mock.indicate(3, modem.nas.cid, 'NETWORK_REJECT_IND', rej);
+			mock.indicate(1, modem.wds_cfg.cid, 'LTE_ATTACH_PARAMS_IND', { valid: 0 });
+		});
+		uloop.timer(500, () => {
+			pushed.detail = modem.reg_detail;
+			pushed.count = modem.last_reject?.count;
+			pushed.attach = modem.attach_info;
+			mock.indicate(3, modem.nas.cid, 'SERVING_SYSTEM_IND', {
+				serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+				                  selected_network: 1, radio_ifs: [ 8 ] },
+				current_plmn: { mcc: 262, mnc: 2, description: 'vodafone.de' },
+			});
+		});
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(pushed.detail, { source: 'qmi', reject_cause: 19, reject_domain: 2, reject_rat: 'LTE',
+		                    reject_plmn: '262/02', ciot_mode: 'lte-m', reject_text: 'ESM failure' },
+		   'pushed reject: in reg_detail before any probe');
+		eq(pushed.count, 2, 'pushed reject: a repeat is counted, not a new reject');
+		eq(pushed.attach, { source: 'qmi', state_text: 'detached' }, 'pushed attach: the detach');
+		eq([ modem.reg_detail, modem.last_reject ], [ null, null ], 'pushed reject: gone once registered');
+		eq(length(mock.calls_for('GET_LTE_ATTACH_PARAMS')), 1,
+		   'attach parameters: read once registered (test_qmi_backend pins the decode)');
+		eq(modem._attach_pushed, true,
+		   'attach parameters: the pushed detach outranks that read');
+		eq(map(mock.calls_for('REGISTER_INDICATIONS'), (c) => join(',', sort(keys(c.args)))),
+		   [ 'network_reject', 'lte_cphy_ca', 'lte_cphy_ca_aggregated', 'nr5g_ca_sig_info',
+		     'nr5g_cell_freq_info', 'nr5g_bwp_info', 'network_time,serving_system_events,signal_info' ],
+		   'indications: the optional ones each in a request of their own');
+		eq(mock.calls_for('INDICATION_REGISTER')[0]?.args,
+		   { lte_attach_params: 1, rab_reject: 1, lte_attach_failure: 1, ipv6_prefix_update: 1 },
+		   'indications: the WDS ones registered on the configuration client');
+	});
+
 // --- 1a2: a re-init after the hold ended leaves no park behind ----------------
 // The modem object outlives a failed init (make_fail: teardown, then start()
 // on the same instance). Parked at the first pass, online at the second: the

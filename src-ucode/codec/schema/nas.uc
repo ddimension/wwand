@@ -26,13 +26,34 @@ export const REJECT_CAUSE = {
 	'13': 'roaming not allowed in this tracking area',
 	'14': 'EPS services not allowed in this PLMN',
 	'15': 'no suitable cells in tracking area',
+	'16': 'MSC temporarily not reachable',
+	'17': 'network failure',
+	'18': 'CS domain not available',
+	'19': 'ESM failure',
+	'20': 'MAC failure',
+	'21': 'synch failure',
 	'22': 'congestion',
+	'23': 'UE security capabilities mismatch',
+	'24': 'security mode rejected, unspecified',
 	'25': 'not authorized for this CSG',
+	'26': 'non-EPS authentication unacceptable',
 	'33': 'requested service option not subscribed',
 	'34': 'service option temporarily out of order',
 	'35': 'requested service option not subscribed (35)',
+	'39': 'CS service temporarily not available',
+	'40': 'no EPS bearer context activated',
 	'42': 'severe network failure',
 };
+
+// QmiNasNetworkServiceDomain (qmi-enums-nas.h, libqmi 1.38), as the Network
+// Reject indication and the system info carry it
+export const SERVICE_DOMAIN = { '0': 'none', '1': 'CS', '2': 'PS', '3': 'CS+PS' };
+
+// The CIoT mode the modem was camped in when a registration was refused
+// (NETWORK_REJECT_IND TLV 0x12). Not in libqmi 1.38; values from the vendor
+// IDL (docs/qmi-beyond-libqmi.md), not yet seen on a modem here. Spelled like
+// codec/schema/rat.uc spells the same technologies.
+export const CIOT_MODE = { '1': 'lte', '2': 'lte-m', '3': 'nb-iot', '4': 'nb-iot-ntn' };
 
 // QmiNasPsAttachAction (qmi-enums-nas.h:570-571, libqmi 1.38)
 export const PS_ATTACH = 1;
@@ -202,9 +223,87 @@ export default {
 				network_time:                { t: 0x17, f: 'u8' },
 				system_info:                 { t: 0x18, f: 'u8' },
 				signal_info:                 { t: 0x19, f: 'u8' },
+				// libqmi 1.38 "Network Reject Information": the indication on,
+				// and whether a system info indication that differs only in
+				// its reject cause is held back
+				network_reject:              { t: 0x21, f: { enable: 'u8', suppress_system_info: 'u8' } },
+				// The rest is not in libqmi 1.38 (docs/qmi-beyond-libqmi.md).
+				// A firmware answers MissingArgument (17) when it knows NONE
+				// of the TLVs in a request, so these go in requests of their
+				// own (modem.uc _arm_nas_indications): 0x28 accepted by the
+				// RG502Q-EA, EG06-E, BG96, BM806U-E1 and RG650E-EU, the four
+				// above it by the RG650E-EU alone (HW-read 2026-11-16).
+				lte_cphy_ca:                 { t: 0x28, f: 'u8' },
+				lte_cphy_ca_aggregated:      { t: 0x54, f: 'u8' },
+				nr5g_bwp_info:               { t: 0x5D, f: 'u8' },
+				nr5g_cell_freq_info:         { t: 0x62, f: 'u8' },
+				nr5g_ca_sig_info:            { t: 0x66, f: 'u8' },
 			},
 			resp: {},
 		},
+
+		// A registration the network refused, pushed as it happens: the cause
+		// (TS 24.008 / 24.301 value, REJECT_CAUSE above), the domain and the
+		// radio interface. libqmi 1.38 "Network Reject" (indication 0x0068)
+		// defines 0x01-0x03, 0x10 and 0x11. 0x12, 0x14 and 0x15 are beyond it
+		// (vendor IDL, docs/qmi-beyond-libqmi.md): the CIoT mode camped in,
+		// whether the attempt counter reached its maximum, and who started
+		// the procedure (0 the UE, 1 the network).
+		NETWORK_REJECT_IND: {
+			id: 0x0068,
+			ind: {
+				radio_if:       { t: 0x01, f: 'u8' },
+				service_domain: { t: 0x02, f: 'u8' },
+				reject_cause:   { t: 0x03, f: 'u8' },
+				plmn:           { t: 0x10, f: { mcc: 'u16', mnc: 'u16', mnc_pcs_digit: 'u8' } },
+				ciot_mode:      { t: 0x12, f: 'u32' },
+				max_attempts:   { t: 0x14, f: 'u8' },
+				proc_type:      { t: 0x15, f: 'u32' },
+			},
+		},
+
+		// Carrier-aggregation changes, pushed. None of these is in libqmi 1.38
+		// (docs/qmi-beyond-libqmi.md). wwand uses them as a TRIGGER to read
+		// the carrier list again (modem.uc _ca_changed) and does not rely on
+		// a single field; the few declared are fixed-width scalars of the
+		// vendor IDL, for the debug log. The three LTE ones arrive on the
+		// RG650E-EU (HW-seen 2026-11-16); the NR ones have not been seen.
+		// THE AGGREGATED BANDWIDTH IS NOT IN MHZ: that modem reported 400,
+		// 300, 200, 100 as SCells went — the count of resource blocks would
+		// fit (100 per 20 MHz carrier), which is a guess. The SCell of 0x0082
+		// has the layout GET_LTE_CPHY_CA_INFO answers in its TLV 0x10 (8
+		// bytes on the RG502Q-EA, 2026-11-16).
+		// 0x0082 and 0x00C3 come with registration TLV 0x28, 0x0132 with
+		// 0x54, 0x015B with 0x66, 0x0153 with 0x62, 0x013F with 0x5D.
+		LTE_CPHY_CA_IND: {
+			id: 0x0082,
+			ind: {
+				scell:             { t: 0x01, f: { pci: 'u16', earfcn: 'u16', state: 'u32' } },
+				aggregated_dl_bw: { t: 0x14, f: 'u16' },
+				scells_configured: { t: 0x15, f: 'u16' },
+			},
+		},
+		LTE_CPHY_CA_AGG_DL_BW_IND: {
+			id: 0x00C3,
+			ind: {
+				aggregated_dl_bw: { t: 0x10, f: 'u16' },
+				scells_configured: { t: 0x11, f: 'u16' },
+			},
+		},
+		LTE_CPHY_CA_AGGREGATED_IND: {
+			id: 0x0132,
+			ind: {
+				aggregated_dl_bw: { t: 0x12, f: 'u16' },
+			},
+		},
+		NR5G_CA_SIG_INFO_IND: {
+			id: 0x015B,
+			ind: {
+				configured: { t: 0x10, f: 'u8' },
+			},
+		},
+		NR5G_SERVING_CELL_FREQ_INFO_IND: { id: 0x0153, ind: {} },
+		NR5G_RRC_BWP_INFO_IND:           { id: 0x013F, ind: {} },
 
 		// NOTE the MNC-PCS-digit TLV has a DIFFERENT id in the response (0x27)
 		// and the indication (0x29) — one of the several request/response id

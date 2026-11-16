@@ -807,4 +807,87 @@ backend.fcc_foxconn(d6, 'auto', '866793040319116', md5, nolog, (v) => got = v);
 eq(d6.sent[3]?.args?.magic_string, 'saltd429b08bc5dfc1a6493e5a5055e0016c',
 	'foxconn: the MBIM IMEI stands in when GET_IDS has none');
 
+// --- pushed diagnostics: network reject, LTE attach ---------------------------
+// Each indication is decoded from a hand-built wire buffer by the schema, then
+// normalised by the backend — a wrong TLV id leaves the field null.
+
+let ind = (msg, bytes) => tlvmod.unpack(msg.ind, bytes);
+let nas_m = nasmod.default.messages, wds_m = wdsmod.default.messages;
+
+// EMM 19 on LTE-M: radio interface LTE (8), PS (2), cause 19, PLMN 262/02
+// without a PCS digit, CIoT mode 2, last attempt
+let rej = backend.network_reject(ind(nas_m.NETWORK_REJECT_IND,
+	tlv(0x01, u8(8)) + tlv(0x02, u8(2)) + tlv(0x03, u8(19)) +
+	tlv(0x10, u16(262) + u16(2) + u8(0)) + tlv(0x12, u32(2)) + tlv(0x14, u8(1))));
+eq(rej, { reject_cause: 19, reject_domain: 2, reject_rat: 'LTE', reject_plmn: '262/02',
+          ciot_mode: 'lte-m', reject_final: true }, 'network reject: every field decoded');
+eq(backend.reject_line(rej), 'cause 19 (ESM failure), PS, lte-m, 262/02, last attempt',
+	'network reject: the log line');
+
+// the three TLVs libqmi defines as mandatory, and a three-digit MNC
+let rej2 = backend.network_reject(ind(nas_m.NETWORK_REJECT_IND,
+	tlv(0x01, u8(5)) + tlv(0x02, u8(1)) + tlv(0x03, u8(111)) + tlv(0x10, u16(310) + u16(30) + u8(1))));
+eq(rej2, { reject_cause: 111, reject_domain: 1, reject_rat: 'UMTS', reject_plmn: '310/030' },
+	'network reject: no CIoT mode, MNC with its PCS digit');
+eq(backend.reject_line(rej2), 'cause 111, CS, UMTS, 310/030', 'network reject: an unnamed cause stays a number');
+eq(backend.network_reject(ind(nas_m.NETWORK_REJECT_IND, tlv(0x01, u8(8)))), null,
+	'network reject: no cause, no reject');
+
+eq(backend.with_reject({ source: 'qmi', limited: true }, rej2),
+	{ source: 'qmi', limited: true, reject_cause: 111, reject_domain: 1, reject_rat: 'UMTS', reject_plmn: '310/030' },
+	'with_reject: laid over the system info read');
+eq(backend.with_reject(null, rej2).source, 'qmi', 'with_reject: stands alone when the read failed');
+let rd0 = { source: 'qmi', reject_cause: 15 };
+ok(backend.with_reject(rd0, null) === rd0, 'with_reject: nothing pushed, nothing changed');
+
+// LTE attach parameters, the bytes the RG502Q-EA sent on 2026-11-16: detach,
+// then attach with APN "plus", IPv4 and its address
+eq(backend.lte_attach(ind(wds_m.LTE_ATTACH_PARAMS_IND, tlv(0x01, u8(0)))),
+	{ source: 'qmi', state_text: 'detached' }, 'lte attach: valid 0 is a detach');
+eq(backend.lte_attach(ind(wds_m.LTE_ATTACH_PARAMS_IND,
+	tlv(0x01, u8(1)) + tlv(0x10, 'plus') + tlv(0x11, u8(0)) + tlv(0x12, "\xad\x7b\xcd\x0a"))),
+	{ source: 'qmi', state_text: 'attached', apn: 'plus', pdp_type: 'ipv4', ipv4: '10.205.123.173' },
+	'lte attach: APN, IP type and address');
+// the read answers the same attach with other TLV ids (libqmi 0x10-0x12)
+eq(backend.lte_attach(tlvmod.unpack(wds_m.GET_LTE_ATTACH_PARAMS.resp, RESULT_OK +
+	tlv(0x10, 'plus') + tlv(0x11, u8(0)) + tlv(0x12, u8(1)) + tlv(0x13, "\xad\x7b\xcd\x0a"))),
+	{ source: 'qmi', state_text: 'attached', apn: 'plus', pdp_type: 'ipv4', ipv4: '10.205.123.173' },
+	'lte attach: the read gives the same result');
+eq(backend.lte_attach(ind(wds_m.LTE_ATTACH_PARAMS_IND,
+	tlv(0x01, u8(1)) + tlv(0x10, '') + tlv(0x11, u8(2)) +
+	tlv(0x15, "\x2a\x01\x05\x98" + "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01" + u8(64)))),
+	{ source: 'qmi', state_text: 'attached', apn: null, pdp_type: 'ipv4v6',
+	  ipv6: '2a01:598:0:0:0:0:0:1/64' },
+	'lte attach: an empty APN is null, the IPv6 address carries its length');
+
+// attach failure: PLMN 262/02 as on the SIM (62 F2 20), reason type 6 (3GPP), 33
+let af = backend.attach_failure(ind(wds_m.LTE_ATTACH_FAILURE_INFO_IND,
+	tlv(0x01, "\x62\xf2\x20") + tlv(0x02, u16(6) + u16(33))));
+eq([ af.type, af.code, af.plmn ], [ 6, 33, '262/02' ], 'attach failure: reason and PLMN');
+ok(length(af.text) > 0, 'attach failure: the reason has words');
+eq(backend.attach_failure(ind(wds_m.LTE_ATTACH_FAILURE_INFO_IND,
+	tlv(0x01, "\x13\x00\x62") + tlv(0x02, u16(6) + u16(29)))).plmn, '310/260',
+	'attach failure: a three-digit MNC');
+eq(backend.attach_failure({}), null, 'attach failure: no reason, nothing');
+
+eq(ind(wds_m.RAB_REJECT_IND, tlv(0x01, u32(10))).cause, 10, 'rab reject: cause decoded');
+eq(backend.rab_reject_text(10), 'congestion', 'rab reject: in words');
+eq(backend.rab_reject_text(99), 'cause 99', 'rab reject: an unknown cause stays a number');
+
+let pfx = ind(wds_m.IPV6_PREFIX_UPDATE_IND,
+	tlv(0x01, "\x2a\x01\x05\x98" + "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" + u8(56)) +
+	tlv(0x02, u32(1)) + tlv(0x03, u32(3)));
+eq([ pfx.prefix.plen, pfx.type, pfx.status ], [ 56, 1, 3 ], 'ipv6 prefix update: prefix, type, status');
+
+// the registration TLVs go out with the ids measured on the modems
+eq(tlvmod.pack(nas_m.REGISTER_INDICATIONS.req, { network_reject: { enable: 1, suppress_system_info: 0 } }),
+	tlv(0x21, u8(1) + u8(0)), 'register: network reject is TLV 0x21, two bytes');
+eq(tlvmod.pack(nas_m.REGISTER_INDICATIONS.req, { lte_cphy_ca: 1 }), tlv(0x28, u8(1)),
+	'register: LTE carrier aggregation is TLV 0x28');
+eq(tlvmod.pack(wds_m.INDICATION_REGISTER.req, { lte_attach_params: 1 }), tlv(0x22, u8(1)),
+	'register: LTE attach parameters is WDS TLV 0x22');
+let cai = ind(nas_m.LTE_CPHY_CA_IND, tlv(0x01, u16(409) + u16(6300) + u32(2)) + tlv(0x14, u16(30)));
+eq([ cai.scell.pci, cai.scell.earfcn, cai.scell.state, cai.aggregated_dl_bw ], [ 409, 6300, 2, 30 ],
+	'lte ca indication: the SCell and the aggregated bandwidth');
+
 done('test_qmi_backend');

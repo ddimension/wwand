@@ -2684,6 +2684,34 @@ modems leave the QMI reject cause empty but report limited service:
                          "reject_text": "requested service option not subscribed" }
 ```
 
+On QMI the network's own word arrives as it happens: the NAS Network Reject
+indication carries the cause of every refused registration, and wwand puts it
+into `registration_detail` at once (and logs `network reject: …`, the first
+as a notice, repeats at debug). It adds `reject_domain` (1 CS, 2 PS, 3 both),
+`reject_rat`, `reject_plmn` and, on a modem that says so, `ciot_mode`
+(`lte-m`, `nb-iot`) and `reject_final` (the modem's last attempt). It wins
+over the system info read and over `AT+CEER`. A reject of one domain on a
+registered modem is logged only. The MBIM passthrough does not deliver NAS
+indications, so MBIM modems keep the read.
+
+```json
+"registration_detail": { "source": "qmi", "reject_cause": 19,
+                         "reject_text": "ESM failure", "reject_domain": 2,
+                         "reject_rat": "LTE", "reject_plmn": "262/02",
+                         "ciot_mode": "lte-m" }
+```
+
+**attach_info on QMI** — `status` → `attach_info` says what the LTE attach was
+done with: `{ source: 'qmi', state_text: 'attached', apn, pdp_type, ipv4?,
+ipv6? }`, or `state_text: 'detached'`. `apn` is the one the network settled
+on, which for an empty attach APN is its default. It comes from the WDS LTE
+Attach Parameters indication and, for an attach that happened before wwand
+listened, from one read after registering. Three more WDS indications are
+registered, and nothing acts on them, because no modem here has sent one
+yet: `LTE attach failed: …` is logged and kept as `attach_info.failure
+{ type, code, text, plmn }`; `service request refused: …` and `IPv6 prefix
+update: …` are logged only.
+
 **Data-system mode** — `modem_cells` → `dsd { mode, lte, nr, source }` reports
 the actual data system (`LTE` / `NSA` / `SA`) from the QMI DSD service, falling
 back to the QENG serving line (AT) and then the coarse NAS radio interfaces.
@@ -2697,7 +2725,10 @@ from QMI `GET_LTE_CPHY_CA_INFO`, or over AT where that is unavailable:
 vendors. QMI `GET_RF_BAND_INFO` then adds the primary carrier of a leg the
 list does not have yet, with band, channel and bandwidth: the NR row of an
 NSA or SA link (no QMI message lists NR carriers), and the LTE PCC of a modem
-whose CA info is unavailable (a T99W175 while idle). This follows Android's
+whose CA info is unavailable (a T99W175 while idle). On QMI the list is
+also read again within a second of a carrier-aggregation indication (LTE
+0x0082 / 0x00C3 / 0x0132, NR 0x015B / 0x0153 / 0x013F, where the firmware
+has them), not only at the slow tick. This follows Android's
 `PhysicalChannelConfig`, which is built from the same reads. The NR row also
 fills `serving.nr.bandwidth_mhz`. NR secondary carriers (NR-CA) are only
 listed where the AT read names them (Quectel); libqmi has no QMI read for

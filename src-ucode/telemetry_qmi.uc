@@ -309,7 +309,7 @@ export function install(self, o)
 	// It is a step after the choice, not a rung of it: counted as a CA answer
 	// it would retire the RG650E's AT QCAINFO, which lists the LTE SCCs that
 	// RF band info cannot.
-	self._fetch_ca_info = function(cb) {
+	let fetch_ca = (cb) => {
 		let store = (ca) => {
 			if (!self.nas) {
 				if (self.cells) self.cells.ca = ca ?? [];
@@ -342,6 +342,29 @@ export function install(self, o)
 				return tel_vendor.read_ca_at(self, (e, ca) => store(ca ?? []));
 			store([]);
 		}, { reprobe: true, log: log, what: 'carrier aggregation' });
+	};
+
+	// ONE READ AT A TIME. The telemetry tick and a carrier-aggregation
+	// indication (modem.uc _ca_changed) both come here, and two reads in
+	// flight answer in any order: the tick's, started before an SCell change,
+	// could land after the indication's and put the old list back. A call
+	// that finds a read running asks for one more after it and returns.
+	self._fetch_ca_info = function(cb) {
+		if (self._ca_busy) {
+			self._ca_again = true;
+			return cb();
+		}
+
+		self._ca_busy = true;
+		fetch_ca(() => {
+			self._ca_busy = false;
+
+			if (!self._ca_again)
+				return cb();
+
+			self._ca_again = false;
+			self._fetch_ca_info(cb);
+		});
 	};
 
 	// settle the data-system mode (NSA/SA/LTE): refresh the QENG serving detail

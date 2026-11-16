@@ -102,4 +102,41 @@ uloop.init();
 	eq(telemetry, [ 13, 14, 15 ], 'tick: a telemetry line only for rounds with an answer');
 }
 
+// --- one carrier read at a time ------------------------------------------------
+// The tick and a carrier-aggregation indication both read the list. The answer
+// of a read started BEFORE the change must not land after the newer one: a
+// second call during a read asks for one more read and returns at once.
+{
+	let pending = [], asked = 0;
+	let self = {
+		config: {}, cells: {}, _ca_be: 'qmi',
+		nas: {
+			request: (name, args, cb) => {
+				if (name == 'GET_LTE_CPHY_CA_INFO') {
+					asked++;
+					push(pending, cb);
+				}
+				else
+					cb({ error: 'qmi', code: 71 }, null);
+				return true;
+			},
+		},
+	};
+
+	tq.install(self, { log: () => null, emit: () => null });
+
+	let done_cbs = [];
+	let answer = (earfcn) => shift(pending)(null, { pcell: { pci: 1, earfcn: earfcn, dl_bandwidth: 5, band: 122 } });
+
+	self._fetch_ca_info(() => push(done_cbs, 'tick'));
+	self._fetch_ca_info(() => push(done_cbs, 'indication'));
+	eq([ asked, done_cbs ], [ 1, [ 'indication' ] ], 'ca: a call during a read does not start a second one');
+
+	answer(1300);
+	eq(asked, 2, 'ca: ...it makes the running read start one more when it ends');
+	answer(6300);
+	eq([ self.cells.ca?.[0]?.earfcn, done_cbs, self._ca_busy ], [ 6300, [ 'indication', 'tick' ], false ],
+		'ca: the list is the newest answer, and the first caller hears back once');
+}
+
 done('test_telemetry_qmi');

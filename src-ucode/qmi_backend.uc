@@ -16,6 +16,8 @@ import * as backend from 'wwand.backend';
 import * as dmsmod from 'wwand.codec.schema.dms';
 import * as dsdmod from 'wwand.codec.schema.dsd';
 import * as nasmod from 'wwand.codec.schema.nas';
+import * as wdsmod from 'wwand.codec.schema.wds';
+import * as callend from 'wwand.callend';
 
 const OPMODE = {
 	online:    dmsmod.OPMODE_ONLINE,
@@ -330,6 +332,141 @@ export function get_reg_detail(nas, cb)
 
 		cb(d);
 	}, { no_recovery: true });
+};
+
+// network_reject(data): a NAS NETWORK_REJECT_IND as the fields reg_detail
+// carries — { reject_cause, reject_domain, reject_rat, reject_plmn?,
+// ciot_mode?, reject_final? } — or null when it names no cause. reject_rat is
+// the radio interface by name, ciot_mode what the modem was camped in
+// ('lte-m', 'nb-iot'; absent on a modem that does not say), reject_final
+// true when the modem gave up after its last attempt. Pure.
+export function network_reject(data)
+{
+	if (data?.reject_cause == null)
+		return null;
+
+	let r = {
+		reject_cause: data.reject_cause,
+		reject_domain: data.service_domain,
+		reject_rat: (data.radio_if != null) ? nasmod.radio_if_name(data.radio_if) : null,
+	};
+
+	// the PCS digit says whether the MNC has three digits: 310/030 and
+	// 310/30 are two operators
+	if (data.plmn)
+		r.reject_plmn = sprintf(data.plmn.mnc_pcs_digit ? '%03d/%03d' : '%03d/%02d',
+			data.plmn.mcc, data.plmn.mnc);
+
+	let ciot = nasmod.CIOT_MODE[sprintf('%d', data.ciot_mode ?? 0)];
+
+	if (ciot)
+		r.ciot_mode = ciot;
+
+	if (data.max_attempts)
+		r.reject_final = true;
+
+	return r;
+};
+
+// reject_line(r): one log line for a network_reject() result,
+// "cause 19 (ESM failure), PS, lte-m, 262/02".
+export function reject_line(r)
+{
+	let text = nasmod.REJECT_CAUSE[sprintf('%d', r.reject_cause)];
+	let parts = [ text ? sprintf('cause %d (%s)', r.reject_cause, text)
+	                   : sprintf('cause %d', r.reject_cause) ];
+	let dom = nasmod.SERVICE_DOMAIN[sprintf('%d', r.reject_domain ?? -1)];
+
+	if (dom && dom != 'none')
+		push(parts, dom);
+
+	if (r.ciot_mode ?? r.reject_rat)
+		push(parts, r.ciot_mode ?? r.reject_rat);
+
+	if (r.reject_plmn)
+		push(parts, r.reject_plmn);
+
+	if (r.reject_final)
+		push(parts, 'last attempt');
+
+	return join(', ', parts);
+};
+
+// with_reject(d, rej): a registration detail with the pushed reject laid over
+// it. The indication wins over the system info read: it names the cause on
+// modems that leave the system info's reject TLV empty, and it is the newer
+// of the two. Returns d itself without a reject. Pure.
+export function with_reject(d, rej)
+{
+	if (!rej)
+		return d;
+
+	let out = { ...(d ?? { source: 'qmi' }) };
+
+	for (let k in [ 'reject_cause', 'reject_domain', 'reject_rat', 'reject_plmn',
+	                'ciot_mode', 'reject_final' ])
+		if (rej[k] != null)
+			out[k] = rej[k];
+
+	return out;
+};
+
+const ATTACH_PDP = { '0': 'ipv4', '1': 'ipv6', '2': 'ipv4v6' };
+
+// lte_attach(data): the LTE attach as status `attach_info` carries it (the
+// shape modem_mbim.uc fills from MBIM LTE Attach Info), from a WDS
+// LTE_ATTACH_PARAMS_IND or a GET_LTE_ATTACH_PARAMS answer:
+// { source: 'qmi', state_text: 'attached', apn, pdp_type, ipv4?, ipv6? } or
+// { source: 'qmi', state_text: 'detached' }. apn is null for an empty one.
+// The indication says `valid`, the read `attached`. Pure.
+export function lte_attach(data)
+{
+	if (!(data?.valid ?? data?.attached))
+		return { source: 'qmi', state_text: 'detached' };
+
+	let a = {
+		source: 'qmi',
+		state_text: 'attached',
+		apn: length(data.apn ?? '') ? data.apn : null,
+		pdp_type: ATTACH_PDP[sprintf('%d', data.ip_type ?? -1)] ?? null,
+	};
+
+	if (data.ipv4 && data.ipv4 != '0.0.0.0')
+		a.ipv4 = data.ipv4;
+
+	if (data.ipv6?.addr)
+		a.ipv6 = sprintf('%s/%d', data.ipv6.addr, data.ipv6.plen);
+
+	return a;
+};
+
+// attach_failure(data): a WDS LTE_ATTACH_FAILURE_INFO_IND as
+// { type, code, text, plmn? } — the reason read like a verbose call end
+// reason (callend.describe), the PLMN from its three BCD bytes. Pure.
+export function attach_failure(data)
+{
+	if (!data?.reason)
+		return null;
+
+	let d = callend.describe(null, data.reason, null);
+	let f = { type: data.reason.type, code: data.reason.reason, text: d?.text ?? null };
+	let p = data.plmn;
+
+	if (type(p) == 'string' && length(p) == 3) {
+		let b = [ ord(p, 0), ord(p, 1), ord(p, 2) ];
+		let mnc3 = b[1] >> 4;
+
+		f.plmn = sprintf('%d%d%d/%d%d%s', b[0] & 15, b[0] >> 4, b[1] & 15,
+			b[2] & 15, b[2] >> 4, mnc3 == 15 ? '' : sprintf('%d', mnc3));
+	}
+
+	return f;
+};
+
+// rab_reject_text(cause): RAB_REJECT_IND cause in words.
+export function rab_reject_text(cause)
+{
+	return wdsmod.RAB_REJECT_CAUSE[sprintf('%d', cause ?? 0)] ?? sprintf('cause %d', cause ?? 0);
 };
 
 // --- context (WDS) operations ------------------------------------------------

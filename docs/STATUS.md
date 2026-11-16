@@ -21,6 +21,28 @@ state buried at the top invites reading a months-old entry as present tense.
   run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
   translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
   build of the same branch runs** — a push cancels it.
+- **Pushed diagnostics on QMI (2026-11-16):** the modem now reports
+  instead of being asked. NAS Network Reject (0x0068) puts the cause of a
+  refused registration into `registration_detail` at once, with domain,
+  radio interface, PLMN and — where the firmware says it — the CIoT mode
+  (`modem.uc _on_network_reject`). WDS LTE Attach Parameters (0x00C6) fills
+  `attach_info` with the APN and IP type the attach really used, plus one
+  libqmi read (0x0085) after registering. Carrier-aggregation indications
+  (LTE 0x0082/0x00C3/0x0132, NR 0x015B/0x0153/0x013F) start a read of the
+  carrier list a second later. WDS LTE attach failure (0x0103) is logged
+  and kept as `attach_info.failure`; RAB reject (0x00CF) and IPv6 prefix
+  update (0x0134) are logged only. Nothing acts on these three.
+  What was measured and what was not is in `qmi-beyond-libqmi.md`. Seen on
+  the wire (2026-11-16): 0x00C6 on the RG502Q-EA, and the three LTE
+  carrier indications on the Chateau's RG650E-EU. `attach_info` is filled
+  on the RG502Q-EA, BM806U-E1 and RG650E-EU. Not seen: a Network Reject —
+  no modem here was refused while it listened, and the BG96 (5.201) goes
+  straight to GSM without trying LTE-M — and anything NR; the NR
+  registrations are accepted by the RG650E-EU only. Not done from the same
+  list: WDS 0x00AD (remove a delegated prefix — never sent), 0x00E3 (no
+  modem here has it), and 0x00CE as a read — its causes are EMM-level
+  service-request rejects, not the ESM/SM cause of a refused dial. The MBIM
+  passthrough delivers no NAS indications, so this is QMI only.
 - **Raw QMI/MBIM from the CLI (2026-11-15):** `wwandctl qmi` and
   `wwandctl mbim` (ubus `modem_qmi_raw` / `modem_mbim_raw`) send one request
   and print the answer undecoded. CTL and the QMI passthrough UUID are

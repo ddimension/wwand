@@ -94,7 +94,7 @@ export function pin_block_reason(retries, force)
 
 // A CARD POLL MUST NOT OUTLIVE ITS SESSION. The retries below re-enter
 // unlock_uim/unlock_dms, which re-read modem.uim / modem.dms at entry — and
-// teardown nulls those (modem.uc:1917). An anonymous timer firing after an
+// teardown nulls those (modem.uc:2081). An anonymous timer firing after an
 // unplug or a config reload inside the up-to-10 s poll window therefore
 // dereferenced null, and a throw inside a uloop callback ends the program: the
 // next timer never runs and uloop.run() does not return (measured 2026-09-19).
@@ -133,7 +133,7 @@ function watch_card_ready(modem, uim, on_ready)
 {
 	// THE WAITER LIVES ON THE CLIENT, and carries an owner token. A single
 	// modem-wide slot let two unlocks steal from each other: init calls
-	// sim.unlock (modem_init_qmi.uc:746) while the eSIM path schedules its own
+	// sim.unlock (modem_init_qmi.uc:747) while the eSIM path schedules its own
 	// (esim_bridge.uc:651), and nothing serialises them — the second overwrote
 	// the first, and whichever finished first cleared the OTHER's waiter.
 	let mine = {};

@@ -200,7 +200,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1917) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:2081) and set_opmode dereferences it unguarded (qmi_backend.uc:68),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:762, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -208,7 +208,7 @@ export function create(opts)
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
 	// callback arrives the generation has already moved.
 	// EACH WAIT OWNS ITS OWN TIMER AND ITS OWN DEBT. `tm.settle` is a shared
-	// one-shot slot, also written by the init chain (modem_init_qmi.uc:611,
+	// one-shot slot, also written by the init chain (modem_init_qmi.uc:612,
 	// :696, :994), so parking radio-bounce waits there let a second one
 	// overwrite the first: teardown then cancelled only the newest, the older
 	// timer survived unreachable, and whichever fired first cleared the other's
@@ -719,7 +719,7 @@ export function create(opts)
 				// caller would wait for a modem that is not going anywhere.
 				// That includes NO_EFFECT ("that changed nothing"), which
 				// set_opmode deliberately does NOT fold into success for
-				// 'reset' (qmi_backend.uc:67) so that it arrives here.
+				// 'reset' (qmi_backend.uc:69) so that it arrives here.
 				if (err)
 					return cb({ error: 'qmi', detail: err });
 
@@ -1541,7 +1541,7 @@ export function create(opts)
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
-			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:590-593), so it
+			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:685-688), so it
 			// carries the same raw WCDMA Ec/Io and needs the same conversion —
 			// an indication landing between refreshes would otherwise flip the
 			// unit back under a consumer that just read the polled value
@@ -1587,6 +1587,174 @@ export function create(opts)
 			self.rf_bands = map(data.rf_band_info, (b) =>
 				({ ...b, name: nasmod.active_band_name(b.band) }));
 		});
+		self.nas.on('NETWORK_REJECT_IND', (data) => self._on_network_reject(data));
+
+		// one function per name: a closure made in a loop body would see the
+		// loop variable's LAST value in every handler
+		let on_ca = (name) => self.nas.on(name, (data) => self._ca_changed(name, data));
+
+		map([ 'LTE_CPHY_CA_IND', 'LTE_CPHY_CA_AGG_DL_BW_IND', 'LTE_CPHY_CA_AGGREGATED_IND',
+		      'NR5G_CA_SIG_INFO_IND', 'NR5G_SERVING_CELL_FREQ_INFO_IND',
+		      'NR5G_RRC_BWP_INFO_IND' ], on_ca);
+	};
+
+	// A registration the network refused, as it happens. The cause goes to
+	// reg_detail at once while the modem is not registered — the system info
+	// read leaves it empty on many modems, and AT+CEER is not asked before
+	// the registration probe — and stays in last_reject for that probe
+	// (regdetail.uc). A modem retries a refused attach several times and
+	// reports each one: the first is a notice, the repeats are debug.
+	self._on_network_reject = function(data) {
+		let r = qmi_backend.network_reject(data);
+
+		if (!r)
+			return;
+
+		let line = qmi_backend.reject_line(r);
+		let n = (self.last_reject?.line == line) ? self.last_reject.count + 1 : 1;
+
+		self.last_reject = { ...r, line: line, count: n, at: time() };
+		log(n == 1 ? 'notice' : 'debug', sprintf('network reject: %s%s', line,
+			n > 1 ? sprintf(' (%d times)', n) : ''));
+
+		// a reject of one domain on a modem that is registered (the CS half
+		// of a combined attach) is logged, and is not why it is "not
+		// registered"
+		if (self.reg?.registration == nasmod.REG_REGISTERED)
+			return;
+
+		let d = qmi_backend.with_reject(self.reg_detail, r);
+
+		d.reject_text = nasmod.REJECT_CAUSE[sprintf('%d', r.reject_cause)] ??
+			sprintf('reject cause %d', r.reject_cause);
+		delete d.stale;
+		self.reg_detail = d;
+	};
+
+	// A carrier-aggregation indication is a TRIGGER, not a source: the carrier
+	// list is read again through the ladder the telemetry tick uses
+	// (_fetch_ca_info), so the status page follows an SCell coming or going
+	// within a second instead of at the next slow tick. The settle time folds
+	// the burst a reconfiguration sends (one indication per SCell) into one
+	// read.
+	self._ca_changed = function(name, data) {
+		log('debug', sprintf('carrier aggregation changed (%s%s)', name,
+			data?.aggregated_dl_bw != null
+				? sprintf(', aggregated DL bandwidth %d', data.aggregated_dl_bw) : ''));
+
+		if (self.state != 'READY' || !self.cells || tm.ca_ind)
+			return;
+
+		tm.ca_ind = uloop.timer(1000, () => {
+			tm.ca_ind = null;
+
+			if (self.state == 'READY' && self.nas && self.cells)
+				self._fetch_ca_info(() => null);
+		});
+	};
+
+	// The indications beyond the three the bring-up needs, each in a request
+	// of its own and best effort: a firmware answers MissingArgument when it
+	// knows none of the TLVs in a request (schema/nas.uc REGISTER_INDICATIONS),
+	// and that must cost neither the others nor the registration.
+	self._arm_nas_indications = function() {
+		if (!self.nas || self._nas_ind_armed)
+			return;
+
+		self._nas_ind_armed = true;
+
+		let arm = (what, args) => self.nas.request('REGISTER_INDICATIONS', args, (e) => {
+			if (e && e.error != 'cancelled')
+				log('debug', sprintf('%s indications not available: %J', what, e));
+		}, { no_recovery: true });
+
+		arm('network reject', { network_reject: { enable: 1, suppress_system_info: 0 } });
+		arm('LTE carrier aggregation', { lte_cphy_ca: 1 });
+		arm('LTE aggregated carrier', { lte_cphy_ca_aggregated: 1 });
+		arm('NR carrier aggregation', { nr5g_ca_sig_info: 1 });
+		arm('NR cell frequency', { nr5g_cell_freq_info: 1 });
+		arm('NR bandwidth part', { nr5g_bwp_info: 1 });
+	};
+
+	// The modem-wide WDS indications, on the configuration client. Only the
+	// attach parameters have been seen on the wire (schema/wds.uc); the other
+	// three are logged and shown, and nothing acts on them.
+	self._install_wds_handlers = function() {
+		let wds = self.wds_cfg;
+
+		let set_attach = (a) => {
+			let was = self.attach_info;
+
+			// the failure belongs to the attempt it ended: kept across the
+			// "detached" that follows it, dropped by the next attach
+			if (a.state_text != 'attached' && was?.failure)
+				a.failure = was.failure;
+
+			self.attach_info = a;
+
+			if (a.state_text == was?.state_text && a.apn == was?.apn && a.pdp_type == was?.pdp_type)
+				return;
+
+			log('info', a.state_text == 'attached'
+				? sprintf('LTE attach: APN %s, %s', a.apn ?? '(none)', a.pdp_type ?? '?')
+				: 'LTE detached');
+		};
+
+		wds.on('LTE_ATTACH_PARAMS_IND', (data) => {
+			self._attach_pushed = true;
+			set_attach(qmi_backend.lte_attach(data));
+		});
+
+		wds.on('LTE_ATTACH_FAILURE_INFO_IND', (data) => {
+			let f = qmi_backend.attach_failure(data);
+
+			if (!f)
+				return;
+
+			log('notice', sprintf('LTE attach failed: %s%s', f.text ?? sprintf('type %d cause %d', f.type, f.code),
+				f.plmn ? sprintf(' (%s)', f.plmn) : ''));
+			self.attach_info = { ...(self.attach_info ?? { source: 'qmi' }), failure: { ...f, at: time() } };
+		});
+
+		wds.on('RAB_REJECT_IND', (data) => {
+			log('notice', sprintf('service request refused: %s',
+				qmi_backend.rab_reject_text(data?.cause)));
+		});
+
+		wds.on('IPV6_PREFIX_UPDATE_IND', (data) => {
+			if (!data?.prefix)
+				return;
+
+			log('info', sprintf('IPv6 prefix update: %s/%d %s %s', data.prefix.addr, data.prefix.plen,
+				data.type == 2 ? 'multihoming' : 'candidate',
+				[ '?', 'added', 'promoted', 'removed' ][data.status] ?? '?'));
+		});
+
+		self._read_lte_attach = () => wds.request('GET_LTE_ATTACH_PARAMS', {}, (e, d) => {
+			// An indication THIS incarnation received is the newer word.
+			// What attach_info holds is no measure of that: it outlives a
+			// teardown, and a modem that came back attached to another APN
+			// sends no indication to say so.
+			if (!e && !self._attach_pushed)
+				set_attach(qmi_backend.lte_attach(d));
+		}, { no_recovery: true });
+	};
+
+	// Best effort and unverifiable by its answer: a firmware returns success
+	// for a registration TLV it does not know (schema/wds.uc
+	// INDICATION_REGISTER). The read that follows fills attach_info for an
+	// attach that happened before anyone listened.
+	self._arm_wds_indications = function() {
+		if (!self.wds_cfg || self._wds_ind_armed)
+			return;
+
+		self._wds_ind_armed = true;
+		self.wds_cfg.request('INDICATION_REGISTER', {
+			lte_attach_params: 1, rab_reject: 1, lte_attach_failure: 1, ipv6_prefix_update: 1,
+		}, (e) => {
+			if (e && e.error != 'cancelled')
+				log('debug', sprintf('wds indication register failed: %J', e));
+		}, { no_recovery: true });
 	};
 
 	// enable the NAS event report (RF band + reject reason). Separate from
@@ -1714,6 +1882,7 @@ export function create(opts)
 
 		if (ss.registration == nasmod.REG_REGISTERED) {
 			self._reg_released = false;
+			self.last_reject = null;
 
 			if (self.state == 'REGISTERING') {
 				if (tm.reg) {
@@ -1723,6 +1892,7 @@ export function create(opts)
 
 				self.counters.attempts = 0;
 				self.reg_detail = null;   // registered: clear any stale reject info
+				self._read_lte_attach?.();
 				// woken from a park at init (a plugin's hold): this READY
 				// entry emits `registered` itself — the parked-while-READY
 				// re-emit below must not add a second one later
@@ -1849,7 +2019,7 @@ export function create(opts)
 			if (t)
 				t.cancel();
 
-		tm.retry = tm.reg = tm.settle = tm.delay = tm.at_drain = tm.probe = tm.init_reset = tm.reset_watch = null;
+		tm.retry = tm.reg = tm.settle = tm.delay = tm.at_drain = tm.probe = tm.init_reset = tm.reset_watch = tm.ca_ind = null;
 
 		// a settle wait cancelled just above never runs its body, so the
 		// continuation it owed is paid here instead — otherwise a ubus reattach
@@ -1968,7 +2138,12 @@ export function create(opts)
 		// back to polling) — for the whole remaining life of the daemon, with
 		// nothing in the log to say so.
 		self._nas_evt_armed = false;
+		self._nas_ind_armed = false;
+		self._wds_ind_armed = false;
+		self._attach_pushed = false;
+		self._ca_busy = self._ca_again = false;
 		self._dsd_ind_armed = false;
+		self.last_reject = null;
 		// ...and WMS, which is worse than the other two: it is allocated lazily
 		// on the first SMS op and cached. Left set, a retry handed every later
 		// SMS the OLD client — bound to a hub that is closed — and never

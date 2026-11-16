@@ -180,6 +180,7 @@ export function install(self, o)
 								return fail('alloc_wds', e4);
 
 							self.wds_cfg = wds;
+							self._install_wds_handlers();
 
 							// DSD (Data System Determination): optional, gives the
 							// clean LTE / 5G-NSA / 5G-SA status; absent on older modems.
@@ -1006,8 +1007,11 @@ export function install(self, o)
 	step_register = () => {
 		self.set_state('REGISTERING');
 		self.reg_detail = null;
+		self.last_reject = null;
 
 		self._arm_nas_event_report();
+		self._arm_nas_indications();
+		self._arm_wds_indications();
 
 		self.nas.request('REGISTER_INDICATIONS', {
 			serving_system_events: 1,
