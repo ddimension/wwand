@@ -11,7 +11,7 @@ drive a router-relevant "adopt from MM" backlog and (b) state wwand's advantages
 for the upstream discussion.
 
 Framing: MM is a ~15-year glibc/GLib/DBus daemon (15–30 MB RSS, 50+ compiled
-vendor plugins, fwupd integration); wwand is a ~3 MB single-ucode daemon
+vendor plugins, fwupd integration); wwand is a ~5 MB single-ucode daemon
 purpose-built for OpenWrt routers. Several "gaps" below are deliberate scope
 choices, flagged as such.
 
@@ -121,7 +121,8 @@ calls, firmware/fwupd, suspend/resume.
   a stable `wwandN` L3 device; MM-on-OpenWrt is effectively one bearer/iface.
 - **Zero-config autosetup** + **per-ICCID SIM config** + **PUK-avoidance PIN
   guard**.
-- **Footprint** — ~2.9 MB RSS, one process, no per-context spawns; MM+libqmi+glib
+- **Footprint** — ~5 MB RSS as bytecode (10.8 MB as source; NR7101, one QMI
+  modem, 2026-11-16), one process, no per-context spawns; MM+libqmi+glib
   is 15–30 MB.
 - **Testability** — effect-injection host suites (count in
   [STATUS.md](../STATUS.md)), schemas verified

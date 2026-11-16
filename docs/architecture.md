@@ -26,13 +26,15 @@ the vendor/interface survey behind this.
 
 ## 1. Measured baseline (Chateau)
 
-One process. Zero per-context spawns. ~3 MB resident. The measured baseline:
+One process. Zero per-context spawns. ~5 MB resident as bytecode. The measured
+baseline (RSS: Zyxel NR7101, mips, one QMI modem, 2026-11-16; the rest from the
+first Chateau measurement, when the tree was much smaller):
 
 | Metric | Value | Context |
 |---|---|---|
-| Daemon RSS | **~2.9 MB** | ModemManager + libqmi + glib: typically 15–30 MB |
+| Daemon RSS | **5.1 MB** bytecode, 10.8 MB source | the same tree both ways; ModemManager + libqmi + glib: typically 15–30 MB |
 | Open fds | 36 | cdc-wdm, tty, ubus, uloop; watched for leaks in soak tests |
-| ucode sources | 196 KB uncompressed | ≈ 40–50 KB on squashfs |
+| ucode tree | 2.9 MB source, 1.7 MB bytecode (2026-11-16) | was 196 KB at the first measurement; the RSS grew with it |
 | Native module | ~68 KB stripped | I/O + rmnet netlink helper |
 | Processes | **1 daemon, 0 per context** | no per-interface supervisor (no-proto-task) |
 | External spawns at runtime | 0 | only reboot in recovery (repower is a board GPIO) |

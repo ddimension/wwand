@@ -1,14 +1,14 @@
 # wwand
 
 **A lean, event-driven WWAN connection manager for OpenWrt.**
-Native QMI / MBIM / NCM. ~3 MB. No uqmi, qmicli, libqmi, glib or ModemManager.
+Native QMI / MBIM / NCM. ~5 MB RSS. No uqmi, qmicli, libqmi, glib or ModemManager.
 
 ```
         ┌─────────────────────────────────────────────────────────┐
         │                        wwand                            │
         │   ┌─────┐   ┌──────┐   ┌─────┐     one daemon, one uloop │
         │   │ QMI │   │ MBIM │   │ NCM │     indication-driven      │
-        │   └──┬──┘   └──┬───┘   └──┬──┘     ~3 MB RSS, 0 spawns    │
+        │   └──┬──┘   └──┬───┘   └──┬──┘     ~5 MB RSS, 0 spawns    │
         └──────┼─────────┼──────────┼────────────────────┬─────────┘
                │ native  │ native+  │ AT                 │ ubus
                │ qmux    │ passthru │                    ▼
@@ -39,10 +39,12 @@ The plugins bring their own pages — remote SIM ([wwand-rsim](https://github.co
 
 ## Why wwand
 
-- **Tiny & quiet** — ~3 MB RSS, **zero** processes spawned in normal operation,
-  one uloop. State changes arrive as modem indications rather than polls; what
-  does poll is bounded and purposeful (telemetry while a UI is watching, the
-  zero-rx watchdog). Compare ModemManager + libqmi + glib at 15–30 MB.
+- **Small & quiet** — ~5 MB RSS shipped as bytecode (one QMI modem; source
+  costs twice that, see [Packages](#packages)), **zero** processes spawned in
+  normal operation, one uloop. State changes arrive as modem indications
+  rather than polls; what does poll is bounded and purposeful (telemetry while
+  a UI is watching, the zero-rx watchdog). Compare ModemManager + libqmi +
+  glib at 15–30 MB.
 - **Three backends, one contract** — QMI, MBIM and NCM sit behind a single
   daemon-neutral interface, so netifd, the ubus API and the UI never care which
   a modem speaks. MBIM even tunnels the whole QMI stack over an
@@ -113,12 +115,20 @@ channels).
 | `wwand-datapath-rmnet_nss_mhi` | the same for Quectel's vendor `pcie_mhi` driver (PCIe/MHI, QMI *and* MBIM) (`DEPENDS wwand`) |
 
 The ucode tree can ship **precompiled to bytecode** (faster start, no on-device
-parse) or as readable source. Which is the default depends on the packaging: the
-ddimension feed precompiles unless `CONFIG_WWAND_UCODE_SOURCE` is set, while the
-openwrt/packages submission ships source and precompiles only under
-`CONFIG_WWAND_UCODE_PRECOMPILE`. Bytecode also needs a host ucode that can emit
-relocatable modules — where it cannot, the build falls back to source on its own
-rather than failing.
+parse, about **half the memory**) or as readable source. Measured on a Zyxel
+NR7101 (mips, one QMI modem, the same tree both ways, 2026-11-16): the running
+daemon holds 5.1 MB RSS as bytecode (stripped, `-s`) and 10.8 MB as source.
+Periodic garbage collection (`ucode -g`) changes neither figure by more than
+40 KB, so the difference is not garbage left uncollected. Which is the default
+depends on the packaging: the ddimension feed precompiles unless
+`CONFIG_WWAND_UCODE_SOURCE` is set, while the openwrt/packages submission ships
+source and precompiles only under `CONFIG_WWAND_UCODE_PRECOMPILE`. Bytecode also
+needs a host ucode that can emit relocatable modules — where it cannot, the
+build falls back to source on its own rather than failing. ucode 2026.01.16
+(the openwrt-25.12 images up to 25.12.6) can neither emit nor load them; the
+25.12 branch moved to 2026.07.09 on 2026-11-11, its package repository serves
+that to 25.12.x routers, and the bytecode package depends on
+`ucode >= 2026.07.09`, so `apk upgrade` brings the interpreter along.
 
 A typical QMI router installs **`wwand-qmi`** (which pulls in `wwand`). The LuCI
 UI is [luci-proto-wwand](https://github.com/ddimension/luci-proto-wwand) +
