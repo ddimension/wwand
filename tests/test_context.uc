@@ -64,6 +64,9 @@ function make_handlers(over, started)
 		GET_REVISION: { revision: 'R11A06' },
 		GET_IDS: { imei: '860000000000001' },
 		SET_OPERATING_MODE: {},
+		// the PS re-attach a changed attach profile runs on a live modem
+		// (modem.uc reapply_sim)
+		ATTACH_DETACH: {},
 		GET_OPERATING_MODE: { mode: 0 },   // online (FCC verify pass-through)
 		GET_CARD_STATUS: { card_status: card_status() },
 		GET_MANUFACTURER: { manufacturer: 'Quectel' },
@@ -590,6 +593,90 @@ scenario('flags-ipv4', {
 	});
 });
 
+// `clat` on an IPv6-only connection also starts IPv4, AFTER IPv6, so the
+// modem translates (ddimension/wwand#89); the family rides SET_IP_FAMILY
+// per WDS client, which is how the mock tells the two starts apart
+// `fail`: the family whose start is refused, with `err` as the answer
+let clat_handlers = (fail, err) => {
+	let fam = {};
+	return {
+		SET_IP_FAMILY: (args, meta) => { fam[sprintf('%d', meta.cid)] = args.preference; return {}; },
+		START_NETWORK: (args, meta) => (fam[sprintf('%d', meta.cid)] == fail)
+			? (err ?? { __error: 14, call_end_reason: 3 })
+			: { pdh: (fam[sprintf('%d', meta.cid)] == 4) ? 1111 : 2222 },
+		GET_CURRENT_SETTINGS: (args, meta) =>
+			(fam[sprintf('%d', meta.cid)] == 4) ? V4_SETTINGS : V6_SETTINGS,
+	};
+};
+
+scenario('clat-v4', {
+	config: { apn: 'v6only', pdp_type: 'ipv6', clat: true },
+	handlers: clat_handlers(0),
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'clat-v4: connects');
+		eq(map(mock.calls_for('SET_IP_FAMILY'), (c) => c.args.preference), [ 6, 4 ],
+			'clat-v4: IPv6 first, then the IPv4 the modem translates');
+		ok(ctx.settings?.ipv4 != null && ctx.settings?.ipv6 != null,
+			'clat-v4: both families reach the settings netifd gets');
+		next();
+	});
+});
+
+scenario('clat-v4-refused', {
+	config: { apn: 'v6only', pdp_type: 'ipv6', clat: true },
+	handlers: clat_handlers(4),
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(err, null, 'clat-v4-refused: an IPv4 the modem does not give is not the interface\'s failure');
+		eq([ ctx.state, ctx.settings?.ipv4, ctx.settings?.ipv6 != null ], [ 'CONNECTED', null, true ],
+			'clat-v4-refused: connected IPv6-only, as without clat');
+		next();
+	});
+});
+
+// the translated IPv4 rides the IPv6 PDN: without IPv6 there is no interface
+scenario('clat-v6-refused', {
+	config: { apn: 'v6only', pdp_type: 'ipv6', clat: true },
+	handlers: clat_handlers(6),
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		ok(err != null, 'clat-v6-refused: an IPv6 that fails fails the interface');
+		eq(map(mock.calls_for('SET_IP_FAMILY'), (c) => c.args.preference), [ 6 ],
+			'clat-v6-refused: ...and no IPv4 is started on the 192.0.0.x alone');
+		next();
+	});
+});
+
+// "PDP in use" on the CLAT IPv4 is not reclaimed: CGACT=0 would take down
+// the IPv6 already up on that profile
+scenario('clat-v4-in-use', {
+	config: { apn: 'v6only', pdp_type: 'ipv6', clat: true },
+	at: { res: { lines: [] } },
+	handlers: clat_handlers(4, { __error: 14, call_end_reason: 3,
+		verbose_call_end: { type: 2, reason: 241 } }),
+}, (ctx, mock, events, next, at_cmds) => {
+	ctx.up((err) => {
+		eq(filter(at_cmds, (c) => index(c, 'CGACT=0') >= 0), [],
+			'clat-v4-in-use: no CGACT=0 under the IPv6 the CLAT IPv4 depends on');
+		eq([ err, ctx.state, ctx.settings?.ipv4 ], [ null, 'CONNECTED', null ],
+			'clat-v4-in-use: connected IPv6-only');
+		next();
+	});
+});
+
+// without clat an IPv6 connection asks for IPv6 only, as before
+scenario('clat-off-v6', {
+	config: { apn: 'v6only', pdp_type: 'ipv6' },
+	handlers: clat_handlers(0),
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		eq(map(mock.calls_for('SET_IP_FAMILY'), (c) => c.args.preference), [ 6 ],
+			'clat-off-v6: no IPv4 start without clat');
+		next();
+	});
+});
+
 // already held: nothing written
 scenario('flags-same', {
 	config: { apn: 'web', pdp_type: 'ipv4v6', clat: false, address_allocation: 'nas' },
@@ -598,6 +685,59 @@ scenario('flags-same', {
 	ctx.up((err) => {
 		eq(err, null, 'flags-same: connects');
 		eq(length(mock.calls_for('MODIFY_PROFILE')), 0, 'flags-same: no NV write');
+		next();
+	});
+});
+
+// --- an IMS PDN (`option ims`): P-CSCF via PCO + IM CN flag, P-CSCF read back ---
+
+scenario('flags-ims', {
+	config: { apn: 'ims', pdp_type: 'ipv4', ims: true },
+	handlers: {
+		GET_CURRENT_SETTINGS: { ...V4_SETTINGS, pcscf_pco: 1, pcscf: [ '10.1.2.3', '10.1.2.4' ] },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'ims: connects');
+		let w = filter(mock.calls_for('MODIFY_PROFILE'), (c) => c.args.pcscf_pco != null);
+		eq([ w[0]?.args?.pcscf_pco, w[0]?.args?.imcn ], [ 1, 1 ], 'ims: P-CSCF via PCO and IM CN flag written');
+		let g = mock.calls_for('GET_CURRENT_SETTINGS');
+		ok(length(g) && (g[0].args.requested & 0xC00) == 0xC00, 'ims: the P-CSCF settings are requested');
+		eq(settings.ipv4.pcscf, [ '10.1.2.3', '10.1.2.4' ], 'ims: P-CSCF addresses in the settings');
+		next();
+	});
+});
+
+// an IPv6 IMS PDN: the IPv6 list 0x2E, together with an IPv4 list if any
+scenario('flags-ims-v6', {
+	config: { apn: 'ims', pdp_type: 'ipv6', ims: true },
+	handlers: {
+		GET_CURRENT_SETTINGS: { ...V6_SETTINGS, pcscf_pco: 1,
+			pcscf6: [ '2001:db8:0:0:0:0:0:5', '2001:db8:0:0:0:0:0:6' ] },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'ims-v6: connects');
+		eq(settings.ipv6.pcscf, [ '2001:db8:0:0:0:0:0:5', '2001:db8:0:0:0:0:0:6' ],
+			'ims-v6: IPv6 P-CSCF addresses in the settings');
+		next();
+	});
+});
+
+// without `ims` nothing of it is asked for, and a stray list is not reported
+scenario('flags-no-ims', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	handlers: {
+		GET_CURRENT_SETTINGS: { ...V4_SETTINGS, pcscf: [ '10.1.2.3' ] },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'no-ims: connects');
+		eq(filter(mock.calls_for('MODIFY_PROFILE'), (c) => c.args.pcscf_pco != null || c.args.imcn != null), [],
+			'no-ims: no IMS profile flags');
+		eq((mock.calls_for('GET_CURRENT_SETTINGS')[0]?.args?.requested ?? 0) & 0xC00, 0,
+			'no-ims: no P-CSCF request');
+		eq(settings.ipv4.pcscf, null, 'no-ims: no P-CSCF in the settings');
 		next();
 	});
 });
@@ -737,6 +877,42 @@ scenario('v6-refused-hint-typed', {
 }, (ctx, mock, events, next) => {
 	ctx.up(() => {
 		eq(hints(cm_logs), 0, 'v6-hint: reason 50 of another type is not a refusal');
+		next();
+	});
+});
+
+// The mirror: an IPv6-only APN (Vodafone DE `ims`) answers the v4 half of a
+// dual-stack dial with internal 208. That degrades to v6 instead of failing
+// the context; any other v4 failure stays fatal (section C below).
+let v4_logs = [];
+
+scenario('v4-refused-degrades', {
+	config: { apn: 'ims', pdp_type: 'ipv4v6' },
+	logs: v4_logs,
+	handlers: {
+		START_NETWORK: (args, meta) => (meta.count == 1)
+			? { __error: 14, call_end_reason: 3, verbose_call_end: { type: 2, reason: 208 } }
+			: { pdh: 2222 },
+		GET_CURRENT_SETTINGS: V6_SETTINGS,
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err, settings) => {
+		eq(err, null, 'v4-refused: up on v6 after internal 208');
+		eq([ settings?.ipv4, settings?.ipv6 != null ], [ null, true ], 'v4-refused: v6 only');
+		eq(length(filter(v4_logs, (x) => index(x, "set option pdp_type 'ipv6'") >= 0)), 1,
+			'v4-refused: names pdp_type ipv6, once');
+		next();
+	});
+});
+
+scenario('v4-refused-v4-only', {
+	config: { apn: 'ims', pdp_type: 'ipv4' },
+	handlers: {
+		START_NETWORK: { __error: 14, call_end_reason: 3, verbose_call_end: { type: 2, reason: 208 } },
+	},
+}, (ctx, mock, events, next) => {
+	ctx.up((err) => {
+		ok(err != null, 'v4-refused: fatal when there is no v6 half to fall back to');
 		next();
 	});
 });
@@ -1502,6 +1678,16 @@ ok(_all_done, sprintf('every scenario ran (%d of %d) — the pump did not run ou
 	   'pap', 'conn_cfg: interface fallback for a card without an APN of its own');
 	eq(context_common.conn_cfg(ctx, 'password'), null, 'conn_cfg: empty on both levels -> null');
 
+	// an IMS PDN keeps its own settings: the card's override is its data dial
+	let ims = { config: { apn: 'ims', pdp_type: 'ipv6', ims: true },
+	            modem: { active_sim: { apn: 'web.vodafone.de', pdp_type: 'ipv4v6', username: 'u' } } };
+	eq([ context_common.conn_cfg(ims, 'apn'), context_common.conn_cfg(ims, 'pdp_type'),
+	     context_common.conn_cfg(ims, 'username') ], [ 'ims', 'ipv6', null ],
+	   'conn_cfg: an ims interface ignores the wwand_sim override');
+	eq(context_common.effective_pdp(ims), 'ipv6', 'effective_pdp: the ims interface family');
+	ims.config.ims = false;
+	eq(context_common.conn_cfg(ims, 'apn'), 'web.vodafone.de', 'conn_cfg: ims 0 is an ordinary interface');
+
 	ctx.modem.active_sim = null;
 	eq(context_common.conn_cfg(ctx, 'apn'), 'iface-apn', 'conn_cfg: no active sim -> interface');
 
@@ -1630,6 +1816,19 @@ ok(_all_done, sprintf('every scenario ran (%d of %d) — the pump did not run ou
 		config: { apn: 'internet', pdp_type: 'ipv4v6' },
 		deps: { log: () => null, on_event: () => null },
 	});
+
+	// an `ims` interface that owns the attach never marks it as the IMS PDN
+	mods = [];
+	context_mod.create({
+		name: 'atp-ims',
+		modem: { wds_cfg: mkwds({ apn: 'internet', pdp_type: 3, auth: 0, username: '' }),
+		         config: {}, alloc: () => null, attach_context: () => null },
+		config: { apn: 'internet', pdp_type: 'ipv4v6', ims: true },
+		deps: { log: () => null, on_event: () => null },
+	}).ensure_attach_profile(1, () => null);
+	eq(filter(mods, (m) => m.pcscf_pco != null || m.imcn != null), [],
+		'attach: the IMS profile flags never reach the attach profile');
+	mods = [];
 
 	// no init_apn: the interface APN is already on the profile, nothing to write
 	mkctx({}).ensure_attach_profile(1, () => null);

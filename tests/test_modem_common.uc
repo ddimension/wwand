@@ -1306,6 +1306,28 @@ newc = { serving: { lte: { band: 3 } }, lte_intra: { earfcn: 6300 } };
 mc.preserve_serving(newc, oldc);
 eq(newc.serving.lte.band, 3, 'preserve_serving: existing serving not overwritten');
 
+// each leg on its own: NSA -> SA on an unchanged NR channel. The new read
+// has no LTE, so the LTE leg goes; the NR leg stays (ddimension/wwand#75)
+let old_nsa = { serving: { lte: { earfcn: 6400, band: 20 }, nr: { arfcn: 642048, band: 78 } } };
+newc = { nr5g_arfcn: 642048, nr5g_cell: { pci: 650 } };
+mc.preserve_serving(newc, old_nsa);
+eq(newc.serving, { nr: { arfcn: 642048, band: 78 } }, 'preserve_serving: an LTE leg the new read lacks is dropped');
+
+// SA -> NSA: the NR leg is still on its channel, the LTE leg is new
+newc = { lte_intra: { earfcn: 1750 }, nr5g_arfcn: 642048 };
+mc.preserve_serving(newc, old_nsa);
+eq(newc.serving, { nr: { arfcn: 642048, band: 78 } }, 'preserve_serving: an LTE leg on another channel is dropped, NR kept');
+
+// the NR leg left (EN-DC released): LTE kept, NR dropped
+newc = { lte_intra: { earfcn: 6400 } };
+mc.preserve_serving(newc, old_nsa);
+eq(newc.serving, { lte: { earfcn: 6400, band: 20 } }, 'preserve_serving: an NR leg the new read lacks is dropped');
+
+// QENG's connection state rides along with a carried leg
+newc = { lte_intra: { earfcn: 6300 } };
+mc.preserve_serving(newc, { serving: { state: 'NOCONN', lte: { earfcn: 6300, band: 20 } } });
+eq(newc.serving, { state: 'NOCONN', lte: { earfcn: 6300, band: 20 } }, 'preserve_serving: the read\'s state is carried with a leg');
+
 // null guards
 ok(mc.preserve_serving(null, oldc) == null, 'preserve_serving: null new cells -> null');
 newc = { lte_intra: { earfcn: 6300 } };
@@ -1360,6 +1382,61 @@ sca = { cells: { ca: [ { role: 'PCC', earfcn: 6300, pci: 334, bandwidth_mhz: 10 
 mc.serving_from_ca(sca);
 eq(sca.cells.serving.lte, { bandwidth_mhz: 10, earfcn: 6300, pci: 334 },
 	'serving_from_ca: an untagged PCC is still the LTE one');
+
+// the RF-band rows (qmi_backend.ca_with_rf) carry no PCI: the cell-location
+// serving cell of the same channel supplies it, per leg
+sca = { cells: {
+	lte_intra: { earfcn: 6300, serving_cell_id: 409 },
+	nr5g_arfcn: 642048, nr5g_cell: { pci: 650 },
+	ca: [
+		{ rat: 'lte', role: 'PCC', earfcn: 6300, pci: null, bandwidth_mhz: 10 },
+		{ rat: 'nr', role: 'PCC', earfcn: 642048, pci: null, band: 'n78', bandwidth_mhz: 100 },
+	] } };
+mc.serving_from_ca(sca);
+eq([ sca.cells.ca[0].pci, sca.cells.ca[1].pci ], [ 409, 650 ],
+	'serving_from_ca: a PCI-less PCC takes the serving PCI of its channel');
+eq(sca.cells.serving.nr, { bandwidth_mhz: 100, arfcn: 642048, pci: 650, band: 78 },
+	'serving_from_ca: the NR PCC seeds serving.nr with its bandwidth and the modem\'s band');
+// NR-ARFCN 642048 (3630.72 MHz) is in n48 as well as n77/n78: deriving the
+// band from the channel afterwards must not replace the one the modem named
+// (ddimension/wwand#75: serving band 48 next to the modem's n78)
+mc.fill_serving_band(sca);
+eq(sca.cells.serving.nr.band, 78, 'fill_serving_band: the modem\'s NR band stays, not the first overlapping one');
+
+// the Fibocom rows carry the band as a number, and a QCAINFO NR row leaves
+// its bandwidth unknown: the band is still the modem's and must win
+sca = { cells: { ca: [
+	{ rat: 'nr', role: 'PCC NR', earfcn: 642048, pci: 650, band: 78, bandwidth_mhz: null },
+] } };
+mc.serving_from_ca(sca);
+mc.fill_serving_band(sca);
+eq([ sca.cells.serving.nr.arfcn, sca.cells.serving.nr.pci, sca.cells.serving.nr.band ], [ 642048, 650, 78 ],
+	'serving_from_ca: a numeric band survives, and a row without bandwidth still seeds serving.nr');
+
+// a band derived by an earlier read and carried forward is a guess: the
+// band the modem names replaces it (ddimension/wwand#75, NSA -> SA)
+sca = { cells: {
+	nr5g_arfcn: 642048,
+	serving: { nr: { arfcn: 642048, band: 48, dl_freq_mhz: 3630.72 } },
+	ca: [ { rat: 'nr', role: 'PCC', earfcn: 642048, pci: 650, band: 'n78', bandwidth_mhz: 100 } ] } };
+mc.serving_from_ca(sca);
+eq([ sca.cells.serving.nr.band, sca.cells.serving.nr.bandwidth_mhz ], [ 78, 100 ],
+	'serving_from_ca: the modem\'s NR band replaces a carried-forward derived one');
+
+// ...but not across a channel mismatch (a handover between the two reads)
+sca = { cells: {
+	lte_intra: { earfcn: 1300, serving_cell_id: 409 },
+	nr5g_arfcn: 643000, nr5g_cell: { pci: 650 },
+	serving: { nr: { arfcn: 643000 } },
+	ca: [
+		{ rat: 'lte', role: 'PCC', earfcn: 6300, pci: null, bandwidth_mhz: 10 },
+		{ rat: 'nr', role: 'PCC', earfcn: 642048, pci: null, bandwidth_mhz: 100 },
+	] } };
+mc.serving_from_ca(sca);
+eq([ sca.cells.ca[0].pci, sca.cells.ca[1].pci ], [ null, null ],
+	'serving_from_ca: no PCI from a serving cell on another channel');
+eq(sca.cells.serving.nr, { arfcn: 643000 },
+	'serving_from_ca: NR-ARFCN mismatch does not fill serving.nr');
 
 // --- qeng_ok: vendor gate for AT+QENG ----------------------------------------
 
@@ -1978,6 +2055,20 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	let bad = { info: {}, config: {}, at_init_extra: () => die('boom') };
 
 	eq(mc.init_commands(bad), [], 'init list: a failing extra adds nothing and breaks nothing');
+
+	// the 5G NR mode last; an option no known command can apply is a warning
+	let fox = { info: { firmware: 'T99W175.F0.0.0.3.0.GC.003' }, config: { nr5g_mode: 'sa' } };
+	let fc = mc.init_commands(fox);
+
+	eq(fc[length(fc) - 1]?.set, 'AT^NR5G_MODE=2', 'init list: the 5G NR mode step last');
+	eq(fox.config_warnings, [], 'init list: an applicable nr5g_mode warns nothing');
+
+	let other = { info: { manufacturer: 'Fibocom' }, config: { nr5g_mode: 'nsa' },
+	              config_warnings: [ { check: 'nr5g_mode' }, { check: 'quirk' } ] };
+
+	eq(mc.init_commands(other), [], 'init list: nothing for a modem of neither dialect');
+	eq(map(other.config_warnings, (w) => w.check), [ 'quirk', 'nr5g_mode' ],
+		'init list: ...reported once as not applied, other warnings kept');
 }
 
 // --- an AT port that was only not ready yet (ddimension/wwand#47) ----------
@@ -2079,6 +2170,17 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	eq(mc.attach_owner([ a ]), a, 'attach_owner: then the first bound');
 	eq(mc.attach_owner([]), null, 'attach_owner: nothing bound');
 
+	// option iccid: an interface bound to another card is not this card's
+	// connection, whatever profile it dials (HW, NR7101, 2026-11-07)
+	let modem_b = { info: { iccid: '89882390001186977790' } };
+	let home = { config: { interface: 'wwand0', mux_id: 1, iccid: '89490200001022832490' }, modem: modem_b };
+	let away = { config: { interface: 'wwand1', mux_id: 2, profile: 2, auto: false, iccid: '89882390001186977790' }, modem: modem_b };
+	eq(mc.attach_owner([ home, away ]), away, 'attach_owner: never an interface bound to another card');
+	eq(mc.attach_owner([ home ]), null, 'attach_owner: ...not even as the only one');
+	let unread = { info: { iccid: null } };
+	eq(mc.attach_owner([ { ...home, modem: unread } ])?.config?.interface, 'wwand0',
+		'attach_owner: nothing is excluded while the card is not read yet');
+
 	// the EFFECTIVE apn: a wwand_sim `#N` decides which profile is dialled
 	let card = { active_sim: { apn: '#1' } };
 	let sim_p1 = { config: { interface: 's1', apn: '#2' }, modem: card };
@@ -2156,6 +2258,120 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	eq(r.got, [ true ], 'at_reset: an answered reset reports sent, once');
 	eq(run({ error: 'timeout' }).got, [ true ], 'at_reset: a timeout after the write counts as sent');
 	eq(run({ error: 'ERROR' }).got, [ false ], 'at_reset: a refused reset reports not sent');
+}
+
+// --- apply_nr5g_mode: QMI SSP nr5g_disable_mode first, vendor AT otherwise ----
+{
+	// a NAS that answers synchronously; `ssp` is the GET reply (null = refused),
+	// `set_err` what the SET returns
+	let mknas = (ssp, set_err) => {
+		let n = { sets: [] };
+		n.request = (name, args, cb) => {
+			if (name == 'GET_SYSTEM_SELECTION_PREFERENCE')
+				return ssp ? cb(null, ssp) : cb({ error: 'qmi', code: 71 }, null);
+			push(n.sets, args);
+			cb(set_err, set_err ? null : {});
+		};
+		return n;
+	};
+	let mkself = (mode, model) => {
+		let s = { config: { nr5g_mode: mode }, info: { manufacturer: 'Quectel', model: model ?? 'RG502Q-EA' },
+			config_warnings: [], ran: null };
+		s.at = { run_sequence: (cmds, done) => { s.ran = cmds; done([]); } };
+		return s;
+	};
+	let quiet = () => null;
+	let n, s, called;
+
+	// differs -> one SET, permanent, with the mapped value (nsa = SA off = 1)
+	n = mknas({ nr5g_disable_mode: 0 }); s = mkself('nsa'); called = 0;
+	mc.apply_nr5g_mode(s, n, quiet, () => called++);
+	eq(n.sets, [ { nr5g_disable_mode: 1 } ], 'apply_nr5g_mode: nsa writes 1 over QMI, alone (no change_duration)');
+	ok(called == 1 && s.ran == null && s._nr5g_via == 'qmi', 'apply_nr5g_mode: ...no AT, cb once');
+
+	// already set -> read only
+	n = mknas({ nr5g_disable_mode: 2 }); s = mkself('sa');
+	mc.apply_nr5g_mode(s, n, quiet, () => null);
+	eq(n.sets, [], 'apply_nr5g_mode: a matching value is only read');
+
+	// no 0x2B in the reply -> the vendor AT command
+	n = mknas({ mode_preference: 0x10 }); s = mkself('both');
+	mc.apply_nr5g_mode(s, n, quiet, () => null);
+	ok(n.sets == null || length(n.sets) == 0, 'apply_nr5g_mode: no QMI write without 0x2B');
+	ok(length(s.ran ?? []) == 1 && s._nr5g_via == 'at', 'apply_nr5g_mode: ...falls back to the AT step');
+
+	// SET refused -> AT
+	n = mknas({ nr5g_disable_mode: 0 }, { error: 'qmi', code: 94 }); s = mkself('sa');
+	mc.apply_nr5g_mode(s, n, quiet, () => null);
+	ok(length(s.ran ?? []) == 1, 'apply_nr5g_mode: a refused QMI write falls back to AT');
+
+	// no NAS and no known AT command -> a config warning, cb still once
+	s = mkself('sa', 'EG06-E'); called = 0;
+	mc.apply_nr5g_mode(s, null, quiet, () => called++);
+	ok(called == 1 && s.ran == null && length(filter(s.config_warnings, (w) => w.check == 'nr5g_mode')) == 1,
+		'apply_nr5g_mode: nothing to send it with -> one warning, no command');
+
+	// a known AT command but no AT channel -> warned, not silently dropped
+	n = mknas({ mode_preference: 0x10 }); s = mkself('sa'); s.at = null; called = 0;
+	mc.apply_nr5g_mode(s, n, quiet, () => called++);
+	ok(called == 1 && length(filter(s.config_warnings, (w) => w.check == 'nr5g_mode')) == 1,
+		'apply_nr5g_mode: no AT channel for the fallback -> one warning');
+
+	// unset -> nothing at all, and an old warning goes
+	s = mkself(null); push(s.config_warnings, { check: 'nr5g_mode' }); called = 0;
+	mc.apply_nr5g_mode(s, mknas({ nr5g_disable_mode: 1 }), quiet, () => called++);
+	ok(called == 1 && !length(s.config_warnings), 'apply_nr5g_mode: unset touches nothing and clears the warning');
+
+	// a deferring backend leaves the vendor command out of its AT init list
+	s = mkself('sa'); s._nr5g_deferred = true; s.config.at_init = [];
+	ok(length(filter(mc.init_commands(s), (c) => index(c?.set ?? '', 'nr5g') >= 0)) == 0,
+		'init_commands: a QMI/MBIM modem defers nr5g_mode to apply_nr5g_mode');
+}
+
+// --- nr5g_blocker: why an LTE link stays off 5G NSA ---------------------------
+{
+	let st = (o) => ({ nsa_available: true, dcnr_restricted: false, endc_enabled: true, disabled: 'none', ...o });
+	eq(mc.nr5g_blocker(st({}), { nr: false }, null), null, 'nr5g_blocker: nothing in the way -> null');
+	ok(index(mc.nr5g_blocker(st({ disabled: 'nsa' }), { nr: false }, null) ?? '', 'NSA is switched off') >= 0,
+		'nr5g_blocker: nr5g_disable_mode NSA named first');
+	ok(index(mc.nr5g_blocker(st({ endc_enabled: false }), null, null) ?? '', 'EN-DC is off') >= 0,
+		'nr5g_blocker: EN-DC off');
+	ok(index(mc.nr5g_blocker(st({ dcnr_restricted: true }), null, 'lte,nr5g') ?? '', 'DCNR') >= 0,
+		'nr5g_blocker: DCNR restriction');
+	eq(mc.nr5g_blocker(st({ endc_enabled: false }), { nr: true }, null), null, 'nr5g_blocker: 5G up -> null');
+	eq(mc.nr5g_blocker(st({ endc_enabled: false, nsa_available: false }), null, null), null,
+		'nr5g_blocker: no anchor in this cell -> nothing to explain');
+	eq(mc.nr5g_blocker(st({ endc_enabled: false }), null, 'lte'), null,
+		'nr5g_blocker: modes without nr5g are the operator\'s choice');
+	ok(index(mc.nr5g_blocker(st({ endc_enabled: false }), null, 'all') ?? '', 'EN-DC is off') >= 0,
+		'nr5g_blocker: modes all includes NR');
+	eq(mc.nr5g_blocker(null, null, null), null, 'nr5g_blocker: no state -> null');
+}
+
+// collect_nr5g: an all-empty settled poll retires NR collection for the
+// current data-system mode only; a mode change (LTE -> NSA) re-polls, so a RAT
+// transition does not leave the modem's NR status stuck empty for its life.
+{
+	let calls = 0;
+	// every read answers OK but empty (settled, no NR fact)
+	let empty_nas = { request: (msg, req, cb) => { calls++; cb(null, {}); } };
+
+	let m = { dsd_status: { mode: 'LTE' }, config: {} };
+	mc.collect_nr5g(m, empty_nas, () => null, () => null);
+	eq(calls, 3, 'collect_nr5g: polls all three reads');
+	ok(m._nr5g_state_none, 'collect_nr5g: an all-empty settled poll retires NR collection');
+	eq(m._nr5g_none_mode, 'LTE', 'collect_nr5g: remembers the mode it retired on');
+
+	calls = 0;
+	mc.collect_nr5g(m, empty_nas, () => null, () => null);
+	eq(calls, 0, 'collect_nr5g: stays retired while the data-system mode is unchanged');
+
+	calls = 0;
+	let done_cb = false;
+	m.dsd_status = { mode: 'NSA' };
+	mc.collect_nr5g(m, empty_nas, () => null, () => { done_cb = true; });
+	eq(calls, 3, 'collect_nr5g: a data-system mode change (LTE -> NSA) lifts the retirement and re-polls');
+	ok(done_cb, 'collect_nr5g: cb still fires after a mode-change re-poll');
 }
 
 done('test_modem_common');

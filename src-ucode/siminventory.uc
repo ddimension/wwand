@@ -3,7 +3,8 @@
 // wwand — the SIM inventory: every card wwand has seen, by ICCID, and where
 // it is — which modem, which slot, which eUICC and profile, or which reader
 // on the router (wwand-rsim). One table for the status page and `wwandctl
-// sims` now, and the lookup an ICCID-bound interface will need later.
+// sims` now, and the lookup an ICCID-bound interface switches by (bind_plan
+// below).
 //
 // Each SOURCE reports its complete current view (`observe(key, cards)`):
 // the active card of a modem, its slot list, the profile list of its eUICC,
@@ -232,4 +233,82 @@ export function from_modem(name, m, remote)
 		}));
 
 	return out;
+};
+
+// --- ICCID-bound interfaces (`option iccid` on a proto wwand interface) ---
+//
+// The two decisions an ifup of such an interface needs, kept pure so they can
+// be tested apart from the daemon that carries them out (daemon.uc
+// sim_binding).
+
+// The interface that keeps `modem` on a card other than `want`, or null.
+// Holding means using the card now: a context past IDLE, or one whose switch
+// is under way. An interface without an ICCID holds nothing — it takes
+// whatever card the modem runs — and two with the same ICCID share it (two
+// PDNs on one subscription). First come wins: a holder is never taken over,
+// because two `auto` interfaces bound to different cards would otherwise take
+// the modem from each other at every boot.
+export function bind_holder(contexts, name, modem, want)
+{
+	for (let n in sort(keys(contexts ?? {}))) {
+		let c = contexts[n];
+		let other = norm_iccid(c?.cfg?.iccid);
+
+		if (n == name || c?.cfg?.modem != modem || !other || other == want)
+			continue;
+
+		if (c._sim_switch || (c.ctx && c.ctx.state != 'IDLE'))
+			return n;
+	}
+
+	return null;
+};
+
+// What an ifup that needs ICCID `want` has to do, given the card's inventory
+// entry (`card`, from find(); null when never seen) and the modem as it stands
+// (`m`: { modem, active, active_slot } — `active` the normalised ICCID in use,
+// null while the card is being read). One step at a time: the slot first,
+// then the profile, because a profile on an eUICC in another slot can only be
+// enabled once that slot is the active one, and the card has to come up in
+// between. The daemon asks again after each step, when the modem registers.
+//   { action: 'ok' }                    the modem runs that card
+//   { action: 'wait', why }             no card read yet — ask again then
+//   { action: 'slot', slot }            switch to that physical slot
+//   { action: 'enable', slot }          enable that eUICC profile
+//   { action: 'refuse', error, detail } not reachable from here
+export function bind_plan(want, card, m)
+{
+	let refuse = (detail) => ({ action: 'refuse', error: 'sim_not_here', detail: detail });
+
+	if (m?.active != null && m.active == want)
+		return { action: 'ok' };
+
+	if (m?.active == null)
+		return { action: 'wait', why: 'the card is still being read' };
+
+	if (!card)
+		return refuse(sprintf('card %s has never been seen on this router', want));
+
+	// where it was, as the inventory still holds it ("known, not here")
+	let place = card.reader ? sprintf('reader %s', card.reader)
+		: card.modem ? sprintf('modem %s%s', card.modem, (card.slot != null) ? sprintf(' slot %d', card.slot) : '')
+		: 'an unknown place';
+
+	if (!card.present)
+		return refuse(sprintf('card %s is not present (last seen in %s)', want, place));
+
+	// a remote card is lent by its plugin (wwand-rsim), not switched to here
+	if (card.reader)
+		return refuse(sprintf('card %s is in %s — a remote SIM, which its plugin hands out', want, place));
+
+	if (card.modem != m.modem)
+		return refuse(sprintf('card %s is in %s, not in modem %s', want, place, m.modem));
+
+	if (card.slot != null && +card.slot != +(m.active_slot ?? 0))
+		return { action: 'slot', slot: +card.slot };
+
+	if (card.profile && card.profile.state != 'enabled')
+		return { action: 'enable', slot: card.slot };
+
+	return refuse(sprintf('card %s is in modem %s, but neither a slot switch nor a profile enable reaches it', want, m.modem));
 };

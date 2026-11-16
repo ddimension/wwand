@@ -79,12 +79,27 @@ members. Verify: `ip link show master vrf_wan` lists `wwand0` and `dmz0`.
   	list device 'vrf_wan'          # REQUIRED: l3mdev re-injects forwarded
   	...                            #   traffic with iif = the VRF master
   ```
-- **l3mdev FIB rule is automatic — do not script it.** When the first VRF device
-  is created the kernel installs the `1000: from all lookup [l3mdev]` rule for
-  **both** v4 and v6 itself, and the `config device` + `config interface vrf_wan`
-  pair re-instantiates the master on every (cold) boot. Cold-boot-verified: no
-  `ip rule add l3mdev` and no hotplug helper are needed (an earlier workaround
-  adding them by hand was pure redundancy).
+- **The l3mdev FIB rule: automatic at boot, gone after `network restart`.** When
+  the first VRF device is created the kernel installs the `1000: from all lookup
+  [l3mdev]` rule for **both** v4 and v6 itself, and the `config device` +
+  `config interface vrf_wan` pair re-instantiates the master on every (cold)
+  boot. Cold-boot-verified. But the kernel does that **once per network
+  namespace**: netifd flushes the policy rules when it (re)starts, and a VRF
+  created after that (or another one) brings nothing back (HW-checked on the
+  Chateau, 2026-11-14: no l3mdev rule for either family after a
+  `/etc/init.d/network restart`, none after `ip link add … type vrf` either).
+  Routing in the VRF then works only where netifd's own `from <addr> lookup
+  <table>` rules happen to match. A hotplug helper that re-adds the rules when
+  they are missing restores it:
+  ```sh
+  # /etc/hotplug.d/iface/25-l3mdev
+  [ "$ACTION" = ifup ] || exit 0
+  ip link show type vrf 2>/dev/null | grep -q . || exit 0
+  for f in -4 -6; do
+  	ip $f rule show pref 1000 | grep -q l3mdev ||
+  		ip $f rule add pref 1000 l3mdev protocol kernel
+  done
+  ```
 
 **Forwarding to a DMZ host through the VRF (HW-tested).** With the master in the
 WAN zone, inbound traffic is correctly DNAT'd and forwarded to the DMZ host — v4

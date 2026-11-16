@@ -1114,7 +1114,8 @@ daemon.shutdown();
 	let t = mk({ rat_order: 'nr5g,lte' });
 	let called = 0;
 	config_check.sync_rat_order(t.m, () => null, () => called++);
-	eq([ called, t.sets ], [ 1, [ { acquisition_order: [ 12, 8 ] } ] ], 'mbim rat order: a different order is written, alone');
+	eq([ called, t.sets ], [ 1, [ { acquisition_order: [ 12, 8 ], change_duration: 1 } ] ],
+		'mbim rat order: a different order is written, alone and permanent');
 	eq(checks(t), [], 'mbim rat order: ...and the check finds it in place');
 
 	t = mk({ rat_order: 'lte,umts', warnings: [ { check: 'config' }, { check: 'rat_order', expected: 'old' } ] });

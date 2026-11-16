@@ -16,6 +16,8 @@ import * as backend from 'wwand.backend';
 import * as dmsmod from 'wwand.codec.schema.dms';
 import * as dsdmod from 'wwand.codec.schema.dsd';
 import * as nasmod from 'wwand.codec.schema.nas';
+import * as wdsmod from 'wwand.codec.schema.wds';
+import * as callend from 'wwand.callend';
 
 const OPMODE = {
 	online:    dmsmod.OPMODE_ONLINE,
@@ -94,8 +96,138 @@ export function fcc_auth(dms, variant, magic, cb)
 	dms.request('SET_FCC_AUTHENTICATION', {}, (err) => cb(err), { no_recovery: true });
 };
 
-// QmiNasDLBandwidth enum -> MHz (LTE carrier bandwidth)
-const CA_BW_MHZ = { '0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20 };
+// THE FOXCONN SDX55 V2 MAGIC, as ModemManager computes it
+// (data/dispatcher-fcc-unlock/105b, 1.24.0): "salt" followed by the md5 hex of
+// mcfg version without its last two dot fields, apps version, IMEI, "salt",
+// "foxc". With "T99W175.F0.1.0.0.9.GC.004" the hashed part starts
+// "T99W175.F0.1.0.0.9". `md5`: (string)->32-hex-digest, injected like the
+// Fibocom sha256 (fcc_fibocom.uc) so the host suite can check it.
+export function foxconn_v2_magic(mcfg, apps, imei, md5)
+{
+	let fw = replace(sprintf('%s', mcfg), /\.[^.]*\.[^.]*$/, '');
+
+	return 'salt' + substr(md5(fw + apps + imei + 'salt' + 'foxc'), 0, 32);
+};
+
+// The Foxconn unlock the way ModemManager's 105b helper runs it over an MBIM
+// port: v2 with the magic above and magic number 48, then v1 with 0 when v2
+// cannot be built or is refused. `cfg` is `option fcc_auth`: 'foxconn:<n>'
+// sends only v1 with n, 'foxconn2:<string>:<number>' only that v2. `imei`
+// stands in when GET_IDS has none. cb(variant | null): the one accepted.
+export function fcc_foxconn(dms, cfg, imei, md5, log, cb)
+{
+	let p = split(sprintf('%s', cfg ?? ''), ':');
+	let v1 = (magic) => fcc_auth(dms, 'foxconn', magic, (err) => {
+		if (err)
+			log('info', sprintf('FCC(foxconn): v1 (magic %d) not accepted: %J', magic, err));
+
+		cb(err ? null : 'foxconn');
+	});
+
+	if (p[0] == 'foxconn' && p[1] != null && p[1] != '')
+		return v1(+p[1]);
+
+	if (p[0] == 'foxconn2')
+		return fcc_auth(dms, 'foxconn2', { string: p[1] ?? '', number: +(p[2] ?? 0) }, (err) => {
+			if (err)
+				log('info', sprintf('FCC(foxconn): v2 not accepted: %J', err));
+
+			cb(err ? null : 'foxconn2');
+		});
+
+	let ver = (t, k) => dms.request('FOXCONN_GET_FIRMWARE_VERSION', { version_type: t },
+		(err, d) => k(err ? null : d?.version), { no_recovery: true });
+
+	ver(0, (mcfg) => ver(2, (apps) => dms.request('GET_IDS', {}, (ierr, ids) => {
+		let id = (!ierr && ids?.imei) ? ids.imei : imei;
+
+		if (!mcfg || !apps || !id || !md5) {
+			log('info', sprintf('FCC(foxconn): no v2 magic (%s) — trying v1',
+				!md5 ? 'no md5' : !mcfg ? 'no mcfg version' : !apps ? 'no apps version' : 'no IMEI'));
+			return v1(0);
+		}
+
+		fcc_auth(dms, 'foxconn2', { string: foxconn_v2_magic(mcfg, apps, id, md5), number: 48 }, (err) => {
+			if (!err)
+				return cb('foxconn2');
+
+			log('info', sprintf('FCC(foxconn): v2 not accepted (%J) — trying v1', err));
+			v1(0);
+		});
+	}, { no_recovery: true })));
+};
+
+// QmiNasDLBandwidth enum -> MHz (libqmi 1.38 qmi-enums-nas.h). One enum for
+// every radio: 0-5 are LTE, 6-19 and 24 NR (since libqmi 1.36), 20-23 the
+// GSM/TD-SCDMA/WCDMA widths, which no carrier list here reports; 0xFF unknown.
+// The CPHY CA info only ever carries the LTE values.
+const CA_BW_MHZ = {
+	'0': 1.4, '1': 3, '2': 5, '3': 10, '4': 15, '5': 20,
+	'6': 5, '7': 10, '8': 15, '9': 20, '10': 25, '11': 30, '12': 40, '13': 50,
+	'14': 60, '15': 80, '16': 90, '17': 100, '18': 200, '19': 400, '24': 70,
+};
+
+// get_rf_bands(nas, cb): the radio interfaces in use, as
+// [ { radio_if, band, channel, bandwidth_mhz }, ... ] (band = QmiNasActiveBand),
+// [] when the modem answered with none, null when the request failed. The
+// extended list wins over the legacy one: its channel is 32 bits wide, the
+// legacy u16 cannot hold an NR-ARFCN above 65535 (n77/n78 sit at 620000+).
+export function get_rf_bands(nas, cb)
+{
+	nas.request('GET_RF_BAND_INFO', {}, (e, d) => {
+		if (e)
+			return cb(null);
+
+		let bw = {};
+
+		for (let b in (d?.bandwidths ?? []))
+			bw[sprintf('%d', b.radio_if)] = CA_BW_MHZ[sprintf('%d', b.bandwidth)] ?? null;
+
+		cb(map(d?.bands_ext ?? d?.bands ?? [], (b) => ({
+			radio_if: b.radio_if, band: b.band, channel: b.channel,
+			bandwidth_mhz: bw[sprintf('%d', b.radio_if)] ?? null,
+		})));
+	}, { no_recovery: true });
+};
+
+// ca_with_rf(ca, rf): complete a carrier list (from get_ca or the vendor AT
+// read) with the primary carrier of each leg from get_rf_bands, the way
+// Android's PhysicalChannelConfig list is built from the same three NAS reads
+// (CPHY CA info, RF band info, cell location). Two gaps it closes:
+//   - the NR leg: no QMI message lists NR carriers (libqmi 1.38), but RF band
+//     info names its band, NR-ARFCN and bandwidth — the 5G row of an NSA
+//     link, the only row of an SA one;
+//   - an LTE PCC when the CA info is unavailable: the T99W175 answers it with
+//     InformationUnavailable while the UE is idle (HW-read 2026-11-13).
+// A leg the list already carries is left alone — the Quectel QCAINFO rows are
+// richer (SCCs, PCI) than what RF band info can say. PCI is not in RF band
+// info; modem_common.serving_from_ca fills it from the cell location read.
+// Pure; returns a new list (ca may be null).
+export function ca_with_rf(ca, rf)
+{
+	let out = [ ...(ca ?? []) ];
+	// 'PCC LTE' / 'PCC NR' too: the Fibocom AT rows name the leg in the role
+	// (telemetry_ncm.uc ca_entries), and missing them doubled both PCCs
+	let has = (rat) => length(filter(out, (c) => match(c?.role ?? '', /^PCC( LTE| NR)?$/) &&
+		(c?.rat ?? 'lte') == rat)) > 0;
+	let lte = filter(rf ?? [], (b) => b.radio_if == nasmod.RADIO_IF_LTE)[0];
+	let nr = filter(rf ?? [], (b) => b.radio_if == nasmod.RADIO_IF_5GNR)[0];
+
+	if (lte && !has('lte'))
+		push(out, { rat: 'lte', role: 'PCC', earfcn: lte.channel, pci: null,
+		            bandwidth_mhz: lte.bandwidth_mhz });
+
+	if (nr && !has('nr')) {
+		// the band token the way the AT producer spells it ('n78'), so the
+		// page shows the modem's band rather than re-deriving it
+		let m = match(nasmod.ACTIVE_BAND_NAMES[sprintf('%d', nr.band)] ?? '', /^NR (n[0-9]+)$/);
+
+		push(out, { rat: 'nr', role: 'PCC', earfcn: nr.channel, pci: null,
+		            band: m ? m[1] : null, bandwidth_mhz: nr.bandwidth_mhz });
+	}
+
+	return out;
+};
 
 // get_ca(nas, cb): active LTE carrier aggregation, normalized to
 // [ { role, earfcn, pci, bandwidth_mhz, state? }, ... ]. Band/frequency are
@@ -202,7 +334,224 @@ export function get_reg_detail(nas, cb)
 	}, { no_recovery: true });
 };
 
+// network_reject(data): a NAS NETWORK_REJECT_IND as the fields reg_detail
+// carries — { reject_cause, reject_domain, reject_rat, reject_plmn?,
+// ciot_mode?, reject_final? } — or null when it names no cause. reject_rat is
+// the radio interface by name, ciot_mode what the modem was camped in
+// ('lte-m', 'nb-iot'; absent on a modem that does not say), reject_final
+// true when the modem gave up after its last attempt. Pure.
+export function network_reject(data)
+{
+	if (data?.reject_cause == null)
+		return null;
+
+	let r = {
+		reject_cause: data.reject_cause,
+		reject_domain: data.service_domain,
+		reject_rat: (data.radio_if != null) ? nasmod.radio_if_name(data.radio_if) : null,
+	};
+
+	// the PCS digit says whether the MNC has three digits: 310/030 and
+	// 310/30 are two operators
+	if (data.plmn)
+		r.reject_plmn = sprintf(data.plmn.mnc_pcs_digit ? '%03d/%03d' : '%03d/%02d',
+			data.plmn.mcc, data.plmn.mnc);
+
+	let ciot = nasmod.CIOT_MODE[sprintf('%d', data.ciot_mode ?? 0)];
+
+	if (ciot)
+		r.ciot_mode = ciot;
+
+	if (data.max_attempts)
+		r.reject_final = true;
+
+	return r;
+};
+
+// reject_line(r): one log line for a network_reject() result,
+// "cause 19 (ESM failure), PS, lte-m, 262/02".
+export function reject_line(r)
+{
+	let text = nasmod.REJECT_CAUSE[sprintf('%d', r.reject_cause)];
+	let parts = [ text ? sprintf('cause %d (%s)', r.reject_cause, text)
+	                   : sprintf('cause %d', r.reject_cause) ];
+	let dom = nasmod.SERVICE_DOMAIN[sprintf('%d', r.reject_domain ?? -1)];
+
+	if (dom && dom != 'none')
+		push(parts, dom);
+
+	if (r.ciot_mode ?? r.reject_rat)
+		push(parts, r.ciot_mode ?? r.reject_rat);
+
+	if (r.reject_plmn)
+		push(parts, r.reject_plmn);
+
+	if (r.reject_final)
+		push(parts, 'last attempt');
+
+	return join(', ', parts);
+};
+
+// with_reject(d, rej): a registration detail with the pushed reject laid over
+// it. The indication wins over the system info read: it names the cause on
+// modems that leave the system info's reject TLV empty, and it is the newer
+// of the two. Returns d itself without a reject. Pure.
+export function with_reject(d, rej)
+{
+	if (!rej)
+		return d;
+
+	let out = { ...(d ?? { source: 'qmi' }) };
+
+	for (let k in [ 'reject_cause', 'reject_domain', 'reject_rat', 'reject_plmn',
+	                'ciot_mode', 'reject_final' ])
+		if (rej[k] != null)
+			out[k] = rej[k];
+
+	return out;
+};
+
+const ATTACH_PDP = { '0': 'ipv4', '1': 'ipv6', '2': 'ipv4v6' };
+
+// lte_attach(data): the LTE attach as status `attach_info` carries it (the
+// shape modem_mbim.uc fills from MBIM LTE Attach Info), from a WDS
+// LTE_ATTACH_PARAMS_IND or a GET_LTE_ATTACH_PARAMS answer:
+// { source: 'qmi', state_text: 'attached', apn, pdp_type, ipv4?, ipv6? } or
+// { source: 'qmi', state_text: 'detached' }. apn is null for an empty one.
+// The indication says `valid`, the read `attached`. Pure.
+export function lte_attach(data)
+{
+	if (!(data?.valid ?? data?.attached))
+		return { source: 'qmi', state_text: 'detached' };
+
+	let a = {
+		source: 'qmi',
+		state_text: 'attached',
+		apn: length(data.apn ?? '') ? data.apn : null,
+		pdp_type: ATTACH_PDP[sprintf('%d', data.ip_type ?? -1)] ?? null,
+	};
+
+	if (data.ipv4 && data.ipv4 != '0.0.0.0')
+		a.ipv4 = data.ipv4;
+
+	if (data.ipv6?.addr)
+		a.ipv6 = sprintf('%s/%d', data.ipv6.addr, data.ipv6.plen);
+
+	return a;
+};
+
+// attach_failure(data): a WDS LTE_ATTACH_FAILURE_INFO_IND as
+// { type, code, text, plmn? } — the reason read like a verbose call end
+// reason (callend.describe), the PLMN from its three BCD bytes. Pure.
+export function attach_failure(data)
+{
+	if (!data?.reason)
+		return null;
+
+	let d = callend.describe(null, data.reason, null);
+	let f = { type: data.reason.type, code: data.reason.reason, text: d?.text ?? null };
+	let p = data.plmn;
+
+	if (type(p) == 'string' && length(p) == 3) {
+		let b = [ ord(p, 0), ord(p, 1), ord(p, 2) ];
+		let mnc3 = b[1] >> 4;
+
+		f.plmn = sprintf('%d%d%d/%d%d%s', b[0] & 15, b[0] >> 4, b[1] & 15,
+			b[2] & 15, b[2] >> 4, mnc3 == 15 ? '' : sprintf('%d', mnc3));
+	}
+
+	return f;
+};
+
+// rab_reject_text(cause): RAB_REJECT_IND cause in words.
+export function rab_reject_text(cause)
+{
+	return wdsmod.RAB_REJECT_CAUSE[sprintf('%d', cause ?? 0)] ?? sprintf('cause %d', cause ?? 0);
+};
+
 // --- context (WDS) operations ------------------------------------------------
+
+// get_pdn_throttle(wds, cb): the APNs the modem holds back right now, as
+// [ { apn, ipv4_s, ipv6_s } ] (seconds left, null for a family not held),
+// [] when none is, null when the request failed. 3GPP only.
+export function get_pdn_throttle(wds, cb)
+{
+	wds.request('GET_PDN_THROTTLE_INFO', { network_type: 0 }, (e, d) => {
+		if (e)
+			return cb(null);
+
+		// rounded UP: a hold of 400 ms is still a hold, and floored it read 0
+		let secs = (held, ms) => held ? int(((ms ?? 0) + 999) / 1000) : null;
+		let out = [];
+
+		for (let t in (d?.info ?? []))
+			if (t.ipv4 || t.ipv6)
+				push(out, { apn: t.apn ?? '', ipv4_s: secs(t.ipv4, t.ipv4_left_ms), ipv6_s: secs(t.ipv6, t.ipv6_left_ms) });
+
+		cb(out);
+	}, { no_recovery: true });
+};
+
+// read_profiles(wds, cb): the modem's 3GPP profiles and which it attaches
+// with, READ-ONLY — the facts any choice of a dial profile has to start
+// from, since the attach profile is the modem's to name (wds.uc
+// GET_LTE_ATTACH_PDN_LIST), not necessarily 1. cb(null, {
+//   profiles: [ { index, name, apn, pdp_type, auth, apn_disabled, imcn, pcscf_pco } ],
+//   attach:   { current: [ids], pending: [ids] } | { error },
+//   default:  { embedded, tethered } (each an index or { error }) })
+// or cb({ error }) when the list itself cannot be read. Each later read
+// answers on its own: a firmware without the attach list or the default
+// number still yields the profiles. Strictly sequential — one request on
+// the config client at a time, like every other reader of it.
+export function read_profiles(wds, cb)
+{
+	let qerr = (e) => ({ error: 'qmi', code: e?.code ?? null });
+	let out = { profiles: [], attach: null, default: {} };
+
+	wds.request('GET_PROFILE_LIST', { profile_type: 0 }, (e, d) => {
+		if (e)
+			return cb(qerr(e));
+
+		let ids = map(d?.profiles ?? [], (p) => p.index);
+		let i = 0;
+		let next;
+
+		let tail = () => {
+			wds.request('GET_LTE_ATTACH_PDN_LIST', {}, (ae, ad) => {
+				out.attach = ae ? qerr(ae) : { current: ad?.current ?? [], pending: ad?.pending ?? [] };
+
+				// QmiWdsProfileFamily: 0 embedded (the router's own sessions),
+				// 1 tethered (libqmi 1.38 qmi-enums-wds.h)
+				wds.request('GET_DEFAULT_PROFILE_NUMBER', { profile: { type: 0, family: 0 } }, (de, dd) => {
+					out.default.embedded = de ? qerr(de) : dd?.index;
+
+					wds.request('GET_DEFAULT_PROFILE_NUMBER', { profile: { type: 0, family: 1 } }, (te, td) => {
+						out.default.tethered = te ? qerr(te) : td?.index;
+						cb(null, out);
+					}, { no_recovery: true });
+				}, { no_recovery: true });
+			}, { no_recovery: true });
+		};
+
+		next = () => {
+			if (i >= length(ids))
+				return tail();
+
+			let idx = ids[i++];
+
+			wds.request('GET_PROFILE_SETTINGS', { profile: { type: 0, index: idx } }, (se, s) => {
+				push(out.profiles, se ? { index: idx, ...qerr(se) } : {
+					index: idx, name: s?.profile_name, apn: s?.apn, pdp_type: s?.pdp_type,
+					auth: s?.auth, apn_disabled: s?.apn_disabled,
+					imcn: s?.imcn, pcscf_pco: s?.pcscf_pco,
+				});
+				next();
+			}, { no_recovery: true });
+		};
+
+		next();
+	}, { no_recovery: true });
+};
 
 const RAT_LTE = (1 << 5), RAT_5GNR = (1 << 10);
 const STATS_MASK = 0x3FF;

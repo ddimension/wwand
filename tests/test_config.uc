@@ -22,7 +22,7 @@ let r = padopt({
 		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', pincode: '1234',
 		      modes: 'lte,nr5g', mux: 'auto', at_init: [ 'ATI' ], location: '1',
 		      serial: '99efe861', imei: '350000000000000', repower_time: '10' },
-		m1: { '.type': 'wwand_modem', device: '/dev/cdc-wdm1', sim_detect: 'HIGH', reset_fallback: '45' },
+		m1: { '.type': 'wwand_modem', device: '/dev/cdc-wdm1', sim_detect: 'HIGH', reset_fallback: '45', nr5g_mode: 'SA' },
 		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'internet',
 		       pdp_type: 'ipv4v6', mux_id: '0' },
 		wan2: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: '#2',
@@ -85,6 +85,7 @@ eq(r.contexts.wan.address_allocation, null, 'native: address_allocation unset st
 eq(r.modems.m0.sim_detect, null, 'native: sim_detect unset stays null');
 eq(r.modems.m1.sim_detect, 'high', 'native: sim_detect parsed, case-insensitive');
 eq(r.modems.m1.reset_fallback, 45, 'native: reset_fallback parsed as seconds');
+eq([ r.modems.m0.nr5g_mode, r.modems.m1.nr5g_mode ], [ null, 'sa' ], 'native: nr5g_mode unset stays null, set parsed case-insensitive');
 eq(r.contexts.wan2.apn, '#2', 'native: profile passthrough apn');
 eq(r.contexts.wan.auto, true, 'native: interface auto defaults true');
 eq(r.contexts.wan2.auto, false, 'native: auto 0 -> not proactively brought up');
@@ -1277,6 +1278,19 @@ r = padopt({
 });
 eq(r.modems.m0.fcc_auth, 'foxconn:0', 'modem: fcc_auth passed through');
 
+// option ipa_mode switches a card's own IPA off, so only the one value counts
+r = padopt({
+	network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', ipa_mode: 'IPAd' },
+		m1: { '.type': 'wwand_modem', device: '/dev/cdc-wdm1', ipa_mode: 'yes' },
+		m2: { '.type': 'wwand_modem', device: '/dev/cdc-wdm2' },
+	},
+});
+eq([ r.modems.m0.ipa_mode, r.modems.m1.ipa_mode, r.modems.m2.ipa_mode ], [ 'ipad', null, null ],
+	'modem: ipa_mode is ipad or unset, a typo is not read as yes');
+eq(length(filter(r.warnings, (w) => index(w, 'ipa_mode: unknown value') == 0)), 1,
+	'modem: an unknown ipa_mode value warns');
+
 // wwand_sim.modem is OPTIONAL: an unbound sim applies to every modem (matched
 // by ICCID), a bound one only to its modem
 r = padopt({
@@ -1870,5 +1884,27 @@ ok(length(filter(psim.warnings, (w) => index(w, 'nonsense') >= 0)) > 0,
 // field attempt silently do nothing
 eq(length(filter(psim.warnings, (w) => index(w, "unknown option 'pdp_type'") >= 0)), 0,
 	'sim pdp: no longer reported as an unknown option');
+
+// option iccid on an interface
+{
+	let c = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', iccid: '8949 0200 0010 2283 2490' },
+		b:  { '.type': 'interface', proto: 'wwand', modem: 'm0', iccid: '89882390001598474352' },
+		c:  { '.type': 'interface', proto: 'wwand', modem: 'm0', iccid: '12345' },
+	} });
+
+	eq(c.contexts.a.iccid, '89490200001022832490', 'iccid: blanks removed');
+	eq(c.contexts.c.iccid, null, 'iccid: too short — no binding');
+	ok(length(filter(c.warnings, (w) => index(w, "invalid iccid '12345'") >= 0)) == 1, 'iccid: ...and a warning');
+	ok(length(filter(c.warnings, (w) => index(w, 'interfaces a and b: both auto') >= 0)) == 1,
+	   'iccid: two auto interfaces bound to different cards on one modem are warned about');
+	c = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		a:  { '.type': 'interface', proto: 'wwand', modem: 'm0', iccid: '89490200001022832490' },
+		b:  { '.type': 'interface', proto: 'wwand', modem: 'm0', iccid: '89882390001598474352', auto: '0' },
+	} });
+	eq(length(filter(c.warnings, (w) => index(w, 'both auto') >= 0)), 0, 'iccid: ...not when one is auto 0');
+}
 
 done('test_config');

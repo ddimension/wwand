@@ -97,6 +97,11 @@ export function collect(self, log, cb)
 		return add_ceer(null);
 
 	qmi_backend.get_reg_detail(self.nas, (d) => {
+		// the cause the network pushed (modem.uc _on_network_reject) beats
+		// both the system info read and AT+CEER: it is the newest, and it
+		// says which domain and which CIoT mode were refused
+		d = qmi_backend.with_reject(d, self.last_reject);
+
 		if (!d)
 			return add_ceer(null);
 

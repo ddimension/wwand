@@ -29,9 +29,16 @@ import * as modem_quirks from 'wwand.modem_quirks';
 // profile and in its data calls (HW-seen on 245, 2026-09-27).
 const CREDENTIALS = { auth: true, username: true, password: true };
 
+// AN IMS PDN IS NOT THE CARD'S DIAL. A wwand_sim describes how this card
+// reaches its data network: one APN, one login, one IP family. An interface
+// with `ims '1'` is a second PDN on the same card (the IM CN one) and is
+// defined by the interface alone. Taking the card's APN there dialled the
+// internet APN a second time ("call already present", HW-seen on 245,
+// 2026-11-14), and its pdp_type would ask the IMS APN for a family the
+// network refuses (Vodafone's IMS PDN is IPv6-only).
 export function conn_cfg(ctx, field)
 {
-	let sim = ctx.modem?.active_sim;
+	let sim = (ctx.config?.ims === true) ? null : ctx.modem?.active_sim;
 	let s = sim?.[field];
 
 	if (s != null && s != '')

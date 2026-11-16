@@ -9,8 +9,6 @@
 //   fx = { read(path), write(path, data), exists(path), run(argv), log(level, msg) }
 //
 // Preserved behaviors (see old files/usr/sbin/qmi-hotplug):
-// - dl-datagram-max-size from a per-board quirk table (4K default,
-//   31K on zyxel lte3301-plus / nr7101), overridable via config
 // - rx_urb_size = dl_datagram_max_size + 4 (QMAP header) when muxing
 // - parent MTU 1508 while creating rmnet links, then parent MTU = urb size
 // - mux child MTU: configured value if > 576, else 1500
@@ -20,7 +18,25 @@
 
 import * as fs from 'fs';
 
-export const DEFAULT_DGRAM_SIZE = 4096;
+// The DL aggregation size asked of every modem, overridable per modem with
+// `option dl_datagram_max_size`. One value and not a per-model table, because
+// the request is negotiated: the modem may clamp it, and its positive echo
+// sizes the receive side (setup() below).
+//
+// Why 31 KB and not the 32 KB ModemManager asks for (mm-port-qmi.c:1112,
+// MM 1.18.8): usbnet receives each aggregate into ONE linear skb of
+// rx_urb_size = size + 4 (usbnet.c:494-525), mainline mhi_net likewise into
+// one of the parent MTU (mhi_net.c:278-281). The allocator adds NET_SKB_PAD,
+// NET_IP_ALIGN on the ip_align path, and the aligned skb_shared_info
+// (skbuff.c:590-622, 739-760; skbuff.h:257-265). On this 4 KB-page kernel,
+// 31744 + 4 stays inside a 32 KB allocation, while 32768 + 4 rounds the skb
+// head to 64 KB per buffer: half of it unused, and an order-4 allocation, the
+// first to fail on a fragmented router (all Linux 6.18.41). 31 KB is also the
+// vendor drivers' own largest table entry (qmi_wwan_q `(9<<8)|31`, see
+// datapath_rmnet_nss.uc). The one receive side that does NOT follow the echo
+// is a vendor driver's buffer fixed at bind; a datapath reports it as
+// `dgram_max` and the request is capped there (dgram_size()).
+export const DEFAULT_DGRAM_SIZE = 31 * 1024;
 
 // RMNET_FLAGS_* (linux/if_link.h)
 export const RMNET_INGRESS_DEAGGREGATION = 0x01;
@@ -229,21 +245,6 @@ export function canon_mux(name)
 
 	return (n == 'none') ? 'raw_ip' : n;
 };
-
-// board_name prefix -> aggregation size (SoC capability)
-const BOARD_DGRAM_SIZES = [
-	{ prefix: 'zyxel,lte3301-plus', size: 31 * 1024 },
-	{ prefix: 'zyxel,nr7101',       size: 31 * 1024 },
-	// SDX20-class boards support 16K; extend as devices get verified
-];
-
-// modem model pattern -> aggregation size; takes precedence over the board
-// table (USB modems are not tied to a board). The modem clamps the WDA
-// request to its real capability and the echoed value drives the driver
-// side, so an optimistic entry here is safe.
-const MODEL_DGRAM_SIZES = [
-	{ pattern: '^RG650E', size: 31 * 1024 },   // SDX72 class
-];
 
 export function default_fx(log)
 {
@@ -665,22 +666,19 @@ export function apply_iface_id(fx, netdev, value, log, on_addr)
 	return { applied: null, error: why };
 };
 
-export function board_dgram_size(fx, override, model)
+// The DL aggregation size to request: the configured override, else the
+// default, and either one capped at `driver_max`, the receive buffer a vendor
+// driver fixed at bind. That cap applies to an override too: the modem would
+// accept the larger size and send aggregates the driver cannot receive.
+// Returns { size, capped } — `capped` true when driver_max lowered it.
+export function dgram_size(override, driver_max)
 {
-	if (+override > 0)
-		return +override;
+	let size = (+override > 0) ? +override : DEFAULT_DGRAM_SIZE;
 
-	for (let entry in MODEL_DGRAM_SIZES)
-		if (match(model ?? '', regexp(entry.pattern)))
-			return entry.size;
+	if (+driver_max > 0 && size > +driver_max)
+		return { size: +driver_max, capped: true };
 
-	let board = trim(fx.read('/tmp/sysinfo/board_name') ?? '');
-
-	for (let entry in BOARD_DGRAM_SIZES)
-		if (substr(board, 0, length(entry.prefix)) == entry.prefix)
-			return entry.size;
-
-	return DEFAULT_DGRAM_SIZE;
+	return { size: size, capped: false };
 };
 
 // Pin PCIe runtime PM off for an MHI modem's endpoint (and its bridge).
@@ -1311,6 +1309,12 @@ export function datapath_caps(backend, plugins, fx, netdev)
 		adopts: (type(impl?.prune) == 'function'),
 		// host-side uplink coalescing is available
 		tx_aggr: (impl?.tx_aggr === true),
+		// the largest DL aggregate the driver can receive, in bytes, or null
+		// when the receive side follows the negotiated size (every datapath
+		// wwand sizes itself). Only an adopter's driver has a buffer fixed at
+		// bind; asked of the device like qmap_versions, and null without one.
+		dgram_max: (type(impl?.dgram_max) == 'function' && fx && netdev)
+			? impl.dgram_max(fx, netdev) : null,
 		// the wire framing the parent carries: 802.3 (the kernel default) or
 		// raw-IP. A boolean, not the WDA enum — netlink stays codec-free; the
 		// caller maps it onto the WDA link-layer protocol value.

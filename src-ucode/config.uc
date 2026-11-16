@@ -20,6 +20,7 @@ import * as netlink from 'wwand.netlink';
 import * as catmod from 'wwand.codec.schema.cat';
 import * as nasmod from 'wwand.codec.schema.nas';
 import * as recovery from 'wwand.recovery';
+import * as siminventory from 'wwand.siminventory';
 
 const OLD_DEPRECATED = [ 'dhcp', 'autocreateif', 'customroutes', 'strongestnetwork' ];
 
@@ -113,6 +114,9 @@ function conn_fields(s, warnings)
 		// profile "Address Allocation Preference": 'nas' | 'dhcp', unset =
 		// leave it; anything else is warned about and ignored, never guessed
 		address_allocation: addr_alloc_opt(s.address_allocation, warnings),
+		// an IMS PDN: profile "PCSCF Address Using PCO" + "IMCN Flag", and the
+		// P-CSCF addresses read into the status. TRI-STATE like the flags above.
+		ims: (s.ims != null && s.ims != '') ? bool_opt(s.ims, null) : null,
 		settings_poll: num_opt(s.settings_poll, 300, 'settings_poll', warnings),
 		// on a reconnect that changes the IP, do a netifd link down->up instead of
 		// an in-place renew, so dependent tunnels/xfrm re-follow the new local
@@ -267,7 +271,7 @@ export function modem_defaults(over)
 {
 	return {
 		device: null, netdev: null, usb_path: null, reset_gpio: null, reset_fallback: null,
-		sim_detect: null,
+		sim_detect: null, nr5g_mode: null,
 		serial: null, imei: null,   // stable identity anchors (USB iSerial / IMEI)
 		repower_time: null,         // recovery power-cycle off / reset hold seconds
 		pincode: null, modes: null, rat_order: null, mcc: null, mnc: null,
@@ -279,6 +283,7 @@ export function modem_defaults(over)
 		gnss_nmea: null,       // 'fix' | 'full': the NMEA the receiver emits (null = untouched)
 		nitz_time: true,       // step the system clock from NITZ (see deps set_clock)
 		fcc_auth: null,        // RF unlock for laptop-SKU modems (see reference.md)
+		ipa_mode: null,        // 'ipad': declare the router's IPA to an SGP.32 card (sim.uc declare_ipad)
 		failreboot: 100, recovery_steps: null, proto_error_limit: 25, zero_rx_timeout: 21600,
 		tx_stall_timeout: 120, // s: a stuck transmit queue resets the modem (0 = watch only)
 		unarmed_reset_after: 300,   // s: first reset-line pulse of a never-answering modem
@@ -292,6 +297,63 @@ export function modem_defaults(over)
 	};
 };
 
+// `option ipa_mode`: 'ipad' or unset. Anything else warns and stays unset — the
+// option switches a card's own IPA off, so a typo must not be read as yes.
+function ipa_mode_opt(v, warnings)
+{
+	if (v == null || v == '')
+		return null;
+
+	if (lc(v) == 'ipad')
+		return 'ipad';
+
+	push(warnings ?? [], sprintf('ipa_mode: unknown value %J (only \'ipad\') — ignored', v));
+	return null;
+}
+
+// `option iccid` of an interface: 18-20 digits (ITU-T E.118; a trailing F and
+// blanks as the modems and the card print it are tolerated), else a warning
+// and no binding — a typo bound to no card would hold the interface down for
+// good, where unbound it at least connects.
+function iccid_opt(v, name, warnings)
+{
+	if (v == null || v == '')
+		return null;
+
+	let id = siminventory.norm_iccid(sprintf('%s', v));
+
+	if (!id) {
+		push(warnings, sprintf("interface %s: invalid iccid '%s', ignoring (18-20 digits)", name, v));
+		return null;
+	}
+
+	return id;
+}
+
+// Two interfaces brought up at boot on one modem, bound to different cards,
+// cannot both come up: the first takes the card and the second is refused
+// (sim_in_use). Which one is first is netifd's order, so it is said here
+// rather than left to be found at the next reboot.
+function check_iccid_bindings(result)
+{
+	let seen = {};
+
+	for (let name in sort(keys(result.contexts))) {
+		let c = result.contexts[name];
+
+		if (!c.iccid || !(c.auto ?? true))
+			continue;
+
+		let prev = seen[c.modem];
+
+		if (prev && prev.iccid != c.iccid)
+			push(result.warnings, sprintf("interfaces %s and %s: both auto on modem %s, bound to different cards — only one comes up; set `option auto '0'` on the other",
+				prev.name, name, c.modem));
+		else if (!prev)
+			seen[c.modem] = { name: name, iccid: c.iccid };
+	}
+}
+
 export function context_defaults(over)
 {
 	return {
@@ -302,9 +364,10 @@ export function context_defaults(over)
 		username: null, password: null, profile: null,
 		mtu: null, use_pushed_mtu: true,
 		use_pushed_prefix: false,
-		ipv6_pd: null, clat: null, address_allocation: null,
+		ipv6_pd: null, clat: null, address_allocation: null, ims: null,
 		settings_poll: 300,
 		auto: true,   // netifd 'auto 0' => daemon won't proactively bring it up
+		iccid: null,  // option iccid: the card this connection needs
 		...(over ?? {}),
 	};
 };
@@ -358,10 +421,10 @@ function apply_globals(s, result)
 // instead of 'pincode' cost a HW debugging session — the daemon saw "PIN
 // required but none configured" and safety-blocked the SIM).
 const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', 'serial',
-	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'recovery_steps', 'pincode', 'modes', 'rat_order', 'mcc', 'mnc',
+	'imei', 'repower_time', 'reset_gpio', 'reset_fallback', 'sim_detect', 'nr5g_mode', 'recovery_steps', 'pincode', 'modes', 'rat_order', 'mcc', 'mnc',
 	'mux', 'dl_datagram_max_size', 'tty', 'diag_port', 'at2_external', 'gnss', 'gnss_set_time', 'nitz_time', 'fcc_auth',
 	'gnss_nmea', 'at_init', 'location', 'delay', 'failreboot', 'proto_error_limit',
-	'unarmed_reset_after', 'card_hold',
+	'unarmed_reset_after', 'card_hold', 'ipa_mode',
 	'zero_rx_timeout', 'tx_stall_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
 	// the AT-over-MBIM pipe: `at_over_mbim` forces it and picks the vendor CID
@@ -494,6 +557,10 @@ function modem_from_section(s, warnings)
 		// sim_detect_commands); anything else is dropped, never guessed
 		sim_detect: (index([ 'high', 'low', 'off' ], lc(sprintf('%s', s.sim_detect ?? ''))) >= 0)
 			? lc(s.sim_detect) : null,
+		// which 5G NR flavours the modem may use: 'nsa' | 'sa' | 'both'
+		// (atcmd.uc nr5g_mode_commands); anything else is dropped
+		nr5g_mode: (index([ 'nsa', 'sa', 'both' ], lc(sprintf('%s', s.nr5g_mode ?? ''))) >= 0)
+			? lc(s.nr5g_mode) : null,
 		pincode: s.pincode,
 		modes: s.modes,
 		// acquisition order, most preferred first (validated below)
@@ -564,6 +631,7 @@ function modem_from_section(s, warnings)
 		// turn a stray 3 into v1 and a stray 99 into "automatic" without a word.
 		qmap_version: num_opt(s.qmap_version, 0, 'qmap_version', warnings),
 		fcc_auth: s.fcc_auth,
+		ipa_mode: ipa_mode_opt(s.ipa_mode, warnings),
 		at_init: (type(s.at_init) == 'array') ? s.at_init :
 		         (s.at_init != null ? [ s.at_init ] : []),
 		location: bool_opt(s.location, false),
@@ -1124,6 +1192,9 @@ function compat_translate(raw, result)
 				profile: (s.profile != null) ? +s.profile : null,
 				use_pushed_mtu: bool_opt(s.use_pushed_mtu, true),
 				auto: bool_opt(s.auto, true),
+				// the card this connection needs (daemon.uc sim_binding):
+				// normalised, so the spellings a modem reads back compare
+				iccid: iccid_opt(s.iccid, name, result.warnings),
 				// autosetup marker: this interface was created by the
 				// zero-config autosetup and still awaits its one-shot
 				// ICCID->APN fill-in (cleared by the daemon afterwards)
@@ -1465,6 +1536,7 @@ export function parse(raw, opts)
 	parse_network_sections(raw ?? {}, result, opts?.ext_options);
 	compat_translate(raw ?? {}, result);
 	assign_l3_names(result);
+	check_iccid_bindings(result);
 
 	// resolve each modem's optional plmn_list -> the entries to restore before
 	// radio-on; warn on a dangling reference.

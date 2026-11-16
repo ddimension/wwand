@@ -175,4 +175,42 @@ eq(inv.list()[0].iccid, '89882280000192155295', 'present cards are listed first'
 inv.forget_except('modem:', []);
 eq(inv.find('89882280000192155295').present, false, 'forget: a removed modem\'s cards are absent');
 
+// --- ICCID-bound interfaces: bind_plan / bind_holder ---------------------
+{
+	let A = '89490200001022832490', B = '89882390001598474352';
+	let m = { modem: 'wm0', active: A, active_slot: 1 };
+	let card = (o) => ({ iccid: B, present: true, modem: 'wm0', slot: 2, reader: null, profile: null, ...(o ?? {}) });
+
+	eq(siminv.bind_plan(A, null, m), { action: 'ok' }, 'bind: the card in use needs nothing');
+	eq(siminv.bind_plan(B, null, { ...m, active: null }).action, 'wait', 'bind: no card read yet — wait');
+	eq(siminv.bind_plan(B, card(), m), { action: 'slot', slot: 2 }, 'bind: a card in another slot — switch the slot');
+	eq(siminv.bind_plan(B, card({ slot: 1, profile: { state: 'disabled', name: 'IoT' } }), m),
+	   { action: 'enable', slot: 1 }, 'bind: a disabled profile on the active eUICC — enable it');
+	eq(siminv.bind_plan(B, card({ slot: 2, profile: { state: 'disabled' } }), m),
+	   { action: 'slot', slot: 2 }, 'bind: a profile on an eUICC in another slot — the slot first');
+	eq(siminv.bind_plan(B, null, m).error, 'sim_not_here', 'bind: never seen — refused');
+	ok(index(siminv.bind_plan(B, card({ present: false }), m).detail, 'last seen in modem wm0 slot 2') >= 0,
+	   'bind: not present — refused, naming where it was last');
+	ok(index(siminv.bind_plan(B, card({ reader: 'r0', modem: null, slot: null }), m).detail, 'remote SIM') >= 0,
+	   'bind: a card in a reader — refused, its plugin hands it out');
+	ok(index(siminv.bind_plan(B, card({ modem: 'wm1' }), m).detail, 'not in modem wm0') >= 0,
+	   'bind: a card in another modem — refused');
+	eq(siminv.bind_plan(B, card({ slot: 1 }), m).action, 'refuse',
+	   'bind: in the active slot but not in use, no profile — nothing reaches it');
+
+	let ctxs = {
+		home: { cfg: { modem: 'wm0', iccid: A }, ctx: { state: 'CONNECTED' } },
+		away: { cfg: { modem: 'wm0', iccid: B }, ctx: { state: 'IDLE' } },
+		any:  { cfg: { modem: 'wm0', iccid: null }, ctx: { state: 'CONNECTED' } },
+		pdn2: { cfg: { modem: 'wm0', iccid: A }, ctx: { state: 'IDLE' } },
+		other:{ cfg: { modem: 'wm1', iccid: A }, ctx: { state: 'CONNECTED' } },
+	};
+	eq(siminv.bind_holder(ctxs, 'away', 'wm0', B), 'home', 'holder: an interface up on another card holds the modem');
+	eq(siminv.bind_holder(ctxs, 'pdn2', 'wm0', A), null, 'holder: the same card is shared, an unbound interface holds nothing');
+	ctxs.home.ctx.state = 'IDLE';
+	eq(siminv.bind_holder(ctxs, 'away', 'wm0', B), null, 'holder: an idle interface holds nothing');
+	ctxs.home._sim_switch = { steps: 1 };
+	eq(siminv.bind_holder(ctxs, 'away', 'wm0', B), 'home', 'holder: ...a switch under way does');
+}
+
 done('test_siminventory');

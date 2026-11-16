@@ -65,6 +65,8 @@ const WAKE_TRIES = 3;
 export function create(opts)
 {
 	let self = {
+		// `option nr5g_mode` goes through sync_modes, not the AT init list
+		_nr5g_deferred: true,
 		id: opts.id,
 		device: opts.device,
 		protocol: 'mbim',
@@ -547,12 +549,21 @@ export function create(opts)
 
 		if (aom) {
 			let vendor = (aom == 'compal') ? 'compal' : 'fibocom';
-			let eng = mbim_backend.make_at_engine(self.mbim, vendor);
+			let eng = mbim_backend.make_at_engine(self.mbim, vendor, (level, msg) => log(level, sprintf('at: %s', msg)));
 
 			log('notice', sprintf('AT side channel over MBIM (%s vendor CID)', vendor));
 			self.at = eng;
 			self.at_telemetry = eng;
-			return step_at_ident();
+
+			// the same init list every other AT channel runs (cell locks,
+			// SIM detection, the 5G NR mode): a forced tunnel is still the
+			// modem's only AT path, and skipping it here dropped them
+			let cmds = modem_common.init_commands(self);
+
+			if (!length(cmds))
+				return step_at_ident();
+
+			return eng.run_sequence(cmds, modem_common.init_done(self, { next: step_at_ident }));
 		}
 
 		return modem_common.open_at(self, {
@@ -701,7 +712,8 @@ export function create(opts)
 	// switch_slot handle the MBIM transports themselves (passthrough UIM on
 	// demand, native MS-BCE fallback); unsupported -> log + continue.
 	step_simslot = () => {
-		let want = +(self.config.sim_slot ?? 0);
+		// -1: a bound card to look for, its slot known once the list is read
+		let want = sim.boot_slot(self, null).slot;
 
 		if (!want)
 			return step_sim();
@@ -714,17 +726,26 @@ export function create(opts)
 			// established does not answer. Same outcome as the error branch
 			// above.
 			if (err || !sim.enumerated(slots)) {
-				log('info', sprintf('sim_slot %d configured but slot status unsupported, continuing', want));
+				log('info', (want > 0)
+					? sprintf('sim_slot %d configured but slot status unsupported, continuing', want)
+					: 'an interface is bound to a card, but slot status is unsupported — continuing on the active one');
 				return step_sim();
 			}
+
+			let pick = sim.boot_slot(self, slots);
+
+			want = pick.slot;
+
+			if (!(want > 0))
+				return step_sim();
 
 			let cur = filter(slots, (s) => s.active)[0];
 
 			if (cur?.physical == want)
 				return step_sim();
 
-			log('notice', sprintf('switching to SIM slot %d (active: slot %d)',
-				want, cur?.physical ?? 0));
+			log('notice', sprintf('switching to SIM slot %d (active: slot %d) — %s',
+				want, cur?.physical ?? 0, pick.why));
 
 			sim.switch_slot(self, want, (serr) => {
 				if (serr)
@@ -1247,6 +1268,9 @@ export function create(opts)
 		if (!self.mbim)
 			return cb({ error: 'no_channel' });
 
+		if (self._modes_not_native)
+			return cb({ error: 'modes_not_mbim', detail: sprintf('modes "%s" have no MBIM data class', self.config?.modes) });
+
 		// zero-padded by hand: ucode's sprintf has no `%0*d`, and a `%02d` that
 		// silently truncated a 3-digit MNC would name a different operator
 		let id = '';
@@ -1264,8 +1288,169 @@ export function create(opts)
 		self.mbim.command(bc, 'REGISTER_STATE', 'set', {
 			provider_id: id,
 			register_action: plmn ? bc.REGISTER_ACTION_MANUAL : bc.REGISTER_ACTION_AUTOMATIC,
-			data_class: 0,
+			// the configured modes, as sync_modes wrote them: the DataClass
+			// is the RAT selection itself, not a hint for this one request
+			// (a T99W175 keeps it across a reset, HW-observed 2026-11-08).
+			// ModemManager sends its requested class here too
+			// (mm-broadband-modem-mbim.c:7279-7283, 1.24.0).
+			data_class: self._modes_data_class ?? 0,
 		}, (err) => cb(err), { timeout: 60000 });
+	};
+
+	// `option modes`: OVER THE QMI PASSTHROUGH WHEN THERE IS ONE, the MBIM
+	// DataClass only without it — ModemManager's split (1.24.0: a modem whose
+	// capabilities load over QMI-over-MBIM does all mode switching over QMI,
+	// mm-broadband-modem-mbim.c:491-501, 1452-1460, and registers over QMI too,
+	// because a Register State set "would overwrite whatever capabilities and
+	// modes we had set", :7258-7265). The DataClass is the weaker lever: what
+	// its CUSTOM bit stands for differs by firmware AND carrier profile on the
+	// same modem. On a T99W175 F0.0.0.3.0.GC.003 it is 5G SA (HW-observed
+	// 2026-11-08); on F0.1.0.0.9 CUSTOM alone turned the NAS mode preference
+	// into "td-scdma, 5gnr" with the GC profile, and "lte, 5g-nsa, custom"
+	// read as "lte, 5gnr" with the SC profile (mbimcli/qmicli output in
+	// ddimension/wwand#75, 2026-11-10 and 2026-11-12). The NAS mode
+	// preference says what it means. NSA vs SA is neither: that is
+	// `option nr5g_mode` (atcmd nr5g_mode_commands).
+	//
+	// Without a passthrough the DataClass goes out ModemManager's way, CUSTOM
+	// in place of the class it stands for (mbim_backend.data_class_custom),
+	// read back from PreferredDataClasses — MBIMEx 2.0 only, because v1
+	// reports nothing to compare against, and a set that cannot be checked
+	// would be sent at every start, each one a re-registration. With neither
+	// the modes are reported, not dropped silently. The registration stays
+	// what it is: a modem in manual selection gets its own provider id back,
+	// since an automatic set would undo the user's choice. Replaces this
+	// function's earlier warnings, so a re-init does not stack them. cb()
+	// always.
+	self.sync_modes = function(cb) {
+		let want = qmi_backend.parse_modes(self.config?.modes);
+		let warnings = [];
+		let finish = () => {
+			self.config_warnings = filter(self.config_warnings ?? [], (w) => w.check != 'mode_preference');
+
+			for (let w in warnings)
+				push(self.config_warnings, w);
+
+			// then `option nr5g_mode`, over the passthrough NAS when there is
+			// one (modem_common.apply_nr5g_mode: QMI first, AT otherwise). Unset,
+			// the passthrough is not opened just to find that out; the call
+			// still runs, because it clears a warning from an earlier config.
+			if (!self.config?.nr5g_mode || !self.mbim)
+				return modem_common.apply_nr5g_mode(self, null, log, cb);
+
+			self.with_nas((nas) => modem_common.apply_nr5g_mode(self, nas, log, cb));
+		};
+		let warn = (msg, actual) => push(warnings, { check: 'mode_preference', severity: 'warn',
+			message: msg, expected: self.config.modes, actual: actual });
+
+		self._modes_data_class = null;
+		self._modes_not_native = false;
+
+		if (want == null)
+			return finish();
+
+		let caps = self.info?.mbim_data_class;
+		let custom = self.info?.mbim_custom_data_class;
+		let dc = mbim_backend.data_class_from_modes(want);
+		let mask = mbim_backend.data_class_custom(dc, caps, custom) ?? dc;
+
+		// the mask a native network selection sends with its Register State
+		// set (native_register) — also on the NAS path, which a later
+		// selection reaches only when the passthrough is gone: a set with 0
+		// there would read as "any" and undo these modes. Modes MBIM cannot
+		// express (td-scdma) make that set refuse instead of narrowing or
+		// widening them.
+		self._modes_data_class = dc ? mask : null;
+		self._modes_not_native = !dc || !!(want & ~mbim_backend.MODES_MBIM);
+
+		let via_mbim;
+
+		let via_nas = (nas) => nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
+			if (!gerr && cur?.mode_preference == want) {
+				log('info', sprintf('network modes "%s" already set — skipping', self.config.modes));
+				return finish();
+			}
+
+			log('notice', sprintf('setting network modes "%s" over the passthrough (mask 0x%02x)', self.config.modes, want));
+
+			// permanent, like the QMI init write (modem_init_qmi)
+			nas.request('SET_SYSTEM_SELECTION_PREFERENCE', { mode_preference: want, change_duration: 1 }, (serr) => {
+				if (serr)
+					warn(sprintf('setting modes "%s" failed: %J', self.config.modes, serr), null);
+
+				finish();
+			}, { no_recovery: true });
+		}, { no_recovery: true });
+
+		via_mbim = () => {
+			let names = (m) => join(',', filter([ 'gsm', 'umts', 'lte', 'nr5g', 'cdma' ],
+				(n) => m & nasmod.MODE_BITS[n])) || 'none';
+			let held = (d) => mbim_backend.modes_from_data_class(d, caps, custom) & mbim_backend.MODES_MBIM;
+			let wanted = want & mbim_backend.MODES_MBIM;
+
+			if (want & nasmod.MODE_BITS['td-scdma'])
+				push(warnings, { check: 'mode_preference', severity: 'info',
+					message: sprintf('modes "%s": td-scdma has no MBIM data class and is not selected natively', self.config.modes),
+					expected: self.config.modes, actual: null });
+
+			// a list naming nothing MBIM can express would go out as 0, which a
+			// Register State set reads as "any" — the opposite of a restriction
+			if (!dc) {
+				warn(sprintf('modes "%s" name no technology MBIM can select — not applied', self.config.modes), null);
+				return finish();
+			}
+
+			if ((self.mbim.mbimex_version ?? 0) < 0x0200) {
+				warn(sprintf('modes "%s" are not applied: this modem reports no preferred data classes (MBIMEx 1.0) and offers no QMI passthrough',
+					self.config.modes), null);
+				return finish();
+			}
+
+			self.mbim.command(bc, 'REGISTER_STATE', 'query', {}, (qerr, cur) => {
+				if (qerr || cur?.preferred_data_classes == null) {
+					warn(sprintf('modes "%s" are not applied: the modem reports no preferred data classes and offers no QMI passthrough',
+						self.config.modes), null);
+					return finish();
+				}
+
+				let p = cur.preferred_data_classes;
+
+				if (held(p) == wanted) {
+					log('info', sprintf('network modes "%s" already set — skipping', self.config.modes));
+					return finish();
+				}
+
+				let manual = (cur.register_mode == bc.REGISTER_MODE_MANUAL && cur.provider_id);
+
+				log('notice', sprintf('setting network modes "%s" (data class 0x%08x, modem held %s)',
+					self.config.modes, mask, names(held(p))));
+
+				self.mbim.command(bc, 'REGISTER_STATE', 'set', {
+					provider_id: manual ? cur.provider_id : '',
+					register_action: manual ? bc.REGISTER_ACTION_MANUAL : bc.REGISTER_ACTION_AUTOMATIC,
+					data_class: mask,
+				}, (serr, now) => {
+					// THE SET'S OWN REPLY IS THE READ-BACK: Register State set
+					// answers with the full state, PreferredDataClasses
+					// included (libmbim 1.32.0,
+					// mbim-service-ms-basic-connect-v2.json)
+					let kept = now?.preferred_data_classes;
+
+					if (serr)
+						warn(sprintf('setting modes "%s" failed: %J', self.config.modes, serr), null);
+					else if (kept != null && held(kept) != wanted)
+						warn(sprintf('modem kept %s for modes "%s"', names(held(kept)), self.config.modes),
+							names(held(kept)));
+
+					finish();
+				}, { timeout: 60000, no_recovery: true });
+			}, { no_recovery: true });
+		};
+
+		if (!self.mbim)
+			return finish();
+
+		self.with_nas((nas) => nas ? via_nas(nas) : via_mbim());
 	};
 
 	self._on_connect_ind = function(data) {
@@ -1360,8 +1545,10 @@ export function create(opts)
 
 		emit('serving_system', self.reg);
 
-		if (registered)
+		if (registered) {
 			self._reg_released = false;
+			self._reg_lost = false;
+		}
 
 		if (registered && self.state == 'REGISTERING') {
 			if (reg_timer) { reg_timer.cancel(); reg_timer = null; }
@@ -1407,6 +1594,15 @@ export function create(opts)
 				return;
 			}
 
+			// ONCE per loss, too: the state turns REGISTERING only in
+			// do_register, after the preferred-list reads, and each register
+			// report until then landed here again. A band/RAT change sent
+			// about 120 of them, each logged and each starting another
+			// registration (evidence: ddimension/wwand#75, 2026-11-13).
+			if (self._reg_lost)
+				return;
+
+			self._reg_lost = true;
 			log('warn', 'registration lost');
 			emit('deregistered', self.reg);
 			notify_contexts('suspend', self.reg);
@@ -1519,43 +1715,99 @@ export function create(opts)
 		});
 	};
 
-	// the RAT acquisition order goes first, over the passthrough NAS, like the
-	// QMI init writes it before its attach profile (config_check.sync_rat_order)
-	step_attach_profile = () => config_check.sync_rat_order(self, log,
-		() => self._apply_attach(step_register));
+	// the modes and the RAT acquisition order go first, like the QMI init
+	// writes them before its attach profile: the modes natively
+	// (sync_modes), the order over the passthrough NAS
+	// (config_check.sync_rat_order)
+	step_attach_profile = () => self.sync_modes(() => config_check.sync_rat_order(self, log,
+		() => self._apply_attach(step_register)));
 
-	// HwRadioState reads OFF. On a Fibocom FM350 (MediaTek T7xx) that is an FCC
-	// lock, not the physical W_DISABLE kill: GTFCCEFFSTATUS mode 2 means the
-	// modem re-locks on every power-up, CFUN is 1 yet it never searches, and no
-	// MBIM/ucode write can clear it — only the vendor GTFCCLOCK challenge/
-	// response over AT does (fcc_fibocom). Gated so it is never sent to a non-
-	// Fibocom modem unless `option fcc_auth` names 'fibocom'. Once per init
-	// (_fcc_tried): a success flips the switch on, so step_register is re-entered
-	// to re-read (and handle the software radio) — a persisting OFF is then the
-	// real hardware kill, reported as before.
-	radio_off = (next) => {
+	// THE RADIO WILL NOT COME ON: HwRadioState reads OFF, or our own switch to
+	// on was refused or left the software radio off. That is how a vendor FCC
+	// lock shows over MBIM, and ModemManager reads it the same way: any of the
+	// three makes its power-up return RETRY, which runs the FCC unlock helper
+	// and powers up again (mm-broadband-modem-mbim.c:2088-2129 — "The SDX55
+	// returns 'Operation not allowed'" — and mm-iface-modem.c:4475,
+	// ModemManager 1.24.0). Two unlocks, each gated so it never reaches a modem
+	// of another vendor unless `option fcc_auth` names it:
+	//   Fibocom FM350 (MediaTek T7xx), hw OFF only: GTFCCEFFSTATUS mode 2
+	//     re-locks it on every power-up, CFUN is 1 yet it never searches, and
+	//     only the GTFCCLOCK challenge/response over AT clears it (fcc_fibocom).
+	//   Foxconn SDX55 (T99W175 with Foxconn ids, 105b:e0ab): the DMS Foxconn
+	//     FCC authentication over the QMI passthrough, v2 then v1, as MM's
+	//     105b helper sends it (qmi_backend fcc_foxconn).
+	// Once per init (_fcc_tried): a success re-enters step_register to re-read
+	// the radio; a hw OFF that persists is then the real hardware kill.
+	radio_off = (next, hw) => {
 		let fa = self.config.fcc_auth;
-		let explicit = (type(fa) == 'string' && index(fa, 'fibocom') == 0);
+		let auto = (fa == null || fa == '' || fa == 'auto');
+		let named = (v) => (type(fa) == 'string' && index(fa, v) == 0);
 		let is_fibocom = (match(self.info?.manufacturer ?? '', /fibocom/i) ||
 		                  match(self.info?.model ?? '', /FM3[0-9]0|FM1[0-9]0/i));
-		let auto = (fa == null || fa == '' || fa == 'auto');
+		// the firmware string names the module (T99W175.F0..., T77W968...);
+		// the MBIM hardware info of a T99W175 is "QUALCOMM INCORPORATED"
+		let is_foxconn = (match(self.info?.manufacturer ?? '', /foxconn/i) ||
+		                  match(self.info?.firmware ?? '', /^T(99|77)W/));
+		let vendor = null;
 
-		if (self._fcc_tried || !(explicit || (auto && is_fibocom))) {
-			log('warn', 'hardware radio switch is off — registration will not start');
-			self.control_note = 'radio disabled by the hardware switch';
+		if (hw && (named('fibocom') || (auto && is_fibocom)))
+			vendor = 'fibocom';
+		else if (named('foxconn') || (auto && is_foxconn))
+			vendor = 'foxconn';
+
+		let stays = (note, msg) => {
+			log('warn', msg);
+			self.control_note = note;
+			next();
+		};
+		let not_released = (v) => hw
+			? stays('radio disabled (FCC lock not released)', sprintf('hardware radio switch is off — %s FCC unlock did not release it', v))
+			: stays('radio stays off (FCC lock not released)', sprintf('the radio refuses to switch on — %s FCC unlock did not release it', v));
+		let retry = () => settle_timer = uloop.timer(self.timing.settle, step_register);
+
+		if (self._fcc_tried || !vendor) {
+			if (hw)
+				return stays('radio disabled by the hardware switch', 'hardware radio switch is off — registration will not start');
+
 			return next();
 		}
 
 		self._fcc_tried = true;
 
-		// sha256 comes from ucode-mod-digest (a wwand-mbim DEPENDS), loaded
+		// the digests come from ucode-mod-digest (a wwand-mbim DEPENDS), loaded
 		// lazily: require() is a catchable runtime call, so a build that somehow
-		// lacks the module degrades to the hardware-kill message instead of
-		// failing to load the whole backend (a static import cannot be caught).
-		let sha;
-		try { sha = require('digest').sha256; } catch (e) { sha = null; }
+		// lacks the module degrades instead of failing to load the whole
+		// backend (a static import cannot be caught)
+		let digest;
+		try { digest = require('digest'); } catch (e) { digest = null; }
 
-		if (!sha) {
+		if (vendor == 'foxconn') {
+			log('notice', sprintf('%s — trying Foxconn FCC unlock over the passthrough',
+				hw ? 'hardware radio switch is off' : 'the radio refuses to switch on'));
+
+			let gen = self._gen;
+
+			return self._pt_fcc_foxconn(fa, digest?.md5, (err, variant) => {
+				// fcc_foxconn answers without an error whatever its requests
+				// returned, and its DMS client outlives the passthrough: after
+				// a teardown the pending one ends as a timeout, not as
+				// `cancelled`, and would walk a dead instance into do_register
+				if (err?.error == 'cancelled' || self._gen != gen || !self.mbim)
+					return;
+
+				if (err || !variant) {
+					if (err)
+						log('info', sprintf('FCC(foxconn): %J', err));
+
+					return not_released('Foxconn');
+				}
+
+				log('notice', sprintf('FCC(foxconn): accepted (%s) — switching the radio on again', variant));
+				retry();
+			});
+		}
+
+		if (!digest?.sha256) {
 			log('warn', 'hardware radio switch is off — FCC unlock needs ucode-mod-digest (not installed)');
 			self.control_note = 'radio disabled by the hardware switch';
 			return next();
@@ -1563,14 +1815,11 @@ export function create(opts)
 
 		log('notice', 'radio off — trying Fibocom FCC unlock (GTFCCLOCK)');
 
-		fcc_fibocom.unlock(modem_common.telemetry_at(self), log, fa, sha, (ok) => {
-			if (!ok) {
-				log('warn', 'hardware radio switch is off — Fibocom FCC unlock did not release it');
-				self.control_note = 'radio disabled (FCC lock not released)';
-				return next();
-			}
+		fcc_fibocom.unlock(modem_common.telemetry_at(self), log, fa, digest.sha256, (ok) => {
+			if (!ok)
+				return not_released('Fibocom');
 
-			settle_timer = uloop.timer(self.timing.settle, step_register);
+			retry();
 		});
 	};
 
@@ -1696,9 +1945,15 @@ export function create(opts)
 		// 2026-10-30), so a re-query would read the FCC lock back as a stale off
 		// and mask it. hw OFF is a physical kill on most modems but the FCC lock
 		// on an FM350, which radio_off clears over AT.
-		let decide = (rs) => {
+		//
+		// `refused`: our switch to on failed or left the software radio off —
+		// with hw OFF the other face of an FCC lock (radio_off).
+		let decide = (rs, refused) => {
 			if (rs?.hw_radio_state == bc.RADIO_STATE_OFF)
-				return radio_off(do_register);
+				return radio_off(do_register, true);
+
+			if (refused)
+				return radio_off(do_register, false);
 
 			do_register();
 		};
@@ -1722,7 +1977,8 @@ export function create(opts)
 				// the answer to OUR OWN switch is the authoritative reading
 				note_radio(sdata);
 				settle_timer = uloop.timer(self.timing.settle,
-					() => decide(serr ? null : sdata));
+					() => decide(serr ? null : sdata,
+						serr != null || sdata?.sw_radio_state == bc.RADIO_STATE_OFF));
 			});
 		});
 	};
@@ -1733,6 +1989,7 @@ export function create(opts)
 		// QMI-over-MBIM passthrough NAS / AT+CPOL. Best-effort, never blocks.
 		sim.log_preradio(self, log, () => sim.restore_preferred_plmn(self, log, () => {
 			self.set_state('REGISTERING');
+			self._reg_lost = false;
 			self._install_indications();
 
 			// ...and TELL THE MODEM, which is the half that was missing. The
@@ -2344,7 +2601,7 @@ export function create(opts)
 	// GIVE THE CID BACK. Every passthrough client is allocated out of the
 	// MODEM's client table, and a destroyed-but-not-released one stays in it
 	// until the modem's stack resets — the same finite resource modem.uc's
-	// teardown release burst exists to protect (modem.uc:360,:1693). The
+	// teardown release burst exists to protect (modem.uc:401,:1903). The
 	// session-long clients (pt.nas/dsd, uim, wms) are allocated once and go
 	// with the session; these two allocate PER CALL, so a scripted reattach
 	// loop walked the table down on its own. An E182E-class stack has room for
@@ -2413,7 +2670,7 @@ export function create(opts)
 	// (modem.uc), `before_release` included: the modem owns it, releases its CID on teardown and when the
 	// passthrough is rebuilt, and `destroyed` tells the plugin to ask again.
 	// Which indications the passthrough carries depends on the service
-	// (qmi_over_mbim.uc:143-151): NAS pushes none on the EG06 and the RM520N,
+	// (qmi_over_mbim.uc:145-153): NAS pushes none on the EG06 and the RM520N,
 	// UIM Remote pushes all of its own on the RM520N — a remote SIM works over
 	// MBIM there (HW-observed 2026-09-27). A plugin whose service stays silent
 	// finds that out from its own protocol.
@@ -2490,6 +2747,44 @@ export function create(opts)
 
 		if (cb)
 			cb(null);
+	};
+
+	// One MBIM command as an operator gives it (`wwandctl mbim`, ubus
+	// modem_mbim_raw): a = { service: name|uuid, cid, kind: 'query'|'set',
+	// info: binary, timeout }. cb(err, { status, status_name, info }). A
+	// status other than success is an ANSWER — the reply carries it with
+	// whatever InformationBuffer came along (MS UICC puts the card's SW1 SW2
+	// there) — so only a request that got none is an error. Outside the
+	// recovery count: what an operator tries says nothing about the channel.
+	//
+	// THE QMI PASSTHROUGH IS REFUSED. A frame sent to it from here passes by
+	// the never-SYNC block in qmi_over_mbim.send, and a CTL SYNC over it resets
+	// the modem's embedded QMI state and ends the live data session (the
+	// evidence is with the block, qmi_over_mbim.uc:77-81). modem_qmi_raw
+	// reaches the same services through the shim.
+	self.mbim_raw = function(a, cb) {
+		if (!self.mbim?.opened)
+			return cb({ error: 'not_ready' }, null);
+
+		let uuid = mbimmod.service_uuid(a.service);
+
+		if (!uuid)
+			return cb({ error: 'invalid_service', detail: 'a service name (basic_connect, sms, ...) or UUID' }, null);
+
+		if (uuid == mbimmod.service_uuid('qmi_passthrough'))
+			return cb({ error: 'refused', detail: 'QMI over MBIM goes through modem_qmi_raw (wwandctl qmi)' }, null);
+
+		self.mbim.command_raw(uuid, a.cid, a.info ?? '', (err, info) => {
+			if (err?.error == 'mbim')
+				return cb(null, { status: err.status, status_name: mbimmod.status_name(err.status),
+				                  info: err.info ?? '' });
+
+			if (err)
+				return cb(err, null);
+
+			cb(null, { status: 0, status_name: mbimmod.status_name(0), info: info ?? '' });
+		}, { cmd_type: (a.kind == 'set') ? mbimmod.CMD_SET : mbimmod.CMD_QUERY,
+		     timeout: a.timeout, no_recovery: true, keep_info: true });
 	};
 
 	self.reset = function(cb) {
@@ -2720,6 +3015,14 @@ export function create(opts)
 		pt_dms((dms, done) => qmi_backend.set_opmode(dms, mode, (err) => done(err)), (err) => cb(err));
 	};
 
+	// The Foxconn FCC unlock over the passthrough's DMS (qmi_backend
+	// fcc_foxconn); cb(err, accepted variant | null). A method, so a test can
+	// stand in for a passthrough the MBIM mock does not have.
+	self._pt_fcc_foxconn = function(cfg, md5, cb) {
+		pt_dms((dms, done) => qmi_backend.fcc_foxconn(dms, cfg, self.info?.imei, md5, log,
+			(variant) => done(null, variant)), cb);
+	};
+
 	// GET_OPERATING_MODE over the passthrough (libqmi 1.38.0
 	// qmi-service-dms.json "Get Operating Mode", 0x002D, output Mode 0x01);
 	// cb(err, mode).
@@ -2874,7 +3177,7 @@ export function create(opts)
 	// the passthrough has stopped answering and is rebuilt.
 	drop_pt = () => {
 		// DETACH FIRST, clean up after. destroy() pays a client's pending
-		// callbacks synchronously (client.uc:225), and one of those may be a
+		// callbacks synchronously (client.uc:249), and one of those may be a
 		// probe that calls _ensure_pt or _ensure_uim again. Still seeing the
 		// stack being dropped, it would drop it a second time and start a
 		// bring-up in the middle of this one.
@@ -2903,15 +3206,15 @@ export function create(opts)
 		// whole block means the first throwing destroy skips the clients after it
 		// AND the shim close — and with the stack already detached above, that
 		// strands a shim that is still open with clients registered on it
-		// (qmi_over_mbim.uc:135).
+		// (qmi_over_mbim.uc:137).
 		if (pt) {
 			// GIVE THE SESSION-LONG CIDs BACK FIRST, while ctl and the shim are
 			// still up. These were allocated out of the MODEM's client table
-			// and destroy() deliberately does not release them (client.uc:209)
+			// and destroy() deliberately does not release them (client.uc:233)
 			// — closing the HOST's MBIM session is not shown to reset the
 			// modem's embedded QMI client table, so every daemon reload leaked
 			// a NAS, a DSD and (once used) a UIM and a WMS. The E182E-class
-			// table has room for a handful. Same burst modem.uc:1699 does for
+			// table has room for a handful. Same burst modem.uc:2067 does for
 			// the native side, which the passthrough never had. ctl is NOT in this list: it is the
 			// implicit client (cid 0) and it is what carries RELEASE_CID for
 			// all the others, so it has to outlive them.
@@ -2953,6 +3256,10 @@ export function create(opts)
 	};
 
 	self.teardown = function() {
+		// the unlock is tried once per INIT: kept across a restart of this
+		// instance, a first attempt that failed for a passing reason (the
+		// passthrough not up yet) left every later init without one
+		self._fcc_tried = false;
 		// see modem.uc: make_fail refuses to arm a retry while this is raised,
 		// because a failure reported from INSIDE a teardown would arm it after
 		// the cancel pass below and restart a modem that is being stopped. The
@@ -2995,7 +3302,7 @@ export function create(opts)
 		modem_common.close_at(self);
 
 		// GUARDED, because destroying a client pays its pending callbacks
-		// SYNCHRONOUSLY (client.uc:225, mbim_client.uc:679) and those callbacks
+		// SYNCHRONOUSLY (client.uc:249, mbim_client.uc:679) and those callbacks
 		// are not ours. One that throws would skip the depth decrement at the
 		// end, leaving it raised for the life of the object — and make_fail then
 		// refuses every future retry, which is worse than whatever the callback

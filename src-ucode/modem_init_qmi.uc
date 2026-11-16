@@ -8,7 +8,7 @@
 //   -> datapath -> opmode -> sim slot -> sim unlock -> identity -> confnet
 //   -> validate -> attach profile -> register
 // and returns { begin } (the start() entry). o = { log, emit, notify_contexts,
-// fail, dp, at_opts, tm } — `tm` is modem.uc's shared one-shot timer holder,
+// fail, dp, at_opts, tm, rec } — `tm` is modem.uc's shared one-shot timer holder,
 // `fail` the recovery-aware failure path. All state stays on `self`; the
 // self-attached methods the chain calls are installed by modem.uc before start().
 
@@ -31,17 +31,29 @@ import * as dsdmod from 'wwand.codec.schema.dsd';
 const SYNC_TRIES = 10;
 const MODES_TRIES = 3;
 
+// QMI_PROTOCOL_ERROR_INVALID_TRANSITION (qmi-errors.h:287, libqmi 1.38.0)
+const QMI_ERR_INVALID_TRANSITION = 60;
+
+// the status line of a modem that cannot leave offline; cleared when it does
+const STUCK_OFFLINE_NOTE = 'modem stuck offline: its reset does not happen — it needs a power cycle';
+
+// A board repower that did not cure it would otherwise repeat with every
+// re-enumeration, which is a fresh modem object each time: the bound lives
+// per modem id, at one repower per this window.
+const STUCK_REPOWER_EVERY = 600;
+let stuck_repowered = {};
+
 export function install(self, o)
 {
 	let log = o.log, emit = o.emit, notify_contexts = o.notify_contexts;
 	let sim_block = o.sim_block;
-	let fail = o.fail, dp = o.dp, at_opts = o.at_opts, tm = o.tm;
+	let fail = o.fail, dp = o.dp, at_opts = o.at_opts, tm = o.tm, rec = o.rec;
 
 	// shared wwand_sim matcher (modem_common — parity across all backends)
 	let match_sim_override = (iccid, imsi) =>
 		modem_common.match_sim_override(self.config?.sims, iccid, imsi);
 
-	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, verify_online, step_simslot, step_sim, step_identity, step_confnet, step_confnet_apply, step_validate, step_attach_profile, step_register;
+	let step_sync, step_services, step_at, step_esim_quirk, step_apply_init_reset, step_datapath, step_opmode, verify_online, online_reached, leave_refused_mode, reset_out_of_offline, step_simslot, step_sim, step_identity, step_confnet, step_confnet_apply, step_confnet_modes, step_validate, step_attach_profile, step_register;
 
 	// DMS model was junk and the USB descriptor filled in (generic "HUAWEI Mobile"
 	// style): ATI usually knows the real model — upgrade identity off the critical
@@ -115,11 +127,29 @@ export function install(self, o)
 
 	step_services = () => {
 		self.set_state('INIT_SERVICES');
-		self.ctl.request('GET_VERSION_INFO', {}, (err, data) => {
-			if (err)
-				return fail('version_info', err);
+		// reset before asking: a re-init must not answer has_service from
+		// the previous session's table while this request is in flight
+		self.services = {};
+		self.services_unknown = false;
+		self._services_absent = {};
 
-			self.services = {};
+		self.ctl.request('GET_VERSION_INFO', {}, (err, data) => {
+
+			// A timeout is not a refusal. Some firmware never answers this
+			// request while every service works (RG502Q-EA
+			// RG502QEAACR13A03M4G_ZYXEL, ddimension/wwand#82; quectel-CM never
+			// sends it). Go on with the table marked unknown: the DMS/NAS/WDS
+			// allocations below remain the bring-up gate, so a dead modem
+			// still fails there, and each optional service is tried rather
+			// than assumed absent (modem.uc has_service). A refused request
+			// (an error answer) still fails the init.
+			if (err?.error == 'timeout') {
+				log('warn', 'GET_VERSION_INFO unanswered — continuing without the service list, optional services are probed by allocation');
+				self.services_unknown = true;
+				data = { services: [] };
+			}
+			else if (err)
+				return fail('version_info', err);
 
 			let names = [];
 
@@ -150,6 +180,7 @@ export function install(self, o)
 								return fail('alloc_wds', e4);
 
 							self.wds_cfg = wds;
+							self._install_wds_handlers();
 
 							// DSD (Data System Determination): optional, gives the
 							// clean LTE / 5G-NSA / 5G-SA status; absent on older modems.
@@ -161,7 +192,7 @@ export function install(self, o)
 									() => self._apply_cat_mode(
 										() => self._read_info(step_at))));
 
-							if (self.services[sprintf('%d', dsdmod.default.service)]) {
+							if (self.has_service(dsdmod.default.service)) {
 								self.alloc(dsdmod.default, (e5, dsd) => {
 									self.dsd = e5 ? null : dsd;
 									if (self.dsd)
@@ -178,7 +209,7 @@ export function install(self, o)
 
 					// WMS (SMS) is NOT allocated here — brought up lazily on the
 					// first SMS op via _ensure_wms (wms schema off the heap until used).
-					if (self.services[sprintf('%d', uimmod.default.service)]) {
+					if (self.has_service(uimmod.default.service)) {
 						self.alloc(uimmod.default, (e3, uim) => {
 							if (e3) {
 								log('warn', 'uim allocation failed, using dms fallback');
@@ -197,7 +228,7 @@ export function install(self, o)
 					}
 				});
 			});
-		});
+		}, { timeout: self.timing.version_info, no_recovery: true });
 	};
 
 	// AT side channel: best-effort, failures never block bring-up
@@ -307,7 +338,7 @@ export function install(self, o)
 		// and then destroys the clients, which delivers `cancelled` to the AT
 		// command in flight — so this callback can arrive AFTER the modem is
 		// gone, and next() would drive the init chain over a dead instance.
-		// Same trap as modem.uc:185.
+		// Same trap as modem.uc:195.
 		let resume = (why) => {
 			if (resumed || self._gen != gen)
 				return;
@@ -323,7 +354,7 @@ export function install(self, o)
 				why, join('; ', reasons)));
 
 			// Deliberately NOT cleared on a later init pass. The object is
-			// created once per device attach (daemon.uc:3334), so a modem that
+			// created once per device attach (daemon.uc:3766), so a modem that
 			// really did reset comes back as a NEW instance with no debt — and
 			// a re-init of THIS instance means it did not, so the debt still
 			// holds. Deduplicated because a re-init re-derives the same reason
@@ -412,19 +443,141 @@ export function install(self, o)
 
 			self._opmode_set('online', (err) => {
 				// (set_opmode already treats "no effect / already online" as success)
+				if (err?.error == 'qmi' && err.code == QMI_ERR_INVALID_TRANSITION)
+					return leave_refused_mode(err);
+
 				if (err)
 					return fail('opmode', err);
 
-				// Online by the init's own hand, so no park is in force any
-				// more: this object outlives a failed init (make_fail
-				// restarts the same instance), and a flag left from a park
-				// at an earlier pass made REGISTERING wait forever and the
-				// next registration loss read as "radio parked" — swallowed.
-				self.lowpower_parked = false;
-				self._plugin_held = false;
-				self._fcc_due = false;
+				online_reached();
+			});
+		});
+	};
 
-				verify_online(0);
+	online_reached = () => {
+		// Online by the init's own hand, so no park is in force any more:
+		// this object outlives a failed init (make_fail restarts the same
+		// instance), and a flag left from a park at an earlier pass made
+		// REGISTERING wait forever and the next registration loss read as
+		// "radio parked" — swallowed.
+		self.lowpower_parked = false;
+		self._plugin_held = false;
+		self._fcc_due = false;
+
+		if (self.control_note == STUCK_OFFLINE_NOTE)
+			self.control_note = null;
+
+		verify_online(0);
+	};
+
+	// ONLINE REFUSED AS AN INVALID TRANSITION is a statement about the mode
+	// the modem is in, not a fault: QMI DMS allows only certain transitions,
+	// and the way online goes through another mode. fail() here walked the
+	// recovery ladder, whose opmode cycle and reset start with the same
+	// refused writes, up to a reboot of the router.
+	leave_refused_mode = (err) => {
+		let gen = self._gen;
+
+		self.dms.request('GET_OPERATING_MODE', {}, (gerr, d) => {
+			if (self._gen != gen)
+				return;
+
+			let mode = gerr ? null : d?.mode;
+
+			if (mode == dmsmod.OPMODE_OFFLINE)
+				return reset_out_of_offline(gen);
+
+			// low power IS the step before online; nothing to go through
+			if (mode == null || mode == dmsmod.OPMODE_LOW_POWER)
+				return fail('opmode', err);
+
+			log('notice', sprintf('modem refuses online from %s — going through low power',
+				dmsmod.OPMODE_NAMES[sprintf('%d', mode)] ?? sprintf('opmode %d', mode)));
+
+			self._opmode_set('low_power', (lerr) => {
+				if (self._gen != gen)
+					return;
+
+				if (lerr)
+					return fail('opmode', lerr);
+
+				self._opmode_set('online', (oerr) => {
+					if (self._gen != gen)
+						return;
+
+					oerr ? fail('opmode', oerr) : online_reached();
+				});
+			});
+		}, { no_recovery: true });
+	};
+
+	// Offline leaves only by a reset: an EG25-G (EG25GGBR07A08M2G) in offline
+	// answered INVALID_TRANSITION to online, low power, persistent low power
+	// and factory test alike, and AT+CFUN=0/1/4 with CME ERROR 4 (HW-observed,
+	// RPi4, 2026-11-07). The same modem ACKED the reset and did not perform
+	// it, any number of times, while a reboot of the Pi did not cut its USB
+	// power — so a modem that stays put after the reset is not retried up the
+	// ladder: without board power nothing there reaches it, and the reboot at
+	// its end restarts the router for nothing. It is said, and the reset is
+	// retried at a slow pace in case the firmware takes it later.
+	reset_out_of_offline = (gen) => {
+		let retry = self.timing.stuck_offline_retry ?? 600000;
+
+		let stuck = (why) => {
+			let now = time(), board = rec?.can_repower(), repowered = false;
+
+			if (board && now - (stuck_repowered[self.id] ?? 0) >= STUCK_REPOWER_EVERY) {
+				stuck_repowered[self.id] = now;
+				log('err', sprintf('modem stuck offline: %s — repowering it', why));
+
+				repowered = rec.usb_repower();
+			}
+
+			// A repower that worked takes the modem off the bus and the
+			// teardown cancels the retry below. It is armed all the same: a
+			// board that reports success without cutting the modem's power (a
+			// wrong reset_gpio, a rail that feeds something else) would
+			// otherwise leave this init parked here with no timer at all.
+			if (!repowered) {
+				self.control_note = STUCK_OFFLINE_NOTE;
+				log('err', sprintf('modem stuck offline: %s, %s — it needs a power cycle; retrying the reset in %d s',
+					why, board ? sprintf('and the board repowers it at most every %d s', STUCK_REPOWER_EVERY)
+					           : 'and nothing here can cut its power', retry / 1000));
+			}
+
+			tm.retry = uloop.timer(retry, () => {
+				tm.retry = null;
+
+				if (self._gen == gen)
+					reset_out_of_offline(gen);
+			});
+		};
+
+		log('warn', 'modem is offline, which it leaves only by a reset — resetting it');
+
+		self._opmode_set('reset', (rerr) => {
+			if (self._gen != gen)
+				return;
+
+			if (rerr)
+				return stuck(sprintf('the reset was refused (%J)', rerr));
+
+			// A real reset takes the modem off the bus, and the teardown
+			// cancels this timer. Still here: read the mode before calling it
+			// stuck — a modem that came back online without re-enumerating
+			// simply continues.
+			tm.init_reset = uloop.timer(self.timing.init_reset ?? 30000, () => {
+				tm.init_reset = null;
+
+				self.dms.request('GET_OPERATING_MODE', {}, (gerr, d) => {
+					if (self._gen != gen)
+						return;
+
+					if (!gerr && d?.mode != null && d.mode != dmsmod.OPMODE_OFFLINE)
+						return step_opmode();
+
+					stuck('the reset was acknowledged and the modem stayed on the bus');
+				}, { no_recovery: true });
 			});
 		});
 	};
@@ -508,7 +661,8 @@ export function install(self, o)
 	// assert the configured physical SIM slot (option sim_slot, 0 = leave
 	// as-is) before touching the SIM — a switch re-initializes the SIM stack
 	step_simslot = () => {
-		let want = +(self.config.sim_slot ?? 0);
+		// -1: a bound card to look for, its slot known once the list is read
+		let want = sim.boot_slot(self, null).slot;
 
 		if (!want || !self.uim)
 			return step_sim();
@@ -521,17 +675,26 @@ export function install(self, o)
 			// established does not answer. Same outcome as the error branch
 			// above.
 			if (err || !sim.enumerated(slots)) {
-				log('info', sprintf('sim_slot %d configured but slot status unsupported, continuing', want));
+				log('info', (want > 0)
+					? sprintf('sim_slot %d configured but slot status unsupported, continuing', want)
+					: 'an interface is bound to a card, but slot status is unsupported — continuing on the active one');
 				return step_sim();
 			}
+
+			let pick = sim.boot_slot(self, slots);
+
+			want = pick.slot;
+
+			if (!(want > 0))
+				return step_sim();
 
 			let cur = filter(slots, (s) => s.active)[0];
 
 			if (cur?.physical == want)
 				return step_sim();
 
-			log('notice', sprintf('switching to SIM slot %d (active: slot %d)',
-				want, cur?.physical ?? 0));
+			log('notice', sprintf('switching to SIM slot %d (active: slot %d) — %s',
+				want, cur?.physical ?? 0, pick.why));
 
 			sim.switch_slot(self, want, (serr) => {
 				if (serr)
@@ -690,7 +853,11 @@ export function install(self, o)
 		sim.log_preradio(self, log, () => sim.restore_preferred_plmn(self, log, () => step_confnet_apply()));
 	};
 
-	step_confnet_apply = () => {
+	// `option nr5g_mode` first (QMI, else AT — modem_common.apply_nr5g_mode),
+	// then the modes, RAT order and PLMN in one SSP write
+	step_confnet_apply = () => modem_common.apply_nr5g_mode(self, self.nas, log, step_confnet_modes);
+
+	step_confnet_modes = () => {
 		let mask = qmi_backend.parse_modes(self.config.modes);
 		let order = nasmod.rat_order_ids(self.config.rat_order);
 		let sel = null;
@@ -777,6 +944,13 @@ export function install(self, o)
 			if (!length(keys(args)))
 				return step_apply_init_reset(step_validate);
 
+			// permanent, as the settings editor writes the same values
+			// (netsel_ops): left out, the firmware picks the duration, and
+			// libqmi 1.38 documents no default — on one that keeps it only
+			// until the power cycle, the modem starts without wwand on
+			// whatever it held before (QmiNasChangeDuration, qmi-enums-nas.h)
+			args.change_duration = 1;
+
 			if (args.mode_preference != null)
 				log('notice', sprintf('setting network modes "%s" (mask 0x%02x)', self.config.modes, args.mode_preference));
 
@@ -840,7 +1014,13 @@ export function install(self, o)
 		self.set_state('REGISTERING');
 		self.reg_detail = null;
 
+		// last_reject is NOT cleared here: a reject that costs a registered
+		// modem its registration arrives before the serving-system change
+		// that runs this step, and it is the cause to show while the modem
+		// searches. It ends with the next registration or the teardown.
 		self._arm_nas_event_report();
+		self._arm_nas_indications();
+		self._arm_wds_indications();
 
 		self.nas.request('REGISTER_INDICATIONS', {
 			serving_system_events: 1,

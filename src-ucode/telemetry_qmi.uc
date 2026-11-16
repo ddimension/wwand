@@ -8,8 +8,9 @@
 //                                modem_signal/modem_cells query)
 //   self._start_telemetry()      the slow periodic cell/log tick
 //   self._log_telemetry()        one telemetry log line + 'telemetry' emit
-//   self._fetch_ca_info(cb)      CA carriers (QMI GET_LTE_CPHY_CA_INFO or
-//                                AT+QCAINFO, cached via backend.choose)
+//   self._fetch_ca_info(cb)      CA carriers (QMI GET_LTE_CPHY_CA_INFO or the
+//                                vendor AT read, cached via backend.choose;
+//                                then the NR leg from RF band info)
 //   self._arm_data_mode_ind()    live DSD data-system change indication
 //   self._determine_data_mode(cb) NSA/SA/LTE mode (DSD -> QENG -> radio_ifs)
 // and returns { stop } for modem.teardown. o = { log, emit }. All timers and
@@ -303,8 +304,23 @@ export function install(self, o)
 	// GET_LTE_CPHY_CA_INFO, fall back to AT+QCAINFO, cache the choice per modem
 	// (RG650E answers the QMI one with INFO_UNAVAILABLE, so it settles on AT).
 	// Stores self.cells.ca and calls cb().
-	self._fetch_ca_info = function(cb) {
-		let store = (ca) => { if (self.cells) self.cells.ca = ca ?? []; cb(); };
+	// Whatever the ladder picked, RF band info then adds the primary carrier
+	// of a leg the list lacks (qmi_backend.ca_with_rf) — the NR leg above all.
+	// It is a step after the choice, not a rung of it: counted as a CA answer
+	// it would retire the RG650E's AT QCAINFO, which lists the LTE SCCs that
+	// RF band info cannot.
+	let fetch_ca = (cb) => {
+		let store = (ca) => {
+			if (!self.nas) {
+				if (self.cells) self.cells.ca = ca ?? [];
+				return cb();
+			}
+
+			qmi_backend.get_rf_bands(self.nas, (rf) => {
+				if (self.cells) self.cells.ca = qmi_backend.ca_with_rf(ca, rf);
+				cb();
+			});
+		};
 
 		backend.choose(self, '_ca_be', [
 			{ name: 'qmi', probe: (ok) => self.nas
@@ -326,6 +342,29 @@ export function install(self, o)
 				return tel_vendor.read_ca_at(self, (e, ca) => store(ca ?? []));
 			store([]);
 		}, { reprobe: true, log: log, what: 'carrier aggregation' });
+	};
+
+	// ONE READ AT A TIME. The telemetry tick and a carrier-aggregation
+	// indication (modem.uc _ca_changed) both come here, and two reads in
+	// flight answer in any order: the tick's, started before an SCell change,
+	// could land after the indication's and put the old list back. A call
+	// that finds a read running asks for one more after it and returns.
+	self._fetch_ca_info = function(cb) {
+		if (self._ca_busy) {
+			self._ca_again = true;
+			return cb();
+		}
+
+		self._ca_busy = true;
+		fetch_ca(() => {
+			self._ca_busy = false;
+
+			if (!self._ca_again)
+				return cb();
+
+			self._ca_again = false;
+			self._fetch_ca_info(cb);
+		});
 	};
 
 	// settle the data-system mode (NSA/SA/LTE): refresh the QENG serving detail
@@ -450,14 +489,16 @@ export function install(self, o)
 				// modem temperature + active access-tech (IoT/RedCap) over the AT
 				// side channel (best-effort, slow loop) — then log the full
 				// telemetry line and reschedule
-				modem_common.collect_temperature(self, () =>
+				// ...and why 5G is held off, if it is (modem_common collect_nr5g)
+				modem_common.collect_nr5g(self, self.nas, log, () =>
+				  modem_common.collect_temperature(self, () =>
 				    modem_common.probe_iot_rat(self, () => {
 					if (!err)
 						self._log_telemetry();
 
 					if (self.nas)
 						telemetry_timer = uloop.timer(interval, tick);
-				}));
+				})));
 			};
 
 			// sitting out a round still reads the rest (signal floor,

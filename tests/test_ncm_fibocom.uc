@@ -602,6 +602,21 @@ eq(e?.error, 'modem_gone', 'gtact set: a teardown between read and write is not 
 	eq(asked, 'AT+QCAINFO', 'read_ca_at: non-Fibocom asks QCAINFO');
 	ok(length(ca_q) >= 1, 'read_ca_at: QCAINFO carriers parsed');
 
+	// any other named vendor is not asked at all: the T99W175's MBIM caps say
+	// "Qualcomm", and QCAINFO there was an ERROR at every re-probe (#75)
+	asked = null;
+	let fox = { info: { manufacturer: 'Qualcomm', model: 'Qualcomm Snapdragon X55 5G' },
+		at_telemetry: sender([ 'ERROR' ]) };
+	let fox_err, fox_ca = 'unset';
+	telemetry_ncm.read_ca_at(fox, (e, ca) => { fox_err = e; fox_ca = ca; });
+	eq(asked, null, 'read_ca_at: a non-Quectel vendor gets no QCAINFO');
+	ok(fox_err != null && fox_ca == null, 'read_ca_at: ...and reports "no reading", so the ladder moves on');
+
+	// a blank manufacturer says nothing either way and keeps the old path
+	let anon = { info: { manufacturer: '', model: '' }, at_telemetry: sender([ 'OK' ]) };
+	telemetry_ncm.read_ca_at(anon, () => null);
+	eq(asked, 'AT+QCAINFO', 'read_ca_at: an unnamed manufacturer still asks QCAINFO');
+
 	// a modem-level ERROR surfaces as (err, null) — the caller stores [] and the
 	// probe reports unavailable, so the ladder does not demote-thrash
 	let errmdm = { info: { manufacturer: 'Fibocom', model: 'x' },

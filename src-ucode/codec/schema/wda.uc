@@ -62,12 +62,16 @@ export default {
 				endpoint:         { t: 0x17, f: { type: 'u32', iface: 'u32' } },
 				// Three request TLVs libqmi 1.38.0 does not model — its input
 				// set is 0x10-0x17, 0x1B, 0x1C (qmi-service-wda.json:43-98) —
-				// so libqmi cannot confirm them, and the vendor IDL trees and
-				// RG650E message table they were taken from are not in this
-				// tree and carry no version: UNVERIFIED. Its RESPONSE puts
-				// download minimum padding at 0x1A and flow control at 0x1B
-				// (qmi-service-wda.json:161-168), which is a reason to doubt,
-				// not confirm, the request ids below.
+				// so libqmi cannot confirm them. Ids and widths are confirmed
+				// by two Qualcomm IDL tables (2026-11-15): the OnePlus 8T's
+				// /vendor/lib64/libqmiservices.so (OOS 14) and msm8996's
+				// wireless_data_administrative_service_v01.c — 0x18 qos header
+				// format GENERIC_4_BYTE, 0x19 downlink minimum padding
+				// GENERIC_4_BYTE, 0x1A flow control GENERIC_1_BYTE
+				// (docs/qmi-beyond-libqmi.md). libqmi's RESPONSE numbers the
+				// same settings differently (0x1A padding, 0x1B flow control,
+				// qmi-service-wda.json:161-168); the vendor tables agree with
+				// the request ids used here.
 				//
 				// `dl_min_padding` is the interesting one — it decides whether
 				// the modem pads downlink QMAP frames, which lands directly on
@@ -80,7 +84,7 @@ export default {
 				// a schema entry is cheap while a wrong request is not. Sending
 				// any of them should follow a GET_SUPPORTED_FIELDS (0x001F) probe
 				// on the target, not a schema line.
-				qos_header_format: { t: 0x18, f: 'u8' },
+				qos_header_format: { t: 0x18, f: 'u32' },
 				dl_min_padding:    { t: 0x19, f: 'u32' },
 				flow_control:      { t: 0x1A, f: 'u8' },
 				// uplink QMAP aggregation: tell the modem to expect host-batched

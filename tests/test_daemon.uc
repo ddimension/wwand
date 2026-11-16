@@ -15,6 +15,8 @@ import * as config from 'wwand/config.uc';
 import * as daemon_mod from 'wwand/daemon.uc';
 import * as netlink_mod from 'wwand/netlink.uc';
 import * as ubus_api from 'wwand/ubus.uc';
+import * as board_mod from 'wwand/board.uc';
+import * as sim_inv from 'wwand/siminventory.uc';
 
 let sock = getenv('WWAND_TEST_UBUS_SOCK');
 
@@ -2025,6 +2027,94 @@ uloop.run();
 	eq(cleared, [], 'setproto: a failed switch does not touch the pin');
 })();
 
+// --- a throttled dial: no ladder climb, and the retry waits it out -----------
+//
+// The modem refuses every dial on an APN it holds back after network
+// rejections until a back-off runs out (callend.throttled; context.uc sets
+// err.throttled). Counted as a failure it would walk the recovery ladder into
+// radio cycles and resets that cannot help (HW: the BG96 on 5.201 with an
+// NB-IoT card on LTE-M, "PDN IPv4 call throttled", 8 failed attempts).
+(() => {
+	let climbed = 0, ups = 0, c = null, pending_thr = null;
+	let LIST = [ { apn: 'Other', ipv4_s: 5, ipv6_s: null },
+	             { apn: 'IoT.Example', ipv4_s: 120, ipv6_s: null } ];
+
+	let fake = {
+		modem: { create: (o) => ({
+			id: o.id, state: 'READY', config: o.config,
+			start: () => null, stop: () => null,
+			note_connect_success: () => null,
+			note_connect_failure: () => { climbed++; },
+			// answered later, like the modem: held until the test releases it
+			pdn_throttle: (cb) => { pending_thr = cb; },
+		}) },
+		context: { create: (o) => {
+			c = { state: 'IDLE', name: o.name, modem: o.modem, config: o.config, deps: o.deps,
+			      modem_event: () => null,
+			      up: (cb) => { ups++; return cb({ error: 'x' }); },
+			      down: (cb) => cb ? cb() : null };
+			return c;
+		} },
+	};
+
+	let d = daemon_mod.create({ timing: TIMING, deps: { log: () => null, load_qmi: () => fake } });
+
+	d.apply_config(config.parse({ network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0',
+		       device: 'l3a', apn: 'iot.example', pdp_type: 'ipv4' },
+	} }));
+	d.contexts.wan.wanted = true;
+
+	c.deps.on_event(c, 'error', { stage: 'start_network', throttled: true,
+		verbose: { type: 2, reason: 209 } });
+
+	eq(climbed, 0, 'throttle: a throttled dial does not climb the recovery ladder');
+	ok(d.contexts.wan.throttle?.querying, 'throttle: marked while the modem is asked, so no dial races the answer');
+	ups = 0;
+	d._retry_activate('wan');
+	eq(ups, 0, 'throttle: ...and the retry does not dial meanwhile');
+
+	pending_thr(LIST);
+	eq(d.contexts.wan.throttle?.seconds, 120, 'throttle: the time left for THIS APN, matched case-insensitively');
+
+	d._retry_activate('wan');
+	eq(ups, 0, 'throttle: a known hold is waited out — the retry does not dial during the throttle');
+	ok(d.contexts.wan.hold_timer != null,
+		'throttle: the reconnect hold is DEFERRED past the throttle, not dropped — so a persistent failure after the throttle still gives the interface up (stays bounded)');
+	eq(d.status().contexts.wan.throttle?.apn, 'iot.example', 'throttle: published on the interface status');
+
+	let got = null;
+	ups = 0;
+	d.context_up('wan', (err) => { got = err; });
+	eq([ got?.error, ups ], [ 'throttled', 0 ], 'throttle: netifd setup is answered without a dial');
+
+	// an APN set that the modem does not list is not held by a stranger's entry
+	d.contexts.wan.throttle = null;
+	d.contexts.wan.cfg.apn = 'mine.example';
+	c.deps.on_event(c, 'error', { stage: 'start_network', throttled: true, verbose: { type: 2, reason: 209 } });
+	pending_thr(LIST);
+	eq(d.contexts.wan.throttle?.seconds, null, 'throttle: an unlisted APN gets no time from another one');
+
+	// no APN set (network default): the longest hold the modem reports
+	d.contexts.wan.throttle = null;
+	d.contexts.wan.cfg.apn = null;
+	c.deps.on_event(c, 'error', { stage: 'start_network', throttled: true, verbose: { type: 2, reason: 209 } });
+	pending_thr(LIST);
+	eq(d.contexts.wan.throttle?.seconds, 120, 'throttle: the default APN takes the longest reported hold');
+
+	// any other failure still counts
+	c.deps.on_event(c, 'error', { stage: 'start_network', verbose: { type: 6, reason: 33 } });
+	eq(climbed, 1, 'throttle: an ordinary rejection still climbs');
+
+	// a session coming up ends it
+	c.state = 'CONNECTED';
+	c.deps.on_event(c, 'up', {});
+	eq(d.contexts.wan.throttle, null, 'throttle: cleared once connected');
+	d.contexts.wan.wanted = false;
+	for (let n, e in d.contexts) { if (e.retry_timer) e.retry_timer.cancel(); if (e.hold_timer) e.hold_timer.cancel(); }
+})();
+
 // --- context_failed: an external prober drives the rungs it cannot reach -----
 //
 // L3 reachability is measured OUTSIDE (watchcat, mwan3, cron): with policy
@@ -2289,6 +2379,94 @@ uloop.run();
 		'remove: the context is told BEFORE the modem stops, not after');
 	eq(d2.contexts.wwan0.ctx, null,
 		'remove: ...and the daemon then drops its handle to it');
+}
+
+// --- a control device without its netdev yet waits for it --------------------
+//
+// A PCIe/MHI modem re-enumerating after a reset announces its control device
+// first and its netdev a moment later (T99W175, 2026-11-08). Started in
+// between, the modem got no datapath netdev, the netdev kept its kernel name,
+// and netifd's interface stayed down until wwand was restarted.
+{
+	let ctl = { device: '/dev/wwan0mbim0', protocol: 'qmi', driver: 'mhi_wwan_mbim', netdev: null };
+	let nd = null;
+	let created = [];
+	let parsed = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/wwan0mbim0' },
+		wwan0: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'web' },
+	} });
+
+	let d = daemon_mod.create({
+		timing: { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
+		          reg_timeout: 500, backoff_min: 40, backoff_max: 60 },
+		deps: {
+			log: () => null,
+			load_qmi: () => ({
+				modem: { create: (o) => {
+					push(created, o.datapath?.netdev);
+					return { id: 'm0', start: () => null, stop: () => null,
+						note_connect_success: () => null, note_connect_failure: () => null,
+						datapath: {} };
+				} },
+				context: { create: (o) => ({ state: 'IDLE', config: o.config, modem: o.modem,
+					modem_event: () => null }) },
+			}),
+			emit_event: () => null, kick_interface: () => null,
+			renew_interface: () => null, down_interface: () => null,
+			iface_status: (i, cb) => cb({ up: false }),
+			datapath_fx: null, read_config: () => parsed,
+			resolve_control: () => ({ ...ctl, netdev: nd }),
+			resolve_netdev: () => nd,
+			learn_device: () => null, learn_modem_path: () => null,
+		},
+	});
+
+	d.apply_config(parsed);
+
+	eq([ d.modems.m0.modem, created ], [ null, [] ],
+		'netdev race: a control device without its netdev does not start the modem');
+	ok(match(d.modems.m0.control_note ?? '', /network interface not present yet/),
+		'netdev race: ...and says what it waits for');
+
+	nd = 'wwan0';
+	d.hotplug('add', 'wwan0');
+
+	eq(created, [ 'wwan0' ], 'netdev race: the netdev\'s hotplug starts it, with the netdev');
+	eq(d.modems.m0.netdev, 'wwan0', 'netdev race: ...which the entry records for the rename');
+	eq(d.modems.m0._netdev_since, null, 'netdev race: ...and the wait is over');
+
+	// a modem that really has none is started after the window, as before
+	nd = null;
+	created = [];
+	d.hotplug('remove', 'wwan0mbim0');
+	d.hotplug('add', 'wwan0mbim0');
+	eq(created, [], 'netdev race: waiting again after a re-enumeration');
+	d.modems.m0._netdev_since = time() - 60;
+	d.hotplug('add', 'wwan0mbim0');
+	eq(created, [ null ], 'netdev race: past the window it starts without one');
+
+	// the tick retries a netdev wait at its own bound, with no hotplug owed
+	created = [];
+	d.hotplug('remove', 'wwan0mbim0');
+	d.hotplug('add', 'wwan0mbim0');
+	d.modems.m0._netdev_since = time() - 20;
+	d.modems.m0._waiting_logged = time() - 16;
+	d._tick();
+	eq(created, [ null ], 'netdev race: the waiting tick ends the wait after NETDEV_SETTLE, not after 30 s');
+
+	// a control device that left takes its window with it
+	created = [];
+	d.hotplug('remove', 'wwan0mbim0');
+	d.hotplug('add', 'wwan0mbim0');
+	d.modems.m0._netdev_since = time() - 60;
+	let saved = ctl;
+	ctl = { device: null, protocol: null, netdev: null };
+	d.hotplug('add', 'something');
+	eq(d.modems.m0._netdev_since, null, 'netdev race: the control device leaving ends the wait');
+	ctl = saved;
+	d.hotplug('add', 'wwan0mbim0');
+	eq(created, [], 'netdev race: ...so its return waits afresh');
+	d.shutdown?.();
 }
 
 // --- a rebuild keeps the plugin options ------------------------------------------
@@ -3279,6 +3457,52 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	   'vanish: stock NR7101 (no exported supply) keeps the reset pulse');
 	eq(run(true, { reset_gpio: 'gpio7' }), [ 'reset gpio7' ],
 	   'vanish: an explicit per-modem reset_gpio is honoured over the board supply');
+}
+
+// --- the LED state carries the generation a `tech` panel lights --------------
+// 5G NSA is the case worth pinning: NAS lists only the LTE anchor, so the
+// generation has to come from the modem's rat_fine (DSD), which the tick reads
+// (board.uc generation; ddimension/wwand#77).
+{
+	let seen = [];
+	let ctl = { device: '/dev/cdc-wdm0', protocol: 'qmi', driver: 'qmi_wwan', netdev: 'wwan0' };
+	let parsed4 = config.parse({ network: {
+		m0: { '.type': 'wwand_modem', device: '/dev/cdc-wdm0' },
+		wwan0: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'web' },
+	} });
+	let d4 = daemon_mod.create({
+		timing: { sync_retry: 1, settle: 1, sim_settle: 1, card_poll: 1,
+		          reg_timeout: 500, backoff_min: 40, backoff_max: 60 },
+		deps: {
+			log: () => null,
+			board: { id: 'test,tech', has_power: false, profile: {},
+			         init: () => null, bars: () => 4, generation: board_mod.generation,
+			         leds: (st) => push(seen, st),
+			         reset_pulse: () => false, power_cycle: () => false },
+			load_qmi: () => ({
+				modem: { create: () => ({ id: 'm0', start: () => null, stop: () => null,
+					note_connect_success: () => null, note_connect_failure: () => null,
+					state: 'READY', datapath: {},
+					reg: { registration: 'registered', radio_ifs: [ 8 ] },
+					rat_fine: { rat: 'nr5g', mode: 'nsa' } }) },
+				context: { create: (o) => ({ state: 'CONNECTED', config: o.config,
+					modem: o.modem, modem_event: () => null, down: (cb) => cb?.() }) },
+			}),
+			emit_event: () => null, kick_interface: () => null,
+			renew_interface: () => null, down_interface: () => null,
+			iface_status: (i, cb) => cb({ up: false }),
+			datapath_fx: null, read_config: () => parsed4,
+			resolve_control: () => ctl, resolve_netdev: () => null,
+			learn_device: () => null, learn_modem_path: () => null,
+		},
+	});
+	d4.apply_config(parsed4);
+	d4._tick();
+	d4.shutdown?.();
+
+	let last = seen[length(seen) - 1];
+	eq(last?.gen, '5g', 'leds: 5G NSA reaches the panel as 5g, not as its LTE anchor');
+	eq(last?.lte, true, 'leds: ...while the LTE-labelled `mobile` LED still sees LTE');
 }
 
 // --- the automatic unarmed pulse needs the modem's OWN line -----------------
@@ -4769,5 +4993,274 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	unlink('/tmp/test-giveups-txs.json');
 	unlink('/tmp/test-admin-txs.json');
 }
+
+// --- ICCID-bound interfaces (option iccid) ----------------------------------
+// The card is the connection's: an ifup on a modem running another card
+// switches to it and dials once it is in use; another bound interface using
+// the modem keeps it (first come wins); a card change under a bound interface
+// takes it down rather than re-dialling it on the wrong subscription.
+(() => {
+	let A = '89490200001022832490', B = '89882390001598474352';
+	let ops = [], evs = {}, modem;
+	let fake = {
+		modem: { create: (o) => (evs[o.id] = o.deps?.on_event, modem = {
+			id: o.id, state: 'READY', config: o.config,
+			info: { iccid: A }, active_slot: 1,
+			slots: [ { physical: 1, iccid: A, active: true }, { physical: 2, iccid: B, active: false } ],
+			start: () => null, stop: () => null,
+			set_opmode: (mode, cb) => cb(null),
+		}) },
+		context: { create: (o) => ({
+			state: 'IDLE', name: o.name, modem: o.modem,
+			up: function(cb) { push(ops, 'dial:' + o.name); this.state = 'CONNECTED'; cb(null); },
+			down: function(cb) { this.state = 'IDLE'; cb ? cb() : null; },
+			status: function() { return { state: this.state }; },
+		}) },
+	};
+	let d = daemon_mod.create({ timing: TIMING, deps: { log: () => null, load_qmi: () => fake,
+		giveups_file: '/tmp/test-giveups-iccid.json', admin_downs_file: '/tmp/test-admin-iccid.json',
+		down_interface: (i) => push(ops, 'down:' + i) } });
+	let real_switch = d.modem_sim_switch_slot;
+
+	d.modem_sim_switch_slot = (mn, slot, cb, opts) => {
+		push(ops, sprintf('slot:%s:%d:%s', mn, slot, opts?.for_interface ?? '-'));
+		cb(null, { slot: slot });
+	};
+	d.apply_config(config.parse({ network: {
+		m0:   { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		home: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', iccid: A },
+		away: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3b', iccid: B + 'F', auto: '0' },
+		any:  { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3c' },
+	} }));
+
+	let up = (n) => { let r = {}; d.context_up(n, (e, res) => { r.err = e; r.res = res; }); return r; };
+	let siminv_holder = (dd) => sim_inv.bind_holder(dd.contexts, 'home', 'm0', A);
+
+	eq(d.contexts.away.cfg.iccid, B, 'iccid: normalised on parse (the trailing F a modem prints)');
+	eq(d.modems.m0.modem.bound_iccid(), { iccid: A, interface: 'home' },
+	   'iccid: the bring-up asserts the slot of the auto interface\'s card');
+	d._admin_downs.home = true;
+	eq(d.modems.m0.modem.bound_iccid(), null, 'iccid: ...not of one the operator took down');
+	delete d._admin_downs.home;
+
+	ops = [];
+	eq(up('home').err, null, 'iccid: the card in use — dialled as any interface');
+	eq(ops, [ 'dial:home' ], 'iccid: ...with no switch');
+	eq(d.status().contexts.home.sim, { want: A, state: 'ok', reason: null }, 'iccid: status says the card is in use');
+
+	ops = [];
+	let r = up('away');
+	eq([ r.err?.error, ops ], [ 'sim_in_use', [] ], 'iccid: another bound interface up on its card keeps the modem');
+	ok(index(r.err?.detail ?? '', 'interface home,') >= 0, 'iccid: ...and the refusal names it');
+	eq(d.contexts.away.wanted, false, 'iccid: the refused interface is not wanted (no kick on the next registration)');
+
+	// an unbound interface takes whatever card the modem runs
+	ops = [];
+	eq(up('any').err, null, 'iccid: an unbound interface is not held off');
+
+	// the operator's own slot switch would pull the card from under home
+	let sw = null;
+	real_switch('m0', 2, (e) => sw = e);
+	eq(sw?.error, 'sim_in_use', 'iccid: a manual slot switch under a bound interface is refused');
+	eq(d.sim_bound_user('m0', { force: true }), null, 'iccid: ...unless forced');
+
+	// home goes down: away may switch now
+	d.contexts.home.ctx.state = 'IDLE';
+	d.contexts.any.ctx.state = 'IDLE';
+	ops = [];
+	r = up('away');
+	eq([ r.err?.error, ops ], [ 'sim_switching', [ 'slot:m0:2:away' ] ],
+	   'iccid: an ifup switches to the slot that holds its card, and waits');
+	eq(d.status().contexts.away.sim.state, 'switching', 'iccid: status says the switch is under way');
+
+	ops = [];
+	r = up('home');
+	eq(r.err?.error, 'sim_in_use', 'iccid: a switch under way holds the modem as well');
+
+	// ...until its interface is taken down: the down ends the switch
+	d.context_down('away', () => null);
+	eq(d.contexts.away._sim_switch, null, 'iccid: an ifdown ends the switch it started');
+	eq(siminv_holder(d), null, 'iccid: ...and nothing holds the modem any more');
+	up('away');
+
+	// a two-step switch: the slot comes up on the profile that eUICC had
+	// enabled, not the wanted one — a step on the way, not a card change
+	evs.m0(modem, 'sim_refresh', { iccid: A, imsi: '262' });
+	ops = [];
+	evs.m0(modem, 'sim_refresh', { iccid: '89011111111111111111', imsi: '999' });
+	eq([ filter(ops, (o) => index(o, 'down:') == 0), d.contexts.away.wanted,
+	     d.contexts.away._sim_switch != null, d.status().contexts.away.sim.state ],
+	   [ [], true, true, 'switching' ],
+	   'iccid: another card read during its own switch does not take the interface down');
+
+	// the card came up and the modem registered: the next setup dials
+	modem.info.iccid = B;
+	modem.active_slot = 2;
+	ops = [];
+	eq(up('away').err, null, 'iccid: once the modem runs the card, the ifup dials');
+	eq([ ops, d.contexts.away._sim_switch, d.status().contexts.away.sim.state ], [ [ 'dial:away' ], null, 'ok' ],
+	   'iccid: ...and the switch is over');
+
+	// the card changes under it (the operator, a card's own IPA): down, not re-dialled
+	d.contexts.away.wanted = true;
+	ops = [];
+	modem.info.iccid = A;
+	evs.m0(modem, 'sim_refresh', { iccid: B, imsi: '901' });
+	evs.m0(modem, 'sim_refresh', { iccid: A, imsi: '262' });
+	eq(filter(ops, (o) => index(o, 'down:') == 0 || o == 'dial:away'), [ 'down:away' ],
+	   'iccid: a card change under a bound interface takes it down (an unbound one re-dials)');
+	eq([ d.contexts.away.wanted, d.status().contexts.away.sim.state ], [ false, 'released' ],
+	   'iccid: ...and it stays down until the next ifup');
+
+	// a card nowhere to be found
+	d.apply_config(config.parse({ network: {
+		m0:   { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		home: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', iccid: '89000000000000000001' },
+	} }));
+	r = up('home');
+	eq(r.err?.error, 'sim_not_here', 'iccid: a card never seen is refused');
+
+	d.shutdown();
+	unlink('/tmp/test-giveups-iccid.json');
+	unlink('/tmp/test-admin-iccid.json');
+})();
+
+// --- an interface still up on a REBUILT device is reset, not adopted
+// netifd holds it without a bound device, so a modem restart that took the mux
+// child away leaves it up; adopting it re-sends the same addresses, which
+// netifd reads as unchanged and never puts back on the new device
+// (ddimension/wwand#90). A session that survived (same ifindex) is adopted.
+(() => {
+	let evs = [], ups = 0, hook = null, ctx_ev = null;
+	let fx = fakefx.create();
+	let fake = {
+		modem: { create: (o) => {
+			hook = o.deps.on_event;
+			return { id: o.id, state: 'READY', config: o.config, start: () => null, stop: () => null,
+			         note_connect_success: () => null };
+		} },
+		context: { create: (o) => {
+			ctx_ev = o.deps.on_event;
+			return { state: 'IDLE', name: o.name, modem: o.modem, config: o.config,
+			         down: (cb) => cb ? cb() : null, up: (cb) => { ups++; },
+			         modem_event: () => null };
+		} },
+	};
+	let d = daemon_mod.create({ timing: TIMING, deps: {
+		log: () => null, load_qmi: () => fake, datapath_fx: fx,
+		resolve_modem_device: (cfg) => cfg.device,
+		resolve_netdev: () => 'wwan0',
+		kick_interface: (i) => push(evs, 'kick ' + i),
+		down_interface: (i) => push(evs, 'down ' + i),
+		renew_interface: () => null,
+		iface_status: (i, cb) => cb({ up: true, pending: false, autostart: true }),
+	} });
+
+	d.apply_config(config.parse({ network: {
+		m0:   { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		wan6: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'a', pdp_type: 'ipv6' },
+	} }));
+	d.contexts.wan6.wanted = true;
+
+	fx.files['/sys/class/net/wwand0/ifindex'] = '7\n';
+	ctx_ev(d.contexts.wan6.ctx, 'up', {});
+	eq(d.contexts.wan6._up_ifindex, '7', 'rebuilt device: the up records the ifindex its addresses live on');
+
+	// same device (a wwand restart, a registration blip): adopted in place
+	ups = 0;
+	hook(d.modems.m0.modem, 'registered', {});
+	ok(ups >= 1 && length(evs) == 0, 'rebuilt device: an unchanged device is adopted, no down or kick');
+
+	// a device that cannot be read is no evidence either way: adopted
+	d.contexts.wan6.ctx.state = 'IDLE';
+	d.contexts.wan6.retry_timer?.cancel();
+	d.contexts.wan6.retry_timer = null;
+	fx.files['/sys/class/net/wwand0/ifindex'] = '';
+	evs = []; ups = 0;
+	hook(d.modems.m0.modem, 'registered', {});
+	ok(ups >= 1 && length(evs) == 0, 'rebuilt device: an unreadable ifindex is inconclusive, adopted, not reset');
+
+	// the modem restarted, its mux child is a new device
+	d.contexts.wan6.ctx.state = 'IDLE';
+	d.contexts.wan6.retry_timer?.cancel();
+	d.contexts.wan6.retry_timer = null;
+	fx.files['/sys/class/net/wwand0/ifindex'] = '9\n';
+	evs = []; ups = 0;
+	hook(d.modems.m0.modem, 'registered', {});
+	eq(evs, [ 'down wan6', 'kick wan6' ],
+		'rebuilt device: the still-up interface is reset (down, then setup) so netifd re-applies its addresses');
+	ok(d._our_downs.wan6 != null, 'rebuilt device: the reset is marked as ours, not read as an ifdown');
+	d.shutdown();
+})();
+
+// --- raw QMI / MBIM (wwandctl qmi / mbim): validated, sent, answered as hex ---
+(() => {
+	let d = daemon_mod.create({ deps: { log: () => null } });
+	let r = {};
+	let reqs = [], released = [];
+	let answer = null;
+	let qmi_m = {
+		extra_client: (s, cb) => cb(null, { service: s.service,
+			request_raw: (id, payload, cb2, opts) => { push(reqs, [ s.service, id, hexenc(payload), opts ]); answer(cb2); } }),
+		extra_release: (c) => push(released, c.service),
+	};
+	let mbim_args = null;
+	let mbim_m = { mbim_raw: (a, cb) => { mbim_args = a; cb(null, { status: 0, status_name: 'Success', info: "\x01\xff" }); } };
+
+	d.modems = { q: { modem: qmi_m }, n: { modem: {} }, b: { modem: mbim_m } };
+
+	let qraw = (ref, a) => { let o = null; d.modem_qmi_raw(ref, a, (e, res) => { o = e ?? res; }); return o; };
+
+	eq(map([ { service: 0, message: 1 }, { service: 256, message: 1 }, { service: '3', message: 1 } ],
+		(a) => qraw('q', a)?.error), [ 'invalid_service', 'invalid_service', 'invalid_service' ],
+		'qmi raw: CTL, a service past one byte, and a non-number are refused');
+	eq(qraw('q', { service: 3, message: 0x10000 })?.error, 'invalid_message', 'qmi raw: a message id past u16 is refused');
+	eq(map([ 'abc', 'zz' ], (p) => qraw('q', { service: 3, message: 1, payload: p })?.error),
+		[ 'invalid_payload', 'invalid_payload' ], 'qmi raw: a payload that is no whole bytes of hex is refused');
+	eq(qraw('n', { service: 3, message: 1 })?.error, 'unsupported', 'qmi raw: a modem with no QMI channel says so');
+	eq(length(reqs), 0, 'qmi raw: nothing invalid reached the modem');
+
+	answer = (cb) => cb({ error: 'qmi', result: 1, code: 26 }, { _result: { result: 1, error: 26 } },
+		hexdec('02040001001a00' + '1001007f'));
+	r = qraw('q', { service: 3, message: 0x24, payload: '010100ff', timeout: 999999 });
+	eq([ reqs[0][0], reqs[0][1], reqs[0][2] ], [ 3, 0x24, '010100ff' ], 'qmi raw: service, message and payload reach the client');
+	eq([ reqs[0][3].timeout, reqs[0][3].no_recovery ], [ 120000, true ], 'qmi raw: the timeout is capped, the request is outside recovery');
+	eq(r, { result: 1, error_code: 26, payload: '02040001001a001001007f',
+	        tlvs: [ { type: 2, value: '01001a00' }, { type: 0x10, value: '7f' } ] },
+		'qmi raw: a refusal is an answer, with its code and TLVs');
+	eq(released, [ 3 ], 'qmi raw: the client is given back after the answer');
+
+	answer = (cb) => cb({ error: 'timeout' }, null);
+	eq(qraw('q', { service: 11, message: 1 })?.error, 'timeout', 'qmi raw: no answer is the error');
+	eq([ reqs[1][3].timeout, released ], [ 10000, [ 3, 11 ] ], 'qmi raw: default 10 s, and released on a timeout too');
+
+	// the modem's teardown destroys the client and pays the pending request
+	// `cancelled` from inside its own release loop: releasing it again from
+	// the callback would send a second RELEASE_CID for the same CID
+	answer = (cb) => null;
+	let held = null;
+	qmi_m.extra_client = (s, cb) => {
+		held = { service: s.service, destroyed: false,
+			request_raw: (id, payload, cb2) => { held.cb = cb2; } };
+		cb(null, held);
+	};
+	qraw('q', { service: 3, message: 1 });
+	held.destroyed = true;
+	held.cb({ error: 'cancelled' }, null);
+	eq(released, [ 3, 11 ], 'qmi raw: a client the teardown destroyed is not released a second time');
+
+	let mraw = (ref, a) => { let o = null; d.modem_mbim_raw(ref, a, (e, res) => { o = e ?? res; }); return o; };
+
+	eq([ mraw('b', { type: 'get', cid: 1 })?.error, mraw('b', { cid: 0 })?.error, mraw('b', { cid: 1, info: 'x' })?.error ],
+		[ 'invalid_type', 'invalid_cid', 'invalid_info' ], 'mbim raw: type, cid and info are checked');
+	eq(mraw('b', { cid: 0x80000000 })?.error, 'invalid_cid', 'mbim raw: a cid past int32, which ubus cannot carry, is refused');
+	eq(mraw('q', { cid: 1 })?.error, 'unsupported', 'mbim raw: a modem with no MBIM channel says so');
+	eq(mraw('b', { service: 'basic_connect', cid: 2, info: '0aff' }), { status: 0, status_name: 'Success', info: '01ff' },
+		'mbim raw: the answer comes back as hex');
+	eq([ mbim_args.kind, hexenc(mbim_args.info), mbim_args.timeout ], [ 'query', '0aff', 10000 ],
+		'mbim raw: query by default, the buffer as bytes, the default timeout');
+	d.modems = {};
+	d.shutdown();
+})();
 
 done('test_daemon');

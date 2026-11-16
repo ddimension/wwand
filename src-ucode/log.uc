@@ -19,6 +19,7 @@ const LOG_DAEMON = 3;   // syslog facility
 let threshold = LEVELS.info;
 let target = 'auto';    // 'auto' (syslog, else stderr) | 'syslog' | 'stderr'
 let io = null;          // native seam (wwand.io), when it provides syslog_*
+let ident = 'wwand';    // syslog program name; a plugin daemon (sipd) sets its own
 
 export function set_level(name)
 {
@@ -46,6 +47,9 @@ export function open(iomod, opts)
 {
 	io = (iomod && type(iomod.syslog_open) == 'function') ? iomod : null;
 
+	if (opts?.ident)
+		ident = opts.ident;
+
 	if (opts?.level)
 		set_level(opts.level);
 
@@ -53,7 +57,7 @@ export function open(iomod, opts)
 		target = opts.target;
 
 	if (io && target != 'stderr')
-		return io.syslog_open('wwand', LOG_DAEMON);
+		return io.syslog_open(ident, LOG_DAEMON);
 
 	return false;
 };
@@ -66,7 +70,7 @@ export function set_target(name)
 	target = name;
 
 	if (io && target != 'stderr')
-		io.syslog_open('wwand', LOG_DAEMON);
+		io.syslog_open(ident, LOG_DAEMON);
 
 	return true;
 };

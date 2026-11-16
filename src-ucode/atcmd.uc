@@ -86,6 +86,16 @@ const LOCAL_PORTS = {
 	// 2026-10-13). Only the observed role is pinned; a device sharing the
 	// generic id with another layout still gets the probing walk.
 	'05c6:90d5': { '5': 'at' },
+	// ZTE MF286DMODULE (BD_TELIAMF286DV1.0.0B12, the internal modem of the
+	// ZTE MF286D router; 19d2:1485). if3 is the AT port, if4 a secondary AT
+	// port (AT+ICCID answers there). if2 opens but never answers AT, so the
+	// probing walk burns its full timeout on it at every boot before it
+	// reaches if3. HW-verified 2026-11-07 on an MF286D (OpenWrt 25.12.6):
+	// if3 is the port the walk itself settled on across three boots. Only
+	// the observed roles are pinned — if2 stays untagged (mute on AT, DIAG
+	// presumed but not proven). if5 is the QMI interface: qmi_wwan binds it
+	// and option reserves it (qmi_wwan.c:1329, option.c:1956, 6.18.41).
+	'19d2:1485': { '3': 'at', '4': 'at2' },
 };
 
 // model-specific init sequences (old proto_qmi_serial_init)
@@ -169,6 +179,71 @@ export function sim_detect_commands(info, cfg)
 
 	return [ { check: 'AT+QSIMDET?', want: d.want, set: d.set,
 	           note: sprintf('SIM detection %s', cfg.sim_detect) } ];
+};
+
+// `option nr5g_mode` on the modem: which 5G NR flavours it may use, apart
+// from the RAT list in `option modes`. 'nsa' = non-standalone only (EN-DC,
+// NR anchored on LTE), 'sa' = standalone only, 'both'. This is the Android
+// model (AOSP radio HAL IRadioNetwork, main 1a56e38, 2026-11-12): the
+// allowed-RAT bitmap has one NR bit, and NSA and SA are separate switches —
+// setNrDualConnectivityState for NSA, setN1ModeEnabled (N1 mode, TS 24.501
+// 4.9) for SA. Neither QMI nor MBIM has a standard message for it: libqmi
+// 1.38 splits only the NR band lists (SSP TLV 0x2F / 0x30), and the MBIM
+// 5G_SA data class bit is not one either — a T99W175 drops it while its own
+// switch, not the bit, keeps SA off (ddimension/wwand#75: SA came up only
+// after AT^NR5G_MODE went from 1 to 0, F0.1.0.0.9.SC.005, 2026-11-12).
+//
+// So it is a vendor AT setting, read first and written only when it
+// differs. Both dialects number the values the same way, 0 both, 1 NSA
+// only, 2 SA only:
+//   Foxconn T99W175 (Cinterion MV31-W): AT^NR5G_MODE=<0|1|2>, "^NR5G_MODE:<n>"
+//     (MV31-W AT Command Reference Guide, 80762ST11160A Rev 2, 2024-06-11,
+//     p. 172; takes effect without a reset);
+//   Quectel RG50xQ/RM5xxQ: AT+QNWPREFCFG="nr5g_disable_mode",<0|1|2> where 1
+//     disables SA and 2 NSA (5G Network Searching Scheme Introduction V1.0,
+//     2021-07-12, p. 18; immediate, saved automatically).
+// The dialect comes from the MODEL, never from the vendor alone: each
+// command is documented for one family only (the Quectel note lists RG500Q,
+// RG501Q-EU, RG502Q-EA, RM500Q, RM502Q, RM505Q-AE, RM510Q-GL), and a refused
+// read does not stop the step — run_step writes on a bare ERROR, so an
+// unrelated Quectel would get an undocumented persistent write. A modem
+// outside both gets no command, and the caller reports the option as not
+// applied.
+const NR5G_MODE = { both: 0, nsa: 1, sa: 2 };
+
+export function nr5g_dialect(info)
+{
+	let id = lc(join(' ', map([ info?.manufacturer, info?.model, info?.firmware, info?.revision ],
+		(v) => sprintf('%s', v ?? ''))));
+
+	if (match(id, /(^|[^a-z0-9])r[gm]5[0-9][0-9]q/))
+		return 'quectel';
+
+	// the T99W175's MBIM firmware string ("T99W175.F0.1.0.0.9.SC.005") is
+	// what is known before AT identifies anything; the MV31-W is the same
+	// module under Cinterion's name
+	if (match(id, /(^|[^a-z0-9])(t99w175|mv31-w)/))
+		return 'foxconn';
+
+	return null;
+};
+
+export function nr5g_mode_commands(info, cfg)
+{
+	let n = NR5G_MODE[cfg?.nr5g_mode];
+	let d = (n != null) ? nr5g_dialect(info) : null;
+
+	if (d == 'foxconn')
+		return [ { check: 'AT^NR5G_MODE?', want: sprintf('\\^NR5G_MODE: *%d[^0-9]*$', n),
+		           set: sprintf('AT^NR5G_MODE=%d', n), note: sprintf('5G NR mode %s', cfg.nr5g_mode) } ];
+
+	if (d == 'quectel')
+		return [ { check: 'AT+QNWPREFCFG="nr5g_disable_mode"',
+		           want: sprintf('\\+QNWPREFCFG: *"nr5g_disable_mode", *%d[^0-9]*$', n),
+		           set: sprintf('AT+QNWPREFCFG="nr5g_disable_mode",%d', n),
+		           note: sprintf('5G NR mode %s', cfg.nr5g_mode) } ];
+
+	return [];
 };
 
 export function cell_lock_commands(cfg)
@@ -641,6 +716,122 @@ function cmd_prefix(cmd)
 	return m ? uc(m[1]) : null;
 };
 
+// never log credentials: auth commands carry username+password in their
+// argument list — mask every quoted argument (covers the user/pass
+// positions in all quoted forms: CGAUTH/MGAUTH/QICSGP/QCPDPP/NDISDUP),
+// and the trailing comma fields for the unquoted AT^AUTHDATA form.
+// CPIN/CPUK (PIN/PUK entry) mask everything after the '='. The prefix
+// class must cover AT+/AT^/AT$ — Huawei/MeiG/Sierra use ^/$.
+function redact_at(cmd)
+{
+	let cls = match(cmd, /^AT[+^$](CGAUTH|MGAUTH|QICSGP|AUTHDATA|QCPDPP|NDISDUP|CPIN|CPUK)\s*=/);
+
+	if (!cls)
+		return cmd;
+
+	if (cls[1] == 'CPIN' || cls[1] == 'CPUK')
+		return replace(cmd, /^(AT\+(CPIN|CPUK)\s*=\s*).*$/, '$1***');
+
+	cmd = replace(cmd, /"([^"]*)"/g, '"***"');
+
+	// unquoted AUTHDATA carries the credentials as the last two comma
+	// fields — either may be empty (one-credential forms exist), so
+	// requiring two non-empty fields leaked them into the log
+	return replace(cmd, /(,[^,"]*)(,[^,"]*)$/, ',***,***');
+}
+
+// run a list of commands sequentially, best-effort (errors logged only)
+// A step is a command, or a SETTING the modem should have:
+//   { check, want, set, note, reset }
+// `check` reads it; when one of the answer's lines matches `want` (a
+// regex source) the modem is as wanted and nothing is written — so the
+// sequence can run on every start without wearing out the modem's flash.
+// Otherwise `set` writes it and `check` confirms it. done(changed): the
+// steps that changed something (their `note` and `reset`), for the
+// caller to act on — an EFS item, for one, is read at modem boot only.
+function run_step(self, log, st, next)
+{
+	let matches = (res) => length(filter(res?.lines ?? [], (l) => match(l, regexp(st.want)))) > 0;
+
+	// `timeout` (ms, optional): how long the check may take
+	let copts = (st.timeout > 0) ? { timeout: st.timeout } : null;
+
+	self.send(st.check, (err, res) => {
+		if (!err && matches(res)) {
+			log('debug', sprintf('%s: already set', st.note ?? redact_at(st.check)));
+			return next(null);
+		}
+
+		// A check that got NO ANSWER says nothing about the setting (a
+		// port still busy after enumeration, a timeout): writing on it would
+		// spend a flash write — and, with `reset`, a modem reset — on every
+		// start while the value is already right. Left for the next start.
+		// An answer that refuses (ERROR, +CME) is one: Quectel's QNVFR
+		// answers ERROR for an EFS item that does not exist yet (RG650E).
+		// ...and so are the answers of a SIM or port still busy (CME 14 SIM
+		// busy, 515 please wait): no word on the value either
+		if (err && ((err.error != 'ERROR' && err.error != 'cme') ||
+		            (err.error == 'cme' && (+err.code == 14 || +err.code == 515)))) {
+			log('warn', sprintf('%s: cannot read it (%J) — left as it is', st.note ?? redact_at(st.check), err));
+			return next(null);
+		}
+
+		self.send(st.set, (serr) => {
+			if (serr) {
+				log('warn', sprintf('%s: %s failed: %J', st.note ?? 'init setting', redact_at(st.set), serr));
+				return next(null);
+			}
+
+			self.send(st.check, (cerr, cres) => {
+				if (cerr || !matches(cres)) {
+					log('warn', sprintf('%s: written, but it does not read back as wanted', st.note ?? redact_at(st.set)));
+					return next(null);
+				}
+
+				log('notice', sprintf('%s: set%s', st.note ?? redact_at(st.set),
+					st.reset ? ' (takes effect after a modem reset)' : ''));
+				next(st);
+			});
+		});
+	}, copts);
+}
+
+// The sequence runner both AT engines share — the tty one here and the
+// AT-over-MBIM tunnel (mbim_backend make_at_engine) — so a setting step is
+// read, written and confirmed the same way on either. `self` is the engine;
+// it needs only send(cmd, cb, o).
+export function run_sequence(self, log, cmds, done)
+{
+	let idx = 0;
+	let changed = [];
+	let step;
+
+	step = () => {
+		if (idx >= length(cmds))
+			return done ? done(changed) : null;
+
+		let cmd = cmds[idx++];
+
+		if (type(cmd) == 'object')
+			return run_step(self, log, cmd, (st) => {
+				if (st)
+					push(changed, { note: st.note, set: st.set, reset: !!st.reset });
+				step();
+			});
+
+		self.send(cmd, (err, res) => {
+			if (err)
+				log('warn', sprintf('%s failed: %J', redact_at(cmd), err));
+			else
+				log('info', sprintf('%s ok', redact_at(cmd)));
+
+			step();
+		});
+	};
+
+	step();
+};
+
 export function create(transport, opts)
 {
 	let log = opts?.log ?? ((level, msg) => warn(sprintf('%s: at: %s\n', level, msg)));
@@ -694,28 +885,7 @@ export function create(transport, opts)
 
 	let finish, next;
 
-	// never log credentials: auth commands carry username+password in their
-	// argument list — mask every quoted argument (covers the user/pass
-	// positions in all quoted forms: CGAUTH/MGAUTH/QICSGP/QCPDPP/NDISDUP),
-	// and the trailing comma fields for the unquoted AT^AUTHDATA form.
-	// CPIN/CPUK (PIN/PUK entry) mask everything after the '='. The prefix
-	// class must cover AT+/AT^/AT$ — Huawei/MeiG/Sierra use ^/$.
-	let redact = (cmd) => {
-		let cls = match(cmd, /^AT[+^$](CGAUTH|MGAUTH|QICSGP|AUTHDATA|QCPDPP|NDISDUP|CPIN|CPUK)\s*=/);
-
-		if (!cls)
-			return cmd;
-
-		if (cls[1] == 'CPIN' || cls[1] == 'CPUK')
-			return replace(cmd, /^(AT\+(CPIN|CPUK)\s*=\s*).*$/, '$1***');
-
-		cmd = replace(cmd, /"([^"]*)"/g, '"***"');
-
-		// unquoted AUTHDATA carries the credentials as the last two comma
-		// fields — either may be empty (one-credential forms exist), so
-		// requiring two non-empty fields leaked them into the log
-		return replace(cmd, /(,[^,"]*)(,[^,"]*)$/, ',***,***');
-	};
+	let redact = redact_at;
 
 	// prefix-less call-progress codes (RING, NO CARRIER, ...): compared as a
 	// WHOLE line so a bare identify value can never be swallowed by a substring
@@ -909,6 +1079,12 @@ export function create(transport, opts)
 		// on the way, or idle noise the line loop below skips.
 		cur.lines = [];
 		cur.prefix = cmd_prefix(cur.cmd);
+		// ATD, ATA and ATO end in a call-progress code, not in OK: V.250
+		// (07/2003) 6.3.1 lists NO CARRIER, BUSY, NO ANSWER and NO DIALTONE
+		// as the final results of a dial. Treated as URCs they were dropped
+		// and the dial ran into its timeout (HW-observed: a VoLTE ATD on the
+		// RG650E answered NO CARRIER at once, 2026-11-13).
+		cur.dial = match(cur.cmd ?? '', /^AT[DAO]/i) != null;
 
 		cur.timer = uloop.timer(cur.timeout, () => {
 			log('warn', sprintf('timeout waiting for reply to %s', redact(cur.cmd)));
@@ -972,6 +1148,11 @@ export function create(transport, opts)
 
 			if (m)
 				return finish({ error: lc(m[1]), code: m[2] }, cur.lines);
+
+			// RING stays a URC even here: it announces a call, it does not
+			// answer the dial
+			if (cur.dial && !match(uc(line), /^RING( [0-9]+)?$/) && is_bare_urc(line))
+				return finish({ error: lc(line) }, cur.lines);
 
 			// a URC that lands between the lines of a response is NOT part of
 			// the answer: route it to the state machine instead of letting it
@@ -1091,90 +1272,8 @@ export function create(transport, opts)
 		next();
 	};
 
-	// run a list of commands sequentially, best-effort (errors logged only)
-	// A step is a command, or a SETTING the modem should have:
-	//   { check, want, set, note, reset }
-	// `check` reads it; when one of the answer's lines matches `want` (a
-	// regex source) the modem is as wanted and nothing is written — so the
-	// sequence can run on every start without wearing out the modem's flash.
-	// Otherwise `set` writes it and `check` confirms it. done(changed): the
-	// steps that changed something (their `note` and `reset`), for the
-	// caller to act on — an EFS item, for one, is read at modem boot only.
-	let run_step = (st, next) => {
-		let matches = (res) => length(filter(res?.lines ?? [], (l) => match(l, regexp(st.want)))) > 0;
-
-		// `timeout` (ms, optional): how long the check may take
-		let copts = (st.timeout > 0) ? { timeout: st.timeout } : null;
-
-		self.send(st.check, (err, res) => {
-			if (!err && matches(res)) {
-				log('debug', sprintf('%s: already set', st.note ?? redact(st.check)));
-				return next(null);
-			}
-
-			// A check that got NO ANSWER says nothing about the setting (a
-			// port still busy after enumeration, a timeout): writing on it would
-			// spend a flash write — and, with `reset`, a modem reset — on every
-			// start while the value is already right. Left for the next start.
-			// An answer that refuses (ERROR, +CME) is one: Quectel's QNVFR
-			// answers ERROR for an EFS item that does not exist yet (RG650E).
-			// ...and so are the answers of a SIM or port still busy (CME 14 SIM
-			// busy, 515 please wait): no word on the value either
-			if (err && ((err.error != 'ERROR' && err.error != 'cme') ||
-			            (err.error == 'cme' && (+err.code == 14 || +err.code == 515)))) {
-				log('warn', sprintf('%s: cannot read it (%J) — left as it is', st.note ?? redact(st.check), err));
-				return next(null);
-			}
-
-			self.send(st.set, (serr) => {
-				if (serr) {
-					log('warn', sprintf('%s: %s failed: %J', st.note ?? 'init setting', redact(st.set), serr));
-					return next(null);
-				}
-
-				self.send(st.check, (cerr, cres) => {
-					if (cerr || !matches(cres)) {
-						log('warn', sprintf('%s: written, but it does not read back as wanted', st.note ?? redact(st.set)));
-						return next(null);
-					}
-
-					log('notice', sprintf('%s: set%s', st.note ?? redact(st.set),
-						st.reset ? ' (takes effect after a modem reset)' : ''));
-					next(st);
-				});
-			});
-		}, copts);
-	};
-
 	self.run_sequence = function(cmds, done) {
-		let idx = 0;
-		let changed = [];
-		let step;
-
-		step = () => {
-			if (idx >= length(cmds))
-				return done ? done(changed) : null;
-
-			let cmd = cmds[idx++];
-
-			if (type(cmd) == 'object')
-				return run_step(cmd, (st) => {
-					if (st)
-						push(changed, { note: st.note, set: st.set, reset: !!st.reset });
-					step();
-				});
-
-			self.send(cmd, (err, res) => {
-				if (err)
-					log('warn', sprintf('%s failed: %J', redact(cmd), err));
-				else
-					log('info', sprintf('%s ok', redact(cmd)));
-
-				step();
-			});
-		};
-
-		step();
+		run_sequence(self, log, cmds, done);
 	};
 
 	// discard pending serial noise (old M9200B empty_serial_buffers quirk)

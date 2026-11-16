@@ -24,6 +24,8 @@
 'use strict';
 
 import * as uloop from 'uloop';
+import * as siminventory from 'wwand.siminventory';
+import * as context_common from 'wwand.context_common';
 
 const UP_GUARD_MS = 150000;
 
@@ -60,6 +62,14 @@ export function install(self, o)
 	// these self/mutually reference (the TDZ trap — see CLAUDE.md ucode gotchas)
 	let activate, clear_reconnect, retry_activate, enter_reconnecting, give_up;
 
+	// seconds left of a throttle the modem reported for this interface's APN,
+	// 0 when none (or its time is unknown or over)
+	let throttle_left = (entry) => {
+		let until = entry?.throttle?.until;
+
+		return (until != null) ? max(0, until - context_common.mono()) : 0;
+	};
+
 	// bring context `name` up; queues on pending_up until the modem is READY.
 	activate = (name, cb) => {
 		let entry = self.contexts[name];
@@ -74,6 +84,25 @@ export function install(self, o)
 
 		if (entry.ctx.state == 'CONNECTED')
 			return cb(null, self._up_result(name, entry));
+
+		// netifd's setup during a throttle: answered at once rather than
+		// dialled into the back-off (daemon.uc note_throttle)
+		if (throttle_left(entry) > 0) {
+			// ...and someone has to own the dial after it: an interface given
+			// up before (or never started) has no retry chain
+			if (!entry.retry_timer) {
+				let mine = entry;
+
+				// the same interface, still wanted — a reload in between may
+				// have put a different one under this name
+				uloop.timer(0, () => {
+					if (self.contexts[name] === mine && mine.wanted)
+						retry_activate(name);
+				});
+			}
+
+			return cb({ error: 'throttled', apn: entry.throttle.apn, retry_in: throttle_left(entry) });
+		}
 
 		if (modem.state != 'READY') {
 			log('info', sprintf('interface %s: modem not ready (%s), queueing activation',
@@ -146,7 +175,7 @@ export function install(self, o)
 			// the backoff they were meant to space out collapses. Reachable
 			// whenever something reaches retry_activate while a retry is
 			// already scheduled: the modem-ready and adoption paths call it
-			// directly (daemon.uc:1118,:1200), and the sim_refresh handler gets
+			// directly (daemon.uc:1216,:1326), and the sim_refresh handler gets
 			// there through enter_reconnecting.
 			if (entry.retry_timer) {
 				entry.retry_timer.cancel();
@@ -202,6 +231,60 @@ export function install(self, o)
 		}
 
 		entry._held_retry_logged = false;
+
+		// AN ICCID-BOUND INTERFACE DIALS ONLY ON ITS CARD. Right after its own
+		// slot switch the modem still reads READY for a moment, and this path
+		// dialled the new interface on whatever answered — profile 2 of a
+		// card not read yet (HW, NR7101, 2026-11-07: "invalid profile id").
+		// No retry is scheduled: the `registered` that follows the card's
+		// bring-up kicks the interface (daemon.uc modem_registered), and its
+		// setup takes the next step (sim_binding).
+		let bound = siminventory.norm_iccid(entry.cfg?.iccid);
+
+		if (bound && bound != siminventory.norm_iccid(modem.info?.iccid))
+			return;
+
+		// the modem holds this APN back (daemon.uc note_throttle): a dial
+		// before the back-off ends is refused the same way. While the time is
+		// being asked, the ordinary backoff stands; once known, the next try
+		// waits for its end — and the reconnect hold is deferred past the
+		// throttle's end (below), not fired in the middle of an outage whose
+		// end is known and that no `registered` would recover from.
+		if (entry.throttle?.querying)
+			return schedule();
+
+		let left = throttle_left(entry);
+
+		if (left > 0) {
+			if (entry.retry_timer)
+				entry.retry_timer.cancel();
+
+			// Defer the give-up hold past the throttle, don't drop it: giving
+			// the interface up mid-throttle is wrong (the outage end is known
+			// and no `registered` follows a throttle), but a hold that never
+			// fired again would turn the throttle into an UNBOUNDED retry loop
+			// once ordinary failures persist after it. Re-arm it to land a
+			// full hold_max_ms after the throttle clears; a dial that succeeds
+			// first cancels it (clear_reconnect on the 'up' event).
+			if (entry.hold_timer)
+				entry.hold_timer.cancel();
+			entry.hold_timer = uloop.timer(left * 1000 + 1000 + hold_max_ms, () => {
+				entry.hold_timer = null;
+				give_up(name, 'reconnect hold expired');
+			});
+
+			let thr = entry.throttle;
+
+			entry.retry_timer = uloop.timer(left * 1000 + 1000, () => {
+				entry.retry_timer = null;
+
+				if (entry.throttle === thr)
+					entry.throttle = null;
+
+				retry_activate(name);
+			});
+			return;
+		}
 
 		entry.ctx.up((err) => {
 			if (err && entry.wanted && entry.ctx?.state != 'CONNECTED')

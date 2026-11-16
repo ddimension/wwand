@@ -173,6 +173,12 @@ be decided by load order; `_wwand_apply_settings` builds the netifd update).
   `/vol/release/chateau/openwrt/build_dir/.../libqmi-1.38.0/data/qmi-service-*.json`
   (request TLVs vs `input`, response vs `output`, resolve `common-ref` ids).
   A wrong tag silently decodes garbage (e.g. the packet-dropped 0x1D/0x1E fix).
+  libqmi first is a recommendation (since 2026-11-15), not an exclusion: where
+  libqmi lacks a message or TLV, a vendor IDL table (a shipping RIL's
+  `libqmiservices.so`, decoded with wwand-ims `tools/qmi-idl-dump.py`), Qualcomm
+  sources, the Gobi API or the kernel may supply it — named in the schema
+  comment, measured on hardware before it is sent or relied on, and listed in
+  `docs/qmi-beyond-libqmi.md` (rerun wwand-ims `tools/qmi-libqmi-audit.sh`).
 - **Kernel behaviour must be verified against the kernel source**, the same way
   QMI schemas are verified against libqmi. The tree is at
   `/vol/release/chateau/openwrt/build_dir/target-*/linux-*/linux-*/drivers/`.
@@ -384,4 +390,4 @@ Modem is normally in **QMI mode**
   (libqmi QMI_WDA_DATA_AGGREGATION_PROTOCOL_QMAPV4 = 0x08; v5 is 0x09, and
   quectel-cm only ever sends 0x05 or 0x09). `DAP_QMAPV5` was 8 and is 9 now, so
   the renegotiation that used to fire here should stop. Re-verify on HW;
-  `dl_datagram_max_size` (default model table = 31 KB) is overridable per modem.
+  `dl_datagram_max_size` (default 31744 for every modem, negotiated) is overridable per modem.

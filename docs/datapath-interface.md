@@ -182,6 +182,7 @@ return {
     aggregate:       true,               // QMAP arithmetic on the parent
     programs_parent: true,               // reprograms the parent's link format
     tx_aggr:         false,              // rmnet-style uplink coalesce
+    dgram_max:       (fx, netdev) => n,  // driver's fixed RX buffer (optional)
 };
 ```
 
@@ -300,6 +301,15 @@ the historical behaviour.
 - **`tx_aggr`** (default false) — opt into the mainline-rmnet ethtool egress
   coalesce call. Also decides whether the negotiated uplink maxima are reported
   as `ul_agg`.
+- **`dgram_max(fx, netdev)`** (optional, default none) — the largest WDA DL
+  datagram size the driver can receive, in bytes, for a driver that fixed its
+  receive buffer at load: that buffer less the 4 bytes wwand reserves
+  everywhere (urb = size + 4). wwand asks every modem for 31 KB and sizes its own
+  receive side from the answer; a driver that does not follow the answer would
+  get aggregates larger than its URB. So the WDA request is capped at this
+  value, a configured `dl_datagram_max_size` included. `rmnet_nss` answers with
+  RMNET_INFO `rx_urb_size`, else `qmap_size`; `rmnet_nss_mhi` likewise (its
+  `mru`, 15 KB in QMAP mode), each less 4. `null` means no cap.
 - **`qmap`** (default: `aggregate`) — QMAP frames ride the parent. A different
   question from `aggregate`, which is about who sizes the buffers: a datapath
   adopting a driver's channels answers `aggregate: false, qmap: true`. It

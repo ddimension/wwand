@@ -210,6 +210,22 @@ return {
 	qmap: true,
 	qmap_versions: qmap_versions,
 
+	// the WDA request is capped at the driver's receive buffer: its skbs are
+	// `mru` bytes, fixed at probe (15 KB for QMAP, mhi_netdev_quectel.c:3254),
+	// and exported as qmap_size = mru (:3265) and RMNET_INFO rx_urb_size
+	// (:1751; skbs of exactly mru, no headroom, :1904-1940; pcie_mhi 1.6.0 as in
+	// the feed, read 2026-11-05). The modem would accept more and send
+	// aggregates that do not fit. Less 4 bytes, as on the USB sibling.
+	dgram_max: (fx, netdev) => {
+		let info = (type(fx?.rmnet_info) == 'function') ? fx.rmnet_info(netdev) : null;
+		let buf = +info?.rx_urb_size;
+
+		if (!(buf > 4))
+			buf = num_attr(fx, vendor_attr(netdev, 'qmap_size'));
+
+		return (buf > 4) ? buf - 4 : null;
+	},
+
 	// the children are the kernel's; only a pcie_mhi reload creates or removes
 	// them, and the shared prune matches on iflink, which they do not report
 	prune: (fx, netdev, wanted) => null,

@@ -13,6 +13,7 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as uloop from 'uloop';
 import * as struct from 'struct';
+import * as fs from 'fs';
 import * as mockhub from './lib/mockhub.uc';
 import * as client_mod from 'wwand/client.uc';
 import * as backend from 'wwand/qmi_backend.uc';
@@ -45,13 +46,20 @@ let raw_err = () => ({ __raw: RESULT_ERR });
 
 // --- mock wiring: each op reads a mutable response so scenarios can vary ------
 
-let r_ca, r_dsd, r_sysinfo, r_pkt, r_bearer, r_rates, r_opmode;
+let r_ca, r_rf, r_thr, r_dsd, r_sysinfo, r_pkt, r_bearer, r_rates, r_opmode;
+let r_plist, r_pset = {}, r_attach, r_defnum = [];
 
 let mock = mockhub.create({ handlers: {
 	GET_LTE_CPHY_CA_INFO:               () => r_ca,
+	GET_RF_BAND_INFO:                   () => r_rf,
 	GET_SYSTEM_STATUS:                  () => r_dsd,     // DSD service 0x2A
 	GET_SYSTEM_INFO:                    () => r_sysinfo, // NAS
 	GET_PACKET_STATISTICS:              () => r_pkt,     // WDS
+	GET_PDN_THROTTLE_INFO:              () => r_thr,     // WDS
+	GET_PROFILE_LIST:                   () => r_plist,   // WDS
+	GET_PROFILE_SETTINGS:               (a) => r_pset[sprintf('%d', a.profile.index)],
+	GET_LTE_ATTACH_PDN_LIST:            () => r_attach,  // WDS
+	GET_DEFAULT_PROFILE_NUMBER:         (a) => r_defnum[a.profile.family],
 	GET_CURRENT_DATA_BEARER_TECHNOLOGY: () => r_bearer,  // WDS
 	GET_CHANNEL_RATES:                  () => r_rates,   // WDS
 	SET_OPERATING_MODE:                 () => r_opmode,  // DMS
@@ -103,6 +111,132 @@ push(steps, (next) => {
 push(steps, (next) => {
 	r_ca = raw_err();
 	backend.get_ca(nas, (ca) => { eq(ca, null, 'get_ca: a REFUSED request is null'); next(); });
+});
+
+// === get_rf_bands: GET_RF_BAND_INFO 0x01 / 0x11 / 0x12 ========================
+// The LTE half is the RG502Q-EA's reply byte for byte (B20, EARFCN 6300,
+// bandwidth enum 3 = 10 MHz; HW-read 2026-11-13); the NR entry is n78
+// (QmiNasActiveBand 269) at NR-ARFCN 642048 with enum 17 = 100 MHz, a value
+// the legacy u16 channel of TLV 0x01 cannot hold.
+push(steps, (next) => {
+	r_rf = raw(tlv(0x01, u8(2) + u8(8) + u16(145) + u16(6300) + u8(12) + u16(269) + u16(642048 & 0xffff)) +
+	           tlv(0x11, u8(2) + u8(8) + u16(145) + u32(6300) + u8(12) + u16(269) + u32(642048)) +
+	           tlv(0x12, u8(2) + u8(8) + u32(3) + u8(12) + u32(17)));
+	backend.get_rf_bands(nas, (rf) => {
+		eq(rf, [
+			{ radio_if: 8,  band: 145, channel: 6300,   bandwidth_mhz: 10 },
+			{ radio_if: 12, band: 269, channel: 642048, bandwidth_mhz: 100 },
+		], 'get_rf_bands: extended list wins (32-bit NR-ARFCN), bandwidth per radio');
+		next();
+	});
+});
+
+// a modem without the 1.26 TLVs: legacy list, no bandwidth
+push(steps, (next) => {
+	r_rf = raw(tlv(0x01, u8(1) + u8(8) + u16(145) + u16(6300)));
+	backend.get_rf_bands(nas, (rf) => {
+		eq(rf, [ { radio_if: 8, band: 145, channel: 6300, bandwidth_mhz: null } ],
+			'get_rf_bands: legacy list alone, bandwidth unknown');
+		next();
+	});
+});
+
+push(steps, (next) => {
+	r_rf = raw_err();
+	backend.get_rf_bands(nas, (rf) => { eq(rf, null, 'get_rf_bands: a refused request is null'); next(); });
+});
+
+// === get_pdn_throttle: WDS 0x006C info array (libqmi 1.38 layout) ===========
+push(steps, (next) => {
+	let lstr = (x) => u8(length(x)) + x;
+	r_thr = raw(tlv(0x10, u8(2) +
+		u8(1) + u8(0) + u32(95500) + u32(0) + lstr('nbiot.example') +
+		u8(0) + u8(0) + u32(0) + u32(0) + lstr('free.example')));
+	backend.get_pdn_throttle(wds, (t) => {
+		eq(t, [ { apn: 'nbiot.example', ipv4_s: 96, ipv6_s: null } ],
+			'get_pdn_throttle: only held APNs, ms -> s rounded up, a family not held is null');
+		r_thr = raw_err();
+		backend.get_pdn_throttle(wds, (t2) => { eq(t2, null, 'get_pdn_throttle: a refused request is null'); next(); });
+	});
+});
+
+// === read_profiles: WDS 0x002A / 0x002B / 0x0094 / 0x0049 (libqmi 1.38) =====
+push(steps, (next) => {
+	let lstr = (x) => u8(length(x)) + x;
+	// list: { type u8, index u8, name lstring } x2
+	r_plist = raw(tlv(0x01, u8(2) + u8(0) + u8(1) + lstr('') + u8(0) + u8(2) + lstr('ims')));
+	// settings: name 0x10 / pdp 0x11 / apn 0x14 (plain strings), imcn 0x22
+	r_pset['1'] = raw(tlv(0x11, u8(3)) + tlv(0x14, 'internet'));
+	r_pset['2'] = raw(tlv(0x10, 'ims') + tlv(0x11, u8(2)) + tlv(0x14, 'ims') + tlv(0x22, u8(1)));
+	// attach: current [2], pending [] — u8 count of u16 ids
+	r_attach = raw(tlv(0x10, u8(1) + u16(2)) + tlv(0x11, u8(0)));
+	r_defnum = [ raw(tlv(0x01, u8(1))), raw_err() ];
+
+	backend.read_profiles(wds, (e, p) => {
+		eq(e, null, 'read_profiles: answers');
+		eq(map(p.profiles, (x) => [ x.index, x.name, x.apn, x.pdp_type, x.imcn ]),
+			[ [ 1, null, 'internet', 3, null ], [ 2, 'ims', 'ims', 2, 1 ] ],
+			'read_profiles: every listed profile read, absent TLVs stay null');
+		eq(p.attach, { current: [ 2 ], pending: [] },
+			'read_profiles: the attach list decodes its u16 ids — here profile 2, not 1');
+		eq(p.default.embedded, 1, 'read_profiles: default embedded profile number');
+		eq(p.default.tethered?.error, 'qmi', 'read_profiles: a refused read answers alone, the rest stands');
+
+		r_attach = raw_err();
+		backend.read_profiles(wds, (e2, p2) => {
+			eq([ e2, p2.attach?.error, length(p2.profiles) ], [ null, 'qmi', 2 ],
+				'read_profiles: a firmware without the attach list still yields the profiles');
+
+			r_plist = raw_err();
+			backend.read_profiles(wds, (e3) => {
+				eq(e3?.error, 'qmi', 'read_profiles: no profile list is an error');
+				next();
+			});
+		});
+	});
+});
+
+// === ca_with_rf: the primary carrier of each leg the list lacks ===============
+push(steps, (next) => {
+	let rf = [
+		{ radio_if: 8,  band: 145, channel: 6300,   bandwidth_mhz: 10 },
+		{ radio_if: 12, band: 269, channel: 642048, bandwidth_mhz: 100 },
+	];
+	let lte_ca = [
+		{ rat: 'lte', role: 'PCC', earfcn: 6300, pci: 409, bandwidth_mhz: 10 },
+		{ rat: 'lte', role: 'SCC', earfcn: 1801, pci: 334, bandwidth_mhz: 20, state: 2 },
+	];
+
+	// NSA over QMI: the CPHY CA rows stay, the NR leg is added
+	eq(backend.ca_with_rf(lte_ca, rf), [ ...lte_ca,
+		{ rat: 'nr', role: 'PCC', earfcn: 642048, pci: null, band: 'n78', bandwidth_mhz: 100 } ],
+		'ca_with_rf: NSA — LTE CA rows kept, NR leg appended');
+
+	// CA info unavailable (T99W175 while idle): both legs from RF band info
+	eq(backend.ca_with_rf(null, rf), [
+		{ rat: 'lte', role: 'PCC', earfcn: 6300, pci: null, bandwidth_mhz: 10 },
+		{ rat: 'nr', role: 'PCC', earfcn: 642048, pci: null, band: 'n78', bandwidth_mhz: 100 } ],
+		'ca_with_rf: no CA list — a PCC per leg from RF band info');
+
+	// SA: NR only
+	eq(backend.ca_with_rf([], [ rf[1] ]), [
+		{ rat: 'nr', role: 'PCC', earfcn: 642048, pci: null, band: 'n78', bandwidth_mhz: 100 } ],
+		'ca_with_rf: SA — the NR row alone');
+
+	// a list that already has both legs (Quectel QCAINFO) is left as it was
+	let at_ca = [ { rat: 'lte', role: 'PCC', earfcn: 1300, pci: 42 },
+	              { rat: 'nr', role: 'PCC', earfcn: 632628, pci: 321, band: 'n78' } ];
+	eq(backend.ca_with_rf(at_ca, rf), at_ca, 'ca_with_rf: legs already listed are not duplicated');
+
+	// the Fibocom AT rows name the leg in the role (ca_entries): still a PCC
+	let fib_ca = [ { rat: 'lte', role: 'PCC LTE', earfcn: 1300, pci: 42 },
+	               { rat: 'nr', role: 'PCC NR', earfcn: 632628, pci: 321 } ];
+	eq(backend.ca_with_rf(fib_ca, rf), fib_ca, "ca_with_rf: 'PCC LTE' / 'PCC NR' count as listed legs");
+
+	// no RF answer: the list unchanged, a missing one an empty list
+	eq(backend.ca_with_rf(lte_ca, null), lte_ca, 'ca_with_rf: no RF band info -> list unchanged');
+	eq(backend.ca_with_rf(null, null), [], 'ca_with_rf: nothing at all -> []');
+	next();
 });
 
 // === get_data_mode: DSD available_systems (t=0x10) ============================
@@ -300,6 +434,29 @@ eq(tlvmod.pack(W.MODIFY_PROFILE.req, { profile: { type: 0, index: 1 }, address_a
 	'wds: modify profile carries address allocation 0x2D and CLAT 0xDE');
 eq(tlvmod.unpack(W.GET_PROFILE_SETTINGS.resp, tlv(0x2D, u8(0)) + tlv(0xDE, u8(1))),
 	{ address_allocation: 0, clat: 1 }, 'wds: profile settings decode 0x2D and 0xDE');
+
+// IMS PDN flags: "PCSCF Address Using PCO" 0x1F and "IMCN Flag" 0x22 in Modify
+// Profile and Get Profile Settings; in Get Current Settings "PCSCF Address Using
+// PCO" 0x22 and "PCSCF Server Address List" 0x23 = u8 count + LE u32 IPv4
+// (libqmi 1.38 qmi-service-wds.json)
+eq(tlvmod.pack(W.MODIFY_PROFILE.req, { profile: { type: 0, index: 2 }, pcscf_pco: 1, imcn: 1 }),
+	tlv(0x01, u8(0) + u8(2)) + tlv(0x1F, u8(1)) + tlv(0x22, u8(1)),
+	'wds: modify profile carries P-CSCF via PCO 0x1F and IMCN 0x22');
+eq(tlvmod.unpack(W.GET_PROFILE_SETTINGS.resp, tlv(0x1F, u8(1)) + tlv(0x22, u8(0))),
+	{ pcscf_pco: 1, imcn: 0 }, 'wds: profile settings decode 0x1F and 0x22');
+let cs = tlvmod.unpack(W.GET_CURRENT_SETTINGS.resp,
+	tlv(0x22, u8(1)) + tlv(0x23, u8(2) + u32(0x0A010203) + u32(0xC0A80001)));
+eq([ cs.pcscf_pco, cs.pcscf ], [ 1, [ '10.1.2.3', '192.168.0.1' ] ],
+	'wds: current settings decode the P-CSCF list (LE u32, first octet in the MSB)');
+// "PCSCF IPv6 Address List" 0x2E (Qualcomm IDL, not libqmi): u8 count +
+// 16-byte addresses in network order
+let cs6 = tlvmod.unpack(W.GET_CURRENT_SETTINGS.resp,
+	tlv(0x2E, u8(2) + '\x20\x01\x0d\xb8' + '\0\0\0\0\0\0\0\0\0\0\0\x05' +
+	          '\x20\x01\x0d\xb8\0\x01' + '\0\0\0\0\0\0\0\0\0\x06'));
+eq(length(cs6.pcscf6), 2, 'wds: current settings decode the IPv6 P-CSCF list 0x2E');
+eq(cs6.pcscf6, [ '2001:db8:0:0:0:0:0:5', '2001:db8:1:0:0:0:0:6' ],
+	'wds: IPv6 P-CSCF addresses in network order');
+eq(wdsmod.REQ_SETTINGS_PCSCF, 0xC00, 'wds: P-CSCF requested-settings bits 10 and 11');
 
 // Vendor "get delegated IPv6 prefix" 0x00AC (wds.uc GET_DELEGATED_PREFIX): the
 // request is exactly ONE TLV 0x01 of 16 bytes — the modem answers MALFORMED to
@@ -580,5 +737,157 @@ let cross = tlvmod.unpack(N.GET_SERVING_SYSTEM.resp,
 	tlv(0x29, u16(310) + u16(30) + u8(1)));
 
 eq(cross.mnc_pcs_digit, null, 'serving pcs: 0x29 is not read by the response schema');
+
+// --- Foxconn FCC unlock (ModemManager 1.24.0 dispatcher-fcc-unlock/105b) -----
+// md5 stands in for ucode-mod-digest, which the host ucode lacks; backed by
+// md5sum so the algorithm, not only the string assembly, is checked. The
+// expected magic is what the 105b script's own pipeline prints for these
+// inputs (sed, printf, md5sum, head -c 32), mrhaav's T99W175 values.
+let md5 = (s) => {
+	let tmp = '/tmp/wwand_fcc_foxconn_test.bin';
+	let f = fs.open(tmp, 'w');
+	f.write(s);
+	f.close();
+	let p = fs.popen('md5sum < ' + tmp, 'r');
+	let out = p.read('all');
+	p.close();
+	return substr(out, 0, 32);
+};
+
+eq(backend.foxconn_v2_magic('T99W175.F0.1.0.0.9.GC.004', '096', '866793040319116', md5),
+	'saltd429b08bc5dfc1a6493e5a5055e0016c', 'foxconn v2: the magic matches the 105b pipeline');
+
+// a fake DMS: records every request, answers from `ans` (a name -> [err, data])
+let fox_dms = (ans) => {
+	let d = { sent: [] };
+
+	d.request = (name, args, cb) => {
+		push(d.sent, { name: name, args: args });
+		let a = ans[name] ?? [ null, {} ];
+		let r = (type(a) == 'function') ? a(args) : a;
+		cb(r[0], r[1]);
+	};
+
+	return d;
+};
+let nolog = () => null;
+let fox_ver = (args) => [ null, { version: (args.version_type == 0) ? 'T99W175.F0.1.0.0.9.GC.004' : '096' } ];
+let got;
+
+let d1 = fox_dms({ FOXCONN_GET_FIRMWARE_VERSION: fox_ver, GET_IDS: [ null, { imei: '866793040319116' } ] });
+backend.fcc_foxconn(d1, 'auto', null, md5, nolog, (v) => got = v);
+eq(got, 'foxconn2', 'foxconn auto: v2 accepted');
+eq(d1.sent[3]?.args, { magic_string: 'saltd429b08bc5dfc1a6493e5a5055e0016c', magic_number: 48 },
+	'foxconn auto: v2 carries the computed magic and magic number 48');
+
+let d2 = fox_dms({ FOXCONN_GET_FIRMWARE_VERSION: fox_ver, GET_IDS: [ null, { imei: '866793040319116' } ],
+	FOXCONN_SET_FCC_AUTHENTICATION_V2: [ { error: 'qmi', code: 0x47 }, null ] });
+backend.fcc_foxconn(d2, null, null, md5, nolog, (v) => got = v);
+eq(got, 'foxconn', 'foxconn auto: a refused v2 falls back to v1');
+eq(d2.sent[4], { name: 'FOXCONN_SET_FCC_AUTHENTICATION', args: { value: 0 } },
+	'foxconn auto: ...with magic 0');
+
+let d3 = fox_dms({ FOXCONN_GET_FIRMWARE_VERSION: [ { error: 'qmi', code: 0x1e }, null ] });
+backend.fcc_foxconn(d3, 'foxconn', '866793040319116', md5, nolog, (v) => got = v);
+eq(map(d3.sent, (r) => r.name), [ 'FOXCONN_GET_FIRMWARE_VERSION', 'FOXCONN_GET_FIRMWARE_VERSION', 'GET_IDS',
+	'FOXCONN_SET_FCC_AUTHENTICATION' ], 'foxconn: no firmware version means no v2, straight to v1');
+
+let d4 = fox_dms({});
+backend.fcc_foxconn(d4, 'foxconn:5', null, md5, nolog, (v) => got = v);
+eq(d4.sent, [ { name: 'FOXCONN_SET_FCC_AUTHENTICATION', args: { value: 5 } } ],
+	'foxconn:<n>: only v1 with that magic');
+
+let d5 = fox_dms({ FOXCONN_SET_FCC_AUTHENTICATION_V2: [ { error: 'qmi', code: 0x47 }, null ] });
+backend.fcc_foxconn(d5, 'foxconn2:abc:7', null, md5, nolog, (v) => got = v);
+eq([ got, d5.sent ], [ null, [ { name: 'FOXCONN_SET_FCC_AUTHENTICATION_V2', args: { magic_string: 'abc', magic_number: 7 } } ] ],
+	'foxconn2:<s>:<n>: only that v2, a refusal is no unlock');
+
+let d6 = fox_dms({ FOXCONN_GET_FIRMWARE_VERSION: fox_ver, GET_IDS: [ null, {} ] });
+backend.fcc_foxconn(d6, 'auto', '866793040319116', md5, nolog, (v) => got = v);
+eq(d6.sent[3]?.args?.magic_string, 'saltd429b08bc5dfc1a6493e5a5055e0016c',
+	'foxconn: the MBIM IMEI stands in when GET_IDS has none');
+
+// --- pushed diagnostics: network reject, LTE attach ---------------------------
+// Each indication is decoded from a hand-built wire buffer by the schema, then
+// normalised by the backend — a wrong TLV id leaves the field null.
+
+let ind = (msg, bytes) => tlvmod.unpack(msg.ind, bytes);
+let nas_m = nasmod.default.messages, wds_m = wdsmod.default.messages;
+
+// EMM 19 on LTE-M: radio interface LTE (8), PS (2), cause 19, PLMN 262/02
+// without a PCS digit, CIoT mode 2, last attempt
+let rej = backend.network_reject(ind(nas_m.NETWORK_REJECT_IND,
+	tlv(0x01, u8(8)) + tlv(0x02, u8(2)) + tlv(0x03, u8(19)) +
+	tlv(0x10, u16(262) + u16(2) + u8(0)) + tlv(0x12, u32(2)) + tlv(0x14, u8(1))));
+eq(rej, { reject_cause: 19, reject_domain: 2, reject_rat: 'LTE', reject_plmn: '262/02',
+          ciot_mode: 'lte-m', reject_final: true }, 'network reject: every field decoded');
+eq(backend.reject_line(rej), 'cause 19 (ESM failure), PS, lte-m, 262/02, last attempt',
+	'network reject: the log line');
+
+// the three TLVs libqmi defines as mandatory, and a three-digit MNC
+let rej2 = backend.network_reject(ind(nas_m.NETWORK_REJECT_IND,
+	tlv(0x01, u8(5)) + tlv(0x02, u8(1)) + tlv(0x03, u8(111)) + tlv(0x10, u16(310) + u16(30) + u8(1))));
+eq(rej2, { reject_cause: 111, reject_domain: 1, reject_rat: 'UMTS', reject_plmn: '310/030' },
+	'network reject: no CIoT mode, MNC with its PCS digit');
+eq(backend.reject_line(rej2), 'cause 111, CS, UMTS, 310/030', 'network reject: an unnamed cause stays a number');
+eq(backend.network_reject(ind(nas_m.NETWORK_REJECT_IND, tlv(0x01, u8(8)))), null,
+	'network reject: no cause, no reject');
+
+eq(backend.with_reject({ source: 'qmi', limited: true }, rej2),
+	{ source: 'qmi', limited: true, reject_cause: 111, reject_domain: 1, reject_rat: 'UMTS', reject_plmn: '310/030' },
+	'with_reject: laid over the system info read');
+eq(backend.with_reject(null, rej2).source, 'qmi', 'with_reject: stands alone when the read failed');
+let rd0 = { source: 'qmi', reject_cause: 15 };
+ok(backend.with_reject(rd0, null) === rd0, 'with_reject: nothing pushed, nothing changed');
+
+// LTE attach parameters, the bytes the RG502Q-EA sent on 2026-11-16: detach,
+// then attach with APN "plus", IPv4 and its address
+eq(backend.lte_attach(ind(wds_m.LTE_ATTACH_PARAMS_IND, tlv(0x01, u8(0)))),
+	{ source: 'qmi', state_text: 'detached' }, 'lte attach: valid 0 is a detach');
+eq(backend.lte_attach(ind(wds_m.LTE_ATTACH_PARAMS_IND,
+	tlv(0x01, u8(1)) + tlv(0x10, 'plus') + tlv(0x11, u8(0)) + tlv(0x12, "\xad\x7b\xcd\x0a"))),
+	{ source: 'qmi', state_text: 'attached', apn: 'plus', pdp_type: 'ipv4', ipv4: '10.205.123.173' },
+	'lte attach: APN, IP type and address');
+// the read answers the same attach with other TLV ids (libqmi 0x10-0x12)
+eq(backend.lte_attach(tlvmod.unpack(wds_m.GET_LTE_ATTACH_PARAMS.resp, RESULT_OK +
+	tlv(0x10, 'plus') + tlv(0x11, u8(0)) + tlv(0x12, u8(1)) + tlv(0x13, "\xad\x7b\xcd\x0a"))),
+	{ source: 'qmi', state_text: 'attached', apn: 'plus', pdp_type: 'ipv4', ipv4: '10.205.123.173' },
+	'lte attach: the read gives the same result');
+eq(backend.lte_attach(ind(wds_m.LTE_ATTACH_PARAMS_IND,
+	tlv(0x01, u8(1)) + tlv(0x10, '') + tlv(0x11, u8(2)) +
+	tlv(0x15, "\x2a\x01\x05\x98" + "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01" + u8(64)))),
+	{ source: 'qmi', state_text: 'attached', apn: null, pdp_type: 'ipv4v6',
+	  ipv6: '2a01:598:0:0:0:0:0:1/64' },
+	'lte attach: an empty APN is null, the IPv6 address carries its length');
+
+// attach failure: PLMN 262/02 as on the SIM (62 F2 20), reason type 6 (3GPP), 33
+let af = backend.attach_failure(ind(wds_m.LTE_ATTACH_FAILURE_INFO_IND,
+	tlv(0x01, "\x62\xf2\x20") + tlv(0x02, u16(6) + u16(33))));
+eq([ af.type, af.code, af.plmn ], [ 6, 33, '262/02' ], 'attach failure: reason and PLMN');
+ok(length(af.text) > 0, 'attach failure: the reason has words');
+eq(backend.attach_failure(ind(wds_m.LTE_ATTACH_FAILURE_INFO_IND,
+	tlv(0x01, "\x13\x00\x62") + tlv(0x02, u16(6) + u16(29)))).plmn, '310/260',
+	'attach failure: a three-digit MNC');
+eq(backend.attach_failure({}), null, 'attach failure: no reason, nothing');
+
+eq(ind(wds_m.RAB_REJECT_IND, tlv(0x01, u32(10))).cause, 10, 'rab reject: cause decoded');
+eq(backend.rab_reject_text(10), 'congestion', 'rab reject: in words');
+eq(backend.rab_reject_text(99), 'cause 99', 'rab reject: an unknown cause stays a number');
+
+let pfx = ind(wds_m.IPV6_PREFIX_UPDATE_IND,
+	tlv(0x01, "\x2a\x01\x05\x98" + "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" + u8(56)) +
+	tlv(0x02, u32(1)) + tlv(0x03, u32(3)));
+eq([ pfx.prefix.plen, pfx.type, pfx.status ], [ 56, 1, 3 ], 'ipv6 prefix update: prefix, type, status');
+
+// the registration TLVs go out with the ids measured on the modems
+eq(tlvmod.pack(nas_m.REGISTER_INDICATIONS.req, { network_reject: { enable: 1, suppress_system_info: 0 } }),
+	tlv(0x21, u8(1) + u8(0)), 'register: network reject is TLV 0x21, two bytes');
+eq(tlvmod.pack(nas_m.REGISTER_INDICATIONS.req, { lte_cphy_ca: 1 }), tlv(0x28, u8(1)),
+	'register: LTE carrier aggregation is TLV 0x28');
+eq(tlvmod.pack(wds_m.INDICATION_REGISTER.req, { lte_attach_params: 1 }), tlv(0x22, u8(1)),
+	'register: LTE attach parameters is WDS TLV 0x22');
+let cai = ind(nas_m.LTE_CPHY_CA_IND, tlv(0x01, u16(409) + u16(6300) + u32(2)) + tlv(0x14, u16(30)));
+eq([ cai.scell.pci, cai.scell.earfcn, cai.scell.state, cai.aggregated_dl_bw ], [ 409, 6300, 2, 30 ],
+	'lte ca indication: the SCell and the aggregated bandwidth');
 
 done('test_qmi_backend');

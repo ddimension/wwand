@@ -1645,6 +1645,97 @@ scenario('ipae: ES10 refused on an IPAe-capable card -> its IPAe is in charge', 
 	next();
 });
 
+// An IDEMIA card serves ES10 only once the device declared an IPAd with
+// TERMINAL CAPABILITY tag 84 (HW-seen behind an RG502Q, 2026-11-11): the card
+// below answers 6985 until it has seen that declaration on the basic channel.
+// `denied` models an EG25-G (HW-seen 2026-11-11): QMI refuses the basic
+// channel with ACCESS_DENIED, and its AT port carries the same APDU through.
+function tc_modem(ipa, tc_sw, denied)
+{
+	let m = { timing: T, config: { ipa_mode: ipa }, _gen: 1, apdus: [], at_cmds: [] };
+	let declared = false;
+
+	if (denied)
+		m.at = { send: (cmd, cb) => {
+			push(m.at_cmds, cmd);
+
+			if (index(cmd, 'AT+CSIM=') != 0)
+				return cb({ error: 'ERROR' }, null);
+
+			declared = (tc_sw == '9000');
+			cb(null, { lines: [ sprintf('+CSIM: 4,"%s"', uc(tc_sw)) ] });
+		} };
+
+	m.uim = mkclient({
+		OPEN_LOGICAL_CHANNEL: { channel_id: 1, select_response: hex_to_bytes(FCI_IOT) },
+		SEND_APDU: (args, cb) => {
+			let h = lc(join('', map(args.apdu, (b) => sprintf('%02x', b))));
+
+			push(m.apdus, { channel: args.channel_id, apdu: h });
+
+			if (substr(h, 0, 4) == '80aa' && denied)
+				return cb({ error: 'qmi', result: 1, code: 82 }, null);
+
+			if (substr(h, 0, 4) == '80aa') {
+				declared = (tc_sw == '9000');
+				return cb(null, { response: hex_to_bytes(tc_sw) });
+			}
+
+			cb(null, { response: hex_to_bytes(declared ? 'bf20039000' : '6985') });
+		},
+		LOGICAL_CHANNEL: {},
+	}, []);
+
+	return m;
+}
+
+scenario('ipad: option ipa_mode declares the IPAd before the ISD-R open, then ES10 answers', (next) => {
+	let got = {};
+	let on = tc_modem('ipad', '9000');
+	let off = tc_modem(null, '9000');
+
+	sim.card_euicc_info(on, (v) => { got.on = v?.ipa; });
+	sim.card_euicc_info(off, (v) => { got.off = v?.ipa; });
+
+	eq(got, { on: 'ipad', off: 'ipae' }, 'ipad: declared -> IPAd; not asked for -> the card keeps its IPAe');
+	eq(on.apdus[0], { channel: null, apdu: '80aa000005a903840101' },
+		'ipad: TERMINAL CAPABILITY A9 { 84 01 01 } first, on the basic channel');
+	eq(length(filter(off.apdus, (a) => substr(a.apdu, 0, 4) == '80aa')), 0,
+		'ipad: nothing declared without the option');
+
+	sim.card_euicc_info(on, () => null);
+	eq(length(filter(on.apdus, (a) => substr(a.apdu, 0, 4) == '80aa')), 2,
+		'ipad: declared again before every ISD-R open (a card reset in between drops it)');
+
+	let refused = tc_modem('ipad', '6d00');
+	sim.card_euicc_info(refused, (v) => { got.refused = v?.ipa; });
+	eq(got.refused, 'ipae', 'ipad: a refused declaration still opens the ISD-R and reports what the card runs');
+
+	// QMI refusing the basic channel: the AT port takes the declaration
+	let eg25 = tc_modem('ipad', '9000', true);
+	sim.card_euicc_info(eg25, (v) => { got.eg25 = v?.ipa; });
+	eq([ got.eg25, eg25.at_cmds ], [ 'ipad', [ 'AT+CSIM=20,"80AA000005A903840101"' ] ],
+		'ipad: a modem that denies the QMI basic channel declares over AT+CSIM instead');
+
+	// AT: the declaration goes out as AT+CSIM, ahead of the CCHO
+	let cmds = [];
+	let at = { config: { ipa_mode: 'ipad' }, _apdu_be: 'at', at: { send: (cmd, cb) => {
+		push(cmds, cmd);
+		if (index(cmd, 'AT+CSIM') == 0)
+			return cb(null, { lines: [ '+CSIM: 4,"9000"' ] });
+		cb({ error: 'ERROR' }, null);
+	} } };
+
+	sim.apdu_open(at, 1, sim.ISDR_AID, () => null);
+	eq(cmds[0], 'AT+CSIM=20,"80AA000005A903840101"', 'ipad: AT path declares with AT+CSIM');
+	ok(index(cmds[1] ?? '', 'AT+CCHO=') == 0, 'ipad: then opens the ISD-R');
+
+	cmds = [];
+	sim.apdu_open(at, 1, 'a0000000871002', () => null);
+	ok(index(cmds[0] ?? '', 'AT+CCHO=') == 0, 'ipad: not before an open of another application');
+	next();
+});
+
 // --- a card re-initialisation that never ends (sim.refresh_fallback) --------
 // An eSIM profile enable by somebody else's LPA: the card announces it and goes
 // quiet. The fallback applies what the eSIM bridge applies after its own
@@ -2214,6 +2305,22 @@ eq(sim.multisim([], null), null, 'multisim: no slots, nothing to say');
 	shift(defers)();
 	eq(length(em.esim_info.profiles), 2, 'eSIM re-read: the second read has the list after both changes');
 	eq(length(defers), 0, 'eSIM re-read: then nothing more is pending');
+}
+
+// boot_slot: the bound interface's card wins over sim_slot, so the init does
+// not switch to sim_slot only for the ifup to switch back
+{
+	let slots = [ { physical: 1, iccid: '89490200001022832490', active: true },
+	              { physical: 2, iccid: '89882390001598474352F', active: false } ];
+	let m = { config: { sim_slot: 1 }, bound_iccid: () => ({ iccid: '89882390001598474352', interface: 'away' }) };
+
+	eq(sim.boot_slot(m, slots).slot, 2, 'boot slot: the slot holding the bound card');
+	eq(sim.boot_slot(m, null).slot, -1, 'boot slot: before the list, "look for a card"');
+	m.bound_iccid = () => ({ iccid: '89000000000000000001', interface: 'x' });
+	eq(sim.boot_slot(m, slots), { slot: 1, why: 'option sim_slot' }, 'boot slot: a bound card in no slot leaves sim_slot');
+	m.bound_iccid = null;
+	m.config.sim_slot = 0;
+	eq(sim.boot_slot(m, slots).slot, 0, 'boot slot: neither — leave as is');
 }
 
 done('test_sim');

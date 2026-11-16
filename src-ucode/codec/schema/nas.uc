@@ -26,13 +26,34 @@ export const REJECT_CAUSE = {
 	'13': 'roaming not allowed in this tracking area',
 	'14': 'EPS services not allowed in this PLMN',
 	'15': 'no suitable cells in tracking area',
+	'16': 'MSC temporarily not reachable',
+	'17': 'network failure',
+	'18': 'CS domain not available',
+	'19': 'ESM failure',
+	'20': 'MAC failure',
+	'21': 'synch failure',
 	'22': 'congestion',
+	'23': 'UE security capabilities mismatch',
+	'24': 'security mode rejected, unspecified',
 	'25': 'not authorized for this CSG',
+	'26': 'non-EPS authentication unacceptable',
 	'33': 'requested service option not subscribed',
 	'34': 'service option temporarily out of order',
 	'35': 'requested service option not subscribed (35)',
+	'39': 'CS service temporarily not available',
+	'40': 'no EPS bearer context activated',
 	'42': 'severe network failure',
 };
+
+// QmiNasNetworkServiceDomain (qmi-enums-nas.h, libqmi 1.38), as the Network
+// Reject indication and the system info carry it
+export const SERVICE_DOMAIN = { '0': 'none', '1': 'CS', '2': 'PS', '3': 'CS+PS' };
+
+// The CIoT mode the modem was camped in when a registration was refused
+// (NETWORK_REJECT_IND TLV 0x12). Not in libqmi 1.38; values from the vendor
+// IDL (docs/qmi-beyond-libqmi.md), not yet seen on a modem here. Spelled like
+// codec/schema/rat.uc spells the same technologies.
+export const CIOT_MODE = { '1': 'lte', '2': 'lte-m', '3': 'nb-iot', '4': 'nb-iot-ntn' };
 
 // QmiNasPsAttachAction (qmi-enums-nas.h:570-571, libqmi 1.38)
 export const PS_ATTACH = 1;
@@ -53,6 +74,10 @@ export const RADIO_IF_UMTS = 5;
 export const RADIO_IF_LTE = 8;
 export const RADIO_IF_TD_SCDMA = 9;
 export const RADIO_IF_5GNR = 12;
+
+// SSP nr5g_disable_mode values, keyed by `option nr5g_mode` — the same numbers
+// as Quectel's AT+QNWPREFCFG="nr5g_disable_mode" (atcmd.uc NR5G_MODE)
+export const NR5G_DISABLE = { both: 0, nsa: 1, sa: 2 };
 
 // QmiNasRadioInterface value -> a coarse RAT label (null when unknown/no service)
 export function radio_if_name(r)
@@ -198,9 +223,87 @@ export default {
 				network_time:                { t: 0x17, f: 'u8' },
 				system_info:                 { t: 0x18, f: 'u8' },
 				signal_info:                 { t: 0x19, f: 'u8' },
+				// libqmi 1.38 "Network Reject Information": the indication on,
+				// and whether a system info indication that differs only in
+				// its reject cause is held back
+				network_reject:              { t: 0x21, f: { enable: 'u8', suppress_system_info: 'u8' } },
+				// The rest is not in libqmi 1.38 (docs/qmi-beyond-libqmi.md).
+				// A firmware answers MissingArgument (17) when it knows NONE
+				// of the TLVs in a request, so these go in requests of their
+				// own (modem.uc _arm_nas_indications): 0x28 accepted by the
+				// RG502Q-EA, EG06-E, BG96, BM806U-E1 and RG650E-EU, the four
+				// above it by the RG650E-EU alone (HW-read 2026-11-16).
+				lte_cphy_ca:                 { t: 0x28, f: 'u8' },
+				lte_cphy_ca_aggregated:      { t: 0x54, f: 'u8' },
+				nr5g_bwp_info:               { t: 0x5D, f: 'u8' },
+				nr5g_cell_freq_info:         { t: 0x62, f: 'u8' },
+				nr5g_ca_sig_info:            { t: 0x66, f: 'u8' },
 			},
 			resp: {},
 		},
+
+		// A registration the network refused, pushed as it happens: the cause
+		// (TS 24.008 / 24.301 value, REJECT_CAUSE above), the domain and the
+		// radio interface. libqmi 1.38 "Network Reject" (indication 0x0068)
+		// defines 0x01-0x03, 0x10 and 0x11. 0x12, 0x14 and 0x15 are beyond it
+		// (vendor IDL, docs/qmi-beyond-libqmi.md): the CIoT mode camped in,
+		// whether the attempt counter reached its maximum, and who started
+		// the procedure (0 the UE, 1 the network).
+		NETWORK_REJECT_IND: {
+			id: 0x0068,
+			ind: {
+				radio_if:       { t: 0x01, f: 'u8' },
+				service_domain: { t: 0x02, f: 'u8' },
+				reject_cause:   { t: 0x03, f: 'u8' },
+				plmn:           { t: 0x10, f: { mcc: 'u16', mnc: 'u16', mnc_pcs_digit: 'u8' } },
+				ciot_mode:      { t: 0x12, f: 'u32' },
+				max_attempts:   { t: 0x14, f: 'u8' },
+				proc_type:      { t: 0x15, f: 'u32' },
+			},
+		},
+
+		// Carrier-aggregation changes, pushed. None of these is in libqmi 1.38
+		// (docs/qmi-beyond-libqmi.md). wwand uses them as a TRIGGER to read
+		// the carrier list again (modem.uc _ca_changed) and does not rely on
+		// a single field; the few declared are fixed-width scalars of the
+		// vendor IDL, for the debug log. The three LTE ones arrive on the
+		// RG650E-EU (HW-seen 2026-11-16); the NR ones have not been seen.
+		// THE AGGREGATED BANDWIDTH IS NOT IN MHZ: that modem reported 400,
+		// 300, 200, 100 as SCells went — the count of resource blocks would
+		// fit (100 per 20 MHz carrier), which is a guess. The SCell of 0x0082
+		// has the layout GET_LTE_CPHY_CA_INFO answers in its TLV 0x10 (8
+		// bytes on the RG502Q-EA, 2026-11-16).
+		// 0x0082 and 0x00C3 come with registration TLV 0x28, 0x0132 with
+		// 0x54, 0x015B with 0x66, 0x0153 with 0x62, 0x013F with 0x5D.
+		LTE_CPHY_CA_IND: {
+			id: 0x0082,
+			ind: {
+				scell:             { t: 0x01, f: { pci: 'u16', earfcn: 'u16', state: 'u32' } },
+				aggregated_dl_bw: { t: 0x14, f: 'u16' },
+				scells_configured: { t: 0x15, f: 'u16' },
+			},
+		},
+		LTE_CPHY_CA_AGG_DL_BW_IND: {
+			id: 0x00C3,
+			ind: {
+				aggregated_dl_bw: { t: 0x10, f: 'u16' },
+				scells_configured: { t: 0x11, f: 'u16' },
+			},
+		},
+		LTE_CPHY_CA_AGGREGATED_IND: {
+			id: 0x0132,
+			ind: {
+				aggregated_dl_bw: { t: 0x12, f: 'u16' },
+			},
+		},
+		NR5G_CA_SIG_INFO_IND: {
+			id: 0x015B,
+			ind: {
+				configured: { t: 0x10, f: 'u8' },
+			},
+		},
+		NR5G_SERVING_CELL_FREQ_INFO_IND: { id: 0x0153, ind: {} },
+		NR5G_RRC_BWP_INFO_IND:           { id: 0x013F, ind: {} },
 
 		// NOTE the MNC-PCS-digit TLV has a DIFFERENT id in the response (0x27)
 		// and the indication (0x29) — one of the several request/response id
@@ -418,6 +521,11 @@ export default {
 				nr5g_nsa_band: { t: 0x30, f: {
 					m0: 'u64', m1: 'u64', m2: 'u64', m3: 'u64',
 					m4: 'u64', m5: 'u64', m6: 'u64', m7: 'u64' } },
+				// which 5G flavour is switched off: 0 none, 1 SA, 2 NSA (NR5G_DISABLE
+				// below). NOT IN libqmi 1.38. Read side is GET 0x2B; the pair was
+				// HW-measured on the RG502Q-EA and the RG650E-EU (2026-11-13): 0x2B
+				// follows AT+QNWPREFCFG="nr5g_disable_mode" on both, 0 -> 1 -> 0.
+				nr5g_disable_mode: { t: 0x2E, f: 'u32' },
 			},
 			resp: {},
 		},
@@ -443,6 +551,8 @@ export default {
 				nr5g_nsa_band: { t: 0x2D, f: {
 					m0: 'u64', m1: 'u64', m2: 'u64', m3: 'u64',
 					m4: 'u64', m5: 'u64', m6: 'u64', m7: 'u64' } },
+				// see SET 0x2E above; absent on a firmware without the setting
+				nr5g_disable_mode: { t: 0x2B, f: 'u32' },
 			},
 		},
 
@@ -505,6 +615,28 @@ export default {
 			},
 		},
 
+		// RF band information: the band, channel and DL bandwidth of every
+		// radio interface in use — the one QMI read that names the NR leg's
+		// bandwidth (there is no NR CPHY CA info). Verified against libqmi 1.38
+		// qmi-service-nas.json (msg 0x0031): List 0x01 and Extended List 0x11
+		// (since 1.26; channel widened to guint32 for NR-ARFCN) are guint8-count
+		// arrays of { radio_interface gint8, active_band guint16 QmiNasActiveBand,
+		// active_channel }; Bandwidth List 0x12 (since 1.26) is a guint8-count
+		// array of { radio_interface gint8, bandwidth guint32 QmiNasDLBandwidth }.
+		// Wire shape HW-read on the RG502Q-EA and the T99W175 (LTE, 2026-11-13).
+		GET_RF_BAND_INFO: {
+			id: 0x0031,
+			req: {},
+			resp: {
+				bands: { t: 0x01, f: { n: 'u8', of: {
+					radio_if: 'i8', band: 'u16', channel: 'u16' } } },
+				bands_ext: { t: 0x11, f: { n: 'u8', of: {
+					radio_if: 'i8', band: 'u16', channel: 'u32' } } },
+				bandwidths: { t: 0x12, f: { n: 'u8', of: {
+					radio_if: 'i8', bandwidth: 'u32' } } },
+			},
+		},
+
 		// LTE carrier-aggregation info: serving PCell + active SCells with
 		// EARFCN, DL bandwidth (QmiNasDLBandwidth: 0=1.4 1=3 2=5 3=10 4=15
 		// 5=20 MHz) and band. Preferred bandwidth source; some modems answer
@@ -536,6 +668,18 @@ export default {
 		// (e.g. cause 33 on an IPv4-only attach). The reject cause lives inside
 		// the big "LTE System Info v2" sequence TLV; we model only the fixed
 		// leading fields up to reject_cause and ignore the trailing ones.
+		// EN-DC (5G NSA dual connectivity) on or off in the modem. libqmi 1.38
+		// qmi-service-nas.json "Get ENDC Config" 0x00E8: Enabled 0x10 and
+		// Immediate SCG Release 0x11, both guint8.
+		GET_ENDC_CONFIG: {
+			id: 0x00E8,
+			req: {},
+			resp: {
+				enabled:               { t: 0x10, f: 'u8' },
+				immediate_scg_release: { t: 0x11, f: 'u8' },
+			},
+		},
+
 		GET_SYSTEM_INFO: {
 			id: 0x004D,
 			req: {},
@@ -553,6 +697,12 @@ export default {
 					cid_valid: 'u8', cid: 'u32',
 					reject_valid: 'u8', reject_domain: 'u8', reject_cause: 'u8',
 				} },
+				// libqmi 1.30+ qmi-service-nas.json "Get System Info": the LTE cell
+				// offers 5G NSA (an EN-DC anchor; 0x4E "EUTRA with NR5G
+				// availability"), and the network restricts dual connectivity
+				// (0x4F "DCNR restriction Info"), both guint8 booleans
+				nr5g_available:  { t: 0x4E, f: 'u8' },
+				dcnr_restricted: { t: 0x4F, f: 'u8' },
 			},
 		},
 

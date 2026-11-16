@@ -11,7 +11,7 @@ import * as modem_mod from 'wwand/modem.uc';
 uloop.init();
 
 const TIMING = {
-	sync_retry: 1, settle: 1, sim_settle: 5, card_poll: 1,
+	sync_retry: 1, settle: 1, sim_settle: 5, ps_settle: 1, card_poll: 1,
 	reg_timeout: 500, backoff_min: 1, backoff_max: 5,
 };
 
@@ -181,6 +181,48 @@ scenario('happy', { handlers: base_handlers() }, 'registered',
 		eq(modem.counters.attempts, 0, 'happy: attempts reset');
 	});
 
+// --- 1-delay: `option delay` holds the first request back --------------------
+// Baseline lifecycle checks, no regression test: nothing could cancel the
+// delay before it had its own timer slot either. A second start() while the
+// hub is open is a no-op (the hub guard), so it cannot arm a second delay and
+// orphan the first one.
+let delay_seen = {};
+
+scenario('delay', {
+	handlers: base_handlers(),
+	config: { delay: '0.3' },
+	setup: (mock, modem, finish) => {
+		uloop.timer(50, () => modem.start());
+		uloop.timer(150, () => {
+			delay_seen.early = length(mock.calls_for('SYNC')) + length(mock.calls_for('GET_VERSION_INFO'));
+		});
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(delay_seen.early, 0, 'delay: nothing is sent while the delay runs');
+		eq(modem.state, 'READY', 'delay: the init runs once it expires');
+		eq(length(mock.calls_for('SYNC')), 1, 'delay: a repeated start runs no second init chain');
+	});
+
+// a stop inside the delay cancels it (teardown cancels every slot in `tm`)
+let delay_stop = {};
+
+scenario('delay-stop', {
+	handlers: base_handlers(),
+	config: { delay: '0.2' },
+	guard_ms: 1000,
+	setup: (mock, modem, finish) => {
+		uloop.timer(50, () => modem.stop());
+		uloop.timer(500, () => {
+			delay_stop.sent = length(mock.calls_for('SYNC')) + length(mock.calls_for('GET_VERSION_INFO'));
+			finish();
+		});
+	},
+}, '__never__',
+	(modem, mock, events) => {
+		eq(delay_stop.sent, 0, 'delay-stop: a stop during the delay cancels the init');
+	});
+
 // --- 1a: a plugin holds the radio off at init ----------------------------------
 // A modem waiting for a remote SIM (or lending its card) must not register even
 // once: switched online at SET_OPMODE, the RG650E on 245 registered with its own
@@ -194,6 +236,7 @@ scenario('plugin hold at init', {
 		// asked by a registration timeout (the reject detail) — which is
 		// what a hold at init must not run into
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 		GET_PROFILE_SETTINGS: { __error: 71 },
 		GET_SERVING_SYSTEM: (args, meta) => ({
 			serving_system: { registration: 0, cs_attach: 0, ps_attach: 0,
@@ -245,6 +288,62 @@ scenario('plugin hold at init', {
 		eq(modem._wake_pending, false, 'hold at init: no second registered to come from the wake');
 	});
 
+// --- 1a1: what the network pushes while the modem tries to register -----------
+// A refused attach reaches reg_detail from the NAS reject indication, before
+// any registration probe ran; the attach parameters reach attach_info from the
+// WDS indication and, for an attach nobody saw, from the read after registering.
+let pushed = {};
+
+scenario('pushed reject and attach parameters', {
+	handlers: base_handlers({
+		GET_SERVING_SYSTEM: () => ({
+			serving_system: { registration: 0, cs_attach: 0, ps_attach: 0,
+			                  selected_network: 0, radio_ifs: [] },
+		}),
+		GET_LTE_ATTACH_PARAMS: { apn: 'internet', ip_type: 2, attached: 1 },
+	}),
+	guard_ms: 4000,
+	setup: (mock, modem) => {
+		uloop.timer(300, () => {
+			let rej = { radio_if: 8, service_domain: 2, reject_cause: 19,
+			            plmn: { mcc: 262, mnc: 2, mnc_pcs_digit: 0 }, ciot_mode: 2 };
+
+			mock.indicate(3, modem.nas.cid, 'NETWORK_REJECT_IND', rej);
+			mock.indicate(3, modem.nas.cid, 'NETWORK_REJECT_IND', rej);
+			mock.indicate(1, modem.wds_cfg.cid, 'LTE_ATTACH_PARAMS_IND', { valid: 0 });
+		});
+		uloop.timer(500, () => {
+			pushed.detail = modem.reg_detail;
+			pushed.count = modem.last_reject?.count;
+			pushed.attach = modem.attach_info;
+			mock.indicate(3, modem.nas.cid, 'SERVING_SYSTEM_IND', {
+				serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
+				                  selected_network: 1, radio_ifs: [ 8 ] },
+				current_plmn: { mcc: 262, mnc: 2, description: 'vodafone.de' },
+			});
+		});
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		eq(pushed.detail, { source: 'qmi', reject_cause: 19, reject_domain: 2, reject_rat: 'LTE',
+		                    reject_plmn: '262/02', ciot_mode: 'lte-m', reject_text: 'ESM failure' },
+		   'pushed reject: in reg_detail before any probe');
+		eq(pushed.count, 2, 'pushed reject: a repeat is counted, not a new reject');
+		eq(pushed.attach, { source: 'qmi', state_text: 'detached' }, 'pushed attach: the detach');
+		eq([ modem.reg_detail, modem.last_reject ], [ null, null ], 'pushed reject: gone once registered');
+		eq(length(mock.calls_for('GET_LTE_ATTACH_PARAMS')), 1,
+		   'attach parameters: read once registered (test_qmi_backend pins the decode)');
+		eq(modem._attach_pushed, true,
+		   'attach parameters: the pushed detach outranks that read');
+		eq(map(mock.calls_for('REGISTER_INDICATIONS'), (c) => join(',', sort(keys(c.args)))),
+		   [ 'network_reject', 'lte_cphy_ca', 'lte_cphy_ca_aggregated', 'nr5g_ca_sig_info',
+		     'nr5g_cell_freq_info', 'nr5g_bwp_info', 'network_time,serving_system_events,signal_info' ],
+		   'indications: the optional ones each in a request of their own');
+		eq(mock.calls_for('INDICATION_REGISTER')[0]?.args,
+		   { lte_attach_params: 1, rab_reject: 1, lte_attach_failure: 1, ipv6_prefix_update: 1 },
+		   'indications: the WDS ones registered on the configuration client');
+	});
+
 // --- 1a2: a re-init after the hold ended leaves no park behind ----------------
 // The modem object outlives a failed init (make_fail: teardown, then start()
 // on the same instance). Parked at the first pass, online at the second: the
@@ -255,6 +354,7 @@ let reinit = { hold: 'rsim: its remote SIM x is not connected yet' };
 scenario('plugin hold at init, re-init without it', {
 	handlers: base_handlers({
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 		GET_PROFILE_SETTINGS: { __error: 71 },
 		// the parked radio does not register; online (second pass) it does
 		GET_SERVING_SYSTEM: () => reinit.hold ? {
@@ -300,6 +400,7 @@ scenario('plugin hold at init, low power refused', {
 	handlers: base_handlers({
 		SET_OPERATING_MODE: (args) => (args?.mode == 1) ? { __error: 0x0001 } : {},
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 		GET_PROFILE_SETTINGS: { __error: 71 },
 		GET_SERVING_SYSTEM: (args, meta) => refused.woke ? {
 			serving_system: { registration: 1, cs_attach: 1, ps_attach: 1,
@@ -355,6 +456,7 @@ scenario('plugin hold at init, FCC at the wake', {
 		GET_OPERATING_MODE: () => ({ mode: fcc_held.unlocked ? 0 : 6 }),
 		SET_FCC_AUTHENTICATION: (args) => { fcc_held.unlocked = true; return {}; },
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 		GET_PROFILE_SETTINGS: { __error: 71 },
 		GET_SERVING_SYSTEM: (args, meta) => ({
 			serving_system: { registration: 0, cs_attach: 0, ps_attach: 0,
@@ -386,6 +488,102 @@ scenario('plugin hold at init, FCC at the wake', {
 		eq(length(mock.calls_for('SET_FCC_AUTHENTICATION')), 1, 'fcc held: ...and the wake sends it');
 		eq(fcc_held.answered_unlocked, true, 'fcc held: the wake answers once the modem is unlocked');
 		eq(modem._fcc_due, false, 'fcc held: done once, not again at the next wake');
+	});
+
+// --- 1a5: online refused as an invalid transition ----------------------------
+// QMI DMS answers INVALID_TRANSITION (60) when the target cannot be reached
+// from the current mode. fail() walked the ladder, whose own writes are refused
+// the same way, up to a reboot. Offline leaves only by a reset; anything else
+// goes through low power. (HW: EG25-G stuck offline on the RPi4, 2026-11-07.)
+let stuck = { mode: 3 };
+
+scenario('offline, the reset is acknowledged and not performed', {
+	handlers: base_handlers({
+		GET_OPERATING_MODE: () => ({ mode: stuck.mode }),
+		SET_OPERATING_MODE: (args) => (args?.mode == 4) ? {} : { __error: 60 },
+	}),
+	timing: { init_reset: 50, stuck_offline_retry: 150 },
+	setup: (mock, modem, end) => uloop.timer(600, end),
+}, 'never',
+	(modem, mock, events) => {
+		let modes = map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args?.mode);
+
+		eq(modes[0], 0, 'stuck offline: online asked first');
+		ok(length(filter(modes, (m) => m == 4)) >= 2, 'stuck offline: the reset is retried');
+		eq(length(filter(modes, (m) => m != 0 && m != 4)), 0,
+		   'stuck offline: no other mode is tried from offline');
+		eq(length(filter(events, (e) => e.event == 'error')), 0,
+		   'stuck offline: no failure, so no ladder and no reboot');
+		eq(modem.state, 'SET_OPMODE', 'stuck offline: the init waits where it stands');
+		ok(index(modem.control_note ?? '', 'stuck offline') >= 0, 'stuck offline: said in control_note');
+	});
+
+let back = { mode: 3 };
+
+scenario('offline, the reset brings it back without re-enumerating', {
+	handlers: base_handlers({
+		GET_OPERATING_MODE: () => ({ mode: back.mode }),
+		SET_OPERATING_MODE: (args) => {
+			if (args?.mode == 4) { back.mode = 1; return {}; }
+			if (back.mode == 3) return { __error: 60 };
+			back.mode = args?.mode;
+			return {};
+		},
+	}),
+	timing: { init_reset: 50 },
+}, 'registered',
+	(modem, mock, events) => {
+		eq(map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args?.mode), [ 0, 4, 0 ],
+		   'offline: reset, then online');
+		eq(modem.state, 'READY', 'offline: registers after the reset');
+		eq(modem.control_note, null, 'offline: no stuck note');
+	});
+
+let ft = { mode: 2 };
+
+scenario('online refused from factory test', {
+	handlers: base_handlers({
+		GET_OPERATING_MODE: () => ({ mode: ft.mode }),
+		SET_OPERATING_MODE: (args) => {
+			if (ft.mode == 2 && args?.mode == 0) return { __error: 60 };
+			ft.mode = args?.mode;
+			return {};
+		},
+	}),
+}, 'registered',
+	(modem, mock, events) => {
+		eq(map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args?.mode), [ 0, 1, 0 ],
+		   'factory test: through low power to online');
+		eq(length(filter(events, (e) => e.event == 'error')), 0, 'factory test: no failure');
+		eq(modem.state, 'READY', 'factory test: registers');
+	});
+
+// the admin reset goes offline first; a modem that acknowledges the reset and
+// stays is left there, READY over a radio that is off — the bring-up restarts
+let areset = { mode: 0 };
+
+scenario('admin reset acknowledged and not performed', {
+	handlers: base_handlers({
+		GET_OPERATING_MODE: () => ({ mode: areset.mode }),
+		SET_OPERATING_MODE: (args) => {
+			if (args?.mode == 4) return {};
+			if (areset.mode == 3) return { __error: 60 };
+			areset.mode = args?.mode;
+			return {};
+		},
+	}),
+	timing: { init_reset: 50, stuck_offline_retry: 5000 },
+	setup: (mock, modem, end) => {
+		uloop.timer(300, () => modem.reset((err, res) => areset.answer = [ err, res ]));
+		uloop.timer(900, end);
+	},
+}, 'never',
+	(modem, mock, events) => {
+		eq(areset.answer, [ null, { resetting: true } ], 'admin reset: acknowledged');
+		eq(slice(map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args?.mode), 0, 5), [ 0, 3, 4, 0, 4 ],
+		   'admin reset: still offline afterwards, so the bring-up restarts and resets it out of offline');
+		ok(index(modem.control_note ?? '', 'stuck offline') >= 0, 'admin reset: said in control_note');
+		eq(length(filter(events, (e) => e.event == 'error')), 0, 'admin reset: no ladder');
 	});
 
 // --- 1b: GSM-7-bit packed operator name (issue #2) ---------------------------
@@ -681,6 +879,7 @@ const OVERLAY_HANDLERS = {
 	// the watched fast loop walks on to carrier aggregation; refuse it so the
 	// ladder settles on AT and the scenario stays about the signal
 	GET_LTE_CPHY_CA_INFO: { __error: 71 },
+	GET_RF_BAND_INFO: { __error: 71 },
 	GET_CELL_LOCATION_INFO: (args, m) => ({ lte_intra: {
 		serving_cell_id: 100, earfcn: 1850, ue_idle: 0,
 		plmn: { mcc: 262, mnc: 1 }, tac: 1, global_cell_id: 1,
@@ -810,7 +1009,9 @@ const E182E_HANDLERS = {
 		GET_SIGNAL_INFO: { __error: 71 },
 		GET_CELL_LOCATION_INFO: { __error: 71 },
 		GET_LTE_CPHY_CA_INFO: { __error: 71 },
+		GET_RF_BAND_INFO: { __error: 71 },
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 		GET_SYSTEM_SELECTION_PREFERENCE: { __error: 71 },
 		// the 2011 stack does not answer CTL SYNC (field-observed; the
 		// host mock expresses it as a rejection — same error path, and
@@ -861,6 +1062,64 @@ scenario('e182e', {
 		eq(length(mock.calls_for('RELEASE_CID')), 3,
 			'e182e: teardown released dms/nas/wds on the modem');
 		eq(modem.qmi_clients, {}, 'e182e: no CID of the ended session stays listed');
+	});
+
+// --- 5b': the same stack, GET_VERSION_INFO unanswered -------------------------
+//
+// Some firmware never answers the version query while every service works
+// (RG502Q-EA A03, ddimension/wwand#82). The table is then unknown, not empty:
+// each optional service is tried, and the refused allocation is what says it
+// is missing. This modem refuses all of them, so the outcome must equal the
+// e182e one above — the WDA-less ethernet datapath included, reached through
+// the refused WDA allocation instead of the table.
+let unk_refused = {};
+
+scenario('version-unanswered', {
+	handlers: base_handlers({
+		...E182E_HANDLERS,
+		GET_VERSION_INFO: () => null,
+		ALLOCATE_CID: (a) => {
+			if (a.service > 3) {
+				unk_refused[sprintf('%d', a.service)] = true;
+				// DSD fails for a reason of its own (INTERNAL): that says
+				// nothing about the service, the others are not offered
+				return { __error: (a.service == 42) ? 3 : 31 };
+			}
+
+			unk_refused.cid = (unk_refused.cid ?? 4) + 1;
+			return { allocation: { service: a.service, cid: unk_refused.cid } };
+		},
+	}),
+	config: { tty: '/dev/ttyUSB3' },
+	timing: { version_info: 50 },
+	datapath: { netdev: 'wwan0', mux: 'auto', mux_links: [], dgram_size: 0, fx: e182e_dpfx },
+	at: { fx: fakefx.create(), open_transport: () => e182e_at_tr },
+}, 'registered',
+	(modem, mock, events) => {
+		eq(modem.state, 'READY', 'version-unanswered: the init goes on without the table');
+		eq(modem.services_unknown, true, 'version-unanswered: the table is marked unknown');
+		ok(unk_refused['11'] && unk_refused['26'],
+			'version-unanswered: UIM and WDA were tried, not assumed absent');
+		eq(modem.uim, null, 'version-unanswered: a refused UIM leaves no client');
+		eq(modem.dsd, null, 'version-unanswered: a refused DSD leaves no client');
+		eq(modem.has_service(26), false, 'version-unanswered: a refused allocation marks the service absent');
+		eq(modem.has_service(2), true, 'version-unanswered: an allocated service counts as present');
+		eq(modem.has_service(42), true,
+			'version-unanswered: an allocation failing for another reason (INTERNAL) does not mark the service absent');
+		eq(modem.datapath?.backend, 'ethernet',
+			'version-unanswered: a refused WDA takes the WDA-less path, not a failed init');
+		eq(modem.counters?.proto_errors ?? 0, 0,
+			'version-unanswered: the probing refusals and the silent query fed no recovery counter');
+	});
+
+// a refused version query (an error answer, not silence) still fails the init
+scenario('version-refused', {
+	handlers: base_handlers({ GET_VERSION_INFO: { __error: 1 } }),
+}, 'error',
+	(modem, mock, events) => {
+		eq(filter(events, (e) => e.event == 'error')[0]?.data?.stage, 'version_info',
+			'version-refused: the init fails at the version query');
+		eq(length(mock.calls_for('GET_MODEL')), 0, 'version-refused: nothing after it is asked');
 	});
 
 // --- 5c: exhausted client table (ClientIdsExhausted, CTL error 5) ------------
@@ -1014,7 +1273,9 @@ scenario('signal_units', {
 		// 'telemetry' on the signal read alone, which is what it is about
 		GET_CELL_LOCATION_INFO: { __error: 71 },
 		GET_LTE_CPHY_CA_INFO: { __error: 71 },
+		GET_RF_BAND_INFO: { __error: 71 },
 		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
 	}),
 	setup: (mock, modem) => {
 		let poll = null;
@@ -1068,6 +1329,7 @@ scenario('modes', {
 		// target is not readable pre-registration) is still applied
 		eq(calls[0].args.mode_preference, null, 'modes: live mode matches -> dropped by guard');
 		eq(calls[0].args.network_selection, { mode: 1, mcc: 262, mnc: 1 }, 'modes: manual plmn');
+		eq(calls[0].args.change_duration, 1, 'modes: written permanently, like the settings editor does');
 	});
 
 // --- 6b: runtime config validation — live modem MISMATCHES config ------------
@@ -1143,6 +1405,7 @@ scenario('rat_order', {
 		eq(length(calls), 1, 'rat_order: written once');
 		eq(calls[0].args.acquisition_order, [ 12, 8 ], 'rat_order: NR5G then LTE, as radio interfaces over the wire');
 		eq(calls[0].args.mode_preference, null, 'rat_order: no mode mask configured, none sent');
+		eq(calls[0].args.change_duration, 1, 'rat_order: written permanently');
 		eq(filter(modem.config_warnings, (e) => e.check == 'rat_order'), [],
 			'rat_order: validate finds the order in place, NR5G is in it');
 	});
@@ -1197,7 +1460,7 @@ scenario('datapath', {
 	(modem, mock, events) => {
 		eq(modem.state, 'READY', 'dp: state READY');
 		eq(modem.datapath.backend, 'rmnet', 'dp: rmnet backend');
-		eq(modem.datapath.urb_size, 4100, 'dp: urb size');
+		eq(modem.datapath.urb_size, 31748, 'dp: urb size');
 		eq(modem.datapath.mux_devs, [ 'wwan0m1', 'wwan0m2' ], 'dp: mux devices');
 		eq(modem.datapath.ep_id, 4, 'dp: ep id kept');
 
@@ -1209,7 +1472,7 @@ scenario('datapath', {
 		// it v5, which the modem answered by renegotiating.
 		eq(sdf[0].args.ul_protocol, 9, 'dp: qmap v5 (0x09) requested for rmnet');
 		eq(modem.datapath.v5, true, 'dp: v5 negotiated');
-		eq(sdf[0].args.dl_max_size, 4096, 'dp: aggregation size');
+		eq(sdf[0].args.dl_max_size, 31744, 'dp: aggregation size');
 		eq(sdf[0].args.endpoint, { type: 2, iface: 4 }, 'dp: endpoint tlv');
 		eq(sdf[0].args.ul_max_datagrams, 11, 'dp: uplink aggregation requested');
 		ok((sdf[0].args.ul_max_size ?? 0) > 0, 'dp: uplink aggregation size set');
@@ -1256,6 +1519,34 @@ scenario('datapath-all-declined', {
 		eq(modem.datapath.qmap_version, 1, 'alld: bottomed out at plain QMAP');
 		ok(dpfx3.action_index('link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0x1') >= 0,
 			'alld: links with deaggregation only');
+	});
+
+// an override above 32 KB goes to the modem as asked for the downlink, but the
+// uplink request stays at what the kernel's rmnet can coalesce
+let dpfx_big = fakefx.create({ present: {
+	'/sys/class/net/wwan0/qmi/pass_through': true,
+	'/sys/class/net/wwan0/qmi/raw_ip': true,
+	'/sys/module/rmnet': true,
+} });
+
+scenario('datapath-override-above-rmnet-ul-limit', {
+	handlers: base_handlers({
+		SET_DATA_FORMAT: (args, meta) => ({
+			qos: 0, llp: 2,
+			ul_protocol: args.ul_protocol, dl_protocol: args.dl_protocol,
+			dl_max_datagrams: 32, dl_max_size: args.dl_max_size,
+			ul_max_datagrams: 11, ul_max_size: args.ul_max_size,
+		}),
+	}),
+	datapath: {
+		netdev: 'wwan0', ep_id: 4, mux: 'auto',
+		mux_links: [ { id: 1 } ], dgram_size: 65536, fx: dpfx_big,
+	},
+}, 'registered',
+	(modem, mock, events) => {
+		let sdf = mock.calls_for('SET_DATA_FORMAT');
+		eq(sdf[0].args.dl_max_size, 65536, 'big: the DL override is asked for unchanged');
+		eq(sdf[0].args.ul_max_size, 32768, 'big: the UL request is held at rmnet\'s 32768');
 	});
 
 // a QMI ERROR for a QMAP version is a refusal of that version too: the
@@ -1808,7 +2099,7 @@ scenario('datapath-v5-declined', {
 		eq(length(mock.calls_for('SET_DATA_FORMAT')), 2, 'v5d: renegotiated once');
 		eq(modem.datapath.qmap_version, 4, 'v5d: landed on v4');
 		eq(modem.datapath.v5, false, 'v5d: and the old boolean says not-v5');
-		eq(modem.datapath.urb_size, 4100, 'v5d: urb from requested size, not the zeroed echo');
+		eq(modem.datapath.urb_size, 31748, 'v5d: urb from requested size, not the zeroed echo');
 		ok(dpfx2.action_index('link_add_rmnet wwan0m1 link wwan0 mux_id 1 flags 0xd') >= 0,
 			'v5d: links with deagg + the v4 checksum pair');
 	});
@@ -2425,6 +2716,10 @@ scenario('telemetry', {
 			nr5g_cell: { plmn: '262/01', tac: 54321, global_cell_id: 123456789,
 			             pci: 242, rsrq: -100, rsrp: -970, snr: 200 },
 		},
+		// the slow tick's 5G state reads (modem_common collect_nr5g): the
+		// cell offers an NSA anchor, the modem has EN-DC off
+		GET_SYSTEM_INFO: { nr5g_available: 1, dcnr_restricted: 0 },
+		GET_ENDC_CONFIG: { enabled: 0, immediate_scg_release: 0 },
 	}),
 	config: { stats_interval: 0.005, lock_4g: [ '1300:246' ] },
 }, 'telemetry',
@@ -2446,6 +2741,10 @@ scenario('telemetry', {
 		let tev = filter(events, (e) => e.event == 'telemetry');
 		ok(length(tev) >= 1, 'tele: telemetry event emitted');
 		eq(tev[0].data.cells.lte_intra.tac, 4321, 'tele: event carries cells');
+
+		eq([ modem.nr5g_state?.nsa_available, modem.nr5g_state?.dcnr_restricted, modem.nr5g_state?.endc_enabled ],
+			[ true, false, false ], 'tele: 5G state read on the slow tick');
+		ok(index(modem._nr5g_blocker ?? '', 'EN-DC is off') >= 0, 'tele: ...and the blocker named');
 	});
 
 // --- 13: device disappears ---------------------------------------------------
@@ -2713,6 +3012,208 @@ scenario('sim-refresh-no-end', {
 		eq(length(mock.calls_for('POWER_OFF_SIM')), 1, 'refresh-no-end: card powered off');
 		eq(length(mock.calls_for('POWER_ON_SIM')), 1, 'refresh-no-end: and on again');
 		eq(modem.info.iccid, '89490200001022832490', 'refresh-no-end: identity re-read');
+	});
+
+// --- 15c: a live attach-profile change re-attaches without a radio cycle ------
+// The attach profile is written for the *next* attach. On a registered modem
+// that must be a PS detach/attach (NAS ATTACH_DETACH, RF on), not a DMS
+// low_power cycle: the latter re-runs PLMN selection and can land elsewhere.
+let ps_reattach = { actions: [] };
+
+scenario('sim-reapply-ps-reattach', {
+	handlers: base_handlers({
+		ATTACH_DETACH: (args) => {
+			push(ps_reattach.actions, args.action);
+			return {};
+		},
+	}),
+	guard_ms: 4000,
+	setup: (mock, modem, finish) => {
+		let poll = null;
+
+		poll = uloop.timer(10, () => {
+			if (modem.state != 'READY') {
+				poll.set(10);
+				return;
+			}
+
+			let ctx;
+
+			ctx = {
+				name: 'wwan0', state: 'CONNECTED',
+				config: { auto: true, profile: 1 },
+				ensure_attach_profile: (index, cb) => {
+					ps_reattach.profile = index;
+					cb(true);
+				},
+				down: (cb, reason) => {
+					ps_reattach.down = reason;
+					ctx.state = 'IDLE';
+					cb(null);
+				},
+			};
+
+			modem.contexts = [ ctx ];
+			modem.reapply_sim(() => {
+				ps_reattach.done = true;
+				finish();
+			});
+		});
+	},
+}, '__never__',
+	(modem, mock, events) => {
+		eq(ps_reattach.profile, 1, 'ps-reattach: the attach profile is reprogrammed first');
+		eq(ps_reattach.down, 'reattach', 'ps-reattach: the live session is stopped before the detach');
+		eq(ps_reattach.actions, [ 2, 1 ], 'ps-reattach: PS detach then attach');
+		eq(ps_reattach.done, true, 'ps-reattach: reapply completes after the attach');
+		eq(length(mock.calls_for('SET_OPERATING_MODE')), 1,
+		   'ps-reattach: the radio was never cycled');
+	});
+
+// A second ATTACH_DETACH sent into the detach transition is answered NO_EFFECT
+// (26) even though the modem ends up PS-detached: observed on the RG502Q,
+// 2026-11-05, where accepting it left the interface IDLE with "EMM detached".
+// The PS path must wait `ps_settle` after an effective detach and treat a
+// NO_EFFECT attach as a failure, falling back to the radio cycle.
+let ps_auto = { actions: [] };
+
+scenario('sim-reapply-ps-reattach-noeffect', {
+	handlers: base_handlers({
+		ATTACH_DETACH: (args) => {
+			push(ps_auto.actions, args.action);
+			return args.action == 1 ? { __error: 26 } : {};
+		},
+	}),
+	guard_ms: 4000,
+	setup: (mock, modem, finish) => {
+		let poll = null;
+
+		poll = uloop.timer(10, () => {
+			if (modem.state != 'READY') {
+				poll.set(10);
+				return;
+			}
+
+			let ctx;
+
+			ctx = {
+				name: 'wwan0', state: 'CONNECTED',
+				config: { auto: true, profile: 1 },
+				ensure_attach_profile: (index, cb) => {
+					ps_auto.profile = index;
+					cb(true);
+				},
+				down: (cb, reason) => {
+					ps_auto.down = reason;
+					ctx.state = 'IDLE';
+					cb(null);
+				},
+			};
+
+			modem.contexts = [ ctx ];
+			modem.reapply_sim(() => {
+				ps_auto.done = true;
+				finish();
+			});
+		});
+	},
+}, '__never__',
+	(modem, mock, events) => {
+		eq(ps_auto.profile, 1, 'ps-noeffect: the attach profile is reprogrammed first');
+		eq(ps_auto.down, 'reattach', 'ps-noeffect: the live session is stopped before the detach');
+		eq(ps_auto.actions, [ 2, 1 ], 'ps-noeffect: PS detach then attach');
+		eq(ps_auto.done, true, 'ps-noeffect: reapply completes through the fallback');
+		let modes = map(mock.calls_for('SET_OPERATING_MODE'), (c) => c.args?.mode);
+		ok(index(modes, 1) >= 0,
+		   'ps-noeffect: NO_EFFECT falls back to the low-power radio cycle');
+	});
+
+// REGISTERING needs the re-attach as much as READY: the autonomous attach
+// already started with the old profile, and skipping it there lost the change
+// for good (a late first binding, a config reload while registering).
+let ps_reg = { actions: [] };
+
+scenario('sim-reapply-ps-registering', {
+	handlers: base_handlers({
+		GET_SYSTEM_INFO: { __error: 71 },
+		GET_ENDC_CONFIG: { __error: 71 },
+		GET_PROFILE_SETTINGS: { __error: 71 },
+		GET_SERVING_SYSTEM: (args, meta) => ({
+			serving_system: { registration: 2, cs_attach: 0, ps_attach: 0,
+			                  selected_network: 0, radio_ifs: [] },
+		}),
+		ATTACH_DETACH: (args) => {
+			push(ps_reg.actions, args.action);
+			return args.action == 2 ? { __error: 26 } : {};   // not attached yet
+		},
+	}),
+	guard_ms: 2000,
+	setup: (mock, modem, finish) => {
+		let poll = null;
+
+		poll = uloop.timer(10, () => {
+			if (modem.state != 'REGISTERING') {
+				poll.set(10);
+				return;
+			}
+
+			modem.contexts = [ {
+				name: 'wwan0', state: 'IDLE', config: { auto: true, profile: 1 },
+				ensure_attach_profile: (index, cb) => cb(true),
+			} ];
+			ps_reg.modes_before = length(mock.calls_for('SET_OPERATING_MODE'));
+			modem.reapply_sim(() => {
+				ps_reg.modes_after = length(mock.calls_for('SET_OPERATING_MODE'));
+				finish();
+			});
+		});
+	},
+}, '__never__',
+	(modem, mock, events) => {
+		eq(ps_reg.actions, [ 2, 1 ], 'ps-registering: PS detach then attach while registering');
+		eq(ps_reg.modes_after, ps_reg.modes_before, 'ps-registering: no radio cycle');
+	});
+
+// Under a plugin hold the session release is not this path's to run: the
+// change keeps the plain radio cycle, as before, instead of being dropped.
+let ps_held = { actions: [] };
+
+scenario('sim-reapply-plugin-held', {
+	handlers: base_handlers({
+		ATTACH_DETACH: (args) => {
+			push(ps_held.actions, args.action);
+			return {};
+		},
+	}),
+	guard_ms: 2000,
+	setup: (mock, modem, finish) => {
+		let poll = null;
+
+		poll = uloop.timer(10, () => {
+			if (modem.state != 'READY') {
+				poll.set(10);
+				return;
+			}
+
+			modem.contexts = [ {
+				name: 'wwan0', state: 'IDLE', config: { auto: true, profile: 1 },
+				ensure_attach_profile: (index, cb) => cb(true),
+			} ];
+			modem._plugin_held = true;
+			ps_held.before = length(mock.calls_for('SET_OPERATING_MODE'));
+			modem.reapply_sim(() => {
+				ps_held.modes = map(slice(mock.calls_for('SET_OPERATING_MODE'), ps_held.before),
+					(c) => c.args?.mode);
+				modem._plugin_held = false;
+				finish();
+			});
+		});
+	},
+}, '__never__',
+	(modem, mock, events) => {
+		eq(ps_held.actions, [], 'plugin-held: no PS detach/attach');
+		ok(length(ps_held.modes ?? []) >= 1 && ps_held.modes[0] == 1,
+			'plugin-held: the change still cycles the radio (low power first)');
 	});
 
 run_next();

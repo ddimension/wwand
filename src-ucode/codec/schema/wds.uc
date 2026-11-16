@@ -41,6 +41,25 @@ export const REQ_SETTINGS_DEFAULT =
 	(1 << 13) |  // mtu
 	(1 << 15);   // ip family
 
+// added for an IMS PDN (interface option `ims`): QMI_WDS_REQUESTED_SETTINGS_
+// PCSCF_ADDRESS (1 << 10) and _PCSCF_SERVER_ADDRESS_LIST (1 << 11)
+// (qmi-enums-wds.h:1443-1444, libqmi 1.38). Bit 11 brings both lists, IPv4
+// 0x23 and IPv6 0x2E; there is no separate IPv6 bit (Qualcomm's 1 << 17 is
+// Technology Name).
+export const REQ_SETTINGS_PCSCF = (1 << 10) | (1 << 11);
+
+// RAB_REJECT_IND cause (vendor IDL, not in libqmi 1.38)
+export const RAB_REJECT_CAUSE = {
+	'1': 'illegal MS', '2': 'illegal ME', '3': 'EPS services not allowed',
+	'4': 'UE identity cannot be derived', '5': 'implicitly detached',
+	'6': 'PLMN not allowed', '7': 'tracking area not allowed',
+	'8': 'roaming not allowed in this tracking area',
+	'9': 'no suitable cells in tracking area', '10': 'congestion',
+	'11': 'not authorized for this CSG', '12': 'no EPS bearer context activated',
+	'13': 'access barred', '14': 'RRC connection rejected',
+	'15': 'T3417 expired', '16': 'T3417 ext expired',
+};
+
 const PROFILE_ID = { t: 0x01, f: { type: 'u8', index: 'u8' } };
 
 export default {
@@ -77,6 +96,90 @@ export default {
 				tx_bytes_ok:    { t: 0x19, f: 'u64' },
 				rx_bytes_ok:    { t: 0x1A, f: 'u64' },
 				current_bearer: { t: 0x1D, f: { network_type: 'u8', rat_mask: 'u32', so_mask: 'u32' } },
+			},
+		},
+
+		// libqmi 1.38 "Indication Register" (0x0003) knows 0x12 and 0x19 only;
+		// the four below are beyond it (vendor IDL,
+		// docs/qmi-beyond-libqmi.md). THE ANSWER PROVES NOTHING: the RG502Q-EA
+		// and the EG06-E return success for a TLV no IDL defines (0x7E,
+		// HW-read 2026-11-16), so only an indication that arrives shows a
+		// firmware has it.
+		INDICATION_REGISTER: {
+			id: 0x0003,
+			req: {
+				lte_attach_params:  { t: 0x22, f: 'u8' },
+				rab_reject:         { t: 0x25, f: 'u8' },
+				lte_attach_failure: { t: 0x33, f: 'u8' },
+				ipv6_prefix_update: { t: 0x3F, f: 'u8' },
+			},
+			resp: {},
+		},
+
+		// libqmi 1.38 "Get LTE Attach Parameters" (0x0085): APN 0x10, IP
+		// Support Type 0x11, OTA Attach Performed 0x12. Its 0x13 is beyond
+		// libqmi: the IPv4 address, HW-read on the RG502Q-EA (2026-11-16)
+		// equal to the one the indication below reported for the same attach.
+		GET_LTE_ATTACH_PARAMS: {
+			id: 0x0085,
+			req: {},
+			resp: {
+				apn:      { t: 0x10, f: 'string' },
+				ip_type:  { t: 0x11, f: 'u8' },
+				attached: { t: 0x12, f: 'u8' },
+				ipv4:     { t: 0x13, f: 'ipv4' },
+			},
+		},
+
+		// What the LTE attach was done with, as the modem reports it: the APN
+		// the NETWORK settled on (for an empty attach APN, its default), the
+		// IP type (0 IPv4, 1 IPv6, 2 IPv4v6) and the addresses. Sent with
+		// valid = 0 and nothing else on a detach. HW-read on the RG502Q-EA
+		// (2026-11-16) over a radio cycle: 0x01, then 0x01 0x10 0x11 0x12 with
+		// the APN as bare characters and the address in the byte order of
+		// GET_CURRENT_SETTINGS. 0x13-0x16 are from the vendor IDL only.
+		LTE_ATTACH_PARAMS_IND: {
+			id: 0x00C6,
+			ind: {
+				valid:        { t: 0x01, f: 'u8' },
+				apn:          { t: 0x10, f: 'string' },
+				ip_type:      { t: 0x11, f: 'u8' },
+				ipv4:         { t: 0x12, f: 'ipv4' },
+				ipv4_gateway: { t: 0x13, f: 'ipv4' },
+				ipv4_netmask: { t: 0x14, f: 'ipv4' },
+				ipv6:         { t: 0x15, f: { addr: 'ipv6', plen: 'u8' } },
+				ipv6_gateway: { t: 0x16, f: { addr: 'ipv6', plen: 'u8' } },
+			},
+		},
+
+		// The three below are declared from the vendor IDL and have NOT been
+		// seen on the wire here (docs/qmi-beyond-libqmi.md): what they carry
+		// is logged and shown, never acted on.
+		//
+		// Why a service request was refused — an EMM-level cause list of its
+		// own (RAB_REJECT_CAUSE below), not the ESM/SM cause of a PDN request.
+		RAB_REJECT_IND: {
+			id: 0x00CF,
+			ind: {
+				cause: { t: 0x01, f: 'u32' },
+			},
+		},
+		// Why an LTE attach failed: the PLMN as on the SIM (3 BCD bytes) and
+		// a reason in the shape of the verbose call end reason (callend.uc).
+		LTE_ATTACH_FAILURE_INFO_IND: {
+			id: 0x0103,
+			ind: {
+				plmn:   { t: 0x01, f: 'bytes' },
+				reason: { t: 0x02, f: { type: 'u16', reason: 'u16' } },
+			},
+		},
+		// A candidate or multihoming IPv6 prefix added, promoted or removed.
+		IPV6_PREFIX_UPDATE_IND: {
+			id: 0x0134,
+			ind: {
+				prefix: { t: 0x01, f: { addr: 'ipv6', plen: 'u8' } },
+				type:   { t: 0x02, f: 'u32' },
+				status: { t: 0x03, f: 'u32' },
 			},
 		},
 
@@ -193,6 +296,12 @@ export default {
 				// "IPv6 Prefix Delegation", guint8 boolean (json:424-428).
 				// Quectel's AT+QIP6CFG="PD_enable",<cid> is the same flag.
 				prefix_delegation:   { t: 0xDF, f: 'u8' },
+				// "PCSCF Address Using PCO" 0x1F and "IMCN Flag" 0x22, guint8
+				// booleans (qmi-service-wds.json Modify Profile, libqmi 1.38):
+				// the network is asked for the P-CSCF in the PCO and the PDN is
+				// marked as the IM CN subsystem one (TS 24.229 B.2.2.1)
+				pcscf_pco:           { t: 0x1F, f: 'u8' },
+				imcn:                { t: 0x22, f: 'u8' },
 			},
 			resp: {
 				// extended error code on failure
@@ -214,7 +323,43 @@ export default {
 				address_allocation: { t: 0x2D, f: 'u8' },
 				clat:              { t: 0xDE, f: 'u8' },
 				prefix_delegation: { t: 0xDF, f: 'u8' },
+				// Get Profile Settings output 0x1F / 0x22 (libqmi 1.38)
+				pcscf_pco:         { t: 0x1F, f: 'u8' },
+				imcn:              { t: 0x22, f: 'u8' },
 			},
+		},
+
+		// The profiles the modem holds, and which of them it attaches with.
+		// libqmi 1.38 qmi-service-wds.json: "Get Profile List" 0x002A (input
+		// Profile Type 0x10; output 0x01, a guint8-count array of { type
+		// guint8, index guint8, name string } — a string inside a struct is
+		// u8-length-prefixed), "Get LTE Attach PDN List" 0x0094 (no input;
+		// output Current List 0x10 / Pending List 0x11, guint8-count arrays of
+		// guint16 profile ids), "Get Default Profile Number" 0x0049 (input
+		// 0x01 { type guint8, family guint8 }, output Index 0x01 guint8).
+		// The attach list says which profile the modem's own attach uses;
+		// nothing makes that profile 1.
+		GET_PROFILE_LIST: {
+			id: 0x002A,
+			req: { profile_type: { t: 0x10, f: 'u8' } },
+			resp: {
+				profiles: { t: 0x01, f: { n: 'u8', of: { type: 'u8', index: 'u8', name: 'lstring' } } },
+			},
+		},
+
+		GET_LTE_ATTACH_PDN_LIST: {
+			id: 0x0094,
+			req: {},
+			resp: {
+				current: { t: 0x10, f: { n: 'u8', of: 'u16' } },
+				pending: { t: 0x11, f: { n: 'u8', of: 'u16' } },
+			},
+		},
+
+		GET_DEFAULT_PROFILE_NUMBER: {
+			id: 0x0049,
+			req: { profile: { t: 0x01, f: { type: 'u8', family: 'u8' } } },
+			resp: { index: { t: 0x01, f: 'u8' } },
 		},
 
 		// VENDOR, NOT IN libqmi (checked against 1.38: no message reports a
@@ -236,6 +381,21 @@ export default {
 			resp: { prefix: { t: 0x10, f: { addr: 'ipv6', plen: 'u8' } } },
 		},
 
+		// The modem's back-off per APN after network rejections. libqmi 1.38
+		// qmi-service-wds.json "Get PDN Throttle Info" 0x006C (since 1.14):
+		// input Network Type 0x01 (guint8, 0 = 3GPP); output Info 0x10, a
+		// guint8-count array of { IPv4 Throttled gint8, IPv6 Throttled gint8,
+		// IPv4 / IPv6 Throttle Time Left MS guint32, APN string } — the
+		// string inside a struct is u8-length-prefixed, as everywhere.
+		GET_PDN_THROTTLE_INFO: {
+			id: 0x006C,
+			req: { network_type: { t: 0x01, f: 'u8' } },
+			resp: {
+				info: { t: 0x10, f: { n: 'u8', of: {
+					ipv4: 'i8', ipv6: 'i8', ipv4_left_ms: 'u32', ipv6_left_ms: 'u32', apn: 'lstring' } } },
+			},
+		},
+
 		GET_CURRENT_SETTINGS: {
 			id: 0x002D,
 			req: { requested: { t: 0x10, f: 'u32' } },
@@ -253,6 +413,20 @@ export default {
 				ipv6_dns2:    { t: 0x28, f: 'ipv6' },
 				mtu:          { t: 0x29, f: 'u32' },
 				ip_family:    { t: 0x2B, f: 'u8' },
+				// "PCSCF Address Using PCO" 0x22 (guint8) and "PCSCF Server
+				// Address List" 0x23: a guint8-counted array of little-endian
+				// guint32 IPv4 addresses (libqmi 1.38).
+				pcscf_pco:    { t: 0x22, f: 'u8' },
+				pcscf:        { t: 0x23, f: { n: 'u8', of: 'ipv4' } },
+				// "PCSCF IPv6 Address List" 0x2E: a guint8-counted array of
+				// 16-byte IPv6 addresses in network order, sent for the same
+				// request bit 11. NOT in libqmi 1.38: from the Qualcomm IDL
+				// (wds_get_runtime_settings_resp_msg_v01,
+				// pcscf_ipv6_server_addr_list, max 20) as shipped in the
+				// OnePlus 8T's /vendor/lib64/libqmiservices.so (OOS 14,
+				// decoded 2026-11-15), and Qualcomm's dsi_netctrl reads its
+				// IPv6 P-CSCF from it with that bit.
+				pcscf6:       { t: 0x2E, f: { n: 'u8', of: 'ipv6' } },
 			},
 		},
 

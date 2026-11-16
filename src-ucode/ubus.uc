@@ -155,6 +155,12 @@ export function publish(conn, daemon, log)
 				daemon.sim_pin_verify(req.args.modem, req.args.pin, ok_reply(reply))),
 		},
 
+		modem_profiles: {
+			args: { modem: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_profiles(req.args.modem, ok_reply(reply))),
+		},
+
 		modem_get_settings: {
 			args: { modem: '', ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
@@ -206,9 +212,10 @@ export function publish(conn, daemon, log)
 		},
 
 		modem_sim_switch_slot: {
-			args: { modem: '', slot: 0, ubus_rpc_session: '' },
+			args: { modem: '', slot: 0, force: false, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
-				daemon.modem_sim_switch_slot(req.args.modem, req.args.slot, ok_reply(reply))),
+				daemon.modem_sim_switch_slot(req.args.modem, req.args.slot, ok_reply(reply),
+					{ force: !!req.args.force })),
 		},
 
 		// enable/disable the SIM PIN query (PIN lock); needs the current PIN
@@ -423,6 +430,21 @@ export function publish(conn, daemon, log)
 						reply(err ? { ok: false, ...err } : { ok: true, response: res.lines }),
 					at_to), wd);
 			},
+		},
+
+		// one raw QMI request / MBIM command (daemon.uc modem_qmi_raw /
+		// modem_mbim_raw); the watchdog outlasts the op's own timeout, which
+		// the daemon caps at 120 s
+		modem_qmi_raw: {
+			args: { modem: '', service: 0, message: 0, payload: '', timeout: 0, ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_qmi_raw(req.args.modem, req.args, ok_reply(reply)), 150000),
+		},
+
+		modem_mbim_raw: {
+			args: { modem: '', service: '', cid: 0, type: '', info: '', timeout: 0, ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_mbim_raw(req.args.modem, req.args, ok_reply(reply)), 150000),
 		},
 
 		modem_set_protocol: {

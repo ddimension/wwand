@@ -17,6 +17,7 @@ import * as merge from 'wwand.codec.schema.merge';
 import * as arfcn_bands from 'wwand.codec.arfcn_bands';
 import * as discovery from 'wwand.discovery';
 import * as context_common from 'wwand.context_common';
+import * as siminventory from 'wwand.siminventory';
 
 // scrub NAS cell-info sentinel metrics (-32768 = "not measured") to null so
 // consumers never render the sentinel as a real dBm value.
@@ -41,43 +42,70 @@ export function clean_cell_metrics(cells)
 	return cells;
 };
 
-// serving_still_current(serving, cells): does a carried-over `serving` object
-// (from an AT +QENG read) still describe the serving cell that `cells` (from a
-// NAS/passthrough/native cell-location read) reports? Compares the LTE EARFCN,
-// then the NR ARFCN; if neither side carries a comparable identity, keep it
-// (conservative). A handover between the two reads makes them disagree.
-function serving_still_current(serving, cells)
-{
-	let le = serving.lte?.earfcn, nle = cells?.lte_intra?.earfcn;
-	if (le != null && nle != null)
-		return le == nle;
-
-	let ne = serving.nr?.arfcn, nne = cells?.nr5g_arfcn;
-	if (ne != null && nne != null)
-		return ne == nne;
-
-	return true;
-};
-
 // preserve_serving(newc, oldc): carry the AT-`+QENG`-derived `serving` (which
 // alone carries LTE/NR `band` + `bandwidth_mhz`) forward across a cells refresh
 // that came from a band-less transport (NAS / MBIM passthrough / native MBIM).
-// Only fills when the new object lacks `serving` (gap) AND the old serving still
-// describes the current serving cell (identity guard) — a handover drops the
-// stale band instead of mislabelling it. Without this, `serving.band` is only
-// re-read on the slow loop, so band flickers out during 1 s LuCI polling on
-// backends whose fast loop refreshes cells but not the serving detail (MBIM).
-// Returns newc. Mirrors the existing `cells.ca` carry-over.
+// Only when the new object lacks `serving` (gap). Without this, `serving.band`
+// is only re-read on the slow loop, so band flickers out during 1 s LuCI
+// polling on backends whose fast loop refreshes cells but not the serving
+// detail (MBIM). Returns newc. Mirrors the existing `cells.ca` carry-over.
+//
+// Each leg is checked on its own against the new read: serving.lte against
+// lte_intra.earfcn, serving.nr against nr5g_arfcn. A leg is carried only while
+// the new read still has that RAT on the same channel (a leg without a channel
+// of its own is kept while the RAT is there), so a handover drops the stale
+// band instead of mislabelling it, and a leg the modem left is dropped with it.
+// Checking the whole object against whichever channel matched first carried an
+// LTE cell into SA: after an NSA -> SA switch the NR channel was unchanged, the
+// new read had no LTE at all, and the LTE leg of the earlier read stayed
+// (evidence: ddimension/wwand#75, 2026-11-13). A read with neither identity
+// cannot judge either leg and keeps the object as it was (conservative).
 export function preserve_serving(newc, oldc)
 {
-	if (newc == null || oldc?.serving == null)
+	let os = oldc?.serving;
+
+	if (newc == null || os == null || newc.serving != null)
 		return newc;
 
-	return merge.fill(newc, oldc, {
-		gap:   [ 'serving' ],
-		guard: (dst, src) => serving_still_current(src.serving, dst),
-	});
+	let le = newc.lte_intra?.earfcn, ne = newc.nr5g_arfcn;
+
+	if (le == null && ne == null) {
+		newc.serving = os;
+		return newc;
+	}
+
+	let lte = (os.lte != null && le != null && (os.lte.earfcn == null || os.lte.earfcn == le));
+	let nr  = (os.nr != null && ne != null && (os.nr.arfcn == null || os.nr.arfcn == ne));
+
+	if (!lte && !nr)
+		return newc;
+
+	// the rest of a QENG serving (its connection `state`) belongs to the read
+	// and goes with whichever leg is carried
+	let s = {};
+
+	for (let k, v in os)
+		if ((k != 'lte' || lte) && (k != 'nr' || nr))
+			s[k] = v;
+
+	newc.serving = s;
+
+	return newc;
 };
+
+// 'B3' / 'n78' / 78 -> 3 / 78; the bare number is how serving bands are
+// stored (see fill_serving_band). Quectel QCAINFO and arfcn_bands spell the
+// band with its prefix, the Fibocom rows (telemetry_ncm.uc ca_entries) carry
+// the number already.
+function band_number(name)
+{
+	if (type(name) == 'int')
+		return (name > 0) ? name : null;
+
+	let m = match(name ?? '', /^[Bn]([0-9]+)$/);
+
+	return m ? +m[1] : null;
+}
 
 // serving_from_ca(self): the QMI LTE-CPHY CA-info PCC (self.cells.ca[role=PCC])
 // IS the serving LTE cell and — unlike the cell-location decode — carries the
@@ -87,13 +115,63 @@ export function preserve_serving(newc, oldc)
 // from it (a Quectel AT-QENG value already there wins), EARFCN-guarded; seeds
 // serving.lte when the modem has no AT serving read. The BAND is left to EARFCN
 // derivation (LuCI, disjoint ranges) / AT-QENG — the QMI CA `band` TLV is the
-// non-3GPP ActiveBand enum. LTE only (there is no NR CPHY CA info).
+// non-3GPP ActiveBand enum.
+// The NR PCC (from QMI RF band info, qmi_backend.ca_with_rf) gap-fills
+// serving.nr the same way, NR-ARFCN-guarded — the vendor-neutral NR bandwidth,
+// and its BAND: that row names the band the modem reports, and the NR-ARFCN
+// alone cannot. The NR bands overlap (n48 3550–3700 MHz lies inside n77 and
+// n78), so fill_serving_band, deriving from the channel, takes the first match:
+// a T99W175 on n78 in Sweden showed serving band 48 next to the modem's n78
+// (evidence: ddimension/wwand#75, 2026-11-13).
+// Before either, a carrier row without a PCI takes it from the cell-location
+// read when the channel matches: RF band info has no PCI, and the serving cell
+// of that channel is the carrier.
 export function serving_from_ca(self)
 {
 	let ca = self.cells?.ca;
 
 	if (!self.cells || type(ca) != 'array')
 		return;
+
+	let lc = self.cells.lte_intra, nr_arfcn = self.cells.nr5g_arfcn;
+	// a primary row as every producer spells it: the Fibocom AT rows say
+	// 'PCC LTE' / 'PCC NR' (telemetry_ncm.uc ca_entries)
+	let is_pcc = (c) => match(c?.role ?? '', /^PCC( LTE| NR)?$/);
+
+	for (let c in ca) {
+		if (!is_pcc(c) || c.pci != null || c.earfcn == null)
+			continue;
+
+		if (c.rat == 'nr' && nr_arfcn == c.earfcn && self.cells.nr5g_cell?.pci != null)
+			c.pci = self.cells.nr5g_cell.pci;
+		else if ((c.rat ?? 'lte') == 'lte' && lc?.earfcn == c.earfcn && lc?.serving_cell_id != null)
+			c.pci = lc.serving_cell_id;
+	}
+
+	let nrp = null;
+	for (let c in ca)
+		if (is_pcc(c) && c?.rat == 'nr') { nrp = c; break; }
+
+	// gated on the row, not its bandwidth: a QCAINFO NR row names its band
+	// and channel but leaves the bandwidth unknown (atcmd_parse.uc), and
+	// merge.fill skips a null source field, so a missing one overwrites nothing
+	if (nrp) {
+		self.cells.serving = self.cells.serving ?? {};
+		self.cells.serving.nr = merge.fill(self.cells.serving.nr,
+			{ arfcn: nrp.earfcn, bandwidth_mhz: nrp.bandwidth_mhz, pci: nrp.pci,
+			  band: band_number(nrp.band) }, {
+			src:   'qmi-rf',
+			gap:   [ 'bandwidth_mhz', 'arfcn', 'pci' ],
+			// the band the modem names outranks one already there, which is
+			// either derived from the channel (fill_serving_band) by an
+			// earlier read and carried forward (preserve_serving) — on an
+			// overlapping NR channel a guess, the 48 next to the modem's n78 —
+			// or an AT+QENG band, the modem's word as well but possibly
+			// carried from an earlier read too, where this row is this read's
+			prefer: [ 'band' ],
+			guard: (dst, src) => dst.arfcn == null || src.arfcn == null || dst.arfcn == src.arfcn,
+		});
+	}
 
 	// THE LTE PCC, not the first PCC. Under EN-DC the AT carrier list carries a
 	// primary row for each leg — one "LTE BAND 3", one "NR5G BAND n78" — so
@@ -103,7 +181,7 @@ export function serving_from_ca(self)
 	// construction, so its absence means LTE rather than unknown.
 	let pcc = null;
 	for (let c in ca)
-		if (c?.role == 'PCC' && (c?.rat ?? 'lte') == 'lte') { pcc = c; break; }
+		if (is_pcc(c) && (c?.rat ?? 'lte') == 'lte') { pcc = c; break; }
 
 	if (!pcc || pcc.bandwidth_mhz == null)
 		return;
@@ -128,12 +206,6 @@ export function serving_from_ca(self)
 // telemetry_ncm): arfcn_bands names it 'B3' / 'n48', and a consumer that adds
 // its own prefix (LuCI status) then showed 'BB3' / 'nn48'
 // (evidence: ddimension/luci-app-wwand#16).
-function band_number(name)
-{
-	let m = match(name ?? '', /^[Bn]([0-9]+)$/);
-
-	return m ? +m[1] : null;
-}
 
 export function fill_serving_band(self)
 {
@@ -365,10 +437,19 @@ function dialled_profile(ctx)
 //      and a session/mux 1 means nothing for it (`numbered` false);
 //   2. one that is brought up automatically (`auto` not 0);
 //   3. the first one bound, as before.
+// Never an interface bound to ANOTHER card (`option iccid`): the attach is the
+// card in use, and after a switch to the card of `wwand1` the attach was
+// programmed with `wwand0`'s APN for the card switched away from, which the
+// new card's network rejected (HW, NR7101, 2026-11-07). While the card is not
+// read yet nothing is excluded.
 // null when nothing is bound.
 export function attach_owner(contexts, numbered)
 {
 	let list = contexts ?? [];
+	let active = siminventory.norm_iccid(list[0]?.modem?.info?.iccid);
+
+	if (active)
+		list = filter(list, (c) => !c?.config?.iccid || siminventory.norm_iccid(c.config.iccid) == active);
 
 	if (numbered !== false)
 		for (let c in list)
@@ -1382,7 +1463,7 @@ export function at_retired(self, ...cmds)
 // A BARE `ERROR` retires a command. `+CME ERROR: <n>` never does: it is a
 // runtime condition (SIM not ready, no network) that says nothing about whether
 // the firmware knows the command. atcmd already separates the three
-// (atcmd.uc:969 vs :973 vs :914).
+// (atcmd.uc:1144 vs :1147 vs :1091).
 //
 // A TIMEOUT retires one only when the PORT IS PROVABLY ALIVE. On its own a
 // timeout means the port is wedged or the modem busy — then every command goes
@@ -1891,10 +1972,29 @@ export function close_at(self)
 	self._at_dead = 0;
 };
 
+// The vendor AT command for `option nr5g_mode`, with the config warning when
+// there is none. Returns the run_sequence steps, [] when unset or unknown.
+function nr5g_at_commands(self)
+{
+	let nr5g = atcmd.nr5g_mode_commands(self.info, self.config);
+
+	self.config_warnings = filter(self.config_warnings ?? [], (w) => w.check != 'nr5g_mode');
+
+	if (self.config.nr5g_mode && !length(nr5g))
+		push(self.config_warnings, { check: 'nr5g_mode', severity: 'warn',
+			message: sprintf('nr5g_mode "%s" is not applied: no QMI setting and no known AT command for this modem (Foxconn T99W175, Quectel RG50xQ/RM5xxQ)',
+				self.config.nr5g_mode),
+			expected: self.config.nr5g_mode, actual: null });
+
+	return nr5g;
+}
+
 // The init commands every AT channel runs once it answers: model quirks,
 // the configured `at_init` list, the steps optional packages add
 // (`self.at_init_extra`, set by the daemon from plugins.uc at_init — e.g.
-// wwand-rsim allowing a modem to lend its card), then cell locks.
+// wwand-rsim allowing a modem to lend its card), then cell locks, SIM
+// detection and the 5G NR mode. An `nr5g_mode` this modem has no known
+// command for is a config warning, not a guess (atcmd nr5g_mode_commands).
 export function init_commands(self)
 {
 	let extra = [];
@@ -1902,12 +2002,17 @@ export function init_commands(self)
 	try { extra = self.at_init_extra?.(self.info) ?? []; }
 	catch (e) { extra = []; }
 
+	// a QMI or MBIM modem applies the mode itself, QMI first (apply_nr5g_mode),
+	// so its AT list leaves the vendor command out
+	let nr5g = self._nr5g_deferred ? [] : nr5g_at_commands(self);
+
 	return [
 		...atcmd.model_init_commands(self.info?.model),
 		...(self.config.at_init ?? []),
 		...extra,
 		...atcmd.cell_lock_commands(self.config),
 		...atcmd.sim_detect_commands(self.info, self.config),
+		...nr5g,
 	];
 };
 
@@ -1922,6 +2027,195 @@ export function init_done(self, o)
 
 		o.next();
 	};
+};
+
+// apply_nr5g_mode(self, nas, log, cb): `option nr5g_mode` on a modem with a
+// NAS client (QMI, or the MBIM passthrough; null without one). QMI FIRST: the
+// system selection preference carries nr5g_disable_mode (SET 0x2E / GET 0x2B,
+// codec/schema/nas.uc), which is the setting the vendor AT commands front —
+// Quectel's nr5g_disable_mode reads back through it on two modems — and it
+// needs no knowledge of the model. Read before write, and the write goes out
+// WITHOUT change_duration, unlike every other SSP write here: the RG502Q-EA
+// refuses 0x2E next to a duration TLV (either value) with MissingArgument,
+// and takes it alone — and the value written alone is still there after a
+// modem reset (AT+CFUN=1,1; HW-measured 2026-11-13). A modem whose reply has
+// no 0x2B, or that refuses the
+// write, gets the vendor AT command instead, when there is one and an AT
+// channel is open (the backends open AT before their modes step). cb() always
+// comes, once; nothing here fails the bring-up.
+export function apply_nr5g_mode(self, nas, log, cb)
+{
+	let want = nasmod.NR5G_DISABLE[self.config.nr5g_mode ?? ''];
+
+	self.config_warnings = filter(self.config_warnings ?? [], (w) => w.check != 'nr5g_mode');
+
+	if (want == null)
+		return cb();
+
+	let via_at = () => {
+		let cmds = nr5g_at_commands(self);
+
+		if (!length(cmds))
+			return cb();
+
+		if (!self.at?.run_sequence) {
+			push(self.config_warnings, { check: 'nr5g_mode', severity: 'warn',
+				message: sprintf('nr5g_mode "%s" is not applied: no QMI setting and no AT channel', self.config.nr5g_mode),
+				expected: self.config.nr5g_mode, actual: null });
+			log('warn', sprintf('nr5g_mode "%s" not applied: no QMI setting and no AT channel', self.config.nr5g_mode));
+			return cb();
+		}
+
+		self._nr5g_via = 'at';
+		self.at.run_sequence(cmds, init_done(self, { next: cb }));
+	};
+
+	if (!nas)
+		return via_at();
+
+	nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (gerr, cur) => {
+		// the session went away under the read: not an answer about the
+		// modem, and its AT channel is closed too — via_at would warn that
+		// the setting cannot be applied on a modem that takes it
+		if (gerr?.error == 'cancelled')
+			return;
+
+		if (gerr || cur?.nr5g_disable_mode == null)
+			return via_at();
+
+		self._nr5g_via = 'qmi';
+
+		if (cur.nr5g_disable_mode == want) {
+			log('info', sprintf('5G NR mode "%s" already set', self.config.nr5g_mode));
+			return cb();
+		}
+
+		nas.request('SET_SYSTEM_SELECTION_PREFERENCE', { nr5g_disable_mode: want }, (serr) => {
+			if (serr) {
+				log('warn', sprintf('5G NR mode "%s" refused over QMI (%J), trying AT', self.config.nr5g_mode, serr));
+				return via_at();
+			}
+
+			log('notice', sprintf('5G NR mode "%s" set (QMI, was %d)', self.config.nr5g_mode, cur.nr5g_disable_mode));
+			cb();
+		}, { no_recovery: true });
+	}, { no_recovery: true });
+};
+
+// Why a 5G-capable modem sits on LTE, from what the modem itself reports:
+//   nsa_available    the LTE cell offers a 5G NSA anchor (System Info 0x4E)
+//   dcnr_restricted  the network restricts dual connectivity (0x4F)
+//   endc_enabled     EN-DC is on in the modem (GET_ENDC_CONFIG)
+//   disabled         'none' | 'sa' | 'nsa' — the SSP nr5g_disable_mode
+//                    (apply_nr5g_mode; `option nr5g_mode` or a factory value)
+// Each is null when the modem does not report it. All from libqmi 1.38
+// messages except `disabled` (codec/schema/nas.uc, HW-measured).
+const NR5G_DISABLED_NAMES = [ 'none', 'sa', 'nsa' ];
+
+// nr5g_blocker(st, dsd, modes): the one thing that keeps an LTE link off 5G
+// NSA although the cell offers it, as a sentence, or null. Null while 5G is
+// up, while the cell offers no anchor (nothing to explain), and when the
+// configured modes leave 5G out — that is the operator's choice. Pure.
+export function nr5g_blocker(st, dsd, modes)
+{
+	if (!st?.nsa_available || dsd?.nr)
+		return null;
+
+	// 'all' names no technology and includes NR (qmi_backend.parse_modes)
+	if (modes && modes != 'all' && !match(modes, /nr5g/))
+		return null;
+
+	if (st.disabled == 'nsa')
+		return 'the cell offers 5G NSA, but NSA is switched off in the modem (nr5g_disable_mode, see option nr5g_mode)';
+
+	if (st.endc_enabled === false)
+		return 'the cell offers 5G NSA, but EN-DC is off in the modem';
+
+	if (st.dcnr_restricted)
+		return 'the cell offers 5G NSA, but the network restricts dual connectivity (DCNR) for this subscription';
+
+	return null;
+};
+
+// collect_nr5g(self, nas, log, cb): refresh self.nr5g_state (shape above) on
+// the slow tick. Three optional reads; a modem that reports none of the four
+// facts is not asked again WHILE IT STAYS ON THE SAME data-system mode (an
+// LTE-only stack never leaves LTE, so it is never re-polled), but a mode
+// change — LTE -> NSA/SA, or the RAT the modem camps on — can bring the facts
+// back, so the retirement is lifted on a mode change instead of lasting the
+// object's life.
+// The blocker is logged when it changes. cb() always, once.
+export function collect_nr5g(self, nas, log, cb)
+{
+	if (!nas)
+		return cb();
+
+	// retired on a mode where the modem reported no NR facts; re-poll once
+	// its data-system mode changes (telemetry keeps self.dsd_status.mode).
+	if (self._nr5g_state_none) {
+		if (self.dsd_status?.mode == self._nr5g_none_mode)
+			return cb();
+		self._nr5g_state_none = false;
+	}
+
+	let st = { nsa_available: null, dcnr_restricted: null, endc_enabled: null, disabled: null };
+	let gone = (e) => (e?.error == 'cancelled');
+	// a definitive "nothing here": answered, or refused as unknown (71
+	// InvalidQmiCommand, 94 NotSupported) — not a timeout, which may pass
+	let settled = (e) => !e || (e?.error == 'qmi' && (e.code == 71 || e.code == 94));
+
+	nas.request('GET_SYSTEM_INFO', {}, (e1, si) => {
+		if (gone(e1))
+			return cb();
+
+		if (!e1) {
+			if (si?.nr5g_available != null) st.nsa_available = !!si.nr5g_available;
+			if (si?.dcnr_restricted != null) st.dcnr_restricted = !!si.dcnr_restricted;
+		}
+
+		nas.request('GET_ENDC_CONFIG', {}, (e2, ec) => {
+			if (gone(e2))
+				return cb();
+
+			if (!e2 && ec?.enabled != null)
+				st.endc_enabled = !!ec.enabled;
+
+			nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (e3, ssp) => {
+				if (gone(e3))
+					return cb();
+
+				if (!e3 && ssp?.nr5g_disable_mode != null)
+					st.disabled = NR5G_DISABLED_NAMES[ssp.nr5g_disable_mode] ?? sprintf('%d', ssp.nr5g_disable_mode);
+
+				if (length(filter(values(st), (v) => v != null)) == 0) {
+					// only when all three settled: a timeout on one of them
+					// must not retire the others. Remember the mode it was
+					// retired on so a later mode change re-polls (see the
+					// guard at the top).
+					if (settled(e1) && settled(e2) && settled(e3)) {
+						self._nr5g_state_none = true;
+						self._nr5g_none_mode = self.dsd_status?.mode;
+					}
+					self.nr5g_state = null;
+					return cb();
+				}
+
+				self.nr5g_state = st;
+
+				let why = nr5g_blocker(st, self.dsd_status, self.config?.modes);
+
+				if (why != self._nr5g_blocker) {
+					if (why)
+						log('notice', sprintf('5G: %s', why));
+					else if (self._nr5g_blocker)
+						log('info', '5G: no longer held off');
+					self._nr5g_blocker = why;
+				}
+
+				cb();
+			}, { no_recovery: true });
+		}, { no_recovery: true });
+	}, { no_recovery: true });
 };
 
 // best-effort AT side-channel bring-up: discover + open the AT tty, run

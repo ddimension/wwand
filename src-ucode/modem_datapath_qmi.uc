@@ -106,7 +106,6 @@ export function setup(self, dp, o, next)
 				: 'raw_ip';
 		}
 
-		let dgram = netlink.board_dgram_size(fxi, dp.dgram_size, self.info.model);
 		// QMAP header version → the WDA aggregation-protocol value. The
 		// ladder is the datapath's own (rmnet: v5, v4, plain), capped by
 		// `option qmap_version` when the operator pins one — which is also
@@ -144,6 +143,9 @@ export function setup(self, dp, o, next)
 			caps = netlink.datapath_caps(backend, dp.plugins, fxi, dp.netdev);
 		}
 
+		let dg = netlink.dgram_size(dp.dgram_size, caps.dgram_max);
+		let dgram = dg.size;
+
 		// forward-declared: negotiate() walks this ladder from inside its own
 		// body, and ucode does not hoist a `let` to where an earlier arrow
 		// can see it
@@ -168,7 +170,7 @@ export function setup(self, dp, o, next)
 				// probe was already given (:90). It was missing from THIS
 				// literal, so datapath_rmnet_nss's parent-rename recovery read
 				// `ctx.opts?.netdev_kernel` as undefined every time
-				// (datapath_rmnet_nss.uc:323) — the adoption the feature exists
+				// (datapath_rmnet_nss.uc:401) — the adoption the feature exists
 				// for could never fire on the AW1000/NSS case it was written
 				// for. The probe passed, then setup returned "mux channel not
 				// created".
@@ -275,7 +277,7 @@ export function setup(self, dp, o, next)
 		// modem keeps the historic behavior: no format setup at all, the
 		// link left entirely to the driver (old behavior: "no wda support,
 		// skipping data format switch").
-		if (!self.services[sprintf('%d', wdamod.default.service)]) {
+		let no_wda = () => {
 			// No WDA means no link-layer negotiation at all, so it also means
 			// no QMAP: the kernel keeps the driver's 802.3 framing and the
 			// honest datapath is `ethernet`. For an auto channel that is a
@@ -303,13 +305,27 @@ export function setup(self, dp, o, next)
 
 			log('info', 'no wda service, skipping data format setup');
 			return next();
-		}
+		};
+
+		if (!self.has_service(wdamod.default.service))
+			return no_wda();
 
 		self.alloc(wdamod.default, (err, wda) => {
+			// with no version table (modem.uc has_service) the refused
+			// allocation is how a missing WDA shows itself: the same case as
+			// a table without it, not a failed bring-up
+			if (err && self.services_unknown && !self.has_service(wdamod.default.service))
+				return no_wda();
+
 			if (err)
 				return fail('alloc_wda', err);
 
 			self.wda = wda;
+
+			// info, not notice: on a vendor-driver box this is every start
+			if (dg.capped)
+				log('info', sprintf('datapath: DL aggregation capped at %d bytes by the receive buffer the %s driver fixed at load',
+					dgram, backend));
 
 			// rmnet supports MAPv5 checksum offload; try it first there and
 			// renegotiate plain QMAP when the modem rejects it (some answer
@@ -342,7 +358,9 @@ export function setup(self, dp, o, next)
 					// safe even when host-side UL aggregation stays off — the
 					// modem then simply receives single-datagram frames
 					args.ul_max_datagrams = UL_MAX_DATAGRAMS;
-					args.ul_max_size = dgram;
+					// rmnet refuses an uplink aggregate above 32768
+					// (rmnet_vnd.c:250-251, 6.18.41); an override may be larger
+					args.ul_max_size = (dgram > 32768) ? 32768 : dgram;
 				}
 
 				if (dp.ep_id != null)

@@ -199,4 +199,20 @@ let trunc = tlv.unpack({ v: { t: 0x01, f: 'u32' } }, hexdec('01' + '0800' + 'aab
 eq(trunc._truncated, true, 'unpack: truncation flagged');
 eq(tlv.has_payload(trunc), false, 'has_payload: truncated response has no payload');
 
+// --- split: TLVs in wire order, for a message no schema describes ----------
+// unpack() keys by type, so a repeated type and the order are lost; the raw
+// request path (wwandctl qmi) shows the frame as it came
+{
+	let parts = tlv.split(hexdec('02040000000000' + '1001' + '00aa' + '100200bbcc'));
+
+	eq(map(parts, (p) => [ p.type, hexenc(p.value) ]), [ [ 2, '00000000' ], [ 0x10, 'aa' ], [ 0x10, 'bbcc' ] ],
+		'split: every TLV in wire order, a repeated type twice');
+	eq(tlv.split(''), [], 'split: no bytes, no TLVs');
+
+	let cut = tlv.split(hexdec('0101001101' + '0800' + 'aabb'));
+
+	eq([ length(cut), cut[1].type, cut[1].truncated, hexenc(cut[1].value) ], [ 2, 1, true, 'aabb' ],
+		'split: a TLV claiming more than is left ends the list, flagged, with what there was');
+}
+
 done('test_tlv');

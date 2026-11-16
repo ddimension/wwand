@@ -194,4 +194,33 @@ c2.request('GET_MODEL', {}, () => { again++; });
 c2.destroy();
 eq(again, 1, 'destroy: after teardown a request answers once, and destroy does not run again');
 
+// --- request_raw: a message no schema describes (wwandctl qmi) --------------
+// The payload goes out as given; the answer comes back undecoded as the third
+// callback argument — also when the result says failure, because the TLVs of
+// a refusal are what the operator is looking at.
+{
+	let rsent = [];
+	let rhub = { send: (f) => { push(rsent, f); return true; }, register: () => null, unregister: () => null };
+	let rerrs = [];
+	let rc = client.create(rhub, { service: 0x2a, messages: {} }, 9, { on_error: (c, k) => push(rerrs, k) });
+	let got = [];
+
+	rc.request_raw(0x0024, hexdec('010100ff'), (e, data, raw) => push(got, [ e, data?._result, raw ]), { no_recovery: true });
+
+	let fd = qmux.decode(rsent[0]);
+
+	eq([ fd.service, fd.cid, fd.msg_id, hexenc(fd.tlvs) ], [ 0x2a, 9, 0x0024, '010100ff' ],
+		'request_raw: service, cid, message id and the TLV bytes as given');
+
+	rc.dispatch({ kind: 'response', txn: fd.txn, msg_id: 0x0024, tlvs: hexdec('020400010030001001007f') });
+	eq(got[0][0], { error: 'qmi', result: 1, code: 0x30 }, 'request_raw: a failure result is the usual qmi error...');
+	eq(hexenc(got[0][2]), '020400010030001001007f', '...and still carries the response TLVs, undecoded');
+	eq(rerrs, [], 'request_raw: no_recovery keeps a refused experiment out of the recovery count');
+
+	rc.destroy();
+	let late = null;
+	eq(rc.request_raw(1, '', (e) => { late = e?.error; }), false, 'request_raw: a destroyed client sends nothing');
+	eq(late, 'cancelled', '...and says cancelled');
+}
+
 done('test_client');

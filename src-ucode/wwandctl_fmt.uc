@@ -260,7 +260,7 @@ export function reg_text(m)
 // The cadence floor, and the reason for it. `modem_signal` keeps wwand's
 // adaptive fast-telemetry loop warm (daemon.uc calls modem.watch()); that loop
 // polls the modem at 1 Hz and decays 6 s after the last request
-// (modem_common.uc:1231, :1041). One sample therefore costs ~6 s of 1 Hz modem
+// (modem_common.uc:1307, :1041). One sample therefore costs ~6 s of 1 Hz modem
 // traffic, so the duty cycle is 6/interval: 10 % at 60 s, 20 % at 30 s, 60 % at
 // 10 s — and at 6 s or below the loop NEVER decays and the modem is polled
 // around the clock. A global `Interval 10` in collectd.conf would do exactly
@@ -270,7 +270,8 @@ export const COLLECTD_MIN_INTERVAL = 30;
 // The card's ISD-R about itself (status `euicc`, daemon probe_euicc) in one
 // line, or null when nothing was read. Which IPA runs an SGP.32 card is the
 // part worth a line: with its own (IPAe) in charge the router has no ES10
-// access, and `esim profiles` failing with 6985 is then expected, not a fault.
+// access, and `esim profiles` failing with 6985 is then expected, not a fault —
+// until `option ipa_mode 'ipad'` declares the router's IPA (sim.uc declare_ipad).
 export function euicc_text(e)
 {
 	if (type(e) != 'object' || (!e.sgp32 && !e.svn))
@@ -281,7 +282,7 @@ export function euicc_text(e)
 	if (!e.sgp32)
 		return base;
 
-	let ipa = (e.ipa == 'ipae') ? 'IPA in the card (IPAe) — no ES10 from the router'
+	let ipa = (e.ipa == 'ipae') ? 'IPA in the card (IPAe) — no ES10 from the router (option ipa_mode \'ipad\')'
 		: (e.ipa == 'ipad') ? 'IPA on the device (IPAd)'
 		: 'IPA unknown';
 
@@ -449,7 +450,7 @@ export function collectd_lines(host, modem, sig, m, interval, cells)
 
 	// THE SENTINEL TYPE IS PER FIELD, not per struct. QMI decodes the LTE/WCDMA/
 	// GSM RSSI and the LTE RSRQ as i8 (sentinel -128) and rsrp/snr/ecio/
-	// nr5g_rsrq as i16 (sentinel -32768) — see codec/schema/nas.uc:163-167. A
+	// nr5g_rsrq as i16 (sentinel -32768) — see codec/schema/nas.uc:188-192. A
 	// blanket i16 test therefore lets an unavailable -128 through as a genuine
 	// -128 dBm reading, which is the exact failure this filter exists to
 	// prevent. (-128 is below any real RSSI floor, so the i8 test costs nothing
@@ -650,4 +651,192 @@ export function select_args(modem, mcc, mnc)
 
 	return { modem: modem, mode: 'manual', mcc: +mcc, mnc: +mnc,
 	         mnc_digits: length(mnc) };
+};
+
+// --- raw QMI / MBIM (wwandctl qmi, wwandctl mbim) ----------------------------
+
+// QMI service ids by libqmi's names (QmiService, qmi-enums.h:102-154, libqmi
+// 1.38.0), lower case. Only the ones a QMUX frame can address: its service
+// field is one byte, so SSC (0x190) and IMSDCM (0x302), QRTR-only, are left
+// out. CTL is in the table so that naming it gets the daemon's refusal, not
+// "unknown service".
+const QMI_SERVICES = {
+	ctl: 0x00, wds: 0x01, dms: 0x02, nas: 0x03, qos: 0x04, wms: 0x05,
+	pds: 0x06, auth: 0x07, at: 0x08, voice: 0x09, cat2: 0x0a, uim: 0x0b,
+	pbm: 0x0c, qchat: 0x0d, rmtfs: 0x0e, test: 0x0f, loc: 0x10, sar: 0x11,
+	ims: 0x12, adc: 0x13, csd: 0x14, mfs: 0x15, time: 0x16, ts: 0x17,
+	tmd: 0x18, sap: 0x19, wda: 0x1a, tsync: 0x1b, rfsa: 0x1c, csvt: 0x1d,
+	qcmap: 0x1e, imsp: 0x1f, imsvt: 0x20, imsa: 0x21, coex: 0x22, pdc: 0x24,
+	stx: 0x26, bit: 0x27, imsrtp: 0x28, rfrpe: 0x29, dsd: 0x2a, ssctl: 0x2b,
+	dpm: 0x2f, cat: 0xe0, rms: 0xe1, oma: 0xe2, fox: 0xe3, fota: 0xe6,
+	gms: 0xe7, gas: 0xe8, atr: 0xed,
+};
+
+// QMI protocol error names (QmiProtocolError nicks, qmi-errors.h:230-354,
+// libqmi 1.38.0). The number alone is what a log or an issue quotes, and
+// nobody remembers which one 26 is.
+const QMI_ERRORS = {
+	'0': 'None', '1': 'MalformedMessage', '2': 'NoMemory', '3': 'Internal',
+	'4': 'Aborted', '5': 'ClientIdsExhausted',
+	'6': 'UnabortableTransaction', '7': 'InvalidClientId',
+	'8': 'NoThresholdsProvided', '9': 'InvalidHandle',
+	'10': 'InvalidProfile', '11': 'InvalidPinId', '12': 'IncorrectPin',
+	'13': 'NoNetworkFound', '14': 'CallFailed', '15': 'OutOfCall',
+	'16': 'NotProvisioned', '17': 'MissingArgument',
+	'19': 'ArgumentTooLong', '22': 'InvalidTransactionId',
+	'23': 'DeviceInUse', '24': 'NetworkUnsupported',
+	'25': 'DeviceUnsupported', '26': 'NoEffect', '27': 'NoFreeProfile',
+	'28': 'InvalidPdpType', '29': 'InvalidTechnologyPreference',
+	'30': 'InvalidProfileType', '31': 'InvalidServiceType',
+	'32': 'InvalidRegisterAction', '33': 'InvalidPsAttachAction',
+	'34': 'AuthenticationFailed', '35': 'PinBlocked',
+	'36': 'PinAlwaysBlocked', '37': 'UimUninitialized',
+	'38': 'MaximumQosRequestsInUse', '39': 'IncorrectFlowFilter',
+	'40': 'NetworkQosUnaware', '41': 'InvalidQosId',
+	'42': 'RequestedNumberUnsupported', '43': 'InterfaceNotFound',
+	'44': 'FlowSuspended', '45': 'InvalidDataFormat', '46': 'GeneralError',
+	'47': 'UnknownError', '48': 'InvalidArgument', '49': 'InvalidIndex',
+	'50': 'NoEntry', '51': 'DeviceStorageFull', '52': 'DeviceNotReady',
+	'53': 'NetworkNotReady', '54': 'WmsCauseCode',
+	'55': 'WmsMessageNotSent', '56': 'WmsMessageDeliveryFailure',
+	'57': 'WmsInvalidMessageId', '58': 'WmsEncoding',
+	'59': 'AuthenticationLock', '60': 'InvalidTransition',
+	'61': 'NotMcastInterface', '62': 'MaximumMcastRequestsInUse',
+	'63': 'InvalidMcastHandle', '64': 'InvalidIpFamilyPreference',
+	'65': 'SessionInactive', '66': 'SessionInvalid',
+	'67': 'SessionOwnership', '68': 'InsufficientResources',
+	'69': 'Disabled', '70': 'InvalidOperation', '71': 'InvalidQmiCommand',
+	'72': 'WmsTPduType', '73': 'WmsSmscAddress',
+	'74': 'InformationUnavailable', '75': 'SegmentTooLong',
+	'76': 'SegmentOrder', '77': 'BundlingNotSupported',
+	'78': 'OperationPartialFailure', '79': 'PolicyMismatch',
+	'80': 'SimFileNotFound', '81': 'ExtendedInternal',
+	'82': 'AccessDenied', '83': 'HardwareRestricted', '84': 'AckNotSent',
+	'85': 'InjectTimeout', '90': 'IncompatibleState', '91': 'FdnRestrict',
+	'92': 'SupsFailureCase', '93': 'NoRadio', '94': 'NotSupported',
+	'95': 'NoSubscription', '96': 'CardCallControlFailed',
+	'97': 'NetworkAborted', '98': 'MsgBlocked',
+	'100': 'InvalidSessionType', '101': 'InvalidPbType', '102': 'NoSim',
+	'103': 'PbNotReady', '104': 'PinRestriction', '105': 'Pin1Restriction',
+	'106': 'PukRestriction', '107': 'Puk2Restriction',
+	'108': 'PbAccessRestricted', '109': 'PbDeleteInProgress',
+	'110': 'PbTextTooLong', '111': 'PbNumberTooLong',
+	'112': 'PbHiddenKeyRestriction', '113': 'PbNotAvailable',
+	'114': 'DeviceMemoryError', '115': 'NoPermission', '116': 'TooSoon',
+	'117': 'TimeNotAcquired', '118': 'OperationInProgress',
+	'388': 'FwWriteFailed', '389': 'FwInfoReadFailed',
+	'390': 'FwFileNotFound', '391': 'FwDirNotFound',
+	'392': 'FwAlreadyActivated', '393': 'FwCannotGenericImage',
+	'400': 'FwFileOpenFailed', '401': 'FwUpdateDiscontinuousFrame',
+	'402': 'FwUpdateFailed', '61441': 'CatEventRegistrationFailed',
+	'61442': 'CatInvalidTerminalResponse',
+	'61443': 'CatInvalidEnvelopeCommand',
+	'61444': 'CatEnvelopeCommandBusy', '61445': 'CatEnvelopeCommandFailed',
+};
+
+// "26", "0x1a" -> 26; anything else -> null. One parser for every number on
+// these command lines, because message ids are written in hex everywhere
+// (libqmi's JSON, the QMI documents) and TLV types as often in decimal.
+export function raw_num(s)
+{
+	if (type(s) != 'string')
+		return null;
+
+	if (match(s, /^0[xX][0-9a-fA-F]+$/))
+		return hex(substr(s, 2));
+
+	if (match(s, /^[0-9]+$/))
+		return +s;
+
+	return null;
+};
+
+// a QMI service by name (nas, uim, ...) or number -> id, or null
+export function qmi_service_id(s)
+{
+	let id = QMI_SERVICES[lc(s ?? '')];
+
+	return (id != null) ? id : raw_num(s);
+};
+
+// The request TLVs from `TYPE=HEX` arguments, packed the way they go on the
+// wire: type (u8), length (u16, LITTLE endian), value — the one place a hand
+// typist gets it wrong, so it is built here, not typed. The value may carry
+// ':' or ' ' between bytes. -> { payload: hex } or { error: text }.
+export function qmi_raw_payload(args)
+{
+	let out = '';
+
+	for (let a in (args ?? [])) {
+		let m = match(a, /^([^=]+)=(.*)$/);
+		let t = m ? raw_num(m[1]) : null;
+
+		if (t == null || t > 255)
+			return { error: sprintf('%J is not TYPE=HEX (type 0..255)', a) };
+
+		let v = lc(replace(m[2], /[: ]/g, ''));
+
+		if (!match(v, /^([0-9a-f]{2})*$/))
+			return { error: sprintf('%J: the value is not whole bytes of hex', a) };
+
+		let n = length(v) / 2;
+
+		if (n > 0xffff)
+			return { error: sprintf('%J: a TLV holds at most 65535 bytes', a) };
+
+		out += sprintf('%02x%02x%02x%s', t, n & 0xff, n >> 8, v);
+	}
+
+	return { payload: out };
+};
+
+// "0a0b0c..." -> "0a 0b 0c ...", wrapped at 16 bytes and indented by `ind`
+// from the second line on
+function hex_bytes(h, ind)
+{
+	let lines = [];
+
+	for (let i = 0; i < length(h ?? ''); i += 32) {
+		let row = [];
+
+		for (let j = i; j < i + 32 && j < length(h); j += 2)
+			push(row, substr(h, j, 2));
+
+		push(lines, join(' ', row));
+	}
+
+	return length(lines) ? join('\n' + ind, lines) : '(empty)';
+}
+
+// ubus modem_qmi_raw's answer as text: the result first, then each TLV in
+// wire order. The result TLV (0x02) is printed as a TLV too — the line
+// above already says what it means, and hiding it would make the dump
+// disagree with a capture of the same frame.
+export function qmi_raw_text(res)
+{
+	let out = [];
+
+	if (res?.result == null)
+		push(out, 'result   (no result TLV)');
+	else if (res.result == 0)
+		push(out, 'result   success');
+	else
+		push(out, sprintf('result   failure, error %d (0x%04x) %s', res.error_code ?? -1,
+			res.error_code ?? 0, QMI_ERRORS[sprintf('%d', res.error_code ?? -1)] ?? 'unknown'));
+
+	for (let t in (res?.tlvs ?? []))
+		push(out, sprintf('tlv 0x%02x %5d  %s', t.type, length(t.value) / 2,
+			hex_bytes(t.value, '               ')));
+
+	if (res?.truncated)
+		push(out, '(the last TLV claims more bytes than the frame carried)');
+
+	return join('\n', out);
+};
+
+// ubus modem_mbim_raw's answer as text
+export function mbim_raw_text(res)
+{
+	return sprintf('status   %d %s\ninfo %5d  %s', res?.status ?? -1, res?.status_name ?? '',
+		length(res?.info ?? '') / 2, hex_bytes(res?.info, '           '));
 };

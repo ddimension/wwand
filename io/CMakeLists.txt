@@ -21,7 +21,7 @@ if(NOT UCODE_INCLUDE_DIR OR NOT UCODE_LIBRARY)
   message(FATAL_ERROR "libucode headers/library not found (install ucode dev files)")
 endif()
 
-add_library(wwand_io MODULE src/wwand-io.c)
+add_library(wwand_io MODULE src/wwand-io.c src/wwand-xfrm.c)
 
 set_target_properties(wwand_io PROPERTIES OUTPUT_NAME wwand_io PREFIX "")
 target_include_directories(wwand_io PRIVATE ${UCODE_INCLUDE_DIR})

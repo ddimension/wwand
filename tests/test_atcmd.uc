@@ -332,6 +332,42 @@ eq(atcmd.cell_lock_commands({}), [], 'lock: nothing configured');
 	eq(length(atcmd.sim_detect_commands({}, { sim_detect: 'high' })), 1,
 		'simdet: a manufacturer not known yet is no reason to skip');
 }
+// 5G NR mode (#75): the Android NSA/SA split as a vendor AT setting. Both
+// dialects number it 0 both / 1 NSA only / 2 SA only
+{
+	let fox = { model: 'QUALCOMM INCORPORATED', firmware: 'T99W175.F0.1.0.0.9.SC.005' };
+	let st = atcmd.nr5g_mode_commands(fox, { nr5g_mode: 'both' });
+
+	eq(atcmd.nr5g_dialect(fox), 'foxconn', 'nr5g: a T99W175 is known by its MBIM firmware string');
+	eq([ st[0]?.check, st[0]?.set ], [ 'AT^NR5G_MODE?', 'AT^NR5G_MODE=0' ], 'nr5g: foxconn both = 0');
+	ok(match('^NR5G_MODE:0', regexp(st[0].want)) && !match('^NR5G_MODE:1', regexp(st[0].want)),
+		'nr5g: foxconn: the held value is recognised (no space after the colon), another is not');
+	eq(atcmd.nr5g_mode_commands(fox, { nr5g_mode: 'nsa' })[0].set, 'AT^NR5G_MODE=1', 'nr5g: foxconn nsa = 1');
+	eq(atcmd.nr5g_mode_commands(fox, { nr5g_mode: 'sa' })[0].set, 'AT^NR5G_MODE=2', 'nr5g: foxconn sa = 2');
+
+	let q = { manufacturer: 'Quectel', model: 'RG502Q-EA' };
+	st = atcmd.nr5g_mode_commands(q, { nr5g_mode: 'nsa' });
+	eq([ st[0]?.check, st[0]?.set ], [ 'AT+QNWPREFCFG="nr5g_disable_mode"', 'AT+QNWPREFCFG="nr5g_disable_mode",1' ],
+		'nr5g: quectel nsa = disable SA (1)');
+	ok(match('+QNWPREFCFG: "nr5g_disable_mode",1', regexp(st[0].want)) &&
+	   !match('+QNWPREFCFG: "nr5g_disable_mode",12', regexp(st[0].want)),
+		'nr5g: quectel: the held value is recognised, a longer number is not');
+	eq(atcmd.nr5g_mode_commands(q, { nr5g_mode: 'sa' })[0].set, 'AT+QNWPREFCFG="nr5g_disable_mode",2',
+		'nr5g: quectel sa = disable NSA (2)');
+	// an MBIM RM502Q: no manufacturer yet, only the firmware string
+	eq(atcmd.nr5g_dialect({ firmware: 'RM502QAEAAR13A04M4G' }), 'quectel', 'nr5g: a Quectel known by its firmware string');
+	// the command is documented for the RG50xQ/RM5xxQ only: another Quectel
+	// would get a persistent write on a bare ERROR
+	eq(atcmd.nr5g_mode_commands({ manufacturer: 'Quectel', model: 'RG650E-EU' }, { nr5g_mode: 'sa' }), [],
+		'nr5g: a Quectel outside the documented families gets nothing sent');
+	eq(atcmd.nr5g_dialect({ manufacturer: 'Foxconn', model: 'T77W968' }), null,
+		'nr5g: another Foxconn module is not taken for a T99W175');
+
+	eq(atcmd.nr5g_mode_commands(q, {}), [], 'nr5g: unset leaves the modem alone');
+	eq(atcmd.nr5g_mode_commands({ manufacturer: 'Fibocom', model: 'FM350-GL' }, { nr5g_mode: 'sa' }), [],
+		'nr5g: a modem of neither dialect gets nothing sent');
+	eq(atcmd.nr5g_mode_commands({}, { nr5g_mode: 'sa' }), [], 'nr5g: an unidentified modem is not guessed at');
+}
 eq(atcmd.cell_lock_commands({ lock_4g: 'garbage' }), [], 'lock: malformed ignored');
 eq(atcmd.cell_lock_commands({ lock_persist: true }), [], 'lock: persist alone is no-op');
 
@@ -986,6 +1022,29 @@ let ec200a_known = fakefx.create({
 eq(atcmd.find_tty(ec200a_known, 'usb0', null), '/dev/ttyUSB2',
 	'EC200A: the port table takes it straight to if4, no probing');
 
+// ZTE MF286D (19d2:1485): if2 opens and stays mute, if3 answers, if4 is the
+// secondary port. Without the entry the first-tty guess lands on the mute if2.
+// Interface -> tty map as reported in ddimension/wwand#85 (AT on ttyUSB1).
+let mf286d = fakefx.create({
+	files: {
+		[sprintf('%s/idVendor', BASE)]: "19d2\n",
+		[sprintf('%s/idProduct', BASE)]: "1485\n",
+		[sprintf('%s/1-1:1.2/bInterfaceNumber', BASE)]: "02\n",
+		[sprintf('%s/1-1:1.3/bInterfaceNumber', BASE)]: "03\n",
+		[sprintf('%s/1-1:1.4/bInterfaceNumber', BASE)]: "04\n",
+	},
+	globs: {
+		[sprintf('%s/*/tty*', BASE)]: [
+			sprintf('%s/1-1:1.2/ttyUSB0', BASE),
+			sprintf('%s/1-1:1.3/ttyUSB1', BASE),
+			sprintf('%s/1-1:1.4/ttyUSB2', BASE),
+		],
+	},
+});
+let mf286d_ch = atcmd.find_at_channels(mf286d, '/dev/cdc-wdm0', null);
+eq(mf286d_ch.primary, '/dev/ttyUSB1', 'MF286D: the port table takes it straight to if3');
+eq(mf286d_ch.telemetry, '/dev/ttyUSB2', 'MF286D: if4 is the secondary AT port');
+
 // local override for devices missing in the generated table (RG650E)
 let rg650 = quectel_fx({ files: { [sprintf('%s/idProduct', BASE)]: "0122\n" } });
 eq(atcmd.find_tty(rg650, '/dev/cdc-wdm0', null), '/dev/ttyUSB2', 'find: RG650E local override');
@@ -1156,6 +1215,44 @@ tr8.reply('\r\nRING\r\nFibocom\r\nOK\r\n');
 
 eq(got6?.lines, [ 'Fibocom' ], 'engine: a bare RING never becomes the manufacturer');
 eq(urcs6, [ 'RING' ], 'engine: prefix-less URC dispatched');
+
+// ... but to a dial a call-progress code IS the final result (V.250 6.3.1):
+// the dial ends with it at once instead of waiting for an OK that never comes
+let urcs6d = [], got6d = null, err6d = null;
+let tr8d = fake_transport();
+let at8d = atcmd.create(tr8d, { log: silent, on_urc: (l) => push(urcs6d, l) });
+
+at8d.send('ATD+491701234567;', (e, r) => { err6d = e; got6d = r; });
+tr8d.reply('\r\nNO CARRIER\r\n');
+
+eq(err6d, { error: 'no carrier' }, 'engine: NO CARRIER ends a dial as its result');
+eq(urcs6d, [], 'engine: ... and is not dispatched as a URC');
+
+let err6b = null;
+let tr8b = fake_transport();
+let at8b = atcmd.create(tr8b, { log: silent });
+
+at8b.send('ATA', (e) => err6b = e);
+tr8b.reply('\r\nBUSY\r\n');
+eq(err6b, { error: 'busy' }, 'engine: BUSY ends an ATA');
+
+// a RING inside a dial window still announces a call, it does not answer it
+let urcs6r = [], err6r = 'unset';
+let tr8r = fake_transport();
+let at8r = atcmd.create(tr8r, { log: silent, on_urc: (l) => push(urcs6r, l) });
+
+at8r.send('ATD+491701234567;', (e) => err6r = e);
+tr8r.reply('\r\nRING\r\nOK\r\n');
+eq(err6r, null, 'engine: a dial still ends on OK');
+eq(urcs6r, [ 'RING' ], 'engine: RING during a dial stays a URC');
+
+let urcs6s = [], err6s = 'unset';
+let tr8s = fake_transport();
+let at8s = atcmd.create(tr8s, { log: silent, on_urc: (l) => push(urcs6s, l) });
+
+at8s.send('ATD+491701234567;', (e) => err6s = e);
+tr8s.reply('\r\nRING 1\r\nOK\r\n');
+eq([ err6s, urcs6s ], [ null, [ 'RING 1' ] ], 'engine: ...and so does the numbered form (RING 1)');
 
 // one buffer for the whole stream: a line split across a command boundary used
 // to be torn in half — its head dropped and its tail pushed into the NEXT

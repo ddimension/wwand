@@ -28,6 +28,7 @@ import * as modem_init_qmi from 'wwand.modem_init_qmi';
 import * as ctlmod from 'wwand.codec.schema.ctl';
 import * as dmsmod from 'wwand.codec.schema.dms';
 import * as nasmod from 'wwand.codec.schema.nas';
+import * as wdsmod from 'wwand.codec.schema.wds';
 import * as uimmod from 'wwand.codec.schema.uim';
 import * as tmdmod from 'wwand.codec.schema.tmd';
 import * as catmod from 'wwand.codec.schema.cat';
@@ -42,7 +43,9 @@ const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
 	sync_retry: 1000,      // delay between CTL sync attempts
 	sim_settle: 5000,      // settle after PIN verify without indication (old: sleep 5)
+	ps_settle: 3000,       // let ATTACH_DETACH's detach complete before attaching again
 	card_poll: 1000,       // card-status re-poll while initializing
+	version_info: 10000,   // CTL GET_VERSION_INFO; unanswered -> service table unknown
 	init_reset: 30000,     // wait for a deferred init reset to take the modem off
 	                       // the bus; it acked but stayed -> the reset did not take
 };
@@ -120,6 +123,8 @@ function decode_operator_name(s)
 export function create(opts)
 {
 	let self = {
+		// `option nr5g_mode` goes through step_confnet_apply, not the AT init list
+		_nr5g_deferred: true,
 		id: opts.id,
 		device: opts.device,
 		config: opts.config ?? {},
@@ -165,6 +170,12 @@ export function create(opts)
 		_gen: 0,
 
 		services: {},      // service id (string) -> { major, minor }
+		// true when GET_VERSION_INFO went unanswered: the table is then NOT
+		// KNOWN rather than empty, and has_service() lets each optional
+		// service be tried, the allocation deciding (modem_init_qmi
+		// step_services)
+		services_unknown: false,
+		_services_absent: {},   // service id (string) -> true, refused while unknown
 		info: {},          // model, revision, imei, ...
 		reg: {},           // registration snapshot
 		reg_detail: null,  // why (not) registered: reject cause, limited service
@@ -189,16 +200,16 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:1716) and set_opmode dereferences it unguarded (qmi_backend.uc:66),
+	// (modem.uc:2081) and set_opmode dereferences it unguarded (qmi_backend.uc:68),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
-	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:741, step_sim), and
+	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:762, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
 	//
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
 	// callback arrives the generation has already moved.
 	// EACH WAIT OWNS ITS OWN TIMER AND ITS OWN DEBT. `tm.settle` is a shared
-	// one-shot slot, also written by the init chain (modem_init_qmi.uc:468,
-	// :543, :809), so parking radio-bounce waits there let a second one
+	// one-shot slot, also written by the init chain (modem_init_qmi.uc:618,
+	// :696, :994), so parking radio-bounce waits there let a second one
 	// overwrite the first: teardown then cancelled only the newest, the older
 	// timer survived unreachable, and whichever fired first cleared the other's
 	// debt. Two reattach calls reach that directly — nothing serialises them.
@@ -229,7 +240,7 @@ export function create(opts)
 		}
 	};
 
-	let settle_after = (gen, fn, gone) => {
+	let settle_after = (gen, fn, gone, delay) => {
 		gone = gone ?? (() => null);
 
 		if (self._gen != gen || !self.dms)
@@ -238,7 +249,7 @@ export function create(opts)
 		let rec = {};
 
 		rec.gone = gone;
-		rec.timer = uloop.timer(self.timing.settle, () => {
+		rec.timer = uloop.timer(delay ?? self.timing.settle, () => {
 			settles = filter(settles, (x) => x != rec);
 
 			if (self._gen != gen || !self.dms)
@@ -331,9 +342,39 @@ export function create(opts)
 	let held_summary = () => join(' ', map(sort(keys(self.qmi_clients)), (k) =>
 		sprintf('%s:[%s]', k, join(',', self.qmi_clients[k]))));
 
+	// Does the modem offer this service? From the version table when the modem
+	// answered it. When it did not, every service counts as offered until its
+	// allocation is refused: an EMPTY table would switch off WDA (and with it
+	// QMAP and the mux), UIM, DSD, TMD, PDC, CAT and UIM Remote without the
+	// modem ever being asked, which is far worse than one refused
+	// ALLOCATE_CID per missing service.
+	self.has_service = function(id) {
+		let k = sprintf('%d', id);
+
+		return self.services_unknown ? !self._services_absent[k] : !!self.services[k];
+	};
+
 	self.alloc = function(schema, cb) {
+		// With no version table an optional service is found missing by
+		// asking, so its refusal is an answer, not a fault: it must not feed
+		// the recovery counter, or a modem lacking a few services climbs the
+		// ladder for it. DMS/NAS/WDS stay counted — they are the bring-up gate.
+		let probing = self.services_unknown &&
+			schema.service != dmsmod.default.service &&
+			schema.service != nasmod.default.service &&
+			schema.service != wdsmod.default.service;
+
 		self.ctl.request('ALLOCATE_CID', { service: schema.service }, (err, data) => {
 			if (err || !data?.allocation) {
+				// ...and only INVALID_SERVICE_TYPE says the service is absent
+				// (QMI_PROTOCOL_ERROR_INVALID_SERVICE_TYPE = 31, qmi-errors.h:258,
+				// libqmi 1.38.0). Every other answer — a full client table (5),
+				// INTERNAL, NO_MEMORY, DEVICE_NOT_READY — and a timeout or cancel
+				// describe this attempt, not the modem, and must not turn into a
+				// decision that holds for the whole session.
+				if (probing && err?.error == 'qmi' && err.code == 31)
+					self._services_absent[sprintf('%d', schema.service)] = true;
+
 				log((err?.code == 5) ? 'warn' : 'debug', sprintf('allocating a client of service %d failed: %J — held: %s',
 					schema.service, err ?? 'no allocation tlv', held_summary() || 'none'));
 
@@ -354,7 +395,7 @@ export function create(opts)
 			log('debug', sprintf('allocated cid %d for service %d — held: %s',
 				data.allocation.cid, schema.service, held_summary()));
 			cb(null, client_mod.create(self.hub, schema, data.allocation.cid, client_hooks));
-		});
+		}, probing ? { no_recovery: true } : null);
 	};
 
 	self.release = function(client, cb) {
@@ -409,7 +450,7 @@ export function create(opts)
 		if (!self.ctl || !self.hub || self.hub.closed)
 			return cb({ error: 'not_ready' }, null);
 
-		if (!self.services[sprintf('%d', schema.service)])
+		if (!self.has_service(schema.service))
 			return cb({ error: 'service_unavailable' }, null);
 
 		let gen = self._gen;
@@ -492,7 +533,7 @@ export function create(opts)
 
 		let wmsmod = require('wwand.codec.schema.wms_lazy').s;
 
-		if (!self.services[sprintf('%d', wmsmod.default.service)]) {
+		if (!self.has_service(wmsmod.default.service)) {
 			self.wms = null;
 			return cb();
 		}
@@ -535,8 +576,43 @@ export function create(opts)
 	let chain = modem_init_qmi.install(self, {
 		log: log, emit: emit, notify_contexts: notify_contexts,
 		sim_block: scaffold.sim_block,
-		fail: fail, dp: dp, at_opts: at_opts, tm: tm,
+		fail: fail, dp: dp, at_opts: at_opts, tm: tm, rec: rec,
 	});
+
+	// AN ACKNOWLEDGED RESET IS NOT A RESET. Both resets below go offline
+	// first, because QMI DMS resets only from offline — and a modem that
+	// acknowledges the reset and does not perform it is left there: the
+	// EG25-G (EG25GGBR07A08M2G) did exactly that and then refused every mode
+	// but reset (HW-observed, RPi4, 2026-11-07). Nothing else notices: the
+	// object stays READY over a radio that is off, and the contexts fail into
+	// the ladder, whose opmode cycle the modem refuses as well. Still on the
+	// bus and offline once the reboot should be done: the bring-up starts
+	// again, and its online step knows the way out of offline (or says it is
+	// stuck — modem_init_qmi.uc reset_out_of_offline).
+	let watch_reset = (why) => {
+		let gen = self._gen;
+
+		tm.reset_watch?.cancel();
+		tm.reset_watch = uloop.timer(self.timing.init_reset ?? 30000, () => {
+			tm.reset_watch = null;
+
+			if (self._gen != gen || !self.dms)
+				return;
+
+			self.dms.request('GET_OPERATING_MODE', {}, (err, d) => {
+				if (self._gen != gen || err || d?.mode != dmsmod.OPMODE_OFFLINE)
+					return;
+
+				log('err', sprintf('%s: acknowledged, but the modem is still on the bus and offline — restarting the bring-up', why));
+				notify_contexts('lost');
+				self.teardown();
+				let wait = self.timing.backoff_min ?? 1000;
+
+				self.set_state('ABSENT', { retry_in: wait });
+				tm.retry = uloop.timer(wait, () => self.start());
+			}, { no_recovery: true });
+		});
+	};
 
 	// record a failed connection cycle and run the resulting ladder action; also
 	// called by the daemon on context-activation failure. QMI-side rungs run
@@ -567,7 +643,7 @@ export function create(opts)
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:4476), and dropping it strands a ubus request.
+				// (daemon.uc:4484), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
@@ -594,7 +670,15 @@ export function create(opts)
 				if (hung(e1))
 					return via_at('QMI does not answer');
 
-				opmode_ours('reset', (e2) => hung(e2) ? via_at('QMI does not answer') : done(action));
+				opmode_ours('reset', (e2) => {
+					if (hung(e2))
+						return via_at('QMI does not answer');
+
+					if (!e2)
+						watch_reset('recovery modem reset');
+
+					done(action);
+				});
 			});
 			return;
 		}
@@ -635,10 +719,11 @@ export function create(opts)
 				// caller would wait for a modem that is not going anywhere.
 				// That includes NO_EFFECT ("that changed nothing"), which
 				// set_opmode deliberately does NOT fold into success for
-				// 'reset' (qmi_backend.uc:67) so that it arrives here.
+				// 'reset' (qmi_backend.uc:69) so that it arrives here.
 				if (err)
 					return cb({ error: 'qmi', detail: err });
 
+				watch_reset('admin modem reset');
 				notify_contexts('lost');
 				cb(null, { resetting: true });
 			});
@@ -807,11 +892,104 @@ export function create(opts)
 				let sim_gen = self._gen;
 				let finish = () => cb ? cb(changed) : null;
 
-				log('notice', 'attach profile changed after sim reapply, cycling radio to re-attach');
-				opmode_ours('low_power', () => {
-					settle_after(sim_gen, () => {
-						online_unless_parked(finish);
-					}, finish);
+				// The attach profile reaches the network only on a new attach.
+				// Re-run it with NAS ATTACH_DETACH (radio on), not a DMS
+				// low_power cycle: RF off re-runs PLMN selection and can land
+				// on another network (bench: 242/02 -> 242/01, 25 s). The
+				// cycle stays as the fallback for a modem that refuses it.
+				//
+				// Skipped only where a later attach reads the profile anyway:
+				// an operator detach (its attach) and a low-power park (its
+				// wake). Everywhere else the change must reach the network.
+				// REGISTERING needs it as much as READY: the autonomous attach
+				// already started with the old profile. Under a plugin hold or
+				// an overlapping reattach the session release is not ours to
+				// run, so those keep the plain radio cycle without it, as
+				// every change did before.
+				if (self.detached || self.lowpower_parked)
+					return finish();
+
+				let gone = () => self._gen != sim_gen || !self.dms;
+
+				let cycle = (done) => {
+					if (gone())
+						return done({ error: 'cancelled' });
+
+					log('notice', 'attach profile changed after sim reapply, cycling radio to re-attach');
+					opmode_ours('low_power', () => {
+						settle_after(sim_gen,
+							() => online_unless_parked(() => done(null, { via: 'opmode' })),
+							() => done({ error: 'cancelled' }));
+					});
+				};
+
+				if ((self.state != 'READY' && self.state != 'REGISTERING') ||
+				    self._plugin_held || self._reattaching)
+					return cycle(() => finish());
+
+				self.with_sessions_released('reattach', (done) => {
+					if (type(self.ps_attach) != 'function')
+						return cycle(done);
+
+					self.ps_attach(false, (err, res) => {
+						if (gone())
+							return done({ error: 'cancelled' });
+
+						if (err) {
+							log('warn', sprintf('attach profile re-attach: PS detach failed (%J), falling back to the radio cycle', err));
+							return cycle(done);
+						}
+
+						// An already-detached modem has no transition to wait
+						// for; attach immediately. After an effective detach,
+						// give the modem time to finish it: a second
+						// ATTACH_DETACH sent into the transition is answered
+						// NO_EFFECT and leaves the modem PS-detached (observed
+						// on the RG502Q, 2026-11-05).
+						let effective = !res?.unchanged;
+
+						log('info', sprintf('attach profile re-attach: PS detach done%s',
+							effective ? '' : ' (NO_EFFECT: already detached)'));
+
+						let attach = () => {
+							if (gone())
+								return done({ error: 'cancelled' });
+
+							self.ps_attach(true, (err2, res2) => {
+								if (gone())
+									return done({ error: 'cancelled' });
+
+								if (err2) {
+									log('warn', sprintf('attach profile re-attach: PS attach failed (%J), falling back to the radio cycle', err2));
+									return cycle(done);
+								}
+
+								// NO_EFFECT still means no new attach. The
+								// modem may have re-attached by itself after
+								// the detach, but it may equally still be in
+								// the transition; do not risk a stale attach
+								// when the old code's radio cycle is reliable.
+								if (res2?.unchanged) {
+									log('warn', 'attach profile re-attach: PS attach reported NO_EFFECT, falling back to the radio cycle');
+									return cycle(done);
+								}
+
+								log('notice', 'attach profile changed after sim reapply, re-attached (PS attach/detach, radio on)');
+								done(null, { via: 'qmi' });
+							});
+						};
+
+						if (!effective)
+							return attach();
+
+						settle_after(sim_gen, attach,
+							() => done({ error: 'cancelled' }), self.timing.ps_settle);
+					});
+				}, (err) => {
+					if (err)
+						log('warn', sprintf('attach profile re-attach failed: %J', err));
+
+					finish();
 				});
 			});
 		}, { ...(opts ?? {}), fresh: true });
@@ -1025,7 +1203,7 @@ export function create(opts)
 	self._install_pdc = function(cb) {
 		cb = cb ?? (() => null);
 
-		if (!self.services[sprintf('%d', pdcmod.default.service)])
+		if (!self.has_service(pdcmod.default.service))
 			return cb();
 
 		let gen = self._gen;
@@ -1066,7 +1244,7 @@ export function create(opts)
 
 		let want = catmod.MODES[self.config?.cat_mode ?? ''];
 
-		if (want == null || !self.services[sprintf('%d', catmod.default.service)])
+		if (want == null || !self.has_service(catmod.default.service))
 			return cb();
 
 		// This one IS on the critical path — it is one or two requests, and the
@@ -1162,10 +1340,29 @@ export function create(opts)
 	// SET_MITIGATION_LEVEL is deliberately not modelled — the modem's thermal
 	// management is the authority, and a host that overrides it can cook the
 	// hardware). Entirely best-effort: cb() runs whatever happens.
+	// pdn_throttle(cb): the APNs the modem holds back after network rejections
+	// (qmi_backend.get_pdn_throttle), for the daemon when a dial comes back
+	// throttled; null without a config WDS client or on error
+	self.pdn_throttle = function(cb) {
+		if (!self.wds_cfg)
+			return cb(null);
+
+		qmi_backend.get_pdn_throttle(self.wds_cfg, cb);
+	};
+
+	// profiles_read(cb): qmi_backend.read_profiles on the config WDS client;
+	// cb({ error: 'not_ready' }) before the client exists
+	self.profiles_read = function(cb) {
+		if (!self.wds_cfg)
+			return cb({ error: 'not_ready' });
+
+		qmi_backend.read_profiles(self.wds_cfg, cb);
+	};
+
 	self._install_thermal = function(cb) {
 		cb = cb ?? (() => null);
 
-		if (!self.services[sprintf('%d', tmdmod.default.service)])
+		if (!self.has_service(tmdmod.default.service))
 			return cb();
 
 		// NOT on the critical path. A modem has ~30 mitigation devices (28 on
@@ -1344,7 +1541,7 @@ export function create(opts)
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
-			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:545-548), so it
+			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:685-688), so it
 			// carries the same raw WCDMA Ec/Io and needs the same conversion —
 			// an indication landing between refreshes would otherwise flip the
 			// unit back under a consumer that just read the polled value
@@ -1390,6 +1587,174 @@ export function create(opts)
 			self.rf_bands = map(data.rf_band_info, (b) =>
 				({ ...b, name: nasmod.active_band_name(b.band) }));
 		});
+		self.nas.on('NETWORK_REJECT_IND', (data) => self._on_network_reject(data));
+
+		// one function per name: a closure made in a loop body would see the
+		// loop variable's LAST value in every handler
+		let on_ca = (name) => self.nas.on(name, (data) => self._ca_changed(name, data));
+
+		map([ 'LTE_CPHY_CA_IND', 'LTE_CPHY_CA_AGG_DL_BW_IND', 'LTE_CPHY_CA_AGGREGATED_IND',
+		      'NR5G_CA_SIG_INFO_IND', 'NR5G_SERVING_CELL_FREQ_INFO_IND',
+		      'NR5G_RRC_BWP_INFO_IND' ], on_ca);
+	};
+
+	// A registration the network refused, as it happens. The cause goes to
+	// reg_detail at once while the modem is not registered — the system info
+	// read leaves it empty on many modems, and AT+CEER is not asked before
+	// the registration probe — and stays in last_reject for that probe
+	// (regdetail.uc). A modem retries a refused attach several times and
+	// reports each one: the first is a notice, the repeats are debug.
+	self._on_network_reject = function(data) {
+		let r = qmi_backend.network_reject(data);
+
+		if (!r)
+			return;
+
+		let line = qmi_backend.reject_line(r);
+		let n = (self.last_reject?.line == line) ? self.last_reject.count + 1 : 1;
+
+		self.last_reject = { ...r, line: line, count: n, at: time() };
+		log(n == 1 ? 'notice' : 'debug', sprintf('network reject: %s%s', line,
+			n > 1 ? sprintf(' (%d times)', n) : ''));
+
+		// a reject of one domain on a modem that is registered (the CS half
+		// of a combined attach) is logged, and is not why it is "not
+		// registered"
+		if (self.reg?.registration == nasmod.REG_REGISTERED)
+			return;
+
+		let d = qmi_backend.with_reject(self.reg_detail, r);
+
+		d.reject_text = nasmod.REJECT_CAUSE[sprintf('%d', r.reject_cause)] ??
+			sprintf('reject cause %d', r.reject_cause);
+		delete d.stale;
+		self.reg_detail = d;
+	};
+
+	// A carrier-aggregation indication is a TRIGGER, not a source: the carrier
+	// list is read again through the ladder the telemetry tick uses
+	// (_fetch_ca_info), so the status page follows an SCell coming or going
+	// within a second instead of at the next slow tick. The settle time folds
+	// the burst a reconfiguration sends (one indication per SCell) into one
+	// read.
+	self._ca_changed = function(name, data) {
+		log('debug', sprintf('carrier aggregation changed (%s%s)', name,
+			data?.aggregated_dl_bw != null
+				? sprintf(', aggregated DL bandwidth %d', data.aggregated_dl_bw) : ''));
+
+		if (self.state != 'READY' || !self.cells || tm.ca_ind)
+			return;
+
+		tm.ca_ind = uloop.timer(1000, () => {
+			tm.ca_ind = null;
+
+			if (self.state == 'READY' && self.nas && self.cells)
+				self._fetch_ca_info(() => null);
+		});
+	};
+
+	// The indications beyond the three the bring-up needs, each in a request
+	// of its own and best effort: a firmware answers MissingArgument when it
+	// knows none of the TLVs in a request (schema/nas.uc REGISTER_INDICATIONS),
+	// and that must cost neither the others nor the registration.
+	self._arm_nas_indications = function() {
+		if (!self.nas || self._nas_ind_armed)
+			return;
+
+		self._nas_ind_armed = true;
+
+		let arm = (what, args) => self.nas.request('REGISTER_INDICATIONS', args, (e) => {
+			if (e && e.error != 'cancelled')
+				log('debug', sprintf('%s indications not available: %J', what, e));
+		}, { no_recovery: true });
+
+		arm('network reject', { network_reject: { enable: 1, suppress_system_info: 0 } });
+		arm('LTE carrier aggregation', { lte_cphy_ca: 1 });
+		arm('LTE aggregated carrier', { lte_cphy_ca_aggregated: 1 });
+		arm('NR carrier aggregation', { nr5g_ca_sig_info: 1 });
+		arm('NR cell frequency', { nr5g_cell_freq_info: 1 });
+		arm('NR bandwidth part', { nr5g_bwp_info: 1 });
+	};
+
+	// The modem-wide WDS indications, on the configuration client. Only the
+	// attach parameters have been seen on the wire (schema/wds.uc); the other
+	// three are logged and shown, and nothing acts on them.
+	self._install_wds_handlers = function() {
+		let wds = self.wds_cfg;
+
+		let set_attach = (a) => {
+			let was = self.attach_info;
+
+			// the failure belongs to the attempt it ended: kept across the
+			// "detached" that follows it, dropped by the next attach
+			if (a.state_text != 'attached' && was?.failure)
+				a.failure = was.failure;
+
+			self.attach_info = a;
+
+			if (a.state_text == was?.state_text && a.apn == was?.apn && a.pdp_type == was?.pdp_type)
+				return;
+
+			log('info', a.state_text == 'attached'
+				? sprintf('LTE attach: APN %s, %s', a.apn ?? '(none)', a.pdp_type ?? '?')
+				: 'LTE detached');
+		};
+
+		wds.on('LTE_ATTACH_PARAMS_IND', (data) => {
+			self._attach_pushed = true;
+			set_attach(qmi_backend.lte_attach(data));
+		});
+
+		wds.on('LTE_ATTACH_FAILURE_INFO_IND', (data) => {
+			let f = qmi_backend.attach_failure(data);
+
+			if (!f)
+				return;
+
+			log('notice', sprintf('LTE attach failed: %s%s', f.text ?? sprintf('type %d cause %d', f.type, f.code),
+				f.plmn ? sprintf(' (%s)', f.plmn) : ''));
+			self.attach_info = { ...(self.attach_info ?? { source: 'qmi' }), failure: { ...f, at: time() } };
+		});
+
+		wds.on('RAB_REJECT_IND', (data) => {
+			log('notice', sprintf('service request refused: %s',
+				qmi_backend.rab_reject_text(data?.cause)));
+		});
+
+		wds.on('IPV6_PREFIX_UPDATE_IND', (data) => {
+			if (!data?.prefix)
+				return;
+
+			log('info', sprintf('IPv6 prefix update: %s/%d %s %s', data.prefix.addr, data.prefix.plen,
+				data.type == 2 ? 'multihoming' : 'candidate',
+				[ '?', 'added', 'promoted', 'removed' ][data.status] ?? '?'));
+		});
+
+		self._read_lte_attach = () => wds.request('GET_LTE_ATTACH_PARAMS', {}, (e, d) => {
+			// An indication THIS incarnation received is the newer word.
+			// What attach_info holds is no measure of that: it outlives a
+			// teardown, and a modem that came back attached to another APN
+			// sends no indication to say so.
+			if (!e && !self._attach_pushed)
+				set_attach(qmi_backend.lte_attach(d));
+		}, { no_recovery: true });
+	};
+
+	// Best effort and unverifiable by its answer: a firmware returns success
+	// for a registration TLV it does not know (schema/wds.uc
+	// INDICATION_REGISTER). The read that follows fills attach_info for an
+	// attach that happened before anyone listened.
+	self._arm_wds_indications = function() {
+		if (!self.wds_cfg || self._wds_ind_armed)
+			return;
+
+		self._wds_ind_armed = true;
+		self.wds_cfg.request('INDICATION_REGISTER', {
+			lte_attach_params: 1, rab_reject: 1, lte_attach_failure: 1, ipv6_prefix_update: 1,
+		}, (e) => {
+			if (e && e.error != 'cancelled')
+				log('debug', sprintf('wds indication register failed: %J', e));
+		}, { no_recovery: true });
 	};
 
 	// enable the NAS event report (RF band + reject reason). Separate from
@@ -1517,6 +1882,7 @@ export function create(opts)
 
 		if (ss.registration == nasmod.REG_REGISTERED) {
 			self._reg_released = false;
+			self.last_reject = null;
 
 			if (self.state == 'REGISTERING') {
 				if (tm.reg) {
@@ -1526,6 +1892,7 @@ export function create(opts)
 
 				self.counters.attempts = 0;
 				self.reg_detail = null;   // registered: clear any stale reject info
+				self._read_lte_attach?.();
 				// woken from a park at init (a plugin's hold): this READY
 				// entry emits `registered` itself — the parked-while-READY
 				// re-emit below must not add a second one later
@@ -1609,9 +1976,12 @@ export function create(opts)
 
 		let begin = chain.begin;
 
-		// old 'delay' option: wait before touching the modem
+		// old 'delay' option: wait before touching the modem. Its own slot:
+		// tm.settle belongs to the init chain's settle waits (see "each wait
+		// owns its own timer" above), and the teardown cancel pass covers
+		// every slot in `tm`, this one included.
 		if (+(self.config.delay ?? 0) > 0)
-			tm.settle = uloop.timer(+self.config.delay * 1000, begin);
+			tm.delay = uloop.timer(+self.config.delay * 1000, begin);
 		else
 			begin();
 	};
@@ -1649,7 +2019,7 @@ export function create(opts)
 			if (t)
 				t.cancel();
 
-		tm.retry = tm.reg = tm.settle = tm.at_drain = tm.probe = tm.init_reset = null;
+		tm.retry = tm.reg = tm.settle = tm.delay = tm.at_drain = tm.probe = tm.init_reset = tm.reset_watch = tm.ca_ind = null;
 
 		// a settle wait cancelled just above never runs its body, so the
 		// continuation it owed is paid here instead — otherwise a ubus reattach
@@ -1768,7 +2138,12 @@ export function create(opts)
 		// back to polling) — for the whole remaining life of the daemon, with
 		// nothing in the log to say so.
 		self._nas_evt_armed = false;
+		self._nas_ind_armed = false;
+		self._wds_ind_armed = false;
+		self._attach_pushed = false;
+		self._ca_busy = self._ca_again = false;
 		self._dsd_ind_armed = false;
+		self.last_reject = null;
 		// ...and WMS, which is worse than the other two: it is allocated lazily
 		// on the first SMS op and cached. Left set, a retry handed every later
 		// SMS the OLD client — bound to a hub that is closed — and never

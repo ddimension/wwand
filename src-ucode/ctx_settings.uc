@@ -42,7 +42,7 @@ function v6_out(v6)
 // through the reload trigger). entry.cfg is the object the context reads live,
 // so updating it in place makes the next activation use the fresh values.
 const CTX_LIVE_FIELDS = [ 'apn', 'pdp_type', 'auth', 'username', 'password',
-                          'profile', 'mtu', 'use_pushed_mtu', 'ip6ifaceid' ];
+                          'profile', 'mtu', 'use_pushed_mtu', 'ip6ifaceid', 'iccid' ];
 
 export function install(self, o)
 {

@@ -64,4 +64,15 @@ eq(callend.describe(503, null).text, 'call ended (reason 503)', 'coarse reason f
 eq(callend.describe(null, null, 42).text, 'activation failed (ext error 42)', 'ext-error fallback');
 eq(callend.describe(null, null), null, 'nothing -> null');
 
+// the modem's PDN back-off: internal 209/211/258, typed
+ok(callend.throttled({ type: 2, reason: 209 }) && callend.throttled({ type: 2, reason: 211 }) &&
+   callend.throttled({ type: 2, reason: 258 }), 'throttled: internal 209/211/258');
+ok(!callend.throttled({ type: 6, reason: 209 }) && !callend.throttled(null), 'throttled: other types and none are not');
+
+// the mirror: the network's "no IPv4", internal 208 and 3GPP 51, typed
+ok(callend.ipv4_refused({ type: 2, reason: 208 }) && callend.ipv4_refused({ type: 6, reason: 51 }),
+   'ipv4_refused: internal 208, 3GPP 51');
+ok(!callend.ipv4_refused({ type: 3, reason: 51 }) && !callend.ipv4_refused({ type: 2, reason: 210 }) &&
+   !callend.ipv4_refused(null), 'ipv4_refused: other types, the v6 refusal and none are not');
+
 done('test_callend');

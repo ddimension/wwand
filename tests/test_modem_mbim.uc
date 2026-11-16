@@ -30,6 +30,7 @@ import * as wmsmod from 'wwand/codec/schema/wms.uc';
 import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
 import * as ext from 'wwand/codec/mbim_schema/ms_basic_connect_ext.uc';
 import * as quectel from 'wwand/codec/mbim_schema/quectel.uc';
+import * as fibocom from 'wwand/codec/mbim_schema/fibocom.uc';
 import * as voice from 'wwand/codec/mbim_schema/ms_voice_ext.uc';
 import * as mbimcodec from 'wwand/codec/mbim.uc';
 
@@ -516,6 +517,90 @@ function assert_subscribe_list() {
 	ms.start();
 }
 
+// THE FOXCONN FCC LOCK OVER MBIM. A T99W175 that boots with Foxconn ids
+// (^CUSTOMER 6, 105b:e0ab) is FCC-locked: the switch to on leaves the software
+// radio off, which ModemManager answers with its 105b unlock over the QMI
+// passthrough (mrhaav, ddimension/wwand#75). The passthrough is stood in for:
+// the lock lifts once the unlock was accepted, and the radio is switched on
+// again. A modem of another vendor whose radio refuses gets no unlock.
+function assert_foxconn_fcc() {
+	let sw_off = (meta) => ({ hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_OFF });
+	// the three answers ModemManager reads as an FCC lock
+	// (mm-broadband-modem-mbim.c:2088-2129, 1.24.0): the set refused, the
+	// software radio still off after it, the hardware radio off
+	let refused = (meta) => (meta.kind == 'set') ? { __error: 2 } : sw_off(meta);
+	let hw_off = (meta) => ({ hw_radio_state: bc.RADIO_STATE_OFF, sw_radio_state: bc.RADIO_STATE_OFF });
+	let fw = { firmware_info: 'T99W175.F0.1.0.0.9.GC.004', hardware_info: 'QUALCOMM INCORPORATED' };
+
+	let run = (caps, locked, k) => {
+		let h = handlers();
+		let unlocked = false, asked = [];
+
+		h.DEVICE_CAPS = { ...h.DEVICE_CAPS, ...caps };
+		h.RADIO_STATE = (args, meta) => (meta.kind == 'set' && unlocked)
+			? { hw_radio_state: bc.RADIO_STATE_ON, sw_radio_state: bc.RADIO_STATE_ON }
+			: locked(meta);
+
+		let mk = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h });
+		let m = null, settled = false;
+		let end = () => {
+			if (settled)
+				return;
+
+			settled = true;
+			k(m, mk, asked);
+		};
+
+		m = modem_mbim.create({
+			id: 'm_fox', device: '/dev/mockfox',
+			config: { apn: 'internet' },
+			timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+			at: { fx: { read: () => null, glob: () => [] } },
+			datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+			deps: {
+				transport_open: mk.transport_open,
+				log: () => null,
+				on_event: (mm, event) => {
+					if (event == 'registered')
+						end();
+				},
+			},
+		});
+
+		m._pt_fcc_foxconn = (cfg, md5, cb) => {
+			push(asked, cfg);
+			unlocked = true;
+			cb(null, 'foxconn2');
+		};
+
+		m.start();
+
+		// a modem whose radio stays off never registers: give up after a while
+		uloop.timer(400, end);
+	};
+
+	let unlocks = (what, locked, k) => run(fw, locked, (m, mk, asked) => {
+		let sets = filter(mk.calls, (c) => c.name == 'RADIO_STATE' && c.kind == 'set');
+
+		eq(length(asked), 1, sprintf('foxconn fcc (%s): the unlock runs once', what));
+		eq(length(sets) >= 2, true, sprintf('foxconn fcc (%s): ...and the radio is switched on again after it', what));
+		eq(m.state, 'READY', sprintf('foxconn fcc (%s): the modem registers once unlocked', what));
+		eq(m.radio, { hw: bc.RADIO_STATE_ON, sw: bc.RADIO_STATE_ON },
+			sprintf('foxconn fcc (%s): the radio reads on afterwards', what));
+		m.stop();
+		k();
+	});
+
+	unlocks('sw left off', sw_off, () =>
+	unlocks('set refused', refused, () =>
+	unlocks('hw off', hw_off, () =>
+	run({}, sw_off, (m2, mk2, asked2) => {
+		eq(length(asked2), 0, 'foxconn fcc: a modem of another vendor gets no Foxconn unlock');
+		m2.stop();
+		finish();
+	}))));
+}
+
 // at all, so a future "just always write it" cannot pass both halves.
 function assert_radio_off() {
 	let h3 = handlers();
@@ -574,7 +659,7 @@ function assert_radio_off() {
 					'radio: a modem already on is left alone');
 
 				m3.stop();
-				finish();
+				assert_foxconn_fcc();
 			},
 		},
 	});
@@ -969,7 +1054,7 @@ assert_sim_poll_teardown();
 
 	// ...and it stays balanced when a client destroy pays a callback that
 	// throws. Destroying a client runs its pending callbacks synchronously
-	// (client.uc:225, mbim_client.uc:679) and those are not ours; an unguarded
+	// (client.uc:249, mbim_client.uc:679) and those are not ours; an unguarded
 	// throw would skip the decrement and leave the depth raised for the life of
 	// the object, after which make_fail refuses every retry. Review follow-up,
 	// 2026-09-19.
@@ -992,7 +1077,7 @@ assert_sim_poll_teardown();
 	// catch around the whole passthrough block let the first bad destroy strand
 	// the remaining clients and the shim, after which `self.pt = null` dropped
 	// the only handle to a shim still open with clients on it
-	// (qmi_over_mbim.uc:135). Raised by review, 2026-09-19.
+	// (qmi_over_mbim.uc:137). Raised by review, 2026-09-19.
 	let m5 = modem_mbim.create({
 		id: 'teardown-partial', device: '/dev/mock4', config: {},
 		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
@@ -1174,7 +1259,7 @@ uloop.run();
 //
 // pt.nas / pt.dsd were destroyed and uim / wms were not even that, and none of
 // the four was ever RELEASED — client.destroy() deliberately does not
-// (client.uc:209). Closing the HOST's MBIM session is not shown to reset the
+// (client.uc:233). Closing the HOST's MBIM session is not shown to reset the
 // modem's embedded QMI client table, so every daemon reload leaked up to four
 // CIDs out of a table that has room for a handful on the E182E class. The
 // native side has done this burst since modem.uc:1693. Raised by Codex review,
@@ -1806,6 +1891,57 @@ function assert_mbim_hold_at_init() {
 }
 
 assert_mbim_hold_at_init();
+
+// a burst of register reports while registration is lost: one loss, one
+// registration. The state turns REGISTERING only once the radio-state query
+// and the preferred-list reads have answered, and a band/RAT change sends
+// many reports before that (ddimension/wwand#75).
+function assert_mbim_loss_burst() {
+	uloop.init();
+
+	let st = { on: true };
+	let mock = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: radio_modem_handlers(st) });
+	let events = [], seen = {};
+	let m = mk_radio_modem('m_burst', mock, events);
+
+	m.start();
+
+	uloop.timer(150, () => {
+		seen.ready = m.state;
+		seen.queries = length(filter(mock.calls, (c) => c.name == 'RADIO_STATE' && c.kind == 'query'));
+		st.on = false;
+		for (let i = 0; i < 5; i++)
+			reg_ind(mock, false);
+	});
+
+	uloop.timer(300, () => {
+		seen.lost = length(filter(events, (e) => e == 'deregistered'));
+		seen.requery = length(filter(mock.calls, (c) => c.name == 'RADIO_STATE' && c.kind == 'query')) - seen.queries;
+		st.on = true;
+		reg_ind(mock, true);
+	});
+
+	uloop.timer(450, () => {
+		seen.final = m.state;
+		st.on = false;
+		reg_ind(mock, false);
+	});
+
+	uloop.timer(600, () => {
+		seen.lost2 = length(filter(events, (e) => e == 'deregistered'));
+		m.stop();
+		uloop.timer(20, () => uloop.end());
+	});
+	uloop.run();
+
+	eq(seen.ready, 'READY', 'mbim loss burst: READY before the loss');
+	eq(seen.lost, 1, 'mbim loss burst: five reports are one loss');
+	eq(seen.requery, 1, 'mbim loss burst: ...and start one registration');
+	eq(seen.final, 'READY', 'mbim loss burst: READY again once registered');
+	eq(seen.lost2, 2, 'mbim loss burst: the next loss is reported again');
+}
+
+assert_mbim_loss_burst();
 
 // the park of a running modem: a lost registration is its consequence, the
 // wake's registration is reported
@@ -2562,6 +2698,250 @@ assert_ready_state_reinit(false, 'ready-state reinit/stuck');
 	ok(length(sets) && index(sets[0], "s\x00t\x00a\x00l\x00e\x00") < 0,
 		'mbim attach: ...with the empty APN, the stale one is gone');
 	eq(m._attach_pending, false, 'mbim attach: ...and only once');
+}
+
+// --- option modes (#75) -------------------------------------------------------
+// Over the QMI passthrough's NAS when there is one, as ModemManager 1.24.0
+// does; the Register State DataClass only without it, CUSTOM in place of the
+// class it stands for (ModemManager's denormalize). The mock modem keeps
+// what a set sends minus the bits it drops (or nothing, told to ignore it),
+// and answers the set with the state after it, as a real one does. `o.nas`
+// gives the modem a passthrough NAS holding that mode preference.
+function run_modes(label, o) {
+	uloop.init();
+
+	let x55 = ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA |
+		ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM;
+	let caps = o.caps ?? x55;
+	let st = { pref: o.pref ?? caps };
+	let h = handlers();
+
+	h.DEVICE_CAPS = { ...h.DEVICE_CAPS, data_class: caps, custom_data_class: o.custom ?? '5G UWB',
+		hardware_info: 'Qualcomm Snapdragon X55 5G' };
+
+	let reg = h.REGISTER_STATE;
+
+	h.REGISTER_STATE = (args, meta) => {
+		if (meta.kind == 'set' && !o.ignore_set)
+			st.pref = args.data_class & ~(o.drop ?? ext.DATA_CLASS_5G_SA);
+
+		let r = { ...reg, register_mode: o.manual ? bc.REGISTER_MODE_MANUAL : bc.REGISTER_MODE_AUTOMATIC };
+
+		if (o.manual)
+			r.provider_id = '24008';
+
+		r.preferred_data_classes = st.pref;
+
+		return r;
+	};
+
+	// a v1 modem: the handshake agreed no extensions, so the reply has no
+	// PreferredDataClasses (the mock would encode an absent field as 0)
+	let mock = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: h,
+		mbimex_version: o.v1 ? 0 : 0x0300 });
+	let seen = null;
+	let m = modem_mbim.create({
+		id: 'm_modes_' + label, device: '/dev/mock_modes_' + label,
+		config: { apn: 'internet', modes: o.modes },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: {
+			transport_open: mock.transport_open,
+			log: () => null,
+			on_event: (mm, event) => {
+				if (event != 'registered' || seen)
+					return;
+
+				seen = {
+					sets: map(filter(mock.calls, (c) => c.name == 'REGISTER_STATE' && c.kind == 'set'),
+						(c) => c.args),
+					warnings: filter(mm.config_warnings ?? [], (w) => w.check == 'mode_preference'),
+					dc: mm._modes_data_class,
+				};
+
+				if (o.netsel)
+					mm.native_register(null, (e) => { seen.netsel = e; });
+			},
+		},
+	});
+
+	let nas_sets = [];
+
+	if (o.nas)
+		m.with_nas = (cb) => cb({
+			request: (name, args, rcb) => {
+				if (name == 'GET_SYSTEM_SELECTION_PREFERENCE')
+					return rcb(null, { mode_preference: o.nas.mode_preference });
+
+				// the other NAS readers of the bring-up get an empty answer
+				if (name != 'SET_SYSTEM_SELECTION_PREFERENCE')
+					return rcb(null, {});
+
+				push(nas_sets, args);
+				o.nas.mode_preference = args.mode_preference;
+				rcb(o.nas.fail ? { error: 'qmi', code: 1 } : null, {});
+			},
+		});
+
+	m.start();
+	uloop.timer(400, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+	uloop.run();
+
+	if (seen)
+		seen.nas_sets = nas_sets;
+
+	return seen ?? { sets: null, warnings: null };
+}
+
+{
+	let LTE_NR = ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_CUSTOM;
+	let auto = (dc) => ({ provider_id: null, register_action: bc.REGISTER_ACTION_AUTOMATIC, data_class: dc });
+	let NAS_LTE_NR = nasmod.MODE_BITS.lte | nasmod.MODE_BITS.nr5g;
+
+	// without a passthrough: ModemManager's mask, CUSTOM for the 5G SA it
+	// stands for on an X55 whose caps list 5G_NSA ("5G UWB")
+	let r = run_modes('x55', { modes: 'lte,nr5g' });
+	// the empty provider id of an automatic set decodes as null in the mock
+	eq(r.sets, [ auto(LTE_NR) ], 'mbim modes: no passthrough: lte,nr5g goes out with CUSTOM for the class it stands for');
+	eq([ r.warnings, r.dc ], [ [], LTE_NR ], 'mbim modes: ...read back as held, the mask kept for a network selection');
+
+	r = run_modes('held', { modes: 'lte,nr5g', pref: LTE_NR });
+	eq(r.sets, [], 'mbim modes: a modem already on them is not re-registered');
+
+	// F0.1.0.0.9 caps ("5G" without 5G_NSA in the caps: CUSTOM = NSA)
+	let f01 = { caps: ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA |
+		ext.DATA_CLASS_LTE | ext.DATA_CLASS_CUSTOM, custom: '5G' };
+
+	r = run_modes('f01', { ...f01, modes: 'nr5g' });
+	eq(r.sets, [ auto(ext.DATA_CLASS_5G_SA | ext.DATA_CLASS_CUSTOM) ],
+		'mbim modes: no passthrough: nr5g is CUSTOM for NSA plus the SA bit, as ModemManager sends it');
+
+	// with a passthrough: the NAS mode preference, never the DataClass
+	r = run_modes('nas', { ...f01, modes: 'lte,nr5g', nas: { mode_preference: nasmod.MODE_BITS.lte |
+		nasmod.MODE_BITS['td-scdma'] | nasmod.MODE_BITS.nr5g } });
+	eq(r.sets, [], 'mbim modes: passthrough: no Register State set at all');
+	eq(r.nas_sets, [ { mode_preference: NAS_LTE_NR, change_duration: 1 } ],
+		'mbim modes: passthrough: lte,nr5g is the NAS mode preference lte|5gnr — the td-scdma CUSTOM had added goes');
+	eq([ r.warnings, r.dc ], [ [], ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_SA | ext.DATA_CLASS_CUSTOM ],
+		'mbim modes: passthrough: no warning; a native selection without the passthrough would still send the modes, not 0');
+
+	// td-scdma has no MBIM class: a native selection would widen the modes
+	// to "any" or drop it, so it refuses
+	r = run_modes('nas_tds', { ...f01, modes: 'td-scdma', netsel: true, nas: { mode_preference: NAS_LTE_NR } });
+	eq(r.nas_sets, [ { mode_preference: nasmod.MODE_BITS['td-scdma'], change_duration: 1 } ],
+		'mbim modes: passthrough: td-scdma is written over NAS');
+	eq(r.netsel?.error, 'modes_not_mbim', 'mbim modes: ...and a native selection refuses rather than send 0');
+
+	r = run_modes('nas_held', { ...f01, modes: 'lte,nr5g', pref: LTE_NR, nas: { mode_preference: NAS_LTE_NR } });
+	eq([ r.sets, r.nas_sets ], [ [], [] ], 'mbim modes: passthrough: already held, nothing written');
+
+	r = run_modes('nas_fail', { ...f01, modes: 'lte', nas: { mode_preference: NAS_LTE_NR, fail: true } });
+	eq(length(r.warnings), 1, 'mbim modes: passthrough: a refused write is reported');
+
+	r = run_modes('manual', { modes: 'lte', manual: true });
+	eq(r.sets, [ { provider_id: '24008', register_action: bc.REGISTER_ACTION_MANUAL, data_class: ext.DATA_CLASS_LTE } ],
+		'mbim modes: a manually selected network stays selected');
+
+	r = run_modes('ignored', { modes: 'lte', ignore_set: true });
+	eq(length(r.sets), 1, 'mbim modes: a firmware that keeps its own is written once');
+	eq(map(r.warnings, (w) => w.actual), [ 'umts,lte,nr5g' ],
+		'mbim modes: ...and reported with what it kept');
+
+	r = run_modes('v1', { modes: 'lte', v1: true });
+	eq(r.sets, [], 'mbim modes: without PreferredDataClasses nothing is sent blind');
+	eq(length(r.warnings), 1, 'mbim modes: ...and, with no passthrough either, reported as not applied');
+
+	r = run_modes('unset', { modes: null });
+	eq([ r.sets, r.warnings ], [ [], [] ], 'mbim modes: unset, the modem keeps its own');
+}
+
+// --- a forced AT tunnel runs the init list too (#75) -------------------------
+// `option at_over_mbim` hands the modem its AT engine without a tty; the init
+// steps (here the 5G NR mode of a T99W175) must run there as on a tty.
+{
+	uloop.init();
+
+	let h = handlers();
+	let sent = [];
+
+	let mock;
+
+	h.DEVICE_CAPS = { ...h.DEVICE_CAPS, firmware_info: 'T99W175.F0.1.0.0.9.SC.005' };
+	h.AT_COMMAND = (args, meta) => {
+		// the raw request bytes, as the mock recorded them: the AT line
+		let line = trim(replace(sprintf('%s', mock.calls[length(mock.calls) - 1].info ?? ''), /\r/g, ''));
+
+		push(sent, line);
+
+		if (line == 'AT^NR5G_MODE?')
+			return { __raw: sprintf("\r\n^NR5G_MODE:%d\r\n\r\nOK\r\n", (index(sent, 'AT^NR5G_MODE=2') >= 0) ? 2 : 1) };
+
+		return { __raw: "\r\nOK\r\n" };
+	};
+
+	mock = mbim_mockhub.create({ schemas: [ bc, ext, fibocom ], handlers: h, mbimex_version: 0x0300 });
+	let m = modem_mbim.create({
+		id: 'm_aom', device: '/dev/mock_aom',
+		config: { apn: 'internet', at_over_mbim: 'fibocom', nr5g_mode: 'sa' },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: { transport_open: mock.transport_open, log: () => null, on_event: () => null },
+	});
+
+	m.start();
+	uloop.timer(400, () => { m.stop(); uloop.timer(20, () => uloop.end()); });
+	uloop.run();
+
+	ok(index(sent, 'AT^NR5G_MODE=2') >= 0, 'at_over_mbim: the forced tunnel runs the init list (nr5g_mode sa written)');
+	eq(filter(m.config_warnings ?? [], (w) => w.check == 'nr5g_mode'), [], 'at_over_mbim: ...and the T99W175 is recognised');
+}
+
+// RAW MBIM COMMAND (wwandctl mbim): a refusal is an answer, the QMI
+// passthrough cannot be reached from here (its never-SYNC block sits in
+// qmi_over_mbim.send, which this path would pass by)
+{
+	uloop.init();
+	let m = modem_mbim.create({
+		id: 'm_raw', device: '/dev/mockat', config: {},
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		deps: { log: () => null, on_event: () => null },
+	});
+	let got = [], calls = [];
+	let take = (e, r) => push(got, e ?? r);
+
+	m.mbim = null;
+	m.mbim_raw({ service: 'basic_connect', cid: 1, kind: 'query' }, take);
+
+	m.mbim = { opened: true, destroy: () => null,
+		command_raw: (svc, cid, info, cb, opts) => {
+			push(calls, [ svc, cid, info, opts.cmd_type, opts.no_recovery, opts.keep_info ]);
+			if (cid == 1)
+				return cb(null, "\xab");
+			if (cid == 2)
+				return cb({ error: 'mbim', status: 9, info: "\x6a\x82" }, null);
+			cb({ error: 'timeout' }, null);
+		},
+	};
+	m.mbim_raw({ service: 'nope', cid: 1 }, take);
+	m.mbim_raw({ service: 'qmi_passthrough', cid: 1 }, take);
+	m.mbim_raw({ service: 'basic_connect', cid: 1, kind: 'query', info: '' }, take);
+	m.mbim_raw({ service: 'ms_uicc_low_level', cid: 2, kind: 'set', info: "\x01" }, take);
+	m.mbim_raw({ service: 'basic_connect', cid: 3 }, take);
+
+	eq(map(slice(got, 0, 3), (g) => g.error), [ 'not_ready', 'invalid_service', 'refused' ],
+		'mbim raw: not open, an unknown service, and the QMI passthrough are refused before sending');
+	eq(got[3], { status: 0, status_name: mbimcodec.status_name(0), info: "\xab" }, 'mbim raw: a success with its buffer');
+	eq(got[4], { status: 9, status_name: mbimcodec.status_name(9), info: "\x6a\x82" },
+		'mbim raw: a failure status is an answer, with the buffer that came along');
+	eq(got[5]?.error, 'timeout', 'mbim raw: no answer is the error');
+	eq(map(calls, (c) => [ c[1], c[3], c[4], c[5] ]),
+		[ [ 1, mbimcodec.CMD_QUERY, true, true ], [ 2, mbimcodec.CMD_SET, true, true ], [ 3, mbimcodec.CMD_QUERY, true, true ] ],
+		'mbim raw: query or set as asked, outside recovery, the refusal buffer kept');
+	eq(calls[0][0], 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df', 'mbim raw: the service by its UUID');
 }
 
 done('test_modem_mbim');

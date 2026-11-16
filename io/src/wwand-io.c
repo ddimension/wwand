@@ -2141,10 +2141,15 @@ static const uc_function_list_t global_fns[] = {
 	{ "syslog_close",  qmit_syslog_close },
 };
 
+/* wwand-xfrm.c: the generic NETLINK_XFRM binding, registered as scope.xfrm */
+void wwand_xfrm_register(uc_vm_t *vm, uc_value_t *scope);
+
 void
 uc_module_init(uc_vm_t *vm, uc_value_t *scope)
 {
 	uc_function_list_register(scope, global_fns);
 
 	transport_type = uc_type_declare(vm, "wwand.io", transport_fns, qmit_free);
+
+	wwand_xfrm_register(vm, scope);
 }
