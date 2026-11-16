@@ -1,6 +1,6 @@
 # wwand — current state
 
-_State of 2026-11-02: stable **v1.8.0** (feed release `2026.11.02`), main **v1.9.0-dev**.
+_State of 2026-11-16: stable **v1.9.0** (feed stable building, release tag pending), main **v1.10.0-dev**.
 65 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
 which moves too often to be worth repeating here)._
 
@@ -11,16 +11,21 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
-- **Release 1.8.0 (2026-11-01, released 2026-11-02):** main merged into
-  stable in wwand and luci-app-wwand (stable's own commits were all
-  cherry-picks, so the merged tree is main's), tagged `v1.8.0` there,
-  `v1.9.0-dev` on main. luci-proto-wwand had nothing new and stays at
-  v1.7.0; wwand-rsim got `v0.1.1`. Feed stable pins wwand 1.8.0 /
-  luci-app-wwand 1.8.0 / wwand-rsim 0.1.1; its build went green and the
-  release tag `2026.11.02` is pushed — the images build from it, check that
-  run. Feed main: wwand `1.8.0_pre48`, luci-app-wwand `1.9.0_pre2` (Polish
-  translation, `luci-i18n-wwand-pl`, #73). **Do not push to the feed while a
-  build of the same branch runs** — a push cancels it.
+- **Release 1.9.0 (2026-11-16):** main merged into stable in wwand,
+  luci-app-wwand and luci-proto-wwand (stable's own commits were all
+  cherry-picks, so the merged tree is main's). Tags on stable: wwand
+  `v1.9.0`, luci-app-wwand `v1.9.0`, luci-proto-wwand `v1.8.0` (its own
+  count; it had skipped 1.8.0 with nothing new). Markers on main:
+  `v1.10.0-dev`, `v1.10.0-dev`, `v1.9.0-dev`. wwand-ims has its first
+  release: a `stable` branch, `v0.1.0` there, `v0.2.0-dev` on main. Feed
+  stable takes the package definitions from feed main (wwand-ims is new
+  there) and pins the tags; **a push to feed stable only builds — the date
+  tag (`scripts/release-stable.sh`) is still to be set once that build is
+  green.** For the release notes: the QMAP DL aggregation default of 31744
+  bytes now applies to every modem and, through the modem's echo, to the
+  host's uplink aggregation as well (`option dl_datagram_max_size`
+  overrides it per modem). **Do not push to the feed while a build of the
+  same branch runs** — a push cancels it.
 - **Pre-release review of main since v1.8.0 (2026-11-16):** five readers
   over the diff, nothing release-blocking; fixed from it: a two-step card
   switch of an `option iccid` interface (slot, then eSIM profile) released
