@@ -42,13 +42,16 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   configure-time capability probe checks the host ucode can actually emit a
   bytecode module with these flags — an older/absent ucode DOES NOT fail the
   build, it ships the ucode SOURCE instead (functional, no bytecode start-up
-  win). That is not hypothetical and not a defect: **openwrt-25.12 ships source,
-  snapshot ships bytecode**, because 25.12's ucode (2026.01.16) does not know
-  `-cmodule` at all — it ignores the flag, compiles the file as a program, and
-  `export` is illegal there. Nor is there a way around it: that interpreter
-  cannot even LOAD a bytecode module (it reads the file as source and stops at
-  the magic), so producing them elsewhere does not help. It flips by itself once
-  the branch carries a newer ucode. Note the coupling is to the ucode VERSION,
+  win). That is not hypothetical and not a defect: ucode 2026.01.16 (the
+  openwrt-25.12 images up to 25.12.6) does not know `-cmodule` at all — it
+  ignores the flag, compiles the file as a program, and `export` is illegal
+  there. Nor is there a way around it: that interpreter cannot even LOAD a
+  bytecode module (it reads the file as source and stops at the magic), so
+  producing them elsewhere does not help. The 25.12 branch moved to ucode
+  2026.07.09 on 2026-11-11 and its package repository serves it to 25.12.x
+  routers, so 25.12 builds since then ship bytecode too, depending on
+  `ucode >= 2026.07.09` (feed stable 1.8.0 for 25.12, built before, is source;
+  memory: 5.1 MB RSS as bytecode vs 10.8 MB as source, README). Note the coupling is to the ucode VERSION,
   not the target: bytecode is architecture-independent (a module from the
   aarch64 package loads in an x86-64 interpreter). Dev opt-out:
   `CONFIG_WWAND_UCODE_SOURCE` (feed menuconfig) / `-DUCODE_PRECOMPILE=OFF`.
