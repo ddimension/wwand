@@ -238,7 +238,9 @@ function nr5g_identity(spec)
 	let scs = m ? nasmod.NR5G_SCS[m[3]] : null;
 	let band = m ? +m[4] : 0;
 
-	if (scs == null || band < 1 || band > 512)
+	// the fields are u16 / u32: a value they cannot hold makes the encoder
+	// throw, and sync would then never call back (see the LTE list below)
+	if (scs == null || band < 1 || band > 512 || +m[1] > 0xffff || +m[2] > 0xffffffff)
 		return null;
 
 	let id = { pci: +m[1], scs: scs, arfcn: +m[2] };
@@ -302,7 +304,7 @@ const QMI = {
 
 				if (!id) {
 					push(errs, { command: 'SET_NR5G_CELL_CONFIG', error: { error: 'invalid',
-						detail: 'scs must be 15/30/60/120/240 kHz and the band 1..512' } });
+						detail: 'the PCI must fit 16 bits, the ARFCN 32, the scs be 15/30/60/120/240 kHz and the band 1..512' } });
 					return cb(errs);
 				}
 
@@ -326,11 +328,16 @@ const QMI = {
 			return { pci: +m[2], freq: +m[1] };
 		});
 
-		// the u16 generation would wrap an EARFCN above 65535 into another
-		// frequency — refuse rather than lock the modem onto the wrong cell
-		if (msg == 'SET_CELL_LOCK_CONFIG' && length(filter(list, (c) => c.freq > 0xffff))) {
+		// A value its field cannot hold is refused here, not sent: the TLV
+		// encoder (struct.pack) THROWS on it rather than truncating, so a
+		// typo like '6300:65536' would abort the bring-up without sync ever
+		// calling back (host ucode, 2026-11-17). The u16 generation takes
+		// EARFCNs up to 65535 only — an LTE band 66 cell does not fit it.
+		let fmax = (msg == 'SET_CELL_LOCK_CONFIG') ? 0xffff : 0xffffffff;
+
+		if (length(filter(list, (c) => c.freq > fmax || c.pci > 0xffff))) {
 			push(errs, { command: msg, error: { error: 'invalid',
-				detail: 'this modem takes EARFCNs up to 65535 only' } });
+				detail: sprintf('a PCI must fit 16 bits and an EARFCN %d bits on this modem', fmax == 0xffff ? 16 : 32) } });
 			return do_nr();
 		}
 

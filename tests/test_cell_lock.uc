@@ -264,6 +264,19 @@ let at_cmds = (at) => filter(at.sent, (c) => index(c, ',') >= 0);
 		'qmi nr: nothing locked, nothing written (no error-3 unlock)');
 }
 
+// a value the u16/u32 field cannot hold is refused before the encoder,
+// which would throw and leave sync without its callback (run() checks it)
+{
+	let n = fake_nas({ u32: true, nr5g: true });
+	let w = run({ with_nas: (cb) => cb(n), config: { lock_4g: '6300:65536', lock_5g: '65536:636666:30:78' } });
+	eq(length(filter(n.sent, (s) => index(s.name, 'SET_') == 0)), 0, 'qmi: PCI 65536 (LTE and NR) not sent');
+	eq(map(w, (x) => x.check), [ 'lock_4g', 'lock_5g' ], 'qmi: both reported as not applied');
+
+	n = fake_nas({ u32: true });
+	w = run({ with_nas: (cb) => cb(n), config: { lock_4g: '4294967296:1' } });
+	eq(length(filter(n.sent, (s) => index(s.name, 'SET_') == 0)), 0, 'qmi u32: EARFCN 2^32 not sent');
+}
+
 // lock_persist cannot be honoured over QMI: said, not silently dropped
 {
 	let n = fake_nas({ u32: true });
