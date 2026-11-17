@@ -53,6 +53,7 @@ table that matches the kind of quirk:
 | **usbnet mode-switch** (PPP-only → rich mode) | `src-ucode/modeswitch.uc` | per-vendor `{ set, reset, query }` |
 | **AT port mapping** (which ttyUSB is AT/at2/gps) | `src-ucode/atport.uc` (generated) + `atcmd.uc` `LOCAL_PORTS` | `usbid → { ifnum: role }` |
 | **NCM dial + telemetry recipe** | `src-ucode/ncm_vendors.uc` → `VENDORS` | per-vendor `dials` + `telemetry` blocks |
+| **Cell lock** (`lock_4g` / `lock_5g`) | `src-ucode/cell_lock.uc` → `DIALECTS` | `{ name, persist, available, read, write }` — see [Cell-lock dialects](#cell-lock-dialects) |
 
 ### Worked example — "my modem needs an AT command at startup"
 
@@ -101,6 +102,45 @@ backend.choose(self, '_ca_be', [
 
 The choice is cached per modem and reset on SIM/protocol change (`backend.reset`).
 This is how CA info falls back QMI → AT+QCAINFO transparently.
+
+### Cell-lock dialects
+
+A cell lock is spelled differently by every modem family, so
+`src-ucode/cell_lock.uc` keeps one entry per dialect in `DIALECTS` and the
+callers (QMI `config_check.validate`, MBIM/NCM `modem_common.run_at_init`)
+only ever call `cell_lock.sync`. The first entry whose `read` answers is the
+modem's dialect; a modem none answers gets a warning, never a guessed write.
+Today there are two: `quectel` (`AT+QNWLOCK`) and `qmi` (NAS cell config).
+
+A new family is one entry with five members:
+
+```
+const MYVENDOR = {
+	name: 'myvendor',
+	persist: null,                 // or a tag when the dialect can make a lock survive a power cycle on request
+	available: (self) => type(self.at?.send) == 'function',
+	read: (self, cb) => {          // cb(err) when the modem does not know the command
+		self.at.send('AT+MYLOCK?', (e, r) => e ? cb(e) : cb(null, {
+			lte: [ /* 'earfcn:pci', … */ ],
+			nr5g: null,            // 'pci:arfcn:scs:band' or null
+			nr5g_supported: false,
+		}), { probe: true });
+	},
+	write: (self, log, want, plan, cb) => {
+		// plan.lte / plan.nr5g say what differs; want.lte empty / want.nr5g
+		// null means RELEASE. cb(errors), [] when everything went in.
+	},
+};
+export const DIALECTS = [ QUECTEL, MYVENDOR, QMI ];
+```
+
+Put it before `qmi` when its read is cheaper or more specific. The read must
+fail with an error on a modem that does not have the command (send it as a
+probe, so that error is not logged as a warning); a read that "answers" on
+the wrong vendor would make that modem take your writes. `sync` does the
+compare, the release of an unconfigured lock, the read-back and the
+warnings, so `write` only sends. Add a case to `tests/test_cell_lock.uc`
+with a fake AT that answers like the modem, including a release.
 
 ### AT port mapping for a new USB id
 

@@ -387,7 +387,10 @@ let open_transport = (tty) => {
 	return t;
 };
 
-let modem = { device: '/dev/cdc-wdm0', config: {}, info: {} };
+// a QMI modem (modem.uc) syncs its cell locks in validate_config, not after
+// the AT init (modem_common.run_at_init), so open_at reaches next() at once
+let qmi_validate = (cb) => cb?.();
+let modem = { device: '/dev/cdc-wdm0', config: {}, info: {}, validate_config: qmi_validate };
 let reached_next = false;
 
 mc.open_at(modem, {
@@ -438,7 +441,7 @@ ok(!length(filter(modem.at_telemetry.urc_prefixes, (p) => p == 'NDISSTAT')),
 // at2_external keeps wwand off the second port entirely
 opened_ttys = [];
 opened_tr = [];
-let modem_x = { device: '/dev/cdc-wdm0', config: { at2_external: '1' }, info: {} };
+let modem_x = { device: '/dev/cdc-wdm0', config: { at2_external: '1' }, info: {}, validate_config: qmi_validate };
 mc.open_at(modem_x, {
 	at_opts: {
 		fx: fake_fx('2c7c:0122', [ { ifn: 2, tty: 'ttyUSB2' }, { ifn: 3, tty: 'ttyUSB3' } ]),
@@ -464,7 +467,7 @@ let wdm_fx = (drv) => ({
 		? sprintf('/x/%s', drv)
 		: null,
 });
-let modem_w = { device: '/dev/cdc-wdm0', config: {}, info: {} };
+let modem_w = { device: '/dev/cdc-wdm0', config: {}, info: {}, validate_config: qmi_validate };
 let reached_w = false;
 
 mc.open_at(modem_w, {
@@ -485,7 +488,7 @@ eq(modem_w.at_tty, '/dev/cdc-wdm0', 'wdm-at: channel reported as the at tty');
 
 // a QMI-bound wdm must never be poked with AT — falls through to the MBIM
 // pipe (absent here: no channel, no engine, clean next)
-let modem_q = { device: '/dev/cdc-wdm0', config: {}, info: {} };
+let modem_q = { device: '/dev/cdc-wdm0', config: {}, info: {}, validate_config: qmi_validate };
 let reached_q = false;
 
 mc.open_at(modem_q, {
@@ -516,7 +519,7 @@ let hw_fx = (drv) => {
 			: null,
 	};
 };
-let modem_hw = { device: '/dev/cdc-wdm0', config: {}, info: {} };
+let modem_hw = { device: '/dev/cdc-wdm0', config: {}, info: {}, validate_config: qmi_validate };
 let reached_hw = false;
 opened_ttys = [];
 opened_tr = [];
@@ -534,7 +537,7 @@ eq(modem_hw.at_tty, '/dev/cdc-wdm0', 'huawei-wdm: channel reported as the wdm');
 eq(modem_hw.at_telemetry, modem_hw.at, 'huawei-wdm: one channel — telemetry shares the engine');
 
 // an explicit option tty still wins over the wdm preference
-let modem_hwt = { device: '/dev/cdc-wdm0', config: { tty: '/dev/ttyUSB2' }, info: {} };
+let modem_hwt = { device: '/dev/cdc-wdm0', config: { tty: '/dev/ttyUSB2' }, info: {}, validate_config: qmi_validate };
 let reached_hwt = false;
 opened_ttys = [];
 
@@ -1762,6 +1765,11 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 		t.write = (d) => {
 			if (t.data_cb && match(d ?? '', /^AT\r?$/) && tty == '/dev/ttyUSB2')
 				t.data_cb("\r\nOK\r\n");
+			// the port that answers is a modem of no known lock dialect: the
+			// cell-lock read after the init list gets the ERROR such a modem
+			// gives, and the bring-up goes on (cell_lock.sync)
+			else if (t.data_cb && tty == '/dev/ttyUSB2')
+				t.data_cb("\r\nERROR\r\n");
 
 			return true;
 		};
@@ -1813,6 +1821,11 @@ eq(length(uc_clock), 1, 'urc_common: unrelated URCs are left alone');
 		t.write = (d) => {
 			if (t.data_cb && match(d ?? '', /^AT\r?$/) && tty == '/dev/ttyUSB2')
 				t.data_cb("\r\nOK\r\n");
+			// the port that answers is a modem of no known lock dialect: the
+			// cell-lock read after the init list gets the ERROR such a modem
+			// gives, and the bring-up goes on (cell_lock.sync)
+			else if (t.data_cb && tty == '/dev/ttyUSB2')
+				t.data_cb("\r\nERROR\r\n");
 
 			return true;
 		};
@@ -2031,7 +2044,7 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), { qc
 eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null),
 	null, 'diag: a modem with no AT channels at all does not throw');
 
-// --- the init list: plugin steps between the configured ones and the locks ------------
+// --- the init list: plugin steps after the configured ones ---------------------------
 {
 	let seen = null, changed = null, nexted = 0;
 	let m = { info: { model: 'RG502Q-EA' }, config: { at_init: [ 'AT+CONF' ], lock_4g: '1300:246' },
@@ -2042,7 +2055,10 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	eq(cmds[0], 'AT+QMBNCFG="AutoSel",1', 'init list: model quirks first');
 	eq(cmds[1], 'AT+CONF', 'init list: then the configured at_init');
 	eq(cmds[2]?.set, 'AT+X=1', 'init list: then what plugins add');
-	ok(index(cmds[3] ?? '', 'QNWLOCK') >= 0, 'init list: cell locks last');
+	// a configured lock is NOT in the list: it is read before it is written,
+	// in the modem's own dialect (cell_lock.sync, after the list)
+	eq(length(filter(cmds, (c) => type(c) == 'string' && index(c, 'QNWLOCK') >= 0)), 0,
+		'init list: no cell-lock command in it');
 	eq(seen?.model, 'RG502Q-EA', 'init list: plugins see the identity');
 
 	let d = mc.init_done(m, { next: () => nexted++ });

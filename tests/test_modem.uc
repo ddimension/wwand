@@ -2517,7 +2517,9 @@ scenario('validate-lock', {
 		SET_SYSTEM_SELECTION_PREFERENCE: {},
 		GET_SYSTEM_SELECTION_PREFERENCE: { mode_preference: 1 << 4, network_selection: 0 },
 	}),
-	// fake AT auto-acks bare "OK" (no +QNWLOCK line) -> lock reads as not applied
+	// fake AT auto-acks bare "OK" (no +QNWLOCK line): that is no answer in the
+	// Quectel dialect, the NAS reads are refused (mockhub 71), so no dialect —
+	// the lock is reported, and nothing is written
 	config: { modes: 'lte', tty: '/dev/ttyUSB2', lock_4g: [ '1300:246' ] },
 	at: {
 		fx: fakefx.create(),
@@ -2527,7 +2529,9 @@ scenario('validate-lock', {
 	(modem, mock, events) => {
 		let lk = filter(modem.config_warnings, (e) => e.check == 'lock_4g');
 		eq(length(lk), 1, 'validate: unapplied 4G lock flagged');
-		eq(lk[0].actual, 'off', 'validate: lock reported off');
+		ok(index(lk[0].message, 'no known cell-lock command') >= 0, 'validate: reported as no dialect');
+		eq(index(at_tr_lock.written, 'AT+QNWLOCK="common/4g",1,1300,246'), -1,
+			'validate: no Quectel write after a bare OK');
 		ok(index(at_tr_lock.written, 'AT+QNWLOCK="common/4g"') >= 0,
 			'validate: 4G lock read back over AT');
 	});

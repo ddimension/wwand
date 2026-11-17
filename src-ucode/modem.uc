@@ -202,7 +202,7 @@ export function create(opts)
 	// AFTER the cancel pass. The new timer fires with self.dms already null
 	// (modem.uc:2081) and set_opmode dereferences it unguarded (qmi_backend.uc:68),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
-	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:762, step_sim), and
+	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:757, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
 	//
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
@@ -1541,7 +1541,7 @@ export function create(opts)
 	self._install_nas_handlers = function() {
 		self.nas.on('SERVING_SYSTEM_IND', (data) => self._update_serving(data));
 		self.nas.on('SIGNAL_INFO_IND', (data) => {
-			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:685-688), so it
+			// same TLV layout as GET_SIGNAL_INFO (schema/nas.uc:764-767), so it
 			// carries the same raw WCDMA Ec/Io and needs the same conversion —
 			// an indication landing between refreshes would otherwise flip the
 			// unit back under a consumer that just read the polled value
@@ -2041,7 +2041,7 @@ export function create(opts)
 		//
 		// This sat one line BELOW close_at() while saying the same thing, which
 		// was only true of the client destroys. atcmd.close() happens to drop
-		// pending callbacks silently (atcmd.uc:1185-1192 — it clears `current`
+		// pending callbacks silently (atcmd.uc:1187-1194 — it clears `current`
 		// and the queue without calling anything), so nothing exploited the gap;
 		// but that is a property of the AT engine, not a guarantee this function
 		// should lean on.

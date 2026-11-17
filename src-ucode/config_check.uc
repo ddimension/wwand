@@ -13,7 +13,7 @@
 
 import * as qmi_backend from 'wwand.qmi_backend';
 import * as modem_quirks from 'wwand.modem_quirks';
-import * as atcmd from 'wwand.atcmd';
+import * as cell_lock from 'wwand.cell_lock';
 import * as nasmod from 'wwand.codec.schema.nas';
 import * as modem_common from 'wwand.modem_common';
 
@@ -257,99 +257,13 @@ export function validate(self, log, cb)
 		}, { probe: true });   // not every Quectel has the setting (RG50xQ)
 	};
 
-	// A LOCK THE CONFIG NO LONGER ASKS FOR IS RELEASED.
-	//
-	// cell_lock_commands() only ever emits a lock when one is CONFIGURED, so
-	// deleting `lock_4g` used to leave the modem locked forever: nothing was
-	// sent, and the modem kept searching for a cell that may not exist. With
-	// `lock_persist` the lock is in modem NV, so it survived reboots and
-	// AT+CFUN resets too — a box that could not be recovered by editing the
-	// config at all. Found on an NR7101 locked to EARFCN 1300 / PCI 246, a cell
-	// not receivable there: permanent "servingcell","SEARCH", never attached
-	// (2026-09-11). Releasing it brought the modem up on EARFCN 6300 within
-	// seconds.
-	//
-	// Read-before-write, like every other setting in this tree: the release is
-	// sent only when the modem actually reports a lock, so a box that never had
-	// one costs one read. `save_ctrl` follows a release because the lock being
-	// cleared may have been persisted by an EARLIER config — without it a power
-	// cycle would restore it (HW-verified on the NR7101).
-	let release_lock = (which, cb) => {
-		if (!self.at)
-			return cb();
-
-		// a probe: a modem without that RAT has no such lock to read
-		self.at.send(sprintf('AT+QNWLOCK="common/%s"', which), (e, r) => {
-			let lk = e ? null : atcmd.parse_qnwlock(r?.lines);
-
-			if (!lk || !lk.enabled)
-				return cb();
-
-			log('notice', sprintf('modem reports a %s cell lock the config does not ask for — releasing it (a lock nothing configured keeps the modem searching for a cell that may not be there)',
-				uc(which)));
-
-			self.at.send(sprintf('AT+QNWLOCK="common/%s",0', which), (e2) => {
-				if (e2) {
-					add(sprintf('lock_%s', which), 'warn',
-						sprintf('a %s cell lock is set on the modem and could not be released: %J',
-							uc(which), e2), 'released', 'still set');
-					return cb();
-				}
-
-				// persist the RELEASE, in case the lock was saved to NV
-				self.at.send('AT+QNWLOCK="save_ctrl",1,1', () => cb());
-			});
-		}, { probe: true });
-	};
-
-	// cell locks: if config sets lock_4g/lock_5g, read them back (best-effort
-	// AT+QNWLOCK) and warn if the modem reports them off / unreadable. When it
-	// sets NEITHER, make sure the modem is not carrying one from an older
-	// config — see release_lock above.
-	check_locks = () => {
-		let l4 = self.config.lock_4g ?? [];
-
-		if (type(l4) == 'string')
-			l4 = [ l4 ];
-
-		let l5 = self.config.lock_5g;
-
-		if (!self.at)
-			return check_autoconnect();
-
-		if (!length(l4) && !l5)
-			return release_lock('4g', () => release_lock('5g', check_autoconnect));
-
-		let check5 = () => {
-			if (!l5)
-				return check_autoconnect();
-
-			self.at.send('AT+QNWLOCK="common/5g"', (e, r) => {
-				let lk = atcmd.parse_qnwlock(r?.lines);
-
-				if (e || !lk || !lk.enabled)
-					add('lock_5g', 'warn',
-						sprintf('configured 5G cell lock %s is not applied on the modem', l5),
-						l5, (lk && lk.enabled) ? 'set' : 'off');
-
-				check_autoconnect();
-			});
-		};
-
-		if (!length(l4))
-			return check5();
-
-		self.at.send('AT+QNWLOCK="common/4g"', (e, r) => {
-			let lk = atcmd.parse_qnwlock(r?.lines);
-
-			if (e || !lk || !lk.enabled)
-				add('lock_4g', 'warn',
-					sprintf('configured 4G cell lock [%s] is not applied on the modem', join(',', l4)),
-					l4, (lk && lk.enabled) ? 'set' : 'off');
-
-			check5();
-		});
-	};
+	// cell locks: brought to what the config asks for — set when configured,
+	// RELEASED when not (a stale lock keeps a modem searching for a cell that
+	// may not be there), in whichever dialect the modem answers
+	// (cell_lock.uc). The QMI modem syncs here and not after its AT init
+	// (modem_common.run_at_init): this is where config_warnings are rebuilt,
+	// and a modem without an AT port still has its NAS client.
+	check_locks = () => cell_lock.sync(self, log, add, check_autoconnect);
 
 	let want = qmi_backend.parse_modes(self.config.modes);
 	let pinned = self.config.mcc && self.config.mnc;

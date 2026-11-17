@@ -138,14 +138,16 @@ export function modes_fallback_command(model)
 	return 'AT^SYSCFGEX="00",3fffffff,1,4,7fffffffffffffff,,';
 };
 
-// Quectel cell locking (verified on RG650E). Config:
+// Quectel cell locking (verified on RG650E): the SET commands of the
+// `quectel` entry in cell_lock.uc, which reads first and writes only what
+// differs. Config:
 //   lock_4g:  list of 'earfcn:pci' -> AT+QNWLOCK="common/4g",<count>,<pairs>
 //             The second field is the NUMBER OF CELLS (0 = unlocked), not an
 //             enable flag, so one form covers one cell and a list:
 //             `AT+QNWLOCK=?` -> "common/4g",(0-10),<freq>,<pci> (RG650E,
 //             2026-10-17). "common/4g_ext" is an RG50x extra that the EG12-EA
-//             answers with ERROR (ddimension/wwand#58), and the lock check
-//             (config_check.uc check_locks) and the telemetry only read
+//             answers with ERROR (ddimension/wwand#58), and the lock sync
+//             (cell_lock.uc, dialect quectel) and the telemetry only read
 //             "common/4g", where a 4g_ext lock reads 0 — "not applied".
 //   lock_5g:  'pci:arfcn:scs:band' (SA only; NSA follows the locked LTE
 //             anchor, the modem answers +CME 902 there — treated as benign)

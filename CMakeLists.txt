@@ -93,7 +93,7 @@ set(WWAND_UCODE_MODULES
   codec/schema/loc.uc codec/schema/merge.uc codec/schema/nas.uc codec/schema/pdc.uc
   codec/schema/rat.uc codec/schema/tmd.uc codec/schema/uim.uc codec/schema/wda.uc
   codec/schema/wds.uc codec/schema/wms.uc
-  carrier_config.uc config_check.uc config.uc context_common.uc context_mbim.uc
+  carrier_config.uc cell_lock.uc config_check.uc config.uc context_common.uc context_mbim.uc
   context_monitor_qmi.uc context_ncm.uc context.uc ctx_settings.uc daemon.uc
   discovery.uc fcc_fibocom.uc hwops.uc log.uc mbim_backend.uc mbim_client.uc
   modem_datapath_qmi.uc

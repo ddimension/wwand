@@ -1,7 +1,7 @@
 # wwand — current state
 
 _State of 2026-11-16: stable **v1.9.0** (feed release 2026.11.16), main **v1.10.0-dev**.
-65 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
+66 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
 which moves too often to be worth repeating here)._
 
 This file describes **what is true now**. The dated log of how it got here is
@@ -11,6 +11,23 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **Cell locks are a dialect table (2026-11-17, ddimension/wwand#91):**
+  `cell_lock.uc` `DIALECTS` — `quectel` (AT+QNWLOCK) and `qmi` (NAS Set/Get
+  Cell Config 0x00D8/0x015A, the older 0x00AF/0x00D7, NR 0x010E/0x010F).
+  `sync` reads first and writes only what differs, sets a configured lock and
+  releases an unconfigured one, on all three backends now (QMI in
+  `config_check.validate`, MBIM/NCM after the AT init); before, MBIM and NCM
+  only ever SET a lock, blindly, from the AT init list. A modem no dialect
+  answers gets a warning. HW 2026-11-17: QMI lock set, read back over AT,
+  released, on the NR7101 (RG502Q-EA, also NR, and across a modem reset with
+  save_ctrl 1,1) and the Chateau (RG650E-EU, LTE only: it refuses the NR
+  read); EG06-E, BG96, BM806U-E1 and E392 know none of the six messages. The
+  Quectel 5G read of a lock has no enable field (`"common/5g",<pci>,…`), so
+  the old `parse_qnwlock` reading of it dropped the PCI; the table parses it
+  itself. **New file: the feed's `WWAND_BASE_UC` needs `cell_lock.uc` in the
+  next bump** (`tools/check-packaging.py`). Not done: a hwtest run of the
+  whole bring-up on this tree; the status read-back (`locks`) still comes
+  from the NCM telemetry only.
 - **Release 1.9.0 (2026-11-16):** main merged into stable in wwand,
   luci-app-wwand and luci-proto-wwand (stable's own commits were all
   cherry-picks, so the merged tree is main's). Tags on stable: wwand

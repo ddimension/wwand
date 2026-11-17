@@ -7,6 +7,7 @@
 
 import * as uloop from 'uloop';
 import * as atcmd from 'wwand.atcmd';
+import * as cell_lock from 'wwand.cell_lock';
 import * as protoswitch from 'wwand.protocol_switch';
 import * as recovery_mod from 'wwand.recovery';
 import * as netlink from 'wwand.netlink';
@@ -1463,7 +1464,7 @@ export function at_retired(self, ...cmds)
 // A BARE `ERROR` retires a command. `+CME ERROR: <n>` never does: it is a
 // runtime condition (SIM not ready, no network) that says nothing about whether
 // the firmware knows the command. atcmd already separates the three
-// (atcmd.uc:1144 vs :1147 vs :1091).
+// (atcmd.uc:1146 vs :1147 vs :1091).
 //
 // A TIMEOUT retires one only when the PORT IS PROVABLY ALIVE. On its own a
 // timeout means the port is wedged or the modem busy — then every command goes
@@ -1992,8 +1993,9 @@ function nr5g_at_commands(self)
 // The init commands every AT channel runs once it answers: model quirks,
 // the configured `at_init` list, the steps optional packages add
 // (`self.at_init_extra`, set by the daemon from plugins.uc at_init — e.g.
-// wwand-rsim allowing a modem to lend its card), then cell locks, SIM
-// detection and the 5G NR mode. An `nr5g_mode` this modem has no known
+// wwand-rsim allowing a modem to lend its card), then SIM detection and the
+// 5G NR mode. Cell locks are not in it: they are read before they are
+// written, in the modem's own dialect (cell_lock.sync, from run_at_init). An `nr5g_mode` this modem has no known
 // command for is a config warning, not a guess (atcmd nr5g_mode_commands).
 export function init_commands(self)
 {
@@ -2010,7 +2012,6 @@ export function init_commands(self)
 		...atcmd.model_init_commands(self.info?.model),
 		...(self.config.at_init ?? []),
 		...extra,
-		...atcmd.cell_lock_commands(self.config),
 		...atcmd.sim_detect_commands(self.info, self.config),
 		...nr5g,
 	];
@@ -2027,6 +2028,37 @@ export function init_done(self, o)
 
 		o.next();
 	};
+};
+
+// An AT channel that answers: its init list (init_commands), then the cell
+// locks, then o.next(). The locks come after the list because they read and
+// write through `engine`, and a read may only go out once the list's quirks
+// (echo off, verbose errors) are in. A QMI modem (it has validate_config)
+// syncs its locks in config_check.validate instead, which rebuilds
+// config_warnings and also runs for a QMI modem with no AT port at all.
+export function run_at_init(self, engine, log, o)
+{
+	let locks = () => {
+		if (type(self.validate_config) == 'function')
+			return o.next();
+
+		let add = (check, severity, message, expected, actual) => {
+			self.config_warnings = filter(self.config_warnings ?? [], (w) => w.check != check);
+			push(self.config_warnings, { check: check, severity: severity,
+				message: message, expected: expected, actual: actual });
+		};
+
+		self.config_warnings = filter(self.config_warnings ?? [],
+			(w) => !(w.check in [ 'lock_4g', 'lock_5g', 'lock_persist' ]));
+		cell_lock.sync(self, log, add, () => o.next());
+	};
+
+	let cmds = init_commands(self);
+
+	if (!length(cmds))
+		return locks();
+
+	engine.run_sequence(cmds, init_done(self, { next: locks }));
 };
 
 // apply_nr5g_mode(self, nas, log, cb): `option nr5g_mode` on a modem with a
@@ -2289,12 +2321,7 @@ function finish_mbim_at(self, o, tr, path, log)
 		self.at_over_mbim = true;
 		log('notice', sprintf('AT over MBIM ready on %s', path));
 
-		let cmds = init_commands(self);
-
-		if (!length(cmds))
-			return o.next();
-
-		engine.run_sequence(cmds, init_done(self, o));
+		run_at_init(self, engine, log, o);
 	}, { timeout: 5000 });
 }
 
@@ -2413,12 +2440,7 @@ function open_at_over_wdm(self, o, fxi, log, next)
 		if (perr?.error != 'timeout' && perr?.error != 'closed') {
 			log('notice', sprintf('AT channel: %s (cdc-wdm)', dev));
 
-			let cmds = init_commands(self);
-
-			if (!length(cmds))
-				return o.next();
-
-			self.at.run_sequence(cmds, init_done(self, o));
+			run_at_init(self, self.at, log, o);
 			return;
 		}
 
@@ -2661,8 +2683,6 @@ open_at_tty = function(self, o, fxi, log, ch, tried)
 			}
 		}
 
-		// model quirks + configured at_init list, then cell locks
-		let cmds = init_commands(self);
 
 		// M9200B: periodically drain stale serial output (empty_serial_buffers quirk)
 		if (index(self.info?.revision ?? '', 'M9200B') >= 0) {
@@ -2678,10 +2698,8 @@ open_at_tty = function(self, o, fxi, log, ch, tried)
 			log('notice', 'M9200B detected, enabling serial drain');
 		}
 
-		if (!length(cmds))
-			return o.next();
-
-		self.at.run_sequence(cmds, init_done(self, o));
+		// model quirks + configured at_init list, then the cell locks
+		run_at_init(self, self.at, log, o);
 	};
 
 	candidate.send('AT', (perr) => {
@@ -2776,7 +2794,7 @@ export function at_late_retry(self, o)
 // of them is not in the unit its name suggests: WCDMA Ec/Io is a raw gint16 in
 // units of -0.5 dB, which libqmi renders as (-0.5)*raw before printing it
 // (qmicli-nas.c:460-462, libqmi 1.38.0) — a raw 20 means -10.0 dB, and the sign
-// flips too. The AT path already reports real dB (atcmd_parse.uc:424), so a raw
+// flips too. The AT path already reports real dB (atcmd_parse.uc:433), so a raw
 // value left in place makes one documented key mean two different things
 // depending on which path answered, with nothing at the consumer able to tell.
 //

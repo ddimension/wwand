@@ -1634,13 +1634,18 @@ push(scenarios, {
 		// simulate the reload: stop this instance while emit('registered') is
 		// still on the stack (surviving this line at all is the core check —
 		// pre-fix the daemon crashed right here)
+		// the bring-up already read the locks once (cell_lock.sync after the
+		// AT init); what must not happen is a READ-BACK after the stop
+		let locks_before = length(filter(env.tr.written, (c) => match(c, /QNWLOCK/)));
+
 		m.stop();
 		eq(m.state, 'ABSENT', 'teardown-in-emit: modem stopped to ABSENT');
 
 		// give any (wrongly) started telemetry a tick, then verify the READY
 		// hooks never ran: no lock read-back, no telemetry poll on the tty
 		uloop.timer(50, () => {
-			eq(env.tr.saw(/QNWLOCK/), null, 'teardown-in-emit: no lock read-back after stop');
+			eq(length(filter(env.tr.written, (c) => match(c, /QNWLOCK/))), locks_before,
+				'teardown-in-emit: no lock read-back after stop');
 			eq(env.tr.saw(/^AT\+CSQ/), null, 'teardown-in-emit: no telemetry poll after stop');
 			env.finish();
 		});

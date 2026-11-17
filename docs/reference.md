@@ -568,9 +568,9 @@ config wwand_modem 'm0'
 	                                 #    (eSIM page, lpac, wwand-ipa). This SWITCHES THE
 	                                 #    CARD'S IPAe OFF — unset (default) sends nothing and
 	                                 #    leaves the card as it starts. See "SGP.32 IoT cards".
-	option lock_4g '1300:246'        # earfcn:pci — LTE cell lock (list: up to 10 cells, AT+QNWLOCK="common/4g",<n>,…)
-	option lock_5g '242:431070:15:1' # pci:arfcn:scs:band — NR SA cell lock
-	option lock_persist '0'          # store the cell lock in modem NV
+	option lock_4g '1300:246'        # earfcn:pci — LTE cell lock (a list; Quectel takes up to 10 cells)
+	option lock_5g '242:431070:15:1' # pci:arfcn:scs:band — NR SA cell lock (scs in kHz)
+	option lock_persist '0'          # store the cell lock in modem NV (Quectel AT only)
 	list band_lte '3'                # LTE bands, one per line — Fibocom FM350/FM150 only (see below)
 	list band_lte '20'
 	list band_nr '78'                # NR bands, one list for SA and NSA alike
@@ -1252,6 +1252,25 @@ Tools → Settings (deferred-apply modems get an explicit "reset to apply"
 button), `lock_4g`/`lock_5g` for hard cell locks with live candidates from
 the cell scan ([Configuration](#configuration), Troubleshooting for the
 scan).
+
+Cell locks go through a table of dialects (`cell_lock.uc`); the first whose
+read the modem answers is used, and nothing is written in a dialect the modem
+has not answered a read in:
+
+| Dialect | Commands | Persistence |
+|---|---|---|
+| `quectel` | `AT+QNWLOCK="common/4g"` / `"common/5g"` | `lock_persist` → `"save_ctrl",1,1` |
+| `qmi` | NAS Set/Get Cell Config 0x00D8/0x015A, or the older 0x00AF/0x00D7 (EARFCN ≤ 65535); NR 0x010E/0x010F | the modem's own setting; `lock_persist` is reported as having no effect |
+
+Locks are read first and written only where they differ, in both
+directions: a configured lock is set, and a lock the config does not ask for
+is released, because a stale lock keeps the modem searching for a cell that may
+not be there. A QMI modem syncs during its config validation, an MBIM or NCM
+modem right after its AT init. A modem no dialect answers gets a `lock_4g` /
+`lock_5g` warning ("no known cell-lock command") instead of a guess; the
+dialect in use is `cell_lock_dialect` on the modem object. Which modems
+answered which commands is in [qmi-beyond-libqmi.md](qmi-beyond-libqmi.md). To
+add a vendor, see [extending.md](extending.md#cell-lock-dialects).
 
 `option modes` is written at bring-up, after the SIM, and only when the modem
 holds something else; every write is permanent:
@@ -2881,7 +2900,7 @@ extending a table, not branching the code — see
 | Protocol switch | QMI ⇄ MBIM via `AT+QCFG="usbnet"` (`modem_set_protocol`); the modem resets and re-enumerates | Quectel RG5xx/RG6xx/EG |
 | MBIM firmware bug | some firmwares reject `MBIM_OPEN` — MBIM stays QMI-only there | RG650E |
 | Serial drain | discard stray serial noise before AT on modems that need it | M9200B |
-| Cell locking | Quectel `AT+QNWLOCK` for a fixed 4G anchor / 5G SA cell | `lock_4g` / `lock_5g` |
+| Cell locking | a fixed 4G anchor / 5G SA cell, Quectel `AT+QNWLOCK` or QMI NAS cell config (`cell_lock.uc`) | `lock_4g` / `lock_5g` |
 
 The known-model tables live in `atcmd.uc` (init + eSIM quirks), `netlink.uc`
 (datagram size) and `protocol_switch.uc` (protocol recipes); capability probes
@@ -2963,7 +2982,8 @@ done once at the next boot.
 
 **Lock to a specific cell?** `option lock_4g 'earfcn:pci'` (LTE) or
 `option lock_5g 'pci:arfcn:scs:band'` (NR SA); `lock_persist 1` stores it in the
-modem NV. The LuCI Modem page has a one-click "Lock this cell".
+modem NV (Quectel AT; over QMI the modem decides). Removing the option releases
+the lock. The LuCI Modem page has a one-click "Lock this cell".
 
 **Where are the recovery counters?** `/tmp/wwand/state/` — they survive a daemon
 restart and clear on reboot (the recovery ladder's last rung).

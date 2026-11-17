@@ -189,6 +189,19 @@ export const NET_STATUS_CURRENT_SERVING = (1 << 0);
 export const NET_STATUS_AVAILABLE       = (1 << 1);
 export const NET_STATUS_FORBIDDEN       = (1 << 4);
 
+// NR subcarrier spacing as the cell-lock messages carry it (IDL-OP13
+// nas_nr5g_scs_enum_type, not in libqmi 1.38), keyed by kHz — the unit
+// `option lock_5g` and AT+QNWLOCK use. Enum 1 set over QMI reads back as 30
+// over AT on the RG502Q-EA (2026-11-17).
+export const NR5G_SCS = { '15': 0, '30': 1, '60': 2, '120': 3, '240': 4 };
+
+// the NR cell of SET/GET_NR5G_CELL_CONFIG: the band is a 512-bit mask, eight
+// u64 words, band n = bit n-1 counted from the first word (n78 set this way
+// reads back as band 78 over AT on the RG502Q-EA, 2026-11-17)
+const NR5G_CELL_IDENTITY = { pci: 'u16', scs: 'u32', arfcn: 'u32',
+	band1: 'u64', band2: 'u64', band3: 'u64', band4: 'u64',
+	band5: 'u64', band6: 'u64', band7: 'u64', band8: 'u64' };
+
 // field specs shared verbatim across the get/indication message pairs below
 // (the messages differ only in id and, for serving system, the lac/cell/tac
 // TLV ids, which stay inline)
@@ -677,6 +690,72 @@ export default {
 			resp: {
 				enabled:               { t: 0x10, f: 'u8' },
 				immediate_scg_release: { t: 0x11, f: 'u8' },
+			},
+		},
+
+		// Cell locks (cell_lock.uc, dialect `qmi`): service acquisition limited
+		// to the listed cells. None of these is in libqmi 1.38; ids, TLVs and
+		// widths are IDL-OP13 (docs/qmi-beyond-libqmi.md), the wire measured on
+		// the RG502Q-EA and RG650E-EU (2026-11-17). Both Quectels keep ONE lock
+		// state behind QMI and AT+QNWLOCK: a lock set here reads back there,
+		// and survives a modem reset when "save_ctrl" says so.
+		// Two LTE generations: 0x00AF/0x00D7 carry the frequency as u16, the
+		// IDL marks them deprecated, and the RG502Q-EA has only those;
+		// 0x00D8/0x015A carry it as u32 (an EARFCN above 65535). The RG650E-EU
+		// answers both. An empty list is the unlock; `enforce` 1 applies it at
+		// once instead of at the next power cycle. The list is u8-counted
+		// (IDL max 60; the read of an unlocked modem is 0x10 = 00).
+		SET_CELL_LOCK_CONFIG: {
+			id: 0x00AF,
+			req: {
+				cell_list: { t: 0x01, f: { n: 'u8', of: { pci: 'u16', freq: 'u16' } } },
+				enforce:   { t: 0x10, f: 'u8' },
+			},
+			resp: {},
+		},
+		GET_CELL_LOCK_CONFIG: {
+			id: 0x00D7,
+			req: {},
+			resp: {
+				cell_list: { t: 0x10, f: { n: 'u8', of: { pci: 'u16', freq: 'u16' } } },
+			},
+		},
+		SET_CELL_CONFIG: {
+			id: 0x00D8,
+			req: {
+				cell_list: { t: 0x01, f: { n: 'u8', of: { pci: 'u16', freq: 'u32' } } },
+				enforce:   { t: 0x10, f: 'u8' },
+			},
+			resp: {},
+		},
+		GET_CELL_CONFIG: {
+			id: 0x015A,
+			req: {},
+			resp: {
+				cell_list: { t: 0x10, f: { n: 'u8', of: { pci: 'u16', freq: 'u32' } } },
+			},
+		},
+		// NR: type 0 one cell (0x10/0x11 identity), 1 an ARFCN list, 2 unlock,
+		// 3 several PCIs. The identity is { pci u16, scs u32 enum (NR5G_SCS),
+		// arfcn u32, band mask 8 × u64, bit n-1 = band n } — 74 bytes. The
+		// RG502Q-EA takes it and reads it back as AT+QNWLOCK="common/5g",
+		// <pci>,<arfcn>,<scs kHz>,<band>; an unlock with nothing locked is
+		// error 3 (Internal) there. The RG650E-EU answers the read with 94
+		// (NotSupported).
+		SET_NR5G_CELL_CONFIG: {
+			id: 0x010E,
+			req: {
+				type:          { t: 0x01, f: 'u32' },
+				cell_identity: { t: 0x10, f: NR5G_CELL_IDENTITY },
+			},
+			resp: {},
+		},
+		GET_NR5G_CELL_CONFIG: {
+			id: 0x010F,
+			req: {},
+			resp: {
+				type:          { t: 0x10, f: 'u32' },
+				cell_identity: { t: 0x11, f: NR5G_CELL_IDENTITY },
 			},
 		},
 

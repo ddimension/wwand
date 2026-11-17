@@ -816,5 +816,6 @@ four `err 48` warnings per LuCI status poll.
 ## 9. Roadmap
 
 1. Byte-trace captures from real modems as codec regression fixtures.
-2. QMI-native cell-lock / PDC (replacing the AT `QNWLOCK` / `QMBNCFG` quirks).
+2. QMI-native PDC (replacing the AT `QMBNCFG` quirk). Cell locks have a QMI
+   dialect since 2026-11-17 (`cell_lock.uc`).
 3. Wider modem coverage in the quirk tables (see `docs/extending.md`).

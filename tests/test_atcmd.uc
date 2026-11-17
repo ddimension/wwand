@@ -460,6 +460,13 @@ let lk4n = atcmd.parse_qnwlock([ '+QNWLOCK: "common/4g",3,1725,59,75,59,6200,102
 eq([ lk4n.enabled, lk4n.values ], [ true, [ 1725, 59, 75, 59, 6200, 102 ] ],
 	'qnwlock: a cell list reads as locked, values are the pairs');
 eq(atcmd.parse_qnwlock([ 'OK' ]), null, 'qnwlock: no lock line -> null');
+// a locked 5G read has no enable field (RG502Q-EA, 2026-11-17): PCI first
+let lk5 = atcmd.parse_qnwlock([ '+QNWLOCK: "common/5g",100,636666,30,78' ]);
+eq([ lk5.enabled, lk5.values ], [ true, [ 100, 636666, 30, 78 ] ], 'qnwlock: locked 5G read keeps the PCI');
+lk5 = atcmd.parse_qnwlock([ '+QNWLOCK: "common/5g",0,636666,30,78' ]);
+eq([ lk5.enabled, lk5.values ], [ true, [ 0, 636666, 30, 78 ] ], 'qnwlock: PCI 0 is a lock, not "off"');
+lk5 = atcmd.parse_qnwlock([ '+QNWLOCK: "common/5g",1,100,636666,30,78' ]);
+eq([ lk5.enabled, lk5.values ], [ true, [ 100, 636666, 30, 78 ] ], 'qnwlock: the documented <enable> form');
 
 // --- AT+QENG servingcell parsing (LTE + NR5G-NSA) ----------------------------
 // real lines from an RG502Q on LTE B3 + NR5G-NSA n1

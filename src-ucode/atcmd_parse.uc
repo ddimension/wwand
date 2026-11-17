@@ -12,7 +12,11 @@ import * as ratmod from 'wwand.codec.schema.rat';
 //   +QNWLOCK: "common/4g",<num_of_cells>[,<earfcn>,<pci>[,...]]
 //   +QNWLOCK: "common/4g_ext",<num_of_cells>[,<cell_list>]
 //   (the count reads as `enabled` here: 0 cells = no lock)
-//   +QNWLOCK: "common/5g",<enable>[,<pci>,<arfcn>,<scs>,<band>]
+//   +QNWLOCK: "common/5g",0                         (no 5G lock)
+//   +QNWLOCK: "common/5g",<pci>,<arfcn>,<scs>,<band>  (locked: NO enable
+//     field — RG502Q-EA, 2026-11-17; read as enabled, values = all four)
+//   +QNWLOCK: "common/5g",<enable>,<pci>,<arfcn>,<scs>,<band>  (the form the
+//     Quectel note gives; also read)
 // returns { scope, enabled, values:[...] } for the first matching line, or null
 // when the modem answered with no lock line (unsupported / empty).
 export function parse_qnwlock(lines)
@@ -25,6 +29,11 @@ export function parse_qnwlock(lines)
 
 		let rest = replace(trim(m[3]), /^,/, '');
 		let vals = length(rest) ? map(split(rest, ','), (x) => +trim(x)) : [];
+
+		// the locked 5G read without an enable field: the leading number is
+		// the PCI, and PCI 0 is a valid cell, not "off"
+		if (m[1] == 'common/5g' && length(vals) == 3)
+			return { scope: m[1], enabled: true, values: [ +m[2], ...vals ] };
 
 		return { scope: m[1], enabled: +m[2] > 0, values: vals };
 	}

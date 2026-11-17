@@ -558,12 +558,7 @@ export function create(opts)
 			// the same init list every other AT channel runs (cell locks,
 			// SIM detection, the 5G NR mode): a forced tunnel is still the
 			// modem's only AT path, and skipping it here dropped them
-			let cmds = modem_common.init_commands(self);
-
-			if (!length(cmds))
-				return step_at_ident();
-
-			return eng.run_sequence(cmds, modem_common.init_done(self, { next: step_at_ident }));
+			return modem_common.run_at_init(self, eng, log, { next: step_at_ident });
 		}
 
 		return modem_common.open_at(self, {
@@ -3308,7 +3303,7 @@ export function create(opts)
 		// refuses every future retry, which is worse than whatever the callback
 		// was complaining about. The QMI teardown wraps its equivalent call for
 		// the same reason; NCM needs none, close_at() discards its queue without
-		// paying it (atcmd.uc:1185). Review follow-up, 2026-09-19.
+		// paying it (atcmd.uc:1187). Review follow-up, 2026-09-19.
 		drop_pt();
 		self._pt_failed = false;
 		self._pt_built = false;
