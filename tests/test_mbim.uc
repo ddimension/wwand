@@ -8,6 +8,8 @@ import * as mbim from 'wwand/codec/mbim.uc';
 import * as bc from 'wwand/codec/mbim_schema/basic_connect.uc';
 import * as ext from 'wwand/codec/mbim_schema/ms_basic_connect_ext.uc';
 import * as context_mbim from 'wwand/context_mbim.uc';
+import * as mbim_client from 'wwand/mbim_client.uc';
+import * as uloop from 'uloop';
 
 function p32(v) {
 	return chr(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff);
@@ -955,5 +957,52 @@ eq(mbim.service_uuid('11111111-2222-3333-4444-555555555555'), '11111111-2222-333
 	'service_uuid: a UUID this tree has no name for passes');
 eq([ mbim.service_uuid('basic-connect'), mbim.service_uuid('a289cc33'), mbim.service_uuid(null) ], [ null, null, null ],
 	'service_uuid: a typo or a partial UUID is refused, not sent');
+
+// --- DEVICE_SERVICES (mbim_client gates commands on it) ------------------------
+
+// the answer of a Huawei ME906s (11.617.00.00.11, LTE3301, 2026-11-17), as
+// modem_mbim_raw returned it: eleven services, neither MS Basic Connect
+// Extensions nor the QMI passthrough among them
+const ME906S_SERVICES = '0b000000050000006000000068000000c800000030000000f80000002c000000240100002000000044010000280000006c010000280000009401000028000000bc01000020000000dc01000020000000fc010000200000001c02000020000000a289cc33bcbb8b4fb6b0133ec2aae6df00000000000000001300000001000000020000000300000004000000050000000600000008000000090000000a0000000b0000000c0000000d0000000f000000100000001300000014000000150000001600000017000000533fbeeb14fe44679f9033a223e56c3f00000000000000000500000001000000020000000300000004000000050000004bf384761e6a41dbb1d8bed289c25bdb00000000000000000400000001000000020000000300000004000000e550a0c85e82479e82f710abf4c3351f000000000000000001000000010000001d2b5ff70aa148b2aa5250f15767174e0000000000000000030000000100000002000000030000003c83a6ed801e434098f0f8dc33baa7cc000000000000000003000000010000000200000003000000d8f20131fcb54e178602d6ed3816164c000000000000000003000000010000000200000003000000ed19555da6ac43278eb1fc022e5e23880000000000000000010000001000000210e40d69375a42cea297906164f2754c00000000000000000100000001000000fdc22af2f4414d46af8d259fcdde463500000000000000000100000000010002883b7c26985f43fa980427d7fb80959c00000000000000000100000001000000';
+
+let dsv = mbim.decode_device_services(hexdec(ME906S_SERVICES));
+eq(length(dsv), 11, 'device_services: the ME906s lists eleven services');
+eq([ dsv[0], dsv[10] ], [ 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df', '883b7c26-985f-43fa-9804-27d7fb80959c' ],
+	'device_services: first basic_connect, last ms_host_shutdown, in wire order');
+ok(index(dsv, ext.SERVICE_UUID) < 0 && index(dsv, mbim.service_uuid('qmi_passthrough')) < 0,
+	'device_services: no MBIMEx, no QMI passthrough on the ME906s');
+eq(mbim.decode_device_services(''), null, 'device_services: an empty answer is unknown, not "nothing offered"');
+// a damaged answer is unknown as a whole, never a shorter list: an omission
+// would refuse a service the modem offers (mbim_client refuse_unlisted)
+let dsraw = hexdec(ME906S_SERVICES);
+let dsbad = substr(dsraw, 0, 8) + struct.pack('<II', 4000, 32) + substr(dsraw, 16);
+eq(mbim.decode_device_services(dsbad), null, 'device_services: a pair pointing outside the buffer makes the list unknown');
+eq(mbim.decode_device_services(substr(dsraw, 0, 8 + 10 * 8)), null,
+	'device_services: a truncated reference table makes the list unknown');
+
+
+// a refused command is answered on a later loop turn, never sent — and a
+// destroy() in between pays it 'cancelled' like any command in flight
+{
+	uloop.init();
+
+	let sent = 0;
+	let cl = mbim_client.create({ send_raw: () => { sent++; return true; } }, {});
+	let got = [];
+
+	cl.services = { [bc.SERVICE_UUID]: true };
+	cl.command_raw(ext.SERVICE_UUID, 15, '', (e) => push(got, e?.error), { cmd_type: 0 });
+	cl.command_raw(ext.SERVICE_UUID, 15, '', (e) => push(got, e?.error), { cmd_type: 0 });
+	eq([ sent, length(got) ], [ 0, 0 ], 'refuse: nothing sent, nothing answered inside the call');
+	cl.destroy();
+	eq(got, [ 'cancelled', 'cancelled' ], 'refuse: a destroy() first pays the refusals as cancelled');
+
+	got = [];
+	cl.command_raw(ext.SERVICE_UUID, 15, '', (e) => push(got, e?.error), { cmd_type: 0 });
+	uloop.timer(20, () => uloop.end());
+	uloop.run();
+	eq(got, [ 'unsupported_service' ], 'refuse: otherwise answered unsupported_service, once');
+	eq(sent, 0, 'refuse: and still never sent');
+}
 
 done('test_mbim');

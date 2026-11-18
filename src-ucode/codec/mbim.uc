@@ -64,6 +64,46 @@ function uuid_str(bytes)
 		substr(h, 16, 4), substr(h, 20, 12));
 }
 
+// MBIM_DEVICE_SERVICES_INFO (Basic Connect CID 16, MBIM 1.0 §10.5.35) -> the
+// list of service UUIDs the function offers, lowercase strings. Layout:
+// DeviceServicesCount u32, MaxDssSessions u32, then one (offset u32, size u32)
+// pair per service, offsets from the start of the buffer, each pointing at an
+// element that opens with the 16-byte DeviceServiceId.
+//
+// ALL OR NOTHING: a truncated table or one malformed element makes the whole
+// answer null (unknown), never a shorter list. The list decides what is NOT
+// sent (mbim_client refuse_unlisted), so a service dropped from it here would
+// be refused for the life of the session although the modem offers it;
+// unknown gates nothing.
+export function decode_device_services(info)
+{
+	info = info ?? '';
+
+	let len = length(info);
+
+	if (len < 8)
+		return null;
+
+	let n = struct.unpack('<I', substr(info, 0, 4))[0];
+
+	if (n > (len - 8) / 8)
+		return null;
+
+	let refs_end = 8 + n * 8;
+	let out = [];
+
+	for (let i = 0; i < n; i++) {
+		let ref = struct.unpack('<II', substr(info, 8 + i * 8, 8));
+
+		if (ref[1] < 16 || ref[0] < refs_end || ref[1] > len || ref[0] > len - ref[1])
+			return null;
+
+		push(out, uuid_str(substr(info, ref[0], 16)));
+	}
+
+	return out;
+};
+
 // MBIM strings are UTF-16LE; ucode strings are UTF-8 byte strings. Both
 // directions have to convert by hand, because ucode's chr() is BYTE-oriented:
 // chr(0x4E2D) yields 0xff, not a three-byte UTF-8 sequence. The first version

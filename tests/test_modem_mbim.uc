@@ -292,6 +292,69 @@ function assert_version_function_error() {
 	mv.start();
 }
 
+// A SERVICE THE MODEM DOES NOT LIST IS NOT ASKED. A Huawei ME906s lists
+// neither MS Basic Connect Extensions nor the QMI passthrough, and IGNORES a
+// command for either: the MBIMEx version query, the passthrough probe and the
+// LTE attach configuration each sat until they timed out, ~50 s of every
+// bring-up (LTE3301, 2026-11-17). mbim_client reads DEVICE_SERVICES after
+// OPEN and refuses such a command at once; the raw ubus path still sends.
+function assert_unlisted_services() {
+	let mocku = mbim_mockhub.create({ schemas: [ bc, ext ], handlers: handlers(),
+		device_services: [ bc.SERVICE_UUID,
+		                   '533fbeeb-14fe-4467-9f90-33a223e56c3f' ] });
+	let mu = null, mu_done = false;
+
+	mu = modem_mbim.create({
+		id: 'm_svc', device: '/dev/mock5',
+		config: { apn: 'internet' },
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		datapath: { netdev: 'wwan0', fx: fakefx.create(), mux: 'auto' },
+		deps: {
+			transport_open: mocku.transport_open,
+			log: () => null,
+			on_event: (m, event) => {
+				if (event != 'registered' || mu_done)
+					return;
+
+				mu_done = true;
+
+				eq(filter(mocku.calls, (c) => c.kind == 'control' || c.name in [ 'DEVICE_SERVICES', 'VERSION' ])[1]?.name,
+					'DEVICE_SERVICES', 'services: DEVICE_SERVICES is asked right after OPEN');
+				eq(length(filter(mocku.calls, (c) => c.name == 'VERSION')), 0,
+					'services: no MBIMEx version query to a modem without the extensions');
+				eq(length(filter(mocku.unknown_calls, (c) => c.uuid == 'd1a30bc2f97a6e43bf65c7e24fb0f0d3')), 0,
+					'services: no QMI passthrough probe to a modem without it');
+				eq([ m.mbim.offers(ext.SERVICE_UUID), m.mbim.offers('533FBEEB-14fe-4467-9f90-33a223e56c3f'),
+				     m.mbim.offers('a289cc33-bcbb-8b4f-b6b0-133ec2aae6df') ], [ false, true, true ],
+					'services: offers() answers from the list, case-blind');
+				eq(m.state, 'READY', 'services: the bring-up completes without them');
+
+				let before = length(filter(mocku.calls, (c) => c.name == 'LTE_ATTACH_CONFIG'));
+				let sync = true, got = null;
+
+				m.mbim.command(ext, 'LTE_ATTACH_CONFIG', 'query', {}, (e) => {
+					got = { e: e, sync: sync };
+
+					// and the raw ubus path still reaches the unlisted service
+					m.mbim.command_raw(ext.SERVICE_UUID, 15, '', () => {
+						eq(length(filter(mocku.calls, (c) => c.name == 'LTE_ATTACH_CONFIG')), before,
+							'services: the refused command never reached the modem');
+						eq([ got.e?.error, got.sync ], [ 'unsupported_service', false ],
+							'services: refused with unsupported_service, on a later loop turn');
+						ok(length(filter(mocku.calls, (c) => c.name == 'VERSION')) == 1,
+							'services: any_service sends to an unlisted service anyway');
+						mu.stop();
+					}, { cmd_type: 0, any_service: true });
+				});
+				sync = false;
+			},
+		},
+	});
+
+	mu.start();
+}
+
 // WHAT THE MODEM IS TOLD TO TELL US (basic_connect cid 19), and the three
 // indications that only earn their keep once it is.
 //
@@ -800,6 +863,7 @@ function assert_puk_block() {
 					m2.stop();
 					assert_radio_off();
 					assert_version_function_error();
+					assert_unlisted_services();
 					assert_subscribe_list();
 				}
 			},
@@ -1054,7 +1118,7 @@ assert_sim_poll_teardown();
 
 	// ...and it stays balanced when a client destroy pays a callback that
 	// throws. Destroying a client runs its pending callbacks synchronously
-	// (client.uc:249, mbim_client.uc:679) and those are not ours; an unguarded
+	// (client.uc:249, mbim_client.uc:768) and those are not ours; an unguarded
 	// throw would skip the decrement and leave the depth raised for the life of
 	// the object, after which make_fail refuses every retry. Review follow-up,
 	// 2026-09-19.
