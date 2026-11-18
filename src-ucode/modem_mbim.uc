@@ -936,7 +936,7 @@ export function create(opts)
 					// ...but a CANCELLATION is the session ending, not the
 					// firmware refusing. destroy() pays its pending callbacks
 					// synchronously and only then clears them
-					// (mbim_client.uc:679,690), so re-querying here enqueued a
+					// (mbim_client.uc:768,779), so re-querying here enqueued a
 					// command into the client being torn down. Same shape as
 					// the ready-state poll above.
 					if (verr.error == 'cancelled' || self._gen != gen || !self.mbim)
@@ -1629,6 +1629,14 @@ export function create(opts)
 
 		if (!ctx || !self.mbim)
 			return next();
+
+		// the LTE attach configuration is an MS Basic Connect Extensions CID;
+		// a modem without the extensions attaches with its own default
+		// profile and there is nothing here to program it with
+		if (self.mbim.offers?.(ext.SERVICE_UUID) === false) {
+			log('notice', 'attach profile: the modem does not list MS Basic Connect Extensions — no LTE attach configuration to program; the modem attaches with its own default');
+			return next();
+		}
 
 		let apn = context_common.conn_cfg(ctx, 'apn');
 
@@ -2339,6 +2347,14 @@ export function create(opts)
 		if (self._pt_failed || !self.mbim)
 			return cb(false);
 
+		// a modem that does not list the service has none: said once, and
+		// remembered like a failed bring-up (mbim_client refuse_unlisted)
+		if (self.mbim.offers?.(mbimmod.service_uuid('qmi_passthrough')) === false) {
+			log('info', 'qmi-over-mbim: the modem does not list the QMI passthrough service — QMI features stay off');
+			self._pt_failed = true;
+			return cb(false);
+		}
+
 		push(pt_waiters, cb);
 
 		if (pt_opening)
@@ -2779,7 +2795,9 @@ export function create(opts)
 
 			cb(null, { status: 0, status_name: mbimmod.status_name(0), info: info ?? '' });
 		}, { cmd_type: (a.kind == 'set') ? mbimmod.CMD_SET : mbimmod.CMD_QUERY,
-		     timeout: a.timeout, no_recovery: true, keep_info: true });
+		     timeout: a.timeout, no_recovery: true, keep_info: true,
+		     // a raw probe of an unlisted service is the point of this path
+		     any_service: true });
 	};
 
 	self.reset = function(cb) {
@@ -3297,7 +3315,7 @@ export function create(opts)
 		modem_common.close_at(self);
 
 		// GUARDED, because destroying a client pays its pending callbacks
-		// SYNCHRONOUSLY (client.uc:249, mbim_client.uc:679) and those callbacks
+		// SYNCHRONOUSLY (client.uc:249, mbim_client.uc:768) and those callbacks
 		// are not ours. One that throws would skip the depth decrement at the
 		// end, leaving it raised for the life of the object — and make_fail then
 		// refuses every future retry, which is worse than whatever the callback

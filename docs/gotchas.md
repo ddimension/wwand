@@ -758,6 +758,29 @@ around:
   patch file-by-file. `#!/usr/bin/env ucode` = bytecode: test the change there
   through a package build, not a file drop.
 
+## An MBIM modem answers a command it does not support
+**Not every one: a Huawei ME906s IGNORES a command for a service it does not
+list.** Firmware 11.617.00.00.11 (ZyXEL LTE3301, 2026-11-17) lists eleven
+services in `DEVICE_SERVICES` — neither MS Basic Connect Extensions nor the QMI
+passthrough among them — and sent nothing back, no status, no function error,
+to the MBIMEx version query, a passthrough `GET_VERSION_INFO` and the LTE attach
+configuration. Each sat until its timeout: 10 + 15 + 25 s of every bring-up, and
+every timeout a vote on the recovery ladder against a channel that worked. The
+RM520N-GL did the same to an unlisted vendor service (atcmd_mbim.uc `attach`),
+so it is not one firmware's oddity. The list is mandatory Basic Connect and
+every device answers it; `mbim_client` reads it after OPEN and refuses an
+unlisted command locally (`refuse_unlisted`).
+
+## A modem switched into its MBIM USB configuration answers MBIM
+**Not the ME906s when it goes there straight from its ECM configuration.** The
+kernel picks configuration 2 (CDC-ECM) at enumeration; `echo 3 >
+bConfigurationValue` binds cdc_mbim, and the first such switch after power-up
+left the function mute — mbimcli's MBIM_OPEN went unanswered as well, so not a
+wwand defect. Going through the unconfigured state, `echo 0` then `echo 3`,
+answered at once, at boot as well as later, in five of five boots (LTE3301,
+2026-11-17). The test box does that in a local hotplug script; wwand does not
+choose USB configurations.
+
 ## One MBIM message, two encodings — and a firmware may pick the wrong one
 
 `BASE_STATIONS_INFO` carries LTE and NR cells in the same reply and encodes them

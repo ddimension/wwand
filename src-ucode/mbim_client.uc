@@ -42,6 +42,7 @@ const EXT_SERVICE_UUID   = '3d01dcc5-fef5-4d05-0d3a-bef7058e9aaf';
 // need (the schemas import nothing from here; the dependency runs one way).
 const BC_SERVICE_UUID    = 'a289cc33-bcbb-8b4f-b6b0-133ec2aae6df';
 const CID_SUBSCRIBE_LIST = 19;
+const CID_DEVICE_SERVICES = 16;
 const EXT_CID_VERSION    = 15;
 const MBIM_VERSION_1_0   = 0x0100;
 const MBIMEX_VERSION_3_0 = 0x0300;
@@ -62,6 +63,53 @@ export function create(hub, hooks)
 		pending: {},
 		handlers: {},     // "service:cid" -> [cb]
 		opened: false,
+		services: null,   // { uuid: true } from DEVICE_SERVICES, null = unknown
+	};
+
+	// Does the function list this service? true / false, or null when the list
+	// is not known (not opened yet, or DEVICE_SERVICES went unanswered) — and
+	// null means "do not gate", the behaviour from before the list was read.
+	// Basic Connect is always true: it is mandatory, and DEVICE_SERVICES itself
+	// lives there.
+	self.offers = function(uuid) {
+		if (self.services == null)
+			return null;
+
+		uuid = lc(uuid ?? '');
+
+		return (uuid == BC_SERVICE_UUID) || !!self.services[uuid];
+	};
+
+	// A COMMAND FOR A SERVICE THE FUNCTION DOES NOT LIST IS NOT SENT. Such a
+	// command is not refused by every firmware, it is IGNORED: a Huawei
+	// ME906s (11.617.00.00.11, 2026-11-17) lists neither MS Basic Connect
+	// Extensions nor the QMI passthrough and let the MBIMEx version query, a
+	// passthrough GET_VERSION_INFO and the LTE attach configuration each sit
+	// until they timed out — 10 + 15 + 25 s of every bring-up, and every
+	// timeout a vote on the recovery ladder against a channel that was fine.
+	// The answer is the same failure the caller already handles, delivered at
+	// once and on the next loop turn like a real one (a caller may rely on the
+	// callback not running inside its own call). It waits in `pending` like a
+	// sent command, so a destroy() in between pays it 'cancelled' — the
+	// session ended — rather than a refusal arriving after the teardown.
+	// `opts.any_service` sends it anyway: the raw ubus path, where probing an
+	// unlisted service is the point.
+	let refuse_unlisted = (uuid, what, txn, cb, opts) => {
+		if (opts?.any_service || self.offers(uuid) !== false)
+			return false;
+
+		let key = sprintf('%d', txn);
+		let p = { cb: cb };
+
+		p.timer = uloop.timer(0, () => {
+			delete self.pending[key];
+
+			if (cb)
+				cb({ error: 'unsupported_service', detail: what }, null);
+		});
+
+		self.pending[key] = p;
+		return true;
 	};
 
 	// `what` names the command for the log — see the on_error contract above.
@@ -123,9 +171,47 @@ export function create(hub, hooks)
 	// device that is not open is its own error to reason about.
 	self.open = function(cb) {
 		let attempt = 0;
-		let do_open, do_version;
+		let do_open, do_services, do_version;
+
+		// What the function offers, read once per OPEN (refuse_unlisted).
+		// Every MBIM device answers DEVICE_SERVICES — it is mandatory Basic
+		// Connect — so an error or a timeout here leaves the list unknown and
+		// nothing gated, rather than failing the open.
+		do_services = () => {
+			self.command_raw(BC_SERVICE_UUID, CID_DEVICE_SERVICES, '', (serr, sinfo) => {
+				let list = serr ? null : mbim.decode_device_services(sinfo);
+
+				self.services = null;
+
+				if (list != null) {
+					self.services = {};
+
+					for (let u in list)
+						self.services[u] = true;
+				}
+
+				if (hooks?.log)
+					hooks.log('info', (list != null)
+						? sprintf('mbim services: %s', join(', ', map(list, (u) => mbim.service_name(u))))
+						: sprintf('mbim services: DEVICE_SERVICES unanswered (%J) — nothing gated', serr));
+
+				if (!MBIMEX_REQUEST)
+					return cb ? cb(null) : null;
+
+				do_version();
+			}, { cmd_type: mbim.CMD_QUERY, timeout: OPEN_TIMEOUT, no_recovery: true, name: 'DEVICE_SERVICES' });
+		};
 
 		do_version = () => {
+			// a function that does not list the extensions has no version
+			// to agree: asking is a guaranteed timeout on one that ignores
+			// unknown services (refuse_unlisted), so say so and read v1
+			if (self.offers(EXT_SERVICE_UUID) === false) {
+				if (hooks?.log)
+					hooks.log('info', 'MBIMEx: the modem does not list MS Basic Connect Extensions — reading the v1 layouts');
+
+				return cb ? cb(null) : null;
+			}
 
 			// WE DO NOT ASK FOR MBIMEx, AND THAT IS THE POINT.
 			//
@@ -231,10 +317,7 @@ export function create(hub, hooks)
 				self.opened = true;
 				self.mbimex_version = 0;
 
-				if (!MBIMEX_REQUEST)
-					return cb ? cb(null) : null;
-
-				do_version();
+				do_services();
 			}, OPEN_TIMEOUT, 'OPEN');
 		};
 
@@ -273,6 +356,9 @@ export function create(hub, hooks)
 
 		let frame = mbim.encode_command(txn, schema.service, cmd.cid, cmd_type, info);
 		let what = sprintf('%s/%s', mbim.service_name(schema.service), name);
+
+		if (refuse_unlisted(schema.service, what, txn, cb, opts))
+			return true;
 
 		return self.raw_send(frame, txn, (err, msg) => {
 			if (err) {
@@ -334,6 +420,9 @@ export function create(hub, hooks)
 		let what = opts?.name
 			? sprintf('%s/%s', mbim.service_name(service_uuid), opts.name)
 			: sprintf('%s/cid %d', mbim.service_name(service_uuid), cid);
+
+		if (refuse_unlisted(service_uuid, what, txn, cb, opts))
+			return true;
 
 		return self.raw_send(frame, txn, (err, msg) => {
 			if (err)

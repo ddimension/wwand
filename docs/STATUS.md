@@ -11,6 +11,19 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **MBIM commands are gated on DEVICE_SERVICES (2026-11-17):** `mbim_client`
+  reads the service list after every OPEN and refuses a command for an
+  unlisted service at once (`unsupported_service`); the MBIMEx version query,
+  the QMI passthrough and the LTE attach profile also say so in the log. Found
+  on the new MBIM test box, a ZyXEL LTE3301 with a **Huawei ME906s**
+  (root@192.168.1.1): it lists neither MBIMEx nor the passthrough and ignored
+  both, ~50 s of every bring-up; now 8 s from OPEN to CONNECTED, five boots,
+  a daemon restart (session adopted) and an ifdown/ifup clean. The box selects
+  the MBIM USB configuration itself (`/etc/hotplug.d/usb/05-huawei-mbim`, 0
+  then 3 — see gotchas.md). Left: the LTE3301 board entry points AT at
+  `/dev/ttyUSB2`, which this module does not have in its MBIM configuration
+  (a warning, then the next channel); no attach-profile programming without
+  MBIMEx (the modem attaches with its own default).
 - **Cell locks are a dialect table (2026-11-17, ddimension/wwand#91):**
   `cell_lock.uc` `DIALECTS` — `quectel` (AT+QNWLOCK) and `qmi` (NAS Set/Get
   Cell Config 0x00D8/0x015A, the older 0x00AF/0x00D7, NR 0x010E/0x010F).
@@ -23,8 +36,8 @@ state buried at the top invites reading a months-old entry as present tense.
   save_ctrl 1,1) and the Chateau (RG650E-EU, LTE only: it refuses the NR
   read); EG06-E, BG96, BM806U-E1 and E392 know none of the six messages. The
   Quectel 5G read of a lock has no enable field (`"common/5g",<pci>,…`), so
-  the old `parse_qnwlock` reading of it dropped the PCI; the table parses it
-  itself. **New file: the feed's `WWAND_BASE_UC` needs `cell_lock.uc` in the
+  the old `parse_qnwlock` reading of it dropped the PCI (and showed a PCI-0
+  lock as off in the NCM telemetry); `parse_qnwlock` reads it now. **New file: the feed's `WWAND_BASE_UC` needs `cell_lock.uc` in the
   next bump** (`tools/check-packaging.py`). Not done: a hwtest run of the
   whole bring-up on this tree; the status read-back (`locks`) still comes
   from the NCM telemetry only.
