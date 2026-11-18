@@ -484,6 +484,35 @@ function s_signal_saturated(next) {
 	}));
 }
 
+// AN RSSI-ONLY READING BELONGS TO THE GENERATION THE MODEM IS ON. The ME906s
+// (no MBIMEx) answers the v1 Signal State, RSSI alone; on GPRS/EDGE it was
+// filed under LTE and shown as "LTE rssi -89 dBm" (2026-11-18). The class
+// mask from the registration decides; unknown or LTE keeps the old filing.
+function s_signal_generation(next) {
+	let sig_schema = { service: bc.service,
+		commands: { SIGNAL_STATE_V2: bc.commands.SIGNAL_STATE_V2 } };
+	let raw = build_signal(12, []);   // index 12 -> -89 dBm, no RsrpSnr tail
+	let cases = [
+		[ ext.DATA_CLASS_GPRS | ext.DATA_CLASS_EDGE, (s) => s.gsm_rssi == -89 && !s.lte, 'EDGE -> gsm_rssi' ],
+		[ ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA, (s) => s.wcdma?.rssi == -89 && !s.lte, 'HSPA -> wcdma.rssi' ],
+		[ ext.DATA_CLASS_LTE, (s) => s.lte?.rssi == -89 && s.gsm_rssi == null, 'LTE -> lte.rssi' ],
+		[ null, (s) => s.lte?.rssi == -89, 'unknown class keeps lte.rssi' ],
+	];
+	let step;
+	step = (i) => {
+		if (i >= length(cases))
+			return next();
+
+		let mc = make_mc(sig_schema, { SIGNAL_STATE_V2: { __raw: raw } });
+
+		mc.open(() => backend.get_signal(mc, (sig) => {
+			ok(sig != null && cases[i][1](sig), sprintf('signal generation: %s', cases[i][2]));
+			step(i + 1);
+		}, cases[i][0]));
+	};
+	step(0);
+}
+
 // ...whereas these are not readings at all
 function s_signal_unusable(next) {
 	let sig_schema = { service: bc.service,
@@ -753,7 +782,8 @@ function s_data_mode(next) {
 					eq(dm4, null, 'data_mode: CUSTOM alone says nothing, so it answers nothing');
 
 					// a mask with no known RAT bit at all reads the same way
-					let mc5 = make_mc(bc, { REGISTER_STATE: reg_state(1 << 2) });
+					// (1xRTT: CDMA, which wwand has no RAT name for)
+					let mc5 = make_mc(bc, { REGISTER_STATE: reg_state(ext.DATA_CLASS_1XRTT) });
 					mc5.open(() => backend.get_data_mode(mc5, (dm5) => {
 						eq(dm5, null, 'data_mode: ...and so does any mask carrying no RAT we know');
 
@@ -763,7 +793,29 @@ function s_data_mode(next) {
 							REGISTER_STATE: reg_state(ext.DATA_CLASS_CUSTOM | ext.DATA_CLASS_5G_SA) });
 						mc6.open(() => backend.get_data_mode(mc6, (dm6) => {
 							eq(dm6?.mode, 'SA', 'data_mode: CUSTOM alongside a known class does not hide it');
-							next();
+
+							// BELOW LTE IS A MODE TOO. An ME906s that fell back to
+							// GPRS/EDGE (0x03) answered nothing, the caller kept
+							// the last mode, and status said LTE on an EDGE link.
+							let legacy = [
+								[ ext.DATA_CLASS_GPRS | ext.DATA_CLASS_EDGE, 'EDGE' ],
+								[ ext.DATA_CLASS_GPRS, 'GSM' ],
+								[ ext.DATA_CLASS_UMTS, 'UMTS' ],
+								[ ext.DATA_CLASS_UMTS | ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA, 'HSPA' ],
+							];
+							let step;
+							step = (i) => {
+								if (i >= length(legacy))
+									return next();
+
+								let mcl = make_mc(bc, { REGISTER_STATE: reg_state(legacy[i][0]) });
+								mcl.open(() => backend.get_data_mode(mcl, (dml) => {
+									eq(dml?.mode, legacy[i][1], sprintf('data_mode: mask 0x%x -> %s', legacy[i][0], legacy[i][1]));
+									eq(dml?.lte, false, sprintf('data_mode: %s is not LTE', legacy[i][1]));
+									step(i + 1);
+								}));
+							};
+							step(0);
 						}));
 					}));
 				}));
@@ -889,7 +941,7 @@ function s_at_over_mbim_compal(next) {
 
 // --- runner ------------------------------------------------------------------
 
-let scenarios = [ s_signal, s_signal_saturated, s_signal_unusable, s_signal_placeholder, s_signal_placeholder_snr, s_cells, s_cells_unknown,
+let scenarios = [ s_signal, s_signal_saturated, s_signal_generation, s_signal_unusable, s_signal_placeholder, s_signal_placeholder_snr, s_cells, s_cells_unknown,
 		  s_cells_out_of_range, s_cells_signed_physical, s_cells_signed_sinr_in_index_range, s_cells_unknown_rsrp_keeps_the_rest, s_cells_coded_still_coded, s_cells_v1, s_fragments, s_data_mode, s_reg_detail, s_slots,
 	s_at_over_mbim, s_at_over_mbim_compal ];
 let i = 0;

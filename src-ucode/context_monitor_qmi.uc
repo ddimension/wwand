@@ -16,7 +16,6 @@
 'use strict';
 
 import * as uloop from 'uloop';
-import * as fs from 'fs';
 import * as tlv from 'wwand.codec.tlv';
 import * as qmi_backend from 'wwand.qmi_backend';
 import * as context_common from 'wwand.context_common';
@@ -227,18 +226,10 @@ export function install(self, o)
 						? (self.config.mux_link ?? (parent ? sprintf('%sm%d', parent, mux) : null))
 						: parent;
 
-					if (dev && fs.access('/sys/class/net/' + dev)) {
-						let g = (f) => +(trim(fs.readfile(sprintf('/sys/class/net/%s/statistics/%s', dev, f)) ?? '') || 0);
+					let nd = context_common.netdev_stats(dev);
 
-						agg.tx_bytes   = g('tx_bytes');
-						agg.rx_bytes   = g('rx_bytes');
-						agg.tx_packets = g('tx_packets');
-						agg.rx_packets = g('rx_packets');
-						agg.tx_errors  = g('tx_errors');
-						agg.rx_errors  = g('rx_errors');
-						agg.tx_dropped = g('tx_dropped');
-						agg.rx_dropped = g('rx_dropped');
-						agg.source = 'netdev';
+					if (nd) {
+						agg = nd;
 
 						if (stats_src == null && (agg.rx_packets || agg.tx_packets))
 							stats_src = 'netdev';

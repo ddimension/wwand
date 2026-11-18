@@ -115,6 +115,19 @@ export function create(opts)
 	// already declared at definition time)
 	let start_stats, stop_stats, sample_stats, refresh_settings;
 	let refresh_refused = false;   // the modem refused the last settings refresh
+	// which counters this connection reads: 'modem' (PACKET_STATISTICS),
+	// 'netdev' (the kernel's, under opts.net_root — /sys/class/net unless a
+	// test points it elsewhere), or null while neither has shown a packet
+	let stats_src = null;
+
+	// the netdev this context's traffic crosses — derive_netdev's rule: session
+	// 0 is the parent, a session > 0 its VLAN child
+	let stats_dev = () => {
+		let parent = self.modem?.datapath?.netdev ?? self.modem?.netdev;
+		let eff = cfgmod.effective_mux_id(self.config, self.modem?.datapath);
+
+		return (eff > 0 && parent) ? (self.config?.mux_link ?? sprintf('%s.%d', parent, eff)) : parent;
+	};
 
 	// shared emit/set_state/fail_finish (context_common.ctx_scaffolding)
 	let sc = context_common.ctx_scaffolding(self, {
@@ -161,6 +174,7 @@ export function create(opts)
 	start_stats = () => {
 		// a new session starts a new run of refusals (apply_refresh)
 		refresh_refused = false;
+		stats_src = null;
 		rx_watch.reset();
 		self.connected_since = context_common.mono();
 		stats_timer = uloop.timer(0, sample_stats);   // first sample immediately
@@ -183,19 +197,46 @@ export function create(opts)
 			if (self.state != 'CONNECTED')
 				return;
 
-			if (!err && d != null) {
-				self.stats = {
-					tx_bytes: d.out_octets, rx_bytes: d.in_octets,
-					tx_packets: d.out_packets, rx_packets: d.in_packets,
-					tx_errors: d.out_errors, rx_errors: d.in_errors,
-					tx_dropped: d.out_discards, rx_dropped: d.in_discards,
-				};
+			let s = (!err && d != null) ? {
+				tx_bytes: d.out_octets, rx_bytes: d.in_octets,
+				tx_packets: d.out_packets, rx_packets: d.in_packets,
+				tx_errors: d.out_errors, rx_errors: d.in_errors,
+				tx_dropped: d.out_discards, rx_dropped: d.in_discards,
+			} : null;
 
-				let total = +(d.in_packets ?? 0);
+			// A MODEM THAT COUNTS NOTHING IS NOT A LINK THAT CARRIES NOTHING.
+			// A Huawei ME906s (11.617.00.00.11, 2026-11-18) answers
+			// PACKET_STATISTICS with every counter at zero while wwand0 moves
+			// traffic, so the zero-rx watchdog read a frozen 0 and would have
+			// reset a working modem after zero_rx_timeout. An rx of zero — or no
+			// answer at all — sends the reader to the kernel's counters; the
+			// first source to show a packet is then kept for the connection,
+			// because the two count over different spans and a switch would
+			// make the published totals jump (the same latch, and the same
+			// reasons, as context_monitor_qmi's WDS/netdev pair).
+			if (s && stats_src == null && s.rx_packets)
+				stats_src = 'modem';
+
+			if (stats_src == 'netdev' || (stats_src == null && !s?.rx_packets)) {
+				let nd = context_common.netdev_stats(stats_dev(), opts.net_root);
+
+				if (nd) {
+					s = nd;
+
+					if (stats_src == null && (nd.rx_packets || nd.tx_packets))
+						stats_src = 'netdev';
+				}
+			}
+
+			if (s != null) {
+				self.stats = s;
+
+				let total = +(s.rx_packets ?? 0);
 				let stalled = rx_watch.feed(total);
 
 				if (stalled != null) {
-					log('err', sprintf('no rx packets for %dms, tripping zero-rx recovery', stalled));
+					log('err', sprintf('no rx packets for %dms (rx %d tx %d from %s), tripping zero-rx recovery',
+						stalled, total, s.tx_packets ?? -1, s.source ?? 'modem'));
 					stop_stats();
 					emit('zero_rx', { stalled_ms: stalled, rx_total: total });
 					return;

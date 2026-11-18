@@ -72,7 +72,7 @@ export function install(self, o)
 					(e, d) => ok(!e && tlv.has_payload(d)), { no_recovery: true })
 				: ok(false)) },
 			{ name: 'mbim', probe: (ok) => self.mbim
-				? mbim_backend.get_signal(self.mbim, (s) => ok(s != null))
+				? mbim_backend.get_signal(self.mbim, (s) => ok(s != null), self.reg?.data_class)
 				: ok(false) },
 		], (be) => {
 			if (be == 'mbim')
@@ -97,7 +97,7 @@ export function install(self, o)
 					outcome('_sig_be', s != null);
 					if (s) self.signal = s;
 					cb();
-				});
+				}, self.reg?.data_class);
 
 			if (be == 'qmi')
 				return with_pt(() => { outcome('_sig_be', false); cb(); }, (pt) => pt.nas.request('GET_SIGNAL_INFO', {}, (e, d) => {
@@ -115,9 +115,38 @@ export function install(self, o)
 		}, { reprobe: true, log: log, what: 'signal' });
 	};
 
+	// The serving cell over AT, in the modem's own dialect: (err, serving) with
+	// serving in the parse_qeng_servingcell shape, or null when the answer named
+	// no cell (a Huawei on GSM answers ^MONSC with a GSM line). ASKING ONE
+	// VENDOR'S COMMAND OF ANOTHER IS A TRANSPORT FAILURE ON EVERY TICK: an
+	// ME906s answers AT+QENG with ERROR, the ladder demoted the AT rung, the
+	// port-only probe picked it again, and "re-probing the ladder" was logged
+	// every 2-3 s (2026-11-18). A blank manufacturer still gets QENG, as before;
+	// a named vendor with no known read gets 'unsupported' and no AT rung.
+	// The third argument is true when the answer says the modem is on another
+	// RAT — a ^MONSC GSM/WCDMA line — so the last LTE cell is no longer true;
+	// an empty or unparsable OK says nothing and keeps it.
+	let at_serving = (cb) => {
+		let mfr = lc(sprintf('%s', self.info?.manufacturer ?? ''));
+
+		if (match(mfr, /huawei/))
+			return modem_common.telemetry_at(self).send('AT^MONSC', (e, r) => {
+				let sc = e ? null : atcmd.parse_monsc(r?.lines);
+				let other = !e && !sc &&
+					length(filter(r?.lines ?? [], (l) => match(l, /^\^MONSC:\s*(GSM|WCDMA|UMTS|TD-SCDMA)\b/)));
+				cb(e, sc ? tel_vendor.sc_to_serving(sc) : null, !!other);
+			});
+
+		if (mfr == '' || modem_common.qeng_ok(self))
+			return modem_common.telemetry_at(self).send('AT+QENG="servingcell"', (e, r) =>
+				cb(e, e ? null : atcmd.parse_qeng_servingcell(r?.lines)));
+
+		cb({ error: 'unsupported', detail: 'no AT serving-cell read for this vendor' }, null);
+	};
+
 	// cells: passthrough NAS cell-location info (decoded + scrubbed exactly as the
 	// QMI backend — richest serving + neighbour detail), else native MBIM Base
-	// Stations Info, else a best-effort AT QENG serving cell. Stores self.cells,
+	// Stations Info, else a best-effort AT serving cell (at_serving). Stores self.cells,
 	// preserving any carrier-aggregation set.
 	self._refresh_cells = function(cb) {
 		cb = cb ?? (() => null);
@@ -128,8 +157,11 @@ export function install(self, o)
 		// the same for AT: an OK whose QENG body is empty or momentarily
 		// unparsable is an answer, and counting it as a transport failure would
 		// send the ladder back to probe the dead ones.
-		let store = (c, answered) => {
+		let store = (c, answered, gone) => {
 			outcome('_cells_be', answered ?? (c != null));
+
+			if (gone)
+				self.cells = null;
 
 			if (c) {
 				if (ca != null)
@@ -151,7 +183,11 @@ export function install(self, o)
 			{ name: 'mbim', probe: (ok) => self.mbim
 				? mbim_backend.get_cells(self.mbim, (c) => ok(c != null))
 				: ok(false) },
-			{ name: 'at', probe: (ok) => ok(!!self.at) },
+			// the probe is the read itself, as on the CA ladder below: a port
+			// that exists says nothing about whether this vendor's read works
+			{ name: 'at', probe: (ok) => self.at
+				? at_serving((e) => ok(!e))
+				: ok(false) },
 		], (be) => {
 			if (be == 'mbim')
 				return mbim_backend.get_cells(self.mbim, (c) => store(c));
@@ -162,10 +198,7 @@ export function install(self, o)
 					{ no_recovery: true }));
 
 			if (be == 'at')
-				return modem_common.telemetry_at(self).send('AT+QENG="servingcell"', (e, r) => {
-					let serving = e ? null : atcmd.parse_qeng_servingcell(r?.lines);
-					store(serving ? { serving: serving } : null, !e);
-				});
+				return at_serving((e, serving, gone) => store(serving ? { serving: serving } : null, !e, gone));
 
 			cb();
 		}, { reprobe: true, log: log, what: 'cells' });

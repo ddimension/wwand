@@ -20,10 +20,27 @@ state buried at the top invites reading a months-old entry as present tense.
   both, ~50 s of every bring-up; now 8 s from OPEN to CONNECTED, five boots,
   a daemon restart (session adopted) and an ifdown/ifup clean. The box selects
   the MBIM USB configuration itself (`/etc/hotplug.d/usb/05-huawei-mbim`, 0
-  then 3 — see gotchas.md). Left: the LTE3301 board entry points AT at
-  `/dev/ttyUSB2`, which this module does not have in its MBIM configuration
-  (a warning, then the next channel); no attach-profile programming without
-  MBIMEx (the modem attaches with its own default).
+  then 3 — see gotchas.md). No attach-profile programming without MBIMEx (the
+  modem attaches with its own default).
+- **What the ME906s showed next (2026-11-18), four fixes:** the module is a
+  refit, not the LTE3301's stock one, so its board entry (`/dev/ttyUSB2`) now
+  applies only while that port exists — otherwise discovery finds the ME906s'
+  single tty, ttyUSB0, which answers AT (and carries NMEA once `AT^WPDGP`
+  starts the GPS). PACKET_STATISTICS answers all zeros, so the MBIM context
+  reads the netdev's counters instead (same latch as the QMI WDS/netdev pair)
+  — without it the zero-rx watchdog would have reset a working modem after
+  6 h. A fallback to GPRS/EDGE gave no data mode and status kept "LTE"; the
+  MBIM class mask now names HSPA/UMTS/EDGE/GSM and an RSSI-only reading is
+  filed under that generation. And `codec/mbim.uc decode_info` stops at the
+  DataBuffer, so a v1 REGISTER_STATE no longer reads the provider id as the
+  v2 `preferred_data_classes`. Vendor services: `3c83a6ed…` answers with a
+  `HUAW` signature on CIDs 1–3, `fdc22af2…` (CID 0x02000100) with `cf000000`,
+  `10e40d69…` empty, `ed19555d…` Failure — none documented, none used; no
+  service offers DSS. With AT found, the MBIM cells ladder's AT rung sent
+  the Quectel `AT+QENG` to the Huawei, got ERROR, and re-probed every 2-3 s;
+  it now reads in the vendor's dialect (`^MONSC` on Huawei, QENG on
+  Quectel/ASR or a blank manufacturer, nothing otherwise) and probes with the
+  read itself. Left: LTE attach profile without MBIMEx.
 - **Cell locks are a dialect table (2026-11-17, ddimension/wwand#91):**
   `cell_lock.uc` `DIALECTS` — `quectel` (AT+QNWLOCK) and `qmi` (NAS Set/Get
   Cell Config 0x00D8/0x015A, the older 0x00AF/0x00D7, NR 0x010E/0x010F).

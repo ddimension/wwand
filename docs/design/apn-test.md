@@ -51,7 +51,7 @@ requirement in disguise.
 — wwand's normal case — that aggregates every channel on the modem, so the
 comparison against the operator's byte counter is silently wrong whenever
 anything else is up. wwand samples the **modem's own WDS packet statistics** per
-call and sums them across address families (`context_monitor_qmi.uc:108-155`).
+call and sums them across address families (`context_monitor_qmi.uc:107-154`).
 That is not merely the tidier counter: it is the modem's view of the session,
 which is the thing the operator bills against.
 

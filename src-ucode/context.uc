@@ -1218,7 +1218,7 @@ export function create(opts)
 							// 'ipv6'` context whose settings read failed
 							// reached CONNECTED with no families, no settings
 							// and a monitor that never re-arms
-							// (its settings refresh returns at context_monitor_qmi.uc:299-300 on an
+							// (its settings refresh returns at context_monitor_qmi.uc:290-291 on an
 							// empty family set), and sat there until
 							// an operator ifdown.
 							if ((family == 4 && !clat_v4()) || (family == 6 && clat_v4()) ||

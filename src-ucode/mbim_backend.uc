@@ -551,6 +551,25 @@ function plmn_str(provider_id)
 	return sprintf('%s/%s', substr(provider_id, 0, 3), substr(provider_id, 3));
 }
 
+// The 2G/3G names for a class mask without LTE or 5G, the highest generation
+// first — or null. WITHOUT THEM A FALLBACK TO 2G READ AS LTE: a Huawei ME906s
+// that lost LTE and re-registered on GPRS/EDGE (available 0x03,
+// 2026-11-18) gave no mode, the caller rightly keeps the last known one on
+// a failed read, and status said "LTE" for hours on an EDGE link.
+function legacy_mode(dc)
+{
+	if (dc & (ext.DATA_CLASS_HSDPA | ext.DATA_CLASS_HSUPA))
+		return 'HSPA';
+	if (dc & ext.DATA_CLASS_UMTS)
+		return 'UMTS';
+	if (dc & ext.DATA_CLASS_EDGE)
+		return 'EDGE';
+	if (dc & ext.DATA_CLASS_GPRS)
+		return 'GSM';
+
+	return null;
+}
+
 // get_signal(mc, cb): per-RAT signal from Signal State, normalized to the QMI
 // self.signal shape { lte:{rssi,rsrq,rsrp,snr}, nr5g:{rsrp,snr} }, or cb(null).
 // That layout has no per-RAT RSRQ, so lte.rsrq is null.
@@ -566,7 +585,12 @@ function plmn_str(provider_id)
 // cb(signal, blank): `blank` lists the RATs whose RsrpSnr entry carried no
 // reading at all (both indexes 0, see rsrp_dbm) and was therefore left out —
 // so the caller can log the placeholder instead of a -157 dBm cell.
-export function get_signal(mc, cb)
+//
+// `data_class` (optional) is the registration's available class mask: an
+// RSSI-only reading belongs to the generation the modem is on. Filed under
+// LTE regardless, an ME906s on EDGE showed "LTE rssi -89 dBm" (2026-11-18).
+// Unknown, or LTE/5G in the mask, keeps it under `lte`.
+export function get_signal(mc, cb, data_class)
 {
 	mc.command(bc, 'SIGNAL_STATE_V2', 'query', {}, (err, data) => {
 		if (err || !data)
@@ -601,8 +625,19 @@ export function get_signal(mc, cb)
 				out.nr5g = { rsrp: rsrp, snr: snr };
 		}
 
-		// RSSI present but no LTE RsrpSnr entry — still surface the RSSI
-		if (!out.lte && rssi != null)
+		// RSSI present but no LTE RsrpSnr entry — still surface the RSSI, under
+		// the generation it was measured on (the shape QMI's SIGNAL_INFO fills:
+		// `gsm_rssi`, `wcdma.rssi`)
+		let gen = legacy_mode(data_class ?? 0);
+
+		if (!out.lte && !out.nr5g && rssi != null && gen != null &&
+		    !(data_class & (ext.DATA_CLASS_LTE | ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA))) {
+			if (gen == 'GSM' || gen == 'EDGE')
+				out.gsm_rssi = rssi;
+			else
+				out.wcdma = { rssi: rssi };
+		}
+		else if (!out.lte && rssi != null)
 			out.lte = { rssi: rssi, rsrq: null, rsrp: null, snr: null };
 
 		return cb(length(out) ? out : null, blank);
@@ -800,7 +835,8 @@ export function get_cells(mc, cb)
 	});
 };
 
-// get_data_mode(mc, cb): data-system mode { mode, lte, nr } (mode LTE/NSA/SA) —
+// get_data_mode(mc, cb): data-system mode { mode, lte, nr } (mode LTE/NSA/SA,
+// or HSPA/UMTS/EDGE/GSM on a modem registered below LTE) —
 // the MBIM analogue of qmi_backend.get_data_mode. Derived from the register
 // state's available data classes (MbimDataClass bitmask: LTE / 5G-NSA / 5G-SA).
 // REGISTRATION_PARAMETERS carries no data-class field, so the register state's
@@ -814,7 +850,7 @@ export function get_data_mode(mc, cb)
 		let dc = data.available_data_classes;
 		let lte = (dc & ext.DATA_CLASS_LTE) != 0;
 		let nr = (dc & (ext.DATA_CLASS_5G_NSA | ext.DATA_CLASS_5G_SA)) != 0;
-		let mode = nr ? (lte ? 'NSA' : 'SA') : (lte ? 'LTE' : null);
+		let mode = nr ? (lte ? 'NSA' : 'SA') : (lte ? 'LTE' : legacy_mode(dc));
 
 		// NO MODE IS NOT A MODE. Returning { mode: null } here reads as a
 		// successful answer to every caller — it is a truthy object — so the

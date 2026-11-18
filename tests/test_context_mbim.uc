@@ -14,6 +14,7 @@
 import { eq, ok, done } from './lib/check.uc';
 import * as uloop from 'uloop';
 import * as struct from 'struct';
+import * as fs from 'fs';
 import * as mbim_mockhub from './lib/mbim_mockhub.uc';
 import * as modem_mbim from 'wwand/modem_mbim.uc';
 import * as context_mbim from 'wwand/context_mbim.uc';
@@ -238,6 +239,63 @@ let scenario_zero_rx = {
 	},
 };
 
+// --- scenario 2b: a modem that counts nothing --------------------------------
+//
+// A Huawei ME906s answers PACKET_STATISTICS with every counter at zero while
+// its netdev carries traffic (2026-11-18). Read alone, that froze the watchdog
+// at 0 and would have reset a working modem. The kernel's counters stand in:
+// rising, they keep the watchdog quiet and are what `stats` publishes; frozen
+// too, the trip still comes, and names its source.
+const NET_ROOT = sprintf('%s/wwand-test-net-%d', getenv('TMPDIR') ?? '/tmp', time());
+
+function net_write(dev, rx_packets) {
+	let d = sprintf('%s/%s/statistics', NET_ROOT, dev);
+
+	system(sprintf("mkdir -p '%s'", d));
+
+	for (let f, v in { rx_packets: rx_packets, tx_packets: 7, rx_bytes: rx_packets * 100,
+	                   tx_bytes: 700, rx_errors: 0, tx_errors: 0, rx_dropped: 0, tx_dropped: 0 })
+		fs.writefile(sprintf('%s/%s', d, f), sprintf('%d\n', v));
+}
+
+const ZERO_STATS = {
+	in_octets: 0, out_octets: 0, in_packets: 0, out_packets: 0,
+	in_errors: 0, out_errors: 0, in_discards: 0, out_discards: 0,
+};
+
+let scenario_zero_counters = {
+	name: 's2b_zero_counters',
+	ctx_timing: { stats_interval: 5, zero_rx_ms: 30 },
+	net_root: NET_ROOT,
+	handlers: () => base_handlers({ PACKET_STATISTICS: ZERO_STATS }),
+	run: (env) => {
+		env.modem.netdev = 'wwtest0';
+		net_write('wwtest0', 1);
+
+		let rx = 1;
+		let tick;
+		tick = uloop.interval(4, () => net_write('wwtest0', ++rx));
+
+		env.ctx.up((err) => {
+			eq(err, null, 'zero counters: context connected');
+
+			uloop.timer(90, () => {
+				tick.cancel();
+				ok(!any_event(env.cevents, 'zero_rx'), 'zero counters: rising netdev rx keeps the watchdog quiet');
+				eq(env.ctx.stats?.source, 'netdev', 'zero counters: stats come from the netdev');
+				ok(env.ctx.stats?.rx_packets > 1, 'zero counters: ...with its numbers, not the modem zeros');
+
+				// the counter-check: the netdev stops too -> a real stall trips
+				uloop.timer(120, () => {
+					ok(any_event(env.cevents, 'zero_rx'), 'zero counters: a frozen netdev still trips zero-rx');
+					system(sprintf("rm -rf '%s'", NET_ROOT));
+					env.finish();
+				});
+			});
+		});
+	},
+};
+
 // --- scenario 3: re-randomized IPv6 interface id must not renumber ----------
 //
 // Some firmware hands back a different low 64 bits on every IP_CONFIGURATION
@@ -361,7 +419,7 @@ let scenario_refresh_refused = {
 	},
 };
 
-let scenarios = [ scenario_flow, scenario_zero_rx, scenario_v6_iid, scenario_fail_reason, scenario_refresh_refused ];
+let scenarios = [ scenario_flow, scenario_zero_rx, scenario_zero_counters, scenario_v6_iid, scenario_fail_reason, scenario_refresh_refused ];
 let current = 0;
 
 function run_next() {
@@ -401,6 +459,7 @@ function run_next() {
 						name: 'wan', modem: m,
 						config: s.ctx_config ?? { apn: 'internet.t-d1.de', mux_id: 0 },
 						timing: s.ctx_timing,
+						net_root: s.net_root,
 						deps: {
 							log: () => null,
 							on_event: (c, ev, d) => push(cevents, { event: ev, data: d }),

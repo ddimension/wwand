@@ -451,14 +451,14 @@ function mk_nr(r)
 
 // wrap a parse_monsc/parse_meng_servingcell descriptor as a serving object with
 // dBm rsrp/rsrq for fill_signal_from_serving + assemble_cells
-function sc_to_serving(sc)
+export function sc_to_serving(sc)
 {
 	return { lte: mk_lte({
 		band: sc.band, earfcn: sc.earfcn, pci: sc.pci, mcc: sc.mcc, mnc: sc.mnc,
 		cid: sc.cid, tac: sc.tac, rsrp: sc.rsrp_dbm, rsrq: sc.rsrq_db,
 		sinr: sc.sinr_db ?? null,
 	}) };
-}
+};
 
 function tel_huawei_cells(self, cb)
 {

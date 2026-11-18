@@ -85,6 +85,9 @@ export function fmt_sig(sig)
 	if (ok(sig?.wcdma?.rssi))
 		push(parts, sprintf('WCDMA rssi %d dBm', sig.wcdma.rssi));
 
+	if (ok(sig?.gsm_rssi))
+		push(parts, sprintf('GSM rssi %d dBm', sig.gsm_rssi));
+
 	if (!length(parts) && ok(sig?.rsrp))
 		push(parts, sprintf('rsrp %d dBm', sig.rsrp));
 

@@ -713,6 +713,29 @@ eq(mbim.service_name('00000000-0000-0000-0000-0000000000ff'),
 	eq(rs.register_state, 1, 'rs: the v1 fields read');
 	eq(rs.provider_id, '26201', 'rs: ...and the strings still resolve');
 	eq(rs.preferred_data_classes, 0x8000, 'rs: the v2 append is picked up');
+
+	// ...and the v1 answer, where the same 4 bytes are the DataBuffer. Captured
+	// off a Huawei ME906s (no MBIMEx, 2026-11-18): roaming on 26202 over
+	// GPRS/EDGE, the provider id at 0x30 — exactly where the v2 field would sit.
+	// A length check reads it as 0x00360032, which is UTF-16 "2", "6".
+	let rs1 = mbim.decode_info(bc.commands.REGISTER_STATE.response, hex2buf(
+		'0000000004000000010000000300000001000000300000000a0000003c000000' +
+		'1600000000000000000000000200000032003600320030003200000076006f00' +
+		'6400610066006f006e0065002e00640065000000'));
+
+	eq(rs1.register_state, 4, 'rs v1: roaming');
+	eq(rs1.available_data_classes, 3, 'rs v1: GPRS|EDGE');
+	eq(rs1.provider_id, '26202', 'rs v1: the strings resolve');
+	eq(rs1.provider_name, 'vodafone.de', 'rs v1: ...both of them');
+	eq(rs1.registration_flag, 2, 'rs v1: the last v1 field still reads');
+	eq(rs1.preferred_data_classes, null, 'rs v1: the v2 append is absent, not the provider id read as a number');
+
+	// a reference pointing back into the fixed part is malformed and must not
+	// truncate the fields after it
+	let rsb = mbim.decode_info({ a: 'u32', s: 'string', b: 'u32' }, hex2buf(
+		'07000000' + '0000000004000000' + '09000000'));
+
+	eq(rsb.b, 9, 'decode: a backward reference does not end the fixed part');
 })();
 
 // --- the layouts that are SELECTED, not appended -----------------------------

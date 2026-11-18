@@ -998,3 +998,20 @@ Write it as two statements (`let mk = a ?? b.c; mk(w);`), as transport.uc
 already did. `tools/check-ucode-pitfalls.py` fails on every called
 parenthesized `??` that is not a `return` / arrow body, and runs in
 `run_tests.sh`.
+
+## An MBIM modem's PACKET_STATISTICS counts the traffic
+**Not the ME906s: every counter is zero while its netdev moves data**
+(11.617.00.00.11, 2026-11-18). The MBIM zero-rx watchdog read only that
+answer, so it saw a frozen 0 and would have reset the modem once
+`zero_rx_timeout` (6 h) ran out; `wwandctl` showed "down 0 bytes". The MBIM
+context now does what the QMI monitor does for QMAP-offloaded modems: an rx of
+zero sends it to the kernel's counters, and whichever source first shows a
+packet is kept for the connection (`context_mbim.uc sample_stats`).
+
+## A v1 MBIM answer is shorter than the v2 one
+**Not when it carries strings.** MBIMEx v2 APPENDS `PreferredDataClasses` to
+REGISTER_STATE, and a decoder that reads the field whenever the buffer is long
+enough reads a v1 answer's DataBuffer there: an ME906s (no MBIMEx) gave
+0x00360032 — UTF-16 "2", "6", the start of its provider id "26202". The fixed
+part ends where the lowest referenced offset begins, and `codec/mbim.uc
+decode_info` now reads every field past that point as absent.

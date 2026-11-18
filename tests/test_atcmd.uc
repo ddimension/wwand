@@ -933,8 +933,31 @@ eq(atcmd.find_tty(ncm_tty_fx, 'usb0', null), '/dev/ttyUSB2', 'find: netdev-ancho
 eq(atcmd.find_tty(quectel_fx(), '/dev/cdc-wdm0', '/dev/ttyACM7'), '/dev/ttyACM7', 'find: override wins');
 
 // board quirk wins over lookup
-let bfx = quectel_fx({ files: { '/tmp/sysinfo/board_name': "zyxel,nr7101\n" } });
+const BOARD_TTY2 = { '/sys/class/tty/ttyUSB2': [ '/sys/class/tty/ttyUSB2' ] };
+let bfx = quectel_fx({ files: { '/tmp/sysinfo/board_name': "zyxel,nr7101\n" }, globs: BOARD_TTY2 });
 eq(atcmd.find_tty(bfx, '/dev/cdc-wdm0', null), '/dev/ttyUSB2', 'find: board quirk');
+
+// ...but only while the board's port exists. A Zyxel LTE3301-M209 refitted with
+// a Huawei ME906s in its MBIM configuration has ONE tty, ttyUSB0 on interface 2,
+// and it answers AT (HW-observed 2026-11-18); the board's ttyUSB2 is absent, and
+// holding to it left the session without an AT port.
+const HBASE = '/sys/class/usbmisc/cdc-wdm0/device/..';
+let me906s_fx = fakefx.create({
+	files: {
+		'/tmp/sysinfo/board_name': "zyxel,lte3301-m209\n",
+		[sprintf('%s/idVendor', HBASE)]: "12d1\n",
+		[sprintf('%s/idProduct', HBASE)]: "15c1\n",
+		[sprintf('%s/1-1:3.2/bInterfaceNumber', HBASE)]: "02\n",
+	},
+	globs: {
+		[sprintf('%s/*/tty*', HBASE)]: [ sprintf('%s/1-1:3.2/ttyUSB0', HBASE) ],
+		'/sys/class/tty/ttyUSB2': [],
+	},
+});
+eq(atcmd.find_tty(me906s_fx, '/dev/cdc-wdm0', null), '/dev/ttyUSB0',
+	'find: an absent board port falls through to discovery');
+eq(atcmd.find_tty(me906s_fx, '/dev/cdc-wdm0', null, null, [ '/dev/ttyUSB2' ]), '/dev/ttyUSB0',
+	'find: ...also on the retry after the board port failed to open');
 
 // unknown usb id: heuristic fallback, first sorted tty
 let ufx = quectel_fx({ files: { [sprintf('%s/idVendor', BASE)]: "dead\n" } });
@@ -1000,7 +1023,7 @@ eq(atcmd.find_tty(ec200a_fx, 'usb0', '/dev/ttyUSB0', null, [ '/dev/ttyUSB0' ]), 
 	'skip: a mute explicit override is reported, not worked around');
 
 // same for a board quirk
-let bskip = quectel_fx({ files: { '/tmp/sysinfo/board_name': "zyxel,nr7101\n" } });
+let bskip = quectel_fx({ files: { '/tmp/sysinfo/board_name': "zyxel,nr7101\n" }, globs: BOARD_TTY2 });
 eq(atcmd.find_tty(bskip, '/dev/cdc-wdm0', null, null, [ '/dev/ttyUSB2' ]), null,
 	'skip: a mute board-quirk port is not swapped for a guess');
 

@@ -1028,7 +1028,8 @@ export function create(opts)
 		// (the SIGNAL_STATE_V2 / passthrough refresh below owns self.signal once
 		// it resolves). data.rssi is the 0..31 coded index (99 = unknown).
 		self.mbim.on(bc, 'SIGNAL_STATE', (data) => {
-			if (!self.signal?.lte && !self.signal?.nr5g) {
+			if (!self.signal?.lte && !self.signal?.nr5g &&
+			    self.signal?.gsm_rssi == null && !self.signal?.wcdma) {
 				let dbm = (data.rssi != null && data.rssi != 99) ? (-113 + 2 * data.rssi) : null;
 				self.signal = { rssi_raw: data.rssi, rssi: dbm };
 			}
@@ -3321,7 +3322,7 @@ export function create(opts)
 		// refuses every future retry, which is worse than whatever the callback
 		// was complaining about. The QMI teardown wraps its equivalent call for
 		// the same reason; NCM needs none, close_at() discards its queue without
-		// paying it (atcmd.uc:1187). Review follow-up, 2026-09-19.
+		// paying it (atcmd.uc:1195). Review follow-up, 2026-09-19.
 		drop_pt();
 		self._pt_failed = false;
 		self._pt_built = false;

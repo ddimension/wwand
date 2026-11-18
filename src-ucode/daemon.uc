@@ -1553,10 +1553,10 @@ export function create(opts)
 	//
 	//   - CONNECTED is sufficient but not necessary. An MBIM attempt aborted
 	//     while the modem was still answering sets `activated` from the late
-	//     reply (context_mbim.uc:378-382), so an IDLE context can be holding a
+	//     reply (context_mbim.uc:418-422), so an IDLE context can be holding a
 	//     session that only down() will tear down.
 	//   - ACTIVATING is not "no session yet" either: MBIM sets `activated`
-	//     before it queries the IP configuration (context_mbim.uc:393-394), NCM
+	//     before it queries the IP configuration (context_mbim.uc:433-434), NCM
 	//     before it reads its own (context_ncm.uc:756), and QMI can have
 	//     activated families while settings are still being fetched.
 	//
@@ -1591,7 +1591,7 @@ export function create(opts)
 	// whether anything started it.
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
-	// own emit on a change (modem_mbim.uc:1087-1096) while the shared reapply
+	// own emit on a change (modem_mbim.uc:1088-1097) while the shared reapply
 	// tail emits on every re-read (modem_common.uc:873-879); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {

@@ -297,6 +297,31 @@ export function tx_queue_stats(dev, root)
 	return { timeouts: total, tx_packets: match(p, /^[0-9]+$/) ? +p : null };
 };
 
+// netdev_stats(dev, root): the kernel's counters for a data netdev, in the
+// shape the contexts publish as `stats` (plus `source: 'netdev'`), or null
+// when the device does not exist. The fallback for a modem whose own counters
+// stay at zero while data flows — see the callers for when each one uses it.
+export function netdev_stats(dev, root)
+{
+	if (!dev || match(dev, /[\/]|^\.\.?$/))
+		return null;
+
+	let base = sprintf('%s/%s', root ?? '/sys/class/net', dev);
+
+	if (!fs.access(base))
+		return null;
+
+	let g = (f) => +(trim(fs.readfile(sprintf('%s/statistics/%s', base, f)) ?? '') || 0);
+
+	return {
+		tx_bytes: g('tx_bytes'), rx_bytes: g('rx_bytes'),
+		tx_packets: g('tx_packets'), rx_packets: g('rx_packets'),
+		tx_errors: g('tx_errors'), rx_errors: g('rx_errors'),
+		tx_dropped: g('tx_dropped'), rx_dropped: g('rx_dropped'),
+		source: 'netdev',
+	};
+};
+
 // How long the timeout count may stay still before a stall counts as over.
 // The watchdog re-fires every watchdog_timeo (5 s on usbnet) while the queue
 // stays stopped, but usbnet's timeout handler unlinks the queued URBs, which

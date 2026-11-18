@@ -392,11 +392,19 @@ export function find_tty(fx, device, tty_override, base_override, skip)
 	if (tty_override != null && tty_override != '')
 		return skipped(tty_override) ? null : tty_override;
 
-	// board quirks first: integrated modems
+	// board quirks first: integrated modems. ONLY WHILE THE PORT EXISTS: the
+	// table describes the module the board ships with, and a board carrying a
+	// different one has no such node. A Zyxel LTE3301-M209 refitted with a
+	// Huawei ME906s in its MBIM configuration (2026-11-18) has one tty,
+	// ttyUSB0, and it answers AT; held to the absent ttyUSB2, wwand ran the
+	// whole session without an AT port. An absent node is not a mute port, so
+	// discovery below takes over; a PRESENT one that stays mute is still not
+	// swapped for a guess.
 	let board = trim(fx.read('/tmp/sysinfo/board_name') ?? '');
 
 	for (let b in BOARD_TTYS)
-		if (substr(board, 0, length(b.prefix)) == b.prefix)
+		if (substr(board, 0, length(b.prefix)) == b.prefix &&
+		    length(fx.glob(sprintf('/sys/class/tty/%s', substr(b.tty, rindex(b.tty, '/') + 1))) ?? []))
 			return skipped(b.tty) ? null : b.tty;
 
 	let base = base_override;

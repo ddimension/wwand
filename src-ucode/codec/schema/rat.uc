@@ -237,6 +237,12 @@ export function from_dsd_mode(mode)
 	case 'LTE': return mk('lte', null, false, 'dsd');
 	case 'NSA': return mk('nr5g', 'nsa', false, 'dsd');
 	case 'SA':  return mk('nr5g', 'sa', false, 'dsd');
+	// below LTE: only the native MBIM class mask names these
+	// (mbim_backend.get_data_mode); QMI DSD reports LTE and 5G alone
+	case 'HSPA': return mk('hspa', null, false, 'dsd');
+	case 'UMTS': return mk('umts', null, false, 'dsd');
+	case 'EDGE': return mk('edge', null, false, 'dsd');
+	case 'GSM':  return mk('gsm', null, false, 'dsd');
 	}
 
 	return null;

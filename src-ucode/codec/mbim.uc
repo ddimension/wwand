@@ -514,18 +514,41 @@ function decode_struct(fields, buf, pos)
 	return [ res, pos ];
 }
 
+// THE FIXED PART ENDS WHERE THE FIRST REFERENCED DATA BEGINS. A field the
+// MBIM extensions APPEND after the v1 layout (REGISTER_STATE's
+// preferred_data_classes, MBIMEx v2) exists only in a v2+ answer; a v1 answer
+// has its DataBuffer there instead. A length check cannot tell the two apart —
+// the strings make a v1 answer longer than the field's offset — so every field
+// at or past the lowest offset a reference has named reads as absent. Seen on
+// a Huawei ME906s (no MBIMEx, 2026-11-18): "preferred" data class 0x00360032,
+// which is UTF-16 "2", "6" — the start of the provider id "26202". A reference
+// pointing back into the fields already read is malformed, and is ignored here
+// rather than allowed to truncate the rest.
 export function decode_info(fields, buf)
 {
 	let res = {};
 	let pos = 0;
 	let len = length(buf ?? '');
+	let data_start = len;
+
+	let note_ref = (o, size) => {
+		if (size > 0 && o >= pos && o < data_start)
+			data_start = o;
+	};
 
 	for (let name, fmt in fields) {
+		if (pos >= data_start) {
+			// the same absent values a buffer that ends early gives
+			res[name] = (type(fmt) == 'object' || fmt == 'ipv4-array' || fmt == 'ipv6-array') ? [] : null;
+			continue;
+		}
+
 		if (fmt == 'string') {
 			if (pos + 8 > len) { res[name] = null; pos += 8; continue; }
 
 			let oh = struct.unpack('<II', substr(buf, pos, 8));
 			pos += 8;
+			note_ref(oh[0], oh[1]);
 			res[name] = (oh[1] > 0 && oh[0] + oh[1] <= len)
 				? utf16le_decode(substr(buf, oh[0], oh[1])) : null;
 		}
@@ -535,6 +558,7 @@ export function decode_info(fields, buf)
 
 			let oh = struct.unpack('<II', substr(buf, pos, 8));
 			pos += 8;
+			note_ref(oh[0], oh[1]);
 			let out = [];
 			let esz = (fmt == 'ipv4-array') ? 4 : 16;
 
@@ -554,6 +578,9 @@ export function decode_info(fields, buf)
 			pos += 4;
 
 			let count = +(res[fmt.array] ?? 0);
+
+			if (o > 0)
+				note_ref(o, count);
 			let out = [];
 
 			// hard bound: `count` comes straight off the modem wire; a
