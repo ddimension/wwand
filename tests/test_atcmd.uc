@@ -789,9 +789,36 @@ eq(cpol_torn[3].oper, 'A1 HR', 'cpol: ...intact');
 
 // --- temperature parsers (QModem-derived) ------------------------------------
 
-// Quectel AT+QTEMP: sensor-name digits skipped, first in-range value wins
+// Quectel AT+QTEMP: sensor-name digits skipped, out-of-range ignored
 eq(atcmd.parse_qtemp([ '+QTEMP: "cpu0-0-usr","35"', '+QTEMP: "pa1","120"' ]), 35, 'qtemp: quoted sensor,val');
 eq(atcmd.parse_qtemp([ '+QTEMP: 42' ]), 42, 'qtemp: bare value');
+// unnamed three-value form (EG06/BG96, HW-read 2026-11-18): the first (PMIC)
+eq(atcmd.parse_qtemp([ '+QTEMP: 27,25,26', 'OK' ]), 27, 'qtemp: unnamed list -> first value');
+// RG500Q-EA (ddimension/wwand#93): the first line is the PA, which lags; the
+// hottest SoC sensor is the reading
+let qtemp_rg500q = [
+	'+QTEMP:"qfe_wtr_pa0","35"', '+QTEMP:"qfe_wtr_pa1","0"', '+QTEMP:"qfe_wtr_pa2","0"',
+	'+QTEMP:"qfe_wtr_pa3","0"', '+QTEMP:"aoss0-usr","44"', '+QTEMP:"mdm-q6-usr","44"',
+	'+QTEMP:"ipa-usr","45"', '+QTEMP:"cpu0-a7-usr","44"', '+QTEMP:"mdm-5g-usr","45"',
+	'+QTEMP:"mdm-vpe-usr","44"', '+QTEMP:"mdm-core-usr","45"', '+QTEMP:"xo-therm-usr","43"',
+	'+QTEMP:"sdx-case-therm-usr","42"', '+QTEMP:"ambient-therm-usr","43"', 'OK' ];
+eq(atcmd.parse_qtemp(qtemp_rg500q), 45, 'qtemp: RG500Q -> hottest SoC sensor, not the PA');
+// ...a PA hotter than the SoC still does not win
+eq(atcmd.parse_qtemp([ '+QTEMP:"qfe_wtr_pa0","60"', '+QTEMP:"mdm-core-usr","40"' ]), 40, 'qtemp: an RF sensor never beats a SoC one');
+// RG650E (HW-read on .245, 2026-11-18): sdr0 first, mmw0 a -273 sentinel
+let qtemp_rg650e = [
+	'+QTEMP: "sdr0","26"', '+QTEMP: "mmw0","-273"', '+QTEMP: "aoss-0","31"',
+	'+QTEMP: "cpuss-0","32"', '+QTEMP: "ethphy-0","33"', '+QTEMP: "mdmss-0","32"',
+	'+QTEMP: "sys-therm-1","29"', 'OK' ];
+eq(atcmd.parse_qtemp(qtemp_rg650e), 33, 'qtemp: RG650E -> not sdr0, -273 ignored');
+// only RF sensors read: report one rather than nothing
+eq(atcmd.parse_qtemp([ '+QTEMP:"qfe_wtr_pa0","35"', '+QTEMP:"mdm-core-usr","0"' ]), 35, 'qtemp: RF only -> the RF reading');
+// a digit in the name is not the value
+eq(atcmd.parse_qtemp([ '+QTEMP:"sensor-55","30"' ]), 30, 'qtemp: value from the second field, not the name');
+// a named sentinel next to an unnamed answer does not hide the answer
+eq(atcmd.parse_qtemp([ '+QTEMP: 27,25,26', '+QTEMP: "mmw0","-273"' ]), 27, 'qtemp: mixed, named sentinel -> the unnamed value');
+// the late EG18 line (urc_common feeds it alone)
+eq(atcmd.parse_qtemp([ '+QTEMP: "xo_therm_buf","32"' ]), 32, 'qtemp: single named line');
 eq(atcmd.parse_qtemp([ '+QTEMP: "modem-ambient","5"' ]), null, 'qtemp: below floor -> null');
 eq(atcmd.parse_qtemp([ 'OK' ]), null, 'qtemp: no line -> null');
 // THE DIE TEMPERATURE IS THE SECOND FIELD, and these two captures are the same

@@ -41,6 +41,13 @@ state buried at the top invites reading a months-old entry as present tense.
   it now reads in the vendor's dialect (`^MONSC` on Huawei, QENG on
   Quectel/ASR or a blank manufacturer, nothing otherwise) and probes with the
   read itself. Left: LTE attach profile without MBIMEx.
+- **Quectel temperature by sensor name (2026-11-18, ddimension/wwand#93):**
+  `atcmd_parse.parse_qtemp` took the first in-range number of a named
+  `+QTEMP` list, which on the RG500Q-EA is `qfe_wtr_pa0` (35 °C while the SoC
+  read 42–45) and on the RG650E `sdr0`. It now reports the hottest non-RF
+  sensor, the value from the second field; the unnamed `+QTEMP: a,b,c` form
+  (EG06, BG96) keeps the first value. Read on .202 (RG502Q-EA), .245
+  (RG650E), .200 (EG06), .201 (BG96).
 - **Cell locks are a dialect table (2026-11-17, ddimension/wwand#91):**
   `cell_lock.uc` `DIALECTS` — `quectel` (AT+QNWLOCK) and `qmi` (NAS Set/Get
   Cell Config 0x00D8/0x015A, the older 0x00AF/0x00D7, NR 0x010E/0x010F).
