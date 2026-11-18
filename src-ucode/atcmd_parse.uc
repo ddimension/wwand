@@ -924,8 +924,51 @@ function first_temp(lines, marker)
 	return null;
 }
 
-// Quectel AT+QTEMP: bare "+QTEMP: 35" or +QTEMP: "sensor","35" (multi-line).
-export function parse_qtemp(lines)    { return first_temp(lines, /\+QTEMP:/); };
+// RF sensors of a named +QTEMP list: the Qualcomm front end and PAs (qfe_*,
+// *pa<n>), the transceiver (sdr<n>) and the mmWave module (mmw<n>). They sit
+// away from the modem SoC and move rarely and in coarse steps: the RG500Q-EA's
+// qfe_wtr_pa0 stayed at 35 while its *-usr sensors read 42-45 and moved
+// (ddimension/wwand#93, 2026-11-18); the RG650E's list starts with sdr0
+// (HW-read 2026-11-18).
+const QTEMP_RF = /^(qfe_|sdr[0-9]|mmw[0-9])|(^|[-_])pa[0-9]*$/;
+
+// Quectel AT+QTEMP, two shapes:
+//   unnamed  "+QTEMP: 27,25,26" (EG06, BG96: PMIC first) or "+QTEMP: 42"
+//            -> the first in-range number;
+//   named    +QTEMP: "sensor","35", one line per sensor (RG50xQ, RG650E, the
+//            late EG18 line) -> the HOTTEST in-range non-RF sensor, an RF one
+//            only when nothing else reads. Not the first line: on every named
+//            list seen so far that line is an RF sensor. The value is the
+//            second quoted field, so a digit in a sensor name is never read
+//            as a temperature. Out of range (the -273 and 0 sentinels) never
+//            counts.
+export function parse_qtemp(lines)
+{
+	let best = null, rf = null, unnamed = [];
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+QTEMP:\s*"([^"]*)"\s*,\s*"?(-?[0-9]+)"?/);
+
+		if (!m) {
+			push(unnamed, l);
+			continue;
+		}
+
+		let v = +m[2];
+
+		if (!(v > 10 && v < 120))
+			continue;
+
+		if (match(lc(m[1]), QTEMP_RF))
+			rf = (rf == null || v > rf) ? v : rf;
+		else
+			best = (best == null || v > best) ? v : best;
+	}
+
+	// a named reading wins; an unnamed line still counts when no named one
+	// is in range (a late named sentinel next to an unnamed answer)
+	return best ?? rf ?? first_temp(unnamed, /\+QTEMP:/);
+};
 
 // Huawei AT^CHIPTEMP? — five comma-separated fields, whose meaning comes from
 // community testing rather than Huawei documentation (ddimension/wwand#12):
