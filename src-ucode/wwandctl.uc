@@ -310,8 +310,24 @@ function cmd_puk(st, args)
 	let res = call_ok('modem_sim_puk', { modem: r.modem, puk: rest[0], new_pin: rest[1] });
 
 	printf('SIM unblocked via %s. New PIN set.\n', res.via ?? '?');
-	printf('NOTE: update the configured pincode (uci set network.%s.pincode=...) to the new PIN.\n',
-		r.modem);
+	pin_config_note(res.config);
+}
+
+// what happened to the configured PIN after a PIN operation (simops keep_pin)
+function pin_config_note(c)
+{
+	if (c == null)
+		return;
+
+	if (c.updated)
+		printf('the configured PIN on %s was updated\n', c.section);
+	else if (c.reason == 'configured_pin_differs' || c.reason == 'changed')
+		printf('NOTE: %s configures a different PIN; it was left as it is\n', c.section ?? '?');
+	else if (c.reason == 'none_configured')
+		printf('NOTE: no PIN is configured; set one (uci set network.%s.pincode=...) if the card asks for it at start\n',
+			c.section ?? '?');
+	else if (c.reason != 'unchanged')
+		printf('NOTE: the configured PIN was not updated (%s)\n', c.reason ?? '?');
 }
 
 function cmd_sms(st, args)
@@ -460,8 +476,11 @@ Connection
 
 SIM
   pin [modem] [pin]      manual PIN release past the low-retry safety block
-  pin-lock [modem] <pin>     enable the SIM PIN query
+  pin-lock [modem] <pin> [--store]  enable the SIM PIN query
+                             (--store: keep the PIN in the config)
   pin-unlock [modem] <pin>   disable the SIM PIN query
+  pin-change [modem] <old> <new>  change the SIM PIN; the configured
+                             PIN follows when it was the old one
   puk [modem] <puk> <new-pin>  unblock a PUK-locked SIM and set a NEW PIN
   slot [modem] <n> [--force]  switch the active physical SIM slot
                          (--force: also under an interface bound to the card in use)
@@ -469,6 +488,8 @@ SIM
 SMS
   sms [modem] [SM|ME]    list stored messages
   sms-send [modem] <number> <text...>   send an SMS
+  ussd [modem] <code|answer>  send a USSD code, or answer the network's question
+  ussd-cancel [modem]        end the USSD session
   sms-delete [modem] <index>
 
 eSIM (needs the wwand-esim package)
@@ -572,7 +593,7 @@ if (json_mode) {
 //
 // WHY THE FLOOR. `modem_signal` keeps wwand's adaptive fast-telemetry loop warm
 // (daemon.uc calls modem.watch()); that loop polls the modem at 1 Hz and decays
-// 6 s after the last request (modem_common.uc:1308, :1041). One sample therefore
+// 6 s after the last request (modem_common.uc:1317, :1041). One sample therefore
 // costs ~6 s of 1 Hz modem traffic, so the duty cycle is 6/interval: 10 % at
 // 60 s, 20 % at 30 s, 60 % at 10 s — and at 6 s or below the loop NEVER decays
 // and the modem is polled around the clock. A global `Interval 10` in
@@ -983,16 +1004,34 @@ case 'pin': {
 case 'pin-lock':
 case 'pin-unlock': {
 	let st = status();
+	let store = ('--store' in args);
+	let a = filter(args, (x) => x != '--store');
+	let r = resolve_modem(st, a[0]);
+	let rest = r.consumed ? slice(a, 1) : a;
+
+	if (!length(rest[0] ?? ''))
+		die(sprintf('usage: wwandctl %s [modem] <pin>%s', cmd, (cmd == 'pin-lock') ? ' [--store]' : ''));
+
+	let res = call_ok('modem_sim_pin_lock',
+		{ modem: r.modem, pin: rest[0], enable: (cmd == 'pin-lock'), store: store });
+	printf('SIM PIN query %s%s\n', (cmd == 'pin-lock') ? 'enabled' : 'disabled',
+		res.already ? ' (was already)' : '');
+	pin_config_note(res.config);
+	break;
+}
+
+case 'pin-change': {
+	let st = status();
 	let r = resolve_modem(st, args[0]);
 	let rest = r.consumed ? slice(args, 1) : args;
 
-	if (!length(rest[0] ?? ''))
-		die(sprintf('usage: wwandctl %s [modem] <pin>', cmd));
+	if (!length(rest[0] ?? '') || !length(rest[1] ?? ''))
+		die('usage: wwandctl pin-change [modem] <old pin> <new pin>');
 
-	let res = call_ok('modem_sim_pin_lock',
-		{ modem: r.modem, pin: rest[0], enable: (cmd == 'pin-lock') });
-	printf('SIM PIN query %s%s\n', (cmd == 'pin-lock') ? 'enabled' : 'disabled',
-		res.already ? ' (was already)' : '');
+	let res = call_ok('modem_sim_pin_change',
+		{ modem: r.modem, old_pin: rest[0], new_pin: rest[1] });
+	printf('SIM PIN changed\n');
+	pin_config_note(res.config);
 	break;
 }
 
@@ -1003,6 +1042,30 @@ case 'puk':
 case 'sms':
 	cmd_sms(status(), args);
 	break;
+
+case 'ussd':
+case 'ussd-cancel': {
+	let st = status();
+	let r = resolve_modem(st, args[0]);
+	let rest = r.consumed ? slice(args, 1) : args;
+
+	if (cmd == 'ussd-cancel') {
+		call_ok('modem_ussd', { modem: r.modem, op: 'cancel' });
+		printf('USSD session ended\n');
+		break;
+	}
+
+	if (!length(rest))
+		die('usage: wwandctl ussd [modem] <code|answer>   e.g. wwandctl ussd "*100#"');
+
+	let res = call_ok('modem_ussd', { modem: r.modem, op: 'send', text: join(' ', rest) });
+
+	printf('%s\n', res.reply ?? '(no text)');
+
+	if (res.action_required)
+		printf('-- the network asks for a reply: wwandctl ussd <answer>, or ussd-cancel\n');
+	break;
+}
 
 case 'sms-send': {
 	let st = status();

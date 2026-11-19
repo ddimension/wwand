@@ -39,6 +39,8 @@ import * as logmod from 'wwand.log';
 import * as modeswitch from 'wwand.modeswitch';
 import * as netlink from 'wwand.netlink';
 import * as transport from 'wwand.transport';
+import * as uloop from 'uloop';
+import * as fs from 'fs';
 
 // netifd device detour placeholder (netifd_device_detour): a name no device
 // ever carries — netifd keeps an interface on it waiting, harmlessly
@@ -66,6 +68,22 @@ export function detour_restore(c)
 		c.commit('network');
 
 	return done;
+};
+
+// the environment of an event's hotplug scripts (create, `hotplug`). PATH is
+// set here: the map handed to uloop.process is the child's whole environment.
+// (`ev`, not `type`: the builtin type() is needed in here.)
+export function hotplug_env(ev, data)
+{
+	let env = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
+	            WWAND_EVENT: replace(ev ?? '', /^wwand\./, ''), ACTION: data?.event ?? '',
+	            DATA: sprintf('%J', data ?? {}) };
+
+	for (let k, v in (data ?? {}))
+		if (k != 'event' && match(k, /^[a-z][a-z0-9_]*$/) && index([ 'string', 'int', 'double', 'bool' ], type(v)) >= 0)
+			env[uc(k)] = sprintf('%s', v);
+
+	return env;
 };
 
 export function create(o)
@@ -176,12 +194,30 @@ export function create(o)
 	let autosetup_mux_id = o.autosetup_mux_id;
 	let load_config = o.read_config;
 
+	// Every event also runs the scripts in /etc/hotplug.d/wwand/, the
+	// OpenWrt way (hotplug-call): a script needs no resident `ubus listen`.
+	// The environment carries the event — ACTION (its name), WWAND_EVENT
+	// (modem | context), MODEM / INTERFACE / CONTEXT, each scalar field upper
+	// case (TEXT, SENDER, ...) and the whole of it as JSON in DATA. Passed by
+	// uloop.process as an environment, never through a shell: an SMS text is
+	// written by whoever knows the number. Nothing is spawned while the
+	// directory does not exist.
+	let hotplug = o.hotplug ?? ((ev, data) => {
+		if (!fs.stat('/etc/hotplug.d/wwand'))
+			return;
+
+		uloop.process('/sbin/hotplug-call', [ 'wwand' ], hotplug_env(ev, data), () => null);
+	});
+
 	return {
 		transport_open: transport.open,
 		log: (level, msg) => logmod.log(level, '%s', msg),
 		// re-parse uci on demand (context_up refreshes params on every up)
 		read_config: load_config,
-		emit_event: (type, data) => conn.event(type, data),
+		emit_event: (type, data) => {
+			conn.event(type, data);
+			hotplug(type, data);
+		},
 		datapath_fx: datapath_fx,
 		// THE COMMAND EXECUTOR for the router-level actions (a reboot). It was
 		// never passed on: the modem ladder did not notice, because
@@ -263,6 +299,54 @@ export function create(o)
 			cursor.commit('network');
 			logmod.log('notice', 'modem %s: switched to %s — cleared the stale `option protocol %s` (a pin the driver contradicts disarms hardware recovery)',
 				section, target, pin);
+		},
+		// A PIN the card now holds (simops: a PIN change, or a PIN query turned
+		// on with `store`): onto the wwand_modem or wwand_sim section it is to
+		// come from at the next SIM step. Left as it was, the next boot enters
+		// the old PIN and burns an attempt on every start until the guard
+		// stops it. `expect` = the value the section must still hold, so a
+		// pincode edited meanwhile is never overwritten. The isolated cursor
+		// commits this one option, never an operator's staged edits; the
+		// daemon has already updated its running config, so the reload that
+		// follows applies nothing (a pincode is outside the restart signature).
+		// `card` = { iccid, imsi } of the card in use, for a wwand_sim: the
+		// section must still name that card, or an override re-pointed at
+		// another card meanwhile would receive this card's PIN.
+		// -> { written, reason? }
+		store_pincode: (section, stype, pin, expect, card) => {
+			if (!section || !match(pin ?? '', /^[0-9]{4,8}$/))
+				return { written: false, reason: 'invalid' };
+
+			let cursor = isolated_cursor();
+
+			if (cursor.get('network', section) != stype)
+				return { written: false, reason: 'no_section' };
+
+			if (stype == 'wwand_sim') {
+				// the same normalisation as modem_common.match_sim_override
+				let norm = (x) => replace(lc(x ?? ''), /f+$/, '');
+				let s_iccid = cursor.get('network', section, 'iccid');
+				let s_imsi = cursor.get('network', section, 'imsi');
+				let same = (s_iccid && card?.iccid && norm(s_iccid) == norm(card.iccid)) ||
+				           (s_imsi && card?.imsi && s_imsi == card.imsi);
+
+				if (!same)
+					return { written: false, reason: 'other_card' };
+			}
+
+			let cur = cursor.get('network', section, 'pincode') ?? '';
+
+			if (expect != null && cur != expect)
+				return { written: false, reason: 'changed' };
+
+			if (cur == pin)
+				return { written: false, reason: 'unchanged' };
+
+			cursor.set('network', section, 'pincode', pin);
+			cursor.commit('network');
+			logmod.log('notice', 'stored the new SIM PIN on %s %s', stype, section);
+
+			return { written: true };
 		},
 		// A band edit the modem does not keep (daemon persist_bands): the lists
 		// go onto its wwand_modem section, an empty one removes the option.

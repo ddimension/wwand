@@ -80,6 +80,17 @@ A **check** means the standard's text was read next to the code. *Basis* is what
 <tr><td rowspan="1">3GPP TS 27.005</td><td rowspan="1"></td><td rowspan="1">+CMGL/+CMGR/+CMGS/+CMGD in PDU mode</td><td>tbd</td><td></td><td></td></tr>
 </tbody>
 <tbody>
+<tr><td rowspan="4"><b>Cell Broadcast and inbound SMS</b><br><code>src-ucode/cbs.uc, sms_rx.uc, codec/schema/wms.uc (event report, broadcast), mbim_backend.uc (sms_records, sms_store_status), atcmd.uc (two-line PDU URCs)</code></td><td rowspan="1">3GPP TS 23.041 (CBS)</td><td rowspan="1"></td><td rowspan="1">GSM page 9.4.1.2, UMTS message 9.4.2.2, serial number fields, PWS message identifiers</td><td>tbd</td><td></td><td></td></tr>
+<tr><td rowspan="1">QMI WMS event report and broadcast</td><td rowspan="1">libqmi 1.38 (qmi-service-wms.json)</td><td rowspan="1">Set Event Report, Event Report indication, Send Ack, Set/Get Broadcast Config, Set Broadcast Activation</td><td>tbd</td><td></td><td></td></tr>
+<tr><td rowspan="1">MBIM SMS notifications</td><td rowspan="1">libmbim 1.32 (mbim-service-sms.json)</td><td rowspan="1">Message Store Status, Read notification, PDU record offsets</td><td>tbd</td><td></td><td></td></tr>
+<tr><td rowspan="1">3GPP TS 27.005</td><td rowspan="1"></td><td rowspan="1">+CNMI, +CMTI, +CMT and +CBM in PDU mode, +CSCB</td><td>tbd</td><td></td><td></td></tr>
+</tbody>
+<tbody>
+<tr><td rowspan="3"><b>USSD</b><br><code>src-ucode/ussd.uc, codec/schema/voice.uc, mbim_backend.uc (ussd_*), sms_pdu.uc (gsm7_pack/unpack, cbs_dcs)</code></td><td rowspan="1">QMI Voice USSD</td><td rowspan="1">libqmi 1.38 (qmi-service-voice.json)</td><td rowspan="1">Originate/Answer/Cancel USSD, USSD and Release USSD indications, Indication Register</td><td>tbd</td><td></td><td></td></tr>
+<tr><td rowspan="1">MBIM USSD service</td><td rowspan="1">libmbim 1.32 (mbim-service-ussd.json)</td><td rowspan="1">USSD set/response/notification, MbimUssdResponse, payload under the 23.038 DCS</td><td>tbd</td><td></td><td></td></tr>
+<tr><td rowspan="1">3GPP TS 27.007 +CUSD and TS 23.038 CBS DCS</td><td rowspan="1"></td><td rowspan="1">+CUSD &lt;m&gt; values, packed GSM7 with CR padding (6.1.2.3.1), DCS groups (5)</td><td>tbd</td><td></td><td></td></tr>
+</tbody>
+<tbody>
 <tr><td rowspan="1"><b>Radio vocabulary and bands</b><br><code>src-ucode/codec/schema/rat.uc, codec/arfcn_bands.uc</code></td><td rowspan="1">3GPP TS 36.101 / TS 38.101-1/-2 (bands, EARFCN, NR-ARFCN)</td><td rowspan="1"></td><td rowspan="1">operating band tables, ARFCN ranges</td><td>tbd</td><td></td><td></td></tr>
 </tbody>
 <tbody>

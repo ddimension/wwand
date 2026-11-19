@@ -509,6 +509,11 @@ config wwand_modem 'm0'
 	                                 #    time — but only when the clock is plainly unset
 	                                 #    (pre-2021), so it never fights sysntpd. Off by
 	                                 #    default — the router has NTP; for RTC-less installs
+	option cell_broadcast ''         # Cell Broadcast: '1' on, '0' off, unset = the modem's
+	                                 #    own setting is left alone. See "Cell Broadcast"
+	list cb_channels '4370-4399'     # which message identifiers; unset with '1' = the
+	                                 #    public warnings, 4352-4359 (ETWS) and 4370-4399
+	                                 #    (CMAS / EU-Alert with their language variants)
 	option nitz_time '1'             # the network's time (NITZ) steps the system clock
 	                                 #    when it is more than 120 s off; smaller
 	                                 #    differences stay NTP's. ON by default: an
@@ -1898,12 +1903,15 @@ wwandctl select 262 01               # manual PLMN selection
 wwandctl slots / slot 2              # SIM slot status / switch
 wwandctl slot 2 --force              # ...also under an interface bound to the card in use
 wwandctl pin [pin]                   # manual PIN release (low-retry guard)
-wwandctl pin-lock 1234 / pin-unlock 1234
+wwandctl pin-lock 1234 [--store] / pin-unlock 1234
+wwandctl pin-change 1234 5678        # change the SIM PIN; the configured one follows
 wwandctl puk 12345678 4321           # PUK entry: unblock + set NEW PIN 4321
 wwandctl plmn                        # PLMN selector lists incl. FPLMN
 wwandctl sms                         # list stored SMS
 wwandctl sms-send +49170... "hi"     # send an SMS
 wwandctl sms-delete 3
+wwandctl ussd "*100#"                # USSD code (or the answer to the network's question)
+wwandctl ussd-cancel                 # end the USSD session
 wwandctl reset / repower             # modem reset / hardware repower
 wwandctl at AT+CSQ                   # raw AT command
 wwandctl qmi nas 0x0024              # raw QMI request (here NAS Get Serving System)
@@ -1926,9 +1934,58 @@ the same step (that is how the SIM spec works, there is no "unblock only").
 **A wrong PUK consumes one of ~10 attempts; after the last one the SIM is
 permanently dead** — wwand therefore never falls back to a second transport
 after an attempt reached the card, and never auto-retries. After a successful
-unblock the daemon restarts the modem bring-up with the new PIN; update
-`option pincode` (or the per-SIM `wwand_sim` override) to the new PIN so the
-next boot unlocks cleanly.
+unblock the daemon restarts the modem bring-up with the new PIN and writes it
+into the `option pincode` the PIN came from (the per-SIM `wwand_sim` override,
+else the `wwand_modem`), so the next boot unlocks cleanly.
+
+### Changing the PIN, turning the PIN query on or off
+
+`wwandctl pin-change <old> <new>`, `pin-lock <pin>` and `pin-unlock <pin>`, or
+LuCI's modem list → *Actions* → *SIM PIN*. Each PIN is verified by the card,
+so a wrong one costs an attempt: with fewer than two left the daemon refuses
+(`low_retries`) and LuCI asks before it repeats the call with `force`. After a
+change the configured PIN follows by itself (only when it held the old one); a
+`pincode` change — by hand or by these operations — does not bounce the
+connection, since only the SIM step reads it.
+
+### USSD
+
+`wwandctl ussd "*100#"` (or LuCI's Modem Tools → *USSD*) sends a code and
+prints the network's answer. When the network asks a question (a menu), the
+session stays open: the next `wwandctl ussd <answer>` answers it,
+`wwandctl ussd-cancel` ends it. A USSD the network sends on its own is logged
+and broadcast as the `ussd` event, and `modem_ussd` op `status` keeps the last
+one — from the first registration on, which is when wwand starts listening
+(QMI: the Voice client and its USSD indications; MBIM: the USSD notification,
+where the modem lists the service; AT: the `+CUSD` URC).
+
+The transport is chosen once per modem — QMI Voice, then the native MBIM USSD
+service, then `AT+CUSD` — and a failure is the result, never a reason to try
+the next one: a code that reached the network may have booked something, and
+sending it twice could book it twice. Whether a network answers USSD at all is
+its own matter: on LTE without a CS domain many do not (QMI `NoNetworkFound`
+on the RG650E, `Internal` on a roaming IoT SIM, 2026-11-19).
+
+### Cell Broadcast
+
+Off unless the modem's config says otherwise: `option cell_broadcast '1'`
+switches it on with `list cb_channels` (default: the public warnings, ETWS
+4352-4359 and CMAS / EU-Alert 4370-4399), `'0'` switches it off, unset leaves
+the modem's own setting as it is. The setting is read before it is written
+(QMI Get Broadcast Config), so a modem already configured is not touched.
+Transports: QMI WMS (native or over the MBIM passthrough — Set Broadcast
+Config / Activation, pages in the Event Report), else AT (`AT+CSCB`, pages as
+`+CBM` with `AT+CNMI` bm=2, the other `+CNMI` fields as the modem has them).
+Native MBIM has no broadcast service.
+
+A message is joined from its pages, decoded under its CBS coding scheme
+(TS 23.038 §5) and reported once: networks repeat a broadcast every few
+minutes, so the same identifier + serial number is a repeat for a day, and a
+new update number is a new version. The last 20 are listed by
+`modem_cell_broadcast` and on LuCI's Modem Tools page; each new one is the
+`cell_broadcast` event (logged at `warn` for a public warning). Both page
+formats are read: the 88-octet GSM page and the UMTS message (TS 23.041
+§9.4.1.2 / §9.4.2.2).
 
 ### Raw QMI and MBIM (`wwandctl qmi`, `wwandctl mbim`)
 
@@ -2092,9 +2149,10 @@ every method to it.
 | `modem_probe` | — | detected modems for the stable-binding picker: `managed[]` (live IMEI/model/device) + `present[]` (every control device in sysfs with its iSerial, read pre-open) |
 | `modem_sim_switch_slot` | `modem`, `slot`, `force?` | switch the active physical SIM slot (drops the connection). Refused with `sim_in_use` and the `interface` while an interface bound to the card in use (`option iccid`) is up or switching; `force: true` goes ahead and that interface goes down |
 | `modem_sim_reinit` | `modem` | re-initialise the card in the active slot without a modem reset: power it off and on (QMI UIM, MBIM UICC reset, or an AT CFUN cycle), then re-read it as after a slot switch — for a card swapped in a slot the modem does not watch. The connection drops and comes back. Result `{ slot }` |
-| `modem_sim_pin_lock` | `modem`, `pin`, `enable` | enable/disable the SIM PIN lock (QMI first, AT fallback; idempotent) |
+| `modem_sim_pin_lock` | `modem`, `pin`, `enable`, `store?`, `force?` | enable/disable the SIM PIN query (UIM → DMS → native MBIM → `AT+CLCK`, moving on only after a QMI reject that never reached the card; idempotent: `already: true` when the card is in that state, nothing sent). PIN 4–8 digits. Refused with `low_retries` (+ `retries`) when fewer than 2 attempts are left, unless `force`; `pin_blocked` on a blocked card. `store` (enable only): the PIN goes into the config where none is, and replaces a configured one the card just proved wrong — reported as `config: { updated, reason?, section }` (write ACL) |
+| `modem_sim_pin_change` | `modem`, `old_pin`, `new_pin`, `store?`, `force?` | change the SIM PIN (UIM Change PIN → DMS → native MBIM PIN CHANGE → `AT+CPWD="SC"`, the same chain rule). `pin_disabled` when the PIN query is off (the card refuses CHANGE on a disabled PIN; nothing is sent), `low_retries` as above. **The configured PIN follows**: the section it comes from (the card's `wwand_sim` when that carries a `pincode`, else the `wwand_modem`) is rewritten when it held the old PIN; a different configured PIN is left alone (`configured_pin_differs`), none configured is written only with `store`. A `pincode` edit no longer restarts the modem or re-dials — only a modem waiting at SIM_BLOCKED is restarted for it (write ACL) |
 | `modem_sim_pin_verify` | `modem`, `pin?` | manual PIN release past the low-retry safety block (the daemon refuses to auto-enter with ≤1 attempt left, to avoid a PUK lock); `pin` overrides the configured one for this attempt (write ACL) |
-| `modem_sim_puk` | `modem`, `puk`, `new_pin` | **PUK entry**: unblock a PUK-locked SIM and set a NEW PIN in one operation (UIM Unblock PIN → native MBIM PIN/PUK1 → `AT+CPIN="puk","pin"`; the chain never re-tries a PUK on a second transport — wrong PUKs brick the SIM). PUK = 8 digits, new PIN 4–8 digits. On success the modem restarts its bring-up with the new PIN as one-shot override; **update the configured `pincode` afterwards** (write ACL) |
+| `modem_sim_puk` | `modem`, `puk`, `new_pin` | **PUK entry**: unblock a PUK-locked SIM and set a NEW PIN in one operation (UIM Unblock PIN → native MBIM PIN/PUK1 → `AT+CPIN="puk","pin"`; the chain never re-tries a PUK on a second transport — wrong PUKs brick the SIM). PUK = 8 digits, new PIN 4–8 digits. On success the modem restarts its bring-up with the new PIN as one-shot override, and the configured PIN follows: the section the PIN comes from is rewritten (`store?` writes it where none is configured); the reply's `config` says what happened (write ACL) |
 | `modem_esim` | `modem`, `op`, `slot?`, … | eSIM — `op`: `profiles`, `eid`, `enable`, `disable`, `delete`, `download`, `notify`, …; reaches only the card in the ACTIVE slot on a one-executor modem (an eUICC elsewhere needs a slot switch first, `modem_sim_slots` names it with its EID); needs the optional `wwand-esim` package. `enable`/`disable` are refused with `sim_in_use` like a slot switch while an interface bound to the card in use is up (`force` overrides both this and `esim_managed`) |
 | `modem_plugin` | `modem`, `plugin`, `op`, `args` | an operation of an installed plugin (see "Plugins") |
 | `modem_plugin_status` | `modem`, `plugin`, `op` | its read-only twin: only the ops the plugin declares read-only (LuCI read ACL) |
@@ -2103,6 +2161,8 @@ every method to it.
 | `modem_sms_list` | `modem`, `storage?` | list stored SMS (decoded: sender, timestamp, text, multipart merged); `storage` `SM` (SIM, default) or `ME` (modem) |
 | `modem_sms_read` | `modem`, `storage?`, `index` | read one stored SMS by index |
 | `modem_sms_delete` | `modem`, `storage?`, `index` **or** `indices` | delete stored SMS by index. `indices` (a list) deletes a set in one call, highest index first, and answers `{ ok, deleted, requested, failed[] }` — every index is attempted even after one fails. `index` (a single number) keeps answering `{ ok: true }`. There is deliberately **no "delete all"**: every backend offers one, and all of them delete what is in the store when the *modem* runs the request rather than what the operator was shown, so a message arriving between the listing and the click would go with it (write ACL) |
+| `modem_cell_broadcast` | `modem` | the last Cell Broadcast messages, newest first (`messages`: `id`, `serial`, `code`, `update`, `kind`/`name` for a public warning, `language`, `text`, `at`), and `configured` (`option cell_broadcast`, null = untouched). Repeats are recognised by identifier + serial number (update number included) for a day and not listed again (read ACL) |
+| `modem_ussd` | `modem`, `op`, `text?` | **USSD**: `op` = `send` (`text` = a code such as `*100#`, or the answer to the network's question; → `reply`, `action_required`, `session`, `via`) \| `cancel` (end the session) \| `status` (`session` idle/active/user_response, `via`, `last` = the last message with `origin` reply/network). Transport: QMI Voice (native or MBIM passthrough) → native MBIM USSD → `AT+CUSD`, chosen once per modem; **a code is never re-sent over a second transport** — a USSD is not idempotent. One request at a time (`busy`); replies that come as an indication or URC are waited for up to 100 s (`timeout`). On AT the text must be printable ASCII, on a Huawei it goes as packed GSM7 hex (write ACL) |
 | `modem_sms_send` | `modem`, `number`, `text` | send an SMS (SMS-SUBMIT, GSM7/UCS2, auto-segmented): QMI WMS RAW_SEND (native/passthrough) else AT+CMGS PDU mode (write ACL) |
 | `modem_repower` | `modem?` | hardware repower: pulse the modem `reset_gpio` (or, single-modem only, the board default), else power-cycle the modem USB power (also single-modem only — on a multi-modem box the board lines would hit the wrong hardware: error `multi_modem_needs_reset_gpio`). Same path as the recovery ladder; recovers a hung / vanished modem |
 | `modem_set_protocol` | `modem`, `protocol` | switch the control protocol (`qmi` ⇄ `mbim`); the modem resets |
@@ -2181,10 +2241,30 @@ automatically but **batched** — changes collect in the init-reset list and
 one single modem reset at the end of init applies them all.
 
 **Events.** The daemon broadcasts `wwand.modem` (`{ modem, event, … }`, events
-`registered` / `deregistered` / `sim_blocked` / `removed` / …) and
+`registered` / `deregistered` / `sim_blocked` / `removed` / `ussd` (a USSD the
+network sent on its own: `text`, `action_required`, `origin`, `via`) / `sms` (a
+new SMS: `storage`, `index`, `sender`, `text`, `timestamp`, `concat`, `via`) /
+`cell_broadcast` (a new Cell Broadcast message: `id`, `serial`, `kind`, `name`,
+`text`, `language`) / …) and
 `wwand.context` (`{ context, interface, event }`, events `up` / `down` /
 `renew`). These are for observers (e.g. LuCI); netifd itself is driven directly
 by the daemon (see above), not via an event subscription.
+
+**Hotplug scripts.** Every event also runs the scripts in
+`/etc/hotplug.d/wwand/` (through `hotplug-call`, the OpenWrt way), so a script
+reacts without a resident `ubus listen`. The environment carries the event:
+`ACTION` (its name: `sms`, `registered`, `up`, …), `WWAND_EVENT` (`modem` or
+`context`), `MODEM` / `INTERFACE` / `CONTEXT`, every scalar field in upper
+case (`TEXT`, `SENDER`, `ID`, …) and the whole event as JSON in `DATA`. Passed
+as an environment, never through a shell — an SMS text is written by whoever
+knows the number, so quote the variables like any untrusted input. Nothing is
+started while the directory does not exist.
+
+```sh
+# /etc/hotplug.d/wwand/50-sms-forward
+[ "$ACTION" = sms ] || exit 0
+logger -t sms "from $SENDER: $TEXT"
+```
 
 ## eSIM management & provisioning
 

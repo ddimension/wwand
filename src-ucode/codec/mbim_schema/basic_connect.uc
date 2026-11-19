@@ -69,6 +69,11 @@ export const PIN_TYPE_PUK2 = 12;
 export const PIN_STATE_UNLOCKED = 0;
 export const PIN_STATE_LOCKED = 1;
 export const PIN_OP_ENTER = 0;
+export const PIN_OP_ENABLE = 1;
+export const PIN_OP_DISABLE = 2;
+export const PIN_OP_CHANGE = 3;
+export const PIN_MODE_ENABLED = 1;
+export const PIN_MODE_DISABLED = 2;
 
 // config pdp_type / auth -> MBIM enums — ONE table for both users (the
 // CONNECT path in context_mbim and the LTE attach path in modem_mbim), so
@@ -324,6 +329,18 @@ export const commands = {
 			cid: 4,
 			set: { pin_type: 'u32', pin_operation: 'u32', pin: 'string', new_pin: 'string' },
 			response: { pin_type: 'u32', pin_state: 'u32', remaining_attempts: 'u32' },
+		},
+
+		// PIN List: ten MbimPinDesc { PinMode, PinFormat, PinLengthMin,
+		// PinLengthMax } (u32 each), PIN1 first (libmbim 1.32.0
+		// mbim-service-basic-connect.json:153-159); only PIN1's is read.
+		// PinMode 1 = enabled, 2 = disabled (mbim-enums.h:358-360) — the one
+		// place MBIM says whether the PIN query is on: the PIN query answers
+		// PinType NONE on an unlocked card either way (HW-read on a Huawei
+		// ME906s, 2026-11-19).
+		PIN_LIST: {
+			cid: 5,
+			response: { pin1_mode: 'u32', pin1_format: 'u32', pin1_min: 'u32', pin1_max: 'u32' },
 		},
 
 		// MbimRegisterAction (mbim-enums.h, libmbim 1.32.0)

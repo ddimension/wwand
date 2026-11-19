@@ -602,6 +602,183 @@ scenario('pinlock: a send failure is terminal too', (next) => {
 	});
 });
 
+// A PIN typed by hand costs an attempt when it is wrong. With one left, a typo
+// PUK-locks the card — so the guard of the automatic entry applies, unless the
+// caller insists (force).
+scenario('pinlock: one attempt left refuses, force goes through', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {}, uim: mkclient({
+		GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_READY, 1) },
+		SET_PIN_PROTECTION: {},
+	}, calls) };
+
+	sim.set_pin_lock(m, false, '1234', (err) => {
+		eq(err?.error, 'low_retries', 'pinlock-low: refused');
+		eq(err?.retries, 1, 'pinlock-low: the attempts left are reported');
+		ok(index(calls, 'SET_PIN_PROTECTION') < 0, 'pinlock-low: nothing sent');
+
+		sim.set_pin_lock(m, false, '1234', (err2) => {
+			eq(err2, null, 'pinlock-low: force sends it');
+			ok(index(calls, 'SET_PIN_PROTECTION') >= 0, 'pinlock-low: ...once');
+			next();
+		}, { force: true });
+	});
+});
+
+// a request that is already satisfied sends nothing, so the guard has nothing
+// to protect and must not turn it into a failure
+scenario('pinlock: already in the state wins over the retry guard', (next) => {
+	let m = { timing: T, config: {}, uim: mkclient({
+		GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_READY, 1) },   // enabled
+	}, []) };
+
+	sim.set_pin_lock(m, true, '1234', (err, res) => {
+		eq(err, null, 'pinlock-already-low: no error');
+		eq(res?.already, true, 'pinlock-already-low: already');
+		next();
+	});
+});
+
+// native MBIM without the passthrough: the PIN set carries ENABLE/DISABLE
+scenario('pinlock: native MBIM when there is no QMI', (next) => {
+	let seen = [];
+	let m = { timing: T, config: {},
+		mbim_pin: { lock: (enable, pin, cb) => { push(seen, [ enable, pin ]); cb(null, {}); } },
+		at: { send: (cmd, cb) => { push(seen, 'AT'); cb(null, {}); } },
+	};
+
+	sim.set_pin_lock(m, false, '1234', (err) => {
+		eq(err, null, 'pinlock-mbim: done');
+		eq(seen, [ [ false, '1234' ] ], 'pinlock-mbim: MBIM DISABLE, AT not reached');
+		next();
+	});
+});
+
+// the guard's fallback on a native MBIM modem is the snapshot of its bring-up:
+// a failed attempt must lower it, or the guard sees two on a card with one
+scenario('pinchange: a failed MBIM attempt lowers the snapshot the guard reads', (next) => {
+	let m = { timing: T, config: {}, pin1: { state: 2, retries: 2, enabled: true },
+		mbim_pin: { change: (o, n, cb) => cb({ status: 'wrong pin' }) },
+	};
+
+	sim.change_pin(m, '1234', '5678', (err) => {
+		ok(err != null, 'pinchange-mbim: the wrong PIN surfaces');
+		eq(m.pin1.retries, 1, 'pinchange-mbim: the snapshot drops to 1');
+
+		sim.change_pin(m, '1234', '5678', (err2) => {
+			eq(err2?.error, 'low_retries', 'pinchange-mbim: the next try needs force');
+			next();
+		});
+	});
+});
+
+// native MBIM asks the card live (PIN List): a disabled PIN refuses a change and
+// answers a disable as done, sending nothing — on the ME906s both used to go to
+// the card with the typed PIN (2026-11-19)
+scenario('pin ops: native MBIM reads the PIN state live', (next) => {
+	let sent = [];
+	let m = { timing: T, config: {},
+		mbim_pin: {
+			status: (cb) => cb({ state: 3, retries: 3 }),
+			change: (o, n, cb) => { push(sent, 'change'); cb(null, {}); },
+			lock:   (e, p, cb) => { push(sent, 'lock'); cb(null, {}); },
+		},
+	};
+
+	sim.change_pin(m, '1234', '5678', (err) => {
+		eq(err?.error, 'pin_disabled', 'mbim-live: a change on a disabled PIN is refused');
+
+		sim.set_pin_lock(m, false, '1234', (err2, res) => {
+			eq(res?.already, true, 'mbim-live: a disable on a disabled PIN is done already');
+			eq(sent, [], 'mbim-live: nothing reached the card');
+			next();
+		});
+	});
+});
+
+// --- change_pin ----------------------------------------------------------------
+
+scenario('pinchange: UIM carries old and new PIN', (next) => {
+	let calls = [], sent;
+	let m = { timing: T, config: {}, uim: mkclient({
+		GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_READY, 3) },
+		CHANGE_PIN: (args, cb) => { sent = args.info; cb(null, {}); },
+	}, calls) };
+
+	sim.change_pin(m, '1234', '5678', (err, res) => {
+		eq(err, null, 'pinchange: done');
+		eq(res?.via, 'uim', 'pinchange: via UIM');
+		eq(sent?.old_pin, '1234', 'pinchange: old PIN sent');
+		eq(sent?.new_pin, '5678', 'pinchange: new PIN sent');
+		eq(sent?.pin_id, uimmod.PIN_ID_PIN1, 'pinchange: PIN1');
+		next();
+	});
+});
+
+// the card refuses CHANGE CHV on a disabled PIN; nothing is sent for it
+scenario('pinchange: a disabled PIN is refused before anything is sent', (next) => {
+	let calls = [];
+	let c = card(uimmod.APP_STATE_READY, 3);
+
+	c.cards[0].applications[0].pin1_state = 3;
+
+	let m = { timing: T, config: {}, uim: mkclient({ GET_CARD_STATUS: { card_status: c } }, calls) };
+
+	sim.change_pin(m, '1234', '5678', (err) => {
+		eq(err?.error, 'pin_disabled', 'pinchange-disabled: refused');
+		ok(index(calls, 'CHANGE_PIN') < 0, 'pinchange-disabled: nothing sent');
+		next();
+	});
+});
+
+scenario('pinchange: one attempt left refuses', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {}, uim: mkclient({
+		GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_READY, 1) },
+	}, calls) };
+
+	sim.change_pin(m, '1234', '5678', (err) => {
+		eq(err?.error, 'low_retries', 'pinchange-low: refused');
+		ok(index(calls, 'CHANGE_PIN') < 0, 'pinchange-low: nothing sent');
+		next();
+	});
+});
+
+// a QMI reject falls through to DMS; a wrong old PIN there stops the chain —
+// AT+CPWD must not spend a second attempt on it
+scenario('pinchange: reject falls through, a wrong PIN stops', (next) => {
+	let calls = [];
+	let m = { timing: T, config: {},
+		uim: mkclient({
+			GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_READY, 3) },
+			CHANGE_PIN: { __err: { error: 'qmi', code: 94 } },
+		}, calls),
+		dms: mkclient({
+			CHANGE_PIN: { __err: { error: 'qmi', code: 12 }, data: { retries: { verify: 2 } } },
+		}, calls),
+		at: { send: (cmd, cb) => { push(calls, 'AT'); cb(null, {}); } },
+	};
+
+	sim.change_pin(m, '1234', '5678', (err) => {
+		eq(err?.retries, 2, 'pinchange-chain: retries surfaced');
+		eq(length(filter(calls, (c) => c == 'CHANGE_PIN')), 2, 'pinchange-chain: UIM, then DMS');
+		ok(index(calls, 'AT') < 0, 'pinchange-chain: AT never tried after a real PIN error');
+		next();
+	});
+});
+
+scenario('pinchange: AT+CPWD when there is nothing else', (next) => {
+	let sent = [];
+	let m = { timing: T, config: {}, at: { send: (cmd, cb) => { push(sent, cmd); cb(null, {}); } } };
+
+	sim.change_pin(m, '1234', '5678', (err, res) => {
+		eq(err, null, 'pinchange-at: done');
+		eq(sent[0], 'AT+CPWD="SC","1234","5678"', 'pinchange-at: 27.007 syntax');
+		eq(res?.via, 'at', 'pinchange-at: via AT');
+		next();
+	});
+});
+
 // --- write_user_plmn via AT+CPOL/CPLS ----------------------------------------
 
 // a mock AT channel: records every command; answers AT+CPOL? with two existing
@@ -2395,6 +2572,85 @@ eq(sim.multisim([], null), null, 'multisim: no slots, nothing to say');
 	m.bound_iccid = null;
 	m.config.sim_slot = 0;
 	eq(sim.boot_slot(m, slots).slot, 0, 'boot slot: neither — leave as is');
+}
+
+// The configured PIN follows a PIN change: the next start would otherwise enter
+// the old one and burn an attempt per start. It is rewritten only on the
+// section the PIN comes from, and only while that still holds the OLD PIN.
+{
+	let writes = [];
+	let mk = (cfg_pin, sim_pin) => ({
+		config: { pincode: cfg_pin },
+		active_sim: (sim_pin != null) ? { section: 'card1', pincode: sim_pin } : null,
+		uim: mkclient({
+			GET_CARD_STATUS: { card_status: card(uimmod.APP_STATE_READY, 3) },
+			CHANGE_PIN: {}, SET_PIN_PROTECTION: {},
+		}, []),
+	});
+	let pself = { modems: {} };
+
+	simops.install(pself, {
+		log: () => null,
+		check_modem: (ref, cb) => pself.modems[ref] ?? null,
+		load_esim: () => null,
+		store_pincode: (section, stype, pin, expect) => {
+			push(writes, [ section, stype, pin, expect ]);
+			return { written: true };
+		},
+	});
+
+	let run = (m, f) => {
+		let out;
+
+		pself.modems.m0 = { modem: m };
+		f((err, res) => out = { err: err, res: res });
+		return out;
+	};
+
+	let m = mk('1234', null);
+	let r = run(m, (cb) => pself.modem_sim_pin_change('m0', '1234', '5678', cb));
+
+	eq(r.res?.config?.updated, true, 'pin follows: the modem\'s PIN updated');
+	eq(writes[0], [ 'm0', 'wwand_modem', '5678', '1234' ], 'pin follows: on the modem section, expecting the old PIN');
+	eq(m.config.pincode, '5678', 'pin follows: the running config holds it, the reload finds nothing');
+
+	writes = [];
+	m = mk('1234', '1111');
+	r = run(m, (cb) => pself.modem_sim_pin_change('m0', '1111', '2222', cb));
+	eq(writes[0], [ 'card1', 'wwand_sim', '2222', '1111' ], 'pin follows: the per-SIM PIN wins');
+	eq(m.active_sim.pincode, '2222', 'pin follows: ...in memory too');
+
+	writes = [];
+	m = mk('9999', null);
+	r = run(m, (cb) => pself.modem_sim_pin_change('m0', '1234', '5678', cb));
+	eq(r.res?.config?.reason, 'configured_pin_differs', 'pin follows: another configured PIN is left alone');
+	eq(length(writes), 0, 'pin follows: ...and nothing is written');
+
+	m = mk(null, null);
+	r = run(m, (cb) => pself.modem_sim_pin_change('m0', '1234', '5678', cb));
+	eq(r.res?.config?.reason, 'none_configured', 'pin follows: none configured, no store — nothing written');
+	r = run(m, (cb) => pself.modem_sim_pin_change('m0', '1234', '5678', cb, { store: true }));
+	eq(writes[0]?.[2], '5678', 'pin follows: store writes it where none is');
+
+	// turning the query on proves the PIN right: a wrong configured one is fixed
+	writes = [];
+	m = mk('0000', null);
+	m.uim = mkclient({ GET_CARD_STATUS: { card_status: (() => {
+		let c = card(uimmod.APP_STATE_READY, 3);
+		c.cards[0].applications[0].pin1_state = 3;
+		return c;
+	})() }, SET_PIN_PROTECTION: {} }, []);
+	r = run(m, (cb) => pself.modem_sim_pin_lock('m0', '1234', true, cb, { store: true }));
+	eq(writes[0], [ 'm0', 'wwand_modem', '1234', '0000' ], 'pin lock: store replaces a PIN the card just refuted');
+	// the query already on: nothing was sent, so nothing the card verified
+	writes = [];
+	m = mk(null, null);
+	r = run(m, (cb) => pself.modem_sim_pin_lock('m0', '1234', true, cb, { store: true }));
+	eq([ r.res?.already, r.res?.config?.reason, length(writes) ], [ true, 'not_verified', 0 ],
+	   'pin lock: an unchecked PIN is never stored');
+
+	r = run(m, (cb) => pself.modem_sim_pin_lock('m0', '12a4', false, cb));
+	eq(r.err?.error, 'invalid_pin', 'pin lock: a non-digit PIN never reaches a transport');
 }
 
 done('test_sim');

@@ -46,6 +46,23 @@ import * as dmsmod from 'wwand.codec.schema.dms';
 import * as sim from 'wwand.sim';
 import * as config_check from 'wwand.config_check';
 
+// the MBIM USSD service for mbim_client.on(): one notification, decoded raw
+// (mbim_backend.ussd_decode — a ref-byte-array the field codec does not read)
+// the MBIM SMS notifications sms_rx.uc reads: a message stored (Message
+// Store Status) and one delivered without storage (Read). Raw, like ussd_svc.
+const sms_svc = {
+	service: mbim_backend.SMS_SERVICE,
+	commands: {
+		STORE_STATUS: { cid: mbim_backend.SMS_CID_STORE_STATUS, decode: (info) => mbim_backend.sms_store_status(info) },
+		READ: { cid: mbim_backend.SMS_CID_READ, decode: (info) => mbim_backend.sms_records(info) },
+	},
+};
+
+const ussd_svc = {
+	service: mbim_backend.USSD_SERVICE,
+	commands: { USSD: { cid: mbim_backend.USSD_CID, decode: (info) => mbim_backend.ussd_decode(info) } },
+};
+
 const TIMING_DEFAULTS = {
 	...modem_common.TIMING_BASE,   // settle/reg_timeout/backoff_min/backoff_max
 	at_drain: 60000,
@@ -106,6 +123,9 @@ export function create(opts)
 
 	let deps = opts.deps ?? {};
 	let transport_open = deps.transport_open ?? transport_mod.open;
+	// set with the PIN helpers (mbim_pin), used by the SIM step: declared here,
+	// before both, as ucode resolves a name where it is compiled
+	let pin1_from_list = () => null;
 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: modem %s: %s\n', level, self.id, msg)));
 	self.log_fn = log;
 
@@ -356,16 +376,80 @@ export function create(opts)
 			del:      (index, cb) => mbim_backend.sms_delete(self.mbim, index, cb),
 		};
 
-		// PUK entry for sim.unblock_puk (duck-typed like mbim_uicc so the base
-		// sim.uc stays free of mbim imports): PIN set with PUK1 + ENTER carries
-		// the new PIN per the MBIM spec.
+		// PIN operations for sim.uc (duck-typed like mbim_uicc so the base
+		// sim.uc stays free of mbim imports), all one PIN set (libmbim 1.32
+		// MbimPinOperation): PUK1 + ENTER carries the new PIN per the MBIM spec;
+		// ENABLE/DISABLE take the current PIN1, CHANGE the old one and the new.
+		let pin_set = (type, op, pin, new_pin, cb) => self.mbim.command(bc, 'PIN', 'set', {
+			pin_type: type, pin_operation: op, pin: pin, new_pin: new_pin ?? '',
+		}, (err, d) => cb(err, err ? null : { retries: d?.remaining_attempts }));
+
 		self.mbim_pin = {
-			unblock: (puk, new_pin, cb) => self.mbim.command(bc, 'PIN', 'set', {
-				pin_type: bc.PIN_TYPE_PUK1,
-				pin_operation: bc.PIN_OP_ENTER,
-				pin: puk, new_pin: new_pin,
-			}, (err, d) => cb(err, err ? null : { retries: d?.remaining_attempts })),
+			unblock: (puk, new_pin, cb) => pin_set(bc.PIN_TYPE_PUK1, bc.PIN_OP_ENTER, puk, new_pin, cb),
+			lock:    (enable, pin, cb)  => pin_set(bc.PIN_TYPE_PIN1,
+				enable ? bc.PIN_OP_ENABLE : bc.PIN_OP_DISABLE, pin, null, cb),
+			change:  (old_pin, new_pin, cb) => pin_set(bc.PIN_TYPE_PIN1, bc.PIN_OP_CHANGE, old_pin, new_pin, cb),
+			// PIN1 in sim.uc's numbering (2 enabled, 3 disabled, 1 locked, 4
+			// PUK-blocked) with the attempts left, from the PIN List and the
+			// PIN query. Without it sim.uc knew nothing on a native-MBIM modem
+			// and sent the PIN for a request the card would refuse anyway
+			// (HW-seen on the ME906s, 2026-11-19, MBIM status PIN_DISABLED).
+			// The attempts count only while the PIN query names PIN1 or no
+			// PIN at all; a firmware's "unknown" (0xFFFFFFFF) is dropped.
+			// the second query only on the same, live client: a teardown
+			// answers the first with `cancelled` while it clears the client's
+			// pending requests, and a request queued from inside that would
+			// be lost with them — the caller then never hears back
+			status: (cb) => {
+				let mc = self.mbim;
+
+				if (!mc)
+					return cb(null, { error: 'cancelled' });
+
+				let gone = { error: 'cancelled' };
+
+				mc.command(bc, 'PIN_LIST', 'query', {}, (lerr, list) => {
+				if (lerr?.error == 'cancelled' || self.mbim !== mc)
+					return cb(null, gone);
+
+				mc.command(bc, 'PIN', 'query', {}, (perr, pin) => {
+					if (perr?.error == 'cancelled' || self.mbim !== mc)
+						return cb(null, gone);
+
+					let st = null;
+
+					if (!perr && pin?.pin_type == bc.PIN_TYPE_PUK1)
+						st = 4;
+					else if (!perr && pin?.pin_type == bc.PIN_TYPE_PIN1 && pin?.pin_state == bc.PIN_STATE_LOCKED)
+						st = 1;
+					else if (!lerr && list?.pin1_mode == bc.PIN_MODE_ENABLED)
+						st = 2;
+					else if (!lerr && list?.pin1_mode == bc.PIN_MODE_DISABLED)
+						st = 3;
+
+					let r = (!perr && (pin?.pin_type == 0 || pin?.pin_type == bc.PIN_TYPE_PIN1) &&
+					         pin?.remaining_attempts != null && pin.remaining_attempts <= 10)
+						? pin.remaining_attempts : null;
+
+					cb((st == null && r == null) ? null : { state: st, retries: r });
+				}, { no_recovery: true });
+				}, { no_recovery: true });
+			},
 		};
+
+		// whether the PIN query is on, for status `pin1` on an unlocked card:
+		// the PIN List alone says (no PIN query — the SIM step has just made
+		// the one it needed). Best-effort, never in the way of the bring-up;
+		// a firmware without it leaves `enabled` null.
+		pin1_from_list = () => self.mbim.command(bc, 'PIN_LIST', 'query', {}, (err, l) => {
+			if (err || !self.pin1)
+				return;
+
+			if (l?.pin1_mode == bc.PIN_MODE_ENABLED || l?.pin1_mode == bc.PIN_MODE_DISABLED) {
+				self.pin1.enabled = (l.pin1_mode == bc.PIN_MODE_ENABLED);
+				self.pin1.state = self.pin1.enabled ? 2 : 3;
+			}
+		}, { no_recovery: true });
 
 		// native MBIM multi-slot (MS BCE SysCaps/DeviceSlotMappings/SlotInfo-
 		// Status) — sim.uc's slot fallback when the passthrough UIM is
@@ -785,6 +869,7 @@ export function create(opts)
 			// claim about the card rather than about what we were told. Only
 			// the state is known, and the state is what is recorded.
 			self.pin1 = { state: 2, retries: null, enabled: null };
+			pin1_from_list();
 
 			return step_attach_profile();
 		}
@@ -880,9 +965,9 @@ export function create(opts)
 				return fail('pin_query', err);
 			}
 
-			// status `pin1` (QMI parity — stayed null on MBIM): MBIM only
-			// reports the CURRENTLY required pin, so `enabled` is unknowable
-			// once unlocked (null, not false)
+			// status `pin1` (QMI parity — stayed null on MBIM): the PIN query
+			// reports only the CURRENTLY required pin, so on an unlocked card
+			// `enabled` comes from the PIN List afterwards (pin1_from_list)
 			self.pin1 = {
 				state: (data.pin_state == bc.PIN_STATE_LOCKED) ? 1 : 2,
 				retries: data.remaining_attempts,
@@ -890,8 +975,10 @@ export function create(opts)
 				          data.pin_type == bc.PIN_TYPE_PIN1) ? true : null,
 			};
 
-			if (data.pin_state == bc.PIN_STATE_UNLOCKED)
+			if (data.pin_state == bc.PIN_STATE_UNLOCKED) {
+				pin1_from_list();
 				return step_attach_profile();
+			}
 
 			let block = (reason) =>
 				sim_block({ reason: reason, retries: data.remaining_attempts });
@@ -1230,6 +1317,34 @@ export function create(opts)
 				data.slot_index ?? 0, data.state,
 				ext.UICC_SLOT_STATE_NAMES?.[sprintf('%d', data.state)] ?? 'unknown'));
 		});
+
+		// A USSD the network sends on its own (a USSD-Notify or -Request), and
+		// the reply to a CONTINUE, arrive as this notification. Only where the
+		// modem lists the service: the subscription list is derived from
+		// these handlers, and an unlisted service in it risks the whole list
+		// being refused (subscribe_events). ussd.uc reads it via _ussd_note.
+		if (self.mbim.offers(mbim_backend.USSD_SERVICE) === true)
+			self.mbim.on(ussd_svc, 'USSD', (d) => self._ussd_note?.('mbim', d));
+
+		// a new SMS, on a modem that lists the SMS service (same reason):
+		// stored and announced, or delivered unstored (class 0) as a Read
+		if (self.mbim.offers(mbim_backend.SMS_SERVICE) === true) {
+			self.mbim.on(sms_svc, 'STORE_STATUS', (d) => {
+				if (d && (d.flag & mbim_backend.SMS_FLAG_NEW_MESSAGE))
+					self._sms_note?.('mbim_stored', d.index);
+			});
+			self.mbim.on(sms_svc, 'READ', (recs) => {
+				for (let r in (recs ?? []))
+					self._sms_note?.('mbim_pdu', r.pdu);
+			});
+		}
+	};
+
+	// native MBIM USSD for ussd.uc (duck-typed like mbim_pin): only where the
+	// modem lists the service; `set` answers the decoded response
+	self.mbim_ussd = {
+		offered: () => self.mbim?.offers(mbim_backend.USSD_SERVICE) === true,
+		set: (action, dcs, payload, cb) => mbim_backend.ussd_set(self.mbim, action, dcs, payload, cb),
 	};
 
 	// NATIVE OPERATOR SCAN. MBIM has had one all along (VISIBLE_PROVIDERS,
@@ -2593,7 +2708,7 @@ export function create(opts)
 				if (!aerr && adata?.allocation)
 					self[field] = client_mod.create(self.pt.shim, schema.default, adata.allocation.cid, hooks);
 
-				cb(self[field]);
+				cb(self[field], aerr);
 			}, { no_recovery: true });
 		});
 	};
@@ -2603,6 +2718,53 @@ export function create(opts)
 	// self.wms via the passthrough so the backend-neutral sms.uc list/read/
 	// delete works on an MBIM modem (the EG06 exposes QMI-WMS over it)
 	self._ensure_wms = ensure_pt_client('wms', wmsmod);
+	// Voice for USSD over the passthrough; the schema require()d on first use
+	// (voice_lazy.uc), so the factory is built then too
+	// cb(voice, err) as modem.uc's: err when the modem lists the passthrough
+	// and it did not come up — Voice may well be there, and ussd.uc must not
+	// take the next transport for it. A refused ALLOCATE_CID (the passthrough
+	// up, no Voice behind it) is "no Voice".
+	// Callers during an allocation wait for the same one (as modem.uc's):
+	// two ALLOCATE_CIDs would create two clients, and drop_pt releases only
+	// the one left in self.voice.
+	self._ensure_voice = (cb) => {
+		if (self.voice && !pt_stale())
+			return cb(self.voice);
+
+		if (self._voice_waiting)
+			return push(self._voice_waiting.cbs, cb);
+
+		let mine = self._voice_waiting = { cbs: [ cb ] };
+		let answer = (v, err) => {
+			let cbs = mine.cbs;
+
+			mine.cbs = [];
+
+			if (self._voice_waiting === mine)
+				self._voice_waiting = null;
+
+			for (let w in cbs)
+				w(v, err);
+		};
+
+		ensure_pt_client('voice', require('wwand.codec.schema.voice_lazy').s)((v, aerr) => {
+			let cb = answer;
+
+			if (v)
+				return cb(v);
+
+			let listed = (self.mbim?.offers?.(mbimmod.service_uuid('qmi_passthrough')) === true);
+
+			// only INVALID_SERVICE_TYPE says Voice is absent behind the
+			// passthrough (QMI_PROTOCOL_ERROR_INVALID_SERVICE_TYPE = 31,
+			// qmi-errors.h:258, libqmi 1.38; modem.uc alloc reads it so too);
+			// a timeout or ClientIdsExhausted is a Voice that is there
+			if (aerr && aerr.code != 31)
+				return cb(null, { error: 'voice_unavailable', detail: aerr });
+
+			cb(null, (listed && !self.pt) ? { error: 'voice_unavailable', detail: 'QMI passthrough not up' } : null);
+		});
+	};
 
 	// admin-triggered soft modem reset (ubus modem_reset — backend fallback of
 	// the generic reset chain; backend parity with QMI/NCM): QMI DMS
@@ -3202,7 +3364,7 @@ export function create(opts)
 		// and every later SMS op used a client bound to a shim that is gone,
 		// failing forever and feeding the proto-error counter, which eventually
 		// power-cycles a healthy modem.
-		let pt = self.pt, uim = self.uim, wms = self.wms, extra = self.extra_clients ?? [];
+		let pt = self.pt, uim = self.uim, wms = self.wms, voice = self.voice, extra = self.extra_clients ?? [];
 		// ...and the releases still owed on this stack (pt_release): the
 		// burst below is their last chance
 		let owed = filter(self._pt_unreleased, (e) => e.pt === pt);
@@ -3212,6 +3374,22 @@ export function create(opts)
 		self.pt = null;
 		self.uim = null;
 		self.wms = null;
+		self.voice = null;
+
+		// a Voice allocation still out answers its callers now; its own late
+		// answer finds the list empty
+		let vw = self._voice_waiting;
+
+		self._voice_waiting = null;
+
+		if (vw) {
+			let cbs = vw.cbs;
+
+			vw.cbs = [];
+
+			for (let w in cbs)
+				w(null, { error: 'reinitialised' });
+		}
 		// plugins' clients rode on the same shim: released and destroyed with
 		// it, and `destroyed` tells their owners to ask again
 		self.extra_clients = [];
@@ -3237,7 +3415,7 @@ export function create(opts)
 			if (pt.ctl)
 				modem_common.before_release(extra, log);
 
-			for (let c in [ pt.nas, pt.dsd, uim, wms, ...extra, ...owed ]) {
+			for (let c in [ pt.nas, pt.dsd, uim, wms, voice, ...extra, ...owed ]) {
 				if (!c || !pt.ctl)
 					continue;
 
@@ -3250,7 +3428,7 @@ export function create(opts)
 				}
 			}
 
-			for (let c in [ pt.ctl, pt.nas, pt.dsd, uim, wms, ...extra ]) {
+			for (let c in [ pt.ctl, pt.nas, pt.dsd, uim, wms, voice, ...extra ]) {
 				if (!c)
 					continue;
 

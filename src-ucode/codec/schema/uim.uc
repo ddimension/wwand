@@ -342,6 +342,20 @@ export default {
 			},
 		},
 
+		// change PIN1. Verified vs libqmi 1.38 qmi-service-uim.json ("Change
+		// PIN" 0x0028: Session + Info 0x02 { PIN ID u8, Old PIN string, New
+		// PIN string }; response 0x10 Retries Remaining on failure).
+		CHANGE_PIN: {
+			id: 0x0028,
+			req: {
+				session: SESSION,
+				info:    { t: 0x02, f: { pin_id: 'u8', old_pin: 'lstring', new_pin: 'lstring' } },
+			},
+			resp: {
+				retries: { t: 0x10, f: { verify: 'u8', unblock: 'u8' } },
+			},
+		},
+
 		// SIM hot-reset (card power off/on, slot 1-based). The modem discards
 		// its cached SIM state and re-reads the card — the "apply" after an
 		// eSIM profile switch. Verified vs libqmi 1.38 (0x0030/0x0031).

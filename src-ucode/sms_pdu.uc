@@ -653,3 +653,176 @@ export function encode_submit(number, text, opts)
 
 	return out;
 };
+
+// --- GSM text for USSD and Cell Broadcast ------------------------------------
+//
+// Both carry their text under the CBS Data Coding Scheme of TS 23.038 §5, not
+// the SMS one, and both pack GSM7 the same LSB-first way as SMS. The pieces
+// below are the shared half; ussd.uc and cbs.uc own what is particular to each.
+
+// text -> UTF-16 code units (surrogate pairs for non-BMP, as encode_submit)
+function utf16_units(text)
+{
+	let units = [];
+
+	for (let cp in utf8_cps(text ?? '')) {
+		if (cp > 0xffff) {
+			let v = cp - 0x10000;
+
+			push(units, 0xd800 | (v >> 10));
+			push(units, 0xdc00 | (v & 0x3ff));
+		}
+		else
+			push(units, cp);
+	}
+
+	return units;
+}
+
+// UTF-8 text -> packed GSM7 octets, or null when a character is outside the
+// default alphabet and its extension. 7 spare bits at the end are filled with
+// CR, not left zero: zero bits would read as '@' (TS 23.038 §6.1.2.3.1).
+export function gsm7_pack(text)
+{
+	let sep = to_septets(utf8_cps(text ?? ''));
+
+	if (sep == null)
+		return null;
+
+	if ((length(sep) % 8) == 7)
+		push(sep, 0x0d);
+
+	return pack7(sep, 0);
+};
+
+// packed GSM7 octets -> text. `n` = septet count when the carrier states one;
+// otherwise every whole septet the octets hold, with the CR that pads a
+// message ending 7 bits short of an octet dropped again (§6.1.2.3.1).
+export function gsm7_unpack(octets, n)
+{
+	let pad = (n == null);
+
+	n = n ?? int(length(octets) * 8 / 7);
+
+	let sep = unpack7(octets, 0, n, 0);
+
+	if (pad && ((length(octets) * 8) % 7) == 0 && length(sep) && sep[length(sep) - 1] == 0x0d)
+		pop(sep);
+
+	return gsm7_text(sep);
+};
+
+// UCS2 (UTF-16BE) octets <-> text
+export function ucs2_decode(octets)
+{
+	return ucs2_text(octets, 0, length(octets));
+};
+
+export function ucs2_encode(text)
+{
+	let out = [];
+
+	for (let u in utf16_units(text)) {
+		push(out, (u >> 8) & 0xff);
+		push(out, u & 0xff);
+	}
+
+	return out;
+};
+
+// UTF-16 code units (as a QMI u16 array carries them, already in host order)
+// -> text, surrogate pairs joined
+export function utf16_units_text(units)
+{
+	let out = '';
+
+	for (let i = 0; i < length(units); i++) {
+		let cp = units[i];
+
+		if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < length(units)) {
+			cp = 0x10000 + ((cp - 0xD800) << 10) + (units[++i] - 0xDC00);
+		}
+
+		out += utf8(cp);
+	}
+
+	return out;
+};
+
+// The CBS Data Coding Scheme, TS 23.038 §5 -> { alphabet: 'gsm7' | '8bit' |
+// 'ucs2', lang_prefix: 0 | 'gsm7' | 'ucs2', compressed, udh, language }.
+// lang_prefix: 'gsm7' = the text opens with a 2-letter ISO 639 code and CR in
+// three GSM7 characters (0x10), 'ucs2' = two GSM7 characters in two octets
+// before UCS2 text (0x11). Reserved codings are read as GSM7, the spec's own
+// fallback for an unknown scheme.
+const CBS_LANG0 = [ 'de', 'en', 'it', 'fr', 'es', 'nl', 'sv', 'da', 'pt', 'fi', 'no', 'el', 'tr', 'hu', 'pl', null ];
+const CBS_LANG2 = [ 'cs', 'he', 'ar', 'ru', 'is' ];
+const CBS_ALPHA = [ 'gsm7', '8bit', 'ucs2', 'gsm7' ];
+
+export function cbs_dcs(dcs)
+{
+	let r = { alphabet: 'gsm7', lang_prefix: 0, compressed: false, udh: false, language: null };
+	let hi = (dcs >> 4) & 0x0f;
+
+	if (hi == 0x0)
+		r.language = CBS_LANG0[dcs & 0x0f];
+	else if (dcs == 0x10)
+		r.lang_prefix = 'gsm7';
+	else if (dcs == 0x11) {
+		r.alphabet = 'ucs2';
+		r.lang_prefix = 'ucs2';
+	}
+	else if (hi == 0x2)
+		r.language = CBS_LANG2[dcs & 0x0f];
+	else if (hi >= 0x4 && hi <= 0x7) {
+		r.compressed = !!(dcs & 0x20);
+		r.alphabet = CBS_ALPHA[(dcs >> 2) & 3];
+	}
+	else if (hi == 0x9) {
+		r.udh = true;
+		r.alphabet = CBS_ALPHA[(dcs >> 2) & 3];
+	}
+	// 1010-1101 reserved and 1110 WAP Forum: GSM7, as reserved codings are.
+	// Not the SMS message-waiting groups (§4, 1100-1110, of which 1110 is
+	// UCS2) — this is the CBS scheme, §5, where those values mean otherwise.
+	else if (hi == 0xf)
+		r.alphabet = (dcs & 0x04) ? '8bit' : 'gsm7';
+
+	return r;
+};
+
+// text under a CBS DCS: { text, language, alphabet, raw? }. 8-bit data has no
+// character set to decode with, so it comes back as hex in `raw` and `text`
+// stays null; compressed text likewise (no decompressor, TS 23.042).
+// `n` = septets, where the carrier states it (unused otherwise).
+export function cbs_text(dcs, octets, n)
+{
+	let d = cbs_dcs(dcs);
+	let r = { text: null, language: d.language, alphabet: d.alphabet };
+
+	if (d.compressed || d.alphabet == '8bit') {
+		r.raw = hx(octets);
+		return r;
+	}
+
+	if (d.lang_prefix == 'ucs2') {
+		r.language = gsm7_text(unpack7(octets, 0, 2, 0));
+		r.text = ucs2_text(octets, 2, length(octets) - 2);
+		return r;
+	}
+
+	if (d.alphabet == 'ucs2') {
+		r.text = ucs2_text(octets, 0, length(octets));
+		return r;
+	}
+
+	let t = gsm7_unpack(octets, n);
+
+	if (d.lang_prefix == 'gsm7') {
+		r.language = substr(t, 0, 2);
+		t = substr(t, 3);
+	}
+
+	r.text = t;
+	return r;
+};

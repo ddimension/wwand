@@ -418,14 +418,59 @@ export function set_lte_attach_config(mc, contexts, cb)
 // The SMS service has NO storage selector (READ/DELETE act on the modem's
 // configured SMS store), unlike the QMI WMS path — so this is the fallback for
 // pure-MBIM firmware without the passthrough. PDU format only (no CDMA).
-const SMS_SERVICE = '533fbeeb-14fe-4467-9f90-33a223e56c3f';
-const SMS_CID_READ = 2;
+export const SMS_SERVICE = '533fbeeb-14fe-4467-9f90-33a223e56c3f';
+export const SMS_CID_READ = 2;
 const SMS_CID_DELETE = 4;
 const SMS_FORMAT_PDU = 0;
 const SMS_FLAG_ALL = 0;
 const SMS_FLAG_INDEX = 1;
 
 function _u(buf, p) { return (p + 4 <= length(buf)) ? struct.unpack('<I', substr(buf, p, 4))[0] : 0; }
+
+// the records of an SMS Read response or notification (same layout) ->
+// [ { index, status, pdu } ]. WHERE THE PDU OFFSET COUNTS FROM is not
+// settled: libmbim reads it from the start of the RECORD (mbim-message.c:710,
+// called with the record's offset from mbim-sms.c:75, 1.32), and the EG06
+// answered with it counted from the start of the BUFFER — the messages read
+// that way were the same ones its QMI passthrough listed (HW-validated
+// 2026-07-25, commit 1bde1da). A response uses one way for all its
+// records, so the choice is made for the response: the reading under which
+// every PDU lies inside the buffer and overlaps no record header (16 octets
+// each). The record-based one (the standard) when it qualifies, the
+// buffer-based one otherwise; with neither, the records are skipped — a
+// guess per record could hand back the bytes of another one.
+export function sms_records(resp)
+{
+	let count = _u(resp, 4), recs = [];
+
+	for (let i = 0; i < count; i++) {
+		let off = _u(resp, 8 + i * 8);             // ref pair: [offset, size]
+
+		push(recs, { off: off, index: _u(resp, off), status: _u(resp, off + 4),
+		             poff: _u(resp, off + 8), psize: _u(resp, off + 12) });
+	}
+
+	let ok_under = (pos) => {
+		for (let r in recs) {
+			let at = pos(r);
+
+			if (at + r.psize > length(resp))
+				return false;
+
+			for (let h in recs)
+				if (at < h.off + 16 && at + r.psize > h.off)
+					return false;
+		}
+
+		return true;
+	};
+
+	let rel = (r) => r.off + r.poff, abs = (r) => r.poff;
+	let pos = ok_under(rel) ? rel : ok_under(abs) ? abs : null;
+
+	return pos ? map(recs, (r) => ({ index: r.index, status: r.status,
+		pdu: hexmod.bin_to_hex(substr(resp, pos(r), r.psize)) })) : [];
+};
 
 // sms_read_all(mc, cb): read every stored PDU. cb(err, [{ index, status, pdu }]).
 // Response (MbimSmsRead, PDU): Format(u32), MessagesCount(u32), then a
@@ -440,19 +485,22 @@ export function sms_read_all(mc, cb)
 		if (err)
 			return cb(err, null);
 
-		let count = _u(resp, 4), out = [];
-
-		for (let i = 0; i < count; i++) {
-			let off = _u(resp, 8 + i * 8);             // ref pair: [offset, size]
-			let idx = _u(resp, off), status = _u(resp, off + 4);
-			let poff = _u(resp, off + 8), psize = _u(resp, off + 12);
-
-			push(out, { index: idx, status: status, pdu: hexmod.bin_to_hex(substr(resp, poff, psize)) });
-		}
-
-		cb(null, out);
+		cb(null, sms_records(resp));
 	});
 };
+
+
+// Message Store Status (CID 5, notification): Flag, MessageIndex
+// (mbim-service-sms.json:177-190, libmbim 1.32); NEW_MESSAGE = 1 << 1
+// (mbim-enums.h:986-990)
+export const SMS_CID_STORE_STATUS = 5;
+export const SMS_FLAG_NEW_MESSAGE = 2;
+
+export function sms_store_status(info)
+{
+	return (length(info ?? '') >= 8) ? { flag: _u(info, 0), index: _u(info, 4) } : null;
+};
+
 
 // sms_delete(mc, index, cb): delete one stored message by index.
 export function sms_delete(mc, index, cb)
@@ -460,6 +508,55 @@ export function sms_delete(mc, index, cb)
 	let info = struct.pack('<II', SMS_FLAG_INDEX, +index);
 
 	mc.command_raw(SMS_SERVICE, SMS_CID_DELETE, info, (err) => cb(err ?? null));
+};
+
+// --- USSD (MBIM USSD service, libmbim 1.32 mbim-service-ussd.json:8-37) ------
+// One CID, set + notification, no query. Set: Action, DataCodingScheme,
+// Payload ref-byte-array; response and notification: Response, SessionState,
+// DataCodingScheme, Payload. The DCS is the 23.038 CBS byte itself (unlike
+// QMI's), the payload packed GSM7 or UCS2 big-endian as the DCS says
+// (ModemManager mm-broadband-modem-mbim.c:8447-8510, 1.25.95), at most 160
+// octets.
+export const USSD_SERVICE = 'e550a0c8-5e82-479e-82f7-10abf4c3351f';
+export const USSD_CID = 1;
+export const USSD_ACTION_INITIATE = 0;
+export const USSD_ACTION_CONTINUE = 1;
+export const USSD_ACTION_CANCEL = 2;
+// MbimUssdResponse (mbim-enums.h:1024-1031)
+export const USSD_RESPONSE = [ 'no_action_required', 'action_required', 'terminated_by_network',
+	'other_local_client', 'operation_not_supported', 'network_timeout' ];
+
+export function ussd_encode_set(action, dcs, payload)
+{
+	let p = payload ?? '';
+	let pad = (4 - (length(p) % 4)) % 4;
+
+	return struct.pack('<IIII', action, dcs ?? 0, length(p) ? 16 : 0, length(p)) + p +
+		substr('\x00\x00\x00', 0, pad);
+};
+
+// response or notification -> { response, response_name, session_state,
+// dcs, payload } (payload a binary string); null when too short
+export function ussd_decode(info)
+{
+	if (length(info ?? '') < 20)
+		return null;
+
+	let r = _u(info, 0), off = _u(info, 12), len = _u(info, 16);
+
+	return {
+		response: r,
+		response_name: USSD_RESPONSE[r] ?? sprintf('%d', r),
+		session_state: _u(info, 4),
+		dcs: _u(info, 8),
+		payload: (len && off + len <= length(info)) ? substr(info, off, len) : '',
+	};
+};
+
+export function ussd_set(mc, action, dcs, payload, cb)
+{
+	mc.command_raw(USSD_SERVICE, USSD_CID, ussd_encode_set(action, dcs, payload), (err, resp) =>
+		cb(err ?? null, err ? null : ussd_decode(resp)), { timeout: 100000 });
 };
 
 // how many neighbour cells to ask the modem for (BASE_STATIONS_INFO caps)

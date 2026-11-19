@@ -44,7 +44,8 @@ an unattended one-shot conversion there is an example uci-defaults script in
 The per-modem dialog (Edit button). Hardware binding by **device path**
 (a dropdown of detected modems + free text), USB serial or IMEI; the **FCC
 unlock** method for laptop-SKU modems; the generic **Reset modem** button;
-SIM slot, PIN, radio and resilience tabs.
+SIM slot, PIN, radio and resilience tabs. *Radio & Cell* also switches
+**Cell Broadcast** (leave / on / off) and lists its channels.
 
 ![Modem config](images/luci-modem-config.png)
 
@@ -103,13 +104,16 @@ as `?sim=<ICCID>`.
 
 ![SIM cards](images/luci-sim-cards.png)
 
-## Modem Tools — bands, operator, cell lock, SIM, eSIM, SMS
+## Modem Tools — bands, operator, cell lock, SIM, eSIM, SMS, USSD, Cell Broadcast
 
 Radio-technology and per-band selection, manual/automatic **network
-selection** with an operator scan, **cell lock**, SIM slot & PIN control, full
+selection** with an operator scan, **cell lock**, SIM slot and **SIM PIN**
+(turn the PIN query on or off, **change the PIN**; the configured PIN follows,
+and with fewer than two attempts left the page asks before it tries), full
 **eSIM profile management** (download via activation code through lpac,
-enable/disable/delete, provider confirmations), SIM PLMN preference lists and
-SMS.
+enable/disable/delete, provider confirmations), SIM PLMN preference lists,
+SMS, **USSD** (send a code, answer the network's question, end the session)
+and the last **Cell Broadcast** messages.
 
 ![Modem Tools](images/luci-modem-tools.png)
 

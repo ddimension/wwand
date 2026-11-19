@@ -427,6 +427,8 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	'unarmed_reset_after', 'card_hold', 'ipa_mode',
 	'zero_rx_timeout', 'tx_stall_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
+	// Cell Broadcast (sms_rx.uc): on/off, and which message identifiers
+	'cell_broadcast', 'cb_channels',
 	// the AT-over-MBIM pipe: `at_over_mbim` forces it and picks the vendor CID
 	// flavour, `at_mbim '0'` disables the automatic fallback. Both are read by
 	// the backends (modem_mbim step_at, modem_common open_at_over_mbim) and
@@ -559,6 +561,11 @@ function modem_from_section(s, warnings)
 			? lc(s.sim_detect) : null,
 		// which 5G NR flavours the modem may use: 'nsa' | 'sa' | 'both'
 		// (atcmd.uc nr5g_mode_commands); anything else is dropped
+		// Cell Broadcast: '1' on, '0' off, unset = the modem's own setting is
+		// left alone (sms_rx.uc wanted); cb_channels "4370-4399" or ids
+		cell_broadcast: (s.cell_broadcast == null || s.cell_broadcast == '') ? null
+			: ((s.cell_broadcast == '0' || s.cell_broadcast == 'false' || s.cell_broadcast == 'off') ? '0' : '1'),
+		cb_channels: s.cb_channels,
 		nr5g_mode: (index([ 'nsa', 'sa', 'both' ], lc(sprintf('%s', s.nr5g_mode ?? ''))) >= 0)
 			? lc(s.nr5g_mode) : null,
 		pincode: s.pincode,
@@ -742,6 +749,9 @@ function sim_from_section(s, warnings, label)
 	}
 
 	return {
+		// the uci section, for the one writer that puts a value back onto it
+		// (a changed SIM PIN, deps.store_pincode)
+		section: s['.name'],
 		modem: s.modem,
 		iccid: s.iccid,
 		imsi: s.imsi,

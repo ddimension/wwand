@@ -626,6 +626,16 @@ export function urc_common(self, o)
 			}
 		}
 
+		// a USSD answer or a network-initiated USSD (27.007 +CUSD), for the
+		// AT transport of ussd.uc
+		if (match(line, /^\+CUSD:/))
+			self._ussd_note?.('at', line);
+
+		// a new SMS or a Cell Broadcast page (27.005 +CMTI, +CMT and +CBM —
+		// the last two arrive with their PDU, atcmd.uc emit_urc), for sms_rx.uc
+		if (match(line, /^\+(CMTI|CMT|CBM):/))
+			self._sms_note?.('at', line);
+
 		// NITZ (network identity/time, pushed at attach): recorded always,
 		// applied to the clock per nitz_apply
 		let tz = nitz_ctzv(line);
@@ -800,6 +810,10 @@ export function scaffolding(self, o)
 		if (deps.on_event)
 			deps.on_event(self, event, data);
 	};
+
+	// for the feature modules outside the backends (ussd.uc), which report
+	// what the network sent the same way a backend reports its own events
+	self._emit = emit;
 
 	let notify_contexts = (event, data) => {
 		for (let ctx in self.contexts)

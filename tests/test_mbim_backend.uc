@@ -1095,6 +1095,26 @@ backend.uicc_reset(resetc, (err) => {
 		eq(recs[0].pdu, PDU, 'sms-read: extracted PDU hex');
 	});
 
+	// the standard layout (libmbim, mbim-message.c:710): the PDU offset counts
+	// from the RECORD. Record at 16, PDU at record+16 = 32. Read from the
+	// buffer start, offset 16 would be the record header itself.
+	let std = p32(0) + p32(1) + p32(16) + p32(16) +
+		p32(6) + p32(0) + p32(16) + p32(length(pdu_bytes)) + pdu_bytes;
+
+	eq(backend.sms_records(std)[0]?.pdu, PDU, 'sms-read: the record-relative offset of the standard');
+
+	// two records the EG06 way (buffer-relative): records at 24 and 40, PDUs
+	// at 56 and 73. Read record-relative, the first would land on 80 — inside
+	// the buffer, but not where any PDU is; the second points past the end, so
+	// the response as a whole is buffer-relative.
+	let two = p32(0) + p32(2) + p32(24) + p32(16) + p32(40) + p32(16) +
+		p32(1) + p32(1) + p32(56) + p32(17) +
+		p32(2) + p32(1) + p32(73) + p32(17) + pdu_bytes + pdu_bytes;
+	let tr = backend.sms_records(two);
+
+	eq([ length(tr), tr[0]?.index, tr[0]?.pdu, tr[1]?.pdu ], [ 2, 1, PDU, PDU ],
+	   'sms-read: one reading for the whole response');
+
 	// delete by index -> CID 4, [flag=INDEX(1), index]
 	let delseen = null;
 	backend.sms_delete({ command_raw: (u, c, i, cb) => { delseen = { c, i }; cb(null); } }, 7, () => {});

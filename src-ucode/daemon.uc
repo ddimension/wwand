@@ -12,6 +12,8 @@ import * as modem_quirks from 'wwand.modem_quirks';
 import * as discovery from 'wwand.discovery';
 import * as netsel_ops from 'wwand.netsel_ops';
 import * as simops from 'wwand.simops';
+import * as ussd from 'wwand.ussd';
+import * as sms_rx from 'wwand.sms_rx';
 import * as simmod from 'wwand.sim';
 import * as hwops from 'wwand.hwops';
 import * as plugins from 'wwand.plugins';
@@ -114,7 +116,12 @@ let load_esim = lazy_backend('wwand.esim', loaded_note('esim'));
 // the attach profile and re-dials (apply_config, apply_sim_change).
 // plmn_list names the list and plmn_restore is what it resolves to: an edit to
 // the list itself changes only the second, and must still be applied.
-const SIM_EFFECT = [ 'pincode', 'apn', 'auth', 'username', 'password', 'pdp_type',
+// The `pincode` is not among them: only the SIM step reads it, and on a card
+// that is already unlocked re-programming the attach profile and re-dialling
+// for it drops the connection for nothing — a PIN change from LuCI stores the
+// new PIN, and that must not bounce the WAN. A modem at its SIM step
+// (SIM_UNLOCK, SIM_BLOCKED) is restarted by apply_config's step 1 instead.
+const SIM_EFFECT = [ 'apn', 'auth', 'username', 'password', 'pdp_type',
 	'plmn_list', 'plmn_restore' ];
 
 function sim_effect(s)
@@ -590,7 +597,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:1124-1127 warns "references
+	// produces no entry for it at all (config.uc:1127-1130 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -1591,8 +1598,8 @@ export function create(opts)
 	// whether anything started it.
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
-	// own emit on a change (modem_mbim.uc:1088-1097) while the shared reapply
-	// tail emits on every re-read (modem_common.uc:873-879); one comparison, in
+	// own emit on a change (modem_mbim.uc:1092-1101) while the shared reapply
+	// tail emits on every re-read (modem_common.uc:882-888); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {
 		let entry = self.modems[modem.id];
@@ -1923,6 +1930,16 @@ export function create(opts)
 		if (event == 'state' && data?.state == 'ABSENT')
 			modem._absent_count = (modem._absent_count ?? 0) + 1;
 
+		// listen for network-initiated USSD from the first registration on
+		// (MBIM/AT: the hook; QMI: the Voice client and its indications) —
+		// they come only while registered, and are otherwise lost unseen
+		if (event == 'registered') {
+			ussd.arm(modem);
+			// new SMS and Cell Broadcast from here on, and the broadcast
+			// switched as the config says (sms_rx.uc)
+			sms_rx.arm(modem, (level, msg) => log(level, sprintf('modem %s: %s', modem.id, msg)));
+		}
+
 		// clear the one-shot manual-PIN-release flags so a later cycle never reuses them
 		if (event == 'registered' || event == 'sim_blocked') {
 			modem.pin_force = false;
@@ -2065,6 +2082,32 @@ export function create(opts)
 
 		case 'identity_mismatch':
 			modem_identity_mismatch(modem, data);
+			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
+			return;
+
+		// what the network sent on its own (ussd.uc): a USSD-Notify or a
+		// USSD-Request; for observers only, nothing here acts on it
+		case 'ussd':
+			log('notice', sprintf('modem %s: USSD from the network%s: %s', modem.id,
+				data?.action_required ? ' (asks for a reply)' : '', data?.text ?? '?'));
+			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
+			return;
+
+		// a new SMS (sms_rx.uc). The text goes to the event only: the log
+		// says that one came and from where, not what it says
+		case 'sms':
+			log('notice', sprintf('modem %s: SMS received%s%s', modem.id,
+				data?.sender ? ' from ' + data.sender : '',
+				(data?.index != null) ? sprintf(' (%s %d)', data.storage ?? '?', data.index) : ''));
+			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
+			return;
+
+		// a Cell Broadcast message, new (repeats are dropped by cbs.uc); a
+		// public warning is logged at warn, it is meant to be seen
+		case 'cell_broadcast':
+			log(data?.kind ? 'warn' : 'notice', sprintf('modem %s: cell broadcast %d%s: %s', modem.id,
+				data?.id ?? 0, data?.kind ? sprintf(' (%s %s)', data.kind, data.name ?? '') : '',
+				data?.text ?? '(no text)'));
 			emit('wwand.modem', { modem: modem.id, event: event, ...(data ?? {}) });
 			return;
 		}
@@ -2965,7 +3008,7 @@ export function create(opts)
 			};
 
 		// TELL THE CONTEXTS FIRST, then stop the modem — the order _device_gone
-		// uses (modem_common.uc:918). Dropping `centry.ctx` below only releases
+		// uses (modem_common.uc:927). Dropping `centry.ctx` below only releases
 		// the daemon's HANDLE: the context object itself lives on with its
 		// monitor timers armed and its WDS clients alive, polling a hub that
 		// entry.modem.stop() has just closed. One orphan per removal, and its
@@ -4052,11 +4095,15 @@ export function create(opts)
 		// place for the cost of one re-registration, so a restart would drop
 		// the connections for nothing — and the settings editor writes them to
 		// uci on every band edit of a modem that does not keep them itself.
+		// ...and its `pincode`, for SIM_EFFECT's reason: read by the SIM step
+		// only, handed to the running modem in step 4, and a modem at its SIM
+		// step (SIM_UNLOCK, SIM_BLOCKED) is restarted for it in step 1.
 		let modem_sig = (mn) => {
 			let cfg = { ...(parsed.modems[mn] ?? {}) };
 
 			delete cfg.ext;
 			delete cfg.sims;
+			delete cfg.pincode;
 
 			for (let k in BAND_OPTS)
 				delete cfg[k];
@@ -4069,10 +4116,20 @@ export function create(opts)
 		//    changed modem must rebuild its datapath, so its contexts bounce with it.
 		let sims_changed = (mn) =>
 			sprintf('%J', self.modems[mn]?.cfg?.sims) != sprintf('%J', parsed.modems[mn]?.sims);
+		let pin_changed = (mn) =>
+			(self.modems[mn]?.cfg?.pincode ?? '') != (parsed.modems[mn]?.pincode ?? '');
+		// The two states in which a changed PIN or override must restart the
+		// modem: SIM_BLOCKED waits for one, and in SIM_UNLOCK the SIM step has
+		// already taken the old PIN and may be about to enter it — updating
+		// the config in place would let that attempt go out and burn a try.
+		// Before it (INIT_*) the step reads the config handed over in step 4,
+		// after it the PIN is not read again.
+		let at_sim_step = (mn) =>
+			(index([ 'SIM_UNLOCK', 'SIM_BLOCKED' ], self.modems[mn].modem?.state) >= 0);
 
 		for (let mn in keys(self.modems))
 			if (!parsed.modems[mn] || self.modems[mn]._sig != modem_sig(mn) ||
-			    (sims_changed(mn) && self.modems[mn].modem?.state == 'SIM_BLOCKED'))
+			    ((sims_changed(mn) || pin_changed(mn)) && at_sim_step(mn)))
 				stop_modem(mn);
 
 		// 2) stop contexts that are gone or changed on a still-running modem (their
@@ -4147,11 +4204,14 @@ export function create(opts)
 			let m = self.modems[mn].modem;
 			let changed = sims_changed(mn);
 
-			if (self.modems[mn].cfg)
+			if (self.modems[mn].cfg) {
 				self.modems[mn].cfg.sims = parsed.modems[mn]?.sims;
+				self.modems[mn].cfg.pincode = parsed.modems[mn]?.pincode;
+			}
 
 			if (m?.config) {
 				m.config.sims = parsed.modems[mn]?.sims;
+				m.config.pincode = parsed.modems[mn]?.pincode;
 
 				if (changed && (m.info?.iccid != null || m.info?.imsi != null)) {
 					let before = sim_effect(m.active_sim);
@@ -5524,7 +5584,8 @@ export function create(opts)
 
 	// SIM/SMS/eSIM/APDU + hardware reset/repower ops live in their own modules
 	// (same install pattern); the daemon keeps lifecycle, config and status.
-	simops.install(self, { log: log, check_modem: check_modem, load_esim: load_esim });
+	simops.install(self, { log: log, check_modem: check_modem, load_esim: load_esim,
+	                       store_pincode: deps.store_pincode });
 	hwops.install(self, { log: log, check_modem: check_modem, board: deps.board,
 	                      board_gpio_ok: board_gpio_ok,
 	                      reset_fallback_ms: self.timing?.reset_fallback_ms,

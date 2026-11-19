@@ -4457,6 +4457,45 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	d.shutdown();
 })();
 
+// A PINCODE EDIT, LIVE. Only the SIM step reads it: on a running modem it is
+// handed over without a restart or a re-dial (a PIN change from LuCI writes it
+// back, and that must not bounce the WAN) — but a modem AT its SIM step is
+// restarted, because in SIM_UNLOCK the old PIN may be on its way to the card.
+(() => {
+	let made = 0, reapplied = 0, downs = 0;
+	let fake = {
+		modem: { create: (o) => { made++; return { id: o.id, state: 'READY', config: o.config,
+		                                           info: { iccid: '89882390000064624748', imsi: '901280001430235' },
+		                                           reapply_sim: (cb) => { reapplied++; cb(false); },
+		                                           start: () => null, stop: () => null }; } },
+		context: { create: (o) => ({ state: 'CONNECTED', down: (cb) => { downs++; return cb ? cb() : null; },
+		                             up: (cb) => cb(null), modem_event: () => null }) },
+	};
+	let d = daemon_mod.create({ timing: TIMING, deps: { log: () => null, load_qmi: () => fake } });
+	let net = (mpin, spin) => config.parse({ network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi', pincode: mpin },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a', apn: 'a' },
+		s1:  { '.type': 'wwand_sim', iccid: '89882390000064624748', apn: 'a', pincode: spin },
+	} });
+
+	d.apply_config(net('1234', '1111'));
+	// the fake does no card read: match its card as the SIM step would
+	d.modems.m0.modem.active_sim = d.modems.m0.modem.config.sims[0];
+	d.contexts.wan.wanted = true;
+	d.apply_config(net('5678', '1111'));
+	eq([ made, downs ], [ 1, 0 ], 'live pincode: a modem PIN edit restarts nothing and re-dials nothing');
+	eq(d.modems.m0.modem.config.pincode, '5678', 'live pincode: ...the running modem has the new one');
+
+	d.apply_config(net('5678', '2222'));
+	eq([ made, reapplied, downs ], [ 1, 0, 0 ], 'live pincode: a per-SIM PIN edit neither restarts nor re-applies');
+	eq(d.modems.m0.modem.active_sim?.pincode, '2222', 'live pincode: ...and the matched override carries it');
+
+	d.modems.m0.modem.state = 'SIM_UNLOCK';
+	d.apply_config(net('9999', '2222'));
+	eq(made, 2, 'live pincode: a modem in SIM_UNLOCK is restarted (the old PIN may be on its way)');
+	d.shutdown();
+})();
+
 // A RELOAD WHILE AN ANSWER IS OUT. Neither the activation nor netifd's status
 // probe can be cancelled, so both can land after a reload replaced the
 // context. The registration probe must not kick or start the new context on

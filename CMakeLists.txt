@@ -83,7 +83,7 @@ endif()
 
 # ES modules (top-level `export`) -> compiled with -cmodule
 set(WWAND_UCODE_MODULES
-  apndb.uc apntest/plan.uc apntest/runner.uc atcmd_mbim.uc atcmd_parse.uc atcmd.uc backend.uc board.uc callend.uc client.uc
+  apndb.uc apntest/plan.uc apntest/runner.uc atcmd_mbim.uc atcmd_parse.uc atcmd.uc backend.uc board.uc callend.uc cbs.uc client.uc
   codec/arfcn_bands.uc codec/hex.uc codec/mbim.uc codec/qmux.uc codec/tlv.uc
   codec/mbim_schema/basic_connect.uc codec/mbim_schema/compal.uc
   codec/mbim_schema/fibocom.uc codec/mbim_schema/ms_basic_connect_ext.uc
@@ -92,7 +92,7 @@ set(WWAND_UCODE_MODULES
   codec/schema/cat.uc codec/schema/ctl.uc codec/schema/dms.uc codec/schema/dsd.uc
   codec/schema/loc.uc codec/schema/merge.uc codec/schema/nas.uc codec/schema/pdc.uc
   codec/schema/rat.uc codec/schema/tmd.uc codec/schema/uim.uc codec/schema/wda.uc
-  codec/schema/wds.uc codec/schema/wms.uc
+  codec/schema/voice.uc codec/schema/wds.uc codec/schema/wms.uc
   carrier_config.uc cell_lock.uc config_check.uc config.uc context_common.uc context_mbim.uc
   context_monitor_qmi.uc context_ncm.uc context.uc ctx_settings.uc daemon.uc
   discovery.uc fcc_fibocom.uc hwops.uc log.uc mbim_backend.uc mbim_client.uc
@@ -100,8 +100,8 @@ set(WWAND_UCODE_MODULES
   modem_common.uc modem_init_qmi.uc modem_mbim.uc modem_ncm.uc modem_quirks.uc
   modem.uc modeswitch.uc ncm_vendors.uc netlink.uc netsel_ops.uc nmea.uc
   protocol_switch.uc qmi_backend.uc qmi_over_mbim.uc qmi_over_qrtr.uc reconnect.uc recovery.uc
-  regdetail.uc simops.uc siminventory.uc sim_plmn.uc sim.uc sms_pdu.uc sms.uc
-  telemetry_mbim.uc telemetry_ncm.uc telemetry_qmi.uc transport.uc ubus.uc
+  regdetail.uc simops.uc siminventory.uc sim_plmn.uc sim.uc sms_pdu.uc sms_rx.uc sms.uc
+  telemetry_mbim.uc telemetry_ncm.uc telemetry_qmi.uc transport.uc ubus.uc ussd.uc
   version.uc
   wwandctl_fmt.uc
   plugins.uc
@@ -118,7 +118,7 @@ set(WWAND_UCODE_PROGRAMS
 # may freely import the bytecode modules above.
 set(WWAND_UCODE_PLAIN
   atcmd_mbim_lazy.uc atport.uc esim.uc esim_bridge.uc gps.uc mbim_lazy.uc ncm_lazy.uc qmi_lazy.uc
-  codec/schema/wms_lazy.uc
+  codec/schema/voice_lazy.uc codec/schema/wms_lazy.uc
   # datapath add-ons: require()d plain scripts that RETURN their implementation
   datapath_rmnet_nss.uc datapath_rmnet_nss_mhi.uc
 )

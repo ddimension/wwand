@@ -182,9 +182,13 @@ function parse_cmgl(lines)
 
 function at_prepare(modem, storage, next)
 {
-	let mem = is_me(storage) ? 'ME' : 'SM';
+	// MT, the combined store, as itself: a +CMTI may name it (27.005 3.1) —
+	// and only as <mem1>, the store read and deleted from: a modem may offer
+	// it there and not for writing
+	let mem = (uc(storage ?? '') == 'MT') ? 'MT' : is_me(storage) ? 'ME' : 'SM';
+	let cpms = (mem == 'MT') ? 'AT+CPMS="MT"' : sprintf('AT+CPMS="%s","%s","%s"', mem, mem, mem);
 
-	modem.at.send(sprintf('AT+CPMS="%s","%s","%s"', mem, mem, mem), () =>
+	modem.at.send(cpms, () =>
 		modem.at.send('AT+CMGF=0', () => next()));
 }
 

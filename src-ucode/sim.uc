@@ -575,18 +575,112 @@ export function unblock_puk(modem, puk, new_pin, cb)
 	attempt();
 };
 
+// the attempts a bring-up read (modem_mbim.uc self.pin1), for the retry
+// guard only, when nothing can be asked live. Not its state — a snapshot that
+// old must not decide "already" or "disabled".
+function pin1_snapshot(modem)
+{
+	if (modem.pin1?.retries != null)
+		return { state: null, retries: modem.pin1.retries };
+
+	return null;
+}
+
+// PIN1 as the card reports it, for the two PIN operations below: cb({ state,
+// retries }) with state 1/2 = enabled (not verified / verified), 3 = disabled,
+// 4/5 = blocked / permanently blocked (QmiUimPinState, libqmi 1.38 — the DMS
+// QmiDmsUimPinStatus numbers the same states the same way). cb(null) when no
+// transport can say, which the callers treat as "unknown", never as a state;
+// cb(null, err) when the channel went away while asking.
+// UIM is authoritative where present; a card whose UPIN replaces PIN1 counts
+// the UPIN's attempts (unlock_uim reads them the same way).
+function pin1_status(modem, cb)
+{
+	if (modem.uim)
+		return modem.uim.request('GET_CARD_STATUS', {}, (err, data) => {
+			let found = err ? null : find_app(data.card_status);
+			let app = found?.app;
+
+			if (!app)
+				return cb(null);
+
+			cb({ state: app.pin1_state,
+			     retries: app.upin_replaces_pin1 ? found.card.upin_retries : app.pin1_retries });
+		}, { no_recovery: true });
+
+	if (modem.dms)
+		return modem.dms.request('GET_PIN_STATUS', {}, (err, data) =>
+			cb(err || data?.pin1 == null ? null
+			   : { state: data.pin1.status, retries: data.pin1.verify_retries }),
+			{ no_recovery: true });
+
+	// native MBIM without the passthrough: asked live (modem_mbim.uc
+	// mbim_pin.status, PIN List + PIN query). `err` = the channel went away
+	// meanwhile: the operation stops there, nothing is sent on a closing client
+	if (type(modem.mbim_pin?.status) == 'function')
+		return modem.mbim_pin.status((st, err) => cb(err ? null : (st ?? pin1_snapshot(modem)), err));
+
+	cb(pin1_snapshot(modem));
+}
+
+
+// A PIN typed by hand into an operation that verifies it costs an attempt when
+// it is wrong, like the automatic entry does. The same floor applies, so a typo
+// on a card with one attempt left cannot turn it into a PUK lock — unless the
+// caller says it means it (`force`), the manual release's rule (pin_block_reason).
+function pin_retry_guard(st, force)
+{
+	if (st?.state == 4 || st?.state == 5)
+		return { error: 'pin_blocked', status: st.state };
+
+	if (!force && st?.retries != null && st.retries < PIN_MIN_RETRIES)
+		return { error: 'low_retries', retries: st.retries };
+
+	return null;
+}
+
+// After a PIN operation failed in a way that may have reached the card: bring
+// the attempts the retry guard falls back to (modem.pin1, pin1_status) down to
+// what the card said, or one lower when it said nothing. A snapshot left as it
+// was would let the guard see two attempts on a card that has one. Erring low
+// only ever asks for `force` one time too many.
+function note_failed_attempt(modem, retries)
+{
+	if (modem.pin1 == null)
+		return;
+
+	if (retries != null)
+		modem.pin1.retries = retries;
+	else if (modem.pin1.retries != null && modem.pin1.retries > 0)
+		modem.pin1.retries--;
+}
+
+// the transports that can run a PIN operation, in the order they are tried.
+// Native MBIM sits after QMI and before AT: on an MBIM modem with the
+// passthrough the QMI path is there and goes first, without it this is the one
+// transport that needs no AT port (duck-typed modem.mbim_pin, like the PUK).
+function pin_chain(modem)
+{
+	let chain = [];
+
+	if (modem.uim)      push(chain, 'uim');
+	if (modem.dms)      push(chain, 'dms');
+	if (modem.mbim_pin) push(chain, 'mbim');
+	if (modem.at)       push(chain, 'at');
+
+	return chain;
+}
+
 // enable (lock) or disable (unlock) the SIM PIN1 query — whether the card asks
 // for the PIN at power-on. Needs the current PIN. Tries QMI first (UIM, then
-// DMS), falls back to AT+CLCK on a transport rejection. cb(err, { enabled }).
-export function set_pin_lock(modem, enable, pin, cb)
+// DMS), then native MBIM, then AT+CLCK, moving on only after a transport
+// rejection. cb(err, { enabled, retries? }).
+export function set_pin_lock(modem, enable, pin, cb, opts)
 {
 	let enabled = enable ? 1 : 0;
 	let pin_id = uimmod.PIN_ID_PIN1;
 
-	let chain = [];
-	if (modem.uim) push(chain, 'uim');
-	if (modem.dms) push(chain, 'dms');
-	if (modem.at)  push(chain, 'at');
+	let chain = pin_chain(modem);
 
 	let i = 0, attempt;
 
@@ -597,8 +691,10 @@ export function set_pin_lock(modem, enable, pin, cb)
 		let be = chain[i++];
 
 		let handle = (err, data) => {
-			if (err && err.code == QMI_ERR_NO_EFFECT)     // already in the requested state
-				return cb(null, { enabled: !!enable, note: 'no_effect' });
+			// already in the requested state — and the card verified nothing,
+			// which is what `already` tells a caller that would store the PIN
+			if (err && err.code == QMI_ERR_NO_EFFECT)
+				return cb(null, { enabled: !!enable, note: 'no_effect', already: true });
 
 			if (!err)
 				return cb(null, { enabled: !!enable });
@@ -622,6 +718,9 @@ export function set_pin_lock(modem, enable, pin, cb)
 			if (transport_reject && i < length(chain))
 				return attempt();
 
+			if (!transport_reject)
+				note_failed_attempt(modem, data?.retries?.verify);
+
 			cb({ error: err.error ?? 'qmi', detail: err, retries: data?.retries?.verify });
 		};
 
@@ -636,6 +735,10 @@ export function set_pin_lock(modem, enable, pin, cb)
 				info: { pin_id: pin_id, enabled: enabled, pin: pin },
 			}, handle, { no_recovery: true });
 
+		if (be == 'mbim')
+			return modem.mbim_pin.lock(!!enable, pin, (err, d) =>
+				handle(err ? { error: 'mbim', detail: err } : null, d));
+
 		// AT+CLCK="SC",<1 lock|0 unlock>,"<pin>"
 		modem.at.send(sprintf('AT+CLCK="SC",%d,"%s"', enabled, pin),
 			(err) => handle(err ? { error: 'at', detail: err } : null));
@@ -643,30 +746,103 @@ export function set_pin_lock(modem, enable, pin, cb)
 
 	// idempotent: read the current PIN1 state and short-circuit if already in
 	// the requested state — avoids a spurious AccessDenied and never touches a
-	// retry. PIN1 state 1/2 = enabled, 3 = disabled, 4/5 = blocked. Use UIM
-	// (authoritative where present, and what the EG06 uses), else DMS.
-	let after_state = (st) => {
-		if (st != null) {
-			if (st == 4 || st == 5)
-				return cb({ error: 'pin_blocked', status: st });
+	// retry. Use UIM (authoritative where present, and what the EG06 uses),
+	// else DMS.
+	// "already" before the retry guard: a request that sends nothing costs
+	// nothing, and refusing it for low retries would report a failure that is
+	// not one. A BLOCKED PIN first, though — it is neither on nor off, and
+	// "not enabled" would read it as already disabled.
+	pin1_status(modem, (st, serr) => {
+		if (serr)
+			return cb(serr);
 
-			if (!!enable == (st == 1 || st == 2))
-				return cb(null, { enabled: !!enable, already: true });
-		}
+		if (st?.state == 4 || st?.state == 5)
+			return cb({ error: 'pin_blocked', status: st.state });
+
+		if (st?.state != null && !!enable == (st.state == 1 || st.state == 2))
+			return cb(null, { enabled: !!enable, already: true });
+
+		let g = pin_retry_guard(st, opts?.force);
+
+		if (g)
+			return cb(g);
 
 		attempt();
+	});
+};
+
+// change PIN1 from `old_pin` to `new_pin` (QMI UIM Change PIN 0x0028, DMS UIM
+// Change PIN 0x002A, libqmi 1.38; MBIM PIN set with PinOperation CHANGE,
+// libmbim 1.32 mbim-enums.h; AT+CPWD="SC", 3GPP TS 27.007 7.5). The chain and
+// its one rule are set_pin_lock's: move on only after a QMI reject that never
+// reached the card, so a wrong old PIN costs one attempt, not one per transport.
+//
+// A card whose PIN query is OFF is refused before anything is sent: the card
+// itself refuses CHANGE CHV on a disabled CHV1 ("in contradiction with CHV
+// status", GSM 11.11 9.2.10), and what a firmware makes of that is its own —
+// the one thing it must never become is an attempt counted against a PIN the
+// user believes is not even in use.
+// cb(err, { changed: true, via, retries? }).
+export function change_pin(modem, old_pin, new_pin, cb, opts)
+{
+	let chain = pin_chain(modem);
+
+	if (!length(chain))
+		return cb({ error: 'no_pin_backend' });
+
+	let i = 0, attempt;
+
+	attempt = () => {
+		let be = chain[i++];
+
+		let handle = (err, data) => {
+			if (!err)
+				return cb(null, { changed: true, via: be });
+
+			let transport_reject = (err.error == 'qmi') && PINLOCK_FALLBACK[sprintf('%d', err.code)];
+
+			if (transport_reject && i < length(chain))
+				return attempt();
+
+			if (!transport_reject)
+				note_failed_attempt(modem, data?.retries?.verify);
+
+			cb({ error: err.error ?? 'change_failed', detail: err, retries: data?.retries?.verify });
+		};
+
+		if (be == 'uim')
+			return modem.uim.request('CHANGE_PIN', {
+				session: { session_type: uimmod.SESSION_TYPE_PRIMARY_GW_PROVISIONING, aid: '' },
+				info: { pin_id: uimmod.PIN_ID_PIN1, old_pin: old_pin, new_pin: new_pin },
+			}, handle, { no_recovery: true });
+
+		if (be == 'dms')
+			return modem.dms.request('CHANGE_PIN', {
+				info: { pin_id: uimmod.PIN_ID_PIN1, old_pin: old_pin, new_pin: new_pin },
+			}, handle, { no_recovery: true });
+
+		if (be == 'mbim')
+			return modem.mbim_pin.change(old_pin, new_pin, (err, d) =>
+				handle(err ? { error: 'mbim', detail: err } : null, d));
+
+		modem.at.send(sprintf('AT+CPWD="SC","%s","%s"', old_pin, new_pin),
+			(err) => handle(err ? { error: 'at', detail: err } : null));
 	};
 
-	if (modem.uim)
-		return modem.uim.request('GET_CARD_STATUS', {}, (err, data) =>
-			after_state(err ? null : find_app(data.card_status)?.app?.pin1_state),
-			{ no_recovery: true });
+	pin1_status(modem, (st, serr) => {
+		if (serr)
+			return cb(serr);
 
-	if (modem.dms)
-		return modem.dms.request('GET_PIN_STATUS', {}, (err, data) =>
-			after_state(err ? null : data?.pin1?.status), { no_recovery: true });
+		let g = pin_retry_guard(st, opts?.force);
 
-	attempt();
+		if (g)
+			return cb(g);
+
+		if (st?.state == 3)
+			return cb({ error: 'pin_disabled' });
+
+		attempt();
+	});
 };
 
 // --- card identity (IMSI / ICCID) -------------------------------------------

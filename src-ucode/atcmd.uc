@@ -944,11 +944,67 @@ export function create(transport, opts)
 		return is_bare_urc(line);
 	};
 
-	let emit_urc = (line) => {
+	let emit_now = (line) => {
 		if (self.on_urc)
 			self.on_urc(line);
 		else
 			log('debug', sprintf('urc: %s', line));
+	};
+
+	// THE PDU URCS ARE TWO LINES: `+CMT: [<alpha>],<length>`, `+CBM: <length>`
+	// and `+CDS: <length>` in PDU mode are followed by the PDU on a line of
+	// its own (TS 27.005 3.4.1). That line is hex, no URC by its looks — idle
+	// it was dropped, inside a command it was taken for the answer. The header
+	// is held until it comes, and both go out as one `header\npdu`; anything
+	// else arriving first releases the header alone.
+	let pdu_header = null;
+
+	let emit_urc = (line) => {
+		// the length is the last field; the <alpha> before it may hold a
+		// comma ("Doe, John"). A text-mode header that matches by chance is
+		// released again by its next line, which is not hex.
+		if (match(line, /^\+(CMT|CBM|CDS):(.*,)?[ ]*[0-9]+$/)) {
+			if (pdu_header != null)
+				emit_now(pdu_header);
+
+			pdu_header = line;
+			return;
+		}
+
+		emit_now(line);
+	};
+
+	// a line after a held header: its PDU (true, consumed), or something else
+	// (the header goes out alone and the line is handled as usual)
+	// A hex line is that PDU only when its length is the announced one: a
+	// command's own answer can be hex too (an ICCID, a firmware value), and
+	// must stay the answer. <length> counts octets — the whole page of +CBM,
+	// the TPDU of +CMT and +CDS, i.e. without the SMSC address in front of it
+	// (its length octet first) (27.005 3.4.1).
+	let pdu_fits = (h, hex) => {
+		let n = +match(h, /([0-9]+)$/)[1], octets = length(hex) / 2;
+
+		if (substr(h, 0, 5) == '+CBM:')
+			return octets == n;
+
+		return octets - 1 - int(substr(hex, 0, 2), 16) == n;
+	};
+
+	let take_pdu_line = (line) => {
+		if (pdu_header == null)
+			return false;
+
+		let h = pdu_header;
+
+		pdu_header = null;
+
+		if (match(line, /^([0-9A-Fa-f][0-9A-Fa-f])+$/) && pdu_fits(h, line)) {
+			emit_now(h + '\n' + line);
+			return true;
+		}
+
+		emit_now(h);
+		return false;
 	};
 
 	// drain complete lines while NO command is running: URCs arrive while idle
@@ -1007,7 +1063,7 @@ export function create(transport, opts)
 
 			self.buffer = substr(self.buffer, idx + 1);
 
-			if (line == '' || !looks_unsolicited(line))
+			if (line == '' || take_pdu_line(line) || !looks_unsolicited(line))
 				continue;
 
 			emit_urc(line);
@@ -1145,7 +1201,7 @@ export function create(transport, opts)
 
 			line = strip_echo(line);   // drop blanks and our own echo
 
-			if (line == '')
+			if (line == '' || take_pdu_line(line))
 				continue;
 
 			if (line == 'OK')

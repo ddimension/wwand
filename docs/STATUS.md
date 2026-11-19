@@ -11,6 +11,33 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **Inbound SMS and Cell Broadcast, hotplug scripts (2026-11-19):** new
+  `sms_rx.uc` + `cbs.uc` — the events `sms` and `cell_broadcast`; Cell
+  Broadcast switched per `option cell_broadcast` / `list cb_channels` (default
+  the PWS channels), read before written; ubus `modem_cell_broadcast`; every
+  event also runs `/etc/hotplug.d/wwand` (hotplug-call, the event in the
+  environment). The AT engine now joins the two-line PDU URCs (`+CMT`, `+CBM`,
+  `+CDS`). The native MBIM SMS record parser takes the libmbim (record-relative)
+  PDU offset where the EG06's buffer-relative one points outside the data.
+- **USSD (2026-11-19):** new `ussd.uc` — QMI Voice (native/passthrough), native
+  MBIM USSD, `AT+CUSD`; ubus `modem_ussd` (send/cancel/status), `wwandctl
+  ussd`, LuCI Modem Tools → USSD, network-initiated ones as the `ussd` event.
+  HW: end to end over MBIM on the ME906s (GDSP SIM answers `*#100#`); the
+  Huawei takes and gives the AT string as packed GSM7 hex (`AT+CUSD` with
+  text: cme UNKNOWN). The QMI path runs on the RG502Q, but no test SIM's
+  network answers USSD there (Keepgo: Internal; RG650E Telekom: NoNetworkFound;
+  E392 GDSP: SupsFailureCase) — **a QMI reply and a QMI menu (Answer USSD)
+  are not HW-verified yet.**
+- **SIM PIN change, PIN query on/off from LuCI (2026-11-19):** new ubus
+  `modem_sim_pin_change` and `wwandctl pin-change`; `modem_sim_pin_lock` gains
+  native MBIM (PIN set ENABLE/DISABLE), `store` and `force`. Both refuse with
+  fewer than two attempts left unless forced, and a change on a card whose PIN
+  query is off is refused before anything is sent. The configured PIN follows
+  a change and a PUK entry (simops `keep_pin`, deps `store_pincode`, only while
+  the section still holds the old PIN), and a `pincode` edit no longer
+  restarts the modem or re-dials (it left `modem_sig` and `SIM_EFFECT`). LuCI:
+  modem list → Actions → *SIM PIN*. Part of the ModemManager gap list (with
+  USSD, Cell Broadcast and an SMS-arrival event).
 - **MBIM commands are gated on DEVICE_SERVICES (2026-11-17):** `mbim_client`
   reads the service list after every OPEN and refuses a command for an
   unlisted service at once (`unsupported_service`); the MBIMEx version query,

@@ -202,7 +202,7 @@ export function create(opts)
 	// AFTER the cancel pass. The new timer fires with self.dms already null
 	// (modem.uc:2081) and set_opmode dereferences it unguarded (qmi_backend.uc:68),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
-	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:757, step_sim), and
+	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:761, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
 	//
 	// `gen` is captured where the OPERATION begins, not read here — by the time a
@@ -543,6 +543,59 @@ export function create(opts)
 				log('warn', 'wms allocation failed, SMS unavailable');
 			self.wms = ew ? null : wms;
 			cb();
+		});
+	};
+
+	// the Voice client, for USSD only (ussd.uc): allocated at the first
+	// registration (ussd.arm — a network-initiated USSD needs its indications
+	// registered before it comes) and only where the modem lists the service;
+	// the schema is require()d here, so one without it never loads it.
+	// `_voice_tried` gates the one-shot like `_wms_tried`.
+	// cb(voice, err): err set when the modem LISTS Voice and the allocation
+	// failed — not the same as "no Voice": ussd.uc must not fall back to
+	// another transport then. Not latched on that failure (the next call tries
+	// again); callers arriving during an allocation wait for the same one.
+	self._ensure_voice = function(cb) {
+		if (self._voice_tried)
+			return cb(self.voice ?? null);
+
+		if (self._voice_waiting)
+			return push(self._voice_waiting.cbs, cb);
+
+		let vmod = require('wwand.codec.schema.voice_lazy').s;
+
+		if (!self.has_service(vmod.default.service)) {
+			self._voice_tried = true;
+			self.voice = null;
+			return cb(null);
+		}
+
+		// this allocation's own waiters: a teardown answers and empties them,
+		// and a newer allocation's list is never this one's to answer
+		let mine = self._voice_waiting = { cbs: [ cb ] };
+		let gen = self._gen;
+
+		self.alloc(vmod.default, (ev, voice) => {
+			let waiting = mine.cbs;
+
+			mine.cbs = [];
+
+			if (self._voice_waiting === mine)
+				self._voice_waiting = null;
+
+			if (ev || gen != self._gen) {
+				log('warn', 'voice allocation failed, USSD unavailable for now');
+				voice?.destroy?.();
+				for (let w in waiting)
+					w(null, { error: 'voice_unavailable' });
+				return;
+			}
+
+			self._voice_tried = true;
+			self.voice = voice;
+
+			for (let w in waiting)
+				w(voice);
 		});
 	};
 
@@ -2071,7 +2124,7 @@ export function create(opts)
 			modem_common.before_release(self.extra_clients ?? [], log);
 
 		for (let c in [ self.dms, self.nas, self.uim, self.wda, self.wds_cfg,
-		               self.dsd, self.tmd, self.cat, self.wms, self.pdc,
+		               self.dsd, self.tmd, self.cat, self.wms, self.pdc, self.voice,
 		               ...(self.extra_clients ?? []) ]) {
 			if (!c)
 				continue;
@@ -2092,7 +2145,7 @@ export function create(opts)
 		// them beside its new ones.
 		self.qmi_clients = {};
 
-		self.dsd = self.tmd = self.cat = self.wms = self.pdc = null;
+		self.dsd = self.tmd = self.cat = self.wms = self.pdc = self.voice = null;
 		self.extra_clients = [];
 
 		// fail any PDC operation still waiting on an indication that will now
@@ -2149,6 +2202,20 @@ export function create(opts)
 		// SMS the OLD client — bound to a hub that is closed — and never
 		// allocated a replacement, so SMS stayed broken with no way back.
 		self._wms_tried = false;
+		self._voice_tried = false;
+
+		// callers waiting on a Voice allocation this teardown cuts off: told,
+		// not left hanging — the allocation's own answer is dropped (_gen)
+		let vw = self._voice_waiting;
+		let vwait = vw?.cbs ?? [];
+
+		self._voice_waiting = null;
+
+		if (vw)
+			vw.cbs = [];
+
+		for (let w in vwait)
+			w(null, { error: 'reinitialised' });
 
 		// Fail any long-APDU reassembly still waiting instead of leaving its
 		// caller on a 30 s timer for a client that no longer exists. Clearing

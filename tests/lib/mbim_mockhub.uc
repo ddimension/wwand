@@ -234,6 +234,18 @@ export function create(opts)
 			handler = { __raw: struct.pack('<HH', 0x0100, self.mbimex_version) };
 		}
 
+		// BUILT-IN: the PIN List, which the SIM step asks after an unlocked
+		// PIN (modem_mbim.uc pin1_from_list) to learn whether the PIN query
+		// is on — answered "PIN1 disabled", the ME906s' answer (2026-11-19).
+		// A test that cares overrides it.
+		if (handler == null && entry.name == 'PIN_LIST')
+			handler = { pin1_mode: 2, pin1_format: 1, pin1_min: 4, pin1_max: 8 };
+
+		// ...and the PIN query that goes with it (mbim_pin.status), for the
+		// tests that never reach a SIM step of their own: unlocked, 3 left
+		if (handler == null && entry.name == 'PIN' && kind == 'query')
+			handler = { pin_type: 0, pin_state: 0, remaining_attempts: 3 };
+
 		if (handler == null)
 			die(sprintf('mbim_mockhub: no handler for %s', entry.name));
 

@@ -24,7 +24,12 @@ function fake_uci(state) {
 			if (s == null)
 				return null;
 
-			return (option == null) ? s : (s[option] ?? null);
+			// libuci answers a section query with the section's TYPE; a
+			// fixture without one keeps the old answer (the object)
+			if (option == null)
+				return s['.type'] ?? s;
+
+			return s[option] ?? null;
 		},
 		set: (pkg, section, option, value) => {
 			self.state[section] = self.state[section] ?? {};
@@ -726,6 +731,42 @@ function mkdeps(u, extra) {
 	d.autosetup_create('mhi_QMI_debug', {});
 	ok(u.state.wwmodem_auto?.device != '/dev/mhi_QMI_debug',
 		'autosetup: a non-control vendor MHI node is not stored as a /dev control device');
+}
+
+// --- store_pincode: the PIN a PIN change leaves on the card ------------------
+{
+	let u = fake_uci({
+		m0: { '.type': 'wwand_modem', pincode: '1234' },
+		s1: { '.type': 'wwand_sim', iccid: '89882390000064624748', pincode: '1111' },
+	});
+	let d = mkdeps(u);
+	let card = { iccid: '89882390000064624748F', imsi: '901280001430235' };
+
+	eq(d.store_pincode('m0', 'wwand_modem', '5678', '1234'), { written: true }, 'store_pincode: the modem\'s PIN replaced');
+	eq(u.state.m0.pincode, '5678', 'store_pincode: ...on the section');
+	eq(d.store_pincode('m0', 'wwand_modem', '9999', '1234').reason, 'changed',
+	   'store_pincode: a section no longer holding the old PIN is left alone');
+	eq(d.store_pincode('m0', 'wwand_sim', '9999', '5678').reason, 'no_section', 'store_pincode: the type must match');
+	eq(d.store_pincode('s1', 'wwand_sim', '2222', '1111', card), { written: true },
+	   'store_pincode: a per-SIM PIN for the card in use (ICCID normalised)');
+	u.state.s1.iccid = '89490200001844967110';
+	eq(d.store_pincode('s1', 'wwand_sim', '3333', '2222', card).reason, 'other_card',
+	   'store_pincode: an override re-pointed at another card does not get this card\'s PIN');
+	eq(d.store_pincode('m0', 'wwand_modem', '12;4', null).reason, 'invalid', 'store_pincode: digits only');
+	eq(u.commits, 2, 'store_pincode: committed once per write, never for a refusal');
+}
+
+// --- the environment of /etc/hotplug.d/wwand scripts ----------------------------
+{
+	let env = depsmod.hotplug_env('wwand.modem', { modem: 'm0', event: 'sms', sender: '+491701234567',
+		text: 'a "quoted" $(text)', index: 3, concat: { ref: 1 } });
+
+	eq([ env.WWAND_EVENT, env.ACTION, env.MODEM, env.SENDER, env.INDEX ], [ 'modem', 'sms', 'm0', '+491701234567', '3' ],
+	   'hotplug env: the event and its scalar fields');
+	eq(env.TEXT, 'a "quoted" $(text)', 'hotplug env: the text as it is — an environment, no shell');
+	eq(env.CONCAT, null, 'hotplug env: nested fields only in DATA');
+	ok(index(env.DATA, '"concat"') >= 0, 'hotplug env: ...which holds all of it');
+	ok(env.PATH != null, 'hotplug env: a PATH, the map is the whole environment');
 }
 
 done('test_deps');

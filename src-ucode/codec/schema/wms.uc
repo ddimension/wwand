@@ -16,8 +16,15 @@ export const STORAGE_NV  = 0x01;   // ME (modem non-volatile)
 export const MODE_CDMA      = 0x00;
 export const MODE_GSM_WCDMA = 0x01;
 
-// QmiWmsMessageFormat (RAW_SEND Format field)
+// QmiWmsMessageFormat (RAW_SEND Format field; Event Report Transfer Route)
 export const FORMAT_GSM_WCDMA_PP = 0x06;
+export const FORMAT_GSM_WCDMA_BROADCAST = 0x07;
+
+// QmiWmsAckIndicator: whether the host must Send Ack a transferred message
+export const ACK_SEND = 0x00;
+
+// QmiWmsMessageProtocol (Send Ack)
+export const PROTOCOL_WCDMA = 0x01;
 
 // QmiWmsMessageTagType
 export const TAG_MT_READ     = 0x00;
@@ -25,9 +32,64 @@ export const TAG_MT_NOT_READ = 0x01;
 export const TAG_MO_SENT     = 0x02;
 export const TAG_MO_NOT_SENT = 0x03;
 
+// Event reporting and broadcast, verified against libqmi 1.38
+// qmi-service-wms.json (2026-11-19): Set Event Report 0x0001 (:30-43) and the
+// Event Report indication 0x0001 (:45-116); Send Ack 0x0037 (:506-564); Set
+// Broadcast Activation 0x003C (:567-586), Set/Get Broadcast Config
+// 0x003D/0x003E (:589-650). The activation's second field carries its own
+// "id" in the JSON but sits inside the sequence: one 2-octet TLV 0x01.
 export default {
 	service: 0x05,
 	messages: {
+		SET_EVENT_REPORT: {
+			id: 0x0001,
+			req:  { new_mt: { t: 0x10, f: 'u8' } },
+			resp: {},
+		},
+
+		// a message stored (0x10) or handed over unstored (0x11 — a cell
+		// broadcast page is Format 0x07 there, ModemManager 1.25.95
+		// mm-broadband-modem-qmi.c:10970-10988)
+		EVENT_REPORT_IND: {
+			id: 0x0001,
+			ind: {
+				mt_message:     { t: 0x10, f: { storage_type: 'u8', memory_index: 'u32' } },
+				transfer_route: { t: 0x11, f: { ack_indicator: 'u8', transaction_id: 'u32',
+				                                format: 'u8', data: { n: 'u16', of: 'u8' } } },
+				message_mode:   { t: 0x12, f: 'u8' },
+			},
+		},
+
+		SEND_ACK: {
+			id: 0x0037,
+			req:  { info: { t: 0x01, f: { transaction_id: 'u32', protocol: 'u8', success: 'u8' } } },
+			resp: {},
+		},
+
+		SET_BROADCAST_ACTIVATION: {
+			id: 0x003C,
+			req:  { activation: { t: 0x01, f: { mode: 'u8', activate: 'u8' } } },
+			resp: {},
+		},
+
+		SET_BROADCAST_CONFIG: {
+			id: 0x003D,
+			req:  {
+				mode:     { t: 0x01, f: 'u8' },
+				channels: { t: 0x10, f: { n: 'u16', of: { start: 'u16', end: 'u16', selected: 'u8' } } },
+			},
+			resp: {},
+		},
+
+		GET_BROADCAST_CONFIG: {
+			id: 0x003E,
+			req:  { mode: { t: 0x01, f: 'u8' } },
+			resp: {
+				config: { t: 0x10, f: { activated: 'u8',
+				                        channels: { n: 'u16', of: { start: 'u16', end: 'u16', selected: 'u8' } } } },
+			},
+		},
+
 		// Send a raw PDU (SMS-SUBMIT). Verified vs libqmi wms "Raw Send" 0x0020:
 		// input Raw Message Data 0x01 { Format u8, Raw Data u16-array }, GSM WCDMA
 		// Link Timer 0x12 (u8) optional; output Message ID 0x01 (u16 reference).

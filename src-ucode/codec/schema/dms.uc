@@ -93,6 +93,15 @@ export default {
 			resp: { retries: { t: 0x10, f: { verify: 'u8', unblock: 'u8' } } },
 		},
 
+		// change PIN1; DMS fallback for modems without UIM. libqmi 1.38 "UIM
+		// Change PIN" 0x002A: Info 0x01 { Pin ID u8, Old PIN string, New PIN
+		// string }; response 0x10 Pin Retries Status on failure.
+		CHANGE_PIN: {
+			id: 0x002A,
+			req:  { info: { t: 0x01, f: { pin_id: 'u8', old_pin: 'lstring', new_pin: 'lstring' } } },
+			resp: { retries: { t: 0x10, f: { verify: 'u8', unblock: 'u8' } } },
+		},
+
 		GET_PIN_STATUS: {
 			id: 0x002B,
 			req:  {},

@@ -1236,6 +1236,49 @@ eq(urcs3, [ '+CTZV: +32,0', '+CGEV: ME PDN ACT 1' ],
 	'engine: URCs inside a command window reach on_urc');
 eq(got3?.lines, [], 'engine: ... and stay OUT of the response lines');
 
+// THE PDU URCS ARE TWO LINES (27.005 3.4.1): `+CBM: <len>` / `+CMT: ,<len>`
+// and then the PDU. Inside a command the PDU line was taken for the answer;
+// idle it was dropped as no URC. Both go out as one `header\npdu` — and only a
+// hex line of the announced length is that PDU: a command's own answer can be
+// hex as well.
+{
+	let u = [], r = null;
+	let t = fake_transport();
+	let e = atcmd.create(t, { log: silent, on_urc: (l) => push(u, l) });
+	let cbm = '';
+	let tpdu = '';
+
+	for (let i = 0; i < 88; i++) cbm += 'AB';
+	for (let i = 0; i < 24; i++) tpdu += '11';
+
+	e.send('AT+CSQ', (err, res) => r = res);
+	t.reply('\r\n+CBM: 88\r\n' + cbm + '\r\n+CSQ: 20,99\r\nOK\r\n');
+	eq(u, [ '+CBM: 88\n' + cbm ], 'engine: +CBM and its PDU inside a command, as one URC');
+	eq(r?.lines, [ '+CSQ: 20,99' ], 'engine: ...and the PDU is not the answer');
+
+	t.reply('\r\n+CMT: "",24\r\n00' + tpdu + '\r\n');
+	eq(u[1], '+CMT: "",24\n00' + tpdu, 'engine: +CMT and its PDU (SMSC not counted) while idle');
+
+	t.reply('\r\n+CMT: "Doe, John",24\r\n00' + tpdu + '\r\n');
+	eq(u[2], '+CMT: "Doe, John",24\n00' + tpdu, 'engine: an alias with a comma');
+	splice(u, 2, 1);
+
+	t.reply('\r\n+CBM: 88\r\n+CEREG: 1\r\n');
+	eq([ u[2], u[3] ], [ '+CBM: 88', '+CEREG: 1' ], 'engine: a header without its PDU goes out alone');
+
+	t.reply('\r\n+CMTI: "SM",3\r\n');
+	eq(u[4], '+CMTI: "SM",3', 'engine: +CMTI is one line as before');
+
+	// a command's hex answer right behind a held header stays the answer
+	let r2 = null;
+
+	t.reply('\r\n+CBM: 88\r\n');
+	e.send('AT+CCID', (err, res) => r2 = res);
+	t.reply('\r\n89490200001844967110\r\nOK\r\n');
+	eq(r2?.lines, [ '89490200001844967110' ], 'engine: a hex answer of another length is not the PDU');
+	eq(u[5], '+CBM: 88', 'engine: ...and the header went out alone');
+}
+
 // the running command's OWN prefix is its answer, never a URC — AT+CEREG?
 // legitimately replies "+CEREG:", and a +CEREG URC may ride along with it
 let urcs4 = [], got4 = null;
