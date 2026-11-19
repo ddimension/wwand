@@ -5105,7 +5105,7 @@ export function create(opts)
 				// per-slot UICC state, keyed by slot index, as the modem last
 				// said. Event-driven on MBIM; absent elsewhere.
 				slot_state: entry.modem?.slot_state,
-				apdu_backend: entry.modem?._apdu_be,   // mbim | qmi | at (once probed)
+				apdu_backend: entry.modem?._apdu_be,   // mbim | qmi | at | qmi_apdu (once probed)
 				pin1: entry.modem?.pin1,
 				sim_block: entry.modem?.sim_block,  // { reason, retries } when SIM_BLOCKED
 				// card-side diagnostics from the UIM indications: a busy card

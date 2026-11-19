@@ -1971,7 +1971,8 @@ let mk_modem = (lines) => ({
 	};
 
 	sim.apdu_open(m, 1, sim.ISDR_AID, () => null);
-	eq([ mopts, qopts ], [ [ true ], [ true ] ],
+	// QMI is asked twice: the logical channel, then SEND_APDU alone
+	eq([ mopts, qopts ], [ [ true ], [ true, true ] ],
 		'apdu backend choice: the MBIM and QMI ISD-R probes do not vote on the channel');
 
 	let m2 = { mbim_uicc: { open: (aid, cb, o) => { push(mopts, o?.no_recovery ?? false); cb({ error: 'mbim', status: 2 }, null); } },
@@ -2006,6 +2007,79 @@ let mk_modem = (lines) => ({
 	qask(3);    // INTERNAL
 	qask(52);   // DEVICE_NOT_READY
 	eq(qgot, [ true, false, false ], 'euicc info: QMI not-found is final, INTERNAL / not-ready are not');
+}
+
+// SEND_APDU alone: a firmware without the QMI logical channel messages and
+// without CCHO on its AT port (Huawei E392, HW-measured 2026-11-19). The
+// channel is opened, selected and closed with the card's own commands.
+{
+	let h2a = (h) => map(match(h, /../g), (x) => hex(x[0]));
+	let a2h = (a) => join('', map(a, (b) => sprintf('%02x', b)));
+	// a card: MANAGE CHANNEL gives channel 2, the USIM answers 61xx then its
+	// FCP, an unknown application 6a82
+	let mk = (extra) => {
+		let m = { sent: [], at_cmds: [], ...extra };
+
+		m.uim = { request: (name, args, cb) => {
+			let a = a2h(args.apdu);
+
+			push(m.sent, [ name, args.channel_id ?? null, a ]);
+			if (m.deny)
+				return cb({ error: 'qmi', code: 82 }, null);
+
+			let r = (a == '0070000001') ? '029000'
+				: (a == '02a4040407a0000000871002') ? '6103'
+				: (a == '02c0000003') ? '6201aa9000'
+				: (substr(a, 2, 4) == 'a404') ? '6a82'
+				: '9000';
+
+			cb(null, { response: h2a(r) });
+		} };
+		m.at = { send: (cmd, cb) => { push(m.at_cmds, cmd); cb({ error: 'ERROR' }, null); } };
+		return m;
+	};
+
+	// the AT port has no CCHO: a real open goes on over SEND_APDU, and stays there
+	let m = mk({ _apdu_be: 'at' }), got = {};
+
+	sim.apdu_open(m, 1, 'A0000000871002', (err, ch) => { got.open = err ?? ch; });
+	eq(got.open, { channel: 2, select_response: '6201aa' }, 'qmi_apdu: MANAGE CHANNEL, SELECT by AID, GET RESPONSE');
+	eq(m.sent, [ [ 'SEND_APDU', null, '0070000001' ], [ 'SEND_APDU', null, '02a4040407a0000000871002' ],
+	             [ 'SEND_APDU', null, '02c0000003' ] ], 'qmi_apdu: no QMI channel id, the channel is in the CLA');
+	eq(m._apdu_be, 'qmi_apdu', 'qmi_apdu: the transport that worked stays');
+	m.sent = [];
+	sim.apdu_send(m, 1, 2, '0288008122' + '00', (err, r) => { got.send = err ?? r; });
+	sim.apdu_send(m, 1, 2, '00c0000010', () => null);
+	sim.apdu_send(m, 1, 2, '80e2910000', () => null);
+	eq([ got.send, map(m.sent, (x) => x[2]) ], [ '9000', [ '028800812200', '02c0000010', '82e2910000' ] ],
+		'qmi_apdu: send passes the APDU, and puts the channel into a CLA that has none');
+	m.sent = [];
+	sim.apdu_close(m, 1, 2, (err) => { got.close = err; });
+	eq([ got.close, m.sent ], [ null, [ [ 'SEND_APDU', null, '0070800200' ] ] ], 'qmi_apdu: MANAGE CHANNEL closes');
+	m.at_cmds = [];
+	sim.apdu_open(m, 1, 'A0000000871002', () => null);
+	eq(m.at_cmds, [], 'qmi_apdu: the next open does not ask the AT port again');
+
+	// an application that is not on the card: the channel is closed again, the AT answer is reported
+	m = mk({ _apdu_be: 'at' });
+	sim.apdu_open(m, 1, 'A0000000871004', (err, ch) => { got.none = err; });
+	eq([ got.none, m._apdu_be, m.sent[2] ], [ { error: 'ERROR' }, 'at', [ 'SEND_APDU', null, '0070800200' ] ],
+		'qmi_apdu: a refused SELECT closes the channel and leaves the transport as it was');
+
+	// the eUICC discovery open is not retried (a plain SIM refuses it on every modem)
+	m = mk({ _apdu_be: 'at' });
+	sim.apdu_open(m, 1, sim.ISDR_AID, () => null, { probe: 'no eUICC' });
+	eq(m.sent, [], 'qmi_apdu: the discovery open stays on AT');
+
+	// a port that has opened a channel before is not second-guessed
+	m = mk({ _apdu_be: 'at', _at_ccho_ok: true });
+	sim.apdu_open(m, 1, 'A0000000871002', (err) => { got.proven = err; });
+	eq([ got.proven, m.sent ], [ { error: 'ERROR' }, [] ], 'qmi_apdu: not behind an AT port that opens channels');
+
+	// a modem that denies SEND_APDU without a channel (EG25-G): the AT error stands
+	m = mk({ _apdu_be: 'at', deny: true });
+	sim.apdu_open(m, 1, 'A0000000871002', (err) => { got.denied = err; });
+	eq([ got.denied, m._apdu_be ], [ { error: 'ERROR' }, 'at' ], 'qmi_apdu: a modem that denies it keeps the AT answer');
 }
 
 // QMI logical channels address the LOGICAL slot: the eUICC in physical slot

@@ -1531,6 +1531,105 @@ function uim_slot(modem, slot)
 // errors at every start (evidence: ddimension/wwand#51, RM520N, 2026-10-14).
 const NOT_A_FAULT = { no_recovery: true };
 
+// --- QMI SEND_APDU alone (channels by hand) transport ---
+//
+// A firmware can carry UIM SEND_APDU and neither of the logical channel
+// messages, and no CCHO/CGLA/CSIM on its AT port either. HW-measured on a
+// Huawei E392 (11.433.59.00.192), 2026-11-19: LOGICAL_CHANNEL (0x3F) answers
+// InvalidArgument for any AID, OPEN_LOGICAL_CHANNEL (0x42) InvalidQmiCommand,
+// while SEND_APDU without a channel id passes the APDU to the card as it is —
+// MANAGE CHANNEL opens a channel, and a SELECT with that channel in its CLA
+// reaches it. So the channel is opened, selected and closed with the card's
+// own commands (ISO 7816-4 MANAGE CHANNEL / SELECT by DF name), and the
+// channel travels in the CLA byte, not in the QMI channel TLV.
+function qmi_raw_apdu(modem, slot, apdu_hex, cb, opts)
+{
+	modem.uim.request('SEND_APDU', {
+		slot: uim_slot(modem, slot), apdu: hex_to_arr(apdu_hex),
+	}, (err, data) => {
+		if (err)
+			return cb(err, null);
+
+		cb(null, lc(arr_to_hex(data?.response ?? [])));
+	}, { timeout: 30000, ...(opts ?? {}) });
+}
+
+// ISO 7816-4 5.4.1: channels 0-3 in the low bits of a first interindustry
+// CLA, 4-19 in a further interindustry one (0x40 | channel - 4)
+function channel_cla(channel)
+{
+	return channel < 4 ? channel : (0x40 | (channel - 4));
+}
+
+// The caller's APDU for a channel it got from qmi_apdu_open. Most callers
+// put the channel into the CLA themselves; one that left a first
+// interindustry (or proprietary 8x) CLA at channel 0 gets it set here.
+function qmi_apdu_on_channel(channel, apdu_hex)
+{
+	let c = hex(substr(apdu_hex, 0, 2));
+
+	if (channel >= 1 && channel <= 3 && !(c & 0x40) && !(c & 0x03))
+		return sprintf('%02x%s', c | channel, substr(apdu_hex, 2));
+
+	return apdu_hex;
+}
+
+function qmi_apdu_close(modem, slot, channel, cb)
+{
+	qmi_raw_apdu(modem, slot, sprintf('007080%02x00', channel), (err) => cb(err ?? null));
+}
+
+function qmi_apdu_open(modem, slot, aid_hex, cb)
+{
+	if (!modem.uim)
+		return cb({ error: 'no_uim_client' }, null);
+
+	// MANAGE CHANNEL, open: the card assigns the number
+	qmi_raw_apdu(modem, slot, '0070000001', (err, r) => {
+		if (err)
+			return cb(err, null);
+
+		if (length(r) != 6 || substr(r, 2) != '9000')
+			return cb({ error: 'uicc_select', detail: sprintf('MANAGE CHANNEL: %s', r) }, null);
+
+		let ch = hex(substr(r, 0, 2));
+
+		if (!(ch >= 1 && ch <= 19))
+			return cb({ error: 'no_channel' }, null);
+
+		let fail = (e) => qmi_apdu_close(modem, slot, ch, () => cb(e, null));
+		let aid = lc(aid_hex);
+
+		// SELECT by DF name. A 3GPP application (RID A000000087) is asked for
+		// its FCP as TS 102 221 has it; anything else (the ISD-R) gets the
+		// GlobalPlatform form, whose answer is the FCI the eUICC code reads.
+		let p2 = (substr(aid, 0, 10) == 'a000000087') ? 0x04 : 0x00;
+		let select = sprintf('%02xa404%02x%02x%s', channel_cla(ch), p2, length(aid) / 2, aid);
+
+		qmi_raw_apdu(modem, slot, select, (err, r) => {
+			if (err)
+				return fail(err);
+
+			let sw = substr(r, -4);
+			let ok = (data) => cb(null, { channel: ch, select_response: data });
+
+			if (sw == '9000')
+				return ok(substr(r, 0, length(r) - 4));
+
+			// T=0: the answer waits to be fetched
+			if (substr(sw, 0, 2) == '61')
+				return qmi_raw_apdu(modem, slot, sprintf('%02xc00000%s', channel_cla(ch), substr(sw, 2)), (err, g) => {
+					if (err || substr(g ?? '', -4) != '9000')
+						return ok('');
+
+					ok(substr(g, 0, length(g) - 4));
+				});
+
+			fail({ error: 'uicc_select', detail: sprintf('SELECT %s: %s', aid, sw) });
+		});
+	});
+}
+
 function apdu_backend(modem, slot, cb)
 {
 	backend.choose(modem, '_apdu_be', [
@@ -1575,6 +1674,20 @@ function apdu_backend(modem, slot, cb)
 			go();
 		} },
 		{ name: 'at', probe: (ok) => ok(!!modem.at) },
+		// no AT port: SEND_APDU alone, when the card answers a MANAGE CHANNEL
+		// through it. A modem with an AT port that cannot open a channel
+		// gets here from apdu_open, on its first real open.
+		{ name: 'qmi_apdu', probe: (ok) => {
+			if (!modem.uim)
+				return ok(false);
+
+			qmi_raw_apdu(modem, slot, '0070000001', (err, r) => {
+				if (err || length(r) != 6 || substr(r, 2) != '9000')
+					return ok(false);
+
+				qmi_apdu_close(modem, slot, hex(substr(r, 0, 2)), () => ok(true));
+			}, NOT_A_FAULT);
+		} },
 	], cb);
 }
 
@@ -1675,7 +1788,7 @@ function apdu_transport_gone(modem, be)
 {
 	let there = (be == 'mbim') ? modem.mbim_uicc
 		: (be == 'at') ? modem.at
-		: (be == 'qmi') ? modem.uim : true;
+		: (be == 'qmi' || be == 'qmi_apdu') ? modem.uim : true;
 
 	return there ? null : { error: 'no_apdu_channel', detail: sprintf('%s transport not available (modem re-initialising?)', be) };
 }
@@ -1766,8 +1879,30 @@ export function apdu_open(modem, slot, aid_hex, cb, opts)
 				cb(err, d ? { channel: d.channel, select_response: d.select_response } : null),
 				opts?.probe ? NOT_A_FAULT : null);
 
+		// THE AT PORT MAY NOT KNOW CCHO. `at` is chosen for having a port, not
+		// for having opened a channel (the discovery open fails the same way
+		// on every plain SIM). So a real open the modem refuses, on a port
+		// that never opened one, is tried over SEND_APDU alone, and that
+		// transport stays when it works (Huawei E392, see qmi_apdu_open).
 		if (be == 'at')
-			return at_apdu_open(modem, aid_hex, cb, opts);
+			return at_apdu_open(modem, aid_hex, (err, ch) => {
+				if (!err)
+					modem._at_ccho_ok = true;
+
+				if (!err || opts?.probe || modem._at_ccho_ok || !modem.uim || !refused_answer(err))
+					return cb(err, ch);
+
+				qmi_apdu_open(modem, slot, aid_hex, (e2, ch2) => {
+					if (e2)
+						return cb(err, null);
+
+					modem._apdu_be = 'qmi_apdu';
+					cb(null, ch2);
+				});
+			}, opts);
+
+		if (be == 'qmi_apdu')
+			return qmi_apdu_open(modem, slot, aid_hex, cb);
 
 		if (be != 'qmi')
 			return cb({ error: 'no_apdu_channel' }, null);
@@ -1883,6 +2018,9 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 	if (!modem.uim)
 		return cb({ error: 'no_uim_client' }, null);
 
+	if (modem._apdu_be == 'qmi_apdu')
+		return qmi_raw_apdu(modem, slot, qmi_apdu_on_channel(+channel, apdu_hex), cb);
+
 	modem.uim.request('SEND_APDU', {
 		slot: uim_slot(modem, slot), channel_id: channel, apdu: hex_to_arr(apdu_hex),
 	}, (err, data) => {
@@ -1961,6 +2099,9 @@ export function apdu_close(modem, slot, channel, cb)
 
 	if (!modem.uim)
 		return cb({ error: 'no_uim_client' });
+
+	if (modem._apdu_be == 'qmi_apdu')
+		return qmi_apdu_close(modem, slot, +channel, cb);
 
 	modem.uim.request('LOGICAL_CHANNEL', {
 		slot: uim_slot(modem, slot), channel_id: channel, terminate: 1,
