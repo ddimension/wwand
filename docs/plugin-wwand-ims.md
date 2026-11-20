@@ -34,7 +34,10 @@ Two ways to carry a call, chosen per modem by `wwand_ims.ims_modem.backend`:
 
 ## Prerequisites
 
-- **Modem** with an IMS PDN and USIM APDU access (QMI UIM, MBIM UICC, or AT).
+- **Modem** with an IMS PDN and USIM APDU access (QMI UIM, MBIM UICC, or AT;
+  QMI Send APDU alone is enough — a Huawei E392 without logical channel
+  messages and without QMAP registers and carries calls as the IMS-only modem
+  next to a data modem).
   On a Quectel data module VoLTE needs **LTE FGI bits 3 and 7** on and the
   **modem's own IMS off** — `wwandctl ims fix` does both (FGI via
   `AT+QNWCFG="lte_fgi_fdd"`, or via a patched carrier MBN, see below).
@@ -201,6 +204,8 @@ ubus call wwand modem_plugin '{"modem":"wwmodem0","plugin":"ims","op":"status"}'
 | `ip xfrm`: *Protocol not supported*; empty kmod-ipsec apks | kernel without `XFRM_USER`/`INET_ESP`/`INET6_ESP` — rebuild the image with kmod-ipsec/4/6 (see Prerequisites). |
 | IMS PDN won't come up: *interface in use, config matches an existing call (internal 241)* | the modem's own IMS holds the IMS profile — `wwandctl ims fix` (`QCFG ims` → 2 = off) + reset. |
 | `xfrm: spi missing or reserved, sa out spi 0` | the P-CSCF returned a degenerate Security-Server (`spi-c=1; spi-s=0`) after an unclean de-register — a `CFUN 0/1` re-attach clears it; next REGISTER gets real SPIs. Always de-REGISTER cleanly (stop sipd) so SAs/policies do not leak. |
+| REGISTER times out although the P-CSCF answers a ping; `ping -M do -s 1468` to it gets nothing, `-s 1448` does | the IMS PDN's path MTU is below 1500 and the network signals none, so the full-size first fragment of the REGISTER is lost — set `option mtu '1400'` on the IMS interface (measured: Vodafone GDSP, APN `ims.iot`). |
+| IMS interface: `DEVICE_CLAIM_FAILED` on a modem without QMAP | such a modem has one netdev and carries one PDN: only one `proto wwand` interface may name it, and the IMS interface takes no `mux_id`. |
 | `no SIP over TCP on port 5064: Address in use` | another UE (a leftover sipd, or `wwandctl ims call`) holds the protected ports — only one UE per IMS PDN. |
 | REGISTER times out (`state: unprotected`) on an **IPv4** IMS PDN, though tcpdump shows the 401 on the IMS interface and on the VRF device | netifd's `<addr> dev <iface> scope link` host route displaces the kernel's `local` route for the /32 in the VRF table, so the reply is not delivered locally (no UDP counter moves). The `25-wwand-ims-l3mdev` hotplug re-adds `local <addr>` on every ifup; check `ip route show table <vrf table>` for it. No `ip_nonlocal_bind` / `udp_l3mdev_accept` sysctl is needed. |
 | Call ends right after the 183 with `503`, `Reason: … ASR: BEARER_RELEASED` or `ASR: INSUFFICIENT_SERVER_RESOURCES` (which one depends on the P-CSCF site) | the voice bearer (QCI 1) could not be set up. Seen with LTE FGI 3 and 7 missing in the UE capability: no dedicated-bearer request reaches the modem at all. Set the FGIs (Prerequisites); typical after a SIM change that switched the carrier MBN. |

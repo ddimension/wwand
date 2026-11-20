@@ -606,7 +606,10 @@ The **APDU transport** is chosen per modem (`sim.uc apdu_backend`): native
 **MBIM MS UICC Low Level Access** → **QMI UIM** (native or over the
 QMI-over-MBIM passthrough) → **AT** (`CCHO`/`CGLA`/`CCHC` — the path for
 AT-only modems like the Fibocom FM350-GL, whose T700 answers `CCHO` with a
-bare session id). On dual-SIM modules the eUICC is its own physical slot; the
+bare session id) → **QMI `SEND_APDU` alone** (`qmi_apdu`: the channel opened,
+selected and closed by hand with MANAGE CHANNEL and SELECT by AID, its number
+in the CLA byte — for a firmware whose UIM service has no logical channel
+message, like the Huawei E392). On dual-SIM modules the eUICC is its own physical slot; the
 internal LPA re-claims the ISD-R, so host APDU access is a **window** that
 opens after a slot switch — wwand re-probes the backend per operation instead
 of caching a dead channel, and the modem's `esim_ready` event (fired after the

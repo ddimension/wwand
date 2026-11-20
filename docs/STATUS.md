@@ -11,6 +11,17 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **APDU transport `qmi_apdu` (2026-11-19, 3488705):** QMI `SEND_APDU` alone,
+  the logical channel opened / selected / closed by hand (MANAGE CHANNEL,
+  SELECT by AID), its number in the CLA — for a UIM service without a channel
+  message. Last candidate of `apdu_backend`, and the fallback of a real open
+  that an AT port without `CCHO` refuses. HW: the Chateau's Huawei E392 as the
+  IMS-only modem (wwand-ims UE: AKA over it, registered, a voice call) next to
+  the RG650E for data. **Not HW-verified: the eSIM path over it** (ISD-R,
+  no eUICC behind such a modem), and channels above 3. The E392 runs raw_ip
+  without QMAP: one PDN, one interface. The GDSP IMS PDN's path MTU is about
+  1450 and not signalled — `option mtu '1400'` there; a lower default for
+  `option ims` PDNs is not built.
 - **wwandctl SMS slots (2026-11-20, wwand#94):** `wwandctl sms` prints the part
   list of a multi-part message (`[4,5]`, was `[  0]`); `sms-delete [SM|ME]
   <index>[,<index>...]` sends the storage and a list, so slot 0 (real on QMI)

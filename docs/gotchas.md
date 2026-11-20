@@ -771,6 +771,21 @@ so it is not one firmware's oddity. The list is mandatory Basic Connect and
 every device answers it; `mbim_client` reads it after OPEN and refuses an
 unlisted command locally (`refuse_unlisted`).
 
+## A QMI modem with a UIM service has logical channels, and an AT port has `CCHO`
+**Not the Huawei E392** (firmware 11.433.59.00.192, Chateau, 2026-11-19). Its
+UIM service sends APDUs (`SEND_APDU` 0x3B) but has no channel message:
+`LOGICAL_CHANNEL` 0x3F answers `InvalidArgument` for any AID,
+`OPEN_LOGICAL_CHANNEL` 0x42 and Get Supported Messages 0x1E `InvalidQmiCommand`.
+Its AT port has `CRSM` and nothing else for the card — no `CSIM`, `CCHO`,
+`CGLA`. The APDU probe saw an AT port and chose `at` (its probe is "is there a
+port", because an AT open on a plain SIM cannot be told from a modem without
+the command), and every channel open then failed, so IMS-AKA never ran. The
+card itself does channels: MANAGE CHANNEL through `SEND_APDU` returns one, and
+the modem passes a CLA with the channel number untouched (CLA 01 without the
+QMI channel TLV, and CLA 00 with it). That is the `qmi_apdu` transport in
+`sim.uc`; a real open that AT refuses on a port that never opened a channel
+falls back to it.
+
 ## A modem switched into its MBIM USB configuration answers MBIM
 **Not the ME906s when it goes there straight from its ECM configuration.** The
 kernel picks configuration 2 (CDC-ECM) at enumeration; `echo 3 >

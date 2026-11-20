@@ -2286,10 +2286,25 @@ The **APDU channel** is chosen per modem by `backend.choose`, in order
 (`OPEN_CHANNEL` / `APDU` / `CLOSE_CHANNEL`, so eSIM works on an MBIM modem even
 without an AT port) → **QMI UIM logical channel** (native, or tunnelled over the
 QMI-over-MBIM passthrough) → **AT** (`CCHO`/`CGLA`/`CCHC`, for firmwares that
-report the QMI channel as `NOT_SUPPORTED`). The same `_apdu_be` choice serves
+report the QMI channel as `NOT_SUPPORTED`) → **QMI `SEND_APDU` alone**
+(`qmi_apdu`, below). The same `_apdu_be` choice serves
 both the raw `modem_apdu` channel and the ES10c eSIM path. Discovering it opens
 the ISD-R; on a plain SIM every backend refuses that, which is an answer and not
 counted as a protocol error.
+
+`qmi_apdu` is for a UIM service that sends APDUs but has no logical channel
+message (Huawei E392: `SEND_APDU` works, `LOGICAL_CHANNEL` answers
+`InvalidArgument`, `OPEN_LOGICAL_CHANNEL` `InvalidQmiCommand`, and its AT port
+knows neither `CCHO` nor `CGLA`). wwand then does what the modem would: MANAGE
+CHANNEL opens a channel, SELECT by AID picks the application (a `61xx` is
+followed by GET RESPONSE; a refused SELECT closes the channel again), every
+APDU carries the channel number in its CLA byte, MANAGE CHANNEL closes it. It
+is tried last, and on two ways: as the last candidate of the probe when there
+is no AT port, and — because the AT probe only asks whether a port exists —
+when a real open (not the ISD-R discovery) is refused over AT on a modem whose
+AT port has never opened a channel. The second case switches `_apdu_be` to
+`qmi_apdu` only once that open succeeded; a modem whose `CCHO` ever worked
+keeps AT.
 
 On MBIM, an `OPEN_CHANNEL` is checked against what the Microsoft extension
 defines: `Channel 0` or a SELECT status other than `90 00` / `91 XX` is a
@@ -2967,6 +2982,7 @@ extending a table, not branching the code — see
 
 | Quirk | Mechanism | Example |
 |---|---|---|
+| USIM APDUs without a logical channel message | `sim.uc` `qmi_apdu`: `SEND_APDU` alone, MANAGE CHANNEL / SELECT by AID by hand, the channel in the CLA | Huawei E392 (UIM has `SEND_APDU` only; AT has `CRSM` but no `CCHO`/`CGLA`/`CSIM`) |
 | AT port discovery | fallback: `option tty` → board table → the `atport.uc` udev table (generated from ModemManager) → first-ttyUSB heuristic → an AT-bearing cdc-wdm (huawei_cdc_ncm) → AT over the MBIM pipe (Quectel QDU CID 8) | — |
 | Init AT commands | `MODEL_QUIRKS` (atcmd.uc): model pattern → commands run once before registration | EG06/EM06/RG50xQ → `AT+QMBNCFG="AutoSel",1` (carrier-config auto-select) |
 | QMAP aggregation size | `netlink.dgram_size`: 31744 for every modem, overridable via `dl_datagram_max_size`, capped at a vendor driver's fixed buffer (`dgram_max`) | the modem's echo sizes the receive side |
