@@ -653,6 +653,47 @@ export function select_args(modem, mcc, mnc)
 	         mnc_digits: length(mnc) };
 };
 
+// --- SMS (wwandctl sms, wwandctl sms-delete) ---------------------------------
+
+// The storage slots of one listed message, as `sms-delete` takes them back:
+// `4` for a single part, `4,5` for a concatenated one. A joined multi-part
+// message carries `indexes` and no `index` (sms.uc), and `%d` of the missing
+// one printed 0 for every such message (ddimension/wwand#94).
+export function sms_slots(m)
+{
+	let idx = (type(m?.indexes) == 'array' && length(m.indexes)) ? m.indexes
+		: (m?.index != null ? [ m.index ] : []);
+
+	return length(idx) ? join(',', idx) : '?';
+};
+
+// `sms-delete [SM|ME] <index>[,<index>...]` (the modem already taken off) ->
+// the modem_sms_delete args, or null when it is not that shape. The storage
+// defaults to SM like `wwandctl sms`, so the numbers a listing printed delete
+// what it showed. Always sent as `indices`: slot 0 is a real slot on QMI
+// (the report in ddimension/wwand#94 lists one in ME), and the daemon takes
+// slot 0 only from a list — a bare `index` 0 is what an empty LuCI selection
+// sends as its placeholder (simops modem_sms_delete).
+export function sms_delete_args(modem, rest)
+{
+	let r = [ ...(rest ?? []) ];
+	let storage = (r[0] == 'SM' || r[0] == 'ME') ? shift(r) : 'SM';
+	let idx = [];
+
+	for (let a in r)
+		for (let s in split(a, ',')) {
+			if (s == '')
+				continue;
+
+			if (!match(s, /^[0-9]+$/))
+				return null;
+
+			push(idx, +s);
+		}
+
+	return length(idx) ? { modem: modem, storage: storage, indices: idx } : null;
+};
+
 // --- raw QMI / MBIM (wwandctl qmi, wwandctl mbim) ----------------------------
 
 // QMI service ids by libqmi's names (QmiService, qmi-enums.h:102-154, libqmi

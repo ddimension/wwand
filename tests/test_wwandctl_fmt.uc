@@ -538,4 +538,19 @@ eq(fmt.qmi_raw_text({ result: 0, tlvs: [ { type: 0x10, value: seq } ] }),
 eq(fmt.mbim_raw_text({ status: 9, status_name: 'NoDeviceSupport', info: '' }),
 	'status   9 NoDeviceSupport\ninfo     0  (empty)', 'mbim_raw_text: status and an empty buffer');
 
+// --- SMS: the slots a listing shows are the ones sms-delete takes (wwand#94) --
+eq(fmt.sms_slots({ index: 0 }), '0', 'sms_slots: a single part, slot 0 is real');
+eq(fmt.sms_slots({ concat_ref: 12210, parts: 2, indexes: [ 4, 5 ] }), '4,5',
+	'sms_slots: a joined message lists its parts, not a null printed as 0');
+eq(fmt.sms_slots({}), '?', 'sms_slots: nothing known');
+
+eq(fmt.sms_delete_args('m0', [ 'ME', '4,5' ]), { modem: 'm0', storage: 'ME', indices: [ 4, 5 ] },
+	'sms_delete_args: storage and a part list');
+eq(fmt.sms_delete_args('m0', [ '3' ]), { modem: 'm0', storage: 'SM', indices: [ 3 ] },
+	'sms_delete_args: SM by default, like `sms`');
+eq(fmt.sms_delete_args('m0', [ 'SM', '0', '1,2' ])?.indices, [ 0, 1, 2 ],
+	'sms_delete_args: slot 0, several arguments');
+eq(fmt.sms_delete_args('m0', [ 'ME' ]), null, 'sms_delete_args: no index');
+eq(fmt.sms_delete_args('m0', [ '4,x' ]), null, 'sms_delete_args: junk refused, not partly deleted');
+
 done('test_wwandctl_fmt');
