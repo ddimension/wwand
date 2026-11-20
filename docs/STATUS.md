@@ -1,7 +1,7 @@
 # wwand — current state
 
-_State of 2026-11-16: stable **v1.9.0** (feed release 2026.11.16), main **v1.10.0-dev**.
-66 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
+_State of 2026-11-20: stable **v1.9.0** (feed release 2026.11.16), main **v1.10.0-dev**.
+69 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
 which moves too often to be worth repeating here)._
 
 This file describes **what is true now**. The dated log of how it got here is
@@ -26,7 +26,8 @@ state buried at the top invites reading a months-old entry as present tense.
   list of a multi-part message (`[4,5]`, was `[  0]`); `sms-delete [SM|ME]
   <index>[,<index>...]` sends the storage and a list, so slot 0 (real on QMI)
   is reachable and ME is no longer deleted from SM. LuCI SMS *send* (item 3 of
-  the issue) is a feature, not built.
+  the issue) is on the Modem Tools page (luci-app-wwand 4360b41,
+  `modem_sms_send`).
 - **Inbound SMS and Cell Broadcast, hotplug scripts (2026-11-19):** new
   `sms_rx.uc` + `cbs.uc` — the events `sms` and `cell_broadcast`; Cell
   Broadcast switched per `option cell_broadcast` / `list cb_channels` (default
@@ -52,7 +53,7 @@ state buried at the top invites reading a months-old entry as present tense.
   a change and a PUK entry (simops `keep_pin`, deps `store_pincode`, only while
   the section still holds the old PIN), and a `pincode` edit no longer
   restarts the modem or re-dials (it left `modem_sig` and `SIM_EFFECT`). LuCI:
-  modem list → Actions → *SIM PIN*. Part of the ModemManager gap list (with
+  Modem Tools → SIM → *SIM PIN*. Part of the ModemManager gap list (with
   USSD, Cell Broadcast and an SMS-arrival event).
 - **MBIM commands are gated on DEVICE_SERVICES (2026-11-17):** `mbim_client`
   reads the service list after every OPEN and refuses a command for an
@@ -104,8 +105,8 @@ state buried at the top invites reading a months-old entry as present tense.
   read); EG06-E, BG96, BM806U-E1 and E392 know none of the six messages. The
   Quectel 5G read of a lock has no enable field (`"common/5g",<pci>,…`), so
   the old `parse_qnwlock` reading of it dropped the PCI (and showed a PCI-0
-  lock as off in the NCM telemetry); `parse_qnwlock` reads it now. **New file: the feed's `WWAND_BASE_UC` needs `cell_lock.uc` in the
-  next bump** (`tools/check-packaging.py`). Not done: a hwtest run of the
+  lock as off in the NCM telemetry); `parse_qnwlock` reads it now. The feed's `WWAND_BASE_UC` carries
+  `cell_lock.uc`. Not done: a hwtest run of the
   whole bring-up on this tree; the status read-back (`locks`) still comes
   from the NCM telemetry only.
 - **Release 1.9.0 (2026-11-16):** main merged into stable in wwand,
@@ -119,8 +120,8 @@ state buried at the top invites reading a months-old entry as present tense.
   stable took the package definitions from feed main (wwand-ims is new
   there) and pins the tags; **released as feed tag `2026.11.16`**
   (wwand 1.9.0, luci-app-wwand 1.9.0, luci-proto-wwand 1.8.0, wwand-ims
-  0.1.1). Feed main pins the review fixes as wwand `1.10.0_pre0`,
-  luci-app-wwand `1.10.0_pre1`, luci-proto-wwand `1.9.0_pre1`. For the release notes: the QMAP DL aggregation default of 31744
+  0.1.1). Feed main pins wwand `1.10.0_pre10`,
+  luci-app-wwand `1.10.0_pre2`, luci-proto-wwand `1.9.0_pre1`. For the release notes: the QMAP DL aggregation default of 31744
   bytes now applies to every modem and, through the modem's echo, to the
   host's uplink aggregation as well (`option dl_datagram_max_size`
   overrides it per modem). **Do not push to the feed while a build of the
@@ -380,7 +381,8 @@ state buried at the top invites reading a months-old entry as present tense.
   (`board.uc generation`: 5G NSA from rat_fine). LEDs are written only when
   they change. Host-tested with the Xunison D50 and AW1000 files from the
   issue; no test device has such a panel, so HW is the reporters' (4IceG,
-  kuncy7). Not built: the LuCI LED page and micw's sweep (#48).
+  kuncy7). The sweep (#48) is built (`board.uc` `SWEEP`); not built: the LuCI
+  LED page.
 - **rmnet_nss after a restart (#78, 2026-11-05):** the probe needed a
   `<parent>_1`, which the first start had renamed to `wwandN`, so a restart
   fell back to a datapath that cannot serve `qmi_wwan_q` and looped on
@@ -436,7 +438,7 @@ state buried at the top invites reading a months-old entry as present tense.
   `modem_common.at_reset` threw `access to undeclared variable guard` (in every
   release since 3a1fcc4, 2026-10-01, stable included). Fixed on main and
   HW-checked on the NR7101 (real engine, real CFUN=1,1, one callback);
-  on stable as f25bcdc (cherry-pick, not yet in a release). The trip line no longer claims "the control
+  on stable as f25bcdc (cherry-pick, in v1.8.0 and v1.9.0). The trip line no longer claims "the control
   channel kept answering" — `proto_errors` is a streak reset by any answer.
 - **Fork branches for the device images** (ddimension/openwrt): `chateau-ci`,
   `lte3301`, `nbg7815-update` rebased onto openwrt main and **pushed 2026-10-24**
@@ -450,7 +452,7 @@ state buried at the top invites reading a months-old entry as present tense.
   the built-in entry; an invalid file is ignored whole and logged, status
   `board.profile_source` names the winner. hwtest `boardfile` (func.sh) passed on
   the Cudy, NR7101, LTE3301, LTE3301-PLUS and -M209. micw's 2G/3G/4G sweep panel
-  would be a third LED style — build it with his board PR. MayorBug told on #50.
+  is the third LED style (`board.uc` `SWEEP`). MayorBug told on #50.
 - **Issues waiting on reporters:** luci-app-wwand#16 (mrhaav — `BB3` band fixed
   in pre30; the eNodeB/sector row built 2026-10-29, luci-app-wwand 6d1abbc,
   checked on the Chateau), #73 (i18n
@@ -465,7 +467,7 @@ state buried at the top invites reading a months-old entry as present tense.
   closed.
 - **PRs:** #50 (MayorBug, draft, conflicts) waiting on a rework. #60 and #65
   (xhudan) merged with follow-ups.
-- **Upstream:** openwrt/packages#30185 (pins 1.6.9; maintainer review
+- **Upstream:** openwrt/packages#30185 (pins 1.9.0; maintainer review
   CHANGES_REQUESTED since 08-07; the bot's oldest open point — unversioned
   `+ucode` — is answered by the #67 floor once the PR is updated, which is done
   only on request), openwrt/luci#8917 (no maintainer review yet).
@@ -494,7 +496,7 @@ is always user-triggered.
 
 | | |
 |---|---|
-| Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim`, plus two optional datapath add-ons in the feed. Plugins in their own repositories: `wwand-ipa` (SGP.32 eIM), `wwand-qlog` (Quectel QLog diag capture), `wwand-rsim` (remote SIM: readers, phones over Bluetooth SAP, other modems' cards) |
+| Packages | `wwand` (base, no backend) + `wwand-qmi` / `-mbim` / `-ncm` / `-mhi` / `-esim` / `-gps` / `-apntest`, plus two optional datapath add-ons in the feed. Plugins in their own repositories: `wwand-ipa` (SGP.32 eIM), `wwand-qlog` (Quectel QLog diag capture), `wwand-rsim` (remote SIM: readers, phones over Bluetooth SAP, other modems' cards), `wwand-ims` (VoLTE / IMS for a LAN SIP phone) |
 | Datapath | one plug-in interface (`docs/datapath-interface.md`): built-ins `rmnet`, `qmimux`, `vlan` (MBIM), pseudo-modes `raw_ip` and `ethernet` (802.3, WDA-less QMI stacks); add-ons `rmnet_nss`, `rmnet_nss_mhi` |
 | QMAP | negotiated down a ladder v5 → v4 → v1, capped by `option qmap_version` |
 | Feed | ddimension/openwrt-repo, two independent lines — stable (releases, published only by a date tag; last: 2026.11.16 with wwand 1.9.0) and main (development, `X.Y.Z_preN` from the `vX.Y.0-dev` marker, now `v1.10.0-dev`). The source repos have the same two lines (`stable` at v1.9.0). `wwand` requires `ucode (>=` the SDK's ucode `)` since #67 |
@@ -515,9 +517,10 @@ The test devices are those in the workspace's `test-devices.txt`, nothing else.
 | HP EliteBook 850 G7 (openwrt-elitebook, x86_64) | Dell DW5932e / Foxconn T99W373, **PCIe/MHI** (`mhi-pci-generic`, `wwand-mhi`), MBIM + QMI passthrough | connected 5G NSA (ENDC); RAT priority read and in LuCI (2026-10-30, main f3f3a6a); eUICC in slot 2 listed; UIM Remote on via `AT^EFS`; borrows the NR7101's card over SSH (`donor_cond none`, the RG502Q refuses the condition TLV); the slot needs `kmod-hp-elitebook-850-g7-wwan-unlock` |
 | HP EliteBook 850 G7 (openwrt-elitebook, x86_64) | Dell DW5931e / Fibocom FM350-GL (MediaTek T7xx, PCI `14c3:4d75`, `kmod-mtk-t7xx`), firmware 81600.0000.00.29.23.06_GC, **native MBIM** (MBIMEx 3.0, no QMI passthrough: `NoDeviceSupport`) | 2026-10-31, main f2c804f: FCC lock released by GTFCCLOCK (06f51e0); connected, ping 3/3, 5G SA on o2-de; IP config needs the full 60-byte query (7e4e5d8); CA over `AT+GTCAINFO?` (4e1d62d); eUICC (SGP.22 2.2.2) and APDU over MBIM; no RAT priority or NAS settings, which need the passthrough (`unsupported_on_backend`) |
 
-Snapshot devices run ucode 2026.07.09 (libucode ABI 20230711), so the feed's
-current snapshot packages do not install there (the #67 floor); hwtest deploys
-the ucode tree as source over each device's own `wwand_io.so`.
+Snapshot images here carry ucode 2026.10.x; the #67 floor ties the feed's
+snapshot packages to the SDK's ucode, so on an image older than that they do
+not install, and hwtest deploys the ucode tree as source over each device's own
+`wwand_io.so`.
 
 ## Multi-SIM: what the hardware here actually is
 

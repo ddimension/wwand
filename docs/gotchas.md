@@ -272,9 +272,19 @@ made here:
   session when the command *form* was wrong rather than the command absent
   (ddimension/wwand#12). Any success resets the count.
 - `+CME ERROR: <n>` is a runtime condition (SIM not ready, no network) and a
-  timeout means the port is wedged. Neither says the firmware lacks the command,
-  and a bare ERROR on either side of one is **not** a streak — counting through
-  them would retire on evidence that is not about the firmware at all.
+  timeout may mean the port is wedged. Neither says the firmware lacks the
+  command, and a bare ERROR on either side of one is **not** a streak — counting
+  through them would retire on evidence that is not about the firmware at all.
+
+Timeouts have their own, slower count. **Five timeouts of one command** retire
+it too (`AT_RETIRE_SILENT_AFTER`), but a timeout only counts when the port
+answered some *other* command since that one last went silent — an RG520N-EB
+behind an MHI DUN bridge never answered `AT+QENG="servingcell"` while `AT+CSQ`
+answered on the same port (ddimension/wwand#56). A separate telemetry port
+(`at2`) that answers **nothing** for 20 consecutive commands
+(`AT_PORT_DEAD_AFTER`) is closed instead, and telemetry falls back to the
+control channel (ddimension/wwand#60); both are re-probed on the next modem
+init.
 
 The memory is cleared with the AT channel (`close_at`), so a re-open after a
 protocol switch or a re-enumeration probes again from scratch.
@@ -287,9 +297,12 @@ With `lock_persist` the lock is in modem NV and survives reboots and `AT+CFUN`
 resets too: the config says "no lock", the hardware says "locked", and there is
 no way to say otherwise short of AT by hand.
 
-`config_check` now asks the modem and releases a lock the config does not
-request, followed by `save_ctrl` because the lock being cleared may have been
-persisted by an *earlier* config.
+`cell_lock.sync` asks the modem and releases a lock the config does not
+request, in whichever dialect the modem answers (`cell_lock.uc` `DIALECTS`,
+QMI included); on the Quectel AT dialect a release is followed by `save_ctrl`
+because the lock being cleared may have been persisted by an *earlier* config.
+A QMI modem runs it from `config_check`; MBIM and NCM reach it through
+`modem_common.run_at_init`.
 
 *Evidence:* HW-found on an NR7101 pinned to EARFCN 1300 / PCI 246, a cell not
 receivable at that site — permanent `"servingcell","SEARCH"`, `+CGATT: 0`,

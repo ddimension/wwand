@@ -72,6 +72,11 @@ do not "fix" one side to match the other:
   transports (`backend.choose`/`first_of`), read `modem.config`/`active_sim`
   and update `modem.info`.
 
+The operation names in the two tables below are **conceptual capabilities**,
+not method names — each backend spreads them over its own init steps and
+helpers. The fields consumers may actually rely on are the duck-typed contract
+written down in the header of `src-ucode/backend.uc:20-38`.
+
 ### Modem-level
 
 | Operation | Purpose | QMI | MBIM | NCM (AT) |
@@ -79,10 +84,10 @@ do not "fix" one side to match the other:
 | `open` | bring the control channel up | transport + `CTL SYNC` + version + per-service CID alloc | open + `MBIM OPEN` | open the AT tty (this *is* the control channel; optional usb-serial `new_id` bind) |
 | `read_info` | model, revision, imei, manufacturer, capabilities | `DMS GET_*` | `DEVICE_CAPS` | `ATI`/`CGMI`/`CGMM`/`CGMR` + `CGSN` (imei); manufacturer selects the vendor recipe |
 | `set_opmode(mode)` | online / low_power / offline / reset | `DMS SET_OPERATING_MODE` | online / low_power / offline: passthrough `DMS SET_OPERATING_MODE`, else (no passthrough, DMS refused, or during init) Basic Connect `RADIO_STATE`; a wake switches back what may be off (DMS as well when this modem object has not set it itself — a park survives a daemon restart), after a deferred vendor FCC unlock; an unheld init asks the DMS mode once and switches a leftover low power online; no reset (`reset()` is its own op) | `AT+CFUN` (reset = `AT+CFUN=1,1`) |
-| `slot_status` / `switch_slot(n)` | list / select physical SIM slots | `UIM GET_SLOT_STATUS` / `SWITCH_SLOT` | — | vendor `slots` recipe (Fibocom `AT+GTDUALSIM`, switch + CFUN reset) |
+| `slot_status` / `switch_slot(n)` | list / select physical SIM slots | `UIM GET_SLOT_STATUS` / `SWITCH_SLOT` | passthrough UIM, else native MS Basic Connect Extensions slot info / device slot mappings (`self.mbim_slots`) | vendor `slots` recipe (Fibocom `AT+GTDUALSIM`, switch + CFUN reset) |
 | `sim_unlock(pin)` | query PIN state, verify, guard retries | `UIM`/`DMS` | `SUBSCRIBER_READY` + `PIN` | `AT+CPIN?` + `AT+CPIN="…"`; retries via `AT+QPINC` |
 | `read_identity` | imsi, iccid, msisdn | `UIM` EF read → `DMS` → AT | `SUBSCRIBER_READY` | `AT+CIMI` (imsi) + `AT+QCCID`/`+CCID`/`+ICCID` chain |
-| `config_network(modes,plmn)` | mode/PLMN preference | `NAS SET_SYSTEM_SELECTION_PREFERENCE` | — | AT (`AT+COPS`; `with_nas` is null → daemon uses the AT path) |
+| `config_network(modes,plmn)` | mode/PLMN preference | `NAS SET_SYSTEM_SELECTION_PREFERENCE` | passthrough `NAS SET_SYSTEM_SELECTION_PREFERENCE`, else Basic Connect `REGISTER_STATE` set (data classes + automatic/manual) | AT (`AT+COPS`; `with_nas` is null → daemon uses the AT path) |
 | `ensure_attach_profile(apn,pdp)` | program the autonomous-attach profile | `WDS MODIFY_PROFILE` (CID 1) | folded into connect | `AT+CGDCONT` (+ vendor auth: `QICSGP`/`CGAUTH`/…) on CID 1 |
 | `register` | wait for registration + subscribe indications | `NAS REGISTER_INDICATIONS` + `GET_SERVING_SYSTEM` + ind | `REGISTER_STATE` + `PACKET_SERVICE` | poll `AT+CEREG?` → `AT+C5GREG?` → `AT+CREG?` (5G-SA aware), with registration URCs (`+CREG`/`+CEREG`/…, Fibocom) as a poll fast path |
 | `reg_detail` | EMM reject cause + limited-service flag | `NAS GET_SYSTEM_INFO` + AT `+CEER` | — | vendor `reg_detail` block (AT; best-effort) |
@@ -137,7 +142,11 @@ which the core tolerates.
 
 Independent of protocol, a modem/context emits: `state`, `registered`,
 `deregistered`, `serving_system`, `sim_blocked`, `removed`, `telemetry`,
-`protocol_switch` (modem); `up`, `down`, `renew` (context). Status fields the
+`protocol_switch`, `identity`, `identity_mismatch`, `sim_refresh`,
+`esim_ready`, `sessions_released`, `ussd`, `sms`, `cell_broadcast` (modem);
+`up`, `error`, `zero_rx`, `down`, `suspend`, `settings`, `modem_ready`
+(context; `renew` is not an event — it is the daemon driving netifd, deps
+`renew_interface`). Status fields the
 daemon reads off a modem object: `state`, `info`, `reg`, `reg_detail`, `signal`,
 `counters{attempts,proto_errors}`. The recovery ladder (`recovery.uc`,
 `on_proto_error`/`on_proto_success`) is protocol-neutral; only its rungs
@@ -146,10 +155,10 @@ daemon reads off a modem object: `state`, `info`, `reg`, `reg_detail`, `signal`,
 ```mermaid
 flowchart LR
   subgraph MOD["modem emits"]
-    ME["state · registered · deregistered<br/>serving_system · sim_blocked<br/>removed · telemetry · protocol_switch"]
+    ME["state · registered · deregistered<br/>serving_system · sim_blocked<br/>removed · telemetry · protocol_switch<br/>identity · sim_refresh · esim_ready<br/>ussd · sms · cell_broadcast · …"]
   end
   subgraph CTX["context emits"]
-    CE["up · down · renew"]
+    CE["up · error · zero_rx · down<br/>suspend · settings · modem_ready"]
   end
   ME --> D["daemon"]
   CE --> D
@@ -157,7 +166,7 @@ flowchart LR
   D -->|"reads off the object"| ST["status()<br/><small>state · info · reg · reg_detail<br/>signal · counters</small>"]
 ```
 
-The events are the same three words whatever protocol produced them, which is
+The events are the same names whatever protocol produced them, which is
 what lets everything above the backend layer stay protocol-agnostic. The daemon
 never asks *how* a modem registered — only that it did.
 

@@ -80,11 +80,11 @@ code = "src-ucode/codec/{qmux,tlv,hex}.uc, codec/schema/*.uc"
   [[component.standard]]
   name = "Qualcomm QMI, as documented by libqmi"
   basis = "libqmi 1.38.0 data/qmi-service-*.json"
-  sections = "CTL, DMS, NAS, WDS, WDA, UIM, WMS, LOC, PDC, DSD, TMD, CAT: message ids, TLV ids, enums"
+  sections = "CTL, DMS, NAS, WDS, WDA, UIM, WMS, LOC, PDC, DSD, VOICE: message ids, TLV ids, enums"
     [[component.standard.review]]
     review = "R9"
     result = "NAS Get RF Band Information (0x0031, new): List 0x01, Extended List 0x11 (u32 channel) and Bandwidth List 0x12 as libqmi models them, wire shape HW-read on the RG502Q-EA and the T99W175; Get LTE Cphy CA Info 0x13/0x15 match"
-    open = "every other message of the twelve services not checked against libqmi in one pass yet"
+    open = "every other message of these services not checked against libqmi in one pass yet"
     [[component.standard.review]]
     review = "R10"
     result = "NAS Get System Info 0x4E (EUTRA with NR5G availability) and 0x4F (DCNR restriction) added as guint8, Get ENDC Config 0x00E8 (Enabled 0x10, Immediate SCG Release 0x11) added; all match libqmi 1.38"
@@ -93,6 +93,12 @@ code = "src-ucode/codec/{qmux,tlv,hex}.uc, codec/schema/*.uc"
     review = "R11"
     result = "WDS Get PDN Throttle Info 0x006C added (Network Type 0x01 guint8, Info 0x10 array with string APN), matches libqmi 1.38; call end reasons internal 209/211/258 classed as throttling per qmi-enums-wds.h"
     open = "not HW-read in a throttled state"
+  [[component.standard]]
+  name = "Qualcomm QMI beyond libqmi"
+  basis = "vendor IDL tables (libqmiservices.so, *_v01.c), Gobi API, the kernel; each id listed in docs/qmi-beyond-libqmi.md with its source"
+  sections = "CAT and TMD (whole services libqmi lacks), the NAS/UIM/WDA/WDS ids and TLVs listed there"
+    [[component.standard.review]]
+    review = "tbd"
 
 [[component]]
 name = "QMI backend (modem, context, telemetry)"
@@ -288,13 +294,19 @@ code = "src-ucode/{sim,sim_plmn,simops,siminventory}.uc"
   [[component.standard]]
   name = "ISO/IEC 7816-4 and 3GPP TS 27.007 SIM access"
   basis = ""
-  sections = "APDU structure, +CSIM, +CCHO/+CCHC, +CGLA"
+  sections = "APDU structure, +CSIM, +CCHO/+CCHC, +CGLA; +CPIN (with the new PIN after a PUK), +CPWD=\"SC\" (PIN change), +CLCK=\"SC\" (PIN query on/off)"
     [[component.standard.review]]
     review = "tbd"
   [[component.standard]]
   name = "ITU-T E.118 / E.212"
   basis = ""
   sections = "ICCID (Luhn), IMSI, MCC/MNC"
+    [[component.standard.review]]
+    review = "tbd"
+  [[component.standard]]
+  name = "PIN operations over QMI and MBIM"
+  basis = "libqmi 1.38 (qmi-service-uim.json, qmi-service-dms.json), libmbim 1.32 (mbim-service-basic-connect.json)"
+  sections = "UIM Set PIN Protection / Verify / Unblock / Change PIN 0x0028, DMS UIM Change PIN 0x002A, MBIM PIN set (enter, enable, disable, change) and PIN List"
     [[component.standard.review]]
     review = "tbd"
 
@@ -338,11 +350,17 @@ code = "src-ucode/{sms,sms_pdu}.uc, codec/schema/wms.uc"
 
 [[component]]
 name = "Cell Broadcast and inbound SMS"
-code = "src-ucode/cbs.uc, sms_rx.uc, codec/schema/wms.uc (event report, broadcast), mbim_backend.uc (sms_records, sms_store_status), atcmd.uc (two-line PDU URCs)"
+code = "src-ucode/cbs.uc, sms_rx.uc, sms_pdu.uc (cbs_dcs, cbs_text), codec/schema/wms.uc (event report, broadcast), mbim_backend.uc (sms_records, sms_store_status), atcmd.uc (two-line PDU URCs)"
   [[component.standard]]
   name = "3GPP TS 23.041 (CBS)"
   basis = ""
   sections = "GSM page 9.4.1.2, UMTS message 9.4.2.2, serial number fields, PWS message identifiers"
+    [[component.standard.review]]
+    review = "tbd"
+  [[component.standard]]
+  name = "3GPP TS 23.038 (CBS data coding scheme)"
+  basis = ""
+  sections = "CBS DCS groups (5), packed GSM7 with CR padding (6.1.2.3.1), UCS2"
     [[component.standard.review]]
     review = "tbd"
   [[component.standard]]
@@ -387,6 +405,22 @@ code = "src-ucode/ussd.uc, codec/schema/voice.uc, mbim_backend.uc (ussd_*), sms_
     review = "tbd"
 
 [[component]]
+name = "Cell lock"
+code = "src-ucode/cell_lock.uc"
+  [[component.standard]]
+  name = "QMI NAS cell lock (beyond libqmi)"
+  basis = "vendor IDL table IDL-OP13, HW-measured; docs/qmi-beyond-libqmi.md"
+  sections = "NAS Set/Get Cell Lock Config 0x00AF/0x00D7, Set/Get Cell Config 0x00D8/0x015A, Set/Get NR5G Cell Config 0x010E/0x010F"
+    [[component.standard.review]]
+    review = "tbd"
+  [[component.standard]]
+  name = "Quectel AT+QNWLOCK"
+  basis = "Quectel AT command manuals, HW-read on the RG502Q-EA and RG650E-EU"
+  sections = "common/4g, common/5g, save_ctrl"
+    [[component.standard.review]]
+    review = "tbd"
+
+[[component]]
 name = "Radio vocabulary and bands"
 code = "src-ucode/codec/schema/rat.uc, codec/arfcn_bands.uc"
   [[component.standard]]
@@ -412,7 +446,7 @@ code = "src-ucode/{netlink,modem_datapath_qmi,datapath_rmnet_nss,datapath_rmnet_
     [[component.standard.review]]
     review = "R1"
     result = "ids, TLVs, widths and enums match; DAP -> rmnet flags right; UL aggregation limits now clamped to the kernel's, parent MTU step fits MAP v4"
-    open = "request TLVs 0x18-0x1A unverified (not modelled by libqmi, not sent); QMAP v4 not HW-proven (both QMI modems decline it)"
+    open = "request TLVs 0x18-0x1A not modelled by libqmi and not sent (ids and widths taken from two vendor IDL tables, docs/qmi-beyond-libqmi.md); QMAP v4 not HW-proven (both QMI modems decline it)"
 
 [[component]]
 name = "netifd integration"

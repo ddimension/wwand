@@ -3,9 +3,11 @@
 wwand and the wwand-ims plugin speak QMI to Qualcomm modems. The public
 definition of that surface (libqmi) stops where the vendor services
 begin: the IMS Settings service, vendor NAS messages, voice service
-details. This page documents how we close that gap **by observation of a
-stock device** instead of consulting vendor source trees — the method
-behind the evidence in the wwand-ims research folder.
+details. This page documents one way to close that gap: **observation of a
+stock device** — the method behind the evidence in the wwand-ims research
+folder. It sits beside the vendor IDL tables and Qualcomm sources the QMI
+schema rule also accepts (named in the schema comment, measured on hardware,
+listed in [qmi-beyond-libqmi.md](qmi-beyond-libqmi.md)).
 
 ## The method
 
@@ -37,13 +39,15 @@ what the modem does without them (the default state).
   the CC_IN_PROGRESS/mode-6 state is a normal intermediate step.
 - Handover and WFC flows (a full LTE→WLAN Rove-In was captured).
 - Clean-room documentation sources: the same sequences feed the
-  wwand-ims-docs call-flow chapters without vendor trees.
+  private IMS documentation's call-flow chapters (not published)
+  without vendor trees.
 
 ## What it is not
 
 - Not a specification: it shows one RIL revision's behaviour, not the
-  protocol. TLV numbering still needs the public IDL (libqmi) or
-  measured round-trips.
+  protocol. TLV numbering still needs a named IDL source (libqmi, or a
+  vendor IDL table / Qualcomm source per
+  [qmi-beyond-libqmi.md](qmi-beyond-libqmi.md)) or measured round-trips.
 - Not raw QMI bytes: the Android diag path (diag_mdlog masks) does not
   deliver on OOS 14 yet — the logcat evidence is message-level, not
   wire-level.

@@ -25,7 +25,8 @@ message-oriented cdc-wdm/tty I/O + rmnet netlink helper;
   the separate `ucode-mod-wwand-io` package is gone, `PROVIDES` covers old
   configs), `wwand-qmi`, `wwand-mbim` (DEPENDS wwand-qmi), `wwand-ncm`,
   `wwand-mhi` (PCIe/MHI transport + MHI kmods + the wwan-subsystem hotplug;
-  backend-neutral, pair with wwand-qmi/-mbim), `wwand-esim`, plus two optional
+  backend-neutral, pair with wwand-qmi/-mbim), `wwand-esim`, `wwand-gps` (NMEA
+  reader, `modem_gps`), `wwand-apntest` (APN test runner), plus two optional
   DATAPATH add-ons — `wwand-datapath-rmnet_nss` (vendor `qmi_wwan_q`, USB) and
   `wwand-datapath-rmnet_nss_mhi` (vendor `pcie_mhi`, PCIe/MHI) — which adopt the
   QMAP children those drivers register so Qualcomm NSS offload survives.
@@ -116,7 +117,7 @@ incl. `schema/rat.uc` = canonical RAT/IoT vocabulary, `mbim*.uc`) → session
 (`transport.uc`, `client.uc`; further hubs under the same contract:
 `qmi_over_mbim.uc`, `qmi_over_qrtr.uc`) → state machines
 (`modem.uc` + its extracted QMI helpers `modem_init_qmi.uc` / `telemetry_qmi.uc`
-/ `regdetail.uc` / `config_check.uc` / `datapath_qmi.uc`; the datapath
+/ `regdetail.uc` / `config_check.uc` / `modem_datapath_qmi.uc`; the datapath
 interface lives in `netlink.uc` with `datapath_*.uc` add-ons beside it
 (docs/datapath-interface.md); `modem_mbim.uc` +
 `telemetry_mbim.uc`; `modem_ncm.uc` + `ncm_vendors.uc` (vendor dial/auth tables)
@@ -129,7 +130,8 @@ datapath, `recovery.uc`, `atcmd.uc` + `atcmd_parse.uc`, `board.uc`) → integrat
 
 ## Board / power / LEDs (`board.uc`)
 Generic, keyed off `/etc/board.json` model id → a profile table (MikroTik
-Chateau, Zyxel LTE33xx/NR7101; unknown = null profile → all ops no-op). Absorbs
+Chateau, Zyxel LTE3301/LTE5398/NR7101, Cudy LT300, Huasifei WH3000 Pro,
+Arcadyan AW1000; unknown = null profile → all ops no-op). Absorbs
 the vendor helper scripts: modem power/reset GPIOs + status LEDs. Wired in:
 recovery `usb_repower` rung → board **power-cycle or reset-GPIO pulse** (replaces
 the external `usb-repower`); a modem config `reset_gpio` (or the board default)

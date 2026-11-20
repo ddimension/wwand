@@ -100,8 +100,9 @@ const LOCAL_PORTS = {
 
 // model-specific init sequences (old proto_qmi_serial_init)
 const MODEL_QUIRKS = [
-	// enable automatic carrier config (MBN) selection; the QMI-native
-	// equivalent would be the PDC service (future replacement)
+	// enable automatic carrier config (MBN) selection. carrier_config.uc
+	// drives PDC over QMI, but only for an MBN asked for by its id; picking one
+	// by the inserted SIM is the firmware's AutoSel
 	{ pattern: '^EG06|^EM06|^RG50[02]Q', commands: [ 'AT+QMBNCFG="AutoSel",1' ] },
 ];
 

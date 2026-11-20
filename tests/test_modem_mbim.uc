@@ -2764,6 +2764,30 @@ assert_ready_state_reinit(false, 'ready-state reinit/stuck');
 	eq(m._attach_pending, false, 'mbim attach: ...and only once');
 }
 
+// USSD: ussd.uc names the action, the modem puts MbimUssdAction on the wire
+// (0 initiate, 1 continue, 2 cancel; libmbim mbim-enums.h); an unknown name
+// sends nothing
+{
+	let m = modem_mbim.create({
+		id: 'm_ussd', device: '/dev/mockat', config: {},
+		timing: { settle: 1, reg_timeout: 500, backoff_min: 1, backoff_max: 5, at_drain: 1 },
+		at: { fx: { read: () => null, glob: () => [] } },
+		recovery: { fx: fakefx.create(), state_dir: '/state' },
+		deps: { log: () => null, on_event: () => null },
+	});
+	let actions = [], bad;
+
+	m.mbim = { destroy: () => null,
+		command_raw: (svc, cid, info, cb) => { push(actions, struct.unpack('<I', info)[0]); cb('x'); } };
+
+	for (let a in [ 'initiate', 'continue', 'cancel' ])
+		m.mbim_ussd.set(a, 15, '', () => null);
+
+	m.mbim_ussd.set(2, 15, '', (err) => { bad = err; });
+	eq(actions, [ 0, 1, 2 ], 'mbim ussd: the action names on the wire');
+	eq(bad?.error, 'invalid_action', 'mbim ussd: a raw number is refused, nothing sent');
+}
+
 // --- option modes (#75) -------------------------------------------------------
 // Over the QMI passthrough's NAS when there is one, as ModemManager 1.24.0
 // does; the Register State DataClass only without it, CUSTOM in place of the

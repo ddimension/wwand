@@ -3,7 +3,7 @@
 **The control backend talks to the modem; the datapath builds the kernel side of
 the data link.** They are separate axes: a QMI modem may carry its sessions over
 mainline rmnet, over qmi_wwan's own `add_mux`, over a vendor driver's QMAP
-children, or over nothing at all. wwand ships four answers and takes a fifth from
+children, or over nothing at all. wwand ships six answers and takes more from
 any add-on package, all through **one interface** — the built-ins are entries in
 it, not special cases beside it.
 
@@ -14,6 +14,7 @@ it, not special cases beside it.
 | `vlan` | mbim | cdc_mbim sessions as 802.1q sub-devices |
 | `raw_ip` | all | no multiplexing — the plain raw-IP parent (not an implementation) |
 | `ethernet` | qmi | no multiplexing — the parent keeps the kernel's 802.3 framing (raw_ip off), ARP stays on (the function is an L2 bridge into the GGSN segment; the gateway resolves via proxy-ARP); for QMI stacks without a WDA service (not an implementation) |
+| `untagged` | mbim | no multiplexing — MBIM session 0 rides the cdc_mbim parent without an 802.1q tag (not raw_ip: there is no raw-IP knob on cdc_mbim; not an implementation) |
 | *add-on* | declared | `rmnet_nss` (vendor `qmi_wwan_q`, USB) and `rmnet_nss_mhi` (vendor `pcie_mhi`, PCIe/MHI) keep Qualcomm NSS offload by adopting the children those drivers register |
 
 ### The two axes
@@ -36,7 +37,8 @@ flowchart LR
     ETH["ethernet"]
     RIP["raw_ip"]
     VL["vlan"]
-    NSS["rmnet_nss<br/><small>add-on</small>"]
+    UT["untagged"]
+    NSS["rmnet_nss / rmnet_nss_mhi<br/><small>add-ons</small>"]
   end
   Q --> RM
   Q --> QM
@@ -44,7 +46,8 @@ flowchart LR
   Q --> RIP
   Q --> NSS
   M --> VL
-  M --> RIP
+  M --> UT
+  M --> NSS
   N --> RIP
   N --> ETH
 ```
@@ -94,7 +97,7 @@ flowchart TD
     B1 --> B2["wwand0<br/><small>qmimux child</small>"]
   end
   subgraph C["QMI · ethernet — no WDA service"]
-    C1["qmi_wwan → wwan0<br/><small>raw_ip=N (802.3 kept), NOARP</small>"]
+    C1["qmi_wwan → wwan0<br/><small>raw_ip=N (802.3 kept), ARP on</small>"]
   end
   subgraph D["MBIM · vlan — sessions as 802.1q"]
     D1["cdc_mbim → wwan0<br/><small>raw-IP trunk</small>"]
@@ -178,7 +181,8 @@ return {
     map_id:          (entry, netdev, fx) => entry.id,  // wire id (optional)
     status:          (fx, netdev) => ({ … }),   // extra status rows (optional)
     qmap:            true,               // QMAP rides the parent (default: aggregate)
-    qmap_v5:         false,              // may negotiate MAPv5 checksum offload
+    qmap_versions:   [ 1 ],              // QMAP header versions, best first,
+                                         // or (fx, netdev) => [ … ]
     aggregate:       true,               // QMAP arithmetic on the parent
     programs_parent: true,               // reprograms the parent's link format
     tx_aggr:         false,              // rmnet-style uplink coalesce
@@ -219,7 +223,8 @@ that owns its children can keep them, and the drop to `raw_ip` happens **after**
 
 `ctx` carries `netdev` (the parent — **possibly already renamed, use this one**),
 `sys` (`/sys/class/net/<netdev>/qmi`), `mux` (`[{ id, name?, mtu? }]`),
-`urb_size`, `v5` (MAPv5 checksum offload negotiated over WDA), `mux_mtus` (fill
+`urb_size`, `qmap_version` (the negotiated QMAP header version: 1, 4 or 5),
+`v5` (the same as a boolean: MAPv5 checksum offload), `mux_mtus` (fill
 it: child → configured MTU) and the full `opts`, plus four helpers so the common
 case needs **no imports at all**:
 
@@ -315,10 +320,18 @@ the historical behaviour.
   adopting a driver's channels answers `aggregate: false, qmap: true`. It
   decides whether the WDA data format applies and whether the parent-vs-children
   packet ratio measures anything.
-- **`qmap_v5`** (default false) — this datapath carries MAPv5 checksum offload,
-  so the WDA format is negotiated as QMAPv5 first, with the plain-QMAP fallback.
+- **`qmap_versions`** (default `[ 1 ]`) — the QMAP header versions this
+  datapath can drive, best first; the WDA format is negotiated down that
+  ladder. Built-in rmnet declares `[ 5, 4, 1 ]`. It may be a function
+  `(fx, netdev)` for an adopter, whose header version is the vendor driver's
+  and can only be asked of the device. A datapath that declares only the
+  boolean `qmap_v5: true` is read as `[ 5, 1 ]`.
 
-`netlink.datapath_caps(backend, plugins)` answers all four by name. Three
+`netlink.datapath_caps(backend, plugins, fx, netdev)` answers all of these by
+name, as one object: `aggregate`, `qmap`, `qmap_versions`, `adopts` (the
+datapath overrides `prune`), `tx_aggr`, `dgram_max` and `llp_802_3` (the
+parent carries 802.3 framing). Without `fx`/`netdev` the device-dependent
+answers fall back to their static shape. Three
 callers used to test the name itself (`backend == 'rmnet'` for v5 and uplink
 coalescing, `!= 'rmnet' && != 'qmimux'` for the aggregation ratio), which every
 datapath added later fell outside of, silently.
@@ -374,7 +387,7 @@ datapath, and nothing noticed because no test drove a remap through it.
 flowchart TD
   START["setup()"] --> MUX{"option mux"}
   MUX -->|"raw_ip / none / raw-ip"| RIP["raw_ip — no mux"]
-  MUX -->|ethernet| ETH["ethernet — 802.3 kept, NOARP"]
+  MUX -->|ethernet| ETH["ethernet — 802.3 kept, ARP on"]
   MUX -->|"a name"| NAMED{"installed AND<br/>serves this protocol?"}
   NAMED -->|yes| USE["that one"]
   NAMED -->|"wrong protocol"| ERR["refused — impossible, not risky"]

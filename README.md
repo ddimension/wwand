@@ -86,8 +86,8 @@ The plugins bring their own pages — remote SIM ([wwand-rsim](https://github.co
 | **Cell Broadcast** | Public warnings (ETWS, CMAS / EU-Alert) and any channel you list: switched per modem, pages joined, repeats recognised, the last messages kept · `modem_cell_broadcast`, LuCI Modem Tools, the `cell_broadcast` event |
 | **Events** | ubus `wwand.modem` / `wwand.context` (registration, SIM, USSD, a new SMS, Cell Broadcast, interface up/down) and the same as `/etc/hotplug.d/wwand` scripts |
 | **USSD** | Codes and menus (`*100#`): QMI Voice → native MBIM USSD → `AT+CUSD`, one transport per modem and never a second send; network-initiated USSD as a ubus event · `wwandctl ussd`, LuCI Modem Tools |
-| **SMS** | Receive/list · read · delete stored messages (SIM or modem store) with a full GSM 03.40 PDU decoder (7-bit incl. umlauts, UCS2, alphanumeric sender, multipart merge) · transport auto-chosen QMI WMS (native / passthrough) → native MBIM SMS → AT · LuCI inbox on the Modem Tools page |
-| **Board** | Auto-detected board profiles (MikroTik Chateau 5G, Zyxel LTE3301-PLUS / -M209 / -Q222, LTE5398-M904, NR7101, Cudy LT300) drive modem **power/reset GPIOs** and **status LEDs** (5-bar signal graph or mobile/LTE) — absorbing the vendor helper scripts. Manual `modem_reset` / `modem_repower` (LuCI button); GPIO picker in the UI |
+| **SMS** | Send (`modem_sms_send`, `wwandctl sms-send`, LuCI) · receive/list · read · delete stored messages (SIM or modem store) with a full GSM 03.40 PDU decoder (7-bit incl. umlauts, UCS2, alphanumeric sender, multipart merge) · a new message raises the `sms` event · transport auto-chosen QMI WMS (native / passthrough) → native MBIM SMS → AT · LuCI inbox and send form on the Modem Tools page |
+| **Board** | Auto-detected board profiles (MikroTik Chateau 5G, Zyxel LTE3301-PLUS / -M209 / -Q222, LTE5398-M904, NR7101, Cudy LT300, Huasifei WH3000 Pro, Arcadyan AW1000) drive modem **power/reset GPIOs** and **status LEDs** (5-bar signal graph or mobile/LTE) — absorbing the vendor helper scripts. Manual `modem_reset` / `modem_repower` (LuCI button); GPIO picker in the UI |
 | **Ops** | Recovery ladder (opmode → modem reset → **board power-cycle / reset-GPIO** → reboot) + zero-rx watchdog · non-destructive restart + session adoption · **"waiting for modem"** surfaced to netifd/LuCI + logged · uniform rich telemetry line across all backends · the network's time (NITZ) sets the system clock when it is more than two minutes off — for routers without an RTC (`option nitz_time`, default on) · per-model quirk tables · AT side channel · **`at2_external`** reserves the secondary AT port for external tools (gpsd, scripts) |
 
 ## Packages
@@ -99,7 +99,9 @@ publishes **prebuilt, signed binary repositories** (snapshot and 25.12 across
 seven architectures) in two channels,
 `https://ddimension.github.io/openwrt-repo/<channel>/<release>/<arch>/`:
 `stable` carries the tagged releases (wwand vX.Y.Z as package version X.Y.Z),
-`main` the development state in between (X.Y.Z_pN, N commits after the tag).
+`main` the development state in between (X.Y.Z_preN, N commits after the
+`vX.Y.0-dev` marker of the next release; a stable pin between two tags is
+X.Y.Z_pN).
 See the [feed README](https://github.com/ddimension/openwrt-repo#binary-package-repositories)
 for device setup (the `ddimension-feed` package, signing keys, switching
 channels).
@@ -149,7 +151,7 @@ hook into the daemon through a neutral plugin interface (`plugins.uc`, see
 | `rsim-card` / `rsim-card-pcsc` | the card-side helper alone, for a **SIM host** — a PC or a second router holding the reader, reached over SSH (restricted to `rsim-card --serve`); `-pcsc` adds PC/SC readers through pcscd. Needs nothing of wwand |
 | [`wwand-ipa`](https://github.com/ddimension/wwand-ipa) + `wwand-ipad` | SGP.32 IoT Profile Assistant: eSIM fleet management through an eIM (`DEPENDS wwand-esim`) + `luci-app-wwand-ipa` |
 | [`wwand-qlog`](https://github.com/ddimension/wwand-qlog) | `wwandctl qlog`: Quectel QLog diagnostic capture on the port wwand found |
-| [`wwand-ims`](https://github.com/ddimension/wwand-ims) | VoLTE / IMS for a LAN SIP phone or a PBX trunk: the router is its own IMS UE over the modem's IMS PDN (IMS-AKA, sec-agree ESP via the `wwand_io` xfrm binding), or the modem's own IMS over QMI; `wwandctl ims` + sipd (`DEPENDS wwand-qmi kmod-ipsec…`, see [docs/plugin-wwand-ims.md](docs/plugin-wwand-ims.md)) |
+| [`wwand-ims`](https://github.com/ddimension/wwand-ims) | VoLTE / IMS for a LAN SIP phone or a PBX trunk: the router is its own IMS UE over the modem's IMS PDN (IMS-AKA, sec-agree ESP via the `wwand_io` xfrm binding), or the modem's own IMS over QMI; `wwandctl ims` + sipd (`DEPENDS wwand kmod-ipsec…`, see [docs/plugin-wwand-ims.md](docs/plugin-wwand-ims.md)) |
 
 ## Quick start
 
@@ -199,7 +201,7 @@ The full map, including the design notes and the running log, is
 |---|---|
 | `src-ucode/` | The daemon (ucode): codec, session, backends, integration |
 | `io/` | Native C module — cdc-wdm/tty I/O, rmnet netlink helper, non-blocking `spawn()` |
-| `files/` | netifd proto shim, init, hotplug, migration helper + uci-defaults |
+| `files/` | netifd proto shim, init, hotplug, migration helper + an inert uci-defaults example (installed to `/usr/share/wwand/examples/`) |
 | `tests/` | Host-side suites — `sh tests/run_tests.sh`, no hardware needed |
 | `docs/` | Reference, architecture, extending guide |
 

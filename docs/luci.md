@@ -25,8 +25,9 @@ connections** per modem, plus the per-ICCID SIM override table. Each row has
 **Edit** (the modem), **Status**, **Delete** and an **Actions** menu: **Tools**,
 **Reboot** — which resets just that modem (GPIO reset if the board exposes one,
 otherwise a backend soft reset; its connections drop briefly and recover on
-their own) — **Repower**, **Reattach** and, where they apply, **Unlock SIM**
-and **Save SIM** (a per-ICCID entry for the inserted card).
+their own) — **Repower**, **Reattach**, **Reinit SIM**, **Detach** / **Attach**
+and, where they apply, **Unlock SIM** and **Save SIM** (a per-ICCID entry for the
+inserted card).
 
 ![Modems overview](images/luci-modems-list.png)
 

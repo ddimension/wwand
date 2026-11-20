@@ -4880,9 +4880,10 @@ export function create(opts)
 		// No context to take down — the modem is absent, or the interface's
 		// modem is not configured — but this is still the operator's ifdown
 		// (netifd tears a pending interface down through the shim as well,
-		// proto-ext.c:162-170). Unrecorded, the shim's WAITING_MODEM error
-		// that stays on the interface read as OUR block once the modem came,
-		// and the interface was brought up against them.
+		// proto-ext.c:162-170, netifd 2026.07.08~6088f7b3). Unrecorded, the
+		// shim's WAITING_MODEM error that stays on the interface read as OUR
+		// block once the modem came, and the interface was brought up against
+		// them.
 		if (!entry?.ctx) {
 			// ...unless it is the teardown of a down wwand issued itself (a
 			// hold expiry, a SIM block) that reached us after the modem had

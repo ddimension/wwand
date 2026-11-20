@@ -1341,10 +1341,17 @@ export function create(opts)
 	};
 
 	// native MBIM USSD for ussd.uc (duck-typed like mbim_pin): only where the
-	// modem lists the service; `set` answers the decoded response
+	// modem lists the service; `set` takes the action by name ('initiate',
+	// 'continue', 'cancel' — ussd.uc is in the base package and cannot import
+	// the MBIM constants) and answers the decoded response
+	let ussd_actions = { initiate: mbim_backend.USSD_ACTION_INITIATE,
+		'continue': mbim_backend.USSD_ACTION_CONTINUE, cancel: mbim_backend.USSD_ACTION_CANCEL };
+
 	self.mbim_ussd = {
 		offered: () => self.mbim?.offers(mbim_backend.USSD_SERVICE) === true,
-		set: (action, dcs, payload, cb) => mbim_backend.ussd_set(self.mbim, action, dcs, payload, cb),
+		set: (action, dcs, payload, cb) => (ussd_actions[action] == null)
+			? cb({ error: 'invalid_action', action: action }, null)
+			: mbim_backend.ussd_set(self.mbim, ussd_actions[action], dcs, payload, cb),
 	};
 
 	// NATIVE OPERATOR SCAN. MBIM has had one all along (VISIBLE_PROVIDERS,

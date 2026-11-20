@@ -198,7 +198,7 @@ scenario('mbim: initiate, a question, continue', (next) => {
 		eq([ res?.reply, res?.action_required, res?.via ], [ '1=Saldo', true, 'mbim' ], 'mbim: the question');
 
 		ussd.send(m, '1', (err2, res2) => {
-			eq(sets, [ [ 0, 15 ], [ 1, 15 ] ], 'mbim: INITIATE, then CONTINUE, both GSM7');
+			eq(sets, [ [ 'initiate', 15 ], [ 'continue', 15 ] ], 'mbim: INITIATE, then CONTINUE, both GSM7');
 			eq([ res2?.reply, res2?.session ], [ '5 EUR', 'idle' ], 'mbim: the final answer');
 			next();
 		});

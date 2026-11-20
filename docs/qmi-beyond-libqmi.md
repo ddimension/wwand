@@ -10,7 +10,8 @@ that is sent is measured on hardware first.
 The list is generated, not kept by hand: `tools/qmi-libqmi-audit.sh` in
 wwand-ims dumps every schema, compares each message and TLV id with libqmi
 1.38, and looks each one up in a vendor IDL dump. Rerun it after a schema
-change; a new row without an entry here is a gap. The plugin's own entries
+change, passing this tree's `src-ucode` as its first argument — without one it
+audits `../wwand-ims-core/src-ucode`, a different checkout; a new row without an entry here is a gap. The plugin's own entries
 (wwand-ims `plugins/ims.uc`) are listed in wwand-ims
 `docs/qmi-beyond-libqmi.md`.
 
@@ -20,7 +21,7 @@ change; a new row without an entry here is a gap. The plugin's own entries
 |---|---|
 | **IDL-8T** | The Qualcomm IDL encoder tables in a shipping RIL: OnePlus 8T (KB2003, OxygenOS 14, SM8250/X55), `/vendor/lib64/libqmiservices.so` (md5 a062f6bae6caa55fac574e7c8e07e8b1), decoded with wwand-ims `tools/qmi-idl-dump.py` on 2026-11-15. The dump is wwand-ims `research/op8t-20261113/idl-libqmiservices.json`. It gives message ids, TLV ids and wire widths, no names. |
 | **IDL-OP13** | The Qualcomm IDL of a newer RIL: OnePlus 13 vendor tree (NAS IDL 1.0x190), the service headers and encoder tables (`network_access_service_v01`, `wireless_data_service_v01`), read 2026-11-16 from the private reference library (`qcril-ref/idl`). It gives names, TLV ids and wire widths. |
-| **IDL-8996** | Qualcomm's msm8996 QMI service sources (`wireless_data_service_v01.c` and others) and `dsi_netctrl`, in the reference library under `~/projects/wwand-ims-docs/library`. They give names and widths. |
+| **IDL-8996** | Qualcomm's msm8996 QMI service sources (`wireless_data_service_v01.c` and others) and `dsi_netctrl`, in the private reference library (not published). They give names and widths. |
 | **IDL-RG650E** | The request and indication tables in the RG650E's own apps side (`libqmiservices.so`, `libdsi_netctrl.so`), from earlier RE rounds (chateau_5g notes). |
 | **Gobi** | Qualcomm's Gobi API, 2013-07-31 (`QMIEnum.h`, `GobiConnectionMgmtAPIStructs.h`). It is old, so its value tables are not trusted for current firmware. |
 | **Kernel** | The GPL-2.0 Linux QMI sources (`thermal_mitigation_device_service_v01.{h,c}`). |

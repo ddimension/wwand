@@ -345,7 +345,7 @@ function mbim_send(modem, req, text, answering)
 		return complete(modem, req, { error: 'too_long' }, null, answering ? 'user_response' : null);
 
 	// CONTINUE answers the network's question, INITIATE starts a session
-	modem.mbim_ussd.set(answering ? 1 : 0, e.dcs, e.payload, (err, d) => {
+	modem.mbim_ussd.set(answering ? 'continue' : 'initiate', e.dcs, e.payload, (err, d) => {
 		if (err)
 			return complete(modem, req, { error: 'mbim', detail: err }, null);
 
@@ -592,7 +592,7 @@ export function cancel(modem, cb)
 			return voice.request('CANCEL_USSD', {}, (err) =>
 				done(err ? { error: 'qmi', detail: err } : null), { no_recovery: true });
 		if (be == 'mbim')
-			return modem.mbim_ussd.set(2, 0, '', (err) => done(err ? { error: 'mbim', detail: err } : null));
+			return modem.mbim_ussd.set('cancel', 0, '', (err) => done(err ? { error: 'mbim', detail: err } : null));
 		if (be == 'at')
 			return modem.at.send('AT+CUSD=2', (err) => done(err ? { error: 'at', detail: err } : null));
 

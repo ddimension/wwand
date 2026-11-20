@@ -21,7 +21,7 @@ choices, flagged as such.
 |---|---|---|---|
 | Initial EPS/attach bearer | distinct attach APN + creds (`init_*`) | same: `init_apn`/`init_auth`/`init_user`/`init_pass` on `wwand_modem`, else the connection APN | parity |
 | Roaming gate | `allow_roaming` | — | **MISSING** (MED–HIGH for fixed/M2M) |
-| Allowed vs preferred RAT | both | allowed set only | near-parity (preferred tier missing, LOW) |
+| Allowed vs preferred RAT | both | allowed set + acquisition order (`option rat_order`, `modem_set_settings` `rat_order`) | parity |
 | PLMN pinning | register-in-operator | mcc/mnc + idempotent netsel + scan | **wwand better** |
 | IP type / MTU | iptype | pdp_type + pushed-MTU/prefix knobs | wwand better (MTU) |
 | Multi-PDN on one modem | one bearer/iface (OpenWrt handler) | N interfaces → QMAP mux channels | **wwand better** |
@@ -30,17 +30,18 @@ choices, flagged as such.
 | Firmware update | fwupd | — | missing (LOW–MED) |
 | Carrier config (PDC/MBN) | yes | QMI PDC list/get/set (`modem_carrier_config`) + the Quectel quirk | parity (wwand selects among shipped blobs; deliberately never writes or deletes one) |
 | FCC unlock | per-vendor scripts | native (DMS/Foxconn/MBIM) | parity (MM wider vendor list) |
-| SIM PIN/PUK | yes | PIN + PUK-avoidance guard | parity+ |
+| SIM PIN/PUK | yes | PIN verify/change/enable + PUK + PUK-avoidance guard | parity+ |
 | Multi-SIM / per-SIM cfg | slots | slots + per-ICCID `wwand_sim` overrides | **wwand better** |
 | eSIM download / LPA | **no profile download** (reports EID only) | **full LPA**: ES10c enable/disable/delete + SM-DP+ via lpac | **wwand better (headline)** |
 | Signal / cell / DSD | Signal + GetCellInfo | signal + cells + DSD NSA/SA + CA + reject-cause + temp | parity/wwand better |
-| Location GPS/NMEA/AGPS | GPS raw + NMEA + AGPS/SUPL | QMI LOC fix; yields port to gpsd | near-parity (no NMEA producer / AGPS) |
-| SMS | send + receive | send + receive (PDU encoder; QMI WMS / MBIM / `AT+CMGS`) | parity |
-| USSD | yes | — | **MISSING** (MED, prepaid balance) |
+| Location GPS/NMEA/AGPS | GPS raw + NMEA + AGPS/SUPL | QMI LOC fix; NMEA reader on the modem's port (`wwand-gps`, `modem_gps`) | near-parity (no AGPS, no NMEA stream out) |
+| SMS | send + receive | send + receive (PDU encoder; QMI WMS / MBIM / `AT+CMGS`), `sms` arrival event | parity |
+| USSD | yes | `modem_ussd`: QMI Voice → native MBIM USSD → `AT+CUSD`, network-initiated USSD as an event | parity |
+| Cell Broadcast | yes | `modem_cell_broadcast`, the `cell_broadcast` event (ETWS, CMAS / EU-Alert) | parity |
 | Voice | yes | — | missing by design (LOW) |
 | Recovery / robustness | reconnect; no HW reset | recovery ladder + board GPIO reset + zero-rx watchdog + persistent counters | **wwand better (decisive for routers)** |
 | Non-destructive restart | bounces sessions | WAN + traffic survive, session adopted | **wwand better** |
-| Control API | rich DBus (mmcli) | ubus (~30 methods) + events + `wwandctl` | parity for router use |
+| Control API | rich DBus (mmcli) | ubus (~58 methods) + events + `wwandctl` | parity for router use |
 | netifd integration | PPP-oriented, one bearer | no-proto-task, VRF-safe, in-place renew, idempotent reload | **wwand better** |
 | Zero-config | manual APN typical | autosetup + ICCID→APN fill | **wwand better** |
 | Low-power / thermal | `lowpower` on ifdown; temp | `option lowpower` parks the radio on the last context-down and an ifup wakes it; QMI TMD mitigation state + temp | parity |
@@ -57,8 +58,8 @@ choices, flagged as such.
    `proto modemmanager` interface because wwand has no home for it yet.
 2. ~~**SMS send**~~ — **SHIPPED.** PDU encoder + QMI WMS RawSend / MBIM /
    `AT+CMGS`, `modem_sms_send` on ubus, LuCI inbox on the Modem Tools page.
-3. **USSD** — MED/med. `modem_ussd` → QMI NAS/VS or `AT+CUSD`; reuse the GSM-7
-   codec. Prepaid balance/top-up is a real cellular-router use case.
+3. ~~**USSD**~~ — **SHIPPED.** `modem_ussd` over QMI Voice, native MBIM USSD
+   or `AT+CUSD` (`ussd.uc`), `wwandctl ussd`, LuCI Modem Tools.
 4. ~~**Distinct attach-bearer credentials**~~ — **SHIPPED.** `init_apn`,
    `init_auth`, `init_user`, `init_pass` on `wwand_modem` feed the attach-profile
    write instead of reusing the context APN, closing the separate IMS/attach-APN
@@ -84,17 +85,18 @@ choices, flagged as such.
 8. ~~**Thin `wwand` CLI**~~ — **SHIPPED** as `wwandctl` (`src-ucode/wwandctl.uc`,
    installed to `/usr/bin/wwandctl`): an `mmcli`-like verb surface over the ubus
    object, with `--json` for scripting.
-9. **Preferred-RAT tier + signal delta thresholds** — LOW/low. Extend
-   `modem_set_settings` with a preferred-RAT ranking + QMI NAS signal-threshold
-   config (report on delta, not just interval).
+9. **Preferred-RAT tier + signal delta thresholds** — LOW/low. The ranking is
+   shipped (`option rat_order`, `modem_set_settings` `rat_order`); open is the
+   QMI NAS signal-threshold config (report on delta, not just interval).
 10. **AGPS/SUPL + NMEA stream** — LOW/med. SUPL-server config on the QMI LOC
-    session; optionally emit an NMEA stream (today wwand only yields the port).
+    session; optionally emit an NMEA stream (today `wwand-gps` reads NMEA into
+    `modem_gps`, or wwand yields the port).
 
-Still open, in the order above: **1** roaming gate, **3** USSD, **5** metered
-usage accounting + quota action, **9** preferred-RAT tier + signal delta
-thresholds, **10** AGPS/SUPL + NMEA. Five of the ten have shipped (2, 4, 6, 7,
+Still open, in the order above: **1** roaming gate, **5** metered
+usage accounting + quota action, **9** signal delta thresholds, **10**
+AGPS/SUPL + NMEA stream. Six of the ten have shipped (2, 3, 4, 6, 7,
 8); the list keeps its original numbering so earlier references to "item 6" still
-find the same thing. Last reviewed against the tree on **2026-08-31**.
+find the same thing. Last reviewed against the tree on **2026-11-20**.
 
 Deliberately excluded as low-value-for-effort on routers: PPP fallback, voice
 calls, firmware/fwupd, suspend/resume.
@@ -130,5 +132,5 @@ calls, firmware/fwupd, suspend/resume.
   own udev rules (`tools/gen-atport-table.py`).
 
 _Caveat: MM-side feature claims are from its published API surface + the OpenWrt
-package, not a line-by-line 1.24 source read; wwand's USSD and voice absences
-were verified directly in source (SMS send was on that list until it shipped)._
+package, not a line-by-line 1.24 source read; wwand's voice absence
+was verified directly in source._

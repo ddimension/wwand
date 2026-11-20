@@ -46,26 +46,34 @@ first Chateau measurement, when the tree was much smaller):
                                    (protocol-agnostic), rmnet netlink helper
  codec:        qmux.uc, tlv.uc, hex.uc, schema/*.uc  — QMI, declarative
                schema: ctl/dms/nas/wds/wda/uim/wms/loc/dsd/rat + pdc (carrier
-               config), tmd (thermal mitigation), cat (SIM toolkit)
-               mbim.uc, mbim_schema/*.uc             — MBIM, declarative
+               config), tmd (thermal mitigation), cat (SIM toolkit), voice
+               (wms/voice loaded lazily via *_lazy.uc)
+               mbim.uc, mbim_schema/*.uc             — MBIM, declarative:
+               basic_connect, ms_basic_connect_ext, ms_voice_ext,
+               qmi_passthrough + vendor quectel/compal/fibocom
  session:      transport.uc (hub/routing), client.uc (QMI correlation),
                mbim_client.uc, qmi_over_mbim.uc (QMI-over-MBIM passthrough hub),
                qmi_over_qrtr.uc (QMI over the QRTR bus: CTL emulated, one
                socket per client)
  backends:     QMI  — modem.uc/context.uc + extracted helpers modem_init_qmi.uc,
-                      telemetry_qmi.uc, datapath_qmi.uc, context_monitor_qmi.uc,
+                      telemetry_qmi.uc, modem_datapath_qmi.uc, context_monitor_qmi.uc,
                       regdetail.uc, config_check.uc
                MBIM — modem_mbim/context_mbim + telemetry_mbim.uc
                NCM  — modem_ncm/context_ncm + telemetry_ncm.uc (NCM/AT)
                one daemon-neutral contract; shared core:
                       modem_common.uc, context_common.uc, backend.uc,
-                      qmi_backend.uc, mbim_backend.uc, sim.uc
+                      qmi_backend.uc, mbim_backend.uc, sim.uc;
+               services over any backend: ussd.uc, sms_rx.uc (inbound SMS),
+                      cbs.uc (cell broadcast), cell_lock.uc (lock_4g/lock_5g)
  system:       netlink.uc (datapath), recovery.uc, board.uc (power/reset/LEDs),
                carrier_config.uc (MBN selection over PDC — token/indication),
                atcmd.uc + atcmd_parse.uc (+atport),
                discovery.uc (control-type detection), modeswitch/protocol_switch
  integration:  daemon.uc + netsel_ops.uc (registry/policy), config.uc
-               (+migrate/compat), ubus.uc, main.uc
+               (+migrate/compat), ubus.uc, main.uc, simops.uc (SIM/SMS/
+               eSIM/APDU/PLMN ops), hwops.uc (reset/repower), deps.uc (side
+               effects: uci, netifd over ubus, emit_event → /etc/hotplug.d/
+               wwand scripts via hotplug_env), plugins.uc (plugin hooks)
  shell:        wwand-proto.sh (thin netifd shim → wwand.sh, proto `wwand` only), init, hotplug,
                wwand-migrate + an example uci-defaults script (user-triggered config migration)
 ```
@@ -180,6 +188,9 @@ Design principles, all validated in the field:
 
 Bring-up is a linear step chain per modem; any step failure tears down and
 schedules a capped-backoff retry that climbs the recovery ladder (§ Recovery).
+The QMI chain is drawn; `VERIFY_ONLINE` and `FCC_AUTH` are step functions inside
+`SET_OPMODE`, not states — `status` never shows them (`modem_common.MODEM_STATES`
+holds the names it can show).
 
 ```
   ABSENT
@@ -298,7 +309,7 @@ the datapath:
   keeps its kernel name and is never renamed.
 
 On `registered` the daemon writes the resolved name back onto the interface
-section as `option device` (`main.uc` `learn_device`): idempotent, `commit`-only
+section as `option device` (`deps.uc` `learn_device`): idempotent, `commit`-only
 so no interface bounce, and it **never clobbers a user-set value** — gated by
 `wwand_globals.write_device` (default on). That gives VRF `list ports`, firewall
 and LuCI one explicit, editable, stable handle onto the datapath.
@@ -487,7 +498,8 @@ Port discovery: config override → board quirk table → USB id + interface
 number lookup in a table generated from ModemManager's udev rules (225
 devices; lazily loaded) → first-tty heuristic. Serialized command engine
 with echo filtering and OK/ERROR/+CME parsing. Used for model init quirks
-(Quectel MBN autoselect — a QMI-native PDC replacement is a future option),
+(Quectel MBN autoselect; the QMI-native path is `carrier_config.uc`, MBN
+selection over PDC),
 cell locking, the Huawei mode fallback, and ad-hoc diagnostics via ubus.
 Connection bring-up never depends on AT.
 
@@ -498,11 +510,9 @@ loop, the zero-rx watchdog) has been consolidated into `modem_common.uc` /
 `context_common.uc`; the remaining fork between the three backends is genuine
 per-protocol logic (step chains, teardown, `with_nas`). Open items:
 
-1. A ~25-line `series()` helper would flatten the deeper callback chains
-   (`_read_info`, sim flows).
-2. Error objects are ad hoc; an `errors.uc` with constants and a QMI
+1. Error objects are ad hoc; an `errors.uc` with constants and a QMI
    error-code name table would improve logs and grep-ability.
-3. Recovery persistence writes on every counter change; a dirty-flag with a
+2. Recovery persistence writes on every counter change; a dirty-flag with a
    1 s timer would throttle failure storms (tmpfs, so hygiene only).
 
 (The old per-interface shell monitor is gone — the no-proto-task model in §3
@@ -516,9 +526,10 @@ above cares which one is in use.
 
 ```
               ┌──────────── daemon-neutral contract ─────────────┐
-              │ modem: start/stop/state/with_nas/attach_context/ │
-              │        note_connect_*/switch_protocol + events    │
-              │ context settings: {ipv4{…}, ipv6{…}, mtu}         │
+              │ modem: duck-typed fields (spec: backend.uc:20-38)│
+              │  (id/state/config/info/reg/active_sim/at/timing/ │
+              │   contexts, scaffolding, reset, reapply_sim)     │
+              │ context settings: {ipv4{…}, ipv6{…}, mtu}        │
               └──────────────────────────────────────────────────┘
                    │                  │                    │
                ┌───┴───┐         ┌────┴────┐          ┌────┴───┐

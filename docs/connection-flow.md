@@ -75,13 +75,18 @@ PCIe-ready), `serial` (USB iSerial), `device` literal. A modem whose control
 device is absent **waits** (`control_note` = "waiting for modem", re-checked
 every 30 s by the daemon tick) — boot order never fails a modem permanently.
 Zero-config boxes get `wwmodem_auto` + `interface wwan0` created by autosetup
-(`daemon.autosetup_scan` / hotplug, uci writers in `main.uc`).
+(`daemon.autosetup_scan` / hotplug, uci writers `autosetup_create` /
+`autosetup_fill` in `deps.uc`).
 
 ### Bring-up chain (per modem)
 
 `daemon.uc start_modem` builds the backend object; the per-backend init chain
 drives the modem state machine below. These are the names `ubus call wwand
 status` prints, so a stuck bring-up can be read straight off the status page.
+The diagram is the QMI chain; the other backends use a subset of the same
+names (`modem_common.MODEM_STATES`): MBIM has no `SET_OPMODE`/`CONFIGURE_NET`
+and goes through `ATTACHING` before `REGISTERING`, NCM has neither and uses
+`CONFIGURING` for its attach configuration.
 
 ```mermaid
 stateDiagram-v2
@@ -146,8 +151,9 @@ routes, VRF membership are netifd's job (see the VRF invariant in
 `architecture.md`).
 
 APN/credential resolution precedence: active `wwand_sim` (per-ICCID/IMSI
-override) → interface section → card-provisioned attach APN (read from the
-modem when the config leaves it empty) — `context_common.conn_cfg`.
+override) → interface section → empty, which means the network default — an
+unset APN is written into the attach profile as empty, never kept from what
+profile 1 held — `context_common.conn_cfg`.
 
 ### Steady state and failure
 
@@ -166,7 +172,8 @@ modem when the config leaves it empty) — `context_common.conn_cfg`.
 ```mermaid
 stateDiagram-v2
   [*] --> IDLE
-  IDLE --> PREPARING: up() — profile, attach APN
+  IDLE --> PREPARING: up() — profile, attach APN (QMI only)
+  IDLE --> ACTIVATING: up() (MBIM, NCM)
   PREPARING --> ACTIVATING: profile ready
   ACTIVATING --> CONNECTED: settings pushed to netifd
   CONNECTED --> CONNECTED: renew in place<br/>(session reconnected, no teardown)

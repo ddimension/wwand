@@ -1106,7 +1106,7 @@ const MODES = [
 	{ name: 'raw_ip', kind: 'mode',
 	  description: 'no multiplexing — one plain raw-IP interface' },
 	{ name: 'ethernet', kind: 'mode',
-	  description: 'no multiplexing — the parent stays in 802.3 ethernet framing (raw_ip off), ARP off (point-to-point hop)' },
+	  description: 'no multiplexing — the parent stays in 802.3 ethernet framing (raw_ip off), ARP on (the modem bridges into the network segment)' },
 	// cdc_mbim's no-mux answer, and a different thing from raw_ip even though
 	// both mean "the parent carries it": untagged traffic on a cdc_mbim parent
 	// IS IPS session 0 (drivers/net/usb/cdc_mbim.c:262-270, Linux 6.18.41 — no

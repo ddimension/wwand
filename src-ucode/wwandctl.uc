@@ -413,7 +413,9 @@ function cmd_esim(st, args)
 	}
 
 	case 'download-status': {
-		let res = call_ok('modem_esim', { modem: r.modem, op: op });
+		// the bridge's op is spelled with an underscore (esim_bridge.uc
+		// download_status); the CLI keeps the hyphen of its other commands
+		let res = call_ok('modem_esim', { modem: r.modem, op: 'download_status' });
 		printf('state: %s%s\n', res.state ?? '?', res.via ? sprintf(' via %s', res.via) : '');
 		if (length(res.log ?? ''))
 			printf('%s\n', res.log);
@@ -505,7 +507,7 @@ eSIM (needs the wwand-esim package)
 
 Maintenance
   sims                   every SIM card seen: ICCID, where it is (modem/slot, eUICC profile, reader)
-  reset [modem]          modem reset (GPIO if configured, else backend soft reset)
+  reset [modem]          modem reset (its own reset first; the reset GPIO only as the fallback)
   repower [modem]        hardware repower (reset-GPIO pulse / board power-cycle)
   protocol [modem] qmi|mbim   switch the control protocol (the modem resets)
   plmn-set [modem] <user|nas|fplmn> <mccmnc>[+gsm,+utran,...] ...
