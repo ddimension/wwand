@@ -111,20 +111,33 @@ export function install(self, o)
 				name, join(', ', changed)));
 	};
 
-	// apply the effective MTU on the l3 link (use_pushed_mtu semantics, native rtnl)
+	// the MTU the l3 link gets, or null (the link is left alone). A configured
+	// `option mtu` wins over the pushed one: it is the operator's answer to a
+	// path the network describes wrongly. A modem pushes the bearer's MTU, not
+	// the path's: the Huawei E392 pushes 1500 on a GDSP IMS PDN whose path
+	// takes about 1450, where large SIP requests need `option mtu '1400'`
+	// (HW-observed on the Chateau's E392, 2026-11-20). use_pushed_mtu only
+	// decides whether the pushed value applies when none is configured. One
+	// function for _apply_mtu and _settings_result, so what is reported is
+	// what was applied.
+	let effective_mtu = (entry) => {
+		let pushed = entry.ctx.settings?.mtu;
+
+		if (entry.cfg.mtu != null && entry.cfg.mtu > 575)
+			return entry.cfg.mtu;
+		if (entry.cfg.use_pushed_mtu && pushed != null && pushed > 1280)
+			return pushed;
+		return null;
+	};
+
+	// apply the effective MTU on the l3 link (native rtnl)
 	self._apply_mtu = function(name, entry, netdev) {
 		let fx = datapath_fx;
 
 		if (!fx || !netdev)
 			return;
 
-		let pushed = entry.ctx.settings?.mtu;
-		let mtu = null;
-
-		if (entry.cfg.use_pushed_mtu && pushed != null && pushed > 1280)
-			mtu = pushed;
-		else if (entry.cfg.mtu != null && entry.cfg.mtu > 575)
-			mtu = entry.cfg.mtu;
+		let mtu = effective_mtu(entry);
 
 		if (mtu == null)
 			return;
@@ -212,7 +225,7 @@ export function install(self, o)
 			context: name,
 			interface: entry.cfg.interface,
 			netdev: netdev,
-			mtu: entry.cfg.mtu ?? entry.ctx.settings?.mtu,
+			mtu: effective_mtu(entry),
 			pushed_mtu: entry.ctx.settings?.mtu,
 			use_pushed_mtu: entry.cfg.use_pushed_mtu,
 			ipv4: entry.ctx.settings?.ipv4,

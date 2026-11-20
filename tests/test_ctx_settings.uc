@@ -216,4 +216,39 @@ eq(length(calls), 0, 'wiring: no netdev -> nothing attempted');
 	ok(modem.active_sim === keep_sims[0], 'moved: and so is its match');
 }
 
+// --- _apply_mtu: a configured MTU wins over the pushed one -----------------
+//
+// The E392 pushes 1500 for a path of about 1450; `option mtu '1400'` is the
+// fix, and it did nothing while the pushed value came first.
+{
+	let run = (cfg, pushed) => {
+		let self = {}, links = [];
+		ctx_settings.install(self, {
+			log: () => null, read_config: null,
+			datapath_fx: {
+				exists: () => false, write: () => true, last_error: null,
+				link_set: (dev, a) => { push(links, a.mtu); return true; },
+			},
+		});
+		let entry = { cfg: cfg, ctx: { settings: (pushed != null) ? { mtu: pushed } : null } };
+		self._apply_mtu('wwims', entry, 'wwims');
+		// what the shim is told must be what the link got (null: left alone)
+		eq(self._settings_result('wwims', entry, 'wwims').mtu, links[0],
+		   sprintf('mtu: reported = applied for %J, pushed %J', cfg, pushed));
+		return links;
+	};
+	eq(run({ mtu: 1400, use_pushed_mtu: true }, 1500), [ 1400 ],
+	   'mtu: the configured MTU wins over the pushed one');
+	eq(run({ mtu: 1400, use_pushed_mtu: false }, 1500), [ 1400 ],
+	   'mtu: the configured MTU applies with use_pushed_mtu off');
+	eq(run({ use_pushed_mtu: true }, 1430), [ 1430 ],
+	   'mtu: nothing configured -> the pushed MTU');
+	eq(run({ use_pushed_mtu: false }, 1430), [],
+	   'mtu: nothing configured, use_pushed_mtu off -> the link is left alone');
+	eq(run({ use_pushed_mtu: true }, 1200), [],
+	   'mtu: a pushed MTU at or below 1280 is not applied');
+	eq(run({ mtu: 500, use_pushed_mtu: true }, 1430), [ 1430 ],
+	   'mtu: an implausible configured MTU (<= 575) falls back to the pushed one');
+}
+
 done('test_ctx_settings');

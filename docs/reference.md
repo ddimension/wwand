@@ -728,8 +728,8 @@ config interface 'wan'
 	option auth 'none'               # none|pap|chap|both
 	option username ''
 	option password ''
-	option mtu ''                    # fixed MTU (else the pushed MTU when enabled)
-	option use_pushed_mtu '1'        # apply the network-advertised MTU
+	option mtu ''                    # fixed MTU; wins over the pushed one
+	option use_pushed_mtu '1'        # no mtu set: apply the network-advertised MTU
 	option iccid ''                  # bind to one SIM card (18-20 digits); the ifup
 	                                 #   switches to its slot / eSIM profile
 	option use_pushed_prefix '0'     # keep the pushed IPv4 prefix (default: /32 p-t-p)
