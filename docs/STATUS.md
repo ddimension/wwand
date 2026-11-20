@@ -20,8 +20,16 @@ state buried at the top invites reading a months-old entry as present tense.
   the RG650E for data. **Not HW-verified: the eSIM path over it** (ISD-R,
   no eUICC behind such a modem), and channels above 3. The E392 runs raw_ip
   without QMAP: one PDN, one interface. The GDSP IMS PDN's path MTU is about
-  1450 and not signalled — `option mtu '1400'` there; a lower default for
-  `option ims` PDNs is not built.
+  1450 while the E392 pushes 1500 — `option mtu '1400'` there; a lower default
+  for `option ims` PDNs is not built.
+- **A configured `option mtu` wins over the pushed MTU (2026-11-20).** It came
+  second: with `use_pushed_mtu` on (the default) any pushed value above 1280
+  replaced it, so the E392's 1500 overrode the 1400 above while the status
+  reported 1400; the UE's reg-event SUBSCRIBE timed out at 1500 and went
+  through at 1400 (`ctx_settings._apply_mtu`, test_ctx_settings; HW-checked on
+  the Chateau: after a restart the daemon sets 1400 itself). `use_pushed_mtu`
+  now only decides whether the pushed MTU applies when none is configured, as
+  reference.md and the LuCI help said.
 - **wwandctl SMS slots (2026-11-20, wwand#94):** `wwandctl sms` prints the part
   list of a multi-part message (`[4,5]`, was `[  0]`); `sms-delete [SM|ME]
   <index>[,<index>...]` sends the storage and a list, so slot 0 (real on QMI)
