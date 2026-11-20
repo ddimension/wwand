@@ -112,7 +112,8 @@ selection** with an operator scan, **cell lock**, SIM slot and **SIM PIN**
 and with fewer than two attempts left the page asks before it tries), full
 **eSIM profile management** (download via activation code through lpac,
 enable/disable/delete, provider confirmations), SIM PLMN preference lists,
-SMS, **USSD** (send a code, answer the network's question, end the session)
+SMS (list, delete the ticked ones, **send** — a long text in several parts),
+**USSD** (send a code, answer the network's question, end the session)
 and the last **Cell Broadcast** messages.
 
 ![Modem Tools](images/luci-modem-tools.png)
