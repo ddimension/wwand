@@ -10,7 +10,8 @@
 
 import { fmt_plmn, fmt_sig, fmt_locks, reg_text, packet_service_text,
 	collectd_lines, collectd_interval, recovery_text, radio_text, select_args, euicc_text,
-	raw_num, qmi_service_id, qmi_raw_payload, qmi_raw_text, mbim_raw_text } from 'wwand.wwandctl_fmt';
+	raw_num, qmi_service_id, qmi_raw_payload, qmi_raw_text, mbim_raw_text,
+	sms_slots, sms_delete_args } from 'wwand.wwandctl_fmt';
 
 import * as libubus from 'ubus';
 import * as fs from 'fs';
@@ -339,7 +340,8 @@ function cmd_sms(st, args)
 	let res = call_ok('modem_sms_list', { modem: r.modem, storage: storage });
 
 	for (let m in (res.messages ?? []))
-		printf('[%3d] %s  %s\n      %s\n', m.index, m.timestamp ?? '-', m.sender ?? '?',
+		printf('[%3s] %s  %s%s\n      %s\n', sms_slots(m), m.timestamp ?? '-', m.sender ?? '?',
+			m.incomplete ? sprintf('  (%d of %d parts)', length(m.indexes ?? []), m.parts ?? 0) : '',
 			m.text ?? '');
 
 	if (!length(res.messages ?? []))
@@ -488,9 +490,9 @@ SIM
 SMS
   sms [modem] [SM|ME]    list stored messages
   sms-send [modem] <number> <text...>   send an SMS
+  sms-delete [modem] [SM|ME] <index>[,<index>...]   delete the slots "sms" lists
   ussd [modem] <code|answer>  send a USSD code, or answer the network's question
   ussd-cancel [modem]        end the USSD session
-  sms-delete [modem] <index>
 
 eSIM (needs the wwand-esim package)
   esim [modem] profiles                  list installed profiles
@@ -1087,11 +1089,27 @@ case 'sms-delete': {
 	let r = resolve_modem(st, args[0]);
 	let rest = r.consumed ? slice(args, 1) : args;
 
-	if (rest[0] == null)
-		die('usage: wwandctl sms-delete [modem] <index>');
+	let req = sms_delete_args(r.modem, rest);
 
-	call_ok('modem_sms_delete', { modem: r.modem, index: +rest[0] });
-	printf('message %d deleted\n', +rest[0]);
+	if (!req)
+		die('usage: wwandctl sms-delete [modem] [SM|ME] <index>[,<index>...]');
+
+	// a list reply says ok: false when any slot failed, next to what did go
+	// (sms.sms_delete) — that is reported per slot, not as one error
+	let res = call('modem_sms_delete', req);
+
+	if (res.ok === false && type(res.failed) != 'array')
+		die(sprintf('modem_sms_delete failed: %s', res.error ?? 'unknown error'));
+
+	printf('%s: deleted %d of %d slot%s\n', req.storage, res.deleted ?? 0, res.requested ?? length(req.indices),
+		(length(req.indices) == 1) ? '' : 's');
+
+	for (let f in (res.failed ?? []))
+		printf('  slot %d: %s%s\n', f.index, f.error?.error ?? sprintf('%J', f.error),
+			f.error?.detail ? sprintf(' %J', f.error.detail) : '');
+
+	if (length(res.failed ?? []))
+		exit(1);
 	break;
 }
 

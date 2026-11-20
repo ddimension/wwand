@@ -125,8 +125,13 @@ sms.sms_delete(modem, 'SM', 6, (err, res) => {
 	eq(length(sent), 0, 'ubus: and NOTHING was sent to the modem');
 
 	ops.modem_sms_delete('m0', 'SM', 0, null, (e, r) => { got = e; });
-	eq(got?.error, 'no_index', 'ubus: a bare index 0 is refused too — slots number from 1');
+	eq(got?.error, 'no_index', 'ubus: a bare index 0 is refused too — it is the placeholder');
 	eq(length(sent), 0, 'ubus: still nothing sent');
+
+	// ...but slot 0 is real on QMI (wwand#94): reachable as a list
+	ops.modem_sms_delete('m0', 'ME', null, [ 0 ], (e, r) => { got = r; });
+	eq([ sent, got?.deleted ], [ [ 0 ], 1 ], 'ubus: slot 0 is deleted when listed');
+	sent = [];
 
 	// ...and a real request still goes through, both shapes
 	ops.modem_sms_delete('m0', 'SM', 3, [], (e, r) => { got = e; });

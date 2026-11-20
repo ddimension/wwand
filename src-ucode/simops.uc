@@ -532,9 +532,12 @@ export function install(self, o)
 		// "fixing" the `?? default` patterns elsewhere in this tree that work
 		// precisely because the key is absent.
 		//
-		// So a positive index is required. SMS storage records are numbered from
-		// 1 (3GPP TS 51.011 EF_SMS is a linear fixed file, record 1 upwards), so
-		// this refuses nothing a modem can actually address.
+		// So a bare `index` must be positive. That does refuse a real slot: QMI
+		// WMS numbers its memory indexes from 0 (a listing with slot 0 in ME and
+		// a delete of [0, 1, 2] in SM: ddimension/wwand#94), and so may AT. A
+		// bare 0 cannot be told apart from the placeholder an empty LuCI
+		// selection sends next to its list, so slot 0 is reached through
+		// `indices` only — sms_delete takes 0 there, and wwandctl sends a list.
 		let which = (type(indices) == 'array' && length(indices)) ? indices
 			: ((+index > 0) ? +index : null);
 

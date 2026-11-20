@@ -11,6 +11,11 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **wwandctl SMS slots (2026-11-20, wwand#94):** `wwandctl sms` prints the part
+  list of a multi-part message (`[4,5]`, was `[  0]`); `sms-delete [SM|ME]
+  <index>[,<index>...]` sends the storage and a list, so slot 0 (real on QMI)
+  is reachable and ME is no longer deleted from SM. LuCI SMS *send* (item 3 of
+  the issue) is a feature, not built.
 - **Inbound SMS and Cell Broadcast, hotplug scripts (2026-11-19):** new
   `sms_rx.uc` + `cbs.uc` — the events `sms` and `cell_broadcast`; Cell
   Broadcast switched per `option cell_broadcast` / `list cb_channels` (default

@@ -1907,9 +1907,9 @@ wwandctl pin-lock 1234 [--store] / pin-unlock 1234
 wwandctl pin-change 1234 5678        # change the SIM PIN; the configured one follows
 wwandctl puk 12345678 4321           # PUK entry: unblock + set NEW PIN 4321
 wwandctl plmn                        # PLMN selector lists incl. FPLMN
-wwandctl sms                         # list stored SMS
+wwandctl sms [ME]                    # list stored SMS ([4,5] = the slots of a multi-part one)
 wwandctl sms-send +49170... "hi"     # send an SMS
-wwandctl sms-delete 3
+wwandctl sms-delete ME 4,5           # delete those slots (storage defaults to SM, like `sms`)
 wwandctl ussd "*100#"                # USSD code (or the answer to the network's question)
 wwandctl ussd-cancel                 # end the USSD session
 wwandctl reset / repower             # modem reset / hardware repower
@@ -2160,7 +2160,7 @@ every method to it.
 | `modem_apdu` | `modem`, `op`, … | raw ISO-7816 APDU channel (advanced) |
 | `modem_sms_list` | `modem`, `storage?` | list stored SMS (decoded: sender, timestamp, text, multipart merged); `storage` `SM` (SIM, default) or `ME` (modem) |
 | `modem_sms_read` | `modem`, `storage?`, `index` | read one stored SMS by index |
-| `modem_sms_delete` | `modem`, `storage?`, `index` **or** `indices` | delete stored SMS by index. `indices` (a list) deletes a set in one call, highest index first, and answers `{ ok, deleted, requested, failed[] }` — every index is attempted even after one fails. `index` (a single number) keeps answering `{ ok: true }`. There is deliberately **no "delete all"**: every backend offers one, and all of them delete what is in the store when the *modem* runs the request rather than what the operator was shown, so a message arriving between the listing and the click would go with it (write ACL) |
+| `modem_sms_delete` | `modem`, `storage?`, `index` **or** `indices` | delete stored SMS by index. `indices` (a list) deletes a set in one call, highest index first, and answers `{ ok, deleted, requested, failed[] }` — every index is attempted even after one fails. `index` (a single number) keeps answering `{ ok: true }` and must be positive — a bare 0 is the placeholder an empty LuCI selection sends, so slot 0 (QMI numbers from 0) is deleted through `indices`, as `wwandctl sms-delete` does. There is deliberately **no "delete all"**: every backend offers one, and all of them delete what is in the store when the *modem* runs the request rather than what the operator was shown, so a message arriving between the listing and the click would go with it (write ACL) |
 | `modem_cell_broadcast` | `modem` | the last Cell Broadcast messages, newest first (`messages`: `id`, `serial`, `code`, `update`, `kind`/`name` for a public warning, `language`, `text`, `at`), and `configured` (`option cell_broadcast`, null = untouched). Repeats are recognised by identifier + serial number (update number included) for a day and not listed again (read ACL) |
 | `modem_ussd` | `modem`, `op`, `text?` | **USSD**: `op` = `send` (`text` = a code such as `*100#`, or the answer to the network's question; → `reply`, `action_required`, `session`, `via`) \| `cancel` (end the session) \| `status` (`session` idle/active/user_response, `via`, `last` = the last message with `origin` reply/network). Transport: QMI Voice (native or MBIM passthrough) → native MBIM USSD → `AT+CUSD`, chosen once per modem; **a code is never re-sent over a second transport** — a USSD is not idempotent. One request at a time (`busy`); replies that come as an indication or URC are waited for up to 100 s (`timeout`). On AT the text must be printable ASCII, on a Huawei it goes as packed GSM7 hex (write ACL) |
 | `modem_sms_send` | `modem`, `number`, `text` | send an SMS (SMS-SUBMIT, GSM7/UCS2, auto-segmented): QMI WMS RAW_SEND (native/passthrough) else AT+CMGS PDU mode (write ACL) |
