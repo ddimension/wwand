@@ -224,6 +224,16 @@ restart. On MT7621 boards sipd unloads the
 `crypto_hw_eip93` driver when it cannot do the IMS encryption (see *Common
 failures*).
 
+### VoWiFi with the IMS PDN as fallback
+
+`option access 'vowifi pdn'` on the line: the router registers over VoWiFi,
+and over the modem's IMS PDN (VoLTE) while the tunnel does not work. Once
+VoWiFi has worked again for a minute it moves back. `'pdn vowifi'` is the
+other way round. `wwandctl status` shows which one is in use ("over VoWiFi"
+/ "over VoLTE"). A move back waits until no call is running; a call on a way that fails
+ends with it. Run
+`wwandctl ims setup` so the IMS PDN exists too.
+
 ### Several modems, several SIM cards
 
 **One line per modem.** Every `config ims_modem` section is an IMS line with
