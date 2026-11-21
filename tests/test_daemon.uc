@@ -5049,6 +5049,52 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	unlink('/tmp/test-admin-txs.json');
 }
 
+// --- deps.sim_bring: a plugin takes the next step towards a card ----------------
+// (wwand-rsim lending a card the modem does not run on): the step an
+// ICCID-bound interface takes, the slot first, not forced
+(() => {
+	let A = '89490200001022832490', B = '89882390001598474352';
+	let ops = [], pd = null;
+	let fake = {
+		modem: { create: (o) => ({
+			id: o.id, state: 'READY', config: o.config,
+			info: { iccid: A }, active_slot: 1,
+			slots: [ { physical: 1, iccid: A, active: true }, { physical: 2, iccid: B, active: false } ],
+			start: () => null, stop: () => null, set_opmode: (mode, cb) => cb(null),
+		}) },
+		context: { create: (o) => ({ state: 'IDLE', down: (cb) => cb ? cb() : null, status: () => ({ state: 'IDLE' }) }) },
+	};
+	let d = daemon_mod.create({ timing: TIMING, deps: { log: () => null, load_qmi: () => fake,
+		giveups_file: '/tmp/test-giveups-bring.json', admin_downs_file: '/tmp/test-admin-bring.json',
+		plugins: [ { name: 'cap', options: [], mod: { create: (dd) => { pd = dd; return {}; } } } ] } });
+
+	d.modem_sim_switch_slot = (mn, slot, cb, opts) => {
+		push(ops, sprintf('slot:%s:%d:%s', mn, slot, opts?.force ? 'force' : '-'));
+		cb(null, { slot: slot });
+	};
+	d.apply_config(config.parse({ network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a' },
+	} }));
+	d.esim_guard('m0', 'enable');   // loads the plugins
+	ok(type(pd?.sim_bring) == 'function', 'sim_bring: a plugin dep');
+
+	let got = null;
+	pd.sim_bring('m0', B + 'F', (e, p) => { got = [ e, p?.action, p?.slot ]; });
+	eq(got, [ null, 'slot', 2 ], 'sim_bring: the card in another slot -> that slot is switched to');
+	eq(ops, [ 'slot:m0:2:-' ], 'sim_bring: ...not forced (an ICCID-bound interface or an eIM guard can still say no)');
+
+	d.modems.m0.modem.info.iccid = B;
+	d.modems.m0.modem.active_slot = 2;
+	pd.sim_bring('m0', B, (e, p) => { got = [ e, p?.action ]; });
+	eq(got, [ null, 'ok' ], 'sim_bring: the modem runs it -> ok');
+	pd.sim_bring('m0', '89000000000000000001', (e, p) => { got = [ e, p?.action ]; });
+	eq(got, [ null, 'refuse' ], 'sim_bring: a card never seen here -> refuse');
+	d.shutdown();
+	unlink('/tmp/test-giveups-bring.json');
+	unlink('/tmp/test-admin-bring.json');
+})();
+
 // --- ICCID-bound interfaces (option iccid) ----------------------------------
 // The card is the connection's: an ifup on a modem running another card
 // switches to it and dials once it is in use; another bound interface using

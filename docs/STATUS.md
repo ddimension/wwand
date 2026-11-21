@@ -69,6 +69,10 @@ state buried at the top invites reading a months-old entry as present tense.
   (with `sim_slot '2'` it powered the remote card down 7 s after its first
   SELECT, for ever). HW on the NR7101: switched to 1 by itself, card read,
   back to 2 when the remote card was switched off, a modem reset stays on 1.
+  Plus `deps.sim_bring(ref, iccid, cb)`: the next step towards a card by its
+  ICCID (bind_plan: slot, then eSIM profile; not forced), for wwand-rsim's
+  `rsim_lend_switch` (a lend of a card the lending modem does not run on,
+  and back after) — host-tested, not on hardware yet.
 - **Steering across networks (`steer_networks 'allowed'`, 2026-11-21).** HW on
   the GL-X3000 (RM520N-GL, GDSP SIM on Vodafone): a scan, a lock on Telekom
   6400:36 (another network), the card re-registered on 262/01 in ~40 s (the

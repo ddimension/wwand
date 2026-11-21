@@ -3435,7 +3435,11 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   physical slot the modem must run on now, or null. The bring-up asserts it
   ahead of an ICCID-bound interface's card and `option sim_slot`, so a modem
   reset does not switch away from it; `deps.sim_switch_slot(ref, physical,
-  cb)` switches at once, as `wwandctl slot` does. wwand-rsim answers it while
+  cb)` switches at once, as `wwandctl slot` does, and `deps.sim_bring(ref,
+  iccid, cb)` takes the next step towards a card by its ICCID — the slot, then
+  the eSIM profile, as an ICCID-bound interface does (`siminventory.bind_plan`;
+  cb(err, plan) with plan.action `ok` | `wait` | `slot` | `enable` |
+  `refuse`): a plugin asks again after each step until `ok`. wwand-rsim answers it while
   a remote card is offered: the RG502Q-EA uses UIM Remote slot 1 only while it
   runs on physical slot 1 (on slot 2 it powered the remote card down 7 s after
   its first SELECT, for ever — HW 2026-11-21).

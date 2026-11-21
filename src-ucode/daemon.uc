@@ -5877,6 +5877,38 @@ export function create(opts)
 			// the modem's physical SIM slots, read now (simops.uc
 			// modem_sim_slots): cb(err, { slots, multisim })
 			sim_slots: (ref, cb) => self.modem_sim_slots(ref, cb),
+			// one step towards card `iccid` on modem `ref` — the step an
+			// ICCID-bound interface takes (siminventory.bind_plan): a slot
+			// switch, or an eSIM profile enable. cb(err, plan), plan.action
+			// 'ok' (the modem runs that card) | 'wait' (its card is still being
+			// read: ask again) | 'slot' / 'enable' (that step was started: ask
+			// again once the card is read) | 'refuse' (plan.detail: not
+			// reachable from here). For a plugin that brings a card in for a
+			// while and puts the old one back the same way.
+			sim_bring: (ref, iccid, cb) => {
+				let want = siminventory.norm_iccid(iccid);
+				let mo = self.modems[ref]?.modem;
+
+				if (!want || !mo)
+					return cb(null, { action: 'refuse', detail: !mo ? sprintf('no modem %s', ref) : 'not an ICCID' });
+
+				try { inventory_refresh(); }
+				catch (e) { log('warn', sprintf('SIM inventory refresh failed (%s)', e)); }
+
+				let p = siminventory.bind_plan(want, inventory.find(want), {
+					modem: ref, active: siminventory.norm_iccid(mo.info?.iccid), active_slot: mo.active_slot,
+				});
+
+				// not forced: a card an eIM plugin manages (esim_guard) or one an
+				// ICCID-bound interface is using is not taken away for a plugin;
+				// the refusal comes back as the step's error
+				if (p.action == 'slot')
+					return self.modem_sim_switch_slot(ref, p.slot, (e) => cb(e, p));
+				if (p.action == 'enable')
+					return self.modem_esim(ref, 'enable', { iccid: want, slot: p.slot }, (e) => cb(e, p));
+
+				cb(null, p);
+			},
 			// switch the modem to a physical slot now, as `wwandctl slot` does
 			// (simops.uc modem_sim_switch_slot): cb(err, res). A plugin that
 			// needs a slot for longer also answers its sim_slot hook, or the
