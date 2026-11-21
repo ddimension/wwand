@@ -431,7 +431,7 @@ export function create(opts)
 
 		// a registration-class URC short-circuits the REGISTERING poll interval
 		if (self.state == 'REGISTERING' && poll && !self._esim_op &&
-		    match(line, /^\+?(CEREG|C5GREG|CREG|CGREG|CTZV|EONSNWNAME)[:\s]/))
+		    match(line, /^\+?(CEREG|C5GREG|CREG|CGREG|CTZV|EONSNWNAME)[:[:space:]]/))
 			poll();
 
 		urc_shared(line, ch);

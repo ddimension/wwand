@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Fail on ucode constructs that parse, run, and silently do the wrong thing.
+r"""Fail on ucode constructs that parse, run, and silently do the wrong thing.
 
-One so far: CALLING A PARENTHESIZED `??`,
+Two so far.
+
+1. AN ESCAPE CLASS INSIDE A BRACKET EXPRESSION, `[^=;\s]` or `[:\s]`. ucode
+regexes are POSIX ERE: it translates `\s`, `\d`, `\w` outside a bracket, but
+inside one the backslash is literal, so `[:\s]` is ":", "\\" or the letter
+"s" — `match("+CREG ", /^\+?(CREG)[:\s]/)` is null and `"+CREGs"` matches.
+Verified on the host ucode and on ucode-2026.07.09~b885dd0f (NR7101,
+2026-11-21). Write the POSIX class instead: `[:[:space:]]`, `[^=;[:space:]]`.
+
+2. CALLING A PARENTHESIZED `??`,
 
     let c = (o.cursor_isolated ?? o.cursor)();     # c is null
     (o.timer ?? uloop.timer)(wait, fn);            # overwrites a neighbouring local
@@ -125,9 +134,29 @@ def bad_calls(src):
                 yield src.count('\n', 0, start) + 1
 
 
+# `\s`/`\d`/`\w` (or their capitals) between `[` and the `]` that closes it;
+# a POSIX class like [:space:] inside the bracket is stepped over whole
+BRACKET_ESCAPE = re.compile(r'\[\^?\]?(?:\[:[a-z]+:\]|[^\]\n])*?\\[sdwSDW](?:\[:[a-z]+:\]|[^\]\n])*\]')
+
+
+def bracket_escapes(src):
+    """Line numbers of a bracket expression with an escape class in it. On
+    the raw line, comment lines skipped: the masking above would blank a regex
+    literal's quotes but cannot tell a regex from a division."""
+    for n, line in enumerate(src.splitlines(), 1):
+        s = line.lstrip()
+
+        if s.startswith('//') or s.startswith('*'):
+            continue
+
+        if BRACKET_ESCAPE.search(line):
+            yield n
+
+
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else 'src-ucode'
     hits = []
+    brackets = []
     files = 0
 
     for dirpath, _, names in os.walk(root):
@@ -146,12 +175,20 @@ def main():
             for n in bad_calls(src):
                 hits.append((path, n, lines[n - 1].strip()))
 
+            for n in bracket_escapes(src):
+                brackets.append((path, n, lines[n - 1].strip()))
+
     for path, n, text in hits:
         print(f'{path}:{n}: call of a parenthesized `??` — misplaces the stack when the left side is set; split it into two statements')
         print(f'    {text}')
 
-    print(f'checked {files} .uc files under {root}: {len(hits)} called `(a ?? b)()` outside a return')
-    return 1 if hits else 0
+    for path, n, text in brackets:
+        print(f'{path}:{n}: an escape class inside [...] is a literal letter in ucode (POSIX ERE); write [:space:] and the like')
+        print(f'    {text}')
+
+    print(f'checked {files} .uc files under {root}: {len(hits)} called `(a ?? b)()` outside a return, '
+          f'{len(brackets)} escape classes inside a bracket')
+    return 1 if hits or brackets else 0
 
 
 if __name__ == '__main__':

@@ -329,6 +329,17 @@ integer 0. It dropped a BG96's NONE slots from its RAT acquisition order
 (`[0,0,4,8]` went out as `[4,8]`, nas.uc `rat_order_ids`, HW-seen 2026-10-30).
 Test the type when a value may be a number: `type(n) == 'string' && n == ''`.
 
+### `\s` inside a bracket matches whitespace, as in JS
+**Wrong.** ucode regexes are POSIX ERE. ucode translates `\s`, `\d`, `\w` OUTSIDE
+a bracket expression, but inside one the backslash is literal, so `[:\s]` is
+":", "\" or the letter "s": `match("+CREG ", /^\+?(CREG)[:\s]/)` is null, and
+`"+CREGs"` matches (host ucode and ucode-2026.07.09~b885dd0f, NR7101,
+2026-11-21). It sat unnoticed in atcmd.uc and modem_ncm.uc because real lines
+carry the `:`. wwand-esim-transfer's cookie parser lost every cookie name with
+an "s" in it, and a test named its cookie `SID`. Write the POSIX class:
+`[:[:space:]]`, `[^=;[:space:]]`. `tools/check-ucode-pitfalls.py` fails on the
+pattern.
+
 ### Self-referencing arrow functions work like in JS
 **Wrong.** No hoisting: a `let` arrow that references itself (recursion,
 reschedule) throws "Can't access lexical declaration before initialization" at

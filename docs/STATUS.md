@@ -33,6 +33,11 @@ state buried at the top invites reading a months-old entry as present tense.
     EF_AD, AUTHENTICATE answered 9862. The check stops at "no entitlement
     server known", since none is configured. The plugin and its LuCI page
     stay installed there.
+- **ucode: `\s` inside `[...]` is the letter s (2026-11-21).** POSIX ERE:
+  - `[:\s]` never matched a space in atcmd.uc / modem_ncm.uc (harmless there,
+    real lines carry `:`);
+  - fixed to `[:[:space:]]`, gotchas.md;
+  - `tools/check-ucode-pitfalls.py` now fails on the pattern.
 - **Anchor steering (2026-11-21):** `option
   anchor_steering 'auto'` (steering.uc) scans (QMI PCI scan, refused by both
   our 5G modems → `AT+QSCAN`), locks the LTE primary cell onto a cell of the
