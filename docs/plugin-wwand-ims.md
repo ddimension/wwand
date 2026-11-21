@@ -224,6 +224,56 @@ restart. On MT7621 boards sipd unloads the
 `crypto_hw_eip93` driver when it cannot do the IMS encryption (see *Common
 failures*).
 
+### Several modems, several SIM cards
+
+**One line per modem.** Every `config ims_modem` section is an IMS line with
+its own sipd. For a second modem:
+
+```sh
+wwandctl ims wwmodem1 setup --apply   # IMS PDN wwims1, VRF and zone ims1, the line ue_wwmodem1
+uci set wwand_ims.<phone>.line='ue_wwmodem1'   # which phone uses that line
+uci commit wwand_ims; /etc/init.d/wwand-ims-sipd restart
+```
+
+The first line keeps the names it always had; each further one gets its own
+interface, VRF, firewall zone, VoWiFi tunnel and RTP ports, and its own SIP
+port for the phones (the gateway's port + 1, + 2, …; `option sip_port`
+sets one). A phone registers at the port of its line; one without
+`option line` belongs to the first. `wwandctl status` shows an `IMS UE` row
+per modem, LuCI Status → VoLTE a block per line.
+
+**Settings per SIM card.** `config ims_sim` with `option iccid` (the card's
+ICCID, a prefix, or a list) sets what that card does, over its line's
+settings — for example VoWiFi for one card and VoLTE for the other in the
+same modem:
+
+```
+config ims_sim 'vodafone_card'
+	list iccid 'xxxxxxx'          # the card's ICCID or a prefix of it
+	option access 'vowifi'
+	option profile 'vodafone_de'
+```
+
+`access`, `profile`, `smsip`, `sms_storage`, `epdg` and the `vowifi_*`
+options can be set per card (LuCI: Network → VoLTE → SIM cards). When the
+modem gets another card — a slot switch, another eSIM profile, a remote SIM
+— its line starts again by itself with that card's settings.
+
+**VoWiFi without a modem.** VoWiFi needs only the SIM card: put it in a
+card reader (wwand-rsim's `rsim-card`; `rsim-card-pcsc` for a USB CCID
+reader) and give the line the reader instead of a modem:
+
+```
+config ims_modem 'card0'
+	option card 'pcsc:0'          # or ssh:root@<router>:wwand:wwmodem0 for a card elsewhere
+	option backend 'ue'
+	option profile 'telekom_de'   # the operator's ePDG settings
+```
+
+The router reads the IMSI from the card and builds the tunnel over its
+internet connection. No IMS PDN and no SMS over IP on such a line. Check it
+with `ubus call wwand-ims.card0 status`.
+
 ### SMS over IP
 
 `ims_modem` option `smsip '1'` (off by default) registers the UE for SMS
