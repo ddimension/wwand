@@ -60,9 +60,13 @@ Resilience.
 
 ![Interface config](images/luci-interface-config.png)
 
-The **Connection** tab holds the data-bearer settings: APN, PDP type and auth,
-the QMAP **mux channel** that lets several connections share one modem, the
-3GPP **attach profile index**, MTU handling and the reconnect behaviour.
+The **Connection** tab holds the data-bearer settings: APN, PDP type and auth
+(*Automatic* is PAP/CHAP when a username is set, none otherwise), the QMAP
+**mux channel** that lets several connections share one modem, the 3GPP
+**profile index** (empty: the attach profile on mux 0/1, a profile of its own
+named `wwand:<interface>` on mux 2 and up), MTU handling, the profile flags
+(prefix delegation, CLAT, address allocation, **IMS PDN**), **IPv6 source
+routing** (`sourcefilter`) and the reconnect behaviour.
 
 ![Interface config — Connection tab](images/luci-interface-connection.png)
 
@@ -73,7 +77,8 @@ Settings*; see [reference.md](reference.md).
 
 ## Per-SIM override editor (SIM / APN / PIN)
 
-Match a specific card by its ICCID and give it a PIN — and optionally its own
+Match a specific card by its ICCID (or by its IMSI — then no PIN, since the
+IMSI is only readable after the PIN) and give it a PIN — and optionally its own
 APN / auth / PDP type, optionally bound to one modem. Ideal for dual-SIM or
 swapping eUICC profiles with different PINs.
 
