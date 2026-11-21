@@ -3143,6 +3143,12 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   running modem: the process a slot switch runs — forget the old card
   (identity, notes, per-SIM override, eSIM/APDU caches), then unlock and
   re-apply the per-SIM settings for the new one.
+  `retry_sim(ref)` resumes a modem that stopped in its SIM step for want of
+  a card — none inserted, or none that answered — now that the card a plugin
+  serves is usable (its PIN was entered): the same resume the backends run
+  when a card arrives; `true` when it resumed. The core sends nothing to any
+  card on this path: whether a reader card needs a PIN, and entering it, is
+  the plugin's.
 - **ubus:** `modem_plugin` reaches `ops`; `modem_plugin_status` reaches only
   `read_ops`.
 - **Card source:** an optional `card_source(ref, ext)` returns where the

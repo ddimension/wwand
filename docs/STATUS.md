@@ -378,6 +378,13 @@ state buried at the top invites reading a months-old entry as present tense.
   through `../hwtest/run.sh` (procedure and pitfalls in `../hwtest/README.md`).
   The LTE3301-PLUS (EG06-E, now in MBIM mode) does not register with its current
   SIM, so its `connect` check fails for that reason alone.
+- **The plugin card-identity interface, and `retry_sim` (2026-11-21):** two deps
+  a card-serving plugin (wwand-rsim) needs around a reader card, shaped with the
+  maintainer's #80 review in mind — PIN entry belongs in the plugin, not the
+  core. `deps.retry_sim(ref)` resumes a modem that had stopped for want of the
+  card a plugin serves — the backends' own `retry_sim`, until now reachable only
+  through the full card-change process (`sim_changed`). The core sends no PIN on
+  any of these paths.
 
 ## What it is
 

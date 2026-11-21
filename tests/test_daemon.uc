@@ -1732,6 +1732,47 @@ uloop.run();
 	d.shutdown();
 })();
 
+// --- deps.retry_sim / deps.reader_card: the plugin hooks around a reader card -
+// The two deps a card-serving plugin needs: resume a modem that stopped for
+// want of the card once the plugin made it usable (its PIN was entered), and
+// publish that card's identity — the modem's own reads cannot see it (it
+// never appears in its UIM slots), sim.uc adopts the published one instead.
+(() => {
+	let pd = null, resumed = 0;
+	let fake = {
+		modem: { create: (o) => ({
+			id: o.id, state: 'SIM_BLOCKED', config: o.config,
+			retry_sim: () => { resumed++; return true; },
+			start: () => null, stop: () => null,
+		}) },
+		context: { create: (o) => ({ state: 'IDLE', name: o.name, modem: o.modem, config: o.config,
+		                             down: (cb) => cb ? cb() : null, status: () => ({ state: 'IDLE' }) }) },
+	};
+	let d = daemon_mod.create({ timing: TIMING, deps: { log: () => null, load_qmi: () => fake,
+		giveups_file: '/tmp/test-giveups-pincard.json', admin_downs_file: '/tmp/test-admin-pincard.json',
+		plugins: [ { name: 'cap', options: [], mod: { create: (dd) => { pd = dd; return {}; } } } ] } });
+
+	d.apply_config(config.parse({ network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'l3a' },
+	} }));
+	d.esim_guard('m0', 'enable');   // loads the plugins
+	let m = d.modems.m0.modem;
+
+	ok(type(pd?.retry_sim) == 'function', 'retry_sim: a plugin dep');
+
+	eq(pd.retry_sim('m0'), true, 'retry_sim: the modem resumed from its SIM step');
+	eq(resumed, 1, 'retry_sim: ...by its own retry_sim, the backends\'');
+	eq(pd.retry_sim('m9'), false, 'retry_sim: no such modem -> false');
+
+	delete m.retry_sim;
+	eq(pd.retry_sim('m0'), false, 'retry_sim: a backend without it (NCM) -> false, not a crash');
+
+	d.shutdown();
+	unlink('/tmp/test-giveups-pincard.json');
+	unlink('/tmp/test-admin-pincard.json');
+})();
+
 // --- option lowpower: park the radio when nothing on this modem is up --------
 // For battery and solar installs. Two things make it dangerous if done naively,
 // and both are asserted: it must fire only on an OPERATOR down (a transient

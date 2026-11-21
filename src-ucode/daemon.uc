@@ -5661,6 +5661,15 @@ export function create(opts)
 			// the card behind the modem changed: the same forget-and-re-read
 			// a slot switch runs (simops.uc card_changed)
 			sim_changed: (ref, why) => self.card_changed ? self.card_changed(ref, why) : false,
+			// the modem stopped in its SIM step for want of a card (none
+			// inserted, or none that answered) and the card a plugin serves
+			// became usable — its PIN was entered: resume the init chain
+			// from that step, the same resume the backends run themselves
+			// when a card arrives (modem_init_qmi/modem_mbim retry_sim; a
+			// PIN/PUK block stays terminal). true when it resumed. Nothing
+			// beyond that: whether a card needs a PIN, and entering it, is
+			// the plugin's to know and do — the core sends no PIN here
+			retry_sim: (ref) => self.modems[ref]?.modem?.retry_sim?.() ?? false,
 			// a QMI client of a schema the plugin brings, on the modem's own
 			// channel and owned by the modem (modem.uc extra_client) — on an
 			// MBIM modem over its QMI passthrough (modem_mbim.uc extra_client;
