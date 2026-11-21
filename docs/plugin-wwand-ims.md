@@ -147,46 +147,78 @@ to merge by hand as `ims-network.example`.
 
 ### VoWiFi (wwand-ims-vowifi)
 
-With `ims_modem` option `access 'vowifi'` the router UE reaches the IMS
-through the operator's ePDG (TS 24.302, TS 33.402) instead of the IMS PDN —
-over any WAN, the modem only lends the USIM. HW-tested with Telekom DE
-(NR7101, 2026-11-21): registration and incoming calls with two-way audio
-(outgoing calls over the tunnel not measured yet).
+VoWiFi takes the router's IMS line over the internet (fixed line, Wi-Fi
+uplink, anything) instead of over the modem's IMS PDN. The router builds an
+IPsec tunnel to the operator's ePDG; the modem only lends the SIM for the
+login. Useful where the mobile signal is weak, or when the modem's own
+VoLTE does not work.
 
-- **Packages:** `wwand-ims-vowifi` pulls strongSwan's charon with `vici`,
-  `eap-aka`, `fips-prf`, `p-cscf`, `kernel-netlink` and the feed's own
-  **`ext-aka`** plugin (EAP-AKA with the USIM: charon runs
-  `/usr/libexec/strongswan/ext-aka`, which does the AUTHENTICATE over
-  wwand's `modem_apdu`), plus `kmod-xfrm-interface` and `xfrm`. `swanctl`
-  is in the images for debugging only.
-- **No charon config:** sipd loads and starts the connection over vici at run
-  time; nothing goes into `swanctl.conf`. The one setting vici cannot carry,
-  the P-CSCF request, ships as `/etc/strongswan.d/charon/wwand-ims-vowifi.conf`
-  and names only this connection — charon's other connections are untouched.
-- **netifd does the router side** (wwand's split): `config interface
-  'imswifi0'` (`proto xfrm`, `ifid 7001`, `mtu 1280`) is the tunnel's XFRM
-  interface; `config interface 'wwvowifi'` (`proto wwandvowifi` on
-  `@imswifi0`, `ip4table`/`ip6table 31`) takes the inner address and the
-  default route from sipd (`ubus call wwand-ims vowifi_addr`) whenever sipd
-  renews it. **No VRF** for the tunnel: netifd 25.12 turns IPv6 off on VRF
-  ports; table 31 with netifd's `from`/`to` rules keeps the traffic in the
-  tunnel, the UE's sockets bind to `imswifi0`.
-- **Setup:** `wwandctl ims setup --apply` writes both interfaces and puts
-  them into the `ims` firewall zone once `wwand-ims-vowifi` is installed or
-  `access 'vowifi'` is set (`--vowifi` / `--no-vowifi` to choose).
-  It is idempotent: run again later it adds what a working setup lacks.
-- **The ePDG's wants** are operator-profile options: `vowifi_epdg` (default
-  `epdg.epc.mnc<MNC>.mcc<MCC>.pub.3gppnetwork.org`), `vowifi_apn` (sent as
-  IDr; none by default — an ePDG that answers with its own identity would be
-  refused), `vowifi_proposals` (default `aes256-sha512-modp4096`, then
-  charon's), `vowifi_esp_proposals`, `vowifi_remote_auth` (`eap-aka`,
-  EAP-only, default; or `pubkey`), `vowifi_pani`. `ims_modem` options of the
-  same name (and `epdg`) override them.
-- **Kept up:** an IKE or CHILD SA down, charon restarted or crashed, or a
-  failed start → load + initiate again, backing off 5 s to 60 s, never giving
-  up; sipd registers again once netifd has the new address.
-- **Status:** `ubus call wwand-ims status` → `vowifi { state, v6, v4, pcscf,
-  epdg, error, tries }`; LuCI Status → VoLTE shows it.
+**Quick start**
+
+```sh
+apk add wwand-ims-vowifi                    # pulls strongSwan with what it needs
+uci set wwand_ims.@ims_modem[0].access='vowifi'
+uci commit wwand_ims
+wwandctl ims setup --apply                  # tunnel interfaces, firewall zone, ePDG settings from the SIM's carrier config
+setsid /etc/init.d/network restart          # detached when over ssh
+/etc/init.d/firewall reload
+/etc/init.d/wwand-ims-sipd restart
+wwandctl status                             # see below
+```
+
+When it works, `wwandctl status` shows:
+
+```
+  IMS UE      registered +49… over VoWiFi via <P-CSCF>
+  VoWiFi      up to epdg.epc.mnc…pub.3gppnetwork.org, inner <address>, 2 P-CSCF
+```
+
+Back to VoLTE: `access 'pdn'` (or delete the option) and restart sipd.
+
+**Operator settings** come from the carrier config of the SIM (the modem's
+own Wi-Fi-calling settings in its MBN, read by `wwandctl ims setup`) into
+the SIM's operator profile. Normally nothing needs to be set. To change one,
+set it in the profile (LuCI: Network → VoLTE → Operator profiles → VoWiFi);
+a value you set is never overwritten:
+
+| Option | What | Default |
+|---|---|---|
+| `vowifi_epdg` | the ePDG's name | `epdg.epc.mnc<MNC>.mcc<MCC>.pub.3gppnetwork.org` from the SIM |
+| `vowifi_apn` | sent as the tunnel's responder identity | `ims` (`%any`: none) |
+| `vowifi_proposals`, `vowifi_esp_proposals` | IKE / ESP algorithms (strongSwan notation) | from the carrier config, then strongSwan's |
+| `vowifi_rekey_s`, `vowifi_esp_rekey_s`, `vowifi_dpd_s` | rekeying, dead peer detection | from the carrier config; else no rekeying, DPD 60 s |
+| `vowifi_remote_auth` | how the ePDG proves itself | `eap-aka` (EAP only; `pubkey`: certificate) |
+
+**Tested** (NR7101, RG502Q, 2026-11-21):
+
+| Operator | Result |
+|---|---|
+| Telekom DE | registers; incoming calls with audio both ways |
+| Vodafone DE | registers (needs the strongSwan plugin `epdg-idr` from this feed, pulled in by the package); calls not tried yet |
+
+Outgoing calls over VoWiFi are not measured yet.
+
+**When it does not come up**
+
+- `wwandctl status`: the `VoWiFi` row says `connecting`, or `down` with the
+  reason and the number of failed attempts. The tunnel is retried by itself
+  (5 s, then up to every 60 s), also after a restart or crash of strongSwan.
+- More detail: `uci set wwand_ims.@ims_modem[0].vowifi_loglevel='2'`, restart
+  sipd, then `logread -e wwand-ims-sipd` shows every step of the tunnel setup
+  (`charon[…]` lines).
+- See *Common failures* below for the known cases.
+
+**How it works** (for the curious): sipd drives strongSwan's charon only
+over its control socket (vici) — nothing goes into `swanctl.conf`, other
+IPsec connections of the router are untouched. The SIM login (EAP-AKA) runs
+on the modem's SIM through wwand (strongSwan plugin `ext-aka`). The ePDG
+answers with an identity of its own; the plugin `epdg-idr` lets charon
+accept it. netifd sets up the router side: the tunnel interface `imswifi0`
+(`proto xfrm`) and `wwvowifi` (`proto wwandvowifi`), which takes the
+tunnel's address and puts the routes into table 31 (no VRF: netifd 25.12
+turns IPv6 off on VRF ports). On MT7621 boards sipd unloads the
+`crypto_hw_eip93` driver when it cannot do the IMS encryption (see *Common
+failures*).
 
 ### SMS over IP
 
@@ -282,7 +314,9 @@ ubus call wwand modem_plugin '{"modem":"wwmodem0","plugin":"ims","op":"status"}'
 - **SIP trace** — `sip_gateway` option `sip_trace '/tmp/wwand-ims-sip.trace'`:
   every SIP message of both sides in full (identities and keys included —
   for debugging only).
-- **VoWiFi** — charon's log lines for the tunnel are in sipd's syslog
+- **VoWiFi** — `wwandctl status` has a `VoWiFi` row under `IMS UE` (up to
+  the ePDG with the inner address and P-CSCFs, connecting, or down with
+  the reason and the failed attempts). charon's log lines for the tunnel are in sipd's syslog
   (`charon: …`), the USIM authentication under ident `wwand-ims-vowifi`;
   `swanctl --list-sas`, `ifstatus wwvowifi`, `ip -6 route show table 31`.
 - **Call list** — `ubus call wwand-ims calls`: the last ten calls with
@@ -302,8 +336,9 @@ ubus call wwand modem_plugin '{"modem":"wwmodem0","plugin":"ims","op":"status"}'
 | Call ends right after the 183 with `503`, `Reason: … ASR: BEARER_RELEASED` or `ASR: INSUFFICIENT_SERVER_RESOURCES` (which one depends on the P-CSCF site) | the voice bearer (QCI 1) could not be set up. Seen with LTE FGI 3 and 7 missing in the UE capability: no dedicated-bearer request reaches the modem at all. Set the FGIs (Prerequisites); typical after a SIM change that switched the carrier MBN. |
 | VoWiFi: tunnel up, REGISTER times out, `ICMP port unreachable` back from the router | the tunnel's interfaces are not in the `ims` firewall zone — `wwandctl ims setup --apply` adds `imswifi0`/`wwvowifi`. |
 | VoWiFi: `send(): Network unreachable`, no IPv6 address on `imswifi0` (`disable_ipv6 1`) | the XFRM interface is a port of a VRF: netifd 25.12 turns IPv6 off there. Remove the VRF for the tunnel (the current `setup` writes none). |
-| VoWiFi: `constraint check failed: identity …` / `… requires public key authentication` | the ePDG answers with its own identity, or authenticates EAP-only: leave `vowifi_apn` empty, `vowifi_remote_auth 'eap-aka'`. |
+| VoWiFi: `constraint check failed: identity 'ims' … required, not matched by 'epdg…'` | the ePDG answers with its own identity and the strongSwan plugin `epdg-idr` is missing or not on: install `strongswan-mod-epdg-idr` (the package pulls it), restart strongSwan (`/etc/init.d/swanctl restart`). `… requires public key authentication`: set `vowifi_remote_auth 'eap-aka'`. |
 | VoWiFi: `EAP method not supported` from charon | `strongswan-mod-fips-prf` missing (EAP-AKA needs it). |
+| `registration failed: … xfrm … kernel: Invalid argument … sa out` with an operator that wants `ealg=aes-cbc` (Vodafone DE), MT7621 board | the EIP-93 crypto driver (`crypto_hw_eip93`) rejects the keys of `authenc(hmac(sha1),cbc(aes))`. sipd unloads it by itself (log: `kernel module crypto_hw_eip93 unloaded`), the kernel's software crypto takes over; it comes back at boot and is unloaded again. A driver fix is a TODO. |
 | MultiSIM: the phone rings only with its display on | the router's 180 came before the phone was paged — `alert_delay_ms` (default 4500). |
 | `IMS UE  down` though sipd runs | the IMS PDN (wwims) is down or re-attaching, so the UE de-registered — check `wwandctl status` for wwims `CONNECTED` and the P-CSCF in `status.contexts.wwims`. |
 
