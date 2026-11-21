@@ -115,8 +115,11 @@ scenario('uim: remote card needs a late SIM PIN -> configured PIN + re-read', (n
 		},
 	};
 
-	let m = { timing: { ...T, pin_poll: 1 }, config: { pincode: '1234' }, _gen: 1,
-	          uim: mkclient({ GET_CARD_STATUS: { card_status: c } }, calls),
+	// declared before the literal: ucode enforces TDZ at closure creation,
+	// so reapply_sim may not reference `m` while `m`'s initializer still runs
+	let m;
+	m = { timing: { ...T, pin_poll: 1 }, config: { pincode: '1234' }, _gen: 1,
+	     uim: mkclient({ GET_CARD_STATUS: { card_status: c } }, calls),
 	          at: at,
 	          reapply_sim: function() {
 		          eq(at.sent[0], 'AT+CPIN?', 'uim-remote-pin: AT state queried');
