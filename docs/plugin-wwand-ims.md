@@ -159,7 +159,7 @@ VoLTE does not work.
 apk add wwand-ims-vowifi                    # pulls strongSwan with what it needs
 uci set wwand_ims.@ims_modem[0].access='vowifi'
 uci commit wwand_ims
-wwandctl ims setup --apply                  # tunnel interfaces, firewall zone, ePDG settings from the SIM's carrier config
+wwandctl ims setup --apply                  # the ePDG settings from the SIM's carrier config into its profile
 setsid /etc/init.d/network restart          # detached when over ssh
 /etc/init.d/firewall reload
 /etc/init.d/wwand-ims-sipd restart
@@ -213,10 +213,14 @@ over its control socket (vici) — nothing goes into `swanctl.conf`, other
 IPsec connections of the router are untouched. The SIM login (EAP-AKA) runs
 on the modem's SIM through wwand (strongSwan plugin `ext-aka`). The ePDG
 answers with an identity of its own; the plugin `epdg-idr` lets charon
-accept it. netifd sets up the router side: the tunnel interface `imswifi0`
-(`proto xfrm`) and `wwvowifi` (`proto wwandvowifi`), which takes the
-tunnel's address and puts the routes into table 31 (no VRF: netifd 25.12
-turns IPv6 off on VRF ports). On MT7621 boards sipd unloads the
+accept it. netifd sets up the router side with two interfaces sipd creates
+at run time and removes when it stops (no sections in
+`/etc/config/network`): the tunnel interface `imswifi0` (`proto xfrm`, in
+the firewall zone `ims` by itself) and `wwvowifi` (`proto wwandvowifi`),
+which takes the tunnel's address and puts the routes into table 31 (no
+VRF: netifd 25.12 turns IPv6 off on VRF ports). Only sipd brings a dropped
+tunnel back (strongSwan's own restart is off), also after a network
+restart. On MT7621 boards sipd unloads the
 `crypto_hw_eip93` driver when it cannot do the IMS encryption (see *Common
 failures*).
 
@@ -334,7 +338,7 @@ ubus call wwand modem_plugin '{"modem":"wwmodem0","plugin":"ims","op":"status"}'
 | `no SIP over TCP on port 5064: Address in use` | another UE (a leftover sipd, or `wwandctl ims call`) holds the protected ports — only one UE per IMS PDN. |
 | REGISTER times out (`state: unprotected`) on an **IPv4** IMS PDN, though tcpdump shows the 401 on the IMS interface and on the VRF device | netifd's `<addr> dev <iface> scope link` host route displaces the kernel's `local` route for the /32 in the VRF table, so the reply is not delivered locally (no UDP counter moves). The `25-wwand-ims-l3mdev` hotplug re-adds `local <addr>` on every ifup; check `ip route show table <vrf table>` for it. No `ip_nonlocal_bind` / `udp_l3mdev_accept` sysctl is needed. |
 | Call ends right after the 183 with `503`, `Reason: … ASR: BEARER_RELEASED` or `ASR: INSUFFICIENT_SERVER_RESOURCES` (which one depends on the P-CSCF site) | the voice bearer (QCI 1) could not be set up. Seen with LTE FGI 3 and 7 missing in the UE capability: no dedicated-bearer request reaches the modem at all. Set the FGIs (Prerequisites); typical after a SIM change that switched the carrier MBN. |
-| VoWiFi: tunnel up, REGISTER times out, `ICMP port unreachable` back from the router | the tunnel's interfaces are not in the `ims` firewall zone — `wwandctl ims setup --apply` adds `imswifi0`/`wwvowifi`. |
+| VoWiFi: tunnel up, REGISTER times out, `ICMP port unreachable` back from the router | `imswifi0` is not in the `ims` firewall zone: check `ifstatus imswifi0` (`data.zone`) and `/etc/init.d/firewall reload`; a static section `imswifi0` from an older setup needs `option zone 'ims'` or `list network 'imswifi0'` in the zone. |
 | VoWiFi: `send(): Network unreachable`, no IPv6 address on `imswifi0` (`disable_ipv6 1`) | the XFRM interface is a port of a VRF: netifd 25.12 turns IPv6 off there. Remove the VRF for the tunnel (the current `setup` writes none). |
 | VoWiFi: `constraint check failed: identity 'ims' … required, not matched by 'epdg…'` | the ePDG answers with its own identity and the strongSwan plugin `epdg-idr` is missing or not on: install `strongswan-mod-epdg-idr` (the package pulls it), restart strongSwan (`/etc/init.d/swanctl restart`). `… requires public key authentication`: set `vowifi_remote_auth 'eap-aka'`. |
 | VoWiFi: `EAP method not supported` from charon | `strongswan-mod-fips-prf` missing (EAP-AKA needs it). |
