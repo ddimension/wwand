@@ -231,7 +231,9 @@ and over the modem's IMS PDN (VoLTE) while the tunnel does not work. Once
 VoWiFi has worked again for a minute it moves back. `'pdn vowifi'` is the
 other way round. `wwandctl status` shows which one is in use ("over VoWiFi"
 / "over VoLTE"). A move back waits until no call is running; a call on a way that fails
-ends with it. Run
+ends with it. A tunnel that dies quietly (the uplink stops) is noticed
+within about 40–50 s, and a way that looks up but where registering keeps
+failing is skipped for 5 minutes. Run
 `wwandctl ims setup` so the IMS PDN exists too.
 
 ### Several modems, several SIM cards
