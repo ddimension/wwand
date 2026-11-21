@@ -2572,6 +2572,16 @@ eq(sim.multisim([], null), null, 'multisim: no slots, nothing to say');
 	m.bound_iccid = null;
 	m.config.sim_slot = 0;
 	eq(sim.boot_slot(m, slots).slot, 0, 'boot slot: neither — leave as is');
+
+	// a plugin's slot (wwand-rsim with a remote card offered) comes first,
+	// before the list is read too
+	m.plugin_slot = () => ({ slot: 1, why: 'rsim: the remote card is on slot 1' });
+	m.bound_iccid = () => ({ iccid: '89490000000000000002', interface: 'wan' });
+	eq(sim.boot_slot(m, slots), { slot: 1, why: 'rsim: the remote card is on slot 1' },
+		'boot slot: a plugin\'s slot wins over a bound card and sim_slot');
+	eq(sim.boot_slot(m, null).slot, 1, 'boot slot: ...also before the slot list is read');
+	m.plugin_slot = () => null;
+	eq(sim.boot_slot(m, null).slot, -1, 'boot slot: no plugin answer, the bound card again');
 }
 
 // The configured PIN follows a PIN change: the next start would otherwise enter

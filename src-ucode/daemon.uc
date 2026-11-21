@@ -3881,6 +3881,9 @@ export function create(opts)
 		// on LTE a registration is an attach, the network sees the IMSI. Parked
 		// at init as a plugin park, so the tick wakes it when the hold is gone.
 		entry.modem.radio_hold = () => self.plugins_radio_hold?.(name) ?? null;
+		// the physical slot a plugin needs the modem on, { slot, why } or null
+		// (plugins.uc sim_slot) — asserted at bring-up ahead of everything else
+		entry.modem.plugin_slot = () => self.plugins_sim_slot?.(name) ?? null;
 		// The card the bring-up asserts the slot for (sim.uc boot_slot): an
 		// ICCID-bound interface on this modem that is to come up — `auto`
 		// and not taken down by the operator, or in use already. First by name; config.uc
@@ -5874,6 +5877,12 @@ export function create(opts)
 			// the modem's physical SIM slots, read now (simops.uc
 			// modem_sim_slots): cb(err, { slots, multisim })
 			sim_slots: (ref, cb) => self.modem_sim_slots(ref, cb),
+			// switch the modem to a physical slot now, as `wwandctl slot` does
+			// (simops.uc modem_sim_switch_slot): cb(err, res). A plugin that
+			// needs a slot for longer also answers its sim_slot hook, or the
+			// next bring-up asserts option sim_slot again
+			sim_switch_slot: (ref, physical, cb) => self.modem_sim_switch_slot(ref, physical,
+				(e, r) => cb(e, r), { force: true }),
 			// the card behind the modem changed: the same forget-and-re-read
 			// a slot switch runs (simops.uc card_changed)
 			sim_changed: (ref, why) => self.card_changed ? self.card_changed(ref, why) : false,

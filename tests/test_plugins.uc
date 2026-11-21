@@ -44,6 +44,10 @@ inst = {
 		poll:   (ref, ext, args, cb) => cb(null, { started: true }),
 	},
 	read_ops: [ 'status' ],
+	// the slot a remote card is offered on, for m0 only; a bad answer for m1
+	sim_slot: (ref, ext) => (ref == 'm0') ? { slot: 1, why: 'the remote card is on slot 1' }
+		: ((ref == 'm1') ? { slot: 0 } : null),
+	radio_busy: (ref, ext) => (ref == 'm0') ? 'a call is up' : null,
 	// a setting for a Qualcomm modem with the plugin's option set, nothing else
 	at_init: (ref, ext, info) => (info.protocol == 'qmi' && ext.alpha == '1')
 		? [ 'AT+ALPHA', { check: 'AT+X?', want: '^1$', set: 'AT+X=1', note: 'x', reset: true },
@@ -78,6 +82,12 @@ eq(self.plugins_at_init('m0', { model: 'M', protocol: 'qmi' }),
    'at_init: the steps a plugin adds, with the modem\'s options and identity — a malformed one left out');
 eq(self.plugins_at_init('m0', { protocol: 'mbim' }), [], 'at_init: ...and none where it says none');
 eq(self.plugins_at_init('m1', { protocol: 'qmi' }), [], 'at_init: per modem');
+
+eq(self.plugins_sim_slot('m0'), { slot: 1, why: 'alpha: the remote card is on slot 1' },
+	'sim_slot: the slot a plugin needs, with its name');
+eq(self.plugins_sim_slot('m1'), null, 'sim_slot: slot 0 is no answer');
+eq(self.plugins_radio_busy('m0'), 'alpha: a call is up', 'radio_busy: the reason, with the plugin\'s name');
+eq(self.plugins_radio_busy('m1'), null, 'radio_busy: nothing busy');
 
 // --- simops: the lock and the connection token -------------------------------------
 

@@ -62,6 +62,13 @@ state buried at the top invites reading a months-old entry as present tense.
     dialect for `lock_4g` there, independent of steering.
   - Not read: RM520N-GL (X3000, blocked; likely as the RG650E), FM350
     (swapped out), EG25-G (Pi unreachable).
+- **Plugin hook `sim_slot` + dep `sim_switch_slot` (2026-11-21):** a plugin
+  can name the physical slot a modem must run on; `sim.boot_slot` asks it
+  first, ahead of an ICCID-bound card and `option sim_slot`. For wwand-rsim:
+  the RG502Q-EA uses UIM Remote slot 1 only while it runs on physical slot 1
+  (with `sim_slot '2'` it powered the remote card down 7 s after its first
+  SELECT, for ever). HW on the NR7101: switched to 1 by itself, card read,
+  back to 2 when the remote card was switched off, a modem reset stays on 1.
 - **Steering across networks (`steer_networks 'allowed'`, 2026-11-21).** HW on
   the GL-X3000 (RM520N-GL, GDSP SIM on Vodafone): a scan, a lock on Telekom
   6400:36 (another network), the card re-registered on 262/01 in ~40 s (the

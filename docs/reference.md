@@ -3344,6 +3344,8 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
 { name, options: [ 'foo', 'foo_interval' ], create: (deps) => ({
 	tick: (ref, ext) => …,               // every 10 s, per modem
 	radio_hold: (ref, ext) => …,         // null, or why the radio stays off
+	sim_slot: (ref, ext) => …,           // null, or { slot, why }: the physical slot it must run on
+	radio_busy: (ref, ext) => …,         // null, or why optional radio work waits
 	stop: () => …,                       // the daemon exits
 	busy: () => …,                       // its stop is still under way
 	card_source: (ref, ext) => …,        // where the active card really is
@@ -3429,6 +3431,14 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   modem that cannot switch its radio off at all (NCM without an AT port)
   answers every park `unsupported`; it stays registered, its interfaces are
   refused, and `status()` says so in `radio_hold_error`.
+- **SIM slot:** an optional `sim_slot(ref, ext)` returns `{ slot, why }`, the
+  physical slot the modem must run on now, or null. The bring-up asserts it
+  ahead of an ICCID-bound interface's card and `option sim_slot`, so a modem
+  reset does not switch away from it; `deps.sim_switch_slot(ref, physical,
+  cb)` switches at once, as `wwandctl slot` does. wwand-rsim answers it while
+  a remote card is offered: the RG502Q-EA uses UIM Remote slot 1 only while it
+  runs on physical slot 1 (on slot 2 it powered the remote card down 7 s after
+  its first SELECT, for ever — HW 2026-11-21).
 - **Radio busy:** an optional `radio_busy(ref, ext)` returns why optional
   radio work must wait right now (a voice call is up), or null. Anchor
   steering scans and locks only while it answers null; unlike `radio_hold`

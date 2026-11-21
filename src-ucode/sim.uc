@@ -919,14 +919,23 @@ export function enumerated(slots)
 	return true;
 };
 
-// The slot a bring-up asserts, { slot, why }: the one holding the card an
-// ICCID-bound interface needs (`self.bound_iccid`, daemon.uc), else
-// `option sim_slot`; slot 0 = leave as is. The bound card wins because the
+// The slot a bring-up asserts, { slot, why }: the one a plugin needs the
+// modem on (`self.plugin_slot`, daemon.uc — wwand-rsim while a remote card
+// is offered: the RG502Q-EA uses UIM Remote slot 1 only while it runs on
+// physical slot 1, and asserting sim_slot 2 instead made it power the remote
+// card down 7 s after its first SELECT, for ever — HW 2026-11-21), else the
+// one holding the card an ICCID-bound interface needs (`self.bound_iccid`,
+// daemon.uc), else `option sim_slot`; slot 0 = leave as is. The bound card wins because the
 // interface switches to it on its ifup anyway: asserting sim_slot first would
 // change the card twice on every boot. `slots` null asks only whether there
 // is anything to assert (no slot list read yet).
 export function boot_slot(self, slots)
 {
+	let p = self.plugin_slot?.();
+
+	if (+(p?.slot ?? 0) > 0)
+		return { slot: +p.slot, why: p.why ?? 'a plugin needs it' };
+
 	let b = self.bound_iccid?.();
 	let cfg = +(self.config?.sim_slot ?? 0);
 

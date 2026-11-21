@@ -15,6 +15,11 @@
 //       radio_hold(ref, ext),           // -> null, or a reason the modem's
 //                                       //    radio must stay off (its card
 //                                       //    is in use elsewhere)
+//       sim_slot(ref, ext),             // -> null, or { slot, why }: the
+//                                       //    physical slot the modem must run
+//                                       //    on now (a remote card offered on
+//                                       //    that slot); asserted at bring-up
+//                                       //    ahead of option sim_slot
 //       radio_busy(ref, ext),           // -> null, or why the radio must
 //                                       //    not be re-tuned right now (a
 //                                       //    voice call): optional radio
@@ -177,6 +182,24 @@ export function install(self, o)
 
 			if (type(r) == 'string' && length(r))
 				return sprintf('%s: %s', p.name, r);
+		}
+
+		return null;
+	};
+
+	// The physical slot a plugin needs this modem on now, { slot, why } with
+	// the plugin's name in why, or null. The first plugin that answers wins.
+	self.plugins_sim_slot = function(ref) {
+		for (let p in (instances ?? [])) {
+			if (type(p.inst.sim_slot) != 'function')
+				continue;
+
+			let r = null;
+
+			try { r = p.inst.sim_slot(ref, ext_of(ref)); } catch (e) { r = null; }
+
+			if (+(r?.slot ?? 0) > 0)
+				return { slot: +r.slot, why: sprintf('%s: %s', p.name, r.why ?? 'needs it') };
 		}
 
 		return null;
