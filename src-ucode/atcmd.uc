@@ -918,7 +918,7 @@ export function create(transport, opts)
 	let is_urc_line = (line, own) => {
 		// prefixed form. The prefix class covers AT+/AT^/AT$ — Huawei, MeiG
 		// and Sierra emit vendor URCs with ^ and $.
-		let m = match(line, /^[+^$]([A-Z0-9]+)[:\s]/);
+		let m = match(line, /^[+^$]([A-Z0-9]+)[:[:space:]]/);
 
 		if (m) {
 			if (own != null && m[1] == own)
