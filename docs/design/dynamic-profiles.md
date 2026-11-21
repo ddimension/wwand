@@ -1,6 +1,7 @@
 # Dynamic profile handling — survey and plan
 
-Status: stage 1 (read path) in the tree, stages 2–3 not started.
+Status: the plan below is in the tree since 2026-11-20 (QMI): attach index
+from the attach list, own profiles for mux 2+, the sweep. NCM is not part of it.
 Evidence: ddimension/wwand#88.
 
 ## The problem

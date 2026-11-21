@@ -354,7 +354,7 @@ export function install(self, o)
 				why, join('; ', reasons)));
 
 			// Deliberately NOT cleared on a later init pass. The object is
-			// created once per device attach (daemon.uc:3766), so a modem that
+			// created once per device attach (daemon.uc:3796), so a modem that
 			// really did reset comes back as a NEW instance with no debt — and
 			// a re-init of THIS instance means it did not, so the debt still
 			// holds. Deduplicated because a re-init re-derives the same reason
@@ -970,11 +970,34 @@ export function install(self, o)
 	// complements config.uc's static parse-time warnings.
 	step_validate = () => self.validate_config(() => step_attach_profile());
 
-	// program the LTE attach profile (CID1) BEFORE registration so the autonomous
+	// program the LTE attach profile BEFORE registration so the autonomous
 	// attach uses the right APN + IP family. On a change, cycle the radio so an
 	// in-flight attach with the stale profile re-runs. See context.uc
 	// ensure_attach_profile / the EMM #33 IPv4-only-attach finding.
+	//
+	// Which profile that is, the modem says (its LTE attach PDN list,
+	// qmi_backend.attach_index) — read first, because the attach owner is the
+	// interface that dials THAT profile.
+	let attach_profile_go;
+
 	step_attach_profile = () => {
+		if (!self.wds_cfg)
+			return attach_profile_go();
+
+		qmi_backend.attach_index(self.wds_cfg, (ix, known, cancelled) => {
+			if (cancelled)
+				return;
+
+			if (self.attach_index != ix)
+				log(known ? 'info' : 'debug', sprintf('attach profile: %d (%s)', ix,
+					known ? 'the modem\'s LTE attach PDN list' : 'no attach list from this firmware — 1'));
+
+			self.attach_index = ix;
+			attach_profile_go();
+		});
+	};
+
+	attach_profile_go = () => {
 		let ctx = modem_common.attach_owner(self.contexts);
 
 		// no interface bound yet: the first one to bind programs it
@@ -989,7 +1012,7 @@ export function install(self, o)
 		if (!ctx.ensure_attach_profile || !self.dms)
 			return step_register();
 
-		ctx.ensure_attach_profile(1, (changed) => {
+		ctx.ensure_attach_profile(self.attach_index ?? 1, (changed) => {
 			if (!changed)
 				return step_register();
 

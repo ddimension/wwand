@@ -57,6 +57,9 @@ const PDP_MAP = {
 	ipv4v6: wdsmod.PDP_TYPE_IPV4V6,
 };
 
+// the mark of an interface's own profile (mux 2+, own_profile)
+const OWN_PROFILE_PREFIX = qmi_backend.OWN_PROFILE_PREFIX;
+
 // The optional settings an interface may put into the modem profile it dials.
 // Each is a stored 3GPP profile setting — WDS Modify Profile input and Get
 // Profile Settings output, both since libqmi 1.36 (qmi-service-wds.json:
@@ -222,12 +225,94 @@ export function create(opts)
 		let index = +(self.config.profile ?? 0);
 		// `option profile` (or `apn '#N'` above) is the operator NAMING a
 		// profile; anything else is us picking one to write the APN into.
-		let named = (index > 0);
+		if (index > 0)
+			return { index: index, named: true, modify: (apn != null && apn != '') };
 
-		if (!index)
-			index = +(self.config.mux_id ?? 0) || 1;
+		// Mux 2 and up: a profile of its own, found by its mark (own_profile)
+		// — never the one numbered like the mux. On carrier configurations
+		// profiles 2 and 3 are `ims` and `sos`, which the modem uses itself,
+		// and a second channel writing its APN into 2 broke VoLTE without a
+		// word (ddimension/wwand#88). The index is not known until the modem's
+		// list is read; `modify` always, so an emptied APN reaches it too.
+		// The mux IN FORCE, as the WDS bind uses it: an `auto` channel 2 the
+		// modem could not carry runs on the plain parent, the one PDN there
+		// is, and dials the attach profile like mux 0 (config.uc
+		// effective_mux_id).
+		let mux = cfgmod.effective_mux_id(self.config, self.modem?.datapath);
 
-		return { index: index, named: named, modify: (apn != null && apn != '') };
+		if (mux >= 2)
+			return { index: null, own: true, mark: OWN_PROFILE_PREFIX + self.name, modify: true };
+
+		// Mux 0/1: the attach profile, written to the config — the modem's
+		// own attach bearer is this interface's data connection
+		// (modem_common.attach_owner). Its index is the modem's to name
+		// (qmi_backend.attach_index, read at init): 1 on most firmwares, 5 on
+		// the EG06-E.
+		return { index: +(self.modem?.attach_index ?? 1) || 1, named: false,
+		         modify: (apn != null && apn != '') };
+	};
+
+	// The profile of an interface on mux 2 and up: the one carrying its mark
+	// (profile name `wwand:<iface>`), else a new one — Create Profile takes no
+	// index, the modem hands out the lowest free one. The mark is the mapping:
+	// it lives in the modem's NV with the profile and survives a modem reset
+	// (HW, six modems, 2026-11-20 — docs/design/dynamic-profiles.md), so
+	// nothing else has to remember the number, and a number remembered
+	// elsewhere could point at someone else's profile after an MBN switch.
+	// Several with the mark (a create whose answer was lost): the lowest is
+	// used, the daemon's sweep removes the rest (sweep_own_profiles).
+	//
+	// A modem that cannot list or create profiles dials without an index, the
+	// APN inline (`invalid`, as for the E182E above) — never falls back to the
+	// mux-numbered profile, which is the one this exists to protect.
+	let own_profile = (profile, done) => {
+		let wds = self.modem.wds_cfg;
+		let inline = (what, err) => {
+			log('warn', sprintf('%s (%J) — dialling with the APN inline, no profile index', what, err));
+			profile.invalid = true;
+			done();
+		};
+
+		wds.request('GET_PROFILE_LIST', { profile_type: wdsmod.PROFILE_TYPE_3GPP }, (err, data) => {
+			if (torn_down(err, wds))
+				return;
+
+			if (err)
+				return inline('profile list unreadable', err);
+
+			let hits = sort(map(filter(data?.profiles ?? [], (p) => p.name == profile.mark),
+				(p) => p.index), (a, b) => a - b);
+
+			if (length(hits)) {
+				profile.index = hits[0];
+
+				if (length(hits) > 1)
+					log('notice', sprintf('profiles %s all carry %s — using %d', join(', ', hits),
+						profile.mark, hits[0]));
+
+				return done();
+			}
+
+			wds.request('CREATE_PROFILE', {
+				profile_type: wdsmod.PROFILE_TYPE_3GPP,
+				profile_name: profile.mark,
+				pdp_type: PDP_MAP[context_common.effective_pdp(self)],
+				apn: cfg('apn') ?? '',
+			}, (cerr, cd) => {
+				if (torn_down(cerr, wds))
+					return;
+
+				let ix = cd?.profile?.index;
+
+				if (cerr || !ix)
+					return inline('no profile of its own could be created', cerr ?? cd);
+
+				log('notice', sprintf('created profile %d (%s) for mux %d — the modem\'s own profiles stay untouched',
+					ix, profile.mark, +(self.config.mux_id ?? 0)));
+				profile.index = ix;
+				done();
+			});
+		});
 	};
 
 	// --- PREPARING ---------------------------------------------------------
@@ -238,10 +323,12 @@ export function create(opts)
 		if (!profile.modify)
 			return check_pdp_type(profile, done);
 
+		// an own profile keeps its mark (the name IS how it is found again)
+		// and takes an emptied APN as empty, not as "leave it"
 		let base = {
 			profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: profile.index },
-			profile_name: 'default',
-			apn: cfg('apn'),
+			profile_name: profile.mark ?? 'default',
+			apn: profile.own ? (cfg('apn') ?? '') : cfg('apn'),
 			apn_disabled: 0,
 		};
 
@@ -1095,6 +1182,10 @@ export function create(opts)
 		self.modem.at != null;
 
 	let reclaim_stale_pdp = (profile, on_done) => {
+		// no index (a dial with the APN inline): no cid to deactivate
+		if (profile.index == null)
+			return on_done();
+
 		log('warn', sprintf(
 			'profile %d is in use on the modem, deactivating stale PDP context',
 			profile.index));
@@ -1122,7 +1213,12 @@ export function create(opts)
 
 		set_state('PREPARING');
 
-		prepare(profile, () => {
+		// mux 2+: find or create the interface's own profile first; one that
+		// could not be had dials with the APN inline and writes nothing
+		let prep = (cont) => !profile.own ? prepare(profile, cont)
+			: own_profile(profile, () => profile.invalid ? cont() : prepare(profile, cont));
+
+		prep(() => {
 			if (gen != up_gen || self.state != 'PREPARING')
 				return;   // attempt aborted while preparing — drop the late reply
 

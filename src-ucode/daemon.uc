@@ -1592,7 +1592,7 @@ export function create(opts)
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
 	// own emit on a change (modem_mbim.uc:1092-1101) while the shared reapply
-	// tail emits on every re-read (modem_common.uc:872-878); one comparison, in
+	// tail emits on every re-read (modem_common.uc:886-892); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {
 		let entry = self.modems[modem.id];
@@ -1922,6 +1922,36 @@ export function create(opts)
 		// tell a reset that happened from one that was only acknowledged).
 		if (event == 'state' && data?.state == 'ABSENT')
 			modem._absent_count = (modem._absent_count ?? 0) + 1;
+
+		if (event == 'registered') {
+			// profiles wwand created for an interface on mux 2+ that no
+			// longer uses one (QMI; once per init) — the modem's own profiles
+			// are not touched (qmi_backend.sweep_own_profiles). Kept: every
+			// interface, on any modem, that would dial an own profile now —
+			// mux 2+ without `option profile` (context.uc resolve_profile).
+			// One moved to `option profile` or to mux 1 leaves its profile
+			// orphaned; one removed and added again gets a new one at its
+			// next dial, the safe direction.
+			let keep = {};
+
+			for (let n, e in self.contexts) {
+				// decided as context.uc resolve_profile decides it: the mux in
+				// force on its own modem, no `option profile`, and no effective
+				// `apn '#N'` — a wwand_sim's included: conn_cfg on the bound
+				// context, or on the interface's config and its modem (whose
+				// card is read by the registration) while none is bound
+				let m = self.modems[e?.cfg?.modem]?.modem;
+				let dp = m?.datapath;
+				let apn = context_common.conn_cfg(e?.ctx ?? { config: e?.cfg ?? {}, modem: m }, 'apn');
+				let named = (type(apn) == 'string' && substr(apn, 0, 1) == '#') ||
+					+(e?.cfg?.profile ?? 0) > 0;
+
+				if (cfgmod.effective_mux_id(e?.cfg, dp) >= 2 && !named)
+					keep[n] = true;
+			}
+
+			modem.sweep_own_profiles?.(keep);
+		}
 
 		// clear the one-shot manual-PIN-release flags so a later cycle never reuses them
 		if (event == 'registered' || event == 'sim_blocked') {
@@ -2965,13 +2995,13 @@ export function create(opts)
 			};
 
 		// TELL THE CONTEXTS FIRST, then stop the modem — the order _device_gone
-		// uses (modem_common.uc:917). Dropping `centry.ctx` below only releases
+		// uses (modem_common.uc:931). Dropping `centry.ctx` below only releases
 		// the daemon's HANDLE: the context object itself lives on with its
 		// monitor timers armed and its WDS clients alive, polling a hub that
 		// entry.modem.stop() has just closed. One orphan per removal, and its
 		// late events can arm a spurious reconnect-hold on the rebuilt entry.
 		// `lost` is built for exactly this — it stops the monitor and destroys
-		// the family clients without attempting QMI cleanup (context.uc:1333).
+		// the family clients without attempting QMI cleanup (context.uc:1429).
 		for (let cname, centry in self.contexts) {
 			if (centry.cfg.modem == name && centry.ctx)
 				centry.ctx.modem_event('lost');
@@ -6024,7 +6054,7 @@ export function create(opts)
 				// a client the modem's teardown destroyed is released by that
 				// teardown, which pays this callback `cancelled` from inside
 				// its release loop while the client is still on the modem's
-				// list (modem.uc:2067-2077) — a release from here would send
+				// list (modem.uc:2080-2090) — a release from here would send
 				// a second RELEASE_CID for the same CID
 				if (!c.destroyed)
 					m.extra_release(c);

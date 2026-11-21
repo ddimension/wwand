@@ -48,8 +48,10 @@ export function collect(self, log, cb)
 		if (!wds)
 			return finish(d);
 
+		// the profile the modem attaches with (qmi_backend.attach_index, read
+		// at init): 5 on the EG06-E, where profile 1 is someone else's
 		wds.request('GET_PROFILE_SETTINGS',
-			{ profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: 1 } }, (err, p) => {
+			{ profile: { type: wdsmod.PROFILE_TYPE_3GPP, index: self.attach_index ?? 1 } }, (err, p) => {
 			// finish() here feeds the registration-timeout continuation, which
 			// can go on to call fail() — behind a teardown that is already
 			// tearing this modem down

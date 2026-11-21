@@ -200,7 +200,7 @@ export function create(opts)
 	// clients, which delivers a synchronous `cancelled` to everything in flight —
 	// so an outer set_opmode callback that ignores its error re-arms tm.settle
 	// AFTER the cancel pass. The new timer fires with self.dms already null
-	// (modem.uc:2081) and set_opmode dereferences it unguarded (qmi_backend.uc:68),
+	// (modem.uc:2094) and set_opmode dereferences it unguarded (qmi_backend.uc:68),
 	// which in ucode is a throw inside a uloop callback: the daemon dies and procd
 	// respawns it. The MBIM twin carries the same guard (modem_mbim.uc:762, step_sim), and
 	// every QMI site that re-arms tm.settle needs it too.
@@ -643,7 +643,7 @@ export function create(opts)
 				// done() IS answered on the cancelled path. It is not only
 				// make_fail's internal continuation: the daemon passes a real
 				// caller's callback through note_connect_failure
-				// (daemon.uc:4484), and dropping it strands a ubus request.
+				// (daemon.uc:4514), and dropping it strands a ubus request.
 				// Restarting a torn-down modem is prevented where it belongs
 				// instead — make_fail now refuses a `cancelled` outright
 				// (modem_common.uc).
@@ -885,7 +885,7 @@ export function create(opts)
 			if (!ctx?.ensure_attach_profile || !self.dms)
 				return cb ? cb(changed) : null;
 
-			ctx.ensure_attach_profile(1, (ch) => {
+			ctx.ensure_attach_profile(self.attach_index ?? 1, (ch) => {
 				if (!ch)
 					return cb ? cb(changed) : null;
 
@@ -1357,6 +1357,19 @@ export function create(opts)
 			return cb({ error: 'not_ready' });
 
 		qmi_backend.read_profiles(self.wds_cfg, cb);
+	};
+
+	// sweep_own_profiles(keep): remove the profiles wwand created for an
+	// interface on mux 2+ (`wwand:<name>`) that no longer dials one, and
+	// duplicates of a mark (qmi_backend.sweep_own_profiles). `keep` holds the
+	// interfaces that do, on any modem (daemon.uc builds it). Once per init
+	// (`_gen`): the table does not change between registrations.
+	self.sweep_own_profiles = function(keep) {
+		if (!self.wds_cfg || self._swept_gen === self._gen)
+			return;
+
+		self._swept_gen = self._gen;
+		qmi_backend.sweep_own_profiles(self.wds_cfg, keep, log, () => null);
 	};
 
 	self._install_thermal = function(cb) {

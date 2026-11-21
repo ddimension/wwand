@@ -553,6 +553,82 @@ export function read_profiles(wds, cb)
 	}, { no_recovery: true });
 };
 
+// The name that marks a profile wwand created for an interface on mux 2 and
+// up: `wwand:<iface>` (context.uc own_profile). Only a profile carrying it is
+// ever written for such an interface, or deleted (sweep_own_profiles).
+export const OWN_PROFILE_PREFIX = 'wwand:';
+
+// sweep_own_profiles(wds, keep, log, cb): delete the profiles marked
+// `wwand:<name>` whose <name> is not in `keep` (the interfaces that dial an
+// own profile now — the daemon builds it), and every duplicate of a mark beyond its lowest index (a create whose
+// answer was lost). cb(deleted indices). Anything without the mark is not
+// looked at twice: the modem's own profiles stay as they are. Strictly
+// sequential on the config client, like every other reader of it.
+export function sweep_own_profiles(wds, keep, log, cb)
+{
+	wds.request('GET_PROFILE_LIST', { profile_type: 0 }, (e, d) => {
+		if (e)
+			return cb([]);
+
+		let seen = {}, gone = [];
+
+		for (let p in sort(d?.profiles ?? [], (a, b) => a.index - b.index)) {
+			let n = p?.name;
+
+			if (type(n) != 'string' || substr(n, 0, length(OWN_PROFILE_PREFIX)) != OWN_PROFILE_PREFIX)
+				continue;
+
+			let iface = substr(n, length(OWN_PROFILE_PREFIX));
+
+			if (seen[n] || !(iface in keep))
+				push(gone, { index: p.index, name: n, why: seen[n] ? 'duplicate' : 'interface gone' });
+
+			seen[n] = true;
+		}
+
+		let i = 0, next;
+
+		next = () => {
+			if (i >= length(gone))
+				return cb(map(gone, (g) => g.index));
+
+			let g = gone[i++];
+
+			wds.request('DELETE_PROFILE', { profile: { type: 0, index: g.index } }, (de) => {
+				log(de ? 'warn' : 'notice', sprintf('profile %d (%s, %s): %s', g.index, g.name, g.why,
+					de ? sprintf('delete failed: %J', de) : 'deleted'));
+				next();
+			}, { no_recovery: true });
+		};
+
+		next();
+	}, { no_recovery: true });
+};
+
+// attach_index(wds, cb): cb(index, known, cancelled) — the profile the modem
+// attaches with, the first entry of its LTE attach PDN list (0x0094
+// `current`), and whether the modem said so (`known`). `cancelled`: the client
+// went down under the request (a teardown) — the caller's chain must stop
+// there, not carry on with the fallback. 1 where it cannot: the E392 does not
+// know the message (QMI error 71, INVALID_QMI_COMMAND) and attaches with its
+// only profile, 1. Not "1" by assumption: the EG06-E attaches with 5 (HW-read
+// 2026-11-20, docs/design/dynamic-profiles.md), and a write into 1 there
+// would never reach the attach.
+export function attach_index(wds, cb)
+{
+	wds.request('GET_LTE_ATTACH_PDN_LIST', {}, (e, d) => {
+		if (e?.error == 'cancelled')
+			return cb(1, false, true);
+
+		let first = (!e && type(d?.current) == 'array') ? d.current[0] : null;
+
+		if (type(first) == 'int' && first > 0 && first < 256)
+			return cb(first, true, false);
+
+		cb(1, false, false);
+	}, { no_recovery: true });
+};
+
 const RAT_LTE = (1 << 5), RAT_5GNR = (1 << 10);
 const STATS_MASK = 0x3FF;
 

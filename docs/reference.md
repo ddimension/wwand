@@ -720,8 +720,9 @@ config interface 'wan'
 	option device 'wwand0'           # optional: pin the L3 name, any name you like
 	                                 #   (else wwand suggests the next wwandN)
 	option mux_id '1'                # QMAP channel: 1-254, or 'auto'
-	option profile '1'               # 3GPP profile (CID) for the attach + bearer
-	                                 #   (default: mux_id, else 1)
+	option profile '1'               # 3GPP profile (CID) to dial and write. Unset:
+	                                 #   mux 0/1 the attach profile, mux 2+ a profile
+	                                 #   of its own named wwand:<iface> (QMI)
 	option apn 'internet'            # or '#2' = keep profile 2's APN/login; pdp_type
 	                                 #   and the profile flags below still apply
 	option pdp_type 'ipv4v6'         # ipv4|ipv6|ipv4v6
@@ -818,10 +819,36 @@ data dial; the IMS PDN is a second one on the same card). IMS APNs are often
 IPv6-only (Vodafone DE): set `pdp_type 'ipv6'` there. A dual-stack dial still
 comes up when the network refuses only IPv4 (internal 208 / 3GPP 51): the v4
 half degrades and the log names `pdp_type 'ipv6'`, the mirror of the IPv6 hint.
-Pin the profile with `option profile`: without it the interface dials the
-profile of its mux channel, which on carrier configurations is the modem's own
-`ims` (2) or `sos` (3) profile, and wwand writes the APN and PDP type into it
-(see docs/design/dynamic-profiles.md).
+Without `option profile` an interface on mux 2 and up dials a profile of its
+own (below), so the modem's `ims` (2) and `sos` (3) profiles stay untouched.
+
+**Which profile an interface dials (QMI).** `option profile N` or `apn '#N'`
+names it. Without either:
+
+- **mux 0/1** dials the **attach profile** and wwand writes it to the
+  config: the modem's own attach bearer is this interface's data connection.
+  Its index is the first entry of the modem's LTE attach PDN list (WDS 0x0094),
+  read at init — 1 on most firmwares, 5 on the EG06-E in MBIM mode, 1 where the
+  firmware does not know the message (the E392).
+- **mux 2 and up** dials a **profile of its own**, named `wwand:<iface>`:
+  the profile carrying that name is found again at every dial and brought to
+  the interface's APN, PDP type, login and profile flags; without one, wwand
+  creates it (WDS Create Profile, at the index the modem hands out). The name
+  is the mapping: it lives in the modem's NV with the profile and survives a
+  modem reset. A profile without that name is never written for such an
+  interface. A modem that cannot list or create profiles dials with the APN in
+  the request and no profile index, writing nothing.
+- At every modem init wwand deletes the profiles named `wwand:<name>` whose
+  interface `<name>` no longer dials one — removed, or moved to mux 0/1 or to
+  `option profile` — and duplicates of a name (log: `profile N
+  (wwand:<name>, interface gone): deleted`). Nothing else in the table is
+  touched.
+
+Before wwand 1.10 an interface on mux 2+ wrote its APN and PDP type into the
+profile numbered like its mux (#88). A carrier profile overwritten that way is
+not repaired by the update — a carrier configuration reload or a manual write
+restores it. `option profile <mux_id>` keeps the old behaviour for anyone who
+wants it. Design and measurements: docs/design/dynamic-profiles.md.
 
 On **NCM**, `address_allocation` is the standard `<IPv4AddrAlloc>` of
 `AT+CGDCONT` (the 7th parameter, 3GPP TS 27.007), so it works for every vendor;
@@ -830,7 +857,8 @@ equivalent and is QMI only. **MBIM** carries neither (libmbim 1.32: no field in
 the provisioned contexts or the LTE attach configuration).
 
 **Attach profile.** Before registration, wwand programs the LTE **attach
-profile** (CID `profile`, normally 1) from the primary context's `apn` +
+profile** (the first entry of the modem's LTE attach PDN list, else 1) from the
+primary context's `apn` +
 `pdp_type`, so the modem's *autonomous* attach uses the right settings. A stale
 attach profile (wrong APN, or IPv4-only where the subscription needs IPv4v6)
 otherwise gets the attach rejected with EMM cause 33 and registration wedges —
@@ -2877,7 +2905,7 @@ extending a table, not branching the code — see
 | MBIM service list | `DEVICE_SERVICES` is read after every MBIM_OPEN and logged (`mbim services: …`); a command for a service the modem does not list is not sent but fails at once with `unsupported_service` — the MBIMEx version query, the QMI passthrough, the LTE attach configuration, UICC and telemetry over MS Basic Connect Extensions included. Unanswered → the list is unknown and nothing is gated. `modem_mbim_raw` sends regardless | Huawei ME906s: no MBIMEx, no QMI passthrough; it ignored those commands until they timed out, ~50 s per bring-up |
 | Identity read | UIM raw EF read → DMS getter fallback | EG06 rejects EF reads → IMSI/ICCID via DMS |
 | PIN unlock | UIM `VERIFY_PIN` → DMS fallback, with retry guards | — |
-| Attach profile | CID1 programmed from config before the autonomous attach | avoids the EMM-33 IPv4-only / wrong-APN reject |
+| Attach profile | the profile the modem attaches with (its LTE attach PDN list, else CID 1) programmed from config before the autonomous attach | avoids the EMM-33 IPv4-only / wrong-APN reject |
 | Operator name | decoded whether plain ASCII or GSM-7 bit-packed (some modems pack the PLMN name) | EG06 |
 | Protocol switch | QMI ⇄ MBIM via `AT+QCFG="usbnet"` (`modem_set_protocol`); the modem resets and re-enumerates | Quectel RG5xx/RG6xx/EG |
 | MBIM firmware bug | some firmwares reject `MBIM_OPEN` — MBIM stays QMI-only there | RG650E |
@@ -2893,7 +2921,7 @@ go through `backend.uc`.
 | Term | Meaning |
 |---|---|
 | **PDP context / bearer** | A cellular data session with its own IP config. wwand maps one context to one netifd interface. |
-| **Attach profile** | The 3GPP profile (CID 1) the modem uses for the *autonomous* LTE/5G attach. wwand programs its APN/PDP type from config **before** registration to avoid a wrong-APN reject. |
+| **Attach profile** | The 3GPP profile the modem uses for the *autonomous* LTE/5G attach — the first entry of its LTE attach PDN list on QMI (1 on most modems, 5 on the EG06-E), CID 1 on NCM. wwand programs its APN/PDP type from config **before** registration to avoid a wrong-APN reject. |
 | **QMAP / mux** | Qualcomm multiplexing that carries several PDP contexts over one link, each as its own L3 device (`wwandN`, see [Device naming](#device-naming)). Backends: **rmnet** (kernel, preferred) or **qmimux** (sysfs). |
 | **`mux_id`** | The QMAP channel of a context (0 = no mux, N = channel N; the L3 device is still named `wwandN`). |
 | **L3 device / `wwandN`** | The stable per-connection datapath device the daemon assigns (`wwand0…wwand100`) and references in VRF ports / firewall matches. See [Device naming](#device-naming). |

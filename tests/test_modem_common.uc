@@ -2187,6 +2187,25 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	let raw_p1 = { config: { interface: 's2', apn: '#1' }, modem: { active_sim: { apn: '#2' } } };
 	eq(mc.attach_owner([ raw_p1, sim_p1 ]), sim_p1, 'attach_owner: the per-SIM #N decides, not the interface\'s');
 
+	// the attach profile is the modem's to name (modem.attach_index, from its
+	// LTE attach PDN list): 5 on the EG06-E. Mux 0/1 dials it, so it owns the
+	// attach; `option profile 5` does too; profile 1 by number no longer does
+	let eg06 = { attach_index: 5 };
+	let x_mux1 = { config: { interface: 'x0', mux_id: 1, auto: false }, modem: eg06 };
+	let x_p1 = { config: { interface: 'x1', profile: 1 }, modem: eg06 };
+	let x_p5 = { config: { interface: 'x5', profile: 5, auto: false }, modem: eg06 };
+	eq(mc.attach_owner([ x_p1, x_mux1 ]), x_mux1, 'attach_owner: mux 0/1 dials the attach profile the modem names');
+	eq(mc.attach_owner([ x_p1, x_p5 ]), x_p5, 'attach_owner: so does `option profile` with that index');
+	// mux 2+ without `option profile` dials a profile of its own (#88): never
+	// the attach one, so it never takes rule 1 from a mux 1 interface
+	let own2 = { config: { interface: 'w2', mux_id: 2 } };
+	let mux1 = { config: { interface: 'w1', mux_id: 1, auto: false } };
+	eq(mc.attach_owner([ own2, mux1 ]), mux1, 'attach_owner: a mux 2 interface does not dial the attach profile');
+	// ...unless its `auto` channel was demoted to the parent (raw_ip): then
+	// it is the one PDN there and dials the attach profile
+	let demoted = { config: { interface: 'w2', mux_id: 2, mux_auto: true }, modem: { datapath: { backend: 'raw_ip' } } };
+	eq(mc.attach_owner([ demoted, mux1 ]), demoted, 'attach_owner: a demoted auto channel 2 dials the attach profile');
+
 	// MBIM: the attach configuration is no numbered profile — session 1 owns nothing
 	let m_down = { config: { mux_id: 1, auto: false } };
 	let m_auto = { config: { mux_id: 2 } };
