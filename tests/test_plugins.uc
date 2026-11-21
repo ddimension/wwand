@@ -317,6 +317,29 @@ eq(self.connection_token('m1'), null, 'token: null for a modem with nothing conn
 	   'inventory: a modem that is gone takes its cards along (absent, kept)');
 }
 
+// sms_send: the first plugin that takes it; one that answered has taken it,
+// whatever it returns or throws (no second send through the modem)
+{
+	let mk = (fn) => ({ name: 'p', options: [], mod: { create: () => ({ sms_send: fn }) } });
+	let run = (fns) => {
+		let o = { modems: { m0: { modem: {}, ext: {} } } };
+		plugins.install(o, { log: () => null, plugins: map(fns, mk), deps: {} });
+		let calls = [];
+		let took = o.plugins_sms_send('m0', '+4915550000003', 'x', (e, r) => push(calls, [ e, r ]));
+		return [ took, calls ];
+	};
+	eq(run([ (ref, ext, n, t, cb) => false ]), [ false, [] ], 'sms_send: not taken -> the modem sends');
+	eq(run([ (ref, ext, n, t, cb) => { cb(null, { parts: 1 }); return true; } ]), [ true, [ [ null, { parts: 1 } ] ] ],
+		'sms_send: taken, answered once');
+	eq(run([ (ref, ext, n, t, cb) => { cb(null, { parts: 1 }); return false; },
+	         (ref, ext, n, t, cb) => { cb(null, { second: true }); return true; } ]),
+		[ true, [ [ null, { parts: 1 } ] ] ], 'sms_send: answered but returned false -> taken, nobody else asked');
+	eq(run([ (ref, ext, n, t, cb) => { cb({ error: 'x' }); cb(null, {}); die('late'); } ]),
+		[ true, [ [ { error: 'x' }, null ] ] ], 'sms_send: answered twice and threw -> taken, one answer');
+	eq(run([ (ref, ext, n, t, cb) => die('boom'), (ref, ext, n, t, cb) => { cb(null, { b: 1 }); return true; } ]),
+		[ true, [ [ null, { b: 1 } ] ] ], 'sms_send: one that throws before answering is passed over');
+}
+
 for (let f in fs.lsdir(tmp) ?? [])
 	fs.unlink(sprintf('%s/%s', tmp, f));
 fs.rmdir(tmp);

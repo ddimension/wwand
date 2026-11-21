@@ -2222,7 +2222,8 @@ every method to it.
 | `modem_sms_delete` | `modem`, `storage?`, `index` **or** `indices` | delete stored SMS by index. `indices` (a list) deletes a set in one call, highest index first, and answers `{ ok, deleted, requested, failed[] }` — every index is attempted even after one fails. `index` (a single number) keeps answering `{ ok: true }` and must be positive — a bare 0 is the placeholder an empty LuCI selection sends, so slot 0 (QMI numbers from 0) is deleted through `indices`, as `wwandctl sms-delete` does. There is deliberately **no "delete all"**: every backend offers one, and all of them delete what is in the store when the *modem* runs the request rather than what the operator was shown, so a message arriving between the listing and the click would go with it (write ACL) |
 | `modem_cell_broadcast` | `modem` | the last Cell Broadcast messages, newest first (`messages`: `id`, `serial`, `code`, `update`, `kind`/`name` for a public warning, `language`, `text`, `at`), and `configured` (`option cell_broadcast`, null = untouched). Repeats are recognised by identifier + serial number (update number included) for a day and not listed again (read ACL) |
 | `modem_ussd` | `modem`, `op`, `text?` | **USSD**: `op` = `send` (`text` = a code such as `*100#`, or the answer to the network's question; → `reply`, `action_required`, `session`, `via`) \| `cancel` (end the session) \| `status` (`session` idle/active/user_response, `via`, `last` = the last message with `origin` reply/network). Transport: QMI Voice (native or MBIM passthrough) → native MBIM USSD → `AT+CUSD`, chosen once per modem; **a code is never re-sent over a second transport** — a USSD is not idempotent. One request at a time (`busy`); replies that come as an indication or URC are waited for up to 100 s (`timeout`). On AT the text must be printable ASCII, on a Huawei it goes as packed GSM7 hex (write ACL) |
-| `modem_sms_send` | `modem`, `number`, `text` | send an SMS (SMS-SUBMIT, GSM7/UCS2, auto-segmented): QMI WMS RAW_SEND (native/passthrough) else AT+CMGS PDU mode (write ACL) |
+| `modem_sms_send` | `modem`, `number`, `text` | send an SMS (SMS-SUBMIT, GSM7/UCS2, auto-segmented): a plugin that carries the modem's SMS first (its `sms_send` hook: wwand-ims with SMS over IMS on), else QMI WMS RAW_SEND (native/passthrough), else AT+CMGS PDU mode (write ACL) |
+| `modem_sms_deliver` | `modem`, `storage?`, `pdu`, `via?` | an SMS a plugin received outside the modem (SMS over IMS) written into the modem's store, `ME` (default) or `SM`, as received and unread: QMI WMS Raw Write + Modify Tag, else `AT+CMGW=<len>,0`; native MBIM cannot (`unsupported_on_backend`). `pdu` is the SMS-DELIVER behind an SMSC address, hex. Announced as the event `sms` like a received one; answers `{ ok, storage, index }`, `invalid_pdu` when it does not decode. No LuCI ACL grants it |
 | `modem_repower` | `modem?` | hardware repower: pulse the modem `reset_gpio` (or, single-modem only, the board default), else power-cycle the modem USB power (also single-modem only — on a multi-modem box the board lines would hit the wrong hardware: error `multi_modem_needs_reset_gpio`). Same path as the recovery ladder; recovers a hung / vanished modem |
 | `modem_set_protocol` | `modem`, `protocol` | switch the control protocol (`qmi` ⇄ `mbim`); the modem resets |
 | `modem_reattach` | `modem` | detach/re-attach at the registration level (QMI DMS low-power→online, MBIM radio off→on, `AT+COPS=2`→`0` fallback) without a full modem reset (write ACL). **The connected PDN sessions are stopped first** (WDS STOP_NETWORK / MBIM deactivate / CGACT=0) and only then is the modem detached — not cut by the detach underneath them; the daemon holds its own reconnect off for the whole cycle. Afterwards the AT path re-dials them directly (COPS=0 answers once registered; the T700's data path does not survive the cycle anyway), the QMI/MBIM path hands them to the daemon's reconnect, which waits for the re-registration. Result adds `contexts_released` (backend) / `contexts_bounced` (AT) and `contexts_failed`. The daemon's own radio cycle after an unanswered dial, and the recovery ladder's opmode-cycle rung (all backends), take the same way |
@@ -2514,6 +2515,13 @@ merged. `storage` selects the **SIM** (`SM`, default) or the **modem** store
    passthrough; it has no storage selector (reads the modem's store), so it is
    tried after QMI.
 3. **AT** — `AT+CPMS` + `AT+CMGF=0` + `CMGL`/`CMGR`/`CMGD` in PDU mode.
+
+**SMS from a plugin** (`modem_sms_deliver`, `sms.uc sms_write`): an SMS a
+plugin's UE received over IMS (wwand-ims, TS 24.341) is written into the
+modem's own store like one the modem received, and is from then on listed,
+read and deleted there. A full store refuses it, and the plugin reports that
+to the network, which delivers again later. While such a plugin carries the
+modem's SMS (its `sms_send` hook says so), `modem_sms_send` goes through it.
 
 The one GSM 03.40 PDU decoder (`sms_pdu.uc`) serves every backend. LuCI exposes
 an **SMS** section on the **Modem Tools** page: a storage selector, load, and a
@@ -3268,6 +3276,7 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
 	card_source: (ref, ext) => …,        // where the active card really is
 	status: (ref, ext) => …,             // status rows
 	esim_guard: (ref, op, ext) => …,     // null, or { reason } to lock the card
+	sms_send: (ref, ext, number, text, cb) => …,  // true: it sends this SMS itself
 	ops: { status: (ref, ext, args, cb) => …, … },
 	read_ops: [ 'status' ],
 }) }

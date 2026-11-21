@@ -327,6 +327,15 @@ export function publish(conn, daemon, log)
 				daemon.modem_sms_send(req.args.modem, req.args.number, req.args.text, ok_reply(reply))),
 		},
 
+		// an SMS a plugin received outside the modem (SMS over IMS), written
+		// into the modem's store (simops modem_sms_deliver). No LuCI ACL grants it.
+		modem_sms_deliver: {
+			args: { modem: '', storage: '', pdu: '', via: '', ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_sms_deliver(req.args.modem, req.args.storage, req.args.pdu, req.args.via,
+					ok_reply(reply))),
+		},
+
 		// `indices` (a list) deletes several in one call and reports
 		// { deleted, requested, failed }; `index` (a single number) is kept for
 		// callers that predate it and still answers { ok: true }.

@@ -12,6 +12,7 @@ import * as sim from 'wwand.sim';
 import * as sms from 'wwand.sms';
 import * as ussd from 'wwand.ussd';
 import * as sms_rx from 'wwand.sms_rx';
+import * as sms_pdu from 'wwand.sms_pdu';
 
 // The states of a modem's init chain up to and including the SIM step: a
 // modem in one of them reads its card as part of that chain.
@@ -547,10 +548,43 @@ export function install(self, o)
 		sms.sms_delete(entry.modem, storage ?? 'SM', which, cb);
 	};
 
+	// A plugin may carry the modem's outgoing SMS (plugins_sms_send: wwand-ims
+	// with SMS over IMS on); else the modem sends it.
 	self.modem_sms_send = function(ref, number, text, cb) {
 		let entry = check_modem(ref, cb);
-		if (entry)
-			sms.sms_send(entry.modem, number, text, cb);
+		if (!entry)
+			return;
+		if (!length(number ?? '') || text == null)
+			return cb({ error: 'invalid_argument' });
+		if (self.plugins_sms_send?.(ref, number, text, cb))
+			return;
+		sms.sms_send(entry.modem, number, text, cb);
+	};
+
+	// An SMS a plugin received outside the modem (wwand-ims: SMS over IMS),
+	// as its SMS-DELIVER TPDU behind an SMSC address — the form the modems
+	// deliver it in (sms_pdu.decode_deliver). Written into the modem's own
+	// store `storage` ('ME' by default, or 'SM') as received and unread
+	// (sms.sms_write), and announced like one the modem received (the event
+	// `sms`). From then on it is an SMS of that store like any other. A full
+	// or refusing store is the caller's error to report (the network delivers
+	// it again later). Not for LuCI: no ACL grants it.
+	self.modem_sms_deliver = function(ref, storage, pdu, via, cb) {
+		let entry = check_modem(ref, cb);
+		if (!entry)
+			return;
+		let st = (uc(storage ?? '') == 'SM') ? 'SM' : 'ME';
+		let m = sms_pdu.decode_deliver(pdu ?? '');
+		if (!m)
+			return cb({ error: 'invalid_pdu' }, null);
+		sms.sms_write(entry.modem, st, pdu, (err, res) => {
+			if (err)
+				return cb(err, null);
+			entry.modem._emit?.('sms', { storage: st, index: res.index, sender: m.sender, text: m.text,
+				timestamp: m.timestamp, concat: m.udh ? { ref: m.udh.ref, part: m.udh.part,
+				total: m.udh.total } : null, via: via ?? 'plugin' });
+			cb(null, { ok: true, storage: st, index: res.index });
+		});
 	};
 
 	// eSIM download/notification bridge (optional wwand-esim, esim_bridge.uc); lazy.

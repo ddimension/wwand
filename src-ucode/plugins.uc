@@ -28,6 +28,9 @@
 //                                       //    { check, want, set, note, reset }
 //                                       //    written only when they differ
 //                                       //    (atcmd run_sequence)
+//       sms_send(ref, ext, number, text, cb),  // -> true when it sends this
+//                                       //    modem's SMS itself (SMS over
+//                                       //    IMS); cb(err, { parts, ... })
 //       ops: { <op>: (ref, ext, args, cb) },   // ubus modem_plugin
 //       read_ops: [ 'status', ... ],           // ...and which of them the
 //                                              // read-only twin may call
@@ -272,6 +275,37 @@ export function install(self, o)
 		}
 
 		return null;
+	};
+
+	// A plugin that carries this modem's outgoing SMS takes the message:
+	// true when one did (it calls cb), false when the modem sends it. The
+	// first that says yes wins; one that throws is passed over.
+	// A plugin that answered (called cb) has taken it whatever it returns or
+	// throws: falling through then would send the SMS twice and answer twice.
+	self.plugins_sms_send = function(ref, number, text, cb) {
+		for (let p in active()) {
+			if (type(p.inst.sms_send) != 'function')
+				continue;
+
+			let took = false, answered = false;
+			let once = (err, res) => {
+				if (answered)
+					return;
+				answered = true;
+				cb(err, res);
+			};
+
+			try { took = !!p.inst.sms_send(ref, ext_of(ref), number, text, once); }
+			catch (e) {
+				log('warn', sprintf('plugin %s: sms_send failed (%s)', p.name, e));
+				took = false;
+			}
+
+			if (took || answered)
+				return true;
+		}
+
+		return false;
 	};
 
 	// The first plugin that manages this card for this operation, or null.

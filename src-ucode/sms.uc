@@ -420,6 +420,61 @@ export function sms_delete(modem, storage, index, cb)
 	step();
 };
 
+// Store an SMS that came another way (SMS over IMS) in the modem: `pdu` is
+// the SMS-DELIVER behind its SMSC address, hex, as a read gives it back.
+// Written as received and unread, so it lists like one the modem took itself.
+// QMI WMS Raw Write (+ Modify Tag to MT not read: the write carries no tag,
+// and the RG502Q files a DELIVER as read, HW 2026-11-21), else AT+CMGW in PDU
+// mode with <stat> 0 "REC UNREAD" (TS 27.005 3.5.3; not measured yet). The
+// native MBIM SMS service has no write: unsupported_on_backend there.
+// cb(err, { index }).
+export function sms_write(modem, storage, pdu, cb)
+{
+	let a = hexmod.hex_to_arr(pdu ?? '');
+
+	if (!length(a) || a[0] + 1 >= length(a))
+		return cb({ error: 'invalid_pdu' }, null);
+
+	sms_backend(modem, (be) => {
+		if (be == 'qmi') {
+			let st = qmi_storage(storage);
+
+			return modem.wms.request('RAW_WRITE', {
+				raw: { storage_type: st, format: wmsmod.FORMAT_GSM_WCDMA_PP, data: a },
+			}, (err, data) => {
+				if (err || data?.memory_index == null)
+					return cb({ error: 'qmi', detail: err ?? 'no memory index' }, null);
+
+				let index = data.memory_index;
+
+				// unread, as a received one is; a firmware without it keeps it read
+				modem.wms.request('MODIFY_TAG', {
+					tag: { storage_type: st, memory_index: index, tag: wmsmod.TAG_MT_NOT_READ },
+					message_mode: wmsmod.MODE_GSM_WCDMA,
+				}, () => cb(null, { index: index }));
+			});
+		}
+		if (be == 'at')
+			return at_prepare(modem, storage, () => {
+				// <length>: the TPDU's octets, without the SMSC field
+				modem.at.send_pdu(sprintf('AT+CMGW=%d,0', length(a) - (a[0] + 1)), pdu, (err, res) => {
+					if (err)
+						return cb({ error: 'at', detail: err }, null);
+
+					for (let l in (res?.lines ?? [])) {
+						let m = match(l, /\+CMGW:[ \t]*([0-9]+)/);
+						if (m)
+							return cb(null, { index: +m[1] });
+					}
+
+					cb({ error: 'at', detail: 'no +CMGW index' }, null);
+				}, { timeout: 10000 });
+			});
+
+		cb({ error: 'unsupported_on_backend' }, null);
+	});
+};
+
 // rolling 8-bit concatenation reference for multipart sends (no RNG in ucode)
 let concat_ref = 0;
 

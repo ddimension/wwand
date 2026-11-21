@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 André Valentin <avalentin@marcant.net>
 // wwand — QMI Wireless Messaging Service (WMS) message schema (service 0x05).
-// List/read/delete and send (RAW_SEND, below). TLV layouts + message ids + enum
-// values verified against libqmi 1.38 data/qmi-service-wms.json and
+// List/read/write/delete and send (RAW_SEND, below). TLV layouts + message ids +
+// enum values verified against libqmi 1.38 data/qmi-service-wms.json and
 // qmi-enums-wms.h:
-//   Raw Read 0x0022, Delete 0x0024, List Messages 0x0031.
+//   Raw Write 0x0021, Raw Read 0x0022, Modify Tag 0x0023, Delete 0x0024,
+//   List Messages 0x0031.
 
 'use strict';
 
@@ -101,6 +102,32 @@ export default {
 			resp: {
 				message_id: { t: 0x01, f: 'u16' },
 			},
+		},
+
+		// Store a raw PDU (an SMS-DELIVER that came another way: SMS over IMS).
+		// libqmi 1.38 qmi-service-wms.json "Raw Write" 0x0021: input Raw Message
+		// Data 0x01 { Storage Type u8, Format u8, Raw Data u16-array }; output
+		// Memory Index 0x01 (u32). It carries no tag: the RG502Q stores a
+		// DELIVER as MT read (HW 2026-11-21), MODIFY_TAG makes it unread.
+		RAW_WRITE: {
+			id: 0x0021,
+			req: {
+				raw: { t: 0x01, f: { storage_type: 'u8', format: 'u8', data: { n: 'u16', of: 'u8' } } },
+			},
+			resp: {
+				memory_index: { t: 0x01, f: 'u32' },
+			},
+		},
+
+		// libqmi 1.38 "Modify Tag" 0x0023: input Message Tag 0x01 { Storage Type
+		// u8, Memory Index u32, Message Tag u8 }, Message Mode 0x10 (u8)
+		MODIFY_TAG: {
+			id: 0x0023,
+			req: {
+				tag:          { t: 0x01, f: { storage_type: 'u8', memory_index: 'u32', tag: 'u8' } },
+				message_mode: { t: 0x10, f: 'u8' },
+			},
+			resp: {},
 		},
 
 		// Read one stored message as a raw PDU. Message Mode (0x10) is mandatory

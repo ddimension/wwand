@@ -298,4 +298,73 @@ sms.sms_list(at_modem(INTERLEAVED), 'SM', (err, res) => {
 	eq(res.messages[0].index, 7, 'cmgl: ...and it keeps its index');
 });
 
+// --- write (an SMS over IMS into the modem's store) and modem_sms_deliver ---
+(function() {
+	let HI = '0004029121000020101000000000' + '02e834';	// PDU_HI: no SMSC field, "hi"
+	let reqs = [];
+	let fake = { _sms_be: 'qmi', wms: { request: (n, a, cb) => {
+		push(reqs, [ n, a ]);
+		if (n == 'RAW_WRITE')
+			return cb(null, { memory_index: 7 });
+		cb(null, {});
+	} } };
+	let got;
+	sms.sms_write(fake, 'ME', HI, (e, r) => { got = [ e, r ]; });
+	eq(got, [ null, { index: 7 } ], 'write qmi: the memory index');
+	eq([ reqs[0][0], reqs[0][1].raw.storage_type, reqs[0][1].raw.format, length(reqs[0][1].raw.data) ],
+		[ 'RAW_WRITE', 1, 6, 17 ], 'write qmi: Raw Write into NV, GSM/WCDMA PP, the whole PDU');
+	eq([ reqs[1][0], reqs[1][1].tag ], [ 'MODIFY_TAG', { storage_type: 1, memory_index: 7, tag: 1 } ],
+		'write qmi: then tagged MT not read');
+	sms.sms_write(fake, 'SM', '', (e, r) => { got = e; });
+	eq(got?.error, 'invalid_pdu', 'write: no PDU');
+
+	let bad = { _sms_be: 'qmi', wms: { request: (n, a, cb) => cb({ qmi_error: 0x15 }, null) } };
+	sms.sms_write(bad, 'SM', HI, (e, r) => { got = e; });
+	eq(got?.error, 'qmi', 'write qmi: a refused write is an error');
+
+	// AT: CMGW=<TPDU octets>,0 with the PDU after the prompt; the index from +CMGW
+	let at_cmds = [], pdus = [];
+	let fat = { _sms_be: 'at', at: {
+		send: (c, cb) => { push(at_cmds, c); cb(null, { lines: [ 'OK' ] }); },
+		send_pdu: (c, p, cb) => { push(at_cmds, c); push(pdus, p); cb(null, { lines: [ '+CMGW: 12', 'OK' ] }); },
+	} };
+	sms.sms_write(fat, 'ME', HI, (e, r) => { got = [ e, r ]; });
+	eq([ got, at_cmds, pdus ], [ [ null, { index: 12 } ],
+		[ 'AT+CPMS="ME","ME","ME"', 'AT+CMGF=0', 'AT+CMGW=16,0' ], [ HI ] ], 'write at: CPMS, PDU mode, CMGW REC UNREAD');
+
+	let fmb = { _sms_be: 'mbim' };
+	sms.sms_write(fmb, 'ME', HI, (e, r) => { got = e; });
+	eq(got?.error, 'unsupported_on_backend', 'write mbim: native MBIM has no write');
+
+	// simops: deliver -> write + the event sms
+	let events = [];
+	reqs = [];
+	fake._emit = (ev, d) => push(events, [ ev, d ]);
+	let ops = {};
+	simops.install(ops, {
+		log: () => null,
+		check_modem: (ref, cb) => (ref == 'm0') ? { modem: fake } : cb({ error: 'no_such_modem' }, null),
+	});
+	ops.modem_sms_deliver('m0', null, HI, 'ims', (e, r) => { got = [ e, r ]; });
+	eq(got, [ null, { ok: true, storage: 'ME', index: 7 } ], 'deliver: written, ME by default');
+	eq([ events[0][0], events[0][1].storage, events[0][1].index, events[0][1].text, events[0][1].via ],
+		[ 'sms', 'ME', 7, 'hi', 'ims' ], 'deliver: announced like a received SMS');
+	ops.modem_sms_deliver('m0', 'SM', HI, 'ims', (e, r) => { got = r; });
+	eq([ got.storage, reqs[2][1].raw.storage_type ], [ 'SM', 0 ], 'deliver: SM on request');
+	ops.modem_sms_deliver('m0', 'ME', 'zz', 'ims', (e, r) => { got = e; });
+	eq(got?.error, 'invalid_pdu', 'deliver: not an SMS-DELIVER, nothing written');
+
+	// send: a plugin that carries the SMS takes it first
+	let taken = [];
+	ops.plugins_sms_send = (ref, number, text, cb) => {
+		push(taken, number);
+		cb(null, { parts: 1, via: 'ims' });
+		return true;
+	};
+	ops.modem_sms_send('m0', '+4915550000003', 'x', (e, r) => { got = r; });
+	eq([ taken, got ], [ [ '+4915550000003' ], { parts: 1, via: 'ims' } ], 'send: the plugin took it');
+	ops.modem_sms_send('m0', '', 'x', (e, r) => { got = e; });
+	eq(got?.error, 'invalid_argument', 'send: no number -> refused before any plugin');
+})();
+
 done('test_sms');
