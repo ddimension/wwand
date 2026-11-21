@@ -1414,7 +1414,7 @@ two things depending on which path answered:
 
 - **WCDMA Ec/Io** arrives over QMI as a raw gint16 in -0.5 dB units
   (`qmicli-nas.c:460-462`, libqmi 1.38.0) but over AT already in dB
-  (`atcmd_parse.uc:433`). `modem_common.normalise_qmi_signal()` converts at the
+  (`atcmd_parse.uc:500`). `modem_common.normalise_qmi_signal()` converts at the
   edge — at **all three** doors that store a raw QMI signal reply: the polled
   `GET_SIGNAL_INFO`, the `SIGNAL_INFO_IND` indication and the same request over
   the QMI-over-MBIM passthrough. Converting only the first was worse than

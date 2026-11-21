@@ -529,7 +529,42 @@ eq(nb.intra[0], { earfcn: 1300, pci: 155, rsrq: -130, rsrp: -990, rssi: -700, sr
 eq(length(nb.inter), 2, 'qeng nc: two inter neighbours');
 eq(nb.inter[1], { earfcn: 100, pci: 91, rsrq: -160, rsrp: -1080, rssi: -780, srxlev: -100 },
 	'qeng nc: inter neighbour parsed');
-eq(atcmd.parse_qeng_neighbourcell([ 'OK' ]), { intra: [], inter: [], nr: [] }, 'qeng nc: none -> empty');
+eq(atcmd.parse_qeng_neighbourcell([ 'OK' ]), { intra: [], inter: [], nr: [], layers: { serving: null, freqs: [] } },
+	'qeng nc: none -> empty');
+
+// the reselection parameters (SIB3/SIB5) ride on the same lines; an inter-
+// frequency layer the modem does not measure still names its priority and
+// thresholds with a '-' PCI (RG502Q-EA on a shared B20 cell, 2026-11-21)
+let lay = atcmd.parse_qeng_neighbourcell([
+	'+QENG: "neighbourcell intra","LTE",6300,334,-9,-62,-35,-,65,3,62,4,58',
+	'+QENG: "neighbourcell intra","LTE",6300,409,-10,-62,-43,-,0,3,62,4,58',
+	'+QENG: "neighbourcell inter","LTE",6400,-,-,-,-,-,65,3,10,12',
+	'+QENG: "neighbourcell inter","LTE",1801,-,-,-,-,-,0,0,12,12',
+	'+QENG: "neighbourcell inter","LTE",2850,57,-11,-98,-70,-,8,0,12,12',
+	'OK',
+]);
+eq(lay.layers.serving, { earfcn: 6300, resel_priority: 3, s_non_intra_search: 62,
+	thresh_serving_low: 4, s_intra_search: 58 }, 'qeng nc layers: the serving layer\'s parameters');
+eq(map(lay.layers.freqs, (f) => [ f.earfcn, f.resel_priority, f.thresh_x_low, f.thresh_x_high, length(f.cells) ]),
+	[ [ 6400, 3, 10, 12, 0 ], [ 1801, 0, 12, 12, 0 ], [ 2850, 0, 12, 12, 1 ] ],
+	'qeng nc layers: every inter-frequency layer, measured or not');
+eq(lay.layers.freqs[2].cells[0], { pci: 57, rsrq: -110, rsrp: -980, rssi: -700, srxlev: 80 },
+	'qeng nc layers: a measured inter cell keeps its values (0.1 dB)');
+eq(length(lay.inter), 1, 'qeng nc layers: inter[] still lists only measured cells');
+
+// AT+QSCAN=1,1 as the RG502Q-EA printed it (2026-11-21)
+let qs = atcmd.parse_qscan([
+	'+QSCAN: "LTE",262,02,6300,409,-62,-8,66,26,C7EC01,B08B,50,20',
+	'+QSCAN: "LTE",262,01,1300,342,-95,-8,33,121,1C36403,BFF,100,3',
+	'+QSCAN: "LTE",262,03,250,202,-128,-19,-,109,AA4034,3A73,50,1',
+	'+QSCAN: "NR5G",262,01,636666,100,-90,-11,10,30,ABC,BFF,78',
+	'OK',
+]);
+eq(length(qs), 3, 'qscan: three LTE cells, the NR5G line skipped');
+eq(qs[1], { plmn: '262/01', earfcn: 1300, pci: 342, rsrp: -95, rsrq: -8,
+	cell_id: 0x1C36403, tac: 0xBFF, band: 3 }, 'qscan: every field of a cell');
+eq(qs[0].plmn, '262/02', 'qscan: a two-digit MNC keeps its leading zero');
+eq(atcmd.parse_qscan([ 'ERROR' ]), [], 'qscan: no line, no cells');
 
 // NR5G neighbour rows (QMI carries none, so QENG is the only source). Two layouts:
 // with an ARFCN (large) and without (PCI first) — told apart by magnitude.

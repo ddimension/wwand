@@ -292,6 +292,7 @@ export const parse_qnwlock = parse.parse_qnwlock;
 export const parse_qcainfo = parse.parse_qcainfo;
 export const parse_qeng_servingcell = parse.parse_qeng_servingcell;
 export const parse_qeng_neighbourcell = parse.parse_qeng_neighbourcell;
+export const parse_qscan = parse.parse_qscan;
 export const parse_qrsrp = parse.parse_qrsrp;
 export const parse_qrsrq = parse.parse_qrsrq;
 export const parse_qsinr = parse.parse_qsinr;

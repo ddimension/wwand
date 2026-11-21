@@ -11,6 +11,45 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **Anchor steering (2026-11-21):** `option
+  anchor_steering 'auto'` (steering.uc) scans (QMI PCI scan, refused by both
+  our 5G modems → `AT+QSCAN`), locks the LTE primary cell onto a cell of the
+  registered network, keeps it once EN-DC shows, releases it on every failure
+  and before any recovery rung; volatile (`save_ctrl` 0,0 first). HW on the
+  NR7101: moved off a Vodafone-hosted B20 cell onto Telekom 6400/381, EN-DC
+  after 39 s; restart → the init released the lock; off → released,
+  `save_ctrl` 1,1; on/off by reload restarts nothing. **Not HW-checked:** the
+  RSRP/stall release paths (host-tested only), throughput with the n1 leg
+  (the NR7101's default route is br-lan), the QMI PCI-scan decode (no modem
+  answered type 3), and a voice-call deferral — wwand-ims has no
+  `radio_busy` yet. Status page: *Cell layers* + *Anchor steering*.
+  Design and measurements: docs/design/anchor-steering.md.
+  **TODO: the other supported modems.** Today it needs a cell scan and a
+  cell lock wwand can drive: QMI lock + AT+QSCAN on Quectel (RG502Q-EA
+  measured, the RG650E-EU refuses the QMI PCI scan too). Research each
+  family's documentation for a cell scan, a primary-cell lock and its
+  persistence, then measure: Quectel EG06/EG25/EM/RM (QSCAN, QNWLOCK and its
+  save_ctrl), Fibocom (FM350/FM150: +GTCELLLOCK and a scan command?), MeiG
+  SLM7xx (NCM, the LT300), Sierra/Foxconn MBIM modems (QMI over the MBIM
+  passthrough), Huawei; an MBIM-native path if MBIM has one. `steering.uc
+  modem_fx` takes the scan and lock per dialect, like `cell_lock.uc` DIALECTS.
+- **A named profile vanishes on a Quectel card change (2026-11-21, open):**
+  the NR7101's hwtest SIM-slot switch made the modem reload its carrier
+  config (`QMBNCFG AutoSel`), which rebuilt the profile list from the MBN
+  (cid 1–4) and dropped the hand-made cid 5 that `wwand1` names with `option
+  profile '5'` — "invalid profile id" until it was recreated. Not the sweep
+  (nothing deleted it). An interface without `option profile` on mux 2+ gets
+  its own profile re-created at the next dial; one that names an index has
+  no such way back. Same run: `ratorder` read a longer list afterwards
+  (`nr5g,lte,umts,gsm,evdo,cdma1x,td-scdma`) and failed "not restored", and
+  `esim-slot:wwmodem0` failed twice with an empty slot list on slot 1 —
+  both first seen on the NR7101, both after the switch; to look at.
+- **Own-profile sweep deleted a named profile (fixed 2026-11-21):** 8e0ade4's sweep kept only interfaces that dial an own
+  profile, so `wwand1` with `option profile '5'` lost profile 5
+  (`wwand:wwand1`) on the NR7101 and failed with "invalid profile id". Now
+  every configured interface and every named index (`'#N'`) is kept
+  (qmi_backend.sweep_own_profiles, test_qmi_backend). Profile 5 was recreated
+  there with `AT+CGDCONT=5`.
 - **Profiles per interface (2026-11-20, #88):** without `option profile`, mux
   0/1 dials the attach profile (the first entry of the modem's LTE attach PDN
   list, `qmi_backend.attach_index`, else 1) and mux 2+ a profile of its own

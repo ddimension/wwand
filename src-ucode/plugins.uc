@@ -15,6 +15,11 @@
 //       radio_hold(ref, ext),           // -> null, or a reason the modem's
 //                                       //    radio must stay off (its card
 //                                       //    is in use elsewhere)
+//       radio_busy(ref, ext),           // -> null, or why the radio must
+//                                       //    not be re-tuned right now (a
+//                                       //    voice call): optional radio
+//                                       //    work such as anchor steering
+//                                       //    waits, nothing else is held
 //       stop(),                         // the daemon exits -> true when it
 //                                       //    started work that needs the loop
 //       busy(),                         // -> true while that work runs
@@ -169,6 +174,26 @@ export function install(self, o)
 			let r = null;
 
 			try { r = p.inst.radio_hold(ref, ext_of(ref)); } catch (e) { r = null; }
+
+			if (type(r) == 'string' && length(r))
+				return sprintf('%s: %s', p.name, r);
+		}
+
+		return null;
+	};
+
+	// Why optional radio work (a cell scan, a steering lock) must wait now, or
+	// null. Unlike radio_hold this never keeps the radio off or fails a
+	// bring-up; it only defers work that would cost the user seconds of
+	// service while something time-critical runs.
+	self.plugins_radio_busy = function(ref) {
+		for (let p in (instances ?? [])) {
+			if (type(p.inst.radio_busy) != 'function')
+				continue;
+
+			let r = null;
+
+			try { r = p.inst.radio_busy(ref, ext_of(ref)); } catch (e) { r = null; }
 
 			if (type(r) == 'string' && length(r))
 				return sprintf('%s: %s', p.name, r);

@@ -559,11 +559,17 @@ export function read_profiles(wds, cb)
 export const OWN_PROFILE_PREFIX = 'wwand:';
 
 // sweep_own_profiles(wds, keep, log, cb): delete the profiles marked
-// `wwand:<name>` whose <name> is not in `keep` (the interfaces that dial an
-// own profile now — the daemon builds it), and every duplicate of a mark beyond its lowest index (a create whose
-// answer was lost). cb(deleted indices). Anything without the mark is not
-// looked at twice: the modem's own profiles stay as they are. Strictly
-// sequential on the config client, like every other reader of it.
+// `wwand:<name>` whose interface <name> no longer exists, and every duplicate
+// of a mark beyond its lowest index (a create whose answer was lost).
+// cb(deleted indices). `keep` (the daemon builds it): every configured
+// interface by name, and every profile index an interface names — `option
+// profile N` or `apn '#N'` — as '#N'. A named index is never deleted, marked
+// or not: an interface may point at a profile wwand once created for it, and
+// deleting it left that interface dialling a profile the modem no longer has
+// (profile 5 on the NR7101, "invalid profile id", 2026-11-21). Anything
+// without the mark is not looked at twice: the modem's own profiles stay as
+// they are. Strictly sequential on the config client, like every other
+// reader of it.
 export function sweep_own_profiles(wds, keep, log, cb)
 {
 	wds.request('GET_PROFILE_LIST', { profile_type: 0 }, (e, d) => {
@@ -579,6 +585,11 @@ export function sweep_own_profiles(wds, keep, log, cb)
 				continue;
 
 			let iface = substr(n, length(OWN_PROFILE_PREFIX));
+
+			if (keep[sprintf('#%d', p.index)]) {
+				seen[n] = true;
+				continue;
+			}
 
 			if (seen[n] || !(iface in keep))
 				push(gone, { index: p.index, name: n, why: seen[n] ? 'duplicate' : 'interface gone' });

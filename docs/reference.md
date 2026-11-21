@@ -597,6 +597,12 @@ config wwand_modem 'm0'
 	option lock_4g '1300:246'        # earfcn:pci — LTE cell lock (a list; Quectel takes up to 10 cells)
 	option lock_5g '242:431070:15:1' # pci:arfcn:scs:band — NR SA cell lock (scs in kHz)
 	option lock_persist '0'          # store the cell lock in modem NV (Quectel AT only)
+	option anchor_steering 'off'     # 'auto': lock a FIXED router's LTE primary cell onto an
+	                                 #    EN-DC anchor of the registered network, supervised and
+	                                 #    volatile (see "Anchor steering"); off while lock_4g /
+	                                 #    lock_5g is set. Changed on reload without a restart.
+	option steer_rsrp_min '-105'     # dBm floor for a steering target (and for keeping it)
+	option steer_scan_interval '21600' # s between steering cell scans (min 600)
 	list band_lte '3'                # LTE bands, one per line — Fibocom FM350/FM150 only (see below)
 	list band_lte '20'
 	list band_nr '78'                # NR bands, one list for SA and NSA alike
@@ -1331,6 +1337,58 @@ modem right after its AT init. A modem no dialect answers gets a `lock_4g` /
 dialect in use is `cell_lock_dialect` on the modem object. Which modems
 answered which commands is in [qmi-beyond-libqmi.md](qmi-beyond-libqmi.md). To
 add a vendor, see [extending.md](extending.md#cell-lock-dialects).
+
+### Anchor steering
+
+A router that does not move camps where the network's idle rules put it, and a
+strong cell another operator hosts can hold it there for good: that cell offers
+no EN-DC, and its own SIB5 ranks its layer above the operator's other layers,
+so the modem never even measures them. The NR7101 on a Telekom card sat on such
+a B20 cell (broadcasting 262/02); locked to Telekom's own B20 cell it reported
+the anchor within a minute and added an NR5G-NSA leg on n1 (2026-11-21). A
+phone finds those cells as it moves; a CPE does not. `option anchor_steering
+'auto'` does it for the router (`steering.uc`, design and measurements in
+[design/anchor-steering.md](design/anchor-steering.md)):
+
+1. 120 s after the modem registers, and at most every `steer_scan_interval`
+   after that, it scans for LTE cells — QMI Perform Network Scan with the PCI
+   scan type first, `AT+QSCAN=1,1` when the modem refuses it (the RG502Q-EA and
+   the RG650E-EU always do; a QSCAN costs about 15 s of service). Nothing is
+   scanned while the serving cell already offers EN-DC, or while a plugin says
+   the radio is busy (`radio_busy`, see Plugins).
+2. Candidates are cells of the **registered** network, at least
+   `steer_rsrp_min`, at most 20 dB below the current cell, not blocked; a cell
+   already seen with an anchor first, then by RSRP.
+3. The LTE **primary cell** is locked (QMI cell lock first, `AT+QNWLOCK` as
+   the fallback) after `AT+QNWLOCK="save_ctrl",0,0` on Quectel, so the lock
+   never reaches NV. No band is excluded: the network still adds LTE
+   secondary carriers and the NR leg.
+4. It is released, and that cell blocked for 6 h, when the cell is not the
+   serving one within 15 s, offers no EN-DC within 60 s, is left, loses
+   registration, stays below `steer_rsrp_min` for 30 s, or the data path
+   stalls — and before every recovery rung, so the ladder never fights it.
+   Measured why: a lock on a cell that is not there stops all data within 3 s
+   and wwand's own supervision did not notice for 74 s; a release brought data
+   back in 10 s with every PDN session intact.
+5. Switching it off, a changed threshold or a removed modem releases the lock;
+   a daemon that dies holding one is caught by the next init, which releases
+   every lock the config does not ask for. The release writes
+   `save_ctrl 1,1` again, as a config release does.
+
+Roaming cards (GDSP and other global SIMs) are steered within the network they
+are registered on — the visited one — and never onto another network's cell.
+A visited network often gives a roaming SIM no EN-DC at all: a round in which
+every candidate failed doubles the wait for the next (up to 8 intervals), and
+a change of the registered network forgets the block list and starts over.
+
+Lock writes run one at a time, and a stop or a recovery step that comes while a
+write or a scan is out releases after it: a set can never land after its
+release.
+
+Nothing is written to a file: the scanned cells, the block list and the state
+live in the daemon and are shown on `status` (`steering`) and `modem_cells`.
+A configured `lock_4g`/`lock_5g` switches steering off. Meant for fixed
+installations only: a moving router gains nothing from a lock.
 
 `option modes` is written at bring-up, after the SIM, and only when the modem
 holds something else; every write is permanent:
@@ -2181,13 +2239,13 @@ every method to it.
 
 | Method | Arguments | Description |
 |---|---|---|
-| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `tx_stall` — `{ netdev, timeouts, stalled_s }`: the kernel's transmit watchdog on the data netdev (`/sys/class/net/<dev>/queues/tx-*/tx_timeout`, read on the daemon's 10 s tick; a stall ends when `tx_packets` moves again), `timeouts` counted since wwand began watching this modem, `stalled_s` how long the queue has been stuck or null while it moves (see `option tx_stall_timeout`), `gps_port` — the modem's NMEA tty when its port table names one (read by wwand-gps when `option gnss` is set; see `modem_gps`), `diag_port` — the modem's DM/DIAG node, likewise resolved and never opened (see "The diag port"), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran, `remote_sim` — `{ supported, via \| reason }`: whether the modem can run on a remote SIM, from the services it lists itself (QMI UIM Remote, service 0x32, natively or over the QMI-over-MBIM passthrough); `supported: null` while not known yet — listed is not switched on, see `wwandctl rsim MODEM switch`; on a Quectel that does NOT list it, the daemon reads the firmware switch once (EFS `uim_remote_service_enable`, read by the modem at boot) and adds `switch: 'off' | 'unset' | 'on'` with a reason naming the remedy (switch on + modem reset), since there "not listed" usually means "switched off", `radio_held` — why a plugin holds the radio off (`<plugin>: <reason>`, null when nothing does; see "Radio hold" under Plugins), `radio_hold_error` — `cannot hold this modem (<why>)` when that hold cannot be honoured and the radio is in fact on, null otherwise) + contexts + `board` (detected profile, `profile_source` — the board file's path or `builtin`, power/reset capability) |
+| `status` / `modem_list` | — | modems (state, identity, registration, `registration_detail`, counters, `control_note`, `apdu_backend`, `at2_released` — the secondary AT port left to external tools, `tx_stall` — `{ netdev, timeouts, stalled_s }`: the kernel's transmit watchdog on the data netdev (`/sys/class/net/<dev>/queues/tx-*/tx_timeout`, read on the daemon's 10 s tick; a stall ends when `tx_packets` moves again), `timeouts` counted since wwand began watching this modem, `stalled_s` how long the queue has been stuck or null while it moves (see `option tx_stall_timeout`), `gps_port` — the modem's NMEA tty when its port table names one (read by wwand-gps when `option gnss` is set; see `modem_gps`), `diag_port` — the modem's DM/DIAG node, likewise resolved and never opened (see "The diag port"), `locks` — cell/frequency-lock read-back, `rat` — the current fine access technology incl. IoT/RedCap/NTN (`NB-IoT`/`LTE-M`/`5G-SA`/…, identified over AT where QMI/MBIM can't name it), `caps` — best-effort `{ rats, iot_modes, ntn }` capability summary, `fcc_lock` — the FCC/RF-lock probe read-back, `esim` — `{ eid, profiles }` once the `esim_ready` bring-up refresh ran, `remote_sim` — `{ supported, via \| reason }`: whether the modem can run on a remote SIM, from the services it lists itself (QMI UIM Remote, service 0x32, natively or over the QMI-over-MBIM passthrough); `supported: null` while not known yet — listed is not switched on, see `wwandctl rsim MODEM switch`; on a Quectel that does NOT list it, the daemon reads the firmware switch once (EFS `uim_remote_service_enable`, read by the modem at boot) and adds `switch: 'off' | 'unset' | 'on'` with a reason naming the remedy (switch on + modem reset), since there "not listed" usually means "switched off", `radio_held` — why a plugin holds the radio off (`<plugin>: <reason>`, null when nothing does; see "Radio hold" under Plugins), `radio_hold_error` — `cannot hold this modem (<why>)` when that hold cannot be honoured and the radio is in fact on, null otherwise, `steering` — anchor steering's `{ state, target, plmn, failed_rounds, since_s, reason, last_scan_s, next_scan_s, scan_source, cells, blocked }` while `anchor_steering 'auto'` runs, null otherwise; `state` is `idle`/`scanning`/`locking`/`locked`/`verified`/`releasing`/`backoff`) + contexts + `board` (detected profile, `profile_source` — the board file's path or `builtin`, power/reset capability) |
 | `reload` | — | re-read UCI and apply the **diff** — only changed/added/removed modems and contexts are touched (idempotent; see *Idempotent reload*) |
 | `set_log_level` | `level` | change the log level at runtime |
 | `hotplug` | `action`, `device` | device add/remove (from the hotplug script) |
 | `modem_signal` | `modem` | last raw signal info (LTE/NR5G/WCDMA/GSM metrics) |
 | `modem_telemetry` | `modem` (optional) | per-modem state, temperature, attempts and protocol errors, plus each context's state — **no subscriber identifiers**, so it can be granted to an unprivileged reader (see [Feeding collectd](#feeding-collectd-wwandctl-collectd)) |
-| `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` + `temperature` (also on `status`, which is the canonical place — same field, kept here for compatibility) |
+| `modem_cells` | `modem` | registration + `registration_detail` + signal + decoded cells + `dsd` + `ca` + `temperature` (also on `status`, which is the canonical place — same field, kept here for compatibility) + `cell_layers` — where the modem camps and why: `{ source: 'qmi'\|'at', serving: { earfcn, band, dl_mhz, pci, cell_plmn, shared, rsrp, anchor, resel_priority, s_non_intra_search, thresh_serving_low, s_intra_search }, freqs: [ { earfcn, band, dl_mhz, resel_priority, thresh_x_low, thresh_x_high, cells: [ { pci, rsrp, rsrq } ] } ] }`, the network's idle-mode parameters as the modem reports them (QMI cell location while idle, else `AT+QENG="neighbourcell"` at most every 10 s — connected, a Quectel prints `-` for them and lists no other layer, so the last idle reading of the same serving EARFCN is carried, with `serving.params_age_s` / `freqs_age_s` saying how old it is); `shared` when the cell broadcasts another network than the registered one; null without an LTE serving cell + `steering` (as on `status`) |
 | `modem_location` | `modem` | last GNSS fix, short form — a view over the `modem_gps` reader, whichever source feeds it (needs `option gnss` and `wwand-gps`) |
 | `modem_at` | `modem`, `command`, `timeout?` | run an AT command on the modem's AT port |
 | `modem_qmi_raw` | `modem`, `service`, `message`, `payload?`, `timeout?` | one raw QMI request (see [Raw QMI and MBIM](#raw-qmi-and-mbim-wwandctl-qmi-wwandctl-mbim)): `service` 1–255, `message` 0–0xffff, `payload` the request TLVs as hex, `timeout` ms (default 10000, max 120000). Result: `result` (0 success, 1 failure, absent without a result TLV), `error_code`, `payload` (the response TLVs as hex), `tlvs` (`[{ type, value }]` in wire order), `truncated` when the last TLV claims more bytes than came. Errors: `invalid_service` (also for CTL), `invalid_message`, `invalid_payload`, `unsupported` (NCM), `service_unavailable`, `not_ready`, `timeout` |
@@ -3356,6 +3414,10 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   modem that cannot switch its radio off at all (NCM without an AT port)
   answers every park `unsupported`; it stays registered, its interfaces are
   refused, and `status()` says so in `radio_hold_error`.
+- **Radio busy:** an optional `radio_busy(ref, ext)` returns why optional
+  radio work must wait right now (a voice call is up), or null. Anchor
+  steering scans and locks only while it answers null; unlike `radio_hold`
+  nothing is held off and no bring-up fails.
 - **Stop:** an optional `stop()` runs when the daemon exits. Returning true
   says it sent requests that need the event loop; the daemon then keeps
   running it until the plugin's optional `busy()` answers false, at most 8 s

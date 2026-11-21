@@ -438,10 +438,32 @@ export default {
 
 		NETWORK_SCAN: {
 			id: 0x0021,
+			// 0x11 / 0x13 and resp 0x17 / 0x1C are not in libqmi 1.38: IDL-OP13
+			// (nas_perform_network_scan_req/resp_msg_v01), listed in
+			// docs/qmi-beyond-libqmi.md. scan_type u32: 0 PLMN, 2 mode
+			// preference, 3 PCI; lte_band_pref u64, bit n-1 = band n, for this
+			// scan only. Type 3 is refused (70) by the RG502Q-EA and the
+			// RG650E-EU in every state tried (2026-11-21), so the pci_info
+			// decode below follows the IDL and has not seen a modem's answer.
 			req: {
 				network_type: { t: 0x10, f: 'u8' },
+				scan_type:    { t: 0x11, f: 'u32' },
+				lte_band_pref:{ t: 0x13, f: 'u64' },
 			},
 			resp: {
+				// 0x17: up to 5 cells { freq, pci, global cell id, PLMNs } and
+				// ONE signal block for the whole set
+				pci_info: { t: 0x17, f: {
+					cells: { n: 'u8', of: {
+						freq: 'u32', pci: 'u16', global_cell_id: 'u32',
+						plmn: { n: 'u8', of: { mcc: 'u16', mnc: 'u16', pcs: 'u8' } },
+					} },
+					rsrp: 'i16', rsrp_rx0: 'i16', rsrp_rx1: 'i16',
+					rsrq: 'i16', rsrq_rx0: 'i16', rsrq_rx1: 'i16',
+				} },
+				// 0x1C: SIB2 upperLayerIndication-r15 per entry of 0x10, 0xFF for
+				// a non-LTE PLMN; HW 2026-11-21 RG502Q-EA: 0, 0xFF, 0xFF
+				sib2_upper_layer: { t: 0x1C, f: { n: 'u8', of: 'u8' } },
 				network_information: { t: 0x10, f: { n: 'u16', of: {
 					mcc: 'u16', mnc: 'u16', network_status: 'u8', description: 'lstring' } } },
 				radio_access_technology: { t: 0x11, f: { n: 'u16', of: {

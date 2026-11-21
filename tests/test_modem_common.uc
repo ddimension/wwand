@@ -2409,4 +2409,59 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	ok(done_cb, 'collect_nr5g: cb still fires after a mode-change re-poll');
 }
 
+// === cell_layers / merge_layers: where the modem camps and why ===============
+{
+	// connected the RG502Q-EA prints '-' for the idle parameters (2026-11-21):
+	// the last idle reading of the same serving EARFCN is carried, with its time
+	let idle = { serving: { earfcn: 6300, resel_priority: 3, s_non_intra_search: 62,
+		thresh_serving_low: 4, s_intra_search: 58 },
+		freqs: [ { earfcn: 1801, resel_priority: 0, thresh_x_low: 12, thresh_x_high: 12, cells: [] } ] };
+	let m1 = mc.merge_layers(idle, null, 100);
+	eq([ m1.serving.params_at, m1.freqs_at ], [ 100, 100 ], 'merge_layers: a fresh idle read is stamped');
+
+	let conn = { serving: { earfcn: 6300, resel_priority: null, s_non_intra_search: null,
+		thresh_serving_low: null, s_intra_search: null }, freqs: [] };
+	let m2 = mc.merge_layers(conn, m1, 160);
+	eq([ m2.serving.resel_priority, m2.serving.s_non_intra_search, m2.serving.params_at ], [ 3, 62, 100 ],
+		'merge_layers: connected, the idle values of the same layer are carried with their time');
+	eq([ length(m2.freqs), m2.freqs_at ], [ 1, 100 ], 'merge_layers: ...and so are the other layers');
+
+	let moved = { serving: { earfcn: 6400, resel_priority: null }, freqs: [] };
+	let m3 = mc.merge_layers(moved, m1, 170);
+	eq([ m3.serving.resel_priority, length(m3.freqs) ], [ null, 0 ],
+		'merge_layers: on another layer nothing is carried over');
+
+	// a hosted cell: the cell's PLMN is not the registered one
+	let cells = {
+		lte_intra: { ue_idle: 0, plmn: '262/02', earfcn: 6300, serving_cell_id: 334,
+			resel_priority: 0, cells: [ { pci: 334, rsrp: -625, srxlev: 0 } ] },
+		lte_inter: { ue_idle: 0, freqs: [] },
+		at_layers: m2,
+	};
+	let cl = mc.cell_layers(cells, '262/01', { nsa_available: false });
+	eq([ cl.source, cl.serving.band, cl.serving.pci, cl.serving.shared, cl.serving.anchor ],
+		[ 'at', 20, 334, true, false ], 'cell_layers: AT source while connected, a hosted B20 cell');
+	eq([ cl.serving.rsrp, cl.serving.resel_priority ], [ -62.5, 3 ],
+		'cell_layers: RSRP in dB, the carried priority');
+	ok(cl.serving.params_age_s != null, 'cell_layers: the carried values say how old they are');
+	eq([ cl.freqs[0].band, cl.freqs[0].resel_priority, cl.freqs[0].thresh_x_high ], [ 3, 0, 12 ],
+		'cell_layers: the other layers with band and parameters');
+	eq(mc.cell_layers(cells, '262/02', null).serving.shared, false, 'cell_layers: the own network is not shared');
+
+	// idle, QMI carries the parameters itself and wins
+	cells.lte_intra.ue_idle = 1;
+	cells.lte_intra.resel_priority = 5;
+	eq([ mc.cell_layers(cells, '262/01', null).source, mc.cell_layers(cells, '262/01', null).serving.resel_priority ],
+		[ 'qmi', 5 ], 'cell_layers: idle QMI values win over AT');
+	eq(mc.cell_layers({}, null, null), null, 'cell_layers: no LTE serving cell, null');
+
+	// a cell refresh between two layer reads keeps them, on the same layer only
+	let fresh = { lte_intra: { earfcn: 6300, serving_cell_id: 334, cells: [] } };
+	mc.preserve_serving(fresh, cells);
+	ok(fresh.at_layers === cells.at_layers, 'preserve_serving: the layers survive a cell refresh');
+	let other = { lte_intra: { earfcn: 6400, serving_cell_id: 381, cells: [] } };
+	mc.preserve_serving(other, cells);
+	eq(other.at_layers, null, 'preserve_serving: ...not onto another serving layer');
+}
+
 done('test_modem_common');

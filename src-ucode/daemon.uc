@@ -25,6 +25,7 @@ import * as recoverymod from 'wwand.recovery';
 import * as ctx_settings from 'wwand.ctx_settings';
 import * as context_common from 'wwand.context_common';
 import * as modem_common from 'wwand.modem_common';
+import * as steering from 'wwand.steering';
 import * as hexmod from 'wwand.codec.hex';
 import * as tlvmod from 'wwand.codec.tlv';
 // module scope: the lazy backend loaders live outside create(), so they cannot
@@ -132,6 +133,13 @@ function sim_effect(s)
 // The per-modem band allow-lists (config wwand_modem). Applied live and kept
 // out of the restart signature — see apply_config.
 const BAND_OPTS = [ 'band_lte', 'band_nr', 'band_umts' ];
+
+// Options the running modem reads on every use, so a reload hands them over
+// without a restart: anchor steering re-reads its switch every daemon tick
+// (steer_tick). A restart for them would drop every connection to change a
+// supervisor — and cancel the release of a lock steering held mid-flight
+// (HW-seen on the NR7101, 2026-11-21: the init's lock clean-up caught it).
+const LIVE_MODEM_OPTS = [ 'anchor_steering', 'steer_rsrp_min', 'steer_scan_interval' ];
 
 function band_sig(cfg)
 {
@@ -597,7 +605,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:1130-1133 warns "references
+	// produces no entry for it at all (config.uc:1147-1150 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -1599,7 +1607,7 @@ export function create(opts)
 	//
 	// COMPARED HERE rather than trusted from the event. modem_mbim filters its
 	// own emit on a change (modem_mbim.uc:1092-1101) while the shared reapply
-	// tail emits on every re-read (modem_common.uc:893-899); one comparison, in
+	// tail emits on every re-read (modem_common.uc:901-907); one comparison, in
 	// the place that acts on it, cannot disagree with itself.
 	let modem_sim_refresh = (modem, data) => {
 		let entry = self.modems[modem.id];
@@ -1934,30 +1942,30 @@ export function create(opts)
 		// (MBIM/AT: the hook; QMI: the Voice client and its indications) —
 		// they come only while registered, and are otherwise lost unseen
 		if (event == 'registered') {
-			// profiles wwand created for an interface on mux 2+ that no
-			// longer uses one (QMI; once per init) — the modem's own profiles
-			// are not touched (qmi_backend.sweep_own_profiles). Kept: every
-			// interface, on any modem, that would dial an own profile now —
-			// mux 2+ without `option profile` (context.uc resolve_profile).
-			// One moved to `option profile` or to mux 1 leaves its profile
-			// orphaned; one removed and added again gets a new one at its
-			// next dial, the safe direction.
+			// profiles wwand created for an interface on mux 2 and up whose
+			// interface no longer exists (QMI; once per init) — the modem's own
+			// profiles are not touched (qmi_backend.sweep_own_profiles). Kept:
+			// every configured interface, and every profile index one names
+			// (`option profile N`, an effective `apn '#N'` — a wwand_sim's
+			// included: conn_cfg on the bound context, or on the interface's
+			// config and its modem while none is bound). An interface that moved
+			// to `option profile` or to mux 1 keeps its old profile: a stale
+			// profile costs a slot, deleting one an interface still names cost
+			// that interface its connection.
 			let keep = {};
 
 			for (let n, e in self.contexts) {
-				// decided as context.uc resolve_profile decides it: the mux in
-				// force on its own modem, no `option profile`, and no effective
-				// `apn '#N'` — a wwand_sim's included: conn_cfg on the bound
-				// context, or on the interface's config and its modem (whose
-				// card is read by the registration) while none is bound
 				let m = self.modems[e?.cfg?.modem]?.modem;
-				let dp = m?.datapath;
 				let apn = context_common.conn_cfg(e?.ctx ?? { config: e?.cfg ?? {}, modem: m }, 'apn');
-				let named = (type(apn) == 'string' && substr(apn, 0, 1) == '#') ||
-					+(e?.cfg?.profile ?? 0) > 0;
+				let hash = (type(apn) == 'string') ? match(apn, /^#([0-9]+)$/) : null;
 
-				if (cfgmod.effective_mux_id(e?.cfg, dp) >= 2 && !named)
-					keep[n] = true;
+				keep[n] = true;
+
+				if (hash)
+					keep[sprintf('#%d', +hash[1])] = true;
+
+				if (+(e?.cfg?.profile ?? 0) > 0)
+					keep[sprintf('#%d', +e.cfg.profile)] = true;
 			}
 
 			modem.sweep_own_profiles?.(keep);
@@ -3036,7 +3044,7 @@ export function create(opts)
 			};
 
 		// TELL THE CONTEXTS FIRST, then stop the modem — the order _device_gone
-		// uses (modem_common.uc:938). Dropping `centry.ctx` below only releases
+		// uses (modem_common.uc:946). Dropping `centry.ctx` below only releases
 		// the daemon's HANDLE: the context object itself lives on with its
 		// monitor timers armed and its WDS clients alive, polling a hub that
 		// entry.modem.stop() has just closed. One orphan per removal, and its
@@ -3179,6 +3187,14 @@ export function create(opts)
 
 		if (entry.modeswitch_liveness)
 			entry.modeswitch_liveness.cancel();
+
+		// its lock goes with it (the release may fail on a modem that is gone;
+		// the next init's cell_lock.sync releases what is left)
+		if (entry._steer) {
+			let st = entry._steer;
+			entry._steer = null;
+			st.stop();
+		}
 
 		delete self.modems[name];
 
@@ -4136,6 +4152,9 @@ export function create(opts)
 			for (let k in BAND_OPTS)
 				delete cfg[k];
 
+			for (let k in LIVE_MODEM_OPTS)
+				delete cfg[k];
+
 			return sprintf('%J', { cfg: cfg, mux: mux_by_modem[mn], l3: l3_by_modem[mn] });
 		};
 		let ctx_sig = (cn) => sprintf('%J', parsed.contexts[cn]);
@@ -4281,6 +4300,34 @@ export function create(opts)
 			}
 
 			e.modem?.apply_config_bands?.(() => null);
+		}
+
+		// the live options (LIVE_MODEM_OPTS), handed to the running modem; a
+		// changed steering threshold takes effect by stopping the steering
+		// object, which releases its lock — the next tick builds a new one
+		for (let mn in keys(self.modems)) {
+			let e = self.modems[mn];
+			let pm = parsed.modems[mn];
+
+			if (!e.cfg || !pm)
+				continue;
+
+			let changed = false;
+
+			for (let k in LIVE_MODEM_OPTS)
+				if (sprintf('%J', e.cfg[k]) != sprintf('%J', pm[k])) {
+					changed = true;
+					e.cfg[k] = pm[k];
+
+					if (e.modem?.config)
+						e.modem.config[k] = pm[k];
+				}
+
+			if (changed && e._steer) {
+				let st = e._steer;
+				e._steer = null;
+				st.stop();
+			}
 		}
 
 		for (let cn in keys(self.contexts))
@@ -4447,6 +4494,70 @@ export function create(opts)
 					m.trip_zero_rx?.('tx stall');
 			};
 
+			// anchor steering (steering.uc), reconciled every tick: on while
+			// the modem config asks for it and the modem is registered, off
+			// otherwise. It belongs to ONE modem object: a re-created modem
+			// gets a new one, and the old one is stopped, which releases the
+			// lock it held.
+			let steer_tick = (name, entry) => {
+				let m = entry?.modem;
+				let st = entry._steer;
+				let on = !!m && steering.enabled(m.config);
+
+				// stopped only when switched off or the modem object changed —
+				// NOT on a lost registration: a lock can cost registration for a
+				// moment, and steering's own supervision releases and blocks
+				// that cell; stopping here would release without blocking and
+				// lock the same cell again at the next scan
+				if (st && (st._for !== m || !on)) {
+					entry._steer = null;
+					st.stop();
+					st = null;
+				}
+
+				// started once the modem has registered: before that there is
+				// no serving cell to judge
+				if (st || !on || !is_registered(m.reg))
+					return;
+
+				let mlog = (lvl, msg) => log(lvl, sprintf('modem %s: %s', name, msg));
+				let txs = () => (entry._txs_for === m && entry._txs)
+					? entry._txs.view(self._tx_clock?.() ?? context_common.mono()) : null;
+
+				st = steering.create({
+					log: mlog,
+					config: steering.config_of(m.config),
+					fx: steering.modem_fx(m, mlog, {
+						now: () => context_common.mono(),
+						timer: (ms, cb) => uloop.timer(ms, cb),
+						registered: () => is_registered(m.reg),
+						stalled: () => (txs()?.stalled_s ?? 0) > 0,
+						busy: () => self.plugins_radio_busy?.(name) ??
+							(m._plugin_held ? 'a plugin holds the radio' : null),
+					}),
+				});
+				st._for = m;
+				entry._steer = st;
+
+				// a recovery rung never runs against a lock steering set: release
+				// first, then the ladder as before (wrapped once per modem object)
+				if (!m._steer_wrapped && type(m.note_connect_failure) == 'function') {
+					let orig = m.note_connect_failure;
+
+					m._steer_wrapped = true;
+					m.note_connect_failure = (done) => {
+						let s2 = (entry._steer && entry._steer._for === m) ? entry._steer : null;
+
+						if (!s2)
+							return orig(done);
+
+						s2.before_recovery(() => orig(done));
+					};
+				}
+
+				mlog('info', 'anchor steering on');
+			};
+
 			let tick;
 			tick = () => {
 				let now = time();
@@ -4571,6 +4682,10 @@ export function create(opts)
 
 				for (let name, entry in self.modems)
 					tx_stall_tick(name, entry);
+
+				for (let name, entry in self.modems)
+					try { steer_tick(name, entry); }
+					catch (e) { log('warn', sprintf('modem %s: anchor steering: %s', name, e)); }
 
 				// a radio a plugin parked, which no plugin holds any more (it
 				// stopped, failed, forgot): handed back as the plugin would
@@ -5224,6 +5339,8 @@ export function create(opts)
 				// collect_nr5g / nr5g_blocker); null on a modem that reports none
 				nr5g: entry.modem?.nr5g_state
 					? { ...entry.modem.nr5g_state, blocker: entry.modem._nr5g_blocker ?? null } : null,
+				// anchor steering (steering.uc): null while it is off
+				steering: (entry._steer && entry._steer._for === entry.modem) ? entry._steer.status() : null,
 				// the modem's own thermal mitigation (QMI TMD): which parts of it
 				// are holding back and how far. `mitigated` is the one-bit answer
 				// to "is throughput down because the modem decided so".
@@ -5871,6 +5988,10 @@ export function create(opts)
 			registration_detail: entry.modem.reg_detail,
 			signal: entry.modem.signal,
 			cells: entry.modem.cells,
+			// where the modem camps and why (modem_common.cell_layers)
+			cell_layers: modem_common.cell_layers(entry.modem.cells, steering.reg_plmn(entry.modem),
+				entry.modem.nr5g_state),
+			steering: (entry._steer && entry._steer._for === entry.modem) ? entry._steer.status() : null,
 			dsd: entry.modem.dsd_status,
 			// Also on `status`, which is where both in-tree consumers look and
 			// where it belongs (it is a property of the modem, not of the

@@ -98,6 +98,11 @@ A **check** means the standard's text was read next to the code. *Basis* is what
 <tr><td rowspan="1">Quectel AT+QNWLOCK</td><td rowspan="1">Quectel AT command manuals, HW-read on the RG502Q-EA and RG650E-EU</td><td rowspan="1">common/4g, common/5g, save_ctrl</td><td>tbd</td><td></td><td></td></tr>
 </tbody>
 <tbody>
+<tr><td rowspan="3"><b>Anchor steering</b><br><code>src-ucode/steering.uc, cell_lock.uc runtime_lte, atcmd_parse.uc parse_qscan / parse_qeng_neighbourcell layers</code></td><td rowspan="1">3GPP TS 36.304 (E-UTRA idle-mode cell reselection) and TS 36.331 SIB2 upperLayerIndication</td><td rowspan="1">3GPP TS 36.304 / 36.331; HW-read on the RG502Q-EA (2026-11-21)</td><td rowspan="1">reselection priorities, SnonIntraSearch, threshX-High/Low as reported by AT+QENG; the EN-DC availability the modem reports</td><td>tbd</td><td></td><td></td></tr>
+<tr><td rowspan="1">QMI NAS Perform Network Scan, scan type and PCI result (beyond libqmi)</td><td rowspan="1">vendor IDL table IDL-OP13; docs/qmi-beyond-libqmi.md</td><td rowspan="1">0x0021 request TLV 0x10/0x11/0x13, response TLV 0x17 / 0x1C</td><td>tbd</td><td></td><td></td></tr>
+<tr><td rowspan="1">Quectel AT+QSCAN</td><td rowspan="1">Quectel AT command manuals, HW-read on the RG502Q-EA (2026-11-21)</td><td rowspan="1">AT+QSCAN=1,1 LTE result lines</td><td>tbd</td><td></td><td></td></tr>
+</tbody>
+<tbody>
 <tr><td rowspan="1"><b>Radio vocabulary and bands</b><br><code>src-ucode/codec/schema/rat.uc, codec/arfcn_bands.uc</code></td><td rowspan="1">3GPP TS 36.101 / TS 38.101-1/-2 (bands, EARFCN, NR-ARFCN)</td><td rowspan="1"></td><td rowspan="1">operating band tables, ARFCN ranges</td><td>tbd</td><td></td><td></td></tr>
 </tbody>
 <tbody>

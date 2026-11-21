@@ -66,6 +66,14 @@ export function preserve_serving(newc, oldc)
 {
 	let os = oldc?.serving;
 
+	// the AT layer read (fetch_lte_layers) runs every 10 s, the cell read every
+	// second while watched: without the carry a modem_cells between the two saw
+	// no layers at all (RG650E-EU, 2026-11-21). Only while the serving EARFCN
+	// is the one the layers were read on.
+	if (newc != null && newc.at_layers == null && oldc?.at_layers?.serving != null &&
+	    oldc.at_layers.serving.earfcn == (newc.lte_intra?.earfcn ?? newc.serving?.lte?.earfcn))
+		newc.at_layers = oldc.at_layers;
+
 	if (newc == null || os == null || newc.serving != null)
 		return newc;
 
@@ -1770,6 +1778,143 @@ export function fetch_nr_neighbours(self, cb)
 	});
 };
 
+// The LTE reselection layers over AT (AT+QENG="neighbourcell", Quectel/ASR):
+// the serving layer's idle parameters and every inter-frequency layer the
+// network lists, measured or not. QMI Get Cell Location Info carries the same
+// (lte_intra / lte_inter) but only while the modem is IDLE — connected it
+// reports the priorities as 0 and no layer at all (RG502Q-EA, ue_idle 0,
+// 2026-11-21) — so this is the source cell_layers() falls back on.
+// Stores self.cells.at_layers (or null). Best-effort, like fetch_nr_neighbours.
+const LAYERS_EVERY_S = 10;
+
+// merge_layers(fresh, prev, now): the AT read, with the idle parameters
+// carried over from `prev` while the serving layer stays the same. Connected,
+// the RG502Q-EA prints '-' for all of them (`"neighbourcell intra","LTE",
+// 6300,334,-10,-62,-35,-,-,-,-,-,-`, 2026-11-21) and lists no other layer;
+// they are what the cell broadcasts, so the last idle reading of the same
+// EARFCN is still the network's setting. `params_at` / `freqs_at`: when the
+// carried values were read (monotonic s), shown as their age.
+export function merge_layers(fresh, prev, now)
+{
+	if (!fresh?.serving)
+		return fresh;
+
+	let out = { serving: { ...fresh.serving }, freqs: fresh.freqs ?? [] };
+	let same = (prev?.serving?.earfcn != null && prev.serving.earfcn == fresh.serving.earfcn);
+
+	if (fresh.serving.resel_priority != null)
+		out.serving.params_at = now;
+	else if (same && prev.serving.resel_priority != null)
+		for (let k in [ 'resel_priority', 's_non_intra_search', 'thresh_serving_low', 's_intra_search', 'params_at' ])
+			out.serving[k] = prev.serving[k];
+
+	if (length(out.freqs))
+		out.freqs_at = now;
+	else if (same && length(prev.freqs ?? [])) {
+		out.freqs = prev.freqs;
+		out.freqs_at = prev.freqs_at;
+	}
+
+	return out;
+};
+
+export function fetch_lte_layers(self, cb)
+{
+	cb = cb ?? (() => null);
+
+	// the parameters change with the cell, not by the second; the fast loop
+	// runs every second while LuCI polls, so one read per LAYERS_EVERY_S
+	let now = clock(true)[0];
+
+	if (!self.cells || !qeng_ok(self))
+		return cb();
+
+	if (self._layers_at != null && now - self._layers_at < LAYERS_EVERY_S) {
+		self.cells.at_layers ??= self._layers_last;
+		return cb();
+	}
+
+	self._layers_at = now;
+
+	telemetry_at(self).send('AT+QENG="neighbourcell"', (err, res) => {
+		if (self.cells) {
+			let l = err ? null : atcmd.parse_qeng_neighbourcell(res?.lines).layers;
+			l = (l?.serving || length(l?.freqs ?? [])) ? merge_layers(l, self._layers_last, now) : null;
+			self.cells.at_layers = self._layers_last = l;
+		}
+		cb();
+	});
+};
+
+// cell_layers(cells, reg_plmn, nr5g): where the modem camps and why — the
+// serving LTE layer and the other frequencies the network lists, with band,
+// downlink MHz, the network's reselection priority and thresholds, and the
+// cells seen on each. null without an LTE serving cell.
+//
+// Source: QMI lte_intra/lte_inter while the modem is idle (they carry the
+// parameters then), otherwise the AT read (fetch_lte_layers). Values as the
+// modem reports them (thresholds and s_*_search in its own units; rsrp/rsrq/
+// srxlev converted to dB here).
+//
+// `shared`: the serving cell's own PLMN differs from the registered one — a
+// cell another operator hosts (RAN sharing). It carries the host's settings,
+// its anchor flags and layer priorities included: the NR7101 on Telekom sat on
+// such a B20 cell (cell PLMN 262/02, registered 262/01, 2026-11-21).
+// `anchor`: the cell advertises EN-DC (status nr5g.nsa_available).
+export function cell_layers(cells, reg_plmn, nr5g)
+{
+	let li = cells?.lte_intra;
+	let earfcn = li?.earfcn ?? cells?.serving?.lte?.earfcn;
+
+	if (earfcn == null)
+		return null;
+
+	let db = (v) => (v != null) ? v / 10.0 : null;
+	let band = (e) => {
+		let d = (e != null) ? arfcn_bands.lte_band(e) : null;
+		return { band: d?.band != null ? band_number(d.band) : null, dl_mhz: d?.mhz };
+	};
+	let qmi_idle = (li?.ue_idle == 1) &&
+		((li?.resel_priority ?? 0) > 0 || length(cells?.lte_inter?.freqs ?? []) > 0);
+	let at = cells?.at_layers;
+	let source = qmi_idle ? 'qmi' : (at ? 'at' : null);
+	let srv_cell = filter(li?.cells ?? [], (c) => c.pci == li?.serving_cell_id)[0];
+
+	let serving = {
+		earfcn: earfcn, ...band(earfcn), pci: li?.serving_cell_id ?? cells?.serving?.lte?.pci,
+		cell_plmn: li?.plmn, rsrp: db(srv_cell?.rsrp), srxlev: db(srv_cell?.srxlev),
+		anchor: nr5g?.nsa_available ?? null,
+	};
+	serving.shared = (serving.cell_plmn != null && reg_plmn != null &&
+	                  replace(serving.cell_plmn, '/', '') != replace(reg_plmn, '/', ''));
+
+	let p = qmi_idle ? li : at?.serving;
+
+	if (p) {
+		serving.resel_priority = p.resel_priority;
+		serving.s_non_intra_search = p.s_non_intra_search;
+		serving.thresh_serving_low = p.thresh_serving_low;
+		serving.s_intra_search = p.s_intra_search;
+	}
+
+	// the age of carried-over idle values (merge_layers), null when fresh/QMI
+	let now = clock(true)[0];
+	let age = (t) => (t != null) ? now - t : null;
+	serving.params_age_s = qmi_idle ? 0 : age(at?.serving?.params_at);
+
+	let src_freqs = qmi_idle ? (cells?.lte_inter?.freqs ?? []) : (at?.freqs ?? []);
+	let freqs = map(src_freqs, (f) => ({
+		earfcn: f.earfcn, ...band(f.earfcn),
+		resel_priority: f.resel_priority,
+		thresh_x_low: f.thresh_x_low ?? f.thresh_low,
+		thresh_x_high: f.thresh_x_high ?? f.thresh_high,
+		cells: map(f.cells ?? [], (c) => ({ pci: c.pci, rsrp: db(c.rsrp), rsrq: db(c.rsrq) })),
+	}));
+
+	return { source: source, serving: serving, freqs: freqs,
+		freqs_age_s: qmi_idle ? 0 : age(at?.freqs_at) };
+};
+
 // manufacturers whose AT firmware answers AT+QNWINFO (the active access-tech
 // query). Extensible: add a vendor here once its QNWINFO/analogue is verified.
 const QNWINFO_VENDORS = /quectel/;
@@ -2822,7 +2967,7 @@ export function at_late_retry(self, o)
 // of them is not in the unit its name suggests: WCDMA Ec/Io is a raw gint16 in
 // units of -0.5 dB, which libqmi renders as (-0.5)*raw before printing it
 // (qmicli-nas.c:460-462, libqmi 1.38.0) — a raw 20 means -10.0 dB, and the sign
-// flips too. The AT path already reports real dB (atcmd_parse.uc:433), so a raw
+// flips too. The AT path already reports real dB (atcmd_parse.uc:500), so a raw
 // value left in place makes one documented key mean two different things
 // depending on which path answered, with nothing at the consumer able to tell.
 //

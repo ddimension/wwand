@@ -284,8 +284,14 @@ function tel_quectel_cells(self, cb)
 			assemble_cells(self, serving, neigh, null,
 				modem_common.at_retired(self, 'AT+QRSRP?', 'AT+QRSRQ?', 'AT+QSINR?'));
 
-			if (self.cells)
+			if (self.cells) {
 				self.cells.nr5g_neigh = (neigh && length(neigh.nr)) ? neigh.nr : null;
+				// the reselection layers ride on the same answer (cell_layers)
+				let l = neigh?.layers;
+				l = (l?.serving || length(l?.freqs ?? []))
+					? modem_common.merge_layers(l, self._layers_last, clock(true)[0]) : null;
+				self.cells.at_layers = self._layers_last = l;
+			}
 			cb();
 		});
 	});

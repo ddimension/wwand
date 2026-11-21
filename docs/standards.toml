@@ -421,6 +421,28 @@ code = "src-ucode/cell_lock.uc"
     review = "tbd"
 
 [[component]]
+name = "Anchor steering"
+code = "src-ucode/steering.uc, cell_lock.uc runtime_lte, atcmd_parse.uc parse_qscan / parse_qeng_neighbourcell layers"
+  [[component.standard]]
+  name = "3GPP TS 36.304 (E-UTRA idle-mode cell reselection) and TS 36.331 SIB2 upperLayerIndication"
+  basis = "3GPP TS 36.304 / 36.331; HW-read on the RG502Q-EA (2026-11-21)"
+  sections = "reselection priorities, SnonIntraSearch, threshX-High/Low as reported by AT+QENG; the EN-DC availability the modem reports"
+    [[component.standard.review]]
+    review = "tbd"
+  [[component.standard]]
+  name = "QMI NAS Perform Network Scan, scan type and PCI result (beyond libqmi)"
+  basis = "vendor IDL table IDL-OP13; docs/qmi-beyond-libqmi.md"
+  sections = "0x0021 request TLV 0x10/0x11/0x13, response TLV 0x17 / 0x1C"
+    [[component.standard.review]]
+    review = "tbd"
+  [[component.standard]]
+  name = "Quectel AT+QSCAN"
+  basis = "Quectel AT command manuals, HW-read on the RG502Q-EA (2026-11-21)"
+  sections = "AT+QSCAN=1,1 LTE result lines"
+    [[component.standard.review]]
+    review = "tbd"
+
+[[component]]
 name = "Radio vocabulary and bands"
 code = "src-ucode/codec/schema/rat.uc, codec/arfcn_bands.uc"
   [[component.standard]]

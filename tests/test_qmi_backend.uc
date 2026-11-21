@@ -231,11 +231,19 @@ push(steps, (next) => {
 		eq(deleted, [ 5, 6 ], 'sweep: DELETE_PROFILE for exactly those');
 		ok(length(filter(lines, (m) => index(m, 'interface gone') >= 0)) == 1, 'sweep: says why');
 
-		r_plist = raw_err();
+		// an interface that names an own profile by index (`option profile 5`)
+		// keeps it, though no interface by that mark's name exists any more
+		r_plist = raw(tlv(0x01, u8(2) + ent(4, 'wwand:wan6') + ent(5, 'wwand:gone')));
 		deleted = [];
-		backend.sweep_own_profiles(wds, {}, (l, m) => null, (g2) => {
-			eq([ g2, deleted ], [ [], [] ], 'sweep: an unreadable list deletes nothing');
-			next();
+		backend.sweep_own_profiles(wds, { wan6: true, '#5': true }, (l, m) => null, (g1) => {
+			eq([ g1, deleted ], [ [], [] ], 'sweep: a profile index an interface names is never deleted');
+
+			r_plist = raw_err();
+			deleted = [];
+			backend.sweep_own_profiles(wds, {}, (l, m) => null, (g2) => {
+				eq([ g2, deleted ], [ [], [] ], 'sweep: an unreadable list deletes nothing');
+				next();
+			});
 		});
 	});
 });

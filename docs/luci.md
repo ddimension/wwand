@@ -46,7 +46,11 @@ The per-modem dialog (Edit button). Hardware binding by **device path**
 (a dropdown of detected modems + free text), USB serial or IMEI; the **FCC
 unlock** method for laptop-SKU modems; the generic **Reset modem** button;
 SIM slot, PIN, radio and resilience tabs. *Radio & Cell* also switches
-**Cell Broadcast** (leave / on / off) and lists its channels.
+**Cell Broadcast** (leave / on / off) and lists its channels. The same tab has **Anchor steering** (off / automatic, with its minimum
+RSRP and scan interval): for a router that does not move, it locks the LTE
+primary cell onto an EN-DC anchor of the registered network and releases it as
+soon as it does not deliver — never restricting carrier aggregation and never
+storing the lock in the modem (reference.md, "Anchor steering").
 
 ![Modem config](images/luci-modem-config.png)
 
@@ -128,8 +132,19 @@ and the last **Cell Broadcast** messages.
 
 Configuration warnings first, then **live signal graphs**, then the panels:
 modem identity, serving cell, SIM slots, the active connection (IP/DNS/MTU,
-uptime, data), datapath and muxing, carrier aggregation and neighbour cells.
-Refreshes about once a second.
+uptime, data), datapath and muxing, carrier aggregation and neighbour cells,
+**Cell layers** and **Anchor steering**. Refreshes about once a second.
+
+*Cell layers* answers why the modem camps where it does: the serving layer
+with the network it broadcasts — flagged *hosted by another network* when that
+is not the registered one, the usual reason a fixed router never sees 5G —
+whether it offers an EN-DC anchor, the network's reselection priority and
+search thresholds, and every other layer the network lists with its priority
+and the cells measured on it ("not measured" is normal for a layer ranked
+below the serving one). *Anchor steering* (when switched on) shows its state,
+the locked cell, why it last released one, the last and next scan, and the
+cells the last scan found, each marked when it has been seen with an anchor
+or is blocked.
 
 The active slot's card shows ICCID, IMSI, PIN state and, for an eUICC, what
 its ISD-R says about itself: **eUICC** (SGP.32 IoT or SGP.22, with the SGP.22

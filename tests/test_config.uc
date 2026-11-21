@@ -355,6 +355,25 @@ r = padopt({
 });
 eq(r.modems.m0.protocol, 'mbim', 'protocol: accepted case-insensitively');
 
+// anchor steering (steering.uc): off by default, 'auto' turns it on, any other
+// word is off and named; the thresholds are numbers
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', anchor_steering: 'auto',
+		       steer_rsrp_min: '-100', steer_scan_interval: '3600' },
+		m1:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm1', anchor_steering: 'on' },
+		m2:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm2' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+eq([ r.modems.m0.anchor_steering, r.modems.m0.steer_rsrp_min, r.modems.m0.steer_scan_interval ],
+	[ 'auto', -100, 3600 ], 'anchor_steering: auto and its thresholds');
+eq(r.modems.m1.anchor_steering, 'off', 'anchor_steering: an unknown word is off...');
+ok(length(filter(r.warnings, (w) => match(w, /anchor_steering: "on" is not off or auto/))) == 1, '...and named');
+eq(r.modems.m2.anchor_steering, 'off', 'anchor_steering: off by default');
+ok(!length(filter(r.warnings, (w) => match(w, /unknown option.*(anchor_steering|steer_)/))),
+	'anchor_steering: its options are known');
+
 // `option diag_port` — the explicit DM/DIAG node for the wwand-qlog add-on.
 // wwand never opens it; it is the escape hatch for a modem whose USB id has no
 // 'qcdm' row in the generated port table, and no table is ever complete.

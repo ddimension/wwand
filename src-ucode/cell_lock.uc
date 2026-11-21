@@ -352,6 +352,25 @@ const QMI = {
 
 export const DIALECTS = [ QUECTEL, QMI ];
 
+// The order a RUNTIME lock (anchor steering) asks in: QMI first, because it
+// needs no AT port (at2_external may have handed it away) and its `enforce`
+// applies the lock at once — RG502Q-EA 0x00AF: on the target cell in 4 s
+// without a lost packet (2026-11-21). The config lock keeps DIALECTS.
+export const RUNTIME_DIALECTS = [ QMI, QUECTEL ];
+
+// Quectel keeps ONE global save_ctrl in NV, and wwand leaves it at 1,1 after
+// every release (QUECTEL.write), so ANY lock set afterwards survives a power
+// cycle, the QMI one included: a GPIO reset kept a 0x00AF lock on the
+// RG502Q-EA (2026-11-21). A runtime lock must not outlive wwand, so it turns
+// saving off first — on a modem whose QNWLOCK read answered, never blind.
+function volatile_first(self, cb)
+{
+	if (self.cell_lock_dialect != 'quectel' || type(self.at?.send) != 'function')
+		return cb();
+
+	self.at.send('AT+QNWLOCK="save_ctrl",0,0', () => cb());
+}
+
 // the modem's dialect and its current state: cb(dialect, state), or
 // cb(null, null) when no entry's read answers
 export function probe(self, cb, dialects)
@@ -461,4 +480,48 @@ export function sync(self, log, add, cb, dialects)
 			});
 		});
 	}, dialects);
+};
+
+// runtime_lte(self, log, cells, cb): set a volatile LTE primary-cell lock on
+// `cells` ([ 'earfcn:pci', … ]), or release it with []. Reads back:
+// cb(err, now) — `now` the LTE list the modem reports after the write, err a
+// string when no dialect answered or the read-back differs. 5G is never
+// touched: the lock moves the LTE primary cell only, and the network still
+// adds LTE secondary carriers and the NR leg (an n1 SCG came within seconds on
+// the NR7101 under a lock on 6400/381, 2026-11-21).
+//
+// The release writes save_ctrl 1,1 on Quectel exactly as sync's release does,
+// so NV holds "no lock" afterwards, not the state before steering.
+export function runtime_lte(self, log, cells, cb)
+{
+	probe(self, (d, cur) => {
+		if (!d)
+			return cb('no known cell-lock command', null);
+
+		let want = { lte: cells, nr5g: null, persist: false };
+		let plan = { lte: true, nr5g: false };
+		let go = () => d.write(self, log, want, plan, (errs) => {
+			for (let e in errs)
+				log('warn', sprintf('steering cell lock (%s): %s failed: %J', d.name, e.command ?? '?', e.error));
+
+			d.read(self, (err, now) => {
+				let got = err ? null : now.lte;
+				let finish = () => cb((got != null && same_cells(cells, got)) ? null
+					: sprintf('the modem reports %s after the write', got ? sprintf('[%s]', join(',', got)) : 'nothing'), got);
+
+				// a QMI release leaves save_ctrl at 0,0 from the lock: put back
+				// what a release by sync leaves, so NV holds the released state
+				if (!length(cells) && d.name != 'quectel' && self.cell_lock_dialect == 'quectel' &&
+				    type(self.at?.send) == 'function')
+					return self.at.send('AT+QNWLOCK="save_ctrl",1,1', () => finish());
+
+				finish();
+			});
+		});
+
+		if (length(cells))
+			return volatile_first(self, go);
+
+		go();
+	}, RUNTIME_DIALECTS);
 };

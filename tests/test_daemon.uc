@@ -1050,6 +1050,19 @@ ok(rld.contexts.wanA.ctx != ctxA_obj, 'reload apn: wanA ctx rebuilt with new con
 eq(rld.contexts.wanA.cfg.apn, 'a2', 'reload apn: wanA carries the new APN');
 ctxA_obj = rld.contexts.wanA.ctx;
 
+// (2a) anchor steering switched on for m0: a live option (LIVE_MODEM_OPTS) —
+//      the running modem gets it, nothing restarts
+rl_events = [];
+rld.apply_config(netcfg((n) => { n.wanA.apn = 'a2'; n.m0.anchor_steering = 'auto'; n.m0.steer_rsrp_min = '-100'; }));
+eq(rl_events, [], 'reload steering: no modem or context restarted');
+ok(rld.modems.m0.modem == m0_obj, 'reload steering: m0 modem object preserved');
+eq([ rld.modems.m0.cfg.anchor_steering, rld.modems.m0.cfg.steer_rsrp_min ], [ 'auto', -100 ],
+	'reload steering: the new values reach the running modem entry');
+rl_events = [];
+rld.apply_config(netcfg((n) => { n.wanA.apn = 'a2'; }));
+eq(rl_events, [], 'reload steering: switching it off restarts nothing either');
+eq(rld.modems.m0.cfg.anchor_steering, 'off', 'reload steering: ...and it is off');
+
 // (2b) a plugin's options (plugins.uc) changed for m0: the plugin reads them
 //      from entry.ext, so the modem keeps running and only that record moves
 //      — switching a plugin feature on must not bounce the connection

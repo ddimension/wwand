@@ -233,11 +233,25 @@ export function parse_qeng_servingcell(lines)
 // firmware; the ARFCN (large) is told apart from the PCI (<= 1007) by magnitude.
 //   +QENG: "neighbourcell","NR5G",<arfcn>,<pci>,<rsrp>,<rsrq>,<sinr>[,...]
 //   +QENG: "neighbourcell","NR5G",<pci>,<rsrp>,<rsrq>,<sinr>[,...]  (no arfcn)
+// The trailing fields carry the network's idle-mode reselection parameters
+// (SIB3/SIB5), which say why a modem camps where it does:
+//   intra: …,<srxlev>,<cell_resel_priority>,<s_non_intra_search>,<thresh_serving_low>,<s_intra_search>
+//   inter: …,<srxlev>,<cell_resel_priority>,<threshx_low>,<threshx_high>
+// (RG502Q-EA, HW-read 2026-11-21: `"neighbourcell intra","LTE",6300,334,-9,
+// -62,-35,-,65,3,62,4,58` / `"neighbourcell inter","LTE",1801,-,-,-,-,-,0,0,12,12`).
+// An inter-frequency layer the modem does not measure still comes with its
+// parameters and a '-' PCI — exactly the layers a modem never reselects to —
+// so they are kept in `layers` even without a cell.
 // returns { intra:[{earfcn,pci,rsrq,rsrp,rssi,srxlev}], inter:[…],
-//           nr:[{arfcn,pci,rsrp,rsrq,sinr}] }.
+//           nr:[{arfcn,pci,rsrp,rsrq,sinr}],
+//           layers: { serving: { earfcn, resel_priority, s_non_intra_search,
+//                                thresh_serving_low, s_intra_search } | null,
+//                     freqs: [ { earfcn, resel_priority, thresh_x_low,
+//                                thresh_x_high, cells: [ {pci,rsrq,rsrp,rssi,srxlev} ] } ] } }.
 export function parse_qeng_neighbourcell(lines)
 {
-	let out = { intra: [], inter: [], nr: [] };
+	let out = { intra: [], inter: [], nr: [], layers: { serving: null, freqs: [] } };
+	let freq_of = {};
 	let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
 	let x10 = (s) => { let n = num(s); return (n != null) ? n * 10 : null; };
 
@@ -271,10 +285,63 @@ export function parse_qeng_neighbourcell(lines)
 			rsrq: x10(f[2]), rsrp: x10(f[3]), rssi: x10(f[4]), srxlev: x10(f[6]),
 		};
 
+		if (scope == 'inter' && cell.earfcn != null) {
+			let key = sprintf('%d', cell.earfcn);
+			let fr = freq_of[key];
+
+			if (!fr) {
+				fr = freq_of[key] = { earfcn: cell.earfcn, resel_priority: num(f[7]),
+				                      thresh_x_low: num(f[8]), thresh_x_high: num(f[9]), cells: [] };
+				push(out.layers.freqs, fr);
+			}
+
+			if (cell.pci != null)
+				push(fr.cells, { pci: cell.pci, rsrq: cell.rsrq, rsrp: cell.rsrp,
+				                 rssi: cell.rssi, srxlev: cell.srxlev });
+		}
+		else if (scope == 'intra' && !out.layers.serving && cell.earfcn != null)
+			out.layers.serving = { earfcn: cell.earfcn, resel_priority: num(f[7]),
+			                       s_non_intra_search: num(f[8]), thresh_serving_low: num(f[9]),
+			                       s_intra_search: num(f[10]) };
+
 		if (cell.pci == null)
 			continue;
 
 		push((scope == 'inter') ? out.inter : out.intra, cell);
+	}
+
+	return out;
+};
+
+// parse AT+QSCAN=1,1 (Quectel cell scan, LTE) into cells. Line format on the
+// RG502Q-EA (2026-11-21, 26 s for all LTE bands, about 16 s without data):
+//   +QSCAN: "LTE",<mcc>,<mnc>,<earfcn>,<pci>,<rsrp>,<rsrq>,<srxlev>,<squal>,<cellid hex>,<tac hex>,<bandwidth>,<band>
+//   e.g. +QSCAN: "LTE",262,01,6400,381,-79,-7,50,121,1C36400,BFF,50,20
+// rsrp/rsrq in dB(m) as printed; a '-' field comes out null. NR5G lines are
+// skipped: their field order differs by firmware and steering locks LTE only.
+// returns [ { plmn: 'mcc/mnc', earfcn, pci, rsrp, rsrq, cell_id, tac, band } ].
+export function parse_qscan(lines)
+{
+	let out = [];
+	let num = (s) => (s != null && match(s, /^-?[0-9]+$/)) ? +s : null;
+
+	for (let l in (lines ?? [])) {
+		let m = match(l, /\+QSCAN:\s*"LTE",(.*)/);
+
+		if (!m)
+			continue;
+
+		let f = map(split(m[1], ','), (x) => trim(x));
+		let cell = {
+			plmn: (num(f[0]) != null && f[1] != null && match(f[1], /^[0-9]{2,3}$/)) ? sprintf('%d/%s', +f[0], f[1]) : null,
+			earfcn: num(f[2]), pci: num(f[3]), rsrp: num(f[4]), rsrq: num(f[5]),
+			cell_id: (f[8] != null && match(f[8], /^[0-9A-Fa-f]+$/)) ? hex(f[8]) : null,
+			tac: (f[9] != null && match(f[9], /^[0-9A-Fa-f]+$/)) ? hex(f[9]) : null,
+			band: num(f[11]),
+		};
+
+		if (cell.earfcn != null && cell.pci != null)
+			push(out, cell);
 	}
 
 	return out;

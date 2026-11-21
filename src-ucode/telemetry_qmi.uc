@@ -244,7 +244,8 @@ export function install(self, o)
 					// EARFCN/NR-ARFCN -> band gap-fill (only fills when a vendor
 					// source left band unset; QENG/CA-info always win).
 					modem_common.fill_serving_band(self);
-					modem_common.fetch_nr_neighbours(self, after);
+					modem_common.fetch_nr_neighbours(self,
+						() => modem_common.fetch_lte_layers(self, after));
 				}));
 			}, { no_recovery: true });
 		}, { no_recovery: true });
