@@ -381,10 +381,13 @@ state buried at the top invites reading a months-old entry as present tense.
 - **The plugin card-identity interface, and `retry_sim` (2026-11-21):** two deps
   a card-serving plugin (wwand-rsim) needs around a reader card, shaped with the
   maintainer's #80 review in mind — PIN entry belongs in the plugin, not the
-  core. `deps.retry_sim(ref)` resumes a modem that had stopped for want of the
-  card a plugin serves — the backends' own `retry_sim`, until now reachable only
-  through the full card-change process (`sim_changed`). The core sends no PIN on
-  any of these paths.
+  core. `deps.reader_card(ref, card)` publishes the identity of the card a
+  plugin serves a modem (the card never appears in the modem's UIM slots,
+  HW-proven RG502Q-EA 2026-11-14; the core's reads adopt it, `sim.uc`
+  read_identity/unlock_uim), and `deps.retry_sim(ref)` resumes a modem that had
+  stopped for want of that card — the backends' own `retry_sim`, until now
+  reachable only through the full card-change process (`sim_changed`). The core
+  sends no PIN on any of these paths.
 
 ## What it is
 

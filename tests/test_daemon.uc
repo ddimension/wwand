@@ -1760,6 +1760,7 @@ uloop.run();
 	let m = d.modems.m0.modem;
 
 	ok(type(pd?.retry_sim) == 'function', 'retry_sim: a plugin dep');
+	ok(type(pd?.reader_card) == 'function', 'reader_card: a plugin dep');
 
 	eq(pd.retry_sim('m0'), true, 'retry_sim: the modem resumed from its SIM step');
 	eq(resumed, 1, 'retry_sim: ...by its own retry_sim, the backends\'');
@@ -1767,6 +1768,14 @@ uloop.run();
 
 	delete m.retry_sim;
 	eq(pd.retry_sim('m0'), false, 'retry_sim: a backend without it (NCM) -> false, not a crash');
+
+	eq(pd.reader_card('m0', { iccid: 8944, imsi: null }), true, 'reader_card: published for a modem of ours');
+	eq(m.reader_card, { iccid: '8944', imsi: null }, 'reader_card: ...normalized onto the modem object sim.uc reads');
+	pd.reader_card('m0', { imsi: '204083209110281' });
+	eq(m.reader_card, { iccid: null, imsi: '204083209110281' }, 'reader_card: a partial identity, null where unknown');
+	eq(pd.reader_card('m9', { iccid: '8944' }), false, 'reader_card: no such modem -> false');
+	pd.reader_card('m0', null);
+	eq(m.reader_card, null, 'reader_card: withdrawn when the session ends');
 
 	d.shutdown();
 	unlink('/tmp/test-giveups-pincard.json');

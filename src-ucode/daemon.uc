@@ -5670,6 +5670,29 @@ export function create(opts)
 			// beyond that: whether a card needs a PIN, and entering it, is
 			// the plugin's to know and do — the core sends no PIN here
 			retry_sim: (ref) => self.modems[ref]?.modem?.retry_sim?.() ?? false,
+			// the card a plugin serves this modem (a reader session): its
+			// identity { iccid, imsi } — either null while not known yet —
+			// or null when the session ends. A card that rides a reader
+			// never appears in the modem's own UIM slots (HW-proven on the
+			// RG502Q-EA, 2026-11-14), so the modem's own identity reads
+			// cannot see it; the core's reads adopt the published identity
+			// instead (sim.uc read_identity / unlock_uim consult
+			// modem.reader_card). Publishing re-runs nothing by itself:
+			// pair it with retry_sim (the modem stopped for want of that
+			// card) or sim_changed (a different card arrived)
+			reader_card: (ref, card) => {
+				let m = self.modems[ref]?.modem;
+
+				if (!m)
+					return false;
+
+				m.reader_card = (card == null) ? null : {
+					iccid: (card.iccid != null) ? sprintf('%s', card.iccid) : null,
+					imsi: (card.imsi != null) ? sprintf('%s', card.imsi) : null,
+				};
+
+				return true;
+			},
 			// a QMI client of a schema the plugin brings, on the modem's own
 			// channel and owned by the modem (modem.uc extra_client) — on an
 			// MBIM modem over its QMI passthrough (modem_mbim.uc extra_client;

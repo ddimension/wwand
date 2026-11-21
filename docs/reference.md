@@ -3149,6 +3149,17 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
   when a card arrives; `true` when it resumed. The core sends nothing to any
   card on this path: whether a reader card needs a PIN, and entering it, is
   the plugin's.
+  `reader_card(ref, card)` publishes the identity of the card a plugin
+  serves this modem over a reader session — `{ iccid, imsi }`, either null
+  while not yet known — and withdraws it (`card` null) when the session
+  ends. A card that rides a reader never appears in the modem's own UIM
+  slots, so the modem's identity reads cannot see it; the core's reads adopt
+  the published identity instead, and the SIM step lets the reader card
+  through as the card the plugin says is there. Publishing re-runs nothing
+  by itself: `retry_sim` resumes a modem that stopped for want of that
+  card, `sim_changed` runs the full card-change process for a different
+  one. This is the plugin card-identity interface; entering a PIN for such
+  a card is the plugin's business, not the core's.
 - **ubus:** `modem_plugin` reaches `ops`; `modem_plugin_status` reaches only
   `read_ops`.
 - **Card source:** an optional `card_source(ref, ext)` returns where the
