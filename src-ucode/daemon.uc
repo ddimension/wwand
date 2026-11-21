@@ -139,7 +139,7 @@ const BAND_OPTS = [ 'band_lte', 'band_nr', 'band_umts' ];
 // (steer_tick). A restart for them would drop every connection to change a
 // supervisor — and cancel the release of a lock steering held mid-flight
 // (HW-seen on the NR7101, 2026-11-21: the init's lock clean-up caught it).
-const LIVE_MODEM_OPTS = [ 'anchor_steering', 'steer_rsrp_min', 'steer_scan_interval' ];
+const LIVE_MODEM_OPTS = [ 'anchor_steering', 'steer_rsrp_min', 'steer_scan_interval', 'steer_networks' ];
 
 function band_sig(cfg)
 {
@@ -605,7 +605,7 @@ export function create(opts)
 	// KEYED BY INTERFACE, NOT CARRIED ON THE ENTRY. The marker is evidence
 	// about an interface, and the context entry lives SHORTER than the
 	// interface. A config reload that cannot resolve an interface's modem
-	// produces no entry for it at all (config.uc:1147-1150 warns "references
+	// produces no entry for it at all (config.uc:1159-1162 warns "references
 	// unknown modem" and skips it), so a marker on the entry would have nothing
 	// to be carried over from. Re-adding the modem would then build a fresh
 	// entry with no marker, the status poll would see netifd's cleared
@@ -4550,6 +4550,15 @@ export function create(opts)
 
 						if (!s2)
 							return orig(done);
+
+						// a move to another network ends the session on purpose,
+						// and its own deadline decides (steering.uc moving). The
+						// failure is not counted and runs no rung: the ladder
+						// executes its action right here, and an opmode cycle or
+						// a reset with the move's lock still set is what this
+						// wrap exists to prevent (Codex review)
+						if (s2.moving())
+							return (done ?? ((a) => null))('retry');
 
 						s2.before_recovery(() => orig(done));
 					};

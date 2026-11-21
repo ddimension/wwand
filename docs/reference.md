@@ -603,6 +603,8 @@ config wwand_modem 'm0'
 	                                 #    lock_5g is set. Changed on reload without a restart.
 	option steer_rsrp_min '-105'     # dBm floor for a steering target (and for keeping it)
 	option steer_scan_interval '21600' # s between steering cell scans (min 600)
+	option steer_networks 'registered' # 'allowed': a card that may use several networks (GDSP and
+	                                 #    other global roaming SIMs) may be moved to another one
 	list band_lte '3'                # LTE bands, one per line — Fibocom FM350/FM150 only (see below)
 	list band_lte '20'
 	list band_nr '78'                # NR bands, one list for SA and NSA alike
@@ -1353,12 +1355,18 @@ phone finds those cells as it moves; a CPE does not. `option anchor_steering
 1. 120 s after the modem registers, and at most every `steer_scan_interval`
    after that, it scans for LTE cells — QMI Perform Network Scan with the PCI
    scan type first, `AT+QSCAN=1,1` when the modem refuses it (the RG502Q-EA and
-   the RG650E-EU always do; a QSCAN costs about 15 s of service). Nothing is
-   scanned while the serving cell already offers EN-DC, or while a plugin says
-   the radio is busy (`radio_busy`, see Plugins).
+   the RG650E-EU always do; a QSCAN costs about 15 s of service), and on a
+   modem with neither (the Foxconn T99W175) the cells it measures by itself,
+   `AT$QCRSRP?` — Qualcomm's generic list, answered by every Qualcomm modem
+   tested; no data gap, but no network per cell and only the layers the
+   network lets the modem measure. A refused source is not asked again.
+   Nothing is scanned while the serving cell already offers EN-DC, or while a
+   plugin says the radio is busy (`radio_busy`, see Plugins).
 2. Candidates are cells of the **registered** network, at least
    `steer_rsrp_min`, at most 20 dB below the current cell, not blocked; a cell
-   already seen with an anchor first, then by RSRP.
+   already seen with an anchor first, then the registered network's own, then
+   by RSRP. A measured cell whose network is unknown (`AT$QCRSRP?`) ranks after
+   every known own one; a foreign one is not acquired and ends up blocked.
 3. The LTE **primary cell** is locked (QMI cell lock first, `AT+QNWLOCK` as
    the fallback) after `AT+QNWLOCK="save_ctrl",0,0` on Quectel, so the lock
    never reaches NV. No band is excluded: the network still adds LTE
@@ -1376,7 +1384,14 @@ phone finds those cells as it moves; a CPE does not. `option anchor_steering
    `save_ctrl 1,1` again, as a config release does.
 
 Roaming cards (GDSP and other global SIMs) are steered within the network they
-are registered on — the visited one — and never onto another network's cell.
+are registered on — the visited one — unless `steer_networks 'allowed'`: then
+a cell of any network the card may use is a candidate, except the networks on
+its forbidden list (EF FPLMN) and any network a move onto failed here (blocked
+6 h). The registered network's cells get 6 dB ahead (a move elsewhere costs a
+re-registration), a move gets 45 s to register instead of 15, and on a cell
+that already offers EN-DC only a cell at least 10 dB stronger is taken. A move
+of steering's own — onto the target's network, or back after a failed one — is
+not taken for roaming.
 A visited network often gives a roaming SIM no EN-DC at all: a round in which
 every candidate failed doubles the wait for the next (up to 8 intervals), and
 a change of the registered network forgets the block list and starts over.

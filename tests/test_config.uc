@@ -360,8 +360,8 @@ eq(r.modems.m0.protocol, 'mbim', 'protocol: accepted case-insensitively');
 r = padopt({
 	network: {
 		m0:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm0', anchor_steering: 'auto',
-		       steer_rsrp_min: '-100', steer_scan_interval: '3600' },
-		m1:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm1', anchor_steering: 'on' },
+		       steer_rsrp_min: '-100', steer_scan_interval: '3600', steer_networks: 'allowed' },
+		m1:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm1', anchor_steering: 'on', steer_networks: 'any' },
 		m2:  { '.type': 'wwand_modem', device: '/dev/cdc-wdm2' },
 		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
 	},
@@ -371,6 +371,9 @@ eq([ r.modems.m0.anchor_steering, r.modems.m0.steer_rsrp_min, r.modems.m0.steer_
 eq(r.modems.m1.anchor_steering, 'off', 'anchor_steering: an unknown word is off...');
 ok(length(filter(r.warnings, (w) => match(w, /anchor_steering: "on" is not off or auto/))) == 1, '...and named');
 eq(r.modems.m2.anchor_steering, 'off', 'anchor_steering: off by default');
+eq([ r.modems.m0.steer_networks, r.modems.m1.steer_networks, r.modems.m2.steer_networks ],
+	[ 'allowed', 'registered', 'registered' ], 'steer_networks: allowed, an unknown word and the default are registered');
+ok(length(filter(r.warnings, (w) => match(w, /steer_networks: "any" is not/))) == 1, 'steer_networks: ...and the unknown word is named');
 ok(!length(filter(r.warnings, (w) => match(w, /unknown option.*(anchor_steering|steer_)/))),
 	'anchor_steering: its options are known');
 

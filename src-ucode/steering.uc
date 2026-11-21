@@ -39,12 +39,17 @@
 //   scan(cb)              cb(err, [ { plmn, earfcn, pci, rsrp, band } ], source)
 //   lock(cells, cb)       cb(err) — cells [ 'earfcn:pci' ], [] releases
 //   busy()                a reason not to change the radio now, or null
+//   watch()               (optional) keep the cell telemetry fresh, called on
+//                         every tick while a lock is pending
+//   forbidden(cb)         (optional) cb([ 'mccmnc' ]): the card's forbidden
+//                         networks, asked only with networks 'allowed'
 
 'use strict';
 
 import * as cell_lock from 'wwand.cell_lock';
 import * as atcmd from 'wwand.atcmd';
 import * as arfcn_bands from 'wwand.codec.arfcn_bands';
+import * as sim_plmn from 'wwand.sim_plmn';
 
 export const DEFAULTS = {
 	rsrp_min: -105,          // dBm: a target weaker than this is not worth a lock
@@ -55,28 +60,55 @@ export const DEFAULTS = {
 	anchor_s: 60,            // ...and advertise EN-DC by then
 	weak_s: 30,              // RSRP below rsrp_min this long on the locked cell
 	block_s: 21600,          // a cell that failed is not tried again for this long
+	// which networks a target may be on: 'registered' (the one the card is on)
+	// or 'allowed' (any the card may use — a GDSP or other multi-network
+	// roaming SIM — minus its forbidden list and networks that failed)
+	networks: 'registered',
+	switch_gain: 10,         // dB a target must beat an ANCHORED serving cell by
+	own_bonus: 6,            // dB a cell of the registered network is preferred by:
+	                         //    another network costs a re-registration
+	acquire_foreign_s: 45,   // registering on another network takes longer
 };
 
 const FAST_MS = 3000, SLOW_MS = 10000;
 
 let key = (c) => sprintf('%d:%d', c.earfcn, c.pci);
 let plmn_eq = (a, b) => a != null && b != null && replace(a, '/', '') == replace(b, '/', '');
+let pkey = (p) => replace(p ?? '', '/', '');
 
-// candidates(scan, cur, reg_plmn, blocked, o): the cells worth a lock, best
-// first. Only the registered PLMN's own cells: a hosted cell of another PLMN
-// carries that operator's settings, and is what the modem is usually stuck on.
-// The current serving cell is never a candidate (it is what we leave), nor a
-// blocked one. Ranked by: seen with an anchor, then RSRP.
-export function candidates(scan, cur, reg_plmn, blocked, o)
+// candidates(scan, cur, reg_plmn, blocked, o, ctx): the cells worth a lock,
+// best first. With o.networks 'registered' never another PLMN's cell: a hosted
+// cell of another PLMN carries that operator's settings, and is what the
+// modem is usually stuck on. With 'allowed' (a card that may use several
+// networks) any PLMN the card does not have as forbidden (ctx.forbidden, EF
+// FPLMN) and that has not failed here (ctx.blocked_plmn). A cell whose PLMN
+// the source does not name (AT$QCRSRP) ranks after every known one; locked, a
+// foreign one is not acquired and ends up blocked.
+// ctx.anchored: the serving cell already offers EN-DC — then only a target at
+// least o.switch_gain stronger is worth the move.
+// Never the current serving cell (what we leave), never a blocked one.
+// Ranked by: seen with an anchor, PLMN known, RSRP (+own_bonus for the
+// registered network's cells: another network costs a re-registration).
+export function candidates(scan, cur, reg_plmn, blocked, o, ctx)
 {
+	ctx = ctx ?? {};
+
 	let floor = o.rsrp_min, drop = o.max_drop;
 	let here = cur ? key(cur) : null;
+	let allowed = (o.networks == 'allowed');
+	let own = (c) => plmn_eq(c.plmn, reg_plmn);
+	let ok_plmn = (c) => c.plmn == null || own(c) ||
+		(allowed && !ctx.forbidden?.[pkey(c.plmn)] && !ctx.blocked_plmn?.[pkey(c.plmn)]);
 	let out = filter(scan ?? [], (c) =>
 		c.earfcn != null && c.pci != null && c.rsrp != null &&
-		plmn_eq(c.plmn, reg_plmn) && key(c) != here && !blocked[key(c)] &&
-		c.rsrp >= floor && (cur?.rsrp == null || c.rsrp >= cur.rsrp - drop));
+		ok_plmn(c) && key(c) != here && !blocked[key(c)] &&
+		c.rsrp >= floor && (cur?.rsrp == null || c.rsrp >= cur.rsrp - drop) &&
+		(!ctx.anchored || (cur?.rsrp != null && c.rsrp >= cur.rsrp + (o.switch_gain ?? 10))));
+	let known = (c) => (c.plmn != null) ? 1 : 0;
+	let score = (c) => c.rsrp + (own(c) ? (o.own_bonus ?? 0) : 0);
 
-	return sort(out, (a, b) => ((b.anchor ? 1 : 0) - (a.anchor ? 1 : 0)) || (b.rsrp - a.rsrp));
+	return sort(out, (a, b) => ((b.anchor ? 1 : 0) - (a.anchor ? 1 : 0)) ||
+		(known(b) - known(a)) || (score(b) - score(a)));
 };
 
 export function create(o)
@@ -103,6 +135,10 @@ export function create(o)
 		// interval for nothing — the wait doubles, up to 8 intervals
 		failed_rounds: 0,
 		plmn: null,          // the registered network the learned state is for
+		blocked_plmn: {},    // network -> { until, why }: a move onto it failed
+		target_plmn: null,   // the network of the cell being locked
+		left_plmn: null,     // the network a move onto another one started from
+		acquire_lim: cfg.acquire_s,
 	};
 	let timer = null, weak_since = null;
 	let tick, try_next;
@@ -185,6 +221,7 @@ export function create(o)
 			if (err)
 				log('warn', sprintf('anchor steering: release of %s: %s', t, err));
 			self.target = null;
+			self.target_plmn = null;
 			weak_since = null;
 			// no new scan right after a release: a remaining candidate of this
 			// round is still tried (try_next), a new round waits an interval
@@ -231,10 +268,18 @@ export function create(o)
 		let k = key(c);
 
 		log('notice', sprintf('anchor steering: locking the primary cell on %s (B%s, %d dBm, %s)',
-			k, c.band ?? '?', c.rsrp, c.plmn));
+			k, c.band ?? '?', c.rsrp, c.plmn ?? 'network unknown'));
 		let my_round = round;
 
+		let reg = fx.reg_plmn();
+		let foreign = (c.plmn != null && reg != null && !plmn_eq(c.plmn, reg));
+
 		self.target = k;
+		self.target_plmn = c.plmn;
+		self.acquire_lim = foreign ? cfg.acquire_foreign_s : cfg.acquire_s;
+		// only a move has a network it started from: a lock on the own
+		// network must not count as one (moving() would shield it)
+		self.left_plmn = foreign ? reg : null;
 		set('locking', null);
 		do_lock([ k ], (err) => {
 			// overtaken by stop() or a recovery step: their release is queued
@@ -279,16 +324,40 @@ export function create(o)
 
 			self.cells = cells;
 
-			let obs = fx.observe();
-			self.queue = candidates(cells, obs.serving, fx.reg_plmn(), self.blocked, cfg);
+			let choose = (forbidden) => {
+				if (self.stopped || stopping || my_round != round)
+					return;
 
-			if (!length(self.queue)) {
-				self.next_scan = fx.now() + cfg.scan_interval;
-				set('idle', 'no better cell of the registered network in reach');
-				return schedule();
-			}
+				let obs = fx.observe();
+				let bp = {};
 
-			try_next(my_round);
+				for (let n, b in self.blocked_plmn)
+					bp[n] = true;
+
+				self.queue = candidates(cells, obs.serving, fx.reg_plmn(), self.blocked, cfg,
+					{ forbidden: forbidden, blocked_plmn: bp, anchored: !!obs.anchor });
+
+				if (!length(self.queue)) {
+					self.next_scan = fx.now() + cfg.scan_interval;
+					set('idle', obs.anchor
+						? sprintf('the serving cell offers EN-DC and no cell is %d dB stronger', cfg.switch_gain)
+						: 'no better cell in reach');
+					return schedule();
+				}
+
+				try_next(my_round);
+			};
+
+			// the card's forbidden networks matter only when other networks may be chosen
+			if (cfg.networks != 'allowed' || type(fx.forbidden) != 'function')
+				return choose({});
+
+			fx.forbidden((list) => {
+				let f = {};
+				for (let p in (list ?? []))
+					f[pkey(p)] = true;
+				choose(f);
+			});
 		});
 	};
 
@@ -302,27 +371,47 @@ export function create(o)
 			if (b.until <= now)
 				delete self.blocked[k];
 
+		for (let k, b in self.blocked_plmn)
+			if (b.until <= now)
+				delete self.blocked_plmn[k];
+
+		// a pending lock is judged on FRESH cells: telemetry refreshes them
+		// only while someone watches (modem_cells), otherwise on its slow loop,
+		// and the 15/60 s deadlines then read a cell list from before the
+		// lock. The T99W175 moved within 2 s but was released for "not
+		// serving within 15 s" — nobody was watching (2026-11-21). watch()
+		// decays after 6 s, so one call per FAST_MS tick keeps it running.
+		if (self.state == 'locking' || self.state == 'locked')
+			fx.watch?.();
+
 		let obs = fx.observe();
 		let here = obs.serving ? key(obs.serving) : null;
 
-		// a new registered network (roaming moved on): its cells and its
-		// rules are not the last one's — forget what was learned there
+		// a new registered network. Steering's own moves are not one: onto the
+		// target's network while locking it, or back to the one it left after
+		// a failed attempt. Anything else (roaming moved on) ends the round and
+		// any lock, and a scan follows soon; what was learned about cells and
+		// networks is kept — a blocked cell is still not worth a second try.
 		let plmn = fx.reg_plmn();
 		if (plmn != null && plmn != self.plmn) {
 			let old = self.plmn;
+			let held = (self.state == 'locking' || self.state == 'locked' || self.state == 'verified');
+			let ours = held && plmn_eq(plmn, self.target_plmn);
+			let back = plmn_eq(plmn, self.left_plmn);
 
 			self.plmn = plmn;
 
-			if (old != null) {
+			if (back)
+				self.left_plmn = null;
+
+			if (old != null && !ours && !back) {
 				log('info', sprintf('anchor steering: registered network %s -> %s, starting over', old, plmn));
-				// the round, a scan out and a lock all belong to the old network
 				round++;
 				self.queue = [];
-				self.blocked = {};
-				self.anchors = {};
 				self.failed_rounds = 0;
+				self.left_plmn = null;
 
-				if (self.state == 'locking' || self.state == 'locked' || self.state == 'verified')
+				if (held)
 					return self.release('the registered network changed', () => {
 						self.next_scan = fx.now() + cfg.first_scan;
 						schedule();
@@ -344,7 +433,9 @@ export function create(o)
 		case 'backoff': {
 			if (now < self.next_scan || !obs.registered || !obs.serving)
 				break;
-			if (obs.anchor) {
+			// with one network, an anchor is the end of it; with several, a
+			// clearly stronger cell elsewhere may still be worth the move
+			if (obs.anchor && cfg.networks != 'allowed') {
 				self.next_scan = now + cfg.scan_interval;
 				set('idle', 'the serving cell already advertises EN-DC');
 				break;
@@ -358,15 +449,24 @@ export function create(o)
 		}
 
 		case 'locking':
-			if (here == self.target && obs.registered) {
+			// a move is acquired once the REGISTRATION is on the target's
+			// network too: the cell list can show the target first, and a
+			// "locked" move would stop being moving() while the session it
+			// ends is still being torn down (Codex review)
+			if (here == self.target && obs.registered &&
+			    (self.left_plmn == null || plmn_eq(fx.reg_plmn(), self.target_plmn))) {
 				log('notice', sprintf('anchor steering: on %s', here));
 				set('locked', null);
 				break;
 			}
-			if (now - self.since >= cfg.acquire_s) {
+			if (now - self.since >= self.acquire_lim) {
 				block(self.target, 'not acquired');
+				// another network that would not take the card: not again soon
+				if (self.target_plmn != null && self.left_plmn != null)
+					self.blocked_plmn[pkey(self.target_plmn)] = { until: now + cfg.block_s,
+						why: sprintf('%s not acquired', self.target) };
 				let r = round;
-				return self.release(sprintf('%s not serving within %d s', self.target, cfg.acquire_s),
+				return self.release(sprintf('%s not serving within %d s', self.target, self.acquire_lim),
 					() => try_next(r));
 			}
 			break;
@@ -397,6 +497,8 @@ export function create(o)
 				if (obs.anchor) {
 					log('notice', sprintf('anchor steering: %s advertises EN-DC — keeping the lock', here));
 					self.failed_rounds = 0;
+					// the move is done: a later change back is a real one
+					self.left_plmn = null;
 					set('verified', null);
 				}
 				else if (now - self.since >= cfg.anchor_s) {
@@ -411,6 +513,15 @@ export function create(o)
 		}
 
 		schedule();
+	};
+
+	// moving(): a lock onto ANOTHER network is being acquired. That move ends
+	// the data session by design (a re-registration), and the daemon reports
+	// the end as a connection failure — releasing on it aborted every move a
+	// second after it began (X3000, Vodafone -> Telekom 6400:13, 2026-11-21).
+	// While moving, the acquire_foreign_s deadline decides, not the failure.
+	self.moving = function() {
+		return self.state == 'locking' && self.left_plmn != null && self.target_plmn != null;
 	};
 
 	// called by the daemon right before a recovery rung: a lock wwand set must
@@ -444,6 +555,8 @@ export function create(o)
 			state: self.state,
 			target: self.target,
 			plmn: self.plmn,
+			networks: cfg.networks,
+			target_plmn: self.target_plmn,
 			failed_rounds: self.failed_rounds,
 			since_s: now - self.since,
 			reason: self.reason,
@@ -453,6 +566,8 @@ export function create(o)
 			cells: map(self.cells, (c) => ({ ...c, blocked: !!self.blocked[key(c)] })),
 			blocked: map(keys(self.blocked), (k) => ({ cell: k, why: self.blocked[k].why,
 				for_s: self.blocked[k].until - now })),
+			blocked_networks: map(keys(self.blocked_plmn), (k) => ({ plmn: k,
+				why: self.blocked_plmn[k].why, for_s: self.blocked_plmn[k].until - now })),
 		};
 	};
 
@@ -509,10 +624,13 @@ function scan_at(self, cb)
 {
 	let at = self.at;
 
-	if (type(at?.send) != 'function' || self.cell_lock_dialect != 'quectel')
+	if (self._steer_no_qscan || type(at?.send) != 'function' || self.cell_lock_dialect != 'quectel')
 		return cb('no AT cell scan (AT+QSCAN is Quectel)');
 
 	at.send('AT+QSCAN=1,1', (e, r) => {
+		// a Quectel without it (EG06-E, BG96: ERROR, 2026-11-21) is not asked again
+		if (e?.error == 'ERROR' || e?.error == 'cme')
+			self._steer_no_qscan = true;
 		if (e)
 			return cb(sprintf('AT+QSCAN: %J', e));
 		cb(null, atcmd.parse_qscan(r?.lines));
@@ -529,6 +647,38 @@ export function reg_plmn(self)
 		? sprintf((p.mnc_digits == 3) ? '%d/%03d' : '%d/%02d', p.mcc, p.mnc) : null;
 };
 
+// The third source: what a Qualcomm modem measures by itself (AT$QCRSRP?),
+// answered by every Qualcomm modem here, the T99W175 included, which has no
+// cell scan at all (2026-11-21). No data gap, but no PLMN per cell, and only
+// the layers the network lets the modem measure — a hosted cell that ranks
+// its own layer above the others hides exactly the cells steering looks for,
+// which is why it comes after the two scans. A refusal is remembered.
+function scan_qcrsrp(self, cb)
+{
+	let at = self.at;
+
+	if (self._steer_no_qcrsrp || type(at?.send) != 'function')
+		return cb('no AT$QCRSRP');
+
+	at.send('AT$QCRSRP?', (e, r) => {
+		let cells = e ? [] : atcmd.parse_qcrsrp(r?.lines);
+
+		if (!length(cells)) {
+			// only the modem's own refusal (non-Qualcomm AT: ERROR) is
+			// remembered — a timeout or a busy port says nothing about support
+			if (e?.error == 'ERROR' || e?.error == 'cme')
+				self._steer_no_qcrsrp = true;
+			return cb(e ? sprintf('AT$QCRSRP?: %J', e) : 'AT$QCRSRP? lists no cell');
+		}
+
+		cb(null, map(cells, (c) => ({
+			plmn: null, earfcn: c.earfcn, pci: c.pci, rsrp: c.rsrp,
+			band: (arfcn_bands.lte_band(c.earfcn)?.band != null)
+				? +replace(arfcn_bands.lte_band(c.earfcn).band, /^B/, '') : null,
+		})));
+	}, { probe: true });
+}
+
 // modem_fx(self, deps): fx for create() on a live modem object.
 //   deps.now / deps.timer   clock and uloop timers
 //   deps.registered()       the daemon's registration verdict (any backend)
@@ -540,6 +690,10 @@ export function modem_fx(self, log, deps)
 		now: deps.now,
 		timer: deps.timer,
 		busy: deps.busy ?? (() => null),
+		// the fast telemetry, as a modem_cells poll starts it
+		watch: () => self.watch?.(),
+		// the card's forbidden networks (EF FPLMN) as 'mccmnc', [] when unreadable
+		forbidden: (cb) => sim_plmn.read_fplmn(self, (l) => cb(map(l ?? [], (e) => e.mcc + e.mnc))),
 
 		reg_plmn: () => reg_plmn(self),
 
@@ -564,10 +718,16 @@ export function modem_fx(self, log, deps)
 			};
 		},
 
+		// QMI PCI scan, else AT+QSCAN (Quectel), else the measured cells
 		scan: (cb) => scan_qmi(self, (e, cells) => {
 			if (!e)
 				return cb(null, cells, 'qmi');
-			scan_at(self, (e2, cells2) => cb(e2 ? sprintf('%s; %s', e, e2) : null, cells2 ?? [], 'qscan'));
+			scan_at(self, (e2, cells2) => {
+				if (!e2)
+					return cb(null, cells2 ?? [], 'qscan');
+				scan_qcrsrp(self, (e3, cells3) => cb(e3 ? sprintf('%s; %s; %s', e, e2, e3) : null,
+					cells3 ?? [], 'qcrsrp'));
+			});
 		}),
 
 		lock: (cells, cb) => cell_lock.runtime_lte(self, log, cells, (err) => cb(err)),
@@ -592,6 +752,8 @@ export function config_of(cfg)
 		o.rsrp_min = n(cfg.steer_rsrp_min);
 	if (n(cfg?.steer_scan_interval) != null && n(cfg.steer_scan_interval) >= 600)
 		o.scan_interval = n(cfg.steer_scan_interval);
+	if (cfg?.steer_networks == 'allowed')
+		o.networks = 'allowed';
 
 	return o;
 };

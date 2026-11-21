@@ -887,9 +887,32 @@ export function get_cells(mc, cb)
 
 		if (lte) {
 			let list = [ lte_cell(lte) ];
+			let inter = {}, order = [];
 
-			for (let n in (data.lte_neighbors ?? []))
-				push(list, lte_cell(n));
+			// a neighbour on another EARFCN is an inter-frequency cell, as
+			// lte_inter carries them for QMI; one whose EARFCN the modem leaves
+			// out (0xFFFFFFFF: the T99W175 for every neighbour, 2026-11-21)
+			// can only be shown on the serving layer
+			for (let n in (data.lte_neighbors ?? [])) {
+				let e = n.earfcn;
+
+				if (e == null || e == 0xFFFFFFFF || e == lte.earfcn) {
+					push(list, lte_cell(n));
+					continue;
+				}
+
+				let k = sprintf('%d', e);
+
+				if (!inter[k]) {
+					inter[k] = { earfcn: e, cells: [] };
+					push(order, k);
+				}
+
+				push(inter[k].cells, lte_cell(n));
+			}
+
+			if (length(order))
+				cells.lte_inter = { freqs: map(order, (k) => inter[k]) };
 
 			cells.lte_intra = {
 				plmn:            plmn_str(lte.provider_id),

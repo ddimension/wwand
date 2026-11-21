@@ -53,6 +53,16 @@ function steps_opt(value, warnings)
 	return steps;
 }
 
+// steer_networks: 'registered' | 'allowed'; anything else is registered, and said so
+function steer_networks_opt(value, warnings)
+{
+	if (value == null || value == '' || value == 'registered' || value == 'allowed')
+		return (value == 'allowed') ? 'allowed' : 'registered';
+
+	push(warnings ?? [], sprintf('steer_networks: %J is not registered or allowed, using registered', value));
+	return 'registered';
+}
+
 // anchor_steering: 'off' | 'auto'; anything else is off, and said so
 function steer_mode_opt(value, warnings)
 {
@@ -302,6 +312,7 @@ export function modem_defaults(over)
 		lock_4g: [], lock_5g: null, lock_persist: false,
 		anchor_steering: 'off', // 'auto': steer a fixed modem onto an EN-DC anchor cell (steering.uc)
 		steer_rsrp_min: -105, steer_scan_interval: 21600,
+		steer_networks: 'registered', // 'allowed': a multi-network card may be moved to another network
 		sim_slot: 0,
 		stats_interval: 60,
 		auto_correct_config: false,   // gated runtime auto-correction (default off)
@@ -439,7 +450,7 @@ const MODEM_KNOWN_OPTS = [ 'protocol', 'device', 'netdev', 'path', 'usb_path', '
 	'unarmed_reset_after', 'card_hold', 'ipa_mode',
 	'zero_rx_timeout', 'tx_stall_timeout', 'bearer_poll_count', 'lock_4g', 'lock_5g', 'lock_persist', 'sim_slot',
 	// anchor steering (steering.uc)
-	'anchor_steering', 'steer_rsrp_min', 'steer_scan_interval',
+	'anchor_steering', 'steer_rsrp_min', 'steer_scan_interval', 'steer_networks',
 	'stats_interval', 'auto_correct_config', 'plmn_list',
 	// Cell Broadcast (sms_rx.uc): on/off, and which message identifiers
 	'cell_broadcast', 'cb_channels',
@@ -672,6 +683,7 @@ function modem_from_section(s, warnings)
 		anchor_steering: steer_mode_opt(s.anchor_steering, warnings),
 		steer_rsrp_min: num_opt(s.steer_rsrp_min, -105, 'steer_rsrp_min', warnings),
 		steer_scan_interval: num_opt(s.steer_scan_interval, 21600, 'steer_scan_interval', warnings),
+		steer_networks: steer_networks_opt(s.steer_networks, warnings),
 		// Band allow-lists of 3GPP numbers, never a mask string: the codec
 		// owns the encoding. Applied only where the band command is not NV
 		// (Fibocom +GTACT, modem_ncm apply_config_bands) — a QMI/MBIM modem

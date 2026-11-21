@@ -119,9 +119,9 @@ function build_base_stations(m) {
 // The same content in the v1 layout: no SystemSubType, so every pointer after
 // SystemType sits 4 bytes earlier, and there are no NR arrays at all (libmbim
 // 1.32.0, mbim-service-ms-basic-connect-extensions.json vs -v3.json).
-function build_base_stations_v1() {
+function build_base_stations_v1(neigh_earfcn) {
 	let lte_serv = cell_struct('26201', [ 12345678, 1300, 42, 0x1234, -95, -10, 0 ]);
-	let lte_neigh = cell_struct('', [ 0, 1300, 99, 0, -105, -14 ]);
+	let lte_neigh = cell_struct('', [ 0, neigh_earfcn ?? 1300, 99, 0, -105, -14 ]);
 
 	let base = 76;   // SystemType + 4 ms-structs + 5 array pointers
 	let lte_serv_off = base;
@@ -458,7 +458,24 @@ function s_cells_v1(next) {
 			eq(length(cells.lte_intra?.cells ?? []), 2, 'cells v1: serving + 1 neighbour');
 			eq(cells.nr5g_arfcn, null, 'cells v1: no NR arrays exist in the v1 layout');
 			eq(cells.nr5g_cell, null, 'cells v1: ...and no NR cell');
-			next();
+			eq(cells.lte_inter, null, 'cells v1: a neighbour on the serving EARFCN is intra-frequency');
+
+			// a neighbour on another EARFCN goes to lte_inter, as QMI carries it
+			let mc2 = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations_v1(3749) } },
+				null, { mbimex_version: 0 });
+			mc2.open(() => backend.get_cells(mc2, (c2) => {
+				eq(length(c2.lte_intra.cells), 1, 'cells v1: an inter-frequency neighbour leaves the serving layer');
+				eq([ c2.lte_inter?.freqs?.[0]?.earfcn, c2.lte_inter?.freqs?.[0]?.cells?.[0]?.pci ], [ 3749, 99 ],
+					'cells v1: ...and is listed on its own EARFCN');
+
+				let mc3 = make_mc(ext, { BASE_STATIONS_INFO: { __raw: build_base_stations_v1(0xFFFFFFFF) } },
+					null, { mbimex_version: 0 });
+				mc3.open(() => backend.get_cells(mc3, (c3) => {
+					eq([ length(c3.lte_intra.cells), c3.lte_inter ], [ 2, null ],
+						'cells v1: a neighbour without an EARFCN stays on the serving layer');
+					next();
+				}));
+			}));
 		});
 	});
 }

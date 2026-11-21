@@ -103,6 +103,11 @@ let mk = (t, cfg) => steering.create({ fx: t.fx, config: cfg ?? {},
 	c = steering.candidates(SCAN, null, '262/01', { '6400:381': { until: 1 } }, steering.DEFAULTS);
 	eq(c[0].pci, 116, 'candidates: a blocked cell is skipped');
 
+	// measured cells without a PLMN (AT$QCRSRP) are allowed, after the own network's
+	let mixed = [ ...SCAN, { plmn: null, earfcn: 3600, pci: 90, rsrp: -70, band: 8 } ];
+	c = steering.candidates(mixed, { earfcn: 6300, pci: 334, rsrp: -62 }, '262/01', {}, steering.DEFAULTS);
+	eq(map(c, (x) => x.pci), [ 381, 116, 90 ], 'candidates: a cell of unknown network ranks after the known own ones');
+
 	let withanchor = map(SCAN, (x) => ({ ...x, anchor: x.pci == 342 }));
 	c = steering.candidates(withanchor, null, '262/01', {}, steering.DEFAULTS);
 	eq(c[0].pci, 342, 'candidates: a cell seen with an anchor ranks first, whatever its RSRP');
@@ -321,8 +326,8 @@ for (let what in [ 'registration', 'stall' ]) {
 	// the visited network changes: learned state is dropped, a fresh start
 	plmn = '262/02';
 	t.run(11);       // the idle cadence (SLOW_MS)
-	eq([ s.status().failed_rounds, length(s.status().blocked), s.status().plmn ], [ 0, 0, '262/02' ],
-		'roaming: a new registered network starts over');
+	eq([ s.status().failed_rounds, length(s.status().blocked), s.status().plmn ], [ 0, 2, '262/02' ],
+		'roaming: a new registered network starts over, the blocked cells stay blocked');
 	ok(s.status().next_scan_s <= 120, 'roaming: ...with a scan soon');
 }
 
@@ -365,6 +370,89 @@ for (let what in [ 'registration', 'stall' ]) {
 	eq(s3.status().failed_rounds, 0, 'stale round: a round a recovery ended is not counted as failed');
 }
 
+// a pending lock keeps the telemetry fresh; a verified or idle one does not
+{
+	let t = mkfx();
+	let w = 0;
+	t.fx.watch = () => w++;
+	let s = mk(t);
+	t.run(119);
+	eq(w, 0, 'watch: nothing while idle');
+	t.run(10);                          // locked at 120 s, serving at 123 s
+	ok(w >= 2, 'watch: called on every tick while the lock is pending');
+	t.radio.anchor = true; t.run(4);
+	eq(s.state, 'verified', 'watch: verified');
+	let w1 = w;
+	t.run(30);
+	eq(w, w1, 'watch: not while a verified lock is only supervised');
+}
+
+// --- networks 'allowed': a card that may use several networks ----------------
+{
+	let A = { ...steering.DEFAULTS, networks: 'allowed' };
+	// the X3000 site (QSCAN 2026-11-21): registered on Vodafone, Telekom stronger
+	let site = [
+		{ plmn: '262/02', earfcn: 6300, pci: 385, rsrp: -112, band: 20 },
+		{ plmn: '262/02', earfcn: 3600, pci: 33, rsrp: -105, band: 8 },
+		{ plmn: '262/01', earfcn: 6400, pci: 36, rsrp: -94, band: 20 },
+		{ plmn: '262/01', earfcn: 3749, pci: 382, rsrp: -100, band: 8 },
+		{ plmn: '262/03', earfcn: 6200, pci: 372, rsrp: -98, band: 20 },
+	];
+	let cur = { earfcn: 6300, pci: 478, rsrp: -107 };
+	let pcis = (l) => map(l, (x) => x.pci);
+
+	eq(pcis(steering.candidates(site, cur, '262/02', {}, steering.DEFAULTS)), [ 33 ],
+		'networks registered: only the registered network\'s cells');
+	eq(pcis(steering.candidates(site, cur, '262/02', {}, A)), [ 36, 372, 33, 382 ],
+		'networks allowed: every network, by RSRP with the registered one 6 dB ahead (-105+6 beats -100)');
+	eq(pcis(steering.candidates(site, cur, '262/02', {}, A, { forbidden: { '26203': true } })), [ 36, 33, 382 ],
+		'networks allowed: a network on the card\'s forbidden list is left out');
+	eq(pcis(steering.candidates(site, cur, '262/02', {}, A, { blocked_plmn: { '26201': true } })), [ 372, 33 ],
+		'networks allowed: a network that failed is left out');
+	eq(pcis(steering.candidates(site, cur, '262/02', {}, A, { anchored: true })), [ 36 ],
+		'anchored: only a cell at least switch_gain (10 dB) stronger');
+}
+{
+	// a move onto another network: the PLMN change is steering's own, no restart
+	let t = mkfx({ scan: [ { plmn: '262/01', earfcn: 6400, pci: 36, rsrp: -94, band: 20 } ] });
+	let plmn = '262/02';
+	t.fx.reg_plmn = () => plmn;
+	t.radio.serving = { earfcn: 6300, pci: 478, rsrp: -107 };
+	t.radio.anchor = true;            // Vodafone's cell has an anchor already
+	let s = mk(t, { networks: 'allowed' });
+	t.run(125);
+	eq(t.locks, [ '6400:36' ], 'move: an anchored cell is left for a 13 dB stronger one');
+	t.run(6);                         // the cell shows, the registration is still Vodafone's
+	eq([ s.state, s.moving() ], [ 'locking', true ], 'move: not acquired before the registration moved');
+	plmn = '262/01';                  // the modem re-registers on Telekom
+	t.radio.anchor = false;
+	t.run(4);
+	eq([ s.state, s.status().plmn ], [ 'locked', '262/01' ], 'move: the new network is not a restart');
+	t.radio.anchor = true; t.run(4);
+	eq(s.state, 'verified', 'move: EN-DC on the new network keeps the lock');
+	ok(!s.moving(), 'move: a verified lock is no longer a move');
+	eq(s.status().target_plmn, '262/01', 'move: the target network is shown');
+
+	// a network that does not take the card: cell and network blocked, and
+	// the way back to the old network is no reason to scan again at once
+	let t2 = mkfx({ follows: false, scan: [ { plmn: '262/01', earfcn: 6400, pci: 36, rsrp: -94, band: 20 } ] });
+	t2.fx.reg_plmn = () => '262/02';
+	t2.radio.serving = { earfcn: 6300, pci: 478, rsrp: -107 };
+	let s2 = mk(t2, { networks: 'allowed' });
+	t2.run(125);
+	ok(s2.moving(), 'foreign: acquiring a cell of another network is a move');
+	t2.radio.serving = null; t2.radio.registered = false;
+	t2.run(35);
+	eq(length(t2.locks), 1, 'foreign: registering elsewhere gets acquire_foreign_s (45 s), not 15');
+	t2.run(15);
+	eq(t2.locks[1], 'release', 'foreign: released after acquire_foreign_s');
+	eq(map(s2.status().blocked_networks, (b) => b.plmn), [ '26201' ], 'foreign: that network is blocked');
+	t2.radio.serving = { earfcn: 6300, pci: 478, rsrp: -107 }; t2.radio.registered = true;
+	let n = t2.scans;
+	t2.run(300);
+	eq(t2.scans, n, 'foreign: back on the old network, no rescan right away');
+}
+
 // a QMI scan with a three-digit MNC (pcs) keeps it
 {
 	let m = { reg: { registration: 1, plmn: { mcc: 310, mnc: 1, mnc_digits: 3 } } };
@@ -390,6 +478,34 @@ for (let what in [ 'registration', 'stall' ]) {
 	fx2.scan((e, cells, src) => { got = [ e, length(cells), src ]; });
 	eq([ got[0], got[1], got[2], m2._steer_no_qmi_scan ], [ null, 1, 'qscan', true ],
 		'scan: a refused QMI scan falls back to AT+QSCAN and is not asked again');
+
+	// a modem with neither scan (T99W175: QMI 70, no Quectel AT): the cells it
+	// measures (AT$QCRSRP?), and a refused QSCAN is not sent again
+	let sentat = [];
+	let m3 = { cell_lock_dialect: 'quectel',
+		with_nas: (cb) => cb({ request: (n, a, cb2) => cb2({ error: 'qmi', code: 70 }) }),
+		at: { send: (cmd, cb2) => {
+			push(sentat, cmd);
+			if (cmd == 'AT+QSCAN=1,1') return cb2({ error: 'ERROR' });
+			cb2(null, { lines: [ '$QCRSRP: 409,6300,"-091.20",090,3600,"-114.70"' ] });
+		} } };
+	let fx3 = steering.modem_fx(m3, null, { now: () => 0, timer: () => null });
+	fx3.scan((e, cells, src) => { got = [ e, cells, src ]; });
+	eq([ got[0], got[2], length(got[1]), got[1][1] ], [ null, 'qcrsrp', 2,
+		{ plmn: null, earfcn: 3600, pci: 90, rsrp: -115, band: 8 } ],
+		'scan: no QMI scan, no QSCAN -> the measured cells, without a PLMN');
+	fx3.scan((e, cells, src) => null);
+	eq(filter(sentat, (c) => c == 'AT+QSCAN=1,1'), [ 'AT+QSCAN=1,1' ], 'scan: a refused QSCAN is not sent again');
+
+	// a timed-out QCRSRP is asked again; an ERROR is not
+	let tries = 0, ans = { error: 'timeout' };
+	let m4 = { at: { send: (cmd, cb2) => { tries++; cb2(ans); } } };
+	let fx4 = steering.modem_fx(m4, null, { now: () => 0, timer: () => null });
+	fx4.scan(() => null); fx4.scan(() => null);
+	eq(tries, 2, 'scan: a QCRSRP timeout is not taken for a refusal');
+	ans = { error: 'ERROR' };
+	fx4.scan(() => null); fx4.scan(() => null);
+	eq(tries, 3, 'scan: ...an ERROR is, and it is not asked again');
 }
 
 // --- modem_fx.observe: an NR leg counts as the anchor --------------------------

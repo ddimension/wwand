@@ -13,13 +13,16 @@ plugins"](extending.md#a-feature-in-its-own-package-plugins) and
 
 ## Shape
 
-Three parts, two of them ordinary wwand plugins:
+Three parts in `wwand-ims` (two of them ordinary wwand plugins), and two
+optional packages:
 
 | Part | Where | What |
 |---|---|---|
 | `plugins/ims.uc` | daemon plugin, `/usr/share/ucode/wwand/plugins/ims.uc` | the **modem-IMS backend**: IMS registration/service state and call control over QMI (IMSA, IMS, NAS, Voice). ubus `modem_plugin`. |
 | `ctl/ims.uc` | wwandctl command, `/usr/share/ucode/wwand/ctl/ims.uc` | `wwandctl ims check\|fix\|setup\|mbn\|call` — prepares the modem and the router. |
 | `sipd` | own procd daemon, `/usr/share/wwand-ims/` | SIP registrar + B2BUA for LAN phones / a PBX trunk, and (backend `ue`) **the router's own IMS UE**. |
+| `vowifi/` | package `wwand-ims-vowifi` | **VoWiFi**: the UE's IMS through an IKEv2/EAP-AKA tunnel to the operator's ePDG over the fixed-line WAN instead of the IMS PDN (strongSwan's charon, driven over vici). |
+| `luci/` | package `luci-app-wwand-ims` | Status → VoLTE (registration, phones, the running call, the last ten calls, the VoWiFi tunnel) and Network → VoLTE (`/etc/config/wwand_ims`, operator profiles; *Clone current settings* makes a new profile from what the modem and the network use now). |
 
 Two ways to carry a call, chosen per modem by `wwand_ims.ims_modem.backend`:
 
@@ -142,6 +145,59 @@ live in profiles in `/etc/config/wwand_ims`, selected by SIM IMSI/ICCID prefix
 sysupgrade). The IMS PDN network/firewall that `setup` writes is also available
 to merge by hand as `ims-network.example`.
 
+### VoWiFi (wwand-ims-vowifi)
+
+With `ims_modem` option `access 'vowifi'` the router UE reaches the IMS
+through the operator's ePDG (TS 24.302, TS 33.402) instead of the IMS PDN —
+over any WAN, the modem only lends the USIM. HW-tested with Telekom DE
+(NR7101, 2026-11-21): registration and incoming calls with two-way audio
+(outgoing calls over the tunnel not measured yet).
+
+- **Packages:** `wwand-ims-vowifi` pulls strongSwan's charon with `vici`,
+  `eap-aka`, `fips-prf`, `p-cscf`, `kernel-netlink` and the feed's own
+  **`ext-aka`** plugin (EAP-AKA with the USIM: charon runs
+  `/usr/libexec/strongswan/ext-aka`, which does the AUTHENTICATE over
+  wwand's `modem_apdu`), plus `kmod-xfrm-interface` and `xfrm`. `swanctl`
+  is in the images for debugging only.
+- **No charon config:** sipd loads and starts the connection over vici at run
+  time; nothing goes into `swanctl.conf`. The one setting vici cannot carry,
+  the P-CSCF request, ships as `/etc/strongswan.d/charon/wwand-ims-vowifi.conf`
+  and names only this connection — charon's other connections are untouched.
+- **netifd does the router side** (wwand's split): `config interface
+  'imswifi0'` (`proto xfrm`, `ifid 7001`, `mtu 1280`) is the tunnel's XFRM
+  interface; `config interface 'wwvowifi'` (`proto wwandvowifi` on
+  `@imswifi0`, `ip4table`/`ip6table 31`) takes the inner address and the
+  default route from sipd (`ubus call wwand-ims vowifi_addr`) whenever sipd
+  renews it. **No VRF** for the tunnel: netifd 25.12 turns IPv6 off on VRF
+  ports; table 31 with netifd's `from`/`to` rules keeps the traffic in the
+  tunnel, the UE's sockets bind to `imswifi0`.
+- **Setup:** `wwandctl ims setup --apply` writes both interfaces and puts
+  them into the `ims` firewall zone once `wwand-ims-vowifi` is installed or
+  `access 'vowifi'` is set (`--vowifi` / `--no-vowifi` to choose).
+  It is idempotent: run again later it adds what a working setup lacks.
+- **The ePDG's wants** are operator-profile options: `vowifi_epdg` (default
+  `epdg.epc.mnc<MNC>.mcc<MCC>.pub.3gppnetwork.org`), `vowifi_apn` (sent as
+  IDr; none by default — an ePDG that answers with its own identity would be
+  refused), `vowifi_proposals` (default `aes256-sha512-modp4096`, then
+  charon's), `vowifi_esp_proposals`, `vowifi_remote_auth` (`eap-aka`,
+  EAP-only, default; or `pubkey`), `vowifi_pani`. `ims_modem` options of the
+  same name (and `epdg`) override them.
+- **Kept up:** an IKE or CHILD SA down, charon restarted or crashed, or a
+  failed start → load + initiate again, backing off 5 s to 60 s, never giving
+  up; sipd registers again once netifd has the new address.
+- **Status:** `ubus call wwand-ims status` → `vowifi { state, v6, v4, pcscf,
+  epdg, error, tries }`; LuCI Status → VoLTE shows it.
+
+### SMS over IP
+
+`ims_modem` option `smsip '1'` (off by default) registers the UE for SMS
+(TS 24.341). An incoming SMS is written into the modem's own store (option
+`sms_storage` `ME`/`SM`) and is then an ordinary SMS for wwand
+(`wwandctl sms`, the LuCI SMS list, the `sms` event); `wwand modem_sms_send`
+goes over IMS while the UE is registered with `smsip`. With one number on
+several SIMs the network may deliver to the router instead of the phone.
+Profile options `sms_smsc`, `sms_psi`.
+
 ## Usage
 
 ### A LAN SIP phone
@@ -159,6 +215,33 @@ Asterisk 20 (`codec_amr`, `allow=amrwb,amr`). The full `pjsip.conf` /
 `extensions.conf` is `asterisk-pjsip.example` in the plugin repo; the matching
 router side is an `extension` with the same username/password and a
 `sip_gateway` listening on the address Asterisk registers to.
+
+The called number is in the INVITE's `To` (the network's
+`P-Called-Party-ID`), the caller's in `From` (`P-Asserted-Identity`).
+
+### Forwarded calls
+
+A call forwarded to this number (e.g. a landline diverted to the mobile)
+reaches the LAN with the network's **`History-Info`** as it came (RFC 7044)
+and **`Diversion`** headers made from it (RFC 5806: the diverting number,
+`reason` from the RFC 4458 cause — `unconditional`, `user-busy`,
+`no-answer`, `deflection`, `unavailable`, `unknown`; the latest diversion
+first), or the network's own `Diversion` when it sends one. In Asterisk:
+`${REDIRECTING(from-num)}`, `${REDIRECTING(reason)}`,
+`${PJSIP_HEADER(read,History-Info)}`. Nothing is filtered — the network
+leaves out what the subscriber may not see. `sip_gateway` option
+`redirect_info '0'` turns it off.
+
+### One number on several SIMs
+
+With a MultiSIM number the network sends one INVITE per device. A phone in
+idle needs a few seconds of paging; if the router's 180 comes first, the
+network does not alert the phone. sipd therefore holds its 180 back
+(profile option `alert_delay_ms`, default **4500**; the LAN phone rings at
+once). More than about 5.9 s and Telekom cancels the router's leg
+(`CC_NOT_REACHABLE`) — sipd warns above 5 s; `0` sends the 180 at once.
+Whoever answers first takes the call; the other leg gets a CANCEL with
+`Reason: …"Call completed elsewhere"`.
 
 ### A test call
 
@@ -196,6 +279,14 @@ ubus call wwand modem_plugin '{"modem":"wwmodem0","plugin":"ims","op":"status"}'
 - **IPsec** — `ip xfrm state` / `ip xfrm policy`: a registered UE holds **four
   SAs** (the sec-agree association). None, or `spi … 0`, means the SA install
   failed (see below).
+- **SIP trace** — `sip_gateway` option `sip_trace '/tmp/wwand-ims-sip.trace'`:
+  every SIP message of both sides in full (identities and keys included —
+  for debugging only).
+- **VoWiFi** — charon's log lines for the tunnel are in sipd's syslog
+  (`charon: …`), the USIM authentication under ident `wwand-ims-vowifi`;
+  `swanctl --list-sas`, `ifstatus wwvowifi`, `ip -6 route show table 31`.
+- **Call list** — `ubus call wwand-ims calls`: the last ten calls with
+  result, reason and RTP packet counts per direction.
 
 ### Common failures
 
@@ -209,6 +300,11 @@ ubus call wwand modem_plugin '{"modem":"wwmodem0","plugin":"ims","op":"status"}'
 | `no SIP over TCP on port 5064: Address in use` | another UE (a leftover sipd, or `wwandctl ims call`) holds the protected ports — only one UE per IMS PDN. |
 | REGISTER times out (`state: unprotected`) on an **IPv4** IMS PDN, though tcpdump shows the 401 on the IMS interface and on the VRF device | netifd's `<addr> dev <iface> scope link` host route displaces the kernel's `local` route for the /32 in the VRF table, so the reply is not delivered locally (no UDP counter moves). The `25-wwand-ims-l3mdev` hotplug re-adds `local <addr>` on every ifup; check `ip route show table <vrf table>` for it. No `ip_nonlocal_bind` / `udp_l3mdev_accept` sysctl is needed. |
 | Call ends right after the 183 with `503`, `Reason: … ASR: BEARER_RELEASED` or `ASR: INSUFFICIENT_SERVER_RESOURCES` (which one depends on the P-CSCF site) | the voice bearer (QCI 1) could not be set up. Seen with LTE FGI 3 and 7 missing in the UE capability: no dedicated-bearer request reaches the modem at all. Set the FGIs (Prerequisites); typical after a SIM change that switched the carrier MBN. |
+| VoWiFi: tunnel up, REGISTER times out, `ICMP port unreachable` back from the router | the tunnel's interfaces are not in the `ims` firewall zone — `wwandctl ims setup --apply` adds `imswifi0`/`wwvowifi`. |
+| VoWiFi: `send(): Network unreachable`, no IPv6 address on `imswifi0` (`disable_ipv6 1`) | the XFRM interface is a port of a VRF: netifd 25.12 turns IPv6 off there. Remove the VRF for the tunnel (the current `setup` writes none). |
+| VoWiFi: `constraint check failed: identity …` / `… requires public key authentication` | the ePDG answers with its own identity, or authenticates EAP-only: leave `vowifi_apn` empty, `vowifi_remote_auth 'eap-aka'`. |
+| VoWiFi: `EAP method not supported` from charon | `strongswan-mod-fips-prf` missing (EAP-AKA needs it). |
+| MultiSIM: the phone rings only with its display on | the router's 180 came before the phone was paged — `alert_delay_ms` (default 4500). |
 | `IMS UE  down` though sipd runs | the IMS PDN (wwims) is down or re-attaching, so the UE de-registered — check `wwandctl status` for wwims `CONNECTED` and the P-CSCF in `status.contexts.wwims`. |
 
 ## How it works

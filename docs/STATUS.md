@@ -24,15 +24,59 @@ state buried at the top invites reading a months-old entry as present tense.
   answered type 3), and a voice-call deferral — wwand-ims has no
   `radio_busy` yet. Status page: *Cell layers* + *Anchor steering*.
   Design and measurements: docs/design/anchor-steering.md.
-  **TODO: the other supported modems.** Today it needs a cell scan and a
-  cell lock wwand can drive: QMI lock + AT+QSCAN on Quectel (RG502Q-EA
-  measured, the RG650E-EU refuses the QMI PCI scan too). Research each
-  family's documentation for a cell scan, a primary-cell lock and its
-  persistence, then measure: Quectel EG06/EG25/EM/RM (QSCAN, QNWLOCK and its
-  save_ctrl), Fibocom (FM350/FM150: +GTCELLLOCK and a scan command?), MeiG
-  SLM7xx (NCM, the LT300), Sierra/Foxconn MBIM modems (QMI over the MBIM
-  passthrough), Huawei; an MBIM-native path if MBIM has one. `steering.uc
-  modem_fx` takes the scan and lock per dialect, like `cell_lock.uc` DIALECTS.
+  **TODO: the other supported modems** — read on all test devices but the
+  NR7101 (2026-11-21, test commands and QMI reads only; the X3000 blocked,
+  the Pi unreachable). Steering only pays on a 5G NSA modem; the 4G ones
+  have no anchor to gain.
+  - RG650E-EU (Chateau): QMI lock 0x00D8/0x015A, QNWLOCK incl.
+    `common/4g_ext`, AT+QSCAN (1-3); QMI PCI scan refused (70) — supported;
+    already anchored there, so steering stays idle (HW-checked).
+  - Foxconn T99W175 (EliteBook, MBIM + QMI passthrough): QMI lock
+    0x00AF/0x00D7 answers over the passthrough, 0x015A 71; QMI PCI scan
+    refused (70); its AT port (`ATI`: Qualcomm model 334) knows none of the
+    scan/lock commands tried. Lock yes, discovery no. Its GDSP SIM is on
+    Vodafone's own B20 6300/409 there, with B7/B3/B1 ranked above B20 (5 vs 3)
+    and no cell measured on them — no better Vodafone layer at that site.
+    **Built: `AT$QCRSRP?`** (Qualcomm's generic measured-cell list, PCI +
+    EARFCN + RSRP; answered by the RG650E-EU, EG06-E, BG96, BM806U-E1 and the
+    T99W175, not by the Huawei/MeiG modems) as the third discovery source after
+    the QMI PCI scan and QSCAN: no data gap, no PLMN per cell, so such cells
+    rank after known own ones. On the T99W175 the QMI PLMN scan (type 0)
+    failed (result 1, code 0) after 15 s and cost ~20 s of data; MBIM Base
+    Stations Info lists only serving-layer neighbours without EARFCN or PLMN.
+    MBIM neighbours with their own EARFCN now go to `lte_inter` (they were
+    folded onto the serving layer). HW on the T99W175 (GDSP SIM on Vodafone): QCRSRP →
+    lock 6300:334 (QMI 0x00AF over the passthrough), serving after 6 s, no
+    EN-DC within 60 s → released, blocked, failed round 1; no packet lost; off
+    afterwards, no lock left. Its first run had released a lock that had taken
+    ("not serving within 15 s"): the cells were stale because nobody polled
+    modem_cells — steering now keeps the fast telemetry running (watch())
+    while a lock is pending.
+  - 4G only, steering not meaningful: EG06-E (QNWLOCK common/4g + common/lte,
+    no QSCAN), BG96 (QNWLOCK common/4g, no QSCAN, QMI scan 48), E392
+    (^FREQLOCK frequency only, QMI 71), BM806U-E1 (nothing; QMI 71/48),
+    ME906s (^NETSCAN answers but is undocumented in its 2015 AT spec, no lock).
+  - MeiG SLM770A (LT300, NCM): `AT^CELLLOCK=<0|1>,<2 WCDMA|3 LTE>,1,<earfcn>,<pci>`
+    (release `AT^CELLLOCK=0`) and `AT+CELLINFO=1|2` (serving / neighbours) per
+    the Teltonika wiki (rev. 148717), `AT^NETSCAN` answers too — a cell-lock
+    dialect for `lock_4g` there, independent of steering.
+  - Not read: RM520N-GL (X3000, blocked; likely as the RG650E), FM350
+    (swapped out), EG25-G (Pi unreachable).
+- **Steering across networks (`steer_networks 'allowed'`, 2026-11-21).** HW on
+  the GL-X3000 (RM520N-GL, GDSP SIM on Vodafone): a scan, a lock on Telekom
+  6400:36 (another network), the card re-registered on 262/01 in ~40 s (the
+  connection failure of the move no longer releases it: `steering.moving()`),
+  6400:36 was still not serving at 45 s, the next candidate Telekom 3749:389
+  served in 4 s and showed EN-DC after 6 s — NR5G-NSA on n78. wwand rebuilt the
+  session on its own after the move. **TODO:** (1) a move is "verified" on
+  EN-DC alone — add an active data check after a network change (the rx
+  counter must move within ~60 s, else release and block the network); today
+  only the transmit-stall watchdog (120 s) would notice a network that
+  registers the card but carries no data. Could not be shown on that box:
+  its v6 GDSP APN passes no data on either network (GDSP's own DNS
+  2a00:f88::1 unanswered, also back on Vodafone with steering off). (2) 45 s
+  to acquire a cell on another network is tight (~40 s for the registration
+  alone); measure more moves before changing it.
 - **A named profile vanishes on a Quectel card change (2026-11-21, open):**
   the NR7101's hwtest SIM-slot switch made the modem reload its carrier
   config (`QMBNCFG AutoSel`), which rebuilt the profile list from the MBN

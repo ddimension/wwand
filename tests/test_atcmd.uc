@@ -566,6 +566,23 @@ eq(qs[1], { plmn: '262/01', earfcn: 1300, pci: 342, rsrp: -95, rsrq: -8,
 eq(qs[0].plmn, '262/02', 'qscan: a two-digit MNC keeps its leading zero');
 eq(atcmd.parse_qscan([ 'ERROR' ]), [], 'qscan: no line, no cells');
 
+// AT$QCRSRP? as the Qualcomm modems answered it (2026-11-21)
+eq(atcmd.parse_qcrsrp([ '$QCRSRP: 342,1300,"-099.90",483,10020,"-094.00",116,3749,"-087.80"', 'OK' ]),
+	[ { earfcn: 1300, pci: 342, rsrp: -100 }, { earfcn: 10020, pci: 483, rsrp: -94 }, { earfcn: 3749, pci: 116, rsrp: -88 } ],
+	'qcrsrp: cells on several layers (RG650E-EU), RSRP rounded');
+eq(atcmd.parse_qcrsrp([ '$QCRSRP: 409,6300,"-063.50"', '334,6300,"-066.10"', 'OK' ]),
+	[ { earfcn: 6300, pci: 409, rsrp: -64 }, { earfcn: 6300, pci: 334, rsrp: -66 } ],
+	'qcrsrp: the list continued on a second line (BM806U-E1)');
+eq(atcmd.parse_qcrsrp([ '$QCRSRP: 000,9460,"-109.40"' ]), [ { earfcn: 9460, pci: 0, rsrp: -109 } ],
+	'qcrsrp: PCI 000 is PCI 0 (T99W175)');
+eq(atcmd.parse_qcrsrp([ 'ERROR' ]), [], 'qcrsrp: no answer, no cells');
+eq(atcmd.parse_qcrsrp([ '$QCRSRP: 409,6300', '334,6300,"-066.10"' ]), [],
+	'qcrsrp: a missing field rejects the answer instead of shifting the triples');
+eq(atcmd.parse_qcrsrp([ '$QCRSRP: 409,6300,"-063.50"', 'OK', '334,6300,"-066.10"' ]),
+	[ { earfcn: 6300, pci: 409, rsrp: -64 } ], 'qcrsrp: a numeric line after another line is not a continuation');
+eq(atcmd.parse_qcrsrp([ '$QCRSRP: 409,6300,"-020.00"' ]), [], 'qcrsrp: an RSRP outside -140..-44 is not one');
+eq(atcmd.parse_qcrsrp([ '$QCRSRP: ' ]), [], 'qcrsrp: an empty list');
+
 // NR5G neighbour rows (QMI carries none, so QENG is the only source). Two layouts:
 // with an ARFCN (large) and without (PCI first) — told apart by magnitude.
 let nrn = atcmd.parse_qeng_neighbourcell([

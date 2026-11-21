@@ -347,6 +347,62 @@ export function parse_qscan(lines)
 	return out;
 };
 
+// parse AT$QCRSRP? (Qualcomm's generic AT set) into the LTE cells the modem
+// measures: triples of <pci>,<earfcn>,"<rsrp dBm>" after the tag. It is the
+// one cell list every Qualcomm modem here answers — RG650E-EU, EG06-E, BG96,
+// BM806U-E1, T99W175 (2026-11-21) — and it carries other layers too
+// (`$QCRSRP: 342,1300,"-099.90",483,10020,"-094.00",116,3749,"-087.80"` on
+// the RG650E). Not a scan: only what the modem measures by itself, and no
+// PLMN per cell. The BM806U-E1 continues the list on a second line without
+// the tag (`$QCRSRP: 409,6300,"-063.50"` then `334,6300,"-066.10"`), so the
+// lines after the tag are joined. A '000' PCI is PCI 0.
+// returns [ { earfcn, pci, rsrp } ] (rsrp rounded to whole dBm), [] when none.
+export function parse_qcrsrp(lines)
+{
+	let body = null, open = false;
+
+	// continuation lines directly after the tag only: the first line that is
+	// not one ends the list (an unrelated numeric line later is not part of it)
+	for (let l in (lines ?? [])) {
+		let m = match(l, /^\s*\$QCRSRP:\s*(.*)$/);
+
+		if (m) {
+			body = m[1];
+			open = true;
+		}
+		else if (open && match(l, /^\s*[0-9]+,[0-9]+,/))
+			body += ',' + trim(l);
+		else
+			open = false;
+	}
+
+	let out = [];
+
+	if (body == null)
+		return out;
+
+	let f = map(split(body, ','), (x) => trim(replace(x, /"/g, '')));
+
+	// all or nothing: one missing field shifts every later triple, and
+	// '409,6300' + '334,6300,"-066.10"' would read as PCI 409 at "334 dBm"
+	if (length(f) % 3)
+		return out;
+
+	for (let i = 0; i < length(f); i += 3) {
+		let ok = match(f[i], /^[0-9]+$/) && match(f[i + 1], /^[0-9]+$/) &&
+			match(f[i + 2], /^-[0-9]+(\.[0-9]+)?$/);
+		let rsrp = ok ? -int(-(+f[i + 2]) + 0.5) : null;
+
+		// a reported RSRP is -140..-44 dBm (TS 36.133); anything else is not one
+		if (!ok || +f[i] > 503 || rsrp < -140 || rsrp > -44)
+			return [];
+
+		push(out, { earfcn: +f[i + 1], pci: +f[i], rsrp: rsrp });
+	}
+
+	return out;
+};
+
 // per-Rx-branch signal (Quectel), the antenna-alignment source:
 //   +QRSRP: <b0>,<b1>,<b2>,<b3>,<sysmode>   (dBm; sysmode = LTE | NR5G | ...)
 //   +QRSRQ: <b0>,<b1>,<b2>,<b3>,<sysmode>   (dB)

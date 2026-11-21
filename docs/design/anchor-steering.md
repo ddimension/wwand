@@ -65,7 +65,7 @@ mobility while it moves); a CPE that never moves does not.
 
 | Step | Primary | Fallback | Measured |
 |---|---|---|---|
-| Discover cells | QMI NAS Perform Network Scan 0x0021, scan type 3 (PCI) with an LTE band mask | `AT+QSCAN=1,1` | QMI type 3/4 refused (70 / 48) by the RG502Q-EA and the RG650E-EU, at once and without a data gap; QSCAN answered in 26 s, ~16 s without data |
+| Discover cells | QMI NAS Perform Network Scan 0x0021, scan type 3 (PCI) with an LTE band mask | `AT+QSCAN=1,1`, then `AT$QCRSRP?` (measured cells, no PLMN; the T99W175's only source) | QMI type 3/4 refused (70 / 48) by the RG502Q-EA and the RG650E-EU, at once and without a data gap; QSCAN answered in 26 s, ~16 s without data |
 | Lock | QMI `SET_CELL_LOCK_CONFIG` 0x00AF (u16) / `SET_CELL_CONFIG` 0x00D8 (u32), `enforce` 1 — the existing `cell_lock.uc` `qmi` dialect | `AT+QNWLOCK="common/4g"` | 0x00AF on the RG502Q-EA: on the target in 4 s, no data lost |
 | Release | the same message with an empty list | `AT+QNWLOCK="common/4g",0` | 0x00AF empty list: back on the old cell, data in 10 s |
 

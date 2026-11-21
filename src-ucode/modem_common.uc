@@ -2967,7 +2967,7 @@ export function at_late_retry(self, o)
 // of them is not in the unit its name suggests: WCDMA Ec/Io is a raw gint16 in
 // units of -0.5 dB, which libqmi renders as (-0.5)*raw before printing it
 // (qmicli-nas.c:460-462, libqmi 1.38.0) — a raw 20 means -10.0 dB, and the sign
-// flips too. The AT path already reports real dB (atcmd_parse.uc:500), so a raw
+// flips too. The AT path already reports real dB (atcmd_parse.uc:542), so a raw
 // value left in place makes one documented key mean two different things
 // depending on which path answered, with nothing at the consumer able to tell.
 //
