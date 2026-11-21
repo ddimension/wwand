@@ -850,10 +850,13 @@ function parse_network_sections(raw, result, ext_options)
 
 			// a protocol wwand has no backend for is a typo, and a silent one:
 			// it would override a perfectly good detection with a name nothing
-			// answers to, and then look exactly like broken hardware.
+			// answers to, and then look exactly like broken hardware. 'ppp' is
+			// one of them: wwand has no PPP/serial dial-up backend, and none is
+			// planned — discovery names a serial-only device that way, but as a
+			// setting it would only pin the modem to nothing.
 			if (s.protocol != null && s.protocol != '' &&
-			    !(lc(s.protocol) in [ 'auto', 'qmi', 'mbim', 'ncm', 'ppp' ])) {
-				let m = sprintf("wwand_modem %s: protocol '%s' is not one of qmi, mbim, ncm, ppp (or auto/unset for detection) — ignored, the driver decides",
+			    !(lc(s.protocol) in [ 'auto', 'qmi', 'mbim', 'ncm' ])) {
+				let m = sprintf("wwand_modem %s: protocol '%s' is not one of qmi, mbim, ncm (or auto/unset for detection) — ignored, the driver decides",
 					name, s.protocol);
 
 				push(result.warnings, m);

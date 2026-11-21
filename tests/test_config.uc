@@ -334,6 +334,18 @@ ok(length(filter(r.warnings, (w) => match(w, /protocol 'qmi2' is not one of/))) 
 	'protocol: a name with no backend is reported');
 eq(r.modems.m0.protocol, null, 'protocol: ...and dropped, so detection still runs');
 
+// 'ppp' too: there is no PPP/serial dial-up backend (and none is planned) —
+// accepted, it pinned the modem to a backend nothing provides
+r = padopt({
+	network: {
+		m0:  { '.type': 'wwand_modem', device: '/dev/ttyUSB2', protocol: 'ppp' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', apn: 'i' },
+	},
+});
+ok(length(filter(r.warnings, (w) => match(w, /protocol 'ppp' is not one of qmi, mbim, ncm/))) == 1,
+	'protocol: ppp is refused like any name without a backend');
+eq(r.modems.m0.protocol, null, 'protocol: ...and dropped');
+
 // case is not the operator's problem
 r = padopt({
 	network: {
