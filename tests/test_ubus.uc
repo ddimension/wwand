@@ -102,6 +102,13 @@ uloop.run();
 			push(missing, name);
 
 	eq(missing, [], 'publish: every method accepts ubus_rpc_session as a string');
+
+	// the same refusal for an op's own argument: `wwandctl esim discovery
+	// <smds>` and a single `notify` by seq go through modem_esim, and an
+	// undeclared one is refused before the daemon sees it
+	let me = table?.modem_esim?.args ?? {};
+
+	eq([ type(me.smds), type(me.seq) ], [ 'string', 'int' ], 'publish: modem_esim declares smds (string) and seq (int)');
 }
 
 done('test_ubus');

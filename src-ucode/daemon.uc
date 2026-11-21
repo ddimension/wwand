@@ -5862,6 +5862,13 @@ export function create(opts)
 			modem_reset: (ref, cb) => self.modem_reset(ref, cb),
 			esim: () => load_esim(),
 			esim_bridge: () => self.esim_bridge(),
+			// the eSIM operations the way the ubus method runs them
+			// (simops.uc modem_esim): with the managed-card guard of another
+			// plugin (esim_guard) and the interface check before an
+			// enable/disable (sim_in_use), both passed with params.force.
+			// esim_bridge().modem_esim is the same call WITHOUT them; a
+			// plugin acting for the user takes this one.
+			modem_esim: (ref, op, params, cb) => self.modem_esim(ref, op, params, cb),
 			esim_refresh: (ref, eid, slot, cb) => self.esim_refresh(ref, eid, slot, cb),
 			// an AT command on the modem's AT channel, whichever it is — a tty,
 			// or AT carried inside MBIM where there is none (atcmd_mbim.uc);

@@ -11,6 +11,28 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **eSIM bridge for transfers (2026-11-21):** what the plugin
+  ddimension/wwand-esim-transfer needs from the core.
+  - `modem_esim` op `discovery` (`smds?`; lpac `profile discovery`, IMEI
+    passed when known) → `{ servers }`.
+  - `notify` with `seq`: that one notification, removed from the card once
+    acknowledged (`notification process -r`). Still listed means not
+    delivered.
+  - Both arguments are declared on the ubus method (test_ubus).
+  - `wwandctl esim discovery [smds]`.
+  - Plugin dep `modem_esim`: the guarded path (`esim_managed`,
+    `sim_in_use`). Before this, a plugin had only the bare bridge and went
+    past both.
+  - `parse_lpac_line` keeps an array/object `data` as `data_json`. Before
+    this, the notification list (LuCI "Pending notifications", `wwandctl esim
+    notifications`) showed only the result line, never the notifications.
+  - **Not HW-checked:** discovery and `notify seq`. They need an eUICC in the
+    active slot; the RG650E's is in slot 2 of the Chateau fallback.
+  - The plugin's read-only USIM probe and its pre-flight check ran on the
+    NR7101 over the AT APDU backend: logical channel by partial USIM AID,
+    EF_AD, AUTHENTICATE answered 9862. The check stops at "no entitlement
+    server known", since none is configured. The plugin and its LuCI page
+    stay installed there.
 - **Anchor steering (2026-11-21):** `option
   anchor_steering 'auto'` (steering.uc) scans (QMI PCI scan, refused by both
   our 5G modems → `AT+QSCAN`), locks the LTE primary cell onto a cell of the

@@ -78,6 +78,21 @@ eq(r.code, '-1', 'lpa refusal: negative code');
 eq(r.message, 'es10c_enable_profile', 'lpa refusal: message');
 eq(r.data, 'profile not in disabled state', 'lpa refusal: detail data');
 
+// a listing applet answers an array: kept raw for the caller (notification
+// list, profile discovery), the string field stays null
+r = P('{"type":"lpa","payload":{"code":0,"message":"success","data":["rsp.example.com","smdp.example.org"]}}');
+eq(r.data, null, 'lpa array: no string data');
+eq(r.data_json, '["rsp.example.com","smdp.example.org"]', 'lpa array: raw JSON kept');
+
+r = P('{"type":"lpa","payload":{"code":0,"message":"success","data":[{"seqNumber":3,"profileManagementOperation":"delete"}]}}');
+eq(r.data_json, '[{"seqNumber":3,"profileManagementOperation":"delete"}]', 'lpa object array: raw JSON kept');
+
+eq(bridge.discovery_servers('result: code=0 success\ndata: ["rsp.example.com","smdp.example.org:8443"]'),
+	[ 'rsp.example.com', 'smdp.example.org:8443' ], 'discovery: servers from the run log');
+eq(bridge.discovery_servers('result: code=0 success\ndata: []'), [], 'discovery: no event -> []');
+eq(bridge.discovery_servers('result: code=-1 es11_authenticate_client'), [], 'discovery: failed run -> []');
+eq(bridge.discovery_servers(null), [], 'discovery: no log -> []');
+
 // --- noise / robustness ------------------------------------------------------
 
 eq(P(''), null, 'empty line -> null');
@@ -215,7 +230,11 @@ expect('download', { activation_code: 'LPA:1$a$b', confirmation_code: 'x' + chr(
 	'invalid_argument');
 expect('download', { activation_code: 'LPA:1$a$b' }, 'esim_not_installed');
 expect('notifications', {}, 'esim_not_installed');
+expect('discovery', { smds: "lpa.ds.gsma.com';reboot" }, 'invalid_argument');
+expect('discovery', {}, 'esim_not_installed');
 expect('notify', {}, 'esim_not_installed');
+expect('notify', { seq: '3;reboot' }, 'invalid_argument');
+expect('notify', { seq: 3 }, 'esim_not_installed');
 expect('download_status', {}, null, (res) => {
 	// the failed lpac starts must not wedge dl 'running' (the notify leak fix)
 	eq(res?.state, 'failed', 'router download_status: dl never wedged running');

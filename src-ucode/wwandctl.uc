@@ -358,7 +358,7 @@ function cmd_esim(st, args)
 	let op = rest[0];
 
 	if (op == null)
-		die('usage: wwandctl esim [modem] <eid|backend|profiles|enable|disable|delete|download|download-status|notifications|notify> [...]');
+		die('usage: wwandctl esim [modem] <eid|backend|profiles|enable|disable|delete|download|download-status|notifications|notify|discovery> [...]');
 
 	switch (op) {
 	case 'eid':
@@ -425,6 +425,23 @@ function cmd_esim(st, args)
 	case 'notifications': {
 		let res = call_ok('modem_esim', { modem: r.modem, op: op, slot: +(rest[1] ?? 1) });
 		printf('%s\n', length(res.log ?? '') ? res.log : '(none)');
+		break;
+	}
+
+	// discovery [smds]: SM-DS events for this card's EID
+	case 'discovery': {
+		let args = { modem: r.modem, op: op };
+
+		if (length(rest[1] ?? ''))
+			args.smds = rest[1];
+
+		let res = call_ok('modem_esim', args);
+
+		if (!length(res.servers ?? []))
+			printf('no profile waiting for this EID\n');
+
+		for (let srv in res.servers ?? [])
+			printf('%s   (wwandctl esim download \'LPA:1$%s$\')\n', srv, srv);
 		break;
 	}
 
@@ -504,6 +521,7 @@ eSIM (needs the wwand-esim package)
   esim [modem] download <activation_code> [confirmation_code] [--no-notify]
   esim [modem] download-status          poll a running download
   esim [modem] notifications | notify   pending eUICC notifications (ES9+)
+  esim [modem] discovery [smds]         profiles an operator queued for this EID (SM-DS)
 
 Maintenance
   sims                   every SIM card seen: ICCID, where it is (modem/slot, eUICC profile, reader)

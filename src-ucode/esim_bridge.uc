@@ -142,12 +142,20 @@ function parse_lpac_line(s)
 	if (mtype == 'progress')
 		return { kind: 'progress', message: field(s, /"message": *"([^"]*)"/) ?? 'step' };
 
+	// `data` is a string for most applets, but an array or object for the
+	// listing ones (`notification list`, `profile list`, `profile discovery`:
+	// lpac jprint_success over a cJSON array, src/applet/profile/discovery.c,
+	// lpac 2.3.0). That one is kept as its raw JSON text in data_json — the
+	// caller parses it where a malformed line can be survived; here the whole
+	// line would be lost. cJSON prints the payload in insertion order (code,
+	// message, data), so the value runs to the two closing braces at the end.
 	if (mtype == 'lpa')
 		return {
 			kind: 'lpa',
 			code: field(s, /"code": *(-?[0-9]+)/),
 			message: field(s, /"message": *"([^"]*)"/) ?? '',
 			data: field(s, /"data": *"([^"]*)"/),
+			data_json: field(s, /"data": *([\[{].*)\} *\} *$/),
 		};
 
 	if (mtype == 'event')
@@ -168,6 +176,21 @@ const ES10_NAMES = {
 	BF51: 'LoadEuiccPackage', BF52: 'GetEimConfigurationData', BF55: 'GetEimConfigurationData',
 	BF57: 'AddInitialEim', BF58: 'ProfileRollback', BF4F: 'IpaEuiccData',
 };
+
+// The SM-DP+ addresses of a `profile discovery` run, from its log: lpac
+// answers a JSON array of strings, kept as the run's `data: [...]` line
+// (parse_lpac_line data_json). Read with match(), not json(), for the reason
+// given at parse_lpac_line. [] when there is none or the run failed.
+function discovery_servers(out)
+{
+	let line = match(out ?? '', /(^|\n)data: (\[[^\n]*\])/);
+	let res = [];
+
+	for (let m in (match(line?.[2] ?? '', /"([A-Za-z0-9.:-]+)"/g) ?? []))
+		push(res, m[1]);
+
+	return res;
+}
 
 // the tag a BER object starts with, as hex ('BF38', '30'), or null
 function first_tag(h)
@@ -231,6 +254,8 @@ return {
 	parse_lpac_line: parse_lpac_line,
 	// ...and the debug line one card command becomes
 	apdu_summary: apdu_summary,
+	// ...and what a discovery run's log names (the `discovery` op's servers)
+	discovery_servers: discovery_servers,
 
 	// deps: { esim (the wwand.esim module), log(level,msg), modem_of(ref),
 	//         changed?(ref, slot) }
@@ -458,6 +483,8 @@ return {
 					logline(sprintf('result: code=%s %s', rec.code ?? '?', rec.message));
 					if (rec.data)
 						logline('data: ' + rec.data);
+					else if (rec.data_json)
+						logline('data: ' + rec.data_json);
 					return;
 				}
 
@@ -552,6 +579,12 @@ return {
 			case 'download':      cmd = sprintf("profile download -a '%s'%s", code ?? '',
 			                                    length(conf ?? '') ? sprintf(" -c '%s'", conf) : ''); break;
 			case 'notif-list':    cmd = 'notification list'; break;
+			// SM-DS event lookup for this EID (ES11, SGP.22 3.6.3): the code
+			// arg is the SM-DS host (checked by the caller: host characters
+			// only), conf the IMEI (digits only) for the DeviceInfo
+			case 'discovery':     cmd = sprintf("profile discovery%s%s",
+			                                    length(code ?? '') ? sprintf(" -s '%s'", code) : '',
+			                                    length(conf ?? '') ? sprintf(" -i '%s'", conf) : ''); break;
 			case 'notif-process': cmd = 'notification process -a'; break;
 			// one notification by seqNumber (digits only, checked by the
 			// caller), removed from the card once the SM-DP+ acknowledged it
@@ -986,9 +1019,71 @@ return {
 					return;
 				}
 
+				// SM-DS discovery: has an operator queued a profile for this
+				// card's EID? (ES11, SGP.22 3.6.3; lpac `profile discovery`,
+				// default SM-DS lpa.ds.gsma.com, src/applet/profile/
+				// discovery.c, lpac 2.3.0). Answers the SM-DP+ addresses
+				// holding an event for it; each is a `download` of
+				// `LPA:1$<address>$` (empty matching id) away. Synchronous
+				// like `notifications`: the ES11 round trip takes seconds,
+				// not a download's minute. A host name only, so the shell
+				// quoting holds; the IMEI goes in for the DeviceInfo when the
+				// modem told us one.
+				case 'discovery': {
+					if (dl?.state == 'running' || mgmt_busy)
+						return done({ error: 'busy' });
+
+					let smds = params?.smds ?? '';
+
+					if (length(smds) && !match(smds, /^[A-Za-z0-9.-]+(:[0-9]+)?$/))
+						return done({ error: 'invalid_argument' });
+
+					let imei = entry.modem?.info?.imei ?? '';
+
+					if (!match(imei, /^[0-9]{14,16}$/))
+						imei = '';
+
+					mgmt_busy = true;
+
+					let dp = lpac_run(ref, slot, 'discovery', smds, imei, (err, out) => {
+						mgmt_busy = false;
+
+						let ok = !err && match(out ?? '', /result:[^\n]*code=0/);
+
+						done(ok ? null : { error: 'lpac', ...(err ?? {}), log: out },
+							{ ok: !!ok, log: out, servers: discovery_servers(out) });
+					});
+
+					if (dp === false) {
+						mgmt_busy = false;
+
+						return done({ error: 'esim_not_installed' });
+					}
+
+					if (!dp) {
+						mgmt_busy = false;
+
+						return done({ error: 'esim', detail: { error: 'spawn' } });
+					}
+
+					return;
+				}
+
 				case 'notify': {
 					if (dl?.state == 'running' || mgmt_busy)
 						return done({ error: 'busy' });
+
+					// `seq`: ONE notification, removed from the card once its
+					// SM-DP+ acknowledged it (`notification process -r <seq>`,
+					// src/applet/notification/process.c, lpac 2.3.0) — so
+					// "still listed" means "not delivered", which is what a
+					// caller that must know a delete reached the operator
+					// checks. Without it every pending one is sent and all
+					// stay listed (`-a`, no removal), as before.
+					let seq = params?.seq;
+
+					if (seq != null && !match('' + seq, /^[0-9]{1,10}$/))
+						return done({ error: 'invalid_argument' });
 
 					dl = { state: 'running', via: 'notify', logf: ESIM_LOGF };
 
@@ -997,9 +1092,15 @@ return {
 					// the completion handler or on a failed spawn)
 					let notify_quiet = quiet_claim(entry.modem);
 
-					if (!lpac_run(ref, slot, 'notif-process', '', '', (err, out) => {
-						dl = { state: err ? 'failed' : 'done', via: 'notify',
-						       code: err?.code ?? 0, log: out };
+					if (!lpac_run(ref, slot, (seq != null) ? 'notif-send' : 'notif-process',
+					              (seq != null) ? '' + seq : '', '', (err, out) => {
+						// lpac exits 0 when the SM-DP+ refused, the verdict
+						// is its result line (as for a download); the `-a`
+						// run keeps its old meaning, the exit status
+						let failed = err || ((seq != null) && !match(out ?? '', /result:[^\n]*code=0/));
+
+						dl = { state: failed ? 'failed' : 'done', via: 'notify',
+						       code: err?.code ?? (failed ? -1 : 0), log: out };
 						notify_quiet();   // run finished — URCs may resume
 						log('notice', sprintf('modem %s: eSIM notifications %s', ref, dl.state));
 					})) {

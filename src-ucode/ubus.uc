@@ -276,7 +276,9 @@ export function publish(conn, daemon, log)
 		modem_esim: {
 			args: { modem: '', op: '', slot: 0, iccid: '',
 			        activation_code: '', confirmation_code: '',
-			        auto_notify: true, force: false, ubus_rpc_session: '' },
+			        auto_notify: true, force: false,
+			        // discovery: the SM-DS host; notify: one notification
+			        smds: '', seq: 0, ubus_rpc_session: '' },
 			call: (req) => defer(req, (reply) =>
 				daemon.modem_esim(req.args.modem, req.args.op, req.args, ok_reply(reply))),
 		},

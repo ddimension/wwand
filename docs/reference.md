@@ -2285,7 +2285,7 @@ every method to it.
 | `modem_sim_puk` | `modem`, `puk`, `new_pin`, `store?` | **PUK entry**: unblock a PUK-locked SIM and set a NEW PIN in one operation (UIM Unblock PIN → native MBIM PIN/PUK1 → `AT+CPIN="puk","pin"`; the chain never re-tries a PUK on a second transport — wrong PUKs brick the SIM). PUK = 8 digits, new PIN 4–8 digits. On success the modem restarts its bring-up with the new PIN as one-shot override, and the configured PIN follows: the section the PIN comes from is rewritten (`store?` writes it where none is configured); the reply's `config` says what happened (write ACL) |
 | `modem_esim_profiles` | `modem`, `slot?` | the eSIM profile list alone — `modem_esim` with `op: profiles`, through the same APDU ladder (MBIM UICC → QMI UIM → AT), so it also serves an NCM modem; needs `wwand-esim` (read ACL) |
 | `modem_gps` | `modem` | GNSS: the NMEA port, the receiver state and, with `wwand-gps` installed, the fix wwand's own reader has off that port (see "GNSS (`wwand-gps`)" above) (read ACL) |
-| `modem_esim` | `modem`, `op`, `slot?`, `iccid?`, `activation_code?`, `confirmation_code?`, `auto_notify?`, `force?` | eSIM — `op`: `profiles`, `eid`, `enable`, `disable`, `delete`, `download`, `notify`, …; reaches only the card in the ACTIVE slot on a one-executor modem (an eUICC elsewhere needs a slot switch first, `modem_sim_slots` names it with its EID); needs the optional `wwand-esim` package. `enable`/`disable` are refused with `sim_in_use` like a slot switch while an interface bound to the card in use is up (`force` overrides both this and `esim_managed`) |
+| `modem_esim` | `modem`, `op`, `slot?`, `iccid?`, `activation_code?`, `confirmation_code?`, `auto_notify?`, `force?`, `smds?`, `seq?` | eSIM — `op`: `profiles`, `eid`, `enable`, `disable`, `delete`, `download`, `notify` (`seq`: one notification), `discovery` (`smds`), …; reaches only the card in the ACTIVE slot on a one-executor modem (an eUICC elsewhere needs a slot switch first, `modem_sim_slots` names it with its EID); needs the optional `wwand-esim` package. `enable`/`disable` are refused with `sim_in_use` like a slot switch while an interface bound to the card in use is up (`force` overrides both this and `esim_managed`) |
 | `modem_plugin` | `modem`, `plugin`, `op`, `args` | an operation of an installed plugin (see "Plugins") |
 | `modem_plugin_status` | `modem`, `plugin`, `op` | its read-only twin: only the ops the plugin declares read-only (LuCI read ACL) |
 | `modem_euicc_profiles` | `modem`, `slot` | the MODEM's own eUICC profile read (QMI UIM), no lpac. For a card lpac structurally cannot enumerate: an SGP.02 **M2M eUICC** has no local ES10 — it is managed over the air by its SM-SR and refuses STORE DATA — so host-driven enumeration is impossible by design there, while the modem's own interface does not go through ES10 at all. Read-only. Not every firmware implements it (both modems here answer *not supported*), and a failure on the FIRST index is reported as `no_native_euicc` so a caller falls back to lpac rather than believing in an empty card. Note the eUICC is not necessarily in the ACTIVE slot — pass the slot that holds it |
@@ -2468,7 +2468,8 @@ to 1):
 | `download` | `activation_code`, `confirmation_code?`, `auto_notify?` | install a profile from an SM-DP+ (async) |
 | `download_status` | — | poll a running download: `idle`/`running`/`done`/`failed` + live lpac log |
 | `notifications` | — | list pending eUICC notifications (ES9+) |
-| `notify` | — | send the pending notifications to the SM-DP+ |
+| `notify` | `seq?` | send the pending notifications to the SM-DP+ (they stay listed); with `seq` only that one, removed from the card once its SM-DP+ acknowledged it — still listed afterwards means not delivered |
+| `discovery` | `smds?` | ask an SM-DS whether an operator queued a profile for this card's EID (default `lpa.ds.gsma.com`, the GSMA root SM-DS) → `{ servers }`, the SM-DP+ addresses holding an event; download each as `LPA:1$<address>$` |
 
 **Provisioning a profile (download flow):**
 
@@ -3360,7 +3361,12 @@ core knowing them by name (`plugins.uc`). A plugin is a plain script at
 - **Options:** The `wwand_modem` options it lists reach it raw as `ext`. They
   are not reported as unknown, and changing them does not restart the modem.
 - **deps:** `modem_of`, `connection_token` (changes with every new data
-  session, null while none is up), `modem_reset`, `esim`, `esim_bridge`
+  session, null while none is up), `modem_reset`, `esim`, `modem_esim(ref,
+  op, params, cb)` (the eSIM ops as the ubus method runs them: refused with
+  `esim_managed` while another plugin's `esim_guard` holds the card and
+  with `sim_in_use` for an enable/disable under a bound interface,
+  `params.force` past both; a plugin acting for the user takes this one),
+  `esim_bridge`
   (whose `session_run` runs another stdio-APDU process on the card under
   the same claim as lpac; its events carry their flat payload fields, and
   `session_download(ref, code, cc, cb)` runs an lpac download for the session
