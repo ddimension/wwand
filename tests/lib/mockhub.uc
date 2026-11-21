@@ -200,6 +200,13 @@ export function create(opts)
 			handler = {};
 		if (handler == null && entry.name == 'GET_LTE_ATTACH_PARAMS')
 			handler = { __error: 71 };
+		// read before the attach profile is programmed (qmi_backend.
+		// attach_index): "no such read" is the E392's answer and leaves the
+		// attach profile at 1, which is what a scenario that does not care
+		// expects. Profile list / create have NO default: a mux 2+ interface
+		// must show which profiles it finds.
+		if (handler == null && entry.name == 'GET_LTE_ATTACH_PDN_LIST')
+			handler = { __error: 71 };
 
 		// built-in cell-lock defaults: a QMI modem without an AT channel asks
 		// its NAS client for the lock state on every validate (cell_lock.uc,

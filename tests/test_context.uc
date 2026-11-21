@@ -1323,7 +1323,9 @@ scenario('pushed-prefix', {
 
 scenario('mux-bind', {
 	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 2 },
-	handlers: { BIND_MUX_DATA_PORT: {} },
+	handlers: { BIND_MUX_DATA_PORT: {},
+		// mux 2+ dials a profile of its own (context.uc own_profile)
+		GET_PROFILE_LIST: { profiles: [] }, CREATE_PROFILE: { profile: { type: 0, index: 4 } } },
 }, (ctx, mock, events, next) => {
 	// datapath state normally produced by INIT_DATAPATH; injected here
 	ctx.modem.datapath = { backend: 'rmnet', ep_id: 4, urb_size: 4100, mux_devs: [ 'wwan0m2' ] };
@@ -1395,6 +1397,23 @@ scenario('mux-auto-demoted', {
 	});
 });
 
+// an `auto` channel 2 demoted to the parent is the one PDN there: it dials
+// the attach profile like mux 0, and no own profile is looked for or created
+// (the mux IN FORCE decides, config.uc effective_mux_id — as the bind does)
+scenario('mux-auto-demoted-2', {
+	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 2, mux_auto: true },
+}, (ctx, mock, events, next) => {
+	ctx.modem.datapath = { backend: 'raw_ip', ep_id: null, mux_devs: [] };
+
+	ctx.up((err) => {
+		eq(err, null, 'mux-auto-2: up on the plain parent');
+		eq(length(mock.calls_for('GET_PROFILE_LIST')), 0, 'mux-auto-2: no own-profile lookup');
+		eq(length(mock.calls_for('CREATE_PROFILE')), 0, 'mux-auto-2: nothing created');
+		eq(mock.calls_for('START_NETWORK')[0].args.profile_3gpp, 1, 'mux-auto-2: dials the attach profile');
+		next();
+	});
+});
+
 // the 802.3 fallback is demotable in exactly the same way
 scenario('mux-auto-demoted-ethernet', {
 	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 1, mux_auto: true },
@@ -1412,7 +1431,9 @@ scenario('mux-auto-demoted-ethernet', {
 // the exception, not the new default.
 scenario('mux-auto-built', {
 	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 3, mux_auto: true },
-	handlers: { BIND_MUX_DATA_PORT: {} },
+	handlers: { BIND_MUX_DATA_PORT: {},
+		// mux 2+ dials a profile of its own (context.uc own_profile)
+		GET_PROFILE_LIST: { profiles: [] }, CREATE_PROFILE: { profile: { type: 0, index: 4 } } },
 }, (ctx, mock, events, next) => {
 	ctx.modem.datapath = { backend: 'rmnet', ep_id: 4, urb_size: 4100, mux_devs: [ 'wwan0m3' ] };
 
@@ -1422,6 +1443,153 @@ scenario('mux-auto-built', {
 		let binds = mock.calls_for('BIND_MUX_DATA_PORT');
 		eq(length(binds), 1, 'mux-auto-built: bound once');
 		eq(binds[0].args.mux_id, 3, 'mux-auto-built: on the allocated channel');
+		next();
+	});
+});
+
+// --- mux 2+: a profile of its own, never the carrier's (#88) -----------------
+//
+// Without `option profile` a context on mux 2 used to dial the profile numbered
+// like its mux and write its APN into it — profile 2 is `ims` on carrier
+// configurations, and VoLTE broke. Now: the profile marked `wwand:<iface>`,
+// else a new one at the index the modem hands out; an unmarked profile is
+// never written.
+let CARRIER_PROFILES = [
+	{ type: 0, index: 1, name: 'default' },
+	{ type: 0, index: 2, name: 'ims' },
+	{ type: 0, index: 3, name: 'sos' },
+];
+let mux_dp = (ctx, mux) => {
+	ctx.modem.datapath = { backend: 'rmnet', ep_id: 4, urb_size: 4100, mux_devs: [ sprintf('wwan0m%d', mux) ] };
+};
+let written = (mock) => map(mock.calls_for('MODIFY_PROFILE'), (c) => c.args.profile.index);
+// profile 1 is the ATTACH profile: with no mux 0/1 interface bound, the first
+// one bound owns the attach (modem_common.attach_owner, rule 3) and its APN is
+// written there — unchanged behaviour, and not the dial. The carrier's 2 and 3
+// are what #88 is about.
+let carrier_written = (mock) => filter(written(mock), (i) => i == 2 || i == 3);
+
+scenario('own-create', {
+	config: { apn: 'internet.v6', pdp_type: 'ipv4', mux_id: 2 },
+	handlers: {
+		BIND_MUX_DATA_PORT: {},
+		GET_PROFILE_LIST: { profiles: CARRIER_PROFILES },
+		CREATE_PROFILE: { profile: { type: 0, index: 4 } },
+		GET_PROFILE_SETTINGS: { pdp_type: 0, apn: 'internet.v6' },
+	},
+}, (ctx, mock, events, next) => {
+	mux_dp(ctx, 2);
+	ctx.up((err) => {
+		eq(err, null, 'own-create: up');
+
+		let cr = mock.calls_for('CREATE_PROFILE');
+		eq(length(cr), 1, 'own-create: one profile created');
+		eq(cr[0].args.profile_name, 'wwand:own-create_ctx', 'own-create: marked with the interface');
+		eq(cr[0].args.apn, 'internet.v6', 'own-create: with the APN');
+		eq(cr[0].args.pdp_type, 0, 'own-create: and the PDP type');
+		eq(mock.calls_for('START_NETWORK')[0].args.profile_3gpp, 4,
+			'own-create: dials the index the modem handed out');
+		eq(carrier_written(mock), [], 'own-create: the carrier\'s `ims` / `sos` are never written');
+		// created with APN and PDP type, so read-before-write has nothing left
+		eq(filter(written(mock), (i) => i != 1 && i != 4), [], 'own-create: the dial writes its own profile only');
+		next();
+	});
+});
+
+scenario('own-reuse', {
+	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 2 },
+	handlers: {
+		BIND_MUX_DATA_PORT: {},
+		GET_PROFILE_LIST: { profiles: [ ...CARRIER_PROFILES,
+			{ type: 0, index: 7, name: 'wwand:own-reuse_ctx' },
+			{ type: 0, index: 5, name: 'wwand:own-reuse_ctx' },
+			{ type: 0, index: 6, name: 'wwand:somebody-else' } ] },
+		GET_PROFILE_SETTINGS: { pdp_type: 0, apn: 'old.apn' },
+	},
+}, (ctx, mock, events, next) => {
+	mux_dp(ctx, 2);
+	ctx.up((err) => {
+		eq(err, null, 'own-reuse: up');
+		eq(length(mock.calls_for('CREATE_PROFILE')), 0, 'own-reuse: nothing created');
+		eq(mock.calls_for('START_NETWORK')[0].args.profile_3gpp, 5,
+			'own-reuse: the lowest profile with its mark (duplicates go to the sweep)');
+
+		let mods = mock.calls_for('MODIFY_PROFILE');
+		ok(length(mods) >= 1, 'own-reuse: a changed APN is written');
+		let own = filter(mods, (c) => c.args.profile.index == 5);
+		eq(uniq(filter(written(mock), (i) => i != 1)), [ 5 ], 'own-reuse: into its own profile only');
+		eq(own[0]?.args?.profile_name, 'wwand:own-reuse_ctx', 'own-reuse: the write keeps the mark');
+		eq(own[0]?.args?.apn, 'web', 'own-reuse: with the new APN');
+		next();
+	});
+});
+
+// an own profile follows an emptied APN (network default) instead of keeping
+// the old one — "leave it" is the attach profile's '#N' semantics, not this
+scenario('own-empty-apn', {
+	config: { pdp_type: 'ipv4', mux_id: 2 },
+	handlers: {
+		BIND_MUX_DATA_PORT: {},
+		GET_PROFILE_LIST: { profiles: [ { type: 0, index: 4, name: 'wwand:own-empty-apn_ctx' } ] },
+		GET_PROFILE_SETTINGS: { pdp_type: 0, apn: 'stale.apn' },
+	},
+}, (ctx, mock, events, next) => {
+	mux_dp(ctx, 2);
+	ctx.up((err) => {
+		eq(err, null, 'own-empty-apn: up');
+		let own = filter(mock.calls_for('MODIFY_PROFILE'), (c) => c.args.profile.index == 4);
+		eq(own[0]?.args?.apn, '', 'own-empty-apn: the APN is cleared');
+		next();
+	});
+});
+
+// a modem that cannot create profiles: the APN goes inline, no index, nothing
+// written — never the mux-numbered profile this exists to protect
+scenario('own-refused', {
+	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 2 },
+	handlers: {
+		BIND_MUX_DATA_PORT: {},
+		GET_PROFILE_LIST: { profiles: CARRIER_PROFILES },
+		CREATE_PROFILE: { __error: 71 },
+	},
+}, (ctx, mock, events, next) => {
+	mux_dp(ctx, 2);
+	ctx.up((err) => {
+		eq(err, null, 'own-refused: up');
+
+		let sn = mock.calls_for('START_NETWORK')[0].args;
+		eq(sn.profile_3gpp, null, 'own-refused: no profile index');
+		eq(sn.apn, 'web', 'own-refused: the APN inline');
+		eq(filter(written(mock), (i) => i != 1), [], 'own-refused: no profile written for the dial');
+		next();
+	});
+});
+
+// `option profile N` stays the operator's choice, on any mux: no list read
+scenario('own-named', {
+	config: { apn: 'web', pdp_type: 'ipv4', mux_id: 2, profile: 3 },
+	handlers: { BIND_MUX_DATA_PORT: {}, GET_PROFILE_SETTINGS: { pdp_type: 0, apn: 'web' } },
+}, (ctx, mock, events, next) => {
+	mux_dp(ctx, 2);
+	ctx.up((err) => {
+		eq(err, null, 'own-named: up');
+		eq(length(mock.calls_for('GET_PROFILE_LIST')), 0, 'own-named: no own-profile lookup');
+		eq(mock.calls_for('START_NETWORK')[0].args.profile_3gpp, 3, 'own-named: the named profile');
+		next();
+	});
+});
+
+// mux 0/1 dials the ATTACH profile, whose index the modem names (the EG06-E
+// attaches with 5): the data connection rides the attach bearer
+scenario('attach-index', {
+	config: { apn: 'web', pdp_type: 'ipv4' },
+	handlers: { GET_PROFILE_SETTINGS: { pdp_type: 0, apn: 'web' } },
+}, (ctx, mock, events, next) => {
+	ctx.modem.attach_index = 5;
+	ctx.up((err) => {
+		eq(err, null, 'attach-index: up');
+		eq(mock.calls_for('START_NETWORK')[0].args.profile_3gpp, 5, 'attach-index: dials the attach profile');
+		eq(length(mock.calls_for('GET_PROFILE_LIST')), 0, 'attach-index: no own profile for mux 0/1');
 		next();
 	});
 });

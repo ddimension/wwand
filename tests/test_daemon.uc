@@ -78,6 +78,9 @@ function handlers()
 		},
 		MODIFY_PROFILE: {},
 		GET_PROFILE_SETTINGS: { pdp_type: 0, apn: 'web' },
+		// the sweep of wwand's own profiles at every registration (daemon
+		// on_modem_event -> modem.sweep_own_profiles): nothing marked here
+		GET_PROFILE_LIST: { profiles: [ { type: 0, index: 1, name: 'default' } ] },
 		SET_IP_FAMILY: {},
 		// succeeds for the initial connect and the first transient-drop
 		// reconnect; fails afterwards so the second drop exercises the

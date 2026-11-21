@@ -11,6 +11,15 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **Profiles per interface (2026-11-20, #88):** without `option profile`, mux
+  0/1 dials the attach profile (the first entry of the modem's LTE attach PDN
+  list, `qmi_backend.attach_index`, else 1) and mux 2+ a profile of its own
+  named `wwand:<iface>` (`context.uc own_profile`: found by the name, else
+  Create Profile; refused → the APN inline, no index). Profiles without the
+  name are never written for it; orphaned and duplicate marks go at the next
+  registration (`qmi_backend.sweep_own_profiles`). QMI only; NCM keeps cid =
+  mux. Plan and measurements: docs/design/dynamic-profiles.md. Host tests
+  test_context (own-*), test_modem_common, test_qmi_backend.
 - **APDU transport `qmi_apdu` (2026-11-19, 3488705):** QMI `SEND_APDU` alone,
   the logical channel opened / selected / closed by hand (MANAGE CHANNEL,
   SELECT by AID), its number in the CLA — for a UIM service without a channel

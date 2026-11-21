@@ -938,7 +938,7 @@ export function create(opts)
 			if (!ctx?.ensure_attach_profile || !self.dms)
 				return cb ? cb(changed) : null;
 
-			ctx.ensure_attach_profile(1, (ch) => {
+			ctx.ensure_attach_profile(self.attach_index ?? 1, (ch) => {
 				if (!ch)
 					return cb ? cb(changed) : null;
 
@@ -1410,6 +1410,19 @@ export function create(opts)
 			return cb({ error: 'not_ready' });
 
 		qmi_backend.read_profiles(self.wds_cfg, cb);
+	};
+
+	// sweep_own_profiles(keep): remove the profiles wwand created for an
+	// interface on mux 2+ (`wwand:<name>`) that no longer dials one, and
+	// duplicates of a mark (qmi_backend.sweep_own_profiles). `keep` holds the
+	// interfaces that do, on any modem (daemon.uc builds it). Once per init
+	// (`_gen`): the table does not change between registrations.
+	self.sweep_own_profiles = function(keep) {
+		if (!self.wds_cfg || self._swept_gen === self._gen)
+			return;
+
+		self._swept_gen = self._gen;
+		qmi_backend.sweep_own_profiles(self.wds_cfg, keep, log, () => null);
 	};
 
 	self._install_thermal = function(cb) {

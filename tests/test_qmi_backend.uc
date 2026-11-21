@@ -47,7 +47,7 @@ let raw_err = () => ({ __raw: RESULT_ERR });
 // --- mock wiring: each op reads a mutable response so scenarios can vary ------
 
 let r_ca, r_rf, r_thr, r_dsd, r_sysinfo, r_pkt, r_bearer, r_rates, r_opmode;
-let r_plist, r_pset = {}, r_attach, r_defnum = [];
+let r_plist, r_pset = {}, r_attach, r_defnum = [], r_create, deleted = [];
 
 let mock = mockhub.create({ handlers: {
 	GET_LTE_CPHY_CA_INFO:               () => r_ca,
@@ -60,6 +60,8 @@ let mock = mockhub.create({ handlers: {
 	GET_PROFILE_SETTINGS:               (a) => r_pset[sprintf('%d', a.profile.index)],
 	GET_LTE_ATTACH_PDN_LIST:            () => r_attach,  // WDS
 	GET_DEFAULT_PROFILE_NUMBER:         (a) => r_defnum[a.profile.family],
+	CREATE_PROFILE:                     () => r_create,  // WDS
+	DELETE_PROFILE:                     (a) => { push(deleted, a.profile.index); return raw(''); },
 	GET_CURRENT_DATA_BEARER_TECHNOLOGY: () => r_bearer,  // WDS
 	GET_CHANNEL_RATES:                  () => r_rates,   // WDS
 	SET_OPERATING_MODE:                 () => r_opmode,  // DMS
@@ -194,6 +196,58 @@ push(steps, (next) => {
 			});
 		});
 	});
+});
+
+// === attach_index: the first entry of the LTE attach PDN list (0x0094) =========
+push(steps, (next) => {
+	r_attach = raw(tlv(0x10, u8(1) + u16(5)) + tlv(0x11, u8(0)));
+	backend.attach_index(wds, (ix, known, cancelled) => {
+		eq([ ix, known, cancelled ], [ 5, true, false ], 'attach_index: the EG06-E shape, current [5]');
+
+		r_attach = raw_err();
+		backend.attach_index(wds, (ix2, known2) => {
+			eq([ ix2, known2 ], [ 1, false ], 'attach_index: no list (the E392) -> 1, not known');
+
+			r_attach = raw(tlv(0x10, u8(0)) + tlv(0x11, u8(0)));
+			backend.attach_index(wds, (ix3, known3) => {
+				eq([ ix3, known3 ], [ 1, false ], 'attach_index: an empty list -> 1');
+				next();
+			});
+		});
+	});
+});
+
+// === sweep_own_profiles: only wwand-marked profiles, only orphans + duplicates ==
+push(steps, (next) => {
+	let lstr = (x) => u8(length(x)) + x;
+	let ent = (i, n) => u8(0) + u8(i) + lstr(n);
+	r_plist = raw(tlv(0x01, u8(6) + ent(1, 'default') + ent(2, 'ims') + ent(4, 'wwand:wan6') +
+		ent(5, 'wwand:gone') + ent(6, 'wwand:wan6') + ent(7, 'wwandish')));
+	deleted = [];
+	let lines = [];
+
+	backend.sweep_own_profiles(wds, { wan6: true, wan: true }, (l, m) => push(lines, m), (gone) => {
+		eq(gone, [ 5, 6 ], 'sweep: the orphan and the duplicate, nothing else');
+		eq(deleted, [ 5, 6 ], 'sweep: DELETE_PROFILE for exactly those');
+		ok(length(filter(lines, (m) => index(m, 'interface gone') >= 0)) == 1, 'sweep: says why');
+
+		r_plist = raw_err();
+		deleted = [];
+		backend.sweep_own_profiles(wds, {}, (l, m) => null, (g2) => {
+			eq([ g2, deleted ], [ [], [] ], 'sweep: an unreadable list deletes nothing');
+			next();
+		});
+	});
+});
+
+// === CREATE_PROFILE answer: Profile Identifier 0x01 { type u8, index u8 } ======
+push(steps, (next) => {
+	r_create = raw(tlv(0x01, u8(0) + u8(4)));
+	wds.request('CREATE_PROFILE', { profile_type: 0, profile_name: 'wwand:wan6', pdp_type: 2, apn: 'v6.example' },
+		(e, d) => {
+			eq([ e, d?.profile ], [ null, { type: 0, index: 4 } ], 'create_profile: the index the modem handed out');
+			next();
+		});
 });
 
 // === ca_with_rf: the primary carrier of each leg the list lacks ===============

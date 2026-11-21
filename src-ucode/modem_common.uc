@@ -11,6 +11,7 @@ import * as cell_lock from 'wwand.cell_lock';
 import * as protoswitch from 'wwand.protocol_switch';
 import * as recovery_mod from 'wwand.recovery';
 import * as netlink from 'wwand.netlink';
+import * as cfgmod from 'wwand.config';
 import * as tlv from 'wwand.codec.tlv';
 import * as nasmod from 'wwand.codec.schema.nas';
 import * as ratmod from 'wwand.codec.schema.rat';
@@ -410,32 +411,45 @@ function apply_gnss_nmea(self, log, recipe, at, cb)
 // that reaches the same client twice says goodbye once; guarded per client,
 // because a plugin's goodbye that throws must not cost the release burst it
 // precedes the CIDs of every client after it.
-// The profile index a context dials, the way the QMI and NCM contexts
-// resolve it (context.uc resolve_profile, context_ncm.uc resolve_cid): an
-// `apn '#N'` names profile N, else `option profile`, else the mux channel,
-// else 1. The APN is the EFFECTIVE one — a matching wwand_sim overrides the
-// interface's (context_common.conn_cfg), and its `#N` is what gets dialled.
-function dialled_profile(ctx)
+// Whether a context dials the modem's ATTACH profile, the way the QMI and NCM
+// contexts resolve their index (context.uc resolve_profile, context_ncm.uc
+// resolve_cid): an `apn '#N'` names profile N, else `option profile` names
+// one; without either, a context on mux 0 or 1 dials the attach profile and
+// one on mux 2 and up a profile of its own (QMI, context.uc own_profile) or
+// the cid of its mux (NCM) — never the attach one. The attach profile is the
+// first entry of the modem's LTE attach PDN list on QMI (modem.attach_index,
+// read at init), 1 elsewhere. The APN is the EFFECTIVE one — a matching
+// wwand_sim overrides the interface's (context_common.conn_cfg), and its `#N`
+// is what gets dialled.
+function dials_attach(ctx)
 {
 	let cfg = ctx?.config;
+	let at = +(ctx?.modem?.attach_index ?? 1) || 1;
 	let apn = context_common.conn_cfg(ctx ?? {}, 'apn');
 
 	if (type(apn) == 'string' && substr(apn, 0, 1) == '#')
-		return +substr(apn, 1);
+		return +substr(apn, 1) == at;
 
-	return +(cfg?.profile ?? 0) || +(cfg?.mux_id ?? 0) || 1;
+	if (+(cfg?.profile ?? 0))
+		return +cfg.profile == at;
+
+	// the mux in force (config.uc effective_mux_id), as the context decides
+	// with it: an `auto` channel demoted to the parent dials the attach profile
+	return (cfgmod.effective_mux_id(cfg, ctx?.modem?.datapath) || 1) == 1;
 }
 
 // The interface whose settings the modem's ATTACH profile follows. The attach
-// bearer the modem brings up on its own is profile 1 (QMI ensure_attach_profile
-// (1), NCM step_attach cid 1), and it IS the data connection of the interface
-// that dials profile 1 — so that interface's APN, IP family and profile flags
-// have to win. Bind order did not: after a modem reset on an NR7101 the
-// `auto 0`, administratively-down `wwand1`, which dials profile 2, bound first
-// and put its APN into the attach profile (2026-10-10). In order:
-//   1. an interface that dials profile 1 — only where the attach IS a
-//      numbered profile (QMI, NCM); MBIM's LTE attach configuration is not,
-//      and a session/mux 1 means nothing for it (`numbered` false);
+// bearer the modem brings up on its own is the attach profile (QMI
+// ensure_attach_profile(modem.attach_index), NCM step_attach cid 1), and it IS
+// the data connection of the interface that dials that profile — so that
+// interface's APN, IP family and profile flags have to win. Bind order did
+// not: after a modem reset on an NR7101 the `auto 0`, administratively-down
+// `wwand1`, which dials profile 2, bound first and put its APN into the attach
+// profile (2026-10-10). In order:
+//   1. an interface that dials the attach profile (dials_attach) — only where
+//      the attach IS a numbered profile (QMI, NCM); MBIM's LTE attach
+//      configuration is not, and a session/mux 1 means nothing for it
+//      (`numbered` false);
 //   2. one that is brought up automatically (`auto` not 0);
 //   3. the first one bound, as before.
 // Never an interface bound to ANOTHER card (`option iccid`): the attach is the
@@ -454,7 +468,7 @@ export function attach_owner(contexts, numbered)
 
 	if (numbered !== false)
 		for (let c in list)
-			if (dialled_profile(c) == 1)
+			if (dials_attach(c))
 				return c;
 
 	for (let c in list)

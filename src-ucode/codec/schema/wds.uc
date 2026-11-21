@@ -347,6 +347,34 @@ export default {
 			},
 		},
 
+		// A profile of wwand's own for an interface on mux 2 and up, marked by
+		// its name (context.uc own_profile). libqmi 1.38 qmi-service-wds.json:
+		// "Create Profile" 0x0027 (input Profile Type 0x01 guint8, Profile Name
+		// 0x10, PDP Type 0x11 guint8, APN Name 0x14; output Profile Identifier
+		// 0x01 { type guint8, index guint8 }, Extended Error Code 0xE0) — no
+		// index in the request: the modem hands out the lowest free one (HW,
+		// six modems, 2026-11-20); "Delete Profile" 0x0029 (input Profile
+		// Identifier 0x01).
+		CREATE_PROFILE: {
+			id: 0x0027,
+			req: {
+				profile_type: { t: 0x01, f: 'u8' },
+				profile_name: { t: 0x10, f: 'string' },
+				pdp_type:     { t: 0x11, f: 'u8' },
+				apn:          { t: 0x14, f: 'string' },
+			},
+			resp: {
+				profile:   PROFILE_ID,
+				ext_error: { t: 0xE0, f: 'u16' },
+			},
+		},
+
+		DELETE_PROFILE: {
+			id: 0x0029,
+			req: { profile: PROFILE_ID },
+			resp: { ext_error: { t: 0xE0, f: 'u16' } },
+		},
+
 		GET_LTE_ATTACH_PDN_LIST: {
 			id: 0x0094,
 			req: {},
