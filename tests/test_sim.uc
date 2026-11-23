@@ -2055,12 +2055,36 @@ let mk_modem = (lines) => ({
 	sim.apdu_send(at, 1, 1, '80E2910003BF2200', (e, v) => { got.endless = e?.error ?? v; });
 	eq(got.endless, 'apdu_chain', 't0 at: an endless 61xx chain stops with an error');
 
-	// the modem's own logical channel already fetched it: one request, as it was
-	let native = 0;
-	let n = { _apdu_be: 'qmi', uim: { request: (name, args, cb) => { native++; cb(null, { response: h2a('6104') }); } } };
+	// the modem's own logical channel: the EG25-G's QMI UIM hands back a bare
+	// 61xx (HW-seen 2026-11-23), so it is chained there too, on the channel id
+	let native = [];
+	let n = { _apdu_be: 'qmi', uim: { request: (name, args, cb) => {
+		let a = a2h(args.apdu);
 
-	sim.apdu_send(n, 1, 1, '80e2910003bf2200', (e, v) => { got.native = e ?? v; });
-	eq([ got.native, native ], [ '6104', 1 ], 't0 native QMI UIM: not chained (the modem does it)');
+		push(native, [ args.channel_id, a ]);
+		cb(null, { response: h2a(a == '81e2910003bf5500' ? '6102' : a == '81c0000002' ? 'bf559000' : '6d00') });
+	} } };
+
+	sim.apdu_send(n, 1, 1, '81e2910003bf5500', (e, v) => { got.native = e ?? v; });
+	eq([ got.native, native ], [ 'bf559000', [ [ 1, '81e2910003bf5500' ], [ 1, '81c0000002' ] ] ],
+		't0 native QMI UIM: a bare 61xx chained with GET RESPONSE on the same channel');
+
+	// ...and a modem that chained by itself costs one request, as before
+	native = [];
+	n.uim.request = (name, args, cb) => { push(native, a2h(args.apdu)); cb(null, { response: h2a('bf559000') }); };
+	sim.apdu_send(n, 1, 1, '81e2910003bf5500', (e, v) => { got.native = e ?? v; });
+	eq([ got.native, length(native) ], [ 'bf559000', 1 ], 't0 native QMI UIM: an answer already complete is one request');
+
+	// MBIM UICC the same way
+	let mb = [];
+	let u = { _apdu_be: 'mbim', mbim_uicc: { apdu: (ch, a, cb) => {
+		push(mb, [ ch, a ]);
+		cb(null, a == '81e2910003bf5500' ? '6102' : a == '81c0000002' ? 'bf559000' : '6d00');
+	} } };
+
+	sim.apdu_send(u, 1, 1, '81e2910003bf5500', (e, v) => { got.mbim = e ?? v; });
+	eq([ got.mbim, mb ], [ 'bf559000', [ [ 1, '81e2910003bf5500' ], [ 1, '81c0000002' ] ] ],
+		't0 MBIM UICC: a bare 61xx chained too');
 }
 
 // QMI logical channels address the LOGICAL slot: the eUICC in physical slot
