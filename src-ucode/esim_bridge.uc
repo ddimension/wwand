@@ -1117,6 +1117,8 @@ return {
 
 				case 'profiles': return esim.profiles(entry.modem, slot, done);
 				case 'eid':      return esim.get_eid(entry.modem, slot, done);
+				// the card's own capabilities (GetEUICCInfo2 + an SGP.32 probe); read-only
+				case 'info':     return esim.info(entry.modem, slot, done);
 				case 'enable':
 				case 'disable':
 				case 'delete': {

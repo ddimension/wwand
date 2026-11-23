@@ -155,6 +155,11 @@ eq(nasmod.rat_order_ids([ 99, 'nr5g', -1 ]), [ 99, 12, -1 ],
 eq(nasmod.rat_order_ids([ 0, 0, 'gsm', 'lte' ]), [ 0, 0, 4, 8 ],
 	'rat order: the BG96\'s own order, NONE slots and all, goes back as read (0 is not an empty name)');
 eq(nasmod.rat_order_ids([ -1, 'lte', -1 ]), [ -1, 8, -1 ], 'rat order: unknown slots may repeat too');
+eq([ nasmod.rat_order_holds([ 12, 8, 5 ], [ 12, 8 ]), nasmod.rat_order_holds([ 12, 8 ], [ 12, 8 ]),
+     nasmod.rat_order_holds([ 8, 12 ], [ 12, 8 ]), nasmod.rat_order_holds([ 12 ], [ 12, 8 ]),
+     nasmod.rat_order_holds(null, [ 12 ]), nasmod.rat_order_holds([ 5, 12, 8 ], [ 12, 8 ]) ],
+	[ true, true, false, false, false, false ],
+	'rat order holds: the configured order leads (RATs appended behind it are fine, ddimension/wwand#95); swapped, short, unread or behind another RAT is not');
 eq([ nasmod.rat_order_writable([ 12, 8 ]), nasmod.rat_order_writable([ 0, 0, 4, 8 ]), nasmod.rat_order_writable([ 8, -1 ]) ],
 	[ true, false, false ], 'rat order: an order with slots QMI cannot name is not wwand\'s to rewrite');
 eq([ nasmod.rat_order_ids([ 'lte', 8 ]), nasmod.rat_order_ids([ 300 ]), nasmod.rat_order_ids('99') ],

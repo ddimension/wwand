@@ -264,6 +264,12 @@ conn_cli.defer('wwand', 'context_up', { interface: 'wan' }, (code, reply) => {
 		});
 	});
 
+	// modem_esim_info: the same read-only shape for the card's own capabilities
+	conn_cli.defer('wwand', 'modem_esim_info', { modem: 'm0' }, (ci, ri) => {
+		eq(ci, 0, 'esim-info: the method exists and routes');
+		eq([ ri?.error, ri?.detail?.error ], [ 'esim', 'no_esim_backend' ], 'esim-info: ...to the bridge\'s info op');
+	});
+
 	conn_cli.defer('wwand', 'modem_telemetry', {}, (ct, tl) => {
 		eq(ct, 0, 'telemetry: ok');
 		eq(tl.modems.m0.state, 'READY', 'telemetry: carries the state collectd graphs');

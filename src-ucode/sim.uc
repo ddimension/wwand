@@ -1748,15 +1748,78 @@ function channel_cla(channel)
 
 // The caller's APDU for a channel it got from qmi_apdu_open. Most callers
 // put the channel into the CLA themselves; one that left a first
-// interindustry (or proprietary 8x) CLA at channel 0 gets it set here.
+// interindustry (or proprietary 8x) CLA at channel 0 gets it set here — in
+// the low bits for 1-3, and for 4-19 as a FURTHER CLA of the same family
+// (0x40 | n-4 interindustry, 0xC0 | n-4 proprietary, chaining and secure
+// messaging kept; ISO 7816-4 5.4.1, the coding the IPAe probe in
+// card_euicc_info uses): left alone, a channel-4 APDU would go to the basic
+// channel.
 function qmi_apdu_on_channel(channel, apdu_hex)
 {
 	let c = hex(substr(apdu_hex, 0, 2));
 
-	if (channel >= 1 && channel <= 3 && !(c & 0x40) && !(c & 0x03))
-		return sprintf('%02x%s', c | channel, substr(apdu_hex, 2));
+	if ((c & 0x40) || (c & 0x03) || channel < 1 || channel > 19)
+		return apdu_hex;
 
-	return apdu_hex;
+	// a further CLA has one secure-messaging bit (0x20) for the first's two (0x0C)
+	let cla = (channel <= 3) ? (c | channel)
+		: ((c & 0x80) | 0x40 | ((c & 0x0c) ? 0x20 : 0) | (c & 0x10) | (channel - 4));
+
+	return sprintf('%02x%s', cla, substr(apdu_hex, 2));
+}
+
+// T=0 LEAVES THE ANSWER ON THE CARD. A transport that passes the APDU through
+// as it is (AT+CGLA, QMI SEND_APDU without a channel) hands back what the card
+// said, and over T=0 a command with response data says `61xx` — xx bytes wait
+// for a GET RESPONSE — or `6Cxx` (wrong Le, re-send with Le = xx; the T=0
+// procedure bytes of ISO/IEC 7816-3; lpac 2.3.0 euicc/euicc.c and
+// es10_transceive in esim.uc chain 61xx the same way). The modem's own
+// logical channel (QMI UIM, MBIM UICC) fetches them itself, the pass-through
+// does not: `STORE DATA GetEUICCInfo2` on the RG650E over CGLA answered a
+// bare `618b` (HW-observed, 2026-11-22, ddimension/wwand#98). So the raw path
+// chains it here, and a caller gets the whole answer whichever transport the
+// modem has. `send(apdu, cb)` is the
+// transport. GET RESPONSE goes out in the CLASS OF THE COMMAND it continues:
+// ES10 is proprietary (`8x`), and an `01 C0` after an `81 E2` is another
+// class a strict eUICC may refuse (6E00) — so the command's CLA is reused,
+// chaining bit (0x10) cleared, and the transport puts the channel in as it
+// did for the command (qmi_apdu_on_channel; CGLA carries it apart). cb(err, hex) — the
+// concatenated data plus the LAST status word; a transport error mid-chain is
+// returned as such, never a truncated answer that looks complete.
+const GET_RESPONSE_MAX = 64;   // 64 x 256 B: far past any ES10 answer
+
+function apdu_complete(send, apdu_hex, cb)
+{
+	let cla = hex(substr(apdu_hex, 0, 2)) & 0xef;
+	let data = '';
+	let rounds = 0;
+	let step;
+
+	step = (err, r) => {
+		if (err)
+			return cb(err, null);
+
+		r = lc(r ?? '');
+
+		let sw = substr(r, -4);
+
+		data += substr(r, 0, length(r) - 4);
+
+		if (++rounds > GET_RESPONSE_MAX)
+			return cb({ error: 'apdu_chain', detail: sprintf('still %s after %d GET RESPONSE', sw, GET_RESPONSE_MAX) }, null);
+
+		if (substr(sw, 0, 2) == '61')
+			return send(sprintf('%02xc00000%s', cla, substr(sw, 2)), step);
+
+		// wrong Le: only a command whose last byte IS Le (a 5-byte case 2
+		// header) can be re-sent with another; a case 4 command keeps its 6Cxx
+		if (substr(sw, 0, 2) == '6c' && rounds == 1 && length(apdu_hex) == 10)
+			return send(substr(apdu_hex, 0, 8) + substr(sw, 2), step);
+
+		cb(null, data + sw);
+	};
+
+	send(apdu_hex, step);
 }
 
 function qmi_apdu_close(modem, slot, channel, cb)
@@ -2197,14 +2260,16 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 	if (modem._apdu_be == 'mbim')
 		return modem.mbim_uicc.apdu(channel, apdu_hex, cb);
 
+	// the two pass-through transports leave a T=0 answer on the card
 	if (modem._apdu_be == 'at')
-		return at_apdu_send(modem, channel, apdu_hex, cb);
+		return apdu_complete((a, k) => at_apdu_send(modem, channel, a, k), apdu_hex, cb);
 
 	if (!modem.uim)
 		return cb({ error: 'no_uim_client' }, null);
 
 	if (modem._apdu_be == 'qmi_apdu')
-		return qmi_raw_apdu(modem, slot, qmi_apdu_on_channel(+channel, apdu_hex), cb);
+		return apdu_complete((a, k) => qmi_raw_apdu(modem, slot, qmi_apdu_on_channel(+channel, a), k),
+			apdu_hex, cb);
 
 	modem.uim.request('SEND_APDU', {
 		slot: uim_slot(modem, slot), channel_id: channel, apdu: hex_to_arr(apdu_hex),

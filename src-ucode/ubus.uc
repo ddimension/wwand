@@ -273,6 +273,17 @@ export function publish(conn, daemon, log)
 					{ slot: req.args.slot }, ok_reply(reply))),
 		},
 
+		// READ-ONLY twin of modem_esim's `info` op, for the same reason as
+		// modem_esim_profiles above: what the eUICC itself says it is
+		// (GetEUICCInfo2: SGP.22 version, category, capabilities, free memory)
+		// and whether it is an SGP.32 IoT eUICC
+		modem_esim_info: {
+			args: { modem: '', slot: 0, ubus_rpc_session: '' },
+			call: (req) => defer(req, (reply) =>
+				daemon.modem_esim(req.args.modem, 'info',
+					{ slot: req.args.slot }, ok_reply(reply))),
+		},
+
 		modem_esim: {
 			args: { modem: '', op: '', slot: 0, iccid: '',
 			        activation_code: '', confirmation_code: '',

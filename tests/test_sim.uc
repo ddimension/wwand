@@ -2259,6 +2259,83 @@ let mk_modem = (lines) => ({
 	eq([ got.denied, m._apdu_be ], [ { error: 'ERROR' }, 'at' ], 'qmi_apdu: a modem that denies it keeps the AT answer');
 }
 
+// T=0 over a pass-through transport: send fetches a 61xx answer with GET
+// RESPONSE (and re-sends a case 2 command on 6Cxx), so the caller gets the
+// whole answer — the RG650E answered GetEUICCInfo2 over CGLA with a bare 618b
+// (HW-observed 2026-11-22, ddimension/wwand#98)
+{
+	let h2a = (h) => map(match(h, /../g), (x) => hex(x[0]));
+	let a2h = (a) => join('', map(a, (b) => sprintf('%02x', b)));
+	// AT: the card answers in pieces, 61xx in between
+	let cmds = [];
+	let answers = {
+		'80E2910003BF2200': '6104',
+		'80C0000004': 'bf2281026102',
+		'80C0000002': '01029000',
+		'00B0000010': '6c08',
+		'00B0000008': '1122334455667788' + '9000',
+		'80E2910003BF5500': '6985',
+	};
+	let at = { _apdu_be: 'at', at: { send: (cmd, cb) => {
+		push(cmds, cmd);
+		let m = match(cmd, /AT\+CGLA=1,[0-9]+,"([0-9A-F]+)"/);
+		let r = m ? answers[m[1]] : null;
+
+		if (r == null)
+			return cb({ error: 'ERROR' }, null);
+		cb(null, { lines: [ sprintf('+CGLA: %d,"%s"', length(r), r) ] });
+	} } };
+	let got = {};
+
+	sim.apdu_send(at, 1, 1, '80E2910003BF2200', (e, v) => { got.info = e ?? v; });
+	eq(got.info, 'bf228102' + '0102' + '9000', 't0 at: two GET RESPONSE rounds, the data joined, the last SW');
+	eq(cmds, [ 'AT+CGLA=1,16,"80E2910003BF2200"', 'AT+CGLA=1,10,"80C0000004"', 'AT+CGLA=1,10,"80C0000002"' ],
+		't0 at: GET RESPONSE on the same channel, in the class of the command it continues (80, ES10), Le from the 61xx');
+	sim.apdu_send(at, 1, 1, '00B0000010', (e, v) => { got.wrong_le = e ?? v; });
+	eq(got.wrong_le, '1122334455667788' + '9000', 't0 at: 6Cxx re-sends a case 2 command with Le = xx');
+	sim.apdu_send(at, 1, 1, '80E2910003BF5500', (e, v) => { got.refused = e ?? v; });
+	eq(got.refused, '6985', 't0 at: an error status word is passed through untouched');
+
+	// a transport error in the middle is an error, never a truncated answer
+	answers['80C0000004'] = null;
+	sim.apdu_send(at, 1, 1, '80E2910003BF2200', (e, v) => { got.broken = e ?? v; });
+	eq(got.broken, { error: 'ERROR' }, 't0 at: a failed GET RESPONSE fails the send');
+
+	// a card that never stops saying 61xx is cut off, not followed forever
+	answers['80C0000004'] = '6104';
+	sim.apdu_send(at, 1, 1, '80E2910003BF2200', (e, v) => { got.endless = e?.error ?? v; });
+	eq(got.endless, 'apdu_chain', 't0 at: an endless 61xx chain stops with an error');
+
+	// QMI SEND_APDU alone: the same, the channel in the CLA of both
+	let sent = [];
+	let q = { _apdu_be: 'qmi_apdu', uim: { request: (name, args, cb) => {
+		let a = a2h(args.apdu);
+
+		push(sent, a);
+		cb(null, { response: h2a(a == '82e2910003bf2200' ? '6103' : a == '82c0000003' ? 'aabbcc9000' : '6d00') });
+	} } };
+
+	// channel 4 and up: a further CLA of the same family, for the command and its GET RESPONSE
+	sent = [];
+	sim.apdu_send(q, 1, 5, '80e2910003bf2200', () => null);
+	sim.apdu_send(q, 1, 4, '00b0000010', () => null);
+	eq(sent, [ 'c1e2910003bf2200', '40b0000010' ], 't0 qmi_apdu: channel 5 -> C1 (proprietary), channel 4 -> 40 (interindustry)');
+	sent = [];
+	sim.apdu_send(q, 1, 5, '0cb0000010', () => null);
+	sim.apdu_send(q, 1, 5, '8ce2910003bf2200', () => null);
+	eq(sent, [ '61b0000010', 'e1e2910003bf2200' ], 't0 qmi_apdu: secure messaging survives the further CLA (0C -> 61, 8C -> E1)');
+	sent = [];
+	sim.apdu_send(q, 1, 2, '80e2910003bf2200', (e, v) => { got.qmi = e ?? v; });
+	eq([ got.qmi, sent ], [ 'aabbcc9000', [ '82e2910003bf2200', '82c0000003' ] ], 't0 qmi_apdu: GET RESPONSE chained, proprietary class kept, channel in the CLA');
+
+	// the modem's own logical channel already fetched it: one request, as it was
+	let native = 0;
+	let n = { _apdu_be: 'qmi', uim: { request: (name, args, cb) => { native++; cb(null, { response: h2a('6104') }); } } };
+
+	sim.apdu_send(n, 1, 1, '80e2910003bf2200', (e, v) => { got.native = e ?? v; });
+	eq([ got.native, native ], [ '6104', 1 ], 't0 native QMI UIM: not chained (the modem does it)');
+}
+
 // QMI logical channels address the LOGICAL slot: the eUICC in physical slot
 // 2, active, is logical slot 1 — an RG650E answered NOT_SUPPORTED (94) to
 // slot 2 and opened the ISD-R on slot 1 (HW-observed on 245, 2026-10-15).

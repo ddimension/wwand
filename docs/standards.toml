@@ -150,6 +150,14 @@ by = "Claude"
 reviewed = "wwand 5950083"
 fixed = "wwand, commit \"recovery: a throttled APN waits out the back-off instead of climbing the ladder\""
 
+[[reviews]]
+id = "R12"
+date = "2026-11-23"
+kind = "reference ASN.1 read next to the code (Wireshark epan/dissectors/asn1/sgp22 RSPDefinitions.asn sgp22v2 + PEDefinitions.asn, master 49c70fe1: EUICCInfo2, RspCapability, UICCCapability, PprIds; lpac 2.3.0 euicc/es10c_ex.c for comparison)"
+by = "Claude, for ddimension/wwand#99"
+reviewed = "wwand 0ca39ce"
+fixed = "wwand, commit \"esim: the card's own capabilities\""
+
 [[component]]
 name = "MBIM codec and backend"
 code = "src-ucode/codec/mbim.uc, codec/mbim_schema/*.uc, {mbim_backend,mbim_client,modem_mbim,context_mbim,telemetry_mbim}.uc"
@@ -325,6 +333,14 @@ code = "src-ucode/{esim,esim_bridge}.uc"
   sections = "ISD-R AID, logical channel per session, profile enable → card refresh"
     [[component.standard.review]]
     review = "tbd"
+  [[component.standard]]
+  name = "GSMA SGP.22 ES10b GetEUICCInfo2, SGP.32 GetEimConfigurationData"
+  basis = "Wireshark sgp22 ASN.1 (RSPDefinitions sgp22v2, PEDefinitions), master 49c70fe1"
+  sections = "EUICCInfo2 fields [1]-[21] incl. the v3/SGP.32 reserved ones, RspCapability, UICCCapability, PprIds bit names; BF55 as the SGP.32 probe"
+    [[component.standard.review]]
+    review = "R12"
+    result = "tags, bit numbers and enum values match; euiccCategory [11] is 8B (IMPLICIT), which lpac 2.3.0 reads as AB and misses"
+    open = "the SGP.22 v3 specification itself not read (the module is v2 with v3 tags reserved); BF55 answered on no card here (no SGP.32 card with an IPAd at hand)"
 
 [[component]]
 name = "SMS"

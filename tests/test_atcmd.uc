@@ -288,9 +288,10 @@ ok(seq_done, 'sequence: completion after error');
 
 // --- model quirks ------------------------------------------------------------
 
-eq(atcmd.model_init_commands('EG06'), [ 'AT+QMBNCFG="AutoSel",1' ], 'quirks: EG06');
-eq(atcmd.model_init_commands('RG502Q-EA'), [ 'AT+QMBNCFG="AutoSel",1' ], 'quirks: RG502Q');
-eq(atcmd.model_init_commands('RG500Q-GL'), [ 'AT+QMBNCFG="AutoSel",1' ], 'quirks: RG500Q');
+// the modem's automatic MBN selection is its own setting: wwand no longer
+// switches it on at start (it replaced a user's MBN at every boot, #96)
+eq([ atcmd.model_init_commands('EG06'), atcmd.model_init_commands('RG502Q-EA'), atcmd.model_init_commands('RG500Q-GL') ],
+	[ [], [], [] ], 'quirks: no AutoSel sent to EG06/RG502Q/RG500Q (ddimension/wwand#96)');
 eq(atcmd.model_init_commands('E392'), [], 'quirks: no init for huawei');
 eq(atcmd.model_init_commands(null), [], 'quirks: null model');
 

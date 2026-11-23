@@ -17,6 +17,7 @@ import * as daemon_mod from 'wwand/daemon.uc';
 import * as netsel_ops from 'wwand/netsel_ops.uc';
 import * as modem_common from 'wwand/modem_common.uc';
 import * as config_check from 'wwand/config_check.uc';
+import * as carrier_cfg from 'wwand/carrier_config.uc';
 
 uloop.init();
 
@@ -936,6 +937,61 @@ daemon.shutdown();
 		ok(index(err?.detail ?? '', 'no QMI PDC service') >= 0,
 			'carrier: ...with the original reason');
 	});
+})();
+
+// --- carrier config on a Quectel: the choice survives the reset (#96) --------
+// While the firmware's AutoSel is on, a Quectel picks its own MBN by the SIM at
+// every boot, over the selected one (an RG500Q-EA was back on ROW_Commercial
+// after each reboot). A manual `set` switches it off; `auto` switches it on.
+(function() {
+	// only the MBN commands: the daemon's own eUICC probe uses the port too
+	let sent = [];
+	let mk = (manufacturer, at_ok) => {
+		let handlers = {};
+		let pdc = {
+			on: (name, fn) => { handlers[name] = fn; },
+			request: (name, args, cb) => { cb(null, {}); handlers[name + '_IND']?.({ token: args.token, result: 0 }); },
+		};
+		let at = { send: (cmd, cb) => { if (index(cmd, 'QMBNCFG') >= 0) push(sent, cmd); cb(at_ok ? null : { error: 'ERROR' }, at_ok ? { lines: [ 'OK' ] } : null); } };
+		let fake = {
+			modem: { create: (o) => {
+				let m = { id: o.id, state: 'READY', config: o.config, protocol: 'qmi', pdc: pdc, at: at,
+				          info: { manufacturer: manufacturer, model: 'RG500Q-EA' },
+				          start: () => null, stop: () => null };
+				carrier_cfg.install(m);
+				return m;
+			} },
+			context: { create: (o) => ({ state: 'IDLE', down: (cb) => cb ? cb() : null }) },
+		};
+		let d = daemon_mod.create({ timing: { hold_max_ms: 1000, failed_min_gap: 1 },
+			deps: { log: () => null, load_qmi: () => fake } });
+
+		d.apply_config(config.parse({ network: {
+			m0: { '.type': 'wwand_modem', device: '/dev/mock0', protocol: 'qmi' },
+		} }));
+		return d;
+	};
+	let got;
+
+	sent = [];
+	mk('Quectel', true).modem_carrier_config('m0', 'set', '0a0b', (err, res) => { got = err ?? res; });
+	eq([ got.selected, got.autosel, sent ], [ '0a0b', 'off', [ 'AT+QMBNCFG="AutoSel",0' ] ],
+		'carrier set on a Quectel: selected, and the firmware\'s own MBN choice switched off');
+
+	sent = [];
+	mk('Quectel', false).modem_carrier_config('m0', 'set', '0a0b', (err, res) => { got = err ?? res; });
+	eq([ got.selected, got.autosel, index(got.autosel_note ?? '', 'failed') > 0 ], [ '0a0b', null, true ],
+		'carrier set: a refused AutoSel is said, the PDC selection stands');
+
+	sent = [];
+	mk('Sierra Wireless', true).modem_carrier_config('m0', 'set', '0a0b', (err, res) => { got = err ?? res; });
+	eq([ got.selected, got.autosel, sent ], [ '0a0b', null, [] ], 'carrier set on another vendor: no AT sent');
+
+	sent = [];
+	mk('Quectel', true).modem_carrier_config('m0', 'auto', '', (err, res) => { got = err ?? res; });
+	eq([ got.autosel, got.apply, sent ], [ 'on', 'modem_reset', [ 'AT+QMBNCFG="AutoSel",1' ] ], 'carrier auto: AutoSel back on');
+	mk('Sierra Wireless', true).modem_carrier_config('m0', 'auto', '', (err, res) => { got = err ?? res; });
+	eq(got.error, 'unsupported', 'carrier auto: refused where there is no such switch');
 })();
 
 // --- a band/RAT change ends in a reattach (ddimension/wwand#62) ---------------

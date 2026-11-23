@@ -358,13 +358,49 @@ function cmd_esim(st, args)
 	let op = rest[0];
 
 	if (op == null)
-		die('usage: wwandctl esim [modem] <eid|backend|profiles|enable|disable|delete|download|download-status|notifications|notify|discovery> [...]');
+		die('usage: wwandctl esim [modem] <eid|info|backend|profiles|enable|disable|delete|download|download-status|notifications|notify|discovery> [...]');
 
 	switch (op) {
 	case 'eid':
 	case 'backend': {
 		let res = call_ok('modem_esim', { modem: r.modem, op: op, slot: +(rest[1] ?? 1) });
 		printf('%s\n', (op == 'eid') ? (res.eid ?? '?') : (res.backend ?? '?'));
+		break;
+	}
+
+	// what the card itself says it is (GetEUICCInfo2) and whether it is an
+	// SGP.32 IoT eUICC; `--json` for the whole answer
+	case 'info': {
+		let json_out = index(rest, '--json') >= 0;
+		let pos = filter(slice(rest, 1), (a) => a != '--json');
+		let res = call_ok('modem_esim_info', { modem: r.modem, slot: +(pos[0] ?? 1) });
+
+		if (json_out) {
+			printf('%.J\n', res);
+			break;
+		}
+
+		let line = (k, v) => (v != null && v != '') ? printf('%-22s %s\n', k, v) : null;
+		let list = (v) => length(v ?? []) ? join(', ', v) : null;
+
+		line('eid', res.eid);
+		line('sgp.22 version (svn)', res.svn);
+		line('highest svn', res.highest_svn);
+		line('sgp.32 (IoT eUICC)', (res.sgp32 == null) ? sprintf('unknown (%s)', res.sgp32_error ?? '?')
+			: res.sgp32 ? sprintf('yes%s', (res.eim_count != null) ? sprintf(', %d eIM(s) configured', res.eim_count) : '') : 'no');
+		line('category', res.category);
+		line('profile package', res.profile_version);
+		line('firmware', res.firmware);
+		line('free memory', (res.free_nvm != null) ? sprintf('%d B non-volatile, %d B volatile', res.free_nvm, res.free_vm ?? 0) : null);
+		line('rsp capability', list(res.rsp_capability));
+		line('uicc capability', list(res.uicc_capability));
+		line('forbidden ppr', list(res.forbidden_ppr));
+		line('globalplatform', res.globalplatform_version);
+		line('ts 102 241', res.ts102241_version);
+		line('protection profile', res.pp_version);
+		line('sas accreditation', trim(res.sas_accreditation ?? ''));
+		line('platform label', res.platform_label);
+		line('ci keys (verify)', list(res.ci_pkid_verification));
 		break;
 	}
 
@@ -476,6 +512,7 @@ Status
   carrier [modem]        carrier configuration (MBN): which one is active
   carrier [modem] list   every carrier config the modem holds
   carrier [modem] set <id>   select one (takes effect after a modem reset)
+  carrier [modem] auto       let a Quectel pick its MBN by the SIM again (AutoSel)
   euicc [modem] [slot]   the MODEM's own eUICC profile read, without lpac —
                          for an M2M eUICC whose ES10 the card refuses. Many
                          modems answer "not supported"; lpac stays the tool.
@@ -516,6 +553,7 @@ SMS
 eSIM (needs the wwand-esim package)
   esim [modem] profiles                  list installed profiles
   esim [modem] eid                      read the eUICC EID
+  esim [modem] info [slot] [--json]     what the eUICC says it is: SGP.22 version, SGP.32, capabilities
   esim [modem] backend                  which APDU transport serves the eUICC
   esim [modem] enable|disable|delete <iccid>
   esim [modem] download <activation_code> [confirmation_code] [--no-notify]
@@ -751,6 +789,15 @@ case 'carrier': {
 	}
 	else if (op == 'set') {
 		printf('selected %s — %s\n', res.selected, res.note ?? 'applied');
+
+		// a Quectel would otherwise pick its own MBN again at that reset
+		if (res.autosel == 'off')
+			printf('the modem\'s automatic MBN selection is off now (back on: wwandctl carrier auto)\n');
+		else if (res.autosel_note)
+			printf('note: %s — the modem may pick its own MBN again at the reset\n', res.autosel_note);
+	}
+	else if (op == 'auto') {
+		printf('automatic MBN selection on — %s\n', res.note ?? 'from the next reset');
 	}
 	else {
 		printf('active   %s\n', res.active ?? '(none)');

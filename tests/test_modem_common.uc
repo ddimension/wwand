@@ -2052,9 +2052,8 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	          at_init_changed: (c) => { changed = c; } };
 	let cmds = mc.init_commands(m);
 
-	eq(cmds[0], 'AT+QMBNCFG="AutoSel",1', 'init list: model quirks first');
-	eq(cmds[1], 'AT+CONF', 'init list: then the configured at_init');
-	eq(cmds[2]?.set, 'AT+X=1', 'init list: then what plugins add');
+	eq(cmds[0], 'AT+CONF', 'init list: the configured at_init first (no model quirk for an RG502Q any more)');
+	eq(cmds[1]?.set, 'AT+X=1', 'init list: then what plugins add');
 	// a configured lock is NOT in the list: it is read before it is written,
 	// in the modem's own dialect (cell_lock.sync, after the list)
 	eq(length(filter(cmds, (c) => type(c) == 'string' && index(c, 'QNWLOCK') >= 0)), 0,

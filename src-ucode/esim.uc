@@ -80,7 +80,9 @@ function ber_build(tag, val)
 // cb(err, response_byte_array)
 function es10_transceive(modem, slot, channel, req, cb)
 {
-	let cla = 0x80 | (channel & 0x03);
+	// proprietary class with the channel in it: 0x80 | n for 0-3, a further
+	// CLA 0xC0 | n-4 for 4-19 (`channel & 3` put channel 4 on the basic one)
+	let cla = (channel < 4) ? (0x80 | channel) : (0xc0 | (channel - 4));
 	let blocks = [];
 
 	for (let off = 0; off < length(req); off += 255)
@@ -240,6 +242,138 @@ function parse_result(tlvs, tag)
 		return { error: 'euicc', code: code?.[0] };
 
 	return null;
+}
+
+// --- GetEUICCInfo2 (ES10b, BF22): what the card itself says it is ------------
+//
+// Field tags, bit names and enum values per the ASN.1 Wireshark's SGP.22
+// dissector builds from (epan/dissectors/asn1/sgp22/RSPDefinitions.asn +
+// PEDefinitions.asn, master 49c70fe1, 2026-11-08: module sgp22v2, carrying the
+// tags SGP.22 v3 and SGP.32 reserve). Context tags are IMPLICIT (AUTOMATIC
+// TAGS), so [11] euiccCategory INTEGER is 8B — lpac 2.3.0 (es10c_ex.c) looks
+// for AB and never finds it; both eUICCs read here sent 8B (2026-11-22).
+
+const TAG_EUICC_INFO2 = 0xbf22;
+// SGP.32 ES10b GetEimConfigurationData: an IoT eUICC answers it (an empty
+// list included), an SGP.22 consumer card refuses it — 6985 on the RG650E's
+// and the T99W175's eUICC, both svn 2.2.x (HW-read 2026-11-22)
+const TAG_EIM_CONFIG = 0xbf55;
+
+const RSP_CAPABILITY = {
+	'0': 'additionalProfile', '1': 'crlSupport', '2': 'rpmSupport', '3': 'testProfileSupport',
+	'4': 'deviceInfoExtensibilitySupport', '5': 'serviceSpecificDataSupport',
+	'19': 'osUpdateSupport', '26': 'iotSpecificMetadataSupport', '27': 'mslCheckSupport',
+	'28': 'rspServerTestProfileAllowlistCheckSupport',
+};
+
+const UICC_CAPABILITY = [
+	'contactlessSupport', 'usimSupport', 'isimSupport', 'csimSupport', 'akaMilenage', 'akaCave',
+	'akaTuak128', 'akaTuak256', 'usimTestAlgorithm', 'rfu2', 'gbaAuthenUsim', 'gbaAuthenISim',
+	'mbmsAuthenUsim', 'eapClient', 'javacard', 'multos', 'multipleUsimSupport', 'multipleIsimSupport',
+	'multipleCsimSupport', 'berTlvFileSupport', 'dfLinkSupport', 'catTp', 'getIdentity',
+	'profile-a-x25519', 'profile-b-p256', 'suciCalculatorApi', 'dns-resolution', 'scp11ac',
+	'scp11c-authorization-mechanism', 's16mode', 'eaka', 'iotminimal',
+];
+
+const PPR_IDS = [ 'pprUpdateControl', 'ppr1', 'ppr2' ];
+const TRE_PROPERTIES = [ 'isDiscrete', 'isIntegrated', 'usesRemoteMemory' ];
+const EUICC_CATEGORY = [ 'other', 'basicEuicc', 'mediumEuicc', 'contactlessEuicc' ];
+
+// VersionType: three binary bytes, major/minor/revision ('02 02 02' = 2.2.2)
+function version_str(v)
+{
+	return (length(v ?? []) == 3) ? sprintf('%d.%d.%d', v[0], v[1], v[2]) : null;
+}
+
+function uint_of(v)
+{
+	let n = 0;
+
+	for (let b in (v ?? []))
+		n = n * 256 + b;
+
+	return n;
+}
+
+function text_of(v)
+{
+	return join('', map(v ?? [], (c) => sprintf('%c', c)));
+}
+
+// A DER BIT STRING: first byte the unused bit count, then the bits, MSB first
+// = bit 0. A set bit with no name is reported by number ('bit 7'), never
+// dropped: a later spec version names bits this table does not know yet.
+function bits_of(v, names)
+{
+	let out = [];
+
+	if (!length(v ?? []))
+		return out;
+
+	let total = (length(v) - 1) * 8 - v[0];
+
+	for (let i = 0; i < total; i++)
+		if ((v[1 + (i >> 3)] >> (7 - (i & 7))) & 1)
+			push(out, (type(names) == 'array' ? names[i] : names[sprintf('%d', i)]) ?? sprintf('bit %d', i));
+
+	return out;
+}
+
+// cb-free decode of the BF22 answer; null when it is not there. Every field
+// is optional in the result: a card leaves out what it does not have.
+function parse_euiccinfo2(tlvs)
+{
+	let body = find_tag(tlvs, TAG_EUICC_INFO2);
+
+	if (body == null)
+		return null;
+
+	let i = {};
+	let keys = (v) => map(ber_parse(v), (k) => arr_to_hex(k.val));
+
+	for (let f in ber_parse(body)) {
+		switch (f.tag) {
+		case 0x81: i.profile_version = version_str(f.val); break;
+		case 0x82: i.svn = version_str(f.val); break;
+		case 0x83: i.firmware = version_str(f.val); break;
+		case 0x84:   // extCardResource: ETSI TS 102 226 TLVs in an OCTET STRING
+			for (let r in ber_parse(f.val)) {
+				if (r.tag == 0x81) i.installed_applications = uint_of(r.val);
+				if (r.tag == 0x82) i.free_nvm = uint_of(r.val);
+				if (r.tag == 0x83) i.free_vm = uint_of(r.val);
+			}
+			break;
+		case 0x85: i.uicc_capability = bits_of(f.val, UICC_CAPABILITY); break;
+		case 0x86: i.ts102241_version = version_str(f.val); break;
+		case 0x87: i.globalplatform_version = version_str(f.val); break;
+		case 0x88: i.rsp_capability = bits_of(f.val, RSP_CAPABILITY); break;
+		case 0xa9: i.ci_pkid_verification = keys(f.val); break;
+		case 0xaa: i.ci_pkid_signing = keys(f.val); break;
+		case 0x8b:
+		case 0xab:   // what lpac 2.3.0 looks for; the ASN.1 says 8B
+			i.category = EUICC_CATEGORY[uint_of(f.val)] ?? 'other'; break;
+		case 0x99: i.forbidden_ppr = bits_of(f.val, PPR_IDS); break;
+		case 0x04: i.pp_version = version_str(f.val); break;
+		case 0x0c: i.sas_accreditation = text_of(f.val); break;
+		case 0xac:
+			for (let c in ber_parse(f.val)) {
+				if (c.tag == 0x80) i.platform_label = text_of(c.val);
+				if (c.tag == 0x81) i.discovery_base_url = text_of(c.val);
+			}
+			break;
+		case 0x8d: i.tre_properties = bits_of(f.val, TRE_PROPERTIES); break;
+		case 0x8e: i.tre_product_reference = text_of(f.val); break;
+		case 0xaf: i.additional_profile_versions = map(ber_parse(f.val), (k) => version_str(k.val)); break;
+		case 0x90: i.lpa_mode = uint_of(f.val); break;
+		case 0xb1: i.ci_pkid_signing_v3 = keys(f.val); break;
+		case 0x92: i.additional_info = arr_to_hex(f.val); break;
+		case 0x93: i.highest_svn = version_str(f.val); break;
+		case 0xb4: i.iot_specific_info = true; break;
+		case 0x95: i.minimum_security_level = arr_to_hex(f.val); break;
+		}
+	}
+
+	return i;
 }
 
 // enable/disable carry { iccid CHOICE (5A), refreshFlag BOOLEAN };
@@ -486,6 +620,50 @@ let qmi = {
 		});
 	},
 
+	// The card's own description (GetEUICCInfo2), its EID, and whether it is
+	// an SGP.32 IoT eUICC. cb(err, { eid, svn, …, sgp32 }) — `sgp32` is true
+	// when GetEimConfigurationData answers, false when the card refuses it —
+	// unless its EUICCInfo2 carries iotSpecificInfo [20], which only an SGP.32
+	// card does (one whose own IPA keeps ES10b to itself refuses the probe) —
+	// and null when the probe failed for another reason (`sgp32_error`).
+	info: (modem, slot, cb) => {
+		es10_request(modem, slot, ber_build(TAG_EUICC_INFO2, []), (err, tlvs) => {
+			if (err)
+				return cb(err, null);
+
+			let info = parse_euiccinfo2(tlvs);
+
+			if (info == null)
+				return cb({ error: 'no_response', detail: 'no EUICCInfo2 in the answer' }, null);
+
+			es10_request(modem, slot, ber_build(TAG_GET_EID, ber_build(0x5c, [ 0x5a ])), (eerr, etlvs) => {
+				let body = eerr ? null : find_tag(etlvs, TAG_GET_EID);
+				let eid = body ? find_tag(ber_parse(body), 0x5a) : null;
+
+				info.eid = eid ? arr_to_hex(eid) : null;
+
+				es10_request(modem, slot, ber_build(TAG_EIM_CONFIG, []), (perr, ptlvs) => {
+					let sw = perr?.sw;
+
+					if (!perr) {
+						info.sgp32 = (find_tag(ptlvs, TAG_EIM_CONFIG) != null);
+						let list = info.sgp32 ? find_tag(ber_parse(find_tag(ptlvs, TAG_EIM_CONFIG)), 0xa0) : null;
+						info.eim_count = (list != null) ? length(ber_parse(list)) : null;
+					}
+					// "not this command / not now" from the card is its no
+					else if (sw == '6985' || sw == '6a88' || sw == '6d00' || sw == '6a80' || sw == '6e00')
+						info.sgp32 = !!info.iot_specific_info;
+					else {
+						info.sgp32 = null;
+						info.sgp32_error = perr.error;
+					}
+
+					cb(null, info);
+				});
+			});
+		});
+	},
+
 	profiles: (modem, slot, cb) => {
 		es10_request(modem, slot, ber_build(TAG_PROFILE_INFO, []), (err, tlvs) => {
 			if (err)
@@ -514,6 +692,9 @@ let qmi = {
 let at = {
 	get_eid: (modem, slot, cb) => at_eid(modem, cb),
 	profiles: (modem, slot, cb) => at_profiles(modem, cb),
+	// the vendor LPA (AT+QESIM) has no ES10b; there is nothing to read
+	info: (modem, slot, cb) => cb({ error: 'unsupported_on_backend',
+	                                detail: 'the modem\'s own LPA (AT) does not pass ES10b through' }, null),
 	enable:  (modem, slot, iccid, cb) => at_profile_op(modem, iccid, 'enable_profile',  (e) => cb(e, { iccid: iccid })),
 	disable: (modem, slot, iccid, cb) => at_profile_op(modem, iccid, 'disable_profile', (e) => cb(e, { iccid: iccid })),
 	del:     (modem, slot, iccid, cb) => at_profile_op(modem, iccid, 'delete_profile',  (e) => cb(e, { iccid: iccid })),
@@ -552,8 +733,10 @@ return {
 	_iccid_request: iccid_request,
 	_bytes_to_iccid: bytes_to_iccid,
 	_qesim_fields: qesim_fields,
+	_parse_euiccinfo2: parse_euiccinfo2,
 
 	get_eid: (modem, slot, cb)        => dispatch('get_eid', [ modem, slot, cb ]),
+	info: (modem, slot, cb)           => dispatch('info', [ modem, slot, cb ]),
 	profiles: (modem, slot, cb)       => dispatch('profiles', [ modem, slot, cb ]),
 	enable: (modem, slot, iccid, cb)  => dispatch('enable', [ modem, slot, iccid, cb ]),
 	disable: (modem, slot, iccid, cb) => dispatch('disable', [ modem, slot, iccid, cb ]),

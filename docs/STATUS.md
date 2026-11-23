@@ -11,6 +11,20 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **Issue round 2026-11-23 (#95, #96, #98, #99):**
+  - #98: raw `modem_apdu send` over AT CGLA / QMI SEND_APDU alone chains
+    GET RESPONSE on `61xx` and re-sends on `6Cxx` (`sim.uc apdu_complete`).
+  - #99: `modem_esim_info` / `wwandctl esim info` / the status *Card* row:
+    GetEUICCInfo2 decoded (Wireshark sgp22 ASN.1, R12) and an SGP.32 probe
+    (BF55). Both eUICCs here: SGP.22 2.2.x, BF55 → 6985.
+  - #95: `rat_order` counts as held when the modem's order starts with it
+    (`nas.uc rat_order_holds`); the RG500Q appends `umts`.
+  - #96: no `AT+QMBNCFG="AutoSel",1` at init any more; `carrier set` switches
+    AutoSel off on a Quectel, `carrier auto` back on. Likely also the cause of
+    the NR7101 profile-list reload below (not re-checked).
+  - **Not HW-checked:** the Chateau went unreachable and the EliteBook's name
+    stopped resolving during the round; the NR7101 runs packages pre14, so
+    single modules from main cannot be mixed in there.
 - **eSIM bridge for transfers (2026-11-21):** what the plugin
   ddimension/wwand-esim-transfer needs from the core.
   - `modem_esim` op `discovery` (`smds?`; lpac `profile discovery`, IMEI
