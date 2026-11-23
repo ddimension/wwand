@@ -134,7 +134,7 @@ function watch_card_ready(modem, uim, on_ready)
 	// THE WAITER LIVES ON THE CLIENT, and carries an owner token. A single
 	// modem-wide slot let two unlocks steal from each other: init calls
 	// sim.unlock (modem_init_qmi.uc:753) while the eSIM path schedules its own
-	// (esim_bridge.uc:684), and nothing serialises them — the second overwrote
+	// (esim_bridge.uc:775), and nothing serialises them — the second overwrote
 	// the first, and whichever finished first cleared the OTHER's waiter.
 	let mine = {};
 
@@ -1773,12 +1773,15 @@ function qmi_apdu_on_channel(channel, apdu_hex)
 // said, and over T=0 a command with response data says `61xx` — xx bytes wait
 // for a GET RESPONSE — or `6Cxx` (wrong Le, re-send with Le = xx; the T=0
 // procedure bytes of ISO/IEC 7816-3; lpac 2.3.0 euicc/euicc.c and
-// es10_transceive in esim.uc chain 61xx the same way). The modem's own
-// logical channel (QMI UIM, MBIM UICC) fetches them itself, the pass-through
-// does not: `STORE DATA GetEUICCInfo2` on the RG650E over CGLA answered a
-// bare `618b` (HW-observed, 2026-11-22, ddimension/wwand#98). So the raw path
-// chains it here, and a caller gets the whole answer whichever transport the
-// modem has. `send(apdu, cb)` is the
+// es10_transceive in esim.uc chain 61xx the same way). Some modems' own
+// logical channel fetches them itself, and neither a pass-through nor every
+// QMI UIM does: `STORE DATA GetEUICCInfo2` on the RG650E over CGLA answered a
+// bare `618b` (HW-observed, 2026-11-22, ddimension/wwand#98), and the EG25-G's
+// QMI UIM SEND_APDU on a logical channel a bare `6100` to
+// GetEimConfigurationData (EG25GGBR07A08M2G, IDEMIA IoT eUICC, HW-observed
+// 2026-11-23). So every path chains it here, and a caller gets the whole
+// answer whichever transport the modem has; where the modem already chained,
+// no 61xx arrives and this is one send. `send(apdu, cb)` is the
 // transport. GET RESPONSE goes out in the CLASS OF THE COMMAND it continues:
 // ES10 is proprietary (`8x`), and an `01 C0` after an `81 E2` is another
 // class a strict eUICC may refuse (6E00) — so the command's CLA is reused,
@@ -2250,27 +2253,10 @@ export function install_apdu_reassembly(modem)
 	});
 };
 
-export function apdu_send(modem, slot, channel, apdu_hex, cb)
+// one APDU over the QMI UIM logical channel, the long-response reassembly
+// included; cb(err, hex) as the card answered it
+function qmi_uim_apdu(modem, slot, channel, apdu_hex, cb)
 {
-	let gone = apdu_transport_gone(modem, modem._apdu_be);
-
-	if (gone)
-		return cb(gone, null);
-
-	if (modem._apdu_be == 'mbim')
-		return modem.mbim_uicc.apdu(channel, apdu_hex, cb);
-
-	// the two pass-through transports leave a T=0 answer on the card
-	if (modem._apdu_be == 'at')
-		return apdu_complete((a, k) => at_apdu_send(modem, channel, a, k), apdu_hex, cb);
-
-	if (!modem.uim)
-		return cb({ error: 'no_uim_client' }, null);
-
-	if (modem._apdu_be == 'qmi_apdu')
-		return apdu_complete((a, k) => qmi_raw_apdu(modem, slot, qmi_apdu_on_channel(+channel, a), k),
-			apdu_hex, cb);
-
 	modem.uim.request('SEND_APDU', {
 		slot: uim_slot(modem, slot), channel_id: channel, apdu: hex_to_arr(apdu_hex),
 	}, (err, data) => {
@@ -2332,6 +2318,31 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 			}),
 		};
 	}, { timeout: 30000 });
+}
+
+export function apdu_send(modem, slot, channel, apdu_hex, cb)
+{
+	let gone = apdu_transport_gone(modem, modem._apdu_be);
+
+	if (gone)
+		return cb(gone, null);
+
+	// every transport goes through apdu_complete: a T=0 answer may stay on the
+	// card behind any of them, the modem's own logical channel included
+	if (modem._apdu_be == 'mbim')
+		return apdu_complete((a, k) => modem.mbim_uicc.apdu(channel, a, k), apdu_hex, cb);
+
+	if (modem._apdu_be == 'at')
+		return apdu_complete((a, k) => at_apdu_send(modem, channel, a, k), apdu_hex, cb);
+
+	if (!modem.uim)
+		return cb({ error: 'no_uim_client' }, null);
+
+	if (modem._apdu_be == 'qmi_apdu')
+		return apdu_complete((a, k) => qmi_raw_apdu(modem, slot, qmi_apdu_on_channel(+channel, a), k),
+			apdu_hex, cb);
+
+	apdu_complete((a, k) => qmi_uim_apdu(modem, slot, channel, a, k), apdu_hex, cb);
 };
 
 export function apdu_close(modem, slot, channel, cb)

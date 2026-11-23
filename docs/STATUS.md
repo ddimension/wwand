@@ -11,6 +11,17 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **IPAd with the card's own eIM on 3.123 (2026-11-23):** the EG25-G box
+  runs `option ipa_mode 'ipad'` + `option ipa '1'` (wwand-ipa/wwand-ipad
+  0.2.0_p2) permanently now. The IDEMIA IoT eUICC holds its eIM
+  (`eim-vfcl.idemia.io`, TLS by certificate); ipad polls it with that
+  configuration alone, no file, no secret on the router (HW-seen: TLS
+  session to it over wwand0, `noEimPackageAvailable`). Two core fixes came
+  out of it: the bridge's `event_payload` now keeps an array of flat objects
+  (ipad's `eims` list was dropped, so `wwandctl ipa` showed no eIM), and
+  `sim.uc apdu_send` chains `61xx` on the native QMI UIM and MBIM paths too
+  (the EG25-G's QMI UIM hands back a bare `6100`). hwtest `ipa:<modem>`
+  checks it on every run.
 - **Issue round 2026-11-23 (#95, #96, #98, #99):**
   - #98: raw `modem_apdu send` over AT CGLA / QMI SEND_APDU alone chains
     GET RESPONSE on `61xx` and re-sends on `6Cxx` (`sim.uc apdu_complete`).

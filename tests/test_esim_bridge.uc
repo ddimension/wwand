@@ -134,6 +134,41 @@ eq(r.payload.m, -3, 'event payload: negative integer');
 
 eq(length(keys(P('{"type":"event"}').payload)), 0, 'event without payload: empty object');
 
+// ipad's info event lists the card's eIMs (host.c host_event_info): an array
+// of flat objects. Lost before (only flat fields were read), and its objects'
+// fields must not leak to the top.
+r = P('{"type":"event","payload":{"event":"info","eid":"8903","backend":"iot","counter":5,' +
+	'"eims":[{"id":"1.3.6.1.4.1.54916.999.110.100","fqdn":"eim.example","tls":"certificate"},' +
+	'{"id":"a]}\\"b","tls":"system"}]}}');
+eq(r.payload.eid, '8903', 'event payload with an array: the flat field before it');
+eq(r.payload.counter, 5, 'event payload with an array: an integer before it');
+eq(length(r.payload.eims), 2, 'event payload: the array of objects, both entries');
+eq(r.payload.eims[0].fqdn, 'eim.example', 'event payload: an entry\'s string field');
+eq(r.payload.eims[0].tls, 'certificate', 'event payload: ...and the next one');
+eq(r.payload.eims[1].id, 'a]}"b', 'event payload: brackets and a quote inside a value do not end the array');
+eq(r.payload.fqdn, null, 'event payload: an entry\'s field does not leak to the top');
+eq(r.payload.tls, null, 'event payload: ...none of them');
+
+// an array pattern inside a string value is part of the value, not a member
+r = P('{"type":"event","payload":{"event":"info","id":"x\\"fake\\":[1]","eims":[{"id":"real"}]}}');
+eq(r.payload.fake, null, 'event payload: "key":[ inside a string makes no array');
+eq(r.payload.id, 'x"fake":[1]', 'event payload: ...and the string stays whole');
+eq(r.payload.eims?.[0]?.id, 'real', 'event payload: ...the real array after it is still read');
+
+r = P('{"type":"event","payload":{"event":"info","eims":[],"eid":"89"}}');
+eq(type(r.payload.eims), 'array', 'event payload: an empty array is a list');
+eq(length(r.payload.eims), 0, 'event payload: ...with nothing in it');
+eq(r.payload.eid, '89', 'event payload: the field after the array');
+
+r = P('{"type":"event","payload":{"event":"info","eims":["x",{"id":"y"},3]}}');
+eq(length(r.payload.eims), 1, 'event payload: an element that is not an object is skipped');
+eq(r.payload.eims[0].id, 'y', 'event payload: ...the object is kept');
+
+r = P('{"type":"event","payload":{"event":"info","eid":"89","eims":[{"id":"x"');
+eq(r.payload.eims, null, 'event payload: an array the line does not close is dropped');
+eq(r.payload.eid, '89', 'event payload: ...the fields before it stay');
+eq(r.payload.id, null, 'event payload: ...and its content does not leak');
+
 // --- modem_esim op router (the done-routing surface LuCI calls) --------------
 //
 // No lpac on the host (lpac_path points at nothing) -> every lpac path takes

@@ -82,18 +82,11 @@ function json_unescape(v)
 	});
 }
 
-// The flat fields of an event's payload: strings (unescaped), booleans and
-// integers. Pulled with match() for the reason the header gives, which is why
-// nested objects and arrays are not supported — no event carries one.
-function event_payload(s)
+// The flat fields of a JSON object's text: strings (unescaped), booleans and
+// integers. Pulled with match() for the reason parse_lpac_line gives.
+function flat_fields(body)
 {
 	let out = {};
-	let at = index(s, '"payload"');
-
-	if (at < 0)
-		return out;
-
-	let body = substr(s, at + 9);
 
 	for (let m in (match(body, /"([a-z_]+)": *"(([^"\\]|\\.)*)"/g) ?? []))
 		out[m[1]] = json_unescape(m[2]);
@@ -103,6 +96,136 @@ function event_payload(s)
 
 	for (let m in (match(body, /"([a-z_]+)": *(-?[0-9]+) *[,}]/g) ?? []))
 		out[m[1]] = +m[2];
+
+	return out;
+}
+
+// Where the array or object opening at s[i] ends: the index past its close,
+// -1 when the line ends first. String-aware, so a bracket or brace inside a
+// value (an eIM id is free text) does not count.
+function json_span(s, i)
+{
+	let depth = 0;
+	let instr = false;
+
+	for (let k = i; k < length(s); k++) {
+		let c = substr(s, k, 1);
+
+		if (instr) {
+			if (c == '\\')
+				k++;
+			else if (c == '"')
+				instr = false;
+		}
+		else if (c == '"')
+			instr = true;
+		else if (c == '[' || c == '{')
+			depth++;
+		else if ((c == ']' || c == '}') && --depth == 0)
+			return k + 1;
+	}
+
+	return -1;
+}
+
+// The objects of an array's text, each read as flat_fields; an element that
+// is not an object (a string, a number, an array) is skipped.
+function objects_of(arr)
+{
+	let out = [];
+
+	for (let k = 1; k < length(arr) - 1; k++) {
+		let c = substr(arr, k, 1);
+
+		if (c == '"') {
+			// a string element: skip to its closing quote
+			k++;
+			while (k < length(arr) && substr(arr, k, 1) != '"')
+				k += (substr(arr, k, 1) == '\\') ? 2 : 1;
+		}
+		else if (c == '{' || c == '[') {
+			let e = json_span(arr, k);
+
+			if (e < 0)
+				break;
+
+			if (c == '{')
+				push(out, flat_fields(substr(arr, k, e - k)));
+			k = e - 1;
+		}
+	}
+
+	return out;
+}
+
+// An event's payload: its flat fields, and an array of flat objects as a list
+// of them (ipad's `info` lists the card's eIMs that way, host.c
+// host_event_info). The array is cut out before the flat fields are read, so
+// the fields of its objects do not leak to the top. Deeper nesting is not
+// supported — no event carries it.
+function event_payload(s)
+{
+	let at = index(s, '"payload"');
+
+	if (at < 0)
+		return {};
+
+	let body = substr(s, at + 9);
+	let arrays = {};
+	let flat = '';
+	let kept = 0;          // body[kept..] not yet copied to flat
+	let key = null;        // where the last string outside a value starts
+	let instr = false;
+
+	// One walk over the structure, outside strings only: a `[` that follows
+	// `"key":` is an array member. A regex over the raw text would also find
+	// that pattern inside a string value.
+	for (let k = 0; k < length(body); k++) {
+		let c = substr(body, k, 1);
+
+		if (instr) {
+			if (c == '\\')
+				k++;
+			else if (c == '"')
+				instr = false;
+			continue;
+		}
+
+		if (c == '"') {
+			instr = true;
+			key = k;
+		}
+		else if (c == '[') {
+			let m = (key != null) ? match(substr(body, key, k - key), /^"([a-z_]+)" *: *$/) : null;
+			let end = json_span(body, k);
+
+			// an array the line does not close: neither it nor what follows
+			// is trusted
+			if (end < 0) {
+				if (m)
+					flat += substr(body, kept, key - kept);
+				else
+					flat += substr(body, kept, k - kept);
+				kept = length(body);
+				break;
+			}
+
+			if (m) {
+				arrays[m[1]] = objects_of(substr(body, k, end - k));
+				flat += substr(body, kept, key - kept);
+				kept = end;
+			}
+			k = end - 1;
+			key = null;
+		}
+	}
+
+	flat += substr(body, kept);
+
+	let out = flat_fields(flat);
+
+	for (let k, v in arrays)
+		out[k] = v;
 
 	return out;
 }
@@ -117,7 +240,8 @@ function event_payload(s)
 //                                        and waits: the answer is one line back
 //                                        (session_run's on_event); payload holds
 //                                        the event's string, boolean and integer
-//                                        fields (event_payload)
+//                                        fields and arrays of flat objects
+//                                        (event_payload)
 //   { kind: 'log', text }                anything that is not protocol JSON
 //   null                                 empty line
 function parse_lpac_line(s)
