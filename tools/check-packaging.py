@@ -416,6 +416,13 @@ def main():
         # MBIM tunnels the whole QMI stack over the passthrough, reaching
         # qmi_backend through the lazy require() shim rather than an import
         ('wwand-mbim', 'wwand-qmi'),
+        # wwand-qrtr is a meta package and installs nothing: it exists so that
+        # `option device 'qrtr'` has one name that pulls the QMI backend, the
+        # MHI transport and kmod-qrtr-mhi, which wwand-mhi no longer does
+        # (binding the IPCR channel stops direct QMI on the RM551E-GL,
+        # ddimension/openwrt-repo#7)
+        ('wwand-qrtr', 'wwand-qmi'),
+        ('wwand-qrtr', 'wwand-mhi'),
     }
     for p, ds in sorted(deps.items()):
         for d in ds:
