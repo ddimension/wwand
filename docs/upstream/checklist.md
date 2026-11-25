@@ -24,8 +24,10 @@ Nothing below is pushed/posted. Order matters (the PR Makefile must point at a
      `+kmod-mhi-pci-generic +kmod-mhi-wwan-ctrl +kmod-mhi-wwan-mbim +kmod-mhi-net`,
      ships the `wwan`-subsystem hotplug (moved out of base). **No
      `+kmod-qrtr-mhi`** — it is opt-in for `device 'qrtr'`, because binding the
-     IPCR channel stops direct QMI on the RM551E-GL (ddimension/openwrt-repo#7);
-     the upstream PR still carries it and needs the same change.
+     IPCR channel stops direct QMI on the RM551E-GL (ddimension/openwrt-repo#7).
+     The feed has a meta package `wwand-qrtr` (`+wwand-qmi +wwand-mhi
+     +kmod-qrtr-mhi`, installs nothing) for it; the upstream PR still carries
+     the old DEPENDS and needs the same change.
    - `test-version.sh` covers all three executables (already in the PR head).
    - Keep the upstream PR **source-shipped** (no bytecode/CMakeLists precompile —
      that stays feed-only) and keep `ucode-mod-wwand-io` **separate** upstream
