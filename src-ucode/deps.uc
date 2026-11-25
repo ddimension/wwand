@@ -1050,6 +1050,8 @@ export function create(o)
 		modeswitch: (o, cb) => modeswitch.attempt(o, cb),
 		// the presence gate of a QRTR modem (discovery.qrtr_probe)
 		qrtr_probe: (cfg) => discovery.qrtr_probe(cfg.qrtr_node),
+		// ...and why it may never open: no QRTR channel driver on the MHI bus
+		qrtr_channel_missing: () => discovery.qrtr_channel_missing(),
 		resolve_ep_id: (cfg, device, netdev) =>
 			netdev ? netlink.ep_iface_number(netdev) : null,
 		resolve_ep_type: (cfg, device, netdev) =>

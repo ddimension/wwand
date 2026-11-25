@@ -112,7 +112,7 @@ channels).
 | `wwand-qmi` | QMI backend — the common case; over cdc-wdm, or over the QRTR bus for PCIe/MHI modems that have none (`DEPENDS wwand`) |
 | `wwand-mbim` | MBIM backend (`DEPENDS wwand-qmi` — the passthrough reuses QMI) |
 | `wwand-ncm` | NCM/ECM backend (`DEPENDS wwand`) |
-| `wwand-mhi` | PCIe/MHI transport + MHI drivers (`DEPENDS wwand`; backend-neutral, add wwand-qmi or wwand-mbim) |
+| `wwand-mhi` | PCIe/MHI transport + MHI drivers (`DEPENDS wwand`; backend-neutral, add wwand-qmi or wwand-mbim). The QRTR channel driver is not included: for `option device 'qrtr'` install `kmod-qrtr-mhi` as well — on some modems (Quectel RM551E-GL) binding the IPCR channel stops direct QMI from answering |
 | `wwand-esim` | eSIM management + SM-DP+ download (`DEPENDS wwand + lpac` — no backend: the APDU transport chain MBIM UICC → QMI UIM → AT → QMI Send APDU lives in the base `sim.uc`, so eSIM works on an NCM- or MBIM-only box too) |
 | `wwand-gps` | reads the modem's NMEA port wwand found during enumeration and reports the fix through `modem_gps` (`DEPENDS wwand`) |
 | `wwand-apntest` | runs configured APN tests in sequence on a dedicated test box — SIM or eUICC profile, dial, checks, one verdict per test, reported to Nagios/Icinga through NSCA-ng (`send_nsca`, package `nsca-ng` in the ddimension feed) (`DEPENDS wwand`) |

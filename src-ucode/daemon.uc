@@ -3554,7 +3554,9 @@ export function create(opts)
 			entry.control_note = entry.vanished
 				? 'waiting for modem (device vanished)'
 				: (cfg.device == 'qrtr')
-					? 'waiting for modem (no QMI service on the QRTR bus)'
+					? (deps.qrtr_channel_missing?.()
+						? 'waiting for modem (no QRTR channel driver on the MHI bus: kmod-qrtr-mhi not installed or not loaded)'
+						: 'waiting for modem (no QMI service on the QRTR bus)')
 					: 'waiting for modem (control device not present)';
 			entry.waiting_since = entry.waiting_since ?? time();
 			return;

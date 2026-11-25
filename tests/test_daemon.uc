@@ -4882,6 +4882,28 @@ eq(am_opts.m0?.datapath?.mux_auto, false,
 	d.shutdown();
 }
 
+// --- ...and without the MHI QRTR driver it says what to install ---------------
+//
+// kmod-qrtr-mhi is opt-in (ddimension/openwrt-repo#7): a box upgraded from a
+// wwand-mhi that pulled it in loses it, and "no QMI service" would then read
+// like a modem still booting, forever.
+{
+	let d = daemon_mod.create({ timing: TIMING, deps: {
+		log: () => null, load_qmi: () => null,
+		qrtr_probe: (cfg) => null,
+		qrtr_channel_missing: () => true,
+	} });
+
+	d.apply_config(config.parse({ network: {
+		m0:  { '.type': 'wwand_modem', device: 'qrtr', protocol: 'qmi' },
+		wan: { '.type': 'interface', proto: 'wwand', modem: 'm0', device: 'mhi_hwip0', apn: 'a' },
+	} }));
+
+	ok(match(d.modems.m0.control_note ?? '', /no QRTR channel driver on the MHI bus: kmod-qrtr-mhi not installed or not loaded/),
+		'qrtr: no channel driver -> the wait note names the package');
+	d.shutdown();
+}
+
 // --- a live APN change re-programs the attach profile (deborah-3) ------------
 //
 // The attach profile belongs to the modem and is programmed at its init; a
