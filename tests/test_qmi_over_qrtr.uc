@@ -80,6 +80,15 @@ eq(discovery.qrtr_probe(null, { qrtr_servers: (ms) => servers }), 1, 'probe: pre
 eq(discovery.qrtr_probe(null, { qrtr_servers: (ms) => [] }), null, 'probe: a modem still booting reads as absent');
 eq(discovery.qrtr_probe(null, { qrtr_servers: (ms) => null }), null, 'probe: no qrtr in the kernel reads as absent');
 
+let sysfs = (paths) => ({ access: (p) => index(paths, p) >= 0 });
+
+eq(discovery.qrtr_channel_missing(sysfs([ '/sys/bus/mhi' ])), true,
+   'channel: an MHI bus without qcom_mhi_qrtr -> the driver is missing');
+eq(discovery.qrtr_channel_missing(sysfs([ '/sys/bus/mhi', '/sys/bus/mhi/drivers/qcom_mhi_qrtr' ])), false,
+   'channel: the driver registered -> not missing');
+eq(discovery.qrtr_channel_missing(sysfs([])), false,
+   'channel: no MHI bus at all -> no claim about a driver it would not use');
+
 // --- create -------------------------------------------------------------------
 
 eq(qrtr.create({ io: fake_io, node: 5 }), null, 'create: refuses a node without DMS');

@@ -1290,3 +1290,17 @@ export function qrtr_probe(want, fx, ms)
 
 	return qrtr_pick_node(fx.qrtr_servers?.(ms ?? 300), want);
 };
+
+// Is the MHI channel driver of QRTR missing? true only on a box with an MHI
+// bus (a PCIe modem) whose kernel has no `qcom_mhi_qrtr` driver registered —
+// then no QMI service can ever reach the QRTR bus, and the wait note should
+// say what to install rather than look like a modem still booting. The driver
+// is not part of wwand-mhi: on some modems binding their IPCR channel stops
+// direct QMI from answering (RM551E-GL, ddimension/openwrt-repo#7), so it is
+// opt-in (kmod-qrtr-mhi). The name is the driver's (net/qrtr/mhi.c:220, 6.18.55).
+export function qrtr_channel_missing(fx)
+{
+	fx = fx ?? default_fx();
+
+	return fx.access('/sys/bus/mhi') && !fx.access('/sys/bus/mhi/drivers/qcom_mhi_qrtr');
+};

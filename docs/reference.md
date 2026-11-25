@@ -435,8 +435,13 @@ config wwand_modem 'm0'
 	                                 #   for an SDX modem on PCIe/MHI whose QMI
 	                                 #   lives only on the QRTR bus (no cdc-wdm,
 	                                 #   e.g. an RG520N on an IPQ5018). QMI backend
-	                                 #   only; the QRTR channel driver
-	                                 #   (kmod-qrtr-mhi) comes with wwand-mhi.
+	                                 #   only; install the QRTR channel driver
+	                                 #   (kmod-qrtr-mhi) too — wwand-mhi does
+	                                 #   not pull it, since binding the IPCR
+	                                 #   channel stops direct QMI on some
+	                                 #   modems (RM551E-GL). Without it the
+	                                 #   wait note says so ("no QRTR channel
+	                                 #   driver on the MHI bus").
 	                                 #   The modem counts as present once a
 	                                 #   node on the bus serves QMI DMS and WDS;
 	                                 #   until then
