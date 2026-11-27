@@ -1410,6 +1410,29 @@ scenario('rat_order', {
 			'rat_order: validate finds the order in place, NR5G is in it');
 	});
 
+// An RG500Q-EA reads back the configured order with the RATs it supports but
+// was not given appended (nr5g,lte -> nr5g,lte,umts; ddimension/wwand#95):
+// the order is in force — no warning, and nothing rewritten at the next start
+let ssp95 = { mode_preference: (1 << 4) | (1 << 6), network_selection: 0, acquisition_order: [ 8, 5 ] };
+
+scenario('rat_order-trailing', {
+	handlers: base_handlers({
+		GET_SYSTEM_SELECTION_PREFERENCE: () => ssp95,
+		SET_SYSTEM_SELECTION_PREFERENCE: (args) => {
+			if (args.acquisition_order != null)
+				ssp95 = { ...ssp95, acquisition_order: [ ...args.acquisition_order, 5 ] };
+			return {};
+		},
+	}),
+	config: { rat_order: 'nr5g,lte' },
+}, 'registered',
+	(modem, mock, events) => {
+		eq(length(mock.calls_for('SET_SYSTEM_SELECTION_PREFERENCE')), 1, 'rat_order trailing: written once');
+		eq(ssp95.acquisition_order, [ 12, 8, 5 ], 'rat_order trailing: the modem appended umts');
+		eq(filter(modem.config_warnings, (e) => e.check == 'rat_order'), [],
+			'rat_order trailing: the configured order leads, no mismatch warning');
+	});
+
 // the mask also allows GSM, which this modem has no radio for (DMS radio_ifs
 // UMTS, LTE, 5GNR=10): not a gap, so not reported
 scenario('rat_order-left-out', {
@@ -2187,13 +2210,14 @@ scenario('at-init', {
 	(modem, mock, events) => {
 		eq(modem.state, 'READY', 'at: READY');
 		eq(modem.at_tty, '/dev/ttyUSB2', 'at: tty from config override');
-		// model RG502Q-EA -> QMBNCFG quirk, then configured ATE0 (validate_config
+		// model RG502Q-EA: no model quirk, the configured ATE0 (validate_config
 		// later appends its AT+QCFG="autoconnect" probe, so check just the prefix)
 		// a bare AT goes first: open_at probes the port before committing to
 		// it, so a channel that opens but never answers is dropped in favour
 		// of the MBIM pipe instead of silently swallowing every command
 		eq(at_tr.written[0], 'AT', 'at: the port is probed before it is used');
-		eq(slice(at_tr.written, 1, 3), [ 'AT+QMBNCFG="AutoSel",1', 'ATE0' ], 'at: quirk + at_init sequence');
+		eq(at_tr.written[1], 'ATE0', 'at: the at_init sequence, no AutoSel (ddimension/wwand#96)');
+		eq(filter(at_tr.written, (c) => index(c, 'QMBNCFG') >= 0), [], 'at: the MBN auto-select is left alone');
 		ok(index(at_tr.written, 'AT+QCFG="autoconnect"') >= 0, 'at: autoconnect probed at validate');
 	});
 

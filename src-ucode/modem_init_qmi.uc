@@ -928,7 +928,7 @@ export function install(self, o)
 				}
 
 				if (args.acquisition_order != null &&
-				    sprintf('%J', cur.acquisition_order) == sprintf('%J', args.acquisition_order)) {
+				    nasmod.rat_order_holds(cur.acquisition_order, args.acquisition_order)) {
 					log('info', sprintf('RAT order "%s" already set — skipping', self.config.rat_order));
 					delete args.acquisition_order;
 				}

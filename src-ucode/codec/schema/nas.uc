@@ -154,6 +154,25 @@ export function rat_order_writable(ids)
 	return length(filter(ids ?? [], (id) => type(id) != 'int' || id <= 0)) == 0;
 };
 
+// Whether the order `have` the modem reports holds the configured `want`: it
+// STARTS with it. A firmware may list the RATs it supports but was not given
+// behind the configured ones — an RG500Q-EA set to nr5g,lte reads back
+// nr5g,lte,umts over QMI while AT+QNWPREFCFG="rat_order_pref" says NR5G:LTE
+// (ddimension/wwand#95, 2026-11-21). Those trail every configured RAT, so the
+// configured order is in force; an exact comparison warned about it forever
+// and had the init rewrite the order (NV) at every start.
+export function rat_order_holds(have, want)
+{
+	if (type(have) != 'array' || type(want) != 'array' || length(have) < length(want))
+		return false;
+
+	for (let i = 0; i < length(want); i++)
+		if (have[i] != want[i])
+			return false;
+
+	return true;
+};
+
 // [ 12, 8 ] -> [ 'nr5g', 'lte' ]; a value without a name stays a number, so a
 // read-back shows what the modem holds instead of dropping it
 export function rat_order_names(ids)

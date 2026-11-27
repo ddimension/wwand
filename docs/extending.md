@@ -56,19 +56,22 @@ table that matches the kind of quirk:
 
 ### Worked example — "my modem needs an AT command at startup"
 
-Say a new Quectel needs `AT+QMBNCFG="AutoSel",1` before registration. Add one row
-to `MODEL_QUIRKS` in `src-ucode/atcmd.uc`:
+Say a new modem needs `AT+MYCMD=1` before registration. Add one row to
+`MODEL_QUIRKS` in `src-ucode/atcmd.uc`:
 
 ```
 const MODEL_QUIRKS = [
-    { match: /^EG06|^EM06|^RG50[0-9]|^RG65[0-9]/,
-      commands: [ 'AT+QMBNCFG="AutoSel",1' ] },
     // your modem:
     { match: /^RG255/, commands: [ 'AT+MYCMD=1' ] },
 ];
 ```
 
-`model_init_commands(model)` collects every matching row; the AT engine runs them
+Only for what the modem needs to work with wwand — never to change a setting
+that is the user's or the modem's own: the `AT+QMBNCFG="AutoSel",1` that
+stood here replaced a user's carrier config at every boot (#96).
+
+`model_init_commands(model)` returns the commands of the FIRST matching row (so a
+more specific pattern goes above a broader one); the AT engine runs them
 once after the modem is detected, before registration. That's it — no other code
 changes. Add a `test_atcmd` assertion (`model_init_commands('RG255…')` returns
 your command) and you're done.

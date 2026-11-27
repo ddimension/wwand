@@ -127,7 +127,7 @@ export function install(self, o)
 
 
 	// Carrier configuration (MBN) over QMI PDC: what the modem runs, what else
-	// it has, and selecting one. `op` = 'list' | 'get' | 'set'.
+	// it has, and selecting one. `op` = 'list' | 'get' | 'set' | 'auto'.
 	//
 	// A selection only takes effect after a modem reset, and the reply says so
 	// rather than implying the radio changed underneath the caller — PDC reports
@@ -137,6 +137,35 @@ export function install(self, o)
 
 		if (!entry)
 			return;
+
+		// A QUECTEL PICKS ITS OWN MBN AT BOOT while its AutoSel is on — by the
+		// SIM, over whatever was selected (an RG500Q-EA came back on
+		// ROW_Commercial after every reboot, ddimension/wwand#96). So a manual
+		// `set` switches AutoSel off, or the choice would not survive the reset
+		// it needs; `auto` switches it back on. Other vendors have no such
+		// switch that wwand knows: nothing is sent there. k(note, state): note =
+		// null or what went wrong, state = 'on' | 'off' | null; a failed switch
+		// leaves the PDC selection standing.
+		let quectel = !!match(entry.modem?.info?.manufacturer ?? '', /quectel/i);
+		let autosel = (on, k) => {
+			if (!quectel || !entry.modem?.at)
+				return k(quectel ? 'no AT port to switch the modem\'s automatic MBN selection' : null, null);
+
+			entry.modem.at.send(sprintf('AT+QMBNCFG="AutoSel",%d', on ? 1 : 0), (err) =>
+				k(err ? sprintf('AT+QMBNCFG="AutoSel",%d failed: %s', on ? 1 : 0, err.error ?? err) : null,
+				  err ? null : (on ? 'on' : 'off')),
+				{ timeout: 5000 });
+		};
+
+		// AutoSel is the firmware's, not PDC's: no PDC service needed
+		if (op == 'auto') {
+			if (!quectel)
+				return cb({ error: 'unsupported', detail: 'automatic MBN selection is a Quectel firmware switch (AT+QMBNCFG="AutoSel")' });
+
+			return autosel(true, (note, state) => note
+				? cb({ error: 'at', detail: note })
+				: cb(null, { autosel: state, apply: 'modem_reset', note: 'the modem picks its MBN by the SIM from the next reset on' }));
+		}
 
 		// NO PDC IS NOT THE SAME AS NO ANSWER. MBIMEx v3 has a carrier
 		// configuration of its own (MODEM_CONFIGURATION, ext cid 16), which
@@ -178,8 +207,18 @@ export function install(self, o)
 			if (!id || id == '')
 				return cb({ error: 'no_config_id' });
 
-			return carrier.select(entry.modem, id, (err, r) =>
-				err ? cb({ error: 'pdc', detail: err }) : cb(null, r));
+			return carrier.select(entry.modem, id, (err, r) => {
+				if (err)
+					return cb({ error: 'pdc', detail: err });
+
+				autosel(false, (note, state) => {
+					if (state)
+						r.autosel = state;
+					if (note)
+						r.autosel_note = note;
+					cb(null, r);
+				});
+			});
 		}
 
 		cb({ error: 'invalid_op', op: op });

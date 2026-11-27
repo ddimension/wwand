@@ -965,7 +965,7 @@ export function install(self, o)
 
 					nas.request('GET_SYSTEM_SELECTION_PREFERENCE', {}, (rerr, now) => {
 						if (!rerr && type(now?.acquisition_order) == 'array' &&
-						    sprintf('%J', now.acquisition_order) != sprintf('%J', ids)) {
+						    !nasmod.rat_order_holds(now.acquisition_order, ids)) {
 							log('warn', sprintf('modem %s: firmware accepted RAT order %J and kept %J',
 								ref, nasmod.rat_order_names(ids), nasmod.rat_order_names(now.acquisition_order)));
 							res.not_applied = [ 'rat_order' ];
@@ -1007,7 +1007,7 @@ export function install(self, o)
 				// rewrite (nas.uc rat_order_writable)
 				if (args.acquisition_order != null && !gerr &&
 				    type(cur?.acquisition_order) == 'array' &&
-				    sprintf('%J', cur.acquisition_order) != sprintf('%J', args.acquisition_order) &&
+				    !nasmod.rat_order_holds(cur.acquisition_order, args.acquisition_order) &&
 				    !nasmod.rat_order_writable(cur.acquisition_order))
 					return cb({ error: 'unsupported_setting', key: 'rat_order',
 						detail: sprintf('the modem\'s order %J has slots QMI cannot name (IoT technologies); change it with the vendor command',

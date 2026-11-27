@@ -1531,6 +1531,59 @@ function uim_slot(modem, slot)
 // errors at every start (evidence: ddimension/wwand#51, RM520N, 2026-10-14).
 const NOT_A_FAULT = { no_recovery: true };
 
+// T=0 LEAVES THE ANSWER ON THE CARD. A transport that passes the APDU through
+// as it is (AT+CGLA) hands back what the card
+// said, and over T=0 a command with response data says `61xx` — xx bytes wait
+// for a GET RESPONSE — or `6Cxx` (wrong Le, re-send with Le = xx; the T=0
+// procedure bytes of ISO/IEC 7816-3; lpac 2.3.0 euicc/euicc.c and
+// es10_transceive in esim.uc chain 61xx the same way). The modem's own
+// logical channel (QMI UIM, MBIM UICC) fetches them itself, AT+CGLA
+// does not: `STORE DATA GetEUICCInfo2` on the RG650E over CGLA answered a
+// bare `618b` (HW-observed, 2026-11-22, ddimension/wwand#98). So the raw path
+// chains it here, and a caller gets the whole answer whichever transport the
+// modem has. `send(apdu, cb)` is the
+// transport. GET RESPONSE goes out in the CLASS OF THE COMMAND it continues:
+// ES10 is proprietary (`8x`), and an `01 C0` after an `81 E2` is another
+// class a strict eUICC may refuse (6E00) — so the command's CLA is reused,
+// chaining bit (0x10) cleared; CGLA carries the channel apart. cb(err, hex) — the
+// concatenated data plus the LAST status word; a transport error mid-chain is
+// returned as such, never a truncated answer that looks complete.
+const GET_RESPONSE_MAX = 64;   // 64 x 256 B: far past any ES10 answer
+
+function apdu_complete(send, apdu_hex, cb)
+{
+	let cla = hex(substr(apdu_hex, 0, 2)) & 0xef;
+	let data = '';
+	let rounds = 0;
+	let step;
+
+	step = (err, r) => {
+		if (err)
+			return cb(err, null);
+
+		r = lc(r ?? '');
+
+		let sw = substr(r, -4);
+
+		data += substr(r, 0, length(r) - 4);
+
+		if (++rounds > GET_RESPONSE_MAX)
+			return cb({ error: 'apdu_chain', detail: sprintf('still %s after %d GET RESPONSE', sw, GET_RESPONSE_MAX) }, null);
+
+		if (substr(sw, 0, 2) == '61')
+			return send(sprintf('%02xc00000%s', cla, substr(sw, 2)), step);
+
+		// wrong Le: only a command whose last byte IS Le (a 5-byte case 2
+		// header) can be re-sent with another; a case 4 command keeps its 6Cxx
+		if (substr(sw, 0, 2) == '6c' && rounds == 1 && length(apdu_hex) == 10)
+			return send(substr(apdu_hex, 0, 8) + substr(sw, 2), step);
+
+		cb(null, data + sw);
+	};
+
+	send(apdu_hex, step);
+}
+
 function apdu_backend(modem, slot, cb)
 {
 	backend.choose(modem, '_apdu_be', [
@@ -1877,8 +1930,9 @@ export function apdu_send(modem, slot, channel, apdu_hex, cb)
 	if (modem._apdu_be == 'mbim')
 		return modem.mbim_uicc.apdu(channel, apdu_hex, cb);
 
+	// the pass-through transport leaves a T=0 answer on the card
 	if (modem._apdu_be == 'at')
-		return at_apdu_send(modem, channel, apdu_hex, cb);
+		return apdu_complete((a, k) => at_apdu_send(modem, channel, a, k), apdu_hex, cb);
 
 	if (!modem.uim)
 		return cb({ error: 'no_uim_client' }, null);

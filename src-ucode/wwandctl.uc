@@ -441,6 +441,7 @@ Status
   carrier [modem]        carrier configuration (MBN): which one is active
   carrier [modem] list   every carrier config the modem holds
   carrier [modem] set <id>   select one (takes effect after a modem reset)
+  carrier [modem] auto       let a Quectel pick its MBN by the SIM again (AutoSel)
   euicc [modem] [slot]   the MODEM's own eUICC profile read, without lpac —
                          for an M2M eUICC whose ES10 the card refuses. Many
                          modems answer "not supported"; lpac stays the tool.
@@ -710,6 +711,15 @@ case 'carrier': {
 	}
 	else if (op == 'set') {
 		printf('selected %s — %s\n', res.selected, res.note ?? 'applied');
+
+		// a Quectel would otherwise pick its own MBN again at that reset
+		if (res.autosel == 'off')
+			printf('the modem\'s automatic MBN selection is off now (back on: wwandctl carrier auto)\n');
+		else if (res.autosel_note)
+			printf('note: %s — the modem may pick its own MBN again at the reset\n', res.autosel_note);
+	}
+	else if (op == 'auto') {
+		printf('automatic MBN selection on — %s\n', res.note ?? 'from the next reset');
 	}
 	else {
 		printf('active   %s\n', res.active ?? '(none)');

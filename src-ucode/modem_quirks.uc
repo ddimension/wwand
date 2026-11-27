@@ -24,15 +24,13 @@
 const QUIRKS = [
 	// Quectel LTE/5G family (EG06/EM06, RG50x, RG65x). Telekom (and other
 	// networks) reject an IPv4-only autonomous LTE attach with EMM cause #33 —
-	// the attach profile (CID1) must allow IPv6, so expect ipv4v6 there. The
-	// QMBNCFG auto-select is the carrier-config (MBN) quirk mirrored from
-	// atcmd.MODEL_QUIRKS.
+	// the attach profile (CID1) must allow IPv6, so expect ipv4v6 there. (The
+	// QMBNCFG auto-select that stood here is gone — see atcmd.MODEL_QUIRKS.)
 	{
 		match: /^EG06|^EM06|^RG50[0-9]|^RG65[0-9]/,
 		expect: {
 			attach_pdp_type: 'ipv4v6',
 		},
-		init_commands: [ 'AT+QMBNCFG="AutoSel",1' ],
 	},
 
 	// Zyxel-bundled RG502Q firmware self-activates PDP profile 2 on boot,

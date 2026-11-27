@@ -98,12 +98,16 @@ const LOCAL_PORTS = {
 	'19d2:1485': { '3': 'at', '4': 'at2' },
 };
 
-// model-specific init sequences (old proto_qmi_serial_init)
-const MODEL_QUIRKS = [
-	// enable automatic carrier config (MBN) selection; the QMI-native
-	// equivalent would be the PDC service (future replacement)
-	{ pattern: '^EG06|^EM06|^RG50[02]Q', commands: [ 'AT+QMBNCFG="AutoSel",1' ] },
-];
+// model-specific init sequences (old proto_qmi_serial_init). Empty today.
+//
+// NOT `AT+QMBNCFG="AutoSel",1` any more, which the legacy init sent to
+// EG06/EM06/RG50xQ at every start: it switched on the firmware's own carrier
+// config choice by SIM, so an MBN the user had picked (LuCI, `wwandctl
+// carrier set`) was replaced by the firmware's pick at the next boot — an
+// RG500Q-EA came back on ROW_Commercial every time (ddimension/wwand#96,
+// 2026-11-21). The setting is the modem's; wwand changes it only when asked
+// (hwops.uc modem_carrier_config: `set` switches it off, `auto` on).
+const MODEL_QUIRKS = [];
 
 export function model_init_commands(model)
 {

@@ -38,7 +38,7 @@ export function rat_order_warnings(config, d, rats)
 	let have = join(',', nasmod.rat_order_names(ao));
 	let order = nasmod.rat_order_ids(config?.rat_order);
 
-	if (order != null && sprintf('%J', ao) != sprintf('%J', order))
+	if (order != null && !nasmod.rat_order_holds(ao, order))
 		push(out, { check: 'rat_order', severity: 'warn',
 			message: nasmod.rat_order_writable(ao)
 				? sprintf('modem RAT order %s does not match configured rat_order "%s"',
@@ -102,7 +102,7 @@ export function sync_rat_order(self, log, cb)
 			if (err || !d)
 				return warn([]);   // unreadable -> nothing to say
 
-			if (order == null || sprintf('%J', d.acquisition_order) == sprintf('%J', order) ||
+			if (order == null || nasmod.rat_order_holds(d.acquisition_order, order) ||
 			    (type(d.acquisition_order) == 'array' && !nasmod.rat_order_writable(d.acquisition_order)))
 				return warn(rat_order_warnings(self.config, d, modem_common.mode_rats(self)));
 

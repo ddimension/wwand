@@ -2039,10 +2039,9 @@ eq(mc.resolve_diag_port({ config: {}, device: '/dev/cdc-wdm0' }, diag_fx(), null
 	          at_init_changed: (c) => { changed = c; } };
 	let cmds = mc.init_commands(m);
 
-	eq(cmds[0], 'AT+QMBNCFG="AutoSel",1', 'init list: model quirks first');
-	eq(cmds[1], 'AT+CONF', 'init list: then the configured at_init');
-	eq(cmds[2]?.set, 'AT+X=1', 'init list: then what plugins add');
-	ok(index(cmds[3] ?? '', 'QNWLOCK') >= 0, 'init list: cell locks last');
+	eq(cmds[0], 'AT+CONF', 'init list: the configured at_init first (no model quirk for an RG502Q any more)');
+	eq(cmds[1]?.set, 'AT+X=1', 'init list: then what plugins add');
+	ok(index(cmds[2] ?? '', 'QNWLOCK') >= 0, 'init list: cell locks last');
 	eq(seen?.model, 'RG502Q-EA', 'init list: plugins see the identity');
 
 	let d = mc.init_done(m, { next: () => nexted++ });

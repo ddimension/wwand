@@ -80,7 +80,9 @@ function ber_build(tag, val)
 // cb(err, response_byte_array)
 function es10_transceive(modem, slot, channel, req, cb)
 {
-	let cla = 0x80 | (channel & 0x03);
+	// proprietary class with the channel in it: 0x80 | n for 0-3, a further
+	// CLA 0xC0 | n-4 for 4-19 (`channel & 3` put channel 4 on the basic one)
+	let cla = (channel < 4) ? (0x80 | channel) : (0xc0 | (channel - 4));
 	let blocks = [];
 
 	for (let off = 0; off < length(req); off += 255)
