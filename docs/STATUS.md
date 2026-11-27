@@ -1,6 +1,6 @@
 # wwand — current state
 
-_State of 2026-11-16: stable **v1.9.0** (feed stable building, release tag pending), main **v1.10.0-dev**.
+_State of 2026-11-27: stable **v1.9.0**, 1.9.1 in preparation, main **v1.10.0-dev**.
 65 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
 which moves too often to be worth repeating here)._
 
@@ -11,6 +11,23 @@ state buried at the top invites reading a months-old entry as present tense.
 
 ## Open threads (2026-10-29) — where the next session picks up
 
+- **1.9.1 (stable, 2026-11-27, not tagged yet):** fixes from main by
+  `cherry-pick -x`, features stay on main for 1.10.0. In it: mux 2+ dial a
+  profile of their own `wwand:<iface>` and never write the carrier's `ims`
+  / `sos` (#88, 8e0ade4); MBIM commands for unlisted services refused
+  locally (ME906s, 5245c56); Quectel temperature from the hottest SoC
+  sensor (#93); `wwandctl sms` part lists, storage, slot 0 (#94); a
+  configured `option mtu` over the pushed one; `protocol 'ppp'` refused;
+  the `[:\s]` regex class; `rat_order` held when the modem appends RATs
+  (#95); no forced `AutoSel` for Quectel MBNs, `wwandctl carrier auto`
+  (#96, not HW-checked); T=0 61xx/6Cxx chained on AT CGLA, QMI UIM and
+  MBIM UICC, and ES10 on channels 4-19 (#98); the QRTR wait note naming
+  `wwand-qrtr`. Left on main from the picked commits: `esim info` (#99),
+  the `qmi_apdu` transport, the esim_bridge event arrays, the USSD/SMS
+  listeners on `registered`. Before the tag: an HW round (#88 on the
+  NR7101, #96 on a Quectel with a chosen MBN), and on feed stable the
+  `wwand-mhi` DEPENDS without `kmod-qrtr-mhi` plus the `wwand-qrtr` meta
+  package (ddimension/openwrt-repo#7).
 - **Release 1.9.0 (2026-11-16):** main merged into stable in wwand,
   luci-app-wwand and luci-proto-wwand (stable's own commits were all
   cherry-picks, so the merged tree is main's). Tags on stable: wwand

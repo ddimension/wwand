@@ -851,7 +851,7 @@ names it. Without either:
   (wwand:<name>, interface gone): deleted`). Nothing else in the table is
   touched.
 
-Before wwand 1.10 an interface on mux 2+ wrote its APN and PDP type into the
+Before wwand 1.9.1 an interface on mux 2+ wrote its APN and PDP type into the
 profile numbered like its mux (#88). A carrier profile overwritten that way is
 not repaired by the update — a carrier configuration reload or a manual write
 restores it. `option profile <mux_id>` keeps the old behaviour for anyone who
