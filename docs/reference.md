@@ -2227,6 +2227,14 @@ both the raw `modem_apdu` channel and the ES10c eSIM path. Discovering it opens
 the ISD-R; on a plain SIM every backend refuses that, which is an answer and not
 counted as a protocol error.
 
+**Known limitation in 1.9.x:** a modem that cannot open a logical channel
+through QMI UIM and has no AT port taking `CCHO`/`CGLA` gets no logical APDU
+channel from wwand, so `modem_apdu open` fails with `sim_transport`. The Huawei
+E392 is such a modem (HW-seen on the Chateau, 2026-11-27): wwand-ims cannot run
+the IMS AKA against its card, and no ES10 operation that needs a host APDU
+channel works on it. The transport that serves it (QMI `SEND_APDU`, the channel
+opened by hand with MANAGE CHANNEL) comes with 1.10.
+
 On MBIM, an `OPEN_CHANNEL` is checked against what the Microsoft extension
 defines: `Channel 0` or a SELECT status other than `90 00` / `91 XX` is a
 failure, and a failed open names its cause (`select_failed`,

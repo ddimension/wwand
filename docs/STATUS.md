@@ -20,14 +20,16 @@ state buried at the top invites reading a months-old entry as present tense.
   configured `option mtu` over the pushed one; `protocol 'ppp'` refused;
   the `[:\s]` regex class; `rat_order` held when the modem appends RATs
   (#95); no forced `AutoSel` for Quectel MBNs, `wwandctl carrier auto`
-  (#96, not HW-checked); T=0 61xx/6Cxx chained on AT CGLA, QMI UIM and
+  (#96); T=0 61xx/6Cxx chained on AT CGLA, QMI UIM and
   MBIM UICC, and ES10 on channels 4-19 (#98); the QRTR wait note naming
   `wwand-qrtr`. Left on main from the picked commits: `esim info` (#99),
-  the `qmi_apdu` transport, the esim_bridge event arrays, the USSD/SMS
-  listeners on `registered`. Before the tag: an HW round (#88 on the
-  NR7101, #96 on a Quectel with a chosen MBN), and on feed stable the
-  `wwand-mhi` DEPENDS without `kmod-qrtr-mhi` plus the `wwand-qrtr` meta
-  package (ddimension/openwrt-repo#7).
+  the `qmi_apdu` transport (so the E392 has no APDU channel on 1.9.x,
+  noted in the reference), the esim_bridge event arrays (wwand-ipa's eIM
+  listing), the USSD/SMS listeners on `registered`. HW round 2026-11-27
+  green: #88 and #96 checked on the NR7101, data on all test devices.
+  Before the tag: on feed stable the `wwand-mhi` DEPENDS without
+  `kmod-qrtr-mhi` plus the `wwand-qrtr` meta package
+  (ddimension/openwrt-repo#7).
 - **Release 1.9.0 (2026-11-16):** main merged into stable in wwand,
   luci-app-wwand and luci-proto-wwand (stable's own commits were all
   cherry-picks, so the merged tree is main's). Tags on stable: wwand
