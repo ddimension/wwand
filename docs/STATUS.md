@@ -1,6 +1,6 @@
 # wwand — current state
 
-_State of 2026-11-20: stable **v1.9.0** (feed release 2026.11.16), main **v1.10.0-dev**.
+_State of 2026-11-27: stable **v1.9.1** (tagged; feed stable pins it, not released yet — the last feed release 2026.11.16 is 1.9.0), main **v1.10.0-dev**.
 69 host suites, all green (`cd tests && sh run_tests.sh` — it prints the count,
 which moves too often to be worth repeating here)._
 
@@ -9,8 +9,18 @@ This file describes **what is true now**. The dated log of how it got here is
 `gotchas.md`. Keeping them apart is deliberate: a running log with the current
 state buried at the top invites reading a months-old entry as present tense.
 
-## Open threads (2026-10-29) — where the next session picks up
+## Open threads (2026-11-27) — where the next session picks up
 
+- **1.9.1 (2026-11-27):** tag `v1.9.1` on stable (2ddc494), fixes from
+  main by `cherry-pick -x`: #88, #93, #94, #95, #96, #98, the ME906s MBIM
+  refusal, the configured `option mtu`, `protocol 'ppp'` refused, the
+  `wwand-qrtr` wait note. Stayed on main: `esim info` (#99), the `qmi_apdu`
+  transport (so the E392 has no APDU channel on 1.9.x; stable's reference
+  says so), the esim_bridge event arrays, the USSD/SMS listeners on
+  `registered`. HW round green on all test devices; #88 and #96 checked on
+  the NR7101. Feed stable a2569cb6 pins it and carries openwrt-repo#7
+  (`wwand-mhi` without `kmod-qrtr-mhi`, the `wwand-qrtr` package). Open:
+  the feed release (`scripts/release-stable.sh`, the user's call).
 - **IPAd with the card's own eIM on 3.123 (2026-11-23):** the EG25-G box
   runs `option ipa_mode 'ipad'` + `option ipa '1'` (wwand-ipa/wwand-ipad
   0.2.0_p2) permanently now. The IDEMIA IoT eUICC holds its eIM
